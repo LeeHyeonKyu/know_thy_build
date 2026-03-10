@@ -1,1 +1,4 @@
 node_modules/
+.claude/commands/
+*.tgz
+.npm/
