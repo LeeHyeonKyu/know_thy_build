@@ -1,7 +1,7 @@
 {
   "name": "know-thy-build",
-  "version": "0.1.0",
-  "description": "Socratic project constitution generator for Claude Code",
+  "version": "0.2.0",
+  "description": "Socratic project definition tool for Claude Code",
   "bin": {
     "know-thy-build": "./bin/cli.js"
   },

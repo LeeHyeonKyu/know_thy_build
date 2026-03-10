@@ -10,11 +10,10 @@ import {
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { createInterface } from "readline";
+import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const templatesDir = join(__dirname, "..", "templates");
-const targetDir = process.cwd();
-const COMMANDS_DIR = join(targetDir, ".claude", "commands");
 
 const LANG_OPTIONS = [
   { key: "en", label: "English" },
@@ -59,7 +58,6 @@ async function askLanguage() {
     return custom || LANG_OPTIONS[0].label;
   }
 
-  // Try matching by key or label
   const lower = answer.toLowerCase();
   const match = LANG_OPTIONS.find(
     (o) => o.key === lower || o.label.toLowerCase().startsWith(lower)
@@ -67,9 +65,13 @@ async function askLanguage() {
   return match ? match.label : answer;
 }
 
-function install(lang) {
-  if (!existsSync(COMMANDS_DIR)) {
-    mkdirSync(COMMANDS_DIR, { recursive: true });
+function install(lang, global) {
+  const commandsDir = global
+    ? join(homedir(), ".claude", "commands")
+    : join(process.cwd(), ".claude", "commands");
+
+  if (!existsSync(commandsDir)) {
+    mkdirSync(commandsDir, { recursive: true });
   }
 
   const templates = readdirSync(templatesDir).filter((f) => f.endsWith(".md"));
@@ -78,14 +80,15 @@ function install(lang) {
     const src = join(templatesDir, file);
     let content = readFileSync(src, "utf-8");
     content = content.replaceAll("{{LANG}}", lang);
-    const dest = join(COMMANDS_DIR, file);
+    const dest = join(commandsDir, file);
     writeFileSync(dest, content, "utf-8");
   }
 
+  const scope = global ? "globally (~/.claude/commands/)" : "in this project";
   console.log(`
-  Done! (${lang})
+  Done! Installed ${scope} (${lang})
 
-  Open Claude Code in this project and run:
+  Open Claude Code and run:
 
     /know-thy-build
 `);
@@ -94,22 +97,24 @@ function install(lang) {
 // --- Main ---
 
 const args = process.argv.slice(2);
-const command = args[0];
 
-if (command === "--help" || command === "-h") {
+if (args.includes("--help") || args.includes("-h")) {
   console.log(`
-  know-thy-build - Socratic project project definition tool
+  know-thy-build - Socratic project definition tool
 
   Usage:
-    npx know-thy-build              Interactive setup
+    npx know-thy-build              Install in current project
+    npx know-thy-build --global     Install globally (~/.claude/commands/)
     npx know-thy-build --lang ko    Skip language prompt
 
-  Language shortcuts: ko, en, ja, zh, es, fr, de, pt
+  Options:
+    --global, -g    Install to ~/.claude/commands/ (available in all projects)
+    --lang, -l      Language shortcut: ko, en, ja, zh, es, fr, de, pt
 `);
   process.exit(0);
 }
 
-if (command === "--version" || command === "-v") {
+if (args.includes("--version") || args.includes("-v")) {
   const pkg = JSON.parse(
     readFileSync(join(__dirname, "..", "package.json"), "utf-8")
   );
@@ -117,7 +122,8 @@ if (command === "--version" || command === "-v") {
   process.exit(0);
 }
 
-// If --lang provided, skip prompt
+const global = args.includes("--global") || args.includes("-g");
+
 let lang = null;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--lang" || args[i] === "-l") {
@@ -133,7 +139,7 @@ for (let i = 0; i < args.length; i++) {
 if (lang) {
   const lower = lang.toLowerCase();
   const match = LANG_OPTIONS.find((o) => o.key === lower);
-  install(match ? match.label : lang);
+  install(match ? match.label : lang, global);
 } else {
-  askLanguage().then((chosen) => install(chosen));
+  askLanguage().then((chosen) => install(chosen, global));
 }
