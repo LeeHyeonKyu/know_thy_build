@@ -1,0 +1,24 @@
+{
+  "name": "know-thy-build",
+  "version": "0.1.0",
+  "description": "Socratic project constitution generator for Claude Code",
+  "bin": {
+    "know-thy-build": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "templates/"
+  ],
+  "keywords": [
+    "claude-code",
+    "constitution",
+    "project-setup",
+    "ai-agent",
+    "socratic"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  }
+}
