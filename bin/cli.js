@@ -7,6 +7,7 @@ import {
   writeFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
 } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -87,14 +88,32 @@ function installDir(srcDir, destDir, lang) {
   }
 }
 
+const LEGACY_FILES = ["know-thy-build.md", "know-thy-build-evolve.md"];
+
+function cleanLegacy(commandsDir) {
+  let cleaned = [];
+  for (const file of LEGACY_FILES) {
+    const filePath = join(commandsDir, file);
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+      cleaned.push(file);
+    }
+  }
+  return cleaned;
+}
+
 function install(lang, global) {
   const commandsDir = global
     ? join(homedir(), ".claude", "commands")
     : join(process.cwd(), ".claude", "commands");
 
+  const cleaned = cleanLegacy(commandsDir);
   installDir(templatesDir, commandsDir, lang);
 
   const scope = global ? "globally (~/.claude/commands/)" : "in this project";
+  if (cleaned.length > 0) {
+    console.log(`\n  Cleaned up legacy commands: ${cleaned.join(", ")}`);
+  }
   console.log(`
   Done! Installed ${scope} (${lang})
 
