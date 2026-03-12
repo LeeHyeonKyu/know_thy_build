@@ -67,21 +67,29 @@ Find the highest existing number and increment by 1. Zero-pad to 3 digits. If `f
 
 These are NOT a rigid sequence. Follow the conversation. Most features only need 2-3 of these to be clear.
 
-#### What — What are we building?
+#### Problem — What's broken or missing?
 
-> Discover: The concrete thing to implement.
+> Discover: The specific pain this feature addresses. This is not the project-level problem (that's in PROJECT.md) — this is the concrete gap or friction that triggered "we need this feature."
+
+- What's not working right now? What's the user struggling with?
+- What happens today without this feature? (workaround, manual step, error, confusion...)
+- Who hits this problem and how often?
+
+#### Value — Why is this worth building?
+
+> Discover: The value this feature delivers and how it connects to the bigger picture.
+
+- What changes for the user when this exists?
+- How does this connect to the project's vision or principles in PROJECT.md?
+- What happens if we don't build it? Is there a cost of inaction?
+
+#### Solution — How does this solve it?
+
+> Discover: The concrete thing to implement. Not implementation details, but the user-facing shape of the solution.
 
 - What does this feature do, in one sentence?
 - What does the user see/experience when it's working?
 - Is there an existing pattern in the codebase this builds on?
-
-#### Why — Why does this matter?
-
-> Discover: The motivation. Link to PROJECT.md if relevant.
-
-- What problem does this solve or what value does it add?
-- What happens if we don't build it?
-- Does this connect to a principle or vision in PROJECT.md?
 
 #### Scope — Where are the edges?
 
@@ -148,13 +156,17 @@ During conversation, use `status: drafting`. On finalization, set to `complete`.
 
 <!-- One-liner: what this feature does -->
 
-## What
+## Problem
 
-<!-- Concrete description of what gets built -->
+<!-- What's broken or missing today. The specific pain this feature addresses. -->
 
-## Why
+## Value
 
-<!-- Motivation. Reference PROJECT.md if relevant -->
+<!-- What changes when this exists. Link to PROJECT.md vision/principles if relevant. -->
+
+## Solution
+
+<!-- Concrete description of what gets built and how the user experiences it -->
 
 ## Scope
 
