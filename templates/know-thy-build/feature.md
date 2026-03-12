@@ -31,9 +31,12 @@ Technical terms (e.g. CLI, API, MVP) stay in English. Everything else uses the s
 
 ```bash
 cat PROJECT.md 2>/dev/null
+cat TECHNICAL.md 2>/dev/null
 ```
 
 If PROJECT.md doesn't exist, suggest running `/know-thy-build:project` first. A feature spec without project context is rootless.
+
+If TECHNICAL.md exists, use it as technical context — reference the stack, architecture, and constraints when exploring the feature's approach. If it doesn't exist, that's fine — technical context is helpful but not required.
 
 ### 2. Scan existing features
 

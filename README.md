@@ -1,8 +1,8 @@
 # know-thy-build
 
-Before you write a single line of code, know what you're building and why.
+Before you write a single line of code, know what you're building, why, and how.
 
-**know-thy-build** is a Socratic questioning tool for [Claude Code](https://claude.ai/claude-code). Through conversation — not forms — it helps you define your project clearly: what problem you're solving, why your approach matters, what the deliverable looks like, and what principles guide the work. The result is a `PROJECT.md` that you and your AI agents can reference throughout the project's life.
+**know-thy-build** is a Socratic questioning tool for [Claude Code](https://claude.ai/claude-code). Through conversation — not forms — it helps you define your project across three layers: what problem you're solving (Project), how you'll build it technically (Technical), and what each feature looks like (Feature). The result is a set of living documents that you and your AI agents reference throughout the project's life.
 
 ## Why
 
@@ -10,11 +10,9 @@ We jump into code too fast. A new project starts, and within minutes we're picki
 
 The cost of skipping this step is real. Vague goals lead to wasted effort. Undefined boundaries lead to scope creep. Unspoken assumptions lead to wrong decisions — by you or by AI agents working on your behalf.
 
-know-thy-build exists to help you **think your project through before you build it**. It asks the questions you should be asking yourself: What problem am I really solving? Who is this for? What does success look like? What should this *not* be? The act of answering these questions — one at a time, out loud, with each answer challenged and deepened — is where project clarity comes from.
+know-thy-build exists to help you **think your project through before you build it**. It asks the questions you should be asking yourself — one at a time, each answer challenged and deepened — until you have genuine clarity.
 
-**The real value is that you now understand what you're building** — because you were asked the right questions and had to find the answers yourself.
-
-And that clarity doesn't stay in your head. know-thy-build structures it into a `PROJECT.md` that AI agents can reference — so the understanding you gained carries over to every agent working on your project. They read the same problem definition, follow the same principles, and respect the same boundaries. Your thinking becomes their compass.
+That clarity doesn't stay in your head. It becomes structured documents that AI agents reference — so every agent working on your project reads the same definition, follows the same principles, and builds on the same technical foundation.
 
 ## Quick start
 
@@ -22,142 +20,108 @@ And that clarity doesn't stay in your head. know-thy-build structures it into a 
 npx know-thy-build
 ```
 
-Pick a language, and two commands are installed into your project's `.claude/commands/`:
+Pick a language, and three commands are installed into your `.claude/commands/`:
 
-| Command | Purpose |
-|---------|---------|
-| `/know-thy-build` | Define your project through guided conversation |
-| `/know-thy-build-evolve` | Revisit and evolve the definition as the project grows |
+| Command | Purpose | Output |
+|---------|---------|--------|
+| `/know-thy-build:project` | Define what you're building and why | `PROJECT.md` |
+| `/know-thy-build:technical` | Define how you'll build it | `TECHNICAL.md` |
+| `/know-thy-build:feature` | Design a specific feature | `features/NNN.md` |
 
-Then, inside Claude Code:
-
-```
-/know-thy-build
-```
-
-## What happens
-
-A ~10 minute conversation. No forms. No questionnaires. One question at a time, each digging a layer deeper than the last.
-
-The conversation explores four areas — in whatever order feels natural:
-
-- **Problem** — What triggered this? Why is it a problem? What's the root cause? Who suffers? What are they doing today, and why isn't it enough?
-- **Vision** — What changes when this is solved? What's your approach? What does the user actually get? What's the core value in one word?
-- **Experience & Boundaries** — How does someone use this, end to end? What's the aha moment? What is this NOT? What's the minimum for v1.0?
-- **Principles** — What rules must never be broken? How autonomous should AI agents be? Where do you stand on speed vs quality?
-
-Not every area needs equal depth. Some projects need 5 minutes on the problem and 1 on principles. Others are the opposite. The conversation follows you, not a script.
-
-Progress is saved to `PROJECT.md` as you go. If the session breaks, `/know-thy-build` picks up where you left off.
-
-## What you get
-
-A `PROJECT.md` in your project root — only containing what was actually discussed:
-
-```markdown
----
-status: complete
-version: 1.0.0
----
-
-# my-project
-
-A CLI that does X — solving Y for Z through simplicity.
-
-## Problem
-...
-
-## Vision
-| Before | After |
-|--------|-------|
-| Manual, error-prone | Automated, reliable |
-
-## What We Build
-| | |
-|---|---|
-| **Deliverable** | ... |
-| **Form** | CLI (because ...) |
-
-## User Journey
-...
-
-## Principles
-### Test Before Merge (NON-NEGOTIABLE)
-...
-
-## Boundaries
-**This is NOT:** ...
-
-## Success
-**MVP:** ...
-**Success Signal:** ...
-```
-
-Plus a `CLAUDE.md` reference so AI agents read it before any work:
-
-```markdown
-## Project Definition
-This project follows the principles defined in PROJECT.md.
-AI agents MUST read PROJECT.md before starting any work.
-NON-NEGOTIABLE rules in PROJECT.md cannot be overridden.
-```
-
-## Evolving
-
-Projects change. What you thought you were building at day 1 is rarely what you're building at day 90.
+## The flow
 
 ```
-/know-thy-build-evolve
+:project (What & Why) → :technical (How) → :feature (specific work)
 ```
 
-This presents your current `PROJECT.md` and asks: does it still feel right?
+Each layer builds on the previous. Technical decisions reference the project definition. Feature specs reference both.
 
-If yes — done. A confirmed definition is a valid outcome.
+### 1. Project — What & Why
 
-If something has shifted, it walks you through:
-
-1. **What changed** — follow the thread from what's different → what happened → why → what was the original assumption → what do you know now
-2. **Principles** — did they survive contact with reality? Were they tested? Broken? Did new ones emerge?
-3. **Insights** — stepping back: what did you learn from this experience?
-4. **Update** — apply changes, bump the version, record everything in a changelog with reasoning
-
-The changelog captures not just *what* changed, but *why* — so you can look back at decisions later:
-
-```markdown
-## Changelog
-
-### v1.1.0 — 2026-03-15
-
-**What changed:**
-- Problem: was "X" → now "Y"
-
-**Why:**
-- Assumed users would Z, but they actually W
-
-**Principles:**
-- New: Always validate with real users — learned from shipping v1
-
-**Insights:**
-- We overestimated how much structure users wanted
 ```
+/know-thy-build:project
+```
+
+A conversation that explores:
+
+- **Problem** — What triggered this? Root cause? Who suffers? Current alternatives?
+- **Vision** — What changes when solved? Your approach? Core value?
+- **Output** — What does the user concretely receive? Files, commands, formats?
+- **Experience & Boundaries** — User journey? Aha moment? What is this NOT?
+- **Success** — Measurable metrics? Leading indicators? MVP criteria?
+- **Open Questions** — Risks? Unvalidated assumptions? Technical unknowns?
+- **Principles** — Non-negotiable rules? AI agent autonomy? Speed vs quality?
+
+Not every area needs equal depth. The conversation follows you, not a script.
+
+Result: `PROJECT.md` — the project's identity and compass.
+
+### 2. Technical — How
+
+```
+/know-thy-build:technical
+```
+
+Requires `PROJECT.md`. Scans your codebase for existing technical context (package.json, Dockerfile, etc.) and doesn't re-ask what's already visible.
+
+Explores:
+
+- **Tech Stack** — Language, framework, key dependencies — and why each choice
+- **Architecture** — Components, interactions, structural pattern
+- **Data** — Storage, key entities, formats
+- **Interfaces** — CLI commands, API endpoints, input/output contracts
+- **Constraints** — Performance, security, deployment, platforms
+
+Depth matches project scale. A CLI tool might only need Stack + Interfaces.
+
+Result: `TECHNICAL.md` — the technical foundation.
+
+### 3. Feature — Specific work
+
+```
+/know-thy-build:feature
+```
+
+References both `PROJECT.md` and `TECHNICAL.md`. Features are numbered sequentially.
+
+Each feature spec covers:
+- **What** — concrete description
+- **Why** — motivation, link to project vision
+- **Scope** — includes / excludes
+- **Done When** — acceptance criteria checklist
+- **Approach** — technical notes (optional)
+
+Features are quick — 3-8 exchanges. Create new ones or edit existing ones by number.
+
+Result: `features/001.md`, `features/002.md`, ...
+
+## Evolution
+
+All documents support evolution. Run the same command again on a completed document:
+
+- `/know-thy-build:project` on a complete `PROJECT.md` → evolve mode
+- `/know-thy-build:technical` on a complete `TECHNICAL.md` → evolve mode
+- `/know-thy-build:feature` → edit existing features by number
+
+Changes are tracked with reasoning in a changelog — not just *what* changed, but *why*.
 
 ## Session resilience
 
-Conversations can break mid-session. know-thy-build tracks state in `PROJECT.md` frontmatter:
+All conversations track state in document frontmatter. If a session breaks, run the same command again — it picks up where you left off.
 
 | `status` | What it means |
 |-----------|---------------|
-| `drafting` | Init in progress — `/know-thy-build` will resume |
-| `complete` | Definition is set — `/know-thy-build-evolve` is available |
-| `evolving` | Evolve in progress — `/know-thy-build-evolve` will resume |
+| `drafting` | In progress — will resume |
+| `complete` | Done — running again enters evolve mode |
+| `evolving` | Evolve in progress — will resume |
 
-You never lose progress. Pick up where you left off.
+## Global install
 
-## What this project is
+```bash
+npx know-thy-build --global    # install to ~/.claude/commands/
+```
 
-know-thy-build helps you define your project well. It uses the Socratic method — asking the right questions in the right order — to draw out what you already know but haven't articulated yet. The result is a clear, concrete project definition that both you and AI agents can follow.
-
-It is **not** a project management framework. No PRDs, epics, stories, or sprint plans. No code scaffolding. No tech stack opinions. Just one thing: helping you think clearly about what you're building, and keeping that definition honest as the project evolves.
+Commands become available in all projects.
 
 ## Language support
 
@@ -169,6 +133,8 @@ npx know-thy-build --lang en    # English (default)
 ```
 
 Supported shortcuts: `en`, `ko`, `ja`, `zh`, `es`, `fr`, `de`, `pt` — or pass any language name directly.
+
+All conversation and generated documents use the chosen language. Technical terms stay in English.
 
 ## License
 

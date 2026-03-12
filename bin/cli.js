@@ -100,8 +100,9 @@ function install(lang, global) {
 
   Open Claude Code and run:
 
-    /know-thy-build:project    Define your project
-    /know-thy-build:feature    Design a feature
+    /know-thy-build:project      Define your project (What & Why)
+    /know-thy-build:technical    Define technical foundation (How)
+    /know-thy-build:feature      Design a feature
 `);
 }
 
