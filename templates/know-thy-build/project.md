@@ -117,6 +117,22 @@ Slots to fill:
 
 **When to move on:** The user can see what they're building and nods.
 
+### Output — What does the user actually get?
+
+> What to discover: The concrete, tangible deliverables. Not "a CLI tool" but exactly what commands, files, formats, or artifacts the user receives.
+
+Key threads:
+- When the user is done using this, what do they have in their hands?
+- What are the specific artifacts? (files, commands, endpoints, UI screens...)
+- What format/structure do they take?
+- How do these outputs connect to each other?
+
+Slots to fill:
+- `{{outputs}}` — list of concrete deliverables with descriptions
+- `{{output_format}}` — structure/format of each
+
+**When to move on:** You can list the outputs and the user says "yes, that's what I'd get."
+
 ### Experience & Boundaries — How is it used, and where does it end?
 
 > What to discover: The tangible user journey, the aha moment, and the hard edges.
@@ -127,14 +143,47 @@ Key threads:
 - What's the most frequent action?
 - What might people confuse this with, that this is NOT?
 - What's the minimum for v1.0?
-- How do you know this succeeded? What's the observable signal?
 
 Slots to fill:
 - `{{user_journey}}`, `{{aha_moment}}`, `{{primary_action}}`
 - `{{not_this}}`
-- `{{mvp_criteria}}`, `{{success_signal}}`
+- `{{mvp_criteria}}`
 
 **When to move on:** The project has clear shape and edges.
+
+### Success — How do we measure it?
+
+> What to discover: Measurable success criteria, not vague signals. What observable, countable evidence proves this project is working?
+
+Key threads:
+- How do you know this succeeded? What changes in the user's behavior?
+- Can you put a number on it? (time saved, error reduction, adoption rate...)
+- What's the leading indicator you can check early?
+- What's the ultimate outcome that proves long-term value?
+
+Slots to fill:
+- `{{success_metric}}` — measurable outcome (e.g. "feature design time drops from 30min to 5min")
+- `{{leading_indicator}}` — early signal (e.g. "users run the command without needing docs")
+- `{{success_signal}}` — long-term proof
+
+**When to move on:** There's at least one concrete, measurable metric. Don't force numbers where they don't exist naturally.
+
+### Open Questions — What don't we know yet?
+
+> What to discover: Honest unknowns, risks, and assumptions that haven't been validated. A great project definition admits what it doesn't know.
+
+Key threads:
+- What's the biggest risk? What could make this fail?
+- What are you assuming that you haven't validated?
+- Is there a technical unknown that could change the approach?
+- What would you need to learn or prototype first?
+
+Slots to fill:
+- `{{open_questions}}` — unanswered questions
+- `{{risks}}` — things that could go wrong
+- `{{assumptions}}` — beliefs that need validation
+
+**When to move on:** The user has named at least the biggest unknown. This area is always optional — some projects are clear enough to skip it. But gently probe once.
 
 ### Principles — What philosophy guides this?
 
@@ -201,7 +250,7 @@ Finalize the document. Update frontmatter:
 ```yaml
 ---
 status: complete
-areasExplored: [problem, vision, experience, principles]  # only what was actually explored
+areasExplored: [problem, vision, output, experience, success, open-questions, principles]  # only what was actually explored
 generatedBy: know-thy-build
 version: 1.0.0
 date: {{date}}
@@ -246,6 +295,16 @@ Remove `areasRemaining` and `lastCheckpoint`.
 | **Form** | {{output_form}} ({{why_this_form}}) |
 | **Nature** | {{project_nature}} |
 
+## Output
+
+<!-- Concrete list of what the user receives -->
+
+| Output | Description |
+|--------|-------------|
+| {{output_name}} | {{output_description}} |
+
+<!-- Format/structure details as needed -->
+
 ## User Journey
 
 <!-- {{user_journey}} as natural prose -->
@@ -268,7 +327,21 @@ Remove `areasRemaining` and `lastCheckpoint`.
 ## Success
 
 **MVP:** {{mvp_criteria}}
-**Success Signal:** {{success_signal}}
+**Metric:** {{success_metric}}
+**Leading Indicator:** {{leading_indicator}}
+
+## Open Questions
+
+<!-- Only include if discussed. Omit if the project is clear enough. -->
+
+**Risks:**
+- {{risk}}
+
+**Assumptions:**
+- {{assumption}}
+
+**Unknowns:**
+- {{open_question}}
 
 ---
 
