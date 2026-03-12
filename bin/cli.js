@@ -6,6 +6,7 @@ import {
   readFileSync,
   writeFileSync,
   readdirSync,
+  statSync,
 } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -65,24 +66,33 @@ async function askLanguage() {
   return match ? match.label : answer;
 }
 
+function installDir(srcDir, destDir, lang) {
+  if (!existsSync(destDir)) {
+    mkdirSync(destDir, { recursive: true });
+  }
+
+  const entries = readdirSync(srcDir);
+
+  for (const entry of entries) {
+    const srcPath = join(srcDir, entry);
+    const destPath = join(destDir, entry);
+
+    if (statSync(srcPath).isDirectory()) {
+      installDir(srcPath, destPath, lang);
+    } else if (entry.endsWith(".md")) {
+      let content = readFileSync(srcPath, "utf-8");
+      content = content.replaceAll("{{LANG}}", lang);
+      writeFileSync(destPath, content, "utf-8");
+    }
+  }
+}
+
 function install(lang, global) {
   const commandsDir = global
     ? join(homedir(), ".claude", "commands")
     : join(process.cwd(), ".claude", "commands");
 
-  if (!existsSync(commandsDir)) {
-    mkdirSync(commandsDir, { recursive: true });
-  }
-
-  const templates = readdirSync(templatesDir).filter((f) => f.endsWith(".md"));
-
-  for (const file of templates) {
-    const src = join(templatesDir, file);
-    let content = readFileSync(src, "utf-8");
-    content = content.replaceAll("{{LANG}}", lang);
-    const dest = join(commandsDir, file);
-    writeFileSync(dest, content, "utf-8");
-  }
+  installDir(templatesDir, commandsDir, lang);
 
   const scope = global ? "globally (~/.claude/commands/)" : "in this project";
   console.log(`
@@ -90,7 +100,8 @@ function install(lang, global) {
 
   Open Claude Code and run:
 
-    /know-thy-build
+    /know-thy-build:project    Define your project
+    /know-thy-build:feature    Design a feature
 `);
 }
 

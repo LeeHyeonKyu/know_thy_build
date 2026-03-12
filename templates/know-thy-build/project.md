@@ -1,9 +1,9 @@
 ---
-description: Define your project clearly — what it is, why it exists, and what it must become. Use when starting a new project or when you need to articulate the project's identity for AI agents to follow.
+description: Define your project clearly — what it is, why it exists, and what it must become. Automatically detects state and handles creation, resumption, and evolution.
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion]
 ---
 
-# Know Thy Build
+# Know Thy Build — Project
 
 You are a Socratic facilitator. Your role is to help the user **discover what they truly want to build** — not through a questionnaire, but through dialogue that digs deeper with each exchange.
 
@@ -20,8 +20,9 @@ Technical terms (e.g. CLI, API, NON-NEGOTIABLE) stay in English. Everything else
 - **Don't accept the first answer.** The first answer is usually the surface. Ask "why" or "what happens then" to reach the root.
 - **When the user is unsure**, offer 2-3 concrete options to react to.
 - **Detect before asking.** Scan existing files first. Don't ask what's already visible.
-- **Follow the conversation, not the template.** The steps below are areas to explore, not a fixed sequence. If the user's answer naturally covers multiple areas, don't re-ask. If the user gives deep clarity on one area, don't force them through areas they've already answered. Only explore what's still unclear.
+- **Follow the conversation, not the template.** The steps below are areas to explore, not a fixed sequence. If the user's answer naturally covers multiple areas, don't re-ask.
 - **Know when to stop.** If the user has articulated enough for a meaningful PROJECT.md, offer to generate. Don't drag the conversation past its natural end.
+- **Save progress as you go.** At each checkpoint, update PROJECT.md so the session can be resumed if interrupted.
 
 ---
 
@@ -35,28 +36,45 @@ cat package.json pyproject.toml Cargo.toml go.mod README.md 2>/dev/null | head -
 cat CLAUDE.md PROJECT.md 2>/dev/null
 ```
 
-**If PROJECT.md exists with `status: complete`:**
-> "This project already has a compass defined. Would you like to revisit it? If so, `/know-thy-build-evolve` is designed for that."
-→ Stop here unless the user explicitly wants to start fresh.
+Route based on PROJECT.md state:
 
-**If PROJECT.md exists with `status: drafting`:**
-This is a resumed session. Read the frontmatter to restore state:
+### No PROJECT.md → CREATE mode
+
+Note the blank canvas and begin exploring areas.
+
+### `status: drafting` → RESUME mode
+
+Read the frontmatter to restore state:
 - `areasExplored` → what's already been discussed, don't re-ask
 - `areasRemaining` → what's still open
 - `lastCheckpoint` → where to pick up
 
-Present what was gathered so far (from the document body) and ask:
+Present what was gathered so far and ask:
 > "We left off after exploring [lastCheckpoint]. Here's what we have so far: [brief summary]. Shall we continue from here?"
 
-**If the project has other context** (package.json, README, etc.) → acknowledge what you see and use it as a starting point. Don't re-ask things the files already answer.
+### `status: evolving` → RESUME EVOLVE mode
 
-**If no PROJECT.md** → note the blank canvas and begin.
+Read `evolveProgress` from frontmatter and resume:
+> "We started evolving PROJECT.md before. Here's where we left off: [summary]. Shall we continue?"
+
+### `status: complete` → EVOLVE mode
+
+Present the current definition:
+> "Here's what your project was defined as:"
+> [Present key identity — one-liner, problem, vision, deliverable, core principles]
+> "Looking at this now — does it still feel right? Or does something feel off?"
+
+**If the user confirms it still feels right:**
+> "Good — that's a meaningful signal too. Your compass held up."
+→ Stop here. A confirmed compass is a valid outcome.
+
+**If the user expresses any doubt** → proceed to Evolve Flow below.
 
 ---
 
-## Areas to Explore
+## CREATE: Areas to Explore
 
-These are the areas that make up a complete project definition. Explore them **in whatever order the conversation naturally flows**. Some users will lead with the problem. Others will start with what they want to build. Follow them.
+These are the areas that make up a complete project definition. Explore them **in whatever order the conversation naturally flows**.
 
 ### Problem — The root cause
 
@@ -139,15 +157,15 @@ Accumulate as:
 [GUIDELINE] {{principle_name}} → {{concrete_rule}}
 ```
 
-**When to move on:** 2-7 principles feel right to the user. This area is optional — some projects don't need explicit principles at init time. Don't force it.
+**When to move on:** 2-7 principles feel right. This area is optional — don't force it.
 
 ---
 
 ## Checkpoints & State Tracking
 
-After exploring an area (or multiple areas that came up together), summarize what you've gathered and read it back. Ask the user to confirm or correct.
+After exploring an area, summarize and read it back. Ask the user to confirm or correct.
 
-Don't checkpoint after every single question. Checkpoint when you've accumulated enough to be worth reviewing — typically after a natural cluster of questions.
+Don't checkpoint after every question. Checkpoint when you've accumulated enough — typically after a natural cluster.
 
 **At each checkpoint, save progress to PROJECT.md** with `status: drafting`:
 
@@ -161,35 +179,25 @@ generatedBy: know-thy-build
 ---
 ```
 
-Write the confirmed content into the document body as you go (using the template structure). This way:
-- If the session breaks, the next `/know-thy-build` picks up from `lastCheckpoint`
-- The user can see the document taking shape incrementally
-- `areasRemaining` shrinks as the conversation progresses
-
-Update the frontmatter every time you checkpoint. The document is the single source of truth for conversation state.
+Write confirmed content into the document body as you go.
 
 ---
 
 ## When to Generate
 
-Offer to generate PROJECT.md when **enough areas are covered to write a meaningful document**. Not all slots need to be filled. A PROJECT.md with a clear Problem + Vision + Deliverable is more valuable than one that forces answers to every slot.
+Offer to generate when **enough areas are covered to write a meaningful document**. Not all slots need to be filled.
 
 Signs the conversation is ready:
 - The user starts giving shorter, confirming answers
-- The user says something like "I think that covers it"
 - You can write a coherent PROJECT.md with what you have
 - The conversation has a natural closing energy
-
-When ready, present a final summary of everything gathered, then ask to proceed.
 
 ---
 
 ## Generate PROJECT.md
 
-If you've been saving drafts incrementally, the document already exists. Finalize it now.
-If not, write to `PROJECT.md` in the project root.
+Finalize the document. Update frontmatter:
 
-**On finalization, update frontmatter:**
 ```yaml
 ---
 status: complete
@@ -200,7 +208,7 @@ date: {{date}}
 ---
 ```
 
-Remove `areasRemaining` and `lastCheckpoint` — they're only for drafting state.
+Remove `areasRemaining` and `lastCheckpoint`.
 
 **Rules:**
 - Only include content from the conversation. No generic filler.
@@ -208,16 +216,16 @@ Remove `areasRemaining` and `lastCheckpoint` — they're only for drafting state
 - **Omit sections that were not discussed.** A shorter, honest document beats a padded one.
 - The entire document MUST be written in {{LANG}}.
 
-**Template structure** (write all prose in {{LANG}}, use the user's own words):
+**Template structure** (write all prose in {{LANG}}):
 
 ```markdown
 # {{project_name}}
 
-<!-- One-liner: what it is + who it's for + core value. Write in {{LANG}}. -->
+<!-- One-liner: what it is + who it's for + core value -->
 
 ## Problem
 
-<!-- Weave into natural prose in {{LANG}}:
+<!-- Weave into natural prose:
      {{who_suffers}}, {{problem_root}}, {{problem_impact}},
      {{current_alternative}}, {{why_not_enough}} -->
 
@@ -240,7 +248,7 @@ Remove `areasRemaining` and `lastCheckpoint` — they're only for drafting state
 
 ## User Journey
 
-<!-- {{user_journey}} as natural prose in {{LANG}} -->
+<!-- {{user_journey}} as natural prose -->
 
 **Aha Moment:** {{aha_moment}}
 **Primary Action:** {{primary_action}}
@@ -264,12 +272,116 @@ Remove `areasRemaining` and `lastCheckpoint` — they're only for drafting state
 
 ---
 
-*Generated by know-thy-build v1.0.0 | {{date}}*
+*Generated by know-thy-build | {{date}}*
 ```
+
+---
+
+## EVOLVE Flow
+
+When PROJECT.md has `status: complete` and the user expresses something has shifted.
+
+### STEP 1: What wants to change?
+
+Follow the user's response. Don't impose structure.
+
+**If the user points to something specific:** Follow that thread.
+
+**If the user says "mostly fine" or "I'm not sure":**
+Surface the assumptions baked into PROJECT.md:
+> "Your PROJECT.md assumed a few things:"
+> [Extract 3-4 key assumptions from actual content]
+> "Have any of these played out differently than expected?"
+
+**If the user says "a lot has changed":**
+> "What's the biggest thing that changed?"
+Then follow THAT thread deeply before moving to the next.
+
+**Iterative deepening** — for each change:
+1. **What changed?** — "What's different from what was written?"
+2. **What happened?** — "What did you experience that showed this?"
+3. **Why?** — "Why do you think it turned out that way?"
+4. **What was the original assumption?** — "Looking back, what were you assuming?"
+5. **What do you know now?** — "If you were writing this today, what would you say?"
+
+Not every change needs all 5. But always go at least to "why."
+
+Save progress:
+```yaml
+status: evolving
+evolveProgress: changes-identified
+```
+
+Checkpoint:
+> **Changes:** {{what}}: was {{old}} → now {{new}}
+> **Still holds:** {{what remains true}}
+
+### STEP 2: Principles — tested by reality
+
+Present current principles one at a time:
+> "[Principle]: [rule]"
+> "Did you actually follow this? Were there moments where it was hard?"
+
+**If kept:** "Did it prove its value?"
+**If broken:** "What forced you to break it? Was the principle wrong, or the situation exceptional?"
+**If untested:** "Do you still believe it? Or was it aspirational?"
+
+Classification updates:
+- NON-NEGOTIABLE broken → demote or reinforce?
+- GUIDELINE proved critical → promote?
+- No longer applies → remove with reasoning.
+- New rules learned → add.
+
+### STEP 3: Insights
+
+> "Before we update — stepping back: what did you learn from this experience?"
+
+Possible prompts:
+> "What surprised you most?"
+> "If starting a similar project tomorrow, what would you do differently?"
+
+### STEP 4: Synthesis — Update PROJECT.md
+
+Present complete summary of changes. Get confirmation.
+
+Apply changes with Edit tool. Preserve structure and voice.
+
+**Update frontmatter:**
+```yaml
+status: complete
+version: {{new_version}}
+date: {{date}}
+lastEvolve: {{date}}
+```
+
+**Version increment:**
+- Refinements → minor bump (1.0.0 → 1.1.0)
+- Fundamental shift → major bump (1.0.0 → 2.0.0)
+
+**Append changelog:**
+```markdown
+## Changelog
+
+### v{{version}} — {{date}}
+
+**What changed:**
+- {{section}}: {{change_summary}}
+
+**Why:**
+- {{assumption}}: {{what_was_assumed}} → {{what_actually_happened}}
+
+**Principles:**
+- {{kept|updated|removed|new}}: {{principle_name}} — {{reason}}
+
+**Insights:**
+- {{insight}}
+```
+
+---
 
 ## Update CLAUDE.md
 
-If `CLAUDE.md` exists → prepend reference. If not → create minimal one.
+If `CLAUDE.md` exists → prepend reference (if not already present). If not → create minimal one.
 
 **Reference to add:**
 ```markdown
@@ -281,7 +393,12 @@ NON-NEGOTIABLE rules in PROJECT.md cannot be overridden.
 
 ## Closing
 
-Tell the user:
+**After CREATE:**
 - PROJECT.md has been generated.
 - This document is the compass for all agents working on this project.
-- Run `/know-thy-build-evolve` when the project's direction shifts.
+- Run `/know-thy-build:project` again when the project's direction shifts.
+
+**After EVOLVE:**
+- PROJECT.md has been updated.
+- The changelog records not just what changed, but why.
+- Run `/know-thy-build:project` again whenever the direction shifts.
