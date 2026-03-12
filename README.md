@@ -136,6 +136,45 @@ Supported shortcuts: `en`, `ko`, `ja`, `zh`, `es`, `fr`, `de`, `pt` — or pass 
 
 All conversation and generated documents use the chosen language. Technical terms stay in English.
 
+## Foundations
+
+know-thy-build draws on established techniques from philosophy, software engineering, and AI research.
+
+### Core method: Socratic Prompting
+
+The tool applies the [Socratic method](https://en.wikipedia.org/wiki/Socratic_method) — questioning to surface latent knowledge rather than providing answers directly. In Plato's *Meno*, Socrates demonstrates that learning is **recollection** (anamnesis): the right questions draw out what the learner already knows. know-thy-build operates on the same premise — you already know what you want to build, you just haven't articulated it yet.
+
+- Chang, ["Prompting Large Language Models With the Socratic Method"](https://arxiv.org/abs/2303.08769) (2023) — adapts Socratic strategies into LLM prompting templates
+- Princeton NLP, ["The Socratic Method for Self-Discovery in Large Language Models"](https://princeton-nlp.github.io/SocraticAI/) — explicitly connects Socratic dialogue to self-discovery in LLMs
+- [SocraticLM](https://proceedings.neurips.cc/paper_files/paper/2024/hash/9bae399d1f34b8650351c1bd3692aeae-Abstract-Conference.html) (NeurIPS 2024 Spotlight) — Socratic teaching paradigm outperforming GPT-4 by >12%
+
+### Dialectical reasoning
+
+Each exchange follows a thesis-antithesis-synthesis cycle: the user states what they want (thesis), the tool challenges it (antithesis), and a refined understanding emerges (synthesis). This is [Hegelian dialectic](https://en.wikipedia.org/wiki/Dialectic#Hegelian_dialectic) applied to project definition.
+
+- ["Self-reflecting LLMs: A Hegelian Dialectical Approach"](https://arxiv.org/abs/2501.14917) (2025)
+
+### Requirements elicitation
+
+In software engineering, [requirements elicitation](https://en.wikipedia.org/wiki/Requirements_elicitation) is the process of discovering what stakeholders actually need — a discipline that recognizes requirements are *discovered*, not merely captured.
+
+- Zave & Jackson, "Four Dark Corners of Requirements Engineering" (1997, ACM TOSEM)
+- ["AI-based Multiagent Approach for Requirements Elicitation and Analysis"](https://arxiv.org/abs/2409.00038) (2024)
+
+### Design Thinking (Define phase)
+
+know-thy-build's output maps to the **Define** phase of [Design Thinking](https://web.stanford.edu/~mshanks/MichaelShanks/files/509554.pdf) (Stanford d.school) — synthesizing fuzzy intuitions into a structured problem statement that guides everything that follows.
+
+### The Rubber Duck, upgraded
+
+[Rubber duck debugging](https://en.wikipedia.org/wiki/Rubber_duck_debugging) works because articulating forces clarity. know-thy-build is a rubber duck that talks back — one that not only forces articulation but actively probes weak spots and challenges surface-level answers.
+
+### Multi-Agent Debate
+
+Even within a single facilitator, know-thy-build adopts multiple perspectives — questioning like a PM, challenging like an architect, probing edge cases like QA. The principle that opposing viewpoints produce better outcomes is well-established.
+
+- Liang et al., ["Encouraging Divergent Thinking in Large Language Models through Multi-Agent Debate"](https://arxiv.org/abs/2305.19118) (EMNLP 2024)
+
 ## License
 
 MIT
