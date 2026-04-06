@@ -27,21 +27,45 @@ Technical terms (e.g. CLI, API, MVP) stay in English. Everything else uses the s
 
 ## Before You Begin
 
+### 0. Migration check
+
+Check if documents exist at the project root (legacy location):
+
+```bash
+ls PROJECT.md TECHNICAL.md 2>/dev/null
+ls features/*.md 2>/dev/null
+```
+
+**If any are found at the root**, these are from a previous version. Migrate them to `docs/`:
+
+1. Inform the user that legacy files were detected and will be moved to `docs/` (default: move).
+2. Execute:
+   ```bash
+   mkdir -p docs
+   [ -f PROJECT.md ] && mv PROJECT.md docs/PROJECT.md
+   [ -f TECHNICAL.md ] && mv TECHNICAL.md docs/TECHNICAL.md
+   [ -d features ] && mv features docs/features
+   ```
+3. If `CLAUDE.md` exists, update any path references from `PROJECT.md` to `docs/PROJECT.md`, and `TECHNICAL.md` to `docs/TECHNICAL.md`, `features/` to `docs/features/`.
+4. Inform the user what was moved.
+
+If no legacy files are found, skip silently.
+
 ### 1. Read project context
 
 ```bash
-cat PROJECT.md 2>/dev/null
-cat TECHNICAL.md 2>/dev/null
+cat docs/PROJECT.md 2>/dev/null
+cat docs/TECHNICAL.md 2>/dev/null
 ```
 
-If PROJECT.md doesn't exist, suggest running `/know-thy-build:project` first. A feature spec without project context is rootless.
+If `docs/PROJECT.md` doesn't exist, suggest running `/know-thy-build:project` first. A feature spec without project context is rootless.
 
-If TECHNICAL.md exists, use it as technical context — reference the stack, architecture, and constraints when exploring the feature's approach. If it doesn't exist, that's fine — technical context is helpful but not required.
+If `docs/TECHNICAL.md` exists, use it as technical context — reference the stack, architecture, and constraints when exploring the feature's approach. If it doesn't exist, that's fine — technical context is helpful but not required.
 
 ### 2. Scan existing features
 
 ```bash
-ls features/*.md 2>/dev/null | sort -V
+ls docs/features/*.md 2>/dev/null | sort -V
 ```
 
 ### 3. Route based on state
@@ -61,7 +85,7 @@ ls features/*.md 2>/dev/null | sort -V
 
 ### Determine next number
 
-Find the highest existing number and increment by 1. Zero-pad to 3 digits. If `features/` doesn't exist, start at `001`.
+Find the highest existing number and increment by 1. Zero-pad to 3 digits. If `docs/features/` doesn't exist, start at `001`.
 
 ### Areas to Explore
 
@@ -126,9 +150,9 @@ Don't drag the conversation. Features should be quick.
 
 ### Generate Feature Spec
 
-Create the `features/` directory if it doesn't exist.
+Create the `docs/features/` directory if it doesn't exist.
 
-Write to `features/{{NNN}}.md`:
+Write to `docs/features/{{NNN}}.md`:
 
 **Frontmatter:**
 ```yaml
@@ -200,7 +224,7 @@ When the user chooses to edit an existing feature by number:
 ### 1. Read the feature
 
 ```bash
-cat features/{{NNN}}.md 2>/dev/null
+cat docs/features/{{NNN}}.md 2>/dev/null
 ```
 
 ### 2. Present the current state
@@ -256,7 +280,7 @@ Write whatever content has been confirmed so far. The next `/know-thy-build:feat
 ## Closing
 
 **After CREATE:**
-- Feature spec has been saved to `features/{{NNN}}.md`
+- Feature spec has been saved to `docs/features/{{NNN}}.md`
 - They can start implementing whenever ready
 - Run `/know-thy-build:feature` again for the next feature
 

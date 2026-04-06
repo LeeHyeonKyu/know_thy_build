@@ -24,9 +24,9 @@ Pick a language, and three commands are installed into your `.claude/commands/`:
 
 | Command | Purpose | Output |
 |---------|---------|--------|
-| `/know-thy-build:project` | Define what you're building and why | `PROJECT.md` |
-| `/know-thy-build:technical` | Define how you'll build it | `TECHNICAL.md` |
-| `/know-thy-build:feature` | Design a specific feature | `features/NNN.md` |
+| `/know-thy-build:project` | Define what you're building and why | `docs/PROJECT.md` |
+| `/know-thy-build:technical` | Define how you'll build it | `docs/TECHNICAL.md` |
+| `/know-thy-build:feature` | Design a specific feature | `docs/features/NNN.md` |
 
 ## The flow
 
@@ -54,7 +54,7 @@ A conversation that explores:
 
 Not every area needs equal depth. The conversation follows you, not a script.
 
-Result: `PROJECT.md` — the project's identity and compass.
+Result: `docs/PROJECT.md` — the project's identity and compass.
 
 ### 2. Technical — How
 
@@ -74,7 +74,7 @@ Explores:
 
 Depth matches project scale. A CLI tool might only need Stack + Interfaces.
 
-Result: `TECHNICAL.md` — the technical foundation.
+Result: `docs/TECHNICAL.md` — the technical foundation.
 
 ### 3. Feature — Specific work
 
@@ -93,15 +93,19 @@ Each feature spec covers:
 
 Features are quick — 3-8 exchanges. Create new ones or edit existing ones by number.
 
-Result: `features/001.md`, `features/002.md`, ...
+Result: `docs/features/001.md`, `docs/features/002.md`, ...
 
 ## Evolution
 
 All documents support evolution. Run the same command again on a completed document:
 
-- `/know-thy-build:project` on a complete `PROJECT.md` → evolve mode
-- `/know-thy-build:technical` on a complete `TECHNICAL.md` → evolve mode
+- `/know-thy-build:project` on a complete `docs/PROJECT.md` → evolve mode
+- `/know-thy-build:technical` on a complete `docs/TECHNICAL.md` → evolve mode
 - `/know-thy-build:feature` → edit existing features by number
+
+### Migration from v0.3.x
+
+If you have existing `PROJECT.md`, `TECHNICAL.md`, or `features/` at your project root, they will be automatically moved to `docs/` the next time you run any `/know-thy-build:*` command. References in `CLAUDE.md` are updated automatically.
 
 Changes are tracked with reasoning in a changelog — not just *what* changed, but *why*.
 

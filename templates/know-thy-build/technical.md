@@ -29,15 +29,39 @@ Technical terms (e.g. REST, PostgreSQL, Docker, CI/CD) stay in English. Everythi
 
 ## Before You Begin
 
+### 0. Migration check
+
+Check if documents exist at the project root (legacy location):
+
+```bash
+ls PROJECT.md TECHNICAL.md 2>/dev/null
+ls features/*.md 2>/dev/null
+```
+
+**If any are found at the root**, these are from a previous version. Migrate them to `docs/`:
+
+1. Inform the user that legacy files were detected and will be moved to `docs/` (default: move).
+2. Execute:
+   ```bash
+   mkdir -p docs
+   [ -f PROJECT.md ] && mv PROJECT.md docs/PROJECT.md
+   [ -f TECHNICAL.md ] && mv TECHNICAL.md docs/TECHNICAL.md
+   [ -d features ] && mv features docs/features
+   ```
+3. If `CLAUDE.md` exists, update any path references from `PROJECT.md` to `docs/PROJECT.md`, and `TECHNICAL.md` to `docs/TECHNICAL.md`, `features/` to `docs/features/`.
+4. Inform the user what was moved.
+
+If no legacy files are found, skip silently.
+
 ### 1. Read project context
 
 ```bash
-cat PROJECT.md 2>/dev/null
-cat TECHNICAL.md 2>/dev/null
+cat docs/PROJECT.md 2>/dev/null
+cat docs/TECHNICAL.md 2>/dev/null
 ```
 
-**If PROJECT.md doesn't exist or has `status: drafting`:**
-> "PROJECT.md needs to be complete first — the technical design should follow the project definition. Run `/know-thy-build:project` first."
+**If `docs/PROJECT.md` doesn't exist or has `status: drafting`:**
+> "docs/PROJECT.md needs to be complete first — the technical design should follow the project definition. Run `/know-thy-build:project` first."
 → Stop here.
 
 ### 2. Scan existing technical context
@@ -50,14 +74,14 @@ ls .github/workflows/ .gitlab-ci.yml 2>/dev/null
 cat CLAUDE.md 2>/dev/null
 ```
 
-### 3. Route based on TECHNICAL.md state
+### 3. Route based on `docs/TECHNICAL.md` state
 
-**No TECHNICAL.md → CREATE mode**
-Present what you found from PROJECT.md and codebase:
+**No `docs/TECHNICAL.md` → CREATE mode**
+Present what you found from `docs/PROJECT.md` and codebase:
 > "PROJECT.md defines [one-liner summary]. I can see [tech context from files]. Let's define the technical foundation."
 
 **`status: drafting` → RESUME mode**
-Read frontmatter, present progress, offer to continue.
+Read `docs/TECHNICAL.md` frontmatter, present progress, offer to continue.
 
 **`status: complete` → EVOLVE mode**
 Present current technical definition:
@@ -168,7 +192,7 @@ Slots to fill:
 
 Same pattern as project — checkpoint after natural clusters, not every question.
 
-**Save progress to TECHNICAL.md** with `status: drafting`:
+**Save progress to `docs/TECHNICAL.md`** with `status: drafting`:
 
 ```yaml
 ---
@@ -194,9 +218,9 @@ Not every area needs to be explored. A CLI tool might only need Stack + Interfac
 
 ---
 
-## Generate TECHNICAL.md
+## Generate docs/TECHNICAL.md
 
-Write to `TECHNICAL.md` in the project root.
+Write to `docs/TECHNICAL.md`. Create the `docs/` directory if it doesn't exist.
 
 **Frontmatter:**
 ```yaml
@@ -316,11 +340,11 @@ lastEvolve: {{date}}
 ## Closing
 
 **After CREATE:**
-- TECHNICAL.md has been generated.
+- `docs/TECHNICAL.md` has been generated.
 - This defines the technical foundation for all implementation work.
 - Feature specs (`/know-thy-build:feature`) will reference this automatically.
 - Run `/know-thy-build:technical` again when technical direction shifts.
 
 **After EVOLVE:**
-- TECHNICAL.md has been updated with changelog.
+- `docs/TECHNICAL.md` has been updated with changelog.
 - Review if existing features need adjustment based on technical changes.

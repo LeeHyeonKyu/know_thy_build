@@ -28,17 +28,41 @@ Technical terms (e.g. CLI, API, NON-NEGOTIABLE) stay in English. Everything else
 
 ## Before You Begin
 
-Silently scan the project for existing context:
+### 0. Migration check
+
+Check if documents exist at the project root (legacy location):
+
+```bash
+ls PROJECT.md TECHNICAL.md 2>/dev/null
+ls features/*.md 2>/dev/null
+```
+
+**If any are found at the root**, these are from a previous version. Migrate them to `docs/`:
+
+1. Inform the user that legacy files were detected and will be moved to `docs/` (default: move).
+2. Execute:
+   ```bash
+   mkdir -p docs
+   [ -f PROJECT.md ] && mv PROJECT.md docs/PROJECT.md
+   [ -f TECHNICAL.md ] && mv TECHNICAL.md docs/TECHNICAL.md
+   [ -d features ] && mv features docs/features
+   ```
+3. If `CLAUDE.md` exists, update any path references from `PROJECT.md` to `docs/PROJECT.md`, and `TECHNICAL.md` to `docs/TECHNICAL.md`, `features/` to `docs/features/`.
+4. Inform the user what was moved.
+
+If no legacy files are found, skip silently.
+
+### 1. Scan project context
 
 ```bash
 ls -la 2>/dev/null | head -20
 cat package.json pyproject.toml Cargo.toml go.mod README.md 2>/dev/null | head -80
-cat CLAUDE.md PROJECT.md 2>/dev/null
+cat CLAUDE.md docs/PROJECT.md 2>/dev/null
 ```
 
-Route based on PROJECT.md state:
+Route based on `docs/PROJECT.md` state:
 
-### No PROJECT.md → CREATE mode
+### No docs/PROJECT.md → CREATE mode
 
 Note the blank canvas and begin exploring areas.
 
@@ -55,7 +79,7 @@ Present what was gathered so far and ask:
 ### `status: evolving` → RESUME EVOLVE mode
 
 Read `evolveProgress` from frontmatter and resume:
-> "We started evolving PROJECT.md before. Here's where we left off: [summary]. Shall we continue?"
+> "We started evolving docs/PROJECT.md before. Here's where we left off: [summary]. Shall we continue?"
 
 ### `status: complete` → EVOLVE mode
 
@@ -216,7 +240,7 @@ After exploring an area, summarize and read it back. Ask the user to confirm or 
 
 Don't checkpoint after every question. Checkpoint when you've accumulated enough — typically after a natural cluster.
 
-**At each checkpoint, save progress to PROJECT.md** with `status: drafting`:
+**At each checkpoint, save progress to `docs/PROJECT.md`** with `status: drafting`:
 
 ```yaml
 ---
@@ -243,9 +267,9 @@ Signs the conversation is ready:
 
 ---
 
-## Generate PROJECT.md
+## Generate docs/PROJECT.md
 
-Finalize the document. Update frontmatter:
+Finalize the document. Write to `docs/PROJECT.md`. Create the `docs/` directory if it doesn't exist. Update frontmatter:
 
 ```yaml
 ---
@@ -459,19 +483,19 @@ If `CLAUDE.md` exists → prepend reference (if not already present). If not →
 **Reference to add:**
 ```markdown
 ## Project Compass
-This project follows the principles defined in [PROJECT.md](./PROJECT.md).
-AI agents MUST read PROJECT.md before starting any work.
+This project follows the principles defined in [PROJECT.md](./docs/PROJECT.md).
+AI agents MUST read docs/PROJECT.md before starting any work.
 NON-NEGOTIABLE rules in PROJECT.md cannot be overridden.
 ```
 
 ## Closing
 
 **After CREATE:**
-- PROJECT.md has been generated.
+- `docs/PROJECT.md` has been generated.
 - This document is the compass for all agents working on this project.
 - Run `/know-thy-build:project` again when the project's direction shifts.
 
 **After EVOLVE:**
-- PROJECT.md has been updated.
+- `docs/PROJECT.md` has been updated.
 - The changelog records not just what changed, but why.
 - Run `/know-thy-build:project` again whenever the direction shifts.
