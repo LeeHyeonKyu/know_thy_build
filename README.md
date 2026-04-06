@@ -62,7 +62,7 @@ Result: `docs/PROJECT.md` — the project's identity and compass.
 /know-thy-build:technical
 ```
 
-Requires `PROJECT.md`. Scans your codebase for existing technical context (package.json, Dockerfile, etc.) and doesn't re-ask what's already visible.
+Requires `docs/PROJECT.md`. Scans your codebase for existing technical context (package.json, Dockerfile, etc.) and doesn't re-ask what's already visible.
 
 Explores:
 
@@ -82,7 +82,7 @@ Result: `docs/TECHNICAL.md` — the technical foundation.
 /know-thy-build:feature
 ```
 
-References both `PROJECT.md` and `TECHNICAL.md`. Features are numbered sequentially.
+References both `docs/PROJECT.md` and `docs/TECHNICAL.md`. Features are numbered sequentially.
 
 Each feature spec covers:
 - **What** — concrete description
