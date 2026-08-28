@@ -305,55 +305,76 @@ Slots to fill:
 
 **Prerequisites:** Problem + Persona areas settled.
 
-**This area has two depth levels:**
+**This area has two depth levels.** Default is always executed. Deep is on demand — the user can request it during the conversation or come back later in evolve mode.
 
 #### Default depth (always do this)
 
-The agent MUST research before asking. Use web search to find existing solutions, then present findings as facts for the user to confirm, correct, or extend.
+The agent MUST research before asking. Follow the **Discovery → Extraction → Verification** process:
 
-**Research process:**
-1. Search for tools/services that address `{{problem_root}}` for `{{persona_role}}`
-2. For each competitor found (aim for 3-5), gather: what it is, how it approaches the problem, pricing/access model
-3. Present findings to the user and ask for corrections or additions
+**Step 1 — Discovery (broad search):**
+Run multiple search queries to find existing solutions. Don't rely on a single query — vary the angle:
+- `"{{problem_root}} tool/service/solution"`
+- `"alternative to {{known_solution}} for {{persona_role}}"`
+- `"{{problem_domain}} {{approach_keyword}}"` (e.g. "project definition tool", "requirements elicitation")
+
+Aim for 3-5 competitors. Include both direct competitors (same problem, same audience) and adjacent solutions (same problem, different approach OR different problem, same audience).
+
+**Step 2 — Extraction (per competitor):**
+For each competitor found, fetch their landing page or docs and extract:
+- One-liner: what it is
+- Approach: how they tackle the problem
+- Key differentiator: what they claim is special
+- Access model: pricing, open source, freemium, etc.
+
+**Step 3 — Present and validate:**
+Show the structured findings to the user. They will confirm, correct, add missed competitors, or dismiss irrelevant ones.
 
 Frontier questions:
 
 | Question | Depends on | Type |
 |----------|-----------|------|
-| (Present research results) "I found these existing solutions. Are these right? Anything missing?" | Problem, Persona | Fact (web search) + Decision |
-| For each competitor: What's their approach to this problem? | research | Fact (web search) |
-| For each competitor: What's the gap — what's missing or friction-heavy? | approach | Fact (scan docs/reviews) + Decision |
-| Where does our project differ from all of these? What's the unique angle? | gaps | Decision |
+| (Present research) "I found these existing solutions. Correct? Missing any?" | Discovery + Extraction | Fact (search + fetch) + Decision |
+| For each confirmed competitor: What's the specific gap from {{persona_name}}'s perspective? | user confirmation | Fact (scan docs) + Decision |
+| How would you describe our project's unique angle compared to all of these? | gaps | Decision |
 
 Slots to fill:
-- `{{competitors}}` — list with name, approach, gap
-- `{{differentiation}}` — why our approach is different
+- `{{competitors}}` — list with name, approach, differentiator, gap
+- `{{differentiation}}` — why our approach is different (informed by gaps)
 
-**Done when:** Frontier is empty. At least 2-3 competitors are mapped, gaps are identified, and the user can articulate "we're different because ___."
+**Done when:** Frontier is empty. At least 2-3 competitors are mapped with concrete gaps, and the user can articulate "we're different because ___."
 
-#### Deep depth (on user request or when differentiation is unclear)
+#### Deep depth (on request)
 
-> Trigger: user asks for deeper research, or the differentiation feels weak after default depth. Also triggered by `/know-thy-build:project` with `--deep-research` or when the user says "research more" / "dig deeper".
+> Trigger: user says "research more" / "dig deeper" / "competitive deep dive", or the differentiation feels weak after default depth. Can also be done later in evolve mode.
 
-For each key competitor, research in detail:
+Deep research follows the **Researcher → Verifier** pattern. For each key competitor:
+
+**Step 1 — Journey reconstruction:**
+Search for tutorials, getting-started guides, demo videos, and walkthroughs. Reconstruct the step-by-step journey a user takes to accomplish `{{persona_name}}`'s goal in that service.
+
+**Step 2 — Friction identification:**
+Search for user reviews, forum complaints, GitHub issues, and comparison articles. Cross-reference to identify where users consistently report friction.
+
+**Step 3 — Verification:**
+Cross-check claims across multiple sources. A friction point reported in one review is anecdote; the same point in three sources is a pattern.
 
 | Question | Depends on | Type |
 |----------|-----------|------|
-| Step-by-step: how does a user accomplish {{persona}}'s goal in {{competitor}}? | default research | Fact (scan tutorials, docs, demos) |
-| At which step does friction or frustration occur? | step-by-step | Fact (scan reviews, forums) + Decision |
-| What's the pricing/access barrier? | — | Fact |
-| What do users praise about this service? | — | Fact (scan reviews) |
-| What do users complain about? | — | Fact (scan reviews, issues) |
+| Step-by-step: how does {{persona_name}} accomplish their goal in {{competitor}}? | default research | Fact (fetch tutorials, docs) |
+| At which step does friction occur? What specifically goes wrong? | journey | Fact (fetch reviews, forums, issues) |
+| What do users consistently praise? (learn from this) | — | Fact (cross-reference reviews) |
+| What do users consistently complain about? | — | Fact (cross-reference reviews) |
+| Pricing/access barriers? | — | Fact |
 
 Slots to fill (per competitor):
-- `{{competitor_journey}}` — step-by-step for the same task
-- `{{competitor_friction}}` — where it breaks down
-- `{{competitor_praise}}` — what they do well (learn from this)
+- `{{competitor_journey}}` — numbered steps for the same task
+- `{{competitor_friction}}` — friction points with step numbers
+- `{{competitor_praise}}` — what they do well
 - `{{competitor_complaints}}` — what users hate
 
-**Done when:** Each competitor has a concrete journey map with friction points. The user can explain exactly where and why existing solutions fail.
+**Done when:** Each competitor has a concrete journey with friction points. Claims are verified across multiple sources.
 
-**Note:** Deep research can be done later — the user can return with `/know-thy-build:project` in evolve mode and request deeper competitive analysis. The document structure supports incremental enrichment.
+**Note:** Deep research enriches the document incrementally. Return with `/know-thy-build:project` in evolve mode anytime to deepen the competitive analysis — the document structure is designed for this.
 
 ---
 
