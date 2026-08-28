@@ -240,12 +240,12 @@ Areas have natural dependencies — Problem and Identity are roots, Vision depen
 
 **Area dependency map:**
 ```
-Problem ──┬──→ Vision ──→ Output ──→ Experience & Boundaries
-           │                              │
-           └──→ Success ←─────────────────┘
-                   │
-           Principles (independent — explore anytime)
-           Open Questions (independent — explore anytime)
+Problem ──→ Persona ──→ Vision ──→ Output ──→ User Journey ──→ Boundaries
+                                                    │
+                            Success ←───────────────┘
+                               │
+                 Principles (independent — explore anytime)
+                 Risks & Open Questions (independent — explore anytime)
 ```
 
 ### Problem — The root cause
@@ -267,16 +267,41 @@ Frontier questions — ask in dependency order, 2-3 per round:
 
 Slots to fill:
 - `{{problem_surface}}` → `{{problem_impact}}` → `{{problem_root}}`
-- `{{who_suffers}}`
+- `{{who_suffers}}` (brief — expanded in Persona area)
 - `{{current_alternative}}`, `{{why_not_enough}}`
 
 **Done when:** Frontier is empty — all questions settled or explicitly marked N/A. You can articulate the problem in 2-3 sentences and the user confirms.
+
+### Persona — Who are we building for?
+
+> What to discover: The concrete people who will use this. Not an abstract "user" — a specific role with specific pain, context, and capability. Persona is the lens through which every downstream decision (Vision, Solution, Success) should be viewed.
+
+**Prerequisites:** Problem area settled (we know who suffers — now we go deeper).
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| Who is the primary user? Give them a name and a role. | Problem.who_suffers | Decision |
+| What's their technical level? What tools do they already use? | primary-user | Decision |
+| What's their context when they encounter this problem? (at desk, on-call, in a meeting...) | primary-user | Decision |
+| Is there a secondary user who interacts differently? | primary-user | Decision |
+| What does the primary user care about most — speed, correctness, simplicity, control? | primary-user | Decision |
+
+Slots to fill:
+- `{{persona_name}}`, `{{persona_role}}`, `{{persona_pain}}`
+- `{{persona_tech_level}}`, `{{persona_tools}}`
+- `{{persona_context}}`
+- `{{persona_priority}}` — what they value most
+- `{{secondary_persona}}` (optional)
+
+**Done when:** Frontier is empty. You can describe the primary user in 2-3 sentences and the user confirms. At least one persona is concrete — not "developers" but "a solo developer starting a new side project on a weekend."
 
 ### Vision — What does success look like?
 
 > What to discover: The concrete change this project creates. The approach and core value.
 
-**Prerequisites:** Problem area settled.
+**Prerequisites:** Problem + Persona areas settled.
 
 Frontier questions:
 
@@ -321,24 +346,49 @@ Slots to fill:
 
 **Done when:** Frontier is empty. You can list every output and the user confirms.
 
-### Experience & Boundaries — How is it used, and where does it end?
+### User Journey — How does the user move through this?
 
-> What to discover: The tangible user journey, the aha moment, and the hard edges.
+> What to discover: The high-level journey from trigger to outcome, per persona. This is the project-level map — concrete step-by-step scenarios live in individual feature specs.
 
 **Prerequisites:** Output area settled.
+
+Frontier questions — trace the persona's path through the product:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What situation triggers {{persona_name}} to reach for this tool? | Output settled | Decision |
+| How do they discover it exists? | trigger | Decision |
+| What happens in the first 30 seconds? | discovery | Decision |
+| What's the core action they repeat? How often? | first-use | Decision |
+| At what point does the user think "this is it!"? | core-loop | Decision |
+| After using the tool, what do they do with the output? Where does it flow? | aha-moment | Decision |
+| What brings them back for a second time? | after | Decision |
+
+Slots to fill:
+- `{{trigger}}` — the moment the need arises
+- `{{discovery}}` — how they find the tool
+- `{{first_use}}` — initial experience
+- `{{core_loop}}`, `{{frequency}}` — repeated action
+- `{{aha_moment}}` — the "this is it" point
+- `{{after}}` — what happens with the output
+- `{{return_trigger}}` — why they come back
+
+**Done when:** Frontier is empty. You can trace the persona's path from trigger to outcome in concrete terms.
+
+### Boundaries — Where does it end?
+
+> What to discover: The hard edges — what this is NOT, and what the minimum viable version looks like.
+
+**Prerequisites:** User Journey settled.
 
 Frontier questions:
 
 | Question | Depends on | Type |
 |----------|-----------|------|
-| Walk through first encounter to getting value — like a movie scene. | Output settled | Decision |
-| At what point does the user think "this is it!"? | journey | Decision |
-| What's the most frequent action? | journey | Decision |
-| What might people confuse this with, that this is NOT? | Output.artifacts | Decision |
-| What's the minimum for v1.0? | journey, not-this | Decision |
+| What might people confuse this with, that this is NOT? | Journey | Decision |
+| What's the minimum for v1.0? | not-this | Decision |
 
 Slots to fill:
-- `{{user_journey}}`, `{{aha_moment}}`, `{{primary_action}}`
 - `{{not_this}}`
 - `{{mvp_criteria}}`
 
@@ -348,7 +398,7 @@ Slots to fill:
 
 > What to discover: Measurable success criteria. Observable, countable evidence that this project is working.
 
-**Prerequisites:** Problem + Experience areas settled.
+**Prerequisites:** Problem + User Journey areas settled.
 
 Frontier questions:
 
@@ -366,9 +416,9 @@ Slots to fill:
 
 **Done when:** Frontier is empty. At least one concrete, measurable metric exists. Don't force numbers where they don't exist naturally.
 
-### Open Questions — What don't we know yet?
+### Risks & Open Questions — What could go wrong, and what don't we know?
 
-> What to discover: Honest unknowns, risks, and assumptions that haven't been validated.
+> What to discover: Honest unknowns, concrete risks, and — critically — how we'd respond to each risk. A risk without a mitigation is just worry.
 
 **Prerequisites:** None (can explore anytime, but richer after other areas).
 
@@ -377,12 +427,16 @@ Frontier questions:
 | Question | Depends on | Type |
 |----------|-----------|------|
 | What's the biggest risk? What could make this fail? | — | Decision |
+| **How would you respond if that risk materializes?** | biggest-risk | Decision |
 | What are you assuming that you haven't validated? | — | Decision |
+| **What would you do if that assumption turns out wrong?** | assumptions | Decision |
 | Is there a technical unknown that could change the approach? | — | Decision |
 | What would you need to learn or prototype first? | risks, assumptions | Decision |
 
 Slots to fill:
-- `{{open_questions}}`, `{{risks}}`, `{{assumptions}}`
+- `{{risks}}` — each with `{{mitigation}}`
+- `{{assumptions}}` — each with `{{if_wrong}}` and `{{response}}`
+- `{{open_questions}}`
 
 **Done when:** Frontier is empty. The user has named at least the biggest unknown. This area is optional — some projects are clear enough to skip. But probe at least once.
 
@@ -458,12 +512,13 @@ Offer to generate when **all required areas have empty frontiers**. Required are
 
 Concrete checklist before offering:
 - [ ] Problem frontier is empty — root cause articulated
+- [ ] Persona frontier is empty — primary user is concrete, not abstract
 - [ ] Vision frontier is empty — approach and deliverable defined
 - [ ] Output frontier is empty — concrete artifacts listed
 - [ ] `assumptions` in frontmatter is non-empty (at least the biggest unknowns surfaced)
 - [ ] Every decision has a recommended answer that was accepted, modified, or rejected
 
-Optional areas (Experience, Success, Open Questions, Principles) can be skipped if the user explicitly declines, but offer each at least once.
+Optional areas (Experience, Success, Risks & Open Questions, Principles) can be skipped if the user explicitly declines, but offer each at least once.
 
 ---
 
@@ -506,8 +561,18 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 ## Problem
 
 <!-- Weave into natural prose:
-     {{who_suffers}}, {{problem_root}}, {{problem_impact}},
+     {{problem_root}}, {{problem_impact}},
      {{current_alternative}}, {{why_not_enough}} -->
+
+## Personas
+
+<!-- Primary user first. Secondary only if discussed. -->
+
+| Persona | Role | Pain Point | Tech Level | Context |
+|---------|------|------------|------------|---------|
+| {{persona_name}} | {{persona_role}} | {{persona_pain}} | {{persona_tech_level}} | {{persona_context}} |
+
+**Primary user values:** {{persona_priority}}
 
 ## Vision
 
@@ -538,10 +603,18 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 
 ## User Journey
 
-<!-- {{user_journey}} as natural prose -->
+<!-- Per-persona journey from trigger to outcome. This is the high-level map;
+     concrete step-by-step scenarios live in individual feature specs. -->
 
-**Aha Moment:** {{aha_moment}}
-**Primary Action:** {{primary_action}}
+| Stage | Description |
+|-------|-------------|
+| **Trigger** | {{trigger}} |
+| **Discovery** | {{discovery}} |
+| **First Use** | {{first_use}} |
+| **Core Loop** | {{core_loop}} ({{frequency}}) |
+| **Aha Moment** | {{aha_moment}} |
+| **After** | {{after}} |
+| **Return** | {{return_trigger}} |
 
 ## Principles
 
@@ -561,22 +634,26 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 **Metric:** {{success_metric}}
 **Leading Indicator:** {{leading_indicator}}
 
+## Risks & Mitigations
+
+<!-- Each risk must have a mitigation. A risk without a response is just worry. -->
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| {{risk}} | {{impact}} | {{mitigation}} |
+
 ## Open Questions
 
 <!-- Only include if discussed. Omit if the project is clear enough. -->
 
-**Risks:**
-- {{risk}}
-
-**Unknowns:**
 - {{open_question}}
 
 ## Assumptions
 
 <!-- Always include. These are beliefs surfaced during exploration that haven't been validated.
-     Each assumption should note what would change if it turns out to be wrong. -->
+     Each assumption notes what would change if wrong AND how to respond. -->
 
-- {{assumption}} — if wrong: {{impact}}
+- {{assumption}} — if wrong: {{impact}} → response: {{response}}
 
 ## Key Decisions
 
@@ -586,6 +663,17 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 | Decision | Alternatives Considered | Why This Path |
 |----------|------------------------|---------------|
 | {{decision}} | {{alternatives}} | {{rationale}} |
+
+## Feature Registry
+
+<!-- Index of all features. Updated each time a new feature is defined via /know-thy-build:feature.
+     This section makes PROJECT.md the single entry point for the full project picture. -->
+
+| # | Feature | Priority | Depends On | Status |
+|---|---------|----------|------------|--------|
+| {{id}} | [{{title}}](features/{{NNN}}.md) | {{P0/P1/P2}} | {{depends_on}} | {{status}} |
+
+**Technical Foundation:** [TECHNICAL.md](TECHNICAL.md)
 
 ---
 

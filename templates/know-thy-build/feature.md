@@ -129,12 +129,16 @@ Find the highest existing number and increment by 1. Zero-pad to 3 digits. If `d
 
 Follow the conversation, not a rigid sequence. Most features need only 2-3 areas.
 
-**Area dependency map:**
+**Area dependency map (2-pass):**
 ```
-Problem ──→ Value ──→ Solution ──→ Scope ──→ Done
-                                              │
-                                    Approach (optional)
+Pass 1: Problem ──→ Value ──→ User Stories (lightweight) ──→ Solution ──→ Scope
+                 │                                                          │
+                 └──→ Success Metric                          Approach (optional)
+
+Pass 2: ──→ Acceptance Criteria (per story: Given-When-Then → AC → edge cases → verification)
 ```
+
+User Stories are captured early (before Solution) to inform what to build. Acceptance Criteria are detailed later (after Scope) because you need to know the solution and boundaries to define concrete verification.
 
 #### Problem — What's broken or missing?
 
@@ -162,6 +166,46 @@ Problem ──→ Value ──→ Solution ──→ Scope ──→ Done
 
 **Done when:** Frontier empty — value is clear.
 
+#### Success Metric — How do we know this feature succeeded?
+
+> Optional for Bounded features. Required for Architectural features. "Done When" is a build criterion. Success Metric is a launch criterion.
+
+**Prerequisites:** Value settled.
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| After launch, what number changes? (usage count, time saved, error reduction...) | Value | Decision |
+| What's the baseline today, and what's the target? | metric | Decision |
+
+Slots to fill:
+- `{{feature_metric}}`: `{{baseline}}` → `{{target}}`
+
+**Done when:** Frontier empty — at least one measurable outcome exists. Skip for Bounded features if the user declines.
+
+#### User Stories — What does the user actually do? (Pass 1: lightweight)
+
+> Bridge between Value and Solution. Captures WHAT the user does, not HOW we build it. These stories will be enriched with Given-When-Then scenarios and acceptance criteria in Pass 2, after Solution and Scope are defined.
+
+**Prerequisites:** Value settled. Read PROJECT.md Personas section to identify the relevant persona.
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| Which persona from PROJECT.md uses this feature? | Value | Fact (read PROJECT.md Personas) |
+| What does that persona want to accomplish? | persona | Decision |
+| Walk through the scenario — what happens step by step? | want | Decision |
+| Is there a secondary scenario or edge case worth capturing? | scenario | Decision |
+
+Format each story as:
+```
+As a {{persona}}, I want {{action}} so that {{benefit}}.
+```
+
+Slots to fill:
+- 1-3 user stories (title + As a / I want / so that)
+- Brief scenario sketch per story (will be formalized into Given-When-Then in Pass 2)
+
+**Done when:** Frontier empty — at least one user story with a concrete scenario exists. Don't over-detail here — Pass 2 adds the rigor.
+
 #### Solution — How does this solve it?
 
 **Prerequisites:** Value settled.
@@ -181,21 +225,47 @@ Problem ──→ Value ──→ Solution ──→ Scope ──→ Done
 | Question | Depends on | Type |
 |----------|-----------|------|
 | What's included? | Solution | Decision |
-| What's explicitly NOT included? | includes | Decision |
+| What's explicitly NOT included? (This is required, not optional — unbounded scope is the #1 feature killer) | includes | Decision |
 | Smallest useful version? | includes, excludes | Decision |
 
-**Done when:** Frontier empty — edges are clear.
+**Done when:** Frontier empty — both Includes AND Excludes are defined. Scope without explicit "Excludes" is unbounded.
 
-#### Done — How do we know it's finished?
+#### Acceptance Criteria — The derivation chain (Pass 2)
 
-**Prerequisites:** Scope settled.
+> This is where User Stories get teeth. Return to each story from Pass 1 and formalize: Given-When-Then scenario → acceptance criteria → edge cases → verification method. Each AC bullet is a test case. Each verification note is a QA checklist item.
 
-| Question | Depends on | Type |
-|----------|-----------|------|
-| What must be true for "done"? | Scope | Decision |
-| How would you verify it works? | done-criteria | Decision |
+**Prerequisites:** Scope settled. All User Stories from Pass 1 are available.
 
-**Done when:** Frontier empty — concrete acceptance criteria exist.
+**Process:** For each User Story, walk through this chain:
+
+| Step | Question | Depends on | Type |
+|------|----------|-----------|------|
+| 1 | Formalize the scenario: Given [precondition], When [action], Then [result] | Story from Pass 1 | Decision |
+| 2 | What must be true for this story to be "done"? (one criterion per bullet) | scenario | Decision |
+| 3 | What happens when something goes wrong? (invalid input, empty state, timeout, permission denied...) | happy-path AC | Decision |
+| 4 | Are there boundary conditions? (first item, last item, zero items, max items...) | happy-path AC | Decision |
+| 5 | How would you verify each criterion? (manual check, automated test, visual inspection...) | all ACs | Decision |
+
+Format the output per story:
+```
+### Story: {{story_title}}
+
+**Scenario:**
+- Given: {{precondition}}
+- When: {{user_action}}
+- Then: {{expected_result}}
+
+**Acceptance Criteria:**
+- [ ] {{happy_path_criterion}} — verify: {{method}}
+- [ ] {{edge_case}} — verify: {{method}}
+- [ ] {{error_state}} — verify: {{method}}
+```
+
+**Done when:** Every User Story has:
+- A Given-When-Then scenario
+- At least one happy-path AC
+- At least one edge case or error state AC
+- A verification method per AC
 
 #### Approach — Any technical considerations?
 
@@ -225,17 +295,25 @@ Good to go?
 
 ### When to Generate
 
-Offer to generate when **Problem, Value, and Solution frontiers are empty.**
+Offer to generate when **both passes are complete.**
 
 Concrete checklist:
+
+**Pass 1 (story → solution → scope):**
 - [ ] Problem frontier empty — gap is concrete
 - [ ] Value frontier empty — worth is clear
+- [ ] User Stories — at least one story with As a / I want / so that
 - [ ] Solution frontier empty — what to build is defined
-- [ ] Scope has at least "includes" defined
-- [ ] At least one concrete acceptance criterion exists
+- [ ] Scope has both "Includes" AND "Excludes" defined
+- [ ] Success Metric defined (required for Architectural, optional for Bounded)
+
+**Pass 2 (acceptance criteria per story):**
+- [ ] Every User Story has a Given-When-Then scenario
+- [ ] Every story has at least one happy-path AC with verification method
+- [ ] Every story has at least one edge case or error state AC
 - [ ] Quick perspective check passed (or skipped because obviously solid)
 
-Don't drag the conversation. Features should be quick.
+Don't drag the conversation. Features should be quick — but not shallow.
 
 ### Generate Feature Spec
 
@@ -249,6 +327,9 @@ Write to `docs/features/{{NNN}}.md`:
 id: {{number}}
 title: {{short_title}}
 status: complete
+priority: {{P0|P1|P2}}
+depends_on: [{{feature_ids}}]
+persona: {{primary_persona_name from PROJECT.md}}
 assumptions:
   - "{{assumption}}"
 date: {{date}}
@@ -256,16 +337,26 @@ generatedBy: know-thy-build-feature
 ---
 ```
 
+**Priority guide:**
+- **P0**: Must-have for MVP. Without this, the project doesn't deliver its core value.
+- **P1**: Important. Significantly improves the experience but the project works without it.
+- **P2**: Nice-to-have. Enhances polish or covers edge cases.
+
+Ask the user to assign priority during the Value area. If they resist, recommend based on the feature's connection to PROJECT.md vision.
+
 During conversation, use `status: drafting` with area tracking:
 ```yaml
 ---
 id: {{number}}
 title: {{short_title_or_TBD}}
 status: drafting
+priority: {{P0|P1|P2}}
+depends_on: [{{feature_ids}}]
+persona: {{primary_persona_name}}
 areasExplored:
   problem: { decisions: 2 }
   value: { decisions: 1 }
-areasRemaining: [solution, scope, done]
+areasRemaining: [user-stories, solution, scope, done]
 assumptions:
   - "{{assumption}}"
 date: {{date}}
@@ -295,6 +386,15 @@ generatedBy: know-thy-build-feature
 
 <!-- What changes when this exists. Link to PROJECT.md vision/principles if relevant. -->
 
+## Success Metric
+
+<!-- How we know this feature succeeded AFTER launch. Not build criteria — launch criteria.
+     Omit for Bounded features if not discussed. -->
+
+| Metric | Baseline | Target |
+|--------|----------|--------|
+| {{feature_metric}} | {{baseline}} | {{target}} |
+
 ## Solution
 
 <!-- Concrete description of what gets built and how the user experiences it -->
@@ -305,13 +405,33 @@ generatedBy: know-thy-build-feature
 <!-- Bulleted list -->
 
 **Excludes:**
-<!-- Bulleted list, only if discussed -->
+<!-- Bulleted list — REQUIRED. Scope without Excludes is unbounded. -->
 
-## Done When
+## User Stories & Acceptance Criteria
 
-<!-- Acceptance criteria as a checklist -->
-- [ ] {{criterion_1}}
-- [ ] {{criterion_2}}
+<!-- The derivation chain: Story → Scenario → AC → Verification.
+     Each AC bullet is a test case. Each verification note is a QA checklist item.
+     Persona references PROJECT.md Personas section. -->
+
+### Story 1: {{story_title}}
+
+**As a** {{persona}}, **I want** {{action}} **so that** {{benefit}}.
+
+**Scenario:**
+- Given: {{precondition}}
+- When: {{user_action}}
+- Then: {{expected_result}}
+
+**Acceptance Criteria:**
+- [ ] {{happy_path_criterion}} — verify: {{method}}
+- [ ] {{happy_path_criterion_2}} — verify: {{method}}
+
+**Edge Cases & Errors:**
+- [ ] {{edge_case}} — verify: {{method}}
+- [ ] {{error_state}} — verify: {{method}}
+
+### Story 2: {{story_title}}
+<!-- Repeat structure. Omit if only one story. -->
 
 ## Approach
 
@@ -380,13 +500,29 @@ If the conversation is interrupted before generation, save progress immediately 
 
 Write whatever content has been confirmed so far. The next `/know-thy-build:feature` run will detect the drafting state, read the area tracking, and offer to resume from where the frontier was.
 
+## Update Feature Registry
+
+After creating or editing a feature, update the Feature Registry in `docs/PROJECT.md`:
+
+1. Read `docs/PROJECT.md` and find the `## Feature Registry` section.
+2. If the section doesn't exist, append it (use the template from the project skill).
+3. Add or update the row for this feature:
+   ```
+   | {{id}} | [{{title}}](features/{{NNN}}.md) | {{priority}} | {{depends_on}} | {{status}} |
+   ```
+4. If `depends_on` references other features, verify those feature IDs exist.
+
+This keeps PROJECT.md as the single entry point for the full project picture.
+
 ## Closing
 
 **After CREATE:**
 - Feature spec has been saved to `docs/features/{{NNN}}.md`
+- Feature Registry in `docs/PROJECT.md` has been updated
 - They can start implementing whenever ready
 - Run `/know-thy-build:feature` again for the next feature
 
 **After EDIT:**
 - Feature spec has been updated
+- Feature Registry in `docs/PROJECT.md` has been updated if priority, status, or dependencies changed
 - Changes are recorded if substantial
