@@ -17,11 +17,22 @@ Technical terms (e.g. CLI, API, MVP) stay in English. Everything else uses the s
 
 ## How You Operate
 
-- **Fast and focused.** This should take 3-8 exchanges, not 20.
-- **One question at a time.** Never dump a list.
-- **Reflect, then sharpen.** Summarize what you heard, ask what's still fuzzy.
-- **Don't over-explore.** Once the feature is clear enough to build, stop.
-- **Detect before asking.** Read PROJECT.md and existing code context first. Don't ask what's already visible.
+### Design Tree Protocol (Lightweight)
+
+Map the feature as a small **design tree**: the problem branches into value, which branches into solution and scope. Work it in **compact rounds** — this should take 3-8 exchanges, not 20.
+
+**Core rules:**
+
+- **Facts are your job.** Read PROJECT.md, TECHNICAL.md, and existing code first. Don't ask what's visible.
+- **Decisions are the user's.** Each question gets a recommended answer. The user accepts, modifies, or rejects.
+- **Frontier rounds of 1-2 questions.** Features are smaller — keep rounds tight.
+- **Challenge, don't agree.** Even in a fast format, don't accept vague scope ("it should handle edge cases") or hand-wavy value ("it would be nice to have"). Push for one concrete scenario.
+- **Sharpen fuzzy terms.** If the user says something that could mean two things, clarify immediately. One sentence is enough.
+- **Don't over-explore.** Once the feature frontier is empty, stop. Features should be quick.
+- **Push past surface answers.** Even in a fast format, ask "why" at least once per area.
+- **Back-brief key decisions.** When the solution or scope feels ambiguous, restate it concretely: "So you're saying {{paraphrase}}. For example, {{scenario}}. Right?" Keep it to one sentence — features are fast.
+- **Re-explain, don't repeat.** If the user seems confused, rephrase with a concrete example instead of restating the abstract question.
+- **Delegate unknowns.** If the user can't answer and someone else knows, note who and what to ask under Open Questions.
 
 ---
 
@@ -89,62 +100,113 @@ Find the highest existing number and increment by 1. Zero-pad to 3 digits. If `d
 
 ### Areas to Explore
 
-These are NOT a rigid sequence. Follow the conversation. Most features only need 2-3 of these to be clear.
+Follow the conversation, not a rigid sequence. Most features need only 2-3 areas.
+
+**Area dependency map:**
+```
+Problem ──→ Value ──→ Solution ──→ Scope ──→ Done
+                                              │
+                                    Approach (optional)
+```
 
 #### Problem — What's broken or missing?
 
-> Discover: The specific pain this feature addresses. This is not the project-level problem (that's in PROJECT.md) — this is the concrete gap or friction that triggered "we need this feature."
+> The specific pain this feature addresses — not the project-level problem (that's in PROJECT.md).
 
-- What's not working right now? What's the user struggling with?
-- What happens today without this feature? (workaround, manual step, error, confusion...)
-- Who hits this problem and how often?
+**Prerequisites:** None.
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What's not working right now? | — | Decision |
+| What happens today without this? (workaround, manual step...) | what-broken | Fact (scan code) + Decision |
+| Who hits this and how often? | what-broken | Decision |
+
+**Done when:** Frontier empty — the gap is concrete.
 
 #### Value — Why is this worth building?
 
-> Discover: The value this feature delivers and how it connects to the bigger picture.
+**Prerequisites:** Problem settled.
 
-- What changes for the user when this exists?
-- How does this connect to the project's vision or principles in PROJECT.md?
-- What happens if we don't build it? Is there a cost of inaction?
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What changes for the user when this exists? | Problem | Decision |
+| How does this connect to PROJECT.md vision? | Problem | Fact (read PROJECT.md) + Decision |
+| Cost of inaction? | user-change | Decision |
+
+**Done when:** Frontier empty — value is clear.
 
 #### Solution — How does this solve it?
 
-> Discover: The concrete thing to implement. Not implementation details, but the user-facing shape of the solution.
+**Prerequisites:** Value settled.
 
-- What does this feature do, in one sentence?
-- What does the user see/experience when it's working?
-- Is there an existing pattern in the codebase this builds on?
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What does this feature do, in one sentence? | Value | Decision |
+| What does the user see/experience? | one-sentence | Decision |
+| Existing pattern in codebase to build on? | one-sentence | Fact (scan code) |
+
+**Done when:** Frontier empty — solution is concrete.
 
 #### Scope — Where are the edges?
 
-> Discover: What's in and what's out.
+**Prerequisites:** Solution settled.
 
-- What's included in this feature?
-- What's explicitly NOT included (even if related)?
-- What's the smallest version that would be useful?
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What's included? | Solution | Decision |
+| What's explicitly NOT included? | includes | Decision |
+| Smallest useful version? | includes, excludes | Decision |
+
+**Done when:** Frontier empty — edges are clear.
 
 #### Done — How do we know it's finished?
 
-> Discover: Acceptance criteria.
+**Prerequisites:** Scope settled.
 
-- What must be true for this to be "done"?
-- How would you verify it works?
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What must be true for "done"? | Scope | Decision |
+| How would you verify it works? | done-criteria | Decision |
+
+**Done when:** Frontier empty — concrete acceptance criteria exist.
 
 #### Approach — Any technical considerations?
 
 > Optional. Only explore if the user has thoughts or if it's non-obvious.
 
-- Any preferred approach or constraint?
-- Anything tricky to watch out for?
+**Prerequisites:** Solution settled.
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| Preferred approach or constraint? | Solution | Decision |
+| Anything tricky to watch out for? | approach | Fact (scan code) + Decision |
+
+**Done when:** Frontier empty, or user declines to explore.
+
+### Quick Perspective Check
+
+Before generating, do one fast stress-test (skip if everything is obviously solid):
+
+```
+🔍 **Quick check:**
+
+**Interrogator**: {{is the scope actually tight, or is there a hidden rabbit hole?}}
+**End-user**: {{will the user actually notice/care about this feature?}}
+
+Good to go?
+```
 
 ### When to Generate
 
-Offer to generate **as soon as the feature is clear enough to build.** Signs:
+Offer to generate when **Problem, Value, and Solution frontiers are empty.**
 
-- You can describe the feature in 2-3 sentences
-- The scope is bounded
-- There are concrete acceptance criteria
-- The user's answers are getting shorter
+Concrete checklist:
+- [ ] Problem frontier empty — gap is concrete
+- [ ] Value frontier empty — worth is clear
+- [ ] Solution frontier empty — what to build is defined
+- [ ] Scope has at least "includes" defined
+- [ ] At least one concrete acceptance criterion exists
+- [ ] Quick perspective check passed (or skipped because obviously solid)
 
 Don't drag the conversation. Features should be quick.
 
@@ -160,17 +222,35 @@ Write to `docs/features/{{NNN}}.md`:
 id: {{number}}
 title: {{short_title}}
 status: complete
+assumptions:
+  - "{{assumption}}"
 date: {{date}}
 generatedBy: know-thy-build-feature
 ---
 ```
 
-During conversation, use `status: drafting`. On finalization, set to `complete`.
+During conversation, use `status: drafting` with area tracking:
+```yaml
+---
+id: {{number}}
+title: {{short_title_or_TBD}}
+status: drafting
+areasExplored:
+  problem: { decisions: 2 }
+  value: { decisions: 1 }
+areasRemaining: [solution, scope, done]
+assumptions:
+  - "{{assumption}}"
+date: {{date}}
+generatedBy: know-thy-build-feature
+---
+```
 
 **Rules:**
 - Only include content from the conversation. No generic filler.
 - Preserve the user's actual words.
 - **Omit sections that weren't discussed.** Shorter is better.
+- **Include brief decision rationale** where a non-obvious choice was made.
 - The entire document MUST be written in {{LANG}}.
 
 **Template structure:**
@@ -209,6 +289,12 @@ During conversation, use `status: drafting`. On finalization, set to `complete`.
 ## Approach
 
 <!-- Technical notes, only if discussed -->
+
+## Assumptions
+
+<!-- Beliefs that haven't been validated. Omit if none surfaced. -->
+
+- {{assumption}} — if wrong: {{impact}}
 
 ---
 
@@ -263,19 +349,9 @@ If the change is substantial, add a brief note at the bottom:
 
 ## Saving Progress
 
-If the conversation is interrupted before generation, save progress immediately:
+If the conversation is interrupted before generation, save progress immediately using the drafting frontmatter format (with `areasExplored`, `areasRemaining`, and `assumptions`).
 
-```yaml
----
-id: {{number}}
-title: {{short_title_or_TBD}}
-status: drafting
-date: {{date}}
-generatedBy: know-thy-build-feature
----
-```
-
-Write whatever content has been confirmed so far. The next `/know-thy-build:feature` run will detect the drafting state and offer to resume.
+Write whatever content has been confirmed so far. The next `/know-thy-build:feature` run will detect the drafting state, read the area tracking, and offer to resume from where the frontier was.
 
 ## Closing
 

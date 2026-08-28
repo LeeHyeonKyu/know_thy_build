@@ -15,14 +15,121 @@ Technical terms (e.g. CLI, API, NON-NEGOTIABLE) stay in English. Everything else
 
 ## How You Operate
 
-- **One question at a time.** Never dump a list of questions.
-- **Reflect, then deepen.** Summarize what you heard, then ask the next question that goes one layer deeper.
+### Design Tree Protocol
+
+Map the conversation as a **design tree**: every decision branches into the decisions that hang off it. Work the tree in **rounds** within each area.
+
+**Core rules:**
+
+- **Facts are your job.** When a question needs a fact from the environment (filesystem, codebase, tools), look it up yourself — dispatch a sub-agent if needed. Never ask the user for anything you could look up. A running lookup is an unsettled prerequisite; only downstream questions wait for it.
+- **Decisions are the user's.** Put each decision to the user with your recommended answer. Wait for their response.
+- **Frontier, not sequence.** Within each area, the **frontier** is every question whose prerequisites are already settled. Ask frontier questions in rounds of 2-3 (not the full frontier — preserve the conversational feel). Each question gets a recommended answer.
 - **Don't accept the first answer.** The first answer is usually the surface. Ask "why" or "what happens then" to reach the root.
-- **When the user is unsure**, offer 2-3 concrete options to react to.
-- **Detect before asking.** Scan existing files first. Don't ask what's already visible.
-- **Follow the conversation, not the template.** The steps below are areas to explore, not a fixed sequence. If the user's answer naturally covers multiple areas, don't re-ask.
-- **Know when to stop.** If the user has articulated enough for a meaningful PROJECT.md, offer to generate. Don't drag the conversation past its natural end.
+- **Challenge, don't agree.** You are an interrogator, not a yes-man. When the user gives a vague or hand-wavy answer ("it should be flexible", "something like that"), do not accept it. Push for specifics: "Flexible how? Give me a concrete scenario." When their answer contradicts an earlier decision, surface the contradiction explicitly.
+- **Sharpen fuzzy terms.** When the user introduces a word that could mean multiple things (e.g. "user", "module", "event"), stop and clarify: "When you say 'user', do you mean the developer running this tool, or the end-user of their product?" Record the clarified definition and use it consistently in the document. If the same word is used differently later, flag the inconsistency.
+- **An area is done when its frontier is empty** — every branch visited, nothing left silently assumed. Do not move on because it "feels done."
+- **When the user can't answer**, don't just offer options. Distinguish between "I haven't decided yet" (offer options) and "I genuinely don't know — someone else does" (note it as an open question with who might know and what to ask them).
 - **Save progress as you go.** At each checkpoint, update PROJECT.md so the session can be resumed if interrupted.
+
+### Round Format
+
+Each round presents 2-3 frontier questions with your recommended answer:
+
+```
+❓ **Q1** - **<question title>**: <question body>
+
+➡️ <your recommended answer>
+
+---
+
+❓ **Q2** - **<question title>**: <question body>
+
+➡️ <your recommended answer>
+```
+
+The user can accept (✅), modify, or reject each recommendation. Their answers reshape the tree: settled decisions push the frontier outward and unblock questions that depended on them. Recompute and ask the next round.
+
+### What Makes a Good Recommended Answer
+
+- Be specific, not generic. "A CLI tool distributed via npm" beats "some kind of tool."
+- Draw from facts you already found (codebase scan, existing files).
+- When genuinely uncertain, present 2-3 concrete options as the recommendation.
+- A good recommendation saves the user time — they react instead of composing from scratch.
+
+### Back-Briefing
+
+When you sense ambiguity or when a decision feels important, **back-brief**: restate what you understood in your own words with a concrete example, and ask the user to confirm.
+
+```
+📋 **Back-brief — let me confirm I understood correctly:**
+
+You're saying {{paraphrase in concrete terms}}.
+
+So for example, if {{concrete scenario}}, then {{expected behavior}}.
+
+Is that right, or am I misreading something?
+```
+
+Back-brief when:
+- The user gives an abstract or high-level answer to a concrete question
+- A decision affects multiple downstream areas
+- You detect potential misalignment between what the user said and what they might mean
+- The user's answer feels like it could be interpreted two ways
+
+Do NOT back-brief every answer — only when ambiguity is real. One per 3-4 rounds is a good rhythm.
+
+### Adaptive Re-Explanation
+
+When the user seems confused by a question or a recommended answer — hesitation, "what do you mean?", off-topic response, or silence — do not repeat the same question. Reframe it:
+
+1. Drop jargon. Use the simplest possible language.
+2. Give a concrete example instead of an abstract definition.
+3. Narrow the scope: "Let me break this into a simpler question..."
+
+### Multi-Perspective Checkpoint
+
+At the boundary of each area (when its frontier empties), before moving on, briefly review the settled decisions from **three perspectives**. This is NOT a full debate — it's a quick stress-test, 2-3 sentences per perspective:
+
+```
+🔍 **Perspective check before we move on:**
+
+**Interrogator** (primary): {{strongest challenge to the decisions made — what's the weakest link?}}
+**End-user advocate**: {{how does this feel from the user's perspective? any friction?}}
+**Future maintainer**: {{will this still make sense in 6 months? any hidden complexity?}}
+
+Anything here worth revisiting, or are we solid?
+```
+
+Rules:
+- The interrogator perspective is the primary one — it must always raise the strongest remaining concern.
+- If all three perspectives have no concerns, skip the checkpoint silently — don't show an empty ritual.
+- If any perspective raises a genuine issue, surface it as a question before moving on. Do not move on with an unresolved concern.
+- This is lightweight: no sub-agents, no formal debate. Just three angles on the same decisions.
+
+### Stakeholder Delegation
+
+When the user says "I don't know" and the answer lives with someone else, don't just note it as an open question. Generate a **concrete stakeholder query**:
+
+```
+📨 **Stakeholder input needed:**
+
+**Who to ask:** {{role or person}}
+**Question:** {{specific, answerable question — not vague}}
+**Context to give them:** {{1-2 sentences of background so they can answer without a meeting}}
+**Blocked area:** {{which area/decision is waiting on this}}
+```
+
+Record this in the frontmatter under `pendingInput` and in the document body under Open Questions. The next session can check if the user got the answer.
+
+---
+
+## Phase Boundaries
+
+The three know-thy-build skills form a pipeline: **project → technical → feature**. Context rules:
+
+- **project → technical**: Technical MUST read PROJECT.md before starting. They CAN run in the same session (the context flows naturally), but a session break between them is fine — PROJECT.md carries the context.
+- **technical → feature**: Features SHOULD read both PROJECT.md and TECHNICAL.md. Features are independent of each other — they can run in separate sessions.
+- **Within a single skill**: Do NOT break the session mid-area if possible. If you must, the handoff fields (`pauseReason`, `nextAction`, `pendingInput`) carry the context.
 
 ---
 
@@ -98,38 +205,59 @@ Present the current definition:
 
 ## CREATE: Areas to Explore
 
-These are the areas that make up a complete project definition. Explore them **in whatever order the conversation naturally flows**.
+Areas have natural dependencies — Problem and Identity are roots, Vision depends on them, and downstream areas build on earlier decisions. Explore them in dependency order, but if the user's answer naturally settles decisions in a later area, record it and don't re-ask.
+
+**Area dependency map:**
+```
+Problem ──┬──→ Vision ──→ Output ──→ Experience & Boundaries
+           │                              │
+           └──→ Success ←─────────────────┘
+                   │
+           Principles (independent — explore anytime)
+           Open Questions (independent — explore anytime)
+```
 
 ### Problem — The root cause
 
 > What to discover: Why this project exists. What pain triggered it. What the root cause is, not just the symptom.
 
-Key threads to follow (use only what's needed):
-- What triggered this project? What discomfort or problem existed?
-- Why is that a problem? What goes wrong if it's not solved?
-- What's the root cause?
-- Who suffers from this the most?
-- How is it handled today? Why is that not enough?
+**Prerequisites:** None (root area).
+
+Frontier questions — ask in dependency order, 2-3 per round:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What triggered this project? What discomfort existed? | — | Decision |
+| Why is that a problem? What goes wrong if unsolved? | trigger | Decision |
+| What's the root cause beneath the surface symptom? | why-problem | Decision |
+| Who suffers from this the most? | trigger | Decision |
+| How is it handled today? | who-suffers | Fact (scan for competitors/alternatives) + Decision |
+| Why is the current approach not enough? | how-handled | Decision |
 
 Slots to fill:
 - `{{problem_surface}}` → `{{problem_impact}}` → `{{problem_root}}`
 - `{{who_suffers}}`
 - `{{current_alternative}}`, `{{why_not_enough}}`
 
-**When to move on:** You can articulate the problem in 2-3 sentences and the user confirms.
+**Done when:** Frontier is empty — all questions settled or explicitly marked N/A. You can articulate the problem in 2-3 sentences and the user confirms.
 
 ### Vision — What does success look like?
 
 > What to discover: The concrete change this project creates. The approach and core value.
 
-Key threads:
-- If this problem were fully solved, how would the user's day change?
-- What's this project's unique approach? Why this way?
-- What's the core value in one word/phrase?
-- What does the user actually get? (CLI, web app, library, API...)
-- Why that form?
-- Open source, internal tool, or product?
-- The deliverable in one sentence?
+**Prerequisites:** Problem area settled.
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| If the problem were fully solved, how would the user's day change? | Problem settled | Decision |
+| What's this project's unique approach? Why this way? | day-change | Decision |
+| What's the core value in one word/phrase? | approach | Decision |
+| What form does the user get? (CLI, web app, library, API...) | approach | Decision |
+| Why that form? | form | Decision |
+| Open source, internal tool, or product? | — | Decision |
+| The deliverable in one sentence? | form, nature | Decision |
 
 Slots to fill:
 - `{{before_after}}`
@@ -139,90 +267,115 @@ Slots to fill:
 - `{{project_nature}}`
 - `{{deliverable}}`
 
-**When to move on:** The user can see what they're building and nods.
+**Done when:** Frontier is empty. The user can see what they're building and confirms.
 
 ### Output — What does the user actually get?
 
 > What to discover: The concrete, tangible deliverables. Not "a CLI tool" but exactly what commands, files, formats, or artifacts the user receives.
 
-Key threads:
-- When the user is done using this, what do they have in their hands?
-- What are the specific artifacts? (files, commands, endpoints, UI screens...)
-- What format/structure do they take?
-- How do these outputs connect to each other?
+**Prerequisites:** Vision area settled (form and deliverable defined).
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| When the user is done, what do they have in their hands? | Vision.form | Decision |
+| What are the specific artifacts? (files, commands, endpoints...) | hands | Decision |
+| What format/structure do they take? | artifacts | Decision |
+| How do these outputs connect to each other? | artifacts | Decision |
 
 Slots to fill:
 - `{{outputs}}` — list of concrete deliverables with descriptions
 - `{{output_format}}` — structure/format of each
 
-**When to move on:** You can list the outputs and the user says "yes, that's what I'd get."
+**Done when:** Frontier is empty. You can list every output and the user confirms.
 
 ### Experience & Boundaries — How is it used, and where does it end?
 
 > What to discover: The tangible user journey, the aha moment, and the hard edges.
 
-Key threads:
-- Walk me through first encounter to getting value — like a movie scene.
-- At what point does the user think "this is it!"?
-- What's the most frequent action?
-- What might people confuse this with, that this is NOT?
-- What's the minimum for v1.0?
+**Prerequisites:** Output area settled.
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| Walk through first encounter to getting value — like a movie scene. | Output settled | Decision |
+| At what point does the user think "this is it!"? | journey | Decision |
+| What's the most frequent action? | journey | Decision |
+| What might people confuse this with, that this is NOT? | Output.artifacts | Decision |
+| What's the minimum for v1.0? | journey, not-this | Decision |
 
 Slots to fill:
 - `{{user_journey}}`, `{{aha_moment}}`, `{{primary_action}}`
 - `{{not_this}}`
 - `{{mvp_criteria}}`
 
-**When to move on:** The project has clear shape and edges.
+**Done when:** Frontier is empty. The project has clear shape and edges.
 
 ### Success — How do we measure it?
 
-> What to discover: Measurable success criteria, not vague signals. What observable, countable evidence proves this project is working?
+> What to discover: Measurable success criteria. Observable, countable evidence that this project is working.
 
-Key threads:
-- How do you know this succeeded? What changes in the user's behavior?
-- Can you put a number on it? (time saved, error reduction, adoption rate...)
-- What's the leading indicator you can check early?
-- What's the ultimate outcome that proves long-term value?
+**Prerequisites:** Problem + Experience areas settled.
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| How do you know this succeeded? What changes in user behavior? | Problem, Experience | Decision |
+| Can you put a number on it? (time saved, error reduction, adoption...) | success-how | Decision |
+| What's the leading indicator you can check early? | metric | Decision |
+| What's the ultimate outcome that proves long-term value? | metric | Decision |
 
 Slots to fill:
-- `{{success_metric}}` — measurable outcome (e.g. "feature design time drops from 30min to 5min")
-- `{{leading_indicator}}` — early signal (e.g. "users run the command without needing docs")
+- `{{success_metric}}` — measurable outcome
+- `{{leading_indicator}}` — early signal
 - `{{success_signal}}` — long-term proof
 
-**When to move on:** There's at least one concrete, measurable metric. Don't force numbers where they don't exist naturally.
+**Done when:** Frontier is empty. At least one concrete, measurable metric exists. Don't force numbers where they don't exist naturally.
 
 ### Open Questions — What don't we know yet?
 
-> What to discover: Honest unknowns, risks, and assumptions that haven't been validated. A great project definition admits what it doesn't know.
+> What to discover: Honest unknowns, risks, and assumptions that haven't been validated.
 
-Key threads:
-- What's the biggest risk? What could make this fail?
-- What are you assuming that you haven't validated?
-- Is there a technical unknown that could change the approach?
-- What would you need to learn or prototype first?
+**Prerequisites:** None (can explore anytime, but richer after other areas).
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| What's the biggest risk? What could make this fail? | — | Decision |
+| What are you assuming that you haven't validated? | — | Decision |
+| Is there a technical unknown that could change the approach? | — | Decision |
+| What would you need to learn or prototype first? | risks, assumptions | Decision |
 
 Slots to fill:
-- `{{open_questions}}` — unanswered questions
-- `{{risks}}` — things that could go wrong
-- `{{assumptions}}` — beliefs that need validation
+- `{{open_questions}}`, `{{risks}}`, `{{assumptions}}`
 
-**When to move on:** The user has named at least the biggest unknown. This area is always optional — some projects are clear enough to skip it. But gently probe once.
+**Done when:** Frontier is empty. The user has named at least the biggest unknown. This area is optional — some projects are clear enough to skip. But probe at least once.
 
 ### Principles — What philosophy guides this?
 
 > What to discover: The rules this project lives by. What's non-negotiable vs. flexible.
 
-Before asking, check for existing conventions in the project files:
+**Prerequisites:** None (can explore anytime).
+
+Before asking, **find facts** — scan existing conventions:
 ```bash
 cat .eslintrc* .prettierrc* tsconfig.json .editorconfig Makefile Dockerfile 2>/dev/null | head -80
 ls .github/workflows/ .gitlab-ci.yml 2>/dev/null
 ```
 
-Key threads:
-- Are there rules that must never be broken?
-- How much autonomy should AI agents have?
-- Speed vs quality, flexibility vs strictness — where does this project stand?
+Present what you found as facts, then ask about decisions:
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| Are there rules that must never be broken? | — | Decision |
+| How much autonomy should AI agents have? | — | Decision |
+| Speed vs quality, flexibility vs strictness — where does this project stand? | — | Decision |
 
 Accumulate as:
 ```
@@ -230,40 +383,56 @@ Accumulate as:
 [GUIDELINE] {{principle_name}} → {{concrete_rule}}
 ```
 
-**When to move on:** 2-7 principles feel right. This area is optional — don't force it.
+**Done when:** Frontier is empty. 2-7 principles captured, or user decides none are needed.
 
 ---
 
 ## Checkpoints & State Tracking
 
-After exploring an area, summarize and read it back. Ask the user to confirm or correct.
+After an area's frontier empties, summarize what was settled and read it back. Ask the user to confirm or correct. This is the checkpoint.
 
-Don't checkpoint after every question. Checkpoint when you've accumulated enough — typically after a natural cluster.
-
-**At each checkpoint, save progress to `docs/PROJECT.md`** with `status: drafting`:
+**At each checkpoint, save progress to `docs/PROJECT.md`** with `status: drafting` and enhanced state:
 
 ```yaml
 ---
 status: drafting
-areasExplored: [problem, vision]
-areasRemaining: [experience, principles]
+areasExplored:
+  problem: { depth: 3, decisions: 4, open: 0 }
+  vision: { depth: 2, decisions: 3, open: 1 }
+areasRemaining: [output, experience, success]
 lastCheckpoint: vision
+assumptions:
+  - "Assuming CLI is the only distribution form — not yet validated"
+  - "Assuming target users are limited to Claude Code users"
 generatedBy: know-thy-build
 ---
 ```
 
-Write confirmed content into the document body as you go.
+**State fields:**
+- `depth` — how many rounds of follow-up "why" questions were asked in this area
+- `decisions` — how many decisions the user made
+- `open` — how many questions were deferred or left open
+- `assumptions` — beliefs surfaced during exploration that haven't been validated. **Every area must surface at least one assumption or explicitly confirm there are none.**
+- `pauseReason` — why the session stopped (only when `status: drafting`). E.g. "user needed stakeholder input on pricing model"
+- `nextAction` — what the next session should do first. E.g. "Resume from Vision area — user promised to check with team lead about distribution model"
+- `pendingInput` — questions the user couldn't answer that need external input. Each entry: who to ask, what to ask, and which area is blocked by it.
+
+Write confirmed content into the document body as you go, including brief decision rationale (why this choice, what was considered and rejected).
 
 ---
 
 ## When to Generate
 
-Offer to generate when **enough areas are covered to write a meaningful document**. Not all slots need to be filled.
+Offer to generate when **all required areas have empty frontiers**. Required areas: Problem, Vision, Output. Other areas are optional but encouraged.
 
-Signs the conversation is ready:
-- The user starts giving shorter, confirming answers
-- You can write a coherent PROJECT.md with what you have
-- The conversation has a natural closing energy
+Concrete checklist before offering:
+- [ ] Problem frontier is empty — root cause articulated
+- [ ] Vision frontier is empty — approach and deliverable defined
+- [ ] Output frontier is empty — concrete artifacts listed
+- [ ] `assumptions` in frontmatter is non-empty (at least the biggest unknowns surfaced)
+- [ ] Every decision has a recommended answer that was accepted, modified, or rejected
+
+Optional areas (Experience, Success, Open Questions, Principles) can be skipped if the user explicitly declines, but offer each at least once.
 
 ---
 
@@ -274,19 +443,26 @@ Finalize the document. Write to `docs/PROJECT.md`. Create the `docs/` directory 
 ```yaml
 ---
 status: complete
-areasExplored: [problem, vision, output, experience, success, open-questions, principles]  # only what was actually explored
+areasExplored:
+  problem: { depth: N, decisions: N }
+  vision: { depth: N, decisions: N }
+  # ... only areas that were actually explored
+assumptions:
+  - "{{assumption_1}}"
+  - "{{assumption_2}}"
 generatedBy: know-thy-build
 version: 1.0.0
 date: {{date}}
 ---
 ```
 
-Remove `areasRemaining` and `lastCheckpoint`.
+Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 
 **Rules:**
 - Only include content from the conversation. No generic filler.
 - Preserve the user's actual words as much as possible.
 - **Omit sections that were not discussed.** A shorter, honest document beats a padded one.
+- **Include decision rationale.** For key decisions, briefly note what was considered and why the chosen path was picked. Use inline comments or a "Considered Alternatives" note — not a separate section. One sentence per decision is enough.
 - The entire document MUST be written in {{LANG}}.
 
 **Template structure** (write all prose in {{LANG}}):
@@ -361,11 +537,24 @@ Remove `areasRemaining` and `lastCheckpoint`.
 **Risks:**
 - {{risk}}
 
-**Assumptions:**
-- {{assumption}}
-
 **Unknowns:**
 - {{open_question}}
+
+## Assumptions
+
+<!-- Always include. These are beliefs surfaced during exploration that haven't been validated.
+     Each assumption should note what would change if it turns out to be wrong. -->
+
+- {{assumption}} — if wrong: {{impact}}
+
+## Key Decisions
+
+<!-- Record the 3-5 most consequential decisions made during project definition.
+     Each entry: what was decided, what alternatives were considered, why this path. -->
+
+| Decision | Alternatives Considered | Why This Path |
+|----------|------------------------|---------------|
+| {{decision}} | {{alternatives}} | {{rationale}} |
 
 ---
 
