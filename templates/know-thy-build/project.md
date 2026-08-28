@@ -240,9 +240,11 @@ Areas have natural dependencies — Problem and Identity are roots, Vision depen
 
 **Area dependency map:**
 ```
-Problem ──→ Persona ──→ Vision ──→ Output ──→ User Journey ──→ Boundaries
-                                                    │
-                            Success ←───────────────┘
+Problem ──→ Persona ──┬──→ Vision ──→ Output ──→ User Journey ──→ Boundaries
+                       │       ↑                        │
+                       └──→ Competitive Landscape ──┘   │
+                                                        │
+                            Success ←───────────────────┘
                                │
                  Principles (independent — explore anytime)
                  Risks & Open Questions (independent — explore anytime)
@@ -262,13 +264,13 @@ Frontier questions — ask in dependency order, 2-3 per round:
 | Why is that a problem? What goes wrong if unsolved? | trigger | Decision |
 | What's the root cause beneath the surface symptom? | why-problem | Decision |
 | Who suffers from this the most? | trigger | Decision |
-| How is it handled today? | who-suffers | Fact (scan for competitors/alternatives) + Decision |
+| How is it handled today? (brief — deep competitive analysis in Competitive Landscape area) | who-suffers | Decision |
 | Why is the current approach not enough? | how-handled | Decision |
 
 Slots to fill:
 - `{{problem_surface}}` → `{{problem_impact}}` → `{{problem_root}}`
 - `{{who_suffers}}` (brief — expanded in Persona area)
-- `{{current_alternative}}`, `{{why_not_enough}}`
+- `{{current_alternative}}` (brief — expanded in Competitive Landscape area), `{{why_not_enough}}`
 
 **Done when:** Frontier is empty — all questions settled or explicitly marked N/A. You can articulate the problem in 2-3 sentences and the user confirms.
 
@@ -297,11 +299,69 @@ Slots to fill:
 
 **Done when:** Frontier is empty. You can describe the primary user in 2-3 sentences and the user confirms. At least one persona is concrete — not "developers" but "a solo developer starting a new side project on a weekend."
 
+### Competitive Landscape — What already exists?
+
+> What to discover: Who else is solving this problem, how they approach it, where they fall short. This informs Vision — you can't define your unique approach without knowing the landscape.
+
+**Prerequisites:** Problem + Persona areas settled.
+
+**This area has two depth levels:**
+
+#### Default depth (always do this)
+
+The agent MUST research before asking. Use web search to find existing solutions, then present findings as facts for the user to confirm, correct, or extend.
+
+**Research process:**
+1. Search for tools/services that address `{{problem_root}}` for `{{persona_role}}`
+2. For each competitor found (aim for 3-5), gather: what it is, how it approaches the problem, pricing/access model
+3. Present findings to the user and ask for corrections or additions
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| (Present research results) "I found these existing solutions. Are these right? Anything missing?" | Problem, Persona | Fact (web search) + Decision |
+| For each competitor: What's their approach to this problem? | research | Fact (web search) |
+| For each competitor: What's the gap — what's missing or friction-heavy? | approach | Fact (scan docs/reviews) + Decision |
+| Where does our project differ from all of these? What's the unique angle? | gaps | Decision |
+
+Slots to fill:
+- `{{competitors}}` — list with name, approach, gap
+- `{{differentiation}}` — why our approach is different
+
+**Done when:** Frontier is empty. At least 2-3 competitors are mapped, gaps are identified, and the user can articulate "we're different because ___."
+
+#### Deep depth (on user request or when differentiation is unclear)
+
+> Trigger: user asks for deeper research, or the differentiation feels weak after default depth. Also triggered by `/know-thy-build:project` with `--deep-research` or when the user says "research more" / "dig deeper".
+
+For each key competitor, research in detail:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| Step-by-step: how does a user accomplish {{persona}}'s goal in {{competitor}}? | default research | Fact (scan tutorials, docs, demos) |
+| At which step does friction or frustration occur? | step-by-step | Fact (scan reviews, forums) + Decision |
+| What's the pricing/access barrier? | — | Fact |
+| What do users praise about this service? | — | Fact (scan reviews) |
+| What do users complain about? | — | Fact (scan reviews, issues) |
+
+Slots to fill (per competitor):
+- `{{competitor_journey}}` — step-by-step for the same task
+- `{{competitor_friction}}` — where it breaks down
+- `{{competitor_praise}}` — what they do well (learn from this)
+- `{{competitor_complaints}}` — what users hate
+
+**Done when:** Each competitor has a concrete journey map with friction points. The user can explain exactly where and why existing solutions fail.
+
+**Note:** Deep research can be done later — the user can return with `/know-thy-build:project` in evolve mode and request deeper competitive analysis. The document structure supports incremental enrichment.
+
+---
+
 ### Vision — What does success look like?
 
 > What to discover: The concrete change this project creates. The approach and core value.
 
-**Prerequisites:** Problem + Persona areas settled.
+**Prerequisites:** Problem + Persona + Competitive Landscape (at least default depth) settled.
 
 Frontier questions:
 
@@ -513,12 +573,13 @@ Offer to generate when **all required areas have empty frontiers**. Required are
 Concrete checklist before offering:
 - [ ] Problem frontier is empty — root cause articulated
 - [ ] Persona frontier is empty — primary user is concrete, not abstract
+- [ ] Competitive Landscape — at least default depth (2-3 competitors mapped, differentiation articulated)
 - [ ] Vision frontier is empty — approach and deliverable defined
 - [ ] Output frontier is empty — concrete artifacts listed
 - [ ] `assumptions` in frontmatter is non-empty (at least the biggest unknowns surfaced)
 - [ ] Every decision has a recommended answer that was accepted, modified, or rejected
 
-Optional areas (Experience, Success, Risks & Open Questions, Principles) can be skipped if the user explicitly declines, but offer each at least once.
+Optional areas (User Journey, Boundaries, Success, Risks & Open Questions, Principles) can be skipped if the user explicitly declines, but offer each at least once.
 
 ---
 
@@ -573,6 +634,30 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 | {{persona_name}} | {{persona_role}} | {{persona_pain}} | {{persona_tech_level}} | {{persona_context}} |
 
 **Primary user values:** {{persona_priority}}
+
+## Competitive Landscape
+
+<!-- What already exists and where it falls short. Default depth: name, approach, gap.
+     Deep research (step-by-step journey, friction points, user sentiment) can be added later. -->
+
+| Competitor | Approach | Gap |
+|------------|----------|-----|
+| {{competitor_name}} | {{competitor_approach}} | {{competitor_gap}} |
+
+<!-- Deep research per competitor (optional — include if explored):
+
+### {{competitor_name}} — Deep Dive
+
+**User Journey (same task):**
+1. {{step_1}}
+2. {{step_2}} ← friction: {{friction_point}}
+3. {{step_3}}
+
+**Users praise:** {{praise}}
+**Users complain:** {{complaints}}
+-->
+
+**Our Differentiation:** {{differentiation}}
 
 ## Vision
 
