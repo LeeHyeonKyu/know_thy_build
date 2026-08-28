@@ -577,22 +577,17 @@ Present to the user:
 - When adding a new slice to an existing feature
 - When a sub-agent escalation requires structural changes
 
-## Update CLAUDE.md
+## Update CLAUDE.md (Once Only)
 
-After scaffold creation, add an active contract reference to CLAUDE.md. This ensures every new Claude Code session is aware of the design contract:
+If CLAUDE.md does not already contain a design contract rule, add this **general rule once** — not per feature:
 
 ```markdown
-## Active Design Contracts
-
-Before implementing any feature, check if a design contract exists at `docs/features/NNN-contract.md`.
+## Design Contracts
+Before implementing any feature, check `docs/features/` for a matching `NNN-contract.md`.
 If one exists: read it, follow the approved structure, do not modify signature contract tests.
-If none exists: run `/know-thy-build:architect` before implementing.
-
-### Current Contracts
-- Feature {{NNN}} ({{title}}): `docs/features/{{NNN}}-contract.md`
 ```
 
-This is the **primary enforcement mechanism without hooks** — CLAUDE.md is loaded at every session start, so every agent inherits these rules automatically.
+Individual feature contracts live in their own scope at `docs/features/NNN-contract.md`. Do NOT list individual features in CLAUDE.md — features can number in the hundreds.
 
 ---
 
