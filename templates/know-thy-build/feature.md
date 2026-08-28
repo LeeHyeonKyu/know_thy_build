@@ -36,6 +36,33 @@ Map the feature as a small **design tree**: the problem branches into value, whi
 
 ---
 
+## Feature Classification
+
+Before exploring, classify the feature. Say the classification out loud so the user can override:
+
+| Class | Signal | Depth |
+|-------|--------|-------|
+| **Spike** | "Can we...?", "Is it possible...?", feasibility question | 1-2 exchanges. Output is an answer, not a spec. No feature file. |
+| **Bounded** | Small change to existing code. The flow being changed already exists. | 3-5 exchanges. Quick spec, focus on scope + done-when. |
+| **Architectural** | New subsystem, structural change, or affects multiple components. | 5-8 exchanges. Full exploration of all areas. |
+
+**When in doubt, take the heavier class.** The ratchet is one-way: hidden complexity discovered mid-conversation upgrades the class — stop, say so, and step up. Nothing downgrades mid-conversation.
+
+A spike's output is a recommendation, not a feature spec. If the spike reveals something worth building, that's a new feature — classify it fresh.
+
+## Rationalization Prevention
+
+### Red Flags
+
+| Thought | Reality |
+|---------|---------|
+| "This feature is obvious, I can skip Problem/Value" | If the value is obvious, stating it takes 10 seconds. If it's not, you just caught a bad feature. |
+| "The scope is clear from the description" | Scope without explicit "Excludes" is unbounded. |
+| "Done-when is implied by the solution" | Implied criteria get forgotten. Write them as a checklist. |
+| "This is too small for a spec" | Small features get the bounded classification, not a skip. |
+
+---
+
 ## Before You Begin
 
 ### 0. Migration check

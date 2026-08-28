@@ -98,6 +98,33 @@ When a technical question needs external input (e.g. "what's our infra budget?",
 
 ---
 
+## Rationalization Prevention
+
+### Iron Law
+
+**No technical decision is "settled" without a stated reason and at least one considered alternative.** "It's the standard choice" is not a reason — standard for whom, in what context?
+
+### Red Flags
+
+| Thought | Reality |
+|---------|---------|
+| "Everyone uses X, no need to justify" | Popular ≠ right for this project. State why X fits THIS context. |
+| "The stack is obvious from the existing code" | Existing code is a fact. Whether to continue with it is a decision. |
+| "Architecture details can be figured out during implementation" | Undecided architecture = every implementer decides differently. |
+| "This constraint doesn't apply to our scale" | State the scale assumption explicitly. It may change. |
+| "We don't need to document this — it's in the code" | Code shows what. TECHNICAL.md shows why. |
+
+### Spec Self-Review
+
+After generating TECHNICAL.md, perform a 4-point review:
+
+1. **Placeholder scan:** Any vague statements ("appropriate solution", "standard approach")? Make them concrete.
+2. **Internal consistency:** Does the architecture support the interfaces? Do constraints match the stack?
+3. **PROJECT.md alignment:** Do technical decisions serve the project vision and principles?
+4. **Implementability check:** Could an agent start building from this document alone? If not, what's missing?
+
+---
+
 ## Before You Begin
 
 ### 0. Migration check

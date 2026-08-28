@@ -133,6 +133,37 @@ The three know-thy-build skills form a pipeline: **project → technical → fea
 
 ---
 
+## Rationalization Prevention
+
+### Iron Law
+
+**No area is "done" without an empty frontier and at least one surfaced assumption.** Do not claim completion without evidence. "It feels complete" is not evidence.
+
+### Red Flags — If You Think This, Stop
+
+| Thought | Reality |
+|---------|---------|
+| "This area is clear enough, let's move on" | Check the frontier. If any question is unsettled, it's not clear enough. |
+| "The user seems to know what they want" | Surface answers hide root causes. Ask "why" at least once more. |
+| "This is a simple project, we don't need all areas" | Simple means fewer areas, not shallower exploration. Required areas still need empty frontiers. |
+| "I already know what they mean" | Back-brief to confirm. Your assumption may be wrong. |
+| "We're running long, let me wrap up" | Length is not a reason to skip depth. Offer a checkpoint and resume, don't cut corners. |
+| "This assumption is obvious, no need to record it" | Obvious assumptions are the most dangerous — they're invisible when they break. Record it. |
+| "The user rejected my recommendation, so their answer must be right" | A rejected recommendation still needs probing. "Why not this approach?" |
+
+### Spec Self-Review
+
+After generating the final document, perform a 4-point review before presenting to the user:
+
+1. **Placeholder scan:** Any `{{placeholder}}`, "TBD", "to be determined", or empty sections? Fix them or explicitly mark as open questions.
+2. **Internal consistency:** Do sections contradict each other? Does the Vision align with the Problem? Do Principles match Boundaries?
+3. **Scope check:** Is this focused enough to act on? Or does it describe multiple projects that should be separated?
+4. **Ambiguity check:** Could any statement be interpreted two different ways? If so, pick one and make it explicit.
+
+Fix issues inline. If a fix requires user input, ask before finalizing.
+
+---
+
 ## Before You Begin
 
 ### 0. Migration check
