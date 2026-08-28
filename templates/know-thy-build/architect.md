@@ -1,5 +1,5 @@
 ---
-description: Design the implementation — create code scaffolds, test cases, and a design contract before any code is written. Then orchestrate sub-agents to implement within the contract.
+description: Design the implementation — create code scaffolds with detailed intention comments and signature tests, then orchestrate sub-agents to implement. The code itself is the contract.
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, Agent, AskUserQuestion]
 ---
 
@@ -25,8 +25,7 @@ You are not a code generator. You are a **designer who thinks in code**. Your jo
 2. **Design the structure** — components, interfaces, data flow
 3. **Write the skeleton** — stubs with clear intention comments, no implementation
 4. **Write the tests** — behavioral expectations that validate the design
-5. **Define the contract** — what's approved, what's constrained
-6. **Orchestrate implementation** — dispatch sub-agents, review results
+5. **Orchestrate implementation** — dispatch sub-agents, review results
 
 ### Core Rules
 
@@ -335,7 +334,7 @@ def test_parse_input_simple():
 
 ### Scaffold Self-Review (Before Finalizing)
 
-Before creating the design contract, review the scaffold against this anti-pattern checklist:
+Before finalizing the scaffold, review it against this anti-pattern checklist:
 
 | # | Check | Fix if violated |
 |---|-------|----------------|
@@ -365,72 +364,45 @@ When planning sub-agent tasks:
 - If a task requires more → decompose into smaller tasks
 - Each sub-agent should be able to hold its entire context (stubs, tests, contract) in one read
 
-### Design Contract
+### The Code IS the Contract
 
-**The contract is DERIVED from the code, not written separately.** After scaffold self-review passes:
+**There is no separate contract file.** The stubs, their comments, and the signature tests ARE the contract. This eliminates drift, scope conflicts, and document management overhead.
 
-1. Read every stub file you created
-2. Extract: module responsibility comments, public symbol names, types, PRE/POST from comments
-3. Compile into the contract format below
+The contract lives in three places, all in actual code:
 
-This ensures the contract can never drift from the stubs — it is generated from them. If a stub changes, regenerate the contract.
+1. **Module-level comments** — what this file does and does NOT do
+2. **Stub comments** — PRE/POST/WHY/EXAMPLE on every function
+3. **Signature tests** — `DO NOT MODIFY` tests that enforce the API
 
-Generate the design contract in the feature's scaffold directory:
+To see the full contract at any time:
+
+```bash
+grep -rn "Responsibility:\|NOT responsible\|PRE:\|POST:\|WHY:\|EXAMPLE:\|DO NOT MODIFY" src/ tests/
+```
+
+### Design Decisions Log
+
+Design risks and removed elements from the adversarial review go into the **feature spec** (not a separate file):
+
+Append to `docs/features/{{NNN}}.md`:
 
 ```markdown
-<!-- docs/features/{{NNN}}-contract.md -->
+## Architecture Notes
 
-# Design Contract — Feature {{NNN}}: {{title}}
-
-## Granularity: {{file|interface|function}}-level
-
-## Approved Structure
-
-| File | Responsibility | New/Modified |
-|------|---------------|--------------|
-| src/parser.ts | Transform raw input to tokens | New |
-| src/validator.ts | Validate token sequences | New |
-| tests/parser.test.ts | Parser behavioral tests | New |
-
-## Approved Symbols
-
-| File | Symbol | Type | Purpose |
-|------|--------|------|---------|
-| src/parser.ts | parseInput | function | Main entry — raw string to Token[] |
-| src/parser.ts | splitSegments | function | Internal — segment splitting |
-| src/parser.ts | Token | type | Token data structure |
-
-## Constraints
-
-### Hard (must not violate)
-- Do not modify test files without architect approval
-- Do not change function signatures without architect approval
-- Do not create files outside the approved structure
-
-### Soft (prefer to follow, but can deviate with justification)
-- Follow existing code patterns in the repo
-- Keep functions under 50 lines
-- Use existing utility functions before creating new ones
-
-## Implementation Order (hardest first)
-1. parseInput + splitSegments (core parsing logic)
-2. Token type definition (straightforward)
-
-## Assumptions
-- {{assumption from feature spec}}
-
-## Design Risks (from Adversarial Review)
-<!-- Record the Skeptic's concerns that survived review. These are hypotheses to validate in slice 1. -->
-
+### Design Risks (from Adversarial Review)
 | Risk | What breaks if true | Validated in |
 |------|-------------------|-------------|
 | {{risk}} | {{impact}} | Slice {{N}} |
 
-## Removed Elements (from Minimalist Review)
-<!-- Record abstractions/modules that were removed during adversarial review. Prevents re-adding them later. -->
-
+### Removed Elements (from Minimalist Review)
 - {{removed element}} — reason: {{why it was unnecessary}}
+
+### Implementation Order (hardest first)
+1. {{hardest component}} — why it's risky: {{reason}}
+2. {{next component}} — depends on: {{dependency}}
 ```
+
+This keeps everything about a feature in ONE place: spec + architecture notes in the same file.
 
 ---
 
@@ -444,25 +416,24 @@ For each slice, dispatch a sub-agent with focused instructions:
 You are implementing the internals of {{component}}.
 
 **Read these files first:**
-- docs/features/{{NNN}}.md (feature spec)
-- docs/features/{{NNN}}-contract.md (design contract)
-- {{stub files}} (your implementation targets)
-- {{test files}} (your success criteria)
+- {{stub files}} (your implementation targets — read ALL comments carefully)
+- {{test files}} (your success criteria — DO NOT MODIFY tests marked "DO NOT MODIFY")
+- docs/features/{{NNN}}.md (feature spec, for context)
 
 **Your job:**
 - Fill every `// IMPLEMENT` marker in {{file}}
 - Make all tests in {{test file}} pass
-- Follow the intention comments exactly
+- Follow the PRE/POST/WHY comments exactly — they are the design contract
 
 **Constraints:**
-- Do NOT modify test files
-- Do NOT change function signatures
-- Do NOT create new files or public functions
+- Do NOT modify tests marked "DO NOT MODIFY" (signature contract tests)
+- Do NOT change function signatures (PRE/POST defines the contract)
+- Do NOT create new public functions or files
 - If the design seems wrong, report back with specifics — do not work around it
 
 **When done:**
 - Run tests and report results
-- List any concerns about the design
+- List any concerns about the design (especially where PRE/POST felt wrong)
 ```
 
 ### Handling Escalation
@@ -473,33 +444,40 @@ When a sub-agent reports the design doesn't work:
 
 | Signal | Classification | Action |
 |--------|---------------|--------|
-| "Tests pass but I need a helper function" | **Soft constraint** | Allow if it's private/internal. Add to contract. |
+| "Tests pass but I need a helper function" | **Soft constraint** | Allow if it's private/internal. Add a WHY comment. |
 | "The function signature doesn't support this case" | **Hard constraint** | Review the design. Consider changing the signature. |
 | "I need a new file/module" | **Hard constraint** | Review scope. Was something missed in the scaffold? |
 | "Tests are wrong — they expect behavior that contradicts the spec" | **Critical** | Re-read the spec. Fix tests OR fix the design. |
 
 **Step 2: Decide**
 
-- **Local fix**: Sub-agent can resolve within constraints → update contract, let them proceed
-- **Design change**: Structure needs revision → update stubs + tests + contract, re-dispatch
+- **Local fix**: Sub-agent can resolve within constraints → add internal helper, let them proceed
+- **Design change**: Structure needs revision → update stubs + tests, re-dispatch
 
 **Step 3: Record the change**
 
-If the design changes, record it in the contract using the **ADR supersession pattern** — don't delete the old decision, record why it changed:
+If the design changes, update the code directly:
+1. Modify the stub (add/change function, update PRE/POST/WHY comments)
+2. Update or add signature tests
+3. Add a comment at the change point explaining why:
 
-```markdown
-## Design Changes (ADR Log)
-
-### DC-001: Added `normalizeInput()` to parser.ts
-- **Status:** Accepted
-- **Context:** Sub-agent found input normalization was needed before splitting
-- **Decision:** Add normalizeInput() as internal function in parser.ts
-- **Consequence:** splitSegments now receives normalized input; its contract unchanged
-- **Supersedes:** Original design had splitting as first operation
-- **Slice:** 1
+```typescript
+/**
+ * Normalize input before splitting.
+ *
+ * WHY: Added during implementation — splitSegments assumed clean input,
+ *      but real input contains trailing whitespace and BOM characters.
+ *      Original design had splitting as first operation.
+ * PRE: raw input string (may contain BOM, trailing whitespace)
+ * POST: cleaned string safe for splitSegments
+ */
+function normalizeInput(input: string): string {
+  // IMPLEMENT
+  throw new Error('Not implemented');
+}
 ```
 
-This log is critical — it captures WHY the design evolved, not just what changed. Future sessions can read this to understand design intent without re-discovering the reasoning.
+The design change history lives in the code comments and git history — not in a separate document.
 
 ---
 
@@ -509,18 +487,18 @@ After all slices are implemented:
 
 ### Integration Check
 
-1. Run the full test suite
+1. Run the full test suite (including signature contract tests)
 2. Check that all `// IMPLEMENT` markers are gone
 3. Verify no `throw new Error('Not implemented')` remains
-4. Check that the contract was followed — no unapproved files or symbols
+4. Verify all signature contract tests still pass (no API changes)
 
 ### Fitness Function (Structural Verification)
 
 Beyond tests (behavioral correctness), verify structural correctness:
 
-- Do the implemented files match the contract's approved structure?
-- Are function signatures unchanged from the stubs?
+- Are function signatures unchanged from the original stubs? (signature tests catch this)
 - Do module-level comments still accurately describe what the module does?
+- Were any new public functions/files created that weren't in the original scaffold?
 
 ### Report
 
@@ -531,7 +509,7 @@ Present to the user:
 
 **Slices completed:** {{N}}/{{N}}
 **Tests:** {{passed}}/{{total}} passing
-**Design changes:** {{N}} (see contract changelog)
+**Design changes:** {{N}} (recorded in code comments + git history)
 **Concerns:** {{any remaining issues}}
 ```
 
@@ -548,10 +526,10 @@ Present to the user:
 | Thought | Reality |
 |---------|---------|
 | "I can skip the scaffold for this simple feature" | Simple features get file-level granularity, not no granularity. But check: if ≤ 3 files, maybe skip scaffold entirely. |
-| "Let me write the implementation while creating stubs" | Stubs first, then tests, then implementation. Mixing them loses the design contract's value. |
+| "Let me write the implementation while creating stubs" | Stubs first, then tests, then implementation. Mixing them means the code drives the design instead of the other way around. |
 | "The sub-agent's approach is better, let me just accept it" | Better for what? Check against conceptual integrity, not local optimality. |
 | "Tests can be written after implementation" | Tests encode the design. Writing them after means the implementation defines the design, not you. |
-| "This design change is small, no need to update the contract" | Every unapproved change is architectural drift. Record it. |
+| "This design change is small, no need to document it" | Every design change needs a WHY comment in the code. Undocumented changes are invisible drift. |
 | "This needs a proper abstraction layer" | Does it? Is there more than one consumer? Single-use abstractions are over-engineering. Remove it. |
 | "I should scaffold all components before implementing any" | No. Hardest-first vertical slice. Scaffold slice 1, implement it, THEN expand. Your design is a hypothesis until validated. |
 | "The implementer might need this interface later" | YAGNI. Scaffold what's needed now. If it's needed later, add it then. |
@@ -562,14 +540,14 @@ Present to the user:
 ## Closing
 
 **After scaffold creation:**
-- Stubs and tests exist in the codebase
-- Design contract is saved at `docs/features/{{NNN}}-contract.md`
+- Stubs with detailed PRE/POST/WHY/EXAMPLE comments exist in the codebase
+- Signature contract tests exist and pass
+- Architecture notes appended to the feature spec
 - Ready for implementation (sub-agents or manual)
-- **Update CLAUDE.md** with active contract reference (see below)
 
 **After implementation:**
-- All tests pass
-- Contract was followed (or changes were recorded)
+- All tests pass (including signature contract tests)
+- No `// IMPLEMENT` markers remain
 - Feature is ready for review
 
 **When to re-run:**
@@ -579,36 +557,27 @@ Present to the user:
 
 ## Update CLAUDE.md (Once Only)
 
-If CLAUDE.md does not already contain a design contract rule, add this **general rule once** — not per feature:
+If CLAUDE.md does not already contain an architect rule, add this **general rule once**:
 
 ```markdown
-## Design Contracts
-Before implementing any feature, check `docs/features/` for a matching `NNN-contract.md`.
-If one exists: read it, follow the approved structure, do not modify signature contract tests.
+## Code as Contract
+Stub files contain design intent in PRE/POST/WHY/EXAMPLE comments.
+Tests marked "DO NOT MODIFY" verify API signatures — do not change them without running /know-thy-build:architect.
 ```
 
-Individual feature contracts live in their own scope at `docs/features/NNN-contract.md`. Do NOT list individual features in CLAUDE.md — features can number in the hundreds.
+Do NOT add per-feature entries to CLAUDE.md.
 
 ---
 
 ## Future: Hook-Based Enforcement (Design Only)
 
-The following hook design is documented for future implementation when usage data confirms which constraints decay in practice. **Do not implement now — validate the prompt-based approach first.**
+Documented for future implementation when usage data confirms which constraints decay in practice. **Do not implement now.**
 
 ### Planned Hook: architect-guard
 
 **Trigger:** PreToolUse on Write/Edit
 **Logic:**
-1. Check if target file is in a guarded directory (src/, lib/, app/)
-2. If yes: check if any `docs/features/*-contract.md` exists
-3. If no contract: exit 2 with "Run /know-thy-build:architect first"
-4. If contract exists: check if target file is in approved list
-5. If not approved: exit 2 with "File not in design contract"
-6. If editing a test file marked `DO NOT MODIFY`: exit 2 with "Signature tests are protected"
+1. If editing a test file containing `DO NOT MODIFY`: exit 2 with "Signature tests are protected"
+2. If editing a stub file and changing lines with `PRE:` or `POST:`: exit 2 with "Contract comments are protected"
 
-**When to implement this:**
-- When real-world usage shows sub-agents consistently ignoring contract rules despite CLAUDE.md references
-- When signature tests are being modified despite `DO NOT MODIFY` comments
-- When constraint decay is observed in practice (the prompt-based rules stop being followed in long sessions)
-
-**How to measure:** Track in evolve sessions whether the contract was followed — if violations are common, the hook becomes justified.
+**When to implement:** When real-world usage shows sub-agents modifying signature tests or contract comments despite explicit instructions.
