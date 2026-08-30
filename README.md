@@ -20,21 +20,23 @@ That clarity doesn't stay in your head. It becomes structured documents that AI 
 npx know-thy-build
 ```
 
-Pick a language, and three commands are installed into your `.claude/commands/`:
+Pick a language, and five commands are installed into your `.claude/commands/`:
 
 | Command | Purpose | Output |
 |---------|---------|--------|
 | `/know-thy-build:project` | Define what you're building and why | `docs/PROJECT.md` |
 | `/know-thy-build:technical` | Define how you'll build it | `docs/TECHNICAL.md` |
 | `/know-thy-build:feature` | Design a specific feature | `docs/features/NNN.md` |
+| `/know-thy-build:designer` | Design the user experience | `## Design` in feature spec |
+| `/know-thy-build:architect` | Design implementation scaffolds | Code stubs + tests |
 
 ## The flow
 
 ```
-:project (What & Why) → :technical (How) → :feature (specific work)
+:project (What & Why) → :technical (How) → :feature (specific work) → :designer (UX) → :architect (implementation)
 ```
 
-Each layer builds on the previous. Technical decisions reference the project definition. Feature specs reference both.
+Each layer builds on the previous. Technical decisions reference the project definition. Feature specs reference both. Designer analyzes the user experience and produces a Design Intent Map. Architect creates implementation scaffolds.
 
 ### 1. Project — What & Why
 
@@ -85,15 +87,50 @@ Result: `docs/TECHNICAL.md` — the technical foundation.
 References both `docs/PROJECT.md` and `docs/TECHNICAL.md`. Features are numbered sequentially.
 
 Each feature spec covers:
-- **What** — concrete description
-- **Why** — motivation, link to project vision
-- **Scope** — includes / excludes
-- **Done When** — acceptance criteria checklist
+- **Problem & Value** — what's broken, why it matters
+- **User Stories** — As a / I want / so that, with scenarios
+- **Scope** — includes / excludes (excludes required)
+- **Acceptance Criteria** — Given-When-Then derivation chain
 - **Approach** — technical notes (optional)
 
 Features are quick — 3-8 exchanges. Create new ones or edit existing ones by number.
 
 Result: `docs/features/001.md`, `docs/features/002.md`, ...
+
+### 4. Designer — User Experience
+
+```
+/know-thy-build:designer
+```
+
+Requires a feature spec. Analyzes the feature's user workflow step by step to produce a **Design Intent Map** — a traceable chain connecting every user action to the design decision that enables it.
+
+The Design Intent Map serves three audiences:
+- **Developer**: reads Decision + Rationale → knows what to build and why
+- **QA**: reads Action + Outcome + Verification → derives test cases
+- **Designer**: reads everything → iterates with full context
+
+Explores:
+- **Flow Decomposition** — micro-step breakdown of every user story
+- **Design Intent** — Action → Ideal Outcome → Design Decision → Rationale → QA Verification
+- **State Catalog** — empty, loading, populated, error, success states with intent
+- **Visual Direction** — every visual choice traced to a user action it serves
+- **Prototype** — artifacts with annotated design intent
+- **Verification** — Nielsen heuristics, accessibility, cognitive walkthrough
+
+Includes an **Anti-Slop Protocol** — explicit list of AI-generated design clichés to avoid, with domain-grounded alternatives.
+
+Result: `## Design` section appended to the feature spec + prototype artifact(s).
+
+### 5. Architect — Implementation Design
+
+```
+/know-thy-build:architect
+```
+
+Requires both `docs/PROJECT.md` and `docs/TECHNICAL.md`. Designs the implementation structure using the **Program Sketching** methodology — creates code scaffolds with Design by Contract comments (PRE/POST/WHY/EXAMPLE) and signature tests, then orchestrates sub-agents to fill internals.
+
+Result: Code stubs with intention comments + test suites + architecture notes in feature spec.
 
 ## Evolution
 
@@ -102,6 +139,7 @@ All documents support evolution. Run the same command again on a completed docum
 - `/know-thy-build:project` on a complete `docs/PROJECT.md` → evolve mode
 - `/know-thy-build:technical` on a complete `docs/TECHNICAL.md` → evolve mode
 - `/know-thy-build:feature` → edit existing features by number
+- `/know-thy-build:designer` on a feature with `## Design` → evolve mode
 
 ### Migration from v0.3.x
 

@@ -129,16 +129,18 @@ Find the highest existing number and increment by 1. Zero-pad to 3 digits. If `d
 
 Follow the conversation, not a rigid sequence. Most features need only 2-3 areas.
 
-**Area dependency map (2-pass):**
+**Area dependency map (2-pass + optional design):**
 ```
 Pass 1: Problem ──→ Value ──→ User Stories (lightweight) ──→ Solution ──→ Scope
                  │                                                          │
                  └──→ Success Metric                          Approach (optional)
 
 Pass 2: ──→ Acceptance Criteria (per story: Given-When-Then → AC → edge cases → verification)
+
+Pass 3 (UI features only): ──→ Design Intent (action → outcome → decision → QA verification)
 ```
 
-User Stories are captured early (before Solution) to inform what to build. Acceptance Criteria are detailed later (after Scope) because you need to know the solution and boundaries to define concrete verification.
+User Stories are captured early (before Solution) to inform what to build. Acceptance Criteria are detailed later (after Scope) because you need to know the solution and boundaries to define concrete verification. Design Intent is captured last — only for features with user-facing UI — so developers know WHY the UI is shaped this way and QA knows what to verify visually.
 
 #### Problem — What's broken or missing?
 
@@ -267,6 +269,38 @@ Format the output per story:
 - At least one edge case or error state AC
 - A verification method per AC
 
+#### Design Intent — How does the UI guide the user? (Pass 3, UI features only)
+
+> Bridge between acceptance criteria and implementation. Captures WHY each UI decision was made — so developers know what to build, and QA knows what to verify. **Skip entirely for non-UI features (backend, data, infra).**
+
+**Prerequisites:** Scope and Acceptance Criteria settled. Feature has user-facing interaction.
+
+If the feature has no UI component, skip silently and proceed to Approach or generation.
+
+**Process:** For each User Story's primary interaction, define the intent chain:
+
+| Step | Expected User Action | Ideal Outcome | Design Decision | QA Verification |
+|------|---------------------|---------------|-----------------|-----------------|
+| {{N}} | {{what user does}} | {{what should happen}} | {{how the UI achieves this}} | {{how to verify}} |
+
+Then catalog the essential states:
+
+| State | Trigger | What the user sees |
+|-------|---------|-------------------|
+| Empty | {{trigger}} | {{description — how it guides user to first action}} |
+| Error | {{trigger}} | {{description + recovery path}} |
+
+Frontier questions:
+
+| Question | Depends on | Type |
+|----------|-----------|------|
+| For the primary action in each story: what does the user see, do, and expect? | AC settled | Decision |
+| What does the empty state look like? What guides the user to their first action? | solution | Decision |
+| What does the error state look like? How does the user recover? | AC edge cases | Decision |
+| Is there anything non-obvious about the visual flow that a developer would miss without this context? | all above | Decision |
+
+**Done when:** Every story's primary interaction has an intent row. At least Empty and Error states are defined. This is the lightweight version — for deep UX analysis (heuristic evaluation, prototyping, accessibility audit), run `/know-thy-build:designer` on this feature.
+
 #### Approach — Any technical considerations?
 
 > Optional. Only explore if the user has thoughts or if it's non-obvious.
@@ -295,7 +329,7 @@ Good to go?
 
 ### When to Generate
 
-Offer to generate when **both passes are complete.**
+Offer to generate when **all applicable passes are complete.**
 
 Concrete checklist:
 
@@ -312,6 +346,11 @@ Concrete checklist:
 - [ ] Every story has at least one happy-path AC with verification method
 - [ ] Every story has at least one edge case or error state AC
 - [ ] Quick perspective check passed (or skipped because obviously solid)
+
+**Pass 3 (design intent — UI features only):**
+- [ ] Design Intent Map covers each story's primary interaction (or skipped: non-UI feature)
+- [ ] Empty and Error states defined
+- [ ] For Architectural features with complex UI: suggest `/know-thy-build:designer` for deep dive
 
 Don't drag the conversation. Features should be quick — but not shallow.
 
@@ -433,6 +472,24 @@ generatedBy: know-thy-build-feature
 ### Story 2: {{story_title}}
 <!-- Repeat structure. Omit if only one story. -->
 
+## Design Intent
+
+<!-- Optional: only for features with user-facing UI.
+     For deep UX analysis (heuristics, prototyping, accessibility), run /know-thy-build:designer.
+     Developer: read Decision column to know what to build and why.
+     QA: read Action + Outcome + Verification to derive test cases. -->
+
+| Step | User Action | Ideal Outcome | Design Decision | QA Verification |
+|------|-------------|---------------|-----------------|-----------------|
+| {{N}} | {{action}} | {{outcome}} | {{decision}} | {{verification}} |
+
+**Key States:**
+
+| State | Trigger | User Sees |
+|-------|---------|-----------|
+| Empty | {{trigger}} | {{description}} |
+| Error | {{trigger}} | {{description + recovery}} |
+
 ## Approach
 
 <!-- Technical notes, only if discussed -->
@@ -519,7 +576,10 @@ This keeps PROJECT.md as the single entry point for the full project picture.
 **After CREATE:**
 - Feature spec has been saved to `docs/features/{{NNN}}.md`
 - Feature Registry in `docs/PROJECT.md` has been updated
-- They can start implementing whenever ready
+- Next steps (suggest as appropriate):
+  - **UX deep dive**: `/know-thy-build:designer` — if this feature has complex UI that needs heuristic evaluation, prototyping, and accessibility review
+  - **Implementation design**: `/know-thy-build:architect` — if this feature is Architectural (new subsystem, multi-component, structural change)
+  - **Build**: start implementing directly — if this feature is Bounded and the spec is clear enough
 - Run `/know-thy-build:feature` again for the next feature
 
 **After EDIT:**

@@ -60,15 +60,30 @@ ls docs/features/*.md 2>/dev/null
 > "The project and technical foundations need to be defined first. Run `/know-thy-build:project` and `/know-thy-build:technical`."
 → Stop here.
 
-### 2. Identify target
+### 2. Identify target feature
 
-Ask the user which feature to architect. If they specify a feature number, read the spec:
+**Auto-detect:** Find the most recently modified feature spec:
+
+```bash
+ls -t docs/features/*.md 2>/dev/null | head -5
+```
+
+If a recent feature exists, propose it:
+> "Feature {{id}} ({{title}}) was the most recently updated. Architect this one?"
+
+If the user specifies a different feature number, use that instead. Read the feature spec:
 
 ```bash
 cat docs/features/{{NNN}}.md 2>/dev/null
 ```
 
 If no feature spec exists, ask the user to run `/know-thy-build:feature` first — or describe the feature inline for a quick scaffold.
+
+**If the feature has a `## Design` or `## Design Intent` section:** Read it carefully. Design intent informs code structure — reference it in stub comments:
+```
+// DESIGN INTENT Step 3: User expects immediate feedback.
+// See: docs/features/NNN.md ## Design, Step 3
+```
 
 ### 3. Scan existing codebase
 

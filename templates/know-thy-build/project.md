@@ -900,6 +900,57 @@ If `CLAUDE.md` exists → prepend reference (if not already present). If not →
 This project follows the principles defined in [PROJECT.md](./docs/PROJECT.md).
 AI agents MUST read docs/PROJECT.md before starting any work.
 NON-NEGOTIABLE rules in PROJECT.md cannot be overridden.
+
+## Development Workflow
+
+### Orchestrator Model
+The user session acts as **orchestrator only** — it does NOT implement directly.
+All implementation is delegated to sub-agents with explicit scope and goals.
+
+### Implementation Flow
+
+1. **Orchestrator identifies work** from `docs/features/NNN.md`
+   - Determines scope: which files, which components, what changes
+   - Sets goal: specific acceptance criteria from the feature spec
+   - Dispatches implementation sub-agent
+
+2. **Implementation sub-agent — Pre-work (mandatory)**
+   Before writing any code, the sub-agent MUST read:
+   - `docs/PROJECT.md` — project principles and boundaries
+   - `docs/TECHNICAL.md` — technical decisions and patterns
+   - `docs/features/NNN.md` — feature spec, acceptance criteria, design intent
+   The sub-agent confirms its understanding of scope and goal before proceeding.
+
+3. **Implementation sub-agent — Execution**
+   Implements within the defined scope. Does not expand beyond the goal.
+
+4. **Post-implementation review (mandatory)**
+   After implementation, the sub-agent dispatches **two review agents**:
+
+   **Designer Review Agent:**
+   - Reads the feature's Design Intent Map (if present)
+   - Verifies every design intent step is correctly reflected in implementation
+   - Checks all UI states are handled (empty, loading, error, success)
+   - Adopts the most critical stance — assumes implementation is wrong until proven otherwise
+   - Produces checklist: `- [x]` passed or `- [ ]` failed with specific reason
+
+   **Architect Review Agent:**
+   - Reads `docs/TECHNICAL.md` and the feature spec
+   - Verifies code follows technical decisions, patterns, and constraints
+   - Checks code structure, naming, boundaries, and error handling
+   - Adopts the most critical stance — looks for what will break, not what looks nice
+   - Produces checklist: `- [x]` passed or `- [ ]` failed with specific reason
+
+5. **Review loop**
+   - If ANY criterion is `[ ]` (failed): implementer fixes and re-submits for review
+   - Loop continues until ALL criteria are `[x]`
+   - Only when both reviewers fully pass does the orchestrator accept the work
+
+### Document References
+- Project definition: `docs/PROJECT.md`
+- Technical foundation: `docs/TECHNICAL.md`
+- Feature specs: `docs/features/NNN.md`
+- Feature registry: `docs/PROJECT.md` → Feature Registry section
 ```
 
 ## Closing
