@@ -2,17 +2,22 @@
 
 Before you write a single line of code, know what you're building, why, and how.
 
-**know-thy-build** is a Socratic questioning tool for [Claude Code](https://claude.ai/claude-code). Through conversation — not forms — it helps you define your project across three layers: what problem you're solving (Project), how you'll build it technically (Technical), and what each feature looks like (Feature). The result is a set of living documents that you and your AI agents reference throughout the project's life.
+**know-thy-build** is a multi-agent project definition and quality assurance framework for [Claude Code](https://claude.ai/claude-code). Through Socratic dialogue — not forms — it helps you define your project, design features, establish a QA framework, and orchestrate implementation with built-in design and architecture review.
+
+The result is a set of living documents and an automated workflow where every implementation is reviewed by designer, architect, and QA agents before it ships.
 
 ## Why
 
 We jump into code too fast. A new project starts, and within minutes we're picking frameworks, creating files, writing functions — before we've truly asked ourselves what we're building and why.
 
-The cost of skipping this step is real. Vague goals lead to wasted effort. Undefined boundaries lead to scope creep. Unspoken assumptions lead to wrong decisions — by you or by AI agents working on your behalf.
+The cost of skipping this step is real:
+- Vague goals → wasted effort
+- Undefined boundaries → scope creep
+- Unspoken assumptions → wrong decisions — by you or by AI agents
+- No QA framework → "done" is an opinion, not a fact
+- No design intent → developers guess what to build
 
-know-thy-build exists to help you **think your project through before you build it**. It asks the questions you should be asking yourself — one at a time, each answer challenged and deepened — until you have genuine clarity.
-
-That clarity doesn't stay in your head. It becomes structured documents that AI agents reference — so every agent working on your project reads the same definition, follows the same principles, and builds on the same technical foundation.
+know-thy-build exists to **define the project, design the experience, establish what "done" means, and enforce quality through multi-agent review** — all before you write a line of code.
 
 ## Quick start
 
@@ -22,150 +27,192 @@ npx know-thy-build
 
 Pick a language, and six commands are installed into your `.claude/commands/`:
 
-| Command | Purpose | Output |
-|---------|---------|--------|
-| `/know-thy-build:project` | Define what you're building and why | `docs/PROJECT.md` |
-| `/know-thy-build:technical` | Define how you'll build it | `docs/TECHNICAL.md` |
+| Command | Role | Output |
+|---------|------|--------|
+| `/know-thy-build:project` | Define what and why | `docs/PROJECT.md` |
+| `/know-thy-build:technical` | Define how to build | `docs/TECHNICAL.md` |
 | `/know-thy-build:feature` | Design a specific feature | `docs/features/NNN.md` |
-| `/know-thy-build:designer` | Design the user experience (deep dive) | `## Design` in feature spec |
-| `/know-thy-build:qa` | Build QA framework + test the running product | `docs/QA.md` |
-| `/know-thy-build:architect` | Design implementation scaffolds | Code stubs + tests |
+| `/know-thy-build:qa` | Build QA framework + test | `docs/QA.md` |
+| `/know-thy-build:designer` | UX deep dive | `## Design` in feature spec |
+| `/know-thy-build:architect` | Implementation design | Code stubs + tests |
 
-## The flow
+## The pipeline
 
 ```
-:project (What & Why) → :technical (How) → :feature (specific work) → :qa (testability) → :designer (UX) → :architect (implementation)
+Define:     :project → :technical → :qa setup
+Per feature: :feature → :qa review → [:designer] → implement → [:architect] → QA test → ship
 ```
 
-Each layer builds on the previous. Technical decisions reference the project definition. QA establishes the test framework. Feature specs reference project + technical. QA defines test cases per feature. Designer and architect provide deep dives when needed.
+`[ ]` = optional, invoked when needed.
 
-### 1. Project — What & Why
+### Phase 1: Project Definition (once)
+
+```
+/know-thy-build:project      What are we building and why?
+/know-thy-build:technical    How do we build it? (stack, architecture, testing strategy)
+/know-thy-build:qa           Set up the QA framework (environment, behavioral axes, test profiles)
+```
+
+These three commands run once at project start. They produce the foundation documents that every subsequent command reads.
+
+### Phase 2: Feature Development (per feature, repeating)
+
+```
+/know-thy-build:feature      Define the feature (problem, value, stories, AC, design intent)
+/know-thy-build:qa           Define test cases for this feature (what "done" means)
+/know-thy-build:designer     [optional] Deep UX analysis (heuristics, prototyping, accessibility)
+implement                    Build the feature
+/know-thy-build:architect    [optional] Code design for complex features (stubs, tests, sub-agents)
+/know-thy-build:qa           Test the running product against QA.md test cases
+```
+
+A feature is complete ONLY when all its test cases in `docs/QA.md` pass with evidence.
+
+---
+
+## Roles
+
+### Project — What & Why
 
 ```
 /know-thy-build:project
 ```
 
-A conversation that explores:
+Socratic conversation that explores: Problem, Persona, Competitive Landscape, Vision, Output, User Journey, Boundaries, Success, Risks, Principles.
 
-- **Problem** — What triggered this? Root cause? Who suffers? Current alternatives?
-- **Vision** — What changes when solved? Your approach? Core value?
-- **Output** — What does the user concretely receive? Files, commands, formats?
-- **Experience & Boundaries** — User journey? Aha moment? What is this NOT?
-- **Success** — Measurable metrics? Leading indicators? MVP criteria?
-- **Open Questions** — Risks? Unvalidated assumptions? Technical unknowns?
-- **Principles** — Non-negotiable rules? AI agent autonomy? Speed vs quality?
+Also generates a **Development Workflow** in `CLAUDE.md` — the orchestrator model that enforces multi-agent review for all implementation.
 
-Not every area needs equal depth. The conversation follows you, not a script.
+Result: `docs/PROJECT.md`
 
-Result: `docs/PROJECT.md` — the project's identity and compass.
-
-### 2. Technical — How
+### Technical — How
 
 ```
 /know-thy-build:technical
 ```
 
-Requires `docs/PROJECT.md`. Scans your codebase for existing technical context (package.json, Dockerfile, etc.) and doesn't re-ask what's already visible.
+Requires `docs/PROJECT.md`. Explores: Tech Stack (with structured comparison research), Architecture (with Component Responsibility Map), Data, Interfaces, Testing Strategy, Error & Resilience, Constraints.
 
-Explores:
+Every significant decision is recorded as a **Technical Decision Record (TDR)** — context, options, decision, rationale, consequences, validation method. Includes a **Technical Adversarial Review** (Minimalist, Operator, Future Developer) and **Risk-First Validation**.
 
-- **Tech Stack** — Language, framework, key dependencies — and why each choice
-- **Architecture** — Components, interactions, structural pattern
-- **Data** — Storage, key entities, formats
-- **Interfaces** — CLI commands, API endpoints, input/output contracts
-- **Constraints** — Performance, security, deployment, platforms
+Result: `docs/TECHNICAL.md`
 
-Depth matches project scale. A CLI tool might only need Stack + Interfaces.
-
-Result: `docs/TECHNICAL.md` — the technical foundation.
-
-### 3. Feature — Specific work
+### Feature — Specific Work
 
 ```
 /know-thy-build:feature
 ```
 
-References both `docs/PROJECT.md` and `docs/TECHNICAL.md`. Features are numbered sequentially.
+References both `docs/PROJECT.md` and `docs/TECHNICAL.md`. 3-pass exploration:
 
-Each feature spec covers:
-- **Problem & Value** — what's broken, why it matters
-- **User Stories** — As a / I want / so that, with scenarios
-- **Scope** — includes / excludes (excludes required)
-- **Acceptance Criteria** — Given-When-Then derivation chain
-- **Approach** — technical notes (optional)
+- **Pass 1**: Problem → Value → User Stories → Solution → Scope
+- **Pass 2**: Acceptance Criteria (Given-When-Then → AC → edge cases → verification)
+- **Pass 3** (UI features): Design Intent Map (action → outcome → decision → QA verification)
 
-Features are quick — 3-8 exchanges. Create new ones or edit existing ones by number.
+Result: `docs/features/NNN.md`
 
-Result: `docs/features/001.md`, `docs/features/002.md`, ...
-
-### 4. QA — Test the Product
+### QA — Test the Product
 
 ```
 /know-thy-build:qa
 ```
 
-Operates in two modes:
+Produces and maintains `docs/QA.md` — the single source of truth for all testing.
 
-Produces and maintains `docs/QA.md` — the single source of truth for all testing. A feature is complete ONLY when its test cases in QA.md are all checked off.
+**Three modes:**
 
-**SETUP mode** (after technical): Establishes the QA framework — discovers how to start the service, verifies access methods and tools actually work, generates persona-driven edge case scenarios from PROJECT.md.
+| Mode | When | What |
+|------|------|------|
+| **SETUP** | After `:technical` | Build QA framework: environment, tools, behavioral axes, test profiles, failure injection methods |
+| **REVIEW** | After each `:feature` | Define executable test cases per feature — this IS the definition of "done" |
+| **TEST** | After implementation | Actually run the product, execute test cases, capture evidence |
 
-**REVIEW mode** (after each feature): Defines concrete, executable test cases in QA.md per feature. Each test case has exact steps, expected results, and evidence method. Persona scenarios are applied as edge cases. This is what makes "done" concrete.
+**Research-grounded approach** (PersonaTester FSE 2026, τ-bench CMU 2026, VISTA 2026):
 
-**TEST mode** (after implementation): Actually starts the application and executes every test case with evidence — screenshots, console output, state checks. Tests edge cases by performing them: refreshing mid-flow, opening the same form in two tabs, entering special characters everywhere. A feature is confirmed complete only when all test cases pass with evidence.
+- **Behavioral Testing Axes** instead of character personas — orthogonal axes (Mindset × Strategy × Habit × Cooperation) combined into test profiles
+- **Turn-level behavior instructions** instead of narrative descriptions — "3초 안에 반응 없으면 새로고침하라" not "act like an impatient user"
+- **Failure State Injection** — network failure, resource deletion, session expiry, concurrent mutation (+42% unique failures vs UI-only, VISTA 2026)
+- **QA Self-Check** — metrics to prevent "easy mode" (scenario diversity, unique failures, cooperation drift)
+- **Insight Synthesis** — patterns, failure taxonomy, actionable recommendations (not just pass/fail)
 
-Result: `docs/QA.md` — unified QA document with environment, persona scenarios, per-feature test cases, and evidence-backed results.
+Result: `docs/QA.md`
 
-### 5. Designer — User Experience (Deep Dive)
+### Designer — User Experience (Deep Dive)
 
 ```
 /know-thy-build:designer
 ```
 
-Requires a feature spec. Analyzes the feature's user workflow step by step to produce a **Design Intent Map** — a traceable chain connecting every user action to the design decision that enables it.
+Optional. For features with complex UI that need deeper analysis than the feature's Pass 3 Design Intent.
 
-The Design Intent Map serves three audiences:
-- **Developer**: reads Decision + Rationale → knows what to build and why
-- **QA**: reads Action + Outcome + Verification → derives test cases
-- **Designer**: reads everything → iterates with full context
+Produces a **Design Intent Map** — every user action traced to the design decision that enables it. Includes flow decomposition, state catalog, visual direction, prototyping, Nielsen heuristic evaluation, accessibility audit, cognitive walkthrough.
 
-Explores:
-- **Flow Decomposition** — micro-step breakdown of every user story
-- **Design Intent** — Action → Ideal Outcome → Design Decision → Rationale → QA Verification
-- **State Catalog** — empty, loading, populated, error, success states with intent
-- **Visual Direction** — every visual choice traced to a user action it serves
-- **Prototype** — artifacts with annotated design intent
-- **Verification** — Nielsen heuristics, accessibility, cognitive walkthrough
+**Anti-Slop Protocol** — explicit list of AI-generated design clichés to avoid.
 
-Includes an **Anti-Slop Protocol** — explicit list of AI-generated design clichés to avoid, with domain-grounded alternatives.
+Result: `## Design` section in the feature spec + prototype artifact(s)
 
-Result: `## Design` section appended to the feature spec + prototype artifact(s).
-
-### 5. Architect — Implementation Design
+### Architect — Implementation Design
 
 ```
 /know-thy-build:architect
 ```
 
-Requires both `docs/PROJECT.md` and `docs/TECHNICAL.md`. Designs the implementation structure using the **Program Sketching** methodology — creates code scaffolds with Design by Contract comments (PRE/POST/WHY/EXAMPLE) and signature tests, then orchestrates sub-agents to fill internals.
+Optional. For Architectural features (new subsystem, multi-component, structural change). Uses **Program Sketching** — creates code scaffolds with Design by Contract comments (PRE/POST/WHY/EXAMPLE) and signature tests, then orchestrates sub-agents.
 
-Result: Code stubs with intention comments + test suites + architecture notes in feature spec.
+Includes CRC Cards, Adversarial Review (Minimalist/Implementer/Skeptic), Over-Specification Prevention, Hardest-First Vertical Slice.
+
+Result: Code stubs + test suites + `## Architecture Notes` in feature spec
+
+---
+
+## Multi-Agent Development Workflow
+
+When you run `/know-thy-build:project`, it generates a **Development Workflow** in your `CLAUDE.md`. This workflow enforces:
+
+```
+User Session (Orchestrator only — never implements directly)
+│
+├── Dispatches Implementation Sub-Agent
+│   ├── Pre-work: reads PROJECT.md, TECHNICAL.md, feature spec, QA.md
+│   ├── Implements within defined scope
+│   │
+│   └── Post-implementation Review Loop
+│       ├── Designer Review Agent (Design Intent verification)
+│       ├── Architect Review Agent (code quality, patterns, structure)
+│       │   └── Both must pass before QA begins
+│       └── QA Review Agent (runs the product, executes test cases)
+│           └── All test cases must be ✅ with evidence
+│
+└── Loop until all reviewers pass → Feature complete
+```
+
+## Documents Produced
+
+| Document | Created by | Purpose |
+|----------|-----------|---------|
+| `docs/PROJECT.md` | `:project` | Project identity, persona, vision, principles |
+| `docs/TECHNICAL.md` | `:technical` | Tech stack, architecture, TDRs, testing strategy |
+| `docs/QA.md` | `:qa` | Test environment, behavioral axes, test cases, results |
+| `docs/features/NNN.md` | `:feature` + `:designer` + `:architect` | Feature spec, design intent, architecture notes |
+| `CLAUDE.md` | `:project` | Project compass + development workflow |
+| Code stubs + tests | `:architect` | Implementation scaffolds |
 
 ## Evolution
 
 All documents support evolution. Run the same command again on a completed document:
 
-- `/know-thy-build:project` on a complete `docs/PROJECT.md` → evolve mode
-- `/know-thy-build:technical` on a complete `docs/TECHNICAL.md` → evolve mode
-- `/know-thy-build:feature` → edit existing features by number
-- `/know-thy-build:qa` on a feature with `## QA Results` → re-test after changes
-- `/know-thy-build:designer` on a feature with `## Design` → evolve mode
+| Command | On complete document | Effect |
+|---------|---------------------|--------|
+| `:project` | `docs/PROJECT.md` | Evolve mode — what changed and why |
+| `:technical` | `docs/TECHNICAL.md` | Evolve mode — update TDRs, re-run adversarial review |
+| `:feature` | `docs/features/NNN.md` | Edit by number |
+| `:qa` | `docs/QA.md` | Re-test after changes, regression check |
+| `:designer` | `## Design` section | Update design, re-verify |
+
+Changes are tracked with reasoning in a changelog — not just *what* changed, but *why*.
 
 ### Migration from v0.3.x
 
 If you have existing `PROJECT.md`, `TECHNICAL.md`, or `features/` at your project root, they will be automatically moved to `docs/` the next time you run any `/know-thy-build:*` command. References in `CLAUDE.md` are updated automatically.
-
-Changes are tracked with reasoning in a changelog — not just *what* changed, but *why*.
 
 ## Session resilience
 
@@ -177,21 +224,12 @@ All conversations track state in document frontmatter. If a session breaks, run 
 | `complete` | Done — running again enters evolve mode |
 | `evolving` | Evolve in progress — will resume |
 
-## Global install
+## Install options
 
 ```bash
-npx know-thy-build --global    # install to ~/.claude/commands/
-```
-
-Commands become available in all projects.
-
-## Language support
-
-```bash
-npx know-thy-build              # interactive prompt
-npx know-thy-build --lang ko    # Korean
-npx know-thy-build --lang ja    # Japanese
-npx know-thy-build --lang en    # English (default)
+npx know-thy-build              # Install in current project
+npx know-thy-build --global     # Install to ~/.claude/commands/ (all projects)
+npx know-thy-build --lang ko    # Skip language prompt (Korean)
 ```
 
 Supported shortcuts: `en`, `ko`, `ja`, `zh`, `es`, `fr`, `de`, `pt` — or pass any language name directly.
@@ -202,40 +240,47 @@ All conversation and generated documents use the chosen language. Technical term
 
 know-thy-build draws on established techniques from philosophy, software engineering, and AI research.
 
-### Core method: Socratic Prompting
+### Socratic Prompting
 
-The tool applies the [Socratic method](https://en.wikipedia.org/wiki/Socratic_method) — questioning to surface latent knowledge rather than providing answers directly. In Plato's *Meno*, Socrates demonstrates that learning is **recollection** (anamnesis): the right questions draw out what the learner already knows. know-thy-build operates on the same premise — you already know what you want to build, you just haven't articulated it yet.
+The tool applies the [Socratic method](https://en.wikipedia.org/wiki/Socratic_method) — questioning to surface latent knowledge. In Plato's *Meno*, Socrates demonstrates that learning is **recollection**: the right questions draw out what the learner already knows. know-thy-build operates on the same premise — you already know what you want to build, you just haven't articulated it yet.
 
-- Chang, ["Prompting Large Language Models With the Socratic Method"](https://arxiv.org/abs/2303.08769) (2023) — adapts Socratic strategies into LLM prompting templates
-- Princeton NLP, ["The Socratic Method for Self-Discovery in Large Language Models"](https://princeton-nlp.github.io/SocraticAI/) — explicitly connects Socratic dialogue to self-discovery in LLMs
-- [SocraticLM](https://proceedings.neurips.cc/paper_files/paper/2024/hash/9bae399d1f34b8650351c1bd3692aeae-Abstract-Conference.html) (NeurIPS 2024 Spotlight) — Socratic teaching paradigm outperforming GPT-4 by >12%
+- Chang, ["Prompting Large Language Models With the Socratic Method"](https://arxiv.org/abs/2303.08769) (2023)
+- Princeton NLP, ["The Socratic Method for Self-Discovery in Large Language Models"](https://princeton-nlp.github.io/SocraticAI/)
+- [SocraticLM](https://proceedings.neurips.cc/paper_files/paper/2024/hash/9bae399d1f34b8650351c1bd3692aeae-Abstract-Conference.html) (NeurIPS 2024 Spotlight)
 
-### Dialectical reasoning
+### Dialectical Reasoning
 
-Each exchange follows a thesis-antithesis-synthesis cycle: the user states what they want (thesis), the tool challenges it (antithesis), and a refined understanding emerges (synthesis). This is [Hegelian dialectic](https://en.wikipedia.org/wiki/Dialectic#Hegelian_dialectic) applied to project definition.
+Each exchange follows a thesis-antithesis-synthesis cycle. This is [Hegelian dialectic](https://en.wikipedia.org/wiki/Dialectic#Hegelian_dialectic) applied to project definition.
 
 - ["Self-reflecting LLMs: A Hegelian Dialectical Approach"](https://arxiv.org/abs/2501.14917) (2025)
 
-### Requirements elicitation
+### Requirements Elicitation
 
-In software engineering, [requirements elicitation](https://en.wikipedia.org/wiki/Requirements_elicitation) is the process of discovering what stakeholders actually need — a discipline that recognizes requirements are *discovered*, not merely captured.
+[Requirements elicitation](https://en.wikipedia.org/wiki/Requirements_elicitation) is the process of discovering what stakeholders actually need — requirements are *discovered*, not merely captured.
 
 - Zave & Jackson, "Four Dark Corners of Requirements Engineering" (1997, ACM TOSEM)
 - ["AI-based Multiagent Approach for Requirements Elicitation and Analysis"](https://arxiv.org/abs/2409.00038) (2024)
 
-### Design Thinking (Define phase)
+### Behavioral Testing Research
 
-know-thy-build's output maps to the **Define** phase of [Design Thinking](https://web.stanford.edu/~mshanks/MichaelShanks/files/509554.pdf) (Stanford d.school) — synthesizing fuzzy intuitions into a structured problem statement that guides everything that follows.
+The QA framework is grounded in 2026 research on AI agent-based testing:
 
-### The Rubber Duck, upgraded
-
-[Rubber duck debugging](https://en.wikipedia.org/wiki/Rubber_duck_debugging) works because articulating forces clarity. know-thy-build is a rubber duck that talks back — one that not only forces articulation but actively probes weak spots and challenges surface-level answers.
+- [PersonaTester](https://arxiv.org/abs/2603.24160) (FSE 2026) — orthogonal behavioral axes for test persona definition
+- [Mind the Sim2Real Gap](https://arxiv.org/abs/2603.11245) (CMU 2026) — LLM simulators inflate success rates vs human baselines
+- [VISTA](https://arxiv.org/abs/2606.11079) (2026) — QA quality self-measurement, failure state injection (+42%)
+- [NCUser](https://arxiv.org/abs/2509.23124) (ICLR 2026) — non-cooperative user axes
+- [Persona Policies](https://arxiv.org/abs/2605.12894) (UW 2026) — turn-level behavior instructions outperform character descriptions
+- [CANDOR](https://arxiv.org/abs/2506.02943) (TOSEM 2026) — role separation: oracle accuracy requires requirement understanding
 
 ### Multi-Agent Debate
 
-Even within a single facilitator, know-thy-build adopts multiple perspectives — questioning like a PM, challenging like an architect, probing edge cases like QA. The principle that opposing viewpoints produce better outcomes is well-established.
+know-thy-build adopts multiple perspectives through specialized roles (project, technical, feature, designer, QA, architect) — each with its own adversarial review protocol.
 
 - Liang et al., ["Encouraging Divergent Thinking in Large Language Models through Multi-Agent Debate"](https://arxiv.org/abs/2305.19118) (EMNLP 2024)
+
+### Design Thinking
+
+The output maps to the **Define** phase of [Design Thinking](https://web.stanford.edu/~mshanks/MichaelShanks/files/509554.pdf) (Stanford d.school).
 
 ## License
 

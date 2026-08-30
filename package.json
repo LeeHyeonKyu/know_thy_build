@@ -1,7 +1,7 @@
 {
   "name": "know-thy-build",
-  "version": "0.4.0",
-  "description": "Socratic project definition tool for Claude Code",
+  "version": "0.5.0",
+  "description": "Multi-agent project definition & QA framework for Claude Code — Socratic dialogue, behavioral testing axes, design intent, orchestrated review",
   "bin": {
     "know-thy-build": "./bin/cli.js"
   },
@@ -11,10 +11,15 @@
   ],
   "keywords": [
     "claude-code",
-    "constitution",
-    "project-setup",
+    "project-definition",
+    "multi-agent",
+    "qa-framework",
+    "socratic",
     "ai-agent",
-    "socratic"
+    "design-intent",
+    "behavioral-testing",
+    "code-review",
+    "orchestration"
   ],
   "license": "MIT",
   "type": "module",

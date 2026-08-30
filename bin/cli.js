@@ -117,14 +117,20 @@ function install(lang, global) {
   console.log(`
   Done! Installed ${scope} (${lang})
 
-  Open Claude Code and run:
+  Pipeline:
 
-    /know-thy-build:project      Define your project (What & Why)
-    /know-thy-build:technical    Define technical foundation (How)
-    /know-thy-build:feature      Design a feature
-    /know-thy-build:designer     Design the user experience (UX deep dive)
-    /know-thy-build:qa           QA — review specs + test the running product
-    /know-thy-build:architect    Design implementation (Scaffold + Tests + Contract)
+    Define (once):
+      /know-thy-build:project      Define your project (What & Why)
+      /know-thy-build:technical    Define technical foundation (How)
+      /know-thy-build:qa           Set up QA framework (environment + test axes)
+
+    Per feature (repeat):
+      /know-thy-build:feature      Design a feature (stories + AC + design intent)
+      /know-thy-build:qa           Define test cases (what "done" means)
+      /know-thy-build:designer     [optional] UX deep dive (heuristics, prototyping)
+      /know-thy-build:architect    [optional] Code design (stubs, tests, sub-agents)
+
+  Start with /know-thy-build:project
 `);
 }
 
@@ -134,12 +140,20 @@ const args = process.argv.slice(2);
 
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`
-  know-thy-build - Socratic project definition tool
+  know-thy-build — Multi-agent project definition & QA framework for Claude Code
 
   Usage:
     npx know-thy-build              Install in current project
     npx know-thy-build --global     Install globally (~/.claude/commands/)
     npx know-thy-build --lang ko    Skip language prompt
+
+  Commands installed:
+    :project     Define what and why                → docs/PROJECT.md
+    :technical   Define how to build                → docs/TECHNICAL.md
+    :qa          QA framework + test the product    → docs/QA.md
+    :feature     Design a specific feature          → docs/features/NNN.md
+    :designer    UX deep dive (optional)            → ## Design in feature spec
+    :architect   Implementation design (optional)   → Code stubs + tests
 
   Options:
     --global, -g    Install to ~/.claude/commands/ (available in all projects)
