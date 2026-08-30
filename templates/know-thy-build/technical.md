@@ -761,6 +761,7 @@ lastEvolve: {{date}}
 **After CREATE:**
 - `docs/TECHNICAL.md` has been generated.
 - This defines the technical foundation for all implementation work.
+- **Next step:** Run `/know-thy-build:qa` to set up the QA framework (`docs/QA.md`) — it uses the deployment info from TECHNICAL.md to verify the test environment.
 - Feature specs (`/know-thy-build:feature`) will reference this automatically.
 - When implementing features, `/know-thy-build:architect` will work within these decisions.
 - Run `/know-thy-build:technical` again when technical direction shifts.

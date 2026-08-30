@@ -576,10 +576,10 @@ This keeps PROJECT.md as the single entry point for the full project picture.
 **After CREATE:**
 - Feature spec has been saved to `docs/features/{{NNN}}.md`
 - Feature Registry in `docs/PROJECT.md` has been updated
-- Next steps (suggest as appropriate):
-  - **UX deep dive**: `/know-thy-build:designer` — if this feature has complex UI that needs heuristic evaluation, prototyping, and accessibility review
-  - **Implementation design**: `/know-thy-build:architect` — if this feature is Architectural (new subsystem, multi-component, structural change)
-  - **Build**: start implementing directly — if this feature is Bounded and the spec is clear enough
+- **Next step (mandatory):** `/know-thy-build:qa` — define test cases in `docs/QA.md`. This is what makes "done" concrete. Without test cases, there is no definition of "done."
+- Optional next steps:
+  - **UX deep dive**: `/know-thy-build:designer` — if this feature has complex UI
+  - **Implementation design**: `/know-thy-build:architect` — if this feature is Architectural
 - Run `/know-thy-build:feature` again for the next feature
 
 **After EDIT:**

@@ -20,23 +20,24 @@ That clarity doesn't stay in your head. It becomes structured documents that AI 
 npx know-thy-build
 ```
 
-Pick a language, and five commands are installed into your `.claude/commands/`:
+Pick a language, and six commands are installed into your `.claude/commands/`:
 
 | Command | Purpose | Output |
 |---------|---------|--------|
 | `/know-thy-build:project` | Define what you're building and why | `docs/PROJECT.md` |
 | `/know-thy-build:technical` | Define how you'll build it | `docs/TECHNICAL.md` |
 | `/know-thy-build:feature` | Design a specific feature | `docs/features/NNN.md` |
-| `/know-thy-build:designer` | Design the user experience | `## Design` in feature spec |
+| `/know-thy-build:designer` | Design the user experience (deep dive) | `## Design` in feature spec |
+| `/know-thy-build:qa` | Build QA framework + test the running product | `docs/QA.md` |
 | `/know-thy-build:architect` | Design implementation scaffolds | Code stubs + tests |
 
 ## The flow
 
 ```
-:project (What & Why) → :technical (How) → :feature (specific work) → :designer (UX) → :architect (implementation)
+:project (What & Why) → :technical (How) → :feature (specific work) → :qa (testability) → :designer (UX) → :architect (implementation)
 ```
 
-Each layer builds on the previous. Technical decisions reference the project definition. Feature specs reference both. Designer analyzes the user experience and produces a Design Intent Map. Architect creates implementation scaffolds.
+Each layer builds on the previous. Technical decisions reference the project definition. QA establishes the test framework. Feature specs reference project + technical. QA defines test cases per feature. Designer and architect provide deep dives when needed.
 
 ### 1. Project — What & Why
 
@@ -97,7 +98,25 @@ Features are quick — 3-8 exchanges. Create new ones or edit existing ones by n
 
 Result: `docs/features/001.md`, `docs/features/002.md`, ...
 
-### 4. Designer — User Experience
+### 4. QA — Test the Product
+
+```
+/know-thy-build:qa
+```
+
+Operates in two modes:
+
+Produces and maintains `docs/QA.md` — the single source of truth for all testing. A feature is complete ONLY when its test cases in QA.md are all checked off.
+
+**SETUP mode** (after technical): Establishes the QA framework — discovers how to start the service, verifies access methods and tools actually work, generates persona-driven edge case scenarios from PROJECT.md.
+
+**REVIEW mode** (after each feature): Defines concrete, executable test cases in QA.md per feature. Each test case has exact steps, expected results, and evidence method. Persona scenarios are applied as edge cases. This is what makes "done" concrete.
+
+**TEST mode** (after implementation): Actually starts the application and executes every test case with evidence — screenshots, console output, state checks. Tests edge cases by performing them: refreshing mid-flow, opening the same form in two tabs, entering special characters everywhere. A feature is confirmed complete only when all test cases pass with evidence.
+
+Result: `docs/QA.md` — unified QA document with environment, persona scenarios, per-feature test cases, and evidence-backed results.
+
+### 5. Designer — User Experience (Deep Dive)
 
 ```
 /know-thy-build:designer
@@ -139,6 +158,7 @@ All documents support evolution. Run the same command again on a completed docum
 - `/know-thy-build:project` on a complete `docs/PROJECT.md` → evolve mode
 - `/know-thy-build:technical` on a complete `docs/TECHNICAL.md` → evolve mode
 - `/know-thy-build:feature` → edit existing features by number
+- `/know-thy-build:qa` on a feature with `## QA Results` → re-test after changes
 - `/know-thy-build:designer` on a feature with `## Design` → evolve mode
 
 ### Migration from v0.3.x

@@ -122,7 +122,8 @@ function install(lang, global) {
     /know-thy-build:project      Define your project (What & Why)
     /know-thy-build:technical    Define technical foundation (How)
     /know-thy-build:feature      Design a feature
-    /know-thy-build:designer     Design the user experience (UX + Intent Map)
+    /know-thy-build:designer     Design the user experience (UX deep dive)
+    /know-thy-build:qa           QA — review specs + test the running product
     /know-thy-build:architect    Design implementation (Scaffold + Tests + Contract)
 `);
 }

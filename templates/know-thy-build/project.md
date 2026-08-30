@@ -925,7 +925,7 @@ All implementation is delegated to sub-agents with explicit scope and goals.
    Implements within the defined scope. Does not expand beyond the goal.
 
 4. **Post-implementation review (mandatory)**
-   After implementation, the sub-agent dispatches **two review agents**:
+   After implementation, the sub-agent dispatches **three review agents**:
 
    **Designer Review Agent:**
    - Reads the feature's Design Intent Map (if present)
@@ -941,10 +941,22 @@ All implementation is delegated to sub-agents with explicit scope and goals.
    - Adopts the most critical stance — looks for what will break, not what looks nice
    - Produces checklist: `- [x]` passed or `- [ ]` failed with specific reason
 
-5. **Review loop**
-   - If ANY criterion is `[ ]` (failed): implementer fixes and re-submits for review
-   - Loop continues until ALL criteria are `[x]`
-   - Only when both reviewers fully pass does the orchestrator accept the work
+5. **Designer + Architect must both pass before QA begins.**
+
+6. **QA Review Agent (mandatory — runs the product)**
+   - Actually starts the application and tests it as a real user
+   - Executes every acceptance criterion from the feature spec step by step
+   - Tests edge cases: interruption (refresh, back, cancel), concurrency (multi-tab), boundary (empty, max, special chars), state corruption (expired session, deleted resource)
+   - Captures evidence for every test: screenshots, console output, state checks
+   - Adopts the most paranoid, impatient, careless user persona
+   - Produces checklist: `- [x]` passed with evidence or `- [ ]` failed with reproduction steps
+
+7. **Review loop**
+   - If ANY criterion is `[ ]` (failed): implementer fixes and re-submits
+   - Designer + Architect re-review if changes are structural
+   - QA re-tests failed scenarios + regression check on happy path
+   - Loop continues until ALL reviewers' criteria are `[x]`
+   - Only when all three reviewers fully pass does the orchestrator accept the work
 
 ### Document References
 - Project definition: `docs/PROJECT.md`
