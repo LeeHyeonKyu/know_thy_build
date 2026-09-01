@@ -367,14 +367,26 @@ id: {{number}}
 title: {{short_title}}
 status: complete
 priority: {{P0|P1|P2}}
+class: {{Spike|Bounded|Architectural}}
 depends_on: [{{feature_ids}}]
 persona: {{primary_persona_name from PROJECT.md}}
+gate:
+  worktree: null
+  architect: pending
+  designer: pending    # set to 'skipped' for non-UI features
+  qa: pending
 assumptions:
   - "{{assumption}}"
 date: {{date}}
 generatedBy: know-thy-build-feature
 ---
 ```
+
+**Gate initialization rules:**
+- **Spike**: No gate field. Spikes produce answers, not implementations.
+- **Bounded (non-UI)**: `architect: pending`, `designer: skipped`, `qa: pending`
+- **Bounded (UI)**: `architect: pending`, `designer: pending`, `qa: pending`
+- **Architectural**: All `pending`
 
 **Priority guide:**
 - **P0**: Must-have for MVP. Without this, the project doesn't deliver its core value.
@@ -573,14 +585,123 @@ This keeps PROJECT.md as the single entry point for the full project picture.
 
 ## Closing
 
-**After CREATE:**
+**After CREATE (Spike):**
+- No worktree, no gate, no implementation. The spike's output is an answer.
+- Run `/know-thy-build:feature` again if the spike reveals something worth building.
+
+**After CREATE (Bounded / Architectural):**
 - Feature spec has been saved to `docs/features/{{NNN}}.md`
 - Feature Registry in `docs/PROJECT.md` has been updated
-- **Next step (mandatory):** `/know-thy-build:qa` — define test cases in `docs/QA.md`. This is what makes "done" concrete. Without test cases, there is no definition of "done."
-- Optional next steps:
-  - **UX deep dive**: `/know-thy-build:designer` — if this feature has complex UI
-  - **Implementation design**: `/know-thy-build:architect` — if this feature is Architectural
-- Run `/know-thy-build:feature` again for the next feature
+
+### Worktree Setup
+
+1. Detect the repo name:
+   ```bash
+   REPO=$(basename $(git rev-parse --show-toplevel))
+   WT_PATH="../${REPO}-wt"
+   ```
+
+2. Check for existing worktree:
+   ```bash
+   git worktree list
+   ls -d "$WT_PATH" 2>/dev/null
+   ```
+
+3. **If `$WT_PATH` already exists:**
+   > "Worktree `$WT_PATH` already exists (branch: {{branch}}). Options:"
+   > 1. Continue with existing worktree (previous feature is in progress)
+   > 2. Remove existing worktree and create new one
+   > 3. Skip worktree (work in main)
+   
+   If user chooses option 1 or 3, skip creation. If option 2, run `git worktree remove "$WT_PATH"` first.
+
+4. **Create worktree:**
+   ```bash
+   git worktree add "$WT_PATH" -b "feature/{{NNN}}-{{short_title_kebab}}"
+   ```
+
+5. Confirm:
+   > "Worktree created at `$WT_PATH` on branch `feature/{{NNN}}-{{short_title_kebab}}`."
+
+6. Update feature spec frontmatter:
+   ```yaml
+   gate:
+     worktree: feature/{{NNN}}-{{short_title_kebab}}
+   ```
+
+### Sub-agent Dispatch
+
+After worktree creation, dispatch a sub-agent to orchestrate the entire feature lifecycle in the worktree.
+
+Use the **Agent tool** with `isolation: "worktree"` is NOT needed here — the worktree is already created manually above. Instead, dispatch the sub-agent with an explicit working directory.
+
+**Sub-agent prompt:**
+
+```
+You are the feature orchestrator for Feature {{NNN}}: {{title}}.
+Your working directory is: {{WT_PATH}}
+
+Read these files first:
+- docs/PROJECT.md — project principles
+- docs/TECHNICAL.md — technical decisions
+- docs/features/{{NNN}}.md — this feature's spec and gate status
+
+## Your job: Define → Implement → Review → Finish
+
+### Phase 1: Define
+Run each role to define their criteria for this feature:
+
+1. Run /know-thy-build:architect
+   - Reads the feature spec
+   - Designs structure: CRC cards, scaffolds, signature tests
+   - Creates stub files with PRE/POST/WHY/EXAMPLE comments
+   - Creates signature contract tests
+
+2. Run /know-thy-build:designer (skip if gate.designer is 'skipped')
+   - Reads the feature spec
+   - Defines design intent map, state catalog, micro-interactions
+   - Updates the feature spec with detailed design intent
+
+3. Run /know-thy-build:qa in REVIEW mode
+   - Reads the feature spec + architect scaffolds + design intent
+   - Defines concrete test cases in docs/QA.md
+   - Each test case has verification method and expected evidence
+
+### Phase 2: Implement
+Fill the scaffolds:
+- Read all stub files with // IMPLEMENT markers
+- Implement each stub following PRE/POST/WHY contracts
+- Run tests after each implementation to verify
+- Do NOT modify signature contract tests (DO NOT MODIFY markers)
+
+### Phase 3: Review
+Submit implementation for review by each role:
+
+1. Architect review:
+   - Verify code follows scaffolds, conventions, and TECHNICAL.md
+   - Check all signature tests pass
+   - Check no // IMPLEMENT markers remain
+   - Update docs/features/{{NNN}}.md: gate.architect → passed
+
+2. Designer review (skip if gate.designer is 'skipped'):
+   - Verify UI matches design intent map
+   - Check all states are handled (empty, error, loading, success)
+   - Update docs/features/{{NNN}}.md: gate.designer → passed
+
+3. QA TEST:
+   - Actually run the product
+   - Execute every test case from docs/QA.md for this feature
+   - Capture evidence (screenshots, console output, state checks)
+   - Update docs/features/{{NNN}}.md: gate.qa → passed
+
+If any review fails → fix and re-submit. Loop until all gates pass.
+
+### Phase 4: Finish
+When all gates are passed/skipped, run /know-thy-build:finish.
+```
+
+> "Sub-agent dispatched to worktree. It will run define → implement → review → finish automatically."
+> "You can continue working on other things in main, or run `/know-thy-build:feature` for the next feature."
 
 **After EDIT:**
 - Feature spec has been updated

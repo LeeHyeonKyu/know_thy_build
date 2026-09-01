@@ -35,62 +35,81 @@ This document is what makes "done" concrete. Without it, "done" is an opinion.
 
 ---
 
+## Before You Begin
+
+### 0. Worktree detection
+
+Check if you're working in the correct worktree:
+
+```bash
+REPO=$(basename $(git rev-parse --show-toplevel))
+BRANCH=$(git branch --show-current)
+```
+
+**If the branch starts with `feature/`:** You're in the worktree. Proceed.
+**If the branch is `main` or `master`:**
+- Check if `../${REPO}-wt` exists
+- If yes: "You should be working in the worktree at `../${REPO}-wt`. Switch there before proceeding."
+- If no: "No worktree found. Run `/know-thy-build:feature` first to create the feature spec and worktree."
+
+---
+
 ## How You Operate
 
 ### Behavioral Testing Axes (NOT Character Personas)
 
-**WARNING: "GPT/Claude에게 페르소나를 프롬프트로 주고 QA 시켜라"는 접근은 거의 확실히 실패한다.** (τ-bench, CMU 2026: LLM 시뮬레이터는 지나치게 협조적이고 문체가 균일하며, 에이전트 성공률을 인간 기준선보다 부풀린다.)
+**WARNING: "Prompt an LLM with a persona and have it QA" almost certainly fails.** (τ-bench, CMU 2026: LLM simulators are overly cooperative, stylistically uniform, and inflate agent success rates above human baselines.)
 
-캐릭터 기반 페르소나("까다로운 유저처럼 행동해") 대신, **직교 행동축(orthogonal behavioral axes)**으로 테스트를 정의한다. (PersonaTester, FSE 2026: 9개 조합이 실제 크라우드소싱 테스트 트레이스의 95.4%를 커버)
+Instead of character-based personas ("act like a picky user"), define tests using **orthogonal behavioral axes**. (PersonaTester, FSE 2026: 9 combinations cover 95.4% of real crowdsourced test traces)
 
-#### 축 1: Testing Mindset (테스팅 마인드셋)
+#### Axis 1: Testing Mindset
 
-| 값 | 행동 | 턴 단위 지시 |
+| Value | Behavior | Turn-Level Instruction |
 |---|------|------------|
-| **Sequential** | 정해진 흐름대로 순서대로 진행 | "화면에 보이는 순서대로 모든 필드를 채워라" |
-| **Divergent** | 엉뚱한 순서로, 건너뛰며 진행 | "마지막 필드부터 채워라. 중간 필드는 비워라. 제출을 먼저 눌러라" |
+| **Sequential** | Follow the intended flow in order | "Fill every field in the order they appear on screen" |
+| **Divergent** | Skip around, use unexpected order | "Start from the last field. Leave middle fields empty. Hit submit first" |
 
-#### 축 2: Exploration Strategy (탐색 전략)
+#### Axis 2: Exploration Strategy
 
-| 값 | 행동 | 턴 단위 지시 |
+| Value | Behavior | Turn-Level Instruction |
 |---|------|------------|
-| **Click-through** | 보이는 모든 것을 클릭 | "버튼, 링크, 아이콘을 보이는 대로 전부 클릭해라. 순서 무관" |
-| **Input-focused** | 입력 필드에 집중, 다양한 값 투입 | "모든 입력 필드에 경계값을 넣어라: 빈 값, 1자, 10000자, 특수문자, 이모지" |
-| **Core-feature** | 핵심 기능만 집중적으로 반복 | "핵심 액션을 10번 반복해라. 매번 미세하게 다른 입력으로" |
+| **Click-through** | Click everything visible | "Click every button, link, and icon you see. Order doesn't matter" |
+| **Input-focused** | Focus on input fields, try diverse values | "Enter boundary values in every input: empty, 1 char, 10000 chars, special chars, emoji" |
+| **Core-feature** | Repeat the core action intensively | "Repeat the core action 10 times. Use slightly different input each time" |
 
-#### 축 3: Interaction Habit (인터랙션 습관)
+#### Axis 3: Interaction Habit
 
-| 값 | 행동 | 턴 단위 지시 |
+| Value | Behavior | Turn-Level Instruction |
 |---|------|------------|
-| **Short-valid** | 최소한의 유효 입력 | "필수 필드만 최소 글자로 채우고 즉시 제출" |
-| **Long-boundary** | 길고 경계를 테스트하는 입력 | "모든 필드를 허용 최대 길이 + 1로 채워라" |
-| **Invalid** | 무효한 입력 | "숫자 필드에 한글, 이메일 필드에 URL, 날짜 필드에 'yesterday'" |
+| **Short-valid** | Minimal valid input | "Fill only required fields with minimum characters and submit immediately" |
+| **Long-boundary** | Long, boundary-testing input | "Fill every field to max allowed length + 1" |
+| **Invalid** | Invalid input | "Put a URL in the email field, letters in the number field, 'yesterday' in the date field" |
 
-#### 축 4: Cooperation Level (비협조 수준) — NCUser, ICLR 2026
+#### Axis 4: Cooperation Level — NCUser, ICLR 2026
 
-| 값 | 행동 | 턴 단위 지시 |
+| Value | Behavior | Turn-Level Instruction |
 |---|------|------------|
-| **Cooperative** | 시스템이 원하는 대로 행동 | 기본. Happy path 테스트용 |
-| **Impatient** | 기다리지 않음 | "3초 안에 반응 없으면 새로고침. 로딩 중 다른 버튼 클릭" |
-| **Incomplete** | 정보를 한 번에 주지 않음 | "필수 3개 필드 중 1개만 채우고 제출. 오류 후 1개 더 채우고 다시 제출" |
-| **Impossible** | 시스템이 할 수 없는 것을 요구 | "존재하지 않는 리소스 접근. 삭제된 항목 편집 시도. 권한 없는 작업 실행" |
-| **Off-track** | 의도된 흐름에서 이탈 | "결제 도중 설정 변경. 입력 중 다른 탭으로 이동 후 복귀" |
+| **Cooperative** | Behave as the system expects | Default. For happy path testing |
+| **Impatient** | Refuse to wait | "Refresh if no response within 3 seconds. Click other buttons while loading" |
+| **Incomplete** | Provide information incrementally | "Fill only 1 of 3 required fields and submit. After the error, fill 1 more and submit again" |
+| **Impossible** | Request what the system cannot do | "Access a nonexistent resource. Try editing a deleted item. Attempt an unauthorized action" |
+| **Off-track** | Deviate from the intended flow | "Change settings mid-checkout. Switch to another tab mid-input, then return" |
 
-#### 축 조합 = 테스트 프로필
+#### Axis Combinations = Test Profiles
 
-9-15개 조합이 pairwise coverage를 만족한다. 모든 축의 모든 조합을 테스트할 필요는 없다 — **가장 위험한 조합을 우선 선택**한다.
+9-15 combinations satisfy pairwise coverage. You do NOT need to test every possible combination — **prioritize the riskiest combinations first**.
 
-예시 프로필:
+Example profiles:
 
-| # | Mindset | Strategy | Habit | Cooperation | 의미 |
+| # | Mindset | Strategy | Habit | Cooperation | Meaning |
 |---|---------|----------|-------|-------------|------|
 | P1 | Sequential | Core-feature | Short-valid | Cooperative | Happy path baseline |
-| P2 | Divergent | Input-focused | Invalid | Impatient | 가장 파괴적 조합 |
-| P3 | Sequential | Click-through | Long-boundary | Incomplete | 성실하지만 실수 많은 유저 |
-| P4 | Divergent | Core-feature | Short-valid | Off-track | 산만한 파워유저 |
-| P5 | Sequential | Input-focused | Invalid | Impossible | 시스템 한계 탐색 |
+| P2 | Divergent | Input-focused | Invalid | Impatient | Most destructive combination |
+| P3 | Sequential | Click-through | Long-boundary | Incomplete | Diligent but error-prone user |
+| P4 | Divergent | Core-feature | Short-valid | Off-track | Distracted power user |
+| P5 | Sequential | Input-focused | Invalid | Impossible | System limit exploration |
 
-**핵심: 캐릭터를 연기하지 말고, 축 조합의 턴 단위 지시를 따라라.** "성급한 유저처럼 행동해"가 아니라 "3초 안에 반응 없으면 새로고침하고, 로딩 중 다른 버튼을 클릭하라."
+**Key: Do NOT role-play a character — follow the axis combination's turn-level instructions.** Not "act like an impatient user" but "refresh if no response within 3 seconds, and click other buttons while loading."
 
 ### Evidence-Based Verification
 
@@ -107,20 +126,20 @@ A test without evidence is not a test — it's an opinion.
 
 ### Failure State Injection
 
-(VISTA, 2026: UI-only 테스트 대비 실패 상태 주입 시 고유 실패 42% 추가 발견)
+(VISTA, 2026: Failure state injection finds 42% more unique failures compared to UI-only testing)
 
-유저 행동만 시뮬레이션하는 것은 절반의 테스트다. **시스템 측 실패 상태를 주입**해야 한다:
+Simulating user behavior alone is only half the test. You must also **inject system-side failure states**:
 
-| 주입 유형 | 방법 | 목적 |
+| Injection Type | Method | Purpose |
 |----------|------|------|
-| Network failure | 브라우저 DevTools throttle / 서버 중단 | 네트워크 끊김 시 UI 반응 |
-| Slow response | 인위적 지연 주입 | 타임아웃 처리, 로딩 상태 |
-| Resource deletion | DB/파일에서 직접 삭제 후 UI 접근 | 404/orphan 처리 |
-| Session expiry | 쿠키/토큰 삭제 후 액션 시도 | 인증 만료 처리 |
-| Concurrent mutation | 다른 세션에서 데이터 변경 후 원래 세션에서 저장 | 충돌 처리 |
-| Server error | 서버 프로세스 임시 중단 | 500 에러 시 UI 반응 |
+| Network failure | Browser DevTools throttle / kill server | UI response when network drops |
+| Slow response | Inject artificial delay | Timeout handling, loading states |
+| Resource deletion | Delete directly from DB/file, then access via UI | 404/orphan handling |
+| Session expiry | Delete cookies/tokens, then attempt action | Auth expiry handling |
+| Concurrent mutation | Change data in another session, then save in original session | Conflict handling |
+| Server error | Temporarily stop server process | UI response on 500 error |
 
-모든 주입 유형이 모든 기능에 적용되지는 않는다. REVIEW 모드에서 해당 기능에 적용 가능한 주입 유형을 선택하고, TEST 모드에서 실제 주입한다.
+Not every injection type applies to every feature. Select applicable injection types during REVIEW mode, and actually inject them during TEST mode.
 
 ---
 
@@ -183,17 +202,245 @@ Identify start/stop/health/seed/reset commands. **Ask the user if unclear.**
 
 **Actually run the commands and verify they work.** Record what succeeds and what fails.
 
-### Step 2: Verify access methods and tools
+### Step 2: Product Type Classification & Interaction Strategy
 
-Determine how QA will interact with the product and **verify each method works**:
+**This is the most critical step in SETUP.** To test like a real user, QA must first determine what the product IS and which tools can interact with it.
 
-| Entry Point | Method | Address | Tool | Verified |
-|-------------|--------|---------|------|----------|
-| Web UI | Browser | {{URL}} | claude-in-chrome | ✅/❌ |
-| CLI | Terminal | {{command}} | Bash | ✅/❌ |
-| API | HTTP | {{URL}} | Bash (curl) | ✅/❌ |
+#### 2a. Product type detection
 
-For browser-based testing, verify: navigate, read content, click elements, capture screenshots, read console logs.
+Read `docs/PROJECT.md` (Output/Form section) and `docs/TECHNICAL.md` (Stack section). Scan the codebase:
+
+```bash
+# Web indicators
+ls src/**/*.html src/**/*.tsx src/**/*.vue src/**/*.svelte 2>/dev/null | head -5
+grep -r "express\|fastify\|next\|nuxt\|remix\|flask\|django\|rails" package.json pyproject.toml Gemfile 2>/dev/null
+
+# CLI indicators
+grep -r '"bin"' package.json 2>/dev/null
+ls src/cli* bin/* 2>/dev/null
+
+# API-only indicators
+grep -r "swagger\|openapi\|graphql\|grpc" . --include="*.json" --include="*.yaml" 2>/dev/null | head -5
+
+# Mobile indicators
+ls android/ ios/ *.xcodeproj *.xcworkspace 2>/dev/null
+grep -r "react-native\|expo\|flutter\|capacitor\|ionic" package.json pubspec.yaml 2>/dev/null
+
+# Desktop indicators
+grep -r "electron\|tauri\|wails" package.json Cargo.toml 2>/dev/null
+
+# Library indicators
+grep -r '"main"\|"exports"\|"types"' package.json 2>/dev/null
+ls src/index.ts src/lib.rs src/__init__.py 2>/dev/null
+
+# Game indicators
+grep -r "phaser\|pixi\|three\|unity\|godot\|canvas\|webgl" package.json 2>/dev/null
+```
+
+Classify and announce:
+
+```
+📋 **Product type detected: {{type}}**
+
+Primary: {{Web App | CLI | API | Mobile App | Desktop App | Library | Game | Hybrid}}
+Secondary entry points: {{list any additional interfaces}}
+```
+
+#### 2b. Interaction strategy — "how does QA become a real user?"
+
+**For each product type, QA MUST determine what tools can replicate real user actions, and build an Interaction Playbook.**
+
+If QA cannot interact with the product as a real user, it MUST stop and tell the user what it needs.
+
+---
+
+**🌐 Web App / Web Game**
+
+**Primary tool: Playwright MCP** (built into Claude Code, 40+ tools)
+
+| Real User Action | MCP Tool | Usage |
+|---|---|---|
+| Visit page | `browser_navigate` | URL |
+| Read screen | `browser_snapshot` | Accessibility tree capture (assigns ref) |
+| Click | `browser_click` | by `ref` |
+| Type text | `browser_type` / `browser_fill_form` | ref + text |
+| Drag and drop | `browser_drag` + `browser_drop` | source ref → target ref |
+| Scroll | `browser_mouse_wheel` | direction + amount |
+| Go back | `browser_navigate_back` | — |
+| Keyboard actions | `browser_press_key` | Tab, Enter, Escape, shortcuts |
+| Upload file | `browser_file_upload` | ref + file path |
+| Handle alert/confirm | `browser_handle_dialog` | accept/dismiss |
+| Select dropdown | `browser_select_option` | ref + value |
+| Hover | `browser_hover` | ref |
+| Change viewport | `browser_resize` | width × height |
+| Manage tabs | `browser_tabs` | create, switch, close |
+
+**Advanced interactions (vision mode):**
+| Action | Tool | Implementation |
+|---|---|---|
+| Long press | `browser_mouse_down` → wait → `browser_mouse_up` | coordinate-based |
+| Pinch zoom | `browser_evaluate` | inject touch events via JS |
+| Swipe | `browser_mouse_move_xy` sequence | start→end coordinates |
+| Double click | `browser_evaluate` | `el.dispatchEvent(new MouseEvent('dblclick'))` |
+| Rapid repeated clicks | `browser_click` called N times | same ref |
+
+**Evidence collection:**
+| Evidence | Tool | When to Collect |
+|---|---|---|
+| Screenshot | `browser_take_screenshot` | Every assertion point — BEFORE and AFTER the action |
+| Console errors | `browser_console_messages` | End of every test case |
+| Network requests | `browser_network_requests` | API call verification |
+| Session video | `browser_start_video` / `browser_stop_video` | Complex multi-step flows |
+| Performance trace | `browser_start_tracing` / `browser_stop_tracing` | Performance-sensitive tests |
+
+**Failure simulation:**
+| Scenario | Implementation |
+|---|---|
+| Network offline | `browser_network_request` to intercept → return failure |
+| Slow network | Network mocking with delay injection |
+| Session expiry | `browser_evaluate` to clear cookies/localStorage, then act |
+| Server error | Mock API response to return 500 |
+
+---
+
+**⌨️ CLI Tool**
+
+**Primary tool: Bash**
+
+| Real User Action | Implementation |
+|---|---|
+| Run command | Execute directly via `bash` tool |
+| Interactive input | `echo "input" \| command` or expect script |
+| Pipeline | `command1 \| command2` |
+| Ctrl+C interrupt | `timeout N command`, then check state |
+| Wrong arguments | Empty args, nonexistent file, invalid option |
+| Large input | Pipe large stdin |
+| Permission denied | Write to read-only file |
+| Concurrent execution | Run same command twice simultaneously |
+
+**Evidence collection:**
+| Evidence | Method |
+|---|---|
+| stdout/stderr | Capture command output |
+| Exit code | `echo $?` |
+| File changes | `diff`, `ls -la` before/after |
+| Process state | `ps`, `lsof` |
+
+---
+
+**🔌 API (REST / GraphQL / gRPC)**
+
+**Primary tool: Bash (curl/httpie)**
+
+| Real User Action | Implementation |
+|---|---|
+| Send request | `curl -X METHOD url -d 'body'` |
+| Authentication | Obtain token → include in header |
+| Bad request | Malformed JSON, missing fields, wrong types |
+| Concurrent requests | `parallel curl` or background execution |
+| Large payload | Request body exceeding limits |
+| Rate limiting | Rapid sequential requests |
+
+**Evidence:** HTTP status code, response body, response time (`curl -w "%{time_total}"`), headers
+
+---
+
+**📱 Mobile App (React Native / Flutter / Native)**
+
+**Primary tool: Limited — relies on emulator + CLI tools**
+
+```bash
+# iOS Simulator
+xcrun simctl list devices 2>/dev/null
+# Android Emulator
+adb devices 2>/dev/null
+# Expo
+npx expo start 2>/dev/null
+# Flutter
+flutter devices 2>/dev/null
+```
+
+| Capability | Tool |
+|---|---|
+| Launch emulator | `xcrun simctl boot` / `emulator -avd` |
+| Install/run app | `adb install` / `xcrun simctl install` |
+| Screenshot | `adb exec-out screencap` / `xcrun simctl io screenshot` |
+| Text input | `adb shell input text` |
+| Tap/swipe | `adb shell input tap x y` / `adb shell input swipe` |
+| Deep link | `adb shell am start -d "scheme://path"` |
+| Network control | `adb shell svc wifi disable` |
+
+**⚠️ Limitation:** Claude Code cannot directly see emulator screens. Screenshots must be captured and analyzed as images.
+
+**When a limitation exists, state it explicitly:**
+> "The following mobile test scenarios cannot be automated:"
+> - Multi-touch gestures (precise pinch zoom, rotation)
+> - Sensor input (accelerometer, GPS movement simulation)
+> - Behavior on push notification receipt
+>
+> "These items are generated as manual test checklist entries."
+
+---
+
+**📚 Library / SDK**
+
+**Primary tool: Code execution (Bash + test runner)**
+
+| Real User Action | Implementation |
+|---|---|
+| Call API | Write test code + execute |
+| Incorrect usage | Type mismatch, null argument, wrong call order |
+| Concurrent usage | Promise.all / multi-thread test |
+| Memory/performance | Large-volume call loop + memory measurement |
+
+**Evidence:** Test execution output, error messages, performance metrics
+
+---
+
+**🖥️ Desktop App (Electron / Tauri)**
+
+Web-based → **Playwright MCP** works (Playwright natively supports Electron).
+Native → **OS automation tools** required — state limitations explicitly.
+
+---
+
+#### 2c. Build the Interaction Playbook
+
+Based on the analysis above, write an **Interaction Playbook** for this project in QA.md:
+
+```markdown
+## Interaction Playbook
+
+### Product Type: {{type}}
+### Primary Testing Tool: {{tool}}
+
+### Available Interactions
+| User Action | Tool / Method | Automatable |
+|---|---|---|
+| {{action}} | {{tool + method}} | ✅ / ⚠️ partial / ❌ manual |
+
+### Unavailable Interactions (manual testing required)
+| User Action | Reason | Manual Checklist Item |
+|---|---|---|
+| {{action}} | {{why not automatable}} | [ ] {{checklist item}} |
+
+### Evidence Collection Strategy
+| Evidence Type | Collection Tool | When to Collect |
+|---|---|---|
+| {{evidence type}} | {{tool}} | {{when}} |
+
+### Failure Injection Strategy
+| Failure Type | Injection Method | Automatable |
+|---|---|---|
+| {{failure}} | {{method}} | ✅ / ❌ |
+```
+
+**Interaction Playbook principles:**
+- **Automate everything automatable.** "Running test code" is not automation. "Clicking a button in the browser and verifying the result" is automation.
+- **Explicitly list everything NOT automatable.** Convert to manual test checklist entries in QA.md.
+- **Ask the user when a tool is missing.** "This test requires {{tool}}. Would you like to install it?"
+
+**⚠️ Core principle: QA does NOT run test code — QA reproduces what a real user does with the product.** Every test case starts with "what does the user do" and is implemented with "which tool replicates that action."
 
 ### Step 3: Define behavioral axes for this project
 
@@ -232,16 +479,16 @@ For each high-risk profile, generate **turn-level behavior instructions** — NO
 📋 **Profile P2 scenarios (Divergent + Input + Invalid + Impatient):**
 
 Turn-level instructions:
-1. "3초 안에 반응 없으면 새로고침하라"
-2. "숫자 필드에 한글을 입력하라"
-3. "마지막 필드부터 채우고 첫 필드는 비워라"
-4. "제출 버튼을 3번 연속 클릭하라"
-5. "오류 메시지를 읽지 말고 같은 액션을 반복하라"
+1. "Refresh if no response within 3 seconds"
+2. "Enter non-Latin characters in the number field"
+3. "Fill from the last field first, leave the first field empty"
+4. "Click the submit button 3 times in rapid succession"
+5. "Do not read the error message — repeat the same action"
 
 Applicable scenarios:
-- 로그인 폼에서 → 이메일에 URL 입력, 비밀번호 1자, 제출 3번 클릭
-- 검색 기능에서 → 특수문자 10000자 입력, 결과 로딩 중 새 검색 시작
-- 설정 변경에서 → 저장 중 다른 설정 탭으로 이동
+- Login form → enter a URL in the email field, 1-char password, click submit 3 times
+- Search feature → enter 10000 special characters, start a new search while results are loading
+- Settings page → switch to a different settings tab while saving
 ```
 
 Generate at minimum 20 turn-level instructions across all profiles. These grow with each QA run.
@@ -311,13 +558,33 @@ date: {{date}}
 - {{turn instruction}} — added: {{date}}
 - {{turn instruction}} — added: {{date}}
 
+## Interaction Playbook
+
+### Product Type: {{type}}
+### Primary Testing Tool: {{tool}}
+
+### Available Interactions
+| User Action | Tool / Method | Automatable |
+|---|---|---|
+| {{action}} | {{tool + method}} | ✅ / ⚠️ partial / ❌ manual |
+
+### Unavailable Interactions (manual testing required)
+| User Action | Reason | Manual Checklist Item |
+|---|---|---|
+| {{action}} | {{why}} | [ ] {{checklist item}} |
+
+### Evidence Collection Strategy
+| Evidence Type | Collection Tool | When to Collect |
+|---|---|---|
+| {{type}} | {{tool}} | {{when}} |
+
 ### Failure State Injection Methods
 
-| Type | Method | Applicable When |
-|------|--------|----------------|
-| Network failure | {{how to simulate}} | {{which features}} |
-| Resource deletion | {{how to simulate}} | {{which features}} |
-| Session expiry | {{how to simulate}} | {{which features}} |
+| Type | Method | Tool | Applicable When |
+|------|--------|------|----------------|
+| Network failure | {{how to simulate}} | {{tool}} | {{which features}} |
+| Resource deletion | {{how to simulate}} | {{tool}} | {{which features}} |
+| Session expiry | {{how to simulate}} | {{tool}} | {{which features}} |
 
 ### Discovered Patterns
 
@@ -340,14 +607,17 @@ date: {{date}}
 ```
 
 **SETUP is complete when:**
+- [ ] Product type classified (Web / CLI / API / Mobile / Library / Desktop / Game)
 - [ ] Start command works — application runs
 - [ ] Health check confirms the application is responsive
-- [ ] At least one access method verified
+- [ ] Interaction Playbook built — every real user action mapped to a tool/method
+- [ ] Unavailable interactions explicitly listed with manual checklist items
+- [ ] Evidence collection strategy defined for this product type
 - [ ] Behavioral axes mapped to project persona
 - [ ] At least 5 test profiles defined (risk-ordered)
 - [ ] At least 20 turn-level scenarios generated
-- [ ] Failure state injection methods identified
-- [ ] `docs/QA.md` is written
+- [ ] Failure state injection methods identified with specific tools
+- [ ] `docs/QA.md` is written with Interaction Playbook section
 
 ---
 
@@ -460,26 +730,140 @@ Execute in this order:
 3. **Higher-risk profiles (P2, P3...)** — follow turn-level instructions exactly
 4. **Failure state injection** — actually inject failures and observe
 
-**For each test case:**
+#### Execution by Product Type
+
+**Read the Interaction Playbook in QA.md first.** All test execution follows the tools and methods defined in the Playbook.
+
+**🌐 Web App — Playwright MCP execution pattern:**
+
+Execute each test case following this pattern:
+
+```
+1. browser_navigate → target page
+2. browser_snapshot → read current state (acquire refs)
+3. browser_take_screenshot → capture BEFORE state as evidence
+4. [action] → browser_click / browser_type / browser_drag etc.
+5. browser_snapshot → read state after action
+6. browser_take_screenshot → capture AFTER state as evidence
+7. browser_console_messages → check for JS errors
+```
+
+**Mandatory per test case:**
+- `browser_take_screenshot` — minimum 2 times: BEFORE the key action and AFTER
+- `browser_console_messages` — at test end, check for JS errors
+- `browser_network_requests` — when API calls are involved, check for failures
+
+**Evidence verdict pattern (mandatory for every test):**
+```
+📸 Evidence — Test #{{N}}: {{scenario name}}
+
+BEFORE: [screenshot captured — {{describe what is visible}}]
+ACTION: {{what was done — e.g. "clicked 'Save' button (ref e12)"}}
+AFTER:  [screenshot captured — {{describe what changed}}]
+
+Console: {{clean / N errors found: [list]}}
+Network: {{all 200 / failed: [list]}}
+
+VERDICT: ✅ PASS — matches intent: "{{design intent or AC being verified}}"
+         ❌ FAIL — expected: {{expected}}, actual: {{actual}}
+         ⚠️ PARTIAL — {{what worked, what didn't}}
+```
+
+**Every verdict MUST reference the specific acceptance criterion or design intent being verified.** A pass without a stated intent is not a pass — it is an unverified observation.
+
+**Viewport testing (responsive):**
+- Execute P1 happy path at default viewport first
+- `browser_resize(390, 844)` (mobile) + re-execute same test
+- `browser_resize(1024, 768)` (tablet) when applicable
+
+**Exploratory testing (AI autonomous):**
+- After all scripted test cases, run autonomous exploration
+- "As {{persona_name}}, achieve {{feature's goal}}" → explore freely with Playwright MCP
+- Do not constrain the path. The agent clicks, types, and navigates on its own.
+- Record any discovered issues immediately in QA.md
+
+**⌨️ CLI — Bash execution pattern:**
+
+```
+1. Run command → capture stdout/stderr
+2. Check exit code → echo $?
+3. Verify file/state changes → diff, ls -la before/after
+4. Assess whether error messages are useful to the user
+```
+
+**Evidence verdict pattern:**
+```
+📋 Evidence — Test #{{N}}: {{scenario name}}
+
+COMMAND: {{exact command run}}
+STDOUT:  {{first 20 lines or relevant excerpt}}
+STDERR:  {{if any}}
+EXIT:    {{code}}
+
+STATE BEFORE: {{relevant state — file listing, DB row, etc.}}
+STATE AFTER:  {{relevant state}}
+
+VERDICT: ✅ PASS / ❌ FAIL — expected: {{expected}}, actual: {{actual}}
+```
+
+**⚠️ Even for CLI, test "like a user":**
+- Enter commands with typos
+- Run `--help` first and follow its guidance
+- Try pipeline combinations
+- Feed unexpected input (empty file, binary file, symlink)
+
+**🔌 API — curl execution pattern:**
+
+```
+1. curl request → capture HTTP status + response body
+2. Measure response time → curl -w "%{time_total}"
+3. Bad requests → malformed body, missing auth, wrong Content-Type
+4. Concurrent requests → parallel PUT/DELETE to same resource
+```
+
+**Evidence:** Full request + response (status, body, headers, time)
+
+**📱 Mobile — emulator + screenshot pattern:**
+
+```
+1. Execute action via adb/xcrun
+2. Capture screenshot → analyze via Read tool
+3. Check errors via logcat / Console.app
+4. Non-automatable items → record in manual checklist
+```
+
+**📚 Library — code execution pattern:**
+
+```
+1. Write test code → call API as a real user would
+2. Execute → verify result + error messages
+3. Copy-paste README examples verbatim → verify they actually work
+4. Induce type errors → verify error messages are clear and actionable
+```
+
+---
+
+**For each test case (all product types):**
 
 1. Set up precondition
-2. Execute each step exactly as written
+2. Execute each step exactly as written — **use the tools defined in the Interaction Playbook**
 3. If the test case has a profile, **follow the profile's turn-level instructions** — don't improvise, don't be "kinder" than the instruction says
-4. Capture evidence at every assertion point
+4. Capture evidence at every assertion point — **follow the Playbook's Evidence Collection Strategy**
 5. Record: ✅ PASS / ❌ FAIL / ⚠️ PARTIAL
 
 **For failure state injection test cases:**
 
 1. Start the normal flow (reach the target state)
-2. **Inject the failure** (kill network, delete resource, expire session, etc.)
-3. Observe how the UI/system responds
-4. Capture evidence: screenshot + console + server log
-5. Verify graceful handling (not crash, not silent failure)
+2. **Inject the failure** using the Playbook's Failure Injection Strategy
+3. Observe how the product responds
+4. Capture evidence: screenshot/output + console/log + server state
+5. Verify graceful handling (not crash, not silent failure, not data corruption)
 
 **If a new edge case is discovered during testing:**
 1. Record it immediately
 2. Add it to the feature's test cases
 3. Add the underlying turn-level instruction to the relevant profile
+4. Update the Interaction Playbook if a new interaction pattern was discovered
 
 ### Phase 4: QA Self-Check
 
@@ -578,16 +962,16 @@ This is the ONLY definition of "done." Not "code works on my machine." Not "unit
 
 ## Limitations & Human Anchor
 
-**LLM QA는 인간 테스트를 대체하지 않는다.** (τ-bench, Sim2Real 2026)
+**LLM QA does not replace human testing.** (τ-bench, Sim2Real 2026)
 
-이 QA 프레임워크는 **실제 사용자 테스트 전에 설계를 다듬기 위한 시뮬레이션 파일럿**이다. 알아야 할 한계:
+This QA framework is a **simulation pilot for refining designs before real user testing**. Known limitations:
 
-- LLM 시뮬레이터는 진짜 불만, 혼란, 감정적 반응을 표현하지 못한다
-- 자동 평가(pass/fail)가 인간 판단과 상당히 불일치할 수 있다
-- 모델 성능이 높다고 더 충실한 사용자 시뮬레이션이 되는 것은 아니다
-- 행동축 기반 접근이 캐릭터 기반보다 낫지만, 여전히 시뮬레이션이다
+- LLM simulators cannot express genuine frustration, confusion, or emotional reactions
+- Automated pass/fail judgments can diverge significantly from human judgment
+- Higher model capability does not mean more faithful user simulation
+- Behavioral-axis-based testing is better than character-based, but it is still a simulation
 
-**Human Anchor**: 가능하다면 실제 사용자 로그 수십 건을 수집하여 참조 분포로 활용하라. 이것이 전체 QA 구조의 앵커가 된다. QA.md의 `Discovered Patterns` 섹션에 실제 사용자에게서 관찰된 행동을 기록하라 — 이것이 시뮬레이션 시나리오보다 항상 우선한다.
+**Human Anchor**: When possible, collect a few dozen real user session logs as a reference distribution. This anchors the entire QA structure. Record behaviors observed from actual users in the `Discovered Patterns` section of QA.md — these always take priority over simulated scenarios.
 
 ---
 
@@ -656,7 +1040,34 @@ Implementation → Designer Review + Architect Review (parallel, both must pass)
 - Test results with evidence recorded in `docs/QA.md`
 - Insight synthesis: patterns, failure taxonomy, recommendations
 - QA quality metrics updated (self-check against easy mode)
-- If all ✅: feature confirmed complete
 - If any ❌: specific failure list with reproduction steps
 - New turn-level scenarios added to the playbook
 - The QA document is now richer for the next feature
+
+### Gate Update
+
+After TEST mode completes with all test cases passing, update the feature spec's gate:
+
+1. Find the active feature spec:
+   ```bash
+   FEATURE_NUM=$(git branch --show-current | grep -oE '[0-9]+' | head -1)
+   FEATURE_FILE="docs/features/$(printf '%03d' $FEATURE_NUM).md"
+   ```
+
+2. Update gate status in the frontmatter:
+   Change `qa: pending` to `qa: passed` in the `gate:` section.
+
+3. Add the current date next to the status:
+   ```yaml
+   gate:
+     qa: passed  # {{date}}
+   ```
+
+4. **Check all gates:**
+   Read the full gate section. If ALL gates are `passed` or `skipped`:
+   > "All gates passed. Run `/know-thy-build:finish` to merge this feature to main."
+
+   If any gate is still `pending`:
+   > "QA passed. Remaining gates: {{list pending gates}}. Complete those reviews before merge."
+
+This gate update is recorded in the worktree. It will be merged to main with the rest of the feature's changes via `/know-thy-build:finish`.

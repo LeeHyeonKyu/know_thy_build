@@ -901,69 +901,127 @@ This project follows the principles defined in [PROJECT.md](./docs/PROJECT.md).
 AI agents MUST read docs/PROJECT.md before starting any work.
 NON-NEGOTIABLE rules in PROJECT.md cannot be overridden.
 
-## Development Workflow
+## Worktree Workflow
+
+### Principle
+- Feature specs (`docs/`) are defined **only in main**.
+- Implementation code is modified **only in the worktree**. Worktree path: `../<repo>-wt`
+- If a spec change is needed, edit it in main and sync to worktree via `git merge main` (one-way flow).
+- Merge strategy: **squash merge** — `feat(NNN): title` format.
+- On feature completion: `git worktree remove` + `git branch -d` automatic cleanup.
+
+### Feature Lifecycle
+
+```
+main:
+  /know-thy-build:feature → spec finalized → worktree created → sub-agent dispatched
+
+worktree (sub-agent orchestrates the entire lifecycle):
+  Phase 1 — Define:
+    /know-thy-build:architect  → scaffold, signature tests
+    /know-thy-build:designer   → design intent (UI features only)
+    /know-thy-build:qa REVIEW  → test cases
+
+  Phase 2 — Implement:
+    Sub-agent fills scaffolds and implements code
+
+  Phase 3 — Review:
+    Architect review → gate.architect ✓
+    Designer review  → gate.designer ✓
+    QA TEST          → gate.qa ✓
+
+  Phase 4 — Finish:
+    All gates passed → /know-thy-build:finish → squash merge + cleanup
+```
+
+### Gate (Merge Prerequisite)
+The `gate` field in the feature spec frontmatter tracks review status.
+Merge is allowed only when all gates are `passed` or `skipped`.
+
+| Role | Gate Status | Updated When |
+|------|-----------|--------------|
+| architect | pending → passed | Architect review passes |
+| designer | pending → passed / skipped | Designer review passes (skipped for non-UI) |
+| qa | pending → passed | All QA test cases pass |
 
 ### Orchestrator Model
 The user session acts as **orchestrator only** — it does NOT implement directly.
-All implementation is delegated to sub-agents with explicit scope and goals.
+After defining the feature spec, it dispatches a sub-agent to the worktree to handle define → implement → review → finish end-to-end.
 
-### Implementation Flow
+### Sub-agent Pre-work (mandatory)
+Before any work, the sub-agent MUST read:
+- `docs/PROJECT.md` — project principles and boundaries
+- `docs/TECHNICAL.md` — technical decisions and patterns
+- `docs/features/NNN.md` — feature spec, acceptance criteria, design intent
 
-1. **Orchestrator identifies work** from `docs/features/NNN.md`
-   - Determines scope: which files, which components, what changes
-   - Sets goal: specific acceptance criteria from the feature spec
-   - Dispatches implementation sub-agent
-
-2. **Implementation sub-agent — Pre-work (mandatory)**
-   Before writing any code, the sub-agent MUST read:
-   - `docs/PROJECT.md` — project principles and boundaries
-   - `docs/TECHNICAL.md` — technical decisions and patterns
-   - `docs/features/NNN.md` — feature spec, acceptance criteria, design intent
-   The sub-agent confirms its understanding of scope and goal before proceeding.
-
-3. **Implementation sub-agent — Execution**
-   Implements within the defined scope. Does not expand beyond the goal.
-
-4. **Post-implementation review (mandatory)**
-   After implementation, the sub-agent dispatches **three review agents**:
-
-   **Designer Review Agent:**
-   - Reads the feature's Design Intent Map (if present)
-   - Verifies every design intent step is correctly reflected in implementation
-   - Checks all UI states are handled (empty, loading, error, success)
-   - Adopts the most critical stance — assumes implementation is wrong until proven otherwise
-   - Produces checklist: `- [x]` passed or `- [ ]` failed with specific reason
-
-   **Architect Review Agent:**
-   - Reads `docs/TECHNICAL.md` and the feature spec
-   - Verifies code follows technical decisions, patterns, and constraints
-   - Checks code structure, naming, boundaries, and error handling
-   - Adopts the most critical stance — looks for what will break, not what looks nice
-   - Produces checklist: `- [x]` passed or `- [ ]` failed with specific reason
-
-5. **Designer + Architect must both pass before QA begins.**
-
-6. **QA Review Agent (mandatory — runs the product)**
-   - Actually starts the application and tests it as a real user
-   - Executes every acceptance criterion from the feature spec step by step
-   - Tests edge cases: interruption (refresh, back, cancel), concurrency (multi-tab), boundary (empty, max, special chars), state corruption (expired session, deleted resource)
-   - Captures evidence for every test: screenshots, console output, state checks
-   - Adopts the most paranoid, impatient, careless user persona
-   - Produces checklist: `- [x]` passed with evidence or `- [ ]` failed with reproduction steps
-
-7. **Review loop**
-   - If ANY criterion is `[ ]` (failed): implementer fixes and re-submits
-   - Designer + Architect re-review if changes are structural
-   - QA re-tests failed scenarios + regression check on happy path
-   - Loop continues until ALL reviewers' criteria are `[x]`
-   - Only when all three reviewers fully pass does the orchestrator accept the work
+### Review Loop
+- If ANY criterion is `[ ]` (failed): implementer fixes and re-submits
+- Architect + Designer re-review if changes are structural
+- QA re-tests failed scenarios + regression check on happy path
+- Loop continues until ALL reviewers' criteria are `[x]`
+- Only when all three gates pass does `/know-thy-build:finish` proceed
 
 ### Document References
 - Project definition: `docs/PROJECT.md`
 - Technical foundation: `docs/TECHNICAL.md`
 - Feature specs: `docs/features/NNN.md`
+- QA test cases: `docs/QA.md`
 - Feature registry: `docs/PROJECT.md` → Feature Registry section
 ```
+
+## Setup Merge Gate Hook
+
+After generating CLAUDE.md, set up the merge gate hook in `.claude/settings.json`.
+
+**If `.claude/settings.json` does not exist**, create it. If it exists, merge the hook into the existing `hooks` section.
+
+**Hook script to generate** at `.claude/hooks/check-merge-gate.sh`:
+
+```bash
+#!/usr/bin/env bash
+# know-thy-build merge gate — blocks git merge when feature gate is not fully passed
+
+# Only check if the command contains git merge
+if ! echo "$TOOL_INPUT" | grep -qE 'git\s+merge'; then
+  exit 0
+fi
+
+# Find the active feature spec with gate
+FEATURE_FILE=$(ls -t docs/features/*.md 2>/dev/null | head -1)
+if [ -z "$FEATURE_FILE" ]; then
+  exit 0
+fi
+
+# Check gate statuses
+PENDING=$(grep -cE '^\s+(architect|designer|qa):\s*pending' "$FEATURE_FILE" 2>/dev/null || echo "0")
+
+if [ "$PENDING" -gt 0 ]; then
+  echo "❌ Merge gate blocked — pending reviews exist:"
+  grep -E '^\s+(architect|designer|qa):' "$FEATURE_FILE" 2>/dev/null
+  echo ""
+  echo "Run /know-thy-build:finish to check gate status."
+  exit 2
+fi
+
+exit 0
+```
+
+**Settings to add to `.claude/settings.json`:**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "bash .claude/hooks/check-merge-gate.sh"
+      }
+    ]
+  }
+}
+```
+
+Make the hook script executable: `chmod +x .claude/hooks/check-merge-gate.sh`
 
 ## Closing
 

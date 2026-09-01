@@ -108,6 +108,21 @@ Does this match what you're imagining? Anything that feels off?
 
 ## Before You Begin
 
+### 0. Worktree detection
+
+Check if you're working in the correct worktree:
+
+```bash
+REPO=$(basename $(git rev-parse --show-toplevel))
+BRANCH=$(git branch --show-current)
+```
+
+**If the branch starts with `feature/`:** You're in the worktree. Proceed.
+**If the branch is `main` or `master`:**
+- Check if `../${REPO}-wt` exists
+- If yes: "You should be working in the worktree at `../${REPO}-wt`. Switch there before proceeding."
+- If no: "No worktree found. Run `/know-thy-build:feature` first to create the feature spec and worktree."
+
 ### 1. Read all context
 
 ```bash
@@ -634,3 +649,24 @@ Append to the feature's `## Changes` section:
 - Design section has been updated with affected changes
 - QA Checklist items updated to match
 - Changes recorded in the feature spec
+
+## Gate Update
+
+After design work is complete and documented, update the feature spec's gate:
+
+1. Find the active feature spec:
+   ```bash
+   FEATURE_NUM=$(git branch --show-current | grep -oE '[0-9]+' | head -1)
+   FEATURE_FILE="docs/features/$(printf '%03d' $FEATURE_NUM).md"
+   ```
+
+2. Update gate status in the frontmatter:
+   Change `designer: pending` to `designer: passed` in the `gate:` section.
+
+3. Add the current date next to the status:
+   ```yaml
+   gate:
+     designer: passed  # {{date}}
+   ```
+
+This gate update is recorded in the worktree. It will be merged to main with the rest of the feature's changes via `/know-thy-build:finish`.

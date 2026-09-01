@@ -48,6 +48,21 @@ State your chosen granularity and why. The user can override.
 
 ## Before You Begin
 
+### 0. Worktree detection
+
+Check if you're working in the correct worktree:
+
+```bash
+REPO=$(basename $(git rev-parse --show-toplevel))
+BRANCH=$(git branch --show-current)
+```
+
+**If the branch starts with `feature/`:** You're in the worktree. Proceed.
+**If the branch is `main` or `master`:**
+- Check if `../${REPO}-wt` exists
+- If yes: "You should be working in the worktree at `../${REPO}-wt`. Switch there before proceeding."
+- If no: "No worktree found. Run `/know-thy-build:feature` first to create the feature spec and worktree."
+
 ### 1. Read all context
 
 ```bash
@@ -596,3 +611,26 @@ Documented for future implementation when usage data confirms which constraints 
 2. If editing a stub file and changing lines with `PRE:` or `POST:`: exit 2 with "Contract comments are protected"
 
 **When to implement:** When real-world usage shows sub-agents modifying signature tests or contract comments despite explicit instructions.
+
+---
+
+## Gate Update
+
+After all verification passes (Phase 4 complete), update the feature spec's gate:
+
+1. Find the active feature spec:
+   ```bash
+   FEATURE_NUM=$(git branch --show-current | grep -oE '[0-9]+' | head -1)
+   FEATURE_FILE="docs/features/$(printf '%03d' $FEATURE_NUM).md"
+   ```
+
+2. Update gate status in the frontmatter:
+   Change `architect: pending` to `architect: passed` in the `gate:` section.
+
+3. Add the current date next to the status:
+   ```yaml
+   gate:
+     architect: passed  # {{date}}
+   ```
+
+This gate update is recorded in the worktree. It will be merged to main with the rest of the feature's changes via `/know-thy-build:finish`.

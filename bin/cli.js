@@ -122,13 +122,17 @@ function install(lang, global) {
     Define (once):
       /know-thy-build:project      Define your project (What & Why)
       /know-thy-build:technical    Define technical foundation (How)
-      /know-thy-build:qa           Set up QA framework (environment + test axes)
 
-    Per feature (repeat):
-      /know-thy-build:feature      Design a feature (stories + AC + design intent)
-      /know-thy-build:qa           Define test cases (what "done" means)
-      /know-thy-build:designer     [optional] UX deep dive (heuristics, prototyping)
-      /know-thy-build:architect    [optional] Code design (stubs, tests, sub-agents)
+    Per feature (worktree workflow):
+      /know-thy-build:feature      Design feature spec (main) → create worktree → dispatch sub-agent
+
+      Sub-agent orchestrates in worktree:
+        Define:
+          /know-thy-build:architect    Code structure (stubs, tests)
+          /know-thy-build:designer     UX design intent (UI features)
+          /know-thy-build:qa           Test cases (what "done" means)
+        Implement → Review → Gate check
+          /know-thy-build:finish       Merge gate + squash merge + cleanup
 
   Start with /know-thy-build:project
 `);
@@ -148,12 +152,13 @@ if (args.includes("--help") || args.includes("-h")) {
     npx know-thy-build --lang ko    Skip language prompt
 
   Commands installed:
-    :project     Define what and why                → docs/PROJECT.md
+    :project     Define what and why                → docs/PROJECT.md + CLAUDE.md + hooks
     :technical   Define how to build                → docs/TECHNICAL.md
+    :feature     Design feature + worktree + agent  → docs/features/NNN.md + worktree
+    :architect   Code structure (stubs, tests)      → scaffold + signature tests
+    :designer    UX design intent (UI features)     → design intent in feature spec
     :qa          QA framework + test the product    → docs/QA.md
-    :feature     Design a specific feature          → docs/features/NNN.md
-    :designer    UX deep dive (optional)            → ## Design in feature spec
-    :architect   Implementation design (optional)   → Code stubs + tests
+    :finish      Merge gate + squash merge          → main branch + cleanup
 
   Options:
     --global, -g    Install to ~/.claude/commands/ (available in all projects)
