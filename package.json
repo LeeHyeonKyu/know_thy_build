@@ -1,6 +1,6 @@
 {
   "name": "know-thy-build",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Multi-agent project definition & QA framework for Claude Code — Socratic dialogue, behavioral testing axes, design intent, orchestrated review",
   "bin": {
     "know-thy-build": "./bin/cli.js"
