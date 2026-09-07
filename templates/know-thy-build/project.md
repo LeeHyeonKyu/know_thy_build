@@ -1014,7 +1014,12 @@ exit 0
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "command": "bash .claude/hooks/check-merge-gate.sh"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/check-merge-gate.sh"
+          }
+        ]
       }
     ]
   }
