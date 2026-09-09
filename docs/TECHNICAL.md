@@ -10,65 +10,69 @@ generatedBy: know-thy-build-technical
 
 | Layer | Choice | Why |
 |-------|--------|-----|
-| Runtime | Node.js ≥18 | `npx` 기반 설치를 위한 최소 요구사항. ESM (`"type": "module"`) 사용 |
-| Language | JavaScript (ES Modules) | 빌드 도구 없이 바로 실행. 의존성 제로 |
-| Distribution | npm (`npx know-thy-build`) | 별도 설치 없이 한 줄로 실행 가능 |
+| Runtime | Node.js ≥18 | Minimum requirement for `npx`-based installation. Uses ESM (`"type": "module"`) |
+| Language | JavaScript (ES Modules) | Runs directly without build tools. Zero dependencies |
+| Distribution | npm (`npx know-thy-build`) | One-line execution with no separate install step |
 
-**외부 의존성: 없음.** `package.json`에 dependencies가 없다. Node.js 내장 모듈만 사용 (`fs`, `path`, `url`, `readline`, `os`).
+**External dependencies: none.** No dependencies in `package.json`. Uses only Node.js built-in modules (`fs`, `path`, `url`, `readline`, `os`).
 
 ## Architecture
 
 ```
 know-thy-build/
-├── bin/cli.js              # CLI 진입점 — 언어 선택, 템플릿 설치
+├── bin/cli.js              # CLI entry point — language selection, template installation
 ├── templates/
 │   └── know-thy-build/
-│       ├── project.md      # /know-thy-build:project 명령어 템플릿
-│       ├── technical.md    # /know-thy-build:technical 명령어 템플릿
-│       └── feature.md      # /know-thy-build:feature 명령어 템플릿
+│       ├── project.md      # /know-thy-build:project — project definition + hook generation
+│       ├── technical.md    # /know-thy-build:technical — technical foundation definition
+│       ├── feature.md      # /know-thy-build:feature — feature design + gate initialization
+│       ├── architect.md    # /know-thy-build:architect — code structure (scaffold, tests)
+│       ├── designer.md     # /know-thy-build:designer — UX design intent
+│       ├── qa.md           # /know-thy-build:qa — behavioral testing axes QA
+│       └── finish.md       # /know-thy-build:finish — gate check + merge + cleanup
 ├── package.json
 └── README.md
 ```
 
-### 동작 방식
+### How It Works
 
-1. `npx know-thy-build` 실행 → `bin/cli.js` 진입
-2. 언어 선택 (interactive prompt 또는 `--lang` 플래그)
-3. `templates/` 디렉토리의 `.md` 파일들을 대상 위치에 복사
-   - 로컬: `.claude/commands/know-thy-build/` (현재 프로젝트)
-   - 글로벌: `~/.claude/commands/know-thy-build/` (`--global` 플래그)
-4. 복사 시 `{{LANG}}` 플레이스홀더를 선택된 언어로 치환
-5. 레거시 명령어 파일 자동 정리 (`know-thy-build.md`, `know-thy-build-evolve.md`)
+1. Run `npx know-thy-build` → enters `bin/cli.js`
+2. Select language (interactive prompt or `--lang` flag)
+3. Copy `.md` files from `templates/` to the target location
+   - Local: `.claude/commands/know-thy-build/` (current project)
+   - Global: `~/.claude/commands/know-thy-build/` (`--global` flag)
+4. Replace `{{LANG}}` placeholders with the selected language during copy
+5. Automatically clean up legacy command files (`know-thy-build.md`, `know-thy-build-evolve.md`)
 
-### 핵심 설계 결정
+### Key Design Decisions
 
-- **도구 자체는 코드를 거의 포함하지 않는다.** 실제 "로직"은 템플릿 안의 프롬프트에 있다. CLI는 단순 설치기.
-- **Claude Code의 slash command 시스템에 의존.** 템플릿이 `.claude/commands/`에 설치되면 Claude Code가 이를 slash command로 인식.
-- **프롬프트가 곧 제품이다.** 각 템플릿 `.md` 파일은 Claude에게 소크라테스식 대화를 수행하도록 지시하는 정교한 프롬프트.
+- **The tool itself contains almost no code.** The real "logic" lives in the prompts inside templates. The CLI is just an installer.
+- **Depends on Claude Code's slash command system.** Once templates are installed in `.claude/commands/`, Claude Code recognizes them as slash commands.
+- **The prompts are the product.** Each template `.md` file is a carefully crafted prompt that instructs Claude to conduct a Socratic dialogue.
 
 ## Interfaces
 
 ### CLI
 
 ```bash
-npx know-thy-build                  # 인터랙티브 언어 선택 후 설치
-npx know-thy-build --lang ko        # 한국어로 바로 설치
-npx know-thy-build --global         # 글로벌 설치
-npx know-thy-build --version        # 버전 출력
-npx know-thy-build --help           # 도움말
+npx know-thy-build                  # Interactive language selection, then install
+npx know-thy-build --lang ko        # Install directly with Korean
+npx know-thy-build --global         # Global install
+npx know-thy-build --version        # Print version
+npx know-thy-build --help           # Show help
 ```
 
-### Slash Commands (설치 후 Claude Code에서)
+### Slash Commands (in Claude Code after installation)
 
 | Command | Input | Output |
 |---------|-------|--------|
-| `/know-thy-build:project` | 대화 | `PROJECT.md` |
-| `/know-thy-build:technical` | 대화 + `PROJECT.md` 참조 | `TECHNICAL.md` |
-| `/know-thy-build:feature` | 대화 + `PROJECT.md` + `TECHNICAL.md` 참조 | `features/NNN.md` |
+| `/know-thy-build:project` | Conversation | `PROJECT.md` |
+| `/know-thy-build:technical` | Conversation + `PROJECT.md` reference | `TECHNICAL.md` |
+| `/know-thy-build:feature` | Conversation + `PROJECT.md` + `TECHNICAL.md` reference | `features/NNN.md` |
 
-### 문서 상태 관리
+### Document State Management
 
-YAML frontmatter의 `status` 필드로 세션 상태 추적:
+Session state tracked via the `status` field in YAML frontmatter:
 
 ```
 drafting → complete → evolving → complete
@@ -76,16 +80,16 @@ drafting → complete → evolving → complete
 
 ## Constraints
 
-- **Node.js ≥18 필수** (`engines` 필드)
-- **Claude Code 전용** — 다른 AI 도구에서는 slash command가 동작하지 않음
-- **의존성 제로** — 설치 속도와 신뢰성 극대화
-- **npm 배포** — `files` 필드로 `bin/`과 `templates/`만 포함
+- **Node.js ≥18 required** (`engines` field)
+- **Claude Code only** — slash commands do not work in other AI tools
+- **Zero dependencies** — maximizes install speed and reliability
+- **npm distribution** — only `bin/` and `templates/` included via `files` field
 
 ## Distribution
 
-- npm 레지스트리에 `know-thy-build`로 배포 (v0.3.2)
-- GitHub Actions를 통한 자동 publish
-- `npx`로 설치 없이 바로 실행 가능
+- Published to npm registry as `know-thy-build`
+- Automatic publish via GitHub Actions
+- Runs instantly via `npx` with no prior install
 
 ---
 

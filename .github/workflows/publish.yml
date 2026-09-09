@@ -5,7 +5,32 @@ on:
     branches: [main]
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: CLI smoke test
+        run: node bin/cli.js --help
+
+      - name: Template integrity
+        run: |
+          FAIL=0
+          for f in templates/know-thy-build/*.md; do
+            if ! head -1 "$f" | grep -q '^---'; then
+              echo "❌ Missing frontmatter: $f"
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -eq 1 ]; then exit 1; fi
+          echo "✅ All templates have frontmatter"
+
   publish:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

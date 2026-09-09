@@ -40,6 +40,15 @@ FEATURE_FILE="docs/features/$(printf '%03d' $FEATURE_NUM).md"
 
 Read the feature spec and extract the gate section from frontmatter.
 
+### 3. Read project operations
+
+```bash
+# Check for project-specific merge/deploy requirements
+grep -A 20 '## Operations' docs/PROJECT.md 2>/dev/null
+```
+
+If an Operations section exists, note the project's merge strategy and additional gates. These are checked alongside know-thy-build gates below.
+
 ---
 
 ## Gate Check
@@ -69,6 +78,15 @@ Present a clear gate status report:
 > - `{{role}}`: pending — run `/know-thy-build:{{role}}` to complete
 
 → Stop here. Do NOT proceed with merge.
+
+### Project-specific gates (if defined)
+
+If `docs/PROJECT.md` has an Operations → Additional Gates section, check those too:
+- **Code review required?** → Verify PR was reviewed (or inform the user to do so)
+- **CI must pass?** → Check CI status or inform the user to verify
+- **Other gates?** → Report status of each
+
+> These gates are informational — know-thy-build reports them but cannot enforce external systems. The user is responsible for ensuring project-specific gates pass before proceeding.
 
 ---
 
@@ -131,14 +149,24 @@ Report what will be merged to main:
 
 ## Merge
 
-### 1. Switch to main and merge
+### 1. Determine merge strategy
+
+Check `docs/PROJECT.md` → Operations → Merge Strategy. Default to squash if not defined.
+
+| Strategy | Command |
+|----------|---------|
+| squash (default) | `git merge --squash` |
+| rebase | `git rebase main` then fast-forward merge |
+| merge commit | `git merge --no-ff` |
+
+### 2. Switch to main and merge
 
 ```bash
 # Ensure main is up to date
 git checkout main
 git pull --ff-only origin main 2>/dev/null || true
 
-# Squash merge
+# Execute the merge strategy determined above (default: squash)
 git merge --squash "feature/{{NNN}}-{{title_kebab}}"
 ```
 

@@ -6,62 +6,113 @@ generatedBy: know-thy-build-project
 
 # know-thy-build
 
-코드를 쓰기 전에 무엇을, 왜, 어떻게 만들 것인지를 명확히 하는 소크라테스식 대화 도구.
+A Socratic dialogue tool that clarifies what, why, and how you're building — before you write code.
 
 ## Problem
 
-우리는 코드부터 쓴다. 새 프로젝트가 시작되면 몇 분 안에 프레임워크를 고르고, 파일을 만들고, 함수를 작성한다 — 진짜로 무엇을 왜 만드는지 스스로에게 묻기도 전에.
+We write code first. Within minutes of starting a new project, we pick a framework, create files, and write functions — before ever asking ourselves what we're building or why.
 
-이 단계를 건너뛰는 비용은 실제적이다:
-- 모호한 목표 → 낭비되는 노력
-- 정의되지 않은 경계 → 스코프 크리프
-- 말하지 않은 가정 → 잘못된 결정 (본인이든 AI 에이전트든)
+The cost of skipping this step is real:
+- Vague goals → wasted effort
+- Undefined boundaries → scope creep
+- Unspoken assumptions → bad decisions (by humans and AI agents alike)
 
-현재 대안은 없다. 기존 프로젝트 정의 도구들은 폼 기반이거나, AI 에이전트와의 통합을 고려하지 않는다.
+No adequate alternative exists. Existing project definition tools are form-based or ignore integration with AI agents.
 
 ## Vision
 
-프로젝트를 시작할 때 대화를 통해 생각을 정리하면, 그 결과물이 구조화된 문서로 남아 본인과 AI 에이전트 모두가 같은 정의, 같은 원칙, 같은 기술 기반 위에서 일하게 된다.
+When you start a project by organizing your thinking through conversation, the result is structured documentation that ensures both you and your AI agents work from the same definitions, principles, and technical foundation.
 
-핵심 가치: **명확성은 대화에서 나온다.** 소크라테스의 산파술처럼, 올바른 질문이 이미 알고 있는 것을 끌어낸다.
+Core value: **Clarity emerges from dialogue.** Like Socratic maieutics, the right questions draw out what you already know.
 
 ## Approach
 
-Claude Code의 slash command 시스템 위에 동작하는 3단계 대화형 도구:
+A three-stage conversational tool built on Claude Code's slash command system:
 
-1. **Project** (`/know-thy-build:project`) — 무엇을 왜 만드는가 → `PROJECT.md`
-2. **Technical** (`/know-thy-build:technical`) — 어떻게 만드는가 → `TECHNICAL.md`
-3. **Feature** (`/know-thy-build:feature`) — 구체적인 기능 설계 → `features/NNN.md`
+1. **Project** (`/know-thy-build:project`) — What and why → `PROJECT.md`
+2. **Technical** (`/know-thy-build:technical`) — How to build → `TECHNICAL.md`
+3. **Feature** (`/know-thy-build:feature`) — Concrete feature design → `features/NNN.md`
 
-각 단계는 이전 단계 위에 쌓인다. 폼이 아니라 대화를 통해 진행하며, 한 번에 하나씩 질문한다.
+Each stage builds on the previous. Driven by conversation, not forms — one question at a time.
 
 ## Output
 
-- `PROJECT.md` — 프로젝트의 정체성과 나침반
-- `TECHNICAL.md` — 기술적 기반
-- `features/NNN.md` — 개별 기능 스펙 (순번 관리)
+- `PROJECT.md` — Project identity and compass
+- `TECHNICAL.md` — Technical foundation
+- `features/NNN.md` — Individual feature specs (sequentially numbered)
 
-모든 문서는 YAML frontmatter로 상태 추적 (`drafting` → `complete` → `evolving`). 세션이 끊겨도 재개 가능.
+All documents track state via YAML frontmatter (`drafting` → `complete` → `evolving`). Sessions can be resumed after interruption.
 
 ## Boundaries
 
-**이것이다:**
-- Claude Code 전용 소크라테스식 프로젝트 정의 도구
-- 대화를 통한 요구사항 도출 (requirements elicitation)
-- AI 에이전트가 참조할 수 있는 구조화된 문서 생성기
+**This IS:**
+- A Socratic project definition tool for Claude Code
+- Requirements elicitation through conversation
+- A structured document generator that AI agents can reference
 
-**이것이 아니다:**
-- 범용 프로젝트 매니지먼트 도구
-- 코드 생성기 또는 scaffolding 도구
-- 다른 AI 도구/에디터용 플러그인 (Claude Code 전용)
+**This is NOT:**
+- A general-purpose project management tool
+- A code generator or scaffolding tool
+- A plugin for other AI tools/editors (Claude Code only)
 
 ## Principles
 
-- **한 번에 하나의 질문.** 목록을 던지지 않는다.
-- **반영 후 날카롭게.** 들은 것을 요약하고, 불명확한 것을 묻는다.
-- **과도한 탐색 금지.** 만들 수 있을 만큼 명확해지면 멈춘다.
-- **기존 컨텍스트 감지.** 이미 보이는 것을 다시 묻지 않는다.
-- **문서는 살아있다.** 같은 명령어를 다시 실행하면 evolve 모드로 진입한다.
+- **English only in all artifacts.** All prompts (`.md` templates), generated documents, code comments, commit messages, and any content that becomes part of the shipped package MUST be written in English. Korean is only for user-facing conversation (the `{{LANG}}` placeholder handles this per-project). This is NON-NEGOTIABLE — mixed-language templates break for non-Korean users.
+- **One question at a time.** Don't dump a list.
+- **Reflect, then sharpen.** Summarize what you heard, then probe what's unclear.
+- **Stop when clear enough.** Don't over-explore once the frontier is empty.
+- **Detect existing context.** Don't ask what's already visible in the codebase.
+- **Documents are living.** Re-running the same command enters evolve mode.
+
+## Feature Registry
+
+| # | Feature | Priority | Depends On | Status |
+|---|---------|----------|------------|--------|
+| 001 | [docs directory restructuring](features/001.md) | P0 | — | complete |
+
+## Operations
+
+### Merge Strategy
+
+| Setting | Value |
+|---------|-------|
+| **Strategy** | squash |
+| **Branch naming** | `feature/NNN-slug` (know-thy-build default) |
+| **Commit format** | `feat(NNN): title` |
+
+### Version Bump
+
+Local `npm version` — no ship skill needed. CI detects the version change and publishes.
+
+```
+npm version patch    # bug fixes, doc changes
+npm version minor    # new features
+npm version major    # breaking changes
+git push --follow-tags
+```
+
+### Deploy
+
+| Setting | Value |
+|---------|-------|
+| **Method** | npm publish (GitHub Actions automatic) |
+| **Target** | npm registry (`know-thy-build`) |
+| **Trigger** | main push when version in package.json differs from npm registry |
+
+### CI/CD
+
+| Check | Tool | Blocks merge? |
+|-------|------|---------------|
+| CLI smoke test | `node bin/cli.js --help` | yes |
+| Template integrity | All `.md` files must have frontmatter | yes |
+| npm publish | GitHub Actions (`publish.yml`) | — (automatic after merge) |
+
+### Additional Gates
+
+| Gate | Required? | Who |
+|------|-----------|-----|
+| know-thy-build gates (architect/qa) | yes | sub-agent |
+| code review | no | solo project — self-review |
 
 ---
 
