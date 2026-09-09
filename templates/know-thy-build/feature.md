@@ -375,6 +375,8 @@ gate:
   architect: pending
   designer: pending    # set to 'skipped' for non-UI features
   qa: pending
+  integration: pending # set by finish — auto-passed if no conflicts
+  ci: pending          # set by finish — runs project test command
 assumptions:
   - "{{assumption}}"
 date: {{date}}
@@ -384,9 +386,11 @@ generatedBy: know-thy-build-feature
 
 **Gate initialization rules:**
 - **Spike**: No gate field. Spikes produce answers, not implementations.
-- **Bounded (non-UI)**: `architect: pending`, `designer: skipped`, `qa: pending`
-- **Bounded (UI)**: `architect: pending`, `designer: pending`, `qa: pending`
+- **Bounded (non-UI)**: `architect: pending`, `designer: skipped`, `qa: pending`, `integration: pending`, `ci: pending`
+- **Bounded (UI)**: `architect: pending`, `designer: pending`, `qa: pending`, `integration: pending`, `ci: pending`
 - **Architectural**: All `pending`
+
+`integration` and `ci` gates are always initialized as `pending`. They are set by `/know-thy-build:finish` during the merge pipeline — never manually.
 
 **Priority guide:**
 - **P0**: Must-have for MVP. Without this, the project doesn't deliver its core value.

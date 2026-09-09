@@ -685,13 +685,49 @@ For each selected profile, generate test cases using its **turn-level instructio
 - **Profile** column traces which behavioral axis combination generated this case.
 - **Injection test cases** must specify exactly how to inject the failure state.
 
-### Step 5: Update QA.md
+### Step 5: Regression Guard Tests (MANDATORY)
+
+**Purpose:** Protect this feature's core behavior from being broken by future feature merges. When multiple agents work on features in parallel, another agent's merge can silently break your work. Regression guard tests catch that.
+
+**Rules:**
+- Each **Done When** criterion in the feature spec → at least 1 automated test
+- Tests must be **independently runnable** — no cross-feature dependency
+- Tests must **fail loudly** when behavior changes, not silently pass
+- Test names include the feature number: `test_NNN_*` (e.g. `test_003_login_success`)
+- Tests run via the project's test command defined in `docs/PROJECT.md` → Operations → CI/CD
+
+**How to write regression guards:**
+
+1. Read the feature spec's **Done When** section
+2. For each criterion, write at least one automated test that:
+   - Sets up the precondition
+   - Performs the action
+   - Asserts the expected outcome
+   - Cleans up after itself (no side effects on other tests)
+3. Group tests under the feature number for traceability
+
+**Template:**
+
+```
+### Regression Guards — Feature {{NNN}}: {{title}}
+
+| # | Done-When Criterion | Test Name | What It Verifies |
+|---|---------------------|-----------|------------------|
+| 1 | {{criterion_1}} | test_{{NNN}}_{{name}} | {{specific assertion}} |
+| 2 | {{criterion_2}} | test_{{NNN}}_{{name}} | {{specific assertion}} |
+```
+
+**Why this matters:** When `/know-thy-build:finish` rebases on main and resolves conflicts, it runs the project's test command. If another feature's merge broke your work, your regression guard tests fail, and the merge is blocked. Without these tests, the CI gate is a formality.
+
+### Step 6: Update QA.md
 
 1. Append the feature section to `docs/QA.md`
 2. Add any new turn-level scenarios to the Turn-Level Scenarios section
-3. Update feature spec frontmatter:
+3. Add regression guard test entries to the feature section
+4. Update feature spec frontmatter:
    ```yaml
    qaTestCases: {{count}}
+   qaRegressionGuards: {{count}}
    qaReviewDate: {{date}}
    ```
 
@@ -699,6 +735,7 @@ For each selected profile, generate test cases using its **turn-level instructio
 - [ ] Every AC has at least one test case
 - [ ] At least 3 profiles are represented in test cases
 - [ ] At least 2 failure state injection test cases
+- [ ] **Every Done-When criterion has at least one regression guard test**
 - [ ] Access path verified
 - [ ] Test cases are concrete enough that anyone could execute them
 - [ ] Feature section appended to `docs/QA.md`

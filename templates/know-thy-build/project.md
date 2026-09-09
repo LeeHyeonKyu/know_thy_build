@@ -571,17 +571,19 @@ Frontier questions:
 | Question | Depends on | Type |
 |----------|-----------|------|
 | How do feature branches merge to main? (squash, rebase, merge commit) | — | Decision |
+| **What is the test command?** (e.g. `npm test`, `pytest`, `go test ./...`) | — | Decision (REQUIRED) |
 | How does code reach users? (npm publish, docker, manual deploy, CI/CD trigger) | — | Decision |
-| What automated checks run before merge? (lint, type check, tests) | merge-strategy | Fact (scan CI config) + Decision |
+| What other automated checks run before merge? (lint, type check) | merge-strategy | Fact (scan CI config) + Decision |
 | Are there review requirements beyond know-thy-build gates? (code review, security scan) | — | Decision |
 
 Slots to fill:
 - `{{merge_strategy}}` — squash / rebase / merge commit
+- `{{test_command}}` — **REQUIRED.** The command `/know-thy-build:finish` runs before merge. Without it, the `ci` gate auto-passes.
 - `{{deploy_method}}` — how releases reach users
-- `{{ci_checks}}` — automated quality checks
+- `{{ci_checks}}` — automated quality checks (lint, type check, etc.)
 - `{{additional_gates}}` — extra review requirements
 
-**Done when:** Frontier is empty. At minimum, merge strategy and deploy method are defined. CI/CD and additional gates can be "none yet" if the project is early.
+**Done when:** Frontier is empty. At minimum, merge strategy and **test command** are defined. Deploy and additional gates can be "none yet" if the project is early.
 
 > **Why this matters:** Without explicit operations definitions, sub-agents and hooks cannot enforce project-specific workflows. The merge gate hook only covers know-thy-build's built-in gates — project-specific gates (code review, CI checks) must be defined here so agents know to respect them.
 
@@ -844,13 +846,15 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 
 ### CI/CD
 
-<!-- Automated checks that run on push or PR. -->
+<!-- Automated checks that run on push or PR.
+     The test command is REQUIRED — /know-thy-build:finish runs it before merge.
+     Without it, the ci gate auto-passes and regressions slip through. -->
 
-| Check | Tool | Blocks merge? |
-|-------|------|---------------|
+| Check | Command | Blocks merge? |
+|-------|---------|---------------|
+| **test** | **{{test_command}}** | **yes (required)** |
 | {{lint}} | {{eslint, ruff, etc.}} | {{yes/no}} |
 | {{type check}} | {{tsc, mypy, etc.}} | {{yes/no}} |
-| {{tests}} | {{jest, pytest, etc.}} | {{yes/no}} |
 
 ### Additional Gates
 
@@ -1011,8 +1015,13 @@ worktree (sub-agent orchestrates the entire lifecycle):
     Designer review  → gate.designer ✓
     QA TEST          → gate.qa ✓
 
-  Phase 4 — Finish:
-    All gates passed → /know-thy-build:finish → squash merge + cleanup
+  Phase 4 — Finish (merge pipeline):
+    /know-thy-build:finish orchestrates:
+      Review gates check     → architect/designer/qa must be passed
+      Rebase on main         → surface conflicts
+      Conflict resolution    → resolve, then integration review agent
+      CI/CD                  → run project test command
+      Merge                  → squash merge + cleanup
 ```
 
 ### Gate (Merge Prerequisite)
@@ -1024,6 +1033,8 @@ Merge is allowed only when all gates are `passed` or `skipped`.
 | architect | pending → passed | Architect review passes |
 | designer | pending → passed / skipped | Designer review passes (skipped for non-UI) |
 | qa | pending → passed | All QA test cases pass |
+| integration | pending → passed | Finish: rebase clean OR conflict review agent passes |
+| ci | pending → passed | Finish: project test command passes |
 
 ### Orchestrator Model
 The user session acts as **orchestrator only** — it does NOT implement directly.
@@ -1040,7 +1051,8 @@ Before any work, the sub-agent MUST read:
 - Architect + Designer re-review if changes are structural
 - QA re-tests failed scenarios + regression check on happy path
 - Loop continues until ALL reviewers' criteria are `[x]`
-- Only when all three gates pass does `/know-thy-build:finish` proceed
+- Only when all three review gates pass does `/know-thy-build:finish` start the merge pipeline
+- Finish then handles: rebase → conflict resolution → integration review → CI → merge
 
 ### Project-Specific Operations
 The merge gate hook enforces know-thy-build's built-in gates (architect/designer/qa).
@@ -1092,7 +1104,7 @@ FEATURE_FILE="docs/features/$(printf '%03d' "$FEATURE_NUM").md"
 grep -qE '^status:\s*complete' "$FEATURE_FILE" 2>/dev/null && exit 0
 
 # Check gate statuses
-PENDING=$(grep -cE '^\s+(architect|designer|qa):\s*pending' "$FEATURE_FILE" 2>/dev/null || echo "0")
+PENDING=$(grep -cE '^\s+(architect|designer|qa|integration|ci):\s*pending' "$FEATURE_FILE" 2>/dev/null || echo "0")
 
 if [ "$PENDING" -gt 0 ]; then
   echo "❌ Merge gate blocked — Feature $(printf '%03d' "$FEATURE_NUM") has pending reviews:"

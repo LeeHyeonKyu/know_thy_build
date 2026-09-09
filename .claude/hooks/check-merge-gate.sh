@@ -18,7 +18,7 @@ FEATURE_FILE="docs/features/$(printf '%03d' "$FEATURE_NUM").md"
 grep -qE '^status:\s*complete' "$FEATURE_FILE" 2>/dev/null && exit 0
 
 # Check gate statuses
-PENDING=$(grep -cE '^\s+(architect|designer|qa):\s*pending' "$FEATURE_FILE" 2>/dev/null || echo "0")
+PENDING=$(grep -cE '^\s+(architect|designer|qa|integration|ci):\s*pending' "$FEATURE_FILE" 2>/dev/null || echo "0")
 
 if [ "$PENDING" -gt 0 ]; then
   echo "❌ Merge gate blocked — Feature $(printf '%03d' "$FEATURE_NUM") has pending reviews:"
