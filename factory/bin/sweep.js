@@ -21,6 +21,7 @@ async function main() {
   const transition = ({ issue, to, reason }) => transitionIssue({ gh, issue, to, reason });
   const release = (issue) => releaseLock({ run, cwd: root, issue });
   const tokenIssuedAt = await gh.getVariable("FACTORY_TOKEN_ISSUED_AT");
+  if (tokenIssuedAt == null) console.warn("factory: FACTORY_TOKEN_ISSUED_AT not set — token expiry check skipped");
   const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
