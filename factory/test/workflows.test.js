@@ -476,3 +476,79 @@ test("factory-plan.js: loader/dispatcher issue mismatch fails closed — no deba
   expect(result.guarantee).toBe("structural");
   expect(validate("plan.v1", result).ok).toBe(false);
 });
+
+test("factory-plan.js: an objection the synthesizer already logged is superseded, not duplicated, when it survives the second vote", async () => {
+  const OBJECTION = "the rollback path is still unspecified";
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") {
+      // the synthesizer kept the objection with its own override reason at re-synthesis
+      return planFix({
+        dissent_log: [
+          { role: "architect", objection: "files_expected is too wide", resolution: "narrowed to two paths" },
+          { role: "skeptic", objection: OBJECTION, resolution: "overridden — rollback is out of scope" },
+        ],
+      });
+    }
+    if (opts.label?.startsWith("sign:")) {
+      return roleOf(opts) === "skeptic" ? { vote: "object", reason: OBJECTION } : { vote: "accept", reason: "ok" };
+    }
+    return null;
+  };
+
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(result.dissent_log.filter((d) => d.role === "skeptic" && d.objection === OBJECTION)).toHaveLength(1);
+  expect(result.dissent_log).toEqual([
+    { role: "architect", objection: "files_expected is too wide", resolution: "narrowed to two paths" },
+    { role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding" },
+  ]);
+});
+
+test("factory-plan.js: synthesis sees R1 and R2; the second sign-off votes on the revised plan, not the first draft", async () => {
+  let synthCalls = 0;
+  let signRounds = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") {
+      synthCalls += 1;
+      return planFix({ summary: `PLAN-DRAFT-${synthCalls}` });
+    }
+    if (opts.label?.startsWith("sign:")) {
+      if (roleOf(opts) === "skeptic") signRounds += 1;
+      return signRounds === 1 && roleOf(opts) === "skeptic"
+        ? { vote: "object", reason: "dw1 has no failing-test id" }
+        : { vote: "accept", reason: "ok" };
+    }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  // the synthesizer is given both rounds of the debate, not just the positions
+  const synthesis = calls.filter((c) => c.opts.agentType === "plan-synthesizer");
+  expect(synthesis[0].prompt).toContain("POSITION-OF-skeptic");
+  expect(synthesis[0].prompt).toContain("files_expected is too wide"); // an R2 objection claim
+
+  const signs = labelled(calls, "sign:");
+  expect(signs).toHaveLength(8);
+  for (const c of signs.slice(0, 4)) {
+    expect(c.prompt).toContain("PLAN-DRAFT-1");
+    expect(c.prompt).not.toContain("PLAN-DRAFT-2");
+  }
+  for (const c of signs.slice(4)) {
+    expect(c.prompt).toContain("PLAN-DRAFT-2");
+    expect(c.prompt).not.toContain("PLAN-DRAFT-1");
+  }
+  expect(result.summary).toBe("PLAN-DRAFT-2");
+});

@@ -253,12 +253,16 @@ if (plan) {
 
     // Second failed sign-off: the disagreement is real. Record it and proceed — the plan handoff
     // carries the dissent to the human rather than pretending the room agreed.
+    // The synthesizer may already have logged this same objection with its own override reason at
+    // re-synthesis; the surviving vote supersedes that, so the earlier entry is replaced rather than
+    // duplicated (one objection, one line, the final resolution).
     if (attempt === 1) {
       const log = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
+      const superseded = log.filter((d) => !objections.some((o) => d && d.role === o.role && d.objection === o.reason));
       plan = {
         ...plan,
         dissent_log: [
-          ...log,
+          ...superseded,
           ...objections.map((o) => ({ role: o.role, objection: o.reason, resolution: 'unresolved — proceeding' })),
         ],
       };
