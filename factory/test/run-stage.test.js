@@ -658,6 +658,30 @@ test("makeCheckoutHead: no implement handoff → { ok:false, reason:'implement h
   expect(gh.prHeadSha).not.toHaveBeenCalled();
 });
 
+test("makeCheckoutHead: an implement handoff with no PR number is refused before calling gh.prHeadSha", async () => {
+  const gh = { comments: vi.fn(async () => implHandoffFor(7, { head_sha: "a".repeat(40), pr: null })), prHeadSha: vi.fn() };
+  const run = makeFakeRun([]);
+  const checkoutHead = makeCheckoutHead({ gh, run, root: "/repo", issue: 7 });
+  const r = await checkoutHead();
+  expect(r).toEqual({ ok: false, reason: "implement handoff has no PR number" });
+  expect(gh.prHeadSha).not.toHaveBeenCalled();
+  expect(run.calls).toEqual([]);
+});
+
+test("makeCheckoutHead: a gh.prHeadSha failure (e.g. gh pr view) is caught, not thrown", async () => {
+  const gh = {
+    comments: vi.fn(async () => implHandoffFor(7, { head_sha: "a".repeat(40), pr: 9 })),
+    prHeadSha: vi.fn(async () => { throw new Error("gh pr view 9 failed (1): could not find pull request"); }),
+  };
+  const run = makeFakeRun([]);
+  const checkoutHead = makeCheckoutHead({ gh, run, root: "/repo", issue: 7 });
+  const r = await checkoutHead();
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/^gh pr view failed: /);
+  expect(r.reason).toMatch(/could not find pull request/);
+  expect(run.calls).toEqual([]);
+});
+
 test("makeCheckoutHead: PR head moved since implement handoff → reason names both shas", async () => {
   const headSha = "a".repeat(40);
   const currentSha = "b".repeat(40);

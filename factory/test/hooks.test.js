@@ -84,6 +84,22 @@ test("stop-guard: dirty file at repo root is still caught when the hook runs fro
   expect(r3.stderr).toMatch(/uncommitted/);   // upstream이 없어도 exit 2가 나오므로, 이유가 "uncommitted"인지까지 확인한다
 });
 
+test("stop-guard: a detached HEAD (review/merge checkoutHead) still refuses a dirty tree, but skips the push checks", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sg-detached-"));
+  await run("git", ["init", "-q", "-b", "main"], { cwd });
+  await run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd });
+  const sha = (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim();
+  await run("git", ["checkout", "-q", "--detach", sha], { cwd });
+  expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(0);           // clean detached HEAD, no upstream, still passes
+  await run("bash", ["-c", "echo x > f.txt"], { cwd });
+  const r = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r.code).toBe(2);
+  expect(r.stderr).toMatch(/detached HEAD with uncommitted changes/);
+  // .factory/out is excluded on a detached HEAD too — same pathspec as the branch case
+  await run("bash", ["-c", "rm f.txt && mkdir -p .factory/out && echo y > .factory/out/x"], { cwd });
+  expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(0);
+});
+
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 1'"\n`);

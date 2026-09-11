@@ -97,10 +97,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     hb = await d.heartbeat();
     const a = await d.assertHandoff();
     if (!a.ok) { record([`assert: FAIL — ${a.reason}`]); return 2; }   // assertHandoff가 needs-human 전이와 코멘트를 이미 했다
-    if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
-      const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
-      if (!ip.ok) { record(refusal(ip)); return 2; }
-    }
     // review·merge는 implement handoff에 적힌 PR head에 게이트를 묶는다 — 그 사이 PR에 새 커밋이
     // 얹혀도(force-push, 추가 커밋) 검증하지 않은 코드를 검증한 것으로 착각하지 않도록 detach해서 고정한다.
     if ((stage === "review" || stage === "merge") && d.checkoutHead) {
@@ -111,6 +107,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
         return 2;
       }
       checkoutSha = co.sha;
+    }
+    if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
+      const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
+      if (!ip.ok) { record(refusal(ip)); return 2; }
     }
     const ctx = await d.buildContext();
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
@@ -273,7 +273,10 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
     const handoff = latestHandoff(await gh.comments(issue), "implement");
     if (!handoff?.data?.head_sha) return { ok: false, reason: "implement handoff missing" };
     const { head_sha, pr } = handoff.data;
-    const currentSha = await gh.prHeadSha(pr);
+    if (pr == null) return { ok: false, reason: "implement handoff has no PR number" };
+    let currentSha;
+    try { currentSha = await gh.prHeadSha(pr); }
+    catch (e) { return { ok: false, reason: `gh pr view failed: ${e?.message || e}` }; }
     if (currentSha !== head_sha) {
       return { ok: false, reason: `PR head moved since implement handoff (${head_sha.slice(0, 7)} → ${currentSha.slice(0, 7)})` };
     }
