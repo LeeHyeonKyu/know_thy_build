@@ -2,7 +2,7 @@
 
 형식: **ADR-NNN · 날짜 · 질문 · 관측(수치) · 결정 · 영향 받는 스펙 절**
 
-ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`, repo `LeeHyeonKyu/know-thy-build-demo`)로 측정한 결과다. 관측 칸의 수치는 전부 실측이며 추정치에는 그렇다고 표시한다. ADR-009는 스파이크가 아니라 Plan 0 실행 중 발견한 러너/yml 관례다.
+ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`, repo `LeeHyeonKyu/know-thy-build-demo`)로 측정한 결과다. 관측 칸의 수치는 전부 실측이며 추정치에는 그렇다고 표시한다. ADR-009는 스파이크가 아니라 Plan 0 실행 중 발견한 러너/yml 관례다. ADR-010~013은 Plan 1b(게이트 레이어 구현) 진행 중 코드 검토·TDD로 확정한 결정이다 — 스파이크가 아니라 실제 `factory/lib`·`factory/bin` 구현과 그 리뷰(컨트롤러의 "Plan 1b 실행 판결")에서 나왔다.
 
 공통 실행 조건: `claude -p` · `--permission-mode dontAsk` · `--max-turns 5` · `--output-format json` · CLI는 잡마다 `npm i -g @anthropic-ai/claude-code`로 설치.
 
@@ -17,6 +17,10 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 | 007 | idle ceiling | MOOT |
 | 008 | 신뢰되지 않은 워크스페이스의 allow/deny | PASS (CI 필수 조치 도출) |
 | 009 | 러너/yml 관례 | (스파이크 아님 — 실행 중 발견) |
+| 010 | 게이트 판정의 진실 소스 | 파일(`gates.json`)이 진실 — handoff는 복사본, 불일치는 거부 |
+| 011 | flaky 재분류는 어느 스테이지가 하나 | implement에서만 — review·merge는 재분류 없이 RED |
+| 012 | 게이트 판정과 사전 assert의 분리 | `gatesChecked` 표식 — 전이 경로에서만 게이트를 확인 |
+| 013 | 훅 입력 불신 원칙 | `tool_input`을 셸 문자열에 넣기 전 반드시 이스케이프 |
 
 ---
 
@@ -257,3 +261,51 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 - 따라서 §4.2.4가 예고한 "후퇴 시 잃는 것 = 구조적 보장(`structural`) → 사후 감지(`verified`)"는 **이번에 발생하지 않았다.** handoff·run 기록의 `guarantee` 값은 `structural`로 나간다.
 - 다만 **건너뛰기 방지의 성격은 후퇴했다**(ADR-006): 메인 세션을 구조적으로 잠그는 수단이 없으므로, "workflow를 호출하지 않고 스테이지를 위조"하는 시도는 **금지가 아니라 탐지**로 막힌다. 유일한 방어선은 `verify-stage.sh`의 사후 검증(+ADR-001의 훅 기록)이며, 이는 §4.2.2가 원래 요구하던 것과 동일하다 — 설계는 바뀌지 않고 "보너스로 기대했던 불가능성"만 사라졌다.
 - 런타임에 Workflow 호출이 실패하면 §4.2.4의 규칙대로 `blocked` + `orchestration-unavailable`로 끝난다. **자동 모드 전환은 여전히 없다.**
+
+---
+
+## ADR-010 게이트 판정은 파일이 진실 (handoff 복사본 불일치 거부) — 2026-09-12
+
+**질문**: `gates.sh`(L1, 에이전트 프로세스 밖)가 쓰는 `.factory/out/gates.json`과 workflow가 handoff에 스스로 채워 넣는 `gates` 필드가 다르면 어느 쪽을 믿는가.
+
+**관측** (Plan 1b `lib/verify-stage.js`·`lib/requirements.js`·`lib/gates.js` 구현, Task 12): `verify-stage.js`는 handoff의 `data.gates`가 이미 채워져 있고 파일 값과 다르면 `"handoff gates mismatch: ..."`로 스테이지를 거부한다. 빠져 있으면(워크플로가 아예 안 실었으면) 파일 값(`{status, level}`)으로 채워 넣는다 — 스키마 검증은 이 채움 **뒤에** 이뤄지도록 순서를 바꿨다(워크플로가 `gates`를 빠뜨려도 파일 값으로 `implement.v1`을 만족할 수 있어야 하므로). `requirements.js`의 `factory:awaiting-review` 규칙도 `ctx.gatesFile`이 있으면 handoff의 자기 신고 대신 **파일의 status**를 본다: "게이트 판정의 출처는 handoff가 아니라 러너가 쓴 파일이다 — 파일이 있으면 handoff의 자기 신고는 무시한다"(코드 주석 원문).
+
+**결정**: 게이트 판정의 유일한 진실은 러너가 `gates.sh`로 만든 `.factory/out/gates.json`이다. handoff에 실리는 `gates` 필드는 그 파일의 **복사본** 취급이며, 워크플로가 스스로 다른 값을 써 넣으면(불일치) verify가 거부하고, 아예 누락하면(빈 값) verify가 파일 값으로 덮어쓴다. 에이전트 출력에 "GREEN"이라 적혀 있어도 판정은 파일만 본다 — §4.2.5의 원 원칙("에이전트는 gates를 돌릴 수는 있지만 판정할 수 없다")을 "파일 vs handoff 불일치"라는 구체적 실패 모드로 확장한 것이다.
+
+**영향**: §3.3(approved/merged 요구사항 — ADR-012와 함께), §4.2.1 step 5·6, §6.2.
+
+---
+
+## ADR-011 flaky 귀책 재분류는 implement에서만; review·merge는 RED — 2026-09-12
+
+**질문**: 기존 테스트가 RED일 때, "이 PR 탓인가 아니면 main에서도 flaky인가"를 재분류(`classify-failure.sh`)할 권한을 어느 스테이지가 갖는가. 모든 스테이지가 재분류하면 같은 테스트가 스테이지마다 다르게 판정될 수 있다.
+
+**관측** (Plan 1b `lib/gates.js` `runStageGates`, Task 12): 실패 분류 호출(`classifyFailures`)은 `stage === "implement"` 조건 블록 안에서만 일어난다 — review·merge 스테이지에서 `runStageGates`를 호출해도 이 블록을 타지 않으므로 실패한 기존 테스트는 재분류 없이 그대로 RED로 집계된다. 소스 주석 원문: "분류(classifyFailures)는 **implement에서만** 한다. review/merge는 재분류 없이 RED가 RED다."
+
+**결정**: flaky-existing 판정과 그에 따른 `factory:flaky` 이슈 자동 생성·판정 제외는 **implement 스테이지에서만** 일어난다. review·merge 단계에서 같은 테스트가 다시 실패하면(main이 그 사이 움직였거나 새 PR이 경쟁 조건을 심었거나) 재시도로 되돌리지 않고 RED로 판정해 사람 또는 다음 implement 재진입이 보게 한다. §5.2.5 도입부의 "gates.sh는 절대 재시도로 GREEN을 만들지 않는다"는 원칙을 "재분류 창구는 하나뿐"이라는 스테이지 경계로 구체화한 결정이다 — 재분류 권한이 여러 곳에 있으면 서로 다른 근거로 같은 테스트를 다르게 판정하는 상황을 막을 수 없다.
+
+**영향**: §5.2.5-③, §4.2.1 step 5, §5.2.4.
+
+---
+
+## ADR-012 게이트 판정과 사전 assert의 분리 — `gatesChecked` — 2026-09-12
+
+**질문**: "`gates.json`이 없다"(아직 검증 안 됨)와 "`gates.json`이 RED다"(검증했더니 실패)를 같은 검사로 뭉뚱그려도 되는가 — 특히 스테이지 **시작** 시점의 선행 handoff 확인(`assert-handoff.sh`)에도 그 검사를 걸면 무슨 일이 생기는가.
+
+**관측** (Plan 1b `lib/requirements.js`, Task 12 리뷰 수정 "C-A"): `requirements.js`의 `gatesGate(ctx)`를 처음에는 `ctx.gatesFile`의 유무·status만으로 무조건 판정하게 만들었다. 그런데 `merge` 스테이지의 `assertHandoff`(stage=merge)는 **선행** handoff(review)를 확인하려고 `requirementFor("factory:approved")({issue, comments})`를 호출한다 — 이 시점은 `resetGates`가 지난 런의 `gates.json`을 이미 지운 직후라 `ctx.gatesFile`이 없다. 그 결과 매번 `"gates file missing"`으로 거부되어 **merge 스테이지 전체가 항상 실패**하는 회귀가 발생했다("merge: 선행 handoff 확인은 게이트를 요구하지 않는다" 테스트로 재현·확인, 785327b 리뷰).
+
+**결정**: `gatesGate`는 **`ctx.gatesChecked === true`일 때만** 판정하고, 아니면 `null`(통과)을 돌려준다. 이 표식은 오직 **전이 경로**(`bin/run-stage.js`의 `transition` dep)에서만 `gates.json`과 함께 세워진다 — `runStage`의 `assertHandoff` dep과 `bin/assert-handoff.js`는 이 값을 절대 세우지 않는다(양쪽 코드에 그 이유를 주석으로 명시). 즉 "직전 스테이지가 산출물을 남겼는가"(assert, 스테이지 시작)와 "이번 스테이지의 게이트가 GREEN인가"(전이, 스테이지 종료)는 서로 다른 질문이고 서로 다른 코드 경로에서 검사된다. 부수 방어선: `gatesGate`는 `ctx.gatesFile?.diagnostic === true`(로컬 진단 CLI `bin/gates.js`의 산출물)도 거부한다 — 진단 실행이 전이를 통과시키지 못하게.
+
+**영향**: §3.3(approved/merged 행의 전제 — ADR-010과 함께), §4.2.1 step 2·8.
+
+---
+
+## ADR-013 훅 입력 불신 원칙 (lint-touched 인젝션 사례) — 2026-09-12
+
+**질문**: `PostToolUse` 훅이 에이전트가 채운 `tool_input`(예: `file_path`)을 셸 명령 문자열에 그대로 이어붙여도 되는가.
+
+**관측** (Plan 1b `factory/hooks/lint-touched.sh`, Task 13 리뷰 CRITICAL 1): 최초 구현은 `cmd=${cmd//\{file\}/$file}`로 `tool_input.file_path`를 이스케이프 없이 명령 템플릿에 그대로 치환했다. review가 `file_path: "x.js; touch <tmp>/PWNED #"`를 채운 Edit/Write 호출을 흉내 낸 테스트로 이 경로를 재현했다 — 수정 전 코드는 `;` 뒤를 별도 명령으로 실행해 `PWNED` 파일이 실제로 생성됐다(`existsSync(pwnDir/PWNED) === true`, 인젝션 성공을 그대로 증명). 훅은 에이전트 프로세스 **밖**에서 도는 L2 강제 장치인데, 그 장치 자신이 에이전트가 통제하는 문자열로 임의 명령을 실행할 수 있는 구멍이 있었던 것이다.
+
+**결정**: **훅에 들어오는 `tool_input` 값은 신뢰하지 않는다 — 셸 문자열에 끼워 넣을 때는 반드시 이스케이프한다.** `lint-touched.sh`는 `file_path`를 `printf '%q'`로 이스케이프한 뒤에만 명령 템플릿의 `{file}` 자리에 넣는다(`qfile=$(printf '%q' "$file"); cmd=${cmd//\{file\}/$qfile}`). 재현 테스트(`lint-touched: shell-escapes file_path — no command injection via Edit/Write`)로 수정 후에는 `PWNED`가 생성되지 않음을 확인했다. 이 원칙은 `lint-touched.sh` 하나에 국한되지 않는다 — 앞으로 어떤 훅이든 `tool_input`(또는 다른 에이전트 통제 필드)을 `bash -lc`류 문자열에 섞으면 같은 방식으로 이스케이프해야 한다.
+
+**영향**: §6.3(`lint-touched.sh` 서술), 훅 작성 일반 규칙(ADR-009의 "로깅 훅은 exit 0" 규칙과 나란히 적용되는 별개의 규칙 — 하나는 훅이 잡을 막지 않게, 하나는 훅 자신이 구멍이 되지 않게).

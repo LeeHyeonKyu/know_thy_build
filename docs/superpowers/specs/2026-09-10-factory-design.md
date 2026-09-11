@@ -109,6 +109,7 @@ stateDiagram-v2
   planned --> in_progress: implement claim
   in_progress --> awaiting_review: gates GREEN + PR
   in_progress --> blocked: env 실패
+  in_progress --> planned: sweeper 재큐
   awaiting_review --> approved: review N/N
   awaiting_review --> rework: review reject
   rework --> in_progress: implement 재진입
@@ -137,8 +138,10 @@ stateDiagram-v2
 | `ready` | `stage=triage` | `disposition=ready`, `tier` 존재 |
 | `planned` | `stage=plan` | `done_when[]` ≥1, `files_expected[]`, `dissent_log[]`, 참여 역할 == CHARTER 로스터, 라운드 수 == 3 |
 | `awaiting-review` | `stage=implement` | `gates.status=GREEN`, `head_sha` == 브랜치 HEAD, `verifier.verdict=accepted`, PR 번호 |
-| `approved` | `stage=review` | `head_sha` == PR HEAD, 판정 수 == 로스터 크기, 전원 `approve`, `round` ≤ K |
-| `merged` | (merge 잡 자체가 검사) | required checks GREEN, integrity GREEN, approved handoff의 `head_sha` == PR HEAD |
+| `approved` | `stage=review` | `head_sha` == PR HEAD, 판정 수 == 로스터 크기, 전원 `approve`, `round` ≤ K, **이번 스테이지의 `gates.json`이 GREEN** |
+| `merged` | (merge 잡 자체가 검사) | required checks GREEN, integrity GREEN, approved handoff의 `head_sha` == PR HEAD, **이번 스테이지의 `gates.json`이 GREEN** |
+
+review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5) — `approved`/`merged` 전이가 보는 `gates.json`은 review·merge 자신이 이번 런에서 만든 파일이지 implement의 파일을 재사용하지 않는다. 단 이 검사는 **오직 전이 경로에서만** 작동한다: 스테이지 시작 시점의 선행 handoff 확인(`assert-handoff.sh`, §4.2.1 step 2)은 "직전 스테이지가 산출물을 남겼는가"만 묻고 이번 런의 게이트는 묻지 않는다 — 그 시점엔 이번 런의 게이트가 아직 돌지 않았다(`resetGates`가 지난 런의 파일을 지운 직후다). 두 시점을 구분하는 표식이 `gatesChecked`다: `transition.sh`가 전이 직전에만 `gatesChecked=true`를 `gates.json`과 함께 실어 넘기고, `assert-handoff.sh`는 이 값을 절대 세우지 않는다(ADR-012).
 
 사람이 라벨을 `approved`로 손으로 옮겨도 merge 잡은 review handoff를 찾지 못하므로 `needs-human`으로 되돌린다. **건너뛰기는 라벨이 아니라 산출물 부재로 막힌다.**
 
@@ -300,7 +303,17 @@ run-stage.sh <stage> <issue>
       10분으로 잘리고 foreground sleep은 Bash 툴이 차단하므로 workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상 moot)
      (stdout은 파싱 **전에** 위 리다이렉트로 `.factory/out/<stage>.json`에 verbatim 저장된다 — JSON 파싱이 실패해도 원본이 남고,
       6의 산출물 확인과 `verify-stage.sh` 재실행이 이 파일을 읽는다. §4.4)
-  5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 생성
+  5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
+                                             #   gates.json이 진실이다 — handoff(7)에 실리는 gates 필드는 이 파일의 복사본일 뿐이고, 워크플로가
+                                             #   다른 값을 써 넣으면 6이 "handoff gates mismatch"로 거부하며, 아예 빠뜨렸으면 6이 파일 값으로 채운다(ADR-010).
+                                             #   prove-test·new-test-repeat(§5.2.4)와 diff_coverage·mutation(증명 게이트)도 gates.sh 자신이 실행해
+                                             #   gates.json의 게이트 항목(prove-test, new-test-repeat, diff_coverage, mutation)으로 합산한다 — 별도 파일로 흩어지지 않는다.
+                                             #   실패한 기존 테스트의 flaky 재분류(classify-failure.sh, §5.2.5-③)는 implement에서만 한다 — review·merge는
+                                             #   재분류 없이 RED가 RED다(ADR-011). flaky-existing은 이번 판정에서 excluded로 옮기고 제목 `flaky: <id>`로
+                                             #   중복 없이 `factory:queue` + `factory:flaky` 이슈를 자동 생성한다.
+                                             #   게이트별 되돌림 — 남은 실패가 0이 돼도, 그 게이트 자신이 리포트를 **파싱했고**(parsed:true) 자신의
+                                             #   failing_ids가 전부 제외 목록에 들어간 경우에만 그 게이트가 RED→GREEN으로 뒤집힌다. 리포트를 못 읽어
+                                             #   이유를 모르는 RED 게이트(e2e 등)는 절대 뒤집지 않는다.
   6. verify-stage.sh <stage> <issue>         # 4의 결과에 workflow 산출물이 있는가: 역할 목록 == context.json 로스터,
                                              #   라운드 수, 판정 수, orchestration == harness.toml 설정. 없으면 needs-human "stage artifact missing"
                                              #   인원·역할의 근거는 훅 기록이다(ADR-001): SubagentStart/SubagentStop 라인의 agent_id·agent_type을 센다.
@@ -319,6 +332,10 @@ run-stage.sh <stage> <issue>
   8. transition.sh <issue> <to>              # 3.3 규칙 (implement 성공 시 <to>=factory:awaiting-review; 출발 상태는 2.5가 이미 in-progress로 옮겨 둔 상태)
   9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md append + push · lock 해제
 ```
+
+**merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.sh`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
+
+merge 스테이지도 여전히 `claude -p "/factory-merge <issue>"`를 호출한다(step 4) — 충돌 해소가 필요할 때만 `merge.integrator`가 spawn되고 평소엔 스크립트만 돈다(§7.1). **Plan 2에서 merge를 스크립트 전용으로 바꾼다**는 것이 이 계획 시점에서는 이연된 결정이다.
 
 #### 4.2.2 커맨드 파일 — `.claude/commands/factory-implement.md`
 
@@ -370,7 +387,12 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 
 - 잡은 짧다(표 4.1). 6시간 상한은 문제가 아니다.
 - 구현 에이전트는 논리 단위마다 커밋·push한다. `Stop` 훅이 미push 변경이 있으면 종료를 거부한다.
-- sweeper가 heartbeat 30분 끊긴 `in-progress`를 `planned`(재시도 +1)로 되돌린다. R회 초과 시 `needs-human`.
+- **sweeper**(`factory-sweeper.yml`, 30분 주기 → `.factory/bin/sweep.js`)가 네 가지를 훑는다:
+  1. `factory:in-progress` 이슈의 heartbeat 코멘트(`<!-- factory-heartbeat issue=<n> -->`)가 30분 넘게 갱신되지 않았으면 lock을 회수하고, 같은 이슈의 `factory-retry issue=<n> count=<k>` 마커를 읽어 count+1이 R 이하면 `factory:planned`로 되돌린다(재큐 — §3.2 `in_progress --> planned` 엣지, 다음 재큐 코멘트에 갱신된 count가 남는다). count가 R을 넘으면 `factory:needs-human`으로 보낸다.
+  2. `factory:blocked` 이슈는 재시도하지 않고 곧바로 `factory:needs-human`으로 올린다 — 환경·크리덴셜 문제는 sweeper가 고칠 수 없다(§3.2 `blocked --> needs_human`).
+  3. 격리 정책(`.factory/quarantine.toml`, §5.2.5-⑤)을 적용한다: `consecutive_passes ≥ quarantine_return_after`인 항목은 복귀시키고, `quarantine_ttl_days` 경과 또는 `since` 파싱 실패(fail-closed) 항목은 만료 처리한다.
+  4. 토큰 발급일(`FACTORY_TOKEN_ISSUED_AT`)이 334일(≈11개월)을 넘으면 "토큰 갱신 필요" `factory:needs-human` 이슈를 연다 — 같은 제목의 열린 이슈가 있으면 중복 생성하지 않는다(§4.4).
+  각 이슈·각 서브 스텝은 개별적으로 실패가 격리된다 — 하나가 에러를 던져도 나머지는 계속 처리된다.
 - Claude Workflow의 resume은 세션 디렉토리에 의존하므로 **쓰지 않는다.** 재진입은 브랜치·handoff에서 한다.
 
 ### 4.4 의존성과 인증
@@ -431,11 +453,14 @@ node  = "22"
 
 [commands]                            # 전부 exit code로 판정. 출력은 run 기록에 첨부
 lint        = "pnpm lint"
+lint_file   = "pnpm eslint {file}"                                     # §6.3 lint-touched.sh가 건드린 파일 하나에만 돌린다 (로깅형, 절대 차단 안 함)
 typecheck   = "pnpm tsc --noEmit"
 unit        = "pnpm vitest run --project unit --reporter=json --outputFile=.factory/out/unit.json"
 integration = "pnpm vitest run --project integration --reporter=json --outputFile=.factory/out/integration.json"
 e2e         = "pnpm playwright test --reporter=json --output=.factory/out/e2e"
 build       = "pnpm build"
+test_files  = "pnpm vitest run {files}"                                # §5.2.4 prove-test·new-test-repeat: 지정한 테스트 파일들만 실행
+test_one    = "pnpm vitest run {file} -t '{name}'"                     # §5.2.5-③ classify-failure: 테스트 하나만 격리 재실행
 
 [harness]
 maturity = "M2"                        # M0 | M1 | M2 (§5.2.1). 승격은 factory:harness 이슈 + 사람 머지
@@ -443,9 +468,11 @@ maturity = "M2"                        # M0 | M1 | M2 (§5.2.1). 승격은 facto
 [factory]
 orchestration = "workflow"             # workflow | agent (§4.2.4). 런타임에 자동 전환되지 않는다
 
-[commands.proof]                       # 증명 게이트 (§5.2.4). 측정은 gates.sh가, 임계는 여기(protected)에
-diff_coverage = "pnpm vitest run --coverage --coverage.reporter=json && node .factory/bin/diff-coverage.js"
-mutation      = "pnpm stryker run --incremental --mutate $(git diff --name-only origin/main -- 'src/**/*.ts')"
+[commands.proof]                       # 증명 게이트 (§5.2.4). 측정은 gates.sh(diff-coverage.js/mutation.js)가, 임계는 여기(protected)에
+coverage        = "pnpm vitest run --coverage --coverage.reporter=json"   # diff coverage가 돌릴 커버리지 명령
+coverage_report = ".factory/out/coverage/coverage-final.json"            # istanbul JSON. diff-coverage.js가 변경 줄과 대조
+mutation        = "pnpm stryker run --incremental --mutate $(git diff --name-only origin/main -- 'src/**/*.ts')"
+mutation_report = "reports/mutation/mutation.json"                       # Stryker --incremental 기본 경로. mutation.js가 읽는다
 
 [gates]
 required = ["lint", "typecheck", "unit", "integration", "e2e", "build", "diff_coverage", "mutation"]   # 성숙도까지의 명령. skip이면 MISCONFIGURED (exit 2)
@@ -459,14 +486,18 @@ mutation_score_pct = 70                # 변경 파일 기준
 new_test_repeats   = 3                 # §5.2.5-②
 flaky_isolation_runs = 3               # §5.2.5-③ PR 코드 격리 재실행
 flaky_base_runs    = 5                 # §5.2.5-③ main 재실행
-quarantine_max     = 5                 # §5.2.5-⑤ 초과 시 implement claim 거부
+quarantine_max     = 5                 # §5.2.5-⑤ 초과 시 implement claim 거부. 이 값이 quarantine 상한의 유일한 출처다(CHARTER에는 두지 않는다 — §5.3)
 quarantine_ttl_days = 28
+quarantine_return_after = 30           # §5.2.5-⑤ 연속 통과 시 자동 복귀
 
 [test]                                 # §5.2 테스트 계약. /qa SETUP이 작성하고 doctor가 실행한다
 guide        = "docs/QA.md"            # builder·qa 리뷰어의 필수 입력. 레벨별 작성법·fixture·네이밍
 naming       = "test_{issue}_{slug}"   # done_when.verify가 가리키는 id 규약
 smoke        = { unit = "test/unit/smoke.test.ts", integration = "test/integration/smoke.test.ts", e2e = "e2e/smoke.spec.ts" }
 runtime_budget_min = 12                # full 레벨 소요 시간 상한. 초과가 3회 연속이면 retro가 분할 제안
+test_glob    = ["test/**/*.test.ts", "e2e/**/*.spec.ts"]   # changed-files.js가 "이번 diff의 테스트 파일"을 가르는 기준(§5.2.4)
+source_glob  = ["src/**/*.ts"]                              # diff coverage의 분모, mutation의 대상 파일 선택 기준
+unit_report  = ".factory/out/unit.json"                     # integration_report/e2e_report도 같은 규약: <level>_report, 기본값 .factory/out/<level>.json
 
 [test.env]
 compose   = "docker-compose.test.yml"  # 로컬·CI 동일. CI는 services: 로 치환 가능
@@ -540,6 +571,8 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 - **기존 테스트 수정 금지**(`tests_are_load_bearing`). 불가피하면 spec-conformance 리뷰어가 사유와 함께 `must_approve_explicitly`로 승인하고, 해당 PR은 tier가 load-bearing으로 승격된다. 예외: `factory:flaky` 이슈는 그 이슈가 지목한 테스트 id에 한해 수정 가능. 삭제는 §5.2.5-④의 TTL 경로로만.
 - `[test].runtime_budget_min` 초과가 3회 연속이면 retro가 `fast` 레벨 선택 규칙(변경 경로 기반 선택 실행) 또는 샤딩을 제안한다. 그 전까지는 느려도 전부 돈다.
 
+**대상 파일 — "새 테스트"와 "변경된 테스트"는 다른 로직에 쓰인다.** `prove-test`·`new-test-repeat`은 이번 PR에서 **변경된 테스트 파일 전부**(추가 A + 수정 M, rename R은 새 경로 기준. 삭제 D는 제외 — 돌릴 수도 커버리지를 잴 수도 없다)를 대상으로 한다: 기존 파일에 케이스를 추가했을 뿐이어도 base에 얹으면 실패해야 증명된다. 반면 `classify-failure.sh`의 "새 테스트 → red" 규칙(§5.2.5-③ step 1)은 **git이 `A`로 잡은 파일만**(`addedTests`)을 새 테스트로 본다 — 기존 파일을 수정해 만든 케이스는 새 테스트 취급하지 않고 기존 테스트의 flaky/introduced 분류 경로를 그대로 탄다. `new_test_repeats` 임계가 설정돼 있지 않으면(`[gates.thresholds]` 누락) `new-test-repeat` 게이트는 "돌았지만 통과"가 아니라 **`MISCONFIGURED`**다 — 반복 횟수를 모르면 "흔들리지 않음"을 주장할 근거가 없다.
+
 **증명 게이트 — 커버리지와 mutation은 역할이 다르고 둘 다 쓴다.**
 
 | 게이트 | 재는 것 | 레벨 | 성숙도 | 임계(예) |
@@ -562,25 +595,27 @@ flaky = 같은 코드에서 결과가 달라지는 테스트. 게이트가 "재�
 - 테스트 내 `sleep`·고정 시간 대기 금지, 조건 대기만 — lint 규칙
 
 **② 탐지 — 새 테스트는 태어날 때 시끄러운 조건에서 반복**
-implement 단계에서 `gates.sh`가 **이번 PR의 새 테스트만 3회** 실행하되, 조용한 3회가 아니라 **전체 스위트가 병렬로 도는 중에, 순서 무작위로** 돌린다(부하 의존 flaky를 재현하기 위해). 한 번이라도 다르면 RED, builder에게 "비결정적 테스트"로 rework.
+implement 단계에서 `gates.sh`가 **이번 PR에서 변경된 테스트 파일**(추가 + 수정, §5.2.4 "대상 파일" 참고 — 새 테스트만이 아니다)을 `new_test_repeats`회 실행하되, 조용한 반복이 아니라 **전체 스위트가 병렬로 도는 중에** 돌린다(부하 의존 flaky를 재현하기 위해). 한 번이라도 다르면 RED, builder에게 "비결정적 테스트"로 rework.
 
 ①②가 본체다. flaky의 원인은 거의 전부 테스트가 쓰이는 순간에 심어지므로 여기서 대부분 죽는다. 새어 나오는 것은 세 부류뿐이며 각각 다른 곳에서 처리된다: **환경 문제**(docker 지연, 포트 충돌)는 `test-env.sh` 실패 → `blocked`로 분류되어 테스트 통계를 오염시키지 않는다. **부하 의존**은 ②의 시끄러운 반복이 잡는다. **잠복 경쟁 조건**(쓰일 땐 결정적이었으나 나중 PR이 공유 코드에 race를 넣음)은 ③이 원인 PR에 책임을 돌린다. ④⑤에 자주 도달하면 그 자체가 ①의 규칙이 부족하다는 retro 신호다.
 
 **③ 분류 — 기존 테스트가 실패했을 때, 이 PR 탓인가** (`classify-failure.sh`, 실패 시에만 실행되므로 평소 비용 0)
 1. 실패한 기존 테스트를 PR 코드에서 격리 재실행 3회 → 3/3 아니면 RED (이 PR이 깨뜨림)
 2. 3/3이면 base SHA(main)에서 5회 실행 → main에서 한 번도 안 실패하면 이 PR이 비결정성을 **도입**한 것 → RED
-3. main에서도 실패하면 `flaky-existing`: 이 PR의 판정에서 그 테스트를 제외하고, **`factory:queue` + `factory:flaky` 이슈를 자동 생성**(실행 로그 첨부)
+3. main에서도 실패하면 `flaky-existing`: 이 PR의 판정에서 그 테스트를 제외하고, **`factory:queue` + `factory:flaky` 이슈를 자동 생성**(실행 로그 첨부, 제목 `flaky: <id>`로 중복 생성 방지)
 
 기준은 "재시도하면 통과"가 아니라 **"main에서도 flaky임이 입증됨"** 이다.
+
+이 분류는 **implement에서만** 실행된다 — review·merge는 실패한 기존 테스트를 재분류하지 않고 RED를 RED로 둔다(ADR-011; "재시도로 GREEN을 만들지 않는다"는 원칙의 스테이지 경계 적용). 1의 격리 재실행에 앞서 base 워크트리 준비 자체가 실패하면(예: `git worktree add` 실패) 그 테스트와 아직 처리하지 못한 나머지 테스트는 `introduced`도 `flaky-existing`도 아닌 `blocked`로 분류된다 — base와 비교하지 못했으므로 어느 쪽으로도 단정할 근거가 없고, 그 verdict가 하나라도 있으면 스테이지는 판정 없이 `factory:blocked`로 끝난다(사람이 봐야 하는 상태이지 RED가 아니다).
 
 **④ 자가 수정 — flaky 이슈는 factory가 처리**
 일반 파이프라인을 탄다. 해당 테스트 id에 한해 수정 허용. done_when은 "해당 테스트 30회 연속 통과". plan 단계에서 skeptic의 lens에 "테스트 문제인가 **제품의 경쟁 조건**인가"가 필수 질문으로 들어간다 — flaky는 자주 실제 결함이다.
 
 **⑤ 격리 — K회 자가 수정 실패 후. 사람 승인은 없다**
 사람에게 "skip 승인"을 맡겨도 근거를 더 잘 읽는 것이 아니므로 그 경로는 두지 않는다. 대신 시스템 제약으로 바꾼다.
-- **격리(quarantine)**: skip하지 않는다. **계속 실행하되 판정에서만 제외**하고 결과를 run 기록에 남긴다. `.factory/quarantine.toml`(스크립트만 씀)에 id·사유·근거 run·격리일 기록.
-- **상한**: 격리 수 ≤ N(기본 5개 또는 전체의 2%). 초과 시 implement 잡이 **새 claim을 거부**한다(리뷰 대기 역압과 동일). flaky 방치 = 공장 정지이므로 방치가 구조적으로 불가능하다.
-- **자동 복귀**: 격리 중 30회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다).
+- **격리(quarantine)**: skip하지 않는다. **계속 실행하되 판정에서만 제외**하고 결과를 run 기록에 남긴다. `.factory/quarantine.toml`(스크립트만 씀)에 기록. schema: `[[quarantined]] id, since, reason, evidence[], consecutive_passes`.
+- **상한**: 격리 수 ≤ N(기본 5개 또는 전체의 2%, `harness.toml [gates.thresholds].quarantine_max`가 유일한 출처 — §5.1). 초과 시 implement 잡이 **새 claim을 거부**한다(리뷰 대기 역압과 동일). flaky 방치 = 공장 정지이므로 방치가 구조적으로 불가능하다.
+- **자동 복귀**: 격리 중 `quarantine_return_after`(기본 30)회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다).
 - **TTL**: 격리 4주 경과 시 retro가 그 테스트가 지키던 동작을 **다른 레벨에서 다시 쓰는 이슈**를 만든다(예: e2e 타이밍 의존 → integration). 그것도 K회 실패하면 삭제하고 `DECISIONS.md`에 "이 동작은 현재 검증되지 않음"을 기록한다. 삭제는 조용히 일어나지 않는다.
 - 사람은 역압으로 공장이 멈췄을 때만 등장하며, 그때의 판단은 "skip해도 되나"가 아니라 "제품에 비결정성이 있는데 어떻게 할 것인가"라는 제품 판단이다.
 
@@ -624,7 +659,7 @@ plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
 plan_rounds: { docs: 2, default: 3 }
-back_pressure: { awaiting_review_max: 4, quarantine_max: 5 }
+back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -691,7 +726,7 @@ light_on_merge: true
 
 ### 6.1 L0 상세
 - required checks: `factory/gates`, `factory/review`, `factory/integrity`. 세 개 모두 GREEN이어야 머지 가능.
-- `factory/integrity`: PR diff에 `harness.toml [protected].factory` 매치 파일이 있으면 RED. 예외는 `factory:retro-proposal` 라벨 PR(사람만 머지 가능 — required reviewer 1명 규칙을 이 라벨에만 적용).
+- `factory/integrity`(`.factory/bin/integrity.js`)는 PR diff(`base...head`)에서 세 가지를 본다: ① `[protected].factory` 매치 파일 변경 — `[protected].except`와 `[protected].additive_only`(`.claude/agents/*.md`의 `## Examples`/`## Perspectives`, 위치 기반 검사: 섹션 밖 삽입·삭제는 전부 위반이고, 이번 diff가 새로 추가한 `## ` 헤더는 그 자신도 다른 추가 줄의 경계로도 인정하지 않는다 — base에 없던 헤더로 경계를 위조해 섹션을 자칭해도 잡힌다) 밖이면 RED. ② `.factory/lessons/**` 항목 포맷 — `factory-lessons:v1` 헤더, `- [L-YYYY-MM-DD-NN]` 형식, 항목마다 `근거:` 문구, 역할당 상한(`max`) 초과. ③ `harness.toml [test].test_glob`에 매치하는 테스트 파일에 skip/ignore 주석(`.skip(`, `xit(`, `xdescribe(`, `@pytest.mark.skip`, `istanbul ignore`, `pragma: no cover`, `Stryker disable`)이 새로 추가됨. 예외는 `factory:retro-proposal` 라벨 PR(사람만 머지 가능 — required reviewer 1명 규칙을 이 라벨에만 적용).
 - 토큰: implement/review/plan 잡은 `FACTORY_BOT_TOKEN`(merge 권한 없음). merge 잡만 `FACTORY_MERGE_TOKEN`.
 - linear history, force-push 금지, 관리자도 규칙 적용(`enforce_admins`).
 
@@ -742,6 +777,12 @@ light_on_merge: true
 ```
 
 훅은 stdin JSON(`.tool_input.command`)을 읽는다. 기존 `check-merge-gate.sh`의 `$TOOL_INPUT` 버그는 이 교체로 해소된다.
+
+`lint-touched.sh`(`PostToolUse(Edit|Write)`, **로깅형** — 절대 차단하지 않는다)는 `tool_input.file_path`를 읽어 `harness.toml [commands].lint_file`을 그 파일 하나에 대해서만 돌리고, 실패해도 결과를 stderr로 에이전트에게 돌려줄 뿐 **exit 0으로 끝난다**(ADR-009의 로깅 훅 규칙과 동일). 명령 실행은 Node의 `spawnSync`를 거쳐 `FACTORY_LINT_TIMEOUT_MS`(기본 60000ms)로 시간을 제한한다 — bash `timeout(1)`이 없는 러너(macOS 등)에서도 훅이 멈추지 않는다.
+
+`verdict-format.sh`(`SubagentStop`, **판정형** — exit 2로 세션 종료를 거부할 수 있다)는 `agent_type`이 `reviewer-*` 또는 `factory-verifier`일 때만 개입한다. `agent_transcript_path`의 트랜스크립트에서 **마지막 assistant 메시지 하나만** 읽어(이전 메시지의 verdict가 이후 "생각이 바뀌었다"는 발언을 가려서는 안 된다) ` ```json ` 펜스와 `"verdict"` 키가 있는지 본다. 없으면 exit 2로 종료를 거부하고 verdict를 다시 요구한다.
+
+**훅에 들어오는 `tool_input` 값은 신뢰하지 않는다 — 셸 문자열에 끼워 넣을 때는 반드시 이스케이프한다.** `lint-touched.sh`는 `tool_input.file_path`(에이전트가 자유롭게 채우는 값)를 `printf '%q'`로 이스케이프한 뒤에만 명령 템플릿의 `{file}` 자리에 넣는다. 이스케이프 없이 문자열 치환만 하면 `x.js; touch <tmp>/PWNED #` 같은 `file_path`가 그대로 셸에서 두 번째 명령으로 실행된다 — Plan 1b 실행 판결(review가 이 인젝션을 실제로 재현: 수정 전 코드에서 `PWNED` 파일이 생성됨을 확인, 수정 후 재검증 통과)로 확정됐고 ADR-013(아래)에 남는다.
 
 **이 훅들은 Workflow `agent()` 서브에이전트 안에서도 발화한다**(ADR-001 실측: 워커 2명 실행에서 `PreToolUse` 8줄, `SubagentStart` 2줄, `SubagentStop` 2줄). 따라서 L2를 에이전트 frontmatter로 분산시킬 필요가 없고 `settings.json` 한 곳으로 충분하다. stdin JSON에는 `agent_id`·`agent_type`이 실려 있어(메인 세션의 `Stop`에는 없다) 훅 로그만으로 메인 세션 호출과 서브에이전트 호출을 구분할 수 있다. **`verify-stage.sh`는 이 훅 기록을 인원·역할 검증의 입력으로 쓴다** — `SubagentStart`/`SubagentStop`의 `agent_type`을 세서 로스터와 대조한다. 다만 스파이크의 로깅 훅이 stdin JSON의 **키 목록만** 남겼으므로 확인된 것은 두 필드의 **존재**이고, `agent_type`의 **값이 등록된 역할 이름(`.claude/agents/<role>`)과 같은 문자열인지는 미확인**이다 — Plan 1이 `verify-stage.sh`를 쓰기 전에 가장 먼저 확인할 항목이며, 다르면 매핑 테이블을 끼우거나 다른 필드로 대조한다(인원 수를 세는 용도는 어느 쪽이든 성립). `-p` 출력 JSON의 `subagent_stats`는 쓰지 않는다: Workflow 서브에이전트를 세지 않는다(ADR-002 — 워커 2명이 실제로 떴는데 `spawned: 0`).
 
