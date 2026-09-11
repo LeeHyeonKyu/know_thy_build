@@ -37,6 +37,18 @@ function makeDoctorRun(root) {
   ]);
 }
 
+/** makeDoctorRun과 동일하지만 smoke 명령(test_files에 test/smoke.test.js가 들어간 bash -lc 호출)만 reject한다. */
+function makeDoctorRunSmokeThrows(root) {
+  return makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "ls-files", result: () => ({ code: 0, stdout: allFiles(root).join("\n"), stderr: "" }) },
+    { match: (c, a) => c === "bash" && a[0] === "-lc" && a[1].includes("test/smoke.test.js"), result: () => { throw new Error("spawn boom"); } },
+    { match: (c, a) => c === "bash" && a[0] && a[0].endsWith("verdict-format.sh"), result: { code: 2, stdout: "", stderr: "" } },
+    { match: (c) => c === "bash", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c) => c === "docker", result: { code: 0, stdout: "", stderr: "" } },
+    { match: () => true, result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+}
+
 const fakeGh = {
   listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
   getVariable: async () => "2026-01-01T00:00:00Z",
@@ -131,6 +143,66 @@ test("--offline skips GitHub checks entirely (no gh injected, no github.* checks
   expect(code).toBe(0);
   const { checks } = JSON.parse(o.out.join(""));
   expect(checks.some((c) => c.id.startsWith("github."))).toBe(false);
+});
+
+test("smoke command that throws is caught as smoke.<level> FAIL and the env is still torn down (fix round 1, Important #1)", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRunSmokeThrows(root);
+  const envDownCalls = [];
+  const spyEnvDown = async (args) => { envDownCalls.push(args); return { ok: true, steps: [] }; };
+  const { io: i, o } = io();
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run, gh: fakeGh, deps: { envDown: spyEnvDown } });
+  expect(typeof code).toBe("number"); // did not throw / propagate
+  expect(envDownCalls).toHaveLength(1); // torn down exactly once despite the throw
+  const { checks } = JSON.parse(o.out.join(""));
+  const smokeUnit = checks.find((c) => c.id === "smoke.unit");
+  expect(smokeUnit).toMatchObject({ level: "FAIL" });
+  expect(smokeUnit.detail).toContain("threw");
+});
+
+test("envUp partial failure still tears down with the pids it started, and reports smoke.env FAIL (fix round 1, Important #2)", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root); // smoke.<level> commands never run on this branch
+  const envDownCalls = [];
+  const spyEnvDown = async (args) => { envDownCalls.push(args); return { ok: true, steps: [] }; };
+  const spyEnvUp = async () => ({ ok: false, steps: [{ name: "seed", ok: false, detail: "exit 1: seed failed" }], pids: [7] });
+  const { io: i, o } = io();
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run, gh: fakeGh, deps: { envUp: spyEnvUp, envDown: spyEnvDown } });
+  expect(typeof code).toBe("number");
+  expect(envDownCalls).toHaveLength(1);
+  expect(envDownCalls[0].pids).toEqual([7]); // the partially-started pids are torn down, not dropped
+  const { checks } = JSON.parse(o.out.join(""));
+  expect(checks.find((c) => c.id === "smoke.env")).toMatchObject({ level: "FAIL", detail: expect.stringContaining("seed failed") });
+  expect(checks.some((c) => c.id.startsWith("smoke.") && c.id !== "smoke.env")).toBe(false); // levels never ran
+});
+
+test("envDown failure during teardown is non-fatal — smoke.env-down WARN, doctor still finishes (fix round 1, Important #2)", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root);
+  const spyEnvDown = async () => ({ ok: false, steps: [{ name: "compose-down", ok: false, detail: "exit 1" }] });
+  const { io: i, o } = io();
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run, gh: fakeGh, deps: { envDown: spyEnvDown } });
+  expect(typeof code).toBe("number");
+  const { checks } = JSON.parse(o.out.join(""));
+  expect(checks.find((c) => c.id === "smoke.env-down")).toMatchObject({ level: "WARN", detail: expect.stringContaining("compose-down") });
+});
+
+test("settings template unreadable → settings.template FAIL instead of throwing (fix round 1, Minor #3)", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root);
+  const { io: i, o } = io();
+  // checkFiles also reads this same source path once (to render/compare .claude/settings.json) — only the
+  // *second* read (doctor.js's own template load for checkSettings) should fail, so checkFiles isn't disturbed.
+  let templateReads = 0;
+  const readFile = (p) => {
+    if (p.endsWith("templates/factory/claude/settings.json") && ++templateReads === 2) throw new Error("ENOENT: no such file");
+    return readFileSync(p, "utf8");
+  };
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run, gh: fakeGh, deps: { readFile } });
+  expect(typeof code).toBe("number"); // did not throw
+  const { checks } = JSON.parse(o.out.join(""));
+  expect(checks.find((c) => c.id === "settings.template")).toMatchObject({ level: "FAIL", detail: expect.stringContaining("ENOENT") });
+  expect(checks.some((c) => c.id === "settings.deny")).toBe(false); // checkSettings itself skipped, not half-run
 });
 
 test("factory scope skipped when .factory/bin/run-stage.js is absent → factory.initialized PASS hint", async () => {

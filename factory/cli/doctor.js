@@ -8,7 +8,7 @@ import { envUp, envDown } from "../lib/test-env.js";
 import { q } from "../lib/prove-test.js";
 import { buildManifest } from "./manifest.js";
 import { projectVars } from "./init.js";
-import { renderReport, exitCode } from "../lib/doctor/report.js";
+import { renderReport, exitCode, summarize } from "../lib/doctor/report.js";
 
 // factory/hooks/*.sh 전부 — checkHooks가 각각 실제로 실행해 종료 코드를 검사한다.
 const DOCTOR_HOOKS = ["block-dangerous.sh", "lint-touched.sh", "record-agents.sh", "stop-guard.sh", "verdict-format.sh"];
@@ -51,9 +51,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
 
   const finish = (checks) => {
     if (json) {
-      const summary = { PASS: 0, WARN: 0, FAIL: 0 };
-      for (const c of checks) summary[c.level]++;
-      io.out(JSON.stringify({ checks, summary }));
+      io.out(JSON.stringify({ checks, summary: summarize(checks) }));
     } else {
       io.out(renderReport(checks));
     }
@@ -99,8 +97,13 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     try {
       settings = JSON.parse(readFile(join(root, ".claude/settings.json")));
     } catch {}
-    const template = JSON.parse(readFileSync(join(pkgRoot, "templates/factory/claude/settings.json"), "utf8"));
-    checks.push(...checkSettings({ settings, template }));
+    let template;
+    try {
+      template = JSON.parse(readFile(join(pkgRoot, "templates/factory/claude/settings.json")));
+    } catch (e) {
+      checks.push({ id: "settings.template", level: "FAIL", detail: `settings template unreadable: ${e.message}` });
+    }
+    if (template) checks.push(...checkSettings({ settings, template }));
 
     checks.push(...(await checkHooks({ run, root, exists, readFile, hooks: DOCTOR_HOOKS })));
     checks.push(...checkWorkflows({ root, exists, readFile }));
@@ -117,17 +120,38 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   const smoke = harness.test?.smoke || {};
   if (!noRun && Object.keys(smoke).length) {
     const envResult = await envUpFn({ run, cwd: root, harness });
+    // envUp이 partial로 뭔가를 띄워놓고 실패했을 수도 있으니(compose up 성공 → seed 실패 등) 성공 여부와 무관하게
+    // envDown은 항상 부른다. envDown 자체가 실패해도 doctor 전체를 죽이지 않고 WARN으로만 남긴다(teardown은 best-effort).
+    const tearDown = async () => {
+      try {
+        const r = await envDownFn({ run, cwd: root, harness, pids: envResult.pids });
+        if (!r.ok) {
+          const detail = (r.steps || []).filter((s) => !s.ok).map((s) => `${s.name}: ${s.detail}`).join("; ") || "env down reported failure";
+          checks.push({ id: "smoke.env-down", level: "WARN", detail });
+        }
+      } catch (e) {
+        checks.push({ id: "smoke.env-down", level: "WARN", detail: e.message });
+      }
+    };
     if (!envResult.ok) {
+      await tearDown();
       const failed = envResult.steps.find((s) => !s.ok);
       checks.push({ id: "smoke.env", level: "FAIL", detail: failed?.detail || "env up failed" });
     } else {
-      for (const [level, val] of Object.entries(smoke)) {
-        const smokeFiles = Array.isArray(val) ? val : [val];
-        const cmd = harness.commands.test_files.replace("{files}", smokeFiles.map(q).join(" "));
-        const r = await run("bash", ["-lc", cmd], { cwd: root });
-        checks.push({ id: `smoke.${level}`, level: r.code === 0 ? "PASS" : "FAIL", detail: r.code === 0 ? "" : `${cmd} → exit ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 400)}` });
+      try {
+        for (const [level, val] of Object.entries(smoke)) {
+          const smokeFiles = Array.isArray(val) ? val : [val];
+          const cmd = harness.commands.test_files.replaceAll("{files}", smokeFiles.map(q).join(" "));
+          try {
+            const r = await run("bash", ["-lc", cmd], { cwd: root });
+            checks.push({ id: `smoke.${level}`, level: r.code === 0 ? "PASS" : "FAIL", detail: r.code === 0 ? "" : `${cmd} → exit ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 400)}` });
+          } catch (e) {
+            checks.push({ id: `smoke.${level}`, level: "FAIL", detail: `${cmd} → threw: ${e.message}` });
+          }
+        }
+      } finally {
+        await tearDown();
       }
-      await envDownFn({ run, cwd: root, harness, pids: envResult.pids });
     }
   }
 
