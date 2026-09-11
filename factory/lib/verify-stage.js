@@ -2,21 +2,29 @@ import { validate } from "./schemas.js";
 
 const SCHEMA_OF = { triage: "triage.v1", plan: "plan.v1", implement: "implement.v1", review: "review.v1" };
 
-/** result 텍스트에서 첫 JSON 객체를 꺼낸다: ```json 펜스 우선, 없으면 첫 '{'부터 균형 잡힌 '}'까지. */
+/** result 텍스트에서 첫 유효 JSON 객체를 꺼낸다: ```json 펜스 우선, 없거나 무효면 모든 '{' 시작점에서 문자열·이스케이프를 인식하는 균형 스캔. */
 export function extractJson(text) {
   if (typeof text !== "string") return null;
   const fence = /```json\s*\n([\s\S]*?)\n```/.exec(text);
-  const candidates = fence ? [fence[1]] : [];
-  const start = text.indexOf("{");
-  if (start >= 0) {
-    let depth = 0;
-    for (let i = start; i < text.length; i++) {
-      if (text[i] === "{") depth++;
-      if (text[i] === "}") { depth--; if (depth === 0) { candidates.push(text.slice(start, i + 1)); break; } }
-    }
+  if (fence) { try { return JSON.parse(fence[1]); } catch { /* fall through */ } }
+  for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
+    const end = matchBrace(text, start);
+    if (end < 0) continue;
+    try { return JSON.parse(text.slice(start, end + 1)); } catch { /* try next start */ }
   }
-  for (const c of candidates) { try { return JSON.parse(c); } catch { /* try next */ } }
   return null;
+}
+/** start의 '{'에 대응하는 '}' 인덱스. 문자열 리터럴과 \" 이스케이프를 건너뛴다. 없으면 -1. */
+function matchBrace(text, start) {
+  let depth = 0, inStr = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) { if (ch === "\\") i++; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth === 0) return i; }
+  }
+  return -1;
 }
 
 export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration }) {

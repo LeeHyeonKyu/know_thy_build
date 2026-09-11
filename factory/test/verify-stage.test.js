@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { verifyStage } from "../lib/verify-stage.js";
+import { verifyStage, extractJson } from "../lib/verify-stage.js";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -32,4 +32,12 @@ test("plan checks rounds", () => {
   expect(ok.ok).toBe(true);
   const bad = verifyStage({ stage: "plan", out: out({ ...plan, rounds: 3 }), agentsLog: log(["plan-architect", "plan-skeptic"]), roster: ["architect", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow" });
   expect(bad.reasons.join()).toMatch(/rounds/);
+});
+
+test("extractJson tolerates braces inside strings and invalid fences", () => {
+  const obj = { schema: "x", note: "has a stray } and { inside", ok: true };
+  expect(extractJson("prefix text " + JSON.stringify(obj) + " suffix")).toEqual(obj);
+  expect(extractJson("```json\n{not json\n```\nlater: " + JSON.stringify({ a: 1 }))).toEqual({ a: 1 });
+  expect(extractJson("no objects here")).toBe(null);
+  expect(extractJson('{"esc":"quote \\" brace }"}')).toEqual({ esc: 'quote " brace }' });
 });
