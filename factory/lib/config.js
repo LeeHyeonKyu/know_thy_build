@@ -9,6 +9,7 @@ export function loadHarness(root) {
   h.gates ??= {}; h.gates.thresholds = { ...THRESHOLD_DEFAULTS, ...(h.gates.thresholds || {}) };
   h.test = { test_glob: [], source_glob: [], unit_report: ".factory/out/unit.json", ...(h.test || {}) };
   h.commands ??= {}; h.commands.proof = { ...(h.commands.proof || {}) };
+  h.factory = { orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"], ...(h.factory || {}) };
   return h;
 }
 export function loadRoles(root) {

@@ -208,11 +208,11 @@ export async function buildCtxExtra({ gh, issue, to, data, ctx, charter, record 
  * 머지 직전에만 묻는 두 가지: PR의 체크가 전부 통과했는가, 보호 경로 무결성이 지켜졌는가.
  * 조회 자체가 실패하면 플래그를 **세우지 않는다** — requirements가 "확인되지 않음"을 거부로 다룬다(fail closed).
  */
-export async function mergeGates({ gh, root, harness, pr, prHeadSha, base, readFile, record = () => {}, runner = run }) {
+export async function mergeGates({ gh, root, harness, pr, prHeadSha, base, readFile, record = () => {}, runner = run, required = null }) {
   const out = {};
   try {
     if (pr == null) record("merge gate: no PR number in the implement handoff — checks unverified");
-    else out.checksGreen = allChecksGreen(await gh.prChecks(pr));
+    else out.checksGreen = allChecksGreen(await gh.prChecks(pr), required);
   } catch (e) { record(`merge gate: gh pr checks failed — ${e?.message || e}`); }
   try {
     // 무결성은 **머지될 커밋**에 대한 주장이어야 한다. 로컬 워크트리가 PR head가 아니면
@@ -306,7 +306,7 @@ async function main() {
       ctxExtra.gatesChecked = true;
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
-      if (to === "factory:merged") Object.assign(ctxExtra, await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase() }));
+      if (to === "factory:merged") Object.assign(ctxExtra, await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
       return transition({ gh, issue, to, reason, ctxExtra });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),

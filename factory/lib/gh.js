@@ -3,8 +3,13 @@ import { STATES } from "./labels.js";
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
  * bucket(pass|fail|pending|skipping|cancel)은 최신 gh만 준다. 없으면 state로 떨어진다.
+ * required가 있으면 그 이름들만 본다 — 모두 존재하고 모두 pass여야 true(이름이 없으면 false). required=null이면 기존 동작(전체 체크가 대상).
  */
-export const allChecksGreen = (checks) => checks.length > 0 && checks.every((c) => (c.bucket ? c.bucket === "pass" : c.state === "SUCCESS"));
+const isGreen = (c) => (c.bucket ? c.bucket === "pass" : c.state === "SUCCESS");
+export const allChecksGreen = (checks, required = null) => {
+  if (required) return required.every((name) => { const c = checks.find((x) => x.name === name); return c ? isGreen(c) : false; });
+  return checks.length > 0 && checks.every(isGreen);
+};
 
 export function makeGh({ run, repo }) {
   async function gh(args, opts = {}) {
@@ -63,5 +68,57 @@ export function makeGh({ run, repo }) {
     },
     // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
     async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
+
+    /** targetUrl은 옵션 필드 그대로 target_url로 나간다. description은 GitHub API 제한(140자)으로 자른다. */
+    async setStatus({ sha, context, state, description, targetUrl }) {
+      const body = { state, context, description: (description || "").slice(0, 140), target_url: targetUrl };
+      await gh(["api", "-X", "POST", `repos/${repo}/statuses/${sha}`, "--input", "-"], { input: JSON.stringify(body) });
+    },
+    async listSecrets() {
+      return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
+    },
+    async listLabels() {
+      return JSON.parse(await gh(["label", "list", "-R", repo, "--json", "name", "--limit", "200"])).map((l) => l.name);
+    },
+    async createLabel({ name, color, description }) {
+      await gh(["label", "create", name, "-R", repo, "--color", color, "--description", description, "--force"]);
+    },
+    // gh api exits non-zero for an unprotected branch (404) — go through run() directly, like getVariable.
+    async getBranchProtection(branch) {
+      const r = await run("gh", ["api", `repos/${repo}/branches/${branch}/protection`]);
+      return r.code === 0 ? JSON.parse(r.stdout) : null;
+    },
+    async putBranchProtection(branch, body) {
+      await gh(["api", "-X", "PUT", `repos/${repo}/branches/${branch}/protection`, "--input", "-"], { input: JSON.stringify(body) });
+    },
+    async setVariable(name, value) {
+      await gh(["variable", "set", name, "-R", repo, "--body", value]);
+    },
+    async prView(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,state,mergeable,headRefName,headRefOid,baseRefName,labels"]));
+      return { number: j.number, state: j.state, mergeable: j.mergeable, headRefName: j.headRefName, headRefOid: j.headRefOid, baseRefName: j.baseRefName, labels: (j.labels || []).map((l) => l.name) };
+    },
+    async mergePr(pr, { method = "squash", deleteBranch = true } = {}) {
+      const args = ["pr", "merge", String(pr), "-R", repo, `--${method}`];
+      if (deleteBranch) args.push("--delete-branch");
+      await gh(args);
+    },
+    async closeIssue(n, comment) {
+      const args = ["issue", "close", String(n), "-R", repo];
+      if (comment) args.push("--comment", comment);
+      await gh(args);
+    },
+    async issueList({ labels = [], state = "open", limit = 200 } = {}) {
+      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,labels,updatedAt,closedAt"];
+      const j = JSON.parse(await gh(args));
+      return j.map((i) => ({ number: i.number, title: i.title, labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
+    },
+    async prList({ label, state = "open" } = {}) {
+      const args = ["pr", "list", "-R", repo, "--state", state];
+      if (label) args.push("--label", label);
+      args.push("--json", "number,title,headRefName,updatedAt");
+      const j = JSON.parse(await gh(args));
+      return j.map((p) => ({ number: p.number, title: p.title, headRefName: p.headRefName, updatedAt: p.updatedAt }));
+    },
   };
 }

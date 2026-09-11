@@ -91,3 +91,96 @@ test("getVariable returns trimmed value, or null on non-zero exit (missing varia
   const runMissing = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "variable not found" } }]);
   expect(await makeGh({ run: runMissing, repo }).getVariable("FACTORY_TOKEN_ISSUED_AT")).toBe(null);
 });
+
+// ── Task 9: bootstrap/status/merge surface + required_checks filter ────────
+
+test("allChecksGreen with required: all required names present and pass → true; a missing name → false; required=null keeps old behavior", () => {
+  const checks = [{ name: "factory/gates", bucket: "pass" }, { name: "lint", bucket: "fail" }];
+  expect(allChecksGreen(checks, ["factory/gates"])).toBe(true);
+  expect(allChecksGreen(checks, ["factory/gates", "lint"])).toBe(false);
+  expect(allChecksGreen(checks, ["factory/gates", "factory/review"])).toBe(false); // absent name → false
+  expect(allChecksGreen(checks, null)).toBe(false); // old behavior: every check must pass
+  expect(allChecksGreen([{ bucket: "pass" }], null)).toBe(true);
+});
+
+test("setStatus posts a status via --input stdin JSON, truncating description to 140 chars", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[3].includes("/statuses/"), result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  const long = "x".repeat(200);
+  await gh.setStatus({ sha: "a".repeat(40), context: "factory/gates", state: "success", description: long, targetUrl: "https://x" });
+  const call = run.calls[0];
+  expect(call.args).toEqual(["api", "-X", "POST", `repos/${repo}/statuses/${"a".repeat(40)}`, "--input", "-"]);
+  const body = JSON.parse(call.opts.input);
+  expect(body).toEqual({ state: "success", context: "factory/gates", description: "x".repeat(140), target_url: "https://x" });
+});
+
+test("listSecrets/listLabels map to name arrays; createLabel forces the color/description", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "secret" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ name: "TOKEN" }]), stderr: "" } },
+    { match: (c, a) => a[0] === "label" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ name: "bug" }, { name: "backlog" }]), stderr: "" } },
+    { match: (c, a) => a[0] === "label" && a[1] === "create", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.listSecrets()).toEqual(["TOKEN"]);
+  expect(run.calls[0].args).toEqual(["secret", "list", "-R", repo, "--json", "name"]);
+  expect(await gh.listLabels()).toEqual(["bug", "backlog"]);
+  expect(run.calls[1].args).toEqual(["label", "list", "-R", repo, "--json", "name", "--limit", "200"]);
+  await gh.createLabel({ name: "factory:ready", color: "00ff00", description: "ready for review" });
+  expect(run.calls[2].args).toEqual(["label", "create", "factory:ready", "-R", repo, "--color", "00ff00", "--description", "ready for review", "--force"]);
+});
+
+test("getBranchProtection returns parsed json, or null on non-zero exit (404); putBranchProtection PUTs body on stdin", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: JSON.stringify({ required_status_checks: { contexts: ["ci"] } }), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.getBranchProtection("main")).toEqual({ required_status_checks: { contexts: ["ci"] } });
+  expect(run.calls[0].args).toEqual(["api", `repos/${repo}/branches/main/protection`]);
+
+  const run404 = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 404: Branch not protected" } }]);
+  expect(await makeGh({ run: run404, repo }).getBranchProtection("main")).toBe(null);
+
+  const runPut = makeFakeRun([{ match: (c, a) => a.includes("PUT"), result: { code: 0, stdout: "", stderr: "" } }]);
+  const ghPut = makeGh({ run: runPut, repo });
+  await ghPut.putBranchProtection("main", { required_status_checks: { contexts: ["ci"] } });
+  const putCall = runPut.calls[0];
+  expect(putCall.args).toEqual(["api", "-X", "PUT", `repos/${repo}/branches/main/protection`, "--input", "-"]);
+  expect(JSON.parse(putCall.opts.input)).toEqual({ required_status_checks: { contexts: ["ci"] } });
+});
+
+test("setVariable sets a repo variable via --body", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "variable" && a[1] === "set", result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await gh.setVariable("FACTORY_TOKEN_ISSUED_AT", "2026-09-12T00:00:00Z");
+  expect(run.calls[0].args).toEqual(["variable", "set", "FACTORY_TOKEN_ISSUED_AT", "-R", repo, "--body", "2026-09-12T00:00:00Z"]);
+});
+
+test("prView maps gh json including label names", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ number: 9, state: "OPEN", mergeable: "MERGEABLE", headRefName: "claude/fq-7", headRefOid: "a".repeat(40), baseRefName: "main", labels: [{ name: "factory:approved" }] }), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.prView(9)).toEqual({ number: 9, state: "OPEN", mergeable: "MERGEABLE", headRefName: "claude/fq-7", headRefOid: "a".repeat(40), baseRefName: "main", labels: ["factory:approved"] });
+  expect(run.calls[0].args).toEqual(["pr", "view", "9", "-R", repo, "--json", "number,state,mergeable,headRefName,headRefOid,baseRefName,labels"]);
+});
+
+test("mergePr defaults to squash + delete-branch; closeIssue adds --comment only when given", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await gh.mergePr(9, {});
+  expect(run.calls[0].args).toEqual(["pr", "merge", "9", "-R", repo, "--squash", "--delete-branch"]);
+  await gh.mergePr(9, { method: "rebase", deleteBranch: false });
+  expect(run.calls[1].args).toEqual(["pr", "merge", "9", "-R", repo, "--rebase"]);
+  await gh.closeIssue(5);
+  expect(run.calls[2].args).toEqual(["issue", "close", "5", "-R", repo]);
+  await gh.closeIssue(5, "superseded");
+  expect(run.calls[3].args).toEqual(["issue", "close", "5", "-R", repo, "--comment", "superseded"]);
+});
+
+test("issueList maps labels to names and forwards state/limit/labels; prList forwards label/state", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 1, title: "T", labels: [{ name: "bug" }], updatedAt: "2026-09-11T00:00:00Z", closedAt: null }]), stderr: "" } },
+    { match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 9, title: "P", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]), stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.issueList({ labels: ["bug", "backlog"], state: "closed", limit: 50 })).toEqual([{ number: 1, title: "T", labels: ["bug"], updatedAt: "2026-09-11T00:00:00Z", closedAt: null }]);
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--state", "closed", "--limit", "50", "--label", "bug", "--label", "backlog", "--json", "number,title,labels,updatedAt,closedAt"]);
+  expect(await gh.prList({ label: "factory:approved" })).toEqual([{ number: 9, title: "P", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]);
+  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--state", "open", "--label", "factory:approved", "--json", "number,title,headRefName,updatedAt"]);
+});

@@ -376,6 +376,24 @@ test("merge gates: integrity는 PR head에서 잰 것만 인정한다 — 로컬
   expect(unknown.integrityGreen).toBe(false);
 });
 
+test("merge gates: required_checks filters which checks matter — an optional failing check doesn't block, a missing required one does", async () => {
+  const HEAD = "f".repeat(40);
+  const runner = async (cmd, a) => ({ code: 0, stdout: a[0] === "rev-parse" ? HEAD + "\n" : "", stderr: "" });
+  const harness = { protected: {}, test: {} };
+  const args = { root: "/x", harness, base: "b".repeat(40), readFile: () => "", runner, record: () => {}, pr: 9, prHeadSha: HEAD };
+  const required = ["factory/gates", "factory/review", "factory/integrity"];
+
+  // 필수 체크는 모두 통과, 옵션 체크(lint)는 실패해도 checksGreen: true
+  const ghPass = { prChecks: async () => [
+    { name: "factory/gates", bucket: "pass" }, { name: "factory/review", bucket: "pass" }, { name: "factory/integrity", bucket: "pass" }, { name: "lint", bucket: "fail" },
+  ] };
+  expect((await mergeGates({ ...args, gh: ghPass, required })).checksGreen).toBe(true);
+
+  // 필수 체크 하나가 아예 없으면 false
+  const ghMissing = { prChecks: async () => [{ name: "factory/gates", bucket: "pass" }, { name: "factory/review", bucket: "pass" }] };
+  expect((await mergeGates({ ...args, gh: ghMissing, required })).checksGreen).toBe(false);
+});
+
 // ── F1 / F5 / C1: 판정 불가·지난 런의 잔재·is_error ─────────────────────────
 
 test("F1: merge-base를 못 구하면 스테이지는 판정 없이 factory:blocked로 끝난다", async () => {
