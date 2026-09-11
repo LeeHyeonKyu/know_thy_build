@@ -224,3 +224,255 @@ test("factory-triage.js: a null factory-loader result re-spawns once; a second n
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
   expect(result).toEqual({ issue: 11, orchestration: "workflow", guarantee: "structural" });
 });
+
+// --- Task 3: templates/factory/claude/workflows/factory-plan.js ---
+
+const FACTORY_PLAN_WORKFLOW = new URL("../../templates/factory/claude/workflows/factory-plan.js", import.meta.url).pathname;
+
+const PLAN_ROSTER = [
+  { name: "product-advocate", agentType: "plan-product-advocate", model: "opus", lessons: ".factory/lessons/plan-product-advocate.md" },
+  { name: "architect", agentType: "plan-architect", model: "opus", lessons: ".factory/lessons/plan-architect.md" },
+  { name: "skeptic", agentType: "plan-skeptic", model: "opus", lessons: ".factory/lessons/plan-skeptic.md" },
+  { name: "operator", agentType: "plan-operator", model: "sonnet", lessons: ".factory/lessons/plan-operator.md" },
+];
+
+const planLoaderFix = (over = {}) => ({
+  issue: 42,
+  stage: "plan",
+  tier: "standard",
+  roster: PLAN_ROSTER,
+  rounds: 3,
+  spec_path: "docs/features/016-export-csv.md",
+  orchestration: "workflow",
+  ...over,
+});
+
+// R1 answers carry a role-unique marker so the tests can prove independence (R1 prompts must contain
+// no other role's position) and that R2 really is cross-examination (others' positions, never one's own).
+const posFix = (role) => ({
+  position: `POSITION-OF-${role}`,
+  risks: [`${role} risk`],
+  proposed_done_when: [{ id: "dw1", text: "CSV export writes a header row", verify: "test_42_export_csv", level: "unit" }],
+  files_expected: ["src/export/csv.js"],
+});
+const xexFix = (role) => ({
+  agreements: [`${role} agrees on the header row`],
+  objections: [{ to: "architect", claim: "files_expected is too wide", evidence: "src/export/csv.js only" }],
+  concessions: [],
+});
+const planFix = (over = {}) => ({
+  issue: 42,
+  tier: "standard",
+  roles: ["product-advocate", "architect", "skeptic", "operator"],
+  rounds: 3,
+  summary: "Export the report table as CSV",
+  done_when: [{ id: "dw1", text: "CSV export writes a header row", verify: "test_42_export_csv_header", level: "unit" }],
+  files_expected: ["src/export/csv.js"],
+  dissent_log: [],
+  non_goals: ["streaming export"],
+  open_risks: ["very large datasets"],
+  ...over,
+});
+
+const labelled = (calls, prefix) => calls.filter((c) => typeof c.opts.label === "string" && c.opts.label.startsWith(prefix));
+const roleOf = (opts) => String(opts.label).split(":")[1];
+
+test("factory-plan.js: meta.name equals the file's own basename", () => {
+  const src = readFileSync(FACTORY_PLAN_WORKFLOW, "utf8");
+  const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
+  expect(m[1]).toBe(basename(FACTORY_PLAN_WORKFLOW, ".js"));
+});
+
+test("factory-plan.js: standard tier runs R1/R2/synthesis/sign-off over the loader roster and returns a valid plan.v1", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix();
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "the done_when levels fit M0" };
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json" },
+  });
+
+  expect(labelled(calls, "R1:")).toHaveLength(4);
+  expect(labelled(calls, "R2:")).toHaveLength(4);
+  expect(labelled(calls, "sign:")).toHaveLength(4);
+  expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(1);
+
+  // each debater is spawned as its own agent file, with its roles.toml model
+  const r1 = labelled(calls, "R1:");
+  expect(r1.map((c) => c.opts.agentType)).toEqual(PLAN_ROSTER.map((r) => r.agentType));
+  expect(r1.map((c) => c.opts.model)).toEqual(["opus", "opus", "opus", "sonnet"]);
+  expect(calls.find((c) => c.opts.agentType === "plan-synthesizer").opts.model).toBe("opus");
+
+  expect(validate("plan.v1", result).ok).toBe(true);
+  expect(result).toMatchObject({
+    issue: 42,
+    tier: "standard",
+    rounds: 3,
+    orchestration: "workflow",
+    guarantee: "structural",
+    summary: "Export the report table as CSV",
+  });
+  expect(result.roles).toEqual(["product-advocate", "architect", "skeptic", "operator"]);
+  expect(result.debate.r1.map((x) => x.role)).toEqual(PLAN_ROSTER.map((r) => r.name));
+  expect(result.debate.r2.map((x) => x.role)).toEqual(PLAN_ROSTER.map((r) => r.name));
+  expect(result.debate.votes.every((v) => v.vote === "accept")).toBe(true);
+  expect(phases).toEqual(["Load", "Positions", "Cross-examination", "Synthesis", "Sign-off"]);
+});
+
+test("factory-plan.js: R1 is independent (no other role's position in the prompt); R2 carries the others' R1 but not one's own", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix();
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+    return null;
+  };
+  const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  for (const c of labelled(calls, "R1:")) expect(c.prompt).not.toContain("POSITION-OF-");
+  for (const c of labelled(calls, "R2:")) {
+    const self = roleOf(c.opts);
+    expect(c.prompt).not.toContain(`POSITION-OF-${self}`);
+    for (const other of PLAN_ROSTER.map((r) => r.name).filter((n) => n !== self)) {
+      expect(c.prompt, `R2:${self} should see ${other}'s position`).toContain(`POSITION-OF-${other}`);
+    }
+  }
+});
+
+test("factory-plan.js: one objection at sign-off re-runs the synthesizer once; a clean second vote leaves dissent_log untouched", async () => {
+  let signRounds = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix();
+    if (opts.label?.startsWith("sign:")) {
+      if (roleOf(opts) === "skeptic") signRounds += 1;
+      const objecting = signRounds === 1 && roleOf(opts) === "skeptic";
+      return objecting ? { vote: "object", reason: "dw1 has no failing-test id" } : { vote: "accept", reason: "ok" };
+    }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(2);
+  expect(labelled(calls, "sign:")).toHaveLength(8);
+  expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")[1].prompt).toContain("dw1 has no failing-test id");
+  expect(result.dissent_log).toEqual([]);
+  expect(result.debate.votes.every((v) => v.vote === "accept")).toBe(true);
+  expect(validate("plan.v1", result).ok).toBe(true);
+});
+
+test("factory-plan.js: an objection that survives the re-synthesis is recorded in dissent_log as unresolved, and the plan proceeds", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix();
+    if (opts.label?.startsWith("sign:")) {
+      return roleOf(opts) === "skeptic"
+        ? { vote: "object", reason: "the rollback path is still unspecified" }
+        : { vote: "accept", reason: "ok" };
+    }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(2);
+  expect(labelled(calls, "sign:")).toHaveLength(8);
+  expect(result.dissent_log).toEqual([
+    { role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding" },
+  ]);
+  expect(validate("plan.v1", result).ok).toBe(true);
+});
+
+test("factory-plan.js: docs tier (rounds 2, roster 2) skips cross-examination entirely but still declares the phase", async () => {
+  const docsRoster = PLAN_ROSTER.filter((r) => r.name === "architect" || r.name === "skeptic");
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix({ tier: "docs", rounds: 2, roster: docsRoster });
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix({ tier: "docs", roles: ["architect", "skeptic"], rounds: 2 });
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(labelled(calls, "R1:")).toHaveLength(2);
+  expect(labelled(calls, "R2:")).toHaveLength(0);
+  expect(labelled(calls, "sign:")).toHaveLength(2);
+  expect(phases).toEqual(["Load", "Positions", "Cross-examination", "Synthesis", "Sign-off"]);
+  expect(result.rounds).toBe(2);
+  expect(result.tier).toBe("docs");
+  expect(result.roles).toEqual(["architect", "skeptic"]);
+  expect(result.debate.r2).toEqual([]);
+  expect(validate("plan.v1", result).ok).toBe(true);
+});
+
+test("factory-plan.js: a debater that returns null twice in R1 is re-spawned once and then dropped — the debate proceeds without it, never inventing a position", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return roleOf(opts) === "operator" ? null : posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix();
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  // 4 debaters + exactly one insurance re-spawn for the role that came back null (ADR-003)
+  expect(labelled(calls, "R1:")).toHaveLength(5);
+  expect(labelled(calls, "R1:").filter((c) => roleOf(c.opts) === "operator")).toHaveLength(2);
+  expect(result.debate.r1.map((x) => x.role)).toEqual(["product-advocate", "architect", "skeptic"]);
+  // a role with no position does not cross-examine and does not sign
+  expect(labelled(calls, "R2:").map((c) => roleOf(c.opts))).toEqual(["product-advocate", "architect", "skeptic"]);
+  expect(labelled(calls, "sign:").map((c) => roleOf(c.opts))).toEqual(["product-advocate", "architect", "skeptic"]);
+  // `roles` stays the loader roster — verify-stage compares it against the hook log and flags the gap
+  expect(result.roles).toEqual(PLAN_ROSTER.map((r) => r.name));
+});
+
+test("factory-plan.js: loader/dispatcher issue mismatch fails closed — no debate at all, error surfaced, plan.v1 invalid", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix({ issue: 99 });
+    return planFix();
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader"]);
+  expect(result.issue).toBe(42);
+  expect(result.error).toMatch(/context issue mismatch/);
+  expect(result.done_when).toBeUndefined();
+  expect(result.orchestration).toBe("workflow");
+  expect(result.guarantee).toBe("structural");
+  expect(validate("plan.v1", result).ok).toBe(false);
+});

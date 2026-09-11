@@ -63,7 +63,7 @@ test("CHARTER template is a draft with the §5.3 frontmatter", () => {
 
 test("lessons skeletons carry the integrity header", () => {
   const files = readdirSync(join(T, "factory/lessons"));
-  expect(files.length).toBe(13);
+  expect(files.length).toBe(14);
   for (const f of files) {
     const role = f.replace(/\.md$/, "");
     expect(read(`factory/lessons/${f}`)).toMatch(new RegExp(`<!--\\s*factory-lessons:v1\\s+role=${role}\\s+max=\\d+\\s*-->`));

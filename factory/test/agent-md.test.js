@@ -155,3 +155,37 @@ test("parseAgentMd: factory-loader.md frontmatter — sonnet model, read-only to
   expect(frontmatter.tools).toEqual(["Read", "Bash", "Grep"]);
   expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
 });
+
+// Task 3: the five plan debate agents.
+const PLAN_AGENTS = ["plan-product-advocate", "plan-architect", "plan-skeptic", "plan-operator", "plan-synthesizer"];
+
+for (const name of PLAN_AGENTS) {
+  test(`lintAgentMd: templates/factory/claude/agents/${name}.md passes with no violations`, () => {
+    expect(lintAgentMd(readAgent(name), { expectedName: name })).toEqual([]);
+  });
+}
+
+test("plan agents: read-only tools and the roles.toml model, every one behind deny-all-writes", () => {
+  const models = { "plan-product-advocate": "opus", "plan-architect": "opus", "plan-skeptic": "opus", "plan-operator": "sonnet", "plan-synthesizer": "opus" };
+  for (const name of PLAN_AGENTS) {
+    const { frontmatter } = parseAgentMd(readAgent(name));
+    expect(frontmatter.name, name).toBe(name);
+    expect(frontmatter.model, name).toBe(models[name]);
+    expect(frontmatter.tools, name).toEqual(["Read", "Grep", "Glob"]);
+    expect(frontmatter.hooks.PreToolUse[0].matcher, name).toBe("Edit|Write|NotebookEdit");
+    expect(frontmatter.hooks.PreToolUse[0].hooks[0].command, name).toContain("deny-all-writes.sh");
+  }
+});
+
+test("plan-skeptic.md carries the §5.2.5-④ mandatory question for flaky issues", () => {
+  const { sections } = parseAgentMd(readAgent("plan-skeptic"));
+  const lens = [...sections.entries()].find(([k]) => k.startsWith("Lens"))[1];
+  expect(lens).toContain("테스트 문제인가 제품의 경쟁 조건인가");
+});
+
+test("plan-synthesizer.md forbids forging consensus and done_when without a test id", () => {
+  const { sections } = parseAgentMd(readAgent("plan-synthesizer"));
+  const mustNot = [...sections.entries()].find(([k]) => k.startsWith("You must not"))[1];
+  expect(mustNot).toMatch(/dissent_log|objection|반박/);
+  expect(mustNot).toContain("test_<issue>_<slug>");
+});
