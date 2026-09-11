@@ -10,12 +10,14 @@ const cmd = (c) => ({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_inp
 
 test("block-dangerous: blocks merges, force pushes, protected writes; allows normal commands", async () => {
   for (const c of ["gh pr merge 5", "git merge feature", "git push --force origin x", "git push -f origin x", "git push origin --force-with-lease",
-                   "echo x > .factory/harness.toml", "sed -i 's/a/b/' .claude/settings.json", "cat foo | tee docs/factory/CHARTER.md", "echo y >> .github/workflows/factory-implement.yml"]) {
+                   "echo x > .factory/harness.toml", "sed -i 's/a/b/' .claude/settings.json", "cat foo | tee docs/factory/CHARTER.md", "echo y >> .github/workflows/factory-implement.yml",
+                   "git push origin --force-with-lease=refs/heads/main:abc", "git push origin --delete refs/heads/factory/lock-7", "git push origin --delete factory/lock-7", "git push origin :refs/heads/factory/lock-7"]) {
     const r = await bash("block-dangerous.sh", cmd(c));
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }
-  for (const c of ["git push origin HEAD", "git commit -m x", "npm test", "cat .factory/harness.toml", "gh pr view 5"]) {
+  for (const c of ["git push origin HEAD", "git commit -m x", "npm test", "cat .factory/harness.toml", "gh pr view 5",
+                   "git push origin HEAD:refs/heads/claude/fq-7", "git push origin --delete claude/fq-7"]) {
     expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
   }
 });

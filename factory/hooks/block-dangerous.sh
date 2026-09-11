@@ -10,7 +10,8 @@ block() { echo "factory: blocked — $1" >&2; exit 2; }
 
 echo "$c" | grep -Eq '(^|[;&|[:space:]])gh[[:space:]]+pr[[:space:]]+merge' && block "gh pr merge"
 echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+merge([[:space:]]|$)' && block "git merge"
-echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]](--force|-f|--force-with-lease)([[:space:]]|$)' && block "force push"
+echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]](--force|-f|--force-with-lease)([[:space:]=]|$)' && block "force push"
+echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*(--delete[^;&|]*factory/lock-|:refs/heads/factory/lock-)' && block "lock branch deletion"
 # protected paths written via shell redirection / sed -i / tee
 prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md)'
 echo "$c" | grep -Eq "(>>?|tee[[:space:]]+(-a[[:space:]]+)?)[[:space:]]*[\"']?[^[:space:]\"']*$prot" && block "write to protected path"
