@@ -941,6 +941,288 @@ gh workflow run spike-5-usage.yml
 
 ---
 
+### Task 11: Spike 8 — 신뢰되지 않은 워크스페이스에서 `permissions.deny`와 훅은 작동하는가 (계획 수정: D1에서 발견)
+
+**배경:** Spike 1·2 실행 로그에 `Ignoring 7 permissions.allow entries from .claude/settings.json: this workspace has not been trusted.` 가 찍혔다. 일회용 러너는 trust 다이얼로그를 수락한 적이 없으므로 프로젝트 settings의 allow가 무시됐다. 훅은 발화했다. **deny도 무시된다면 스펙 §6.3의 L2(설정 deny)가 CI에서 무력**하다.
+
+**질문:** (a) 신뢰되지 않은 러너에서 프로젝트 `permissions.deny`가 적용되는가? (b) `--settings <file>`로 CLI에 직접 준 deny는 적용되는가? (c) 워크스페이스를 CI에서 "신뢰됨"으로 만드는 방법이 있는가 (`~/.claude.json`의 `projects[<cwd>].hasTrustDialogAccepted: true` 등)? (d) `--permission-mode dontAsk`에서 deny에 걸린 호출은 `permission_denials`에 기록되는가?
+
+**Files:**
+- Create: `.claude/commands/spike-deny.md`
+- Create: `.factory-ci-settings.json` (repo 루트, `--settings`로 전달)
+- Modify: `.claude/settings.json` (deny 추가)
+- Create: `.github/workflows/spike-8-trust-deny.yml`
+
+- [ ] **Step 1: deny를 어기도록 유도하는 커맨드**
+
+`.claude/commands/spike-deny.md`:
+```markdown
+---
+description: tries a denied command
+---
+Run exactly these bash commands one at a time and report for each whether it ran or was denied:
+1. `echo DENY_PROBE_MARKER > .spike/deny-probe.txt`
+2. `git push --force origin HEAD:refs/heads/deny-probe-should-never-exist`
+Reply with JSON: {"echo": "ran"|"denied", "force_push": "ran"|"denied"}.
+```
+
+- [ ] **Step 2: 프로젝트 settings에 deny 추가**
+
+`.claude/settings.json`의 `permissions`에 추가:
+```json
+"deny": ["Bash(git push --force*)", "Bash(git push -f*)"]
+```
+
+- [ ] **Step 3: CLI 전달용 settings 파일**
+
+`.factory-ci-settings.json`:
+```json
+{ "permissions": { "deny": ["Bash(git push --force*)", "Bash(git push -f*)"] } }
+```
+
+- [ ] **Step 4: yml — 매트릭스 3개: project-only / cli-settings / trusted**
+
+`.github/workflows/spike-8-trust-deny.yml`:
+```yaml
+name: spike-8-trust-deny
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [project-only, cli-settings, trusted]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - name: probe
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_PROJECT_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p .spike
+          EXTRA=""
+          if [ "${{ matrix.mode }}" = "cli-settings" ]; then EXTRA="--settings .factory-ci-settings.json"; fi
+          if [ "${{ matrix.mode }}" = "trusted" ]; then
+            node -e '
+              const fs=require("fs"), p=process.env.HOME+"/.claude.json";
+              let j={}; try{ j=JSON.parse(fs.readFileSync(p,"utf8")) }catch{}
+              j.projects ??= {}; j.projects[process.env.CLAUDE_PROJECT_DIR] = { ...(j.projects[process.env.CLAUDE_PROJECT_DIR]||{}), hasTrustDialogAccepted: true };
+              fs.writeFileSync(p, JSON.stringify(j,null,2));'
+            cat ~/.claude.json
+          fi
+          claude -p "/spike-deny" --permission-mode dontAsk --max-turns 6 --output-format json $EXTRA > .spike/out.json || true
+          echo "--- result ---"; jq '.result, .permission_denials' .spike/out.json
+          echo "--- ignoring? ---"; grep -i "ignoring" .spike/out.json || true
+          echo "--- probe file ---"; cat .spike/deny-probe.txt 2>/dev/null || echo "(no probe file)"
+          echo "--- remote branch must NOT exist ---"; git ls-remote --heads origin deny-probe-should-never-exist || echo "(absent — good)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: spike-8-${{ matrix.mode }}, path: .spike/, include-hidden-files: true }
+```
+
+- [ ] **Step 5: 실행·관측·ADR-008 초안 (`spikes/adr-008.md`)**
+
+```bash
+git add -A && git commit -m "spike-8: trust + deny enforcement" && git push
+gh workflow run spike-8-trust-deny.yml
+```
+매트릭스별로 기록: `force_push` ran|denied, `permission_denials` 내용, "Ignoring" 경고 유무, 원격 브랜치 존재 여부(존재하면 즉시 `git push origin --delete deny-probe-should-never-exist`).
+
+```markdown
+# ADR-008 신뢰되지 않은 러너에서의 deny
+- project-only: deny 적용 yes|no · cli-settings: yes|no · trusted(hasTrustDialogAccepted): yes|no, allow 경고 사라짐 yes|no
+- 결정: CI의 L2 deny는 `--settings .factory/ci-settings.json`로 전달 | trust 부트스트랩 스텝 추가 | 둘 다
+- 스펙 영향: §6.3 (settings.json의 deny가 CI에서 어떻게 적용되는지 명시), §4.2.1 4번 플래그
+```
+
+**해석:** 어느 모드에서든 force push가 "ran"이면(원격 브랜치가 생기면) 그 모드의 deny는 무력하다. `cli-settings`에서 denied면 스펙의 `--settings .factory/ci-settings.json` 경로가 유효하다. `trusted`에서 "Ignoring" 경고가 사라지면 trust 부트스트랩이 가능하다.
+
+---
+
+### Task 12: Spike 6b — 신뢰된 워크스페이스에서 커맨드 `allowed-tools`가 메인 세션을 제한하는가 (계획 수정: D2 결과로 6은 무효)
+
+**배경:** Spike 8이 보여준 대로 비신뢰 러너에서는 allow가 무시되고 deny가 과잉 차단되므로, 비신뢰 상태에서 잰 Spike 6은 무효다. CI는 어차피 trust 부트스트랩을 할 것이므로(ADR-008) **신뢰된 상태**에서 다시 잰다. 추가로 CLI 플래그 `--allowedTools`와 `--disallowedTools`가 메인 세션·서브에이전트에 각각 어떻게 걸리는지 함께 본다.
+
+**Files:**
+- Create: `.github/actions/trust-workspace/action.yml` (D3 이후 모든 spike가 재사용)
+- Create: `.github/workflows/spike-6b-allowed-tools-trusted.yml`
+
+- [ ] **Step 1: trust 부트스트랩 composite action**
+
+`.github/actions/trust-workspace/action.yml`:
+```yaml
+name: trust-workspace
+description: mark the checkout as trusted in ~/.claude.json so project settings apply
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        node -e '
+          const fs=require("fs"), p=process.env.HOME+"/.claude.json";
+          let j={}; try{ j=JSON.parse(fs.readFileSync(p,"utf8")) }catch{}
+          const cwd=process.env.GITHUB_WORKSPACE;
+          j.projects ??= {}; j.projects[cwd] = { ...(j.projects[cwd]||{}), hasTrustDialogAccepted: true };
+          fs.writeFileSync(p, JSON.stringify(j,null,2));'
+        echo "trusted: $GITHUB_WORKSPACE"
+```
+
+- [ ] **Step 2: yml — 매트릭스 3개: frontmatter / cli-allowed / cli-disallowed**
+
+`.github/workflows/spike-6b-allowed-tools-trusted.yml`:
+```yaml
+name: spike-6b-allowed-tools-trusted
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [frontmatter, cli-allowed, cli-disallowed]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - uses: ./.github/actions/trust-workspace
+      - name: dispatch
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+          CLAUDE_PROJECT_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p .spike
+          EXTRA=""
+          case "${{ matrix.mode }}" in
+            cli-allowed)    EXTRA='--allowedTools Workflow(spike-hooks)' ;;
+            cli-disallowed) EXTRA='--disallowedTools Bash' ;;
+          esac
+          start=$(date +%s)
+          claude -p "/spike-restricted" --permission-mode dontAsk --max-turns 8 --output-format json $EXTRA > .spike/out.json || true
+          echo "elapsed=$(( $(date +%s) - start ))s" | tee .spike/elapsed
+          grep -c "Ignoring" .spike/out.json || echo "no Ignoring warning"
+          jq '.result' .spike/out.json
+          jq '.permission_denials' .spike/out.json
+          echo "--- hooks.log ---"; cat .spike/hooks.log || true
+      - name: observe
+        run: |
+          echo "main bash hook line (attempted):   $(grep -c 'MAIN_SESSION_BASH_RAN' .spike/hooks.log || true)"
+          echo "main bash in permission_denials:   $(jq '[.permission_denials[]? | select(.tool_name=="Bash")] | length' .spike/out.json)"
+          echo "worker files:                      $(ls .spike/worker-*.txt 2>/dev/null | wc -l)"
+          echo "worker bash hook lines:            $(grep -c 'SPIKE_WORKER_BASH' .spike/hooks.log || true)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-6b-${{ matrix.mode }}
+          path: .spike/
+          include-hidden-files: true
+```
+
+- [ ] **Step 3: 실행·관측·ADR-006 갱신 (`spikes/adr-006.md`를 덮어쓴다 — 비신뢰 결과는 "무효" 절로 남김)**
+
+해석: 판정 기준은 **메인 세션의 Bash가 `permission_denials`에 있는가**(훅 라인은 시도만 증명한다)와 **워커 파일 2개가 생겼는가**(서브에이전트는 자유로운가).
+
+| mode | main Bash denied | worker files 2 | 결론 |
+|---|---|---|---|
+| frontmatter | yes | yes | 커맨드 `allowed-tools`로 메인 세션 잠금 가능 → 건너뛰기 불가능 |
+| frontmatter | no | yes | frontmatter는 grant일 뿐 restrict 아님 → cli 모드 결과로 판단 |
+| cli-allowed | yes | yes | `--allowedTools`가 메인만 제한 → run-stage.sh에서 이 플래그 사용 |
+| cli-disallowed | yes | no | `--disallowedTools`는 서브에이전트까지 막음 → 사용 불가 |
+| 어느 모드든 | no | — | 메인 세션 잠금 불가 → `verify-stage.sh` 사후 검증만 (스펙 §4.2.2 그대로) |
+
+```markdown
+# ADR-006 메인 세션 도구 제한 (신뢰된 워크스페이스)
+- frontmatter: main denied yes|no · workers N/2 · cli-allowed: … · cli-disallowed: …
+- 결정: 잠금 수단 = 커맨드 allowed-tools | --allowedTools | 없음(사후 검증)
+- 비신뢰 상태 측정(run 34574564725, 34574709197)은 무효: allow 무시·deny 과잉차단 상태였음
+```
+
+---
+
+### Task 13: Spike 7b — idle ceiling, 이번엔 부작용 마커로 (계획 수정: 7은 에이전트의 거짓 보고를 쟀음)
+
+**배경:** Spike 7의 sleeper 에이전트는 `sleep 720`을 백그라운드로 돌리고 즉시 답했다(default 레그: "Waiting for the background sleep task…", 0 레그: 56초 만에 "SLEPT" — 거짓). 측정된 것은 ceiling이 아니라 에이전트의 정직성이었다. 이번엔 **파일 마커**로 실제 경과를 증명하고, Bash 도구의 `timeout` 파라미터를 명시해 백그라운드화를 막는다.
+
+**Files:**
+- Modify: `.claude/workflows/spike-idle.js`
+- Create: `.github/workflows/spike-7b-idle-markers.yml`
+
+- [ ] **Step 1: 마커를 남기는 sleeper — 백그라운드 금지, timeout 명시**
+
+`.claude/workflows/spike-idle.js` (전체 교체):
+```js
+export const meta = { name: 'spike-idle', description: 'Agent sleeps 2x~9.5min in foreground with file markers, to measure -p idle ceiling', phases: [{ title: 'Sleep' }] }
+phase('Sleep')
+const r = await agent(
+  `Run these bash commands one at a time, in the FOREGROUND (never background them; pass timeout 600000 to the Bash tool for each):
+1. date +%s > .spike/mark-0
+2. sleep 570 && date +%s > .spike/mark-1
+3. sleep 570 && date +%s > .spike/mark-2
+Then reply with the single word DONE. Do not reply before command 3 has finished.`,
+  { label: 'sleeper', model: 'sonnet' })
+return { marker: 'SPIKE_IDLE_OK', r }
+```
+
+- [ ] **Step 2: yml — default vs 0, 신뢰된 상태, 잡 상한 30분**
+
+`.github/workflows/spike-7b-idle-markers.yml`:
+```yaml
+name: spike-7b-idle-markers
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ceiling: ["default", "0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-claude
+      - uses: ./.github/actions/trust-workspace
+      - name: dispatch
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CLAUDE_PROJECT_DIR: ${{ github.workspace }}
+        run: |
+          mkdir -p .spike
+          if [ "${{ matrix.ceiling }}" != "default" ]; then export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=${{ matrix.ceiling }}; fi
+          start=$(date +%s)
+          claude -p "/spike-idle-dispatch" --permission-mode dontAsk --max-turns 5 --output-format json > .spike/out.json; echo "exit=$?" > .spike/exit
+          echo "elapsed=$(( $(date +%s) - start ))s" | tee .spike/elapsed
+          cat .spike/exit; jq '.result' .spike/out.json || true
+          for m in 0 1 2; do echo "mark-$m: $(cat .spike/mark-$m 2>/dev/null || echo absent)"; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-7b-${{ matrix.ceiling }}
+          path: .spike/
+          include-hidden-files: true
+```
+
+- [ ] **Step 3: 실행·관측·ADR-007 갱신 (`spikes/adr-007.md` 덮어쓰기)**
+
+해석: `mark-2`가 있고 `mark-2 − mark-0 ≥ 1140`이면 에이전트가 실제로 19분을 기다린 것이다.
+
+| leg | elapsed | mark-2 존재 | result DONE | 결론 |
+|---|---|---|---|---|
+| default | ~10분 | 없음 | 없음 | ceiling 실재(무활동 10분) |
+| default | ~19분+ | 있음 | 있음 | ceiling이 이 경로에 안 걸림 |
+| 0 | ~19분+ | 있음 | 있음 | 0 = 무제한 확인 |
+
+```markdown
+# ADR-007 idle ceiling
+- default: elapsed Ns · marks [..] · result … / 0: elapsed Ns · marks [..] · result …
+- 결정: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 고정 (근거: …) · 상한은 timeout-minutes
+- Spike 7(run 34574812726)은 무효: sleeper가 sleep을 백그라운드화하고 거짓 보고
+```
+
+---
+
 ### Task 10: ADR 확정과 본체 커밋
 
 **Files:**
