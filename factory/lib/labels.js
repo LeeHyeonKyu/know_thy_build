@@ -11,7 +11,7 @@ export const TRANSITIONS = new Map([
   ["factory:needs-info", new Set(["factory:queue"])],
   ["factory:ready", new Set(["factory:planned", "factory:needs-human"])],
   ["factory:planned", new Set(["factory:in-progress", "factory:needs-human"])],
-  ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human"])],
+  ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:planned"])],   // sweeper 재큐
   ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human"])],
   ["factory:rework", new Set(["factory:in-progress", "factory:needs-human"])],
   ["factory:approved", new Set(["factory:merged", "factory:needs-human"])],

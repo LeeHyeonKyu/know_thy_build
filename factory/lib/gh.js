@@ -45,5 +45,14 @@ export function makeGh({ run, repo }) {
       // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
       await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
     },
+    async searchIssues(label) {
+      return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]));
+    },
+    async createIssue({ title, body, labels = [] }) {
+      const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
+      const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
+    },
+    // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
+    async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
   };
 }
