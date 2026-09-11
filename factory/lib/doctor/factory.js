@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import { mkdtempSync, writeFileSync as writeFixture, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { render as renderTemplate } from "../../cli/install.js";
 import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
 
@@ -7,12 +9,19 @@ const c = (id, level, detail = "") => ({ id, level, detail });
 const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity"].map((n) => `factory-${n}.yml`);
 
 const HOOK_INPUT = {
-  "record-agents.sh": { hook_event_name: "SubagentStop", agent_type: "reviewer-doctor", agent_transcript_path: "/nonexistent" },
-  "verdict-format.sh": { hook_event_name: "SubagentStop", agent_type: "reviewer-doctor", agent_transcript_path: "/nonexistent" },
   "block-dangerous.sh": { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo doctor" } },
   "lint-touched.sh": { hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "/nonexistent" } },
   "stop-guard.sh": { hook_event_name: "Stop" },
 };
+// record-agents.sh와 verdict-format.sh는 둘 다 SubagentStop을 받는 리뷰어 훅이다 — 입력 모양을 하나로 공유한다.
+// transcriptPath는 반드시 실재하는 파일이어야 한다: verdict-format.sh는 `[ -f "$path" ] || exit 0`으로 fail-open이라
+// 없는 경로를 주면 판정 로직 자체를 검증하지 못하고 항상 PASS로 속게 된다.
+const REVIEWER_AGENT_TYPE = "reviewer-doctor";
+const subagentStopPayload = (transcriptPath) => ({ hook_event_name: "SubagentStop", agent_type: REVIEWER_AGENT_TYPE, agent_transcript_path: transcriptPath });
+const NEEDS_TRANSCRIPT = new Set(["record-agents.sh", "verdict-format.sh"]);
+// verdict-format.sh가 jq -rs로 읽는 형식과 정확히 일치해야 한다: transcript는 assistant 메시지들의 JSON 스트림이고,
+// 마지막 text 블록에 ```json/"verdict" 블록이 없으면 "판정 안 됨"으로 exit 2가 나오는 게 정상이다(=판정 훅이 실제로 판정한다는 증거).
+const TRANSCRIPT_FIXTURE = JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "doctor probe: no verdict block here" }] } }) + "\n";
 // 판정 훅(verdict-format.sh)만 예외: reviewer-* 입력에 verdict 블록이 없으면 exit 2가 "정상 동작"이다. 나머지는 0을 기대한다.
 const EXPECTED_EXIT = { "verdict-format.sh": 2 };
 // 로깅형 훅은 절대 차단하면 안 되므로 스크립트 마지막 줄이 `exit 0`이어야 한다(ADR-009) — lintLoggingHook로 추가 검사한다.
@@ -49,16 +58,17 @@ export function checkCharter({ root, loadCharter }) {
 
 const rosterUnion = (obj) => [...new Set(Object.values(obj || {}).flat())];
 
-/** triage/implement/merge/retro는 이름 없이 단일 agent인 경우(=.agent 직접)와 plan/review처럼 이름별 로스터인 경우를 모두 받아들인다. */
-function collectRoleEntries(roles) {
+// roles.toml 자체에 정의된 모든 agent/lessons 경로를 훑는다 — CHARTER 로스터에 없는 이름(예: plan.synthesizer처럼
+// 아직 어느 tier도 쓰지 않는 역할)도 파일이 실재해야 한다. roster-defined와는 독립적인 검사다.
+// triage만 이름 없이 단일 agent(roles.triage.agent)고, 나머지(plan/implement/review/merge/retro)는 이름별 로스터다.
+function collectAllRoleEntries(roles) {
   const entries = [];
-  for (const stage of ["implement", "merge", "retro"]) {
+  if (roles.triage?.agent) entries.push(roles.triage);
+  for (const stage of ["plan", "implement", "review", "merge", "retro"]) {
     const s = roles[stage];
     if (!s) continue;
-    if (s.agent) entries.push(s);
-    else for (const name of Object.keys(s)) entries.push(s[name]);
+    for (const name of Object.keys(s)) entries.push(s[name]);
   }
-  if (roles.triage?.agent) entries.push(roles.triage);
   return entries;
 }
 
@@ -70,11 +80,7 @@ export function checkRoles({ charter, roles, exists, root }) {
     ...planNames.filter((n) => !roles.plan?.[n]),
   ];
 
-  const entries = [
-    ...reviewNames.filter((n) => roles.review?.[n]).map((n) => roles.review[n]),
-    ...planNames.filter((n) => roles.plan?.[n]).map((n) => roles.plan[n]),
-    ...collectRoleEntries(roles),
-  ];
+  const entries = collectAllRoleEntries(roles);
   const missingAgents = entries.filter((e) => e.agent && !exists(join(root, e.agent))).map((e) => e.agent);
   const missingLessons = entries.filter((e) => e.lessons && !exists(join(root, e.lessons))).map((e) => e.lessons);
 
@@ -101,23 +107,44 @@ export function checkSettings({ settings, template }) {
   return out;
 }
 
-/** 훅을 실제로 실행해 종료 코드와(로깅 훅이면) exit-0 규칙을 검사한다. 파일이 없으면 실행하지 않고 바로 FAIL. */
-export async function checkHooks({ run, root, exists, readFile, hooks }) {
+/**
+ * 훅을 실제로 실행해 종료 코드와(로깅 훅이면) exit-0 규칙을 검사한다. 파일이 없으면 실행하지 않고 바로 FAIL.
+ * record-agents.sh/verdict-format.sh를 검사 목록에 포함하면, 그 훅들이 실제로 읽을 수 있는 transcript 파일을
+ * 임시 디렉터리에 하나 만들어 공유한다(둘 다 SubagentStop이므로 같은 파일을 써도 된다) — finally에서 정리한다.
+ */
+export async function checkHooks({
+  run, root, exists, readFile, hooks,
+  hooksDir = join(root, ".claude/hooks"),
+  mkTemp = () => mkdtempSync(join(tmpdir(), "ktb-doctor-")),
+  writeFile = writeFixture,
+  rmDir = (d) => rmSync(d, { recursive: true, force: true }),
+}) {
   const out = [];
-  for (const name of hooks) {
-    const id = `hooks.${name}`;
-    const path = join(root, ".claude/hooks", name);
-    if (!exists(path)) { out.push(c(id, "FAIL", `${path} missing`)); continue; }
-    const payload = HOOK_INPUT[name] || { hook_event_name: "PreToolUse" };
-    const expected = EXPECTED_EXIT[name] ?? 0;
-    const r = await run("bash", [path], { input: JSON.stringify(payload), cwd: root });
-    const problems = [];
-    if (r.code !== expected) problems.push(`exit ${r.code} (${(r.stderr || r.stdout || "").trim().slice(0, 200)}), expected ${expected}`);
-    if (LOGGING_HOOKS.has(name)) {
-      const violations = lintLoggingHook(readFile(path));
-      if (violations.length) problems.push(violations.map((v) => `${v.rule}: ${v.msg}`).join("; "));
+  const needsTranscript = hooks.some((h) => NEEDS_TRANSCRIPT.has(h));
+  let tmpDir, transcriptPath;
+  if (needsTranscript) {
+    tmpDir = mkTemp();
+    transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFile(transcriptPath, TRANSCRIPT_FIXTURE);
+  }
+  try {
+    for (const name of hooks) {
+      const id = `hooks.${name}`;
+      const path = join(hooksDir, name);
+      if (!exists(path)) { out.push(c(id, "FAIL", `${path} missing`)); continue; }
+      const payload = NEEDS_TRANSCRIPT.has(name) ? subagentStopPayload(transcriptPath) : HOOK_INPUT[name] || { hook_event_name: "PreToolUse" };
+      const expected = EXPECTED_EXIT[name] ?? 0;
+      const r = await run("bash", [path], { input: JSON.stringify(payload), cwd: root });
+      const problems = [];
+      if (r.code !== expected) problems.push(`exit ${r.code} (${(r.stderr || r.stdout || "").trim().slice(0, 200)}), expected ${expected}`);
+      if (LOGGING_HOOKS.has(name)) {
+        const violations = lintLoggingHook(readFile(path));
+        if (violations.length) problems.push(violations.map((v) => `${v.rule}: ${v.msg}`).join("; "));
+      }
+      out.push(problems.length ? c(id, "FAIL", problems.join("; ")) : c(id, "PASS"));
     }
-    out.push(problems.length ? c(id, "FAIL", problems.join("; ")) : c(id, "PASS"));
+  } finally {
+    if (tmpDir) rmDir(tmpDir);
   }
   return out;
 }
