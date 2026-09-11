@@ -236,7 +236,10 @@ jobs:
       - name: Upload run record
         if: always()
         uses: actions/upload-artifact@v4
-        with: { name: run-${{ github.event.issue.number }}, path: docs/factory/runs/ }
+        with:                                            # ADR-009: ${{ }}를 flow mapping 안에 두면 워크플로 파일이 통째로 파싱 실패한다
+          name: run-${{ github.event.issue.number }}
+          path: docs/factory/runs/
+          include-hidden-files: true                     # ADR-009: dot-디렉토리(.factory/out 등)는 이게 없으면 빈 아티팩트가 된다
 ```
 
 ### 4.2 제어 계층 — 오케스트레이터는 세 겹, LLM은 하나
@@ -268,6 +271,11 @@ workflow .js (결정적 JS, claude 프로세스 안의 런타임)       재량 0
 ```
 run-stage.sh <stage> <issue>
   0. charter-ready.sh                        # CHARTER status != ready 또는 doctor 실패 → 즉시 종료
+  0.5 trust-workspace.sh                     # ADR-008 — 필수. ~/.claude.json의 projects[<cwd>].hasTrustDialogAccepted = true 를 쓴다.
+                                             #   러너의 fresh checkout은 untrusted이고, 그 상태에서는 permissions.allow가 전부 무시되며
+                                             #   (경고 "Ignoring N permissions.allow entries ... this workspace has not been trusted")
+                                             #   deny가 걸린 세션은 deny에 매칭되지 않는 Bash까지 막는 경우가 관측됐다(ADR-008/ADR-006 상충).
+                                             #   trusted 상태에서만 "allow 정상 + deny만 선택 적용"이 성립한다 → L2(§6.3)의 전제.
   1. claim.sh <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작
   2. assert-handoff.sh <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
@@ -277,10 +285,14 @@ run-stage.sh <stage> <issue>
        --settings .factory/ci-settings.json \
        --max-turns 5 --max-budget-usd <CHARTER> \
        --permission-mode dontAsk --output-format json > .factory/out/<stage>.json
-     (env: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 — 진짜 상한은 잡의 timeout-minutes)
+     (env: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 — 방어적으로 유지하되 진짜 상한은 잡의 timeout-minutes. ADR-007: 단일 Bash 호출이
+      10분으로 잘리고 foreground sleep은 Bash 툴이 차단하므로 workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상 moot)
   5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 생성
   6. verify-stage.sh <stage> <issue>         # 4의 결과에 workflow 산출물이 있는가: 역할 목록 == context.json 로스터,
                                              #   라운드 수, 판정 수, orchestration == harness.toml 설정. 없으면 needs-human "stage artifact missing"
+                                             #   인원·역할의 근거는 훅 기록이다(ADR-001): SubagentStart/SubagentStop 라인의 agent_id·agent_type을 센다.
+                                             #   stdout JSON의 subagent_stats는 쓰지 않는다 — Workflow agent()를 세지 않는다(ADR-002: 워커 2명에 spawned 0).
+                                             #   permission_denials도 판정 근거로 쓰지 않는다 — trusted 세션에서 항상 비어 있었다(ADR-006 3/3).
   7. write-handoff.sh <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
   8. transition.sh <issue> <to>              # 3.3 규칙
   9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md append + push · lock 해제
@@ -305,7 +317,7 @@ run commands, edit anything, or add commentary. If the workflow fails, return it
 error verbatim.
 ```
 
-메인 세션이 workflow를 호출하지 않으면 6에서 잡힌다. 건너뛰기는 성공으로 위장할 수 없고 잡 실패로 드러난다. `allowed-tools`가 메인 세션만 제한하고 서브에이전트(각자 frontmatter `tools:`)에는 영향이 없으면 건너뛰기는 감지가 아니라 **불가능**이 된다 — spike 6.
+메인 세션이 workflow를 호출하지 않으면 6에서 잡힌다. 건너뛰기는 성공으로 위장할 수 없고 잡 실패로 드러난다. **건너뛰기를 막는 메커니즘은 `verify-stage.sh`의 사후 검증 하나뿐이다** — 메인 세션만 선택적으로 잠그는 수단은 존재하지 않는다(ADR-006: frontmatter `allowed-tools`는 grant 힌트일 뿐 restrict가 아니고, `--allowedTools`는 `dontAsk` 아래에서 게이트로 작동하지 않으며, `--disallowedTools`는 서브에이전트까지 함께 막는다). 따라서 여기의 `allowed-tools:`는 의도 선언이지 강제 장치가 아니며, 건너뛰기는 **불가능이 아니라 감지**다. 감지의 근거는 workflow 산출물의 존재와 훅 로그의 `agent_id`/`agent_type`이다(ADR-001).
 
 #### 4.2.3 각 층이 읽는 것
 
@@ -323,7 +335,7 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 `harness.toml [factory] orchestration = "workflow" | "agent"` (기본 `workflow`, protected).
 
 - 런타임에 Workflow 호출이 실패하면(도구 없음, 권한 거부, 사양 불일치) 잡은 `blocked` + 사유 `orchestration-unavailable`로 끝난다. **자동으로 agent 모드로 바꿔 돌지 않는다.** sweeper → `needs-human` → `:unstick`이 전환 여부를 묻고, 전환은 `harness.toml` PR(사람 머지)이다.
-- 모든 handoff와 run 기록에 `orchestration: workflow|agent`, `guarantee: structural|verified`, `workflow_run_id`가 남는다. `structural` = 코드가 N명을 띄웠음, `verified` = 사후에 판정 수 == 로스터를 확인했을 뿐. `verify-stage.sh`는 handoff의 `orchestration`이 설정과 일치하는지 검사한다.
+- 모든 handoff와 run 기록에 `orchestration: workflow|agent`, `guarantee: structural|verified`, `workflow_run_id`가 남는다. 여기에 `-p` 출력 JSON의 `usage`·`total_cost_usd`·`modelUsage`·`num_turns`·`terminal_reason`·`permission_denials`를 함께 싣는다(ADR-002에서 존재 확인 — §9 run 기록, §4.4 사용량 보고). `structural` = 코드가 N명을 띄웠음, `verified` = 사후에 판정 수 == 로스터를 확인했을 뿐. `verify-stage.sh`는 handoff의 `orchestration`이 설정과 일치하는지 검사한다.
 - `:digest`와 retro가 모드별 머지 수를 보고한다. 설계 시점의 후퇴 결정은 `docs/factory/DECISIONS.md`에 ADR로 남긴다(무엇을 잃는지 — 구조적 보장 → 감지 — 명시).
 
 #### 4.2.5 로컬과 GitHub의 경쟁 — claim이 라벨보다 먼저
@@ -347,15 +359,15 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 |---|---|
 | Node | **22 이상** (Claude Code v2.1.198+ 요구). `actions/setup-node@v4`로 고정 |
 | CLI 설치 | `npm i -g @anthropic-ai/claude-code` (npm 캐시는 `actions/cache`). 또는 `curl -fsSL https://claude.ai/install.sh \| bash` |
-| 인증 A — 구독 | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`. **유효 1년**, 자동 갱신 없음. 문서가 CI 사용을 명시적으로 허용. 모델 요청만 가능(claude.ai 커넥터·Remote Control 불가 — factory는 필요 없음). 개인 구독 한도를 공유할 가능성이 있음(문서 미명시) |
-| 인증 B — API key | `ANTHROPIC_API_KEY`. 만료 없음, 종량 과금. 팀·조직 공유 시 문서 권장 |
+| 인증 A — 구독 (**기본**) | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`. **유효 1년**, 자동 갱신 없음. 문서가 CI 사용을 명시적으로 허용. 모델 요청만 가능(claude.ai 커넥터·Remote Control 불가 — factory는 필요 없음). **CI 소비는 개인 구독의 7일 창에 그대로 반영된다**(ADR-005: 스파이크 0~8 동안 92% → 94%, 사람 자신의 세션과 혼재되어 +2%p는 상한) |
+| 인증 B — API key | `ANTHROPIC_API_KEY`. 만료 없음, 종량 과금. **동작하지만 권고가 아니다**(ADR-005) — 구독 토큰이 운영 모드다 |
 | 우선순위 | 둘 다 있으면 OAuth 토큰이 `/login` 자격증명보다 우선. 스크립트는 둘 중 하나만 요구 |
 
 운영 규칙:
 - `bootstrap`이 토큰 발급일을 repo variable `FACTORY_TOKEN_ISSUED_AT`에 기록한다. sweeper가 **11개월** 시점에 `needs-human` 이슈("토큰 갱신")를 생성한다. 인증 실패는 `blocked` 경로로 빠진다.
 - `doctor`는 두 시크릿 중 하나의 존재를 확인한다(값은 보지 않는다).
 - 구독 → API key 전환은 시크릿 교체만으로 끝나야 한다. 스크립트는 인증 방식을 참조하지 않는다.
-- 12.1 spike에 "구독 토큰의 usage limit 소모 실측"을 포함한다.
+- **사용량은 제한하지 않고 보고한다**(ADR-005). 구독 토큰이 기본이고 CI 소비는 사람의 7일 창에서 나가므로, factory의 책임은 "얼마나 썼는지 보이게 하는 것"까지다: 잡마다 `-p` 출력 JSON의 `usage`·`total_cost_usd`·`modelUsage`를 run 기록(§9)에 남기고, 이슈별 합계와 주간 합계를 `factory status`·retro·`:digest`가 표시한다. **한도 판단과 토큰 갱신은 사람이 한다 — factory가 한도를 이유로 스스로 멈추지 않는다**(CHARTER의 이슈당 토큰 예산은 선택이며 기본 off, §5.3).
 
 ### 4.5 러너 환경 — 되는 것과 안 되는 것
 
@@ -365,13 +377,13 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 |---|---|---|
 | 로컬 `~/.claude/` 스킬·플러그인·설정 | **없음** | factory가 쓰는 스킬·에이전트·워크플로·훅은 전부 `.claude/`에 **커밋** (원칙 10). `factory init`의 존재 이유 |
 | claude.ai 커넥터 (Linear, Slack, Drive) | **없음** — 구독 토큰은 모델 요청만 | GitHub 연동은 `gh` CLI. 이슈 트래커는 GitHub Issues만(1.0) |
-| MCP 서버 | **가능** | repo의 `.mcp.json`(project scope) + settings `enableAllProjectMcpServers: true`. qa 리뷰어의 playwright MCP는 `npx @playwright/mcp --headless` |
+| MCP 서버 | **가능** | repo의 `.mcp.json`(project scope). **trust 부트스트랩(§4.2.1 step 0.5)이 선행되면 `enableAllProjectMcpServers` 없이 그대로 로드된다**(ADR-004 실측). qa 리뷰어의 playwright MCP는 `npx @playwright/mcp --headless` — 러너에서 headless 구동 확인(ADR-004) |
 | Docker / compose | **기본 설치** | DB·fake 서버 |
 | Chrome/Chromium/Firefox | **기본 포함** | playwright 브라우저는 `npx playwright install --with-deps chromium` (캐시 가능) |
 | 앱 실행 | **가능** — 백그라운드 + localhost | GUI 없음, **headless만** |
 | 웹/API e2e | **가능** | 위 조합 |
 | 모바일 네이티브 (iOS 시뮬레이터) | **제한** — macOS 러너 필요(분당 비용 10배), Android 에뮬레이터는 ubuntu에서 느림 | 로직·API는 웹 레벨 e2e, 모바일 UI는 위젯 테스트 + 빌드 성공까지만 gate. 필요 시 self-hosted macOS 러너(`vars.FACTORY_RUNNER`) |
-| 자원 | ≈4 vCPU / 16GB / 14GB SSD | compose + 앱 + playwright 동시 실행 시간은 spike로 실측 (§12.1) |
+| 자원 | ≈4 vCPU / 16GB / 14GB SSD | **동시 실행 검증됨**(ADR-004, `ubuntu-latest`): compose(postgres) + 앱 + chromium + playwright MCP를 함께 띄운 뒤에도 가용 메모리 6.5~6.7GB/7.9GB 유지, env_up 36s. 대형 러너 불필요. 단 측정 대상이 사소한 데모 앱이라 `runtime_budget_min` 기본값 12는 dogfood(§12.3)까지 그대로 둔다 |
 
 ---
 
@@ -567,7 +579,7 @@ test-env.sh up
 ```
 
 - 외부 서비스는 **절대 실제로 호출하지 않는다.** `[test.fakes]`의 fake 서버가 대신한다. 실제 크리덴셜은 CI 시크릿에 존재하지 않는다(CHARTER `NEVER_AUTOMATE`와 별개로, 존재 자체를 막는다).
-- 러너 자원: 표준 러너(≈4 vCPU/16GB)에서 compose + 앱 + playwright가 동시에 돌아야 한다. `doctor`가 `full` 레벨 소요 시간을 측정해 `runtime_budget_min`과 비교한다.
+- 러너 자원: 표준 러너(≈4 vCPU/16GB)에서 compose + 앱 + playwright가 동시에 돌아야 한다 — ADR-004에서 실측 확인(가용 메모리 6.5GB/7.9GB 유지). `doctor`가 `full` 레벨 소요 시간을 측정해 `runtime_budget_min`과 비교한다. 단, vitest처럼 기본 glob이 e2e 스펙까지 집어먹는 러너 도구는 `full`을 통째로 깨뜨리므로 스캐폴드가 unit/e2e 글롭을 분리해 둔다(ADR-004).
 
 #### 5.2.7 선택 — hold-out 시나리오
 
@@ -585,7 +597,7 @@ tier_default: standard
 # Charter — own-calendar
 
 ## Tiers
-| tier | 판정 기준 | 리뷰 로스터 | gate 레벨 | 예산(토큰/이슈) |
+| tier | 판정 기준 | 리뷰 로스터 | gate 레벨 | 예산(토큰/이슈) — 참고값, 기본 미적용 |
 |---|---|---|---|---|
 | docs | diff가 `docs/**`, `*.md`만 | correctness, spec-conformance | fast | 100k |
 | standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
@@ -602,6 +614,7 @@ tier_default: standard
 - same gate RED M = 3
 - runner retries R = 2
 - review 대기(awaiting-review) 이슈가 4개 이상이면 implement는 새 claim을 하지 않는다 (back-pressure)
+- budget_tokens_per_issue: unset   # 선택·기본 off (ADR-005). 켜면 초과 시 **새 claim만** 거부하고 진행 중 스테이지는 죽이지 않는다. 기본 동작은 보고만(§4.4)
 
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
 - 결제 제공자 교체, OAuth 제공자 추가/삭제
@@ -653,6 +666,8 @@ light_on_merge: true
 
 ### 6.3 L2 `.claude/settings.json` (factory init이 생성)
 
+**전제 — CI에서는 trust 부트스트랩이 선행되어야 이 층이 성립한다.** 러너의 fresh checkout은 untrusted 워크스페이스이고, 그 상태에서는 `permissions.allow`가 전부 무시되며(ADR-002/ADR-008, 3/3 run에서 `Ignoring N permissions.allow entries … this workspace has not been trusted`) deny가 붙은 세션이 deny에 매칭되지도 않는 평범한 Bash까지 막는 현상이 관측됐다(ADR-008). 따라서 `claude -p` 전에 `~/.claude.json`의 `projects[<cwd>].hasTrustDialogAccepted = true`를 쓴다(§4.2.1 step 0.5). trusted 상태에서만 "allow 정상 작동 + deny만 선택적으로 적용"이 확인됐고(ADR-008 3/3: force-push는 원격 브랜치 미생성으로 차단, 비대상 명령은 통과), `--settings`는 project 설정을 대체하지 않고 **병합**되므로 trust를 대신하지 못한다.
+
 ```json
 {
   "permissions": {
@@ -684,6 +699,8 @@ light_on_merge: true
 ```
 
 훅은 stdin JSON(`.tool_input.command`)을 읽는다. 기존 `check-merge-gate.sh`의 `$TOOL_INPUT` 버그는 이 교체로 해소된다.
+
+**이 훅들은 Workflow `agent()` 서브에이전트 안에서도 발화한다**(ADR-001 실측: 워커 2명 실행에서 `PreToolUse` 8줄, `SubagentStart` 2줄, `SubagentStop` 2줄). 따라서 L2를 에이전트 frontmatter로 분산시킬 필요가 없고 `settings.json` 한 곳으로 충분하다. stdin JSON에는 `agent_id`·`agent_type`이 실려 있어(메인 세션의 `Stop`에는 없다) 훅 로그만으로 메인 세션 호출과 서브에이전트 호출을 구분할 수 있다. **`verify-stage.sh`는 이 훅 기록을 인원·역할 검증의 입력으로 쓴다** — `SubagentStart`/`SubagentStop`의 `agent_type`을 세서 로스터와 대조한다. `-p` 출력 JSON의 `subagent_stats`는 쓰지 않는다: Workflow 서브에이전트를 세지 않는다(ADR-002 — 워커 2명이 실제로 떴는데 `spawned: 0`).
 
 ```bash
 # .claude/hooks/stop-guard.sh — 세션 종료 전 검사
@@ -979,6 +996,8 @@ R2 · 교차 검토   R1에 reject가 하나라도 있으면 → 전체 R2: 타 
 집계            aggregate-review.sh: R2 verdict 전원 approve → approved. 아니면 rework + must_fix 합집합(중복 제거)
 ```
 
+**schema null 시 해당 리뷰어 1회 재spawn** 규칙은 유지하되 성격은 **보험**이다: 실측에서 null은 0/20(opus 10/10, sonnet 10/10, 중첩 배열·enum 포함 스키마)이었고 재시도 경로는 한 번도 발동하지 않았다(ADR-003). 표본이 1세트뿐이라 제거하지 않을 뿐, 이 규칙이 정상 경로에서 돌 것으로 기대하지 않는다. 같은 이유로 리뷰어 모델 고정도 하지 않는다.
+
 rework 시 builder는 각 must_fix에 **반드시 응답**한다(`factory.rework-response.v1`, PR 코멘트):
 
 ```yaml
@@ -1082,6 +1101,8 @@ N=1(머지마다 전체 retro)이 기본이며 안전하다. 두 가지 가드�
 
 이슈당 1파일. 모든 스테이지가 append. 트랜스크립트가 사라진 뒤 유일한 영구 증거이자 retro의 입력.
 
+각 스테이지 줄에는 `-p` 출력 JSON에서 그대로 얻는 값을 싣는다: `usage`(토큰), `total_cost_usd`, `modelUsage`, `num_turns`, `terminal_reason`, `permission_denials`(ADR-002에서 존재 확인). 토큰·비용은 사용량 **보고**의 원천이다 — 구독 창을 소비하되 factory가 제한하지 않으므로(§4.4, ADR-005) 이슈별·주간 합계를 `factory status`·retro·`:digest`가 여기서 읽어 보여준다.
+
 ```markdown
 # Run · #123 incremental sync
 
@@ -1158,14 +1179,20 @@ git push
 
 ## 12. 검증 전략
 
-### 12.1 1단계 spike (설계를 바꿀 수 있는 미확인 사실)
-1. **settings.json 훅이 Workflow `agent()` 서브에이전트에 적용되는가.** 안 되면: 에이전트 frontmatter 훅 + `run-stage.sh`의 사후 검사로 대체(설계 불변).
-2. **`claude -p "/factory-review 125"`가 Actions에서 저장된 workflow를 실행하는가** — `Workflow(factory-review)` allow rule, `--permission-mode dontAsk`, 10분 idle ceiling(`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`).
-3. **StructuredOutput schema의 신뢰도** — 5회 재시도 후 null이 나오는 빈도. 높으면 리뷰어 재spawn 1회 규칙으로 흡수.
-4. 러너에서 playwright(qa 리뷰어) 실행 가능 여부, 그리고 표준 러너에서 compose + 앱 + playwright 동시 실행 시 `full` 레벨 소요 시간.
-5. 구독 OAuth 토큰으로 CI 실행 시 개인 usage limit을 소모하는지 실측 (문서 미명시).
-6. 커맨드 frontmatter `allowed-tools: Workflow(name)`가 **메인 세션만** 제한하고 workflow 안 서브에이전트(각자 `tools:`)에는 영향이 없는지. 되면 건너뛰기가 감지가 아니라 불가능이 된다(§4.2.2). 안 되면 `verify-stage.sh`의 사후 검증으로 충분.
-7. `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`의 "idle" 의미(무활동 시간 vs 총 대기)와 0 설정 시 동작. 걸리면 메인 세션이 workflow 결과 없이 종료 → L1이 `blocked`로 잡는지 확인.
+### 12.1 1단계 spike (설계를 바꿀 수 있는 미확인 사실) — **종결 2026-09-11**
+
+8개 항목 전부 실제 GitHub Actions 러너에서 실행했다. 결과·수치·근거는 `docs/factory/DECISIONS.md`(ADR-001~009)에 있다.
+
+1. **settings.json 훅이 Workflow `agent()` 서브에이전트에 적용되는가.** 안 되면: 에이전트 frontmatter 훅 + `run-stage.sh`의 사후 검사로 대체(설계 불변). → **ADR-001 (PASS)** — 워커 2명에서 `PreToolUse` 8줄·`SubagentStart`/`Stop` 각 2줄 발화, `agent_id`/`agent_type`으로 메인/서브 구분 가능 → L2는 settings.json 한 곳
+2. **`claude -p "/factory-review 125"`가 Actions에서 저장된 workflow를 실행하는가** — `Workflow(factory-review)` allow rule, `--permission-mode dontAsk`, 10분 idle ceiling(`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`). → **ADR-002 (PASS)** — 1턴·12s·$0.089로 서브에이전트 2명 병렬 + CLAUDE.md 주입 확인. 단 allow rule은 untrusted라 무시됐고 `dontAsk`가 실질 게이트, `subagent_stats`는 Workflow 에이전트를 세지 않음
+3. **StructuredOutput schema의 신뢰도** — 5회 재시도 후 null이 나오는 빈도. 높으면 리뷰어 재spawn 1회 규칙으로 흡수. → **ADR-003 (PASS)** — null 0/20(opus·sonnet 각 0/10)·정답 20/20·$1.55·85s → 재spawn 규칙은 보험으로만 유지
+4. 러너에서 playwright(qa 리뷰어) 실행 가능 여부, 그리고 표준 러너에서 compose + 앱 + playwright 동시 실행 시 `full` 레벨 소요 시간. → **ADR-004 (PASS)** — env_up 36s·full 2s·e2e 2s·가용 메모리 6.5GB 유지·playwright MCP headless ok → 대형 러너 불필요, 데모 앱 기준이라 `runtime_budget_min` 12는 dogfood까지 유지
+5. 구독 OAuth 토큰으로 CI 실행 시 개인 usage limit을 소모하는지 실측 (문서 미명시). → **ADR-005 (PASS)** — 7일 창 92%→94%(사람 세션 혼재, +2%p는 상한) = 소모함 → 구독이 기본 운영 모드이고 factory는 제한이 아니라 보고한다
+6. 커맨드 frontmatter `allowed-tools: Workflow(name)`가 **메인 세션만** 제한하고 workflow 안 서브에이전트(각자 `tools:`)에는 영향이 없는지. 되면 건너뛰기가 감지가 아니라 불가능이 된다(§4.2.2). 안 되면 `verify-stage.sh`의 사후 검증으로 충분. → **ADR-006 (FAIL)** — 메인만 잠그는 수단 없음 — frontmatter 무력·`--allowedTools` 무력·`--disallowedTools`는 서브에이전트까지 차단·`permission_denials` 항상 빈 배열 → 건너뛰기는 **감지**, `verify-stage.sh`가 유일한 방어선
+7. `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`의 "idle" 의미(무활동 시간 vs 총 대기)와 0 설정 시 동작. 걸리면 메인 세션이 workflow 결과 없이 종료 → L1이 `blocked`로 잡는지 확인. → **ADR-007 (MOOT)** — Bash 툴이 foreground `sleep`을 하드 차단해 두 레그(default/0) 모두 측정 불가·차이 없음. 단일 Bash 호출 10분 상한 + 실작업의 연속 툴 이벤트 때문에 구성상 초과 불가 → `=0`은 방어적으로 유지하고 실질 상한은 `timeout-minutes`
+8. (실행 중 추가) **러너의 fresh checkout이 untrusted 워크스페이스일 때 §6.3의 L2가 성립하는가.** → **ADR-008 (PASS)** — untrusted면 `permissions.allow` 전부 무시·deny 세션이 비대상 Bash까지 막는 경우 발생. trusted에서만 "allow 정상 + deny 선택 적용"(force-push 3/3 차단) → **trust 부트스트랩이 CI 필수**, §4.2.1 step 0.5
+
+부수 산출: 러너/yml 관례는 **ADR-009**(flow mapping 안의 `${{ }}` 금지, `upload-artifact`의 `include-hidden-files: true`)로 남겼다 — Plan 2의 yml 템플릿이 지킨다.
 
 ### 12.2 단위 검증 (스크립트는 전부 테스트를 가진다)
 - `transition.sh`: 상태 그래프 밖 전이 거부, handoff 없는 전이 거부, 손으로 옮긴 라벨 되돌림 — bats 테스트
