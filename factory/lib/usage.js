@@ -9,7 +9,10 @@
  * 고정을 대상으로 한다(가짜 텍스트가 아니라).
  */
 
-const HEADER_RE = /^## (.+?) · (.+?) · (.+)$/gm;
+// 알려진 스테이지 이름만 헤더로 인정한다 — 섹션 본문(예: 리뷰 코멘트 인용문)에 우연히 "## "로
+// 시작하는 줄이 섞여 들어와도 새 섹션으로 오인하지 않는다. retro/sweep은 아직 run-stage.js의
+// STAGES에 없지만(§Task 16·Plan 4) 기록 포맷은 동일하게 쓸 예정이라 미리 받아둔다.
+const HEADER_RE = /^## (triage|plan|implement|review|merge|retro|sweep) · (.+?) · (.+)$/gm;
 const USAGE_RE = /^usage: (\{[^}]*\}) cost_usd: (\S+) num_turns: (\S+) terminal_reason: (\S+) models: (.*)$/;
 
 /** "YYYY-MM-DDTHH:MMZ"(초 없는 short form)도, 일반 ISO도 받는다. 파싱 불가면 null. */

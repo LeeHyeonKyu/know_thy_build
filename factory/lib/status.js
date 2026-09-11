@@ -9,13 +9,19 @@ import { STATES } from "./labels.js";
 const NEEDS_HUMAN = "factory:needs-human";
 const NEEDS_INFO = "factory:needs-info";
 const IN_PROGRESS = "factory:in-progress";
+const BLOCKED = "factory:blocked";
 const MERGED = "factory:merged";
 const AWAITING_REVIEW = "factory:awaiting-review";
+const REWORK = "factory:rework";
 
-// "대기 중"으로 보여줄 상태들, 파이프라인 순서. in-progress(별도 섹션)·merged(별도 섹션)·
-// needs-human/needs-info(Needs You로 흡수)·blocked(sweeper가 자동 회수를 시도하는 중이라
-// 사람이 지금 볼 필요는 없다 — needs-human으로 에스컬레이션되면 그때 Needs You에 뜬다)는 뺀다.
-const QUEUE_STATES = ["factory:queue", "factory:ready", "factory:planned", AWAITING_REVIEW, "factory:rework", "factory:approved"];
+// "진행 중"으로 보여줄 상태들 — 지금 어떤 스테이지가 돌고 있거나(in-progress·awaiting-review 동안
+// review가 돈다·rework는 implement 재진입 직전) 자동 회수가 시도되는 중(blocked)인 상태 전부.
+// blocked는 fix round 1(Critical #2)까지는 조회만 되고 화면 어디에도 안 떴다 — sweeper가 회수를
+// 시도하는 중이라도 사람이 지금 뭘 기다리는지는 봐야 한다(다만 Needs You는 아니다 — 아직 사람 차례가
+// 아니다. sweeper가 못 살리면 needs-human으로 에스컬레이션되고 그때 Needs You에 뜬다).
+const LIVE_STATES = [IN_PROGRESS, BLOCKED, AWAITING_REVIEW, REWORK];
+// "대기 중" — 아직 어떤 스테이지도 시작 안 한 상태.
+const QUEUE_STATES = ["factory:queue", "factory:ready", "factory:planned", "factory:approved"];
 
 const labelOf = (issue) => (issue.labels || []).find((l) => STATES.has(l)) || null;
 
@@ -23,6 +29,16 @@ function minutesBetween(fromIso, toIso) {
   const a = Date.parse(fromIso), b = Date.parse(toIso);
   if (Number.isNaN(a) || Number.isNaN(b)) return null;
   return Math.round((b - a) / 60000);
+}
+
+// heartbeat이 없을 때만 쓰는 fallback — 라벨 자체가 "지금 어느 스테이지를 기다리는지"를 말해주는
+// 두 상태(awaiting-review → review가 돈다, rework → implement가 재진입한다)에만 적용된다.
+// in-progress·blocked는 라벨만으로 어느 스테이지였는지 알 수 없다(in-progress는 claim 시점에 라벨이
+// 이미 바뀌어 있고, blocked는 임의의 게이트 스테이지에서 올 수 있다) — heartbeat이 없으면 null.
+function labelFallbackStage(state) {
+  if (state === AWAITING_REVIEW) return "review";
+  if (state === REWORK) return "implement";
+  return null;
 }
 
 export function buildStatus({
@@ -43,13 +59,24 @@ export function buildStatus({
     needsYou.push({ kind: "harness", number: p.number, title: p.title, hint: `:harness ${p.number}` });
   }
 
-  const inProgress = issues
-    .filter((i) => labelOf(i) === IN_PROGRESS)
-    .map((i) => {
-      const last = heartbeats.get(i.number);
-      const age_min = last != null ? minutesBetween(last, now) : null;
-      return { number: i.number, title: i.title, state: IN_PROGRESS, stage: "implement", age_min, stale: age_min != null && age_min > staleMinutes };
-    });
+  const inProgress = [];
+  for (const state of LIVE_STATES) {
+    for (const i of issues) {
+      if (labelOf(i) !== state) continue;
+      const hb = heartbeats.get(i.number) || null;
+      const age_min = hb?.last != null ? minutesBetween(hb.last, now) : null;
+      const stage = hb?.stage ?? labelFallbackStage(state);
+      inProgress.push({
+        number: i.number,
+        title: i.title,
+        state,
+        stage,
+        age_min,
+        stale: age_min != null && age_min >= staleMinutes,
+        hint: state === BLOCKED ? "sweeper → needs-human" : null,
+      });
+    }
+  }
 
   const queue = [];
   for (const state of QUEUE_STATES) {
@@ -86,7 +113,11 @@ export function renderStatus(s) {
 
   lines.push("## 진행 중");
   if (s.inProgress.length === 0) lines.push("(none)");
-  else for (const p of s.inProgress) lines.push(`- #${p.number} ${p.title} · ${p.stage} · ${p.age_min ?? "?"}m${p.stale ? " · STALE" : ""}`);
+  else for (const p of s.inProgress) {
+    const stage = p.stage ?? "?";
+    const suffix = [p.stale ? "STALE" : null, p.hint].filter(Boolean).join(" · ");
+    lines.push(`- #${p.number} ${p.title} · ${p.state} · ${stage} · ${p.age_min ?? "?"}m${suffix ? " · " + suffix : ""}`);
+  }
   lines.push("");
 
   lines.push("## 큐");
@@ -106,6 +137,10 @@ export function renderStatus(s) {
 
   lines.push("## 사용량");
   if (s.usage) {
+    if (s.usage.perIssue.length === 0) lines.push("(none)");
+    else for (const p of s.usage.perIssue.slice(0, 10)) {
+      lines.push(`- #${p.issue} $${p.cost_usd} · ${p.runs} runs · ${p.tokens.input}/${p.tokens.output} tokens`);
+    }
     lines.push(`- window (since ${s.usage.window.since}): $${s.usage.window.cost_usd} / ${s.usage.window.runs} runs`);
     lines.push(`- total: $${s.usage.total.cost_usd} / ${s.usage.total.runs} runs`);
   } else {

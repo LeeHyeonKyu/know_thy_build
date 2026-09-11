@@ -98,6 +98,18 @@ test("perIssue sorted by cost desc; tokens sum input/output only", () => {
   expect(summary.perIssue[1]).toEqual({ issue: "1", cost_usd: 1, runs: 1, tokens: { input: 100, output: 10 } });
 });
 
+test("a stray '## ' line inside a section body (e.g. a quoted markdown heading in a review comment) is not mistaken for a new section — only known stage names open one", () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-"));
+  const p = makeRecord(root, 3, "review", "2026-09-08T09:02:00Z", null, [
+    "verdict: GREEN",
+    "## Not a real stage header — quoted from a PR description",
+    "more notes",
+  ]);
+  const entries = parseRunRecord(readFileSync(p, "utf8"));
+  expect(entries).toHaveLength(1);
+  expect(entries[0].stage).toBe("review");
+});
+
 test("mixed n/a cost sections are ignored in sums, never treated as 0-that-blocks-others", () => {
   const root = mkdtempSync(join(tmpdir(), "usage-"));
   makeRecord(root, 5, "triage", "2026-09-10T00:00:00Z", { usage: {}, total_cost_usd: null, num_turns: null, terminal_reason: "error", modelUsage: {} });

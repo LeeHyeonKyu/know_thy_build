@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildStatus, renderStatus } from "../lib/status.js";
 import { statusCommand } from "../cli/status.js";
+import { THRESHOLD_DEFAULTS } from "../lib/config.js";
 
 const NOW = "2026-09-15T12:00:00Z";
 const minutesAgo = (n) => new Date(Date.parse(NOW) - n * 60000).toISOString();
@@ -19,6 +20,8 @@ function baseIssues() {
     { number: 7, title: "waiting review 2", labels: ["factory:awaiting-review"], updatedAt: NOW, closedAt: null },
     { number: 8, title: "merged a", labels: ["factory:merged"], updatedAt: NOW, closedAt: "2026-09-14T00:00:00Z" },
     { number: 9, title: "merged b", labels: ["factory:merged"], updatedAt: NOW, closedAt: "2026-09-13T00:00:00Z" },
+    { number: 10, title: "blocked thing", labels: ["factory:blocked"], updatedAt: NOW, closedAt: null },
+    { number: 11, title: "rework thing", labels: ["factory:rework"], updatedAt: NOW, closedAt: null },
   ];
 }
 
@@ -33,7 +36,12 @@ function baseArgs() {
   return {
     issues: baseIssues(),
     prs: basePrs(),
-    heartbeats: new Map([[3, minutesAgo(5)], [4, minutesAgo(35)]]),
+    heartbeats: new Map([
+      [3, { last: minutesAgo(5), stage: "implement", runner: "gha-1" }],
+      [4, { last: minutesAgo(35), stage: "implement", runner: "gha-1" }],
+      [6, { last: minutesAgo(2), stage: "review", runner: "gha-2" }],
+      // 7 (awaiting-review), 10 (blocked), 11 (rework) — no heartbeat on purpose.
+    ]),
     quarantine: { quarantined: [{ id: "flaky-a" }, { id: "flaky-b" }] },
     thresholds: { quarantine_max: 5 },
     charter: { back_pressure: { awaiting_review_max: 4 } },
@@ -62,16 +70,50 @@ test("inProgress marks a 35-minute-old heartbeat stale, a 5-minute-old one not",
   expect(byNumber[3].state).toBe("factory:in-progress");
 });
 
+test("stale boundary is inclusive: exactly staleMinutes (default 30) counts as stale", () => {
+  const args = baseArgs();
+  args.heartbeats.set(3, { last: minutesAgo(30), stage: "implement", runner: "gha-1" });
+  const s = buildStatus(args);
+  const three = s.inProgress.find((p) => p.number === 3);
+  expect(three.age_min).toBe(30);
+  expect(three.stale).toBe(true);
+});
+
+test("blocked issues show in 진행 중 (not Needs You) with a sweeper hint; stage null without a heartbeat", () => {
+  const s = buildStatus(baseArgs());
+  expect(s.needsYou.some((n) => n.number === 10)).toBe(false);
+  const blocked = s.inProgress.find((p) => p.number === 10);
+  expect(blocked).toBeTruthy();
+  expect(blocked.state).toBe("factory:blocked");
+  expect(blocked.hint).toBe("sweeper → needs-human");
+  expect(blocked.stage).toBeNull();
+});
+
+test("inProgress[].stage comes from the heartbeat body's stage: field when present", () => {
+  const s = buildStatus(baseArgs());
+  const six = s.inProgress.find((p) => p.number === 6);
+  expect(six.state).toBe("factory:awaiting-review");
+  expect(six.stage).toBe("review");
+});
+
+test("inProgress[].stage falls back to a label-derived guess when there's no heartbeat: awaiting-review → review, rework → implement", () => {
+  const s = buildStatus(baseArgs());
+  const seven = s.inProgress.find((p) => p.number === 7);
+  expect(seven.stage).toBe("review");
+  const eleven = s.inProgress.find((p) => p.number === 11);
+  expect(eleven.stage).toBe("implement");
+});
+
 test("backPressure computes awaiting-review count and reads caps from charter/thresholds", () => {
   const s = buildStatus(baseArgs());
   expect(s.backPressure).toEqual({ awaiting_review: 2, max: 4, quarantined: 2, quarantine_max: 5 });
 });
 
-test("queue holds the waiting-state issues (not in-progress, not needs-you, not merged)", () => {
+test("queue only holds genuinely-waiting states — awaiting-review/rework/blocked/in-progress live in 진행 중 instead", () => {
   const s = buildStatus(baseArgs());
   const numbers = s.queue.map((q) => q.number).sort((a, b) => a - b);
-  expect(numbers).toEqual([5, 6, 7]);
-  expect(s.queue.find((q) => q.number === 5)).toEqual({ number: 5, title: "waiting triage", state: "factory:queue" });
+  expect(numbers).toEqual([5]);
+  expect(s.queue[0]).toEqual({ number: 5, title: "waiting triage", state: "factory:queue" });
 });
 
 test("recent = last 10 factory:merged issues by closedAt desc", () => {
@@ -97,6 +139,43 @@ test("renderStatus keeps section order: Needs You → 진행 중 → 큐 → 역
   for (let i = 1; i < positions.length; i++) expect(positions[i]).toBeGreaterThan(positions[i - 1]);
 });
 
+test("renderStatus's 사용량 section lists top per-issue usage (by cost) before window/total", () => {
+  const args = baseArgs();
+  args.usage = {
+    perIssue: [
+      { issue: "3", cost_usd: 5, runs: 2, tokens: { input: 100, output: 20 } },
+      { issue: "6", cost_usd: 1.5, runs: 1, tokens: { input: 10, output: 2 } },
+    ],
+    window: { since: "2026-09-08T12:00:00.000Z", cost_usd: 6.5, runs: 3 },
+    total: { cost_usd: 6.5, runs: 3 },
+  };
+  const s = buildStatus(args);
+  const text = renderStatus(s);
+  const section = text.slice(text.indexOf("## 사용량"));
+  expect(section).toContain("#3 $5 · 2 runs · 100/20 tokens");
+  expect(section).toContain("#6 $1.5 · 1 runs · 10/2 tokens");
+  expect(section.indexOf("#3")).toBeLessThan(section.indexOf("window (since"));
+  expect(section).toContain("window (since 2026-09-08T12:00:00.000Z): $6.5 / 3 runs");
+  expect(section).toContain("total: $6.5 / 3 runs");
+});
+
+test("empty repo: every section renders a (none) placeholder", () => {
+  const s = buildStatus({
+    issues: [], prs: {}, heartbeats: new Map(),
+    quarantine: { quarantined: [] }, thresholds: { quarantine_max: 5 },
+    charter: { back_pressure: { awaiting_review_max: 4 } },
+    usage: { perIssue: [], window: { since: "2026-09-08T00:00:00.000Z", cost_usd: 0, runs: 0 }, total: { cost_usd: 0, runs: 0 } },
+    now: NOW,
+  });
+  expect(s.needsYou).toEqual([]);
+  expect(s.inProgress).toEqual([]);
+  expect(s.queue).toEqual([]);
+  expect(s.recent).toEqual([]);
+  const text = renderStatus(s);
+  // one "(none)" per empty list section (Needs You, 진행 중, 큐, 최근 머지) + one for empty perIssue.
+  expect(text.match(/\(none\)/g)).toHaveLength(5);
+});
+
 // ── statusCommand ────────────────────────────────────────────────
 
 function io() {
@@ -120,6 +199,7 @@ function fakeGh() {
     comments: vi.fn(async (n) => {
       if (n === 3) return [{ id: 1, body: `<!-- factory-heartbeat issue=3 -->\nstage: implement · runner: gha-1 · started: x · last: ${minutesAgo(5)}`, createdAt: NOW }];
       if (n === 4) return [{ id: 2, body: `<!-- factory-heartbeat issue=4 -->\nstage: implement · runner: gha-1 · started: x · last: ${minutesAgo(35)}`, createdAt: NOW }];
+      if (n === 6) return [{ id: 3, body: `<!-- factory-heartbeat issue=6 -->\nstage: review · runner: gha-2 · started: x · last: ${minutesAgo(2)}`, createdAt: NOW }];
       return [];
     }),
     comment: throwing("comment"),
@@ -138,7 +218,7 @@ function fakeGh() {
   };
 }
 
-test("statusCommand --json exits 0, emits buildStatus JSON, and never calls a mutating gh method", async () => {
+test("statusCommand --json exits 0, emits buildStatus JSON (incl. blocked issues in inProgress), and never calls a mutating gh method", async () => {
   const root = mkdtempSync(join(tmpdir(), "status-cli-"));
   const gh = fakeGh();
   const { io: i, o } = io();
@@ -154,6 +234,11 @@ test("statusCommand --json exits 0, emits buildStatus JSON, and never calls a mu
   expect(parsed.backPressure.awaiting_review).toBe(2);
   expect(parsed.recent).toHaveLength(2);
   expect(parsed.usage).toBeTruthy();
+  const blocked = parsed.inProgress.find((p) => p.number === 10);
+  expect(blocked.state).toBe("factory:blocked");
+  expect(blocked.hint).toBe("sweeper → needs-human");
+  const six = parsed.inProgress.find((p) => p.number === 6);
+  expect(six.stage).toBe("review");
 
   for (const mutator of ["comment", "patchComment", "addLabels", "removeLabel", "setFactoryLabel", "createDraftPr", "createIssue", "closeIssue", "mergePr", "setStatus", "createLabel", "putBranchProtection", "setVariable"]) {
     expect(gh[mutator]).not.toHaveBeenCalled();
@@ -184,4 +269,26 @@ test("statusCommand renders text (non-json) with section headers by default", as
   expect(code).toBe(0);
   expect(o.out[0]).toContain("Needs You");
   expect(o.out[0]).toContain("사용량");
+});
+
+test("statusCommand on an empty repo: no issues/PRs anywhere still exits 0 and renders (none) placeholders", async () => {
+  const root = mkdtempSync(join(tmpdir(), "status-cli-empty-"));
+  const gh = { issueList: vi.fn(async () => []), prList: vi.fn(async () => []), comments: vi.fn(async () => []) };
+  const { io: i, o } = io();
+  const readRecords = vi.fn(async () => new Map());
+  const code = await statusCommand({ root, argv: [], io: i, gh, run: vi.fn(), now: () => NOW, readRecords });
+  expect(code).toBe(0);
+  expect(o.out[0]).toContain("(none)");
+});
+
+test("statusCommand falls back to canonical caps (awaiting_review_max: 4, quarantine_max from THRESHOLD_DEFAULTS) when CHARTER.md/harness.toml are unreadable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "status-cli-nocharter-"));
+  const gh = { issueList: vi.fn(async () => []), prList: vi.fn(async () => []), comments: vi.fn(async () => []) };
+  const { io: i, o } = io();
+  const readRecords = vi.fn(async () => new Map());
+  const code = await statusCommand({ root, argv: ["--json"], io: i, gh, run: vi.fn(), now: () => NOW, readRecords });
+  expect(code).toBe(0);
+  const parsed = JSON.parse(o.out[0]);
+  expect(parsed.backPressure.max).toBe(4);
+  expect(parsed.backPressure.quarantine_max).toBe(THRESHOLD_DEFAULTS.quarantine_max);
 });

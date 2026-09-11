@@ -3,13 +3,20 @@ import { join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
 import { readRecords as realReadRecords } from "../lib/records-branch.js";
-import { loadCharter, loadHarness } from "../lib/config.js";
+import { loadCharter, loadHarness, THRESHOLD_DEFAULTS } from "../lib/config.js";
 import { loadQuarantine } from "../lib/quarantine.js";
 import { STATES } from "../lib/labels.js";
 import { summarizeUsage } from "../lib/usage.js";
 import { buildStatus, renderStatus } from "../lib/status.js";
 
 const LAST_RE = /last:\s*(\S+)/;
+const STAGE_RE = /stage:\s*(\S+)/;
+const RUNNER_RE = /runner:\s*(\S+)/;
+
+// heartbeat이 있을 수 있는 상태 — lib/status.js LIVE_STATES와 같은 목록(in-progress·blocked는
+// heartbeat 없이는 어느 스테이지였는지 알 길이 없고, awaiting-review·rework는 라벨 fallback이
+// 있긴 하지만 실제로 review/implement가 돌고 있다면 heartbeat이 더 정확하다).
+const HEARTBEAT_ELIGIBLE_STATES = new Set(["factory:in-progress", "factory:blocked", "factory:awaiting-review", "factory:rework"]);
 
 /** readRecords가 실패하거나(브랜치 없음·fetch 실패) 비어 있을 때만 쓰는 로컬 fallback. */
 function localRecords(root, dir = "docs/factory/runs") {
@@ -23,17 +30,23 @@ function localRecords(root, dir = "docs/factory/runs") {
   return out;
 }
 
-/** in-progress 이슈의 heartbeat 코멘트(`<!-- factory-heartbeat issue=<n> -->`)에서 마지막 `last:` 값을 읽는다. */
-async function collectHeartbeats(gh, inProgressIssues) {
+/**
+ * heartbeat 대상 이슈의 코멘트에서 `<!-- factory-heartbeat issue=<n> -->` 마커가 달린 마지막 코멘트를
+ * 찾아 `{last, stage, runner}`를 뽑는다(heartbeat.js가 쓰는 `stage: <s> · runner: <r> · started: … · last: …`
+ * 본문 형식). → Map<issue, {last, stage, runner}>.
+ */
+async function collectHeartbeats(gh, eligibleIssues) {
   const map = new Map();
-  for (const i of inProgressIssues) {
+  for (const i of eligibleIssues) {
     const marker = `<!-- factory-heartbeat issue=${i.number} -->`;
     const comments = await gh.comments(i.number);
     const matches = comments.filter((c) => c.body.includes(marker));
     const last = matches[matches.length - 1];
     if (!last) continue;
-    const m = LAST_RE.exec(last.body);
-    if (m) map.set(i.number, m[1]);
+    const lastM = LAST_RE.exec(last.body);
+    const stageM = STAGE_RE.exec(last.body);
+    const runnerM = RUNNER_RE.exec(last.body);
+    if (lastM) map.set(i.number, { last: lastM[1], stage: stageM ? stageM[1] : null, runner: runnerM ? runnerM[1] : null });
   }
   return map;
 }
@@ -62,11 +75,14 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
   ]);
   const prs = { retroProposal, harness };
 
-  const inProgressIssues = issues.filter((i) => (i.labels || []).includes("factory:in-progress"));
-  const heartbeats = await collectHeartbeats(ghClient, inProgressIssues);
+  const heartbeatEligible = issues.filter((i) => (i.labels || []).some((l) => HEARTBEAT_ELIGIBLE_STATES.has(l)));
+  const heartbeats = await collectHeartbeats(ghClient, heartbeatEligible);
 
-  let charter; try { charter = loadCharter(root); } catch { charter = { back_pressure: {} }; }
-  let thresholds; try { thresholds = loadHarness(root).gates.thresholds; } catch { thresholds = {}; }
+  // CHARTER.md/harness.toml이 아직 없거나(fresh repo) 깨진 경우도 status는 죽지 않는다 — doctor가
+  // 아니라 읽기 전용 보고이므로 config.js가 정의한 것과 같은 canonical 기본값으로 떨어진다
+  // (fix round 1, Important #5: 전엔 undefined였다 — "cap 없음"처럼 보였다).
+  let charter; try { charter = loadCharter(root); } catch { charter = { back_pressure: { awaiting_review_max: 4 } }; }
+  let thresholds; try { thresholds = loadHarness(root).gates.thresholds; } catch { thresholds = { quarantine_max: THRESHOLD_DEFAULTS.quarantine_max }; }
   let quarantine; try { quarantine = loadQuarantine(root); } catch { quarantine = { quarantined: [] }; }
 
   let records;
