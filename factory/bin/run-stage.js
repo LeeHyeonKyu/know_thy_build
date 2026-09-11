@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen } from "../lib/gh.js";
 import { loadCharter, loadHarness } from "../lib/config.js";
-import { loadQuarantine } from "../lib/quarantine.js";
+import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine } from "../lib/gates.js";
 import { integrityCheck } from "../lib/integrity.js";
@@ -31,6 +31,21 @@ export const STAGES = ["triage", "plan", "implement", "review", "merge"];
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
+
+/**
+ * merge-base를 못 구하면 이번 런의 "무엇과 비교했는가"가 통째로 없다 — diff·integrity·prove-test가
+ * 전부 근거를 잃는다. RED도 GREEN도 아닌 판정 불가이므로 typed error로 올려 blocked로 끝낸다.
+ */
+export const MERGE_BASE_BLOCKED_REASON = "cannot compute merge-base (shallow clone?)";
+export const MERGE_BASE_ERROR_CODE = "FACTORY_MERGE_BASE";
+export class MergeBaseError extends Error {
+  constructor(detail = "") {
+    super(MERGE_BASE_BLOCKED_REASON + (detail ? ` — ${detail}` : ""));
+    this.name = "MergeBaseError";
+    this.code = MERGE_BASE_ERROR_CODE;
+  }
+}
+export const isMergeBaseError = (e) => e?.code === MERGE_BASE_ERROR_CODE;
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -74,8 +89,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     const ctx = await d.buildContext();
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     const out = await d.claudeP(ctx);
-    const gates = await d.gates(ctx);                                 // 게이트 없는 스테이지(triage/plan)는 null
     const usage = usageLine(out);
+    // claude -p가 실패를 보고했으면 게이트를 돌릴 이유가 없다 — 판정할 산출물이 없다.
+    // 게이트는 건너뛰고 곧장 verify로 간다(verify가 is_error로 떨어뜨린다).
+    let gates = null;
+    if (!out?.is_error) {
+      try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
+      catch (e) {
+        if (!isMergeBaseError(e)) throw e;
+        const t = await d.transition({ to: "factory:blocked", reason: MERGE_BASE_BLOCKED_REASON });
+        record([`gates: BLOCKED — ${e.message}`, ...refusal(t), usage]);
+        return 2;
+      }
+    }
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
       : gates.schema === "factory.gates.v1" ? [verdictLine(gates)] : [];
@@ -124,6 +150,27 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       record([`lock: release failed for issue ${issue} — delete refs/heads/factory/lock-${issue} by hand`]);
     }
   }
+}
+
+/**
+ * 지난 런이 남긴 "판정의 재료"까지 전부 지운다. gates.json만 지우고 unit.json·coverage·mutation
+ * 리포트를 남겨두면, 이번 런에서 그 명령이 아예 돌지 않았을 때 낡은 리포트가 이번 판정의 근거로
+ * 읽힌다(격리 제외·diff coverage·mutation score가 전부 옛 실행 얘기가 된다).
+ * 레포 밖 경로는 건드리지 않는다 — 하네스가 절대 경로를 가리켜도 남의 파일을 지우지 않는다.
+ */
+export function gateOutputPaths({ root, harness = {} }) {
+  const rel = [".factory/out/gates.json"];
+  for (const name of ["unit", "integration", "e2e"]) rel.push(harness.test?.[`${name}_report`] || `.factory/out/${name}.json`);
+  rel.push(harness.commands?.proof?.coverage_report, harness.commands?.proof?.mutation_report);
+  const rootAbs = resolve(root);
+  const under = (p) => p === rootAbs || p.startsWith(rootAbs + sep);
+  const paths = rel.filter(Boolean).map((p) => resolve(isAbsolute(p) ? p : join(rootAbs, p))).filter(under);
+  return [...new Set(paths)];
+}
+export function resetGateOutputs({ root, harness, rm = (p) => rmSync(p, { force: true }) }) {
+  const paths = gateOutputPaths({ root, harness });
+  for (const p of paths) rm(p);
+  return paths;
 }
 
 export function nextState(stage, data) {
@@ -191,7 +238,14 @@ async function main() {
   const readJson = (p) => { try { const t = readFile(p); return t ? JSON.parse(t) : null; } catch { return null; } };
   const gatesPath = join(root, ".factory/out/gates.json");
   let baseSha = null;                                                 // 한 런 안에서 base는 하나다 — 두 번 물어보면 두 답이 나올 수 있다
-  const mergeBase = async () => (baseSha ||= (await run("git", ["merge-base", `origin/${harness.project?.default_branch || "main"}`, "HEAD"], { cwd: root })).stdout.trim());
+  const mergeBase = async () => {
+    if (baseSha) return baseSha;
+    const branch = harness.project?.default_branch ?? "main";
+    const r = await run("git", ["merge-base", `origin/${branch}`, "HEAD"], { cwd: root });
+    const sha = r.stdout.trim();
+    if (r.code !== 0 || !sha) throw new MergeBaseError(`origin/${branch}: exit ${r.code} ${r.stderr.trim()}`.trim());
+    return (baseSha = sha);
+  };
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -210,16 +264,17 @@ async function main() {
     assertHandoff: async () => {
       const target = Object.entries(STAGE_OF_TARGET).find(([, s]) => s === prevStage(stage))?.[0];
       if (!target) return { ok: true };
-      // gatesChecked 없음 — 선행 handoff 확인은 직전 스테이지의 산출물만 본다(§ requirements.gatesGate).
-      const req = requirementFor(target)({ issue, comments: await gh.comments(issue) });
+      // prerequisite:true — 선행 handoff 확인은 직전 스테이지의 산출물이 있는지만 본다. 이번 런의
+      // 게이트도 sha 바인딩도 아직 존재하지 않는다(resetGates가 방금 지웠다). § requirements.gatesGate
+      const req = requirementFor(target)({ issue, prerequisite: true, comments: await gh.comments(issue) });
       if (!req.ok) { await transition({ gh, issue, to: "factory:needs-human", reason: `prerequisite handoff missing: ${req.reason}` }); }
       return req;
     },
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
-    /** 지난 런의 게이트 판정 파일도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
-    resetGates: async () => { rmSync(gatesPath, { force: true }); },
+    /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
+    resetGates: async () => { resetGateOutputs({ root, harness }); },
     countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
     claudeP: async () => {
       const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
@@ -232,7 +287,7 @@ async function main() {
     /** 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. */
     gates: async (ctx) => {
       if (!GATED_STAGES.has(stage)) return null;
-      const result = await runStageGates({ run, cwd: root, harness, stage, tier: ctx.tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile });
+      const result = await runStageGates({ run, cwd: root, harness, stage, tier: ctx.tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile, saveQuarantine: (q) => writeQuarantine(root, q) });
       mkdirSync(join(root, ".factory/out"), { recursive: true });
       writeFileSync(gatesPath, JSON.stringify(result, null, 2));
       console.log(verdictLine(result));

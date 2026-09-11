@@ -1,5 +1,8 @@
 import { test, expect, vi } from "vitest";
-import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED } from "../bin/run-stage.js";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -292,7 +295,7 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
   const v = { role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] };
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, verdicts: [v], orchestration: "workflow", guarantee: "verified" };
   const comments = [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: review }) }];
-  const assertHandoff = vi.fn(async () => requirementFor("factory:approved")({ issue: 7, comments }));   // run-stage/main()과 같은 ctx: gatesChecked 없음
+  const assertHandoff = vi.fn(async () => requirementFor("factory:approved")({ issue: 7, comments, prerequisite: true }));   // run-stage/main()과 같은 ctx
   const lines = [];
   const d = baseDeps({ assertHandoff, resetGates: async () => {}, runRecord: (l) => lines.push(...l) });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
@@ -300,6 +303,7 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
   expect(lines.some((l) => /assert: FAIL/.test(l))).toBe(false);
   // 반대로 전이 경로(gatesChecked)에서는 같은 handoff라도 게이트 파일을 요구한다
   expect(requirementFor("factory:approved")({ issue: 7, comments, gatesChecked: true }).reason).toMatch(/gates file missing/);
+  expect(requirementFor("factory:approved")({ issue: 7, comments }).reason).toMatch(/gates not verified/);
 });
 
 test("implement: a back-pressure check that throws is recorded and the stage proceeds", async () => {
@@ -369,6 +373,59 @@ test("merge gates: integrity는 PR head에서 잰 것만 인정한다 — 로컬
 
   const unknown = await mergeGates({ ...args, prHeadSha: undefined });              // PR head를 못 알아냈으면 확인 안 된 것이다
   expect(unknown.integrityGreen).toBe(false);
+});
+
+// ── F1 / F5 / C1: 판정 불가·지난 런의 잔재·is_error ─────────────────────────
+
+test("F1: merge-base를 못 구하면 스테이지는 판정 없이 factory:blocked로 끝난다", async () => {
+  const lines = [];
+  const d = implDeps({
+    gates: vi.fn(async () => { throw new MergeBaseError("origin/main: exit 128 fatal: no merge base"); }),
+    verifyStage: vi.fn(), writeHandoff: vi.fn(), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: MERGE_BASE_BLOCKED_REASON }));
+  expect(d.verifyStage).not.toHaveBeenCalled();
+  expect(d.writeHandoff).not.toHaveBeenCalled();
+  expect(lines.some((l) => /gates: BLOCKED — cannot compute merge-base/.test(l))).toBe(true);
+});
+
+test("F1: merge-base가 아닌 예외는 그대로 올라가 exit 1이 된다 — blocked로 덮지 않는다", async () => {
+  const lines = [];
+  const d = implDeps({ gates: async () => { throw new Error("gh exploded"); }, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(1);
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(lines.some((l) => /aborted — gh exploded/.test(l))).toBe(true);
+});
+
+test("C1: claude -p가 is_error면 게이트를 돌리지 않고 곧장 verify로 간다", async () => {
+  const d = implDeps({
+    claudeP: async () => ({ is_error: true, result: "boom" }),
+    gates: vi.fn(async () => ({ status: "GREEN" })),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/is_error/) }));
+});
+
+test("F5: resetGates는 판정 파일뿐 아니라 그 재료(테스트·커버리지·mutation 리포트)까지 지운다", () => {
+  const root = mkdtempSync(join(tmpdir(), "reset-gates-"));
+  const harness = {
+    test: { unit_report: ".factory/out/unit.json", e2e_report: "reports/e2e.json" },      // integration_report는 기본값
+    commands: { proof: { coverage_report: ".factory/out/coverage/coverage-final.json", mutation_report: "/etc/passwd" } },
+  };
+  const files = [".factory/out/gates.json", ".factory/out/unit.json", ".factory/out/integration.json", "reports/e2e.json", ".factory/out/coverage/coverage-final.json", "keep.json"];
+  for (const f of files) { mkdirSync(dirname(join(root, f)), { recursive: true }); writeFileSync(join(root, f), "{}"); }
+
+  const deleted = resetGateOutputs({ root, harness });
+  for (const f of files.slice(0, -1)) expect(existsSync(join(root, f)), f).toBe(false);
+  expect(existsSync(join(root, "keep.json"))).toBe(true);
+  // 레포 밖(절대 경로) 리포트는 목록에도 오르지 않는다 — 남의 파일을 지우지 않는다
+  expect(deleted.some((p) => p === "/etc/passwd")).toBe(false);
+  expect(gateOutputPaths({ root, harness: {} })).toEqual([
+    join(root, ".factory/out/gates.json"), join(root, ".factory/out/unit.json"),
+    join(root, ".factory/out/integration.json"), join(root, ".factory/out/e2e.json"),
+  ]);
 });
 
 test("C1: states with no commit binding get the plain ctxExtra and make no gh calls", async () => {
