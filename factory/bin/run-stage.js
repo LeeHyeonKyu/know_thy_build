@@ -14,7 +14,7 @@ import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMer
 import { integrityCheck } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
-import { STAGE_OF_TARGET } from "../lib/labels.js";
+import { STAGE_OF_TARGET, factoryLabelOf } from "../lib/labels.js";
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -83,6 +83,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
+    // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
+    // triage 스테이지가 스스로 backlog → factory:queue로 밀어 넣는다 — claim 직후·hydrateRecord보다
+    // 먼저(라벨 이동일 뿐 기록과는 무관하다). best-effort — 실패해도 흔적만 남기고 스테이지는 계속된다.
+    try {
+      const localMsg = await d.localEntry?.();
+      if (localMsg) record([localMsg]);
+    } catch (e) { record([`local entry: aborted — ${e?.message || e}`]); }
     // fresh checkout이면 로컬에 이슈의 run 기록이 없다 — 이번 스테이지가 appendRunRecord로 쓰기
     // 전에 factory/records 브랜치의 누적 내용을 먼저 복원한다(ADR-014 후속, fix round 1 Critical).
     // 안 그러면 뒤에서 만들어지는 "이번 스테이지 한 줄짜리" 파일을 syncRecords가 그대로 커밋해
@@ -297,6 +304,32 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
   };
 }
 
+/**
+ * 로컬 진입(§4.2.5): `factory run triage <issue>`가 락을 먼저 잡았을 때만 의미가 있다 — main()이
+ * `FACTORY_LOCAL_ENTRY=1`을 심어야 켜진다(GitHub 이벤트로 뜬 triage 잡은 이 env가 없다). backlog
+ * 라벨만 있고 아직 factory 상태 라벨이 없는 이슈에 한해 factory:queue로 스스로 밀어 넣고 전이
+ * 마커 코멘트를 남긴다 — 락은 이미 이 프로세스가 쥐고 있으므로, 라벨 이벤트로 따라 뜨는 GitHub의
+ * triage 잡은 claim에 실패해 exit 0으로 물러난다(의도된 설계, 중복 실행 방지).
+ */
+export function makeLocalEntry({ gh, issue, stage, env }) {
+  return async () => {
+    if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
+    const it = await gh.issue(issue);
+    // "backlog" is itself a member of STATES (lib/labels.js) — factoryLabelOf(labels) never returns
+    // null while "backlog" is present, it returns "backlog" itself. So "no factory label yet" means
+    // the current state is unset or still exactly "backlog", not "no STATES label found at all".
+    // Two STATE labels at once (an invalid label combo) makes factoryLabelOf throw — that's not
+    // swallowed here, the caller's best-effort catch (run-stage.js runStage) records it instead.
+    const current = factoryLabelOf(it.labels);
+    if ((current == null || current === "backlog") && it.labels.includes("backlog")) {
+      await gh.setFactoryLabel(issue, "factory:queue");
+      await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
+      return "local entry: backlog → factory:queue";
+    }
+    return null;
+  };
+}
+
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
   const [stage, issueArg] = process.argv.slice(2);
@@ -334,6 +367,7 @@ async function main() {
     backPressure: () => backPressure({ gh, charter, quarantine: loadQuarantine(root), thresholds: harness.gates.thresholds }),
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
+    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env }),
     heartbeat: () => startHeartbeat({ gh, issue, stage, runnerId }),
     assertHandoff: async () => {
       const target = Object.entries(STAGE_OF_TARGET).find(([, s]) => s === prevStage(stage))?.[0];

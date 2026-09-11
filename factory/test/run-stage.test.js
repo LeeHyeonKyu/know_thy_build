@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
@@ -307,6 +307,109 @@ test("a hydrateRecord that throws is swallowed by its own try/catch, recorded, a
   });
   expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
   expect(lines.some((l) => /hydrate: aborted — git fetch failed/.test(l))).toBe(true);
+});
+
+test("localEntry runs right after claim, before hydrateRecord and resetGates", async () => {
+  const calls = [];
+  const deps = baseDeps({
+    claim: async () => { calls.push("claim"); return { ok: true }; },
+    localEntry: vi.fn(async () => { calls.push("local-entry"); return "local entry: backlog → factory:queue"; }),
+    hydrateRecord: async () => { calls.push("hydrate"); return { ok: true }; },
+    resetGates: async () => calls.push("reset-gates"),
+  });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(calls.indexOf("claim")).toBeLessThan(calls.indexOf("local-entry"));
+  expect(calls.indexOf("local-entry")).toBeLessThan(calls.indexOf("hydrate"));
+  expect(calls.indexOf("local-entry")).toBeLessThan(calls.indexOf("reset-gates"));
+  expect(deps.localEntry).toHaveBeenCalledTimes(1);
+});
+
+test("localEntry is not called when claim fails", async () => {
+  const localEntry = vi.fn();
+  const deps = baseDeps({ claim: async () => ({ ok: false, holder: "other" }), localEntry });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(localEntry).not.toHaveBeenCalled();
+});
+
+test("localEntry is optional — deps without it still work", async () => {
+  const deps = baseDeps({});
+  expect(deps.localEntry).toBeUndefined();
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+});
+
+test("localEntry's returned line is recorded", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    localEntry: async () => "local entry: backlog → factory:queue",
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(lines).toContain("local entry: backlog → factory:queue");
+});
+
+test("localEntry returning null/undefined records nothing extra", async () => {
+  const lines = [];
+  const deps = baseDeps({ localEntry: async () => null, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(lines.some((l) => /local entry/.test(l))).toBe(false);
+});
+
+test("a localEntry that throws is swallowed (best-effort), recorded, and doesn't change the exit code", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    localEntry: async () => { throw new Error("gh label failed"); },
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(lines.some((l) => /local entry: aborted — gh label failed/.test(l))).toBe(true);
+});
+
+test("makeLocalEntry: backlog issue with no factory label → sets factory:queue, comments the transition marker, returns the record line", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const comment = vi.fn(async () => {});
+  const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog", "priority:p1"] }), setFactoryLabel, comment };
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const line = await entry();
+  expect(line).toBe("local entry: backlog → factory:queue");
+  expect(setFactoryLabel).toHaveBeenCalledWith(12, "factory:queue");
+  expect(comment).toHaveBeenCalledWith(12, expect.stringContaining("<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->"));
+  expect(comment).toHaveBeenCalledWith(12, expect.stringContaining("backlog → factory:queue — claimed locally first (§4.2.5)"));
+});
+
+test("makeLocalEntry: issue already carries a factory label → no-op, returns null", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const comment = vi.fn(async () => {});
+  const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["factory:ready"] }), setFactoryLabel, comment };
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  expect(await entry()).toBeNull();
+  expect(setFactoryLabel).not.toHaveBeenCalled();
+  expect(comment).not.toHaveBeenCalled();
+});
+
+test("makeLocalEntry: backlog issue but no factory label and no backlog label either → no-op, returns null", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const comment = vi.fn(async () => {});
+  const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["priority:p1"] }), setFactoryLabel, comment };
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  expect(await entry()).toBeNull();
+  expect(setFactoryLabel).not.toHaveBeenCalled();
+});
+
+test("makeLocalEntry: FACTORY_LOCAL_ENTRY unset → no-op, returns null, gh untouched", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const comment = vi.fn(async () => {});
+  const gh = { issue: vi.fn(async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] })), setFactoryLabel, comment };
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: {} });
+  expect(await entry()).toBeNull();
+  expect(gh.issue).not.toHaveBeenCalled();
+  expect(setFactoryLabel).not.toHaveBeenCalled();
+});
+
+test("makeLocalEntry: non-triage stage → no-op, returns null, gh untouched", async () => {
+  const gh = { issue: vi.fn(async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] })) };
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "plan", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  expect(await entry()).toBeNull();
+  expect(gh.issue).not.toHaveBeenCalled();
 });
 
 test("M4: the usage line carries num_turns, terminal_reason and per-model cost", () => {
