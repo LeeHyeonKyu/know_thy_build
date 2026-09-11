@@ -1,0 +1,30 @@
+name: factory-setup
+description: Node 22, jq, .factory runtime deps, project runtime setup, optional Claude Code + test environment
+inputs:
+  claude:
+    description: install Claude Code CLI
+    default: "true"
+  test-env:
+    description: bring up the harness test environment (.factory/bin/test-env.js up)
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - shell: bash
+      run: |
+        command -v jq >/dev/null || { echo "factory: jq is required on the runner" >&2; exit 2; }
+        git config user.name "factory-bot"
+        git config user.email "factory-bot@users.noreply.github.com"
+        npm install --prefix .factory --no-audit --no-fund
+        node .factory/bin/setup-env.js
+    - if: inputs.claude == 'true'
+      shell: bash
+      run: |
+        npm i -g @anthropic-ai/claude-code
+        claude --version
+    - if: inputs.test-env == 'true'
+      shell: bash
+      run: node .factory/bin/test-env.js up

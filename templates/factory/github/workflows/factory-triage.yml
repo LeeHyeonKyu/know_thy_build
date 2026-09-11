@@ -1,0 +1,43 @@
+name: factory-triage
+on:
+  issues:
+    types: [labeled]
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  statuses: write
+concurrency:
+  group: factory-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  triage:
+    if: contains(fromJSON('["factory:queue"]'), github.event.label.name)
+    runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+      - uses: ./.factory/actions/setup
+        with:
+          claude: "true"
+          test-env: "false"
+      - name: Run stage
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
+        run: node .factory/bin/run-stage.js triage ${{ github.event.issue.number }}
+      - name: Upload run outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-triage-${{ github.event.issue.number }}-${{ github.run_id }}
+          path: |
+            docs/factory/runs/
+            .factory/out/
+          include-hidden-files: true
