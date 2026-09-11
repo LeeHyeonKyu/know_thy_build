@@ -65,14 +65,17 @@ test("merged requires checks + integrity GREEN and approved handoff sha == PR he
   expect(r({ ...base, checksGreen: true }).reason).toMatch(/integrity check not verified GREEN/);
 });
 
-test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing, GREEN이 아니면 거부", () => {
+test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing, GREEN이 아니면 거부 (전이 경로에서만)", () => {
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
-  const ctx = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, maxRounds: 3, checksGreen: true, integrityGreen: true };
+  const ctx = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, maxRounds: 3, checksGreen: true, integrityGreen: true, gatesChecked: true };
   for (const to of ["factory:approved", "factory:merged"]) {
     const r = requirementFor(to);
     expect(r(ctx).reason, to).toMatch(/gates file missing/);
     expect(r({ ...ctx, gatesFile: { status: "RED", level: "full" } }).reason, to).toMatch(/gates file status is RED/);
+    expect(r({ ...ctx, gatesFile: { ...GREEN, diagnostic: true } }).reason, to).toMatch(/diagnostic/);
     expect(r({ ...ctx, gatesFile: GREEN }).ok, to).toBe(true);
+    // 선행 handoff 확인(gatesChecked 없음)은 게이트를 묻지 않는다 — 그 시점엔 이번 런의 게이트가 없다
+    expect(r({ ...ctx, gatesChecked: undefined }).ok, to).toBe(true);
   }
 });
 

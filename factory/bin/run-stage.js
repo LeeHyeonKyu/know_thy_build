@@ -210,6 +210,7 @@ async function main() {
     assertHandoff: async () => {
       const target = Object.entries(STAGE_OF_TARGET).find(([, s]) => s === prevStage(stage))?.[0];
       if (!target) return { ok: true };
+      // gatesChecked 없음 — 선행 handoff 확인은 직전 스테이지의 산출물만 본다(§ requirements.gatesGate).
       const req = requirementFor(target)({ issue, comments: await gh.comments(issue) });
       if (!req.ok) { await transition({ gh, issue, to: "factory:needs-human", reason: `prerequisite handoff missing: ${req.reason}` }); }
       return req;
@@ -241,6 +242,8 @@ async function main() {
     writeHandoff: async ({ data }) => { await gh.comment(issue, renderHandoff({ stage, issue, summary: data.summary || `### ${stage} 완료`, data })); },
     transition: async ({ to, reason, data }) => {
       const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, charter, record: recordLine });
+      // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
+      ctxExtra.gatesChecked = true;
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
       if (to === "factory:merged") Object.assign(ctxExtra, await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase() }));

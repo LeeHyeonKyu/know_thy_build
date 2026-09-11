@@ -2,6 +2,7 @@ import { test, expect, vi } from "vitest";
 import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED } from "../bin/run-stage.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
+import { requirementFor } from "../lib/requirements.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -9,6 +10,7 @@ test("run-stage executes the §4.2.1 skeleton in order and transitions on succes
     charterReady: vi.fn(async () => { calls.push("charter"); return true; }),
     trustWorkspace: vi.fn(async () => calls.push("trust")),
     claim: vi.fn(async () => { calls.push("claim"); return { ok: true }; }),
+    resetGates: vi.fn(async () => calls.push("reset-gates")),
     assertHandoff: vi.fn(async () => { calls.push("assert"); return { ok: true }; }),
     buildContext: vi.fn(async () => { calls.push("context"); return { roster: ["correctness"], rounds: undefined, orchestration: "workflow", limits: { K: 3 } }; }),
     heartbeat: vi.fn(async () => { calls.push("heartbeat"); return { stop: () => calls.push("heartbeat-stop") }; }),
@@ -23,7 +25,7 @@ test("run-stage executes the §4.2.1 skeleton in order and transitions on succes
   };
   const code = await runStage({ stage: "review", issue: 7, deps });
   expect(code).toBe(0);
-  expect(calls).toEqual(["charter", "trust", "claim", "heartbeat", "assert", "context", "reset-agents", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
+  expect(calls).toEqual(["charter", "trust", "claim", "reset-gates", "heartbeat", "assert", "context", "reset-agents", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
 });
 
 test("claim failure exits 0 without doing work; verify failure → transition to needs-human, exit 2", async () => {
@@ -284,6 +286,20 @@ test("implement: back-pressure refusal exits 0 before claim", async () => {
   expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
   expect(d.claim).not.toHaveBeenCalled();
   expect(lines.some((l) => /back-pressure: refused — awaiting-review 4 ≥ 4/.test(l))).toBe(true);
+});
+
+test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다 (진짜 requirementFor로)", async () => {
+  const v = { role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] };
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, verdicts: [v], orchestration: "workflow", guarantee: "verified" };
+  const comments = [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: review }) }];
+  const assertHandoff = vi.fn(async () => requirementFor("factory:approved")({ issue: 7, comments }));   // run-stage/main()과 같은 ctx: gatesChecked 없음
+  const lines = [];
+  const d = baseDeps({ assertHandoff, resetGates: async () => {}, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect((await assertHandoff()).ok).toBe(true);
+  expect(lines.some((l) => /assert: FAIL/.test(l))).toBe(false);
+  // 반대로 전이 경로(gatesChecked)에서는 같은 handoff라도 게이트 파일을 요구한다
+  expect(requirementFor("factory:approved")({ issue: 7, comments, gatesChecked: true }).reason).toMatch(/gates file missing/);
 });
 
 test("implement: a back-pressure check that throws is recorded and the stage proceeds", async () => {

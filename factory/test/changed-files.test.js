@@ -19,8 +19,17 @@ test("changedFiles classifies by status and globs", async () => {
   expect(r.added).toEqual(["test/new.test.js", "docs/x.md"]);
   expect(r.tests).toEqual(["test/new.test.js", "test/old.test.js"]);
   expect(r.addedTests).toEqual(["test/new.test.js"]);
-  expect(r.sources).toEqual(["src/a.js", "src/gone.js"]);
+  expect(r.sources).toEqual(["src/a.js"]);                              // 지워진 파일은 검사 대상이 아니다
   expect(run.calls[0].args).toEqual(["diff", "--name-status", "abc...HEAD"]);
+});
+
+test("tests/sources는 삭제를 빼고, 이름이 바뀐 파일은 새 경로로 친다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "D\ttest/gone.test.js\nR100\ttest/old.test.js\ttest/moved.test.js\nD\tsrc/dead.js\nR090\tsrc/from.js\tsrc/to.js\n", stderr: "" } }]);
+  const r = await changedFiles({ run, cwd: "/repo", base: "abc", harness });
+  expect(r.all).toContain("test/gone.test.js");                         // all은 삭제도 그대로 담는다
+  expect(r.tests).toEqual(["test/moved.test.js"]);
+  expect(r.sources).toEqual(["src/to.js"]);
+  expect(r.addedTests).toEqual([]);
 });
 
 test("changedLines parses -U0 hunks (added/modified lines only)", async () => {

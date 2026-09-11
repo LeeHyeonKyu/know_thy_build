@@ -15,9 +15,16 @@ function need(ctx, stage, schema) {
 }
 const sameSet = (a, b) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
 
-/** 리뷰·머지도 게이트 파일을 요구한다 — 파일이 없으면 "확인 안 됨"이고, 확인 안 됨은 통과가 아니다. */
+/**
+ * 리뷰·머지도 게이트 파일을 요구한다 — 파일이 없으면 "확인 안 됨"이고, 확인 안 됨은 통과가 아니다.
+ * 단 **전이 경로에서만** 물린다(`ctx.gatesChecked === true`). 선행 handoff 확인(assertHandoff)은
+ * "직전 스테이지가 산출물을 남겼는가"를 묻는 것이지 이번 런의 게이트를 묻는 게 아니다 —
+ * 그 시점엔 이번 런의 게이트가 아직 돌지도 않았다(resetGates가 지운 직후다).
+ */
 function gatesGate(ctx) {
+  if (ctx.gatesChecked !== true) return null;
   if (!ctx.gatesFile) return fail("gates file missing");
+  if (ctx.gatesFile.diagnostic === true) return fail("gates file is diagnostic output");
   if (ctx.gatesFile.status !== "GREEN") return fail(`gates file status is ${ctx.gatesFile.status}`);
   return null;
 }
