@@ -41,5 +41,8 @@ export function makeGh({ run, repo }) {
       const out = await gh(["pr", "create", "-R", repo, "--draft", "--head", head, "--base", base, "--title", title, "--body-file", "-"], { input: body });
       const m = /\/pull\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
+    async patchComment(commentId, body) {
+      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "-f", `body=${body}`]);
+    },
   };
 }
