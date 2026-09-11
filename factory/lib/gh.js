@@ -1,5 +1,11 @@
 import { STATES } from "./labels.js";
 
+/**
+ * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
+ * bucket(pass|fail|pending|skipping|cancel)은 최신 gh만 준다. 없으면 state로 떨어진다.
+ */
+export const allChecksGreen = (checks) => checks.length > 0 && checks.every((c) => (c.bucket ? c.bucket === "pass" : c.state === "SUCCESS"));
+
 export function makeGh({ run, repo }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);
@@ -30,6 +36,9 @@ export function makeGh({ run, repo }) {
       const current = (await this.issue(n)).labels.filter((l) => STATES.has(l) && l !== label);
       const args = ["issue", "edit", String(n), "-R", repo, ...current.flatMap((l) => ["--remove-label", l]), "--add-label", label];
       await gh(args);
+    },
+    async prChecks(pr) {
+      return JSON.parse(await gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,state,bucket"]));
     },
     async prHeadSha(pr) {
       return JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "headRefOid"])).headRefOid;

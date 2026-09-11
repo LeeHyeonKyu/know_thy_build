@@ -2,6 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { parseVitestJson } from "./parsers/vitest-json.js";
 import { isQuarantined } from "./quarantine.js";
+import { changedFiles } from "./changed-files.js";
+import { classifyFailures } from "./classify-failure.js";
+import { proveTest, repeatNewTests } from "./prove-test.js";
+import { runDiffCoverage } from "./diff-coverage.js";
+import { mutationGate } from "./mutation.js";
 
 const LEVELS = ["fast", "full", "deep"];
 const MAX_LEVEL = { M0: "fast", M1: "full", M2: "deep" };
@@ -64,6 +69,73 @@ export async function runGates({ run, cwd, harness, level, quarantine, readFile 
     gates[name] = { status, code: r.code, duration_ms: Date.now() - t0, log: (r.stderr + r.stdout).slice(-2000) };
   }
   const result = { schema: "factory.gates.v1", level, requested_level, downgraded_from: level === requested_level ? null : requested_level, status: null, gates, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests, ran_at: now };
+  return recomputeStatus(result, harness);
+}
+
+/** CHARTER tier → 게이트 레벨. 모르는 tier는 standard처럼 취급한다(약한 쪽으로 기울지 않는다). */
+const LEVEL_OF_TIER = { docs: "fast", standard: "full", "load-bearing": "deep" };
+export const levelForTier = (tier) => LEVEL_OF_TIER[tier] || "full";
+
+const defaultReadFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
+
+/**
+ * 한 스테이지의 게이트 전체(명령 게이트 + 실패 분류 + prove-test/반복 + 증명 게이트)를 한 번에 돌려
+ * `factory.gates.v1` 결과 하나로 합산한다. run-stage의 `d.gates`와 `bin/gates.js`가 공유하는 유일한 본체.
+ *
+ * - 분류(classifyFailures)는 **implement에서만** 한다. review/merge는 재분류 없이 RED가 RED다.
+ * - `blocked`(base 워크트리를 못 만들어 "PR이 깨뜨렸다"를 판정할 수 없음)가 하나라도 있으면
+ *   status를 BLOCKED로 올린다 — GREEN도 RED도 아닌, 사람이 봐야 하는 상태다.
+ */
+export async function runStageGates({ run, cwd, harness, stage, tier, level: levelArg, base, quarantine = { quarantined: [] }, gh, issue, readFile = defaultReadFile, now }) {
+  const level = levelArg || levelForTier(tier);
+  const result = await runGates({ run, cwd, harness, level, quarantine, readFile, ...(now ? { now } : {}) });
+  let changed = null;
+  const changedOnce = async () => (changed ||= await changedFiles({ run, cwd, base, harness }));
+
+  if (stage === "implement" && result.tests?.failing?.length) {
+    const { addedTests } = await changedOnce();
+    const cls = await classifyFailures({ run, cwd, harness, failing: result.tests.failing, base, thresholds: harness.gates.thresholds, addedTests });
+    result.classification = cls;
+    const blocked = cls.filter((c) => c.verdict === "blocked");
+    if (blocked.length) {
+      recomputeStatus(result, harness);
+      result.status = "BLOCKED";
+      result.blocked_reason = `cannot classify ${blocked.length} failing test(s): ${blocked[0].evidence?.error || "unknown"}`;
+      return result;
+    }
+    const flaky = cls.filter((c) => c.verdict === "flaky-existing");
+    if (flaky.length) {
+      result.flaky_issues = [];
+      for (const c of flaky) {
+        result.tests.excluded.push(c.id);
+        result.tests.failing = result.tests.failing.filter((f) => f.id !== c.id);
+        // 격리 이슈를 못 만들어도 판정은 계속한다 — gh 실패로 스테이지를 죽이지 않는다.
+        try { result.flaky_issues.push(await gh?.createIssue({ title: `flaky: ${c.id}`, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"] })); }
+        catch (e) { result.flaky_issues.push(`error: ${e?.message || e}`); }
+      }
+      result.tests.failed = result.tests.failing.length;
+    }
+    // 남은 실패가 없으면(전부 기존 flaky) 테스트 게이트의 RED는 이 변경의 책임이 아니다.
+    if (result.tests.failing.length === 0) for (const [n, g] of Object.entries(result.gates)) if (g.status === "RED" && TEST_GATES.has(n)) g.status = "GREEN";
+  }
+
+  if (stage === "implement") {
+    const ch = await changedOnce();
+    if (tier !== "docs") {
+      const pt = await proveTest({ run, cwd, harness, base, addedTests: ch.addedTests });
+      result.gates["prove-test"] = { status: pt.ok ? "GREEN" : "RED", log: pt.detail };
+    }
+    const rp = await repeatNewTests({ run, cwd, harness, addedTests: ch.addedTests, times: harness.gates.thresholds.new_test_repeats });
+    result.gates["new-test-repeat"] = { status: rp.ok ? "GREEN" : "RED", log: rp.detail };
+    if (result.skipped.includes("diff_coverage")) {
+      const dc = await runDiffCoverage({ run, cwd, harness, base, readFile });
+      result.gates.diff_coverage = { status: dc.misconfigured ? "MISCONFIGURED" : dc.ok ? "GREEN" : "RED", log: `pct=${dc.pct} threshold=${dc.threshold} uncovered=${JSON.stringify(dc.uncovered || []).slice(0, 500)}` };
+    }
+    if (result.skipped.includes("mutation")) {
+      const mu = await mutationGate({ run, cwd, harness, changedSources: ch.sources, readFile });
+      result.gates.mutation = { status: mu.misconfigured ? "MISCONFIGURED" : mu.ok ? "GREEN" : "RED", log: `score=${mu.score} threshold=${mu.threshold} ${mu.detail || ""}` };
+    }
+  }
   return recomputeStatus(result, harness);
 }
 

@@ -27,11 +27,26 @@ function matchBrace(text, start) {
   return -1;
 }
 
-export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration }) {
+const GATED_STAGES = ["implement", "review", "merge"];
+
+/**
+ * gates: `.factory/out/gates.json`의 내용(없으면 null). 게이트 판정의 단일 출처는 이 파일이다 —
+ * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
+ * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
+ */
+export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
   const reasons = [];
   if (!out || out.is_error) reasons.push("claude -p reported is_error");
   const data = out ? extractJson(out.result) : null;
   if (!data) reasons.push("no JSON object in result");
+  if (GATED_STAGES.includes(stage)) {
+    if (!gates) reasons.push("gates file missing");
+    else if (data) {
+      if (data.gates && (data.gates.status !== gates.status || data.gates.level !== gates.level)) reasons.push(`handoff gates mismatch: handoff says ${data.gates.status}/${data.gates.level}, file says ${gates.status}/${gates.level}`);
+      else data.gates = { status: gates.status, level: gates.level };
+      if (stage === "implement" && gates.status !== "GREEN") reasons.push(`gates ${gates.status}: failing=${(gates.failing || []).join(",") || "none"}`);
+    }
+  }
   if (data && SCHEMA_OF[stage]) {
     const v = validate(SCHEMA_OF[stage], data);
     if (!v.ok) reasons.push(`schema ${SCHEMA_OF[stage]}: ${v.errors.join("; ")}`);

@@ -29,7 +29,9 @@ const RULES = {
   },
   "factory:awaiting-review"(ctx) {
     const { h, err } = need(ctx, "implement", "implement.v1"); if (err) return err;
-    if (h.data.gates.status !== "GREEN") return fail(`gates status is ${h.data.gates.status}`);
+    // 게이트 판정의 출처는 handoff가 아니라 러너가 쓴 파일이다 — 파일이 있으면 handoff의 자기 신고는 무시한다.
+    const status = ctx.gatesFile ? ctx.gatesFile.status : h.data.gates.status;
+    if (status !== "GREEN") return fail(ctx.gatesFile ? `gates file status is ${status}` : `gates status is ${status}`);
     if (ctx.headSha && h.data.head_sha !== ctx.headSha) return fail(`implement head_sha ${h.data.head_sha.slice(0, 7)} != branch head ${ctx.headSha.slice(0, 7)}`);
     if (h.data.verifier.verdict === "rejected") return fail("verifier rejected");
     return pass;

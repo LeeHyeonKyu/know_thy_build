@@ -7,7 +7,7 @@ const out = (obj, extra = {}) => ({ is_error: false, result: "The workflow retur
 const log = (types) => ({ starts: [], stops: [], completed: types, orphans: [] });
 
 test("passes when result parses, schema ok, roster covered, orchestration matches", () => {
-  const r = verifyStage({ stage: "review", out: out(review), agentsLog: log(["reviewer-correctness", "reviewer-qa", "reviewer-correctness"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow" });
+  const r = verifyStage({ stage: "review", out: out(review), agentsLog: log(["reviewer-correctness", "reviewer-qa", "reviewer-correctness"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } });
   expect(r.ok).toBe(true);
   expect(r.data.verdicts).toHaveLength(2);
 });
@@ -32,6 +32,16 @@ test("plan checks rounds", () => {
   expect(ok.ok).toBe(true);
   const bad = verifyStage({ stage: "plan", out: out({ ...plan, rounds: 3 }), agentsLog: log(["plan-architect", "plan-skeptic"]), roster: ["architect", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow" });
   expect(bad.reasons.join()).toMatch(/rounds/);
+});
+
+test("implement/review/merge require a gates file; handoff gates must match the file", () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const noFile = verifyStage({ stage: "implement", out: out(impl), agentsLog: log([]), roster: [], orchestration: "workflow", gates: null });
+  expect(noFile.reasons).toContain("gates file missing");
+  const mismatch = verifyStage({ stage: "implement", out: out(impl), agentsLog: log([]), roster: [], orchestration: "workflow", gates: { status: "RED", level: "full" } });
+  expect(mismatch.reasons.join()).toMatch(/gates mismatch/);
+  const filled = verifyStage({ stage: "implement", out: out({ ...impl, gates: undefined }), agentsLog: log([]), roster: [], orchestration: "workflow", gates: { status: "GREEN", level: "full" } });
+  expect(filled.ok).toBe(true); expect(filled.data.gates).toEqual({ status: "GREEN", level: "full" });
 });
 
 test("extractJson tolerates braces inside strings and invalid fences", () => {

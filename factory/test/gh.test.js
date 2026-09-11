@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { makeGh } from "../lib/gh.js";
+import { makeGh, allChecksGreen } from "../lib/gh.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const repo = "o/r";
@@ -72,6 +72,17 @@ test("createIssue returns the issue number parsed from the created URL", async (
   const call = run.calls[0];
   expect(call.args).toEqual(["issue", "create", "-R", repo, "--title", "factory: 토큰 갱신 필요", "--body-file", "-", "--label", "factory:needs-human"]);
   expect(call.opts.input).toBe("body");
+});
+
+test("prChecks asks for name,state,bucket; allChecksGreen is fail-closed and falls back to state", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "checks", result: { code: 0, stdout: JSON.stringify([{ name: "ci", state: "SUCCESS", bucket: "pass" }]), stderr: "" } }]);
+  expect(await makeGh({ run, repo }).prChecks(9)).toEqual([{ name: "ci", state: "SUCCESS", bucket: "pass" }]);
+  expect(run.calls[0].args).toEqual(["pr", "checks", "9", "-R", repo, "--json", "name,state,bucket"]);
+  expect(allChecksGreen([{ bucket: "pass" }, { bucket: "pass" }])).toBe(true);
+  expect(allChecksGreen([{ bucket: "pass" }, { bucket: "fail" }])).toBe(false);
+  expect(allChecksGreen([])).toBe(false);                                  // 체크가 하나도 없으면 "확인됨"이 아니다
+  expect(allChecksGreen([{ state: "SUCCESS" }])).toBe(true);               // bucket을 모르는 gh 버전
+  expect(allChecksGreen([{ state: "FAILURE" }])).toBe(false);
 });
 
 test("getVariable returns trimmed value, or null on non-zero exit (missing variable)", async () => {

@@ -1,6 +1,7 @@
 import { test, expect, vi } from "vitest";
-import { runStage, buildCtxExtra, usageLine, GATES_SELF_REPORTED } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED } from "../bin/run-stage.js";
 import { renderHandoff } from "../lib/handoff.js";
+import { verifyStage } from "../lib/verify-stage.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -253,6 +254,67 @@ test("C1: a gh failure yields no sha plus a run-record line — never a crash", 
   expect(y.prHeadSha).toBeUndefined();
   expect(gh2.prHeadSha).not.toHaveBeenCalled();
   expect(noPr.some((l) => /no PR number/.test(l))).toBe(true);
+});
+
+// ── Plan 1b: 파일 기반 게이트 판정 · back-pressure · blocked ────────────────
+
+/** 게이트 통합은 진짜 verifyStage로만 의미가 있다 — 스텁을 쓰면 "파일이 이긴다"를 증명하지 못한다. */
+const implDeps = (over = {}) => baseDeps({
+  buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 }, tier: "standard" }),
+  claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" }) }),
+  verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, agentsLog: { starts: [], stops: [], completed: [], orphans: [] }, roster: [], orchestration: "workflow", gates }),
+  transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  ...over,
+});
+
+test("implement: gates RED → verify fails → needs-human; gates file status wins over handoff claim", async () => {
+  const lines = [];
+  const gates = { schema: "factory.gates.v1", level: "full", status: "RED", failing: ["unit"], passed: 3, failed: 1, skipped: [], misconfigured: [], tests: { failing: [{ id: "t::x" }], excluded: [] } };
+  const d = implDeps({ gates: async () => gates, runRecord: (l) => lines.push(...l) });
+  const code = await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" });
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/gates mismatch|gates RED/) }));
+  expect(lines.some((l) => /FACTORY_GATES: .*status=RED/.test(l))).toBe(true);   // 판정 한 줄은 런 기록에 남는다
+  expect(lines).not.toContain(GATES_SELF_REPORTED);
+});
+
+test("implement: back-pressure refusal exits 0 before claim", async () => {
+  const lines = [];
+  const d = baseDeps({ backPressure: async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }), claim: vi.fn(), runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(d.claim).not.toHaveBeenCalled();
+  expect(lines.some((l) => /back-pressure: refused — awaiting-review 4 ≥ 4/.test(l))).toBe(true);
+});
+
+test("implement: a BLOCKED gates result ends the stage at factory:blocked without verifying", async () => {
+  const lines = [];
+  const gates = { schema: "factory.gates.v1", level: "full", status: "BLOCKED", blocked_reason: "cannot classify failures: worktree add failed", failing: [], passed: 0, failed: 0, skipped: [], misconfigured: [] };
+  const d = implDeps({ gates: async () => gates, verifyStage: vi.fn(), writeHandoff: vi.fn(), runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/worktree add failed/) }));
+  expect(d.verifyStage).not.toHaveBeenCalled();
+  expect(d.writeHandoff).not.toHaveBeenCalled();
+  expect(lines.some((l) => /FACTORY_GATES: .*status=BLOCKED/.test(l))).toBe(true);
+});
+
+test("merge gates: checks + integrity are measured, and a failed lookup leaves the flag unset (fail closed)", async () => {
+  const lines = [];
+  const runner = async () => ({ code: 0, stdout: "", stderr: "" });                 // 변경 파일 없음 → integrity ok
+  const harness = { protected: {}, test: {} };
+  const args = { root: "/x", harness, base: "b".repeat(40), readFile: () => "", runner, record: (l) => lines.push(l) };
+
+  const gh = { prChecks: vi.fn(async () => [{ name: "ci", state: "SUCCESS", bucket: "pass" }]) };
+  expect(await mergeGates({ ...args, gh, pr: 9 })).toEqual({ checksGreen: true, integrityGreen: true });
+  expect(gh.prChecks).toHaveBeenCalledWith(9);
+
+  const noPr = await mergeGates({ ...args, gh, pr: null });
+  expect(noPr.checksGreen).toBeUndefined();                                         // 확인 못 했으면 GREEN이라고 말하지 않는다
+  expect(lines.some((l) => /no PR number/.test(l))).toBe(true);
+
+  const boom = await mergeGates({ ...args, gh: { prChecks: async () => { throw new Error("HTTP 404"); } }, pr: 9 });
+  expect(boom.checksGreen).toBeUndefined();
+  expect(boom.integrityGreen).toBe(true);
+  expect(lines.some((l) => /gh pr checks failed — HTTP 404/.test(l))).toBe(true);
 });
 
 test("C1: states with no commit binding get the plain ctxExtra and make no gh calls", async () => {

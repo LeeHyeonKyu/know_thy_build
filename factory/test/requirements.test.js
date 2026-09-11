@@ -32,6 +32,13 @@ test("awaiting-review requires implement handoff: GREEN, head_sha == branch head
   expect(r({ comments: [c("implement", { ...impl, verifier: { verdict: "rejected" } })], headSha: sha }).reason).toMatch(/verifier/);
 });
 
+test("awaiting-review trusts the gates file over the handoff", () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: sha, pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:awaiting-review");
+  expect(r({ comments: [c("implement", impl)], headSha: sha, gatesFile: { status: "RED" } }).reason).toMatch(/gates file/);
+  expect(r({ comments: [c("implement", impl)], headSha: sha, gatesFile: { status: "GREEN" } }).ok).toBe(true);
+});
+
 test("approved requires review handoff: sha == PR head, all approve, count == roster, round <= K", () => {
   const v = (role, verdict) => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: "x", where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a", "approve"), v("b", "approve")], orchestration: "workflow", guarantee: "verified" };
