@@ -286,6 +286,27 @@ test("implement: back-pressure refusal exits 0 before claim", async () => {
   expect(lines.some((l) => /back-pressure: refused — awaiting-review 4 ≥ 4/.test(l))).toBe(true);
 });
 
+test("implement: a back-pressure check that throws is recorded and the stage proceeds", async () => {
+  const lines = [];
+  const d = baseDeps({ backPressure: async () => { throw new Error("gh search failed"); }, claim: vi.fn(async () => ({ ok: true })), runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(d.claim).toHaveBeenCalled();
+  expect(lines.some((l) => /back-pressure: check failed — gh search failed/.test(l))).toBe(true);
+});
+
+test("implement: 지난 런의 게이트 파일은 첫 전이(in-progress)보다 먼저 지워진다", async () => {
+  const calls = [];
+  const d = baseDeps({
+    resetGates: async () => calls.push("reset-gates"),
+    transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
+    resetAgentsLog: async () => calls.push("reset-agents"),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(calls[0]).toBe("reset-gates");
+  expect(calls[1]).toBe("transition:factory:in-progress");
+  expect(calls.indexOf("reset-agents")).toBeGreaterThan(1);
+});
+
 test("implement: a BLOCKED gates result ends the stage at factory:blocked without verifying", async () => {
   const lines = [];
   const gates = { schema: "factory.gates.v1", level: "full", status: "BLOCKED", blocked_reason: "cannot classify failures: worktree add failed", failing: [], passed: 0, failed: 0, skipped: [], misconfigured: [] };
@@ -299,22 +320,39 @@ test("implement: a BLOCKED gates result ends the stage at factory:blocked withou
 
 test("merge gates: checks + integrity are measured, and a failed lookup leaves the flag unset (fail closed)", async () => {
   const lines = [];
-  const runner = async () => ({ code: 0, stdout: "", stderr: "" });                 // 변경 파일 없음 → integrity ok
+  const HEAD = "f".repeat(40);
+  // rev-parse는 로컬 HEAD를, 나머지 git 호출(diff)은 "변경 없음"을 돌려준다 → integrity ok
+  const runner = async (cmd, a) => ({ code: 0, stdout: a[0] === "rev-parse" ? HEAD + "\n" : "", stderr: "" });
   const harness = { protected: {}, test: {} };
   const args = { root: "/x", harness, base: "b".repeat(40), readFile: () => "", runner, record: (l) => lines.push(l) };
 
   const gh = { prChecks: vi.fn(async () => [{ name: "ci", state: "SUCCESS", bucket: "pass" }]) };
-  expect(await mergeGates({ ...args, gh, pr: 9 })).toEqual({ checksGreen: true, integrityGreen: true });
+  expect(await mergeGates({ ...args, gh, pr: 9, prHeadSha: HEAD })).toEqual({ checksGreen: true, integrityGreen: true });
   expect(gh.prChecks).toHaveBeenCalledWith(9);
 
-  const noPr = await mergeGates({ ...args, gh, pr: null });
+  const noPr = await mergeGates({ ...args, gh, pr: null, prHeadSha: HEAD });
   expect(noPr.checksGreen).toBeUndefined();                                         // 확인 못 했으면 GREEN이라고 말하지 않는다
   expect(lines.some((l) => /no PR number/.test(l))).toBe(true);
 
-  const boom = await mergeGates({ ...args, gh: { prChecks: async () => { throw new Error("HTTP 404"); } }, pr: 9 });
+  const boom = await mergeGates({ ...args, gh: { prChecks: async () => { throw new Error("HTTP 404"); } }, pr: 9, prHeadSha: HEAD });
   expect(boom.checksGreen).toBeUndefined();
   expect(boom.integrityGreen).toBe(true);
   expect(lines.some((l) => /gh pr checks failed — HTTP 404/.test(l))).toBe(true);
+});
+
+test("merge gates: integrity는 PR head에서 잰 것만 인정한다 — 로컬 HEAD가 다르면 false", async () => {
+  const lines = [];
+  const runner = vi.fn(async (cmd, a) => ({ code: 0, stdout: a[0] === "rev-parse" ? "1".repeat(40) : "", stderr: "" }));
+  const gh = { prChecks: async () => [{ name: "ci", bucket: "pass" }] };
+  const args = { root: "/x", harness: { protected: {}, test: {} }, base: "b".repeat(40), readFile: () => "", runner, record: (l) => lines.push(l), gh, pr: 9 };
+
+  const drifted = await mergeGates({ ...args, prHeadSha: "2".repeat(40) });
+  expect(drifted.integrityGreen).toBe(false);
+  expect(lines.some((l) => /integrity: local HEAD != PR head/.test(l))).toBe(true);
+  expect(runner.mock.calls.some((c) => c[1][0] === "diff")).toBe(false);            // 다른 트리를 검사하지도 않는다
+
+  const unknown = await mergeGates({ ...args, prHeadSha: undefined });              // PR head를 못 알아냈으면 확인 안 된 것이다
+  expect(unknown.integrityGreen).toBe(false);
 });
 
 test("C1: states with no commit binding get the plain ctxExtra and make no gh calls", async () => {

@@ -25,6 +25,17 @@ test("proveTest fails when there are no new tests", async () => {
   expect(r.ok).toBe(false); expect(r.detail).toMatch(/no new tests/);
 });
 
+test("repeatNewTests: 반복 횟수를 모르면 통과가 아니라 MISCONFIGURED다", async () => {
+  const run = makeFakeRun([{ match: () => true, result: ok }]);
+  for (const times of [undefined, 0, -1]) {
+    const r = await repeatNewTests({ run, cwd: "/repo", harness, addedTests: ["test/new.test.js"], times });
+    expect(r.ok, String(times)).toBe(false);
+    expect(r.misconfigured, String(times)).toBe(true);
+    expect(r.detail).toMatch(/new_test_repeats missing/);
+  }
+  expect(run.calls).toHaveLength(0);                                   // 설정이 없으면 아무것도 돌리지 않는다
+});
+
 test("repeatNewTests runs N times, first alongside the full suite; any failure → not ok", async () => {
   let n = 0;
   const run = makeFakeRun([

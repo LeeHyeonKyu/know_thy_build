@@ -15,6 +15,13 @@ function need(ctx, stage, schema) {
 }
 const sameSet = (a, b) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
 
+/** 리뷰·머지도 게이트 파일을 요구한다 — 파일이 없으면 "확인 안 됨"이고, 확인 안 됨은 통과가 아니다. */
+function gatesGate(ctx) {
+  if (!ctx.gatesFile) return fail("gates file missing");
+  if (ctx.gatesFile.status !== "GREEN") return fail(`gates file status is ${ctx.gatesFile.status}`);
+  return null;
+}
+
 const RULES = {
   "factory:ready"(ctx) {
     const { h, err } = need(ctx, "triage", "triage.v1"); if (err) return err;
@@ -38,6 +45,7 @@ const RULES = {
   },
   "factory:approved"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
+    const g = gatesGate(ctx); if (g) return g;
     if (ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`review head_sha ${h.data.head_sha.slice(0, 7)} != PR head ${ctx.prHeadSha.slice(0, 7)}`);
     if (ctx.rosterSize != null && h.data.verdicts.length !== ctx.rosterSize) return fail(`verdict count ${h.data.verdicts.length} != roster size ${ctx.rosterSize}`);
     if (!h.data.verdicts.every((v) => v.verdict === "approve")) return fail("not all approve");
@@ -46,6 +54,7 @@ const RULES = {
   },
   "factory:merged"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
+    const g = gatesGate(ctx); if (g) return g;
     if (ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`approved handoff head_sha != PR head`);
     // 머지는 되돌릴 수 없다 — "확인하지 않았음"과 "확인해보니 RED"를 같게 취급한다(fail closed).
     if (ctx.checksGreen !== true) return fail("required checks not verified GREEN");

@@ -28,6 +28,7 @@ function matchBrace(text, start) {
 }
 
 const GATED_STAGES = ["implement", "review", "merge"];
+const listOf = (a) => (a && a.length ? a.join(",") : "none");
 
 /**
  * gates: `.factory/out/gates.json`의 내용(없으면 null). 게이트 판정의 단일 출처는 이 파일이다 —
@@ -41,10 +42,15 @@ export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "
   if (!data) reasons.push("no JSON object in result");
   if (GATED_STAGES.includes(stage)) {
     if (!gates) reasons.push("gates file missing");
+    // bin/gates.js가 남긴 로컬 진단 결과는 스테이지 판정이 아니다 — 사람이 손으로 만든 GREEN이 머지로 이어지면 안 된다.
+    else if (gates.diagnostic === true) reasons.push("gates file is a local diagnostic run (diagnostic: true), not a stage verdict");
     else if (data) {
       if (data.gates && (data.gates.status !== gates.status || data.gates.level !== gates.level)) reasons.push(`handoff gates mismatch: handoff says ${data.gates.status}/${data.gates.level}, file says ${gates.status}/${gates.level}`);
       else data.gates = { status: gates.status, level: gates.level };
-      if (stage === "implement" && gates.status !== "GREEN") reasons.push(`gates ${gates.status}: failing=${(gates.failing || []).join(",") || "none"}`);
+      if (stage === "implement" && gates.status !== "GREEN") {
+        const mis = gates.status === "MISCONFIGURED" ? ` misconfigured=${listOf(gates.misconfigured)}` : "";
+        reasons.push(`gates ${gates.status}: failing=${listOf(gates.failing)}${mis}`);
+      }
     }
   }
   if (data && SCHEMA_OF[stage]) {

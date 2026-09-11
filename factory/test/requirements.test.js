@@ -39,27 +39,41 @@ test("awaiting-review trusts the gates file over the handoff", () => {
   expect(r({ comments: [c("implement", impl)], headSha: sha, gatesFile: { status: "GREEN" } }).ok).toBe(true);
 });
 
+const GREEN = { status: "GREEN", level: "full" };
+
 test("approved requires review handoff: sha == PR head, all approve, count == roster, round <= K", () => {
   const v = (role, verdict) => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: "x", where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a", "approve"), v("b", "approve")], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:approved");
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, maxRounds: 3 }).ok).toBe(true);
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3, maxRounds: 3 }).reason).toMatch(/verdict count/);
-  expect(r({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2, maxRounds: 3 }).reason).toMatch(/not all approve/);
-  expect(r({ comments: [c("review", { ...review, round: 4 })], prHeadSha: sha, rosterSize: 2, maxRounds: 3 }).reason).toMatch(/round/);
-  expect(r({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2, maxRounds: 3 }).reason).toMatch(/head_sha/);
+  expect(r({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).ok).toBe(true);
+  expect(r({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/verdict count/);
+  expect(r({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/not all approve/);
+  expect(r({ comments: [c("review", { ...review, round: 4 })], prHeadSha: sha, rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/round/);
+  expect(r({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/head_sha/);
 });
 
 test("merged requires checks + integrity GREEN and approved handoff sha == PR head", () => {
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:merged");
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: true, integrityGreen: true }).ok).toBe(true);
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: false, integrityGreen: true }).reason).toMatch(/checks/);
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: true, integrityGreen: false }).reason).toMatch(/integrity/);
+  const base = { comments: [c("review", review)], prHeadSha: sha, gatesFile: GREEN };
+  expect(r({ ...base, checksGreen: true, integrityGreen: true }).ok).toBe(true);
+  expect(r({ ...base, checksGreen: false, integrityGreen: true }).reason).toMatch(/checks/);
+  expect(r({ ...base, checksGreen: true, integrityGreen: false }).reason).toMatch(/integrity/);
   // 확인하지 않았으면(플래그 부재) 통과가 아니라 거부다
-  expect(r({ comments: [c("review", review)], prHeadSha: sha }).ok).toBe(false);
-  expect(r({ comments: [c("review", review)], prHeadSha: sha }).reason).toMatch(/not verified GREEN/);
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: true }).reason).toMatch(/integrity check not verified GREEN/);
+  expect(r(base).ok).toBe(false);
+  expect(r(base).reason).toMatch(/not verified GREEN/);
+  expect(r({ ...base, checksGreen: true }).reason).toMatch(/integrity check not verified GREEN/);
+});
+
+test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing, GREEN이 아니면 거부", () => {
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
+  const ctx = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, maxRounds: 3, checksGreen: true, integrityGreen: true };
+  for (const to of ["factory:approved", "factory:merged"]) {
+    const r = requirementFor(to);
+    expect(r(ctx).reason, to).toMatch(/gates file missing/);
+    expect(r({ ...ctx, gatesFile: { status: "RED", level: "full" } }).reason, to).toMatch(/gates file status is RED/);
+    expect(r({ ...ctx, gatesFile: GREEN }).ok, to).toBe(true);
+  }
 });
 
 test("need(): a handoff for another issue does not satisfy the gate", () => {

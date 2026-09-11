@@ -24,7 +24,8 @@ export function loadCharter(root) {
     roster: data.roster || {},
     plan_roles: data.plan_roles || {},
     plan_rounds: { docs: 2, default: 3, ...(data.plan_rounds || {}) },
-    back_pressure: { awaiting_review_max: 4, quarantine_max: 5, ...(data.back_pressure || {}) },
+    // quarantine 캡의 단일 출처는 harness [gates.thresholds].quarantine_max다 — 여기엔 두지 않는다.
+    back_pressure: { awaiting_review_max: 4, ...(data.back_pressure || {}) },
     budget: data.budget || {},
     retro: data.retro || { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true },
   };

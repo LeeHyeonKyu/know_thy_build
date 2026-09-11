@@ -44,6 +44,15 @@ test("implement/review/merge require a gates file; handoff gates must match the 
   expect(filled.ok).toBe(true); expect(filled.data.gates).toEqual({ status: "GREEN", level: "full" });
 });
 
+test("MISCONFIGURED 사유는 어떤 게이트가 빠졌는지 말하고, 진단용 파일은 판정으로 인정하지 않는다", () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const mis = verifyStage({ stage: "implement", out: out(impl), agentsLog: log([]), roster: [], orchestration: "workflow", gates: { status: "MISCONFIGURED", level: "full", failing: [], misconfigured: ["mutation", "e2e"] } });
+  expect(mis.reasons.join()).toMatch(/gates MISCONFIGURED: failing=none misconfigured=mutation,e2e/);
+  const diag = verifyStage({ stage: "implement", out: out(impl), agentsLog: log([]), roster: [], orchestration: "workflow", gates: { status: "GREEN", level: "full", diagnostic: true } });
+  expect(diag.ok).toBe(false);
+  expect(diag.reasons.join()).toMatch(/diagnostic/);
+});
+
 test("extractJson tolerates braces inside strings and invalid fences", () => {
   const obj = { schema: "x", note: "has a stray } and { inside", ok: true };
   expect(extractJson("prefix text " + JSON.stringify(obj) + " suffix")).toEqual(obj);

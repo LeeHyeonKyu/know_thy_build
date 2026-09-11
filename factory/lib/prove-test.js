@@ -24,6 +24,8 @@ export async function proveTest({ run, cwd, harness, base, addedTests, tmp = `${
 }
 
 export async function repeatNewTests({ run, cwd, harness, addedTests, times, fullSuiteCmd = harness.commands.unit }) {
+  // 반복 횟수를 모르면 "흔들리지 않음"을 주장할 수 없다 — 통과가 아니라 설정 오류다.
+  if (!(times >= 1)) return { ok: false, misconfigured: true, runs: [], detail: "new_test_repeats missing" };
   if (!addedTests?.length) return { ok: true, runs: [], detail: "no new tests" };
   const cmd = harness.commands.test_files.replace("{files}", addedTests.map(q).join(" "));
   const runs = [];

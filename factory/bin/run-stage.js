@@ -50,14 +50,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   // 공장이 감당할 수 있는 만큼만 물린다. 거부는 실패가 아니다 — 라벨을 건드리지 않고 물러나
   // 다음 sweeper/이벤트에서 다시 시도한다. 그래서 락을 잡기도 전에 본다.
   if (stage === "implement" && d.backPressure) {
-    const bp = await d.backPressure();
-    if (!bp.ok) { console.error(`factory: back-pressure — ${bp.reasons.join("; ")}`); record([`back-pressure: refused — ${bp.reasons.join("; ")}`]); return 0; }
+    try {
+      const bp = await d.backPressure();
+      if (!bp.ok) { console.error(`factory: back-pressure — ${bp.reasons.join("; ")}`); record([`back-pressure: refused — ${bp.reasons.join("; ")}`]); return 0; }
+    } catch (e) {
+      // 흐름 제어를 못 읽은 것이지 안전 게이트가 깨진 게 아니다 — 흔적을 남기고 진행한다.
+      record([`back-pressure: check failed — ${e?.message || e}`]);
+    }
   }
   await d.trustWorkspace();
   const c = await d.claim();
   if (!c.ok) { console.error(`factory: issue #${issue} already claimed by ${c.holder}`); return 0; }
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   try {
+    await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
     const a = await d.assertHandoff();
     if (!a.ok) { record([`assert: FAIL — ${a.reason}`]); return 2; }   // assertHandoff가 needs-human 전이와 코멘트를 이미 했다
@@ -150,14 +156,22 @@ export async function buildCtxExtra({ gh, issue, to, data, ctx, charter, record 
  * 머지 직전에만 묻는 두 가지: PR의 체크가 전부 통과했는가, 보호 경로 무결성이 지켜졌는가.
  * 조회 자체가 실패하면 플래그를 **세우지 않는다** — requirements가 "확인되지 않음"을 거부로 다룬다(fail closed).
  */
-export async function mergeGates({ gh, root, harness, pr, base, readFile, record = () => {}, runner = run }) {
+export async function mergeGates({ gh, root, harness, pr, prHeadSha, base, readFile, record = () => {}, runner = run }) {
   const out = {};
   try {
     if (pr == null) record("merge gate: no PR number in the implement handoff — checks unverified");
     else out.checksGreen = allChecksGreen(await gh.prChecks(pr));
   } catch (e) { record(`merge gate: gh pr checks failed — ${e?.message || e}`); }
   try {
-    out.integrityGreen = (await integrityCheck({ run: runner, cwd: root, base, harness, readFile })).ok;
+    // 무결성은 **머지될 커밋**에 대한 주장이어야 한다. 로컬 워크트리가 PR head가 아니면
+    // 여기서 통과시킨 GREEN은 다른 트리 얘기다 — 검사하지 않은 것으로 친다.
+    const head = (await runner("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    if (!prHeadSha || head !== prHeadSha) {
+      record(`integrity: local HEAD != PR head (local ${head.slice(0, 7) || "unknown"}, pr ${prHeadSha ? prHeadSha.slice(0, 7) : "unknown"})`);
+      out.integrityGreen = false;
+    } else {
+      out.integrityGreen = (await integrityCheck({ run: runner, cwd: root, base, harness, readFile })).ok;
+    }
   } catch (e) { record(`merge gate: integrity check failed — ${e?.message || e}`); }
   return out;
 }
@@ -176,7 +190,8 @@ async function main() {
   const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   const readJson = (p) => { try { const t = readFile(p); return t ? JSON.parse(t) : null; } catch { return null; } };
   const gatesPath = join(root, ".factory/out/gates.json");
-  const mergeBase = async () => (await run("git", ["merge-base", `origin/${harness.project?.default_branch || "main"}`, "HEAD"], { cwd: root })).stdout.trim();
+  let baseSha = null;                                                 // 한 런 안에서 base는 하나다 — 두 번 물어보면 두 답이 나올 수 있다
+  const mergeBase = async () => (baseSha ||= (await run("git", ["merge-base", `origin/${harness.project?.default_branch || "main"}`, "HEAD"], { cwd: root })).stdout.trim());
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -200,8 +215,10 @@ async function main() {
       return req;
     },
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
-    /** 지난 런의 기록이 이번 런의 체크를 대신 만족시키면 안 된다 — 로스터 로그도, 게이트 판정 파일도. */
-    resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); rmSync(gatesPath, { force: true }); },
+    /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
+    resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
+    /** 지난 런의 게이트 판정 파일도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
+    resetGates: async () => { rmSync(gatesPath, { force: true }); },
     countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
     claudeP: async () => {
       const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
@@ -226,7 +243,7 @@ async function main() {
       const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, charter, record: recordLine });
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
-      if (to === "factory:merged") Object.assign(ctxExtra, await mergeGates({ gh, root, harness, pr: ctxExtra.pr, readFile, record: recordLine, base: await mergeBase() }));
+      if (to === "factory:merged") Object.assign(ctxExtra, await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase() }));
       return transition({ gh, issue, to, reason, ctxExtra });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),

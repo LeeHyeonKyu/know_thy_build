@@ -52,12 +52,17 @@ export async function runGates({ run, cwd, harness, level, quarantine, readFile 
     const t0 = Date.now();
     const r = await run("bash", ["-lc", cmd], { cwd });
     let status = r.code === 0 ? "GREEN" : "RED";
+    // parsed/failing_ids: 이 게이트의 RED가 "어떤 테스트 때문인지" 아는가. 리포트를 못 읽었으면
+    // (parsed:false) 그 RED의 이유를 모르는 것이고, 나중에 어떤 근거로도 GREEN으로 뒤집으면 안 된다.
+    let reportParsed = false, failing_ids = null;
     if (TEST_GATES.has(name)) {
       const rep = harness.test[`${name}_report`] || `.factory/out/${name}.json`;
       const reportPath = isAbsolute(rep) ? rep : join(cwd, rep);
       const report = readFile(reportPath);
       if (report) {
         const parsed = parseVitestJson(report, cwd);
+        reportParsed = !parsed.error;
+        failing_ids = parsed.failing.map((f) => f.id);
         const excluded = parsed.failing.filter((f) => isQuarantined(quarantine, f.id)).map((f) => f.id);
         const remaining = parsed.failing.filter((f) => !excluded.includes(f.id));
         tests = { ...(tests || { total: 0, passed: 0, failed: 0, failing: [], excluded: [] }) };
@@ -67,6 +72,7 @@ export async function runGates({ run, cwd, harness, level, quarantine, readFile 
       }
     }
     gates[name] = { status, code: r.code, duration_ms: Date.now() - t0, log: (r.stderr + r.stdout).slice(-2000) };
+    if (TEST_GATES.has(name)) { gates[name].parsed = reportParsed; gates[name].failing_ids = failing_ids || []; }
   }
   const result = { schema: "factory.gates.v1", level, requested_level, downgraded_from: level === requested_level ? null : requested_level, status: null, gates, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests, ran_at: now };
   return recomputeStatus(result, harness);
@@ -106,27 +112,43 @@ export async function runStageGates({ run, cwd, harness, stage, tier, level: lev
     const flaky = cls.filter((c) => c.verdict === "flaky-existing");
     if (flaky.length) {
       result.flaky_issues = [];
+      // 같은 테스트로 런마다 새 이슈를 열지 않는다 — 이미 열려 있으면 그 번호를 그대로 쓴다.
+      let open = [];
+      try { open = (await gh?.searchIssues("factory:flaky")) || []; }
+      catch (e) { result.flaky_issue_lookup_error = e?.message || String(e); }
       for (const c of flaky) {
         result.tests.excluded.push(c.id);
         result.tests.failing = result.tests.failing.filter((f) => f.id !== c.id);
+        const title = `flaky: ${c.id}`;
+        const existing = open.find((i) => i.title === title);
+        if (existing) { result.flaky_issues.push(existing.number); continue; }
         // 격리 이슈를 못 만들어도 판정은 계속한다 — gh 실패로 스테이지를 죽이지 않는다.
-        try { result.flaky_issues.push(await gh?.createIssue({ title: `flaky: ${c.id}`, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"] })); }
+        try { result.flaky_issues.push(await gh?.createIssue({ title, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["factory:queue", "factory:flaky"] })); }
         catch (e) { result.flaky_issues.push(`error: ${e?.message || e}`); }
       }
       result.tests.failed = result.tests.failing.length;
     }
-    // 남은 실패가 없으면(전부 기존 flaky) 테스트 게이트의 RED는 이 변경의 책임이 아니다.
-    if (result.tests.failing.length === 0) for (const [n, g] of Object.entries(result.gates)) if (g.status === "RED" && TEST_GATES.has(n)) g.status = "GREEN";
+    // 남은 실패가 없으면(전부 기존 flaky) 테스트 게이트의 RED는 이 변경의 책임이 아니다 —
+    // 단 **그 게이트의 리포트를 실제로 읽었고**, 그 게이트의 실패가 전부 제외 목록에 들어간 경우에만.
+    // 리포트 없이 RED인 게이트(e2e 등)는 이유를 모르므로 절대 뒤집지 않는다.
+    if (result.tests.failing.length === 0) {
+      for (const [n, g] of Object.entries(result.gates)) {
+        if (g.status !== "RED" || !TEST_GATES.has(n) || g.parsed !== true) continue;
+        if ((g.failing_ids || []).length && g.failing_ids.every((id) => result.tests.excluded.includes(id))) g.status = "GREEN";
+      }
+    }
   }
 
   if (stage === "implement") {
     const ch = await changedOnce();
+    // 새로 추가된 테스트만이 아니라 **수정된 테스트 파일**도 증명 대상이다 — 기존 파일에 추가된
+    // 케이스도 base에서는 실패해야 한다.
     if (tier !== "docs") {
-      const pt = await proveTest({ run, cwd, harness, base, addedTests: ch.addedTests });
+      const pt = await proveTest({ run, cwd, harness, base, addedTests: ch.tests });
       result.gates["prove-test"] = { status: pt.ok ? "GREEN" : "RED", log: pt.detail };
     }
-    const rp = await repeatNewTests({ run, cwd, harness, addedTests: ch.addedTests, times: harness.gates.thresholds.new_test_repeats });
-    result.gates["new-test-repeat"] = { status: rp.ok ? "GREEN" : "RED", log: rp.detail };
+    const rp = await repeatNewTests({ run, cwd, harness, addedTests: ch.tests, times: harness.gates.thresholds.new_test_repeats });
+    result.gates["new-test-repeat"] = { status: rp.misconfigured ? "MISCONFIGURED" : rp.ok ? "GREEN" : "RED", log: rp.detail };
     if (result.skipped.includes("diff_coverage")) {
       const dc = await runDiffCoverage({ run, cwd, harness, base, readFile });
       result.gates.diff_coverage = { status: dc.misconfigured ? "MISCONFIGURED" : dc.ok ? "GREEN" : "RED", log: `pct=${dc.pct} threshold=${dc.threshold} uncovered=${JSON.stringify(dc.uncovered || []).slice(0, 500)}` };

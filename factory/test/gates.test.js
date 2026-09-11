@@ -63,8 +63,9 @@ const stageHarness = {
   gates: { required: ["unit"], fast: ["unit"], full: ["unit", "diff_coverage", "mutation"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 1 } },
   test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
 };
-const TF = "vitest run 'test/new.test.js'", TO = "vitest run 'test/a.test.js' -t flaky one";
-const diffOut = { code: 0, stdout: "M\tsrc/a.js\nA\ttest/new.test.js\n", stderr: "" };
+// 수정된 테스트 파일(test/a.test.js)도 증명 대상이므로 test_files 명령에 함께 실린다.
+const TF = "vitest run 'test/a.test.js' 'test/new.test.js'", TO = "vitest run 'test/a.test.js' -t flaky one";
+const diffOut = { code: 0, stdout: "M\tsrc/a.js\nM\ttest/a.test.js\nA\ttest/new.test.js\n", stderr: "" };
 // proveTest가 실제로 mkdir/cp를 하므로 cwd는 진짜 디렉터리여야 한다.
 const stageCwd = mkdtempSync(join(tmpdir(), "stage-gates-"));
 const readUnit = (p) => (p.endsWith("unit.json") ? JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: join(stageCwd, "test/a.test.js"), assertionResults: [{ fullName: "flaky one", status: "failed" }] }] }) : null);
@@ -84,7 +85,7 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
-  const gh = { createIssue: vi.fn(async () => 101) };
+  const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
   const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit });
   expect(r.level).toBe("full");
   expect(r.tests.excluded).toEqual(["test/a.test.js::flaky one"]);
@@ -95,8 +96,50 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
   expect(r.gates.diff_coverage.status).toBe("MISCONFIGURED");      // commands.proof.coverage 없음
   expect(r.gates.mutation.status).toBe("MISCONFIGURED");
   expect(r.status).toBe("GREEN");                                  // required는 unit뿐 — misconfigured가 required면 전체 MISCONFIGURED
-  expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one", labels: ["backlog", "factory:flaky"] }));
+  expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one", labels: ["factory:queue", "factory:flaky"] }));
   expect(r.flaky_issues).toEqual([101]);
+  // 증명 대상은 추가된 테스트만이 아니라 수정된 테스트 파일까지다
+  expect(run.calls.some((c) => c.cmd === "bash" && c.args[1] === TF && c.opts.cwd.endsWith("prove-wt"))).toBe(true);
+});
+
+test("이미 열려 있는 flaky 이슈는 다시 만들지 않는다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
+    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: bad },
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: diffOut },
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c) => c === "cp", result: ok },
+  ]);
+  const gh = { createIssue: vi.fn(async () => 999), searchIssues: vi.fn(async () => [{ number: 55, title: "flaky: test/a.test.js::flaky one", updatedAt: "2026-09-11T00:00:00Z" }]) };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit });
+  expect(gh.searchIssues).toHaveBeenCalledWith("factory:flaky");
+  expect(gh.createIssue).not.toHaveBeenCalled();
+  expect(r.flaky_issues).toEqual([55]);
+});
+
+test("리포트를 못 읽은 RED 테스트 게이트는 flaky 제외로도 뒤집히지 않는다", async () => {
+  const h = { ...stageHarness, commands: { ...stageHarness.commands, e2e: "playwright" }, gates: { ...stageHarness.gates, required: ["unit", "e2e"], full: ["unit", "e2e"] } };
+  const run = makeFakeRun([
+    { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
+    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: bad },
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    { match: (c, a) => c === "bash" && a[1] === "playwright", result: bad },        // e2e RED, 리포트 없음
+    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: diffOut },
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c) => c === "cp", result: ok },
+  ]);
+  const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit });
+  expect(r.gates.unit.status).toBe("GREEN");        // 리포트를 읽었고 실패가 전부 제외됨
+  expect(r.gates.e2e.status).toBe("RED");           // 왜 RED인지 모르는 게이트는 그대로 둔다
+  expect(r.gates.e2e.parsed).toBe(false);
+  expect(r.status).toBe("RED");
+  expect(r.failing).toEqual(["e2e"]);
 });
 
 test("implement: 판정 불가(blocked) 분류는 BLOCKED로 올라가고 증명 게이트는 아예 돌지 않는다", async () => {

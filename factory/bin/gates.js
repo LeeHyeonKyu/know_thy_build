@@ -5,7 +5,7 @@
  * exit: 0 GREEN / 1 RED / 2 그 밖(MISCONFIGURED·BLOCKED)
  */
 import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { loadHarness } from "../lib/config.js";
@@ -15,7 +15,7 @@ import { runStageGates, verdictLine } from "../lib/gates.js";
 const isMain = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
 if (isMain) {
   const args = process.argv.slice(2);
-  const usage = "usage: gates.js [fast|full|deep] [--tier <docs|standard|load-bearing>] [--stage <implement|review|merge>] [--base <sha>]";
+  const usage = "usage: gates.js [fast|full|deep] [--tier <docs|standard|load-bearing>] [--stage <implement|review|merge>] [--base <sha>] [--out <path>]";
   if (args.includes("-h") || args.includes("--help")) { console.log(usage); process.exit(0); }
   const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
   const level = args.find((a) => ["fast", "full", "deep"].includes(a)) || null;
@@ -28,8 +28,12 @@ if (isMain) {
   const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   // gh는 넘기지 않는다 — 로컬 진단이 flaky 이슈를 열어서는 안 된다.
   const result = await runStageGates({ run, cwd: root, harness, stage, tier, level, base, quarantine: loadQuarantine(root), readFile });
-  mkdirSync(join(root, ".factory/out"), { recursive: true });
-  writeFileSync(join(root, ".factory/out/gates.json"), JSON.stringify(result, null, 2));
-  console.log(verdictLine(result));
+  // 진단 결과는 스테이지 판정 파일(.factory/out/gates.json)을 덮지 않는다. 표식도 남겨서
+  // 혹시 그 자리에 놓이더라도 verifyStage가 거부한다.
+  result.diagnostic = true;
+  const outPath = flag("--out") || join(root, ".factory/out/gates.diagnostic.json");
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, JSON.stringify(result, null, 2));
+  console.log(`${verdictLine(result)} (diagnostic — written to ${outPath})`);
   process.exit(result.status === "GREEN" ? 0 : result.status === "RED" ? 1 : 2);
 }

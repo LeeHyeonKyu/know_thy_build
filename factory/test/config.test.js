@@ -9,7 +9,7 @@ function fixture() {
   mkdirSync(join(root, ".factory"), { recursive: true });
   mkdirSync(join(root, "docs/factory"), { recursive: true });
   writeFileSync(join(root, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M1"\n[factory]\norchestration = "workflow"\n[commands]\nlint = "npm run lint"\nunit = "npm test"\n[gates]\nrequired = ["lint","unit"]\nfast = ["lint","unit"]\nfull = ["lint","unit"]\ndeep = ["lint","unit"]\n`);
-  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nlimits: { K: 3, M: 3, R: 2 }\nroster:\n  docs: [correctness, spec-conformance]\n  standard: [correctness, architecture, spec-conformance, qa]\n  load-bearing: [correctness, security, architecture, spec-conformance, qa]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [product-advocate, architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\nback_pressure: { awaiting_review_max: 4, quarantine_max: 5 }\nbudget: {}\n---\n# Charter\n`);
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nlimits: { K: 3, M: 3, R: 2 }\nroster:\n  docs: [correctness, spec-conformance]\n  standard: [correctness, architecture, spec-conformance, qa]\n  load-bearing: [correctness, security, architecture, spec-conformance, qa]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [product-advocate, architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\nback_pressure: { awaiting_review_max: 4 }\nbudget: {}\n---\n# Charter\n`);
   writeFileSync(join(root, ".factory/roles.toml"), `schema = 1\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\n[review.security]\nagent = ".claude/agents/reviewer-security.md"\n[review.architecture]\nagent = "x"\n[review.spec-conformance]\nagent = "x"\n[review.qa]\nagent = "x"\n[plan.architect]\nagent = "x"\n[plan.skeptic]\nagent = "x"\n[plan.product-advocate]\nagent = "x"\n[plan.operator]\nagent = "x"\n`);
   return root;
 }
@@ -21,6 +21,7 @@ test("loads harness.toml, CHARTER frontmatter, roles.toml", () => {
   const ch = loadCharter(root);
   expect(ch.status).toBe("ready");
   expect(ch.limits.K).toBe(3);
+  expect(ch.back_pressure).toEqual({ awaiting_review_max: 4 });          // quarantine 캡은 harness thresholds가 단일 출처
   expect(loadRoles(root).review.security.agent).toContain("security");
 });
 

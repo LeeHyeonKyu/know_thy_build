@@ -17,7 +17,9 @@ if (isMain) {
   const args = process.argv.slice(2);
   const bi = args.indexOf("--base");
   const ids = args.filter((a, i) => !(a === "--base" || (bi >= 0 && i === bi + 1)));
-  if (!ids.length || ids.includes("-h") || ids.includes("--help")) { console.error('usage: classify-failure.js "<file>::<test full name>" [...] [--base <sha>]'); process.exit(1); }
+  const usage = 'usage: classify-failure.js "<file>::<test full name>" [...] [--base <sha>]';
+  if (ids.includes("-h") || ids.includes("--help")) { console.log(usage); process.exit(0); }
+  if (!ids.length) { console.error(usage); process.exit(1); }
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
   let harness;
   try { harness = loadHarness(root); } catch (e) { console.error(`classify-failure: .factory/harness.toml unreadable — ${e.message}`); process.exit(2); }

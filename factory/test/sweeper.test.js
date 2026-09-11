@@ -3,7 +3,7 @@ import { backPressure } from "../lib/back-pressure.js";
 import { sweep } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
 
-const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2, quarantine_max: 5 } };
+const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
 const T = { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
 
 test("backPressure refuses when awaiting-review ≥ max or quarantine over cap", async () => {
