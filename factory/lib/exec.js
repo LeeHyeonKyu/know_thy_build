@@ -20,6 +20,13 @@ export function run(cmd, args = [], opts = {}) {
   });
 }
 
+/** 백그라운드 셸 명령. 부모가 끝나도 살아 있어야 하므로 detached + unref. */
+export function spawnBackground(cmd, { cwd, env } = {}) {
+  const child = spawn("bash", ["-lc", cmd], { cwd, env: { ...process.env, ...(env || {}) }, detached: true, stdio: "ignore" });
+  child.unref();
+  return { pid: child.pid };
+}
+
 /** 테스트용 가짜 실행기. table: [{match(cmd,args)→bool, result|fn(cmd,args,opts)→result}] */
 export function makeFakeRun(table) {
   const fake = async (cmd, args = [], opts = {}) => {
