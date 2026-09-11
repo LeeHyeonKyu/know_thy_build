@@ -127,7 +127,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       return 2;
     }
     // BLOCKED은 위에서 이미 return했다 — 여기 남은 gates는 GREEN 아니면 그 외(RED/MISCONFIGURED)뿐이다.
-    if (GATED_STAGES.has(stage) && gates != null) {
+    // diagnostic(bin/gates.js가 손으로 남긴 로컬 진단 결과)은 스테이지 판정이 아니다 — verify-stage/requirements와
+    // 같은 불변식: 사람이 손으로 만든 GREEN이 커밋 상태로 새어나가면 안 된다.
+    if (GATED_STAGES.has(stage) && gates != null && gates.diagnostic !== true) {
       await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
     }
     const v = d.verifyStage({ stage, out, ctx, gates });
@@ -147,7 +149,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       const agg = aggregateReview({ verdicts: v.data.verdicts, rosterSize: roster.length, rosterRoles: roster });
       const reviewDescription = (decision) => {
         const k = v.data.verdicts.filter((x) => x.verdict === "approve").length;
-        return `review round ${v.data.round}: ${decision} (${k}/${v.data.verdicts.length} approve)`;
+        const n = roster.length || v.data.verdicts.length;               // 정족수는 로스터 크기다 — verdict 개수는 미완일 때 부족분을 감춘다
+        return `review round ${v.data.round}: ${decision} (${k}/${n} approve)`;
       };
       if (agg.decision === "incomplete") {                            // 라운드가 덜 끝났다 — 자동 라우팅하지 않는다
         await postStatus({ context: "factory/review", state: "error", description: reviewDescription("incomplete"), sha: v.data.head_sha });

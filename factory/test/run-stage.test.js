@@ -531,3 +531,41 @@ test("status posting: gates RED → factory/gates failure", async () => {
   expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
   expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates", state: "failure", sha: "e".repeat(40) }));
 });
+
+// ── fix round 1 ──────────────────────────────────────────────────────────
+
+test("status posting: a diagnostic gates file (bin/gates.js local run) is never published as a status", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "f".repeat(40), diagnostic: true, passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const d = implDeps({ gates: async () => gates, reportStatus });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);   // real verifyStage also rejects diagnostic gates
+  expect(reportStatus).not.toHaveBeenCalled();
+});
+
+test("status posting: incomplete review counts against the full roster, and posts before the needs-human transition", async () => {
+  const calls = [];
+  const reportStatus = vi.fn(async (s) => { calls.push(`report:${s.context}`); });
+  const transition = vi.fn(async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; });
+  const verdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const d = baseDeps({
+    buildContext: async () => ({ roster: ["correctness", "qa", "security"], orchestration: "workflow", limits: { K: 3 } }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: "g".repeat(40), verdicts: [verdict("correctness", "approve")] } }),
+    writeHandoff: vi.fn(async () => {}), transition, reportStatus,
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({
+    context: "factory/review", state: "error", sha: "g".repeat(40), description: expect.stringContaining("review round 1: incomplete (1/3 approve)"),
+  }));
+  expect(calls.indexOf("report:factory/review")).toBeGreaterThanOrEqual(0);
+  expect(calls.indexOf("report:factory/review")).toBeLessThan(calls.indexOf("transition:factory:needs-human"));
+});
+
+test("status posting: a missing sha skips the post and leaves a record line", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const lines = [];
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };   // no head_sha
+  const d = implDeps({ gates: async () => gates, reportStatus, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(reportStatus).not.toHaveBeenCalled();
+  expect(lines.some((l) => /status: factory\/gates skipped — no sha/.test(l))).toBe(true);
+});
