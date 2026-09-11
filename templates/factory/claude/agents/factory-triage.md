@@ -1,7 +1,7 @@
 ---
 name: factory-triage
 description: Judges whether a factory issue is something this factory should build at all, and if so, what tier of review it needs
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob
 model: sonnet
 hooks:
   PreToolUse:

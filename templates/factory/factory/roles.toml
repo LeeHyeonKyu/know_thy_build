@@ -2,9 +2,10 @@ schema = 1
 
 # ── triage ──────────────────────────────────────────
 [triage]
-agent  = ".claude/agents/factory-triage.md"
-model  = "sonnet"
-output = "factory.triage.v1"
+agent   = ".claude/agents/factory-triage.md"
+model   = "sonnet"
+lessons = ".factory/lessons/factory-triage.md"
+output  = "factory.triage.v1"
 
 # ── plan 토론자 ─────────────────────────────────────
 [plan.product-advocate]

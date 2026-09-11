@@ -181,6 +181,33 @@ test("factory-triage.js: a null factory-triage result re-spawns once; a second n
   expect(result.guarantee).toBe("structural");
 });
 
+test("factory-triage.js: loader/dispatcher issue mismatch fails closed — no triage call, error surfaced, no disposition", async () => {
+  const loaderFix = {
+    issue: 99, // loader read a stale/wrong context.json
+    stage: "triage",
+    tier: "standard",
+    roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }],
+    orchestration: "workflow",
+  };
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return loaderFix;
+    return { disposition: "ready", tier: "standard", reason: "should never run", summary: "should never run" };
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
+    agent: stub,
+    args: { issue: 7, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader"]);
+  expect(result.issue).toBe(7);
+  expect(result.error).toMatch(/context issue mismatch/);
+  expect(result.disposition).toBeUndefined();
+  expect(result.orchestration).toBe("workflow");
+  expect(result.guarantee).toBe("structural");
+  expect(validate("triage.v1", result).ok).toBe(false);
+});
+
 test("factory-triage.js: a null factory-loader result re-spawns once; a second null still runs the Triage phase but invents no role", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return null;

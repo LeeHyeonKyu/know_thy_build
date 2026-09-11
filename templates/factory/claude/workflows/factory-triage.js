@@ -77,6 +77,22 @@ const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader
 phase('Triage');
 
 const issue = Number(args.issue);
+
+// Fail-closed issue-provenance check — copy this pattern into factory-plan.js/factory-implement.js/
+// factory-review.js's own Load→<stage> transitions (Tasks 3-5). The loader is only trustworthy if the
+// context.json it read actually belongs to the issue the dispatcher was asked to run: a stale
+// `.factory/out/context.json` from a previous run, or a wrong --context path, must never let a role act
+// on the wrong issue silently. Returning no `disposition` here makes verify-stage's `triage.v1` schema
+// check fail the stage into needs-human instead.
+if (loaded && Number(loaded.issue) !== issue) {
+  return {
+    issue,
+    error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
+    orchestration: 'workflow',
+    guarantee: 'structural',
+  };
+}
+
 const roster = (loaded && Array.isArray(loaded.roster)) ? loaded.roster : [];
 const role = roster.find((r) => r && r.name === 'triage');
 
