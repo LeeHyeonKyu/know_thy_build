@@ -2,11 +2,12 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
+import { makeFakeRun } from "../lib/exec.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -568,4 +569,141 @@ test("status posting: a missing sha skips the post and leaves a record line", as
   expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
   expect(reportStatus).not.toHaveBeenCalled();
   expect(lines.some((l) => /status: factory\/gates skipped — no sha/.test(l))).toBe(true);
+});
+
+// ── Task 12: review·merge — PR head checkout (R6) ───────────────────────────
+
+const checkoutBaseDeps = (over = {}) => baseDeps({
+  buildContext: async () => { return { roster: [], orchestration: "workflow", limits: { K: 3 } }; },
+  ...over,
+});
+
+test("review: checkoutHead is called right after assertHandoff, before buildContext/gates", async () => {
+  const calls = [];
+  const d = checkoutBaseDeps({
+    assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
+    checkoutHead: vi.fn(async () => { calls.push("checkout"); return { ok: true, sha: "a".repeat(40), pr: 9 }; }),
+    buildContext: async () => { calls.push("context"); return { roster: [], orchestration: "workflow", limits: { K: 3 } }; },
+    gates: async () => { calls.push("gates"); return null; },
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(d.checkoutHead).toHaveBeenCalledTimes(1);
+  const assertIdx = calls.indexOf("assert");
+  const checkoutIdx = calls.indexOf("checkout");
+  const contextIdx = calls.indexOf("context");
+  const gatesIdx = calls.indexOf("gates");
+  expect(checkoutIdx).toBeGreaterThan(assertIdx);
+  expect(checkoutIdx).toBeLessThan(contextIdx);
+  expect(checkoutIdx).toBeLessThan(gatesIdx);
+});
+
+test("merge: checkoutHead is called for merge too", async () => {
+  const checkoutHead = vi.fn(async () => ({ ok: true, sha: "b".repeat(40), pr: 9 }));
+  const d = checkoutBaseDeps({ checkoutHead });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(checkoutHead).toHaveBeenCalledTimes(1);
+});
+
+test("review: checkoutHead failure (PR head moved) → needs-human with that reason, exit 2, no claudeP", async () => {
+  const lines = [];
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const d = checkoutBaseDeps({
+    checkoutHead: vi.fn(async () => ({ ok: false, reason: "PR head moved since implement handoff (aaaaaaa → bbbbbbb)" })),
+    transition, claudeP, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "PR head moved since implement handoff (aaaaaaa → bbbbbbb)" }));
+  expect(claudeP).not.toHaveBeenCalled();
+  expect(lines.some((l) => /checkout: FAIL — PR head moved since implement handoff/.test(l))).toBe(true);
+});
+
+test("implement/triage/plan never call checkoutHead", async () => {
+  for (const stage of ["implement", "triage", "plan"]) {
+    const checkoutHead = vi.fn(async () => ({ ok: true, sha: "c".repeat(40) }));
+    const d = checkoutBaseDeps({ checkoutHead, transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+    await runStage({ stage, issue: 7, deps: d, runnerId: "r" });
+    expect(checkoutHead, stage).not.toHaveBeenCalled();
+  }
+});
+
+test("deps without checkoutHead still work — it is optional", async () => {
+  const d = checkoutBaseDeps({});
+  expect(d.checkoutHead).toBeUndefined();
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+});
+
+test("review: a successful checkout records checkout: <sha7> in the final run-record lines", async () => {
+  const lines = [];
+  const d = checkoutBaseDeps({
+    checkoutHead: vi.fn(async () => ({ ok: true, sha: "deadbeef".repeat(5), pr: 9 })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(lines).toContain("checkout: deadbee");
+});
+
+// makeCheckoutHead: the real main()-style implementation, unit-tested via makeFakeRun + a fake gh.
+
+const implHandoffFor = (issue, { head_sha, pr }) => [
+  { id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "implement", issue, summary: "s", data: { head_sha, pr } }) },
+];
+
+test("makeCheckoutHead: no implement handoff → { ok:false, reason:'implement handoff missing' }", async () => {
+  const gh = { comments: vi.fn(async () => []), prHeadSha: vi.fn() };
+  const run = makeFakeRun([]);
+  const checkoutHead = makeCheckoutHead({ gh, run, root: "/repo", issue: 7 });
+  const r = await checkoutHead();
+  expect(r).toEqual({ ok: false, reason: "implement handoff missing" });
+  expect(gh.prHeadSha).not.toHaveBeenCalled();
+});
+
+test("makeCheckoutHead: PR head moved since implement handoff → reason names both shas", async () => {
+  const headSha = "a".repeat(40);
+  const currentSha = "b".repeat(40);
+  const gh = {
+    comments: vi.fn(async () => implHandoffFor(7, { head_sha: headSha, pr: 9 })),
+    prHeadSha: vi.fn(async () => currentSha),
+  };
+  const run = makeFakeRun([]);
+  const checkoutHead = makeCheckoutHead({ gh, run, root: "/repo", issue: 7 });
+  const r = await checkoutHead();
+  expect(r).toEqual({ ok: false, reason: `PR head moved since implement handoff (${headSha.slice(0, 7)} → ${currentSha.slice(0, 7)})` });
+  expect(gh.prHeadSha).toHaveBeenCalledWith(9);
+  expect(run.calls).toEqual([]);
+});
+
+test("makeCheckoutHead: a git failure (fetch or checkout) surfaces { ok:false, reason }", async () => {
+  const sha = "a".repeat(40);
+  const gh = { comments: vi.fn(async () => implHandoffFor(7, { head_sha: sha, pr: 9 })), prHeadSha: vi.fn(async () => sha) };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 1, stdout: "", stderr: "fatal: could not read from remote" } },
+  ]);
+  const checkoutHead = makeCheckoutHead({ gh, run, root: "/repo", issue: 7 });
+  const r = await checkoutHead();
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/git fetch failed: fatal: could not read from remote/);
+
+  const run2 = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 1, stdout: "", stderr: "fatal: reference is not a tree" } },
+  ]);
+  const checkoutHead2 = makeCheckoutHead({ gh, run: run2, root: "/repo", issue: 7 });
+  const r2 = await checkoutHead2();
+  expect(r2.ok).toBe(false);
+  expect(r2.reason).toMatch(/git checkout failed: fatal: reference is not a tree/);
+});
+
+test("makeCheckoutHead: success fetches origin claude/fq-<issue> then checks out --detach <sha>", async () => {
+  const sha = "a".repeat(40);
+  const gh = { comments: vi.fn(async () => implHandoffFor(42, { head_sha: sha, pr: 9 })), prHeadSha: vi.fn(async () => sha) };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const checkoutHead = makeCheckoutHead({ gh, run, root: "/repo", issue: 42 });
+  const r = await checkoutHead();
+  expect(r).toEqual({ ok: true, sha, pr: 9 });
+  expect(run.calls[0]).toEqual(expect.objectContaining({ cmd: "git", args: ["fetch", "origin", "claude/fq-42"], opts: { cwd: "/repo" } }));
+  expect(run.calls[1]).toEqual(expect.objectContaining({ cmd: "git", args: ["checkout", "--detach", sha], opts: { cwd: "/repo" } }));
 });

@@ -91,6 +91,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   const c = await d.claim();
   if (!c.ok) { console.error(`factory: issue #${issue} already claimed by ${c.holder}`); return 0; }
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
+  let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — 런 레코드의 마지막 줄에 싣는다
   try {
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
@@ -99,6 +100,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
+    }
+    // review·merge는 implement handoff에 적힌 PR head에 게이트를 묶는다 — 그 사이 PR에 새 커밋이
+    // 얹혀도(force-push, 추가 커밋) 검증하지 않은 코드를 검증한 것으로 착각하지 않도록 detach해서 고정한다.
+    if ((stage === "review" || stage === "merge") && d.checkoutHead) {
+      const co = await d.checkoutHead();
+      if (!co.ok) {
+        const t = await d.transition({ to: "factory:needs-human", reason: co.reason });
+        record([`checkout: FAIL — ${co.reason}`, ...refusal(t)]);
+        return 2;
+      }
+      checkoutSha = co.sha;
     }
     const ctx = await d.buildContext();
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
@@ -164,7 +176,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     }
     await d.writeHandoff({ stage, data: v.data, gates });
     const t = await d.transition({ to: nextState(stage, v.data), data: v.data });
-    record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...gatesNote, usage]);
+    record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
@@ -251,6 +263,28 @@ export async function mergeGates({ gh, root, harness, pr, prHeadSha, base, readF
   return out;
 }
 
+/**
+ * review·merge가 게이트를 돌릴 커밋을 implement handoff의 head_sha에 고정한다. PR이 그 사이
+ * 움직였으면(추가 커밋·force-push) 검증하지 않은 코드를 검증한 것으로 속지 않도록 거부한다.
+ * detach checkout이라 로컬 브랜치를 건드리지 않는다 — mergeBase()는 이후 지연 계산되어 이 HEAD를 본다.
+ */
+export function makeCheckoutHead({ gh, run, root, issue }) {
+  return async () => {
+    const handoff = latestHandoff(await gh.comments(issue), "implement");
+    if (!handoff?.data?.head_sha) return { ok: false, reason: "implement handoff missing" };
+    const { head_sha, pr } = handoff.data;
+    const currentSha = await gh.prHeadSha(pr);
+    if (currentSha !== head_sha) {
+      return { ok: false, reason: `PR head moved since implement handoff (${head_sha.slice(0, 7)} → ${currentSha.slice(0, 7)})` };
+    }
+    const fetch = await run("git", ["fetch", "origin", `claude/fq-${issue}`], { cwd: root });
+    if (fetch.code !== 0) return { ok: false, reason: `git fetch failed: ${fetch.stderr.trim()}` };
+    const checkout = await run("git", ["checkout", "--detach", head_sha], { cwd: root });
+    if (checkout.code !== 0) return { ok: false, reason: `git checkout failed: ${checkout.stderr.trim()}` };
+    return { ok: true, sha: head_sha, pr };
+  };
+}
+
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
   const [stage, issueArg] = process.argv.slice(2);
@@ -298,6 +332,7 @@ async function main() {
       if (!req.ok) { await transition({ gh, issue, to: "factory:needs-human", reason: `prerequisite handoff missing: ${req.reason}` }); }
       return req;
     },
+    checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
