@@ -103,6 +103,17 @@ test("allChecksGreen with required: all required names present and pass → true
   expect(allChecksGreen([{ bucket: "pass" }], null)).toBe(true);
 });
 
+test("allChecksGreen: a duplicate check name (commit status + check-run) must have ALL matches green, not just the first found", () => {
+  const onePendingOnePass = [{ name: "factory/gates", bucket: "pass" }, { name: "factory/gates", bucket: "pending" }];
+  expect(allChecksGreen(onePendingOnePass, ["factory/gates"])).toBe(false);
+  const bothPass = [{ name: "factory/gates", bucket: "pass" }, { name: "factory/gates", bucket: "pass" }];
+  expect(allChecksGreen(bothPass, ["factory/gates"])).toBe(true);
+});
+
+test("allChecksGreen: required=[] means 'not configured', not vacuously true — fail closed", () => {
+  expect(allChecksGreen([{ name: "a", bucket: "pass" }], [])).toBe(false);
+});
+
 test("setStatus posts a status via --input stdin JSON, truncating description to 140 chars", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[3].includes("/statuses/"), result: { code: 0, stdout: "", stderr: "" } }]);
   const gh = makeGh({ run, repo });
@@ -112,6 +123,13 @@ test("setStatus posts a status via --input stdin JSON, truncating description to
   expect(call.args).toEqual(["api", "-X", "POST", `repos/${repo}/statuses/${"a".repeat(40)}`, "--input", "-"]);
   const body = JSON.parse(call.opts.input);
   expect(body).toEqual({ state: "success", context: "factory/gates", description: "x".repeat(140), target_url: "https://x" });
+});
+
+test("setStatus rejects an invalid state before calling gh", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await expect(gh.setStatus({ sha: "a".repeat(40), context: "factory/gates", state: "unknown" })).rejects.toThrow(/invalid state/);
+  expect(run.calls).toHaveLength(0);
 });
 
 test("listSecrets/listLabels map to name arrays; createLabel forces the color/description", async () => {

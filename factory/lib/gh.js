@@ -3,13 +3,23 @@ import { STATES } from "./labels.js";
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
  * bucket(pass|fail|pending|skipping|cancel)은 최신 gh만 준다. 없으면 state로 떨어진다.
- * required가 있으면 그 이름들만 본다 — 모두 존재하고 모두 pass여야 true(이름이 없으면 false). required=null이면 기존 동작(전체 체크가 대상).
+ * required가 있으면 그 이름들만 본다 — 이름마다 모든 동명 체크(commit status + check-run 중복 등)가 다 존재하고
+ * 다 pass여야 true(하나라도 없거나 하나라도 안 green이면 false). required=[]는 "설정 안 됨"이지 "무조건 통과"가 아니다 — fail closed로 false.
+ * required=null이면 기존 동작(전체 체크가 대상).
  */
 const isGreen = (c) => (c.bucket ? c.bucket === "pass" : c.state === "SUCCESS");
 export const allChecksGreen = (checks, required = null) => {
-  if (required) return required.every((name) => { const c = checks.find((x) => x.name === name); return c ? isGreen(c) : false; });
+  if (required !== null) {
+    if (required.length === 0) return false;
+    return required.every((name) => {
+      const matches = checks.filter((x) => x.name === name);
+      return matches.length > 0 && matches.every(isGreen);
+    });
+  }
   return checks.length > 0 && checks.every(isGreen);
 };
+
+const STATUS_STATES = new Set(["success", "failure", "pending", "error"]);
 
 export function makeGh({ run, repo }) {
   async function gh(args, opts = {}) {
@@ -71,6 +81,7 @@ export function makeGh({ run, repo }) {
 
     /** targetUrl은 옵션 필드 그대로 target_url로 나간다. description은 GitHub API 제한(140자)으로 자른다. */
     async setStatus({ sha, context, state, description, targetUrl }) {
+      if (!STATUS_STATES.has(state)) throw new Error(`setStatus: invalid state "${state}" (expected one of ${[...STATUS_STATES].join(", ")})`);
       const body = { state, context, description: (description || "").slice(0, 140), target_url: targetUrl };
       await gh(["api", "-X", "POST", `repos/${repo}/statuses/${sha}`, "--input", "-"], { input: JSON.stringify(body) });
     },
