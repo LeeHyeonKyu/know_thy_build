@@ -40,3 +40,77 @@ return { now: Date.now() }
   );
   await expect(runWorkflow(file, { agent: async () => ({}) })).rejects.toThrow(/Date is not defined/);
 });
+
+test("runWorkflow: Math.random() is blocked (non-deterministic scripts must fail), Math.max still works", async () => {
+  const randomFile = writeScript(
+    `export const meta = {name:'t',description:'d',phases:[]}
+return { r: Math.random() }
+`
+  );
+  await expect(runWorkflow(randomFile, { agent: async () => ({}) })).rejects.toThrow(/Math\.random is not a function/);
+
+  const maxFile = writeScript(
+    `export const meta = {name:'t',description:'d',phases:[]}
+return { m: Math.max(1, 2) }
+`
+  );
+  const { result } = await runWorkflow(maxFile, { agent: async () => ({}) });
+  expect(result.m).toBe(2);
+});
+
+test("runWorkflow: parallel isolates a rejecting thunk to null, keeps other results, and never leaves an unhandled rejection", async () => {
+  const file = writeScript(
+    `export const meta = {name:'t',description:'d',phases:[]}
+const r = await parallel([
+  () => Promise.resolve('ok'),
+  () => Promise.reject(new Error('boom')),
+])
+return { r }
+`
+  );
+  const unhandled = [];
+  const onUnhandled = (err) => unhandled.push(err);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const { result } = await runWorkflow(file, { agent: async () => ({}) });
+    expect(result.r).toEqual(["ok", null]);
+    // give any late unhandledRejection a microtask/macrotask to surface before asserting
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("runWorkflow: pipeline nulls only the item whose stage throws; other items complete normally", async () => {
+  const file = writeScript(
+    `export const meta = {name:'t',description:'d',phases:[]}
+const r = await pipeline(
+  [1, 2, 3],
+  (x) => x + 1,
+  (x) => { if (x === 3) throw new Error('bad'); return x * 10; },
+)
+return { r }
+`
+  );
+  const { result } = await runWorkflow(file, { agent: async () => ({}) });
+  expect(result.r).toEqual([20, null, 40]);
+});
+
+test("runWorkflow: a multi-line `export const meta = {...}` still parses, and meta.name/meta.phases are usable in the body", async () => {
+  const file = writeScript(
+    `export const meta = {
+  name: 't',
+  description: 'd',
+  phases: [{ title: 'A' }, { title: 'B' }],
+}
+
+phase(meta.phases[0].title)
+phase(meta.phases[1].title)
+return { name: meta.name, count: meta.phases.length }
+`
+  );
+  const { result, phases } = await runWorkflow(file, { agent: async () => ({}) });
+  expect(result).toEqual({ name: "t", count: 2 });
+  expect(phases).toEqual(["A", "B"]);
+});

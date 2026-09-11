@@ -59,6 +59,10 @@ test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows eve
   expect(noJq.stderr).toMatch(/jq missing/);
 });
 
+test("deny-all-writes: malformed stdin passes through (exit 0), same as block-dangerous", async () => {
+  expect((await run("bash", [join(H, "deny-all-writes.sh")], { input: "not json" })).code).toBe(0);
+});
+
 test("stop-guard: non-factory branch passes; factory branch with dirty tree blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-"));
   await run("git", ["init", "-q", "-b", "main"], { cwd });

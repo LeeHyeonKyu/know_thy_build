@@ -44,6 +44,17 @@ export async function runWorkflow(file, { agent, args = {}, log = () => {} } = {
 
   const phase = (title) => { phases.push(title); };
 
+  // 스크립트는 결정적이어야 한다(ADR 계열 P3-R6/Global Constraint) — `Math.random()`은 금지.
+  // Math의 나머지(max/min/floor/PI/...)는 그대로 두되 `random`만 빠진 사본을 만든다
+  // (Object.assign은 Math의 own 프로퍼티가 non-enumerable이라 아무것도 복사하지 못하므로
+  // getOwnPropertyNames + defineProperty로 명시적으로 복제한다).
+  const sandboxMath = Object.create(null);
+  for (const k of Object.getOwnPropertyNames(Math)) {
+    if (k === "random") continue;
+    Object.defineProperty(sandboxMath, k, Object.getOwnPropertyDescriptor(Math, k));
+  }
+  Object.freeze(sandboxMath);
+
   const sandbox = {
     agent: stubAgent,
     parallel,
@@ -52,7 +63,7 @@ export async function runWorkflow(file, { agent, args = {}, log = () => {} } = {
     log,
     args,
     budget: { total: null, spent: () => 0, remaining: () => Infinity },
-    JSON, Math, Array, Object, String, Number, Promise, Set, Map,
+    JSON, Math: sandboxMath, Array, Object, String, Number, Promise, Set, Map,
   };
 
   const context = vm.createContext(sandbox);
