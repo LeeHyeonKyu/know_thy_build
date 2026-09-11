@@ -7,7 +7,7 @@ export const STATES = new Set([
 /** §3.2 전이 그래프. 키: from, 값: 허용된 to. */
 export const TRANSITIONS = new Map([
   ["backlog", new Set(["factory:queue"])],
-  ["factory:queue", new Set(["factory:ready", "factory:needs-info", "factory:wont-do"])],
+  ["factory:queue", new Set(["factory:ready", "factory:needs-info", "factory:wont-do", "factory:needs-human"])],
   ["factory:needs-info", new Set(["factory:queue"])],
   ["factory:ready", new Set(["factory:planned", "factory:needs-human"])],
   ["factory:planned", new Set(["factory:in-progress", "factory:needs-human"])],

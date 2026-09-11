@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
-import { loadCharter, loadHarness } from "../lib/config.js";
+import { loadCharter } from "../lib/config.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET } from "../lib/labels.js";
@@ -20,36 +22,49 @@ import { trustWorkspace } from "./trust-workspace.js";
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
 export const ROLE_PREFIX = { plan: "plan-", review: "reviewer-" };
+export const STAGES = ["triage", "plan", "implement", "review", "merge"];
 
-export async function runStage({ stage, issue, deps }) {
+export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   const d = deps;
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   await d.trustWorkspace();
   const c = await d.claim();
   if (!c.ok) { console.error(`factory: issue #${issue} already claimed by ${c.holder}`); return 0; }
   const hb = await d.heartbeat();
+  /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
+  const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
   try {
     const a = await d.assertHandoff();
     if (!a.ok) return 2;                                              // assertHandoff가 needs-human 전이와 코멘트를 이미 했다
+    if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
+      const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
+      if (!ip.ok) { d.runRecord(refusal(ip)); return 2; }
+    }
     const ctx = await d.buildContext();
     const out = await d.claudeP(ctx);
     const gates = await d.gates(ctx);                                 // Plan 1b 전까지 null
     const v = d.verifyStage({ stage, out, ctx, gates });
+    const usage = `usage: ${JSON.stringify(out?.usage || {})} cost_usd: ${out?.total_cost_usd ?? "n/a"}`;
     if (!v.ok) {
-      await d.transition({ to: "factory:needs-human", reason: `stage artifact missing or invalid: ${v.reasons.join("; ")}` });
-      d.runRecord(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`)]);
+      const t = await d.transition({ to: "factory:needs-human", reason: `stage artifact missing or invalid: ${v.reasons.join("; ")}` });
+      d.runRecord(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), usage]);
       return 2;
     }
     // review handoff(review.v1)는 verdicts만 싣는다 — 집계 결정은 여기서 만들어 handoff·전이에 함께 실는다.
     if (stage === "review" && v.data && v.data.decision == null && Array.isArray(v.data.verdicts)) {
       const roster = ctx?.roster || [];
       const agg = aggregateReview({ verdicts: v.data.verdicts, rosterSize: roster.length, rosterRoles: roster });
+      if (agg.decision === "incomplete") {                            // 라운드가 덜 끝났다 — 자동 라우팅하지 않는다
+        const t = await d.transition({ to: "factory:needs-human", reason: `review incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}` });
+        d.runRecord(["verify: ok", `review: incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}`, ...refusal(t), usage]);
+        return 2;
+      }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
     }
     await d.writeHandoff({ stage, data: v.data, gates });
     const t = await d.transition({ to: nextState(stage, v.data), data: v.data });
-    d.runRecord([`verify: ok`, `transition: ${t.ok ? t.to : "refused — " + t.reason}`, `usage: ${JSON.stringify(out.usage || {})} cost_usd: ${out.total_cost_usd ?? "n/a"}`]);
+    d.runRecord(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), usage]);
     return t.ok ? 0 : 2;
   } finally {
     hb.stop();
@@ -67,15 +82,14 @@ export function nextState(stage, data) {
 async function main() {
   const [stage, issueArg] = process.argv.slice(2);
   const issue = Number(issueArg);
-  if (!stage || !issue) { console.error("usage: run-stage <stage> <issue>"); process.exit(1); }
+  if (!stage || !issue || !STAGES.includes(stage)) { console.error(`usage: run-stage <${STAGES.join("|")}> <issue>`); process.exit(1); }
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   const gh = makeGh({ run, repo });
-  const charter = loadCharter(root), harness = loadHarness(root);
-  let ctxCache;
+  let charter, ctxCache;                                              // CHARTER는 dormancy 판정에서만 읽는다 — 없거나 깨져도 잠들 뿐 터지지 않는다
   const deps = {
-    charterReady: async () => charter.status === "ready",
+    charterReady: async () => { try { charter = loadCharter(root); } catch { return false; } return charter.status === "ready"; },
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     heartbeat: () => startHeartbeat({ gh, issue, stage, runnerId }),
@@ -89,20 +103,23 @@ async function main() {
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
     claudeP: async () => {
       const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
-      if (charter.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
+      if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
       const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
+      mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
+      writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
     gates: async () => null,
     verifyStage: ({ out }) => verifyStage({ stage, out, agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration }),
     writeHandoff: async ({ data }) => { await gh.comment(issue, renderHandoff({ stage, issue, summary: data.summary || `### ${stage} 완료`, data })); },
-    transition: ({ to, reason, data }) => transition({ gh, issue, to, reason, ctxExtra: { roster: ctxCache?.roster, expectedRounds: ctxCache?.rounds, rosterSize: ctxCache?.roster?.length, maxRounds: charter.limits.K } }),
+    transition: ({ to, reason, data }) => transition({ gh, issue, to, reason, ctxExtra: { roster: ctxCache?.roster, expectedRounds: ctxCache?.rounds, rosterSize: ctxCache?.roster?.length, maxRounds: charter?.limits?.K } }),
     runRecord: (lines) => appendRunRecord({ root, issue, stage, runnerId, lines }),
     release: () => release({ run, cwd: root, issue }),
   };
-  process.exit(await runStage({ stage, issue, deps }));
+  process.exit(await runStage({ stage, issue, deps, runnerId }));
 }
 export const PREV = { plan: "triage", implement: "plan", review: "implement", merge: "review" };
 export function prevStage(stage) { return PREV[stage] || null; }
 
-if (import.meta.url === `file://${process.argv[1]}`) main().catch((e) => { console.error(e); process.exit(1); });
+const isMain = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+if (isMain) main().catch((e) => { console.error(e); process.exit(1); });

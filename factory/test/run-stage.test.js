@@ -44,6 +44,51 @@ test("charter not ready → exit 0 immediately", async () => {
   expect(deps.claim).not.toHaveBeenCalled();
 });
 
+test("implement stage moves to in-progress after the handoff check, then to awaiting-review", async () => {
+  const calls = [];
+  const transition = vi.fn(async ({ to }) => { calls.push("transition"); return { ok: true, to }; });
+  const deps = {
+    charterReady: async () => { calls.push("charter"); return true; },
+    trustWorkspace: async () => calls.push("trust"),
+    claim: async () => { calls.push("claim"); return { ok: true }; },
+    heartbeat: async () => { calls.push("heartbeat"); return { stop: () => calls.push("heartbeat-stop") }; },
+    assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
+    buildContext: async () => { calls.push("context"); return { roster: [], orchestration: "workflow", limits: { K: 3 } }; },
+    claudeP: async () => { calls.push("claude"); return { is_error: false, result: "{}" }; },
+    gates: async () => { calls.push("gates"); return null; },
+    verifyStage: () => { calls.push("verify"); return { ok: true, reasons: [], data: {} }; },
+    writeHandoff: async () => calls.push("handoff"),
+    transition,
+    runRecord: () => calls.push("record"),
+    release: async () => calls.push("release"),
+  };
+  expect(await runStage({ stage: "implement", issue: 9, deps, runnerId: "runner-1" })).toBe(0);
+  expect(calls).toEqual(["charter", "trust", "claim", "heartbeat", "assert", "transition", "context", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
+  expect(transition.mock.calls[0][0]).toEqual(expect.objectContaining({ to: "factory:in-progress", reason: expect.stringContaining("runner-1") }));
+  expect(transition.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ to: "factory:awaiting-review" }));
+});
+
+test("a refused transition is recorded, never silent", async () => {
+  const lines = [];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ({ roster: [], orchestration: "workflow", limits: {} }),
+    claudeP: async () => ({ is_error: false, result: "{}" }), gates: async () => null,
+    verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: async () => ({ ok: false, reason: "plan handoff missing" }),
+    runRecord: (l) => lines.push(...l), release: async () => {},
+  };
+  expect(await runStage({ stage: "plan", issue: 3, deps })).toBe(2);
+  expect(lines).toContain("transition refused: plan handoff missing");
+
+  const ipLines = [];
+  const ipDeps = { ...deps, runRecord: (l) => ipLines.push(...l), writeHandoff: vi.fn(async () => {}) };
+  expect(await runStage({ stage: "implement", issue: 3, deps: ipDeps, runnerId: "r1" })).toBe(2);
+  expect(ipLines).toContain("transition refused: plan handoff missing");
+  expect(ipDeps.writeHandoff).not.toHaveBeenCalled();          // in-progress 거부면 스테이지를 진행하지 않는다
+});
+
 test("review stage derives decision from verdicts via aggregateReview", async () => {
   const verdict = (role, kind) => ({
     role, verdict: kind, confidence: "high",
@@ -69,4 +114,11 @@ test("review stage derives decision from verdicts via aggregateReview", async ()
   const approved = depsFor([verdict("correctness", "approve"), verdict("qa", "approve")]);
   expect(await runStage({ stage: "review", issue: 7, deps: approved })).toBe(0);
   expect(approved.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:approved" }));
+
+  const incomplete = depsFor([verdict("correctness", "approve")]);   // 2-role roster, 1 verdict
+  expect(await runStage({ stage: "review", issue: 7, deps: incomplete })).toBe(2);
+  expect(incomplete.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human", reason: expect.stringMatching(/incomplete/),
+  }));
+  expect(incomplete.writeHandoff).not.toHaveBeenCalled();
 });

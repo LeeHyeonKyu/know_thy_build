@@ -14,6 +14,7 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:queue", "factory:ready")).toBe(true);
   expect(canTransition("factory:queue", "factory:needs-info")).toBe(true);
   expect(canTransition("factory:queue", "factory:wont-do")).toBe(true);
+  expect(canTransition("factory:queue", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:needs-info", "factory:queue")).toBe(true);
   expect(canTransition("factory:ready", "factory:planned")).toBe(true);
   expect(canTransition("factory:planned", "factory:in-progress")).toBe(true);
