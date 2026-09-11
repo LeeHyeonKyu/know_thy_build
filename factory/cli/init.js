@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, mkdtempSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildManifest } from "./manifest.js";
-import { planInstall, applyInstall, ensureGitignore, render } from "./install.js";
+import { planInstall, applyInstall, ensureGitignore } from "./install.js";
 import { run as realRun } from "../lib/exec.js";
 
 export const GITIGNORE_ENTRIES = [".factory/out/", ".factory/node_modules/"];
@@ -19,14 +19,21 @@ export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun 
   const manifest = buildManifest({ pkgRoot });
   const actions = planInstall({ manifest, root, mode: upgrade || diff ? "upgrade" : "init", vars });
   if (diff) {
-    const stale = actions.filter((a) => a.action === "replace" || a.action === "merge");
+    const stale = actions.filter((a) => a.action === "replace" || a.action === "merge" || (a.action === "create" && a.owner === "factory"));
+    if (json) { io.out(JSON.stringify({ stale: stale.map(({ content, ...a }) => a) })); return stale.length ? 1 : 0; }
     if (!stale.length) { io.out("factory init --diff: everything up to date"); return 0; }
     const tmp = mkdtempSync(join(tmpdir(), "ktb-diff-"));
-    for (const a of stale) {
-      const fresh = join(tmp, a.dest.replace(/\//g, "__"));
-      writeFileSync(fresh, a.content);
-      const r = await run("git", ["diff", "--no-index", "--color=never", join(root, a.dest), fresh]);
-      io.out(`# ${a.dest} (${a.action})\n${r.stdout}`);
+    try {
+      for (const a of stale) {
+        const fresh = join(tmp, a.dest.replace(/\//g, "__"));
+        writeFileSync(fresh, a.content);
+        const missing = a.action === "create";
+        const before = missing ? "/dev/null" : join(root, a.dest);
+        const r = await run("git", ["diff", "--no-index", "--color=never", before, fresh]);
+        io.out(`# ${a.dest} (${missing ? "create — missing" : a.action})\n${r.stdout}`);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
     }
     return 1;
   }

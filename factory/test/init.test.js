@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { initCommand } from "../cli/init.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -56,6 +56,29 @@ test("init --diff prints git diff --no-index for stale factory-owned files and t
   expect(o.out.join("\n")).toContain("-stale");
   expect(readFileSync(join(root, ".factory/lib/gates.js"), "utf8")).toBe("stale");
   expect(run.calls.filter((c) => c.args[0] === "diff")).toHaveLength(1);
+});
+
+test("init --diff reports a missing factory-owned file as create and cleans up its temp dir", async () => {
+  const root = fresh(); const { io: i } = io();
+  await initCommand({ root, pkgRoot, argv: [], io: i });
+  rmSync(join(root, ".factory/lib/gates.js"));
+  const run = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--no-index", result: { code: 1, stdout: "+export const v = 1;\n", stderr: "" } }]);
+  const { io: i2, o } = io();
+  expect(await initCommand({ root, pkgRoot, argv: ["--diff"], io: i2, run })).toBe(1);
+  expect(o.out.join("\n")).toContain("gates.js");
+  expect(o.out.join("\n")).toContain("(create");
+  const freshPath = run.calls.at(-1).args.at(-1);
+  expect(existsSync(dirname(freshPath))).toBe(false);
+});
+
+test("init --diff --json prints a JSON summary of stale actions instead of git diff text", async () => {
+  const root = fresh(); const { io: i } = io();
+  await initCommand({ root, pkgRoot, argv: [], io: i });
+  writeFileSync(join(root, ".factory/lib/gates.js"), "stale");
+  const { io: i2, o } = io();
+  expect(await initCommand({ root, pkgRoot, argv: ["--diff", "--json"], io: i2 })).toBe(1);
+  const parsed = JSON.parse(o.out.join(""));
+  expect(parsed.stale.some((a) => a.dest === ".factory/lib/gates.js" && a.action === "replace")).toBe(true);
 });
 
 test("init falls back to the directory basename when package.json is missing", async () => {
