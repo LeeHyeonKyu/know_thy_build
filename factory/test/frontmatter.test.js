@@ -51,6 +51,24 @@ roster:   # 주석만 달린 중첩 블록 머리
   expect(data.roster).toEqual({ docs: ["correctness", "spec-conformance"] });
 });
 
+test("nested list-of-maps (agent frontmatter hooks: block, spec §7.3)", () => {
+  const md = `---
+name: reviewer-correctness
+model: opus
+hooks:
+  PreToolUse:
+    - matcher: Edit|Write
+      hooks: [{ type: command, command: .claude/hooks/deny-all-writes.sh }]
+---
+`;
+  const { data } = parseFrontmatter(md);
+  expect(data.hooks).toEqual({
+    PreToolUse: [
+      { matcher: "Edit|Write", hooks: [{ type: "command", command: ".claude/hooks/deny-all-writes.sh" }] },
+    ],
+  });
+});
+
 test("4-space nested blocks parse (common indent is stripped, not exactly 2)", () => {
   const { data } = parseFrontmatter(`---
 schema: factory.charter.v1

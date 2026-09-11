@@ -39,6 +39,26 @@ test("block-dangerous: without jq the hook fails CLOSED (exit 2)", async () => {
   expect(r.stderr).toMatch(/jq missing/);
 });
 
+test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows everything else, fails closed without jq", async () => {
+  const r1 = await bash("deny-all-writes.sh", { tool_name: "Edit", tool_input: { file_path: "src/a.js" } });
+  expect(r1.code).toBe(2);
+  expect(r1.stderr).toMatch(/factory: this role must not write files \(Edit src\/a\.js\)/);
+
+  const r2 = await bash("deny-all-writes.sh", { tool_name: "Write", tool_input: { file_path: "b.md" } });
+  expect(r2.code).toBe(2);
+  expect(r2.stderr).toMatch(/factory: this role must not write files \(Write b\.md\)/);
+
+  const r3 = await bash("deny-all-writes.sh", { tool_name: "NotebookEdit", tool_input: { file_path: "n.ipynb" } });
+  expect(r3.code).toBe(2);
+
+  expect((await bash("deny-all-writes.sh", { tool_name: "Read", tool_input: { file_path: "src/a.js" } })).code).toBe(0);
+  expect((await bash("deny-all-writes.sh", { tool_name: "Bash", tool_input: { command: "ls" } })).code).toBe(0);
+
+  const noJq = await run("/bin/bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify({ tool_name: "Edit" }), env: { PATH: "/nonexistent" } });
+  expect(noJq.code).toBe(2);
+  expect(noJq.stderr).toMatch(/jq missing/);
+});
+
 test("stop-guard: non-factory branch passes; factory branch with dirty tree blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-"));
   await run("git", ["init", "-q", "-b", "main"], { cwd });

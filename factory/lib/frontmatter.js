@@ -20,7 +20,8 @@ function parseBlock(lines) {
       i++;
       while (i < lines.length && /^\s{2,}\S/.test(lines[i])) { sub.push(lines[i]); i++; }
       const indent = sub.length ? Math.min(...sub.map((l) => /^\s*/.exec(l)[0].length)) : 0;
-      data[key] = parseBlock(sub.map((l) => l.slice(indent)));
+      const dedented = sub.map((l) => l.slice(indent));
+      data[key] = isListBlock(dedented) ? parseList(dedented) : parseBlock(dedented);
       continue;
     }
     data[key] = parseValue(rest);
@@ -78,4 +79,25 @@ function parseInlineArray(s) {
   const inner = s.slice(1, s.lastIndexOf("]")).trim();
   if (!inner) return [];
   return splitTop(inner).map(parseValue);
+}
+
+/** `- key: value` 형태의 블록 리스트(YAML list-of-maps). 에이전트 frontmatter의 `hooks:` 블록(spec §7.3)에 쓰인다. */
+function isListBlock(lines) {
+  return lines.length > 0 && /^-(\s|$)/.test(lines[0]);
+}
+
+function parseList(lines) {
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const m = /^-\s?(.*)$/.exec(lines[i]);
+    if (!m) { i++; continue; }
+    const itemLines = [];
+    if (m[1].trim()) itemLines.push(m[1]);
+    i++;
+    // 다음 항목( "- "로 시작)이 나오기 전까지, 2칸 들여쓴 계속줄을 같은 항목에 합친다.
+    while (i < lines.length && !/^-(\s|$)/.test(lines[i])) { itemLines.push(lines[i].replace(/^\s{2}/, "")); i++; }
+    out.push(itemLines.length === 1 && !itemLines[0].includes(":") ? parseValue(itemLines[0]) : parseBlock(itemLines));
+  }
+  return out;
 }

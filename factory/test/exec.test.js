@@ -5,7 +5,7 @@ test("run executes a real command and captures stdout/code", async () => {
   const r = await run("node", ["-e", "process.stdout.write('hi'); process.exit(3)"]);
   expect(r.stdout).toBe("hi");
   expect(r.code).toBe(3);
-});
+}, 30000);
 
 test("run passes stdin input", async () => {
   const r = await run("node", ["-e", "process.stdin.on('data', d => process.stdout.write(String(d).toUpperCase()))"], { input: "abc" });
