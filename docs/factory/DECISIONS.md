@@ -40,6 +40,8 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **결정**: L2 훅은 **`.claude/settings.json`에 둔다**(§6.3 설계 유지). 네 이벤트(`PreToolUse`/`SubagentStart`/`SubagentStop`/`Stop`)가 모두 workflow 서브에이전트 안에서 발화하고, stdin JSON의 `agent_id`/`agent_type`으로 메인 세션 호출과 서브에이전트 호출을 분리할 수 있으므로 에이전트 frontmatter 훅으로의 대체는 불필요하다. 부수 효과로 **`verify-stage.sh`의 로스터·라운드 검증 근거를 훅 기록으로 삼는다**: `SubagentStart`/`SubagentStop` 라인의 `agent_type`을 세면 "누가 몇 명 떴는가"가 나온다(→ ADR-002의 `subagent_stats` 불가 사유와 짝).
 
+**이 결정의 미확인 부분 — `agent_type`의 값 형식.** 스파이크의 로깅 훅은 stdin JSON을 `jq -c 'keys'`로만 남겼으므로 **확인된 것은 `agent_id`·`agent_type`이 존재한다는 사실뿐**이고, `agent_type`의 **값**이 등록된 역할 이름(`.claude/agents/<role>`의 파일명/`name`)과 같은 문자열인지는 관측하지 않았다. 인원 수를 세는 용도(`SubagentStart` 라인 수 == 로스터 크기)는 값 형식과 무관하게 성립하지만, **"누가"를 로스터와 문자열 대조하는 부분은 근거가 없다.** Plan 1은 `verify-stage.sh`를 쓰기 전에 이 값을 먼저 실측하고(훅에서 `keys`가 아니라 값을 찍는다), 형식이 다르면 매핑 테이블을 끼우거나 `label` 등 다른 필드로 대조 축을 바꾼다.
+
 **영향**: §6.3(L2 배치 확정 · 훅 로그를 verify 입력으로), §4.2.1 step 6, Plan 1(`verify-stage.sh` 설계), Plan 3(훅 배치).
 
 ---
@@ -54,11 +56,11 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 - **턴 수 1 · 소요 12s · 비용 $0.08908150000000001** (`--max-turns 5` 예산 대비 여유 큼).
 - 서브에이전트 CLAUDE.md 주입: **yes** — agent `a`/`b` 모두 `claude_md_marker: "yes"`(CLAUDE.md의 `MARKER_CLAUDE_MD_LOADED=yes`를 정확히 보고).
 - 권한 규칙 `Workflow(spike-basic)`: **무의미했다** — `.claude/settings.json`의 `permissions.allow` 7개 전부가 `Ignoring 7 permissions.allow entries from .claude/settings.json: this workspace has not been trusted`와 함께 무시됐다(→ ADR-008). 그럼에도 `--permission-mode dontAsk` 단독으로 모든 툴 호출이 프롬프트 없이 통과, `permission_denials: []`.
-- **`subagent_stats.spawned: 0`** — 워크플로 서브에이전트 2명이 실제로 떴는데도 0이었다. **`-p` stdout JSON의 `subagent_stats`는 Workflow `agent()` 서브에이전트를 세지 않는다.**
-- `-p` 출력 JSON이 함께 싣는 필드: `permission_denials`, `modelUsage`, `terminal_reason`, `num_turns`, `total_cost_usd`, `usage`. 전부 §9 run 기록에 그대로 옮길 수 있다.
+- **`subagent_stats.spawned: 0`** — 워크플로 서브에이전트 2명이 실제로 떴는데도 0이었다. **`-p` stdout JSON의 `subagent_stats`는 Workflow `agent()` 서브에이전트를 세지 않는다.** (출처: 이 run의 잡 로그 — spike-2의 yml이 `out.json` 전문을 그대로 출력한다. ADR-002 초안에는 없고 컨트롤러가 원본 로그에서 확인한 항목이다.)
+- `-p` 출력 JSON이 함께 싣는 필드: `permission_denials`, `modelUsage`, `terminal_reason`, `num_turns`, `total_cost_usd`, `usage`. 전부 §9 run 기록에 그대로 옮길 수 있다. (출처: 같은 로그의 `out.json` 전문.)
 
 **결정**: **orchestration 기본값 `workflow` 유지**(후퇴 없음 — 아래 "후퇴 결정" 참조). 단 두 가지를 확정한다:
-1. `verify-stage.sh`는 **`subagent_stats`를 쓰지 않는다.** 로스터·인원·라운드 검증은 훅 기록(`SubagentStart`/`SubagentStop`의 `agent_id`/`agent_type`, ADR-001)으로 한다.
+1. `verify-stage.sh`는 **`subagent_stats`를 쓰지 않는다.** 로스터·인원·라운드 검증은 훅 기록(`SubagentStart`/`SubagentStop`의 `agent_id`/`agent_type`, ADR-001)으로 한다 — 단 `agent_type` **값**이 역할 이름과 같은지는 미확인이므로 Plan 1이 먼저 실측한다(ADR-001 참조).
 2. run 기록(§9)에 `permission_denials`, `modelUsage`, `terminal_reason`, `num_turns`, `total_cost_usd`를 싣는다 — 무료로 얻는 감사 자료다.
 
 **영향**: §4.2.1 step 4·6, §4.2.4(모드 기본값 유지), §6.3, §9(run 기록 필드), Plan 1(`verify-stage.sh`).
@@ -190,9 +192,9 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 에이전트는 단독 `sleep 570`도 시도해 동일하게 차단됐고, **DONE을 위조하지 않고 정직하게 미완료를 보고**했다(선행 spike-7 run [34574812726](https://github.com/LeeHyeonKyu/know-thy-build-demo/actions/runs/34574812726)에서는 sleeper가 `sleep 720`을 백그라운드화하고 완료를 거짓 보고 — 그 run은 무효). `default`와 `0`의 **차이는 전혀 관측되지 않았다**(동일 실패 지점·동일 거부 메시지). 즉 이 방법론으로는 ceiling 값을 측정할 수 없다.
 
-**결정**: **질문 자체가 moot다.** 근거 세 가지의 결합:
-1. **단일 Bash 툴 호출은 10분 상한**이 걸려 있다 — 하나의 도구 호출이 ceiling을 넘겨 침묵할 수 없다.
-2. **foreground `sleep`(및 우회로서의 chained 짧은 sleep)은 Bash 툴이 하드 차단**한다(위 실측). 에이전트가 인위적으로 오래 침묵하는 경로 자체가 봉쇄돼 있다.
+**결정**: **질문 자체가 moot다.** 근거 세 가지의 결합 — 1·2의 성격에 주의: **이 스파이크가 잰 값이 아니라 CLI 자체의 동작이며, 컨트롤러 판단(ruling)으로 채택했다.** 스파이크 7b가 실측한 것은 2의 차단이 실제로 발생한다는 사실(거부 메시지 verbatim)뿐이고, 10분이라는 수치는 측정되지 않았다.
+1. **단일 Bash 툴 호출은 10분 상한**이 걸려 있다(CLI 동작 · 컨트롤러 ruling) — 하나의 도구 호출이 ceiling을 넘겨 침묵할 수 없다.
+2. **foreground `sleep`(및 우회로서의 chained 짧은 sleep)은 Bash 툴이 하드 차단**한다 — 이것만 위에서 실측했다. 에이전트가 인위적으로 오래 침묵하는 경로 자체가 봉쇄돼 있다.
 3. 실제 작업을 하는 workflow 에이전트는 도구 이벤트를 연속적으로 뱉는다. 따라서 **workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상(by construction)**.
 
 운영 규칙: `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`은 **방어적으로 계속 설정**하고(비용 0, 위 추론이 틀렸을 때의 보험), **진짜 상한은 잡의 `timeout-minutes`**로 건다. 두 장치 모두 원안 그대로 유지된다. 파생 규칙: 앞으로 "에이전트가 실제로 N분을 기다렸는가"를 검증해야 하면 **에이전트에게 `sleep`을 시키지 않고 오케스트레이션 레이어(yml 스텝의 sleep/polling)에서 대기를 만들고 에이전트는 마커로 사후 검증만** 한다.
@@ -217,7 +219,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 - `--settings`는 project `.claude/settings.json`을 **대체하지 않고 병합**한다(cli-settings 레그에서도 `Ignoring` 경고가 그대로 출력됨).
 - untrusted + deny 조건에서 **deny에 걸리지 않는 평범한 `echo`까지 전면 차단**되는 현상이 `/spike-deny` 커맨드에서 관측됐다. 단 같은 untrusted 상태의 다른 커맨드(ADR-006 선행 run 34574564725/34574709197)에서는 반대로 통과했다 — **원인 미상의 상충**이며 일반 규칙으로 단정하지 않는다. trusted 모드에서는 이 모호성이 아예 사라진다.
 
-**결정**: **모든 factory CI 워크플로는 `claude -p` 전에 trust 부트스트랩을 거친다.** `~/.claude.json`의 `projects[$GITHUB_WORKSPACE].hasTrustDialogAccepted = true`를 쓰는 스텝을 공통 setup에 넣는다(데모의 `.github/actions/trust-workspace/action.yml`이 구현 예 — node 한 줄로 기존 JSON을 읽어 머지 후 재기록). 근거: trusted는 이번 관측에서 유일하게 **"allow 정상 작동 + deny만 선택적으로 적용"**이 상충 없이 확인된 모드다. `--settings .factory/ci-settings.json`은 병합이므로 필수가 아니며, 워크플로별 deny 확장이 필요할 때의 보조 수단으로만 남긴다.
+**결정**: **모든 factory CI 워크플로는 `claude -p` 전에 trust 부트스트랩을 거친다.** `~/.claude.json`의 `projects[$GITHUB_WORKSPACE].hasTrustDialogAccepted = true`를 쓰는 스텝을 공통 setup에 넣는다(데모의 `.github/actions/trust-workspace/action.yml`이 구현 예 — node 한 줄로 기존 JSON을 읽어 머지 후 재기록). 근거: trusted는 이번 관측에서 유일하게 **"allow 정상 작동 + deny만 선택적으로 적용"**이 상충 없이 확인된 모드다(1/3 레그). 범위를 정확히 해둔다 — **deny 자체는 trust와 무관하게 3/3 유효했으므로 L2가 성립하기 위해 trust가 필요한 것은 아니다.** trust가 사는 것은 (a) allow 규칙의 작동, (b) `.mcp.json` project 서버 로딩(ADR-004), (c) 비대상 명령까지 막히는 과잉 차단의 제거다. `--settings .factory/ci-settings.json`은 병합이므로 필수가 아니며, 워크플로별 deny 확장이 필요할 때의 보조 수단으로만 남긴다.
 
 이 결정은 ADR-004(trusted면 `.mcp.json`이 `enableAllProjectMcpServers` 없이 로드)와 ADR-006(trusted 재측정)의 전제이기도 하다 — **trust 부트스트랩은 다른 모든 CI 관측의 선행 조건**이다.
 
@@ -232,13 +234,15 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 **관측**:
 1. **flow mapping 안의 `${{ }}`는 워크플로 파일을 통째로 무효화한다.** `with: { name: x-${{ matrix.y }}, path: .spike/ }` 형태에서 `}}`가 flow mapping을 조기 종료시켜 파싱이 깨진다. 증상: 잡이 실행조차 안 되고 run 목록에 워크플로 이름 대신 **경로 문자열**(`.github/workflows/spike-8-trust-deny.yml`)이 뜨며 즉시 failure — 실제로 3개 run(34574545130, 34574544207, 34574407539)이 이 사유로 죽었고 커밋 `fd90f80`으로 고쳤다.
 2. **`actions/upload-artifact@v4`는 dot-디렉토리를 기본적으로 빼먹는다.** D1 스파이크의 `path: .spike/` 아티팩트가 **전부 비어 있었고**(데이터는 잡 로그에서 회수), `include-hidden-files: true`를 붙인 이후 run부터 정상 수집됐다.
+3. **로깅 훅이 죽으면 관측이 통째로 사라진다.** 스파이크의 `log-hook.sh`가 `set -e` + `jq` 치환으로 짜여 있어, `jq` 실패나 경로 문제가 나면 훅이 비정상 종료하고 그 시점부터 기록이 조용히 끊긴다(D1의 deferred minor로 기록됨). `PreToolUse`에서 **exit 2만** 도구 호출을 차단하므로 다른 실패는 잡을 막지는 않지만, 사후 검증(ADR-001·ADR-006)의 유일한 근거가 없어진다.
 
-**결정** (factory yml 템플릿 규칙):
+**결정** (factory yml·훅 템플릿 규칙):
 - yml에서 `${{ }}`를 쓰는 `with:`/`env:`는 **항상 블록 매핑**으로 쓴다. flow mapping(`{ … }`)은 보간이 전혀 없는 짧은 값에만 허용한다.
 - 아티팩트 경로에 dot-디렉토리(`.factory/out/`, `.spike/` 등)가 하나라도 있으면 **`include-hidden-files: true`를 필수로 붙인다.** factory 산출물은 대부분 `.factory/` 아래이므로 사실상 전 워크플로에 해당한다.
-- 두 규칙은 `doctor`의 yml 린트 후보다(Plan 2에서 판단).
+- **로깅 훅은 어떤 경우에도 exit 0으로 끝난다** — 실패할 수 있는 모든 구문에 `|| true`를 붙이고 마지막 줄에 `exit 0`을 둔다. 판정하는 훅(`stop-guard.sh` 등)만 의도적으로 exit 2를 낸다. 관측용 훅이 잡을 막거나 스스로 침묵해서는 안 된다.
+- 세 규칙 모두 `doctor`의 린트 후보다(Plan 2에서 판단).
 
-**영향**: §4.1(워크플로 파일 예시), Plan 2(yml 템플릿 전부).
+**영향**: §4.1(워크플로 파일 예시), §6.3(훅 작성 규칙), Plan 2(yml 템플릿 전부), Plan 3(훅 구현).
 
 ---
 

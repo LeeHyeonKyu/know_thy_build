@@ -24,7 +24,7 @@
 5. **에이전트는 서로의 의견을 읽고 답해야 한다.** 독립 판단 라운드 → 교차 검토 라운드의 2단 구조를 plan과 review 모두에 강제한다. 독립 먼저(집단사고 방지), 교환 나중(사각 제거).
 6. **에이전트는 검증기를 속인다고 가정한다.** 작업자와 검증자를 분리하고, 검증자는 작업자의 설명을 읽지 않으며(cold read), 테스트가 수정을 실제로 증명하는지 되돌려 확인한다(prove-test).
 7. **상태는 GitHub에만 있다.** 라벨(큐·락·트리거), 코멘트(handoff), 브랜치(진행). 러너·세션·워크트리는 언제든 사라진다. 모든 잡은 재진입 가능하고, 진행은 즉시 push한다.
-8. **하드 한계는 라벨·코멘트에 기록된 숫자다.** 라운드 K, 같은 게이트 RED M, 재시도 R, 이슈당 예산. 초과 시 `needs-human`과 함께 "막힌 지점·시도한 것·남은 위험"을 남기고 멈춘다.
+8. **하드 한계는 라벨·코멘트에 기록된 숫자다.** 라운드 K, 같은 게이트 RED M, 재시도 R, 이슈당 예산(상한을 켠 경우 — 기본은 보고만, §4.4·§5.3·ADR-005). 초과 시 `needs-human`과 함께 "막힌 지점·시도한 것·남은 위험"을 남기고 멈춘다.
 9. **배운 것은 프롬프트가 아니라 게이트가 되는 것이 목표다.** lesson은 근거와 상한을 갖는 체크 항목이고, lint/테스트로 표현 가능해지면 게이트로 승격한다. 역할 정의 변경은 사람이 승인한다(LLM 생성 지침의 효과 0 / 비용 +20% — 부록 A).
 10. **factory가 필요로 하는 모든 것은 repo에 커밋돼 있다.** 러너는 fresh clone만 본다.
 
@@ -112,10 +112,12 @@ stateDiagram-v2
   approved --> merged: merge
   merged --> [*]: retro
   rework --> needs_human: round > K
-  in_progress --> needs_human: RED × M · 예산 · 재시도 R
+  in_progress --> needs_human: RED × M · 예산(켠 경우) · 재시도 R
   blocked --> needs_human: sweeper
   needs_human --> queue: 사람
 ```
+
+예산 간선은 **상한을 켠 경우에만 존재한다**(기본 off — §4.4·§5.3, ADR-005). 켜져 있어도 초과는 **다음 claim을 거부하는 방식**으로 작동하며 진행 중인 스테이지를 도중에 죽이지 않는다: 이미 도는 스테이지는 끝까지 가고, 그 다음 전이에서 `needs-human`으로 빠진다.
 
 ### 3.3 전이 규칙 — 건너뛰기 불가의 구현
 
@@ -239,7 +241,7 @@ jobs:
         with:                                            # ADR-009: ${{ }}를 flow mapping 안에 두면 워크플로 파일이 통째로 파싱 실패한다
           name: run-${{ github.event.issue.number }}
           path: docs/factory/runs/
-          include-hidden-files: true                     # ADR-009: dot-디렉토리(.factory/out 등)는 이게 없으면 빈 아티팩트가 된다
+          include-hidden-files: true                     # ADR-009: 템플릿 기본값. dot-디렉토리를 올릴 때(.factory/out 등) 없으면 빈 아티팩트가 된다
 ```
 
 ### 4.2 제어 계층 — 오케스트레이터는 세 겹, LLM은 하나
@@ -275,7 +277,9 @@ run-stage.sh <stage> <issue>
                                              #   러너의 fresh checkout은 untrusted이고, 그 상태에서는 permissions.allow가 전부 무시되며
                                              #   (경고 "Ignoring N permissions.allow entries ... this workspace has not been trusted")
                                              #   deny가 걸린 세션은 deny에 매칭되지 않는 Bash까지 막는 경우가 관측됐다(ADR-008/ADR-006 상충).
-                                             #   trusted 상태에서만 "allow 정상 + deny만 선택 적용"이 성립한다 → L2(§6.3)의 전제.
+                                             #   trusted 상태에서만 "allow 정상 + deny만 선택 적용"이 성립한다 → L2(§6.3)의 allow·선택적 동작의 전제.
+                                             #   CI에서만 실행한다($GITHUB_ACTIONS 또는 $FACTORY_RUNNER_ID가 있을 때만) — run-stage.sh는 로컬에서도
+                                             #   돌고, 개발자의 ~/.claude.json을 말없이 고쳐서는 안 된다. Plan 2가 composite action/가드된 스텝으로 구현.
   1. claim.sh <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작
   2. assert-handoff.sh <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
@@ -283,14 +287,19 @@ run-stage.sh <stage> <issue>
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
   4. claude -p "/factory-<stage> <issue>" \
        --settings .factory/ci-settings.json \
-       --max-turns 5 --max-budget-usd <CHARTER> \
+       --max-turns 5 [--max-budget-usd <CHARTER>] \
        --permission-mode dontAsk --output-format json > .factory/out/<stage>.json
+     (--max-budget-usd는 CHARTER의 예산 상한을 **켠 경우에만** 붙인다 — 기본은 off이고 factory는 소비를 보고만 한다(§4.4·§5.3, ADR-005).
+      켜져 있어도 초과는 다음 claim을 거부할 뿐, 도는 스테이지를 도중에 죽이지 않는다)
      (env: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 — 방어적으로 유지하되 진짜 상한은 잡의 timeout-minutes. ADR-007: 단일 Bash 호출이
       10분으로 잘리고 foreground sleep은 Bash 툴이 차단하므로 workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상 moot)
   5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 생성
   6. verify-stage.sh <stage> <issue>         # 4의 결과에 workflow 산출물이 있는가: 역할 목록 == context.json 로스터,
                                              #   라운드 수, 판정 수, orchestration == harness.toml 설정. 없으면 needs-human "stage artifact missing"
                                              #   인원·역할의 근거는 훅 기록이다(ADR-001): SubagentStart/SubagentStop 라인의 agent_id·agent_type을 센다.
+                                             #   주의 — 확인된 것은 두 필드의 *존재*뿐이다(스파이크 훅이 stdin JSON의 keys만 로깅했다).
+                                             #   agent_type의 *값*이 등록된 역할 이름(.claude/agents/<role>)과 같은지는 미확인 → Plan 1의 첫 확인 항목.
+                                             #   다르면 로스터 대조는 매핑 테이블을 거치거나 label 등 다른 필드로 바꾼다(인원 수 세기는 그대로 유효).
                                              #   stdout JSON의 subagent_stats는 쓰지 않는다 — Workflow agent()를 세지 않는다(ADR-002: 워커 2명에 spawned 0).
                                              #   permission_denials도 판정 근거로 쓰지 않는다 — trusted 세션에서 항상 비어 있었다(ADR-006 3/3).
   7. write-handoff.sh <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
@@ -666,7 +675,13 @@ light_on_merge: true
 
 ### 6.3 L2 `.claude/settings.json` (factory init이 생성)
 
-**전제 — CI에서는 trust 부트스트랩이 선행되어야 이 층이 성립한다.** 러너의 fresh checkout은 untrusted 워크스페이스이고, 그 상태에서는 `permissions.allow`가 전부 무시되며(ADR-002/ADR-008, 3/3 run에서 `Ignoring N permissions.allow entries … this workspace has not been trusted`) deny가 붙은 세션이 deny에 매칭되지도 않는 평범한 Bash까지 막는 현상이 관측됐다(ADR-008). 따라서 `claude -p` 전에 `~/.claude.json`의 `projects[<cwd>].hasTrustDialogAccepted = true`를 쓴다(§4.2.1 step 0.5). trusted 상태에서만 "allow 정상 작동 + deny만 선택적으로 적용"이 확인됐고(ADR-008 3/3: force-push는 원격 브랜치 미생성으로 차단, 비대상 명령은 통과), `--settings`는 project 설정을 대체하지 않고 **병합**되므로 trust를 대신하지 못한다.
+**전제 — deny는 신뢰 여부와 무관하게 걸리지만, allow와 "선택적 차단"은 trust 부트스트랩을 요구한다.** 정확히는(ADR-008, 3개 모드 매트릭스):
+
+- `permissions.deny` 자체는 **untrusted에서도 유효하다** — force-push 프로브가 project-only·cli-settings·trusted **3/3 모두 차단**됐다(원격 브랜치 미생성으로 확인). 아래 JSON의 deny 목록이 러너에서 무시될 걱정은 하지 않아도 된다.
+- `permissions.allow`는 **untrusted에서 전부 무시된다**(ADR-002/ADR-008, 3/3 run에서 `Ignoring N permissions.allow entries … this workspace has not been trusted`).
+- **"deny에 걸린 것만 막고 나머지는 통과"라는 선택적 동작은 trusted 레그에서만 확인됐다(1/3).** untrusted 레그에서는 deny에 매칭되지도 않는 평범한 Bash까지 함께 막히는 과잉 차단이 관측됐는데, 같은 untrusted 상태의 다른 커맨드에서는 반대로 통과한 기록이 있어(ADR-006과 상충) **원인 미상·미해결**이다.
+
+따라서 `claude -p` 전에 `~/.claude.json`의 `projects[<cwd>].hasTrustDialogAccepted = true`를 쓴다(§4.2.1 step 0.5 — CI에서만). trust가 필요한 이유는 **L2가 존재하기 위해서가 아니라** allow 규칙·`.mcp.json` 로딩(§4.5)·예측 가능한 선택적 차단을 얻기 위해서다. `--settings`는 project 설정을 대체하지 않고 **병합**되므로 trust를 대신하지 못한다.
 
 ```json
 {
@@ -700,7 +715,9 @@ light_on_merge: true
 
 훅은 stdin JSON(`.tool_input.command`)을 읽는다. 기존 `check-merge-gate.sh`의 `$TOOL_INPUT` 버그는 이 교체로 해소된다.
 
-**이 훅들은 Workflow `agent()` 서브에이전트 안에서도 발화한다**(ADR-001 실측: 워커 2명 실행에서 `PreToolUse` 8줄, `SubagentStart` 2줄, `SubagentStop` 2줄). 따라서 L2를 에이전트 frontmatter로 분산시킬 필요가 없고 `settings.json` 한 곳으로 충분하다. stdin JSON에는 `agent_id`·`agent_type`이 실려 있어(메인 세션의 `Stop`에는 없다) 훅 로그만으로 메인 세션 호출과 서브에이전트 호출을 구분할 수 있다. **`verify-stage.sh`는 이 훅 기록을 인원·역할 검증의 입력으로 쓴다** — `SubagentStart`/`SubagentStop`의 `agent_type`을 세서 로스터와 대조한다. `-p` 출력 JSON의 `subagent_stats`는 쓰지 않는다: Workflow 서브에이전트를 세지 않는다(ADR-002 — 워커 2명이 실제로 떴는데 `spawned: 0`).
+**이 훅들은 Workflow `agent()` 서브에이전트 안에서도 발화한다**(ADR-001 실측: 워커 2명 실행에서 `PreToolUse` 8줄, `SubagentStart` 2줄, `SubagentStop` 2줄). 따라서 L2를 에이전트 frontmatter로 분산시킬 필요가 없고 `settings.json` 한 곳으로 충분하다. stdin JSON에는 `agent_id`·`agent_type`이 실려 있어(메인 세션의 `Stop`에는 없다) 훅 로그만으로 메인 세션 호출과 서브에이전트 호출을 구분할 수 있다. **`verify-stage.sh`는 이 훅 기록을 인원·역할 검증의 입력으로 쓴다** — `SubagentStart`/`SubagentStop`의 `agent_type`을 세서 로스터와 대조한다. 다만 스파이크의 로깅 훅이 stdin JSON의 **키 목록만** 남겼으므로 확인된 것은 두 필드의 **존재**이고, `agent_type`의 **값이 등록된 역할 이름(`.claude/agents/<role>`)과 같은 문자열인지는 미확인**이다 — Plan 1이 `verify-stage.sh`를 쓰기 전에 가장 먼저 확인할 항목이며, 다르면 매핑 테이블을 끼우거나 다른 필드로 대조한다(인원 수를 세는 용도는 어느 쪽이든 성립). `-p` 출력 JSON의 `subagent_stats`는 쓰지 않는다: Workflow 서브에이전트를 세지 않는다(ADR-002 — 워커 2명이 실제로 떴는데 `spawned: 0`).
+
+로깅 훅 자체의 규칙: **어떤 경우에도 exit 0으로 끝난다**(`|| true` + 마지막 줄 `exit 0`). `PreToolUse`에서 exit 2만 도구 호출을 차단하지만, `jq`나 경로 문제로 훅이 죽으면 그 순간부터 기록이 조용히 사라져 사후 검증의 근거가 없어진다 — 감시자는 감시 대상을 막지도, 스스로 침묵하지도 않아야 한다(ADR-009).
 
 ```bash
 # .claude/hooks/stop-guard.sh — 세션 종료 전 검사
@@ -1250,7 +1267,7 @@ actions:
 | `:harness` | `doctor` 실패, 브라운필드 adopt, 성숙도 승격 PR 검토 | Define/Operate |
 | `:next` | backlog → queue 착수 결정 | Operate |
 | `:clarify` | `needs-info` | Operate |
-| `:unstick` | `needs-human` (라운드·RED·예산·재시도·격리 역압) | Operate |
+| `:unstick` | `needs-human` (라운드·RED·예산(상한을 켠 경우)·재시도·격리 역압) | Operate |
 | `:proposal` | `retro-proposal` PR 머지 (gate 승격·임계·역할 변경·신설) | Operate |
 | `:role` | 역할 파일 작성·수정·시험 | Operate |
 | `:digest` | 이해 부채 — 이번 주 제품이 어떻게 변했나 | Operate |
