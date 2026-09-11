@@ -34,8 +34,19 @@ test("rosterFor: review roster by tier must exist in roles.toml; plan roster by 
   expect(() => rosterFor({ ...ch, roster: { docs: ["ghost"] } }, roles, "review", "docs")).toThrow(/not defined in roles.toml: ghost/);
 });
 
-test("loadCharter throws when status != ready is requested strictly", () => {
+test("loadCharter reports status verbatim (dormancy는 호출자가 판단한다)", () => {
   const root = fixture();
-  const ch = loadCharter(root);
-  expect(ch.status).toBe("ready");
+  expect(loadCharter(root).status).toBe("ready");
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: draft\n---\n`);
+  expect(loadCharter(root).status).toBe("draft");
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\n---\n`);
+  expect(loadCharter(root).status).toBe("draft");                       // 기본값
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: nope.v1\n---\n`);
+  expect(() => loadCharter(root)).toThrow(/factory.charter.v1/);
+});
+
+test("limits는 부분 오버라이드를 받는다 — 빠진 키는 기본값으로 채운다", () => {
+  const root = fixture();
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\nlimits: { K: 5 }\n---\n`);
+  expect(loadCharter(root).limits).toEqual({ K: 5, M: 3, R: 2 });
 });

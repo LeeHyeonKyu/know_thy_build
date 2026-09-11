@@ -49,6 +49,20 @@ test("merged requires checks + integrity GREEN and approved handoff sha == PR he
   expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: true, integrityGreen: true }).ok).toBe(true);
   expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: false, integrityGreen: true }).reason).toMatch(/checks/);
   expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: true, integrityGreen: false }).reason).toMatch(/integrity/);
+  // 확인하지 않았으면(플래그 부재) 통과가 아니라 거부다
+  expect(r({ comments: [c("review", review)], prHeadSha: sha }).ok).toBe(false);
+  expect(r({ comments: [c("review", review)], prHeadSha: sha }).reason).toMatch(/not verified GREEN/);
+  expect(r({ comments: [c("review", review)], prHeadSha: sha, checksGreen: true }).reason).toMatch(/integrity check not verified GREEN/);
+});
+
+test("need(): a handoff for another issue does not satisfy the gate", () => {
+  const triage = { schema: "factory.triage.v1", issue: 7, disposition: "ready", tier: "docs" };
+  const r = requirementFor("factory:ready");
+  expect(r({ comments: [c("triage", triage)], issue: 7 }).ok).toBe(true);
+  const wrongIssue = r({ comments: [c("triage", triage)], issue: 8 });
+  expect(wrongIssue.ok).toBe(false);
+  expect(wrongIssue.reason).toMatch(/handoff issue mismatch/);
+  expect(r({ comments: [c("triage", triage)] }).ok).toBe(true);            // ctx.issue가 없으면 종전대로
 });
 
 test("states without a handoff requirement always pass", () => {

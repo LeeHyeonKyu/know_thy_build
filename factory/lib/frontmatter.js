@@ -13,13 +13,14 @@ function parseBlock(lines) {
     if (!line.trim() || line.trim().startsWith("#")) { i++; continue; }
     const kv = /^([^\s:][^:]*):\s*(.*)$/.exec(line);
     if (!kv) throw new Error(`frontmatter: cannot parse line: ${line}`);
-    const key = kv[1].trim(); const rest = kv[2].trim();
+    const key = kv[1].trim(); const rest = stripComment(kv[2]).trim();   // `k:  # note` 는 값이 아니라 중첩 블록의 머리다
     if (rest === "") {
-      // nested block: collect indented lines
+      // nested block: 들여쓰기된 줄을 모은 뒤 "공통 들여쓰기"만큼 벗긴다 — 2칸이든 4칸이든 받는다.
       const sub = [];
       i++;
-      while (i < lines.length && /^\s{2,}\S/.test(lines[i])) { sub.push(lines[i].replace(/^\s{2}/, "")); i++; }
-      data[key] = parseBlock(sub);
+      while (i < lines.length && /^\s{2,}\S/.test(lines[i])) { sub.push(lines[i]); i++; }
+      const indent = sub.length ? Math.min(...sub.map((l) => /^\s*/.exec(l)[0].length)) : 0;
+      data[key] = parseBlock(sub.map((l) => l.slice(indent)));
       continue;
     }
     data[key] = parseValue(rest);
@@ -28,8 +29,20 @@ function parseBlock(lines) {
   return data;
 }
 
+/** 따옴표 밖에 있는 ` #…` 꼬리 주석을 잘라낸다. `#`는 공백 뒤에 올 때만 주석이다(`a#b`는 값). */
+export function stripComment(s) {
+  let q = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q) { if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'") { q = ch; continue; }
+    if (ch === "#" && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i);
+  }
+  return s;
+}
+
 function parseValue(s) {
-  s = s.trim();
+  s = stripComment(s).trim();
   if (s.startsWith("{")) return parseInlineMap(s);
   if (s.startsWith("[")) return parseInlineArray(s);
   if (s === "true") return true;

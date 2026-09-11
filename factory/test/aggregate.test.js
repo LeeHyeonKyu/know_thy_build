@@ -16,6 +16,12 @@ test("fewer verdicts than roster → incomplete", () => {
   expect(r.decision).toBe("incomplete");
   expect(r.missing_roles).toEqual(["b"]);
 });
+test("duplicate-role verdicts do not satisfy the roster → incomplete", () => {
+  const r = aggregateReview({ verdicts: [v("a", "approve"), v("a", "approve")], rosterSize: 2, rosterRoles: ["a", "b"] });
+  expect(r.decision).toBe("incomplete");
+  expect(r.missing_roles).toEqual(["b"]);
+  expect(r.must_fix).toEqual([]);
+});
 test("upheld disputes keep rework even when all new verdicts approve", () => {
   const r = aggregateReview({ verdicts: [v("a", "approve"), v("b", "approve")], rosterSize: 2, rulings: [{ id: "cf1", ruling: "uphold", by: "a" }] });
   expect(r.decision).toBe("rework");

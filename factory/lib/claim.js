@@ -4,7 +4,7 @@ export async function claim({ run, cwd, issue, stage, runnerId, now = new Date()
   const g = (args) => run("git", args, { cwd });
   const treeR = await g(["hash-object", "-t", "tree", "/dev/null"]);       // empty tree
   const tree = treeR.stdout.trim();
-  if (treeR.code !== 0 || !tree) return { ok: false, holder: "unknown", error: "commit-tree failed: " + treeR.stderr };
+  if (treeR.code !== 0 || !tree) return { ok: false, holder: "unknown", error: "hash-object failed: " + treeR.stderr };
   const msg = `lock issue=${issue} stage=${stage} runner=${runnerId} at=${now}`;
   const commitR = await g(["commit-tree", tree, "-m", msg]);
   const commit = commitR.stdout.trim();

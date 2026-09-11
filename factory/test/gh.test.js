@@ -6,12 +6,18 @@ const repo = "o/r";
 test("issue() maps gh json; comments() maps id/body/createdAt", async () => {
   const run = makeFakeRun([
     { match: (c, a) => a.includes("view") && a.includes("--json"), result: { code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [{ name: "backlog" }, { name: "bug" }] }), stderr: "" } },
-    { match: (c, a) => a[0] === "api" && a[1].includes("/comments"), result: { code: 0, stdout: JSON.stringify([{ id: 11, body: "x", created_at: "2026-09-11T00:00:00Z" }]), stderr: "" } },
+    // --slurp은 페이지마다 하나의 배열을 담은 배열을 낸다
+    { match: (c, a) => a[0] === "api" && a[1].includes("/comments"), result: { code: 0, stdout: JSON.stringify([[{ id: 11, body: "x", created_at: "2026-09-11T00:00:00Z" }], [{ id: 12, body: "y", created_at: "2026-09-11T01:00:00Z" }]]), stderr: "" } },
   ]);
   const gh = makeGh({ run, repo });
   const issue = await gh.issue(5);
   expect(issue).toEqual({ number: 5, title: "T", body: "B", labels: ["backlog", "bug"] });
-  expect(await gh.comments(5)).toEqual([{ id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z" }]);
+  expect(await gh.comments(5)).toEqual([
+    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z" },
+    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z" },
+  ]);
+  const api = run.calls.find((c) => c.args[0] === "api");
+  expect(api.args).toEqual(["api", "repos/o/r/issues/5/comments?per_page=100", "--paginate", "--slurp"]);
 });
 
 test("setFactoryLabel removes other factory state labels and adds the new one", async () => {

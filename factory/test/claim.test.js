@@ -39,7 +39,16 @@ test("claim fails without pushing when commit-tree fails", async () => {
   ]);
   const r = await claim({ run, cwd: "/repo", issue: 7, stage: "implement", runnerId: "gha-1" });
   expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/commit-tree failed/);
   expect(run.calls.find((c) => c.args[0] === "push")).toBeUndefined();
+});
+
+test("claim names the right step when hash-object fails", async () => {
+  const run = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "hash-object", result: { code: 1, stdout: "", stderr: "fatal: not a git repository" } }]);
+  const r = await claim({ run, cwd: "/repo", issue: 7, stage: "implement", runnerId: "gha-1" });
+  expect(r.ok).toBe(false);
+  expect(r.error).toMatch(/hash-object failed/);
+  expect(run.calls.find((c) => c.args[0] === "commit-tree")).toBeUndefined();
 });
 
 test("release deletes the lock ref", async () => {

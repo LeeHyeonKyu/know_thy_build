@@ -12,8 +12,8 @@ export function makeGh({ run, repo }) {
       return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name) };
     },
     async comments(n) {
-      // --paginate concatenates page arrays into invalid JSON; >100 comments/issue is out of 1.0 scope.
-      const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`]));
+      // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
+      const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
       return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at }));
     },
     async comment(n, body) {
