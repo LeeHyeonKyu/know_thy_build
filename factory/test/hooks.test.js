@@ -9,22 +9,34 @@ const bash = (script, input, cwd) => run("bash", [join(H, script)], { input: JSO
 const cmd = (c) => ({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: c } });
 
 test("block-dangerous: blocks merges, force pushes, protected writes; allows normal commands", async () => {
-  for (const c of ["gh pr merge 5", "git merge feature", "git push --force origin x", "git push -f origin x", "git push origin --force-with-lease",
+  const blocked = ["gh pr merge 5", "git merge feature", "git push --force origin x", "git push -f origin x", "git push origin --force-with-lease",
                    "echo x > .factory/harness.toml", "sed -i 's/a/b/' .claude/settings.json", "cat foo | tee docs/factory/CHARTER.md", "echo y >> .github/workflows/factory-implement.yml",
-                   "git push origin --force-with-lease=refs/heads/main:abc", "git push origin --delete refs/heads/factory/lock-7", "git push origin --delete factory/lock-7", "git push origin :refs/heads/factory/lock-7"]) {
+                   "git push origin --force-with-lease=refs/heads/main:abc", "git push origin --delete refs/heads/factory/lock-7", "git push origin --delete factory/lock-7", "git push origin :refs/heads/factory/lock-7",
+                   "git push origin +main:main", "git push origin +refs/heads/claude/fq-7:refs/heads/main",
+                   "gh api -X PUT repos/o/r/pulls/9/merge", "gh api repos/o/r/pulls/9/merge --method PUT",
+                   "cp /tmp/evil .factory/harness.toml", "mv /tmp/evil docs/factory/CHARTER.md",
+                   "perl -i -pe 's/a/b/' .claude/settings.json", "perl -pi -e 's/a/b/' .factory/harness.toml",
+                   "python3 -c \"open('.factory/harness.toml','w').write('x')\""];
+  const allowed = ["git push origin HEAD", "git commit -m x", "npm test", "cat .factory/harness.toml", "gh pr view 5",
+                   "git push origin HEAD:refs/heads/claude/fq-7", "git push origin --delete claude/fq-7",
+                   "cp .factory/harness.toml /tmp/backup", "python3 -c \"print(1)\""];
+  await Promise.all(blocked.map(async (c) => {
     const r = await bash("block-dangerous.sh", cmd(c));
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: blocked/);
-  }
-  for (const c of ["git push origin HEAD", "git commit -m x", "npm test", "cat .factory/harness.toml", "gh pr view 5",
-                   "git push origin HEAD:refs/heads/claude/fq-7", "git push origin --delete claude/fq-7"]) {
-    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
-  }
-});
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);   // 30여 개의 bash 프로세스를 띄운다 — 기본 5s 타임아웃으로는 모자란다
 
 test("block-dangerous: non-Bash tools and malformed input pass through", async () => {
   expect((await bash("block-dangerous.sh", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: ".factory/x" } })).code).toBe(0);
   expect((await run("bash", [join(H, "block-dangerous.sh")], { input: "not json" })).code).toBe(0);
+});
+
+test("block-dangerous: without jq the hook fails CLOSED (exit 2)", async () => {
+  const r = await run("/bin/bash", [join(H, "block-dangerous.sh")], { input: JSON.stringify(cmd("echo hi")), env: { PATH: "/nonexistent" } });
+  expect(r.code).toBe(2);
+  expect(r.stderr).toMatch(/jq missing/);
 });
 
 test("stop-guard: non-factory branch passes; factory branch with dirty tree blocks", async () => {
@@ -39,4 +51,23 @@ test("stop-guard: non-factory branch passes; factory branch with dirty tree bloc
   await run("git", ["add", "."], { cwd }); await run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "w"], { cwd });
   const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
   expect(r2.code).toBe(2); expect(r2.stderr).toMatch(/unpushed|no upstream/);
+});
+
+test("stop-guard: .factory/out artifacts are not 'dirty' — pushed branch with only those passes", async () => {
+  const remote = mkdtempSync(join(tmpdir(), "sg-remote-"));
+  await run("git", ["init", "-q", "--bare", "-b", "main", remote]);
+  const cwd = mkdtempSync(join(tmpdir(), "sg-work-"));
+  const git = (...a) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd });
+  await git("init", "-q", "-b", "main");
+  await git("commit", "-q", "--allow-empty", "-m", "init");
+  await git("checkout", "-q", "-b", "claude/fq-7");
+  await git("remote", "add", "origin", remote);
+  await git("push", "-q", "-u", "origin", "claude/fq-7");
+  await run("bash", ["-c", "mkdir -p .factory/out && echo x > .factory/out/x"], { cwd });
+  const r = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r.stderr + r.stdout, "stop-guard should ignore .factory/out").toBe("");
+  expect(r.code).toBe(0);
+  // 같은 브랜치에서 .factory/out 밖의 변경은 여전히 막는다
+  await run("bash", ["-c", "echo y > src.txt"], { cwd });
+  expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
 });
