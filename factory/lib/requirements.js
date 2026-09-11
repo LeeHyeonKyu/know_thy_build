@@ -16,18 +16,29 @@ function need(ctx, stage, schema) {
 const sameSet = (a, b) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
 
 /**
- * 리뷰·머지도 게이트 파일을 요구한다 — 파일이 없으면 "확인 안 됨"이고, 확인 안 됨은 통과가 아니다.
- * 단 **전이 경로에서만** 물린다(`ctx.gatesChecked === true`). 선행 handoff 확인(assertHandoff)은
- * "직전 스테이지가 산출물을 남겼는가"를 묻는 것이지 이번 런의 게이트를 묻는 게 아니다 —
- * 그 시점엔 이번 런의 게이트가 아직 돌지도 않았다(resetGates가 지운 직후다).
+ * 게이트를 통과했다는 주장의 출처는 러너가 쓴 `.factory/out/gates.json` 하나뿐이다 — handoff의
+ * 자기 신고는 대체재가 아니다(워크플로가 자기 성적표를 쓰는 것이므로). 파일을 읽지 않은 호출자
+ * (`gatesChecked !== true`)는 "게이트가 GREEN이더라"를 주장할 자격이 없다 — 거부한다.
+ *
+ * 예외는 **선행 확인**(`ctx.prerequisite === true`)뿐이다: assertHandoff와 bin/assert-handoff는
+ * "직전 스테이지가 산출물을 남겼는가"를 묻는 것이지 이번 런의 게이트를 묻는 게 아니다 — 그 시점엔
+ * 이번 런의 게이트도 sha 바인딩도 존재하지 않는다(resetGates가 지운 직후다).
  */
+export const GATES_UNVERIFIED = "gates not verified for this transition";
 function gatesGate(ctx) {
-  if (ctx.gatesChecked !== true) return null;
+  if (ctx.prerequisite === true) return null;
+  if (ctx.gatesChecked !== true) return fail(GATES_UNVERIFIED);
   if (!ctx.gatesFile) return fail("gates file missing");
   if (ctx.gatesFile.diagnostic === true) return fail("gates file is diagnostic output");
   if (ctx.gatesFile.status !== "GREEN") return fail(`gates file status is ${ctx.gatesFile.status}`);
+  // 판정 파일이 **어떤 커밋**을 검사한 것인지까지 묶는다. 게이트가 돈 뒤에 커밋이 더 붙었으면
+  // 그 GREEN은 지금 머지하려는 트리의 얘기가 아니다.
+  const head = ctx.prHeadSha || ctx.headSha;
+  const of = ctx.gatesFile.head_sha;
+  if (head && of && of !== head) return fail(`gates file describes ${of.slice(0, 7)}, PR head is ${head.slice(0, 7)}`);
   return null;
 }
+const shaBound = (ctx) => ctx.prerequisite !== true;
 
 const RULES = {
   "factory:ready"(ctx) {
@@ -43,17 +54,16 @@ const RULES = {
   },
   "factory:awaiting-review"(ctx) {
     const { h, err } = need(ctx, "implement", "implement.v1"); if (err) return err;
-    // 게이트 판정의 출처는 handoff가 아니라 러너가 쓴 파일이다 — 파일이 있으면 handoff의 자기 신고는 무시한다.
-    const status = ctx.gatesFile ? ctx.gatesFile.status : h.data.gates.status;
-    if (status !== "GREEN") return fail(ctx.gatesFile ? `gates file status is ${status}` : `gates status is ${status}`);
-    if (ctx.headSha && h.data.head_sha !== ctx.headSha) return fail(`implement head_sha ${h.data.head_sha.slice(0, 7)} != branch head ${ctx.headSha.slice(0, 7)}`);
+    // 게이트 판정의 출처는 handoff가 아니라 러너가 쓴 파일이다 — handoff의 자기 신고는 대체재가 아니다.
+    const g = gatesGate(ctx); if (g) return g;
+    if (shaBound(ctx) && ctx.headSha && h.data.head_sha !== ctx.headSha) return fail(`implement head_sha ${h.data.head_sha.slice(0, 7)} != branch head ${ctx.headSha.slice(0, 7)}`);
     if (h.data.verifier.verdict === "rejected") return fail("verifier rejected");
     return pass;
   },
   "factory:approved"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
     const g = gatesGate(ctx); if (g) return g;
-    if (ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`review head_sha ${h.data.head_sha.slice(0, 7)} != PR head ${ctx.prHeadSha.slice(0, 7)}`);
+    if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`review head_sha ${h.data.head_sha.slice(0, 7)} != PR head ${ctx.prHeadSha.slice(0, 7)}`);
     if (ctx.rosterSize != null && h.data.verdicts.length !== ctx.rosterSize) return fail(`verdict count ${h.data.verdicts.length} != roster size ${ctx.rosterSize}`);
     if (!h.data.verdicts.every((v) => v.verdict === "approve")) return fail("not all approve");
     if (ctx.maxRounds != null && h.data.round > ctx.maxRounds) return fail(`round ${h.data.round} > K=${ctx.maxRounds}`);
@@ -62,7 +72,8 @@ const RULES = {
   "factory:merged"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
     const g = gatesGate(ctx); if (g) return g;
-    if (ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`approved handoff head_sha != PR head`);
+    if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`approved handoff head_sha != PR head`);
+    if (ctx.prerequisite === true) return pass;
     // 머지는 되돌릴 수 없다 — "확인하지 않았음"과 "확인해보니 RED"를 같게 취급한다(fail closed).
     if (ctx.checksGreen !== true) return fail("required checks not verified GREEN");
     if (ctx.integrityGreen !== true) return fail("integrity check not verified GREEN");

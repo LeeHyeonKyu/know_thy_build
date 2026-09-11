@@ -23,39 +23,59 @@ test("planned requires plan handoff whose roles == roster and rounds == expected
   expect(r({ comments: [c("plan", plan)], roster: ["skeptic", "architect"], expectedRounds: 2 }).reason).toMatch(/rounds/);
 });
 
+const GREEN = { status: "GREEN", level: "full" };
+/** 전이 경로의 최소 ctx: 게이트 파일을 실제로 읽었다는 표식(gatesChecked) + 그 파일 */
+const checked = (over = {}) => ({ gatesChecked: true, gatesFile: GREEN, ...over });
+
 test("awaiting-review requires implement handoff: GREEN, head_sha == branch head, verifier accepted, pr", () => {
   const impl = { schema: "factory.implement.v1", issue: 7, head_sha: sha, pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:awaiting-review");
-  expect(r({ comments: [c("implement", impl)], headSha: sha }).ok).toBe(true);
-  expect(r({ comments: [c("implement", impl)], headSha: "d".repeat(40) }).reason).toMatch(/head_sha/);
-  expect(r({ comments: [c("implement", { ...impl, gates: { status: "RED", level: "full" } })], headSha: sha }).reason).toMatch(/gates/);
-  expect(r({ comments: [c("implement", { ...impl, verifier: { verdict: "rejected" } })], headSha: sha }).reason).toMatch(/verifier/);
+  expect(r(checked({ comments: [c("implement", impl)], headSha: sha })).ok).toBe(true);
+  expect(r(checked({ comments: [c("implement", impl)], headSha: "d".repeat(40) })).reason).toMatch(/head_sha/);
+  expect(r(checked({ comments: [c("implement", impl)], headSha: sha, gatesFile: { status: "RED" } })).reason).toMatch(/gates/);
+  expect(r(checked({ comments: [c("implement", { ...impl, verifier: { verdict: "rejected" } })], headSha: sha })).reason).toMatch(/verifier/);
 });
 
-test("awaiting-review trusts the gates file over the handoff", () => {
+test("F4: awaiting-review의 판정 출처는 게이트 파일뿐 — handoff의 자기 신고는 대체재가 아니다", () => {
   const impl = { schema: "factory.implement.v1", issue: 7, head_sha: sha, pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:awaiting-review");
-  expect(r({ comments: [c("implement", impl)], headSha: sha, gatesFile: { status: "RED" } }).reason).toMatch(/gates file/);
-  expect(r({ comments: [c("implement", impl)], headSha: sha, gatesFile: { status: "GREEN" } }).ok).toBe(true);
+  const comments = [c("implement", impl)];
+  // handoff는 GREEN이라고 말하지만 파일을 읽지 않았다 → 확인 안 됨
+  expect(r({ comments, headSha: sha }).reason).toMatch(/gates not verified for this transition/);
+  expect(r({ comments, headSha: sha, gatesChecked: true }).reason).toMatch(/gates file missing/);
+  expect(r({ comments, headSha: sha, gatesChecked: true, gatesFile: { ...GREEN, diagnostic: true } }).reason).toMatch(/diagnostic/);
+  expect(r({ comments, headSha: sha, gatesChecked: true, gatesFile: { status: "RED" } }).reason).toMatch(/gates file status is RED/);
+  expect(r(checked({ comments, headSha: sha })).ok).toBe(true);
 });
 
-const GREEN = { status: "GREEN", level: "full" };
+test("F6: 게이트 파일이 다른 커밋을 잰 것이면 거부한다", () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: sha, pr: 9, gates: GREEN, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const other = "9".repeat(40);
+  const ar = requirementFor("factory:awaiting-review")(checked({ comments: [c("implement", impl)], headSha: sha, gatesFile: { ...GREEN, head_sha: other } }));
+  expect(ar.ok).toBe(false);
+  expect(ar.reason).toBe(`gates file describes ${other.slice(0, 7)}, PR head is ${sha.slice(0, 7)}`);
+  expect(requirementFor("factory:awaiting-review")(checked({ comments: [c("implement", impl)], headSha: sha, gatesFile: { ...GREEN, head_sha: sha } })).ok).toBe(true);
+
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
+  const ap = requirementFor("factory:approved")(checked({ comments: [c("review", review)], prHeadSha: sha, gatesFile: { ...GREEN, head_sha: other } }));
+  expect(ap.reason).toMatch(/gates file describes/);
+});
 
 test("approved requires review handoff: sha == PR head, all approve, count == roster, round <= K", () => {
   const v = (role, verdict) => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: "x", where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a", "approve"), v("b", "approve")], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:approved");
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).ok).toBe(true);
-  expect(r({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/verdict count/);
-  expect(r({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/not all approve/);
-  expect(r({ comments: [c("review", { ...review, round: 4 })], prHeadSha: sha, rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/round/);
-  expect(r({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2, maxRounds: 3, gatesFile: GREEN }).reason).toMatch(/head_sha/);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, maxRounds: 3 })).ok).toBe(true);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3, maxRounds: 3 })).reason).toMatch(/verdict count/);
+  expect(r(checked({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2, maxRounds: 3 })).reason).toMatch(/not all approve/);
+  expect(r(checked({ comments: [c("review", { ...review, round: 4 })], prHeadSha: sha, rosterSize: 2, maxRounds: 3 })).reason).toMatch(/round/);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2, maxRounds: 3 })).reason).toMatch(/head_sha/);
 });
 
 test("merged requires checks + integrity GREEN and approved handoff sha == PR head", () => {
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:merged");
-  const base = { comments: [c("review", review)], prHeadSha: sha, gatesFile: GREEN };
+  const base = checked({ comments: [c("review", review)], prHeadSha: sha });
   expect(r({ ...base, checksGreen: true, integrityGreen: true }).ok).toBe(true);
   expect(r({ ...base, checksGreen: false, integrityGreen: true }).reason).toMatch(/checks/);
   expect(r({ ...base, checksGreen: true, integrityGreen: false }).reason).toMatch(/integrity/);
@@ -74,9 +94,26 @@ test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing,
     expect(r({ ...ctx, gatesFile: { status: "RED", level: "full" } }).reason, to).toMatch(/gates file status is RED/);
     expect(r({ ...ctx, gatesFile: { ...GREEN, diagnostic: true } }).reason, to).toMatch(/diagnostic/);
     expect(r({ ...ctx, gatesFile: GREEN }).ok, to).toBe(true);
-    // 선행 handoff 확인(gatesChecked 없음)은 게이트를 묻지 않는다 — 그 시점엔 이번 런의 게이트가 없다
-    expect(r({ ...ctx, gatesChecked: undefined }).ok, to).toBe(true);
+    // F4: 파일을 읽지 않은 호출자는 "GREEN이더라"를 주장할 수 없다 — 자기 신고로 넘어가지 않는다
+    expect(r({ ...ctx, gatesChecked: undefined }).reason, to).toMatch(/gates not verified for this transition/);
   }
+});
+
+test("F4: prerequisite 확인은 게이트·sha를 전부 건너뛴다 — handoff의 존재와 유효성만 본다", () => {
+  const v = { role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] };
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [v], orchestration: "workflow", guarantee: "verified" };
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: sha, pr: 9, gates: { status: "RED", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const other = "e".repeat(40);
+  // 게이트 파일도 없고 sha도 어긋나지만, 선행 확인은 "직전 스테이지가 산출물을 남겼는가"만 묻는다
+  expect(requirementFor("factory:awaiting-review")({ comments: [c("implement", impl)], headSha: other, prerequisite: true }).ok).toBe(true);
+  for (const to of ["factory:approved", "factory:merged"]) {
+    const r = requirementFor(to);
+    expect(r({ comments: [c("review", review)], prHeadSha: other, rosterSize: 1, maxRounds: 3, prerequisite: true }).ok, to).toBe(true);
+    // handoff 자체가 없으면 선행 확인도 실패한다
+    expect(r({ comments: [], prerequisite: true }).reason, to).toMatch(/review handoff missing/);
+  }
+  // verdict/라운드 같은 handoff 내용 검사는 선행 확인에서도 그대로 물린다
+  expect(requirementFor("factory:approved")({ comments: [c("review", { ...review, verdicts: [{ ...v, verdict: "reject", must_fix: [{ id: "x", where: "w", claim: "c", evidence: "e" }] }] })], prerequisite: true }).reason).toMatch(/not all approve/);
 });
 
 test("need(): a handoff for another issue does not satisfy the gate", () => {
