@@ -23,7 +23,7 @@ import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
-import { syncRecords } from "../lib/records-branch.js";
+import { syncRecords, hydrateRecord } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 
@@ -83,6 +83,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
+    // fresh checkout이면 로컬에 이슈의 run 기록이 없다 — 이번 스테이지가 appendRunRecord로 쓰기
+    // 전에 factory/records 브랜치의 누적 내용을 먼저 복원한다(ADR-014 후속, fix round 1 Critical).
+    // 안 그러면 뒤에서 만들어지는 "이번 스테이지 한 줄짜리" 파일을 syncRecords가 그대로 커밋해
+    // 브랜치에 쌓여 있던 이전 스테이지들의 기록을 통째로 덮어쓰게 된다. best-effort — 실패해도
+    // 흔적만 남기고 스테이지는 계속된다.
+    try {
+      const h = await d.hydrateRecord?.();
+      if (h && !h.ok) record([`hydrate: ${h.reason || "failed"}`]);
+    } catch (e) { record([`hydrate: aborted — ${e?.message || e}`]); }
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
     const a = await d.assertHandoff();
@@ -400,6 +409,7 @@ async function main() {
       return transition({ gh, issue, to, reason, ctxExtra });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
+    hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
     release: () => release({ run, cwd: root, issue }),
     syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} (${runnerId})` }),
     reportStatus: (s) => gh.setStatus({

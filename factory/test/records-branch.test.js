@@ -1,9 +1,10 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../lib/exec.js";
-import { syncRecords, readRecords } from "../lib/records-branch.js";
+import { syncRecords, readRecords, hydrateRecord } from "../lib/records-branch.js";
+import { appendRunRecord } from "../lib/run-record.js";
 
 const git = (cwd, ...args) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd });
 
@@ -59,9 +60,12 @@ test("(b) second sync links a parent (2 commits on factory/records) and updates 
   const r1 = await syncRecords({ run, cwd, message: "m1" });
   expect(r1.ok).toBe(true);
 
-  writeRecord(cwd, 7, "v2\n");
+  // 실제 appendRunRecord처럼 기존 내용 위에 이어 쓴다 — 통째로 갈아치우지 않는다(그건
+  // syncRecords의 divergence 가드가 "브랜치 내용을 잃을 뻔했다"로 보고 건너뛰어야 할 케이스다).
+  writeRecord(cwd, 7, "v1\nv2\n");
   const r2 = await syncRecords({ run, cwd, message: "m2" });
   expect(r2.ok).toBe(true);
+  expect(r2.skipped).toEqual([]);
   expect(r2.commit).not.toBe(r1.commit);
 
   const log = await run("git", ["log", "--format=%H", "factory/records"], { cwd: remote });
@@ -70,7 +74,7 @@ test("(b) second sync links a parent (2 commits on factory/records) and updates 
   expect(parent.stdout.trim()).toBe(r1.commit);
 
   const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
-  expect(show.stdout).toBe("v2\n");
+  expect(show.stdout).toBe("v1\nv2\n");
 }, 20000);
 
 test("(c) a race — another sync pushes first, forcing a retry; both files survive", async () => {
@@ -180,3 +184,100 @@ test("default author/committer is factory-bot when env is not given", async () =
   const show = await run("git", ["show", "-s", "--format=%an <%ae>", r.commit], { cwd: remote });
   expect(show.stdout.trim()).toBe("factory-bot <factory-bot@users.noreply.github.com>");
 });
+
+// ── fix round 1: hydrateRecord — fresh checkout must not clobber the branch's accumulated record ──
+
+test("hydrateRecord: a fresh clone restores the branch's record before this stage appends, so nothing is lost", async () => {
+  const remote = await makeRemote();
+  const cwd1 = await makeClone(remote, "writer");
+  writeRecord(cwd1, 7, "# Run · #7\n\n## triage · t1\ndisposition: ready\n");
+  const r1 = await syncRecords({ run, cwd: cwd1, message: "m1" });
+  expect(r1.ok).toBe(true);
+
+  // 다음 스테이지는 완전히 새로운(fresh) 체크아웃에서 돈다 — 로컬에 docs/factory/runs/7.md가 없다.
+  const cwd2 = await makeClone(remote, "fresh");
+  expect(existsSync(join(cwd2, "docs/factory/runs/7.md"))).toBe(false);
+  const h = await hydrateRecord({ run, cwd: cwd2, issue: 7 });
+  expect(h).toEqual({ ok: true, hydrated: true });
+  expect(readFileSync(join(cwd2, "docs/factory/runs/7.md"), "utf8")).toBe("# Run · #7\n\n## triage · t1\ndisposition: ready\n");
+
+  appendRunRecord({ root: cwd2, issue: 7, stage: "plan", runnerId: "gha-2", now: "2026-09-12T00:00Z", lines: ["rounds: 1"] });
+  const r2 = await syncRecords({ run, cwd: cwd2, message: "m2" });
+  expect(r2.ok).toBe(true);
+  expect(r2.skipped).toEqual([]);
+
+  const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
+  expect(show.stdout).toContain("## triage · t1\ndisposition: ready\n");
+  expect(show.stdout).toContain("## plan · 2026-09-12T00:00Z · gha-2\nrounds: 1\n");
+}, 20000);
+
+test("hydrateRecord: diverged local content is reported (never silently merged), and syncRecords then skips that file to keep the branch version", async () => {
+  const remote = await makeRemote();
+  const cwd1 = await makeClone(remote, "writer");
+  writeRecord(cwd1, 7, "branch content\n");
+  const r1 = await syncRecords({ run, cwd: cwd1, message: "m1" });
+  expect(r1.ok).toBe(true);
+
+  const cwd2 = await makeClone(remote, "diverged");
+  writeRecord(cwd2, 7, "completely different local content\n");   // hydrate가 만든 게 아닌, 이미 다른 로컬 내용
+  const h = await hydrateRecord({ run, cwd: cwd2, issue: 7 });
+  expect(h).toEqual({ ok: false, hydrated: false, reason: "local record diverged from branch" });
+  expect(readFileSync(join(cwd2, "docs/factory/runs/7.md"), "utf8")).toBe("completely different local content\n");   // 손대지 않았다
+
+  const r2 = await syncRecords({ run, cwd: cwd2, message: "m2" });
+  expect(r2.ok).toBe(true);
+  expect(r2.skipped).toEqual(["docs/factory/runs/7.md"]);
+
+  const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
+  expect(show.stdout).toBe("branch content\n");   // 브랜치 내용이 유지됐다 — 덮어쓰지 않았다
+}, 20000);
+
+test("hydrateRecord: no factory/records branch on the remote → {ok:true, hydrated:false}, no throw", async () => {
+  const remote = await makeRemote();
+  const cwd = await makeClone(remote);
+  writeRecord(cwd, 7, "local only\n");
+  const h = await hydrateRecord({ run, cwd, issue: 7 });
+  expect(h).toEqual({ ok: true, hydrated: false });
+  expect(readFileSync(join(cwd, "docs/factory/runs/7.md"), "utf8")).toBe("local only\n");   // 손대지 않았다
+});
+
+test("hydrateRecord: branch exists but has no record for this issue yet → {ok:true, hydrated:false}", async () => {
+  const remote = await makeRemote();
+  const cwd1 = await makeClone(remote, "writer");
+  writeRecord(cwd1, 7, "x\n");
+  await syncRecords({ run, cwd: cwd1, message: "m" });
+
+  const cwd2 = await makeClone(remote, "other-issue");
+  const h = await hydrateRecord({ run, cwd: cwd2, issue: 8 });
+  expect(h).toEqual({ ok: true, hydrated: false });
+  expect(existsSync(join(cwd2, "docs/factory/runs/8.md"))).toBe(false);
+}, 20000);
+
+// ── fix round 1: syncRecords — nothing to sync ──────────────────────────────
+
+test("syncRecords with no local *.md files returns ok:true without committing anything", async () => {
+  const remote = await makeRemote();
+  const cwd = await makeClone(remote);
+  const r = await syncRecords({ run, cwd, message: "m" });
+  expect(r).toEqual({ ok: true, commit: null, reason: "nothing to sync", retried: false });
+  const branches = await run("git", ["branch", "-r"], { cwd: remote });
+  expect(branches.stdout).not.toContain("factory/records");
+});
+
+// ── fix round 1: readRecords — flat files only ──────────────────────────────
+
+test("readRecords only reads <name>.md files directly under dir — nested paths are skipped", async () => {
+  const remote = await makeRemote();
+  const cwd = await makeClone(remote);
+  writeRecord(cwd, 7, "flat\n");
+  const nestedDir = join(cwd, "docs/factory/runs/nested");
+  mkdirSync(nestedDir, { recursive: true });
+  writeFileSync(join(nestedDir, "99.md"), "nested\n");
+  const r = await syncRecords({ run, cwd, message: "m" });
+  expect(r.ok).toBe(true);
+
+  const map = await readRecords({ run, cwd });
+  expect(map.size).toBe(1);
+  expect(map.get("7")).toBe("flat\n");
+  expect(map.has("nested/99")).toBe(false);
+}, 20000);

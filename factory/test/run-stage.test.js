@@ -271,6 +271,44 @@ test("a failed syncRecords doesn't change a non-zero exit code either (e.g. a ne
   expect(lines.some((l) => /run-record sync: failed — no origin remote/.test(l))).toBe(true);
 });
 
+test("hydrateRecord runs first inside the try (before resetGates), best-effort, and never changes the exit code", async () => {
+  const calls = [];
+  const deps = baseDeps({
+    hydrateRecord: vi.fn(async () => { calls.push("hydrate"); return { ok: true, hydrated: true }; }),
+    resetGates: async () => calls.push("reset-gates"),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps, runnerId: "r" })).toBe(0);
+  expect(calls[0]).toBe("hydrate");
+  expect(calls[1]).toBe("reset-gates");
+  expect(deps.hydrateRecord).toHaveBeenCalledTimes(1);
+});
+
+test("hydrateRecord is optional — deps without it still work", async () => {
+  const deps = baseDeps({});
+  expect(deps.hydrateRecord).toBeUndefined();
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+});
+
+test("a hydrateRecord failure ({ok:false}) is recorded but never changes the exit code", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    hydrateRecord: async () => ({ ok: false, hydrated: false, reason: "local record diverged from branch" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(lines.some((l) => /hydrate: local record diverged from branch/.test(l))).toBe(true);
+});
+
+test("a hydrateRecord that throws is swallowed by its own try/catch, recorded, and doesn't change the exit code", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    hydrateRecord: async () => { throw new Error("git fetch failed"); },
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(lines.some((l) => /hydrate: aborted — git fetch failed/.test(l))).toBe(true);
+});
+
 test("M4: the usage line carries num_turns, terminal_reason and per-model cost", () => {
   const line = usageLine({
     usage: { input_tokens: 10, output_tokens: 2 }, total_cost_usd: 0.42, num_turns: 4, terminal_reason: "end_turn",
