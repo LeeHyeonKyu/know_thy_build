@@ -21,12 +21,22 @@ export function mergeSettings(existing, template) {
   return out;
 }
 
+const GITIGNORE_HEADER = "# know-thy-build factory";
+
+/** 헤더가 이미 있으면 그 블록 뒤에 누락분만 덧붙인다 — 헤더를 중복 생성하지 않는다. */
 export function ensureGitignore(text, entries) {
-  const lines = (text || "").split("\n");
+  const raw = text || "";
+  const lines = raw.split("\n");
   const missing = entries.filter((e) => !lines.includes(e));
   if (!missing.length) return text;
-  const base = text == null || text === "" ? "" : text.endsWith("\n") ? text + "\n" : text + "\n\n";
-  return `${base}# know-thy-build factory\n${missing.join("\n")}\n`;
+  const headerIdx = lines.indexOf(GITIGNORE_HEADER);
+  if (headerIdx === -1) {
+    const base = raw === "" ? "" : raw.endsWith("\n") ? raw + "\n" : raw + "\n\n";
+    return `${base}${GITIGNORE_HEADER}\n${missing.join("\n")}\n`;
+  }
+  let end = headerIdx + 1;
+  while (end < lines.length && lines[end] !== "") end++;
+  return [...lines.slice(0, end), ...missing, ...lines.slice(end)].join("\n");
 }
 
 export function planInstall({ manifest, root, mode, vars = {}, exists = existsSync, readFile = (p) => readFileSync(p, "utf8") }) {
@@ -37,16 +47,18 @@ export function planInstall({ manifest, root, mode, vars = {}, exists = existsSy
     const present = exists(target);
     const base = { dest: e.dest, owner: e.owner, mode: e.mode };
     if (!present) { actions.push({ ...base, action: "create", content: fresh }); continue; }
-    if (mode === "init") { actions.push({ ...base, action: "skip" }); continue; }
-    // upgrade
-    if (e.owner !== "factory") { actions.push({ ...base, action: "keep" }); continue; }
-    const current = readFile(target);
+    // 병합형 항목(.claude/settings.json)은 init/upgrade 모두에서 병합한다 — 결정적, 가산적이므로 안전하다.
     if (e.merge === "settings") {
+      const current = readFile(target);
       let cur; try { cur = JSON.parse(current); } catch (err) { throw new Error(`${e.dest}: existing settings.json is not valid JSON — ${err.message}`); }
       const merged = JSON.stringify(mergeSettings(cur, JSON.parse(fresh)), null, 2) + "\n";
       actions.push({ ...base, action: merged === current ? "skip" : "merge", content: merged });
       continue;
     }
+    if (mode === "init") { actions.push({ ...base, action: "skip" }); continue; }
+    // upgrade
+    if (e.owner !== "factory") { actions.push({ ...base, action: "keep" }); continue; }
+    const current = readFile(target);
     actions.push(current === fresh ? { ...base, action: "skip" } : { ...base, action: "replace", content: fresh });
   }
   return actions;
