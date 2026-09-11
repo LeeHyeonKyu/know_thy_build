@@ -1,8 +1,11 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { join, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { runWorkflow } from "./helpers/run-workflow.js";
+import { validate } from "../lib/schemas.js";
+
+const FACTORY_TRIAGE_WORKFLOW = new URL("../../templates/factory/claude/workflows/factory-triage.js", import.meta.url).pathname;
 
 function writeScript(src) {
   const dir = mkdtempSync(join(tmpdir(), "wf-"));
@@ -113,4 +116,84 @@ return { name: meta.name, count: meta.phases.length }
   const { result, phases } = await runWorkflow(file, { agent: async () => ({}) });
   expect(result).toEqual({ name: "t", count: 2 });
   expect(phases).toEqual(["A", "B"]);
+});
+
+// --- Task 2: templates/factory/claude/workflows/factory-triage.js ---
+
+test("factory-triage.js: meta.name equals the file's own basename", () => {
+  const src = readFileSync(FACTORY_TRIAGE_WORKFLOW, "utf8");
+  const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
+  expect(m[1]).toBe(basename(FACTORY_TRIAGE_WORKFLOW, ".js"));
+});
+
+test("factory-triage.js: loader → triage call order, valid triage.v1 result, workflow orchestration, Load/Triage phases", async () => {
+  const loaderFix = {
+    issue: 7,
+    stage: "triage",
+    tier: "standard",
+    roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }],
+    orchestration: "workflow",
+  };
+  const triageFix = { disposition: "ready", tier: "standard", reason: "done_when is concrete", summary: "add CSV export" };
+
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return loaderFix;
+    if (opts.agentType === "factory-triage") return triageFix;
+    return null;
+  };
+
+  // the dispatcher command may hand the workflow a stringly-typed issue — the workflow must Number() it.
+  const { result, calls, phases } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
+    agent: stub,
+    args: { issue: "7", context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-triage"]);
+  expect(calls[1].opts.model).toBe("sonnet");
+  expect(result).toMatchObject({ issue: 7, disposition: "ready", tier: "standard", orchestration: "workflow", guarantee: "structural" });
+  expect(validate("triage.v1", result).ok).toBe(true);
+  expect(phases).toEqual(["Load", "Triage"]);
+});
+
+test("factory-triage.js: a null factory-triage result re-spawns once; a second null leaves the result without a disposition", async () => {
+  const loaderFix = {
+    issue: 9,
+    stage: "triage",
+    tier: "standard",
+    roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }],
+    orchestration: "workflow",
+  };
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return loaderFix;
+    if (opts.agentType === "factory-triage") return null;
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
+    agent: stub,
+    args: { issue: 9, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(2);
+  expect(result.disposition).toBeUndefined();
+  expect(result.issue).toBe(9);
+  expect(result.orchestration).toBe("workflow");
+  expect(result.guarantee).toBe("structural");
+});
+
+test("factory-triage.js: a null factory-loader result re-spawns once; a second null still runs the Triage phase but invents no role", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return null;
+    return null;
+  };
+
+  const { calls, phases, result } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
+    agent: stub,
+    args: { issue: 11, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.filter((c) => c.opts.agentType === "factory-loader")).toHaveLength(2);
+  expect(phases).toEqual(["Load", "Triage"]);
+  expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
+  expect(result).toEqual({ issue: 11, orchestration: "workflow", guarantee: "structural" });
 });

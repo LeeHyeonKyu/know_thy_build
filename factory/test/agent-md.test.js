@@ -1,5 +1,9 @@
 import { test, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { parseAgentMd, lintAgentMd, REQUIRED_SECTIONS } from "../lib/agent-md.js";
+
+const AGENTS = new URL("../../templates/factory/claude/agents/", import.meta.url).pathname;
+const readAgent = (name) => readFileSync(`${AGENTS}${name}.md`, "utf8");
 
 // spec §7.3 reviewer-correctness.md — 훅 명령은 이미 .claude/hooks/deny-all-writes.sh다.
 const FIXTURE = `---
@@ -131,4 +135,23 @@ test("lintAgentMd: reviewer role without deny-all-writes hook → exactly one vi
   );
   const violations = lintAgentMd(noHook, { expectedName: "reviewer-correctness" });
   expect(violations).toEqual([{ rule: "deny-hook", msg: expect.any(String) }]);
+});
+
+// Task 2: factory-loader.md / factory-triage.md templates (full suite lint is switched on in Task 6).
+test("lintAgentMd: templates/factory/claude/agents/factory-loader.md passes with no violations", () => {
+  const text = readAgent("factory-loader");
+  expect(lintAgentMd(text, { expectedName: "factory-loader" })).toEqual([]);
+});
+
+test("lintAgentMd: templates/factory/claude/agents/factory-triage.md passes with no violations", () => {
+  const text = readAgent("factory-triage");
+  expect(lintAgentMd(text, { expectedName: "factory-triage" })).toEqual([]);
+});
+
+test("parseAgentMd: factory-loader.md frontmatter — sonnet model, read-only tools, deny-all-writes hook", () => {
+  const { frontmatter } = parseAgentMd(readAgent("factory-loader"));
+  expect(frontmatter.name).toBe("factory-loader");
+  expect(frontmatter.model).toBe("sonnet");
+  expect(frontmatter.tools).toEqual(["Read", "Bash", "Grep"]);
+  expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
 });
