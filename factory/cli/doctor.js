@@ -4,6 +4,7 @@ import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
 import { checkFiles, checkCharter, checkRoles, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
 import { loadHarness, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh } from "../lib/gh.js";
+import { LABELS } from "../lib/label-catalog.js";
 import { envUp, envDown } from "../lib/test-env.js";
 import { q } from "../lib/prove-test.js";
 import { buildManifest } from "./manifest.js";
@@ -12,23 +13,6 @@ import { renderReport, exitCode, summarize } from "../lib/doctor/report.js";
 
 // factory/hooks/*.sh 전부 — checkHooks가 각각 실제로 실행해 종료 코드를 검사한다.
 const DOCTOR_HOOKS = ["block-dangerous.sh", "lint-touched.sh", "record-agents.sh", "stop-guard.sh", "verdict-format.sh"];
-
-// Task 10에서 lib/labels.js의 정식 카탈로그로 교체될 임시 목록.
-export const DOCTOR_LABELS = [
-  "backlog",
-  "factory:queue",
-  "factory:ready",
-  "factory:needs-info",
-  "factory:wont-do",
-  "factory:planned",
-  "factory:in-progress",
-  "factory:awaiting-review",
-  "factory:rework",
-  "factory:approved",
-  "factory:merged",
-  "factory:blocked",
-  "factory:needs-human",
-].map((name) => ({ name }));
 
 /**
  * harness 스코프는 항상 실행한다. `.factory/bin/run-stage.js`가 있을 때만 factory 스코프(파일·CHARTER·roles·
@@ -110,7 +94,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
 
     if (!offline) {
       const ghClient = gh || makeGh({ run, repo: process.env.FACTORY_REPO || "" });
-      checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: DOCTOR_LABELS })));
+      checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: LABELS })));
     }
   } else {
     checks.push({ id: "factory.initialized", level: "PASS", detail: "not initialized — run factory init" });
