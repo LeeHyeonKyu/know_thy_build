@@ -1,5 +1,6 @@
 import { test, expect, vi } from "vitest";
-import { runStage } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, usageLine, GATES_SELF_REPORTED } from "../bin/run-stage.js";
+import { renderHandoff } from "../lib/handoff.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -10,6 +11,7 @@ test("run-stage executes the §4.2.1 skeleton in order and transitions on succes
     assertHandoff: vi.fn(async () => { calls.push("assert"); return { ok: true }; }),
     buildContext: vi.fn(async () => { calls.push("context"); return { roster: ["correctness"], rounds: undefined, orchestration: "workflow", limits: { K: 3 } }; }),
     heartbeat: vi.fn(async () => { calls.push("heartbeat"); return { stop: () => calls.push("heartbeat-stop") }; }),
+    resetAgentsLog: vi.fn(async () => calls.push("reset-agents")),
     claudeP: vi.fn(async () => { calls.push("claude"); return { is_error: false, result: '{"schema":"factory.review.v1"}' }; }),
     gates: vi.fn(async () => { calls.push("gates"); return null; }),
     verifyStage: vi.fn(() => { calls.push("verify"); return { ok: true, reasons: [], data: { round: 1 } }; }),
@@ -20,7 +22,7 @@ test("run-stage executes the §4.2.1 skeleton in order and transitions on succes
   };
   const code = await runStage({ stage: "review", issue: 7, deps });
   expect(code).toBe(0);
-  expect(calls).toEqual(["charter", "trust", "claim", "heartbeat", "assert", "context", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
+  expect(calls).toEqual(["charter", "trust", "claim", "heartbeat", "assert", "context", "reset-agents", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
 });
 
 test("claim failure exits 0 without doing work; verify failure → transition to needs-human, exit 2", async () => {
@@ -54,6 +56,7 @@ test("implement stage moves to in-progress after the handoff check, then to awai
     heartbeat: async () => { calls.push("heartbeat"); return { stop: () => calls.push("heartbeat-stop") }; },
     assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
     buildContext: async () => { calls.push("context"); return { roster: [], orchestration: "workflow", limits: { K: 3 } }; },
+    resetAgentsLog: async () => calls.push("reset-agents"),
     claudeP: async () => { calls.push("claude"); return { is_error: false, result: "{}" }; },
     gates: async () => { calls.push("gates"); return null; },
     verifyStage: () => { calls.push("verify"); return { ok: true, reasons: [], data: {} }; },
@@ -63,7 +66,7 @@ test("implement stage moves to in-progress after the handoff check, then to awai
     release: async () => calls.push("release"),
   };
   expect(await runStage({ stage: "implement", issue: 9, deps, runnerId: "runner-1" })).toBe(0);
-  expect(calls).toEqual(["charter", "trust", "claim", "heartbeat", "assert", "transition", "context", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
+  expect(calls).toEqual(["charter", "trust", "claim", "heartbeat", "assert", "transition", "context", "reset-agents", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
   expect(transition.mock.calls[0][0]).toEqual(expect.objectContaining({ to: "factory:in-progress", reason: expect.stringContaining("runner-1") }));
   expect(transition.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ to: "factory:awaiting-review" }));
 });
@@ -121,4 +124,141 @@ test("review stage derives decision from verdicts via aggregateReview", async ()
     to: "factory:needs-human", reason: expect.stringMatching(/incomplete/),
   }));
   expect(incomplete.writeHandoff).not.toHaveBeenCalled();
+});
+
+// ── 여기부터: 최종 리뷰에서 걸린 것들 ────────────────────────────────────────
+
+const baseDeps = (over = {}) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+  buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }),
+  resetAgentsLog: async () => {}, claudeP: async () => ({ is_error: false, result: "{}" }), gates: async () => null,
+  verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+  transition: async () => ({ ok: true, to: "factory:planned" }), runRecord: () => {}, release: async () => true, ...over,
+});
+
+test("I1: a heartbeat that throws still releases the lock and exits 1", async () => {
+  const calls = [];
+  const deps = baseDeps({
+    heartbeat: async () => { calls.push("heartbeat"); throw new Error("gh comment failed"); },
+    claudeP: vi.fn(), release: async () => { calls.push("release"); return true; },
+    runRecord: (l) => calls.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 4, deps })).toBe(1);
+  expect(calls).toContain("release");
+  expect(calls.some((l) => /aborted — gh comment failed/.test(l))).toBe(true);
+  expect(deps.claudeP).not.toHaveBeenCalled();
+});
+
+test("I2: the agents log is truncated between context and claude", async () => {
+  const calls = [];
+  const deps = baseDeps({
+    buildContext: async () => { calls.push("context"); return { roster: [], orchestration: "workflow", limits: {} }; },
+    resetAgentsLog: async () => calls.push("reset-agents"),
+    claudeP: async () => { calls.push("claude"); return { is_error: false, result: "{}" }; },
+  });
+  expect(await runStage({ stage: "plan", issue: 4, deps })).toBe(0);
+  expect(calls).toEqual(["context", "reset-agents", "claude"]);
+});
+
+test("I4: unverified gates are declared as self-reported on implement/review/merge, not on plan", async () => {
+  for (const stage of ["implement", "review", "merge"]) {
+    const lines = [];
+    await runStage({ stage, issue: 4, deps: baseDeps({ runRecord: (l) => lines.push(...l), verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }) }) });
+    expect(lines, stage).toContain(GATES_SELF_REPORTED);
+  }
+  const planLines = [];
+  await runStage({ stage: "plan", issue: 4, deps: baseDeps({ runRecord: (l) => planLines.push(...l) }) });
+  expect(planLines).not.toContain(GATES_SELF_REPORTED);
+
+  const verified = [];                                   // gates가 실제로 오면 그 줄은 사라진다
+  await runStage({ stage: "implement", issue: 4, deps: baseDeps({ gates: async () => ({ status: "GREEN" }), runRecord: (l) => verified.push(...l) }) });
+  expect(verified).not.toContain(GATES_SELF_REPORTED);
+});
+
+test("I7: the review round is counted from prior handoffs, so K bites", async () => {
+  const lines = [];
+  const transition = vi.fn(async ({ data, to }) => (data?.round > 3 ? { ok: false, reason: `round ${data.round} > K=3` } : { ok: true, to }));
+  const deps = baseDeps({
+    stage: "review",
+    buildContext: async () => ({ roster: ["a"], orchestration: "workflow", limits: { K: 3 } }),
+    countHandoffs: async (s) => (s === "review" ? 3 : 0),               // 이미 3라운드를 돌았다
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, verdicts: [{ role: "a", verdict: "approve", must_fix: [] }] } }),
+    writeHandoff: vi.fn(async () => {}), transition, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(2);
+  expect(deps.writeHandoff).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ round: 4 }) }));
+  expect(lines.some((l) => /transition refused: .*round/.test(l))).toBe(true);
+});
+
+test("M3: a failed prerequisite assert is written to the run record", async () => {
+  const lines = [];
+  const deps = baseDeps({ assertHandoff: async () => ({ ok: false, reason: "plan handoff missing" }), runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 4, deps })).toBe(2);
+  expect(lines).toContain("assert: FAIL — plan handoff missing");
+});
+
+test("M7: a failed lock release is shouted about and recorded", async () => {
+  const lines = [];
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  await runStage({ stage: "plan", issue: 11, deps: baseDeps({ release: async () => false, runRecord: (l) => lines.push(...l) }) });
+  expect(err).toHaveBeenCalledWith(expect.stringContaining("lock release failed for issue 11"));
+  expect(lines.some((l) => /lock: release failed for issue 11/.test(l))).toBe(true);
+  err.mockRestore();
+});
+
+test("M4: the usage line carries num_turns, terminal_reason and per-model cost", () => {
+  const line = usageLine({
+    usage: { input_tokens: 10, output_tokens: 2 }, total_cost_usd: 0.42, num_turns: 4, terminal_reason: "end_turn",
+    modelUsage: { "claude-opus-4-6": { costUSD: 0.4 }, "claude-haiku-4-5": { costUSD: 0.02 } },
+  });
+  expect(line).toContain("num_turns: 4");
+  expect(line).toContain("terminal_reason: end_turn");
+  expect(line).toContain("claude-opus-4-6=$0.4");
+  expect(line).toContain("claude-haiku-4-5=$0.02");
+  expect(usageLine(undefined)).toContain("models: n/a");               // claude가 아무것도 못 뱉어도 터지지 않는다
+});
+
+// ── C1: 커밋/PR 바인딩 ────────────────────────────────────────────────────
+
+const implHandoff = (pr) => [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "implement", issue: 7, summary: "s", data: { pr } }) }];
+
+test("C1: awaiting-review binds the branch head sha into ctxExtra", async () => {
+  const gh = { branchHeadSha: vi.fn(async () => "a".repeat(40)), comments: vi.fn(), prHeadSha: vi.fn() };
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:awaiting-review", ctx: { roster: ["a", "b"], rounds: 3 }, charter: { limits: { K: 3 } } });
+  expect(gh.branchHeadSha).toHaveBeenCalledWith("claude/fq-7");
+  expect(x).toEqual({ issue: 7, roster: ["a", "b"], expectedRounds: 3, rosterSize: 2, maxRounds: 3, headSha: "a".repeat(40) });
+});
+
+test("C1: approved/merged bind the PR head sha read from the implement handoff", async () => {
+  for (const to of ["factory:approved", "factory:merged"]) {
+    const gh = { comments: vi.fn(async () => implHandoff(9)), prHeadSha: vi.fn(async () => "b".repeat(40)), branchHeadSha: vi.fn() };
+    const x = await buildCtxExtra({ gh, issue: 7, to, ctx: { roster: ["a"] }, charter: { limits: { K: 3 } } });
+    expect(gh.prHeadSha, to).toHaveBeenCalledWith(9);
+    expect(x.prHeadSha, to).toBe("b".repeat(40));
+    expect(gh.branchHeadSha, to).not.toHaveBeenCalled();
+  }
+});
+
+test("C1: a gh failure yields no sha plus a run-record line — never a crash", async () => {
+  const lines = [];
+  const gh = { branchHeadSha: async () => { throw new Error("HTTP 404"); }, comments: vi.fn(), prHeadSha: vi.fn() };
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:awaiting-review", ctx: {}, charter: {}, record: (l) => lines.push(l) });
+  expect(x.headSha).toBeUndefined();
+  expect(lines.some((l) => /commit binding: lookup failed for factory:awaiting-review — HTTP 404/.test(l))).toBe(true);
+
+  const noPr = [];
+  const gh2 = { comments: async () => [], prHeadSha: vi.fn(), branchHeadSha: vi.fn() };
+  const y = await buildCtxExtra({ gh: gh2, issue: 7, to: "factory:merged", ctx: {}, charter: {}, record: (l) => noPr.push(l) });
+  expect(y.prHeadSha).toBeUndefined();
+  expect(gh2.prHeadSha).not.toHaveBeenCalled();
+  expect(noPr.some((l) => /no PR number/.test(l))).toBe(true);
+});
+
+test("C1: states with no commit binding get the plain ctxExtra and make no gh calls", async () => {
+  const gh = { branchHeadSha: vi.fn(), comments: vi.fn(), prHeadSha: vi.fn() };
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:in-progress", ctx: { roster: ["a"] }, charter: { limits: { K: 5 } } });
+  expect(x).toEqual({ issue: 7, roster: ["a"], expectedRounds: undefined, rosterSize: 1, maxRounds: 5 });
+  expect(gh.branchHeadSha).not.toHaveBeenCalled();
+  expect(gh.comments).not.toHaveBeenCalled();
 });
