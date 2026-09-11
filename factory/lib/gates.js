@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { parseVitestJson } from "./parsers/vitest-json.js";
 import { isQuarantined } from "./quarantine.js";
 
@@ -31,7 +33,7 @@ export function recomputeStatus(result, harness) {
   return result;
 }
 
-export async function runGates({ run, cwd, harness, level, quarantine, readFile, now = new Date().toISOString() }) {
+export async function runGates({ run, cwd, harness, level, quarantine, readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null), now = new Date().toISOString() }) {
   const requested_level = level;
   const max = MAX_LEVEL[harness.harness?.maturity] || "deep";
   if (LEVELS.indexOf(level) > LEVELS.indexOf(max)) level = max;
@@ -46,7 +48,9 @@ export async function runGates({ run, cwd, harness, level, quarantine, readFile,
     const r = await run("bash", ["-lc", cmd], { cwd });
     let status = r.code === 0 ? "GREEN" : "RED";
     if (TEST_GATES.has(name)) {
-      const report = readFile(`${cwd}/${harness.test[`${name}_report`] || `.factory/out/${name}.json`}`);
+      const rep = harness.test[`${name}_report`] || `.factory/out/${name}.json`;
+      const reportPath = isAbsolute(rep) ? rep : join(cwd, rep);
+      const report = readFile(reportPath);
       if (report) {
         const parsed = parseVitestJson(report, cwd);
         const excluded = parsed.failing.filter((f) => isQuarantined(quarantine, f.id)).map((f) => f.id);

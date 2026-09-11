@@ -46,6 +46,12 @@ test("quarantined test failures are excluded from the unit verdict", async () =>
   expect(verdictLine(r)).toContain("excluded=test/a.test.js::flaky one");
 });
 
+test("runGates without readFile uses the default (real fs); no report file → unit gate stays by exit code, still GREEN", async () => {
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, ok), sh("vitest run --project integration", ok), sh("npm run build", ok)]);
+  const r = await runGates({ run, cwd: "/repo", harness, level: "full", quarantine: { quarantined: [] }, now: "2026-09-11T00:00:00Z" });
+  expect(r.status).toBe("GREEN"); expect(r.passed).toBe(5);
+});
+
 test("recomputeStatus recomputes after a caller mutates result.gates", async () => {
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, ok), sh("vitest run --project integration", ok), sh("npm run build", ok)]);
   const r = await runGates({ run, cwd: "/repo", harness, level: "full", quarantine: { quarantined: [] }, readFile: () => null });

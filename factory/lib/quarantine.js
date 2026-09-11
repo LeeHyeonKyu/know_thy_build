@@ -13,7 +13,7 @@ export function applyPolicy(q, { now, thresholds }) {
   const nowMs = Date.parse(now), ttlMs = thresholds.quarantine_ttl_days * 86400e3;
   const returned = q.quarantined.filter((x) => (x.consecutive_passes || 0) >= thresholds.quarantine_return_after).map((x) => x.id);
   const kept = q.quarantined.filter((x) => !returned.includes(x.id));
-  const expired = kept.filter((x) => Date.parse(x.since) + ttlMs < nowMs).map((x) => x.id);
+  const expired = kept.filter((x) => { const t = Date.parse(x.since); return Number.isNaN(t) || t + ttlMs < nowMs; }).map((x) => x.id);
   return { q: { quarantined: kept }, returned, expired };
 }
 export const overCap = (q, thresholds) => q.quarantined.length >= thresholds.quarantine_max;

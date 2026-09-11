@@ -30,3 +30,9 @@ test("recordResult counts consecutive passes; applyPolicy returns after N and fl
   expect(overCap(q2, T)).toBe(false);
   expect(overCap({ quarantined: [{}, {}] }, T)).toBe(true);
 });
+
+test("applyPolicy fails closed: unparseable since counts as expired", () => {
+  const q = { quarantined: [{ id: "t::garbage", since: "garbage", reason: "r", evidence: [], consecutive_passes: 0 }] };
+  const { expired } = applyPolicy(q, { now: "2026-09-11T00:00:00Z", thresholds: T });
+  expect(expired).toEqual(["t::garbage"]);
+});
