@@ -316,12 +316,12 @@ export function makeLocalEntry({ gh, issue, stage, env }) {
     if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
     const it = await gh.issue(issue);
     // "backlog" is itself a member of STATES (lib/labels.js) — factoryLabelOf(labels) never returns
-    // null while "backlog" is present, it returns "backlog" itself. So "no factory label yet" means
-    // the current state is unset or still exactly "backlog", not "no STATES label found at all".
-    // Two STATE labels at once (an invalid label combo) makes factoryLabelOf throw — that's not
-    // swallowed here, the caller's best-effort catch (run-stage.js runStage) records it instead.
-    const current = factoryLabelOf(it.labels);
-    if ((current == null || current === "backlog") && it.labels.includes("backlog")) {
+    // null while "backlog" is present, it returns "backlog" itself. So this only fires when the
+    // issue's current STATE is exactly "backlog" — an unlabeled issue (no STATES label at all,
+    // factoryLabelOf → null) is deliberately NOT auto-queued (fix round 1 ruling: strict match, no
+    // null disjunct). Two STATE labels at once (an invalid label combo) makes factoryLabelOf throw —
+    // that's not swallowed here, the caller's best-effort catch (run-stage.js runStage) records it.
+    if (factoryLabelOf(it.labels) === "backlog") {
       await gh.setFactoryLabel(issue, "factory:queue");
       await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
       return "local entry: backlog → factory:queue";

@@ -395,6 +395,16 @@ test("makeLocalEntry: backlog issue but no factory label and no backlog label ei
   expect(setFactoryLabel).not.toHaveBeenCalled();
 });
 
+test("makeLocalEntry: unlabeled issue → null, no gh mutation", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const comment = vi.fn(async () => {});
+  const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: [] }), setFactoryLabel, comment };
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  expect(await entry()).toBeNull();
+  expect(setFactoryLabel).not.toHaveBeenCalled();
+  expect(comment).not.toHaveBeenCalled();
+});
+
 test("makeLocalEntry: FACTORY_LOCAL_ENTRY unset → no-op, returns null, gh untouched", async () => {
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
