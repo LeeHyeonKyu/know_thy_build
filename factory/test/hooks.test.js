@@ -71,3 +71,15 @@ test("stop-guard: .factory/out artifacts are not 'dirty' — pushed branch with 
   await run("bash", ["-c", "echo y > src.txt"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
 });
+
+test("stop-guard: dirty file at repo root is still caught when the hook runs from a subdirectory", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sg-sub-"));
+  await run("git", ["init", "-q", "-b", "main"], { cwd });
+  await run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd });
+  await run("git", ["checkout", "-q", "-b", "claude/fq-7"], { cwd });
+  // dirty file at root, hook run from a subdirectory → still blocked
+  await run("bash", ["-c", "mkdir -p sub && echo y > root-dirty.txt"], { cwd });
+  const r3 = await run("bash", [join(H, "stop-guard.sh")], { input: "{}", cwd: join(cwd, "sub") });
+  expect(r3.code).toBe(2);
+  expect(r3.stderr).toMatch(/uncommitted/);   // upstream이 없어도 exit 2가 나오므로, 이유가 "uncommitted"인지까지 확인한다
+});

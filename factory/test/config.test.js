@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadHarness, loadCharter, loadRoles, rosterFor } from "../lib/config.js";
@@ -49,4 +49,18 @@ test("limits는 부분 오버라이드를 받는다 — 빠진 키는 기본값�
   const root = fixture();
   writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\nlimits: { K: 5 }\n---\n`);
   expect(loadCharter(root).limits).toEqual({ K: 5, M: 3, R: 2 });
+});
+
+test("loadHarness fills gates.thresholds / test / commands.proof defaults and keeps overrides", () => {
+  const root = fixture();
+  const h = loadHarness(root);
+  expect(h.gates.thresholds).toEqual({ diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 });
+  expect(h.test.unit_report).toBe(".factory/out/unit.json");
+  expect(h.test.test_glob).toEqual([]);
+  expect(h.commands.proof).toEqual({});
+  writeFileSync(join(root, ".factory/harness.toml"), readFileSync(join(root, ".factory/harness.toml"), "utf8") + `\n[gates.thresholds]\ndiff_coverage_pct = 80\n[test]\ntest_glob = ["test/**/*.test.js"]\n`);
+  const h2 = loadHarness(root);
+  expect(h2.gates.thresholds.diff_coverage_pct).toBe(80);
+  expect(h2.gates.thresholds.mutation_score_pct).toBe(70);
+  expect(h2.test.test_glob).toEqual(["test/**/*.test.js"]);
 });
