@@ -142,6 +142,11 @@ function install(lang, global) {
 
 const args = process.argv.slice(2);
 
+if (args[0] === "factory") {
+  const { main } = await import("../factory/cli/index.js");
+  process.exit(await main(args.slice(1)));
+}
+
 if (args.includes("--help") || args.includes("-h")) {
   console.log(`
   know-thy-build — Multi-agent project definition & QA framework for Claude Code
@@ -150,6 +155,7 @@ if (args.includes("--help") || args.includes("-h")) {
     npx know-thy-build              Install in current project
     npx know-thy-build --global     Install globally (~/.claude/commands/)
     npx know-thy-build --lang ko    Skip language prompt
+    npx know-thy-build factory <init|doctor|bootstrap|run|status>   Phase 2 — see \`factory --help\`
 
   Commands installed:
     :project     Define what and why                → docs/PROJECT.md + CLAUDE.md + hooks
