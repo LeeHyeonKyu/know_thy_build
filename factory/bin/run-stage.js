@@ -23,6 +23,7 @@ import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
+import { syncRecords } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 
@@ -182,6 +183,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       console.error(`factory: lock release failed for issue ${issue}`);
       record([`lock: release failed for issue ${issue} — delete refs/heads/factory/lock-${issue} by hand`]);
     }
+    // run 기록을 factory/records 브랜치로 push한다(ADR-014) — 락 해제 뒤, 부수 효과로. 실패해도
+    // 이번 런의 결과(exit code)는 절대 바꾸지 않는다 — 다음 런이나 사람이 다시 밀어 넣을 수 있다.
+    try {
+      const s = await d.syncRecords?.();
+      if (s && !s.ok) { console.error(`factory: run-record sync to factory/records failed — ${s.reason}`); record([`run-record sync: failed — ${s.reason}`]); }
+    } catch (e) { console.error(`factory: run-record sync to factory/records aborted — ${e?.message || e}`); record([`run-record sync: aborted — ${e?.message || e}`]); }
   }
 }
 
@@ -394,6 +401,7 @@ async function main() {
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     release: () => release({ run, cwd: root, issue }),
+    syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} (${runnerId})` }),
     reportStatus: (s) => gh.setStatus({
       ...s,
       targetUrl: process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID

@@ -308,4 +308,16 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **결정**: **훅에 들어오는 `tool_input` 값은 신뢰하지 않는다 — 셸 문자열에 끼워 넣을 때는 반드시 이스케이프한다.** `lint-touched.sh`는 `file_path`를 `printf '%q'`로 이스케이프한 뒤에만 명령 템플릿의 `{file}` 자리에 넣는다(`qfile=$(printf '%q' "$file"); cmd=${cmd//\{file\}/$qfile}`). 재현 테스트(`lint-touched: shell-escapes file_path — no command injection via Edit/Write`)로 수정 후에는 `PWNED`가 생성되지 않음을 확인했다. 이 원칙은 `lint-touched.sh` 하나에 국한되지 않는다 — 앞으로 어떤 훅이든 `tool_input`(또는 다른 에이전트 통제 필드)을 `bash -lc`류 문자열에 섞으면 같은 방식으로 이스케이프해야 한다.
 
+---
+
+## ADR-014 run 기록은 `factory/records` 브랜치 — 보호된 default 브랜치에는 직접 push할 수 없다 — 2026-09-12
+
+**질문**: `run-stage.sh`의 마지막 단계(§4.2.1 step 9)는 `docs/factory/runs/<issue>.md`를 매 스테이지 append하고 커밋·push해야 한다(§9). 이 파일은 어느 브랜치에 올라가야 하는가 — 러너가 review·merge 스테이지에서는 detach된 HEAD(ADR-008 이전, Task 12)로 도는데, 그 detached HEAD에서 만든 커밋은 애초에 어떤 브랜치에도 속하지 않는다.
+
+**관측** (Plan 2 Task 14): required status checks(`factory/gates`, `factory/review` — Task 11)가 걸린 default 브랜치는 러너가 직접 `git push origin <sha>:refs/heads/main` 같은 방식으로 밀어 넣을 수 없다(브랜치 보호 규칙이 거부한다) — PR을 거치지 않는 한 어떤 커밋도 그 브랜치에 직접 올라갈 수 없다. 게다가 run 기록은 스테이지마다(개별 이슈의 triage/plan/implement/review×N/merge) append되므로, 커밋할 때마다 PR을 새로 열 수도 없다. 한편 review·merge 스테이지는 PR head를 검증하려고 로컬 HEAD를 detach해서 고정한다(ADR 미기재, Task 12 R6) — 그 상태에서 "현재 브랜치"에 커밋하는 방식(`git add && git commit`)은 애초에 성립하지 않는다(현재 브랜치가 없다). 즉 필요한 것은 **현재 체크아웃·인덱스·HEAD를 전혀 건드리지 않고**, 별도 브랜치의 끝에 커밋 하나를 이어 붙이는 방법이다.
+
+**결정**: run 기록은 default 브랜치가 아니라 전용 `factory/records` 브랜치에, git plumbing만으로 append한다(`factory/lib/records-branch.js` `syncRecords`) — 워킹 트리·현재 인덱스·현재 브랜치(또는 detached HEAD)를 하나도 건드리지 않는다: `git fetch`로 원격의 현재 tip을 parent 후보로 얻고(브랜치가 아직 없으면 parent 없음), 임시 `GIT_INDEX_FILE`(`<git-dir>/factory-records.index`, 끝나면 삭제)에 parent tree를 `read-tree`한 뒤(없으면 `--empty`) `docs/factory/runs/*.md`를 `hash-object -w` + `update-index --add --cacheinfo`로 올리고, `write-tree` → `commit-tree <tree> -p <parent> -m <message>` → `git push origin <commit>:refs/heads/factory/records`로 민다. author/committer는 기본 `factory-bot <factory-bot@users.noreply.github.com>`(env로 override 가능). push가 non-fast-forward로 거부되면(동시에 도는 다른 러너가 먼저 밀었다) 처음부터 **한 번만** 재시도(`retried: true`) — 그래도 실패하면 `{ ok:false, reason }`을 돌려줄 뿐 절대 throw하지 않는다. 읽기는 대칭적으로 `readRecords`(`ls-tree -r` + `show`)가 `Map<issue, text>`를 돌려준다(브랜치 없으면 빈 Map). `bin/run-stage.js`의 `finally`는 `release` 뒤에 `syncRecords`를 자신만의 try/catch로 호출한다 — 실패해도(`ok:false`든 throw든) `console.error` + `record([...])`로 흔적만 남기고 **스테이지의 exit code는 절대 바꾸지 않는다**: run 기록 동기화는 부수 효과이지, 스테이지 성패의 일부가 아니다. plumbing이 브랜치·HEAD 상태에 전혀 의존하지 않는다는 것은 detached HEAD 클론에서 sync하는 테스트로 확인했다(review·merge의 실제 실행 조건과 동일).
+
+**영향**: §4.2.1 step 9(run-record.sh → syncRecords), §9(run 기록의 저장 위치 — default 브랜치가 아니라 `factory/records`), `factory status`·retro가 run 기록을 읽는 경로(이제 로컬 파일이 아니라 `readRecords`로 이 브랜치를 봐야 한다 — 로컬 워크트리의 `docs/factory/runs/`는 러너 프로세스 안에서만 유효하고 다음 런에서 fresh checkout이면 사라진다).
+
 **영향**: §6.3(`lint-touched.sh` 서술), 훅 작성 일반 규칙(ADR-009의 "로깅 훅은 exit 0" 규칙과 나란히 적용되는 별개의 규칙 — 하나는 훅이 잡을 막지 않게, 하나는 훅 자신이 구멍이 되지 않게).

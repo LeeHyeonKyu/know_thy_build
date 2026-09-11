@@ -215,6 +215,62 @@ test("M7: a failed lock release is shouted about and recorded", async () => {
   err.mockRestore();
 });
 
+// ── Task 14: run 기록 브랜치 factory/records — syncRecords wiring ───────────
+
+test("syncRecords runs after release, in its own try/catch, and a success doesn't change the exit code", async () => {
+  const calls = [];
+  const deps = baseDeps({
+    release: async () => { calls.push("release"); return true; },
+    syncRecords: vi.fn(async () => { calls.push("syncRecords"); return { ok: true, commit: "a".repeat(40), retried: false }; }),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(calls).toEqual(["release", "syncRecords"]);
+  expect(deps.syncRecords).toHaveBeenCalledTimes(1);
+});
+
+test("syncRecords is optional — deps without it still work", async () => {
+  const deps = baseDeps({});
+  expect(deps.syncRecords).toBeUndefined();
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+});
+
+test("a failed syncRecords ({ok:false}) is shouted about and recorded, but never changes the exit code", async () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const lines = [];
+  const deps = baseDeps({
+    syncRecords: async () => ({ ok: false, reason: "push failed: non-fast-forward", retried: true }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(err).toHaveBeenCalledWith(expect.stringContaining("push failed: non-fast-forward"));
+  expect(lines.some((l) => /run-record sync: failed — push failed: non-fast-forward/.test(l))).toBe(true);
+  err.mockRestore();
+});
+
+test("a syncRecords that throws is swallowed by its own try/catch, recorded, and doesn't change the exit code", async () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const lines = [];
+  const deps = baseDeps({
+    syncRecords: async () => { throw new Error("git fetch failed"); },
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(err).toHaveBeenCalledWith(expect.stringContaining("git fetch failed"));
+  expect(lines.some((l) => /run-record sync: aborted — git fetch failed/.test(l))).toBe(true);
+  err.mockRestore();
+});
+
+test("a failed syncRecords doesn't change a non-zero exit code either (e.g. a needs-human transition)", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    verifyStage: () => ({ ok: false, reasons: ["roster role not completed: qa"], data: {} }),
+    syncRecords: async () => ({ ok: false, reason: "no origin remote", retried: false }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(2);
+  expect(lines.some((l) => /run-record sync: failed — no origin remote/.test(l))).toBe(true);
+});
+
 test("M4: the usage line carries num_turns, terminal_reason and per-model cost", () => {
   const line = usageLine({
     usage: { input_tokens: 10, output_tokens: 2 }, total_cost_usd: 0.42, num_turns: 4, terminal_reason: "end_turn",
