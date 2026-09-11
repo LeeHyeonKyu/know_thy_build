@@ -19,9 +19,16 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
     if (additive) {
       const allowed = prot.additive_only[additive];
       const removed = removedByFile.get(f) || [];
+      const added = addedByFile.get(f) || [];
+      // An added '## ' header can never define a section boundary for itself or for other
+      // added lines — otherwise a diff could inject "+malicious\n+## Examples" and have the
+      // injected header retroactively "legitimize" the disallowed content that precedes it.
+      const addedLineNos = new Set(added.map((l) => l.line));
+      const headerAdded = added.some((l) => /^##\s/.test(l.text));
       const lines = (readFile(`${cwd}/${f}`) || "").split("\n");
-      const outside = (addedByFile.get(f) || []).some((l) => !allowed.includes(sectionAt(lines, l.line)));
+      const outside = added.some((l) => !allowed.includes(sectionAt(lines, l.line, addedLineNos)));
       if (removed.length || outside) violations.push({ file: f, rule: `additive-only sections (${allowed.join(", ")}) — removals or edits outside allowed sections` });
+      if (headerAdded) violations.push({ file: f, rule: "additive-only: header added" });
       continue;
     }
     if (matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f)) violations.push({ file: f, rule: "protected path changed" });
@@ -67,11 +74,15 @@ function removedLines(u0) {
   }
   return m;
 }
-/** 현재 파일(lines, 1-indexed lineNo 기준)에서 lineNo가 속한 가장 가까운 '## ' 헤더 */
-function sectionAt(lines, lineNo) {
+/**
+ * 현재 파일(lines, 1-indexed lineNo 기준)에서 lineNo가 속한 가장 가까운 '## ' 헤더.
+ * addedLineNos에 속한 헤더 줄(이번 diff가 새로 추가한 헤더)은 경계로 인정하지 않는다 —
+ * 오직 base에 이미 있던(추가되지 않은) 헤더만 섹션을 정의한다.
+ */
+function sectionAt(lines, lineNo, addedLineNos = new Set()) {
   let current = null;
   for (let i = 0; i < lineNo && i < lines.length; i++) {
-    if (/^## /.test(lines[i])) current = lines[i].trim();
+    if (/^## /.test(lines[i]) && !addedLineNos.has(i + 1)) current = lines[i].trim();
   }
   return current;
 }

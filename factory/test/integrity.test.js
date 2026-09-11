@@ -31,6 +31,18 @@ test("additive-only is position-aware: added blank line under Lens is a violatio
   expect(r.ok).toBe(false);
   expect(r.violations[0].rule).toMatch(/additive-only/);
 });
+test("additive-only: an added '## ' header cannot self-legitimize the disallowed content it follows", async () => {
+  // base: Purpose / Lens / Examples / Perspectives. Under Lens (after line 2) inject two new
+  // lines: "malicious" content, then a forged "## Examples" header — trying to make sectionAt
+  // treat "malicious" as if it were inside the (already-allowed) Examples section.
+  const readFile = () => "## Purpose\n## Lens\nmalicious\n## Examples\n## Examples\n## Perspectives\n";
+  const diff = `+++ b/.claude/agents/reviewer-qa.md\n@@ -2,0 +3,2 @@\n+malicious\n+## Examples\n`;
+  const run = makeFakeRun([names("M\t.claude/agents/reviewer-qa.md\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile });
+  expect(r.ok).toBe(false);
+  expect(r.violations.some((v) => v.rule === "additive-only: header added")).toBe(true);
+  expect(r.violations.some((v) => /additive-only sections.*outside/.test(v.rule))).toBe(true);
+});
 test("full deletion of an additive-only/protected file → violation", async () => {
   const delDiff = `--- a/.claude/agents/reviewer-qa.md\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-## Purpose\n-## Examples\n-content\n`;
   const run = makeFakeRun([names("D\t.claude/agents/reviewer-qa.md\n"), u0(delDiff)]);
