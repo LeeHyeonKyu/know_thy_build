@@ -14,9 +14,14 @@ import { isAbsolute, join, relative, sep } from "node:path";
  * fresh checkout 방어(fix round 1, Critical): 러너가 매번 새로 체크아웃하면 로컬에는 이슈의
  * run 기록이 없다 — `appendRunRecord`가 그 상태에서 파일을 만들면 "이번 스테이지 한 줄짜리" 파일이
  * 되고, syncRecords가 그걸 그대로 커밋하면 브랜치에 쌓여 있던 이전 스테이지들의 기록이 통째로
- * 사라진다. 그래서 `hydrateRecord`가 스테이지 시작 시 브랜치 내용을 로컬로 먼저 복원하고,
- * `syncRecords`는 그러고도 로컬이 브랜치보다 짧거나 다르면(hydrate가 실패했거나 안 됐거나) 그
- * 파일만 건너뛰어 브랜치 내용을 덮어쓰지 않는다 — 이중 방어.
+ * 사라진다. 그래서 `hydrateRecord`가 스테이지 **시작 시**(charterReady 직후) 브랜치 내용을 로컬로
+ * 먼저 복원한다.
+ *
+ * 같은 이슈 경합(fix round 2, F6): 그러고도 로컬이 브랜치 tip의 연장이 아닐 수 있다 — 두 러너가
+ * 같은 tip을 하이드레이트한 뒤 서로 다른 섹션을 붙이면, 나중에 미는 쪽의 로컬은 이미 움직인 tip의
+ * 접두어가 아니다. 이때 건너뛰면(과거 동작) 그 스테이지의 기록이 영영 사라지므로, 대신 **공통
+ * 접두어(줄 경계) 이후의 로컬 꼬리만 브랜치 tip 뒤에 이어 붙인다**(결과 `merged: [path]`).
+ * 건너뛰는 경우는 딱 하나 — 더할 꼬리가 없을 때(로컬이 브랜치보다 뒤처져 있을 뿐, `skipped: [path]`).
  */
 
 const REMOTE_REF = "refs/factory/records-remote";
@@ -36,6 +41,24 @@ function listMarkdownFiles(absDir) {
   return rels.sort();
 }
 
+/**
+ * a와 b의 공통 접두어 길이 — 단, **줄 경계**까지만 인정하고, 접두어 끝의 빈 줄은 꼬리에 돌려준다.
+ * run 기록은 줄 단위 append 로그(섹션 사이 빈 줄 + `## <stage> …` 헤더)라 두 러너의 꼬리가
+ * "\n\n## " 같은 시작을 공유하는 것이 보통이다: 문자 단위 LCP를 그대로 쓰면 이어 붙인 꼬리의 첫
+ * 줄이 "## "를 잃고 반토막 나고, 줄 경계까지만 물러나면 꼬리가 섹션 구분용 빈 줄을 뺏긴다.
+ * 둘 다 되돌려야 "브랜치 tip + 내 섹션"이 원래 모양 그대로 이어진다.
+ */
+export function commonPrefixLength(a, b) {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a[i] === b[i]) i += 1;
+  if (i === a.length || i === b.length) return i;                     // 한쪽이 다른 쪽의 접두어다 — 자를 필요가 없다
+  const nl = a.lastIndexOf("\n", i - 1);
+  let cut = nl === -1 ? 0 : nl + 1;                                   // 다른 글자가 나온 그 줄의 시작으로
+  while (cut > 0 && a[cut - 1] === "\n" && (cut < 2 || a[cut - 2] === "\n")) cut -= 1;   // 접두어 끝의 빈 줄은 꼬리의 구분자다
+  return cut;
+}
+
 async function gitDir({ run, cwd }) {
   const r = await run("git", ["rev-parse", "--git-dir"], { cwd });
   if (r.code !== 0) return null;
@@ -53,8 +76,8 @@ async function fetchParent({ run, cwd, branch }) {
 
 /**
  * fetch → (parent가 있으면) read-tree → dir의 *.md를 인덱스에 올림(단, parent가 이미 갖고 있고
- * 로컬 내용이 그 접두어가 아니면 건너뛴다 — 브랜치 내용을 덮어쓰지 않는다) → write-tree →
- * commit-tree → push. 한 번의 시도.
+ * 로컬이 그 연장이 아니면 공통 접두어 이후의 로컬 꼬리만 tip 뒤에 이어 붙인다 — 어느 쪽도
+ * 덮어쓰지 않는다) → write-tree → commit-tree → push. 한 번의 시도.
  */
 async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files }) {
   const parent = await fetchParent({ run, cwd, branch });
@@ -67,20 +90,30 @@ async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, file
 
   const absDir = join(cwd, dir);
   const skipped = [];
+  const merged = [];
   for (const rel of files) {
     const idxPath = `${dir}/${rel}`;
-    const localContent = readFileSync(join(absDir, rel), "utf8");
+    let content = readFileSync(join(absDir, rel), "utf8");
+    let blobFrom = join(absDir, rel);                                 // 그대로 올릴 수 있는 경우엔 파일을 바로 해시한다
     if (parent) {
       const parentShow = await run("git", ["show", `${parent}:${idxPath}`], { cwd });
-      // parentShow.code === 0 → 브랜치가 이미 이 경로를 갖고 있다. 로컬이 그 내용을 접두어로
-      // 포함하지 않으면(hydrate가 안 됐거나 실패했다는 뜻) 덮어쓰지 않고 건너뛴다 — read-tree가
-      // 이미 인덱스에 parent 버전을 올려뒀으므로 아무것도 하지 않는 것이 "브랜치 버전 유지"다.
-      if (parentShow.code === 0 && !localContent.startsWith(parentShow.stdout)) {
-        skipped.push(idxPath);
-        continue;
+      // parentShow.code === 0 → 브랜치가 이미 이 경로를 갖고 있다.
+      if (parentShow.code === 0 && !content.startsWith(parentShow.stdout)) {
+        // 로컬이 브랜치 tip의 연장이 아니다 — 같은 이슈에 동시에 돈 다른 러너가 그 사이 자기
+        // 섹션을 먼저 밀었다는 뜻이다(둘 다 같은 P0을 하이드레이트했고 서로 다른 꼬리를 붙였다).
+        // 어느 쪽도 버리지 않는다: 공통 접두어 이후의 로컬 꼬리만 브랜치 tip 뒤에 이어 붙인다.
+        // 공통 접두어는 줄 경계까지만 인정한다 — 두 꼬리가 "## " 같은 머리글자를 공유하면
+        // 문자 단위 LCP가 섹션 헤더를 반토막 내기 때문이다.
+        const tail = content.slice(commonPrefixLength(content, parentShow.stdout));
+        if (!tail) { skipped.push(idxPath); continue; }               // 더할 게 없다 — 로컬이 브랜치보다 뒤처져 있을 뿐
+        content = parentShow.stdout + tail;
+        blobFrom = null;
+        merged.push(idxPath);
       }
     }
-    const ho = await run("git", ["hash-object", "-w", join(absDir, rel)], { cwd, env: idxEnv });
+    const ho = blobFrom
+      ? await run("git", ["hash-object", "-w", blobFrom], { cwd, env: idxEnv })
+      : await run("git", ["hash-object", "-w", "--stdin"], { cwd, env: idxEnv, input: content });
     if (ho.code !== 0) return { ok: false, reason: `hash-object failed: ${ho.stderr.trim()}` };
     const blob = ho.stdout.trim();
     const ui = await run("git", ["update-index", "--add", "--cacheinfo", `100644,${blob},${idxPath}`], { cwd, env: idxEnv });
@@ -95,17 +128,19 @@ async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, file
   if (parent) ctArgs.push("-p", parent);
   ctArgs.push("-m", message);
   const ct = await run("git", ctArgs, { cwd, env: gitEnv });
-  if (ct.code !== 0) return { ok: false, reason: `commit-tree failed: ${ct.stderr.trim()}`, skipped };
+  if (ct.code !== 0) return { ok: false, reason: `commit-tree failed: ${ct.stderr.trim()}`, skipped, merged };
   const commit = ct.stdout.trim();
 
   const push = await run("git", ["push", "origin", `${commit}:refs/heads/${branch}`], { cwd });
-  if (push.code !== 0) return { ok: false, reason: `push failed: ${push.stderr.trim()}`, pushStderr: push.stderr, skipped };
-  return { ok: true, commit, skipped };
+  if (push.code !== 0) return { ok: false, reason: `push failed: ${push.stderr.trim()}`, pushStderr: push.stderr, skipped, merged };
+  return { ok: true, commit, skipped, merged };
 }
 
 /**
  * run 기록을 `factory/records` 브랜치로 동기화한다. 절대 throw하지 않는다.
- * → { ok, commit?, reason?, retried, skipped? }
+ * → { ok, commit?, reason?, retried, skipped?, merged? }
+ *   merged: 브랜치 tip 뒤로 로컬 꼬리를 이어 붙인 경로들(같은 이슈 경합)
+ *   skipped: 로컬이 더할 게 없어 건드리지 않은 경로들
  */
 export async function syncRecords({ run, cwd, branch = "factory/records", dir = "docs/factory/runs", message, env = {} }) {
   const files = listMarkdownFiles(join(cwd, dir));
@@ -123,12 +158,13 @@ export async function syncRecords({ run, cwd, branch = "factory/records", dir = 
   };
   try {
     const r1 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files });
-    if (r1.ok) return { ok: true, commit: r1.commit, retried: false, skipped: r1.skipped };
-    if (!r1.pushStderr || !RETRYABLE.test(r1.pushStderr)) return { ok: false, reason: r1.reason, retried: false, skipped: r1.skipped };
+    if (r1.ok) return { ok: true, commit: r1.commit, retried: false, skipped: r1.skipped, merged: r1.merged };
+    if (!r1.pushStderr || !RETRYABLE.test(r1.pushStderr)) return { ok: false, reason: r1.reason, retried: false, skipped: r1.skipped, merged: r1.merged };
     // 다른 러너가 그 사이 먼저 push했다(non-fast-forward) — 처음부터 딱 한 번 다시 시도한다.
+    // 재시도의 fetch가 새 tip을 가져오므로, 같은 파일을 건드린 경우 두 번째 attempt가 꼬리를 병합한다.
     const r2 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files });
-    if (r2.ok) return { ok: true, commit: r2.commit, retried: true, skipped: r2.skipped };
-    return { ok: false, reason: r2.reason, retried: true, skipped: r2.skipped };
+    if (r2.ok) return { ok: true, commit: r2.commit, retried: true, skipped: r2.skipped, merged: r2.merged };
+    return { ok: false, reason: r2.reason, retried: true, skipped: r2.skipped, merged: r2.merged };
   } finally {
     try { rmSync(indexPath, { force: true }); } catch { /* best-effort cleanup */ }
   }

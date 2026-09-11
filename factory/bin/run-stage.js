@@ -65,6 +65,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     try { await d.reportStatus({ context, state, description, sha }); }
     catch (e) { record([`status: ${context} post failed — ${e?.message || e}`]); }
   };
+  // fresh checkout이면 로컬에 이슈의 run 기록이 없다 — 이 스테이지가 **무엇이든 기록하기 전에**
+  // factory/records 브랜치의 누적 내용을 먼저 복원한다(ADR-014 보강). 그래서 charterReady 직후,
+  // back-pressure·claim·localEntry보다도 앞이다: 그 세 지점 모두 자기 몫의 record() 줄을 남기고
+  // 물러날 수 있는데, 하이드레이트가 그보다 늦으면 그 줄들이 "한 줄짜리 새 파일"에 쓰여 브랜치에
+  // 쌓여 있던 이전 스테이지 기록을 덮어쓸 뻔한 내용이 된다(syncRecords가 뒤에서 막지만, 그때는
+  // 이번 줄이 버려진다). best-effort — 실패해도 흔적만 남기고 스테이지는 계속된다.
+  try {
+    const h = await d.hydrateRecord?.();
+    if (h && !h.ok) record([`hydrate: ${h.reason || "failed"}`]);
+  } catch (e) { record([`hydrate: aborted — ${e?.message || e}`]); }
   // 공장이 감당할 수 있는 만큼만 물린다. 거부는 실패가 아니다 — 라벨을 건드리지 않고 물러나
   // 다음 sweeper/이벤트에서 다시 시도한다. 그래서 락을 잡기도 전에 본다.
   if (stage === "implement" && d.backPressure) {
@@ -84,21 +94,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
-    // triage 스테이지가 스스로 backlog → factory:queue로 밀어 넣는다 — claim 직후·hydrateRecord보다
-    // 먼저(라벨 이동일 뿐 기록과는 무관하다). best-effort — 실패해도 흔적만 남기고 스테이지는 계속된다.
+    // triage 스테이지가 스스로 backlog → factory:queue로 밀어 넣는다 — claim 직후(라벨 이동일 뿐
+    // 기록과는 무관하다. 기록 하이드레이트는 이미 charterReady 직후에 끝났다).
+    // best-effort — 실패해도 흔적만 남기고 스테이지는 계속된다.
     try {
       const localMsg = await d.localEntry?.();
       if (localMsg) record([localMsg]);
     } catch (e) { record([`local entry: aborted — ${e?.message || e}`]); }
-    // fresh checkout이면 로컬에 이슈의 run 기록이 없다 — 이번 스테이지가 appendRunRecord로 쓰기
-    // 전에 factory/records 브랜치의 누적 내용을 먼저 복원한다(ADR-014 후속, fix round 1 Critical).
-    // 안 그러면 뒤에서 만들어지는 "이번 스테이지 한 줄짜리" 파일을 syncRecords가 그대로 커밋해
-    // 브랜치에 쌓여 있던 이전 스테이지들의 기록을 통째로 덮어쓰게 된다. best-effort — 실패해도
-    // 흔적만 남기고 스테이지는 계속된다.
-    try {
-      const h = await d.hydrateRecord?.();
-      if (h && !h.ok) record([`hydrate: ${h.reason || "failed"}`]);
-    } catch (e) { record([`hydrate: aborted — ${e?.message || e}`]); }
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
     const a = await d.assertHandoff();
@@ -174,15 +176,26 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
         const n = roster.length || v.data.verdicts.length;               // 정족수는 로스터 크기다 — verdict 개수는 미완일 때 부족분을 감춘다
         return `review round ${v.data.round}: ${decision} (${k}/${n} approve)`;
       };
+      /**
+       * `factory/review`는 **우리가 실제로 체크아웃해 검증한 커밋**(checkoutSha, R6)에만 건다 —
+       * handoff의 `head_sha`는 에이전트가 적어 넣은 값이라, 그 값을 그대로 sha로 쓰면 에이전트가
+       * 임의의 커밋(예: 이미 머지된 default 브랜치 tip)에 GREEN 리뷰 상태를 붙일 수 있다.
+       * 둘이 다르면 아예 게시하지 않는다 — 어느 쪽이 맞는지 여기서 판단하지 않고 흔적만 남긴다
+       * (필수 체크가 비면 L0·L1이 fail closed로 머지를 막는다).
+       */
+      const postReviewStatus = async ({ state, decision }) => {
+        if (v.data.head_sha !== checkoutSha) { record(["status: factory/review skipped — handoff head_sha differs from checked-out head"]); return; }
+        await postStatus({ context: "factory/review", state, description: reviewDescription(decision), sha: checkoutSha });
+      };
       if (agg.decision === "incomplete") {                            // 라운드가 덜 끝났다 — 자동 라우팅하지 않는다
-        await postStatus({ context: "factory/review", state: "error", description: reviewDescription("incomplete"), sha: v.data.head_sha });
+        await postReviewStatus({ state: "error", decision: "incomplete" });
         const t = await d.transition({ to: "factory:needs-human", reason: `review incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}` });
         record(["verify: ok", `review: incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
         return 2;
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
-      await postStatus({ context: "factory/review", state: agg.decision === "approved" ? "success" : "failure", description: reviewDescription(agg.decision), sha: v.data.head_sha });
+      await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     await d.writeHandoff({ stage, data: v.data, gates });
     const t = await d.transition({ to: nextState(stage, v.data), data: v.data });
@@ -204,6 +217,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     try {
       const s = await d.syncRecords?.();
       if (s && !s.ok) { console.error(`factory: run-record sync to factory/records failed — ${s.reason}`); record([`run-record sync: failed — ${s.reason}`]); }
+      // ok:true여도 조용하면 안 되는 두 경우: 같은 이슈에 동시에 돈 다른 러너 때문에 로컬 꼬리가
+      // 브랜치 tip 뒤로 병합됐거나(merged), 로컬이 브랜치보다 뒤처져 더할 게 없었거나(skipped).
+      // 둘 다 "내가 쓴 줄이 내가 기대한 자리에 있지 않다"는 신호다 — 사후 감사에서 보여야 한다.
+      if (s?.merged?.length) record([`run-record sync: merged onto the branch tip — ${s.merged.join(", ")}`]);
+      if (s?.skipped?.length) record([`run-record sync: skipped (nothing new) — ${s.skipped.join(", ")}`]);
     } catch (e) { console.error(`factory: run-record sync to factory/records aborted — ${e?.message || e}`); record([`run-record sync: aborted — ${e?.message || e}`]); }
   }
 }

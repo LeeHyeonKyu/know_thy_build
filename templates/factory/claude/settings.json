@@ -13,7 +13,21 @@
       "Edit(.github/workflows/factory-*)",
       "Write(.github/workflows/factory-*)",
       "Edit(docs/factory/CHARTER.md)",
-      "Write(docs/factory/CHARTER.md)"
+      "Write(docs/factory/CHARTER.md)",
+      "Edit(package.json)",
+      "Write(package.json)",
+      "Edit(package-lock.json)",
+      "Write(package-lock.json)",
+      "Edit(vitest.config.*)",
+      "Write(vitest.config.*)",
+      "Edit(playwright.config.*)",
+      "Write(playwright.config.*)",
+      "Edit(tsconfig*.json)",
+      "Write(tsconfig*.json)",
+      "Edit(.eslintrc*)",
+      "Write(.eslintrc*)",
+      "Edit(eslint.config.*)",
+      "Write(eslint.config.*)"
     ],
     "allow": [
       "Bash(git *)",

@@ -9,7 +9,9 @@ import { join } from "node:path";
 
 const T = new URL("../../templates/factory/factory/harness.toml", import.meta.url).pathname;
 const tmpl = () => { const r = mkdtempSync(join(tmpdir(), "ktb-h-")); mkdirSync(join(r, ".factory"), { recursive: true }); writeFileSync(join(r, ".factory/harness.toml"), readFileSync(T, "utf8").replace("{{PROJECT_NAME}}", "d")); return loadHarness(r); };
-const files = [".factory/harness.toml", ".claude/settings.json", ".github/workflows/factory-plan.yml", "docs/factory/CHARTER.md", "test/smoke.test.js", "src/a.js"];
+// 템플릿 [protected].factory의 모든 글롭이 최소 하나씩 매치하는 파일 목록 — 빌드 설정 파일 포함(F9)
+const files = [".factory/harness.toml", ".claude/settings.json", ".github/workflows/factory-plan.yml", "docs/factory/CHARTER.md", "test/smoke.test.js", "src/a.js",
+               "package.json", "package-lock.json", "vitest.config.js", "playwright.config.js", "tsconfig.json", ".eslintrc.json", "eslint.config.js"];
 const by = (checks) => Object.fromEntries(checks.map((c) => [c.id, c]));
 
 test("template harness passes every static check", () => {

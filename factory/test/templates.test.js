@@ -24,6 +24,18 @@ test("harness.toml template parses and is an M0 fast-only harness", () => {
   expect(h.test.test_glob.length).toBeGreaterThan(0);
 });
 
+test("harness.toml template protects the build-config files the gate commands resolve through (F9)", () => {
+  const h = toml(read("factory/harness.toml"));
+  for (const g of ["package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*"]) {
+    expect(h.protected.factory, g).toContain(g);
+  }
+  // 기존 보호 대상은 그대로다
+  for (const g of [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]) {
+    expect(h.protected.factory, g).toContain(g);
+  }
+  expect(h.protected.except).toContain(".factory/lessons/**");
+});
+
 test("roles.toml template defines every role the CHARTER template names", () => {
   const roles = toml(read("factory/roles.toml"));
   const { data: charter } = parseFrontmatter(read("docs/factory/CHARTER.md"));
@@ -69,6 +81,16 @@ test("settings.json template has the §6.3 deny list, all four hook events, and 
   expect(cmds("SubagentStop")).toEqual(expect.arrayContaining([".claude/hooks/record-agents.sh", ".claude/hooks/verdict-format.sh"]));
   const hooksDir = new URL("../hooks/", import.meta.url).pathname;
   for (const ev of Object.keys(s.hooks)) for (const c of cmds(ev)) expect(existsSync(join(hooksDir, c.replace(".claude/hooks/", ""))), c).toBe(true);
+});
+
+test("settings.json deny covers the build-config files, matching [protected].factory (F9)", () => {
+  const s = JSON.parse(read("claude/settings.json"));
+  const h = toml(read("factory/harness.toml"));
+  for (const g of ["package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*"]) {
+    expect(s.permissions.deny, `Edit(${g})`).toContain(`Edit(${g})`);
+    expect(s.permissions.deny, `Write(${g})`).toContain(`Write(${g})`);
+    expect(h.protected.factory, g).toContain(g);   // 두 목록이 갈라지면 L2가 막는 것과 L1 integrity가 보는 것이 달라진다
+  }
 });
 
 test("dispatcher commands exist for the four LLM stages only and name their workflow", () => {

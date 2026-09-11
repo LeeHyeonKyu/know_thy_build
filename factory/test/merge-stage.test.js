@@ -131,6 +131,26 @@ test("(3) gates non-GREEN (RED) → needs-human 'gates RED at merge'; status pos
   expect(d.mergeGates).not.toHaveBeenCalled();
 });
 
+test("(3) gates null (no verdict at all) → needs-human 'gates missing at merge', never merges (F7)", async () => {
+  const { lines, record } = makeRecord();
+  const postStatus = basePostStatus();
+  const d = baseD({ gates: vi.fn(async () => null) });
+  const code = await run(d, { record, postStatus });
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates missing at merge" }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.mergeGates).not.toHaveBeenCalled();
+  expect(postStatus).not.toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates" }));
+  expect(lines.some((l) => /merge: gates missing/.test(l))).toBe(true);
+});
+
+test("(3) gates undefined → same fail-closed path as null", async () => {
+  const d = baseD({ gates: vi.fn(async () => undefined) });
+  expect(await run(d)).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates missing at merge" }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
 test("(3) gates GREEN → factory/gates status posted as success, flow continues", async () => {
   const postStatus = basePostStatus();
   const d = baseD();

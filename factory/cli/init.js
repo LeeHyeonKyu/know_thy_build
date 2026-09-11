@@ -5,7 +5,10 @@ import { buildManifest } from "./manifest.js";
 import { planInstall, applyInstall, ensureGitignore } from "./install.js";
 import { run as realRun } from "../lib/exec.js";
 
-export const GITIGNORE_ENTRIES = [".factory/out/", ".factory/node_modules/"];
+// run 기록은 `factory/records` 브랜치에 산다(ADR-014) — 작업 브랜치에서는 추적하지 않는다.
+// 추적하면 hydrateRecord가 스테이지 시작에 복원한 파일이 그대로 "미커밋 변경"이 되어 stop-guard가
+// 종료를 막는다(fix round 2, F1). 디렉터리는 appendRunRecord가 필요할 때 만든다 — .gitkeep을 두지 않는다.
+export const GITIGNORE_ENTRIES = [".factory/out/", ".factory/node_modules/", "docs/factory/runs/"];
 
 export function projectVars(root) {
   let name = basename(root);
@@ -38,9 +41,6 @@ export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun 
     return 1;
   }
   const counts = applyInstall({ actions, root, writeFile: writeFileSync, mkdir: (d) => mkdirSync(d, { recursive: true }), chmod: chmodSync });
-  mkdirSync(join(root, "docs/factory/runs"), { recursive: true });
-  const keep = join(root, "docs/factory/runs/.gitkeep");
-  if (!existsSync(keep)) writeFileSync(keep, "");
   const gi = join(root, ".gitignore");
   const before = existsSync(gi) ? readFileSync(gi, "utf8") : null;
   const after = ensureGitignore(before, GITIGNORE_ENTRIES);
@@ -52,8 +52,8 @@ export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun 
 Next:
   1. Edit .factory/harness.toml (or run /know-thy-build:project) and docs/factory/CHARTER.md (status: ready when done)
   2. npx know-thy-build factory doctor
-  3. npx know-thy-build factory bootstrap   # labels, branch protection, token issue date
-  4. gh secret set FACTORY_BOT_TOKEN; gh secret set CLAUDE_CODE_OAUTH_TOKEN   # see docs §4.4
-  5. git add -A && git commit && git push`);
+  3. git add -A && git commit && git push    # push BEFORE bootstrap — branch protection blocks the first push
+  4. npx know-thy-build factory bootstrap    # labels, branch protection, token issue date
+  5. gh secret set FACTORY_BOT_TOKEN; gh secret set CLAUDE_CODE_OAUTH_TOKEN   # see docs §4.4`);
   return 0;
 }

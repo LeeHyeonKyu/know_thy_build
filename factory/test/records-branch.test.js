@@ -211,7 +211,7 @@ test("hydrateRecord: a fresh clone restores the branch's record before this stag
   expect(show.stdout).toContain("## plan · 2026-09-12T00:00Z · gha-2\nrounds: 1\n");
 }, 20000);
 
-test("hydrateRecord: diverged local content is reported (never silently merged), and syncRecords then skips that file to keep the branch version", async () => {
+test("hydrateRecord: diverged local content is reported (never silently merged), and syncRecords appends only the local tail — the branch content survives", async () => {
   const remote = await makeRemote();
   const cwd1 = await makeClone(remote, "writer");
   writeRecord(cwd1, 7, "branch content\n");
@@ -226,10 +226,59 @@ test("hydrateRecord: diverged local content is reported (never silently merged),
 
   const r2 = await syncRecords({ run, cwd: cwd2, message: "m2" });
   expect(r2.ok).toBe(true);
-  expect(r2.skipped).toEqual(["docs/factory/runs/7.md"]);
+  expect(r2.skipped).toEqual([]);
+  expect(r2.merged).toEqual(["docs/factory/runs/7.md"]);
 
   const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
-  expect(show.stdout).toBe("branch content\n");   // 브랜치 내용이 유지됐다 — 덮어쓰지 않았다
+  expect(show.stdout).toBe("branch content\ncompletely different local content\n");   // 브랜치 내용 뒤에 로컬 꼬리가 붙었다 — 어느 쪽도 잃지 않는다
+}, 20000);
+
+test("(f) same-issue race: two runners hydrate from the same tip and both stage sections survive (F6)", async () => {
+  const remote = await makeRemote();
+  const seed = await makeClone(remote, "seed");
+  // P0 — triage가 이미 브랜치에 올려둔 기록
+  appendRunRecord({ root: seed, issue: 7, title: "race", stage: "triage", runnerId: "gha-0", now: "2026-09-12T00:00Z", lines: ["disposition: ready"] });
+  const P0 = readFileSync(join(seed, "docs/factory/runs/7.md"), "utf8");
+  expect((await syncRecords({ run, cwd: seed, message: "m0" })).ok).toBe(true);
+
+  // 두 러너가 같은 이슈에서 같은 tip(P0)을 하이드레이트한다
+  const cwdA = await makeClone(remote, "race-a");
+  const cwdB = await makeClone(remote, "race-b");
+  expect(await hydrateRecord({ run, cwd: cwdA, issue: 7 })).toEqual({ ok: true, hydrated: true });
+  expect(await hydrateRecord({ run, cwd: cwdB, issue: 7 })).toEqual({ ok: true, hydrated: true });
+  appendRunRecord({ root: cwdA, issue: 7, stage: "plan", runnerId: "gha-a", now: "2026-09-12T01:00Z", lines: ["rounds: 1"] });
+  appendRunRecord({ root: cwdB, issue: 7, stage: "review", runnerId: "gha-b", now: "2026-09-12T02:00Z", lines: ["decision: approved"] });
+  const S1 = readFileSync(join(cwdA, "docs/factory/runs/7.md"), "utf8").slice(P0.length);
+  const S2 = readFileSync(join(cwdB, "docs/factory/runs/7.md"), "utf8").slice(P0.length);
+
+  // A가 먼저 밀고, B는 그사이 tip이 움직인 것을 발견하고 재시도한다
+  const rA = await syncRecords({ run, cwd: cwdA, message: "mA" });
+  expect(rA.ok).toBe(true);
+  const rB = await syncRecords({ run, cwd: cwdB, message: "mB" });
+  expect(rB.ok).toBe(true);
+  expect(rB.merged).toEqual(["docs/factory/runs/7.md"]);
+
+  const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
+  expect(show.stdout).toBe(P0 + S1 + S2);           // P0 + A의 섹션 + B의 섹션 — 아무것도 덮어쓰지 않았다
+  expect(show.stdout).toContain("## plan · 2026-09-12T01:00Z · gha-a\nrounds: 1\n");
+  expect(show.stdout).toContain("## review · 2026-09-12T02:00Z · gha-b\ndecision: approved\n");
+}, 30000);
+
+test("(g) syncRecords still skips a file whose local content adds nothing new (local is a prefix of the branch tip)", async () => {
+  const remote = await makeRemote();
+  const cwd1 = await makeClone(remote, "ahead");
+  writeRecord(cwd1, 7, "line1\nline2\n");
+  expect((await syncRecords({ run, cwd: cwd1, message: "m1" })).ok).toBe(true);
+
+  const cwd2 = await makeClone(remote, "behind");
+  writeRecord(cwd2, 7, "line1\n");                 // 브랜치 tip의 접두어일 뿐 — 새로 더한 꼬리가 없다
+  const r2 = await syncRecords({ run, cwd: cwd2, message: "m2" });
+  expect(r2.ok).toBe(true);
+  expect(r2.skipped).toEqual(["docs/factory/runs/7.md"]);
+  expect(r2.merged).toEqual([]);
+
+  const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
+  expect(show.stdout).toBe("line1\nline2\n");
 }, 20000);
 
 test("hydrateRecord: no factory/records branch on the remote → {ok:true, hydrated:false}, no throw", async () => {

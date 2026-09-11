@@ -69,7 +69,13 @@ ready_timeout_sec = 90
 [test.fakes]
 
 [protected]                      # (protected)
-factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]
+# 빌드 설정 파일도 보호한다 — [commands]의 게이트 명령(lint/unit/test_files/…)이 전부 이 파일들을
+# 거쳐 해석되므로, 에이전트가 여기를 고치면 "게이트를 통과시키는" 가장 쉬운 길이 코드를 고치는 게
+# 아니라 판정 기준을 고치는 것이 된다(테스트 제외, 린트 규칙 해제, 의존성 교체).
+# 바꿔야 한다면 경로는 하나다: `factory:harness` 이슈 → 사람이 diff를 보고 머지(§5.1).
+factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md",
+                 "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
+                 "tsconfig*.json", ".eslintrc*", "eslint.config.*"]
 except        = [".factory/lessons/**", "docs/factory/runs/**"]
 additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true

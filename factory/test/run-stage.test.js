@@ -271,16 +271,71 @@ test("a failed syncRecords doesn't change a non-zero exit code either (e.g. a ne
   expect(lines.some((l) => /run-record sync: failed — no origin remote/.test(l))).toBe(true);
 });
 
-test("hydrateRecord runs first inside the try (before resetGates), best-effort, and never changes the exit code", async () => {
+test("a successful syncRecords that merged a record tail says so in the run record (F6)", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    syncRecords: async () => ({ ok: true, commit: "a".repeat(40), retried: true, merged: ["docs/factory/runs/7.md"], skipped: [] }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(lines).toContain("run-record sync: merged onto the branch tip — docs/factory/runs/7.md");
+});
+
+test("a successful syncRecords that skipped a record (nothing new) says so too", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    syncRecords: async () => ({ ok: true, commit: "a".repeat(40), retried: false, skipped: ["docs/factory/runs/7.md"], merged: [] }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(lines).toContain("run-record sync: skipped (nothing new) — docs/factory/runs/7.md");
+});
+
+test("a clean syncRecords (nothing merged or skipped) adds no extra record line", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    syncRecords: async () => ({ ok: true, commit: "a".repeat(40), retried: false, skipped: [], merged: [] }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(0);
+  expect(lines.some((l) => /run-record sync/.test(l))).toBe(false);
+});
+
+test("hydrateRecord runs right after charterReady — before back-pressure, claim and localEntry (F5)", async () => {
   const calls = [];
   const deps = baseDeps({
+    charterReady: async () => { calls.push("charter"); return true; },
     hydrateRecord: vi.fn(async () => { calls.push("hydrate"); return { ok: true, hydrated: true }; }),
+    backPressure: async () => { calls.push("back-pressure"); return { ok: true, reasons: [] }; },
+    claim: async () => { calls.push("claim"); return { ok: true }; },
+    localEntry: async () => { calls.push("local-entry"); return null; },
     resetGates: async () => calls.push("reset-gates"),
   });
   expect(await runStage({ stage: "implement", issue: 7, deps, runnerId: "r" })).toBe(0);
-  expect(calls[0]).toBe("hydrate");
-  expect(calls[1]).toBe("reset-gates");
+  // 기록 하이드레이트는 back-pressure 거부나 claim 실패로 물러날 때도 이미 끝나 있어야 한다 —
+  // 그래야 그 경로에서 남기는 record 줄이 브랜치의 누적 기록 위에 얹힌다.
+  expect(calls.slice(0, 2)).toEqual(["charter", "hydrate"]);
+  expect(calls.indexOf("hydrate")).toBeLessThan(calls.indexOf("back-pressure"));
+  expect(calls.indexOf("hydrate")).toBeLessThan(calls.indexOf("claim"));
+  expect(calls.indexOf("hydrate")).toBeLessThan(calls.indexOf("local-entry"));
+  expect(calls.indexOf("hydrate")).toBeLessThan(calls.indexOf("reset-gates"));
   expect(deps.hydrateRecord).toHaveBeenCalledTimes(1);
+});
+
+test("hydrateRecord is not called when the charter isn't ready (the stage never starts)", async () => {
+  const hydrateRecord = vi.fn(async () => ({ ok: true, hydrated: false }));
+  expect(await runStage({ stage: "plan", issue: 7, deps: baseDeps({ charterReady: async () => false, hydrateRecord }) })).toBe(0);
+  expect(hydrateRecord).not.toHaveBeenCalled();
+});
+
+test("hydrateRecord still runs when back-pressure refuses the stage", async () => {
+  const hydrateRecord = vi.fn(async () => ({ ok: true, hydrated: true }));
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const deps = baseDeps({ backPressure: async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }), hydrateRecord, claim: vi.fn() });
+  expect(await runStage({ stage: "implement", issue: 7, deps, runnerId: "r" })).toBe(0);
+  expect(hydrateRecord).toHaveBeenCalledTimes(1);
+  expect(deps.claim).not.toHaveBeenCalled();
+  err.mockRestore();
 });
 
 test("hydrateRecord is optional — deps without it still work", async () => {
@@ -309,7 +364,7 @@ test("a hydrateRecord that throws is swallowed by its own try/catch, recorded, a
   expect(lines.some((l) => /hydrate: aborted — git fetch failed/.test(l))).toBe(true);
 });
 
-test("localEntry runs right after claim, before hydrateRecord and resetGates", async () => {
+test("localEntry runs right after claim (and after hydrateRecord), before resetGates", async () => {
   const calls = [];
   const deps = baseDeps({
     claim: async () => { calls.push("claim"); return { ok: true }; },
@@ -318,8 +373,8 @@ test("localEntry runs right after claim, before hydrateRecord and resetGates", a
     resetGates: async () => calls.push("reset-gates"),
   });
   expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(calls.indexOf("hydrate")).toBeLessThan(calls.indexOf("claim"));
   expect(calls.indexOf("claim")).toBeLessThan(calls.indexOf("local-entry"));
-  expect(calls.indexOf("local-entry")).toBeLessThan(calls.indexOf("hydrate"));
   expect(calls.indexOf("local-entry")).toBeLessThan(calls.indexOf("reset-gates"));
   expect(deps.localEntry).toHaveBeenCalledTimes(1);
 });
@@ -700,6 +755,7 @@ test("status posting: review approved posts factory/gates and factory/review suc
   const verdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: [], should_fix: [], verified: [] });
   const d = baseDeps({
     buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    checkoutHead: async () => ({ ok: true, sha: "b".repeat(40), pr: 9 }),
     gates: async () => gates,
     verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: "b".repeat(40), verdicts: [verdict("correctness", "approve"), verdict("qa", "approve")] } }),
     writeHandoff: vi.fn(async () => {}), transition: vi.fn(async () => ({ ok: true })),
@@ -715,6 +771,7 @@ test("status posting: review rework posts factory/review failure (no gates file 
   const verdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: kind === "reject" ? [{ id: "MF1", where: "a.js:1", claim: "broken", evidence: "test fails" }] : [], should_fix: [], verified: [] });
   const d = baseDeps({
     buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    checkoutHead: async () => ({ ok: true, sha: "c".repeat(40), pr: 9 }),
     verifyStage: () => ({ ok: true, reasons: [], data: { round: 2, head_sha: "c".repeat(40), verdicts: [verdict("correctness", "reject"), verdict("qa", "approve")] } }),
     writeHandoff: vi.fn(async () => {}), transition: vi.fn(async () => ({ ok: true })),
     reportStatus,
@@ -764,6 +821,7 @@ test("status posting: incomplete review counts against the full roster, and post
   const verdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: [], should_fix: [], verified: [] });
   const d = baseDeps({
     buildContext: async () => ({ roster: ["correctness", "qa", "security"], orchestration: "workflow", limits: { K: 3 } }),
+    checkoutHead: async () => ({ ok: true, sha: "g".repeat(40), pr: 9 }),
     verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: "g".repeat(40), verdicts: [verdict("correctness", "approve")] } }),
     writeHandoff: vi.fn(async () => {}), transition, reportStatus,
   });
@@ -783,6 +841,51 @@ test("status posting: a missing sha skips the post and leaves a record line", as
   expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
   expect(reportStatus).not.toHaveBeenCalled();
   expect(lines.some((l) => /status: factory\/gates skipped — no sha/.test(l))).toBe(true);
+});
+
+// ── fix round 2 (F4): factory/review is posted at the *verified* head, never at an agent-chosen sha ──
+
+const reviewVerdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: [], should_fix: [], verified: [] });
+
+test("status posting: factory/review is posted at checkoutSha (the verified PR head), not at the handoff's own head_sha field", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const sha = "1".repeat(40);
+  const d = baseDeps({
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    checkoutHead: async () => ({ ok: true, sha, pr: 9 }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: sha, verdicts: [reviewVerdict("correctness", "approve"), reviewVerdict("qa", "approve")] } }),
+    reportStatus,
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/review", state: "success", sha }));
+});
+
+test("status posting: a handoff head_sha that differs from the checked-out head posts NO factory/review status and is recorded", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const lines = [];
+  const d = baseDeps({
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    checkoutHead: async () => ({ ok: true, sha: "1".repeat(40), pr: 9 }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: "2".repeat(40), verdicts: [reviewVerdict("correctness", "approve"), reviewVerdict("qa", "approve")] } }),
+    reportStatus, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(reportStatus).not.toHaveBeenCalledWith(expect.objectContaining({ context: "factory/review" }));
+  expect(lines).toContain("status: factory/review skipped — handoff head_sha differs from checked-out head");
+});
+
+test("status posting: an incomplete review with a drifted head_sha also posts nothing and is recorded", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const lines = [];
+  const d = baseDeps({
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    checkoutHead: async () => ({ ok: true, sha: "1".repeat(40), pr: 9 }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: "3".repeat(40), verdicts: [reviewVerdict("correctness", "approve")] } }),
+    reportStatus, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
+  expect(reportStatus).not.toHaveBeenCalledWith(expect.objectContaining({ context: "factory/review" }));
+  expect(lines).toContain("status: factory/review skipped — handoff head_sha differs from checked-out head");
 });
 
 // ── Task 12: review·merge — PR head checkout (R6) ───────────────────────────

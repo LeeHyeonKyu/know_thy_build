@@ -1,7 +1,19 @@
 import { LABELS } from "./label-catalog.js";
 
+/**
+ * L0(branch protection)가 요구하는 체크는 `factory/integrity` 하나다(ADR-015 보강).
+ * `factory/gates`·`factory/review`는 **이슈 파이프라인을 탄 PR에만** 게시자가 있다(run-stage가
+ * PR head sha에 commit status로 올린다) — 사람이 직접 여는 retro-proposal·harness PR이나
+ * 부트스트랩 직후의 첫 push에는 그 상태를 만들 주체가 아예 없어서, L0에 넣는 순간 그 PR들은
+ * 영영 머지 불가가 된다(교착). 두 체크는 L1이 계속 강제한다 — merge 스테이지의
+ * `allChecksGreen(prChecks, harness.factory.required_checks)`가 세 개 전부를 요구한다.
+ * strict:false — 게이트 판정은 이미 sha에 묶여 있고(requirements.js gatesGate), strict(=up-to-date)는
+ * 머지 직전 base 리베이스를 요구하는데 팩토리는 리베이스를 하지 않는다(하면 게이트가 검증한 sha가 바뀐다).
+ */
+const L0_CONTEXTS = ["factory/integrity"];
+
 const PROTECTION_BODY = (contexts) => ({
-  required_status_checks: { strict: true, contexts },
+  required_status_checks: { strict: false, contexts },
   enforce_admins: true,
   required_pull_request_reviews: null,
   restrictions: null,
@@ -16,14 +28,15 @@ const secretNote = (label) => `gh secret set ${label} — bootstrap never writes
 /**
  * 부트스트랩 계획을 순수 함수로 만든다 — gh 호출은 전혀 하지 않는다.
  * 라벨: 카탈로그 전부를 항상 op으로 낸다(--force가 있어도 갱신 대상이라 existing.labels는 보고용일 뿐, 필터링에 쓰지 않는다).
- * protection: harness의 default_branch/required_checks로 정확한 body를 만든다(§요구사항, 그대로 고정).
+ * protection: harness의 default_branch + 고정된 L0 contexts(`factory/integrity` 하나)로 body를 만든다.
+ *   `harness.factory.required_checks`는 여기서 쓰지 않는다 — 그건 L1(머지 스테이지) 몫이다(ADR-015 보강).
  * variable: FACTORY_TOKEN_ISSUED_AT이 없을 때만 오늘 날짜로 세팅 — 있으면 값을 덮어쓰지 않고 note만 남긴다.
  * secrets: bootstrap은 값을 쓸 수 없으므로(비밀이라) 부재를 note로만 알린다.
  */
 export function bootstrapPlan({ harness, today, existing }) {
   const ops = LABELS.map((l) => ({ kind: "label", name: l.name, color: l.color, description: l.description }));
 
-  ops.push({ kind: "protection", branch: harness.project.default_branch, body: PROTECTION_BODY(harness.factory.required_checks) });
+  ops.push({ kind: "protection", branch: harness.project.default_branch, body: PROTECTION_BODY(L0_CONTEXTS) });
 
   const issuedAt = existing?.variables?.FACTORY_TOKEN_ISSUED_AT;
   if (issuedAt) {

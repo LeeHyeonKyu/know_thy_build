@@ -11,7 +11,8 @@ const MERGEABILITY_REPOLL_MS = 5000;
  * 머지해도 되는가"뿐이다: PR이 열려 있는가, 충돌은 없는가, 게이트는 GREEN인가, 필수 체크와 무결성은
  * 확인됐는가. 전부 통과해야만 gh pr merge를 부른다 — 머지는 되돌릴 수 없으므로 매 단계 fail closed.
  *
- * d: prInfo() → PR view(number,state,mergeable,…) | null, gates() → factory.gates.v1 | null (MergeBaseError/
+ * d: prInfo() → PR view(number,state,mergeable,…) | null, gates() → factory.gates.v1 | null (null은 "통과"가
+ *    아니라 **판정 없음**이다 — needs-human "gates missing at merge"로 떨어진다. MergeBaseError/
  *    GitDiffError를 던질 수 있다), mergeGates() → { checksGreen, integrityGreen } (마찬가지),
  *    mergePr(pr), transition({to,reason,mergeGatesResult?}), closeIssue(pr), sleep?(ms).
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
@@ -78,13 +79,16 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: gates BLOCKED — ${reason}`, ...refusal(t)]);
     return 2;
   }
-  if (gates && gates.status !== "GREEN") {
-    const reason = `gates ${gates.status} at merge`;
+  // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
+  // 만들어지지 않았거나 이 런에서 게이트가 돌지 않았다는 뜻이고, 머지는 되돌릴 수 없으므로
+  // 확인되지 않은 것을 통과로 읽지 않는다(fail closed, §merge gate와 같은 원칙).
+  if (!gates || gates.status !== "GREEN") {
+    const reason = `gates ${gates?.status ?? "missing"} at merge`;
     const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: gates ${gates.status}`, ...refusal(t)]);
+    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t)]);
     return 2;
   }
-  record([`merge: gates ${gates ? gates.status : "none"}`]);
+  record([`merge: gates ${gates.status}`]);
 
   // (4) 필수 체크와 무결성 — 조회 자체가 안 됐으면 플래그가 서지 않는다(fail closed). 둘 다 실패면
   // 두 이유를 모두 남긴다 — 하나만 말하면 사람이 나머지 원인을 못 보고 재시도한다.

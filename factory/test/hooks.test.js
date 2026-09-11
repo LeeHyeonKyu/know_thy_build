@@ -100,6 +100,49 @@ test("stop-guard: a detached HEAD (review/merge checkoutHead) still refuses a di
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(0);
 });
 
+// ── fix round 2 (F1): the hydrated run record / quarantine writes must not trip the stop guard ──
+
+test("stop-guard: an untracked run record (docs/factory/runs/) never blocks — detached HEAD or claude/fq-* branch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sg-runs-"));
+  const git = (...a) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd });
+  await git("init", "-q", "-b", "main");
+  await git("commit", "-q", "--allow-empty", "-m", "init");
+  const sha = (await git("rev-parse", "HEAD")).stdout.trim();
+  await git("checkout", "-q", "--detach", sha);
+  // review/merge run detached and hydrateRecord writes docs/factory/runs/<issue>.md before anything else
+  await run("bash", ["-c", "mkdir -p docs/factory/runs && echo '# Run · #7' > docs/factory/runs/7.md"], { cwd });
+  const r = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r.stderr + r.stdout, "stop-guard should ignore docs/factory/runs").toBe("");
+  expect(r.code).toBe(0);
+  // same on a pushed factory work branch — the run record alone is not "uncommitted work"
+  const remote = mkdtempSync(join(tmpdir(), "sg-runs-remote-"));
+  await run("git", ["init", "-q", "--bare", "-b", "main", remote]);
+  await git("checkout", "-q", "-b", "claude/fq-7");
+  await git("remote", "add", "origin", remote);
+  await git("push", "-q", "-u", "origin", "claude/fq-7");
+  const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r2.stderr + r2.stdout).toBe("");
+  expect(r2.code).toBe(0);
+});
+
+test("stop-guard: a modified tracked .factory/quarantine.toml (script-owned) never blocks on a detached HEAD", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sg-quar-"));
+  const git = (...a) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd });
+  await git("init", "-q", "-b", "main");
+  await run("bash", ["-c", "mkdir -p .factory && printf 'schema = 1\\n' > .factory/quarantine.toml"], { cwd });
+  await git("add", ".factory/quarantine.toml");
+  await git("commit", "-q", "-m", "quarantine");
+  const sha = (await git("rev-parse", "HEAD")).stdout.trim();
+  await git("checkout", "-q", "--detach", sha);
+  await run("bash", ["-c", "printf '[entries]\\n' >> .factory/quarantine.toml"], { cwd });
+  const r = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r.stderr + r.stdout, "stop-guard should ignore .factory/quarantine.toml").toBe("");
+  expect(r.code).toBe(0);
+  // a change outside the exclusions is still caught on the same detached HEAD
+  await run("bash", ["-c", "echo y > src.txt"], { cwd });
+  expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
+});
+
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 1'"\n`);

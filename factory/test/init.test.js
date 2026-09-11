@@ -12,10 +12,14 @@ const fresh = () => { const r = mkdtempSync(join(tmpdir(), "ktb-init-")); writeF
 test("init installs the full manifest into an empty repo and renders the project name", async () => {
   const root = fresh(); const { io: i, o } = io();
   expect(await initCommand({ root, pkgRoot, argv: [], io: i })).toBe(0);
-  for (const p of [".factory/bin/run-stage.js", ".factory/lib/gates.js", ".factory/harness.toml", ".factory/roles.toml", ".factory/package.json", ".factory/lessons/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/block-dangerous.sh", ".claude/commands/factory-triage.md", ".github/workflows/factory-implement.yml", ".factory/actions/setup/action.yml", "docs/factory/CHARTER.md", "docs/factory/runs/.gitkeep"]) expect(existsSync(join(root, p)), p).toBe(true);
+  for (const p of [".factory/bin/run-stage.js", ".factory/lib/gates.js", ".factory/harness.toml", ".factory/roles.toml", ".factory/package.json", ".factory/lessons/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/block-dangerous.sh", ".claude/commands/factory-triage.md", ".github/workflows/factory-implement.yml", ".factory/actions/setup/action.yml", "docs/factory/CHARTER.md"]) expect(existsSync(join(root, p)), p).toBe(true);
   expect(readFileSync(join(root, ".factory/harness.toml"), "utf8")).toContain('name           = "demo-app"');
   expect(statSync(join(root, ".claude/hooks/block-dangerous.sh")).mode & 0o111).not.toBe(0);
-  expect(readFileSync(join(root, ".gitignore"), "utf8")).toContain(".factory/out/");
+  const gitignore = readFileSync(join(root, ".gitignore"), "utf8");
+  expect(gitignore).toContain(".factory/out/");
+  // run 기록은 factory/records 브랜치에 산다(ADR-014) — 작업 브랜치에서는 추적하지 않는다(F1)
+  expect(gitignore).toContain("docs/factory/runs/");
+  expect(existsSync(join(root, "docs/factory/runs/.gitkeep")), "no .gitkeep — the directory is created on demand by appendRunRecord").toBe(false);
   expect(o.out.join("\n")).toMatch(/created\s+\d+/);
 });
 

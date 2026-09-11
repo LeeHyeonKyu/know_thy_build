@@ -25,7 +25,7 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 const HARNESS = { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review", "factory/integrity"] } };
 
 const PROTECTION_BODY = (contexts) => ({
-  required_status_checks: { strict: true, contexts },
+  required_status_checks: { strict: false, contexts },
   enforce_admins: true,
   required_pull_request_reviews: null,
   restrictions: null,
@@ -68,12 +68,17 @@ test("bootstrapPlan: always emits every label op (existing is report-only, never
   }
 });
 
-test("bootstrapPlan: protection op body matches the exact required shape, contexts from harness.factory.required_checks", () => {
+test("bootstrapPlan: protection op body matches the exact required shape — L0 contexts are integrity only (ADR-015 보강)", () => {
   const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] };
   const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
   const protectionOps = ops.filter((o) => o.kind === "protection");
   expect(protectionOps.length).toBe(1);
-  expect(protectionOps[0]).toEqual({ kind: "protection", branch: "main", body: PROTECTION_BODY(["factory/gates", "factory/review", "factory/integrity"]) });
+  // factory/gates·factory/review는 이슈 파이프라인을 타는 PR에만 게시자가 있다 — L0에 넣으면 사람이
+  // 머지하는 retro-proposal·harness PR과 첫 push가 영영 막힌다. 둘은 L1(allChecksGreen)이 계속 강제한다.
+  expect(protectionOps[0]).toEqual({ kind: "protection", branch: "main", body: PROTECTION_BODY(["factory/integrity"]) });
+  expect(protectionOps[0].body.required_status_checks.strict).toBe(false);   // F3: 게이트는 sha 바인딩 — strict는 factory가 하지 않는 rebase를 요구한다
+  // 하네스의 required_checks는 그대로다 — 머지 스테이지(L1)가 세 개 전부를 본다
+  expect(HARNESS.factory.required_checks).toEqual(["factory/gates", "factory/review", "factory/integrity"]);
 });
 
 test("bootstrapPlan: FACTORY_TOKEN_ISSUED_AT absent → variable op with today's date", () => {

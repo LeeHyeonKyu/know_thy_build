@@ -68,6 +68,18 @@ implement                    Build the feature
 
 A feature is complete ONLY when all its test cases in `docs/QA.md` pass with evidence.
 
+### Phase 2 — factory (dark build loop)
+
+Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipeline in CI (triage → plan → implement → review → merge):
+
+- `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files)
+- `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
+- `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`)
+- `factory run <stage> <issue>` — run a stage locally with the exact scripts CI uses
+- `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
+
+Design and rationale: [`docs/superpowers/specs/2026-09-10-factory-design.md`](docs/superpowers/specs/2026-09-10-factory-design.md) · decisions: [`docs/factory/DECISIONS.md`](docs/factory/DECISIONS.md)
+
 ---
 
 ## Roles

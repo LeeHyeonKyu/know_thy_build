@@ -341,9 +341,10 @@ run-stage.sh <stage> <issue>
   9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md를 default 브랜치가 아니라 전용
                                              #   `factory/records` 브랜치에 git plumbing으로 append한다(ADR-014) — 현재
                                              #   체크아웃·인덱스·HEAD(또는 detached HEAD)를 건드리지 않는다. 스테이지
-                                             #   시작 시(0.5 이후) `hydrateRecord`가 이 브랜치에서 기존 run 기록을 먼저
-                                             #   복원하고, 동기화는 로컬 파일이 브랜치 내용을 연장하지 않는 한 덮어쓰지
-                                             #   않는다(ADR-014 보강) · lock 해제
+                                             #   시작 시(CHARTER 확인 직후, back-pressure·claim보다 먼저) `hydrateRecord`가
+                                             #   이 브랜치에서 기존 run 기록을 먼저 복원하고, 동기화는 로컬이 브랜치 tip의
+                                             #   연장이 아니면 공통 접두어 이후의 로컬 꼬리만 tip 뒤에 이어 붙인다 —
+                                             #   어느 쪽 내용도 잃지 않는다(ADR-014 보강) · lock 해제
 ```
 
 **merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.sh`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
@@ -745,7 +746,7 @@ light_on_merge: true
 | **L3 프롬프트** | `CLAUDE.md`, `.claude/agents/*.md` | 읽기만 | (강제 아님) 품질·관점 |
 
 ### 6.1 L0 상세
-- required checks: `factory/gates`, `factory/review`, `factory/integrity`(`harness.toml [factory].required_checks`의 기본값, §5.1). 세 개 모두 GREEN이어야 머지 가능. 게시 주체는 서로 다르다(Plan 2 실행 판결, ADR-015) — `factory/gates`·`factory/review`는 run-stage가 PR head sha에 commit status로 게시하고(§4.2.1 step 5·8), `factory/integrity`는 `factory-integrity.yml`의 잡 `name:`(GitHub가 자동으로 만드는 체크 이름)이라 run-stage가 게시하지 않는다.
+- required checks: `factory/gates`, `factory/review`, `factory/integrity`(`harness.toml [factory].required_checks`의 기본값, §5.1). 세 개 모두 GREEN이어야 머지 가능. 게시 주체는 서로 다르다(Plan 2 실행 판결, ADR-015) — `factory/gates`·`factory/review`는 run-stage가 PR head sha에 commit status로 게시하고(§4.2.1 step 5·8), `factory/integrity`는 `factory-integrity.yml`의 잡 `name:`(GitHub가 자동으로 만드는 체크 이름)이라 run-stage가 게시하지 않는다. **단, branch protection(L0)에 required context로 등록하는 것은 `factory/integrity` 하나뿐이다(ADR-015 보강)** — `factory/gates`·`factory/review`는 이슈 파이프라인을 탄 PR에만 게시자가 있어서 L0에 넣으면 사람이 머지하는 retro-proposal·`factory:harness` PR과 부트스트랩 직후의 첫 push가 영영 막힌다. 세 개를 모두 요구하는 것은 L1(머지 스테이지의 `allChecksGreen(prChecks, [factory].required_checks)`)이고, `bootstrap`은 `required_status_checks = { strict: false, contexts: ["factory/integrity"] }`를 건다(strict=false: 게이트는 이미 sha에 묶여 있고 팩토리는 리베이스를 하지 않는다).
 - `factory/integrity`(`.factory/bin/integrity.js`)는 PR diff(`base...head`)에서 세 가지를 본다: ① `[protected].factory` 매치 파일 변경 — `[protected].except`와 `[protected].additive_only`(`.claude/agents/*.md`의 `## Examples`/`## Perspectives`, 위치 기반 검사: 섹션 밖 삽입·삭제는 전부 위반이고, 이번 diff가 새로 추가한 `## ` 헤더는 그 자신도 다른 추가 줄의 경계로도 인정하지 않는다 — base에 없던 헤더로 경계를 위조해 섹션을 자칭해도 잡힌다) 밖이면 RED. ② `.factory/lessons/**` 항목 포맷 — `factory-lessons:v1` 헤더, `- [L-YYYY-MM-DD-NN]` 형식, 항목마다 `근거:` 문구, 역할당 상한(`max`) 초과. ③ `harness.toml [test].test_glob`에 매치하는 테스트 파일에 skip/ignore 주석(`.skip(`, `xit(`, `xdescribe(`, `@pytest.mark.skip`, `istanbul ignore`, `pragma: no cover`, `Stryker disable`)이 새로 추가됨. `factory:retro-proposal` 라벨 PR도 이 검사에서 예외는 아니다 — 다만 그 PR의 "required reviewer 1명" 규칙은 branch protection으로 표현하지 않는다(Plan 2 실행 판결, ADR-015 — R5: 라벨 조건부 required reviewer는 GitHub이 지원하지 않는다). 대신 merge 스테이지가 `claude/fq-*` 브랜치 PR만 자동 머지 대상으로 보므로, retro가 만드는 PR은 구조적으로 사람만 머지한다.
 - 토큰: 모든 잡이 단일 PAT `FACTORY_BOT_TOKEN`을 쓴다(checkout·`GH_TOKEN` 동일) — `GITHUB_TOKEN`이 만든 라벨·push 이벤트는 다음 워크플로를 깨우지 않으므로 기본 액션 토큰으로는 스테이지 체이닝이 끊긴다. merge 잡만 선택적으로 `FACTORY_MERGE_TOKEN`을 상위 토큰으로 쓸 수 있다(`${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}`, 없으면 `FACTORY_BOT_TOKEN`으로 폴백)(Plan 2 실행 판결, ADR-015 — R2). 머지 보호는 이 토큰 하나가 아니라 required checks(L0) + merge 스크립트 전용(L1, R3) + deny(L2)의 합으로 성립한다.
 - linear history, force-push 금지, 관리자도 규칙 적용(`enforce_admins`).
@@ -1216,6 +1217,8 @@ N=1(머지마다 전체 retro)이 기본이며 안전하다. 두 가지 가드�
 
 이슈당 1파일. 모든 스테이지가 append. 트랜스크립트가 사라진 뒤 유일한 영구 증거이자 retro의 입력.
 
+**저장 위치는 default 브랜치가 아니라 전용 `factory/records` 브랜치다**(ADR-014). 작업 브랜치에서는 `.gitignore`가 `docs/factory/runs/`를 제외한다 — 러너가 복원한 기록 파일이 "미커밋 변경"으로 보여 `stop-guard.sh`가 종료를 막는 일이 없어야 한다. 스테이지는 시작 시(CHARTER 확인 직후) `hydrateRecord`로 브랜치의 누적 기록을 로컬에 복원하고, 끝에 `syncRecords`로 plumbing 커밋을 브랜치 끝에 잇는다. 같은 이슈에서 두 러너가 동시에 append했다면 로컬 파일 전체가 아니라 **공통 접두어 이후의 꼬리만** 브랜치 tip 뒤에 이어 붙인다 — 어느 쪽 섹션도 잃지 않는다(ADR-014 보강).
+
 각 스테이지 줄에는 `-p` 출력 JSON에서 그대로 얻는 값을 싣는다: `usage`(토큰), `total_cost_usd`, `modelUsage`, `num_turns`, `terminal_reason`, `permission_denials`(ADR-002에서 존재 확인). 토큰·비용은 사용량 **보고**의 원천이다 — 구독 창을 소비하되 factory가 제한하지 않으므로(§4.4, ADR-005) 이슈별·주간 합계를 `factory status`·retro·`:digest`가 여기서 읽어 보여준다.
 
 ```markdown
@@ -1280,8 +1283,9 @@ Feature Registry(PROJECT.md)는 유지하되 `status`를 사람이 쓰지 않는
 npx know-thy-build            → /project   (스택 결정, 러너 + unit 스모크, harness.toml maturity=M0, doctor PASS)
                               → /technical (CHARTER.md draft → 사람이 status: ready)
                               → /qa SETUP  (QA.md 규약, 결정성 규칙)
-npx know-thy-build factory init / doctor / bootstrap
-git push
+npx know-thy-build factory init / doctor
+git push                      (bootstrap 전에 — 보호 규칙이 걸린 뒤에는 default 브랜치로 직접 push할 수 없다)
+npx know-thy-build factory bootstrap
 /feature ×N                   → docs/features/001..N.md + 이슈 backlog
 라벨 backlog → factory:queue   → 이후 다크 (fast 레벨 게이트로 시작)
   …이슈 #3에서 prisma 도입 → retro가 M1 부족 감지 → factory:harness 이슈 → factory가 compose·seed·스모크 구축 → 사람이 harness.toml diff 머지 → full 레벨
