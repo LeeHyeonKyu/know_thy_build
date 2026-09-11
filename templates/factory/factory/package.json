@@ -1,0 +1,7 @@
+{
+  "name": "factory-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Runtime dependencies for .factory/bin and .factory/lib (installed by know-thy-build factory init). Do not edit.",
+  "dependencies": { "smol-toml": "1.3.1" }
+}

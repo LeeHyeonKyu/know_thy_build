@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gh secret*)", "Bash(gh variable set*)", "Bash(gh api -X DELETE*)", "Bash(gh api --method DELETE*)",
+      "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)"
+    ]
+  }
+}

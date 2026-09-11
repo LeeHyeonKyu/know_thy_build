@@ -1,0 +1,81 @@
+schema = 1
+
+# know-thy-build factory harness — M0 skeleton. /project fills [commands]; /qa SETUP fills [test.*].
+# Sections marked (protected) can only change through a human-merged PR (integrity blocks agents).
+
+[project]
+name           = "{{PROJECT_NAME}}"
+spec_dir       = "docs/features"
+runs_dir       = "docs/factory/runs"
+default_branch = "main"
+
+[runtime]
+setup = "npm ci"
+node  = "22"
+
+[commands]                       # all judged by exit code
+lint       = "npm run lint"
+unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
+test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
+test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
+lint_file  = "npx eslint {file}"                 # lint-touched.sh (logging only)
+
+[harness]
+maturity = "M0"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
+
+[factory]
+orchestration   = "workflow"     # workflow | agent
+required_checks = ["factory/gates", "factory/review", "factory/integrity"]
+
+[commands.proof]                 # fill when maturity >= M1
+# coverage        = "npx vitest run --coverage --coverage.reporter=json"
+# coverage_report = ".factory/out/coverage/coverage-final.json"
+# mutation        = "npx stryker run --incremental"
+# mutation_report = "reports/mutation/mutation.json"
+
+[gates]
+required = ["lint", "unit"]
+fast     = ["lint", "unit"]
+full     = ["lint", "unit"]
+deep     = ["lint", "unit"]
+
+[gates.thresholds]               # (protected)
+diff_coverage_pct       = 90
+mutation_score_pct      = 70
+new_test_repeats        = 3
+flaky_isolation_runs    = 3
+flaky_base_runs         = 5
+quarantine_max          = 5
+quarantine_ttl_days     = 28
+quarantine_return_after = 30
+
+[test]
+guide       = "docs/QA.md"
+naming      = "test_{issue}_{slug}"
+smoke       = { unit = "test/smoke.test.js" }
+runtime_budget_min = 12
+test_glob   = ["test/**/*.test.js"]
+source_glob = ["src/**/*.js"]
+unit_report = ".factory/out/unit.json"
+
+[test.env]
+# compose   = "docker-compose.test.yml"
+# env_file  = ".env.test"
+# seed      = ""
+# app_start = ""
+# app_ready = "http://localhost:3000/healthz"
+ready_timeout_sec = 90
+
+[test.fakes]
+
+[protected]                      # (protected)
+factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]
+except        = [".factory/lessons/**", "docs/factory/runs/**"]
+additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
+tests_are_load_bearing = true
+
+[load_bearing]
+paths = []
+
+[evidence]
+qa_artifacts = ".factory/out/qa/**"
