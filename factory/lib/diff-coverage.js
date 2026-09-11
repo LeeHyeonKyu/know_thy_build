@@ -18,6 +18,7 @@ export async function runDiffCoverage({ run, cwd, harness, base, readFile }) {
   const cmd = harness.commands.proof.coverage, report = harness.commands.proof.coverage_report;
   if (!cmd || !report) return { ok: false, misconfigured: true, detail: "commands.proof.coverage / coverage_report missing" };
   const r = await run("bash", ["-lc", cmd], { cwd });
+  if (r.code !== 0) return { ok: false, detail: `coverage command failed (exit ${r.code})`, command_code: r.code };
   const text = readFile(`${cwd}/${report}`);
   if (!text) return { ok: false, detail: `coverage report not found at ${report}`, command_code: r.code };
   const changed = await changedLines({ run, cwd, base });

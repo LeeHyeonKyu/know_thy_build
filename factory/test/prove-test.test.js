@@ -7,7 +7,7 @@ const wt = (res) => ({ match: (c, a) => c === "git" && a[0] === "worktree", resu
 const ok = { code: 0, stdout: "", stderr: "" }, fail = { code: 1, stdout: "", stderr: "FAIL" };
 
 test("proveTest ok when new tests FAIL on base", async () => {
-  const run = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run test/new.test.js"), result: fail }]);
+  const run = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run") && a[1].includes("test/new.test.js"), result: fail }]);
   const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt" });
   expect(r.ok).toBe(true);
   expect(run.calls.some((c) => c.cmd === "git" && c.args.join(" ") === "worktree add --detach /tmp/wt abc")).toBe(true);
