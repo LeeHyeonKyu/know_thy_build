@@ -66,6 +66,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
   const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
   const record = (lines) => { try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); } };
+  /**
+   * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
+   * 없으므로(어느 커밋 얘기인지 모름) 건너뛰고 흔적만 남긴다.
+   */
+  const postStatus = async ({ context, state, description, sha }) => {
+    if (!d.reportStatus) return;
+    if (!sha) { record([`status: ${context} skipped — no sha`]); return; }
+    try { await d.reportStatus({ context, state, description, sha }); }
+    catch (e) { record([`status: ${context} post failed — ${e?.message || e}`]); }
+  };
   // 공장이 감당할 수 있는 만큼만 물린다. 거부는 실패가 아니다 — 라벨을 건드리지 않고 물러나
   // 다음 sweeper/이벤트에서 다시 시도한다. 그래서 락을 잡기도 전에 본다.
   if (stage === "implement" && d.backPressure) {
@@ -116,6 +126,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       record([`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
+    // BLOCKED은 위에서 이미 return했다 — 여기 남은 gates는 GREEN 아니면 그 외(RED/MISCONFIGURED)뿐이다.
+    if (GATED_STAGES.has(stage) && gates != null) {
+      await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+    }
     const v = d.verifyStage({ stage, out, ctx, gates });
     if (!v.ok) {
       const t = await d.transition({ to: "factory:needs-human", reason: `stage artifact missing or invalid: ${v.reasons.join("; ")}` });
@@ -131,13 +145,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     if (stage === "review" && v.data && v.data.decision == null && Array.isArray(v.data.verdicts)) {
       const roster = ctx?.roster || [];
       const agg = aggregateReview({ verdicts: v.data.verdicts, rosterSize: roster.length, rosterRoles: roster });
+      const reviewDescription = (decision) => {
+        const k = v.data.verdicts.filter((x) => x.verdict === "approve").length;
+        return `review round ${v.data.round}: ${decision} (${k}/${v.data.verdicts.length} approve)`;
+      };
       if (agg.decision === "incomplete") {                            // 라운드가 덜 끝났다 — 자동 라우팅하지 않는다
+        await postStatus({ context: "factory/review", state: "error", description: reviewDescription("incomplete"), sha: v.data.head_sha });
         const t = await d.transition({ to: "factory:needs-human", reason: `review incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}` });
         record(["verify: ok", `review: incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
         return 2;
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
+      await postStatus({ context: "factory/review", state: agg.decision === "approved" ? "success" : "failure", description: reviewDescription(agg.decision), sha: v.data.head_sha });
     }
     await d.writeHandoff({ stage, data: v.data, gates });
     const t = await d.transition({ to: nextState(stage, v.data), data: v.data });
@@ -311,6 +331,12 @@ async function main() {
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     release: () => release({ run, cwd: root, issue }),
+    reportStatus: (s) => gh.setStatus({
+      ...s,
+      targetUrl: process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID
+        ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`
+        : undefined,
+    }),
   };
   process.exit(await runStage({ stage, issue, deps, runnerId }));
 }

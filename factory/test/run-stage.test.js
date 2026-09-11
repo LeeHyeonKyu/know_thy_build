@@ -467,3 +467,67 @@ test("C1: states with no commit binding get the plain ctxExtra and make no gh ca
   expect(gh.branchHeadSha).not.toHaveBeenCalled();
   expect(gh.comments).not.toHaveBeenCalled();
 });
+
+// ── Task 11: 체크 상태 게시 (factory/gates, factory/review) ─────────────────
+
+test("status posting: implement GREEN → factory/gates success exactly once with the gates head_sha", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const d = implDeps({ gates: async () => gates, reportStatus });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(reportStatus).toHaveBeenCalledTimes(1);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates", state: "success", sha: "a".repeat(40) }));
+});
+
+test("status posting: review approved posts factory/gates and factory/review success", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "b".repeat(40), passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const verdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const d = baseDeps({
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    gates: async () => gates,
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, head_sha: "b".repeat(40), verdicts: [verdict("correctness", "approve"), verdict("qa", "approve")] } }),
+    writeHandoff: vi.fn(async () => {}), transition: vi.fn(async () => ({ ok: true })),
+    reportStatus,
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates", state: "success", sha: "b".repeat(40) }));
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/review", state: "success", sha: "b".repeat(40), description: expect.stringContaining("review round 1: approved (2/2 approve)") }));
+});
+
+test("status posting: review rework posts factory/review failure (no gates file → no factory/gates post)", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const verdict = (role, kind) => ({ role, verdict: kind, confidence: "high", must_fix: kind === "reject" ? [{ id: "MF1", where: "a.js:1", claim: "broken", evidence: "test fails" }] : [], should_fix: [], verified: [] });
+  const d = baseDeps({
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 } }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 2, head_sha: "c".repeat(40), verdicts: [verdict("correctness", "reject"), verdict("qa", "approve")] } }),
+    writeHandoff: vi.fn(async () => {}), transition: vi.fn(async () => ({ ok: true })),
+    reportStatus,
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/review", state: "failure", sha: "c".repeat(40), description: expect.stringContaining("review round 2: rework (1/2 approve)") }));
+  expect(reportStatus).not.toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates" }));
+});
+
+test("status posting: a reportStatus throw is recorded but the run continues", async () => {
+  const reportStatus = vi.fn(async () => { throw new Error("network down"); });
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "d".repeat(40), passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const lines = [];
+  const d = implDeps({ gates: async () => gates, reportStatus, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(lines.some((l) => /status: factory\/gates post failed — network down/.test(l))).toBe(true);
+});
+
+test("status posting: plan stage posts nothing", async () => {
+  const reportStatus = vi.fn(async () => {});
+  await runStage({ stage: "plan", issue: 4, deps: baseDeps({ reportStatus }) });
+  expect(reportStatus).not.toHaveBeenCalled();
+});
+
+test("status posting: gates RED → factory/gates failure", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const gates = { schema: "factory.gates.v1", level: "full", status: "RED", head_sha: "e".repeat(40), failing: ["unit"], passed: 3, failed: 1, skipped: [], misconfigured: [], tests: { failing: [{ id: "t::x" }], excluded: [] } };
+  const d = implDeps({ gates: async () => gates, reportStatus });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates", state: "failure", sha: "e".repeat(40) }));
+});
