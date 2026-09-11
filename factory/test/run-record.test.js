@@ -14,3 +14,10 @@ test("creates file with header then appends stage sections", () => {
   expect(txt).toContain("## plan · 2026-09-08T09:21Z · gha-2\nrounds: 3\nhandoff: comment 3021\n");
   expect(p).toBe(join(root, "docs/factory/runs/123.md"));
 });
+
+test("short-form timestamp (no seconds) is left unchanged", () => {
+  const root = mkdtempSync(join(tmpdir(), "rr-"));
+  const p = appendRunRecord({ root, issue: 456, stage: "plan", runnerId: "gha-3", now: "2026-09-08T09:02Z", lines: ["x"] });
+  const txt = readFileSync(p, "utf8");
+  expect(txt).toContain("## plan · 2026-09-08T09:02Z · gha-3\nx\n");
+});

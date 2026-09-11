@@ -16,3 +16,14 @@ test("posts once, then patches on each tick; stop() clears the timer", async () 
   expect(gh.patchComment).toHaveBeenCalledTimes(2);
   vi.useRealTimers();
 });
+
+test("unparseable comment id disables heartbeat (no timer, no patches)", async () => {
+  vi.useFakeTimers();
+  const gh = { comment: vi.fn(async () => "https://x/1"), patchComment: vi.fn(async () => {}) };
+  const hb = await startHeartbeat({ gh, issue: 7, stage: "implement", runnerId: "gha-1", intervalMs: 1000, now: () => "T0" });
+  expect(hb.commentId).toBe(null);
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(gh.patchComment).not.toHaveBeenCalled();
+  hb.stop();
+  vi.useRealTimers();
+});

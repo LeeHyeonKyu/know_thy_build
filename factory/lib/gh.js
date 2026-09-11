@@ -42,7 +42,8 @@ export function makeGh({ run, repo }) {
       const m = /\/pull\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
     async patchComment(commentId, body) {
-      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "-f", `body=${body}`]);
+      // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
+      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
     },
   };
 }

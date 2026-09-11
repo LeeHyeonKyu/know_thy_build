@@ -35,6 +35,15 @@ test("comment() posts body via --body-file from stdin", async () => {
   expect(call.opts.input).toBe("hello");
 });
 
+test("patchComment sends body via --input stdin JSON (avoids -f @-prefix file interpretation)", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a.includes("PATCH"), result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await gh.patchComment(42, "@user hi");
+  const call = run.calls[0];
+  expect(call.args.slice(-2)).toEqual(["--input", "-"]);
+  expect(call.opts.input).toBe(JSON.stringify({ body: "@user hi" }));
+});
+
 test("non-zero exit throws with stderr", async () => {
   const run = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "boom" } }]);
   await expect(makeGh({ run, repo }).issue(1)).rejects.toThrow(/boom/);

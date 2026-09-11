@@ -20,13 +20,26 @@ test("claim succeeds when push creates the lock ref", async () => {
 test("claim fails (ok:false, holder from remote message) when ref exists", async () => {
   const run = makeFakeRun([...base,
     { match: (c, a) => c === "git" && a[0] === "push", result: { code: 1, stdout: "", stderr: "! [rejected] deadbeef -> factory/lock-7 (fetch first)" } },
-    { match: (c, a) => c === "git" && a[0] === "ls-remote", result: { code: 0, stdout: "cafebabe\trefs/heads/factory/lock-7\n", stderr: "" } },
     { match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 0, stdout: "", stderr: "" } },
     { match: (c, a) => c === "git" && a[0] === "log", result: { code: 0, stdout: "lock issue=7 stage=implement runner=local/mac at=2026-09-11T00:00:00Z\n", stderr: "" } },
   ]);
   const r = await claim({ run, cwd: "/repo", issue: 7, stage: "implement", runnerId: "gha-2" });
   expect(r.ok).toBe(false);
   expect(r.holder).toMatch(/runner=local\/mac/);
+  const fetch = run.calls.find((c) => c.args[0] === "fetch");
+  expect(fetch.args).toEqual(["fetch", "origin", "refs/heads/factory/lock-7"]);
+  const log = run.calls.find((c) => c.args[0] === "log");
+  expect(log.args).toEqual(["log", "-1", "--format=%s", "FETCH_HEAD"]);
+});
+
+test("claim fails without pushing when commit-tree fails", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "hash-object", result: { code: 0, stdout: "4b825dc642cb6eb9a060e54bf8d69288fbee4904\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "commit-tree", result: { code: 1, stdout: "", stderr: "fatal: bad tree" } },
+  ]);
+  const r = await claim({ run, cwd: "/repo", issue: 7, stage: "implement", runnerId: "gha-1" });
+  expect(r.ok).toBe(false);
+  expect(run.calls.find((c) => c.args[0] === "push")).toBeUndefined();
 });
 
 test("release deletes the lock ref", async () => {
