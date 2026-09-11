@@ -3,7 +3,11 @@ import { dirname, join } from "node:path";
 
 const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 
+/** 테스트 파일을 지정 실행하는 명령이 없으면 증명 게이트는 "실패"가 아니라 설정 오류다. */
+const MISSING_TEST_FILES = { ok: false, misconfigured: true, detail: "commands.test_files missing" };
+
 export async function proveTest({ run, cwd, harness, base, addedTests, tmp = `${cwd}/.factory/out/prove-wt` }) {
+  if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
   if (!addedTests?.length) return { ok: false, detail: "no new tests in this change (done_when must be backed by new tests)" };
   const g = (args) => run("git", args, { cwd });
   const add = await g(["worktree", "add", "--detach", tmp, base]);
@@ -23,9 +27,10 @@ export async function proveTest({ run, cwd, harness, base, addedTests, tmp = `${
   }
 }
 
-export async function repeatNewTests({ run, cwd, harness, addedTests, times, fullSuiteCmd = harness.commands.unit }) {
+export async function repeatNewTests({ run, cwd, harness, addedTests, times, fullSuiteCmd = harness.commands?.unit }) {
   // 반복 횟수를 모르면 "흔들리지 않음"을 주장할 수 없다 — 통과가 아니라 설정 오류다.
   if (!(times >= 1)) return { ok: false, misconfigured: true, runs: [], detail: "new_test_repeats missing" };
+  if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES, runs: [] };
   if (!addedTests?.length) return { ok: true, runs: [], detail: "no new tests" };
   const cmd = harness.commands.test_files.replace("{files}", addedTests.map(q).join(" "));
   const runs = [];

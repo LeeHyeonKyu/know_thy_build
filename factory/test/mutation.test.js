@@ -19,3 +19,8 @@ test("no changed sources → ok; no command → misconfigured", async () => {
   expect((await mutationGate({ run: makeFakeRun([]), cwd: "/", harness: H({}), changedSources: [], readFile: () => null })).ok).toBe(true);
   expect((await mutationGate({ run: makeFakeRun([]), cwd: "/", harness: H({}), changedSources: ["x"], readFile: () => null })).misconfigured).toBe(true);
 });
+test("F9: [commands.proof] 블록 자체가 없어도 터지지 않고 MISCONFIGURED다", async () => {
+  const bare = { commands: {}, gates: { thresholds: { mutation_score_pct: 70 } } };
+  const r = await mutationGate({ run: makeFakeRun([]), cwd: "/", harness: bare, changedSources: ["src/a.js"], readFile: () => null });
+  expect(r).toEqual({ ok: false, misconfigured: true, threshold: 70, detail: "commands.proof.mutation missing" });
+});

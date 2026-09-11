@@ -8,7 +8,16 @@ export async function classifyFailures({ run, cwd, harness, failing, base, thres
     else existing.push(f);
   }
   if (!existing.length) return out;
-  const one = (f, dir) => run("bash", ["-lc", harness.commands.test_one.replace("{file}", q(f.file)).replace("{name}", f.name.replace(/'/g, "'\\''"))], { cwd: dir });
+  // 테스트 하나를 돌릴 방법이 없으면 "이 PR 탓인가"를 물을 수 없다 — red도 flaky도 아닌 blocked다.
+  const cmd = harness.commands?.test_one;
+  if (!cmd) {
+    const error = "commands.test_one missing";
+    for (const f of existing) out.push({ id: f.id, verdict: "blocked", evidence: { error } });
+    return out;
+  }
+  // {file}과 마찬가지로 {name}도 여기서 따옴표를 붙인다 — 하네스 쪽에서 '{name}'으로 감싸면
+  // 이름에 든 작은따옴표가 명령을 깨거나 주입 경로가 된다(§5.1 test_one 계약).
+  const one = (f, dir) => run("bash", ["-lc", cmd.replace("{file}", q(f.file)).replace("{name}", q(f.name))], { cwd: dir });
   let wtReady = false;
   try {
     for (let idx = 0; idx < existing.length; idx++) {

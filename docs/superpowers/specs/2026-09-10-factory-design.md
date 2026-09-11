@@ -460,7 +460,9 @@ integration = "pnpm vitest run --project integration --reporter=json --outputFil
 e2e         = "pnpm playwright test --reporter=json --output=.factory/out/e2e"
 build       = "pnpm build"
 test_files  = "pnpm vitest run {files}"                                # §5.2.4 prove-test·new-test-repeat: 지정한 테스트 파일들만 실행
-test_one    = "pnpm vitest run {file} -t '{name}'"                     # §5.2.5-③ classify-failure: 테스트 하나만 격리 재실행
+test_one    = "pnpm vitest run {file} -t {name}"                       # §5.2.5-③ classify-failure: 테스트 하나만 격리 재실행
+                                                                       #   계약: {file}·{name} 둘 다 **스크립트가 셸 따옴표를 붙인다**. 하네스에서 '{name}'처럼
+                                                                       #   직접 감싸지 말 것 — 이름에 든 작은따옴표가 명령을 깨거나 주입 경로가 된다
 
 [harness]
 maturity = "M2"                        # M0 | M1 | M2 (§5.2.1). 승격은 factory:harness 이슈 + 사람 머지
@@ -469,7 +471,9 @@ maturity = "M2"                        # M0 | M1 | M2 (§5.2.1). 승격은 facto
 orchestration = "workflow"             # workflow | agent (§4.2.4). 런타임에 자동 전환되지 않는다
 
 [commands.proof]                       # 증명 게이트 (§5.2.4). 측정은 gates.sh(diff-coverage.js/mutation.js)가, 임계는 여기(protected)에
-coverage        = "pnpm vitest run --coverage --coverage.reporter=json"   # diff coverage가 돌릴 커버리지 명령
+coverage        = "pnpm vitest run --coverage --coverage.reporter=json"   # diff coverage가 돌릴 커버리지 명령.
+                                                                          #   [commands].unit이 이미 커버리지를 뱉는다면 여기에 **같은 명령을 그대로 써도 된다**
+                                                                          #   (그러면 한 스테이지에서 두 번 돈다 — 정확성 우선, 중복 실행은 허용)
 coverage_report = ".factory/out/coverage/coverage-final.json"            # istanbul JSON. diff-coverage.js가 변경 줄과 대조
 mutation        = "pnpm stryker run --incremental --mutate $(git diff --name-only origin/main -- 'src/**/*.ts')"
 mutation_report = "reports/mutation/mutation.json"                       # Stryker --incremental 기본 경로. mutation.js가 읽는다
@@ -615,7 +619,7 @@ implement 단계에서 `gates.sh`가 **이번 PR에서 변경된 테스트 파�
 사람에게 "skip 승인"을 맡겨도 근거를 더 잘 읽는 것이 아니므로 그 경로는 두지 않는다. 대신 시스템 제약으로 바꾼다.
 - **격리(quarantine)**: skip하지 않는다. **계속 실행하되 판정에서만 제외**하고 결과를 run 기록에 남긴다. `.factory/quarantine.toml`(스크립트만 씀)에 기록. schema: `[[quarantined]] id, since, reason, evidence[], consecutive_passes`.
 - **상한**: 격리 수 ≤ N(기본 5개 또는 전체의 2%, `harness.toml [gates.thresholds].quarantine_max`가 유일한 출처 — §5.1). 초과 시 implement 잡이 **새 claim을 거부**한다(리뷰 대기 역압과 동일). flaky 방치 = 공장 정지이므로 방치가 구조적으로 불가능하다.
-- **자동 복귀**: 격리 중 `quarantine_return_after`(기본 30)회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다).
+- **자동 복귀**: 격리 중 `quarantine_return_after`(기본 30)회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다). 격리 항목의 `consecutive_passes`는 implement/review 게이트 실행마다 갱신된다(Plan 1b); 격리 등록은 Plan 4 retro.
 - **TTL**: 격리 4주 경과 시 retro가 그 테스트가 지키던 동작을 **다른 레벨에서 다시 쓰는 이슈**를 만든다(예: e2e 타이밍 의존 → integration). 그것도 K회 실패하면 삭제하고 `DECISIONS.md`에 "이 동작은 현재 검증되지 않음"을 기록한다. 삭제는 조용히 일어나지 않는다.
 - 사람은 역압으로 공장이 멈췄을 때만 등장하며, 그때의 판단은 "skip해도 되나"가 아니라 "제품에 비결정성이 있는데 어떻게 할 것인가"라는 제품 판단이다.
 
@@ -731,7 +735,7 @@ light_on_merge: true
 - linear history, force-push 금지, 관리자도 규칙 적용(`enforce_admins`).
 
 ### 6.2 L1 상세
-- `gates.sh <level>` → `.factory/out/gates.json` + 한 줄 `FACTORY_GATES: level=full status=GREEN passed=4 failed=0 failing=none skipped=none misconfigured=none`. required 게이트가 skip이면 `MISCONFIGURED` exit 2.
+- `gates.sh <level>` → `.factory/out/gates.json` + 한 줄 `FACTORY_GATES: level=full status=GREEN passed=4 failed=0 failing=none skipped=none misconfigured=none excluded=none`. required 게이트가 skip이면 `MISCONFIGURED` exit 2.
 - `prove-test.sh <issue>`: 브랜치의 새 테스트 파일을 base에 얹어 실행 → **실패해야** 통과. 통과하면 "테스트가 수정을 증명하지 않음".
 - `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
 - `assert-handoff.sh`, `transition.sh`: 3.3.

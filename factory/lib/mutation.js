@@ -6,7 +6,7 @@ const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 export async function mutationGate({ run, cwd, harness, changedSources, readFile }) {
   const threshold = harness.gates.thresholds.mutation_score_pct;
   if (!changedSources?.length) return { ok: true, score: null, threshold, detail: "no changed sources" };
-  const { mutation, mutation_report } = harness.commands.proof;
+  const { mutation, mutation_report } = harness.commands?.proof || {};
   if (!mutation) return { ok: false, misconfigured: true, threshold, detail: "commands.proof.mutation missing" };
   const r = await run("bash", ["-lc", mutation.replace("{files}", changedSources.map(q).join(","))], { cwd });
   let score = null, detail;

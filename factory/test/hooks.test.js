@@ -124,6 +124,17 @@ test("lint-touched: enforces a timeout on the lint command (no system `timeout` 
   expect(r.stderr).toMatch(/exit 124/);
 }, 10000);
 
+test("lint-touched: 쓰레기 FACTORY_LINT_TIMEOUT_MS는 기본 60s로 떨어진다 (NaN 타임아웃 금지)", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "lt-nan-")); mkdirSync(join(cwd, ".factory"));
+  writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 3'"\n`);
+  for (const bad of ["abc", "", "0", "-1"]) {
+    const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd, FACTORY_LINT_TIMEOUT_MS: bad } });
+    expect(r.code, bad).toBe(0);
+    expect(r.stderr, bad).toMatch(/exit 3/);            // 124(즉시 kill)가 아니라 실제 lint 결과가 온다
+    expect(r.stderr, bad).toMatch(/LINT src\/a\.js/);
+  }
+}, 15000);
+
 test("verdict-format: only the LAST assistant text message counts", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vf-last-"));
   const t = join(dir, "t.jsonl");

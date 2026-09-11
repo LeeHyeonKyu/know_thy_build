@@ -25,6 +25,16 @@ test("proveTest fails when there are no new tests", async () => {
   expect(r.ok).toBe(false); expect(r.detail).toMatch(/no new tests/);
 });
 
+test("F9: commands.test_files가 없으면 터지지 않고 MISCONFIGURED로 돌아온다", async () => {
+  const run = makeFakeRun([{ match: () => true, result: ok }]);
+  const bare = { commands: {} };
+  const pt = await proveTest({ run, cwd: "/repo", harness: bare, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt" });
+  expect(pt).toEqual({ ok: false, misconfigured: true, detail: "commands.test_files missing" });
+  const rp = await repeatNewTests({ run, cwd: "/repo", harness: bare, addedTests: ["test/new.test.js"], times: 3 });
+  expect(rp).toMatchObject({ ok: false, misconfigured: true, detail: "commands.test_files missing" });
+  expect(run.calls).toHaveLength(0);                                   // 워크트리도 만들지 않는다
+});
+
 test("repeatNewTests: 반복 횟수를 모르면 통과가 아니라 MISCONFIGURED다", async () => {
   const run = makeFakeRun([{ match: () => true, result: ok }]);
   for (const times of [undefined, 0, -1]) {
