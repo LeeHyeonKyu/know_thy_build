@@ -27,8 +27,8 @@ const SCHEMAS = {
   "triage.v1"(o, e) {
     req(e, o, "issue", "number");
     const d = oneOf(e, o, "disposition", ["ready", "needs-info", "wont-do"]);
+    if (d === "ready" || !["needs-info", "wont-do"].includes(d)) oneOf(e, o, "tier", ["docs", "standard", "load-bearing"]);
     if (d === "needs-info") req(e, o, "questions", "array");
-    else oneOf(e, o, "tier", ["docs", "standard", "load-bearing"]);
   },
   "plan.v1"(o, e) {
     req(e, o, "issue", "number");

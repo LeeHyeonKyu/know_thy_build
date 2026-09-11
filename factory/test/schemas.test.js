@@ -7,6 +7,8 @@ test("triage.v1", () => {
   expect(r.ok).toBe(false);
   expect(r.errors.join(" ")).toMatch(/disposition/);
   expect(r.errors.join(" ")).toMatch(/tier/);
+  expect(validate("triage.v1", { schema: "factory.triage.v1", issue: 1, disposition: "wont-do" }).ok).toBe(true);
+  expect(validate("triage.v1", { schema: "factory.triage.v1", issue: 1, disposition: "needs-info", questions: ["q"] }).ok).toBe(true);
 });
 
 test("plan.v1 requires done_when with verify+level, files_expected, dissent_log, roles, rounds", () => {
