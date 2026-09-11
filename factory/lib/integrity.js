@@ -1,8 +1,12 @@
 import { matchesAny } from "./glob.js";
-import { changedLines } from "./changed-files.js";
 
 const SKIP_PRAGMAS = [/\.skip\s*\(/, /\bxit\s*\(/, /\bxdescribe\s*\(/, /@pytest\.mark\.skip/, /istanbul ignore/, /pragma:\s*no cover/, /Stryker disable/];
 
+/**
+ * readFileAt (base content) is accepted for interface symmetry but currently unused:
+ * the additive-only position check only reads the CURRENT file (readFile) — it asks
+ * "which section did this added line land in", not "what changed relative to base".
+ */
 export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, readFile, readFileAt = () => "" }) {
   const violations = [];
   const ns = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
@@ -15,8 +19,9 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
     if (additive) {
       const allowed = prot.additive_only[additive];
       const removed = removedByFile.get(f) || [];
-      const outside = (addedByFile.get(f) || []).filter((l) => !inAllowedSection(readFile(`${cwd}/${f}`), allowed, l.text));
-      if (removed.length || outside.length) violations.push({ file: f, rule: `additive-only sections (${allowed.join(", ")}) — removals or edits outside allowed sections` });
+      const lines = (readFile(`${cwd}/${f}`) || "").split("\n");
+      const outside = (addedByFile.get(f) || []).some((l) => !allowed.includes(sectionAt(lines, l.line)));
+      if (removed.length || outside) violations.push({ file: f, rule: `additive-only sections (${allowed.join(", ")}) — removals or edits outside allowed sections` });
       continue;
     }
     if (matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f)) violations.push({ file: f, rule: "protected path changed" });
@@ -28,33 +33,67 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   return { ok: violations.length === 0, violations, checked: { files } };
 }
 
-function addedLines(u0) { return collect(u0, "+"); }
-function removedLines(u0) { return collect(u0, "-"); }
-function collect(u0, sign) {
-  const m = new Map(); let file = null;
+const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/** 파일 귀속: "+++ b/X" → X, 삭제 diff의 "+++ /dev/null"은 직전 "--- a/X"의 X로 귀속시킨다 */
+function fileFor(line, current, pendingOld) {
+  if (line.startsWith("+++ b/")) return line.slice(6);
+  if (line.startsWith("+++ /dev/null")) return pendingOld;
+  return current;
+}
+/** git diff -U0 파싱: "+" 줄마다 신규 파일 기준 줄 번호(line, 1-indexed)를 함께 기록한다 */
+function addedLines(u0) {
+  const m = new Map(); let file = null, pendingOld = null, newLine = 0;
   for (const line of u0.split("\n")) {
-    if (line.startsWith("+++ ")) { file = line.startsWith("+++ b/") ? line.slice(6) : file; continue; }
-    if (line.startsWith("--- ")) continue;
-    if (file && line.startsWith(sign) && !line.startsWith(sign + sign + sign)) { if (!m.has(file)) m.set(file, []); m.get(file).push({ text: line.slice(1) }); }
+    if (line.startsWith("--- ")) { pendingOld = line.startsWith("--- a/") ? line.slice(6) : null; continue; }
+    if (line.startsWith("+++ ")) { file = fileFor(line, file, pendingOld); continue; }
+    const h = HUNK_HEADER.exec(line);
+    if (h) { newLine = Number(h[1]); continue; }
+    if (file && line.startsWith("+") && !line.startsWith("+++")) {
+      if (!m.has(file)) m.set(file, []);
+      m.get(file).push({ text: line.slice(1), line: newLine });
+      newLine++;
+    }
   }
   return m;
 }
-/** 파일 전체 텍스트에서 해당 줄 텍스트가 허용 섹션(## 헤더 ~ 다음 ## 헤더) 안에 있는가 */
-function inAllowedSection(fullText, allowedHeaders, lineText) {
-  let current = null;
-  for (const l of (fullText || "").split("\n")) {
-    if (/^## /.test(l)) current = l.trim();
-    if (l === lineText && current && allowedHeaders.includes(current)) return true;
+/** 삭제된 줄은 위치를 안 따진다(있으면 위반) — 삭제 전용 diff도 옛 파일명으로 귀속시킨다 */
+function removedLines(u0) {
+  const m = new Map(); let file = null, pendingOld = null;
+  for (const line of u0.split("\n")) {
+    if (line.startsWith("--- ")) { pendingOld = line.startsWith("--- a/") ? line.slice(6) : null; continue; }
+    if (line.startsWith("+++ ")) { file = fileFor(line, file, pendingOld); continue; }
+    if (file && line.startsWith("-") && !line.startsWith("---")) { if (!m.has(file)) m.set(file, []); m.get(file).push({ text: line.slice(1) }); }
   }
-  return false;
+  return m;
+}
+/** 현재 파일(lines, 1-indexed lineNo 기준)에서 lineNo가 속한 가장 가까운 '## ' 헤더 */
+function sectionAt(lines, lineNo) {
+  let current = null;
+  for (let i = 0; i < lineNo && i < lines.length; i++) {
+    if (/^## /.test(lines[i])) current = lines[i].trim();
+  }
+  return current;
 }
 function lessonsFormat(file, text) {
   const v = [];
   const head = /<!--\s*factory-lessons:v1\s+role=([\w-]+)\s+max=(\d+)\s*-->/.exec(text);
   if (!head) return [{ file, rule: "lessons header missing" }];
-  const entries = text.split("\n").filter((l) => /^- /.test(l));
+  const lines = text.split("\n");
+  const entryIdx = [];
+  lines.forEach((l, i) => { if (/^- /.test(l)) entryIdx.push(i); });
+  const entries = entryIdx.map((i) => lines[i]);
   for (const e of entries) if (!/^- \[L-\d{4}-\d{2}-\d{2}-\d{2}\]/.test(e)) v.push({ file, rule: `lessons entry malformed: ${e.slice(0, 40)}` });
   if (entries.length > Number(head[2])) v.push({ file, rule: `lessons over max ${head[2]}` });
-  if (!/근거:/.test(text) && entries.length) v.push({ file, rule: "lessons entries need 근거:" });
+  // 항목별 근거: 블록 = "- [L-...]" 줄부터 다음 "- [L-...]" 줄 직전(또는 EOF)까지
+  const idIdx = entryIdx.filter((i) => /^- \[L-\d{4}-\d{2}-\d{2}-\d{2}\]/.test(lines[i]));
+  idIdx.forEach((start, k) => {
+    const end = k + 1 < idIdx.length ? idIdx[k + 1] : lines.length;
+    const block = lines.slice(start, end).join("\n");
+    if (!/근거:/.test(block)) {
+      const id = /^- (\[L-\d{4}-\d{2}-\d{2}-\d{2}\])/.exec(lines[start])?.[1] || lines[start].slice(0, 40);
+      v.push({ file, rule: `lessons entry missing 근거: ${id}` });
+    }
+  });
   return v;
 }
