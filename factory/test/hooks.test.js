@@ -1,6 +1,6 @@
 import { test, expect } from "vitest";
 import { run } from "../lib/exec.js";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -102,4 +102,36 @@ test("verdict-format: reviewer stop without verdict json → exit 2; with → 0;
   expect(bad.code).toBe(2); expect(bad.stderr).toMatch(/verdict JSON/);
   const other = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "factory-builder", agent_transcript_path: t }) });
   expect(other.code).toBe(0);
+});
+
+test("lint-touched: shell-escapes file_path — no command injection via Edit/Write", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "lt-inj-")); mkdirSync(join(cwd, ".factory"));
+  const pwnDir = mkdtempSync(join(tmpdir(), "lt-pwn-"));
+  writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "echo LINT {file}"\n`);
+  const evil = `x.js; touch ${pwnDir}/PWNED #`;
+  const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: evil } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd } });
+  expect(r.code).toBe(0);
+  expect(existsSync(join(pwnDir, "PWNED"))).toBe(false);
+});
+
+test("lint-touched: enforces a timeout on the lint command (no system `timeout` on macOS)", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "lt-to-")); mkdirSync(join(cwd, ".factory"));
+  writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "sleep 5; echo late {file}"\n`);
+  const start = Date.now();
+  const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd, FACTORY_LINT_TIMEOUT_MS: "500" } });
+  expect(Date.now() - start).toBeLessThan(3000);
+  expect(r.code).toBe(0);
+  expect(r.stderr).toMatch(/exit 124/);
+}, 10000);
+
+test("verdict-format: only the LAST assistant text message counts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vf-last-"));
+  const t = join(dir, "t.jsonl");
+  const msg = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+  writeFileSync(t, msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n" + msg("changed my mind") + "\n");
+  const r = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
+  expect(r.code).toBe(2);
+  writeFileSync(t, msg("changed my mind") + "\n" + msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n");
+  const r2 = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
+  expect(r2.code).toBe(0);
 });

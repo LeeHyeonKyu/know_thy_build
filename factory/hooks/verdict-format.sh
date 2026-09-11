@@ -6,7 +6,7 @@ type=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null) || exit 
 case "$type" in reviewer-*|factory-verifier) ;; *) exit 0 ;; esac
 path=$(printf '%s' "$input" | jq -r '.agent_transcript_path // empty' 2>/dev/null) || exit 0
 [ -f "$path" ] || exit 0
-last=$(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' "$path" 2>/dev/null | tail -c 20000)
+last=$(jq -rs '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // ""' "$path" 2>/dev/null | tail -c 20000)
 if printf '%s' "$last" | grep -q '```json' && printf '%s' "$last" | grep -q '"verdict"'; then exit 0; fi
 echo "factory: reply with the verdict JSON block (\`\`\`json … \"verdict\": approve|reject … \`\`\`) before stopping" >&2
 exit 2

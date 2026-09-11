@@ -7,7 +7,8 @@ file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null
 root="${CLAUDE_PROJECT_DIR:-.}"
 cmd=$(grep -E '^\s*lint_file\s*=\s*"' "$root/.factory/harness.toml" 2>/dev/null | head -1 | sed -E 's/^[^"]*"(.*)"[[:space:]]*$/\1/') || exit 0
 [ -n "$cmd" ] || exit 0
-cmd=${cmd//\{file\}/$file}
-out=$(cd "$root" && bash -lc "$cmd" 2>&1); code=$?
+qfile=$(printf '%q' "$file")
+cmd=${cmd//\{file\}/$qfile}
+out=$(cd "$root" && node -e 'const {spawnSync}=require("node:child_process");const r=spawnSync("bash",["-lc",process.argv[1]],{encoding:"utf8",timeout:Number(process.env.FACTORY_LINT_TIMEOUT_MS||60000)});process.stdout.write((r.stdout||"")+(r.stderr||""));process.exit(r.status==null?124:r.status)' "$cmd" 2>&1); code=$?
 if [ $code -ne 0 ]; then printf 'factory lint (%s) exit %s:\n%s\n' "$file" "$code" "$(printf '%s' "$out" | tail -20)" >&2; fi
 exit 0
