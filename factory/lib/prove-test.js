@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+export const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 
 /** 테스트 파일을 지정 실행하는 명령이 없으면 증명 게이트는 "실패"가 아니라 설정 오류다. */
 const MISSING_TEST_FILES = { ok: false, misconfigured: true, detail: "commands.test_files missing" };
