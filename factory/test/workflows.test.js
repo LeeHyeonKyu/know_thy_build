@@ -208,7 +208,7 @@ test("factory-triage.js: loader/dispatcher issue mismatch fails closed — no tr
   expect(validate("triage.v1", result).ok).toBe(false);
 });
 
-test("factory-triage.js: a null factory-loader result re-spawns once; a second null still runs the Triage phase but invents no role", async () => {
+test("factory-triage.js: a null factory-loader result re-spawns once; a second null fails the stage closed with a named error and no role call", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return null;
     return null;
@@ -220,9 +220,10 @@ test("factory-triage.js: a null factory-loader result re-spawns once; a second n
   });
 
   expect(calls.filter((c) => c.opts.agentType === "factory-loader")).toHaveLength(2);
-  expect(phases).toEqual(["Load", "Triage"]);
+  expect(phases).toEqual(["Load"]);
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
-  expect(result).toEqual({ issue: 11, orchestration: "workflow", guarantee: "structural" });
+  expect(result).toEqual({ issue: 11, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(validate("triage.v1", result).ok).toBe(false);
 });
 
 // --- Task 3: templates/factory/claude/workflows/factory-plan.js ---
@@ -477,6 +478,20 @@ test("factory-plan.js: loader/dispatcher issue mismatch fails closed — no deba
   expect(validate("plan.v1", result).ok).toBe(false);
 });
 
+test("factory-plan.js: a null factory-loader fails the stage closed — no debate, named error, plan.v1 invalid", async () => {
+  const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? null : planFix());
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-loader"]);
+  expect(phases).toEqual(["Load"]);
+  expect(result).toEqual({ issue: 42, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(validate("plan.v1", result).ok).toBe(false);
+});
+
 test("factory-plan.js: an objection the synthesizer already logged is superseded, not duplicated, when it survives the second vote", async () => {
   const OBJECTION = "the rollback path is still unspecified";
   const stub = async (prompt, opts) => {
@@ -651,6 +666,10 @@ test("factory-implement.js: a rejected verdict buys exactly one fix round — th
   expect(byType(calls, "factory-builder")).toHaveLength(2);
   expect(byType(calls, "factory-verifier")).toHaveLength(2);
   expect(byType(calls, "factory-builder")[1].prompt).toContain("the mock always returns three rows");
+  // the second verdict is about the second head, not the one it already judged
+  expect(byType(calls, "factory-verifier")[0].prompt).toContain(SHA_A);
+  expect(byType(calls, "factory-verifier")[1].prompt).toContain(SHA_B);
+  expect(byType(calls, "factory-verifier")[1].prompt).not.toContain(SHA_A);
   expect(result.head_sha).toBe(SHA_B);
   expect(result.verifier.verdict).toBe("accepted");
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
@@ -819,4 +838,140 @@ test("factory-implement.js: the builder prompt carries the protected build-confi
   expect(build).toContain("claude/fq-42");
   expect(build).toContain("gh pr create --draft");
   expect(build).toContain("Closes #42");
+});
+
+const REWORK_MUST_FIX = [
+  { id: "cf1", where: "src/sync/service.ts:88", claim: "the since cursor is parsed in local time", evidence: "line 88 `new Date(since)`" },
+  { id: "arch2", where: "src/sync/service.ts", claim: "SyncService should be split", evidence: "500 lines, four responsibilities" },
+];
+
+test("factory-implement.js: a rework answer that skips a must_fix id re-spawns the builder once, naming the id it left out", async () => {
+  let builds = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX });
+    if (opts.agentType === "factory-builder") {
+      builds += 1;
+      const responses = builds === 1
+        ? [{ id: "cf1", status: "fixed", commit: SHA_B }]
+        : [{ id: "cf1", status: "fixed", commit: SHA_B }, { id: "arch2", status: "disputed", reason: "non_goals of the #42 plan" }];
+      return buildFix({ rework_response: { responses } });
+    }
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(byType(calls, "factory-builder")).toHaveLength(2);
+  const completion = byType(calls, "factory-builder")[1].prompt;
+  expect(completion).toContain("rework_response was incomplete");
+  expect(completion).toContain("arch2");
+  expect(result.error).toBeUndefined();
+  expect(result.rework_response.responses).toHaveLength(2);
+  expect(validate("rework-response.v1", result.rework_response).ok).toBe(true);
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
+});
+
+test("factory-implement.js: a rework answer still incomplete after the re-spawn fails closed — error, no verifier key, no verifier call", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX });
+    if (opts.agentType === "factory-builder") return buildFix({ rework_response: { responses: [{ id: "cf1", status: "fixed", commit: SHA_B }] } });
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(byType(calls, "factory-builder")).toHaveLength(2);
+  expect(byType(calls, "factory-verifier")).toHaveLength(0);
+  expect(phases).toEqual(["Load", "Build"]);
+  expect(result.error).toBe("rework response incomplete: arch2");
+  expect(result.verifier).toBeUndefined();
+  expect(result.head_sha).toBe(SHA_A);
+  expect(result.pr).toBe(31);
+  // no verifier verdict at all — verify-stage's implement.v1 check fails the stage into needs-human
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
+});
+
+test("factory-implement.js: a malformed rework entry (fixed with no commit, unknown status) counts as incomplete", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX });
+    if (opts.agentType === "factory-builder") {
+      return buildFix({ rework_response: { responses: [{ id: "cf1", status: "fixed" }, { id: "arch2", status: "acknowledged" }] } });
+    }
+    return verdictFix();
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const completion = byType(calls, "factory-builder")[1].prompt;
+  expect(completion).toContain("cf1 (status fixed needs a commit)");
+  expect(completion).toContain("arch2 (status must be fixed or disputed)");
+  expect(result.error).toMatch(/^rework response incomplete: /);
+  expect(result.verifier).toBeUndefined();
+});
+
+test("factory-implement.js: the rework block is repeated in the fix prompt — a rejected rework round still has to answer must_fix", async () => {
+  let verifies = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX });
+    if (opts.agentType === "factory-builder") {
+      return buildFix({ rework_response: { responses: [
+        { id: "cf1", status: "fixed", commit: SHA_B },
+        { id: "arch2", status: "disputed", reason: "non_goals of the #42 plan" },
+      ] } });
+    }
+    if (opts.agentType === "factory-verifier") { verifies += 1; return verifies === 1 ? REJECTED : verdictFix(); }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const fix = byType(calls, "factory-builder")[1].prompt;
+  expect(fix).toContain("REWORK round");
+  expect(fix).toContain("arch2");
+  expect(fix).toContain("gh pr comment");
+  expect(result.verifier.verdict).toBe("accepted");
+  expect(result.rework_response.responses).toHaveLength(2);
+});
+
+test("factory-implement.js: a null factory-loader fails the stage closed — nothing is built, named error", async () => {
+  const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? null : buildFix());
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-loader"]);
+  expect(phases).toEqual(["Load"]);
+  expect(result).toEqual({ issue: 42, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
+});
+
+test("factory-implement.js: the verifier must quote prove-test's expected/observed line as evidence", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix();
+    return verdictFix();
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+  const verify = byType(calls, "factory-verifier")[0].prompt;
+  expect(verify).toContain("expected/observed");
+  expect(verify).toMatch(/quote/);
 });

@@ -125,11 +125,24 @@ const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader
 
 const issue = Number(args.issue);
 
+// Fail-closed on a dead loader (same in all four workflows): without it we do not know the tier, the PR,
+// or — worst — whether this run is a rework with must_fix items outstanding, so the builder would treat a
+// rework as a fresh build and silently drop every reviewer finding. A named error beats a schema failure
+// with no reason attached.
+if (!loaded) {
+  return {
+    issue,
+    error: 'loader returned nothing',
+    orchestration: 'workflow',
+    guarantee: 'structural',
+  };
+}
+
 // Fail-closed issue-provenance check (same pattern as factory-triage.js / factory-plan.js): a stale
 // `.factory/out/context.json` or a wrong --context path must never let the builder open a PR against the
 // wrong issue. Returning no head_sha/pr here makes verify-stage's `implement.v1` check fail into
 // needs-human rather than merging work nobody asked for.
-if (loaded && Number(loaded.issue) !== issue) {
+if (Number(loaded.issue) !== issue) {
   return {
     issue,
     error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
@@ -141,10 +154,62 @@ if (loaded && Number(loaded.issue) !== issue) {
 // implement's roster in context.json is intentionally empty: builder and verifier are fixed roles
 // (`roles.toml [implement.builder]` / `[implement.verifier]`, both opus), not a CHARTER-driven debate
 // roster. The loader still runs — it is where issue/tier/pr/must_fix/disputed come from.
-const tier = loaded ? loaded.tier : undefined;
-const mustFix = (loaded && Array.isArray(loaded.must_fix)) ? loaded.must_fix.filter(Boolean) : [];
-const disputed = (loaded && Array.isArray(loaded.disputed)) ? loaded.disputed.filter(Boolean) : [];
-const priorPr = loaded && typeof loaded.pr === 'number' ? loaded.pr : null;
+const tier = loaded.tier;
+const mustFix = Array.isArray(loaded.must_fix) ? loaded.must_fix.filter(Boolean) : [];
+const disputed = Array.isArray(loaded.disputed) ? loaded.disputed.filter(Boolean) : [];
+const priorPr = typeof loaded.pr === 'number' ? loaded.pr : null;
+
+// Rework completeness (§7.5, P3-R4): every must_fix id must come back as `fixed` with the commit that
+// fixed it or `disputed` with a reason. A silent omission is how an unanswered reviewer finding reaches
+// merge looking answered, so this is checked here rather than left to the next review round to notice.
+// Returns the gaps as human-readable strings — empty means the response is complete and well formed.
+function reworkGaps(out) {
+  if (mustFix.length === 0 || !out) return [];
+  const responses = out.rework_response && Array.isArray(out.rework_response.responses)
+    ? out.rework_response.responses.filter(Boolean)
+    : [];
+  const answered = new Set();
+  const malformed = [];
+  for (const r of responses) {
+    if (typeof r.id !== 'string' || r.id === '') continue;
+    answered.add(r.id);
+    if (r.status === 'fixed') {
+      if (typeof r.commit !== 'string' || r.commit === '') malformed.push(`${r.id} (status fixed needs a commit)`);
+    } else if (r.status === 'disputed') {
+      if (typeof r.reason !== 'string' || r.reason === '') malformed.push(`${r.id} (status disputed needs a reason)`);
+    } else {
+      malformed.push(`${r.id} (status must be fixed or disputed)`);
+    }
+  }
+  const missing = mustFix
+    .filter((m) => typeof m.id === 'string' && m.id !== '' && !answered.has(m.id))
+    .map((m) => m.id);
+  return [...missing, ...malformed];
+}
+
+// One completion re-spawn, naming exactly what is missing. A second incomplete answer is not retried —
+// it is returned as an error without a `verifier`, which fails verify-stage's implement.v1 check closed.
+async function completeRework(out, prompt, label) {
+  const gaps = reworkGaps(out);
+  if (gaps.length === 0) return out;
+  const retry = await agent(
+    `${prompt}\n\nYour rework_response was incomplete: ${gaps.join('; ')}. Answer EVERY must_fix id — ` +
+    `status "fixed" with the commit sha that fixed it, or status "disputed" with a reason citing the plan ` +
+    `handoff or a file path. Repost the complete factory.rework-response.v1 as a PR comment with ` +
+    `\`gh pr comment\` and return the same responses in rework_response.`,
+    { agentType: 'factory-builder', model: 'opus', label, schema: BUILD },
+  );
+  return retry ? { ...out, ...retry } : out;
+}
+
+const reworkFailure = (out, gaps) => ({
+  issue,
+  head_sha: out ? out.head_sha : undefined,
+  pr: out ? out.pr : undefined,
+  error: `rework response incomplete: ${gaps.join('; ')}`,
+  orchestration: 'workflow',
+  guarantee: 'structural',
+});
 
 // The protected set is the same list in three places — `harness.toml [protected].factory`,
 // `settings.json permissions.deny`, and `hooks/block-dangerous.sh`. Naming it in the prompt is not the
@@ -228,6 +293,10 @@ phase('Build');
 
 let built = await build(buildPrompt, 'build');
 
+built = await completeRework(built, buildPrompt, 'build:rework');
+const buildGaps = reworkGaps(built);
+if (buildGaps.length > 0) return reworkFailure(built, buildGaps);
+
 // Cold read (§7.1 `cold_read = true`): the verifier's prompt carries the head sha and PR number and
 // nothing else the builder wrote — no summary, no branch name, no test list, no commit messages.
 // Explanation is persuasion; the verifier judges the diff and the tests.
@@ -255,7 +324,9 @@ const verifyPrompt = (round, priorFindings) =>
   `skip/ignore pragma was added; prove-test expected FAIL and observed PASS; the diff leaves ` +
   `\`files_expected\` with no reason given in the diff itself.\n` +
   `verdict: accepted | accepted-with-reservations | rejected. Every finding needs {where (path:line), ` +
-  `claim, evidence}; rejected needs at least one. If you could not confirm something, reject and say ` +
+  `claim, evidence}; rejected needs at least one. When a finding rests on prove-test, quote its verdict ` +
+  `line (the expected/observed pair) verbatim in \`evidence\` — a finding that only says "prove-test ` +
+  `failed" cannot be checked by the next reader. If you could not confirm something, reject and say ` +
   `what you could not confirm — an unverified accept is worth nothing.`;
 
 phase('Verify');
@@ -277,10 +348,16 @@ if (built && verdict && verdict.verdict === 'rejected') {
     `Answer every finding on the same branch \`claude/fq-${issue}\`. A finding about a test is a finding ` +
     `about the test: strengthen the assertion or the fixture rather than the code that makes it pass. ` +
     `This is your only fix round — the next verdict ends the stage either way.\n\n` +
-    `${buildRules}`;
+    `${buildRules}${reworkBlock}`;
 
   const fixed = await build(fixPrompt, 'fix');
   if (fixed) built = { ...built, ...fixed, rework_response: fixed.rework_response || built.rework_response };
+
+  // The fix round can drop or mangle the rework response it was told to carry — check it again rather
+  // than trusting that what was complete before the fix is still complete after it.
+  built = await completeRework(built, fixPrompt, 'fix:rework');
+  const fixGaps = reworkGaps(built);
+  if (fixGaps.length > 0) return reworkFailure(built, fixGaps);
 
   const second = await once(() => agent(verifyPrompt(2, verdict.findings), { agentType: 'factory-verifier', model: 'opus', label: 'verify:2', schema: VERDICT }))();
   if (second) verdict = second;

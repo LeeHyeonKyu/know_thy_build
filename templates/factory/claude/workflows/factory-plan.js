@@ -140,10 +140,22 @@ const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader
 
 const issue = Number(args.issue);
 
+// Fail-closed on a dead loader (same in all four workflows): without the loader there is no roster, so
+// the debate would be a silent no-op returning an empty plan. A named error is what the human reads in
+// the run record; an empty plan just fails the schema with nothing to act on.
+if (!loaded) {
+  return {
+    issue,
+    error: 'loader returned nothing',
+    orchestration: 'workflow',
+    guarantee: 'structural',
+  };
+}
+
 // Fail-closed issue-provenance check (same pattern as factory-triage.js): a stale
 // `.factory/out/context.json` or a wrong --context path must never let four debaters plan the wrong
 // issue. Returning no done_when/tier here makes verify-stage's `plan.v1` check fail into needs-human.
-if (loaded && Number(loaded.issue) !== issue) {
+if (Number(loaded.issue) !== issue) {
   return {
     issue,
     error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
@@ -152,12 +164,12 @@ if (loaded && Number(loaded.issue) !== issue) {
   };
 }
 
-const roster = (loaded && Array.isArray(loaded.roster)) ? loaded.roster.filter((r) => r && r.name && r.agentType) : [];
+const roster = Array.isArray(loaded.roster) ? loaded.roster.filter((r) => r && r.name && r.agentType) : [];
 const rosterNames = roster.map((r) => r.name);
-const tier = loaded ? loaded.tier : undefined;
+const tier = loaded.tier;
 // CHARTER plan_rounds, via the loader: docs tier debates in 2 rounds (positions → synthesis), every
 // other tier in 3 (positions → cross-examination → synthesis). Sign-off is not a round.
-const rounds = Number(loaded && loaded.rounds) || 3;
+const rounds = Number(loaded.rounds) || 3;
 
 // The shared reading order. The workflow cannot read files — every role opens these itself.
 const reading = (r) =>

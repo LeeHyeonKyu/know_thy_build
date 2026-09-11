@@ -74,9 +74,22 @@ const loaderPrompt =
 
 const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader', model: 'sonnet', schema: LOADER }))();
 
-phase('Triage');
-
 const issue = Number(args.issue);
+
+// Fail-closed on a dead loader (same in all four workflows): a loader that returned nothing twice told us
+// neither the issue it read nor the tier, so nothing downstream can be trusted to be about this issue.
+// Proceeding would spend a role's turn to produce a result that fails the schema anyway — with no reason
+// attached. Naming the failure here is what the human reads in the run record.
+if (!loaded) {
+  return {
+    issue,
+    error: 'loader returned nothing',
+    orchestration: 'workflow',
+    guarantee: 'structural',
+  };
+}
+
+phase('Triage');
 
 // Fail-closed issue-provenance check — copy this pattern into factory-plan.js/factory-implement.js/
 // factory-review.js's own Load→<stage> transitions (Tasks 3-5). The loader is only trustworthy if the
@@ -84,7 +97,7 @@ const issue = Number(args.issue);
 // `.factory/out/context.json` from a previous run, or a wrong --context path, must never let a role act
 // on the wrong issue silently. Returning no `disposition` here makes verify-stage's `triage.v1` schema
 // check fail the stage into needs-human instead.
-if (loaded && Number(loaded.issue) !== issue) {
+if (Number(loaded.issue) !== issue) {
   return {
     issue,
     error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
@@ -93,7 +106,7 @@ if (loaded && Number(loaded.issue) !== issue) {
   };
 }
 
-const roster = (loaded && Array.isArray(loaded.roster)) ? loaded.roster : [];
+const roster = Array.isArray(loaded.roster) ? loaded.roster : [];
 const role = roster.find((r) => r && r.name === 'triage');
 
 let verdict = null;
