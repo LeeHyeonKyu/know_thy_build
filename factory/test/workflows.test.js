@@ -975,3 +975,403 @@ test("factory-implement.js: the verifier must quote prove-test's expected/observ
   expect(verify).toContain("expected/observed");
   expect(verify).toMatch(/quote/);
 });
+
+// --- Task 5: templates/factory/claude/workflows/factory-review.js ---
+
+const FACTORY_REVIEW_WORKFLOW = new URL("../../templates/factory/claude/workflows/factory-review.js", import.meta.url).pathname;
+
+// the review roster comes from CHARTER/roles.toml via the loader — the workflow never hardcodes it.
+const REVIEW_ROSTER = [
+  { name: "correctness", agentType: "reviewer-correctness", model: "opus", lessons: ".factory/lessons/reviewer-correctness.md" },
+  { name: "architecture", agentType: "reviewer-architecture", model: "opus", lessons: ".factory/lessons/reviewer-architecture.md" },
+  { name: "spec-conformance", agentType: "reviewer-spec-conformance", model: "sonnet", lessons: ".factory/lessons/reviewer-spec-conformance.md" },
+  { name: "qa", agentType: "reviewer-qa", model: "sonnet", lessons: ".factory/lessons/reviewer-qa.md" },
+];
+
+const reviewLoaderFix = (over = {}) => ({
+  issue: 42,
+  stage: "review",
+  tier: "standard",
+  roster: REVIEW_ROSTER,
+  rounds: 2,
+  spec_path: "docs/features/016-export-csv.md",
+  pr: 31,
+  head_sha: SHA_A,
+  must_fix: [],
+  disputed: [],
+  orchestration: "workflow",
+  ...over,
+});
+
+const approveV = (role, over = {}) => ({
+  role,
+  verdict: "approve",
+  confidence: "high",
+  must_fix: [],
+  should_fix: [],
+  verified: [`${role}: read the diff and the tests it adds`],
+  ...over,
+});
+
+const finding = (id) => ({ id, where: `src/export/${id}.js:12`, claim: `${id} claim`, evidence: `${id} evidence` });
+
+const rejectV = (role, id, over = {}) => ({
+  role,
+  verdict: "reject",
+  confidence: "high",
+  must_fix: [finding(id)],
+  should_fix: [],
+  verified: [],
+  ...over,
+});
+
+const labelOf = (c) => c.opts.label || "";
+const withLabel = (calls, prefix) => calls.filter((c) => labelOf(c).startsWith(prefix));
+
+test("factory-review.js: meta.name equals the file's own basename", () => {
+  const src = readFileSync(FACTORY_REVIEW_WORKFLOW, "utf8");
+  const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
+  expect(m[1]).toBe(basename(FACTORY_REVIEW_WORKFLOW, ".js"));
+});
+
+test("factory-review.js: unanimous approve with nothing missed — R1 ×4 then light R2 ×4, and a valid review.v1 handoff", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix();
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json" },
+  });
+
+  expect(phases).toEqual(["Load", "Disputes", "R1", "R2"]);
+  expect(withLabel(calls, "R1:")).toHaveLength(4);
+  expect(withLabel(calls, "R2-light:")).toHaveLength(4);
+  expect(withLabel(calls, "R2:")).toHaveLength(0);
+  expect(withLabel(calls, "dispute:")).toHaveLength(0);
+  expect(calls).toHaveLength(9);
+
+  // every reviewer is spawned as its own agent file, with the model the loader carried from roles.toml
+  expect(withLabel(calls, "R1:").map((c) => c.opts.agentType)).toEqual([
+    "reviewer-correctness", "reviewer-architecture", "reviewer-spec-conformance", "reviewer-qa",
+  ]);
+  expect(withLabel(calls, "R1:").map((c) => c.opts.model)).toEqual(["opus", "opus", "sonnet", "sonnet"]);
+
+  expect(result.verdicts).toHaveLength(4);
+  expect(result.verdicts.every((v) => v.verdict === "approve")).toBe(true);
+  expect(result.verdicts.map((v) => v.role)).toEqual(["correctness", "architecture", "spec-conformance", "qa"]);
+  expect(result.round).toBe(0); // run-stage recounts the round from the handoff comments
+  expect(result.decision).toBeUndefined(); // aggregate-review.sh owns `decision`, never the workflow
+  expect(result.r1).toHaveLength(4);
+  expect(result.disputes).toEqual([]);
+  expect(result.summary).toContain("4 approve");
+  expect(validate("review.v1", result).ok).toBe(true);
+});
+
+test("factory-review.js: one R1 reject turns R2 into a full exchange — revise replaces, maintain keeps R1", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix();
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label.startsWith("R2:")) {
+      const role = label.slice(3);
+      if (role === "architecture") {
+        return { verdict: "revise", must_fix: [finding("arch2")], should_fix: [], verified: [], on_others: [{ id: "cf1", stance: "agree", reason: "the UTC claim checks out" }] };
+      }
+      return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(withLabel(calls, "R1:")).toHaveLength(4);
+  expect(withLabel(calls, "R2:")).toHaveLength(4);
+  expect(withLabel(calls, "R2-light:")).toHaveLength(0);
+
+  const byRole = Object.fromEntries(result.verdicts.map((v) => [v.role, v]));
+  // maintain keeps the R1 judgement verbatim
+  expect(byRole.correctness.verdict).toBe("reject");
+  expect(byRole.correctness.must_fix).toEqual([finding("cf1")]);
+  // revise replaces the lists — an approve that grows a must_fix becomes a reject
+  expect(byRole.architecture.verdict).toBe("reject");
+  expect(byRole.architecture.must_fix).toEqual([finding("arch2")]);
+  expect(byRole.architecture.verified).toEqual([]);
+  expect(byRole.qa.verdict).toBe("approve");
+  // r1 is kept untouched next to the final verdicts
+  expect(result.r1.find((v) => v.role === "architecture").verdict).toBe("approve");
+  expect(validate("review.v1", result).ok).toBe(true);
+
+  // the full R2 hands each reviewer the OTHERS' R1, never its own back
+  const archR2 = withLabel(calls, "R2:").find((c) => labelOf(c) === "R2:architecture").prompt;
+  expect(archR2).toContain("cf1");
+  expect(archR2).toContain("correctness");
+  // it sees its own R1 once (to decide maintain|revise) and never again inside the others' block
+  const othersBlock = archR2.slice(archR2.indexOf("The other reviewers' round-1 judgements:"));
+  expect(othersBlock).not.toContain('"role": "architecture"');
+  expect(othersBlock).toContain('"role": "correctness"');
+});
+
+test("factory-review.js: a light R2 that reports `missed` promotes only that reviewer to a full R2", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix();
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) {
+      return label.endsWith(":qa")
+        ? { missed: [{ what: "nobody opened the export dialog", why: "the done_when is a user-visible download" }] }
+        : { missed: [] };
+    }
+    if (label === "R2:qa") {
+      return { verdict: "revise", must_fix: [finding("qa1")], should_fix: [], verified: [], on_others: [] };
+    }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(withLabel(calls, "R2-light:")).toHaveLength(4);
+  expect(withLabel(calls, "R2:")).toHaveLength(1);
+  expect(labelOf(withLabel(calls, "R2:")[0])).toBe("R2:qa");
+  // 4 light + 1 promoted full = 5 R2 spawns in total
+  expect(calls.filter((c) => labelOf(c).startsWith("R2")).length).toBe(5);
+
+  const promoted = withLabel(calls, "R2:")[0].prompt;
+  expect(promoted).toContain("nobody opened the export dialog");
+
+  const byRole = Object.fromEntries(result.verdicts.map((v) => [v.role, v]));
+  expect(byRole.qa.verdict).toBe("reject");
+  expect(byRole.qa.must_fix).toEqual([finding("qa1")]);
+  expect(byRole.correctness.verdict).toBe("approve");
+  expect(validate("review.v1", result).ok).toBe(true);
+});
+
+test("factory-review.js: a disputed cf1 goes to correctness only — uphold forces it back into that reviewer's must_fix", async () => {
+  const disputed = [{ id: "cf1", status: "disputed", reason: "out of scope per the plan's non_goals" }];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix({ disputed, must_fix: [finding("cf1")] });
+    const label = opts.label;
+    if (label.startsWith("dispute:")) return { rulings: [{ id: "cf1", ruling: "uphold", reason: "non_goals says nothing about the parser" }] };
+    if (label.startsWith("R1:")) return approveV(label.slice(3)); // even an approving R1 cannot bury an upheld item
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const disputeCalls = withLabel(calls, "dispute:");
+  expect(disputeCalls).toHaveLength(1);
+  expect(disputeCalls[0].opts.agentType).toBe("reviewer-correctness");
+  expect(disputeCalls[0].prompt).toContain("cf1");
+  expect(disputeCalls[0].prompt).toContain("out of scope per the plan's non_goals");
+  // the dispute runs before R1 and the upheld id is named in that reviewer's R1 prompt
+  expect(calls.indexOf(disputeCalls[0])).toBeLessThan(calls.indexOf(withLabel(calls, "R1:")[0]));
+  expect(withLabel(calls, "R1:").find((c) => labelOf(c) === "R1:correctness").prompt).toContain("uphold");
+
+  const cf = result.verdicts.find((v) => v.role === "correctness");
+  expect(cf.verdict).toBe("reject");
+  expect(cf.must_fix.map((m) => m.id)).toEqual(["cf1"]);
+  expect(result.disputes).toEqual([{ role: "correctness", id: "cf1", ruling: "uphold", reason: "non_goals says nothing about the parser" }]);
+  // nobody else is asked about someone else's id
+  expect(result.verdicts.filter((v) => v.role !== "correctness").every((v) => v.must_fix.length === 0)).toBe(true);
+  expect(validate("review.v1", result).ok).toBe(true);
+});
+
+test("factory-review.js: a withdrawn dispute is not forced back in — the R1 verdict stands", async () => {
+  const disputed = [{ id: "cf1", status: "disputed", reason: "the plan's non_goals excludes the parser" }];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix({ disputed, must_fix: [finding("cf1")] });
+    const label = opts.label;
+    if (label.startsWith("dispute:")) return { rulings: [{ id: "cf1", ruling: "withdraw", reason: "agreed — non_goals covers it" }] };
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+
+  const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const cf = result.verdicts.find((v) => v.role === "correctness");
+  expect(cf.verdict).toBe("approve");
+  expect(cf.must_fix).toEqual([]);
+  expect(result.disputes[0].ruling).toBe("withdraw");
+  expect(validate("review.v1", result).ok).toBe(true);
+});
+
+test("factory-review.js: a disputed id is routed by its prefix — sec/arch/spec/qa each reach exactly their owner", async () => {
+  const disputed = [
+    { id: "sec1", status: "disputed", reason: "r1" },
+    { id: "arch3", status: "disputed", reason: "r2" },
+    { id: "spec2", status: "disputed", reason: "r3" },
+    { id: "qa7", status: "disputed", reason: "r4" },
+    { id: "zzz9", status: "disputed", reason: "nobody owns this prefix" },
+  ];
+  const roster = [
+    { name: "security", agentType: "reviewer-security", model: "opus", lessons: ".factory/lessons/reviewer-security.md" },
+    ...REVIEW_ROSTER,
+  ];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix({ roster, disputed });
+    const label = opts.label;
+    if (label.startsWith("dispute:")) return { rulings: [] };
+    if (label.startsWith("R1:")) return approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const disputeCalls = withLabel(calls, "dispute:");
+  expect(disputeCalls.map((c) => c.opts.agentType).sort()).toEqual([
+    "reviewer-architecture", "reviewer-qa", "reviewer-security", "reviewer-spec-conformance",
+  ]);
+  const secPrompt = disputeCalls.find((c) => c.opts.agentType === "reviewer-security").prompt;
+  expect(secPrompt).toContain("sec1");
+  expect(secPrompt).not.toContain("spec2");
+  // an id no reviewer owns is recorded rather than silently dropped
+  expect(result.disputes).toContainEqual({ role: null, id: "zzz9", ruling: "unowned", reason: "no reviewer in this round owns that id prefix" });
+  expect(result.verdicts).toHaveLength(5);
+});
+
+test("factory-review.js: a reviewer that dies twice is dropped, not invented — no R2 for it, verdicts short of the roster", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix();
+    const label = opts.label;
+    if (label.startsWith("R1:")) return label.endsWith(":qa") ? null : approveV(label.slice(3));
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(withLabel(calls, "R1:qa")).toHaveLength(2); // one insurance re-spawn (ADR-003), then it is dropped
+  expect(withLabel(calls, "R2-light:")).toHaveLength(3);
+  expect(withLabel(calls, "R2-light:qa")).toHaveLength(0);
+  expect(result.verdicts.map((v) => v.role)).toEqual(["correctness", "architecture", "spec-conformance"]);
+  expect(result.summary).toContain("qa");
+  // review.v1 still validates — aggregate-review.sh compares verdicts against the roster and calls this
+  // `incomplete` → needs-human, naming the missing role (§7.5).
+  expect(validate("review.v1", result).ok).toBe(true);
+});
+
+test("factory-review.js: R1 is a cold read — only spec-conformance is pointed at handoffs.plan, and nobody sees another verdict", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix();
+    const label = opts.label;
+    if (label.startsWith("R1:")) {
+      const role = label.slice(3);
+      return role === "correctness" ? rejectV(role, "cf1") : approveV(role);
+    }
+    if (label.startsWith("R2:")) return { verdict: "maintain", must_fix: [], should_fix: [], verified: [], on_others: [] };
+    return null;
+  };
+
+  const { calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const r1 = withLabel(calls, "R1:");
+  const spec = r1.find((c) => labelOf(c) === "R1:spec-conformance").prompt;
+  expect(spec).toContain("handoffs.plan");
+  expect(spec).not.toContain("Do NOT read handoffs.plan");
+  expect(spec).toContain("files_expected");
+
+  for (const c of r1.filter((x) => labelOf(x) !== "R1:spec-conformance")) {
+    expect(c.prompt, labelOf(c)).toContain("Do NOT read handoffs.plan");
+    expect(c.prompt, labelOf(c)).toContain("PR description");
+  }
+  // no R1 prompt carries another reviewer's judgement, and every one carries the diff + gates
+  for (const c of r1) {
+    expect(c.prompt, labelOf(c)).not.toContain("cf1 claim");
+    expect(c.prompt, labelOf(c)).not.toContain("cf1 evidence");
+    expect(c.prompt, labelOf(c)).not.toContain('"verdict"');
+    expect(c.prompt, labelOf(c)).toContain("git diff origin/");
+    expect(c.prompt, labelOf(c)).toContain(".factory/out/gates.json");
+    expect(c.prompt, labelOf(c)).toContain(SHA_A);
+  }
+  // the id prefix each reviewer must number its must_fix with
+  const prefixes = { correctness: "cf", architecture: "arch", "spec-conformance": "spec", qa: "qa" };
+  for (const c of r1) {
+    expect(c.prompt, labelOf(c)).toContain(`\`${prefixes[labelOf(c).slice(3)]}1\``);
+  }
+  // every R1 reviewer is told to read its own lessons file
+  expect(r1.find((c) => labelOf(c) === "R1:qa").prompt).toContain(".factory/lessons/reviewer-qa.md");
+
+  // the light-R2 path is the only one that hides the others' judgements behind `verified`
+  const full = withLabel(calls, "R2:").find((c) => labelOf(c) === "R2:qa").prompt;
+  expect(full).toContain("cf1");
+});
+
+test("factory-review.js: a light R2 shows only the others' verified[] — no verdict, no must_fix leaks", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return reviewLoaderFix();
+    const label = opts.label;
+    if (label.startsWith("R1:")) return approveV(label.slice(3), { should_fix: [{ where: "src/a.js:2", claim: "SECRET-SHOULD-FIX" }] });
+    if (label.startsWith("R2-light:")) return { missed: [] };
+    return null;
+  };
+
+  const { calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const light = withLabel(calls, "R2-light:").find((c) => labelOf(c) === "R2-light:correctness").prompt;
+  expect(light).toContain("qa: read the diff and the tests it adds");
+  expect(light).not.toContain("SECRET-SHOULD-FIX");
+  expect(light).not.toContain('"verdict"');
+  expect(light).not.toContain("correctness: read the diff"); // not its own verified list back
+});
+
+test("factory-review.js: a null factory-loader fails the stage closed — no reviewer runs, named error", async () => {
+  const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? null : approveV("correctness"));
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-loader"]);
+  expect(phases).toEqual(["Load"]);
+  expect(result).toEqual({ issue: 42, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(validate("review.v1", result).ok).toBe(false);
+});
+
+test("factory-review.js: loader/dispatcher issue mismatch fails closed — nothing is reviewed, review.v1 invalid", async () => {
+  const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? reviewLoaderFix({ issue: 7 }) : approveV("correctness"));
+
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls).toHaveLength(1);
+  expect(result.error).toContain("context issue mismatch");
+  expect(result.verdicts).toBeUndefined();
+  expect(validate("review.v1", result).ok).toBe(false);
+});

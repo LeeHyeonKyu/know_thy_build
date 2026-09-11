@@ -241,3 +241,77 @@ test("factory-verifier.md: opus, read-only tools, deny-all-writes, and an explic
   expect(lens).toContain("prove-test");
   expect(lens).toMatch(/done_when/);
 });
+
+// Task 5: the five review roles (roles.toml [review.*]).
+const REVIEW_AGENTS = ["reviewer-correctness", "reviewer-security", "reviewer-architecture", "reviewer-spec-conformance", "reviewer-qa"];
+
+for (const name of REVIEW_AGENTS) {
+  test(`lintAgentMd: templates/factory/claude/agents/${name}.md passes with no violations`, () => {
+    expect(lintAgentMd(readAgent(name), { expectedName: name })).toEqual([]);
+  });
+}
+
+test("reviewer agents: roles.toml models and tools, every one behind deny-all-writes", () => {
+  const models = {
+    "reviewer-correctness": "opus", "reviewer-security": "opus", "reviewer-architecture": "opus",
+    "reviewer-spec-conformance": "sonnet", "reviewer-qa": "sonnet",
+  };
+  for (const name of REVIEW_AGENTS) {
+    const { frontmatter } = parseAgentMd(readAgent(name));
+    expect(frontmatter.name, name).toBe(name);
+    expect(frontmatter.model, name).toBe(models[name]);
+    expect(frontmatter.hooks.PreToolUse[0].matcher, name).toBe("Edit|Write|NotebookEdit");
+    expect(frontmatter.hooks.PreToolUse[0].hooks[0].command, name).toContain("deny-all-writes.sh");
+    expect(frontmatter.tools, name).toContain("Read");
+  }
+  // qa is the only reviewer that drives a browser (roles.toml [review.qa].tools)
+  expect(parseAgentMd(readAgent("reviewer-qa")).frontmatter.tools).toEqual(["Bash", "Read", "Grep", "Glob", "mcp__playwright__*"]);
+});
+
+test("reviewer-correctness.md is the spec §7.3 exemplar verbatim — only the hook matcher widens to NotebookEdit", () => {
+  // §7.3 is the template (Plan 3 Global Constraints). The single edit is the matcher: the constraint
+  // spells the write-forbidden roles' matcher as `Edit|Write|NotebookEdit`, and a deny that stops Edit
+  // but not NotebookEdit is not a deny. The hook command in §7.3 is already the real script's path.
+  expect(readAgent("reviewer-correctness")).toBe(FIXTURE.replace("matcher: Edit|Write\n", "matcher: Edit|Write|NotebookEdit\n"));
+});
+
+test("reviewer agents: each Output section pins the must_fix id prefix its ids must use", () => {
+  const prefixes = {
+    "reviewer-correctness": "cf", "reviewer-security": "sec", "reviewer-architecture": "arch",
+    "reviewer-spec-conformance": "spec", "reviewer-qa": "qa",
+  };
+  for (const [name, prefix] of Object.entries(prefixes)) {
+    const { sections } = parseAgentMd(readAgent(name));
+    const out = [...sections.entries()].find(([k]) => k.startsWith("Output"))[1];
+    expect(out, name).toContain(`${prefix}1`);
+  }
+});
+
+test("reviewer agents: the cold-read four refuse the builder's channels by name; spec-conformance is handed the plan", () => {
+  for (const name of ["reviewer-correctness", "reviewer-security", "reviewer-architecture", "reviewer-qa"]) {
+    const { sections } = parseAgentMd(readAgent(name));
+    const entry = [...sections.entries()].find(([k]) => k.startsWith("You do NOT receive"));
+    expect(entry, name).toBeDefined();
+    expect(entry[0], name).toMatch(/찾아 읽지도 않는다/);
+    expect(entry[1], name).toMatch(/PR description/);
+  }
+  const spec = parseAgentMd(readAgent("reviewer-spec-conformance"));
+  const receives = [...spec.sections.entries()].find(([k]) => k.startsWith("You receive"))[1];
+  expect(receives).toContain("handoffs.plan");
+  expect(receives).toContain("done_when");
+  expect([...spec.sections.keys()].some((k) => k.startsWith("You do NOT receive"))).toBe(false);
+});
+
+test("reviewer-security.md / reviewer-architecture.md / reviewer-spec-conformance.md / reviewer-qa.md carry their own Lens", () => {
+  const lens = (name) => [...parseAgentMd(readAgent(name)).sections.entries()].find(([k]) => k.startsWith("Lens"))[1];
+  const sec = lens("reviewer-security");
+  for (const s of ["신뢰 경계", "인가", "시크릿", "SSRF", "traversal", "load_bearing"]) expect(sec, s).toContain(s);
+  const arch = lens("reviewer-architecture");
+  for (const s of ["TECHNICAL.md", "중복", "공개 API", "마이그레이션", "files_expected"]) expect(arch, s).toContain(s);
+  // scope is spec-conformance's call, not architecture's
+  expect(arch).toContain("spec-conformance");
+  const conf = lens("reviewer-spec-conformance");
+  for (const s of ["done_when", "files_expected", "non_goals", "must_approve_explicitly", "qa_artifacts"]) expect(conf, s).toContain(s);
+  const qa = lens("reviewer-qa");
+  for (const s of [".factory/out/qa/", ".factory/scenarios/", "Design Intent"]) expect(qa, s).toContain(s);
+});
