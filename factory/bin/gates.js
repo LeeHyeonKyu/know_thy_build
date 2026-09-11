@@ -24,7 +24,14 @@ if (isMain) {
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
   let harness;
   try { harness = loadHarness(root); } catch (e) { console.error(`gates: .factory/harness.toml unreadable — ${e.message}`); process.exit(2); }
-  const base = flag("--base") || (await run("git", ["merge-base", `origin/${harness.project?.default_branch || "main"}`, "HEAD"], { cwd: root })).stdout.trim();
+  let base = flag("--base");
+  if (!base) {
+    // base가 없으면 diff가 없고, diff가 없으면 tier 승격도 증명 게이트도 전부 "변경 없음"으로 읽힌다.
+    const branch = harness.project?.default_branch ?? "main";
+    const mb = await run("git", ["merge-base", `origin/${branch}`, "HEAD"], { cwd: root });
+    base = mb.stdout.trim();
+    if (mb.code !== 0 || !base) { console.error(`gates: cannot compute merge-base against origin/${branch} (shallow clone?) — exit ${mb.code} ${mb.stderr.trim()}`); process.exit(2); }
+  }
   const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   // gh는 넘기지 않는다 — 로컬 진단이 flaky 이슈를 열어서는 안 된다.
   const result = await runStageGates({ run, cwd: root, harness, stage, tier, level, base, quarantine: loadQuarantine(root), readFile });
