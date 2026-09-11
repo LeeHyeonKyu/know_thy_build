@@ -41,34 +41,46 @@ export function bootstrapPlan({ harness, today, existing }) {
   return ops;
 }
 
-/** ops를 실제로 적용한다. label/protection/variable만 gh를 부른다 — note는 보고만 하고 절대 gh를 건드리지 않는다. */
+/**
+ * ops를 실제로 적용한다. label/protection/variable만 gh를 부른다 — note는 보고만 하고 절대 gh를 건드리지 않는다.
+ * harness는 받지 않는다 — protection op이 계획 단계에서 이미 branch/body를 다 갖춘 self-contained 객체라 필요 없다.
+ * op마다 격리한다: 라벨 하나가 실패해도(권한/네트워크 등) 나머지 라벨·protection·variable은 계속 시도한다 — 부트스트랩은
+ * 되돌릴 수 없는 단일 트랜잭션이 아니라 "최대한 맞춰놓기"이므로 한 실패가 전체를 막으면 안 된다. 실패는 failed[]에
+ * 모아 반환하고, 종료 코드를 결정하는 건 호출자(bootstrapCommand) 몫이다.
+ */
 export async function applyBootstrap({ gh, ops, log = () => {} }) {
   const applied = [];
+  const failed = [];
   const notes = [];
   for (const op of ops) {
-    switch (op.kind) {
-      case "label":
-        await gh.createLabel({ name: op.name, color: op.color, description: op.description });
-        log(`label: ${op.name}`);
-        applied.push(op);
-        break;
-      case "protection":
-        await gh.putBranchProtection(op.branch, op.body);
-        log(`protection: ${op.branch}`);
-        applied.push(op);
-        break;
-      case "variable":
-        await gh.setVariable(op.name, op.value);
-        log(`variable: ${op.name}=${op.value}`);
-        applied.push(op);
-        break;
-      case "note":
-        log(`note: ${op.message}`);
-        notes.push(op.message);
-        break;
-      default:
-        throw new Error(`applyBootstrap: unknown op kind "${op.kind}"`);
+    try {
+      switch (op.kind) {
+        case "label":
+          await gh.createLabel({ name: op.name, color: op.color, description: op.description });
+          log(`label: ${op.name}`);
+          applied.push(op);
+          break;
+        case "protection":
+          await gh.putBranchProtection(op.branch, op.body);
+          log(`protection: ${op.branch}`);
+          applied.push(op);
+          break;
+        case "variable":
+          await gh.setVariable(op.name, op.value);
+          log(`variable: ${op.name}=${op.value}`);
+          applied.push(op);
+          break;
+        case "note":
+          log(`note: ${op.message}`);
+          notes.push(op.message);
+          break;
+        default:
+          throw new Error(`applyBootstrap: unknown op kind "${op.kind}"`);
+      }
+    } catch (e) {
+      log(`failed: ${op.kind} ${op.name || op.branch || ""} — ${e.message}`);
+      failed.push({ op, error: e.message });
     }
   }
-  return { applied, notes };
+  return { applied, failed, notes };
 }

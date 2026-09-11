@@ -1,10 +1,11 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LABELS } from "../lib/label-catalog.js";
 import { bootstrapPlan, applyBootstrap } from "../lib/bootstrap.js";
 import { bootstrapCommand } from "../cli/bootstrap.js";
+import { makeFakeRun } from "../lib/exec.js";
 
 /** loadHarness가 읽을 최소 harness.toml — default_branch·required_checks만 있으면 충분하다. */
 function makeHarnessRoot() {
@@ -182,4 +183,94 @@ test("bootstrapCommand: applies ops against injected gh, honors --token-issued-a
   expect(gh.calls.putBranchProtection.length).toBe(1);
   expect(gh.calls.setVariable.length).toBe(1);
   expect(gh.calls.setVariable[0]).toEqual({ name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" });
+});
+
+// ── fix round 1 ─────────────────────────────────────────────────────────────
+
+test("bootstrapCommand: --token-issued-at rejects a non-date value before any gh call, exit 1", async () => {
+  const gh = fakeGhCli();
+  const { io: i, o } = io();
+  const root = makeHarnessRoot();
+  const code = await bootstrapCommand({ root, argv: ["--token-issued-at", "banana"], io: i, gh, today: "2026-01-01" });
+  expect(code).toBe(1);
+  expect(o.err.join("\n")).toContain("--token-issued-at expects YYYY-MM-DD");
+  expect(gh.calls.createLabel.length).toBe(0);
+  expect(gh.calls.putBranchProtection.length).toBe(0);
+  expect(gh.calls.setVariable.length).toBe(0);
+});
+
+test("bootstrapCommand: --token-issued-at as the last arg (no value) → exit 1, no gh call", async () => {
+  const gh = fakeGhCli();
+  const { io: i, o } = io();
+  const root = makeHarnessRoot();
+  const code = await bootstrapCommand({ root, argv: ["--token-issued-at"], io: i, gh, today: "2026-01-01" });
+  expect(code).toBe(1);
+  expect(o.err.join("\n")).toContain("--token-issued-at expects YYYY-MM-DD");
+  expect(gh.calls.createLabel.length).toBe(0);
+});
+
+test("bootstrapCommand: valid --token-issued-at forces the variable op even when the variable already exists", async () => {
+  const gh = fakeGhCli({ labels: [], secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"], variable: "2020-01-01" });
+  const { io: i } = io();
+  const root = makeHarnessRoot();
+  const code = await bootstrapCommand({ root, argv: ["--token-issued-at", "2026-09-12"], io: i, gh, today: "2026-01-01" });
+  expect(code).toBe(0);
+  expect(gh.calls.setVariable).toEqual([{ name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" }]);
+});
+
+test("applyBootstrap: a failing op is isolated — the rest still run, failure is reported, not thrown", async () => {
+  const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: null }, secrets: [] };
+  const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
+  const gh = fakeGh();
+  gh.createLabel = async (args) => {
+    if (args.name === LABELS[0].name) throw new Error("gh: permission denied");
+    gh.calls.createLabel.push(args);
+  };
+  const { applied, failed, notes } = await applyBootstrap({ gh, ops, log: () => {} });
+  expect(failed).toEqual([{ op: ops.find((o) => o.kind === "label" && o.name === LABELS[0].name), error: "gh: permission denied" }]);
+  expect(gh.calls.createLabel.length).toBe(LABELS.length - 1); // every other label still attempted
+  expect(gh.calls.putBranchProtection.length).toBe(1); // protection still ran after the failed label
+  expect(gh.calls.setVariable.length).toBe(1); // variable still ran too
+  expect(applied.length).toBe(LABELS.length - 1 + 1 + 1); // labels(minus the failed one) + protection + variable
+  expect(notes.length).toBe(2);
+});
+
+test("bootstrapCommand: a failing gh op → exit 1, failure printed", async () => {
+  const gh = fakeGhCli({ labels: [], secrets: [], variable: null });
+  gh.createLabel = async () => { throw new Error("gh: rate limited"); };
+  const { io: i, o } = io();
+  const root = makeHarnessRoot();
+  const code = await bootstrapCommand({ root, argv: [], io: i, gh, today: "2026-09-12" });
+  expect(code).toBe(1);
+  expect(o.err.join("\n")).toContain("rate limited");
+});
+
+test("bootstrapCommand: no gh injected → builds one via the injected run, including the `gh repo view` repo-detect fallback", async () => {
+  const prevRepo = process.env.FACTORY_REPO;
+  delete process.env.FACTORY_REPO;
+  try {
+    const fakeRun = makeFakeRun([
+      { match: (c, a) => c === "gh" && a[0] === "repo" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ nameWithOwner: "o/r" }), stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "label" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "variable" && a[1] === "get", result: { code: 1, stdout: "", stderr: "not found" } },
+      { match: (c, a) => c === "gh" && a[0] === "secret" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+    ]);
+    const { io: i, o } = io();
+    const root = makeHarnessRoot();
+    const code = await bootstrapCommand({ root, argv: ["--dry-run"], io: i, run: fakeRun, today: "2026-09-12" });
+    expect(code).toBe(0);
+    expect(fakeRun.calls.some((c) => c.cmd === "gh" && c.args[0] === "repo" && c.args[1] === "view")).toBe(true);
+    expect(o.out.join("\n")).toContain("label");
+  } finally {
+    if (prevRepo === undefined) delete process.env.FACTORY_REPO; else process.env.FACTORY_REPO = prevRepo;
+  }
+});
+
+test("bootstrapCommand: missing harness.toml → exit 1, message mentions harness.toml", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb-bootstrap-noharness-"));
+  const { io: i, o } = io();
+  const code = await bootstrapCommand({ root, argv: [], io: i, gh: fakeGhCli(), today: "2026-09-12" });
+  expect(code).toBe(1);
+  expect(o.err.join("\n")).toContain("harness.toml");
+  rmSync(root, { recursive: true, force: true });
 });
