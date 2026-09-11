@@ -19,6 +19,12 @@ test("template harness passes every static check", () => {
   expect(c["gates.required-in-commands"].level).toBe("PASS");
   expect(c["protected.globs-match"].level).toBe("PASS");
   expect(c["commands.placeholders"].level).toBe("PASS");
+  expect(c["commands.unit"].level).toBe("PASS");
+});
+
+test("commands.unit missing → FAIL", () => {
+  const h = tmpl(); delete h.commands.unit;
+  expect(by(checkHarness({ harness: h, files }))["commands.unit"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("unit") });
 });
 
 test("required gate not in [commands] nor proof → FAIL; not in its own level → FAIL", () => {

@@ -7,6 +7,7 @@ const MAX_LEVEL = { M0: "fast", M1: "full", M2: "deep" };
 const LEVELS = ["fast", "full", "deep"];
 const c = (id, level, detail = "") => ({ id, level, detail });
 
+/** harness.toml의 스키마·게이트·명령·임계값·보호 범위를 정적으로 검사한다 (프로세스 실행 없음). */
 export function checkHarness({ harness: h, files = [] }) {
   const out = [];
   out.push(h.schema === 1 ? c("harness.schema", "PASS") : c("harness.schema", "FAIL", `schema must be 1, got ${h.schema}`));
@@ -18,7 +19,7 @@ export function checkHarness({ harness: h, files = [] }) {
   const cmds = h.commands || {};
   const badPh = Object.entries(TEMPLATED).filter(([k, phs]) => cmds[k] && phs.some((p) => !cmds[k].includes(p))).map(([k, phs]) => `${k} must contain ${phs.join(" and ")}`);
   out.push(badPh.length ? c("commands.placeholders", "FAIL", badPh.join("; ")) : c("commands.placeholders", "PASS"));
-  for (const k of ["lint", "unit", "test_files"]) if (!cmds[k]) out.push(c(`commands.${k}`, "FAIL", `[commands].${k} is required at M0`));
+  for (const k of ["lint", "unit", "test_files"]) out.push(cmds[k] ? c(`commands.${k}`, "PASS") : c(`commands.${k}`, "FAIL", `[commands].${k} is required at M0`));
   // gates
   const required = h.gates?.required || [];
   const known = (g) => g in cmds || g in PROOF_GATES;
@@ -30,6 +31,8 @@ export function checkHarness({ harness: h, files = [] }) {
   out.push(notInLevels.length ? c("gates.required-in-levels", "FAIL", `required gates absent from every level up to ${maxLevel}: ${notInLevels.join(", ")}`) : c("gates.required-in-levels", "PASS"));
   const beyond = LEVELS.slice(LEVELS.indexOf(maxLevel) + 1).filter((l) => (h.gates?.[l] || []).some((g) => !(h.gates?.[maxLevel] || []).includes(g)));
   out.push(beyond.length ? c("gates.levels-vs-maturity", "WARN", `${beyond.join(",")} list gates beyond maturity ${h.harness?.maturity}; they will be downgraded to ${maxLevel}`) : c("gates.levels-vs-maturity", "PASS"));
+  // 모든 레벨을 훑는다 — 의도적이다: 증명 도구는 그 레벨이 활성화되기 전, 게이트를 도입하는
+  // 성숙도에서부터 이미 갖춰져 있어야 한다 (§5.2.1).
   const proofMissing = [];
   for (const l of LEVELS) for (const g of h.gates?.[l] || []) for (const k of PROOF_GATES[g] || []) if (!cmds.proof?.[k]) proofMissing.push(`${g} needs [commands.proof].${k}`);
   out.push(proofMissing.length ? c("proof.commands", "FAIL", [...new Set(proofMissing)].join("; ")) : c("proof.commands", "PASS"));
@@ -52,6 +55,7 @@ export function checkHarness({ harness: h, files = [] }) {
   return out;
 }
 
+/** [commands]의 비-템플릿 명령(및 proof 제외)을 실제로 실행해 종료 코드를 보고한다. */
 export async function checkCommands({ harness: h, run, cwd, skipRun = false }) {
   if (skipRun) return [c("commands.run", "WARN", "--no-run: commands not executed")];
   const out = [];
