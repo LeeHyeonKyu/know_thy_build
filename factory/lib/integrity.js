@@ -8,10 +8,16 @@ const SKIP_PRAGMAS = [/\.skip\s*\(/, /\bxit\s*\(/, /\bxdescribe\s*\(/, /@pytest\
  * "which section did this added line land in", not "what changed relative to base".
  */
 export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, readFile, readFileAt = () => "" }) {
-  const violations = [];
+  // 무결성은 "검사했더니 깨끗하다"는 주장이다. diff를 얻지 못했는데 violations가 비었다고 ok:true를
+  // 돌려주면 "검사하지 못했음"이 "통과"로 둔갑한다 — base가 비었거나 git이 실패하면 fail-closed다.
+  if (!base) return cannotCompute("base is empty (merge-base not resolved)");
   const ns = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
+  if (ns.code !== 0) return cannotCompute(gitReason("git diff --name-status", ns));
+  const violations = [];
   const files = ns.stdout.split("\n").filter(Boolean).map((l) => l.split("\t").pop());
-  const u0 = (await run("git", ["diff", "-U0", `${base}...${head}`], { cwd })).stdout;
+  const u0r = await run("git", ["diff", "-U0", `${base}...${head}`], { cwd });
+  if (u0r.code !== 0) return cannotCompute(gitReason("git diff -U0", u0r));
+  const u0 = u0r.stdout;
   const addedByFile = addedLines(u0), removedByFile = removedLines(u0);
   const prot = harness.protected || {};
   for (const f of files) {
@@ -39,6 +45,10 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   }
   return { ok: violations.length === 0, violations, checked: { files } };
 }
+
+/** 판정 불가 — ok:false에 이유를 한 줄로 싣는다(file은 "-": 특정 파일의 위반이 아니다). */
+const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], checked: { files: [] } });
+const gitReason = (what, r) => `${what} exited ${r.code}${r.stderr ? `: ${r.stderr.trim().slice(0, 200)}` : ""}`;
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 

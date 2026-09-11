@@ -55,6 +55,31 @@ test("skip/ignore pragmas added to tests → violation", async () => {
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "" });
   expect(r.violations).toEqual([{ file: "test/a.test.js", rule: "test skip/ignore pragma added" }]);
 });
+// ── F1: 검사하지 못한 것은 통과가 아니다 ────────────────────────────────────
+
+test("git diff가 실패하면 ok:false — 빈 diff를 '위반 없음'으로 읽지 않는다", async () => {
+  const boom = { code: 128, stdout: "", stderr: "fatal: no merge base" };
+  for (const table of [
+    [{ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: boom }],
+    [names("M\tsrc/a.js\n"), { match: (c, a) => a[0] === "diff" && a.includes("-U0"), result: boom }],
+  ]) {
+    const r = await integrityCheck({ run: makeFakeRun(table), cwd: "/repo", base: "b", head: "h", harness, readFile: () => "" });
+    expect(r.ok).toBe(false);
+    expect(r.violations).toEqual([{ file: "-", rule: expect.stringContaining("integrity could not be computed") }]);
+    expect(r.violations[0].rule).toMatch(/exited 128/);
+  }
+});
+
+test("base가 비어 있으면 검사 자체가 성립하지 않는다 — git을 부르지도 않는다", async () => {
+  for (const base of ["", null, undefined]) {
+    const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+    const r = await integrityCheck({ run, cwd: "/repo", base, head: "h", harness, readFile: () => "" });
+    expect(r.ok, String(base)).toBe(false);
+    expect(r.violations[0].rule).toMatch(/integrity could not be computed: base is empty/);
+    expect(run.calls).toHaveLength(0);
+  }
+});
+
 test("lessons format violation", async () => {
   const run = makeFakeRun([names("M\t.factory/lessons/reviewer-qa.md\n"), u0("")]);
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "<!-- factory-lessons:v1 role=reviewer-qa max=1 -->\n- [L-2026-09-01-01] a\n  근거: r\n- bad entry\n" });

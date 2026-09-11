@@ -8,8 +8,16 @@ const isMain = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).h
 if (isMain) {
   const args = process.argv.slice(2); const bi = args.indexOf("--base");
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
-  const base = bi >= 0 ? args[bi + 1] : (await run("git", ["merge-base", "origin/main", "HEAD"], { cwd: root })).stdout.trim();
-  const r = await integrityCheck({ run, cwd: root, base, harness: loadHarness(root), readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) });
+  const harness = loadHarness(root);
+  const branch = harness.project?.default_branch ?? "main";
+  let base = bi >= 0 ? args[bi + 1] : null;
+  if (base == null) {
+    // merge-base를 못 구하면 검사 자체가 성립하지 않는다 — 빈 base로 "위반 없음"을 만들지 않는다(shallow clone 등).
+    const mb = await run("git", ["merge-base", `origin/${branch}`, "HEAD"], { cwd: root });
+    base = mb.stdout.trim();
+    if (mb.code !== 0 || !base) { console.error(`integrity: cannot compute merge-base against origin/${branch} (shallow clone?) — exit ${mb.code} ${mb.stderr.trim()}`); process.exit(2); }
+  }
+  const r = await integrityCheck({ run, cwd: root, base, harness, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) });
   console.log(JSON.stringify(r, null, 2));
   process.exit(r.ok ? 0 : 1);
 }
