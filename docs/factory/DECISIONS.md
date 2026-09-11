@@ -42,6 +42,9 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **이 결정의 미확인 부분 — `agent_type`의 값 형식.** 스파이크의 로깅 훅은 stdin JSON을 `jq -c 'keys'`로만 남겼으므로 **확인된 것은 `agent_id`·`agent_type`이 존재한다는 사실뿐**이고, `agent_type`의 **값**이 등록된 역할 이름(`.claude/agents/<role>`의 파일명/`name`)과 같은 문자열인지는 관측하지 않았다. 인원 수를 세는 용도(`SubagentStart` 라인 수 == 로스터 크기)는 값 형식과 무관하게 성립하지만, **"누가"를 로스터와 문자열 대조하는 부분은 근거가 없다.** Plan 1은 `verify-stage.sh`를 쓰기 전에 이 값을 먼저 실측하고(훅에서 `keys`가 아니라 값을 찍는다), 형식이 다르면 매핑 테이블을 끼우거나 `label` 등 다른 필드로 대조 축을 바꾼다.
 
+- 2026-09-11 실측 (spike-9, run [34582313066](https://github.com/LeeHyeonKyu/know-thy-build-demo/actions/runs/34582313066)): SubagentStart/Stop의 `agent_type` 값 = `spike-worker` (`.claude/agents/spike-worker.md`의 `name`과 동일: 접두사·경로·표시명 없이 frontmatter `name`을 그대로 문자열로 씀). 같은 에이전트의 Start/Stop은 동일 `agent_id`를 공유함 = yes (워커1은 Start·Stop 양쪽 모두 `agent_id: a254959c919976f05`, 워커2는 양쪽 모두 `a31cb67af848f0bac`). `agent_id`는 스폰마다 새로 발급되는 난수형 식별자로 역할을 나타내지 않는다 — 역할 식별은 오직 `agent_type` 몫. 다른 식별 필드는 관측되지 않음(`SubagentStop`의 `background_tasks[].name`은 워크플로 이름 `spike-hooks`이지 역할명이 아니며, 별도의 표시명 필드는 없음).
+  → verify-stage는 `agent_type`(정규화 불필요 — `.claude/agents/<role>.md`의 frontmatter `name`과 항등 비교)으로 로스터를 대조한다.
+
 **영향**: §6.3(L2 배치 확정 · 훅 로그를 verify 입력으로), §4.2.1 step 6, Plan 1(`verify-stage.sh` 설계), Plan 3(훅 배치).
 
 ---
