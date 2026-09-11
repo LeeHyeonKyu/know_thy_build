@@ -89,7 +89,7 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 | `factory:blocked` | 환경·크리덴셜 문제 | sweeper |
 | `factory:needs-human` | 하드 한계 초과 또는 handoff 불일치 | 없음 |
 
-보조 라벨(비배타): `factory:tier-docs` / `tier-standard` / `tier-load-bearing` (triage가 부여), `factory:retro-proposal` (retro가 만든 PR).
+보조 라벨(비배타, 6개, (ADR-015)): `factory:tier-docs` / `factory:tier-standard` / `factory:tier-load-bearing` (triage가 부여), `factory:retro-proposal` (retro가 만든 PR), `factory:flaky` (flaky-existing으로 격리된 테스트의 후속 이슈), `factory:harness` (harness 자체에 관한 이슈).
 
 `factory:queue` → `factory:needs-human`: triage 산출물이 검증 실패하면(요구 검사 실패, §3.3) `ready`로 넘어가지 못하고 여기서 바로 전이한다.
 
@@ -348,7 +348,7 @@ run-stage.sh <stage> <issue>
 
 **merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.sh`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
 
-merge 스테이지는 **스크립트 전용**이다 — step 4의 `claude -p "/factory-merge <issue>"` 호출이 없다(Plan 2 실행 판결, ADR-015 — R3, 확정). `merge.integrator`(§7.1)를 spawn해 충돌을 해소하는 대신, PR이 `CONFLICTING`이면 `factory:approved → factory:rework`로 전이해 implement 재진입이 같은 일을 한다.
+merge 스테이지는 **스크립트 전용**이다 — step 4의 `claude -p "/factory-merge <issue>"` 호출이 없다(Plan 2 실행 판결, ADR-015 — R3, 확정). `merge.integrator`(§7.1)를 spawn해 충돌을 해소하는 대신, PR이 `CONFLICTING`이면 `factory:approved → factory:rework`로 전이해 implement 재진입이 같은 일을 한다. mergeability가 `UNKNOWN`(GitHub 계산 중)이면 `prInfo`를 5초 후 한 번 재조회하고, 그래도 `MERGEABLE`이 아니면 `factory:needs-human`으로 전이한다(사유 "mergeability unknown after re-poll") — 무한정 기다리지 않는 fail-closed 처리다(Plan 2 실행 판결, ADR-015 — R3).
 
 #### 4.2.2 커맨드 파일 — `.claude/commands/factory-implement.md`
 
@@ -1524,7 +1524,7 @@ P3 역할 신설: reviewer-performance
 
   ✓ PR 코멘트: "P1: allSettled 패턴 예외 추가 요청. P3: 승인" 
   ✓ human-decision 기록
-  → 머지: https://github.com/…/pull/131 (수정 커밋 후 required reviewer로 승인·머지)
+  → 머지: https://github.com/…/pull/131 (수정 커밋 후 사람이 GitHub UI에서 머지 — retro-proposal PR은 merge 잡이 다루지 않는다, ADR-015 R5)
 ```
 
 #### `:role` — 신설
