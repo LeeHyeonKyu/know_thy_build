@@ -26,6 +26,7 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:rework", "factory:in-progress")).toBe(true);
   expect(canTransition("factory:rework", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:approved", "factory:merged")).toBe(true);
+  expect(canTransition("factory:approved", "factory:rework")).toBe(true);   // merge conflict — rebase and rework
   expect(canTransition("factory:blocked", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:blocked", "factory:planned")).toBe(true);   // sweeper 재큐
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);

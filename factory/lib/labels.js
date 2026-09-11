@@ -14,7 +14,7 @@ export const TRANSITIONS = new Map([
   ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:planned"])],   // sweeper 재큐
   ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human"])],
   ["factory:rework", new Set(["factory:in-progress", "factory:needs-human"])],
-  ["factory:approved", new Set(["factory:merged", "factory:needs-human"])],
+  ["factory:approved", new Set(["factory:merged", "factory:needs-human", "factory:rework"])],   // merge-stage: PR conflicts with default branch → back to rework
   ["factory:blocked", new Set(["factory:needs-human", "factory:planned"])],
   ["factory:needs-human", new Set(["factory:queue"])],
   ["factory:merged", new Set([])],

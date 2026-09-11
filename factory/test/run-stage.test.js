@@ -169,8 +169,8 @@ test("I2: the agents log is truncated between context and claude", async () => {
   expect(calls).toEqual(["context", "reset-agents", "claude"]);
 });
 
-test("I4: unverified gates are declared as self-reported on implement/review/merge, not on plan", async () => {
-  for (const stage of ["implement", "review", "merge"]) {
+test("I4: unverified gates are declared as self-reported on implement/review, not on plan (merge is script-only and has its own gates path — see merge-stage.test.js)", async () => {
+  for (const stage of ["implement", "review"]) {
     const lines = [];
     await runStage({ stage, issue: 4, deps: baseDeps({ runRecord: (l) => lines.push(...l), verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }) }) });
     expect(lines, stage).toContain(GATES_SELF_REPORTED);
@@ -299,7 +299,14 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
   const comments = [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: review }) }];
   const assertHandoff = vi.fn(async () => requirementFor("factory:approved")({ issue: 7, comments, prerequisite: true }));   // run-stage/main()과 같은 ctx
   const lines = [];
-  const d = baseDeps({ assertHandoff, resetGates: async () => {}, runRecord: (l) => lines.push(...l) });
+  const d = baseDeps({
+    assertHandoff, resetGates: async () => {}, runRecord: (l) => lines.push(...l),
+    defaultBranch: "main",
+    prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+    gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
+    mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+    mergePr: async () => {}, closeIssue: async () => {},
+  });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
   expect((await assertHandoff()).ok).toBe(true);
   expect(lines.some((l) => /assert: FAIL/.test(l))).toBe(false);
@@ -578,6 +585,16 @@ const checkoutBaseDeps = (over = {}) => baseDeps({
   ...over,
 });
 
+/** merge는 checkoutBaseDeps 위에 runMergeStage의 7단계 deps(happy path)를 얹는다. */
+const mergeHappyDeps = (over = {}) => checkoutBaseDeps({
+  defaultBranch: "main",
+  prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+  gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
+  mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+  mergePr: async () => {}, closeIssue: async () => {},
+  ...over,
+});
+
 test("review: checkoutHead is called right after assertHandoff, before buildContext/gates", async () => {
   const calls = [];
   const d = checkoutBaseDeps({
@@ -599,9 +616,45 @@ test("review: checkoutHead is called right after assertHandoff, before buildCont
 
 test("merge: checkoutHead is called for merge too", async () => {
   const checkoutHead = vi.fn(async () => ({ ok: true, sha: "b".repeat(40), pr: 9 }));
-  const d = checkoutBaseDeps({ checkoutHead });
+  const d = mergeHappyDeps({ checkoutHead });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
   expect(checkoutHead).toHaveBeenCalledTimes(1);
+});
+
+// ── Task 13: merge is script-only — no LLM-stage machinery ─────────────────
+
+test("merge: never calls trustWorkspace, claudeP, buildContext, verifyStage or writeHandoff", async () => {
+  const trustWorkspace = vi.fn(async () => {});
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const buildContext = vi.fn(async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }));
+  const verifyStage = vi.fn(() => ({ ok: true, reasons: [], data: {} }));
+  const writeHandoff = vi.fn(async () => {});
+  const d = mergeHappyDeps({
+    checkoutHead: vi.fn(async () => ({ ok: true, sha: "a".repeat(40), pr: 9 })),
+    trustWorkspace, claudeP, buildContext, verifyStage, writeHandoff,
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(trustWorkspace).not.toHaveBeenCalled();
+  expect(claudeP).not.toHaveBeenCalled();
+  expect(buildContext).not.toHaveBeenCalled();
+  expect(verifyStage).not.toHaveBeenCalled();
+  expect(writeHandoff).not.toHaveBeenCalled();
+});
+
+test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates → mergeGates → mergePr → transition → closeIssue) in order", async () => {
+  const calls = [];
+  const d = mergeHappyDeps({
+    assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
+    checkoutHead: vi.fn(async () => { calls.push("checkout"); return { ok: true, sha: "a".repeat(40), pr: 9 }; }),
+    prInfo: async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; },
+    gates: async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }; },
+    mergeGates: async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; },
+    mergePr: async () => { calls.push("mergePr"); },
+    transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
+    closeIssue: async () => { calls.push("closeIssue"); },
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(calls).toEqual(["assert", "checkout", "prInfo", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
 });
 
 test("review: checkoutHead failure (PR head moved) → needs-human with that reason, exit 2, no claudeP", async () => {

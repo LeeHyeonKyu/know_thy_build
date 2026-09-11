@@ -23,6 +23,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
 import { trustWorkspace } from "./trust-workspace.js";
+import { runMergeStage } from "../lib/merge-stage.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -87,7 +88,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       record([`back-pressure: check failed — ${e?.message || e}`]);
     }
   }
-  await d.trustWorkspace();
+  // merge는 workspace를 신뢰 등록할 필요가 없다 — claude -p를 전혀 부르지 않는다(스크립트 전용).
+  if (stage !== "merge") await d.trustWorkspace();
   const c = await d.claim();
   if (!c.ok) { console.error(`factory: issue #${issue} already claimed by ${c.holder}`); return 0; }
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
@@ -108,6 +110,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       }
       checkoutSha = co.sha;
     }
+    // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
+    // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). 여기서 끝낸다.
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, d, record, refusal });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -350,10 +355,15 @@ async function main() {
       writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
-    /** 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. */
+    /**
+     * 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다.
+     * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의
+     * 자기 신고에서 읽고, 그마저 없으면 CHARTER의 기본값으로 fail closed 대신 보수적으로 채운다.
+     */
     gates: async (ctx) => {
       if (!GATED_STAGES.has(stage)) return null;
-      const result = await runStageGates({ run, cwd: root, harness, stage, tier: ctx.tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile, saveQuarantine: (q) => writeQuarantine(root, q) });
+      const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default) : ctx.tier;
+      const result = await runStageGates({ run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile, saveQuarantine: (q) => writeQuarantine(root, q) });
       mkdirSync(join(root, ".factory/out"), { recursive: true });
       writeFileSync(gatesPath, JSON.stringify(result, null, 2));
       console.log(verdictLine(result));
@@ -361,13 +371,35 @@ async function main() {
     },
     verifyStage: ({ out, gates }) => verifyStage({ stage, out, agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates }),
     writeHandoff: async ({ data }) => { await gh.comment(issue, renderHandoff({ stage, issue, summary: data.summary || `### ${stage} 완료`, data })); },
-    transition: async ({ to, reason, data }) => {
+    /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
+    prInfo: async () => {
+      const h = latestHandoff(await gh.comments(issue), "implement");
+      return h?.data?.pr == null ? null : gh.prView(h.data.pr);
+    },
+    /**
+     * merge stage 전용: 필수 체크 + 무결성. checkoutHead가 이미 로컬 HEAD를 implement handoff의
+     * head_sha로 고정해뒀지만, 여기서도 PR head를 **다시** 라이브로 물어본다 — checkoutHead 이후
+     * PR이 또 움직였으면(추가 커밋) 그 드리프트를 여기서 잡아 integrityGreen을 세우지 않는다.
+     */
+    mergeGates: async () => {
+      const h = latestHandoff(await gh.comments(issue), "implement");
+      const pr = h?.data?.pr ?? null;
+      let prHeadSha;
+      try { if (pr != null) prHeadSha = await gh.prHeadSha(pr); }
+      catch (e) { recordLine(`merge gate: gh pr view failed — ${e?.message || e}`); }
+      return mergeGates({ gh, root, harness, pr, prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null });
+    },
+    mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
+    closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
+    get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
+    transition: async ({ to, reason, data, mergeGatesResult }) => {
       const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, charter, record: recordLine });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
-      if (to === "factory:merged") Object.assign(ctxExtra, await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
+      // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.
+      if (to === "factory:merged") Object.assign(ctxExtra, mergeGatesResult ?? await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
       return transition({ gh, issue, to, reason, ctxExtra });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
