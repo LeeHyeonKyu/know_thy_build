@@ -21,6 +21,8 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 | 011 | flaky 재분류는 어느 스테이지가 하나 | implement에서만 — review·merge는 재분류 없이 RED |
 | 012 | 게이트 판정과 사전 assert의 분리 | `gatesChecked` 표식 — 전이 경로에서만 게이트를 확인 |
 | 013 | 훅 입력 불신 원칙 | `tool_input`을 셸 문자열에 넣기 전 반드시 이스케이프 |
+| 014 | run 기록은 `factory/records` 브랜치 | 보호된 default 브랜치에는 스테이지마다 직접 push할 수 없다 |
+| 015 | Plan 2 배선 판결 — 리뷰 트리거·단일 PAT·체크 상태·merge 스크립트 전용 | R1·R2·R3·R5·R6·R7 + 실행 중 확정된 병합·라벨 그래프·doctor·status 판결 |
 
 ---
 
@@ -320,4 +322,34 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **영향**: §4.2.1 step 9(run-record.sh → syncRecords), §9(run 기록의 저장 위치 — default 브랜치가 아니라 `factory/records`), `factory status`·retro가 run 기록을 읽는 경로(이제 로컬 파일이 아니라 `readRecords`로 이 브랜치를 봐야 한다 — 로컬 워크트리의 `docs/factory/runs/`는 러너 프로세스 안에서만 유효하고 다음 런에서 fresh checkout이면 사라진다).
 
-**영향**: §6.3(`lint-touched.sh` 서술), 훅 작성 일반 규칙(ADR-009의 "로깅 훅은 exit 0" 규칙과 나란히 적용되는 별개의 규칙 — 하나는 훅이 잡을 막지 않게, 하나는 훅 자신이 구멍이 되지 않게).
+**보강 (ADR-014, Plan 2 실행 판결)** — 2026-09-12: 위 결정은 "쓰기"만 다뤘다. 실행 중 두 가지가 더 필요했다. 첫째, `run-stage.sh`는 매 스테이지 **시작** 시점에 `hydrateRecord`를 호출해 `factory/records` 브랜치의 `docs/factory/runs/<issue>.md`를 로컬 워크트리로 먼저 복원한다 — fresh checkout(또는 detached HEAD)에는 이전 스테이지가 쓴 run 기록이 없으므로, 하이드레이트 없이 append하면 이전 스테이지 줄이 사라진다. 둘째, `syncRecords`는 브랜치의 기존 내용을 로컬 파일이 **연장(extend)하지 않는 한** 덮어쓰지 않는다 — 로컬 파일이 브랜치 tip의 내용으로 시작하는 접두어가 아니면(동시에 도는 다른 러너가 그 사이 자기 스테이지를 먼저 push했다면) 로컬 파일 전체가 아니라 로컬이 새로 추가한 꼬리만 브랜치 tip 뒤에 이어 붙인다. 두 조치 모두 "여러 러너가 같은 이슈의 run 기록에 순서 없이 동시 append할 수 있다"는 전제에서 나왔다 — 첫 결정 시점엔 그 경합까지 다루지 않았다.
+
+**영향**: §9(run 기록 — 스테이지 시작 시 hydrate·비파괴적 append 명시).
+
+---
+
+## ADR-015 Plan 2 배선 판결 — 리뷰 트리거·단일 PAT·체크 상태·merge 스크립트 전용 — 2026-09-12
+
+**질문**: Plan 2(CLI·템플릿·CI 배선)를 실행하려면 스펙이 확정하지 않은 GitHub 제약 여섯 가지에 답해야 했다 — review 잡을 무엇으로 깨울지, 토큰을 몇 개 발급할지, merge를 에이전트가 계속 개입시킬지, retro-proposal PR의 리뷰어 규칙을 branch protection으로 표현할 수 있는지, review·merge가 어떤 워킹 트리 상태에서 게이트를 돌릴지, `factory run triage`가 `backlog` 이슈를 어떻게 다룰지. 각각은 스펙 문언과 실제 GitHub 동작이 부딪히는 지점이었다.
+
+**관측** (Plan 2 실행 중, 계획 문서 "Rulings baked into this plan" R1·R2·R3·R5·R6·R7 + Task 3·9·10·13·14·15·16 구현):
+
+- **GitHub 규칙 3가지가 선택지를 좁혔다.** ① `GITHUB_TOKEN`(기본 액션 토큰)이 만든 라벨·push 이벤트는 다음 워크플로를 깨우지 않는다 — PAT가 아니면 스테이지 간 체이닝 자체가 끊긴다. ② branch protection의 required reviewer 규칙은 "이 라벨이 붙은 PR만" 조건부로 걸 수 없다 — 리뷰어 요구는 전체 PR에 걸리거나 아예 안 걸린다. ③ 게이트(`lint`/`unit`/…)는 워킹 트리에서 명령을 실행해 판정하므로, 그 워킹 트리가 실제로 무엇을 체크아웃하고 있는지가 판정의 의미를 결정한다.
+- **R1** — `factory-review.yml`은 `pull_request: synchronize` 대신 `issues: labeled` (`factory:awaiting-review`)로 뜬다(`templates/factory/github/workflows/factory-review.yml`). implement가 이 라벨을 붙이는 순간이 "게이트 GREEN + PR 존재"가 확정된 시점이고, PR head는 이미 implement handoff의 `head_sha`로 묶여 있어 PR→이슈 매핑을 따로 계산할 필요가 없다.
+- **R2** — 모든 스테이지가 단일 PAT `FACTORY_BOT_TOKEN`을 쓴다(checkout·`GH_TOKEN` 동일); merge 잡만 `${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}`로 선택적 상위 토큰을 허용한다(모든 yml 템플릿에서 확인). 위 GitHub 규칙 ①이 근거다 — `GITHUB_TOKEN`으로는 triage→plan→…→merge 체인이 끊긴다. 머지 보호는 이 토큰 하나가 아니라 L0(required checks)+L1(merge 스크립트 전용)+L2(deny)의 합으로 성립한다.
+- **R3** — merge 스테이지는 `claude -p` 호출이 없다(`factory/bin/run-stage.js`: `stage === "merge"`이면 trust-workspace조차 건너뛴다 — "merge는 workspace를 신뢰 등록할 필요가 없다, claude -p를 전혀 부르지 않는다" 원문 주석). PR이 `CONFLICTING`이면 `factory:approved → factory:rework`로 전이하며 사유에 "merge conflict"를 남긴다(`factory/lib/merge-stage.js`, `factory/lib/labels.js`의 `approved → rework` 엣지). integrator 에이전트를 spawn하는 대신 implement 재진입이 conflict를 해소한다.
+- **R5** — retro-proposal PR의 "required reviewer 1명" 규칙은 branch protection에 넣지 않았다 — 위 GitHub 규칙 ②(라벨 조건부 불가)가 이유다. 대신 merge 스테이지가 `claude/fq-*` 브랜치 PR만 머지 대상으로 보므로(스크립트가 만들지 않은 PR은 애초에 자동 머지 후보가 아니다), retro가 만드는 `factory:retro-proposal` PR은 구조적으로 사람만 머지한다.
+- **R6** — review·merge 스테이지는 게이트를 돌리기 전에 implement handoff의 `head_sha`로 PR head를 detach checkout한다(`makeCheckoutHead`, `factory/bin/run-stage.js`). 위 GitHub 규칙 ③이 근거다 — default 브랜치 워킹 트리에서 돈 GREEN은 그 PR에 대한 판정이 아니다. checkout 시점에 PR head가 handoff의 `head_sha`와 다르면(그 사이 새 커밋이 push됨) "PR head moved" 사유로 `needs-human`. detach된 HEAD 위에서 트리가 지저분해지는 것도 그 자체로 위험 신호라 `stop-guard.sh`가 브랜치 없이도(`git branch --show-current`가 빈 문자열이어도) `git status --porcelain`을 검사해 미커밋 변경이 있으면 종료를 거부한다 — review/merge는 애초에 트리를 건드리면 안 된다는 원칙이 브랜치 유무와 무관하게 적용된다.
+- **R7** — `factory run triage <n>`을 라벨이 정확히 `backlog`인 이슈에 실행하면, `claim.sh`로 lock을 **먼저** 잡고(1단계) 그다음에야 `backlog → factory:queue` 전이 코멘트를 남긴다(`makeLocalEntry`, `factory/bin/run-stage.js` — claim 직후·`hydrateRecord`보다 앞). `FACTORY_LOCAL_ENTRY=1`이 없는 GitHub 이벤트발 triage 잡은 이 경로를 타지 않는다. 다른 스테이지는 라벨을 옮기지 않는다(전이는 오직 `assert-handoff`/`transition`이 처리); `factory run merge`는 CLI 자체가 존재하지 않는다(§2.1 `factory run` 스테이지 목록은 `triage|plan|implement|review`뿐).
+
+**결정**: R1·R2·R3·R5·R6·R7을 위 관측대로 확정한다. 부수적으로, Plan 2 실행 중 스펙에 없던 판결 다섯 가지도 함께 확정한다(전부 코드·테스트로 검증됨):
+
+1. **`.claude/settings.json`은 `init`에서도 결정적으로 병합된다** — `--upgrade`뿐 아니라(`factory/cli/install.js` `planInstall`: `merge === "settings"`인 항목은 `mode` 분기보다 먼저 병합 처리된다). 브라운필드 저장소는 이미 자기 `settings.json`을 가지고 있을 수 있으므로, "파일이 없으면 create, 있으면 무조건 skip"이라는 `init`의 일반 규칙(§2.1)이 이 파일에는 적용되지 않는다 — deny 합집합·훅 append는 init 시점에도 안전하게 가산적이다.
+2. **라벨 그래프가 세 엣지를 더 가진다**: `factory:approved → factory:blocked`, `factory:awaiting-review → factory:blocked`(게이트·API 조회 실패로 두 스테이지 모두 `blocked`로 끝날 수 있어 양쪽 다 빠져나가야 한다), `factory:approved → factory:rework`(R3의 conflict 경로). 그리고 `transition()`이 그래프가 거부하는 엣지를 만나면 라벨은 바꾸지 않고 `factory-transition-refused` 코멘트만 남긴다(`factory/lib/transition.js`) — merge 경로를 포함해 전이가 조용히 실패하는 지점이 없다.
+3. **라벨 카탈로그는 19개다** — `backlog`(1) + `factory:*` 상태(12) + 보조 라벨(6, tier 3종 + retro-proposal + flaky + harness). 스펙 §3.1 표의 "13 states"는 이 중 상태 라벨 12개에 `backlog`를 더한 숫자다(`factory/lib/label-catalog.js` 주석에 명시).
+4. **`checksGreen`은 `harness.toml [factory].required_checks`에 열거된 이름 전부가 존재하고 전부 통과일 때만 true다**(`allChecksGreen`, `factory/lib/gh.js`) — 같은 이름이 중복 보고돼도 전부 통과라면 green이고, `required`가 빈 배열이면 무조건 false(fail-closed, "확인할 게 없다"를 통과로 읽지 않는다). `factory/gates`·`factory/review`는 run-stage가 PR head sha에 commit status로 게시하는 값이고(§4.2.1 step 5·8), `factory/integrity`는 `factory-integrity.yml`의 잡 `name:`(GitHub가 자동으로 만드는 체크 이름)이라 run-stage가 게시하지 않는다 — 셋의 "게시 주체"가 서로 다르다.
+5. **run 기록은 스테이지 시작 시 하이드레이트되고, 동기화는 비파괴적이다** — ADR-014 보강 참조.
+6. **doctor**: `verdict-format.sh`/`record-agents.sh` 검사는 실제 transcript 픽스처를 임시로 만들어 실행한다(fail-open을 실제로 확인하려면 파일이 있어야 한다); `roles.toml`에 정의된 모든 에이전트 경로를 CHARTER 로스터 소속 여부와 무관하게 검사한다(로스터 밖 역할도 파일이 실재해야 한다); CHARTER가 없거나 `status: draft`인 것은 FAIL이 아니라 WARN이다(§11 그린필드 흐름에서 `/project`가 CHARTER보다 먼저 doctor를 통과해야 하므로).
+7. **`factory status`의 두 버킷**: "진행 중" = `factory:in-progress`/`awaiting-review`/`rework`/`blocked`(blocked 항목엔 "sweeper → needs-human" 힌트가 붙는다); "큐" = `factory:queue`/`ready`/`planned`/`approved`(`factory/lib/status.js` `LIVE_STATES`/`QUEUE_STATES`). 이슈별 사용량이 상위 10개까지 표시되지만, 사용량은 어떤 경우에도 진행을 막지 않고 보고만 한다(ADR-005 그대로).
+
+**영향**: §3.2(전이도에 세 엣지 추가), §3.3(그래프 거부가 코멘트를 남김), §4.1(review 트리거·merge "스크립트 전용"·retro "(Plan 4)"·액션 버전), §4.2.1(step 4 "merge는 호출 안 함"·step 9 "`factory/records` 브랜치"), §4.2.5(`factory run triage`의 backlog 경로), §5.1(`[factory].required_checks` 예시), §6.1(토큰·체크 게시 주체·retro-proposal 리뷰어 규칙 삭제), §6.3(settings.json 병합 시점·record-agents 훅), §13.4(`factory status` 버킷).

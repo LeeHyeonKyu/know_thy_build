@@ -62,7 +62,7 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 "로컬 모드"는 없다. `factory run`은 `.factory/bin/run-stage.sh <stage> <issue>`를 로컬에서 실행하는 것이고, 이 스크립트는 CI의 yml이 호출하는 것과 **같은 파일**이다. 따라서 훅·권한·게이트·handoff 규칙이 동일하다.
 
 - claim은 동일하게 lock 브랜치 first-push-wins. heartbeat 코멘트에 `runner: local/<hostname>`을 남긴다.
-- `backlog` 이슈에 `factory run plan 123`을 실행하면 **lock을 먼저 잡고** 그다음 라벨을 `factory:queue → ready`로 옮긴다(§4.2.5). 라벨 이벤트로 뜬 GitHub 잡은 claim에 실패해 물러난다. 로컬 실행도 상태 머신 안에서 일어난다.
+- `backlog` 이슈에 `factory run triage 123`을 실행하면 **lock을 먼저 잡고** 그다음 라벨을 `backlog → factory:queue`로 옮긴다(§4.2.5, Plan 2 실행 판결 ADR-015 — R7). 라벨 이벤트로 뜬 GitHub 잡은 claim에 실패해 물러난다. 로컬 실행도 상태 머신 안에서 일어난다. 다른 스테이지는 라벨을 옮기지 않는다.
 - 머지는 로컬에서 불가능하다. branch protection이 막고, `factory run merge`는 존재하지 않는다.
 
 ---
@@ -112,14 +112,19 @@ stateDiagram-v2
   in_progress --> planned: sweeper 재큐
   awaiting_review --> approved: review N/N
   awaiting_review --> rework: review reject
+  awaiting_review --> blocked: env failure
   rework --> in_progress: implement 재진입
   approved --> merged: merge
+  approved --> rework: merge conflict
+  approved --> blocked: env failure
   merged --> [*]: retro
   rework --> needs_human: round > K
   in_progress --> needs_human: RED × M · 예산(켠 경우) · 재시도 R
   blocked --> needs_human: sweeper
   needs_human --> queue: 사람
 ```
+
+`awaiting_review --> blocked`·`approved --> blocked`는 게이트·GitHub API 조회 자체가 실패했을 때(환경·크리덴셜 문제) 두 스테이지 모두 `blocked`로 끝날 수 있어 생긴 엣지이고, `approved --> rework`는 merge 스테이지가 PR을 `CONFLICTING`으로 판정했을 때(사유 "merge conflict — rebase onto \<default\>") implement 재진입으로 돌려보내는 경로다(Plan 2 실행 판결, ADR-015 — R3).
 
 예산 간선은 **상한을 켠 경우에만 존재한다**(기본 off — §4.4·§5.3, ADR-005). 켜져 있어도 초과는 **다음 claim을 거부하는 방식**으로 작동하며 진행 중인 스테이지를 도중에 죽이지 않는다: 이미 도는 스테이지는 끝까지 가고, 그 다음 전이에서 `needs-human`으로 빠진다.
 
@@ -129,7 +134,7 @@ stateDiagram-v2
 
 전이는 오직 `.factory/bin/transition.sh <issue> <to>`가 수행한다. 이 스크립트는:
 
-1. 현재 라벨이 허용된 출발 상태인지 확인한다(표 3.1의 그래프 밖 전이는 exit 2).
+1. 현재 라벨이 허용된 출발 상태인지 확인한다(표 3.1의 그래프 밖 전이는 exit 2 — 라벨은 바꾸지 않고 `factory-transition-refused` 코멘트만 남긴다(Plan 2 실행 판결, ADR-015) — merge를 포함해 전이가 조용히 실패하는 지점이 없다).
 2. **목적 상태가 요구하는 handoff가 존재하는지** 확인한다(아래 표). 없으면 전이하지 않고 `needs-human` + 사유 코멘트.
 3. 라벨을 교체하고 handoff 코멘트를 남긴다.
 
@@ -199,9 +204,9 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 | `factory-triage.yml` | `issues: labeled` (`factory:queue`) | `triage` | 15 |
 | `factory-plan.yml` | `issues: labeled` (`factory:ready`) | `plan` | 45 |
 | `factory-implement.yml` | `issues: labeled` (`factory:planned`, `factory:rework`) | `implement` | 90 |
-| `factory-review.yml` | `pull_request: synchronize, ready_for_review` + 라벨 `awaiting-review` | `review` | 45 |
-| `factory-merge.yml` | `issues: labeled` (`factory:approved`) | `merge` | 20 |
-| `factory-retro.yml` | `pull_request: closed (merged)` — cron 없음. 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro` | 30 |
+| `factory-review.yml` | `issues: labeled` (`factory:awaiting-review`) — `pull_request` 이벤트가 아니다(Plan 2 실행 판결, ADR-015 — R1: PR head는 이미 implement handoff의 `head_sha`로 묶여 있어 PR→이슈 매핑이 필요 없다) | `review` | 45 |
+| `factory-merge.yml` | `issues: labeled` (`factory:approved`) | `merge` — **스크립트 전용, `claude -p` 호출 없음**(Plan 2 실행 판결, ADR-015 — R3) | 20 |
+| `factory-retro.yml` (Plan 4) | `pull_request: closed (merged)` — cron 없음. 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro` | 30 |
 | `factory-sweeper.yml` | `schedule: */30` | `sweep` | 5 |
 | `factory-integrity.yml` | `pull_request: *` | `integrity` | 5 |
 
@@ -226,7 +231,7 @@ jobs:
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4              # R8 — Plan 0 실측 버전 고정(Plan 2 실행 판결, ADR-015)
         with: { fetch-depth: 0 }
       - uses: ./.factory/actions/setup        # node/pnpm 등 harness.toml [runtime] 기준
       - uses: actions/setup-node@v4
@@ -293,10 +298,13 @@ run-stage.sh <stage> <issue>
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.sh <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
-  4. claude -p "/factory-<stage> <issue>" \
+  4. (merge 제외) claude -p "/factory-<stage> <issue>" \
        --settings .factory/ci-settings.json \
        --max-turns 5 [--max-budget-usd <CHARTER>] \
        --permission-mode dontAsk --output-format json > .factory/out/<stage>.json
+     (merge는 이 단계를 **호출하지 않는다** — 스크립트 전용이다(Plan 2 실행 판결, ADR-015 — R3): 이연됐던 결정이
+      Plan 2에서 확정됐다. `charter-ready`/`trust-workspace`도 merge에서는 건너뛴다 — claude 프로세스를 띄우지 않으므로
+      workspace trust가 필요 없다. 충돌 해소는 conflict → rework 전이로 implement가 재진입해 처리한다.)
      (--max-budget-usd는 CHARTER의 예산 상한을 **켠 경우에만** 붙인다 — 기본은 off이고 factory는 소비를 보고만 한다(§4.4·§5.3, ADR-005).
       켜져 있어도 초과는 다음 claim을 거부할 뿐, 도는 스테이지를 도중에 죽이지 않는다)
      (env: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 — 방어적으로 유지하되 진짜 상한은 잡의 timeout-minutes. ADR-007: 단일 Bash 호출이
@@ -330,12 +338,17 @@ run-stage.sh <stage> <issue>
   7. write-handoff.sh <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
                                              #   6이 이미 schema를 통과시켰으므로 7은 재검증하지 않고 6의 data를 그대로 코멘트로 옮긴다
   8. transition.sh <issue> <to>              # 3.3 규칙 (implement 성공 시 <to>=factory:awaiting-review; 출발 상태는 2.5가 이미 in-progress로 옮겨 둔 상태)
-  9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md append + push · lock 해제
+  9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md를 default 브랜치가 아니라 전용
+                                             #   `factory/records` 브랜치에 git plumbing으로 append한다(ADR-014) — 현재
+                                             #   체크아웃·인덱스·HEAD(또는 detached HEAD)를 건드리지 않는다. 스테이지
+                                             #   시작 시(0.5 이후) `hydrateRecord`가 이 브랜치에서 기존 run 기록을 먼저
+                                             #   복원하고, 동기화는 로컬 파일이 브랜치 내용을 연장하지 않는 한 덮어쓰지
+                                             #   않는다(ADR-014 보강) · lock 해제
 ```
 
 **merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.sh`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
 
-merge 스테이지도 여전히 `claude -p "/factory-merge <issue>"`를 호출한다(step 4) — 충돌 해소가 필요할 때만 `merge.integrator`가 spawn되고 평소엔 스크립트만 돈다(§7.1). **Plan 2에서 merge를 스크립트 전용으로 바꾼다**는 것이 이 계획 시점에서는 이연된 결정이다.
+merge 스테이지는 **스크립트 전용**이다 — step 4의 `claude -p "/factory-merge <issue>"` 호출이 없다(Plan 2 실행 판결, ADR-015 — R3, 확정). `merge.integrator`(§7.1)를 spawn해 충돌을 해소하는 대신, PR이 `CONFLICTING`이면 `factory:approved → factory:rework`로 전이해 implement 재진입이 같은 일을 한다.
 
 #### 4.2.2 커맨드 파일 — `.claude/commands/factory-implement.md`
 
@@ -380,6 +393,8 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 #### 4.2.5 로컬과 GitHub의 경쟁 — claim이 라벨보다 먼저
 
 라벨이 `queue`가 되는 순간 GitHub Action이 뜬다. 로컬 `factory run`이 라벨부터 바꾸면 GitHub이 먼저 잡는다. 따라서 `factory run <stage> <issue>`는 **lock을 먼저 잡고 그다음 라벨을 옮긴다.** 라벨 이벤트로 뜬 GitHub 잡은 claim에 실패해 즉시 종료한다 — 로컬이 이긴다. 사람이 GitHub UI에서 라벨을 옮기면 GitHub 잡이 먼저 claim한다 — GitHub이 이긴다. 승자는 행위에서 결정되고 둘이 동시에 도는 일은 없다. lock은 스테이지 종료 시 삭제, heartbeat 끊긴 lock은 sweeper가 회수.
+
+이 "claim 뒤 라벨 이동" 경로를 실제로 타는 것은 **`factory run triage`뿐이다** — 이슈 라벨이 정확히 `backlog`일 때 lock을 잡은 직후 `backlog → factory:queue`로 옮긴다(Plan 2 실행 판결, ADR-015 — R7). 다른 스테이지(`plan`/`implement`/`review`)는 라벨을 옮기지 않는다 — 전이는 오직 `assert-handoff`/`transition`이 처리한다. `factory run merge`는 CLI에 없다(§2.1).
 
 에이전트(4)는 gates를 **돌릴 수는 있지만 판정할 수 없다.** 판정은 5의 파일이며, 에이전트 출력에 "GREEN"이라 적혀 있어도 6은 5의 파일만 읽는다.
 
@@ -468,7 +483,8 @@ test_one    = "pnpm vitest run {file} -t {name}"                       # §5.2.5
 maturity = "M2"                        # M0 | M1 | M2 (§5.2.1). 승격은 factory:harness 이슈 + 사람 머지
 
 [factory]
-orchestration = "workflow"             # workflow | agent (§4.2.4). 런타임에 자동 전환되지 않는다
+orchestration   = "workflow"           # workflow | agent (§4.2.4). 런타임에 자동 전환되지 않는다
+required_checks = ["factory/gates", "factory/review", "factory/integrity"]   # 기본값(Plan 2 실행 판결, ADR-015). branch protection과 merge 게이트 필터가 같은 목록을 쓴다
 
 [commands.proof]                       # 증명 게이트 (§5.2.4). 측정은 gates.sh(diff-coverage.js/mutation.js)가, 임계는 여기(protected)에
 coverage        = "pnpm vitest run --coverage --coverage.reporter=json"   # diff coverage가 돌릴 커버리지 명령.
@@ -729,9 +745,9 @@ light_on_merge: true
 | **L3 프롬프트** | `CLAUDE.md`, `.claude/agents/*.md` | 읽기만 | (강제 아님) 품질·관점 |
 
 ### 6.1 L0 상세
-- required checks: `factory/gates`, `factory/review`, `factory/integrity`. 세 개 모두 GREEN이어야 머지 가능.
-- `factory/integrity`(`.factory/bin/integrity.js`)는 PR diff(`base...head`)에서 세 가지를 본다: ① `[protected].factory` 매치 파일 변경 — `[protected].except`와 `[protected].additive_only`(`.claude/agents/*.md`의 `## Examples`/`## Perspectives`, 위치 기반 검사: 섹션 밖 삽입·삭제는 전부 위반이고, 이번 diff가 새로 추가한 `## ` 헤더는 그 자신도 다른 추가 줄의 경계로도 인정하지 않는다 — base에 없던 헤더로 경계를 위조해 섹션을 자칭해도 잡힌다) 밖이면 RED. ② `.factory/lessons/**` 항목 포맷 — `factory-lessons:v1` 헤더, `- [L-YYYY-MM-DD-NN]` 형식, 항목마다 `근거:` 문구, 역할당 상한(`max`) 초과. ③ `harness.toml [test].test_glob`에 매치하는 테스트 파일에 skip/ignore 주석(`.skip(`, `xit(`, `xdescribe(`, `@pytest.mark.skip`, `istanbul ignore`, `pragma: no cover`, `Stryker disable`)이 새로 추가됨. 예외는 `factory:retro-proposal` 라벨 PR(사람만 머지 가능 — required reviewer 1명 규칙을 이 라벨에만 적용).
-- 토큰: implement/review/plan 잡은 `FACTORY_BOT_TOKEN`(merge 권한 없음). merge 잡만 `FACTORY_MERGE_TOKEN`.
+- required checks: `factory/gates`, `factory/review`, `factory/integrity`(`harness.toml [factory].required_checks`의 기본값, §5.1). 세 개 모두 GREEN이어야 머지 가능. 게시 주체는 서로 다르다(Plan 2 실행 판결, ADR-015) — `factory/gates`·`factory/review`는 run-stage가 PR head sha에 commit status로 게시하고(§4.2.1 step 5·8), `factory/integrity`는 `factory-integrity.yml`의 잡 `name:`(GitHub가 자동으로 만드는 체크 이름)이라 run-stage가 게시하지 않는다.
+- `factory/integrity`(`.factory/bin/integrity.js`)는 PR diff(`base...head`)에서 세 가지를 본다: ① `[protected].factory` 매치 파일 변경 — `[protected].except`와 `[protected].additive_only`(`.claude/agents/*.md`의 `## Examples`/`## Perspectives`, 위치 기반 검사: 섹션 밖 삽입·삭제는 전부 위반이고, 이번 diff가 새로 추가한 `## ` 헤더는 그 자신도 다른 추가 줄의 경계로도 인정하지 않는다 — base에 없던 헤더로 경계를 위조해 섹션을 자칭해도 잡힌다) 밖이면 RED. ② `.factory/lessons/**` 항목 포맷 — `factory-lessons:v1` 헤더, `- [L-YYYY-MM-DD-NN]` 형식, 항목마다 `근거:` 문구, 역할당 상한(`max`) 초과. ③ `harness.toml [test].test_glob`에 매치하는 테스트 파일에 skip/ignore 주석(`.skip(`, `xit(`, `xdescribe(`, `@pytest.mark.skip`, `istanbul ignore`, `pragma: no cover`, `Stryker disable`)이 새로 추가됨. `factory:retro-proposal` 라벨 PR도 이 검사에서 예외는 아니다 — 다만 그 PR의 "required reviewer 1명" 규칙은 branch protection으로 표현하지 않는다(Plan 2 실행 판결, ADR-015 — R5: 라벨 조건부 required reviewer는 GitHub이 지원하지 않는다). 대신 merge 스테이지가 `claude/fq-*` 브랜치 PR만 자동 머지 대상으로 보므로, retro가 만드는 PR은 구조적으로 사람만 머지한다.
+- 토큰: 모든 잡이 단일 PAT `FACTORY_BOT_TOKEN`을 쓴다(checkout·`GH_TOKEN` 동일) — `GITHUB_TOKEN`이 만든 라벨·push 이벤트는 다음 워크플로를 깨우지 않으므로 기본 액션 토큰으로는 스테이지 체이닝이 끊긴다. merge 잡만 선택적으로 `FACTORY_MERGE_TOKEN`을 상위 토큰으로 쓸 수 있다(`${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}`, 없으면 `FACTORY_BOT_TOKEN`으로 폴백)(Plan 2 실행 판결, ADR-015 — R2). 머지 보호는 이 토큰 하나가 아니라 required checks(L0) + merge 스크립트 전용(L1, R3) + deny(L2)의 합으로 성립한다.
 - linear history, force-push 금지, 관리자도 규칙 적용(`enforce_admins`).
 
 ### 6.2 L1 상세
@@ -741,6 +757,8 @@ light_on_merge: true
 - `assert-handoff.sh`, `transition.sh`: 3.3.
 
 ### 6.3 L2 `.claude/settings.json` (factory init이 생성)
+
+**병합 시점.** `.claude/settings.json`은 `init --upgrade`뿐 아니라 **`init`(최초 설치) 시점에도 결정적으로 병합된다**(Plan 2 실행 판결, ADR-015) — brownfield 저장소는 이미 자기 `settings.json`을 갖고 있을 수 있으므로, "파일이 있으면 무조건 skip"이라는 `init`의 일반 규칙(§2.1)은 이 파일에는 적용되지 않는다. 병합은 deny/allow 합집합, 훅은 `command`가 이미 있으면 append하지 않는 방식으로 가산적이고 멱등이다.
 
 **전제 — deny는 신뢰 여부와 무관하게 걸리지만, allow와 "선택적 차단"은 trust 부트스트랩을 요구한다.** 정확히는(ADR-008, 3개 모드 매트릭스):
 
@@ -773,12 +791,17 @@ light_on_merge: true
     "Stop": [
       { "hooks": [{ "type": "command", "command": ".claude/hooks/stop-guard.sh" }] }
     ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": ".claude/hooks/record-agents.sh" }] }
+    ],
     "SubagentStop": [
-      { "hooks": [{ "type": "command", "command": ".claude/hooks/verdict-format.sh" }] }
+      { "hooks": [{ "type": "command", "command": ".claude/hooks/record-agents.sh" }, { "type": "command", "command": ".claude/hooks/verdict-format.sh" }] }
     ]
   }
 }
 ```
+
+`record-agents.sh`(`SubagentStart`/`SubagentStop`, **로깅형**)는 `agent_id`/`agent_type`을 훅 로그에 남긴다 — `verify-stage.sh`가 로스터·인원·라운드를 검증하는 근거 파일이다(ADR-001). ADR-009의 로깅 훅 규칙(항상 exit 0)을 따른다(Plan 2 실행 판결, ADR-015).
 
 훅은 stdin JSON(`.tool_input.command`)을 읽는다. 기존 `check-merge-gate.sh`의 `$TOOL_INPUT` 버그는 이 교체로 해소된다.
 
@@ -1528,6 +1551,8 @@ P3 역할 신설: reviewer-performance
 ### 13.4 설치와 배치
 
 `npx know-thy-build`가 13개 전부를 `.claude/commands/know-thy-build/`에 설치한다(Phase 1·2 구분 없이 하나의 세트). 운영 스킬은 factory가 init된 프로젝트에서만 의미가 있으므로, `factory init` 전에는 첫 줄에서 "factory가 아직 없음"을 안내하고 종료한다. `factory status` CLI는 `:status`의 비대화형 버전으로 남긴다(CI·스크립트용).
+
+`factory status`의 화면 구성은 Needs You → **진행 중** → **큐** → 역압 → 최근 머지 → 사용량 순이다(Plan 2 실행 판결, ADR-015). "진행 중" = `factory:in-progress`/`awaiting-review`/`rework`/`blocked`(blocked 항목엔 "sweeper → needs-human" 힌트가 붙는다 — 아직 사람 차례는 아니다); "큐" = `factory:queue`/`ready`/`planned`/`approved`(아직 어떤 스테이지도 시작 안 한 상태). 이슈별 사용량이 함께 표시되지만(상위 10개), 사용량은 어떤 경우에도 진행을 막지 않고 **보고만** 한다(ADR-005).
 
 ---
 
