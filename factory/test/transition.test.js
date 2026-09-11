@@ -14,6 +14,24 @@ test("graph violation → ok:false, no label change", async () => {
   expect(gh.setFactoryLabel).not.toHaveBeenCalled();
 });
 
+test("graph violation → refusal comment posted (visible), no label change", async () => {
+  const gh = fakeGh(["backlog"]);
+  const r = await transition({ gh, issue: 7, to: "factory:approved" });
+  expect(r.ok).toBe(false); expect(r.reason).toMatch(/not allowed/);
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(gh.comment).toHaveBeenCalledTimes(1);
+  expect(gh.comment.mock.calls[0][1]).toMatch(/factory-transition-refused from=backlog to=factory:approved/);
+  expect(gh.comment.mock.calls[0][1]).toMatch(/not allowed/);
+});
+
+test("graph violation with human:true → no comment, no label change", async () => {
+  const gh = fakeGh(["backlog"]);
+  const r = await transition({ gh, issue: 7, to: "factory:approved", human: true });
+  expect(r.ok).toBe(false);
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+});
+
 test("requirement failure → moves to needs-human with refusal comment", async () => {
   const gh = fakeGh(["factory:ready"]);   // no plan handoff
   const r = await transition({ gh, issue: 7, to: "factory:planned" });

@@ -657,6 +657,39 @@ test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates →
   expect(calls).toEqual(["assert", "checkout", "prInfo", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
 });
 
+test("merge: postStatus is run-stage's own helper, not reimplemented — no sha skips the post and leaves a record line", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const lines = [];
+  const d = mergeHappyDeps({
+    gates: async () => ({ schema: "factory.gates.v1", status: "GREEN" }),   // no head_sha
+    reportStatus, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(reportStatus).not.toHaveBeenCalled();
+  expect(lines.some((l) => /status: factory\/gates skipped — no sha/.test(l))).toBe(true);
+});
+
+test("merge: postStatus posts factory/gates via run-stage's reportStatus when a sha is present", async () => {
+  const reportStatus = vi.fn(async () => {});
+  const d = mergeHappyDeps({
+    gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "e".repeat(40) }),
+    reportStatus,
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(reportStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates", state: "success", sha: "e".repeat(40) }));
+});
+
+test("merge: checkoutHead's sha flows into runMergeStage as headSha and is recorded", async () => {
+  const lines = [];
+  const d = mergeHappyDeps({
+    checkoutHead: vi.fn(async () => ({ ok: true, sha: "f".repeat(40), pr: 9 })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(lines).toContain(`merge: head ${"f".repeat(7)}`);
+  expect(lines).toContain(`merge: merged ${"f".repeat(7)} via PR #9`);
+});
+
 test("review: checkoutHead failure (PR head moved) → needs-human with that reason, exit 2, no claudeP", async () => {
   const lines = [];
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));

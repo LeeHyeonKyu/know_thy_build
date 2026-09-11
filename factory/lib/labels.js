@@ -12,9 +12,11 @@ export const TRANSITIONS = new Map([
   ["factory:ready", new Set(["factory:planned", "factory:needs-human"])],
   ["factory:planned", new Set(["factory:in-progress", "factory:needs-human"])],
   ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:planned"])],   // sweeper 재큐
-  ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human"])],
+  // blocked = 환경/자격증명 실패로 sweeper가 needs-human으로 에스컬레이션한다(§3.2) — review·merge
+  // 게이트가 BLOCKED로 끝나는 모든 스테이지에서 겪을 수 있으므로 두 상태 모두에서 빠져나가야 한다.
+  ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked"])],
   ["factory:rework", new Set(["factory:in-progress", "factory:needs-human"])],
-  ["factory:approved", new Set(["factory:merged", "factory:needs-human", "factory:rework"])],   // merge-stage: PR conflicts with default branch → back to rework
+  ["factory:approved", new Set(["factory:merged", "factory:needs-human", "factory:rework", "factory:blocked"])],   // merge-stage: conflict → rework, gates/API failure → blocked
   ["factory:blocked", new Set(["factory:needs-human", "factory:planned"])],
   ["factory:needs-human", new Set(["factory:queue"])],
   ["factory:merged", new Set([])],

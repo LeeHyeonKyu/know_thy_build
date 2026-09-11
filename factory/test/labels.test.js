@@ -23,10 +23,12 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:in-progress", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:awaiting-review", "factory:approved")).toBe(true);
   expect(canTransition("factory:awaiting-review", "factory:rework")).toBe(true);
+  expect(canTransition("factory:awaiting-review", "factory:blocked")).toBe(true);   // review gates BLOCKED
   expect(canTransition("factory:rework", "factory:in-progress")).toBe(true);
   expect(canTransition("factory:rework", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:approved", "factory:merged")).toBe(true);
   expect(canTransition("factory:approved", "factory:rework")).toBe(true);   // merge conflict — rebase and rework
+  expect(canTransition("factory:approved", "factory:blocked")).toBe(true);   // merge gates BLOCKED / merge API failure
   expect(canTransition("factory:blocked", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:blocked", "factory:planned")).toBe(true);   // sweeper 재큐
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);

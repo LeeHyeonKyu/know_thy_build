@@ -5,7 +5,13 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   const it = await gh.issue(issue);
   const from = factoryLabelOf(it.labels);
   if (!from) return { ok: false, from, to, reason: "no factory state label on issue" };
-  if (!canTransition(from, to)) return { ok: false, from, to, reason: `transition ${from} → ${to} not allowed` };
+  if (!canTransition(from, to)) {
+    const graphReason = `transition ${from} → ${to} not allowed`;
+    // 그래프에 없는 전이는 라벨을 건드리지 않는다(어느 쪽으로도 안전한 기본값이 없다 — 예: merged/wont-do는
+    // needs-human으로도 못 나간다) — 하지만 조용히 실패하지는 않는다. 사람이 볼 수 있게 코멘트는 남긴다.
+    if (!human) await gh.comment(issue, `<!-- factory-transition-refused from=${from} to=${to} -->\n**전이 거부** ${from} → ${to}: ${graphReason}`);
+    return { ok: false, from, to, reason: graphReason };
+  }
   const comments = await gh.comments(issue);
   const req = requirementFor(to)({ comments, ...ctxExtra });
   if (!req.ok) {

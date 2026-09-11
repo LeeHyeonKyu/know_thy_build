@@ -10,6 +10,7 @@ import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quaran
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
+import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -34,23 +35,9 @@ export const STAGES = ["triage", "plan", "implement", "review", "merge"];
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 
-/**
- * merge-base를 못 구하면 이번 런의 "무엇과 비교했는가"가 통째로 없다 — diff·integrity·prove-test가
- * 전부 근거를 잃는다. RED도 GREEN도 아닌 판정 불가이므로 typed error로 올려 blocked로 끝낸다.
- */
-export const MERGE_BASE_BLOCKED_REASON = "cannot compute merge-base (shallow clone?)";
-export const MERGE_BASE_ERROR_CODE = "FACTORY_MERGE_BASE";
-export class MergeBaseError extends Error {
-  constructor(detail = "") {
-    super(MERGE_BASE_BLOCKED_REASON + (detail ? ` — ${detail}` : ""));
-    this.name = "MergeBaseError";
-    this.code = MERGE_BASE_ERROR_CODE;
-  }
-}
-export const isMergeBaseError = (e) => e?.code === MERGE_BASE_ERROR_CODE;
-
-/** diff를 못 읽는 것도 판정 불가다 — merge-base와 같은 사유로 blocked로 끝낸다. */
-export const GIT_DIFF_BLOCKED_REASON = "cannot compute diff";
+// MergeBaseError/isMergeBaseError/MERGE_BASE_BLOCKED_REASON/GIT_DIFF_BLOCKED_REASON now live in
+// lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
+export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -93,7 +80,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   const c = await d.claim();
   if (!c.ok) { console.error(`factory: issue #${issue} already claimed by ${c.holder}`); return 0; }
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
-  let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — 런 레코드의 마지막 줄에 싣는다
+  let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
@@ -111,8 +98,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       checkoutSha = co.sha;
     }
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
-    // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). 여기서 끝낸다.
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, d, record, refusal });
+    // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
+    // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -392,6 +380,8 @@ async function main() {
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
+    /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     transition: async ({ to, reason, data, mergeGatesResult }) => {
       const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, charter, record: recordLine });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
