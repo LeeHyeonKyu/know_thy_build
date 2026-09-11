@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { changedFiles, changedLines } from "../lib/changed-files.js";
+import { changedFiles, changedLines, isGitDiffError } from "../lib/changed-files.js";
 import { globToRegex } from "../lib/glob.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -30,6 +30,27 @@ test("tests/sources는 삭제를 빼고, 이름이 바뀐 파일은 새 경로�
   expect(r.tests).toEqual(["test/moved.test.js"]);
   expect(r.sources).toEqual(["src/to.js"]);
   expect(r.addedTests).toEqual([]);
+});
+
+test("harness에 [test] 섹션(globs)이 없어도 changedFiles는 던지지 않는다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "A\ttest/new.test.js\nM\tsrc/a.js\n", stderr: "" } }]);
+  const r = await changedFiles({ run, cwd: "/repo", base: "abc", harness: {} });
+  expect(r.tests).toEqual([]);
+  expect(r.sources).toEqual([]);
+  expect(r.all).toEqual(["test/new.test.js", "src/a.js"]);
+});
+
+test("git diff가 실패하면 code: FACTORY_GIT_DIFF를 실은 에러를 던진다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: { code: 128, stdout: "", stderr: "fatal: bad revision" } }]);
+  await expect(changedFiles({ run, cwd: "/repo", base: "abc", harness })).rejects.toMatchObject({ code: "FACTORY_GIT_DIFF" });
+  const run2 = makeFakeRun([{ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: { code: 128, stdout: "", stderr: "fatal: bad revision" } }]);
+  try { await changedFiles({ run: run2, cwd: "/repo", base: "abc", harness }); }
+  catch (e) { expect(isGitDiffError(e)).toBe(true); }
+});
+
+test("changedLines도 git diff 실패에서 code: FACTORY_GIT_DIFF를 던진다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "diff" && a.includes("-U0"), result: { code: 128, stdout: "", stderr: "fatal: bad revision" } }]);
+  await expect(changedLines({ run, cwd: "/repo", base: "abc" })).rejects.toMatchObject({ code: "FACTORY_GIT_DIFF" });
 });
 
 test("changedLines parses -U0 hunks (added/modified lines only)", async () => {

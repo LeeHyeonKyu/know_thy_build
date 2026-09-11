@@ -30,11 +30,13 @@ export function recomputeStatus(result, harness) {
     else if (g.status === "MISCONFIGURED") misconfigured.push(name);
   }
   // 레벨 목록이 비어 있으면 "전부 통과"가 아니라 "아무것도 물리지 않았다"다 — GREEN으로 부르지 않는다.
-  const emptyLevel = !(harness.gates?.[result.level] || []).length;
+  const names = harness.gates?.[result.level] || [];
+  const emptyLevel = !names.length;
   if (emptyLevel) misconfigured.push(EMPTY_LEVEL);
-  // required는 "돌아서 GREEN이었는가"를 묻는다. 설정 오류·SKIPPED·레벨 목록에 아예 없어서 돌지 않은
-  // 것은 모두 "확인 안 됨"이고, 확인 안 됨은 통과가 아니다(fail closed).
-  const requiredMissing = (harness.gates.required || []).filter((n) => misconfigured.includes(n) || skipped.includes(n) || !(n in gates));
+  // required는 "선택된 레벨 안에서, 돌아서 GREEN이었는가"를 묻는다(§6.2). 레벨 목록에 아예 없는
+  // required 게이트는 "이 레벨에서 확인 대상이 아님"이지 실패가 아니다 — required는 레벨의 상위집합일 수
+  // 있다(예: required=8, fast=3). 목록 **안에** 있는데 설정 오류이거나 SKIPPED로 남은 것만 실패다.
+  const requiredMissing = (harness.gates.required || []).filter((n) => names.includes(n) && (misconfigured.includes(n) || skipped.includes(n)));
   const passed = Object.values(gates).filter((g) => g.status === "GREEN").length;
   const status = emptyLevel || requiredMissing.length ? "MISCONFIGURED" : failing.length ? "RED" : "GREEN";
   result.failing = failing;

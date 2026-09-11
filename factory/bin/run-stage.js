@@ -9,6 +9,7 @@ import { loadCharter, loadHarness } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine } from "../lib/gates.js";
+import { isGitDiffError } from "../lib/changed-files.js";
 import { integrityCheck } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -46,6 +47,9 @@ export class MergeBaseError extends Error {
   }
 }
 export const isMergeBaseError = (e) => e?.code === MERGE_BASE_ERROR_CODE;
+
+/** diff를 못 읽는 것도 판정 불가다 — merge-base와 같은 사유로 blocked로 끝낸다. */
+export const GIT_DIFF_BLOCKED_REASON = "cannot compute diff";
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -96,8 +100,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     if (!out?.is_error) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
-        if (!isMergeBaseError(e)) throw e;
-        const t = await d.transition({ to: "factory:blocked", reason: MERGE_BASE_BLOCKED_REASON });
+        if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+        const t = await d.transition({ to: "factory:blocked", reason });
         record([`gates: BLOCKED — ${e.message}`, ...refusal(t), usage]);
         return 2;
       }

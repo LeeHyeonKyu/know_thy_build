@@ -40,13 +40,12 @@ test("maturity downgrade: M1 asked for deep → full, recorded", async () => {
   expect(r.level).toBe("full"); expect(r.requested_level).toBe("deep"); expect(r.downgraded_from).toBe("deep");
 });
 
-/** fast 레벨만 도는 하네스 — required는 그 레벨이 실제로 도는 게이트여야 한다(그렇지 않으면 MISCONFIGURED). */
-const fastHarness = { ...harness, gates: { ...harness.gates, required: ["lint", "typecheck", "unit"] } };
-
 test("quarantined test failures are excluded from the unit verdict", async () => {
+  // required(lint/typecheck/unit/integration/build)가 fast 목록(lint/typecheck/unit)의 상위집합이어도
+  // fast에 없는 required는 이 레벨의 실패가 아니다 — 트림된 fastHarness 없이 harness를 그대로 쓴다.
   const report = JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/repo/test/a.test.js", assertionResults: [{ fullName: "flaky one", status: "failed" }, { fullName: "solid", status: "passed" }] }] });
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, bad)]);
-  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [{ id: "test/a.test.js::flaky one" }] }, readFile: (p) => p.endsWith("unit.json") ? report : null });
+  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [{ id: "test/a.test.js::flaky one" }] }, readFile: (p) => p.endsWith("unit.json") ? report : null });
   expect(r.gates.unit.status).toBe("GREEN"); expect(r.status).toBe("GREEN");
   expect(r.tests.excluded).toEqual(["test/a.test.js::flaky one"]); expect(r.tests.failing).toEqual([]);
   expect(verdictLine(r)).toContain("excluded=test/a.test.js::flaky one");
@@ -244,14 +243,49 @@ test("F7: 리포트를 하나도 못 읽었으면 격리 통계를 건드리지 
   expect(saved).toHaveLength(0);
 });
 
-// ── F3: required는 "돌아서 GREEN이었는가"를 묻는다 ─────────────────────────
+// ── F3: required는 "선택된 레벨 안에서, 돌아서 GREEN이었는가"를 묻는다(§6.2) ──────
+// spec 기준 하네스: required는 8개 상위집합, fast(3)/full(6)/deep(8)은 그 부분집합이다.
+const specHarness = {
+  harness: { maturity: "M2" },
+  commands: { lint: "npm run lint", typecheck: "tsc", unit: "vitest run", integration: "vitest run --project integration", build: "npm run build", e2e: "playwright test", proof: {} },
+  gates: {
+    required: ["lint", "typecheck", "unit", "integration", "build", "e2e", "diff_coverage", "mutation"],
+    fast: ["lint", "typecheck", "unit"],
+    full: ["lint", "typecheck", "unit", "integration", "build", "e2e"],
+    deep: ["lint", "typecheck", "unit", "integration", "build", "e2e", "diff_coverage", "mutation"],
+    thresholds: {},
+  },
+  test: {},
+};
 
-test("F3: required 게이트가 레벨 목록에 아예 없으면 MISCONFIGURED — 안 돈 것은 통과가 아니다", async () => {
-  const h = { ...harness, gates: { ...harness.gates, required: ["lint", "typecheck", "unit", "integration", "build"], fast: ["lint", "typecheck", "unit"] } };
-  const run = makeFakeRun([{ match: () => true, result: ok }]);
-  const r = await runGates({ run, cwd: "/repo", harness: h, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
+test("F3: fast 레벨은 목록 밖 required를 묻지 않는다 — 목록에 있는 것만 GREEN이면 fast도 GREEN", async () => {
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok)]);
+  const r = await runGates({ run, cwd: "/repo", harness: specHarness, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(r.status).toBe("GREEN");
+  expect(r.required_missing).toEqual([]);
+});
+
+test("F3: full 레벨도 마찬가지로 목록에 있는 required가 전부 GREEN이면 GREEN", async () => {
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok), sh("vitest run --project integration", ok), sh("npm run build", ok), sh("playwright test", ok)]);
+  const r = await runGates({ run, cwd: "/repo", harness: specHarness, level: "full", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(r.status).toBe("GREEN");
+  expect(r.required_missing).toEqual([]);
+});
+
+test("F3: 레벨 목록 안의 required 게이트에 명령이 없으면 MISCONFIGURED", async () => {
+  const h = { ...specHarness, commands: { ...specHarness.commands, integration: undefined } };
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok), sh("npm run build", ok), sh("playwright test", ok)]);
+  const r = await runGates({ run, cwd: "/repo", harness: h, level: "full", quarantine: { quarantined: [] }, readFile: () => null });
   expect(r.status).toBe("MISCONFIGURED");
-  expect(r.required_missing).toEqual(["integration", "build"]);
+  expect(r.required_missing).toEqual(["integration"]);
+});
+
+test("F3: 레벨 목록 안의 required 게이트가 SKIPPED로 남으면 MISCONFIGURED", async () => {
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok), sh("vitest run --project integration", ok), sh("npm run build", ok), sh("playwright test", ok)]);
+  const r = await runGates({ run, cwd: "/repo", harness: specHarness, level: "deep", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(r.skipped).toEqual(expect.arrayContaining(["diff_coverage", "mutation"]));
+  expect(r.status).toBe("MISCONFIGURED");
+  expect(r.required_missing).toEqual(expect.arrayContaining(["diff_coverage", "mutation"]));
 });
 
 test("F3: required 게이트가 SKIPPED여도 MISCONFIGURED", async () => {
@@ -283,7 +317,7 @@ test("SKIPPED/MISCONFIGURED 엔트리도 다른 게이트와 같은 모양(code/
 test("리포트가 격리 대상 아닌 실패를 보여주면 exit 0이어도 RED다", async () => {
   const report = JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/repo/test/a.test.js", assertionResults: [{ fullName: "real failure", status: "failed" }] }] });
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, ok)]);   // 명령은 exit 0 — 리포터가 삼켰다
-  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
   expect(r.gates.unit.status).toBe("RED");
   expect(r.status).toBe("RED");
   expect(r.tests.failing.map((f) => f.id)).toEqual(["test/a.test.js::real failure"]);

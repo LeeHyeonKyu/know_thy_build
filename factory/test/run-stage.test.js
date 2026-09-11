@@ -2,7 +2,8 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
+import { GitDiffError } from "../lib/changed-files.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -388,6 +389,19 @@ test("F1: merge-base를 못 구하면 스테이지는 판정 없이 factory:bloc
   expect(d.verifyStage).not.toHaveBeenCalled();
   expect(d.writeHandoff).not.toHaveBeenCalled();
   expect(lines.some((l) => /gates: BLOCKED — cannot compute merge-base/.test(l))).toBe(true);
+});
+
+test("F2: git diff를 못 구하면(GitDiffError) merge-base와 같은 방식으로 factory:blocked로 끝난다", async () => {
+  const lines = [];
+  const d = implDeps({
+    gates: vi.fn(async () => { throw new GitDiffError("fatal: bad revision"); }),
+    verifyStage: vi.fn(), writeHandoff: vi.fn(), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: GIT_DIFF_BLOCKED_REASON }));
+  expect(d.verifyStage).not.toHaveBeenCalled();
+  expect(d.writeHandoff).not.toHaveBeenCalled();
+  expect(lines.some((l) => /gates: BLOCKED — git diff failed/.test(l))).toBe(true);
 });
 
 test("F1: merge-base가 아닌 예외는 그대로 올라가 exit 1이 된다 — blocked로 덮지 않는다", async () => {
