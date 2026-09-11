@@ -91,6 +91,8 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 
 보조 라벨(비배타): `factory:tier-docs` / `tier-standard` / `tier-load-bearing` (triage가 부여), `factory:retro-proposal` (retro가 만든 PR).
 
+`factory:queue` → `factory:needs-human`: triage 산출물이 검증 실패하면(요구 검사 실패, §3.3) `ready`로 넘어가지 못하고 여기서 바로 전이한다.
+
 ### 3.2 전이도
 
 ```mermaid
@@ -101,6 +103,7 @@ stateDiagram-v2
   queue --> ready: triage
   queue --> needs_info: triage
   queue --> wont_do: triage
+  queue --> needs_human: triage 산출물 검증 실패
   needs_info --> queue: 사람
   ready --> planned: plan (3라운드 토론)
   planned --> in_progress: implement claim
@@ -118,6 +121,8 @@ stateDiagram-v2
 ```
 
 예산 간선은 **상한을 켠 경우에만 존재한다**(기본 off — §4.4·§5.3, ADR-005). 켜져 있어도 초과는 **다음 claim을 거부하는 방식**으로 작동하며 진행 중인 스테이지를 도중에 죽이지 않는다: 이미 도는 스테이지는 끝까지 가고, 그 다음 전이에서 `needs-human`으로 빠진다.
+
+`planned|rework → in_progress`("implement claim")는 stage=implement일 때 `run-stage.sh`의 2.5단계에서 일어난다 — assert-handoff 직후, `claude -p` 호출 **전**이다(§4.2.1). `in_progress → awaiting_review`는 스테이지 종료 시점, 같은 스크립트의 8단계 전이다.
 
 ### 3.3 전이 규칙 — 건너뛰기 불가의 구현
 
@@ -137,9 +142,11 @@ stateDiagram-v2
 
 사람이 라벨을 `approved`로 손으로 옮겨도 merge 잡은 review handoff를 찾지 못하므로 `needs-human`으로 되돌린다. **건너뛰기는 라벨이 아니라 산출물 부재로 막힌다.**
 
+요구 검사 실패 시 스크립트가 `factory:needs-human`으로 전이하고 `factory-transition-refused` 코멘트를 남긴다; 사람 실행(`--human`)은 전이하지 않고 사유만 반환한다. `assert`/`verify` 실패는 대상 상태에 도달하지 못했다는 뜻이므로, 어느 스테이지에서 일어나든 **그 스테이지가 시작한 현재 라벨**에서 곧바로 `needs-human`으로 전이한다(예: triage 산출물 검증 실패는 `factory:queue`에서, review 산출물 검증 실패는 `factory:awaiting-review`에서) — 목적 상태로 먼저 넘어간 뒤 되돌리지 않는다.
+
 ### 3.4 handoff 코멘트 포맷
 
-각 스테이지는 종료 시 이슈(또는 PR)에 코멘트 하나를 남긴다. 사람이 읽을 요약 + 기계가 읽을 블록.
+각 스테이지는 종료 시 이슈(또는 PR)에 코멘트 하나를 남긴다. 사람이 읽을 요약 + 기계가 읽을 블록. 기계가 읽는 블록은 **JSON**이다 — `transition.sh` 등의 bash 스크립트가 `jq`만으로 파싱하도록, 별도 YAML 파서 의존성을 피한다.
 
 ```markdown
 <!-- factory-handoff:v1 stage=plan issue=123 -->
@@ -153,34 +160,30 @@ stateDiagram-v2
 
 **dissent**: skeptic — "커서를 timestamp로 두면 동시 쓰기에서 누락 가능. ULID 권장." → 해결: 이번 범위는 timestamp, 후속 이슈 #124 생성.
 
-```yaml
-schema: factory.plan.v1
-issue: 123
-tier: standard
-roles: [product-advocate, architect, skeptic, operator]
-rounds: 3
-done_when:
-  - id: dw1
-    text: "GET /sync?since=<ts> returns only changed events"
-    verify: "test_123_incremental_sync"
-  - id: dw2
-    text: "GET /sync without since is unchanged"
-    verify: "test_sync_full"
-  - id: dw3
-    text: "invalid cursor -> 400 SYNC_BAD_CURSOR"
-    verify: "test_123_bad_cursor"
-files_expected: ["src/sync/service.ts", "src/sync/router.ts", "test/sync/*.test.ts"]
-non_goals: ["ULID cursor", "client-side cache"]
-dissent_log:
-  - role: skeptic
-    objection: "timestamp cursor loses concurrent writes"
-    resolution: "deferred to #124; documented in ADR-017"
-open_risks: ["clock skew between DB and app"]
-budget_tokens: 400000
+```json
+{
+  "schema": "factory.plan.v1",
+  "issue": 123,
+  "tier": "standard",
+  "roles": ["product-advocate", "architect", "skeptic", "operator"],
+  "rounds": 3,
+  "done_when": [
+    { "id": "dw1", "text": "GET /sync?since=<ts> returns only changed events", "verify": "test_123_incremental_sync" },
+    { "id": "dw2", "text": "GET /sync without since is unchanged", "verify": "test_sync_full" },
+    { "id": "dw3", "text": "invalid cursor -> 400 SYNC_BAD_CURSOR", "verify": "test_123_bad_cursor" }
+  ],
+  "files_expected": ["src/sync/service.ts", "src/sync/router.ts", "test/sync/*.test.ts"],
+  "non_goals": ["ULID cursor", "client-side cache"],
+  "dissent_log": [
+    { "role": "skeptic", "objection": "timestamp cursor loses concurrent writes", "resolution": "deferred to #124; documented in ADR-017" }
+  ],
+  "open_risks": ["clock skew between DB and app"],
+  "budget_tokens": 400000
+}
 ```
 ```
 
-`transition.sh`는 YAML 블록만 파싱한다. 위 요약 텍스트는 사람용이다.
+`transition.sh`는 ` ```json ` 펜스 블록만 `jq`로 파싱한다. 위 요약 텍스트는 사람용이다.
 
 ---
 
@@ -279,10 +282,12 @@ run-stage.sh <stage> <issue>
                                              #   deny가 걸린 세션은 deny에 매칭되지 않는 Bash까지 막는 경우가 관측됐다(ADR-008/ADR-006 상충).
                                              #   trusted 상태에서만 "allow 정상 + deny만 선택 적용"이 성립한다 → L2(§6.3)의 allow·선택적 동작의 전제.
                                              #   CI에서만 실행한다($GITHUB_ACTIONS 또는 $FACTORY_RUNNER_ID가 있을 때만) — run-stage.sh는 로컬에서도
-                                             #   돌고, 개발자의 ~/.claude.json을 말없이 고쳐서는 안 된다. Plan 2가 composite action/가드된 스텝으로 구현.
+                                             #   돌고, 개발자의 ~/.claude.json을 말없이 고쳐서는 안 된다. 가드는 trust-workspace 자신의 코드다(Plan 1a) — 별도 composite action이 아니다.
   1. claim.sh <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
-                                             #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작
+                                             #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
+                                             #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 10분마다 같은 코멘트에 PATCH로 갱신
   2. assert-handoff.sh <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
+  2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.sh <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
   4. claude -p "/factory-<stage> <issue>" \
@@ -293,6 +298,8 @@ run-stage.sh <stage> <issue>
       켜져 있어도 초과는 다음 claim을 거부할 뿐, 도는 스테이지를 도중에 죽이지 않는다)
      (env: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 — 방어적으로 유지하되 진짜 상한은 잡의 timeout-minutes. ADR-007: 단일 Bash 호출이
       10분으로 잘리고 foreground sleep은 Bash 툴이 차단하므로 workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상 moot)
+     (stdout은 파싱 **전에** 위 리다이렉트로 `.factory/out/<stage>.json`에 verbatim 저장된다 — JSON 파싱이 실패해도 원본이 남고,
+      6의 산출물 확인과 `verify-stage.sh` 재실행이 이 파일을 읽는다. §4.4)
   5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 생성
   6. verify-stage.sh <stage> <issue>         # 4의 결과에 workflow 산출물이 있는가: 역할 목록 == context.json 로스터,
                                              #   라운드 수, 판정 수, orchestration == harness.toml 설정. 없으면 needs-human "stage artifact missing"
@@ -302,8 +309,14 @@ run-stage.sh <stage> <issue>
                                              #   다르면 로스터 대조는 매핑 테이블을 거치거나 label 등 다른 필드로 바꾼다(인원 수 세기는 그대로 유효).
                                              #   stdout JSON의 subagent_stats는 쓰지 않는다 — Workflow agent()를 세지 않는다(ADR-002: 워커 2명에 spawned 0).
                                              #   permission_denials도 판정 근거로 쓰지 않는다 — trusted 세션에서 항상 비어 있었다(ADR-006 3/3).
+                                             #   workflow return contract: workflow가 돌려준 객체가 곧 handoff 데이터다. 스테이지 schema를 만족해야 한다 —
+                                             #   plan.v1, implement.v1(head_sha·pr·gates·verifier·orchestration·guarantee), review.v1(verdicts[]·round·head_sha·pr).
+                                             #   만족하지 못하면 **여기(6)에서** needs-human으로 실패한다 — 다음 스테이지의 assert-handoff에서가 아니다.
+                                             #   review의 decision은 workflow가 정하지 않는다: L1의 aggregate-review.sh가 verdicts[]로 계산해 채운다(§7.5).
+                                             #   verdicts 수 < 로스터 크기(incomplete)는 rework가 아니라 needs-human으로 보내고 빠진 역할을 사유에 명시한다.
   7. write-handoff.sh <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
-  8. transition.sh <issue> <to>              # 3.3 규칙
+                                             #   6이 이미 schema를 통과시켰으므로 7은 재검증하지 않고 6의 data를 그대로 코멘트로 옮긴다
+  8. transition.sh <issue> <to>              # 3.3 규칙 (implement 성공 시 <to>=factory:awaiting-review; 출발 상태는 2.5가 이미 in-progress로 옮겨 둔 상태)
   9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md append + push · lock 해제
 ```
 
@@ -375,6 +388,7 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 운영 규칙:
 - `bootstrap`이 토큰 발급일을 repo variable `FACTORY_TOKEN_ISSUED_AT`에 기록한다. sweeper가 **11개월** 시점에 `needs-human` 이슈("토큰 갱신")를 생성한다. 인증 실패는 `blocked` 경로로 빠진다.
 - `doctor`는 두 시크릿 중 하나의 존재를 확인한다(값은 보지 않는다).
+- `claude -p` stdout은 파싱 전에 `.factory/out/<stage>.json`에 그대로(verbatim) 저장된다(§4.2.1 step 4) — JSON 파싱 실패해도 원본이 남고, run 기록의 `usage`/`total_cost_usd` 추출과 `verify-stage.sh` 재실행이 이 파일을 근거로 한다.
 - 구독 → API key 전환은 시크릿 교체만으로 끝나야 한다. 스크립트는 인증 방식을 참조하지 않는다.
 - **사용량은 제한하지 않고 보고한다**(ADR-005). 구독 토큰이 기본이고 CI 소비는 사람의 7일 창에서 나가므로, factory의 책임은 "얼마나 썼는지 보이게 하는 것"까지다: 잡마다 `-p` 출력 JSON의 `usage`·`total_cost_usd`·`modelUsage`를 run 기록(§9)에 남기고, 이슈별 합계와 주간 합계를 `factory status`·retro·`:digest`가 표시한다. **한도 판단과 토큰 갱신은 사람이 한다 — factory가 한도를 이유로 스스로 멈추지 않는다**(CHARTER의 이슈당 토큰 예산은 선택이며 기본 off, §5.3).
 
@@ -599,8 +613,20 @@ test-env.sh up
 ```markdown
 ---
 schema: factory.charter.v1
-status: ready            # ready가 아니면 factory 전체가 dormant
+status: ready
 tier_default: standard
+limits: { K: 3, M: 3, R: 2 }
+roster:
+  docs: [correctness, spec-conformance]
+  standard: [correctness, architecture, spec-conformance, qa]
+  load-bearing: [correctness, security, architecture, spec-conformance, qa]
+plan_roles:
+  docs: [architect, skeptic]
+  default: [product-advocate, architect, skeptic, operator]
+plan_rounds: { docs: 2, default: 3 }
+back_pressure: { awaiting_review_max: 4, quarantine_max: 5 }
+budget: {}
+retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
 
 # Charter — own-calendar
@@ -648,6 +674,8 @@ every_merges: { initial: 1, min: 1, max: 20 }   # N은 수확량에 따라 자�
 light_on_merge: true
 ```
 
+기계가 읽는 값(`loadCharter`)은 위 **frontmatter뿐**이다. 본문의 표(Tiers·Plan 토론 로스터·Hard limits·Retro)는 **사람이 읽는 문서**이며, 값이 갱신될 때 frontmatter와 어긋나면 frontmatter가 정본이다.
+
 `status: ready`가 아니면 모든 factory 잡이 첫 줄에서 종료한다. 그린필드에서 Phase 1이 끝나기 전에 factory가 도는 일을 막는다.
 
 ---
@@ -670,7 +698,7 @@ light_on_merge: true
 ### 6.2 L1 상세
 - `gates.sh <level>` → `.factory/out/gates.json` + 한 줄 `FACTORY_GATES: level=full status=GREEN passed=4 failed=0 failing=none skipped=none misconfigured=none`. required 게이트가 skip이면 `MISCONFIGURED` exit 2.
 - `prove-test.sh <issue>`: 브랜치의 새 테스트 파일을 base에 얹어 실행 → **실패해야** 통과. 통과하면 "테스트가 수정을 증명하지 않음".
-- `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework`. LLM 개입 없음.
+- `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
 - `assert-handoff.sh`, `transition.sh`: 3.3.
 
 ### 6.3 L2 `.claude/settings.json` (factory init이 생성)
@@ -1010,8 +1038,10 @@ return { r1, r2, plan }                          // run-stage.sh가 라운드별
 R1 · 독립 판정   로스터 병렬, cold read. 각자 factory.verdict.v1
 R2 · 교차 검토   R1에 reject가 하나라도 있으면 → 전체 R2: 타 리뷰어의 R1을 받고 {verdict(maintain|revise), must_fix, on_others[{id, agree|disagree, reason}]}
                R1이 만장일치 approve면 → 경량 R2: 타 리뷰어의 verified[] 목록만 받고 {missed: [] | [{what, why}]}. missed가 있으면 그 항목만 전체 R2로 승격
-집계            aggregate-review.sh: R2 verdict 전원 approve → approved. 아니면 rework + must_fix 합집합(중복 제거)
+집계            aggregate-review.sh: R2 verdict 전원 approve → approved. verdict 수 < 로스터 크기 → incomplete(빠진 역할 명시, needs-human). 그 외 reject 있으면 rework + must_fix 합집합(중복 제거)
 ```
+
+workflow가 돌려주는 객체(handoff data)에는 `decision` 필드가 없다 — `decision`은 workflow 밖, L1의 `aggregate-review.sh`가 `verdicts[]`로부터 계산해 handoff에 채운다(§4.2.1 step 6). `verdicts.length < roster.length`는 `incomplete`이며 `rework`가 아니라 `needs-human`으로 라우팅되고, 빠진 역할이 사유에 이름으로 남는다.
 
 **schema null 시 해당 리뷰어 1회 재spawn** 규칙은 유지하되 성격은 **보험**이다: 실측에서 null은 0/20(opus 10/10, sonnet 10/10, 중첩 배열·enum 포함 스키마)이었고 재시도 경로는 한 번도 발동하지 않았다(ADR-003). 표본이 1세트뿐이라 제거하지 않을 뿐, 이 규칙이 정상 경로에서 돌 것으로 기대하지 않는다. 같은 이유로 리뷰어 모델 고정도 하지 않는다.
 
