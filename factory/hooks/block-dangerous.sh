@@ -18,8 +18,12 @@ echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]](--
 # refspec 앞의 '+'도 force push다: git push origin +main:main
 echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]]\+[^[:space:]+]' && block "force push (leading + refspec)"
 echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*(--delete[^;&|]*factory/lock-|:refs/heads/factory/lock-)' && block "lock branch deletion"
-# protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c
-prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md)'
+# protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c.
+# 목록은 harness.toml `[protected].factory` · settings.json deny와 같아야 한다(F9) — 셋이 갈라지면
+# Edit는 막히는데 `echo > package.json`은 통과하고, integrity가 사후에야 잡는다.
+# 빌드 설정 파일(package.json·러너/린터 config)이 여기 있는 이유: gate 명령이 그 파일들을 통해
+# 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.
+prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
 echo "$c" | grep -Eq "(>>?|tee[[:space:]]+(-a[[:space:]]+)?)[[:space:]]*[\"']?[^[:space:]\"']*$prot" && block "write to protected path"
 echo "$c" | grep -Eq "sed[[:space:]]+(-[a-zA-Z]*i[a-zA-Z]*[[:space:]]+)[^;&|]*$prot" && block "sed -i on protected path"
 echo "$c" | grep -Eq "(^|[;&|[:space:]])(cp|mv)[[:space:]]+[^;&|]*[[:space:]]$prot" && block "cp/mv onto protected path"

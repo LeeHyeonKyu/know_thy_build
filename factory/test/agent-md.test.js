@@ -189,3 +189,55 @@ test("plan-synthesizer.md forbids forging consensus and done_when without a test
   expect(mustNot).toMatch(/dissent_log|objection|반박/);
   expect(mustNot).toContain("test_<issue>_<slug>");
 });
+
+// Task 4: the implement pair — factory-builder (the only role that writes) and factory-verifier (cold read).
+for (const name of ["factory-builder", "factory-verifier"]) {
+  test(`lintAgentMd: templates/factory/claude/agents/${name}.md passes with no violations`, () => {
+    expect(lintAgentMd(readAgent(name), { expectedName: name })).toEqual([]);
+  });
+}
+
+test("factory-builder.md: opus, may write, and is NOT behind deny-all-writes — it is the only role that edits", () => {
+  const { frontmatter } = parseAgentMd(readAgent("factory-builder"));
+  expect(frontmatter.name).toBe("factory-builder");
+  expect(frontmatter.model).toBe("opus");
+  for (const t of ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]) expect(frontmatter.tools, t).toContain(t);
+  expect(frontmatter.hooks?.PreToolUse).toBeUndefined();
+});
+
+test("factory-builder.md: the protected build-config paths are off-limits in both You must not and Lens, with the harness-change escape hatch", () => {
+  const text = readAgent("factory-builder");
+  const { sections } = parseAgentMd(text);
+  const find = (k) => [...sections.entries()].find(([key]) => key.startsWith(k))[1];
+  const mustNot = find("You must not");
+  const lens = find("Lens");
+  for (const p of ["package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*", ".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]) {
+    expect(mustNot, p).toContain(p);
+  }
+  expect(mustNot).toMatch(/integrity/);
+  expect(lens).toContain("Harness change needed");
+  expect(lens).toMatch(/factory:harness/);
+  expect(lens).toMatch(/npm install/);
+  // §5.2.4 tests_are_load_bearing
+  expect(mustNot).toMatch(/tests_are_load_bearing|기존 테스트/);
+});
+
+test("factory-verifier.md: opus, read-only tools, deny-all-writes, and an explicit cold-read refusal list", () => {
+  const { frontmatter, sections } = parseAgentMd(readAgent("factory-verifier"));
+  expect(frontmatter.name).toBe("factory-verifier");
+  expect(frontmatter.model).toBe("opus");
+  expect(frontmatter.tools).toEqual(["Read", "Grep", "Glob", "Bash"]);
+  expect(frontmatter.hooks.PreToolUse[0].matcher).toBe("Edit|Write|NotebookEdit");
+  expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
+
+  // §7.3 structure: the refusal list is its own section, and it names the builder's channels by name
+  const refusesEntry = [...sections.entries()].find(([k]) => k.startsWith("You do NOT receive"));
+  const refuses = refusesEntry[1];
+  const lens = [...sections.entries()].find(([k]) => k.startsWith("Lens"))[1];
+  expect(refusesEntry[0]).toMatch(/찾아 읽지도 않는다/);
+  expect(refuses).toMatch(/PR description/);
+  expect(refuses).toMatch(/커밋 메시지|commit message/);
+  expect(refuses).toMatch(/head sha|head_sha/);
+  expect(lens).toContain("prove-test");
+  expect(lens).toMatch(/done_when/);
+});

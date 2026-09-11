@@ -552,3 +552,271 @@ test("factory-plan.js: synthesis sees R1 and R2; the second sign-off votes on th
   }
   expect(result.summary).toBe("PLAN-DRAFT-2");
 });
+
+// --- Task 4: templates/factory/claude/workflows/factory-implement.js ---
+
+const FACTORY_IMPLEMENT_WORKFLOW = new URL("../../templates/factory/claude/workflows/factory-implement.js", import.meta.url).pathname;
+
+const SHA_A = "0123456789abcdef0123456789abcdef01234567";
+const SHA_B = "89abcdef0123456789abcdef0123456789abcdef";
+
+// the implement roster in context.json is intentionally empty — builder and verifier are fixed roles
+// (roles.toml [implement.builder]/[implement.verifier]), not a CHARTER-driven debate roster.
+const implLoaderFix = (over = {}) => ({
+  issue: 42,
+  stage: "implement",
+  tier: "standard",
+  roster: [],
+  spec_path: "docs/features/016-export-csv.md",
+  orchestration: "workflow",
+  ...over,
+});
+
+const buildFix = (over = {}) => ({
+  head_sha: SHA_A,
+  pr: 31,
+  branch: "claude/fq-42",
+  summary: "Export the report table as CSV",
+  tests_added: ["test_42_export_csv_header"],
+  commits: [SHA_A],
+  ...over,
+});
+
+const verdictFix = (over = {}) => ({ verdict: "accepted", findings: [], prove_test_read: true, ...over });
+
+const REJECTED = {
+  verdict: "rejected",
+  findings: [{ where: "test/export.test.js:20", claim: "the mock always returns three rows", evidence: "line 20 stubs read() with a fixed array — the since filter is never exercised" }],
+  prove_test_read: true,
+};
+
+const byType = (calls, type) => calls.filter((c) => c.opts.agentType === type);
+
+test("factory-implement.js: meta.name equals the file's own basename", () => {
+  const src = readFileSync(FACTORY_IMPLEMENT_WORKFLOW, "utf8");
+  const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
+  expect(m[1]).toBe(basename(FACTORY_IMPLEMENT_WORKFLOW, ".js"));
+});
+
+test("factory-implement.js: loader → builder → verifier, Load/Build/Verify/Fix phases, and a valid implement.v1 handoff", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-builder", "factory-verifier"]);
+  expect(calls[1].opts.model).toBe("opus");
+  expect(calls[2].opts.model).toBe("opus");
+  // the fix phase is declared even when nothing is rejected — phases are the script's shape, not its history
+  expect(phases).toEqual(["Load", "Build", "Verify", "Fix"]);
+
+  expect(result).toMatchObject({
+    issue: 42,
+    head_sha: SHA_A,
+    pr: 31,
+    summary: "Export the report table as CSV",
+    tests_added: ["test_42_export_csv_header"],
+    orchestration: "workflow",
+    guarantee: "structural",
+    verifier: { verdict: "accepted", findings: [], prove_test_read: true },
+  });
+  expect(result.rework_response).toBeUndefined();
+  // `gates` is filled in by verify-stage from the gate files, never by the workflow (ADR-010)
+  expect(validate("implement.v1", result).ok).toBe(false);
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
+});
+
+test("factory-implement.js: a rejected verdict buys exactly one fix round — the second head_sha wins and the builder is shown the findings", async () => {
+  let builds = 0;
+  let verifies = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") { builds += 1; return buildFix(builds === 1 ? {} : { head_sha: SHA_B, commits: [SHA_A, SHA_B] }); }
+    if (opts.agentType === "factory-verifier") { verifies += 1; return verifies === 1 ? REJECTED : verdictFix(); }
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(byType(calls, "factory-builder")).toHaveLength(2);
+  expect(byType(calls, "factory-verifier")).toHaveLength(2);
+  expect(byType(calls, "factory-builder")[1].prompt).toContain("the mock always returns three rows");
+  expect(result.head_sha).toBe(SHA_B);
+  expect(result.verifier.verdict).toBe("accepted");
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
+});
+
+test("factory-implement.js: a second rejection ends the stage rejected — no third builder, no third verifier", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix({ head_sha: SHA_B });
+    if (opts.agentType === "factory-verifier") return REJECTED;
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(byType(calls, "factory-builder")).toHaveLength(2);
+  expect(byType(calls, "factory-verifier")).toHaveLength(2);
+  expect(calls).toHaveLength(5);
+  expect(result.verifier.verdict).toBe("rejected");
+  expect(result.verifier.findings).toEqual(REJECTED.findings);
+  // implement.v1 still validates — `rejected` is a legal verdict. requirements.js refuses the
+  // awaiting-review transition on it, which is what turns this into needs-human (P3-R2).
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
+});
+
+test("factory-implement.js: a head_sha that is not 40 hex re-spawns the builder exactly once, with the rule in the prompt", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix({ head_sha: "abc" });
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(byType(calls, "factory-builder")).toHaveLength(2);
+  expect(byType(calls, "factory-builder")[1].prompt).toContain("git rev-parse HEAD");
+  expect(byType(calls, "factory-verifier")).toHaveLength(1);
+  expect(result.head_sha).toBe("abc");
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).errors).toContain("head_sha must be a 40-hex sha");
+});
+
+test("factory-implement.js: rework — every must_fix id reaches the builder prompt and the response comes back as a valid rework-response.v1", async () => {
+  const mustFix = [
+    { id: "cf1", where: "src/sync/service.ts:88", claim: "the since cursor is parsed in local time", evidence: "line 88 `new Date(since)`" },
+    { id: "arch2", where: "src/sync/service.ts", claim: "SyncService should be split", evidence: "500 lines, four responsibilities" },
+  ];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ pr: 31, head_sha: SHA_A, must_fix: mustFix, disputed: [{ id: "arch2", status: "disputed", reason: "out of scope per non_goals" }] });
+    if (opts.agentType === "factory-builder") {
+      return buildFix({
+        rework_response: { responses: [
+          { id: "cf1", status: "fixed", commit: SHA_B },
+          { id: "arch2", status: "disputed", reason: "splitting SyncService is in the plan handoff non_goals (#42 plan)" },
+        ] },
+      });
+    }
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const build = byType(calls, "factory-builder")[0];
+  expect(build.prompt).toContain("cf1");
+  expect(build.prompt).toContain("arch2");
+  expect(build.prompt).toContain("factory.rework-response.v1");
+  expect(build.prompt).toContain("gh pr comment");
+  expect(result.rework_response).toEqual({
+    issue: 42,
+    responses: [
+      { id: "cf1", status: "fixed", commit: SHA_B },
+      { id: "arch2", status: "disputed", reason: "splitting SyncService is in the plan handoff non_goals (#42 plan)" },
+    ],
+  });
+  expect(validate("rework-response.v1", result.rework_response).ok).toBe(true);
+});
+
+test("factory-implement.js: the verifier reads cold — nothing of the builder's output but the head_sha and PR number reaches its prompt", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") {
+      return buildFix({ summary: "BUILDER-SUMMARY-MARKER", branch: "BUILDER-BRANCH-MARKER", tests_added: ["BUILDER-TEST-MARKER"], commits: ["BUILDER-COMMIT-MARKER"] });
+    }
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  const verify = byType(calls, "factory-verifier")[0];
+  for (const marker of ["BUILDER-SUMMARY-MARKER", "BUILDER-BRANCH-MARKER", "BUILDER-TEST-MARKER", "BUILDER-COMMIT-MARKER"]) {
+    expect(verify.prompt, marker).not.toContain(marker);
+  }
+  expect(verify.prompt).toContain(SHA_A);
+  expect(verify.prompt).toContain("31");
+  expect(verify.prompt).toMatch(/do not read/i);
+});
+
+test("factory-implement.js: loader/dispatcher issue mismatch fails closed — nothing is built, implement.v1 invalid", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ issue: 99 });
+    return buildFix();
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader"]);
+  expect(result.issue).toBe(42);
+  expect(result.error).toMatch(/context issue mismatch/);
+  expect(result.head_sha).toBeUndefined();
+  expect(result.orchestration).toBe("workflow");
+  expect(result.guarantee).toBe("structural");
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
+});
+
+test("factory-implement.js: a builder that dies twice is not invented around — no verifier call, no head_sha", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(byType(calls, "factory-builder")).toHaveLength(2);
+  expect(byType(calls, "factory-verifier")).toHaveLength(0);
+  expect(result.head_sha).toBeUndefined();
+  expect(result.verifier).toEqual({});
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
+});
+
+test("factory-implement.js: the builder prompt carries the protected build-config paths and the harness-change escape hatch", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix();
+    return verdictFix();
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+  const build = byType(calls, "factory-builder")[0].prompt;
+  for (const p of [".factory/**", ".claude/**", "docs/factory/CHARTER.md", "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*"]) {
+    expect(build, p).toContain(p);
+  }
+  expect(build).toContain("Harness change needed");
+  expect(build).toMatch(/npm install/);
+  expect(build).toContain("claude/fq-42");
+  expect(build).toContain("gh pr create --draft");
+  expect(build).toContain("Closes #42");
+});

@@ -28,6 +28,27 @@ test("block-dangerous: blocks merges, force pushes, protected writes; allows nor
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);   // 30여 개의 bash 프로세스를 띄운다 — 기본 5s 타임아웃으로는 모자란다
 
+// F9 carry-over: `[protected].factory`와 settings.json deny는 이미 빌드 설정 파일을 덮는다(templates.test.js).
+// 훅도 같은 목록을 덮어야 한다 — 그렇지 않으면 Edit는 막히는데 `echo > package.json`은 통과한다.
+test("block-dangerous: shell writes to the protected build-config files are blocked too; reading them is not", async () => {
+  const blocked = ["echo '{}' > package.json", "echo x >> package-lock.json",
+                   "sed -i 's/a/b/' vitest.config.js", "sed -i '' 's/a/b/' playwright.config.ts",
+                   "cat foo | tee tsconfig.json", "cat foo | tee -a tsconfig.build.json",
+                   "cp /tmp/evil .eslintrc.json", "mv /tmp/evil eslint.config.js",
+                   "perl -i -pe 's/a/b/' package.json",
+                   "python3 -c \"open('package.json','w').write('{}')\"",
+                   "npm pkg set scripts.test=true > package.json"];
+  const allowed = ["cat package.json", "npm test", "npx vitest run", "git diff package.json",
+                   "cp package.json /tmp/backup", "node -e \"1\" > /tmp/out.json",
+                   "grep -n vitest package.json", "cat vitest.config.js | head -5"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 test("block-dangerous: non-Bash tools and malformed input pass through", async () => {
   expect((await bash("block-dangerous.sh", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: ".factory/x" } })).code).toBe(0);
   expect((await run("bash", [join(H, "block-dangerous.sh")], { input: "not json" })).code).toBe(0);
