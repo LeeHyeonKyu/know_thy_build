@@ -1532,7 +1532,10 @@ test("run-stage: the worktree check is skipped entirely on implement (the only w
   expect(assertCleanWorktree).not.toHaveBeenCalled();
 });
 
-test("run-stage: git-status-failure on a no-write stage (review) is fail-closed to needs-human", async () => {
+// KTB-14 r1: `git status`가 **실패한** 것은 더러운 트리와 같은 등급이 아니다 — GREEN도 RED도 아닌
+// 판정 불가이고, 이 저장소에서 판정 불가의 자리는 언제나 blocked다(merge-stage의 `undecidable()`,
+// 게이트 BLOCKED과 같은 계약). needs-human은 "사람이 판단할 것이 있다"는 뜻인데 여기엔 재료가 없다.
+test("run-stage: git-status-failure on a no-write stage (review) is undecidable → factory:blocked", async () => {
   const transition = vi.fn(async () => ({ ok: true }));
   const lines = [];
   const d = baseDeps({
@@ -1541,8 +1544,9 @@ test("run-stage: git-status-failure on a no-write stage (review) is fail-closed 
   });
   expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({
-    to: "factory:needs-human",
+    to: "factory:blocked",
     reason: "worktree check failed after review (no-write stage): git status failed: fatal: not a git repository",
   }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(lines.some((l) => l.includes("worktree: FAIL —"))).toBe(true);
 });

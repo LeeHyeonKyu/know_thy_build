@@ -196,10 +196,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     if (isNoWriteStage(stage)) {
       const clean = d.assertCleanWorktree ? await d.assertCleanWorktree() : { ok: true };
       if (!clean.ok) {
-        const reason = clean.dirty?.length
+        // 두 실패는 등급이 다르다(KTB-14 r1). **더러운 트리**는 사람이 볼 것이 있다 — 어떤 파일이
+        // 어떻게 바뀌었는지 보고 판단해야 하므로 needs-human이다. **`git status` 자체가 실패한 것**은
+        // GREEN도 RED도 아닌 **판정 불가**이고, 이 저장소에서 판정 불가의 자리는 언제나
+        // `factory:blocked`다(merge-stage의 `undecidable()`, 게이트 BLOCKED과 같은 계약) — 사람이
+        // 판단할 재료가 아직 없고, 원인은 대개 러너 쪽이라 재시도로 풀릴 수 있다. 어느 쪽이든
+        // 산출물은 받지 않는다(verifyStage조차 부르지 않는다).
+        const dirty = Boolean(clean.dirty?.length);
+        const reason = dirty
           ? `worktree dirty after ${stage} (no-write stage): ${clean.dirty.join(", ")}`
           : `worktree check failed after ${stage} (no-write stage): ${clean.reason || "unknown"}`;
-        const t = await d.transition({ to: "factory:needs-human", reason });
+        const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
         record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
         return 2;
       }
@@ -366,6 +373,13 @@ const isScratchPath = (p) => NO_WRITE_SCRATCH_PREFIXES.some((pre) => p === pre.s
  * `git status --porcelain` 한 줄 = "XY PATH" 또는 rename/copy의 "XY OLD -> NEW"다 — 두 경우 모두
  * 경로는 세 번째 문자부터 시작한다. rename은 **양쪽** 경로를 낸다(KTB-5 N1과 같은 원칙 — 출발지를
  * 놓치면 보호 경로를 스크래치 밖 이름으로 옮기는 변경이 새 이름만 보고 통과할 수 있다).
+ *
+ * 알려진 한계(KTB-14 r1): `core.quotePath`가 켜진 기본 설정에서 git은 ASCII 밖·특수문자 경로를
+ * **C 인용**으로 낸다(`"src/\355\225\234.js"`, `"a b -> c"`). 그 줄은 여기서 따옴표째 한 경로로
+ * 읽히고, 안쪽의 ` -> `도 구분자로 오해될 수 있다. 이 체크의 **판정 방향에서는 안전한 쪽으로
+ * 틀린다** — 인용된 경로는 스크래치 접두(`.factory/out/`·`docs/factory/runs/`)와 절대 일치하지
+ * 않으므로 항상 "더러움"으로 센다(누락이 아니라 오탐). 정확한 파싱이 필요해지면
+ * `-z`(NUL 구분 + 인용 없음)로 바꾸는 것이 정공법이다.
  */
 function pathsOfStatusLine(line) {
   const rest = line.slice(3);

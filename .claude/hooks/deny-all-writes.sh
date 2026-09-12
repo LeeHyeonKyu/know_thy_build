@@ -70,6 +70,10 @@ T='["]?[^-[:space:]"&|;<>]'
 # 명령 위치(줄 시작 또는 `;`/`&`/`|` 뒤)에만 걸리는 접두사 — `grep -rn mkdir src/`의 인자 `mkdir`은 제외된다.
 CMD='(^|[;&|][[:space:]]*)'
 FLAGS='([[:space:]]+-[^[:space:];&|]+)*'
+# 짧은 옵션은 값을 **붙여** 받는다: `curl -osrc/a.js`, `curl -sLosrc/a.js`, `cp -tsrc/sub`.
+# r1의 규칙들은 플래그 뭉치 뒤에 공백이나 `=`를 요구해서 이 모양을 통째로 놓쳤다(KTB-13 r2).
+# 뭉치 뒤에 이걸 붙이면 "플래그 글자가 뭉치 안에 있다"만으로 판정이 선다 — 값이 붙어 있든 아니든.
+ATTACHED='[a-zA-Z]*[^[:space:];&|]*'
 
 # `>|`는 noclobber를 무시하는 리다이렉션이다 — `>`/`>>`와 같은 쓰기이므로 같이 잡는다.
 echo "$w" | grep -Eq "(^|[^-=<])>>?\|?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
@@ -82,7 +86,9 @@ if echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]|$)"; then
   echo "$c" | grep -Eq "${CMD}(cp|mv)[[:space:]][^;&|]*[[:space:]][\"']?$allow[[:space:]]*($|[;&|])" || deny "cp/mv"
   # `-t`/`--target-directory`는 목적지를 마지막 토큰이 **아닌** 곳에 둔다 — 위 규칙은 `cp -t src /tmp/a.js`를
   # "목적지가 /tmp"로 읽고 통과시켰다(KTB-13 r1). 이 플래그가 보이면 목적지를 신뢰할 수 없으므로 그냥 막는다.
-  echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*t[a-zA-Z]*|--target-directory)([[:space:]=]|$)" && deny "cp/mv --target-directory"
+  # 짧은 옵션은 값을 **붙여** 쓸 수 있다(`cp -tsrc/sub a`) — 그래서 뭉치 뒤에 공백/`=`를 요구하지 않고
+  # 플래그 글자가 뭉치 안에 있다는 사실로 판정한다(`$ATTACHED`, KTB-13 r2).
+  echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*t$ATTACHED|--target-directory)([[:space:]=]|$)" && deny "cp/mv --target-directory"
 fi
 # `node -e`/`-p`/`--eval`/`--print`는 fs를 직접 부를 수 있는 **인라인 스크립트**다 — sed -i·perl -i·python -c와
 # 같은 대접을 한다(대상이 어디든 차단). 저장소 스크립트를 **실행**하는 `node .factory/bin/gates.js`는 그대로다:
@@ -91,7 +97,7 @@ fi
 echo "$c" | grep -Eq "${CMD}node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*|--eval|--print)([[:space:]=]|$)" && deny "node inline script (-e/-p/--eval/--print)"
 # 다운로드는 쓰기다. curl은 출력 플래그가 있을 때만(플래그가 없으면 stdout — 읽기다), wget은 **언제나**:
 # wget은 플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다.
-echo "$c" | grep -Eq "${CMD}curl([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*[oO][a-zA-Z]*|--output|--output-dir|--remote-name)([[:space:]=]|$)" && deny "curl writing a file (-o/-O/--output)"
+echo "$c" | grep -Eq "${CMD}curl([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*[oO]$ATTACHED|--output|--output-dir|--remote-name)([[:space:]=]|$)" && deny "curl writing a file (-o/-O/--output)"
 echo "$c" | grep -Eq "${CMD}wget([[:space:]]|$)" && deny "wget (it writes into the cwd even without -O)"
 # 제자리 편집·파이썬 파일 열기는 대상이 어디든 막는다. 쓰기 금지 역할에게 정당한 제자리 편집은 없고,
 # 임시 파일이 필요하면 /tmp로 리다이렉션하는 길이 이미 열려 있다.

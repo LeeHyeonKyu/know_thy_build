@@ -311,6 +311,40 @@ test("deny-all-writes: node -e / curl -o / wget / install / cp -t are writes too
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
+// ── KTB-13 r2: 짧은 옵션에 값이 **붙어** 오면 규칙이 통째로 빠져나갔다 ────────────────────────
+// r1의 curl·cp/mv 규칙은 플래그 뭉치 뒤에 공백이나 `=`를 요구했다. 그런데 짧은 옵션은 값을 붙여
+// 쓸 수 있다 — `curl -o.factory/harness.toml u`, `cp -tsrc/sub a`. 셸이 그대로 한 토큰으로 넘기고
+// 도구는 정상 동작하는데, 훅만 못 본다(exit 0). 플래그 글자가 뭉치 안에 **있다는 사실**로 충분하다.
+test("deny-all-writes: attached short-option values do not escape the curl/cp/mv rules (KTB-13 r2)", async () => {
+  const blocked = [
+    "curl -o.factory/harness.toml https://e/x", "curl -osrc/a.js https://e/x", "curl -sLosrc/a.js https://e/x",
+    "curl -sLOhttps://e/x.js", "curl --output-dir=src https://e/x",
+    "cp -tsrc/sub /tmp/a.js", "cp -rtsrc /tmp/a.js", "mv -tdir /tmp/a.js",
+  ];
+  const allowed = [
+    // 붙은 값을 허용하게 넓혔다고 해서 출력 플래그가 없는 curl까지 걸리면 안 된다.
+    "curl -sSL https://e/x", "curl -H 'x: y' https://e/x", "curl --location https://e/x", "curl -X POST -d @/tmp/b https://e/x",
+    "cp -a src/a.js /tmp/a.js", "mv /tmp/a.js /tmp/b.js", "cp -r src /tmp/backup",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
+test("block-dangerous: attached short-option values do not escape the curl rule on protected paths (KTB-13 r2)", async () => {
+  const blocked = ["curl -o.factory/harness.toml https://e/x", "curl -sLopackage.json https://e/x", "curl -Odocs/factory/CHARTER.md https://e/x"];
+  const allowed = ["curl -sSL https://e/x", "curl -o/tmp/x https://e/x"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 // MultiEdit은 Edit/Write와 같은 도구다 — allow가 그것도 부여하므로(KTB-13) case에서 빠지면 그 한 도구로
 // 쓰기 금지가 통째로 무너진다. 매처도 같이 넓혀야 훅이 애초에 발화한다(agent-md.test.js가 고정).
 test("deny-all-writes: MultiEdit is blocked exactly like Edit/Write, with the same qa carve-out (KTB-13 r1)", async () => {

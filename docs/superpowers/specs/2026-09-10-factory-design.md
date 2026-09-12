@@ -290,7 +290,7 @@ L1  run-stage.sh (bash, claude 프로세스 밖)               재량 0
     ▼
 메인 세션 (LLM — claude -p의 본체)                        재량 최소화 (디스패처)
     커맨드 파일 = "Workflow 하나를 호출하고 결과를 그대로 돌려줘라"
-    --max-turns 5 · 커맨드 frontmatter allowed-tools: Workflow(factory-<stage>)
+    --max-turns `[factory].max_turns`(기본 12, ADR-020 KTB-16) · 커맨드 frontmatter allowed-tools: Workflow(factory-<stage>)
     │
     ▼
 workflow .js (결정적 JS, claude 프로세스 안의 런타임)       재량 0
@@ -324,7 +324,7 @@ run-stage.sh <stage> <issue>
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
   4. (merge 제외) claude -p "/factory-<stage> <issue>" \
        --settings .factory/ci-settings.json \
-       --max-turns 5 [--max-budget-usd <CHARTER>] \
+       --max-turns <harness [factory].max_turns, 기본 12 — ADR-020 KTB-16> [--max-budget-usd <CHARTER>] \
        --permission-mode dontAsk --output-format json > .factory/out/<stage>.json
      (merge는 이 단계를 **호출하지 않는다** — 스크립트 전용이다(Plan 2 실행 판결, ADR-015 — R3): 이연됐던 결정이
       Plan 2에서 확정됐다. `charter-ready`/`trust-workspace`도 merge에서는 건너뛴다 — claude 프로세스를 띄우지 않으므로
@@ -336,7 +336,8 @@ run-stage.sh <stage> <issue>
      (stdout은 파싱 **전에** 위 리다이렉트로 `.factory/out/<stage>.json`에 verbatim 저장된다 — JSON 파싱이 실패해도 원본이 남고,
       6의 산출물 확인과 `verify-stage.sh` 재실행이 이 파일을 읽는다. §4.4)
      (쓰기 금지 스테이지 — triage/plan/review — 는 이 시점에 워크트리를 다시 묻는다: `.factory/out/**`·`docs/factory/runs/**` 밖의
-      변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14). implement는
+      변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14).
+      `git status` 자체가 실패한 것은 더러운 트리가 아니라 **판정 불가**라 needs-human이 아니라 `factory:blocked`다(KTB-14 r1). implement는
       건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.)
   5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
                                              #   gates.json이 진실이다 — handoff(7)에 실리는 gates 필드는 이 파일의 복사본일 뿐이고, 워크플로가
