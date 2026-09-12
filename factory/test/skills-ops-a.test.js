@@ -167,3 +167,91 @@ test("templates/know-thy-build/clarify.md: Must not section prohibits answering 
   const section = text.slice(mustNotIdx, nextHeadingIdx === -1 ? undefined : nextHeadingIdx);
   expect(section).toMatch(/스스로 답/);
 });
+
+// ── Fix round 1 (Important #1): the factory:harness label lives on the ISSUE only
+// (factory/bin/retro.js's createIssue call) — the implementation PR that closes it carries no
+// label (factory/lib/gh.js's createPr opens it `--draft`, branch `claude/fq-<issue>`). harness.md
+// must find that PR by head branch, not by re-querying a PR label that doesn't exist. ───────────
+
+test("templates/know-thy-build/harness.md: finds the promotion PR by head branch (claude/fq-<n>), not by a PR label", () => {
+  const text = readTemplate("harness");
+  expect(text).toContain("claude/fq-");
+  expect(text).toContain("gh pr diff");
+  expect(text).not.toContain("gh pr list --label factory:harness");
+});
+
+// ── Fix round 1 (Important #2): every doctor check id quoted in harness.md's table must be a
+// real id from factory/lib/doctor/harness.js or factory/lib/doctor/factory.js — extracted by
+// regex from the actual source, not typed by hand, so the table can't silently drift from the
+// checks doctor really runs (e.g. the old table's "agents.*"/"hooks.*" were never real ids —
+// the real ids are per-item: `agents.<role>`, `hooks.<hook>`, built via template literals). ─────
+
+const DOCTOR_HARNESS_SRC = new URL("../lib/doctor/harness.js", import.meta.url);
+const DOCTOR_FACTORY_SRC = new URL("../lib/doctor/factory.js", import.meta.url);
+
+function doctorSource() {
+  return readFileSync(DOCTOR_HARNESS_SRC, "utf8") + "\n" + readFileSync(DOCTOR_FACTORY_SRC, "utf8");
+}
+
+// Static ids: string-literal doctor ids, e.g. c("harness.schema", ...).
+function staticDoctorIds(src) {
+  const ids = new Set();
+  for (const m of src.matchAll(/"([a-z][a-z0-9]*(?:\.[a-z0-9_-]+)+)"/g)) ids.add(m[1]);
+  return ids;
+}
+
+// Dynamic id prefixes: template-literal doctor ids built per item, e.g. `agents.${name}` →
+// "agents.", `commands.run.${k}` → "commands.run.". The text before "${" is a literal substring
+// of the source file regardless of what `name`/`k` evaluate to at runtime.
+function dynamicDoctorIdPrefixes(src) {
+  const prefixes = new Set();
+  for (const m of src.matchAll(/`([a-z][a-zA-Z0-9_.-]*)\$\{/g)) prefixes.add(m[1]);
+  return prefixes;
+}
+
+function idIsKnownDoctorCheck(id, { staticIds, dynamicPrefixes }) {
+  const angle = id.indexOf("<");
+  if (angle === -1) return staticIds.has(id);
+  return dynamicPrefixes.has(id.slice(0, angle));
+}
+
+// Extract every backtick-quoted id-like token from the FIRST column only of harness.md's
+// "| doctor id | ... |" table — the second column's prose also uses backticked terms (file
+// paths, TOML keys) that aren't doctor ids and must not be checked against the doctor source.
+function harnessTableIdTokens(text) {
+  const startIdx = text.indexOf("| doctor id |");
+  if (startIdx === -1) return [];
+  const ids = [];
+  for (const line of text.slice(startIdx).split("\n")) {
+    if (!line.startsWith("|")) break;
+    const cells = line.split("|");
+    if (cells.length < 2) continue;
+    for (const m of cells[1].matchAll(/`([a-zA-Z][a-zA-Z0-9_.<>-]*)`/g)) ids.push(m[1]);
+  }
+  return ids;
+}
+
+test("templates/know-thy-build/harness.md: doctor-id table extraction finds real static and dynamic ids in the doctor source (sanity check on the extractor itself)", () => {
+  const src = doctorSource();
+  const staticIds = staticDoctorIds(src);
+  const dynamicPrefixes = dynamicDoctorIdPrefixes(src);
+  expect(staticIds.has("harness.schema")).toBe(true);
+  expect(staticIds.has("roles.roster-defined")).toBe(true);
+  expect(dynamicPrefixes.has("agents.")).toBe(true);
+  expect(dynamicPrefixes.has("hooks.")).toBe(true);
+  expect(dynamicPrefixes.has("skills.")).toBe(true);
+  expect(dynamicPrefixes.has("commands.run.")).toBe(true);
+});
+
+test("templates/know-thy-build/harness.md: every doctor id in its table is a real check id from factory/lib/doctor/{harness,factory}.js", () => {
+  const { staticIds, dynamicPrefixes } = { staticIds: staticDoctorIds(doctorSource()), dynamicPrefixes: dynamicDoctorIdPrefixes(doctorSource()) };
+  const ids = harnessTableIdTokens(readTemplate("harness"));
+  expect(ids.length).toBeGreaterThan(0);
+  const unknown = ids.filter((id) => !idIsKnownDoctorCheck(id, { staticIds, dynamicPrefixes }));
+  expect(unknown).toEqual([]);
+});
+
+test("templates/know-thy-build/harness.md: the doctor-id table no longer uses fake wildcard ids (agents.*, hooks.*, commands.*, etc.)", () => {
+  const ids = harnessTableIdTokens(readTemplate("harness"));
+  expect(ids.filter((id) => id.includes("*"))).toEqual([]);
+});
