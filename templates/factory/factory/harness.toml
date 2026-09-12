@@ -33,6 +33,15 @@ maturity = "M0"                  # M0 | M1 | M2 — promotion is a factory:harne
 [factory]
 orchestration   = "workflow"     # workflow | agent
 required_checks = ["factory/gates", "factory/review", "factory/integrity"]
+# max_turns: `claude -p --max-turns` for every stage dispatcher. Integer 3–50 (doctor checks).
+# 12, not 5: with `orchestration = "workflow"` the Workflow tool runs in the BACKGROUND, so the
+# dispatcher spends turns on ① the Workflow call ② the launch receipt ③ the completion notification
+# ④ printing the artifact — plus one per chunk when the notification's <result> is truncated and it
+# has to Read the task output file. 5 cut demo #2's plan at turn 6: 30 min and $12 with no artifact
+# (ADR-020 KTB-16). Raise it per stage below if one stage keeps running out.
+max_turns       = 12
+# [factory.max_turns_by_stage]     # per-stage override, wins over max_turns
+# plan = 16
 
 [commands.proof]                 # fill when maturity >= M1
 # coverage        = "npx vitest run --coverage --coverage.reporter=json"

@@ -19,7 +19,7 @@ import { STAGE_OF_TARGET, ENTRY_LABELS, factoryLabelOf, TIERS, tierLabel } from 
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
@@ -47,6 +47,29 @@ export const readFileOrNull = (p) => { try { return existsSync(p) ? readFileSync
 /** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
 const transcriptTextFor = (root, out) =>
   readTranscript({ root, home: homedir(), sessionId: out?.session_id, readFile: readFileOrNull }) || "";
+
+/**
+ * `claude -p --max-turns`의 기본값(KTB-16). 5였고, 그 5가 데모 #2의 plan 재실행을 죽였다 —
+ * 백그라운드 `Workflow`를 쓰는 디스패처가 쓰는 턴은 최소 ① Workflow 호출 ② 접수증 수신
+ * ③ 완료 알림 수신 ④ 산출물 출력이고, 알림의 `<result>`가 잘려 output 파일을 `Read`로 읽어야
+ * 하면 조각 수만큼 더 붙는다. 6턴째에 잘려 30분과 $12.05가 산출물 없이 증발했다.
+ * 12는 그 관측(조각 4개 + 여유)에서 나온 값이지 이론값이 아니다 — 그래서 하네스에서 조정된다.
+ */
+export const DEFAULT_MAX_TURNS = 12;
+
+/**
+ * 이 스테이지에 쓸 `--max-turns`. `[factory].max_turns`가 공통값이고
+ * `[factory].max_turns_by_stage.<stage>`가 스테이지별로 이긴다 — review는 로스터 크기만큼
+ * 알림이 오고 triage는 워크플로를 아예 안 쓰는 등, 턴 수요가 스테이지마다 다르기 때문이다.
+ * 값이 정수가 아니면(오타·문자열) 기본값으로 떨어진다 — doctor가 그 오타를 FAIL로 잡는다.
+ */
+export function stageMaxTurns(harness, stage) {
+  const f = harness?.factory || {};
+  for (const v of [f.max_turns_by_stage?.[stage], f.max_turns]) {
+    if (Number.isInteger(v) && v >= 1) return v;
+  }
+  return DEFAULT_MAX_TURNS;
+}
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -183,8 +206,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     }
     // claude -p가 실패를 보고했으면 게이트를 돌릴 이유가 없다 — 판정할 산출물이 없다.
     // 게이트는 건너뛰고 곧장 verify로 간다(verify가 is_error로 떨어뜨린다).
+    //
+    // 예외는 **턴 한도**다(KTB-16/17): 그때 백그라운드 워크플로는 이미 끝났고 산출물은 트랜스크립트
+    // 안에 있다 — 모자란 것은 디스패처가 그것을 다시 출력할 턴뿐이었다. 게이트를 건너뛰면
+    // verifyStage가 복구한 산출물을 "gates file missing"으로 되떨어뜨려, 복구가 아무 소용이 없어진다.
     let gates = null;
-    if (!out?.is_error) {
+    if (!out?.is_error || hitMaxTurns(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
@@ -211,7 +238,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     }
     const v = d.verifyStage({ stage, out, ctx, gates });
     if (!v.ok) {
-      const t = await d.transition({ to: "factory:needs-human", reason: `stage artifact missing or invalid: ${v.reasons.join("; ")}` });
+      // 턴 한도는 설계 오류가 아니라 **재시도로 풀리는 일시 조건**이다(KTB-16) — 사람이 판단할
+      // 것이 아직 없으므로 needs-human이 아니라 blocked다(gates BLOCKED·머지 API 실패와 같은 등급).
+      // 여기까지 왔다는 건 트랜스크립트에서도 산출물을 복구하지 못했다는 뜻이다(KTB-17) — 복구했다면
+      // verifyStage가 이미 통과시켰다. 사유의 첫 줄이 원인(턴 한도)이고 스키마 진단은 그 뒤에 붙는다.
+      const maxTurns = hitMaxTurns(out);
+      const to = maxTurns ? "factory:blocked" : "factory:needs-human";
+      const t = await d.transition({ to, reason: `${maxTurns ? "stage did not finish" : "stage artifact missing or invalid"}: ${v.reasons.join("; ")}` });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
@@ -521,7 +554,7 @@ async function main() {
     countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
     ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
     claudeP: async () => {
-      const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
+      const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, stage)), "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
       if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
       const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
       mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다

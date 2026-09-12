@@ -24,6 +24,27 @@ test("template harness passes every static check", () => {
   expect(c["commands.unit"].level).toBe("PASS");
 });
 
+// KTB-16: 오타로 12가 120이 되면 잘못된 프롬프트가 몇 시간·수백 달러를 태울 수 있다.
+test("factory.max_turns: 정수 3–50만 통과, 스테이지별 표도 같은 범위, 없으면 WARN(기본값 12)", () => {
+  const c = by(checkHarness({ harness: tmpl(), files }));
+  expect(c["factory.max_turns"]).toMatchObject({ level: "PASS", detail: "12" });
+
+  const h = tmpl(); h.factory.max_turns = 120;
+  expect(by(checkHarness({ harness: h, files }))["factory.max_turns"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("[factory].max_turns=120") });
+
+  const h2 = tmpl(); h2.factory.max_turns = 2;
+  expect(by(checkHarness({ harness: h2, files }))["factory.max_turns"].level).toBe("FAIL");
+
+  const h3 = tmpl(); h3.factory.max_turns_by_stage = { plan: 16, review: "many" };
+  expect(by(checkHarness({ harness: h3, files }))["factory.max_turns"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("[factory.max_turns_by_stage].review") });
+
+  const h4 = tmpl(); h4.factory.max_turns_by_stage = { plan: 16 };
+  expect(by(checkHarness({ harness: h4, files }))["factory.max_turns"].level).toBe("PASS");
+
+  const h5 = tmpl(); delete h5.factory.max_turns;
+  expect(by(checkHarness({ harness: h5, files }))["factory.max_turns"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("init --upgrade") });
+});
+
 test("commands.unit missing → FAIL", () => {
   const h = tmpl(); delete h.commands.unit;
   expect(by(checkHarness({ harness: h, files }))["commands.unit"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("unit") });

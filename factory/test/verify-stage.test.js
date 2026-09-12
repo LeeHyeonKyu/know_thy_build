@@ -99,3 +99,31 @@ test("end-to-end: a broken fence in the envelope is rescued by transcriptText, a
   expect(with_.ok).toBe(true);
   expect(with_.data.verdicts).toHaveLength(2);
 });
+
+// ── KTB-16: 턴 한도만은 다른 is_error다 ───────────────────────────────────
+// 봉투는 실패라고 말하지만 백그라운드 워크플로는 이미 끝났고 산출물은 트랜스크립트 안에 있다 —
+// 모자란 것은 디스패처가 그것을 **다시 출력할** 턴 하나뿐이었다(데모 #2: 30분·$12.05).
+
+test("max_turns + a recovered artifact is a pass; max_turns without one names the turn limit, not 'no JSON object'", () => {
+  const transcript = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "tu1" }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: "Workflow launched in background. Task ID: abc" }] } }),
+    JSON.stringify({ type: "user", message: { content: `<task-notification>\n<status>completed</status>\n<result>${JSON.stringify(review)}</result>\n</task-notification>` } }),
+  ].join("\n");
+  const cut = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 6, result: "I ran out of turns." };
+  const args = { stage: "review", out: cut, agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } };
+
+  const rescued = verifyStage({ ...args, transcriptText: transcript });
+  expect(rescued.ok).toBe(true);
+  expect(rescued.data.verdicts).toHaveLength(2);
+
+  const receiptOnly = verifyStage({ ...args, transcriptText: transcript.split("\n").slice(0, 2).join("\n") });
+  expect(receiptOnly.ok).toBe(false);
+  expect(receiptOnly.reasons[0]).toBe("claude -p hit max turns (6)");
+  expect(receiptOnly.reasons.join(" ")).not.toMatch(/reported is_error/);
+
+  // 턴 한도가 아닌 is_error는 산출물을 복구해도 그대로 실패다 — 그 런은 실제로 무언가 터진 것이다.
+  const other = verifyStage({ ...args, out: { ...cut, subtype: "error_during_execution", terminal_reason: "error" }, transcriptText: transcript });
+  expect(other.ok).toBe(false);
+  expect(other.reasons).toContain("claude -p reported is_error");
+});

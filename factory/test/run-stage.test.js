@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
@@ -886,6 +886,67 @@ test("C1: claude -p가 is_error면 게이트를 돌리지 않고 곧장 verify�
   expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
   expect(d.gates).not.toHaveBeenCalled();
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/is_error/) }));
+});
+
+// ── KTB-16: `--max-turns`는 하네스가 정하고, 턴 한도는 needs-human이 아니라 blocked다 ─────────
+// 데모 #2의 plan 재실행은 6턴째에 잘렸다 — 30분·$12.05가 산출물 없이 증발했고, 이슈에 남은 사유는
+// "no JSON object in result"(증상)라 사람이 프롬프트를 의심하게 만들었다. 진짜 원인은 턴 한도다.
+
+test("KTB-16: --max-turns는 [factory].max_turns에서 오고, 스테이지별 표가 그것을 이긴다", () => {
+  expect(DEFAULT_MAX_TURNS).toBe(12);
+  expect(stageMaxTurns(undefined, "plan")).toBe(12);                       // 하네스가 없으면 기본값
+  expect(stageMaxTurns({ factory: {} }, "plan")).toBe(12);
+  expect(stageMaxTurns({ factory: { max_turns: 20 } }, "plan")).toBe(20);
+  expect(stageMaxTurns({ factory: { max_turns: 20, max_turns_by_stage: { plan: 30 } } }, "plan")).toBe(30);
+  expect(stageMaxTurns({ factory: { max_turns: 20, max_turns_by_stage: { plan: 30 } } }, "review")).toBe(20);
+  // 오타(문자열·0·소수)는 조용히 쓰지 않는다 — 기본값으로 떨어지고 doctor가 그 오타를 FAIL로 잡는다.
+  expect(stageMaxTurns({ factory: { max_turns: "8" } }, "plan")).toBe(12);
+  expect(stageMaxTurns({ factory: { max_turns: 0 } }, "plan")).toBe(12);
+});
+
+test("KTB-16: terminal_reason max_turns면 사유가 턴 한도를 말하고 등급은 blocked다 (needs-human 아님)", async () => {
+  const lines = [];
+  const d = implDeps({
+    claudeP: async () => ({ is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 6, result: "" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/claude -p hit max turns \(6\)/) }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lines).toContain("- claude -p hit max turns (6)");
+  expect(lines).not.toContain("- claude -p reported is_error");
+});
+
+test("KTB-16: subtype만 error_max_turns여도 같은 등급이다 (CLI 버전에 따라 한쪽만 온다)", async () => {
+  const d = implDeps({ claudeP: async () => ({ is_error: true, subtype: "error_max_turns", num_turns: 9, result: "" }) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/hit max turns \(9\)/) }));
+});
+
+/**
+ * KTB-16 + KTB-17이 함께 닫는 그 케이스 — **데모 #2 그 자체**: 봉투는 `is_error` + `max_turns`인데
+ * 워크플로는 이미 끝났고 산출물은 트랜스크립트 안에 있다. 그러면 이 런은 성공이다.
+ * 게이트도 돌아야 한다 — 건너뛰면 복구한 산출물이 "gates file missing"으로 되떨어진다.
+ */
+test("KTB-16/17: max_turns 봉투라도 트랜스크립트에서 산출물을 복구하면 verify ok — 게이트도 돈다", async () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const transcript = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w1" }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: "Workflow launched in background. Task ID: abc" }] } }),
+    JSON.stringify({ type: "user", message: { content: `<task-notification>\n<status>completed</status>\n<result>${JSON.stringify(impl)}</result>\n</task-notification>` } }),
+  ].join("\n");
+  const gatesFile = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const lines = [];
+  const d = implDeps({
+    claudeP: async () => ({ is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 6, result: "I ran out of turns." }),
+    gates: vi.fn(async () => gatesFile),
+    verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, transcriptText: transcript, agentsLog: { starts: [], stops: [], completed: [], orphans: [] }, roster: [], orchestration: "workflow", gates }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(d.gates).toHaveBeenCalled();
+  expect(lines).toContain("verify: ok");
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
 });
 
 test("F5: resetGates는 판정 파일뿐 아니라 그 재료(테스트·커버리지·mutation 리포트)까지 지운다", () => {

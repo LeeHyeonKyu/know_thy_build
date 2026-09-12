@@ -28,9 +28,14 @@ export const ENTRY_LABELS = {
 /** §3.2 전이 그래프. 키: from, 값: 허용된 to. */
 export const TRANSITIONS = new Map([
   ["backlog", new Set(["factory:queue"])],
-  ["factory:queue", new Set(["factory:ready", "factory:needs-info", "factory:wont-do", "factory:needs-human"])],
+  // queue·ready에서도 blocked로 나갈 수 있어야 한다(KTB-16/KTB-14 r1). "판정 불가"(턴 한도로 잘린
+  // 런, `git status`가 실패해 워크트리를 증명할 수 없는 런)는 어느 스테이지에서나 생기는데, 이 두
+  // 상태에 그 출구가 없으면 triage·plan은 blocked를 요청했다가 그래프에 거부당해 **라벨이 그대로
+  // 남는다** — 같은 이슈가 아무 표식 없이 제자리에 앉아 있게 된다. blocked는 막다른 곳이 아니다:
+  // sweeper가 유예 뒤 needs-human으로 올리고, needs-human → queue로 다시 돈다.
+  ["factory:queue", new Set(["factory:ready", "factory:needs-info", "factory:wont-do", "factory:needs-human", "factory:blocked"])],
   ["factory:needs-info", new Set(["factory:queue"])],
-  ["factory:ready", new Set(["factory:planned", "factory:needs-human"])],
+  ["factory:ready", new Set(["factory:planned", "factory:needs-human", "factory:blocked"])],
   ["factory:planned", new Set(["factory:in-progress", "factory:needs-human"])],
   ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:planned"])],   // sweeper 재큐
   // blocked = 환경/자격증명 실패로 sweeper가 needs-human으로 에스컬레이션한다(§3.2) — review·merge

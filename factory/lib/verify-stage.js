@@ -34,13 +34,24 @@ const GATED_STAGES = ["implement", "review", "merge"];
 const listOf = (a) => (a && a.length ? a.join(",") : "none");
 
 /**
+ * `claude -p`가 **턴 한도**에서 잘렸는가(KTB-16). CLI는 이 사실을 두 자리에 적는다 —
+ * `terminal_reason: "max_turns"`와 `subtype: "error_max_turns"`. 한쪽만 보면 CLI 버전에 따라
+ * 조용히 놓친다. 이것은 설계 오류가 아니라 **재시도로 풀리는 일시 조건**이라, 등급도 사유 문구도
+ * 다른 `is_error`와 달라야 한다(`run-stage.js`가 이 판정으로 needs-human 대신 blocked를 세운다).
+ */
+export function hitMaxTurns(out) {
+  return out?.terminal_reason === "max_turns" || out?.subtype === "error_max_turns";
+}
+/** 턴 한도 실패의 run 기록/전이 사유 한 줄. 증상("no JSON object in result")이 아니라 원인을 적는다. */
+export const maxTurnsReason = (out) => `claude -p hit max turns (${out?.num_turns ?? "n/a"})`;
+
+/**
  * gates: `.factory/out/gates.json`의 내용(없으면 null). 게이트 판정의 단일 출처는 이 파일이다 —
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
  */
 export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
   const reasons = [];
-  if (!out || out.is_error) reasons.push("claude -p reported is_error");
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
    * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
@@ -60,6 +71,16 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
     validate: schemaName ? (o) => validate(schemaName, withGates(o)) : null,
   });
   const data = artifact.ok ? artifact.data : null;
+  /*
+   * `is_error`는 그 자체로 실패다 — 단 하나의 예외가 **턴 한도**다(KTB-16). `Workflow`는 백그라운드로
+   * 돌고 디스패처는 그 결과를 받아 다시 출력하기만 하면 되는데, 그 마지막 턴이 모자라면 CLI는
+   * `is_error: true, subtype: error_max_turns, terminal_reason: max_turns`로 끝난다 — **워크플로는
+   * 이미 끝났고 산출물은 트랜스크립트 안에 있다**(데모 #2 plan 재실행: 30분·$12.05가 그렇게 증발했다).
+   * 그래서 스키마를 통과하는 산출물을 실제로 복구했을 때만 이 예외가 열린다. 복구하지 못했으면
+   * 사유는 "no JSON object in result"(증상)가 아니라 턴 한도(원인)로 적는다.
+   */
+  const maxTurns = hitMaxTurns(out);
+  if ((!out || out.is_error) && !(maxTurns && artifact.ok)) reasons.push(maxTurns ? maxTurnsReason(out) : "claude -p reported is_error");
   if (!artifact.ok) reasons.push(artifact.reason);
   if (GATED_STAGES.includes(stage)) {
     if (!gates) reasons.push("gates file missing");

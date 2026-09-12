@@ -16,6 +16,10 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:queue", "factory:wont-do")).toBe(true);
   expect(canTransition("factory:queue", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:needs-info", "factory:queue")).toBe(true);
+  // KTB-16/KTB-14 r1: "판정 불가"(턴 한도, git status 실패)는 어느 스테이지에서나 생긴다 —
+  // 출구가 없으면 triage·plan은 blocked를 요청했다가 거부당해 라벨이 그대로 남는다.
+  expect(canTransition("factory:queue", "factory:blocked")).toBe(true);
+  expect(canTransition("factory:ready", "factory:blocked")).toBe(true);
   expect(canTransition("factory:ready", "factory:planned")).toBe(true);
   expect(canTransition("factory:planned", "factory:in-progress")).toBe(true);
   expect(canTransition("factory:in-progress", "factory:awaiting-review")).toBe(true);

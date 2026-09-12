@@ -66,15 +66,15 @@ test("loadHarness fills gates.thresholds / test / commands.proof defaults and ke
   expect(h2.test.test_glob).toEqual(["test/**/*.test.js"]);
 });
 
-test("loadHarness fills factory.{orchestration,required_checks} defaults and keeps overrides", () => {
+test("loadHarness fills factory.{orchestration,required_checks,max_turns} defaults and keeps overrides", () => {
   const root = fixture();
   const h = loadHarness(root); // fixture already declares [factory] orchestration = "workflow"
-  expect(h.factory).toEqual({ orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"] });
+  expect(h.factory).toEqual({ orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"], max_turns: 12 });
 
   const bare = mkdtempSync(join(tmpdir(), "ktb-"));
   mkdirSync(join(bare, ".factory"), { recursive: true });
   writeFileSync(join(bare, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M1"\n[commands]\nlint = "npm run lint"\nunit = "npm test"\n[gates]\nrequired = ["lint"]\nfast = ["lint"]\nfull = ["lint"]\ndeep = ["lint"]\n`);
-  expect(loadHarness(bare).factory).toEqual({ orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"] }); // no [factory] section at all
+  expect(loadHarness(bare).factory).toEqual({ orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"], max_turns: 12 }); // no [factory] section at all
 
   writeFileSync(join(root, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M1"\n[factory]\norchestration = "workflow"\nrequired_checks = ["factory/gates"]\n[commands]\nlint = "npm run lint"\nunit = "npm test"\n[gates]\nrequired = ["lint","unit"]\nfast = ["lint","unit"]\nfull = ["lint","unit"]\ndeep = ["lint","unit"]\n`);
   expect(loadHarness(root).factory.required_checks).toEqual(["factory/gates"]);

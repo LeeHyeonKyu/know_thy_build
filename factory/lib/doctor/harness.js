@@ -15,6 +15,16 @@ export function checkHarness({ harness: h, files = [] }) {
   out.push(MAX_LEVEL[h.harness?.maturity] ? c("harness.maturity", "PASS", h.harness.maturity) : c("harness.maturity", "FAIL", `[harness].maturity must be M0|M1|M2, got ${h.harness?.maturity}`));
   out.push(["workflow", "agent"].includes(h.factory?.orchestration) ? c("factory.orchestration", "PASS") : c("factory.orchestration", "FAIL", `[factory].orchestration must be workflow|agent`));
   out.push(Array.isArray(h.factory?.required_checks) && h.factory.required_checks.length ? c("factory.required_checks", "PASS", h.factory.required_checks.join(",")) : c("factory.required_checks", "FAIL", "[factory].required_checks must list at least one check"));
+  // max_turns(KTB-16). 하한 3은 백그라운드 디스패처의 최소 턴(호출·알림·출력)이고, 상한 50은
+  // "한 스테이지가 50턴을 쓰고 있다면 그건 한도 문제가 아니다"는 선이다 — 오타로 12가 120이 되면
+  // 잘못된 프롬프트가 몇 시간·수백 달러를 태울 수 있으므로 doctor가 범위를 잡는다.
+  const badTurns = [];
+  const turns = (v, where) => { if (v !== undefined && !(Number.isInteger(v) && v >= 3 && v <= 50)) badTurns.push(`${where}=${v} must be an integer 3–50`); };
+  turns(h.factory?.max_turns, "[factory].max_turns");
+  for (const [stage, v] of Object.entries(h.factory?.max_turns_by_stage || {})) turns(v, `[factory.max_turns_by_stage].${stage}`);
+  out.push(badTurns.length ? c("factory.max_turns", "FAIL", badTurns.join("; "))
+    : h.factory?.max_turns === undefined ? c("factory.max_turns", "WARN", "[factory].max_turns not set — the default 12 applies; run `npx know-thy-build factory init --upgrade`")
+      : c("factory.max_turns", "PASS", String(h.factory.max_turns)));
   // commands
   const cmds = h.commands || {};
   const badPh = Object.entries(TEMPLATED).filter(([k, phs]) => cmds[k] && phs.some((p) => !cmds[k].includes(p))).map(([k, phs]) => `${k} must contain ${phs.join(" and ")}`);
