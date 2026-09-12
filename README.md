@@ -72,7 +72,7 @@ A feature is complete ONLY when all its test cases in `docs/QA.md` pass with evi
 
 Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipeline in CI (triage → plan → implement → review → merge):
 
-- `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files) — Claude-side, that's 4 workflow scripts (`.claude/workflows/factory-{triage,plan,implement,review}.js`), 14 role agents (`.claude/agents/*.md`), and 4 dispatcher commands (`.claude/commands/factory-*.md`)
+- `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files). On the Claude side that's 4 workflow scripts (`.claude/workflows/factory-{triage,plan,implement,review}.js`), 14 role agents (`.claude/agents/*.md`), and 4 dispatcher commands (`.claude/commands/factory-*.md`)
 - `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
 - `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`)
 - `factory run <stage> <issue>` — run a stage locally with the exact scripts CI uses

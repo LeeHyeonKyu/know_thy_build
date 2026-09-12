@@ -404,7 +404,7 @@ const LOADER = {
 };
 ```
 
-역할 에이전트가 `context.json`을 직접 읽는다는 것은 loader가 대신 읽어 만든 프롬프트 인자를 넘겨받는다는 뜻이 아니다 — role 에이전트는 자기 `.md`·lessons·diff를 직접 읽고, `context.json` 자체를 다시 읽는 것은 loader의 몫이다(workflow가 파일을 못 읽으므로). loader-null(1회 재spawn 후에도 null 또는 throw)과 issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)는 네 workflow 모두 같은 모양으로 fail-closed 응답한다 — `{issue, error, orchestration: 'workflow', guarantee: 'structural'}`뿐, stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)는 아예 싣지 않는다. 각 스테이지 schema가 그 필드를 required로 두므로 `verify-stage`가 그대로 실패시켜 needs-human이 된다 — 별도의 에러 처리 경로가 필요 없다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다.
+위 표의 "역할 에이전트가 `context.json`을 읽는다"는 문자 그대로다 — 네 workflow의 역할 프롬프트는 전부 `Read \`${args.context}\`` (즉 `.factory/out/context.json`)로 시작하고, 각 역할이 그 파일을 자기 손으로 다시 연다. loader가 있는 이유는 역할이 아니라 **workflow 스크립트 자신**이 파일을 못 읽기 때문이다(§4.2 표의 workflow 행) — loader는 그 파일을 읽어 로스터 부분집합(이름·`agentType`·`model` 등)만 schema로 workflow에 돌려주고, workflow는 그 schema 값으로 몇 명을 어떤 이름·모델로 spawn할지만 결정한다. 즉 loader의 산출물은 workflow의 분기 재료이지 역할 에이전트에게 전달되는 `context.json`의 대체물이 아니다 — 역할 에이전트는 loader를 거치지 않고 같은 파일을 독립적으로 연다. loader-null(1회 재spawn 후에도 null 또는 throw)과 issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)는 네 workflow 모두 같은 모양으로 fail-closed 응답한다 — `{issue, error, orchestration: 'workflow', guarantee: 'structural'}`뿐, stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)는 아예 싣지 않는다. 각 스테이지 schema가 그 필드를 required로 두므로 `verify-stage`가 그대로 실패시켜 needs-human이 된다 — 별도의 에러 처리 경로가 필요 없다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다.
 
 #### 4.2.4 orchestration 모드 — 후퇴는 설정이지 동작이 아니다
 
@@ -948,7 +948,7 @@ agent    = ".claude/agents/reviewer-spec-conformance.md"
 model    = "sonnet"
 lessons  = ".factory/lessons/reviewer-spec-conformance.md"
 spawn_on = ["tier:docs", "tier:standard", "tier:load-bearing"]
-cold_read = false                                 # 이 역할만 plan handoff를 읽는다 (스펙 대조가 임무)
+cold_read = false                                 # plan handoff 전체(files_expected·non_goals 포함)를 읽는 유일한 역할; qa는 done_when만 (ADR-016)
 output   = "factory.verdict.v1"
 
 [review.qa]
@@ -1175,7 +1175,7 @@ workflow가 돌려주는 객체(handoff data)에는 `decision` 필드가 없다 
 
 qa 리뷰어는 cold read 대상이지만 `handoffs.plan.done_when`(id/text/verify/level만 — `files_expected`/`non_goals`는 제외)은 R1 프롬프트에서 받는다. cold read가 배제하는 것은 **빌더의 산출물**(PR 설명·코멘트·커밋 메시지)이지 plan handoff가 아니다 — §5.2.3가 이 지점에서 §7.1의 일반 `cold_read = true` 문구보다 우선한다.
 
-**rework 완결성은 workflow가 센다** (implement, P3-R2): builder의 `rework_response.responses[]`가 이번 라운드 must_fix의 모든 id를 답했는지(`fixed`는 commit 필요, `disputed`는 reason 필요) `factory-implement.js` 자신이 세고, 빠지거나 형식이 틀린 id를 이름으로 모아 builder를 **1회만** 재spawn한다. 그래도 빠져 있으면 `verifier` 필드가 없는 객체를 return한다 — `implement.v1`이 `verifier`를 required로 두므로 그대로 needs-human이 된다. 사람이 읽는 handoff 본문에는 "rework response incomplete"라는 사유가 남는다.
+**rework 완결성은 workflow가 센다** (implement, P3-R2, Plan 3 실행 판결, ADR-016): builder의 `rework_response.responses[]`가 이번 라운드 must_fix의 모든 id를 답했는지(`fixed`는 commit 필요, `disputed`는 reason 필요) `factory-implement.js` 자신이 세고, 빠지거나 형식이 틀린 id를 이름으로 모아 builder를 **1회만** 재spawn한다. 그래도 빠져 있으면 `verifier` 필드가 없는 객체를 return한다 — `implement.v1`이 `verifier`를 required로 두므로 그대로 needs-human이 된다. 사람이 읽는 handoff 본문에는 "rework response incomplete"라는 사유가 남는다.
 
 **schema null 시 해당 리뷰어 1회 재spawn** 규칙은 유지하되 성격은 **보험**이다: 실측에서 null은 0/20(opus 10/10, sonnet 10/10, 중첩 배열·enum 포함 스키마)이었고 재시도 경로는 한 번도 발동하지 않았다(ADR-003). 표본이 1세트뿐이라 제거하지 않을 뿐, 이 규칙이 정상 경로에서 돌 것으로 기대하지 않는다. 같은 이유로 리뷰어 모델 고정도 하지 않는다.
 
