@@ -45,9 +45,10 @@ const fakeGh = {
 
 /**
  * initCommand로 설치 + test/smoke.test.js stub.
- * 역할 파일 stub은 더 이상 만들지 않는다(F5): `[merge.integrator]`는 roles.toml에서 사라졌고, 남은 미설치
- * 역할은 `[retro.analyst]` 하나인데 `checkRoles`가 그것을 FAIL이 아니라 "Plan 4가 채운다" WARN으로 보고한다 —
- * 그래서 "갓 init한 저장소의 doctor는 exit 0"이 stub 없이 성립한다. 이게 실제 사용자가 보는 상태다.
+ * 역할 파일 stub은 더 이상 만들지 않는다(F5): `[merge.integrator]`는 roles.toml에서 사라졌고, 마지막까지
+ * 비어 있던 `[retro.analyst]`도 Plan 4가 `factory-retro.md`를 설치하면서 채워졌다 —
+ * `roles.retro-agent-file`은 이제 WARN이 아니라 PASS다. "갓 init한 저장소의 doctor는 exit 0"이 stub 없이
+ * 성립한다. 이게 실제 사용자가 보는 상태다.
  */
 async function setupRepo() {
   const root = mkdtempSync(join(tmpdir(), "ktb-doctor-cli-"));
@@ -72,6 +73,8 @@ test("(a) full doctor run against a freshly-initialized repo: exit 0, PASS summa
   const charter = checks.find((c) => c.id === "charter");
   expect(charter).toMatchObject({ level: "WARN" });
   expect(checks.every((c) => c.level !== "FAIL")).toBe(true);
+  // Plan 4가 retro 역할 파일을 설치하면서 마지막 "아직 안 온 것" WARN이 사라졌다.
+  expect(checks.find((c) => c.id === "roles.retro-agent-file")).toMatchObject({ level: "PASS" });
 });
 
 test("(a2) the factory scope lints every installed agent file — an agent that loses a required section turns doctor red", async () => {
@@ -81,7 +84,7 @@ test("(a2) the factory scope lints every installed agent file — an agent that 
   const { io: iOk, o: oOk } = io();
   await doctorCommand({ root, pkgRoot, argv: ["--json", "--offline", "--no-run"], io: iOk, run, gh: fakeGh });
   const ok = JSON.parse(oOk.out.join("")).checks.filter((c) => c.id.startsWith("agents."));
-  expect(ok.length).toBe(14);                                   // 13 roles.toml 역할 + loader — stub은 더 이상 없다(F5)
+  expect(ok.length).toBe(15);                                   // 14 roles.toml 역할(retro 포함) + loader — stub은 더 이상 없다(F5)
   expect(ok.every((c) => c.level === "PASS")).toBe(true);
   expect(ok.some((c) => c.id === "agents.factory-loader")).toBe(true);   // roles.toml에 없지만 검사한다
 

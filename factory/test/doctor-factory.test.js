@@ -128,10 +128,10 @@ test("checkAgents: the shipped roles.toml + agent templates are what an initiali
     readFile: (p) => readFileSync(asInstalled(p), "utf8"),
   });
   for (const ch of checks) expect(ch.level, `${ch.id}: ${ch.detail}`).toBe("PASS");
-  // 13 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5) + loader. merge에는 역할이 아예 없고
-  // (ADR-015 R3 — F5에서 [merge.integrator] 삭제), retro.analyst는 아직 없는 파일이라 건너뛴다(Plan 4).
+  // 14 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5 + retro 1) + loader. merge에는 역할이
+  // 아예 없고(ADR-015 R3 — F5에서 [merge.integrator] 삭제), retro.analyst는 Plan 4가 파일을 채웠다.
   expect(checks.map((ch) => ch.id).sort()).toEqual([
-    "agents.factory-builder", "agents.factory-loader", "agents.factory-triage", "agents.factory-verifier",
+    "agents.factory-builder", "agents.factory-loader", "agents.factory-retro", "agents.factory-triage", "agents.factory-verifier",
     "agents.plan-architect", "agents.plan-operator", "agents.plan-product-advocate", "agents.plan-skeptic",
     "agents.plan-synthesizer", "agents.reviewer-architecture", "agents.reviewer-correctness", "agents.reviewer-qa",
     "agents.reviewer-security", "agents.reviewer-spec-conformance",

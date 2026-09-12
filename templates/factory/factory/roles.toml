@@ -97,6 +97,7 @@ output   = "factory.verdict.v1"
 # merge에는 역할이 없다 — merge 스테이지는 `claude -p`를 전혀 부르지 않는 스크립트 전용이고(ADR-015 R3),
 # 충돌은 integrator가 아니라 `factory:approved → factory:rework` 전이로 implement가 다시 푼다.
 [retro.analyst]
-agent  = ".claude/agents/factory-retro.md"
-model  = "opus"
-output = "factory.retro.v1"
+agent   = ".claude/agents/factory-retro.md"
+model   = "opus"
+lessons = ".factory/lessons/factory-retro.md"
+output  = "factory.retro.v1"

@@ -62,8 +62,11 @@ function bulletsUnderSubheading(text, heading) {
 
 function needsDenyAllWritesHook(name) {
   if (!name) return false;
+  // factory-retro는 제안만 낸다(P4-R4) — lessons·예시 append도, 제안 PR도, 이슈 생성도 전부 L1이 한다.
+  // 이 역할이 직접 쓸 수 있게 되는 순간 "근거를 세는 쪽"과 "쓰는 쪽"이 같아져서 위조 불가 전제가 무너진다.
   return name.startsWith("reviewer-") || name.startsWith("plan-") ||
-    name === "factory-triage" || name === "factory-verifier" || name === "factory-loader";
+    name === "factory-triage" || name === "factory-verifier" || name === "factory-loader" ||
+    name === "factory-retro";
 }
 
 /**

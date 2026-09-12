@@ -371,10 +371,10 @@ test("reviewer-spec-conformance.md: defers structural justification to architect
 // Task 6: the sweep. The per-task tests above pin what each role file says; this one is the gate that no
 // agent template can be added (or edited) past §7.2 — `doctor checkAgents` runs exactly this lint on the
 // installed copies, so a template that fails here fails the installed repo's doctor too.
-test("every templates/factory/claude/agents/*.md lints clean, and the set is the 14 roles Plan 3 installs", () => {
+test("every templates/factory/claude/agents/*.md lints clean, and the set is the 15 roles Plan 3+4 install", () => {
   const files = agentFiles();
   expect(files).toEqual([
-    "factory-builder.md", "factory-loader.md", "factory-triage.md", "factory-verifier.md",
+    "factory-builder.md", "factory-loader.md", "factory-retro.md", "factory-triage.md", "factory-verifier.md",
     "plan-architect.md", "plan-operator.md", "plan-product-advocate.md", "plan-skeptic.md", "plan-synthesizer.md",
     "reviewer-architecture.md", "reviewer-correctness.md", "reviewer-qa.md", "reviewer-security.md",
     "reviewer-spec-conformance.md",
@@ -414,4 +414,45 @@ test("reviewer-qa.md says .factory/out/qa/ is the one writable path, and spec-co
   expect(conf).toContain("qa_artifacts");
   expect(conf).toContain("reject");             // 규칙 자체는 그대로다
   expect(conf).toMatch(/로스터/);                // 다만 tier 로스터에 qa가 있을 때만
+});
+
+// ── Plan 4 Task 5: factory-retro — 쓰기 금지 역할이 하나 늘었다 ────────────────────────────────
+test("factory-retro.md: opus, read-only tools, deny-all-writes hook covering Bash", () => {
+  const { frontmatter } = parseAgentMd(readAgent("factory-retro"));
+  expect(frontmatter.name).toBe("factory-retro");
+  expect(frontmatter.model).toBe("opus");
+  expect(frontmatter.tools).toEqual(["Read", "Grep", "Glob"]);
+  expect(frontmatter.hooks.PreToolUse[0].matcher).toBe("Edit|Write|NotebookEdit|Bash");
+  expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
+});
+
+// retro는 lessons·예시·제안을 *제안*할 뿐 아무것도 쓰지 않는다(P4-R4) — 훅 규칙 목록에 들어 있지 않으면
+// 언젠가 누가 훅을 지워도 lint가 통과한다.
+test("lintAgentMd: factory-retro is a write-forbidden role — dropping its hook is a deny-hook violation", () => {
+  const text = readAgent("factory-retro");
+  expect(lintAgentMd(text, { expectedName: "factory-retro" })).toEqual([]);
+  const noHook = text.replace(/hooks:\n  PreToolUse:\n[\s\S]*?deny-all-writes\.sh \}\]\n/, "");
+  expect(noHook).not.toContain("deny-all-writes.sh");
+  expect(lintAgentMd(noHook, { expectedName: "factory-retro" })).toEqual([{ rule: "deny-hook", msg: expect.any(String) }]);
+});
+
+test("factory-retro.md Lens carries the adoption rules L1 will later count (§8.4 minimum evidence windows)", () => {
+  const { sections } = parseAgentMd(readAgent("factory-retro"));
+  const lens = [...sections.entries()].find(([k]) => k.startsWith("Lens"))[1];
+  const bullets = lens.split("\n").filter((l) => /^\s*(\d+\.|-)\s/.test(l));
+  expect(bullets.length).toBeGreaterThanOrEqual(6);
+  for (const s of ["evidence_runs", "gate", "role-new", "20", "삭제"]) expect(lens, s).toContain(s);
+  // "무엇이 이걸 더 일찍 잡았겠는가" + "어느 층(prompt → lesson → gate)" — §8.2가 retro에 요구하는 두 질문
+  expect(lens).toMatch(/더 일찍|earlier/);
+  expect(lens).toMatch(/prompt → lesson → gate/);
+
+  const mustNot = [...sections.entries()].find(([k]) => k.startsWith("You must not"))[1];
+  expect(mustNot).toMatch(/지어낸|지어내|invent/);
+  expect(mustNot).toMatch(/Lens/);          // Lens 수정 제안은 lesson이 아니라 제안 PR이다
+  expect(mustNot).toMatch(/코드|code/);      // 코드는 건드리지 않는다
+
+  const output = [...sections.entries()].find(([k]) => k.startsWith("Output"))[1];
+  for (const f of ["period", "lessons", "examples", "perspectives", "harness", "proposals", "summary"]) {
+    expect(output, f).toContain(f);
+  }
 });

@@ -66,7 +66,7 @@ test("CHARTER template is a draft with the §5.3 frontmatter", () => {
 
 test("lessons skeletons carry the integrity header", () => {
   const files = readdirSync(join(T, "factory/lessons"));
-  expect(files.length).toBe(14);
+  expect(files.length).toBe(15);
   for (const f of files) {
     const role = f.replace(/\.md$/, "");
     expect(read(`factory/lessons/${f}`)).toMatch(new RegExp(`<!--\\s*factory-lessons:v1\\s+role=${role}\\s+max=\\d+\\s*-->`));
@@ -108,24 +108,35 @@ test("settings.json deny covers the build-config files, matching [protected].fac
   }
 });
 
-test("dispatcher commands exist for the four LLM stages only and name their workflow", () => {
+test("dispatcher commands exist for the four LLM stages plus retro, and each names its workflow", () => {
   for (const s of ["triage", "plan", "implement", "review"]) {
     const t = read(`claude/commands/factory-${s}.md`);
     expect(t).toMatch(new RegExp(`allowed-tools: Workflow\\(factory-${s}\\)`));
     expect(t).toContain("`factory-" + s + "`");
     expect(t).toContain(".factory/out/context.json");
   }
+  // retro는 스테이지가 아니다(라벨 상태 머신 밖의 잡) — context.json이 아니라 L1이 써 둔 후보 파일을 받는다.
+  const retro = read("claude/commands/factory-retro.md");
+  expect(retro).toMatch(/allowed-tools: Workflow\(factory-retro\)/);
+  expect(retro).toContain("`factory-retro`");
+  expect(retro).toContain(".factory/out/retro-candidates.json");
+  expect(retro).not.toContain("context.json");
+  expect(readdirSync(join(T, "claude/commands")).sort()).toEqual([
+    "factory-implement.md", "factory-plan.md", "factory-retro.md", "factory-review.md", "factory-triage.md",
+  ]);
   expect(existsSync(join(T, "claude/commands/factory-merge.md"))).toBe(false);
 });
 
 // ── Task 6: the Claude-side templates the four stages actually load ──────────────────────────
-// ADR-015 / P3-R7: there is no merge workflow (merge is a script) and retro is Plan 4.
+// ADR-015 / P3-R7: there is no merge workflow (merge is a script). retro is the fifth workflow but
+// not a fifth stage — it is the Plan 4 job that runs outside the label state machine.
 const WORKFLOW_STAGES = ["triage", "plan", "implement", "review"];
+const WORKFLOW_SCRIPTS = [...WORKFLOW_STAGES, "retro"];
 
-test("the four stage workflows exist, each meta.name is its own basename, and there is no factory-merge.js", () => {
+test("the five workflows exist, each meta.name is its own basename, and there is no factory-merge.js", () => {
   const dir = join(T, "claude/workflows");
-  expect(readdirSync(dir).sort()).toEqual(WORKFLOW_STAGES.map((s) => `factory-${s}.js`).sort());
-  for (const s of WORKFLOW_STAGES) {
+  expect(readdirSync(dir).sort()).toEqual(WORKFLOW_SCRIPTS.map((s) => `factory-${s}.js`).sort());
+  for (const s of WORKFLOW_SCRIPTS) {
     const src = read(`claude/workflows/factory-${s}.js`);
     // `agentType`/`Workflow(factory-<s>)` 배선이 파일명을 그대로 쓴다 — meta.name이 어긋나면 디스패처가 못 찾는다.
     const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
@@ -135,12 +146,12 @@ test("the four stage workflows exist, each meta.name is its own basename, and th
   expect(existsSync(join(dir, "factory-merge.js"))).toBe(false);
 });
 
-test("every roles.toml agent path Plan 3 owns resolves to a real agent template", () => {
+test("every roles.toml agent path resolves to a real agent template — retro included (Plan 4)", () => {
   const roles = toml(read("factory/roles.toml"));
   const agentPath = (p) => join(T, "claude", p.replace(".claude/", ""));
-  // triage/plan/implement/review의 모든 역할 파일은 실재해야 한다 — roles.toml의 경로가 곧 설치 대상이다.
+  // triage/plan/implement/review/retro의 모든 역할 파일은 실재해야 한다 — roles.toml의 경로가 곧 설치 대상이다.
   const entries = [["triage", roles.triage]];
-  for (const stage of ["plan", "implement", "review"]) {
+  for (const stage of ["plan", "implement", "review", "retro"]) {
     for (const [name, def] of Object.entries(roles[stage])) entries.push([`${stage}.${name}`, def]);
   }
   for (const [id, def] of entries) expect(existsSync(agentPath(def.agent)), `${id} → ${def.agent}`).toBe(true);
@@ -149,8 +160,12 @@ test("every roles.toml agent path Plan 3 owns resolves to a real agent template"
   // merge에는 역할 블록 자체가 없다(F5 / ADR-015 R3 — merge는 `claude -p`를 부르지 않는 스크립트 전용이라
   // integrator를 정의해 두면 "언젠가 에이전트가 머지한다"는 약속이 roles.toml에 남는다).
   expect(roles.merge).toBeUndefined();
-  // retro.analyst의 파일만 아직 없다(Plan 4) — doctor는 이것을 FAIL이 아니라 WARN으로 보고한다.
-  expect(existsSync(agentPath(roles.retro.analyst.agent)), roles.retro.analyst.agent).toBe(false);
+  // Plan 4가 `[retro.analyst]`의 파일을 채웠다 — doctor의 `roles.retro-agent-file` WARN은 이제 PASS다.
+  expect(roles.retro.analyst.agent).toBe(".claude/agents/factory-retro.md");
+  expect(existsSync(agentPath(roles.retro.analyst.agent)), roles.retro.analyst.agent).toBe(true);
+  expect(roles.retro.analyst.lessons).toBe(".factory/lessons/factory-retro.md");
+  expect(roles.retro.analyst.model).toBe("opus");
+  expect(roles.retro.analyst.output).toBe("factory.retro.v1");
 });
 
 test("ci-settings, package.json, quarantine templates parse", () => {

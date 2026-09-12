@@ -1759,3 +1759,142 @@ test("factory-implement.js: PR bodies and rework comments go through --body-file
   expect(build).toMatch(/Write tool/);
   expect(build).toMatch(/NEVER pass a body inline/);
 });
+
+// ── Plan 4 Task 5: factory-retro.js — 단일 analyst, loader 없음(P4-R6) ─────────────────────────
+const FACTORY_RETRO_WORKFLOW = new URL("../../templates/factory/claude/workflows/factory-retro.js", import.meta.url).pathname;
+
+const retroFix = (over = {}) => ({
+  period: { from: "2026-09-01T00:00:00Z", to: "2026-09-07T00:00:00Z" },
+  lessons: [{ role: "reviewer-correctness", text: "타임스탬프를 비교하기 전에 양쪽이 UTC인지 확인한다", evidence_runs: [110, 112] }],
+  examples: [{ role: "reviewer-qa", kind: "good", text: "위치: …. 주장: …. 근거: …", evidence_runs: [104, 109] }],
+  perspectives: [{ role: "reviewer-qa", text: "시계가 뒤로 가는 사람의 눈", evidence_runs: [104, 109] }],
+  harness: [{ target: "M1", reason: "prisma/schema.prisma가 있는데 harness는 M0다" }],
+  proposals: [{ kind: "gate", title: "no-multiple-resolved를 lint에 추가", body: "…", evidence_runs: [110, 112, 118] }],
+  summary: "12건 머지, lesson 후보 1건 채택 제안",
+  ...over,
+});
+
+const retroArgs = { candidates: ".factory/out/retro-candidates.json" };
+
+test("factory-retro.js: meta.name equals the file's own basename and the only phase is Analyze", async () => {
+  const src = readFileSync(FACTORY_RETRO_WORKFLOW, "utf8");
+  const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
+  expect(m[1]).toBe(basename(FACTORY_RETRO_WORKFLOW, ".js"));
+
+  const { phases } = await runWorkflow(FACTORY_RETRO_WORKFLOW, { agent: async () => retroFix(), args: retroArgs });
+  expect(phases).toEqual(["Analyze"]);
+});
+
+test("factory-retro.js: one analyst call (opus, schema retro.v1 literal) and the answer comes back as a valid retro.v1", async () => {
+  const { result, calls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, { agent: async () => retroFix(), args: retroArgs });
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0].opts.agentType).toBe("factory-retro");
+  expect(calls[0].opts.model).toBe("opus");
+  expect(calls[0].opts.label).toBe("retro");
+  // 스키마 리터럴은 lib/schemas.js의 `retro.v1`을 그대로 비춘다 — 한쪽만 넓어지면 L1의 validate가
+  // 워크플로가 이미 받아들인 출력을 거절한다.
+  const schema = calls[0].opts.schema;
+  expect(schema.required).toEqual(["period", "lessons", "examples", "perspectives", "harness", "proposals", "summary"]);
+  expect(schema.properties.period.required).toEqual(["from", "to"]);
+  expect(schema.properties.lessons.items.required).toEqual(["role", "text", "evidence_runs"]);
+  expect(schema.properties.examples.items.properties.kind.enum).toEqual(["good", "bad"]);
+  expect(schema.properties.proposals.items.properties.kind.enum).toEqual(["gate", "threshold", "role-change", "role-new", "test-delete"]);
+  for (const k of ["lessons", "examples", "perspectives", "proposals"]) {
+    expect(schema.properties[k].items.properties.evidence_runs, k).toEqual({ type: "array", items: { type: "number" } });
+  }
+  expect(schema.properties.harness.items.required).toEqual(["target", "reason"]);
+
+  expect(result.summary).toBe("12건 머지, lesson 후보 1건 채택 제안");
+  expect(result.orchestration).toBe("workflow");
+  expect(result.guarantee).toBe("structural");
+  expect(validate("retro.v1", result).ok).toBe(true);
+});
+
+test("factory-retro.js: the analyst prompt names the candidates file the dispatcher passed and everything it must read", async () => {
+  const { calls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, {
+    agent: async () => retroFix(),
+    args: { candidates: ".factory/out/other-candidates.json" },
+  });
+  const p = calls[0].prompt;
+  expect(p).toContain(".factory/out/other-candidates.json");
+  expect(p).toContain("docs/factory/runs/");
+  expect(p).toContain(".factory/lessons/");
+  expect(p).toContain(".claude/agents/");
+  expect(p).toContain("docs/factory/CHARTER.md");
+  // 최소 근거 창과 채택 규칙(§8.4 / Global Constraints)은 프롬프트에 적혀 있어야 한다 — L1이 다시 세지만,
+  // 에이전트가 규칙을 모르면 셀 수 없는 후보만 잔뜩 낸다.
+  expect(p).toMatch(/2 distinct issues|≥2 distinct/);
+  expect(p).toContain("evidence_runs");
+  expect(p).toMatch(/20 runs/);
+  expect(p).toMatch(/Examples 8|8\/8\/6/);
+  expect(p).toMatch(/never invent|do not invent/i);
+});
+
+test("factory-retro.js: with no candidates arg the workflow falls back to the standard path, never to a guess", async () => {
+  const { calls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, { agent: async () => retroFix(), args: {} });
+  expect(calls[0].prompt).toContain(".factory/out/retro-candidates.json");
+});
+
+test("factory-retro.js: an analyst that returns null is re-spawned exactly once, and the second answer stands", async () => {
+  let attempts = 0;
+  const { result, calls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, {
+    agent: async () => {
+      attempts += 1;
+      return attempts === 1 ? null : retroFix({ summary: "second pass" });
+    },
+    args: retroArgs,
+  });
+  expect(calls).toHaveLength(2);
+  expect(result.summary).toBe("second pass");
+  expect(validate("retro.v1", result).ok).toBe(true);
+});
+
+test("factory-retro.js: an analyst that throws once is re-spawned, and a throw twice fails closed with a named error", async () => {
+  let attempts = 0;
+  const { result: afterThrow, calls: throwCalls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, {
+    agent: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("subagent died mid-turn");
+      return retroFix({ summary: "survived" });
+    },
+    args: retroArgs,
+  });
+  expect(throwCalls).toHaveLength(2);
+  expect(afterThrow.summary).toBe("survived");
+
+  const { result, calls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, {
+    agent: async () => { throw new Error("dead again"); },
+    args: retroArgs,
+  });
+  expect(calls).toHaveLength(2);
+  expect(result).toEqual({ error: "retro analyst returned nothing", orchestration: "workflow", guarantee: "structural" });
+  // 빈 제안을 지어내지 않는다 — retro가 죽은 것과 "배울 게 없었다"는 서로 다른 사실이고, L1은 전자에서
+  // `_retro.md`에 실패를 기록할 뿐 lessons PR을 열지 않는다.
+  expect(validate("retro.v1", result).ok).toBe(false);
+});
+
+test("factory-retro.js: a null twice returns the same error object (no partial retro output leaks through)", async () => {
+  const { result, calls } = await runWorkflow(FACTORY_RETRO_WORKFLOW, { agent: async () => null, args: retroArgs });
+  expect(calls).toHaveLength(2);
+  expect(result).toEqual({ error: "retro analyst returned nothing", orchestration: "workflow", guarantee: "structural" });
+});
+
+test("factory-retro.js: the analyst's own orchestration/guarantee claims are overwritten by the workflow", async () => {
+  const { result } = await runWorkflow(FACTORY_RETRO_WORKFLOW, {
+    agent: async () => retroFix({ orchestration: "agent", guarantee: "verified" }),
+    args: retroArgs,
+  });
+  expect(result.orchestration).toBe("workflow");
+  expect(result.guarantee).toBe("structural");
+});
+
+test("factory-retro.js: once() is byte-identical to the four stage workflows', and there is no loader in it", () => {
+  const retro = readFileSync(FACTORY_RETRO_WORKFLOW, "utf8");
+  expect(blockOf(retro, /function once\(fn\) \{[\s\S]*?\n\}/, "once")).toBe(
+    blockOf(readFileSync(FACTORY_REVIEW_WORKFLOW, "utf8"), /function once\(fn\) \{[\s\S]*?\n\}/, "once"),
+  );
+  // P4-R6: retro는 로스터가 없다 — 로더를 부르면 읽을 context.json 자체가 없는 잡에서 없는 파일을 읽는다.
+  expect(retro).not.toContain("factory-loader");
+  expect(retro).not.toContain("context.json");
+});
