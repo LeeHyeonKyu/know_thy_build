@@ -989,7 +989,7 @@ test("merge: never calls trustWorkspace, claudeP, buildContext, verifyStage or w
   expect(writeHandoff).not.toHaveBeenCalled();
 });
 
-test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates → mergeGates → protectedPaths → mergePr → transition → closeIssue) in order", async () => {
+test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → protectedPaths → gates → mergeGates → mergePr → transition → closeIssue) in order", async () => {
   const calls = [];
   const d = mergeHappyDeps({
     assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
@@ -1003,15 +1003,17 @@ test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates →
     closeIssue: async () => { calls.push("closeIssue"); },
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
-  expect(calls).toEqual(["assert", "checkout", "prInfo", "gates", "mergeGates", "protectedPaths", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["assert", "checkout", "prInfo", "protectedPaths", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
 });
 
 // KTB-5: 보호 경로 변경은 L0(integrity 체크)가 아니라 여기서 자동 머지를 막는다 — 사람은 여전히
 // 그 PR을 머지할 수 있어야 하기 때문이다(required context가 `factory/integrity` 하나뿐).
-test("merge: a protected path in the PR range → needs-human, never merges (KTB-5)", async () => {
+test("merge: a protected path in the PR range → needs-human, never merges, and never runs the gates (KTB-5)", async () => {
   const lines = [];
   const d = mergeHappyDeps({
     protectedPaths: async () => ({ ok: true, files: [".factory/harness.toml"] }),
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) })),
+    mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
     mergePr: vi.fn(async () => {}),
     comment: vi.fn(async () => {}),
     transition: vi.fn(async ({ to }) => ({ ok: true, to })),
@@ -1019,9 +1021,26 @@ test("merge: a protected path in the PR range → needs-human, never merges (KTB
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(2);
   expect(d.mergePr).not.toHaveBeenCalled();
+  // 게이트는 `harness.commands`(= PR이 쓴 코드)를 bash로 돌린다 — 거부가 그보다 먼저 일어난다
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.mergeGates).not.toHaveBeenCalled();
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining(".factory/harness.toml") }));
-  expect(d.comment).toHaveBeenCalled();
+  // 상세 코멘트는 **PR**에, 이슈에는 전이 사유 한 줄만
+  expect(d.comment).toHaveBeenCalledWith(9, expect.stringContaining(".factory/harness.toml"));
   expect(lines.some((l) => /protected paths changed — human merge required/.test(l))).toBe(true);
+});
+
+test("merge: protectedPaths that cannot be computed → factory:blocked, no gates, no merge (KTB-5 fix round 1)", async () => {
+  const d = mergeHappyDeps({
+    protectedPaths: async () => ({ ok: false, files: [], reason: "git diff --name-status exited 128" }),
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) })),
+    mergePr: vi.fn(async () => {}),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringContaining("protected-path check could not be computed") }));
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
 });
 
 test("merge: postStatus is run-stage's own helper, not reimplemented — no sha skips the post and leaves a record line", async () => {

@@ -1003,7 +1003,7 @@ Run `npx know-thy-build factory status` (or `/know-thy-build:status`) anytime: N
 
 ### Protected Paths
 
-`.factory/**`, `.claude/**`, `.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`, and the build-config files listed in `harness.toml [protected]` change only through a human-merged PR — the factory's integrity check blocks agents from editing them directly. If one of these needs to change, open a `factory:harness` issue (harness/build config) or edit it yourself and let a human merge the PR.
+`.factory/**`, `.claude/**`, `.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`, and the build-config files listed in `harness.toml [protected]` change only through a human-merged PR — a hook denies agent edits, and the merge stage refuses to auto-merge a PR that carries one. If one of these needs to change, open a `factory:harness` issue (harness/build config) or edit it yourself and let a human merge the PR.
 
 ### Document References
 - Project definition: `docs/PROJECT.md`

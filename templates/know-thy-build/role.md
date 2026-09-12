@@ -39,7 +39,7 @@ Technical terms (e.g. frontmatter keys, schema names, tool names, TOML keys) sta
 
 라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --human --reason "<why>"`; 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
 
-이 스킬은 이슈보다 PR을 더 자주 다룬다(자신이 여는 `factory/role-<short>` PR) — `human-decision:v1`은 그 PR에 남긴다(`gh pr comment <pr> --body-file <tmp>`). 관련 이슈(예: 이 역할 신설을 요청한 `:proposal` 근거 이슈)를 전이해야 할 때만 `transition.js`를 쓴다. 어느 경우든 `gh pr merge` 실행은 금지다 — `.factory/roles.toml`과 `.claude/agents/**`는 protected build-config 경로라 integrity가 자동 머지를 막고, 머지 버튼은 언제나 사람이 GitHub UI에서 누른다.
+이 스킬은 이슈보다 PR을 더 자주 다룬다(자신이 여는 `factory/role-<short>` PR) — `human-decision:v1`은 그 PR에 남긴다(`gh pr comment <pr> --body-file <tmp>`). 관련 이슈(예: 이 역할 신설을 요청한 `:proposal` 근거 이슈)를 전이해야 할 때만 `transition.js`를 쓴다. 어느 경우든 `gh pr merge` 실행은 금지다 — `.factory/roles.toml`과 `.claude/agents/**`는 protected build-config 경로라 merge 스테이지(L1)가 자동 머지를 거부하고, 머지 버튼은 언제나 사람이 GitHub UI에서 누른다.
 
 Must not도 하나 더: **이번 세션에서 만들지 않은 역할**의 `roles.toml` 블록을 diff 없이 편집하지 않는다 — 그 역할을 원래 등록한 사람의 의도를 이 세션이 대신 판단하지 않는다.
 
@@ -203,7 +203,7 @@ git push -u origin factory/role-<short>
 gh pr create --label factory:retro-proposal --title "role: <신설|변경> reviewer-<short>" --body-file <tmp>
 ```
 
-PR 본문에는 목적·Lens 요약·시험 실행 결과(적중/오탐)·CHARTER 로스터 diff를 담는다. `.factory/roles.toml`과 `.claude/agents/**`는 protected build-config 경로라 integrity가 자동 머지를 막는다 — 사람이 GitHub UI에서 직접 머지한다. **`gh pr merge` 실행은 금지 — 이 스킬은 어떤 경우에도 호출하지 않는다.**
+PR 본문에는 목적·Lens 요약·시험 실행 결과(적중/오탐)·CHARTER 로스터 diff를 담는다. `.factory/roles.toml`과 `.claude/agents/**`는 protected build-config 경로라 merge 스테이지(L1)가 자동 머지를 거부한다 — 사람이 GitHub UI에서 직접 머지한다. **`gh pr merge` 실행은 금지 — 이 스킬은 어떤 경우에도 호출하지 않는다.**
 
 ## human-decision 기록
 

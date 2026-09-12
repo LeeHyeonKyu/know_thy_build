@@ -50,7 +50,53 @@ test("KTB-5 protectedPaths: name-status만 보고 목록을 만든다 — -U0 di
   const r = await protectedPaths({ run, cwd: "/repo", base: "b", head: "h", harness: h });
   expect(r).toEqual({ ok: true, files: [".factory/harness.toml", "package.json"] });
   expect(run.calls).toHaveLength(1);
-  expect(run.calls[0].args).toEqual(["diff", "--name-status", "b...h"]);
+  expect(run.calls[0].args).toEqual(["diff", "--no-renames", "--name-status", "b...h"]);
+});
+
+// ── fix round 1: rename/copy는 **출발지**가 보호 경로다 ─────────────────────────
+// `R096\t<old>\t<new>` 줄에서 마지막 필드만 취하면, 보호 경로를 보호되지 않는 이름으로 옮기는
+// diff가 검사를 통째로 빠져나간다 — 예: `.github/workflows/factory-integrity.yml` →
+// `ci-integrity.yml`(잡 이름 그대로, 본문 무력화). 그 PR은 L0도(자기 워크플로), 변조 검사도,
+// 보호 경로 검사도 통과해 자동 머지되고, required 체크 자신이 무력화된다.
+
+const RENAMED = "R100\t.github/workflows/factory-integrity.yml\tci-integrity.yml\n";
+const COPIED = "C075\tdocs/factory/CHARTER.md\tdocs/notes/charter-copy.md\n";
+const WF_HARNESS = { ...harness, protected: { ...harness.protected, factory: [...harness.protected.factory, ".github/workflows/factory-*.yml"] } };
+
+test("fix round 1 protectedPaths: rename 줄의 출발지가 보호 경로면 잡는다(R100)", async () => {
+  const r = await protectedPaths({ run: makeFakeRun([names(RENAMED)]), cwd: "/repo", base: "b", head: "h", harness: WF_HARNESS });
+  expect(r.files).toEqual([".github/workflows/factory-integrity.yml"]);
+});
+
+test("fix round 1 protectedPaths: copy 줄(C075)의 출발지도 센다 — 목적지만 보면 놓친다", async () => {
+  const r = await protectedPaths({ run: makeFakeRun([names(COPIED)]), cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.files).toEqual(["docs/factory/CHARTER.md"]);
+});
+
+test("fix round 1 protectedPaths: --no-renames가 만드는 D+A 쌍도 출발지를 잡는다", async () => {
+  const ns = "D\t.github/workflows/factory-integrity.yml\nA\tci-integrity.yml\n";
+  const r = await protectedPaths({ run: makeFakeRun([names(ns)]), cwd: "/repo", base: "b", head: "h", harness: WF_HARNESS });
+  expect(r.files).toEqual([".github/workflows/factory-integrity.yml"]);
+});
+
+test("fix round 1 integrityCheck: 같은 name-status도 --no-renames로 묻고, rename 출발지를 protected에 싣는다", async () => {
+  const run = makeFakeRun([names(RENAMED), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: WF_HARNESS, readFile: () => "" });
+  expect(run.calls[0].args).toEqual(["diff", "--no-renames", "--name-status", "b...h"]);
+  expect(r.protected).toEqual([".github/workflows/factory-integrity.yml"]);
+  expect(r.checked.files).toEqual([".github/workflows/factory-integrity.yml", "ci-integrity.yml"]);
+});
+
+test("fix round 1 integrityCheck: copy 줄의 출발지도 protected에 실린다", async () => {
+  const run = makeFakeRun([names(COPIED), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "" });
+  expect(r.protected).toEqual(["docs/factory/CHARTER.md"]);
+});
+
+test("fix round 1: 같은 경로가 여러 줄에 나와도 한 번만 센다", async () => {
+  const run = makeFakeRun([names("M\t.factory/harness.toml\nM\t.factory/harness.toml\n")]);
+  const r = await protectedPaths({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.files).toEqual([".factory/harness.toml"]);
 });
 
 test("KTB-5 protectedPaths: 보호 경로가 없으면 빈 목록 — ok:true", async () => {

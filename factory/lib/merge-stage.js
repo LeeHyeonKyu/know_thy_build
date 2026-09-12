@@ -16,7 +16,8 @@ const MERGEABILITY_REPOLL_MS = 5000;
  *    GitDiffError를 던질 수 있다), mergeGates() → { checksGreen, integrityGreen } (마찬가지),
  *    mergePr(pr), transition({to,reason,mergeGatesResult?}), closeIssue(pr), sleep?(ms),
  *    protectedPaths() → { ok, files, reason? } (KTB-5 — base 브랜치 코드로 계산한 보호 경로 목록.
- *    ok:false나 dep 부재는 "보호 경로 없음"이 아니라 거부다), comment?(body) → 거부 사유 코멘트(best-effort).
+ *    ok:false나 dep 부재는 "보호 경로 없음"이 아니라 **판정 불가**라 blocked다), comment?(number, body) →
+ *    그 번호(여기서는 PR)에 코멘트(best-effort).
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
@@ -59,7 +60,57 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record([`merge: PR #${pr} not conflicting (${cur.mergeable})`]);
 
-  // (3) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human. base/diff를 못 구한
+  // (3) 보호 경로가 PR 범위에 있으면 **자동 머지는 없다** — 사람이 머지한다(KTB-5, §5.1/ADR-020).
+  // L0의 `factory/integrity` 체크는 변조만 RED로 만든다(보호 경로 변경은 알림일 뿐) — 그렇지
+  // 않으면 required context가 그것 하나뿐이라 사람의 머지까지 영영 막힌다. 그래서 "봇은 못 하고
+  // 사람은 할 수 있다"는 구분을 여기, 자동 머지 경로 안에 둔다.
+  //
+  // **게이트보다 먼저다**(fix round 1). `d.gates()`는 `harness.commands`를 bash로 실행한다 — 곧 PR이
+  // 쓴 코드를 머지 잡 안에서 돌린다. 보호 경로를 실은 PR은 애초에 자동 머지 후보가 아니므로, 그
+  // 코드를 **한 줄도 실행하기 전에** 거른다. (게이트가 돌 때도 자격증명은 자식 env에서 빠진다 —
+  // `lib/exec.js`의 `scrubEnv`, `lib/gates.js`가 감싼다.)
+  //
+  // 이 판정은 **base 브랜치의 코드**로 계산된다: 이 프로세스의 모듈은 checkoutHead보다 먼저,
+  // 워크플로의 기본 체크아웃(base) 상태에서 로드됐고 harness도 그때 읽혔다(run-stage.js의
+  // charterReady). PR의 `.factory/bin/integrity.js`를 하위 프로세스로 부르지 않는 이유가 이것이다 —
+  // 그랬다면 에이전트 PR이 자기 자신을 화이트리스트하는 integrity를 실어 보낼 수 있다.
+  //
+  // 계산 자체가 안 된 것(git 실패·merge-base 없음·dep 미배선)은 GREEN도 RED도 아닌 **판정 불가**라
+  // `factory:blocked`다 — 게이트·mergeGates의 typed-error와 같은 처리다(needs-human은 "사람이
+  // 판단할 것이 있다"는 뜻이고, 여기서는 판단할 재료 자체가 없다).
+  const prot = d.protectedPaths ? await d.protectedPaths() : { ok: false, files: [], reason: "protectedPaths dep not wired" };
+  if (!prot?.ok) {
+    const reason = `protected-path check could not be computed: ${prot?.reason || "unknown"}`;
+    const t = await d.transition({ to: "factory:blocked", reason });
+    record([`merge: ${reason}`, ...refusal(t)]);
+    return 2;
+  }
+  if (prot.files.length) {
+    // 사유는 **이슈**의 전이 코멘트로 간다(한 줄 포인터: 어느 PR을 사람이 봐야 하는지). 상세 코멘트는
+    // **PR**에 붙는다 — 사람이 머지 버튼을 누르는 자리가 거기이고, 본문이 그 diff를 가리키기 때문이다.
+    const reason = `protected paths changed — human merge required: ${prot.files.join(", ")} (see PR #${pr})`;
+    // 코멘트는 부수 효과다 — 실패해도 거부 자체를 잃지 않는다(전이 코멘트가 사유를 이미 싣는다).
+    try {
+      await d.comment?.(pr, [
+        "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**",
+        "",
+        "이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은",
+        "사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).",
+        "",
+        "변경된 보호 경로:",
+        ...prot.files.map((f) => `- \`${f}\``),
+        "",
+        "diff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.",
+        `추적 이슈 #${issue}는 \`factory:needs-human\`으로 옮겼습니다.`,
+      ].join("\n"));
+    } catch (e) { record([`merge: protected-path comment failed — ${e?.message || e}`]); }
+    const t = await d.transition({ to: "factory:needs-human", reason });
+    record([`merge: ${reason}`, ...refusal(t)]);
+    return 2;
+  }
+  record(["merge: no protected paths in the PR range"]);
+
+  // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human. base/diff를 못 구한
   // 것도 판정 불가다(run-stage의 나머지 스테이지와 같은 typed-error 계약). 상태 게시는 부수 효과라
   // 실패해도(또는 diagnostic 결과여도) 머지 판단을 막지 않는다 — postStatus 자체가 best-effort다.
   let gates;
@@ -92,7 +143,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record([`merge: gates ${gates.status}`]);
 
-  // (4) 필수 체크와 무결성 — 조회 자체가 안 됐으면 플래그가 서지 않는다(fail closed). 둘 다 실패면
+  // (5) 필수 체크와 무결성 — 조회 자체가 안 됐으면 플래그가 서지 않는다(fail closed). 둘 다 실패면
   // 두 이유를 모두 남긴다 — 하나만 말하면 사람이 나머지 원인을 못 보고 재시도한다.
   let mg;
   try {
@@ -115,46 +166,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record(["merge: mergeGates — checks GREEN, integrity GREEN"]);
 
-  // (4b) 보호 경로가 PR 범위에 있으면 **자동 머지는 없다** — 사람이 머지한다(KTB-5, §5.1/ADR-020).
-  // L0의 `factory/integrity` 체크는 변조만 RED로 만든다(보호 경로 변경은 알림일 뿐) — 그렇지
-  // 않으면 required context가 그것 하나뿐이라 사람의 머지까지 영영 막힌다. 그래서 "봇은 못 하고
-  // 사람은 할 수 있다"는 구분을 여기, 자동 머지 직전에 둔다.
-  //
-  // 이 판정은 **base 브랜치의 코드**로 계산된다: 이 프로세스의 모듈은 checkoutHead보다 먼저,
-  // 워크플로의 기본 체크아웃(base) 상태에서 로드됐고 harness도 그때 읽혔다(run-stage.js의
-  // charterReady). PR의 `.factory/bin/integrity.js`를 하위 프로세스로 부르지 않는 이유가 이것이다 —
-  // 그랬다면 에이전트 PR이 자기 자신을 화이트리스트하는 integrity를 실어 보낼 수 있다.
-  // 조회 자체가 안 됐으면 통과가 아니라 거부다(fail closed) — dep이 아예 없는 것도 마찬가지다.
-  const prot = d.protectedPaths ? await d.protectedPaths() : { ok: false, files: [], reason: "protectedPaths dep not wired" };
-  if (!prot?.ok) {
-    const reason = `protected-path check could not be computed: ${prot?.reason || "unknown"}`;
-    const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: ${reason}`, ...refusal(t)]);
-    return 2;
-  }
-  if (prot.files.length) {
-    const reason = `protected paths changed — human merge required: ${prot.files.join(", ")}`;
-    // 코멘트는 부수 효과다 — 실패해도 거부 자체를 잃지 않는다(전이 코멘트가 사유를 이미 싣는다).
-    try {
-      await d.comment?.([
-        `**보호 경로 변경 — 자동 머지를 하지 않습니다** (PR #${pr}).`,
-        "",
-        "이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은",
-        "사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).",
-        "",
-        "변경된 보호 경로:",
-        ...prot.files.map((f) => `- \`${f}\``),
-        "",
-        "diff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.",
-      ].join("\n"));
-    } catch (e) { record([`merge: protected-path comment failed — ${e?.message || e}`]); }
-    const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: ${reason}`, ...refusal(t)]);
-    return 2;
-  }
-  record(["merge: no protected paths in the PR range"]);
-
-  // (5) 실제 머지. gh 호출 실패는 blocked로 세운다 — needs-human이 아니라 blocked인 건 아직
+  // (6) 실제 머지. gh 호출 실패는 blocked로 세운다 — needs-human이 아니라 blocked인 건 아직
   // 머지되지 않았고(irreversible 아님) 재시도 판단이 필요해서다.
   const sha = headSha || gates?.head_sha || null;
   record([`merge: head ${sha ? sha.slice(0, 7) : "unknown"}`]);
@@ -168,12 +180,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}`]);
 
-  // (6) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
+  // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).
   const t = await d.transition({ to: "factory:merged", mergeGatesResult: mg });
   record([...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
 
-  // (7) 추적 이슈를 닫는다 — 코드는 이미 머지됐다. 이것도 실패해도 머지 자체는 되돌릴 게 없으므로
+  // (8) 추적 이슈를 닫는다 — 코드는 이미 머지됐다. 이것도 실패해도 머지 자체는 되돌릴 게 없으므로
   // 흔적만 남기고 성공으로 끝낸다.
   try {
     await d.closeIssue(pr);

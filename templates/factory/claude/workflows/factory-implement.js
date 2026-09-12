@@ -269,8 +269,9 @@ const buildRules =
   `\`gh pr edit <pr> --body-file <path>\` instead of opening a second one.\n` +
   `7. Return head_sha = the output of \`git rev-parse HEAD\` **after** the push: 40 lowercase hex ` +
   `characters, not a short sha and not a branch name.\n\n` +
-  `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook and ` +
-  `\`factory/integrity\` rejects the PR. If the change genuinely needs a new dependency, a new script, or ` +
+  `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
+  `carrying such a change is never auto-merged — the merge stage hands it to a human instead. ` +
+  `If the change genuinely needs a new dependency, a new script, or ` +
   `a runner/linter config change, write what is needed and why into the PR body under a ` +
   `"Harness change needed" heading and finish the issue without it — a human opens a \`factory:harness\` ` +
   `issue from that. Do NOT \`npm install\`, edit a lockfile, or otherwise work around the deny.\n` +

@@ -240,34 +240,47 @@ test("(4) mergeGates() throwing GitDiffError → factory:blocked", async () => {
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: "cannot compute diff" }));
 });
 
-// ── (4b) 보호 경로 = 사람이 머지한다 (KTB-5) ────────────────────────────────
+// ── (3) 보호 경로 = 사람이 머지한다 (KTB-5) ────────────────────────────────
 // L0(`factory/integrity` 체크)는 변조만 본다 — 보호 경로 변경으로 RED가 되면 사람조차 머지할 수
 // 없기 때문이다(required context가 그것 하나뿐). 그래서 "사람이 머지해야 한다"는 판단은 여기,
-// 자동 머지 직전의 L1에서 내린다.
+// 자동 머지 경로 안에서 내린다 — 그리고 **게이트보다 먼저**다(게이트는 PR이 쓴 코드를 실행한다).
 
-test("(4b) protected paths in the PR range → needs-human naming the files, never merges", async () => {
+test("(3) protected paths in the PR range → needs-human naming the files and the PR, never merges", async () => {
   const { lines, record } = makeRecord();
   const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml", "package.json"] })) });
   const code = await run(d, { record });
   expect(code).toBe(2);
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
     to: "factory:needs-human",
-    reason: "protected paths changed — human merge required: .factory/harness.toml, package.json",
+    reason: "protected paths changed — human merge required: .factory/harness.toml, package.json (see PR #9)",
   }));
   expect(d.mergePr).not.toHaveBeenCalled();
   expect(d.closeIssue).not.toHaveBeenCalled();
   expect(lines.some((l) => /protected paths changed/.test(l))).toBe(true);
 });
 
-test("(4b) the refusal leaves a comment listing every protected file", async () => {
+// 핵심 순서 불변식: `gates()`는 `harness.commands`를 bash로 돌린다 = PR이 쓴 코드를 머지 잡 안에서
+// 실행한다. 보호 경로를 실은 PR은 애초에 자동 머지 후보가 아니므로 그 코드가 한 줄도 돌지 않는다.
+test("(3) the refusal happens BEFORE gates/mergeGates — no PR-authored command ever runs", async () => {
+  const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml"] })) });
+  expect(await run(d)).toBe(2);
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.mergeGates).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(3) the refusal comments on the PR (not the issue), listing every protected file", async () => {
   const comment = vi.fn(async () => {});
   const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml"] })), comment });
   await run(d);
   expect(comment).toHaveBeenCalledTimes(1);
-  expect(comment.mock.calls[0][0]).toMatch(/`\.factory\/harness\.toml`/);
+  const [target, body] = comment.mock.calls[0];
+  expect(target).toBe(9);                                   // PR 번호 — 이슈(7)가 아니다
+  expect(body).toMatch(/`\.factory\/harness\.toml`/);
+  expect(body).toMatch(/#7/);                               // 추적 이슈로 되돌아가는 포인터
 });
 
-test("(4b) a failing comment never masks the refusal — still needs-human, still exit 2", async () => {
+test("(3) a failing comment never masks the refusal — still needs-human, still exit 2", async () => {
   const d = baseD({
     protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml"] })),
     comment: vi.fn(async () => { throw new Error("gh down"); }),
@@ -277,26 +290,27 @@ test("(4b) a failing comment never masks the refusal — still needs-human, stil
   expect(d.mergePr).not.toHaveBeenCalled();
 });
 
-test("(4b) protectedPaths could not be computed → fail closed, needs-human, no merge", async () => {
+test("(3) protectedPaths could not be computed → factory:blocked (판정 불가, not needs-human), no merge", async () => {
   const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: false, files: [], reason: "git diff --name-status exited 128" })) });
   const code = await run(d);
   expect(code).toBe(2);
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
-    to: "factory:needs-human",
+    to: "factory:blocked",
     reason: "protected-path check could not be computed: git diff --name-status exited 128",
   }));
+  expect(d.gates).not.toHaveBeenCalled();
   expect(d.mergePr).not.toHaveBeenCalled();
 });
 
-test("(4b) the dep missing altogether is not a pass — fail closed, no merge", async () => {
+test("(3) the dep missing altogether is not a pass — factory:blocked, no merge", async () => {
   const d = baseD({ protectedPaths: undefined });
   const code = await run(d);
   expect(code).toBe(2);
-  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/protected-path check/) }));
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/protected-path check/) }));
   expect(d.mergePr).not.toHaveBeenCalled();
 });
 
-test("(4b) a clean PR range (no protected files) merges as before", async () => {
+test("(3) a clean PR range (no protected files) merges as before", async () => {
   const d = baseD();
   expect(await run(d)).toBe(0);
   expect(d.protectedPaths).toHaveBeenCalled();
@@ -377,7 +391,7 @@ test("(7) closeIssue failure is guarded — recorded, never thrown, still exit 0
 
 // ── happy path: full order + record lines for every step ───────────────────
 
-test("happy path: calls prInfo → gates → mergeGates → protectedPaths → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
+test("happy path: calls prInfo → protectedPaths → gates → mergeGates → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
   const calls = [];
   const d = baseD({
     prInfo: vi.fn(async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; }),
@@ -391,7 +405,7 @@ test("happy path: calls prInfo → gates → mergeGates → protectedPaths → m
   const { lines, record } = makeRecord();
   const code = await run(d, { record });
   expect(code).toBe(0);
-  expect(calls).toEqual(["prInfo", "gates", "mergeGates", "protectedPaths", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["prInfo", "protectedPaths", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
   expect(d.closeIssue).toHaveBeenCalledWith(9);
   // 7단계 각각의 흔적이 런 레코드에 남는다
   expect(lines.length).toBeGreaterThanOrEqual(7);

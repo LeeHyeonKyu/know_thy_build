@@ -1,7 +1,7 @@
 schema = 1
 
 # know-thy-build factory harness — M0 skeleton. /project fills [commands]; /qa SETUP fills [test.*].
-# Sections marked (protected) can only change through a human-merged PR (integrity blocks agents).
+# Sections marked (protected) can only change through a human-merged PR (the merge stage refuses to auto-merge one).
 
 [project]
 name           = "{{PROJECT_NAME}}"

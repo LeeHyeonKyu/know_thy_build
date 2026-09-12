@@ -149,7 +149,7 @@ npx know-thy-build factory doctor            # 그다음 실제 실행
 
 ## 경로 (c): 승격 PR 검토
 
-`factory:harness` 라벨은 **이슈에만** 붙는다 — retro(`factory/bin/retro.js`)가 `createIssue`로 그 이슈를 열 때 `[factory:queue, factory:harness]`를 준다. 그 이슈가 일반 파이프라인(plan→implement→review)을 타면서 열리는 구현 PR에는 라벨이 없다: `gh pr create --draft`로 열리고(`factory/lib/gh.js`의 `createPr`), 브랜치는 `claude/fq-<issue>`, 본문에 `Closes #<issue>`가 있다. 그래서 PR은 라벨로 찾지 않고 **head 브랜치로** 찾는다. 찾은 PR이 `harness.toml`(또는 다른 `[protected]` 경로)을 건드리므로 integrity가 자동 머지를 막는다 — 사람이 GitHub UI에서 머지해야 한다. 이 스킬은 그 diff를 사람이 5분 안에 판단할 수 있는 요약으로 바꾼다.
+`factory:harness` 라벨은 **이슈에만** 붙는다 — retro(`factory/bin/retro.js`)가 `createIssue`로 그 이슈를 열 때 `[factory:queue, factory:harness]`를 준다. 그 이슈가 일반 파이프라인(plan→implement→review)을 타면서 열리는 구현 PR에는 라벨이 없다: `gh pr create --draft`로 열리고(`factory/lib/gh.js`의 `createPr`), 브랜치는 `claude/fq-<issue>`, 본문에 `Closes #<issue>`가 있다. 그래서 PR은 라벨로 찾지 않고 **head 브랜치로** 찾는다. 찾은 PR이 `harness.toml`(또는 다른 `[protected]` 경로)을 건드리므로 merge 스테이지(L1)가 자동 머지를 거부한다 — 사람이 GitHub UI에서 머지해야 한다(`factory/integrity` 체크는 변조만 보므로 GREEN일 수 있다). 이 스킬은 그 diff를 사람이 5분 안에 판단할 수 있는 요약으로 바꾼다.
 
 ### Step 1: 이슈 → PR 찾기
 

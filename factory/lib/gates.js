@@ -8,6 +8,7 @@ import { classifyFailures } from "./classify-failure.js";
 import { proveTest, repeatNewTests } from "./prove-test.js";
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
+import { scrubbedRunner } from "./exec.js";
 
 const LEVELS = ["fast", "full", "deep"];
 const MAX_LEVEL = { M0: "fast", M1: "full", M2: "deep" };
@@ -128,7 +129,14 @@ const defaultReadFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
  * - `blocked`(base 워크트리를 못 만들어 "PR이 깨뜨렸다"를 판정할 수 없음)가 하나라도 있으면
  *   status를 BLOCKED로 올린다 — GREEN도 RED도 아닌, 사람이 봐야 하는 상태다.
  */
-export async function runStageGates({ run, cwd, harness, stage, tier, level: levelArg, base, quarantine = { quarantined: [] }, gh, issue, readFile = defaultReadFile, now, saveQuarantine }) {
+export async function runStageGates({ run: injectedRun, cwd, harness, stage, tier, level: levelArg, base, quarantine = { quarantined: [] }, gh, issue, readFile = defaultReadFile, now, saveQuarantine }) {
+  // 이 아래의 **모든** 하위 프로세스는 자격증명 없는 환경에서 돈다(ADR-020 fix round 1). 게이트·
+  // 증명 게이트·분류는 전부 `harness.commands`, 곧 PR이 쓴 코드를 bash로 실행한다 — merge 잡의
+  // 토큰이 그 안에 있으면 게이트 스크립트 한 줄이 4b 검사를 건너뛰고 스스로 머지할 수 있다.
+  // 한 자리에서 감싸는 이유: proveTest·classifyFailures·diff-coverage·mutation이 전부 이 `run`을
+  // 그대로 넘겨받는다(각자 감싸면 새 호출자가 생길 때마다 빠뜨린다). git 호출도 함께 스크럽되지만
+  // git은 이 토큰들을 쓰지 않는다(체크아웃 자격증명은 `.git/config`에 산다).
+  const run = scrubbedRunner(injectedRun);
   let changed = null;
   const changedOnce = async () => (changed ||= await changedFiles({ run, cwd, base, harness }));
 

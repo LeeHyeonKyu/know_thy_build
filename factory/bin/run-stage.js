@@ -474,7 +474,8 @@ async function main() {
       try { return await protectedPaths({ run, cwd: root, base: await mergeBase(), harness }); }
       catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
     },
-    comment: (body) => gh.comment(issue, body),
+    /** merge stage 전용: 거부 사유를 **PR**에 붙인다(사람이 머지 버튼을 누르는 자리). PR과 이슈는 같은 번호 공간이라 `gh issue comment`가 그대로 통한다. */
+    comment: (number, body) => gh.comment(number, body),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },

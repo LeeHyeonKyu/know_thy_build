@@ -30,9 +30,10 @@ plan handoff이 계약으로 정한 `done_when`을 **실제로 동작하는 코�
   `istanbul ignore`, `Stryker disable`. 게이트를 끄는 것은 게이트를 통과하는 것이 아니다.
 - **보호 경로를 편집한다**: `.factory/**`, `.claude/**`, `.github/workflows/factory-*.yml`,
   `docs/factory/CHARTER.md`, `package.json`, `package-lock.json`, `vitest.config.*`,
-  `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`. 훅이 `Edit`을 거부하고
-  `factory/integrity`가 PR을 거절한다. 우회(`npm install`, 셸 리다이렉션, 락파일 손질)는 훅이 다시 막고,
-  뚫리더라도 integrity가 잡는다 — 시간을 그곳에 쓰지 않는다. 필요한 변경은 `## Lens` 6번의 경로로 요청한다.
+  `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`. 훅이 `Edit`을 거부하고,
+  그런 변경이 PR에 실리면 **merge 스테이지가 자동 머지를 거부해 사람이 머지한다**(ADR-020) — 즉 그 PR은
+  당신의 손을 떠나 사람의 판단을 기다린다. 우회(`npm install`, 셸 리다이렉션, 락파일 손질)는 훅이 다시 막고,
+  뚫려도 자동으로 머지되지 않는다 — 시간을 그곳에 쓰지 않는다. 필요한 변경은 `## Lens` 6번의 경로로 요청한다.
 - **테스트를 나중에 쓴다.** RED를 실제로 관측하지 않은 테스트는 증거가 아니다.
 - 크리덴셜·토큰·키를 저장소·픽스처·로그에 쓴다. 외부 서비스를 실제로 호출한다(`[test.fakes]`만 쓴다).
 - `gh pr merge`, `git merge`, force push — 머지는 당신의 일이 아니다(훅이 막는다).

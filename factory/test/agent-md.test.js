@@ -252,7 +252,11 @@ test("factory-builder.md: the protected build-config paths are off-limits in bot
   for (const p of ["package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*", ".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]) {
     expect(mustNot, p).toContain(p);
   }
-  expect(mustNot).toMatch(/integrity/);
+  // 프롬프트는 이 금지를 **실제로 집행하는 것**의 이름을 대야 한다. ADR-020 이후 그것은 integrity
+  // 체크(변조만 RED)가 아니라 merge 스테이지다 — "integrity가 PR을 거절한다"는 이제 틀린 문장이고,
+  // 틀린 위협은 에이전트가 한 번 부딪혀 보면 거짓으로 드러나 나머지 금지까지 함께 약해진다.
+  expect(mustNot).toMatch(/merge 스테이지가 자동 머지를 거부/);
+  expect(mustNot).not.toMatch(/integrity가 PR을 거절/);
   expect(lens).toContain("Harness change needed");
   expect(lens).toMatch(/factory:harness/);
   expect(lens).toMatch(/npm install/);

@@ -17,10 +17,16 @@ test("block-dangerous: blocks merges, force pushes, protected writes; allows nor
                    "gh api -X PUT repos/o/r/pulls/9/merge", "gh api repos/o/r/pulls/9/merge --method PUT",
                    "cp /tmp/evil .factory/harness.toml", "mv /tmp/evil docs/factory/CHARTER.md",
                    "perl -i -pe 's/a/b/' .claude/settings.json", "perl -pi -e 's/a/b/' .factory/harness.toml",
-                   "python3 -c \"open('.factory/harness.toml','w').write('x')\""];
+                   "python3 -c \"open('.factory/harness.toml','w').write('x')\"",
+                   // ADR-020 fix round 1: 옮기거나 지우는 것도 편집이다 — `git mv`로 required 체크를 만드는
+                   // 워크플로를 보호되지 않는 이름으로 옮기면 내용 변경 없이 그 체크가 사라진다.
+                   "git mv .github/workflows/factory-integrity.yml ci-integrity.yml",
+                   "git rm .github/workflows/factory-merge.yml", "git rm -r .factory/lib",
+                   "git mv docs/factory/CHARTER.md docs/charter.md", "git rm package.json"];
   const allowed = ["git push origin HEAD", "git commit -m x", "npm test", "cat .factory/harness.toml", "gh pr view 5",
                    "git push origin HEAD:refs/heads/claude/fq-7", "git push origin --delete claude/fq-7",
-                   "cp .factory/harness.toml /tmp/backup", "python3 -c \"print(1)\""];
+                   "cp .factory/harness.toml /tmp/backup", "python3 -c \"print(1)\"",
+                   "git rm src/old.js", "git mv src/a.js src/b.js"];   // 보호 경로가 아닌 곳의 rm/mv는 정상 작업이다
   await Promise.all(blocked.map(async (c) => {
     const r = await bash("block-dangerous.sh", cmd(c));
     expect(r.code, c).toBe(2);

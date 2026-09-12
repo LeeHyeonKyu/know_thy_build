@@ -20,10 +20,10 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   // 무결성은 "검사했더니 깨끗하다"는 주장이다. diff를 얻지 못했는데 violations가 비었다고 ok:true를
   // 돌려주면 "검사하지 못했음"이 "통과"로 둔갑한다 — base가 비었거나 git이 실패하면 fail-closed다.
   if (!base) return cannotCompute("base is empty (merge-base not resolved)");
-  const ns = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
+  const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return cannotCompute(gitReason("git diff --name-status", ns));
   const violations = [];
-  const files = changedFiles(ns.stdout);
+  const files = [...new Set(changedFiles(ns.stdout))];          // rename 줄은 경로를 둘 내놓는다 — 같은 파일을 두 번 판정하지 않는다
   const u0r = await run("git", ["diff", "-U0", `${base}...${head}`], { cwd });
   if (u0r.code !== 0) return cannotCompute(gitReason("git diff -U0", u0r));
   const u0 = u0r.stdout;
@@ -68,14 +68,28 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
  */
 export async function protectedPaths({ run, cwd, base, head = "HEAD", harness }) {
   if (!base) return { ok: false, files: [], reason: "base is empty (merge-base not resolved)" };
-  const ns = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
+  const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return { ok: false, files: [], reason: gitReason("git diff --name-status", ns) };
   const prot = harness?.protected || {};
-  return { ok: true, files: changedFiles(ns.stdout).filter((f) => isProtected(f, prot)) };
+  return { ok: true, files: [...new Set(changedFiles(ns.stdout).filter((f) => isProtected(f, prot)))] };
 }
 
-/** `git diff --name-status` 한 줄 = "<status>\t<path>"(rename은 "<status>\told\tnew") — 마지막 필드가 현재 경로다. */
-const changedFiles = (stdout) => stdout.split("\n").filter(Boolean).map((l) => l.split("\t").pop());
+/**
+ * `--no-renames`가 핵심이다(fix round 1). rename 탐지가 켜져 있으면 한 줄이 `R096\t<old>\t<new>`가
+ * 되는데, 보호 경로를 **보호되지 않는 이름으로 옮기는** diff가 바로 그 모양이다: 예를 들어
+ * `.github/workflows/factory-integrity.yml` → `ci-integrity.yml`(잡 이름은 그대로, 본문은 무력화)은
+ * 목적지가 보호 경로가 아니므로 출발지를 놓치면 검사에 걸리지 않고, 그대로 자동 머지되면 required
+ * 체크 자신이 무력화된다. `--no-renames`면 같은 변경이 `D <old>` + `A <new>` 두 줄로 나와 출발지가
+ * 반드시 목록에 들어온다(git config `diff.renames`도 이 플래그가 이긴다).
+ */
+const NAME_STATUS = (base, head) => ["diff", "--no-renames", "--name-status", `${base}...${head}`];
+
+/**
+ * `git diff --name-status` 한 줄 = "<status>\t<path>"이고, rename/copy는 "<status>\told\tnew"다.
+ * **모든** 경로 필드를 취한다(마지막 것만이 아니라) — `--no-renames`를 이미 주고 있지만, 그 플래그가
+ * 빠진 호출·다른 git 버전·미리 계산된 diff를 받아도 출발지를 잃지 않게 하는 두 번째 문이다.
+ */
+const changedFiles = (stdout) => stdout.split("\n").filter(Boolean).flatMap((l) => l.split("\t").slice(1)).filter(Boolean);
 /** additive_only가 맡은 파일은 그 규칙이 판정한다 — 보호 목록에 넣지 않는다(넣으면 retro의 다크 예시 추가가 매번 사람 머지가 된다). */
 const additiveGlobFor = (f, prot) => Object.keys(prot.additive_only || {}).find((g) => matchesAny([g], f));
 /** 사람이 머지해야 하는 경로인가: `[protected].factory` 매치 − `except` − `additive_only`. */

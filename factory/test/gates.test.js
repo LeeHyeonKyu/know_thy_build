@@ -332,3 +332,33 @@ test("recomputeStatus recomputes after a caller mutates result.gates", async () 
   expect(r2.status).toBe("RED");
   expect(r2.failing).toContain("unit");
 });
+
+// ── ADR-020 fix round 1: 게이트 하위 프로세스에서 자격증명이 빠진다 ─────────────────
+// `[commands]`는 PR이 쓴 코드다. merge 잡의 토큰이 그 안에 있으면 게이트 스크립트가
+// `gh pr merge`로 보호 경로 검사를 건너뛸 수 있다 — runStageGates가 실행기를 한 번 감싼다.
+
+const TOKENS = ["GH_TOKEN", "GITHUB_TOKEN", "FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
+test("runStageGates scrubs merge-capable credentials from every child process it spawns", async () => {
+  const scrubHarness = {
+    harness: { maturity: "M0" },
+    commands: { unit: "vitest --json" },
+    gates: { required: ["unit"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: {} },
+    test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
+  };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: ok },
+    diffNames, revParse,
+  ]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: scrubHarness, stage: "merge", tier: "docs", base: "b".repeat(40), issue: 7, readFile: () => null });
+  expect(r.status).toBe("GREEN");
+  expect(run.calls.length).toBeGreaterThan(0);
+  for (const { cmd, args, opts } of run.calls) {
+    const where = `${cmd} ${args.join(" ")}`;
+    expect(opts.replaceEnv, where).toBe(true);                 // process.env가 다시 얹히지 않는다
+    for (const k of TOKENS) expect(opts.env, `${where} / ${k}`).not.toHaveProperty(k);
+    expect(opts.env.PATH, where).toBeTruthy();                 // 환경은 지우지 않는다 — 자격증명만 뺀다
+  }
+  // 게이트 명령 자체도 그 환경으로 돌았다(git 호출만 스크럽된 것이 아니다)
+  expect(run.calls.some((c) => c.cmd === "bash" && c.args[1] === "vitest --json")).toBe(true);
+});
