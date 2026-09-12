@@ -175,13 +175,35 @@ export function checkSkills({ root, exists, readFile, list = readdirSync }) {
   return out;
 }
 
-export function checkSettings({ settings, template }) {
+/**
+ * L2는 두 파일에 나뉘어 산다(ADR-019).
+ * - `.claude/settings.json`: 사람의 대화형 세션에도 걸리는 Bash deny + allow + 훅. 경로 deny는 여기 없다 —
+ *   deny는 allow로 못 이기므로, 여기에 `Edit(.factory/**)`를 두면 `:harness`·`:role`·`:technical` 같은
+ *   사람-지점 스킬이 자기 일(빌드 설정 결정)을 할 수 없다.
+ * - `.factory/ci-settings.json`: CI의 `claude -p --settings`로만 로드된다(run-stage.js·retro.js) — 경로
+ *   deny 전부가 여기 산다. CI 에이전트의 L2는 그대로다.
+ * 둘 다 검사한다: 한쪽만 보면 "설치됐다"가 "막힌다"를 뜻하지 않게 된다.
+ */
+export function checkSettings({ settings, template, ciSettings, ciTemplate }) {
   const out = [settings ? c("settings.present", "PASS") : c("settings.present", "FAIL", ".claude/settings.json missing")];
   const s = settings || {};
   const wantDeny = template.permissions?.deny || [];
   const haveDeny = new Set(s.permissions?.deny || []);
   const missingDeny = wantDeny.filter((d) => !haveDeny.has(d));
   out.push(missingDeny.length ? c("settings.deny", "FAIL", `deny list missing: ${missingDeny.join(", ")}`) : c("settings.deny", "PASS"));
+
+  if (ciTemplate) {
+    if (!ciSettings) {
+      out.push(c("settings.ci-deny", "FAIL", ".factory/ci-settings.json missing — CI agents would run without the path deny list"));
+    } else {
+      const wantCi = ciTemplate.permissions?.deny || [];
+      const haveCi = new Set(ciSettings.permissions?.deny || []);
+      const missingCi = wantCi.filter((d) => !haveCi.has(d));
+      out.push(missingCi.length
+        ? c("settings.ci-deny", "FAIL", `.factory/ci-settings.json deny list missing: ${missingCi.join(", ")}`)
+        : c("settings.ci-deny", "PASS"));
+    }
+  }
 
   const cmdsOf = (hooks) => Object.values(hooks || {}).flat().flatMap((entry) => (entry.hooks || []).map((h) => h.command));
   const haveCmds = new Set(cmdsOf(s.hooks));

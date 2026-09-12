@@ -464,6 +464,25 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **결정**: 위 관측대로 P5-R1~R7과 세 가지 이번 Task 6 실행 판결(wont-do는 close+`human-decision`, §13.3 대 §10 우선순위는 §10, 금지 문자열 규칙이 원문 인용보다 우선)을 Plan 5의 확정 동작으로 채택한다. 13개 카탈로그 스킬 + `architect`/`designer`(비-카탈로그) 전부가 §13.3의 6섹션 구조를 갖추고, `doctor`가 그 전부를 이름과 무관하게 lint한다는 전제가 구현 전체에서 유지됐다.
 
-**알려진 한계**: 스킬 본문은 LLM이 따르는 프로즈다 — `lintSkillMd`가 기계로 검사하는 것은 구조(frontmatter·섹션 존재·순서)와 몇 개의 고정 문자열(`transition.js`·`human-decision:v1`·`gh pr merge` 금지 문장)뿐이고, 그 문장이 실제로 서술하는 흐름이 옳은지·사람이 스킬을 그대로 따를지는 검사하지 않는다. `checkSkills`는 설치 디렉터리에 있는 낯선 `.md`(카탈로그도 helper도 아닌 파일)를 전부 FAIL로 보고한다 — 관용도가 없으므로 설치 디렉터리에 다른 스킬을 손으로 얹으면 doctor가 항상 빨갛다.
+**알려진 한계**: 스킬 본문은 LLM이 따르는 프로즈다 — `lintSkillMd`가 기계로 검사하는 것은 구조(frontmatter·섹션 존재·순서)와 몇 개의 고정 문자열(`transition.js`·`human-decision:v1`·`gh pr merge` 금지 문장)뿐이고, 그 문장이 실제로 서술하는 흐름이 옳은지·사람이 스킬을 그대로 따를지는 검사하지 않는다. `checkSkills`는 설치 디렉터리에 있는 낯선 `.md`(카탈로그도 helper도 아닌 파일)를 전부 FAIL로 보고한다 — 관용도가 없으므로 설치 디렉터리에 다른 스킬을 손으로 얹으면 doctor가 항상 빨갛다. 그리고 이 스킬들이 **실제로 실행될 수 있는가**는 Plan 5 구현 내내 검증되지 않은 전제였다 — `.claude/settings.json`의 경로 deny가 `:harness`·`:role`·`:technical`의 쓰기를 사람의 대화형 세션에서까지 막고 있었다(ADR-019가 그 판결이다).
 
 **영향**: §2.1(스킬 개수 12→13, Define 4→5), §7.2(쓰기 금지 목록에 `factory-retro` 추가), §10(표 아래에 `architect`/`designer`가 비-카탈로그로 계속 설치되고 §13.3 블록을 갖춘다는 문장), §13.3(`:unstick` Does 3단계 `transition.sh`→`transition.js`, `wont-do 판단`에 집행 방식 명시, `:digest` Must not의 `:feature --bug`→`:issue`), §13.4(`doctor`의 `skills.<name>`/`skills.missing` 보고 형식, 설치기가 `templates/know-thy-build/`만 복사하고 레거시 `finish.md`를 지운다는 문장), README(Define/Operate 표 갱신, helper 15개 설치 문장, 파이프라인 블록의 `factory` 단계·`sub-agents`→`agents`).
+
+---
+
+## ADR-019 사람-지점 스킬의 L2 — 경로 deny는 `.claude/settings.json`이 아니라 CI 전용 설정에 산다 — 2026-09-12
+
+**질문**: Plan 5가 설치하는 사람-지점 스킬(`:harness`·`:role`·`:technical`·`:project`·`:qa`)은 전부 빌드 설정을 쓰는 것이 자기 일이다 — `:harness`는 `.factory/harness.toml`을, `:role`은 `.claude/agents/<name>.md`와 `.factory/roles.toml`과 CHARTER 로스터를, `:technical`은 `docs/factory/CHARTER.md`를 쓴다. 그런데 `factory init`이 설치하는 `.claude/settings.json`의 deny 목록은 그 경로를 전부 막고 있었다. 스킬이 자기 Does를 수행할 수 없다면 Plan 5는 설치는 되지만 작동하지 않는다. L2를 약화시키지 않으면서 이 충돌을 어떻게 푸는가.
+
+**관측**:
+
+- Claude Code의 deny 규칙은 **세션 종류를 가리지 않는다** — CI의 `claude -p`에도, 사람이 터미널에서 여는 대화형 세션에도 똑같이 걸린다. 그리고 deny는 allow로 덮어쓸 수 없다(ADR-001 스파이크에서 3/3 유효로 확인된 성질이 여기서는 반대로 작용한다). 즉 `.claude/settings.json`에 `Edit(.factory/**)`가 있는 한, 사람이 `/know-thy-build:harness`를 실행해도 `harness.toml`을 고칠 수 없다.
+- 반면 CI는 이미 자기 설정 파일을 따로 로드한다: `factory/bin/run-stage.js:407`과 `factory/bin/retro.js:800`이 `claude -p … --settings .factory/ci-settings.json`으로 부른다. `--settings`는 **병합**이고 deny는 병합된 결과에서도 유효하다(ADR-005 관측: cli-settings 레그에서 denied). 그래서 경로 deny를 이 파일로 옮기면 CI 에이전트가 받는 L2는 한 글자도 달라지지 않는다.
+- 나머지 세 겹은 그대로다. **L0**: `block-dangerous.sh`는 `PreToolUse(Bash)` 훅이라 설정 파일과 무관하게 **모든 세션**에서 돈다 — `echo > package.json`·`sed -i .factory/harness.toml`·`cp … .claude/settings.json` 같은 셸 모양의 쓰기는 사람의 세션에서도 계속 막힌다(스킬은 Edit/Write 도구로 쓰므로 영향이 없다). **L1**: `integrity.js`가 PR diff에서 보호 경로 변경을 잡고, 그런 PR은 `needs-human`이 되어 사람이 머지한다(ADR-015). **사람의 판단 자체가 판결이다** — `:harness`가 `harness.toml`을 고치는 것은 "에이전트가 게이트를 우회했다"가 아니라 "사람이 게이트를 정했다"이고, 그것이 이 스킬들의 존재 이유다.
+- 그래서 `.claude/settings.json`이 계속 들고 있어야 하는 것은 **사람에게도 걸려야 옳은** deny뿐이다: `gh pr merge*`(머지는 파이프라인의 마지막 문이지 세션의 편의가 아니다), `git merge*`, `git push --force*`/`-f*`, branch protection PUT. 이 넷은 사람이 대화형으로 실행할 이유가 있다면 셸에서 직접 하면 되고, 에이전트 세션에서는 언제나 사고다.
+
+**결정**: `templates/factory/claude/settings.json`의 **경로 기반 `Edit(...)`/`Write(...)` deny 전부**를 `templates/factory/factory/ci-settings.json`의 `permissions.deny`로 옮긴다(기존 CI 전용 항목 — `gh secret*`·`gh api -X DELETE*`·`Read(.env*)` — 은 유지). `.claude/settings.json`에는 Bash deny·allow·훅 배선만 남는다. `factory doctor`는 이제 **두 파일을 모두** 검사한다 — `settings.present`/`settings.deny`/`settings.hooks`는 (작아진) settings 템플릿을, 새 `settings.ci-deny`는 `.factory/ci-settings.json`이 존재하고 ci-settings 템플릿의 deny를 전부 담고 있는지를 본다(둘 중 하나라도 빠지면 FAIL). `block-dangerous.sh`의 F9 삼자 일치 주석과 그 일치를 검사하는 테스트(`factory/test/templates.test.js`)의 기준도 `settings.json` deny에서 `ci-settings.json` deny로 옮긴다 — 세 목록(`harness.toml [protected].factory` · `ci-settings.json` deny · 훅의 `prot` 정규식)은 계속 같아야 한다.
+
+**알려진 한계**: 사람의 대화형 Claude는 이제 패키지 소유 파일 `.factory/lib/**`·`.factory/bin/**`도 Edit/Write로 고칠 수 있다 — 경로 deny가 `.factory/**` 통째로였기 때문에 그것까지 함께 풀렸다. 이 문을 다시 좁히려면 `.factory/lib` 하위만 남기는 식의 세분화가 필요하지만, 그러면 "사람은 자기 저장소의 무엇이든 고칠 수 있다"는 사실과 싸우는 설정이 된다 — 대신 **탐지**에 기댄다: `factory doctor`의 `files.stale`이 템플릿과 달라진 팩토리 소유 파일을 전부 보고하고(`factory init --upgrade`가 되돌린다), L1 integrity가 그 변경이 PR에 실리면 잡는다. 또 하나: `factory init`을 이미 돌린 저장소는 `.claude/settings.json`에 옛 경로 deny가 남아 있고 `mergeSettings`가 **가산적**이라 `--upgrade`로도 지워지지 않는다 — 사람이 그 줄들을 직접 지워야 한다(`.factory/ci-settings.json`은 팩토리 소유라 `--upgrade`가 통째로 교체하므로 새 deny를 자동으로 받는다).
+
+**영향**: §6 표의 "L2 hooks + deny" 행과 §6.3(어느 deny가 어느 파일에 사는지와 그 이유), `templates/factory/claude/settings.json`, `templates/factory/factory/ci-settings.json`, `factory/lib/doctor/factory.js`(`checkSettings`의 `settings.ci-deny`), `factory/cli/doctor.js`(ci 템플릿·설치본 로드), `factory/hooks/block-dangerous.sh`(F9 주석), `factory/test/templates.test.js`·`doctor-factory.test.js`, `templates/know-thy-build/harness.md`(doctor 체크 표).

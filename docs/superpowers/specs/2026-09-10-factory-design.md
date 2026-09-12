@@ -772,7 +772,7 @@ light_on_merge: true
 |---|---|---|---|
 | **L0 GitHub** | branch protection, required checks, 토큰 스코프 | 불가 | 머지, force-push, factory 파일 변경된 PR의 머지 |
 | **L1 결정적 스크립트** | `.factory/bin/*.sh` — 에이전트 프로세스 밖에서 실행 | 실행 불가(러너가 실행) | 판정 위조, 건너뛰기, handoff 없는 전이, 투표 조작 |
-| **L2 hooks + deny** | `.claude/settings.json`, 에이전트 frontmatter | 편집 deny | 위험 명령, 미push 종료, 포맷 불일치 출력, 기존 테스트 수정 |
+| **L2 hooks + deny** | `.claude/settings.json`(Bash deny·allow·훅 — 사람의 대화형 세션에도 걸린다), `.factory/ci-settings.json`(경로 `Edit`/`Write` deny — CI의 `claude -p --settings`로만 로드된다, ADR-019), 에이전트 frontmatter | 편집 deny | 위험 명령, 미push 종료, 포맷 불일치 출력, 기존 테스트 수정 |
 | **L3 프롬프트** | `CLAUDE.md`, `.claude/agents/*.md` | 읽기만 | (강제 아님) 품질·관점 |
 
 ### 6.1 L0 상세
@@ -787,7 +787,14 @@ light_on_merge: true
 - `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
 - `assert-handoff.sh`, `transition.sh`: 3.3.
 
-### 6.3 L2 `.claude/settings.json` (factory init이 생성)
+### 6.3 L2 — `.claude/settings.json` + `.factory/ci-settings.json` (factory init이 둘 다 생성)
+
+**어느 deny가 어느 파일에 사는가 (ADR-019).** deny 규칙은 세션 종류를 가리지 않고 걸리며 allow로 덮을 수 없다. 그래서 두 파일로 나눈다:
+
+- **`.claude/settings.json`** — 모든 세션(CI의 `claude -p`, 그리고 사람의 대화형 세션)에 걸린다. 여기 남는 deny는 **사람에게도 걸려야 옳은 것**뿐이다: `gh pr merge*`, `git merge*`, `git push --force*`/`-f*`, branch protection PUT. allow 목록과 훅 배선도 여기 있다.
+- **`.factory/ci-settings.json`** — CI만 로드한다(`run-stage.js`·`retro.js`가 `claude -p … --settings .factory/ci-settings.json`으로 부른다; `--settings`는 병합이고 deny는 병합 결과에서도 유효하다). **경로 기반 `Edit(...)`/`Write(...)` deny 전부**가 여기 산다 — `.factory/**`, `.claude/**`, `.github/workflows/factory-*`, `docs/factory/CHARTER.md`, 그리고 게이트 명령이 해석되어 지나가는 빌드 설정 파일(`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`). CI 전용 deny(`gh secret*`, `gh api -X DELETE*`, `Read(.env*)`)도 같은 파일에 있다.
+
+**왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 `factory/integrity`(L1)가 잡아 사람 머지를 요구한다(ADR-015). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.hooks`와 `settings.ci-deny`.
 
 **병합 시점.** `.claude/settings.json`은 `init --upgrade`뿐 아니라 **`init`(최초 설치) 시점에도 결정적으로 병합된다**(Plan 2 실행 판결, ADR-015) — brownfield 저장소는 이미 자기 `settings.json`을 갖고 있을 수 있으므로, "파일이 있으면 무조건 skip"이라는 `init`의 일반 규칙(§2.1)은 이 파일에는 적용되지 않는다. 병합은 deny/allow 합집합, 훅은 `command`가 이미 있으면 append하지 않는 방식으로 가산적이고 멱등이다.
 
@@ -804,11 +811,7 @@ light_on_merge: true
   "permissions": {
     "deny": [
       "Bash(gh pr merge*)", "Bash(git merge*)", "Bash(git push --force*)", "Bash(git push -f*)",
-      "Bash(gh api -X PUT /repos/*/branches/*/protection*)",
-      "Edit(.factory/**)", "Write(.factory/**)",
-      "Edit(.claude/**)", "Write(.claude/**)",
-      "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
-      "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)"
+      "Bash(gh api -X PUT /repos/*/branches/*/protection*)"
     ],
     "allow": ["Bash(git *)", "Bash(gh issue *)", "Bash(gh pr view*)", "Bash(gh pr comment*)", "Bash(pnpm *)"]
   },
@@ -827,6 +830,28 @@ light_on_merge: true
     ],
     "SubagentStop": [
       { "hooks": [{ "type": "command", "command": ".claude/hooks/record-agents.sh" }, { "type": "command", "command": ".claude/hooks/verdict-format.sh" }] }
+    ]
+  }
+}
+```
+
+그리고 경로 deny는 CI만 로드하는 쪽에 있다:
+
+```json
+// .factory/ci-settings.json — `claude -p … --settings`로만 로드된다(병합)
+{
+  "permissions": {
+    "deny": [
+      "Bash(gh secret*)", "Bash(gh variable set*)", "Bash(gh api -X DELETE*)", "Bash(gh api --method DELETE*)",
+      "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)",
+      "Edit(.factory/**)", "Write(.factory/**)",
+      "Edit(.claude/**)", "Write(.claude/**)",
+      "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
+      "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)",
+      "Edit(package.json)", "Write(package.json)", "Edit(package-lock.json)", "Write(package-lock.json)",
+      "Edit(vitest.config.*)", "Write(vitest.config.*)", "Edit(playwright.config.*)", "Write(playwright.config.*)",
+      "Edit(tsconfig*.json)", "Write(tsconfig*.json)", "Edit(.eslintrc*)", "Write(.eslintrc*)",
+      "Edit(eslint.config.*)", "Write(eslint.config.*)"
     ]
   }
 }

@@ -91,7 +91,18 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     } catch (e) {
       checks.push({ id: "settings.template", level: "FAIL", detail: `settings template unreadable: ${e.message}` });
     }
-    if (template) checks.push(...checkSettings({ settings, template }));
+    // 경로 deny는 CI 전용 파일에 산다(ADR-019) — 템플릿과 설치본을 같은 방식으로 읽어 둘 다 검사한다.
+    let ciSettings = null;
+    try {
+      ciSettings = JSON.parse(readFile(join(root, ".factory/ci-settings.json")));
+    } catch {}
+    let ciTemplate;
+    try {
+      ciTemplate = JSON.parse(readFile(join(pkgRoot, "templates/factory/factory/ci-settings.json")));
+    } catch (e) {
+      checks.push({ id: "settings.ci-template", level: "FAIL", detail: `ci-settings template unreadable: ${e.message}` });
+    }
+    if (template) checks.push(...checkSettings({ settings, template, ciSettings, ciTemplate }));
 
     checks.push(...(await checkHooks({ run, root, exists, readFile, hooks: DOCTOR_HOOKS })));
     checks.push(...checkWorkflows({ root, exists, readFile }));

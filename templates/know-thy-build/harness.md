@@ -76,7 +76,8 @@ ls .factory/harness.toml docs/PROJECT.md 2>/dev/null
 | `roles.roster-defined`, `roles.agent-files`, `roles.retro-agent-file`, `roles.lessons-files` | CHARTER 로스터가 `roles.toml`에 없는 이름을 가리킴, 또는 역할 `.md`/lessons 파일이 없음 |
 | `agents.<role>` | 그 역할의 `.claude/agents/<role>.md`가 §7.2 구조를 안 지킴 |
 | `skills.installed`, `skills.<name>`, `skills.missing` | `.claude/commands/know-thy-build/*.md`가 §13.3 구조를 안 지킴, 또는 13개 카탈로그 중 일부가 안 설치됨 |
-| `settings.present`, `settings.deny`, `settings.hooks` | `.claude/settings.json`이 없거나 템플릿의 deny/hook과 안 맞음 |
+| `settings.present`, `settings.deny`, `settings.hooks` | `.claude/settings.json`이 없거나 템플릿의 Bash deny/hook과 안 맞음 |
+| `settings.ci-deny` | `.factory/ci-settings.json`이 없거나 경로 deny가 빠짐 — CI 에이전트가 빌드 설정을 고칠 수 있게 된다(ADR-019) |
 | `hooks.<hook>` | 그 훅(`.claude/hooks/<hook>`)이 없거나 실행 결과가 기대와 다름 |
 | `workflows.present`, `workflows.lint` | `.github/workflows/factory-*.yml`이 없거나 lint 위반 |
 | `github.claude-secret`, `github.bot-token`, `github.token-issued-at`, `github.labels`, `github.protection`, `github.required-checks`, `github.unavailable` | secret 미설정, 라벨 미부트스트랩, branch protection 미설정(대부분 WARN — `factory bootstrap` 재실행으로 해결), 또는 `gh` 자체가 오프라인(WARN) |

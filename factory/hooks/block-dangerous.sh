@@ -19,7 +19,8 @@ echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]](--
 echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*[[:space:]]\+[^[:space:]+]' && block "force push (leading + refspec)"
 echo "$c" | grep -Eq '(^|[;&|[:space:]])git[[:space:]]+push[^;&|]*(--delete[^;&|]*factory/lock-|:refs/heads/factory/lock-)' && block "lock branch deletion"
 # protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c.
-# 목록은 harness.toml `[protected].factory` · settings.json deny와 같아야 한다(F9) — 셋이 갈라지면
+# 목록은 harness.toml `[protected].factory` · ci-settings.json deny와 같아야 한다(F9 / ADR-019 — 경로
+# deny는 `.claude/settings.json`이 아니라 CI 전용 `.factory/ci-settings.json`에 산다) — 셋이 갈라지면
 # Edit는 막히는데 `echo > package.json`은 통과하고, integrity가 사후에야 잡는다.
 # 빌드 설정 파일(package.json·러너/린터 config)이 여기 있는 이유: gate 명령이 그 파일들을 통해
 # 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.

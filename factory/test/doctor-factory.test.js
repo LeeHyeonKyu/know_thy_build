@@ -240,6 +240,24 @@ test("checkSettings: deny superset and all hook commands present → PASS", () =
   expect(c["settings.present"].level).toBe("PASS");
   expect(c["settings.deny"].level).toBe("PASS");
   expect(c["settings.hooks"].level).toBe("PASS");
+  // ciTemplate이 없으면 그 검사 자체를 만들지 않는다 — "확인 안 함"을 PASS로 기록하지 않는다.
+  expect(c["settings.ci-deny"]).toBeUndefined();
+});
+
+// ADR-019: 경로 deny는 `.factory/ci-settings.json`에만 산다 — doctor가 그 파일까지 봐야 L2가 검증된다.
+test("checkSettings: ci-settings.json missing or short of the template deny list → settings.ci-deny FAIL", () => {
+  const template = { permissions: { deny: ["A"] }, hooks: {} };
+  const ciTemplate = { permissions: { deny: ["Edit(.factory/**)", "Write(package.json)"] } };
+  const settings = { permissions: { deny: ["A"] }, hooks: {} };
+
+  const missing = by(checkSettings({ settings, template, ciSettings: null, ciTemplate }));
+  expect(missing["settings.ci-deny"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("ci-settings.json missing") });
+
+  const short = by(checkSettings({ settings, template, ciSettings: { permissions: { deny: ["Edit(.factory/**)"] } }, ciTemplate }));
+  expect(short["settings.ci-deny"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("Write(package.json)") });
+
+  const full = by(checkSettings({ settings, template, ciSettings: { permissions: { deny: [...ciTemplate.permissions.deny, "Read(.env)"] } }, ciTemplate }));
+  expect(full["settings.ci-deny"].level).toBe("PASS");
 });
 
 test("checkHooks: runs each hook with stdin JSON and checks exit code; verdict-format gets a real transcript file", async () => {

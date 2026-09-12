@@ -2,7 +2,19 @@
   "permissions": {
     "deny": [
       "Bash(gh secret*)", "Bash(gh variable set*)", "Bash(gh api -X DELETE*)", "Bash(gh api --method DELETE*)",
-      "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)"
+      "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)",
+
+      "Edit(.factory/**)", "Write(.factory/**)",
+      "Edit(.claude/**)", "Write(.claude/**)",
+      "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
+      "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)",
+      "Edit(package.json)", "Write(package.json)",
+      "Edit(package-lock.json)", "Write(package-lock.json)",
+      "Edit(vitest.config.*)", "Write(vitest.config.*)",
+      "Edit(playwright.config.*)", "Write(playwright.config.*)",
+      "Edit(tsconfig*.json)", "Write(tsconfig*.json)",
+      "Edit(.eslintrc*)", "Write(.eslintrc*)",
+      "Edit(eslint.config.*)", "Write(eslint.config.*)"
     ]
   }
 }

@@ -75,7 +75,10 @@ test("lessons skeletons carry the integrity header", () => {
 
 test("settings.json template has the §6.3 deny list, all four hook events, and record-agents on Subagent*", () => {
   const s = JSON.parse(read("claude/settings.json"));
-  for (const d of ["Bash(gh pr merge*)", "Bash(git push --force*)", "Edit(.factory/**)", "Write(.claude/**)", "Edit(docs/factory/CHARTER.md)"]) expect(s.permissions.deny).toContain(d);
+  for (const d of ["Bash(gh pr merge*)", "Bash(git push --force*)", "Bash(git merge*)", "Bash(gh api -X PUT /repos/*/branches/*/protection*)"]) expect(s.permissions.deny).toContain(d);
+  // ADR-019: 경로 deny는 여기 없다 — deny는 사람의 대화형 세션에도 걸리고 allow로 못 이기므로,
+  // 여기 두면 `:harness`·`:role`·`:technical`이 자기 일을 할 수 없다. 전부 ci-settings.json으로 옮겼다.
+  for (const d of s.permissions.deny) expect(d, d).toMatch(/^Bash\(/);
   const cmds = (ev) => s.hooks[ev].flatMap((e) => e.hooks.map((h) => h.command));
   expect(cmds("PreToolUse")).toContain(".claude/hooks/block-dangerous.sh");
   expect(cmds("PostToolUse")).toContain(".claude/hooks/lint-touched.sh");
@@ -98,14 +101,20 @@ test("settings.json allows the gh surface the builder needs, including `gh pr ed
   expect(s.permissions.deny).toContain("Bash(gh pr merge*)");
 });
 
-test("settings.json deny covers the build-config files, matching [protected].factory (F9)", () => {
-  const s = JSON.parse(read("claude/settings.json"));
+test("ci-settings.json deny covers the build-config files, matching [protected].factory (F9 / ADR-019)", () => {
+  const s = JSON.parse(read("factory/ci-settings.json"));
   const h = toml(read("factory/harness.toml"));
   for (const g of ["package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*"]) {
     expect(s.permissions.deny, `Edit(${g})`).toContain(`Edit(${g})`);
     expect(s.permissions.deny, `Write(${g})`).toContain(`Write(${g})`);
     expect(h.protected.factory, g).toContain(g);   // 두 목록이 갈라지면 L2가 막는 것과 L1 integrity가 보는 것이 달라진다
   }
+  // 팩토리 소유 경로도 통째로 여기 있다 — 스펙 §6.3의 목록이 통째로 CI 파일로 옮겨왔다는 뜻이다.
+  for (const d of ["Edit(.factory/**)", "Write(.factory/**)", "Edit(.claude/**)", "Write(.claude/**)",
+    "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
+    "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)"]) expect(s.permissions.deny, d).toContain(d);
+  // CI 전용 deny(비밀·삭제)는 그대로 남아 있다.
+  for (const d of ["Bash(gh secret*)", "Read(.env)"]) expect(s.permissions.deny, d).toContain(d);
 });
 
 test("dispatcher commands exist for the four LLM stages plus retro, and each names its workflow", () => {
