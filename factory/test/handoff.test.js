@@ -95,7 +95,8 @@ test("renderHandoff implement: PR number, verifier verdict with finding count, t
   };
   const { body, h } = roundTrip("implement", 42, data);
   expect(h.data).toEqual(data);
-  expect(body).toContain("PR #31");
+  expect(body).toContain("**PR #31** · head `0123456789ab`");   // 강조는 PR 번호 하나뿐 — sha는 따라오는 사실이다
+  expect(body).not.toContain("**PR #31** · head `0123456789ab`**");
   expect(body).toContain("verifier: accepted-with-reservations (1 finding)");
   expect(body).toContain("test_42_csv_header");
   expect(body).toContain("test_42_csv_empty");
@@ -131,13 +132,12 @@ test("renderHandoff triage: disposition, tier and the questions that block it", 
 });
 
 test("renderHandoff: an unknown stage and a missing summary still render and parse", () => {
-  const { body, h } = roundTrip("retro", 3, { issue: 3 }, undefined);
+  // summary를 아예 넘기지 않는다(`write-handoff.js`는 항상 넘기지만, 마커/펜스 구조는 그것과 무관해야 한다)
+  const body = renderHandoff({ stage: "retro", issue: 3, data: { issue: 3, note: "later" } });
   expect(body.startsWith("<!-- factory-handoff:v1 stage=retro issue=3 -->")).toBe(true);
-  expect(h.data).toEqual({ issue: 3 });
-  expect(h.summary).toBe("s");
-  // summary가 아예 없을 때도 마커/펜스 구조는 그대로다
-  const bare = renderHandoff({ stage: "retro", issue: 3, data: { issue: 3 } });
-  expect(parseHandoffs([{ id: 1, body: bare, createdAt: "2026-09-11T00:00:00Z" }])[0]).toMatchObject({ stage: "retro", issue: 3, summary: "" });
+  const [h] = parseHandoffs([{ id: 1, body, createdAt: "2026-09-11T00:00:00Z" }]);
+  expect(h.summary).toBe("");
+  expect(h.data).toEqual({ issue: 3, note: "later" });
 });
 
 test("latestHandoff returns the newest for a stage by createdAt", () => {

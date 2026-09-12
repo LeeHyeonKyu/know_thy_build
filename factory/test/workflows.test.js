@@ -1655,6 +1655,23 @@ test("factory-plan.js: M1 allows integration and downgrades only e2e; M2 leaves 
   expect(m2.result.dissent_log).toEqual([]);
 });
 
+test("factory-plan.js: the filter only ever downgrades — an unrecognized or missing level is left exactly as it came", async () => {
+  const doneWhen = [
+    { id: "dw1", text: "a", verify: "test_42_a" },                    // level 누락
+    { id: "dw2", text: "b", verify: "test_42_b", level: "smoke" },    // 스키마에 없는 레벨
+    { id: "dw3", text: "c", verify: "test_42_c", level: "e2e" },
+  ];
+  // M2: 아무것도 낮출 것이 없다 — 빈 칸과 오타를 e2e로 "채워 넣지" 않는다(스키마 위반은 plan.v1 검사의 몫)
+  const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: { issue: 42, context: "c" } });
+  expect(m2.result.done_when).toEqual(doneWhen);
+  expect(m2.result.dissent_log).toEqual([]);
+
+  // M1: 알려진 레벨 중 한도를 넘는 e2e만 내려가고, 나머지 둘은 그대로다
+  const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: { issue: 42, context: "c" } });
+  expect(m1.result.done_when).toEqual([doneWhen[0], doneWhen[1], { ...doneWhen[2], level: "integration" }]);
+  expect(m1.result.dissent_log).toEqual([{ role: "workflow", objection: "done_when dw3 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
+});
+
 test("factory-plan.js: a loader that reported no maturity leaves the levels alone — the workflow does not invent a bound", async () => {
   const doneWhen = [{ id: "dw1", text: "a", verify: "test_42_a", level: "e2e" }];
   const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub(undefined, doneWhen), args: { issue: 42, context: "c" } });
@@ -1686,6 +1703,33 @@ test("factory-plan.js: the re-synthesized plan is bound too — an objection rou
   expect(synthesis).toBe(2);
   expect(result.done_when.map((w) => w.level)).toEqual(["unit"]);
   expect(result.dissent_log).toContainEqual({ role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" });
+});
+
+test("factory-plan.js: a workflow downgrade the re-synthesis echoes back is superseded, not duplicated", async () => {
+  const overLevel = [{ id: "dw1", text: "a", verify: "test_42_a", level: "e2e" }];
+  const note = { role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" };
+  let synthesis = 0;
+  let signOff = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix({ maturity: "M0" });
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") {
+      synthesis += 1;
+      // 재합성은 같은 e2e 항목을 다시 올리면서, 1차에서 workflow가 남긴 dissent 줄까지 그대로 되받아 적는다
+      return planFix({ done_when: overLevel, dissent_log: synthesis === 1 ? [] : [note] });
+    }
+    if (opts.label?.startsWith("sign:")) {
+      signOff += 1;
+      return signOff <= PLAN_ROSTER.length && roleOf(opts) === "skeptic" ? { vote: "object", reason: "범위가 넓다" } : { vote: "accept", reason: "ok" };
+    }
+    return null;
+  };
+
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c" } });
+  expect(synthesis).toBe(2);
+  expect(result.done_when.map((w) => w.level)).toEqual(["unit"]);
+  expect(result.dissent_log).toEqual([note]);   // 하나의 반박, 하나의 줄
 });
 
 test("factory-implement.js: PR bodies and rework comments go through --body-file, never an inline body", async () => {

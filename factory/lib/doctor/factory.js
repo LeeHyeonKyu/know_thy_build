@@ -224,9 +224,9 @@ export async function checkGitHub({ gh, harness, labels }) {
       issuedAt ? c("github.token-issued-at", "PASS", issuedAt) : c("github.token-issued-at", "WARN", "FACTORY_TOKEN_ISSUED_AT not set"),
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
       !protection || missingChecks.length
-        ? c("github.protection", "WARN", `run factory bootstrap — branch protection is missing L0 contexts: ${missingChecks.join(", ") || L0_CONTEXTS.join(", ")}`)
+        ? c("github.protection", "WARN", `run factory bootstrap — branch protection is missing L0 contexts: ${missingChecks.join(", ")}`)
         : c("github.protection", "PASS", `L0 contexts: ${L0_CONTEXTS.join(", ")}`),
-      c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.join(", ")}`),
+      c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.length ? l1.join(", ") : "(none configured)"}`),
     ];
   } catch (e) {
     return [c("github.unavailable", "WARN", `gh unavailable — ${e.message}`)];

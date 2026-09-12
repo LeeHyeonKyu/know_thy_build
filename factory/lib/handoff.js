@@ -42,9 +42,11 @@ function planBody(d) {
 function implementBody(d) {
   const out = [];
   const head = [];
-  if (d.pr !== undefined && d.pr !== null && d.pr !== "") head.push(`PR #${line(d.pr)}`);
+  // PR 번호만 굵게 — 사람이 이 본문에서 찾는 것은 "어디로 가면 되는가" 하나다. sha는 따라오는 사실이라
+  // 같이 굵히면 강조가 둘이 되어 아무것도 강조되지 않는다.
+  if (d.pr !== undefined && d.pr !== null && d.pr !== "") head.push(`**PR #${line(d.pr)}**`);
   if (typeof d.head_sha === "string" && d.head_sha) head.push(`head \`${line(d.head_sha).slice(0, 12)}\``);
-  if (head.length) out.push(`**${head[0]}**${head[1] ? ` · ${head[1]}` : ""}`);
+  if (head.length) out.push(head.join(" · "));
   const v = d.verifier || {};
   if (v.verdict) out.push(`verifier: ${line(v.verdict)} (${plural(arr(v.findings).length, "finding")})`);
   const tests = arr(d.tests_added).map((t) => `\`${line(t)}\``);

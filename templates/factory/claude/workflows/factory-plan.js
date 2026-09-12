@@ -139,6 +139,7 @@ function once(fn) {
 // 아예 돌지 않으므로) — "게이트 통과"와 "계약 확인"이 조용히 갈라진다.
 // 넘는 항목은 버리지 않는다(사람이 원한 것은 그 항목이지 그 레벨이 아니다): 허용된 최고 레벨로 낮추고,
 // 낮췄다는 사실을 dissent_log에 남겨 다음 성숙도에서 되돌릴 수 있게 한다.
+const LEVELS = ['unit', 'integration', 'e2e'];
 const ALLOWED_LEVELS = { M0: ['unit'], M1: ['unit', 'integration'], M2: ['unit', 'integration', 'e2e'] };
 
 function boundToMaturity(p) {
@@ -147,9 +148,15 @@ function boundToMaturity(p) {
   // 하네스가 실제로 M2인 저장소의 계약을 workflow가 임의로 좁히게 된다.
   if (!p || !allowed) return p;
   const highest = allowed[allowed.length - 1];
+  const ceiling = LEVELS.indexOf(highest);
   const notes = [];
   const bounded = (Array.isArray(p.done_when) ? p.done_when : []).map((w) => {
-    if (!w || allowed.includes(w.level)) return w;
+    if (!w) return w;
+    const at = LEVELS.indexOf(w.level);
+    // 이 필터는 **낮추기만** 한다. 없는 레벨·오타 레벨(at === -1)은 그대로 둔다 — 빈 칸을 채우는 것은
+    // 필터가 아니라 발명이고, 그렇게 채워 넣은 값은 "합의된 계약"처럼 보이면서 아무도 고르지 않은 값이다.
+    // 스키마 위반(레벨 누락/오타)은 DONE_WHEN_ITEM의 enum과 verify-stage의 plan.v1 검사가 잡는 몫이다.
+    if (at === -1 || at <= ceiling) return w;
     notes.push({
       role: 'workflow',
       objection: `done_when ${w.id} level ${w.level} exceeds maturity ${maturity}`,
@@ -158,11 +165,11 @@ function boundToMaturity(p) {
     return { ...w, level: highest };
   });
   if (notes.length === 0) return p;
-  return {
-    ...p,
-    done_when: bounded,
-    dissent_log: [...(Array.isArray(p.dissent_log) ? p.dissent_log : []), ...notes],
-  };
+  // 재합성이 같은 항목을 다시 올려 보내면 같은 objection이 두 줄이 된다 — 사인오프 블록과 같은 방식으로
+  // 앞선 동일 항목을 대체한다(하나의 반박, 하나의 줄, 마지막 처리 결과).
+  const log = Array.isArray(p.dissent_log) ? p.dissent_log : [];
+  const superseded = log.filter((d) => !notes.some((n) => d && d.role === n.role && d.objection === n.objection));
+  return { ...p, done_when: bounded, dissent_log: [...superseded, ...notes] };
 }
 
 phase('Load');

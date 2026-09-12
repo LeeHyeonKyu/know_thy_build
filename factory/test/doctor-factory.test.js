@@ -220,7 +220,8 @@ test("checkGitHub: no branch protection at all → protection WARN naming the L0
   const gh = { listSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
   expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
-  expect(c["github.required-checks"].level).toBe("PASS");
+  // L1 목록이 비어 있어도 줄은 나온다 — "설정되지 않았다"를 빈 문자열로 말하면 아무도 못 읽는다
+  expect(c["github.required-checks"]).toMatchObject({ level: "PASS", detail: "enforced by L1 at merge: (none configured)" });
 });
 
 test("checkGitHub: gh unavailable → single WARN, no other github.* checks", async () => {
