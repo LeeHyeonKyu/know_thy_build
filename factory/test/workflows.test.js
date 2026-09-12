@@ -1829,6 +1829,9 @@ test("factory-retro.js: the analyst prompt names the candidates file the dispatc
   expect(p).toMatch(/20 runs/);
   expect(p).toMatch(/Examples 8|8\/8\/6/);
   expect(p).toMatch(/never invent|do not invent/i);
+  // 성숙도 격차는 L1이 분석 **전에** 결정적으로 판정해 후보 파일에 실어 준다 — 에이전트는 그 목록에만
+  // 이유 문장을 보탠다(없는 격차를 지어낼 자리가 없다).
+  expect(p).toContain("maturity_gaps");
 });
 
 test("factory-retro.js: with no candidates arg the workflow falls back to the standard path, never to a guess", async () => {

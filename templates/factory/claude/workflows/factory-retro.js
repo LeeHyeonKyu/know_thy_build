@@ -121,9 +121,10 @@ const prompt =
   `You are the factory's retro analyst. Read, in this order:\n` +
   `1. \`${candidates}\` — written by the retro job (L1) just now. It carries \`period\` ` +
   `({from, to}), the accumulated \`candidates\` ({lessons, examples, flaky, needs_human}, each entry with ` +
-  `the \`runs\` it came from), the deterministic \`stats\` for this window, and the \`history\` of previous ` +
-  `retros from \`docs/factory/runs/_retro.md\`. Candidates are raw claims harvested from handoffs — they ` +
-  `are NOT yet lessons, and some of them never will be.\n` +
+  `the \`runs\` it came from), the deterministic \`stats\` for this window, the \`history\` of previous ` +
+  `retros from \`docs/factory/runs/_retro.md\`, and \`maturity_gaps\` — the harness gaps L1 already ` +
+  `detected deterministically ({target, rule, reason}). Candidates are raw claims harvested from ` +
+  `handoffs — they are NOT yet lessons, and some of them never will be.\n` +
   `2. \`docs/factory/runs/*.md\` — the run records for the issues those candidates cite (restored to the ` +
   `working tree before you were spawned). This is the only durable evidence of what actually happened.\n` +
   `3. \`.factory/lessons/*.md\` — every role's current lessons. The header of each file ` +
@@ -176,7 +177,8 @@ const prompt =
   `to — prompt → lesson → gate** (move it as far toward the gate as the evidence allows).\n\n` +
   `\`harness\` entries are maturity gaps only (target \`M1\`/\`M2\` with a one-sentence reason); L1 detects ` +
   `them deterministically and uses your reason as the issue body, so do not invent a gap it did not find — ` +
-  `the candidates file tells you which ones it found.\n` +
+  `\`maturity_gaps\` in the candidates file is the complete list it found, and your \`harness\` entries must ` +
+  `match those targets one-for-one (an entry for anything else is dropped).\n` +
   `\`summary\` is one paragraph a human reads first: what this window looked like, what you are proposing, ` +
   `and what you deliberately left as a candidate because the evidence had not accumulated yet.`;
 

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../lib/exec.js";
-import { syncRecords, readRecords, hydrateRecord } from "../lib/records-branch.js";
+import { syncRecords, readRecords, readRecordsDetailed, hydrateRecord } from "../lib/records-branch.js";
 import { appendRunRecord } from "../lib/run-record.js";
 
 const git = (cwd, ...args) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd });
@@ -358,4 +358,84 @@ test("(h) overwrite: a rewritten state file (_retro.md) replaces the branch cont
   await syncRecords({ run, cwd, message: "retro 3 (no overwrite)" });
   const bad = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
   expect(bad.stdout.match(/factory-retro-state:v1/g).length).toBeGreaterThan(1);
+}, 30000);
+
+// ── 출처(provenance)와 교체 경합 — retro의 상태 파일이 조용히 사라지지 않게 ──────────────────
+
+test("(i) readRecordsDetailed tells 'nothing there' apart from 'could not read' — readRecords cannot", async () => {
+  // (1) origin이 없다 — 읽을 수 없었던 것이지 비어 있는 것이 아니다.
+  const noRemote = mkdtempSync(join(tmpdir(), "records-noremote-"));
+  await git(noRemote, "init", "-q", "-b", "main");
+  const r0 = await readRecordsDetailed({ run, cwd: noRemote });
+  expect(r0.fetched).toBe(false);
+  expect(r0.records.size).toBe(0);
+  expect(await readRecords({ run, cwd: noRemote })).toEqual(new Map());   // 옛 API는 둘을 구별하지 못한다
+
+  // (2) 원격은 있고 브랜치는 없다 — 확정된 "첫 실행"이다.
+  const remote = await makeRemote();
+  const cwd = await makeClone(remote);
+  const r1 = await readRecordsDetailed({ run, cwd });
+  expect(r1.fetched).toBe(true);
+  expect(r1.exists).toBe(false);
+  expect(r1.records.size).toBe(0);
+
+  // (3) 브랜치가 있다 — 내용과 blob sha를 함께 돌려준다(교체 동기화가 그 sha를 건다).
+  writeRecord(cwd, "_retro", "state v1\n");
+  writeRecord(cwd, 7, "# Run · #7\n");
+  await syncRecords({ run, cwd, message: "m", overwrite: ["_retro.md"] });
+  const r2 = await readRecordsDetailed({ run, cwd });
+  expect(r2.fetched).toBe(true);
+  expect(r2.exists).toBe(true);
+  expect(r2.failures).toEqual([]);
+  expect(r2.records.get("_retro")).toBe("state v1\n");
+  const expected = (await run("git", ["rev-parse", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote })).stdout.trim();
+  expect(r2.blobs.get("_retro")).toBe(expected);
+  expect(r2.blobs.get("7")).toMatch(/^[0-9a-f]{40}$/);
+}, 30000);
+
+test("(j) expectBlob refuses to clobber a state file that moved on the branch, and lands when it did not", async () => {
+  const remote = await makeRemote();
+  const a = await makeClone(remote, "a");
+  const b = await makeClone(remote, "b");
+
+  writeRecord(a, "_retro", "state v1\n");
+  expect((await syncRecords({ run, cwd: a, message: "retro 1", overwrite: ["_retro.md"] })).ok).toBe(true);
+
+  // 두 러너가 같은 버전을 하이드레이트한다.
+  const seen = (await readRecordsDetailed({ run, cwd: a })).blobs.get("_retro");
+  await readRecordsDetailed({ run, cwd: b });
+
+  // b가 먼저 자기 상태를 민다.
+  writeRecord(b, "_retro", "state v2-from-b\n");
+  expect((await syncRecords({ run, cwd: b, message: "retro from b", overwrite: ["_retro.md"] })).ok).toBe(true);
+
+  // a는 자기가 읽은 blob을 걸고 교체를 시도한다 — 그 사이 움직였으니 밀지 않는다.
+  writeRecord(a, "_retro", "state v2-from-a\n");
+  const moved = await syncRecords({ run, cwd: a, message: "retro from a", overwrite: ["_retro.md"], expectBlob: { "_retro.md": seen } });
+  expect(moved).toMatchObject({ ok: false, moved: true });
+  expect(moved.reason).toMatch(/state moved/);
+  const kept = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
+  expect(kept.stdout).toBe("state v2-from-b\n");                          // b의 상태가 그대로 살아 있다
+
+  // 다시 하이드레이트해 새 blob을 걸면 같은 쓰기가 착지한다.
+  const fresh = (await readRecordsDetailed({ run, cwd: a })).blobs.get("_retro");
+  writeRecord(a, "_retro", "state v3-on-top-of-b\n");
+  expect((await syncRecords({ run, cwd: a, message: "retro from a 2", overwrite: ["_retro.md"], expectBlob: { "_retro.md": fresh } })).ok).toBe(true);
+  const landed = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
+  expect(landed.stdout).toBe("state v3-on-top-of-b\n");
+}, 30000);
+
+test("(k) expectBlob null means 'the branch had no such file' — it refuses to clobber one that appeared since", async () => {
+  const remote = await makeRemote();
+  const cwd = await makeClone(remote);
+  const other = await makeClone(remote, "other");
+
+  writeRecord(other, "_retro", "state from another runner\n");
+  await syncRecords({ run, cwd: other, message: "other", overwrite: ["_retro.md"] });
+
+  writeRecord(cwd, "_retro", "first-run state\n");
+  const r = await syncRecords({ run, cwd, message: "mine", overwrite: ["_retro.md"], expectBlob: { "_retro.md": null } });
+  expect(r).toMatchObject({ ok: false, moved: true });
+  const show = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
+  expect(show.stdout).toBe("state from another runner\n");
 }, 30000);

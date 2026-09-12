@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # 머지된 PR의 head/merge ref가 아니라 **머지된 결과가 있는 base 브랜치**를 본다 — retro는
+          # 이 저장소의 현재 상태(하네스·역할·lessons·파일 목록)를 읽어 판단한다.
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
           token: ${{ secrets.FACTORY_BOT_TOKEN }}
       - uses: ./.factory/actions/setup

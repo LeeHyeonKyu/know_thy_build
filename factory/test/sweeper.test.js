@@ -56,7 +56,7 @@ test("sweep: a failing issue is isolated — error recorded, other issues still 
 });
 
 test("sweep: quarantine policy returns entries past consecutive_passes threshold — saveQuarantine called with post-policy state", async () => {
-  const gh = { searchIssues: async () => [], comment: vi.fn(), patchComment: vi.fn() };
+  const gh = { searchIssues: async () => [], issueList: async () => [], comment: vi.fn(), patchComment: vi.fn() };
   const quarantine = { quarantined: [{ id: "x1", consecutive_passes: 30, since: "2026-01-01T00:00:00Z" }] };
   const saveQuarantine = vi.fn();
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine, saveQuarantine });
@@ -68,9 +68,13 @@ test("sweep: quarantine policy returns entries past consecutive_passes threshold
 // `quarantine.toml`은 "지금 격리된 것"만 담으므로 복귀·만료는 그 순간 어디에도 남지 않는다 — 이력은
 // 사람이 보는 flaky 이슈에 남아야 하고, retro는 그 `expired` 코멘트만으로 만료를 안다(P4-R3).
 
-test("sweep: returned/expired ids get a marker comment on their flaky issue", async () => {
+test("sweep: returned/expired ids get a marker comment on their flaky issue — closed issues included", async () => {
   const gh = {
-    searchIssues: vi.fn(async (l) => (l === "factory:flaky" ? [{ number: 21, title: "flaky: test/a.test.js > sorts" }, { number: 22, title: "flaky: test/b.test.js > ticks" }] : [])),
+    searchIssues: vi.fn(async () => []),
+    // 라벨로 좁힌 목록 + state:"all" — 사람이 닫아 둔 flaky 이슈에도 만료 사실을 남긴다
+    issueList: vi.fn(async ({ labels, state }) => (labels?.[0] === "factory:flaky" && state === "all"
+      ? [{ number: 21, title: "flaky: test/a.test.js > sorts", state: "OPEN" }, { number: 22, title: "flaky: test/b.test.js > ticks", closedAt: "2026-09-01T00:00:00Z" }]
+      : [])),
     comment: vi.fn(async () => "u#issuecomment-1"), patchComment: vi.fn(),
   };
   const quarantine = { quarantined: [
@@ -84,11 +88,13 @@ test("sweep: returned/expired ids get a marker comment on their flaky issue", as
   expect(actions).toContainEqual({ kind: "quarantine-comment", state: "expired", id: "test/b.test.js > ticks", issue: 22 });
   // 정책 적용 자체는 그대로 — 코멘트는 부수 효과다.
   expect(actions).toContainEqual({ kind: "quarantine", returned: ["test/a.test.js > sorts"], expired: ["test/b.test.js > ticks"] });
+  expect(gh.issueList).toHaveBeenCalledWith({ labels: ["factory:flaky"], state: "all" });
 });
 
 test("sweep: quarantine-exit comments are best-effort — no matching issue, and a failing comment, are isolated per id", async () => {
   const gh = {
-    searchIssues: vi.fn(async (l) => (l === "factory:flaky" ? [{ number: 31, title: "flaky: x1" }] : [])),
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [{ number: 31, title: "flaky: x1" }]),
     comment: vi.fn(async (n) => { if (n === 31) throw new Error("gh comment boom"); return "u"; }),
     patchComment: vi.fn(),
   };
@@ -98,14 +104,14 @@ test("sweep: quarantine-exit comments are best-effort — no matching issue, and
   ] };
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine, saveQuarantine: vi.fn() });
   expect(actions).toContainEqual({ kind: "error", step: "quarantine-comment", id: "x1", error: expect.stringContaining("gh comment boom") });
-  expect(actions).toContainEqual({ kind: "quarantine-comment-skipped", state: "expired", id: "x2", reason: "no open flaky issue" });
+  expect(actions).toContainEqual({ kind: "quarantine-comment-skipped", state: "expired", id: "x2", reason: "no flaky issue" });
   expect(actions.some((a) => a.kind === "quarantine")).toBe(true);
 });
 
-test("sweep: nothing left quarantine → no flaky issue search at all", async () => {
-  const gh = { searchIssues: vi.fn(async () => []), comment: vi.fn(), patchComment: vi.fn() };
+test("sweep: nothing left quarantine → no flaky issue lookup at all", async () => {
+  const gh = { searchIssues: vi.fn(async () => []), issueList: vi.fn(async () => []), comment: vi.fn(), patchComment: vi.fn() };
   await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [{ id: "keep", since: "2026-09-10T00:00:00Z", consecutive_passes: 0 }] }, saveQuarantine: vi.fn() });
-  expect(gh.searchIssues.mock.calls.map((c) => c[0])).not.toContain("factory:flaky");
+  expect(gh.issueList).not.toHaveBeenCalled();
   expect(gh.comment).not.toHaveBeenCalled();
 });
 
@@ -133,4 +139,20 @@ test("sweep: token expiry is deduped when an open renewal issue already exists",
   const actions = await sweep({ gh, charter, thresholds: T, now, staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, tokenIssuedAt });
   expect(gh.createIssue).not.toHaveBeenCalled();
   expect(actions.some((a) => a.kind === "token-expiry")).toBe(false);
+});
+
+test("sweep: a failing flaky-issue lookup is isolated — the policy still applied, only the comments are lost", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => { throw new Error("gh issue list boom"); }),
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const saveQuarantine = vi.fn();
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [{ id: "x1", since: "2026-01-01T00:00:00Z" }] }, saveQuarantine });
+  // 만료 항목은 quarantine.toml에 **남는다**(applyPolicy는 플래그만 낸다) — 그래서 만료 사실의 유일한
+  // 기록이 이슈 코멘트이고, 그 코멘트를 못 남기면 retro는 만료를 영영 알 수 없다.
+  expect(saveQuarantine).toHaveBeenCalledWith({ quarantined: [{ id: "x1", since: "2026-01-01T00:00:00Z" }] });
+  expect(actions).toContainEqual({ kind: "quarantine", returned: [], expired: ["x1"] });
+  expect(actions).toContainEqual({ kind: "error", step: "quarantine-comment", error: expect.stringContaining("gh issue list boom") });
+  expect(gh.comment).not.toHaveBeenCalled();
 });

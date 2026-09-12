@@ -10,8 +10,14 @@
 //  2. **retro 실패는 공장을 멈추지 않는다.** 전체 분석이 죽거나 스키마를 어기면 `_retro.md`에
 //     `last_full_failed`를 남기고 exit 0으로 물러난다 — `merges_since`를 리셋하지 않으므로 다음 머지가
 //     다시 시도한다. 집행 단계도 각각 격리돼서, 한 단계의 실패가 나머지 단계를 막지 않는다.
-//  3. **`_retro.md`의 이력은 조용히 리셋되지 않는다.** 상태 파일이 손상됐으면(파서가 던진다) 아무것도
-//     쓰지 않고 exit 2로 사람을 부른다 — 덮어쓰면 누적 통계·N 조정 이력·후보 목록이 통째로 사라진다.
+//  3. **`_retro.md`의 이력은 조용히 사라지지 않는다.** 세 겹으로 막는다:
+//     (a) 상태 파일이 손상됐으면(파서가 던진다) 아무것도 쓰지 않고 exit 2 — 사람의 몫이다.
+//     (b) 하이드레이트가 브랜치 내용을 **확정하지 못했으면**(fetch 실패, 부분 읽기 실패) 역시 아무것도
+//         쓰지 않고 exit 2 — `readRecords`는 절대 던지지 않으므로 실패한 회차가 "기록 없음"처럼 보이고,
+//         그 기본 상태를 교체 동기화가 브랜치의 진짜 상태 위에 밀어버린다(fix round 1, Critical).
+//     (c) 동기화는 하이드레이트한 blob sha를 걸고 교체한다(`expectBlob`) — 그 사이 다른 retro가 상태를
+//         밀었으면 새 상태를 다시 읽어 같은 변이를 그 위에 얹고 한 번만 재시도하고, 그래도 움직였으면
+//         덮어쓰지 않고 exit 1로 시끄럽게 실패한다.
 //
 // 모든 외부 접촉(fs·git·gh·claude)은 `deps`로 주입된다 — `runRetro`는 순수 오케스트레이션이고,
 // `main()`이 실제 의존성을 조립한다(bin/run-stage.js와 같은 형태).
@@ -24,7 +30,7 @@ import { run } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
-import { readRecords, syncRecords } from "../lib/records-branch.js";
+import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
 import { extractJson } from "../lib/verify-stage.js";
 import { harvest as harvestRecords, mergeCandidates } from "../lib/retro/harvest.js";
@@ -41,10 +47,13 @@ import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/
 
 const QUEUE_LABEL = "factory:queue";
 const HARNESS_LABEL = "factory:harness";
+const FLAKY_LABEL = "factory:flaky";
 const MIN_EVIDENCE = 2;                                               // lesson·예시·관점의 최소 근거 run(§8.4)
 const TITLE_MAX = 240;                                                // GitHub 이슈 제목 여유 — 자르기는 결정적이라 dedup을 깨지 않는다
+const STATE_FILE = "_retro.md";                                       // records dir 기준 — 교체 동기화의 대상
 
-const EMPTY_CANDIDATES = { lessons: [], examples: [], flaky: [], needs_human: [] };
+/** 후보 목록의 빈 값. 함수로 둔다 — 상수 객체를 퍼뜨리면 한 실행의 push가 다음 실행에 새어 나간다. */
+export const emptyCandidates = () => ({ lessons: [], examples: [], flaky: [], needs_human: [] });
 
 /** `now`(ISO)를 브랜치·파일 이름에 쓰는 `YYYY-MM-DD-HHMM`으로. UTC로만 — 러너의 TZ와 무관하게 같은 값. */
 export function stampOf(now) {
@@ -65,6 +74,27 @@ export const ymdOf = (v) => {
   const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(v ?? ""));
   return m ? m[1] : todayOf(v);
 };
+
+/**
+ * run 기록의 가장 오래된 섹션 시각 — retro가 한 번도 돈 적 없을 때의 `period.from`이다.
+ * 섹션 헤더는 `## <stage> · <iso> · <runner>`(run-record.js) — 코멘트 타임스탬프가 아니라 **기록**에서
+ * 읽는다: 기간은 "공장이 무엇을 했는가"의 창이고 그 사실의 출처는 run 기록이다(`_retro`는 건너뛴다).
+ */
+export function earliestRecordAt(records) {
+  const map = records instanceof Map ? records : new Map(Object.entries(records || {}));
+  let best = null;
+  let bestMs = Infinity;
+  for (const [issue, text] of map) {
+    if (issue === "_retro") continue;
+    for (const m of String(text ?? "").matchAll(/^## \S+ · (\S+) · /gm)) {
+      const ms = Date.parse(m[1]);
+      if (!Number.isFinite(ms) || ms >= bestMs) continue;
+      bestMs = ms;
+      best = m[1];
+    }
+  }
+  return best;
+}
 
 /** 서로 다른 근거 run 수 — `String(r)`로 정규화한다(에이전트가 110과 "110"을 섞어도 창은 한 번만 찬다). */
 export const distinctRuns = (runs) => new Set((Array.isArray(runs) ? runs : []).map((r) => String(r))).size;
@@ -87,22 +117,73 @@ const gapBody = (gap, agentReason) => [
   "이 이슈는 retro가 만들었고 라벨을 옮기지 않습니다 — 큐에 들어간 뒤 정상적인 스테이지가 처리합니다.",
 ].join("\n");
 
-/** `_retro.md` 위쪽에 사람이 먼저 읽는 통계 표(§8.3 "통계" 절과 같은 수치). */
-export function statsTable(stats) {
-  const s = stats || {};
-  const usage = s.usage || {};
-  const tokens = usage.tokens || {};
-  const rejects = Object.entries(s.rejects_by_role || {});
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/**
+ * 창(window) 통계를 누적 통계에 더한다 — **full run에서만** 부른다. 커서가 전진하는 순간이 창이 닫히는
+ * 순간이고, 경량 실행은 커서를 움직이지 않으므로 같은 창을 다시 더하면 이중 집계가 된다(§8.4 delta).
+ * `review_rounds_avg`는 머지 건수로 가중한 누적 평균이다 — 평균의 평균은 평균이 아니다.
+ */
+export function accumulateStats(total, window) {
+  const t = total || {};
+  const w = window || {};
+  const tMerged = Number(t.merged) || 0;
+  const wMerged = Number(w.merged) || 0;
+  const merged = tMerged + wMerged;
+  const avg = merged
+    ? ((Number(t.review_rounds_avg) || 0) * tMerged + (Number(w.review_rounds_avg) || 0) * wMerged) / merged
+    : 0;
+  const rejects = { ...(t.rejects_by_role || {}) };
+  for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
+  const tok = (side) => (Number(t.usage?.tokens?.[side]) || 0) + (Number(w.usage?.tokens?.[side]) || 0);
+  return {
+    merged,
+    review_rounds_avg: round2(avg),
+    rejects_by_role: rejects,
+    needs_human: (Number(t.needs_human) || 0) + (Number(w.needs_human) || 0),
+    usage: { cost_usd: round2((Number(t.usage?.cost_usd) || 0) + (Number(w.usage?.cost_usd) || 0)), tokens: { input: tok("input"), output: tok("output") } },
+    retros: (Number(t.retros) || 0) + 1,
+  };
+}
+
+const rejectCell = (s) => {
+  const rejects = Object.entries(s?.rejects_by_role || {});
+  return rejects.length ? rejects.map(([r, n]) => `${r} ${n}`).join(", ") : "없음";
+};
+
+/**
+ * `_retro.md` 위쪽에 사람이 먼저 읽는 통계 표(§8.3 "통계" 절과 같은 수치). 두 열이다: 이번 창(N 자가
+ * 조정을 움직이는 값)과 누적(공장의 전체 이력). 창만 보면 "공장이 지금까지 무엇을 했는가"를 알 수 없고,
+ * 누적만 보면 "이번에 무엇이 달라졌는가"를 알 수 없다.
+ */
+export function statsTable(window, total) {
+  const w = window || {};
+  const t = total || {};
+  const row = (label, a, b) => `| ${label} | ${a} | ${b} |`;
   return [
-    "| metric | value |",
-    "| --- | --- |",
-    `| merged | ${s.merged ?? 0} |`,
-    `| review rounds avg | ${s.review_rounds_avg ?? 0} |`,
-    `| needs-human | ${s.needs_human ?? 0} |`,
-    `| rejects by role | ${rejects.length ? rejects.map(([r, n]) => `${r} ${n}`).join(", ") : "없음"} |`,
-    `| cost (usd) | ${Number(usage.cost_usd || 0).toFixed(2)} |`,
-    `| tokens | input ${tokens.input || 0} / output ${tokens.output || 0} |`,
+    "| metric | this window | cumulative |",
+    "| --- | --- | --- |",
+    row("merged", w.merged ?? 0, t.merged ?? 0),
+    row("review rounds avg", w.review_rounds_avg ?? 0, t.review_rounds_avg ?? 0),
+    row("needs-human", w.needs_human ?? 0, t.needs_human ?? 0),
+    row("rejects by role", rejectCell(w), rejectCell(t)),
+    row("cost (usd)", Number(w.usage?.cost_usd || 0).toFixed(2), Number(t.usage?.cost_usd || 0).toFixed(2)),
+    row("tokens", `input ${w.usage?.tokens?.input || 0} / output ${w.usage?.tokens?.output || 0}`, `input ${t.usage?.tokens?.input || 0} / output ${t.usage?.tokens?.output || 0}`),
+    row("full retros", "—", t.retros ?? 0),
   ].join("\n");
+}
+
+/**
+ * 채택된 항목을 후보 목록에서 내린다 — 채택된 후보를 남겨 두면 다음 retro가 같은 것을 또 제안하고
+ * (`applyLessons`가 'duplicate'로 거부하므로 해롭지는 않지만) 후보 목록이 영원히 커진다. 근거가
+ * 모자라 미룬 후보는 **남긴다**(Global Constraints) — 여기서 내리는 것은 실제로 파일에 들어간 텍스트뿐이다.
+ */
+export function retireCandidates(candidates, texts) {
+  const drop = new Set((texts || []).map((t) => String(t ?? "").trim()).filter(Boolean));
+  const c = candidates || emptyCandidates();
+  if (!drop.size) return c;
+  const keep = (list) => (list || []).filter((x) => !drop.has(String(x?.text ?? "").trim()));
+  return { ...c, lessons: keep(c.lessons), examples: keep(c.examples) };
 }
 
 const byRole = (items) => {
@@ -116,14 +197,57 @@ const byRole = (items) => {
   return map;
 };
 
+const dedupeIssues = (...lists) => {
+  const seen = new Map();
+  for (const list of lists) for (const i of list || []) if (i?.number != null && !seen.has(i.number)) seen.set(i.number, i);
+  return [...seen.values()];
+};
+
+/**
+ * 이번 실행이 **결정한 상태 변경**을 하나의 값으로 모아 둔다. 순수 함수라, 동기화가 "state moved"로
+ * 튕겼을 때 새로 읽은 base 상태에 **같은 변이를 그대로 다시 적용**할 수 있다 — 그래서 경합에서도
+ * 남의 이력을 지우지 않고 내 이력을 얹을 수 있다(불변식 3c). n_before/n_after와 후보 병합은 언제나
+ * "적용 시점의 base"를 기준으로 다시 계산된다.
+ */
+export function applyMutation(base, m = {}) {
+  const b = base || {};
+  const s = {
+    ...b,
+    cursor: { last_retro_at: null, last_record_offsets: {}, ...(b.cursor || {}) },
+    history: Array.isArray(b.history) ? [...b.history] : [],
+  };
+  if (!Number.isFinite(s.n) || s.n < 1) s.n = 1;
+  if (!Number.isFinite(s.merges_since) || s.merges_since < 0) s.merges_since = 0;
+
+  if (m.mergesSince != null) s.merges_since = m.mergesSince;           // 기록에서 센 값(결정적)
+  else if (m.mergesDelta) s.merges_since += m.mergesDelta;             // 셀 수 없었을 때만 잡 실행 횟수로
+
+  s.candidates = m.candidates ? mergeCandidates(b.candidates || emptyCandidates(), m.candidates) : (b.candidates || emptyCandidates());
+  if (m.stats) s.stats = m.stats;
+  if (m.lastFullFailed) s.last_full_failed = m.lastFullFailed;
+
+  if (m.full) {
+    const nBefore = s.n;
+    s.n = nextN(nBefore, { yield: m.full.yield, needsHumanSince: m.full.needsHumanSince }, m.full.bounds || { min: 1, max: Infinity });
+    s.history.push({ ...m.full.entry, n_before: nBefore, n_after: s.n });
+    s.merges_since = 0;
+    s.cursor = { ...s.cursor, last_retro_at: m.full.at };
+    s.candidates = retireCandidates(s.candidates, m.full.retire);
+    s.stats_total = accumulateStats(b.stats_total, m.stats);
+    s.deferred_proposals = m.full.deferredProposals || [];
+    s.deletion_candidates = m.full.deletionCandidates || [];
+    delete s.last_full_failed;
+  }
+  return s;
+}
+
 /**
  * `runRetro({ deps, force, now }) → 0 | 1 | 2`
  *   0 = 정상(경량 수확만 했든, 전체 retro를 돌았든, 전체 분석이 실패해 다음 머지로 넘겼든)
- *   1 = 예상하지 못한 중단(오케스트레이션 자체가 터졌다 — 상태는 최선의 범위에서 저장한다)
- *   2 = `_retro.md`가 손상됐다(사람이 봐야 한다 — 아무것도 쓰지 않는다)
+ *   1 = 예상하지 못한 중단, 또는 상태가 그 사이 움직여 덮어쓰기를 거부했다(no clobber)
+ *   2 = 상태를 읽지 못했다 — 손상됐거나 브랜치 내용을 확정하지 못했다(아무것도 쓰지 않는다)
  *
- * `force`(`factory run retro --force`)는 두 가지를 바꾼다: N을 무시하고 전체 retro를 돌리고,
- * `merges_since`를 **올리지 않는다**(사람이 손으로 돌린 실행은 머지 이벤트가 아니다).
+ * `force`(`factory run retro --force`)는 N을 무시하고 전체 retro를 돌린다.
  */
 export async function runRetro({ deps, force = false, now } = {}) {
   const d = deps;
@@ -141,85 +265,145 @@ export async function runRetro({ deps, force = false, now } = {}) {
     }
   };
 
-  let state = null;
-  const persist = async () => {
-    if (!state) return;
-    try { await d.writeState(state, { statsTable: statsTable(state.stats) }); }
-    catch (e) { record(`retro: _retro.md write failed — ${e?.message || e}`); }
-    try {
-      const s = await d.sync();
-      if (s && s.ok === false) record(`retro: records sync failed — ${s.reason}`);
-    } catch (e) { record(`retro: records sync aborted — ${e?.message || e}`); }
-  };
-
   try {
-    // ① hydrate — records 브랜치의 run 기록과 `_retro.md`를 로컬로 복원한다. 이게 없으면 fresh
-    // checkout에서 상태가 "처음 실행"으로 보이고, 이어지는 sync가 브랜치의 누적 이력을 덮어쓴다.
-    let hydrated = null;
-    try { hydrated = await d.hydrate(); }
-    catch (e) { record(`retro: hydrate failed — ${e?.message || e}`); }
+    // ① hydrate — records 브랜치의 run 기록과 `_retro.md`를 로컬로 복원한다. **출처를 확인한다**:
+    // 브랜치 내용을 확정하지 못했으면(fetch 실패, `_retro.md` 부분 읽기 실패) 상태를 쓰지 않는다.
+    let hy = null;
+    try { hy = await d.hydrate(); }
+    catch (e) {
+      console.error(`factory: retro aborted — hydrate threw: ${e?.message || e}`);
+      record(`retro: hydrate failed — refusing to write state (${e?.message || e})`);
+      return 2;
+    }
+    if (!hy?.fetched) {
+      console.error("factory: retro aborted — could not read the factory/records branch");
+      record(`retro: hydrate failed — refusing to write state (${hy?.reason || "records branch not read"})`);
+      return 2;
+    }
+    if (hy.stateFailed) {
+      console.error("factory: retro aborted — the branch has _retro.md but it could not be read");
+      record("retro: hydrate failed — refusing to write state (_retro.md unreadable on the branch)");
+      return 2;
+    }
+    // 브랜치에 `_retro.md`가 아예 없으면 첫 실행이다 — 기본 상태로 진행한다(교체가 아니라 생성이다).
+    let expectBlob = { [STATE_FILE]: hy.stateBlob ?? null };
 
     // ② 상태 — 파서가 던지면 절대 덮어쓰지 않는다(손상된 `_retro.md`는 사람의 몫이다).
-    try { state = await d.readState(); }
+    let base;
+    try { base = await d.readState(); }
     catch (e) {
       console.error(`factory: retro aborted — ${e?.message || e}`);
       record(`retro: _retro.md unreadable — ${e?.message || e}`);
       return 2;
     }
-    state.cursor = state.cursor || { last_retro_at: null, last_record_offsets: {} };
-    state.candidates = state.candidates || { ...EMPTY_CANDIDATES };
-    state.history = Array.isArray(state.history) ? state.history : [];
-    // N이 숫자가 아니거나 1 밑이면(손으로 고친 상태 파일, 옛 형식) 1로 되돌린다 — 0이나 NaN이면
-    // shouldRunFull이 매 머지마다 full을 돌리거나 영원히 돌리지 않는다. 조용히 넘기지 않고 기록한다.
-    if (!Number.isFinite(state.n) || state.n < 1) {
-      record(`retro: n was ${JSON.stringify(state.n)} — reset to 1`);
-      state.n = 1;
-    }
-    if (!Number.isFinite(state.merges_since) || state.merges_since < 0) state.merges_since = 0;
+    if (!Number.isFinite(base.n) || base.n < 1) record(`retro: n was ${JSON.stringify(base.n)} — reset to 1`);
+    const guardedN = Number.isFinite(base.n) && base.n >= 1 ? base.n : 1;
+    const baseMerges = Number.isFinite(base.merges_since) && base.merges_since >= 0 ? base.merges_since : 0;
+    const since = base.cursor?.last_retro_at ?? null;
 
-    // ③ 머지 카운터 — 트리거가 머지 이벤트일 때만 올린다.
-    if (!force) state.merges_since += 1;
+    /**
+     * 상태를 쓰고 records 브랜치로 동기화한다. 교체가 "state moved"로 튕기면(직렬화가 어떤 이유로든
+     * 깨졌다) 새 상태를 다시 읽어 **같은 변이를 그 위에 얹고** 딱 한 번 더 시도한다. 그래도 움직였으면
+     * 덮어쓰지 않고 실패를 알린다 — 남의 이력을 지우는 것보다 시끄럽게 실패하는 것이 낫다.
+     */
+    const persist = async (mutation) => {
+      let cur = base;
+      for (let attemptNo = 0; attemptNo < 2; attemptNo += 1) {
+        const next = applyMutation(cur, mutation);
+        try { await d.writeState(next, { statsTable: statsTable(next.stats, next.stats_total) }); }
+        catch (e) { record(`retro: _retro.md write failed — ${e?.message || e}`); return { ok: false }; }
 
-    // ④ 경량 수확(§8.4) — 마지막 retro 커서 이후만 본다. 실패해도 물러나지 않는다: 수확이 비면
+        let s;
+        try { s = await d.sync({ expectBlob }); }
+        catch (e) { record(`retro: records sync aborted — ${e?.message || e}`); return { ok: true }; }
+        if (!s || s.ok !== false) return { ok: true };
+        if (!s.moved) { record(`retro: records sync failed — ${s.reason}`); return { ok: true }; }
+
+        record(`retro: state moved on the branch — ${attemptNo === 0 ? "re-hydrating and retrying once" : "refusing to overwrite"} (${s.reason})`);
+        if (attemptNo === 1) return { ok: false, moved: true };
+        try {
+          const again = await d.hydrate();
+          if (!again?.fetched || again.stateFailed) return { ok: false, moved: true };
+          expectBlob = { [STATE_FILE]: again.stateBlob ?? null };
+          cur = await d.readState();
+        } catch (e) {
+          record(`retro: re-hydrate failed — ${e?.message || e}`);
+          return { ok: false, moved: true };
+        }
+      }
+      return { ok: false, moved: true };
+    };
+
+    // ② 경량 수확(§8.4) — 마지막 retro 커서 이후만 본다. 실패해도 물러나지 않는다: 수확이 비면
     // 이번 머지의 후보가 없을 뿐이고, 후보는 `_retro.md`에 누적되므로 다음 머지가 다시 본다.
-    const since = state.cursor.last_retro_at ?? null;
-    let h = { candidates: { ...EMPTY_CANDIDATES }, stats: null, issues: [], commentsByIssue: new Map(), first: null };
-    const harvested = await step("harvest", () => d.harvest({ since, records: hydrated?.records }));
-    if (harvested.ok && harvested.value) h = { ...h, ...harvested.value };
-    state.candidates = mergeCandidates(state.candidates, h.candidates);
-    // 통계는 **창(since..now)의 값으로 교체**한다 — 누적으로 더하면 커서가 움직이지 않는 경량 실행이
-    // 매 머지마다 같은 창을 다시 더해 이중 집계가 된다(delta의 단위는 창이지 실행이 아니다, §8.4).
-    if (h.stats) state.stats = h.stats;
+    let h = { candidates: emptyCandidates(), stats: null, issues: [], flakyIssues: [], harnessTitles: [], commentsByIssue: new Map(), first: null };
+    let harvestRan = false;
+    const doHarvest = async () => {
+      harvestRan = true;
+      const r = await step("harvest", () => d.harvest({ since, records: hy.records }));
+      if (r.ok && r.value) h = { ...h, ...r.value };
+    };
+    // 머지 수는 **기록에서 센다**(결정적) — 잡 실행 횟수로 세면 재실행이 부풀리고 놓친 이벤트가 빠진다.
+    // 셀 수 없었을 때(수확 실패, light_on_merge:false)만 실행 횟수로 +1 한다.
+    const counted = () => (Number.isFinite(h.stats?.merged) ? h.stats.merged : null);
 
-    // ⑤ full인가 — `force`는 N을 무시한다.
-    const decision = await d.shouldRunFull({ state, force });
+    // `light_on_merge: false`는 "경량 실행에서는 후보 추출을 하지 않는다"는 선언이다(§8.4) — 그러면
+    // 판정을 수확보다 **먼저** 내려야 하고, 그때 머지 수는 실행 횟수로만 셀 수 있다. 기본값(true)에서는
+    // 수확이 먼저이므로 판정에 기록에서 센 값을 쓸 수 있다.
+    const lightOnMerge = d.lightOnMerge !== false;
+    if (lightOnMerge) await doHarvest();
+    // `shouldRunFull`의 계약은 "`merges_since`는 **이번 머지를 아직 반영하지 않은** 값"이라 스스로 +1을
+    // 더한다(state.js). 기록에서 센 값은 이번 머지를 **이미 포함한다**(머지 스테이지가 이슈를 닫은 뒤에
+    // 이 잡이 뜬다) — 그래서 판정에는 1을 빼서 넘긴다. 0건이면 -1이 되어 판정은 light가 되는데, 그게
+    // 맞다: 창에서 관측된 머지가 없으면 전체 retro가 볼 것도 없다.
+    const forDecision = counted() != null ? counted() - 1 : baseMerges;
+    const decision = await d.shouldRunFull({ state: { ...base, n: guardedN, merges_since: forDecision }, force });
+    if (decision?.full && !harvestRan) await doHarvest();
+
+    const mergesSince = counted();
+    const countBits = mergesSince != null ? { mergesSince } : { mergesDelta: force ? 0 : 1 };
+    const harvestBits = harvestRan ? { candidates: h.candidates, stats: h.stats } : {};
+
+    // ③ light — 전체 분석 없이 후보만 쌓고 물러난다.
     if (!decision?.full) {
-      record(`retro: light (merges_since=${state.merges_since}/${state.n})`);
-      await persist();
-      return 0;
+      const finalMerges = mergesSince ?? baseMerges + (force ? 0 : 1);
+      record(`retro: light (merges_since=${finalMerges}/${guardedN})`);
+      if (!harvestRan) record("retro: harvest skipped — light_on_merge is false");
+      const p = await persist({ ...countBits, ...harvestBits });
+      return p.moved ? 1 : 0;
     }
 
-    // ⑥ 전체 분석 — 후보 파일을 쓰고 `claude -p "/factory-retro"`를 부른다(full일 때만 토큰을 쓴다).
+    // ④ 성숙도 격차는 **분석보다 먼저** 판정한다(결정적, §5.2.1) — 후보 파일에 실어서 에이전트가
+    // "우리가 찾은 격차"에만 이유 문장을 보태게 한다(없는 격차를 지어내지 못한다).
+    const gapsRes = await step("maturity", () => d.maturityGaps());
+    const gaps = (gapsRes.ok && gapsRes.value) || [];
+
+    // ⑤ 전체 분석 — 후보 파일을 쓰고 `claude -p "/factory-retro"`를 부른다(full일 때만 토큰을 쓴다).
     const period = { from: since ?? h.first ?? at, to: at };
-    let envelope = null;
     // history는 복사해서 넘긴다 — 후보 파일은 이 호출 시점의 스냅샷이어야 하고(이 실행의 이력 항목은
     // 아직 만들어지지도 않았다), 에이전트 쪽 코드가 상태 배열을 건드릴 길을 아예 두지 않는다.
-    const called = await step("claude-p", () => d.claudeP({ period, candidates: state.candidates, stats: state.stats, history: [...state.history] }));
-    if (called.ok) envelope = called.value;
+    const snapshot = applyMutation(base, { ...countBits, ...harvestBits });
+    const called = await step("claude-p", () => d.claudeP({
+      period,
+      candidates: snapshot.candidates,
+      stats: snapshot.stats,
+      history: [...snapshot.history],
+      maturity_gaps: gaps,
+    }));
+    const envelope = called.ok ? called.value : null;
     const out = envelope && !envelope.is_error ? extractJson(envelope.result) : null;
     const v = out ? validate("retro.v1", out) : { ok: false, errors: [envelope ? (envelope.is_error ? "claude -p reported is_error" : "no JSON object in result") : (called.error || "claude -p failed")] };
     if (!v.ok) {
       const reason = v.errors.join("; ");
       // 실패를 상태에 남기지만 `merges_since`는 리셋하지 않는다 — 다음 머지가 다시 전체 retro를 돈다.
-      state.last_full_failed = { at, reason };
       record(`retro: full analysis failed — ${reason} (retrying on the next merge)`);
-      await persist();
-      return 0;
+      const p = await persist({ ...countBits, ...harvestBits, lastFullFailed: { at, reason } });
+      return p.moved ? 1 : 0;
     }
-    delete state.last_full_failed;
 
-    // ⑦ 집행 — 각 단계는 격리되고, 결과는 `applied`에 쌓여 `_retro.md` 이력에 남는다.
+    // ⑥ 집행 — 각 단계는 격리되고, 결과는 `applied`에 쌓여 `_retro.md` 이력에 남는다.
     const files = {};                                                 // 다크 PR에 실릴 변경 파일: 경로 → 새 전문
+    const retire = [];                                                // 실제로 파일에 들어간 텍스트 — 후보에서 내린다
     let addedLessons = 0;
     let addedRoleItems = 0;
     let harnessIssues = 0;
@@ -236,6 +420,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
       const res = r.value;
       applied.push({ step: `lessons:${role}`, added: (res.added || []).map((a) => a.id), rejected: res.rejected || [], evicted: res.evicted || [] });
       addedLessons += (res.added || []).length;
+      for (const a of res.added || []) retire.push(a.text);
       // 실제로 바뀐 파일만 PR에 싣는다 — 채택이 하나도 없으면 `applyLessons`는 원문을 바이트 그대로
       // 돌려주므로, 넣어도 빈 diff가 되고 "변경 없음" 커밋이 실패한다.
       if (res.path && ((res.added || []).length || (res.evicted || []).length)) files[res.path] = res.text;
@@ -264,6 +449,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
       const res = r.value;
       applied.push({ step: `role:${role}`, added: res.added || [], skipped: res.skipped || [], deferred });
       addedRoleItems += (res.added || []).length;
+      for (const a of res.added || []) retire.push(a.text);
       if (res.path && (res.added || []).length) files[res.path] = res.text;
     }
 
@@ -277,12 +463,10 @@ export async function runRetro({ deps, force = false, now } = {}) {
       }
     }
 
-    // (d) 성숙도 승격 이슈 — 판정은 결정적(§5.2.1), 에이전트는 이유 문장만 보탠다. 제목으로 dedup한다
-    // (열려 있는 이슈만 — 닫힌 이슈는 이미 처리됐다는 뜻이라 새 격차는 새 이슈를 받아야 한다).
-    const openIssues = (h.issues || []).filter((i) => i?.state !== "closed");
-    const openTitles = new Set(openIssues.map((i) => String(i?.title ?? "").trim()));
-    const gapsRes = await step("maturity", () => d.maturityGaps());
-    for (const gap of (gapsRes.ok && gapsRes.value) || []) {
+    // (d) 성숙도 승격 이슈 — 판정은 위에서 이미 났고, 에이전트는 이유 문장만 보탠다. 제목으로 dedup한다
+    // (열려 있는 `factory:harness` 이슈만 — 닫힌 이슈는 처리됐다는 뜻이라 새 격차는 새 이슈를 받는다).
+    const openTitles = new Set((h.harnessTitles || []).map((t) => String(t ?? "").trim()));
+    for (const gap of gaps) {
       const title = gapTitle(gap);
       if (openTitles.has(title)) { applied.push({ step: "harness", title, skipped: "duplicate" }); continue; }
       const agentReason = (out.harness || []).find((x) => x?.target === gap?.target)?.reason;
@@ -294,23 +478,27 @@ export async function runRetro({ deps, force = false, now } = {}) {
     }
 
     // (e) flaky 격리 등록(§5.2.5-⑤, P4-R3) — 등록은 `quarantine.toml` 저장 + 이슈 코멘트까지 한 단계다.
-    const reg = await step("quarantine-register", () => d.registerQuarantine({ issues: h.issues, commentsByIssue: h.commentsByIssue, now: at }));
+    // 대상 목록은 라벨로 좁힌 `factory:flaky` 이슈다(200개 일반 스냅샷이 아니라).
+    const reg = await step("quarantine-register", () => d.registerQuarantine({ issues: h.flakyIssues, commentsByIssue: h.commentsByIssue, now: at }));
     const registered = (reg.ok && reg.value?.registered) || [];
     if (registered.length) applied.push({ step: "quarantine-register", registered });
 
     // (f) TTL 만료 → "다른 레벨에서 다시 쓰라"는 이슈. 만료 사실은 sweeper가 flaky 이슈에 남긴
-    // `<!-- factory-quarantine expired id=… -->` 코멘트에만 있다(`quarantine.toml`에는 이미 없다).
-    const exp = await step("quarantine-expired", () => d.expiredIds({ issues: h.issues, commentsByIssue: h.commentsByIssue, since }));
+    // `<!-- factory-quarantine expired id=… -->` 코멘트에**만** 있다 — `applyPolicy`는 만료를 플래그로만
+    // 내고 `quarantine.toml`에는 저장하지 않으므로(항목은 그대로 남는다) 파일에는 흔적이 없다.
+    // 닫힌 flaky 이슈에 달린 만료 코멘트도 놓치지 않으려 일반 스냅샷과 합쳐서 본다.
+    const allIssues = dedupeIssues(h.issues, h.flakyIssues);
+    const exp = await step("quarantine-expired", () => d.expiredIds({ issues: allIssues, commentsByIssue: h.commentsByIssue, since }));
     const expired = (exp.ok && exp.value) || [];
-    for (const draft of rewriteIssuesForExpired({ expired, openIssues })) {
+    const openFlaky = (h.flakyIssues || []).filter((i) => i?.state !== "closed");
+    for (const draft of rewriteIssuesForExpired({ expired, openIssues: openFlaky })) {
       const r = await step("rewrite-issue", () => d.createIssue(draft));
       if (r.ok) applied.push({ step: "rewrite-issue", title: draft.title, issue: r.value ?? null });
     }
 
     // (g) 삭제 후보 — 재작성 이슈가 다시 needs-human에 도달한 것. 삭제는 조용히 일어나지 않는다:
     // `_retro.md`에 후보로 남기고 **제안 PR**(사람 머지)의 `test-delete` 항목으로 낸다(§5.2.5-④).
-    const deletions = deletionCandidates({ issues: h.issues, commentsByIssue: h.commentsByIssue });
-    state.deletion_candidates = deletions;
+    const deletions = deletionCandidates({ issues: openFlaky, commentsByIssue: h.commentsByIssue });
     const deletionProposals = deletions.map((x) => ({
       kind: "test-delete",
       title: `test-delete: ${x.id}`,
@@ -323,11 +511,10 @@ export async function runRetro({ deps, force = false, now } = {}) {
 
     // (h) 제안 PR — 최소 근거 창(§8.4)은 L1이 센다. 미달 제안은 버리지 않고 상태에 남긴다.
     const { accepted, deferred } = filterByEvidence([...(out.proposals || []), ...deletionProposals]);
-    state.deferred_proposals = deferred.map((x) => x.proposal);
     if (deferred.length) applied.push({ step: "proposals", deferred: deferred.map((x) => ({ kind: x.proposal?.kind, title: x.proposal?.title, reason: x.reason })) });
     let proposalPr = null;
     if (accepted.length) {
-      const { title, body } = renderProposalPr({ period: { from: ymdOf(period.from), to: ymdOf(period.to) }, proposals: accepted, stats: state.stats });
+      const { title, body } = renderProposalPr({ period: { from: ymdOf(period.from), to: ymdOf(period.to) }, proposals: accepted, stats: snapshot.stats });
       const date = stampOf(at);
       const r = await step("publish-proposal", () => d.publishProposal({ files: { [`docs/factory/retro/${date}.md`]: body }, title, body, date }));
       if (r.ok) {
@@ -336,24 +523,29 @@ export async function runRetro({ deps, force = false, now } = {}) {
       }
     }
 
-    // ⑧ yield → N 자가 조정 → 이력 → 커서 전진(§8.4). PR이 실제로 열리지 않았으면(번호 없음) 세지 않는다.
+    // ⑦ yield → N 자가 조정 → 이력 → 커서 전진(§8.4). PR이 실제로 열리지 않았으면(번호 없음) 세지 않는다.
     const proposalCount = proposalPr && proposalPr.pr != null ? 1 : 0;
     const y = addedLessons + addedRoleItems + harnessIssues + proposalCount;
-    const needsHumanSince = Number(state.stats?.needs_human ?? 0) || 0;
-    const bounds = d.nBounds || { min: 1, max: Infinity };
-    const nBefore = state.n;
-    const nAfter = nextN(nBefore, { yield: y, needsHumanSince }, bounds);
-    state.n = nAfter;
-    state.history.push({ at, yield: y, n_before: nBefore, n_after: nAfter, needs_human_since: needsHumanSince, applied });
-    state.merges_since = 0;
-    state.cursor = { ...state.cursor, last_retro_at: at };
-    record(`retro: full — yield=${y} (lessons ${addedLessons}, role items ${addedRoleItems}, harness ${harnessIssues}, proposal PR ${proposalCount}) · n ${nBefore}→${nAfter}`);
-    await persist();
-    return 0;
+    const needsHumanSince = Number(h.stats?.needs_human ?? base.stats?.needs_human ?? 0) || 0;
+    record(`retro: full — yield=${y} (lessons ${addedLessons}, role items ${addedRoleItems}, harness ${harnessIssues}, proposal PR ${proposalCount})`);
+    const p = await persist({
+      ...countBits,
+      ...harvestBits,
+      full: {
+        at,
+        yield: y,
+        needsHumanSince,
+        bounds: d.nBounds || { min: 1, max: Infinity },
+        retire,
+        deferredProposals: deferred.map((x) => x.proposal),
+        deletionCandidates: deletions,
+        entry: { at, yield: y, needs_human_since: needsHumanSince, applied },
+      },
+    });
+    return p.moved ? 1 : 0;
   } catch (e) {
     console.error(`factory: retro aborted — ${e?.message || e}`);
     record(`retro: aborted — ${e?.message || e}`);
-    await persist();
     return 1;
   }
 }
@@ -401,7 +593,7 @@ async function main() {
   const now = new Date().toISOString();
   const runsDir = join(root, "docs/factory/runs");
   const outDir = join(root, ".factory/out");
-  const statePath = join(runsDir, "_retro.md");
+  const statePath = join(runsDir, STATE_FILE);
   const readText = (p) => (existsSync(p) ? readFileSync(p, "utf8") : "");
   const defaultBranch = harness.project?.default_branch ?? "main";
   const fileOf = roleFileMap(roles);
@@ -411,51 +603,71 @@ async function main() {
     // 경량 실행은 매 머지마다 도므로 기록은 러너 로그로 충분하다 — `_retro.md`는 `renderRetroState`가
     // 통째로 다시 쓰는 상태 파일이라 run 기록을 append할 수 없다(append하면 다음 render가 지운다).
     record: (line) => console.log(`factory: ${line}`),
+    lightOnMerge: charter.retro?.light_on_merge !== false,
+    /**
+     * 브랜치 내용을 **출처와 함께** 복원한다. run 기록은 append-only 로그라 로컬에 이미 있으면
+     * 건드리지 않는다(아직 push되지 않은 꼬리일 수 있다 — hydrateRecord와 같은 규칙). `_retro.md`는
+     * 예외다: retro만 쓰고 쓸 때마다 sync하므로 **브랜치가 유일한 진실**이고, 로컬 사본은 지난 실행이
+     * 남긴 잔재일 뿐이다. 그 잔재를 읽으면(오래된 체크아웃에서 `factory run retro`) 옛 상태 위에 새
+     * 이력을 쓰고 브랜치 이력을 덮어쓴다.
+     */
     hydrate: async () => {
-      const records = await readRecords({ run, cwd: root });
+      const r = await readRecordsDetailed({ run, cwd: root });
       mkdirSync(runsDir, { recursive: true });
-      for (const [issue, text] of records) {
-        const p = join(runsDir, `${issue}.md`);
-        // run 기록은 append-only 로그다 — 로컬에 이미 있으면 아직 push되지 않은 꼬리일 수 있으니
-        // 건드리지 않는다(hydrateRecord와 같은 규칙). `_retro.md`는 예외다: retro만 쓰고 쓸 때마다
-        // 반드시 sync하므로 **브랜치가 유일한 진실**이고, 로컬 사본은 지난 실행이 남긴 잔재일 뿐이다.
-        // 그 잔재를 읽으면(오래된 체크아웃에서 `factory run retro`) 옛 상태 위에 새 이력을 쓰고
-        // 브랜치의 이력을 통째로 덮어쓴다 — 그래서 여기서만 브랜치 내용으로 되돌린다.
-        if (issue === "_retro" || !existsSync(p)) writeFileSync(p, text);
+      if (r.fetched) {
+        for (const [issue, text] of r.records) {
+          const p = join(runsDir, `${issue}.md`);
+          if (issue === "_retro" || !existsSync(p)) writeFileSync(p, text);
+        }
       }
-      return { records };
+      const stateRel = `docs/factory/runs/${STATE_FILE}`;
+      return {
+        records: r.records,
+        fetched: r.fetched,
+        exists: r.exists,
+        stateBlob: r.blobs.get("_retro") ?? null,
+        stateFailed: (r.failures || []).includes(stateRel),
+        reason: r.fetched ? null : "could not read the factory/records branch",
+      };
     },
     readState: () => parseRetroState(readText(statePath), { initial: retro.initial ?? 1 }),
     writeState: (state, opts) => { mkdirSync(runsDir, { recursive: true }); writeFileSync(statePath, renderRetroState(state, opts)); },
     /**
-     * 이슈·코멘트를 한 번만 긁어 경량 수확과 이후 격리 판정이 같은 스냅샷을 쓴다. `state`는 gh가
-     * 주지 않으므로 `closedAt`에서 만든다(lib 쪽은 소문자 `open`/`closed`를 본다).
-     * 코멘트는 창(`since`) 안에서 움직인 이슈만 읽는다 — 단 `factory:flaky` 이슈는 언제 갱신됐든
-     * 읽는다: 격리 등록·만료 판정의 근거가 그 이슈의 코멘트에만 있다.
+     * 이슈 스냅샷은 세 갈래다 — 목적마다 물어보는 대상이 다르다:
+     *   - `issues`: 일반 스냅샷(최근 200, state all). 창 통계(머지 수·리뷰 라운드·reject)의 재료다.
+     *   - `flakyIssues`: `factory:flaky` **라벨로 좁힌** 열린 이슈 — 격리 등록·재작성 dedup·삭제 후보.
+     *   - `harnessTitles`: `factory:harness` 라벨로 좁힌 열린 이슈 제목 — 성숙도 이슈 dedup.
+     * 라벨로 좁히지 않으면 "최근 200개" 창 밖으로 밀려난 flaky·harness 이슈를 못 보고 중복을 만든다.
+     * 코멘트는 창 안에서 움직인 이슈 + 열린 flaky 이슈만 읽는다(그 둘이 판정에 쓰이는 전부다).
      */
     harvest: async ({ since, records }) => {
-      const raw = await gh.issueList({ state: "all", limit: 200 });
-      const issues = raw.map((i) => ({ ...i, state: i.closedAt ? "closed" : "open" }));
+      const withState = (list) => list.map((i) => ({ ...i, state: i.closedAt ? "closed" : "open" }));
+      const issues = withState(await gh.issueList({ state: "all", limit: 200 }));
+      const flakyIssues = withState(await gh.issueList({ labels: [FLAKY_LABEL], state: "open" }));
+      const harnessTitles = (await gh.issueList({ labels: [HARNESS_LABEL], state: "open" })).map((i) => i.title);
+
       const sinceMs = since == null ? null : Date.parse(since);
+      const moved = (i) => {
+        if (sinceMs == null || !i.updatedAt) return true;
+        const ms = Date.parse(i.updatedAt);
+        return !Number.isFinite(ms) || ms > sinceMs;
+      };
       const commentsByIssue = new Map();
-      for (const i of issues) {
-        const stale = sinceMs != null && i.updatedAt && Number.isFinite(Date.parse(i.updatedAt)) && Date.parse(i.updatedAt) <= sinceMs;
-        if (stale && !(i.labels || []).includes("factory:flaky")) continue;
+      for (const i of dedupeIssues(issues.filter(moved), flakyIssues)) {
         try { commentsByIssue.set(i.number, await gh.comments(i.number)); }
         catch (e) { console.error(`factory: retro could not read comments on #${i.number} — ${e?.message || e}`); }
       }
-      const stamps = [...commentsByIssue.values()].flat().map((c) => c?.createdAt).filter(Boolean).sort();
       const { candidates, stats } = harvestRecords({ records, issues, commentsByIssue, since });
-      return { candidates, stats, issues, commentsByIssue, first: stamps[0] ?? null };
+      return { candidates, stats, issues, flakyIssues, harnessTitles, commentsByIssue, first: earliestRecordAt(records) };
     },
     shouldRunFull: ({ state, force: f }) => shouldRunFull({ state, retro, force: f }),
     /**
      * 후보 파일을 먼저 쓰고(워크플로가 그 경로만 인자로 받는다, P4-R6) `claude -p`를 부른다.
      * 파싱에 실패해도 원본 stdout은 `.factory/out/retro.json`에 남는다 — 사후 감사의 1차 증거다.
      */
-    claudeP: async ({ period, candidates, stats, history }) => {
+    claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
       mkdirSync(outDir, { recursive: true });
-      writeFileSync(join(outDir, "retro-candidates.json"), `${JSON.stringify({ period, candidates, stats, history }, null, 2)}\n`);
+      writeFileSync(join(outDir, "retro-candidates.json"), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
       const args = ["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
       if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
       const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
@@ -505,9 +717,10 @@ async function main() {
     },
     expiredIds: ({ issues, commentsByIssue, since }) => expiredFromComments({ issues, commentsByIssue, since }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),
-    // `_retro.md`는 매번 통째로 다시 렌더링되는 상태 파일이라 꼬리 병합의 대상이 아니다 — 병합되면
-    // 마커·JSON 펜스가 둘인 파일이 되고 다음 retro가 옛 상태를 읽는다(records-branch.js `overwrite` 참조).
-    sync: () => syncRecords({ run, cwd: root, message: `retro: state update (${runnerId})`, overwrite: ["_retro.md"] }),
+    // `_retro.md`는 매번 통째로 다시 렌더링되는 상태 파일이라 꼬리 병합의 대상이 아니고(병합되면 마커·
+    // JSON 펜스가 둘인 파일이 된다), 교체는 하이드레이트한 blob에만 건다 — 그 사이 상태가 움직였으면
+    // 덮어쓰지 않고 moved로 튕긴다(records-branch.js `overwrite`/`expectBlob` 참조).
+    sync: ({ expectBlob } = {}) => syncRecords({ run, cwd: root, message: `retro: state update (${runnerId})`, overwrite: [STATE_FILE], expectBlob }),
     nBounds: { min: retro.min ?? 1, max: retro.max ?? Infinity },
   };
 

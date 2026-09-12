@@ -79,8 +79,22 @@ async function fetchParent({ run, cwd, branch }) {
  * 로컬이 그 연장이 아니면 공통 접두어 이후의 로컬 꼬리만 tip 뒤에 이어 붙인다 — 어느 쪽도
  * 덮어쓰지 않는다) → write-tree → commit-tree → push. 한 번의 시도.
  */
-async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite }) {
+async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite, expectBlob }) {
   const parent = await fetchParent({ run, cwd, branch });
+
+  // 교체(overwrite) 대상은 "내가 읽은 그 버전을 교체한다"는 주장이다 — push 전에 브랜치의 그 경로가
+  // 정말 내가 읽은 blob인지 확인한다. 움직였다면(그 사이 다른 retro가 상태를 밀었다) **아무것도 하지
+  // 않고** moved로 돌려준다: 교체는 병합이 아니라 덮어쓰기라 여기서 밀면 남의 상태가 조용히 사라진다.
+  for (const [rel, want] of Object.entries(expectBlob || {})) {
+    if (!files.includes(rel)) continue;
+    const idxPath = `${dir}/${rel}`;
+    const rp = parent ? await run("git", ["rev-parse", `${parent}:${idxPath}`], { cwd }) : { code: 1, stdout: "" };
+    const have = rp.code === 0 && rp.stdout.trim() ? rp.stdout.trim() : null;
+    const expected = want ?? null;
+    if (have !== expected) {
+      return { ok: false, moved: true, reason: `state moved: ${idxPath} (hydrated ${expected ?? "absent"}, branch ${have ?? "absent"})` };
+    }
+  }
 
   const idxEnv = { ...gitEnv, GIT_INDEX_FILE: indexPath };
   const rt = parent
@@ -150,8 +164,14 @@ async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, file
  * 펜스가 두 개인 파일이 된다. 그러면 다음 retro의 파서는 **옛 상태**(첫 펜스)를 읽고 상태가 영원히
  * 전진하지 않는다. `_retro.md`는 `concurrency: factory-retro`로 직렬화된 단일 작성자(retro)만 쓰므로
  * 교체가 안전하고, 교체가 유일하게 옳다.
+ *
+ * `expectBlob`: `{ "<dir 기준 상대경로>": "<blob sha>" | null }` — 교체 전에 브랜치의 그 경로가 정말
+ * 내가 하이드레이트한 blob인지 확인한다(null = "그때 브랜치에 없었다"). 다르면 **아무것도 밀지 않고**
+ * `{ok:false, moved:true, reason:'state moved: …'}`로 돌려준다: 직렬화가 어떤 이유로든 깨졌을 때
+ * (수동 실행, 잡 재시도, 다른 러너) 교체가 남의 상태를 조용히 지우는 것을 막는 유일한 장치다.
+ * 호출자는 다시 하이드레이트해 새 상태 위에 자기 변경을 얹고 한 번 더 시도할 수 있다.
  */
-export async function syncRecords({ run, cwd, branch = "factory/records", dir = "docs/factory/runs", message, env = {}, overwrite = [] }) {
+export async function syncRecords({ run, cwd, branch = "factory/records", dir = "docs/factory/runs", message, env = {}, overwrite = [], expectBlob = null }) {
   const files = listMarkdownFiles(join(cwd, dir));
   if (files.length === 0) return { ok: true, commit: null, reason: "nothing to sync", retried: false };
 
@@ -167,13 +187,17 @@ export async function syncRecords({ run, cwd, branch = "factory/records", dir = 
   };
   const over = new Set(overwrite);
   try {
-    const r1 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite: over });
+    const r1 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite: over, expectBlob });
     if (r1.ok) return { ok: true, commit: r1.commit, retried: false, skipped: r1.skipped, merged: r1.merged };
+    // 교체 대상이 움직였다 — 재시도는 의미가 없다(다시 시도해도 같은 blob을 만난다). 호출자가 새
+    // 상태를 다시 읽고 자기 변경을 얹어야 한다.
+    if (r1.moved) return { ok: false, moved: true, reason: r1.reason, retried: false };
     if (!r1.pushStderr || !RETRYABLE.test(r1.pushStderr)) return { ok: false, reason: r1.reason, retried: false, skipped: r1.skipped, merged: r1.merged };
     // 다른 러너가 그 사이 먼저 push했다(non-fast-forward) — 처음부터 딱 한 번 다시 시도한다.
     // 재시도의 fetch가 새 tip을 가져오므로, 같은 파일을 건드린 경우 두 번째 attempt가 꼬리를 병합한다.
-    const r2 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite: over });
+    const r2 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite: over, expectBlob });
     if (r2.ok) return { ok: true, commit: r2.commit, retried: true, skipped: r2.skipped, merged: r2.merged };
+    if (r2.moved) return { ok: false, moved: true, reason: r2.reason, retried: true };
     return { ok: false, reason: r2.reason, retried: true, skipped: r2.skipped, merged: r2.merged };
   } finally {
     try { rmSync(indexPath, { force: true }); } catch { /* best-effort cleanup */ }
@@ -208,22 +232,65 @@ export async function hydrateRecord({ run, cwd, issue, branch = "factory/records
   return { ok: false, hydrated: false, reason: "local record diverged from branch" };
 }
 
-/** `factory/records` 브랜치에서 run 기록을 읽는다. → Map<issue, text>. 브랜치가 없으면 빈 Map. 절대 throw하지 않는다. */
-export async function readRecords({ run, cwd, branch = "factory/records", dir = "docs/factory/runs" }) {
-  const fetchR = await run("git", ["fetch", "origin", `refs/heads/${branch}:${REMOTE_REF}`], { cwd });
-  if (fetchR.code !== 0) return new Map();
-  const ls = await run("git", ["ls-tree", "-r", "--name-only", REMOTE_REF], { cwd });
-  if (ls.code !== 0) return new Map();
+/**
+ * 원격에 <branch>가 실제로 있는지 묻는다(fetch 실패의 두 원인을 가른다).
+ * `git ls-remote --exit-code`는 찾으면 0, **없으면 2**, 그 외 오류면 다른 코드다.
+ * → "yes" | "no" | "unknown". 절대 throw하지 않는다.
+ */
+async function remoteBranchExists({ run, cwd, branch }) {
+  const r = await run("git", ["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`], { cwd });
+  if (r.code === 0) return "yes";
+  if (r.code === 2) return "no";
+  return "unknown";
+}
+
+/**
+ * `factory/records`의 run 기록을 **출처와 함께** 읽는다(fix round 1, Critical).
+ * → `{ records: Map<issue,text>, blobs: Map<issue,sha>, fetched, exists, failures: [path], parent }`
+ *
+ * `readRecords`는 빈 Map과 "정말 비어 있다"를 구별하지 못한다 — 절대 throw하지 않는 설계라서, 네트워크
+ * 실패도 "기록 없음"으로 보인다. 기록을 **append**하는 스테이지에는 그 구별이 필요 없었지만(빈 로컬에
+ * 자기 섹션을 붙여도 syncRecords의 꼬리 병합이 브랜치를 지키니까), 상태 파일을 **교체**하는 retro에는
+ * 치명적이다: fetch가 실패한 회차가 기본 상태를 만들어 브랜치의 진짜 상태 위에 밀어버린다.
+ *   - `fetched: true`  — 브랜치 내용을 확정했다(브랜치가 아직 없다는 확정도 포함, `exists: false`).
+ *   - `fetched: false` — 확정하지 못했다(fetch도 ls-remote도 실패, 또는 ls-tree 실패). 이때 `records`가
+ *     비어 있는 것은 "없다"가 아니라 "모른다"다.
+ *   - `failures` — 트리에는 있는데 내용을 읽지 못한 경로들(부분 실패도 조용히 지나가지 않는다).
+ *   - `blobs` — 각 기록의 blob sha. 교체 동기화의 `expectBlob`이 이 값을 그대로 쓴다.
+ */
+export async function readRecordsDetailed({ run, cwd, branch = "factory/records", dir = "docs/factory/runs" }) {
+  const empty = { records: new Map(), blobs: new Map(), failures: [], parent: null };
+  const parent = await fetchParent({ run, cwd, branch });
+  if (!parent) {
+    const exists = await remoteBranchExists({ run, cwd, branch });
+    if (exists === "no") return { ...empty, fetched: true, exists: false };
+    return { ...empty, fetched: false, exists: exists === "yes" ? true : null };
+  }
+  const ls = await run("git", ["ls-tree", "-r", REMOTE_REF], { cwd });
+  if (ls.code !== 0) return { ...empty, fetched: false, exists: true, parent };
+
   const prefix = dir.endsWith("/") ? dir : `${dir}/`;
-  const out = new Map();
-  for (const path of ls.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+  const records = new Map();
+  const blobs = new Map();
+  const failures = [];
+  for (const line of ls.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    // `<mode> <type> <sha>\t<path>` — --name-only를 쓰지 않는 이유는 sha가 필요해서다(expectBlob).
+    const m = /^(\d+) (\w+) ([0-9a-f]+)\t(.+)$/.exec(line);
+    if (!m || m[2] !== "blob") continue;
+    const [, , , sha, path] = m;
     if (!path.startsWith(prefix) || !path.endsWith(".md")) continue;
     const rest = path.slice(prefix.length);
     if (rest.includes("/")) continue;                                 // dir 바로 아래 파일만 — 중첩 경로는 스킵
     const show = await run("git", ["show", `${REMOTE_REF}:${path}`], { cwd });
-    if (show.code !== 0) continue;
+    if (show.code !== 0) { failures.push(path); continue; }
     const issue = rest.slice(0, -3);
-    out.set(issue, show.stdout);
+    records.set(issue, show.stdout);
+    blobs.set(issue, sha);
   }
-  return out;
+  return { records, blobs, fetched: true, exists: true, failures, parent };
+}
+
+/** `factory/records` 브랜치에서 run 기록을 읽는다. → Map<issue, text>. 브랜치가 없거나 못 읽으면 빈 Map. 절대 throw하지 않는다. */
+export async function readRecords(args) {
+  return (await readRecordsDetailed(args)).records;
 }

@@ -70,6 +70,8 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   expect(y).toContain("cancel-in-progress: false");
   expect(y).toContain("timeout-minutes: 30");
   expect(y).toContain("fetch-depth: 0");
+  // PR head/merge ref가 아니라 머지된 결과가 있는 base 브랜치를 본다 — retro는 현재 저장소 상태를 읽는다
+  expect(y).toContain("ref: ${{ github.event.pull_request.base.ref }}");
   expect(y).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
   expect(y).toContain("uses: ./.factory/actions/setup");
   expect(y).toContain('claude: "true"');                                 // full retro는 claude -p를 부른다

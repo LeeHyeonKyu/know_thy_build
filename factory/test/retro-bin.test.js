@@ -1,5 +1,8 @@
 import { test, expect, vi } from "vitest";
-import { distinctRuns, gapTitle, roleFileMap, runRetro, stampOf, statsTable, todayOf } from "../bin/retro.js";
+import {
+  accumulateStats, applyMutation, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
+  retireCandidates, roleFileMap, runRetro, stampOf, statsTable, todayOf, ymdOf,
+} from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
 
 const NOW = "2026-09-12T13:45:30Z";
@@ -32,10 +35,14 @@ const ISSUES = [
   { number: 33, title: "rewrite flaky test at another level: t3", labels: ["factory:flaky", "factory:needs-human"], state: "open" },
 ];
 
+const FLAKY_ISSUES = ISSUES.filter((i) => i.labels.includes("factory:flaky"));
+
 const HARVEST = () => ({
   candidates: { lessons: [{ role: "correctness", text: "raw claim", runs: [11] }], examples: [], flaky: [{ id: "t1", issue: 21 }], needs_human: [] },
-  stats: { merged: 2, review_rounds_avg: 1.5, rejects_by_role: { correctness: 2 }, needs_human: 0, usage: { cost_usd: 1.5, tokens: { input: 10, output: 20 } } },
+  stats: { merged: 3, review_rounds_avg: 1.5, rejects_by_role: { correctness: 2 }, needs_human: 0, usage: { cost_usd: 1.5, tokens: { input: 10, output: 20 } } },
   issues: ISSUES,
+  flakyIssues: FLAKY_ISSUES,
+  harnessTitles: [],
   commentsByIssue: new Map(),
   first: "2026-08-01T00:00:00Z",
 });
@@ -55,7 +62,7 @@ function makeDeps({ state, overrides = {} } = {}) {
   const deps = {
     now: NOW,
     record: (line) => recorded.push(line),
-    hydrate: vi.fn(async () => ({ records: new Map([["11", "# run 11"]]) })),
+    hydrate: vi.fn(async () => ({ records: new Map([["11", "# run 11"]]), fetched: true, exists: true, stateBlob: "b10b", stateFailed: false })),
     readState: vi.fn(async () => state),
     writeState: vi.fn(async (s, opts) => { written.push({ state: JSON.parse(JSON.stringify(s)), opts }); }),
     harvest: vi.fn(async () => HARVEST()),
@@ -74,6 +81,7 @@ function makeDeps({ state, overrides = {} } = {}) {
     expiredIds: vi.fn(async () => ["t2"]),
     publishProposal: vi.fn(async () => ({ pr: 88, reason: null })),
     sync: vi.fn(async () => ({ ok: true })),
+    lightOnMerge: true,
     nBounds: { min: 1, max: 20 },
     ...overrides,
   };
@@ -106,14 +114,57 @@ test("stampOf/todayOf are UTC and stable; gapTitle is the dedup key", () => {
   expect(gapTitle({ target: "M1", rule: "r", reason: "x".repeat(500) }).length).toBe(240);
 });
 
-test("distinctRuns normalizes to strings; statsTable renders the §8.3 numbers", () => {
+test("distinctRuns normalizes to strings; statsTable shows the window next to the cumulative total", () => {
   expect(distinctRuns([1, "1", 2])).toBe(2);
   expect(distinctRuns(undefined)).toBe(0);
-  const t = statsTable(HARVEST().stats);
-  expect(t).toContain("| merged | 2 |");
-  expect(t).toContain("| needs-human | 0 |");
-  expect(t).toContain("correctness 2");
-  expect(t).toContain("| cost (usd) | 1.50 |");
+  const total = { merged: 9, review_rounds_avg: 1.2, needs_human: 3, rejects_by_role: { qa: 4 }, usage: { cost_usd: 12.5, tokens: { input: 99, output: 88 } }, retros: 4 };
+  const t = statsTable(HARVEST().stats, total);
+  expect(t).toContain("| metric | this window | cumulative |");
+  expect(t).toContain("| merged | 3 | 9 |");
+  expect(t).toContain("| needs-human | 0 | 3 |");
+  expect(t).toContain("| rejects by role | correctness 2 | qa 4 |");
+  expect(t).toContain("| cost (usd) | 1.50 | 12.50 |");
+  expect(t).toContain("| full retros | — | 4 |");
+  // 누적이 아직 없으면(첫 실행) 0으로 렌더링한다 — 빈 칸을 남기지 않는다
+  expect(statsTable(null, null)).toContain("| merged | 0 | 0 |");
+});
+
+test("accumulateStats sums the window into the total and keeps review_rounds_avg a merge-weighted mean", () => {
+  const w1 = { merged: 2, review_rounds_avg: 2, needs_human: 1, rejects_by_role: { qa: 1 }, usage: { cost_usd: 1.5, tokens: { input: 10, output: 20 } } };
+  const t1 = accumulateStats(null, w1);
+  expect(t1).toMatchObject({ merged: 2, review_rounds_avg: 2, needs_human: 1, rejects_by_role: { qa: 1 }, retros: 1 });
+  expect(t1.usage).toEqual({ cost_usd: 1.5, tokens: { input: 10, output: 20 } });
+  const w2 = { merged: 6, review_rounds_avg: 1, needs_human: 0, rejects_by_role: { qa: 2, security: 1 }, usage: { cost_usd: 0.75, tokens: { input: 1, output: 2 } } };
+  const t2 = accumulateStats(t1, w2);
+  expect(t2.merged).toBe(8);
+  expect(t2.review_rounds_avg).toBe(1.25);                                // (2×2 + 1×6) / 8 — 평균의 평균(1.5)이 아니다
+  expect(t2.rejects_by_role).toEqual({ qa: 3, security: 1 });
+  expect(t2.usage.cost_usd).toBe(2.25);
+  expect(t2.usage.tokens).toEqual({ input: 11, output: 22 });
+  expect(t2.retros).toBe(2);
+  // 머지가 0인 창은 평균을 흔들지 않는다
+  expect(accumulateStats(t2, { merged: 0, review_rounds_avg: 0 }).review_rounds_avg).toBe(1.25);
+});
+
+test("earliestRecordAt reads the oldest run-record section timestamp and skips _retro", () => {
+  const records = new Map([
+    ["11", "# Run · #11\n\n## triage · 2026-09-03T10:00Z · gha-1\nx\n\n## plan · 2026-09-04T10:00Z · gha-2\ny\n"],
+    ["12", "# Run · #12\n\n## implement · 2026-09-01T08:30Z · gha-3\nz\n"],
+    ["_retro", "# Retro State\n\n## history · 1999-01-01T00:00Z · x\n"],
+  ]);
+  expect(earliestRecordAt(records)).toBe("2026-09-01T08:30Z");
+  expect(earliestRecordAt(new Map())).toBeNull();
+  expect(earliestRecordAt({ 5: "no sections here" })).toBeNull();
+});
+
+test("retireCandidates drops exactly the texts that made it into a file, and keeps the rest", () => {
+  const c = { lessons: [{ role: "a", text: "adopted" }, { role: "a", text: "still waiting" }], examples: [{ role: "b", text: " adopted example " }], flaky: [{ id: "x" }], needs_human: [{ issue: 1 }] };
+  const out = retireCandidates(c, ["adopted", "adopted example"]);
+  expect(out.lessons).toEqual([{ role: "a", text: "still waiting" }]);
+  expect(out.examples).toEqual([]);
+  expect(out.flaky).toEqual([{ id: "x" }]);                               // flaky·needs_human은 채택의 대상이 아니다
+  expect(retireCandidates(c, [])).toBe(c);
+  expect(emptyCandidates()).not.toBe(emptyCandidates());                  // 공유 상수가 아니다 — 실행 간 누출 금지
 });
 
 test("roleFileMap resolves both the roster name and the agent basename", () => {
@@ -130,35 +181,58 @@ test("roleFileMap resolves both the roster name and the agent basename", () => {
 
 // ── 경량 경로 ────────────────────────────────────────────────────────────
 
-test("light: merges_since += 1, candidates merged, state written and synced, no claude -p", async () => {
-  const state = freshState({ merges_since: 0, n: 3 });
+test("light: merges_since comes from the records (deterministic), candidates merged, state written and synced, no claude -p", async () => {
+  const state = freshState({ merges_since: 7, n: 5 });                    // 옛 카운터 값은 기록에서 센 값으로 교체된다
   const { deps, recorded, last } = makeDeps({ state });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
   expect(deps.claudeP).not.toHaveBeenCalled();
   expect(deps.hydrate).toHaveBeenCalled();
   expect(deps.harvest).toHaveBeenCalledWith(expect.objectContaining({ since: CURSOR }));
-  expect(recorded).toContain("retro: light (merges_since=1/3)");
+  // 기록의 머지 2건 — 잡이 몇 번 돌았는지가 아니라 무엇이 머지됐는지로 센다
+  expect(recorded).toContain("retro: light (merges_since=3/5)");
+  // 판정에는 1을 뺀 값이 간다 — shouldRunFull이 "이번 머지"를 스스로 +1 하기 때문(이중 계산 금지)
+  expect(deps.shouldRunFull).toHaveBeenCalledWith(expect.objectContaining({ state: expect.objectContaining({ merges_since: 2 }) }));
   const s = last();
-  expect(s.merges_since).toBe(1);
+  expect(s.merges_since).toBe(3);
   expect(s.cursor.last_retro_at).toBe(CURSOR);                            // 커서는 full에서만 전진한다
   expect(s.candidates.lessons).toEqual([{ role: "correctness", text: "raw claim", runs: [11] }]);
   expect(s.candidates.flaky).toEqual([{ id: "t1", issue: 21 }]);
-  expect(s.stats.merged).toBe(2);
-  expect(deps.sync).toHaveBeenCalled();
+  expect(s.stats.merged).toBe(3);
+  expect(s.stats_total).toBeUndefined();                                  // 누적은 full에서만 움직인다
+  expect(deps.sync).toHaveBeenCalledWith(expect.objectContaining({ expectBlob: { "_retro.md": "b10b" } }));
   // 사람이 먼저 읽는 통계 표가 같이 나간다
-  expect(deps.writeState.mock.calls[0][1].statsTable).toContain("| merged | 2 |");
+  expect(deps.writeState.mock.calls[0][1].statsTable).toContain("| merged | 3 | 0 |");
 });
 
-test("light: a failing harvest does not stop the run — the merge is still counted and the state still synced", async () => {
+test("light: a failing harvest falls back to counting this job run, and the state is still synced", async () => {
   const state = freshState({ merges_since: 0, n: 5 });
   const { deps, recorded, last } = makeDeps({ state, overrides: { harvest: vi.fn(async () => { throw new Error("gh down"); }) } });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
-  expect(last().merges_since).toBe(1);
+  expect(last().merges_since).toBe(1);                                    // 셀 수 없으면 실행 횟수로 +1
+  expect(last().stats).toEqual({});                                       // 실패한 수확은 통계를 바꾸지 않는다
   expect(recorded.join("\n")).toContain("harvest failed — gh down");
   expect(deps.sync).toHaveBeenCalled();
 });
 
-test("force: merges_since is NOT incremented and the full path runs even below N", async () => {
+test("light_on_merge: false skips the harvest on a light run but still counts the merge", async () => {
+  const state = freshState({ merges_since: 1, n: 5 });
+  const { deps, recorded, last } = makeDeps({ state, overrides: { lightOnMerge: false } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(deps.harvest).not.toHaveBeenCalled();
+  expect(last().merges_since).toBe(2);
+  expect(recorded).toContain("retro: light (merges_since=2/5)");
+  expect(recorded).toContain("retro: harvest skipped — light_on_merge is false");
+});
+
+test("light_on_merge: false still harvests when the count says this is a full run", async () => {
+  const state = freshState({ merges_since: 2, n: 3 });
+  const { deps } = makeDeps({ state, overrides: { lightOnMerge: false } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(deps.harvest).toHaveBeenCalledTimes(1);                          // full은 후보 없이 돌 수 없다
+  expect(deps.claudeP).toHaveBeenCalled();
+});
+
+test("force: the full path runs even below N", async () => {
   const state = freshState({ merges_since: 0, n: 9 });
   const { deps, last } = makeDeps({ state });
   expect(await runRetro({ deps, force: true, now: NOW })).toBe(0);
@@ -169,7 +243,7 @@ test("force: merges_since is NOT incremented and the full path runs even below N
 
 test("n guard: a non-finite or sub-1 N is reset to 1 and recorded, never silently used", async () => {
   for (const bad of [null, 0, -3, "many"]) {
-    const state = freshState({ merges_since: 0, n: bad });
+    const state = freshState({ merges_since: 5, n: bad });
     const { deps, recorded, last } = makeDeps({ state });
     expect(await runRetro({ deps, now: NOW })).toBe(0);
     expect(recorded.join("\n")).toContain("reset to 1");
@@ -185,19 +259,124 @@ test("a corrupted _retro.md is exit 2 and nothing is written — the history is 
   expect(deps.claudeP).not.toHaveBeenCalled();
 });
 
+// ── 하이드레이트 출처(fix round 1, Critical) ──────────────────────────────
+// `readRecords`는 절대 던지지 않는다 — 그래서 fetch 실패가 "기록 없음"처럼 보이고, 그 기본 상태를
+// 교체 동기화가 브랜치의 진짜 상태 위에 밀어버린다. 확정하지 못한 회차는 아무것도 쓰지 않는다.
+
+const unprovenHydrate = {
+  "a failed fetch": { records: new Map(), fetched: false, exists: null, stateBlob: null, stateFailed: false },
+  "a branch we could not list": { records: new Map(), fetched: false, exists: true, stateBlob: null, stateFailed: false },
+  "_retro.md present on the branch but unreadable": { records: new Map(), fetched: true, exists: true, stateBlob: "b10b", stateFailed: true },
+};
+
+for (const [name, value] of Object.entries(unprovenHydrate)) {
+  test(`hydrate provenance: ${name} → exit 2, nothing written, no claude -p`, async () => {
+    const state = freshState();
+    const { deps, written } = makeDeps({ state, overrides: { hydrate: vi.fn(async () => value) } });
+    expect(await runRetro({ deps, now: NOW })).toBe(2);
+    expect(written).toEqual([]);
+    expect(deps.sync).not.toHaveBeenCalled();
+    expect(deps.claudeP).not.toHaveBeenCalled();
+    expect(deps.readState).not.toHaveBeenCalled();
+  });
+}
+
+test("hydrate provenance: a hydrate that throws is also exit 2 — we do not know what the branch holds", async () => {
+  const state = freshState();
+  const { deps, written, recorded } = makeDeps({ state, overrides: { hydrate: vi.fn(async () => { throw new Error("network"); }) } });
+  expect(await runRetro({ deps, now: NOW })).toBe(2);
+  expect(written).toEqual([]);
+  expect(recorded.join("\n")).toContain("refusing to write state");
+});
+
+test("hydrate provenance: a branch with no _retro.md at all is a first run — proceed with the default state", async () => {
+  const state = freshState({ cursor: { last_retro_at: null }, merges_since: 0, n: 5, history: [] });
+  const { deps, last } = makeDeps({ state, overrides: {
+    hydrate: vi.fn(async () => ({ records: new Map(), fetched: true, exists: false, stateBlob: null, stateFailed: false })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(last()).toBeTruthy();
+  // 교체가 아니라 생성이다 — expectBlob은 "그때 브랜치에 없었다"를 뜻하는 null이다
+  expect(deps.sync).toHaveBeenCalledWith({ expectBlob: { "_retro.md": null } });
+});
+
+// ── 교체 동기화의 경합(no clobber) ───────────────────────────────────────
+
+test("state moved between hydrate and sync → re-hydrate once, re-apply the same mutation on the fresh base, and land", async () => {
+  const base = freshState({ merges_since: 0, n: 5, history: [] });
+  // 그 사이 다른 retro가 이력을 하나 남기고 커서를 옮겼다
+  const fresher = freshState({ merges_since: 0, n: 4, history: [{ at: "2026-09-11T00:00:00Z", yield: 2, n_before: 5, n_after: 4 }] });
+  let hydrateCalls = 0;
+  let syncCalls = 0;
+  const { deps, written } = makeDeps({ state: base, overrides: {
+    hydrate: vi.fn(async () => {
+      hydrateCalls += 1;
+      return { records: new Map(), fetched: true, exists: true, stateBlob: hydrateCalls === 1 ? "old" : "new", stateFailed: false };
+    }),
+    readState: vi.fn(async () => (hydrateCalls === 1 ? base : fresher)),
+    sync: vi.fn(async ({ expectBlob }) => {
+      syncCalls += 1;
+      return expectBlob["_retro.md"] === "old" ? { ok: false, moved: true, reason: "state moved: …" } : { ok: true };
+    }),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(hydrateCalls).toBe(2);
+  expect(syncCalls).toBe(2);
+  // 두 번째 쓰기는 **새 base 위에** 같은 변이를 얹었다 — 남의 이력이 살아 있다
+  const finalState = written.at(-1).state;
+  expect(finalState.history).toHaveLength(1);
+  expect(finalState.history[0].at).toBe("2026-09-11T00:00:00Z");
+  expect(finalState.merges_since).toBe(3);
+  expect(finalState.n).toBe(4);
+});
+
+test("state still moved after one retry → exit 1, no clobber", async () => {
+  const state = freshState({ merges_since: 0, n: 5 });
+  const { deps, recorded } = makeDeps({ state, overrides: {
+    sync: vi.fn(async () => ({ ok: false, moved: true, reason: "state moved: docs/factory/runs/_retro.md" })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(1);
+  expect(deps.sync).toHaveBeenCalledTimes(2);
+  expect(recorded.join("\n")).toContain("refusing to overwrite");
+});
+
+test("a re-hydrate that cannot prove the branch content is exit 1 — never a blind overwrite", async () => {
+  const state = freshState({ merges_since: 0, n: 5 });
+  let calls = 0;
+  const { deps } = makeDeps({ state, overrides: {
+    hydrate: vi.fn(async () => {
+      calls += 1;
+      return { records: new Map(), fetched: calls === 1, exists: true, stateBlob: "old", stateFailed: false };
+    }),
+    sync: vi.fn(async () => ({ ok: false, moved: true, reason: "state moved" })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(1);
+  expect(deps.sync).toHaveBeenCalledTimes(1);
+});
+
+test("an ordinary (non-moved) sync failure is recorded but does not change the exit code", async () => {
+  const state = freshState({ merges_since: 0, n: 5 });
+  const { deps, recorded } = makeDeps({ state, overrides: { sync: vi.fn(async () => ({ ok: false, reason: "push failed: no upstream" })) } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(deps.sync).toHaveBeenCalledTimes(1);
+  expect(recorded.join("\n")).toContain("records sync failed — push failed");
+});
+
 // ── 전체 경로 ────────────────────────────────────────────────────────────
 
-test("full: every enforcement step runs, and the candidates file carries period/candidates/stats/history", async () => {
+test("full: every enforcement step runs, and the candidates file carries period/candidates/stats/history/maturity_gaps", async () => {
   const state = freshState({ merges_since: 2, n: 3, history: [{ at: "2026-09-05T00:00:00Z", yield: 1, n_before: 3, n_after: 3 }] });
   const { deps, last } = makeDeps({ state });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
 
-  // ⓵ claude -p 입력
+  // ⓵ claude -p 입력 — 성숙도 격차는 **분석 전에** 결정적으로 판정해 후보 파일에 실린다
   const arg = deps.claudeP.mock.calls[0][0];
   expect(arg.period).toEqual({ from: CURSOR, to: NOW });
-  expect(arg.stats.merged).toBe(2);
+  expect(arg.stats.merged).toBe(3);
   expect(arg.history).toHaveLength(1);
   expect(arg.candidates.flaky).toEqual([{ id: "t1", issue: 21 }]);
+  expect(arg.maturity_gaps).toEqual([{ target: "M1", rule: "db-schema-at-m0", reason: "DB schema files present" }]);
+  expect(deps.maturityGaps.mock.invocationCallOrder[0]).toBeLessThan(deps.claudeP.mock.invocationCallOrder[0]);
 
   // ⓶ lessons — 역할별로 한 번, 근거 창은 applyLessons에 넘어간다
   expect(deps.applyLessons).toHaveBeenCalledTimes(2);
@@ -228,8 +407,10 @@ test("full: every enforcement step runs, and the candidates file carries period/
   }));
 
   // ⓺ 격리 등록 + ⓻ 만료 → 재작성 이슈
-  expect(deps.registerQuarantine).toHaveBeenCalledWith(expect.objectContaining({ issues: ISSUES, now: NOW }));
-  expect(deps.expiredIds).toHaveBeenCalledWith(expect.objectContaining({ since: CURSOR }));
+  // 격리 판정은 라벨로 좁힌 목록을 쓴다(최근 200개 일반 스냅샷이 아니라)
+  expect(deps.registerQuarantine).toHaveBeenCalledWith(expect.objectContaining({ issues: FLAKY_ISSUES, now: NOW }));
+  // 만료 코멘트는 닫힌 flaky 이슈에도 달릴 수 있으므로 두 목록의 합집합에서 읽는다
+  expect(deps.expiredIds).toHaveBeenCalledWith(expect.objectContaining({ since: CURSOR, issues: expect.arrayContaining(ISSUES) }));
   expect(deps.createIssue).toHaveBeenCalledWith(expect.objectContaining({
     title: "rewrite flaky test at another level: t2",
     labels: ["backlog", "factory:flaky"],
@@ -254,6 +435,10 @@ test("full: every enforcement step runs, and the candidates file carries period/
   expect(s.n).toBe(2);
   expect(s.merges_since).toBe(0);
   expect(s.cursor.last_retro_at).toBe(NOW);
+  // 누적 통계는 full에서만 창을 더한다
+  expect(s.stats_total).toMatchObject({ merged: 3, review_rounds_avg: 1.5, needs_human: 0, retros: 1 });
+  // 채택된 텍스트는 후보에서 내려간다(미달 후보는 남는다)
+  expect(s.candidates.lessons).toEqual([{ role: "correctness", text: "raw claim", runs: [11] }]);
   expect(s.deferred_proposals).toEqual([expect.objectContaining({ kind: "threshold" })]);
   expect(s.deletion_candidates).toEqual([{ id: "t3", issue: 33 }]);
   expect(s.last_full_failed).toBeUndefined();
@@ -269,36 +454,36 @@ test("full: every enforcement step runs, and the candidates file carries period/
 const barren = (over = {}) => ({
   claudeP: vi.fn(async () => ({ result: JSON.stringify({ ...AGENT_OUT(), lessons: [], examples: [], perspectives: [], harness: [], proposals: [] }) })),
   maturityGaps: vi.fn(async () => []),
-  harvest: vi.fn(async () => ({ ...HARVEST(), issues: [ISSUES[0]] })),          // 재작성 이슈가 없으니 삭제 후보도 없다
+  harvest: vi.fn(async () => ({ ...HARVEST(), issues: [ISSUES[0]], flakyIssues: [] })),   // 재작성 이슈가 없으니 삭제 후보도 없다
   expiredIds: vi.fn(async () => []),
   registerQuarantine: vi.fn(async () => ({ registered: [] })),
   ...over,
 });
 
 test("full: yield 0 stretches N; the clamp is honoured", async () => {
-  const state = freshState({ merges_since: 3, n: 4 });
+  const state = freshState({ merges_since: 3, n: 3 });
   const { deps, last } = makeDeps({ state, overrides: barren() });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
   expect(deps.publishLessons).not.toHaveBeenCalled();                     // 바뀐 파일이 없으면 PR도 없다
   expect(deps.publishProposal).not.toHaveBeenCalled();
-  expect(last().history.at(-1)).toMatchObject({ yield: 0, n_before: 4, n_after: 6 });
-  expect(last().n).toBe(6);
+  expect(last().history.at(-1)).toMatchObject({ yield: 0, n_before: 3, n_after: 5 });   // round(3 × 1.5)
+  expect(last().n).toBe(5);
 });
 
 test("full: needs-human ≥2 since the last retro halves N even when the yield is small", async () => {
-  const state = freshState({ merges_since: 7, n: 8 });
+  const state = freshState({ merges_since: 3, n: 3 });
   const { deps, last } = makeDeps({ state, overrides: barren({
-    harvest: vi.fn(async () => ({ ...HARVEST(), issues: [ISSUES[0]], stats: { ...HARVEST().stats, needs_human: 2 } })),
+    harvest: vi.fn(async () => ({ ...HARVEST(), issues: [ISSUES[0]], flakyIssues: [], stats: { ...HARVEST().stats, needs_human: 2 } })),
   }) });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
-  expect(last().history.at(-1)).toMatchObject({ yield: 0, needs_human_since: 2, n_after: 4 });
+  expect(last().history.at(-1)).toMatchObject({ yield: 0, needs_human_since: 2, n_before: 3, n_after: 2 });
 });
 
 test("full: a harness gap whose issue title is already open is deduped, not created twice", async () => {
   const title = "harness: promote to M1 — DB schema files present";
   const state = freshState();
   const { deps, last } = makeDeps({ state, overrides: {
-    harvest: vi.fn(async () => ({ ...HARVEST(), issues: [...ISSUES, { number: 44, title, labels: ["factory:harness"], state: "open" }] })),
+    harvest: vi.fn(async () => ({ ...HARVEST(), harnessTitles: [title] })),
     // 같은 격차를 두 번 돌려준다 — 같은 실행 안에서도 두 번 만들지 않아야 한다
     maturityGaps: vi.fn(async () => [{ target: "M1", rule: "db-schema-at-m0", reason: "DB schema files present" }]),
   } });
@@ -312,7 +497,7 @@ test("full: a harness gap whose issue title is already open is deduped, not crea
 test("full: an already open rewrite issue for the same expired id is not created again", async () => {
   const state = freshState();
   const { deps } = makeDeps({ state, overrides: {
-    harvest: vi.fn(async () => ({ ...HARVEST(), issues: [...ISSUES, { number: 45, title: "rewrite flaky test at another level: t2", labels: ["factory:flaky"], state: "open" }] })),
+    harvest: vi.fn(async () => ({ ...HARVEST(), flakyIssues: [...FLAKY_ISSUES, { number: 45, title: "rewrite flaky test at another level: t2", labels: ["factory:flaky"], state: "open" }] })),
   } });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
   expect(deps.createIssue.mock.calls.map((c) => c[0].title)).not.toContain("rewrite flaky test at another level: t2");
@@ -377,7 +562,7 @@ for (const [name, overrides] of Object.entries(failures)) {
     const s = last();
     expect(s.last_full_failed.at).toBe(NOW);
     expect(s.last_full_failed.reason).toBeTruthy();
-    expect(s.merges_since).toBe(3);                                       // 리셋하지 않는다 — 다음 머지가 다시 시도한다
+    expect(s.merges_since).toBe(3);                                       // 기록에서 센 값 그대로 — 리셋하지 않는다(다음 머지가 다시 시도한다)
     expect(s.cursor.last_retro_at).toBe(CURSOR);                          // 커서도 움직이지 않는다
     expect(s.history).toEqual([]);                                        // 돌지 않은 retro는 이력에 남지 않는다
     expect(deps.applyLessons).not.toHaveBeenCalled();
@@ -404,12 +589,25 @@ test("period.from falls back to the first observed activity when there has never
   expect(deps.claudeP.mock.calls[0][0].period).toEqual({ from: "2026-08-01T00:00:00Z", to: NOW });
 });
 
-test("an unexpected abort is exit 1 and still tries to persist what it knows", async () => {
+test("an unexpected abort is exit 1 and writes nothing — a run that decided nothing has nothing to write", async () => {
   const state = freshState();
-  const { deps, recorded } = makeDeps({ state, overrides: { shouldRunFull: vi.fn(() => { throw new Error("boom"); }) } });
+  const { deps, recorded, written } = makeDeps({ state, overrides: { shouldRunFull: vi.fn(() => { throw new Error("boom"); }) } });
   expect(await runRetro({ deps, now: NOW })).toBe(1);
   expect(recorded.join("\n")).toContain("aborted — boom");
-  expect(deps.writeState).toHaveBeenCalled();
+  expect(written).toEqual([]);
+  expect(deps.sync).not.toHaveBeenCalled();
+});
+
+test("applyMutation is pure and re-appliable — the same mutation on a fresher base yields the fresher n/history", () => {
+  const mutation = { mergesSince: 4, stats: { merged: 4 }, full: { at: NOW, yield: 0, needsHumanSince: 0, bounds: { min: 1, max: 20 }, retire: [], entry: { at: NOW, yield: 0 }, deferredProposals: [], deletionCandidates: [] } };
+  const a = applyMutation({ n: 4, merges_since: 1, history: [], candidates: emptyCandidates() }, mutation);
+  expect(a).toMatchObject({ n: 6, merges_since: 0 });
+  expect(a.history.at(-1)).toMatchObject({ n_before: 4, n_after: 6 });
+  const b = applyMutation({ n: 2, merges_since: 9, history: [{ at: "x" }], candidates: emptyCandidates() }, mutation);
+  expect(b.n).toBe(3);
+  expect(b.history.map((x) => x.at)).toEqual(["x", NOW]);
+  // 같은 mutation을 두 번 적용해도 base가 같으면 결과가 같다(재시도가 이력을 두 번 쌓지 않는다)
+  expect(applyMutation({ n: 4, merges_since: 1, history: [], candidates: emptyCandidates() }, mutation)).toEqual(a);
 });
 
 test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async () => {
