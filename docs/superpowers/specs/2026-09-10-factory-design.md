@@ -150,7 +150,7 @@ stateDiagram-v2
 | `planned` | `stage=plan` | `done_when[]` ≥1, `files_expected[]`, `dissent_log[]`, 참여 역할 == CHARTER 로스터, 라운드 수 == 3 |
 | `awaiting-review` | `stage=implement` | `gates.status=GREEN`, `head_sha` == 브랜치 HEAD, `verifier.verdict=accepted`, PR 번호 |
 | `approved` | `stage=review` | `head_sha` == PR HEAD, 판정 수 == 로스터 크기, 전원 `approve`, `round` ≤ K, **이번 스테이지의 `gates.json`이 GREEN** |
-| `merged` | (merge 잡 자체가 검사) | required checks GREEN, integrity GREEN, approved handoff의 `head_sha` == PR HEAD, **이번 스테이지의 `gates.json`이 GREEN** |
+| `merged` | (merge 잡 자체가 검사) | required checks GREEN, integrity GREEN, 보호 경로 변경 없음(있으면 needs-human — ADR-020), approved handoff의 `head_sha` == PR HEAD, **이번 스테이지의 `gates.json`이 GREEN** |
 
 review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5) — `approved`/`merged` 전이가 보는 `gates.json`은 review·merge 자신이 이번 런에서 만든 파일이지 implement의 파일을 재사용하지 않는다. 단 이 검사는 **오직 전이 경로에서만** 작동한다: 스테이지 시작 시점의 선행 handoff 확인(`assert-handoff.sh`, §4.2.1 step 2)은 "직전 스테이지가 산출물을 남겼는가"만 묻고 이번 런의 게이트는 묻지 않는다 — 그 시점엔 이번 런의 게이트가 아직 돌지 않았다(`resetGates`가 지난 런의 파일을 지운 직후다). 두 시점을 구분하는 표식이 `gatesChecked`다: `transition.js`가 전이 직전에만 `gatesChecked=true`를 `gates.json`과 함께 실어 넘기고, `assert-handoff.sh`는 이 값을 절대 세우지 않는다(ADR-012).
 
@@ -560,7 +560,7 @@ ready_timeout_sec = 90
 [test.fakes]                           # 외부 서비스는 절대 실제 호출하지 않는다
 google_calendar = "pnpm fake:gcal"     # 포트·동작은 QA.md §3에 정의
 
-[protected]                            # 이 경로 변경이 PR에 있으면 integrity RED
+[protected]                            # 이 경로 변경이 PR에 있으면 자동 머지 없음 — 사람이 머지한다 (ADR-020)
 factory  = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]
 except   = [".factory/lessons/**", "docs/factory/runs/**"]   # 예외. 대신 integrity가 포맷·상한·근거 링크를 검사
 additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }   # 이 두 섹션의 '추가' diff만 허용 (§8.1)
@@ -572,6 +572,8 @@ paths = ["src/auth/**", "src/sync/**", "prisma/schema.prisma", "src/api/public/*
 [evidence]
 qa_artifacts = ".factory/out/qa/**"     # qa 리뷰어의 스크린샷·로그. PR 코멘트에 첨부됨
 ```
+
+**`[protected]`을 집행하는 자리는 둘로 나뉜다(ADR-020 KTB-5).** `factory/integrity` 체크(L0)는 **변조만** RED로 만든다 — `additive_only` 위반, 위조된 `## ` 헤더, lessons 포맷·상한·근거, 테스트 skip/ignore pragma, 그리고 판정 불가. `[protected].factory` 매치 파일이 diff에 **있다**는 사실 자체는 위반이 아니라 "누가 머지해야 하는가"의 문제이므로 체크를 RED로 만들지 않고 잡 로그에 한 줄(`integrity: protected paths changed (human merge required): …`)로만 남는다. 그런 PR의 **자동 머지를 거부하는 것은 merge 스테이지(L1)**다 — 보호 경로가 하나라도 있으면 머지하지 않고 `factory:needs-human`으로 전이해 사람이 diff를 보고 직접 머지하게 한다. 이렇게 나누는 이유: `factory/integrity`는 branch protection에 등록된 **유일한** required context라(ADR-015 보강), 이 체크가 RED가 되면 봇만이 아니라 **사람도** 그 PR을 머지할 수 없다 — 그러면 설계가 전제하는 사람 머지 경로(retro-proposal PR, `factory:harness` 승격 PR, 사람-지점 스킬이 만드는 PR, 인프라 업그레이드 PR)가 통째로 막힌다.
 
 `doctor`는 `[commands]`의 각 명령을 실제로 실행해 exit 0인지, `[gates].required`가 전부 `[commands]`에 있는지, `[protected].factory` glob이 실제 파일에 매치되는지, 훅 스크립트가 stdin JSON을 읽는지, `[test.env]`로 환경을 띄워 `[test].smoke` 세 개가 GREEN인지를 검사한다.
 
@@ -590,7 +592,7 @@ gate의 실체는 `harness.toml`의 명령이 아니라 **main에 누적된 테�
 | **M2** | HTTP/UI 표면 등장 → 앱 기동·ready URL, fake 서버, `e2e` 스모크, playwright | `deep` | 동일 |
 
 - `harness.toml [harness].maturity = "M0" | "M1" | "M2"`. `[gates].required`는 해당 성숙도까지의 명령만 요구하고, `doctor`는 선언된 것만 검사한다. CHARTER의 tier 표에서 `deep`이 필요한 tier는 M2 전까지 `full`로 강등되며 그 사실이 run 기록에 남는다.
-- **승격은 이슈다.** retro(또는 사람)가 "prisma schema가 생겼는데 M0"처럼 능력 부족을 감지하면 `factory:harness` 라벨의 이슈를 만든다. 이 이슈는 일반 파이프라인(plan→implement→review)을 타되, `harness.toml` 변경이 포함되므로 integrity가 자동 머지를 막고 **사람이 머지**한다. 즉 인프라 작업은 factory가 하고, gate 정의의 변경만 사람이 승인한다(원칙 2·9와 일치).
+- **승격은 이슈다.** retro(또는 사람)가 "prisma schema가 생겼는데 M0"처럼 능력 부족을 감지하면 `factory:harness` 라벨의 이슈를 만든다. 이 이슈는 일반 파이프라인(plan→implement→review)을 타되, `harness.toml` 변경이 포함되므로 merge 스테이지(L1)가 자동 머지를 거부하고 **사람이 머지**한다(ADR-020 — `factory/integrity` 체크는 변조만 RED로 만들므로 사람의 머지는 막히지 않는다). 즉 인프라 작업은 factory가 하고, gate 정의의 변경만 사람이 승인한다(원칙 2·9와 일치).
 - 브라운필드는 `/project` evolve 모드가 현재 코드에서 성숙도를 판정해 M1·M2로 바로 시작한다.
 - **빈도**: M0→M1→M2는 프로젝트 생애에 최대 2번. 그 외 능력 추가(새 외부 의존성의 fake 서버, 새 도구 설정, contract test 같은 새 레벨)가 그린필드 첫 달 2~4건, 이후 월 1건 이하로 예상. retro의 감지 규칙 초기값 세 가지: 매니페스트에 외부 SDK가 추가됐는데 `[test.fakes]`에 없음 / DB 스키마가 있는데 M0 / HTTP 라우트가 있는데 M1.
 
@@ -674,7 +676,7 @@ implement 단계에서 `gates.sh`가 **이번 PR에서 변경된 테스트 파�
 
 retro는 flaky 발생률과 원인 분류(타이밍/순서/공유 상태/네트워크/제품 결함)를 집계해 ①의 규칙을 lint로 승격 제안하고 builder lessons에 반영한다.
 
-**임계값은 누가 어디서 바꾸나.** `[gates.thresholds]`(기계적 임계)와 CHARTER의 hard limits(정책 상한)는 모두 protected다. 바뀌는 경로는 둘뿐: (a) 사람이 직접 편집 → PR → integrity가 잡아 사람 머지(본인이 하면 된다), (b) retro가 통계와 함께 `retro-proposal`로 제안(예: "8주간 quarantine_max 도달 3회, 평균 체류 9일 → 8로 상향") → 사람 머지. `doctor`가 범위를 검사한다(`new_test_repeats ≥ 2`, `quarantine_max ≤ 전체의 5%` 등). 에이전트는 편집할 수 없고, 편집해도 integrity에 걸린다.
+**임계값은 누가 어디서 바꾸나.** `[gates.thresholds]`(기계적 임계)와 CHARTER의 hard limits(정책 상한)는 모두 protected다. 바뀌는 경로는 둘뿐: (a) 사람이 직접 편집 → PR → merge 스테이지가 자동 머지를 거부해 사람 머지(본인이 하면 된다), (b) retro가 통계와 함께 `retro-proposal`로 제안(예: "8주간 quarantine_max 도달 3회, 평균 체류 9일 → 8로 상향") → 사람 머지. `doctor`가 범위를 검사한다(`new_test_repeats ≥ 2`, `quarantine_max ≤ 전체의 5%` 등). 에이전트는 편집할 수 없고, 편집해도 그 PR은 자동 머지되지 않는다(ADR-020).
 
 #### 5.2.6 환경 — 로컬과 CI가 같은 방법으로 뜬다
 
@@ -772,14 +774,15 @@ light_on_merge: true
 
 | 층 | 위치 | 에이전트 접근 | 무엇을 막나 |
 |---|---|---|---|
-| **L0 GitHub** | branch protection, required checks, 토큰 스코프 | 불가 | 머지, force-push, factory 파일 변경된 PR의 머지 |
-| **L1 결정적 스크립트** | `.factory/bin/*.sh` — 에이전트 프로세스 밖에서 실행 | 실행 불가(러너가 실행) | 판정 위조, 건너뛰기, handoff 없는 전이, 투표 조작 |
+| **L0 GitHub** | branch protection, required checks, 토큰 스코프 | 불가 | 머지, force-push, **변조된** PR의 머지(`factory/integrity`) — 보호 경로 변경은 여기서 막지 않는다(ADR-020) |
+| **L1 결정적 스크립트** | `.factory/bin/*.sh` — 에이전트 프로세스 밖에서 실행 | 실행 불가(러너가 실행) | 판정 위조, 건너뛰기, handoff 없는 전이, 투표 조작, **보호 경로가 실린 PR의 자동 머지**(사람에게 넘긴다, ADR-020) |
 | **L2 hooks + deny** | `.claude/settings.json`(Bash deny·allow·훅 — 사람의 대화형 세션에도 걸린다), `.factory/ci-settings.json`(경로 `Edit`/`Write` deny — CI의 `claude -p --settings`로만 로드된다, ADR-019), 에이전트 frontmatter | 편집 deny | 위험 명령, 미push 종료, 포맷 불일치 출력, 기존 테스트 수정 |
 | **L3 프롬프트** | `CLAUDE.md`, `.claude/agents/*.md` | 읽기만 | (강제 아님) 품질·관점 |
 
 ### 6.1 L0 상세
 - required checks: `factory/gates`, `factory/review`, `factory/integrity`(`harness.toml [factory].required_checks`의 기본값, §5.1). 세 개 모두 GREEN이어야 머지 가능. 게시 주체는 서로 다르다(Plan 2 실행 판결, ADR-015) — `factory/gates`·`factory/review`는 run-stage가 PR head sha에 commit status로 게시하고(§4.2.1 step 5·8), `factory/integrity`는 `factory-integrity.yml`의 잡 `name:`(GitHub가 자동으로 만드는 체크 이름)이라 run-stage가 게시하지 않는다. **단, branch protection(L0)에 required context로 등록하는 것은 `factory/integrity` 하나뿐이다(ADR-015 보강)** — `factory/gates`·`factory/review`는 이슈 파이프라인을 탄 PR에만 게시자가 있어서 L0에 넣으면 사람이 머지하는 retro-proposal·`factory:harness` PR과 부트스트랩 직후의 첫 push가 영영 막힌다. 세 개를 모두 요구하는 것은 L1(머지 스테이지의 `allChecksGreen(prChecks, [factory].required_checks)`)이고, `bootstrap`은 `required_status_checks = { strict: false, contexts: ["factory/integrity"] }`를 건다(strict=false: 게이트는 이미 sha에 묶여 있고 팩토리는 리베이스를 하지 않는다).
-- `factory/integrity`(`.factory/bin/integrity.js`)는 PR diff(`base...head`)에서 세 가지를 본다: ① `[protected].factory` 매치 파일 변경 — `[protected].except`와 `[protected].additive_only`(`.claude/agents/*.md`의 `## Examples`/`## Perspectives`, 위치 기반 검사: 섹션 밖 삽입·삭제는 전부 위반이고, 이번 diff가 새로 추가한 `## ` 헤더는 그 자신도 다른 추가 줄의 경계로도 인정하지 않는다 — base에 없던 헤더로 경계를 위조해 섹션을 자칭해도 잡힌다) 밖이면 RED. ② `.factory/lessons/**` 항목 포맷 — `factory-lessons:v1` 헤더, `- [L-YYYY-MM-DD-NN]` 형식, 항목마다 `근거:` 문구, 역할당 상한(`max`) 초과. ③ `harness.toml [test].test_glob`에 매치하는 테스트 파일에 skip/ignore 주석(`.skip(`, `xit(`, `xdescribe(`, `@pytest.mark.skip`, `istanbul ignore`, `pragma: no cover`, `Stryker disable`)이 새로 추가됨. `factory:retro-proposal` 라벨 PR도 이 검사에서 예외는 아니다 — 다만 그 PR의 "required reviewer 1명" 규칙은 branch protection으로 표현하지 않는다(Plan 2 실행 판결, ADR-015 — R5: 라벨 조건부 required reviewer는 GitHub이 지원하지 않는다). 대신 merge 스테이지가 `claude/fq-*` 브랜치 PR만 자동 머지 대상으로 보므로, retro가 만드는 PR은 구조적으로 사람만 머지한다.
+- `factory/integrity`(`.factory/bin/integrity.js`)는 PR diff(`base...head`)에서 **변조**를 본다(ADR-020 KTB-5 — 보호 경로 변경 자체는 RED가 아니다, 아래 참조): ① `[protected].additive_only`(`.claude/agents/*.md`의 `## Examples`/`## Perspectives`) 규칙 위반 — 위치 기반 검사라 섹션 밖 삽입·삭제는 전부 위반이고, 이번 diff가 새로 추가한 `## ` 헤더는 그 자신도 다른 추가 줄의 경계로도 인정하지 않는다(base에 없던 헤더로 경계를 위조해 섹션을 자칭해도 잡힌다). ② `.factory/lessons/**` 항목 포맷 — `factory-lessons:v1` 헤더, `- [L-YYYY-MM-DD-NN]` 형식, 항목마다 `근거:` 문구, 역할당 상한(`max`) 초과. ③ `harness.toml [test].test_glob`에 매치하는 테스트 파일에 skip/ignore 주석(`.skip(`, `xit(`, `xdescribe(`, `@pytest.mark.skip`, `istanbul ignore`, `pragma: no cover`, `Stryker disable`)이 새로 추가됨. `factory:retro-proposal` 라벨 PR도 이 검사에서 예외는 아니다 — 다만 그 PR의 "required reviewer 1명" 규칙은 branch protection으로 표현하지 않는다(Plan 2 실행 판결, ADR-015 — R5: 라벨 조건부 required reviewer는 GitHub이 지원하지 않는다). 대신 merge 스테이지가 `claude/fq-*` 브랜치 PR만 자동 머지 대상으로 보므로, retro가 만드는 PR은 구조적으로 사람만 머지한다.
+- **보호 경로 변경은 L0가 막지 않는다(ADR-020 KTB-5).** `[protected].factory` 매치 파일(`except`·`additive_only` 제외)이 diff에 있으면 integrity는 그 목록을 결과의 `protected`에 싣고 잡 로그에 `integrity: protected paths changed (human merge required): <files>`를 찍지만 **exit 0**이다 — 이 체크가 L0의 유일한 required context이므로, 여기서 RED를 만들면 `enforce_admins` 아래에서 **사람도** 그 PR을 머지할 수 없다(그리고 사람이 머지하는 것이 바로 이 설계가 원하는 결과다). 자동 머지를 막는 것은 L1이다(§6.2).
 - 토큰: 모든 잡이 단일 PAT `FACTORY_BOT_TOKEN`을 쓴다(checkout·`GH_TOKEN` 동일) — `GITHUB_TOKEN`이 만든 라벨·push 이벤트는 다음 워크플로를 깨우지 않으므로 기본 액션 토큰으로는 스테이지 체이닝이 끊긴다. merge 잡만 선택적으로 `FACTORY_MERGE_TOKEN`을 상위 토큰으로 쓸 수 있다(`${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}`, 없으면 `FACTORY_BOT_TOKEN`으로 폴백)(Plan 2 실행 판결, ADR-015 — R2). 머지 보호는 이 토큰 하나가 아니라 required checks(L0) + merge 스크립트 전용(L1, R3) + deny(L2)의 합으로 성립한다.
 - linear history, force-push 금지, 관리자도 규칙 적용(`enforce_admins`).
 
@@ -788,6 +791,7 @@ light_on_merge: true
 - `prove-test.sh <issue>`: 브랜치의 새 테스트 파일을 base에 얹어 실행 → **실패해야** 통과. 통과하면 "테스트가 수정을 증명하지 않음".
 - `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
 - `assert-handoff.sh`, `transition.js`: 3.3.
+- **merge 스테이지의 보호 경로 거부(ADR-020 KTB-5).** 필수 체크·무결성을 확인한 뒤 실제 머지 직전에, PR 범위(`base...head`)의 `git diff --name-status`에서 `[protected].factory` 매치(− `except` − `additive_only`)를 센다. 하나라도 있으면 머지하지 않고 `factory:needs-human`으로 전이한다(사유 `protected paths changed — human merge required: <files>` + 파일을 나열한 코멘트, exit 2). 이 판정은 **base 브랜치의 코드와 base 브랜치의 `harness.toml`**로 한다 — 모듈과 하네스는 `checkoutHead`가 워킹 트리를 PR head로 옮기기 전(워크플로의 기본 체크아웃 = base)에 이미 로드됐고, PR이 실은 `.factory/bin/integrity.js`를 하위 프로세스로 부르지 않는다. 그러지 않으면 에이전트 PR이 자기를 화이트리스트하는 integrity를 실어 보낼 수 있다. 계산에 파일 **내용**을 읽지 않는 것도 같은 이유다(name-status diff만으로 충분하다). 조회 실패는 통과가 아니라 거부다(fail closed).
 
 > **이름에 관한 주석.** L1 스크립트는 전부 Node로 구현되어 `.factory/bin/*.js`로 설치된다(`factory/bin/` 참조). 이 문서에 남은 `.sh` 이름(`gates.sh`, `assert-handoff.sh`, `write-handoff.sh`, `run-record.sh`, `aggregate-review.sh`, `prove-test.sh`)은 최초 설계 당시의 표기이고 실제 파일명은 같은 이름의 `.js`다. `transition.js`만은 스킬 본문이 사람에게 그대로 복사해 실행시키는 명령이라(§13.1 원칙 2) 문서 전체에서 실제 파일명으로 통일했다.
 
@@ -798,7 +802,7 @@ light_on_merge: true
 - **`.claude/settings.json`** — 모든 세션(CI의 `claude -p`, 그리고 사람의 대화형 세션)에 걸린다. 여기 남는 deny는 **사람에게도 걸려야 옳은 것**뿐이다: `gh pr merge*`, `git merge*`, `git push --force*`/`-f*`, branch protection PUT. allow 목록과 훅 배선도 여기 있다.
 - **`.factory/ci-settings.json`** — CI만 로드한다(`run-stage.js`·`retro.js`가 `claude -p … --settings .factory/ci-settings.json`으로 부른다; `--settings`는 병합이고 deny는 병합 결과에서도 유효하다). **경로 기반 `Edit(...)`/`Write(...)` deny 전부**가 여기 산다 — `.factory/**`, `.claude/**`, `.github/workflows/factory-*`, `docs/factory/CHARTER.md`, 그리고 게이트 명령이 해석되어 지나가는 빌드 설정 파일(`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`). CI 전용 deny(`gh secret*`, `gh api -X DELETE*`, `Read(.env*)`)도 같은 파일에 있다.
 
-**왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 `factory/integrity`(L1)가 잡아 사람 머지를 요구한다(ADR-015). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.hooks`와 `settings.ci-deny`.
+**왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 merge 스테이지(L1)가 자동 머지를 거부해 사람 머지를 요구한다(ADR-015, ADR-020). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.hooks`와 `settings.ci-deny`.
 
 **병합 시점.** `.claude/settings.json`은 `init --upgrade`뿐 아니라 **`init`(최초 설치) 시점에도 결정적으로 병합된다**(Plan 2 실행 판결, ADR-015) — brownfield 저장소는 이미 자기 `settings.json`을 갖고 있을 수 있으므로, "파일이 있으면 무조건 skip"이라는 `init`의 일반 규칙(§2.1)은 이 파일에는 적용되지 않는다. 병합은 deny/allow 합집합, 훅은 `command`가 이미 있으면 append하지 않는 방식으로 가산적이고 멱등이다.
 
@@ -1433,7 +1437,7 @@ npx know-thy-build factory bootstrap
 
 ### 12.3 통합 검증 (dogfood)
 1. **샘플 그린필드 repo** (`know-thy-build-demo`): Phase 1 → factory init → 이슈 5개를 다크로 처리. 목표: needs-human 0, 리뷰 라운드 평균 ≤2.
-2. **know_thy_build 자신**: 브라운필드 케이스. `harness.toml`에 `tests/run.sh` 등록. factory 파일 변경은 integrity로 막히므로 KTB 자체 개발은 `retro-proposal` 경로처럼 사람이 머지 — 이 예외 경로의 시험대.
+2. **know_thy_build 자신**: 브라운필드 케이스. `harness.toml`에 `tests/run.sh` 등록. factory 파일 변경은 자동 머지 대상에서 빠지므로(L1, ADR-020) KTB 자체 개발은 `retro-proposal` 경로처럼 사람이 머지 — 이 예외 경로의 시험대.
 3. own-calendar: 붕괴 이력이 있는 실전 브라운필드. 병렬 이슈 3개 동시 투입으로 claim·back-pressure·sweeper 검증.
 
 ### 12.4 성공 기준 (1.0)
