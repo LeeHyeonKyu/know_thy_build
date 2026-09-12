@@ -667,7 +667,7 @@ implement 단계에서 `gates.sh`가 **이번 PR에서 변경된 테스트 파�
 - **등록**(Plan 4 실행 판결, ADR-017): 등록의 트리거는 이력의 전이 **횟수**가 아니라 **현재 상태**다 — `factory:flaky` 라벨 이슈가 (아직 `quarantine.toml`에 없는 채로) `factory:needs-human`에 **도달해 있으면** 등록한다. K회 자가 수정 실패는 이미 `transition.js`의 K 기반 rework 상한이 상류에서 집행해 그 이슈를 needs-human으로 보낸 것이므로, 여기서 전이 횟수를 다시 세지 않는다(이중 판단 금지). retro(이슈 이력을 읽는 유일한 잡)가 `registerFromFlakyIssues`로 감지해 `id`(이슈 제목 `flaky: <id>`)·`since`·`reason`(needs-human 사유)·`evidence`로 등록한다. **등록·복귀·만료는 모두 해당 flaky 이슈에 코멘트를 남긴다**: `<!-- factory-quarantine <registered|returned|expired> id=<id> -->`. 등록은 retro가, 복귀·만료는 sweeper가 남긴다(sweeper는 닫힌 이슈에도 만료 코멘트를 남길 수 있어야 하므로 `state:"all"`로 flaky 이슈를 찾는다).
 - **상한**: 격리 수 ≤ N(기본 5개 또는 전체의 2%, `harness.toml [gates.thresholds].quarantine_max`가 유일한 출처 — §5.1). 초과 시 implement 잡이 **새 claim을 거부**한다(리뷰 대기 역압과 동일). flaky 방치 = 공장 정지이므로 방치가 구조적으로 불가능하다.
 - **자동 복귀**: 격리 중 `quarantine_return_after`(기본 30)회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다). 격리 항목의 `consecutive_passes`는 implement/review 게이트 실행마다 갱신된다(Plan 1b).
-- **TTL**: 격리 4주 경과 시 sweeper가 `expired`로 표시한다 — **`quarantine.toml`에서 항목을 내리지 않는다**, 플래그만 남기고 격리는 계속된다(존치가 곧 격리 지속의 근거이므로 만료 코멘트가 그 사실의 유일한 기록이다). 그다음 retro가 그 테스트가 지키던 동작을 **다른 레벨에서 다시 쓰는 이슈**(`backlog`+`factory:flaky`, 제목 `rewrite flaky test at another level: <id>`, 제목으로 dedup)를 만든다(예: e2e 타이밍 의존 → integration). 그 rewrite 이슈가 다시 `factory:needs-human`에 도달하면(같은 "현재 상태" 게이트) retro가 **`test-delete` 제안 PR**(`factory:retro-proposal`)을 낸다 — 채택 여부와 `DECISIONS.md`에 "이 동작은 현재 검증되지 않음"을 남기는 것은 **사람**이 한다(제안 PR은 절대 자체 머지되지 않는다 — §8.1). 삭제는 조용히 일어나지 않는다.
+- **TTL**(Plan 4 실행 판결, ADR-017): 격리 4주 경과 시 sweeper가 `expired`로 표시한다 — **`quarantine.toml`에서 항목을 내리지 않는다**, 플래그만 남기고 격리는 계속된다(존치가 곧 격리 지속의 근거이므로 만료 코멘트가 그 사실의 유일한 기록이다). 그다음 retro가 그 테스트가 지키던 동작을 **다른 레벨에서 다시 쓰는 이슈**(`backlog`+`factory:flaky`, 제목 `rewrite flaky test at another level: <id>`, 제목으로 dedup)를 만든다(예: e2e 타이밍 의존 → integration). 그 rewrite 이슈가 다시 `factory:needs-human`에 도달하면(같은 "현재 상태" 게이트) retro가 **`test-delete` 제안 PR**(`factory:retro-proposal`)을 낸다 — 채택 여부와 `DECISIONS.md`에 "이 동작은 현재 검증되지 않음"을 남기는 것은 **사람**이 한다(제안 PR은 절대 자체 머지되지 않는다 — §8.1). 삭제는 조용히 일어나지 않는다.
 - 사람은 역압으로 공장이 멈췄을 때만 등장하며, 그때의 판단은 "skip해도 되나"가 아니라 "제품에 비결정성이 있는데 어떻게 할 것인가"라는 제품 판단이다.
 
 retro는 flaky 발생률과 원인 분류(타이밍/순서/공유 상태/네트워크/제품 결함)를 집계해 ①의 규칙을 lint로 승격 제안하고 builder lessons에 반영한다.
@@ -1210,7 +1210,7 @@ responses:
 
 입력: `docs/factory/runs/*.md`(모든 스테이지 기록), review handoff(R1·R2 판정, must_fix, disputed 결과), rework 라운드 사유, needs-human 사유, 머지 후 CI 실패(있으면).
 
-출력 세 종류:
+출력 네 종류(Plan 4 실행 판결, ADR-017 — 표는 처음부터 네 행이었다):
 
 | 종류 | 형태 | 처리 | 예 |
 |---|---|---|---|
