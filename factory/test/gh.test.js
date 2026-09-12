@@ -202,3 +202,16 @@ test("issueList maps labels to names and forwards state/limit/labels; prList for
   expect(await gh.prList({ label: "factory:approved" })).toEqual([{ number: 9, title: "P", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]);
   expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--state", "open", "--label", "factory:approved", "--json", "number,title,headRefName,updatedAt"]);
 });
+
+test("createPr opens a non-draft PR with labels and returns the number", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "create", result: { code: 0, stdout: "https://github.com/o/r/pull/131\n", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  const pr = await gh.createPr({ head: "factory/lessons-2026-09-12", base: "main", title: "retro: lessons", body: "B", labels: ["factory:retro-proposal"] });
+  expect(pr).toBe(131);
+  expect(run.calls[0].args).toEqual([
+    "pr", "create", "-R", repo, "--head", "factory/lessons-2026-09-12", "--base", "main",
+    "--title", "retro: lessons", "--body-file", "-", "--label", "factory:retro-proposal",
+  ]);
+  expect(run.calls[0].args).not.toContain("--draft");
+  expect(run.calls[0].opts.input).toBe("B");
+});

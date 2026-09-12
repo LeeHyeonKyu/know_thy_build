@@ -65,6 +65,12 @@ export function makeGh({ run, repo }) {
       const out = await gh(["pr", "create", "-R", repo, "--draft", "--head", head, "--base", base, "--title", title, "--body-file", "-"], { input: body });
       const m = /\/pull\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
+    /** 사람이 보는(또는 스스로 머지하는) PR — draft가 아니다. 라벨은 생성 시점에 붙인다. */
+    async createPr({ head, base, title, body, labels = [] }) {
+      const args = ["pr", "create", "-R", repo, "--head", head, "--base", base, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])];
+      const out = await gh(args, { input: body });
+      const m = /\/pull\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
+    },
     async patchComment(commentId, body) {
       // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
       await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
