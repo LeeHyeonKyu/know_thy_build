@@ -276,10 +276,17 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (gates && gates.diagnostic !== true && postStatus) {
     await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
   }
+  // KTB-21 parity with run-stage (implement/review): `[factory.test.env].compose`가 있으면 게이트가
+  // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
+  // 없으면(=이 하네스는 compose를 안 쓴다) 아무 줄도 붙지 않는다. merge에도 같은 dep(gates())이
+  // 붙어 있으므로 결과를 흘려버리지 않는다 — 아래 세 갈래(BLOCKED/비-GREEN/GREEN) 모두에 붙인다.
+  const testEnvNote = gates?.test_env_reup?.ran
+    ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
+    : [];
   if (gates?.status === "BLOCKED") {
     const reason = gates.blocked_reason || "gates could not be decided";
     const t = await toBlocked(reason);
-    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t)]);
+    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t), ...testEnvNote]);
     return 2;
   }
   // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
@@ -288,10 +295,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!gates || gates.status !== "GREEN") {
     const reason = `gates ${gates?.status ?? "missing"} at merge`;
     const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t)]);
+    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t), ...testEnvNote]);
     return 2;
   }
-  record([`merge: gates ${gates.status}`]);
+  record([`merge: gates ${gates.status}`, ...testEnvNote]);
 
   // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
   // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는

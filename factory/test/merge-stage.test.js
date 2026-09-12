@@ -168,6 +168,43 @@ test("(3) gates GREEN → factory/gates status posted as success, flow continues
   expect(postStatus).toHaveBeenCalledWith(expect.objectContaining({ context: "factory/gates", state: "success" }));
 });
 
+// ── KTB-21: merge도 implement/review와 같은 test_env_reup 기록을 남긴다 ──────────────
+test("(3) gates.test_env_reup ok is recorded alongside the GREEN gates line", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    gates: vi.fn(async () => ({
+      schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40),
+      passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] },
+      test_env_reup: { ran: true, ok: true, detail: "" },
+    })),
+  });
+  const code = await run(d, { record });
+  expect(code).toBe(0);
+  expect(lines).toContain("test-env: re-up ok");
+});
+
+test("(3) gates BLOCKED by a failed test-env re-up records the failure detail alongside the blocked line", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    gates: vi.fn(async () => ({
+      schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "test-env re-up failed: compose: exit 1",
+      test_env_reup: { ran: true, ok: false, detail: "compose: exit 1" },
+    })),
+  });
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(lines.some((l) => /merge: gates BLOCKED — test-env re-up failed: compose: exit 1/.test(l))).toBe(true);
+  expect(lines).toContain("test-env: re-up failed — compose: exit 1");
+});
+
+test("(3) no compose in the harness → no test-env note in the merge run record", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD();
+  const code = await run(d, { record });
+  expect(code).toBe(0);
+  expect(lines.some((l) => l.startsWith("test-env:"))).toBe(false);
+});
+
 test("(3) a diagnostic gates result is never posted as a status (same guard as run-stage's gated stages)", async () => {
   const postStatus = basePostStatus();
   const d = baseD({ gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "GREEN", diagnostic: true, head_sha: "a".repeat(40) })) });

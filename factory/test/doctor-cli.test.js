@@ -127,6 +127,27 @@ test("(b) missing harness.toml → single FAIL, exit 1, message says harness.tom
   expect(o.out.join("\n")).toContain("harness.toml unreadable");
 });
 
+// M2: doctor.js reads harness.toml twice — `loadHarness` (fills `[factory].max_turns` default 12) for
+// everything else, and `loadHarnessRaw` (no defaults filled) just for this one WARN, because the
+// normalized object can never tell "missing" from "explicitly 12". This test drives that wiring from
+// the CLI entry point (doctorCommand), not from checkHarness directly (doctor-harness.test.js already
+// covers checkHarness in isolation) — a fake `deps.loadHarnessRaw` stands in for the real file parse
+// (same fake-deps pattern as the `readFile` test above), proving doctorCommand forwards its result into
+// checkHarness's `raw` param end to end.
+test("(b2) doctorCommand wires loadHarnessRaw into checkHarness — a harness.toml without [factory].max_turns yields the WARN through the CLI", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root);
+  const { io: i, o } = io();
+  const loadHarnessRaw = () => ({ factory: {} }); // raw parse with no [factory].max_turns key at all
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json", "--offline", "--no-run"], io: i, run, gh: fakeGh, deps: { loadHarnessRaw } });
+  expect(typeof code).toBe("number"); // did not throw
+  const { checks } = JSON.parse(o.out.join(""));
+  expect(checks.find((c) => c.id === "factory.max_turns")).toMatchObject({
+    level: "WARN",
+    detail: expect.stringContaining("run `npx know-thy-build factory init --upgrade`"),
+  });
+});
+
 test("(c) --json prints a parseable { checks, summary }", async () => {
   const root = await setupRepo();
   const run = makeDoctorRun(root);
