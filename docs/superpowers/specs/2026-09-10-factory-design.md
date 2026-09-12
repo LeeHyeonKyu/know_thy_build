@@ -57,6 +57,8 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 
 `init`은 기존 파일을 덮어쓰지 않는다. 업그레이드는 `init --diff`로 차이를 보여주고 `init --upgrade`로 factory 소유 파일만 교체한다(`harness.toml`, `CHARTER.md`, `lessons/`는 절대 건드리지 않음).
 
+(Plan 3 실행 판결, ADR-016) `init`이 설치하는 Claude-side 파일: workflow 스크립트 4개(`.claude/workflows/factory-{triage,plan,implement,review}.js`), role 에이전트 14개(`.claude/agents/*.md` — loader 1 + triage 1 + plan 5 + implement 2 + review 5), 디스패처 커맨드 4개(`.claude/commands/factory-{triage,plan,implement,review}.md`).
+
 ### 2.2 로컬 실행 `factory run`
 
 "로컬 모드"는 없다. `factory run`은 `.factory/bin/run-stage.sh <stage> <issue>`를 로컬에서 실행하는 것이고, 이 스크립트는 CI의 yml이 호출하는 것과 **같은 파일**이다. 따라서 훅·권한·게이트·handoff 규칙이 동일하다.
@@ -383,6 +385,27 @@ error verbatim.
 
 workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 이번 잡의 로스터를 `context.json`에 확정해 쓰고, workflow의 첫 스텝인 loader 에이전트(sonnet)가 그 파일을 읽어 schema로 돌려준다. loader가 역할을 지어내면 다음 `agent({agentType})`이 존재하지 않는 파일로 실패하고, 6에서 로스터 불일치로 잡힌다.
 
+**loader 확정 문장** (Plan 3 실행 판결, ADR-016): `factory-loader`(sonnet, `tools: Read, Bash, Grep`, `hooks.PreToolUse`는 `deny-all-writes.sh`)는 `roles.toml`의 어떤 `[stage.<name>]` 블록에도 속하지 않는다 — 로스터 역할이 아니라 네 workflow 모두의 첫 스텝이라서다. 네 workflow(`factory-triage.js`/`factory-plan.js`/`factory-implement.js`/`factory-review.js`)는 바이트 단위로 동일한 `LOADER` schema 리터럴을 공유한다:
+
+```js
+const LOADER = {
+  type: 'object',
+  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
+  properties: {
+    issue: { type: 'number' }, stage: { type: 'string' }, tier: { type: 'string' },
+    maturity: { type: 'string' },   // harness.maturity 그대로 — plan이 done_when level을 이걸로 묶는다
+    roster: { type: 'array', items: { type: 'object', required: ['name', 'agentType', 'model'],
+      properties: { name: { type: 'string' }, agentType: { type: 'string' }, model: { type: 'string' }, lessons: { type: 'string' } } } },
+    rounds: { type: 'number' }, limits: { type: 'object' }, spec_path: { type: 'string' },
+    pr: { type: 'number' }, head_sha: { type: 'string' },
+    must_fix: { type: 'array', items: { type: 'object' } }, disputed: { type: 'array', items: { type: 'object' } },
+    orchestration: { type: 'string' },
+  },
+};
+```
+
+역할 에이전트가 `context.json`을 직접 읽는다는 것은 loader가 대신 읽어 만든 프롬프트 인자를 넘겨받는다는 뜻이 아니다 — role 에이전트는 자기 `.md`·lessons·diff를 직접 읽고, `context.json` 자체를 다시 읽는 것은 loader의 몫이다(workflow가 파일을 못 읽으므로). loader-null(1회 재spawn 후에도 null 또는 throw)과 issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)는 네 workflow 모두 같은 모양으로 fail-closed 응답한다 — `{issue, error, orchestration: 'workflow', guarantee: 'structural'}`뿐, stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)는 아예 싣지 않는다. 각 스테이지 schema가 그 필드를 required로 두므로 `verify-stage`가 그대로 실패시켜 needs-human이 된다 — 별도의 에러 처리 경로가 필요 없다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다.
+
 #### 4.2.4 orchestration 모드 — 후퇴는 설정이지 동작이 아니다
 
 `harness.toml [factory] orchestration = "workflow" | "agent"` (기본 `workflow`, protected).
@@ -585,6 +608,8 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 3. plan handoff `done_when[].verify` — 이번 이슈에서 무엇을, 어느 레벨에서
 4. `[test].smoke` 세 파일 — 살아 있는 최소 예제
 5. `.factory/lessons/factory-builder.md`, `reviewer-qa.md` — 과거 실패에서 배운 것
+
+(Plan 3 실행 판결, ADR-016) correctness·security·architecture 리뷰어는 plan handoff를 읽지 않는다 — cold read가 그 세 역할에게는 §7.1의 일반 규칙 그대로 적용돼 코드와 diff만 판단 근거가 되고, plan handoff 접근은 spec-conformance(`cold_read = false`)와 qa(§7.5의 `done_when`만)에 한정된다.
 
 #### 5.2.4 성장 규칙과 증명 게이트
 
@@ -845,9 +870,10 @@ schema = 1
 
 # ── triage ──────────────────────────────────────────
 [triage]
-agent  = ".claude/agents/factory-triage.md"
-model  = "sonnet"
-output = "factory.triage.v1"
+agent   = ".claude/agents/factory-triage.md"
+model   = "sonnet"
+lessons = ".factory/lessons/factory-triage.md"     # (Plan 3 실행 판결, ADR-016) — §7.2 checkAgents가 모든 role의 Lessons 경로를 lint하므로 triage만 예외로 둘 근거가 없다
+output  = "factory.triage.v1"
 
 # ── plan 토론자 ─────────────────────────────────────
 [plan.product-advocate]
@@ -947,6 +973,8 @@ output = "factory.retro.v1"
 
 `model` 값은 `docs/research/multi-agent-model-guidance-for-repo.md`의 balanced 프로파일을 기본으로 한다. CHARTER에서 프로파일(`quality | balanced | budget`)을 바꾸면 레지스트리의 model이 프로파일 표로 치환된다.
 
+**설치 범위** (Plan 3 실행 판결, ADR-016): `[merge.integrator]`·`[retro.analyst]` 블록은 위 예시에 verbatim으로 남아 있지만, `factory-integrator.md`·`factory-retro.md` 에이전트 파일은 Plan 3에서 설치되지 않는다 — merge는 스크립트 전용이라 integrator를 spawn하지 않고(ADR-015 R3), retro는 Plan 4 몫이다. `doctor`의 `checkRoles`는 그래서 이 두 항목에 한해 `roles.agent-files` FAIL을 보고한다 — 이것은 Plan 4까지의 알려진 gap이며, `checkAgents`(§7.2)는 파일이 없는 항목을 lint 대상에서 건너뛴다.
+
 ### 7.2 역할 정의 파일의 필수 구조
 
 모든 `.claude/agents/*.md`는 다음 섹션을 가진다. `doctor`가 섹션 존재를 검사한다.
@@ -962,6 +990,19 @@ frontmatter: name, description, tools, model, hooks(선택)
 ## Perspectives      — 이 역할이 세상을 보는 렌즈들 (retro가 확장 제안)
 ## Lessons           — lessons 파일 경로와 "체크리스트로 읽어라" 지시 (include 문법에 의존하지 않는다)
 ```
+
+**doctor의 검사 = `lintAgentMd` 규칙** (Plan 3 실행 판결, ADR-016): `factory/lib/agent-md.js`의 `lintAgentMd(text, {expectedName})`이 `checkAgents`(`factory/lib/doctor/factory.js`)를 통해 `roles.toml`이 가리키는 모든 role `.md` + loader(§4.2.3)에 적용하는 규칙은 다음과 같다.
+
+- frontmatter `name`이 파일 basename(확장자 제외)과 정확히 같아야 한다 — 이름이 어긋나면 훅 로그 대조(`rolePrefix + role`)가 깨진다(Global Constraints).
+- frontmatter `model`은 `opus|sonnet|haiku` 중 하나.
+- frontmatter `tools`가 비어 있지 않아야 한다.
+- 8개 필수 섹션(`Purpose`/`You receive`/`You must not`/`Lens`/`Output`/`Examples`/`Perspectives`/`Lessons`)이 모두 있어야 한다. 헤더는 **접두 관용**이다 — `## Lens`, `## Lens — 설명`, `## Lens:`, `## Lens (주석)`은 같은 섹션으로 인정하지만, 뒤에 오는 문자가 ` —`/`:`/` (` 중 하나가 아닌 `## Lenses`나 `## Lens of the reviewer`는 다른 섹션으로 취급해 필수 섹션 누락으로 잡는다.
+- `## Examples`의 `### 좋은 발견`/`### 나쁜 발견` 하위 불릿이 각 ≥2개.
+- `## Perspectives`의 최상위 불릿이 ≥3개.
+- `## Lessons`가 `.factory/lessons/<name>.md` 경로 문자열을 포함해야 한다.
+- 쓰기 금지 역할(이름이 `reviewer-`/`plan-`로 시작하거나 `factory-triage`/`factory-verifier`/`factory-loader`)은 frontmatter `hooks.PreToolUse`에 `deny-all-writes.sh`가 배선돼 있어야 한다.
+
+파일이 아예 없는 항목(§7.1의 `merge.integrator`/`retro.analyst`처럼 아직 설치되지 않은 역할)은 `checkAgents`가 건너뛴다 — 부재는 `roles.agent-files`가 이미 별도로 FAIL로 잡고 있어, 같은 사실을 두 줄로 보고하지 않기 위해서다.
 
 ### 7.3 예시 — `.claude/agents/reviewer-correctness.md`
 
@@ -1098,7 +1139,14 @@ for (let attempt = 0; attempt < 2; attempt++) {
   if (attempt === 1) { plan.dissent_log.push(...objections.map(o => ({ role: o.role, objection: o.reason, resolution: 'unresolved — proceeding' }))); break }
   plan = await agent(`합의안:\n${JSON.stringify(plan)}\n\n이의:\n${JSON.stringify(objections)}\n\n수정하라.`, { agentType: 'plan-synthesizer', schema: PLAN_V1 })
 }
-return { r1, r2, plan }                          // run-stage.sh가 라운드별 코멘트 3개 + handoff 1개를 남긴다
+return { ...plan, issue, tier, roles: rosterNames, rounds, orchestration: 'workflow', guarantee: 'structural', debate: { r1, r2, votes } }
+// (Plan 3 실행 판결, ADR-016) — 위 `return { r1, r2, plan }` 발췌는 실제로는 채택되지 않았다: `verify-stage`가
+// `plan.v1`을 **최상위 객체**에 대고 검증하므로, plan.v1 필드(done_when·files_expected·dissent_log·non_goals·
+// open_risks·summary)는 최상위로 스프레드되고 토론 원본(r1/r2/votes)은 `debate` 아래 별도 필드로 얹힌다.
+// 라운드별 코멘트 3개는 채택되지 않았다 — `renderHandoff`의 `planBody()`가 R1 요약·R2 objection 수·표결
+// 결과·dissent를 handoff 코멘트 하나의 사람용 본문으로 합친다(P3-R5). `boundToMaturity`(별도 함수, 미발췌)가
+// loader가 넘긴 `harness.maturity`를 넘는 `done_when.level`을 최고 허용 레벨로 낮추고 `role: 'workflow'`인
+// dissent_log 항목을 남긴다 — maturity를 못 읽었으면 낮추지 않는다(모르는 상태로 지어내지 않는다).
 ```
 
 #### Review — 2라운드 + builder 응답 (`.claude/workflows/factory-review.js`)
@@ -1111,6 +1159,23 @@ R2 · 교차 검토   R1에 reject가 하나라도 있으면 → 전체 R2: 타 
 ```
 
 workflow가 돌려주는 객체(handoff data)에는 `decision` 필드가 없다 — `decision`은 workflow 밖, L1의 `aggregate-review.sh`가 `verdicts[]`로부터 계산해 handoff에 채운다(§4.2.1 step 6). `verdicts.length < roster.length`는 `incomplete`이며 `rework`가 아니라 `needs-human`으로 라우팅되고, 빠진 역할이 사유에 이름으로 남는다.
+
+**must_fix id 접두 규약, `unruled`, verdict 유도 규칙, qa의 plan 접근** (Plan 3 실행 판결, ADR-016):
+
+| 역할 | id 접두 |
+|---|---|
+| correctness | `cf` |
+| security | `sec` |
+| architecture | `arch` |
+| spec-conformance | `spec` |
+| qa | `qa` |
+| CHARTER가 추가한 그 외 역할 | 역할 이름 그대로 |
+
+접두는 builder의 rework 응답과 다음 라운드의 dispute 판정이 정확히 그 리뷰어에게 되돌아가게 하는 유일한 경로다(workflow는 접두 표를 하드코딩하되 로스터 자체는 하드코딩하지 않는다 — 표에 없는 이름은 자기 이름을 그대로 접두로 쓴다). **verdict는 findings가 정한다, 단어가 정하지 않는다**: `approve`인데 `must_fix`가 있으면 `reject`로, `reject`인데 `must_fix`가 비어 있으면 `approve`로 workflow가 재계산한다(R1·R2 모두) — `review.v1`이 애초에 그 조합을 거부하기도 하지만, 재계산은 애매한 스키마 위반 대신 명확한 규칙으로 처리한다. 이전 라운드에서 builder가 `disputed`로 답한 must_fix는 그 항목을 낸 리뷰어만 `withdraw|uphold`로 판정하며, 두 번 다 응답이 없거나 일부 id만 답한 경우는 **`unruled`**로 기록한다 — `uphold`와 같은 효과(다음 R1의 must_fix에 재부착, reject 유지)를 갖지만 같은 사실은 아니므로 별도 라벨로 구분한다("아무도 판정하지 않아 유지된 항목"과 "판단 끝에 유지된 항목"을 같은 줄로 뭉개지 않는다). `disputes[]`의 각 항목은 `{role, by, id, ruling, reason}`이고 `by`는 판정을 낸 리뷰어(= `role`)다 — 소유자가 없는 dispute id(로스터가 라운드 사이에 줄어든 경우)는 `{role: null, by: null, ruling: 'unowned'}`로 남는다.
+
+qa 리뷰어는 cold read 대상이지만 `handoffs.plan.done_when`(id/text/verify/level만 — `files_expected`/`non_goals`는 제외)은 R1 프롬프트에서 받는다. cold read가 배제하는 것은 **빌더의 산출물**(PR 설명·코멘트·커밋 메시지)이지 plan handoff가 아니다 — §5.2.3가 이 지점에서 §7.1의 일반 `cold_read = true` 문구보다 우선한다.
+
+**rework 완결성은 workflow가 센다** (implement, P3-R2): builder의 `rework_response.responses[]`가 이번 라운드 must_fix의 모든 id를 답했는지(`fixed`는 commit 필요, `disputed`는 reason 필요) `factory-implement.js` 자신이 세고, 빠지거나 형식이 틀린 id를 이름으로 모아 builder를 **1회만** 재spawn한다. 그래도 빠져 있으면 `verifier` 필드가 없는 객체를 return한다 — `implement.v1`이 `verifier`를 required로 두므로 그대로 needs-human이 된다. 사람이 읽는 handoff 본문에는 "rework response incomplete"라는 사유가 남는다.
 
 **schema null 시 해당 리뷰어 1회 재spawn** 규칙은 유지하되 성격은 **보험**이다: 실측에서 null은 0/20(opus 10/10, sonnet 10/10, 중첩 배열·enum 포함 스키마)이었고 재시도 경로는 한 번도 발동하지 않았다(ADR-003). 표본이 1세트뿐이라 제거하지 않을 뿐, 이 규칙이 정상 경로에서 돌 것으로 기대하지 않는다. 같은 이유로 리뷰어 모델 고정도 하지 않는다.
 
