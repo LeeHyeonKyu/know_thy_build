@@ -52,6 +52,49 @@ test("KTB-6: 변조는 여전히 ok:false — policy와 함께 있어도 서로�
   expect(r.policy.some((v) => /additive-only/.test(v.rule))).toBe(true);
 });
 
+// ── lessons 삭제는 정책 사안이다 (fix round 2의 "알려진 한계"를 닫는다) ──────────────
+// `.factory/lessons/**`는 `[protected].except`라 보호 목록에 안 들어가고, 삭제된 경로에는 내용 규칙도
+// 안 걸린다(N2) — 그래서 lessons를 지우는 diff는 L0에서도 L1에서도 **아무 신호를 만들지 않았다**.
+
+test("lessons 삭제는 violations가 아니라 policy다 — L0는 GREEN을 유지하고 사람이 머지한다", async () => {
+  const run = makeFakeRun([names("D\t.factory/lessons/reviewer-qa.md\n"), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([]);
+  expect(r.protected).toEqual([]);                                  // except라 보호 목록에는 여전히 없다
+  expect(r.policy).toEqual([{ file: ".factory/lessons/reviewer-qa.md", rule: "lessons file deleted or moved away — human merge required" }]);
+});
+
+test("lessons를 **옮기는** 것도 같다(출발지가 사라졌다); 살아 있는 lessons 수정과 새 lessons 추가는 조용하다", async () => {
+  const moved = makeFakeRun([names("D\t.factory/lessons/reviewer-qa.md\nA\tdocs/x.md\n"), u0("")]);
+  expect((await integrityCheck({ run: moved, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null })).policy)
+    .toEqual([{ file: ".factory/lessons/reviewer-qa.md", rule: "lessons file deleted or moved away — human merge required" }]);
+
+  const good = "<!-- factory-lessons:v1 role=reviewer-qa max=30 -->\n- [L-2026-09-01-01] x\n  근거: runs/1.md\n";
+  const alive = makeFakeRun([names("M\t.factory/lessons/reviewer-qa.md\nA\t.factory/lessons/new-role.md\n"), u0("")]);
+  const r = await integrityCheck({ run: alive, cwd: "/repo", base: "b", head: "h", harness, readFile: () => good });
+  expect(r.ok).toBe(true);
+  expect(r.policy).toEqual([]);
+});
+
+test("policyViolations(L1)가 같은 판정을 낸다 — L0가 알리는 것과 머지가 막는 것이 갈리지 않는다", async () => {
+  const run = makeFakeRun([names("D\t.factory/lessons/reviewer-qa.md\nM\tsrc/a.js\n")]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual([".factory/lessons/reviewer-qa.md"]);
+  expect(r.violations).toEqual([{ file: ".factory/lessons/reviewer-qa.md", rule: "lessons file deleted or moved away — human merge required" }]);
+  // additive_only 글롭에 걸리는 파일이 없으므로 파일당 git 호출(diff -U0 / show)은 한 번도 없다
+  expect(run.calls.filter((c) => c.args[0] === "show")).toHaveLength(0);
+});
+
+test("policyViolations: additive_only가 비어 있어도 lessons 삭제는 잡는다(예전엔 name-status조차 묻지 않았다)", async () => {
+  const bare = { protected: { factory: [".factory/**"], except: [".factory/lessons/**"] } };
+  const run = makeFakeRun([names("D\t.factory/lessons/plan-skeptic.md\n")]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness: bare });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual([".factory/lessons/plan-skeptic.md"]);
+});
+
 // ── KTB-6: policyViolations() — L1이 쓰는 섹션 정책 계산 ────────────────────────────
 // merge 스테이지는 PR head를 체크아웃한 트리 위에서 돈다. 섹션 판정에는 파일 내용이 필요한데,
 // **워킹 트리를 읽으면 PR이 판정 재료를 고를 수 있다** — 그래서 `git show <rev>:<file>`로만 읽는다.

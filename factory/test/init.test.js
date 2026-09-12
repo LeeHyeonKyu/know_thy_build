@@ -21,6 +21,10 @@ test("init installs the full manifest into an empty repo and renders the project
   expect(gitignore).toContain("docs/factory/runs/");
   // 게이트가 만드는 테스트 산출물도 추적하지 않는다 — 추적되면 stop-guard가 "미커밋 변경"으로 막는다.
   for (const e of ["test-results/", "coverage/", ".nyc_output/"]) expect(gitignore, e).toContain(e);
+  // `npm install --prefix .factory`(setup 액션·`factory run` preflight)가 로컬에 만드는 파일 —
+  // 추적되면 매번 dirty이고, `.factory/**`라 무결성 검사에는 사람 머지 신호로 보인다.
+  expect(gitignore).toContain(".factory/node_modules/");
+  expect(gitignore).toContain(".factory/package-lock.json");
   expect(existsSync(join(root, "docs/factory/runs/.gitkeep")), "no .gitkeep — the directory is created on demand by appendRunRecord").toBe(false);
   expect(o.out.join("\n")).toMatch(/created\s+\d+/);
 });

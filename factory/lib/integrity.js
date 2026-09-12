@@ -53,7 +53,7 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
       if (!gone) continue;        // 살아 있는 동안만 additive 규칙이 이 파일을 전담한다 — 삭제·이동은 아래 보호 목록으로도 간다
     }
     if (isProtectedPath(f, prot)) protectedFiles.push(f);       // 위반이 아니라 "사람이 머지해야 한다"는 사실 (KTB-5)
-    if (gone) continue;                                         // 내용 규칙은 여기서 끝 (N2)
+    if (gone) { policy.push(...lessonsGone(f)); continue; }      // 내용 규칙은 여기서 끝 (N2) — 사라진 lessons만 정책으로 센다
     if (f.startsWith(".factory/lessons/")) violations.push(...lessonsFormat(f, text));
     if (matchesAny(harness.test?.test_glob || [], f)) {
       if ((addedByFile.get(f) || []).some((l) => SKIP_PRAGMAS.some((re) => re.test(l.text)))) violations.push({ file: f, rule: "test skip/ignore pragma added" });
@@ -61,6 +61,19 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   }
   return { ok: violations.length === 0, violations, protected: protectedFiles, policy, checked: { files } };
 }
+
+/**
+ * **사라진 lessons 파일은 정책 사안이다**(fix round 2의 "알려진 한계"를 닫는다).
+ * `.factory/lessons/**`는 `[protected].except`라 보호 목록에 들어가지 않고, 삭제된 경로에는 내용 규칙도
+ * 걸리지 않는다(N2) — 그래서 `.factory/lessons/reviewer-qa.md`를 지우거나 옮기는 diff는 L0에서도 L1에서도
+ * **아무 신호를 만들지 않았다**. 누적된 교훈이 조용히 사라지는 경로다. 변조로 다루지는 않는다(역할을
+ * 은퇴시키며 지우는 것은 정상 작업이다) — additive-only 위반과 같은 자리, 곧 `policy`(사람이 머지한다)로
+ * 올린다. rename은 `--no-renames` 덕에 `D <old>`로 보이므로 출발지가 그대로 잡힌다.
+ */
+const LESSONS_DIR = ".factory/lessons/";
+const lessonsGone = (f) => (f.startsWith(LESSONS_DIR) && f.endsWith(".md")
+  ? [{ file: f, rule: "lessons file deleted or moved away — human merge required" }]
+  : []);
 
 /**
  * additive-only 판정의 **단일 본체** — L0(`integrityCheck`)와 L1(`policyViolations`)이 같은 함수를
@@ -96,12 +109,15 @@ export function additiveOnlyViolations({ file, allowed, added, removed, headText
 export async function policyViolations({ run, cwd, base, head = "HEAD", harness }) {
   if (!base) return { ok: false, files: [], violations: [], reason: "base is empty (merge-base not resolved)" };
   const prot = harness?.protected || {};
-  if (!Object.keys(prot.additive_only || {}).length) return { ok: true, files: [], violations: [] };
   const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason("git diff --name-status", ns) };
-  const entries = changedEntries(ns.stdout)
-    .map((e) => [e.path, additiveGlobFor(e.path, prot)]).filter(([, g]) => g);
+  const changed = changedEntries(ns.stdout);
   const violations = [];
+  // 사라진 lessons는 글롭과 무관하게 센다 — L0가 `policy`로 올린 것과 **같은 판정**이어야 한다.
+  for (const e of changed) if (e.deleted) violations.push(...lessonsGone(e.path));
+  const entries = Object.keys(prot.additive_only || {}).length
+    ? changed.map((e) => [e.path, additiveGlobFor(e.path, prot)]).filter(([, g]) => g)
+    : [];
   for (const [f, glob] of entries) {
     const u0r = await run("git", U0(base, head, f), { cwd });
     if (u0r.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason(`git diff -U0 -- ${f}`, u0r) };

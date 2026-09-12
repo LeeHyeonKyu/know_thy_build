@@ -569,4 +569,26 @@ f12a174을 다시 읽은 리뷰가 두 구멍을 더 찾았다. 둘 다 "한 판
 
 **알려진 한계(N2에서 파생)**: `.factory/lessons/**`는 `[protected].except`라 보호 목록에도 들어가지 않으므로, **lessons 파일의 삭제는 이제 L0에서도 L1에서도 아무 신호를 만들지 않는다**(전에는 오진이긴 해도 RED였다). 역할을 은퇴시키며 지우는 것은 정상 작업이라 변조로 볼 수 없지만, 누적된 교훈이 조용히 사라질 수 있는 경로이긴 하다 — 필요해지면 `policy`(사람 머지)로 올리는 것이 맞는 자리다.
 
+### KTB-8 — 스테이지 워크플로가 공유 concurrency 그룹에서 서로를 취소했다
+
+**질문**: `issues: labeled` 이벤트 하나가 스테이지 워크플로 5개의 런을 전부 만드는데(GitHub는 트리거에 라벨 이름 필터를 주지 않는다 — 필터는 잡 레벨 `if`다), 다섯이 `concurrency.group: factory-issue-<n>`을 공유하고 있었다. `cancel-in-progress: false`에서도 GitHub는 그룹당 실행 1 + 대기 1만 유지하므로 새 웨이브가 직전 대기 런을 취소한다 — 데모 #2에서 조건이 맞는 유일한 런(`factory-plan`)이 생성 1초 만에 밀려나고 이슈가 `factory:ready`에 기록 하나 없이 멈췄다. 공유 그룹이 무엇을 보장한다고 믿고 있었는가, 그리고 런이 **만들어지지도 않은** 정지를 누가 본다고 믿고 있었는가.
+
+**결정**:
+
+1. **그룹을 워크플로별로 가른다** — `factory-issue-${{ github.event.issue.number || inputs.issue }}-<stage>`(`templates/factory/github/workflows/factory-{triage,plan,implement,review,merge}.yml`). 이슈 단위 상호배제는 처음부터 concurrency가 아니라 `factory/lib/claim.js`의 원자적 락 브랜치 claim(`refs/heads/factory/lock-<issue>` 원격 push, 두 번째 러너는 `{ok:false, holder}`로 fail closed)이 주고 있었다 — 공유 그룹은 보호를 더하지 않으면서 스테이지를 죽이는 레이스만 만들었다. yml 주석이 그 사실을 명시하고, `factory/test/yml-lint.test.js`가 다섯 그룹 문자열이 pairwise distinct임을 고정한다.
+2. **재점화는 `workflow_dispatch`뿐이다** — 라벨이 이미 목적 상태에 있으면 같은 라벨을 또 붙여도 `labeled` 이벤트가 나지 않으므로 라벨로는 되살릴 수 없다. 스테이지 5개에 `inputs.issue`를 달고 잡 조건을 `github.event_name == 'workflow_dispatch' || contains(...)`로, 이슈 번호를 `github.event.issue.number || inputs.issue`로 바꿨다(`run-stage.js`는 이미 argv에서 읽는다). 사람·컨트롤러용 같은 손잡이가 `factory/cli/run.js`의 `factory run <stage> <issue> --remote`다 — 로컬 실행 없이 dispatch만 하고, `merge`도 받는다(브랜치 보호가 막는 것은 로컬 실행이지 CI dispatch가 아니다).
+3. **sweeper의 세 번째 팔**(`factory/lib/sweeper.js`, `factory/bin/sweep.js`) — `factory:ready|planned|awaiting-review|approved`에 앉아 있고 ① 마지막 전이 코멘트(`factory-transition:v1`)가 `staleMinutes`보다 오래됐고 ② 그 창 안에 갱신된 하트비트가 없고 ③ 재점화 마커가 없는 이슈를 `gh workflow run factory-<stage>.yml -f issue=<n>`으로 다시 띄우고 `<!-- factory-sweeper restarted stage=<stage> issue=<n> -->`를 남긴다. 하트비트 확인이 "in-flight 런 조회"를 대신한다 — `gh run list`보다 싸고, 이미 이 파일이 읽는 데이터이며, 스테이지가 살아 있다는 1차 증거다(plan은 37분 동안 `factory:ready`에 머문다). 전이 코멘트가 아예 없으면 판단하지 않는다(나이를 모르는 것을 "오래됐다"로 읽지 않는다). 중복 dispatch 자체는 무해하다 — 락 claim이 두 번째 러너를 fail closed 시킨다. 워크플로에 `permissions: actions: write`를 더했다.
+
+**알려진 한계**: 스테이지 5개를 `factory-stage.yml` 하나로 합쳐 라벨로 분기하면 라벨 이벤트당 런이 1개뿐이라 그룹 경합도 팬아웃 로그 잡음(매 전이마다 취소 4건)도 사라진다 — 위 ①보다 옳지만 변경 폭이 커서 채택하지 않았다. 그리고 취소된 런은 잡 로그·아티팩트·코멘트를 아무것도 남기지 않으므로(도그푸드 O8), 정지의 사후 조사는 여전히 90일짜리 Actions 기록에 의존한다.
+
+### KTB-9 — tier 라벨을 붙이는 코드가 어디에도 없었다
+
+**질문**: 스펙 §3.2는 triage가 `factory:tier-docs|standard|load-bearing`을 부여한다고 적었고 `factory/lib/label-catalog.js`가 셋을 정의해 `bootstrap`이 만들기까지 하는데, `addLabels`를 부르는 곳은 retro 경로뿐이었다. tier가 handoff JSON 안에만 있으면 사람은 이슈 목록에서 tier를 볼 수 없다 — 라벨은 사람이 읽는 표식이므로 이것은 문서와 코드의 드리프트다.
+
+**결정**: `factory/bin/run-stage.js`가 triage handoff를 **검증한 뒤**(`verifyStage` 통과 뒤 — 검증 전의 tier는 에이전트의 자기 신고다) `gh.setTierLabel(issue, factory:tier-<tier>)`로 그 tier를 붙이고 다른 `factory:tier-*`를 같은 `gh issue edit` 호출에서 뗀다. `setFactoryLabel`을 재사용하지 않는다 — 그것은 `labels.js`의 `STATES`만 보므로 태우면 상태 라벨이 떨어져 나간다(tier는 상태와 **직교**하되 이슈당 하나다; `TIERS`·`tierLabel()`·`TIER_LABELS`를 `factory/lib/labels.js`에 뒀다). 라벨 적용 실패는 런 기록 한 줄로만 남기고 스테이지를 죽이지 않는다 — 판정의 재료는 계속 handoff의 tier이고(게이트·로스터·`factory status`), 라벨은 그 사실의 사본일 뿐이다.
+
+### 보강 — lessons 파일의 삭제는 `policy`(사람 머지)다
+
+fix round 2가 "알려진 한계"로 적어 둔 구멍을 닫는다. `.factory/lessons/**`는 `[protected].except`라 보호 목록에 들어가지 않고, 삭제된 경로에는 내용 규칙도 걸리지 않으므로(N2) lessons 파일을 지우거나 옮기는 diff는 **L0에서도 L1에서도 아무 신호를 만들지 않았다** — 누적된 교훈이 조용히 사라지는 경로다. 변조로 다루지는 않는다(역할을 은퇴시키며 지우는 것은 정상 작업이고, 그것을 RED로 만들면 KTB-5와 같은 오진이 된다): `factory/lib/integrity.js`의 `integrityCheck`가 additive-only 위반과 **같은 자리**인 `policy`에 `lessons file deleted or moved away — human merge required`를 싣고, `policyViolations`(L1)도 같은 판정을 내 merge 스테이지가 자동 머지를 거부한다. 두 함수가 갈리면 체크가 알리는 것과 머지가 막는 것이 달라지므로 판정 본체를 공유한다(`lessonsGone`). rename은 `--no-renames` 덕에 `D <old>`로 보여 출발지가 그대로 잡힌다.
+
 (이후 항목은 dogfood 진행에 따라 추가)

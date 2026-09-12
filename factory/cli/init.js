@@ -11,7 +11,10 @@ import { run as realRun } from "../lib/exec.js";
 // 테스트 산출물(`test-results/`·`coverage/`·`.nyc_output/`)도 무시한다: 게이트가 매 스테이지마다
 // 커버리지·리포트를 만들고, 추적되면 그 파일들이 "미커밋 변경"으로 남아 stop-guard가 스테이지 종료를
 // 막거나 PR diff에 러너의 산출물이 섞인다(F1과 같은 이유 — 판정의 재료는 커밋 대상이 아니다).
-export const GITIGNORE_ENTRIES = [".factory/out/", ".factory/node_modules/", "docs/factory/runs/", "test-results/", "coverage/", ".nyc_output/"];
+// `.factory/package-lock.json`은 `npm install --prefix .factory`(CI의 setup 액션과 `factory run`의
+// preflight 3단계)가 로컬에 만드는 파일이다 — 커밋 대상이 아닌데 무시 목록에 없어서 매번 dirty로 잡혔고,
+// 무결성 검사에는 `.factory/**`(보호 경로)로 보여 사람 머지 신호까지 만들었다.
+export const GITIGNORE_ENTRIES = [".factory/out/", ".factory/node_modules/", ".factory/package-lock.json", "docs/factory/runs/", "test-results/", "coverage/", ".nyc_output/"];
 
 export function projectVars(root) {
   let name = basename(root);

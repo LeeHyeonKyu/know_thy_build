@@ -6,6 +6,11 @@ import { run } from "../lib/exec.js";
 import { syncRecords, readRecords, readRecordsDetailed, hydrateRecord } from "../lib/records-branch.js";
 import { appendRunRecord } from "../lib/run-record.js";
 
+/**
+ * 이 파일의 테스트는 **진짜 git**을 부른다(bare 원격 + 클론 + push/fetch) — 한 건에 수 초에서 20 초가
+ * 걸리고, 스위트 전체가 동시에 도는 로컬·CI에서는 디스크 경합으로 30 초를 넘겨 timeout으로 떨어졌다.
+ * 느린 것은 검증 대상이 아니라 환경이므로 케이스마다 60 초를 준다(개별 `}, 60000)`).
+ */
 const git = (cwd, ...args) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd });
 
 /** bare 원격 하나. */
@@ -50,7 +55,7 @@ test("(a) first sync creates the factory/records branch on the remote; working t
   expect(status.stdout.trim()).toBe("");
   const branch = await git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
   expect(branch.stdout.trim()).toBe("main");
-}, 30000);
+}, 60000);
 
 test("(b) second sync links a parent (2 commits on factory/records) and updates the file", async () => {
   const remote = await makeRemote();
@@ -75,7 +80,7 @@ test("(b) second sync links a parent (2 commits on factory/records) and updates 
 
   const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
   expect(show.stdout).toBe("v1\nv2\n");
-}, 30000);
+}, 60000);
 
 test("(c) a race — another sync pushes first, forcing a retry; both files survive", async () => {
   const remote = await makeRemote();
@@ -108,7 +113,7 @@ test("(c) a race — another sync pushes first, forcing a retry; both files surv
   expect(showA.stdout).toBe("from-a\n");
   const showB = await run("git", ["show", "factory/records:docs/factory/runs/8.md"], { cwd: remote });
   expect(showB.stdout).toBe("from-b\n");
-}, 30000);
+}, 60000);
 
 test("(d) readRecords round-trips what syncRecords wrote", async () => {
   const remote = await makeRemote();
@@ -122,7 +127,7 @@ test("(d) readRecords round-trips what syncRecords wrote", async () => {
   expect(map.size).toBe(2);
   expect(map.get("7")).toBe("seven\n");
   expect(map.get("42")).toBe("forty-two\n");
-}, 30000);
+}, 60000);
 
 test("(e) no origin remote configured — syncRecords never throws, returns ok:false", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "records-noorigin-"));
@@ -134,7 +139,7 @@ test("(e) no origin remote configured — syncRecords never throws, returns ok:f
   expect(r.ok).toBe(false);
   expect(r.retried).toBe(false);
   expect(typeof r.reason).toBe("string");
-}, 30000);
+}, 60000);
 
 test("readRecords returns an empty Map when the branch doesn't exist on the remote", async () => {
   const remote = await makeRemote();
@@ -142,7 +147,7 @@ test("readRecords returns an empty Map when the branch doesn't exist on the remo
   const map = await readRecords({ run, cwd });
   expect(map.size).toBe(0);
   expect(map instanceof Map).toBe(true);
-}, 30000);
+}, 60000);
 
 test("detached HEAD (review/merge stages run detached, Task 12) — sync works and never moves HEAD", async () => {
   const remote = await makeRemote();
@@ -163,7 +168,7 @@ test("detached HEAD (review/merge stages run detached, Task 12) — sync works a
 
   const show = await run("git", ["show", "factory/records:docs/factory/runs/99.md"], { cwd: remote });
   expect(show.stdout).toBe("detached\n");
-}, 30000);
+}, 60000);
 
 test("custom author/committer env overrides the factory-bot defaults", async () => {
   const remote = await makeRemote();
@@ -173,7 +178,7 @@ test("custom author/committer env overrides the factory-bot defaults", async () 
   expect(r.ok).toBe(true);
   const show = await run("git", ["show", "-s", "--format=%an <%ae>", r.commit], { cwd: remote });
   expect(show.stdout.trim()).toBe("someone <someone@example.com>");
-}, 30000);
+}, 60000);
 
 test("default author/committer is factory-bot when env is not given", async () => {
   const remote = await makeRemote();
@@ -183,7 +188,7 @@ test("default author/committer is factory-bot when env is not given", async () =
   expect(r.ok).toBe(true);
   const show = await run("git", ["show", "-s", "--format=%an <%ae>", r.commit], { cwd: remote });
   expect(show.stdout.trim()).toBe("factory-bot <factory-bot@users.noreply.github.com>");
-}, 30000);
+}, 60000);
 
 // ── fix round 1: hydrateRecord — fresh checkout must not clobber the branch's accumulated record ──
 
@@ -209,7 +214,7 @@ test("hydrateRecord: a fresh clone restores the branch's record before this stag
   const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
   expect(show.stdout).toContain("## triage · t1\ndisposition: ready\n");
   expect(show.stdout).toContain("## plan · 2026-09-12T00:00Z · gha-2\nrounds: 1\n");
-}, 30000);
+}, 60000);
 
 test("hydrateRecord: diverged local content is reported (never silently merged), and syncRecords appends only the local tail — the branch content survives", async () => {
   const remote = await makeRemote();
@@ -231,7 +236,7 @@ test("hydrateRecord: diverged local content is reported (never silently merged),
 
   const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
   expect(show.stdout).toBe("branch content\ncompletely different local content\n");   // 브랜치 내용 뒤에 로컬 꼬리가 붙었다 — 어느 쪽도 잃지 않는다
-}, 30000);
+}, 60000);
 
 test("(f) same-issue race: two runners hydrate from the same tip and both stage sections survive (F6)", async () => {
   const remote = await makeRemote();
@@ -262,7 +267,7 @@ test("(f) same-issue race: two runners hydrate from the same tip and both stage 
   expect(show.stdout).toBe(P0 + S1 + S2);           // P0 + A의 섹션 + B의 섹션 — 아무것도 덮어쓰지 않았다
   expect(show.stdout).toContain("## plan · 2026-09-12T01:00Z · gha-a\nrounds: 1\n");
   expect(show.stdout).toContain("## review · 2026-09-12T02:00Z · gha-b\ndecision: approved\n");
-}, 30000);
+}, 60000);
 
 test("(g) syncRecords still skips a file whose local content adds nothing new (local is a prefix of the branch tip)", async () => {
   const remote = await makeRemote();
@@ -279,7 +284,7 @@ test("(g) syncRecords still skips a file whose local content adds nothing new (l
 
   const show = await run("git", ["show", "factory/records:docs/factory/runs/7.md"], { cwd: remote });
   expect(show.stdout).toBe("line1\nline2\n");
-}, 30000);
+}, 60000);
 
 test("hydrateRecord: no factory/records branch on the remote → {ok:true, hydrated:false}, no throw", async () => {
   const remote = await makeRemote();
@@ -288,7 +293,7 @@ test("hydrateRecord: no factory/records branch on the remote → {ok:true, hydra
   const h = await hydrateRecord({ run, cwd, issue: 7 });
   expect(h).toEqual({ ok: true, hydrated: false });
   expect(readFileSync(join(cwd, "docs/factory/runs/7.md"), "utf8")).toBe("local only\n");   // 손대지 않았다
-}, 30000);
+}, 60000);
 
 test("hydrateRecord: branch exists but has no record for this issue yet → {ok:true, hydrated:false}", async () => {
   const remote = await makeRemote();
@@ -300,7 +305,7 @@ test("hydrateRecord: branch exists but has no record for this issue yet → {ok:
   const h = await hydrateRecord({ run, cwd: cwd2, issue: 8 });
   expect(h).toEqual({ ok: true, hydrated: false });
   expect(existsSync(join(cwd2, "docs/factory/runs/8.md"))).toBe(false);
-}, 30000);
+}, 60000);
 
 // ── fix round 1: syncRecords — nothing to sync ──────────────────────────────
 
@@ -311,7 +316,7 @@ test("syncRecords with no local *.md files returns ok:true without committing an
   expect(r).toEqual({ ok: true, commit: null, reason: "nothing to sync", retried: false });
   const branches = await run("git", ["branch", "-r"], { cwd: remote });
   expect(branches.stdout).not.toContain("factory/records");
-}, 30000);
+}, 60000);
 
 // ── fix round 1: readRecords — flat files only ──────────────────────────────
 
@@ -329,7 +334,7 @@ test("readRecords only reads <name>.md files directly under dir — nested paths
   expect(map.size).toBe(1);
   expect(map.get("7")).toBe("flat\n");
   expect(map.has("nested/99")).toBe(false);
-}, 30000);
+}, 60000);
 
 test("(h) overwrite: a rewritten state file (_retro.md) replaces the branch content instead of being tail-merged", async () => {
   const remote = await makeRemote();
@@ -358,7 +363,7 @@ test("(h) overwrite: a rewritten state file (_retro.md) replaces the branch cont
   await syncRecords({ run, cwd, message: "retro 3 (no overwrite)" });
   const bad = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
   expect(bad.stdout.match(/factory-retro-state:v1/g).length).toBeGreaterThan(1);
-}, 30000);
+}, 60000);
 
 // ── 출처(provenance)와 교체 경합 — retro의 상태 파일이 조용히 사라지지 않게 ──────────────────
 
@@ -391,7 +396,7 @@ test("(i) readRecordsDetailed tells 'nothing there' apart from 'could not read' 
   const expected = (await run("git", ["rev-parse", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote })).stdout.trim();
   expect(r2.blobs.get("_retro")).toBe(expected);
   expect(r2.blobs.get("7")).toMatch(/^[0-9a-f]{40}$/);
-}, 30000);
+}, 60000);
 
 test("(j) expectBlob refuses to clobber a state file that moved on the branch, and lands when it did not", async () => {
   const remote = await makeRemote();
@@ -423,7 +428,7 @@ test("(j) expectBlob refuses to clobber a state file that moved on the branch, a
   expect((await syncRecords({ run, cwd: a, message: "retro from a 2", overwrite: ["_retro.md"], expectBlob: { "_retro.md": fresh } })).ok).toBe(true);
   const landed = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
   expect(landed.stdout).toBe("state v3-on-top-of-b\n");
-}, 30000);
+}, 60000);
 
 test("(k) expectBlob null means 'the branch had no such file' — it refuses to clobber one that appeared since", async () => {
   const remote = await makeRemote();
@@ -438,4 +443,4 @@ test("(k) expectBlob null means 'the branch had no such file' — it refuses to 
   expect(r).toMatchObject({ ok: false, moved: true });
   const show = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
   expect(show.stdout).toBe("state from another runner\n");
-}, 30000);
+}, 60000);
