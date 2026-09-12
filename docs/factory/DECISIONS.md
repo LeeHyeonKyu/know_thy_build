@@ -496,11 +496,95 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 ---
 
-## ADR-020 (draft) Dogfood 판결 — 2026-09-12
+## ADR-020 Dogfood 판결 — 2026-09-12 (Plan 6 Task 7, part 1 — 재구성)
 
-Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다.
+Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19) **⑤ 권한·훅**(KTB-13·14) **⑥ 관찰**(O1~O12, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
 
-### KTB-5 — integrity 체크(L0)는 변조만 본다; 보호 경로 변경은 L1이 사람에게 넘긴다
+### 질문
+
+다크 factory를 실제 GitHub Actions + 구독 토큰으로 세 저장소(데모 그린필드·KTB 자기 자신·own-calendar)에 태웠을 때, 설계가 종이 위에서 옳다고 가정했던 것 중 무엇이 실측에서 깨졌고, 그때마다 "무엇을 판결의 근거로 삼을 것인가"를 어떻게 정했는가.
+
+### 관측 (총괄)
+
+- **실측 소각**: 데모 라운드 3까지 `factory status` 실측으로 **$81.81 / 53 runs**(#2 $45.49 / 11 runs, #8 $36.32 / 39 runs — list-price 환산, 구독 청구라 실비용은 아님). 가장 비싼 두 스테이지(implement $17.07 · review $11.33)의 비용 상당 부분이 권한 우회(KTB-12/13류 — Bash 209회·245회)에서 나왔다: 방벽을 잘못 세우면 비용으로 되돌아온다.
+- **결함 19건(KTB-1~19, 재리뷰 라운드 포함) 중 다수가 같은 실수의 변주다**: "판정을 exit code 하나로 뭉쳤다"(KTB-5/6), "두 겹 검사가 서로 다른 git 호출을 쓴다"(KTB-5 fix round 2), "플래그 뭉치의 경계 조건을 놓쳤다"(KTB-13 r1→r2), "재시도가 놓친 창"(KTB-8→10→15b→19). 반복되는 근본 패턴: **한 판정을 두 곳에서 다시 계산할 때, 그 둘이 같은 입력·같은 시점의 세계를 보게 만들지 않으면 갈린다.**
+- 그린필드(데모)는 **첫 다크 완주**(이슈 #8 → PR #10, 2026-09-12 17:07Z)까지 도달했다. 브라운필드 둘(KTB 자기 자신·own-calendar)은 **로컬 준비까지만** 끝났고 원격 다크 실행은 사용자 조치 대기로 PARKED다(아래 "PARKED" 절).
+- 세부 실측(스테이지별 run id·소요·비용·라벨 전이)은 `docs/factory/dogfood/2026-09-12-demo.md`·`2026-09-12-ktb.md`에 표로 있다 — 이 ADR은 그 실측이 바꾼 설계만 적는다.
+
+### 결정
+
+### ① doctor / 설치 — KTB-1·2·3·4·11·12
+
+Task 1(데모 픽스처)과 Task 2(bootstrap)에서 `factory doctor`·`factory bootstrap` 자체의 판정 로직이 깨졌다 — 전부 "doctor가 실제로 도는 환경(test env·GitHub 조회·brownfield 파일)과 doctor 코드가 가정한 환경이 다르다"는 같은 계열이다.
+
+#### KTB-1 — `factory doctor`가 `[commands]`를 하네스 테스트 환경 **밖에서** 실행했다
+
+**질문**: 데모(M1, `[test.env].compose` 선언)에서 `factory doctor`를 돌리면 `commands.run.unit`이 상시 FAIL이었다 — CI(`.factory/actions/setup`, `test-env: true`)와 로컬 `factory doctor`가 같은 명령을 다른 순서로 실행하고 있었다.
+
+**관측**: doctor가 `[commands]` 게이트 명령을 실행하는 시점이 `envUp`/`envDown`(테스트 환경 기동/종료) 바깥이었다 — DB가 필요한 M1+ 저장소는 컴포즈가 뜨지 않은 채로 유닛 테스트를 돌려 항상 죽는다.
+
+**결정**: `envUp`/`envDown`이 명령 게이트와 스모크를 **한 사이클**로 감싸도록 고쳐, CI와 로컬이 같은 순서(기동 → 게이트/스모크 → 종료)를 갖게 했다.
+
+**알려진 한계**: 없음 — 순서 버그였고 고치는 데 설계 트레이드오프가 없었다.
+
+**영향**: `factory/cli/doctor.js`(envUp/envDown 래핑). 테스트: `doctor-cli.test.js`(`env-wraps-commands`). sha `6e4af3f`.
+
+#### KTB-2 — GitHub Free private repo의 branch protection 403이 두 번 찍히고 exit code가 불명확했다
+
+**질문**: `factory bootstrap`을 GitHub Free 플랜의 private repo에 돌리면 branch protection PUT이 403(`Upgrade to GitHub Pro or make this repository public…`)으로 실패하는데, 그 한 줄이 두 곳(`applyBootstrap`의 `log()` + `bootstrapCommand`의 요약 루프)에서 중복 출력됐고 종료 코드가 무엇을 뜻하는지 불명확했다.
+
+**관측**: 사람이 읽는 출력이 원인(플랜 제약)과 조치(공개 전환 또는 업그레이드)를 명확히 말하지 않으면서 다른 정상 op(라벨 등)의 성공 여부와 섞여 보였다.
+
+**결정**: `bootstrap.js`(cli+lib)가 이 403을 **한 줄만** 찍도록 dedupe하고(`protection main: not available on this plan (private repo on GitHub Free) — make the repo public or upgrade; L0 required-check enforcement is off, L1 (merge script requires all checks GREEN) and L2 still apply`), exit 1을 명확히 하면서도 다른 op은 전부 적용을 유지한다. `doctor`의 `github.protection`도 같은 403을 **FAIL이 아니라 WARN**(플랜 안내)으로 구분한다(404는 그대로 다른 처리).
+
+**알려진 한계**: 플랜 제약은 KTB가 되돌릴 수 없다 — L0가 없는 채로 L1·L2에 의존하는 것이 이 판결의 실질적 결과다(own-calendar에서 같은 조건이 재현된다, 아래 관찰 참조).
+
+**영향**: `factory/cli/bootstrap.js`, `factory/lib/bootstrap.js`, `factory/lib/doctor/factory.js`(`github.protection`). 테스트: `bootstrap.test.js`(fix round 2)·`gh.test.js`·`doctor-factory.test.js`(fix round 2). sha `ca65348`.
+
+#### KTB-3 — env-up 실패 시 스모크는 건너뛰지만 `[commands]`는 그대로 돌아 거짓 결과를 냈다
+
+**질문**: `factory doctor`가 env-up 실패 시 스모크는 건너뛰면서(`envResult.ok` 게이트) `[commands]`는 그대로 실행하는 비대칭이 있었다 — DB가 필요한 M1+ 저장소는 env-up이 죽어도 `commands.run.*`가 환경 없이 돌아 "고칠 수 없는" 거짓 FAIL을 낸다(코드는 정상인데 환경이 없어서 실패로 보인다).
+
+**결정**: `checkCommands`에 `skipReason`을 추가해 env-up 실패 시 각 `commands.run.<k>`를 실행 없이 `FAIL: skipped: test env not up (<reason>)`로 보고하도록 스모크와 대칭을 맞췄다(`envDown`은 그대로 항상 호출).
+
+**알려진 한계**: "환경이 없어서 건너뛴 FAIL"과 "코드가 실제로 깨진 FAIL"이 둘 다 FAIL로 보이므로, 사람은 사유 문자열을 읽어야 구분할 수 있다 — doctor 출력의 등급 자체(PASS/WARN/FAIL)는 나누지 않았다(둘 다 "게이트가 검증되지 않았다"는 점에서 FAIL이 맞다는 판단).
+
+**영향**: `factory/lib/doctor/factory.js`(`checkCommands`). 테스트: `doctor-cli.test.js`(Task 3). sha `ca65348`.
+
+#### KTB-4 — `FACTORY_REPO` 없이 돌리면 doctor가 존재하는 branch protection을 "없다"고 오보했다
+
+**질문**: `factory/cli/doctor.js`가 gh client를 `makeGh({ run, repo: process.env.FACTORY_REPO || "" })`로 만들었다 — 사람이 `FACTORY_REPO` 없이(정상 케이스) `factory doctor`를 돌리면 `repo`가 `""`가 돼 `gh api repos//branches/main/protection`이 실패하고, 그 non-403 실패가 `null`로 떨어져 실제로는 존재하는 branch protection(`contexts=["factory/integrity"]`)을 `github.protection — branch protection is missing L0 contexts: factory/integrity`로 오보했다.
+
+**결정**: `status.js`가 이미 하던 해석(`FACTORY_REPO` → `gh repo view --json nameWithOwner`)을 `resolveRepo({ run })`로 `factory/lib/gh.js`에 공유 추출해 `doctor.js`·`status.js` 둘 다 쓰게 했다. 해석 자체가 실패하면(로그인 안 됨·git repo 아님) `github.*` 전체를 건너뛰고 `github.unavailable` WARN 하나로 남긴다(오프라인 허용, 오보 아님). `bootstrap.js`/`run.js`/`factory/bin/*.js`도 같은 `|| ""` 패턴을 찾아봤으나 전부 이미 `FACTORY_REPO || gh repo view` 인라인 방식을 쓰고 있어 결함이 없었다(추가 수정 없음).
+
+**알려진 한계**: 없음 — 단일 출처로 통합해 재발 가능성을 없앴다(같은 계산을 두 곳에서 다시 하지 않는다는 이 ADR의 반복 원칙).
+
+**영향**: `factory/lib/gh.js`(`resolveRepo`), `factory/cli/doctor.js`. 테스트: `gh.test.js`(resolveRepo 유닛 3건)·`doctor-cli.test.js`(KTB-4 2건). sha `09fb3e6`.
+
+#### KTB-11 — `files.stale`이 병합 대상 파일(`.claude/settings.json`)까지 바이트로 비교하고 있었다
+
+**질문**: 브라운필드 저장소에서 `factory doctor`를 돌리면 `.claude/settings.json`이 사람이 정당하게 추가한
+deny/allow/훅을 갖고 있어도 `files.stale` WARN이 영구히 뜬다. `manifest.js`는 이 파일을 `merge: "settings"`로
+표시하고 init/upgrade는 `mergeSettings`(합집합)로만 이 파일을 건드리는데, `checkFiles`는 `owner === "factory"`인
+모든 항목을 템플릿 렌더 결과와 바이트로 비교한다 — "병합 대상"이라는 사실 자체를 몰랐다.
+
+**결정**: `checkFiles`가 `e.merge === "settings"` 항목만 다른 규칙으로 판정한다(`factory/lib/doctor/factory.js`
+`settingsIsStale`) — `mergeSettings(installed, template)`를 다시 계산해 그 결과가 설치된 파일과 **다를 때만**
+stale이다(사람이 자기 항목을 더 넣었어도 템플릿 항목을 전부 갖고 있으면 병합 결과는 설치본과 같다).
+JSON으로 못 읽는 파일(사람이 손으로 깨뜨린 경우 등)은 이전 동작(바이트 비교)으로 안전하게 되돌아간다.
+`mergeSettings`는 `factory/cli/install.js`의 기존 순수 함수를 그대로 재사용한다 — 판정 두 곳(설치기·doctor)이
+갈리면 "병합됐다"와 "stale이 아니다"가 서로 다른 답을 낼 수 있다.
+테스트: `doctor-factory.test.js`(customized-but-complete → PASS, 훅 하나 누락 → WARN, 바이트 동일 → PASS 회귀).
+
+#### KTB-12 — `factory doctor`는 설치된 파일이 디스크에 있는지만 봤지, git이 실제로 추적하는지는 보지 않았다
+
+KTB 자신의 `.gitignore`가 `.claude/commands/`를 통째로 무시해 `factory init`이 쓴 `.claude/commands/factory-*.md` 디스패처가 커밋되지 않았고, CI 체크아웃에는 그 파일이 없어 모든 `claude -p /factory-<stage>` 호출이 실패하는 결함으로 발견됐다. `checkFilesTracked`(`files.tracked`)가 `git check-ignore --stdin`으로 설치된 manifest 파일이 gitignore에 가려졌는지 배치 검사하고, KTB의 `.gitignore`는 `.claude/commands/`를 `.claude/commands/*`로 바꿔(디렉터리 단위 제외는 자식 파일의 negation을 무시한다는 git의 알려진 제약 때문) `!.claude/commands/factory-*.md`로 다섯 디스패처만 되돌렸다.
+
+### ② 무결성 L0/L1 — KTB-5·6
+
+`factory/integrity`가 branch protection의 유일한 required context라는 사실 하나가 두 번 같은 방식으로 사람의 머지를 막았다 — 처음은 보호 경로 변경(KTB-5), 두 번째는 역할 프롬프트의 additive-only 규칙(KTB-6). 두 판결과 재리뷰에서 나온 보강 두 건을 함께 묶는다.
+
+#### KTB-5 — integrity 체크(L0)는 변조만 본다; 보호 경로 변경은 L1이 사람에게 넘긴다
 
 **질문**: `factory/integrity` 체크는 `[protected].factory` 매치 파일이 diff에 있으면 `protected path changed` 위반으로 exit 1 했다. 그런데 이 체크는 branch protection에 등록된 **유일한** required context다(ADR-015 보강: `bootstrap`이 `required_status_checks.contexts = ["factory/integrity"]`, `enforce_admins: true`). 그러면 보호 경로를 건드린 PR은 **누구도** 머지할 수 없다 — 관리자도, 사람도. 그런데 설계가 전제하는 사람 머지 경로는 전부 보호 경로를 건드린다. 스펙의 의도(§5.1, ADR-015)는 "봇의 자동 머지를 막고 사람이 머지하게 한다"인데, 구현은 사람까지 막고 있었다. 이 둘을 어떻게 가르는가.
 
@@ -537,7 +621,7 @@ Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩) 중에 *
 
 **영향**: `factory/lib/integrity.js`(`protected` 필드·`protectedPaths()`·`isProtected`·`NAME_STATUS`의 `--no-renames`·모든 경로 필드를 취하는 `changedFiles`), `factory/bin/integrity.js`(notice 줄), `factory/lib/merge-stage.js`(단계 (3)·deps 계약), `factory/bin/run-stage.js`(`protectedPaths`·`comment(number, body)` dep), `factory/lib/retro/publish.js`(다크 PR assert), `factory/lib/exec.js`(`MERGE_CAPABLE_ENV`·`scrubEnv`·`scrubbedRunner`·`run()`의 `replaceEnv`), `factory/lib/gates.js`(`runStageGates`가 실행기를 감싼다), `factory/hooks/block-dangerous.sh`(보호 경로의 `git rm`/`git mv`), `factory/test/integrity.test.js`·`merge-stage.test.js`·`run-stage.test.js`·`retro-publish.test.js`·`exec.test.js`·`gates.test.js`·`hooks.test.js`, 스펙 §5.1(`[protected]` 주석과 설명 문장)·§6 표의 L0/L1 행·§6.1(`factory/integrity`가 보는 것)·§6.2(merge 스테이지의 보호 경로 거부), ADR-015(보강 한 줄). 프롬프트·스킬 드리프트도 함께 고쳤다("integrity가 PR을 거절한다" → "merge 스테이지가 자동 머지를 거부하고 사람이 머지한다"): `templates/factory/claude/agents/factory-builder.md`, `templates/factory/claude/workflows/factory-implement.js`, `templates/know-thy-build/role.md`·`harness.md`·`project.md`, `templates/factory/factory/harness.toml`. 템플릿 워크플로는 바뀌지 않는다 — `factory-integrity.yml`은 권한을 늘릴 이유가 없고, `factory-merge.yml`은 이미 `fetch-depth: 0`으로 base…head diff를 계산할 수 있다.
 
-### KTB-6 — `additive_only`도 L0 변조 규칙이 아니다: 역할 프롬프트 변경을 사람도 머지할 수 없었다
+#### KTB-6 — `additive_only`도 L0 변조 규칙이 아니다: 역할 프롬프트 변경을 사람도 머지할 수 없었다
 
 **질문**: KTB-5가 보호 경로를 L1으로 옮긴 직후, 데모 PR #3(그 수정을 실어 나르는 평범한 `factory init --upgrade`)이 다시 `factory/integrity` RED로 떨어졌다. 이번 원인은 `[protected].additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }`가 여전히 **L0 변조 규칙**이었다는 것이다 — KTB-5의 프롬프트 드리프트 수정이 `factory-builder.md`의 `## You must not`을 고쳤고, 그것이 허용 섹션 밖이라 위반이 됐다. KTB-5와 같은 질문이 다시 나온다: 이것은 커밋에 대한 사실인가, 아니면 누가 머지해도 되는가의 정책인가.
 
@@ -559,7 +643,7 @@ Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩) 중에 *
 
 **알려진 한계**: L1의 섹션 판정은 파일당 git 호출 두 번(`diff -U0`, `show`)이라 `additive_only` 글롭에 걸리는 파일이 많은 PR에서는 호출이 선형으로 는다 — 역할 파일은 십수 개 규모라 실무상 문제가 없지만, 글롭을 넓히면 비용을 다시 봐야 한다. 그리고 L0와 L1은 같은 함수를 쓰지만 **입력 경로가 다르다**: L0는 체크아웃된 워킹 트리를, L1은 `git show`를 읽는다. 정상적인 CI에서는 같은 내용이지만, 워킹 트리가 더럽거나(스테이지가 파일을 쓴 경우) L0가 다른 커밋에서 돌면 둘의 판정이 갈릴 수 있다 — 그때 머지를 막는 쪽은 언제나 L1이다(L0는 알림일 뿐이므로 안전한 방향이다).
 
-### 보강 — KTB-5/6 fix round 2 (재리뷰) — 2026-09-12
+#### 보강 — KTB-5/6 fix round 2 (재리뷰) — 2026-09-12
 
 f12a174을 다시 읽은 리뷰가 두 구멍을 더 찾았다. 둘 다 "한 판정을 두 개의 git 호출로 나눠 물으면 그 둘이 같은 세계를 봐야 한다"는 같은 실수다.
 
@@ -569,200 +653,29 @@ f12a174을 다시 읽은 리뷰가 두 구멍을 더 찾았다. 둘 다 "한 판
 
 **알려진 한계(N2에서 파생)**: `.factory/lessons/**`는 `[protected].except`라 보호 목록에도 들어가지 않으므로, **lessons 파일의 삭제는 이제 L0에서도 L1에서도 아무 신호를 만들지 않는다**(전에는 오진이긴 해도 RED였다). 역할을 은퇴시키며 지우는 것은 정상 작업이라 변조로 볼 수 없지만, 누적된 교훈이 조용히 사라질 수 있는 경로이긴 하다 — 필요해지면 `policy`(사람 머지)로 올리는 것이 맞는 자리다.
 
-### KTB-8 — 스테이지 워크플로가 공유 concurrency 그룹에서 서로를 취소했다
-
-**질문**: `issues: labeled` 이벤트 하나가 스테이지 워크플로 5개의 런을 전부 만드는데(GitHub는 트리거에 라벨 이름 필터를 주지 않는다 — 필터는 잡 레벨 `if`다), 다섯이 `concurrency.group: factory-issue-<n>`을 공유하고 있었다. `cancel-in-progress: false`에서도 GitHub는 그룹당 실행 1 + 대기 1만 유지하므로 새 웨이브가 직전 대기 런을 취소한다 — 데모 #2에서 조건이 맞는 유일한 런(`factory-plan`)이 생성 1초 만에 밀려나고 이슈가 `factory:ready`에 기록 하나 없이 멈췄다. 공유 그룹이 무엇을 보장한다고 믿고 있었는가, 그리고 런이 **만들어지지도 않은** 정지를 누가 본다고 믿고 있었는가.
-
-**결정**:
-
-1. **그룹을 워크플로별로 가른다** — `factory-issue-${{ github.event.issue.number || inputs.issue }}-<stage>`(`templates/factory/github/workflows/factory-{triage,plan,implement,review,merge}.yml`). 이슈 단위 상호배제는 처음부터 concurrency가 아니라 `factory/lib/claim.js`의 원자적 락 브랜치 claim(`refs/heads/factory/lock-<issue>` 원격 push, 두 번째 러너는 `{ok:false, holder}`로 fail closed)이 주고 있었다 — 공유 그룹은 보호를 더하지 않으면서 스테이지를 죽이는 레이스만 만들었다. yml 주석이 그 사실을 명시하고, `factory/test/yml-lint.test.js`가 다섯 그룹 문자열이 pairwise distinct임을 고정한다.
-2. **재점화는 `workflow_dispatch`뿐이다** — 라벨이 이미 목적 상태에 있으면 같은 라벨을 또 붙여도 `labeled` 이벤트가 나지 않으므로 라벨로는 되살릴 수 없다. 스테이지 5개에 `inputs.issue`를 달고 잡 조건을 `github.event_name == 'workflow_dispatch' || contains(...)`로, 이슈 번호를 `github.event.issue.number || inputs.issue`로 바꿨다(`run-stage.js`는 이미 argv에서 읽는다). 사람·컨트롤러용 같은 손잡이가 `factory/cli/run.js`의 `factory run <stage> <issue> --remote`다 — 로컬 실행 없이 dispatch만 하고, `merge`도 받는다(브랜치 보호가 막는 것은 로컬 실행이지 CI dispatch가 아니다).
-3. **sweeper의 세 번째 팔**(`factory/lib/sweeper.js`, `factory/bin/sweep.js`) — `factory:ready|planned|awaiting-review|approved`에 앉아 있고 ① 마지막 전이 코멘트(`factory-transition:v1`)가 `staleMinutes`보다 오래됐고 ② 그 창 안에 갱신된 하트비트가 없고 ③ 재점화 마커가 없는 이슈를 `gh workflow run factory-<stage>.yml -f issue=<n>`으로 다시 띄우고 `<!-- factory-sweeper restarted stage=<stage> issue=<n> -->`를 남긴다. 하트비트 확인이 "in-flight 런 조회"를 대신한다 — `gh run list`보다 싸고, 이미 이 파일이 읽는 데이터이며, 스테이지가 살아 있다는 1차 증거다(plan은 37분 동안 `factory:ready`에 머문다). 전이 코멘트가 아예 없으면 판단하지 않는다(나이를 모르는 것을 "오래됐다"로 읽지 않는다). ~~중복 dispatch 자체는 무해하다 — 락 claim이 두 번째 러너를 fail closed 시킨다.~~ **(KTB-10에서 정정: 이 문장은 틀렸다.** 같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작하므로 락이 이미 풀려 있다 — 중복 실행을 실제로 막는 것은 `run-stage.js`의 진입 상태 가드다.**)** 워크플로에 `permissions: actions: write`를 더했다.
-
-**알려진 한계**: 스테이지 5개를 `factory-stage.yml` 하나로 합쳐 라벨로 분기하면 라벨 이벤트당 런이 1개뿐이라 그룹 경합도 팬아웃 로그 잡음(매 전이마다 취소 4건)도 사라진다 — 위 ①보다 옳지만 변경 폭이 커서 채택하지 않았다. 그리고 취소된 런은 잡 로그·아티팩트·코멘트를 아무것도 남기지 않으므로(도그푸드 O8), 정지의 사후 조사는 여전히 90일짜리 Actions 기록에 의존한다.
-
-### KTB-9 — tier 라벨을 붙이는 코드가 어디에도 없었다
-
-**질문**: 스펙 §3.2는 triage가 `factory:tier-docs|standard|load-bearing`을 부여한다고 적었고 `factory/lib/label-catalog.js`가 셋을 정의해 `bootstrap`이 만들기까지 하는데, `addLabels`를 부르는 곳은 retro 경로뿐이었다. tier가 handoff JSON 안에만 있으면 사람은 이슈 목록에서 tier를 볼 수 없다 — 라벨은 사람이 읽는 표식이므로 이것은 문서와 코드의 드리프트다.
-
-**결정**: `factory/bin/run-stage.js`가 triage handoff를 **검증한 뒤**(`verifyStage` 통과 뒤 — 검증 전의 tier는 에이전트의 자기 신고다) `gh.setTierLabel(issue, factory:tier-<tier>)`로 그 tier를 붙이고 다른 `factory:tier-*`를 같은 `gh issue edit` 호출에서 뗀다. `setFactoryLabel`을 재사용하지 않는다 — 그것은 `labels.js`의 `STATES`만 보므로 태우면 상태 라벨이 떨어져 나간다(tier는 상태와 **직교**하되 이슈당 하나다; `TIERS`·`tierLabel()`·`TIER_LABELS`를 `factory/lib/labels.js`에 뒀다). 라벨 적용 실패는 런 기록 한 줄로만 남기고 스테이지를 죽이지 않는다 — 판정의 재료는 계속 handoff의 tier이고(게이트·로스터·`factory status`), 라벨은 그 사실의 사본일 뿐이다.
-
-### 보강 — lessons 파일의 삭제는 `policy`(사람 머지)다
+#### 보강 — lessons 파일의 삭제는 `policy`(사람 머지)다
 
 fix round 2가 "알려진 한계"로 적어 둔 구멍을 닫는다. `.factory/lessons/**`는 `[protected].except`라 보호 목록에 들어가지 않고, 삭제된 경로에는 내용 규칙도 걸리지 않으므로(N2) lessons 파일을 지우거나 옮기는 diff는 **L0에서도 L1에서도 아무 신호를 만들지 않았다** — 누적된 교훈이 조용히 사라지는 경로다. 변조로 다루지는 않는다(역할을 은퇴시키며 지우는 것은 정상 작업이고, 그것을 RED로 만들면 KTB-5와 같은 오진이 된다): `factory/lib/integrity.js`의 `integrityCheck`가 additive-only 위반과 **같은 자리**인 `policy`에 `lessons file deleted or moved away — human merge required`를 싣고, `policyViolations`(L1)도 같은 판정을 내 merge 스테이지가 자동 머지를 거부한다. 두 함수가 갈리면 체크가 알리는 것과 머지가 막는 것이 달라지므로 판정 본체를 공유한다(`lessonsGone`). rename은 `--no-renames` 덕에 `D <old>`로 보여 출발지가 그대로 잡힌다.
 
-### KTB-10 — 중복 실행을 막는 것은 락이 아니라 진입 상태 가드다
+### ③ 산출물 추출 — KTB-7·16·17
 
-**질문**: KTB-8은 concurrency 그룹을 워크플로별로 갈라 "조건이 맞는 런이 취소되는" 정지를 없앴고, 재점화 경로(`workflow_dispatch` + sweeper의 세 번째 팔)를 열었다. 그런데 그 ADR은 "중복 dispatch 자체는 무해하다 — 락 claim이 두 번째 러너를 fail closed 시킨다"고 적었다. 그 문장이 참인가.
+세 판결 모두 같은 질문의 다른 층이다 — "백그라운드로 도는 Workflow 툴의 반환값을 세션 트랜스크립트에서 어떻게 신뢰성 있게 뽑아내는가." KTB-7이 원인(디스패처가 산출물을 요약해 통째로 날림)을 처음 잡았고, KTB-16(턴 한도)·KTB-17(후보 소스가 접수증을 보고 있었음)이 KTB-7의 수정이 실전에서 또 깨진 지점을 이었다.
 
-**관측**: 참이 아니다. 락 claim이 되돌려 세우는 것은 **동시에** 도는 두 번째 러너인데, 같은 그룹에 PENDING으로 걸린 dispatch는 그룹당 실행 1 + 대기 1이라는 성질 때문에 **원래 런이 끝난 뒤에** 시작한다 — 그때 락은 이미 해제돼 있다. 그래서 PENDING 런은 스테이지를 처음부터 다시 돌고, 전이 그래프(`factory:planned → factory:planned`은 없다)가 그것을 거부하는 것은 `claude -p`가 이미 끝난 **뒤**다: plan 한 번 ~$12, 그리고 이슈에는 중복 handoff 코멘트가 남는다. sweeper가 30분마다 이 실수를 반복할 수 있는 구조였다.
+#### KTB-7 — 디스패처가 workflow 결과를 요약해 스테이지가 통째로 날아갔다
 
-**결정**:
+**질문**: 데모 이슈 #2의 plan 스테이지(`factory-plan`, run 34691260727)가 19/19 에이전트로 정상 완주했는데(`is_error:false`, `subtype:success`, 3,594 s) `factory:needs-human`으로 떨어졌다 — 원인이 워크플로 실패가 아니라면 무엇인가.
 
-1. **진입 상태 가드**(`factory/bin/run-stage.js`) — claim이 성공한 직후(로컬 진입 §4.2.5 **뒤**: 그 경로가 `backlog → factory:queue`를 바로 그 자리에서 만든다) 이슈의 현재 factory 상태 라벨을 읽어, 그것이 이 스테이지의 진입 라벨(`ENTRY_LABELS`, `factory/lib/labels.js` — triage `factory:queue` · plan `factory:ready` · implement `factory:planned|factory:rework` · review `factory:awaiting-review` · merge `factory:approved`)이 아니면 `entry state <label> != expected <…> — nothing to do` 한 줄만 남기고 exit 0으로 물러난다. 전이도, handoff도, `claude -p`도 없다. 라벨을 읽지 못하면(조회 실패·상태 라벨 2개) **막지 않는다** — 이것은 비용 방어이지 안전 게이트가 아니고, 실제 안전은 여전히 전이 그래프가 쥔다. `sweeper.js`의 세 겹 dedupe는 이 가드 앞단의 비용·잡음 절감으로 위치를 다시 적었다.
-2. **아티팩트 경로는 폴백을 갖는다**(I1) — `CLAUDE_TRANSCRIPTS`를 굳히는 스텝이 setup **뒤**에 있었고, setup이 실패하면 그 env가 빈 채로 `if: always()`인 업로드 스텝이 돈다. 그러면 경로가 `/**/*.jsonl` — 러너 **루트**에 앵커된 glob — 이 되고 `if-no-files-found: ignore`라 아무 소리도 내지 않는다. 스텝을 **첫 스텝**으로 올려 `if: always()`를 달고(순수한 `echo … >> $GITHUB_ENV`라 체크아웃보다 앞이어도 된다), 경로에 `|| format('{0}/.factory/out', github.workspace)` 폴백을 넣었다. 방어는 두 겹이다. `factory/lib/yml-lint.js`에 `env-path-no-fallback` 규칙을 더해 `${{ env.… }}`로 시작하면서 `||`가 없는 artifact path를 거부한다(같은 파일의 `tilde-path` 규칙은 이제 따옴표를 벗기고 본다 — 따옴표 하나로 비켜 갈 수 있으면 규칙이 아니다).
-3. **재점화 마커는 dispatch보다 먼저 남긴다**(M4) — 마커가 dedupe의 유일한 근거이므로, dispatch 성공 뒤 코멘트가 실패하면 sweeper가 30분마다 같은 스테이지를 계속 민다. 순서를 뒤집어 실패가 **덜 재시작하는 쪽**으로 기울게 했다(놓친 재점화는 사람이 `--remote`로 되살릴 수 있지만, 반복 재점화는 돈이다).
-4. **back-pressure로 세워 둔 이슈는 멈춘 것이 아니다**(M5) — `factory:planned`는 implement가 흐름 제어에 걸려 **라벨을 건드리지 않고** 물러났을 때도 그대로 남는다. sweeper가 그것을 밀면 새 런이 같은 이유로 또 물러나고 코멘트만 쌓인다. implement 팔은 dispatch 직전에 `backPressure()`(run-stage가 보는 바로 그 헬퍼)를 sweep당 한 번 물어보고, 거부면 dispatch도 코멘트도 하지 않는다.
-5. **L1 거부 문구를 규칙별로 가른다**(I3) — `policyViolations`는 additive-only 위반과 사라진 lessons 파일을 같은 배열에 싣는데, 하나의 제목으로 뭉치면 "`## Examples`에만 추가하세요"라는 설명이 lessons 삭제 위에 붙는다. `merge-stage.js`가 목록을 규칙으로 갈라 각자의 제목·설명으로 내고, 한 PR이 둘 다 어기면 두 섹션이 함께 실린다. 같은 맥락에서 `integrity.js`는 "지워졌다"(`deleted or moved away`)와 "트리에 있는데 읽히지 않는다"(`unreadable`)를 다른 사유로 낸다 — 판정은 같지만 문구가 같으면 사람이 있지도 않은 삭제를 diff에서 찾는다(M8).
-6. **`factory run … --remote`는 `-R <repo>`를 명시한다**(M7) — 없으면 `gh workflow run`이 cwd의 git remote로 저장소를 고르는데, 이 경로는 로컬 체크아웃을 전제하지 않는다(init 여부도 보지 않는다). `resolveRepo`(KTB-4의 단일 출처)로 해석하고, 해석 실패는 읽을 수 있는 에러로 끝낸다. `--remote`는 argv 어느 위치에서도 받는다.
-7. **tier 라벨은 전이보다 먼저**(M2) — 라벨을 붙이는 것도 `issues: labeled` 이벤트라, 그 이벤트가 만드는 5-런 물결이 뒤에 오면 전이가 막 띄운 다음 스테이지의 PENDING 런을 concurrency 슬롯에서 밀어낸다(KTB-8이 죽은 방식 그대로). 코드의 순서는 원래 옳았으나 이유가 어디에도 없었다 — 주석과 테스트로 고정했다.
+**관측**: 설계는 "디스패처 세션의 **최종 텍스트** = workflow의 return 값"을 전제했다. 실측에서는 그 값이 약 20 KB(~640줄) JSON이었고, 모델이 그것을 다시 타이핑하다가 "재타이핑 중 전사 오류 위험이 크다"며 `"r1": [ /* full R1 positions … */ ]` 같은 **요약**을 냈다 — 게다가 JS 주석이 섞여 ```json 펜스가 `JSON.parse`에도 실패했다. 같은 커밋 근처에서 형제 결함 둘도 함께 드러났다: **D2**(`factory/lib/usage.js`의 `USAGE_RE`가 `\{[^}]*\}`라 중첩 usage 블롭을 못 맞춰 `cost_usd: 11.95`인 런을 `factory status`가 `$0 · 0/0 tokens`로 보고 — ADR-005 소비 보고가 전면 무력이었다), **D3**(`verify-stage.js`의 `extractJson`이 펜스 파싱 실패 시 조용히 균형-스캔 폴백으로 내려가 계획 안의 `done_when` 항목 하나를 산출물로 잘못 집어와 진짜 원인을 가렸다).
 
-**영향**: `factory/bin/run-stage.js`(진입 가드·`issueLabels` dep·tier 주석), `factory/lib/labels.js`(`ENTRY_LABELS`), `factory/lib/sweeper.js`·`factory/bin/sweep.js`(마커 순서·back-pressure 면제), `factory/lib/merge-stage.js`(규칙별 섹션), `factory/lib/integrity.js`(`unreadable` 사유·`LESSONS_POLICY_RULE`), `factory/lib/yml-lint.js`(`env-path-no-fallback`·따옴표 벗기기), `factory/cli/run.js`(`-R`·플래그 위치), `templates/factory/github/workflows/factory-{triage,plan,implement,review,retro}.yml`, 스펙 §4.1(concurrency/dispatch 스니펫·가드 문장·sweeper 재점화 행).
+**결정**: 산출물 출처를 **세션 트랜스크립트의 `Workflow` tool_result**로 올렸다(신규 순수 모듈 `factory/lib/stage-artifact.js`의 `extractStageArtifact` — 트랜스크립트 → 펜스 → 맨 JSON 순으로 훑고 **스키마를 통과하는 첫 후보**가 이긴다). `run-stage.js`가 그 결과로 `.factory/out/<stage>.json`을 덮고 envelope은 `<stage>.envelope.json`으로 따로 남긴다. 디스패처 프롬프트 5개는 "생 JSON으로 통째로 그대로, 요약·축약은 **하드 실패**"로 강화했다. `USAGE_RE`는 탐욕 `\{.*\}`로, `extractJson`은 후보별 실패 사유를 한 줄씩 적도록 고쳤다(D2/D3 각각).
 
-**알려진 한계**: 가드는 라벨을 **한 번** 읽는다 — 그 조회와 스테이지 본체 사이에 사람이 라벨을 바꾸면 가드는 옛 답으로 통과시킨다(그 뒤는 전이 그래프가 받는다). 그리고 가드가 exit 0으로 물러나는 것은 dispatch가 **정상적으로** 늦게 도착한 경우와 사람이 잘못된 스테이지를 손으로 민 경우를 구분하지 않는다 — 둘 다 런 기록 한 줄로만 남는다.
+**재검증(같은 커밋, 재리뷰 지적 3건)**: ① `~/.claude/projects/**/*.jsonl` 업로드 경로가 `actions/upload-artifact`에서 `~`를 셸처럼 펼치지 않아 `if-no-files-found: ignore`와 겹쳐 **실패조차 없이 빈 아티팩트**가 올라가고 있었다(수정의 핵심 근거가 몇 회차째 무효) — 선행 스텝이 `CLAUDE_TRANSCRIPTS=$HOME/.claude/projects`를 `GITHUB_ENV`로 굳히고 경로를 `${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl`로 바꿨다(`yml-lint`에 `tilde-path` 규칙 추가). ② `bin/retro.js`가 옛 `extractJson`을 쓰고 있었다 — `retro.v1`도 같은 이유로 회차가 날아갈 수 있어 `extractStageArtifact` + 트랜스크립트 후보로 옮기고 `factory-retro.yml`에도 트랜스크립트 업로드를 더했다. ③ `bin/verify-stage.js`(진단 CLI)가 트랜스크립트를 아예 보지 않아 CI와 다른 답을 냈다 — `--transcript <path>`와 봉투 `session_id` 자동 탐색을 더하고 경로 계산 `readTranscript()`를 `lib/stage-artifact.js`로 올려 세 진입점이 같은 계산을 쓰게 했다.
 
-### KTB-11 — `files.stale`이 병합 대상 파일(`.claude/settings.json`)까지 바이트로 비교하고 있었다
+**알려진 한계**: 이 수정 자체가 다시 두 번 더 깨졌다(KTB-16: 턴 한도가 산출물이 도착하기 전에 세션을 죽임, KTB-17: 트랜스크립트 후보가 접수증만 보고 있었음) — "산출물이 트랜스크립트 안에 있다"는 KTB-7의 전제는 옳았지만 "어디를 어떻게 읽어야 그것이 나오는가"는 실전에서 계속 갱신됐다.
 
-**질문**: 브라운필드 저장소에서 `factory doctor`를 돌리면 `.claude/settings.json`이 사람이 정당하게 추가한
-deny/allow/훅을 갖고 있어도 `files.stale` WARN이 영구히 뜬다. `manifest.js`는 이 파일을 `merge: "settings"`로
-표시하고 init/upgrade는 `mergeSettings`(합집합)로만 이 파일을 건드리는데, `checkFiles`는 `owner === "factory"`인
-모든 항목을 템플릿 렌더 결과와 바이트로 비교한다 — "병합 대상"이라는 사실 자체를 몰랐다.
+**영향**: `factory/lib/stage-artifact.js`(신규), `factory/lib/usage.js`(D2), `factory/lib/verify-stage.js`(D3), `factory/bin/run-stage.js`·`bin/retro.js`·`bin/verify-stage.js`, `factory/lib/yml-lint.js`(`tilde-path`), 디스패처 프롬프트 5개, 워크플로 템플릿 4개(트랜스크립트 업로드). 테스트: `stage-artifact.test.js`(신규 8건)·`usage.test.js`(회귀 1건)·`verify-stage-cli.test.js`(신규 7건)·`retro-bin.test.js`(4건)·`verify-stage.test.js`(1건)·`yml-lint.test.js`. sha `516ac5a` + `9c3346d`(run-stage 부분) + `9c61315`.
 
-**결정**: `checkFiles`가 `e.merge === "settings"` 항목만 다른 규칙으로 판정한다(`factory/lib/doctor/factory.js`
-`settingsIsStale`) — `mergeSettings(installed, template)`를 다시 계산해 그 결과가 설치된 파일과 **다를 때만**
-stale이다(사람이 자기 항목을 더 넣었어도 템플릿 항목을 전부 갖고 있으면 병합 결과는 설치본과 같다).
-JSON으로 못 읽는 파일(사람이 손으로 깨뜨린 경우 등)은 이전 동작(바이트 비교)으로 안전하게 되돌아간다.
-`mergeSettings`는 `factory/cli/install.js`의 기존 순수 함수를 그대로 재사용한다 — 판정 두 곳(설치기·doctor)이
-갈리면 "병합됐다"와 "stale이 아니다"가 서로 다른 답을 낼 수 있다.
-테스트: `doctor-factory.test.js`(customized-but-complete → PASS, 훅 하나 누락 → WARN, 바이트 동일 → PASS 회귀).
-
-### KTB-12 — `factory doctor`는 설치된 파일이 디스크에 있는지만 봤지, git이 실제로 추적하는지는 보지 않았다
-
-KTB 자신의 `.gitignore`가 `.claude/commands/`를 통째로 무시해 `factory init`이 쓴 `.claude/commands/factory-*.md` 디스패처가 커밋되지 않았고, CI 체크아웃에는 그 파일이 없어 모든 `claude -p /factory-<stage>` 호출이 실패하는 결함으로 발견됐다. `checkFilesTracked`(`files.tracked`)가 `git check-ignore --stdin`으로 설치된 manifest 파일이 gitignore에 가려졌는지 배치 검사하고, KTB의 `.gitignore`는 `.claude/commands/`를 `.claude/commands/*`로 바꿔(디렉터리 단위 제외는 자식 파일의 negation을 무시한다는 git의 알려진 제약 때문) `!.claude/commands/factory-*.md`로 다섯 디스패처만 되돌렸다.
-
-### G1 — `[runtime].setup`으로 Node 외 툴체인(Flutter 등)을 깔 수 있는가 (own-calendar 준비에서 발견한 설계 공백)
-
-**질문**: 러너 셋업(`templates/factory/factory/actions/setup/action.yml`)은 `actions/setup-node` +
-`[runtime].setup`(`.factory/bin/setup-env.js`가 `harness.toml`에서 읽어 실행)만 돈다. Flutter나 Python처럼
-Node가 아닌 툴체인이 필요한 저장소는 그것을 표현할 자리가 없다. 최소로 여는 방법은 무엇이고, 기존 구조에
-그것을 막는 것이 있는가.
-
-**결정**: 전용 `[runtime].actions` 메커니즘(임의 다중 설치 스텝)은 지금은 만들지 않는다(범위 초과, 나중으로
-미룬다) — 대신 `[runtime].setup` 한 줄에 툴체인 설치 + `$GITHUB_PATH` 확장을 표현하는 것을 **정식 경로**로
-문서화하고 그것이 실제로 동작함을 고정한다.
-
-1. **`[runtime].setup`을 자기만의 액션 스텝으로 분리했다**(`.factory/actions/setup/action.yml`). 기존에는
-   `npm install --prefix .factory`·`git config`와 같은 `run:` 블록 안에서 돌고 있었다 — 동작 자체는 GitHub
-   Actions의 "$GITHUB_PATH 추가는 그것을 쓴 스텝이 아니라 **다음** 스텝부터 반영된다"는 규칙 때문에 이미
-   합류 지점(Claude/test-env 설치, 그리고 이 composite action을 부른 워크플로의 게이트 스텝) 전에 최소 한
-   스텝을 거치므로 틀리지는 않았지만, 다른 명령과 같은 스텝에 있으면 그 사실이 파일만 보고는 드러나지
-   않는다. 스텝을 쪼개 `[runtime].setup`이 하는 일과 그 경계를 파일 자체가 말하게 했다.
-2. **`harness.toml`에 `setup_note` 주석**을 추가해(TOML 파서는 무시하는 순수 문서) `[runtime].setup`이
-   저장소 루트에서, 자기만의 액션 스텝(`bash -e`)으로, `$GITHUB_PATH`/`$GITHUB_ENV`를 쓸 수 있는 채로
-   실행된다는 계약과 Flutter 설치 예시(`curl … | tar -xJ` + `echo … >> "$GITHUB_PATH"`)를 남겼다.
-3. 테스트: `yml-lint.test.js`(setup-env.js 호출이 npm install/git config/`if: always()`와 섞이지 않은
-   독립 스텝임을 고정) · `templates.test.js`(`setup_note`가 `$GITHUB_PATH`·"own step"·Flutter 예시를 담고,
-   TOML 파싱은 그대로임을 고정).
-
-**알려진 한계**: 이것으로 여는 것은 "한 줄짜리 셸 명령으로 표현 가능한 설치"뿐이다. 여러 스텝의 캐싱(예:
-Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 진짜 다중-액션이 필요해지면, 그때
-`[runtime].actions`(스텝 목록) 같은 정식 메커니즘을 다시 본다 — 지금은 마주친 요구(툴체인 설치 + PATH
-확장)를 채우는 가장 작은 변경만 했다.
-
-### KTB-13 — `dontAsk`는 allow에 없는 도구를 **거절**한다: allow 목록이 부여이고, deny·훅이 가드다
-
-**질문**: CI는 `claude -p /factory-<stage> <n> --permission-mode dontAsk --settings .factory/ci-settings.json`으로 스테이지를 돌린다. 설치된 `.claude/settings.json`의 `permissions.allow`는 Bash 패턴 8개뿐이었다(`Bash(git *)`, `Bash(gh issue *)`, `Bash(gh pr view*|comment*|create*|edit*)`, `Bash(npm *)`, `Bash(npx *)`) — `Read`·`Edit`·`Write` 같은 **도구 이름은 한 줄도 없다**. 설계는 그것으로 충분하다고 적었다: ADR-002·ADR-008의 스파이크에서 `--permission-mode dontAsk`가 "모든 툴 호출을 프롬프트 없이 통과"시켰고 `permission_denials: []`였기 때문이다. 그 전제가 아직 참인가.
-
-**관측** (데모 라이브):
-
-- **거짓이다.** 지금 CLI의 `dontAsk`는 allow 규칙에 걸리지 않는 도구 호출을 **묻지 않고 거절한다** — "doesn't ask"가 "approves"가 아니라 "denies without asking"이다.
-- 데모 이슈 #2의 implement 라운드에서 builder가 보고했다: "Write and Edit tools are denied by the sandbox (dontAsk mode), and bash file writing (redirection, heredoc into a file) is denied too. Creating files through git apply is accepted only for trivial…" — 그리고 포기하고 `factory:needs-human`으로 넘어갔다. **스테이지가 코드를 한 줄도 쓰지 못한 채 끝났다.**
-- 이슈 #8은 성공했는데, 그 방식이 증상을 그대로 설명한다 — builder가 편집을 `git apply`에 실어 날랐다(`Bash(git *)`가 allow에 있었으므로). 좁은 allow 목록이 곧 **차단 목록**이었고, 에이전트는 그 목록의 구멍을 찾아 우회하는 법을 배우고 있었다.
-- ADR-002/ADR-008의 관측 자체는 그 시점에는 정직했다(그래서 지우지 않는다). 스파이크 시점 CLI의 동작이고, 그 뒤에 바뀌었다. 아래가 **현행 CLI 버전에 대한 철회**다.
-
-**결정**: **allow 목록은 편의 목록이 아니라 에이전트가 가진 도구의 정의다.** `templates/factory/claude/settings.json`의 `permissions.allow`에 팩토리 에이전트가 실제로 쓰는 도구를 싣는다 — `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `LS`, `Agent`, `Workflow`, `TodoWrite`, 그리고 `Bash(*)`. 좁은 Bash 항목 8개는 **대체한다**: `dontAsk`에서 allow에 없는 Bash 명령은 그대로 거절이므로, 그 목록은 `mkdir`·`cat > file`·`sed -i` 같은 builder의 정당한 명령을 막고 있었다.
-
-**무엇이 여전히 가드인가** — 넓어진 것은 부여이지 방벽이 아니다. 네 겹은 그대로다:
-
-- **deny는 allow를 이긴다**(두 파일 모두 그대로다). `.claude/settings.json`의 `gh pr merge*`·`git merge*`·force-push·branch-protection PUT, `.factory/ci-settings.json`의 경로 `Edit`/`Write` deny 전부(`.factory/**`·`.claude/**`·CHARTER·빌드 설정)와 CI 전용 deny. `Bash(*)`가 allow에 있어도 `Bash(git push --force*)`는 여전히 거절된다.
-- **`block-dangerous.sh`(PreToolUse)** 가 위험한 셸 모양과 보호 경로 쓰기를 계속 거부한다. 이것이 `Bash(*)`의 실질적 경계다.
-- **`deny-all-writes.sh`(역할 frontmatter의 PreToolUse)** 가 쓰기 금지 역할(triage·plan-\*·reviewer-\*·verifier·loader)의 `Edit`/`Write`/`NotebookEdit`과 "파일을 만드는 bash"를 막는다. **순서가 이것을 성립시킨다: PreToolUse 훅은 permission 판정보다 먼저 돌고, exit 2는 도구 호출 자체를 차단한다** — 그 도구가 allow에 있는지와 무관하다. 그래서 전역 allow가 넓어져도 리뷰어는 여전히 쓸 수 없다(`hooks.test.js`가 이것을 고정한다).
-- **L0 `factory/integrity` + L1 merge 스테이지**(KTB-5·KTB-6)가 변조와 보호 경로 변경을 PR 단계에서 잡는다.
-
-**doctor**: `checkSettings`에 `settings.allow`를 더한다 — 템플릿 allow 항목이 하나라도 빠지면 **FAIL**이다(`settings.deny`와 같은 모양·같은 무게). 빠진 설치본은 "조금 불편한" 설치본이 아니라 **builder가 파일을 쓰지 못하는** 설치본이다. 상위집합(사람이 자기 항목을 더한 브라운필드)은 PASS다.
-
-**기존 설치**: `mergeSettings`가 deny·allow를 **합집합**으로 병합하므로 `factory init --upgrade`가 새 항목을 더한다(멱등 — KTB 자신에게 적용해 확인). 뒤에 남는 좁은 Bash 항목은 무해하다: `Bash(*)`가 그것을 포함하고, allow는 서로를 취소하지 않는다. `MOVED_DENIES_ADR_019` 같은 제거 목록은 만들지 않는다 — 지울 이유가 없다.
-
-**영향**: §6.3(allow 문단), `templates/factory/claude/settings.json`, `factory/lib/doctor/factory.js`, `factory/test/templates.test.js`·`doctor-factory.test.js`·`hooks.test.js`.
-
-#### KTB-13 fix round 1 — 훅이 실제로 무엇을 덮는가 (잔여 위험 등록부)
-
-**리뷰 지적**: allow를 부여로 바꾼 판결 자체는 옳지만, 그 근거였던 "`block-dangerous.sh`가 `Bash(*)`의 실질 경계이고 `deny-all-writes.sh`가 읽기 전용 역할을 막는다"는 문장이 **검증되지 않은 채** 쓰였다. 좁은 allow가 실제로는 두 번째 방벽이었다 — `node`·`curl`·`wget`·`install`은 애초에 allow에 없어서 훅까지 **도달하지도 않았고**, 그래서 두 훅 어느 쪽도 그 모양들을 본 적이 없다. allow를 열면서 그 모양들이 처음으로 훅 앞에 선다.
-
-**수정** (두 훅 + 매처):
-
-- `deny-all-writes.sh`(쓰기 금지 역할): `MultiEdit`을 `Edit|Write`와 같은 팔에 넣고, Bash arm에 `node -e|-p|--eval|--print`(인라인 스크립트는 대상 불문 차단 — `sed -i`·`python -c`와 같은 원칙), `curl`의 출력 플래그(`-o`·`-O`·`--output`·`--output-dir`·`--remote-name`), `wget` **전면**(플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다), `install`(파일 변형 명령 목록에 추가), `cp`/`mv`의 `-t`/`--target-directory`(목적지를 마지막 토큰이 아닌 곳에 두어 "목적지만 보는" 규칙을 통째로 빠져나갔다)를 더했다. 저장소 스크립트 실행(`node .factory/bin/prove-test.js`)과 출력 플래그 없는 `curl`은 그대로 통과한다.
-- `block-dangerous.sh`(builder, 보호 경로만): `node` 인라인 스크립트가 보호 경로를 말하는 경우, `dd of=<보호경로>`, `install … <보호경로>`, `curl`/`wget` 세그먼트에 보호 경로가 보이는 경우, `git checkout <ref> -- <보호경로>`·`git restore <보호경로>`(다른 커밋의 내용으로 워킹 트리를 덮는다), 그리고 `git apply`/`git am` **전면 차단**을 더했다. `git apply`만 전면인 이유: 패치 내용이 명령줄에 없어 훅이 **무엇이 쓰이는지 볼 수 없다** — 판정 불능은 안전이 아니다(이 파일 맨 위 jq 규칙과 같은 원칙). builder에게 손실은 없다(KTB-13 이후 `Edit`/`Write`로 직접 쓴다). 데모 #8이 쓴 우회로가 바로 이것이고, 여기서 닫힌다.
-- 매처: 쓰기 금지 역할 14개의 `hooks.PreToolUse.matcher`가 `Edit|Write|MultiEdit|NotebookEdit|Bash`다. `lintAgentMd`의 `deny-hook` 규칙이 이제 **다섯 이름 전부**를 요구하고 무엇이 빠졌는지 말한다(`DENY_WRITES_TOOLS`가 정본 — 훅 스크립트가 판정해도 매처가 좁으면 그 판정은 발화하지 않는다).
-
-**잔여 위험 등록부.** 아래가 지금 실제로 막히는 것과 막히지 않는 것이다 — "훅이 덮는다"를 다시 검증 없이 쓰지 않기 위해 표로 고정한다.
-
-| 모양 | builder (`block-dangerous`) | 쓰기 금지 역할 (`+ deny-all-writes`) |
-|---|---|---|
-| 리다이렉션 `>`/`>>`/`>\|`, `tee` | 보호 경로만 차단 | 차단(/tmp·`$TMPDIR`·`.factory/out/qa/` 제외) |
-| `sed -i`, `perl -i`, `python -c … open(` | 보호 경로만 차단 | 대상 불문 차단 |
-| `node -e\|-p\|--eval\|--print` | 보호 경로를 말하면 차단 | 대상 불문 차단 |
-| `curl -o\|-O\|--output`, `wget` | 보호 경로를 말하면 차단 | 차단(`curl`은 출력 플래그가 있을 때, `wget`은 전면) |
-| `rm`/`mv`/`mkdir`/`touch`/`ln`/`chmod`/`dd`/`install` | 보호 경로만 차단(`dd`는 `of=`) | 차단(카브아웃 제외) |
-| `cp`/`mv` 목적지, `-t`/`--target-directory` | 보호 경로가 목적지면 차단 | 차단(카브아웃 제외) |
-| `git commit/push/add/checkout/restore/rm/mv/config` | 머지·force-push·lock 삭제·보호 경로 checkout/restore/rm/mv 차단 | 쓰기 서브커맨드 전면 차단 |
-| `git apply` / `git am` | **전면 차단**(패치 내용이 보이지 않는다) | 전면 차단 |
-| `gh pr merge`, `gh api …/merge`, `factory:*` 라벨 조작 | 차단 | 차단 |
-
-**막지 못하는 것(알려진 잔여 위험)**:
-
-1. **아직 열거되지 않은 쓰기 도구.** 두 훅은 **명령 모양의 열거**다 — 화이트리스트가 아니다. `rsync`, `tar -x`, `unzip`, `patch`, `busybox`, `awk`의 `> file`이 아닌 출력 리다이렉트, `python -c` 이외의 인터프리터(`ruby -e`, `php -r`), 셸 내장 `printf -v`+`exec>`, 새로 설치된 CLI 등은 지금 목록에 없다. 이 목록은 관측될 때마다 자란다.
-2. **Bash에 닿는 역할은 builder만이 아니다.** `reviewer-*`·`factory-verifier`·`factory-loader`는 게이트·테스트를 돌려야 하므로 frontmatter `tools:`에 `Bash`가 있다. 그들의 방벽은 `deny-all-writes.sh` **하나뿐**이고, 그 훅은 위 표의 모양들만 안다. `plan-*`과 `factory-triage`·`factory-retro`는 `tools:`에 Bash가 없어 도달 자체가 없다.
-3. **L1은 PR에 도달한 diff만 본다.** merge 스테이지의 보호 경로·`additive_only` 거부와 `factory/integrity`는 **커밋되어 push된 것**을 판정한다. reviewer·verifier·loader는 커밋하지 않으므로, 그들이 워크트리에서 파일을 고쳐 게이트 결과나 자기 판정 근거를 바꾸면 **어떤 diff에도 나타나지 않는다**. 그 경로의 유일한 방벽이 (2)의 훅 하나라는 뜻이다. `stop-guard.sh`가 SubagentStop에서 더러운 트리를 거부하는 것이 부분적인 사후 감지다(쓰기 금지 역할은 그 가드에서 면제되어 있으므로 — ADR-016 F6 — 감지도 아니다). **KTB-14(아래)가 이 gap을 닫는다** — triage/plan/review에 한해 `run-stage.js` 자신이 claude -p 직후 워크트리를 다시 물어, 훅이 놓친 모양이든 무엇이든 스크래치 경로 밖의 diff를 산출물 채택 이전에 거부한다.
-4. **훅 입력은 신뢰할 수 없다.** 판정은 명령 **문자열**에 대한 정규식이다. 변수 확장(`P=pack; echo x > "$P"age.json`), base64, `eval`, 힙 스크립트 파일 경유는 문자열에 보호 경로가 보이지 않으므로 빠져나간다. ADR-013의 원칙(훅 입력 불신)이 여기서도 상한이다 — 훅은 **실수와 게으른 우회**를 막지 실행 중인 적대적 에이전트를 막지 못한다.
-5. **오탐(의도적).** `git restore --staged package.json`(인덱스만 건드린다), `node -p`로 보호 경로를 **읽는** 것, `rm -rf node_modules/foo/package.json`(N4), 그리고 **`git apply --check`/`--stat`/`--numstat`**(패치를 적용하지 않고 적용 가능성·통계만 본다 — 읽기다)은 막힌다. `git apply`가 전면 차단인 이유가 그대로 여기 적용된다: 패치 내용이 명령줄에 없어 훅은 `--check`가 진짜 붙었는지 이상의 것을 판정할 수 없고, 플래그 하나로 차단을 끄는 경로를 여는 것(`git apply --check; git apply p.diff`가 한 줄에 있을 때 앞의 것만 보고 통과시키는 것)이 더 나쁘다. 우회로는 `git apply`가 아니라 `git diff`/`patch --dry-run`이다. 전부 "하지 못해 불편한 쪽이 조용히 지워지는 쪽보다 낫다"는 기존 판결을 따른다.
-
-이 등록부의 요지: **넓어진 allow의 대가는 "훅이 아는 모양의 목록"에 의존하게 된 것**이고, 그 목록은 완전하지 않다. 완전해질 수도 없다 — 완전함을 원하면 allow를 다시 좁혀야 하는데, 그것이 KTB-13이 고친 바로 그 고장이다. 실제 방어선은 여전히 **L0/L1**(변조는 체크가, 보호 경로는 사람 머지가)이고, 훅은 그 앞의 싼 그물이다.
-
-### KTB-14 — 쓰기 금지 스테이지는 claude -p 이후에도 워크트리가 깨끗한지 스스로 다시 묻는다
-
-**질문**: KTB-13 fix round 1의 잔여 위험 등록부 gap 3이 명시한 구멍은 이렇다 — `reviewer-*`·`plan-*`·`factory-triage`(그리고 `factory-verifier`·`factory-loader`)는 게이트·테스트를 돌리기 위해 `tools:`에 Bash를 들고 있지만 **절대 커밋하지 않는다**. 그들의 유일한 방벽은 `deny-all-writes.sh`(PreToolUse) 하나뿐이고, 그 훅은 gap 1이 이미 적어 둔 대로 **명령 모양의 열거**라 완전할 수 없다(`rsync`·`tar -x`·변수 확장·`eval` 등 얼마든지 새로 나온다). 게다가 `stop-guard.sh`(SubagentStop)는 바로 그 역할들을 더티 트리 검사에서 **면제**한다(그들이 커밋할 수 없으니 자기 산출물을 지울 수 없어서, 지우려면 쓰기가 필요한데 쓰기는 막혀 있다 — 교착 방지). 그 결과 이 역할들이 훅이 모르는 모양으로 워크트리를 건드리면(예: 게이트 결과·자기 판정 근거를 바꿔 산출물을 유리하게 조작), 그 변경은 **커밋되지 않으므로 L1/`factory/integrity`가 보는 어떤 diff에도 나타나지 않고**, 훅에 안 걸리므로 즉시 차단되지도 않고, `stop-guard`도 면제라 사후에도 잡히지 않는다. 세 겹 방어가 전부 이 경로 하나를 놓치고 있었다 — 무엇을 구조적 백스톱으로 세울 것인가.
-
-**결정**: 훅이 알아야 하는 **명령 모양**이 아니라, 훅이 몰라도 되는 **결과**를 본다 — 그 스테이지의 `claude -p`가 끝난 워크트리와 시작 워크트리를 비교해, 하나라도 다르면(스크래치 경로 제외) 산출물을 통째로 거부한다.
-
-1. **`factory/lib/agent-md.js`의 `needsDenyAllWritesHook`가 여전히 단일 출처다.** "이 스테이지가 쓰기 금지 스테이지인가"를 새로 정의하지 않는다 — 대표 역할 이름(`factory-triage`·`plan-x`·`reviewer-x`)으로 그 함수를 그대로 프로브한다(`run-stage.js`의 `isNoWriteStage`). 두 판정이 갈리면 KTB-13 r1의 교착 경고와 같은 실수가 된다. 결과: triage·plan·review는 참, implement(`factory-builder`)는 거짓 — implement가 이 저장소에서 유일하게 쓰기가 허용된 스테이지다. merge는 애초에 `claude -p`를 부르지 않으므로(script-only, ADR-015 R3) 이 체크에 닿지도 않는다.
-2. **`factory/bin/run-stage.js`가 claude -p 직후, 게이트·verifyStage보다 먼저** `git status --porcelain --untracked-files=all`을 워크트리(`root` — review는 `checkoutHead`가 이미 detach해 둔 PR head)에서 다시 묻는다(`assertNoWriteStageClean`). 허용 스크래치 경로는 딱 둘: `.factory/out/**`(게이트 리포트·claude 원본 출력), `docs/factory/runs/**`(run 기록 — 실제 저장소는 `factory/records` 브랜치이고 이 경로는 hydrateRecord/append가 매 스테이지 쓰는 로컬 사본이다). `.factory/lessons/**`는 넣지 않는다 — 그것은 retro 전용 쓰기 경로이고(`needsDenyAllWritesHook`가 `factory-retro`도 쓰기 금지로 분류하지만 retro는 `run-stage.js`의 스테이지가 아니다), triage/plan/review가 그 경로에 쓸 이유는 없다. `.factory/quarantine.toml`(gates가 쓰는 스크립트 소유 파일, `stop-guard.sh`의 제외 목록에는 있다)도 넣지 않는다 — review의 게이트는 flaky 재분류를 하지 않으므로(ADR-011: 재분류는 implement 전용) review 스테이지에서 이 파일이 바뀔 일이 없고, 못 박아 두면 나중에 review가 그 파일을 건드리는 변경이 조용히 스크래치로 승격되는 것을 막는다.
-3. **위반이면 산출물을 받지 않는다.** 스크래치 밖의 변화가 하나라도 있으면(rename은 양쪽 다 — KTB-5 N1과 같은 원칙) `factory:needs-human`으로 전이하고 사유 `worktree dirty after <stage> (no-write stage): <paths>`를 남긴다 — **`verifyStage`조차 부르지 않는다**(사람이 볼 것은 handoff 검증 결과가 아니라 워크트리 자체다). `git status`가 실패하면 "깨끗하다"를 증명할 수 없으므로 fail-closed이되, **등급은 다르다(KTB-14 r1)**: 그것은 GREEN도 RED도 아닌 **판정 불가**이므로 `factory:blocked`다(`worktree check failed after <stage> (no-write stage): <reason>`) — `merge-stage.js`의 `undecidable()`·게이트 BLOCKED과 같은 계약이고, `needs-human`은 "사람이 판단할 것이 있다"는 뜻이라 판단할 재료조차 없는 이 경우에는 라벨이 원인을 잘못 말한다. 더러운 트리만 `needs-human`이다.
-4. **implement는 건드리지 않는다.** implement는 유일한 쓰기 스테이지이고 이 체크는 애초에 실행되지 않는다(`isNoWriteStage("implement") === false`) — builder가 커밋 전에 파일을 고치는 것은 정상 작업이다.
-
-**이 백스톱이 닫는 것과 닫지 못하는 것**: 이것은 **명령 모양이 아니라 결과**를 보므로 gap 1(열거되지 않은 쓰기 도구)이 두 훅 어느 쪽에 대해서도 완전할 필요가 없어진다 — `rsync`든 `eval`이든, 트리를 실제로 바꾸면 잡힌다. 반대로 이 체크가 **못 잡는 것**도 있다: (a) 워크트리를 건드리지 않고 **claude -p 세션 안에서만** 거짓 판정을 만드는 경로(예: verify가 신뢰하는 훅 기록 자체를 조작 — 이건 `agents.jsonl`이 매 런 리셋되고 훅이 별도 채널로 쓰므로 다른 방어선이다), (b) `.factory/out/**`·`docs/factory/runs/**` **안에서** 벌어지는 조작(게이트 리포트 위조 등 — 그건 이 체크의 관할이 아니라 `gates.json`을 유일한 진실로 삼는 ADR-010의 몫이다), (c) 체크와 커밋 사이의 TOCTOU(이 체크는 스냅샷이다 — 그러나 review/triage/plan은 이 체크 직후 아무것도 커밋하지 않고 handoff 코멘트만 남기므로 이 저장소의 흐름에서 실질적인 창이 없다).
-
-**영향**: `factory/bin/run-stage.js`(`isNoWriteStage`·`assertNoWriteStageClean`·`NO_WRITE_SCRATCH_PREFIXES`·`assertCleanWorktree` dep, claude -p 스텝과 gates 스텝 사이), `factory/test/run-stage.test.js`, 스펙 §4.2.1(step 4 뒤 한 줄), 이 문서 KTB-13 fix round 1 항목 3(교차 참조), `docs/factory/dogfood/2026-09-12-ktb.md`(예방적 수정 기록).
-
-### KTB-13 r2 — 짧은 옵션에 값이 **붙어** 오면 r1의 규칙이 통째로 빠져나갔다
-
-**리뷰 지적(High)**: r1이 더한 `curl`·`cp`/`mv` 규칙은 플래그 뭉치 뒤에 공백이나 `=`를 요구했다(`([[:space:]=]|$)`). 그런데 짧은 옵션은 값을 **붙여** 받는다 — 셸이 한 토큰으로 넘기고 도구는 정상 동작한다. 그래서 `curl -o.factory/harness.toml u`, `curl -sLosrc/a.js u`, `cp -tsrc/sub a`, `mv -tdir a`가 전부 exit 0으로 통과했다. r1이 막았다고 적어 둔 모양이 실제로는 한 글자 차이로 열려 있었다. (`block-dangerous.sh`는 영향이 없다 — 그쪽은 보호 경로 **부분 문자열**을 보므로 값이 붙어도 경로가 그대로 보인다. 그래도 회귀 테스트는 양쪽에 넣었다.)
-
-**결정**: 플래그 글자가 뭉치 안에 **있다는 사실**로 판정한다. 공용 조각 하나(`ATTACHED='[a-zA-Z]*[^[:space:];&|]*'`)를 뭉치 뒤에 붙여, 값이 붙어 있든(`-osrc/a.js`) 떨어져 있든(`-o src/a.js`) 같은 규칙이 선다. 넓어진 만큼의 대가는 오탐 쪽으로만 간다 — 출력 플래그가 없는 `curl -sSL`·`curl -H 'x: y'`·`curl --location`, `cp -a`·`cp -r`은 그대로 통과한다(테스트로 고정).
-
-**남은 같은 가족의 위험(등록부 gap 1에 포함)**: `node -e"code"`·`sed -i.bak`처럼 **다른 규칙**의 붙은 형태는 이 수정의 범위가 아니다(리뷰가 검증한 것은 curl/cp/mv였다). 같은 한 줄짜리 변경으로 닫히지만, 그 세 규칙은 이번 라운드에서 관측된 적이 없어 "관측될 때마다 자라는 목록"(gap 1)에 그대로 둔다.
-
-**영향**: `factory/hooks/deny-all-writes.sh`(+ 설치본 `.claude/hooks/`), `factory/test/hooks.test.js`(붙은 형태 8 blocked / 7 allowed, block-dangerous 3 blocked / 2 allowed).
-
-### KTB-15 — draft PR은 절대 머지될 수 없다 (그리고 머지만 실패한 런은 approved로 되돌아간다)
-
-**질문**: 데모 #8은 triage·plan·implement·review를 전부 통과하고 merge에서 죽었다 — `gh pr merge failed (1): GraphQL: Pull Request is still a draft`, 40초, `factory:approved → factory:blocked`. implement 워크플로는 `gh pr create --draft`로 PR을 열고(`templates/factory/claude/workflows/factory-implement.js`, `gh.js`의 `createDraftPr`) 파이프라인 어디에도 ready로 되돌리는 코드가 없었다. 즉 **어떤 PR도 자동 머지될 수 없었다** — 게이트·리뷰·무결성·정책을 전부 통과해도 마지막 한 걸음에서 GitHub이 거부한다. 파이프라인이 merge까지 도달한 것이 이번이 처음이라 이제야 드러났다.
-
-**결정**: draft로 여는 것은 **유지한다**(리뷰 중인 PR을 사람이 실수로 머지하는 것을 막는 신호다). 대신 머지 직전에 뒤집는다.
-
-1. `gh.prReady(pr)` = `gh pr ready <n> -R <repo>`. 이미 ready인 PR에도 exit 0이라 **멱등**이다 — 재시도 런이 상태를 따로 묻지 않는다.
-2. `merge-stage.js`가 그것을 **`mergePr` 바로 앞**에서 부른다: 보호 경로(KTB-5)·역할 섹션 정책(KTB-6)·게이트·필수 체크·무결성이 **전부** 통과한 뒤다. 그 앞에 두면 거부된 PR이 ready로 남아 사람이 실수로 머지할 수 있게 되는데, draft는 바로 그 사고를 막는 장치다. 실패는 머지 실패와 같은 등급(`factory:blocked` — 아직 머지되지 않았으므로 되돌릴 것이 없고 재시도로 풀릴 수 있다), 사유는 `ready-for-review failed: …`.
-3. 전이 그래프에 **`factory:blocked → factory:approved`**(§3.2). 머지만 실패한 런은 고칠 것이 코드가 아니므로 `planned`로 되돌려 이미 GREEN인 구현을 다시 돌 이유가 없다. 요구조건은 그대로 물린다 — `requirements.js`의 approved 규칙이 review handoff·이번 런의 GREEN `gates.json`·PR head 일치를 계속 요구하므로 이 엣지가 "승인을 건너뛰는 문"이 되지는 않는다. sweeper의 blocked 팔은 **그대로** 유예 뒤 needs-human으로 올린다(재시도는 사람의 판단이다). 사람 경로는 sweeper 주석과 `:unstick`의 선택지 목록에 적었다: `transition.js <n> factory:approved --human` → `factory run merge <n> --remote`.
-
-**관측자 제안 중 채택하지 않은 것**: "`still a draft` 실패를 `needs-human`으로 재분류". 원인을 고친 뒤에는 그 문자열이 다시 나올 자리가 없고, 등급을 문자열 매칭으로 나누는 것은 GitHub 메시지 변경에 그대로 깨진다. blocked → approved 엣지가 같은 목적(사람이 되살릴 수 있다)을 문자열 없이 달성한다.
-
-**알려진 마찰(미해결)**: 사람 경로의 `transition.js … factory:approved --human`은 `gatesGate`가 요구하는 **이번 런의 GREEN `gates.json`**을 그대로 요구한다(`--human`으로도 건너뛸 수 없다는 것이 기존 판결이다). 러너 밖에서 손으로 실행하면 그 파일이 없어 거부된다 — 그때의 길은 sweeper가 올린 `needs-human → queue`(전체 재실행)뿐이다. 게이트 파일을 러너 아티팩트에서 복원하는 경로를 열 것인지는 다음 라운드의 판단으로 남긴다.
-
-→ **KTB-15b가 이 마찰을 닫았다**: 이 문서의 `transition.js <n> factory:approved --human` 경로는 KTB-15b(아래)로 사라졌다 — 사람의 재시도는 이제 `factory run merge <n> --remote` 하나다(`factory-blocked-origin` 마커로 run-stage의 진입 가드가 재시도 자격을 판정한다).
-
-**영향**: `factory/lib/gh.js`, `factory/lib/merge-stage.js`, `factory/bin/run-stage.js`(dep), `factory/lib/labels.js`, `factory/lib/sweeper.js`(주석), `templates/know-thy-build/unstick.md`, `factory/test/{merge-stage,gh,labels}.test.js`.
-
-### KTB-16 — `--max-turns 5`가 plan을 죽였다: 한도는 하네스가 정하고, 턴 한도는 blocked다
+#### KTB-16 — `--max-turns 5`가 plan을 죽였다: 한도는 하네스가 정하고, 턴 한도는 blocked다
 
 **질문**: KTB-13 배포 후 재큐된 데모 #2의 plan 재실행(run 34700674634)이 30분 18초·**$12.05**를 태우고 산출물 없이 끝났다 — `is_error: true`, `subtype: error_max_turns`, `terminal_reason: max_turns`, `num_turns: 6`. `bin/run-stage.js`는 `--max-turns 5`를 **하드코딩**하고 있었다.
 
@@ -780,7 +693,7 @@ Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 
 
 **영향**: `factory/bin/run-stage.js`(`DEFAULT_MAX_TURNS`·`stageMaxTurns`·게이트 게이팅·verify 실패 등급), `factory/lib/verify-stage.js`(`hitMaxTurns`·`maxTurnsReason`), `factory/lib/config.js`, `factory/lib/doctor/harness.js`, `factory/lib/labels.js`, `templates/factory/factory/harness.toml`, 테스트 4종.
 
-### KTB-17 — 백그라운드 `Workflow`의 반환값은 tool_result에 없다: 알림과 output 파일을 본다
+#### KTB-17 — 백그라운드 `Workflow`의 반환값은 tool_result에 없다: 알림과 output 파일을 본다
 
 **질문**: KTB-7이 세운 "1순위 출처는 트랜스크립트의 `Workflow` tool_result"가 **작동하지 않았다**. 관측자가 같은 아티팩트로 폴백 경로만 떼어 재생했을 때 나온 1,340자는 계획이 아니라 접수증이었다:
 
@@ -815,21 +728,67 @@ You will be notified when it completes.
 
 **영향**: `factory/lib/stage-artifact.js`(`taskNotificationsFromTranscript`·`fileReadsFromTranscript`·`toolResultTextsFromTranscript`·`isWorkflowReceipt`·`stripLineNumbers`·후보 순서), `factory/test/stage-artifact.test.js`, 픽스처.
 
-### 라운드 3 관측 사실 (ADR 근거로 고정)
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19
 
-dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 남겨야 하는** 사실들:
+한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
-- **비용.** #2 plan $12.43 + #2 implement $8.13 + #8 plan $7.78 + #8 implement $17.07 + #8 review $11.33 ≈ **$56.7**(triage 2건 별도), 그리고 KTB-16이 태운 #2 plan 재실행 **$12.05**. 가장 비싼 두 스테이지(implement $17.07 · review $11.33)의 비용 상당 부분이 KTB-12/13의 권한 우회(Bash 209회·245회)에서 나왔다 — 방벽을 잘못 세우면 비용으로 되돌아온다는 것의 실측이다.
-- **훅이 권한 판정보다 먼저 발화한다 — 실물로 확인.** #8 review의 서브에이전트 트랜스크립트 16개 집계: `tool_use {Bash:245, Read:47, StructuredOutput:18, Write:1, Workflow:1}`, hook-blocked **36** · dontAsk-denied **57**. 차단 메시지는 일반적인 dontAsk 문구가 아니라 `PreToolUse:Bash hook error: [.claude/hooks/deny-all-writes.sh]: factory: this role must not write (bash: redirection to a path outside /tmp, $TMPDIR or .factory/out/qa/)`였다. KTB-13이 "PreToolUse 훅은 permission 판정보다 **먼저** 돌고 exit 2가 호출 자체를 차단하므로 전역 allow가 넓어져도 리뷰어는 쓸 수 없다"고 쓴 문장이 **이제 관측으로 뒷받침된다**(그전까지는 스파이크 추론이었다).
-- **R1→R2 verdict 뒤집힘: 표본 0.** #8 review의 R1이 만장일치 approve(correctness·architecture·spec-conformance·qa 전부 approve/high)라 rework 라운드가 없었다. §12.4의 뒤집힘 지표는 라운드 3에서도 표본이 없다 — 세 라운드 연속이다. 이 지표는 아직 "측정되지 않았다"이지 "0이다"가 아니다.
+#### KTB-8 — 스테이지 워크플로가 공유 concurrency 그룹에서 서로를 취소했다
 
-### O11 — 스테이지가 도는 동안 대상 저장소를 업그레이드하지 않는다
+**질문**: `issues: labeled` 이벤트 하나가 스테이지 워크플로 5개의 런을 전부 만드는데(GitHub는 트리거에 라벨 이름 필터를 주지 않는다 — 필터는 잡 레벨 `if`다), 다섯이 `concurrency.group: factory-issue-<n>`을 공유하고 있었다. `cancel-in-progress: false`에서도 GitHub는 그룹당 실행 1 + 대기 1만 유지하므로 새 웨이브가 직전 대기 런을 취소한다 — 데모 #2에서 조건이 맞는 유일한 런(`factory-plan`)이 생성 1초 만에 밀려나고 이슈가 `factory:ready`에 기록 하나 없이 멈췄다. 공유 그룹이 무엇을 보장한다고 믿고 있었는가, 그리고 런이 **만들어지지도 않은** 정지를 누가 본다고 믿고 있었는가.
 
-**관측**: 라운드 3에서 KTB-13 수정을 실어 나르는 `factory init --upgrade` PR이 데모 #2의 implement가 **도는 중에** 머지됐다. base가 런 밑에서 움직였고, 그 런의 게이트·프롬프트·훅이 어느 버전의 것인지가 사후에 불분명해졌다 — 실패를 어느 커밋 탓으로 돌릴지 판단할 수 없다.
+**결정**:
 
-**결정(운영 규칙)**: 대상 저장소의 팩토리 업그레이드(`init --upgrade` 머지)는 **돌고 있는 스테이지가 없을 때만** 한다. 자동화된 가드는 두지 않는다 — 업그레이드 PR은 보호 경로를 건드리므로 어차피 사람이 머지하고(ADR-020 KTB-5), 그 사람이 `factory:in-progress`/`awaiting-review` 이슈가 있는지 보면 된다. 이 규칙을 문서에 못 박는 이유는 라운드 3에서 그것을 보지 않고 머지했기 때문이다.
+1. **그룹을 워크플로별로 가른다** — `factory-issue-${{ github.event.issue.number || inputs.issue }}-<stage>`(`templates/factory/github/workflows/factory-{triage,plan,implement,review,merge}.yml`). 이슈 단위 상호배제는 처음부터 concurrency가 아니라 `factory/lib/claim.js`의 원자적 락 브랜치 claim(`refs/heads/factory/lock-<issue>` 원격 push, 두 번째 러너는 `{ok:false, holder}`로 fail closed)이 주고 있었다 — 공유 그룹은 보호를 더하지 않으면서 스테이지를 죽이는 레이스만 만들었다. yml 주석이 그 사실을 명시하고, `factory/test/yml-lint.test.js`가 다섯 그룹 문자열이 pairwise distinct임을 고정한다.
+2. **재점화는 `workflow_dispatch`뿐이다** — 라벨이 이미 목적 상태에 있으면 같은 라벨을 또 붙여도 `labeled` 이벤트가 나지 않으므로 라벨로는 되살릴 수 없다. 스테이지 5개에 `inputs.issue`를 달고 잡 조건을 `github.event_name == 'workflow_dispatch' || contains(...)`로, 이슈 번호를 `github.event.issue.number || inputs.issue`로 바꿨다(`run-stage.js`는 이미 argv에서 읽는다). 사람·컨트롤러용 같은 손잡이가 `factory/cli/run.js`의 `factory run <stage> <issue> --remote`다 — 로컬 실행 없이 dispatch만 하고, `merge`도 받는다(브랜치 보호가 막는 것은 로컬 실행이지 CI dispatch가 아니다).
+3. **sweeper의 세 번째 팔**(`factory/lib/sweeper.js`, `factory/bin/sweep.js`) — `factory:ready|planned|awaiting-review|approved`에 앉아 있고 ① 마지막 전이 코멘트(`factory-transition:v1`)가 `staleMinutes`보다 오래됐고 ② 그 창 안에 갱신된 하트비트가 없고 ③ 재점화 마커가 없는 이슈를 `gh workflow run factory-<stage>.yml -f issue=<n>`으로 다시 띄우고 `<!-- factory-sweeper restarted stage=<stage> issue=<n> -->`를 남긴다. 하트비트 확인이 "in-flight 런 조회"를 대신한다 — `gh run list`보다 싸고, 이미 이 파일이 읽는 데이터이며, 스테이지가 살아 있다는 1차 증거다(plan은 37분 동안 `factory:ready`에 머문다). 전이 코멘트가 아예 없으면 판단하지 않는다(나이를 모르는 것을 "오래됐다"로 읽지 않는다). ~~중복 dispatch 자체는 무해하다 — 락 claim이 두 번째 러너를 fail closed 시킨다.~~ **(KTB-10에서 정정: 이 문장은 틀렸다.** 같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작하므로 락이 이미 풀려 있다 — 중복 실행을 실제로 막는 것은 `run-stage.js`의 진입 상태 가드다.**)** 워크플로에 `permissions: actions: write`를 더했다.
 
-### KTB-15b — blocked 재시도는 사람 손이 아니라 마커와 sweeper로: 머지·triage·plan·implement 전부
+**알려진 한계**: 스테이지 5개를 `factory-stage.yml` 하나로 합쳐 라벨로 분기하면 라벨 이벤트당 런이 1개뿐이라 그룹 경합도 팬아웃 로그 잡음(매 전이마다 취소 4건)도 사라진다 — 위 ①보다 옳지만 변경 폭이 커서 채택하지 않았다. 그리고 취소된 런은 잡 로그·아티팩트·코멘트를 아무것도 남기지 않으므로(도그푸드 O8), 정지의 사후 조사는 여전히 90일짜리 Actions 기록에 의존한다.
+
+#### KTB-9 — tier 라벨을 붙이는 코드가 어디에도 없었다
+
+**질문**: 스펙 §3.2는 triage가 `factory:tier-docs|standard|load-bearing`을 부여한다고 적었고 `factory/lib/label-catalog.js`가 셋을 정의해 `bootstrap`이 만들기까지 하는데, `addLabels`를 부르는 곳은 retro 경로뿐이었다. tier가 handoff JSON 안에만 있으면 사람은 이슈 목록에서 tier를 볼 수 없다 — 라벨은 사람이 읽는 표식이므로 이것은 문서와 코드의 드리프트다.
+
+**결정**: `factory/bin/run-stage.js`가 triage handoff를 **검증한 뒤**(`verifyStage` 통과 뒤 — 검증 전의 tier는 에이전트의 자기 신고다) `gh.setTierLabel(issue, factory:tier-<tier>)`로 그 tier를 붙이고 다른 `factory:tier-*`를 같은 `gh issue edit` 호출에서 뗀다. `setFactoryLabel`을 재사용하지 않는다 — 그것은 `labels.js`의 `STATES`만 보므로 태우면 상태 라벨이 떨어져 나간다(tier는 상태와 **직교**하되 이슈당 하나다; `TIERS`·`tierLabel()`·`TIER_LABELS`를 `factory/lib/labels.js`에 뒀다). 라벨 적용 실패는 런 기록 한 줄로만 남기고 스테이지를 죽이지 않는다 — 판정의 재료는 계속 handoff의 tier이고(게이트·로스터·`factory status`), 라벨은 그 사실의 사본일 뿐이다.
+
+#### KTB-10 — 중복 실행을 막는 것은 락이 아니라 진입 상태 가드다
+
+**질문**: KTB-8은 concurrency 그룹을 워크플로별로 갈라 "조건이 맞는 런이 취소되는" 정지를 없앴고, 재점화 경로(`workflow_dispatch` + sweeper의 세 번째 팔)를 열었다. 그런데 그 ADR은 "중복 dispatch 자체는 무해하다 — 락 claim이 두 번째 러너를 fail closed 시킨다"고 적었다. 그 문장이 참인가.
+
+**관측**: 참이 아니다. 락 claim이 되돌려 세우는 것은 **동시에** 도는 두 번째 러너인데, 같은 그룹에 PENDING으로 걸린 dispatch는 그룹당 실행 1 + 대기 1이라는 성질 때문에 **원래 런이 끝난 뒤에** 시작한다 — 그때 락은 이미 해제돼 있다. 그래서 PENDING 런은 스테이지를 처음부터 다시 돌고, 전이 그래프(`factory:planned → factory:planned`은 없다)가 그것을 거부하는 것은 `claude -p`가 이미 끝난 **뒤**다: plan 한 번 ~$12, 그리고 이슈에는 중복 handoff 코멘트가 남는다. sweeper가 30분마다 이 실수를 반복할 수 있는 구조였다.
+
+**결정**:
+
+1. **진입 상태 가드**(`factory/bin/run-stage.js`) — claim이 성공한 직후(로컬 진입 §4.2.5 **뒤**: 그 경로가 `backlog → factory:queue`를 바로 그 자리에서 만든다) 이슈의 현재 factory 상태 라벨을 읽어, 그것이 이 스테이지의 진입 라벨(`ENTRY_LABELS`, `factory/lib/labels.js` — triage `factory:queue` · plan `factory:ready` · implement `factory:planned|factory:rework` · review `factory:awaiting-review` · merge `factory:approved`)이 아니면 `entry state <label> != expected <…> — nothing to do` 한 줄만 남기고 exit 0으로 물러난다. 전이도, handoff도, `claude -p`도 없다. 라벨을 읽지 못하면(조회 실패·상태 라벨 2개) **막지 않는다** — 이것은 비용 방어이지 안전 게이트가 아니고, 실제 안전은 여전히 전이 그래프가 쥔다. `sweeper.js`의 세 겹 dedupe는 이 가드 앞단의 비용·잡음 절감으로 위치를 다시 적었다.
+2. **아티팩트 경로는 폴백을 갖는다**(I1) — `CLAUDE_TRANSCRIPTS`를 굳히는 스텝이 setup **뒤**에 있었고, setup이 실패하면 그 env가 빈 채로 `if: always()`인 업로드 스텝이 돈다. 그러면 경로가 `/**/*.jsonl` — 러너 **루트**에 앵커된 glob — 이 되고 `if-no-files-found: ignore`라 아무 소리도 내지 않는다. 스텝을 **첫 스텝**으로 올려 `if: always()`를 달고(순수한 `echo … >> $GITHUB_ENV`라 체크아웃보다 앞이어도 된다), 경로에 `|| format('{0}/.factory/out', github.workspace)` 폴백을 넣었다. 방어는 두 겹이다. `factory/lib/yml-lint.js`에 `env-path-no-fallback` 규칙을 더해 `${{ env.… }}`로 시작하면서 `||`가 없는 artifact path를 거부한다(같은 파일의 `tilde-path` 규칙은 이제 따옴표를 벗기고 본다 — 따옴표 하나로 비켜 갈 수 있으면 규칙이 아니다).
+3. **재점화 마커는 dispatch보다 먼저 남긴다**(M4) — 마커가 dedupe의 유일한 근거이므로, dispatch 성공 뒤 코멘트가 실패하면 sweeper가 30분마다 같은 스테이지를 계속 민다. 순서를 뒤집어 실패가 **덜 재시작하는 쪽**으로 기울게 했다(놓친 재점화는 사람이 `--remote`로 되살릴 수 있지만, 반복 재점화는 돈이다).
+4. **back-pressure로 세워 둔 이슈는 멈춘 것이 아니다**(M5) — `factory:planned`는 implement가 흐름 제어에 걸려 **라벨을 건드리지 않고** 물러났을 때도 그대로 남는다. sweeper가 그것을 밀면 새 런이 같은 이유로 또 물러나고 코멘트만 쌓인다. implement 팔은 dispatch 직전에 `backPressure()`(run-stage가 보는 바로 그 헬퍼)를 sweep당 한 번 물어보고, 거부면 dispatch도 코멘트도 하지 않는다.
+5. **L1 거부 문구를 규칙별로 가른다**(I3) — `policyViolations`는 additive-only 위반과 사라진 lessons 파일을 같은 배열에 싣는데, 하나의 제목으로 뭉치면 "`## Examples`에만 추가하세요"라는 설명이 lessons 삭제 위에 붙는다. `merge-stage.js`가 목록을 규칙으로 갈라 각자의 제목·설명으로 내고, 한 PR이 둘 다 어기면 두 섹션이 함께 실린다. 같은 맥락에서 `integrity.js`는 "지워졌다"(`deleted or moved away`)와 "트리에 있는데 읽히지 않는다"(`unreadable`)를 다른 사유로 낸다 — 판정은 같지만 문구가 같으면 사람이 있지도 않은 삭제를 diff에서 찾는다(M8).
+6. **`factory run … --remote`는 `-R <repo>`를 명시한다**(M7) — 없으면 `gh workflow run`이 cwd의 git remote로 저장소를 고르는데, 이 경로는 로컬 체크아웃을 전제하지 않는다(init 여부도 보지 않는다). `resolveRepo`(KTB-4의 단일 출처)로 해석하고, 해석 실패는 읽을 수 있는 에러로 끝낸다. `--remote`는 argv 어느 위치에서도 받는다.
+7. **tier 라벨은 전이보다 먼저**(M2) — 라벨을 붙이는 것도 `issues: labeled` 이벤트라, 그 이벤트가 만드는 5-런 물결이 뒤에 오면 전이가 막 띄운 다음 스테이지의 PENDING 런을 concurrency 슬롯에서 밀어낸다(KTB-8이 죽은 방식 그대로). 코드의 순서는 원래 옳았으나 이유가 어디에도 없었다 — 주석과 테스트로 고정했다.
+
+**영향**: `factory/bin/run-stage.js`(진입 가드·`issueLabels` dep·tier 주석), `factory/lib/labels.js`(`ENTRY_LABELS`), `factory/lib/sweeper.js`·`factory/bin/sweep.js`(마커 순서·back-pressure 면제), `factory/lib/merge-stage.js`(규칙별 섹션), `factory/lib/integrity.js`(`unreadable` 사유·`LESSONS_POLICY_RULE`), `factory/lib/yml-lint.js`(`env-path-no-fallback`·따옴표 벗기기), `factory/cli/run.js`(`-R`·플래그 위치), `templates/factory/github/workflows/factory-{triage,plan,implement,review,retro}.yml`, 스펙 §4.1(concurrency/dispatch 스니펫·가드 문장·sweeper 재점화 행).
+
+**알려진 한계**: 가드는 라벨을 **한 번** 읽는다 — 그 조회와 스테이지 본체 사이에 사람이 라벨을 바꾸면 가드는 옛 답으로 통과시킨다(그 뒤는 전이 그래프가 받는다). 그리고 가드가 exit 0으로 물러나는 것은 dispatch가 **정상적으로** 늦게 도착한 경우와 사람이 잘못된 스테이지를 손으로 민 경우를 구분하지 않는다 — 둘 다 런 기록 한 줄로만 남는다.
+
+#### KTB-15 — draft PR은 절대 머지될 수 없다 (그리고 머지만 실패한 런은 approved로 되돌아간다)
+
+**질문**: 데모 #8은 triage·plan·implement·review를 전부 통과하고 merge에서 죽었다 — `gh pr merge failed (1): GraphQL: Pull Request is still a draft`, 40초, `factory:approved → factory:blocked`. implement 워크플로는 `gh pr create --draft`로 PR을 열고(`templates/factory/claude/workflows/factory-implement.js`, `gh.js`의 `createDraftPr`) 파이프라인 어디에도 ready로 되돌리는 코드가 없었다. 즉 **어떤 PR도 자동 머지될 수 없었다** — 게이트·리뷰·무결성·정책을 전부 통과해도 마지막 한 걸음에서 GitHub이 거부한다. 파이프라인이 merge까지 도달한 것이 이번이 처음이라 이제야 드러났다.
+
+**결정**: draft로 여는 것은 **유지한다**(리뷰 중인 PR을 사람이 실수로 머지하는 것을 막는 신호다). 대신 머지 직전에 뒤집는다.
+
+1. `gh.prReady(pr)` = `gh pr ready <n> -R <repo>`. 이미 ready인 PR에도 exit 0이라 **멱등**이다 — 재시도 런이 상태를 따로 묻지 않는다.
+2. `merge-stage.js`가 그것을 **`mergePr` 바로 앞**에서 부른다: 보호 경로(KTB-5)·역할 섹션 정책(KTB-6)·게이트·필수 체크·무결성이 **전부** 통과한 뒤다. 그 앞에 두면 거부된 PR이 ready로 남아 사람이 실수로 머지할 수 있게 되는데, draft는 바로 그 사고를 막는 장치다. 실패는 머지 실패와 같은 등급(`factory:blocked` — 아직 머지되지 않았으므로 되돌릴 것이 없고 재시도로 풀릴 수 있다), 사유는 `ready-for-review failed: …`.
+3. 전이 그래프에 **`factory:blocked → factory:approved`**(§3.2). 머지만 실패한 런은 고칠 것이 코드가 아니므로 `planned`로 되돌려 이미 GREEN인 구현을 다시 돌 이유가 없다. 요구조건은 그대로 물린다 — `requirements.js`의 approved 규칙이 review handoff·이번 런의 GREEN `gates.json`·PR head 일치를 계속 요구하므로 이 엣지가 "승인을 건너뛰는 문"이 되지는 않는다. sweeper의 blocked 팔은 **그대로** 유예 뒤 needs-human으로 올린다(재시도는 사람의 판단이다). 사람 경로는 sweeper 주석과 `:unstick`의 선택지 목록에 적었다: `transition.js <n> factory:approved --human` → `factory run merge <n> --remote`.
+
+**관측자 제안 중 채택하지 않은 것**: "`still a draft` 실패를 `needs-human`으로 재분류". 원인을 고친 뒤에는 그 문자열이 다시 나올 자리가 없고, 등급을 문자열 매칭으로 나누는 것은 GitHub 메시지 변경에 그대로 깨진다. blocked → approved 엣지가 같은 목적(사람이 되살릴 수 있다)을 문자열 없이 달성한다.
+
+**알려진 마찰(미해결)**: 사람 경로의 `transition.js … factory:approved --human`은 `gatesGate`가 요구하는 **이번 런의 GREEN `gates.json`**을 그대로 요구한다(`--human`으로도 건너뛸 수 없다는 것이 기존 판결이다). 러너 밖에서 손으로 실행하면 그 파일이 없어 거부된다 — 그때의 길은 sweeper가 올린 `needs-human → queue`(전체 재실행)뿐이다. 게이트 파일을 러너 아티팩트에서 복원하는 경로를 열 것인지는 다음 라운드의 판단으로 남긴다.
+
+→ **KTB-15b가 이 마찰을 닫았다**: 이 문서의 `transition.js <n> factory:approved --human` 경로는 KTB-15b(아래)로 사라졌다 — 사람의 재시도는 이제 `factory run merge <n> --remote` 하나다(`factory-blocked-origin` 마커로 run-stage의 진입 가드가 재시도 자격을 판정한다).
+
+**영향**: `factory/lib/gh.js`, `factory/lib/merge-stage.js`, `factory/bin/run-stage.js`(dep), `factory/lib/labels.js`, `factory/lib/sweeper.js`(주석), `templates/know-thy-build/unstick.md`, `factory/test/{merge-stage,gh,labels}.test.js`.
+
+#### KTB-15b — blocked 재시도는 사람 손이 아니라 마커와 sweeper로: 머지·triage·plan·implement 전부
 
 **질문**: KTB-15가 연 `factory:blocked → factory:approved` 엣지의 "알려진 마찰(미해결)"이 실제로 걸렸다 — 문서가 안내하는 사람 경로 `node .factory/bin/transition.js <n> factory:approved --human`은 `requirements.js`의 `gatesGate`가 **로컬** `.factory/out/gates.json`(이번 런이 만든 GREEN 파일)을 요구하는데, 러너 밖 사람의 셸에는 그 파일이 없다 — 그래서 그 경로는 항상 거부됐다. 유일하게 남은 길은 sweeper가 유예 뒤 올리는 `needs-human → queue`, 곧 리뷰까지 통과한 구현을 통째로 다시 도는 것뿐이었다.
 
@@ -847,7 +806,7 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 
 **영향**: `factory/lib/labels.js`(`ENTRY_LABELS`·`BLOCKED_RETRY`·`TRANSITIONS`), `factory/lib/transition.js`(origin 마커, `stage` 인자), `factory/lib/retro/issue-comments.js`(`blockedOrigin`), `factory/bin/run-stage.js`(진입 가드 일반화, `artifact:` 기록), `factory/lib/merge-stage.js`(`retryFromBlocked`, I1 재확인 루프), `factory/lib/sweeper.js`(blocked 팔 일반화), `factory/lib/yml-lint.js`(`ready-for-review-trigger`), `.github/workflows/factory-integrity.yml` + 템플릿, `factory/lib/stage-artifact.js`(I3), `factory/lib/verify-stage.js`(M1), `factory/hooks/{deny-all-writes,block-dangerous}.sh`, `factory/bin/retro.js`(retro의 `--max-turns`도 하드코딩 5 대신 `stageMaxTurns`), `templates/know-thy-build/unstick.md`. 테스트: `labels.test.js`·`transition.test.js`·`issue-comments.test.js`(신규)·`run-stage.test.js`·`merge-stage.test.js`·`sweeper.test.js`·`yml-lint.test.js`·`stage-artifact.test.js`·`verify-stage.test.js`·`hooks.test.js`·`retro-bin.test.js`.
 
-### KTB-18 — 손으로 얹은 라벨이 만드는 상태 모호성은 조용히 죽지 않는다: 코멘트하고, sweeper가 고친다
+#### KTB-18 — 손으로 얹은 라벨이 만드는 상태 모호성은 조용히 죽지 않는다: 코멘트하고, sweeper가 고친다
 
 **질문**: §12.4 skip-attempt probe(이슈 #14) — 사람이 아직 `backlog`가 붙어 있는 이슈에 `factory:approved`를 손으로 얹었다. `run-stage merge`는 `factoryLabelOf`가 정확히 설계한 대로 거부했다(`issue must carry exactly one factory state label, found: backlog, factory:approved`) — 그런데 그 거부가 **어디서도 잡히지 않았다**. 진입 라벨 가드(`run-stage.js`)는 이 예외를 삼켜 "entry state: unreadable"로만 기록하고 조용히 진행을 계속했고, 그 뒤 `d.transition`이 (라벨을 다시 읽어) 같은 예외를 또 던졌는데, 이번엔 아무도 잡지 않아 최상위 try/catch까지 올라가 `console.error` + exit 1로 죽었다 — 이슈 코멘트도, 전이도 없었다. 결과: 이슈는 두 라벨을 영원히 달고 앉아 있고, 아무도 그 사실을 몰랐다(정확한 거부가 **침묵한 거부**였다).
 
@@ -859,7 +818,7 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 
 **영향**: `factory/bin/run-stage.js`(진입 가드), `factory/lib/sweeper.js`(`sweepLabelSetRepair`), `factory/test/{run-stage,sweeper}.test.js`.
 
-### KTB-19 — 머지 재시도는 "아직 존재하지도 않는 체크"와 경합했다: 횟수가 아니라 상태로 기다린다
+#### KTB-19 — 머지 재시도는 "아직 존재하지도 않는 체크"와 경합했다: 횟수가 아니라 상태로 기다린다
 
 **질문**: 데모 #8의 blocked→approved 재시도(KTB-15b)가 `gh pr ready`까지는 성공했지만 `gh pr merge`가 `Required status check "factory/integrity" is queued`로 실패했다. 원인: 그 PR 브랜치는 업그레이드 **이전**에 만들어져 낡은 `integrity.yml`(`ready_for_review` 트리거 포함)을 그대로 갖고 있었다 — ready 플립이 새 필수 체크를 막 밀어 넣었고, KTB-15b I1의 고정 3×10초 재확인 창이 그 체크가 `queued`인 채로 끝나버렸다.
 
@@ -873,3 +832,180 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 **영향**: `factory/lib/merge-stage.js`(`waitForChecksSettled`, `toBlocked`), `factory/lib/config.js`(`merge_check_wait_sec` 기본값), `factory/bin/run-stage.js`(`prChecks`/`requiredChecks`/`mergeCheckWaitSec` dep, origin hoist), `factory/lib/labels.js`(`blocked→rework` 엣지), `factory/lib/transition.js`·`factory/lib/retro/issue-comments.js`(`blockedOriginMarker` 공유), `factory/lib/sweeper.js`(`blockedRetryComment`). 테스트: `merge-stage.test.js`·`config.test.js`·`labels.test.js`·`sweeper.test.js`.
 
 (이후 항목은 dogfood 진행에 따라 추가)
+### ⑤ 권한·훅 — KTB-13·14
+
+`--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
+
+#### KTB-13 — `dontAsk`는 allow에 없는 도구를 **거절**한다: allow 목록이 부여이고, deny·훅이 가드다
+
+**질문**: CI는 `claude -p /factory-<stage> <n> --permission-mode dontAsk --settings .factory/ci-settings.json`으로 스테이지를 돌린다. 설치된 `.claude/settings.json`의 `permissions.allow`는 Bash 패턴 8개뿐이었다(`Bash(git *)`, `Bash(gh issue *)`, `Bash(gh pr view*|comment*|create*|edit*)`, `Bash(npm *)`, `Bash(npx *)`) — `Read`·`Edit`·`Write` 같은 **도구 이름은 한 줄도 없다**. 설계는 그것으로 충분하다고 적었다: ADR-002·ADR-008의 스파이크에서 `--permission-mode dontAsk`가 "모든 툴 호출을 프롬프트 없이 통과"시켰고 `permission_denials: []`였기 때문이다. 그 전제가 아직 참인가.
+
+**관측** (데모 라이브):
+
+- **거짓이다.** 지금 CLI의 `dontAsk`는 allow 규칙에 걸리지 않는 도구 호출을 **묻지 않고 거절한다** — "doesn't ask"가 "approves"가 아니라 "denies without asking"이다.
+- 데모 이슈 #2의 implement 라운드에서 builder가 보고했다: "Write and Edit tools are denied by the sandbox (dontAsk mode), and bash file writing (redirection, heredoc into a file) is denied too. Creating files through git apply is accepted only for trivial…" — 그리고 포기하고 `factory:needs-human`으로 넘어갔다. **스테이지가 코드를 한 줄도 쓰지 못한 채 끝났다.**
+- 이슈 #8은 성공했는데, 그 방식이 증상을 그대로 설명한다 — builder가 편집을 `git apply`에 실어 날랐다(`Bash(git *)`가 allow에 있었으므로). 좁은 allow 목록이 곧 **차단 목록**이었고, 에이전트는 그 목록의 구멍을 찾아 우회하는 법을 배우고 있었다.
+- ADR-002/ADR-008의 관측 자체는 그 시점에는 정직했다(그래서 지우지 않는다). 스파이크 시점 CLI의 동작이고, 그 뒤에 바뀌었다. 아래가 **현행 CLI 버전에 대한 철회**다.
+
+**결정**: **allow 목록은 편의 목록이 아니라 에이전트가 가진 도구의 정의다.** `templates/factory/claude/settings.json`의 `permissions.allow`에 팩토리 에이전트가 실제로 쓰는 도구를 싣는다 — `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `LS`, `Agent`, `Workflow`, `TodoWrite`, 그리고 `Bash(*)`. 좁은 Bash 항목 8개는 **대체한다**: `dontAsk`에서 allow에 없는 Bash 명령은 그대로 거절이므로, 그 목록은 `mkdir`·`cat > file`·`sed -i` 같은 builder의 정당한 명령을 막고 있었다.
+
+**무엇이 여전히 가드인가** — 넓어진 것은 부여이지 방벽이 아니다. 네 겹은 그대로다:
+
+- **deny는 allow를 이긴다**(두 파일 모두 그대로다). `.claude/settings.json`의 `gh pr merge*`·`git merge*`·force-push·branch-protection PUT, `.factory/ci-settings.json`의 경로 `Edit`/`Write` deny 전부(`.factory/**`·`.claude/**`·CHARTER·빌드 설정)와 CI 전용 deny. `Bash(*)`가 allow에 있어도 `Bash(git push --force*)`는 여전히 거절된다.
+- **`block-dangerous.sh`(PreToolUse)** 가 위험한 셸 모양과 보호 경로 쓰기를 계속 거부한다. 이것이 `Bash(*)`의 실질적 경계다.
+- **`deny-all-writes.sh`(역할 frontmatter의 PreToolUse)** 가 쓰기 금지 역할(triage·plan-\*·reviewer-\*·verifier·loader)의 `Edit`/`Write`/`NotebookEdit`과 "파일을 만드는 bash"를 막는다. **순서가 이것을 성립시킨다: PreToolUse 훅은 permission 판정보다 먼저 돌고, exit 2는 도구 호출 자체를 차단한다** — 그 도구가 allow에 있는지와 무관하다. 그래서 전역 allow가 넓어져도 리뷰어는 여전히 쓸 수 없다(`hooks.test.js`가 이것을 고정한다).
+- **L0 `factory/integrity` + L1 merge 스테이지**(KTB-5·KTB-6)가 변조와 보호 경로 변경을 PR 단계에서 잡는다.
+
+**doctor**: `checkSettings`에 `settings.allow`를 더한다 — 템플릿 allow 항목이 하나라도 빠지면 **FAIL**이다(`settings.deny`와 같은 모양·같은 무게). 빠진 설치본은 "조금 불편한" 설치본이 아니라 **builder가 파일을 쓰지 못하는** 설치본이다. 상위집합(사람이 자기 항목을 더한 브라운필드)은 PASS다.
+
+**기존 설치**: `mergeSettings`가 deny·allow를 **합집합**으로 병합하므로 `factory init --upgrade`가 새 항목을 더한다(멱등 — KTB 자신에게 적용해 확인). 뒤에 남는 좁은 Bash 항목은 무해하다: `Bash(*)`가 그것을 포함하고, allow는 서로를 취소하지 않는다. `MOVED_DENIES_ADR_019` 같은 제거 목록은 만들지 않는다 — 지울 이유가 없다.
+
+**영향**: §6.3(allow 문단), `templates/factory/claude/settings.json`, `factory/lib/doctor/factory.js`, `factory/test/templates.test.js`·`doctor-factory.test.js`·`hooks.test.js`.
+
+##### KTB-13 fix round 1 — 훅이 실제로 무엇을 덮는가 (잔여 위험 등록부)
+
+**리뷰 지적**: allow를 부여로 바꾼 판결 자체는 옳지만, 그 근거였던 "`block-dangerous.sh`가 `Bash(*)`의 실질 경계이고 `deny-all-writes.sh`가 읽기 전용 역할을 막는다"는 문장이 **검증되지 않은 채** 쓰였다. 좁은 allow가 실제로는 두 번째 방벽이었다 — `node`·`curl`·`wget`·`install`은 애초에 allow에 없어서 훅까지 **도달하지도 않았고**, 그래서 두 훅 어느 쪽도 그 모양들을 본 적이 없다. allow를 열면서 그 모양들이 처음으로 훅 앞에 선다.
+
+**수정** (두 훅 + 매처):
+
+- `deny-all-writes.sh`(쓰기 금지 역할): `MultiEdit`을 `Edit|Write`와 같은 팔에 넣고, Bash arm에 `node -e|-p|--eval|--print`(인라인 스크립트는 대상 불문 차단 — `sed -i`·`python -c`와 같은 원칙), `curl`의 출력 플래그(`-o`·`-O`·`--output`·`--output-dir`·`--remote-name`), `wget` **전면**(플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다), `install`(파일 변형 명령 목록에 추가), `cp`/`mv`의 `-t`/`--target-directory`(목적지를 마지막 토큰이 아닌 곳에 두어 "목적지만 보는" 규칙을 통째로 빠져나갔다)를 더했다. 저장소 스크립트 실행(`node .factory/bin/prove-test.js`)과 출력 플래그 없는 `curl`은 그대로 통과한다.
+- `block-dangerous.sh`(builder, 보호 경로만): `node` 인라인 스크립트가 보호 경로를 말하는 경우, `dd of=<보호경로>`, `install … <보호경로>`, `curl`/`wget` 세그먼트에 보호 경로가 보이는 경우, `git checkout <ref> -- <보호경로>`·`git restore <보호경로>`(다른 커밋의 내용으로 워킹 트리를 덮는다), 그리고 `git apply`/`git am` **전면 차단**을 더했다. `git apply`만 전면인 이유: 패치 내용이 명령줄에 없어 훅이 **무엇이 쓰이는지 볼 수 없다** — 판정 불능은 안전이 아니다(이 파일 맨 위 jq 규칙과 같은 원칙). builder에게 손실은 없다(KTB-13 이후 `Edit`/`Write`로 직접 쓴다). 데모 #8이 쓴 우회로가 바로 이것이고, 여기서 닫힌다.
+- 매처: 쓰기 금지 역할 14개의 `hooks.PreToolUse.matcher`가 `Edit|Write|MultiEdit|NotebookEdit|Bash`다. `lintAgentMd`의 `deny-hook` 규칙이 이제 **다섯 이름 전부**를 요구하고 무엇이 빠졌는지 말한다(`DENY_WRITES_TOOLS`가 정본 — 훅 스크립트가 판정해도 매처가 좁으면 그 판정은 발화하지 않는다).
+
+**잔여 위험 등록부.** 아래가 지금 실제로 막히는 것과 막히지 않는 것이다 — "훅이 덮는다"를 다시 검증 없이 쓰지 않기 위해 표로 고정한다.
+
+| 모양 | builder (`block-dangerous`) | 쓰기 금지 역할 (`+ deny-all-writes`) |
+|---|---|---|
+| 리다이렉션 `>`/`>>`/`>\|`, `tee` | 보호 경로만 차단 | 차단(/tmp·`$TMPDIR`·`.factory/out/qa/` 제외) |
+| `sed -i`, `perl -i`, `python -c … open(` | 보호 경로만 차단 | 대상 불문 차단 |
+| `node -e\|-p\|--eval\|--print` | 보호 경로를 말하면 차단 | 대상 불문 차단 |
+| `curl -o\|-O\|--output`, `wget` | 보호 경로를 말하면 차단 | 차단(`curl`은 출력 플래그가 있을 때, `wget`은 전면) |
+| `rm`/`mv`/`mkdir`/`touch`/`ln`/`chmod`/`dd`/`install` | 보호 경로만 차단(`dd`는 `of=`) | 차단(카브아웃 제외) |
+| `cp`/`mv` 목적지, `-t`/`--target-directory` | 보호 경로가 목적지면 차단 | 차단(카브아웃 제외) |
+| `git commit/push/add/checkout/restore/rm/mv/config` | 머지·force-push·lock 삭제·보호 경로 checkout/restore/rm/mv 차단 | 쓰기 서브커맨드 전면 차단 |
+| `git apply` / `git am` | **전면 차단**(패치 내용이 보이지 않는다) | 전면 차단 |
+| `gh pr merge`, `gh api …/merge`, `factory:*` 라벨 조작 | 차단 | 차단 |
+
+**막지 못하는 것(알려진 잔여 위험)**:
+
+1. **아직 열거되지 않은 쓰기 도구.** 두 훅은 **명령 모양의 열거**다 — 화이트리스트가 아니다. `rsync`, `tar -x`, `unzip`, `patch`, `busybox`, `awk`의 `> file`이 아닌 출력 리다이렉트, `python -c` 이외의 인터프리터(`ruby -e`, `php -r`), 셸 내장 `printf -v`+`exec>`, 새로 설치된 CLI 등은 지금 목록에 없다. 이 목록은 관측될 때마다 자란다.
+2. **Bash에 닿는 역할은 builder만이 아니다.** `reviewer-*`·`factory-verifier`·`factory-loader`는 게이트·테스트를 돌려야 하므로 frontmatter `tools:`에 `Bash`가 있다. 그들의 방벽은 `deny-all-writes.sh` **하나뿐**이고, 그 훅은 위 표의 모양들만 안다. `plan-*`과 `factory-triage`·`factory-retro`는 `tools:`에 Bash가 없어 도달 자체가 없다.
+3. **L1은 PR에 도달한 diff만 본다.** merge 스테이지의 보호 경로·`additive_only` 거부와 `factory/integrity`는 **커밋되어 push된 것**을 판정한다. reviewer·verifier·loader는 커밋하지 않으므로, 그들이 워크트리에서 파일을 고쳐 게이트 결과나 자기 판정 근거를 바꾸면 **어떤 diff에도 나타나지 않는다**. 그 경로의 유일한 방벽이 (2)의 훅 하나라는 뜻이다. `stop-guard.sh`가 SubagentStop에서 더러운 트리를 거부하는 것이 부분적인 사후 감지다(쓰기 금지 역할은 그 가드에서 면제되어 있으므로 — ADR-016 F6 — 감지도 아니다). **KTB-14(아래)가 이 gap을 닫는다** — triage/plan/review에 한해 `run-stage.js` 자신이 claude -p 직후 워크트리를 다시 물어, 훅이 놓친 모양이든 무엇이든 스크래치 경로 밖의 diff를 산출물 채택 이전에 거부한다.
+4. **훅 입력은 신뢰할 수 없다.** 판정은 명령 **문자열**에 대한 정규식이다. 변수 확장(`P=pack; echo x > "$P"age.json`), base64, `eval`, 힙 스크립트 파일 경유는 문자열에 보호 경로가 보이지 않으므로 빠져나간다. ADR-013의 원칙(훅 입력 불신)이 여기서도 상한이다 — 훅은 **실수와 게으른 우회**를 막지 실행 중인 적대적 에이전트를 막지 못한다.
+5. **오탐(의도적).** `git restore --staged package.json`(인덱스만 건드린다), `node -p`로 보호 경로를 **읽는** 것, `rm -rf node_modules/foo/package.json`(N4), 그리고 **`git apply --check`/`--stat`/`--numstat`**(패치를 적용하지 않고 적용 가능성·통계만 본다 — 읽기다)은 막힌다. `git apply`가 전면 차단인 이유가 그대로 여기 적용된다: 패치 내용이 명령줄에 없어 훅은 `--check`가 진짜 붙었는지 이상의 것을 판정할 수 없고, 플래그 하나로 차단을 끄는 경로를 여는 것(`git apply --check; git apply p.diff`가 한 줄에 있을 때 앞의 것만 보고 통과시키는 것)이 더 나쁘다. 우회로는 `git apply`가 아니라 `git diff`/`patch --dry-run`이다. 전부 "하지 못해 불편한 쪽이 조용히 지워지는 쪽보다 낫다"는 기존 판결을 따른다.
+
+이 등록부의 요지: **넓어진 allow의 대가는 "훅이 아는 모양의 목록"에 의존하게 된 것**이고, 그 목록은 완전하지 않다. 완전해질 수도 없다 — 완전함을 원하면 allow를 다시 좁혀야 하는데, 그것이 KTB-13이 고친 바로 그 고장이다. 실제 방어선은 여전히 **L0/L1**(변조는 체크가, 보호 경로는 사람 머지가)이고, 훅은 그 앞의 싼 그물이다.
+
+#### KTB-14 — 쓰기 금지 스테이지는 claude -p 이후에도 워크트리가 깨끗한지 스스로 다시 묻는다
+
+**질문**: KTB-13 fix round 1의 잔여 위험 등록부 gap 3이 명시한 구멍은 이렇다 — `reviewer-*`·`plan-*`·`factory-triage`(그리고 `factory-verifier`·`factory-loader`)는 게이트·테스트를 돌리기 위해 `tools:`에 Bash를 들고 있지만 **절대 커밋하지 않는다**. 그들의 유일한 방벽은 `deny-all-writes.sh`(PreToolUse) 하나뿐이고, 그 훅은 gap 1이 이미 적어 둔 대로 **명령 모양의 열거**라 완전할 수 없다(`rsync`·`tar -x`·변수 확장·`eval` 등 얼마든지 새로 나온다). 게다가 `stop-guard.sh`(SubagentStop)는 바로 그 역할들을 더티 트리 검사에서 **면제**한다(그들이 커밋할 수 없으니 자기 산출물을 지울 수 없어서, 지우려면 쓰기가 필요한데 쓰기는 막혀 있다 — 교착 방지). 그 결과 이 역할들이 훅이 모르는 모양으로 워크트리를 건드리면(예: 게이트 결과·자기 판정 근거를 바꿔 산출물을 유리하게 조작), 그 변경은 **커밋되지 않으므로 L1/`factory/integrity`가 보는 어떤 diff에도 나타나지 않고**, 훅에 안 걸리므로 즉시 차단되지도 않고, `stop-guard`도 면제라 사후에도 잡히지 않는다. 세 겹 방어가 전부 이 경로 하나를 놓치고 있었다 — 무엇을 구조적 백스톱으로 세울 것인가.
+
+**결정**: 훅이 알아야 하는 **명령 모양**이 아니라, 훅이 몰라도 되는 **결과**를 본다 — 그 스테이지의 `claude -p`가 끝난 워크트리와 시작 워크트리를 비교해, 하나라도 다르면(스크래치 경로 제외) 산출물을 통째로 거부한다.
+
+1. **`factory/lib/agent-md.js`의 `needsDenyAllWritesHook`가 여전히 단일 출처다.** "이 스테이지가 쓰기 금지 스테이지인가"를 새로 정의하지 않는다 — 대표 역할 이름(`factory-triage`·`plan-x`·`reviewer-x`)으로 그 함수를 그대로 프로브한다(`run-stage.js`의 `isNoWriteStage`). 두 판정이 갈리면 KTB-13 r1의 교착 경고와 같은 실수가 된다. 결과: triage·plan·review는 참, implement(`factory-builder`)는 거짓 — implement가 이 저장소에서 유일하게 쓰기가 허용된 스테이지다. merge는 애초에 `claude -p`를 부르지 않으므로(script-only, ADR-015 R3) 이 체크에 닿지도 않는다.
+2. **`factory/bin/run-stage.js`가 claude -p 직후, 게이트·verifyStage보다 먼저** `git status --porcelain --untracked-files=all`을 워크트리(`root` — review는 `checkoutHead`가 이미 detach해 둔 PR head)에서 다시 묻는다(`assertNoWriteStageClean`). 허용 스크래치 경로는 딱 둘: `.factory/out/**`(게이트 리포트·claude 원본 출력), `docs/factory/runs/**`(run 기록 — 실제 저장소는 `factory/records` 브랜치이고 이 경로는 hydrateRecord/append가 매 스테이지 쓰는 로컬 사본이다). `.factory/lessons/**`는 넣지 않는다 — 그것은 retro 전용 쓰기 경로이고(`needsDenyAllWritesHook`가 `factory-retro`도 쓰기 금지로 분류하지만 retro는 `run-stage.js`의 스테이지가 아니다), triage/plan/review가 그 경로에 쓸 이유는 없다. `.factory/quarantine.toml`(gates가 쓰는 스크립트 소유 파일, `stop-guard.sh`의 제외 목록에는 있다)도 넣지 않는다 — review의 게이트는 flaky 재분류를 하지 않으므로(ADR-011: 재분류는 implement 전용) review 스테이지에서 이 파일이 바뀔 일이 없고, 못 박아 두면 나중에 review가 그 파일을 건드리는 변경이 조용히 스크래치로 승격되는 것을 막는다.
+3. **위반이면 산출물을 받지 않는다.** 스크래치 밖의 변화가 하나라도 있으면(rename은 양쪽 다 — KTB-5 N1과 같은 원칙) `factory:needs-human`으로 전이하고 사유 `worktree dirty after <stage> (no-write stage): <paths>`를 남긴다 — **`verifyStage`조차 부르지 않는다**(사람이 볼 것은 handoff 검증 결과가 아니라 워크트리 자체다). `git status`가 실패하면 "깨끗하다"를 증명할 수 없으므로 fail-closed이되, **등급은 다르다(KTB-14 r1)**: 그것은 GREEN도 RED도 아닌 **판정 불가**이므로 `factory:blocked`다(`worktree check failed after <stage> (no-write stage): <reason>`) — `merge-stage.js`의 `undecidable()`·게이트 BLOCKED과 같은 계약이고, `needs-human`은 "사람이 판단할 것이 있다"는 뜻이라 판단할 재료조차 없는 이 경우에는 라벨이 원인을 잘못 말한다. 더러운 트리만 `needs-human`이다.
+4. **implement는 건드리지 않는다.** implement는 유일한 쓰기 스테이지이고 이 체크는 애초에 실행되지 않는다(`isNoWriteStage("implement") === false`) — builder가 커밋 전에 파일을 고치는 것은 정상 작업이다.
+
+**이 백스톱이 닫는 것과 닫지 못하는 것**: 이것은 **명령 모양이 아니라 결과**를 보므로 gap 1(열거되지 않은 쓰기 도구)이 두 훅 어느 쪽에 대해서도 완전할 필요가 없어진다 — `rsync`든 `eval`이든, 트리를 실제로 바꾸면 잡힌다. 반대로 이 체크가 **못 잡는 것**도 있다: (a) 워크트리를 건드리지 않고 **claude -p 세션 안에서만** 거짓 판정을 만드는 경로(예: verify가 신뢰하는 훅 기록 자체를 조작 — 이건 `agents.jsonl`이 매 런 리셋되고 훅이 별도 채널로 쓰므로 다른 방어선이다), (b) `.factory/out/**`·`docs/factory/runs/**` **안에서** 벌어지는 조작(게이트 리포트 위조 등 — 그건 이 체크의 관할이 아니라 `gates.json`을 유일한 진실로 삼는 ADR-010의 몫이다), (c) 체크와 커밋 사이의 TOCTOU(이 체크는 스냅샷이다 — 그러나 review/triage/plan은 이 체크 직후 아무것도 커밋하지 않고 handoff 코멘트만 남기므로 이 저장소의 흐름에서 실질적인 창이 없다).
+
+**영향**: `factory/bin/run-stage.js`(`isNoWriteStage`·`assertNoWriteStageClean`·`NO_WRITE_SCRATCH_PREFIXES`·`assertCleanWorktree` dep, claude -p 스텝과 gates 스텝 사이), `factory/test/run-stage.test.js`, 스펙 §4.2.1(step 4 뒤 한 줄), 이 문서 KTB-13 fix round 1 항목 3(교차 참조), `docs/factory/dogfood/2026-09-12-ktb.md`(예방적 수정 기록).
+
+#### KTB-13 r2 — 짧은 옵션에 값이 **붙어** 오면 r1의 규칙이 통째로 빠져나갔다
+
+**리뷰 지적(High)**: r1이 더한 `curl`·`cp`/`mv` 규칙은 플래그 뭉치 뒤에 공백이나 `=`를 요구했다(`([[:space:]=]|$)`). 그런데 짧은 옵션은 값을 **붙여** 받는다 — 셸이 한 토큰으로 넘기고 도구는 정상 동작한다. 그래서 `curl -o.factory/harness.toml u`, `curl -sLosrc/a.js u`, `cp -tsrc/sub a`, `mv -tdir a`가 전부 exit 0으로 통과했다. r1이 막았다고 적어 둔 모양이 실제로는 한 글자 차이로 열려 있었다. (`block-dangerous.sh`는 영향이 없다 — 그쪽은 보호 경로 **부분 문자열**을 보므로 값이 붙어도 경로가 그대로 보인다. 그래도 회귀 테스트는 양쪽에 넣었다.)
+
+**결정**: 플래그 글자가 뭉치 안에 **있다는 사실**로 판정한다. 공용 조각 하나(`ATTACHED='[a-zA-Z]*[^[:space:];&|]*'`)를 뭉치 뒤에 붙여, 값이 붙어 있든(`-osrc/a.js`) 떨어져 있든(`-o src/a.js`) 같은 규칙이 선다. 넓어진 만큼의 대가는 오탐 쪽으로만 간다 — 출력 플래그가 없는 `curl -sSL`·`curl -H 'x: y'`·`curl --location`, `cp -a`·`cp -r`은 그대로 통과한다(테스트로 고정).
+
+**남은 같은 가족의 위험(등록부 gap 1에 포함)**: `node -e"code"`·`sed -i.bak`처럼 **다른 규칙**의 붙은 형태는 이 수정의 범위가 아니다(리뷰가 검증한 것은 curl/cp/mv였다). 같은 한 줄짜리 변경으로 닫히지만, 그 세 규칙은 이번 라운드에서 관측된 적이 없어 "관측될 때마다 자라는 목록"(gap 1)에 그대로 둔다.
+
+**영향**: `factory/hooks/deny-all-writes.sh`(+ 설치본 `.claude/hooks/`), `factory/test/hooks.test.js`(붙은 형태 8 blocked / 7 allowed, block-dangerous 3 blocked / 2 allowed).
+
+### ⑥ 관찰 — O1~O12, G1
+
+결함으로 승격하지 않았지만 판결의 근거이거나 앞으로의 판결에 필요한 사실들. 전부 `docs/factory/dogfood/2026-09-12-demo.md`·`2026-09-12-ktb.md`·`task-6-prep-report.md`에서 실측됐다(출처 표기).
+
+- **O1**(Task 3, 데모) — plan이 스스로 사람 개입을 선행 조건으로 걸었다: `pg` 의존성 추가가 `package.json`(보호 경로)에 걸려 "`pg` 한 줄만 담은 `factory:harness` PR을 사람이 머지한 뒤 이슈를 claim한다"는 계획을 냈다. 그린필드 첫 기능 이슈가 사람 머지를 요구하는 것은 §11 그린필드 흐름의 실제 마찰이다 — 픽스처가 런타임 의존성을 미리 깔아 둘지, `[protected]`를 tier별로 열지는 아직 판단이 필요하다(미결).
+- **O2**(Task 3, 데모) — `docs/features/001-create-note.md`의 `issue: null`을 채우지 못했다(`main` 보호, 로컬 push 불가). 컨텍스트 로더가 이슈 본문의 `Spec: …` 줄에서 경로를 뽑으므로 파이프라인 영향은 없었다 — 문서 프런트매터의 역참조만 비어 있다.
+- **O3**(Task 3, 데모) — 라벨 이벤트 하나에 워크플로 5개가 뜬다(`issues: labeled`에는 라벨 필터가 없다). 관측된 3회 모두 올바른 스테이지가 슬롯을 잡았지만 `cancel-in-progress: false`에서는 늦게 들어온 pending이 먼저 들어온 pending을 취소하는 잠재 레이스였다 — 이 관찰이 실제로 실현되고 해소된 것이 **KTB-8**이다(④).
+- **O4**(Task 3, 데모) — 세션 트랜스크립트가 아티팩트에 없어 원인 추적을 `.factory/out/plan.json`의 `result` 역추적으로 해야 했다. **KTB-7**의 첫 수정은 업로드 경로가 `~`로 시작해 실제로는 아무것도 올리지 않아 무효였고("고쳤다"와 "동작한다" 사이에 러너 확인이 없었다), **KTB-10**에서 dispatch(M1)가 실제로 뜨는지 run `34696709110`으로 라이브 확인해 간극을 한 번 메웠다.
+- **O5**(Task 3, 데모) — `factory status`가 `_retro.md` 상태 파일을 이슈처럼 센다(`- #_retro $0 · 0 runs`). 표시 잡음(수정 안 함, 낮은 우선순위로 이월).
+- **O6**(Task 3, 데모) — **락 프로토콜이 한 번 깨졌다.** 컨트롤러가 락을 반납한 사이 다른 에이전트가 미커밋 변경(`factory/lib/stage-artifact.js` import)을 자기 KTB-6 커밋(`9c3346d`)에 함께 담아, HEAD가 잠시 untracked 파일을 import하는 상태가 존재했다. 명시 경로 `git add`만으로는 같은 파일을 둘이 건드릴 때를 못 막는다 — 파일 단위 소유권이나 워크트리 분리가 필요하다는 결론이며, 이후 "**한 번에 하나의 KTB-writing 에이전트만**"으로 운영 규칙을 좁혔다(progress.md O6 ruling).
+- **O7**(Task 3, 데모) — heartbeat 정상(10분 간격, 실측 갱신 확인). 37분짜리 스테이지가 죽었는지 살았는지 구분됐다 — sweeper 설계의 전제가 실제로 성립한다.
+- **O8**(Task 3, 데모) — **취소된 런은 흔적을 남기지 않는다.** KTB-8이 취소한 plan 런은 `cancelled`로 1초 만에 끝나 잡 로그도 아티팩트도 코멘트도 없었다. "무슨 일이 있었나"의 유일한 창구가 `gh run list`이고 그마저 90일이 지나면 사라진다. 재점화 마커 코멘트(KTB-8)가 최소한 "스위퍼가 밀었다"는 사실은 이슈에 남기지만, 취소 자체는 여전히 이슈에 기록되지 않는다.
+- **O9**(Task 3, 데모) — **업그레이드 커밋 제목이 실제 배포된 KTB sha를 말해야 한다.** 데모 PR #3의 제목은 `init --upgrade to KTB f12a174`였지만 내용은 f8b0439까지였다. 제목의 sha를 믿고 "그 수정은 아직 안 갔다"고 읽으면 같은 결함을 두 번 조사한다 — 업그레이드 PR 제목의 sha는 `git rev-parse HEAD`로 그 자리에서 찍어야 한다(운영 규칙, 자동화 안 함).
+- **O10**(Task 4, 데모) — 이슈를 `--label backlog`로 생성하면 그 자체가 `issues: labeled`를 쏴 워크플로 5개 중 매칭되는 것이 없어 5개 skipped 런이 뜬다(Task 4의 이슈 4건 생성으로 20개). 노이즈·러너 분(分) 낭비일 뿐 정지·오탐은 아니다 — `on.issues.labeled`는 라벨 이름으로 필터할 수 없으므로(GitHub 미지원), 이슈 생성을 `workflow_dispatch`-only 트리거로 옮기는 안이 후보로 남는다(설계 메모, 미채택).
+- **O11**(라운드 3, 데모) — 전체 판결(운영 규칙)은 바로 다음 항목.
+- **O12**(라운드 3~4, 데모) — `usage.js`/`harvest.js`의 토큰 합산이 `input_tokens`만 세어 프롬프트 캐싱 세션의 실제 입력을 대부분 놓치고 있었다(`_retro.md`가 "input 50"으로 찍은 런의 실제 입력은 캐시 포함 170,000+). `cache_creation_input_tokens`·`cache_read_input_tokens`를 input 합계에 포함하고 `renderStatus`/`statsBlock` 라벨을 `input(+cache)`로 고쳤다(원본 필드는 그대로 남긴다) — **KTB-19 커밋(23ef1df)에 함께 실렸다**(별도 KTB 번호를 받지 않았다: 표시 형식 수정으로 판단됐다).
+#### O11 — 스테이지가 도는 동안 대상 저장소를 업그레이드하지 않는다
+
+**관측**: 라운드 3에서 KTB-13 수정을 실어 나르는 `factory init --upgrade` PR이 데모 #2의 implement가 **도는 중에** 머지됐다. base가 런 밑에서 움직였고, 그 런의 게이트·프롬프트·훅이 어느 버전의 것인지가 사후에 불분명해졌다 — 실패를 어느 커밋 탓으로 돌릴지 판단할 수 없다.
+
+**결정(운영 규칙)**: 대상 저장소의 팩토리 업그레이드(`init --upgrade` 머지)는 **돌고 있는 스테이지가 없을 때만** 한다. 자동화된 가드는 두지 않는다 — 업그레이드 PR은 보호 경로를 건드리므로 어차피 사람이 머지하고(ADR-020 KTB-5), 그 사람이 `factory:in-progress`/`awaiting-review` 이슈가 있는지 보면 된다. 이 규칙을 문서에 못 박는 이유는 라운드 3에서 그것을 보지 않고 머지했기 때문이다.
+
+#### G1 — `[runtime].setup`으로 Node 외 툴체인(Flutter 등)을 깔 수 있는가 (own-calendar 준비에서 발견한 설계 공백)
+
+**질문**: 러너 셋업(`templates/factory/factory/actions/setup/action.yml`)은 `actions/setup-node` +
+`[runtime].setup`(`.factory/bin/setup-env.js`가 `harness.toml`에서 읽어 실행)만 돈다. Flutter나 Python처럼
+Node가 아닌 툴체인이 필요한 저장소는 그것을 표현할 자리가 없다. 최소로 여는 방법은 무엇이고, 기존 구조에
+그것을 막는 것이 있는가.
+
+**결정**: 전용 `[runtime].actions` 메커니즘(임의 다중 설치 스텝)은 지금은 만들지 않는다(범위 초과, 나중으로
+미룬다) — 대신 `[runtime].setup` 한 줄에 툴체인 설치 + `$GITHUB_PATH` 확장을 표현하는 것을 **정식 경로**로
+문서화하고 그것이 실제로 동작함을 고정한다.
+
+1. **`[runtime].setup`을 자기만의 액션 스텝으로 분리했다**(`.factory/actions/setup/action.yml`). 기존에는
+   `npm install --prefix .factory`·`git config`와 같은 `run:` 블록 안에서 돌고 있었다 — 동작 자체는 GitHub
+   Actions의 "$GITHUB_PATH 추가는 그것을 쓴 스텝이 아니라 **다음** 스텝부터 반영된다"는 규칙 때문에 이미
+   합류 지점(Claude/test-env 설치, 그리고 이 composite action을 부른 워크플로의 게이트 스텝) 전에 최소 한
+   스텝을 거치므로 틀리지는 않았지만, 다른 명령과 같은 스텝에 있으면 그 사실이 파일만 보고는 드러나지
+   않는다. 스텝을 쪼개 `[runtime].setup`이 하는 일과 그 경계를 파일 자체가 말하게 했다.
+2. **`harness.toml`에 `setup_note` 주석**을 추가해(TOML 파서는 무시하는 순수 문서) `[runtime].setup`이
+   저장소 루트에서, 자기만의 액션 스텝(`bash -e`)으로, `$GITHUB_PATH`/`$GITHUB_ENV`를 쓸 수 있는 채로
+   실행된다는 계약과 Flutter 설치 예시(`curl … | tar -xJ` + `echo … >> "$GITHUB_PATH"`)를 남겼다.
+3. 테스트: `yml-lint.test.js`(setup-env.js 호출이 npm install/git config/`if: always()`와 섞이지 않은
+   독립 스텝임을 고정) · `templates.test.js`(`setup_note`가 `$GITHUB_PATH`·"own step"·Flutter 예시를 담고,
+   TOML 파싱은 그대로임을 고정).
+
+**알려진 한계**: 이것으로 여는 것은 "한 줄짜리 셸 명령으로 표현 가능한 설치"뿐이다. 여러 스텝의 캐싱(예:
+Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 진짜 다중-액션이 필요해지면, 그때
+`[runtime].actions`(스텝 목록) 같은 정식 메커니즘을 다시 본다 — 지금은 마주친 요구(툴체인 설치 + PATH
+확장)를 채우는 가장 작은 변경만 했다.
+
+### 라운드 3 관측 사실 (ADR 근거로 고정 — 아래 "표본과 지표"의 실측 출처)
+
+dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 남겨야 하는** 사실들:
+
+- **비용.** #2 plan $12.43 + #2 implement $8.13 + #8 plan $7.78 + #8 implement $17.07 + #8 review $11.33 ≈ **$56.7**(triage 2건 별도), 그리고 KTB-16이 태운 #2 plan 재실행 **$12.05**. 가장 비싼 두 스테이지(implement $17.07 · review $11.33)의 비용 상당 부분이 KTB-12/13의 권한 우회(Bash 209회·245회)에서 나왔다 — 방벽을 잘못 세우면 비용으로 되돌아온다는 것의 실측이다.
+- **훅이 권한 판정보다 먼저 발화한다 — 실물로 확인.** #8 review의 서브에이전트 트랜스크립트 16개 집계: `tool_use {Bash:245, Read:47, StructuredOutput:18, Write:1, Workflow:1}`, hook-blocked **36** · dontAsk-denied **57**. 차단 메시지는 일반적인 dontAsk 문구가 아니라 `PreToolUse:Bash hook error: [.claude/hooks/deny-all-writes.sh]: factory: this role must not write (bash: redirection to a path outside /tmp, $TMPDIR or .factory/out/qa/)`였다. KTB-13이 "PreToolUse 훅은 permission 판정보다 **먼저** 돌고 exit 2가 호출 자체를 차단하므로 전역 allow가 넓어져도 리뷰어는 쓸 수 없다"고 쓴 문장이 **이제 관측으로 뒷받침된다**(그전까지는 스파이크 추론이었다).
+- **R1→R2 verdict 뒤집힘: 표본 0.** #8 review의 R1이 만장일치 approve(correctness·architecture·spec-conformance·qa 전부 approve/high)라 rework 라운드가 없었다. §12.4의 뒤집힘 지표는 라운드 3에서도 표본이 없다 — 세 라운드 연속이다. 이 지표는 아직 "측정되지 않았다"이지 "0이다"가 아니다.
+
+### 표본과 지표 (진행 중)
+
+스펙 §12.4의 네 기준을 이 시점까지의 실측으로 채운다 — 최종 숫자는 Task 7 **part 2**(own-calendar 다크 실행·KTB 자기 다크 실행·데모 잔여 이슈 #2/#5/#6/#7/#15가 정리된 뒤)가 채운다. `{{TBD}}`는 part 2 전용 자리표시자다.
+
+| 지표(§12.4) | 이 시점 실측 | 최종(part 2) |
+|---|---|---|
+| 이슈 → 머지 무개입 완주율 (표본 20건 목표, ≥80%) | 데모 1/2 완주(#8 성공, #2 미완주) — **표본 크기 자체가 1.0 기준에 못 미쳐 측정 불가**(아래 캐비엇) | `{{TBD}}` (완주 {{TBD}}건 / 표본 {{TBD}}건) |
+| 스테이지 건너뛰기 시도(손 라벨) 100% 차단 | **1/1 확정** — 이슈 #14 프로브(`backlog`+손 `factory:approved`, 그리고 단일 손 `approved`): 두 변형 모두 침묵 없이 차단됨(KTB-18 발견·수정 후: 코멘트 + `needs-human`) | `{{TBD}}` (own-calendar 병렬 3건에서 추가 프로브 예정 — Task 6) |
+| 리뷰어 R1→R2 판정 뒤집힘 비율 | **표본 0** — 라운드 1~3 전부 R1 만장일치 approve라 전체 R2 자체가 열리지 않았다(이슈 #8 review 실측: correctness·architecture·spec-conformance·qa 전부 approve/high). "측정되지 않았다"이지 "0이다"가 아니다 | `{{TBD}}` (rework를 유발하는 이슈가 나와야 표본이 생긴다) |
+| 머지 후 7일 내 revert 0건 | 머지 1건(#8 → PR #10, 2026-09-12 17:07Z) — 7일 관찰 창 진행 중, 현재까지 revert 0 | `{{TBD}}` (창이 닫힌 뒤 확정) |
+| 비용 합계 | 데모 라운드 1~3 누계 **$81.81**(`factory status`, list-price 환산) + KTB 자기 dogfood 로컬 준비(토큰 소비 0 — 원격 미실행) | `{{TBD}}` (own-calendar·KTB 원격 다크 실행 비용 합산) |
+
+### PARKED (사용자 조치 필요 — 자율로 풀 수 없음)
+
+세 항목 전부 이 세션의 하드 제약(KTB push/merge 금지, 타인 계정 시크릿 미접근)에서 나왔다. ledger(`progress.md`)의 문구를 그대로 옮긴다.
+
+1. **KTB 자기 원격 다크 실행 — 사용자의 push/merge 필요.** "Task 5's dark run — GitHub runs `issues:` workflows from the DEFAULT branch, and KTB's factory files live only on the unpushed `spec/factory-1.0` (user forbids KTB push/merge) → the KTB self-dogfood can only be prepared locally (init/doctor on the branch); the remote run waits for the user to push/merge." 로컬 준비(harness M0·CHARTER ready·`factory init`·전체 doctor·1311 tests)는 `docs/factory/dogfood/2026-09-12-ktb.md`에 완료 기록됨 — KTB-12(`.gitignore`가 디스패처를 통째로 무시)를 이 준비 과정에서 발견·수정했다.
+2. **own-calendar 다크 실행 — 사용자의 시크릿 필요.** "Task 6's dark run — own-calendar needs `CLAUDE_CODE_OAUTH_TOKEN` + `FACTORY_BOT_TOKEN` secrets that only the user can set → local prep only (fresh clone in scratchpad, harness draft via the `:harness (b)` procedure, init, `doctor --no-run --offline`), no push." 로컬 준비는 `task-6-prep-report.md`에 DONE_WITH_CONCERNS로 기록됨(harness M1 draft, doctor PASS 49·WARN 4·FAIL 0, KTB-11 발견, G1 설계 공백 발견).
+3. **own-calendar는 private + GitHub Free → L0(branch protection) 자체가 불가능.** "Branch protection is unavailable: own-calendar is a private repo on GitHub Free, which doesn't support branch protection rules — so L0 (protected-branch enforcement) is off for this repo. `factory bootstrap`'s branch-protection step will no-op/WARN; the merge stage's own integrity/tamper checks are the only real backstop until/unless the plan upgrades or moves the repo." (KTB-2의 403 처리가 이 케이스에도 그대로 적용된다 — WARN이지 FAIL이 아니다.)
+
+### 표본 크기 캐비엇과 대체 판정 (Global Constraints §12.4 인용)
+
+계획(`docs/superpowers/plans/2026-09-12-factory-plan-6-dogfood.md`) Global Constraints가 미리 정한 대체 판정을 그대로 인용한다 — §12.4의 "≥80% 무개입 완주"는 **이 표본 크기로는 측정할 수 없다**:
+
+> 성공 기준(§12.4): 무개입 완주율 ≥80%(표본은 데모 5건 + own-calendar 3건이면 1.0 기준 미달 — 이 계획에서는 "완주 ≥ 6/8, 손 라벨 차단 100%, R1→R2 뒤집힘 기록, revert 0"으로 대체 판정하고 ADR에 표본 크기를 명시).
+
+이 인용이 이 ADR이 명시해야 할 그 "표본 크기 명시"다: 1.0의 성공 기준은 표본 20건(standard tier)을 전제하는데, Plan 6은 데모 5건(§P6-R2: docs 1·standard 3·flaky 1) + own-calendar 3건(§P6-R4, 병렬)으로 설계됐다 — 8건. 실행은 그중 데모 2건(#2·#8)만 다크 파이프라인에 진입했고(나머지 #5/#6/#7/#15는 대기, own-calendar는 PARKED), 위 표의 "이 시점 실측" 열이 그 결과다. part 2가 "완주 ≥ 6/8" 대체 기준으로 최종 판정한다.
+
+(Task 7 part 2가 위 "표본과 지표"의 `{{TBD}}`를 채운다. 그 전까지 이후 항목은 dogfood 진행에 따라 추가된다.)

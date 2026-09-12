@@ -41,8 +41,8 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
 - npm에 publish하는 모든 것(`.github/workflows/publish.yml`의 트리거·`package.json`의 `version` 필드) — 배포는 사람이 태그를 찍고 사람이 승인한다
 - `harness.toml [protected]` 또는 `harness.toml [gates.thresholds]`를 바꾸는 변경 — 판정 기준 자체를 건드리는 diff는 항상 사람 머지(§5.1)
-- 공개 API(`src/api/public/**`)의 breaking change
-- `.env*`, 시크릿, 배포 스크립트(`scripts/deploy.sh`)
+- `templates/factory/**`의 게이트 판정 로직(semantics) 변경 — L0/L1/L2가 무엇을 막는지가 바뀌면 이 템플릿을 설치한 모든 채택 저장소의 동작이 함께 바뀐다(항상 사람 리뷰·ADR-020)
+- `.env*`, 시크릿, `.github/workflows/publish.yml`(npm 배포 경로 — 첫 항목과 같은 대상이지만 워크플로 파일 자체를 짚는다)
 
 ## Definition of Done (모든 tier 공통)
 - plan handoff의 done_when 전항목이 verify 테스트로 증명됨

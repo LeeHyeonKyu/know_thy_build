@@ -65,7 +65,7 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 
 ### 2.2 로컬 실행 `factory run`
 
-"로컬 모드"는 없다. `factory run`은 `.factory/bin/run-stage.sh <stage> <issue>`를 로컬에서 실행하는 것이고, 이 스크립트는 CI의 yml이 호출하는 것과 **같은 파일**이다. 따라서 훅·권한·게이트·handoff 규칙이 동일하다.
+"로컬 모드"는 없다. `factory run`은 `.factory/bin/run-stage.js <stage> <issue>`를 로컬에서 실행하는 것이고, 이 스크립트는 CI의 yml이 호출하는 것과 **같은 파일**이다. 따라서 훅·권한·게이트·handoff 규칙이 동일하다.
 
 - claim은 동일하게 lock 브랜치 first-push-wins. heartbeat 코멘트에 `runner: local/<hostname>`을 남긴다.
 - `backlog` 이슈에 `factory run triage 123`을 실행하면 **lock을 먼저 잡고** 그다음 라벨을 `backlog → factory:queue`로 옮긴다(§4.2.5, Plan 2 실행 판결 ADR-015 — R7). 라벨 이벤트로 뜬 GitHub 잡은 claim에 실패해 물러난다. 로컬 실행도 상태 머신 안에서 일어난다. 다른 스테이지는 라벨을 옮기지 않는다.
@@ -134,7 +134,7 @@ stateDiagram-v2
 
 예산 간선은 **상한을 켠 경우에만 존재한다**(기본 off — §4.4·§5.3, ADR-005). 켜져 있어도 초과는 **다음 claim을 거부하는 방식**으로 작동하며 진행 중인 스테이지를 도중에 죽이지 않는다: 이미 도는 스테이지는 끝까지 가고, 그 다음 전이에서 `needs-human`으로 빠진다.
 
-`planned|rework → in_progress`("implement claim")는 stage=implement일 때 `run-stage.sh`의 2.5단계에서 일어난다 — assert-handoff 직후, `claude -p` 호출 **전**이다(§4.2.1). `in_progress → awaiting_review`는 스테이지 종료 시점, 같은 스크립트의 8단계 전이다.
+`planned|rework → in_progress`("implement claim")는 stage=implement일 때 `run-stage.js`의 2.5단계에서 일어난다 — assert-handoff 직후, `claude -p` 호출 **전**이다(§4.2.1). `in_progress → awaiting_review`는 스테이지 종료 시점, 같은 스크립트의 8단계 전이다.
 
 ### 3.3 전이 규칙 — 건너뛰기 불가의 구현
 
@@ -152,7 +152,7 @@ stateDiagram-v2
 | `approved` | `stage=review` | `head_sha` == PR HEAD, 판정 수 == 로스터 크기, 전원 `approve`, `round` ≤ K, **이번 스테이지의 `gates.json`이 GREEN** |
 | `merged` | (merge 잡 자체가 검사) | required checks GREEN, integrity GREEN, 보호 경로 변경 없음(있으면 needs-human — ADR-020), approved handoff의 `head_sha` == PR HEAD, **이번 스테이지의 `gates.json`이 GREEN** |
 
-review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5) — `approved`/`merged` 전이가 보는 `gates.json`은 review·merge 자신이 이번 런에서 만든 파일이지 implement의 파일을 재사용하지 않는다. 단 이 검사는 **오직 전이 경로에서만** 작동한다: 스테이지 시작 시점의 선행 handoff 확인(`assert-handoff.sh`, §4.2.1 step 2)은 "직전 스테이지가 산출물을 남겼는가"만 묻고 이번 런의 게이트는 묻지 않는다 — 그 시점엔 이번 런의 게이트가 아직 돌지 않았다(`resetGates`가 지난 런의 파일을 지운 직후다). 두 시점을 구분하는 표식이 `gatesChecked`다: `transition.js`가 전이 직전에만 `gatesChecked=true`를 `gates.json`과 함께 실어 넘기고, `assert-handoff.sh`는 이 값을 절대 세우지 않는다(ADR-012).
+review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5) — `approved`/`merged` 전이가 보는 `gates.json`은 review·merge 자신이 이번 런에서 만든 파일이지 implement의 파일을 재사용하지 않는다. 단 이 검사는 **오직 전이 경로에서만** 작동한다: 스테이지 시작 시점의 선행 handoff 확인(`assert-handoff.js`, §4.2.1 step 2)은 "직전 스테이지가 산출물을 남겼는가"만 묻고 이번 런의 게이트는 묻지 않는다 — 그 시점엔 이번 런의 게이트가 아직 돌지 않았다(`resetGates`가 지난 런의 파일을 지운 직후다). 두 시점을 구분하는 표식이 `gatesChecked`다: `transition.js`가 전이 직전에만 `gatesChecked=true`를 `gates.json`과 함께 실어 넘기고, `assert-handoff.js`는 이 값을 절대 세우지 않는다(ADR-012).
 
 사람이 라벨을 `approved`로 손으로 옮겨도 merge 잡은 review handoff를 찾지 못하므로 `needs-human`으로 되돌린다. **건너뛰기는 라벨이 아니라 산출물 부재로 막힌다.**
 
@@ -205,7 +205,7 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 
 ### 4.1 워크플로 파일 (factory init이 생성)
 
-| 파일 | 트리거 | `run-stage.sh` 인자 | `timeout-minutes` |
+| 파일 | 트리거 | `run-stage.js` 인자 | `timeout-minutes` |
 |---|---|---|---|
 | `factory-triage.yml` | `issues: labeled` (`factory:queue`) | `triage` | 15 |
 | `factory-plan.yml` | `issues: labeled` (`factory:ready`) | `plan` | 60 (최종 리뷰 F8 — 4명 토론 R1·R2 + 종합 + 서명 2회는 opus 4대가 직렬로 도는 구간이 있어 45분으로는 상한이 먼저 온다) |
@@ -261,13 +261,13 @@ jobs:
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
       - name: Test environment
-        run: .factory/bin/test-env.sh up        # §5.2.6
+        run: .factory/bin/test-env.js up        # §5.2.6
       - name: Run stage
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # 구독 (§4.4). 또는 ANTHROPIC_API_KEY
           GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}     # merge 권한 없는 토큰
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
-        run: .factory/bin/run-stage.sh implement ${{ github.event.issue.number }}
+        run: .factory/bin/run-stage.js implement ${{ github.event.issue.number }}
       - name: Upload run record
         if: always()
         uses: actions/upload-artifact@v4
@@ -284,7 +284,7 @@ jobs:
 "오케스트레이터가 할 수도 안 할 수도 있는" 구조를 피하려면 재량이 어디에 있는지를 명시해야 한다.
 
 ```
-L1  run-stage.sh (bash, claude 프로세스 밖)               재량 0
+L1  run-stage.js (bash, claude 프로세스 밖)               재량 0
     어느 스테이지를 돌릴지 · claim · context.json 작성 · claude -p 호출 · 판정 · 검증 · 전이
     │
     ▼
@@ -303,24 +303,24 @@ workflow .js (결정적 JS, claude 프로세스 안의 런타임)       재량 0
 
 **Workflow 도구의 정체**: Claude Code 내장 도구로, 모델이 `Workflow({name, args})`를 호출하면 런타임(모델 아님)이 `.claude/workflows/<name>.js`를 샌드박스 JS로 실행한다. 스크립트에 주어지는 API는 `agent / parallel / pipeline / phase / log / workflow / args / budget`뿐이고 fs·네트워크·Node API·`Date.now()`는 없다(결정성·resume 때문). `agent()`는 Agent 도구와 같은 레지스트리로 서브에이전트를 만들고, `schema`를 주면 StructuredOutput을 강제한다. 서브에이전트의 도구 호출은 세션의 permission·hooks를 통과한다. 스크립트의 `return`이 도구 결과다. **다음 단계를 정하는 주체가 모델이 아니라 코드**라는 점이 Agent 도구와의 차이이며, "N명이 반드시 spawn된다"는 보장이 여기서 나온다.
 
-#### 4.2.1 `run-stage.sh`의 골격
+#### 4.2.1 `run-stage.js`의 골격
 
 ```
-run-stage.sh <stage> <issue>
-  0. charter-ready.sh                        # CHARTER status != ready 또는 doctor 실패 → 즉시 종료
-  0.5 trust-workspace.sh                     # ADR-008 — 필수. ~/.claude.json의 projects[<cwd>].hasTrustDialogAccepted = true 를 쓴다.
+run-stage.js <stage> <issue>
+  0. charterReady()                          # CHARTER status != ready 또는 doctor 실패 → 즉시 종료 (독립 스크립트 아님 — run-stage.js가 부르는 라이브러리 함수, §6.2 이름 주석)
+  0.5 trust-workspace.js                     # ADR-008 — 필수. ~/.claude.json의 projects[<cwd>].hasTrustDialogAccepted = true 를 쓴다.
                                              #   러너의 fresh checkout은 untrusted이고, 그 상태에서는 permissions.allow가 전부 무시되며
                                              #   (경고 "Ignoring N permissions.allow entries ... this workspace has not been trusted")
                                              #   deny가 걸린 세션은 deny에 매칭되지 않는 Bash까지 막는 경우가 관측됐다(ADR-008/ADR-006 상충).
                                              #   trusted 상태에서만 "allow 정상 + deny만 선택 적용"이 성립한다 → L2(§6.3)의 allow·선택적 동작의 전제.
-                                             #   CI에서만 실행한다($GITHUB_ACTIONS 또는 $FACTORY_RUNNER_ID가 있을 때만) — run-stage.sh는 로컬에서도
+                                             #   CI에서만 실행한다($GITHUB_ACTIONS 또는 $FACTORY_RUNNER_ID가 있을 때만) — run-stage.js는 로컬에서도
                                              #   돌고, 개발자의 ~/.claude.json을 말없이 고쳐서는 안 된다. 가드는 trust-workspace 자신의 코드다(Plan 1a) — 별도 composite action이 아니다.
-  1. claim.sh <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
+  1. claim.js <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 10분마다 같은 코멘트에 PATCH로 갱신
-  2. assert-handoff.sh <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
+  2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
-  3. build-context.sh <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
+  3. build-context.js <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
   4. (merge 제외) claude -p "/factory-<stage> <issue>" \
        --settings .factory/ci-settings.json \
@@ -334,23 +334,23 @@ run-stage.sh <stage> <issue>
      (env: CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 — 방어적으로 유지하되 진짜 상한은 잡의 timeout-minutes. ADR-007: 단일 Bash 호출이
       10분으로 잘리고 foreground sleep은 Bash 툴이 차단하므로 workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상 moot)
      (stdout은 파싱 **전에** 위 리다이렉트로 `.factory/out/<stage>.json`에 verbatim 저장된다 — JSON 파싱이 실패해도 원본이 남고,
-      6의 산출물 확인과 `verify-stage.sh` 재실행이 이 파일을 읽는다. §4.4)
+      6의 산출물 확인과 `verify-stage.js` 재실행이 이 파일을 읽는다. §4.4)
      (쓰기 금지 스테이지 — triage/plan/review — 는 이 시점에 워크트리를 다시 묻는다: `.factory/out/**`·`docs/factory/runs/**` 밖의
       변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14).
       `git status` 자체가 실패한 것은 더러운 트리가 아니라 **판정 불가**라 needs-human이 아니라 `factory:blocked`다(KTB-14 r1). implement는
       건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.)
-  5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
+  5. gates.js <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
                                              #   gates.json이 진실이다 — handoff(7)에 실리는 gates 필드는 이 파일의 복사본일 뿐이고, 워크플로가
                                              #   다른 값을 써 넣으면 6이 "handoff gates mismatch"로 거부하며, 아예 빠뜨렸으면 6이 파일 값으로 채운다(ADR-010).
-                                             #   prove-test·new-test-repeat(§5.2.4)와 diff_coverage·mutation(증명 게이트)도 gates.sh 자신이 실행해
+                                             #   prove-test·new-test-repeat(§5.2.4)와 diff_coverage·mutation(증명 게이트)도 gates.js 자신이 실행해
                                              #   gates.json의 게이트 항목(prove-test, new-test-repeat, diff_coverage, mutation)으로 합산한다 — 별도 파일로 흩어지지 않는다.
-                                             #   실패한 기존 테스트의 flaky 재분류(classify-failure.sh, §5.2.5-③)는 implement에서만 한다 — review·merge는
+                                             #   실패한 기존 테스트의 flaky 재분류(classify-failure.js, §5.2.5-③)는 implement에서만 한다 — review·merge는
                                              #   재분류 없이 RED가 RED다(ADR-011). flaky-existing은 이번 판정에서 excluded로 옮기고 제목 `flaky: <id>`로
                                              #   중복 없이 `factory:queue` + `factory:flaky` 이슈를 자동 생성한다.
                                              #   게이트별 되돌림 — 남은 실패가 0이 돼도, 그 게이트 자신이 리포트를 **파싱했고**(parsed:true) 자신의
                                              #   failing_ids가 전부 제외 목록에 들어간 경우에만 그 게이트가 RED→GREEN으로 뒤집힌다. 리포트를 못 읽어
                                              #   이유를 모르는 RED 게이트(e2e 등)는 절대 뒤집지 않는다.
-  6. verify-stage.sh <stage> <issue>         # 4의 결과에 workflow 산출물이 있는가: 역할 목록 == context.json 로스터,
+  6. verify-stage.js <stage> <issue>         # 4의 결과에 workflow 산출물이 있는가: 역할 목록 == context.json 로스터,
                                              #   라운드 수, 판정 수, orchestration == harness.toml 설정. 없으면 needs-human "stage artifact missing"
                                              #   인원·역할의 근거는 훅 기록이다(ADR-001): SubagentStart/SubagentStop 라인의 agent_id·agent_type을 센다.
                                              #   주의 — 확인된 것은 두 필드의 *존재*뿐이다(스파이크 훅이 stdin JSON의 keys만 로깅했다).
@@ -361,12 +361,12 @@ run-stage.sh <stage> <issue>
                                              #   workflow return contract: workflow가 돌려준 객체가 곧 handoff 데이터다. 스테이지 schema를 만족해야 한다 —
                                              #   plan.v1, implement.v1(head_sha·pr·gates·verifier·orchestration·guarantee), review.v1(verdicts[]·round·head_sha·pr).
                                              #   만족하지 못하면 **여기(6)에서** needs-human으로 실패한다 — 다음 스테이지의 assert-handoff에서가 아니다.
-                                             #   review의 decision은 workflow가 정하지 않는다: L1의 aggregate-review.sh가 verdicts[]로 계산해 채운다(§7.5).
+                                             #   review의 decision은 workflow가 정하지 않는다: L1의 aggregate.js(aggregateReview())가 verdicts[]로 계산해 채운다(§7.5).
                                              #   verdicts 수 < 로스터 크기(incomplete)는 rework가 아니라 needs-human으로 보내고 빠진 역할을 사유에 명시한다.
-  7. write-handoff.sh <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
+  7. write-handoff.js <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
                                              #   6이 이미 schema를 통과시켰으므로 7은 재검증하지 않고 6의 data를 그대로 코멘트로 옮긴다
   8. transition.js <issue> <to>              # 3.3 규칙 (implement 성공 시 <to>=factory:awaiting-review; 출발 상태는 2.5가 이미 in-progress로 옮겨 둔 상태)
-  9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md를 default 브랜치가 아니라 전용
+  9. run-record.js <stage> <issue>           # docs/factory/runs/<issue>.md를 default 브랜치가 아니라 전용
                                              #   `factory/records` 브랜치에 git plumbing으로 append한다(ADR-014) — 현재
                                              #   체크아웃·인덱스·HEAD(또는 detached HEAD)를 건드리지 않는다. 스테이지
                                              #   시작 시(CHARTER 확인 직후, back-pressure·claim보다 먼저) `hydrateRecord`가
@@ -375,7 +375,7 @@ run-stage.sh <stage> <issue>
                                              #   어느 쪽 내용도 잃지 않는다(ADR-014 보강) · lock 해제
 ```
 
-**merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.sh`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
+**merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.js`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
 
 merge 스테이지는 **스크립트 전용**이다 — step 4의 `claude -p "/factory-merge <issue>"` 호출이 없다(Plan 2 실행 판결, ADR-015 — R3, 확정). `merge.integrator`(§7.1)를 spawn해 충돌을 해소하는 대신, PR이 `CONFLICTING`이면 `factory:approved → factory:rework`로 전이해 implement 재진입이 같은 일을 한다. mergeability가 `UNKNOWN`(GitHub 계산 중)이면 `prInfo`를 5초 후 한 번 재조회하고, 그래도 `MERGEABLE`이 아니면 `factory:needs-human`으로 전이한다(사유 "mergeability unknown after re-poll") — 무한정 기다리지 않는 fail-closed 처리다(Plan 2 실행 판결, ADR-015 — R3).
 
@@ -398,7 +398,7 @@ run commands, edit anything, or add commentary. If the workflow fails, return it
 error verbatim.
 ```
 
-메인 세션이 workflow를 호출하지 않으면 6에서 잡힌다. 건너뛰기는 성공으로 위장할 수 없고 잡 실패로 드러난다. **건너뛰기를 막는 메커니즘은 `verify-stage.sh`의 사후 검증 하나뿐이다** — 메인 세션만 선택적으로 잠그는 수단은 존재하지 않는다(ADR-006: frontmatter `allowed-tools`는 grant 힌트일 뿐 restrict가 아니고, `--allowedTools`는 `dontAsk` 아래에서 게이트로 작동하지 않으며, `--disallowedTools`는 서브에이전트까지 함께 막는다). 따라서 여기의 `allowed-tools:`는 의도 선언이지 강제 장치가 아니며, 건너뛰기는 **불가능이 아니라 감지**다. 감지의 근거는 workflow 산출물의 존재와 훅 로그의 `agent_id`/`agent_type`이다(ADR-001).
+메인 세션이 workflow를 호출하지 않으면 6에서 잡힌다. 건너뛰기는 성공으로 위장할 수 없고 잡 실패로 드러난다. **건너뛰기를 막는 메커니즘은 `verify-stage.js`의 사후 검증 하나뿐이다** — 메인 세션만 선택적으로 잠그는 수단은 존재하지 않는다(ADR-006: frontmatter `allowed-tools`는 grant 힌트일 뿐 restrict가 아니고, `--allowedTools`는 `dontAsk` 아래에서 게이트로 작동하지 않으며, `--disallowedTools`는 서브에이전트까지 함께 막는다). 따라서 여기의 `allowed-tools:`는 의도 선언이지 강제 장치가 아니며, 건너뛰기는 **불가능이 아니라 감지**다. 감지의 근거는 workflow 산출물의 존재와 훅 로그의 `agent_id`/`agent_type`이다(ADR-001).
 
 #### 4.2.3 각 층이 읽는 것
 
@@ -437,7 +437,7 @@ const LOADER = {
 `harness.toml [factory] orchestration = "workflow" | "agent"` (기본 `workflow`, protected).
 
 - 런타임에 Workflow 호출이 실패하면(도구 없음, 권한 거부, 사양 불일치) 잡은 `blocked` + 사유 `orchestration-unavailable`로 끝난다. **자동으로 agent 모드로 바꿔 돌지 않는다.** sweeper → `needs-human` → `:unstick`이 전환 여부를 묻고, 전환은 `harness.toml` PR(사람 머지)이다.
-- 모든 handoff와 run 기록에 `orchestration: workflow|agent`, `guarantee: structural|verified`, `workflow_run_id`가 남는다. 여기에 `-p` 출력 JSON의 `usage`·`total_cost_usd`·`modelUsage`·`num_turns`·`terminal_reason`·`permission_denials`를 함께 싣는다(ADR-002에서 존재 확인 — §9 run 기록, §4.4 사용량 보고). `structural` = 코드가 N명을 띄웠음, `verified` = 사후에 판정 수 == 로스터를 확인했을 뿐. `verify-stage.sh`는 handoff의 `orchestration`이 설정과 일치하는지 검사한다.
+- 모든 handoff와 run 기록에 `orchestration: workflow|agent`, `guarantee: structural|verified`, `workflow_run_id`가 남는다. 여기에 `-p` 출력 JSON의 `usage`·`total_cost_usd`·`modelUsage`·`num_turns`·`terminal_reason`·`permission_denials`를 함께 싣는다(ADR-002에서 존재 확인 — §9 run 기록, §4.4 사용량 보고). `structural` = 코드가 N명을 띄웠음, `verified` = 사후에 판정 수 == 로스터를 확인했을 뿐. `verify-stage.js`는 handoff의 `orchestration`이 설정과 일치하는지 검사한다.
 - `:digest`와 retro가 모드별 머지 수를 보고한다. 설계 시점의 후퇴 결정은 `docs/factory/DECISIONS.md`에 ADR로 남긴다(무엇을 잃는지 — 구조적 보장 → 감지 — 명시).
 
 #### 4.2.5 로컬과 GitHub의 경쟁 — claim이 라벨보다 먼저
@@ -475,7 +475,7 @@ const LOADER = {
 운영 규칙:
 - `bootstrap`이 토큰 발급일을 repo variable `FACTORY_TOKEN_ISSUED_AT`에 기록한다. sweeper가 **11개월** 시점에 `needs-human` 이슈("토큰 갱신")를 생성한다. 인증 실패는 `blocked` 경로로 빠진다.
 - `doctor`는 두 시크릿 중 하나의 존재를 확인한다(값은 보지 않는다).
-- `claude -p` stdout은 파싱 전에 `.factory/out/<stage>.json`에 그대로(verbatim) 저장된다(§4.2.1 step 4) — JSON 파싱 실패해도 원본이 남고, run 기록의 `usage`/`total_cost_usd` 추출과 `verify-stage.sh` 재실행이 이 파일을 근거로 한다.
+- `claude -p` stdout은 파싱 전에 `.factory/out/<stage>.json`에 그대로(verbatim) 저장된다(§4.2.1 step 4) — JSON 파싱 실패해도 원본이 남고, run 기록의 `usage`/`total_cost_usd` 추출과 `verify-stage.js` 재실행이 이 파일을 근거로 한다.
 - 구독 → API key 전환은 시크릿 교체만으로 끝나야 한다. 스크립트는 인증 방식을 참조하지 않는다.
 - **사용량은 제한하지 않고 보고한다**(ADR-005). 구독 토큰이 기본이고 CI 소비는 사람의 7일 창에서 나가므로, factory의 책임은 "얼마나 썼는지 보이게 하는 것"까지다: 잡마다 `-p` 출력 JSON의 `usage`·`total_cost_usd`·`modelUsage`를 run 기록(§9)에 남기고, 이슈별 합계와 주간 합계를 `factory status`·retro·`:digest`가 표시한다. **한도 판단과 토큰 갱신은 사람이 한다 — factory가 한도를 이유로 스스로 멈추지 않는다**(CHARTER의 이슈당 토큰 예산은 선택이며 기본 off, §5.3).
 
@@ -536,7 +536,7 @@ maturity = "M2"                        # M0 | M1 | M2 (§5.2.1). 승격은 facto
 orchestration   = "workflow"           # workflow | agent (§4.2.4). 런타임에 자동 전환되지 않는다
 required_checks = ["factory/gates", "factory/review", "factory/integrity"]   # 기본값(Plan 2 실행 판결, ADR-015). branch protection과 merge 게이트 필터가 같은 목록을 쓴다
 
-[commands.proof]                       # 증명 게이트 (§5.2.4). 측정은 gates.sh(diff-coverage.js/mutation.js)가, 임계는 여기(protected)에
+[commands.proof]                       # 증명 게이트 (§5.2.4). 측정은 gates.js(diff-coverage.js/mutation.js)가, 임계는 여기(protected)에
 coverage        = "pnpm vitest run --coverage --coverage.reporter=json"   # diff coverage가 돌릴 커버리지 명령.
                                                                           #   [commands].unit이 이미 커버리지를 뱉는다면 여기에 **같은 명령을 그대로 써도 된다**
                                                                           #   (그러면 한 스테이지에서 두 번 돈다 — 정확성 우선, 중복 실행은 허용)
@@ -629,7 +629,7 @@ gate의 실체는 `harness.toml`의 명령이 아니라 **main에 누적된 테�
 | Phase 1 `/qa SETUP` | 사람 + claude (대화) | **규약**: `docs/QA.md`(레벨별 작성법, fixture·네이밍, 행위 축·프로파일, 증거 캡처법, 결정성 규칙 §5.2.5-①). 브라운필드면 현재 성숙도의 환경 파일까지 | `doctor` |
 | Phase 2 `factory:harness` 이슈 | builder (factory) | M1·M2 승격: compose, seed, fake 서버, 스모크, 도구 설치, `harness.toml` diff | 일반 리뷰 + **사람 머지** |
 | Phase 2 plan | 토론자 → synthesizer | `done_when[].verify`에 테스트 id와 **레벨** 지정. 현재 성숙도에 없는 레벨은 지정 불가. 테스트 없는 done_when은 schema 거부 | `assert-handoff` |
-| Phase 2 implement | builder | `verify` 테스트를 **먼저** 작성 → RED → 구현 → GREEN | verifier `prove-test` + `gates.sh` |
+| Phase 2 implement | builder | `verify` 테스트를 **먼저** 작성 → RED → 구현 → GREEN | verifier `prove-test` + `gates.js` |
 | Phase 2 review | qa 리뷰어 | 앱을 띄워 직접 조작, 증거를 `[evidence].qa_artifacts`에, hold-out 시나리오 | spec-conformance가 증거 유무 확인 |
 | Phase 2 retro | retro | 성숙도 승격 이슈 생성, 느린 스위트 분할 제안, 결정성 규칙의 lint 승격 제안, flaky 통계 | `retro-proposal` → 사람 (승격 이슈 생성 자체는 다크) |
 
@@ -650,7 +650,7 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 - **기존 테스트 수정 금지**(`tests_are_load_bearing`). 불가피하면 spec-conformance 리뷰어가 사유와 함께 `must_approve_explicitly`로 승인하고, 해당 PR은 tier가 load-bearing으로 승격된다. 예외: `factory:flaky` 이슈는 그 이슈가 지목한 테스트 id에 한해 수정 가능. 삭제는 §5.2.5-④의 TTL 경로로만.
 - `[test].runtime_budget_min` 초과가 3회 연속이면 retro가 `fast` 레벨 선택 규칙(변경 경로 기반 선택 실행) 또는 샤딩을 제안한다. 그 전까지는 느려도 전부 돈다.
 
-**대상 파일 — "새 테스트"와 "변경된 테스트"는 다른 로직에 쓰인다.** `prove-test`·`new-test-repeat`은 이번 PR에서 **변경된 테스트 파일 전부**(추가 A + 수정 M, rename R은 새 경로 기준. 삭제 D는 제외 — 돌릴 수도 커버리지를 잴 수도 없다)를 대상으로 한다: 기존 파일에 케이스를 추가했을 뿐이어도 base에 얹으면 실패해야 증명된다. 반면 `classify-failure.sh`의 "새 테스트 → red" 규칙(§5.2.5-③ step 1)은 **git이 `A`로 잡은 파일만**(`addedTests`)을 새 테스트로 본다 — 기존 파일을 수정해 만든 케이스는 새 테스트 취급하지 않고 기존 테스트의 flaky/introduced 분류 경로를 그대로 탄다. `new_test_repeats` 임계가 설정돼 있지 않으면(`[gates.thresholds]` 누락) `new-test-repeat` 게이트는 "돌았지만 통과"가 아니라 **`MISCONFIGURED`**다 — 반복 횟수를 모르면 "흔들리지 않음"을 주장할 근거가 없다.
+**대상 파일 — "새 테스트"와 "변경된 테스트"는 다른 로직에 쓰인다.** `prove-test`·`new-test-repeat`은 이번 PR에서 **변경된 테스트 파일 전부**(추가 A + 수정 M, rename R은 새 경로 기준. 삭제 D는 제외 — 돌릴 수도 커버리지를 잴 수도 없다)를 대상으로 한다: 기존 파일에 케이스를 추가했을 뿐이어도 base에 얹으면 실패해야 증명된다. 반면 `classify-failure.js`의 "새 테스트 → red" 규칙(§5.2.5-③ step 1)은 **git이 `A`로 잡은 파일만**(`addedTests`)을 새 테스트로 본다 — 기존 파일을 수정해 만든 케이스는 새 테스트 취급하지 않고 기존 테스트의 flaky/introduced 분류 경로를 그대로 탄다. `new_test_repeats` 임계가 설정돼 있지 않으면(`[gates.thresholds]` 누락) `new-test-repeat` 게이트는 "돌았지만 통과"가 아니라 **`MISCONFIGURED`**다 — 반복 횟수를 모르면 "흔들리지 않음"을 주장할 근거가 없다.
 
 **증명 게이트 — 커버리지와 mutation은 역할이 다르고 둘 다 쓴다.**
 
@@ -661,11 +661,11 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 | **incremental mutation** | 변경된 파일의 mutant를 테스트가 잡는가 (Stryker `--incremental`, mutmut, pitest). 단언 없는 테스트를 적발 | deep | M1 | 변경 코드 mutation score ≥ 70% |
 
 - 순서: coverage(싸다) → 통과 시에만 mutation(비싸다).
-- 속임수 차단: 임계값은 `harness.toml`(protected)에, 측정은 `gates.sh`(에이전트 밖)에서. diff에 `/* istanbul ignore */`, `# pragma: no cover`, `// Stryker disable`, `.skip`/`xit`/`@pytest.mark.skip` 추가가 있으면 verifier가 자동 reject.
+- 속임수 차단: 임계값은 `harness.toml`(protected)에, 측정은 `gates.js`(에이전트 밖)에서. diff에 `/* istanbul ignore */`, `# pragma: no cover`, `// Stryker disable`, `.skip`/`xit`/`@pytest.mark.skip` 추가가 있으면 verifier가 자동 reject.
 
 #### 5.2.5 Flaky — 예방·탐지·분류·자가 수정·격리
 
-flaky = 같은 코드에서 결과가 달라지는 테스트. 게이트가 "재시도해서 통과하면 GREEN"을 허용하는 순간 에이전트가 만든 비결정성이 통과하고, flaky가 쌓이면 RED가 잡음이 되어 게이트 전체가 무력화된다. 따라서 **`gates.sh`는 절대 재시도로 GREEN을 만들지 않는다.** 대신 다섯 단계로 처리한다.
+flaky = 같은 코드에서 결과가 달라지는 테스트. 게이트가 "재시도해서 통과하면 GREEN"을 허용하는 순간 에이전트가 만든 비결정성이 통과하고, flaky가 쌓이면 RED가 잡음이 되어 게이트 전체가 무력화된다. 따라서 **`gates.js`는 절대 재시도로 GREEN을 만들지 않는다.** 대신 다섯 단계로 처리한다.
 
 **① 예방 — 결정적 테스트를 구조로 강제** (`/qa SETUP`이 세팅, 위반은 lint·verifier가 잡음)
 - 시계 고정(fake timers), 난수 시드 고정, 테스트 프로세스의 **네트워크 차단**(fake 서버만 허용)
@@ -674,11 +674,11 @@ flaky = 같은 코드에서 결과가 달라지는 테스트. 게이트가 "재�
 - 테스트 내 `sleep`·고정 시간 대기 금지, 조건 대기만 — lint 규칙
 
 **② 탐지 — 새 테스트는 태어날 때 시끄러운 조건에서 반복**
-implement 단계에서 `gates.sh`가 **이번 PR에서 변경된 테스트 파일**(추가 + 수정, §5.2.4 "대상 파일" 참고 — 새 테스트만이 아니다)을 `new_test_repeats`회 실행하되, 조용한 반복이 아니라 **전체 스위트가 병렬로 도는 중에** 돌린다(부하 의존 flaky를 재현하기 위해). 한 번이라도 다르면 RED, builder에게 "비결정적 테스트"로 rework.
+implement 단계에서 `gates.js`가 **이번 PR에서 변경된 테스트 파일**(추가 + 수정, §5.2.4 "대상 파일" 참고 — 새 테스트만이 아니다)을 `new_test_repeats`회 실행하되, 조용한 반복이 아니라 **전체 스위트가 병렬로 도는 중에** 돌린다(부하 의존 flaky를 재현하기 위해). 한 번이라도 다르면 RED, builder에게 "비결정적 테스트"로 rework.
 
-①②가 본체다. flaky의 원인은 거의 전부 테스트가 쓰이는 순간에 심어지므로 여기서 대부분 죽는다. 새어 나오는 것은 세 부류뿐이며 각각 다른 곳에서 처리된다: **환경 문제**(docker 지연, 포트 충돌)는 `test-env.sh` 실패 → `blocked`로 분류되어 테스트 통계를 오염시키지 않는다. **부하 의존**은 ②의 시끄러운 반복이 잡는다. **잠복 경쟁 조건**(쓰일 땐 결정적이었으나 나중 PR이 공유 코드에 race를 넣음)은 ③이 원인 PR에 책임을 돌린다. ④⑤에 자주 도달하면 그 자체가 ①의 규칙이 부족하다는 retro 신호다.
+①②가 본체다. flaky의 원인은 거의 전부 테스트가 쓰이는 순간에 심어지므로 여기서 대부분 죽는다. 새어 나오는 것은 세 부류뿐이며 각각 다른 곳에서 처리된다: **환경 문제**(docker 지연, 포트 충돌)는 `test-env.js` 실패 → `blocked`로 분류되어 테스트 통계를 오염시키지 않는다. **부하 의존**은 ②의 시끄러운 반복이 잡는다. **잠복 경쟁 조건**(쓰일 땐 결정적이었으나 나중 PR이 공유 코드에 race를 넣음)은 ③이 원인 PR에 책임을 돌린다. ④⑤에 자주 도달하면 그 자체가 ①의 규칙이 부족하다는 retro 신호다.
 
-**③ 분류 — 기존 테스트가 실패했을 때, 이 PR 탓인가** (`classify-failure.sh`, 실패 시에만 실행되므로 평소 비용 0)
+**③ 분류 — 기존 테스트가 실패했을 때, 이 PR 탓인가** (`classify-failure.js`, 실패 시에만 실행되므로 평소 비용 0)
 1. 실패한 기존 테스트를 PR 코드에서 격리 재실행 3회 → 3/3 아니면 RED (이 PR이 깨뜨림)
 2. 3/3이면 base SHA(main)에서 5회 실행 → main에서 한 번도 안 실패하면 이 PR이 비결정성을 **도입**한 것 → RED
 3. main에서도 실패하면 `flaky-existing`: 이 PR의 판정에서 그 테스트를 제외하고, **`factory:queue` + `factory:flaky` 이슈를 자동 생성**(실행 로그 첨부, 제목 `flaky: <id>`로 중복 생성 방지)
@@ -705,10 +705,10 @@ retro는 flaky 발생률과 원인 분류(타이밍/순서/공유 상태/네트�
 
 #### 5.2.6 환경 — 로컬과 CI가 같은 방법으로 뜬다
 
-`.factory/bin/test-env.sh up|down`이 `[test.env]`를 읽어 실행한다. CI의 컴포짓 액션 `.factory/actions/setup`도 이 스크립트를 호출한다.
+`.factory/bin/test-env.js up|down`이 `[test.env]`를 읽어 실행한다. CI의 컴포짓 액션 `.factory/actions/setup`도 이 스크립트를 호출한다.
 
 ```
-test-env.sh up
+test-env.js up
   1. docker compose -f <compose> up -d --wait        # 또는 CI services: 가 이미 띄운 경우 skip
   2. <seed>
   3. [test.fakes].* 를 백그라운드로 기동, 포트 대기
@@ -812,10 +812,10 @@ light_on_merge: true
 - linear history, force-push 금지, 관리자도 규칙 적용(`enforce_admins`).
 
 ### 6.2 L1 상세
-- `gates.sh <level>` → `.factory/out/gates.json` + 한 줄 `FACTORY_GATES: level=full status=GREEN passed=4 failed=0 failing=none skipped=none misconfigured=none excluded=none`. required 게이트가 skip이면 `MISCONFIGURED` exit 2.
-- `prove-test.sh <issue>`: 브랜치의 새 테스트 파일을 base에 얹어 실행 → **실패해야** 통과. 통과하면 "테스트가 수정을 증명하지 않음".
-- `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
-- `assert-handoff.sh`, `transition.js`: 3.3.
+- `gates.js <level>` → `.factory/out/gates.json` + 한 줄 `FACTORY_GATES: level=full status=GREEN passed=4 failed=0 failing=none skipped=none misconfigured=none excluded=none`. required 게이트가 skip이면 `MISCONFIGURED` exit 2.
+- `prove-test.js <issue>`: 브랜치의 새 테스트 파일을 base에 얹어 실행 → **실패해야** 통과. 통과하면 "테스트가 수정을 증명하지 않음".
+- `aggregate.js`(`aggregateReview()`): N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
+- `assert-handoff.js`, `transition.js`: 3.3.
 - **merge 스테이지의 보호 경로 거부(ADR-020 KTB-5).** PR이 열려 있고 충돌이 없음을 확인한 **직후, 게이트를 돌리기 전에** PR 범위(`base...head`)의 `git diff --no-renames --name-status`에서 `[protected].factory` 매치(− `except` − `additive_only`)를 센다. 하나라도 있으면 머지하지 않고 `factory:needs-human`으로 전이한다(사유 `protected paths changed — human merge required: <files> (see PR #n)`가 이슈에, 파일을 나열한 상세 코멘트가 PR에, exit 2).
   - **왜 게이트보다 먼저인가**: `gates`는 `[commands]`를 bash로 실행한다 — 곧 **PR이 쓴 코드**를 머지 잡 안에서 돌린다. 보호 경로를 실은 PR은 애초에 자동 머지 후보가 아니므로 그 코드가 한 줄도 실행되기 전에 거른다.
   - **왜 `--no-renames`인가**: rename 줄(`R096\t<old>\t<new>`)에서 목적지만 보면, 보호 경로를 보호되지 않는 이름으로 **옮기는** diff를 놓친다(예: `factory-integrity.yml` → `ci-integrity.yml`, 잡 이름은 그대로 두고 본문만 무력화 — required 체크 자신이 사라진다). `--no-renames`면 `D <old>` + `A <new>`로 나와 출발지가 반드시 목록에 들어오고, 파서도 한 줄의 모든 경로 필드를 취한다. 같은 이유로 `block-dangerous.sh`가 보호 경로의 `git rm`/`git mv`를 막는다.
@@ -823,7 +823,7 @@ light_on_merge: true
 - **merge 스테이지의 역할 섹션 정책 거부(ADR-020 KTB-6).** 보호 경로 검사 **직후**(여전히 게이트 전에) `[protected].additive_only` 글롭에 걸리는 파일을 하나씩 본다 — 그 파일의 `git diff -U0 <base>...<head> -- <file>`과 `git show <head>:<file>`로 추가/삭제 줄과 섹션 경계를 계산해, 허용 섹션 밖의 추가·삭제·새 `## ` 헤더가 있으면 머지하지 않고 `factory:needs-human`으로 전이한다(사유 `agent role sections edited outside Examples/Perspectives — human merge required: <files> (see PR #n)`). 내용을 **`git show`로만** 읽는 것이 핵심이다: 머지 스테이지는 PR head를 체크아웃한 트리 위에서 도는데 워킹 트리를 읽으면 PR이 자기 판정의 재료를 고를 수 있다. 계산 실패는 `factory:blocked`(판정 불가). 판정 본체(`additiveOnlyViolations`)는 L0와 **같은 함수**다 — 둘이 갈라지면 체크가 알리는 것과 머지가 막는 것이 달라진다.
 - **게이트 하위 프로세스는 머지 권한을 물려받지 않는다(ADR-020 fix round 1).** `runStageGates`는 주입받은 실행기를 `scrubbedRunner`(`lib/exec.js`)로 감싸 자식 env에서 `GH_TOKEN`·`GITHUB_TOKEN`·`FACTORY_BOT_TOKEN`·`FACTORY_MERGE_TOKEN`·`CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY`를 뺀다(나머지 환경은 그대로). 게이트 명령은 PR이 쓴 코드이고 merge 잡 안에서 도는데, L2 deny는 `claude -p` 세션의 Bash에만 걸리지 벤더 스크립트가 부르는 하위 프로세스에는 걸리지 않는다 — 환경에서 빼는 것이 유일하게 확실한 방법이다.
 
-> **이름에 관한 주석.** L1 스크립트는 전부 Node로 구현되어 `.factory/bin/*.js`로 설치된다(`factory/bin/` 참조). 이 문서에 남은 `.sh` 이름(`gates.sh`, `assert-handoff.sh`, `write-handoff.sh`, `run-record.sh`, `aggregate-review.sh`, `prove-test.sh`)은 최초 설계 당시의 표기이고 실제 파일명은 같은 이름의 `.js`다. `transition.js`만은 스킬 본문이 사람에게 그대로 복사해 실행시키는 명령이라(§13.1 원칙 2) 문서 전체에서 실제 파일명으로 통일했다.
+> **이름에 관한 주석 (실측: `ls factory/bin factory/lib`, 2026-09-12 dogfood 재확인).** L1 스크립트는 전부 Node로 구현되어 설치된다. 이 문서가 최초 설계 당시 `.sh`로 적었던 이름 열둘 — `gates.sh`·`assert-handoff.sh`·`write-handoff.sh`·`run-record.sh`·`prove-test.sh`·`run-stage.sh`·`test-env.sh`·`trust-workspace.sh`·`claim.sh`·`verify-stage.sh`·`build-context.sh`·`classify-failure.sh` — 은 전부 같은 이름의 `.js` 파일이 실제로 존재하므로(대부분 `factory/bin/`, `run-record.js`만 `factory/lib/`) 본문 전체에서 그 실제 파일명으로 통일했다. `transition.js`만은 스킬 본문이 사람에게 그대로 복사해 실행시키는 명령이라(§13.1 원칙 2) 애초부터 실제 파일명으로 적었다. 이름 둘은 예외다 — 같은 이름의 `.js` 파일이 없다: **`aggregate-review.sh`**는 독립 스크립트가 아니라 `factory/lib/aggregate.js`가 내보내는 순수 함수 `aggregateReview()`이고 `run-stage.js`가 스테이지 6(§4.2.1)에서 라이브러리 호출로 부른다 — 이 문서에서는 `aggregate.js`(`aggregateReview()`)로 적는다. **`charter-ready.sh`**(§4.2.1 step 0)도 마찬가지로 `run-stage.js` 안의 함수 `charterReady()`이고 별도 파일이 아니다 — 이 문서에서는 `charterReady()`로 적는다.
 
 ### 6.3 L2 — `.claude/settings.json` + `.factory/ci-settings.json` (factory init이 둘 다 생성)
 
@@ -902,7 +902,7 @@ light_on_merge: true
 }
 ```
 
-`record-agents.sh`(`SubagentStart`/`SubagentStop`, **로깅형**)는 `agent_id`/`agent_type`을 훅 로그에 남긴다 — `verify-stage.sh`가 로스터·인원·라운드를 검증하는 근거 파일이다(ADR-001). ADR-009의 로깅 훅 규칙(항상 exit 0)을 따른다(Plan 2 실행 판결, ADR-015).
+`record-agents.sh`(`SubagentStart`/`SubagentStop`, **로깅형**)는 `agent_id`/`agent_type`을 훅 로그에 남긴다 — `verify-stage.js`가 로스터·인원·라운드를 검증하는 근거 파일이다(ADR-001). ADR-009의 로깅 훅 규칙(항상 exit 0)을 따른다(Plan 2 실행 판결, ADR-015).
 
 훅은 stdin JSON(`.tool_input.command`)을 읽는다. 기존 `check-merge-gate.sh`의 `$TOOL_INPUT` 버그는 이 교체로 해소된다.
 
@@ -912,7 +912,7 @@ light_on_merge: true
 
 **훅에 들어오는 `tool_input` 값은 신뢰하지 않는다 — 셸 문자열에 끼워 넣을 때는 반드시 이스케이프한다.** `lint-touched.sh`는 `tool_input.file_path`(에이전트가 자유롭게 채우는 값)를 `printf '%q'`로 이스케이프한 뒤에만 명령 템플릿의 `{file}` 자리에 넣는다. 이스케이프 없이 문자열 치환만 하면 `x.js; touch <tmp>/PWNED #` 같은 `file_path`가 그대로 셸에서 두 번째 명령으로 실행된다 — Plan 1b 실행 판결(review가 이 인젝션을 실제로 재현: 수정 전 코드에서 `PWNED` 파일이 생성됨을 확인, 수정 후 재검증 통과)로 확정됐고 ADR-013(아래)에 남는다.
 
-**이 훅들은 Workflow `agent()` 서브에이전트 안에서도 발화한다**(ADR-001 실측: 워커 2명 실행에서 `PreToolUse` 8줄, `SubagentStart` 2줄, `SubagentStop` 2줄). 따라서 L2를 에이전트 frontmatter로 분산시킬 필요가 없고 `settings.json` 한 곳으로 충분하다. stdin JSON에는 `agent_id`·`agent_type`이 실려 있어(메인 세션의 `Stop`에는 없다) 훅 로그만으로 메인 세션 호출과 서브에이전트 호출을 구분할 수 있다. **`verify-stage.sh`는 이 훅 기록을 인원·역할 검증의 입력으로 쓴다** — `SubagentStart`/`SubagentStop`의 `agent_type`을 세서 로스터와 대조한다. 다만 스파이크의 로깅 훅이 stdin JSON의 **키 목록만** 남겼으므로 확인된 것은 두 필드의 **존재**이고, `agent_type`의 **값이 등록된 역할 이름(`.claude/agents/<role>`)과 같은 문자열인지는 미확인**이다 — Plan 1이 `verify-stage.sh`를 쓰기 전에 가장 먼저 확인할 항목이며, 다르면 매핑 테이블을 끼우거나 다른 필드로 대조한다(인원 수를 세는 용도는 어느 쪽이든 성립). `-p` 출력 JSON의 `subagent_stats`는 쓰지 않는다: Workflow 서브에이전트를 세지 않는다(ADR-002 — 워커 2명이 실제로 떴는데 `spawned: 0`).
+**이 훅들은 Workflow `agent()` 서브에이전트 안에서도 발화한다**(ADR-001 실측: 워커 2명 실행에서 `PreToolUse` 8줄, `SubagentStart` 2줄, `SubagentStop` 2줄). 따라서 L2를 에이전트 frontmatter로 분산시킬 필요가 없고 `settings.json` 한 곳으로 충분하다. stdin JSON에는 `agent_id`·`agent_type`이 실려 있어(메인 세션의 `Stop`에는 없다) 훅 로그만으로 메인 세션 호출과 서브에이전트 호출을 구분할 수 있다. **`verify-stage.js`는 이 훅 기록을 인원·역할 검증의 입력으로 쓴다** — `SubagentStart`/`SubagentStop`의 `agent_type`을 세서 로스터와 대조한다. 다만 스파이크의 로깅 훅이 stdin JSON의 **키 목록만** 남겼으므로 확인된 것은 두 필드의 **존재**이고, `agent_type`의 **값이 등록된 역할 이름(`.claude/agents/<role>`)과 같은 문자열인지는 미확인**이다 — Plan 1이 `verify-stage.js`를 쓰기 전에 가장 먼저 확인할 항목이며, 다르면 매핑 테이블을 끼우거나 다른 필드로 대조한다(인원 수를 세는 용도는 어느 쪽이든 성립). `-p` 출력 JSON의 `subagent_stats`는 쓰지 않는다: Workflow 서브에이전트를 세지 않는다(ADR-002 — 워커 2명이 실제로 떴는데 `spawned: 0`).
 
 로깅 훅 자체의 규칙: **어떤 경우에도 exit 0으로 끝난다**(`|| true` + 마지막 줄 `exit 0`). `PreToolUse`에서 exit 2만 도구 호출을 차단하지만, `jq`나 경로 문제로 훅이 죽으면 그 순간부터 기록이 조용히 사라져 사후 검증의 근거가 없어진다 — 감시자는 감시 대상을 막지도, 스스로 침묵하지도 않아야 한다(ADR-009).
 
@@ -1186,7 +1186,7 @@ R3 · 종합     synthesizer 1명. R1+R2 전부를 받고 factory.plan.v1 생성
 export const meta = { name: 'factory-plan', description: 'Issue plan via 3-round role debate',
   phases: [{ title: 'Positions' }, { title: 'Cross-examination' }, { title: 'Synthesis' }, { title: 'Sign-off' }] }
 
-const { issue, roles, context } = args          // run-stage.sh가 roles.toml·CHARTER·이슈·스펙을 읽어 주입
+const { issue, roles, context } = args          // run-stage.js가 roles.toml·CHARTER·이슈·스펙을 읽어 주입
 const POS = { type:'object', required:['position','risks','proposed_done_when','files_expected'], properties:{ /* … */ } }
 const XEX = { type:'object', required:['agreements','objections','concessions'], properties:{ /* … */ } }
 
@@ -1230,10 +1230,10 @@ return { ...plan, issue, tier, roles: rosterNames, rounds, orchestration: 'workf
 R1 · 독립 판정   로스터 병렬, cold read. 각자 factory.verdict.v1
 R2 · 교차 검토   R1에 reject가 하나라도 있으면 → 전체 R2: 타 리뷰어의 R1을 받고 {verdict(maintain|revise), must_fix, on_others[{id, agree|disagree, reason}]}
                R1이 만장일치 approve면 → 경량 R2: 타 리뷰어의 verified[] 목록만 받고 {missed: [] | [{what, why}]}. missed가 있으면 그 항목만 전체 R2로 승격
-집계            aggregate-review.sh: R2 verdict 전원 approve → approved. verdict 수 < 로스터 크기 → incomplete(빠진 역할 명시, needs-human). 그 외 reject 있으면 rework + must_fix 합집합(중복 제거)
+집계            aggregate.js(aggregateReview()): R2 verdict 전원 approve → approved. verdict 수 < 로스터 크기 → incomplete(빠진 역할 명시, needs-human). 그 외 reject 있으면 rework + must_fix 합집합(중복 제거)
 ```
 
-workflow가 돌려주는 객체(handoff data)에는 `decision` 필드가 없다 — `decision`은 workflow 밖, L1의 `aggregate-review.sh`가 `verdicts[]`로부터 계산해 handoff에 채운다(§4.2.1 step 6). `verdicts.length < roster.length`는 `incomplete`이며 `rework`가 아니라 `needs-human`으로 라우팅되고, 빠진 역할이 사유에 이름으로 남는다.
+workflow가 돌려주는 객체(handoff data)에는 `decision` 필드가 없다 — `decision`은 workflow 밖, L1의 `aggregate.js`(`aggregateReview()`)가 `verdicts[]`로부터 계산해 handoff에 채운다(§4.2.1 step 6). `verdicts.length < roster.length`는 `incomplete`이며 `rework`가 아니라 `needs-human`으로 라우팅되고, 빠진 역할이 사유에 이름으로 남는다.
 
 **must_fix id 접두 규약, `unruled`, verdict 유도 규칙, qa의 plan 접근** (Plan 3 실행 판결, ADR-016):
 
@@ -1295,7 +1295,7 @@ retro는 머지 수로만 트리거된다 — §8.4.
 
 ### 8.4 Retro 트리거 — cron 없음, 머지 수로만
 
-retro는 시간이 아니라 **머지 이벤트**로만 깨어난다. `factory-retro.yml`은 `pull_request: closed (merged)`에만 반응하고, `run-stage.sh retro`가 첫 줄에서 CHARTER `## Retro`와 마지막 retro 이후 머지 수(`docs/factory/runs/_retro.md`에 기록)를 읽어 **N 미만이면 경량 추출만 하고 종료**한다.
+retro는 시간이 아니라 **머지 이벤트**로만 깨어난다. `factory-retro.yml`은 `pull_request: closed (merged)`에만 반응하고, `run-stage.js retro`가 첫 줄에서 CHARTER `## Retro`와 마지막 retro 이후 머지 수(`docs/factory/runs/_retro.md`에 기록)를 읽어 **N 미만이면 경량 추출만 하고 종료**한다.
 
 ```markdown
 ## Retro
@@ -1454,12 +1454,12 @@ npx know-thy-build factory bootstrap
 
 8개 항목 전부 실제 GitHub Actions 러너에서 실행했다. 결과·수치·근거는 `docs/factory/DECISIONS.md`(ADR-001~009)에 있다.
 
-1. **settings.json 훅이 Workflow `agent()` 서브에이전트에 적용되는가.** 안 되면: 에이전트 frontmatter 훅 + `run-stage.sh`의 사후 검사로 대체(설계 불변). → **ADR-001 (PASS)** — 워커 2명에서 `PreToolUse` 8줄·`SubagentStart`/`Stop` 각 2줄 발화, `agent_id`/`agent_type`으로 메인/서브 구분 가능 → L2는 settings.json 한 곳
+1. **settings.json 훅이 Workflow `agent()` 서브에이전트에 적용되는가.** 안 되면: 에이전트 frontmatter 훅 + `run-stage.js`의 사후 검사로 대체(설계 불변). → **ADR-001 (PASS)** — 워커 2명에서 `PreToolUse` 8줄·`SubagentStart`/`Stop` 각 2줄 발화, `agent_id`/`agent_type`으로 메인/서브 구분 가능 → L2는 settings.json 한 곳
 2. **`claude -p "/factory-review 125"`가 Actions에서 저장된 workflow를 실행하는가** — `Workflow(factory-review)` allow rule, `--permission-mode dontAsk`, 10분 idle ceiling(`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`). → **ADR-002 (PASS)** — 1턴·12s·$0.089로 서브에이전트 2명 병렬 + CLAUDE.md 주입 확인. 단 allow rule은 untrusted라 무시됐고 `dontAsk`가 실질 게이트, `subagent_stats`는 Workflow 에이전트를 세지 않음
 3. **StructuredOutput schema의 신뢰도** — 5회 재시도 후 null이 나오는 빈도. 높으면 리뷰어 재spawn 1회 규칙으로 흡수. → **ADR-003 (PASS)** — null 0/20(opus·sonnet 각 0/10)·정답 20/20·$1.55·85s → 재spawn 규칙은 보험으로만 유지
 4. 러너에서 playwright(qa 리뷰어) 실행 가능 여부, 그리고 표준 러너에서 compose + 앱 + playwright 동시 실행 시 `full` 레벨 소요 시간. → **ADR-004 (PASS)** — env_up 36s·full 2s·e2e 2s·가용 메모리 6.5GB 유지·playwright MCP headless ok → 대형 러너 불필요, 데모 앱 기준이라 `runtime_budget_min` 12는 dogfood까지 유지
 5. 구독 OAuth 토큰으로 CI 실행 시 개인 usage limit을 소모하는지 실측 (문서 미명시). → **ADR-005 (PASS)** — 7일 창 92%→94%(사람 세션 혼재, +2%p는 상한) = 소모함 → 구독이 기본 운영 모드이고 factory는 제한이 아니라 보고한다
-6. 커맨드 frontmatter `allowed-tools: Workflow(name)`가 **메인 세션만** 제한하고 workflow 안 서브에이전트(각자 `tools:`)에는 영향이 없는지. 되면 건너뛰기가 감지가 아니라 불가능이 된다(§4.2.2). 안 되면 `verify-stage.sh`의 사후 검증으로 충분. → **ADR-006 (FAIL)** — 메인만 잠그는 수단 없음 — frontmatter 무력·`--allowedTools` 무력·`--disallowedTools`는 서브에이전트까지 차단·`permission_denials` 항상 빈 배열 → 건너뛰기는 **감지**, `verify-stage.sh`가 유일한 방어선
+6. 커맨드 frontmatter `allowed-tools: Workflow(name)`가 **메인 세션만** 제한하고 workflow 안 서브에이전트(각자 `tools:`)에는 영향이 없는지. 되면 건너뛰기가 감지가 아니라 불가능이 된다(§4.2.2). 안 되면 `verify-stage.js`의 사후 검증으로 충분. → **ADR-006 (FAIL)** — 메인만 잠그는 수단 없음 — frontmatter 무력·`--allowedTools` 무력·`--disallowedTools`는 서브에이전트까지 차단·`permission_denials` 항상 빈 배열 → 건너뛰기는 **감지**, `verify-stage.js`가 유일한 방어선
 7. `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`의 "idle" 의미(무활동 시간 vs 총 대기)와 0 설정 시 동작. 걸리면 메인 세션이 workflow 결과 없이 종료 → L1이 `blocked`로 잡는지 확인. → **ADR-007 (MOOT)** — Bash 툴이 foreground `sleep`을 하드 차단해 두 레그(default/0) 모두 측정 불가·차이 없음. 단일 Bash 호출 10분 상한 + 실작업의 연속 툴 이벤트 때문에 구성상 초과 불가 → `=0`은 방어적으로 유지하고 실질 상한은 `timeout-minutes`
 8. (실행 중 추가) **러너의 fresh checkout이 untrusted 워크스페이스일 때 §6.3의 L2가 성립하는가.** → **ADR-008 (PASS)** — untrusted면 `permissions.allow` 전부 무시·deny 세션이 비대상 Bash까지 막는 경우 발생. trusted에서만 "allow 정상 + deny 선택 적용"(force-push 3/3 차단) → **trust 부트스트랩이 CI 필수**, §4.2.1 step 0.5
 
@@ -1467,9 +1467,9 @@ npx know-thy-build factory bootstrap
 
 ### 12.2 단위 검증 (스크립트는 전부 테스트를 가진다)
 - `transition.js`: 상태 그래프 밖 전이 거부, handoff 없는 전이 거부, 손으로 옮긴 라벨 되돌림 — bats 테스트
-- `gates.sh`: required skip → exit 2, 판정 라인 포맷
-- `prove-test.sh`: 통과하는 테스트(증명 없음) 감지
-- `aggregate-review.sh`: N/N, N-1/N, schema 불일치 각각
+- `gates.js`: required skip → exit 2, 판정 라인 포맷
+- `prove-test.js`: 통과하는 테스트(증명 없음) 감지
+- `aggregate.js`(`aggregateReview()`): N/N, N-1/N, schema 불일치 각각
 - 훅: stdin JSON으로 실행해 exit 코드 확인 (기존 버그의 회귀 테스트)
 
 ### 12.3 통합 검증 (dogfood)
@@ -1482,6 +1482,19 @@ npx know-thy-build factory bootstrap
 - 스테이지 건너뛰기 시도(손 라벨) 100% 차단
 - 리뷰어 R1 판정이 R2에서 뒤집힌 비율 기록 — 교환 라운드의 가치 측정
 - 머지 후 7일 내 revert 0건
+
+#### 실측 주석 (2026-09-12 dogfood)
+
+Plan 6이 위 네 기준을 실제 GitHub Actions + 구독 토큰으로 처음 측정했다 — 세부 실행 기록은 `docs/factory/dogfood/2026-09-12-demo.md`(데모 그린필드)·`docs/factory/dogfood/2026-09-12-ktb.md`(KTB 자기 자신, 로컬 준비까지)에 있고, 그 실측이 바꾼 설계 판결은 `docs/factory/DECISIONS.md`의 **ADR-020**에 있다(표본 크기 캐비엇 포함). 이 시점의 숫자:
+
+| 기준 | 실측 (2026-09-12) |
+|---|---|
+| 무개입 완주율 ≥80% (표본 20건) | `{{TBD}}` — 표본 자체가 20건에 못 미쳐 1.0 기준으로는 측정 불가(ADR-020 "표본 크기 캐비엇과 대체 판정" 참고) |
+| 손 라벨 100% 차단 | `{{TBD}}` — 1/1 확정(이슈 #14 프로브, KTB-18) |
+| R1→R2 뒤집힘 비율 | `{{TBD}}` — 표본 0(라운드 1~3 전부 R1 만장일치 approve) |
+| 7일 내 revert 0건 | `{{TBD}}` — 머지 1건(#8 → PR #10), 관찰 창 진행 중, 현재까지 0 |
+
+최종 숫자는 Plan 6 Task 7 **part 2**(own-calendar·KTB 원격 다크 실행, 데모 잔여 이슈가 정리된 뒤)가 ADR-020의 "표본과 지표" 절 `{{TBD}}`와 함께 채운다.
 
 ---
 

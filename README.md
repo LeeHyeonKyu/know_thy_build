@@ -86,10 +86,13 @@ Verification is the factory's job, not a manual step: its review roster (includi
 
 Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipeline in CI (triage → plan → implement → review → merge):
 
+**Status**: 1.0.0-alpha — dogfooded on the demo repo (first dark completion 2026-09-12: issue #8 → PR #10); numbers in ADR-020.
+
 - `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files). On the Claude side that's 4 workflow scripts (`.claude/workflows/factory-{triage,plan,implement,review}.js`), 14 role agents (`.claude/agents/*.md`), and 4 dispatcher commands (`.claude/commands/factory-*.md`)
 - `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
 - `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`)
 - `factory run <stage> <issue>` — run a stage locally with the exact scripts CI uses
+- `factory run <stage> <issue> --remote` — dispatch the same stage as a GitHub Actions workflow run instead of running it locally (also restarts a stalled/blocked stage; `merge` accepted)
 - `factory run retro [--force]` — run the merge-triggered retro job (light deterministic harvest every merge; full analysis + dark lessons/examples PR, human-approved proposal PR, or `--force` to skip the merge-count threshold)
 - `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
 
