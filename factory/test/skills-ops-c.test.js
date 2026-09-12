@@ -78,6 +78,7 @@ const REQUIRED = {
     "lintAgentMd",
     "roles.toml",
     "spawn_on",
+    "plan_roles",
     "claude -p --agent",
     "factory/role-",
     "factory:retro-proposal",
@@ -221,6 +222,45 @@ test("templates/know-thy-build/role.md: shows a reviewer roles.toml block ([revi
   const text = readTemplate("role");
   expect(text).toContain("[review.<name>]");
   expect(text).toContain("[plan.<name>]");
+});
+
+// ── Fix round 1 (Critical): plan-stage spawning reads charter.plan_roles[tier] ||
+// charter.plan_roles.default (factory/lib/config.js's rosterFor), not `roster:` — a plan debater
+// registered only in roles.toml + CHARTER `roster:` lints clean but is never spawned. Step 4 must
+// branch by role kind and touch BOTH fields (roster: for reviewers, plan_roles for plan debaters),
+// and say explicitly that a role missing from the matching field is never spawned. ───────────────
+
+function step4Section(text) {
+  const idx = text.indexOf("### Step 4");
+  expect(idx).toBeGreaterThanOrEqual(0);
+  const nextIdx = text.indexOf("\n### Step 5", idx + 1);
+  return text.slice(idx, nextIdx === -1 ? undefined : nextIdx);
+}
+
+test("templates/know-thy-build/role.md: Step 4 diffs both CHARTER roster: (reviewers) and plan_roles (plan debaters)", () => {
+  const section = step4Section(readTemplate("role"));
+  expect(section).toContain("roster:");
+  expect(section).toContain("plan_roles");
+});
+
+test("templates/know-thy-build/role.md: Step 4 states a role missing from the matching CHARTER field lints clean but is never spawned", () => {
+  const section = step4Section(readTemplate("role"));
+  expect(section).toMatch(/lint(?:은|이|Agent).{0,20}(통과|clean)/);
+  expect(section).toMatch(/소집되지 않는다|spawn되지 않는다|절대 소집/);
+});
+
+test("templates/know-thy-build/role.md: Step 4 references rosterFor/config.js as the source of the two spawn paths", () => {
+  const section = step4Section(readTemplate("role"));
+  expect(section).toMatch(/rosterFor|config\.js/);
+});
+
+// ── Fix round 1 (Minor): the write-forbidden role list (agent-md.js's needsDenyAllWritesHook)
+// includes factory-retro alongside factory-triage/factory-verifier/factory-loader — role.md's
+// Step 2 must name it too. ─────────────────────────────────────────────────────────────────────
+
+test("templates/know-thy-build/role.md: the write-forbidden role list includes factory-retro", () => {
+  const text = readTemplate("role");
+  expect(text).toContain("factory-retro");
 });
 
 test("templates/know-thy-build/role.md: the trial run tells the user the token cost BEFORE running and asks for confirmation", () => {

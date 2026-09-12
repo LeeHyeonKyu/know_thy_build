@@ -62,7 +62,7 @@ Must not도 하나 더: **이번 세션에서 만들지 않은 역할**의 `role
 
 ### Step 2: 파일 생성/수정 + 구조 검증
 
-frontmatter는 `name`(파일 basename과 정확히 일치), `description`, `tools`, `model`(opus|sonnet|haiku), 그리고 쓰기 금지 역할(이름이 `reviewer-`/`plan-`로 시작하거나 `factory-triage`/`factory-verifier`/`factory-loader`)이면 `hooks.PreToolUse`를 `deny-all-writes.sh`에 배선한다. 리뷰어 예시(`templates/factory/claude/agents/reviewer-security.md`의 frontmatter를 그대로 가져온 모양):
+frontmatter는 `name`(파일 basename과 정확히 일치), `description`, `tools`, `model`(opus|sonnet|haiku), 그리고 쓰기 금지 역할(이름이 `reviewer-`/`plan-`로 시작하거나 `factory-triage`/`factory-verifier`/`factory-loader`/`factory-retro`)이면 `hooks.PreToolUse`를 `deny-all-writes.sh`에 배선한다. 리뷰어 예시(`templates/factory/claude/agents/reviewer-security.md`의 frontmatter를 그대로 가져온 모양):
 
 ```yaml
 ---
@@ -126,9 +126,11 @@ stance  = "<이 역할이 토론에서 대변하는 입장, 한 문장>"
 
 `model`은 `docs/research/multi-agent-model-guidance-for-repo.md`의 balanced 프로파일을 기본으로 한다(리뷰어·plan 토론자는 보통 `opus`). `spawn_on`은 리뷰어에만 있다(`tier:docs`/`tier:standard`/`tier:load-bearing`, `path:<glob>`) — 이 역할이 어느 tier·경로에서 소집되는지 결정한다. 신설이면 CHARTER 로스터에 아직 없으므로 아무 tier에도 소집되지 않는다는 것을 사람에게 말하고 Step 4로 넘어간다.
 
-### Step 4: CHARTER 로스터 diff 제안 — 조용히 적용하지 않는다
+### Step 4: CHARTER 로스터/`plan_roles` diff 제안 — 조용히 적용하지 않는다
 
-`docs/factory/CHARTER.md` frontmatter `roster:`(`docs: [...]`, `standard: [...]`, `load-bearing: [...]`)에 새 이름을 추가하는 diff를 만들되, **적용하기 전에 diff를 그대로 보여준다**:
+여기서 **역할 종류에 따라 편집할 필드가 다르다** — 리뷰어와 plan 토론자는 서로 다른 소집 경로를 탄다(`factory/lib/config.js`의 `rosterFor`): review 스테이지는 `charter.roster[tier]`를, plan 스테이지는 `charter.plan_roles[tier] || charter.plan_roles.default`를 읽는다. **`roles.toml`에 블록이 있고 `lintAgentMd`/`doctor`가 전부 통과해도, CHARTER의 해당 필드에 이름이 없으면 그 역할은 절대 소집되지 않는다** — lint는 파일 구조만 보고, 소집 여부는 CHARTER가 결정한다. 둘 다 통과했다고 해서 실제로 도는 것은 아니다.
+
+**리뷰어(`[review.<name>]`)** → `docs/factory/CHARTER.md` frontmatter `roster:`(`docs: [...]`, `standard: [...]`, `load-bearing: [...]`)에 추가하는 diff:
 
 ```diff
  roster:
@@ -138,7 +140,16 @@ stance  = "<이 역할이 토론에서 대변하는 입장, 한 문장>"
    load-bearing: [correctness, security, architecture, spec-conformance, qa]
 ```
 
-사람이 승인하면 `Edit`으로 반영한다. 기존 역할의 로스터 자리를 빼거나 옮기는 변경이면 왜 그런지 한 문장을 diff와 함께 남긴다.
+**plan 토론자(`[plan.<name>]`)** → 같은 frontmatter의 `plan_roles:`에 추가하는 diff(`docs: [...]`, `default: [...]` — tier별 목록이 없으면 `default`가 쓰인다):
+
+```diff
+ plan_roles:
+   docs: [architect, skeptic]
+-  default: [product-advocate, architect, skeptic, operator]
++  default: [product-advocate, architect, skeptic, operator, <name>]
+```
+
+이 역할이 `docs` tier에서도 토론해야 하면 `docs: [...]`에도 추가한다 — 그렇지 않으면 `docs` 이슈의 plan에서는 계속 소집되지 않는다. **적용하기 전에 diff를 그대로 보여준다.** 사람이 승인하면 `Edit`으로 반영한다. 기존 역할의 로스터/`plan_roles` 자리를 빼거나 옮기는 변경이면 왜 그런지 한 문장을 diff와 함께 남긴다.
 
 ### Step 5: 시험 실행 (P5-R5) — 진행 전 토큰 비용을 반드시 고지
 
