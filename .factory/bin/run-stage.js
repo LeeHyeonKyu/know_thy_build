@@ -16,6 +16,8 @@ import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
+import { HARNESS_LABEL } from "../lib/label-catalog.js";
+export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -44,7 +46,6 @@ export const STAGES = ["triage", "plan", "implement", "review", "merge"];
  * 변형은 implement 스테이지에만 걸린다: triage·plan·review는 쓰기 금지 스테이지고, merge는 스크립트
  * 전용이라 `claude -p`를 아예 부르지 않는다.
  */
-export const HARNESS_LABEL = "factory:harness";
 export const CI_SETTINGS = ".factory/ci-settings.json";
 export const CI_SETTINGS_HARNESS = ".factory/ci-settings-harness.json";
 export const ciSettingsFile = (harnessIssue = false) => (harnessIssue ? CI_SETTINGS_HARNESS : CI_SETTINGS);
@@ -318,9 +319,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
         return 2;
       }
     }
+    // KTB-21: `[factory.test.env].compose`가 있으면 게이트가 명령을 돌리기 전에 env를 한 번 더
+    // re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이 없으면(=이 하네스는 compose를
+    // 안 쓴다) 아무 줄도 붙지 않는다.
+    const testEnvNote = gates?.test_env_reup?.ran
+      ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
+      : [];
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates)] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });

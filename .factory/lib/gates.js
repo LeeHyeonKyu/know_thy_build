@@ -122,6 +122,21 @@ export function tierFloor({ changed, harness }) {
 const defaultReadFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
 
 /**
+ * KTB-21 — 데모 #18: qa 리뷰어가 증거 수집 중 `docker compose down`으로 test env를 내렸다(훅이 이제
+ * 막는다 — `hooks/deny-all-writes.sh`). 그런데 리뷰 스테이지의 게이트는 그로부터 28분 뒤 도는데,
+ * 훅은 **그 세션 안의** 명령만 본다 — 다른 경로로(사람이, 이전 잡의 잔해가, 재시작 사이 간극에) env가
+ * 내려가 있어도 훅은 그것을 모른다. 그래서 `[commands]`를 돌리기 **직전**, 여기서 한 번 더 방어한다:
+ * `.factory/bin/test-env.js up`은 멱등이다(docker compose의 `up -d --wait`는 이미 떠 있으면 그대로
+ * 확인만 한다) — 매 게이트 실행 전에 불러도 대가가 없다. `harness.test.env.compose`가 없으면(=이
+ * 하네스가 compose를 쓰지 않으면) 아무 일도 하지 않는다.
+ */
+export async function reUpTestEnv({ run, cwd, harness }) {
+  if (!harness.test?.env?.compose) return { ran: false, ok: true };
+  const r = await run("node", [".factory/bin/test-env.js", "up"], { cwd });
+  return { ran: true, ok: r.code === 0, detail: r.code === 0 ? "" : (r.stderr || r.stdout || "").trim().slice(0, 2000) };
+}
+
+/**
  * 한 스테이지의 게이트 전체(명령 게이트 + 실패 분류 + prove-test/반복 + 증명 게이트)를 한 번에 돌려
  * `factory.gates.v1` 결과 하나로 합산한다. run-stage의 `d.gates`와 `bin/gates.js`가 공유하는 유일한 본체.
  *
@@ -137,6 +152,22 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
   // 그대로 넘겨받는다(각자 감싸면 새 호출자가 생길 때마다 빠뜨린다). git 호출도 함께 스크럽되지만
   // git은 이 토큰들을 쓰지 않는다(체크아웃 자격증명은 `.git/config`에 산다).
   const run = scrubbedRunner(injectedRun);
+
+  // KTB-21: [commands]를 돌리기 전에 re-up을 시도한다 — 실패하면 이 뒤로는 무엇을 돌려도 "죽은 env에
+  // 대고 돈 결과"이므로 아예 돌리지 않는다. GREEN도 RED도 아닌 판정 불가이니 BLOCKED다(merge-stage의
+  // `undecidable()`, 워크트리 판정 불가(KTB-14 r1)와 같은 등급 — 사람이 아니라 재시도가 우선이다).
+  const testEnvReup = await reUpTestEnv({ run, cwd, harness });
+  if (!testEnvReup.ok) {
+    return {
+      schema: "factory.gates.v1", level: levelArg ?? null, requested_level: levelArg ?? null, downgraded_from: null,
+      status: "BLOCKED", blocked_reason: `test-env re-up failed: ${testEnvReup.detail}`, test_env_reup: testEnvReup,
+      gates: {}, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests: null,
+      ran_at: now ?? new Date().toISOString(),
+      tier_declared: tier ?? null, tier_effective: null, tier_source: null, base: base ?? null,
+      head_sha: (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim() || null,
+    };
+  }
+
   let changed = null;
   const changedOnce = async () => (changed ||= await changedFiles({ run, cwd, base, harness }));
 
@@ -148,6 +179,7 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
   result.tier_declared = tier ?? null;
   result.tier_effective = effectiveTier;
   result.tier_source = effectiveTier === declaredTier ? "declared" : "promoted-by-diff";
+  result.test_env_reup = testEnvReup;
   // 이 판정이 **어떤 커밋을, 무엇과 비교해** 내린 것인지 파일 안에 남긴다 — 나중에 다른 head의
   // 판정이 이 자리에 놓이면 requirements가 잡아낸다(§3.3).
   result.head_sha = (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim() || null;

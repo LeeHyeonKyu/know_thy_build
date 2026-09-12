@@ -45,9 +45,10 @@ import {
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
 import { stageMaxTurns } from "./run-stage.js";
+import { HARNESS_LABEL } from "../lib/label-catalog.js";
+export { HARNESS_LABEL };   // 재수출 — run-stage.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 
 const QUEUE_LABEL = "factory:queue";
-const HARNESS_LABEL = "factory:harness";
 const FLAKY_LABEL = "factory:flaky";
 const PROPOSAL_LABEL = "factory:retro-proposal";
 const MIN_EVIDENCE = 2;                                               // lesson·예시·관점의 최소 근거 run(§8.4)
