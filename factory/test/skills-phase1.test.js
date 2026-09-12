@@ -107,3 +107,32 @@ for (const name of NAMES) {
     expect(mustNotIdx).toBeGreaterThan(producesIdx);
   });
 }
+
+// ── `#### <n><letter>.` sub-headings must number-match their enclosing `### Step <n>` ───────
+// Fix round 1 regression test: inserting a new Step (qa.md's Step 2, Determinism Rules) left
+// the old Step 2's `#### 2a./2b./2c.` sub-headings un-renumbered when the enclosing heading
+// became `### Step 3`. This walks every `### Step <n>` / `#### <m><letter>.` heading in
+// document order and asserts m === n for whichever Step most recently opened.
+
+function stepSubheadingMismatches(text) {
+  const mismatches = [];
+  let currentStep = null;
+  for (const line of text.split("\n")) {
+    const step = /^###\s+Step\s+(\d+)\b/.exec(line);
+    if (step) { currentStep = Number(step[1]); continue; }
+    const sub = /^####\s+(\d+)[a-z]\.\s/.exec(line);
+    if (sub) {
+      const subStep = Number(sub[1]);
+      if (currentStep === null || subStep !== currentStep) {
+        mismatches.push({ line, subStep, currentStep });
+      }
+    }
+  }
+  return mismatches;
+}
+
+for (const name of NAMES) {
+  test(`templates/know-thy-build/${name}.md: every #### <n><letter>. sub-heading matches its enclosing ### Step <n>`, () => {
+    expect(stepSubheadingMismatches(readTemplate(name))).toEqual([]);
+  });
+}

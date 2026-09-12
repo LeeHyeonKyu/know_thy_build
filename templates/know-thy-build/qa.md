@@ -201,11 +201,11 @@ flaky = a test whose result changes on the same code. The factory's gate never r
 | **Order randomization** | Is the test runner's random-order mode turned **on** (not off — order dependence must surface at birth, not get hidden)? What's the flag? |
 | **No `sleep`** | What lint rule (or grep-based check) rejects a fixed-time wait (`sleep`, `setTimeout` used as a wait) in test files, and requires a condition-based wait instead? |
 
-Write the answers into `docs/QA.md`'s Determinism Rules section (added to the template in Step 5) — this is what `factory-builder`/`factory-verifier` read to write and gate deterministic tests, and what the lint rule above enforces automatically.
+Write the answers into `docs/QA.md`'s Determinism Rules section (added to the template in Step 6) — this is what `factory-builder`/`factory-verifier` read to write and gate deterministic tests, and what the lint rule above enforces automatically.
 
 **Fill `.factory/harness.toml`'s test sections with this project's real values** (the file must already exist — run `/know-thy-build:project` first if it doesn't):
 
-- `[test]` — `naming` (e.g. `test_{issue}_{slug}`), `smoke` (paths to the smoke tests from Step 2b below), `test_glob`/`source_glob`, `runtime_budget_min`.
+- `[test]` — `naming` (e.g. `test_{issue}_{slug}`), `smoke` (paths to the smoke tests written below in this step), `test_glob`/`source_glob`, `runtime_budget_min`.
 - `[test.env]` — if this project needs a compose file, seed script, or an app-ready health check at the current maturity, fill `compose`/`env_file`/`seed`/`app_start`/`app_ready`. Leave commented out at M0 if there's nothing to start yet.
 - `[test.fakes]` — the fake servers/stubs this project's network-blocking rule above depends on (e.g. a fake payment gateway, a stub webhook receiver). Empty is valid at M0.
 
@@ -217,7 +217,7 @@ Write the answers into `docs/QA.md`'s Determinism Rules section (added to the te
 
 **This is the most critical step in SETUP.** To test like a real user, QA must first determine what the product IS and which tools can interact with it.
 
-#### 2a. Product type detection
+#### 3a. Product type detection
 
 Read `docs/PROJECT.md` (Output/Form section) and `docs/TECHNICAL.md` (Stack section). Scan the codebase:
 
@@ -257,7 +257,7 @@ Primary: {{Web App | CLI | API | Mobile App | Desktop App | Library | Game | Hyb
 Secondary entry points: {{list any additional interfaces}}
 ```
 
-#### 2b. Interaction strategy — "how does QA become a real user?"
+#### 3b. Interaction strategy — "how does QA become a real user?"
 
 **For each product type, QA MUST determine what tools can replicate real user actions, and build an Interaction Playbook.**
 
@@ -415,7 +415,7 @@ Native → **OS automation tools** required — state limitations explicitly.
 
 ---
 
-#### 2c. Build the Interaction Playbook
+#### 3c. Build the Interaction Playbook
 
 Based on the analysis above, write an **Interaction Playbook** for this project in QA.md:
 
