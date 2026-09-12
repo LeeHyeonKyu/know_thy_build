@@ -362,6 +362,27 @@ test("checkSettings: ci-settings.json missing or short of the template deny list
   expect(full["settings.ci-deny"].level).toBe("PASS");
 });
 
+// KTB-20: `factory:harness` 이슈의 implement가 `--settings`로 싣는 변형 파일. 없으면 그 이슈는
+// needs-human에서 멈춘다(run-stage가 조용히 좁은 쪽으로 fallback하지 않는다) — 그래서 FAIL이다.
+test("checkSettings: ci-settings-harness.json missing or short of its template → settings.ci-harness FAIL (KTB-20)", () => {
+  const template = { permissions: { deny: ["A"] }, hooks: {} };
+  const settings = { permissions: { deny: ["A"] }, hooks: {} };
+  const ciHarnessTemplate = { permissions: { deny: ["Edit(.factory/lib/**)", "Write(package.json)"] } };
+
+  // 템플릿을 주지 않으면 검사 자체를 만들지 않는다 — "확인 안 함"은 PASS가 아니다(ci-deny와 같은 규칙).
+  expect(by(checkSettings({ settings, template }))["settings.ci-harness"]).toBeUndefined();
+
+  const missing = by(checkSettings({ settings, template, ciHarness: null, ciHarnessTemplate }));
+  expect(missing["settings.ci-harness"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("ci-settings-harness.json missing") });
+  expect(missing["settings.ci-harness"].detail).toContain("factory:harness");
+
+  const short = by(checkSettings({ settings, template, ciHarness: { permissions: { deny: ["Edit(.factory/lib/**)"] } }, ciHarnessTemplate }));
+  expect(short["settings.ci-harness"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("Write(package.json)") });
+
+  const full = by(checkSettings({ settings, template, ciHarness: { permissions: { deny: [...ciHarnessTemplate.permissions.deny] } }, ciHarnessTemplate }));
+  expect(full["settings.ci-harness"].level).toBe("PASS");
+});
+
 // ADR-019 이월: `mergeSettings`가 가산적이라 옛 경로 deny는 `--upgrade`로도 안 지워졌었다.
 // 이제 설치기가 지우고, doctor는 아직 남아 있는 저장소에 WARN으로 알린다.
 test("checkSettings: leftover moved denies in .claude/settings.json → settings.stale-deny WARN naming the fix", () => {

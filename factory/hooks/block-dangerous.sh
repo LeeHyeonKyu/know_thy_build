@@ -31,6 +31,23 @@ echo "$c" | grep -Eq "(^|[;&|[:space:]])${G}push[^;&|]*(--delete[^;&|]*factory/l
 # 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.
 prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
 
+# KTB-20: `factory:harness` 이슈의 implement 스테이지만 `FACTORY_HARNESS_ISSUE=1`로 온다(run-stage.js가
+# `claude -p`의 env에 넣는다 — 훅은 그 세션의 자식이라 그대로 물려받는다). 스펙 §5.2.1의 의도는
+# "인프라 작업은 factory가 하고 **사람이 그 diff를 머지한다**"인데, 그때까지 이 훅과 ci-settings.json이
+# `.factory/harness.toml`·러너 설정을 통째로 막아 승격 PR에 승격이 들어가지 못했다(도그푸딩 #15).
+# 그래서 이 플래그가 서면 **승격이 실제로 건드리는 테스트 인프라 파일만** 보호 목록에서 뺀다:
+# `.factory/harness.toml` · `vitest.config.*` · `playwright.config.*`
+# (`docker-compose.test.yml`·`.env.test`는 애초에 이 목록에 없어 늘 쓸 수 있었다).
+# `.factory/`를 통짜로 여는 것이 아니라 나머지 하위 경로를 이름으로 다시 세운다 — `bin`·`lib`·`actions`·
+# `lessons`·`out`(게이트 판정 파일과 agents.jsonl이 산다: 이것이 열리면 판정을 위조할 수 있다)·
+# `ci-settings*`·`roles.toml`·`quarantine.toml`. `.factory/package.json`은 아래 `package\.json` 대안이
+# 그대로 잡는다. `.claude/**`·워크플로·CHARTER·package.json·tsconfig·eslint는 한 글자도 열리지 않는다.
+# 이 목록은 `ci-settings-harness.json`의 deny와 같아야 한다(F9와 같은 이유: 훅과 L2가 갈라지면 Edit는
+# 막히는데 `echo >`는 통과한다). 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
+if [ "${FACTORY_HARNESS_ISSUE:-}" = "1" ]; then
+  prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
+fi
+
 # `.factory/out/qa/**`는 qa 리뷰어의 증거 디렉터리다(harness.toml `[protected].except`, F3) — 거기 쓰는 것만
 # 예외로 통과시킨다. 보호 경로 검사에만 쓰는 사본 `$p`에서 그 토큰을 지우는 방식이라 `.factory/`의 나머지는
 # 그대로 막힌다. 단 `..`가 뒤따르면(`.factory/out/qa/../harness.toml`) 예외를 아예 적용하지 않는다 —

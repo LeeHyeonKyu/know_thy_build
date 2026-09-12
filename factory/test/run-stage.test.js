@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
@@ -585,6 +585,104 @@ test("KTB-18: with no comment dep wired, the refusal still happens (best-effort 
   const d = baseDeps({ issueLabels: async () => ["backlog", "factory:approved"], claudeP: vi.fn() });
   expect(await runStage({ stage: "merge", issue: 14, deps: d })).toBe(1);
   expect(d.claudeP).not.toHaveBeenCalled();
+});
+
+// ── KTB-20: `factory:harness` 이슈의 implement는 변형 설정 + 환경 플래그로 돈다 ─────────────────
+// 도그푸딩: retro가 만든 승격 이슈 #15에서 builder는 `.factory/harness.toml`·컴포즈·e2e 설정을 하나도
+// 건드릴 수 없어(ci-settings.json의 `Edit/Write(.factory/**)` + block-dangerous.sh) "승격 PR"이 승격을
+// 담지 못하고 전부 사람에게 미뤄졌다. 스펙 §5.2.1의 의도는 반대다 — factory가 인프라를 만들고 사람이
+// 그 diff를 머지한다. merge 스테이지는 한 글자도 바뀌지 않는다(보호 경로 → needs-human → 사람 머지).
+
+test("KTB-20: a factory:harness issue implements with ci-settings-harness.json + FACTORY_HARNESS_ISSUE=1", async () => {
+  const lines = [];
+  const seen = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:planned", "factory:harness", "factory:tier-standard"],
+    ciSettingsPresent: vi.fn(async () => true),
+    claudeP: vi.fn(async (_ctx, opts) => { seen.push(opts); return { is_error: false, result: "{}" }; }),
+    transition: async ({ to }) => ({ ok: true, to }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: d })).toBe(0);
+  expect(seen).toEqual([{ harnessIssue: true }]);
+  expect(d.ciSettingsPresent).toHaveBeenCalledWith(true);
+  expect(lines.some((l) => /harness issue: builder runs with \.factory\/ci-settings-harness\.json \+ FACTORY_HARNESS_ISSUE=1/.test(l))).toBe(true);
+});
+
+test("KTB-20: a normal issue is unchanged — base settings, no env flag", async () => {
+  const lines = [];
+  const seen = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:planned", "factory:tier-standard"],
+    ciSettingsPresent: vi.fn(async () => true),
+    claudeP: vi.fn(async (_ctx, opts) => { seen.push(opts); return { is_error: false, result: "{}" }; }),
+    transition: async ({ to }) => ({ ok: true, to }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 8, deps: d })).toBe(0);
+  expect(seen).toEqual([{ harnessIssue: false }]);
+  expect(d.ciSettingsPresent).toHaveBeenCalledWith(false);
+  expect(lines.some((l) => /harness issue:/.test(l))).toBe(false);
+});
+
+test("KTB-20: the variant is implement-only — the no-write stages keep the base settings", async () => {
+  for (const stage of ["triage", "plan", "review"]) {
+    const seen = [];
+    const entry = { triage: "factory:queue", plan: "factory:ready", review: "factory:awaiting-review" }[stage];
+    const d = baseDeps({
+      issueLabels: async () => [entry, "factory:harness"],
+      claudeP: vi.fn(async (_ctx, opts) => { seen.push(opts); return { is_error: false, result: "{}" }; }),
+      verifyStage: () => ({ ok: true, reasons: [], data: { disposition: "ready", verdict: "approve" } }),
+      transition: async ({ to }) => ({ ok: true, to }),
+    });
+    await runStage({ stage, issue: 15, deps: d });
+    expect(seen, stage).toEqual([{ harnessIssue: false }]);
+  }
+});
+
+test("KTB-20: a harness issue with the variant file missing stops before claude -p — no silent fallback", async () => {
+  const lines = [];
+  const transition = vi.fn(async () => ({ ok: true }));
+  const d = baseDeps({
+    issueLabels: async () => ["factory:planned", "factory:harness"],
+    ciSettingsPresent: async (harnessIssue) => !harnessIssue,      // base는 있고 변형만 없다
+    claudeP: vi.fn(), transition, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: d })).toBe(2);
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human", reason: expect.stringContaining(".factory/ci-settings-harness.json missing"),
+  }));
+  expect(lines.some((l) => /ci-settings: FAIL — \.factory\/ci-settings-harness\.json missing/.test(l))).toBe(true);
+});
+
+test("KTB-20: an unreadable label set falls back to the narrower settings (not the variant)", async () => {
+  const seen = [];
+  const d = baseDeps({
+    issueLabels: async () => { throw new Error("gh issue view failed"); },
+    claudeP: vi.fn(async (_ctx, opts) => { seen.push(opts); return { is_error: false, result: "{}" }; }),
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: d })).toBe(0);
+  expect(seen).toEqual([{ harnessIssue: false }]);
+});
+
+test("KTB-20: stageClaudeArgs/stageClaudeEnv pick the file and the env flag from the same judgement", () => {
+  const base = { root: "/r", stage: "implement", issue: 15, harness: {}, charter: { budget: { usd_per_stage: 12 } } };
+  const normal = stageClaudeArgs(base);
+  expect(normal).toContain("/r/.factory/ci-settings.json");
+  expect(normal).not.toContain("/r/.factory/ci-settings-harness.json");
+  expect(stageClaudeEnv({ root: "/r" })).not.toHaveProperty("FACTORY_HARNESS_ISSUE");
+
+  const harness = stageClaudeArgs({ ...base, harnessIssue: true });
+  expect(harness).toContain("/r/.factory/ci-settings-harness.json");
+  expect(harness[harness.indexOf("--settings") + 1]).toBe("/r/.factory/ci-settings-harness.json");
+  // 나머지 인자는 한 글자도 달라지지 않는다 — 바뀌는 것은 `--settings` 값 하나뿐이다.
+  expect(harness.map((a) => (a.endsWith("ci-settings-harness.json") ? "SETTINGS" : a)))
+    .toEqual(normal.map((a) => (a.endsWith("ci-settings.json") ? "SETTINGS" : a)));
+  expect(stageClaudeEnv({ root: "/r", harnessIssue: true }).FACTORY_HARNESS_ISSUE).toBe("1");
+  expect(ciSettingsFile(true)).toBe(CI_SETTINGS_HARNESS);
+  expect(ciSettingsFile(false)).toBe(CI_SETTINGS);
 });
 
 // ── KTB-9: tier 라벨은 triage가 붙인다(§3.2) ──────────────────────────────

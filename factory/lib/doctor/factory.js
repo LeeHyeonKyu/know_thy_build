@@ -240,7 +240,7 @@ export function checkSkills({ root, exists, readFile, list = readdirSync }) {
  *   deny 전부가 여기 산다. CI 에이전트의 L2는 그대로다.
  * 둘 다 검사한다: 한쪽만 보면 "설치됐다"가 "막힌다"를 뜻하지 않게 된다.
  */
-export function checkSettings({ settings, template, ciSettings, ciTemplate }) {
+export function checkSettings({ settings, template, ciSettings, ciTemplate, ciHarness, ciHarnessTemplate }) {
   const out = [settings ? c("settings.present", "PASS") : c("settings.present", "FAIL", ".claude/settings.json missing")];
   const s = settings || {};
   const wantDeny = template.permissions?.deny || [];
@@ -279,6 +279,21 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate }) {
       out.push(missingCi.length
         ? c("settings.ci-deny", "FAIL", `.factory/ci-settings.json deny list missing: ${missingCi.join(", ")}`)
         : c("settings.ci-deny", "PASS"));
+    }
+  }
+
+  // KTB-20: `factory:harness` 이슈의 implement가 `--settings`로 싣는 변형 파일(§5.2.1). 없으면 run-stage가
+  // 그 이슈에서 needs-human으로 멈춘다(조용한 fallback은 승격 없는 승격 PR을 재현한다) — 그래서 FAIL이다.
+  // ci-settings.json과 같은 무게로 deny 목록까지 본다: "설치됐다"가 "막는다"를 뜻해야 한다.
+  if (ciHarnessTemplate) {
+    if (!ciHarness) {
+      out.push(c("settings.ci-harness", "FAIL", `.factory/ci-settings-harness.json missing — a factory:harness issue would stop at needs-human instead of doing the promotion; run \`npx know-thy-build factory init --upgrade\``));
+    } else {
+      const have = new Set(ciHarness.permissions?.deny || []);
+      const missing = (ciHarnessTemplate.permissions?.deny || []).filter((d) => !have.has(d));
+      out.push(missing.length
+        ? c("settings.ci-harness", "FAIL", `.factory/ci-settings-harness.json deny list missing: ${missing.join(", ")}`)
+        : c("settings.ci-harness", "PASS"));
     }
   }
 

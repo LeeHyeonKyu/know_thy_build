@@ -141,7 +141,18 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
       } catch (e) {
         checks.push({ id: "settings.ci-template", level: "FAIL", detail: `ci-settings template unreadable: ${e.message}` });
       }
-      if (template) checks.push(...checkSettings({ settings, template, ciSettings, ciTemplate }));
+      // KTB-20: `factory:harness` 이슈의 implement가 싣는 변형(§5.2.1). 같은 방식으로 설치본+템플릿을 본다.
+      let ciHarness = null;
+      try {
+        ciHarness = JSON.parse(readFile(join(root, ".factory/ci-settings-harness.json")));
+      } catch {}
+      let ciHarnessTemplate;
+      try {
+        ciHarnessTemplate = JSON.parse(readFile(join(pkgRoot, "templates/factory/factory/ci-settings-harness.json")));
+      } catch (e) {
+        checks.push({ id: "settings.ci-harness-template", level: "FAIL", detail: `ci-settings-harness template unreadable: ${e.message}` });
+      }
+      if (template) checks.push(...checkSettings({ settings, template, ciSettings, ciTemplate, ciHarness, ciHarnessTemplate }));
 
       checks.push(...(await checkHooks({ run, root, exists, readFile, hooks: DOCTOR_HOOKS })));
       checks.push(...checkWorkflows({ root, exists, readFile }));

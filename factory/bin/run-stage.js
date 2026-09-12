@@ -35,6 +35,38 @@ export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factor
 export const ROLE_PREFIX = { plan: "plan-", review: "reviewer-" };
 export const STAGES = ["triage", "plan", "implement", "review", "merge"];
 
+/**
+ * KTB-20 — 보조 라벨 `factory:harness`(§5.2.1: 하네스 성숙도 승격 이슈)와 그 이슈의 builder가 싣는
+ * 변형 L2 설정. 도그푸딩 #15가 드러낸 것: 승격 이슈의 builder는 `.factory/harness.toml`·러너 설정을
+ * 하나도 못 건드려 "승격 PR"에 승격이 들어가지 못했다(ci-settings.json의 `Edit/Write(.factory/**)` +
+ * block-dangerous.sh). 스펙의 의도는 그 반대다 — **인프라 작업은 factory가 하고 사람이 diff를 머지한다**
+ * (L1의 보호 경로 거부는 그대로다: 승격 PR은 여전히 needs-human → 사람 머지).
+ * 변형은 implement 스테이지에만 걸린다: triage·plan·review는 쓰기 금지 스테이지고, merge는 스크립트
+ * 전용이라 `claude -p`를 아예 부르지 않는다.
+ */
+export const HARNESS_LABEL = "factory:harness";
+export const CI_SETTINGS = ".factory/ci-settings.json";
+export const CI_SETTINGS_HARNESS = ".factory/ci-settings-harness.json";
+export const ciSettingsFile = (harnessIssue = false) => (harnessIssue ? CI_SETTINGS_HARNESS : CI_SETTINGS);
+
+/**
+ * `claude -p` 인자/환경을 한 곳에서 만든다(retro.js의 `retroClaudeArgs`와 같은 모양) — 훅이 읽는
+ * `FACTORY_HARNESS_ISSUE`와 `--settings`가 **같은 판단**에서 나와야 둘이 갈라지지 않는다.
+ */
+export function stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue = false }) {
+  const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, stage)), "--output-format", "json", "--settings", join(root, ciSettingsFile(harnessIssue))];
+  if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
+  return args;
+}
+
+export function stageClaudeEnv({ root, harnessIssue = false }) {
+  const env = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root };
+  // 훅은 `claude -p` 세션의 자식 프로세스라 이 변수를 그대로 물려받는다 — block-dangerous.sh가 이것으로
+  // 보호 경로 목록을 좁힌다. 값이 정확히 "1"일 때만 선다(훅 쪽 계약).
+  if (harnessIssue) env.FACTORY_HARNESS_ISSUE = "1";
+  return env;
+}
+
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
@@ -149,6 +181,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // 라벨이 "진짜"인지 판단할 근거가 없다), 그 사실만은 사람에게 말해야 한다: 어떤 라벨들이 붙어
     // 있는지, 팩토리가 왜 이 스테이지를 실행하지 않는지, sweeper가 다음 sweep에서 정리한다는 것.
     let entryLabel;
+    // KTB-20: 같은 라벨 조회에서 `factory:harness`도 읽는다 — implement 스테이지만, 그리고 라벨을
+    // 실제로 읽었을 때만 선다(조회 실패 → false → 평범한 이슈로 취급: 더 좁은 쪽이 기본값이다).
+    let harnessIssue = false;
     if (d.issueLabels) {
       const expected = ENTRY_LABELS[stage] || [];
       let labels = null;
@@ -166,6 +201,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
           return 1;
         }
         entryLabel = found[0];
+        harnessIssue = stage === "implement" && labels.includes(HARNESS_LABEL);
         if (expected.length && !expected.includes(entryLabel)) {
           record([`entry state ${entryLabel ?? "none"} != expected ${expected.join("|")} — nothing to do`]);
           return 0;
@@ -228,15 +264,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // `.factory/ci-settings.json`이 없으면 경로 deny가 통째로 빠진 세션이 돌고, 그 세션은 harness.toml·
     // 게이트 설정을 고칠 수 있다 — "확인되지 않은 강제"는 강제가 아니므로 fail closed로 멈춘다.
     // merge는 여기까지 오지 않는다(script-only, 위에서 return).
-    if (d.ciSettingsPresent && !(await d.ciSettingsPresent())) {
-      const reason = ".factory/ci-settings.json missing — the agent would run without the L2 path deny list; run `npx know-thy-build factory init --upgrade`";
+    // KTB-20: `factory:harness` 이슈면 그 자리에 변형 파일이 온다 — 없으면 "그냥 좁은 쪽으로 돌자"가
+    // 아니라 여기서 멈춘다. 조용히 fallback하면 도그푸딩 #15가 그대로 재현된다(승격 없는 승격 PR).
+    const settingsFile = ciSettingsFile(harnessIssue);
+    if (d.ciSettingsPresent && !(await d.ciSettingsPresent(harnessIssue))) {
+      const reason = `${settingsFile} missing — the agent would run without the L2 path deny list; run \`npx know-thy-build factory init --upgrade\``;
       const t = await d.transition({ to: "factory:needs-human", reason });
       record([`ci-settings: FAIL — ${reason}`, ...refusal(t)]);
       return 2;
     }
+    if (harnessIssue) record([`harness issue: builder runs with ${settingsFile} + FACTORY_HARNESS_ISSUE=1 (test-infra files writable; merge still needs a human)`]);
     const ctx = await d.buildContext();
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
-    const out = await d.claudeP(ctx);
+    const out = await d.claudeP(ctx, { harnessIssue });
     const usage = usageLine(out);
     // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
     // 다시 묻는다(ADR-020 KTB-14). implement(유일한 쓰기 스테이지)는 건너뛴다 — merge는 여기 오지도
@@ -622,11 +662,10 @@ async function main() {
     /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
     resetGates: async () => { resetGateOutputs({ root, harness }); },
     countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
-    ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
-    claudeP: async () => {
-      const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, stage)), "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
-      if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
-      const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
+    ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
+    claudeP: async (_ctx, { harnessIssue = false } = {}) => {
+      const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
+      const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, harnessIssue }) });
       mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
       writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
       // envelope을 이름 붙여 한 벌 더 남긴다 — `<stage>.json`은 산출물 추출이 성공하면 그 객체로

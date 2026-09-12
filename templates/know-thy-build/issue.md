@@ -23,7 +23,7 @@ Technical terms (e.g. CLI, API, stack traces) stay in English. Everything else �
 
 ## Does
 
-짧은 문답(5분 목표): 증상 / 기대 vs 실제 / 재현 절차 / 영향 경로 → 이슈 본문에 `done_when` 초안(버그면 회귀 가드 테스트 1개가 기본, `test_NNN_<slug>`)과 재현 절차를 템플릿으로 작성 → `gh issue create --label backlog`. `--now`면 `:next`와 같은 역압 검사 후 `queue`로 전이.
+짧은 문답(5분 목표): 증상 / 기대 vs 실제 / 재현 절차 / 영향 경로 → 이슈 본문에 `done_when` 초안(버그면 회귀 가드 테스트 1개가 기본, `test_NNN_<slug>`; **Impact paths가 전부 문서면 가드 테스트 없이** 문서 확인 항목으로)과 재현 절차를 템플릿으로 작성 → `gh issue create --label backlog`. `--now`면 `:next`와 같은 역압 검사 후 `queue`로 전이.
 
 ## Produces
 
@@ -128,6 +128,29 @@ cat docs/QA.md 2>/dev/null | head -60
 
 버그가 아니라 잡무·소규모 개선이면 `## Symptom`/`## Repro`는 생략하고 `## What` / `## Why` / `## done_when (draft)`로 바꿔 쓴다 — 다만 `done_when`은 항상 있어야 한다(triage가 대조할 유일한 계약이다).
 
+### 문서만 고치는 이슈 — 회귀 가드를 만들지 않는다 (O14)
+
+**Impact paths가 전부 문서 경로(`*.md`, `docs/**`)면 `done_when`에 `test_NNN_<slug>` 줄을 넣지 않는다.** CHARTER의 tier 표에서 `docs` tier의 조건은 "**diff가 `docs/**`, `*.md`만**"이다 — 가드 테스트를 하나 요구하는 순간 그 이슈의 diff에는 테스트 파일이 들어가고, triage는 같은 표를 보고 `standard`로 판정한다. 그러면 문서 한 줄 고치는 데 리뷰어 로스터 전체와 `full` 게이트가 붙는다. 도그푸딩 관측(README만 고치는 이슈 #18)이 정확히 그랬다: `docs` tier가 `:issue` 이슈에서는 **영영 도달 불가능**했다.
+
+문서 전용 이슈의 `done_when`은 사람이 읽어 확인할 수 있는 문장으로 쓴다(테스트 id 없음, `level` 없음):
+
+```markdown
+## Impact paths
+- `README.md` (Quickstart 절)
+
+## done_when (draft)
+- [ ] `README.md`의 Quickstart가 {{현재 동작}}을 설명한다
+- [ ] 문서 외 파일은 diff에 없다
+
+<!-- docs-only: 회귀 가드 없음 — Impact paths가 전부 문서라 tier는 docs다(CHARTER: diff가 docs/**, *.md만) -->
+```
+
+그리고 사용자에게 그 사실을 한 줄로 말한다:
+
+> "Impact paths가 전부 문서라 회귀 가드 테스트 없이 `done_when`을 썼습니다 — tier는 `docs`로 판정될 것입니다."
+
+문서 **한 줄이라도** 코드·설정 경로가 섞이면(예: `README.md` + `src/cli.js`) 이 예외는 적용되지 않는다 — 평소대로 `test_NNN_<slug>`를 넣는다. 판단은 tier를 "고르는" 것이 아니라 **Impact paths가 무엇인지 말하는 것**이다: tier를 정하는 것은 언제나 triage다.
+
 ### 이슈 생성
 
 ```bash
@@ -135,6 +158,8 @@ gh issue create --label backlog --title "{{short_title}}" --body-file <tmp>
 ```
 
 ### 회귀 가드 이름 보정 — 본문을 고치고, 그 사실을 코멘트로 남긴다
+
+문서 전용 이슈(위 O14 절)는 `test_NNN_<slug>`가 애초에 없으므로 이 보정 자체를 건너뛴다 — 고칠 placeholder가 없다.
 
 `gh issue create`가 이슈 번호(예: `#47`)를 반환하면 `test_NNN_<slug>`의 `NNN`을 실제 번호로 바꿔야 한다. **보정은 반드시 본문(body)에 반영한다** — 팩토리가 읽는 것은 이슈 **본문과 핸드오프뿐**이고(`factory/lib/context.js`가 컨텍스트를 만들 때 코멘트 본문을 읽지 않는다), 코멘트로만 남긴 보정은 triage·plan·리뷰어 어디에도 도달하지 않는다. 조용한 수정이 되지 않도록 본문 갱신 **직후에** 무엇을 왜 바꿨는지 짧은 provenance 코멘트를 따로 남긴다:
 

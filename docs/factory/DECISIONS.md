@@ -498,7 +498,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 ## ADR-020 Dogfood 판결 — 2026-09-12 (Plan 6 Task 7, part 1 — 재구성)
 
-Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19) **⑤ 권한·훅**(KTB-13·14) **⑥ 관찰**(O1~O12, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
+Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19) **⑤ 권한·훅**(KTB-13·14·20) **⑥ 관찰**(O1~O12, O14·O15, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
 
 ### 질문
 
@@ -832,7 +832,7 @@ You will be notified when it completes.
 **영향**: `factory/lib/merge-stage.js`(`waitForChecksSettled`, `toBlocked`), `factory/lib/config.js`(`merge_check_wait_sec` 기본값), `factory/bin/run-stage.js`(`prChecks`/`requiredChecks`/`mergeCheckWaitSec` dep, origin hoist), `factory/lib/labels.js`(`blocked→rework` 엣지), `factory/lib/transition.js`·`factory/lib/retro/issue-comments.js`(`blockedOriginMarker` 공유), `factory/lib/sweeper.js`(`blockedRetryComment`). 테스트: `merge-stage.test.js`·`config.test.js`·`labels.test.js`·`sweeper.test.js`.
 
 (이후 항목은 dogfood 진행에 따라 추가)
-### ⑤ 권한·훅 — KTB-13·14
+### ⑤ 권한·훅 — KTB-13·14·20
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
 
@@ -921,7 +921,26 @@ You will be notified when it completes.
 
 **영향**: `factory/hooks/deny-all-writes.sh`(+ 설치본 `.claude/hooks/`), `factory/test/hooks.test.js`(붙은 형태 8 blocked / 7 allowed, block-dangerous 3 blocked / 2 allowed).
 
-### ⑥ 관찰 — O1~O12, G1
+#### KTB-20 — 하네스 이슈는 하네스를 고칠 수 있어야 한다: 변형 L2 + 훅 env 게이트 (사람 머지는 그대로)
+
+**관측** (데모, 라운드 4): 첫 전체 retro가 `http-at-m1` 성숙도 갭을 감지해 `factory:harness` 라벨의 이슈 #15 "harness: promote to M2"를 스스로 만들었다 — 설계대로다(§5.2.1, ADR-015). 그런데 그 이슈의 builder는 **승격에 필요한 파일을 하나도 쓰지 못했다**: `.factory/ci-settings.json`이 `Edit/Write(.factory/**)`·`Edit/Write(playwright.config.*)`를 막고, `block-dangerous.sh`가 같은 경로의 셸 쓰기를 막는다. 두 방벽은 **정확히 설계대로 동작했다** — 문제는 그 설계가 이 이슈 종류를 구분하지 않는다는 것이었다. 결과: PR #20("승격 PR")에 승격이 들어 있지 않았고, harness.toml·컴포즈·e2e 설정 변경은 전부 "사람이 해 주세요"로 미뤄졌다. L1이 보호 경로 PR의 자동 머지를 거부하는 부분(ADR-020 KTB-5)은 이미 잘 돌고 있었다 — 막힌 것은 그 앞, **diff를 만드는 단계**다.
+
+**무엇이 어긋났나**: 스펙 §5.2.1은 "**인프라 작업은 factory가 하고, gate 정의의 변경만 사람이 승인한다**"라고 적는다(§5.2.2 표도 Phase 2 `factory:harness` 이슈의 산출물 주체를 **builder**로 못 박는다). L2는 그 문장의 앞 절반을 집행하지 못하고 뒤 절반만 집행하고 있었다. "사람이 머지한다"가 "사람이 만든다"로 조용히 미끄러진 것이다 — 그리고 그 미끄러짐은 어디에도 기록되지 않는다(PR은 초록색이고, 스테이지는 성공으로 끝난다).
+
+**결정**: 이슈가 `factory:harness` 라벨을 달고 있으면 **implement 스테이지만** 다른 L2를 싣는다.
+
+1. **변형 설정 파일** `.factory/ci-settings-harness.json`(템플릿 `templates/factory/factory/ci-settings-harness.json`, manifest owner `factory`). `ci-settings.json`과 같되 **승격이 실제로 건드리는 테스트 인프라 파일의 Edit/Write deny만** 뺐다: `.factory/harness.toml`·`vitest.config.*`·`playwright.config.*`. (`docker-compose.test.yml`·`.env.test`는 애초에 어느 목록에도 없어 늘 쓸 수 있었다 — "빼야 할 것"이 없다. `Read(.env.*)`는 비밀 규칙이라 그대로 둔다.) `.factory/**`를 통짜로 여는 대신 **나머지를 이름으로 다시 세운다**: `bin`·`lib`·`actions`·`lessons`·`out`(게이트 판정 파일과 `agents.jsonl`이 사는 곳 — 열리면 판정을 위조할 수 있다)·`ci-settings*`·`roles.toml`·`quarantine.toml`. `.claude/**`·`factory-*.yml`·CHARTER·`package.json`·tsconfig·eslint는 한 글자도 열리지 않는다. 열거는 조용히 늙으므로, `templates.test.js`가 `templates/factory/factory/**`의 **모든** 파일을 훑어 `harness.toml` 하나만 열려 있고 나머지는 전부 deny에 걸리는지 확인한다 — 새 `.factory` 파일이 생기면 그 테스트가 빠진 것을 말한다.
+2. **훅 env 게이트**: `run-stage.js`가 그 세션의 env에 `FACTORY_HARNESS_ISSUE=1`을 세우고, `block-dangerous.sh`가 그때만 보호 경로 정규식을 같은 모양으로 좁힌다. 훅과 설정 파일의 목록은 **같아야 한다**(F9와 같은 이유: 갈라지면 `Edit`는 막히는데 `echo > .factory/harness.toml`은 통과한다). 값은 정확히 `"1"`일 때만 선다(빈 문자열·`0`·`true`는 평범한 이슈와 같다 — fail closed).
+3. **판단의 출처는 이미 읽은 라벨이다**: 진입 가드(KTB-10)가 스테이지 시작 직후 이슈 라벨을 한 번 읽는다 — 거기서 `factory:harness`를 같이 본다. 추가 API 호출이 없고, 라벨 조회가 **실패하면 false**다(더 좁은 쪽이 기본값). `--settings` 경로와 env 플래그는 한 함수(`stageClaudeArgs`/`stageClaudeEnv`)에서 같은 판단으로 나온다 — 둘이 갈라지면 "설정은 열렸는데 훅이 막는다"가 된다.
+4. **implement 스테이지만이다.** triage·plan·review는 쓰기 금지 스테이지고(`deny-all-writes.sh` + KTB-14의 워크트리 백스톱), merge는 스크립트 전용이라 `claude -p`를 아예 부르지 않는다.
+5. **merge는 한 글자도 바뀌지 않는다.** 승격 PR은 여전히 보호 경로를 건드리므로 L1이 자동 머지를 거부하고 `factory:needs-human`으로 전이한다 — **사람이 diff를 보고 머지한다**. 이 판결이 옮기는 것은 "누가 diff를 만드는가"뿐이고, "누가 승인하는가"는 그대로 사람이다.
+6. **변형 파일이 없으면 조용히 fallback하지 않는다.** 그 이슈는 `needs-human`에서 멈추고 사유를 남긴다(`.factory/ci-settings-harness.json missing …`) — 좁은 쪽으로 되돌아가면 도그푸딩 #15가 그대로 재현된다("승격 없는 승격 PR"). `doctor`의 새 검사 `settings.ci-harness`가 파일 존재와 deny 목록을 `settings.ci-deny`와 같은 무게(FAIL)로 본다.
+
+**대가로 받아들인 것**: `factory:harness` 라벨은 이제 **권한을 넓히는 라벨**이다 — 그 라벨을 붙일 수 있는 사람은 builder가 `harness.toml`을 쓸 수 있게 만들 수 있다. 이것은 새로 생긴 위험이 아니라 이미 있던 것의 명시화다(라벨을 붙일 수 있는 사람은 어차피 저장소 쓰기 권한자이고, `factory:*` 상태 라벨은 에이전트가 직접 붙이지 못하도록 훅이 막는다 — F13). 그리고 열린 문 끝에는 **여전히 사람의 머지**가 있다: 넓어진 것은 제안의 범위이지 집행의 범위가 아니다.
+
+**영향**: `templates/factory/factory/ci-settings-harness.json`(신규), `factory/hooks/block-dangerous.sh`(+ 설치본 `.claude/hooks/`), `factory/bin/run-stage.js`(`HARNESS_LABEL`·`ciSettingsFile`·`stageClaudeArgs`·`stageClaudeEnv`·진입 가드에서 라벨 판단·`ciSettingsPresent(harnessIssue)`·`claudeP(ctx, {harnessIssue})`), `factory/lib/doctor/factory.js`+`factory/cli/doctor.js`(`settings.ci-harness`), 테스트: `hooks.test.js`(env 게이트 9 opened / 21 still blocked / 4 값 변주), `run-stage.test.js`(KTB-20 6건), `templates.test.js`(변형 파일 구조 1건), `doctor-factory.test.js`(1건). 스펙 §5.2.1에 한 항목.
+
+### ⑥ 관찰 — O1~O12, O14·O15, G1
 
 결함으로 승격하지 않았지만 판결의 근거이거나 앞으로의 판결에 필요한 사실들. 전부 `docs/factory/dogfood/2026-09-12-demo.md`·`2026-09-12-ktb.md`·`task-6-prep-report.md`에서 실측됐다(출처 표기).
 
@@ -937,6 +956,10 @@ You will be notified when it completes.
 - **O10**(Task 4, 데모) — 이슈를 `--label backlog`로 생성하면 그 자체가 `issues: labeled`를 쏴 워크플로 5개 중 매칭되는 것이 없어 5개 skipped 런이 뜬다(Task 4의 이슈 4건 생성으로 20개). 노이즈·러너 분(分) 낭비일 뿐 정지·오탐은 아니다 — `on.issues.labeled`는 라벨 이름으로 필터할 수 없으므로(GitHub 미지원), 이슈 생성을 `workflow_dispatch`-only 트리거로 옮기는 안이 후보로 남는다(설계 메모, 미채택).
 - **O11**(라운드 3, 데모) — 전체 판결(운영 규칙)은 바로 다음 항목.
 - **O12**(라운드 3~4, 데모) — `usage.js`/`harvest.js`의 토큰 합산이 `input_tokens`만 세어 프롬프트 캐싱 세션의 실제 입력을 대부분 놓치고 있었다(`_retro.md`가 "input 50"으로 찍은 런의 실제 입력은 캐시 포함 170,000+). `cache_creation_input_tokens`·`cache_read_input_tokens`를 input 합계에 포함하고 `renderStatus`/`statsBlock` 라벨을 `input(+cache)`로 고쳤다(원본 필드는 그대로 남긴다) — **KTB-19 커밋(23ef1df)에 함께 실렸다**(별도 KTB 번호를 받지 않았다: 표시 형식 수정으로 판단됐다).
+- **O13** — 미배정(번호만 비워 둔다: 라운드 4에서 후보로 잡혔다가 별도 결함으로 승격되지 않았다).
+- **O14**(라운드 4, 데모) — **`:issue` 스킬이 그리는 이슈에서는 `docs` tier가 영영 도달 불가능했다.** `templates/know-thy-build/issue.md`는 이슈 종류를 가리지 않고 회귀 가드 `test_NNN_<slug>`를 하나 초안에 넣는다. README만 고치는 이슈 #18에서도 그랬고, 그 가드 때문에 diff에 테스트 파일이 들어가 triage는 CHARTER의 tier 표("`docs` = diff가 `docs/**`, `*.md`만")대로 `standard`로 판정했다. 문서 한 줄을 고치는 데 리뷰어 로스터 전체와 `full` 게이트가 붙는다 — tier 표에 `docs`가 있는데 `:issue` 경로로는 아무도 그것을 만들 수 없었다는 뜻이다. **판결**: Impact paths가 **전부** 문서 경로(`*.md`, `docs/**`)면 스킬은 가드 테스트 없이 `done_when`을 쓰고(사람이 읽어 확인하는 문장 + `<!-- docs-only: … -->` 마커), 사용자에게 "docs-only → 회귀 가드 없음, tier는 docs"라고 한 줄로 말한다. 문서 외 경로가 **한 줄이라도** 섞이면 예외는 적용되지 않는다. tier를 정하는 것은 여전히 triage다 — 스킬이 하는 일은 tier를 고르는 것이 아니라 **Impact paths가 무엇인지 정확히 말하는 것**이고, 가드 테스트는 그 사실을 조용히 왜곡하고 있었다. 결함이 아니라 스킬 템플릿의 판단 규칙 하나라서 KTB 번호를 받지 않았다(`skills-ops-a.test.js` 1건으로 고정).
+- **O15**(라운드 4, 데모) — 첫 전체 retro가 자동 생성한 `factory:harness` 이슈 #15("promote to M2")의 승격 PR #20에 **승격이 들어 있지 않았다**: builder가 `.factory/harness.toml`·컴포즈·e2e 설정을 하나도 쓸 수 없어 전부 사람에게 미뤄졌다. 전체 판결은 ⑤의 **KTB-20**이다.
+
 #### O11 — 스테이지가 도는 동안 대상 저장소를 업그레이드하지 않는다
 
 **관측**: 라운드 3에서 KTB-13 수정을 실어 나르는 `factory init --upgrade` PR이 데모 #2의 implement가 **도는 중에** 머지됐다. base가 런 밑에서 움직였고, 그 런의 게이트·프롬프트·훅이 어느 버전의 것인지가 사후에 불분명해졌다 — 실패를 어느 커밋 탓으로 돌릴지 판단할 수 없다.

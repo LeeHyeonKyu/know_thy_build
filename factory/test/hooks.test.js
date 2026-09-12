@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const H = new URL("../hooks/", import.meta.url).pathname;
-const bash = (script, input, cwd) => run("bash", [join(H, script)], { input: JSON.stringify(input), cwd });
+const bash = (script, input, cwd, env) => run("bash", [join(H, script)], { input: JSON.stringify(input), cwd, env });
 const cmd = (c) => ({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: c } });
 
 test("block-dangerous: blocks merges, force pushes, protected writes; allows normal commands", async () => {
@@ -125,6 +125,48 @@ test("block-dangerous: .factory/out/qa/ is writable (qa evidence); the rest of .
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
 }, 30000);
+
+// ── KTB-20: `factory:harness` 이슈의 builder만 테스트 인프라 파일을 셸로 쓸 수 있다 ──────────────
+// 도그푸딩 #15("promote to M2")에서 builder는 `.factory/harness.toml`·컴포즈·e2e 설정을 하나도 건드릴
+// 수 없어 승격 PR에 승격이 들어가지 못했다. 스펙 §5.2.1의 의도는 그 반대다 — factory가 인프라를 만들고
+// 사람이 그 diff를 머지한다(L1은 보호 경로 PR의 자동 머지를 계속 거부한다). run-stage.js가 그 이슈의
+// implement에서만 `FACTORY_HARNESS_ISSUE=1`을 세우고, 이 훅은 그때만 목록을 좁힌다.
+test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — and only those (KTB-20)", async () => {
+  const harness = { FACTORY_HARNESS_ISSUE: "1" };
+  // 플래그가 서면 통과하는 것: 승격이 실제로 건드리는 파일들
+  const opened = ["echo x > .factory/harness.toml", "sed -i 's/M1/M2/' .factory/harness.toml",
+                  "cp /tmp/h.toml .factory/harness.toml", "mv /tmp/h.toml .factory/harness.toml",
+                  "python3 -c \"open('.factory/harness.toml','w').write('x')\"",
+                  "cat t | tee vitest.config.js", "sed -i '' 's/a/b/' playwright.config.ts",
+                  "echo x > playwright.config.js", "git checkout HEAD~1 -- .factory/harness.toml"];
+  for (const c of opened) {
+    expect((await bash("block-dangerous.sh", cmd(c), undefined, harness)).code, `with flag: ${c}`).toBe(0);
+    expect((await bash("block-dangerous.sh", cmd(c))).code, `without flag: ${c}`).toBe(2);   // 평범한 이슈는 그대로 막힌다
+  }
+  // 플래그가 서도 막히는 것: 팩토리 자신의 코드·판정·프롬프트·워크플로·빌드 설정
+  const stillBlocked = ["echo x > .factory/lib/gates.js", "echo x > .factory/bin/run-stage.js",
+                        "echo x > .factory/out/gates.json", "echo x > .factory/out/agents.jsonl",
+                        "echo x > .factory/ci-settings.json", "echo x > .factory/ci-settings-harness.json",
+                        "echo x > .factory/roles.toml", "echo x > .factory/quarantine.toml",
+                        "echo x > .factory/lessons/factory-builder.md", "echo x > .factory/package.json",
+                        "echo x > .factory/actions/setup/action.yml",
+                        "echo x > .claude/settings.json", "rm -rf .claude/agents",
+                        "echo y >> .github/workflows/factory-implement.yml",
+                        "cat foo | tee docs/factory/CHARTER.md", "echo '{}' > package.json",
+                        "cat foo | tee tsconfig.json", "mv /tmp/evil eslint.config.js",
+                        "gh pr merge 5", "git push --force origin x",
+                        "gh issue edit 7 --add-label factory:approved"];
+  for (const c of stillBlocked) {
+    const r = await bash("block-dangerous.sh", cmd(c), undefined, harness);
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  // 플래그는 정확히 "1"일 때만 선다 — 빈 문자열·0·다른 값은 평범한 이슈와 같다(fail closed).
+  for (const v of ["", "0", "true", "yes"]) {
+    const r = await bash("block-dangerous.sh", cmd("echo x > .factory/harness.toml"), undefined, { FACTORY_HARNESS_ISSUE: v });
+    expect(r.code, `FACTORY_HARNESS_ISSUE=${JSON.stringify(v)}`).toBe(2);
+  }
+}, 60000);
 
 // ── F13: 상태 라벨은 L1(transition.js)만 옮긴다 ─────────────────────────────────────────────
 test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment is not", async () => {

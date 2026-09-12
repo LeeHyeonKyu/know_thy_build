@@ -3,6 +3,8 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse as toml } from "smol-toml";
 import { parseFrontmatter } from "../lib/frontmatter.js";
+import { matchesAny } from "../lib/glob.js";
+import { readdirRecursive } from "../cli/manifest.js";
 
 const T = new URL("../../templates/factory/", import.meta.url).pathname;
 const read = (p) => readFileSync(join(T, p), "utf8");
@@ -138,6 +140,47 @@ test("ci-settings.json deny covers the build-config files, matching [protected].
     "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)"]) expect(s.permissions.deny, d).toContain(d);
   // CI 전용 deny(비밀·삭제)는 그대로 남아 있다.
   for (const d of ["Bash(gh secret*)", "Read(.env)"]) expect(s.permissions.deny, d).toContain(d);
+});
+
+// ── KTB-20: `factory:harness` 이슈 전용 변형 ─────────────────────────────────────────────────────
+// 도그푸딩 관측: retro가 만든 `harness: promote to M2` 이슈(#15)에서 builder는 `.factory/harness.toml`·
+// 컴포즈·e2e 설정을 **하나도** 건드릴 수 없었다 — ci-settings.json이 `Edit/Write(.factory/**)`를 막고
+// block-dangerous.sh가 셸 쓰기를 막는다. 그래서 "승격 PR"에 승격이 들어 있지 않았고 전부 사람에게
+// 미뤄졌다. 스펙의 의도(§5.2.1)는 정반대다: **인프라 작업은 factory가 하고 사람은 그 diff를 머지한다.**
+// 변형 설정 파일은 그 의도를 성립시키되, 열리는 것은 테스트 인프라 파일뿐이다.
+test("ci-settings-harness.json opens exactly the test-infra files a promotion touches, and nothing else (KTB-20)", () => {
+  const base = JSON.parse(read("factory/ci-settings.json"));
+  const hv = JSON.parse(read("factory/ci-settings-harness.json"));
+  const baseDeny = new Set(base.permissions.deny);
+  const deny = new Set(hv.permissions.deny);
+
+  // ① 열린 것: harness.toml + 러너 설정 파일. `.factory/**` 통짜 deny도 같이 사라진다(대신 ③).
+  for (const d of ["Edit(.factory/**)", "Write(.factory/**)",
+    "Edit(vitest.config.*)", "Write(vitest.config.*)",
+    "Edit(playwright.config.*)", "Write(playwright.config.*)"]) {
+    expect(baseDeny.has(d), `base must deny ${d}`).toBe(true);
+    expect(deny.has(d), `harness variant must NOT deny ${d}`).toBe(false);
+  }
+  // docker-compose.test.yml·.env.test는 어느 목록에도 없다 — 이미 쓸 수 있으므로 뺄 것이 없다.
+  for (const d of [...baseDeny]) expect(d, d).not.toMatch(/docker-compose|\.env\.test/);
+
+  // ② 나머지는 한 줄도 느슨해지지 않았다 — 변형은 base의 **부분집합**에 ③의 추가 deny만 얹는다.
+  for (const d of baseDeny) {
+    if (/\.factory\/\*\*|vitest\.config|playwright\.config/.test(d)) continue;
+    expect(deny.has(d), `harness variant dropped ${d}`).toBe(true);
+  }
+
+  // ③ `.factory/**`를 통짜로 여는 대신, harness.toml을 뺀 나머지를 이름으로 다시 막는다.
+  //    새 `.factory` 템플릿 파일이 생기면 이 루프가 그것이 빠졌다고 말한다 — 열거는 조용히 늙는다.
+  const editGlobs = [...deny].map((d) => /^Edit\((.+)\)$/.exec(d)?.[1]).filter(Boolean);
+  const writeGlobs = [...deny].map((d) => /^Write\((.+)\)$/.exec(d)?.[1]).filter(Boolean);
+  const fRoot = join(T, "factory");
+  for (const p of readdirRecursive(fRoot)) {
+    const dest = `.factory/${p.slice(fRoot.length + 1)}`;
+    const open = dest === ".factory/harness.toml";               // 이것 하나가 이 변형의 존재 이유다
+    expect(matchesAny(editGlobs, dest), `Edit ${dest}`).toBe(!open);
+    expect(matchesAny(writeGlobs, dest), `Write ${dest}`).toBe(!open);
+  }
 });
 
 test("dispatcher commands exist for the four LLM stages plus retro, and each names its workflow", () => {

@@ -138,6 +138,29 @@ test("templates/know-thy-build/issue.md: describes posting a correction comment 
   expect(text).toMatch(/gh issue comment/);
 });
 
+// ── O14 (dogfood): the guard test made the docs tier unreachable for `:issue` issues ─────────
+// README-only issue #18 got a `test_NNN_<slug>` guard like every other issue, so its diff carried
+// a test file — and CHARTER's docs tier is "diff is docs/**, *.md only", so triage tiered it
+// `standard`. The skill must say: all-documentation Impact paths → no guard test, tier docs.
+test("templates/know-thy-build/issue.md: docs-only impact paths draft done_when without a regression guard (O14)", () => {
+  const text = readTemplate("issue");
+  expect(text).toMatch(/docs-only/);
+  // The rule names both halves of CHARTER's docs-tier condition, so a reader can check it.
+  expect(text).toMatch(/docs\/\*\*/);
+  expect(text).toMatch(/\*\.md/);
+  // It says what NOT to draft, and it says the tier that follows.
+  const idx = text.indexOf("### 문서만 고치는 이슈");
+  expect(idx).toBeGreaterThan(-1);
+  const section = text.slice(idx, text.indexOf("\n### ", idx + 1));   // 다음 h3까지 (본문 안에 예시 `## ` 헤딩이 있다)
+  expect(section).toMatch(/test_NNN_<slug>/);            // names the thing it is suppressing
+  expect(section).toMatch(/tier/);
+  expect(section).toMatch(/docs/);
+  // …and it stays an exception: a mixed diff keeps the guard.
+  expect(section).toMatch(/섞이면|mixed/);
+  // The default path is untouched — the guard is still the default for everything else.
+  expect(text).toMatch(/버그면 회귀 가드 테스트 1개가 기본/);
+});
+
 // ── :harness-specific: Must not section names both prohibitions (never merge, never shrink
 // [protected]/[load_bearing] paths) — not just the common paragraph's generic merge ban. ──────
 
