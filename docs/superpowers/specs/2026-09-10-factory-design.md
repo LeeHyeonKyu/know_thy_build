@@ -59,6 +59,8 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 
 (Plan 3 실행 판결, ADR-016) `init`이 설치하는 Claude-side 파일: workflow 스크립트 4개(`.claude/workflows/factory-{triage,plan,implement,review}.js`), role 에이전트 14개(`.claude/agents/*.md` — loader 1 + triage 1 + plan 5 + implement 2 + review 5), 디스패처 커맨드 4개(`.claude/commands/factory-{triage,plan,implement,review}.md`).
 
+(Plan 4 실행 판결, ADR-017) `factory run retro [--force]` — retro는 이슈 인자를 받지 않는다(있어도 무시). `--force`는 CHARTER의 N을 무시하고 전체 retro를 강제 실행한다(§8.4). `init`이 설치하는 retro 관련 파일 5개: `.github/workflows/factory-retro.yml`, `.claude/workflows/factory-retro.js`, `.claude/agents/factory-retro.md`, 디스패처 `.claude/commands/factory-retro.md`, `.factory/lessons/factory-retro.md`(오케스트레이션 본체 `.factory/bin/retro.js`는 이 다섯과 별도로 항상 설치된다).
+
 ### 2.2 로컬 실행 `factory run`
 
 "로컬 모드"는 없다. `factory run`은 `.factory/bin/run-stage.sh <stage> <issue>`를 로컬에서 실행하는 것이고, 이 스크립트는 CI의 yml이 호출하는 것과 **같은 파일**이다. 따라서 훅·권한·게이트·handoff 규칙이 동일하다.
@@ -208,9 +210,11 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 | `factory-implement.yml` | `issues: labeled` (`factory:planned`, `factory:rework`) | `implement` | 90 |
 | `factory-review.yml` | `issues: labeled` (`factory:awaiting-review`) — `pull_request` 이벤트가 아니다(Plan 2 실행 판결, ADR-015 — R1: PR head는 이미 implement handoff의 `head_sha`로 묶여 있어 PR→이슈 매핑이 필요 없다) | `review` | 45 |
 | `factory-merge.yml` | `issues: labeled` (`factory:approved`) | `merge` — **스크립트 전용, `claude -p` 호출 없음**(Plan 2 실행 판결, ADR-015 — R3) | 20 |
-| `factory-retro.yml` (Plan 4) | `pull_request: closed (merged)` — cron 없음. 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro` | 30 |
+| `factory-retro.yml` | `pull_request: closed` + `if: merged == true`(`concurrency: { group: factory-retro, cancel-in-progress: false }` — 취소 없이 직렬, cron 없음). 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro [--force]` | 30 |
 | `factory-sweeper.yml` | `schedule: */30` | `sweep` | 5 |
 | `factory-integrity.yml` | `pull_request: *` | `integrity` | 5 |
+
+(Plan 4 실행 판결, ADR-017) `factory-retro.yml`의 checkout은 `ref: ${{ github.event.pull_request.base.ref }}`다 — PR head/merge ref가 아니라 **머지 결과가 반영된 base 브랜치**를 체크아웃해야 `node .factory/bin/retro.js`가 방금 머지된 커밋을 본다.
 
 yml은 얇다. 모든 로직은 `.factory/bin/`에 있어 로컬 `factory run`과 동일하다.
 
@@ -660,9 +664,10 @@ implement 단계에서 `gates.sh`가 **이번 PR에서 변경된 테스트 파�
 **⑤ 격리 — K회 자가 수정 실패 후. 사람 승인은 없다**
 사람에게 "skip 승인"을 맡겨도 근거를 더 잘 읽는 것이 아니므로 그 경로는 두지 않는다. 대신 시스템 제약으로 바꾼다.
 - **격리(quarantine)**: skip하지 않는다. **계속 실행하되 판정에서만 제외**하고 결과를 run 기록에 남긴다. `.factory/quarantine.toml`(스크립트만 씀)에 기록. schema: `[[quarantined]] id, since, reason, evidence[], consecutive_passes`.
+- **등록**(Plan 4 실행 판결, ADR-017): 등록의 트리거는 이력의 전이 **횟수**가 아니라 **현재 상태**다 — `factory:flaky` 라벨 이슈가 (아직 `quarantine.toml`에 없는 채로) `factory:needs-human`에 **도달해 있으면** 등록한다. K회 자가 수정 실패는 이미 `transition.js`의 K 기반 rework 상한이 상류에서 집행해 그 이슈를 needs-human으로 보낸 것이므로, 여기서 전이 횟수를 다시 세지 않는다(이중 판단 금지). retro(이슈 이력을 읽는 유일한 잡)가 `registerFromFlakyIssues`로 감지해 `id`(이슈 제목 `flaky: <id>`)·`since`·`reason`(needs-human 사유)·`evidence`로 등록한다. **등록·복귀·만료는 모두 해당 flaky 이슈에 코멘트를 남긴다**: `<!-- factory-quarantine <registered|returned|expired> id=<id> -->`. 등록은 retro가, 복귀·만료는 sweeper가 남긴다(sweeper는 닫힌 이슈에도 만료 코멘트를 남길 수 있어야 하므로 `state:"all"`로 flaky 이슈를 찾는다).
 - **상한**: 격리 수 ≤ N(기본 5개 또는 전체의 2%, `harness.toml [gates.thresholds].quarantine_max`가 유일한 출처 — §5.1). 초과 시 implement 잡이 **새 claim을 거부**한다(리뷰 대기 역압과 동일). flaky 방치 = 공장 정지이므로 방치가 구조적으로 불가능하다.
-- **자동 복귀**: 격리 중 `quarantine_return_after`(기본 30)회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다). 격리 항목의 `consecutive_passes`는 implement/review 게이트 실행마다 갱신된다(Plan 1b); 격리 등록은 Plan 4 retro.
-- **TTL**: 격리 4주 경과 시 retro가 그 테스트가 지키던 동작을 **다른 레벨에서 다시 쓰는 이슈**를 만든다(예: e2e 타이밍 의존 → integration). 그것도 K회 실패하면 삭제하고 `DECISIONS.md`에 "이 동작은 현재 검증되지 않음"을 기록한다. 삭제는 조용히 일어나지 않는다.
+- **자동 복귀**: 격리 중 `quarantine_return_after`(기본 30)회 연속 통과하면 스크립트가 복귀시킨다(제품 변경으로 우연히 고쳐지는 경우가 실제로 있다). 격리 항목의 `consecutive_passes`는 implement/review 게이트 실행마다 갱신된다(Plan 1b).
+- **TTL**: 격리 4주 경과 시 sweeper가 `expired`로 표시한다 — **`quarantine.toml`에서 항목을 내리지 않는다**, 플래그만 남기고 격리는 계속된다(존치가 곧 격리 지속의 근거이므로 만료 코멘트가 그 사실의 유일한 기록이다). 그다음 retro가 그 테스트가 지키던 동작을 **다른 레벨에서 다시 쓰는 이슈**(`backlog`+`factory:flaky`, 제목 `rewrite flaky test at another level: <id>`, 제목으로 dedup)를 만든다(예: e2e 타이밍 의존 → integration). 그 rewrite 이슈가 다시 `factory:needs-human`에 도달하면(같은 "현재 상태" 게이트) retro가 **`test-delete` 제안 PR**(`factory:retro-proposal`)을 낸다 — 채택 여부와 `DECISIONS.md`에 "이 동작은 현재 검증되지 않음"을 남기는 것은 **사람**이 한다(제안 PR은 절대 자체 머지되지 않는다 — §8.1). 삭제는 조용히 일어나지 않는다.
 - 사람은 역압으로 공장이 멈췄을 때만 등장하며, 그때의 판단은 "skip해도 되나"가 아니라 "제품에 비결정성이 있는데 어떻게 할 것인가"라는 제품 판단이다.
 
 retro는 flaky 발생률과 원인 분류(타이밍/순서/공유 상태/네트워크/제품 결함)를 집계해 ①의 규칙을 lint로 승격 제안하고 builder lessons에 반영한다.
@@ -1209,12 +1214,14 @@ responses:
 
 | 종류 | 형태 | 처리 | 예 |
 |---|---|---|---|
-| **lesson** | `.factory/lessons/<role>.md`에 항목 append | **다크** — retro 에이전트는 `factory.retro.v1` schema로 후보만 내고, `write-lessons.sh`(L1)가 조건을 검사해 append·커밋·PR·자동 머지. `.factory/lessons/**`는 `[protected].except`라 integrity가 막지 않되 포맷·상한·근거 링크를 검사. 조건: 근거 run ≥2, 검증 가능한 체크 문장, 역할당 상한 | "timestamp 파싱 기본 타임존 확인" |
-| **gate 승격** | `harness.toml`/lint 설정/테스트 추가 PR | `factory:retro-proposal` → **사람 승인** | lesson 3회 이상 인용 + 정적 검사로 표현 가능 → eslint rule |
-| **역할 예시·관점 추가** | `.claude/agents/*.md`의 `## Examples`, `## Perspectives`에 **추가만** | **다크** — lesson과 같은 제약: 근거 run ≥2, 섹션당 상한(Examples 8, Perspectives 6), 기존 항목 수정·삭제 불가, `write-role-additions.sh`(L1)가 수행. `.claude/agents/**`는 `[protected].except`에 이 두 섹션의 additive diff만 허용하는 규칙으로 등록 | "reviewer-qa Examples에 'DST 경계 25시간 렌더링' 추가" |
+| **lesson** | `.factory/lessons/<role>.md`에 항목 append | **다크** — retro 에이전트는 `factory.retro.v1` schema로 후보만 내고, `factory/lib/retro/lessons.js`의 `applyLessons`(L1, `factory/bin/retro.js`가 호출)가 조건을 검사해 append하고 `factory/lib/retro/publish.js`의 `openAndMergeLessonsPr`이 커밋·PR·자동 머지한다. `.factory/lessons/**`는 `[protected].except`라 integrity가 막지 않되 포맷·상한·근거 링크를 검사. 조건: 근거 run ≥2, 검증 가능한 체크 문장, 역할당 상한 | "timestamp 파싱 기본 타임존 확인" |
+| **gate 승격** | `harness.toml`/lint 설정/테스트 추가 PR | `factory:retro-proposal` → **사람 승인**(`factory/lib/retro/proposals.js`의 `renderProposalPr` + `publish.js`의 `openProposalPr` — 머지도 체크 폴링도 하지 않는다) | lesson 3회 이상 인용 + 정적 검사로 표현 가능 → eslint rule |
+| **역할 예시·관점 추가** | `.claude/agents/*.md`의 `## Examples`, `## Perspectives`에 **추가만** | **다크** — lesson과 같은 제약: 근거 run ≥2, 섹션당 상한(Examples 8, Perspectives 6), 기존 항목 수정·삭제 불가, `factory/lib/retro/role-additions.js`의 `applyRoleAdditions`(L1)가 검사하고 `publish.js`가 PR·머지를 수행. `.claude/agents/**`는 `[protected].except`에 이 두 섹션의 additive diff만 허용하는 규칙으로 등록 | "reviewer-qa Examples에 'DST 경계 25시간 렌더링' 추가" |
 | **역할 변경** | `.claude/agents/*.md`의 `Lens`·`You must not`·`You receive`, `roles.toml`(신설·spawn 조건·model), CHARTER 로스터 | `factory:retro-proposal` → **사람 승인** | "reject 4건이 어떤 렌즈에도 없던 성능 문제 → `reviewer-performance` 신설 제안" |
 
 retro는 머지 수로만 트리거된다 — §8.4.
+
+(Plan 4 실행 판결, ADR-017) 위 네 출력을 만들어내는 오케스트레이션은 전부 `factory/bin/retro.js`(L1, `runRetro`) 하나다: 매 머지마다 `factory/lib/retro/harvest.js`의 `harvest()`로 **경량 수확**(LLM 없이 결정적 — must_fix 주장·미해결 dissent·needs-human 사유·flaky id·usage를 후보로 축적, `mergeCandidates`로 run들을 union)을 하고, 누적 머지 수(`merges_since`)가 CHARTER의 N에 도달했을 때만 `.factory/out/retro-candidates.json`을 써서 `claude -p "/factory-retro"`(단일 opus 분석 에이전트, `templates/factory/claude/agents/factory-retro.md`)를 부른다. 그 출력을 위 4개 처리 모듈이 조건 검사 후 집행한다 — 에이전트 자신은 라벨도 코드도 건드리지 않는다.
 
 ### 8.4 Retro 트리거 — cron 없음, 머지 수로만
 
@@ -1243,7 +1250,15 @@ N=1(머지마다 전체 retro)이 기본이며 안전하다. 두 가지 가드�
 
 - 시간 기준을 두지 않는 이유: 머지가 없으면 배울 것도 없다. 트리거가 결정적이 된다.
 - 초기값·범위는 `:technical`이 기본값으로 쓴다. 바꿀 일은 거의 없고, 바꾼다면 CHARTER PR(protected).
-- 강제 실행: `factory run retro` (N과 무관).
+- 강제 실행: `factory run retro [--force]` (`--force`는 N을 무시하고 전체 retro를 돈다).
+
+(Plan 4 실행 판결, ADR-017) **`_retro.md` 위치와 형식.** 상태는 `factory/records` 브랜치의 `docs/factory/runs/_retro.md`(§9의 hydrate/sync를 재사용) 하나에 산다. 기계 블록은 마커 `<!-- factory-retro-state:v1 -->` + JSON 펜스(커서, N, 이력, 후보, `stats`, `stats_total`)이고 그 위에 사람용 통계·이력 표를 둔다. `factory-retro.yml`은 `concurrency: { group: factory-retro, cancel-in-progress: false }`로 직렬화되므로 이 파일의 유일한 작성자는 항상 하나뿐이다.
+
+**`merges_since`는 대입이지 누적 덧셈이 아니다.** 잡이 실행된 횟수를 매번 `+1`하면 재실행이 값을 부풀리고 놓친 이벤트는 반영되지 않는다. 대신 기록에서 실제로 센 머지 수(`stats.merged`)를 그 시점의 상태에 **대입**한다 — 다만 `shouldRunFull`의 계약이 "`merges_since`는 이번 머지를 아직 포함하지 않은 값"이므로 호출부가 스스로 `+1`을 더해 판정하기 때문에, 대입 시점에는 센 값에서 1을 뺀다(이중 계산 금지). 셀 수 없을 때(수확 실패, 또는 `light_on_merge: false`로 경량 실행에서 수확 자체를 건너뛴 경우)만 `+1` 폴백을 쓴다. `light_on_merge: true`(기본)는 경량 실행마다 `harvest()`로 후보를 추출한다는 뜻이고, `false`는 머지 카운트는 그대로 전진시키되 경량 실행에서 수확을 건너뛴다는 뜻이다 — 어느 쪽이든 머지 자체를 놓치지는 않는다.
+
+**통계는 창(window)과 누적(`stats_total`)을 분리한다.** `stats`는 이번 delta 창의 값으로 **교체**된다(누적 덧셈이면 커서가 안 움직이는 경량 실행이 같은 창을 매 머지마다 이중 집계한다). `stats_total`은 **전체 retro가 돌 때만** 누적된다(그 순간이 창이 닫히는 순간이다): `merged`·`needs_human`·`usage.cost_usd`·`usage.tokens`·`rejects_by_role`·`retros`는 합산, `review_rounds_avg`는 **머지 건수로 가중한 누적 평균**(단순 평균의 평균이 아니다)이다. 사람용 표는 `| metric | this window | cumulative |` 두 열로 이 둘을 나란히 보여준다.
+
+**하이드레이트는 확정하지 못한 상태 위에 아무것도 쓰지 않는다.** `readRecordsDetailed`(§9의 `readRecords`를 감싼다)는 `{records, blobs, fetched, exists, failures, parent}`를 돌려준다 — `fetched: false`(브랜치 조회 자체가 실패)와 `exists: false`(브랜치는 확인했지만 파일이 없다 — 첫 실행)를 구별한다. 하이드레이트가 던지거나 `fetched === false`거나 `_retro.md`가 있는데 못 읽었으면 **exit 2로 아무것도 쓰지 않고 끝난다.** 첫 실행(파일이 아예 없음)은 기본 상태로 진행한다. 동기화(`syncRecords({overwrite: ["_retro.md"], expectBlob})`)는 교체 전에 그 경로의 blob이 하이드레이트 시점과 같은지 확인하고, 다르면(다른 실행이 먼저 밀었다) 아무것도 밀지 않고 실패를 돌려준다 — 그때 한 번만 재하이드레이트해 같은 순수 변이를 새 base에 재적용하고 재시도하며, 그래도 움직였으면 exit 1(맹목적 덮어쓰기 금지). `_retro.md`는 append-only 로그가 아니라 매번 통째로 재렌더되는 상태 파일이라 run 기록의 꼬리-병합 규칙이 아니라 **통째 교체**로만 동기화된다.
 
 ### 8.2 왜 이렇게 나누나
 - LLM이 쓴 지침을 프롬프트에 붙이는 것은 효과가 없고 비용만 늘린다는 결과가 있다(부록 A). 그래서 lesson은 **짧은 체크 항목**이며 상한이 있고, 인용되지 않으면 사라진다.

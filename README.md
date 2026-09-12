@@ -76,6 +76,7 @@ Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipel
 - `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
 - `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`)
 - `factory run <stage> <issue>` — run a stage locally with the exact scripts CI uses
+- `factory run retro [--force]` — run the merge-triggered retro job (light deterministic harvest every merge; full analysis + dark lessons/examples PR, human-approved proposal PR, or `--force` to skip the merge-count threshold)
 - `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
 
 Design and rationale: [`docs/superpowers/specs/2026-09-10-factory-design.md`](docs/superpowers/specs/2026-09-10-factory-design.md) · decisions: [`docs/factory/DECISIONS.md`](docs/factory/DECISIONS.md)
