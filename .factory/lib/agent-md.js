@@ -78,18 +78,29 @@ export function needsDenyAllWritesHook(name) {
 }
 
 /**
- * 훅 명령이 `deny-all-writes.sh`인 PreToolUse 엔트리가 있고, 그 matcher가 **`Bash`까지 덮는가**.
- * Bash가 빠진 matcher는 반쪽이다(F6): 전역 `block-dangerous.sh`는 *보호 경로*만 보므로, 쓰기 금지 역할이
- * `echo x > src/a.js`로 소스 트리를 고치는 것은 그 매처가 아니면 아무도 막지 않는다.
+ * 쓰기 금지 역할의 PreToolUse matcher가 덮어야 하는 도구 전부. 훅 스크립트는 이 다섯을 전부 판정하지만,
+ * matcher에서 빠진 이름은 그 판정이 **애초에 발화하지 않는다** — 빠진 이름 하나가 곧 구멍이다.
+ * `Bash`(F6): 전역 `block-dangerous.sh`는 *보호 경로*만 보므로 `echo x > src/a.js`는 그 매처가 아니면
+ * 아무도 막지 않는다. `MultiEdit`(KTB-13 r1): allow가 이제 `Edit`·`Write`·`MultiEdit`·`NotebookEdit`을
+ * 전역으로 부여하므로, 매처가 좁으면 리뷰어가 그 한 도구로 트리를 고칠 수 있다.
  */
-function hasDenyAllWritesHook(hooks) {
+export const DENY_WRITES_TOOLS = Object.freeze(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]);
+export const DENY_WRITES_MATCHER = DENY_WRITES_TOOLS.join("|");
+
+/** 훅 명령이 `deny-all-writes.sh`인 PreToolUse 엔트리가 있고, 그 matcher가 `DENY_WRITES_TOOLS`를 전부 덮는가. */
+function denyAllWritesGap(hooks) {
   const pre = hooks?.PreToolUse;
-  if (!Array.isArray(pre)) return false;
-  return pre.some((entry) =>
-    Array.isArray(entry?.hooks) &&
-    entry.hooks.some((h) => typeof h?.command === "string" && h.command.includes("deny-all-writes.sh")) &&
-    typeof entry.matcher === "string" &&
-    entry.matcher.split("|").map((s) => s.trim()).includes("Bash"));
+  if (!Array.isArray(pre)) return DENY_WRITES_TOOLS;
+  for (const entry of pre) {
+    if (!Array.isArray(entry?.hooks)) continue;
+    if (!entry.hooks.some((h) => typeof h?.command === "string" && h.command.includes("deny-all-writes.sh"))) continue;
+    if (typeof entry.matcher !== "string") continue;
+    const alts = new Set(entry.matcher.split("|").map((s) => s.trim()));
+    const missing = DENY_WRITES_TOOLS.filter((t) => !alts.has(t));
+    if (!missing.length) return null;
+    return missing;   // 배선은 있는데 매처가 좁다 — 무엇이 빠졌는지 그대로 말한다
+  }
+  return DENY_WRITES_TOOLS;
 }
 
 /** 스펙 §7.2 규칙을 검사한다. 위반이 없으면 []. */
@@ -130,8 +141,11 @@ export function lintAgentMd(text, { expectedName } = {}) {
     if (!lessons.includes(expected)) violations.push({ rule: "lessons-path", msg: `Lessons must reference ${expected}` });
   }
 
-  if (needsDenyAllWritesHook(frontmatter.name) && !hasDenyAllWritesHook(frontmatter.hooks)) {
-    violations.push({ rule: "deny-hook", msg: "write-forbidden role must have hooks.PreToolUse (matcher including Bash) wired to deny-all-writes.sh" });
+  if (needsDenyAllWritesHook(frontmatter.name)) {
+    const missing = denyAllWritesGap(frontmatter.hooks);
+    if (missing) {
+      violations.push({ rule: "deny-hook", msg: `write-forbidden role must have hooks.PreToolUse wired to deny-all-writes.sh with a matcher covering ${DENY_WRITES_MATCHER} — missing: ${missing.join(", ")}` });
+    }
   }
 
   return violations;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PreToolUse 훅. 쓰기 금지 역할(triage, plan-*, verifier, reviewer-*, loader)의 frontmatter에 매달려
-# Edit/Write/NotebookEdit을 전부 막고, 매처가 Bash까지 포함할 때는 "파일을 만드는 bash"도 막는다.
+# Edit/Write/MultiEdit/NotebookEdit을 전부 막고, 매처가 Bash까지 포함할 때는 "파일을 만드는 bash"도 막는다.
 # 그 외 도구는 항상 exit 0.
 # 예외: jq가 없으면 판정할 수 없다 → fail CLOSED(exit 2). block-dangerous.sh와 동일한 원칙(ADR-009).
 command -v jq >/dev/null 2>&1 || { echo "factory: jq missing — cannot evaluate tool, blocking" >&2; exit 2; }
@@ -16,7 +16,7 @@ QA_DIR=".factory/out/qa/"
 PROJ=${CLAUDE_PROJECT_DIR%/}
 
 case "$tool" in
-  Edit|Write)
+  Edit|Write|MultiEdit)
     file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
     # 훅 입력은 신뢰할 수 없다: `./`와 — `$CLAUDE_PROJECT_DIR`가 있을 때만 — 프로젝트 루트 접두를 한 겹씩
     # 벗겨낸 뒤 **정확한 접두** 비교를 한다. 경로에 `..`가 한 번이라도 들어 있으면(벗겨낸 뒤에도) 예외를
@@ -74,11 +74,25 @@ FLAGS='([[:space:]]+-[^[:space:];&|]+)*'
 # `>|`는 noclobber를 무시하는 리다이렉션이다 — `>`/`>>`와 같은 쓰기이므로 같이 잡는다.
 echo "$w" | grep -Eq "(^|[^-=<])>>?\|?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
 echo "$w" | grep -Eq "${CMD}tee$FLAGS[[:space:]]+$T" && deny "tee"
-echo "$w" | grep -Eq "${CMD}(rm|rmdir|mkdir|touch|truncate|ln|chmod|chown|dd)$FLAGS[[:space:]]+$T" && deny "file mutation"
+# `install`은 cp + chmod다(KTB-13 r1) — 같은 목록에 넣는다. `npm install`은 여기 걸리지 않는다:
+# $CMD가 **명령 위치**만 보므로 `npm`의 인자인 `install`은 대상이 아니다.
+echo "$w" | grep -Eq "${CMD}(rm|rmdir|mkdir|touch|truncate|ln|chmod|chown|dd|install)$FLAGS[[:space:]]+$T" && deny "file mutation"
 # cp/mv는 **목적지**(세그먼트의 마지막 토큰)만 본다 — 원본이 저장소 안이어도 목적지가 /tmp면 읽기에 가깝다.
 if echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]|$)"; then
   echo "$c" | grep -Eq "${CMD}(cp|mv)[[:space:]][^;&|]*[[:space:]][\"']?$allow[[:space:]]*($|[;&|])" || deny "cp/mv"
+  # `-t`/`--target-directory`는 목적지를 마지막 토큰이 **아닌** 곳에 둔다 — 위 규칙은 `cp -t src /tmp/a.js`를
+  # "목적지가 /tmp"로 읽고 통과시켰다(KTB-13 r1). 이 플래그가 보이면 목적지를 신뢰할 수 없으므로 그냥 막는다.
+  echo "$c" | grep -Eq "${CMD}(cp|mv)([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*t[a-zA-Z]*|--target-directory)([[:space:]=]|$)" && deny "cp/mv --target-directory"
 fi
+# `node -e`/`-p`/`--eval`/`--print`는 fs를 직접 부를 수 있는 **인라인 스크립트**다 — sed -i·perl -i·python -c와
+# 같은 대접을 한다(대상이 어디든 차단). 저장소 스크립트를 **실행**하는 `node .factory/bin/gates.js`는 그대로다:
+# 플래그가 아니라 파일을 받는 형태는 여기 걸리지 않는다. 플래그 토큰은 반드시 공백 뒤에서 시작해야 하므로
+# `node --version`·`node --experimental-vm-modules x.js`도 걸리지 않는다(첫 `-`에서만 매치를 시작한다).
+echo "$c" | grep -Eq "${CMD}node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*|--eval|--print)([[:space:]=]|$)" && deny "node inline script (-e/-p/--eval/--print)"
+# 다운로드는 쓰기다. curl은 출력 플래그가 있을 때만(플래그가 없으면 stdout — 읽기다), wget은 **언제나**:
+# wget은 플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다.
+echo "$c" | grep -Eq "${CMD}curl([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*[oO][a-zA-Z]*|--output|--output-dir|--remote-name)([[:space:]=]|$)" && deny "curl writing a file (-o/-O/--output)"
+echo "$c" | grep -Eq "${CMD}wget([[:space:]]|$)" && deny "wget (it writes into the cwd even without -O)"
 # 제자리 편집·파이썬 파일 열기는 대상이 어디든 막는다. 쓰기 금지 역할에게 정당한 제자리 편집은 없고,
 # 임시 파일이 필요하면 /tmp로 리다이렉션하는 길이 이미 열려 있다.
 echo "$c" | grep -Eq "${CMD}sed[[:space:]]+[^;&|]*-[a-zA-Z]*i[a-zA-Z]*([[:space:]]|$)" && deny "sed -i"

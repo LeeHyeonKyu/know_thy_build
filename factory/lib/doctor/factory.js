@@ -246,7 +246,9 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate }) {
   const wantDeny = template.permissions?.deny || [];
   const haveDeny = new Set(s.permissions?.deny || []);
   const missingDeny = wantDeny.filter((d) => !haveDeny.has(d));
-  out.push(missingDeny.length ? c("settings.deny", "FAIL", `deny list missing: ${missingDeny.join(", ")}`) : c("settings.deny", "PASS"));
+  out.push(missingDeny.length
+    ? c("settings.deny", "FAIL", `deny list missing: ${missingDeny.join(", ")} — run \`npx know-thy-build factory init --upgrade\``)
+    : c("settings.deny", "PASS"));
 
   // allow도 deny와 같은 무게로 검사한다(KTB-13). `--permission-mode dontAsk`는 allow에 걸리지 않는 도구
   // 호출을 묻지 않고 **거절**한다 — "묻지 않는다"가 "승인한다"가 아니다(ADR-002/ADR-008의 스파이크 관측은

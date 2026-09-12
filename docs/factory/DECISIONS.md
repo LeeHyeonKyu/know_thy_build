@@ -685,4 +685,38 @@ Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 
 
 **영향**: §6.3(allow 문단), `templates/factory/claude/settings.json`, `factory/lib/doctor/factory.js`, `factory/test/templates.test.js`·`doctor-factory.test.js`·`hooks.test.js`.
 
+#### KTB-13 fix round 1 — 훅이 실제로 무엇을 덮는가 (잔여 위험 등록부)
+
+**리뷰 지적**: allow를 부여로 바꾼 판결 자체는 옳지만, 그 근거였던 "`block-dangerous.sh`가 `Bash(*)`의 실질 경계이고 `deny-all-writes.sh`가 읽기 전용 역할을 막는다"는 문장이 **검증되지 않은 채** 쓰였다. 좁은 allow가 실제로는 두 번째 방벽이었다 — `node`·`curl`·`wget`·`install`은 애초에 allow에 없어서 훅까지 **도달하지도 않았고**, 그래서 두 훅 어느 쪽도 그 모양들을 본 적이 없다. allow를 열면서 그 모양들이 처음으로 훅 앞에 선다.
+
+**수정** (두 훅 + 매처):
+
+- `deny-all-writes.sh`(쓰기 금지 역할): `MultiEdit`을 `Edit|Write`와 같은 팔에 넣고, Bash arm에 `node -e|-p|--eval|--print`(인라인 스크립트는 대상 불문 차단 — `sed -i`·`python -c`와 같은 원칙), `curl`의 출력 플래그(`-o`·`-O`·`--output`·`--output-dir`·`--remote-name`), `wget` **전면**(플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다), `install`(파일 변형 명령 목록에 추가), `cp`/`mv`의 `-t`/`--target-directory`(목적지를 마지막 토큰이 아닌 곳에 두어 "목적지만 보는" 규칙을 통째로 빠져나갔다)를 더했다. 저장소 스크립트 실행(`node .factory/bin/prove-test.js`)과 출력 플래그 없는 `curl`은 그대로 통과한다.
+- `block-dangerous.sh`(builder, 보호 경로만): `node` 인라인 스크립트가 보호 경로를 말하는 경우, `dd of=<보호경로>`, `install … <보호경로>`, `curl`/`wget` 세그먼트에 보호 경로가 보이는 경우, `git checkout <ref> -- <보호경로>`·`git restore <보호경로>`(다른 커밋의 내용으로 워킹 트리를 덮는다), 그리고 `git apply`/`git am` **전면 차단**을 더했다. `git apply`만 전면인 이유: 패치 내용이 명령줄에 없어 훅이 **무엇이 쓰이는지 볼 수 없다** — 판정 불능은 안전이 아니다(이 파일 맨 위 jq 규칙과 같은 원칙). builder에게 손실은 없다(KTB-13 이후 `Edit`/`Write`로 직접 쓴다). 데모 #8이 쓴 우회로가 바로 이것이고, 여기서 닫힌다.
+- 매처: 쓰기 금지 역할 14개의 `hooks.PreToolUse.matcher`가 `Edit|Write|MultiEdit|NotebookEdit|Bash`다. `lintAgentMd`의 `deny-hook` 규칙이 이제 **다섯 이름 전부**를 요구하고 무엇이 빠졌는지 말한다(`DENY_WRITES_TOOLS`가 정본 — 훅 스크립트가 판정해도 매처가 좁으면 그 판정은 발화하지 않는다).
+
+**잔여 위험 등록부.** 아래가 지금 실제로 막히는 것과 막히지 않는 것이다 — "훅이 덮는다"를 다시 검증 없이 쓰지 않기 위해 표로 고정한다.
+
+| 모양 | builder (`block-dangerous`) | 쓰기 금지 역할 (`+ deny-all-writes`) |
+|---|---|---|
+| 리다이렉션 `>`/`>>`/`>\|`, `tee` | 보호 경로만 차단 | 차단(/tmp·`$TMPDIR`·`.factory/out/qa/` 제외) |
+| `sed -i`, `perl -i`, `python -c … open(` | 보호 경로만 차단 | 대상 불문 차단 |
+| `node -e\|-p\|--eval\|--print` | 보호 경로를 말하면 차단 | 대상 불문 차단 |
+| `curl -o\|-O\|--output`, `wget` | 보호 경로를 말하면 차단 | 차단(`curl`은 출력 플래그가 있을 때, `wget`은 전면) |
+| `rm`/`mv`/`mkdir`/`touch`/`ln`/`chmod`/`dd`/`install` | 보호 경로만 차단(`dd`는 `of=`) | 차단(카브아웃 제외) |
+| `cp`/`mv` 목적지, `-t`/`--target-directory` | 보호 경로가 목적지면 차단 | 차단(카브아웃 제외) |
+| `git commit/push/add/checkout/restore/rm/mv/config` | 머지·force-push·lock 삭제·보호 경로 checkout/restore/rm/mv 차단 | 쓰기 서브커맨드 전면 차단 |
+| `git apply` / `git am` | **전면 차단**(패치 내용이 보이지 않는다) | 전면 차단 |
+| `gh pr merge`, `gh api …/merge`, `factory:*` 라벨 조작 | 차단 | 차단 |
+
+**막지 못하는 것(알려진 잔여 위험)**:
+
+1. **아직 열거되지 않은 쓰기 도구.** 두 훅은 **명령 모양의 열거**다 — 화이트리스트가 아니다. `rsync`, `tar -x`, `unzip`, `patch`, `busybox`, `awk`의 `> file`이 아닌 출력 리다이렉트, `python -c` 이외의 인터프리터(`ruby -e`, `php -r`), 셸 내장 `printf -v`+`exec>`, 새로 설치된 CLI 등은 지금 목록에 없다. 이 목록은 관측될 때마다 자란다.
+2. **Bash에 닿는 역할은 builder만이 아니다.** `reviewer-*`·`factory-verifier`·`factory-loader`는 게이트·테스트를 돌려야 하므로 frontmatter `tools:`에 `Bash`가 있다. 그들의 방벽은 `deny-all-writes.sh` **하나뿐**이고, 그 훅은 위 표의 모양들만 안다. `plan-*`과 `factory-triage`·`factory-retro`는 `tools:`에 Bash가 없어 도달 자체가 없다.
+3. **L1은 PR에 도달한 diff만 본다.** merge 스테이지의 보호 경로·`additive_only` 거부와 `factory/integrity`는 **커밋되어 push된 것**을 판정한다. reviewer·verifier·loader는 커밋하지 않으므로, 그들이 워크트리에서 파일을 고쳐 게이트 결과나 자기 판정 근거를 바꾸면 **어떤 diff에도 나타나지 않는다**. 그 경로의 유일한 방벽이 (2)의 훅 하나라는 뜻이다. `stop-guard.sh`가 SubagentStop에서 더러운 트리를 거부하는 것이 부분적인 사후 감지다(쓰기 금지 역할은 그 가드에서 면제되어 있으므로 — ADR-016 F6 — 감지도 아니다).
+4. **훅 입력은 신뢰할 수 없다.** 판정은 명령 **문자열**에 대한 정규식이다. 변수 확장(`P=pack; echo x > "$P"age.json`), base64, `eval`, 힙 스크립트 파일 경유는 문자열에 보호 경로가 보이지 않으므로 빠져나간다. ADR-013의 원칙(훅 입력 불신)이 여기서도 상한이다 — 훅은 **실수와 게으른 우회**를 막지 실행 중인 적대적 에이전트를 막지 못한다.
+5. **오탐(의도적).** `git restore --staged package.json`(인덱스만 건드린다), `node -p`로 보호 경로를 **읽는** 것, `rm -rf node_modules/foo/package.json`(N4)은 막힌다. 전부 "지우지 못해 불편한 쪽이 조용히 지워지는 쪽보다 낫다"는 기존 판결을 따른다.
+
+이 등록부의 요지: **넓어진 allow의 대가는 "훅이 아는 모양의 목록"에 의존하게 된 것**이고, 그 목록은 완전하지 않다. 완전해질 수도 없다 — 완전함을 원하면 allow를 다시 좁혀야 하는데, 그것이 KTB-13이 고친 바로 그 고장이다. 실제 방어선은 여전히 **L0/L1**(변조는 체크가, 보호 경로는 사람 머지가)이고, 훅은 그 앞의 싼 그물이다.
+
 (이후 항목은 dogfood 진행에 따라 추가)

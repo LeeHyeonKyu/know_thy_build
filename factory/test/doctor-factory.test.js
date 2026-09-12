@@ -310,6 +310,8 @@ test("checkSettings: deny subset and hook commands", () => {
   const template = { permissions: { deny: ["A", "B"] }, hooks: { Stop: [{ hooks: [{ command: ".claude/hooks/s.sh" }] }] } };
   const c = by(checkSettings({ settings: { permissions: { deny: ["A"] }, hooks: {} }, template }));
   expect(c["settings.deny"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("B") });
+  // KTB-13 r1: deny도 allow와 같은 고치는 법을 말한다 — 두 FAIL이 나란히 뜰 때 한쪽만 안내하면 안 된다.
+  expect(c["settings.deny"].detail).toContain("factory init --upgrade");
   expect(c["settings.hooks"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("s.sh") });
   expect(by(checkSettings({ settings: null, template }))["settings.present"].level).toBe("FAIL");
 });

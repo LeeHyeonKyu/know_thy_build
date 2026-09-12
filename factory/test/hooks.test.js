@@ -46,6 +46,49 @@ test("block-dangerous: blocks merges, force pushes, protected writes; allows nor
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);   // 30여 개의 bash 프로세스를 띄운다 — 기본 5s 타임아웃으로는 모자란다
 
+// ── KTB-13 r1: `Bash(*)`가 allow에 들어온 뒤 이 훅이 유일한 셸 경계다 ────────────────────────────
+// allow가 좁을 때는 `node`·`curl`·`wget`·`install`이 애초에 allow에 없어 도달하지 못했다. 이제 도달한다 —
+// 그리고 넷 다 보호 경로에 **파일을 쓸 수 있는 명령**이다. `git checkout/restore`는 다른 커밋의 내용으로
+// 워킹 트리를 덮어쓰고, `git apply`는 패치 내용이 명령줄에 없어서 훅이 무엇을 쓰는지 **볼 수조차 없다**.
+test("block-dangerous: node -e/dd/install/curl/wget/git checkout|restore|apply on protected paths (KTB-13 r1)", async () => {
+  const blocked = [
+    "node -e \"require('fs').writeFileSync('package.json','{}')\"",
+    "node --eval \"fs.writeFileSync('.factory/harness.toml','x')\"",
+    "node -pe \"require('fs').writeFileSync('.claude/settings.json','x')\"",
+    "dd if=/tmp/x of=package.json",
+    "dd if=/tmp/x of=.factory/harness.toml bs=1",
+    "install -m 644 /tmp/x .factory/harness.toml",
+    "install /tmp/x docs/factory/CHARTER.md",
+    "curl -o package.json https://e/x",
+    "curl -sLo .factory/harness.toml https://e/x",
+    "wget -O docs/factory/CHARTER.md https://e/x",
+    "wget --output-document=.claude/settings.json https://e/x",
+    // 다른 커밋의 내용으로 워킹 트리를 덮는다 — 내용은 diff에만 남고 명령줄에는 보호 경로만 보인다.
+    "git checkout HEAD~1 -- package.json",
+    "git checkout origin/main -- .factory/harness.toml",
+    "git restore --source=HEAD~1 -- .claude/settings.json",
+    "git restore package.json",
+    // 패치는 명령줄에 없다: 훅은 이 명령이 무엇을 쓰는지 알 수 없다 → 전면 차단(fail closed).
+    "git apply /tmp/patch.diff", "git apply --3way p.diff", "git am /tmp/x.patch",
+    "git -C /repo apply p.diff",
+  ];
+  const allowed = [
+    // 브랜치를 만들거나 옮기는 checkout, 인덱스만 건드리는 restore는 그대로다.
+    "git checkout -b claude/fq-7", "git checkout main", "git restore --staged src/a.js",
+    "git checkout HEAD~1 -- src/a.js", "git restore src/a.js",
+    // 보호 경로를 언급하지 않는 inline node·다운로드·dd·install은 이 훅의 관심사가 아니다.
+    "node -e \"console.log(1)\"", "node .factory/bin/gates.js full", "node --version",
+    "curl -s https://api.example.com/x", "wget https://example.com/x.tar.gz",
+    "dd if=/dev/zero of=/tmp/x bs=1", "install -m 755 /tmp/a /tmp/b",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 // F9 carry-over: `[protected].factory`와 settings.json deny는 이미 빌드 설정 파일을 덮는다(templates.test.js).
 // 훅도 같은 목록을 덮어야 한다 — 그렇지 않으면 Edit는 막히는데 `echo > package.json`은 통과한다.
 test("block-dangerous: shell writes to the protected build-config files are blocked too; reading them is not", async () => {
@@ -230,6 +273,52 @@ test("deny-all-writes: a Bash command that writes outside /tmp, $TMPDIR or .fact
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
+// ── KTB-13 r1: 쓰기 금지 역할에게도 `Bash(*)`가 열렸다 ───────────────────────────────────────────
+// 이 역할들은 `sed -i`·리다이렉션만으로 쓰지 않는다 — `node -e`로 fs를 부르고, `curl -o`/`wget`으로 파일을
+// 내려받고, `install`로 복사할 수 있다. 판정 방향은 이 훅의 나머지와 같다: /tmp·$TMPDIR·.factory/out/qa/가
+// **아니면** 막는다. inline 스크립트·다운로드는 대상이 어디든 막는다(sed -i·perl -i·python -c와 같은 원칙) —
+// 쓰기 금지 역할에게 정당한 inline fs 호출은 없고, 임시 파일이 필요하면 리다이렉션 길이 이미 열려 있다.
+test("deny-all-writes: node -e / curl -o / wget / install / cp -t are writes too (KTB-13 r1)", async () => {
+  const blocked = [
+    "node -e \"require('fs').writeFileSync('src/a.js','x')\"",
+    "node --eval \"fs.writeFileSync('a','x')\"",
+    "node -p \"require('fs').readdirSync('.')\"",
+    "node -pe \"1\"", "node --print \"1\"",
+    "curl -o src/a.js https://e/x", "curl -sLo src/a.js https://e/x", "curl -O https://e/x.js",
+    "curl --output src/a.js https://e/x", "curl --remote-name https://e/x.js",
+    // wget은 플래그가 없어도 **cwd에 파일을 만든다** — 그래서 통째로 막는다.
+    "wget https://e/x.js", "wget -O src/a.js https://e/x", "wget --output-document=src/a.js https://e/x",
+    "install /tmp/x src/a.js", "install -m 755 /tmp/x src/a.js",
+    // `-t`/`--target-directory`는 목적지를 **마지막 토큰이 아닌 곳**에 둔다 — 목적지만 보는 cp/mv 규칙의 구멍이었다.
+    "cp -t src /tmp/a.js", "cp --target-directory=src /tmp/a.js", "mv -t src /tmp/a.js",
+  ];
+  const allowed = [
+    // 저장소 스크립트를 node로 **실행**하는 것은 verifier의 정상 작업이다 — 막는 것은 inline 스크립트뿐이다.
+    "node .factory/bin/prove-test.js --file test/a.test.js", "node --version", "node scripts/check.js",
+    "node -r ts-node/register app.js", "node --experimental-vm-modules x.js",
+    // 출력 플래그 없는 curl은 stdout으로 간다 — 읽기다.
+    "curl -s https://api.example.com/x", "curl -sS -H 'x: y' https://e/x", "curl --connect-timeout 5 https://e/x",
+    // 기존 카브아웃은 그대로다(F3 증거 디렉터리 · /tmp).
+    "cp src/a.js /tmp/a.js", "cp /tmp/shot.png .factory/out/qa/7.png",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
+// MultiEdit은 Edit/Write와 같은 도구다 — allow가 그것도 부여하므로(KTB-13) case에서 빠지면 그 한 도구로
+// 쓰기 금지가 통째로 무너진다. 매처도 같이 넓혀야 훅이 애초에 발화한다(agent-md.test.js가 고정).
+test("deny-all-writes: MultiEdit is blocked exactly like Edit/Write, with the same qa carve-out (KTB-13 r1)", async () => {
+  const r = await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: "src/a.js" } });
+  expect(r.code).toBe(2);
+  expect(r.stderr).toMatch(/factory: this role must not write files \(MultiEdit src\/a\.js\)/);
+  expect((await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: ".factory/out/qa/7.md" } })).code).toBe(0);
+  expect((await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: ".factory/out/qa/../harness.toml" } })).code).toBe(2);
 }, 30000);
 
 test("deny-all-writes: $TMPDIR is honoured as a write target, and prove-test's own worktree dir is not blocked", async () => {

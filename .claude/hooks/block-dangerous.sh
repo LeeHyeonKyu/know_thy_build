@@ -55,6 +55,32 @@ echo "$p" | grep -Eq "(^|[;&|[:space:]])${G}(rm|mv)[[:space:]]+[^;&|]*$prot" && 
 # 지우지 못해 불편한 쪽이 조용히 지워지는 쪽보다 낫다고 보고 그대로 둔다(cp는 읽기라 계속 허용).
 echo "$p" | grep -Eq "(^|[;&|[:space:]])(rm|mv)[[:space:]][^;&|]*$prot" && block "rm/mv touching protected path"
 
+# ── KTB-13 r1: `Bash(*)`가 allow에 들어온 뒤에 도달 가능해진 쓰기 모양들 ──────────────────────────
+# allow가 좁을 때는 `node`·`curl`·`wget`·`install`·`dd`가 애초에 allow 밖이라 이 훅까지 오지도 않았다.
+# 이제 온다 — 그리고 넷 다 보호 경로에 파일을 쓸 수 있다. 위의 `sed -i`/`python -c` 줄들과 같은 모양이다.
+# `node -e|-p|--eval|--print`의 스크립트 본문이 보호 경로를 말하면 막는다. 저장소 스크립트를 **실행**하는
+# `node .factory/bin/gates.js full`은 그대로다(플래그가 없다) — 플래그 토큰은 공백 뒤에서만 매치를 시작하므로
+# `node --version`도 걸리지 않는다.
+echo "$p" | grep -Eq "(^|[;&|[:space:]])node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*|--eval|--print)[^;&|]*$prot" && block "node inline script touching protected path"
+echo "$p" | grep -Eq "(^|[;&|[:space:]])dd[[:space:]]+[^;&|]*of=[\"']?[^[:space:]\"']*$prot" && block "dd onto protected path"
+echo "$p" | grep -Eq "(^|[;&|[:space:]])install[[:space:]]+[^;&|]*$prot" && block "install onto protected path"
+# curl/wget은 세그먼트 안에 보호 경로가 보이면 막는다 — `-o`·`-O`·`--output`·`--output-document` 중
+# 어느 철자인지 가리지 않는다(출력 플래그의 형태를 하나씩 쫓는 것보다 목적지를 보는 쪽이 튼튼하다).
+echo "$p" | grep -Eq "(^|[;&|[:space:]])curl[[:space:]]+[^;&|]*$prot" && block "curl downloading onto protected path"
+echo "$p" | grep -Eq "(^|[;&|[:space:]])wget[[:space:]]+[^;&|]*$prot" && block "wget downloading onto protected path"
+# `git checkout <ref> -- <path>` · `git restore [--source=…] <path>`는 **다른 커밋의 내용으로 워킹 트리를
+# 덮어쓴다** — 내용은 명령줄에 없고 경로만 보인다. 브랜치를 만들거나 옮기는 checkout(`-b`, `git checkout main`)과
+# 인덱스만 되돌리는 `git restore --staged src/a.js`는 보호 경로를 말하지 않으므로 그대로 통과한다.
+# 알려진 오탐: `git restore --staged package.json`(인덱스만)도 막힌다 — 워킹 트리를 덮는 형태와 명령줄에서
+# 구별되지 않으므로 막는 쪽을 택한다.
+echo "$p" | grep -Eq "(^|[;&|[:space:]])${G}(checkout|restore)[[:space:]]+[^;&|]*$prot" && block "git checkout/restore onto protected path"
+# `git apply`/`git am`은 **패치 파일**이 쓰는 내용을 명령줄에 싣지 않는다 — 이 훅은 무엇이 쓰이는지 볼 수조차
+# 없으므로 보호 경로만 골라 막을 방법이 없다. 판정 불능은 "안전"이 아니다(이 파일 맨 위의 jq 규칙과 같은 원칙):
+# 전면 차단한다. builder는 손실이 없다 — KTB-13 이후 `Edit`/`Write`가 allow에 있어서 파일을 직접 쓴다.
+# (데모 #8이 편집을 `git apply`에 실어 나른 것은 그때 Edit/Write가 거절됐기 때문이고, 그 우회로가 바로
+#  여기서 닫힌다. L1은 PR에 도달한 diff만 본다 — 워크트리 안에서 끝나는 변조는 diff가 되지 않는다.)
+echo "$c" | grep -Eq "(^|[;&|[:space:]])${G}(apply|am)([[:space:]]|$)" && block "git apply/am (patch contents are invisible to this hook — use Edit/Write)"
+
 # 상태 라벨은 L1(`transition.js`)만 옮긴다 — 에이전트가 `factory:*` 라벨을 직접 붙이거나 떼면 라벨 그래프가
 # 거부했어야 할 전이가 조용히 일어나고, 다음 스테이지 워크플로가 그 라벨 이벤트로 깨어난다(F13).
 # 코멘트는 막지 않는다: handoff·rework-response는 코멘트로 나간다.

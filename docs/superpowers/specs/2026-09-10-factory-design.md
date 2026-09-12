@@ -1085,7 +1085,7 @@ tools: Read, Grep, Glob, Bash
 model: opus
 hooks:
   PreToolUse:
-    - matcher: Edit|Write|NotebookEdit|Bash    # (Plan 3 실행 판결, ADR-016)
+    - matcher: Edit|Write|MultiEdit|NotebookEdit|Bash    # (Plan 3 실행 판결, ADR-016 · MultiEdit은 ADR-020 KTB-13 r1)
       hooks: [{ type: command, command: .claude/hooks/deny-all-writes.sh }]
 ---
 

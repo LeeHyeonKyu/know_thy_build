@@ -5,7 +5,7 @@ tools: Read, Grep, Glob
 model: opus
 hooks:
   PreToolUse:
-    - matcher: Edit|Write|NotebookEdit|Bash
+    - matcher: Edit|Write|MultiEdit|NotebookEdit|Bash
       hooks: [{ type: command, command: .claude/hooks/deny-all-writes.sh }]
 ---
 
