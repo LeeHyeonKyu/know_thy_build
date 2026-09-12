@@ -31,6 +31,29 @@ test("setFactoryLabel removes other factory state labels and adds the new one", 
   expect(edit.args).toEqual(["issue", "edit", "5", "-R", repo, "--remove-label", "factory:ready", "--add-label", "factory:planned"]);
 });
 
+// KTB-9: tier는 상태와 직교한다 — setFactoryLabel(STATES만 본다)을 태우면 상태 라벨이 떨어져 나간다.
+test("setTierLabel swaps only the other factory:tier-* labels, leaving state labels alone", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a.includes("view"), result: { code: 0, stdout: JSON.stringify({ number: 2, title: "", body: "", labels: [{ name: "factory:ready" }, { name: "factory:tier-docs" }, { name: "bug" }] }), stderr: "" } },
+    { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  await gh.setTierLabel(2, "factory:tier-standard");
+  const edit = run.calls.find((c) => c.args.includes("edit"));
+  expect(edit.args).toEqual(["issue", "edit", "2", "-R", repo, "--remove-label", "factory:tier-docs", "--add-label", "factory:tier-standard"]);
+});
+
+test("setTierLabel on an issue with no tier yet is a plain add (one gh call, no removals)", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a.includes("view"), result: { code: 0, stdout: JSON.stringify({ number: 2, title: "", body: "", labels: [{ name: "factory:queue" }] }), stderr: "" } },
+    { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  await gh.setTierLabel(2, "factory:tier-standard");
+  expect(run.calls.filter((c) => c.args.includes("edit"))).toHaveLength(1);
+  expect(run.calls.find((c) => c.args.includes("edit")).args).toEqual(["issue", "edit", "2", "-R", repo, "--add-label", "factory:tier-standard"]);
+});
+
 test("comment() posts body via --body-file from stdin", async () => {
   const run = makeFakeRun([{ match: (c, a) => a.includes("comment"), result: { code: 0, stdout: "https://x/1#issuecomment-99", stderr: "" } }]);
   const gh = makeGh({ run, repo });

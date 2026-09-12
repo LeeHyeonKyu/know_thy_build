@@ -1,4 +1,4 @@
-import { STATES } from "./labels.js";
+import { STATES, TIER_LABELS } from "./labels.js";
 
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
@@ -78,6 +78,15 @@ export function makeGh({ run, repo }) {
       const current = (await this.issue(n)).labels.filter((l) => STATES.has(l) && l !== label);
       const args = ["issue", "edit", String(n), "-R", repo, ...current.flatMap((l) => ["--remove-label", l]), "--add-label", label];
       await gh(args);
+    },
+    /**
+     * tier 라벨을 정확히 하나로 맞춘다(KTB-9). `setFactoryLabel`을 쓸 수 없다 — 그건 STATES만 보고
+     * tier는 상태와 직교하므로, 그 함수를 태우면 상태 라벨이 떨어져 나간다. 한 호출로 끝낸다
+     * (`gh issue edit`은 remove/add를 한 번에 받는다).
+     */
+    async setTierLabel(n, label) {
+      const stale = (await this.issue(n)).labels.filter((l) => TIER_LABELS.has(l) && l !== label);
+      await gh(["issue", "edit", String(n), "-R", repo, ...stale.flatMap((l) => ["--remove-label", l]), "--add-label", label]);
     },
     async prChecks(pr) {
       return JSON.parse(await gh(["pr", "checks", String(pr), "-R", repo, "--json", "name,state,bucket"]));

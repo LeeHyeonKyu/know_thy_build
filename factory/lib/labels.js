@@ -4,6 +4,14 @@ export const STATES = new Set([
   "factory:blocked", "factory:needs-human",
 ]);
 
+/**
+ * §3.2 tier 라벨. 상태 라벨과 **직교**한다 — 동시에 붙어 있고 전이 그래프에 참여하지 않는다.
+ * 다만 한 이슈에 하나뿐이다(tier는 triage의 단일 판정이다). 카탈로그 정의는 `label-catalog.js`.
+ */
+export const TIERS = ["docs", "standard", "load-bearing"];
+export const tierLabel = (tier) => `factory:tier-${tier}`;
+export const TIER_LABELS = new Set(TIERS.map(tierLabel));
+
 /** §3.2 전이 그래프. 키: from, 값: 허용된 to. */
 export const TRANSITIONS = new Map([
   ["backlog", new Set(["factory:queue"])],

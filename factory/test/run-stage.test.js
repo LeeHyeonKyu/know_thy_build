@@ -455,6 +455,60 @@ test("a localEntry that throws is swallowed (best-effort), recorded, and doesn't
   expect(lines.some((l) => /local entry: aborted — gh label failed/.test(l))).toBe(true);
 });
 
+// ── KTB-9: tier 라벨은 triage가 붙인다(§3.2) ──────────────────────────────
+// `label-catalog.js`가 `factory:tier-*` 셋을 만들어 두는데 붙이는 코드가 어디에도 없었다 —
+// tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수 없었다.
+
+const triageDeps = (over = {}) => baseDeps({
+  verifyStage: () => ({ ok: true, reasons: [], data: { disposition: "ready", tier: "load-bearing" } }),
+  transition: async () => ({ ok: true, to: "factory:ready" }),
+  ...over,
+});
+
+test("triage applies the tier label after the handoff verifies — and only after", async () => {
+  const calls = [];
+  const setTierLabel = vi.fn(async (t) => calls.push(`tier:${t}`));
+  const deps = triageDeps({
+    setTierLabel,
+    verifyStage: () => { calls.push("verify"); return { ok: true, reasons: [], data: { disposition: "ready", tier: "load-bearing" } }; },
+    writeHandoff: async () => calls.push("handoff"),
+    runRecord: (l) => calls.push(...l),
+  });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(setTierLabel).toHaveBeenCalledWith("load-bearing");
+  expect(calls.indexOf("verify")).toBeLessThan(calls.indexOf("tier:load-bearing"));
+  expect(calls).toContain("tier: factory:tier-load-bearing");
+});
+
+test("a failed verify never applies a tier label — an unverified tier is the agent's self-report", async () => {
+  const setTierLabel = vi.fn();
+  const deps = triageDeps({ setTierLabel, verifyStage: () => ({ ok: false, reasons: ["tier is required"], data: null }) });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(2);
+  expect(setTierLabel).not.toHaveBeenCalled();
+});
+
+test("only triage labels the tier, and only for a tier in the catalog", async () => {
+  const setTierLabel = vi.fn();
+  for (const stage of ["plan", "implement", "review"]) {
+    await runStage({ stage, issue: 7, deps: triageDeps({ setTierLabel }) });
+  }
+  expect(setTierLabel).not.toHaveBeenCalled();
+  const bogus = triageDeps({ setTierLabel, verifyStage: () => ({ ok: true, reasons: [], data: { disposition: "ready", tier: "enormous" } }) });
+  expect(await runStage({ stage: "triage", issue: 7, deps: bogus })).toBe(0);
+  expect(setTierLabel).not.toHaveBeenCalled();
+});
+
+test("a tier label that fails to apply is recorded but never fails the stage — the handoff still carries the tier", async () => {
+  const lines = [];
+  const deps = triageDeps({
+    setTierLabel: async () => { throw new Error("gh label boom"); },
+    writeHandoff: vi.fn(async () => {}), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(deps.writeHandoff).toHaveBeenCalled();
+  expect(lines.some((l) => /tier: factory:tier-load-bearing label failed — gh label boom/.test(l))).toBe(true);
+});
+
 test("makeLocalEntry: backlog issue with no factory label → sets factory:queue, comments the transition marker, returns the record line", async () => {
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
