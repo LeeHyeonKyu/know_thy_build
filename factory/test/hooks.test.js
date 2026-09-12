@@ -123,7 +123,7 @@ test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything els
     expect((await write(p)).code, p).toBe(0);
     expect((await write(p, "Edit")).code, p).toBe(0);
   }
-  // 예외는 저장소 상대 경로에만 준다 — 절대 경로는 이 저장소 안인지 훅이 알 수 없다
+  // 절대 경로는 `$CLAUDE_PROJECT_DIR`를 모르는 한 거절한다 — 이 저장소 안인지 판단할 근거가 없다
   for (const p of [".factory/out/qa/../gates.json", "src/.factory/out/qa/../../a.js", ".factory/out/gates.json",
                    ".factory/out/qa", "x.factory/out/qa/7.log", "src/a.js", "",
                    "/repo/.factory/out/qa/7.log", "/tmp/evil/.factory/out/qa/7.log"]) {
@@ -133,6 +133,57 @@ test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything els
   }
   // NotebookEdit은 예외가 없다 — 증거는 파일이지 노트북이 아니다
   expect((await write(".factory/out/qa/7.ipynb", "NotebookEdit")).code).toBe(2);
+}, 30000);
+
+// run-stage가 `claude -p`에 넘기는 CLAUDE_PROJECT_DIR가 있으면, 도구가 주는 **절대** file_path도 받는다 —
+// 그것이 없으면 실제 실행에서 qa는 증거를 한 줄도 남길 수 없다(도구는 보통 절대 경로를 준다).
+test("deny-all-writes: an absolute qa path is accepted only under $CLAUDE_PROJECT_DIR", async () => {
+  const proj = "/repo";
+  const write = (file_path, env, tool = "Write") =>
+    run("bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify({ tool_name: tool, tool_input: { file_path } }), env: { ...process.env, ...env } });
+
+  for (const p of ["/repo/.factory/out/qa/7.png", "/repo/.factory/out/qa/deep/7.log"]) {
+    expect((await write(p, { CLAUDE_PROJECT_DIR: proj })).code, p).toBe(0);
+    expect((await write(p, { CLAUDE_PROJECT_DIR: `${proj}/` })).code, `${p} (trailing slash)`).toBe(0);
+    expect((await write(p, { CLAUDE_PROJECT_DIR: proj }, "Edit")).code, `${p} Edit`).toBe(0);
+  }
+  // 프로젝트 밖 · 프로젝트 안이지만 qa 디렉터리가 아님 · 트래버설 · 루트를 모를 때 → 전부 거절
+  for (const [p, env] of [
+    ["/tmp/evil/.factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: proj }],
+    ["/elsewhere/.factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: proj }],
+    ["/repo/sub/.factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: proj }],
+    ["/repo/.factory/out/qa/../harness.toml", { CLAUDE_PROJECT_DIR: proj }],
+    ["/repo/../evil/.factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: proj }],
+    ["/repo/src/a.js", { CLAUDE_PROJECT_DIR: proj }],
+    ["/repo/.factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: "" }],
+  ]) {
+    const r = await write(p, env);
+    expect(r.code, `${p} @ ${env.CLAUDE_PROJECT_DIR || "<unset>"}`).toBe(2);
+    expect(r.stderr, p).toMatch(/must not write files/);
+  }
+  // 상대 경로는 CLAUDE_PROJECT_DIR와 무관하게 그대로 통과한다
+  expect((await write(".factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: "" })).code).toBe(0);
+}, 30000);
+
+test("deny-all-writes: the Bash arm accepts the same absolute qa target under $CLAUDE_PROJECT_DIR", async () => {
+  const sh = (command, env) =>
+    run("bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify(cmd(command)), env: { ...process.env, ...env } });
+  const proj = { CLAUDE_PROJECT_DIR: "/repo" };
+
+  for (const c of ["echo x > /repo/.factory/out/qa/7.log",
+                   "npx playwright test --output /repo/.factory/out/qa/pw 2>&1",
+                   "cp /tmp/shot.png /repo/.factory/out/qa/7-shot.png"]) {
+    expect((await sh(c, proj)).code, c).toBe(0);
+  }
+  for (const [c, env] of [
+    ["echo x > /repo/.factory/out/qa/7.log", { CLAUDE_PROJECT_DIR: "" }],
+    ["echo x > /elsewhere/.factory/out/qa/7.log", proj],
+    ["echo x > /repo/src/a.js", proj],
+  ]) {
+    const r = await sh(c, env);
+    expect(r.code, `${c} @ ${env.CLAUDE_PROJECT_DIR || "<unset>"}`).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
+  }
 }, 30000);
 
 // ── F6(a): 쓰기 금지 역할의 Bash arm ─────────────────────────────────────────────────────────

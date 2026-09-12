@@ -11,16 +11,21 @@ tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
 # 그 밖에는 OS 임시 디렉터리만 허용한다 — prove-test가 워크트리를 거기에 만들고, 리뷰어가 중간 산출물을
 # 둘 곳도 거기뿐이다.
 QA_DIR=".factory/out/qa/"
+# 저장소 루트. run-stage.js가 `claude -p`에 넘겨 주는 값이고, 도구가 절대 경로를 줄 때 그것이 **이 저장소
+# 안인지** 판단할 수 있는 유일한 근거다. 비어 있으면 절대 경로는 전부 거절한다(모르면 막는다).
+PROJ=${CLAUDE_PROJECT_DIR%/}
 
 case "$tool" in
   Edit|Write)
     file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
-    # 훅 입력은 신뢰할 수 없다: `./` 한 겹만 벗겨낸 뒤 **정확한 접두** 비교를 하고, 경로에 `..`가 한 번이라도
-    # 들어 있으면 예외를 적용하지 않는다(정규화 없이 탈출을 허용할 수는 없다).
-    # 예외는 **저장소 상대 경로**에만 준다. 절대 경로는 `/.factory/out/qa/`를 포함하더라도 거절한다 —
-    # 훅 입력만 보고는 그 절대 경로가 이 저장소 안인지(`/tmp/evil/.factory/out/qa/x`인지) 알 수 없고,
-    # 모르는 것을 허용하는 예외는 예외가 아니다.
+    # 훅 입력은 신뢰할 수 없다: `./`와 — `$CLAUDE_PROJECT_DIR`가 있을 때만 — 프로젝트 루트 접두를 한 겹씩
+    # 벗겨낸 뒤 **정확한 접두** 비교를 한다. 경로에 `..`가 한 번이라도 들어 있으면(벗겨낸 뒤에도) 예외를
+    # 적용하지 않는다 — 정규화 없이 탈출을 허용할 수는 없다. 프로젝트 밖의 절대 경로는
+    # (`/tmp/evil/.factory/out/qa/x`) 여전히 거절한다.
     f=${file#./}
+    if [ -n "$PROJ" ]; then
+      case "$f" in "$PROJ"/*) f=${f#"$PROJ"/} ;; esac
+    fi
     case "$f" in
       *..*|/*) ;;
       "$QA_DIR"?*) exit 0 ;;
@@ -47,12 +52,18 @@ c=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || 
 
 deny() { echo "factory: this role must not write (bash: $1)" >&2; exit 2; }
 
+ere() { printf '%s' "$1" | sed -E 's/[][^$.*+?(){}|\\]/\\&/g'; }
 tmp=${TMPDIR:-/tmp}; tmp=${tmp%/}
-esc=$(printf '%s' "$tmp" | sed -E 's/[][^$.*+?(){}|\\]/\\&/g')
-allow="(\./)?($esc/[^[:space:]\"]*|/tmp/[^[:space:]\"]*|/private/tmp/[^[:space:]\"]*|\\\$\{?TMPDIR\}?/[^[:space:]\"]*|$QA_DIR[^[:space:]\"]*|/dev/(null|stdout|stderr))"
+esc=$(ere "$tmp")
+QA_RE='\.factory/out/qa/'
+# 절대 경로로 주어진 qa 증거 경로(`$CLAUDE_PROJECT_DIR/.factory/out/qa/…`)도 같은 대접을 받는다 —
+# `--output` 인자나 도구가 만든 경로는 절대 경로로 오기 때문이다. 프로젝트 루트를 모르면 이 대안은 없다.
+projqa=""
+[ -n "$PROJ" ] && projqa="$(ere "$PROJ")/$QA_RE[^[:space:]\"]*|"
+allow="(\./)?($projqa$esc/[^[:space:]\"]*|/tmp/[^[:space:]\"]*|/private/tmp/[^[:space:]\"]*|\\\$\{?TMPDIR\}?/[^[:space:]\"]*|$QA_RE[^[:space:]\"]*|/dev/(null|stdout|stderr))"
 # `..`가 허용 접두 뒤에 붙으면 카브아웃을 통째로 끈다(block-dangerous.sh와 같은 규칙).
 w="$c"
-printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_DIR)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
+printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_RE)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
 
 # 허용되지 않은 대상이 한 글자라도 남아 있는가. 앞의 `-`는 플래그이므로 대상이 아니다.
 T='["]?[^-[:space:]"&|;<>]'
