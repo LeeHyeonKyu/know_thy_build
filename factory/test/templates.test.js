@@ -83,6 +83,15 @@ test("settings.json template has the §6.3 deny list, all four hook events, and 
   for (const ev of Object.keys(s.hooks)) for (const c of cmds(ev)) expect(existsSync(join(hooksDir, c.replace(".claude/hooks/", ""))), c).toBe(true);
 });
 
+test("settings.json allows the gh surface the builder needs, including `gh pr edit` for --body-file bodies", () => {
+  const s = JSON.parse(read("claude/settings.json"));
+  for (const a of ["Bash(gh pr view*)", "Bash(gh pr comment*)", "Bash(gh pr create*)", "Bash(gh pr edit*)"]) {
+    expect(s.permissions.allow, a).toContain(a);
+  }
+  // 머지는 여전히 builder의 일이 아니다 — allow가 넓어져도 deny가 이긴다.
+  expect(s.permissions.deny).toContain("Bash(gh pr merge*)");
+});
+
 test("settings.json deny covers the build-config files, matching [protected].factory (F9)", () => {
   const s = JSON.parse(read("claude/settings.json"));
   const h = toml(read("factory/harness.toml"));
@@ -101,6 +110,38 @@ test("dispatcher commands exist for the four LLM stages only and name their work
     expect(t).toContain(".factory/out/context.json");
   }
   expect(existsSync(join(T, "claude/commands/factory-merge.md"))).toBe(false);
+});
+
+// ── Task 6: the Claude-side templates the four stages actually load ──────────────────────────
+// ADR-015 / P3-R7: there is no merge workflow (merge is a script) and retro is Plan 4.
+const WORKFLOW_STAGES = ["triage", "plan", "implement", "review"];
+
+test("the four stage workflows exist, each meta.name is its own basename, and there is no factory-merge.js", () => {
+  const dir = join(T, "claude/workflows");
+  expect(readdirSync(dir).sort()).toEqual(WORKFLOW_STAGES.map((s) => `factory-${s}.js`).sort());
+  for (const s of WORKFLOW_STAGES) {
+    const src = read(`claude/workflows/factory-${s}.js`);
+    // `agentType`/`Workflow(factory-<s>)` 배선이 파일명을 그대로 쓴다 — meta.name이 어긋나면 디스패처가 못 찾는다.
+    const m = /^\s*name:\s*['"]([^'"]+)['"]/m.exec(src);
+    expect(m && m[1], `factory-${s}.js meta.name`).toBe(`factory-${s}`);
+    expect(src.startsWith("export const meta = {"), `factory-${s}.js first line`).toBe(true);
+  }
+  expect(existsSync(join(dir, "factory-merge.js"))).toBe(false);
+});
+
+test("every roles.toml agent path Plan 3 owns resolves to a real agent template", () => {
+  const roles = toml(read("factory/roles.toml"));
+  const agentPath = (p) => join(T, "claude", p.replace(".claude/", ""));
+  // triage/plan/implement/review의 모든 역할 파일은 실재해야 한다 — roles.toml의 경로가 곧 설치 대상이다.
+  const entries = [["triage", roles.triage]];
+  for (const stage of ["plan", "implement", "review"]) {
+    for (const [name, def] of Object.entries(roles[stage])) entries.push([`${stage}.${name}`, def]);
+  }
+  for (const [id, def] of entries) expect(existsSync(agentPath(def.agent)), `${id} → ${def.agent}`).toBe(true);
+  // loader는 roles.toml에 없다(로스터 역할이 아니라 workflow의 첫 스텝이다) — 그래도 설치는 된다.
+  expect(existsSync(agentPath(".claude/agents/factory-loader.md"))).toBe(true);
+  // merge.integrator / retro.analyst는 의도적으로 없다(ADR-015 R3, retro는 Plan 4).
+  for (const def of [roles.merge.integrator, roles.retro.analyst]) expect(existsSync(agentPath(def.agent)), def.agent).toBe(false);
 });
 
 test("ci-settings, package.json, quarantine templates parse", () => {

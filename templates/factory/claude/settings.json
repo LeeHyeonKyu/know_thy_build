@@ -35,6 +35,7 @@
       "Bash(gh pr view*)",
       "Bash(gh pr comment*)",
       "Bash(gh pr create*)",
+      "Bash(gh pr edit*)",
       "Bash(npm *)",
       "Bash(npx *)"
     ]

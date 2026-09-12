@@ -48,10 +48,20 @@ export function checkHarness({ harness: h, files = [] }) {
   const smoke = Object.values(h.test?.smoke || {});
   const smokeMissing = smoke.filter((f) => !files.includes(f));
   out.push(!smoke.length ? c("test.smoke", "FAIL", "[test].smoke must name at least the unit smoke test") : smokeMissing.length ? c("test.smoke", "FAIL", `smoke files missing: ${smokeMissing.join(", ")}`) : c("test.smoke", "PASS"));
-  // protected
+  // protected — 매치하지 않는 글롭이라고 다 같은 문제가 아니다.
+  // 와일드카드(`playwright.config.*`, `tsconfig*.json`)는 **미래의 경로 모양**을 막아 두는 것이라, 지금
+  // 그런 파일이 없는 것이 정상이다(그 파일이 생기는 순간부터 보호되는 게 목적). 그걸 WARN으로 올리면
+  // 아무도 못 고치는 경고가 상시로 떠서 doctor의 WARN 전체가 무시당한다 → PASS + "(optional, no match)".
+  // 반대로 와일드카드가 없는 **리터럴 경로**가 아무것도 매치하지 않으면 그건 오타이거나 지워진 파일이다 → WARN.
   const globs = h.protected?.factory || [];
   const unmatched = globs.filter((g) => !files.some((f) => matchesAny([g], f)));
-  out.push(!globs.length ? c("protected.globs-match", "FAIL", "[protected].factory is empty") : unmatched.length ? c("protected.globs-match", "WARN", `no file matches: ${unmatched.join(", ")}`) : c("protected.globs-match", "PASS"));
+  const literal = unmatched.filter((g) => !/[*?]/.test(g));
+  const wildcard = unmatched.filter((g) => /[*?]/.test(g));
+  out.push(
+    !globs.length ? c("protected.globs-match", "FAIL", "[protected].factory is empty")
+      : literal.length ? c("protected.globs-match", "WARN", `no file matches: ${literal.join(", ")}`)
+        : c("protected.globs-match", "PASS", wildcard.length ? `(optional, no match): ${wildcard.join(", ")}` : "")
+  );
   return out;
 }
 

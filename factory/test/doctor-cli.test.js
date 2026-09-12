@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, relative, sep } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -56,7 +56,55 @@ const fakeGh = {
   getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates", "factory/review", "factory/integrity"] } }),
 };
 
-/** initCommand로 설치 + roles.toml에 정의된 모든 agent 파일 stub + test/smoke.test.js stub. */
+/**
+ * §7.2를 지키는 최소 역할 파일. `doctor`의 checkAgents가 설치된 `.claude/agents/*.md`를 전부 lint하므로,
+ * init이 설치하지 않는 역할(merge.integrator·retro.analyst — ADR-015 R3 / Plan 4)의 stub도 규칙을 지켜야 한다.
+ * "# stub agent" 한 줄짜리 stub은 `roles.agent-files`는 통과시키지만 `agents.<name>`을 FAIL로 만든다.
+ */
+const stubAgent = (name) => `---
+name: ${name}
+description: doctor 테스트용 최소 역할 파일
+tools: Read, Grep
+model: sonnet
+---
+
+## Purpose
+stub
+
+## You receive
+- \`.factory/out/context.json\`
+
+## You must not
+- 판정을 지어낸다
+
+## Lens
+1. stub
+
+## Output
+\`\`\`yaml
+verdict: approve
+\`\`\`
+
+## Examples
+
+### 좋은 발견
+- 경로와 근거가 있는 지적
+- 재현 절차가 있는 지적
+
+### 나쁜 발견
+- "개선하면 좋겠습니다"
+- "이 접근보다 저 접근이 낫습니다"
+
+## Perspectives
+- 되돌리는 사람의 눈
+- 다음 라운드의 나
+- 6개월 뒤 이 파일을 읽을 사람
+
+## Lessons
+Read \`.factory/lessons/${name}.md\` and treat each entry as a checklist item.
+`;
+
+/** initCommand로 설치 + init이 설치하지 않는 roles.toml agent 파일 stub + test/smoke.test.js stub. */
 async function setupRepo() {
   const root = mkdtempSync(join(tmpdir(), "ktb-doctor-cli-"));
   writeFileSync(join(root, "package.json"), JSON.stringify({ name: "demo-app" }));
@@ -66,8 +114,9 @@ async function setupRepo() {
   const roles = parseToml(readFileSync(join(root, ".factory/roles.toml"), "utf8"));
   for (const p of collectAgentPaths(roles)) {
     const full = join(root, p);
+    if (existsSync(full)) continue;   // Plan 3이 실제로 설치한 역할 파일은 덮어쓰지 않는다 — 그게 검사 대상이다
     mkdirSync(dirname(full), { recursive: true });
-    writeFileSync(full, "# stub agent\n");
+    writeFileSync(full, stubAgent(p.replace(/^.*\//, "").replace(/\.md$/, "")));
   }
   mkdirSync(join(root, "test"), { recursive: true });
   writeFileSync(join(root, "test/smoke.test.js"), "test('smoke', () => {});\n");
@@ -87,6 +136,26 @@ test("(a) full doctor run against a freshly-initialized repo: exit 0, PASS summa
   const charter = checks.find((c) => c.id === "charter");
   expect(charter).toMatchObject({ level: "WARN" });
   expect(checks.every((c) => c.level !== "FAIL")).toBe(true);
+});
+
+test("(a2) the factory scope lints every installed agent file — an agent that loses a required section turns doctor red", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root);
+
+  const { io: iOk, o: oOk } = io();
+  await doctorCommand({ root, pkgRoot, argv: ["--json", "--offline", "--no-run"], io: iOk, run, gh: fakeGh });
+  const ok = JSON.parse(oOk.out.join("")).checks.filter((c) => c.id.startsWith("agents."));
+  expect(ok.length).toBeGreaterThanOrEqual(14);                 // 13 roles.toml 역할 + loader (+ stub 2개)
+  expect(ok.every((c) => c.level === "PASS")).toBe(true);
+  expect(ok.some((c) => c.id === "agents.factory-loader")).toBe(true);   // roles.toml에 없지만 검사한다
+
+  const agent = join(root, ".claude/agents/reviewer-correctness.md");
+  writeFileSync(agent, readFileSync(agent, "utf8").replace(/## Lens\n[\s\S]*?(?=\n## )/, ""));
+  const { io: iBad, o: oBad } = io();
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json", "--offline", "--no-run"], io: iBad, run, gh: fakeGh });
+  const bad = JSON.parse(oBad.out.join("")).checks.find((c) => c.id === "agents.reviewer-correctness");
+  expect(bad).toMatchObject({ level: "FAIL", detail: expect.stringContaining("## Lens") });
+  expect(code).toBe(1);
 });
 
 test("(b) missing harness.toml → single FAIL, exit 1, message says harness.toml unreadable", async () => {

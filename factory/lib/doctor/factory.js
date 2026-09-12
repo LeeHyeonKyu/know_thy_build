@@ -1,8 +1,10 @@
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { mkdtempSync, writeFileSync as writeFixture, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { render as renderTemplate } from "../../cli/install.js";
 import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
+import { lintAgentMd } from "../agent-md.js";
+import { L0_CONTEXTS } from "../bootstrap.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
@@ -91,6 +93,40 @@ export function checkRoles({ charter, roles, exists, root }) {
   ];
 }
 
+// loader는 roles.toml에 없다 — 로스터 역할이 아니라 workflow의 첫 스텝(P3-R1)이라 어떤 [stage.<name>] 블록에도
+// 속하지 않는다. 그래도 설치되는 역할 파일이고 §7.2 규칙을 그대로 지켜야 하므로 lint 대상에 직접 넣는다.
+const LOADER_AGENT = ".claude/agents/factory-loader.md";
+
+/**
+ * roles.toml이 가리키는 역할 `.md`(+ loader)를 전부 §7.2 규칙으로 lint한다 — 섹션·frontmatter·Examples 개수·
+ * lessons 경로·쓰기 금지 훅. 파일이 **없는** 항목은 건너뛴다: 부재는 `roles.agent-files`가 이미 FAIL로 잡고
+ * 있어서, 여기서 또 잡으면 같은 사실이 서로 다른 두 줄로 보고되고 사람이 두 번 고치려 든다.
+ * id는 `agents.<파일 basename>`이다 — 파일명 = frontmatter name = agent_type 규약(Global Constraints)이라
+ * 이 이름이 곧 훅 로그에서 대조되는 이름이다.
+ */
+export function checkAgents({ roles, root, readFile, exists }) {
+  const paths = [];
+  for (const e of collectAllRoleEntries(roles)) if (e.agent && !paths.includes(e.agent)) paths.push(e.agent);
+  if (!paths.includes(LOADER_AGENT)) paths.push(LOADER_AGENT);
+
+  const out = [];
+  for (const rel of paths) {
+    const abs = join(root, rel);
+    if (!exists(abs)) continue;
+    const name = basename(rel, ".md");
+    const id = `agents.${name}`;
+    let violations;
+    try {
+      violations = lintAgentMd(readFile(abs), { expectedName: name });
+    } catch (e) {
+      out.push(c(id, "FAIL", `${rel} unreadable: ${e.message}`));
+      continue;
+    }
+    out.push(violations.length ? c(id, "FAIL", violations.map((v) => `${v.rule}: ${v.msg}`).join("; ")) : c(id, "PASS"));
+  }
+  return out;
+}
+
 export function checkSettings({ settings, template }) {
   const out = [settings ? c("settings.present", "PASS") : c("settings.present", "FAIL", ".claude/settings.json missing")];
   const s = settings || {};
@@ -175,8 +211,12 @@ export async function checkGitHub({ gh, harness, labels }) {
     const branch = harness.project?.default_branch;
     const protection = await gh.getBranchProtection(branch);
     const contexts = new Set(protection?.required_status_checks?.contexts || []);
-    const required = harness.factory?.required_checks || [];
-    const missingChecks = required.filter((r) => !contexts.has(r));
+    // L0(branch protection)와 L1(머지 스테이지)은 서로 다른 목록을 강제한다(ADR-015 보강, bootstrap.js 주석).
+    // 보호 규칙이 요구해야 하는 것은 `L0_CONTEXTS`뿐이다 — `harness.factory.required_checks`를 여기에 대조하면
+    // 부트스트랩이 절대 넣지 않는 체크를 doctor가 계속 "빠졌다"고 보고하게 된다(=고칠 수 없는 WARN).
+    // required_checks는 별도 PASS 줄로 "L1이 머지 직전에 본다"고 보고만 한다.
+    const missingChecks = L0_CONTEXTS.filter((r) => !contexts.has(r));
+    const l1 = harness.factory?.required_checks || [];
 
     return [
       hasClaude ? c("github.claude-secret", "PASS") : c("github.claude-secret", "FAIL", "set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"),
@@ -184,8 +224,9 @@ export async function checkGitHub({ gh, harness, labels }) {
       issuedAt ? c("github.token-issued-at", "PASS", issuedAt) : c("github.token-issued-at", "WARN", "FACTORY_TOKEN_ISSUED_AT not set"),
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
       !protection || missingChecks.length
-        ? c("github.protection", "WARN", `run factory bootstrap — missing required checks: ${missingChecks.join(", ")}`)
-        : c("github.protection", "PASS"),
+        ? c("github.protection", "WARN", `run factory bootstrap — branch protection is missing L0 contexts: ${missingChecks.join(", ") || L0_CONTEXTS.join(", ")}`)
+        : c("github.protection", "PASS", `L0 contexts: ${L0_CONTEXTS.join(", ")}`),
+      c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.join(", ")}`),
     ];
   } catch (e) {
     return [c("github.unavailable", "WARN", `gh unavailable — ${e.message}`)];

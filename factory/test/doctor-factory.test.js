@@ -1,11 +1,16 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkCharter, checkRoles, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkCharter, checkRoles, checkAgents, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
 import { makeFakeRun, run } from "../lib/exec.js";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { parse as toml } from "smol-toml";
+import { L0_CONTEXTS } from "../lib/bootstrap.js";
 const by = (cs) => Object.fromEntries(cs.map((c) => [c.id, c]));
 const REAL_HOOKS_DIR = new URL("../hooks/", import.meta.url).pathname;
+const AGENT_TEMPLATES = new URL("../../templates/factory/claude/agents/", import.meta.url).pathname;
+const ROLES_TEMPLATE = new URL("../../templates/factory/factory/roles.toml", import.meta.url).pathname;
+const agentText = (name) => readFileSync(`${AGENT_TEMPLATES}${name}.md`, "utf8");
 
 test("checkFiles: missing factory file FAIL, stale WARN, project file never compared", () => {
   const manifest = [{ src: "/p/a.js", dest: ".factory/lib/a.js", owner: "factory" }, { src: "/p/b.js", dest: ".factory/bin/b.js", owner: "factory" }, { src: "/p/h.toml", dest: ".factory/harness.toml", owner: "project" }];
@@ -61,6 +66,52 @@ test("checkRoles: everything present → all PASS", () => {
   expect(c["roles.roster-defined"].level).toBe("PASS");
   expect(c["roles.agent-files"].level).toBe("PASS");
   expect(c["roles.lessons-files"].level).toBe("PASS");
+});
+
+test("checkAgents: lints every installed roles.toml agent, skips the ones that are not there, and covers factory-loader", () => {
+  const files = {
+    "/r/.claude/agents/reviewer-correctness.md": agentText("reviewer-correctness"),
+    // 설치된 사본에서 ## Lens가 지워진 상태 — 템플릿은 멀쩡해도 repo의 사본이 어긋날 수 있다(그게 doctor의 일이다)
+    "/r/.claude/agents/plan-architect.md": agentText("plan-architect").replace(/## Lens\n[\s\S]*?(?=\n## )/, ""),
+    "/r/.claude/agents/factory-loader.md": agentText("factory-loader"),
+  };
+  const roles = {
+    triage: { agent: ".claude/agents/factory-triage.md" }, // 설치 안 됨 → roles.agent-files의 몫, 여기선 건너뛴다
+    plan: { architect: { agent: ".claude/agents/plan-architect.md" } },
+    review: { correctness: { agent: ".claude/agents/reviewer-correctness.md" } },
+  };
+  const c = by(checkAgents({ roles, root: "/r", exists: (p) => p in files, readFile: (p) => files[p] }));
+  expect(c["agents.reviewer-correctness"].level).toBe("PASS");
+  expect(c["agents.plan-architect"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("## Lens") });
+  expect(c["agents.plan-architect"].detail).toContain("section");
+  expect(c["agents.factory-triage"]).toBeUndefined();          // 부재는 중복 보고하지 않는다
+  expect(c["agents.factory-loader"].level).toBe("PASS");       // roles.toml에 없지만 설치되는 파일이다
+});
+
+test("checkAgents: a name that does not match its filename FAILs", () => {
+  const files = { "/r/.claude/agents/reviewer-security.md": agentText("reviewer-correctness") };
+  const roles = { review: { security: { agent: ".claude/agents/reviewer-security.md" } } };
+  const c = by(checkAgents({ roles, root: "/r", exists: (p) => p in files, readFile: (p) => files[p] }));
+  expect(c["agents.reviewer-security"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("name") });
+});
+
+test("checkAgents: the shipped roles.toml + agent templates are what an initialized repo would show — all PASS", () => {
+  const roles = toml(readFileSync(ROLES_TEMPLATE, "utf8"));
+  const asInstalled = (p) => p.replace("/r/.claude/agents/", AGENT_TEMPLATES);
+  const checks = checkAgents({
+    roles, root: "/r",
+    exists: (p) => existsSync(asInstalled(p)),
+    readFile: (p) => readFileSync(asInstalled(p), "utf8"),
+  });
+  for (const ch of checks) expect(ch.level, `${ch.id}: ${ch.detail}`).toBe("PASS");
+  // 13 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5) + loader. merge.integrator·retro.analyst는
+  // 아직 없는 파일이라 건너뛴다(ADR-015 R3, retro는 Plan 4).
+  expect(checks.map((ch) => ch.id).sort()).toEqual([
+    "agents.factory-builder", "agents.factory-loader", "agents.factory-triage", "agents.factory-verifier",
+    "agents.plan-architect", "agents.plan-operator", "agents.plan-product-advocate", "agents.plan-skeptic",
+    "agents.plan-synthesizer", "agents.reviewer-architecture", "agents.reviewer-correctness", "agents.reviewer-qa",
+    "agents.reviewer-security", "agents.reviewer-spec-conformance",
+  ]);
 });
 
 test("checkSettings: deny subset and hook commands", () => {
@@ -140,13 +191,36 @@ test("checkWorkflows: all seven present and lint-clean → PASS", () => {
 });
 
 test("checkGitHub: secrets, token date, labels, protection", async () => {
+  // 보호 규칙에 factory/gates만 있고 L0가 요구하는 factory/integrity는 없다 → protection WARN
   const gh = { listSecrets: async () => ["FACTORY_BOT_TOKEN"], getVariable: async () => null, listLabels: async () => ["backlog"], getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates"] } }) };
-  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review"] } }, labels: [{ name: "backlog" }, { name: "factory:queue" }] }));
+  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review", "factory/integrity"] } }, labels: [{ name: "backlog" }, { name: "factory:queue" }] }));
   expect(c["github.claude-secret"].level).toBe("FAIL");
   expect(c["github.bot-token"].level).toBe("PASS");
   expect(c["github.token-issued-at"].level).toBe("WARN");
   expect(c["github.labels"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory:queue") });
-  expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/review") });
+  expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
+});
+
+test("checkGitHub: protection is judged against L0_CONTEXTS only — required_checks is reported as L1's job, never as a missing rule", async () => {
+  // 부트스트랩이 실제로 넣는 것(=L0_CONTEXTS)만 들어 있는 보호 규칙. harness는 세 체크를 요구하지만
+  // 그건 머지 스테이지(L1)가 보는 목록이므로 protection은 PASS여야 한다 — 아니면 고칠 수 없는 WARN이 영원히 남는다.
+  const gh = {
+    listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
+    getVariable: async () => "2026-01-01T00:00:00Z",
+    listLabels: async () => ["backlog"],
+    getBranchProtection: async () => ({ required_status_checks: { contexts: [...L0_CONTEXTS] } }),
+  };
+  const required = ["factory/gates", "factory/review", "factory/integrity"];
+  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: required } }, labels: [{ name: "backlog" }] }));
+  expect(c["github.protection"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("factory/integrity") });
+  expect(c["github.required-checks"]).toMatchObject({ level: "PASS", detail: "enforced by L1 at merge: factory/gates, factory/review, factory/integrity" });
+});
+
+test("checkGitHub: no branch protection at all → protection WARN naming the L0 contexts bootstrap would set", async () => {
+  const gh = { listSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
+  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
+  expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
+  expect(c["github.required-checks"].level).toBe("PASS");
 });
 
 test("checkGitHub: gh unavailable → single WARN, no other github.* checks", async () => {
@@ -157,7 +231,7 @@ test("checkGitHub: gh unavailable → single WARN, no other github.* checks", as
 });
 
 test("checkGitHub: all green → PASS across the board", async () => {
-  const gh = { listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"], getVariable: async () => "2026-01-01T00:00:00Z", listLabels: async () => ["backlog", "factory:queue"], getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates", "factory/review"] } }) };
+  const gh = { listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"], getVariable: async () => "2026-01-01T00:00:00Z", listLabels: async () => ["backlog", "factory:queue"], getBranchProtection: async () => ({ required_status_checks: { contexts: [...L0_CONTEXTS, "factory/gates"] } }) };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review"] } }, labels: [{ name: "backlog" }, { name: "factory:queue" }] }));
   expect(c["github.claude-secret"].level).toBe("PASS");
   expect(c["github.bot-token"].level).toBe("PASS");

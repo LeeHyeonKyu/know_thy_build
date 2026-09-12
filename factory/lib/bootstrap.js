@@ -10,7 +10,7 @@ import { LABELS } from "./label-catalog.js";
  * strict:false — 게이트 판정은 이미 sha에 묶여 있고(requirements.js gatesGate), strict(=up-to-date)는
  * 머지 직전 base 리베이스를 요구하는데 팩토리는 리베이스를 하지 않는다(하면 게이트가 검증한 sha가 바뀐다).
  */
-const L0_CONTEXTS = ["factory/integrity"];
+export const L0_CONTEXTS = ["factory/integrity"];
 
 const PROTECTION_BODY = (contexts) => ({
   required_status_checks: { strict: false, contexts },

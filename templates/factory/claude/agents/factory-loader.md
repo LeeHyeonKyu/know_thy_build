@@ -44,12 +44,17 @@ are its eyes for exactly one file (plus the two named lookups below). If a field
    `handoffs.review.verdicts[]`, not just one reviewer's.
 4. **disputed**: only from the single latest `factory.rework-response.v1` PR comment (by creation time),
    filtered to entries whose `status` is `disputed`. An older or different-schema comment is not a source.
+5. **maturity**: copy `harness.maturity` from `context.json` verbatim (`M0`/`M1`/`M2`). Do not infer it from
+   the gate levels and do not default it — the plan workflow binds every `done_when` level to this value, so
+   a guessed `M2` lets through a level the repository can never run, and a guessed `M0` silently narrows the
+   contract. If the field is absent, leave it out.
 
 ## Output — schema `LOADER`
 ```yaml
 issue: 7            # issue.number
 stage: triage
 tier: standard
+maturity: M0         # context.json의 harness.maturity 그대로 (M0|M1|M2) — plan이 done_when level을 이걸로 묶는다
 roster:
   - name: triage
     agentType: factory-triage

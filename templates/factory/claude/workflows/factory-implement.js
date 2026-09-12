@@ -17,6 +17,7 @@ const LOADER = {
     issue: { type: 'number' },
     stage: { type: 'string' },
     tier: { type: 'string' },
+    maturity: { type: 'string' },
     roster: {
       type: 'array',
       items: {
@@ -99,9 +100,20 @@ const VERDICT = {
 // makes verify-stage's `implement.v1` check fail the stage into needs-human.
 function once(fn) {
   return async () => {
-    const first = await fn();
+    let first = null;
+    try {
+      first = await fn();
+    } catch {
+      // 죽은 에이전트는 null을 돌려주기도 하고 그대로 throw하기도 한다 — 둘 다 "대답이 없다"이므로 보험은 둘 다에 건다.
+      first = null;
+    }
     if (first !== null && first !== undefined) return first;
-    return await fn();
+    try {
+      return await fn();
+    } catch {
+      // 두 번째도 실패하면 null로 접는다 — 각 workflow의 null 처리 경로(역할 제외·fail-closed)가 그 뒤를 받는다.
+      return null;
+    }
   };
 }
 
@@ -113,7 +125,8 @@ const loaderPrompt =
   `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
   `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
   `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, orchestration; pr/head_sha from handoffs.implement if present; ` +
+  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
+  `pr/head_sha from handoffs.implement if present; ` +
   `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
   `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
   `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
@@ -195,8 +208,9 @@ async function completeRework(out, prompt, label) {
   const retry = await agent(
     `${prompt}\n\nYour rework_response was incomplete: ${gaps.join('; ')}. Answer EVERY must_fix id — ` +
     `status "fixed" with the commit sha that fixed it, or status "disputed" with a reason citing the plan ` +
-    `handoff or a file path. Repost the complete factory.rework-response.v1 as a PR comment with ` +
-    `\`gh pr comment\` and return the same responses in rework_response.`,
+    `handoff or a file path. Repost the complete factory.rework-response.v1 as a PR comment — write it to a ` +
+    `temp file and pass \`gh pr comment <pr> --body-file <path>\`, never an inline --body — and return the ` +
+    `same responses in rework_response.`,
     { agentType: 'factory-builder', model: 'opus', label, schema: BUILD },
   );
   return retry ? { ...out, ...retry } : out;
@@ -243,9 +257,15 @@ const buildRules =
   `the path and the reason in the PR body under a "Scope change" heading.\n` +
   `5. Run \`[commands].lint\` and \`[commands].unit\` from \`harness.commands\` yourself (plus the full ` +
   `level if the harness declares one) before you push. Do not hand a red tree to the verifier.\n` +
-  `6. Commit in logical units with real messages, push the branch, and open a draft PR: ` +
-  `\`gh pr create --draft --title "#${issue}: <summary>"\` with a body that says \`Closes #${issue}\`. ` +
-  `If the PR already exists, push to it instead of opening a second one.\n` +
+  `6. Commit in logical units with real messages, push the branch, and open a draft PR. Write the PR body ` +
+  `to a temp file with the Write tool first (\`/tmp/factory-pr-${issue}.md\`) and pass it as a file: ` +
+  `\`gh pr create --draft --title "#${issue}: <summary>" --body-file /tmp/factory-pr-${issue}.md\`. The body ` +
+  `must say \`Closes #${issue}\`. NEVER pass a body inline (\`--body "…"\`, a heredoc, an echoed string): the ` +
+  `PreToolUse hook reads the whole command text, so a body line that starts with \`>\` — a quote, a "Scope ` +
+  `change" note, anything that looks like a redirection — is read as a write to a protected path and the ` +
+  `command is blocked. The same rule holds for every \`gh pr comment\` and \`gh pr edit\` you run: write the ` +
+  `file, then pass \`--body-file <path>\`. If the PR already exists, push to it and update its body with ` +
+  `\`gh pr edit <pr> --body-file <path>\` instead of opening a second one.\n` +
   `7. Return head_sha = the output of \`git rev-parse HEAD\` **after** the push: 40 lowercase hex ` +
   `characters, not a short sha and not a branch name.\n\n` +
   `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook and ` +
@@ -263,8 +283,10 @@ const reworkBlock = mustFix.length > 0
     `Respond to EVERY id above — a silent omission reads as an unaddressed reject. For each item: ` +
     `status "fixed" with the commit sha that fixed it, or status "disputed" with a reason that cites the ` +
     `plan handoff (\`non_goals\`, \`files_expected\`) or a concrete file path. Opinion is not a dispute.\n` +
-    `Post the whole response as a comment on PR #${priorPr === null ? '<pr>' : priorPr} with ` +
-    `\`gh pr comment\`, as a \`\`\`json fenced block holding a factory.rework-response.v1 object ` +
+    `Post the whole response as a comment on PR #${priorPr === null ? '<pr>' : priorPr}: write it to ` +
+    `\`/tmp/factory-rework-${issue}.md\` with the Write tool and run ` +
+    `\`gh pr comment ${priorPr === null ? '<pr>' : priorPr} --body-file /tmp/factory-rework-${issue}.md\` ` +
+    `(never an inline --body — see rule 6), as a \`\`\`json fenced block holding a factory.rework-response.v1 object ` +
     `({"schema": "factory.rework-response.v1", "issue": ${issue}, "responses": [...]}), and return the ` +
     `same responses in your output's rework_response.`
   : '';

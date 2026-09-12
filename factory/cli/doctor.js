@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
-import { checkFiles, checkCharter, checkRoles, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkCharter, checkRoles, checkAgents, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
 import { loadHarness, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
@@ -73,6 +73,9 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
         charter = { roster: {}, plan_roles: {} };
       }
       checks.push(...checkRoles({ charter, roles, exists, root }));
+      // 파일이 있느냐(checkRoles)와 그 파일이 §7.2를 지키느냐(checkAgents)는 다른 질문이다 —
+      // 섹션이 빠진 역할 파일은 실행은 되지만 판정 품질이 조용히 무너진다.
+      checks.push(...checkAgents({ roles, root, readFile, exists }));
     } catch (e) {
       checks.push({ id: "roles", level: "FAIL", detail: `roles.toml unreadable: ${e.message}` });
     }

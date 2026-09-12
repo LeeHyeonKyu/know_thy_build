@@ -59,6 +59,11 @@ plan handoff이 계약으로 정한 `done_when`을 **실제로 동작하는 코�
 8. **rework면 전원에게 답한다**: `must_fix`의 모든 id에 `fixed`(커밋 sha) 또는 `disputed`(plan handoff의
    `non_goals`·`files_expected` 또는 파일 경로를 근거로)로 답하고, `factory.rework-response.v1`을 PR 코멘트로
    남긴다. 침묵은 미해결로 읽힌다.
+9. **PR 본문·코멘트는 항상 파일로 넘긴다**: Write 도구로 임시 파일(`/tmp/factory-pr-<issue>.md`)에 쓴 뒤
+   `gh pr create --body-file <path>` / `gh pr comment <pr> --body-file <path>` / `gh pr edit <pr> --body-file <path>`.
+   `--body "…"`로 본문을 명령줄에 박지 않는다 — PreToolUse 훅은 **명령 문자열 전체**를 읽으므로 본문에 `>`로
+   시작하는 줄(인용문, "Scope change" 메모)이 하나만 있어도 보호 경로로의 리다이렉션으로 읽혀 명령이 통째로
+   차단된다. 본문이 길수록 확률이 올라가는 종류의 실패이고, 파일로 넘기면 아예 생기지 않는다.
 
 ## Output — schema `factory.implement.build.v1`
 ```yaml

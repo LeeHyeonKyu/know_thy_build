@@ -38,14 +38,28 @@ test("required gate not in [commands] nor proof → FAIL; not in its own level �
 
 test("maturity / thresholds / orchestration / required_checks / placeholders / protected globs", () => {
   const h = tmpl();
-  h.harness.maturity = "M9"; h.gates.thresholds.new_test_repeats = 1; h.gates.thresholds.diff_coverage_pct = 120; h.factory.orchestration = "auto"; h.factory.required_checks = []; h.commands.test_one = "vitest {file}"; h.protected.factory.push("nope/**");
+  h.harness.maturity = "M9"; h.gates.thresholds.new_test_repeats = 1; h.gates.thresholds.diff_coverage_pct = 120; h.factory.orchestration = "auto"; h.factory.required_checks = []; h.commands.test_one = "vitest {file}"; h.protected.factory.push("nope.txt");
   const c = by(checkHarness({ harness: h, files }));
   expect(c["harness.maturity"].level).toBe("FAIL");
   expect(c["thresholds.range"]).toMatchObject({ level: "FAIL", detail: expect.stringMatching(/new_test_repeats.*diff_coverage_pct|diff_coverage_pct.*new_test_repeats/) });
   expect(c["factory.orchestration"].level).toBe("FAIL");
   expect(c["factory.required_checks"].level).toBe("FAIL");
   expect(c["commands.placeholders"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("test_one") });
-  expect(c["protected.globs-match"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("nope/**") });
+  expect(c["protected.globs-match"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("nope.txt") });
+});
+
+test("protected.globs-match: a wildcard glob that matches nothing is optional (PASS), a literal one is a typo (WARN)", () => {
+  // playwright을 아직 안 쓰는 저장소: `playwright.config.*`는 "생기면 보호한다"는 선언이지 오류가 아니다.
+  const withoutPlaywright = files.filter((f) => !f.startsWith("playwright.config"));
+  const wild = by(checkHarness({ harness: tmpl(), files: withoutPlaywright }))["protected.globs-match"];
+  expect(wild.level).toBe("PASS");
+  expect(wild.detail).toContain("(optional, no match)");
+  expect(wild.detail).toContain("playwright.config.*");
+
+  // 리터럴 경로가 빠진 것은 실제로 고칠 것이 있다는 뜻이다.
+  const h = tmpl();
+  const withoutLock = files.filter((f) => f !== "package-lock.json");
+  expect(by(checkHarness({ harness: h, files: withoutLock }))["protected.globs-match"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("package-lock.json") });
 });
 
 test("maturity-level mismatch: deep listed but M0 → WARN; proof gates listed without proof commands → FAIL", () => {

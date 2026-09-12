@@ -17,6 +17,7 @@ const LOADER = {
     issue: { type: 'number' },
     stage: { type: 'string' },
     tier: { type: 'string' },
+    maturity: { type: 'string' },
     roster: {
       type: 'array',
       items: {
@@ -135,9 +136,20 @@ const DISPUTE = {
 // makes aggregate-review.sh call the round `incomplete` → needs-human, naming the missing role.
 function once(fn) {
   return async () => {
-    const first = await fn();
+    let first = null;
+    try {
+      first = await fn();
+    } catch {
+      // 죽은 에이전트는 null을 돌려주기도 하고 그대로 throw하기도 한다 — 둘 다 "대답이 없다"이므로 보험은 둘 다에 건다.
+      first = null;
+    }
     if (first !== null && first !== undefined) return first;
-    return await fn();
+    try {
+      return await fn();
+    } catch {
+      // 두 번째도 실패하면 null로 접는다 — 각 workflow의 null 처리 경로(역할 제외·fail-closed)가 그 뒤를 받는다.
+      return null;
+    }
   };
 }
 
@@ -147,7 +159,8 @@ const loaderPrompt =
   `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
   `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
   `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, orchestration; pr/head_sha from handoffs.implement if present; ` +
+  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
+  `pr/head_sha from handoffs.implement if present; ` +
   `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
   `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
   `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
@@ -502,11 +515,14 @@ verdicts = verdicts.map((v, i) => (v ? v : r1[i]));
 const approves = verdicts.filter((v) => v.verdict === 'approve').length;
 const upheldCount = disputes.filter((d) => d.ruling === 'uphold').length;
 const withdrawnCount = disputes.filter((d) => d.ruling === 'withdraw').length;
+// `unruled`(리뷰어가 두 번 다 죽었거나 일부 id만 답한 경우)는 upheld와 **같은 효과**를 갖지만 같은 사실은
+// 아니다 — 세어서 보여주지 않으면 "아무도 판정하지 않아서 유지된 항목"이 "판단 끝에 유지된 항목"으로 읽힌다.
+const unruledCount = disputes.filter((d) => d.ruling === 'unruled').length;
 
 const summary =
   `${anyReject ? 'Full' : 'Light'} round 2: ${approves} approve / ${verdicts.length - approves} reject ` +
   `across ${verdicts.length} reviewer(s).` +
-  (disputes.length > 0 ? ` Disputes: ${upheldCount} upheld, ${withdrawnCount} withdrawn.` : '') +
+  (disputes.length > 0 ? ` Disputes: ${upheldCount} upheld, ${withdrawnCount} withdrawn, ${unruledCount} unruled.` : '') +
   (dropped.length > 0 ? ` No verdict from: ${dropped.join(', ')}.` : '');
 
 // `decision` is deliberately absent: aggregate-review.sh counts the verdicts against the roster and fills

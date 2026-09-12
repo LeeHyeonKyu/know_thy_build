@@ -1,9 +1,10 @@
 import { test, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { parseAgentMd, lintAgentMd, REQUIRED_SECTIONS } from "../lib/agent-md.js";
 
 const AGENTS = new URL("../../templates/factory/claude/agents/", import.meta.url).pathname;
 const readAgent = (name) => readFileSync(`${AGENTS}${name}.md`, "utf8");
+const agentFiles = () => readdirSync(AGENTS).filter((f) => f.endsWith(".md")).sort();
 
 // spec §7.3 reviewer-correctness.md — 훅 명령은 이미 .claude/hooks/deny-all-writes.sh다.
 const FIXTURE = `---
@@ -122,6 +123,18 @@ test("lintAgentMd: wrong Lessons path → exactly one violation", () => {
   const wrongLessons = FIXTURE.replace(".factory/lessons/reviewer-correctness.md", ".factory/lessons/somewhere-else.md");
   const violations = lintAgentMd(wrongLessons, { expectedName: "reviewer-correctness" });
   expect(violations).toEqual([{ rule: "lessons-path", msg: expect.any(String) }]);
+});
+
+test("lintAgentMd: a decorated header is the section, a different word is not", () => {
+  const swap = (header) => lintAgentMd(FIXTURE.replace("## Lens\n", `${header}\n`), { expectedName: "reviewer-correctness" });
+  // ` —`, `:` and ` (` are decoration on the same section name
+  for (const header of ["## Lens", "## Lens — 무엇을 보는가", "## Lens:", "## Lens (deprecated)"]) {
+    expect(swap(header), header).toEqual([]);
+  }
+  // a different word is a different section — it must not satisfy `## Lens`
+  for (const header of ["## Lenses", "## Lens of the reviewer"]) {
+    expect(swap(header), header).toEqual([{ rule: "section", msg: expect.stringContaining("## Lens") }]);
+  }
 });
 
 test("lintAgentMd: reviewer role without deny-all-writes hook → exactly one violation", () => {
@@ -328,6 +341,23 @@ test("reviewer-spec-conformance.md: defers structural justification to architect
   expect(mustNot).toContain("files_expected");
   expect(mustNot).toMatch(/라운드 1|R1/);
   expect(mustNot).toContain("다른 리뷰어의 판정");
+});
+
+// Task 6: the sweep. The per-task tests above pin what each role file says; this one is the gate that no
+// agent template can be added (or edited) past §7.2 — `doctor checkAgents` runs exactly this lint on the
+// installed copies, so a template that fails here fails the installed repo's doctor too.
+test("every templates/factory/claude/agents/*.md lints clean, and the set is the 14 roles Plan 3 installs", () => {
+  const files = agentFiles();
+  expect(files).toEqual([
+    "factory-builder.md", "factory-loader.md", "factory-triage.md", "factory-verifier.md",
+    "plan-architect.md", "plan-operator.md", "plan-product-advocate.md", "plan-skeptic.md", "plan-synthesizer.md",
+    "reviewer-architecture.md", "reviewer-correctness.md", "reviewer-qa.md", "reviewer-security.md",
+    "reviewer-spec-conformance.md",
+  ]);
+  for (const f of files) {
+    const name = f.replace(/\.md$/, "");
+    expect(lintAgentMd(readAgent(name), { expectedName: name }), f).toEqual([]);
+  }
 });
 
 test("reviewer-security.md / reviewer-architecture.md / reviewer-spec-conformance.md / reviewer-qa.md carry their own Lens", () => {

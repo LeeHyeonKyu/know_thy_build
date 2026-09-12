@@ -18,6 +18,7 @@ const LOADER = {
     issue: { type: 'number' },
     stage: { type: 'string' },
     tier: { type: 'string' },
+    maturity: { type: 'string' },
     roster: {
       type: 'array',
       items: {
@@ -116,9 +117,51 @@ const VOTE = {
 // verify-stage's roster check turns the missing role into needs-human.
 function once(fn) {
   return async () => {
-    const first = await fn();
+    let first = null;
+    try {
+      first = await fn();
+    } catch {
+      // 죽은 에이전트는 null을 돌려주기도 하고 그대로 throw하기도 한다 — 둘 다 "대답이 없다"이므로 보험은 둘 다에 건다.
+      first = null;
+    }
     if (first !== null && first !== undefined) return first;
-    return await fn();
+    try {
+      return await fn();
+    } catch {
+      // 두 번째도 실패하면 null로 접는다 — 각 workflow의 null 처리 경로(역할 제외·fail-closed)가 그 뒤를 받는다.
+      return null;
+    }
+  };
+}
+
+// done_when의 `level`은 하네스 성숙도를 넘을 수 없다(§5.2.1). 프롬프트에도 규칙을 적지만 프롬프트는 부탁이고
+// 이건 강제다: M0 저장소에 e2e done_when이 하나 섞이면 그 항목은 **영영 증명되지 않는다**(그 레벨의 게이트가
+// 아예 돌지 않으므로) — "게이트 통과"와 "계약 확인"이 조용히 갈라진다.
+// 넘는 항목은 버리지 않는다(사람이 원한 것은 그 항목이지 그 레벨이 아니다): 허용된 최고 레벨로 낮추고,
+// 낮췄다는 사실을 dissent_log에 남겨 다음 성숙도에서 되돌릴 수 있게 한다.
+const ALLOWED_LEVELS = { M0: ['unit'], M1: ['unit', 'integration'], M2: ['unit', 'integration', 'e2e'] };
+
+function boundToMaturity(p) {
+  const allowed = ALLOWED_LEVELS[maturity];
+  // 로더가 maturity를 못 읽었으면 workflow가 대신 지어내지 않는다 — 모르는 상태로 전부 unit으로 깎으면
+  // 하네스가 실제로 M2인 저장소의 계약을 workflow가 임의로 좁히게 된다.
+  if (!p || !allowed) return p;
+  const highest = allowed[allowed.length - 1];
+  const notes = [];
+  const bounded = (Array.isArray(p.done_when) ? p.done_when : []).map((w) => {
+    if (!w || allowed.includes(w.level)) return w;
+    notes.push({
+      role: 'workflow',
+      objection: `done_when ${w.id} level ${w.level} exceeds maturity ${maturity}`,
+      resolution: `downgraded to ${highest}`,
+    });
+    return { ...w, level: highest };
+  });
+  if (notes.length === 0) return p;
+  return {
+    ...p,
+    done_when: bounded,
+    dissent_log: [...(Array.isArray(p.dissent_log) ? p.dissent_log : []), ...notes],
   };
 }
 
@@ -128,7 +171,8 @@ const loaderPrompt =
   `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
   `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
   `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, orchestration; pr/head_sha from handoffs.implement if present; ` +
+  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
+  `pr/head_sha from handoffs.implement if present; ` +
   `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
   `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
   `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
@@ -167,6 +211,7 @@ if (Number(loaded.issue) !== issue) {
 const roster = Array.isArray(loaded.roster) ? loaded.roster.filter((r) => r && r.name && r.agentType) : [];
 const rosterNames = roster.map((r) => r.name);
 const tier = loaded.tier;
+const maturity = loaded.maturity;
 // CHARTER plan_rounds, via the loader: docs tier debates in 2 rounds (positions → synthesis), every
 // other tier in 3 (positions → cross-examination → synthesis). Sign-off is not a round.
 const rounds = Number(loaded.rounds) || 3;
@@ -231,7 +276,7 @@ const synthesisReading =
   `Answer with the English field names of your output schema.`;
 
 let plan = r1.length > 0
-  ? await once(() => agent(
+  ? boundToMaturity(await once(() => agent(
       `${synthesisReading}\n\n` +
       `Issue #${issue} (tier ${tier}). Round 1 positions:\n${JSON.stringify(r1, null, 2)}\n\n` +
       `Round 2 cross-examination:\n${JSON.stringify(r2, null, 2)}\n\n` +
@@ -241,7 +286,7 @@ let plan = r1.length > 0
       `that you did not resolve goes into dissent_log verbatim with the role that raised it — deleting an ` +
       `objection is forging consensus, not reaching it.`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
-    ))()
+    ))())
   : null;
 
 phase('Sign-off');
@@ -289,7 +334,7 @@ if (plan) {
       `objection in dissent_log with the reason you are overriding it. This is your only revision.`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))();
-    if (revised) plan = revised;
+    if (revised) plan = boundToMaturity(revised);
   }
 }
 

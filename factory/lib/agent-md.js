@@ -28,11 +28,22 @@ export function parseAgentMd(text) {
   return { frontmatter, sections };
 }
 
-/** REQUIRED_SECTIONS의 이름은 헤더 축약형이다 — "## Output — schema `factory.verdict.v1`" 같은
- * 꾸며진 헤더도 접두 일치로 찾는다("Output"·"Output " 뒤가 공백/구두점이면 매치). */
+/**
+ * REQUIRED_SECTIONS의 이름은 헤더 축약형이다 — "## Output — schema `factory.verdict.v1`"처럼 꾸며진 헤더도
+ * 같은 섹션으로 인정한다. 다만 접두 일치를 그대로 쓰면 "## Lens of the reviewer"나 "## Output values" 같은
+ * **다른 이름의 섹션**이 필수 섹션 자리를 차지해 lint가 조용히 통과한다. 그래서 규칙은 좁다:
+ * 헤더는 `<Name>` 그 자체이거나, 바로 뒤가 ` —`(설명 대시) · `:` · ` (`(괄호 주석) 중 하나여야 한다.
+ * → `## Lens`·`## Lens — 무엇을 보는가`·`## Lens:`·`## Lens (deprecated)`는 Lens 섹션이고,
+ *   `## Lenses`·`## Lens of the reviewer`는 아니다.
+ */
+const DECORATORS = [" —", ":", " ("];
+
 function findSection(sections, name) {
   for (const [key, val] of sections) {
-    if (key === name || key.startsWith(`${name} `) || key.startsWith(`${name}:`)) return val;
+    if (key === name) return val;
+    if (!key.startsWith(name)) continue;
+    const rest = key.slice(name.length);
+    if (DECORATORS.some((d) => rest.startsWith(d))) return val;
   }
   return undefined;
 }

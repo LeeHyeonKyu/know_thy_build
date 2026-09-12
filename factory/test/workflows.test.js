@@ -1522,6 +1522,8 @@ test("factory-review.js: a dispute nobody answers is recorded as `unruled` and c
     { role: "correctness", by: "correctness", id: "cf1", ruling: "unruled", reason: "the reviewer did not respond" },
     { role: "correctness", by: "correctness", id: "cf2", ruling: "unruled", reason: "the reviewer did not respond" },
   ]);
+  // 사람용 요약은 "판정 끝에 유지됨"과 "아무도 판정하지 않아 유지됨"을 구분해서 센다
+  expect(result.summary).toContain("Disputes: 0 upheld, 0 withdrawn, 2 unruled.");
   // fail closed: silence does not withdraw a finding
   const cf = result.verdicts.find((v) => v.role === "correctness");
   expect(cf.verdict).toBe("reject");
@@ -1550,8 +1552,157 @@ test("factory-review.js: a partial ruling list upholds the ids it skipped and re
   });
 
   expect(result.disputes.map((d) => [d.id, d.ruling])).toEqual([["sec1", "withdraw"], ["sec2", "unruled"]]);
+  expect(result.summary).toContain("Disputes: 0 upheld, 1 withdrawn, 1 unruled.");
   const sec = result.verdicts.find((v) => v.role === "security");
   expect(sec.verdict).toBe("reject");
   expect(sec.must_fix.map((m) => m.id)).toEqual(["sec2"]);
   expect(validate("review.v1", result).ok).toBe(true);
+});
+
+// --- Task 6: the blocks all four workflows share, and the maturity bound on done_when ---
+
+const WORKFLOW_FILES = [FACTORY_TRIAGE_WORKFLOW, FACTORY_PLAN_WORKFLOW, FACTORY_IMPLEMENT_WORKFLOW, FACTORY_REVIEW_WORKFLOW];
+const blockOf = (src, re, what) => {
+  const m = re.exec(src);
+  expect(m, what).not.toBeNull();
+  return m[0];
+};
+
+test("the four workflows share a byte-identical LOADER literal, loader prompt and once() — and the schema carries `maturity`", () => {
+  const srcs = WORKFLOW_FILES.map((f) => readFileSync(f, "utf8"));
+  const loaders = srcs.map((s) => blockOf(s, /const LOADER = \{[\s\S]*?\n\};/, "LOADER"));
+  const prompts = srcs.map((s) => blockOf(s, /const loaderPrompt =\n[\s\S]*?;\n/, "loaderPrompt"));
+  const onces = srcs.map((s) => blockOf(s, /function once\(fn\) \{[\s\S]*?\n\}/, "once"));
+
+  // 네 스크립트가 같은 로더를 부른다는 것은 "같은 스키마로 같은 것을 묻는다"는 뜻이다 — 한 파일에서만
+  // 필드를 늘리면 그 스테이지만 다른 문맥을 받고, 그 차이는 실행 중에야 드러난다.
+  for (const [what, set] of [["LOADER", loaders], ["loaderPrompt", prompts], ["once", onces]]) {
+    for (let i = 1; i < set.length; i += 1) expect(set[i], `${what} in ${WORKFLOW_FILES[i]}`).toBe(set[0]);
+  }
+  expect(loaders[0]).toContain("maturity: { type: 'string' }");
+  expect(prompts[0]).toContain("maturity = harness.maturity");
+});
+
+test("once(): an agent that throws is re-spawned exactly once, and the second answer stands", async () => {
+  let attempts = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") {
+      return { issue: 7, stage: "triage", tier: "standard", roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }], orchestration: "workflow" };
+    }
+    attempts += 1;
+    if (attempts === 1) throw new Error("subagent died mid-turn");
+    return { disposition: "ready", tier: "standard", reason: "done_when is concrete", summary: "add CSV export" };
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, { agent: stub, args: { issue: 7, context: ".factory/out/context.json" } });
+  expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(2);
+  expect(result.disposition).toBe("ready");
+  expect(validate("triage.v1", result).ok).toBe(true);
+});
+
+test("once(): a loader that throws twice fails every stage closed — a thrown agent is not a crashed workflow", async () => {
+  for (const file of WORKFLOW_FILES) {
+    const stub = async (prompt, opts) => {
+      if (opts.agentType === "factory-loader") throw new Error("loader exploded");
+      return null;
+    };
+    const { result, calls, phases } = await runWorkflow(file, { agent: stub, args: { issue: 5, context: ".factory/out/context.json" } });
+    expect(calls.map((c) => c.opts.agentType), file).toEqual(["factory-loader", "factory-loader"]);
+    expect(phases, file).toEqual(["Load"]);
+    expect(result, file).toEqual({ issue: 5, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  }
+});
+
+const planLevelStub = (maturity, doneWhen, extra = {}) => async (prompt, opts) => {
+  if (opts.agentType === "factory-loader") return planLoaderFix({ maturity, ...extra });
+  if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+  if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+  if (opts.agentType === "plan-synthesizer") return planFix({ done_when: doneWhen });
+  if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "fine" };
+  return null;
+};
+
+test("factory-plan.js: a done_when level beyond the harness maturity is downgraded, and the downgrade is logged as workflow dissent", async () => {
+  const doneWhen = [
+    { id: "dw1", text: "CSV export writes a header row", verify: "test_42_header", level: "unit" },
+    { id: "dw2", text: "the export page downloads a file", verify: "test_42_download", level: "e2e" },
+    { id: "dw3", text: "the API returns 200", verify: "test_42_api", level: "integration" },
+  ];
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planLevelStub("M0", doneWhen),
+    args: { issue: 42, context: ".factory/out/context.json" },
+  });
+
+  expect(result.done_when.map((w) => [w.id, w.level])).toEqual([["dw1", "unit"], ["dw2", "unit"], ["dw3", "unit"]]);
+  expect(result.dissent_log).toEqual([
+    { role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M0", resolution: "downgraded to unit" },
+    { role: "workflow", objection: "done_when dw3 level integration exceeds maturity M0", resolution: "downgraded to unit" },
+  ]);
+  expect(validate("plan.v1", result).ok).toBe(true);
+});
+
+test("factory-plan.js: M1 allows integration and downgrades only e2e; M2 leaves every level alone", async () => {
+  const doneWhen = [
+    { id: "dw1", text: "a", verify: "test_42_a", level: "integration" },
+    { id: "dw2", text: "b", verify: "test_42_b", level: "e2e" },
+  ];
+  const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: { issue: 42, context: "c" } });
+  expect(m1.result.done_when.map((w) => w.level)).toEqual(["integration", "integration"]);
+  expect(m1.result.dissent_log).toEqual([{ role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
+
+  const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: { issue: 42, context: "c" } });
+  expect(m2.result.done_when.map((w) => w.level)).toEqual(["integration", "e2e"]);
+  expect(m2.result.dissent_log).toEqual([]);
+});
+
+test("factory-plan.js: a loader that reported no maturity leaves the levels alone — the workflow does not invent a bound", async () => {
+  const doneWhen = [{ id: "dw1", text: "a", verify: "test_42_a", level: "e2e" }];
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub(undefined, doneWhen), args: { issue: 42, context: "c" } });
+  expect(result.done_when.map((w) => w.level)).toEqual(["e2e"]);
+  expect(result.dissent_log).toEqual([]);
+});
+
+test("factory-plan.js: the re-synthesized plan is bound too — an objection round cannot smuggle a level back in", async () => {
+  const overLevel = [{ id: "dw1", text: "a", verify: "test_42_a", level: "e2e" }];
+  let synthesis = 0;
+  let signOff = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix({ maturity: "M0" });
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") {
+      synthesis += 1;
+      // 1차는 규칙을 지키고, 재합성이 e2e를 다시 밀어 넣는다
+      return planFix({ done_when: synthesis === 1 ? [{ id: "dw1", text: "a", verify: "test_42_a", level: "unit" }] : overLevel });
+    }
+    if (opts.label?.startsWith("sign:")) {
+      signOff += 1;
+      return signOff <= PLAN_ROSTER.length && roleOf(opts) === "skeptic" ? { vote: "object", reason: "범위가 넓다" } : { vote: "accept", reason: "ok" };
+    }
+    return null;
+  };
+
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c" } });
+  expect(synthesis).toBe(2);
+  expect(result.done_when.map((w) => w.level)).toEqual(["unit"]);
+  expect(result.dissent_log).toContainEqual({ role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" });
+});
+
+test("factory-implement.js: PR bodies and rework comments go through --body-file, never an inline body", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ must_fix: REWORK_MUST_FIX, pr: 31 });
+    if (opts.agentType === "factory-builder") {
+      return buildFix({ rework_response: { responses: REWORK_MUST_FIX.map((m) => ({ id: m.id, status: "fixed", commit: "8f2c1a9" })) } });
+    }
+    return verdictFix();
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json" } });
+  const build = byType(calls, "factory-builder")[0].prompt;
+
+  expect(build).toContain("--body-file");
+  expect(build).toContain("gh pr create --draft");
+  expect(build).toContain("gh pr comment 31 --body-file");
+  // 훅은 명령 문자열 전체를 읽는다 — 본문을 인라인으로 넘기면 `>`로 시작하는 줄 하나가 명령을 통째로 막는다
+  expect(build).toMatch(/Write tool/);
+  expect(build).toMatch(/NEVER pass a body inline/);
 });
