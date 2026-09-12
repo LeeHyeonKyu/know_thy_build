@@ -260,6 +260,20 @@ test("checkSettings: ci-settings.json missing or short of the template deny list
   expect(full["settings.ci-deny"].level).toBe("PASS");
 });
 
+// ADR-019 이월: `mergeSettings`가 가산적이라 옛 경로 deny는 `--upgrade`로도 안 지워졌었다.
+// 이제 설치기가 지우고, doctor는 아직 남아 있는 저장소에 WARN으로 알린다.
+test("checkSettings: leftover moved denies in .claude/settings.json → settings.stale-deny WARN naming the fix", () => {
+  const template = { permissions: { deny: ["Bash(gh pr merge*)"] }, hooks: {} };
+  const stale = { permissions: { deny: ["Bash(gh pr merge*)", "Edit(.factory/**)", "Write(package.json)"] }, hooks: {} };
+  const c = by(checkSettings({ settings: stale, template }));
+  expect(c["settings.stale-deny"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("Edit(.factory/**)") });
+  expect(c["settings.stale-deny"].detail).toContain("factory init --upgrade");
+  expect(c["settings.deny"].level).toBe("PASS");    // deny 자체는 여전히 충족된다 — 별개의 문제다
+
+  const clean = { permissions: { deny: ["Bash(gh pr merge*)", "Read(.env)"] }, hooks: {} };
+  expect(by(checkSettings({ settings: clean, template }))["settings.stale-deny"].level).toBe("PASS");
+});
+
 test("checkHooks: runs each hook with stdin JSON and checks exit code; verdict-format gets a real transcript file", async () => {
   const fakeRun = makeFakeRun([
     {

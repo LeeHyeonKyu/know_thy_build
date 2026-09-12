@@ -49,7 +49,9 @@ export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun 
   const after = ensureGitignore(before, GITIGNORE_ENTRIES);
   if (after !== before) writeFileSync(gi, after);
   if (json) { io.out(JSON.stringify({ counts, actions: actions.map(({ content, ...a }) => a) }, null, 2)); return 0; }
-  io.out(`factory init${upgrade ? " --upgrade" : ""}: created ${counts.created} · replaced ${counts.replaced} · merged ${counts.merged} · skipped ${counts.skipped} · kept ${counts.kept}`);
+  io.out(`factory init${upgrade ? " --upgrade" : ""}: created ${counts.created} · replaced ${counts.replaced} · merged ${counts.merged} · skipped ${counts.skipped} · kept ${counts.kept} · pruned ${counts.pruned}`);
+  // 제거는 조용히 일어나면 안 된다 — 사람의 settings.json에서 줄이 사라진 것이므로 이유를 말한다.
+  if (counts.pruned) io.out(`  pruned ${counts.pruned} path deny entries from .claude/settings.json — they moved to .factory/ci-settings.json (ADR-019); they were blocking the human-point skills`);
   for (const a of actions) if (a.action !== "skip") io.out(`  ${a.action.padEnd(8)} ${a.dest}${a.owner !== "factory" ? `  (${a.owner}-owned)` : ""}`);
   io.out(`
 Next:

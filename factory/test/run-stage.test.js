@@ -33,6 +33,42 @@ test("run-stage executes the §4.2.1 skeleton in order and transitions on succes
   expect(calls).toEqual(["charter", "trust", "claim", "reset-gates", "heartbeat", "assert", "context", "reset-agents", "claude", "gates", "verify", "handoff", "transition", "record", "heartbeat-stop", "release"]);
 });
 
+// ADR-019 / N3: `claude -p --settings`가 가리키는 파일이 없으면 경로 deny 없이 에이전트가 돈다 —
+// 확인되지 않은 강제는 강제가 아니므로, 띄우기 전에 needs-human으로 멈춘다.
+test("ci-settings.json missing → needs-human before claude -p is ever spawned, exit 2", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    ciSettingsPresent: async () => false,
+    buildContext: vi.fn(async () => ({ roster: [], orchestration: "workflow", limits: {} })),
+    claudeP: vi.fn(), gates: async () => null,
+    verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(2);
+  expect(deps.claudeP).not.toHaveBeenCalled();
+  expect(deps.buildContext).not.toHaveBeenCalled();   // 컨텍스트를 만들기도 전에 멈춘다
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: expect.stringContaining(".factory/ci-settings.json missing"),
+  }));
+});
+
+test("ci-settings.json present → the stage proceeds normally", async () => {
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    ciSettingsPresent: async () => true,
+    buildContext: async () => ({ roster: [], orchestration: "workflow", limits: {} }),
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })), gates: async () => null,
+    verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: async () => ({ ok: true }), runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  expect(deps.claudeP).toHaveBeenCalled();
+});
+
 test("claim failure exits 0 without doing work; verify failure → transition to needs-human, exit 2", async () => {
   const base = (over) => ({
     charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),

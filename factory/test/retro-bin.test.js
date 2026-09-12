@@ -107,6 +107,25 @@ test("the agent fixture really satisfies factory.retro.v1 (otherwise the full pa
   expect(validate("retro.v1", AGENT_OUT())).toEqual({ ok: true, errors: [] });
 });
 
+// ADR-019 / N3: 분석 에이전트도 `--settings .factory/ci-settings.json`으로 뜬다 — 그 파일이 없으면
+// hydrate 실패와 같은 자리에서 같은 방식으로 끝낸다: 아무것도 쓰지 않고 exit 2.
+test("ci-settings.json missing → exit 2 before hydrate, nothing written, no claude -p", async () => {
+  const { deps, written, recorded } = makeDeps({ state: freshState(), overrides: { ciSettingsPresent: async () => false } });
+  expect(await runRetro({ deps })).toBe(2);
+  expect(deps.hydrate).not.toHaveBeenCalled();
+  expect(deps.claudeP).not.toHaveBeenCalled();
+  expect(deps.writeState).not.toHaveBeenCalled();
+  expect(deps.sync).not.toHaveBeenCalled();
+  expect(written).toEqual([]);
+  expect(recorded.join("\n")).toMatch(/ci-settings missing/);
+});
+
+test("ci-settings.json present → retro runs as usual", async () => {
+  const { deps } = makeDeps({ state: freshState(), overrides: { ciSettingsPresent: async () => true } });
+  expect(await runRetro({ deps })).toBe(0);
+  expect(deps.hydrate).toHaveBeenCalled();
+});
+
 test("stampOf/todayOf are UTC and stable; gapTitle is the dedup key", () => {
   expect(stampOf(NOW)).toBe("2026-09-12-1345");
   expect(todayOf(NOW)).toBe("2026-09-12");

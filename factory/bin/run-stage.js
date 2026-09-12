@@ -124,6 +124,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
     }
+    // L2를 실을 파일이 없는 채로 에이전트를 띄우지 않는다(ADR-019). `claude -p --settings`가 가리키는
+    // `.factory/ci-settings.json`이 없으면 경로 deny가 통째로 빠진 세션이 돌고, 그 세션은 harness.toml·
+    // 게이트 설정을 고칠 수 있다 — "확인되지 않은 강제"는 강제가 아니므로 fail closed로 멈춘다.
+    // merge는 여기까지 오지 않는다(script-only, 위에서 return).
+    if (d.ciSettingsPresent && !(await d.ciSettingsPresent())) {
+      const reason = ".factory/ci-settings.json missing — the agent would run without the L2 path deny list; run `npx know-thy-build factory init --upgrade`";
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`ci-settings: FAIL — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
     const ctx = await d.buildContext();
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     const out = await d.claudeP(ctx);
@@ -403,6 +413,7 @@ async function main() {
     /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
     resetGates: async () => { resetGateOutputs({ root, harness }); },
     countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
+    ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
     claudeP: async () => {
       const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
       if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));

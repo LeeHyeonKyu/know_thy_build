@@ -323,6 +323,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
   };
 
   try {
+    // ⓪ L2 사전 확인 — `claude -p --settings`가 가리키는 `.factory/ci-settings.json`이 없으면 분석
+    // 에이전트가 경로 deny 없이 돌게 된다(ADR-019). hydrate 실패와 같은 자리에서 같은 방식으로 끝낸다:
+    // 아무것도 쓰지 않고 exit 2 — 커서도 `merges_since`도 그대로라 고친 뒤 다음 머지가 같은 창을 다시 본다.
+    if (d.ciSettingsPresent && !(await d.ciSettingsPresent())) {
+      console.error("factory: retro aborted — .factory/ci-settings.json missing (the analyst would run without the L2 path deny list); run `npx know-thy-build factory init --upgrade`");
+      record("retro: ci-settings missing — refusing to run the analyst without the L2 deny list");
+      return 2;
+    }
     // ① hydrate — records 브랜치의 run 기록과 `_retro.md`를 로컬로 복원한다. **출처를 확인한다**:
     // 브랜치 내용을 확정하지 못했으면(fetch 실패, `_retro.md` 부분 읽기 실패) 상태를 쓰지 않는다.
     let hy = null;
@@ -794,6 +802,7 @@ async function main() {
      * 후보 파일을 먼저 쓰고(워크플로가 그 경로만 인자로 받는다, P4-R6) `claude -p`를 부른다.
      * 파싱에 실패해도 원본 stdout은 `.factory/out/retro.json`에 남는다 — 사후 감사의 1차 증거다.
      */
+    ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
     claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
       mkdirSync(outDir, { recursive: true });
       writeFileSync(join(outDir, "retro-candidates.json"), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);

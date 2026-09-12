@@ -46,7 +46,7 @@ Pick a language, and 13 commands are installed into your `.claude/commands/` —
 | `/know-thy-build:clarify` | Answer `needs-info` questions on a spec | Updated spec/issue, label transition |
 | `/know-thy-build:unstick` | Resolve a stuck issue (`needs-human`) | `human-decision`, derived issues, label transition |
 | `/know-thy-build:proposal` | Review a retro/harness proposal PR | PR comment (dry-run), `human-decision` |
-| `/know-thy-build:role` | Create or edit a reviewer/plan role | `.claude/agents/<role>.md`, `roles.toml` diff, PR |
+| `/know-thy-build:role` | Create or edit a reviewer/plan role | `.claude/agents/reviewer-<short>.md` (or `plan-<short>.md`), `roles.toml` diff, PR |
 | `/know-thy-build:digest` | Weekly summary of what shipped | `docs/factory/digests/YYYY-Wnn.md` |
 | `/know-thy-build:status` | Read-only dashboard (Needs You / in progress / queue) | none (read-only) |
 

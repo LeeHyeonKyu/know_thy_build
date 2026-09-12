@@ -1,7 +1,7 @@
 import { join, basename } from "node:path";
 import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { render as renderTemplate } from "../../cli/install.js";
+import { render as renderTemplate, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
 import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
@@ -193,6 +193,14 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate }) {
   const haveDeny = new Set(s.permissions?.deny || []);
   const missingDeny = wantDeny.filter((d) => !haveDeny.has(d));
   out.push(missingDeny.length ? c("settings.deny", "FAIL", `deny list missing: ${missingDeny.join(", ")}`) : c("settings.deny", "PASS"));
+
+  // ADR-019 이전에 설치한 저장소는 옮겨간 경로 deny를 아직 들고 있다 — `mergeSettings`가 가산적이라
+  // 스스로 사라지지 않는다. WARN인 이유: L2는 (더 좁아진 것이 아니라) 여전히 유효하고, 깨진 것은
+  // 사람의 스킬이다. `--upgrade`가 이제 이 줄들을 제거한다.
+  const stale = MOVED_DENIES_ADR_019.filter((d) => haveDeny.has(d));
+  out.push(stale.length
+    ? c("settings.stale-deny", "WARN", `.claude/settings.json still denies ${stale.join(", ")} — moved to .factory/ci-settings.json (ADR-019); it blocks the human-point skills — run \`npx know-thy-build factory init --upgrade\``)
+    : c("settings.stale-deny", "PASS"));
 
   if (ciTemplate) {
     if (!ciSettings) {
