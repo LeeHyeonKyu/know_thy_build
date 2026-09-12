@@ -96,7 +96,7 @@ function sectionAt(lines, lineNo, addedLineNos = new Set()) {
   }
   return current;
 }
-function lessonsFormat(file, text) {
+export function lessonsFormat(file, text) {
   const v = [];
   const head = /<!--\s*factory-lessons:v1\s+role=([\w-]+)\s+max=(\d+)\s*-->/.exec(text);
   if (!head) return [{ file, rule: "lessons header missing" }];
