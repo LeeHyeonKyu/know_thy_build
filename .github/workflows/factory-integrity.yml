@@ -1,7 +1,10 @@
 name: factory-integrity
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # ready_for_review는 일부러 뺐다(KTB-15b I1) — merge-stage의 draft→ready 플립(KTB-15)이 만드는
+    # 바로 그 이벤트라, 실으면 diff가 그대로인데도 머지 직전에 새 필수 체크 런이 다시 시작돼
+    # `gh pr merge`와 경합한다(yml-lint의 ready-for-review-trigger 규칙이 이 목록을 다시 지킨다).
+    types: [opened, synchronize, reopened]
 permissions:
   contents: read
 jobs:

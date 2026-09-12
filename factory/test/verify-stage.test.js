@@ -98,6 +98,19 @@ test("end-to-end: a broken fence in the envelope is rescued by transcriptText, a
   const with_ = verifyStage({ ...args, transcriptText: transcript });
   expect(with_.ok).toBe(true);
   expect(with_.data.verdicts).toHaveLength(2);
+  // KTB-15b M1: verifyStage surfaces which candidate won — provenance for post-hoc audit.
+  expect(with_.source).toMatch(/transcript tool result/);
+});
+
+// ── KTB-15b M1: verifyStage forwards extractStageArtifact's `source` (provenance) ──────────────
+test("verifyStage returns source on success, and null when nothing verified (no artifact to name)", () => {
+  const r = verifyStage({ stage: "review", out: out(review), agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } });
+  expect(r.ok).toBe(true);
+  expect(r.source).toMatch(/```json fence/);
+
+  const fail = verifyStage({ stage: "review", out: { is_error: false, result: "no json here" }, agentsLog: log([]), roster: [], orchestration: "workflow" });
+  expect(fail.ok).toBe(false);
+  expect(fail.source).toBeNull();
 });
 
 // ── KTB-16: 턴 한도만은 다른 is_error다 ───────────────────────────────────

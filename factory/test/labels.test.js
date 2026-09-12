@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET } from "../lib/labels.js";
+import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY } from "../lib/labels.js";
 
 test("states are the spec's 13 labels", () => {
   expect([...STATES].sort()).toEqual([
@@ -36,7 +36,31 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:blocked", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:blocked", "factory:planned")).toBe(true);   // sweeper 재큐
   expect(canTransition("factory:blocked", "factory:approved")).toBe(true);  // KTB-15: 머지만 실패한 런의 재시도
+  // KTB-15b: triage·plan도 자신의 정상 진입 라벨로 되돌아가는 재시도 엣지를 얻는다(BLOCKED_RETRY).
+  expect(canTransition("factory:blocked", "factory:queue")).toBe(true);
+  expect(canTransition("factory:blocked", "factory:ready")).toBe(true);
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);
+});
+
+// ── KTB-15b I2: blocked에서 재진입할 수 있는 네 스테이지, 그리고 재시도가 허용되는 origin ──────
+test("ENTRY_LABELS: triage/plan/implement/merge accept factory:blocked; review does not", () => {
+  expect(ENTRY_LABELS.triage).toEqual(["factory:queue", "factory:blocked"]);
+  expect(ENTRY_LABELS.plan).toEqual(["factory:ready", "factory:blocked"]);
+  expect(ENTRY_LABELS.implement).toEqual(["factory:planned", "factory:rework", "factory:blocked"]);
+  expect(ENTRY_LABELS.merge).toEqual(["factory:approved", "factory:blocked"]);
+  expect(ENTRY_LABELS.review).toEqual(["factory:awaiting-review"]);
+});
+
+test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
+  expect(BLOCKED_RETRY.triage).toEqual({ origins: ["factory:queue"], hop: "factory:queue" });
+  expect(BLOCKED_RETRY.plan).toEqual({ origins: ["factory:ready"], hop: "factory:ready" });
+  // implement의 hop은 origin이 in-progress여도 planned다 — implement 자신의 무조건적인
+  // planned → in-progress 전이가 그 자리를 다시 채운다.
+  expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" });
+  expect(BLOCKED_RETRY.merge).toEqual({ origins: ["factory:approved"], hop: "factory:approved" });
+  expect(BLOCKED_RETRY.review).toBeUndefined();
+  // 매 hop 자체가 그래프에서 유효한 엣지여야 한다 — 표와 그래프가 어긋나면 재시도가 조용히 거부된다.
+  for (const { hop } of Object.values(BLOCKED_RETRY)) expect(canTransition("factory:blocked", hop), hop).toBe(true);
 });
 
 test("non-edges are rejected", () => {

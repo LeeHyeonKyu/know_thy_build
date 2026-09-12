@@ -62,3 +62,24 @@ test("issue with no factory label is treated as from=null and rejected", async (
   const r = await transition({ gh, issue: 7, to: "factory:queue" });
   expect(r.ok).toBe(false); expect(r.reason).toMatch(/no factory state label/);
 });
+
+// ── KTB-15b I2: a successful transition into factory:blocked leaves an origin marker ───────────
+test("a successful transition into factory:blocked leaves a factory-blocked-origin marker naming the stage", async () => {
+  const gh = fakeGh(["factory:approved"]);
+  const r = await transition({ gh, issue: 7, to: "factory:blocked", reason: "merge API failed", stage: "merge" });
+  expect(r).toEqual({ ok: true, from: "factory:approved", to: "factory:blocked" });
+  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:approved stage=merge -->/);
+});
+
+test("the origin marker falls back to stage=unknown when the caller didn't pass one", async () => {
+  const gh = fakeGh(["factory:in-progress"]);
+  await transition({ gh, issue: 7, to: "factory:blocked", reason: "x" });
+  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:in-progress stage=unknown -->/);
+});
+
+test("a transition NOT into blocked never carries the origin marker", async () => {
+  const triage = renderHandoff({ stage: "triage", issue: 7, summary: "s", data: { schema: "factory.triage.v1", issue: 7, disposition: "ready", tier: "docs" } });
+  const gh = fakeGh(["factory:queue"], [{ id: 1, body: triage, createdAt: "2026-09-11T00:00:00Z" }]);
+  await transition({ gh, issue: 7, to: "factory:ready", stage: "triage" });
+  expect(gh.comment.mock.calls[0][1]).not.toMatch(/factory-blocked-origin/);
+});

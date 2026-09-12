@@ -1,12 +1,31 @@
 import { test, expect, vi } from "vitest";
 import {
   accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
-  retireCandidates, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, ymdOf,
+  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
+
+// ── KTB-15b item 2: retro's --max-turns comes from the harness, not a hardcoded 5 ───────────────
+// bin/retro.js hardcoded `--max-turns 5` (~line 824) — the same problem KTB-16 already fixed for
+// run-stage.js (a short hardcoded turn budget starves a background-Workflow dispatcher's
+// call/receipt/notification/output round trip). retroClaudeArgs reuses run-stage's stageMaxTurns.
+test("retroClaudeArgs: --max-turns comes from [factory].max_turns (default 12), max_turns_by_stage.retro wins, not hardcoded 5", () => {
+  expect(retroClaudeArgs({ harness: undefined, charter: {}, ciSettingsPath: "/r/.factory/ci-settings.json" }))
+    .toEqual(["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", "12", "--output-format", "json", "--settings", "/r/.factory/ci-settings.json"]);
+  expect(retroClaudeArgs({ harness: { factory: { max_turns: 20 } }, charter: {}, ciSettingsPath: "/x" }))
+    .toEqual(expect.arrayContaining(["--max-turns", "20"]));
+  expect(retroClaudeArgs({ harness: { factory: { max_turns: 20, max_turns_by_stage: { retro: 30 } } }, charter: {}, ciSettingsPath: "/x" }))
+    .toEqual(expect.arrayContaining(["--max-turns", "30"]));
+  // max_turns_by_stage for another stage doesn't leak into retro's own turns
+  expect(retroClaudeArgs({ harness: { factory: { max_turns_by_stage: { plan: 40 } } }, charter: {}, ciSettingsPath: "/x" }))
+    .toEqual(expect.arrayContaining(["--max-turns", "12"]));
+  expect(retroClaudeArgs({ harness: {}, charter: { budget: { usd_per_stage: 5 } }, ciSettingsPath: "/x" }))
+    .toEqual(expect.arrayContaining(["--max-budget-usd", "5"]));
+  expect(retroClaudeArgs({ harness: {}, charter: {}, ciSettingsPath: "/x" })).not.toEqual(expect.arrayContaining(["--max-budget-usd"]));
+});
 
 /** 에이전트 출력(`factory.retro.v1`) — 스키마를 실제로 통과하는 값이어야 한다(아래 테스트가 확인한다). */
 const AGENT_OUT = () => ({

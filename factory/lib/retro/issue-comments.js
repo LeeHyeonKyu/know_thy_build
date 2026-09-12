@@ -43,6 +43,27 @@ export function flakyIdFromTitle(title) {
  *     그래프 거부는 라벨을 안 옮긴다. `to=` 값만으로는 못 가른다).
  *     사유는 "**전이 거부** … : " 뒤(레이블 이름 자체의 콜론과 구분하려 "콜론+공백"만 구분자로 본다).
  */
+/**
+ * `lib/transition.js`가 `factory:blocked`로 성공한 모든 전이에 남기는 마커(KTB-15b I2) —
+ * "이 blocked이 어디서, 어느 스테이지의 시도에서 왔는가"의 유일한 출처다. 코멘트 이력을 다시
+ * 훑어 `TRANSITION_TO`로 추측하지 않는다 — 전이가 일어나는 바로 그 순간 이 마커가 사실을 싣는다.
+ */
+export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+) -->/;
+
+/**
+ * 이슈 코멘트에서 **가장 최근** `factory-blocked-origin` 마커를 뽑는다. `{from, stage}` 또는
+ * 마커가 하나도 없으면 null(사람이 API로 라벨을 직접 blocked에 붙인 경우 등 — "판정 불가"이지
+ * "queue에서 왔다"가 아니다). 코멘트는 시간순으로 온다고 가정한다(sweeper의 다른 판정들과 같은 가정).
+ */
+export function blockedOrigin(comments) {
+  let found = null;
+  for (const c of comments || []) {
+    const m = BLOCKED_ORIGIN.exec(String(c?.body ?? ""));
+    if (m) found = { from: m[1], stage: m[2] };
+  }
+  return found;
+}
+
 export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
   const out = [];
   for (const c of comments || []) {

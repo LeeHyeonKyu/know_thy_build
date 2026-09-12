@@ -473,7 +473,8 @@ test("I2: a dispatched plan on an issue already at factory:planned exits 0 befor
   expect(d.transition).not.toHaveBeenCalled();                    // 라벨을 건드리지 않는다
   expect(d.writeHandoff).not.toHaveBeenCalled();
   expect(d.release).toHaveBeenCalled();                           // 잡았던 락은 반드시 놓는다
-  expect(lines).toContain("entry state factory:planned != expected factory:ready — nothing to do");
+  // ENTRY_LABELS.plan now also lists factory:blocked (KTB-15b) — the message names both.
+  expect(lines).toContain("entry state factory:planned != expected factory:ready|factory:blocked — nothing to do");
 });
 
 test("I2: `factory run merge 5 --remote` on an unrelated issue makes no needs-human transition", async () => {
@@ -1549,4 +1550,155 @@ test("run-stage: git-status-failure on a no-write stage (review) is undecidable 
   }));
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(lines.some((l) => l.includes("worktree: FAIL —"))).toBe(true);
+});
+
+// ── KTB-15b I2: generalized blocked-retry guard (triage/plan/implement/merge) ───────────────────
+// Each of these stages can now enter from factory:blocked (ENTRY_LABELS), but only when the
+// factory-blocked-origin marker (lib/labels.js BLOCKED_RETRY) says it came from that stage's own
+// normal entry label. Merge is special — it does not hop the label here; merge-stage.js does,
+// only after re-confirming gates GREEN in this run (see merge-stage.test.js retryFromBlocked).
+
+test("KTB-15b: merge entering from factory:blocked whose origin was factory:approved retries and merges", async () => {
+  const calls = [];
+  const d = mergeHappyDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:approved", stage: "merge" }),
+    transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
+    mergePr: async () => { calls.push("mergePr"); },
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(calls).toEqual(["transition:factory:approved", "mergePr", "transition:factory:merged"]);
+});
+
+test("KTB-15b: merge entering from factory:blocked whose origin was NOT approved refuses — no transition, no PR lookup", async () => {
+  const lines = [];
+  const d = mergeHappyDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:in-progress", stage: "implement" }),
+    prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" })),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.prInfo).not.toHaveBeenCalled();
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(lines.some((l) => /merge: blocked did not originate from approved — nothing to retry \(origin=in-progress\)/.test(l))).toBe(true);
+});
+
+test("KTB-15b: merge entering from factory:blocked with no origin marker at all refuses (unreadable is not approved)", async () => {
+  const d = mergeHappyDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => null,
+    prInfo: vi.fn(),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.prInfo).not.toHaveBeenCalled();
+});
+
+test("KTB-15b: plan entering from factory:blocked whose origin was factory:ready hops back to ready, then runs normally", async () => {
+  const calls = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:ready", stage: "plan" }),
+    transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
+    claudeP: async () => { calls.push("claudeP"); return { is_error: false, result: "{}" }; },
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(0);
+  expect(calls).toEqual(["transition:factory:ready", "claudeP", "transition:factory:planned"]);
+});
+
+test("KTB-15b: plan entering from factory:blocked whose origin was NOT ready refuses — no transition, no claude -p", async () => {
+  const lines = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:in-progress", stage: "implement" }),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    claudeP: vi.fn(),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(2);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(lines.some((l) => /plan: blocked did not originate from ready — nothing to retry \(origin=in-progress\)/.test(l))).toBe(true);
+});
+
+test("KTB-15b: triage entering from factory:blocked whose origin was factory:queue hops back to queue, then runs normally", async () => {
+  const calls = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:queue", stage: "triage" }),
+    transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
+    claudeP: async () => { calls.push("claudeP"); return { is_error: false, result: "{}" }; },
+    verifyStage: () => ({ ok: true, reasons: [], data: { disposition: "ready" } }),
+  });
+  expect(await runStage({ stage: "triage", issue: 7, deps: d })).toBe(0);
+  expect(calls).toEqual(["transition:factory:queue", "claudeP", "transition:factory:ready"]);
+});
+
+test("KTB-15b: implement entering from factory:blocked whose origin was factory:in-progress hops back to planned, then re-claims in-progress normally", async () => {
+  const calls = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:in-progress", stage: "implement" }),
+    transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
+    claudeP: async () => { calls.push("claudeP"); return { is_error: false, result: "{}" }; },
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  // hop back to planned (KTB-15b), then implement's own unconditional planned → in-progress step
+  expect(calls).toEqual(["transition:factory:planned", "transition:factory:in-progress", "claudeP", "transition:factory:awaiting-review"]);
+});
+
+test("KTB-15b: implement entering from factory:blocked whose origin matches neither planned nor in-progress refuses", async () => {
+  const lines = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:queue", stage: "triage" }),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    claudeP: vi.fn(),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(lines.some((l) => /implement: blocked did not originate from planned\|in-progress — nothing to retry \(origin=queue\)/.test(l))).toBe(true);
+});
+
+test("KTB-15b: review never accepts factory:blocked as an entry label — no BLOCKED_RETRY entry for it", async () => {
+  const transition = vi.fn();
+  const d = baseDeps({ issueLabels: async () => ["factory:blocked"], transition });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  expect(transition).not.toHaveBeenCalled();   // entry guard already returned 0 — "nothing to do"
+});
+
+// ── KTB-15b M1: verifyStage's `source` (which candidate won) is recorded, not dropped ───────────
+test("KTB-15b M1: run-stage records `artifact: <source>` when verifyStage names one", async () => {
+  const lines = [];
+  const d = baseDeps({
+    verifyStage: () => ({ ok: true, reasons: [], data: {}, source: "transcript file read plan.json.output (.result)" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(0);
+  expect(lines).toContain("artifact: transcript file read plan.json.output (.result)");
+});
+
+test("KTB-15b M1: no source (or verifyStage that doesn't return one) means no artifact: line", async () => {
+  const lines = [];
+  const d = baseDeps({
+    verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(0);
+  expect(lines.some((l) => l.startsWith("artifact:"))).toBe(false);
+});
+
+test("KTB-15b: a refused hop-back transition stops the stage before claude -p runs", async () => {
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:ready", stage: "plan" }),
+    transition: vi.fn(async () => ({ ok: false, reason: "graph refused (unexpected)" })),
+    claudeP: vi.fn(),
+  });
+  expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(2);
+  expect(d.claudeP).not.toHaveBeenCalled();
 });

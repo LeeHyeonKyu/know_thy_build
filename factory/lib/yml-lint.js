@@ -6,6 +6,15 @@ export function lintWorkflow(text) {
     // 1) flow mapping 안의 ${{ }}: 같은 줄에서 여는 '{' (단, '${{'의 일부가 아님) 뒤에 '${{'가 온다
     const stripped = l.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
     if (/(^|[^$])\{[^}\n]*\$\{\{/.test(stripped)) out.push({ line: i + 1, rule: "flow-interpolation", msg: "${{ }} inside a flow mapping breaks the workflow file — use a block mapping" });
+    // 1b) `ready_for_review`는 어떤 factory 워크플로의 트리거에도 있으면 안 된다(KTB-15b I1) —
+    // merge-stage가 머지 직전 draft PR을 ready로 뒤집으면(`gh pr ready`, KTB-15) 그 자체가
+    // `ready_for_review` 이벤트를 만든다. 그 이벤트를 듣는 워크플로(예: factory-integrity)가 diff는
+    // 그대로인데 새 필수 체크 런을 또 시작하고, 그 런이 끝나기 전에 `gh pr merge`가 먼저 불려
+    // required-checks 판정이 흔들릴 수 있다(레이스). 주석에서의 언급은 괜찮다 — 실제 트리거 목록에
+    // 있는 토큰만 본다.
+    if (/\bready_for_review\b/.test(l.replace(/#.*/, ""))) {
+      out.push({ line: i + 1, rule: "ready-for-review-trigger", msg: "pull_request types must not include ready_for_review — the merge stage's own draft→ready flip (KTB-15) would retrigger this workflow and race `gh pr merge`" });
+    }
   });
   // 2) upload-artifact 스텝: 스텝 블록(다음 '- '까지) 안에 dot-경로가 있으면 include-hidden-files: true 필수
   for (let i = 0; i < lines.length; i++) {

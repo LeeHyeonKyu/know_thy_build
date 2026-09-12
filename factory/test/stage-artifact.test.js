@@ -193,6 +193,24 @@ test("the real demo #2 transcript (max_turns) yields the plan — the notificati
   expect(planValidate(r.data).ok).toBe(true);
 });
 
+// ── KTB-15b I3: 서로 다른 두 경로를 읽었을 때, 더 나중에 읽은 파일이 이긴다 ─────────────────
+// `fileReadsFromTranscript`는 경로별로 재조립한 Map을 **경로가 처음 등장한 순서**로 준다 — 세션
+// 초반에 읽은 낡은 파일과 나중에 다시 만든 진짜 산출물이 둘 다 스키마를 통과하면, 순서를 뒤집지
+// 않는 한 낡은 쪽이 먼저 후보가 되어 이긴다(candidates 배열의 첫 통과자가 이긴다).
+test("KTB-15b I3: among two schema-valid file reads, the more recently read file wins over an earlier stale one", () => {
+  const stale = { ...plan, issue: 99 };
+  const fresh = { ...plan, issue: 2 };
+  const readOf = (id, file, obj) => [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id, input: { file_path: file } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: `1\t${JSON.stringify(obj)}` }] } }),
+  ];
+  const lines = [...readOf("r1", "/tmp/tasks/old.output", stale), ...readOf("r2", "/tmp/tasks/new.output", fresh)];
+  const r = extractStageArtifact({ envelopeResult: "", transcriptText: `${lines.join("\n")}\n`, validate: planValidate });
+  expect(r.ok).toBe(true);
+  expect(r.data.issue).toBe(2);
+  expect(r.source).toMatch(/new\.output/);
+});
+
 /** 데모 러너의 실제 agents.jsonl 한 줄(경로·세션 id는 run 34691260727의 값). */
 const AGENTS_LINE = JSON.stringify({
   session_id: "7d5d1d17-6df2-46b3-9c2d-f91379d2b2bd",

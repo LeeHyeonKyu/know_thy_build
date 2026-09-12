@@ -104,5 +104,8 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
   }
-  return { ok: reasons.length === 0, reasons, data };
+  // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
+  // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)
+  // 지금까지 여기서 버려졌다. run-stage가 이 값을 run 기록 한 줄로 남긴다(§run-stage.js `artifact:`).
+  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null };
 }

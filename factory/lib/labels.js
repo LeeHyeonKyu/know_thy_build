@@ -18,11 +18,36 @@ export const TIER_LABELS = new Set(TIERS.map(tierLabel));
  * run-stage의 진입 가드(KTB-10)가 이것으로 "이미 지나간 스테이지를 다시 돌리는 런"을 즉시 되돌린다.
  */
 export const ENTRY_LABELS = {
-  triage: ["factory:queue"],
-  plan: ["factory:ready"],
-  implement: ["factory:planned", "factory:rework"],
+  triage: ["factory:queue", "factory:blocked"],
+  plan: ["factory:ready", "factory:blocked"],
+  implement: ["factory:planned", "factory:rework", "factory:blocked"],
   review: ["factory:awaiting-review"],
-  merge: ["factory:approved"],
+  merge: ["factory:approved", "factory:blocked"],
+};
+
+/**
+ * KTB-15b I2 — 네 스테이지 모두 `factory:blocked`에서 재진입할 수 있게 됐지만(위 ENTRY_LABELS),
+ * 재시도할 값어치가 있는 것은 그 blocked이 **그 스테이지 자신의 정상 진입 라벨에서** 왔을 때뿐이다.
+ * "어디서 왔는가"는 더 이상 코멘트 이력을 다시 파싱해 추측하지 않는다 — `lib/transition.js`가
+ * blocked으로 가는 모든 성공한 전이에 `factory-blocked-origin` 마커를 즉시 남기고(전이가 일어나는
+ * 바로 그 순간이 유일한 출처다), run-stage의 진입 가드(`ENTRY_LABELS`)와 sweeper의 blocked 팔이
+ * 둘 다 그 마커 하나로 판정한다.
+ *
+ * `origins`: 이 값과 일치해야 재시도를 허용한다(그 외 어디서 왔든 → 거부, 전이 없이 exit 2).
+ * `hop`: origin이 확인된 뒤 blocked에서 **곧장 되돌아갈** 라벨 — 그래야 스테이지의 나머지 로직이
+ * "정상적으로 그 라벨에서 시작한" 것과 똑같이 이어진다. implement는 origin이 `in-progress`여도
+ * `planned`로 되돌아간다 — implement 자신의 무조건적인 `planned → in-progress` 전이(맨 위)가
+ * 그대로 다시 그 자리를 채우기 때문에, 두 origin을 따로 다룰 필요가 없다.
+ *
+ * merge만 이 표로 되돌아가지 않는다(run-stage.js가 merge를 여기서 제외하고 넘긴다) — 머지는
+ * "라벨을 되돌리는 것" 자체가 게이트를 다시 GREEN으로 확인했다는 증거여야 해서, 그 hop을
+ * run-stage 진입 시점이 아니라 `merge-stage.js`가 게이트를 재확인한 **뒤**에 한다(retryFromBlocked).
+ */
+export const BLOCKED_RETRY = {
+  triage: { origins: ["factory:queue"], hop: "factory:queue" },
+  plan: { origins: ["factory:ready"], hop: "factory:ready" },
+  implement: { origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" },
+  merge: { origins: ["factory:approved"], hop: "factory:approved" },
 };
 
 /** §3.2 전이 그래프. 키: from, 값: 허용된 to. */
@@ -49,8 +74,12 @@ export const TRANSITIONS = new Map([
   // (planned로 보내면 이미 GREEN인 구현을 통째로 다시 돈다). 요구조건은 그대로 물린다 —
   // `requirements.js`의 `factory:approved` 규칙이 review handoff + 이번 런의 GREEN gates 파일 +
   // PR head 일치를 계속 요구하므로, 이 엣지가 "승인을 건너뛰는 문"이 되지는 않는다.
-  // 사람 경로: `transition.js <n> factory:approved --human` → `factory run merge <n> --remote`.
-  ["factory:blocked", new Set(["factory:needs-human", "factory:planned", "factory:approved"])],
+  // 사람 경로였던 `transition.js <n> factory:approved --human`은 KTB-15b로 사라졌다 — 재시도는
+  // 이제 `factory run merge <n> --remote`(또는 sweeper의 한 번짜리 자동 재시도)뿐이다.
+  // blocked → queue/ready(KTB-15b): triage·plan도 같은 이유로 재시도 엣지가 필요하다 — 판정 불가로
+  // blocked에 떨어진 런은 코드가 아니라 그 스테이지 자체를 다시 도는 게 맞고(BLOCKED_RETRY), 그
+  // hop은 언제나 **그 스테이지의 정상 진입 라벨**로 되돌아간다.
+  ["factory:blocked", new Set(["factory:needs-human", "factory:queue", "factory:ready", "factory:planned", "factory:approved"])],
   ["factory:needs-human", new Set(["factory:queue"])],
   ["factory:merged", new Set([])],
   ["factory:wont-do", new Set([])],

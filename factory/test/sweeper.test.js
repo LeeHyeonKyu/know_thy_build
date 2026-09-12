@@ -214,6 +214,55 @@ test("sweep: with no dispatchStage wired the third arm is inert — waiting labe
   expect(gh.searchIssues.mock.calls.map((c) => c[0])).toEqual(["factory:in-progress", "factory:blocked"]);
 });
 
+// ── KTB-15b: the blocked arm retries the ORIGIN stage once (from the factory-blocked-origin
+// marker), then escalates on the next sweep if still blocked ─────────────────────────────────
+const BLOCKED_ORIGIN = (from, at) => ({ id: 1, body: `<!-- factory-transition:v1 from=${from} to=factory:blocked by=script -->\n${from} → factory:blocked — x\n<!-- factory-blocked-origin from=${from} stage=x -->`, createdAt: at });
+
+test.each([
+  ["factory:approved", "merge"],
+  ["factory:ready", "plan"],
+  ["factory:queue", "triage"],
+  ["factory:planned", "implement"],
+  ["factory:in-progress", "implement"],
+])("sweep: blocked from %s dispatches %s once, then escalates on the next sweep if still blocked", async (from, stage) => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [BLOCKED_ORIGIN(from, "2026-09-11T00:00:00Z"), ...posted] : [])),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage };
+
+  const first = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledWith({ stage, issue: 9 });
+  expect(gh.comment).toHaveBeenCalledWith(9, expect.stringContaining(`<!-- factory-sweeper restarted stage=${stage} issue=9 -->`));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
+  expect(first).toContainEqual({ kind: "blocked-retry", issue: 9, stage });
+
+  // still blocked next sweep — the restart marker is already there, so this time it escalates
+  const second = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9 });
+});
+
+test("sweep: blocked with no factory-blocked-origin marker at all escalates immediately (no dispatch)", async () => {
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 10 }] : [])),
+    comments: vi.fn(async () => [{ id: 1, body: "a human note, no marker", createdAt: "x" }]),
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn();
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage });
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 10, to: "factory:needs-human" }));
+  expect(actions).toContainEqual({ kind: "blocked-escalated", issue: 10 });
+});
+
 // ── 격리 이탈 코멘트(Plan 1b 이월) ────────────────────────────────────────
 // `quarantine.toml`은 "지금 격리된 것"만 담으므로 복귀·만료는 그 순간 어디에도 남지 않는다 — 이력은
 // 사람이 보는 flaky 이슈에 남아야 하고, retro는 그 `expired` 코멘트만으로 만료를 안다(P4-R3).

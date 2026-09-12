@@ -1,6 +1,6 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
-import { TRANSITION_TO } from "./retro/issue-comments.js";
+import { TRANSITION_TO, blockedOrigin } from "./retro/issue-comments.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -23,6 +23,20 @@ const STALLED_STAGE = {
 };
 /** 재점화 마커 — 이것 자체가 "이미 밀어 봤다"는 기록이다(dedupe의 유일한 근거). */
 export const restartComment = (stage, issue) => `<!-- factory-sweeper restarted stage=${stage} issue=${issue} -->`;
+
+/**
+ * KTB-15b I2 — `factory-blocked-origin` 마커의 `from`(그 blocked을 만든 스테이지의 정상 진입
+ * 라벨)에서, 다시 밀어볼 스테이지로. `lib/labels.js`의 `BLOCKED_RETRY`와 같은 사실을 반대 방향으로
+ * 본 것이다(그 표는 스테이지 → 허용 origin, 이 표는 origin → 다시 밀 스테이지) — `in-progress`도
+ * `planned`와 같은 implement로 간다(원인이 뭐든 재시도는 항상 스테이지 자신을 처음부터 다시 돈다).
+ */
+const BLOCKED_RETRY_STAGE = {
+  "factory:queue": "triage",
+  "factory:ready": "plan",
+  "factory:planned": "implement",
+  "factory:in-progress": "implement",
+  "factory:approved": "merge",
+};
 
 const FLAKY_LABEL = "factory:flaky";
 const NOTE = {
@@ -177,8 +191,35 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
+  // blocked 팔은 기본적으로 **에스컬레이션만** 한다 — 유예 시간(이 잡의 실행 주기)이 지나면
+  // needs-human이다. blocked는 대개 "판정에 필요한 재료를 못 구했다"(게이트 계산 불가, 자격증명)이고,
+  // 그 원인은 공장 밖에 있어 같은 런을 다시 돌려도 같은 자리에서 죽는다 — 되살리는 것은 사람의 판단이다.
+  //
+  // 예외(KTB-15b): 이 blocked이 **그 스테이지 자신의 정상 진입 라벨에서** 왔으면(마커, 아래
+  // `BLOCKED_RETRY_STAGE`) — 즉 판정 불가가 그 스테이지의 마지막 한 걸음에서만 났으면 — 원인이
+  // 대개 일시적이라(GitHub API 순간 실패, 재계산 지연) 사람 없이 **한 번은** 다시 돌아볼 값어치가
+  // 있다. `run-stage`의 진입 가드(§labels.js `BLOCKED_RETRY`)가 실제 재시도 여부를 다시 한번
+  // 결정적으로 가른다 — 여기서는 그저 그 스테이지를 한 번 dispatch할 뿐이다. 재점화 마커는 stalled
+  // 팔과 같은 함수(`restartComment`)로 남기고 같은 방식으로 dedupe한다: 마커가 이미 있으면(=이미
+  // 한 번 밀었는데 여전히 blocked) 더 밀지 않고 곧장 에스컬레이션한다.
   for (const it of await gh.searchIssues("factory:blocked")) {
     try {
+      if (dispatchStage) {
+        const comments = await gh.comments(it.number);
+        const origin = blockedOrigin(comments);
+        const retryStage = origin && BLOCKED_RETRY_STAGE[origin.from];
+        if (retryStage) {
+          const marker = restartComment(retryStage, it.number);
+          const alreadyRetried = comments.some((c) => String(c?.body ?? "").includes(marker));
+          if (!alreadyRetried) {
+            // 마커를 먼저 남긴다(stalled 팔과 같은 이유 — M4). dispatch 실패는 다음 sweep이 다시 시도한다.
+            await gh.comment(it.number, `${marker}\n\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`);
+            await dispatchStage({ stage: retryStage, issue: it.number });
+            actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage });
+            continue;
+          }
+        }
+      }
       await transition({ issue: it.number, to: "factory:needs-human", reason: "blocked (environment/credentials) — needs human" });
       actions.push({ kind: "blocked-escalated", issue: it.number });
     } catch (e) {

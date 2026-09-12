@@ -54,6 +54,16 @@ test("an artifact path starting with ${{ env.… }} needs a `||` fallback", () =
   expect(lintWorkflow("  - run: echo ${{ env.X }}\n")).toEqual([]);
 });
 
+// KTB-15b I1: merge-stage's own draft→ready flip (KTB-15, `gh pr ready`) fires `ready_for_review` —
+// any factory workflow listening for it restarts a required check mid-merge, racing `gh pr merge`.
+test("KTB-15b I1: a pull_request trigger listing ready_for_review is a violation; the comment mentioning it is not", () => {
+  expect(lintWorkflow("on:\n  pull_request:\n    types: [opened, synchronize, reopened, ready_for_review]\n"))
+    .toEqual([expect.objectContaining({ rule: "ready-for-review-trigger", line: 3 })]);
+  expect(lintWorkflow("on:\n  pull_request:\n    types: [opened, synchronize, reopened]\n")).toEqual([]);
+  // a comment merely explaining why it's excluded doesn't trip the rule
+  expect(lintWorkflow("on:\n  pull_request:\n    # ready_for_review is deliberately excluded (KTB-15b)\n    types: [opened, synchronize, reopened]\n")).toEqual([]);
+});
+
 test("logging hooks must end with exit 0", () => {
   expect(lintLoggingHook("#!/bin/bash\necho hi || true\nexit 0\n")).toEqual([]);
   expect(lintLoggingHook("#!/bin/bash\necho hi\n")).toEqual([expect.objectContaining({ rule: "exit0" })]);

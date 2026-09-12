@@ -163,6 +163,16 @@ export function makeGh({ run, repo }) {
       const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,state,mergeable,headRefName,headRefOid,baseRefName,labels"]));
       return { number: j.number, state: j.state, mergeable: j.mergeable, headRefName: j.headRefName, headRefOid: j.headRefOid, baseRefName: j.baseRefName, labels: (j.labels || []).map((l) => l.name) };
     },
+    /**
+     * draft PR을 ready-for-review로 뒤집는다(KTB-15). implement는 **일부러** `--draft`로 PR을 연다 —
+     * 리뷰가 끝나기 전에 사람이 머지 버튼을 누르는 것을 막는 신호다. 그 대가로 머지 직전에 이걸
+     * 한 번 불러야 한다: draft인 채로 `gh pr merge`를 부르면 GitHub이 GraphQL 단에서
+     * `Pull Request is still a draft`로 거부한다(데모 #8이 여기서 죽었다).
+     * 이미 ready인 PR에 불러도 gh는 exit 0이다 — 멱등이라 재시도 경로에서 따로 상태를 묻지 않는다.
+     */
+    async prReady(pr) {
+      await gh(["pr", "ready", String(pr), "-R", repo]);
+    },
     async mergePr(pr, { method = "squash", deleteBranch = true } = {}) {
       const args = ["pr", "merge", String(pr), "-R", repo, `--${method}`];
       if (deleteBranch) args.push("--delete-branch");

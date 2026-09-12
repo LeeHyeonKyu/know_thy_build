@@ -114,7 +114,7 @@ plan 단계 경고: skeptic이 정확히 이 지점을 open_risks에 남김
 
 - `round>K`: 이슈 분할 / 범위 축소(스펙에서 done_when 제거) / 특정 리뷰어 지적을 CHARTER Preserve와 대조해 정당성 판단 → 스펙 수정
 - `RED×M`: 제품 결함 인정(새 이슈) / 환경 문제(harness 이슈) / 테스트 자체가 잘못(스펙 수정)
-- 머지 API 실패(`blocked`): 리뷰까지 통과했고 머지 한 걸음만 실패한 경우다 — 고칠 것이 코드가 아니므로 `node .factory/bin/transition.js <n> factory:approved --human` 후 `factory run merge <n> --remote`로 머지만 다시 돌린다(전이는 review handoff와 이번 런의 GREEN `gates.json`을 여전히 요구한다)
+- 머지 API 실패(`blocked`): 리뷰까지 통과했고 머지 한 걸음만 실패한 경우다 — 고칠 것이 코드가 아니므로 `factory run merge <n> --remote`로 머지만 다시 돌린다(KTB-15b: `factory:blocked`이 `factory:approved`에서 왔을 때만 재시도가 열린다 — run-stage가 이슈 코멘트의 `factory-blocked-origin` 마커로 그 사실을 확인하고, 게이트를 이번 런에서 다시 GREEN으로 확인한 뒤에만 라벨을 approved로 되돌려 머지한다. 다른 곳에서 온 blocked이면 전이 없이 거부되고 그대로 `needs-human`으로 넘어온다 — 사람이 볼 것이 있다는 뜻이다). sweeper도 같은 조건이면 사람보다 먼저 한 번 자동으로 재시도한다.
 - `budget`: 분할 / tier 하향 / 예산 상향(CHARTER 변경 → `:proposal` 경로)
 - `quarantine back-pressure`: 격리 목록을 보고 제품 비결정성 판단 → 수정 이슈 우선 착수 / 삭제 결정
 - `wont-do 판단`: 스펙 폐기

@@ -316,7 +316,11 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate 
   if (notes.length === 0) tried.push("transcript: no completed <task-notification> block");
 
   // (2) 디스패처가 알림의 output-file을 읽은 내용. 조각으로 오므로 파일별로 다시 붙인다.
-  for (const [path, text] of fileReadsFromTranscript(transcriptText)) {
+  // `fileReadsFromTranscript`가 주는 Map은 **경로가 처음 등장한 순서**다 — 그대로 훑으면 세션 초반에
+  // 읽은(그래서 나중에 다시 쓰였을 수 있는) 파일이 나중에 읽은 파일보다 먼저 후보가 되고, 둘 다
+  // 스키마를 통과하면 오래된 쪽이 이긴다(위 (1)·아래 개별 tool_result·Workflow 결과는 전부 **최신이
+  // 먼저**다 — 여기만 거꾸로였다, KTB-15b I3). `.reverse()`로 나머지 후보들과 같은 방향으로 맞춘다.
+  for (const [path, text] of [...fileReadsFromTranscript(transcriptText)].reverse()) {
     pushFrom(`transcript file read ${path.split("/").pop()}`, text);
   }
   // 그리고 개별 tool_result 하나하나 — 파일 경로를 못 얻은 읽기(Bash `cat` 등)도 여기서 잡힌다.

@@ -475,8 +475,12 @@ test("(5) prReady is called immediately before mergePr — after every gate and 
   });
   const code = await run(d);
   expect(code).toBe(0);
-  expect(calls).toEqual(["protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergePr"]);
+  // KTB-15b I1: prReady 뒤 mergeGates가 한 번 더 불린다(대상 저장소의 ready_for_review 리스너가
+  // 새 필수 체크를 깨웠을 수 있어서다) — 첫 재확인이 이미 GREEN이므로 추가 대기 없이 곧장 mergePr다.
+  expect(calls).toEqual(["protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergeGates", "mergePr"]);
   expect(d.prReady).toHaveBeenCalledWith(9);
+  expect(d.mergeGates).toHaveBeenCalledTimes(2);
+  expect(d.sleep).not.toHaveBeenCalled();   // 첫 재확인부터 GREEN이면 재확인 사이 대기는 없다
 });
 
 // 게이트가 떨어진 PR을 ready로 만들어 두면, 그다음부터는 사람이 실수로 머지 버튼을 누를 수 있다 —
@@ -508,6 +512,60 @@ test("(5) no prReady dep wired → the merge still proceeds, with a record line"
   expect(code).toBe(0);
   expect(d.mergePr).toHaveBeenCalled();
   expect(lines.some((l) => /prReady dep not wired/.test(l))).toBe(true);
+});
+
+// ── (6a-ii) KTB-15b I1: re-poll mergeGates after the draft→ready flip ──────
+// A target repo may have its own workflow listening for `ready_for_review` — readying the PR
+// restarts a required check there, and the GREEN this run already saw (step 4/5) is stale.
+test("(6a-ii) the re-check settles GREEN on the second poll — one sleep, then mergePr proceeds", async () => {
+  const mergeGates = vi.fn()
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })      // step (5), before ready
+    .mockResolvedValueOnce({ checksGreen: false, integrityGreen: true })     // right after ready — new check still pending
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true });     // settles GREEN
+  const d = baseD({ mergeGates });
+  const code = await run(d);
+  expect(code).toBe(0);
+  expect(mergeGates).toHaveBeenCalledTimes(3);
+  expect(d.sleep).toHaveBeenCalledTimes(1);
+  expect(d.sleep).toHaveBeenCalledWith(10000);
+  expect(d.mergePr).toHaveBeenCalled();
+});
+
+test("(6a-ii) still not GREEN after every re-poll → factory:blocked, mergePr never called", async () => {
+  const { lines, record } = makeRecord();
+  const mergeGates = vi.fn()
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })
+    .mockResolvedValue({ checksGreen: false, integrityGreen: true });
+  const d = baseD({ mergeGates });
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  // 첫 확인(step 5) + 재확인 3회 = 4번
+  expect(mergeGates).toHaveBeenCalledTimes(4);
+  expect(d.sleep).toHaveBeenCalledTimes(2);   // 3번의 재확인 사이 대기는 2번뿐이다(첫 재확인은 곧장)
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:blocked", reason: expect.stringContaining("required checks not GREEN"),
+  }));
+  expect(lines.some((l) => /mergeGates re-check after ready/.test(l))).toBe(true);
+});
+
+test("(6a-ii) mergeGates() throwing MergeBaseError during the re-check → factory:blocked, not swallowed as needs-human", async () => {
+  const mergeGates = vi.fn()
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })
+    .mockRejectedValueOnce(new MergeBaseError("origin/main: exit 1"));
+  const d = baseD({ mergeGates });
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringContaining("merge-base") }));
+});
+
+test("(6a-ii) with no prReady dep wired, mergeGates is never re-checked (no draft flip happened)", async () => {
+  const mergeGates = vi.fn(async () => ({ checksGreen: true, integrityGreen: true }));
+  const d = baseD({ mergeGates, prReady: undefined });
+  const code = await run(d);
+  expect(code).toBe(0);
+  expect(mergeGates).toHaveBeenCalledTimes(1);
 });
 
 test("(5) mergePr throws → factory:blocked 'merge API failed: …'", async () => {
@@ -597,7 +655,7 @@ test("happy path: calls prInfo → protectedPaths → policyViolations → gates
   const { lines, record } = makeRecord();
   const code = await run(d, { record });
   expect(code).toBe(0);
-  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
   expect(d.closeIssue).toHaveBeenCalledWith(9);
   // 7단계 각각의 흔적이 런 레코드에 남는다
   expect(lines.length).toBeGreaterThanOrEqual(7);

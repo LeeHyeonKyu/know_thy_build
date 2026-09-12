@@ -40,7 +40,9 @@ p="$c"
 printf '%s' "$c" | grep -Eq "$qa\.\." || p=$(printf '%s' "$c" | sed -E "s#(\./)?$qa##g")
 
 echo "$p" | grep -Eq "(>>?|tee[[:space:]]+(-a[[:space:]]+)?)[[:space:]]*[\"']?[^[:space:]\"']*$prot" && block "write to protected path"
-echo "$p" | grep -Eq "sed[[:space:]]+(-[a-zA-Z]*i[a-zA-Z]*[[:space:]]+)[^;&|]*$prot" && block "sed -i on protected path"
+# KTB-15b: `-i`도 값을 붙여 받는다(`sed -i.bak …`) — deny-all-writes.sh의 같은 수정과 짝이다.
+# `--in-place[=SUFFIX]`(GNU 긴 옵션)도 같이 잡는다.
+echo "$p" | grep -Eq "sed[[:space:]]+(-[a-zA-Z]*i[^;&|[:space:]]*[[:space:]]+|--in-place(=[^;&|[:space:]]*)?[[:space:]]+)[^;&|]*$prot" && block "sed -i on protected path"
 echo "$p" | grep -Eq "(^|[;&|[:space:]])(cp|mv)[[:space:]]+[^;&|]*[[:space:]]$prot" && block "cp/mv onto protected path"
 echo "$p" | grep -Eq "(^|[;&|[:space:]])perl[[:space:]]+-[a-zA-Z]*i[^;&|]*$prot" && block "perl -i on protected path"
 echo "$p" | grep -Eq "(^|[;&|[:space:]])python[0-9.]*[[:space:]]+-c[^;&|]*$prot" && block "python -c touching protected path"

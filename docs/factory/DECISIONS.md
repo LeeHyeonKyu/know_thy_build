@@ -827,4 +827,21 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 
 **결정(운영 규칙)**: 대상 저장소의 팩토리 업그레이드(`init --upgrade` 머지)는 **돌고 있는 스테이지가 없을 때만** 한다. 자동화된 가드는 두지 않는다 — 업그레이드 PR은 보호 경로를 건드리므로 어차피 사람이 머지하고(ADR-020 KTB-5), 그 사람이 `factory:in-progress`/`awaiting-review` 이슈가 있는지 보면 된다. 이 규칙을 문서에 못 박는 이유는 라운드 3에서 그것을 보지 않고 머지했기 때문이다.
 
+### KTB-15b — blocked 재시도는 사람 손이 아니라 마커와 sweeper로: 머지·triage·plan·implement 전부
+
+**질문**: KTB-15가 연 `factory:blocked → factory:approved` 엣지의 "알려진 마찰(미해결)"이 실제로 걸렸다 — 문서가 안내하는 사람 경로 `node .factory/bin/transition.js <n> factory:approved --human`은 `requirements.js`의 `gatesGate`가 **로컬** `.factory/out/gates.json`(이번 런이 만든 GREEN 파일)을 요구하는데, 러너 밖 사람의 셸에는 그 파일이 없다 — 그래서 그 경로는 항상 거부됐다. 유일하게 남은 길은 sweeper가 유예 뒤 올리는 `needs-human → queue`, 곧 리뷰까지 통과한 구현을 통째로 다시 도는 것뿐이었다.
+
+**결정**: 사람 손 대신 **런타임이 스스로 재시도**한다.
+
+1. **`ENTRY_LABELS`에 `factory:blocked`를 추가**한다 — merge뿐 아니라 triage·plan·implement까지 네 스테이지 모두(`factory/lib/labels.js`). 재시도할 값어치가 있는 것은 그 blocked이 **그 스테이지 자신의 정상 진입 라벨**(queue/ready/planned·in-progress/approved)에서 왔을 때뿐이다 — 그 사실은 `lib/transition.js`가 `factory:blocked`로 가는 모든 성공한 전이에 **그 순간** 남기는 마커 `<!-- factory-blocked-origin from=<label> stage=<stage> -->`가 유일한 출처다(코멘트 이력을 다시 파싱해 추측하지 않는다). `BLOCKED_RETRY` 표가 스테이지별 허용 origin과 "확인되면 곧장 되돌아갈 라벨(hop)"을 정의한다. origin이 안 맞으면 전이 없이 거부한다(`"<stage>: blocked did not originate from … — nothing to retry"`).
+2. **merge만 hop을 늦춘다.** triage/plan/implement는 origin이 확인되는 즉시 그 라벨로 되돌아가 나머지 로직을 정상 진입처럼 잇는다. merge는 다르다 — 라벨을 되돌리는 것 자체가 "게이트를 다시 GREEN으로 확인했다"는 증거여야 하므로, `merge-stage.js`가 (4) 게이트 재확인을 마친 **뒤에** `retryFromBlocked`로 `approved`로 되돌리고, 그다음에야 mergeGates·prReady·mergePr를 잇는다. `factory:blocked → factory:queue`·`→ factory:ready` 엣지를 그래프에 추가했다(`→ approved`는 KTB-15가 이미 열어 뒀다).
+3. **sweeper의 blocked 팔이 한 번은 먼저 시도한다.** 같은 마커를 읽어 origin → 재시도 스테이지(`queue→triage, ready→plan, planned/in-progress→implement, approved→merge`)로 dispatch하고, stalled 팔과 같은 재점화 마커(`factory-sweeper restarted stage=<s> issue=<n>`)로 dedupe한다 — 한 번 밀었는데 여전히 blocked이면 다음 sweep에서 곧장 needs-human으로 올린다. 사람 경로는 이제 `factory run merge <n> --remote`(또는 해당 스테이지) 하나뿐이다 — `--human` 스크립트 단계가 사라졌다(`templates/know-thy-build/unstick.md`).
+4. **I1 — `ready_for_review` 레이스.** merge-stage의 draft→ready 플립(KTB-15, `gh pr ready`) 자체가 `ready_for_review` PR 이벤트를 만든다 — 그 이벤트를 듣는 워크플로(`factory-integrity.yml`)가 diff는 그대로인데 머지 직전에 새 필수 체크 런을 또 띄우면 `gh pr merge`와 경합한다. `factory-integrity.yml`의 트리거에서 `ready_for_review`를 뺐고(`yml-lint`에 `ready-for-review-trigger` 규칙을 추가해 되돌아오지 못하게 고정), `merge-stage.js`는 prReady 직후 `mergeGates()`를 최대 3회·10초 간격으로 재확인한 뒤에야 머지한다(대상 저장소가 자신만의 리스너를 달아 뒀을 수 있어서 — 우리 워크플로만 고쳐서는 못 막는다).
+5. **I3 — 산출물 후보 순서 버그.** `stage-artifact.js`의 `extractStageArtifact`는 다른 모든 후보군(task-notification·개별 tool_result·Workflow 결과)을 **최신이 먼저**로 훑는데, 파일 재조립 후보(`fileReadsFromTranscript`)만 경로가 **처음 등장한 순서**(사실상 오래된 순서)였다 — 세션 초반에 읽은 낡은 파일과 나중에 다시 쓴 진짜 산출물이 둘 다 스키마를 통과하면 낡은 쪽이 이겼다. `.reverse()` 한 줄로 나머지 후보와 같은 방향을 맞췄다.
+6. **KTB-13 r2의 gap 1 항목 두 개를 닫는다.** `sed -i.bak`/`sed --in-place=…`와 `node -e"…"`/`-p"…"`처럼 값이 **붙은** 형태는 그 규칙들의 원래 경계 검사(`([[:space:]=]|$)`)를 통과하지 못해 빠져나가고 있었다 — curl/cp/mv가 KTB-13 r2에서 이미 받은 것과 같은 관용(플래그 글자가 뭉치 안에 있다는 사실로 충분하다)을 `deny-all-writes.sh`·`block-dangerous.sh` 양쪽에 적용했다.
+
+**M1(사후 감사 개선)**: `verifyStage`가 `extractStageArtifact`의 `source`(어느 후보가 이겼는지)를 그동안 계산만 하고 버려 왔다 — 이제 반환값에 실어 나르고, `run-stage.js`가 `artifact: <source>` 한 줄로 run 기록에 남긴다.
+
+**영향**: `factory/lib/labels.js`(`ENTRY_LABELS`·`BLOCKED_RETRY`·`TRANSITIONS`), `factory/lib/transition.js`(origin 마커, `stage` 인자), `factory/lib/retro/issue-comments.js`(`blockedOrigin`), `factory/bin/run-stage.js`(진입 가드 일반화, `artifact:` 기록), `factory/lib/merge-stage.js`(`retryFromBlocked`, I1 재확인 루프), `factory/lib/sweeper.js`(blocked 팔 일반화), `factory/lib/yml-lint.js`(`ready-for-review-trigger`), `.github/workflows/factory-integrity.yml` + 템플릿, `factory/lib/stage-artifact.js`(I3), `factory/lib/verify-stage.js`(M1), `factory/hooks/{deny-all-writes,block-dangerous}.sh`, `factory/bin/retro.js`(retro의 `--max-turns`도 하드코딩 5 대신 `stageMaxTurns`), `templates/know-thy-build/unstick.md`. 테스트: `labels.test.js`·`transition.test.js`·`issue-comments.test.js`(신규)·`run-stage.test.js`·`merge-stage.test.js`·`sweeper.test.js`·`yml-lint.test.js`·`stage-artifact.test.js`·`verify-stage.test.js`·`hooks.test.js`·`retro-bin.test.js`.
+
 (이후 항목은 dogfood 진행에 따라 추가)

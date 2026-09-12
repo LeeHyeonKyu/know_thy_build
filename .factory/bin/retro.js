@@ -44,6 +44,7 @@ import {
 } from "../lib/retro/quarantine-ops.js";
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
+import { stageMaxTurns } from "./run-stage.js";
 
 const QUEUE_LABEL = "factory:queue";
 const HARNESS_LABEL = "factory:harness";
@@ -730,6 +731,19 @@ export async function collectIssues({ gh, since }) {
  * 유일한 출처이므로, 여기서 두 키를 같은 항목에 매달아 둔다. 모르는 역할은 파일을 만들지 않는다
  * (retro는 역할을 신설하지 않는다 — 신설은 사람이 머지하는 제안 PR의 몫이다).
  */
+/**
+ * retro의 `claude -p` 인자(KTB-15b item 2). 예전에는 `--max-turns 5`가 박혀 있었다 — run-stage.js가
+ * 이미 KTB-16으로 고친 것과 같은 문제(짧은 하드코딩이 백그라운드 워크플로/자격 확인 왕복 턴을
+ * 감당 못 한다)를 retro도 그대로 앓을 수 있어, 같은 `stageMaxTurns(harness, "retro")` 규칙 —
+ * `[factory].max_turns` 공통값, `[factory].max_turns_by_stage.retro`가 있으면 그것이 이긴다,
+ * 둘 다 없으면 기본 12 — 를 그대로 재사용한다. 순수 함수라 하네스만 바꿔가며 테스트할 수 있다.
+ */
+export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
+  const args = ["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, "retro")), "--output-format", "json", "--settings", ciSettingsPath];
+  if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
+  return args;
+}
+
 export function roleFileMap(roles) {
   const map = new Map();
   const add = (name, def) => {
@@ -821,8 +835,7 @@ async function main() {
     claudeP: async ({ period, candidates, stats, history, maturity_gaps }) => {
       mkdirSync(outDir, { recursive: true });
       writeFileSync(join(outDir, "retro-candidates.json"), `${JSON.stringify({ period, candidates, stats, history, maturity_gaps }, null, 2)}\n`);
-      const args = ["-p", "/factory-retro", "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
-      if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
+      const args = retroClaudeArgs({ harness, charter, ciSettingsPath: join(root, ".factory/ci-settings.json") });
       const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
       writeFileSync(join(outDir, "retro.json"), r.stdout);
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }

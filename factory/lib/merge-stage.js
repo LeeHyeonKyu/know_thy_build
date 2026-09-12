@@ -8,6 +8,18 @@ import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
 const MERGEABILITY_REPOLL_MS = 5000;
 
 /**
+ * KTB-15b I1 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR 이벤트를
+ * 만든다. 이 저장소 자신의 워크플로는 그 이벤트를 듣지 않도록 고쳤지만(`factory-integrity.yml`,
+ * yml-lint의 `ready-for-review-trigger` 규칙), **대상 저장소**(팩토리가 설치된 다른 레포)는 그
+ * 이벤트에 반응하는, 팩토리가 모르는 자신만의 필수 체크 워크플로를 달아 뒀을 수 있다 — 그러면
+ * diff는 그대로인데 머지 직전에 새 체크 런이 또 시작되고, 그 런이 끝나기 전에 `gh pr merge`가
+ * 먼저 불려 required-checks 판정이 흔들린다(레이스). 그래서 (6a) 직후 최대 이만큼 짧게
+ * 재확인한다 — 무한정 기다리지 않는다(재확인이 다 GREEN이 아니면 blocked, 재시도로 풀린다).
+ */
+const REQUIRED_CHECKS_REPOLL_ATTEMPTS = 3;
+const REQUIRED_CHECKS_REPOLL_MS = 10000;
+
+/**
  * merge 스테이지는 claude -p를 부르지 않는다 — PR이 이미 approved다, 여기서 물을 건 "지금 이 순간
  * 머지해도 되는가"뿐이다: PR이 열려 있는가, 충돌은 없는가, 게이트는 GREEN인가, 필수 체크와 무결성은
  * 확인됐는가. 전부 통과해야만 gh pr merge를 부른다 — 머지는 되돌릴 수 없으므로 매 단계 fail closed.
@@ -26,8 +38,14 @@ const MERGEABILITY_REPOLL_MS = 5000;
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
  * 여기서 다시 구현하지 않고 그대로 주입받는다.
  * record(lines): run-record 한 줄(들)을 남긴다. refusal(t): 거부된 전이를 record 줄로 바꾼다(runStage와 동일 계약).
+ * retryFromBlocked(KTB-15b): run-stage가 이미 "이 blocked이 approved에서 왔다"를 이슈 코멘트로 확인한
+ * 뒤에만 true로 넘긴다 — 여기서는 그 사실을 다시 검증하지 않고, 게이트가 다시 GREEN으로 확인되는
+ * 시점(아래 (4) 직후)에 라벨을 `factory:approved`로 되돌린다. 그래야 (7)의 `approved → merged` 전이가
+ * 그래프를 통과한다(`factory:blocked → factory:merged` 엣지는 없다 — 머지 재시도는 반드시 approved를
+ * 거쳐야 한다). 이 전이가 거부되면(이론상 그 사이 다른 사람이 라벨을 옮겼을 때) 나머지 단계는 돌지
+ * 않는다 — 머지는 아직 일어나지 않았으므로 되돌릴 것이 없다.
  */
-export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus }) {
+export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus, retryFromBlocked = false }) {
   const sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
 
   // (1) PR이 없거나 열려 있지 않으면 머지할 대상이 없다 — 사람이 봐야 한다.
@@ -209,6 +227,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record([`merge: gates ${gates.status}`]);
 
+  // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
+  // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는
+  // 그대로 이어간다. 이 전이가 거부되면 머지는 아직 일어나지 않았으므로 그대로 멈춘다.
+  if (retryFromBlocked) {
+    const t = await d.transition({ to: "factory:approved", reason: "merge retry from blocked — gates re-verified GREEN" });
+    if (!t.ok) { record([...refusal(t)]); return 2; }
+    record([`transition: ${t.to}`]);
+  }
+
   // (5) 필수 체크와 무결성 — 조회 자체가 안 됐으면 플래그가 서지 않는다(fail closed). 둘 다 실패면
   // 두 이유를 모두 남긴다 — 하나만 말하면 사람이 나머지 원인을 못 보고 재시도한다.
   let mg;
@@ -248,9 +275,14 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 재시도 런이 상태를 따로 묻지 않는다.
   //
   // 실패는 머지 실패와 같은 등급(`factory:blocked`)이다 — 아직 머지되지 않았으므로 되돌릴 것이
-  // 없고, 재시도로 풀릴 수 있다(사람 경로: `transition.js <n> factory:approved --human` →
-  // `factory run merge <n> --remote`, §3.2의 blocked → approved 엣지).
+  // 없고, 재시도로 풀릴 수 있다(재시도 경로: `factory run merge <n> --remote` — KTB-15b, run-stage의
+  // 진입 가드가 이 blocked이 approved에서 왔는지 `factory-blocked-origin` 마커로 확인한다. sweeper의
+  // blocked 팔도 같은 조건이면 사람보다 먼저 한 번 자동으로 이 경로를 시도한다).
   if (d.prReady) {
+    // 불변식(KTB-15b I1): 이 호출 **자체가** `ready_for_review` 이벤트를 만들 수 있다(이미 ready인
+    // PR이면 GitHub이 이벤트를 내지 않지만, 여기서는 어느 쪽인지 구분하지 않는다 — 구분해도 얻는 게
+    // 없고, 아래 재확인은 이미 green인 경우 0회 추가 대기로 끝난다). 그래서 이 호출 뒤에는 gates도
+    // mergeGates도 "아직 유효하다"고 그냥 믿지 않는다 — 아래에서 반드시 다시 확인한다.
     try {
       await d.prReady(pr);
       record([`merge: PR #${pr} ready for review`]);
@@ -260,6 +292,37 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       record([`merge: prReady FAIL — ${reason}`, ...refusal(t)]);
       return 2;
     }
+
+    // (6a-ii) KTB-15b I1: ready로 뒤집은 직후 required checks·integrity를 다시 확인한다 — 대상
+    // 저장소가 `ready_for_review`에 반응하는 자신만의 워크플로를 달아 뒀다면, 방금 확인한 (5)의
+    // GREEN이 이미 낡은 값일 수 있다. 최대 REQUIRED_CHECKS_REPOLL_ATTEMPTS회, 그 사이 REQUIRED_
+    // CHECKS_REPOLL_MS만큼 쉰다 — 첫 시도가 이미 GREEN이면(대부분의 경우 — 이미 ready였거나 대상
+    // 저장소에 그런 리스너가 없다) 추가 대기 없이 그대로 넘어간다.
+    let reverified;
+    for (let i = 0; i < REQUIRED_CHECKS_REPOLL_ATTEMPTS; i++) {
+      if (i > 0) await sleep(REQUIRED_CHECKS_REPOLL_MS);
+      try {
+        reverified = await d.mergeGates();
+      } catch (e) {
+        if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+        const t = await d.transition({ to: "factory:blocked", reason });
+        record([`merge: mergeGates re-check after ready — BLOCKED — ${e.message}`, ...refusal(t)]);
+        return 2;
+      }
+      if (reverified?.checksGreen && reverified?.integrityGreen) break;
+    }
+    if (!reverified?.checksGreen || !reverified?.integrityGreen) {
+      const reasons = [];
+      if (!reverified?.checksGreen) reasons.push("required checks not GREEN");
+      if (!reverified?.integrityGreen) reasons.push("integrity not GREEN");
+      const reason = `ready_for_review retriggered a required check and it did not settle GREEN in time — ${reasons.join("; ")}`;
+      const t = await d.transition({ to: "factory:blocked", reason });
+      record([`merge: mergeGates re-check after ready — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    mg = reverified;
+    record(["merge: mergeGates re-check after ready — checks GREEN, integrity GREEN"]);
   } else {
     // dep이 없다고 머지를 멈추지는 않는다 — 이미 ready인 PR(또는 `--draft`를 쓰지 않는 하네스)이면
     // 아무 문제가 없고, draft라면 바로 아래 mergePr가 GitHub의 거부를 그대로 blocked로 옮긴다.

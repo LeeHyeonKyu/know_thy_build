@@ -345,6 +345,38 @@ test("block-dangerous: attached short-option values do not escape the curl rule 
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
+// ── KTB-15b: sed/node also had an attached-argument hole — `sed -i.bak`/`--in-place=` and
+// `node -e"…"`/`-p"…"` never separated the flag from its value with a space or `=`, so r1/r2's
+// boundary requirement (`([[:space:]=]|$)`) never fired. Same fix family as curl/cp/mv (KTB-13 r2):
+// flag-glyph presence is enough, wherever the value is attached.
+test("deny-all-writes: sed -i.bak / --in-place= and node -e\"…\"/-p\"…\" (attached, no separator) are writes too (KTB-15b)", async () => {
+  const blocked = [
+    "sed -i.bak s/a/b/ f", "sed -i.bak 's/a/b/' src/a.js", "sed --in-place=.bak s/a/b/ f", "sed --in-place s/a/b/ f",
+    "node -e\"1\"", "node -p\"1\"", "node -e\"require('fs').writeFileSync('src/a.js','x')\"",
+  ];
+  const allowed = ["sed -n 1p f", "sed 's/a/b/' f", "node script.js", "node --version"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
+test("block-dangerous: sed -i.bak / --in-place= and attached node -e\"…\" on protected paths are blocked too (KTB-15b, mirrors deny-all-writes)", async () => {
+  const blocked = [
+    "sed -i.bak s/a/b/ package.json", "sed --in-place=.bak s/a/b/ .factory/harness.toml",
+    "node -e\"require('fs').writeFileSync('.claude/settings.json','x')\"",
+  ];
+  const allowed = ["sed -n 1p package.json", "node script.js"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 // MultiEdit은 Edit/Write와 같은 도구다 — allow가 그것도 부여하므로(KTB-13) case에서 빠지면 그 한 도구로
 // 쓰기 금지가 통째로 무너진다. 매처도 같이 넓혀야 훅이 애초에 발화한다(agent-md.test.js가 고정).
 test("deny-all-writes: MultiEdit is blocked exactly like Edit/Write, with the same qa carve-out (KTB-13 r1)", async () => {

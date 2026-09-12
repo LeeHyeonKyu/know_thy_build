@@ -94,14 +94,22 @@ fi
 # 같은 대접을 한다(대상이 어디든 차단). 저장소 스크립트를 **실행**하는 `node .factory/bin/gates.js`는 그대로다:
 # 플래그가 아니라 파일을 받는 형태는 여기 걸리지 않는다. 플래그 토큰은 반드시 공백 뒤에서 시작해야 하므로
 # `node --version`·`node --experimental-vm-modules x.js`도 걸리지 않는다(첫 `-`에서만 매치를 시작한다).
-echo "$c" | grep -Eq "${CMD}node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*|--eval|--print)([[:space:]=]|$)" && deny "node inline script (-e/-p/--eval/--print)"
+# KTB-15b: 짧은 옵션은 값을 **붙여** 받는다(`node -e"1"`, `node -p"1"`) — r2가 curl/cp/mv에 이미 준
+# 관용(플래그 글자가 있다는 사실로 충분하다)을 여기도 준다. 뒤에 붙는 내용은 `[^[:space:];&|]*`로
+# 흡수하고, 그 뒤에 공백/끝이 오는지만 본다(그래야 `--experimental-vm-modules`처럼 우연히 `-e`를
+# 품은 긴 플래그가 오탐되지 않는다 — 그 부분 문자열 앞에 필수 공백이 없으므로 애초에 매치가
+# 시작될 수 없다).
+echo "$c" | grep -Eq "${CMD}node[0-9.]*[[:space:]]+([^;&|]*[[:space:]])?(-[a-zA-Z]*[ep][a-zA-Z]*[^[:space:];&|]*|--eval[^[:space:];&|]*|--print[^[:space:];&|]*)([[:space:]]|$)" && deny "node inline script (-e/-p/--eval/--print)"
 # 다운로드는 쓰기다. curl은 출력 플래그가 있을 때만(플래그가 없으면 stdout — 읽기다), wget은 **언제나**:
 # wget은 플래그가 없어도 URL의 마지막 세그먼트로 cwd에 파일을 만든다.
 echo "$c" | grep -Eq "${CMD}curl([[:space:]]+[^;&|]*)?[[:space:]](-[a-zA-Z]*[oO]$ATTACHED|--output|--output-dir|--remote-name)([[:space:]=]|$)" && deny "curl writing a file (-o/-O/--output)"
 echo "$c" | grep -Eq "${CMD}wget([[:space:]]|$)" && deny "wget (it writes into the cwd even without -O)"
 # 제자리 편집·파이썬 파일 열기는 대상이 어디든 막는다. 쓰기 금지 역할에게 정당한 제자리 편집은 없고,
 # 임시 파일이 필요하면 /tmp로 리다이렉션하는 길이 이미 열려 있다.
-echo "$c" | grep -Eq "${CMD}sed[[:space:]]+[^;&|]*-[a-zA-Z]*i[a-zA-Z]*([[:space:]]|$)" && deny "sed -i"
+# KTB-15b: `-i`도 값을 붙여 받는다(`sed -i.bak …`, BSD/GNU 공통) — 뒤에 붙는 접미사가 문자가
+# 아니어도(`.bak`) 플래그 글자 'i'가 뭉치 안에 있다는 사실로 충분하다. GNU의 긴 옵션
+# `--in-place[=SUFFIX]`도 같은 일을 하므로 같이 잡는다.
+echo "$c" | grep -Eq "${CMD}sed[[:space:]]+[^;&|]*(-[a-zA-Z]*i[^[:space:];&|]*|--in-place(=[^[:space:];&|]*)?)([[:space:]]|$)" && deny "sed -i"
 echo "$c" | grep -Eq "${CMD}perl[[:space:]]+-[a-zA-Z]*i[^;&|]*" && deny "perl -i"
 echo "$c" | grep -Eq "${CMD}python[0-9.]*[[:space:]]+[^;&|]*-c[^;&|]*open\(" && deny "python -c open(...)"
 # 트리·기록을 옮기는 git 서브커맨드. 읽기(diff/log/show/status/rev-parse/ls-files/blame/branch/merge-base)는 그대로.

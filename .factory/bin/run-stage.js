@@ -12,16 +12,18 @@ import { runStageGates, verdictLine } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
+import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
-import { STAGE_OF_TARGET, ENTRY_LABELS, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
+import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
+import { blockedOrigin } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
 import { syncRecords, hydrateRecord } from "../lib/records-branch.js";
@@ -46,6 +48,29 @@ export const readFileOrNull = (p) => { try { return existsSync(p) ? readFileSync
 /** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
 const transcriptTextFor = (root, out) =>
   readTranscript({ root, home: homedir(), sessionId: out?.session_id, readFile: readFileOrNull }) || "";
+
+/**
+ * `claude -p --max-turns`의 기본값(KTB-16). 5였고, 그 5가 데모 #2의 plan 재실행을 죽였다 —
+ * 백그라운드 `Workflow`를 쓰는 디스패처가 쓰는 턴은 최소 ① Workflow 호출 ② 접수증 수신
+ * ③ 완료 알림 수신 ④ 산출물 출력이고, 알림의 `<result>`가 잘려 output 파일을 `Read`로 읽어야
+ * 하면 조각 수만큼 더 붙는다. 6턴째에 잘려 30분과 $12.05가 산출물 없이 증발했다.
+ * 12는 그 관측(조각 4개 + 여유)에서 나온 값이지 이론값이 아니다 — 그래서 하네스에서 조정된다.
+ */
+export const DEFAULT_MAX_TURNS = 12;
+
+/**
+ * 이 스테이지에 쓸 `--max-turns`. `[factory].max_turns`가 공통값이고
+ * `[factory].max_turns_by_stage.<stage>`가 스테이지별로 이긴다 — review는 로스터 크기만큼
+ * 알림이 오고 triage는 워크플로를 아예 안 쓰는 등, 턴 수요가 스테이지마다 다르기 때문이다.
+ * 값이 정수가 아니면(오타·문자열) 기본값으로 떨어진다 — doctor가 그 오타를 FAIL로 잡는다.
+ */
+export function stageMaxTurns(harness, stage) {
+  const f = harness?.factory || {};
+  for (const v of [f.max_turns_by_stage?.[stage], f.max_turns]) {
+    if (Number.isInteger(v) && v >= 1) return v;
+  }
+  return DEFAULT_MAX_TURNS;
+}
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -117,14 +142,41 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // localEntry **뒤**인 이유: 로컬 진입(§4.2.5)이 backlog → factory:queue를 바로 위에서 만든다.
     // 라벨을 읽지 못했으면(조회 실패·상태 라벨 2개) 막지 않고 흔적만 남긴다 — 가드는 비용 방어이지
     // 안전 게이트가 아니고, 실제 안전은 뒤의 전이 그래프가 그대로 쥐고 있다.
+    let entryLabel;
     if (d.issueLabels) {
       const expected = ENTRY_LABELS[stage] || [];
-      let current, known = true;
-      try { current = factoryLabelOf(await d.issueLabels()); }
+      let known = true;
+      try { entryLabel = factoryLabelOf(await d.issueLabels()); }
       catch (e) { known = false; record([`entry state: unreadable — ${e?.message || e}`]); }
-      if (known && expected.length && !expected.includes(current)) {
-        record([`entry state ${current ?? "none"} != expected ${expected.join("|")} — nothing to do`]);
+      if (known && expected.length && !expected.includes(entryLabel)) {
+        record([`entry state ${entryLabel ?? "none"} != expected ${expected.join("|")} — nothing to do`]);
         return 0;
+      }
+    }
+    // KTB-15b I2: 네 스테이지의 진입 라벨에 factory:blocked이 추가됐다(ENTRY_LABELS) — 하지만
+    // 재시도할 것이 있는 건 그 blocked이 **그 스테이지 자신의 정상 진입 라벨에서** 왔을 때뿐이다
+    // (BLOCKED_RETRY). `transition.js`가 blocked으로 갈 때 남긴 `factory-blocked-origin` 마커가
+    // 유일한 출처다 — 다른 곳(예: implement가 아직 안 끝났는데 in-progress에서 온 blocked을
+    // triage가 재시도하려는 경우)에서 온 blocked은 조용히 그래프를 속이지 않고, 전이 없이 거부한다
+    // (사람은 여전히 sweeper의 needs-human 에스컬레이션으로 이 이슈를 보게 된다).
+    //
+    // merge만 예외다: origin이 확인돼도 여기서 라벨을 바로 되돌리지 않는다 — merge-stage.js가
+    // 게이트를 이번 런에서 다시 GREEN으로 확인한 **뒤에야**(retryFromBlocked) approved로 되돌린다.
+    // 다른 세 스테이지는 라벨을 되돌리는 것 자체가 "재시도한다"는 선언이라, 확인 즉시 되돌리고
+    // 나머지 로직을 그 라벨에서 정상적으로 이어간다.
+    const retryCfg = BLOCKED_RETRY[stage];
+    if (retryCfg && entryLabel === "factory:blocked") {
+      const origin = await d.blockedOrigin?.();
+      if (!origin || !retryCfg.origins.includes(origin.from)) {
+        const short = (l) => (l ? l.replace(/^factory:/, "") : "unknown");
+        record([`${stage}: blocked did not originate from ${retryCfg.origins.map(short).join("|")} — nothing to retry (origin=${short(origin?.from)})`]);
+        return 2;
+      }
+      if (stage !== "merge") {
+        const t = await d.transition({ to: retryCfg.hop, reason: `retry from blocked — origin ${origin.from} confirmed` });
+        if (!t.ok) { record([`${stage}: blocked retry hop refused`, ...refusal(t)]); return 2; }
+        record([`${stage}: blocked retry — hopped back to ${t.to}`]);
+        entryLabel = t.to;
       }
     }
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
@@ -145,7 +197,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
     // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus });
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -164,10 +216,37 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     const out = await d.claudeP(ctx);
     const usage = usageLine(out);
+    // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
+    // 다시 묻는다(ADR-020 KTB-14). implement(유일한 쓰기 스테이지)는 건너뛴다 — merge는 여기 오지도
+    // 않는다(위에서 이미 return). 훅이 놓친 모양으로 어떻게 건드렸든, 스크래치 경로(`.factory/out/**`·
+    // `docs/factory/runs/**`) 밖의 diff가 하나라도 있으면 그 산출물은 애초에 받아들이지 않는다 —
+    // verifyStage조차 부르지 않는다.
+    if (isNoWriteStage(stage)) {
+      const clean = d.assertCleanWorktree ? await d.assertCleanWorktree() : { ok: true };
+      if (!clean.ok) {
+        // 두 실패는 등급이 다르다(KTB-14 r1). **더러운 트리**는 사람이 볼 것이 있다 — 어떤 파일이
+        // 어떻게 바뀌었는지 보고 판단해야 하므로 needs-human이다. **`git status` 자체가 실패한 것**은
+        // GREEN도 RED도 아닌 **판정 불가**이고, 이 저장소에서 판정 불가의 자리는 언제나
+        // `factory:blocked`다(merge-stage의 `undecidable()`, 게이트 BLOCKED과 같은 계약) — 사람이
+        // 판단할 재료가 아직 없고, 원인은 대개 러너 쪽이라 재시도로 풀릴 수 있다. 어느 쪽이든
+        // 산출물은 받지 않는다(verifyStage조차 부르지 않는다).
+        const dirty = Boolean(clean.dirty?.length);
+        const reason = dirty
+          ? `worktree dirty after ${stage} (no-write stage): ${clean.dirty.join(", ")}`
+          : `worktree check failed after ${stage} (no-write stage): ${clean.reason || "unknown"}`;
+        const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
+        record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
+        return 2;
+      }
+    }
     // claude -p가 실패를 보고했으면 게이트를 돌릴 이유가 없다 — 판정할 산출물이 없다.
     // 게이트는 건너뛰고 곧장 verify로 간다(verify가 is_error로 떨어뜨린다).
+    //
+    // 예외는 **턴 한도**다(KTB-16/17): 그때 백그라운드 워크플로는 이미 끝났고 산출물은 트랜스크립트
+    // 안에 있다 — 모자란 것은 디스패처가 그것을 다시 출력할 턴뿐이었다. 게이트를 건너뛰면
+    // verifyStage가 복구한 산출물을 "gates file missing"으로 되떨어뜨려, 복구가 아무 소용이 없어진다.
     let gates = null;
-    if (!out?.is_error) {
+    if (!out?.is_error || hitMaxTurns(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
@@ -193,8 +272,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
     }
     const v = d.verifyStage({ stage, out, ctx, gates });
+    // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는
+    // 사후 감사의 provenance다 — verifyStage가 계산해 둔 것을 그냥 흘려보내지 않고 한 줄 남긴다.
+    if (v.source) record([`artifact: ${v.source}`]);
     if (!v.ok) {
-      const t = await d.transition({ to: "factory:needs-human", reason: `stage artifact missing or invalid: ${v.reasons.join("; ")}` });
+      // 턴 한도는 설계 오류가 아니라 **재시도로 풀리는 일시 조건**이다(KTB-16) — 사람이 판단할
+      // 것이 아직 없으므로 needs-human이 아니라 blocked다(gates BLOCKED·머지 API 실패와 같은 등급).
+      // 여기까지 왔다는 건 트랜스크립트에서도 산출물을 복구하지 못했다는 뜻이다(KTB-17) — 복구했다면
+      // verifyStage가 이미 통과시켰다. 사유의 첫 줄이 원인(턴 한도)이고 스키마 진단은 그 뒤에 붙는다.
+      const maxTurns = hitMaxTurns(out);
+      const to = maxTurns ? "factory:blocked" : "factory:needs-human";
+      const t = await d.transition({ to, reason: `${maxTurns ? "stage did not finish" : "stage artifact missing or invalid"}: ${v.reasons.join("; ")}` });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
@@ -295,6 +383,58 @@ export function resetGateOutputs({ root, harness, rm = (p) => rmSync(p, { force:
   const paths = gateOutputPaths({ root, harness });
   for (const p of paths) rm(p);
   return paths;
+}
+
+/**
+ * ADR-020 KTB-14 — 이 스테이지가 "쓰기 금지" 스테이지인가. `lib/agent-md.js`의 `needsDenyAllWritesHook`가
+ * 이미 "이 역할은 아무것도 쓸 수 없어야 한다"의 단일 출처다 — 여기서 다시 정의하면 두 판정이 어긋날 수
+ * 있으므로(KTB-13 r1의 교착 경고와 같은 이유) 같은 함수를 대표 이름으로 프로브한다: triage는 단일 역할
+ * (`factory-triage`), plan·review는 로스터 프리픽스(`plan-*`·`reviewer-*`, `ROLE_PREFIX` 참고) — 대표
+ * 이름 하나만 넣어도 `startsWith` 판정은 그대로 성립한다. implement(`factory-builder`)만 쓰기 스테이지이고,
+ * merge는 에이전트를 아예 띄우지 않는다 — `runStage`가 그 전에 이미 `runMergeStage`로 return한다(위 §merge).
+ */
+const NO_WRITE_STAGE_PROBE = { triage: "factory-triage", plan: "plan-x", review: "reviewer-x" };
+export function isNoWriteStage(stage) { return needsDenyAllWritesHook(NO_WRITE_STAGE_PROBE[stage]); }
+
+/** ADR-020 KTB-14 — 쓰기 금지 스테이지가 워크트리에 남겨도 되는 유일한 두 스크래치 경로. */
+export const NO_WRITE_SCRATCH_PREFIXES = [".factory/out/", "docs/factory/runs/"];
+const isScratchPath = (p) => NO_WRITE_SCRATCH_PREFIXES.some((pre) => p === pre.slice(0, -1) || p.startsWith(pre));
+
+/**
+ * `git status --porcelain` 한 줄 = "XY PATH" 또는 rename/copy의 "XY OLD -> NEW"다 — 두 경우 모두
+ * 경로는 세 번째 문자부터 시작한다. rename은 **양쪽** 경로를 낸다(KTB-5 N1과 같은 원칙 — 출발지를
+ * 놓치면 보호 경로를 스크래치 밖 이름으로 옮기는 변경이 새 이름만 보고 통과할 수 있다).
+ *
+ * 알려진 한계(KTB-14 r1): `core.quotePath`가 켜진 기본 설정에서 git은 ASCII 밖·특수문자 경로를
+ * **C 인용**으로 낸다(`"src/\355\225\234.js"`, `"a b -> c"`). 그 줄은 여기서 따옴표째 한 경로로
+ * 읽히고, 안쪽의 ` -> `도 구분자로 오해될 수 있다. 이 체크의 **판정 방향에서는 안전한 쪽으로
+ * 틀린다** — 인용된 경로는 스크래치 접두(`.factory/out/`·`docs/factory/runs/`)와 절대 일치하지
+ * 않으므로 항상 "더러움"으로 센다(누락이 아니라 오탐). 정확한 파싱이 필요해지면
+ * `-z`(NUL 구분 + 인용 없음)로 바꾸는 것이 정공법이다.
+ */
+function pathsOfStatusLine(line) {
+  const rest = line.slice(3);
+  const i = rest.indexOf(" -> ");
+  return i === -1 ? [rest] : [rest.slice(0, i), rest.slice(i + 4)];
+}
+
+/**
+ * `run-stage.js`가 claude -p 이후, verifyStage 이전에 묻는 구조적 백스톱(ADR-020 KTB-14 — KTB-13 r1
+ * 잔여 위험 등록부 gap 3을 닫는다). `reviewer-*`·`plan-*`·`factory-triage`는 `tools:`에 Bash를 들고
+ * 있고, 훅(`deny-all-writes.sh`)은 **명령 모양의 열거**일 뿐이라 훅이 모르는 모양이면 그냥 통과한다
+ * (KTB-13 r1). 이 체크는 모양이 아니라 **결과**(워크트리 diff)만 본다 — 어떤 셸 모양으로 만들었든
+ * 스크래치 경로 밖의 변화는 전부 위반이다. `git status` 자체가 실패하면 "깨끗하다"를 증명할 수
+ * 없으므로 fail-closed(`ok:false`)다 — 이 저장소의 다른 "판정 불가" 계약(`integrityCheck`의
+ * `cannotCompute`, `mergeGates`)과 같다.
+ */
+export async function assertNoWriteStageClean({ run, cwd }) {
+  const r = await run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
+  if (r.code !== 0) return { ok: false, dirty: [], reason: `git status failed: ${r.stderr.trim()}` };
+  const dirty = new Set();
+  for (const line of r.stdout.split("\n").filter(Boolean)) {
+    for (const p of pathsOfStatusLine(line)) if (p && !isScratchPath(p)) dirty.add(p);
+  }
+  return { ok: dirty.size === 0, dirty: [...dirty] };
 }
 
 export function nextState(stage, data) {
@@ -438,6 +578,9 @@ async function main() {
     localEntry: makeLocalEntry({ gh, issue, stage, env: process.env }),
     /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
     issueLabels: async () => (await gh.issue(issue)).labels,
+    /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의
+     * 어떤 라벨에서 왔는지(`{from, stage}`), `factory-blocked-origin` 마커에서 읽는다. */
+    blockedOrigin: async () => blockedOrigin(await gh.comments(issue)),
     heartbeat: () => startHeartbeat({ gh, issue, stage, runnerId }),
     assertHandoff: async () => {
       const target = Object.entries(STAGE_OF_TARGET).find(([, s]) => s === prevStage(stage))?.[0];
@@ -449,6 +592,8 @@ async function main() {
       return req;
     },
     checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
+    /** ADR-020 KTB-14 — 쓰기 금지 스테이지의 구조적 백스톱. review는 checkoutHead가 이미 detach해 둔 PR head를 그대로 본다. */
+    assertCleanWorktree: () => assertNoWriteStageClean({ run, cwd: root }),
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
@@ -457,7 +602,7 @@ async function main() {
     countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
     ciSettingsPresent: async () => existsSync(join(root, ".factory/ci-settings.json")),
     claudeP: async () => {
-      const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", "5", "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
+      const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, stage)), "--output-format", "json", "--settings", join(root, ".factory/ci-settings.json")];
       if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
       const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
       mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
@@ -539,6 +684,8 @@ async function main() {
     },
     /** merge stage 전용: 거부 사유를 **PR**에 붙인다(사람이 머지 버튼을 누르는 자리). PR과 이슈는 같은 번호 공간이라 `gh issue comment`가 그대로 통한다. */
     comment: (number, body) => gh.comment(number, body),
+    /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
+    prReady: (pr) => gh.prReady(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
@@ -552,7 +699,8 @@ async function main() {
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
       // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.
       if (to === "factory:merged") Object.assign(ctxExtra, mergeGatesResult ?? await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
-      return transition({ gh, issue, to, reason, ctxExtra });
+      // stage: to===factory:blocked일 때만 lib/transition.js가 origin 마커에 쓴다(KTB-15b I2).
+      return transition({ gh, issue, to, reason, ctxExtra, stage });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
