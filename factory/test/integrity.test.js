@@ -1,15 +1,74 @@
 import { test, expect } from "vitest";
-import { integrityCheck } from "../lib/integrity.js";
+import { integrityCheck, protectedPaths } from "../lib/integrity.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const harness = { protected: { factory: [".factory/**", ".claude/**", "docs/factory/CHARTER.md"], except: [".factory/lessons/**", "docs/factory/runs/**"], additive_only: { ".claude/agents/*.md": ["## Examples", "## Perspectives"] } }, test: { test_glob: ["test/**/*.test.js"] } };
 const names = (s) => ({ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: s, stderr: "" } });
 const u0 = (s) => ({ match: (c, a) => a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: s, stderr: "" } });
 
-test("protected file change → violation; except path passes", async () => {
+// ── KTB-5: L0(integrity 체크) = 변조만. 보호 경로 변경은 위반이 아니라 **보고**다 ──────────
+// (사람이 머지해야 한다는 신호일 뿐 — 그 신호가 체크를 RED로 만들면 사람도 머지할 수 없다)
+
+test("KTB-5: protected file change → ok:true, violations 비어 있고 protected에 실린다; except path는 아예 안 실린다", async () => {
   const run = makeFakeRun([names("M\t.factory/harness.toml\nM\t.factory/lessons/reviewer-qa.md\nM\tsrc/a.js\n"), u0("")]);
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "<!-- factory-lessons:v1 role=reviewer-qa max=30 -->\n- [L-2026-09-01-01] x\n  근거: runs/1.md\n" });
-  expect(r.ok).toBe(false); expect(r.violations).toEqual([{ file: ".factory/harness.toml", rule: "protected path changed" }]);
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([]);
+  expect(r.protected).toEqual([".factory/harness.toml"]);
+});
+
+test("KTB-5: 변조가 함께 있으면 ok:false — protected 목록은 그래도 채워진다(두 관심사가 독립적이다)", async () => {
+  const run = makeFakeRun([names("M\t.factory/harness.toml\nM\ttest/a.test.js\n"), u0(`+++ b/test/a.test.js\n@@ -1,0 +2,1 @@\n+test.skip("x", () => {});\n`)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "" });
+  expect(r.ok).toBe(false);
+  expect(r.violations).toEqual([{ file: "test/a.test.js", rule: "test skip/ignore pragma added" }]);
+  expect(r.protected).toEqual([".factory/harness.toml"]);
+});
+
+test("KTB-5: additive_only 규칙이 보는 파일은 protected 목록에 넣지 않는다 — 그 파일의 판정은 additive-only 규칙이 한다", async () => {
+  const examplesFixture = ["## Purpose", "## Lens", "## Examples", ...Array(37).fill(""), "### 좋은 발견", "- DST 25시간", "## Perspectives"].join("\n") + "\n";
+  const okDiff = `+++ b/.claude/agents/reviewer-qa.md\n@@ -40,0 +41,2 @@\n+### 좋은 발견\n+- DST 25시간\n`;
+  const run = makeFakeRun([names("M\t.claude/agents/reviewer-qa.md\n"), u0(okDiff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => examplesFixture });
+  expect(r.ok).toBe(true);
+  expect(r.protected).toEqual([]);
+});
+
+test("KTB-5: 판정 불가도 protected를 [] 로 싣는다 — 호출자가 undefined.length로 터지지 않게", async () => {
+  const r = await integrityCheck({ run: makeFakeRun([]), cwd: "/repo", base: "", head: "h", harness, readFile: () => "" });
+  expect(r.ok).toBe(false);
+  expect(r.protected).toEqual([]);
+});
+
+// ── KTB-5: protectedPaths() — L1(merge 스테이지)이 쓰는 목록 전용 계산 ────────────────────
+// 파일 내용을 **읽지 않는다**: merge는 PR head를 체크아웃한 트리 위에서 도는데, 그 트리의 파일을
+// 읽어 판단하면 PR이 자기 판정 재료를 고를 수 있다. name-status diff만 본다.
+
+test("KTB-5 protectedPaths: name-status만 보고 목록을 만든다 — -U0 diff도 파일 읽기도 하지 않는다", async () => {
+  const run = makeFakeRun([names("M\t.factory/harness.toml\nM\tpackage.json\nM\t.factory/lessons/reviewer-qa.md\nA\tsrc/a.js\n")]);
+  const h = { ...harness, protected: { ...harness.protected, factory: [...harness.protected.factory, "package.json"] } };
+  const r = await protectedPaths({ run, cwd: "/repo", base: "b", head: "h", harness: h });
+  expect(r).toEqual({ ok: true, files: [".factory/harness.toml", "package.json"] });
+  expect(run.calls).toHaveLength(1);
+  expect(run.calls[0].args).toEqual(["diff", "--name-status", "b...h"]);
+});
+
+test("KTB-5 protectedPaths: 보호 경로가 없으면 빈 목록 — ok:true", async () => {
+  const run = makeFakeRun([names("M\tsrc/a.js\nM\t.factory/lessons/reviewer-qa.md\n")]);
+  const r = await protectedPaths({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r).toEqual({ ok: true, files: [] });
+});
+
+test("KTB-5 protectedPaths: base가 없거나 git이 실패하면 ok:false — 빈 목록을 '보호 경로 없음'으로 읽지 않는다", async () => {
+  const empty = await protectedPaths({ run: makeFakeRun([]), cwd: "/repo", base: "", head: "h", harness });
+  expect(empty.ok).toBe(false);
+  expect(empty.files).toEqual([]);
+  expect(empty.reason).toMatch(/base is empty/);
+  const boom = makeFakeRun([{ match: (c, a) => a[0] === "diff", result: { code: 128, stdout: "", stderr: "fatal: no merge base" } }]);
+  const failed = await protectedPaths({ run: boom, cwd: "/repo", base: "b", head: "h", harness });
+  expect(failed.ok).toBe(false);
+  expect(failed.files).toEqual([]);
+  expect(failed.reason).toMatch(/exited 128/);
 });
 test("additive-only agent sections: additions in Examples ok; deletion or other section → violation", async () => {
   // 신규 파일 41~42번째 줄이 '## Examples' 아래에 오도록 채운 픽스처 (hunk: @@ -40,0 +41,2 @@)

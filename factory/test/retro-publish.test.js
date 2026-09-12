@@ -158,17 +158,33 @@ test("polls exhausted → timeout: label + comment, PR left open, no merge", asy
 });
 
 test("local integrity RED opens no PR, pushes nothing, and still removes the worktree", async () => {
-  const run = makeFakeRun(gitTable([], { nameStatus: "M\t.factory/bin/run-stage.js" }));
+  const run = makeFakeRun(gitTable());
   const gh = fakeGh({ checks: [PASS] });
   const s = spies();
-  const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, s));
+  const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, s, { readFile: () => "lessons with no v1 header\n" }));
   expect(out).toMatchObject({ pr: null, merged: false });
   expect(out.reason).toMatch(/^integrity: /);
-  expect(out.reason).toContain("protected path changed");
+  expect(out.reason).toContain("lessons header missing");
   expect(gh.createPr).not.toHaveBeenCalled();
   expect(argvOf(run).some((a) => a.startsWith("git push"))).toBe(false);
   expect(argvOf(run)).toContain(`git worktree remove --force ${worktreeOf(run)}`);
   expect(s.rm).toHaveBeenCalled();
+});
+
+// KTB-5: integrity의 `ok`는 이제 보호 경로를 보지 않는다(변조만 본다) — 그래서 다크 PR이 보호
+// 경로를 실어도 로컬 선검사가 GREEN일 수 있다. splitDarkFiles가 이미 경로를 제한하지만, 그
+// 제한이 깨지면 팩토리가 사람 승인 없이 게이트 정의를 머지하게 된다 — 여기서 한 번 더 막는다.
+test("KTB-5: a dark lessons PR carrying a protected path is refused locally — no push, no PR", async () => {
+  const run = makeFakeRun(gitTable([], { nameStatus: `M\t${LESSONS_PATH}\nM\t.factory/harness.toml` }));
+  const gh = fakeGh({ checks: [PASS] });
+  const s = spies();
+  const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, s));
+  expect(out).toMatchObject({ pr: null, merged: false });
+  expect(out.reason).toMatch(/protected paths in a dark PR/);
+  expect(out.reason).toContain(".factory/harness.toml");
+  expect(gh.createPr).not.toHaveBeenCalled();
+  expect(argvOf(run).some((a) => a.startsWith("git push"))).toBe(false);
+  expect(argvOf(run)).toContain(`git worktree remove --force ${worktreeOf(run)}`);
 });
 
 test("a git failure is reported as a reason and the worktree is still removed", async () => {

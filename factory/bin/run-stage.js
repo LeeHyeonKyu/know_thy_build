@@ -11,7 +11,7 @@ import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
-import { integrityCheck } from "../lib/integrity.js";
+import { integrityCheck, protectedPaths } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, factoryLabelOf } from "../lib/labels.js";
@@ -456,6 +456,25 @@ async function main() {
       catch (e) { recordLine(`merge gate: gh pr view failed — ${e?.message || e}`); }
       return mergeGates({ gh, root, harness, pr, prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null });
     },
+    /**
+     * merge stage 전용(KTB-5): PR 범위(base...HEAD)에서 `[protected].factory` 경로를 센다 →
+     * 하나라도 있으면 merge-stage가 자동 머지를 거부하고 `needs-human`으로 넘긴다.
+     *
+     * **base 브랜치의 코드로 계산된다.** `protectedPaths`는 이 프로세스가 시작될 때 — 즉
+     * checkoutHead가 워킹 트리를 PR head로 옮기기 **전**, 워크플로의 기본 체크아웃(base 브랜치)
+     * 상태에서 — import된 모듈이고, `harness`도 그 시점의 `charterReady`가 읽었다. 그래서 PR이
+     * 자기 `.factory/lib/integrity.js`나 `harness.toml [protected]`를 고쳐도 이 판정은 바뀌지
+     * 않는다. 같은 이유로 하위 프로세스(`node .factory/bin/integrity.js`)를 부르지 않는다 —
+     * 그건 체크아웃된 트리, 곧 PR의 코드를 실행하는 일이다.
+     *
+     * 파일 내용은 읽지 않는다 — `git diff --name-status` 하나면 "어떤 경로가 바뀌었나"는 답이 나오고,
+     * 그 답만이 사람 머지 여부를 가른다(PR head 트리의 내용은 판정 재료로 쓰지 않는다).
+     */
+    protectedPaths: async () => {
+      try { return await protectedPaths({ run, cwd: root, base: await mergeBase(), harness }); }
+      catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
+    },
+    comment: (body) => gh.comment(issue, body),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },

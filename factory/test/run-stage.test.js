@@ -603,6 +603,7 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
     prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
     gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
     mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+    protectedPaths: async () => ({ ok: true, files: [] }),
     mergePr: async () => {}, closeIssue: async () => {},
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
@@ -937,6 +938,7 @@ const mergeHappyDeps = (over = {}) => checkoutBaseDeps({
   prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
   gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
   mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+  protectedPaths: async () => ({ ok: true, files: [] }),          // KTB-5: 보호 경로 없음 = 자동 머지 가능
   mergePr: async () => {}, closeIssue: async () => {},
   ...over,
 });
@@ -987,7 +989,7 @@ test("merge: never calls trustWorkspace, claudeP, buildContext, verifyStage or w
   expect(writeHandoff).not.toHaveBeenCalled();
 });
 
-test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates → mergeGates → mergePr → transition → closeIssue) in order", async () => {
+test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates → mergeGates → protectedPaths → mergePr → transition → closeIssue) in order", async () => {
   const calls = [];
   const d = mergeHappyDeps({
     assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
@@ -995,12 +997,31 @@ test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → gates →
     prInfo: async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; },
     gates: async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }; },
     mergeGates: async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; },
+    protectedPaths: async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; },
     mergePr: async () => { calls.push("mergePr"); },
     transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
     closeIssue: async () => { calls.push("closeIssue"); },
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
-  expect(calls).toEqual(["assert", "checkout", "prInfo", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["assert", "checkout", "prInfo", "gates", "mergeGates", "protectedPaths", "mergePr", "transition:factory:merged", "closeIssue"]);
+});
+
+// KTB-5: 보호 경로 변경은 L0(integrity 체크)가 아니라 여기서 자동 머지를 막는다 — 사람은 여전히
+// 그 PR을 머지할 수 있어야 하기 때문이다(required context가 `factory/integrity` 하나뿐).
+test("merge: a protected path in the PR range → needs-human, never merges (KTB-5)", async () => {
+  const lines = [];
+  const d = mergeHappyDeps({
+    protectedPaths: async () => ({ ok: true, files: [".factory/harness.toml"] }),
+    mergePr: vi.fn(async () => {}),
+    comment: vi.fn(async () => {}),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining(".factory/harness.toml") }));
+  expect(d.comment).toHaveBeenCalled();
+  expect(lines.some((l) => /protected paths changed — human merge required/.test(l))).toBe(true);
 });
 
 test("merge: postStatus is run-stage's own helper, not reimplemented — no sha skips the post and leaves a record line", async () => {

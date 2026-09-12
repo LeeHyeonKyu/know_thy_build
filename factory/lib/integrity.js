@@ -6,6 +6,15 @@ const SKIP_PRAGMAS = [/\.skip\s*\(/, /\bxit\s*\(/, /\bxdescribe\s*\(/, /@pytest\
  * readFileAt (base content) is accepted for interface symmetry but currently unused:
  * the additive-only position check only reads the CURRENT file (readFile) — it asks
  * "which section did this added line land in", not "what changed relative to base".
+ *
+ * **KTB-5 — 두 관심사는 나뉜다.** `ok`는 **변조**(tamper)만 본다: additive-only 위반, 헤더 추가,
+ * lessons 포맷, 테스트 skip/ignore pragma, 그리고 "판정 불가". 보호 경로(`[protected].factory`)
+ * 변경은 위반이 아니라 **사실 보고**다 — `protected` 배열에 실릴 뿐 `ok`를 내리지 않는다.
+ * 이유: `factory/integrity`는 branch protection의 **유일한** required context다(ADR-015 보강).
+ * 보호 경로 변경으로 이 체크가 RED가 되면 `enforce_admins` 아래에서 **사람도** 머지할 수 없고,
+ * 그러면 설계가 전제하는 사람 머지 경로(retro-proposal PR, `factory:harness` 승격 PR, 인프라
+ * 업그레이드 PR)가 통째로 막힌다. "보호 경로는 사람이 머지한다"는 판단은 자동 머지 직전의 L1
+ * (`lib/merge-stage.js`)이 `protectedPaths()`로 내린다 — 사람을 막지 않고 봇만 막는 자리다.
  */
 export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, readFile, readFileAt = () => "" }) {
   // 무결성은 "검사했더니 깨끗하다"는 주장이다. diff를 얻지 못했는데 violations가 비었다고 ok:true를
@@ -14,14 +23,15 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   const ns = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
   if (ns.code !== 0) return cannotCompute(gitReason("git diff --name-status", ns));
   const violations = [];
-  const files = ns.stdout.split("\n").filter(Boolean).map((l) => l.split("\t").pop());
+  const files = changedFiles(ns.stdout);
   const u0r = await run("git", ["diff", "-U0", `${base}...${head}`], { cwd });
   if (u0r.code !== 0) return cannotCompute(gitReason("git diff -U0", u0r));
   const u0 = u0r.stdout;
   const addedByFile = addedLines(u0), removedByFile = removedLines(u0);
   const prot = harness.protected || {};
+  const protectedFiles = [];
   for (const f of files) {
-    const additive = Object.keys(prot.additive_only || {}).find((g) => matchesAny([g], f));
+    const additive = additiveGlobFor(f, prot);
     if (additive) {
       const allowed = prot.additive_only[additive];
       const removed = removedByFile.get(f) || [];
@@ -37,17 +47,42 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
       if (headerAdded) violations.push({ file: f, rule: "additive-only: header added" });
       continue;
     }
-    if (matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f)) violations.push({ file: f, rule: "protected path changed" });
+    if (isProtected(f, prot)) protectedFiles.push(f);            // 위반이 아니라 "사람이 머지해야 한다"는 사실 (KTB-5)
     if (f.startsWith(".factory/lessons/")) violations.push(...lessonsFormat(f, readFile(`${cwd}/${f}`) || ""));
     if (matchesAny(harness.test?.test_glob || [], f)) {
       if ((addedByFile.get(f) || []).some((l) => SKIP_PRAGMAS.some((re) => re.test(l.text)))) violations.push({ file: f, rule: "test skip/ignore pragma added" });
     }
   }
-  return { ok: violations.length === 0, violations, checked: { files } };
+  return { ok: violations.length === 0, violations, protected: protectedFiles, checked: { files } };
 }
 
+/**
+ * `protectedPaths({run, cwd, base, head, harness}) → { ok, files, reason? }` — L1(머지 스테이지)이
+ * 쓰는 **목록만** 계산한다(KTB-5). `integrityCheck`와 달리 `git diff -U0`도, 파일 내용 읽기도 하지
+ * 않는다: 머지 스테이지는 PR head를 체크아웃한 트리 위에서 돌기 때문에, 그 트리의 파일을 읽어
+ * 판단하면 PR이 자기 판정의 재료를 고를 수 있다. name-status diff 하나면 "어떤 경로가 바뀌었나"는
+ * 답이 나오고, 그 답만이 사람 머지 여부를 가른다.
+ *
+ * 빈 목록을 "보호 경로 없음"으로 읽지 않는다 — base가 없거나 git이 실패하면 `ok:false`로,
+ * `integrityCheck`의 cannot-compute와 같은 fail-closed 계약이다.
+ */
+export async function protectedPaths({ run, cwd, base, head = "HEAD", harness }) {
+  if (!base) return { ok: false, files: [], reason: "base is empty (merge-base not resolved)" };
+  const ns = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
+  if (ns.code !== 0) return { ok: false, files: [], reason: gitReason("git diff --name-status", ns) };
+  const prot = harness?.protected || {};
+  return { ok: true, files: changedFiles(ns.stdout).filter((f) => isProtected(f, prot)) };
+}
+
+/** `git diff --name-status` 한 줄 = "<status>\t<path>"(rename은 "<status>\told\tnew") — 마지막 필드가 현재 경로다. */
+const changedFiles = (stdout) => stdout.split("\n").filter(Boolean).map((l) => l.split("\t").pop());
+/** additive_only가 맡은 파일은 그 규칙이 판정한다 — 보호 목록에 넣지 않는다(넣으면 retro의 다크 예시 추가가 매번 사람 머지가 된다). */
+const additiveGlobFor = (f, prot) => Object.keys(prot.additive_only || {}).find((g) => matchesAny([g], f));
+/** 사람이 머지해야 하는 경로인가: `[protected].factory` 매치 − `except` − `additive_only`. */
+const isProtected = (f, prot) => !additiveGlobFor(f, prot) && matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f);
+
 /** 판정 불가 — ok:false에 이유를 한 줄로 싣는다(file은 "-": 특정 파일의 위반이 아니다). */
-const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], checked: { files: [] } });
+const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], checked: { files: [] } });
 const gitReason = (what, r) => `${what} exited ${r.code}${r.stderr ? `: ${r.stderr.trim().slice(0, 200)}` : ""}`;
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;

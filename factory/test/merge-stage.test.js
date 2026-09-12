@@ -26,6 +26,8 @@ const baseD = (over = {}) => ({
   prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" })),
   gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })),
   mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+  protectedPaths: vi.fn(async () => ({ ok: true, files: [] })),
+  comment: vi.fn(async () => {}),
   mergePr: vi.fn(async () => {}),
   transition: graphTransition(),
   closeIssue: vi.fn(async () => {}),
@@ -238,6 +240,70 @@ test("(4) mergeGates() throwing GitDiffError → factory:blocked", async () => {
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: "cannot compute diff" }));
 });
 
+// ── (4b) 보호 경로 = 사람이 머지한다 (KTB-5) ────────────────────────────────
+// L0(`factory/integrity` 체크)는 변조만 본다 — 보호 경로 변경으로 RED가 되면 사람조차 머지할 수
+// 없기 때문이다(required context가 그것 하나뿐). 그래서 "사람이 머지해야 한다"는 판단은 여기,
+// 자동 머지 직전의 L1에서 내린다.
+
+test("(4b) protected paths in the PR range → needs-human naming the files, never merges", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml", "package.json"] })) });
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "protected paths changed — human merge required: .factory/harness.toml, package.json",
+  }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.closeIssue).not.toHaveBeenCalled();
+  expect(lines.some((l) => /protected paths changed/.test(l))).toBe(true);
+});
+
+test("(4b) the refusal leaves a comment listing every protected file", async () => {
+  const comment = vi.fn(async () => {});
+  const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml"] })), comment });
+  await run(d);
+  expect(comment).toHaveBeenCalledTimes(1);
+  expect(comment.mock.calls[0][0]).toMatch(/`\.factory\/harness\.toml`/);
+});
+
+test("(4b) a failing comment never masks the refusal — still needs-human, still exit 2", async () => {
+  const d = baseD({
+    protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml"] })),
+    comment: vi.fn(async () => { throw new Error("gh down"); }),
+  });
+  expect(await run(d)).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(4b) protectedPaths could not be computed → fail closed, needs-human, no merge", async () => {
+  const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: false, files: [], reason: "git diff --name-status exited 128" })) });
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "protected-path check could not be computed: git diff --name-status exited 128",
+  }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(4b) the dep missing altogether is not a pass — fail closed, no merge", async () => {
+  const d = baseD({ protectedPaths: undefined });
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/protected-path check/) }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(4b) a clean PR range (no protected files) merges as before", async () => {
+  const d = baseD();
+  expect(await run(d)).toBe(0);
+  expect(d.protectedPaths).toHaveBeenCalled();
+  expect(d.comment).not.toHaveBeenCalled();
+  expect(d.mergePr).toHaveBeenCalled();
+});
+
 // ── (5) mergePr / head sha ───────────────────────────────────────────────
 
 test("(5) mergePr throws → factory:blocked 'merge API failed: …'", async () => {
@@ -311,12 +377,13 @@ test("(7) closeIssue failure is guarded — recorded, never thrown, still exit 0
 
 // ── happy path: full order + record lines for every step ───────────────────
 
-test("happy path: calls prInfo → gates → mergeGates → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
+test("happy path: calls prInfo → gates → mergeGates → protectedPaths → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
   const calls = [];
   const d = baseD({
     prInfo: vi.fn(async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; }),
     gates: vi.fn(async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }; }),
     mergeGates: vi.fn(async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; }),
+    protectedPaths: vi.fn(async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; }),
     mergePr: vi.fn(async () => { calls.push("mergePr"); }),
     transition: vi.fn(async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; }),
     closeIssue: vi.fn(async () => { calls.push("closeIssue"); }),
@@ -324,7 +391,7 @@ test("happy path: calls prInfo → gates → mergeGates → mergePr → transiti
   const { lines, record } = makeRecord();
   const code = await run(d, { record });
   expect(code).toBe(0);
-  expect(calls).toEqual(["prInfo", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["prInfo", "gates", "mergeGates", "protectedPaths", "mergePr", "transition:factory:merged", "closeIssue"]);
   expect(d.closeIssue).toHaveBeenCalledWith(9);
   // 7단계 각각의 흔적이 런 레코드에 남는다
   expect(lines.length).toBeGreaterThanOrEqual(7);

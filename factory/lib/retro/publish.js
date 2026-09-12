@@ -158,6 +158,15 @@ export async function openAndMergeLessonsPr({
         log(`retro: lessons PR not opened — ${reason}`);
         return { pr: null, merged: false, reason, branch };
       }
+      // KTB-5: `integrity.ok`는 이제 변조만 본다 — 보호 경로 변경은 GREEN을 내리지 않는다. 다크
+      // PR은 정의상 사람 승인 없이 머지되므로, 보호 경로를 싣고는 절대 안 된다. `splitDarkFiles`가
+      // 이미 경로를 제한하지만 그 제한이 깨지면 팩토리가 게이트 정의를 스스로 머지하게 된다 —
+      // 값싼 assert 하나로 두 번째 문을 둔다(push도 PR도 하지 않는다).
+      if (integrity.protected?.length) {
+        const reason = `integrity: protected paths in a dark PR (never auto-merged): ${integrity.protected.join(", ")}`;
+        log(`retro: lessons PR not opened — ${reason}`);
+        return { pr: null, merged: false, reason, branch };
+      }
 
       await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
       pr = await gh.createPr({ head: branch, base: defaultBranch, title, body: lessonsBody(date, paths) });
