@@ -828,7 +828,7 @@ light_on_merge: true
 - **`.claude/settings.json`** — 모든 세션(CI의 `claude -p`, 그리고 사람의 대화형 세션)에 걸린다. 여기 남는 deny는 **사람에게도 걸려야 옳은 것**뿐이다: `gh pr merge*`, `git merge*`, `git push --force*`/`-f*`, branch protection PUT. allow 목록과 훅 배선도 여기 있다.
 - **`.factory/ci-settings.json`** — CI만 로드한다(`run-stage.js`·`retro.js`가 `claude -p … --settings .factory/ci-settings.json`으로 부른다; `--settings`는 병합이고 deny는 병합 결과에서도 유효하다). **경로 기반 `Edit(...)`/`Write(...)` deny 전부**가 여기 산다 — `.factory/**`, `.claude/**`, `.github/workflows/factory-*`, `docs/factory/CHARTER.md`, 그리고 게이트 명령이 해석되어 지나가는 빌드 설정 파일(`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`). CI 전용 deny(`gh secret*`, `gh api -X DELETE*`, `Read(.env*)`)도 같은 파일에 있다.
 
-**왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 merge 스테이지(L1)가 자동 머지를 거부해 사람 머지를 요구한다(ADR-015, ADR-020). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.hooks`와 `settings.ci-deny`.
+**왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 merge 스테이지(L1)가 자동 머지를 거부해 사람 머지를 요구한다(ADR-015, ADR-020). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.allow`/`settings.hooks`와 `settings.ci-deny`.
 
 **병합 시점.** `.claude/settings.json`은 `init --upgrade`뿐 아니라 **`init`(최초 설치) 시점에도 결정적으로 병합된다**(Plan 2 실행 판결, ADR-015) — brownfield 저장소는 이미 자기 `settings.json`을 갖고 있을 수 있으므로, "파일이 있으면 무조건 skip"이라는 `init`의 일반 규칙(§2.1)은 이 파일에는 적용되지 않는다. 병합은 deny/allow 합집합, 훅은 `command`가 이미 있으면 append하지 않는 방식으로 가산적이고 멱등이다.
 
@@ -840,6 +840,10 @@ light_on_merge: true
 
 따라서 `claude -p` 전에 `~/.claude.json`의 `projects[<cwd>].hasTrustDialogAccepted = true`를 쓴다(§4.2.1 step 0.5 — CI에서만). trust가 필요한 이유는 **L2가 존재하기 위해서가 아니라** allow 규칙·`.mcp.json` 로딩(§4.5)·예측 가능한 선택적 차단을 얻기 위해서다. `--settings`는 project 설정을 대체하지 않고 **병합**되므로 trust를 대신하지 못한다.
 
+**allow는 편의 목록이 아니라 부여 목록이다 (ADR-020 KTB-13).** ADR-002/ADR-008이 관측한 "`dontAsk` 단독으로 모든 툴 호출이 프롬프트 없이 통과"는 **현행 CLI에서 더는 성립하지 않는다** — 지금의 `--permission-mode dontAsk`는 allow 규칙에 걸리지 않는 도구 호출을 **묻지 않고 거절한다**("doesn't ask" = denies without asking). 그래서 allow 목록은 곧 **에이전트가 가진 도구의 정의**이고, 도구 이름이 한 줄도 없던 옛 목록(Bash 패턴 8개)에서는 builder가 `Edit`/`Write`도, 파일을 만드는 bash도 쓸 수 없어 implement 스테이지가 통째로 실패했다(데모 #2). 목록은 팩토리 에이전트가 실제로 쓰는 도구 전부다 — `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `LS`, `Agent`, `Workflow`, `TodoWrite`, `Bash(*)`. 좁은 Bash 항목들은 `Bash(*)`로 **대체**한다: allow에 없는 Bash 명령이 거절되는 이상 좁은 목록은 허용 목록이 아니라 차단 목록이었다(`mkdir`·`cat > file`·`sed -i`가 전부 막혔다).
+
+넓어진 것은 **부여**이지 방벽이 아니다. 막는 일은 그대로 세 곳이 한다 — ① **deny는 allow를 이긴다**(두 파일 모두 그대로): 위의 머지·force-push·protection deny와 `.factory/ci-settings.json`의 경로 `Edit`/`Write` deny 전부. ② **`block-dangerous.sh`**(PreToolUse)가 위험한 셸 모양과 보호 경로 쓰기를 계속 거부한다 — 이것이 `Bash(*)`의 실질적 경계다. ③ **`deny-all-writes.sh`**(쓰기 금지 역할의 frontmatter PreToolUse)가 리뷰어·plan·triage·verifier·loader의 쓰기를 막는다. ③이 성립하는 이유는 순서다: **PreToolUse 훅은 permission 판정보다 먼저 돌고, exit 2는 도구 호출 자체를 차단한다** — 그 도구가 allow에 있는지와 무관하다. `factory doctor`는 `settings.allow`로 템플릿 항목 누락을 **FAIL**로 본다(`settings.deny`와 같은 무게 — 항목이 빠진 설치본은 builder가 파일을 쓰지 못하는 설치본이다).
+
 ```json
 {
   "permissions": {
@@ -847,7 +851,10 @@ light_on_merge: true
       "Bash(gh pr merge*)", "Bash(git merge*)", "Bash(git push --force*)", "Bash(git push -f*)",
       "Bash(gh api -X PUT /repos/*/branches/*/protection*)"
     ],
-    "allow": ["Bash(git *)", "Bash(gh issue *)", "Bash(gh pr view*)", "Bash(gh pr comment*)", "Bash(pnpm *)"]
+    "allow": [
+      "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS",
+      "Agent", "Workflow", "TodoWrite", "Bash(*)"
+    ]
   },
   "hooks": {
     "PreToolUse": [

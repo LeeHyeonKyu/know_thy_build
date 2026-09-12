@@ -659,4 +659,30 @@ Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 
 `[runtime].actions`(스텝 목록) 같은 정식 메커니즘을 다시 본다 — 지금은 마주친 요구(툴체인 설치 + PATH
 확장)를 채우는 가장 작은 변경만 했다.
 
+### KTB-13 — `dontAsk`는 allow에 없는 도구를 **거절**한다: allow 목록이 부여이고, deny·훅이 가드다
+
+**질문**: CI는 `claude -p /factory-<stage> <n> --permission-mode dontAsk --settings .factory/ci-settings.json`으로 스테이지를 돌린다. 설치된 `.claude/settings.json`의 `permissions.allow`는 Bash 패턴 8개뿐이었다(`Bash(git *)`, `Bash(gh issue *)`, `Bash(gh pr view*|comment*|create*|edit*)`, `Bash(npm *)`, `Bash(npx *)`) — `Read`·`Edit`·`Write` 같은 **도구 이름은 한 줄도 없다**. 설계는 그것으로 충분하다고 적었다: ADR-002·ADR-008의 스파이크에서 `--permission-mode dontAsk`가 "모든 툴 호출을 프롬프트 없이 통과"시켰고 `permission_denials: []`였기 때문이다. 그 전제가 아직 참인가.
+
+**관측** (데모 라이브):
+
+- **거짓이다.** 지금 CLI의 `dontAsk`는 allow 규칙에 걸리지 않는 도구 호출을 **묻지 않고 거절한다** — "doesn't ask"가 "approves"가 아니라 "denies without asking"이다.
+- 데모 이슈 #2의 implement 라운드에서 builder가 보고했다: "Write and Edit tools are denied by the sandbox (dontAsk mode), and bash file writing (redirection, heredoc into a file) is denied too. Creating files through git apply is accepted only for trivial…" — 그리고 포기하고 `factory:needs-human`으로 넘어갔다. **스테이지가 코드를 한 줄도 쓰지 못한 채 끝났다.**
+- 이슈 #8은 성공했는데, 그 방식이 증상을 그대로 설명한다 — builder가 편집을 `git apply`에 실어 날랐다(`Bash(git *)`가 allow에 있었으므로). 좁은 allow 목록이 곧 **차단 목록**이었고, 에이전트는 그 목록의 구멍을 찾아 우회하는 법을 배우고 있었다.
+- ADR-002/ADR-008의 관측 자체는 그 시점에는 정직했다(그래서 지우지 않는다). 스파이크 시점 CLI의 동작이고, 그 뒤에 바뀌었다. 아래가 **현행 CLI 버전에 대한 철회**다.
+
+**결정**: **allow 목록은 편의 목록이 아니라 에이전트가 가진 도구의 정의다.** `templates/factory/claude/settings.json`의 `permissions.allow`에 팩토리 에이전트가 실제로 쓰는 도구를 싣는다 — `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `LS`, `Agent`, `Workflow`, `TodoWrite`, 그리고 `Bash(*)`. 좁은 Bash 항목 8개는 **대체한다**: `dontAsk`에서 allow에 없는 Bash 명령은 그대로 거절이므로, 그 목록은 `mkdir`·`cat > file`·`sed -i` 같은 builder의 정당한 명령을 막고 있었다.
+
+**무엇이 여전히 가드인가** — 넓어진 것은 부여이지 방벽이 아니다. 네 겹은 그대로다:
+
+- **deny는 allow를 이긴다**(두 파일 모두 그대로다). `.claude/settings.json`의 `gh pr merge*`·`git merge*`·force-push·branch-protection PUT, `.factory/ci-settings.json`의 경로 `Edit`/`Write` deny 전부(`.factory/**`·`.claude/**`·CHARTER·빌드 설정)와 CI 전용 deny. `Bash(*)`가 allow에 있어도 `Bash(git push --force*)`는 여전히 거절된다.
+- **`block-dangerous.sh`(PreToolUse)** 가 위험한 셸 모양과 보호 경로 쓰기를 계속 거부한다. 이것이 `Bash(*)`의 실질적 경계다.
+- **`deny-all-writes.sh`(역할 frontmatter의 PreToolUse)** 가 쓰기 금지 역할(triage·plan-\*·reviewer-\*·verifier·loader)의 `Edit`/`Write`/`NotebookEdit`과 "파일을 만드는 bash"를 막는다. **순서가 이것을 성립시킨다: PreToolUse 훅은 permission 판정보다 먼저 돌고, exit 2는 도구 호출 자체를 차단한다** — 그 도구가 allow에 있는지와 무관하다. 그래서 전역 allow가 넓어져도 리뷰어는 여전히 쓸 수 없다(`hooks.test.js`가 이것을 고정한다).
+- **L0 `factory/integrity` + L1 merge 스테이지**(KTB-5·KTB-6)가 변조와 보호 경로 변경을 PR 단계에서 잡는다.
+
+**doctor**: `checkSettings`에 `settings.allow`를 더한다 — 템플릿 allow 항목이 하나라도 빠지면 **FAIL**이다(`settings.deny`와 같은 모양·같은 무게). 빠진 설치본은 "조금 불편한" 설치본이 아니라 **builder가 파일을 쓰지 못하는** 설치본이다. 상위집합(사람이 자기 항목을 더한 브라운필드)은 PASS다.
+
+**기존 설치**: `mergeSettings`가 deny·allow를 **합집합**으로 병합하므로 `factory init --upgrade`가 새 항목을 더한다(멱등 — KTB 자신에게 적용해 확인). 뒤에 남는 좁은 Bash 항목은 무해하다: `Bash(*)`가 그것을 포함하고, allow는 서로를 취소하지 않는다. `MOVED_DENIES_ADR_019` 같은 제거 목록은 만들지 않는다 — 지울 이유가 없다.
+
+**영향**: §6.3(allow 문단), `templates/factory/claude/settings.json`, `factory/lib/doctor/factory.js`, `factory/test/templates.test.js`·`doctor-factory.test.js`·`hooks.test.js`.
+
 (이후 항목은 dogfood 진행에 따라 추가)

@@ -110,6 +110,11 @@ test("block-dangerous: without jq the hook fails CLOSED (exit 2)", async () => {
   expect(r.stderr).toMatch(/jq missing/);
 }, 30000);
 
+// KTB-13 이후 이 테스트가 지는 무게가 달라졌다. `.claude/settings.json`의 allow가 이제 `Edit`/`Write`/
+// `Bash(*)`를 **전역으로** 부여하므로(그러지 않으면 `dontAsk`가 builder의 쓰기까지 거절한다), 쓰기 금지
+// 역할을 막는 것은 permission 규칙이 아니라 **오직 이 훅**이다. 순서가 이것을 가능하게 한다:
+// PreToolUse 훅은 permission 판정보다 **먼저** 돌고 exit 2는 도구 호출 자체를 차단한다 — allow에 있든
+// 없든 관계없다. 그래서 "allow가 넓어졌다"가 "리뷰어가 쓸 수 있다"를 뜻하지 않는다(ADR-020 KTB-13).
 test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows everything else, fails closed without jq", async () => {
   const r1 = await bash("deny-all-writes.sh", { tool_name: "Edit", tool_input: { file_path: "src/a.js" } });
   expect(r1.code).toBe(2);

@@ -108,13 +108,20 @@ test("settings.json template has the §6.3 deny list, all four hook events, and 
   for (const ev of Object.keys(s.hooks)) for (const c of cmds(ev)) expect(existsSync(join(hooksDir, c.replace(".claude/hooks/", ""))), c).toBe(true);
 });
 
-test("settings.json allows the gh surface the builder needs, including `gh pr edit` for --body-file bodies", () => {
+// KTB-13: `--permission-mode dontAsk`는 allow에 걸리지 않는 도구 호출을 **자동 거절**한다("묻지 않는다"가
+// "승인한다"가 아니다 — ADR-002/008의 스파이크 관측은 지금 CLI에서 더는 성립하지 않는다). allow 목록이
+// 곧 에이전트가 가진 도구다: builder가 Edit/Write 없이 코드를 쓸 수 없고, 좁은 Bash 목록은 `mkdir`·
+// `cat > file` 같은 정당한 명령까지 막았다. 가드는 deny(두 파일) + block-dangerous.sh + integrity다.
+test("settings.json allow grants the tools the factory agents actually need under dontAsk (KTB-13)", () => {
   const s = JSON.parse(read("claude/settings.json"));
-  for (const a of ["Bash(gh pr view*)", "Bash(gh pr comment*)", "Bash(gh pr create*)", "Bash(gh pr edit*)"]) {
+  for (const a of ["Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep", "LS",
+    "Agent", "Workflow", "TodoWrite", "Bash(*)"]) {
     expect(s.permissions.allow, a).toContain(a);
   }
+  // 좁은 Bash allow는 남지 않는다 — `Bash(*)`가 그것을 포함하고, 좁은 목록이 곧 차단 목록이었다.
+  expect(s.permissions.allow.filter((a) => a.startsWith("Bash("))).toEqual(["Bash(*)"]);
   // 머지는 여전히 builder의 일이 아니다 — allow가 넓어져도 deny가 이긴다.
-  expect(s.permissions.deny).toContain("Bash(gh pr merge*)");
+  for (const d of ["Bash(gh pr merge*)", "Bash(git push --force*)"]) expect(s.permissions.deny).toContain(d);
 });
 
 test("ci-settings.json deny covers the build-config files, matching [protected].factory (F9 / ADR-019)", () => {

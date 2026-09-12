@@ -314,6 +314,25 @@ test("checkSettings: deny subset and hook commands", () => {
   expect(by(checkSettings({ settings: null, template }))["settings.present"].level).toBe("FAIL");
 });
 
+// KTB-13: allow는 "편의 목록"이 아니라 **도구 부여 목록**이다 — `--permission-mode dontAsk`는 allow에
+// 걸리지 않는 도구 호출을 묻지 않고 **거절**한다. 그래서 deny와 똑같이 "템플릿 항목이 빠지면 FAIL"이다.
+test("checkSettings: allow list short of the template → settings.allow FAIL naming the missing entries (KTB-13)", () => {
+  const template = { permissions: { deny: ["A"], allow: ["Read", "Edit", "Write", "Bash(*)"] }, hooks: {} };
+
+  const short = by(checkSettings({ settings: { permissions: { deny: ["A"], allow: ["Read", "Bash(*)"] }, hooks: {} }, template }));
+  expect(short["settings.allow"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("Edit") });
+  expect(short["settings.allow"].detail).toContain("Write");
+  expect(short["settings.deny"].level).toBe("PASS");   // deny는 별개의 문제다
+
+  // 사람이 자기 항목을 더해 둔 상위집합은 PASS다(브라운필드, KTB-11과 같은 원칙).
+  const superset = { permissions: { deny: ["A"], allow: [...template.permissions.allow, "Bash(docker *)"] }, hooks: {} };
+  expect(by(checkSettings({ settings: superset, template }))["settings.allow"].level).toBe("PASS");
+
+  // allow가 통째로 없으면(옛 설치) 전부 빠진 것이다 — 조용한 PASS가 아니라 FAIL.
+  const none = by(checkSettings({ settings: { permissions: { deny: ["A"] }, hooks: {} }, template }));
+  expect(none["settings.allow"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("Read") });
+});
+
 test("checkSettings: deny superset and all hook commands present → PASS", () => {
   const template = { permissions: { deny: ["A"] }, hooks: { Stop: [{ hooks: [{ command: ".claude/hooks/s.sh" }] }] } };
   const settings = { permissions: { deny: ["A", "B"] }, hooks: { Stop: [{ hooks: [{ command: ".claude/hooks/s.sh" }] }] } };

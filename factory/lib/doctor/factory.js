@@ -248,6 +248,17 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate }) {
   const missingDeny = wantDeny.filter((d) => !haveDeny.has(d));
   out.push(missingDeny.length ? c("settings.deny", "FAIL", `deny list missing: ${missingDeny.join(", ")}`) : c("settings.deny", "PASS"));
 
+  // allow도 deny와 같은 무게로 검사한다(KTB-13). `--permission-mode dontAsk`는 allow에 걸리지 않는 도구
+  // 호출을 묻지 않고 **거절**한다 — "묻지 않는다"가 "승인한다"가 아니다(ADR-002/ADR-008의 스파이크 관측은
+  // 지금 CLI에서 더는 성립하지 않는다). 그래서 allow는 편의 목록이 아니라 **에이전트가 가진 도구 목록**이고,
+  // 항목이 빠진 설치본은 builder가 파일을 쓰지 못하는 설치본이다 — WARN이 아니라 FAIL이다.
+  const wantAllow = template.permissions?.allow || [];
+  const haveAllow = new Set(s.permissions?.allow || []);
+  const missingAllow = wantAllow.filter((a) => !haveAllow.has(a));
+  out.push(missingAllow.length
+    ? c("settings.allow", "FAIL", `allow list missing: ${missingAllow.join(", ")} — under \`dontAsk\` an un-allowed tool call is denied; run \`npx know-thy-build factory init --upgrade\``)
+    : c("settings.allow", "PASS"));
+
   // ADR-019 이전에 설치한 저장소는 옮겨간 경로 deny를 아직 들고 있다 — `mergeSettings`가 가산적이라
   // 스스로 사라지지 않는다. WARN인 이유: L2는 (더 좁아진 것이 아니라) 여전히 유효하고, 깨진 것은
   // 사람의 스킬이다. `--upgrade`가 이제 이 줄들을 제거한다.

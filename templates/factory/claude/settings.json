@@ -8,14 +8,18 @@
       "Bash(gh api -X PUT /repos/*/branches/*/protection*)"
     ],
     "allow": [
-      "Bash(git *)",
-      "Bash(gh issue *)",
-      "Bash(gh pr view*)",
-      "Bash(gh pr comment*)",
-      "Bash(gh pr create*)",
-      "Bash(gh pr edit*)",
-      "Bash(npm *)",
-      "Bash(npx *)"
+      "Read",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "NotebookEdit",
+      "Glob",
+      "Grep",
+      "LS",
+      "Agent",
+      "Workflow",
+      "TodoWrite",
+      "Bash(*)"
     ]
   },
   "hooks": {

@@ -86,7 +86,19 @@
       "Bash(gh pr create*)",
       "Bash(gh pr edit*)",
       "Bash(npm *)",
-      "Bash(npx *)"
+      "Bash(npx *)",
+      "Read",
+      "Edit",
+      "Write",
+      "MultiEdit",
+      "NotebookEdit",
+      "Glob",
+      "Grep",
+      "LS",
+      "Agent",
+      "Workflow",
+      "TodoWrite",
+      "Bash(*)"
     ]
   }
 }
