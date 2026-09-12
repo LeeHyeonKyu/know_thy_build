@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { makeGh, allChecksGreen } from "../lib/gh.js";
+import { makeGh, allChecksGreen, resolveRepo } from "../lib/gh.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const repo = "o/r";
@@ -90,6 +90,43 @@ test("getVariable returns trimmed value, or null on non-zero exit (missing varia
   expect(await makeGh({ run, repo }).getVariable("FACTORY_TOKEN_ISSUED_AT")).toBe("2025-10-11T00:00:00Z");
   const runMissing = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "variable not found" } }]);
   expect(await makeGh({ run: runMissing, repo }).getVariable("FACTORY_TOKEN_ISSUED_AT")).toBe(null);
+});
+
+// resolveRepo — KTB-4: FACTORY_REPO 우선, 없으면 gh repo view로 cwd 저장소를 묻는다. 실패는 삼키지 않고 throw한다
+// (doctor.js가 "빈 문자열 repo"로 조용히 떨어져 거짓 "protection 없음"을 보고했던 결함, gh.js 주석 참조).
+test("resolveRepo: FACTORY_REPO env wins over gh — never calls run", async () => {
+  const prev = process.env.FACTORY_REPO;
+  process.env.FACTORY_REPO = "env/owner-repo";
+  try {
+    const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: JSON.stringify({ nameWithOwner: "gh/owner-repo" }), stderr: "" } }]);
+    expect(await resolveRepo({ run })).toBe("env/owner-repo");
+    expect(run.calls).toHaveLength(0);
+  } finally {
+    if (prev === undefined) delete process.env.FACTORY_REPO; else process.env.FACTORY_REPO = prev;
+  }
+});
+
+test("resolveRepo: falls back to `gh repo view --json nameWithOwner` when FACTORY_REPO is unset", async () => {
+  const prev = process.env.FACTORY_REPO;
+  delete process.env.FACTORY_REPO;
+  try {
+    const run = makeFakeRun([{ match: (c, a) => c === "gh" && a[0] === "repo" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ nameWithOwner: "LeeHyeonKyu/know-thy-build-demo" }), stderr: "" } }]);
+    expect(await resolveRepo({ run })).toBe("LeeHyeonKyu/know-thy-build-demo");
+    expect(run.calls[0].args).toEqual(["repo", "view", "--json", "nameWithOwner"]);
+  } finally {
+    if (prev === undefined) delete process.env.FACTORY_REPO; else process.env.FACTORY_REPO = prev;
+  }
+});
+
+test("resolveRepo: throws (does not fall back to empty string) when gh repo view fails — not a git repo / not logged in", async () => {
+  const prev = process.env.FACTORY_REPO;
+  delete process.env.FACTORY_REPO;
+  try {
+    const run = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "not a git repository" } }]);
+    await expect(resolveRepo({ run })).rejects.toThrow(/not a git repository/);
+  } finally {
+    if (prev === undefined) delete process.env.FACTORY_REPO; else process.env.FACTORY_REPO = prev;
+  }
 });
 
 // ── Task 9: bootstrap/status/merge surface + required_checks filter ────────

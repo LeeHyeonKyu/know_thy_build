@@ -24,6 +24,26 @@ function makeDoctorRun(root) {
   ]);
 }
 
+/**
+ * makeDoctorRun + gh 자체 호출(secret list·variable get·label list·branch protection)까지 답한다 — `gh`가
+ * doctorCommand에 주입되지 않는 케이스(KTB-4)를 실제 `makeGh`/`resolveRepo` 경로로 돌리기 위한 것.
+ * `repoLookup`이 `{code:1,...}`이면 `gh repo view`가 실패해 resolveRepo가 throw하는 경로를 재현한다.
+ */
+function makeDoctorRunNoGhInjected(root, { repoLookup } = {}) {
+  return makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "ls-files", result: () => ({ code: 0, stdout: allFiles(root).join("\n"), stderr: "" }) },
+    { match: (c, a) => c === "gh" && a[0] === "repo" && a[1] === "view", result: repoLookup || { code: 0, stdout: JSON.stringify({ nameWithOwner: "o/r" }), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "secret" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ name: "CLAUDE_CODE_OAUTH_TOKEN" }, { name: "FACTORY_BOT_TOKEN" }]), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "variable" && a[1] === "get", result: { code: 0, stdout: "2026-01-01T00:00:00Z\n", stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "label" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ name: "backlog" }]), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && /branches\/main\/protection/.test(a[1] || ""), result: { code: 0, stdout: JSON.stringify({ required_status_checks: { contexts: ["factory/gates", "factory/review", "factory/integrity"] } }), stderr: "" } },
+    { match: (c, a) => c === "bash" && a[0] && a[0].endsWith("verdict-format.sh"), result: { code: 2, stdout: "", stderr: "" } },
+    { match: (c) => c === "bash", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c) => c === "docker", result: { code: 0, stdout: "", stderr: "" } },
+    { match: () => true, result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+}
+
 /** makeDoctorRun과 동일하지만 smoke 명령(test_files에 test/smoke.test.js가 들어간 bash -lc 호출)만 reject한다. */
 function makeDoctorRunSmokeThrows(root) {
   return makeFakeRun([
@@ -141,6 +161,48 @@ test("(e) renderReport sorts FAIL first, then WARN, then PASS, and ends with the
   expect(out[1]).toContain("a.warn");
   expect(out[2]).toContain("z.pass");
   expect(out.at(-1)).toBe("doctor: PASS 1 · WARN 1 · FAIL 1");
+});
+
+test("KTB-4: gh not injected + FACTORY_REPO unset — doctor resolves the repo like status.js and calls branch protection with it, not repos//branches/... ", async () => {
+  const prevRepo = process.env.FACTORY_REPO;
+  delete process.env.FACTORY_REPO;
+  try {
+    const root = await setupRepo();
+    const run = makeDoctorRunNoGhInjected(root);
+    const { io: i, o } = io();
+    // no `gh` passed — doctorCommand must build its own client via resolveRepo({ run }), same as status.js.
+    const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run });
+    const { checks } = JSON.parse(o.out.join(""));
+    const protectionCall = run.calls.find((c) => c.cmd === "gh" && c.args[0] === "api" && /branches\/main\/protection/.test(c.args[1] || ""));
+    expect(protectionCall).toBeDefined();
+    expect(protectionCall.args).toEqual(["api", "repos/o/r/branches/main/protection"]); // resolved repo, not "repos//..."
+    // contexts=["factory/integrity"] came back → real protection, not the misleading "missing L0 contexts".
+    expect(checks.find((c) => c.id === "github.protection")).toMatchObject({ level: "PASS" });
+    expect(checks.some((c) => c.id === "github.unavailable")).toBe(false);
+    expect(typeof code).toBe("number");
+  } finally {
+    if (prevRepo === undefined) delete process.env.FACTORY_REPO; else process.env.FACTORY_REPO = prevRepo;
+  }
+});
+
+test("KTB-4: repo resolution failure (offline / not logged in) → github.unavailable WARN, never a misleading missing-contexts report", async () => {
+  const prevRepo = process.env.FACTORY_REPO;
+  delete process.env.FACTORY_REPO;
+  try {
+    const root = await setupRepo();
+    const run = makeDoctorRunNoGhInjected(root, { repoLookup: { code: 1, stdout: "", stderr: "gh: not logged in to any hosts" } });
+    const { io: i, o } = io();
+    const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run });
+    const { checks } = JSON.parse(o.out.join(""));
+    expect(checks.find((c) => c.id === "github.unavailable")).toMatchObject({ level: "WARN", detail: expect.stringContaining("not logged in") });
+    expect(checks.some((c) => c.id === "github.protection")).toBe(false); // no fabricated protection verdict
+    expect(checks.some((c) => c.id.startsWith("github.") && c.id !== "github.unavailable")).toBe(false); // rest of github.* skipped too, cleanly
+    // never sent the broken "repos//..." path.
+    expect(run.calls.some((c) => c.cmd === "gh" && c.args[0] === "api" && (c.args[1] || "").includes("repos//"))).toBe(false);
+    expect(typeof code).toBe("number");
+  } finally {
+    if (prevRepo === undefined) delete process.env.FACTORY_REPO; else process.env.FACTORY_REPO = prevRepo;
+  }
 });
 
 test("--offline skips GitHub checks entirely (no gh injected, no github.* checks)", async () => {

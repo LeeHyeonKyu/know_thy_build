@@ -26,6 +26,28 @@ const STATUS_STATES = new Set(["success", "failure", "pending", "error"]);
 // "권한 문제"가 아니라 "이 플랜에서 못 함"을 구분해야 하므로 정규식을 한 곳에서 공유한다.
 export const GH_FREE_PLAN_PROTECTION_RE = /Upgrade to GitHub Pro|make this repository public/i;
 
+/**
+ * repo 문자열을 결정한다 — `FACTORY_REPO`가 있으면 그걸 쓰고, 없으면 `gh repo view`로 cwd 저장소를 묻는다
+ * (status.js가 원래 하던 방식과 동일; KTB-4). doctor.js는 예전에 `process.env.FACTORY_REPO || ""`로
+ * 떨어뜨렸는데, 사람이 `factory doctor`를 그냥 저장소 안에서 돌리는 게 정상 케이스라 `FACTORY_REPO`는
+ * 보통 비어 있다 — `repo=""`가 되면 `gh api repos//branches/main/protection` 같은 깨진 경로로 호출이
+ * 나가고, 404가 아니라서 `null`로 조용히 떨어져 "보호가 없다"는 오보를 낸다. 여기서 실패(로그인 안 됨·
+ * git repo 아님)는 삼키지 않고 throw한다 — 호출자가 "확인 못 함"(offline-tolerant WARN)으로 다루게 한다.
+ */
+export async function resolveRepo({ run }) {
+  if (process.env.FACTORY_REPO) return process.env.FACTORY_REPO;
+  const r = await run("gh", ["repo", "view", "--json", "nameWithOwner"]);
+  if (r.code !== 0) throw new Error(`gh repo view failed (${r.code}): ${(r.stderr || r.stdout).trim()}`);
+  let parsed;
+  try {
+    parsed = JSON.parse(r.stdout);
+  } catch (e) {
+    throw new Error(`gh repo view returned unparsable JSON: ${e.message}`);
+  }
+  if (!parsed?.nameWithOwner) throw new Error("gh repo view returned no nameWithOwner");
+  return parsed.nameWithOwner;
+}
+
 export function makeGh({ run, repo }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);

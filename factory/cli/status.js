@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
+import { makeGh, resolveRepo } from "../lib/gh.js";
 import { readRecords as realReadRecords } from "../lib/records-branch.js";
 import { loadCharter, loadHarness, THRESHOLD_DEFAULTS } from "../lib/config.js";
 import { loadQuarantine } from "../lib/quarantine.js";
@@ -63,7 +63,7 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
   const json = argv.includes("--json");
   const nowIso = typeof now === "function" ? now() : (now || new Date().toISOString());
 
-  const ghClient = gh || makeGh({ run, repo: process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner });
+  const ghClient = gh || makeGh({ run, repo: await resolveRepo({ run }) });
 
   const openLists = await Promise.all(STATUS_STATE_LABELS.map((label) => ghClient.issueList({ labels: [label], state: "open" })));
   const merged = await ghClient.issueList({ labels: ["factory:merged"], state: "closed", limit: 10 });

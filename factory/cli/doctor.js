@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
 import { checkFiles, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
 import { loadHarness, loadRoles, loadCharter } from "../lib/config.js";
-import { makeGh } from "../lib/gh.js";
+import { makeGh, resolveRepo } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
 import { envUp, envDown } from "../lib/test-env.js";
 import { q } from "../lib/prove-test.js";
@@ -35,6 +35,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   const loadRolesFn = deps.loadRoles || loadRoles;
   const loadCharterFn = deps.loadCharter || loadCharter;
   const checkGitHubFn = deps.checkGitHub || checkGitHub;
+  const resolveRepoFn = deps.resolveRepo || resolveRepo;
   const envUpFn = deps.envUp || envUp;
   const envDownFn = deps.envDown || envDown;
 
@@ -145,8 +146,24 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
       checks.push(...checkWorkflows({ root, exists, readFile }));
 
       if (!offline) {
-        const ghClient = gh || makeGh({ run, repo: process.env.FACTORY_REPO || "" });
-        checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: LABELS })));
+        // gh가 이미 주입돼 있으면(테스트, 향후 다른 호출자) repo 해석은 필요 없다 — 그 gh는 이미 repo를 안다.
+        // 주입이 없으면 status.js와 같은 방식으로 repo를 해석한다(KTB-4) — FACTORY_REPO가 비어 있어도
+        // `gh api repos//branches/main/protection`처럼 깨진 경로로 호출해 거짓 "보호 없음"을 보고하지 않도록.
+        // 해석 자체가 실패하면(로그인 안 됨·git repo 아님) github.* 전체를 건너뛰고 오프라인 허용 WARN 하나로 남긴다.
+        if (gh) {
+          checks.push(...(await checkGitHubFn({ gh, harness, labels: LABELS })));
+        } else {
+          let repo;
+          try {
+            repo = await resolveRepoFn({ run });
+          } catch (e) {
+            checks.push({ id: "github.unavailable", level: "WARN", detail: `could not resolve repo — ${e.message}` });
+          }
+          if (repo) {
+            const ghClient = makeGh({ run, repo });
+            checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: LABELS })));
+          }
+        }
       }
     } else {
       checks.push({ id: "factory.initialized", level: "PASS", detail: "not initialized — run factory init" });
