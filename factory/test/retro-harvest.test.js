@@ -101,6 +101,14 @@ test("factory:flaky labeled issues become flaky candidates, id parsed from the '
   expect(candidates.flaky).toEqual([{ id: "test_123_incremental_sync", issue: 50 }]);
 });
 
+test("flaky: a TTL-rewrite issue ('rewrite flaky test at another level: <id>', Plan 4 Task 3) is parsed by the same id", () => {
+  const issues = [
+    { number: 52, title: "rewrite flaky test at another level: test_123_incremental_sync", labels: ["factory:flaky", "backlog"], state: "open" },
+  ];
+  const { candidates } = harvest({ records: new Map(), issues, commentsByIssue: new Map(), since: null });
+  expect(candidates.flaky).toEqual([{ id: "test_123_incremental_sync", issue: 52 }]);
+});
+
 test("since filters must_fix/dissent/needs-human by comment createdAt — null means everything", () => {
   const commentsByIssue = new Map([
     [60, [
