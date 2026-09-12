@@ -330,3 +330,32 @@ test("readRecords only reads <name>.md files directly under dir — nested paths
   expect(map.get("7")).toBe("flat\n");
   expect(map.has("nested/99")).toBe(false);
 }, 30000);
+
+test("(h) overwrite: a rewritten state file (_retro.md) replaces the branch content instead of being tail-merged", async () => {
+  const remote = await makeRemote();
+  const cwd = await makeClone(remote);
+
+  // retro 1회차: 상태 파일을 처음 밀어 넣는다.
+  const v1 = "# Retro State\n\n- merges since last retro: 0\n\n<!-- factory-retro-state:v1 -->\n```json\n{\"n\":3}\n```\n";
+  writeRecord(cwd, "_retro", v1);
+  expect((await syncRecords({ run, cwd, message: "retro 1", overwrite: ["_retro.md"] })).ok).toBe(true);
+
+  // retro 2회차: 같은 파일을 **통째로 다시 렌더링**한다 — 새 내용은 옛 내용의 접두어가 아니다.
+  const v2 = "# Retro State\n\n- merges since last retro: 2\n\n<!-- factory-retro-state:v1 -->\n```json\n{\"n\":2}\n```\n";
+  writeRecord(cwd, "_retro", v2);
+  const r = await syncRecords({ run, cwd, message: "retro 2", overwrite: ["_retro.md"] });
+  expect(r.ok).toBe(true);
+  expect(r.merged ?? []).toEqual([]);                                  // 꼬리 병합을 하지 않았다
+
+  const show = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
+  expect(show.stdout).toBe(v2);                                        // 마커도 JSON 펜스도 정확히 하나다
+  expect(show.stdout.match(/factory-retro-state:v1/g)).toHaveLength(1);
+
+  // 같은 상황에서 overwrite 없이 밀면(기본 동작) append-only 규칙이 걸려 두 렌더가 이어 붙는다 —
+  // 이 테스트가 지키는 것이 바로 그 차이다.
+  const v3 = "# Retro State\n\n- merges since last retro: 5\n\n<!-- factory-retro-state:v1 -->\n```json\n{\"n\":1}\n```\n";
+  writeRecord(cwd, "_retro", v3);
+  await syncRecords({ run, cwd, message: "retro 3 (no overwrite)" });
+  const bad = await run("git", ["show", "factory/records:docs/factory/runs/_retro.md"], { cwd: remote });
+  expect(bad.stdout.match(/factory-retro-state:v1/g).length).toBeGreaterThan(1);
+}, 30000);

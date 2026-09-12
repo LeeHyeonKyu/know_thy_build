@@ -12,13 +12,15 @@ const fresh = () => { const r = mkdtempSync(join(tmpdir(), "ktb-init-")); writeF
 test("init installs the full manifest into an empty repo and renders the project name", async () => {
   const root = fresh(); const { io: i, o } = io();
   expect(await initCommand({ root, pkgRoot, argv: [], io: i })).toBe(0);
-  for (const p of [".factory/bin/run-stage.js", ".factory/lib/gates.js", ".factory/harness.toml", ".factory/roles.toml", ".factory/package.json", ".factory/lessons/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/block-dangerous.sh", ".claude/commands/factory-triage.md", ".github/workflows/factory-implement.yml", ".factory/actions/setup/action.yml", "docs/factory/CHARTER.md"]) expect(existsSync(join(root, p)), p).toBe(true);
+  for (const p of [".factory/bin/run-stage.js", ".factory/bin/retro.js", ".factory/lib/gates.js", ".factory/lib/retro/state.js", ".factory/harness.toml", ".factory/roles.toml", ".factory/package.json", ".factory/lessons/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/block-dangerous.sh", ".claude/commands/factory-triage.md", ".github/workflows/factory-implement.yml", ".github/workflows/factory-retro.yml", ".factory/actions/setup/action.yml", "docs/factory/CHARTER.md"]) expect(existsSync(join(root, p)), p).toBe(true);
   expect(readFileSync(join(root, ".factory/harness.toml"), "utf8")).toContain('name           = "demo-app"');
   expect(statSync(join(root, ".claude/hooks/block-dangerous.sh")).mode & 0o111).not.toBe(0);
   const gitignore = readFileSync(join(root, ".gitignore"), "utf8");
   expect(gitignore).toContain(".factory/out/");
   // run 기록은 factory/records 브랜치에 산다(ADR-014) — 작업 브랜치에서는 추적하지 않는다(F1)
   expect(gitignore).toContain("docs/factory/runs/");
+  // 게이트가 만드는 테스트 산출물도 추적하지 않는다 — 추적되면 stop-guard가 "미커밋 변경"으로 막는다.
+  for (const e of ["test-results/", "coverage/", ".nyc_output/"]) expect(gitignore, e).toContain(e);
   expect(existsSync(join(root, "docs/factory/runs/.gitkeep")), "no .gitkeep — the directory is created on demand by appendRunRecord").toBe(false);
   expect(o.out.join("\n")).toMatch(/created\s+\d+/);
 });

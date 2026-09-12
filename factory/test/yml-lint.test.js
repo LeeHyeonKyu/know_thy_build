@@ -28,8 +28,8 @@ const W = new URL("../../templates/factory/github/workflows/", import.meta.url).
 const files = readdirSync(W).filter((f) => f.endsWith(".yml"));
 const STAGE = { "factory-triage.yml": ["triage", 15, '"factory:queue"'], "factory-plan.yml": ["plan", 60, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 45, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 20, '"factory:approved"'] };
 
-test("all seven workflow templates exist and pass lint", () => {
-  expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
+test("all eight workflow templates exist and pass lint", () => {
+  expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
   for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8")), f).toEqual([]);
 });
 
@@ -57,6 +57,33 @@ test("sweeper and integrity workflows", () => {
   expect(s).toContain("cron: '*/30 * * * *'"); expect(s).toContain("workflow_dispatch:"); expect(s).toContain("run: node .factory/bin/sweep.js"); expect(s).toContain("timeout-minutes: 5");
   const i = readFileSync(join(W, "factory-integrity.yml"), "utf8");
   expect(i).toContain("name: factory/integrity"); expect(i).toContain("pull_request:"); expect(i).toContain("run: node .factory/bin/integrity.js"); expect(i).toContain("timeout-minutes: 5");
+});
+
+// retro는 스테이지가 아니다(라벨 상태 머신 밖) — 트리거도 concurrency도 §4.1 표의 스테이지 행과 다르다.
+test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 / P4-R5)", () => {
+  const y = readFileSync(join(W, "factory-retro.yml"), "utf8");
+  expect(y).toContain("name: factory-retro");
+  expect(y).toContain("pull_request:");
+  expect(y).toContain("types: [closed]");
+  expect(y).toContain("if: github.event.pull_request.merged == true");   // 닫히기만 한 PR은 배울 것이 없다
+  expect(y).toContain("group: factory-retro");                           // 이슈별이 아니라 잡 전체가 하나의 큐다
+  expect(y).toContain("cancel-in-progress: false");
+  expect(y).toContain("timeout-minutes: 30");
+  expect(y).toContain("fetch-depth: 0");
+  expect(y).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
+  expect(y).toContain("uses: ./.factory/actions/setup");
+  expect(y).toContain('claude: "true"');                                 // full retro는 claude -p를 부른다
+  expect(y).toContain('test-env: "false"');                              // retro는 테스트를 돌리지 않는다
+  expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}");
+  expect(y).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}");
+  expect(y).toContain("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}");
+  expect(y).toContain("FACTORY_RUNNER_ID: gha-${{ github.run_id }}");
+  expect(y).toContain("run: node .factory/bin/retro.js");
+  expect(y).toContain(".factory/out/");
+  expect(y).toContain("include-hidden-files: true");
+  // cron이 없다는 것 자체가 §8.4의 결정이다 — 머지가 없으면 배울 것도 없다.
+  expect(y).not.toContain("schedule:");
+  expect(y).not.toContain("cron:");
 });
 
 test("composite setup action", () => {

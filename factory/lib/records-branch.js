@@ -79,7 +79,7 @@ async function fetchParent({ run, cwd, branch }) {
  * 로컬이 그 연장이 아니면 공통 접두어 이후의 로컬 꼬리만 tip 뒤에 이어 붙인다 — 어느 쪽도
  * 덮어쓰지 않는다) → write-tree → commit-tree → push. 한 번의 시도.
  */
-async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files }) {
+async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite }) {
   const parent = await fetchParent({ run, cwd, branch });
 
   const idxEnv = { ...gitEnv, GIT_INDEX_FILE: indexPath };
@@ -95,7 +95,7 @@ async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, file
     const idxPath = `${dir}/${rel}`;
     let content = readFileSync(join(absDir, rel), "utf8");
     let blobFrom = join(absDir, rel);                                 // 그대로 올릴 수 있는 경우엔 파일을 바로 해시한다
-    if (parent) {
+    if (parent && !overwrite.has(rel)) {
       const parentShow = await run("git", ["show", `${parent}:${idxPath}`], { cwd });
       // parentShow.code === 0 → 브랜치가 이미 이 경로를 갖고 있다.
       if (parentShow.code === 0 && !content.startsWith(parentShow.stdout)) {
@@ -141,8 +141,17 @@ async function attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, file
  * → { ok, commit?, reason?, retried, skipped?, merged? }
  *   merged: 브랜치 tip 뒤로 로컬 꼬리를 이어 붙인 경로들(같은 이슈 경합)
  *   skipped: 로컬이 더할 게 없어 건드리지 않은 경로들
+ *
+ * `overwrite`: dir 기준 상대 경로 목록 — 이 파일들은 꼬리 병합 없이 **로컬 내용으로 교체**한다.
+ * 꼬리 병합은 run 기록이 append-only 로그라는 전제에서만 옳다: 브랜치 tip이 로컬의 접두어가 아니면
+ * "다른 러너가 자기 섹션을 먼저 밀었다"는 뜻이므로 양쪽을 이어 붙이는 게 맞다. 그러나 retro의
+ * `_retro.md`는 **매번 통째로 다시 렌더링되는 상태 파일**이다(`renderRetroState`) — 새 렌더는 옛
+ * 렌더의 접두어가 절대 아니므로 병합 규칙에 걸리면 옛 파일 뒤에 새 파일의 꼬리가 붙어, 마커·JSON
+ * 펜스가 두 개인 파일이 된다. 그러면 다음 retro의 파서는 **옛 상태**(첫 펜스)를 읽고 상태가 영원히
+ * 전진하지 않는다. `_retro.md`는 `concurrency: factory-retro`로 직렬화된 단일 작성자(retro)만 쓰므로
+ * 교체가 안전하고, 교체가 유일하게 옳다.
  */
-export async function syncRecords({ run, cwd, branch = "factory/records", dir = "docs/factory/runs", message, env = {} }) {
+export async function syncRecords({ run, cwd, branch = "factory/records", dir = "docs/factory/runs", message, env = {}, overwrite = [] }) {
   const files = listMarkdownFiles(join(cwd, dir));
   if (files.length === 0) return { ok: true, commit: null, reason: "nothing to sync", retried: false };
 
@@ -156,13 +165,14 @@ export async function syncRecords({ run, cwd, branch = "factory/records", dir = 
     GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL || "factory-bot@users.noreply.github.com",
     ...env,
   };
+  const over = new Set(overwrite);
   try {
-    const r1 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files });
+    const r1 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite: over });
     if (r1.ok) return { ok: true, commit: r1.commit, retried: false, skipped: r1.skipped, merged: r1.merged };
     if (!r1.pushStderr || !RETRYABLE.test(r1.pushStderr)) return { ok: false, reason: r1.reason, retried: false, skipped: r1.skipped, merged: r1.merged };
     // 다른 러너가 그 사이 먼저 push했다(non-fast-forward) — 처음부터 딱 한 번 다시 시도한다.
     // 재시도의 fetch가 새 tip을 가져오므로, 같은 파일을 건드린 경우 두 번째 attempt가 꼬리를 병합한다.
-    const r2 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files });
+    const r2 = await attempt({ run, cwd, branch, dir, message, gitEnv, indexPath, files, overwrite: over });
     if (r2.ok) return { ok: true, commit: r2.commit, retried: true, skipped: r2.skipped, merged: r2.merged };
     return { ok: false, reason: r2.reason, retried: true, skipped: r2.skipped, merged: r2.merged };
   } finally {

@@ -1,5 +1,8 @@
 import { test, expect } from "vitest";
-import { registerFromFlakyIssues, rewriteIssuesForExpired, deletionCandidates } from "../lib/retro/quarantine-ops.js";
+import {
+  QUARANTINE_KINDS, deletionCandidates, expiredFromComments, quarantineComment,
+  quarantineEvents, registerFromFlakyIssues, rewriteIssuesForExpired,
+} from "../lib/retro/quarantine-ops.js";
 
 const needsHumanTransition = (n, reason, at) =>
   ({ id: `t-${n}-${at}`, createdAt: at, body: `<!-- factory-transition:v1 from=factory:in-progress to=factory:needs-human by=script -->\nfactory:in-progress → factory:needs-human — ${reason}` });
@@ -92,4 +95,42 @@ test("deletionCandidates: K has no effect on the gate", () => {
   const issues = [{ number: 94, title: "rewrite flaky test at another level: test_k", labels: ["factory:needs-human"], state: "open" }];
   const out = deletionCandidates({ issues, commentsByIssue: new Map(), K: 9999 });
   expect(out).toEqual([{ id: "test_k", issue: 94 }]);
+});
+
+// ── 격리 사건 코멘트(sweeper가 쓰고 retro가 읽는다) ──────────────────────
+
+test("quarantineComment is the one marker syntax sweeper writes and retro reads", () => {
+  expect(quarantineComment("registered", "test/a.js > x")).toBe("<!-- factory-quarantine registered id=test/a.js > x -->");
+  expect(QUARANTINE_KINDS).toEqual(["registered", "returned", "expired"]);
+});
+
+test("quarantineEvents reads registered/returned/expired markers in order and honours the since window", () => {
+  const issues = [{ number: 70 }, { number: 71 }];
+  const commentsByIssue = new Map([
+    [70, [
+      { id: 1, createdAt: "2026-09-01T00:00:00Z", body: `${quarantineComment("registered", "t1")}\n등록` },
+      { id: 2, createdAt: "2026-09-10T00:00:00Z", body: `${quarantineComment("expired", "t1")}\nTTL` },
+      { id: 3, createdAt: "2026-09-10T01:00:00Z", body: "그냥 사람 코멘트" },
+    ]],
+    [71, [{ id: 4, createdAt: "2026-09-11T00:00:00Z", body: `${quarantineComment("returned", "t2")}\n복귀` }]],
+  ]);
+  expect(quarantineEvents({ issues, commentsByIssue })).toEqual([
+    { kind: "registered", id: "t1", issue: 70, at: "2026-09-01T00:00:00Z" },
+    { kind: "expired", id: "t1", issue: 70, at: "2026-09-10T00:00:00Z" },
+    { kind: "returned", id: "t2", issue: 71, at: "2026-09-11T00:00:00Z" },
+  ]);
+  // 지난 retro가 이미 처리한 창은 다시 보지 않는다(delta, §8.4)
+  expect(quarantineEvents({ issues, commentsByIssue, since: "2026-09-05T00:00:00Z" }).map((e) => e.kind)).toEqual(["expired", "returned"]);
+});
+
+test("expiredFromComments returns only expired ids, deduped, in order — the input rewriteIssuesForExpired wants", () => {
+  const issues = [{ number: 80 }];
+  const commentsByIssue = new Map([[80, [
+    { id: 1, createdAt: "2026-09-10T00:00:00Z", body: quarantineComment("expired", "t_a") },
+    { id: 2, createdAt: "2026-09-10T01:00:00Z", body: quarantineComment("returned", "t_b") },
+    { id: 3, createdAt: "2026-09-10T02:00:00Z", body: quarantineComment("expired", "t_a") },
+    { id: 4, createdAt: "2026-09-10T03:00:00Z", body: quarantineComment("expired", "t_c") },
+  ]]]);
+  expect(expiredFromComments({ issues, commentsByIssue })).toEqual(["t_a", "t_c"]);
+  expect(expiredFromComments({ issues: [], commentsByIssue })).toEqual([]);
 });

@@ -6,10 +6,24 @@
 // 문법을 두 곳에서 다르게 읽으면 harvest의 통계와 여기의 판단이 어긋난다.
 
 import { isQuarantined } from "../quarantine.js";
-import { extractNeedsHuman, flakyIdFromTitle } from "./issue-comments.js";
+import { afterSince, extractNeedsHuman, flakyIdFromTitle } from "./issue-comments.js";
 
 const FLAKY_LABEL = "factory:flaky";
 const NEEDS_HUMAN_LABEL = "factory:needs-human";
+
+/**
+ * 격리 사건은 `quarantine.toml`이 아니라 **flaky 이슈의 코멘트**에 남는다 — `quarantine.toml`은
+ * "지금 격리된 것"만 담는 현재 상태고(복귀·만료된 항목은 그 자리에서 사라진다), "무엇이 언제 왜
+ * 격리됐다가 어떻게 끝났는가"는 이력이라 사람이 보는 이슈에 남아야 한다(§5.2.5-⑤ "격리 등록/복귀/
+ * 만료는 모두 해당 flaky 이슈에 코멘트를 남긴다"). 그래서 이 마커는 두 잡이 공유한다:
+ *   - sweeper(lib/sweeper.js)가 `returned`·`expired`를 쓴다(TTL·연속 통과 판정은 sweeper의 몫).
+ *   - retro(bin/retro.js)가 `registered`를 쓰고, sweeper가 남긴 `expired`를 **읽어** "다른 레벨에서
+ *     다시 쓰라"는 이슈를 만든다(P4-R3: 이슈 이력을 읽는 잡은 retro뿐이다).
+ * 문법이 한 곳에 있어야 쓰는 쪽과 읽는 쪽이 어긋나지 않는다.
+ */
+export const QUARANTINE_KINDS = ["registered", "returned", "expired"];
+export const quarantineComment = (kind, id) => `<!-- factory-quarantine ${kind} id=${id} -->`;
+const QUARANTINE_EVENT = /<!--\s*factory-quarantine (registered|returned|expired) id=(\S+)\s*-->/;
 
 const labelName = (l) => (typeof l === "string" ? l : l?.name);
 const hasLabel = (issue, name) => Array.isArray(issue?.labels) && issue.labels.some((l) => labelName(l) === name);
@@ -76,6 +90,37 @@ export function rewriteIssuesForExpired({ expired = [], openIssues = [] } = {}) 
     existingTitles.add(title);
   }
   return out;
+}
+
+/**
+ * quarantineEvents({ issues, commentsByIssue, since }) → [{kind, id, issue, at}]
+ * 이슈 코멘트에 남은 격리 사건을 시간순(이슈 순서 × 코멘트 순서)으로 읽는다. `since`(ISO|null)
+ * 이후만 본다 — retro는 delta만 처리하므로(§8.4) 지난 retro가 이미 처리한 만료를 다시 보지 않는다.
+ */
+export function quarantineEvents({ issues = [], commentsByIssue, since = null } = {}) {
+  const byIssue = asMap(commentsByIssue);
+  const sinceMs = since == null ? null : Date.parse(since);
+  const out = [];
+  for (const issue of issues) {
+    for (const c of byIssue.get(issue?.number) || []) {
+      if (!afterSince(c?.createdAt, sinceMs)) continue;
+      const m = QUARANTINE_EVENT.exec(c?.body || "");
+      if (m) out.push({ kind: m[1], id: m[2], issue: issue.number, at: c.createdAt });
+    }
+  }
+  return out;
+}
+
+/**
+ * `since` 이후 sweeper가 만료(`expired`) 코멘트를 남긴 격리 id들 — 등장 순서대로, 중복 제거.
+ * 이 목록이 `rewriteIssuesForExpired`의 입력이다. 같은 id가 만료된 뒤 다시 등록·만료될 수 있으므로
+ * "한 번 만료됐으면 영원히 만료"로 보지 않고 창(`since`) 안의 사건만 센다 — 그래도 재작성 이슈는
+ * 제목으로 dedup되므로 같은 이슈가 두 번 생기지는 않는다.
+ */
+export function expiredFromComments(args) {
+  const ids = [];
+  for (const e of quarantineEvents(args)) if (e.kind === "expired" && !ids.includes(e.id)) ids.push(e.id);
+  return ids;
 }
 
 /**

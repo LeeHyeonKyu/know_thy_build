@@ -13,6 +13,7 @@ function makeRoot({ initialized = true, depsInstalled = true } = {}) {
   if (initialized) {
     mkdirSync(join(root, ".factory/bin"), { recursive: true });
     writeFileSync(join(root, ".factory/bin/run-stage.js"), "// stub\n");
+    writeFileSync(join(root, ".factory/bin/retro.js"), "// stub\n");
   }
   if (depsInstalled) {
     mkdirSync(join(root, ".factory/node_modules/smol-toml"), { recursive: true });
@@ -45,12 +46,42 @@ test("stage merge → error, runs only in CI, exit 1, no side effects", async ()
   expect(spawnInherit).not.toHaveBeenCalled();
 });
 
-test("stage retro → error, arrives with Plan 4, exit 1", async () => {
+test("retro spawns .factory/bin/retro.js with no issue argument (Plan 4)", async () => {
   const root = makeRoot();
   const { io: i, o } = io();
-  const code = await runCommand({ root, argv: ["retro", "5"], io: i, run: vi.fn(), spawnInherit: vi.fn() });
-  expect(code).toBe(1);
-  expect(o.err.join("\n")).toContain("retro arrives with Plan 4");
+  const spawnInherit = vi.fn(() => 0);
+  const code = await runCommand({ root, argv: ["retro"], io: i, run: makeOkRun(), spawnInherit });
+  expect(code).toBe(0);
+  expect(o.err).toEqual([]);
+  expect(spawnInherit.mock.calls[0][1]).toEqual([".factory/bin/retro.js"]);
+});
+
+test("retro --force passes --force through; a stray issue argument is ignored (retro has no issue)", async () => {
+  const root = makeRoot();
+  const { io: i } = io();
+  const spawnInherit = vi.fn(() => 7);
+  expect(await runCommand({ root, argv: ["retro", "--force"], io: i, run: makeOkRun(), spawnInherit })).toBe(7);
+  expect(spawnInherit.mock.calls[0][1]).toEqual([".factory/bin/retro.js", "--force"]);
+  const spawn2 = vi.fn(() => 0);
+  expect(await runCommand({ root, argv: ["retro", "5"], io: i, run: makeOkRun(), spawnInherit: spawn2 })).toBe(0);
+  expect(spawn2.mock.calls[0][1]).toEqual([".factory/bin/retro.js"]);
+});
+
+test("retro still runs the full preflight — missing retro.js is 'not initialized', bad gh auth refuses", async () => {
+  const bare = mktemp();
+  mkdirSync(join(bare, ".factory/bin"), { recursive: true });
+  writeFileSync(join(bare, ".factory/bin/run-stage.js"), "// stub\n");     // 스테이지는 설치됐지만 retro.js는 없다
+  const { io: i, o } = io();
+  const spawnInherit = vi.fn();
+  expect(await runCommand({ root: bare, argv: ["retro"], io: i, run: vi.fn(), spawnInherit })).toBe(1);
+  expect(o.err.join("\n")).toContain("factory not initialized");
+  expect(spawnInherit).not.toHaveBeenCalled();
+
+  const root = makeRoot();
+  const { io: i2, o: o2 } = io();
+  const run = makeFakeRun([{ match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 1, stdout: "", stderr: "no" } }]);
+  expect(await runCommand({ root, argv: ["retro"], io: i2, run, spawnInherit: vi.fn() })).toBe(1);
+  expect(o2.err.join("\n")).toMatch(/gh/i);
 });
 
 test("unknown stage → usage error, exit 1", async () => {

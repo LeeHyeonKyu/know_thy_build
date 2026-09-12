@@ -13,6 +13,7 @@ export const HELP = `
                                         Verify the harness contract (exit 1 on any FAIL)
     factory bootstrap [--dry-run]       Labels, branch protection, required checks, FACTORY_TOKEN_ISSUED_AT (repo admin)
     factory run <stage> <issue>         Run a stage locally with the same scripts CI uses (triage|plan|implement|review)
+    factory run retro [--force]         Run the retro job locally (--force ignores the merge count N)
     factory status [--json]             Needs You / queue / in progress / recent merges / usage (read-only)
 `;
 
