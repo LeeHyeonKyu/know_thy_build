@@ -129,3 +129,73 @@ test("appending to a header-only file (no entries yet) produces a valid lessons 
   expect(out).toBe("<!-- factory-lessons:v1 role=r max=5 -->\n- [L-2026-09-12-01] first entry\n  근거: runs/1.md, runs/2.md. 인용: 0회.\n");
   expect(lessonsFormat("f.md", out)).toEqual([]);
 });
+
+test("regression: an entry added earlier in this same call is never evicted to make room for a later one in the same call", () => {
+  const text = HEADER("r", 1); // max=1, no pre-existing entries
+  const { text: out, added, rejected, evicted } = applyLessons({
+    text, today: "2026-09-12",
+    adopted: [
+      { text: "first adoption", evidence_runs: [1, 2] },
+      { text: "second adoption", evidence_runs: [3, 4] },
+    ],
+  });
+  // the first adoption fills the only slot; the second must be rejected with 'max', NOT evict the first.
+  expect(added).toEqual([{ id: "L-2026-09-12-01", text: "first adoption" }]);
+  expect(rejected).toEqual([{ text: "second adoption", reason: "max" }]);
+  expect(evicted).toEqual([]);
+  expect(out).toContain("first adoption");
+  expect(out).not.toContain("second adoption");
+  expect(lessonsFormat("f.md", out)).toEqual([]);
+});
+
+test("regression: eviction is atomic — if not enough zero-citation pre-existing entries exist to make room, NOTHING is evicted (no partial eviction before the reject)", () => {
+  // max=2, three pre-existing entries already over capacity: only one (the oldest) is zero-citation.
+  const text = `${HEADER("r", 2)}` +
+    `- [L-2026-08-01-01] old zero cite\n  근거: runs/1.md, runs/2.md. 인용: 0회.\n` +
+    `- [L-2026-08-05-02] cited one\n  근거: runs/3.md, runs/4.md. 인용: 1회.\n` +
+    `- [L-2026-08-10-03] cited two\n  근거: runs/5.md, runs/6.md. 인용: 2회.\n`;
+  const { text: out, added, rejected, evicted } = applyLessons({
+    text, today: "2026-09-12",
+    adopted: [{ text: "wants two evictions but only one is available", evidence_runs: [7, 8] }],
+  });
+  expect(added).toEqual([]);
+  expect(evicted).toEqual([]); // NOT ["L-2026-08-01-01"] — the old (buggy) behaviour evicted it and still rejected
+  expect(rejected).toEqual([{ text: "wants two evictions but only one is available", reason: "max" }]);
+  expect(out).toBe(text);
+  expect(out).toContain("old zero cite");
+});
+
+test("regression: NN would exceed 99 for today → rejected with 'id-space', no invalid id is ever emitted", () => {
+  const text = `${HEADER("r", 200)}- [L-2026-09-12-99] filler\n  근거: runs/1.md, runs/2.md. 인용: 0회.\n`;
+  const { text: out, added, rejected, evicted } = applyLessons({
+    text, today: "2026-09-12",
+    adopted: [{ text: "one hundredth entry today", evidence_runs: [3, 4] }],
+  });
+  expect(added).toEqual([]);
+  expect(evicted).toEqual([]);
+  expect(rejected).toEqual([{ text: "one hundredth entry today", reason: "id-space" }]);
+  expect(out).toBe(text);
+  expect(out).not.toMatch(/L-2026-09-12-100/);
+});
+
+test("added[] always matches exactly what landed in the returned text, across a mixed batch (duplicate + insufficient + eviction + success)", () => {
+  const text = `${HEADER("r", 2)}- [L-2026-08-01-01] old zero cite\n  근거: runs/1.md, runs/2.md. 인용: 0회.\n- [L-2026-08-05-02] cited\n  근거: runs/3.md, runs/4.md. 인용: 1회.\n`;
+  const { text: out, added, rejected, evicted } = applyLessons({
+    text, today: "2026-09-12",
+    adopted: [
+      { text: "cited", evidence_runs: [5, 6] }, // duplicate of existing text
+      { text: "not enough evidence", evidence_runs: [7] }, // insufficient-evidence
+      { text: "brand new lesson", evidence_runs: [8, 9] }, // needs eviction of the old zero-cite entry
+    ],
+  });
+  expect(rejected).toEqual([
+    { text: "cited", reason: "duplicate" },
+    { text: "not enough evidence", reason: "insufficient-evidence" },
+  ]);
+  expect(evicted).toEqual(["L-2026-08-01-01"]);
+  expect(added).toEqual([{ id: "L-2026-09-12-01", text: "brand new lesson" }]);
+  const entryLines = out.split("\n").filter((l) => l.startsWith("- "));
+  expect(entryLines).toEqual(["- [L-2026-08-05-02] cited", "- [L-2026-09-12-01] brand new lesson"]);
+  for (const a of added) expect(out).toContain(`- [${a.id}] ${a.text}`);
+  expect(lessonsFormat("f.md", out)).toEqual([]);
+});

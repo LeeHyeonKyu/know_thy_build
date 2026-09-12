@@ -4,20 +4,26 @@
 
 import { parseAgentMd } from "../agent-md.js";
 
-// agent-md.js의 DECORATORS와 동일한 규칙: 헤더는 `<marker> <name>` 그 자체이거나, 이름 바로 뒤가
-// ` —`(설명 대시) · `:` · ` (`(괄호 주석) 중 하나여야 매칭한다 — 스펙 §7.3의 실제 예시가
-// "### 나쁜 발견 (이렇게 쓰지 않는다)"처럼 장식된 헤더를 쓴다.
+// `##` 최상위 헤더(Examples/Perspectives)는 **정확히** 일치해야 한다 — integrity.js의
+// `[protected].additive_only` 허용 목록(harness.toml)은 리터럴 문자열 "## Examples"/"## Perspectives"로
+// 섹션 경계를 판정한다(sectionAt이 헤더 줄 텍스트를 그대로 비교한다). 장식된 최상위 헤더
+// ("## Examples — 뭐")를 여기서 허용해 버리면, 우리는 위치를 찾아 삽입에 성공해도 그 결과 PR을
+// integrity가 "허용되지 않은 섹션의 변경"으로 reject한다 — 통과할 수 없는 diff를 만드는 셈이다.
+// `###` 소제목(좋은 발견/나쁜 발견)은 integrity가 보지 않는 하위 구분일 뿐이라 agent-md.js의
+// DECORATORS와 같은 규칙(` —`·`:`·` (` 중 하나로 시작하는 접미)을 허용한다 — 스펙 §7.3의 실제
+// 예시가 "### 나쁜 발견 (이렇게 쓰지 않는다)"처럼 장식된 헤더를 쓴다.
 const DECORATORS = [" —", ":", " ("];
-function headerMatches(line, marker, name) {
-  const prefix = `${marker} ${name}`;
+function subHeaderMatches(line, name) {
+  const prefix = `### ${name}`;
   if (line === prefix) return true;
   if (!line.startsWith(prefix)) return false;
   return DECORATORS.some((d) => line.slice(prefix.length).startsWith(d));
 }
 
-/** `## <name>`(장식 허용) 줄의 인덱스와 그 섹션의 끝(다음 `## ` 헤더 또는 EOF)을 찾는다. */
+/** `## <name>`(정확히 일치, 장식 없음) 줄의 인덱스와 그 섹션의 끝(다음 `## ` 헤더 또는 EOF)을 찾는다. */
 function findTop(lines, name) {
-  const start = lines.findIndex((l) => headerMatches(l, "##", name));
+  const header = `## ${name}`;
+  const start = lines.findIndex((l) => l === header);
   if (start === -1) return null;
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) if (/^## /.test(lines[i])) { end = i; break; }
@@ -28,7 +34,7 @@ function findTop(lines, name) {
 function findSub(lines, topRange, name) {
   if (!topRange) return null;
   let start = -1;
-  for (let i = topRange.start + 1; i < topRange.end; i++) if (headerMatches(lines[i], "###", name)) { start = i; break; }
+  for (let i = topRange.start + 1; i < topRange.end; i++) if (subHeaderMatches(lines[i], name)) { start = i; break; }
   if (start === -1) return null;
   let end = topRange.end;
   for (let i = start + 1; i < topRange.end; i++) if (/^### |^## /.test(lines[i])) { end = i; break; }
@@ -51,8 +57,10 @@ function lastBulletIdx(lines, range) {
  * applyRoleAdditions({ text, examples: [{kind:'good'|'bad', text}], perspectives: [{text}], caps })
  *   → { text, added: [{section, text}], skipped: [{text, reason}] }
  *
- * 대상 섹션이 텍스트에 정확히 그 헤더(`## Examples`/`### 좋은 발견`/`### 나쁜 발견`/`## Perspectives`,
- * 데코레이터 없이)로 존재하지 않으면 헤더를 만들지 않고 reason 'missing-section'으로 skip한다.
+ * 대상 섹션이 텍스트에 그 헤더로 존재하지 않으면 헤더를 만들지 않고 reason 'missing-section'으로
+ * skip한다. `## Examples`/`## Perspectives`는 **정확히** 일치해야 하고(integrity의 additive_only
+ * 허용 목록이 리터럴 문자열이다), `### 좋은 발견`/`### 나쁜 발견`은 장식(` —`·`:`·` (`)을 허용한다
+ * (integrity가 보지 않는 하위 구분이고, 스펙 §7.3 예시가 장식된 소제목을 쓴다).
  * kind가 good/bad가 아니면 'invalid-kind'로 skip. 중복 텍스트(trim 일치, 이번 배치 포함)는 'duplicate',
  * 상한(caps) 도달은 'max'로 skip. 삽입은 해당 섹션의 마지막 불릿 바로 다음 줄(없으면 헤더 바로 다음
  * 줄)에 `- <text>` 한 줄만 넣는다 — 그 외 어떤 줄도 건드리지 않는다.

@@ -108,6 +108,14 @@ test("no additions at all → output is byte-identical to input", () => {
   expect(skipped).toEqual([]);
 });
 
+test("regression: a decorated top-level '## ' header does not match — integrity's additive_only allowlist is literal, so top headers must match exactly", () => {
+  const decorated = SAMPLE.replace("## Perspectives\n", "## Perspectives — 관점\n");
+  const { text, added, skipped } = applyRoleAdditions({ text: decorated, perspectives: [{ text: "x" }] });
+  expect(added).toEqual([]);
+  expect(skipped).toEqual([{ text: "x", reason: "missing-section" }]);
+  expect(text).toBe(decorated);
+});
+
 test("default caps match spec §8.1 (Examples 8/8, Perspectives 6) when caps is omitted", () => {
   const many = (n, kind) => Array.from({ length: n }, (_, i) => ({ kind, text: `item-${kind}-${i}` }));
   const { added, skipped } = applyRoleAdditions({ text: SAMPLE, examples: many(10, "good") });

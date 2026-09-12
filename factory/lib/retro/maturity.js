@@ -14,8 +14,11 @@ const KNOWN_SDKS = [
 
 const HTTP_FRAMEWORKS = ["express", "fastify", "hono", "koa", "next"];
 
-const SCHEMA_GLOBS = ["prisma/schema.prisma", "**/migrations/**", "*.sql", "drizzle.config.*"];
-const HTTP_SURFACE_GLOBS = ["**/routes/**", "**/router.*", "**/api/**", "**/server.*", "app.*"];
+// `*.sql`은 `**/*.sql`로 — 루트 파일만 잡던 원래 glob은 `db/migrations/x.sql`처럼 중첩된 스키마
+// 파일을 놓친다. `app.*`는 소스 확장자로 좁힌다 — 장식 없는 `app.*`는 `app.md`·`app.json` 같은
+// 문서/설정 파일까지 "HTTP 표면"으로 오판한다.
+const SCHEMA_GLOBS = ["prisma/schema.prisma", "**/migrations/**", "**/*.sql", "drizzle.config.*"];
+const HTTP_SURFACE_GLOBS = ["**/routes/**", "**/router.*", "**/api/**", "**/server.*", "app.{js,ts,jsx,tsx,mjs,cjs}"];
 
 const isKnownSdk = (dep) => KNOWN_SDKS.some((g) => (g.endsWith("/*") ? dep.startsWith(g.slice(0, -1)) : dep === g));
 
@@ -32,21 +35,23 @@ function hasFake(fakeKeys, dep) {
  *   - harness: harness.toml 파싱 결과 — `harness.harness.maturity`, `harness.test.fakes`를 읽는다.
  *   - manifestDeps: package.json 등 매니페스트의 의존성 이름 배열(버전 무관, 이름만).
  *
- * (a)는 승격이 아니므로 "이미 그 target 이상" 스킵 규칙을 타지 않는다 — target이 항상 현재
- * maturity 그대로다(경고이지 승격 신호가 아니다). (b)(c)만 "현재 maturity가 target보다 낮을 때"로
- * 걸러진다. 반환은 target으로 dedupe한다(같은 target에 여러 근거가 있으면 첫 근거만 대표로 남되
- * sdk-without-fake는 누락된 SDK 전체를 한 reason에 모아 하나의 후보로 낸다).
+ * (a)는 승격이 아니라 경고다 — `target`은 항상 `null`("no promotion", 컨트롤러 판정 round 1).
+ * (b)(c)만 "현재 maturity가 target보다 낮을 때"로 걸러진다("이미 그 target 이상"이면 skip).
+ * (c)는 "또는"이다(플랜 원문) — routes 스타일 파일과 프레임워크 의존성 중 **하나만** 있어도 HTTP
+ * 표면으로 본다(AND가 아니다).
+ * 반환은 dedupe한다: target이 있으면 target으로, (a)처럼 target이 null이면 **rule 이름**으로
+ * dedupe 키를 삼는다(target만으로는 여러 null-target 후보를 구별할 수 없다).
  */
 export function detectMaturityGaps({ files = [], harness = {}, manifestDeps = [] } = {}) {
   const maturity = harness.harness?.maturity ?? "M0";
   const fakeKeys = Object.keys(harness.test?.fakes || {});
   const gaps = [];
 
-  // (a) 매니페스트에 알려진 외부 SDK가 있는데 harness.test.fakes에 대응 키가 없음.
+  // (a) 매니페스트에 알려진 외부 SDK가 있는데 harness.test.fakes에 대응 키가 없음 — 승격 아님.
   const missing = [...new Set(manifestDeps)].filter((d) => isKnownSdk(d) && !hasFake(fakeKeys, d));
   if (missing.length) {
     gaps.push({
-      target: maturity,
+      target: null,
       rule: "sdk-without-fake",
       reason: `manifest declares external SDK(s) without [test.fakes] entry: ${missing.join(", ")}`,
     });
@@ -57,13 +62,18 @@ export function detectMaturityGaps({ files = [], harness = {}, manifestDeps = []
     gaps.push({ target: "M1", rule: "db-schema-at-m0", reason: "DB schema files present (prisma/migrations/sql) but harness maturity is M0" });
   }
 
-  // (c) HTTP 라우트 표면(파일 경로 + 매니페스트의 웹 프레임워크 의존성)이 있는데 M1 이하.
+  // (c) HTTP 라우트 표면 — routes 스타일 파일 또는 웹 프레임워크 의존성 중 하나만 있어도, M1 이하일 때.
   const hasHttpFiles = files.some((f) => matchesAny(HTTP_SURFACE_GLOBS, f));
   const hasHttpFramework = manifestDeps.some((d) => HTTP_FRAMEWORKS.includes(d));
-  if ((RANK[maturity] ?? 0) <= RANK.M1 && hasHttpFiles && hasHttpFramework) {
-    gaps.push({ target: "M2", rule: "http-at-m1", reason: "HTTP route surface present (express/fastify/hono/koa/next) but harness maturity is M1 or below" });
+  if ((RANK[maturity] ?? 0) <= RANK.M1 && (hasHttpFiles || hasHttpFramework)) {
+    gaps.push({ target: "M2", rule: "http-at-m1", reason: "HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below" });
   }
 
   const seen = new Set();
-  return gaps.filter((g) => (seen.has(g.target) ? false : (seen.add(g.target), true)));
+  return gaps.filter((g) => {
+    const key = g.target === null ? g.rule : g.target;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }

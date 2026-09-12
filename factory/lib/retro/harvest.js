@@ -6,10 +6,10 @@
 
 import { parseHandoffs } from "../handoff.js";
 import { summarizeUsage } from "../usage.js";
+import { afterSince, extractNeedsHuman, flakyIdFromTitle, TRANSITION_TO } from "./issue-comments.js";
 
 const FLAKY_LABEL = "factory:flaky";
 const MERGED_LABEL = "factory:merged";
-const NEEDS_HUMAN_LABEL = "factory:needs-human";
 
 // (role,text) 합성 키의 구분자 — role/claim/objection 텍스트에 나타날 수 없는, 화면에 보이지 않는
 // 코드 31("unit separator")짜리 한 글자. 공백은 역할 이름에 공백이 있을 가능성을 배제할 수 없어
@@ -19,71 +19,8 @@ const NEEDS_HUMAN_LABEL = "factory:needs-human";
 const KEY_SEP = String.fromCharCode(31);
 const roleTextKey = (role, text) => `${role}${KEY_SEP}${text}`;
 
-const TRANSITION_TO = /<!-- factory-transition:v1 from=(\S+) to=(\S+) by=(\S+) -->/;
-const TRANSITION_REFUSED = /<!-- factory-transition-refused from=(\S+) to=(\S+) -->/;
-// label 이름 자체가 "factory:x" 형태라 콜론을 품는다 — 진짜 구분자는 "콜론+공백"뿐이다.
-const REFUSAL_REASON = /\*\*전이 거부\*\*.*?: ([^\n]+)/;
-// 요구사항 미달로 실제 라벨이 needs-human으로 옮겨진 거부만 골라낸다(backtick 인용 — lib/transition.js의
-// 문구 그대로). 그래프상 막힌 거부(canTransition=false)는 라벨을 옮기지 않으므로, 어쩌다 to=factory:needs-human이어도
-// 이 문구가 없다.
-const ACTUALLY_MOVED_TO_NEEDS_HUMAN = "라벨을 `factory:needs-human`으로 옮겼습니다";
-
 const labelName = (l) => (typeof l === "string" ? l : l?.name);
 const hasLabel = (issue, name) => Array.isArray(issue?.labels) && issue.labels.some((l) => labelName(l) === name);
-
-/** `since`(ISO|null) 이후만 통과시킨다. null이면 전부 통과 — "이력 전체"를 뜻한다(§P1). */
-function afterSince(at, sinceMs) {
-  if (sinceMs == null) return true;
-  const ms = at == null ? NaN : Date.parse(at);
-  return Number.isFinite(ms) && ms > sinceMs;
-}
-
-/**
- * 이슈 제목에서 flaky 테스트 id만 뽑는다. 두 접두어를 받는다:
- *   - `flaky: <id>` — sweeper/quarantine이 처음 격리할 때 붙이는 제목(Plan 4 Task 4/5).
- *   - `rewrite flaky test at another level: <id>` — TTL 만료 후 retro가 "다른 레벨에서 다시 쓰라"고
- *     만드는 후속 이슈 제목(Plan 4 Task 3, §5.2.5-⑤). 이 이슈도 같은 근본 원인의 flaky 테스트를
- *     추적하므로 harvest가 같은 id로 묶어야 한다.
- * 둘 다 아니면 제목 그대로(방어적).
- */
-function flakyIdFromTitle(title) {
-  const m = /^(?:flaky|rewrite flaky test at another level):\s*(.+)$/.exec(String(title ?? "").trim());
-  return m ? m[1].trim() : String(title ?? "").trim();
-}
-
-/**
- * 전이 코멘트에서 "이 이슈가 factory:needs-human으로 갔다"는 사건만 뽑는다. 두 경로 모두 라벨을
- * 실제로 옮긴다(lib/transition.js):
- *   - 명시적 성공 전이: `factory-transition:v1 … to=factory:needs-human` — 사유는 "— " 뒤.
- *   - 요구사항 미달 거부: `factory-transition-refused …` 중 실제로 라벨을 needs-human으로 옮긴 것만
- *     (본문에 "라벨을 `factory:needs-human`으로 옮겼습니다" 문구가 있는 것 — canTransition 자체가 막힌
- *     그래프 거부는 라벨을 안 옮긴다. `to=` 값만으로는 못 가른다 — 우연히 to=factory:needs-human인
- *     그래프 거부도 있을 수 있다).
- *     사유는 "**전이 거부** … : " 뒤(레이블 이름 자체의 콜론과 구분하려 "콜론+공백"만 구분자로 본다).
- */
-function extractNeedsHuman(issueNumber, comments, sinceMs) {
-  const out = [];
-  for (const c of comments) {
-    const body = c?.body || "";
-    if (!afterSince(c?.createdAt, sinceMs)) continue;
-
-    const m = TRANSITION_TO.exec(body);
-    if (m && m[2] === NEEDS_HUMAN_LABEL) {
-      const rest = body.slice(m.index + m[0].length);
-      const dash = rest.indexOf(" — ");
-      const reason = dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim();
-      out.push({ issue: issueNumber, reason, at: c.createdAt });
-      continue;
-    }
-
-    const r = TRANSITION_REFUSED.exec(body);
-    if (r && body.includes(ACTUALLY_MOVED_TO_NEEDS_HUMAN)) {
-      const rm = REFUSAL_REASON.exec(body);
-      out.push({ issue: issueNumber, reason: rm ? rm[1].trim() : "", at: c.createdAt });
-    }
-  }
-  return out;
-}
 
 /**
  * lesson 후보: review handoff의 reject 판정 must_fix 항목 하나당 하나(role=그 리뷰어, text=claim 원문 —

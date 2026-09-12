@@ -3,9 +3,9 @@ import { detectMaturityGaps } from "../lib/retro/maturity.js";
 
 const harnessAt = (maturity, fakes = {}) => ({ harness: { maturity }, test: { fakes } });
 
-test("(a) known external SDK in manifest without a matching [test.fakes] key → sdk-without-fake, target = current maturity (no promotion)", () => {
+test("(a) known external SDK in manifest without a matching [test.fakes] key → sdk-without-fake, target null (no promotion)", () => {
   const gaps = detectMaturityGaps({ files: [], harness: harnessAt("M1"), manifestDeps: ["stripe", "lodash"] });
-  expect(gaps).toEqual([{ target: "M1", rule: "sdk-without-fake", reason: "manifest declares external SDK(s) without [test.fakes] entry: stripe" }]);
+  expect(gaps).toEqual([{ target: null, rule: "sdk-without-fake", reason: "manifest declares external SDK(s) without [test.fakes] entry: stripe" }]);
 });
 
 test("(a) scoped wildcard SDKs match by prefix; a matching fake key (exact or unscoped short name) satisfies the rule", () => {
@@ -14,7 +14,7 @@ test("(a) scoped wildcard SDKs match by prefix; a matching fake key (exact or un
     harness: harnessAt("M0", { "@slack/web-api": "fake:slack" }),
     manifestDeps: ["@slack/web-api", "@aws-sdk/client-s3"],
   });
-  expect(gaps).toEqual([{ target: "M0", rule: "sdk-without-fake", reason: "manifest declares external SDK(s) without [test.fakes] entry: @aws-sdk/client-s3" }]);
+  expect(gaps).toEqual([{ target: null, rule: "sdk-without-fake", reason: "manifest declares external SDK(s) without [test.fakes] entry: @aws-sdk/client-s3" }]);
 });
 
 test("(a) unscoped short-name fake key also satisfies the rule", () => {
@@ -31,42 +31,52 @@ test("(b) schema files present at M0 → db-schema-at-m0, target M1", () => {
   expect(gaps).toEqual([{ target: "M1", rule: "db-schema-at-m0", reason: "DB schema files present (prisma/migrations/sql) but harness maturity is M0" }]);
 });
 
-test("(b) migrations dir and *.sql also trigger; not at M0 → skipped", () => {
+test("(b) migrations dir and nested **/*.sql also trigger; not at M0 → skipped", () => {
   expect(detectMaturityGaps({ files: ["db/migrations/0001_init.sql"], harness: harnessAt("M0"), manifestDeps: [] }).map((g) => g.rule)).toEqual(["db-schema-at-m0"]);
+  expect(detectMaturityGaps({ files: ["src/db/report.sql"], harness: harnessAt("M0"), manifestDeps: [] }).map((g) => g.rule)).toEqual(["db-schema-at-m0"]);
   expect(detectMaturityGaps({ files: ["schema.sql"], harness: harnessAt("M1"), manifestDeps: [] })).toEqual([]);
 });
 
-test("(c) HTTP surface files + a web framework dep at M1 or below → http-at-m1, target M2", () => {
-  const gaps = detectMaturityGaps({ files: ["src/routes/users.js"], harness: harnessAt("M1"), manifestDeps: ["express"] });
-  expect(gaps).toEqual([{ target: "M2", rule: "http-at-m1", reason: "HTTP route surface present (express/fastify/hono/koa/next) but harness maturity is M1 or below" }]);
+test("(c) HTTP surface: routes-style file alone (no framework dep) is enough — 'or', not 'and'", () => {
+  const gaps = detectMaturityGaps({ files: ["src/routes/users.js"], harness: harnessAt("M1"), manifestDeps: [] });
+  expect(gaps).toEqual([{ target: "M2", rule: "http-at-m1", reason: "HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below" }]);
 });
 
-test("(c) requires both the file pattern and the framework dep — either alone is not enough", () => {
-  expect(detectMaturityGaps({ files: ["src/routes/users.js"], harness: harnessAt("M0"), manifestDeps: [] })).toEqual([]);
-  expect(detectMaturityGaps({ files: ["src/index.js"], harness: harnessAt("M0"), manifestDeps: ["fastify"] })).toEqual([]);
+test("(c) HTTP surface: a framework dep alone (no matching file) is enough — 'or', not 'and'", () => {
+  const gaps = detectMaturityGaps({ files: ["src/index.js"], harness: harnessAt("M0"), manifestDeps: ["fastify"] });
+  expect(gaps.map((g) => g.rule)).toEqual(["http-at-m1"]);
+});
+
+test("(c) app.<source-ext> matches; a non-source app.* file (e.g. app.md) does not trigger via that pattern", () => {
+  expect(detectMaturityGaps({ files: ["app.ts"], harness: harnessAt("M0"), manifestDeps: [] }).map((g) => g.rule)).toEqual(["http-at-m1"]);
+  expect(detectMaturityGaps({ files: ["app.md"], harness: harnessAt("M0"), manifestDeps: [] })).toEqual([]);
+});
+
+test("(c) neither signal present → no gap", () => {
+  expect(detectMaturityGaps({ files: ["src/index.js"], harness: harnessAt("M0"), manifestDeps: [] })).toEqual([]);
 });
 
 test("(c) already at M2 → skipped (already at/above target)", () => {
   expect(detectMaturityGaps({ files: ["api/server.js"], harness: harnessAt("M2"), manifestDeps: ["koa"] })).toEqual([]);
 });
 
-test("all three rules can fire together with distinct targets, order a→b→c", () => {
+test("all three rules can fire together, (a) with target null and (b)/(c) with distinct targets", () => {
   const gaps = detectMaturityGaps({
     files: ["prisma/schema.prisma", "src/api/users.js"],
     harness: harnessAt("M0"),
     manifestDeps: ["stripe", "next"],
   });
   expect(gaps).toEqual([
-    { target: "M0", rule: "sdk-without-fake", reason: "manifest declares external SDK(s) without [test.fakes] entry: stripe" },
+    { target: null, rule: "sdk-without-fake", reason: "manifest declares external SDK(s) without [test.fakes] entry: stripe" },
     { target: "M1", rule: "db-schema-at-m0", reason: "DB schema files present (prisma/migrations/sql) but harness maturity is M0" },
-    { target: "M2", rule: "http-at-m1", reason: "HTTP route surface present (express/fastify/hono/koa/next) but harness maturity is M1 or below" },
+    { target: "M2", rule: "http-at-m1", reason: "HTTP route surface present (express/fastify/hono/koa/next dependency, or routes-style files) but harness maturity is M1 or below" },
   ]);
 });
 
-test("dedupe by target: two sdk-without-fake candidates would share target=current maturity — only one gap is returned", () => {
+test("dedupe: two sdk-without-fake candidates share target=null — deduped by rule name into one gap", () => {
   const gaps = detectMaturityGaps({ files: [], harness: harnessAt("M0"), manifestDeps: ["stripe", "twilio"] });
   expect(gaps).toHaveLength(1);
-  expect(gaps[0].target).toBe("M0");
+  expect(gaps[0].target).toBeNull();
   expect(gaps[0].reason).toContain("stripe");
   expect(gaps[0].reason).toContain("twilio");
 });
