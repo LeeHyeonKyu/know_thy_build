@@ -14,6 +14,18 @@ export function extractJson(text) {
   }
   return null;
 }
+/**
+ * ```json 펜스가 있는데 그 안이 유효한 JSON이 아니면 파싱 오류 메시지. 펜스가 없거나 정상이면 null.
+ * verifyStage가 폴백(균형 스캔)을 쓸지 말지를 이걸로 가른다 — 펜스는 에이전트가 선언한 계약이라,
+ * 깨졌다는 사실 자체가 결과이지 "다른 객체를 찾아보라"는 신호가 아니다.
+ */
+export function fencedJsonError(text) {
+  if (typeof text !== "string") return null;
+  const fence = /```json\s*\n([\s\S]*?)\n```/.exec(text);
+  if (!fence) return null;
+  try { JSON.parse(fence[1]); return null; } catch (e) { return e?.message || String(e); }
+}
+
 /** start의 '{'에 대응하는 '}' 인덱스. 문자열 리터럴과 \" 이스케이프를 건너뛴다. 없으면 -1. */
 function matchBrace(text, start) {
   let depth = 0, inStr = false;
@@ -38,8 +50,15 @@ const listOf = (a) => (a && a.length ? a.join(",") : "none");
 export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
   const reasons = [];
   if (!out || out.is_error) reasons.push("claude -p reported is_error");
-  const data = out ? extractJson(out.result) : null;
-  if (!data) reasons.push("no JSON object in result");
+  /*
+   * 펜스가 깨졌으면 폴백을 쓰지 않는다. 폴백은 계획 **안의** 중첩 객체(done_when 한 항목 등)를
+   * 집어 오고, 그러면 "issue is required; tier is required; …"라는 오진이 진짜 원인(에이전트가
+   * JSON 안에 `/* … *​/` 주석이나 `…` 축약을 남겼다)을 가린다 — dogfood 데모 #2 plan에서 실제로 벌어졌다.
+   */
+  const fenceErr = out ? fencedJsonError(out.result) : null;
+  const data = fenceErr ? null : out ? extractJson(out.result) : null;
+  if (fenceErr) reasons.push(`\`\`\`json fence is not valid JSON: ${fenceErr}`);
+  else if (!data) reasons.push("no JSON object in result");
   if (GATED_STAGES.includes(stage)) {
     if (!gates) reasons.push("gates file missing");
     // bin/gates.js가 남긴 로컬 진단 결과는 스테이지 판정이 아니다 — 사람이 손으로 만든 GREEN이 머지로 이어지면 안 된다.

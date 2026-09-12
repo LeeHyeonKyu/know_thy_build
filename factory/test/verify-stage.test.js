@@ -18,6 +18,21 @@ test("fails: is_error, no json in result, schema invalid", () => {
   expect(verifyStage({ stage: "review", out: out({ ...review, verdicts: [] }), agentsLog: log([]), roster: [], orchestration: "workflow" }).reasons.join()).toMatch(/schema/);
 });
 
+/**
+ * 회귀(dogfood D3): plan 에이전트가 ```json 펜스 안에 JS 주석(`/* … *​/`)을 남겨 펜스가 깨지면
+ * 균형 스캔 폴백이 계획 **안의** 중첩 객체(done_when 한 항목 등)를 집어 왔고, 검증 결과가
+ * "issue is required; tier is required; …"로 나와 진짜 원인(펜스가 유효한 JSON이 아님)을 가렸다.
+ * 펜스가 선언된 계약이므로, 펜스가 깨지면 폴백을 쓰지 않고 파싱 오류를 그대로 보고한다.
+ */
+test("fails with the fence parse error — not a misleading schema cascade — when ```json is present but invalid", () => {
+  const broken = '```json\n{\n  "issue": 2,\n  "dissent_log": [ /* full R1 positions */ ],\n  "done_when": [{"id":"dw1","text":"t","verify":"unit","level":"fast"}]\n}\n```';
+  const r = verifyStage({ stage: "plan", out: { is_error: false, result: broken }, agentsLog: log([]), roster: [], orchestration: "workflow" });
+  expect(r.ok).toBe(false);
+  expect(r.reasons.join("; ")).toMatch(/json fence is not valid JSON/);
+  expect(r.reasons.join("; ")).not.toMatch(/issue is required/);
+  expect(r.data).toBe(null);
+});
+
 test("fails: roster role never completed; orchestration mismatch", () => {
   const r = verifyStage({ stage: "review", out: out(review), agentsLog: log(["reviewer-correctness"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow" });
   expect(r.ok).toBe(false);

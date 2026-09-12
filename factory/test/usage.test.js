@@ -51,6 +51,43 @@ test("parses a real appendRunRecord + usageLine fixture — one stage with usage
   expect(review.models).toBeNull();
 });
 
+/**
+ * 회귀(dogfood D2): 실제 `claude -p`가 돌려주는 usage는 **중첩 객체**다
+ * (`output_tokens_details`·`server_tool_use`·`cache_creation`·`iterations`).
+ * 기존 정규식이 `\{[^}]*\}`로 블롭을 잡아 중첩이 있으면 줄 전체가 매치되지 않았고,
+ * `factory status`·retro 소비 보고가 통째로 $0 / 0 토큰으로 나왔다(ADR-005 무력화).
+ */
+test("parses a usage line whose usage JSON has nested objects (real claude -p shape)", () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-"));
+  const out = {
+    usage: {
+      input_tokens: 8,
+      cache_creation_input_tokens: 43117,
+      cache_read_input_tokens: 170334,
+      output_tokens: 15770,
+      output_tokens_details: { thinking_tokens: 894 },
+      server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+      cache_creation: { ephemeral_1h_input_tokens: 43117, ephemeral_5m_input_tokens: 0 },
+      iterations: [{ input_tokens: 2, output_tokens: 15036, type: "message" }],
+    },
+    total_cost_usd: 11.949508349999993,
+    num_turns: 4,
+    terminal_reason: "completed",
+    modelUsage: { "claude-sonnet-5": { costUSD: 1.6963931 }, "claude-opus-5": { costUSD: 10.25311525 } },
+  };
+  const p = makeRecord(root, 2, "plan", "2026-09-12T12:08:00Z", out);
+
+  const [entry] = parseRunRecord(readFileSync(p, "utf8"));
+  expect(entry.stage).toBe("plan");
+  expect(entry.cost_usd).toBeCloseTo(11.949508);
+  expect(entry.input_tokens).toBe(8);
+  expect(entry.output_tokens).toBe(15770);
+  expect(entry.cache_read_tokens).toBe(170334);
+  expect(entry.cache_creation_tokens).toBe(43117);
+  expect(entry.num_turns).toBe(4);
+  expect(entry.models).toEqual({ "claude-sonnet-5": 1.6963931, "claude-opus-5": 10.25311525 });
+});
+
 test("parses n/a usage line (cost_usd/num_turns/models all n/a) into nulls/empty", () => {
   const root = mkdtempSync(join(tmpdir(), "usage-"));
   const out = { usage: {}, total_cost_usd: null, num_turns: null, terminal_reason: "error", modelUsage: {} };
