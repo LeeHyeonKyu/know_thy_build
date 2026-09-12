@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
-import { checkFiles, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
 import { loadHarness, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
@@ -100,6 +100,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
       const manifest = buildManifest({ pkgRoot });
       const vars = projectVars(root);
       checks.push(...checkFiles({ manifest, root, exists, readFile, vars }));
+      checks.push(...(await checkFilesTracked({ manifest, root, exists, run })));
       checks.push(...checkCharter({ root, loadCharter: loadCharterFn }));
       checks.push(...checkSkills({ root, exists, readFile }));
 

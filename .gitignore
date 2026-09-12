@@ -1,5 +1,6 @@
 node_modules/
-.claude/commands/
+.claude/commands/*
+!.claude/commands/factory-*.md
 *.tgz
 .npm/
 

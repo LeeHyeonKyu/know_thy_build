@@ -76,6 +76,13 @@ test("install smoke: npx know-thy-build --lang ko → factory init → factory d
     const missingLine = lines.find((l) => l.includes("skills.missing"));
     expect(missingLine, `no doctor line for skills.missing\n---\n${r.stdout}`).toBeTruthy();
     expect(missingLine.startsWith("✓"), `expected PASS, got: ${missingLine}`).toBe(true);
+
+    // KTB-12: a fresh `git init` repo has no .gitignore rules at all, so every installed manifest
+    // file must come back tracked — files.tracked must PASS here (regression guard for the KTB
+    // defect where `.claude/commands/` in .gitignore hid the factory-*.md dispatchers from CI).
+    const trackedLine = lines.find((l) => l.includes("files.tracked"));
+    expect(trackedLine, `no doctor line for files.tracked\n---\n${r.stdout}\n${r.stderr}`).toBeTruthy();
+    expect(trackedLine.startsWith("✓"), `expected PASS, got: ${trackedLine}`).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

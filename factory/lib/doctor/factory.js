@@ -69,6 +69,38 @@ export function checkFiles({ manifest, root, exists, readFile, render = renderTe
   ];
 }
 
+// factory init이 디스크에 쓰는 것과 그 파일이 커밋되는 것은 별개다(KTB-12) — 생성물로서 의도적으로
+// gitignore된 경로는 이 검사 대상이 아니다(디스크에 있어도 정상).
+const GITIGNORED_BY_DESIGN = [".factory/out/", ".factory/node_modules/"];
+
+/**
+ * 설치된 manifest 파일이 실제로 git에 추적되는지 검사한다(KTB-12, 결함은 KTB 자신에서 관찰됨:
+ * `.gitignore`가 `.claude/commands/`를 통째로 무시해 `factory init`이 쓴 `.claude/commands/factory-*.md`
+ * 디스패처가 untracked였다 → CI 체크아웃엔 그 파일이 없고 `claude -p /factory-<stage>`가 전부 실패한다).
+ * `git check-ignore --stdin`을 한 번에 배치로 돌려 디스크에 있는 manifest 대상 중 무시되는 것만 골라낸다.
+ * git 저장소가 아니면(예: 격리된 픽스처) 추적 여부를 판단할 수 없으니 PASS-info로 넘어간다 — fail-closed로
+ * FAIL을 내면 git 없는 환경에서 이 검사가 항상 빨갛게 고정된다.
+ */
+export async function checkFilesTracked({ manifest, root, exists, run }) {
+  const paths = manifest
+    .map((e) => e.dest)
+    .filter((dest) => !GITIGNORED_BY_DESIGN.some((p) => dest.startsWith(p)))
+    .filter((dest) => exists(join(root, dest)));
+
+  if (!paths.length) return [c("files.tracked", "PASS")];
+
+  const r = await run("git", ["check-ignore", "--stdin"], { cwd: root, input: paths.join("\n") + "\n" });
+  // check-ignore exits 0(하나 이상 매치)/1(매치 없음)일 때만 정상 응답이다 — 그 외(127 spawn 실패,
+  // 128 "not a git repository" 등)는 git을 신뢰할 수 없다는 뜻이라 "not a git repo"로 뭉뚱그린다.
+  if (r.code !== 0 && r.code !== 1) {
+    return [c("files.tracked", "PASS", "not a git repo")];
+  }
+  const ignored = (r.stdout || "").split("\n").map((s) => s.trim()).filter(Boolean);
+  return [ignored.length
+    ? c("files.tracked", "FAIL", `ignored by .gitignore: ${ignored.join(", ")} — un-ignore in .gitignore (e.g. \`!.claude/commands/factory-*.md\`) — CI checks out only tracked files`)
+    : c("files.tracked", "PASS")];
+}
+
 /** CHARTER.md는 사람이 작성하는 project-owned 파일이라 아직 없거나 draft여도 정상 진행 상태다(WARN) — 파싱/스키마 깨짐만 FAIL. */
 export function checkCharter({ root, loadCharter }) {
   let charter;

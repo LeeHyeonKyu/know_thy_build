@@ -626,6 +626,10 @@ JSON으로 못 읽는 파일(사람이 손으로 깨뜨린 경우 등)은 이전
 갈리면 "병합됐다"와 "stale이 아니다"가 서로 다른 답을 낼 수 있다.
 테스트: `doctor-factory.test.js`(customized-but-complete → PASS, 훅 하나 누락 → WARN, 바이트 동일 → PASS 회귀).
 
+### KTB-12 — `factory doctor`는 설치된 파일이 디스크에 있는지만 봤지, git이 실제로 추적하는지는 보지 않았다
+
+KTB 자신의 `.gitignore`가 `.claude/commands/`를 통째로 무시해 `factory init`이 쓴 `.claude/commands/factory-*.md` 디스패처가 커밋되지 않았고, CI 체크아웃에는 그 파일이 없어 모든 `claude -p /factory-<stage>` 호출이 실패하는 결함으로 발견됐다. `checkFilesTracked`(`files.tracked`)가 `git check-ignore --stdin`으로 설치된 manifest 파일이 gitignore에 가려졌는지 배치 검사하고, KTB의 `.gitignore`는 `.claude/commands/`를 `.claude/commands/*`로 바꿔(디렉터리 단위 제외는 자식 파일의 negation을 무시한다는 git의 알려진 제약 때문) `!.claude/commands/factory-*.md`로 다섯 디스패처만 되돌렸다.
+
 ### G1 — `[runtime].setup`으로 Node 외 툴체인(Flutter 등)을 깔 수 있는가 (own-calendar 준비에서 발견한 설계 공백)
 
 **질문**: 러너 셋업(`templates/factory/factory/actions/setup/action.yml`)은 `actions/setup-node` +

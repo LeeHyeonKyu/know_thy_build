@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -28,6 +28,55 @@ test("checkFiles: all factory files present and identical → both PASS", () => 
   const c = by(checkFiles({ manifest, root: "/r", exists: (p) => p in files, readFile: (p) => files[p], vars: {} }));
   expect(c["files.missing"].level).toBe("PASS");
   expect(c["files.stale"].level).toBe("PASS");
+});
+
+// KTB-12: `factory init`이 디스크에 쓴 파일이 `.gitignore`에 가려 untracked면 CI 체크아웃엔 그 파일이
+// 없다 — KTB 자신의 `.claude/commands/factory-*.md` 디스패처가 이렇게 조용히 사라졌다.
+test("checkFilesTracked: an installed file matched by .gitignore FAILs naming it with the un-ignore hint", async () => {
+  const manifest = [{ src: "/p/a.md", dest: ".claude/commands/factory-plan.md", owner: "factory" }, { src: "/p/b.js", dest: ".factory/lib/b.js", owner: "factory" }];
+  const files = new Set(["/r/.claude/commands/factory-plan.md", "/r/.factory/lib/b.js"]);
+  const fakeRun = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "check-ignore", result: (cmd, args, opts) => ({ code: 0, stdout: opts.input.includes("factory-plan.md") ? ".claude/commands/factory-plan.md\n" : "", stderr: "" }) },
+  ]);
+  const c = by(await checkFilesTracked({ manifest, root: "/r", exists: (p) => files.has(p), run: fakeRun }));
+  expect(c["files.tracked"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining(".claude/commands/factory-plan.md") });
+  expect(c["files.tracked"].detail).toContain("un-ignore in .gitignore");
+  expect(c["files.tracked"].detail).not.toContain(".factory/lib/b.js");
+});
+
+test("checkFilesTracked: nothing ignored → PASS; missing-on-disk and gitignored-by-design entries are never even asked about", async () => {
+  const manifest = [
+    { src: "/p/a.md", dest: ".claude/commands/factory-plan.md", owner: "factory" },
+    { src: "/p/c.js", dest: ".factory/lib/missing.js", owner: "factory" },
+    { src: "/p/d.js", dest: ".factory/out/built.js", owner: "factory" },
+  ];
+  const files = new Set(["/r/.claude/commands/factory-plan.md", "/r/.factory/out/built.js"]);
+  const fakeRun = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "check-ignore", result: (cmd, args, opts) => {
+        expect(opts.input).toContain("factory-plan.md");
+        expect(opts.input).not.toContain("missing.js");
+        expect(opts.input).not.toContain("built.js");
+        return { code: 1, stdout: "", stderr: "" };
+      } },
+  ]);
+  const c = by(await checkFilesTracked({ manifest, root: "/r", exists: (p) => files.has(p), run: fakeRun }));
+  expect(c["files.tracked"].level).toBe("PASS");
+});
+
+test("checkFilesTracked: not a git repo (or git unavailable) → PASS-info, never FAIL", async () => {
+  const manifest = [{ src: "/p/a.md", dest: ".claude/commands/factory-plan.md", owner: "factory" }];
+  const files = new Set(["/r/.claude/commands/factory-plan.md"]);
+  const notARepo = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "check-ignore", result: { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git" } }]);
+  expect(by(await checkFilesTracked({ manifest, root: "/r", exists: (p) => files.has(p), run: notARepo }))["files.tracked"]).toMatchObject({ level: "PASS", detail: "not a git repo" });
+
+  const gitMissing = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "check-ignore", result: { code: 127, stdout: "", stderr: "spawn git ENOENT" } }]);
+  expect(by(await checkFilesTracked({ manifest, root: "/r", exists: (p) => files.has(p), run: gitMissing }))["files.tracked"]).toMatchObject({ level: "PASS", detail: "not a git repo" });
+});
+
+test("checkFilesTracked: no installed files on disk at all → PASS without calling git", async () => {
+  const fakeRun = makeFakeRun([{ match: () => true, result: () => { throw new Error("should not be called"); } }]);
+  const c = by(await checkFilesTracked({ manifest: [{ src: "/p/a.md", dest: ".claude/commands/factory-plan.md", owner: "factory" }], root: "/r", exists: () => false, run: fakeRun }));
+  expect(c["files.tracked"].level).toBe("PASS");
 });
 
 // KTB-11: .claude/settings.json은 manifest.js가 merge:"settings"로 표시한다 — init/upgrade가
