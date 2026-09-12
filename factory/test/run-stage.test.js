@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs } from "../bin/run-stage.js";
+import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
@@ -1363,4 +1363,125 @@ test("makeCheckoutHead: success fetches origin claude/fq-<issue> then checks out
   expect(r).toEqual({ ok: true, sha, pr: 9 });
   expect(run.calls[0]).toEqual(expect.objectContaining({ cmd: "git", args: ["fetch", "origin", "claude/fq-42"], opts: { cwd: "/repo" } }));
   expect(run.calls[1]).toEqual(expect.objectContaining({ cmd: "git", args: ["checkout", "--detach", sha], opts: { cwd: "/repo" } }));
+});
+
+// ── ADR-020 KTB-14: no-write stages (triage/plan/review) assert a clean worktree after claude -p ──
+// KTB-13 r1's residual-risk register (gap 3) noted that reviewer-*/plan-*/factory-triage hold Bash,
+// never commit, and stop-guard.sh exempts them from the dirty-tree check — so tampering by those
+// roles reaches no diff that L1/integrity ever inspects. This is the structural backstop: it looks
+// at the *result* (worktree diff), not at command shapes, so it doesn't matter which hook-unlisted
+// shell shape produced the change.
+
+test("isNoWriteStage: true for triage/plan/review (agent-md.js needsDenyAllWritesHook role names), false for implement/merge", () => {
+  expect(isNoWriteStage("triage")).toBe(true);
+  expect(isNoWriteStage("plan")).toBe(true);
+  expect(isNoWriteStage("review")).toBe(true);
+  expect(isNoWriteStage("implement")).toBe(false);
+  expect(isNoWriteStage("merge")).toBe(false);
+});
+
+test("assertNoWriteStageClean: a dirty src file is reported", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: " M src/a.js\n", stderr: "" } },
+  ]);
+  const r = await assertNoWriteStageClean({ run, cwd: "/repo" });
+  expect(r).toEqual({ ok: false, dirty: ["src/a.js"] });
+});
+
+test("assertNoWriteStageClean: only .factory/out/** scratch changes are allowed", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: "?? .factory/out/x\n", stderr: "" } },
+  ]);
+  const r = await assertNoWriteStageClean({ run, cwd: "/repo" });
+  expect(r).toEqual({ ok: true, dirty: [] });
+});
+
+test("assertNoWriteStageClean: docs/factory/runs/** scratch changes are allowed too", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: "M  docs/factory/runs/7-plan.md\n", stderr: "" } },
+  ]);
+  const r = await assertNoWriteStageClean({ run, cwd: "/repo" });
+  expect(r).toEqual({ ok: true, dirty: [] });
+});
+
+test("assertNoWriteStageClean: a clean worktree passes", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const r = await assertNoWriteStageClean({ run, cwd: "/repo" });
+  expect(r).toEqual({ ok: true, dirty: [] });
+});
+
+test("assertNoWriteStageClean: a rename outside the allowed prefixes reports both sides", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: "R  src/old.js -> src/new.js\n", stderr: "" } },
+  ]);
+  const r = await assertNoWriteStageClean({ run, cwd: "/repo" });
+  expect(r.ok).toBe(false);
+  expect(r.dirty.sort()).toEqual(["src/new.js", "src/old.js"]);
+});
+
+test("assertNoWriteStageClean: git status itself failing is fail-closed", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 128, stdout: "", stderr: "fatal: not a git repository" } },
+  ]);
+  const r = await assertNoWriteStageClean({ run, cwd: "/repo" });
+  expect(r.ok).toBe(false);
+  expect(r.dirty).toEqual([]);
+  expect(r.reason).toMatch(/git status failed: fatal: not a git repository/);
+});
+
+test("run-stage: a dirty src file after claude -p on a no-write stage (review) → needs-human, no verify", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const verifyStage = vi.fn(() => ({ ok: true, reasons: [], data: {} }));
+  const lines = [];
+  const d = baseDeps({
+    assertCleanWorktree: async () => ({ ok: false, dirty: ["src/a.js"] }),
+    verifyStage, transition, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
+  expect(verifyStage).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "worktree dirty after review (no-write stage): src/a.js",
+  }));
+  expect(lines.some((l) => l.includes("worktree: FAIL — worktree dirty after review (no-write stage): src/a.js"))).toBe(true);
+});
+
+test("run-stage: only .factory/out/x dirty on a no-write stage (plan) → proceeds normally", async () => {
+  const verifyStage = vi.fn(() => ({ ok: true, reasons: [], data: {} }));
+  const d = baseDeps({ assertCleanWorktree: async () => ({ ok: true, dirty: [] }), verifyStage });
+  expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(0);
+  expect(verifyStage).toHaveBeenCalled();
+});
+
+test("run-stage: a clean worktree on triage → proceeds normally", async () => {
+  const assertCleanWorktree = vi.fn(async () => ({ ok: true, dirty: [] }));
+  const verifyStage = vi.fn(() => ({ ok: true, reasons: [], data: { disposition: "ready" } }));
+  const d = baseDeps({ assertCleanWorktree, verifyStage });
+  expect(await runStage({ stage: "triage", issue: 7, deps: d })).toBe(0);
+  expect(assertCleanWorktree).toHaveBeenCalled();
+  expect(verifyStage).toHaveBeenCalled();
+});
+
+test("run-stage: the worktree check is skipped entirely on implement (the only writing stage)", async () => {
+  const assertCleanWorktree = vi.fn(async () => ({ ok: false, dirty: ["src/a.js"] }));
+  const d = implDeps({ assertCleanWorktree, gates: async () => ({ status: "GREEN", level: "full" }) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(assertCleanWorktree).not.toHaveBeenCalled();
+});
+
+test("run-stage: git-status-failure on a no-write stage (review) is fail-closed to needs-human", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const lines = [];
+  const d = baseDeps({
+    assertCleanWorktree: async () => ({ ok: false, dirty: [], reason: "git status failed: fatal: not a git repository" }),
+    transition, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "worktree check failed after review (no-write stage): git status failed: fatal: not a git repository",
+  }));
+  expect(lines.some((l) => l.includes("worktree: FAIL —"))).toBe(true);
 });

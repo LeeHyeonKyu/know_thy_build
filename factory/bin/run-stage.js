@@ -12,6 +12,7 @@ import { runStageGates, verdictLine } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
+import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
@@ -164,6 +165,22 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     const out = await d.claudeP(ctx);
     const usage = usageLine(out);
+    // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
+    // 다시 묻는다(ADR-020 KTB-14). implement(유일한 쓰기 스테이지)는 건너뛴다 — merge는 여기 오지도
+    // 않는다(위에서 이미 return). 훅이 놓친 모양으로 어떻게 건드렸든, 스크래치 경로(`.factory/out/**`·
+    // `docs/factory/runs/**`) 밖의 diff가 하나라도 있으면 그 산출물은 애초에 받아들이지 않는다 —
+    // verifyStage조차 부르지 않는다.
+    if (isNoWriteStage(stage)) {
+      const clean = d.assertCleanWorktree ? await d.assertCleanWorktree() : { ok: true };
+      if (!clean.ok) {
+        const reason = clean.dirty?.length
+          ? `worktree dirty after ${stage} (no-write stage): ${clean.dirty.join(", ")}`
+          : `worktree check failed after ${stage} (no-write stage): ${clean.reason || "unknown"}`;
+        const t = await d.transition({ to: "factory:needs-human", reason });
+        record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
+        return 2;
+      }
+    }
     // claude -p가 실패를 보고했으면 게이트를 돌릴 이유가 없다 — 판정할 산출물이 없다.
     // 게이트는 건너뛰고 곧장 verify로 간다(verify가 is_error로 떨어뜨린다).
     let gates = null;
@@ -295,6 +312,51 @@ export function resetGateOutputs({ root, harness, rm = (p) => rmSync(p, { force:
   const paths = gateOutputPaths({ root, harness });
   for (const p of paths) rm(p);
   return paths;
+}
+
+/**
+ * ADR-020 KTB-14 — 이 스테이지가 "쓰기 금지" 스테이지인가. `lib/agent-md.js`의 `needsDenyAllWritesHook`가
+ * 이미 "이 역할은 아무것도 쓸 수 없어야 한다"의 단일 출처다 — 여기서 다시 정의하면 두 판정이 어긋날 수
+ * 있으므로(KTB-13 r1의 교착 경고와 같은 이유) 같은 함수를 대표 이름으로 프로브한다: triage는 단일 역할
+ * (`factory-triage`), plan·review는 로스터 프리픽스(`plan-*`·`reviewer-*`, `ROLE_PREFIX` 참고) — 대표
+ * 이름 하나만 넣어도 `startsWith` 판정은 그대로 성립한다. implement(`factory-builder`)만 쓰기 스테이지이고,
+ * merge는 에이전트를 아예 띄우지 않는다 — `runStage`가 그 전에 이미 `runMergeStage`로 return한다(위 §merge).
+ */
+const NO_WRITE_STAGE_PROBE = { triage: "factory-triage", plan: "plan-x", review: "reviewer-x" };
+export function isNoWriteStage(stage) { return needsDenyAllWritesHook(NO_WRITE_STAGE_PROBE[stage]); }
+
+/** ADR-020 KTB-14 — 쓰기 금지 스테이지가 워크트리에 남겨도 되는 유일한 두 스크래치 경로. */
+export const NO_WRITE_SCRATCH_PREFIXES = [".factory/out/", "docs/factory/runs/"];
+const isScratchPath = (p) => NO_WRITE_SCRATCH_PREFIXES.some((pre) => p === pre.slice(0, -1) || p.startsWith(pre));
+
+/**
+ * `git status --porcelain` 한 줄 = "XY PATH" 또는 rename/copy의 "XY OLD -> NEW"다 — 두 경우 모두
+ * 경로는 세 번째 문자부터 시작한다. rename은 **양쪽** 경로를 낸다(KTB-5 N1과 같은 원칙 — 출발지를
+ * 놓치면 보호 경로를 스크래치 밖 이름으로 옮기는 변경이 새 이름만 보고 통과할 수 있다).
+ */
+function pathsOfStatusLine(line) {
+  const rest = line.slice(3);
+  const i = rest.indexOf(" -> ");
+  return i === -1 ? [rest] : [rest.slice(0, i), rest.slice(i + 4)];
+}
+
+/**
+ * `run-stage.js`가 claude -p 이후, verifyStage 이전에 묻는 구조적 백스톱(ADR-020 KTB-14 — KTB-13 r1
+ * 잔여 위험 등록부 gap 3을 닫는다). `reviewer-*`·`plan-*`·`factory-triage`는 `tools:`에 Bash를 들고
+ * 있고, 훅(`deny-all-writes.sh`)은 **명령 모양의 열거**일 뿐이라 훅이 모르는 모양이면 그냥 통과한다
+ * (KTB-13 r1). 이 체크는 모양이 아니라 **결과**(워크트리 diff)만 본다 — 어떤 셸 모양으로 만들었든
+ * 스크래치 경로 밖의 변화는 전부 위반이다. `git status` 자체가 실패하면 "깨끗하다"를 증명할 수
+ * 없으므로 fail-closed(`ok:false`)다 — 이 저장소의 다른 "판정 불가" 계약(`integrityCheck`의
+ * `cannotCompute`, `mergeGates`)과 같다.
+ */
+export async function assertNoWriteStageClean({ run, cwd }) {
+  const r = await run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
+  if (r.code !== 0) return { ok: false, dirty: [], reason: `git status failed: ${r.stderr.trim()}` };
+  const dirty = new Set();
+  for (const line of r.stdout.split("\n").filter(Boolean)) {
+    for (const p of pathsOfStatusLine(line)) if (p && !isScratchPath(p)) dirty.add(p);
+  }
+  return { ok: dirty.size === 0, dirty: [...dirty] };
 }
 
 export function nextState(stage, data) {
@@ -449,6 +511,8 @@ async function main() {
       return req;
     },
     checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
+    /** ADR-020 KTB-14 — 쓰기 금지 스테이지의 구조적 백스톱. review는 checkoutHead가 이미 detach해 둔 PR head를 그대로 본다. */
+    assertCleanWorktree: () => assertNoWriteStageClean({ run, cwd: root }),
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },

@@ -335,6 +335,9 @@ run-stage.sh <stage> <issue>
       10분으로 잘리고 foreground sleep은 Bash 툴이 차단하므로 workflow 에이전트가 기본 ceiling보다 오래 무활동일 수 없다 — 구성상 moot)
      (stdout은 파싱 **전에** 위 리다이렉트로 `.factory/out/<stage>.json`에 verbatim 저장된다 — JSON 파싱이 실패해도 원본이 남고,
       6의 산출물 확인과 `verify-stage.sh` 재실행이 이 파일을 읽는다. §4.4)
+     (쓰기 금지 스테이지 — triage/plan/review — 는 이 시점에 워크트리를 다시 묻는다: `.factory/out/**`·`docs/factory/runs/**` 밖의
+      변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14). implement는
+      건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.)
   5. gates.sh <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
                                              #   gates.json이 진실이다 — handoff(7)에 실리는 gates 필드는 이 파일의 복사본일 뿐이고, 워크플로가
                                              #   다른 값을 써 넣으면 6이 "handoff gates mismatch"로 거부하며, 아예 빠뜨렸으면 6이 파일 값으로 채운다(ADR-010).
