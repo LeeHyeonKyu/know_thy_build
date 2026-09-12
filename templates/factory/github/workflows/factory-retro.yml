@@ -26,6 +26,12 @@ jobs:
         with:
           claude: "true"
           test-env: "false"
+      - name: Resolve the session transcript directory
+        # `~`는 셸 확장이지 glob이 아니다 — actions/upload-artifact는 경로를 셸에 넘기지 않으므로
+        # `~/.claude/projects/**`는 아무것도 맞히지 못하고, `if-no-files-found: ignore`라 실패조차
+        # 하지 않는다(빈 아티팩트가 조용히 올라간다). 트랜스크립트는 산출물 추출의 **1순위 출처**라서
+        # (KTB-7) 그 침묵이 사후 조사를 통째로 날린다. 러너의 실제 $HOME을 여기서 굳힌다.
+        run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"
       - name: Retro
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -41,4 +47,6 @@ jobs:
           name: factory-retro-${{ github.run_id }}
           path: |
             .factory/out/
+            ${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl
           include-hidden-files: true
+          if-no-files-found: ignore

@@ -19,6 +19,19 @@ test("upload-artifact with a dot path needs include-hidden-files", () => {
   expect(lintWorkflow(multi.replace("      include-hidden-files: true\n", ""))).toHaveLength(1);
 });
 
+// KTB-7(재리뷰): `~`는 셸 확장이지 glob이 아니다. upload-artifact는 경로를 셸에 넘기지 않으므로
+// `~/.claude/...`는 0 파일을 올리고, `if-no-files-found: ignore`라 실패조차 하지 않는다 — 트랜스크립트가
+// 산출물 추출의 1순위 출처인데 아티팩트가 조용히 비어 있었다.
+test("a `~` path in an upload-artifact step is a violation; an env-resolved absolute path is not", () => {
+  const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n        ~/.claude/projects/**/*.jsonl\n      include-hidden-files: true\n";
+  expect(lintWorkflow(bad)).toEqual([expect.objectContaining({ rule: "tilde-path", line: 6 })]);
+  expect(lintWorkflow(bad.replace("        ~/.claude/projects/**/*.jsonl\n", "        ${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl\n"))).toEqual([]);
+  // 단일 값 형태와 리스트 항목 형태 둘 다 잡는다
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ~/x/*.log\n      include-hidden-files: true\n")).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
+  // upload-artifact 스텝 **밖**의 `~`는 건드리지 않는다(셸 run 줄에서는 진짜로 확장된다)
+  expect(lintWorkflow('  - run: ls ~/.claude/projects\n')).toEqual([]);
+});
+
 test("logging hooks must end with exit 0", () => {
   expect(lintLoggingHook("#!/bin/bash\necho hi || true\nexit 0\n")).toEqual([]);
   expect(lintLoggingHook("#!/bin/bash\necho hi\n")).toEqual([expect.objectContaining({ rule: "exit0" })]);
@@ -46,7 +59,10 @@ test("stage workflows follow the §4.1 table and the token/concurrency rules", (
     // KTB-7/O4: 세션 트랜스크립트가 산출물 추출의 1순위 출처다 — 실패했을 때 사후에 볼 수 있어야 한다.
     // merge는 claude를 띄우지 않으므로(script-only) 트랜스크립트가 없다.
     if (stage !== "merge") {
-      expect(y, f).toContain("~/.claude/projects/**/*.jsonl");
+      // `~`는 upload-artifact가 펼치지 않는다 — 러너의 실제 $HOME을 선행 스텝이 GITHUB_ENV로 굳힌다
+      expect(y, f).toContain('run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"');
+      expect(y, f).toContain("${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl");
+      expect(y, f).not.toContain("            ~/.claude");
       expect(y, f).toContain("if-no-files-found: ignore");
     }
     expect(y, f).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
@@ -112,6 +128,10 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   expect(y).toContain("run: node .factory/bin/retro.js");
   expect(y).toContain(".factory/out/");
   expect(y).toContain("include-hidden-files: true");
+  // retro도 트랜스크립트를 1순위 출처로 쓴다(KTB-7 재리뷰) — 그러면 사후 조사에도 있어야 한다
+  expect(y).toContain('run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"');
+  expect(y).toContain("${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl");
+  expect(y).toContain("if-no-files-found: ignore");
   // cron이 없다는 것 자체가 §8.4의 결정이다 — 머지가 없으면 배울 것도 없다.
   expect(y).not.toContain("schedule:");
   expect(y).not.toContain("cron:");

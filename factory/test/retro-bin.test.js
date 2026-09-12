@@ -898,6 +898,58 @@ for (const [name, overrides] of Object.entries(failures)) {
   });
 }
 
+// ── KTB-7(재리뷰): retro도 트랜스크립트를 1순위 출처로 쓴다 ─────────────────
+// `retro.v1`은 lessons·예시·관점·제안과 각각의 근거 run을 전부 싣는다 — plan 못지않게 크고, 디스패처가
+// 그것을 최종 텍스트로 다시 타이핑하다 요약하면 회차 전체가 `last_full_failed`가 된다(데모 #2의 plan).
+
+/** 디스패처가 요약해 버린 봉투 — 펜스 안에 JS 주석과 축약이 섞여 JSON.parse 자체가 실패한다. */
+const SUMMARIZED = '여기 결과입니다.\n```json\n{ "lessons": [ /* full list … */ ], "summary": "…" }\n```\n';
+const workflowTranscript = (obj) => [
+  JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "tu1" }] } }),
+  JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: JSON.stringify(obj) }] } }),
+].join("\n");
+
+test("a summarized result is rescued by the transcript's Workflow tool_result — the full run lands", async () => {
+  const state = freshState();
+  const transcript = vi.fn(async () => workflowTranscript(AGENT_OUT()));
+  const claudeP = vi.fn(async () => ({ session_id: "s-1", result: SUMMARIZED, total_cost_usd: 0.42, usage: { input_tokens: 1, output_tokens: 1 } }));
+  const { deps, last } = makeDeps({ state, overrides: { claudeP, transcript } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(last().last_full_failed).toBeUndefined();
+  expect(deps.applyLessons).toHaveBeenCalled();
+  expect(transcript).toHaveBeenCalledWith(expect.objectContaining({ session_id: "s-1" }));
+});
+
+test("the same summarized result with no transcript fails the window closed, naming the fence error", async () => {
+  const state = freshState();
+  const { deps, recorded, last } = makeDeps({ state, overrides: {
+    claudeP: vi.fn(async () => ({ session_id: "s-1", result: SUMMARIZED })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(last().last_full_failed.reason).toMatch(/fence is not valid JSON/);
+  expect(recorded.join("\n")).toContain("full analysis failed");
+  expect(deps.applyLessons).not.toHaveBeenCalled();
+});
+
+test("a transcript read that throws is best-effort — the envelope candidates still decide the window", async () => {
+  const state = freshState();
+  const { deps, last } = makeDeps({ state, overrides: {
+    transcript: vi.fn(async () => { throw new Error("ENOENT"); }),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(last().last_full_failed).toBeUndefined();       // envelope의 맨 JSON이 그대로 스키마를 통과한다
+});
+
+test("a transcript Workflow result that breaks the schema never beats a valid envelope result", async () => {
+  const state = freshState();
+  const { deps, last } = makeDeps({ state, overrides: {
+    transcript: vi.fn(async () => workflowTranscript({ lessons: [] })),   // retro.v1이 아니다
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(last().last_full_failed).toBeUndefined();
+  expect(deps.applyLessons).toHaveBeenCalled();
+});
+
 test("a successful full run clears a previous last_full_failed", async () => {
   const state = freshState({ last_full_failed: { at: "2026-09-06T00:00:00Z", reason: "old" } });
   const { deps, last } = makeDeps({ state });

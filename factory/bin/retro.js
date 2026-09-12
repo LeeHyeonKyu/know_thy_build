@@ -23,7 +23,7 @@
 // `main()`이 실제 의존성을 조립한다(bin/run-stage.js와 같은 형태).
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
@@ -32,7 +32,7 @@ import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
 import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
-import { extractJson } from "../lib/verify-stage.js";
+import { extractStageArtifact, readTranscript } from "../lib/stage-artifact.js";
 import { harvest as harvestRecords, mergeCandidates } from "../lib/retro/harvest.js";
 import { applyLessons as applyLessonsText } from "../lib/retro/lessons.js";
 import { detectMaturityGaps } from "../lib/retro/maturity.js";
@@ -461,8 +461,23 @@ export async function runRetro({ deps, force = false, now } = {}) {
       maturity_gaps: gaps,
     }));
     const envelope = called.ok ? called.value : null;
-    const out = envelope && !envelope.is_error ? extractJson(envelope.result) : null;
-    const v = out ? validate("retro.v1", out) : { ok: false, errors: [envelope ? (envelope.is_error ? "claude -p reported is_error" : "no JSON object in result") : (called.error || "claude -p failed")] };
+    /**
+     * 산출물의 1순위 출처는 디스패처가 **재타이핑한** 최종 텍스트가 아니라 세션 트랜스크립트의
+     * `Workflow` tool_result다(KTB-7). retro도 정확히 같은 방식으로 통째로 날아갈 수 있다 —
+     * `retro.v1`은 lessons·예시·관점·제안과 각각의 근거 run을 전부 싣기 때문에 plan 못지않게 크고,
+     * 모델이 그것을 다시 타이핑하다 요약하면 회차 전체가 `last_full_failed`가 된다.
+     * `extractStageArtifact`는 후보를 훑어 **스키마를 통과하는 첫 객체**를 고른다(파싱만 되는 후보는
+     * 이기지 못한다). 트랜스크립트 읽기는 best-effort다 — 없으면 후보가 하나 줄 뿐이다.
+     */
+    let transcriptText = "";
+    if (envelope && !envelope.is_error) {
+      try { transcriptText = (await d.transcript?.(envelope)) || ""; } catch { transcriptText = ""; }
+    }
+    const ex = envelope && !envelope.is_error
+      ? extractStageArtifact({ envelopeResult: envelope.result, transcriptText, validate: (o) => validate("retro.v1", o) })
+      : { ok: false, reason: envelope ? "claude -p reported is_error" : (called.error || "claude -p failed") };
+    const out = ex.ok ? ex.data : null;
+    const v = { ok: ex.ok, errors: ex.ok ? [] : [ex.reason] };
     // 호출이 실패했어도 토큰은 이미 쓰였다 — 비용은 성공한 회차만의 것이 아니다(F10). `retroUsage`는
     // `stats`와 **별개의 변이 필드**다: 수확이 실패해 이번 창 통계가 없으면 지난 창 스냅샷 위에 비용만
     // 얹어야 하고(창 열을 0으로 리셋하는 것은 "이번 창에 아무 일도 없었다"는 거짓 주장이다), 그 병합은
@@ -812,6 +827,12 @@ async function main() {
       writeFileSync(join(outDir, "retro.json"), r.stdout);
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
+    /**
+     * 이 회차의 세션 트랜스크립트 전문(KTB-7). `run-stage.js`와 **같은 계산**을 쓴다
+     * (`lib/stage-artifact.js`의 `readTranscript`) — 스테이지마다 다른 경로 규칙을 갖고 있으면
+     * "트랜스크립트가 1순위 출처"라는 계약이 한쪽만 고쳐지는 순간 갈라진다.
+     */
+    transcript: (envelope) => readTranscript({ root, home: homedir(), sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "",
     applyLessons: ({ role, adopted, today, minEvidence }) => {
       const rel = fileOf.get(role)?.lessons;
       const text = rel ? readText(join(root, rel)) : "";

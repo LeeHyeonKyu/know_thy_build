@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { extractStageArtifact, workflowResultsFromTranscript, fencedJsonError, transcriptPathFrom } from "../lib/stage-artifact.js";
+import { extractStageArtifact, workflowResultsFromTranscript, fencedJsonError, transcriptPathFrom, readTranscript } from "../lib/stage-artifact.js";
 import { validate } from "../lib/schemas.js";
 
 const planValidate = (o) => validate("plan.v1", o);
@@ -110,4 +110,38 @@ test("fencedJsonError reports the parse error only when a fence exists and is br
   expect(fencedJsonError("```json\n{\"a\":1}\n```")).toBe(null);
   expect(fencedJsonError("no fence")).toBe(null);
   expect(fencedJsonError("```json\n{not json}\n```")).toMatch(/./);
+});
+
+// ── readTranscript — run-stage·retro·verify-stage CLI가 공유하는 경로 계산 ──
+// 셋이 각자 계산을 갖고 있으면 "트랜스크립트가 1순위 출처"라는 계약이 한쪽만 고쳐지는 순간 갈라진다.
+// `readFile(path) → string|null`은 주입된다 — 이 모듈은 node:fs를 import하지 않는다.
+
+const fs = (files) => (p) => (Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null);
+
+test("readTranscript: session_id가 없고 훅 기록도 없으면 null — 추측해서 아무 파일이나 읽지 않는다", () => {
+  expect(readTranscript({ root: "/repo", home: "/h", sessionId: undefined, readFile: fs({}) })).toBe(null);
+  expect(readTranscript({ root: "/repo", home: "/h", sessionId: null, readFile: fs({ "/repo/.factory/out/agents.jsonl": "" }) })).toBe(null);
+});
+
+test("readTranscript: agents.jsonl이 없으면 cwd 슬러그로 경로를 계산한다", () => {
+  const path = "/h/.claude/projects/-repo-work/s1.jsonl";
+  expect(readTranscript({ root: "/repo/work", home: "/h", sessionId: "s1", readFile: fs({ [path]: "LINE" }) })).toBe("LINE");
+});
+
+test("readTranscript: 훅이 적어 둔 transcript_path가 계산보다 우선한다", () => {
+  const hooked = "/var/hooked/abc.jsonl";
+  const files = {
+    "/repo/.factory/out/agents.jsonl": JSON.stringify({ session_id: "s1", transcript_path: hooked }),
+    [hooked]: "HOOKED",
+    "/h/.claude/projects/-repo/s1.jsonl": "COMPUTED",
+  };
+  expect(readTranscript({ root: "/repo", home: "/h", sessionId: "s1", readFile: fs(files) })).toBe("HOOKED");
+});
+
+test("readTranscript: 경로는 나왔는데 못 읽으면 null(빈 문자열이 아니다) — 호출자가 '없음'으로 다룬다", () => {
+  expect(readTranscript({ root: "/repo", home: "/h", sessionId: "s1", readFile: fs({}) })).toBe(null);
+});
+
+test("readTranscript: readFile이 던져도 null — 트랜스크립트 읽기 실패가 스테이지를 죽이지 않는다", () => {
+  expect(readTranscript({ root: "/repo", home: "/h", sessionId: "s1", readFile: () => { throw new Error("EACCES"); } })).toBe(null);
 });

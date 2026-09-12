@@ -78,3 +78,24 @@ test("extractJson tolerates braces inside strings and invalid fences", () => {
   expect(extractJson("no objects here")).toBe(null);
   expect(extractJson('{"esc":"quote \\" brace }"}')).toEqual({ esc: 'quote " brace }' });
 });
+
+// ── KTB-7(재리뷰): 트랜스크립트가 붙은 end-to-end 한 건 ────────────────────
+// `run-stage.js`·`bin/verify-stage.js`가 실제로 넘기는 모양 그대로 — 봉투는 디스패처가 요약해
+// 망가뜨렸고(펜스가 유효한 JSON이 아니다) 산출물은 트랜스크립트의 `Workflow` tool_result에만 있다.
+
+test("end-to-end: a broken fence in the envelope is rescued by transcriptText, and the source is named", () => {
+  const transcript = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "tu1" }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: JSON.stringify(review) }] } }),
+  ].join("\n");
+  const broken = { is_error: false, result: '```json\n{ "verdicts": [ /* 전체 생략 */ ] }\n```' };
+  const args = { stage: "review", out: broken, agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } };
+
+  const without = verifyStage(args);
+  expect(without.ok).toBe(false);
+  expect(without.reasons.join(" ")).toMatch(/fence is not valid JSON/);
+
+  const with_ = verifyStage({ ...args, transcriptText: transcript });
+  expect(with_.ok).toBe(true);
+  expect(with_.data.verdicts).toHaveLength(2);
+});

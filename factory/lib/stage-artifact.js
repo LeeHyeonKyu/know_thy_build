@@ -113,6 +113,22 @@ export function transcriptPathFrom({ agentsLogText, sessionId, cwd, home } = {})
 }
 
 /**
+ * 이 런의 세션 트랜스크립트 **전문**. 없으면 null — 산출물 추출은 트랜스크립트 없이도 돌아간다
+ * (envelope의 펜스/맨 JSON으로 내려간다). `readFile(path) → string|null`은 호출자가 주입한다:
+ * 이 모듈은 `node:fs`를 import하지 않는다(순수 모듈이라 파서 테스트가 파일시스템을 만들지 않는다).
+ *
+ * `run-stage.js`와 `retro.js`가 같은 경로 계산을 각자 갖고 있으면 한쪽만 고쳐지는 순간
+ * "트랜스크립트가 1순위 출처"라는 계약이 스테이지마다 달라진다 — 그래서 여기 한 벌만 둔다.
+ */
+export function readTranscript({ root, home, sessionId, readFile } = {}) {
+  try {
+    const agentsLogText = readFile(`${root}/.factory/out/agents.jsonl`) || "";
+    const p = transcriptPathFrom({ agentsLogText, sessionId, cwd: root, home });
+    return p ? (readFile(p) ?? null) : null;
+  } catch { return null; }
+}
+
+/**
  * 후보들을 순서대로 훑어 스키마를 통과하는 첫 객체를 고른다.
  *
  * @param envelopeResult `claude -p --output-format json`의 `result` 문자열.
