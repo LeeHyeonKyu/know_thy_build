@@ -287,7 +287,9 @@ test("reviewer agents: each Output section pins the must_fix id prefix its ids m
   }
 });
 
-test("reviewer agents: the cold-read four refuse the builder's channels by name; spec-conformance is handed the plan", () => {
+test("reviewer agents: the cold-read four refuse the builder's channels by name; the contract is not one of them", () => {
+  const receivesOf = (name) => [...parseAgentMd(readAgent(name)).sections.entries()].find(([k]) => k.startsWith("You receive"))[1];
+
   for (const name of ["reviewer-correctness", "reviewer-security", "reviewer-architecture", "reviewer-qa"]) {
     const { sections } = parseAgentMd(readAgent(name));
     const entry = [...sections.entries()].find(([k]) => k.startsWith("You do NOT receive"));
@@ -295,11 +297,37 @@ test("reviewer agents: the cold-read four refuse the builder's channels by name;
     expect(entry[0], name).toMatch(/찾아 읽지도 않는다/);
     expect(entry[1], name).toMatch(/PR description/);
   }
+  // cold_read excludes what the builder wrote, not the plan: correctness/security/architecture judge the
+  // code and are handed none of it; spec-conformance judges the contract; qa reproduces its done_when.
+  for (const name of ["reviewer-correctness", "reviewer-security", "reviewer-architecture"]) {
+    expect(receivesOf(name), name).not.toContain("handoffs.plan");
+    expect(receivesOf(name), name).not.toContain("done_when");
+  }
+
   const spec = parseAgentMd(readAgent("reviewer-spec-conformance"));
-  const receives = [...spec.sections.entries()].find(([k]) => k.startsWith("You receive"))[1];
-  expect(receives).toContain("handoffs.plan");
-  expect(receives).toContain("done_when");
+  const specReceives = [...spec.sections.entries()].find(([k]) => k.startsWith("You receive"))[1];
+  expect(specReceives).toContain("handoffs.plan");
+  expect(specReceives).toContain("done_when");
+  expect(specReceives).toContain("files_expected");
   expect([...spec.sections.keys()].some((k) => k.startsWith("You do NOT receive"))).toBe(false);
+
+  // §5.2.3: qa receives done_when, docs/TECHNICAL.md §Testing Strategy and the [test].smoke files — and
+  // nothing of the plan beyond done_when, because scope is spec-conformance's call.
+  const qaReceives = receivesOf("reviewer-qa");
+  expect(qaReceives).toContain("handoffs.plan.done_when");
+  expect(qaReceives).toContain("docs/TECHNICAL.md");
+  expect(qaReceives).toContain("[test].smoke");
+  expect(qaReceives).toContain("spec-conformance");
+  const qaRefuses = [...parseAgentMd(readAgent("reviewer-qa")).sections.entries()].find(([k]) => k.startsWith("You do NOT receive"))[1];
+  expect(qaRefuses).not.toContain("plan handoff");
+});
+
+test("reviewer-spec-conformance.md: defers structural justification to architecture and keeps round 1 independent", () => {
+  const mustNot = [...parseAgentMd(readAgent("reviewer-spec-conformance")).sections.entries()].find(([k]) => k.startsWith("You must not"))[1];
+  expect(mustNot).toContain("architecture");
+  expect(mustNot).toContain("files_expected");
+  expect(mustNot).toMatch(/라운드 1|R1/);
+  expect(mustNot).toContain("다른 리뷰어의 판정");
 });
 
 test("reviewer-security.md / reviewer-architecture.md / reviewer-spec-conformance.md / reviewer-qa.md carry their own Lens", () => {

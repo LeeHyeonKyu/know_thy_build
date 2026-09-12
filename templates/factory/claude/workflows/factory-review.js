@@ -238,7 +238,7 @@ for (const d of disputed) {
     // Recorded rather than dropped: an id nobody owns means the roster shrank between rounds (a reviewer
     // that was spawned last time is not in this tier's roster), and a human reading the handoff should see
     // that the dispute went unanswered instead of it vanishing.
-    disputes.push({ role: null, id: d && d.id, ruling: 'unowned', reason: 'no reviewer in this round owns that id prefix' });
+    disputes.push({ role: null, by: null, id: d && d.id, ruling: 'unowned', reason: 'no reviewer in this round owns that id prefix' });
     continue;
   }
   if (!disputeOwners.includes(owner)) disputeOwners.push(owner);
@@ -276,44 +276,70 @@ if (disputeOwners.length > 0) {
     }))().then((out) => ({ role, out }));
   }));
 
+  const answered = new Map();
   for (const entry of rulings) {
-    if (!entry || !entry.out || !Array.isArray(entry.out.rulings)) continue;
-    for (const ruling of entry.out.rulings.filter(Boolean)) {
-      disputes.push({ role: entry.role, id: ruling.id, ruling: ruling.ruling, reason: ruling.reason });
-      if (ruling.ruling !== 'uphold') continue;
-      if (!upheldBy.has(entry.role)) upheldBy.set(entry.role, []);
-      upheldBy.get(entry.role).push(ruling);
+    if (entry && entry.out) answered.set(entry.role, entry.out);
+  }
+
+  for (const role of disputeOwners) {
+    const out = answered.get(role);
+    const ruled = out && Array.isArray(out.rulings) ? out.rulings.filter(Boolean) : [];
+
+    // `by` is what aggregate.js reads when it turns an upheld ruling into a must_fix line; `role` is kept
+    // for the human rendering. Anything that is not an explicit `withdraw` re-attaches to the R1.
+    const record = (id, ruling, reason) => {
+      disputes.push({ role, by: role, id, ruling, reason });
+      if (ruling === 'withdraw') return;
+      if (!upheldBy.has(role)) upheldBy.set(role, []);
+      upheldBy.get(role).push({ id, ruling, reason });
+    };
+
+    for (const r of ruled) record(r.id, r.ruling, r.reason);
+
+    // Fail closed on silence (P3-R8 + §7.5): a reviewer that died twice, or answered only some of its
+    // ids, has not withdrawn anything. An unanswered dispute is recorded as `unruled` and counts as
+    // upheld — otherwise the builder wins the argument by outlasting the reviewer.
+    for (const d of disputed) {
+      const id = d && d.id;
+      if (typeof id !== 'string' || ownerOf(id) !== role) continue;
+      if (ruled.some((r) => r.id === id)) continue;
+      record(id, 'unruled', 'the reviewer did not respond');
     }
   }
 }
 
 phase('R1');
 
-// Cold read (§7.1 `cold_read = true`, Plan 3 Global Constraints): the reviewers' prompts carry the issue,
-// the diff, the gate file and their own lessons — no builder summary, no PR description, no other
-// reviewer's R1. spec-conformance is the single exception: checking done_when ↔ tests ↔ diff is exactly
-// what the plan handoff is for, so `roles.toml [review.spec-conformance] cold_read = false`.
+// Cold read (§7.1, Plan 3 Global Constraints) excludes what the BUILDER wrote — its summary, the PR
+// description and comments, the commit bodies — and the other reviewers' R1. It does not exclude the
+// contract. Two roles are handed the plan handoff, and only the fields their job needs:
+// spec-conformance judges the contract itself (done_when + files_expected + non_goals + dissent_log,
+// `roles.toml cold_read = false`), and qa reproduces `done_when` as a user (§5.2.3 — id/text/verify/level
+// only; scope is not its call). correctness, security and architecture judge the code and get none of it.
+const PLAN_FIELDS = new Map([
+  ['spec-conformance', '`done_when` (id, text, verify, level), `files_expected`, `non_goals`, `dissent_log`'],
+  ['qa', '`done_when` (id, text, verify, level) and nothing else from it — not `files_expected`, not `non_goals`'],
+]);
+
 const r1Prompt = (r) => {
-  const isConformance = r.name === 'spec-conformance';
+  const planFields = PLAN_FIELDS.get(r.name);
   const prefix = prefixFor(r.name);
   const upheld = upheldBy.get(r.name) || [];
   return (
     `Cold read. Read: \`${args.context}\` (the issue text, tier, spec_path` +
-    (isConformance
-      ? `, and \`handoffs.plan\` — \`done_when\` (id, text, verify, level), \`files_expected\`, ` +
-        `\`non_goals\`, \`dissent_log\``
-      : '') +
+    (planFields === undefined ? '' : `, and \`handoffs.plan\` — ${planFields}`) +
     `), the spec at its \`spec_path\` if one is named, the diff ` +
     `\`git diff origin/<default_branch>...HEAD\` (default branch from \`.factory/harness.toml\` ` +
     `[project].default_branch), \`.factory/out/gates.json\` (the raw gate results — read them, do not ` +
     `trust a summary of them), the files that diff touches, and your lessons file at ` +
     `\`${lessonsOf(r)}\` (treat every entry as a checklist item).\n` +
-    (isConformance
-      ? `You are the only reviewer given the plan handoff: the others judge the code, you judge the ` +
-        `contract. Do not read the PR description or the builder's notes either.\n`
-      : `Do NOT read handoffs.plan, the PR description, the PR comments, the commit message bodies, or ` +
+    (planFields === undefined
+      ? `Do NOT read handoffs.plan, the PR description, the PR comments, the commit message bodies, or ` +
         `any note the builder wrote — and do not go looking for them. Explanation is persuasion; you judge ` +
-        `the diff.\n`) +
+        `the diff.\n`
+      : `You are given those plan fields and no more of it. Do NOT read the PR description, the PR ` +
+        `comments, the commit message bodies, or any note the builder wrote — and do not go looking for ` +
+        `them. The contract is evidence; the builder's explanation is persuasion.\n`) +
     `\nIssue #${issue} (tier ${tier})${pr === undefined ? '' : `, PR #${pr}`}` +
     `${headSha === undefined ? '' : `, head ${headSha}`} — judge that commit as the \`${r.name}\` reviewer, ` +
     `through the Lens in your own role file.\n` +
@@ -327,10 +353,11 @@ const r1Prompt = (r) => {
     `If you could not confirm something that matters, reject and say what you could not confirm — an ` +
     `unverified approve is worth nothing.` +
     (upheld.length > 0
-      ? `\n\nYou ruled \`uphold\` on these disputed items earlier in this round: ` +
-        `${JSON.stringify(upheld, null, 2)}\nAn upheld item is still open: it MUST appear in your must_fix ` +
-        `with the same id and your verdict MUST be reject. Restate its where/claim/evidence against the ` +
-        `current diff so the builder can act on it without reading the old round.`
+      ? `\n\nThese disputed items of yours still stand this round — you ruled \`uphold\` on them, or no ` +
+        `ruling came back at all (an unanswered dispute is not a won dispute): ` +
+        `${JSON.stringify(upheld, null, 2)}\nAn item that stands is still open: it MUST appear in your ` +
+        `must_fix with the same id and your verdict MUST be reject. Restate its where/claim/evidence ` +
+        `against the current diff so the builder can act on it without reading the old round.`
       : '')
   );
 };
@@ -347,11 +374,15 @@ roster.forEach((r, i) => {
   r1.push(normalize(v, r.name));
 });
 
+// The findings decide the verdict, not the word next to them (same rule as applyFull): an `approve` that
+// carries must_fix items would let a blocking finding reach merge looking waved through, and a `reject`
+// with an empty must_fix is a block nobody can act on — `review.v1` refuses the second outright.
+// should_fix is left exactly as filed; it never blocks and never promotes.
 function normalize(v, role) {
   const mustFix = Array.isArray(v.must_fix) ? v.must_fix.filter(Boolean) : [];
   return {
     role,
-    verdict: v.verdict === 'reject' ? 'reject' : 'approve',
+    verdict: mustFix.length > 0 ? 'reject' : 'approve',
     confidence: v.confidence,
     must_fix: mustFix,
     should_fix: Array.isArray(v.should_fix) ? v.should_fix.filter(Boolean) : [],
@@ -359,22 +390,27 @@ function normalize(v, role) {
   };
 }
 
-// An upheld dispute is re-attached by the workflow as well as asked for in the prompt: a reviewer that
-// ruled `uphold` and then filed an approving R1 would otherwise silently retract its own ruling, and the
-// builder's dispute would have won by attrition rather than on the merits (§7.5, P3-R4).
+// An item that survived the dispute phase (upheld, or never ruled on) is re-attached by the workflow as
+// well as asked for in the prompt: a reviewer that upheld an item and then filed an approving R1 would
+// silently retract its own ruling, and the builder's dispute would have won by attrition rather than on
+// the merits (§7.5, P3-R4).
 for (const v of r1) {
   const upheld = upheldBy.get(v.role) || [];
   for (const ruling of upheld) {
     if (v.must_fix.some((m) => m && m.id === ruling.id)) continue;
     const prior = priorMustFix.find((m) => m && m.id === ruling.id);
+    const how = ruling.ruling === 'unruled'
+      ? `no ruling came back, so it stands: ${ruling.reason}`
+      : `upheld against the builder's dispute: ${ruling.reason}`;
     v.must_fix.push({
       id: ruling.id,
       where: prior && prior.where ? prior.where : 'see the previous review round',
-      claim: prior && prior.claim ? prior.claim : `upheld against the builder's dispute: ${ruling.reason}`,
-      evidence: prior && prior.evidence ? prior.evidence : `ruled uphold this round: ${ruling.reason}`,
+      claim: prior && prior.claim ? prior.claim : how,
+      evidence: prior && prior.evidence ? prior.evidence : `dispute ruling this round — ${ruling.ruling}: ${ruling.reason}`,
     });
   }
-  if (upheld.length > 0 && v.must_fix.length > 0) v.verdict = 'reject';
+  // re-derive after the merge, by the same rule normalize() used
+  v.verdict = v.must_fix.length > 0 ? 'reject' : 'approve';
 }
 
 phase('R2');
