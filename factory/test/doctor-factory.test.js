@@ -30,6 +30,38 @@ test("checkFiles: all factory files present and identical → both PASS", () => 
   expect(c["files.stale"].level).toBe("PASS");
 });
 
+// KTB-11: .claude/settings.json은 manifest.js가 merge:"settings"로 표시한다 — init/upgrade가
+// mergeSettings로 병합하는 파일이라, "stale"의 정의도 바이트 동등이 아니라 mergeSettings 자체여야 한다.
+// 그렇지 않으면 사용자가 자기 deny/allow/훅을 정당하게 추가한 저장소가 영원히 files.stale WARN을 문다.
+test("checkFiles: merge:'settings' entries are stale only when mergeSettings would change them, not on byte inequality (KTB-11)", () => {
+  const template = JSON.stringify({
+    permissions: { deny: ["Bash(rm -rf *)"], allow: ["Bash(npm test*)"] },
+    hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "block-dangerous.sh" }] }] },
+  });
+  const manifest = [{ src: "/p/settings.json", dest: ".claude/settings.json", owner: "factory", merge: "settings" }];
+  const check = (installed) => {
+    const files = { "/r/.claude/settings.json": installed, "/p/settings.json": template };
+    return by(checkFiles({ manifest, root: "/r", exists: (p) => p in files, readFile: (p) => files[p], vars: {} }));
+  };
+
+  // 사용자가 템플릿 항목을 전부 갖고 있으면서 자기 것도 추가했다(바이트는 다르다) → PASS
+  const customized = JSON.stringify({
+    permissions: { deny: ["Bash(rm -rf *)", "Bash(sudo *)"], allow: ["Bash(npm test*)", "Bash(npm run build*)"] },
+    hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "block-dangerous.sh" }] }] },
+  });
+  expect(check(customized)["files.stale"].level).toBe("PASS");
+
+  // 템플릿 훅 하나가 빠졌다 → mergeSettings가 그것을 덧붙이므로 병합 결과가 설치본과 달라진다 → WARN
+  const missingHook = JSON.stringify({
+    permissions: { deny: ["Bash(rm -rf *)"], allow: ["Bash(npm test*)"] },
+    hooks: { PreToolUse: [] },
+  });
+  expect(check(missingHook)).toMatchObject({ "files.stale": { level: "WARN", detail: expect.stringContaining(".claude/settings.json") } });
+
+  // 바이트 동일 → 그대로 PASS(회귀 방지)
+  expect(check(template)["files.stale"].level).toBe("PASS");
+});
+
 test("checkCharter: absent WARN, draft WARN, ready PASS, broken FAIL", () => {
   expect(by(checkCharter({ root: "/r", loadCharter: () => { const e = new Error("ENOENT"); e.code = "ENOENT"; throw e; } }))["charter"].level).toBe("WARN");
   expect(by(checkCharter({ root: "/r", loadCharter: () => ({ status: "draft" }) }))["charter"].level).toBe("WARN");

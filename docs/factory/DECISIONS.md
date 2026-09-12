@@ -611,4 +611,48 @@ fix round 2가 "알려진 한계"로 적어 둔 구멍을 닫는다. `.factory/l
 
 **알려진 한계**: 가드는 라벨을 **한 번** 읽는다 — 그 조회와 스테이지 본체 사이에 사람이 라벨을 바꾸면 가드는 옛 답으로 통과시킨다(그 뒤는 전이 그래프가 받는다). 그리고 가드가 exit 0으로 물러나는 것은 dispatch가 **정상적으로** 늦게 도착한 경우와 사람이 잘못된 스테이지를 손으로 민 경우를 구분하지 않는다 — 둘 다 런 기록 한 줄로만 남는다.
 
+### KTB-11 — `files.stale`이 병합 대상 파일(`.claude/settings.json`)까지 바이트로 비교하고 있었다
+
+**질문**: 브라운필드 저장소에서 `factory doctor`를 돌리면 `.claude/settings.json`이 사람이 정당하게 추가한
+deny/allow/훅을 갖고 있어도 `files.stale` WARN이 영구히 뜬다. `manifest.js`는 이 파일을 `merge: "settings"`로
+표시하고 init/upgrade는 `mergeSettings`(합집합)로만 이 파일을 건드리는데, `checkFiles`는 `owner === "factory"`인
+모든 항목을 템플릿 렌더 결과와 바이트로 비교한다 — "병합 대상"이라는 사실 자체를 몰랐다.
+
+**결정**: `checkFiles`가 `e.merge === "settings"` 항목만 다른 규칙으로 판정한다(`factory/lib/doctor/factory.js`
+`settingsIsStale`) — `mergeSettings(installed, template)`를 다시 계산해 그 결과가 설치된 파일과 **다를 때만**
+stale이다(사람이 자기 항목을 더 넣었어도 템플릿 항목을 전부 갖고 있으면 병합 결과는 설치본과 같다).
+JSON으로 못 읽는 파일(사람이 손으로 깨뜨린 경우 등)은 이전 동작(바이트 비교)으로 안전하게 되돌아간다.
+`mergeSettings`는 `factory/cli/install.js`의 기존 순수 함수를 그대로 재사용한다 — 판정 두 곳(설치기·doctor)이
+갈리면 "병합됐다"와 "stale이 아니다"가 서로 다른 답을 낼 수 있다.
+테스트: `doctor-factory.test.js`(customized-but-complete → PASS, 훅 하나 누락 → WARN, 바이트 동일 → PASS 회귀).
+
+### G1 — `[runtime].setup`으로 Node 외 툴체인(Flutter 등)을 깔 수 있는가 (own-calendar 준비에서 발견한 설계 공백)
+
+**질문**: 러너 셋업(`templates/factory/factory/actions/setup/action.yml`)은 `actions/setup-node` +
+`[runtime].setup`(`.factory/bin/setup-env.js`가 `harness.toml`에서 읽어 실행)만 돈다. Flutter나 Python처럼
+Node가 아닌 툴체인이 필요한 저장소는 그것을 표현할 자리가 없다. 최소로 여는 방법은 무엇이고, 기존 구조에
+그것을 막는 것이 있는가.
+
+**결정**: 전용 `[runtime].actions` 메커니즘(임의 다중 설치 스텝)은 지금은 만들지 않는다(범위 초과, 나중으로
+미룬다) — 대신 `[runtime].setup` 한 줄에 툴체인 설치 + `$GITHUB_PATH` 확장을 표현하는 것을 **정식 경로**로
+문서화하고 그것이 실제로 동작함을 고정한다.
+
+1. **`[runtime].setup`을 자기만의 액션 스텝으로 분리했다**(`.factory/actions/setup/action.yml`). 기존에는
+   `npm install --prefix .factory`·`git config`와 같은 `run:` 블록 안에서 돌고 있었다 — 동작 자체는 GitHub
+   Actions의 "$GITHUB_PATH 추가는 그것을 쓴 스텝이 아니라 **다음** 스텝부터 반영된다"는 규칙 때문에 이미
+   합류 지점(Claude/test-env 설치, 그리고 이 composite action을 부른 워크플로의 게이트 스텝) 전에 최소 한
+   스텝을 거치므로 틀리지는 않았지만, 다른 명령과 같은 스텝에 있으면 그 사실이 파일만 보고는 드러나지
+   않는다. 스텝을 쪼개 `[runtime].setup`이 하는 일과 그 경계를 파일 자체가 말하게 했다.
+2. **`harness.toml`에 `setup_note` 주석**을 추가해(TOML 파서는 무시하는 순수 문서) `[runtime].setup`이
+   저장소 루트에서, 자기만의 액션 스텝(`bash -e`)으로, `$GITHUB_PATH`/`$GITHUB_ENV`를 쓸 수 있는 채로
+   실행된다는 계약과 Flutter 설치 예시(`curl … | tar -xJ` + `echo … >> "$GITHUB_PATH"`)를 남겼다.
+3. 테스트: `yml-lint.test.js`(setup-env.js 호출이 npm install/git config/`if: always()`와 섞이지 않은
+   독립 스텝임을 고정) · `templates.test.js`(`setup_note`가 `$GITHUB_PATH`·"own step"·Flutter 예시를 담고,
+   TOML 파싱은 그대로임을 고정).
+
+**알려진 한계**: 이것으로 여는 것은 "한 줄짜리 셸 명령으로 표현 가능한 설치"뿐이다. 여러 스텝의 캐싱(예:
+Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 진짜 다중-액션이 필요해지면, 그때
+`[runtime].actions`(스텝 목록) 같은 정식 메커니즘을 다시 본다 — 지금은 마주친 요구(툴체인 설치 + PATH
+확장)를 채우는 가장 작은 변경만 했다.
+
 (이후 항목은 dogfood 진행에 따라 추가)

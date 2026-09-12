@@ -1,7 +1,8 @@
 import { join, basename } from "node:path";
 import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { render as renderTemplate, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
+import { isDeepStrictEqual } from "node:util";
+import { render as renderTemplate, mergeSettings, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
 import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
@@ -31,6 +32,24 @@ const EXPECTED_EXIT = { "verdict-format.sh": 2 };
 // 로깅형 훅은 절대 차단하면 안 되므로 스크립트 마지막 줄이 `exit 0`이어야 한다(ADR-009) — lintLoggingHook로 추가 검사한다.
 const LOGGING_HOOKS = new Set(["record-agents.sh", "lint-touched.sh"]);
 
+/**
+ * merge:"settings" 항목(`.claude/settings.json`)의 "stale"을 바이트 동등이 아니라 `mergeSettings`
+ * 자체로 정의한다(KTB-11). init/upgrade가 이 파일을 `mergeSettings(installed, template)`로 병합하므로
+ * (manifest.js, install.js) — 병합해도 설치된 내용이 그대로면(=템플릿의 deny/allow/훅을 전부 갖고 있으면)
+ * 사용자가 자기 항목을 더 넣었어도 stale이 아니다. 병합 결과가 달라지면(=템플릿 항목이 빠졌으면) stale이다.
+ * 둘 중 하나라도 JSON으로 못 읽으면(사람이 깨뜨린 파일 등) 안전하게 바이트 비교로 되돌아간다.
+ */
+function settingsIsStale(installedText, freshText) {
+  let installed, template;
+  try {
+    installed = JSON.parse(installedText);
+    template = JSON.parse(freshText);
+  } catch {
+    return installedText !== freshText;
+  }
+  return !isDeepStrictEqual(mergeSettings(installed, template), installed);
+}
+
 /** manifest 중 owner === "factory" 항목만 대상(project/script 소유 파일은 CHARTER 등 사람이 편집하므로 비교 대상이 아니다). */
 export function checkFiles({ manifest, root, exists, readFile, render = renderTemplate, vars = {} }) {
   const missing = [];
@@ -40,7 +59,9 @@ export function checkFiles({ manifest, root, exists, readFile, render = renderTe
     const target = join(root, e.dest);
     if (!exists(target)) { missing.push(e.dest); continue; }
     const fresh = render(readFile(e.src), vars);
-    if (readFile(target) !== fresh) stale.push(e.dest);
+    const installed = readFile(target);
+    const isStale = e.merge === "settings" ? settingsIsStale(installed, fresh) : installed !== fresh;
+    if (isStale) stale.push(e.dest);
   }
   return [
     missing.length ? c("files.missing", "FAIL", `missing: ${missing.join(", ")}`) : c("files.missing", "PASS"),

@@ -12,6 +12,13 @@ default_branch = "main"
 [runtime]
 setup = "npm ci"
 node  = "22"
+# setup_note (G1): `[runtime].setup` runs at the repo root, as its own step in
+# `.factory/actions/setup/action.yml` (`bash -e`, with $GITHUB_PATH/$GITHUB_ENV available) — before Claude/
+# test-env install and before the gate commands above run in a later workflow step. A harness that needs a
+# toolchain other than Node (Flutter, Python, …) can install it here and extend PATH for every step that
+# follows, gates included — no separate `[runtime].actions` mechanism exists yet (deferred, ADR-020 G1).
+# Example, Flutter:
+#   setup = "curl -fsSL https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.0-stable.tar.xz | tar -xJ -C $HOME && echo \"$HOME/flutter/bin\" >> \"$GITHUB_PATH\" && flutter --version"
 
 [commands]                       # all judged by exit code
 lint       = "npm run lint"

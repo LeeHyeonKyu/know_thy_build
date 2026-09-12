@@ -24,6 +24,22 @@ test("harness.toml template parses and is an M0 fast-only harness", () => {
   expect(h.test.test_glob.length).toBeGreaterThan(0);
 });
 
+// G1: [runtime].setup only runs actions/setup-node + itself — a repo needing another toolchain (Flutter,
+// Python, …) has to express it inline in `setup` and extend PATH via $GITHUB_PATH. The harness.toml template
+// documents that contract with a Flutter example right next to the key it governs; the parser doesn't see
+// this (it's a comment), so assert it on the raw text.
+test("harness.toml template documents [runtime].setup_note with the $GITHUB_PATH / Flutter example (G1)", () => {
+  const raw = read("factory/harness.toml");
+  const runtimeStart = raw.indexOf("[runtime]");
+  const runtimeBlock = raw.slice(runtimeStart, raw.indexOf("\n[", runtimeStart + 1));
+  expect(runtimeBlock).toContain("setup_note");
+  expect(runtimeBlock).toContain("$GITHUB_PATH");
+  expect(runtimeBlock).toContain("own step");
+  expect(runtimeBlock.toLowerCase()).toContain("flutter");
+  // 여전히 유효한 TOML이어야 한다 — 주석은 smol-toml이 그냥 건너뛴다
+  expect(toml(raw).runtime).toEqual({ setup: "npm ci", node: "22" });
+});
+
 test("harness.toml template protects the build-config files the gate commands resolve through (F9)", () => {
   const h = toml(read("factory/harness.toml"));
   for (const g of ["package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*"]) {

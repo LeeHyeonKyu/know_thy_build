@@ -177,3 +177,20 @@ test("composite setup action", () => {
   expect(a).toContain("git config user.name");
   expect(lintWorkflow(a)).toEqual([]);
 });
+
+// G1: [runtime].setup (invoked via setup-env.js) must be its own composite-action step, split off from the
+// npm-install/git-config step — a $GITHUB_PATH append made by [runtime].setup only takes effect starting
+// with the NEXT step, never the one that wrote it, so a harness toolchain install (e.g. Flutter) needs its
+// own step boundary before Claude/test-env install and before the caller workflow's gate step run later.
+test("composite setup action runs [runtime].setup as its own step, not sharing one with npm install (G1)", () => {
+  const a = readFileSync(new URL("../../templates/factory/factory/actions/setup/action.yml", import.meta.url).pathname, "utf8");
+  const steps = a.split(/\n(?=    - )/).filter((s) => s.trim().startsWith("- "));
+  const setupStep = steps.find((s) => s.includes("node .factory/bin/setup-env.js"));
+  expect(setupStep, "no step runs setup-env.js").toBeTruthy();
+  expect(setupStep).not.toContain("npm install --prefix .factory");
+  expect(setupStep).not.toContain("git config user.name");
+  expect(setupStep).not.toContain("npm i -g @anthropic-ai/claude-code");
+  expect(setupStep).not.toContain("if: always()");
+  // 이 스텝의 run: 값은 setup-env.js 호출 한 줄뿐이어야 한다 — 다른 명령과 여러 줄로 합쳐져 있지 않다는 뜻이다.
+  expect(setupStep).toMatch(/run:\s*node \.factory\/bin\/setup-env\.js\s*\n?$/);
+});
