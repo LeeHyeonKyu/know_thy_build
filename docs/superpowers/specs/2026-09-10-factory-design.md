@@ -215,6 +215,7 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 | `factory-retro.yml` | `pull_request: closed` + `if: merged == true`(`concurrency: { group: factory-retro, cancel-in-progress: false }` — 취소 없이 직렬, cron 없음). 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro [--force]` | 30 |
 | `factory-sweeper.yml` | `schedule: */30` | `sweep` | 5 |
 | `factory-integrity.yml` | `pull_request: *` | `integrity` | 5 |
+| (위 다섯 스테이지 파일의 두 번째 트리거) | `workflow_dispatch` (input: `issue`) — sweeper의 **세 번째 팔**(§4.3)과 `factory run <stage> <issue> --remote`가 여기로 들어온다. 라벨이 이미 목적 상태에 있으면 같은 라벨을 다시 붙여도 `labeled` 이벤트가 나지 않으므로, 런 없이 멈춘 스테이지의 재점화 경로는 이것 하나뿐이다(KTB-8) | 라벨 이벤트와 동일 | 동일 |
 
 (Plan 4 실행 판결, ADR-017) `factory-retro.yml`의 checkout은 `ref: ${{ github.event.pull_request.base.ref }}`다 — PR head/merge ref가 아니라 **머지 결과가 반영된 base 브랜치**를 체크아웃해야 `node .factory/bin/retro.js`가 방금 머지된 커밋을 본다.
 
@@ -226,16 +227,29 @@ name: factory-implement
 on:
   issues:
     types: [labeled]
+  workflow_dispatch:                           # KTB-8 — 멈춘 스테이지의 유일한 재점화 경로(sweeper §4.3 / `factory run … --remote`)
+    inputs:
+      issue:
+        description: "issue number"
+        required: true
+        type: string
 permissions:
   contents: write
   issues: write
   pull-requests: write
+  statuses: write
+# KTB-8: 그룹은 **워크플로마다 다르다**. GitHub은 `issues: labeled`에 라벨 이름 필터를 주지 않으므로
+# 라벨 이벤트 하나가 스테이지 워크플로 5개의 런을 전부 만든다(필터는 아래 잡 레벨 `if`에 있다).
+# 그룹을 공유하면 그 5개가 한 대기 슬롯을 두고 서로를 밀어내고(`cancel-in-progress: false`에서도
+# GitHub은 그룹당 실행 1 + 대기 1만 유지한다), 조건이 맞는 유일한 런이 취소돼 이슈가 조용히 멈춘다.
+# 이슈 단위 상호배제는 concurrency가 아니라 `.factory/lib/claim.js`의 원자적 락 브랜치가 준다.
 concurrency:
-  group: factory-issue-${{ github.event.issue.number }}
+  group: factory-issue-${{ github.event.issue.number || inputs.issue }}-implement
   cancel-in-progress: false
 jobs:
   implement:
-    if: contains(fromJSON('["factory:planned","factory:rework"]'), github.event.label.name)
+    # dispatch에는 label이 없다 — `github.event.label.name`이 null이라 contains()가 false이므로 이벤트 이름을 먼저 본다.
+    if: github.event_name == 'workflow_dispatch' || contains(fromJSON('["factory:planned","factory:rework"]'), github.event.label.name)
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 90
     steps:
@@ -262,6 +276,8 @@ jobs:
           path: docs/factory/runs/
           include-hidden-files: true                     # ADR-009: 템플릿 기본값. dot-디렉토리를 올릴 때(.factory/out 등) 없으면 빈 아티팩트가 된다
 ```
+
+**같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작한다** — 락은 그때 이미 풀려 있어 claim이 막지 못하므로(claim은 *동시* 러너만 막는다), `run-stage.js`는 락을 잡은 직후 이슈의 현재 상태 라벨이 그 스테이지의 진입 라벨(`triage: factory:queue` · `plan: factory:ready` · `implement: factory:planned|factory:rework` · `review: factory:awaiting-review` · `merge: factory:approved`)인지 보고, 아니면 `claude -p`를 부르기 전에 아무 전이도 handoff도 없이 exit 0으로 물러난다(KTB-10 — 중복 실행에 대한 실질적 방어는 전이 그래프가 아니라 이 가드다. 전이 그래프는 이미 돈 뒤에야 거부한다).
 
 ### 4.2 제어 계층 — 오케스트레이터는 세 겹, LLM은 하나
 
