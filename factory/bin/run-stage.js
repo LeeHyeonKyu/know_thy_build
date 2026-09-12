@@ -16,6 +16,8 @@ import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
+import { HARNESS_LABEL } from "../lib/label-catalog.js";
+export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -44,7 +46,6 @@ export const STAGES = ["triage", "plan", "implement", "review", "merge"];
  * 변형은 implement 스테이지에만 걸린다: triage·plan·review는 쓰기 금지 스테이지고, merge는 스크립트
  * 전용이라 `claude -p`를 아예 부르지 않는다.
  */
-export const HARNESS_LABEL = "factory:harness";
 export const CI_SETTINGS = ".factory/ci-settings.json";
 export const CI_SETTINGS_HARNESS = ".factory/ci-settings-harness.json";
 export const ciSettingsFile = (harnessIssue = false) => (harnessIssue ? CI_SETTINGS_HARNESS : CI_SETTINGS);

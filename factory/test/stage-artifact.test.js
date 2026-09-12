@@ -160,6 +160,32 @@ test("chunked Read results are reassembled by line number, and the {summary,agen
   expect(r.data.issue).toBe(2);
 });
 
+/**
+ * M4 리뷰 leftover: 실제 `Read` 출력은 `cat -n`처럼 줄 번호를 **오른쪽 정렬**해 공백으로 채운다
+ * (한 자리에서 두 자리로 넘어가는 지점, 예: `"     9\t"` → `"    10\t"`). `^\d+\t`는 그 앞 공백을
+ * 매치하지 못해 접두를 못 벗기고 통째로 흘려보냈다 — 재조립된 JSON에 `"     9\t…"` 텍스트가
+ * 그대로 섞여 파싱이 깨진다. `^\s*(\d+)\t`로 고친 뒤에는 여러 조각에 패딩이 섞여 있어도
+ * 줄 번호로 정확히 재조립된다.
+ */
+test("padded line-number prefixes (cat -n style) are stripped across multiple Read chunks (M4)", () => {
+  const body = JSON.stringify({ a: 1, b: 2, c: [3, 4, 5], d: "six" }, null, 2).split("\n");
+  expect(body.length).toBeGreaterThan(9);   // 한 자리 → 두 자리 줄 번호 전환을 반드시 포함한다
+  const padded = (from, lines) => lines.map((t, j) => `${String(from + j).padStart(6, " ")}\t${t}`).join("\n");
+  const file = "/tmp/tasks/x.output";
+  const lines = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "r1", input: { file_path: file, offset: 1 } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r1", content: padded(1, body.slice(0, 8)) }] } }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "r2", input: { file_path: file, offset: 9 } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r2", content: padded(9, body.slice(8)) }] } }),
+  ].join("\n") + "\n";
+
+  const reassembled = [...fileReadsFromTranscript(lines).values()][0];
+  expect(reassembled).toBe(body.join("\n"));
+  expect(JSON.parse(reassembled)).toEqual({ a: 1, b: 2, c: [3, 4, 5], d: "six" });
+
+  expect(stripLineNumbers("     1\t{\n     2\t  \"a\": 1\n    10\t}")).toBe('{\n  "a": 1\n}');
+});
+
 test("a receipt-only transcript falls through and says so — not 'no JSON object in result'", () => {
   const r = extractStageArtifact({ envelopeResult: "boom", transcriptText: bgTranscript({}), validate: planValidate });
   expect(r.ok).toBe(false);

@@ -1,14 +1,15 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
-import { loadHarness } from "../lib/config.js";
+import { loadHarness, loadHarnessRaw } from "../lib/config.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const T = new URL("../../templates/factory/factory/harness.toml", import.meta.url).pathname;
-const tmpl = () => { const r = mkdtempSync(join(tmpdir(), "ktb-h-")); mkdirSync(join(r, ".factory"), { recursive: true }); writeFileSync(join(r, ".factory/harness.toml"), readFileSync(T, "utf8").replace("{{PROJECT_NAME}}", "d")); return loadHarness(r); };
+const tmplRoot = (toml) => { const r = mkdtempSync(join(tmpdir(), "ktb-h-")); mkdirSync(join(r, ".factory"), { recursive: true }); writeFileSync(join(r, ".factory/harness.toml"), toml ?? readFileSync(T, "utf8").replace("{{PROJECT_NAME}}", "d")); return r; };
+const tmpl = () => loadHarness(tmplRoot());
 // 템플릿 [protected].factory의 모든 글롭이 최소 하나씩 매치하는 파일 목록 — 빌드 설정 파일 포함(F9)
 const files = [".factory/harness.toml", ".claude/settings.json", ".github/workflows/factory-plan.yml", "docs/factory/CHARTER.md", "test/smoke.test.js", "src/a.js",
                "package.json", "package-lock.json", "vitest.config.js", "playwright.config.js", "tsconfig.json", ".eslintrc.json", "eslint.config.js"];
@@ -43,6 +44,44 @@ test("factory.max_turns: 정수 3–50만 통과, 스테이지별 표도 같은 
 
   const h5 = tmpl(); delete h5.factory.max_turns;
   expect(by(checkHarness({ harness: h5, files }))["factory.max_turns"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("init --upgrade") });
+});
+
+// M2: `loadHarness`가 `[factory].max_turns`에 기본값 12를 항상 채우므로, doctor.js가 그 정규화된
+// 객체 하나만 넘기면 위 h5 케이스(WARN)는 실제 CLI 경로에서 **절대 일어나지 않는다** — `h.factory.max_turns`가
+// 늘 12로 보인다. `raw`(loadHarnessRaw, 기본값 채움 이전 파스)를 실제 파일에서 따로 읽어 넘겨야
+// "파일에 키가 없다"는 사실이 살아남는다.
+test("factory.max_turns WARN survives loadHarness's default-fill when doctor.js's real raw+normalized pair is used (M2)", () => {
+  const missing = "schema = 1\n[project]\ndefault_branch = \"main\"\n[harness]\nmaturity = \"M0\"\n[factory]\norchestration = \"workflow\"\nrequired_checks = [\"factory/gates\"]\n[commands]\nlint = \"x\"\nunit = \"x\"\ntest_files = \"x {files}\"\n[test]\ntest_glob = [\"x\"]\n[gates]\nrequired = []\n";
+  const root = tmplRoot(missing);
+  const normalized = loadHarness(root);           // .factory.max_turns === 12 — the default, not user intent
+  const raw = loadHarnessRaw(root);                // .factory.max_turns === undefined — the truth doctor.js needs
+  expect(normalized.factory.max_turns).toBe(12);
+  expect(raw.factory?.max_turns).toBeUndefined();
+  expect(by(checkHarness({ harness: normalized, files: [], raw }))["factory.max_turns"])
+    .toMatchObject({ level: "WARN", detail: expect.stringContaining("init --upgrade") });
+
+  // 파일에 명시적으로 12를 적어 둔 경우(우연히 기본값과 같아도)는 PASS다 — 진짜 사용자 의도다.
+  const explicit = missing.replace("[factory]\n", "[factory]\nmax_turns = 12\n");
+  const root2 = tmplRoot(explicit);
+  const normalized2 = loadHarness(root2);
+  const raw2 = loadHarnessRaw(root2);
+  expect(by(checkHarness({ harness: normalized2, files: [], raw: raw2 }))["factory.max_turns"])
+    .toMatchObject({ level: "PASS", detail: "12" });
+});
+
+// M3: 오타 스테이지 이름(`"pln"`)은 stageMaxTurns가 못 찾아 조용히 공통 max_turns로 떨어진다 —
+// 아무 신호 없이 오버라이드가 무효화된다. doctor가 알려진 이름(run-stage.js STAGES + retro) 밖의
+// 키를 이름으로 잡아 WARN한다.
+test("factory.max_turns_by_stage.keys: unknown stage names WARN by name; known ones (incl. retro) PASS (M3)", () => {
+  const h = tmpl(); h.factory.max_turns_by_stage = { pln: 16, review: 20 };
+  expect(by(checkHarness({ harness: h, files }))["factory.max_turns_by_stage.keys"])
+    .toMatchObject({ level: "WARN", detail: expect.stringContaining("pln") });
+
+  const h2 = tmpl(); h2.factory.max_turns_by_stage = { plan: 16, retro: 10 };
+  expect(by(checkHarness({ harness: h2, files }))["factory.max_turns_by_stage.keys"].level).toBe("PASS");
+
+  const h3 = tmpl();
+  expect(by(checkHarness({ harness: h3, files }))["factory.max_turns_by_stage.keys"].level).toBe("PASS");
 });
 
 test("commands.unit missing → FAIL", () => {

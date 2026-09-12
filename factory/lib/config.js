@@ -16,6 +16,15 @@ export function loadHarness(root) {
   h.factory = { orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"], max_turns: 12, merge_check_wait_sec: 600, ...(h.factory || {}) };
   return h;
 }
+/**
+ * `loadHarness`가 채우는 기본값(특히 `[factory].max_turns: 12`) 없이, harness.toml을 있는 그대로
+ * 파싱한다. doctor의 "키가 아예 없다"는 판정(`init --upgrade` 안내)은 정규화된 객체로는 절대
+ * 성립하지 않는다 — `loadHarness`가 항상 먼저 12를 채워 넣기 때문이다. 그 판정만을 위한 두 번째
+ * 파스.
+ */
+export function loadHarnessRaw(root) {
+  return parseToml(readFileSync(join(root, ".factory/harness.toml"), "utf8"));
+}
 export function loadRoles(root) {
   return parseToml(readFileSync(join(root, ".factory/roles.toml"), "utf8"));
 }

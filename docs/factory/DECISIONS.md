@@ -580,6 +580,8 @@ JSON으로 못 읽는 파일(사람이 손으로 깨뜨린 경우 등)은 이전
 
 KTB 자신의 `.gitignore`가 `.claude/commands/`를 통째로 무시해 `factory init`이 쓴 `.claude/commands/factory-*.md` 디스패처가 커밋되지 않았고, CI 체크아웃에는 그 파일이 없어 모든 `claude -p /factory-<stage>` 호출이 실패하는 결함으로 발견됐다. `checkFilesTracked`(`files.tracked`)가 `git check-ignore --stdin`으로 설치된 manifest 파일이 gitignore에 가려졌는지 배치 검사하고, KTB의 `.gitignore`는 `.claude/commands/`를 `.claude/commands/*`로 바꿔(디렉터리 단위 제외는 자식 파일의 negation을 무시한다는 git의 알려진 제약 때문) `!.claude/commands/factory-*.md`로 다섯 디스패처만 되돌렸다.
 
+**리뷰 leftover(M2/M3)**: KTB-16의 "키가 없으면 WARN" 약속이 `checkHarness`에만 있었다 — `doctor.js`는 언제나 `loadHarness`(기본값 12 채움) 결과만 넘겼으므로 그 WARN은 실제로는 **한 번도 발화하지 않았다**. `loadHarnessRaw`(기본값 채움 이전 파스)를 doctor.js가 따로 읽어 `checkHarness({ raw })`로 넘기게 고쳤다. 같이, `[factory.max_turns_by_stage]`의 알 수 없는 스테이지 이름(오타)은 `stageMaxTurns`가 조용히 무시하고 공통값으로 떨어지므로 — run-stage의 `STAGES` + `retro`(`bin/retro.js`의 `stageMaxTurns(harness,"retro")`) 밖의 키를 이름으로 WARN한다(`factory.max_turns_by_stage.keys`). 영향: `factory/lib/config.js`(`loadHarnessRaw`), `factory/lib/doctor/harness.js`, `factory/cli/doctor.js`. 테스트: `doctor-harness.test.js`.
+
 ### ② 무결성 L0/L1 — KTB-5·6
 
 `factory/integrity`가 branch protection의 유일한 required context라는 사실 하나가 두 번 같은 방식으로 사람의 머지를 막았다 — 처음은 보호 경로 변경(KTB-5), 두 번째는 역할 프롬프트의 additive-only 규칙(KTB-6). 두 판결과 재리뷰에서 나온 보강 두 건을 함께 묶는다.
@@ -727,6 +729,8 @@ You will be notified when it completes.
 수정 전 그 런의 run 기록은 `verify: FAIL / - claude -p reported is_error / - no candidate matched the stage schema — no JSON object in result`였다. 그 트랜스크립트를 다듬은 픽스처(`factory/test/fixtures/plan-max-turns.jsonl` — 구조 그대로, 토론 산문만 축약)가 테스트에 들어 있다.
 
 **영향**: `factory/lib/stage-artifact.js`(`taskNotificationsFromTranscript`·`fileReadsFromTranscript`·`toolResultTextsFromTranscript`·`isWorkflowReceipt`·`stripLineNumbers`·후보 순서), `factory/test/stage-artifact.test.js`, 픽스처.
+
+**리뷰 leftover(M4)**: `stripLineNumbers`/`fileReadsFromTranscript`의 줄 번호 접두 정규식 `^\d+\t`는 실제 `Read` 출력(`cat -n`처럼 오른쪽 정렬해 공백으로 채운 번호, 예: `"     9\t"`)의 앞 공백을 매치하지 못해 그 줄을 못 벗기고 그대로 흘려보냈다 — 여러 조각으로 온 큰 파일을 재조립할 때 조용히 깨질 수 있는 지점이다. `^\s*(\d+)\t`로 고쳤다. 영향: `factory/lib/stage-artifact.js`. 테스트: `stage-artifact.test.js`(패딩 섞인 다중 조각 재조립 픽스처).
 
 ### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19
 
@@ -939,6 +943,8 @@ You will be notified when it completes.
 **대가로 받아들인 것**: `factory:harness` 라벨은 이제 **권한을 넓히는 라벨**이다 — 그 라벨을 붙일 수 있는 사람은 builder가 `harness.toml`을 쓸 수 있게 만들 수 있다. 이것은 새로 생긴 위험이 아니라 이미 있던 것의 명시화다(라벨을 붙일 수 있는 사람은 어차피 저장소 쓰기 권한자이고, `factory:*` 상태 라벨은 에이전트가 직접 붙이지 못하도록 훅이 막는다 — F13). 그리고 열린 문 끝에는 **여전히 사람의 머지**가 있다: 넓어진 것은 제안의 범위이지 집행의 범위가 아니다.
 
 **영향**: `templates/factory/factory/ci-settings-harness.json`(신규), `factory/hooks/block-dangerous.sh`(+ 설치본 `.claude/hooks/`), `factory/bin/run-stage.js`(`HARNESS_LABEL`·`ciSettingsFile`·`stageClaudeArgs`·`stageClaudeEnv`·진입 가드에서 라벨 판단·`ciSettingsPresent(harnessIssue)`·`claudeP(ctx, {harnessIssue})`), `factory/lib/doctor/factory.js`+`factory/cli/doctor.js`(`settings.ci-harness`), 테스트: `hooks.test.js`(env 게이트 9 opened / 21 still blocked / 4 값 변주), `run-stage.test.js`(KTB-20 6건), `templates.test.js`(변형 파일 구조 1건), `doctor-factory.test.js`(1건). 스펙 §5.2.1에 한 항목.
+
+**리뷰 leftover**: KTB-20의 열거 테스트(③, `templates/factory/factory/**` 훑기)는 `.factory/bin/**`·`.factory/lib/**`·`.factory/out/**`를 절대 못 본다 — 셋 다 **템플릿 파일이 아니다**(bin/lib는 설치 시 패키지에서 복사되고 out은 게이트 실행 중 생긴다). 세 글롭을 이름으로 못 박는 테스트를 더했다(`templates.test.js`). 또한 `HARNESS_LABEL = "factory:harness"`가 `bin/run-stage.js`·`bin/retro.js`·`lib/label-catalog.js` 세 곳에 각자 리터럴로 있던 것을 `label-catalog.js`로 모으고 두 bin 파일은 재수출만 하게 했다 — 갈라지면 retro가 만든 이슈를 run-stage가 못 알아보는 조용한 드리프트가 된다(`labels.test.js`가 import equality로 못 박는다).
 
 ### ⑥ 관찰 — O1~O12, O14·O15, G1
 

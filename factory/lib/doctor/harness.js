@@ -1,14 +1,25 @@
 import { matchesAny } from "../glob.js";
 import { THRESHOLD_DEFAULTS } from "../config.js";
+import { STAGES } from "../../bin/run-stage.js";
 
 const PROOF_GATES = { diff_coverage: ["coverage", "coverage_report"], mutation: ["mutation", "mutation_report"], "prove-test": [], "new-test-repeat": [] };
 const TEMPLATED = { lint_file: ["{file}"], test_files: ["{files}"], test_one: ["{file}", "{name}"] };
 const MAX_LEVEL = { M0: "fast", M1: "full", M2: "deep" };
 const LEVELS = ["fast", "full", "deep"];
+// `[factory.max_turns_by_stage]`가 받아 주는 키 — run-stage의 다섯 스테이지(STAGES) + retro
+// (`bin/retro.js`의 `stageMaxTurns(harness, "retro")`, §8). sweep은 `claude -p`를 부르지 않으므로
+// 여기 없다.
+const MAX_TURNS_STAGE_KEYS = new Set([...STAGES, "retro"]);
 const c = (id, level, detail = "") => ({ id, level, detail });
 
-/** harness.toml의 스키마·게이트·명령·임계값·보호 범위를 정적으로 검사한다 (프로세스 실행 없음). */
-export function checkHarness({ harness: h, files = [] }) {
+/**
+ * harness.toml의 스키마·게이트·명령·임계값·보호 범위를 정적으로 검사한다 (프로세스 실행 없음).
+ * `raw`(옵션, 기본값 `h`)는 `loadHarness`의 기본값 채움 **이전** 파스다 — `[factory].max_turns`가
+ * 파일에 아예 없는지(WARN) vs 정상적으로 채워졌는지(PASS)는 정규화된 `h`만으로는 절대 구별할 수
+ * 없다(`loadHarness`가 항상 12를 채운다). 단위 테스트가 직접 만든 객체를 넘길 때는 `h` 자체를
+ * "raw"로 취급한다(기본값).
+ */
+export function checkHarness({ harness: h, files = [], raw = h }) {
   const out = [];
   out.push(h.schema === 1 ? c("harness.schema", "PASS") : c("harness.schema", "FAIL", `schema must be 1, got ${h.schema}`));
   out.push(h.project?.default_branch ? c("project.default_branch", "PASS", h.project.default_branch) : c("project.default_branch", "FAIL", "[project].default_branch missing"));
@@ -22,9 +33,18 @@ export function checkHarness({ harness: h, files = [] }) {
   const turns = (v, where) => { if (v !== undefined && !(Number.isInteger(v) && v >= 3 && v <= 50)) badTurns.push(`${where}=${v} must be an integer 3–50`); };
   turns(h.factory?.max_turns, "[factory].max_turns");
   for (const [stage, v] of Object.entries(h.factory?.max_turns_by_stage || {})) turns(v, `[factory.max_turns_by_stage].${stage}`);
+  // `raw`는 loadHarness의 기본값(12) 채움 이전이다 — 정규화된 `h`는 파일에 키가 있었는지 없었는지
+  // 절대 구별하지 못한다(둘 다 12로 보인다). "없음"은 raw로만 판정한다.
   out.push(badTurns.length ? c("factory.max_turns", "FAIL", badTurns.join("; "))
-    : h.factory?.max_turns === undefined ? c("factory.max_turns", "WARN", "[factory].max_turns not set — the default 12 applies; run `npx know-thy-build factory init --upgrade`")
+    : raw?.factory?.max_turns === undefined ? c("factory.max_turns", "WARN", "[factory].max_turns not set — the default 12 applies; run `npx know-thy-build factory init --upgrade`")
       : c("factory.max_turns", "PASS", String(h.factory.max_turns)));
+  // M3: `max_turns_by_stage`는 알려진 스테이지 이름만 받는다 — 오타(`"pln"` 등)는 조용히 무시되고
+  // (stageMaxTurns가 못 찾으면 공통 max_turns로 떨어진다) 아무 효과도 없다. FAIL이 아니라 WARN인
+  // 이유: 오타여도 공장이 멈추지 않는다 — 그냥 의도한 오버라이드가 적용되지 않을 뿐이다.
+  const unknownStages = Object.keys(h.factory?.max_turns_by_stage || {}).filter((s) => !MAX_TURNS_STAGE_KEYS.has(s));
+  out.push(unknownStages.length
+    ? c("factory.max_turns_by_stage.keys", "WARN", `unknown stage(s) in [factory.max_turns_by_stage], no effect: ${unknownStages.join(", ")} (known: ${[...MAX_TURNS_STAGE_KEYS].join(", ")})`)
+    : c("factory.max_turns_by_stage.keys", "PASS"));
   // commands
   const cmds = h.commands || {};
   const badPh = Object.entries(TEMPLATED).filter(([k, phs]) => cmds[k] && phs.some((p) => !cmds[k].includes(p))).map(([k, phs]) => `${k} must contain ${phs.join(" and ")}`);

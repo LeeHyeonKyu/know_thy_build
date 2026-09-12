@@ -7,6 +7,13 @@
  * 12개뿐이다(backlog는 "factory 라벨이 아니"라고 스펙이 명시). 이 파일의 소스오브트루스는 아래 12개 색상
  * 쌍(§3.1과 1:1 대응)이며, 총 라벨 수는 backlog(1) + 상태(12) + 보조(6) = 19개다.
  */
+/**
+ * `factory:harness` 라벨 이름의 단일 출처. `bin/run-stage.js`(implement 진입 시 harness 이슈 판정)와
+ * `bin/retro.js`(승격 이슈 생성·dedup 조회)가 각자 리터럴을 갖고 있던 것을 여기로 모은다 — 세 곳이
+ * 갈라지면 retro가 만든 이슈를 run-stage가 못 알아보는 조용한 드리프트가 생긴다.
+ */
+export const HARNESS_LABEL = "factory:harness";
+
 export const LABELS = [
   { name: "backlog", color: "c5def5", description: "스펙은 있으나 착수하지 않음" },
 
@@ -28,5 +35,5 @@ export const LABELS = [
   { name: "factory:tier-load-bearing", color: "bfdadc", description: "핵심 tier — 강화된 리뷰 로스터" },
   { name: "factory:retro-proposal", color: "f9d0c4", description: "retro가 만든 개선 제안 PR" },
   { name: "factory:flaky", color: "fef2c0", description: "불안정한 테스트로 격리됨" },
-  { name: "factory:harness", color: "c2e0c6", description: "harness 자체에 관한 이슈" },
+  { name: HARNESS_LABEL, color: "c2e0c6", description: "harness 자체에 관한 이슈" },
 ];

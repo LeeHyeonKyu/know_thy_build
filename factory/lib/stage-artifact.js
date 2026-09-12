@@ -26,7 +26,7 @@
  * 후보 순서:
  *   1. `<task-notification>` 중 `<status>completed</status>`인 마지막 것의 `<result>`.
  *   2. `Read` tool_result를 파일별로 재조립한 내용 → 그리고 개별 tool_result 하나하나
- *      (둘 다 `^\d+\t` 줄 번호 접두를 벗기고, `{summary,agentCount,logs,result}` 봉투면 한 겹 벗긴다).
+ *      (둘 다 `^\s*\d+\t` 줄 번호 접두를 벗기고, `{summary,agentCount,logs,result}` 봉투면 한 겹 벗긴다).
  *   3. `Workflow` tool_result — **접수증이 아닐 때만**(백그라운드가 아닌 워크플로는 여기로 온다).
  *   4. envelope.result 안의 ```json 펜스.
  *   5. envelope.result 안의 맨 JSON(균형 스캔).
@@ -159,9 +159,13 @@ export function taskNotificationsFromTranscript(text) {
   return found;
 }
 
-/** `Read`가 붙이는 `N\t` 줄 번호 접두를 벗긴다. 접두가 없는 줄은 그대로 둔다. */
+/**
+ * `Read`가 붙이는 줄 번호 접두를 벗긴다. 접두가 없는 줄은 그대로 둔다.
+ * 실제 `Read` 출력은 `cat -n`처럼 번호를 오른쪽 정렬해 공백으로 채운다(`"     1\t"`, `"    42\t"`) —
+ * `^\d+\t`는 앞의 공백을 매치하지 못해 그런 줄을 통째로 못 벗기고 그대로 흘려보냈다.
+ */
 export const stripLineNumbers = (text) =>
-  String(text ?? "").split("\n").map((l) => l.replace(/^\d+\t/, "")).join("\n");
+  String(text ?? "").split("\n").map((l) => l.replace(/^\s*(\d+)\t/, "")).join("\n");
 
 /**
  * 파일 읽기 tool_result를 **파일별로 재조립**한 내용. 하나의 `Read`가 파일 전체를 주는 일은 드물다 —
@@ -192,7 +196,7 @@ export function fileReadsFromTranscript(text) {
         if (!out.has(path)) out.set(path, new Map());
         const lines = out.get(path);
         for (const l of s.split("\n")) {
-          const m = /^(\d+)\t([\s\S]*)$/.exec(l);
+          const m = /^\s*(\d+)\t([\s\S]*)$/.exec(l);
           if (m) lines.set(Number(m[1]), m[2]);
         }
       }

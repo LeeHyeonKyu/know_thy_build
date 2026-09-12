@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
 import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
-import { loadHarness, loadRoles, loadCharter } from "../lib/config.js";
+import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
 import { envUp, envDown } from "../lib/test-env.js";
@@ -32,6 +32,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   const exists = deps.exists || existsSync;
   const readFile = deps.readFile || ((p) => readFileSync(p, "utf8"));
   const loadHarnessFn = deps.loadHarness || loadHarness;
+  const loadHarnessRawFn = deps.loadHarnessRaw || loadHarnessRaw;
   const loadRolesFn = deps.loadRoles || loadRoles;
   const loadCharterFn = deps.loadCharter || loadCharter;
   const checkGitHubFn = deps.checkGitHub || checkGitHub;
@@ -54,13 +55,22 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   } catch (e) {
     return finish([{ id: "harness", level: "FAIL", detail: `harness.toml unreadable: ${e.message}` }]);
   }
+  // M2: `loadHarnessFn`이 이미 `[factory].max_turns`에 기본값 12를 채워 뒀다 — "키가 아예 없다"는
+  // 판정은 그 채움 이전의 파스에서만 가능하다. 이 두 번째 파스가 실패해도(권한, 경합) 전체 doctor를
+  // 죽이지 않는다 — `raw`를 `harness`로 되돌려 그 한 WARN 판정만 조용히 못 하게 둔다.
+  let harnessRaw;
+  try {
+    harnessRaw = loadHarnessRawFn(root);
+  } catch {
+    harnessRaw = harness;
+  }
 
   const checks = [];
 
   // ── harness scope (always) ──────────────────────────────────────
   const lsFiles = await run("git", ["ls-files"], { cwd: root });
   const files = lsFiles.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-  checks.push(...checkHarness({ harness, files }));
+  checks.push(...checkHarness({ harness, files, raw: harnessRaw }));
 
   // ── test env up (wraps the command gates and the smoke) ─────────
   const smoke = harness.test?.smoke || {};

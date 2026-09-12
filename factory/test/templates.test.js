@@ -183,6 +183,20 @@ test("ci-settings-harness.json opens exactly the test-infra files a promotion to
   }
 });
 
+// 리뷰 leftover: 위 KTB-20 테스트의 ③ 열거는 `templates/factory/factory/`를 그대로 훑는다 — 그런데
+// `.factory/bin/**`·`.factory/lib/**`·`.factory/out/**`는 **템플릿 파일이 아니다**(bin·lib는 npm
+// 패키지 코드가 설치 시 복사되고, out은 게이트가 실행 중에 만든다 — 셋 다 `templates/factory/factory/`
+// 아래에 존재하지 않는다). 그래서 열거는 이 세 글롭이 harness 변형에서 빠지는 사고를 절대 잡지 못한다
+// — 여기서 이름으로 못 박는다.
+test("ci-settings-harness.json explicitly denies .factory/bin, .factory/lib, .factory/out — the enumeration can't see them (KTB-20)", () => {
+  const hv = JSON.parse(read("factory/ci-settings-harness.json"));
+  const deny = new Set(hv.permissions.deny);
+  for (const dir of [".factory/bin/**", ".factory/lib/**", ".factory/out/**"]) {
+    expect(deny.has(`Edit(${dir})`), `Edit(${dir})`).toBe(true);
+    expect(deny.has(`Write(${dir})`), `Write(${dir})`).toBe(true);
+  }
+});
+
 test("dispatcher commands exist for the four LLM stages plus retro, and each names its workflow", () => {
   for (const s of ["triage", "plan", "implement", "review"]) {
     const t = read(`claude/commands/factory-${s}.md`);

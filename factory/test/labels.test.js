@@ -1,5 +1,8 @@
 import { test, expect } from "vitest";
 import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY } from "../lib/labels.js";
+import { HARNESS_LABEL } from "../lib/label-catalog.js";
+import { HARNESS_LABEL as HARNESS_LABEL_RUN_STAGE } from "../bin/run-stage.js";
+import { HARNESS_LABEL as HARNESS_LABEL_RETRO } from "../bin/retro.js";
 
 test("states are the spec's 13 labels", () => {
   expect([...STATES].sort()).toEqual([
@@ -84,4 +87,14 @@ test("factoryLabelOf picks the single factory:* label; backlog counts as a state
 test("target state → stage that must have produced the handoff", () => {
   expect(STAGE_OF_TARGET["factory:planned"]).toBe("plan");
   expect(STAGE_OF_TARGET["factory:approved"]).toBe("review");
+});
+
+// 리뷰 leftover: `HARNESS_LABEL`이 `bin/run-stage.js`·`bin/retro.js`·`lib/label-catalog.js` 셋에
+// 각자 리터럴로 있었다 — 셋이 갈라지면 retro가 만든 `factory:harness` 이슈를 run-stage의 implement
+// 진입 판정이 못 알아보는 조용한 드리프트가 생긴다. 이제 label-catalog.js가 유일한 출처이고, 두
+// bin 파일은 재수출만 한다 — import equality로 그것을 못 박는다.
+test("HARNESS_LABEL has a single source of truth — run-stage.js and retro.js re-export label-catalog.js's constant", () => {
+  expect(HARNESS_LABEL).toBe("factory:harness");
+  expect(HARNESS_LABEL_RUN_STAGE).toBe(HARNESS_LABEL);
+  expect(HARNESS_LABEL_RETRO).toBe(HARNESS_LABEL);
 });
