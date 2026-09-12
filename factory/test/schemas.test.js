@@ -48,6 +48,42 @@ test("rework-response.v1", () => {
   expect(validate("rework-response.v1", { ...ok, responses: [{ id: "cf2", status: "disputed" }] }).ok).toBe(false);   // disputed엔 reason
 });
 
+test("retro.v1: arrays may be empty, but a present item needs role/text/kind + evidence_runs≥1", () => {
+  const empty = { period: { from: "2026-09-01", to: "2026-09-08" }, lessons: [], examples: [], perspectives: [], harness: [], proposals: [], summary: "no candidates cleared the evidence bar" };
+  expect(validate("retro.v1", empty).ok).toBe(true);
+
+  const full = {
+    period: { from: "2026-09-01", to: "2026-09-08" },
+    lessons: [{ role: "correctness", text: "Promise.all 부분 실패 처리 확인", evidence_runs: [110, 112] }],
+    examples: [{ role: "reviewer-qa", kind: "good", text: "DST 경계 25시간 렌더링 발견", evidence_runs: [104] }],
+    perspectives: [{ role: "architect", text: "동기 내보내기는 타임아웃이 난다", evidence_runs: [30, 42] }],
+    harness: [{ target: "M1", reason: "prisma/schema.prisma가 있는데 M0" }],
+    proposals: [{ kind: "gate", title: "no-multiple-resolved eslint rule", body: "L-2026-09-05-03 4회 인용", evidence_runs: [110, 112, 118, 121] }],
+    summary: "제안 3건",
+  };
+  expect(validate("retro.v1", full).ok).toBe(true);
+
+  const r1 = validate("retro.v1", { ...full, lessons: [{ role: "correctness", text: "x", evidence_runs: [] }] });
+  expect(r1.ok).toBe(false);
+  expect(r1.errors.join(" ")).toMatch(/lessons\[0\]\.evidence_runs/);
+
+  const r2 = validate("retro.v1", { ...full, examples: [{ role: "reviewer-qa", kind: "meh", text: "x", evidence_runs: [1] }] });
+  expect(r2.ok).toBe(false);
+  expect(r2.errors.join(" ")).toMatch(/examples\[0\]\.kind/);
+
+  const r3 = validate("retro.v1", { ...full, proposals: [{ kind: "nope", title: "t", body: "b", evidence_runs: [1] }] });
+  expect(r3.ok).toBe(false);
+  expect(r3.errors.join(" ")).toMatch(/proposals\[0\]\.kind/);
+
+  const r4 = validate("retro.v1", { ...full, harness: [{ target: "M1" }] });
+  expect(r4.ok).toBe(false);
+  expect(r4.errors.join(" ")).toMatch(/harness\[0\]\.reason/);
+
+  const r5 = validate("retro.v1", { ...full, period: undefined });
+  expect(r5.ok).toBe(false);
+  expect(r5.errors.join(" ")).toMatch(/^period is required/);
+});
+
 test("unknown schema name", () => {
   expect(() => validate("nope", {})).toThrow(/unknown schema/);
 });
