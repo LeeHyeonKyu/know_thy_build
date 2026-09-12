@@ -174,8 +174,11 @@ export function accumulateStats(total, window) {
   const rejects = { ...(t.rejects_by_role || {}) };
   for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
   const tok = (key, side) => (Number(t[key]?.tokens?.[side]) || 0) + (Number(w[key]?.tokens?.[side]) || 0);
-  const sumUsage = (key, round) => ({
-    cost_usd: round((Number(t[key]?.cost_usd) || 0) + (Number(w[key]?.cost_usd) || 0)),
+  // 누적 비용은 **1e-6 자리로만** 반올림한다(센트로 깎지 않는다) — 센트 미만인 창을 round2로 접으면
+  // 그 창의 비용이 누적에서 영구히 사라지고(0을 더한다) 작은 회차를 많이 도는 공장의 총계가 0에 머문다.
+  // 센트 표기는 사람이 보는 순간에만 한다(`statsTable`의 `toFixed(2)`).
+  const sumUsage = (key) => ({
+    cost_usd: round6((Number(t[key]?.cost_usd) || 0) + (Number(w[key]?.cost_usd) || 0)),
     tokens: { input: tok(key, "input"), output: tok(key, "output") },
   });
   return {
@@ -183,11 +186,10 @@ export function accumulateStats(total, window) {
     review_rounds_avg: round2(avg),
     rejects_by_role: rejects,
     needs_human: (Number(t.needs_human) || 0) + (Number(w.needs_human) || 0),
-    usage: sumUsage("usage", round2),
+    usage: sumUsage("usage"),
     // retro 자신의 비용은 스테이지 비용과 **따로** 쌓는다 — 섞으면 "공장이 일하는 데 든 비용"과
     // "공장이 자기를 돌아보는 데 든 비용"을 다시 가를 수 없고, N 자가 조정의 근거가 흐려진다.
-    // 반올림 자리가 다른 이유: 한 번의 retro 호출은 센트 미만일 수 있어 round2면 0으로 사라진다.
-    retro_usage: sumUsage("retro_usage", round6),
+    retro_usage: sumUsage("retro_usage"),
     retros: (Number(t.retros) || 0) + 1,
   };
 }
@@ -274,6 +276,9 @@ export function applyMutation(base, m = {}) {
 
   s.candidates = m.candidates ? mergeCandidates(b.candidates || emptyCandidates(), m.candidates) : (b.candidates || emptyCandidates());
   if (m.stats) s.stats = m.stats;
+  // retro 자신의 비용은 창 통계 위에 **얹는다**(갈아치우지 않는다) — 수확이 실패해 이번 창 통계가
+  // 없는 회차에도 비용은 기록돼야 하고, 그때 창 열은 지난 스냅샷을 그대로 들고 있어야 한다.
+  if (m.retroUsage) s.stats = { ...(s.stats || {}), retro_usage: m.retroUsage };
   if (m.lastFullFailed) s.last_full_failed = m.lastFullFailed;
 
   if (m.full) {
@@ -283,7 +288,9 @@ export function applyMutation(base, m = {}) {
     s.merges_since = 0;
     s.cursor = { ...s.cursor, last_retro_at: m.full.at };
     s.candidates = retireCandidates(s.candidates, m.full.retire);
-    s.stats_total = accumulateStats(b.stats_total, m.stats);
+    // 누적에 더하는 것은 **이번 창**이다 — 수확이 실패했으면 창은 없고 retro 비용만 있다(지난 창
+    // 스냅샷을 여기서 다시 더하면 그 창을 두 번 센다).
+    s.stats_total = accumulateStats(b.stats_total, m.retroUsage ? { ...(m.stats || {}), retro_usage: m.retroUsage } : m.stats);
     s.deferred_proposals = m.full.deferredProposals || [];
     s.deletion_candidates = m.full.deletionCandidates || [];
     delete s.last_full_failed;
@@ -448,8 +455,11 @@ export async function runRetro({ deps, force = false, now } = {}) {
     const envelope = called.ok ? called.value : null;
     const out = envelope && !envelope.is_error ? extractJson(envelope.result) : null;
     const v = out ? validate("retro.v1", out) : { ok: false, errors: [envelope ? (envelope.is_error ? "claude -p reported is_error" : "no JSON object in result") : (called.error || "claude -p failed")] };
-    // 호출이 실패했어도 토큰은 이미 쓰였다 — 비용은 성공한 회차만의 것이 아니다(F10).
-    const fullStatsBits = { candidates: h.candidates, stats: { ...(h.stats || {}), retro_usage: retroUsageOf(envelope) } };
+    // 호출이 실패했어도 토큰은 이미 쓰였다 — 비용은 성공한 회차만의 것이 아니다(F10). `retroUsage`는
+    // `stats`와 **별개의 변이 필드**다: 수확이 실패해 이번 창 통계가 없으면 지난 창 스냅샷 위에 비용만
+    // 얹어야 하고(창 열을 0으로 리셋하는 것은 "이번 창에 아무 일도 없었다"는 거짓 주장이다), 그 병합은
+    // 재적용 가능해야 하므로 `applyMutation`(순수 함수) 안에서 base를 보고 일어나야 한다.
+    const fullStatsBits = { ...harvestBits, retroUsage: retroUsageOf(envelope) };
     if (!v.ok) {
       const reason = v.errors.join("; ");
       // 실패를 상태에 남기지만 `merges_since`는 리셋하지 않는다 — 다음 머지가 다시 전체 retro를 돈다.
@@ -460,9 +470,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
 
     // ⑥ 집행 — 각 단계는 격리되고, 결과는 `applied`에 쌓여 `_retro.md` 이력에 남는다.
     const files = {};                                                 // 다크 PR에 실릴 변경 파일: 경로 → 새 전문
-    const retire = [];                                                // 실제로 파일에 들어간 텍스트 — 후보에서 내린다
-    let addedLessons = 0;
-    let addedRoleItems = 0;
+    /**
+     * 채택 **후보**를 파일 단위로 들고 있는다: `{kind, path, texts}`. 여기서 바로 세거나 후보를 내리지
+     * 않는 이유는, 한 apply 결과가 실제로 착지하는지가 **그 파일의 경로**(허용 목록, F6)와 **그 PR의
+     * 머지**(F3) 두 조건에 달려 있기 때문이다. 둘은 파일마다 다를 수 있다 — 역할 파일 두 개는 PR에
+     * 실려 머지되고 lessons 경로 하나는 허용 목록에서 거절되는 회차가 정상이다. 합계를 미리 더해 두면
+     * 그 회차가 착지하지 않은 텍스트까지 후보에서 내리고 yield로 센다(관측되지 않은 성공).
+     */
+    const pending = [];
     let harnessIssues = 0;
 
     // (a) lesson — 역할별로 한 번. 근거 run ≥2(서로 다른 이슈)는 `applyLessons`가 다시 센다.
@@ -476,11 +491,10 @@ export async function runRetro({ deps, force = false, now } = {}) {
       if (!r.ok || !r.value) continue;
       const res = r.value;
       applied.push({ step: `lessons:${role}`, added: (res.added || []).map((a) => a.id), rejected: res.rejected || [], evicted: res.evicted || [] });
-      addedLessons += (res.added || []).length;
-      for (const a of res.added || []) retire.push(a.text);
       // 실제로 바뀐 파일만 PR에 싣는다 — 채택이 하나도 없으면 `applyLessons`는 원문을 바이트 그대로
       // 돌려주므로, 넣어도 빈 diff가 되고 "변경 없음" 커밋이 실패한다.
       if (res.path && ((res.added || []).length || (res.evicted || []).length)) files[res.path] = res.text;
+      if (res.path && (res.added || []).length) pending.push({ kind: "lessons", path: res.path, texts: res.added.map((a) => a.text) });
     }
 
     // (b) 역할 예시·관점 — 에이전트 파일별로 한 번. 근거 창은 `applyRoleAdditions`가 보지 않으므로
@@ -505,9 +519,10 @@ export async function runRetro({ deps, force = false, now } = {}) {
       if (!r.ok || !r.value) continue;
       const res = r.value;
       applied.push({ step: `role:${role}`, added: res.added || [], skipped: res.skipped || [], deferred });
-      addedRoleItems += (res.added || []).length;
-      for (const a of res.added || []) retire.push(a.text);
-      if (res.path && (res.added || []).length) files[res.path] = res.text;
+      if (res.path && (res.added || []).length) {
+        files[res.path] = res.text;
+        pending.push({ kind: "role", path: res.path, texts: res.added.map((a) => a.text) });
+      }
     }
 
     // (c) 다크 PR — 바뀐 파일이 하나라도 있을 때만. integrity GREEN이면 스스로 머지한다(P4-R2).
@@ -527,14 +542,29 @@ export async function runRetro({ deps, force = false, now } = {}) {
       }
     }
     /**
-     * **머지된 PR만이 채택이다**(F3). PR이 열리지 않았거나(경로 거절·publish 실패) RED·타임아웃·사람이
-     * 닫음으로 머지되지 못했으면 그 텍스트는 파일에 **없다**: 후보에서 내리면 다음 retro가 다시 볼 수
-     * 없어 영원히 사라지고, yield에 세면 "수확이 있었다"며 N을 줄여 토큰만 더 쓴다. 둘 다 관측되지
-     * 않은 성공을 기록하는 셈이다 — 머지 전까지 후보도 텍스트도 그대로 둔다.
+     * **PR에 실려서 머지된 파일의 텍스트만이 채택이다**(F3+F6). 두 조건을 파일마다 따로 본다:
+     *   - 그 파일의 경로가 허용 목록을 통과해 PR에 실렸는가(`splitDarkFiles`의 accepted 집합).
+     *   - 그 PR이 실제로 머지됐는가(`merged === true`).
+     * 어느 한쪽이라도 아니면 그 텍스트는 파일에 **없다**: 후보에서 내리면 다음 retro가 다시 볼 수 없어
+     * 영원히 사라지고, yield에 세면 "수확이 있었다"며 N을 줄여 토큰만 더 쓴다. 둘 다 관측되지 않은
+     * 성공을 기록하는 셈이다 — 착지 전까지 후보도 텍스트도 그대로 둔다. 한 회차에서 역할 파일은
+     * 머지되고 lessons 경로는 거절되는 조합이 정상이므로, 판정은 PR 단위가 아니라 파일 단위다.
      */
     const lessonsMerged = lessonsPr?.merged === true;
-    if (!lessonsMerged && (addedLessons || addedRoleItems)) {
-      record(`retro: lessons PR not merged (${lessonsPr?.reason ?? (lessonsPr?.pr == null ? "no PR" : "unmerged")}) — ${addedLessons + addedRoleItems} additions stay candidates`);
+    const acceptedPaths = new Set(Object.keys(darkFiles));
+    const landedFiles = lessonsMerged ? pending.filter((e) => acceptedPaths.has(e.path)) : [];
+    const countOf = (kind, list) => list.filter((e) => e.kind === kind).reduce((n, e) => n + e.texts.length, 0);
+    const attemptedLessons = countOf("lessons", pending);
+    const attemptedRoleItems = countOf("role", pending);
+    const landedLessons = countOf("lessons", landedFiles);
+    const landedRoleItems = countOf("role", landedFiles);
+    const retire = landedFiles.flatMap((e) => e.texts);                // 후보에서 내릴 텍스트 = 착지한 것뿐
+    const strandedInPr = attemptedLessons + attemptedRoleItems - landedLessons - landedRoleItems;
+    if (strandedInPr) {
+      const why = lessonsMerged
+        ? `paths outside the dark allowlist (${pending.filter((e) => !acceptedPaths.has(e.path)).map((e) => e.path).join(", ")})`
+        : `lessons PR not merged (${lessonsPr?.reason ?? (lessonsPr?.pr == null ? "no PR" : "unmerged")})`;
+      record(`retro: ${strandedInPr} additions stay candidates — ${why}`);
     }
 
     // (d) 성숙도 승격 이슈 — 판정은 위에서 이미 났고, 에이전트는 이유 문장만 보탠다. 제목으로 dedup한다
@@ -611,10 +641,9 @@ export async function runRetro({ deps, force = false, now } = {}) {
 
     // ⑦ yield → N 자가 조정 → 이력 → 커서 전진(§8.4). PR이 실제로 열리지 않았으면(번호 없음) 세지 않는다.
     const proposalCount = proposalPr && proposalPr.pr != null ? 1 : 0;
-    const landed = lessonsMerged ? addedLessons + addedRoleItems : 0;   // 머지된 PR만이 채택이다(F3)
-    const y = landed + harnessIssues + proposalCount;
+    const y = landedLessons + landedRoleItems + harnessIssues + proposalCount;   // 착지한 것만 센다(F3+F6)
     const needsHumanSince = Number(h.stats?.needs_human ?? base.stats?.needs_human ?? 0) || 0;
-    record(`retro: full — yield=${y} (lessons ${addedLessons}, role items ${addedRoleItems}, merged ${lessonsMerged}, harness ${harnessIssues}, proposal PR ${proposalCount})`);
+    record(`retro: full — yield=${y} (lessons ${landedLessons}/${attemptedLessons}, role items ${landedRoleItems}/${attemptedRoleItems}, merged ${lessonsMerged}, harness ${harnessIssues}, proposal PR ${proposalCount})`);
     const p = await persist({
       ...countBits,
       ...fullStatsBits,
@@ -623,7 +652,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
         yield: y,
         needsHumanSince,
         bounds: d.nBounds || { min: 1, max: Infinity },
-        retire: lessonsMerged ? retire : [],                            // 머지되지 않았으면 후보를 내리지 않는다
+        retire,                                                        // 착지한 텍스트만 — 위에서 이미 걸렀다
         deferredProposals: deferred.map((x) => x.proposal),
         deletionCandidates: deletions,
         entry: { at, yield: y, needs_human_since: needsHumanSince, applied },

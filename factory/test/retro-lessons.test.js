@@ -239,3 +239,19 @@ test("empty or whitespace-only text is rejected, never written as a headless ent
   expect(rejected).toEqual([{ text: "  \n\t ", reason: "empty" }, { text: undefined, reason: "empty" }]);
   expect(out).toBe(text);
 });
+
+test("eviction removes the *normalised* text from the duplicate set — an evicted lesson can be re-adopted in the same batch", () => {
+  // 파일에 이미 있던 항목의 문장은 정규화 이전에 쓰였을 수 있다(이중 공백) — 집합에는 정규화된 형태가
+  // 들어 있으므로 evict할 때도 정규화된 형태로 지워야 한다. 원문으로 지우면 evict된 문장이 집합에 남아
+  // 같은 배치의 재채택이 엉뚱하게 'duplicate'로 거부된다.
+  const text = `${HEADER("r", 2)}- [L-2026-08-01-01] dup  text\n  근거: runs/1.md, runs/2.md. 인용: 0회.\n- [L-2026-08-02-01] filler\n  근거: runs/3.md, runs/4.md. 인용: 0회.\n`;
+  const { text: out, added, rejected, evicted } = applyLessons({
+    text, today: "2026-09-12",
+    adopted: [{ text: "fresh", evidence_runs: [5, 6] }, { text: "dup text", evidence_runs: [7, 8] }],
+  });
+  expect(rejected).toEqual([]);
+  expect(evicted).toEqual(["L-2026-08-01-01", "L-2026-08-02-01"]);
+  expect(added).toEqual([{ id: "L-2026-09-12-01", text: "fresh" }, { id: "L-2026-09-12-02", text: "dup text" }]);
+  expect(out.split("\n").filter((l) => l.startsWith("- ["))).toEqual(["- [L-2026-09-12-01] fresh", "- [L-2026-09-12-02] dup text"]);
+  expect(lessonsFormat("f.md", out)).toEqual([]);
+});

@@ -602,6 +602,34 @@ test("full: a file outside the dark allowlist never reaches the PR — it is rec
   expect(recorded.join("\n")).toContain("outside the dark allowlist");
 });
 
+// 판정은 PR 단위가 아니라 **파일 단위**다(micro round, Important): 역할 파일은 실려 머지되고 lessons
+// 경로는 허용 목록에서 거절되는 회차가 정상이다. PR 하나가 머지됐다는 사실이 거절된 파일의 텍스트까지
+// "착지했다"고 만들어서는 안 된다.
+test("full: a partially rejected but merged PR retires and counts only the files that were in it", async () => {
+  const state = freshState({ candidates: {
+    lessons: [{ role: "correctness", text: "타임존", runs: [11, 12] }],
+    examples: [{ role: "qa", text: "DST", runs: [11, 12] }],
+    flaky: [], needs_human: [],
+  } });
+  const { deps, recorded, last } = makeDeps({ state, overrides: {
+    // lessons 경로만 허용 목록 밖 — 역할 파일 두 개는 그대로 PR에 실린다
+    applyLessons: vi.fn(async ({ role }) => (role === "correctness"
+      ? { path: "docs/factory/lessons-correctness.md", text: "LESSONS-C", added: [{ id: "L-2026-09-12-01", text: "타임존" }], rejected: [], evicted: [] }
+      : { path: ".factory/lessons/reviewer-qa.md", text: "LESSONS-Q", added: [], rejected: [], evicted: [] })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(Object.keys(deps.publishLessons.mock.calls[0][0].files).sort()).toEqual([QA_AGENT_PATH, C_AGENT_PATH].sort());
+
+  const s = last();
+  // yield: 역할 추가 2건 + harness 1 + 제안 PR 1 — 거절된 lesson은 세지 않는다
+  expect(s.history.at(-1).yield).toBe(4);
+  // 거절된 경로의 lesson 후보는 살아남고, 실려 머지된 역할 예시 텍스트만 후보에서 내려간다
+  expect(s.candidates.lessons.map((l) => l.text)).toContain("타임존");
+  expect(s.candidates.examples.map((e) => e.text)).not.toContain("DST");
+  expect(recorded.join("\n")).toContain("1 additions stay candidates — paths outside the dark allowlist");
+  expect(recorded.join("\n")).toContain("yield=4 (lessons 0/1, role items 2/2, merged true");
+});
+
 test("full: when every changed file is rejected there is no PR at all, and nothing counts as landed", async () => {
   const state = freshState();
   const { deps, last } = makeDeps({ state, overrides: {
@@ -734,6 +762,33 @@ test("statsTable renders the retro rows even when nothing has been recorded yet"
   const t = statsTable(null, null);
   expect(t).toContain("| retro cost (usd) | 0.00 | 0.00 |");
   expect(t).toContain("| retro tokens | input 0 / output 0 | input 0 / output 0 |");
+});
+
+test("full: a failed harvest keeps the previous window snapshot and only lays the retro cost on top", async () => {
+  // 창 통계를 `{retro_usage}`로 갈아치우면 사람이 보는 표의 창 열이 0으로 리셋된다 — "이번 창에 아무
+  // 일도 없었다"는 거짓 주장이고, 누적에도 그 0이 그대로 들어간다.
+  const previousWindow = { merged: 4, review_rounds_avg: 2, rejects_by_role: { qa: 1 }, needs_human: 1, usage: { cost_usd: 3, tokens: { input: 40, output: 5 } } };
+  const state = freshState({ merges_since: 2, n: 3, stats: previousWindow, stats_total: { merged: 4, retros: 1 } });
+  const { deps, last } = makeDeps({ state, overrides: { harvest: vi.fn(async () => { throw new Error("gh down"); }) } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  const s = last();
+  expect(s.stats).toEqual({ ...previousWindow, retro_usage: { cost_usd: 0.42, tokens: { input: 1200, output: 300 } } });
+  // 누적에는 이번 창이 없다(수확하지 못했다) — retro 비용만 더해진다, 지난 창을 두 번 세지 않는다
+  expect(s.stats_total.merged).toBe(4);
+  expect(s.stats_total.retro_usage).toEqual({ cost_usd: 0.42, tokens: { input: 1200, output: 300 } });
+  expect(s.stats_total.usage).toEqual({ cost_usd: 0, tokens: { input: 0, output: 0 } });
+});
+
+test("accumulateStats keeps the running cost at 6 decimals — a sub-cent window is never lost", () => {
+  const sub = { merged: 0, usage: { cost_usd: 0.004 }, retro_usage: { cost_usd: 0.003 } };
+  const t1 = accumulateStats(null, sub);
+  expect(t1.usage.cost_usd).toBe(0.004);                                // round2였다면 0으로 사라진다
+  expect(t1.retro_usage.cost_usd).toBe(0.003);
+  const t2 = accumulateStats(t1, sub);
+  expect(t2.usage.cost_usd).toBe(0.008);
+  expect(t2.retro_usage.cost_usd).toBe(0.006);
+  // 센트 표기는 사람이 보는 순간에만 한다 — 상태에는 실제 값이 남는다
+  expect(statsTable(sub, t2)).toContain("| cost (usd) | 0.00 | 0.01 |");
 });
 
 test("a failed full analysis still records what it spent", async () => {

@@ -107,7 +107,9 @@ export function applyLessons({ text, adopted = [], today, minEvidence = 2 } = {}
 
     for (const v of victims) {
       entries.splice(entries.indexOf(v), 1);
-      existingTexts.delete(v.text);
+      // 집합에는 **정규화된** 텍스트가 들어 있다(`norm(e.text)`) — 원문으로 지우면 그 항목이 집합에
+      // 남아, evict된 문장을 같은 배치에서 다시 채택하려 할 때 엉뚱하게 'duplicate'로 거부된다.
+      existingTexts.delete(norm(v.text));
       evicted.push(v.id);
     }
 
