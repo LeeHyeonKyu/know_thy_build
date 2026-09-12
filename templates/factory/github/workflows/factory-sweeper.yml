@@ -6,6 +6,9 @@ on:
 permissions:
   contents: write
   issues: write
+  # 멈춘 스테이지를 `gh workflow run`으로 다시 띄운다(KTB-8, sweeper의 세 번째 팔) — 그 호출에 필요하다.
+  # GITHUB_TOKEN이 아니라 FACTORY_BOT_TOKEN으로 나가지만, 잡 권한을 좁혀 두면 폴백이 없다.
+  actions: write
 concurrency:
   group: factory-sweeper
   cancel-in-progress: false

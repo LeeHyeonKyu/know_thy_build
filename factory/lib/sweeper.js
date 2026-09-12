@@ -1,7 +1,28 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
+import { TRANSITION_TO } from "./retro/issue-comments.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
+
+/**
+ * **대기 상태 → 그 상태에서 돌아야 할 스테이지** (KTB-8의 세 번째 팔).
+ *
+ * 앞의 두 팔은 "런이 있었다"는 흔적을 전제한다 — `factory:in-progress`는 하트비트를, `factory:blocked`는
+ * 스테이지가 남긴 라벨을 본다. 그런데 데모 #2가 죽은 방식은 **런이 아예 만들어지지 않은 것**이었다:
+ * 라벨 이벤트가 만든 5개 런이 한 concurrency 그룹에서 서로를 취소해 `factory-plan`이 1초 만에 밀려났고,
+ * 이슈는 `factory:ready`에 하트비트도 blocked 라벨도 없이 앉아 있었다. 두 팔 모두에게 보이지 않는다.
+ *
+ * 라벨을 다시 붙여 되살릴 수도 없다(같은 라벨은 `labeled` 이벤트를 만들지 않는다) — 그래서 재점화는
+ * `workflow_dispatch`뿐이고, 그 손잡이를 스테이지 워크플로 5개에 달았다.
+ */
+const STALLED_STAGE = {
+  "factory:ready": "plan",
+  "factory:planned": "implement",
+  "factory:awaiting-review": "review",
+  "factory:approved": "merge",
+};
+/** 재점화 마커 — 이것 자체가 "이미 밀어 봤다"는 기록이다(dedupe의 유일한 근거). */
+export const restartComment = (stage, issue) => `<!-- factory-sweeper restarted stage=${stage} issue=${issue} -->`;
 
 const FLAKY_LABEL = "factory:flaky";
 const NOTE = {
@@ -69,7 +90,50 @@ async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
   }
 }
 
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null }) {
+/**
+ * 대기 라벨에 앉아 있는데 **아무 일도 일어나지 않은** 이슈를 찾아 그 스테이지를 dispatch로 다시 띄운다.
+ *
+ * "멈췄다"의 판정은 세 가지를 모두 만족할 때다:
+ *   1. 마지막 **전이 코멘트**(`factory-transition:v1`)가 `staleMinutes`보다 오래됐다 — 라벨이 방금
+ *      바뀐 이슈는 스테이지가 아직 뜨는 중이다. 전이 코멘트가 하나도 없으면 판단하지 않는다(사람이
+ *      라벨을 API로 직접 붙인 경우 — 나이를 알 수 없는 것을 "오래됐다"로 읽지 않는다).
+ *   2. `staleMinutes` 안에 갱신된 **하트비트가 없다** — 있으면 그 스테이지는 지금 돌고 있다(plan은 37분
+ *      동안 `factory:ready`에 머문다). 이것이 "in-flight 런 조회"를 대신한다: gh run list보다 싸고,
+ *      스테이지가 살아 있다는 1차 증거이며, 이미 이 파일이 읽는 데이터다.
+ *   3. 같은 창 안에 **재점화 마커가 없다** — 한 번 민 것을 30분마다 다시 밀지 않는다.
+ *
+ * 중복 dispatch 자체는 무해하다(락 claim이 두 번째 러너를 fail closed 시킨다) — 그래도 비용과 잡음이라
+ * 위 셋으로 줄인다. 전부 best-effort다: 한 이슈가 터져도 다음 이슈로 넘어간다.
+ */
+async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, actions }) {
+  if (!dispatchStage) return;
+  const stale = staleMinutes * 60e3;
+  for (const [label, stage] of Object.entries(STALLED_STAGE)) {
+    let issues;
+    try { issues = await gh.searchIssues(label); }
+    catch (e) { actions.push({ kind: "error", step: "stalled-restart", label, error: String(e.message || e) }); continue; }
+    for (const it of issues) {
+      try {
+        const comments = await gh.comments(it.number);
+        const lastTransition = comments.filter((c) => TRANSITION_TO.test(String(c?.body ?? ""))).at(-1);
+        if (!lastTransition) continue;
+        if (nowMs - Date.parse(lastTransition.createdAt) <= stale) continue;
+        const hb = comments.map((c) => HB.exec(String(c?.body ?? ""))).filter(Boolean).at(-1);
+        if (hb && nowMs - Date.parse(hb[2]) <= stale) continue;          // 스테이지가 살아 있다
+        const marker = restartComment(stage, it.number);
+        const restarted = comments.filter((c) => String(c?.body ?? "").includes(marker)).at(-1);
+        if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;
+        await dispatchStage({ stage, issue: it.number });
+        await gh.comment(it.number, `${marker}\n\`${label}\`에서 ${staleMinutes}분 넘게 런 없이 멈춰 있었습니다 — \`factory-${stage}.yml\`을 dispatch로 다시 띄웠습니다(KTB-8).`);
+        actions.push({ kind: "stalled-restart", issue: it.number, stage, label });
+      } catch (e) {
+        actions.push({ kind: "error", step: "stalled-restart", issue: it.number, error: String(e.message || e) });
+      }
+    }
+  }
+}
+
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null }) {
   const actions = [];
   const nowMs = Date.parse(now);
   for (const it of await gh.searchIssues("factory:in-progress")) {
@@ -96,6 +160,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
+  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, actions });
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });
     if (pol.returned.length || pol.expired.length) {

@@ -193,6 +193,53 @@ test("success path spawns node .factory/bin/run-stage.js <stage> <issue> with FA
   expect(opts.env).toEqual(expect.objectContaining({ PATH: "/usr/bin", SOME_VAR: "x", FACTORY_LOCAL_ENTRY: "1" }));
 });
 
+// ── KTB-8: --remote는 아무것도 로컬에서 돌리지 않고 CI 워크플로만 띄운다 ──
+// 라벨이 이미 목적 상태에 있으면 `labeled` 이벤트를 다시 만들 수 없다 — sweeper가 30분마다 하는
+// 재점화를 사람·컨트롤러가 지금 하는 손잡이다.
+
+test("--remote dispatches factory-<stage>.yml with the issue input and never spawns anything locally", async () => {
+  const root = mktemp();                                  // init 여부·.factory 의존성을 보지 않는다
+  const { io: i, o } = io();
+  const run = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 0, stdout: "ok", stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "workflow", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const spawnInherit = vi.fn();
+  const code = await runCommand({ root, argv: ["plan", "2", "--remote"], io: i, run, spawnInherit });
+  expect(code).toBe(0);
+  expect(spawnInherit).not.toHaveBeenCalled();
+  expect(run.calls.find((c) => c.args[0] === "workflow").args).toEqual(["workflow", "run", "factory-plan.yml", "-f", "issue=2"]);
+  expect(o.out.join("\n")).toContain("dispatched factory-plan.yml for issue #2");
+});
+
+test("--remote accepts merge (branch protection blocks the LOCAL run, not the CI dispatch); a failing dispatch exits 1", async () => {
+  const okRun = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 0, stdout: "ok", stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "workflow", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const a = io();
+  expect(await runCommand({ root: mktemp(), argv: ["merge", "7", "--remote"], io: a.io, run: okRun, spawnInherit: vi.fn() })).toBe(0);
+  expect(okRun.calls.find((c) => c.args[0] === "workflow").args).toContain("factory-merge.yml");
+
+  const badRun = makeFakeRun([
+    { match: (c, x) => c === "gh" && x[0] === "auth", result: { code: 0, stdout: "ok", stderr: "" } },
+    { match: (c, x) => c === "gh" && x[0] === "workflow", result: { code: 1, stdout: "", stderr: "could not find any workflows named factory-plan.yml" } },
+  ]);
+  const b = io();
+  expect(await runCommand({ root: mktemp(), argv: ["plan", "2", "--remote"], io: b.io, run: badRun, spawnInherit: vi.fn() })).toBe(1);
+  expect(b.o.err.join("\n")).toContain("could not find any workflows");
+});
+
+test("--remote refuses retro and a bad issue number without calling gh workflow run", async () => {
+  const run = makeFakeRun([{ match: (c) => c === "gh", result: { code: 0, stdout: "ok", stderr: "" } }]);
+  const a = io();
+  expect(await runCommand({ root: mktemp(), argv: ["retro", "--remote"], io: a.io, run, spawnInherit: vi.fn() })).toBe(1);
+  expect(a.o.err.join("\n")).toMatch(/retro is merge-triggered/);
+  const b = io();
+  expect(await runCommand({ root: mktemp(), argv: ["plan", "zero", "--remote"], io: b.io, run, spawnInherit: vi.fn() })).toBe(1);
+  expect(run.calls.some((c) => c.args[0] === "workflow")).toBe(false);
+});
+
 test("default spawnInherit and run are used when not injected (smoke — routes through real deps)", async () => {
   // not exercised end-to-end here (would spawn real processes); just confirm the export shape.
   const mod = await import("../cli/run.js");

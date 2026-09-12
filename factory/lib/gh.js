@@ -105,6 +105,14 @@ export function makeGh({ run, repo }) {
     async searchIssues(label) {
       return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]));
     },
+    /**
+     * 워크플로를 손으로 띄운다(KTB-8). 라벨은 이미 목적 상태에 있어 `labeled` 이벤트를 다시 만들 수
+     * 없으므로, 멈춘 스테이지를 되살리는 경로는 이것뿐이다 — sweeper의 세 번째 팔과
+     * `factory run <stage> <issue> --remote`가 같은 호출을 쓴다.
+     */
+    async dispatchWorkflow(workflow, inputs = {}) {
+      await gh(["workflow", "run", workflow, "-R", repo, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
+    },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;

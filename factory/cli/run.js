@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
 
 const STAGES = ["triage", "plan", "implement", "review"];
-const USAGE = `usage: factory run <${STAGES.join("|")}|retro> <issue>   # retro takes no issue, optional --force`;
+/** `--remote`는 merge도 받는다 — 브랜치 보호가 막는 것은 **로컬 실행**이고, dispatch는 CI에서 도는 일이다. */
+const REMOTE_STAGES = [...STAGES, "merge"];
+const USAGE = `usage: factory run <${STAGES.join("|")}|retro> <issue>   # retro takes no issue, optional --force
+       factory run <${REMOTE_STAGES.join("|")}> <issue> --remote   # dispatch the CI workflow, run nothing locally`;
 
 /** 기본 spawnInherit — stdio를 그대로 물려준다(사람이 로컬에서 실시간으로 본다). */
 const defaultSpawnInherit = (cmd, args, opts) => spawnSync(cmd, args, { ...opts, stdio: "inherit" }).status ?? 1;
@@ -23,9 +26,27 @@ const defaultSpawnInherit = (cmd, args, opts) => spawnSync(cmd, args, { ...opts,
 export async function runCommand({ root, argv = [], io, run = realRun, spawnInherit = defaultSpawnInherit, env = process.env }) {
   const [stage, issueArg] = argv;
   const isRetro = stage === "retro";
+  const remote = argv.includes("--remote");
+
+  // (0) `--remote`: 아무것도 로컬에서 돌리지 않고 CI 워크플로만 띄운다(KTB-8). 라벨이 이미 목적 상태에
+  // 있으면 `labeled` 이벤트를 다시 만들 수 없어 멈춘 스테이지를 라벨로 되살릴 수 없다 — sweeper가
+  // 30분마다 하는 그 일을 사람·컨트롤러가 지금 하는 손잡이다. init 여부·`.factory` 의존성은 보지
+  // 않는다(여기서는 로컬에 그것들이 있을 이유가 없다); gh 인증만 확인한다.
+  if (remote) {
+    if (isRetro) { io.err("factory run --remote: retro is merge-triggered, not dispatchable by issue"); return 1; }
+    if (!REMOTE_STAGES.includes(stage)) { io.err(USAGE); return 1; }
+    const n = Number(issueArg);
+    if (!Number.isInteger(n) || n <= 0) { io.err(USAGE); return 1; }
+    const auth = await run("gh", ["auth", "status"]);
+    if (auth.code !== 0) { io.err("factory run: gh is not authenticated — run `gh auth login` first"); return 1; }
+    const r = await run("gh", ["workflow", "run", `factory-${stage}.yml`, "-f", `issue=${n}`]);
+    if (r.code !== 0) { io.err(`factory run --remote: gh workflow run factory-${stage}.yml failed — ${(r.stderr || r.stdout || "").trim()}`); return 1; }
+    io.out(`dispatched factory-${stage}.yml for issue #${n}`);
+    return 0;
+  }
 
   // (1) 스테이지 검증
-  if (stage === "merge") { io.err("merge runs only in CI (branch protection)"); return 1; }
+  if (stage === "merge") { io.err("merge runs only in CI (branch protection) — use `factory run merge <issue> --remote` to dispatch it"); return 1; }
   if (!isRetro && !STAGES.includes(stage)) { io.err(USAGE); return 1; }
   let issue = 0;
   if (!isRetro) {

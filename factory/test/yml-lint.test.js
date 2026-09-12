@@ -36,10 +36,10 @@ test("all eight workflow templates exist and pass lint", () => {
 test("stage workflows follow the §4.1 table and the token/concurrency rules", () => {
   for (const [f, [stage, timeout, labels]] of Object.entries(STAGE)) {
     const y = readFileSync(join(W, f), "utf8");
-    expect(y, f).toContain(`run: node .factory/bin/run-stage.js ${stage} \${{ github.event.issue.number }}`);
+    expect(y, f).toContain(`run: node .factory/bin/run-stage.js ${stage} \${{ github.event.issue.number || inputs.issue }}`);
     expect(y, f).toContain(`timeout-minutes: ${timeout}`);
-    expect(y, f).toContain(`if: contains(fromJSON('[${labels}]'), github.event.label.name)`);
-    expect(y, f).toContain("group: factory-issue-${{ github.event.issue.number }}");
+    expect(y, f).toContain(`if: github.event_name == 'workflow_dispatch' || contains(fromJSON('[${labels}]'), github.event.label.name)`);
+    expect(y, f).toContain(`group: factory-issue-\${{ github.event.issue.number || inputs.issue }}-${stage}`);
     expect(y, f).toContain("cancel-in-progress: false");
     expect(y, f).toContain("FACTORY_RUNNER_ID: gha-${{ github.run_id }}");
     expect(y, f).toContain("include-hidden-files: true");
@@ -55,6 +55,29 @@ test("stage workflows follow the §4.1 table and the token/concurrency rules", (
     if (stage === "merge") { expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}"); expect(y).toContain('claude: "false"'); }
     else { expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}"); expect(y).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"); }
     expect(y, f).toContain(["implement", "review", "merge"].includes(stage) ? 'test-env: "true"' : 'test-env: "false"');
+  }
+});
+
+// KTB-8: 라벨 이벤트 하나가 스테이지 워크플로 5개의 런을 만든다(GitHub는 `issues: labeled`에 라벨 이름
+// 필터를 주지 않는다). 다섯이 한 concurrency 그룹을 공유하면 한 대기 슬롯을 두고 서로를 취소해서,
+// 조건이 맞는 유일한 런이 밀려나고 이슈가 기록 하나 없이 멈춘다(데모 #2 `factory:ready` 영구 정지).
+test("the five stage workflows never share a concurrency group (KTB-8)", () => {
+  const groups = Object.keys(STAGE).map((f) => /^\s*group:\s*(.+)$/m.exec(readFileSync(join(W, f), "utf8"))[1].trim());
+  expect(new Set(groups).size).toBe(5);
+  for (const g of groups) expect(g).toContain("github.event.issue.number || inputs.issue");
+});
+
+// 그룹을 갈라도 "런이 아예 만들어지지 않은 채 멈춘 스테이지"는 라벨로 되살릴 수 없다 — 라벨이 이미
+// 목적 상태에 있어 `labeled` 이벤트가 다시 나지 않기 때문이다. dispatch가 유일한 재점화 경로다.
+test("every stage workflow can be dispatched with an issue input (KTB-8)", () => {
+  for (const [f, [stage]] of Object.entries(STAGE)) {
+    const y = readFileSync(join(W, f), "utf8");
+    expect(y, f).toContain("workflow_dispatch:");
+    expect(y, f).toMatch(/inputs:\n {6}issue:\n(?: {8}.*\n)* {8}required: true\n/);
+    expect(y, f).toContain("type: string");
+    // dispatch에는 label이 없다 — 잡 조건이 이벤트 이름을 먼저 보지 않으면 재점화가 통째로 죽는다
+    expect(y, f).toContain("if: github.event_name == 'workflow_dispatch' ||");
+    expect(y, f).toContain(`run-stage.js ${stage} \${{ github.event.issue.number || inputs.issue }}`);
   }
 });
 

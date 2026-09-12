@@ -64,6 +64,92 @@ test("sweep: quarantine policy returns entries past consecutive_passes threshold
   expect(actions).toContainEqual({ kind: "quarantine", returned: ["x1"], expired: [] });
 });
 
+// ── KTB-8: 런 없이 멈춘 스테이지의 재점화 ────────────────────────────────
+// 데모 #2는 `factory:ready`에서 하트비트도 blocked 라벨도 없이 영구 정지했다 — 앞의 두 팔 모두에게
+// 보이지 않는 상태다. 라벨을 다시 붙여 되살릴 수도 없으므로(같은 라벨은 `labeled` 이벤트를 만들지
+// 않는다) 재점화 경로는 `workflow_dispatch` 하나뿐이다.
+
+const TRANSITION = (to, at) => ({ id: 1, body: `<!-- factory-transition:v1 from=factory:queue to=${to} by=script -->\nqueue → ${to}`, createdAt: at });
+const stalledArgs = (over = {}) => ({ charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, ...over });
+
+test("sweep: an issue stuck on factory:ready past staleMinutes is dispatched to plan exactly once", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:ready" ? [{ number: 2 }] : [])),
+    comments: vi.fn(async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "plan", issue: 2 });
+  expect(gh.comment).toHaveBeenCalledWith(2, expect.stringContaining("<!-- factory-sweeper restarted stage=plan issue=2 -->"));
+  expect(actions).toContainEqual({ kind: "stalled-restart", issue: 2, stage: "plan", label: "factory:ready" });
+
+  // 같은 창 안의 두 번째 sweep은 마커를 보고 침묵한다 — 30분마다 같은 스테이지를 또 밀지 않는다
+  const second = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  expect(second.some((a) => a.kind === "stalled-restart")).toBe(false);
+});
+
+test("sweep: a fresh factory:ready transition, and one whose stage is alive (fresh heartbeat), are left alone", async () => {
+  const fresh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 2 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:50:00Z")],
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const d1 = vi.fn();
+  expect(await sweep(stalledArgs({ gh: fresh, dispatchStage: d1 }))).toEqual([]);
+  expect(d1).not.toHaveBeenCalled();
+
+  // 전이는 오래됐지만 스테이지가 살아 있다(plan은 37분 동안 `factory:ready`에 머문다) — 하트비트가 증거다
+  const alive = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 2 }] : []),
+    comments: async () => [
+      TRANSITION("factory:ready", "2026-09-11T00:10:00Z"),
+      { id: 2, body: "<!-- factory-heartbeat issue=2 -->\nstage: plan · last: 2026-09-11T00:55:00Z", createdAt: "2026-09-11T00:55:00Z" },
+    ],
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const d2 = vi.fn();
+  expect(await sweep(stalledArgs({ gh: alive, dispatchStage: d2 }))).toEqual([]);
+  expect(d2).not.toHaveBeenCalled();
+});
+
+test("sweep: each waiting label maps to its own stage; a failing dispatch is isolated and never commented", async () => {
+  const seen = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => ({ "factory:planned": [{ number: 3 }], "factory:awaiting-review": [{ number: 4 }], "factory:approved": [{ number: 5 }] }[l] || [])),
+    comments: vi.fn(async () => [TRANSITION("x", "2026-09-11T00:00:00Z")]),
+    comment: vi.fn(async (n) => { seen.push(n); return "u"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async ({ issue }) => { if (issue === 4) throw new Error("gh workflow run boom"); });
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage.mock.calls.map((c) => c[0])).toEqual([
+    { stage: "implement", issue: 3 }, { stage: "review", issue: 4 }, { stage: "merge", issue: 5 },
+  ]);
+  expect(actions).toContainEqual({ kind: "error", step: "stalled-restart", issue: 4, error: expect.stringContaining("gh workflow run boom") });
+  expect(seen).toEqual([3, 5]);                       // dispatch가 실패한 이슈에는 "다시 띄웠다"는 마커를 남기지 않는다
+});
+
+test("sweep: no transition comment at all → nothing is dispatched (age unknown is not 'stale')", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 2 }] : []),
+    comments: async () => [{ id: 1, body: "just a human note", createdAt: "2026-01-01T00:00:00Z" }],
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn();
+  expect(await sweep(stalledArgs({ gh, dispatchStage }))).toEqual([]);
+  expect(dispatchStage).not.toHaveBeenCalled();
+});
+
+test("sweep: with no dispatchStage wired the third arm is inert — waiting labels are not even listed", async () => {
+  const gh = { searchIssues: vi.fn(async () => []), comments: vi.fn(), comment: vi.fn(), patchComment: vi.fn() };
+  await sweep(stalledArgs({ gh }));
+  expect(gh.searchIssues.mock.calls.map((c) => c[0])).toEqual(["factory:in-progress", "factory:blocked"]);
+});
+
 // ── 격리 이탈 코멘트(Plan 1b 이월) ────────────────────────────────────────
 // `quarantine.toml`은 "지금 격리된 것"만 담으므로 복귀·만료는 그 순간 어디에도 남지 않는다 — 이력은
 // 사람이 보는 flaky 이슈에 남아야 하고, retro는 그 `expired` 코멘트만으로 만료를 안다(P4-R3).
