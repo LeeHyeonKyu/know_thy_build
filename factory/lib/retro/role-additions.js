@@ -92,7 +92,8 @@ export function applyRoleAdditions({ text, examples = [], perspectives = [], cap
   function process(kind, rawText) {
     // 항목은 `- <문장>` **한 줄**이다. 에이전트 텍스트의 개행을 그대로 넣으면 그 줄이 새 `## `/`### `
     // 헤더가 될 수 있고(예: `\n## Lens`), 그러면 우리는 삽입에 성공해도 integrity의 `additive_only`가
-    // "허용되지 않은 섹션 변경"으로 PR을 RED로 만든다 — 통과할 수 없는 diff를 만드는 셈이다.
+    // "허용되지 않은 섹션 변경"으로 보고하고 `publish.js`가 그 PR을 열지 않는다(ADR-020 KTB-6) —
+    // 다크로 머지될 수 없는 diff를 만드는 셈이다.
     const norm = normalizeItemText(rawText);
     if (kind !== "good" && kind !== "bad" && kind !== "perspectives") { skipped.push({ text: rawText, reason: "invalid-kind" }); return; }
     if (!norm) { skipped.push({ text: rawText, reason: "empty" }); return; }

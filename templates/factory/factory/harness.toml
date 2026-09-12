@@ -79,6 +79,10 @@ factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml",
                  # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
                  # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
 except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
+# additive_only: 이 두 섹션에 **추가만** 허용한다(§8.1의 다크 경로). 정책이지 변조 판정이 아니므로
+# integrity 체크는 이것으로 RED가 되지 않는다 — 벗어난 편집이 있으면 merge 스테이지가 자동 머지를
+# 거부하고 사람이 머지한다(ADR-020 KTB-6). 그래야 `:role` PR과 역할 파일을 건드리는 업그레이드를
+# 사람이 머지할 수 있다.
 additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true
 

@@ -535,4 +535,26 @@ Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩) 중에 *
 
 **영향**: `factory/lib/integrity.js`(`protected` 필드·`protectedPaths()`·`isProtected`·`NAME_STATUS`의 `--no-renames`·모든 경로 필드를 취하는 `changedFiles`), `factory/bin/integrity.js`(notice 줄), `factory/lib/merge-stage.js`(단계 (3)·deps 계약), `factory/bin/run-stage.js`(`protectedPaths`·`comment(number, body)` dep), `factory/lib/retro/publish.js`(다크 PR assert), `factory/lib/exec.js`(`MERGE_CAPABLE_ENV`·`scrubEnv`·`scrubbedRunner`·`run()`의 `replaceEnv`), `factory/lib/gates.js`(`runStageGates`가 실행기를 감싼다), `factory/hooks/block-dangerous.sh`(보호 경로의 `git rm`/`git mv`), `factory/test/integrity.test.js`·`merge-stage.test.js`·`run-stage.test.js`·`retro-publish.test.js`·`exec.test.js`·`gates.test.js`·`hooks.test.js`, 스펙 §5.1(`[protected]` 주석과 설명 문장)·§6 표의 L0/L1 행·§6.1(`factory/integrity`가 보는 것)·§6.2(merge 스테이지의 보호 경로 거부), ADR-015(보강 한 줄). 프롬프트·스킬 드리프트도 함께 고쳤다("integrity가 PR을 거절한다" → "merge 스테이지가 자동 머지를 거부하고 사람이 머지한다"): `templates/factory/claude/agents/factory-builder.md`, `templates/factory/claude/workflows/factory-implement.js`, `templates/know-thy-build/role.md`·`harness.md`·`project.md`, `templates/factory/factory/harness.toml`. 템플릿 워크플로는 바뀌지 않는다 — `factory-integrity.yml`은 권한을 늘릴 이유가 없고, `factory-merge.yml`은 이미 `fetch-depth: 0`으로 base…head diff를 계산할 수 있다.
 
+### KTB-6 — `additive_only`도 L0 변조 규칙이 아니다: 역할 프롬프트 변경을 사람도 머지할 수 없었다
+
+**질문**: KTB-5가 보호 경로를 L1으로 옮긴 직후, 데모 PR #3(그 수정을 실어 나르는 평범한 `factory init --upgrade`)이 다시 `factory/integrity` RED로 떨어졌다. 이번 원인은 `[protected].additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }`가 여전히 **L0 변조 규칙**이었다는 것이다 — KTB-5의 프롬프트 드리프트 수정이 `factory-builder.md`의 `## You must not`을 고쳤고, 그것이 허용 섹션 밖이라 위반이 됐다. KTB-5와 같은 질문이 다시 나온다: 이것은 커밋에 대한 사실인가, 아니면 누가 머지해도 되는가의 정책인가.
+
+**관측**:
+
+- **실측**: `gh run view 34692991112 --repo LeeHyeonKyu/know-thy-build-demo --log-failed`의 출력에서 `violations`는 정확히 한 줄 — `.claude/agents/factory-builder.md: additive-only sections (## Examples, ## Perspectives) — removals or edits outside allowed sections` — 이었고, `protected` 7개는 KTB-5대로 알림으로만 나왔다(`integrity: protected paths changed …`). 즉 KTB-5의 수정은 정확히 동작했고, 남은 한 규칙이 같은 방식으로 문을 막고 있었다.
+- **범위는 KTB-5보다 넓다.** 이 규칙에 걸리는 것은 retro의 다크 추가가 아닌 **모든** 역할 프롬프트 변경이다: `/know-thy-build:role`이 여는 PR 전부(역할 신설·Lens 수정은 정의상 `## Examples` 밖이다), `.claude/agents/**`를 건드리는 모든 패키지 업그레이드, 그리고 오타 하나 고치는 PR까지. 그 전부가 `enforce_admins` 아래에서 머지 불가였다.
+- **판정의 성격이 KTB-5와 같다.** "역할 파일은 예시·관점에만 추가한다"는 **에이전트에게 거는 제약**이지 "이 diff가 규칙을 변조했다"가 아니다. 사람이 역할의 Lens를 다시 쓰는 것은 `:role` 스킬의 존재 이유이고(ADR-019의 문장 그대로 "사람의 판단 자체가 판결이다"), 그것을 막는 규칙은 정책이 잘못 놓인 것이다.
+- **다만 L1에서의 계산이 보호 경로보다 무겁다.** `protectedPaths()`는 `git diff --name-status` 한 번이면 끝나지만, 섹션 판정에는 **파일 내용**이 필요하다. 그런데 merge 스테이지는 `checkoutHead`로 PR head를 체크아웃한 트리 위에서 돈다 — 워킹 트리를 읽으면 PR이 자기 판정의 재료를 고를 수 있다(KTB-5에서 `protectedPaths`가 내용을 안 읽게 만든 바로 그 이유다).
+- **다크 경로의 전제가 이 규칙이다.** retro가 lessons/역할 추가 PR을 사람 없이 머지하는 근거가 "허용 섹션에 **추가만** 했다"는 것이므로, `ok`가 더 이상 그것을 보지 않게 되면 그 전제를 따로 확인해야 한다.
+
+**결정**:
+
+1. **`integrityCheck`는 `policy: [{file, rule}]`를 따로 싣는다.** additive-only 발견(허용 섹션 밖 편집, 삭제, "header added")은 `violations`에서 빠져 여기로 간다 — `ok`를 내리지 않는다. L0에 남는 변조 규칙은 셋뿐이다: lessons 포맷(헤더·id 형식·상한·`근거:`), 테스트 skip/ignore pragma, 판정 불가. `bin/integrity.js`는 보호 경로와 같은 모양의 알림 한 줄을 찍고 그 때문에 실패하지 않는다.
+2. **`policyViolations({run, cwd, base, head, harness})`가 L1의 계산이다.** `additive_only` 글롭에 걸리는 파일만 골라, 파일별 `git diff -U0 <base>...<head> -- <file>`과 `git show <head>:<file>`로 판정한다 — **워킹 트리를 절대 읽지 않으므로 `checkoutHead` 뒤에도 안전하다**. 삭제된 파일은 `git show`가 실패하는데 그것은 판정 불가가 아니라 빈 내용이다(삭제 = 전부 removal = 위반). 그 외 git 실패는 fail-closed. 판정 본체 `additiveOnlyViolations`는 L0와 **같은 함수**다 — 갈라지면 체크가 알리는 것과 머지가 막는 것이 달라진다.
+3. **merge 스테이지 단계 (3)이 두 정책을 연달아 묻는다**: `protectedPaths()` → `policyViolations()` → (그 다음에야) 게이트. 위반이면 보호 경로와 **같은 거부**다 — `factory:needs-human`, 사유 `agent role sections edited outside Examples/Perspectives — human merge required: <files> (see PR #n)`, PR에 상세 코멘트, exit 2. 계산 실패·dep 부재는 `factory:blocked`.
+4. **retro의 다크 PR 선검사가 `policy`도 본다** — `integrity.policy.length > 0`이면 push도 PR도 하지 않는다. 이 PR이 사람 승인 없이 머지되는 근거가 바로 그 규칙이므로, 전제가 깨지면 자동 머지 자격이 없다.
+5. **다른 소비자는 없었다.** `verify-stage`·훅·게이트 중 additive-only 위반을 읽는 코드는 없다(`integrity.js`가 유일한 생산자였다). `retro.js`·`retro/text.js`·`retro/role-additions.js`의 주석이 "그 PR도 RED다"라고 적고 있던 것은 이제 틀린 서술이라 함께 고쳤다 — 그 경로는 여전히 막히지만, 막는 것은 체크의 RED가 아니라 `publish.js`의 선검사다.
+
+**알려진 한계**: L1의 섹션 판정은 파일당 git 호출 두 번(`diff -U0`, `show`)이라 `additive_only` 글롭에 걸리는 파일이 많은 PR에서는 호출이 선형으로 는다 — 역할 파일은 십수 개 규모라 실무상 문제가 없지만, 글롭을 넓히면 비용을 다시 봐야 한다. 그리고 L0와 L1은 같은 함수를 쓰지만 **입력 경로가 다르다**: L0는 체크아웃된 워킹 트리를, L1은 `git show`를 읽는다. 정상적인 CI에서는 같은 내용이지만, 워킹 트리가 더럽거나(스테이지가 파일을 쓴 경우) L0가 다른 커밋에서 돌면 둘의 판정이 갈릴 수 있다 — 그때 머지를 막는 쪽은 언제나 L1이다(L0는 알림일 뿐이므로 안전한 방향이다).
+
 (이후 항목은 dogfood 진행에 따라 추가)

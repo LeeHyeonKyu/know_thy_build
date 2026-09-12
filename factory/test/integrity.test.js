@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { integrityCheck, protectedPaths } from "../lib/integrity.js";
+import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const harness = { protected: { factory: [".factory/**", ".claude/**", "docs/factory/CHARTER.md"], except: [".factory/lessons/**", "docs/factory/runs/**"], additive_only: { ".claude/agents/*.md": ["## Examples", "## Perspectives"] } }, test: { test_glob: ["test/**/*.test.js"] } };
@@ -34,10 +34,85 @@ test("KTB-5: additive_only 규칙이 보는 파일은 protected 목록에 넣지
   expect(r.protected).toEqual([]);
 });
 
-test("KTB-5: 판정 불가도 protected를 [] 로 싣는다 — 호출자가 undefined.length로 터지지 않게", async () => {
+test("KTB-5: 판정 불가도 protected/policy를 [] 로 싣는다 — 호출자가 undefined.length로 터지지 않게", async () => {
   const r = await integrityCheck({ run: makeFakeRun([]), cwd: "/repo", base: "", head: "h", harness, readFile: () => "" });
   expect(r.ok).toBe(false);
   expect(r.protected).toEqual([]);
+  expect(r.policy).toEqual([]);
+});
+
+test("KTB-6: 변조는 여전히 ok:false — policy와 함께 있어도 서로를 가리지 않는다", async () => {
+  const run = makeFakeRun([
+    names("M\t.claude/agents/reviewer-qa.md\nM\ttest/a.test.js\n"),
+    u0(`+++ b/.claude/agents/reviewer-qa.md\n@@ -10,1 +10,1 @@\n-old lens\n+new lens\n+++ b/test/a.test.js\n@@ -1,0 +2,1 @@\n+test.skip("x", () => {});\n`),
+  ]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "## Lens\nnew lens\n## Examples\n" });
+  expect(r.ok).toBe(false);
+  expect(r.violations).toEqual([{ file: "test/a.test.js", rule: "test skip/ignore pragma added" }]);
+  expect(r.policy.some((v) => /additive-only/.test(v.rule))).toBe(true);
+});
+
+// ── KTB-6: policyViolations() — L1이 쓰는 섹션 정책 계산 ────────────────────────────
+// merge 스테이지는 PR head를 체크아웃한 트리 위에서 돈다. 섹션 판정에는 파일 내용이 필요한데,
+// **워킹 트리를 읽으면 PR이 판정 재료를 고를 수 있다** — 그래서 `git show <rev>:<file>`로만 읽는다.
+
+const AGENT = ".claude/agents/reviewer-qa.md";
+const show = (rev, text) => ({ match: (c, a) => a[0] === "show" && a[1] === `${rev}:${AGENT}`, result: { code: 0, stdout: text, stderr: "" } });
+const fileU0 = (text) => ({ match: (c, a) => a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: text, stderr: "" } });
+
+test("KTB-6 policyViolations: an addition inside ## Examples is allowed → files []", async () => {
+  const headText = ["## Purpose", "## Lens", "## Examples", ...Array(37).fill(""), "### 좋은 발견", "- DST 25시간", "## Perspectives"].join("\n") + "\n";
+  const run = makeFakeRun([names(`M\t${AGENT}\n`), fileU0(`+++ b/${AGENT}\n@@ -40,0 +41,2 @@\n+### 좋은 발견\n+- DST 25시간\n`), show("h", headText)]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r).toMatchObject({ ok: true, files: [] });
+  expect(r.violations).toEqual([]);
+});
+
+test("KTB-6 policyViolations: an edit outside the allowed sections → files lists the agent file", async () => {
+  const run = makeFakeRun([names(`M\t${AGENT}\n`), fileU0(`+++ b/${AGENT}\n@@ -10,1 +10,1 @@\n-old lens\n+new lens\n`), show("h", "## Lens\nnew lens\n## Examples\n")]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual([AGENT]);
+  expect(r.violations[0].rule).toMatch(/additive-only/);
+});
+
+test("KTB-6 policyViolations: reads file content ONLY via git show — never the working tree", async () => {
+  const run = makeFakeRun([names(`M\t${AGENT}\n`), fileU0(`+++ b/${AGENT}\n@@ -10,1 +10,1 @@\n-x\n+y\n`), show("h", "## Lens\ny\n")]);
+  await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  const shows = run.calls.filter((c) => c.args[0] === "show");
+  expect(shows.length).toBeGreaterThan(0);
+  for (const c of shows) expect(c.args[1]).toMatch(/^(b|h):/);        // 언제나 <rev>:<path> — 워킹 트리 경로가 아니다
+  for (const c of run.calls) expect(c.cmd).toBe("git");              // 파일 시스템 접근이 아예 없다
+});
+
+test("KTB-6 policyViolations: only additive_only files are diffed — a plain source change costs no git show", async () => {
+  const run = makeFakeRun([names("M\tsrc/a.js\nM\t.factory/harness.toml\n")]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r).toMatchObject({ ok: true, files: [] });
+  expect(run.calls).toHaveLength(1);                                  // name-status 한 번뿐
+});
+
+test("KTB-6 policyViolations: base 없음 / git 실패는 ok:false — 빈 목록을 '정책 위반 없음'으로 읽지 않는다", async () => {
+  const empty = await policyViolations({ run: makeFakeRun([]), cwd: "/repo", base: "", head: "h", harness });
+  expect(empty).toMatchObject({ ok: false, files: [] });
+  expect(empty.reason).toMatch(/base is empty/);
+  const boomNs = makeFakeRun([{ match: (c, a) => a[0] === "diff" && a.includes("--name-status"), result: { code: 128, stdout: "", stderr: "fatal" } }]);
+  expect(await policyViolations({ run: boomNs, cwd: "/repo", base: "b", head: "h", harness })).toMatchObject({ ok: false, files: [] });
+  const boomDiff = makeFakeRun([names(`M\t${AGENT}\n`), { match: (c, a) => a[0] === "diff" && a.includes("-U0"), result: { code: 128, stdout: "", stderr: "fatal" } }]);
+  const r = await policyViolations({ run: boomDiff, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/exited 128/);
+});
+
+test("KTB-6 policyViolations: a deleted agent file is a policy violation, not a git-show failure", async () => {
+  const run = makeFakeRun([
+    names(`D\t${AGENT}\n`),
+    fileU0(`--- a/${AGENT}\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-## Purpose\n-## Examples\n`),
+    { match: (c, a) => a[0] === "show", result: { code: 128, stdout: "", stderr: "fatal: path does not exist" } },
+  ]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual([AGENT]);
 });
 
 // ── KTB-5: protectedPaths() — L1(merge 스테이지)이 쓰는 목록 전용 계산 ────────────────────
@@ -116,25 +191,32 @@ test("KTB-5 protectedPaths: base가 없거나 git이 실패하면 ok:false — �
   expect(failed.files).toEqual([]);
   expect(failed.reason).toMatch(/exited 128/);
 });
-test("additive-only agent sections: additions in Examples ok; deletion or other section → violation", async () => {
+// ── KTB-6: additive-only는 "누가 고쳐도 되는가"의 정책이지 커밋에 대한 사실이 아니다 ───────
+// 그래서 L0의 violations(=ok)가 아니라 `policy` 배열로 보고되고, 자동 머지를 막는 집행은 L1이 한다.
+// L0가 RED가 되면 required context가 그것 하나뿐이라 **사람도** 역할 프롬프트를 고칠 수 없다.
+
+test("additive-only agent sections: additions in Examples ok; an edit elsewhere lands in policy, not violations", async () => {
   // 신규 파일 41~42번째 줄이 '## Examples' 아래에 오도록 채운 픽스처 (hunk: @@ -40,0 +41,2 @@)
   const examplesFixture = ["## Purpose", "## Lens", "## Examples", ...Array(37).fill(""), "### 좋은 발견", "- DST 25시간", "## Perspectives"].join("\n") + "\n";
   const okDiff = `+++ b/.claude/agents/reviewer-qa.md\n@@ -40,0 +41,2 @@\n+### 좋은 발견\n+- DST 25시간\n`;
   const run1 = makeFakeRun([names("M\t.claude/agents/reviewer-qa.md\n"), u0(okDiff)]);
   const r1 = await integrityCheck({ run: run1, cwd: "/repo", base: "b", head: "h", harness, readFile: () => examplesFixture, readFileAt: () => "## Purpose\n\n## Lens\n\n## Examples\n\n## Perspectives\n" });
   expect(r1.ok).toBe(true);
+  expect(r1.policy).toEqual([]);
   const badDiff = `+++ b/.claude/agents/reviewer-qa.md\n@@ -10,1 +10,1 @@\n-old lens\n+new lens\n`;
   const run2 = makeFakeRun([names("M\t.claude/agents/reviewer-qa.md\n"), u0(badDiff)]);
   const r2 = await integrityCheck({ run: run2, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "## Lens\nnew lens\n## Examples\n", readFileAt: () => "## Lens\nold lens\n## Examples\n" });
-  expect(r2.ok).toBe(false); expect(r2.violations[0].rule).toMatch(/additive-only/);
+  expect(r2.ok).toBe(true);                                    // KTB-6: 체크는 RED가 아니다 — 사람이 머지할 수 있어야 한다
+  expect(r2.violations).toEqual([]);
+  expect(r2.policy[0]).toMatchObject({ file: ".claude/agents/reviewer-qa.md", rule: expect.stringMatching(/additive-only/) });
 });
-test("additive-only is position-aware: added blank line under Lens is a violation even though a blank line also exists under Examples", async () => {
+test("additive-only is position-aware: added blank line under Lens is a policy finding even though a blank line also exists under Examples", async () => {
   const diff = `+++ b/.claude/agents/reviewer-qa.md\n@@ -2,0 +3,1 @@\n+\n`;
   const run = makeFakeRun([names("M\t.claude/agents/reviewer-qa.md\n"), u0(diff)]);
   const readFile = () => "## Purpose\n## Lens\n\n## Examples\n\n## Perspectives\n"; // line 3 (added) is the blank line under ## Lens
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile });
-  expect(r.ok).toBe(false);
-  expect(r.violations[0].rule).toMatch(/additive-only/);
+  expect(r.ok).toBe(true);
+  expect(r.policy[0].rule).toMatch(/additive-only/);
 });
 test("additive-only: an added '## ' header cannot self-legitimize the disallowed content it follows", async () => {
   // base: Purpose / Lens / Examples / Perspectives. Under Lens (after line 2) inject two new
@@ -144,16 +226,16 @@ test("additive-only: an added '## ' header cannot self-legitimize the disallowed
   const diff = `+++ b/.claude/agents/reviewer-qa.md\n@@ -2,0 +3,2 @@\n+malicious\n+## Examples\n`;
   const run = makeFakeRun([names("M\t.claude/agents/reviewer-qa.md\n"), u0(diff)]);
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile });
-  expect(r.ok).toBe(false);
-  expect(r.violations.some((v) => v.rule === "additive-only: header added")).toBe(true);
-  expect(r.violations.some((v) => /additive-only sections.*outside/.test(v.rule))).toBe(true);
+  expect(r.ok).toBe(true);
+  expect(r.policy.some((v) => v.rule === "additive-only: header added")).toBe(true);
+  expect(r.policy.some((v) => /additive-only sections.*outside/.test(v.rule))).toBe(true);
 });
-test("full deletion of an additive-only/protected file → violation", async () => {
+test("full deletion of an additive-only file → policy finding (the file's own rule judges it, not the protected list)", async () => {
   const delDiff = `--- a/.claude/agents/reviewer-qa.md\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-## Purpose\n-## Examples\n-content\n`;
   const run = makeFakeRun([names("D\t.claude/agents/reviewer-qa.md\n"), u0(delDiff)]);
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
-  expect(r.ok).toBe(false);
-  expect(r.violations.some((v) => /additive-only|protected/.test(v.rule))).toBe(true);
+  expect(r.ok).toBe(true);
+  expect(r.policy.some((v) => /additive-only/.test(v.rule))).toBe(true);
 });
 test("skip/ignore pragmas added to tests → violation", async () => {
   const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(`+++ b/test/a.test.js\n@@ -1,0 +2,1 @@\n+test.skip("x", () => {});\n`)]);

@@ -604,6 +604,7 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
     gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
     mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
     protectedPaths: async () => ({ ok: true, files: [] }),
+    policyViolations: async () => ({ ok: true, files: [] }),
     mergePr: async () => {}, closeIssue: async () => {},
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
@@ -939,6 +940,7 @@ const mergeHappyDeps = (over = {}) => checkoutBaseDeps({
   gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
   mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
   protectedPaths: async () => ({ ok: true, files: [] }),          // KTB-5: 보호 경로 없음 = 자동 머지 가능
+  policyViolations: async () => ({ ok: true, files: [] }),        // KTB-6: 역할 섹션 규칙도 통과
   mergePr: async () => {}, closeIssue: async () => {},
   ...over,
 });
@@ -989,7 +991,7 @@ test("merge: never calls trustWorkspace, claudeP, buildContext, verifyStage or w
   expect(writeHandoff).not.toHaveBeenCalled();
 });
 
-test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → protectedPaths → gates → mergeGates → mergePr → transition → closeIssue) in order", async () => {
+test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → protectedPaths → policyViolations → gates → mergeGates → mergePr → transition → closeIssue) in order", async () => {
   const calls = [];
   const d = mergeHappyDeps({
     assertHandoff: async () => { calls.push("assert"); return { ok: true }; },
@@ -998,12 +1000,13 @@ test("merge: calls checkoutHead, then runMergeStage's deps (prInfo → protected
     gates: async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }; },
     mergeGates: async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; },
     protectedPaths: async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; },
+    policyViolations: async () => { calls.push("policyViolations"); return { ok: true, files: [] }; },
     mergePr: async () => { calls.push("mergePr"); },
     transition: async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; },
     closeIssue: async () => { calls.push("closeIssue"); },
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
-  expect(calls).toEqual(["assert", "checkout", "prInfo", "protectedPaths", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["assert", "checkout", "prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
 });
 
 // KTB-5: 보호 경로 변경은 L0(integrity 체크)가 아니라 여기서 자동 머지를 막는다 — 사람은 여전히
@@ -1028,6 +1031,24 @@ test("merge: a protected path in the PR range → needs-human, never merges, and
   // 상세 코멘트는 **PR**에, 이슈에는 전이 사유 한 줄만
   expect(d.comment).toHaveBeenCalledWith(9, expect.stringContaining(".factory/harness.toml"));
   expect(lines.some((l) => /protected paths changed — human merge required/.test(l))).toBe(true);
+});
+
+test("merge: an agent file edited outside Examples/Perspectives → needs-human, no gates, no merge (KTB-6)", async () => {
+  const lines = [];
+  const d = mergeHappyDeps({
+    policyViolations: async () => ({ ok: true, files: [".claude/agents/factory-builder.md"] }),
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) })),
+    mergePr: vi.fn(async () => {}),
+    comment: vi.fn(async () => {}),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining("agent role sections edited outside") }));
+  expect(d.comment).toHaveBeenCalledWith(9, expect.stringContaining(".claude/agents/factory-builder.md"));
+  expect(lines.some((l) => /agent role sections edited outside/.test(l))).toBe(true);
 });
 
 test("merge: protectedPaths that cannot be computed → factory:blocked, no gates, no merge (KTB-5 fix round 1)", async () => {

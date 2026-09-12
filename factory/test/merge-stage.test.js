@@ -27,6 +27,7 @@ const baseD = (over = {}) => ({
   gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })),
   mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
   protectedPaths: vi.fn(async () => ({ ok: true, files: [] })),
+  policyViolations: vi.fn(async () => ({ ok: true, files: [] })),
   comment: vi.fn(async () => {}),
   mergePr: vi.fn(async () => {}),
   transition: graphTransition(),
@@ -198,6 +199,73 @@ test("(3) gates() throwing an unrelated error is NOT swallowed — it propagates
   expect(d.transition).not.toHaveBeenCalled();
 });
 
+// ── (3b) 역할 프롬프트의 허용 섹션 밖 편집 = 사람이 머지한다 (KTB-6) ──────────────
+// `additive_only`도 "누가 고쳐도 되는가"의 정책이지 커밋에 대한 사실이 아니다 — L0에 두면
+// 모든 `:role` PR과 에이전트 파일을 건드리는 패키지 업그레이드를 사람도 머지할 수 없다.
+
+test("(3b) an agent file edited outside Examples/Perspectives → needs-human naming the files, never merges", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({ policyViolations: vi.fn(async () => ({ ok: true, files: [".claude/agents/factory-builder.md"] })) });
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "agent role sections edited outside Examples/Perspectives — human merge required: .claude/agents/factory-builder.md (see PR #9)",
+  }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(lines.some((l) => /agent role sections edited outside/.test(l))).toBe(true);
+});
+
+test("(3b) the policy check runs after protectedPaths and BEFORE gates — no PR-authored command runs", async () => {
+  const calls = [];
+  const d = baseD({
+    protectedPaths: vi.fn(async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; }),
+    policyViolations: vi.fn(async () => { calls.push("policyViolations"); return { ok: true, files: [".claude/agents/x.md"] }; }),
+    gates: vi.fn(async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }; }),
+  });
+  expect(await run(d)).toBe(2);
+  expect(calls).toEqual(["protectedPaths", "policyViolations"]);
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.mergeGates).not.toHaveBeenCalled();
+});
+
+test("(3b) the refusal comments on the PR, naming the allowed sections", async () => {
+  const comment = vi.fn(async () => {});
+  const d = baseD({ policyViolations: vi.fn(async () => ({ ok: true, files: [".claude/agents/x.md"] })), comment });
+  await run(d);
+  const [target, body] = comment.mock.calls[0];
+  expect(target).toBe(9);
+  expect(body).toMatch(/## Examples/);
+  expect(body).toMatch(/`\.claude\/agents\/x\.md`/);
+});
+
+test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {
+  const d = baseD({ policyViolations: vi.fn(async () => ({ ok: false, files: [], reason: "git show exited 128" })) });
+  expect(await run(d)).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:blocked",
+    reason: "agent-section policy check could not be computed: git show exited 128",
+  }));
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(3b) the dep missing altogether is not a pass — factory:blocked", async () => {
+  const d = baseD({ policyViolations: undefined });
+  expect(await run(d)).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/agent-section policy check/) }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(3b) a protected-path refusal wins before the policy check is even asked", async () => {
+  const d = baseD({
+    protectedPaths: vi.fn(async () => ({ ok: true, files: [".factory/harness.toml"] })),
+    policyViolations: vi.fn(async () => ({ ok: true, files: [] })),
+  });
+  expect(await run(d)).toBe(2);
+  expect(d.policyViolations).not.toHaveBeenCalled();
+});
+
 // ── (4) mergeGates ───────────────────────────────────────────────────────
 
 test("(4) checksGreen false → needs-human 'required checks not GREEN'", async () => {
@@ -310,10 +378,11 @@ test("(3) the dep missing altogether is not a pass — factory:blocked, no merge
   expect(d.mergePr).not.toHaveBeenCalled();
 });
 
-test("(3) a clean PR range (no protected files) merges as before", async () => {
+test("(3) a clean PR range (no protected files, sections within policy) merges as before", async () => {
   const d = baseD();
   expect(await run(d)).toBe(0);
   expect(d.protectedPaths).toHaveBeenCalled();
+  expect(d.policyViolations).toHaveBeenCalled();
   expect(d.comment).not.toHaveBeenCalled();
   expect(d.mergePr).toHaveBeenCalled();
 });
@@ -391,13 +460,14 @@ test("(7) closeIssue failure is guarded — recorded, never thrown, still exit 0
 
 // ── happy path: full order + record lines for every step ───────────────────
 
-test("happy path: calls prInfo → protectedPaths → gates → mergeGates → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
+test("happy path: calls prInfo → protectedPaths → policyViolations → gates → mergeGates → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
   const calls = [];
   const d = baseD({
     prInfo: vi.fn(async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; }),
     gates: vi.fn(async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }; }),
     mergeGates: vi.fn(async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; }),
     protectedPaths: vi.fn(async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; }),
+    policyViolations: vi.fn(async () => { calls.push("policyViolations"); return { ok: true, files: [] }; }),
     mergePr: vi.fn(async () => { calls.push("mergePr"); }),
     transition: vi.fn(async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; }),
     closeIssue: vi.fn(async () => { calls.push("closeIssue"); }),
@@ -405,7 +475,7 @@ test("happy path: calls prInfo → protectedPaths → gates → mergeGates → m
   const { lines, record } = makeRecord();
   const code = await run(d, { record });
   expect(code).toBe(0);
-  expect(calls).toEqual(["prInfo", "protectedPaths", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
   expect(d.closeIssue).toHaveBeenCalledWith(9);
   // 7단계 각각의 흔적이 런 레코드에 남는다
   expect(lines.length).toBeGreaterThanOrEqual(7);

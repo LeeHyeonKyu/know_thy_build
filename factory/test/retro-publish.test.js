@@ -187,6 +187,24 @@ test("KTB-5: a dark lessons PR carrying a protected path is refused locally — 
   expect(argvOf(run)).toContain(`git worktree remove --force ${worktreeOf(run)}`);
 });
 
+// KTB-6: additive_only 위반도 `ok`를 내리지 않으므로(정책은 L1이 집행한다), 다크 PR의 로컬
+// 선검사가 `policy`도 봐야 한다 — 이 PR이 사람 승인 없이 머지되는 근거가 "허용 섹션에 추가만"이다.
+test("KTB-6: a dark PR that edits a role file outside the allowed sections is refused locally — no push, no PR", async () => {
+  const AGENT = ".claude/agents/reviewer-correctness.md";
+  const h = { protected: { factory: [".factory/**", ".claude/**"], except: [".factory/lessons/**"], additive_only: { ".claude/agents/*.md": ["## Examples", "## Perspectives"] } }, test: { test_glob: [] } };
+  const badU0 = [`+++ b/${AGENT}`, "@@ -2,1 +2,1 @@", "-old lens", "+new lens", ""].join("\n");
+  const run = makeFakeRun(gitTable([], { nameStatus: `M\t${AGENT}`, u0: badU0 }));
+  const gh = fakeGh({ checks: [PASS] });
+  const s = spies();
+  const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, s, { harness: h, readFile: () => "## Lens\nnew lens\n## Examples\n" }));
+  expect(out).toMatchObject({ pr: null, merged: false });
+  expect(out.reason).toMatch(/role sections edited outside the allowed sections in a dark PR/);
+  expect(out.reason).toContain(AGENT);
+  expect(gh.createPr).not.toHaveBeenCalled();
+  expect(argvOf(run).some((a) => a.startsWith("git push"))).toBe(false);
+  expect(argvOf(run)).toContain(`git worktree remove --force ${worktreeOf(run)}`);
+});
+
 test("a git failure is reported as a reason and the worktree is still removed", async () => {
   const run = makeFakeRun(gitTable([{ match: (c, a) => c === "git" && a[0] === "push", result: { code: 1, stdout: "", stderr: "remote rejected" } }]));
   const gh = fakeGh({ checks: [PASS] });

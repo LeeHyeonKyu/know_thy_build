@@ -167,6 +167,16 @@ export async function openAndMergeLessonsPr({
         log(`retro: lessons PR not opened — ${reason}`);
         return { pr: null, merged: false, reason, branch };
       }
+      // KTB-6: `additive_only` 위반도 이제 `ok`를 내리지 않는다 — `policy`로 옮겼다. 이 PR이
+      // 다크로 머지되는 근거가 바로 "허용 섹션에 **추가만** 했다"는 것이므로, 그 전제가 깨지면
+      // 자동 머지할 자격이 없다. `applyRoleAdditions`가 이미 섹션 안에만 쓰지만, 그 불변식이
+      // 깨졌을 때 조용히 머지되지 않도록 여기서 한 번 더 확인한다.
+      if (integrity.policy?.length) {
+        const files = [...new Set(integrity.policy.map((v) => v.file))].join(", ");
+        const reason = `integrity: role sections edited outside the allowed sections in a dark PR (never auto-merged): ${files}`;
+        log(`retro: lessons PR not opened — ${reason}`);
+        return { pr: null, merged: false, reason, branch };
+      }
 
       await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
       pr = await gh.createPr({ head: branch, base: defaultBranch, title, body: lessonsBody(date, paths) });

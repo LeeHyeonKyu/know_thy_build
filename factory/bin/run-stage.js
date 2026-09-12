@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync } from "node:fs";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
@@ -11,7 +11,7 @@ import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
-import { integrityCheck, protectedPaths } from "../lib/integrity.js";
+import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, factoryLabelOf } from "../lib/labels.js";
@@ -19,6 +19,7 @@ import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
 import { verifyStage } from "../lib/verify-stage.js";
+import { transcriptPathFrom } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { transition } from "../lib/transition.js";
@@ -39,6 +40,22 @@ export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.j
 // MergeBaseError/isMergeBaseError/MERGE_BASE_BLOCKED_REASON/GIT_DIFF_BLOCKED_REASON now live in
 // lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
 export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
+
+/**
+ * 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 산출물 추출은 트랜스크립트 없이도 돌아간다
+ * (envelope의 펜스/맨 JSON으로 내려간다). 읽기 실패가 스테이지를 죽이지는 않는다.
+ */
+function readTranscript(root, out) {
+  try {
+    const p = transcriptPathFrom({
+      agentsLogText: existsSync(join(root, ".factory/out/agents.jsonl")) ? readFileSync(join(root, ".factory/out/agents.jsonl"), "utf8") : "",
+      sessionId: out?.session_id,
+      cwd: root,
+      home: homedir(),
+    });
+    return p && existsSync(p) ? readFileSync(p, "utf8") : "";
+  } catch { return ""; }
+}
 
 /** claude -p 결과를 런 레코드 한 줄로. 무엇을 얼마나 태웠는지는 사후 감사의 1차 증거다. */
 export function usageLine(out) {
@@ -420,6 +437,9 @@ async function main() {
       const r = await run("claude", args, { cwd: root, env: { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root } });
       mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
       writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
+      // envelope을 이름 붙여 한 벌 더 남긴다 — `<stage>.json`은 산출물 추출이 성공하면 그 객체로
+      // 덮이지만(KTB-7), usage·cost는 envelope에만 있으므로 사후 조사에 둘 다 필요하다.
+      writeFileSync(join(root, ".factory/out", `${stage}.envelope.json`), r.stdout);
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
     /**
@@ -436,7 +456,13 @@ async function main() {
       console.log(verdictLine(result));
       return result;
     },
-    verifyStage: ({ out, gates }) => verifyStage({ stage, out, agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates }),
+    verifyStage: ({ out, gates }) => {
+      const v = verifyStage({ stage, out, transcriptText: readTranscript(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates });
+      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
+      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+      return v;
+    },
     writeHandoff: async ({ data }) => { await gh.comment(issue, renderHandoff({ stage, issue, summary: data.summary || `### ${stage} 완료`, data })); },
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
     prInfo: async () => {
@@ -472,6 +498,16 @@ async function main() {
      */
     protectedPaths: async () => {
       try { return await protectedPaths({ run, cwd: root, base: await mergeBase(), harness }); }
+      catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
+    },
+    /**
+     * merge stage 전용(KTB-6): `[protected].additive_only` 규칙(`.claude/agents/*.md`의 `## Examples`·
+     * `## Perspectives`에 추가만)을 벗어난 역할 파일을 센다. 위의 `protectedPaths`와 같은 이유로 base
+     * 브랜치의 코드·하네스로 계산하고, 섹션 판정에 필요한 파일 내용은 **워킹 트리가 아니라**
+     * `git show <rev>:<file>`로 읽는다 — checkoutHead 뒤의 트리는 PR의 것이다.
+     */
+    policyViolations: async () => {
+      try { return await policyViolations({ run, cwd: root, base: await mergeBase(), harness }); }
       catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
     },
     /** merge stage 전용: 거부 사유를 **PR**에 붙인다(사람이 머지 버튼을 누르는 자리). PR과 이슈는 같은 번호 공간이라 `gh issue comment`가 그대로 통한다. */

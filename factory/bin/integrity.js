@@ -24,5 +24,9 @@ if (isMain) {
   // 한다"는 집행은 L1(merge 스테이지)이 자동 머지를 거부하는 것으로 한다. 여기서는 잡 로그에만
   // 남긴다 — 상태를 고쳐 쓰지도, PR에 코멘트를 달지도 않는다(권한을 늘리지 않는다).
   if (r.protected?.length) console.log(`integrity: protected paths changed (human merge required): ${r.protected.join(", ")}`);
+  // additive-only도 마찬가지다(KTB-6): "역할 프롬프트를 누가 고쳐도 되는가"는 정책이지 이 커밋에
+  // 대한 사실이 아니다. 여기서 RED로 만들면 `:role` PR도, 에이전트 파일을 건드리는 패키지
+  // 업그레이드도 사람이 머지할 수 없다 — 집행은 L1이 자동 머지를 거부하는 것으로 한다.
+  if (r.policy?.length) console.log(`integrity: agent role sections edited outside the allowed sections (human merge required): ${[...new Set(r.policy.map((v) => v.file))].join(", ")}`);
   process.exit(r.ok ? 0 : 1);
 }

@@ -15,9 +15,10 @@ const MERGEABILITY_REPOLL_MS = 5000;
  *    아니라 **판정 없음**이다 — needs-human "gates missing at merge"로 떨어진다. MergeBaseError/
  *    GitDiffError를 던질 수 있다), mergeGates() → { checksGreen, integrityGreen } (마찬가지),
  *    mergePr(pr), transition({to,reason,mergeGatesResult?}), closeIssue(pr), sleep?(ms),
- *    protectedPaths() → { ok, files, reason? } (KTB-5 — base 브랜치 코드로 계산한 보호 경로 목록.
- *    ok:false나 dep 부재는 "보호 경로 없음"이 아니라 **판정 불가**라 blocked다), comment?(number, body) →
- *    그 번호(여기서는 PR)에 코멘트(best-effort).
+ *    protectedPaths() → { ok, files, reason? } (KTB-5 — base 브랜치 코드로 계산한 보호 경로 목록),
+ *    policyViolations() → { ok, files, reason? } (KTB-6 — `additive_only` 섹션 규칙을 벗어난 역할 파일).
+ *    둘 다 ok:false거나 dep이 없으면 "위반 없음"이 아니라 **판정 불가**라 blocked다.
+ *    comment?(number, body) → 그 번호(여기서는 PR)에 코멘트(best-effort).
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
@@ -78,37 +79,69 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 계산 자체가 안 된 것(git 실패·merge-base 없음·dep 미배선)은 GREEN도 RED도 아닌 **판정 불가**라
   // `factory:blocked`다 — 게이트·mergeGates의 typed-error와 같은 처리다(needs-human은 "사람이
   // 판단할 것이 있다"는 뜻이고, 여기서는 판단할 재료 자체가 없다).
-  const prot = d.protectedPaths ? await d.protectedPaths() : { ok: false, files: [], reason: "protectedPaths dep not wired" };
-  if (!prot?.ok) {
-    const reason = `protected-path check could not be computed: ${prot?.reason || "unknown"}`;
-    const t = await d.transition({ to: "factory:blocked", reason });
-    record([`merge: ${reason}`, ...refusal(t)]);
-    return 2;
-  }
-  if (prot.files.length) {
-    // 사유는 **이슈**의 전이 코멘트로 간다(한 줄 포인터: 어느 PR을 사람이 봐야 하는지). 상세 코멘트는
-    // **PR**에 붙는다 — 사람이 머지 버튼을 누르는 자리가 거기이고, 본문이 그 diff를 가리키기 때문이다.
-    const reason = `protected paths changed — human merge required: ${prot.files.join(", ")} (see PR #${pr})`;
-    // 코멘트는 부수 효과다 — 실패해도 거부 자체를 잃지 않는다(전이 코멘트가 사유를 이미 싣는다).
+  //
+  // 두 정책을 같은 자리에서 묻는다: 보호 경로(KTB-5)와 역할 파일의 섹션 규칙(KTB-6). 둘 다
+  // "이 diff가 틀렸다"가 아니라 "이 diff는 사람이 머지해야 한다"이고, 거부의 모양도 같다.
+  //
+  // 사유는 **이슈**의 전이 코멘트로 간다(한 줄 포인터: 어느 PR을 사람이 봐야 하는지). 상세 코멘트는
+  // **PR**에 붙는다 — 사람이 머지 버튼을 누르는 자리가 거기이고, 본문이 그 diff를 가리키기 때문이다.
+  // 코멘트는 부수 효과다 — 실패해도 거부 자체를 잃지 않는다(전이 코멘트가 사유를 이미 싣는다).
+  const handToHuman = async ({ reason, heading, why, files }) => {
     try {
       await d.comment?.(pr, [
-        "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**",
-        "",
-        "이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은",
-        "사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).",
-        "",
-        "변경된 보호 경로:",
-        ...prot.files.map((f) => `- \`${f}\``),
-        "",
+        `**${heading} — 팩토리가 자동 머지하지 않습니다.**`, "", ...why, "",
+        ...files.map((f) => `- \`${f}\``), "",
         "diff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.",
         `추적 이슈 #${issue}는 \`factory:needs-human\`으로 옮겼습니다.`,
       ].join("\n"));
-    } catch (e) { record([`merge: protected-path comment failed — ${e?.message || e}`]); }
-    const t = await d.transition({ to: "factory:needs-human", reason });
+    } catch (e) { record([`merge: human-merge comment failed — ${e?.message || e}`]); }
+    const t = await d.transition({ to: "factory:needs-human", reason: `${reason} (see PR #${pr})` });
     record([`merge: ${reason}`, ...refusal(t)]);
     return 2;
+  };
+  const undecidable = async (what, reason) => {
+    const line = `${what} could not be computed: ${reason || "unknown"}`;
+    const t = await d.transition({ to: "factory:blocked", reason: line });
+    record([`merge: ${line}`, ...refusal(t)]);
+    return 2;
+  };
+
+  const prot = d.protectedPaths ? await d.protectedPaths() : { ok: false, files: [], reason: "protectedPaths dep not wired" };
+  if (!prot?.ok) return await undecidable("protected-path check", prot?.reason);
+  if (prot.files.length) {
+    return await handToHuman({
+      reason: `protected paths changed — human merge required: ${prot.files.join(", ")}`,
+      heading: "보호 경로 변경",
+      why: [
+        "이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은",
+        "사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).",
+        "", "변경된 보호 경로:",
+      ],
+      files: prot.files,
+    });
   }
   record(["merge: no protected paths in the PR range"]);
+
+  // 역할 파일의 섹션 규칙(KTB-6). `[protected].additive_only`는 "`.claude/agents/*.md`는 `## Examples`·
+  // `## Perspectives`에 **추가만**"이라는 정책이다 — retro의 다크 추가(§8.1)가 통과하는 좁은 문이고,
+  // 그 밖의 편집은 역할의 정의를 바꾸는 일이라 사람이 봐야 한다. 보호 경로와 달리 섹션 판정에는
+  // 파일 내용이 필요한데, `policyViolations`는 워킹 트리가 아니라 `git show <rev>:<file>`로 읽는다.
+  const pol = d.policyViolations ? await d.policyViolations() : { ok: false, files: [], reason: "policyViolations dep not wired" };
+  if (!pol?.ok) return await undecidable("agent-section policy check", pol?.reason);
+  if (pol.files.length) {
+    return await handToHuman({
+      reason: `agent role sections edited outside Examples/Perspectives — human merge required: ${pol.files.join(", ")}`,
+      heading: "역할 프롬프트의 허용 섹션 밖 편집",
+      why: [
+        "`.claude/agents/*.md`는 `## Examples`·`## Perspectives`에 **추가만** 허용됩니다",
+        "(`[protected].additive_only`). 그 밖의 편집은 역할의 정의를 바꾸는 일이라, 팩토리가",
+        "스스로 머지하지 않고 사람에게 넘깁니다(ADR-020 KTB-6).",
+        "", "허용 섹션 밖에서 바뀐 파일:",
+      ],
+      files: pol.files,
+    });
+  }
+  record(["merge: agent role sections within policy"]);
 
   // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human. base/diff를 못 구한
   // 것도 판정 불가다(run-stage의 나머지 스테이지와 같은 typed-error 계약). 상태 게시는 부수 효과라
