@@ -6,6 +6,7 @@ import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS } from "../bootstrap.js";
+import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
@@ -289,7 +290,18 @@ export async function checkGitHub({ gh, harness, labels }) {
     const have = new Set(await gh.listLabels());
     const missingLabels = labels.filter((l) => !have.has(l.name)).map((l) => l.name);
     const branch = harness.project?.default_branch;
-    const protection = await gh.getBranchProtection(branch);
+    // getBranchProtection throws only for the GitHub-Free private-repo 403 (see gh.js) — a plain 404
+    // (no protection yet) still resolves to `null` below, unchanged. Catch it locally, not in the outer
+    // try/catch: the rest of this function's checks (secrets, labels, …) are still valid and must still be
+    // reported — falling through to `github.unavailable` would throw away all of them over one 403.
+    let protection = null;
+    let protectionCheck;
+    try {
+      protection = await gh.getBranchProtection(branch);
+    } catch (e) {
+      if (!GH_FREE_PLAN_PROTECTION_RE.test(e.message)) throw e;
+      protectionCheck = c("github.protection", "WARN", "branch protection unavailable on this plan (private repo on GitHub Free) — L0 off; make the repo public or upgrade");
+    }
     const contexts = new Set(protection?.required_status_checks?.contexts || []);
     // L0(branch protection)와 L1(머지 스테이지)은 서로 다른 목록을 강제한다(ADR-015 보강, bootstrap.js 주석).
     // 보호 규칙이 요구해야 하는 것은 `L0_CONTEXTS`뿐이다 — `harness.factory.required_checks`를 여기에 대조하면
@@ -297,15 +309,18 @@ export async function checkGitHub({ gh, harness, labels }) {
     // required_checks는 별도 PASS 줄로 "L1이 머지 직전에 본다"고 보고만 한다.
     const missingChecks = L0_CONTEXTS.filter((r) => !contexts.has(r));
     const l1 = harness.factory?.required_checks || [];
+    if (!protectionCheck) {
+      protectionCheck = !protection || missingChecks.length
+        ? c("github.protection", "WARN", `run factory bootstrap — branch protection is missing L0 contexts: ${missingChecks.join(", ")}`)
+        : c("github.protection", "PASS", `L0 contexts: ${L0_CONTEXTS.join(", ")}`);
+    }
 
     return [
       hasClaude ? c("github.claude-secret", "PASS") : c("github.claude-secret", "FAIL", "set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"),
       hasBot ? c("github.bot-token", "PASS") : c("github.bot-token", "FAIL", "set FACTORY_BOT_TOKEN"),
       issuedAt ? c("github.token-issued-at", "PASS", issuedAt) : c("github.token-issued-at", "WARN", "FACTORY_TOKEN_ISSUED_AT not set"),
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
-      !protection || missingChecks.length
-        ? c("github.protection", "WARN", `run factory bootstrap — branch protection is missing L0 contexts: ${missingChecks.join(", ")}`)
-        : c("github.protection", "PASS", `L0 contexts: ${L0_CONTEXTS.join(", ")}`),
+      protectionCheck,
       c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.length ? l1.join(", ") : "(none configured)"}`),
     ];
   } catch (e) {

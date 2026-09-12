@@ -1,4 +1,5 @@
 import { LABELS } from "./label-catalog.js";
+import { GH_FREE_PLAN_PROTECTION_RE } from "./gh.js";
 
 /**
  * L0(branch protection)가 요구하는 체크는 `factory/integrity` 하나다(ADR-015 보강).
@@ -55,6 +56,20 @@ export function bootstrapPlan({ harness, today, existing }) {
 }
 
 /**
+ * 실패한 op 하나를 사람이 읽을 한 줄로 만든다 — 호출자(bootstrapCommand)가 `failed[]`를 순회하며 이 함수로
+ * 딱 한 번만 찍는다. protection 실패가 GitHub Free 플랜 403이면(private repo에서는 branch protection API 자체가
+ * 막힌다) "권한 문제"가 아니라 "이 플랜에서 못 함"이라는 걸 명시하고, L0가 꺼져도 L1(머지 스크립트의
+ * allChecksGreen)·L2(경로 deny)는 그대로 강제된다는 걸 덧붙인다 — 사람이 "그래서 지금 아무 것도 안 지켜지냐"고
+ * 오해하지 않게. 그 외 실패는 지금까지의 문구를 그대로 쓴다.
+ */
+export function formatBootstrapFailure({ op, error }) {
+  if (op.kind === "protection" && GH_FREE_PLAN_PROTECTION_RE.test(error)) {
+    return `protection ${op.branch}: not available on this plan (private repo on GitHub Free) — make the repo public or upgrade; L0 required-check enforcement is off, L1 (merge script requires all checks GREEN) and L2 still apply`;
+  }
+  return `failed: ${op.kind} ${op.name || op.branch || ""} — ${error}`;
+}
+
+/**
  * ops를 실제로 적용한다. label/protection/variable만 gh를 부른다 — note는 보고만 하고 절대 gh를 건드리지 않는다.
  * harness는 받지 않는다 — protection op이 계획 단계에서 이미 branch/body를 다 갖춘 self-contained 객체라 필요 없다.
  * op마다 격리한다: 라벨 하나가 실패해도(권한/네트워크 등) 나머지 라벨·protection·variable은 계속 시도한다 — 부트스트랩은
@@ -91,7 +106,10 @@ export async function applyBootstrap({ gh, ops, log = () => {} }) {
           throw new Error(`applyBootstrap: unknown op kind "${op.kind}"`);
       }
     } catch (e) {
-      log(`failed: ${op.kind} ${op.name || op.branch || ""} — ${e.message}`);
+      // Do not also `log()` here — the caller (bootstrapCommand) prints each failure exactly once from the
+      // returned `failed[]`, formatted per op kind (e.g. the GitHub-Free branch-protection 403 gets a dedicated
+      // actionable line). Logging it here too used to double-print the same failure (once via log→io.out,
+      // once via the caller's io.err loop).
       failed.push({ op, error: e.message });
     }
   }

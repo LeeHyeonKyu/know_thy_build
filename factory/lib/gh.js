@@ -21,6 +21,11 @@ export const allChecksGreen = (checks, required = null) => {
 
 const STATUS_STATES = new Set(["success", "failure", "pending", "error"]);
 
+// GitHub Free 플랜의 private repo는 branch protection API 자체를 막는다 — gh CLI가 그 사실을 이 문구로
+// 알린다(HTTP 403). bootstrap(putBranchProtection 실패 처리)과 doctor(getBranchProtection) 둘 다 이 문구로
+// "권한 문제"가 아니라 "이 플랜에서 못 함"을 구분해야 하므로 정규식을 한 곳에서 공유한다.
+export const GH_FREE_PLAN_PROTECTION_RE = /Upgrade to GitHub Pro|make this repository public/i;
+
 export function makeGh({ run, repo }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);
@@ -101,9 +106,13 @@ export function makeGh({ run, repo }) {
       await gh(["label", "create", name, "-R", repo, "--color", color, "--description", description, "--force"]);
     },
     // gh api exits non-zero for an unprotected branch (404) — go through run() directly, like getVariable.
+    // Exception: a GitHub Free private-repo 403 is not "unprotected", it's "this plan can't have protection" —
+    // callers (doctor) need to tell the two apart, so that one case throws instead of resolving to null.
     async getBranchProtection(branch) {
       const r = await run("gh", ["api", `repos/${repo}/branches/${branch}/protection`]);
-      return r.code === 0 ? JSON.parse(r.stdout) : null;
+      if (r.code === 0) return JSON.parse(r.stdout);
+      if (GH_FREE_PLAN_PROTECTION_RE.test(r.stderr)) throw new Error(r.stderr.trim() || r.stdout.trim());
+      return null;
     },
     async putBranchProtection(branch, body) {
       await gh(["api", "-X", "PUT", `repos/${repo}/branches/${branch}/protection`, "--input", "-"], { input: JSON.stringify(body) });

@@ -65,12 +65,18 @@ export function checkHarness({ harness: h, files = [] }) {
   return out;
 }
 
-/** [commands]의 비-템플릿 명령(및 proof 제외)을 실제로 실행해 종료 코드를 보고한다. */
-export async function checkCommands({ harness: h, run, cwd, skipRun = false }) {
+/**
+ * [commands]의 비-템플릿 명령(및 proof 제외)을 실제로 실행해 종료 코드를 보고한다.
+ * `skipReason`이 있으면(=doctor.js가 test env-up을 먼저 시도했다가 실패한 경우) 명령을 하나도 실행하지 않고
+ * 각각 FAIL로 보고한다 — 환경 없이 돌리면 DB가 있는 저장소는 상시 거짓 FAIL이 나기 때문(harness.toml 주석,
+ * §5.2.1). smoke 블록은 이미 `envResult.ok`로 이 게이팅을 하고 있었다 — commands도 대칭으로 맞춘다.
+ */
+export async function checkCommands({ harness: h, run, cwd, skipRun = false, skipReason = null }) {
   if (skipRun) return [c("commands.run", "WARN", "--no-run: commands not executed")];
   const out = [];
   for (const [k, cmd] of Object.entries(h.commands || {})) {
     if (k === "proof" || k in TEMPLATED) continue;
+    if (skipReason) { out.push(c(`commands.run.${k}`, "FAIL", `skipped: test env not up (${skipReason})`)); continue; }
     const r = await run("bash", ["-lc", cmd], { cwd });
     out.push(r.code === 0 ? c(`commands.run.${k}`, "PASS", cmd) : c(`commands.run.${k}`, "FAIL", `${cmd} → exit ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 400)}`));
   }

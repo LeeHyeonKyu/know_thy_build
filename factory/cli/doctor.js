@@ -66,6 +66,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   // `--no-run`이 아니면 항상 한 사이클 돈다 — envUp/envDown은 `[test.env]`가 비어 있으면 스스로 no-op이다.
   const wantsEnv = !noRun;
   let envResult = { ok: true, steps: [], pids: [] };
+  let envFailReason = null;
   // envUp이 partial로 뭔가를 띄워놓고 실패했을 수도 있으니(compose up 성공 → seed 실패 등) 성공 여부와 무관하게
   // envDown은 항상 부른다. envDown 자체가 실패해도 doctor 전체를 죽이지 않고 WARN으로만 남긴다(teardown은 best-effort).
   const tearDown = async () => {
@@ -83,12 +84,15 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     envResult = await envUpFn({ run, cwd: root, harness });
     if (!envResult.ok) {
       const failed = envResult.steps.find((s) => !s.ok);
-      checks.push({ id: "smoke.env", level: "FAIL", detail: failed?.detail || "env up failed" });
+      envFailReason = failed?.detail || "env up failed";
+      checks.push({ id: "smoke.env", level: "FAIL", detail: envFailReason });
     }
   }
 
   try {
-    checks.push(...(await checkCommands({ harness, run, cwd: root, skipRun: noRun })));
+    // env-up이 실패했으면 [commands]도 smoke와 대칭으로 건너뛴다(둘 다 같은 test env 사이클 안에서 돈다) —
+    // 환경 없이 돌리면 DB가 있는 저장소는 고칠 수 없는 거짓 FAIL이 상시로 뜬다(harness.toml 주석 참조).
+    checks.push(...(await checkCommands({ harness, run, cwd: root, skipRun: noRun, skipReason: envFailReason })));
 
     // ── factory scope (only when installed) ─────────────────────────
     if (exists(join(root, ".factory/bin/run-stage.js"))) {

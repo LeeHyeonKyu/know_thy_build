@@ -184,6 +184,26 @@ test("envUp partial failure still tears down with the pids it started, and repor
   expect(checks.some((c) => c.id.startsWith("smoke.") && c.id !== "smoke.env")).toBe(false); // levels never ran
 });
 
+test("envUp failure also skips [commands] — commands.run.<k> report FAIL with a skip reason instead of running, and envDown still runs (Task 3, doctor gates vs env-up)", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root);
+  const envDownCalls = [];
+  const spyEnvDown = async (args) => { envDownCalls.push(args); return { ok: true, steps: [] }; };
+  const spyEnvUp = async () => ({ ok: false, steps: [{ name: "seed", ok: false, detail: "exit 1: seed failed" }], pids: [7] });
+  const { io: i, o } = io();
+  const code = await doctorCommand({ root, pkgRoot, argv: ["--json"], io: i, run, gh: fakeGh, deps: { envUp: spyEnvUp, envDown: spyEnvDown } });
+  expect(typeof code).toBe("number");
+  expect(envDownCalls).toHaveLength(1); // teardown still runs despite the skip
+  const { checks } = JSON.parse(o.out.join(""));
+  const lint = checks.find((c) => c.id === "commands.run.lint");
+  const unit = checks.find((c) => c.id === "commands.run.unit");
+  expect(lint).toMatchObject({ level: "FAIL", detail: expect.stringContaining("skipped: test env not up") });
+  expect(unit).toMatchObject({ level: "FAIL", detail: expect.stringContaining("skipped: test env not up") });
+  expect(lint.detail).toContain("seed failed"); // carries the actual env-up failure reason
+  // the underlying gate commands themselves were never executed (no npm run lint / vitest run call).
+  expect(run.calls.some((c) => c.cmd === "bash" && c.args[0] === "-lc" && /npm run lint|vitest run/.test(c.args[1] || ""))).toBe(false);
+});
+
 test("envDown failure during teardown is non-fatal — smoke.env-down WARN, doctor still finishes (fix round 1, Important #2)", async () => {
   const root = await setupRepo();
   const run = makeDoctorRun(root);

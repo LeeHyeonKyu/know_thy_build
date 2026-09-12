@@ -164,6 +164,19 @@ test("getBranchProtection returns parsed json, or null on non-zero exit (404); p
   expect(JSON.parse(putCall.opts.input)).toEqual({ required_status_checks: { contexts: ["ci"] } });
 });
 
+test("getBranchProtection throws (not null) on the GitHub Free private-repo 403 — doctor needs to tell this apart from a plain 404", async () => {
+  const run403 = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)" } }]);
+  await expect(makeGh({ run: run403, repo }).getBranchProtection("main")).rejects.toThrow(/Upgrade to GitHub Pro/);
+
+  // the alternate GitHub wording ("make this repository public") also throws.
+  const run403b = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "gh: make this repository public or upgrade (HTTP 403)" } }]);
+  await expect(makeGh({ run: run403b, repo }).getBranchProtection("main")).rejects.toThrow(/make this repository public/);
+
+  // any other non-zero exit (404, network error, etc.) is unchanged — still resolves to null, never throws.
+  const runOther = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 404: Branch not protected" } }]);
+  expect(await makeGh({ run: runOther, repo }).getBranchProtection("main")).toBe(null);
+});
+
 test("setVariable sets a repo variable via --body", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "variable" && a[1] === "set", result: { code: 0, stdout: "", stderr: "" } }]);
   const gh = makeGh({ run, repo });

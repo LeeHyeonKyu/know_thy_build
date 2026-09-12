@@ -1,7 +1,7 @@
 import { run as realRun } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
 import { loadHarness } from "../lib/config.js";
-import { bootstrapPlan, applyBootstrap } from "../lib/bootstrap.js";
+import { bootstrapPlan, applyBootstrap, formatBootstrapFailure } from "../lib/bootstrap.js";
 
 const TOKEN_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
@@ -69,6 +69,7 @@ export async function bootstrapCommand({ root, argv = [], io, gh, run = realRun,
   const { applied, failed, notes } = await applyBootstrap({ gh: ghClient, ops, log: (msg) => io.out(msg) });
   io.out(`bootstrap: applied ${applied.length} ops`);
   for (const n of notes) io.out(`note: ${n}`);
-  for (const f of failed) io.err(`failed: ${f.op.kind} ${f.op.name || f.op.branch || ""} — ${f.error}`);
+  // 실패마다 딱 한 줄만 찍는다(applyBootstrap의 log()는 실패 시 아무것도 찍지 않는다 — dedupe 지점은 여기 하나뿐).
+  for (const f of failed) io.err(formatBootstrapFailure(f));
   return failed.length > 0 ? 1 : 0;
 }

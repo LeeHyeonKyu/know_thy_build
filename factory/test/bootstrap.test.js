@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LABELS } from "../lib/label-catalog.js";
-import { bootstrapPlan, applyBootstrap } from "../lib/bootstrap.js";
+import { bootstrapPlan, applyBootstrap, formatBootstrapFailure } from "../lib/bootstrap.js";
 import { bootstrapCommand } from "../cli/bootstrap.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -248,6 +248,55 @@ test("bootstrapCommand: a failing gh op → exit 1, failure printed", async () =
   const code = await bootstrapCommand({ root, argv: [], io: i, gh, today: "2026-09-12" });
   expect(code).toBe(1);
   expect(o.err.join("\n")).toContain("rate limited");
+});
+
+// ── fix round 2 (GitHub Free branch-protection 403) ─────────────────────────
+
+const GH_FREE_403 = "gh api -X failed (1): gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)";
+const GH_FREE_403_LINE = "protection main: not available on this plan (private repo on GitHub Free) — make the repo public or upgrade; L0 required-check enforcement is off, L1 (merge script requires all checks GREEN) and L2 still apply";
+
+test("formatBootstrapFailure: protection op + GitHub Free 403 message → the actionable line; other failures keep their old text", () => {
+  const protectionOp = { kind: "protection", branch: "main", body: {} };
+  expect(formatBootstrapFailure({ op: protectionOp, error: GH_FREE_403 })).toBe(GH_FREE_403_LINE);
+
+  const labelOp = { kind: "label", name: LABELS[0].name };
+  expect(formatBootstrapFailure({ op: labelOp, error: "gh: permission denied" }))
+    .toBe(`failed: label ${LABELS[0].name} — gh: permission denied`);
+
+  // a protection failure that is NOT the GitHub Free wording keeps the old generic text too.
+  expect(formatBootstrapFailure({ op: protectionOp, error: "gh: permission denied" }))
+    .toBe("failed: protection main — gh: permission denied");
+});
+
+test("applyBootstrap: a 403 protection failure is isolated like any other — every other op (labels, variable) still applied", async () => {
+  const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: null }, secrets: [] };
+  const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
+  const gh = fakeGh();
+  gh.putBranchProtection = async () => { throw new Error(GH_FREE_403); };
+  const { applied, failed } = await applyBootstrap({ gh, ops, log: () => {} });
+  expect(failed).toEqual([{ op: ops.find((o) => o.kind === "protection"), error: GH_FREE_403 }]);
+  expect(gh.calls.createLabel.length).toBe(LABELS.length);   // every label still attempted
+  expect(gh.calls.setVariable.length).toBe(1);               // variable still ran after the failed protection op
+  expect(applied.length).toBe(LABELS.length + 1);            // labels + variable (protection failed, not counted)
+});
+
+test("bootstrapCommand: branch protection 403 on GitHub Free — single actionable line on stderr, exit 1, every other op still applied", async () => {
+  const gh = fakeGhCli({ labels: [], secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"], variable: null });
+  gh.putBranchProtection = async () => { throw new Error(GH_FREE_403); };
+  const { io: i, o } = io();
+  const root = makeHarnessRoot();
+  const code = await bootstrapCommand({ root, argv: [], io: i, gh, today: "2026-09-12" });
+
+  expect(code).toBe(1);
+  // printed exactly once, and only that one actionable line — not the raw "Upgrade to GitHub Pro…" gh text.
+  const matches = [...o.out, ...o.err].filter((l) => l.includes("not available on this plan"));
+  expect(matches).toEqual([GH_FREE_403_LINE]);
+  expect(o.err).toEqual([GH_FREE_403_LINE]);
+  expect(o.out.join("\n")).not.toContain("Upgrade to GitHub Pro");
+  // every other op still ran despite the protection failure.
+  expect(gh.calls.createLabel.length).toBe(LABELS.length);
+  expect(gh.calls.setVariable.length).toBe(1);
+  expect(o.out.join("\n")).toContain(`bootstrap: applied ${LABELS.length + 1} ops`); // labels + variable, not protection
 });
 
 test("bootstrapCommand: no gh injected → builds one via the injected run, including the `gh repo view` repo-detect fallback", async () => {

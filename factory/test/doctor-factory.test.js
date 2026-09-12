@@ -367,6 +367,49 @@ test("checkGitHub: no branch protection at all → protection WARN naming the L0
   expect(c["github.required-checks"]).toMatchObject({ level: "PASS", detail: "enforced by L1 at merge: (none configured)" });
 });
 
+// ── fix round 2 (GitHub Free plan branch-protection 403) ────────────────────
+
+const GH_FREE_403 = "gh api -X failed (1): gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)";
+
+test("checkGitHub: getBranchProtection throws the GitHub-Free 403 → github.protection is WARN (not FAIL), with the plan-specific detail, and every other github.* check still runs", async () => {
+  const gh = {
+    listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
+    getVariable: async () => "2026-01-01T00:00:00Z",
+    listLabels: async () => ["backlog", "factory:queue"],
+    getBranchProtection: async () => { throw new Error(GH_FREE_403); },
+  };
+  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates"] } }, labels: [{ name: "backlog" }, { name: "factory:queue" }] }));
+  expect(c["github.protection"]).toMatchObject({
+    level: "WARN",
+    detail: "branch protection unavailable on this plan (private repo on GitHub Free) — L0 off; make the repo public or upgrade",
+  });
+  // it must NOT fall through to the blanket "gh unavailable" branch — the rest of the checks are still valid.
+  expect(c["github.unavailable"]).toBeUndefined();
+  expect(c["github.claude-secret"].level).toBe("PASS");
+  expect(c["github.bot-token"].level).toBe("PASS");
+  expect(c["github.labels"].level).toBe("PASS");
+  expect(c["github.required-checks"].level).toBe("PASS");
+});
+
+test("checkGitHub: a getBranchProtection failure that is NOT the GitHub-Free wording still falls through to github.unavailable (unchanged)", async () => {
+  const gh = {
+    listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
+    getVariable: async () => "2026-01-01T00:00:00Z",
+    listLabels: async () => ["backlog"],
+    getBranchProtection: async () => { throw new Error("gh: not authenticated"); },
+  };
+  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
+  expect(Object.keys(c)).toEqual(["github.unavailable"]);
+  expect(c["github.unavailable"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("not authenticated") });
+});
+
+test("checkGitHub: no branch protection yet (404 → null, no throw) is unaffected by the 403 handling — still the existing missing-L0-contexts WARN", async () => {
+  const gh = { listSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
+  const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
+  expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
+  expect(c["github.protection"].detail).not.toContain("GitHub Free");
+});
+
 test("checkGitHub: gh unavailable → single WARN, no other github.* checks", async () => {
   const gh = { listSecrets: async () => { throw new Error("not authenticated"); } };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
