@@ -195,6 +195,31 @@ test("envDown failure during teardown is non-fatal — smoke.env-down WARN, doct
   expect(checks.find((c) => c.id === "smoke.env-down")).toMatchObject({ level: "WARN", detail: expect.stringContaining("compose-down") });
 });
 
+/**
+ * CI는 스테이지를 돌리기 전에 `.factory/actions/setup`(test-env: true)으로 하네스 테스트 환경을 먼저 띄운다 —
+ * 게이트 명령은 **그 환경 안에서** 판정된다. doctor가 `[commands]`를 환경 없이 실행하면, DB가 등장한
+ * M1+ 저장소는 전부 `commands.run.unit`에서 "service db is not running"으로 상시 FAIL이 뜨고 그건
+ * 어떤 픽스처 수정으로도 고칠 수 없다(= 사람이 doctor를 무시하게 되는 종류의 거짓 FAIL).
+ */
+test("harness test env wraps the command gates — envUp precedes [commands], envDown follows the smoke (Plan 6 Task 1)", async () => {
+  const root = await setupRepo();
+  const hp = join(root, ".factory/harness.toml");
+  writeFileSync(hp, readFileSync(hp, "utf8").replace('# compose   = "docker-compose.test.yml"', 'compose   = "docker-compose.test.yml"'));
+  const run = makeDoctorRun(root);
+  const { io: i } = io();
+  await doctorCommand({ root, pkgRoot, argv: ["--offline", "--json"], io: i, run, gh: fakeGh });
+
+  const at = (pred) => run.calls.findIndex(pred);
+  const up = at((c) => c.cmd === "docker" && c.args.includes("up"));
+  const unit = at((c) => c.cmd === "bash" && c.args[0] === "-lc" && c.args[1].includes("--outputFile=.factory/out/unit.json"));
+  const down = at((c) => c.cmd === "docker" && c.args.includes("down"));
+  expect(up).toBeGreaterThanOrEqual(0);
+  expect(unit).toBeGreaterThan(up);     // 명령은 환경이 올라온 뒤에 판정된다
+  expect(down).toBeGreaterThan(unit);   // 환경은 명령과 스모크가 끝난 뒤에 내려간다
+  // 컴포즈를 두 번 올렸다 내리면 스모크가 명령 게이트와 다른 환경에서 도는 것이고, 느리기까지 하다.
+  expect(run.calls.filter((c) => c.cmd === "docker" && c.args.includes("up"))).toHaveLength(1);
+});
+
 test("settings template unreadable → settings.template FAIL instead of throwing (fix round 1, Minor #3)", async () => {
   const root = await setupRepo();
   const run = makeDoctorRun(root);
