@@ -45,6 +45,18 @@ test("a partial windows override keeps the defaults for the other kinds", () => 
   expect(DEFAULT_WINDOWS).toEqual({ gate: 3, threshold: 20, "role-change": 10, "role-new": 10 });
 });
 
+test("an unknown kind is deferred, not accepted — fail closed", () => {
+  const { accepted, deferred } = filterByEvidence([p("prompt-rewrite", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])]);
+  expect(accepted).toEqual([]);
+  expect(deferred[0].reason).toBe("unknown-kind: prompt-rewrite");
+});
+
+test("distinct runs are normalized by String() — 110 and \"110\" are one run", () => {
+  const { accepted, deferred } = filterByEvidence([p("gate", [110, "110", 112])]);
+  expect(accepted).toEqual([]);
+  expect(deferred[0].reason).toContain("2 distinct runs");
+});
+
 test("an empty proposal list yields empty buckets", () => {
   expect(filterByEvidence([])).toEqual({ accepted: [], deferred: [] });
   expect(filterByEvidence()).toEqual({ accepted: [], deferred: [] });
@@ -84,6 +96,14 @@ test("renderProposalPr matches the §8.3 shape", () => {
   expect(body).toContain("input 1200000");
   expect(body).toContain("output 340000");
   expect(body.endsWith("\n")).toBe(true);
+});
+
+test("the week label comes from period.from, exactly as in the §8.3 example", () => {
+  // §8.3: `period=2026-09-01..2026-09-07` → `## Retro 2026-W36`. 09-07은 W37의 월요일이므로
+  // 주차는 기간이 시작된 주여야 한다.
+  const { body } = renderProposalPr({ period: { from: "2026-09-01", to: "2026-09-07" }, proposals: [], stats: STATS });
+  expect(body).toContain("<!-- factory-retro:v1 period=2026-09-01..2026-09-07 -->");
+  expect(body).toContain("## Retro 2026-W36 — 제안 0건");
 });
 
 test("every proposal kind renders a Korean label", () => {

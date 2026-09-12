@@ -18,9 +18,16 @@ const KIND_LABEL = {
 
 const ALWAYS_ACCEPTED = new Set(["test-delete"]);
 
+/** 서로 다른 run — 비교는 `String(r)`로 정규화한다(에이전트가 110과 "110"을 섞어 써도 창은 한 번만 찬다). */
 const distinctRuns = (runs) => {
+  const seen = new Set();
   const out = [];
-  for (const r of Array.isArray(runs) ? runs : []) if (!out.includes(r)) out.push(r);
+  for (const r of Array.isArray(runs) ? runs : []) {
+    const k = String(r);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
   return out;
 };
 
@@ -28,7 +35,8 @@ const distinctRuns = (runs) => {
  * `filterByEvidence(proposals, { windows }) → { accepted, deferred:[{proposal, reason}] }`
  * 근거는 **서로 다른** run 수로 센다 — 같은 이슈를 여러 번 인용해도 창은 차지 않는다.
  * `windows`는 기본값 위에 덮어쓴다(일부만 넘겨도 나머지 종류는 §8.4 기본값을 지킨다).
- * 창이 정의되지 않은 종류는 근거를 요구하지 않는다(스키마가 허용하는 5종 외의 값은 없다).
+ * 창이 정의되지 않은 종류는 **defer**한다(fail closed) — 스키마가 5종만 허용하므로 모르는 kind는
+ * 검증을 거치지 않은 출력이라는 뜻이고, "창이 없으니 통과"로 읽으면 근거 검사를 우회하는 구멍이 된다.
  */
 export function filterByEvidence(proposals = [], { windows = {} } = {}) {
   const w = { ...DEFAULT_WINDOWS, ...windows };
@@ -37,7 +45,8 @@ export function filterByEvidence(proposals = [], { windows = {} } = {}) {
   for (const p of proposals || []) {
     const kind = p?.kind;
     if (ALWAYS_ACCEPTED.has(kind)) { accepted.push(p); continue; }
-    const need = w[kind] ?? 0;
+    if (!(kind in w)) { deferred.push({ proposal: p, reason: `unknown-kind: ${kind}` }); continue; }
+    const need = w[kind];
     const have = distinctRuns(p?.evidence_runs).length;
     if (have >= need) accepted.push(p);
     else deferred.push({ proposal: p, reason: `insufficient-evidence: ${have} distinct runs < ${need} (${kind})` });
@@ -76,7 +85,9 @@ function statsBlock(stats) {
  * `renderProposalPr({ period:{from,to}, proposals, stats }) → { title, body }` — §8.3 형식.
  * 본문 첫 줄은 기계 마커(`factory-retro:v1 period=…`)다: 사람이 머지하는 PR이지만 `:proposal`
  * 스킬과 다음 retro가 이 PR을 자기 산출물로 알아볼 수 있어야 한다.
- * 주차는 기간의 **끝**(`to`)이 속한 ISO 주로 적는다 — retro가 보고하는 시점의 주다.
+ * 주차는 기간의 **시작**(`from`)이 속한 ISO 주로 적는다 — §8.3 예시(`2026-09-01..2026-09-07` →
+ * `2026-W36`)가 그 규칙이다. 기간은 주 경계에 정확히 맞지 않을 수 있고(머지 수로 깨어나므로),
+ * 그때 사람이 "어느 주를 돌아본 retro인가"로 읽는 것은 기간이 시작된 주다.
  */
 export function renderProposalPr({ period = {}, proposals = [], stats } = {}) {
   const from = period.from ?? "";
@@ -91,7 +102,7 @@ export function renderProposalPr({ period = {}, proposals = [], stats } = {}) {
   });
   const body = [
     `<!-- factory-retro:v1 period=${from}..${to} -->`,
-    `## Retro ${isoWeek(to)} — 제안 ${list.length}건`,
+    `## Retro ${isoWeek(from)} — 제안 ${list.length}건`,
     ...sections,
     statsBlock(stats),
   ].join("\n\n");

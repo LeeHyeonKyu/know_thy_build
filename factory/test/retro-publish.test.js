@@ -28,6 +28,8 @@ const CLEAN_DIFF = [
 
 const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
 const argvOf = (fake) => fake.calls.map((c) => `${c.cmd} ${c.args.join(" ")}`);
+/** worktree add 호출의 경로 인자 — 임시 디렉토리라 테스트가 미리 알 수 없다. */
+const worktreeOf = (fake) => fake.calls.find((c) => c.args[0] === "worktree" && c.args[1] === "add").args[3];
 const is = (args, ...head) => head.every((h, i) => args[i] === h);
 
 /** 기본 git 테이블: integrity가 깨끗한 diff를 보는 성공 경로. overrides가 앞에 붙는다. */
@@ -35,6 +37,7 @@ function gitTable(overrides = [], { nameStatus = `M\t${LESSONS_PATH}`, u0 = CLEA
   return [
     ...overrides,
     { match: (c, a) => c === "git" && is(a, "fetch", "origin"), result: ok() },
+    { match: (c, a) => c === "git" && is(a, "worktree", "prune"), result: ok() },
     { match: (c, a) => c === "git" && is(a, "worktree", "add"), result: ok() },
     { match: (c, a) => c === "git" && is(a, "worktree", "remove"), result: ok() },
     { match: (c, a) => c === "git" && a[0] === "add", result: ok() },
@@ -83,13 +86,14 @@ test("green integrity + green check: fetch, worktree, bot commit, push refspec, 
   expect(out).toMatchObject({ pr: 77, merged: true, branch: `factory/lessons-${DATE}` });
   const argv = argvOf(run);
   expect(argv[0]).toBe("git fetch origin main");
-  expect(argv[1]).toMatch(/^git worktree add --detach \S+ origin\/main$/);
+  expect(argv[1]).toBe("git worktree prune");
+  expect(argv[2]).toMatch(/^git worktree add --detach \S+ origin\/main$/);
   const commit = run.calls.find((c) => c.args.includes("commit"));
   expect(commit.args.slice(0, 5)).toEqual(["-c", "user.name=factory-bot", "-c", "user.email=factory-bot@users.noreply.github.com", "commit"]);
   expect(commit.args).toContain(`retro: lessons/examples ${DATE}`);
   expect(argv).toContain(`git push origin HEAD:refs/heads/factory/lessons-${DATE}`);
   // 러너의 체크아웃은 건드리지 않는다 — 파일을 쓰는 모든 git 명령은 임시 worktree 안에서 돈다.
-  const wt = run.calls[1].args[3];
+  const wt = worktreeOf(run);
   for (const c of run.calls) {
     if (["add", "commit", "push", "merge-base", "diff"].includes(c.args[0]) || c.args[4] === "commit") expect(c.opts.cwd).toBe(wt);
   }
@@ -148,7 +152,7 @@ test("polls exhausted → timeout: label + comment, PR left open, no merge", asy
   const out = await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh, s, { maxPolls: 3 }));
   expect(out).toMatchObject({ pr: 77, merged: false, reason: "timeout" });
   expect(gh.prChecks).toHaveBeenCalledTimes(3);
-  expect(s.sleeps).toEqual([1000, 1000, 1000]);
+  expect(s.sleeps).toEqual([1000, 1000]);      // 마지막 회차 뒤에는 자지 않는다
   expect(gh.mergePr).not.toHaveBeenCalled();
   expect(gh.addLabels).toHaveBeenCalledWith(77, ["factory:needs-human"]);
 });
@@ -163,7 +167,7 @@ test("local integrity RED opens no PR, pushes nothing, and still removes the wor
   expect(out.reason).toContain("protected path changed");
   expect(gh.createPr).not.toHaveBeenCalled();
   expect(argvOf(run).some((a) => a.startsWith("git push"))).toBe(false);
-  expect(argvOf(run)).toContain(`git worktree remove --force ${run.calls[1].args[3]}`);
+  expect(argvOf(run)).toContain(`git worktree remove --force ${worktreeOf(run)}`);
   expect(s.rm).toHaveBeenCalled();
 });
 
@@ -187,6 +191,48 @@ test("a throwing gh call is reported as a reason and the worktree is still remov
   expect(out).toMatchObject({ merged: false, pr: null });
   expect(out.reason).toContain("no auth");
   expect(s.rm).toHaveBeenCalled();
+});
+
+test("a throwing mergePr still hands the open PR to a human", async () => {
+  const gh = fakeGh({ checks: [PASS] });
+  gh.mergePr = vi.fn(async () => { throw new Error("gh pr merge failed (1): not mergeable"); });
+  const s = spies();
+  const out = await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh, s));
+  expect(out).toMatchObject({ pr: 77, merged: false });
+  expect(out.reason).toContain("not mergeable");
+  expect(gh.addLabels).toHaveBeenCalledWith(77, ["factory:needs-human"]);
+  expect(gh.comment.mock.calls[0][0]).toBe(77);
+  expect(s.rm).toHaveBeenCalled();
+});
+
+test("a transient prChecks error is skipped, not treated as a verdict", async () => {
+  const gh = fakeGh({ checks: [PASS] });
+  let n = 0;
+  gh.prChecks = vi.fn(async () => { n += 1; if (n === 1) throw new Error("API rate limit exceeded"); return PASS; });
+  const s = spies();
+  const out = await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh, s));
+  expect(out.merged).toBe(true);
+  expect(gh.prChecks).toHaveBeenCalledTimes(2);
+  expect(s.sleeps).toEqual([1000]);
+  expect(gh.addLabels).not.toHaveBeenCalled();
+});
+
+test("prChecks that never succeeds falls through to timeout and hands off (fail closed)", async () => {
+  const gh = fakeGh({ checks: [PASS] });
+  gh.prChecks = vi.fn(async () => { throw new Error("API rate limit exceeded"); });
+  const out = await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh, spies(), { maxPolls: 2 }));
+  expect(out).toMatchObject({ pr: 77, merged: false, reason: "timeout" });
+  expect(gh.mergePr).not.toHaveBeenCalled();
+  expect(gh.addLabels).toHaveBeenCalledWith(77, ["factory:needs-human"]);
+});
+
+test("an unparsed PR number stops before polling instead of guessing", async () => {
+  const gh = fakeGh({ checks: [PASS] });
+  gh.createPr = vi.fn(async () => null);
+  const out = await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh, spies()));
+  expect(out).toMatchObject({ pr: null, merged: false, reason: "PR number not parsed" });
+  expect(gh.prChecks).not.toHaveBeenCalled();
+  expect(gh.mergePr).not.toHaveBeenCalled();
 });
 
 test("openProposalPr labels the PR and never merges it", async () => {
