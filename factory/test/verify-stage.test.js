@@ -28,8 +28,11 @@ test("fails with the fence parse error — not a misleading schema cascade — w
   const broken = '```json\n{\n  "issue": 2,\n  "dissent_log": [ /* full R1 positions */ ],\n  "done_when": [{"id":"dw1","text":"t","verify":"unit","level":"fast"}]\n}\n```';
   const r = verifyStage({ stage: "plan", out: { is_error: false, result: broken }, agentsLog: log([]), roster: [], orchestration: "workflow" });
   expect(r.ok).toBe(false);
-  expect(r.reasons.join("; ")).toMatch(/json fence is not valid JSON/);
-  expect(r.reasons.join("; ")).not.toMatch(/issue is required/);
+  const reason = r.reasons.join("; ");
+  expect(reason).toMatch(/json fence is not valid JSON/);
+  // 스키마 미달은 이제 **후보별 진단**으로만 나온다 — 헤드라인이 아니다.
+  expect(reason.indexOf("fence is not valid JSON")).toBeLessThan(reason.indexOf("issue is required"));
+  expect(reason).toMatch(/result bare JSON: issue is required/);
   expect(r.data).toBe(null);
 });
 

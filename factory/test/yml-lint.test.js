@@ -43,6 +43,12 @@ test("stage workflows follow the §4.1 table and the token/concurrency rules", (
     expect(y, f).toContain("cancel-in-progress: false");
     expect(y, f).toContain("FACTORY_RUNNER_ID: gha-${{ github.run_id }}");
     expect(y, f).toContain("include-hidden-files: true");
+    // KTB-7/O4: 세션 트랜스크립트가 산출물 추출의 1순위 출처다 — 실패했을 때 사후에 볼 수 있어야 한다.
+    // merge는 claude를 띄우지 않으므로(script-only) 트랜스크립트가 없다.
+    if (stage !== "merge") {
+      expect(y, f).toContain("~/.claude/projects/**/*.jsonl");
+      expect(y, f).toContain("if-no-files-found: ignore");
+    }
     expect(y, f).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
     expect(y, f).toContain("uses: ./.factory/actions/setup");
     expect(y, f).toContain("fetch-depth: 0");

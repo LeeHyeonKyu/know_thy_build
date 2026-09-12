@@ -136,6 +136,21 @@ test("dispatcher commands exist for the four LLM stages plus retro, and each nam
   expect(existsSync(join(T, "claude/commands/factory-merge.md"))).toBe(false);
 });
 
+/**
+ * KTB-7: 데모 #2 plan에서 디스패처가 약 20 KB짜리 workflow 결과를 "요약"해 최종 메시지에
+ * JS 주석과 `…` 축약을 섞어 넣었고, 스테이지가 needs-human으로 끝났다($11.95·60분 소각).
+ * "verbatim"만으로는 부족했다 — 요약이 **하드 실패**라는 것과 형식(생 JSON 한 덩어리)을 못 박는다.
+ */
+test("dispatcher commands forbid summarizing the workflow result and pin the output shape", () => {
+  for (const s of ["triage", "plan", "implement", "review", "retro"]) {
+    const t = read(`claude/commands/factory-${s}.md`);
+    expect(t, s).toMatch(/complete and\s+verbatim/i);
+    expect(t, s).toMatch(/summariz|truncat/i);
+    expect(t, s).toMatch(/hard failure/i);
+    expect(t, s).toMatch(/raw JSON/i);
+  }
+});
+
 // ── Task 6: the Claude-side templates the four stages actually load ──────────────────────────
 // ADR-015 / P3-R7: there is no merge workflow (merge is a script). retro is the fifth workflow but
 // not a fifth stage — it is the Plan 4 job that runs outside the label state machine.

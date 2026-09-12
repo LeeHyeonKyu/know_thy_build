@@ -1,4 +1,7 @@
 import { validate } from "./schemas.js";
+import { extractStageArtifact, fencedJsonError } from "./stage-artifact.js";
+
+export { fencedJsonError };
 
 const SCHEMA_OF = { triage: "triage.v1", plan: "plan.v1", implement: "implement.v1", review: "review.v1" };
 
@@ -14,18 +17,6 @@ export function extractJson(text) {
   }
   return null;
 }
-/**
- * ```json 펜스가 있는데 그 안이 유효한 JSON이 아니면 파싱 오류 메시지. 펜스가 없거나 정상이면 null.
- * verifyStage가 폴백(균형 스캔)을 쓸지 말지를 이걸로 가른다 — 펜스는 에이전트가 선언한 계약이라,
- * 깨졌다는 사실 자체가 결과이지 "다른 객체를 찾아보라"는 신호가 아니다.
- */
-export function fencedJsonError(text) {
-  if (typeof text !== "string") return null;
-  const fence = /```json\s*\n([\s\S]*?)\n```/.exec(text);
-  if (!fence) return null;
-  try { JSON.parse(fence[1]); return null; } catch (e) { return e?.message || String(e); }
-}
-
 /** start의 '{'에 대응하는 '}' 인덱스. 문자열 리터럴과 \" 이스케이프를 건너뛴다. 없으면 -1. */
 function matchBrace(text, start) {
   let depth = 0, inStr = false;
@@ -47,18 +38,29 @@ const listOf = (a) => (a && a.length ? a.join(",") : "none");
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
  */
-export function verifyStage({ stage, out, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
   const reasons = [];
   if (!out || out.is_error) reasons.push("claude -p reported is_error");
   /*
-   * 펜스가 깨졌으면 폴백을 쓰지 않는다. 폴백은 계획 **안의** 중첩 객체(done_when 한 항목 등)를
-   * 집어 오고, 그러면 "issue is required; tier is required; …"라는 오진이 진짜 원인(에이전트가
-   * JSON 안에 `/* … *​/` 주석이나 `…` 축약을 남겼다)을 가린다 — dogfood 데모 #2 plan에서 실제로 벌어졌다.
+   * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
+   * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
+   * 스키마를 채점 기준으로 두는 게 핵심이다 — 파싱만 되는 후보(계획 안의 done_when 한 항목 등)가
+   * 뽑혀 "issue is required; tier is required; …"라는 오진을 만들던 게 데모 #2 plan의 실패였다.
+   *
+   * gates는 스키마보다 먼저 채워 넣는다(implement.v1·review.v1이 요구한다) — 후보 채점 시점에는
+   * 사본에만 채우고, 파일과의 일치 검사는 아래 기존 경로가 선택된 객체를 상대로 다시 한다.
    */
-  const fenceErr = out ? fencedJsonError(out.result) : null;
-  const data = fenceErr ? null : out ? extractJson(out.result) : null;
-  if (fenceErr) reasons.push(`\`\`\`json fence is not valid JSON: ${fenceErr}`);
-  else if (!data) reasons.push("no JSON object in result");
+  const withGates = (o) => (GATED_STAGES.includes(stage) && gates && o && !o.gates
+    ? { ...o, gates: { status: gates.status, level: gates.level } }
+    : o);
+  const schemaName = SCHEMA_OF[stage];
+  const artifact = extractStageArtifact({
+    envelopeResult: out?.result,
+    transcriptText,
+    validate: schemaName ? (o) => validate(schemaName, withGates(o)) : null,
+  });
+  const data = artifact.ok ? artifact.data : null;
+  if (!artifact.ok) reasons.push(artifact.reason);
   if (GATED_STAGES.includes(stage)) {
     if (!gates) reasons.push("gates file missing");
     // bin/gates.js가 남긴 로컬 진단 결과는 스테이지 판정이 아니다 — 사람이 손으로 만든 GREEN이 머지로 이어지면 안 된다.

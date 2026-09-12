@@ -40,4 +40,6 @@ jobs:
           path: |
             docs/factory/runs/
             .factory/out/
+            ~/.claude/projects/**/*.jsonl
           include-hidden-files: true
+          if-no-files-found: ignore
