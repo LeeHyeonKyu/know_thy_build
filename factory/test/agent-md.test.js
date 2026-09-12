@@ -7,9 +7,12 @@ const readAgent = (name) => readFileSync(`${AGENTS}${name}.md`, "utf8");
 const agentFiles = () => readdirSync(AGENTS).filter((f) => f.endsWith(".md")).sort();
 
 // spec §7.3 reviewer-correctness.md — 훅 명령은 이미 .claude/hooks/deny-all-writes.sh다.
-// 한 줄만 스펙 원문과 다르다(F2): §7.3의 `gates.json` 항목은 리뷰 스테이지에 그 파일이 **없다**는 사실을
-// 말하지 않는다 — run-stage.js가 `claude -p` 앞에서 `.factory/out/`을 지우고 게이트는 workflow가 return한
-// 뒤에야 돈다. 픽스처는 템플릿의 전사(transcription)이므로 여기도 같이 고친다.
+// 픽스처는 템플릿의 전사(transcription)다. 스펙 원문에 대해 두 줄이 다르고, 둘 다 스펙 쪽도 같이 고쳤다:
+//  · `gates.json` 항목(F2) — §7.3은 리뷰 스테이지에 그 파일이 **없다**는 사실을 말하지 않았다.
+//    run-stage.js가 `claude -p` 앞에서 `.factory/out/`을 지우고, 게이트는 workflow가 return한 뒤에야 돈다.
+//  · `matcher`(F6) — `Edit|Write` → `Edit|Write|NotebookEdit|Bash`. NotebookEdit을 놓치는 deny는 deny가
+//    아니고, Bash를 놓치면 `echo x > src/a.js`를 아무도 막지 않는다. 스펙 §7.3의 같은 줄에는 판결 출처를
+//    인라인 주석으로 달아 두었다(그 주석만 템플릿에 없다).
 const FIXTURE = `---
 name: reviewer-correctness
 description: PR diff가 실제로 올바른지 — 논리, 경계, 동시성, 실패 경로 — 를 cold read로 판정한다
@@ -17,7 +20,7 @@ tools: Read, Grep, Glob, Bash
 model: opus
 hooks:
   PreToolUse:
-    - matcher: Edit|Write
+    - matcher: Edit|Write|NotebookEdit|Bash
       hooks: [{ type: command, command: .claude/hooks/deny-all-writes.sh }]
 ---
 
@@ -88,7 +91,7 @@ test("parseAgentMd: frontmatter (tools split, hooks list-of-maps) + all required
   expect(frontmatter.model).toBe("opus");
   expect(frontmatter.tools).toEqual(["Read", "Grep", "Glob", "Bash"]);
   expect(frontmatter.hooks).toEqual({
-    PreToolUse: [{ matcher: "Edit|Write", hooks: [{ type: "command", command: ".claude/hooks/deny-all-writes.sh" }] }],
+    PreToolUse: [{ matcher: "Edit|Write|NotebookEdit|Bash", hooks: [{ type: "command", command: ".claude/hooks/deny-all-writes.sh" }] }],
   });
   for (const name of REQUIRED_SECTIONS) {
     const hit = [...sections.keys()].some((k) => k === name || k.startsWith(`${name} `));
@@ -144,13 +147,32 @@ test("lintAgentMd: reviewer role without deny-all-writes hook → exactly one vi
   const noHook = FIXTURE.replace(
     `hooks:
   PreToolUse:
-    - matcher: Edit|Write
+    - matcher: Edit|Write|NotebookEdit|Bash
       hooks: [{ type: command, command: .claude/hooks/deny-all-writes.sh }]
 `,
     ""
   );
   const violations = lintAgentMd(noHook, { expectedName: "reviewer-correctness" });
   expect(violations).toEqual([{ rule: "deny-hook", msg: expect.any(String) }]);
+});
+
+// ── F6: matcher가 Bash를 덮지 않으면 deny가 반쪽이다 ─────────────────────────────────────────
+// 훅 스크립트는 Bash 명령도 판정하지만(쓰기 리다이렉션·cp/mv·git commit …), 매처가 Edit/Write만 걸면 그
+// 판정은 절대 발화하지 않는다. 전역 block-dangerous.sh는 보호 경로만 보므로 `echo x > src/a.js`는 그냥 통과한다.
+test("lintAgentMd: a deny-all-writes hook whose matcher omits Bash → exactly one deny-hook violation", () => {
+  const narrow = (matcher) => lintAgentMd(
+    FIXTURE.replace("- matcher: Edit|Write|NotebookEdit|Bash\n", `- matcher: ${matcher}\n`),
+    { expectedName: "reviewer-correctness" },
+  );
+  for (const m of ["Edit|Write|NotebookEdit", "Edit|Write", "Edit"]) {
+    expect(narrow(m), m).toEqual([{ rule: "deny-hook", msg: expect.stringContaining("Bash") }]);
+  }
+  // 순서와 공백은 상관없다 — Bash가 대안 중 하나로 들어 있으면 된다
+  for (const m of ["Bash|Edit|Write|NotebookEdit", "Edit | Write | NotebookEdit | Bash"]) {
+    expect(narrow(m), m).toEqual([]);
+  }
+  // `Bash`를 포함하는 **다른 단어**는 Bash가 아니다
+  expect(narrow("Edit|Write|BashTool")).toEqual([{ rule: "deny-hook", msg: expect.any(String) }]);
 });
 
 // Task 2: factory-loader.md / factory-triage.md templates (full suite lint is switched on in Task 6).
@@ -188,7 +210,7 @@ test("plan agents: read-only tools and the roles.toml model, every one behind de
     expect(frontmatter.name, name).toBe(name);
     expect(frontmatter.model, name).toBe(models[name]);
     expect(frontmatter.tools, name).toEqual(["Read", "Grep", "Glob"]);
-    expect(frontmatter.hooks.PreToolUse[0].matcher, name).toBe("Edit|Write|NotebookEdit");
+    expect(frontmatter.hooks.PreToolUse[0].matcher, name).toBe("Edit|Write|NotebookEdit|Bash");
     expect(frontmatter.hooks.PreToolUse[0].hooks[0].command, name).toContain("deny-all-writes.sh");
   }
 });
@@ -243,7 +265,7 @@ test("factory-verifier.md: opus, read-only tools, deny-all-writes, and an explic
   expect(frontmatter.name).toBe("factory-verifier");
   expect(frontmatter.model).toBe("opus");
   expect(frontmatter.tools).toEqual(["Read", "Grep", "Glob", "Bash"]);
-  expect(frontmatter.hooks.PreToolUse[0].matcher).toBe("Edit|Write|NotebookEdit");
+  expect(frontmatter.hooks.PreToolUse[0].matcher).toBe("Edit|Write|NotebookEdit|Bash");
   expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
 
   // §7.3 structure: the refusal list is its own section, and it names the builder's channels by name
@@ -276,7 +298,7 @@ test("reviewer agents: roles.toml models and tools, every one behind deny-all-wr
     const { frontmatter } = parseAgentMd(readAgent(name));
     expect(frontmatter.name, name).toBe(name);
     expect(frontmatter.model, name).toBe(models[name]);
-    expect(frontmatter.hooks.PreToolUse[0].matcher, name).toBe("Edit|Write|NotebookEdit");
+    expect(frontmatter.hooks.PreToolUse[0].matcher, name).toBe("Edit|Write|NotebookEdit|Bash");
     expect(frontmatter.hooks.PreToolUse[0].hooks[0].command, name).toContain("deny-all-writes.sh");
     expect(frontmatter.tools, name).toContain("Read");
   }
@@ -285,11 +307,10 @@ test("reviewer agents: roles.toml models and tools, every one behind deny-all-wr
   expect(parseAgentMd(readAgent("reviewer-qa")).frontmatter.tools).toEqual(["Bash", "Read", "Grep", "Glob"]);
 });
 
-test("reviewer-correctness.md is the spec §7.3 exemplar verbatim — only the hook matcher widens to NotebookEdit", () => {
-  // §7.3 is the template (Plan 3 Global Constraints). The single edit is the matcher: the constraint
-  // spells the write-forbidden roles' matcher as `Edit|Write|NotebookEdit`, and a deny that stops Edit
-  // but not NotebookEdit is not a deny. The hook command in §7.3 is already the real script's path.
-  expect(readAgent("reviewer-correctness")).toBe(FIXTURE.replace("matcher: Edit|Write\n", "matcher: Edit|Write|NotebookEdit\n"));
+test("reviewer-correctness.md is the spec §7.3 exemplar verbatim (the fixture is that exemplar, F2/F6 lines included)", () => {
+  // §7.3 is the template (Plan 3 Global Constraints), and the spec text carries the same two corrected
+  // lines the fixture does — so this is now a straight identity check, not a patch-and-compare.
+  expect(readAgent("reviewer-correctness")).toBe(FIXTURE);
 });
 
 test("reviewer agents: each Output section pins the must_fix id prefix its ids must use", () => {

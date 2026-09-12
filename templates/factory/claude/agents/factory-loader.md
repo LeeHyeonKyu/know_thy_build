@@ -5,7 +5,7 @@ tools: Read, Bash, Grep
 model: sonnet
 hooks:
   PreToolUse:
-    - matcher: Edit|Write|NotebookEdit
+    - matcher: Edit|Write|NotebookEdit|Bash
       hooks: [{ type: command, command: .claude/hooks/deny-all-writes.sh }]
 ---
 

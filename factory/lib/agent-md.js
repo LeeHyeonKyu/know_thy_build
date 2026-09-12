@@ -66,11 +66,19 @@ function needsDenyAllWritesHook(name) {
     name === "factory-triage" || name === "factory-verifier" || name === "factory-loader";
 }
 
+/**
+ * 훅 명령이 `deny-all-writes.sh`인 PreToolUse 엔트리가 있고, 그 matcher가 **`Bash`까지 덮는가**.
+ * Bash가 빠진 matcher는 반쪽이다(F6): 전역 `block-dangerous.sh`는 *보호 경로*만 보므로, 쓰기 금지 역할이
+ * `echo x > src/a.js`로 소스 트리를 고치는 것은 그 매처가 아니면 아무도 막지 않는다.
+ */
 function hasDenyAllWritesHook(hooks) {
   const pre = hooks?.PreToolUse;
   if (!Array.isArray(pre)) return false;
-  return pre.some((entry) => Array.isArray(entry?.hooks) &&
-    entry.hooks.some((h) => typeof h?.command === "string" && h.command.includes("deny-all-writes.sh")));
+  return pre.some((entry) =>
+    Array.isArray(entry?.hooks) &&
+    entry.hooks.some((h) => typeof h?.command === "string" && h.command.includes("deny-all-writes.sh")) &&
+    typeof entry.matcher === "string" &&
+    entry.matcher.split("|").map((s) => s.trim()).includes("Bash"));
 }
 
 /** 스펙 §7.2 규칙을 검사한다. 위반이 없으면 []. */
@@ -112,7 +120,7 @@ export function lintAgentMd(text, { expectedName } = {}) {
   }
 
   if (needsDenyAllWritesHook(frontmatter.name) && !hasDenyAllWritesHook(frontmatter.hooks)) {
-    violations.push({ rule: "deny-hook", msg: "write-forbidden role must have hooks.PreToolUse wired to deny-all-writes.sh" });
+    violations.push({ rule: "deny-hook", msg: "write-forbidden role must have hooks.PreToolUse (matcher including Bash) wired to deny-all-writes.sh" });
   }
 
   return violations;
