@@ -168,6 +168,27 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
   }
 }, 60000);
 
+// ── KTB-21: 진행 중인 테스트 env를 무너뜨리면 나중 게이트가 죽은 env에 대고 돈다(데모 #18) ────────
+// builder는 여전히 `up`(멱등)을 쓸 수 있다 — 막는 것은 서비스를 멈추는 동사뿐이다.
+test("block-dangerous: docker compose/docker teardown verbs are blocked; ps/logs/exec/version/up are not", async () => {
+  const blocked = [
+    "docker compose -f x.yml down", "docker compose down 2>&1 | tee /tmp/log", "docker-compose down",
+    "docker compose stop", "docker compose -f x.yml rm -f", "docker compose kill", "docker-compose restart",
+    "docker stop db", "docker rm -f db", "docker kill db", "docker restart db",
+    "docker container stop db", "docker container rm -f db", "docker container kill db",
+  ];
+  const allowed = [
+    "docker compose ps -a", "docker compose logs db", "docker compose -f x.yml exec -T db psql -U u -d d -c 'select 1'",
+    "docker --version", "docker compose version", "docker compose up -d", "docker compose -f x.yml up",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 // ── F13: 상태 라벨은 L1(transition.js)만 옮긴다 ─────────────────────────────────────────────
 test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment is not", async () => {
   const blocked = ["gh issue edit 7 --add-label factory:approved", "gh issue edit 7 --remove-label factory:queue",
@@ -427,6 +448,29 @@ test("deny-all-writes: MultiEdit is blocked exactly like Edit/Write, with the sa
   expect(r.stderr).toMatch(/factory: this role must not write files \(MultiEdit src\/a\.js\)/);
   expect((await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: ".factory/out/qa/7.md" } })).code).toBe(0);
   expect((await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: ".factory/out/qa/../harness.toml" } })).code).toBe(2);
+}, 30000);
+
+// ── KTB-21: 읽기 전용 역할은 env를 점검할 수는 있어도(ps/logs/exec) 시작·중지할 수는 없다 ─────────
+// qa 리뷰어가 증거 수집 중 `docker compose down`으로 env를 내린 것(데모 #18)이 이 규칙의 근거다.
+// 여기서는 builder(block-dangerous.sh)와 달리 `up`도 막는다 — env를 세우는 것은 이 역할의 일이 아니다.
+test("deny-all-writes: docker compose/docker teardown AND up are blocked; ps/logs/exec/version are not (KTB-21)", async () => {
+  const blocked = [
+    "docker compose -f x.yml down", "docker compose down 2>&1 | tee /tmp/log", "docker-compose down",
+    "docker compose stop", "docker compose -f x.yml rm -f", "docker compose kill", "docker-compose restart",
+    "docker stop db", "docker rm -f db", "docker kill db", "docker restart db",
+    "docker container stop db", "docker container rm -f db", "docker container kill db",
+    "docker compose up -d", "docker compose -f x.yml up", "docker-compose up",
+  ];
+  const allowed = [
+    "docker compose ps -a", "docker compose logs db", "docker compose -f x.yml exec -T db psql -U u -d d -c 'select 1'",
+    "docker --version", "docker compose version",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
 test("deny-all-writes: $TMPDIR is honoured as a write target, and prove-test's own worktree dir is not blocked", async () => {

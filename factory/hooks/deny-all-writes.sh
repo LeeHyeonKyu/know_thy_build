@@ -118,4 +118,16 @@ echo "$c" | grep -Eq "${CMD}git[[:space:]]+(commit|push|add|apply|am|checkout|sw
 echo "$c" | grep -Eq "${CMD}git[[:space:]]+config([[:space:]]|$)" &&
   ! echo "$c" | grep -Eq "${CMD}git[[:space:]]+config[^;&|]*(--get[a-z-]*|--list|-l)([[:space:]=]|$)" &&
   deny "git config write"
+
+# ── KTB-21: 읽기 전용 역할은 테스트 env를 세우거나 무너뜨릴 수 없다 ──────────────────────────────
+# 데모 #18: qa 리뷰어가 증거를 모으는 중 `docker compose down`으로 env를 내렸다 — 28분 뒤 review
+# 스테이지의 게이트가 죽은 env에 대고 돌아 4/4 승인인데도 `unit`이 `service "db" is not running`으로
+# RED였다. 읽기 전용 역할에게 env 상태를 바꿀 이유는 없다: `ps`·`logs`·`exec … psql` 같은 **점검**만
+# 정당하고, **시작(`up`)도 중지(`down`/`stop`/`rm`/`kill`/`restart`)도** 이 역할의 일이 아니다
+# (env를 세우는 것은 gates가 스스로 하는 일이다 — 아래 `gates.js` 재기동 참조).
+DOCKER_TEARDOWN_VERBS='(down|stop|rm|kill|restart)'
+echo "$c" | grep -Eq "${CMD}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]${DOCKER_TEARDOWN_VERBS}([[:space:]]|$)" && deny "docker compose down/stop/rm/kill/restart (read-only role must not change test-env state)"
+echo "$c" | grep -Eq "${CMD}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]up([[:space:]]|$)" && deny "docker compose up (read-only role must not change test-env state)"
+echo "$c" | grep -Eq "${CMD}docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}([[:space:]]|$)" && deny "docker stop/rm/kill/restart (read-only role must not change test-env state)"
+echo "$c" | grep -Eq "${CMD}docker[[:space:]]+container[[:space:]]+(stop|rm|kill)([[:space:]]|$)" && deny "docker container stop/rm/kill (read-only role must not change test-env state)"
 exit 0

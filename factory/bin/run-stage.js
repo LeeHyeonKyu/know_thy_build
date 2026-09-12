@@ -319,9 +319,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
         return 2;
       }
     }
+    // KTB-21: `[factory.test.env].compose`가 있으면 게이트가 명령을 돌리기 전에 env를 한 번 더
+    // re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이 없으면(=이 하네스는 compose를
+    // 안 쓴다) 아무 줄도 붙지 않는다.
+    const testEnvNote = gates?.test_env_reup?.ran
+      ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
+      : [];
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates)] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });

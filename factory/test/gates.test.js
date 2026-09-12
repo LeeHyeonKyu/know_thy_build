@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier } from "../lib/gates.js";
+import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -171,6 +171,60 @@ test("review/merge는 실패를 재분류하지 않는다 — RED는 RED", async
   // 재분류를 위한 워크트리도 격리 재실행도 없다 — diff는 tier 승격 때문에 읽지만 판정은 뒤집지 않는다
   expect(run.calls.filter((c) => c.cmd === "git" && c.args[0] === "worktree")).toEqual([]);
   expect(run.calls.filter((c) => c.cmd === "bash" && c.args[1] === TO)).toEqual([]);
+});
+
+// ── KTB-21: 게이트가 [commands]를 돌리기 전에 test env를 한 번 더 re-up한다(멱등) ────────────────
+// 데모 #18: qa 리뷰어가 증거 수집 중 env를 내렸고, 28분 뒤 게이트가 죽은 env에 대고 돌아 4/4 승인인데도
+// unit이 RED였다. 훅(deny-all-writes.sh)이 그 세션 안의 명령은 이제 막지만, 게이트 자신도 방어해야
+// 한다 — 다른 경로로 env가 내려가 있어도 "죽은 env에 대고 돈 GREEN/RED"를 신뢰하면 안 된다.
+
+test("reUpTestEnv: harness.test.env.compose가 없으면 아무것도 부르지 않는다", async () => {
+  const run = makeFakeRun([{ match: () => true, result: bad }]);   // 불렸으면 실패했을 것 — 안 불렸는지 확인
+  const r = await reUpTestEnv({ run, cwd: "/repo", harness: {} });
+  expect(r).toEqual({ ran: false, ok: true });
+  expect(run.calls).toEqual([]);
+});
+
+test("reUpTestEnv: compose가 있으면 .factory/bin/test-env.js up을 부른다 — 성공/실패 모두 detail을 싣는다", async () => {
+  const h = { test: { env: { compose: "docker-compose.test.yml" } } };
+  const runOk = makeFakeRun([{ match: (c, a) => c === "node" && a[0] === ".factory/bin/test-env.js" && a[1] === "up", result: ok }]);
+  expect(await reUpTestEnv({ run: runOk, cwd: "/repo", harness: h })).toEqual({ ran: true, ok: true, detail: "" });
+
+  const runBad = makeFakeRun([{ match: (c, a) => c === "node" && a[0] === ".factory/bin/test-env.js" && a[1] === "up", result: { code: 2, stdout: "", stderr: "test-env: BLOCKED — compose: exit 1" } }]);
+  const r = await reUpTestEnv({ run: runBad, cwd: "/repo", harness: h });
+  expect(r.ran).toBe(true); expect(r.ok).toBe(false);
+  expect(r.detail).toContain("compose: exit 1");
+});
+
+test("runStageGates: re-up 실패 → [commands]는 한 줄도 돌지 않고 BLOCKED(판정 불가)", async () => {
+  const h = { ...stageHarness, test: { ...stageHarness.test, env: { compose: "docker-compose.test.yml" } } };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "node" && a[0] === ".factory/bin/test-env.js" && a[1] === "up", result: { code: 2, stdout: "", stderr: "test-env: BLOCKED — compose: exit 1: service db failed to start" } },
+    revParse,
+    { match: () => true, result: bad },   // 불렸으면 [commands]가 돈 것 — 안 돌았는지 확인
+  ]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: "b".repeat(40), readFile: () => null });
+  expect(r.status).toBe("BLOCKED");
+  expect(r.blocked_reason).toMatch(/test-env re-up failed.*service db failed to start/);
+  expect(r.test_env_reup).toEqual({ ran: true, ok: false, detail: expect.stringContaining("service db failed to start") });
+  expect(r.gates).toEqual({});
+  expect(run.calls.some((c) => c.cmd === "bash")).toBe(false);   // vitest --json은 한 번도 안 불렸다
+});
+
+test("runStageGates: re-up 성공은 (compose가 있을 때만) 결과에 test_env_reup으로 남는다", async () => {
+  const h = { ...stageHarness, test: { ...stageHarness.test, env: { compose: "docker-compose.test.yml" } } };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "node" && a[0] === ".factory/bin/test-env.js" && a[1] === "up", result: ok },
+    unitOk, diffOf("M\tsrc/a.js\n"), revParse,
+  ]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: "b".repeat(40), readFile: () => null });
+  expect(r.test_env_reup).toEqual({ ran: true, ok: true, detail: "" });
+  expect(r.status).toBe("GREEN");
+
+  // compose가 없는 하네스(기존 동작)는 test_env_reup이 "부르지 않았다"로 남는다.
+  const run2 = makeFakeRun([unitOk, diffOf("M\tsrc/a.js\n"), revParse]);
+  const r2 = await runStageGates({ run: run2, cwd: stageCwd, harness: stageHarness, stage: "review", tier: "standard", base: "b".repeat(40), readFile: () => null });
+  expect(r2.test_env_reup).toEqual({ ran: false, ok: true });
 });
 
 // ── F2: tier는 diff가 바닥을 깐다 ─────────────────────────────────────────

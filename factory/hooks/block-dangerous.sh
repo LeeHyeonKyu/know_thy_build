@@ -105,4 +105,15 @@ echo "$c" | grep -Eq "(^|[;&|[:space:]])${G}(apply|am)([[:space:]]|$)" && block 
 # 코멘트는 막지 않는다: handoff·rework-response는 코멘트로 나간다.
 echo "$c" | grep -Eq '(^|[;&|[:space:]])gh[[:space:]]+issue[[:space:]]+edit[^;&|]*--(add|remove)-label[^;&|]*factory:' && block "gh issue edit --add/remove-label factory:*"
 echo "$c" | grep -Eq '(^|[;&|[:space:]])gh[[:space:]]+api[^;&|]*/issues/[0-9]+/labels' && block "gh api issues labels"
+
+# ── KTB-21: builder는 진행 중인 테스트 env를 무너뜨릴 수 없다 ─────────────────────────────────────
+# 데모 #18: qa 리뷰어가 증거 수집 중 `docker compose down`으로 env를 내려, 28분 뒤 review 게이트가
+# 죽은 env에 대고 돌아 4/4 승인인데도 `unit`이 `service "db" is not running`으로 RED였다. builder도
+# 같은 실수를 할 수 있다 — `down`/`stop`/`rm`/`kill`/`restart`는 여기서도 막는다. `up`은 막지
+# **않는다**: 멱등이고(`test-env.js up`이 gates 전에도 스스로 부른다), builder가 자기 작업 중 env를
+# 다시 올리는 것은 정상 작업이다 — deny-all-writes.sh(읽기 전용 역할)만 `up`까지 막는다.
+DOCKER_TEARDOWN_VERBS='(down|stop|rm|kill|restart)'
+echo "$c" | grep -Eq "(^|[;&|[:space:]])(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]${DOCKER_TEARDOWN_VERBS}([[:space:]]|\$)" && block "docker compose down/stop/rm/kill/restart tears down the test env"
+echo "$c" | grep -Eq "(^|[;&|[:space:]])docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}([[:space:]]|\$)" && block "docker stop/rm/kill/restart tears down the test env"
+echo "$c" | grep -Eq "(^|[;&|[:space:]])docker[[:space:]]+container[[:space:]]+(stop|rm|kill)([[:space:]]|\$)" && block "docker container stop/rm/kill tears down the test env"
 exit 0

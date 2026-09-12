@@ -875,6 +875,36 @@ test("implement: gates RED → verify fails → needs-human; gates file status w
   expect(lines).not.toContain(GATES_SELF_REPORTED);
 });
 
+// ── KTB-21: 게이트 결과의 test_env_reup을 run 기록에 한 줄로 남긴다 ──────────────────────────────
+test("implement: gates.test_env_reup ok/failed is recorded alongside the FACTORY_GATES verdict line", async () => {
+  const lines = [];
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] }, test_env_reup: { ran: true, ok: true, detail: "" } };
+  const d = implDeps({ gates: async () => gates, runRecord: (l) => lines.push(...l) });
+  await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" });
+  expect(lines).toContain("test-env: re-up ok");
+});
+
+test("implement: gates BLOCKED by a failed test-env re-up records the failure detail and skips to blocked", async () => {
+  const lines = [];
+  const gates = { schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "test-env re-up failed: compose: exit 1", test_env_reup: { ran: true, ok: false, detail: "compose: exit 1" } };
+  const d = implDeps({ gates: async () => gates, runRecord: (l) => lines.push(...l) });
+  const code = await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" });
+  expect(code).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: "test-env re-up failed: compose: exit 1" }));
+  expect(lines.some((l) => /gates: BLOCKED — test-env re-up failed: compose: exit 1/.test(l))).toBe(true);
+  expect(lines).toContain("test-env: re-up failed — compose: exit 1");
+});
+
+// harness가 compose를 안 쓰면 test_env_reup이 아예 없다(reUpTestEnv가 {ran:false} 반환) — 그때는
+// 이 한 줄이 붙지 않는다(기존 동작 그대로).
+test("implement: no compose in the harness → no test-env note in the run record", async () => {
+  const lines = [];
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const d = implDeps({ gates: async () => gates, runRecord: (l) => lines.push(...l) });
+  await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" });
+  expect(lines.some((l) => l.startsWith("test-env:"))).toBe(false);
+});
+
 test("implement: back-pressure refusal exits 0 before claim", async () => {
   const lines = [];
   const d = baseDeps({ backPressure: async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }), claim: vi.fn(), runRecord: (l) => lines.push(...l) });

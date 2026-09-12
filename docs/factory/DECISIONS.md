@@ -498,7 +498,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 ## ADR-020 Dogfood 판결 — 2026-09-12 (Plan 6 Task 7, part 1 — 재구성)
 
-Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19) **⑤ 권한·훅**(KTB-13·14·20) **⑥ 관찰**(O1~O12, O14·O15, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
+Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19) **⑤ 권한·훅**(KTB-13·14·20·21) **⑥ 관찰**(O1~O12, O14·O15, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
 
 ### 질문
 
@@ -836,7 +836,7 @@ You will be notified when it completes.
 **영향**: `factory/lib/merge-stage.js`(`waitForChecksSettled`, `toBlocked`), `factory/lib/config.js`(`merge_check_wait_sec` 기본값), `factory/bin/run-stage.js`(`prChecks`/`requiredChecks`/`mergeCheckWaitSec` dep, origin hoist), `factory/lib/labels.js`(`blocked→rework` 엣지), `factory/lib/transition.js`·`factory/lib/retro/issue-comments.js`(`blockedOriginMarker` 공유), `factory/lib/sweeper.js`(`blockedRetryComment`). 테스트: `merge-stage.test.js`·`config.test.js`·`labels.test.js`·`sweeper.test.js`.
 
 (이후 항목은 dogfood 진행에 따라 추가)
-### ⑤ 권한·훅 — KTB-13·14·20
+### ⑤ 권한·훅 — KTB-13·14·20·21
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
 
@@ -945,6 +945,21 @@ You will be notified when it completes.
 **영향**: `templates/factory/factory/ci-settings-harness.json`(신규), `factory/hooks/block-dangerous.sh`(+ 설치본 `.claude/hooks/`), `factory/bin/run-stage.js`(`HARNESS_LABEL`·`ciSettingsFile`·`stageClaudeArgs`·`stageClaudeEnv`·진입 가드에서 라벨 판단·`ciSettingsPresent(harnessIssue)`·`claudeP(ctx, {harnessIssue})`), `factory/lib/doctor/factory.js`+`factory/cli/doctor.js`(`settings.ci-harness`), 테스트: `hooks.test.js`(env 게이트 9 opened / 21 still blocked / 4 값 변주), `run-stage.test.js`(KTB-20 6건), `templates.test.js`(변형 파일 구조 1건), `doctor-factory.test.js`(1건). 스펙 §5.2.1에 한 항목.
 
 **리뷰 leftover**: KTB-20의 열거 테스트(③, `templates/factory/factory/**` 훑기)는 `.factory/bin/**`·`.factory/lib/**`·`.factory/out/**`를 절대 못 본다 — 셋 다 **템플릿 파일이 아니다**(bin/lib는 설치 시 패키지에서 복사되고 out은 게이트 실행 중 생긴다). 세 글롭을 이름으로 못 박는 테스트를 더했다(`templates.test.js`). 또한 `HARNESS_LABEL = "factory:harness"`가 `bin/run-stage.js`·`bin/retro.js`·`lib/label-catalog.js` 세 곳에 각자 리터럴로 있던 것을 `label-catalog.js`로 모으고 두 bin 파일은 재수출만 하게 했다 — 갈라지면 retro가 만든 이슈를 run-stage가 못 알아보는 조용한 드리프트가 된다(`labels.test.js`가 import equality로 못 박는다).
+
+#### KTB-21 — 리뷰어가 테스트 env를 무너뜨릴 수 있었다: 죽은 env에 대고 돈 게이트는 판정이 아니다
+
+**관측**(데모, #18 review): 4/4 승인인데도 `factory:approved`로 전이가 거부됐다 — 사유 "gates file status is RED": `unit`이 `service "db" is not running`. 런 트랜스크립트를 보면 qa 리뷰어가 증거를 모으는 중 `docker compose -f docker-compose.test.yml down`을 실행했다(잡 시작 시 setup이 올려 둔 env를 리뷰어 자신이 내렸다). 게이트는 그로부터 28분 뒤 도는데, 그때 env는 이미 죽어 있었다 — 리뷰는 진짜 코드를 보고 승인했지만 게이트는 그 코드가 아니라 **꺼진 env**를 판정했다.
+
+**무엇이 어긋났나**: `deny-all-writes.sh`(읽기 전용 역할의 유일한 방벽, KTB-14)는 파일 쓰기·git 서브커맨드·인라인 스크립트의 열거였다 — `docker compose down`은 파일을 쓰지도, git을 건드리지도 않으므로 그 열거 어디에도 없었다. qa가 "증거를 모으려고 env를 들여다보는 것"(§F3, `.factory/out/qa/**`)과 "env 상태 자체를 바꾸는 것"은 훅 입장에서 구분되지 않고 있었다. 그리고 설령 훅이 그 세션 안에서 막았더라도, gates는 **다른 시점에** 도는 별도 프로세스라 훅 하나로 "게이트가 도는 순간 env가 살아 있다"까지 보장할 수 없다 — 사람이 손으로, 이전 잡의 잔해가, 재시작 사이 간극이 같은 결과를 낼 수 있다.
+
+**결정**: 두 층으로 막는다 — 원인(훅이 못 보던 명령 모양)과 결과(게이트가 죽은 env를 신뢰하는 것) 모두.
+
+1. **훅**: `deny-all-writes.sh`(읽기 전용 역할)와 `block-dangerous.sh`(builder) 둘 다에 `docker compose`/`docker-compose`의 `down|stop|rm|kill|restart`, 그리고 bare `docker (stop|rm|kill|restart|container (stop|rm|kill))`를 새 명령 모양으로 더한다. `ps`/`logs`/`exec … psql` 같은 **점검**은 그대로 통과한다 — 막는 것은 서비스 상태를 바꾸는 동사뿐이다. `up`은 갈린다: `deny-all-writes.sh`는 `docker compose … up`도 막는다(읽기 전용 역할이 env를 **세울** 이유도 없다 — 세우는 것은 `test-env.js`가 스스로 하는 일이다), `block-dangerous.sh`는 `up`을 막지 **않는다**(멱등이고, builder가 자기 작업 중 다시 올리는 것은 정상 작업이다). 두 훅 모두 이미 설치본(`.claude/hooks/`)에도 같이 반영한다(F9와 같은 이유 — 소스와 설치본이 갈리면 KTB 자신이 방금 고친 구멍을 그대로 안고 돈다).
+2. **방어 종심(gates.js)**: 훅은 "그 세션 안의 명령"만 본다 — 근본적으로는 **판정 시점에 env가 살아 있는지**를 게이트 자신이 확인해야 한다. `harness.test.env.compose`가 있으면 `runStageGates`가 `[commands]`를 돌리기 **전에** `node .factory/bin/test-env.js up`을 한 번 더 부른다(`reUpTestEnv`) — docker compose의 `up -d --wait`는 멱등이라 이미 떠 있으면 그대로 확인만 하고, 대가 없이 매 게이트 실행 전에 걸 수 있다. re-up 자체가 실패하면(env가 진짜로 복구 불가) `[commands]`를 아예 돌리지 않고 결과를 **BLOCKED**로 세운다 — RED가 아니다: 이것은 "이 diff가 틀렸다"는 판정이 아니라 **판정 자체를 할 수 없었다**는 뜻이고, 그 등급은 이미 이 저장소에 있다(merge-stage의 `undecidable()`, 워크트리 판정 불가 KTB-14 r1). `run-stage.js`가 기존 BLOCKED 처리 경로(`gates?.status === "BLOCKED"` → `factory:blocked`)를 그대로 타므로 새 분기가 필요 없다. 성공/실패 둘 다 `test-env: re-up ok|failed — <detail>` 한 줄을 run 기록에 남긴다(`FACTORY_GATES` 판정 줄 옆에).
+
+**알려진 한계**: re-up은 **compose 서비스**만 본다(`env.seed`·`env.app_start`가 죽어 있으면 이 방어선이 못 잡는다 — 그건 이미 `envUp`의 다른 단계이고 이 판결의 범위 밖이다). 그리고 이것은 "게이트 직전 한 번"의 스냅샷이다 — 게이트가 도는 **도중에** 무언가 env를 내리면(예: 같은 컨테이너를 공유하는 다른 잡) 여전히 못 잡는다. 실제 원인(리뷰어가 env를 내림)은 1의 훅이 막으므로, 2는 정말로 **다른 경로**로 죽은 env에 대한 마지막 방어선이다.
+
+**영향**: `factory/hooks/deny-all-writes.sh`(+ 설치본), `factory/hooks/block-dangerous.sh`(+ 설치본), `factory/lib/gates.js`(`reUpTestEnv`, `runStageGates`), `factory/bin/run-stage.js`(`gatesNote`에 `test-env: re-up …` 추가). 테스트: `hooks.test.js`(docker teardown/up 매트릭스 2건), `gates.test.js`(`reUpTestEnv` 2건 + `runStageGates` BLOCKED/성공 2건), `run-stage.test.js`(run 기록 문구 3건). `docs/factory/dogfood/2026-09-12-demo.md`(#18 review 행).
 
 ### ⑥ 관찰 — O1~O12, O14·O15, G1
 
