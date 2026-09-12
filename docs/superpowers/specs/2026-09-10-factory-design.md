@@ -47,7 +47,9 @@ Phase 1 · Define (로컬, 대화형, 사람)         Phase 2 · Build (CI, 이�
 ### 2.1 CLI
 
 ```
-npx know-thy-build                     # 스킬 13개 설치 (.claude/commands/know-thy-build/*) — Define 5 + Operate 8 (§13)
+npx know-thy-build                     # 카탈로그 스킬 13개 — Define 5 + Operate 8 (§13) — 에 비-카탈로그
+                                       #   보조 스킬 architect/designer 2개를 더해 파일 15개를
+                                       #   .claude/commands/know-thy-build/ 에 설치
 npx know-thy-build factory init        # Phase 2 파일 설치 (.github/ .claude/agents|workflows|hooks .factory/ docs/factory/)
 npx know-thy-build factory doctor      # 하네스 계약 검증. 하나라도 비면 exit 1
 npx know-thy-build factory bootstrap   # 라벨 세트, branch protection, required checks (repo admin)
@@ -136,7 +138,7 @@ stateDiagram-v2
 
 ### 3.3 전이 규칙 — 건너뛰기 불가의 구현
 
-전이는 오직 `.factory/bin/transition.sh <issue> <to>`가 수행한다. 이 스크립트는:
+전이는 오직 `.factory/bin/transition.js <issue> <to>`가 수행한다. 이 스크립트는:
 
 1. 현재 라벨이 허용된 출발 상태인지 확인한다(표 3.1의 그래프 밖 전이는 exit 2 — 라벨은 바꾸지 않고 `factory-transition-refused` 코멘트만 남긴다(Plan 2 실행 판결, ADR-015) — merge를 포함해 전이가 조용히 실패하는 지점이 없다).
 2. **목적 상태가 요구하는 handoff가 존재하는지** 확인한다(아래 표). 없으면 전이하지 않고 `needs-human` + 사유 코멘트.
@@ -150,7 +152,7 @@ stateDiagram-v2
 | `approved` | `stage=review` | `head_sha` == PR HEAD, 판정 수 == 로스터 크기, 전원 `approve`, `round` ≤ K, **이번 스테이지의 `gates.json`이 GREEN** |
 | `merged` | (merge 잡 자체가 검사) | required checks GREEN, integrity GREEN, approved handoff의 `head_sha` == PR HEAD, **이번 스테이지의 `gates.json`이 GREEN** |
 
-review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5) — `approved`/`merged` 전이가 보는 `gates.json`은 review·merge 자신이 이번 런에서 만든 파일이지 implement의 파일을 재사용하지 않는다. 단 이 검사는 **오직 전이 경로에서만** 작동한다: 스테이지 시작 시점의 선행 handoff 확인(`assert-handoff.sh`, §4.2.1 step 2)은 "직전 스테이지가 산출물을 남겼는가"만 묻고 이번 런의 게이트는 묻지 않는다 — 그 시점엔 이번 런의 게이트가 아직 돌지 않았다(`resetGates`가 지난 런의 파일을 지운 직후다). 두 시점을 구분하는 표식이 `gatesChecked`다: `transition.sh`가 전이 직전에만 `gatesChecked=true`를 `gates.json`과 함께 실어 넘기고, `assert-handoff.sh`는 이 값을 절대 세우지 않는다(ADR-012).
+review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5) — `approved`/`merged` 전이가 보는 `gates.json`은 review·merge 자신이 이번 런에서 만든 파일이지 implement의 파일을 재사용하지 않는다. 단 이 검사는 **오직 전이 경로에서만** 작동한다: 스테이지 시작 시점의 선행 handoff 확인(`assert-handoff.sh`, §4.2.1 step 2)은 "직전 스테이지가 산출물을 남겼는가"만 묻고 이번 런의 게이트는 묻지 않는다 — 그 시점엔 이번 런의 게이트가 아직 돌지 않았다(`resetGates`가 지난 런의 파일을 지운 직후다). 두 시점을 구분하는 표식이 `gatesChecked`다: `transition.js`가 전이 직전에만 `gatesChecked=true`를 `gates.json`과 함께 실어 넘기고, `assert-handoff.sh`는 이 값을 절대 세우지 않는다(ADR-012).
 
 사람이 라벨을 `approved`로 손으로 옮겨도 merge 잡은 review handoff를 찾지 못하므로 `needs-human`으로 되돌린다. **건너뛰기는 라벨이 아니라 산출물 부재로 막힌다.**
 
@@ -158,7 +160,7 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 
 ### 3.4 handoff 코멘트 포맷
 
-각 스테이지는 종료 시 이슈(또는 PR)에 코멘트 하나를 남긴다. 사람이 읽을 요약 + 기계가 읽을 블록. 기계가 읽는 블록은 **JSON**이다 — `transition.sh` 등의 bash 스크립트가 `jq`만으로 파싱하도록, 별도 YAML 파서 의존성을 피한다.
+각 스테이지는 종료 시 이슈(또는 PR)에 코멘트 하나를 남긴다. 사람이 읽을 요약 + 기계가 읽을 블록. 기계가 읽는 블록은 **JSON**이다 — `transition.js` 등의 bash 스크립트가 `jq`만으로 파싱하도록, 별도 YAML 파서 의존성을 피한다.
 
 ```markdown
 <!-- factory-handoff:v1 stage=plan issue=123 -->
@@ -195,7 +197,7 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 ```
 ```
 
-`transition.sh`는 ` ```json ` 펜스 블록만 `jq`로 파싱한다. 위 요약 텍스트는 사람용이다.
+`transition.js`는 ` ```json ` 펜스 블록만 `jq`로 파싱한다. 위 요약 텍스트는 사람용이다.
 
 ---
 
@@ -343,7 +345,7 @@ run-stage.sh <stage> <issue>
                                              #   verdicts 수 < 로스터 크기(incomplete)는 rework가 아니라 needs-human으로 보내고 빠진 역할을 사유에 명시한다.
   7. write-handoff.sh <stage> <issue>        # 4·5 결과를 schema 검증 후 코멘트로 (orchestration · guarantee · workflow_run_id 포함)
                                              #   6이 이미 schema를 통과시켰으므로 7은 재검증하지 않고 6의 data를 그대로 코멘트로 옮긴다
-  8. transition.sh <issue> <to>              # 3.3 규칙 (implement 성공 시 <to>=factory:awaiting-review; 출발 상태는 2.5가 이미 in-progress로 옮겨 둔 상태)
+  8. transition.js <issue> <to>              # 3.3 규칙 (implement 성공 시 <to>=factory:awaiting-review; 출발 상태는 2.5가 이미 in-progress로 옮겨 둔 상태)
   9. run-record.sh <stage> <issue>           # docs/factory/runs/<issue>.md를 default 브랜치가 아니라 전용
                                              #   `factory/records` 브랜치에 git plumbing으로 append한다(ADR-014) — 현재
                                              #   체크아웃·인덱스·HEAD(또는 detached HEAD)를 건드리지 않는다. 스테이지
@@ -785,7 +787,9 @@ light_on_merge: true
 - `gates.sh <level>` → `.factory/out/gates.json` + 한 줄 `FACTORY_GATES: level=full status=GREEN passed=4 failed=0 failing=none skipped=none misconfigured=none excluded=none`. required 게이트가 skip이면 `MISCONFIGURED` exit 2.
 - `prove-test.sh <issue>`: 브랜치의 새 테스트 파일을 base에 얹어 실행 → **실패해야** 통과. 통과하면 "테스트가 수정을 증명하지 않음".
 - `aggregate-review.sh`: N개 verdict JSON을 세어 `approved | rework | incomplete`(verdict 수 < 로스터 → needs-human, §7.5). LLM 개입 없음.
-- `assert-handoff.sh`, `transition.sh`: 3.3.
+- `assert-handoff.sh`, `transition.js`: 3.3.
+
+> **이름에 관한 주석.** L1 스크립트는 전부 Node로 구현되어 `.factory/bin/*.js`로 설치된다(`factory/bin/` 참조). 이 문서에 남은 `.sh` 이름(`gates.sh`, `assert-handoff.sh`, `write-handoff.sh`, `run-record.sh`, `aggregate-review.sh`, `prove-test.sh`)은 최초 설계 당시의 표기이고 실제 파일명은 같은 이름의 `.js`다. `transition.js`만은 스킬 본문이 사람에게 그대로 복사해 실행시키는 명령이라(§13.1 원칙 2) 문서 전체에서 실제 파일명으로 통일했다.
 
 ### 6.3 L2 — `.claude/settings.json` + `.factory/ci-settings.json` (factory init이 둘 다 생성)
 
@@ -1421,7 +1425,7 @@ npx know-thy-build factory bootstrap
 부수 산출: 러너/yml 관례는 **ADR-009**(flow mapping 안의 `${{ }}` 금지, `upload-artifact`의 `include-hidden-files: true`)로 남겼다 — Plan 2의 yml 템플릿이 지킨다.
 
 ### 12.2 단위 검증 (스크립트는 전부 테스트를 가진다)
-- `transition.sh`: 상태 그래프 밖 전이 거부, handoff 없는 전이 거부, 손으로 옮긴 라벨 되돌림 — bats 테스트
+- `transition.js`: 상태 그래프 밖 전이 거부, handoff 없는 전이 거부, 손으로 옮긴 라벨 되돌림 — bats 테스트
 - `gates.sh`: required skip → exit 2, 판정 라인 포맷
 - `prove-test.sh`: 통과하는 테스트(증명 없음) 감지
 - `aggregate-review.sh`: N/N, N-1/N, schema 불일치 각각
@@ -1447,7 +1451,7 @@ KTB 0.x의 정체성은 "Phase 1을 돕는 스킬"(`:project` `:technical` `:qa`
 ### 13.1 원칙
 
 1. **사람 지점 1개 = 스킬 1개.** 지점이 없는 스킬은 만들지 않는다. 스킬이 없는 지점은 설계 결함이다.
-2. **조언자이자 집행자, 우회자는 아니다.** 스킬은 판단을 돕고 사람의 결정을 **L1 스크립트를 통해** 집행한다(`transition.sh --human --reason "..."`). 라벨을 손으로 옮기게 하지 않고, 게이트를 건너뛰는 스킬은 없다. 머지는 절대 스킬이 하지 않는다 — 사람이 GitHub UI에서 하는 것 자체가 강제의 일부다.
+2. **조언자이자 집행자, 우회자는 아니다.** 스킬은 판단을 돕고 사람의 결정을 **L1 스크립트를 통해** 집행한다(`transition.js --human --reason "..."`). 라벨을 손으로 옮기게 하지 않고, 게이트를 건너뛰는 스킬은 없다. 머지는 절대 스킬이 하지 않는다 — 사람이 GitHub UI에서 하는 것 자체가 강제의 일부다.
 3. **증거 먼저.** 모든 운영 스킬은 handoff·run 기록·dissent·must_fix 이력을 먼저 읽고 한 화면으로 요약한 뒤 질문한다.
 4. **결정은 기록된다.** 사람의 결정은 `human-decision:v1` 블록으로 이슈 코멘트 또는 `docs/factory/DECISIONS.md`에 남는다. retro는 사람의 결정 패턴도 학습한다("needs-human 5건 중 4건이 범위 축소로 해결 → skeptic lens에 범위 질문 추가 제안").
 5. **Phase 1은 길게, 운영은 짧게.** 정의 스킬은 소크라테스식 긴 대화가 맞다. 운영 스킬은 "요약 → 선택지 2~3 → 실행"이다. 정지 해제에 40문답은 안 된다.
@@ -1464,7 +1468,7 @@ actions:
 ```
 ```
 
-### 13.2 스킬 목록 (13개, 전부 1.0)
+### 13.2 스킬 목록 (카탈로그 13개, 전부 1.0 — `architect`/`designer` 2개를 더해 설치 파일은 15개, §13.4)
 
 | 스킬 | 사람 지점 | 계열 |
 |---|---|---|
