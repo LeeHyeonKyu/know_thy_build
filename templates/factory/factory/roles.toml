@@ -35,6 +35,7 @@ stance  = "배포·장애·롤백·관측. 프로덕션에서 무엇이 깨지�
 [plan.synthesizer]
 agent   = ".claude/agents/plan-synthesizer.md"
 model   = "opus"
+lessons = ".factory/lessons/plan-synthesizer.md"
 output  = "factory.plan.v1"
 
 # ── implement ───────────────────────────────────────
@@ -89,14 +90,12 @@ model    = "sonnet"
 lessons  = ".factory/lessons/reviewer-qa.md"
 spawn_on = ["tier:standard", "tier:load-bearing"]
 cold_read = true
-tools    = ["Bash", "Read", "Grep", "Glob", "mcp__playwright__*"]
+tools    = ["Bash", "Read", "Grep", "Glob"]     # 1.0은 MCP 서버를 설치하지 않는다 — 브라우저는 Bash로 npx playwright
 output   = "factory.verdict.v1"
 
-# ── merge / retro ───────────────────────────────────
-[merge.integrator]
-agent  = ".claude/agents/factory-integrator.md"
-model  = "sonnet"                                 # 충돌 해소 시에만 spawn. 평소엔 스크립트만
-
+# ── retro ───────────────────────────────────────────
+# merge에는 역할이 없다 — merge 스테이지는 `claude -p`를 전혀 부르지 않는 스크립트 전용이고(ADR-015 R3),
+# 충돌은 integrator가 아니라 `factory:approved → factory:rework` 전이로 implement가 다시 푼다.
 [retro.analyst]
 agent  = ".claude/agents/factory-retro.md"
 model  = "opus"

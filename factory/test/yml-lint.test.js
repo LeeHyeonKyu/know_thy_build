@@ -26,7 +26,7 @@ test("logging hooks must end with exit 0", () => {
 
 const W = new URL("../../templates/factory/github/workflows/", import.meta.url).pathname;
 const files = readdirSync(W).filter((f) => f.endsWith(".yml"));
-const STAGE = { "factory-triage.yml": ["triage", 15, '"factory:queue"'], "factory-plan.yml": ["plan", 45, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 45, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 20, '"factory:approved"'] };
+const STAGE = { "factory-triage.yml": ["triage", 15, '"factory:queue"'], "factory-plan.yml": ["plan", 60, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 45, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 20, '"factory:approved"'] };
 
 test("all seven workflow templates exist and pass lint", () => {
   expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);

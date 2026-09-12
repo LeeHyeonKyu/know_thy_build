@@ -65,11 +65,11 @@ const rosterUnion = (obj) => [...new Set(Object.values(obj || {}).flat())];
 // triage만 이름 없이 단일 agent(roles.triage.agent)고, 나머지(plan/implement/review/merge/retro)는 이름별 로스터다.
 function collectAllRoleEntries(roles) {
   const entries = [];
-  if (roles.triage?.agent) entries.push(roles.triage);
+  if (roles.triage?.agent) entries.push({ stage: "triage", name: "triage", def: roles.triage });
   for (const stage of ["plan", "implement", "review", "merge", "retro"]) {
     const s = roles[stage];
     if (!s) continue;
-    for (const name of Object.keys(s)) entries.push(s[name]);
+    for (const name of Object.keys(s)) entries.push({ stage, name, def: s[name] });
   }
   return entries;
 }
@@ -83,12 +83,26 @@ export function checkRoles({ charter, roles, exists, root }) {
   ];
 
   const entries = collectAllRoleEntries(roles);
-  const missingAgents = entries.filter((e) => e.agent && !exists(join(root, e.agent))).map((e) => e.agent);
-  const missingLessons = entries.filter((e) => e.lessons && !exists(join(root, e.lessons))).map((e) => e.lessons);
+  // `retro`만 예외다: `[retro.analyst]`가 가리키는 `factory-retro.md`는 Plan 4가 설치한다(ADR-015 R3 / P3-R7).
+  // Plan 3까지 설치를 끝낸 저장소에서 이것을 FAIL로 보고하면 doctor가 **항상** 빨갛고, 그러면 사람은 doctor를
+  // 읽지 않게 된다 — 알려진·계획된 gap은 WARN이지 FAIL이 아니다. 나머지 스테이지는 그대로 FAIL이다.
+  const missingAgents = [];
+  const retroMissing = [];
+  for (const e of entries) {
+    if (!e.def.agent || exists(join(root, e.def.agent))) continue;
+    (e.stage === "retro" ? retroMissing : missingAgents).push(e.def.agent);
+  }
+  const missingLessons = entries.filter((e) => e.def.lessons && !exists(join(root, e.def.lessons))).map((e) => e.def.lessons);
+
+  const agentFiles = missingAgents.length
+    ? c("roles.agent-files", "FAIL", `agent files missing (Plan 3 installs agents): ${missingAgents.join(", ")}`)
+    : retroMissing.length
+      ? c("roles.agent-files", "WARN", `retro agent file arrives with Plan 4: ${retroMissing.join(", ")}`)
+      : c("roles.agent-files", "PASS");
 
   return [
     undefinedNames.length ? c("roles.roster-defined", "FAIL", `roster names not defined in roles.toml: ${undefinedNames.join(", ")}`) : c("roles.roster-defined", "PASS"),
-    missingAgents.length ? c("roles.agent-files", "FAIL", `agent files missing (Plan 3 installs agents): ${missingAgents.join(", ")}`) : c("roles.agent-files", "PASS"),
+    agentFiles,
     missingLessons.length ? c("roles.lessons-files", "WARN", `lessons files missing: ${missingLessons.join(", ")}`) : c("roles.lessons-files", "PASS"),
   ];
 }
@@ -106,7 +120,7 @@ const LOADER_AGENT = ".claude/agents/factory-loader.md";
  */
 export function checkAgents({ roles, root, readFile, exists }) {
   const paths = [];
-  for (const e of collectAllRoleEntries(roles)) if (e.agent && !paths.includes(e.agent)) paths.push(e.agent);
+  for (const e of collectAllRoleEntries(roles)) if (e.def.agent && !paths.includes(e.def.agent)) paths.push(e.def.agent);
   if (!paths.includes(LOADER_AGENT)) paths.push(LOADER_AGENT);
 
   const out = [];

@@ -54,7 +54,7 @@ const PLAN_DATA = {
       { role: "product-advocate", position: "사용자는 CSV를 지금 원한다. 나머지는 나중이다." },
       { role: "architect", position: "내보내기는 서비스 경계 밖에 둔다. 그래야 되돌릴 수 있다." },
     ],
-    r2: [{ role: "architect", objections: [{ to: "product-advocate", claim: "a", evidence: "b" }] }, { role: "product-advocate", objections: [] }],
+    r2_objections: 1,
     votes: [{ role: "product-advocate", vote: "accept", reason: "ok" }, { role: "architect", vote: "object", reason: "여전히 범위가 넓다" }],
   },
 };

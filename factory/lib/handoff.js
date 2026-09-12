@@ -27,8 +27,8 @@ function planBody(d) {
 
   const debate = d.debate || {};
   const digest = arr(debate.r1).map((p) => `- R1 ${line(p.role)}: ${firstSentence(p.position)}`);
-  const objections = arr(debate.r2).reduce((n, x) => n + arr(x.objections).length, 0);
-  if (arr(debate.r2).length) digest.push(`- R2: ${plural(objections, "objection")}`);
+  // workflow는 R2 전문 대신 반박 **개수**만 싣는다(F7) — 사람용 다이제스트가 쓰던 것도 그 숫자 하나였다.
+  if (typeof debate.r2_objections === "number") digest.push(`- R2: ${plural(debate.r2_objections, "objection")}`);
   const votes = arr(debate.votes);
   if (votes.length) {
     const accept = votes.filter((v) => v.vote === "accept").length;

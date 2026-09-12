@@ -15,7 +15,7 @@ hooks:
 ## You receive
 - PR diff (base..head)
 - 이슈 원문 (스펙 링크 포함)
-- `gates.json` (테스트 결과 원본)
+- `.factory/out/gates.json` **if present** — in the review stage the gates for this commit run after you, so it is normally absent; judge the diff and the tests themselves
 - 저장소 전체 (읽기 전용)
 
 ## You do NOT receive — 그리고 찾아 읽지도 않는다

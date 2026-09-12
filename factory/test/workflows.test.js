@@ -320,8 +320,12 @@ test("factory-plan.js: standard tier runs R1/R2/synthesis/sign-off over the load
     summary: "Export the report table as CSV",
   });
   expect(result.roles).toEqual(["product-advocate", "architect", "skeptic", "operator"]);
+  // F7: handoff에는 토론 전문이 아니라 다이제스트가 실린다 — R1은 {role, position}만, R2는 반박 **개수**만.
   expect(result.debate.r1.map((x) => x.role)).toEqual(PLAN_ROSTER.map((r) => r.name));
-  expect(result.debate.r2.map((x) => x.role)).toEqual(PLAN_ROSTER.map((r) => r.name));
+  expect(result.debate.r1.every((x) => Object.keys(x).sort().join(",") === "position,role")).toBe(true);
+  expect(result.debate.r1.some((x) => "risks" in x || "proposed_done_when" in x)).toBe(false);
+  expect(typeof result.debate.r2_objections).toBe("number");
+  expect(result.debate.r2).toBeUndefined();
   expect(result.debate.votes.every((v) => v.vote === "accept")).toBe(true);
   expect(phases).toEqual(["Load", "Positions", "Cross-examination", "Synthesis", "Sign-off"]);
 });
@@ -428,7 +432,7 @@ test("factory-plan.js: docs tier (rounds 2, roster 2) skips cross-examination en
   expect(result.rounds).toBe(2);
   expect(result.tier).toBe("docs");
   expect(result.roles).toEqual(["architect", "skeptic"]);
-  expect(result.debate.r2).toEqual([]);
+  expect(result.debate.r2_objections).toBe(0);   // 교차검토를 아예 돌지 않았으므로 반박도 0이다(F7)
   expect(validate("plan.v1", result).ok).toBe(true);
 });
 
@@ -1066,7 +1070,8 @@ test("factory-review.js: unanimous approve with nothing missed — R1 ×4 then l
   expect(result.verdicts.map((v) => v.role)).toEqual(["correctness", "architecture", "spec-conformance", "qa"]);
   expect(result.round).toBe(0); // run-stage recounts the round from the handoff comments
   expect(result.decision).toBeUndefined(); // aggregate-review.sh owns `decision`, never the workflow
-  expect(result.r1).toHaveLength(4);
+  // F7: `r1`은 싣지 않는다 — `verdicts`가 곧 R2 결과이고, 경량 R2에서 missed가 없으면 그것이 R1 그대로다.
+  expect(result.r1).toBeUndefined();
   expect(result.disputes).toEqual([]);
   expect(result.summary).toContain("4 approve");
   expect(validate("review.v1", result).ok).toBe(true);
@@ -1108,8 +1113,9 @@ test("factory-review.js: one R1 reject turns R2 into a full exchange — revise 
   expect(byRole.architecture.must_fix).toEqual([finding("arch2")]);
   expect(byRole.architecture.verified).toEqual([]);
   expect(byRole.qa.verdict).toBe("approve");
-  // r1 is kept untouched next to the final verdicts
-  expect(result.r1.find((v) => v.role === "architecture").verdict).toBe("approve");
+  // F7: r1은 handoff에 실리지 않는다 — 그 사실은 프롬프트(각자에게 자기 R1을 되돌려 준다)로만 남는다
+  expect(result.r1).toBeUndefined();
+  expect(withLabel(calls, "R2:").find((c) => labelOf(c) === "R2:architecture").prompt).toContain('"verdict": "approve"');
   expect(validate("review.v1", result).ok).toBe(true);
 
   // the full R2 hands each reviewer the OTHERS' R1, never its own back
@@ -1410,7 +1416,9 @@ test("factory-review.js: the findings decide the verdict — an approve carrying
   const qa = result.verdicts.find((v) => v.role === "qa");
   expect(qa.verdict).toBe("reject");
   expect(qa.must_fix).toEqual([finding("qa1")]);
-  expect(result.r1.find((v) => v.role === "qa").verdict).toBe("reject");
+  // R1의 (유도된) reject는 handoff에 실리지 않지만(F7), R2 프롬프트가 자기 R1을 그대로 되돌려 준다
+  expect(result.r1).toBeUndefined();
+  expect(withLabel(calls, "R2:").find((c) => labelOf(c) === "R2:qa").prompt).toContain('"verdict": "reject"');
   expect(validate("review.v1", result).ok).toBe(true);
 });
 
@@ -1457,7 +1465,7 @@ test("factory-review.js: a `revise` that empties must_fix flips the reject to ap
     return null;
   };
 
-  const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
+  const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
     args: { issue: 42, context: ".factory/out/context.json" },
   });
@@ -1466,8 +1474,9 @@ test("factory-review.js: a `revise` that empties must_fix flips the reject to ap
   expect(cf.verdict).toBe("approve");
   expect(cf.must_fix).toEqual([]);
   expect(cf.verified).toEqual(["cf: the base already handled it — my read of line 88 was wrong"]);
-  // r1 still records that it rejected in round 1
-  expect(result.r1.find((v) => v.role === "correctness").verdict).toBe("reject");
+  // R1의 reject는 handoff에 남지 않는다(F7) — R2 프롬프트가 자기 R1을 되돌려 주는 것으로만 확인한다
+  expect(result.r1).toBeUndefined();
+  expect(withLabel(calls, "R2:").find((c) => labelOf(c) === "R2:correctness").prompt).toContain('"verdict": "reject"');
   expect(result.summary).toContain("4 approve");
   expect(validate("review.v1", result).ok).toBe(true);
 });

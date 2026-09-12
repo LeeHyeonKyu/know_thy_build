@@ -204,7 +204,7 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 | 파일 | 트리거 | `run-stage.sh` 인자 | `timeout-minutes` |
 |---|---|---|---|
 | `factory-triage.yml` | `issues: labeled` (`factory:queue`) | `triage` | 15 |
-| `factory-plan.yml` | `issues: labeled` (`factory:ready`) | `plan` | 45 |
+| `factory-plan.yml` | `issues: labeled` (`factory:ready`) | `plan` | 60 (최종 리뷰 F8 — 4명 토론 R1·R2 + 종합 + 서명 2회는 opus 4대가 직렬로 도는 구간이 있어 45분으로는 상한이 먼저 온다) |
 | `factory-implement.yml` | `issues: labeled` (`factory:planned`, `factory:rework`) | `implement` | 90 |
 | `factory-review.yml` | `issues: labeled` (`factory:awaiting-review`) — `pull_request` 이벤트가 아니다(Plan 2 실행 판결, ADR-015 — R1: PR head는 이미 implement handoff의 `head_sha`로 묶여 있어 PR→이슈 매핑이 필요 없다) | `review` | 45 |
 | `factory-merge.yml` | `issues: labeled` (`factory:approved`) | `merge` — **스크립트 전용, `claude -p` 호출 없음**(Plan 2 실행 판결, ADR-015 — R3) | 20 |

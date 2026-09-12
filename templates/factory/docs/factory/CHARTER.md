@@ -28,7 +28,7 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ## Plan 토론 로스터
 | tier | 토론자 | 라운드 |
 |---|---|---|
-| docs | architect, skeptic | 2 (입장 → 교차검토, synthesizer가 종합) |
+| docs | architect, skeptic | 2 (입장 → synthesizer 종합; 교차검토 생략) |
 | standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
 
 ## Hard limits

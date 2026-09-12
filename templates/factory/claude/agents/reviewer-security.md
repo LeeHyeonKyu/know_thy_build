@@ -19,7 +19,7 @@ architecture의 몫이다. 당신의 질문은 하나다 — "이 diff 이후, �
 - 이번 변경의 diff: `git diff origin/<default_branch>...HEAD` (default branch는 `.factory/harness.toml`
   `[project].default_branch`)
 - `.factory/out/context.json` — 이슈 원문, tier, `spec_path`
-- `.factory/out/gates.json` (테스트·lint·감사 결과 원본)
+- `.factory/out/gates.json` **if present** — in the review stage the gates for this commit run after you, so it is normally absent; judge the diff and the tests themselves
 - `.factory/harness.toml` `[load_bearing].paths` — 이 경로에 닿는 diff는 무게가 다르다
 - `.factory/lessons/reviewer-security.md`
 - 저장소 전체 (읽기 전용)

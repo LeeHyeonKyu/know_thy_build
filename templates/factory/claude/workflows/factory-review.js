@@ -343,9 +343,10 @@ const r1Prompt = (r) => {
     (planFields === undefined ? '' : `, and \`handoffs.plan\` — ${planFields}`) +
     `), the spec at its \`spec_path\` if one is named, the diff ` +
     `\`git diff origin/<default_branch>...HEAD\` (default branch from \`.factory/harness.toml\` ` +
-    `[project].default_branch), \`.factory/out/gates.json\` (the raw gate results — read them, do not ` +
-    `trust a summary of them), the files that diff touches, and your lessons file at ` +
-    `\`${lessonsOf(r)}\` (treat every entry as a checklist item).\n` +
+    `[project].default_branch), the files that diff touches, and your lessons file at ` +
+    `\`${lessonsOf(r)}\` (treat every entry as a checklist item). Also read \`.factory/out/gates.json\` ` +
+    `**if present** — in the review stage the gates for this commit run after you, so it is normally ` +
+    `absent; judge the diff and the tests themselves.\n` +
     (planFields === undefined
       ? `Do NOT read handoffs.plan, the PR description, the PR comments, the commit message bodies, or ` +
         `any note the builder wrote — and do not go looking for them. Explanation is persuasion; you judge ` +
@@ -534,7 +535,9 @@ return {
   head_sha: headSha,
   round: 0,
   verdicts,
-  r1,
+  // `r1`은 싣지 않는다(F7): `verdicts`가 이미 R2 결과이고, 경량 R2에서 missed가 없으면 R1 그대로다 —
+  // 두 벌을 함께 실으면 handoff 코멘트가 두 배가 되는 대신 새로 알려 주는 것은 "누가 R2에서 마음을 바꿨는가"
+  // 뿐인데, 그것은 `verdicts[].on_others`와 `summary`가 이미 말한다.
   disputes,
   orchestration: 'workflow',
   guarantee: 'structural',

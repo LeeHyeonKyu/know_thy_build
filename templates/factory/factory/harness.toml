@@ -76,7 +76,9 @@ ready_timeout_sec = 90
 factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md",
                  "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
                  "tsconfig*.json", ".eslintrc*", "eslint.config.*"]
-except        = [".factory/lessons/**", "docs/factory/runs/**"]
+                 # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
+                 # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
+except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
 additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true
 

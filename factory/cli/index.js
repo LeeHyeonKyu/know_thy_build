@@ -33,7 +33,9 @@ export async function main(argv) {
   const root = await repoRoot();
   switch (sub) {
     case "init": return (await import("./init.js")).initCommand({ root, pkgRoot, argv: rest, io });
-    case "doctor": return (await import("./doctor.js")).doctorCommand({ root, pkgRoot, argv: rest, io });
+    // doctorCommand는 `run`에 기본값이 없다 — 모든 외부 프로세스를 주입받는 게 규칙이라(Plan 1a) 여기서
+    // 실주입을 해야 한다. 빠뜨리면 첫 `run("git", ["ls-files"])`에서 TypeError로 죽는다.
+    case "doctor": return (await import("./doctor.js")).doctorCommand({ root, pkgRoot, argv: rest, io, run: realRun });
     case "bootstrap": return (await import("./bootstrap.js")).bootstrapCommand({ root, argv: rest, io });
     case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io });
     case "status": return (await import("./status.js")).statusCommand({ root, argv: rest, io });

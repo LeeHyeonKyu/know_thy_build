@@ -2,7 +2,7 @@ import { test, expect } from "vitest";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { repoRoot, HELP } from "../cli/index.js";
+import { repoRoot, HELP, main } from "../cli/index.js";
 import { makeFakeRun, run as realRun } from "../lib/exec.js";
 
 // ── fix round 2 (F15): `factory init`을 하위 디렉터리에서 실행해도 repo 루트에 설치한다 ──
@@ -38,3 +38,25 @@ test("repoRoot: against a real repo, a subdirectory resolves to the repo root", 
 test("HELP still lists the five factory subcommands", () => {
   for (const s of ["init", "doctor", "bootstrap", "run", "status"]) expect(HELP).toContain(`factory ${s}`);
 });
+
+// ── F4: `main()`은 doctorCommand에 `run`을 주입해야 한다 ──────────────────────────────────────
+// doctorCommand({root, pkgRoot, argv, io})에는 `run` 기본값이 없다 — 빠뜨리면 첫 `run("git", ["ls-files"])`
+// 에서 "run is not a function"으로 죽는다. 단위 테스트는 doctorCommand를 직접 부르며 항상 run을 넘겨 왔기
+// 때문에 이 배선만 아무도 밟지 않았다. 여기서는 CLI 진입점을 그대로 통과시킨다.
+test("main(['doctor','--no-run','--offline']) wires a real run() — it returns an exit code instead of throwing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb-cli-doctor-"));
+  await realRun("git", ["init", "-q", "-b", "main"], { cwd: root });
+  const cwd = process.cwd();
+  const log = console.log, err = console.error;
+  console.log = () => {}; console.error = () => {};
+  try {
+    process.chdir(root);
+    // harness.toml이 없는(=아직 init하지 않은) 저장소이므로 exit 1이 정상이다 — 확인하는 것은
+    // "throw하지 않고 숫자를 돌려준다"이다.
+    const code = await main(["doctor", "--no-run", "--offline"]);
+    expect(typeof code).toBe("number");
+  } finally {
+    process.chdir(cwd);
+    console.log = log; console.error = err;
+  }
+}, 30000);

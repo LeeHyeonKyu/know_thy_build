@@ -59,6 +59,25 @@ test("checkRoles: roles.agent-files covers every defined role, even one absent f
   expect(c["roles.agent-files"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("plan-synthesizer.md") });
 });
 
+// ── F5: retro는 Plan 4가 채운다 — 알려진·계획된 gap은 FAIL이 아니라 WARN이다 ────────────────
+test("checkRoles: a missing retro agent file is WARN (Plan 4), a missing agent for any other stage is still FAIL", () => {
+  const charter = { roster: {}, plan_roles: {} };
+  const rolesRetroOnly = {
+    triage: { agent: ".claude/agents/factory-triage.md" },
+    review: { correctness: { agent: ".claude/agents/reviewer-correctness.md" } },
+    retro: { analyst: { agent: ".claude/agents/factory-retro.md" } },
+  };
+  const present = (p) => !p.endsWith("factory-retro.md");
+  const warn = by(checkRoles({ charter, roles: rolesRetroOnly, root: "/r", exists: present }));
+  expect(warn["roles.agent-files"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("Plan 4") });
+  expect(warn["roles.agent-files"].detail).toContain("factory-retro.md");
+
+  // 같은 저장소에서 review 역할 파일이 없으면 다시 FAIL이고, 그 FAIL이 retro WARN보다 우선한다
+  const bothMissing = by(checkRoles({ charter, roles: rolesRetroOnly, root: "/r", exists: (p) => p.endsWith("factory-triage.md") }));
+  expect(bothMissing["roles.agent-files"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("reviewer-correctness.md") });
+  expect(bothMissing["roles.agent-files"].detail).not.toContain("factory-retro.md");
+});
+
 test("checkRoles: everything present → all PASS", () => {
   const charter = { roster: { docs: ["correctness"] }, plan_roles: { default: ["architect"] } };
   const roles = { review: { correctness: { agent: ".claude/agents/reviewer-correctness.md", lessons: ".factory/lessons/reviewer-correctness.md" } }, plan: { architect: { agent: ".claude/agents/plan-architect.md" } }, triage: { agent: ".claude/agents/factory-triage.md" } };
@@ -104,8 +123,8 @@ test("checkAgents: the shipped roles.toml + agent templates are what an initiali
     readFile: (p) => readFileSync(asInstalled(p), "utf8"),
   });
   for (const ch of checks) expect(ch.level, `${ch.id}: ${ch.detail}`).toBe("PASS");
-  // 13 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5) + loader. merge.integrator·retro.analyst는
-  // 아직 없는 파일이라 건너뛴다(ADR-015 R3, retro는 Plan 4).
+  // 13 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5) + loader. merge에는 역할이 아예 없고
+  // (ADR-015 R3 — F5에서 [merge.integrator] 삭제), retro.analyst는 아직 없는 파일이라 건너뛴다(Plan 4).
   expect(checks.map((ch) => ch.id).sort()).toEqual([
     "agents.factory-builder", "agents.factory-loader", "agents.factory-triage", "agents.factory-verifier",
     "agents.plan-architect", "agents.plan-operator", "agents.plan-product-advocate", "agents.plan-skeptic",

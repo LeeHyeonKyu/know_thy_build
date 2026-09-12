@@ -34,6 +34,9 @@ test("harness.toml template protects the build-config files the gate commands re
     expect(h.protected.factory, g).toContain(g);
   }
   expect(h.protected.except).toContain(".factory/lessons/**");
+  // F3: qa 리뷰어의 증거 디렉터리 — 쓸 수 없으면 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
+  expect(h.protected.except).toContain(".factory/out/qa/**");
+  expect(h.evidence.qa_artifacts).toBe(".factory/out/qa/**");
 });
 
 test("roles.toml template defines every role the CHARTER template names", () => {
@@ -78,7 +81,10 @@ test("settings.json template has the §6.3 deny list, all four hook events, and 
   expect(cmds("PostToolUse")).toContain(".claude/hooks/lint-touched.sh");
   expect(cmds("Stop")).toContain(".claude/hooks/stop-guard.sh");
   expect(cmds("SubagentStart")).toContain(".claude/hooks/record-agents.sh");
-  expect(cmds("SubagentStop")).toEqual(expect.arrayContaining([".claude/hooks/record-agents.sh", ".claude/hooks/verdict-format.sh"]));
+  // stop-guard는 Stop만이 아니라 SubagentStop에도 걸린다(F6): 실제로 일하는 것은 서브에이전트다 —
+  // builder는 자기 서브에이전트가 끝나기 전에 commit+push를 마쳐야 하고, reviewer는 트리를 깨끗이 두고 나가야
+  // 한다. 메인 세션의 Stop에서만 검사하면 그 사실이 workflow가 다 끝난 뒤에야 드러난다.
+  expect(cmds("SubagentStop")).toEqual(expect.arrayContaining([".claude/hooks/record-agents.sh", ".claude/hooks/verdict-format.sh", ".claude/hooks/stop-guard.sh"]));
   const hooksDir = new URL("../hooks/", import.meta.url).pathname;
   for (const ev of Object.keys(s.hooks)) for (const c of cmds(ev)) expect(existsSync(join(hooksDir, c.replace(".claude/hooks/", ""))), c).toBe(true);
 });
@@ -140,8 +146,11 @@ test("every roles.toml agent path Plan 3 owns resolves to a real agent template"
   for (const [id, def] of entries) expect(existsSync(agentPath(def.agent)), `${id} → ${def.agent}`).toBe(true);
   // loader는 roles.toml에 없다(로스터 역할이 아니라 workflow의 첫 스텝이다) — 그래도 설치는 된다.
   expect(existsSync(agentPath(".claude/agents/factory-loader.md"))).toBe(true);
-  // merge.integrator / retro.analyst는 의도적으로 없다(ADR-015 R3, retro는 Plan 4).
-  for (const def of [roles.merge.integrator, roles.retro.analyst]) expect(existsSync(agentPath(def.agent)), def.agent).toBe(false);
+  // merge에는 역할 블록 자체가 없다(F5 / ADR-015 R3 — merge는 `claude -p`를 부르지 않는 스크립트 전용이라
+  // integrator를 정의해 두면 "언젠가 에이전트가 머지한다"는 약속이 roles.toml에 남는다).
+  expect(roles.merge).toBeUndefined();
+  // retro.analyst의 파일만 아직 없다(Plan 4) — doctor는 이것을 FAIL이 아니라 WARN으로 보고한다.
+  expect(existsSync(agentPath(roles.retro.analyst.agent)), roles.retro.analyst.agent).toBe(false);
 });
 
 test("ci-settings, package.json, quarantine templates parse", () => {

@@ -226,7 +226,8 @@ const rounds = Number(loaded.rounds) || 3;
 // The shared reading order. The workflow cannot read files — every role opens these itself.
 const reading = (r) =>
   `Read \`${args.context}\` first (issue, tier, spec_path, roster, handoffs.triage, harness.maturity, limits), ` +
-  `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\`, and your lessons file at ` +
+  `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\` (if present — it may not ` +
+  `exist yet, and that is not a finding), and your lessons file at ` +
   `\`${r.lessons || `.factory/lessons/${r.agentType}.md`}\` (treat every entry as a checklist item). ` +
   `Cite concrete repository paths — a claim with no path is not evidence. ` +
   `Every done_when \`level\` must stay within \`harness.maturity\`: M0 → \`unit\` only, ` +
@@ -275,7 +276,8 @@ phase('Synthesis');
 
 const synthesisReading =
   `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.triage, harness.maturity, limits), ` +
-  `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\`, and your lessons file at ` +
+  `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\` (if present — it may not ` +
+  `exist yet, and that is not a finding), and your lessons file at ` +
   `\`.factory/lessons/plan-synthesizer.md\` (treat every entry as a checklist item). ` +
   `Cite concrete repository paths. Every done_when needs a \`verify\` test id of the form ` +
   `test_${issue}_<slug> and a \`level\` within \`harness.maturity\`: M0 → \`unit\` only, ` +
@@ -353,5 +355,13 @@ return {
   rounds,
   orchestration: 'workflow',
   guarantee: 'structural',
-  debate: { r1, r2, votes },
+  // 토론 전문은 싣지 않는다(F7). 이 객체는 이슈 코멘트의 ```json 블록으로 그대로 나가고, 그 코멘트는 다음
+  // 스테이지의 `context.json`에 다시 실린다 — R1 전문 4개 + R2 반박 전문까지 넣으면 handoff 하나가
+  // 사람이 읽을 수 없는 크기가 되고, 그 비용을 implement·review가 매번 다시 치른다.
+  // 남는 것: 누가 무엇을 주장했는지(한 줄), 반박이 몇 건이었는지, 서명 결과. 나머지는 dissent_log가 들고 있다.
+  debate: {
+    r1: r1.map(({ role, position }) => ({ role, position })),
+    r2_objections: r2.reduce((n, x) => n + (Array.isArray(x.objections) ? x.objections.length : 0), 0),
+    votes,
+  },
 };

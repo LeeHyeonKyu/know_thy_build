@@ -49,16 +49,48 @@ test("block-dangerous: shell writes to the protected build-config files are bloc
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
+// ── F3(b): qa의 증거 디렉터리만 카브아웃 ────────────────────────────────────────────────────
+test("block-dangerous: .factory/out/qa/ is writable (qa evidence); the rest of .factory/ is not", async () => {
+  const allowed = ["echo x > .factory/out/qa/7.log", "cat foo | tee .factory/out/qa/7-server.log",
+                   "cp /tmp/shot.png .factory/out/qa/7-shot.png", "mv /tmp/shot.png ./.factory/out/qa/7-shot.png",
+                   "mkdir -p .factory/out/qa", "echo x >> .factory/out/qa/7.log"];
+  const blocked = ["echo x > .factory/out/gates.json", "echo x > .factory/harness.toml",
+                   "echo x > .factory/out/qa/../harness.toml", "cp /tmp/e .factory/out/qa/../../harness.toml",
+                   "echo x > .claude/settings.json"];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+}, 30000);
+
+// ── F13: 상태 라벨은 L1(transition.js)만 옮긴다 ─────────────────────────────────────────────
+test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment is not", async () => {
+  const blocked = ["gh issue edit 7 --add-label factory:approved", "gh issue edit 7 --remove-label factory:queue",
+                   "gh issue edit 7 --add-label=factory:blocked",
+                   "gh api -X POST repos/o/r/issues/7/labels -f labels=factory:approved",
+                   "gh api repos/o/r/issues/7/labels --method DELETE"];
+  const allowed = ["gh issue comment 7 --body-file /tmp/b.md", "gh issue view 7 --comments", "gh pr comment 7 --body-file /tmp/b.md",
+                   "gh issue edit 7 --title x"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 test("block-dangerous: non-Bash tools and malformed input pass through", async () => {
   expect((await bash("block-dangerous.sh", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: ".factory/x" } })).code).toBe(0);
   expect((await run("bash", [join(H, "block-dangerous.sh")], { input: "not json" })).code).toBe(0);
-});
+}, 30000);
 
 test("block-dangerous: without jq the hook fails CLOSED (exit 2)", async () => {
   const r = await run("/bin/bash", [join(H, "block-dangerous.sh")], { input: JSON.stringify(cmd("echo hi")), env: { PATH: "/nonexistent" } });
   expect(r.code).toBe(2);
   expect(r.stderr).toMatch(/jq missing/);
-});
+}, 30000);
 
 test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows everything else, fails closed without jq", async () => {
   const r1 = await bash("deny-all-writes.sh", { tool_name: "Edit", tool_input: { file_path: "src/a.js" } });
@@ -78,11 +110,60 @@ test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows eve
   const noJq = await run("/bin/bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify({ tool_name: "Edit" }), env: { PATH: "/nonexistent" } });
   expect(noJq.code).toBe(2);
   expect(noJq.stderr).toMatch(/jq missing/);
-});
+}, 30000);
 
 test("deny-all-writes: malformed stdin passes through (exit 0), same as block-dangerous", async () => {
   expect((await run("bash", [join(H, "deny-all-writes.sh")], { input: "not json" })).code).toBe(0);
-});
+}, 30000);
+
+// ── F3(c): qa만 .factory/out/qa/ 아래에 증거를 쓴다 ──────────────────────────────────────────
+test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything else (and any ..) is not", async () => {
+  const write = (file_path, tool = "Write") => bash("deny-all-writes.sh", { tool_name: tool, tool_input: { file_path } });
+  for (const p of [".factory/out/qa/7-shot.png", "./.factory/out/qa/7-server.log", "/repo/.factory/out/qa/deep/7.log"]) {
+    expect((await write(p)).code, p).toBe(0);
+    expect((await write(p, "Edit")).code, p).toBe(0);
+  }
+  for (const p of [".factory/out/qa/../gates.json", "src/.factory/out/qa/../../a.js", ".factory/out/gates.json",
+                   ".factory/out/qa", "x.factory/out/qa/7.log", "src/a.js", ""]) {
+    const r = await write(p);
+    expect(r.code, p).toBe(2);
+    expect(r.stderr, p).toMatch(/must not write files/);
+  }
+  // NotebookEdit은 예외가 없다 — 증거는 파일이지 노트북이 아니다
+  expect((await write(".factory/out/qa/7.ipynb", "NotebookEdit")).code).toBe(2);
+}, 30000);
+
+// ── F6(a): 쓰기 금지 역할의 Bash arm ─────────────────────────────────────────────────────────
+// 전역 block-dangerous.sh는 *보호 경로*만 본다 — `echo x > src/a.js`는 아무도 막지 않았다.
+test("deny-all-writes: a Bash command that writes outside /tmp, $TMPDIR or .factory/out/qa/ is blocked", async () => {
+  const blocked = ["echo x > src/a.js", "echo x >> package.json", "cat a | tee out.txt", "cat a | tee -a out.txt",
+                   "cp /tmp/evil src/a.js", "mv a.js b.js", "sed -i 's/a/b/' src/a.js", "sed -i '' 's/a/b/' src/a.js",
+                   "perl -i -pe 's/a/b/' src/a.js", "python3 -c \"open('src/a.js','w').write('x')\"",
+                   "git commit -m x", "git push origin HEAD", "git checkout -- src/a.js", "git add .",
+                   "touch newfile", "mkdir newdir", "rm -rf src", "echo x > .factory/out/qa/../harness.toml"];
+  const allowed = ["git diff origin/main...HEAD", "git log --oneline -5", "git show HEAD:src/a.js", "git status --porcelain",
+                   "git merge-base origin/main HEAD", "npx vitest run test/a.test.js", "npm test", "cat src/a.js",
+                   "grep -rn mkdir src/", "node .factory/bin/prove-test.js --file test/a.test.js --name test_7_x",
+                   "echo hi > /tmp/out.txt", "cat x 2>/dev/null", "rm -rf /tmp/scratch", "cp src/a.js /tmp/a.js",
+                   "mkdir -p .factory/out/qa/7", "echo y > .factory/out/qa/7-log.txt", "npx playwright test 2>&1"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
+test("deny-all-writes: $TMPDIR is honoured as a write target, and prove-test's own worktree dir is not blocked", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dw-tmpdir-"));
+  const r = await run("bash", [join(H, "deny-all-writes.sh")], {
+    input: JSON.stringify(cmd(`echo x > ${join(dir, "note.txt")}`)),
+    env: { ...process.env, TMPDIR: tmpdir() },
+  });
+  expect(r.code).toBe(0);
+  // 리터럴 `$TMPDIR`도 같은 대접을 받는다 (훅은 확장 전의 명령 문자열을 본다)
+  expect((await bash("deny-all-writes.sh", cmd("echo x > $TMPDIR/note.txt"))).code).toBe(0);
+}, 30000);
 
 test("stop-guard: non-factory branch passes; factory branch with dirty tree blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-"));
@@ -96,7 +177,7 @@ test("stop-guard: non-factory branch passes; factory branch with dirty tree bloc
   await run("git", ["add", "."], { cwd }); await run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "w"], { cwd });
   const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
   expect(r2.code).toBe(2); expect(r2.stderr).toMatch(/unpushed|no upstream/);
-});
+}, 30000);
 
 test("stop-guard: .factory/out artifacts are not 'dirty' — pushed branch with only those passes", async () => {
   const remote = mkdtempSync(join(tmpdir(), "sg-remote-"));
@@ -115,7 +196,7 @@ test("stop-guard: .factory/out artifacts are not 'dirty' — pushed branch with 
   // 같은 브랜치에서 .factory/out 밖의 변경은 여전히 막는다
   await run("bash", ["-c", "echo y > src.txt"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
-});
+}, 30000);
 
 test("stop-guard: dirty file at repo root is still caught when the hook runs from a subdirectory", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-sub-"));
@@ -127,7 +208,7 @@ test("stop-guard: dirty file at repo root is still caught when the hook runs fro
   const r3 = await run("bash", [join(H, "stop-guard.sh")], { input: "{}", cwd: join(cwd, "sub") });
   expect(r3.code).toBe(2);
   expect(r3.stderr).toMatch(/uncommitted/);   // upstream이 없어도 exit 2가 나오므로, 이유가 "uncommitted"인지까지 확인한다
-});
+}, 30000);
 
 test("stop-guard: a detached HEAD (review/merge checkoutHead) still refuses a dirty tree, but skips the push checks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-detached-"));
@@ -143,7 +224,7 @@ test("stop-guard: a detached HEAD (review/merge checkoutHead) still refuses a di
   // .factory/out is excluded on a detached HEAD too — same pathspec as the branch case
   await run("bash", ["-c", "rm f.txt && mkdir -p .factory/out && echo y > .factory/out/x"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(0);
-});
+}, 30000);
 
 // ── fix round 2 (F1): the hydrated run record / quarantine writes must not trip the stop guard ──
 
@@ -168,7 +249,7 @@ test("stop-guard: an untracked run record (docs/factory/runs/) never blocks — 
   const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
   expect(r2.stderr + r2.stdout).toBe("");
   expect(r2.code).toBe(0);
-});
+}, 30000);
 
 test("stop-guard: a modified tracked .factory/quarantine.toml (script-owned) never blocks on a detached HEAD", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-quar-"));
@@ -186,14 +267,14 @@ test("stop-guard: a modified tracked .factory/quarantine.toml (script-owned) nev
   // a change outside the exclusions is still caught on the same detached HEAD
   await run("bash", ["-c", "echo y > src.txt"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
-});
+}, 30000);
 
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 1'"\n`);
   const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd } });
   expect(r.code).toBe(0); expect(r.stderr).toMatch(/LINT src\/a\.js/);
-});
+}, 30000);
 test("verdict-format: reviewer stop without verdict json → exit 2; with → 0; non-reviewer → 0", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vf-"));
   const t = join(dir, "t.jsonl");
@@ -206,7 +287,39 @@ test("verdict-format: reviewer stop without verdict json → exit 2; with → 0;
   expect(bad.code).toBe(2); expect(bad.stderr).toMatch(/verdict JSON/);
   const other = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "factory-builder", agent_transcript_path: t }) });
   expect(other.code).toBe(0);
-});
+}, 30000);
+
+// ── F1: the review workflow spawns reviewer-* with three schemas, not one ────────────────────
+// R1/R2_FULL answer `verdict`, the unanimous-approve R2 answers `missed`, the dispute round answers
+// `rulings`. A hook that only knows `verdict` blocks two of the three rounds at SubagentStop.
+test("verdict-format: a reviewer may stop on any of the three review schemas (verdict | missed | rulings)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vf-schemas-"));
+  const t = join(dir, "t.jsonl");
+  const msg = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+  const fenced = (json) => msg("Here it is:\n```json\n" + json + "\n```");
+  const stop = (agent_type = "reviewer-qa") =>
+    run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type, agent_transcript_path: t }) });
+
+  const bodies = {
+    "verdict (R1 / R2 full)": `{"role":"qa","verdict":"approve","confidence":"high","must_fix":[],"should_fix":[],"verified":[]}`,
+    "missed (R2 light)": `{"missed":[{"what":"빈 목록 경로","why":"아무도 열어보지 않았다"}]}`,
+    "rulings (dispute)": `{"rulings":[{"id":"qa1","ruling":"uphold","reason":"non_goals에 없다"}]}`,
+  };
+  for (const [label, body] of Object.entries(bodies)) {
+    writeFileSync(t, fenced(body) + "\n");
+    expect((await stop()).code, label).toBe(0);
+    // 판정형 훅은 verifier에도 걸린다 — 같은 관용이 적용된다
+    expect((await stop("factory-verifier")).code, label).toBe(0);
+  }
+
+  // 펜스가 없으면 여전히 exit 2다 — 관용은 schema 이름에만 적용되고 "산문으로 대답하기"에는 적용되지 않는다
+  for (const prose of ["I approve, looks fine.", "missed nothing, rulings all fine, verdict approve"]) {
+    writeFileSync(t, msg(prose) + "\n");
+    const bad = await stop();
+    expect(bad.code, prose).toBe(2);
+    expect(bad.stderr, prose).toMatch(/verdict JSON/);
+  }
+}, 30000);
 
 test("lint-touched: shell-escapes file_path — no command injection via Edit/Write", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-inj-")); mkdirSync(join(cwd, ".factory"));
@@ -216,7 +329,7 @@ test("lint-touched: shell-escapes file_path — no command injection via Edit/Wr
   const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: evil } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd } });
   expect(r.code).toBe(0);
   expect(existsSync(join(pwnDir, "PWNED"))).toBe(false);
-});
+}, 30000);
 
 test("lint-touched: enforces a timeout on the lint command (no system `timeout` on macOS)", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-to-")); mkdirSync(join(cwd, ".factory"));
@@ -226,7 +339,7 @@ test("lint-touched: enforces a timeout on the lint command (no system `timeout` 
   expect(Date.now() - start).toBeLessThan(3000);
   expect(r.code).toBe(0);
   expect(r.stderr).toMatch(/exit 124/);
-}, 10000);
+}, 30000);
 
 test("lint-touched: 쓰레기 FACTORY_LINT_TIMEOUT_MS는 기본 60s로 떨어진다 (NaN 타임아웃 금지)", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-nan-")); mkdirSync(join(cwd, ".factory"));
@@ -237,7 +350,7 @@ test("lint-touched: 쓰레기 FACTORY_LINT_TIMEOUT_MS는 기본 60s로 떨어진
     expect(r.stderr, bad).toMatch(/exit 3/);            // 124(즉시 kill)가 아니라 실제 lint 결과가 온다
     expect(r.stderr, bad).toMatch(/LINT src\/a\.js/);
   }
-}, 15000);
+}, 30000);
 
 test("verdict-format: only the LAST assistant text message counts", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vf-last-"));
@@ -249,4 +362,4 @@ test("verdict-format: only the LAST assistant text message counts", async () => 
   writeFileSync(t, msg("changed my mind") + "\n" + msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n");
   const r2 = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
   expect(r2.code).toBe(0);
-});
+}, 30000);

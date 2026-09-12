@@ -7,6 +7,9 @@ const readAgent = (name) => readFileSync(`${AGENTS}${name}.md`, "utf8");
 const agentFiles = () => readdirSync(AGENTS).filter((f) => f.endsWith(".md")).sort();
 
 // spec §7.3 reviewer-correctness.md — 훅 명령은 이미 .claude/hooks/deny-all-writes.sh다.
+// 한 줄만 스펙 원문과 다르다(F2): §7.3의 `gates.json` 항목은 리뷰 스테이지에 그 파일이 **없다**는 사실을
+// 말하지 않는다 — run-stage.js가 `claude -p` 앞에서 `.factory/out/`을 지우고 게이트는 workflow가 return한
+// 뒤에야 돈다. 픽스처는 템플릿의 전사(transcription)이므로 여기도 같이 고친다.
 const FIXTURE = `---
 name: reviewer-correctness
 description: PR diff가 실제로 올바른지 — 논리, 경계, 동시성, 실패 경로 — 를 cold read로 판정한다
@@ -24,7 +27,7 @@ hooks:
 ## You receive
 - PR diff (base..head)
 - 이슈 원문 (스펙 링크 포함)
-- \`gates.json\` (테스트 결과 원본)
+- \`.factory/out/gates.json\` **if present** — in the review stage the gates for this commit run after you, so it is normally absent; judge the diff and the tests themselves
 - 저장소 전체 (읽기 전용)
 
 ## You do NOT receive — 그리고 찾아 읽지도 않는다
@@ -277,8 +280,9 @@ test("reviewer agents: roles.toml models and tools, every one behind deny-all-wr
     expect(frontmatter.hooks.PreToolUse[0].hooks[0].command, name).toContain("deny-all-writes.sh");
     expect(frontmatter.tools, name).toContain("Read");
   }
-  // qa is the only reviewer that drives a browser (roles.toml [review.qa].tools)
-  expect(parseAgentMd(readAgent("reviewer-qa")).frontmatter.tools).toEqual(["Bash", "Read", "Grep", "Glob", "mcp__playwright__*"]);
+  // qa is the only reviewer that drives a browser — but through Bash (`npx playwright`), not an MCP server:
+  // 1.0 installs no MCP, so `mcp__playwright__*` would name a tool that is never there (F3).
+  expect(parseAgentMd(readAgent("reviewer-qa")).frontmatter.tools).toEqual(["Bash", "Read", "Grep", "Glob"]);
 });
 
 test("reviewer-correctness.md is the spec §7.3 exemplar verbatim — only the hook matcher widens to NotebookEdit", () => {
@@ -372,4 +376,21 @@ test("reviewer-security.md / reviewer-architecture.md / reviewer-spec-conformanc
   for (const s of ["done_when", "files_expected", "non_goals", "must_approve_explicitly", "qa_artifacts"]) expect(conf, s).toContain(s);
   const qa = lens("reviewer-qa");
   for (const s of [".factory/out/qa/", ".factory/scenarios/", "Design Intent"]) expect(qa, s).toContain(s);
+  // F3: MCP 없이 Bash로 브라우저를 몬다는 사실과, app_start가 비어 있을 때의 대체 경로를 렌즈가 말한다
+  expect(qa).toContain("npx playwright");
+  expect(qa).toContain("[test.env].app_start");
+});
+
+// ── F3: 증거 디렉터리는 qa만 쓴다 ────────────────────────────────────────────────────────────
+test("reviewer-qa.md says .factory/out/qa/ is the one writable path, and spec-conformance scopes the evidence rule to a roster with qa", () => {
+  const receives = (name) => [...parseAgentMd(readAgent(name)).sections.entries()].find(([k]) => k.startsWith("You receive"))[1];
+  const qaReceives = receives("reviewer-qa");
+  expect(qaReceives).toContain(".factory/out/qa/");
+  expect(qaReceives).toMatch(/쓸 수 있|writable/);
+
+  // "증거가 없으면 발견" 규칙은 유지하되, qa가 로스터에 있을 때로 한정한다 — docs tier에는 qa가 없다.
+  const conf = [...parseAgentMd(readAgent("reviewer-spec-conformance")).sections.entries()].find(([k]) => k.startsWith("Lens"))[1];
+  expect(conf).toContain("qa_artifacts");
+  expect(conf).toContain("reject");             // 규칙 자체는 그대로다
+  expect(conf).toMatch(/로스터/);                // 다만 tier 로스터에 qa가 있을 때만
 });

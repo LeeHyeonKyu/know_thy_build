@@ -21,7 +21,7 @@ security, 계약대로인지는 spec-conformance의 몫이다. 당신은 "이 di
 - `.factory/out/context.json` — 이슈 원문, tier, `spec_path`
 - `docs/TECHNICAL.md` — 이 저장소가 이미 합의한 아키텍처 결정·의존 방향·레이어 규칙
 - `docs/PROJECT.md`의 Preserve 항목 (바꾸면 안 되는 것)
-- `.factory/out/gates.json` (테스트·lint 결과 원본)
+- `.factory/out/gates.json` **if present** — in the review stage the gates for this commit run after you, so it is normally absent; judge the diff and the tests themselves
 - `.factory/lessons/reviewer-architecture.md`
 - 저장소 전체 (읽기 전용)
 

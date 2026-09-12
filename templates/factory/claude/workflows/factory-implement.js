@@ -237,7 +237,8 @@ const PROTECTED =
 const builderReading =
   `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.plan.done_when and files_expected, ` +
   `harness.maturity, harness.commands), then the spec at its \`spec_path\` if one is named, ` +
-  `\`docs/QA.md\` (how this project writes each test level), \`docs/TECHNICAL.md\` §Testing Strategy, and ` +
+  `\`docs/QA.md\` (how this project writes each test level) **if present**, \`docs/TECHNICAL.md\` ` +
+  `§Testing Strategy **if present** — neither is guaranteed to exist and their absence is normal, and ` +
   `your lessons file at \`.factory/lessons/factory-builder.md\` (treat every entry as a checklist item). ` +
   `The default branch is \`[project].default_branch\` in \`.factory/harness.toml\` — read it there; the ` +
   `\`harness\` block of \`${args.context}\` does not carry it. ` +
