@@ -455,6 +455,84 @@ test("a localEntry that throws is swallowed (best-effort), recorded, and doesn't
   expect(lines.some((l) => /local entry: aborted — gh label failed/.test(l))).toBe(true);
 });
 
+// ── KTB-10 I2: 진입 상태 가드 ────────────────────────────────────────────
+// concurrency 그룹 하나당 GitHub은 실행 1 + 대기 1만 유지한다 — sweeper/`--remote` dispatch가 PENDING에
+// 걸렸다가 **원래 런이 끝난 뒤에** 풀리면, 락은 이미 해제돼 있어 claim이 막지 못하고 스테이지가
+// 통째로 다시 돈다(plan 한 번 ~$12 + 중복 handoff). 전이 그래프는 그 **뒤에야** 거부한다.
+
+test("I2: a dispatched plan on an issue already at factory:planned exits 0 before claude -p", async () => {
+  const lines = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:planned", "factory:tier-standard"],
+    claudeP: vi.fn(), buildContext: vi.fn(), transition: vi.fn(), writeHandoff: vi.fn(),
+    release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(0);
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(d.buildContext).not.toHaveBeenCalled();
+  expect(d.transition).not.toHaveBeenCalled();                    // 라벨을 건드리지 않는다
+  expect(d.writeHandoff).not.toHaveBeenCalled();
+  expect(d.release).toHaveBeenCalled();                           // 잡았던 락은 반드시 놓는다
+  expect(lines).toContain("entry state factory:planned != expected factory:ready — nothing to do");
+});
+
+test("I2: `factory run merge 5 --remote` on an unrelated issue makes no needs-human transition", async () => {
+  const d = baseDeps({
+    issueLabels: async () => ["factory:queue"],
+    assertHandoff: vi.fn(async () => ({ ok: false, reason: "review handoff missing" })),
+    transition: vi.fn(), prInfo: vi.fn(),
+  });
+  expect(await runStage({ stage: "merge", issue: 5, deps: d })).toBe(0);
+  expect(d.assertHandoff).not.toHaveBeenCalled();                 // needs-human 전이는 여기서 난다 — 거기까지 가지 않는다
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.prInfo).not.toHaveBeenCalled();
+});
+
+test("I2: each stage accepts exactly its entry labels — implement takes planned and rework", async () => {
+  const at = async (stage, label) => {
+    const d = baseDeps({ issueLabels: async () => [label], claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })), transition: async ({ to }) => ({ ok: true, to }) });
+    await runStage({ stage, issue: 5, deps: d, runnerId: "r" });
+    return d.claudeP.mock.calls.length > 0;
+  };
+  expect(await at("triage", "factory:queue")).toBe(true);
+  expect(await at("plan", "factory:ready")).toBe(true);
+  expect(await at("implement", "factory:planned")).toBe(true);
+  expect(await at("implement", "factory:rework")).toBe(true);
+  expect(await at("implement", "factory:in-progress")).toBe(false);   // 이미 돌고 있던 스테이지의 재점화는 여기서 멈춘다
+  expect(await at("review", "factory:awaiting-review")).toBe(true);
+  expect(await at("plan", "factory:queue")).toBe(false);
+});
+
+test("I2: the guard runs AFTER local entry — `factory run triage` on a backlog issue still works", async () => {
+  let label = "backlog";
+  const d = baseDeps({
+    localEntry: async () => { label = "factory:queue"; return "local entry: backlog → factory:queue"; },
+    issueLabels: async () => [label],
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+    verifyStage: () => ({ ok: true, reasons: [], data: { disposition: "ready" } }),
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "triage", issue: 5, deps: d })).toBe(0);
+  expect(d.claudeP).toHaveBeenCalled();
+});
+
+test("I2: an unreadable label set never blocks the stage — the guard is a cost defense, not a safety gate", async () => {
+  const lines = [];
+  const d = baseDeps({
+    issueLabels: async () => { throw new Error("gh issue view failed"); },
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(0);
+  expect(d.claudeP).toHaveBeenCalled();
+  expect(lines.some((l) => /entry state: unreadable — gh issue view failed/.test(l))).toBe(true);
+});
+
+test("I2: with no issueLabels dep wired the guard is inert (existing callers unchanged)", async () => {
+  const d = baseDeps({ claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })) });
+  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(0);
+  expect(d.claudeP).toHaveBeenCalled();
+});
+
 // ── KTB-9: tier 라벨은 triage가 붙인다(§3.2) ──────────────────────────────
 // `label-catalog.js`가 `factory:tier-*` 셋을 만들어 두는데 붙이는 코드가 어디에도 없었다 —
 // tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수 없었다.
@@ -478,6 +556,14 @@ test("triage applies the tier label after the handoff verifies — and only afte
   expect(setTierLabel).toHaveBeenCalledWith("load-bearing");
   expect(calls.indexOf("verify")).toBeLessThan(calls.indexOf("tier:load-bearing"));
   expect(calls).toContain("tier: factory:tier-load-bearing");
+  // 그리고 **전이보다 먼저**여야 한다(KTB-10 M2). 라벨을 붙이는 것도 `issues: labeled` 이벤트라,
+  // 그 이벤트가 만드는 5개짜리 런 물결이 뒤에 오면 전이가 막 띄운 다음 스테이지의 PENDING 런을
+  // concurrency 슬롯에서 밀어낸다(KTB-8 — 데모 #2가 죽은 방식이다).
+  const tierAt = calls.indexOf("tier: factory:tier-load-bearing");
+  const transitionAt = calls.findIndex((l) => /^transition: /.test(l));
+  expect(tierAt).toBeGreaterThan(-1);
+  expect(transitionAt).toBeGreaterThan(-1);
+  expect(tierAt).toBeLessThan(transitionAt);
 });
 
 test("a failed verify never applies a tier label — an unverified tier is the agent's self-report", async () => {

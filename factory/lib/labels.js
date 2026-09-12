@@ -12,6 +12,19 @@ export const TIERS = ["docs", "standard", "load-bearing"];
 export const tierLabel = (tier) => `factory:tier-${tier}`;
 export const TIER_LABELS = new Set(TIERS.map(tierLabel));
 
+/**
+ * §3.2 전이 그래프를 스테이지 쪽에서 본 것: **이 스테이지가 진입할 때 이슈가 갖고 있어야 하는 상태**.
+ * `TRANSITIONS`의 from 중 그 스테이지가 출발점으로 삼는 것들이다(implement만 두 개 — 첫 구현과 재작업).
+ * run-stage의 진입 가드(KTB-10)가 이것으로 "이미 지나간 스테이지를 다시 돌리는 런"을 즉시 되돌린다.
+ */
+export const ENTRY_LABELS = {
+  triage: ["factory:queue"],
+  plan: ["factory:ready"],
+  implement: ["factory:planned", "factory:rework"],
+  review: ["factory:awaiting-review"],
+  merge: ["factory:approved"],
+};
+
 /** §3.2 전이 그래프. 키: from, 값: 허용된 to. */
 export const TRANSITIONS = new Map([
   ["backlog", new Set(["factory:queue"])],

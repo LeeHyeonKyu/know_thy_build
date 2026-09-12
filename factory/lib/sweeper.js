@@ -102,12 +102,29 @@ async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
  *      스테이지가 살아 있다는 1차 증거이며, 이미 이 파일이 읽는 데이터다.
  *   3. 같은 창 안에 **재점화 마커가 없다** — 한 번 민 것을 30분마다 다시 밀지 않는다.
  *
- * 중복 dispatch 자체는 무해하다(락 claim이 두 번째 러너를 fail closed 시킨다) — 그래도 비용과 잡음이라
- * 위 셋으로 줄인다. 전부 best-effort다: 한 이슈가 터져도 다음 이슈로 넘어간다.
+ * 그리고 back-pressure로 **일부러** 세워 둔 이슈는 애초에 멈춘 것이 아니다(M5). `factory:planned`는
+ * implement가 흐름 제어에 걸려 라벨을 건드리지 않고 물러났을 때도 그대로 남는다 — 그 상태에서
+ * dispatch를 밀면 새 런이 또 같은 이유로 물러나고, "다시 띄웠습니다" 코멘트만 30분마다 쌓인다.
+ * 그래서 implement 재점화 직전에 `backPressure()`를 한 번 물어보고, 거부면 dispatch도 코멘트도 하지 않는다.
+ *
+ * 중복 dispatch를 막는 것은 위 셋뿐이다 — **락 claim은 이 경우를 막지 못한다**. claim이 fail closed로
+ * 돌려세우는 것은 *동시에* 도는 두 번째 러너인데, 같은 concurrency 그룹에 PENDING으로 걸린 dispatch는
+ * 원래 런이 끝나 **락이 풀린 뒤에** 시작하기 때문이다. 그 런을 실제로 되돌리는 것은 run-stage의
+ * 진입 상태 가드(KTB-10, `.factory/bin/run-stage.js`)다: 이슈의 현재 상태 라벨이 그 스테이지의 진입
+ * 라벨이 아니면 claude -p를 부르기 전에 exit 0으로 물러난다. 여기의 셋은 그 앞단의 비용·잡음 절감이다.
+ * 전부 best-effort다: 한 이슈가 터져도 다음 이슈로 넘어간다.
  */
-async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, actions }) {
+async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, actions }) {
   if (!dispatchStage) return;
   const stale = staleMinutes * 60e3;
+  // 한 sweep 안에서 흐름 제어는 한 번만 묻는다 — 이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다.
+  let bpCache;
+  const parked = async () => {
+    if (!backPressure) return null;
+    bpCache ??= Promise.resolve().then(() => backPressure());
+    const bp = await bpCache;
+    return bp?.ok === false ? bp.reasons.join("; ") : null;
+  };
   for (const [label, stage] of Object.entries(STALLED_STAGE)) {
     let issues;
     try { issues = await gh.searchIssues(label); }
@@ -123,8 +140,16 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, actions })
         const marker = restartComment(stage, it.number);
         const restarted = comments.filter((c) => String(c?.body ?? "").includes(marker)).at(-1);
         if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;
+        // 흐름 제어로 세워 둔 `factory:planned`는 멈춘 것이 아니다(M5) — 조용히 넘어간다.
+        if (stage === "implement") {
+          const reason = await parked();
+          if (reason) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `back-pressure — ${reason}` }); continue; }
+        }
+        // 마커를 **먼저** 남긴다(M4). dispatch가 성공한 뒤에 코멘트가 실패하면 dedupe의 유일한 근거가
+        // 사라져 다음 sweep이 30분마다 같은 스테이지를 또 민다 — 재점화는 비싸고(plan 한 번 ~$12)
+        // 놓친 재점화는 사람이 `--remote`로 되살릴 수 있으므로, 실패는 **덜 재시작하는 쪽**으로 기운다.
+        await gh.comment(it.number, `${marker}\n\`${label}\`에서 ${staleMinutes}분 넘게 런 없이 멈춰 있었습니다 — \`factory-${stage}.yml\`을 dispatch로 다시 띄웁니다(KTB-8).`);
         await dispatchStage({ stage, issue: it.number });
-        await gh.comment(it.number, `${marker}\n\`${label}\`에서 ${staleMinutes}분 넘게 런 없이 멈춰 있었습니다 — \`factory-${stage}.yml\`을 dispatch로 다시 띄웠습니다(KTB-8).`);
         actions.push({ kind: "stalled-restart", issue: it.number, stage, label });
       } catch (e) {
         actions.push({ kind: "error", step: "stalled-restart", issue: it.number, error: String(e.message || e) });
@@ -133,7 +158,7 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, actions })
   }
 }
 
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null }) {
   const actions = [];
   const nowMs = Date.parse(now);
   for (const it of await gh.searchIssues("factory:in-progress")) {
@@ -160,7 +185,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
-  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, actions });
+  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, actions });
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });
     if (pol.returned.length || pol.expired.length) {

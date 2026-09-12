@@ -24,12 +24,30 @@ export function lintWorkflow(text) {
     // 붙어 있으면 **실패조차 하지 않고** 빈 아티팩트가 올라간다(KTB-7 재리뷰: 트랜스크립트가 산출물
     // 추출의 1순위 출처인데 몇 회차째 비어 있었다). $HOME은 선행 스텝에서 GITHUB_ENV로 넘긴다.
     block.forEach((b, k) => {
-      if (/^\s*(?:-\s*)?(?:path:\s*)?~\//.test(b.replace(/#.*/, ""))) {
+      // 인용부호는 벗기고 본다 — `path: "~/x"`도 같은 버그다(YAML이 따옴표를 떼고 나면 남는 건 `~/x`이고,
+      // upload-artifact는 그것을 셸이 아니라 glob으로 쓴다). 따옴표 하나로 규칙을 비켜 갈 수 있으면 규칙이 아니다.
+      const bare = unquotePathValue(b.replace(/#.*/, ""));
+      if (/^\s*(?:-\s*)?(?:path:\s*)?~\//.test(bare)) {
         out.push({ line: i + 2 + k, rule: "tilde-path", msg: "upload-artifact does not expand `~` — export $HOME via $GITHUB_ENV and use ${{ env.… }}" });
+      }
+      // 4) `${{ env.X }}`로 시작하는 경로에 `||` 폴백이 없으면, 그 env를 세우는 스텝이 실패했을 때
+      // 경로가 `/**/*.jsonl`로 — 곧 **루트 앵커 glob**으로 — 접힌다. 업로드 스텝은 `if: always()`라
+      // 그때도 돌고, `if-no-files-found: ignore`라 조용하다: 러너 파일시스템 전체를 훑는 일이
+      // 아무 경고 없이 일어난다(KTB-10 I1). 폴백은 반드시 워크스페이스 안을 가리켜야 한다.
+      if (/^\s*(?:-\s*)?(?:path:\s*)?\$\{\{\s*env\./.test(bare) && !/\|\|/.test(bare)) {
+        out.push({ line: i + 2 + k, rule: "env-path-no-fallback", msg: "an artifact path starting with ${{ env.… }} needs a `||` fallback — an unset env collapses it to a root-anchored glob" });
       }
     });
   }
   return out;
+}
+
+/**
+ * `path: "~/x"` / `- '${{ env.X }}/**'` 처럼 값만 따옴표로 감싼 줄에서 따옴표를 벗긴다.
+ * 들여쓰기와 `- `·`path:` 접두는 그대로 둔다 — 위 정규식들이 그것으로 줄 모양을 가른다.
+ */
+function unquotePathValue(line) {
+  return line.replace(/^(\s*(?:-\s*)?(?:path:\s*)?)(['"])(.*)\2\s*$/, "$1$3");
 }
 
 export function lintLoggingHook(text) {

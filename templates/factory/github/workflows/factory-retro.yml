@@ -15,6 +15,19 @@ jobs:
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
+      # **첫 스텝이어야 한다**(KTB-10 I1). setup 뒤에 두면 setup이 실패했을 때 이 env가 비는데,
+      # 업로드 스텝은 `if: always()`라 그때도 돌고 경로가 `/**/*.jsonl` — 러너 **루트**에 앵커된
+      # glob — 으로 접힌다. `if-no-files-found: ignore`까지 붙어 있어 그 사고는 아무 소리도 내지 않는다.
+      # 체크아웃보다 앞이어도 된다: 레포를 한 줄도 읽지 않는 순수한 `echo … >> $GITHUB_ENV`다.
+      # `if: always()`는 이 값만은 어떤 실패 뒤에도 서게 한다(업로드 경로의 폴백은 아래에 또 있다 —
+      # 방어는 두 겹이다: 여기서 세우고, 거기서 못 섰을 때를 대비한다).
+      - name: Resolve the session transcript directory
+        if: always()
+        # `~`는 셸 확장이지 glob이 아니다 — actions/upload-artifact는 경로를 셸에 넘기지 않으므로
+        # `~/.claude/projects/**`는 아무것도 맞히지 못하고, `if-no-files-found: ignore`라 실패조차
+        # 하지 않는다(빈 아티팩트가 조용히 올라간다). 트랜스크립트는 산출물 추출의 **1순위 출처**라서
+        # (KTB-7) 그 침묵이 사후 조사를 통째로 날린다. 러너의 실제 $HOME을 여기서 굳힌다.
+        run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           # 머지된 PR의 head/merge ref가 아니라 **머지된 결과가 있는 base 브랜치**를 본다 — retro는
@@ -26,12 +39,6 @@ jobs:
         with:
           claude: "true"
           test-env: "false"
-      - name: Resolve the session transcript directory
-        # `~`는 셸 확장이지 glob이 아니다 — actions/upload-artifact는 경로를 셸에 넘기지 않으므로
-        # `~/.claude/projects/**`는 아무것도 맞히지 못하고, `if-no-files-found: ignore`라 실패조차
-        # 하지 않는다(빈 아티팩트가 조용히 올라간다). 트랜스크립트는 산출물 추출의 **1순위 출처**라서
-        # (KTB-7) 그 침묵이 사후 조사를 통째로 날린다. 러너의 실제 $HOME을 여기서 굳힌다.
-        run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"
       - name: Retro
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -47,6 +54,6 @@ jobs:
           name: factory-retro-${{ github.run_id }}
           path: |
             .factory/out/
-            ${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl
+            ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl
           include-hidden-files: true
           if-no-files-found: ignore

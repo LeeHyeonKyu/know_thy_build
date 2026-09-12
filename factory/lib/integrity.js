@@ -53,7 +53,9 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
       if (!gone) continue;        // 살아 있는 동안만 additive 규칙이 이 파일을 전담한다 — 삭제·이동은 아래 보호 목록으로도 간다
     }
     if (isProtectedPath(f, prot)) protectedFiles.push(f);       // 위반이 아니라 "사람이 머지해야 한다"는 사실 (KTB-5)
-    if (gone) { policy.push(...lessonsGone(f)); continue; }      // 내용 규칙은 여기서 끝 (N2) — 사라진 lessons만 정책으로 센다
+    // 내용 규칙은 여기서 끝 (N2) — 사라진 lessons만 정책으로 센다. `deleted`(diff가 D로 보고)와
+    // "트리에는 있는데 읽히지 않음"(text === null)은 사유 문구를 다르게 낸다(M8).
+    if (gone) { policy.push(...lessonsGone(f, deleted)); continue; }
     if (f.startsWith(".factory/lessons/")) violations.push(...lessonsFormat(f, text));
     if (matchesAny(harness.test?.test_glob || [], f)) {
       if ((addedByFile.get(f) || []).some((l) => SKIP_PRAGMAS.some((re) => re.test(l.text)))) violations.push({ file: f, rule: "test skip/ignore pragma added" });
@@ -69,11 +71,18 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
  * **아무 신호를 만들지 않았다**. 누적된 교훈이 조용히 사라지는 경로다. 변조로 다루지는 않는다(역할을
  * 은퇴시키며 지우는 것은 정상 작업이다) — additive-only 위반과 같은 자리, 곧 `policy`(사람이 머지한다)로
  * 올린다. rename은 `--no-renames` 덕에 `D <old>`로 보이므로 출발지가 그대로 잡힌다.
+ *
+ * **삭제와 "못 읽음"은 다른 사건이다**(KTB-10 M8). 위의 `gone`은 둘을 합치는데 — `deleted`(diff가 D로
+ * 보고) 또는 `readFile`이 null(트리에 있는데 읽히지 않음) — 사람에게 내미는 사유까지 합치면 오보가
+ * 된다: 권한·인코딩 문제로 읽지 못한 파일을 "지워졌다"고 말하면 사람이 있지도 않은 삭제를 diff에서
+ * 찾는다. 판정(사람 머지)은 같고 문구만 갈린다 — 둘 다 "내용 규칙을 적용할 수 없다"이기 때문이다.
  */
 const LESSONS_DIR = ".factory/lessons/";
-const lessonsGone = (f) => (f.startsWith(LESSONS_DIR) && f.endsWith(".md")
-  ? [{ file: f, rule: "lessons file deleted or moved away — human merge required" }]
+const lessonsGone = (f, deleted = true) => (f.startsWith(LESSONS_DIR) && f.endsWith(".md")
+  ? [{ file: f, rule: `lessons file ${deleted ? "deleted or moved away" : "unreadable"} — human merge required` }]
   : []);
+/** `lessonsGone`이 만드는 규칙 문자열의 단일 출처 — L1(`merge-stage.js`)이 거부 문구를 규칙별로 가른다. */
+export const LESSONS_POLICY_RULE = /^lessons file (?:deleted or moved away|unreadable) — human merge required$/;
 
 /**
  * additive-only 판정의 **단일 본체** — L0(`integrityCheck`)와 L1(`policyViolations`)이 같은 함수를
@@ -114,7 +123,7 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness 
   const changed = changedEntries(ns.stdout);
   const violations = [];
   // 사라진 lessons는 글롭과 무관하게 센다 — L0가 `policy`로 올린 것과 **같은 판정**이어야 한다.
-  for (const e of changed) if (e.deleted) violations.push(...lessonsGone(e.path));
+  for (const e of changed) if (e.deleted) violations.push(...lessonsGone(e.path, true));
   const entries = Object.keys(prot.additive_only || {}).length
     ? changed.map((e) => [e.path, additiveGlobFor(e.path, prot)]).filter(([, g]) => g)
     : [];

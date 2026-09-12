@@ -77,6 +77,21 @@ test("lessons를 **옮기는** 것도 같다(출발지가 사라졌다); 살아 
   expect(r.policy).toEqual([]);
 });
 
+// KTB-10 M8: "지워졌다"와 "못 읽었다"는 다른 사건이다. 판정(사람 머지)은 같지만 사유가 같으면
+// 오보가 된다 — 권한·인코딩 문제로 읽히지 않은 파일을 "삭제됨"이라 말하면 사람이 있지도 않은
+// 삭제를 diff에서 찾는다.
+test("lessons: 트리에 있는데 읽히지 않는 파일은 'unreadable'이다 — 'deleted or moved away'가 아니다", async () => {
+  const run = makeFakeRun([names("M\t.factory/lessons/reviewer-qa.md\n"), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.ok).toBe(true);                                          // 여전히 변조가 아니다
+  expect(r.policy).toEqual([{ file: ".factory/lessons/reviewer-qa.md", rule: "lessons file unreadable — human merge required" }]);
+
+  // 같은 파일이 진짜 삭제(D)면 문구가 갈린다
+  const del = makeFakeRun([names("D\t.factory/lessons/reviewer-qa.md\n"), u0("")]);
+  expect((await integrityCheck({ run: del, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null })).policy)
+    .toEqual([{ file: ".factory/lessons/reviewer-qa.md", rule: "lessons file deleted or moved away — human merge required" }]);
+});
+
 test("policyViolations(L1)가 같은 판정을 낸다 — L0가 알리는 것과 머지가 막는 것이 갈리지 않는다", async () => {
   const run = makeFakeRun([names("D\t.factory/lessons/reviewer-qa.md\nM\tsrc/a.js\n")]);
   const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });

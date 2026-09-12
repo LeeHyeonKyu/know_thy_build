@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
+import { resolveRepo as realResolveRepo } from "../lib/gh.js";
 
 const STAGES = ["triage", "plan", "implement", "review"];
 /** `--remote`는 merge도 받는다 — 브랜치 보호가 막는 것은 **로컬 실행**이고, dispatch는 CI에서 도는 일이다. */
@@ -23,8 +24,11 @@ const defaultSpawnInherit = (cmd, args, opts) => spawnSync(cmd, args, { ...opts,
  * 작업을 하므로 캡처하지 않고 사람이 실시간으로 본다. `FACTORY_LOCAL_ENTRY=1`을 심어 run-stage.js의
  * triage가 "락을 먼저 잡고 큐잉은 나중에" 경로(§4.2.5)를 타게 한다(retro는 이 env를 보지 않는다).
  */
-export async function runCommand({ root, argv = [], io, run = realRun, spawnInherit = defaultSpawnInherit, env = process.env }) {
-  const [stage, issueArg] = argv;
+export async function runCommand({ root, argv = [], io, run = realRun, spawnInherit = defaultSpawnInherit, env = process.env, resolveRepo = realResolveRepo }) {
+  // 플래그는 **위치에 상관없이** 플래그다(KTB-10 M7). 예전에는 `argv[0]`·`argv[1]`을 그대로 스테이지·
+  // 이슈로 읽어서 `factory run --remote plan 5`가 stage="--remote"로 usage를 뱉었다 — 사람이 실제로
+  // 그렇게 친다(sweeper가 하는 일을 손으로 할 때 `--remote`를 먼저 쓰는 게 자연스럽다).
+  const [stage, issueArg] = argv.filter((a) => !a.startsWith("-"));
   const isRetro = stage === "retro";
   const remote = argv.includes("--remote");
 
@@ -39,7 +43,14 @@ export async function runCommand({ root, argv = [], io, run = realRun, spawnInhe
     if (!Number.isInteger(n) || n <= 0) { io.err(USAGE); return 1; }
     const auth = await run("gh", ["auth", "status"]);
     if (auth.code !== 0) { io.err("factory run: gh is not authenticated — run `gh auth login` first"); return 1; }
-    const r = await run("gh", ["workflow", "run", `factory-${stage}.yml`, "-f", `issue=${n}`]);
+    // `-R`를 명시한다(KTB-10 M7). `gh workflow run`은 그것이 없으면 **cwd의 git remote**로 저장소를
+    // 고르는데, 이 명령은 로컬에 체크아웃이 있을 이유가 없는 경로다(위에서 init 여부도 보지 않는다) —
+    // 남의 레포 안에서 치면 조용히 그 레포의 워크플로를 띄운다. `FACTORY_REPO`가 있으면 그것이 답이고,
+    // 없으면 `gh repo view`로 묻는다(`resolveRepo`, KTB-4와 같은 단일 출처).
+    let repo;
+    try { repo = await resolveRepo({ run }); }
+    catch (e) { io.err(`factory run --remote: could not resolve the repository — ${e?.message || e}`); return 1; }
+    const r = await run("gh", ["workflow", "run", `factory-${stage}.yml`, "-R", repo, "-f", `issue=${n}`]);
     if (r.code !== 0) { io.err(`factory run --remote: gh workflow run factory-${stage}.yml failed — ${(r.stderr || r.stdout || "").trim()}`); return 1; }
     io.out(`dispatched factory-${stage}.yml for issue #${n}`);
     return 0;

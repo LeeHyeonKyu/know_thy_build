@@ -25,11 +25,33 @@ test("upload-artifact with a dot path needs include-hidden-files", () => {
 test("a `~` path in an upload-artifact step is a violation; an env-resolved absolute path is not", () => {
   const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n        ~/.claude/projects/**/*.jsonl\n      include-hidden-files: true\n";
   expect(lintWorkflow(bad)).toEqual([expect.objectContaining({ rule: "tilde-path", line: 6 })]);
-  expect(lintWorkflow(bad.replace("        ~/.claude/projects/**/*.jsonl\n", "        ${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl\n"))).toEqual([]);
+  expect(lintWorkflow(bad.replace("        ~/.claude/projects/**/*.jsonl\n", "        ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl\n"))).toEqual([]);
   // 단일 값 형태와 리스트 항목 형태 둘 다 잡는다
   expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ~/x/*.log\n      include-hidden-files: true\n")).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
   // upload-artifact 스텝 **밖**의 `~`는 건드리지 않는다(셸 run 줄에서는 진짜로 확장된다)
   expect(lintWorkflow('  - run: ls ~/.claude/projects\n')).toEqual([]);
+  // 따옴표 하나로 비켜 갈 수 있으면 규칙이 아니다 — YAML이 따옴표를 떼고 나면 남는 건 같은 `~/x`다(KTB-10 M3)
+  expect(lintWorkflow('  - uses: actions/upload-artifact@v4\n    with:\n      path: "~/x"\n      include-hidden-files: true\n')).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        '~/.claude/**/*.jsonl'\n      include-hidden-files: true\n")).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
+});
+
+// KTB-10 I1: `${{ env.X }}`로 시작하는 경로는 그 env를 세우는 스텝이 실패하면 `/**/*.jsonl` — 곧
+// 러너 **루트**에 앵커된 glob — 으로 접힌다. 업로드 스텝은 `if: always()`라 그때도 돌고,
+// `if-no-files-found: ignore`라 아무 소리도 내지 않는다. 폴백이 없으면 그 사고는 보이지 않는다.
+test("an artifact path starting with ${{ env.… }} needs a `||` fallback", () => {
+  const step = (p) => `  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n${p}      include-hidden-files: true\n`;
+  expect(lintWorkflow(step("        ${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl\n")))
+    .toEqual([expect.objectContaining({ rule: "env-path-no-fallback", line: 5 })]);
+  expect(lintWorkflow(step("        ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl\n"))).toEqual([]);
+  // 단일 값 형태와 따옴표 형태도 같다
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ${{ env.X }}/out\n"))
+    .toEqual([expect.objectContaining({ rule: "env-path-no-fallback" })]);
+  expect(lintWorkflow('  - uses: actions/upload-artifact@v4\n    with:\n      path: "${{ env.X }}/out"\n'))
+    .toEqual([expect.objectContaining({ rule: "env-path-no-fallback" })]);
+  // env로 **시작하지 않는** 경로는 접혀도 워크스페이스 안에 남는다 — 규칙 밖이다
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: out/${{ env.X }}/*.log\n")).toEqual([]);
+  // upload-artifact 스텝 밖의 env 표현식은 건드리지 않는다
+  expect(lintWorkflow("  - run: echo ${{ env.X }}\n")).toEqual([]);
 });
 
 test("logging hooks must end with exit 0", () => {
@@ -61,7 +83,11 @@ test("stage workflows follow the §4.1 table and the token/concurrency rules", (
     if (stage !== "merge") {
       // `~`는 upload-artifact가 펼치지 않는다 — 러너의 실제 $HOME을 선행 스텝이 GITHUB_ENV로 굳힌다
       expect(y, f).toContain('run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"');
-      expect(y, f).toContain("${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl");
+      // env가 비면(resolve 스텝이 돌지 못했으면) 경로가 루트 앵커 glob으로 접힌다 — 폴백은 워크스페이스 안이다(KTB-10 I1)
+      expect(y, f).toContain("${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl");
+      // 그리고 그 resolve 스텝은 **첫 스텝**이고 `if: always()`다 — setup이 실패해도 값이 선다
+      expect(y.indexOf("- name: Resolve the session transcript directory"), f).toBeLessThan(y.indexOf("- uses: actions/checkout@v4"));
+      expect(y, f).toMatch(/- name: Resolve the session transcript directory\n {8}if: always\(\)\n/);
       expect(y, f).not.toContain("            ~/.claude");
       expect(y, f).toContain("if-no-files-found: ignore");
     }
@@ -130,7 +156,9 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   expect(y).toContain("include-hidden-files: true");
   // retro도 트랜스크립트를 1순위 출처로 쓴다(KTB-7 재리뷰) — 그러면 사후 조사에도 있어야 한다
   expect(y).toContain('run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"');
-  expect(y).toContain("${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl");
+  expect(y).toContain("${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl");
+  expect(y.indexOf("- name: Resolve the session transcript directory")).toBeLessThan(y.indexOf("- uses: actions/checkout@v4"));
+  expect(y).toMatch(/- name: Resolve the session transcript directory\n {8}if: always\(\)\n/);
   expect(y).toContain("if-no-files-found: ignore");
   // cron이 없다는 것 자체가 §8.4의 결정이다 — 머지가 없으면 배울 것도 없다.
   expect(y).not.toContain("schedule:");

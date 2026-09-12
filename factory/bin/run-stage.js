@@ -14,7 +14,7 @@ import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMer
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
-import { STAGE_OF_TARGET, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
+import { STAGE_OF_TARGET, ENTRY_LABELS, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -108,6 +108,25 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       const localMsg = await d.localEntry?.();
       if (localMsg) record([localMsg]);
     } catch (e) { record([`local entry: aborted — ${e?.message || e}`]); }
+    // 진입 상태 가드(KTB-10). concurrency 그룹 하나당 GitHub은 **실행 1 + 대기 1**만 유지하므로,
+    // sweeper의 재점화나 `--remote` dispatch가 같은 그룹에 PENDING으로 걸렸다가 **원래 런이 끝난 뒤에**
+    // 풀려 같은 스테이지를 처음부터 다시 돌 수 있다. 그때 락은 이미 해제돼 있어 claim이 막지 못한다
+    // (claim은 *동시* 러너만 막는다). 전이 그래프는 결국 거부하지만, 그건 plan 한 번에 ~$12를 태우고
+    // handoff 코멘트를 중복으로 남긴 **뒤**다. 그래서 락을 잡은 직후 이슈의 현재 상태 라벨을 읽어
+    // 이 스테이지의 진입 라벨이 아니면 아무것도 하지 않고 물러난다(전이 없음, handoff 없음, claude -p 없음).
+    // localEntry **뒤**인 이유: 로컬 진입(§4.2.5)이 backlog → factory:queue를 바로 위에서 만든다.
+    // 라벨을 읽지 못했으면(조회 실패·상태 라벨 2개) 막지 않고 흔적만 남긴다 — 가드는 비용 방어이지
+    // 안전 게이트가 아니고, 실제 안전은 뒤의 전이 그래프가 그대로 쥐고 있다.
+    if (d.issueLabels) {
+      const expected = ENTRY_LABELS[stage] || [];
+      let current, known = true;
+      try { current = factoryLabelOf(await d.issueLabels()); }
+      catch (e) { known = false; record([`entry state: unreadable — ${e?.message || e}`]); }
+      if (known && expected.length && !expected.includes(current)) {
+        record([`entry state ${current ?? "none"} != expected ${expected.join("|")} — nothing to do`]);
+        return 0;
+      }
+    }
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
     const a = await d.assertHandoff();
@@ -184,6 +203,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // 없었다. **handoff가 검증된 뒤**에만 붙인다 — 검증 전의 tier는 에이전트의 자기 신고일 뿐이다.
     // 실패해도 스테이지를 죽이지 않는다(라벨은 사람에게 보이는 표식이지 판정의 재료가 아니다 —
     // 게이트·로스터는 계속 handoff의 tier를 읽는다).
+    //
+    // **전이보다 먼저여야 한다**: tier 라벨을 붙이는 것도 `issues: labeled` 이벤트라, 그 이벤트가
+    // 만드는 5개짜리 런 물결(스테이지 워크플로 5개가 전부 뜬다 — GitHub은 라벨 이름 필터를 주지
+    // 않는다)이 뒤에 오면 전이가 막 띄운 다음 스테이지의 PENDING 런을 concurrency 슬롯에서 밀어낸다
+    // (KTB-8). 순서가 뒤집히면 다음 스테이지가 조용히 사라진다 — 데모 #2가 죽은 그 방식이다.
     if (stage === "triage" && d.setTierLabel && TIERS.includes(v.data?.tier)) {
       try { await d.setTierLabel(v.data.tier); record([`tier: ${tierLabel(v.data.tier)}`]); }
       catch (e) { record([`tier: ${tierLabel(v.data.tier)} label failed — ${e?.message || e}`]); }
@@ -412,6 +436,8 @@ async function main() {
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     localEntry: makeLocalEntry({ gh, issue, stage, env: process.env }),
+    /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
+    issueLabels: async () => (await gh.issue(issue)).labels,
     heartbeat: () => startHeartbeat({ gh, issue, stage, runnerId }),
     assertHandoff: async () => {
       const target = Object.entries(STAGE_OF_TARGET).find(([, s]) => s === prevStage(stage))?.[0];

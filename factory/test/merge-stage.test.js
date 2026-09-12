@@ -239,6 +239,75 @@ test("(3b) the refusal comments on the PR, naming the allowed sections", async (
   expect(body).toMatch(/`\.claude\/agents\/x\.md`/);
 });
 
+// ── (3b') 같은 dep이 실어 오는 **두 번째** 규칙: 사라진 lessons 파일 (KTB-10 I3) ──────
+// `policyViolations`는 additive-only 위반과 `.factory/lessons/**`의 삭제·이동을 한 배열에 담는다.
+// 둘은 사람이 할 일이 다르다 — 앞은 역할 정의가 바뀐 diff이고, 뒤는 누적된 교훈이 사라지는 diff다.
+// 한 제목으로 뭉치면 "`## Examples`에만 추가하세요"라는 설명이 lessons 삭제 위에 붙는 오보가 된다.
+
+const LESSONS_GONE = { file: ".factory/lessons/reviewer-qa.md", rule: "lessons file deleted or moved away — human merge required" };
+
+test("(3b') a deleted lessons file gets its own heading and reason — not the additive-only copy", async () => {
+  const comment = vi.fn(async () => {});
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    policyViolations: vi.fn(async () => ({ ok: true, files: [LESSONS_GONE.file], violations: [LESSONS_GONE] })),
+    comment,
+  });
+  expect(await run(d, { record })).toBe(2);
+  const [target, body] = comment.mock.calls[0];
+  expect(target).toBe(9);
+  expect(body).toContain("**lessons 파일 삭제/이동 — 팩토리가 자동 머지하지 않습니다.**");
+  expect(body).not.toContain("역할 프롬프트의 허용 섹션 밖 편집");
+  expect(body).toMatch(/`\.factory\/lessons\/reviewer-qa\.md`/);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "lessons files deleted or moved away — human merge required: .factory/lessons/reviewer-qa.md (see PR #9)",
+  }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(lines.some((l) => /lessons files deleted or moved away/.test(l))).toBe(true);
+});
+
+test("(3b') an additive-only violation keeps its own heading and never mentions lessons", async () => {
+  const comment = vi.fn(async () => {});
+  const d = baseD({
+    policyViolations: vi.fn(async () => ({
+      ok: true, files: [".claude/agents/x.md"],
+      violations: [{ file: ".claude/agents/x.md", rule: "additive-only sections (## Examples) — removals or edits outside allowed sections" }],
+    })),
+    comment,
+  });
+  expect(await run(d)).toBe(2);
+  const [, body] = comment.mock.calls[0];
+  expect(body).toContain("**역할 프롬프트의 허용 섹션 밖 편집 — 팩토리가 자동 머지하지 않습니다.**");
+  expect(body).not.toContain("lessons 파일 삭제/이동");
+});
+
+test("(3b') a PR that does both gets both headings, each above its own file list", async () => {
+  const comment = vi.fn(async () => {});
+  const d = baseD({
+    policyViolations: vi.fn(async () => ({
+      ok: true, files: [".claude/agents/x.md", LESSONS_GONE.file],
+      violations: [
+        { file: ".claude/agents/x.md", rule: "additive-only: header added" },
+        LESSONS_GONE,
+      ],
+    })),
+    comment,
+  });
+  expect(await run(d)).toBe(2);
+  const [, body] = comment.mock.calls[0];
+  expect(body).toContain("역할 프롬프트의 허용 섹션 밖 편집");
+  expect(body).toContain("lessons 파일 삭제/이동");
+  // 제목 사이에 각자의 목록이 온다 — 역할 파일이 lessons 제목 아래에 섞이지 않는다
+  const agentAt = body.indexOf("`.claude/agents/x.md`"), lessonsHeadingAt = body.indexOf("lessons 파일 삭제/이동");
+  expect(agentAt).toBeGreaterThan(0);
+  expect(agentAt).toBeLessThan(lessonsHeadingAt);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: expect.stringMatching(/agent role sections edited outside.*; lessons files deleted or moved away/),
+  }));
+});
+
 test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {
   const d = baseD({ policyViolations: vi.fn(async () => ({ ok: false, files: [], reason: "git show exited 128" })) });
   expect(await run(d)).toBe(2);

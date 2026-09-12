@@ -1,6 +1,7 @@
 import { verdictLine } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
+import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
 
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
@@ -86,11 +87,16 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 사유는 **이슈**의 전이 코멘트로 간다(한 줄 포인터: 어느 PR을 사람이 봐야 하는지). 상세 코멘트는
   // **PR**에 붙는다 — 사람이 머지 버튼을 누르는 자리가 거기이고, 본문이 그 diff를 가리키기 때문이다.
   // 코멘트는 부수 효과다 — 실패해도 거부 자체를 잃지 않는다(전이 코멘트가 사유를 이미 싣는다).
-  const handToHuman = async ({ reason, heading, why, files }) => {
+  //
+  // `sections`는 **규칙별로** 하나씩이다(KTB-10 I3): 한 PR이 두 규칙을 동시에 어길 수 있고(역할 파일
+  // 편집 + lessons 삭제), 그때 한 제목으로 뭉치면 사람이 목록의 절반을 엉뚱한 설명으로 읽는다.
+  const handToHuman = async ({ reason, sections }) => {
     try {
       await d.comment?.(pr, [
-        `**${heading} — 팩토리가 자동 머지하지 않습니다.**`, "", ...why, "",
-        ...files.map((f) => `- \`${f}\``), "",
+        ...sections.flatMap(({ heading, why, files }) => [
+          `**${heading} — 팩토리가 자동 머지하지 않습니다.**`, "", ...why, "",
+          ...files.map((f) => `- \`${f}\``), "",
+        ]),
         "diff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.",
         `추적 이슈 #${issue}는 \`factory:needs-human\`으로 옮겼습니다.`,
       ].join("\n"));
@@ -111,13 +117,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (prot.files.length) {
     return await handToHuman({
       reason: `protected paths changed — human merge required: ${prot.files.join(", ")}`,
-      heading: "보호 경로 변경",
-      why: [
-        "이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은",
-        "사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).",
-        "", "변경된 보호 경로:",
-      ],
-      files: prot.files,
+      sections: [{
+        heading: "보호 경로 변경",
+        why: [
+          "이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은",
+          "사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).",
+          "", "변경된 보호 경로:",
+        ],
+        files: prot.files,
+      }],
     });
   }
   record(["merge: no protected paths in the PR range"]);
@@ -128,18 +136,42 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 파일 내용이 필요한데, `policyViolations`는 워킹 트리가 아니라 `git show <rev>:<file>`로 읽는다.
   const pol = d.policyViolations ? await d.policyViolations() : { ok: false, files: [], reason: "policyViolations dep not wired" };
   if (!pol?.ok) return await undecidable("agent-section policy check", pol?.reason);
+  // 거부 사유가 두 종류다 — 한 제목으로 뭉치면 사람이 엉뚱한 곳을 본다(KTB-10 I3). `policyViolations`는
+  // `additive_only` 규칙 위반과 **사라진 lessons 파일**(`.factory/lessons/**`의 삭제·이동)을 같은
+  // `violations` 배열에 싣는데, 둘은 원인도 사람이 해야 할 일도 다르다: 앞은 역할 정의를 바꾼 diff이고,
+  // 뒤는 누적된 교훈이 통째로 사라지는 diff다. 그래서 파일 목록을 규칙으로 갈라 각자의 제목으로 낸다.
   if (pol.files.length) {
-    return await handToHuman({
-      reason: `agent role sections edited outside Examples/Perspectives — human merge required: ${pol.files.join(", ")}`,
-      heading: "역할 프롬프트의 허용 섹션 밖 편집",
-      why: [
-        "`.claude/agents/*.md`는 `## Examples`·`## Perspectives`에 **추가만** 허용됩니다",
-        "(`[protected].additive_only`). 그 밖의 편집은 역할의 정의를 바꾸는 일이라, 팩토리가",
-        "스스로 머지하지 않고 사람에게 넘깁니다(ADR-020 KTB-6).",
-        "", "허용 섹션 밖에서 바뀐 파일:",
-      ],
-      files: pol.files,
-    });
+    const lessons = [...new Set((pol.violations || []).filter((v) => LESSONS_RULE_RE.test(v.rule)).map((v) => v.file))];
+    const additive = pol.files.filter((f) => !lessons.includes(f));
+    const sections = [], reasons = [];
+    if (additive.length) {
+      reasons.push(`agent role sections edited outside Examples/Perspectives — human merge required: ${additive.join(", ")}`);
+      sections.push({
+        heading: "역할 프롬프트의 허용 섹션 밖 편집",
+        why: [
+          "`.claude/agents/*.md`는 `## Examples`·`## Perspectives`에 **추가만** 허용됩니다",
+          "(`[protected].additive_only`). 그 밖의 편집은 역할의 정의를 바꾸는 일이라, 팩토리가",
+          "스스로 머지하지 않고 사람에게 넘깁니다(ADR-020 KTB-6).",
+          "", "허용 섹션 밖에서 바뀐 파일:",
+        ],
+        files: additive,
+      });
+    }
+    if (lessons.length) {
+      reasons.push(`lessons files deleted or moved away — human merge required: ${lessons.join(", ")}`);
+      sections.push({
+        heading: "lessons 파일 삭제/이동",
+        why: [
+          "`.factory/lessons/**`는 retro가 쌓아 온 교훈의 유일한 저장소입니다. 삭제·이동은 `[protected].except`라",
+          "L0 `factory/integrity`에도, 내용 규칙(사라진 파일은 읽을 내용이 없다)에도 걸리지 않아 **아무 신호 없이**",
+          "빠져나갈 수 있습니다. 역할을 은퇴시키며 지우는 것은 정상 작업이라 변조로 다루지는 않지만,",
+          "무엇이 사라지는지는 사람이 보고 머지해야 합니다(ADR-020 KTB-10).",
+          "", "사라진 lessons 파일:",
+        ],
+        files: lessons,
+      });
+    }
+    return await handToHuman({ reason: reasons.join("; "), sections });
   }
   record(["merge: agent role sections within policy"]);
 

@@ -130,7 +130,71 @@ test("sweep: each waiting label maps to its own stage; a failing dispatch is iso
     { stage: "implement", issue: 3 }, { stage: "review", issue: 4 }, { stage: "merge", issue: 5 },
   ]);
   expect(actions).toContainEqual({ kind: "error", step: "stalled-restart", issue: 4, error: expect.stringContaining("gh workflow run boom") });
-  expect(seen).toEqual([3, 5]);                       // dispatch가 실패한 이슈에는 "다시 띄웠다"는 마커를 남기지 않는다
+  // 마커는 dispatch **전에** 남는다(KTB-10 M4) — 그래서 dispatch가 실패한 4에도 마커가 있고, 다음
+  // sweep은 같은 창 안에서 다시 밀지 않는다. 실패는 "덜 재시작하는 쪽"으로 기운다(재점화는 비싸고,
+  // 놓친 재점화는 사람이 `--remote`로 되살릴 수 있다).
+  expect(seen).toEqual([3, 4, 5]);
+  expect(actions.filter((a) => a.kind === "stalled-restart").map((a) => a.issue)).toEqual([3, 5]);
+});
+
+// KTB-10 M4: 순서가 뒤집혀 있으면(dispatch → 코멘트) 코멘트 실패가 dedupe의 유일한 근거를 지운다 —
+// 그러면 sweeper가 30분마다 같은 스테이지를 계속 민다(plan 한 번 ~$12).
+test("sweep: the restart marker is posted BEFORE the dispatch — a failing comment means no dispatch at all", async () => {
+  const order = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 2 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z")],
+    comment: vi.fn(async () => { order.push("comment"); return "u"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => { order.push("dispatch"); });
+  await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(order).toEqual(["comment", "dispatch"]);
+
+  const boom = { ...gh, comment: vi.fn(async () => { throw new Error("comment API 502"); }) };
+  const d2 = vi.fn();
+  const actions = await sweep(stalledArgs({ gh: boom, dispatchStage: d2 }));
+  expect(d2).not.toHaveBeenCalled();                  // 마커를 못 남겼으면 밀지 않는다
+  expect(actions).toContainEqual({ kind: "error", step: "stalled-restart", issue: 2, error: expect.stringContaining("comment API 502") });
+});
+
+// KTB-10 M5: `factory:planned`는 implement가 흐름 제어에 걸려 **라벨을 건드리지 않고** 물러났을 때도
+// 그대로 남는다 — 멈춘 것이 아니라 일부러 세워 둔 것이다. 밀어 봐야 새 런이 같은 이유로 물러나고
+// "다시 띄웠습니다" 코멘트만 30분마다 쌓인다.
+test("sweep: an issue parked at factory:planned by back-pressure is skipped — no dispatch, no comment", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:planned" ? [{ number: 3 }] : []),
+    comments: async () => [TRANSITION("factory:planned", "2026-09-11T00:00:00Z")],
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn();
+  const backPressure = vi.fn(async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, backPressure }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "stalled-restart-skipped", issue: 3, stage: "implement", label: "factory:planned", reason: "back-pressure — awaiting-review 4 ≥ 4" });
+  expect(actions.some((a) => a.kind === "stalled-restart")).toBe(false);
+});
+
+test("sweep: back-pressure gates only the implement arm, and is asked at most once per sweep", async () => {
+  const gh = {
+    searchIssues: async (l) => ({ "factory:planned": [{ number: 3 }, { number: 6 }], "factory:awaiting-review": [{ number: 4 }] }[l] || []),
+    comments: async () => [TRANSITION("x", "2026-09-11T00:00:00Z")],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const backPressure = vi.fn(async () => ({ ok: false, reasons: ["quarantine 5 ≥ 5"] }));
+  await sweep(stalledArgs({ gh, dispatchStage, backPressure }));
+  expect(backPressure).toHaveBeenCalledTimes(1);                  // 이슈마다 다시 묻지 않는다
+  expect(dispatchStage.mock.calls.map((c) => c[0])).toEqual([{ stage: "review", issue: 4 }]);
+
+  // 흐름 제어가 열려 있으면 implement도 평소대로 밀린다
+  const open = vi.fn(async () => ({ ok: true, reasons: [] }));
+  const d2 = vi.fn(async () => {});
+  await sweep(stalledArgs({ gh, dispatchStage: d2, backPressure: open }));
+  expect(d2.mock.calls.map((c) => c[0])).toEqual([
+    { stage: "implement", issue: 3 }, { stage: "implement", issue: 6 }, { stage: "review", issue: 4 },
+  ]);
 });
 
 test("sweep: no transition comment at all → nothing is dispatched (age unknown is not 'stale')", async () => {

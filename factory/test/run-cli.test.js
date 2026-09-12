@@ -205,11 +205,36 @@ test("--remote dispatches factory-<stage>.yml with the issue input and never spa
     { match: (c, a) => c === "gh" && a[0] === "workflow", result: { code: 0, stdout: "", stderr: "" } },
   ]);
   const spawnInherit = vi.fn();
-  const code = await runCommand({ root, argv: ["plan", "2", "--remote"], io: i, run, spawnInherit });
+  const code = await runCommand({ root, argv: ["plan", "2", "--remote"], io: i, run, spawnInherit, resolveRepo: async () => "o/r" });
   expect(code).toBe(0);
   expect(spawnInherit).not.toHaveBeenCalled();
-  expect(run.calls.find((c) => c.args[0] === "workflow").args).toEqual(["workflow", "run", "factory-plan.yml", "-f", "issue=2"]);
+  // `-R`가 없으면 gh는 **cwd의 git remote**로 저장소를 고른다 — 이 경로는 로컬 체크아웃을 전제하지
+  // 않으므로(init 여부도 보지 않는다) 남의 레포 안에서 치면 조용히 거기를 띄운다(KTB-10 M7).
+  expect(run.calls.find((c) => c.args[0] === "workflow").args).toEqual(["workflow", "run", "factory-plan.yml", "-R", "o/r", "-f", "issue=2"]);
   expect(o.out.join("\n")).toContain("dispatched factory-plan.yml for issue #2");
+});
+
+// KTB-10 M7: 사람이 실제로 `factory run --remote plan 5`라고 친다 — 예전에는 argv[0]을 그대로
+// 스테이지로 읽어서 stage="--remote"가 되고 usage만 뱉었다.
+test("--remote is accepted in any argv position", async () => {
+  for (const argv of [["--remote", "plan", "5"], ["plan", "--remote", "5"], ["plan", "5", "--remote"]]) {
+    const run = makeFakeRun([
+      { match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 0, stdout: "ok", stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "workflow", result: { code: 0, stdout: "", stderr: "" } },
+    ]);
+    const { io: i } = io();
+    expect(await runCommand({ root: mktemp(), argv, io: i, run, spawnInherit: vi.fn(), resolveRepo: async () => "o/r" }), argv.join(" ")).toBe(0);
+    expect(run.calls.find((c) => c.args[0] === "workflow").args).toEqual(["workflow", "run", "factory-plan.yml", "-R", "o/r", "-f", "issue=5"]);
+  }
+});
+
+test("--remote: a repo that cannot be resolved is a readable failure, not a dispatch into the wrong repo", async () => {
+  const run = makeFakeRun([{ match: (c, a) => c === "gh" && a[0] === "auth", result: { code: 0, stdout: "ok", stderr: "" } }]);
+  const { io: i, o } = io();
+  const resolveRepo = async () => { throw new Error("gh repo view failed (1): not a git repository"); };
+  expect(await runCommand({ root: mktemp(), argv: ["plan", "2", "--remote"], io: i, run, spawnInherit: vi.fn(), resolveRepo })).toBe(1);
+  expect(o.err.join("\n")).toMatch(/could not resolve the repository — gh repo view failed/);
+  expect(run.calls.some((c) => c.args[0] === "workflow")).toBe(false);
 });
 
 test("--remote accepts merge (branch protection blocks the LOCAL run, not the CI dispatch); a failing dispatch exits 1", async () => {
@@ -218,7 +243,7 @@ test("--remote accepts merge (branch protection blocks the LOCAL run, not the CI
     { match: (c, a) => c === "gh" && a[0] === "workflow", result: { code: 0, stdout: "", stderr: "" } },
   ]);
   const a = io();
-  expect(await runCommand({ root: mktemp(), argv: ["merge", "7", "--remote"], io: a.io, run: okRun, spawnInherit: vi.fn() })).toBe(0);
+  expect(await runCommand({ root: mktemp(), argv: ["merge", "7", "--remote"], io: a.io, run: okRun, spawnInherit: vi.fn(), resolveRepo: async () => "o/r" })).toBe(0);
   expect(okRun.calls.find((c) => c.args[0] === "workflow").args).toContain("factory-merge.yml");
 
   const badRun = makeFakeRun([
@@ -226,7 +251,7 @@ test("--remote accepts merge (branch protection blocks the LOCAL run, not the CI
     { match: (c, x) => c === "gh" && x[0] === "workflow", result: { code: 1, stdout: "", stderr: "could not find any workflows named factory-plan.yml" } },
   ]);
   const b = io();
-  expect(await runCommand({ root: mktemp(), argv: ["plan", "2", "--remote"], io: b.io, run: badRun, spawnInherit: vi.fn() })).toBe(1);
+  expect(await runCommand({ root: mktemp(), argv: ["plan", "2", "--remote"], io: b.io, run: badRun, spawnInherit: vi.fn(), resolveRepo: async () => "o/r" })).toBe(1);
   expect(b.o.err.join("\n")).toContain("could not find any workflows");
 });
 

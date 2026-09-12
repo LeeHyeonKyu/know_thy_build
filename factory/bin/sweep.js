@@ -8,6 +8,7 @@ import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quara
 import { transition as transitionIssue } from "../lib/transition.js";
 import { release as releaseLock } from "../lib/claim.js";
 import { sweep } from "../lib/sweeper.js";
+import { backPressure } from "../lib/back-pressure.js";
 
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
@@ -25,7 +26,10 @@ async function main() {
   // 멈춘 스테이지의 재점화(KTB-8). 워크플로 파일 이름은 템플릿이 설치하는 그 이름이다 —
   // `factory-<stage>.yml`이 없으면 gh가 실패하고, sweeper는 그 이슈만 error로 적고 넘어간다.
   const dispatchStage = ({ stage, issue: n }) => gh.dispatchWorkflow(`factory-${stage}.yml`, { issue: n });
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage });
+  // 흐름 제어로 **일부러** 세워 둔 `factory:planned`를 "멈췄다"로 읽지 않기 위한 것이다(KTB-10 M5) —
+  // run-stage의 implement가 보는 바로 그 판정을 같은 헬퍼로 묻는다.
+  const backPressureFn = () => backPressure({ gh, charter, quarantine, thresholds });
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }
