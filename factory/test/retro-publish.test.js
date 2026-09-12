@@ -44,7 +44,7 @@ function gitTable(overrides = [], { nameStatus = `M\t${LESSONS_PATH}`, u0 = CLEA
     { match: (c, a) => c === "git" && a.includes("commit"), result: ok("[detached HEAD abc1234] retro\n") },
     { match: (c, a) => c === "git" && a[0] === "merge-base", result: ok("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n") },
     { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: ok(`${nameStatus}\n`) },
-    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "-U0", result: ok(u0) },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("-U0"), result: ok(u0) },
     { match: (c, a) => c === "git" && a[0] === "push", result: ok() },
   ];
 }

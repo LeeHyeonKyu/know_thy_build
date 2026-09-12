@@ -283,3 +283,93 @@ test("lessons per-entry 근거: 3 entries, 2 missing 근거 → 2 violations", a
     expect.stringContaining("L-2026-09-01-03"),
   ]));
 });
+
+// ── fix round 2 ───────────────────────────────────────────────────────────────
+// N1: `-U0` diff에 `--no-renames`가 빠져 있으면 rename된 파일의 추가/삭제 줄이 **비어 있다**.
+// additive_only 분기는 그 빈 집합으로 "위반 없음"을 만들고 `continue`하므로 isProtected에도
+// 닿지 않는다 — 즉 `mv .claude/agents/reviewer-qa.md docs/x.md`가 L0 GREEN + protected 빈 목록으로
+// 통과한다(리뷰어가 실측). 두 diff 모두 같은 플래그를 써야 한 줄의 두 경로가 같은 뜻을 갖는다.
+
+const AGENT_PATH = ".claude/agents/reviewer-qa.md";
+const RENAME_AGENT = `R100\t${AGENT_PATH}\tdocs/x.md\n`;
+// --no-renames가 붙으면 같은 변경이 "전체 삭제 + 신규 추가"로 보인다
+const RENAME_AGENT_U0 = `--- a/${AGENT_PATH}\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-## Purpose\n-## Examples\n-content\n--- /dev/null\n+++ b/docs/x.md\n@@ -0,0 +1,3 @@\n+## Purpose\n+## Examples\n+content\n`;
+
+test("fix round 2 (N1): every -U0 diff is asked with --no-renames too", async () => {
+  const run = makeFakeRun([names("M\tsrc/a.js\n"), u0("")]);
+  await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "" });
+  const u0call = run.calls.find((c) => c.args.includes("-U0"));
+  expect(u0call.args).toEqual(["diff", "--no-renames", "-U0", "b...h"]);
+});
+
+test("fix round 2 (N1): renaming an additive_only file away → policy finding AND the source is protected", async () => {
+  const run = makeFakeRun([names(RENAME_AGENT), u0(RENAME_AGENT_U0)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.policy.some((v) => v.file === AGENT_PATH && /additive-only/.test(v.rule))).toBe(true);
+  // 삭제·이동은 "예시 추가"가 아니다 — additive_only 면제가 적용되지 않으므로 보호 목록에 들어간다
+  expect(r.protected).toContain(AGENT_PATH);
+});
+
+test("fix round 2 (N1): renaming a protected non-additive file away → the source is protected", async () => {
+  const ns = "R100\t.factory/harness.toml\tdocs/harness-old.toml\n";
+  const run = makeFakeRun([names(ns), u0(`--- a/.factory/harness.toml\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-schema = 1\n`)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.protected).toContain(".factory/harness.toml");
+});
+
+test("fix round 2 (N1): policyViolations asks its per-file -U0 with --no-renames as well", async () => {
+  const run = makeFakeRun([
+    names(RENAME_AGENT),
+    { match: (c, a) => a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: RENAME_AGENT_U0, stderr: "" } },
+    { match: (c, a) => a[0] === "show", result: { code: 128, stdout: "", stderr: "fatal" } },
+  ]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  const u0call = run.calls.find((c) => c.args.includes("-U0"));
+  expect(u0call.args).toEqual(["diff", "--no-renames", "-U0", "b...h", "--", AGENT_PATH]);
+  expect(r.files).toEqual([AGENT_PATH]);
+});
+
+// N2: 모든 경로 필드를 세게 되면서, 삭제·이동된 lessons 파일의 **옛 경로**가 내용 규칙에 닿는다 —
+// `readFile`이 null이니 `lessonsFormat("")`이 "lessons header missing"을 만들고 L0가 RED가 된다.
+// 그러면 lessons 파일을 지우거나 옮기는 PR을 아무도 머지할 수 없다(KTB-5와 같은 계열의 오진).
+
+const LESSONS = ".factory/lessons/reviewer-qa.md";
+
+test("fix round 2 (N2): deleting a lessons file is not a false RED — content rules skip a deleted path", async () => {
+  const run = makeFakeRun([names(`D\t${LESSONS}\n`), u0(`--- a/${LESSONS}\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-<!-- factory-lessons:v1 role=reviewer-qa max=30 -->\n`)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([]);
+});
+
+test("fix round 2 (N2): renaming a lessons file away is not a false RED either", async () => {
+  const run = makeFakeRun([names(`R100\t${LESSONS}\tdocs/old-lessons.md\n`), u0(`--- a/${LESSONS}\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-<!-- factory-lessons:v1 role=reviewer-qa max=30 -->\n`)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([]);
+});
+
+test("fix round 2 (N2): a lessons file that still exists is judged as before — the skip is only for deleted paths", async () => {
+  const run = makeFakeRun([names(`M\t${LESSONS}\n`), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => "no header here\n" });
+  expect(r.ok).toBe(false);
+  expect(r.violations[0].rule).toMatch(/lessons header missing/);
+});
+
+test("fix round 2 (N2): a deleted protected path still counts as protected (only the content rules are skipped)", async () => {
+  const run = makeFakeRun([names("D\t.factory/harness.toml\n"), u0(`--- a/.factory/harness.toml\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-schema = 1\n`)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.protected).toEqual([".factory/harness.toml"]);
+});
+
+test("fix round 2 (N2): protectedPaths counts a deleted additive_only source too (the exemption is for live files)", async () => {
+  const r = await protectedPaths({ run: makeFakeRun([names(RENAME_AGENT)]), cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.files).toContain(AGENT_PATH);
+});
+
+test("fix round 2 (N2): a live additive_only file is still exempt from the protected list (retro's dark path survives)", async () => {
+  const r = await protectedPaths({ run: makeFakeRun([names(`M\t${AGENT_PATH}\n`)]), cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.files).toEqual([]);
+});

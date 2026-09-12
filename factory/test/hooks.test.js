@@ -22,11 +22,22 @@ test("block-dangerous: blocks merges, force pushes, protected writes; allows nor
                    // 워크플로를 보호되지 않는 이름으로 옮기면 내용 변경 없이 그 체크가 사라진다.
                    "git mv .github/workflows/factory-integrity.yml ci-integrity.yml",
                    "git rm .github/workflows/factory-merge.yml", "git rm -r .factory/lib",
-                   "git mv docs/factory/CHARTER.md docs/charter.md", "git rm package.json"];
+                   "git mv docs/factory/CHARTER.md docs/charter.md", "git rm package.json",
+                   // fix round 2: git의 **전역 옵션**이 동사 앞에 끼어들어도 규칙이 걸려야 한다 —
+                   // `git -C <dir> rm ...`는 `git rm ...`와 똑같은 일을 하고, 앵커가 없으면 통째로 빠져나간다.
+                   "git -C /repo rm .factory/harness.toml", "git --git-dir=.git merge x",
+                   "git -C . push --force origin x", "git -c user.name=x push -f origin main",
+                   "git --work-tree=/repo mv docs/factory/CHARTER.md docs/x.md",
+                   "git -C /repo -c core.pager=cat rm -r .claude/agents",
+                   // 그리고 보호 경로를 **출발지**로 삼는 평범한 mv/rm도 막는다(기존 cp|mv 규칙은 목적지만 봤다)
+                   "mv .factory/harness.toml /tmp/x", "rm .factory/harness.toml", "rm -rf .claude/agents",
+                   "rm -f docs/factory/CHARTER.md", "mv package.json package.json.bak"];
   const allowed = ["git push origin HEAD", "git commit -m x", "npm test", "cat .factory/harness.toml", "gh pr view 5",
                    "git push origin HEAD:refs/heads/claude/fq-7", "git push origin --delete claude/fq-7",
                    "cp .factory/harness.toml /tmp/backup", "python3 -c \"print(1)\"",
-                   "git rm src/old.js", "git mv src/a.js src/b.js"];   // 보호 경로가 아닌 곳의 rm/mv는 정상 작업이다
+                   "git rm src/old.js", "git mv src/a.js src/b.js",   // 보호 경로가 아닌 곳의 rm/mv는 정상 작업이다
+                   "git -C /repo status", "git -c user.name=x commit -m x", "git -C /repo push origin HEAD",
+                   "rm -rf dist", "mv src/a.js src/b.js", "rm /tmp/scratch"];
   await Promise.all(blocked.map(async (c) => {
     const r = await bash("block-dangerous.sh", cmd(c));
     expect(r.code, c).toBe(2);

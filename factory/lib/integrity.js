@@ -27,26 +27,34 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return cannotCompute(gitReason("git diff --name-status", ns));
   const violations = [];
-  const files = [...new Set(changedFiles(ns.stdout))];          // rename 줄은 경로를 둘 내놓는다 — 같은 파일을 두 번 판정하지 않는다
-  const u0r = await run("git", ["diff", "-U0", `${base}...${head}`], { cwd });
+  const entries = changedEntries(ns.stdout);                    // rename 줄은 경로를 둘 내놓는다 — 같은 파일을 두 번 판정하지 않는다
+  const files = entries.map((e) => e.path);
+  const u0r = await run("git", U0(base, head), { cwd });
   if (u0r.code !== 0) return cannotCompute(gitReason("git diff -U0", u0r));
   const u0 = u0r.stdout;
   const addedByFile = addedLines(u0), removedByFile = removedLines(u0);
   const prot = harness.protected || {};
   const protectedFiles = [], policy = [];
-  for (const f of files) {
+  for (const { path: f, deleted } of entries) {
+    // 사라진 경로에는 **내용 규칙**을 적용할 수 없다(fix round 2, N2). `readFile`이 null인 것은
+    // "포맷이 틀렸다"가 아니라 "읽을 파일이 없다"인데, 그것을 위반으로 읽으면 lessons 파일을
+    // 지우거나 옮기는 PR이 L0 RED가 되어 아무도 머지할 수 없다(KTB-5와 같은 계열의 오진).
+    const text = deleted ? null : readFile(`${cwd}/${f}`);
+    const gone = deleted || text === null;
     const additive = additiveGlobFor(f, prot);
     if (additive) {
       // 정책 위반이지 변조가 아니다 — `ok`를 내리지 않고 `policy`에 실린다(KTB-6). 집행은 L1.
+      // 내용이 없어도 판정은 성립한다: 삭제는 removals로 잡히고 added는 비어 있다.
       policy.push(...additiveOnlyViolations({
         file: f, allowed: prot.additive_only[additive],
         added: addedByFile.get(f) || [], removed: removedByFile.get(f) || [],
-        headText: readFile(`${cwd}/${f}`) || "",
+        headText: gone ? "" : text,
       }));
-      continue;
+      if (!gone) continue;        // 살아 있는 동안만 additive 규칙이 이 파일을 전담한다 — 삭제·이동은 아래 보호 목록으로도 간다
     }
-    if (isProtected(f, prot)) protectedFiles.push(f);            // 위반이 아니라 "사람이 머지해야 한다"는 사실 (KTB-5)
-    if (f.startsWith(".factory/lessons/")) violations.push(...lessonsFormat(f, readFile(`${cwd}/${f}`) || ""));
+    if (isProtectedPath(f, prot)) protectedFiles.push(f);       // 위반이 아니라 "사람이 머지해야 한다"는 사실 (KTB-5)
+    if (gone) continue;                                         // 내용 규칙은 여기서 끝 (N2)
+    if (f.startsWith(".factory/lessons/")) violations.push(...lessonsFormat(f, text));
     if (matchesAny(harness.test?.test_glob || [], f)) {
       if ((addedByFile.get(f) || []).some((l) => SKIP_PRAGMAS.some((re) => re.test(l.text)))) violations.push({ file: f, rule: "test skip/ignore pragma added" });
     }
@@ -91,11 +99,11 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness 
   if (!Object.keys(prot.additive_only || {}).length) return { ok: true, files: [], violations: [] };
   const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason("git diff --name-status", ns) };
-  const entries = [...new Set(changedFiles(ns.stdout))]
-    .map((f) => [f, additiveGlobFor(f, prot)]).filter(([, g]) => g);
+  const entries = changedEntries(ns.stdout)
+    .map((e) => [e.path, additiveGlobFor(e.path, prot)]).filter(([, g]) => g);
   const violations = [];
   for (const [f, glob] of entries) {
-    const u0r = await run("git", ["diff", "-U0", `${base}...${head}`, "--", f], { cwd });
+    const u0r = await run("git", U0(base, head, f), { cwd });
     if (u0r.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason(`git diff -U0 -- ${f}`, u0r) };
     // 삭제됐으면 빈 내용이다 — 실패를 판정 불가로 올리지 않는다(삭제 자체가 정책 위반으로 잡힌다).
     const shown = await run("git", ["show", `${head}:${f}`], { cwd });
@@ -123,7 +131,7 @@ export async function protectedPaths({ run, cwd, base, head = "HEAD", harness })
   const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return { ok: false, files: [], reason: gitReason("git diff --name-status", ns) };
   const prot = harness?.protected || {};
-  return { ok: true, files: [...new Set(changedFiles(ns.stdout).filter((f) => isProtected(f, prot)))] };
+  return { ok: true, files: [...new Set(changedEntries(ns.stdout).filter((e) => isProtectedEntry(e, prot)).map((e) => e.path))] };
 }
 
 /**
@@ -135,17 +143,42 @@ export async function protectedPaths({ run, cwd, base, head = "HEAD", harness })
  * 반드시 목록에 들어온다(git config `diff.renames`도 이 플래그가 이긴다).
  */
 const NAME_STATUS = (base, head) => ["diff", "--no-renames", "--name-status", `${base}...${head}`];
+/**
+ * `-U0` diff도 **같은 플래그**를 써야 한다(fix round 2, N1). 하나만 `--no-renames`면 두 호출이 서로
+ * 다른 세계를 본다: name-status는 rename을 D+A로 펼치는데 `-U0`는 `R`로 접어서, 옮겨진 파일의
+ * 추가·삭제 줄이 **빈 집합**이 된다. 그러면 additive-only 분기가 "위반 없음"을 만들고 `continue`해서
+ * 보호 목록에도 닿지 않는다 — `mv .claude/agents/reviewer-qa.md docs/x.md`가 L0 GREEN에 protected
+ * 빈 목록으로 빠져나간다(실측). 같은 플래그면 그 변경은 전체 삭제로 보여 removal 규칙에 걸린다.
+ */
+const U0 = (base, head, file) => ["diff", "--no-renames", "-U0", `${base}...${head}`, ...(file ? ["--", file] : [])];
 
 /**
  * `git diff --name-status` 한 줄 = "<status>\t<path>"이고, rename/copy는 "<status>\told\tnew"다.
- * **모든** 경로 필드를 취한다(마지막 것만이 아니라) — `--no-renames`를 이미 주고 있지만, 그 플래그가
- * 빠진 호출·다른 git 버전·미리 계산된 diff를 받아도 출발지를 잃지 않게 하는 두 번째 문이다.
+ * **모든** 경로 필드를 상태와 함께 취한다 — `--no-renames`를 이미 주고 있지만, 그 플래그가 빠진
+ * 호출·다른 git 버전·미리 계산된 diff를 받아도 출발지를 잃지 않게 하는 두 번째 문이다.
+ * rename의 출발지는 삭제된 것으로, copy의 출발지는 그대로 있는 것으로 편다.
  */
-const changedFiles = (stdout) => stdout.split("\n").filter(Boolean).flatMap((l) => l.split("\t").slice(1)).filter(Boolean);
+function changedEntries(stdout) {
+  const out = new Map();                                        // path → entry (같은 경로가 두 줄에 나와도 한 번만)
+  const put = (path, deleted) => { if (!path) return; const prev = out.get(path); out.set(path, { path, deleted: prev ? prev.deleted && deleted : deleted }); };
+  for (const line of stdout.split("\n").filter(Boolean)) {
+    const [status, p1, p2] = line.split("\t");
+    if (p2 && /^R/.test(status)) { put(p1, true); put(p2, false); continue; }   // 옮겨졌다 = 출발지는 사라졌다
+    if (p2) { put(p1, false); put(p2, false); continue; }                        // copy: 출발지는 그대로 있다
+    put(p1, /^D/.test(status));
+  }
+  return [...out.values()];
+}
 /** additive_only가 맡은 파일은 그 규칙이 판정한다 — 보호 목록에 넣지 않는다(넣으면 retro의 다크 예시 추가가 매번 사람 머지가 된다). */
 const additiveGlobFor = (f, prot) => Object.keys(prot.additive_only || {}).find((g) => matchesAny([g], f));
-/** 사람이 머지해야 하는 경로인가: `[protected].factory` 매치 − `except` − `additive_only`. */
-const isProtected = (f, prot) => !additiveGlobFor(f, prot) && matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f);
+/** `[protected].factory` 매치 − `except`. additive_only 면제는 호출자가 건다(살아 있는 파일에만). */
+const isProtectedPath = (f, prot) => matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f);
+/**
+ * 사람이 머지해야 하는 경로인가. additive_only 면제는 그 파일이 **계속 존재할 때만** 적용된다 —
+ * 그 면제의 근거가 "허용 섹션에 추가만 했다"(retro의 다크 경로)인데, 삭제·이동은 어떤 섹션에도
+ * 추가한 것이 아니기 때문이다(fix round 2, N1).
+ */
+const isProtectedEntry = ({ path, deleted }, prot) => (!deleted && additiveGlobFor(path, prot) ? false : isProtectedPath(path, prot));
 
 /** 판정 불가 — ok:false에 이유를 한 줄로 싣는다(file은 "-": 특정 파일의 위반이 아니다). */
 const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], checked: { files: [] } });
