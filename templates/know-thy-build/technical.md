@@ -1,5 +1,5 @@
 ---
-description: Define how your project will be built — tech stack, architecture, data model, testing strategy, and technical decisions with structured rationale. Requires PROJECT.md first.
+description: Define how your project will be built — tech stack, architecture, data model, testing strategy, and technical decisions with structured rationale — and draft docs/factory/CHARTER.md (status draft) from those decisions. Requires PROJECT.md first.
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion]
 ---
 
@@ -16,6 +16,26 @@ The What & Why are already settled in PROJECT.md. This conversation is about the
 **All conversation, questions, checkpoints, and generated documents MUST be in: {{LANG}}**
 
 Technical terms (e.g. REST, PostgreSQL, Docker, CI/CD) stay in English. Everything else uses the specified language.
+
+## Trigger
+
+PROJECT.md complete 이후, 또는 evolve
+
+## Reads
+
+PROJECT.md, 코드
+
+## Does
+
+기존(스택 비교·아키텍처·TDR·적대적 리뷰) 유지 + **CHARTER 초안**: TDR의 "되돌리기 어려운 결정"에서 `load_bearing` 경로를, "절대 자동화하면 안 되는 것"에서 `NEVER_AUTOMATE`를, 프로젝트 성격(개인/OSS/고객)에서 `tier_default`와 hard limits를 도출. `status: draft`로 두고 사람이 읽은 뒤 `ready`로 바꾸게 함
+
+## Produces
+
+`docs/TECHNICAL.md`, `docs/factory/CHARTER.md`(draft)
+
+## Must not
+
+CHARTER를 `ready`로 직접 설정
 
 ## How You Operate
 
@@ -719,6 +739,87 @@ date: {{date}}
 
 ---
 
+## Generate docs/factory/CHARTER.md (draft)
+
+Right after `docs/TECHNICAL.md` is written, draft the factory charter from the same conversation — don't re-ask the user, derive it from what's already settled.
+
+**Derivation:**
+- **`load_bearing` paths** — from the Risk Register and any TDR whose "Consequences" note this decision is hard to reverse: list the source paths/directories that decision touches. These belong in `.factory/harness.toml [load_bearing] paths` (run `/know-thy-build:project` first if that file doesn't exist yet) — it's what makes a diff `load-bearing` tier in the Tiers table below.
+- **`NEVER_AUTOMATE`** — from anything the Technical Adversarial Review or PROJECT.md Principles flagged as "never let an agent touch this without a human": secrets, breaking public-API changes, deploy scripts, destructive data operations. Replace the `(fill in)` placeholders — don't leave them blank.
+- **`tier_default` and hard limits** — from the project's nature (PROJECT.md: personal / OSS / customer-facing). A solo/personal project can run looser hard limits; a customer-facing product should default `tier_default: standard` and keep `back_pressure.awaiting_review_max` conservative. State the reasoning as an inline comment, the way `harness.toml [gates.thresholds]` comments do.
+
+**Write `docs/factory/CHARTER.md`** using the Plan 2 template's frontmatter format verbatim — only the values change:
+
+```yaml
+---
+schema: factory.charter.v1
+status: draft
+tier_default: {{tier_default}}
+limits: { K: 3, M: 3, R: 2 }
+roster:
+  docs: [correctness, spec-conformance]
+  standard: [correctness, architecture, spec-conformance, qa]
+  load-bearing: [correctness, security, architecture, spec-conformance, qa]
+plan_roles:
+  docs: [architect, skeptic]
+  default: [product-advocate, architect, skeptic, operator]
+plan_rounds: { docs: 2, default: 3 }
+back_pressure: { awaiting_review_max: {{awaiting_review_max}} }
+budget: {}
+retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
+---
+
+# Charter — {{PROJECT_NAME}}
+
+## Tiers
+| tier | 판정 기준 | 리뷰 로스터 | gate 레벨 | 예산(토큰/이슈) — 참고값, 기본 미적용 |
+|---|---|---|---|---|
+| docs | diff가 `docs/**`, `*.md`만 | correctness, spec-conformance | fast | 100k |
+| standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
+| load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
+
+## Plan 토론 로스터
+| tier | 토론자 | 라운드 |
+|---|---|---|
+| docs | architect, skeptic | 2 (입장 → synthesizer 종합; 교차검토 생략) |
+| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+
+## Hard limits
+- review rounds K = 3
+- same gate RED M = 3
+- runner retries R = 2
+- review 대기(awaiting-review) 이슈가 {{awaiting_review_max}}개 이상이면 implement는 새 claim을 하지 않는다 (back-pressure)
+- budget_tokens_per_issue: {{unset, or a number derived from the riskiest/most expensive decision in Key Decisions}}
+
+## NEVER_AUTOMATE (triage가 wont-do로 보냄)
+- {{never_automate_1 — derived from Technical Adversarial Review / PROJECT.md Principles}}
+- {{never_automate_2}}
+- 공개 API(`src/api/public/**`)의 breaking change
+- `.env*`, 시크릿, 배포 스크립트(`scripts/deploy.sh`)
+
+## Definition of Done (모든 tier 공통)
+- plan handoff의 done_when 전항목이 verify 테스트로 증명됨
+- gates GREEN (tier의 레벨)
+- 새 테스트가 변경 없이 실패함 (prove-test)
+- 기존 테스트 미수정
+- diff가 files_expected 밖으로 나가지 않음 (초과 시 spec-conformance가 reject)
+- run 기록 존재
+
+## Preserve (바꾸면 안 되는 동작)
+- {{preserve_1 — derived from PROJECT.md Boundaries / this Risk Register}}
+- {{preserve_2}}
+
+## Retro
+every_merges: { initial: 1, min: 1, max: 20 }   # N은 수확량에 따라 자가 조정 (§8.4)
+light_on_merge: true
+```
+
+**Rules:**
+- `status: draft` — never write `status: ready`. That is the human's decision, made after reading the draft.
+- Tell the user explicitly: "`docs/factory/CHARTER.md` is drafted with `status: draft`. Read it, then change `status` to `ready` yourself when satisfied — this skill never sets `ready`."
+
+---
+
 ## EVOLVE Flow
 
 When TECHNICAL.md has `status: complete` and the user indicates something has changed.
@@ -760,6 +861,7 @@ lastEvolve: {{date}}
 
 **After CREATE:**
 - `docs/TECHNICAL.md` has been generated.
+- `docs/factory/CHARTER.md` has been drafted with `status: draft` — read it and set `status: ready` yourself when satisfied.
 - This defines the technical foundation for all implementation work.
 - **Next step:** Run `/know-thy-build:qa` to set up the QA framework (`docs/QA.md`) — it uses the deployment info from TECHNICAL.md to verify the test environment.
 - Feature specs (`/know-thy-build:feature`) will reference this automatically.

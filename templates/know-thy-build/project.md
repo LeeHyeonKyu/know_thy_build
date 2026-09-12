@@ -1,5 +1,5 @@
 ---
-description: Define your project clearly — what it is, why it exists, and what it must become. Automatically detects state and handles creation, resumption, and evolution.
+description: Define your project clearly — what it is, why it exists, and what it must become — then build the M0 test harness (harness.toml, a smoke test, factory doctor PASS) before marking it complete. Automatically detects state and handles creation, resumption, and evolution.
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion]
 ---
 
@@ -13,6 +13,26 @@ You are a Socratic facilitator. Your role is to help the user **discover what th
 
 Technical terms (e.g. CLI, API, NON-NEGOTIABLE) stay in English. Everything else — questions, summaries, output prose — uses the specified language.
 
+## Trigger
+
+새 프로젝트, 또는 evolve
+
+## Reads
+
+기존 코드(브라운필드), PROJECT.md(evolve)
+
+## Does
+
+기존 소크라테스 문답(Problem→…→Principles) 유지. **Operations 섹션을 M0 하네스 구축으로 교체**: 스택 결정 → 러너 설치 → unit 스모크 → `harness.toml`(maturity M0) → `factory doctor` 실행. 통과 전 `complete` 불가. CLAUDE.md의 구(舊) 격리 브랜치 워크플로우 절을 factory 섹션으로 교체
+
+## Produces
+
+`docs/PROJECT.md`, `.factory/harness.toml`, 스모크 테스트, `CLAUDE.md`
+
+## Must not
+
+`harness.toml [gates.thresholds]`를 기본값 외로 설정(이유 없이), doctor 실패를 무시하고 진행
+
 ## How You Operate
 
 ### Design Tree Protocol
@@ -21,7 +41,7 @@ Map the conversation as a **design tree**: every decision branches into the deci
 
 **Core rules:**
 
-- **Facts are your job.** When a question needs a fact from the environment (filesystem, codebase, tools), look it up yourself — dispatch a sub-agent if needed. Never ask the user for anything you could look up. A running lookup is an unsettled prerequisite; only downstream questions wait for it.
+- **Facts are your job.** When a question needs a fact from the environment (filesystem, codebase, tools), look it up yourself — delegate the lookup to an agent if needed. Never ask the user for anything you could look up. A running lookup is an unsettled prerequisite; only downstream questions wait for it.
 - **Decisions are the user's.** Put each decision to the user with your recommended answer. Wait for their response.
 - **Frontier, not sequence.** Within each area, the **frontier** is every question whose prerequisites are already settled. Ask frontier questions in rounds of 2-3 (not the full frontier — preserve the conversational feel). Each question gets a recommended answer.
 - **Don't accept the first answer.** The first answer is usually the surface. Ask "why" or "what happens then" to reach the root.
@@ -104,7 +124,7 @@ Rules:
 - The interrogator perspective is the primary one — it must always raise the strongest remaining concern.
 - If all three perspectives have no concerns, skip the checkpoint silently — don't show an empty ritual.
 - If any perspective raises a genuine issue, surface it as a question before moving on. Do not move on with an unresolved concern.
-- This is lightweight: no sub-agents, no formal debate. Just three angles on the same decisions.
+- This is lightweight: no extra agents, no formal debate. Just three angles on the same decisions.
 
 ### Stakeholder Delegation
 
@@ -551,41 +571,26 @@ Accumulate as:
 
 **Done when:** Frontier is empty. 2-7 principles captured, or user decides none are needed.
 
-### Operations — How does code ship?
+### Operations — M0 Harness Build
 
-> What to discover: The project's merge, deploy, and CI workflow. know-thy-build enforces quality gates (architect/designer/qa) BEFORE merge. This area defines what happens AT and AFTER merge — which is project-specific.
+> This area is not a conversation — it's a build step. know-thy-build's dark factory (`factory doctor`) needs a real, GREEN test harness before any code ships, not a description of one. This area builds it.
 
 **Prerequisites:** Vision and Output areas settled.
 
-Before asking, **find facts** — scan existing infrastructure:
-```bash
-cat package.json 2>/dev/null | grep -E '"scripts"|"test"|"lint"|"build"|"deploy"' | head -10
-ls .github/workflows/ .gitlab-ci.yml Jenkinsfile Makefile Dockerfile 2>/dev/null
-cat .github/workflows/*.yml 2>/dev/null | head -40
-```
+**Steps, in order:**
 
-Present what you found as facts, then ask about decisions:
+1. **Stack decision.** Confirm the runtime/test-runner from Tech Stack facts already gathered in this conversation (or from the codebase scan). If the stack genuinely isn't chosen yet, this is a blocking open question — M0 needs at least a runtime and a test runner to exist.
+2. **Install the runner.** Run the project's setup command (e.g. `npm ci`) so the test runner actually executes on this machine — not just declared in a manifest.
+3. **Write one smoke test.** A single test (e.g. `test/smoke.test.js`) that imports the entry point and asserts it doesn't throw. This is the GREEN `factory doctor` checks for at maturity M0.
+4. **Fill `.factory/harness.toml` with this project's real values.**
+   - `factory init` must already have run — it scaffolds the `.factory/harness.toml` *template* (schema, `[protected]`, `[gates.thresholds]` defaults). This step fills it in; it does not create it from scratch.
+   - **If `.factory/harness.toml` doesn't exist**, stop and tell the user: "Run `npx know-thy-build factory init` first — it scaffolds `.factory/`, `.claude/`, and `.github/` before this skill can fill in project-specific values."
+   - Fill `[project]`, `[runtime]`, `[commands]` (lint/unit/test_files/test_one), and `[test].smoke` with commands verified to actually run. Leave `[harness].maturity = "M0"` — promotion to M1/M2 is a later `factory:harness` issue, not this skill's job.
+5. **Run `npx know-thy-build factory doctor --no-run` first** — checks the harness *contract* (files, schema, protected paths) without executing anything.
+6. **Once the stack is actually installed, run the full `npx know-thy-build factory doctor`** (no `--no-run`) — it executes `[commands]` and the `[test].smoke` file for real.
+7. **`status: complete` is forbidden until `factory doctor` PASSes.** If it fails, fix the harness or the smoke test and re-run — never mark the project complete around a failing doctor.
 
-Frontier questions:
-
-| Question | Depends on | Type |
-|----------|-----------|------|
-| How do feature branches merge to main? (squash, rebase, merge commit) | — | Decision |
-| **What is the test command?** (e.g. `npm test`, `pytest`, `go test ./...`) | — | Decision (REQUIRED) |
-| How does code reach users? (npm publish, docker, manual deploy, CI/CD trigger) | — | Decision |
-| What other automated checks run before merge? (lint, type check) | merge-strategy | Fact (scan CI config) + Decision |
-| Are there review requirements beyond know-thy-build gates? (code review, security scan) | — | Decision |
-
-Slots to fill:
-- `{{merge_strategy}}` — squash / rebase / merge commit
-- `{{test_command}}` — **REQUIRED.** The command `/know-thy-build:finish` runs before merge. Without it, the `ci` gate auto-passes.
-- `{{deploy_method}}` — how releases reach users
-- `{{ci_checks}}` — automated quality checks (lint, type check, etc.)
-- `{{additional_gates}}` — extra review requirements
-
-**Done when:** Frontier is empty. At minimum, merge strategy and **test command** are defined. Deploy and additional gates can be "none yet" if the project is early.
-
-> **Why this matters:** Without explicit operations definitions, sub-agents and hooks cannot enforce project-specific workflows. The merge gate hook only covers know-thy-build's built-in gates — project-specific gates (code review, CI checks) must be defined here so agents know to respect them.
+**Done when:** `npx know-thy-build factory doctor` exits 0 — not before.
 
 ---
 
@@ -637,6 +642,8 @@ Concrete checklist before offering:
 - [ ] Every decision has a recommended answer that was accepted, modified, or rejected
 
 Optional areas (User Journey, Boundaries, Success, Risks & Open Questions, Principles) can be skipped if the user explicitly declines, but offer each at least once.
+
+**`status: complete` has one more gate, separate from the frontiers above: the Operations (M0 Harness Build) steps must have run and `npx know-thy-build factory doctor` must PASS.** You can write the document with `status: drafting` as soon as the required frontiers are empty — but do not write `status: complete` until doctor PASSes. If doctor hasn't been run yet (or is failing), generate with `status: drafting` and complete the Operations steps first.
 
 ---
 
@@ -817,54 +824,20 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 
 **Technical Foundation:** [TECHNICAL.md](TECHNICAL.md)
 
-## Operations
+## Operations — M0 Harness
 
-<!-- How this project ships code. Each project defines its own workflow.
-     know-thy-build gates (architect/designer/qa) enforce quality BEFORE merge.
-     Everything below defines what happens AT and AFTER merge. -->
+<!-- Built, not decided. A receipt that the M0 harness exists and factory doctor PASSed —
+     not a merge/deploy policy. The dark factory (docs/factory/CHARTER.md, .factory/harness.toml)
+     owns how code ships once /know-thy-build:technical and factory bootstrap have run. -->
 
-### Merge Strategy
+| | Value |
+|---|---|
+| **Runtime / setup** | {{runtime_setup}} |
+| **Smoke test** | {{smoke_test_path}} |
+| **`.factory/harness.toml` maturity** | M0 |
+| **`factory doctor`** | ✅ PASS — {{date}} |
 
-<!-- How feature branches become main. know-thy-build defaults to squash merge,
-     but your project may differ. -->
-
-| Setting | Value |
-|---------|-------|
-| **Strategy** | {{squash / rebase / merge commit}} |
-| **Branch naming** | `feature/NNN-slug` (know-thy-build default) |
-| **Commit format** | `feat(NNN): title` |
-
-### Deploy
-
-<!-- How main reaches users. Leave blank if not yet decided. -->
-
-| Setting | Value |
-|---------|-------|
-| **Method** | {{npm publish / docker push / manual / CI-triggered / N/A}} |
-| **Target** | {{registry, server, CDN, etc.}} |
-| **Trigger** | {{on tag / on merge to main / manual}} |
-
-### CI/CD
-
-<!-- Automated checks that run on push or PR.
-     The test command is REQUIRED — /know-thy-build:finish runs it before merge.
-     Without it, the ci gate auto-passes and regressions slip through. -->
-
-| Check | Command | Blocks merge? |
-|-------|---------|---------------|
-| **test** | **{{test_command}}** | **yes (required)** |
-| {{lint}} | {{eslint, ruff, etc.}} | {{yes/no}} |
-| {{type check}} | {{tsc, mypy, etc.}} | {{yes/no}} |
-
-### Additional Gates
-
-<!-- Review requirements beyond know-thy-build's built-in gates.
-     Only include gates that actually exist or are planned. Omit if none. -->
-
-| Gate | Required? | Who |
-|------|-----------|-----|
-| {{code review}} | {{yes/no}} | {{team lead, any reviewer, etc.}} |
-| {{security scan}} | {{yes/no}} | {{tool name}} |
+**Next:** `/know-thy-build:technical` (drafts `docs/factory/CHARTER.md`) → `/know-thy-build:qa` SETUP → `npx know-thy-build factory bootstrap`.
 
 ---
 
@@ -876,6 +849,8 @@ Remove `areasRemaining`, `lastCheckpoint`, and `open` counts.
 ## EVOLVE Flow
 
 When PROJECT.md has `status: complete` and the user expresses something has shifted.
+
+**Brownfield maturity note:** if this evolve session reveals the codebase has grown past M0 (integration tests, seeded DBs, real e2e flows already exist) — don't draft the M1/M2 `harness.toml` promotion here. That judgment and the resulting `harness.toml` draft belong to `/know-thy-build:harness`.
 
 ### STEP 1: What wants to change?
 
@@ -986,160 +961,58 @@ This project follows the principles defined in [PROJECT.md](./docs/PROJECT.md).
 AI agents MUST read docs/PROJECT.md before starting any work.
 NON-NEGOTIABLE rules in PROJECT.md cannot be overridden.
 
-## Worktree Workflow
+## Factory
 
-### Principle
-- Feature specs (`docs/`) are defined **only in main**.
-- Implementation code is modified **only in the worktree**. Worktree path: `../<repo>-wt`
-- If a spec change is needed, edit it in main and sync to worktree via `git merge main` (one-way flow).
-- Merge strategy: **squash merge** — `feat(NNN): title` format.
-- On feature completion: `git worktree remove` + `git branch -d` automatic cleanup.
+know-thy-build's dark factory turns `backlog` issues into merged PRs without a human in the implementation loop. This project's entry points:
 
-### Feature Lifecycle
+### Label Flow
 
 ```
-main:
-  /know-thy-build:feature → spec finalized → worktree created → sub-agent dispatched
-
-worktree (sub-agent orchestrates the entire lifecycle):
-  Phase 1 — Define:
-    /know-thy-build:architect  → scaffold, signature tests
-    /know-thy-build:designer   → design intent (UI features only)
-    /know-thy-build:qa REVIEW  → test cases
-
-  Phase 2 — Implement:
-    Sub-agent fills scaffolds and implements code
-
-  Phase 3 — Review:
-    Architect review → gate.architect ✓
-    Designer review  → gate.designer ✓
-    QA TEST          → gate.qa ✓
-
-  Phase 4 — Finish (merge pipeline):
-    /know-thy-build:finish orchestrates:
-      Review gates check     → architect/designer/qa must be passed
-      Rebase on main         → surface conflicts
-      Conflict resolution    → resolve, then integration review agent
-      CI/CD                  → run project test command
-      Merge                  → squash merge + cleanup
+backlog ──(/know-thy-build:next)──▶ factory:queue ──▶ triage → plan → implement → review → merge
+                                                              │
+                                    factory:needs-info · factory:needs-human · factory:blocked
+                                                              │
+                                (/know-thy-build:clarify · /know-thy-build:unstick — human resolves → back to queue)
 ```
 
-### Gate (Merge Prerequisite)
-The `gate` field in the feature spec frontmatter tracks review status.
-Merge is allowed only when all gates are `passed` or `skipped`.
+- **Backlog issues** come from `/know-thy-build:feature` (a lasting spec) or `/know-thy-build:issue` (bug/chore, no spec).
+- **A human moves `backlog` → `factory:queue`** via `/know-thy-build:next` — the factory never self-selects work.
+- **A merge is always a human, on the GitHub UI, after gates pass.** No skill and no script performs a merge.
 
-| Role | Gate Status | Updated When |
-|------|-----------|--------------|
-| architect | pending → passed | Architect review passes |
-| designer | pending → passed / skipped | Designer review passes (skipped for non-UI) |
-| qa | pending → passed | All QA test cases pass |
-| integration | pending → passed | Finish: rebase clean OR conflict review agent passes |
-| ci | pending → passed | Finish: project test command passes |
+### `factory status`
 
-### Orchestrator Model
-The user session acts as **orchestrator only** — it does NOT implement directly.
-After defining the feature spec, it dispatches a sub-agent to the worktree to handle define → implement → review → finish end-to-end.
+Run `npx know-thy-build factory status` (or `/know-thy-build:status`) anytime: Needs You first (needs-info / needs-human / blocked), then queue, in-progress, recent merges, usage. Check this instead of polling issues by hand.
 
-### Sub-agent Pre-work (mandatory)
-Before any work, the sub-agent MUST read:
-- `docs/PROJECT.md` — project principles and boundaries
-- `docs/TECHNICAL.md` — technical decisions and patterns
-- `docs/features/NNN.md` — feature spec, acceptance criteria, design intent
+### Skill Entry Points
 
-### Review Loop
-- If ANY criterion is `[ ]` (failed): implementer fixes and re-submits
-- Architect + Designer re-review if changes are structural
-- QA re-tests failed scenarios + regression check on happy path
-- Loop continues until ALL reviewers' criteria are `[x]`
-- Only when all three review gates pass does `/know-thy-build:finish` start the merge pipeline
-- Finish then handles: rebase → conflict resolution → integration review → CI → merge
+| Situation | Skill |
+|---|---|
+| Define/evolve the project | `/know-thy-build:project` |
+| Define/evolve the tech foundation + CHARTER | `/know-thy-build:technical` |
+| Set up the test framework | `/know-thy-build:qa` |
+| New feature (lasting spec) | `/know-thy-build:feature` |
+| Bug or chore (no spec needed) | `/know-thy-build:issue` |
+| `doctor` failing, brownfield adopt, harness promotion review | `/know-thy-build:harness` |
+| Move `backlog` → `factory:queue` | `/know-thy-build:next` |
+| `factory:needs-info` | `/know-thy-build:clarify` |
+| `factory:needs-human` | `/know-thy-build:unstick` |
+| `factory:retro-proposal` PR review | `/know-thy-build:proposal` |
+| Write or edit a role file | `/know-thy-build:role` |
+| Weekly digest | `/know-thy-build:digest` |
+| Anytime status check | `/know-thy-build:status` |
 
-### Project-Specific Operations
-The merge gate hook enforces know-thy-build's built-in gates (architect/designer/qa).
-Your project may have additional requirements defined in `docs/PROJECT.md` → Operations section:
-- **Merge strategy** — the hook assumes squash merge; adjust if your project uses rebase or merge commits
-- **CI/CD checks** — if your project requires CI to pass before merge, enforce that separately
-- **Additional gates** — code review, security scan, etc. are project-level concerns, not managed by know-thy-build
-- **Deploy** — what happens after merge is entirely project-defined
+### Protected Paths
 
-When `/know-thy-build:finish` runs, it checks know-thy-build gates. For project-specific gates, the project should either:
-1. Add its own hooks to `.claude/settings.json`
-2. Or rely on CI/CD and branch protection rules
+`.factory/**`, `.claude/**`, `.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`, and the build-config files listed in `harness.toml [protected]` change only through a human-merged PR — the factory's integrity check blocks agents from editing them directly. If one of these needs to change, open a `factory:harness` issue (harness/build config) or edit it yourself and let a human merge the PR.
 
 ### Document References
 - Project definition: `docs/PROJECT.md`
-- Technical foundation: `docs/TECHNICAL.md`
+- Technical foundation + CHARTER: `docs/TECHNICAL.md`, `docs/factory/CHARTER.md`
 - Feature specs: `docs/features/NNN.md`
-- QA test cases: `docs/QA.md`
+- QA framework: `docs/QA.md`
+- Harness contract: `.factory/harness.toml`
 - Feature registry: `docs/PROJECT.md` → Feature Registry section
-- Operations: `docs/PROJECT.md` → Operations section
 ```
-
-## Setup Merge Gate Hook
-
-After generating CLAUDE.md, set up the merge gate hook in `.claude/settings.json`.
-
-**If `.claude/settings.json` does not exist**, create it. If it exists, merge the hook into the existing `hooks` section.
-
-**Hook script to generate** at `.claude/hooks/check-merge-gate.sh`:
-
-```bash
-#!/usr/bin/env bash
-# know-thy-build merge gate — blocks git merge when feature gate is not fully passed
-
-# Fast exit: only check commands that contain "git merge"
-echo "${TOOL_INPUT:-}" | grep -qE 'git\s+merge' || exit 0
-
-# Identify current feature from branch name (feature/NNN-slug)
-BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-echo "$BRANCH" | grep -qE '^feature/' || exit 0
-
-FEATURE_NUM=$(echo "$BRANCH" | grep -oE '[0-9]+' | head -1)
-[ -z "$FEATURE_NUM" ] && exit 0
-
-FEATURE_FILE="docs/features/$(printf '%03d' "$FEATURE_NUM").md"
-[ -f "$FEATURE_FILE" ] || exit 0
-
-# Skip completed features — their gate is historical, not active
-grep -qE '^status:\s*complete' "$FEATURE_FILE" 2>/dev/null && exit 0
-
-# Check gate statuses
-PENDING=$(grep -cE '^\s+(architect|designer|qa|integration|ci):\s*pending' "$FEATURE_FILE" 2>/dev/null || echo "0")
-
-if [ "$PENDING" -gt 0 ]; then
-  echo "❌ Merge gate blocked — Feature $(printf '%03d' "$FEATURE_NUM") has pending reviews:"
-  grep -E '^\s+(architect|designer|qa):' "$FEATURE_FILE" 2>/dev/null
-  echo ""
-  echo "Run /know-thy-build:finish to check gate status."
-  exit 2
-fi
-
-exit 0
-```
-
-**Settings to add to `.claude/settings.json`:**
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/hooks/check-merge-gate.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Make the hook script executable: `chmod +x .claude/hooks/check-merge-gate.sh`
-
-> **Note for projects**: The `"matcher": "Bash"` fires on every Bash tool call but exits in < 1ms for non-merge commands (first `grep` short-circuits). Claude Code does not support content-based matchers, so this is the lightest possible approach.
 
 ## Closing
 

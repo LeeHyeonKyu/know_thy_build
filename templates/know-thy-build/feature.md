@@ -1,5 +1,5 @@
 ---
-description: Design a feature before building it — lightweight Socratic conversation that produces a numbered feature spec. Also edit existing features by number.
+description: Design a feature before building it — lightweight Socratic conversation that produces a numbered feature spec, then files it as a `backlog` issue via `gh issue create`. Also edit existing features by number.
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion]
 ---
 
@@ -14,6 +14,26 @@ This is NOT a project-level exercise. The project identity already exists in PRO
 **All conversation, questions, and generated documents MUST be in: {{LANG}}**
 
 Technical terms (e.g. CLI, API, MVP) stay in English. Everything else uses the specified language.
+
+## Trigger
+
+새 기능·버그·개선
+
+## Reads
+
+PROJECT.md, TECHNICAL.md, QA.md, 기존 features, `roles.toml`(현재 성숙도에서 지정 가능한 verify 레벨)
+
+## Does
+
+기존 3-pass 유지. done_when 초안에 verify 레벨을 붙임. 마지막에 `gh issue create --label backlog`
+
+## Produces
+
+`docs/features/NNN.md`(frontmatter `issue:`), 이슈
+
+## Must not
+
+워크트리 생성, 서브에이전트 디스패치, `factory:queue` 라벨 직접 부착(그건 `:next`)
 
 ## How You Operate
 
@@ -94,11 +114,16 @@ If no legacy files are found, skip silently.
 ```bash
 cat docs/PROJECT.md 2>/dev/null
 cat docs/TECHNICAL.md 2>/dev/null
+cat docs/QA.md 2>/dev/null
+cat .factory/roles.toml 2>/dev/null
+cat .factory/harness.toml 2>/dev/null
 ```
 
 If `docs/PROJECT.md` doesn't exist, suggest running `/know-thy-build:project` first. A feature spec without project context is rootless.
 
 If `docs/TECHNICAL.md` exists, use it as technical context — reference the stack, architecture, and constraints when exploring the feature's approach. If it doesn't exist, that's fine — technical context is helpful but not required.
+
+If `docs/QA.md` exists, use its naming/fixture conventions when drafting each Acceptance Criterion's verification method. `.factory/roles.toml` and `.factory/harness.toml [harness].maturity` tell you which verify levels (`fast`/`full`/`deep`) actually have infrastructure behind them right now — a level the current maturity doesn't support can't be assigned to a `done_when` item yet (see Acceptance Criteria below).
 
 ### 2. Scan existing features
 
@@ -247,6 +272,9 @@ Slots to fill:
 | 3 | What happens when something goes wrong? (invalid input, empty state, timeout, permission denied...) | happy-path AC | Decision |
 | 4 | Are there boundary conditions? (first item, last item, zero items, max items...) | happy-path AC | Decision |
 | 5 | How would you verify each criterion? (manual check, automated test, visual inspection...) | all ACs | Decision |
+| 6 | What verify level does that check run at — `fast`/`full`/`deep`? | verification method | Decision (bounded) |
+
+**Verify levels are bounded by the current harness maturity** (`.factory/harness.toml [harness].maturity`, cross-checked against `.factory/roles.toml`) — read it in Step 1 of "Before You Begin". At `M0`, only `fast` (lint + unit) has real infrastructure behind it; assigning `full` or `deep` to a `done_when` item before the harness is promoted just produces an unprovable criterion. If a criterion genuinely needs a level the harness doesn't support yet, say so out loud and either scope the AC down to what `fast` can check, or note it as a follow-up for `/know-thy-build:harness` — don't silently assign an unsupported level.
 
 Format the output per story:
 ```
@@ -258,16 +286,16 @@ Format the output per story:
 - Then: {{expected_result}}
 
 **Acceptance Criteria:**
-- [ ] {{happy_path_criterion}} — verify: {{method}}
-- [ ] {{edge_case}} — verify: {{method}}
-- [ ] {{error_state}} — verify: {{method}}
+- [ ] {{happy_path_criterion}} — verify: {{method}} (level: {{fast|full|deep, ≤ current harness maturity}})
+- [ ] {{edge_case}} — verify: {{method}} (level: {{fast|full|deep}})
+- [ ] {{error_state}} — verify: {{method}} (level: {{fast|full|deep}})
 ```
 
 **Done when:** Every User Story has:
 - A Given-When-Then scenario
 - At least one happy-path AC
 - At least one edge case or error state AC
-- A verification method per AC
+- A verification method **and verify level** per AC
 
 #### Design Intent — How does the UI guide the user? (Pass 3, UI features only)
 
@@ -370,13 +398,7 @@ priority: {{P0|P1|P2}}
 class: {{Spike|Bounded|Architectural}}
 depends_on: [{{feature_ids}}]
 persona: {{primary_persona_name from PROJECT.md}}
-gate:
-  worktree: null
-  architect: pending
-  designer: pending    # set to 'skipped' for non-UI features
-  qa: pending
-  integration: pending # set by finish — auto-passed if no conflicts
-  ci: pending          # set by finish — runs project test command
+issue: null   # filled with the backlog issue number once `gh issue create` returns — see "Create Backlog Issue" below
 assumptions:
   - "{{assumption}}"
 date: {{date}}
@@ -384,13 +406,9 @@ generatedBy: know-thy-build-feature
 ---
 ```
 
-**Gate initialization rules:**
-- **Spike**: No gate field. Spikes produce answers, not implementations.
-- **Bounded (non-UI)**: `architect: pending`, `designer: skipped`, `qa: pending`, `integration: pending`, `ci: pending`
-- **Bounded (UI)**: `architect: pending`, `designer: pending`, `qa: pending`, `integration: pending`, `ci: pending`
-- **Architectural**: All `pending`
+**Spikes never reach this frontmatter** — a Spike produces an answer, not a spec file or an issue (see Feature Classification above, and Closing below).
 
-`integration` and `ci` gates are always initialized as `pending`. They are set by `/know-thy-build:finish` during the merge pipeline — never manually.
+There is no `gate:` field. Review status now lives in GitHub — factory labels (`factory:queue`, `factory:needs-human`, ...) on the issue, not frontmatter this skill would have to keep in sync. Attaching `factory:queue` itself is `/know-thy-build:next`'s job, not this skill's.
 
 **Priority guide:**
 - **P0**: Must-have for MVP. Without this, the project doesn't deliver its core value.
@@ -478,12 +496,12 @@ generatedBy: know-thy-build-feature
 - Then: {{expected_result}}
 
 **Acceptance Criteria:**
-- [ ] {{happy_path_criterion}} — verify: {{method}}
-- [ ] {{happy_path_criterion_2}} — verify: {{method}}
+- [ ] {{happy_path_criterion}} — verify: {{method}} (level: {{fast|full|deep}})
+- [ ] {{happy_path_criterion_2}} — verify: {{method}} (level: {{fast|full|deep}})
 
 **Edge Cases & Errors:**
-- [ ] {{edge_case}} — verify: {{method}}
-- [ ] {{error_state}} — verify: {{method}}
+- [ ] {{edge_case}} — verify: {{method}} (level: {{fast|full|deep}})
+- [ ] {{error_state}} — verify: {{method}} (level: {{fast|full|deep}})
 
 ### Story 2: {{story_title}}
 <!-- Repeat structure. Omit if only one story. -->
@@ -590,122 +608,43 @@ This keeps PROJECT.md as the single entry point for the full project picture.
 ## Closing
 
 **After CREATE (Spike):**
-- No worktree, no gate, no implementation. The spike's output is an answer.
+- No issue is created, no implementation happens. The spike's output is an answer.
 - Run `/know-thy-build:feature` again if the spike reveals something worth building.
 
 **After CREATE (Bounded / Architectural):**
 - Feature spec has been saved to `docs/features/{{NNN}}.md`
 - Feature Registry in `docs/PROJECT.md` has been updated
+- Continue to "Create Backlog Issue" below.
 
-### Worktree Setup
+### Create Backlog Issue
 
-1. Detect the repo name:
-   ```bash
-   REPO=$(basename $(git rev-parse --show-toplevel))
-   WT_PATH="../${REPO}-wt"
+If this turned out to be a bug or a chore rather than something worth a lasting spec, stop here and use `/know-thy-build:issue` instead — it skips the spec file and just files the issue.
+
+1. **Write the issue body to a temp file.** It must contain, verbatim, the spec path `docs/features/{{NNN}}.md` — the factory's context loader extracts it by regex, so don't paraphrase the path:
+
+   ```markdown
+   {{one-paragraph summary — what this feature does and why}}
+
+   Spec: docs/features/{{NNN}}.md
+
+   ## done_when (draft — the spec's Acceptance Criteria are the full version)
+   - [ ] {{done_when_1}} (level: {{fast|full|deep}})
+   - [ ] {{done_when_2}} (level: {{fast|full|deep}})
    ```
 
-2. Check for existing worktree:
+2. **Create the issue:**
    ```bash
-   git worktree list
-   ls -d "$WT_PATH" 2>/dev/null
+   gh issue create --label backlog --title "{{NNN}} {{title}}" --body-file <tmp>
    ```
 
-3. **If `$WT_PATH` already exists:**
-   > "Worktree `$WT_PATH` already exists (branch: {{branch}}). Options:"
-   > 1. Continue with existing worktree (previous feature is in progress)
-   > 2. Remove existing worktree and create new one
-   > 3. Skip worktree (work in main)
-   
-   If user chooses option 1 or 3, skip creation. If option 2, run `git worktree remove "$WT_PATH"` first.
-
-4. **Create worktree:**
-   ```bash
-   git worktree add "$WT_PATH" -b "feature/{{NNN}}-{{short_title_kebab}}"
-   ```
-
-5. Confirm:
-   > "Worktree created at `$WT_PATH` on branch `feature/{{NNN}}-{{short_title_kebab}}`."
-
-6. Update feature spec frontmatter:
+3. **Record the returned issue number in the spec frontmatter** with the Edit tool — don't regenerate the whole file:
    ```yaml
-   gate:
-     worktree: feature/{{NNN}}-{{short_title_kebab}}
+   issue: {{n}}
    ```
 
-### Sub-agent Dispatch
+4. **Do not attach `factory:queue`.** The issue sits in `backlog` until a human runs `/know-thy-build:next` — moving work into the queue is that skill's decision, not this one's.
 
-After worktree creation, dispatch a sub-agent to orchestrate the entire feature lifecycle in the worktree.
-
-Use the **Agent tool** with `isolation: "worktree"` is NOT needed here — the worktree is already created manually above. Instead, dispatch the sub-agent with an explicit working directory.
-
-**Sub-agent prompt:**
-
-```
-You are the feature orchestrator for Feature {{NNN}}: {{title}}.
-Your working directory is: {{WT_PATH}}
-
-Read these files first:
-- docs/PROJECT.md — project principles
-- docs/TECHNICAL.md — technical decisions
-- docs/features/{{NNN}}.md — this feature's spec and gate status
-
-## Your job: Define → Implement → Review → Finish
-
-### Phase 1: Define
-Run each role to define their criteria for this feature:
-
-1. Run /know-thy-build:architect
-   - Reads the feature spec
-   - Designs structure: CRC cards, scaffolds, signature tests
-   - Creates stub files with PRE/POST/WHY/EXAMPLE comments
-   - Creates signature contract tests
-
-2. Run /know-thy-build:designer (skip if gate.designer is 'skipped')
-   - Reads the feature spec
-   - Defines design intent map, state catalog, micro-interactions
-   - Updates the feature spec with detailed design intent
-
-3. Run /know-thy-build:qa in REVIEW mode
-   - Reads the feature spec + architect scaffolds + design intent
-   - Defines concrete test cases in docs/QA.md
-   - Each test case has verification method and expected evidence
-
-### Phase 2: Implement
-Fill the scaffolds:
-- Read all stub files with // IMPLEMENT markers
-- Implement each stub following PRE/POST/WHY contracts
-- Run tests after each implementation to verify
-- Do NOT modify signature contract tests (DO NOT MODIFY markers)
-
-### Phase 3: Review
-Submit implementation for review by each role:
-
-1. Architect review:
-   - Verify code follows scaffolds, conventions, and TECHNICAL.md
-   - Check all signature tests pass
-   - Check no // IMPLEMENT markers remain
-   - Update docs/features/{{NNN}}.md: gate.architect → passed
-
-2. Designer review (skip if gate.designer is 'skipped'):
-   - Verify UI matches design intent map
-   - Check all states are handled (empty, error, loading, success)
-   - Update docs/features/{{NNN}}.md: gate.designer → passed
-
-3. QA TEST:
-   - Actually run the product
-   - Execute every test case from docs/QA.md for this feature
-   - Capture evidence (screenshots, console output, state checks)
-   - Update docs/features/{{NNN}}.md: gate.qa → passed
-
-If any review fails → fix and re-submit. Loop until all gates pass.
-
-### Phase 4: Finish
-When all gates are passed/skipped, run /know-thy-build:finish.
-```
-
-> "Sub-agent dispatched to worktree. It will run define → implement → review → finish automatically."
-> "You can continue working on other things in main, or run `/know-thy-build:feature` for the next feature."
+> "Issue #{{n}} created with label `backlog`, linked to `docs/features/{{NNN}}.md`. Run `/know-thy-build:next` when you're ready to queue it — or `/know-thy-build:feature` again for the next one."
 
 **After EDIT:**
 - Feature spec has been updated
