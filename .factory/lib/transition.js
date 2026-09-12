@@ -1,5 +1,6 @@
 import { canTransition, factoryLabelOf } from "./labels.js";
 import { requirementFor } from "./requirements.js";
+import { blockedOriginMarker } from "./retro/issue-comments.js";
 
 /**
  * `stage`(선택): 이 전이를 만든 스테이지 이름 — `to === "factory:blocked"`일 때만 쓰인다. run-stage의
@@ -28,7 +29,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   }
   await gh.setFactoryLabel(issue, to);
   // KTB-15b I2: blocked으로 가는 모든 성공한 전이는 그 자리에서 "어디서 왔는가"를 마커로 남긴다.
-  const originMarker = to === "factory:blocked" ? `\n<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"} -->` : "";
+  const originMarker = to === "factory:blocked" ? `\n${blockedOriginMarker({ from, stage })}` : "";
   await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=${to} by=${human ? "human" : "script"} -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}${originMarker}`);
   return { ok: true, from, to };
 }

@@ -120,7 +120,7 @@ test("7-day window boundary: now-8d excluded, now-7d (exact) included", () => {
   expect(summary.window.since).toBe("2026-09-08T00:00:00.000Z");
 });
 
-test("perIssue sorted by cost desc; tokens sum input/output only", () => {
+test("perIssue sorted by cost desc; tokens.input sums input_tokens + cache_creation + cache_read (O12)", () => {
   const root = mkdtempSync(join(tmpdir(), "usage-"));
   makeRecord(root, 1, "implement", "2026-09-10T00:00:00Z", { usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 999 }, total_cost_usd: 1, num_turns: 1, terminal_reason: "end_turn", modelUsage: {} });
   makeRecord(root, 2, "implement", "2026-09-10T00:00:00Z", { usage: { input_tokens: 50, output_tokens: 5 }, total_cost_usd: 5, num_turns: 1, terminal_reason: "end_turn", modelUsage: {} });
@@ -132,7 +132,9 @@ test("perIssue sorted by cost desc; tokens sum input/output only", () => {
 
   expect(summary.perIssue.map((r) => r.issue)).toEqual(["2", "1"]);
   expect(summary.perIssue[0]).toEqual({ issue: "2", cost_usd: 5, runs: 1, tokens: { input: 50, output: 5 } });
-  expect(summary.perIssue[1]).toEqual({ issue: "1", cost_usd: 1, runs: 1, tokens: { input: 100, output: 10 } });
+  // issue 1's raw input_tokens is 100, but cache_read_input_tokens (999) is real input the model
+  // saw too — a report that only counted input_tokens would understate this run's input by >90%.
+  expect(summary.perIssue[1]).toEqual({ issue: "1", cost_usd: 1, runs: 1, tokens: { input: 1099, output: 10 } });
 });
 
 test("a stray '## ' line inside a section body (e.g. a quoted markdown heading in a review comment) is not mistaken for a new section — only known stage names open one", () => {

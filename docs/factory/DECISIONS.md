@@ -758,6 +758,8 @@ Flutter SDK를 `actions/cache`로 재사용)이나 스텝별 `if:` 조건처럼 
 
 **알려진 마찰(미해결)**: 사람 경로의 `transition.js … factory:approved --human`은 `gatesGate`가 요구하는 **이번 런의 GREEN `gates.json`**을 그대로 요구한다(`--human`으로도 건너뛸 수 없다는 것이 기존 판결이다). 러너 밖에서 손으로 실행하면 그 파일이 없어 거부된다 — 그때의 길은 sweeper가 올린 `needs-human → queue`(전체 재실행)뿐이다. 게이트 파일을 러너 아티팩트에서 복원하는 경로를 열 것인지는 다음 라운드의 판단으로 남긴다.
 
+→ **KTB-15b가 이 마찰을 닫았다**: 이 문서의 `transition.js <n> factory:approved --human` 경로는 KTB-15b(아래)로 사라졌다 — 사람의 재시도는 이제 `factory run merge <n> --remote` 하나다(`factory-blocked-origin` 마커로 run-stage의 진입 가드가 재시도 자격을 판정한다).
+
 **영향**: `factory/lib/gh.js`, `factory/lib/merge-stage.js`, `factory/bin/run-stage.js`(dep), `factory/lib/labels.js`, `factory/lib/sweeper.js`(주석), `templates/know-thy-build/unstick.md`, `factory/test/{merge-stage,gh,labels}.test.js`.
 
 ### KTB-16 — `--max-turns 5`가 plan을 죽였다: 한도는 하네스가 정하고, 턴 한도는 blocked다
@@ -837,11 +839,37 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 2. **merge만 hop을 늦춘다.** triage/plan/implement는 origin이 확인되는 즉시 그 라벨로 되돌아가 나머지 로직을 정상 진입처럼 잇는다. merge는 다르다 — 라벨을 되돌리는 것 자체가 "게이트를 다시 GREEN으로 확인했다"는 증거여야 하므로, `merge-stage.js`가 (4) 게이트 재확인을 마친 **뒤에** `retryFromBlocked`로 `approved`로 되돌리고, 그다음에야 mergeGates·prReady·mergePr를 잇는다. `factory:blocked → factory:queue`·`→ factory:ready` 엣지를 그래프에 추가했다(`→ approved`는 KTB-15가 이미 열어 뒀다).
 3. **sweeper의 blocked 팔이 한 번은 먼저 시도한다.** 같은 마커를 읽어 origin → 재시도 스테이지(`queue→triage, ready→plan, planned/in-progress→implement, approved→merge`)로 dispatch하고, stalled 팔과 같은 재점화 마커(`factory-sweeper restarted stage=<s> issue=<n>`)로 dedupe한다 — 한 번 밀었는데 여전히 blocked이면 다음 sweep에서 곧장 needs-human으로 올린다. 사람 경로는 이제 `factory run merge <n> --remote`(또는 해당 스테이지) 하나뿐이다 — `--human` 스크립트 단계가 사라졌다(`templates/know-thy-build/unstick.md`).
 4. **I1 — `ready_for_review` 레이스.** merge-stage의 draft→ready 플립(KTB-15, `gh pr ready`) 자체가 `ready_for_review` PR 이벤트를 만든다 — 그 이벤트를 듣는 워크플로(`factory-integrity.yml`)가 diff는 그대로인데 머지 직전에 새 필수 체크 런을 또 띄우면 `gh pr merge`와 경합한다. `factory-integrity.yml`의 트리거에서 `ready_for_review`를 뺐고(`yml-lint`에 `ready-for-review-trigger` 규칙을 추가해 되돌아오지 못하게 고정), `merge-stage.js`는 prReady 직후 `mergeGates()`를 최대 3회·10초 간격으로 재확인한 뒤에야 머지한다(대상 저장소가 자신만의 리스너를 달아 뒀을 수 있어서 — 우리 워크플로만 고쳐서는 못 막는다).
+   → **KTB-19가 이 재확인 메커니즘을 대체했다**: 고정 3회·10초는 새 체크가 재확인 창이 끝날 때까지도 `queued`이면 그대로 blocked였다(데모 #8의 재시도가 실제로 그렇게 죽었다) — 이제 "몇 번"이 아니라 필수 체크가 더 이상 진행 중이 아닐 때까지 기다린다.
 5. **I3 — 산출물 후보 순서 버그.** `stage-artifact.js`의 `extractStageArtifact`는 다른 모든 후보군(task-notification·개별 tool_result·Workflow 결과)을 **최신이 먼저**로 훑는데, 파일 재조립 후보(`fileReadsFromTranscript`)만 경로가 **처음 등장한 순서**(사실상 오래된 순서)였다 — 세션 초반에 읽은 낡은 파일과 나중에 다시 쓴 진짜 산출물이 둘 다 스키마를 통과하면 낡은 쪽이 이겼다. `.reverse()` 한 줄로 나머지 후보와 같은 방향을 맞췄다.
 6. **KTB-13 r2의 gap 1 항목 두 개를 닫는다.** `sed -i.bak`/`sed --in-place=…`와 `node -e"…"`/`-p"…"`처럼 값이 **붙은** 형태는 그 규칙들의 원래 경계 검사(`([[:space:]=]|$)`)를 통과하지 못해 빠져나가고 있었다 — curl/cp/mv가 KTB-13 r2에서 이미 받은 것과 같은 관용(플래그 글자가 뭉치 안에 있다는 사실로 충분하다)을 `deny-all-writes.sh`·`block-dangerous.sh` 양쪽에 적용했다.
 
 **M1(사후 감사 개선)**: `verifyStage`가 `extractStageArtifact`의 `source`(어느 후보가 이겼는지)를 그동안 계산만 하고 버려 왔다 — 이제 반환값에 실어 나르고, `run-stage.js`가 `artifact: <source>` 한 줄로 run 기록에 남긴다.
 
 **영향**: `factory/lib/labels.js`(`ENTRY_LABELS`·`BLOCKED_RETRY`·`TRANSITIONS`), `factory/lib/transition.js`(origin 마커, `stage` 인자), `factory/lib/retro/issue-comments.js`(`blockedOrigin`), `factory/bin/run-stage.js`(진입 가드 일반화, `artifact:` 기록), `factory/lib/merge-stage.js`(`retryFromBlocked`, I1 재확인 루프), `factory/lib/sweeper.js`(blocked 팔 일반화), `factory/lib/yml-lint.js`(`ready-for-review-trigger`), `.github/workflows/factory-integrity.yml` + 템플릿, `factory/lib/stage-artifact.js`(I3), `factory/lib/verify-stage.js`(M1), `factory/hooks/{deny-all-writes,block-dangerous}.sh`, `factory/bin/retro.js`(retro의 `--max-turns`도 하드코딩 5 대신 `stageMaxTurns`), `templates/know-thy-build/unstick.md`. 테스트: `labels.test.js`·`transition.test.js`·`issue-comments.test.js`(신규)·`run-stage.test.js`·`merge-stage.test.js`·`sweeper.test.js`·`yml-lint.test.js`·`stage-artifact.test.js`·`verify-stage.test.js`·`hooks.test.js`·`retro-bin.test.js`.
+
+### KTB-18 — 손으로 얹은 라벨이 만드는 상태 모호성은 조용히 죽지 않는다: 코멘트하고, sweeper가 고친다
+
+**질문**: §12.4 skip-attempt probe(이슈 #14) — 사람이 아직 `backlog`가 붙어 있는 이슈에 `factory:approved`를 손으로 얹었다. `run-stage merge`는 `factoryLabelOf`가 정확히 설계한 대로 거부했다(`issue must carry exactly one factory state label, found: backlog, factory:approved`) — 그런데 그 거부가 **어디서도 잡히지 않았다**. 진입 라벨 가드(`run-stage.js`)는 이 예외를 삼켜 "entry state: unreadable"로만 기록하고 조용히 진행을 계속했고, 그 뒤 `d.transition`이 (라벨을 다시 읽어) 같은 예외를 또 던졌는데, 이번엔 아무도 잡지 않아 최상위 try/catch까지 올라가 `console.error` + exit 1로 죽었다 — 이슈 코멘트도, 전이도 없었다. 결과: 이슈는 두 라벨을 영원히 달고 앉아 있고, 아무도 그 사실을 몰랐다(정확한 거부가 **침묵한 거부**였다).
+
+**결정**: 판정 불가는 여전히 판정 불가다(둘 중 어느 라벨이 "진짜"인지 알 근거가 없으므로 전이는 하지 않는다) — 하지만 판정 불가라는 사실 자체는 절대 조용히 넘기지 않는다.
+
+1. **`run-stage.js`가 직접 상태 라벨 개수를 센다**(`STATES`, `lib/labels.js` — `factoryLabelOf`의 catch에 기대 예외 메시지를 파싱하지 않는다). 2개 이상이면: 이슈에 코멘트 `<!-- factory-label-set-invalid labels=<a,b> -->` + 어떤 라벨들이 붙어 있는지, factory가 왜 이 스테이지를 실행하지 않는지, sweeper가 다음 sweep에서 정리한다는 한 줄 설명을 남기고(best-effort — 코멘트가 실패해도 거부 자체는 잃지 않는다), 런 레코드에 흔적을 남기고 **exit 1**로 끝낸다. 전이는 시도하지 않는다.
+2. **sweeper에 새 팔 "라벨-셋 복구"를 추가한다**(`sweepLabelSetRepair`). `gh.issueList({state:"open"})`로 열린 이슈 전체를 훑어(라벨 필터 없이 — 2개 이상 상태 라벨을 가진 이슈는 어느 단일 라벨 검색으로도 확실히 걸러지지 않는다) 상태 라벨(카탈로그의 상태 목록, `backlog` 포함)이 2개 이상인 이슈를 찾으면, `gh.setFactoryLabel(n, "factory:needs-human")`로 라벨 셋을 정확히 그 하나로 맞춘다(다른 상태 라벨은 제거, tier 라벨은 유지 — `setFactoryLabel`이 이미 그 계약이다) — 사람의 손 편집을 고치는 것이므로 L1이다. 코멘트 `<!-- factory-label-set-repaired from=<a,b> -->`를 마커로 한 번만 남긴다(dedupe).
+3. 이 두 조각은 서로 다른 층이다: (1)은 즉시(다음 스테이지 런이 뜨자마자) 사람에게 말하고, (2)는 최대 sweep 주기 안에 라벨을 실제로 고쳐 이슈를 정상 그래프(`needs-human → queue`)로 되돌린다.
+
+**영향**: `factory/bin/run-stage.js`(진입 가드), `factory/lib/sweeper.js`(`sweepLabelSetRepair`), `factory/test/{run-stage,sweeper}.test.js`.
+
+### KTB-19 — 머지 재시도는 "아직 존재하지도 않는 체크"와 경합했다: 횟수가 아니라 상태로 기다린다
+
+**질문**: 데모 #8의 blocked→approved 재시도(KTB-15b)가 `gh pr ready`까지는 성공했지만 `gh pr merge`가 `Required status check "factory/integrity" is queued`로 실패했다. 원인: 그 PR 브랜치는 업그레이드 **이전**에 만들어져 낡은 `integrity.yml`(`ready_for_review` 트리거 포함)을 그대로 갖고 있었다 — ready 플립이 새 필수 체크를 막 밀어 넣었고, KTB-15b I1의 고정 3×10초 재확인 창이 그 체크가 `queued`인 채로 끝나버렸다.
+
+**결정**: "몇 번 다시 물어볼까"가 아니라 "필수 체크가 더 이상 진행 중이 아닌가"로 기다린다.
+
+1. `merge-stage.js`의 `waitForChecksSettled`가 `d.prChecks(pr)`(원시 `gh pr checks`)를 폴링해 required 체크 중 `queued`/`pending`/`in_progress`가 하나도 없을 때까지 기다린다 — 상한 `harness.factory.merge_check_wait_sec`(기본 600초, `config.js`), 간격 15초(`MERGE_CHECK_POLL_INTERVAL_MS`). 첫 조회는 즉시(대부분은 이미 안정돼 있다).
+2. 안정된 뒤에만 판정한다: 필수 체크 중 하나라도 RED로 끝났으면 그 이름을 대며 `factory:blocked`("required check(s) failed: …"), 시간 안에 안정되지 않으면 "checks still pending after `<n>`s"로 `factory:blocked` — 둘 다 재시도로 풀린다(§KTB-15b, `factory run merge <n> --remote` 또는 sweeper의 한 번짜리 자동 재시도). 안정+GREEN이면 `mergeGates()`를 한 번 더 불러 무결성(`prChecks`가 보지 못하는 것)까지 확인한 뒤 머지한다.
+3. **남는 틈, 그리고 그 방어선**: `gh pr checks`는 대상 저장소가 `ready_for_review`에 반응해 **아직 만들지도 않은** 체크 런을 볼 수 없다. 그 마지막 레이스는 이 폴링이 닫지 않는다 — 그 체크가 실제로 required로 걸려 있다면 branch protection이 `gh pr merge` 자체를 거부하고, 그 실패는 이미 `factory:blocked`로 떨어져 같은 재시도 경로를 탄다.
+4. **리뷰 지적 두 건도 같은 커밋에서 닫는다**(KTB-19 review): **I-1** — sweeper의 blocked 팔이 stalled 팔과 **같은** 재점화 마커(`restartComment`)를 재사용해, "stalled가 먼저 밀었다가 그 런이 blocked으로 떨어지는" 정상 경로에서 한 번의 공짜 재시도가 조용히 사라졌다 — 별도 마커 `factory-sweeper blocked-retry stage=<s> issue=<n>`로 완전히 갈랐다. **I-2** — 머지 재시도는 (4b)가 게이트를 재확인해 라벨을 `approved`로 되돌리기 **전까지** 여전히 `factory:blocked`다. 그 창 안에서 또 판정 불가가 나면(gates BLOCKED, protectedPaths/policyViolations 계산 실패) "전이"는 그래프에 없는 `blocked→blocked` 자기 전이가 되어 엉뚱한 그래프-거부 코멘트를 남겼다 — `factory:blocked → factory:rework`(CONFLICTING 재시도) 엣지를 추가하고, blocked→blocked는 `toBlocked()` 헬퍼가 라벨을 건드리지 않은 채 record만 남기고 `factory-blocked-origin` 마커를 직접 재게시한다(전이를 안 거치므로 `transition.js`가 대신 남겨주지 않는다).
+
+**영향**: `factory/lib/merge-stage.js`(`waitForChecksSettled`, `toBlocked`), `factory/lib/config.js`(`merge_check_wait_sec` 기본값), `factory/bin/run-stage.js`(`prChecks`/`requiredChecks`/`mergeCheckWaitSec` dep, origin hoist), `factory/lib/labels.js`(`blocked→rework` 엣지), `factory/lib/transition.js`·`factory/lib/retro/issue-comments.js`(`blockedOriginMarker` 공유), `factory/lib/sweeper.js`(`blockedRetryComment`). 테스트: `merge-stage.test.js`·`config.test.js`·`labels.test.js`·`sweeper.test.js`.
 
 (이후 항목은 dogfood 진행에 따라 추가)

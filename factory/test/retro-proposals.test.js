@@ -93,7 +93,7 @@ test("renderProposalPr matches the §8.3 shape", () => {
   expect(body).toContain("이슈 12건 머지, 평균 리뷰 라운드 1.6, needs-human 1건");
   expect(body).toContain("리뷰어별 reject 기여: reviewer-correctness 7, reviewer-spec-conformance 3, reviewer-security 0");
   expect(body).toContain("사용량: $12.35");
-  expect(body).toContain("input 1200000");
+  expect(body).toContain("input(+cache) 1200000");
   expect(body).toContain("output 340000");
   expect(body.endsWith("\n")).toBe(true);
 });

@@ -534,6 +534,59 @@ test("I2: with no issueLabels dep wired the guard is inert (existing callers unc
   expect(d.claudeP).toHaveBeenCalled();
 });
 
+// ── KTB-18: a hand-applied label leaving 2+ factory state labels must never be silent ───────────
+// The probe: a human applied `factory:approved` to an issue that still carried `backlog`.
+// `factoryLabelOf` correctly threw "issue must carry exactly one factory state label" — but nothing
+// caught it here, so it fell all the way to `lib/transition.js`'s own (unguarded) call to the same
+// function inside `d.transition`, and the whole stage died with a bare `console.error` + exit 1:
+// no issue comment, no transition, and the two labels just sat there forever.
+
+test("KTB-18: 2+ factory state labels → a comment naming them, exit 1, no transition attempted", async () => {
+  const lines = [];
+  const comment = vi.fn(async () => {});
+  const transition = vi.fn();
+  const d = baseDeps({
+    issueLabels: async () => ["backlog", "factory:approved"],
+    comment, transition, claudeP: vi.fn(), buildContext: vi.fn(), writeHandoff: vi.fn(),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 14, deps: d })).toBe(1);
+  expect(comment).toHaveBeenCalledWith(14, expect.stringContaining("<!-- factory-label-set-invalid labels=backlog,factory:approved -->"));
+  expect(comment.mock.calls[0][1]).toMatch(/backlog, factory:approved/);
+  expect(transition).not.toHaveBeenCalled();
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(lines.some((l) => /entry state: invalid — more than one factory state label: backlog, factory:approved/.test(l))).toBe(true);
+});
+
+test("KTB-18: the invalid-label check fires for every stage, not just merge", async () => {
+  for (const stage of ["triage", "plan", "implement", "review"]) {
+    const comment = vi.fn(async () => {});
+    const d = baseDeps({ issueLabels: async () => ["factory:ready", "factory:planned"], comment, claudeP: vi.fn() });
+    expect(await runStage({ stage, issue: 1, deps: d }), stage).toBe(1);
+    expect(comment, stage).toHaveBeenCalledWith(1, expect.stringContaining("factory-label-set-invalid labels=factory:ready,factory:planned"));
+    expect(d.claudeP, stage).not.toHaveBeenCalled();
+  }
+});
+
+test("KTB-18: a failing comment doesn't mask the refusal — still exit 1, still no transition", async () => {
+  const lines = [];
+  const transition = vi.fn();
+  const d = baseDeps({
+    issueLabels: async () => ["backlog", "factory:approved"],
+    comment: vi.fn(async () => { throw new Error("gh comment 502"); }),
+    transition, claudeP: vi.fn(), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "merge", issue: 14, deps: d })).toBe(1);
+  expect(transition).not.toHaveBeenCalled();
+  expect(lines.some((l) => /label-set-invalid: comment failed — gh comment 502/.test(l))).toBe(true);
+});
+
+test("KTB-18: with no comment dep wired, the refusal still happens (best-effort comment, not required)", async () => {
+  const d = baseDeps({ issueLabels: async () => ["backlog", "factory:approved"], claudeP: vi.fn() });
+  expect(await runStage({ stage: "merge", issue: 14, deps: d })).toBe(1);
+  expect(d.claudeP).not.toHaveBeenCalled();
+});
+
 // ── KTB-9: tier 라벨은 triage가 붙인다(§3.2) ──────────────────────────────
 // `label-catalog.js`가 `factory:tier-*` 셋을 만들어 두는데 붙이는 코드가 어디에도 없었다 —
 // tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수 없었다.

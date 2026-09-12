@@ -77,7 +77,7 @@ function statsBlock(stats) {
     "### 통계",
     `- 이슈 ${s.merged || 0}건 머지, 평균 리뷰 라운드 ${s.review_rounds_avg || 0}, needs-human ${s.needs_human || 0}건`,
     `- 리뷰어별 reject 기여: ${rejects.length ? rejects.map(([role, n]) => `${role} ${n}`).join(", ") : "없음"}`,
-    `- 사용량: ${money(usage.cost_usd)} (토큰 input ${tokens.input || 0} / output ${tokens.output || 0})`,
+    `- 사용량: ${money(usage.cost_usd)} (토큰 input(+cache) ${tokens.input || 0} / output ${tokens.output || 0})`,
   ].join("\n");
 }
 

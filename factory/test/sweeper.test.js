@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { backPressure } from "../lib/back-pressure.js";
-import { sweep } from "../lib/sweeper.js";
+import { sweep, restartComment } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
@@ -238,7 +238,9 @@ test.each([
 
   const first = await sweep(args);
   expect(dispatchStage).toHaveBeenCalledWith({ stage, issue: 9 });
-  expect(gh.comment).toHaveBeenCalledWith(9, expect.stringContaining(`<!-- factory-sweeper restarted stage=${stage} issue=9 -->`));
+  // KTB-19 review I-1: the blocked arm's dedupe marker is its own — NOT the stalled arm's
+  // `restartComment` — so a stalled-dispatch-then-blocked episode still gets its one free retry.
+  expect(gh.comment).toHaveBeenCalledWith(9, expect.stringContaining(`<!-- factory-sweeper blocked-retry stage=${stage} issue=9 -->`));
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
   expect(first).toContainEqual({ kind: "blocked-retry", issue: 9, stage });
 
@@ -247,6 +249,28 @@ test.each([
   expect(dispatchStage).toHaveBeenCalledTimes(1);
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
   expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9 });
+});
+
+// KTB-19 review I-1: the canonical failure the fix targets — the stalled arm dispatches merge
+// (leaving its OWN `restartComment` marker) for an issue stuck at `factory:approved`, that run
+// fails and falls to `factory:blocked` (origin=approved), and the blocked arm should still get its
+// one free retry on the next sweep — it must not mistake the stalled arm's marker for its own.
+test("sweep: a stalled-arm restart marker for the same stage does not block the blocked arm's own one-time retry", async () => {
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [
+      { id: 50, body: `${restartComment("merge", 9)}\n\`factory:approved\`에서 30분 넘게 런 없이 멈춰 있었습니다 — 다시 띄웁니다(KTB-8).`, createdAt: "2026-09-11T00:00:00Z" },
+      BLOCKED_ORIGIN("factory:approved", "2026-09-11T00:05:00Z"),
+    ] : [])),
+    comment: vi.fn(async () => "u#issuecomment-1"),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage });
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: 9 });
+  expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "merge" });
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
 });
 
 test("sweep: blocked with no factory-blocked-origin marker at all escalates immediately (no dispatch)", async () => {
@@ -374,7 +398,9 @@ test("sweep: a failing comment read is isolated per id — the policy still appl
 test("sweep: nothing left quarantine → no flaky issue lookup at all", async () => {
   const gh = { searchIssues: vi.fn(async () => []), issueList: vi.fn(async () => []), comment: vi.fn(), patchComment: vi.fn() };
   await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [{ id: "keep", since: "2026-09-10T00:00:00Z", consecutive_passes: 0 }] }, saveQuarantine: vi.fn() });
-  expect(gh.issueList).not.toHaveBeenCalled();
+  // KTB-18's label-set-repair arm always scans open issues — but never with a flaky-label filter.
+  expect(gh.issueList).toHaveBeenCalledWith({ state: "open" });
+  expect(gh.issueList.mock.calls.some(([a]) => a?.labels?.includes?.("factory:flaky"))).toBe(false);
   expect(gh.comment).not.toHaveBeenCalled();
 });
 
@@ -418,4 +444,92 @@ test("sweep: a failing flaky-issue lookup is isolated — the policy still appli
   expect(actions).toContainEqual({ kind: "quarantine", returned: [], expired: ["x1"] });
   expect(actions).toContainEqual({ kind: "error", step: "quarantine-comment", error: expect.stringContaining("gh issue list boom") });
   expect(gh.comment).not.toHaveBeenCalled();
+});
+
+// ── KTB-18: label-set repair — a hand-applied label leaving 2+ factory state labels ─────────────
+// The probe: a human applied `factory:approved` to an issue that still carried `backlog`.
+// `run-stage` now refuses and comments (see run-stage.test.js), but it never touches the labels
+// (the state is ambiguous) — the issue would sit with two labels forever unless something repairs
+// it. The sweeper is that something: L1 repairing a hand edit.
+
+const openIssue = (number, labels) => ({ number, title: `issue ${number}`, labels });
+
+test("sweep: an open issue with 2 factory state labels is repaired to factory:needs-human (other states removed, tier kept)", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async ({ state }) => (state === "open" ? [openIssue(14, ["backlog", "factory:approved", "factory:tier-standard"])] : [])),
+    comments: vi.fn(async () => []),
+    comment: vi.fn(async () => "u#issuecomment-1"),
+    patchComment: vi.fn(),
+    setFactoryLabel,
+  };
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+  expect(setFactoryLabel).toHaveBeenCalledWith(14, "factory:needs-human");
+  expect(gh.comment).toHaveBeenCalledWith(14, expect.stringContaining("<!-- factory-label-set-repaired from=backlog,factory:approved -->"));
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 14, from: ["backlog", "factory:approved"] });
+});
+
+test("sweep: an open issue with a single factory state label is left untouched", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [openIssue(15, ["factory:ready", "factory:tier-standard"])]),
+    comments: vi.fn(async () => []),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel,
+  };
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+  expect(setFactoryLabel).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(actions.some((a) => a.kind === "label-set-repaired")).toBe(false);
+});
+
+test("sweep: an already-repaired issue (marker present) is skipped — no re-comment, no re-label", async () => {
+  const setFactoryLabel = vi.fn(async () => {});
+  const marker = "<!-- factory-label-set-repaired from=backlog,factory:approved -->";
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [openIssue(16, ["backlog", "factory:approved"])]),
+    comments: vi.fn(async (n) => (n === 16 ? [{ id: 1, body: `${marker}\n이미 복구했습니다.`, createdAt: "x" }] : [])),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel,
+  };
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+  expect(setFactoryLabel).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "label-set-repair-skipped", issue: 16, reason: "already repaired" });
+});
+
+test("sweep: label-set repair isolates a failing issue — one bad apple doesn't stop the rest", async () => {
+  const setFactoryLabel = vi.fn(async (n) => { if (n === 17) throw new Error("gh label boom"); });
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [openIssue(17, ["backlog", "factory:approved"]), openIssue(18, ["backlog", "factory:queue"])]),
+    comments: vi.fn(async () => []),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel,
+  };
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+  expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", issue: 17, error: expect.stringContaining("gh label boom") });
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 18, from: ["backlog", "factory:queue"] });
+});
+
+test("sweep: label-set repair is inert when gh.issueList isn't wired (older test doubles) — no error, no crash", async () => {
+  const gh = { searchIssues: vi.fn(async () => []), comment: vi.fn(), patchComment: vi.fn() };
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+  expect(actions).toEqual([]);
+});
+
+test("sweep: a failing gh.issueList for label-set repair is isolated — recorded, sweep still completes", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => { throw new Error("gh issue list boom"); }),
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+  expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", error: expect.stringContaining("gh issue list boom") });
 });

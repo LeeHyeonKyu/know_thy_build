@@ -15,7 +15,7 @@ import { integrityCheck, protectedPaths, policyViolations } from "../lib/integri
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
-import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, TIERS, tierLabel } from "../lib/labels.js";
+import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -140,17 +140,36 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // handoff 코멘트를 중복으로 남긴 **뒤**다. 그래서 락을 잡은 직후 이슈의 현재 상태 라벨을 읽어
     // 이 스테이지의 진입 라벨이 아니면 아무것도 하지 않고 물러난다(전이 없음, handoff 없음, claude -p 없음).
     // localEntry **뒤**인 이유: 로컬 진입(§4.2.5)이 backlog → factory:queue를 바로 위에서 만든다.
-    // 라벨을 읽지 못했으면(조회 실패·상태 라벨 2개) 막지 않고 흔적만 남긴다 — 가드는 비용 방어이지
-    // 안전 게이트가 아니고, 실제 안전은 뒤의 전이 그래프가 그대로 쥐고 있다.
+    // 라벨을 못 읽은 것(조회 실패)은 막지 않고 흔적만 남긴다 — 가드는 비용 방어이지 안전 게이트가
+    // 아니고, 실제 안전은 뒤의 전이 그래프가 그대로 쥐고 있다. 하지만 **읽은 라벨 자체가 무효**
+    // (상태 라벨 2개 이상 — 사람이 손으로 `factory:approved` 같은 라벨을 backlog 위에 덧붙였을 때
+    // 등)이면 얘기가 다르다(KTB-18): 예전에는 이 자리에서도 조용히 넘어갔고, 그러면 나중에
+    // `d.transition`(내부의 `factoryLabelOf`)이 똑같은 이유로 **잡히지 않은 예외**를 던져 스테이지가
+    // "aborted"로 죽었다 — 코멘트도, 전이도 없이. 상태가 모호하면 전이는 하지 않는 게 맞지만(어느
+    // 라벨이 "진짜"인지 판단할 근거가 없다), 그 사실만은 사람에게 말해야 한다: 어떤 라벨들이 붙어
+    // 있는지, 팩토리가 왜 이 스테이지를 실행하지 않는지, sweeper가 다음 sweep에서 정리한다는 것.
     let entryLabel;
     if (d.issueLabels) {
       const expected = ENTRY_LABELS[stage] || [];
-      let known = true;
-      try { entryLabel = factoryLabelOf(await d.issueLabels()); }
-      catch (e) { known = false; record([`entry state: unreadable — ${e?.message || e}`]); }
-      if (known && expected.length && !expected.includes(entryLabel)) {
-        record([`entry state ${entryLabel ?? "none"} != expected ${expected.join("|")} — nothing to do`]);
-        return 0;
+      let labels = null;
+      try { labels = await d.issueLabels(); }
+      catch (e) { record([`entry state: unreadable — ${e?.message || e}`]); }
+      if (labels) {
+        const found = labels.filter((l) => STATES.has(l));
+        if (found.length > 1) {
+          const marker = `<!-- factory-label-set-invalid labels=${found.join(",")} -->`;
+          try {
+            await d.comment?.(issue, `${marker}\n이 이슈에 factory 상태 라벨이 ${found.length}개(${found.join(", ")}) 붙어 있어 어느 상태인지 판단할 수 없습니다 — factory는 이 스테이지를 실행하지 않습니다. 다음 sweep에서 sweeper가 라벨을 \`factory:needs-human\`으로 정리합니다.`);
+          } catch (e) { record([`label-set-invalid: comment failed — ${e?.message || e}`]); }
+          console.error(`factory: stage ${stage} refused — issue must carry exactly one factory state label, found: ${found.join(", ")}`);
+          record([`entry state: invalid — more than one factory state label: ${found.join(", ")}`]);
+          return 1;
+        }
+        entryLabel = found[0];
+        if (expected.length && !expected.includes(entryLabel)) {
+          record([`entry state ${entryLabel ?? "none"} != expected ${expected.join("|")} — nothing to do`]);
+          return 0;
+        }
       }
     }
     // KTB-15b I2: 네 스테이지의 진입 라벨에 factory:blocked이 추가됐다(ENTRY_LABELS) — 하지만
@@ -165,6 +184,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // 다른 세 스테이지는 라벨을 되돌리는 것 자체가 "재시도한다"는 선언이라, 확인 즉시 되돌리고
     // 나머지 로직을 그 라벨에서 정상적으로 이어간다.
     const retryCfg = BLOCKED_RETRY[stage];
+    let blockedOriginFrom = false;          // merge only (KTB-19 review I-2): the origin label itself, not just a boolean
     if (retryCfg && entryLabel === "factory:blocked") {
       const origin = await d.blockedOrigin?.();
       if (!origin || !retryCfg.origins.includes(origin.from)) {
@@ -177,6 +197,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
         if (!t.ok) { record([`${stage}: blocked retry hop refused`, ...refusal(t)]); return 2; }
         record([`${stage}: blocked retry — hopped back to ${t.to}`]);
         entryLabel = t.to;
+      } else {
+        blockedOriginFrom = origin.from;
       }
     }
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
@@ -197,7 +219,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
     // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" });
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -682,13 +704,19 @@ async function main() {
       try { return await policyViolations({ run, cwd: root, base: await mergeBase(), harness }); }
       catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
     },
-    /** merge stage 전용: 거부 사유를 **PR**에 붙인다(사람이 머지 버튼을 누르는 자리). PR과 이슈는 같은 번호 공간이라 `gh issue comment`가 그대로 통한다. */
+    /** 이슈(또는 PR — 같은 번호 공간)에 코멘트를 남긴다. KTB-18의 라벨-무효 알림과 merge stage의
+     * 거부 사유(사람이 머지 버튼을 누르는 PR)·blocked-origin 마커 재게시가 모두 이걸 쓴다. */
     comment: (number, body) => gh.comment(number, body),
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
+    /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
+     * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */
+    prChecks: (pr) => gh.prChecks(pr),
+    get requiredChecks() { return harness?.factory?.required_checks ?? null; },
+    get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     transition: async ({ to, reason, data, mergeGatesResult }) => {

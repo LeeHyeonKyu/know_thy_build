@@ -2,22 +2,64 @@ import { verdictLine } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
+import { blockedOriginMarker } from "./retro/issue-comments.js";
 
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
 const MERGEABILITY_REPOLL_MS = 5000;
 
 /**
- * KTB-15b I1 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR 이벤트를
- * 만든다. 이 저장소 자신의 워크플로는 그 이벤트를 듣지 않도록 고쳤지만(`factory-integrity.yml`,
+ * KTB-15b I1 / KTB-19 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR
+ * 이벤트를 만든다. 이 저장소 자신의 워크플로는 그 이벤트를 듣지 않도록 고쳤지만(`factory-integrity.yml`,
  * yml-lint의 `ready-for-review-trigger` 규칙), **대상 저장소**(팩토리가 설치된 다른 레포)는 그
  * 이벤트에 반응하는, 팩토리가 모르는 자신만의 필수 체크 워크플로를 달아 뒀을 수 있다 — 그러면
- * diff는 그대로인데 머지 직전에 새 체크 런이 또 시작되고, 그 런이 끝나기 전에 `gh pr merge`가
- * 먼저 불려 required-checks 판정이 흔들린다(레이스). 그래서 (6a) 직후 최대 이만큼 짧게
- * 재확인한다 — 무한정 기다리지 않는다(재확인이 다 GREEN이 아니면 blocked, 재시도로 풀린다).
+ * diff는 그대로인데 머지 직전에 새 체크 런이 또 시작된다.
+ *
+ * KTB-19(데모 #8 재시도): 처음에는 이걸 `mergeGates()`를 몇 번 다시 부르는 것으로만 재확인했는데
+ * (고정 3회·10초 간격), 그 방식은 **체크가 아직 queued인 채로 재확인 창이 끝나버리면** 그대로
+ * blocked였다 — PR 브랜치가 업그레이드 전의 낡은 `integrity.yml`(`ready_for_review` 트리거 포함)을
+ * 그대로 갖고 있었고, ready 플립이 새 필수 체크를 막 밀어 넣은 참이었다. 그래서 이제는 재확인
+ * "횟수"가 아니라 **필수 체크가 더 이상 진행 중이 아닐 때까지** 기다린다(queued/pending/in_progress가
+ * 하나도 없을 때까지, `harness.factory.merge_check_wait_sec` 만큼 상한, `MERGE_CHECK_POLL_INTERVAL_MS`
+ * 간격) — 그런 뒤에만 GREEN/RED를 판정한다. 그래도 닫히지 않는 틈은 남는다: `gh pr checks`가 아직
+ * **존재하지도 않는** 체크 런을 볼 수는 없다(대상 저장소가 그 이벤트에 반응해 체크를 만드는 데
+ * 걸리는 지연). 그 마지막 틈의 방어선은 이 폴링이 아니라 **브랜치 보호**다 — 그 체크가 실제로
+ * required로 걸려 있다면 아직 없는 채로 `gh pr merge`가 불려도 GitHub 쪽에서 거부되고, 그 실패는
+ * 아래 (6)에서 `factory:blocked`로 떨어져 재시도(§KTB-15b)로 풀린다.
  */
-const REQUIRED_CHECKS_REPOLL_ATTEMPTS = 3;
-const REQUIRED_CHECKS_REPOLL_MS = 10000;
+const MERGE_CHECK_POLL_INTERVAL_MS = 15000;
+const DEFAULT_MERGE_CHECK_WAIT_SEC = 600;
+
+/** `gh pr checks`의 한 체크가 아직 끝나지 않았는가 — `bucket`(최신 gh)과 원시 `state` 둘 다 받는다. */
+const CHECK_RUNNING_STATES = new Set(["queued", "pending", "in_progress"]);
+function checkStillRunning(check) {
+  if (check?.bucket === "pending") return true;
+  return CHECK_RUNNING_STATES.has(String(check?.state ?? "").toLowerCase());
+}
+function checkPassed(check) {
+  return check?.bucket ? check.bucket === "pass" : String(check?.state ?? "").toUpperCase() === "SUCCESS";
+}
+/** `required`가 있으면 그 이름의 체크만, 없으면 전부 — `allChecksGreen`(lib/gh.js)과 같은 필터 규칙. */
+function relevantChecks(checks, required) {
+  return required ? checks.filter((c) => required.includes(c.name)) : checks;
+}
+
+/**
+ * KTB-19 — ready 플립 뒤 필수 체크가 더 이상 queued/pending/in_progress가 아닐 때까지 기다린다.
+ * 첫 조회는 즉시(대개 이미 안정돼 있다 — 대상 저장소가 `ready_for_review`를 안 듣거나 이미 ready).
+ * `waitSec` 안에 안정되지 않으면 `{ ok:false, timeout:true }` — pending인 채로 시간 초과.
+ * 안정되면(전부 진행 중이 아니면) `{ ok:true, checks }` — GREEN/RED 판정은 호출자 몫이다.
+ */
+async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = DEFAULT_MERGE_CHECK_WAIT_SEC, intervalMs = MERGE_CHECK_POLL_INTERVAL_MS }) {
+  const attempts = Math.max(1, Math.ceil((waitSec * 1000) / intervalMs));
+  let checks = [];
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(intervalMs);
+    checks = await prChecks(pr);
+    if (!relevantChecks(checks, required).some(checkStillRunning)) return { ok: true, checks };
+  }
+  return { ok: false, timeout: true, checks };
+}
 
 /**
  * merge 스테이지는 claude -p를 부르지 않는다 — PR이 이미 approved다, 여기서 물을 건 "지금 이 순간
@@ -38,15 +80,39 @@ const REQUIRED_CHECKS_REPOLL_MS = 10000;
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
  * 여기서 다시 구현하지 않고 그대로 주입받는다.
  * record(lines): run-record 한 줄(들)을 남긴다. refusal(t): 거부된 전이를 record 줄로 바꾼다(runStage와 동일 계약).
- * retryFromBlocked(KTB-15b): run-stage가 이미 "이 blocked이 approved에서 왔다"를 이슈 코멘트로 확인한
- * 뒤에만 true로 넘긴다 — 여기서는 그 사실을 다시 검증하지 않고, 게이트가 다시 GREEN으로 확인되는
- * 시점(아래 (4) 직후)에 라벨을 `factory:approved`로 되돌린다. 그래야 (7)의 `approved → merged` 전이가
- * 그래프를 통과한다(`factory:blocked → factory:merged` 엣지는 없다 — 머지 재시도는 반드시 approved를
- * 거쳐야 한다). 이 전이가 거부되면(이론상 그 사이 다른 사람이 라벨을 옮겼을 때) 나머지 단계는 돌지
- * 않는다 — 머지는 아직 일어나지 않았으므로 되돌릴 것이 없다.
+ * retryFromBlocked(KTB-15b, KTB-19 review I-2): run-stage가 이미 "이 blocked이 approved에서 왔다"를
+ * 이슈 코멘트로 확인했을 때, 그 origin 라벨(`"factory:approved"`) 그대로 넘긴다 — falsy(`false`)면
+ * 재시도가 아니다. 여기서는 그 사실을 다시 검증하지 않고, 게이트가 다시 GREEN으로 확인되는 시점
+ * (아래 (4) 직후, (4b))에 라벨을 `factory:approved`로 되돌린다. 그래야 (7)의 `approved → merged`
+ * 전이가 그래프를 통과한다(`factory:blocked → factory:merged` 엣지는 없다 — 머지 재시도는 반드시
+ * approved를 거쳐야 한다). 그 전이가 거부되면(이론상 그 사이 다른 사람이 라벨을 옮겼을 때) 나머지
+ * 단계는 돌지 않는다 — 머지는 아직 일어나지 않았으므로 되돌릴 것이 없다.
+ *
+ * (4b) **이전**에는 이슈 라벨이 여전히 `factory:blocked`다 — 그런데 그 사이(protectedPaths·
+ * policyViolations·gates)에서 또 판정 불가/BLOCKED가 나면, "전이"는 `factory:blocked → factory:blocked`
+ * 자기 자신이 된다. 이 그래프는 자기 전이를 두지 않으므로(다른 어떤 상태도 자신에게 돌아가지 않는다)
+ * `canTransition`이 거부하고, 그러면 진짜 사유(게이트 BLOCKED 등) 대신 "그래프가 이 전이를 허용하지
+ * 않는다"는 엉뚱한 코멘트가 남는다. `toBlocked()` 헬퍼가 이 경우를 가른다: 라벨을 안 바꾸는 것
+ * 자체가 맞는 결과이므로 전이를 부르지 않고 기록만 남기되, `factory-blocked-origin` 마커는
+ * (transition()을 안 거치므로) 직접 새로 남긴다 — sweeper의 blocked 팔이 여전히 유효한 origin을 본다.
  */
 export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus, retryFromBlocked = false }) {
   const sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  let leftBlocked = !retryFromBlocked;             // 재시도가 아니면 애초에 "여전히 blocked"인 특수 케이스가 없다
+  /**
+   * `factory:blocked` 목표로 가는 모든 전이는 이 헬퍼를 거친다(KTB-19 review I-2). 재시도 중이고
+   * 아직 approved로 돌아가지 못했으면(위 doc 참고) 그래프를 부르지 않고 record + origin 마커
+   * 재게시로 끝낸다 — 그 외에는 평소처럼 `d.transition`을 그대로 부른다.
+   */
+  const toBlocked = async (reason) => {
+    if (!leftBlocked) {
+      record([`blocked: still blocked — no self-transition (label unchanged): ${reason}`]);
+      try { await d.comment?.(issue, `${blockedOriginMarker({ from: retryFromBlocked, stage: "merge" })}\n머지 재시도가 다시 판정 불가로 멈췄습니다 — 라벨은 그대로 \`factory:blocked\`입니다. 사유: ${reason}`); }
+      catch (e) { record([`blocked: origin marker re-post failed — ${e?.message || e}`]); }
+      return { ok: true, from: "factory:blocked", to: "factory:blocked" };
+    }
+    return d.transition({ to: "factory:blocked", reason });
+  };
 
   // (1) PR이 없거나 열려 있지 않으면 머지할 대상이 없다 — 사람이 봐야 한다.
   const info = await d.prInfo();
@@ -126,7 +192,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   };
   const undecidable = async (what, reason) => {
     const line = `${what} could not be computed: ${reason || "unknown"}`;
-    const t = await d.transition({ to: "factory:blocked", reason: line });
+    const t = await toBlocked(line);
     record([`merge: ${line}`, ...refusal(t)]);
     return 2;
   };
@@ -203,7 +269,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   } catch (e) {
     if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
     const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
-    const t = await d.transition({ to: "factory:blocked", reason });
+    const t = await toBlocked(reason);
     record([`merge: gates BLOCKED — ${e.message}`, ...refusal(t)]);
     return 2;
   }
@@ -212,7 +278,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   if (gates?.status === "BLOCKED") {
     const reason = gates.blocked_reason || "gates could not be decided";
-    const t = await d.transition({ to: "factory:blocked", reason });
+    const t = await toBlocked(reason);
     record([`merge: gates BLOCKED — ${reason}`, ...refusal(t)]);
     return 2;
   }
@@ -233,6 +299,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (retryFromBlocked) {
     const t = await d.transition({ to: "factory:approved", reason: "merge retry from blocked — gates re-verified GREEN" });
     if (!t.ok) { record([...refusal(t)]); return 2; }
+    leftBlocked = true;    // KTB-19 review I-2: from here on, a "→ factory:blocked" is a normal approved→blocked edge
     record([`transition: ${t.to}`]);
   }
 
@@ -244,7 +311,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   } catch (e) {
     if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
     const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
-    const t = await d.transition({ to: "factory:blocked", reason });
+    const t = await toBlocked(reason);
     record([`merge: mergeGates BLOCKED — ${e.message}`, ...refusal(t)]);
     return 2;
   }
@@ -288,36 +355,69 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       record([`merge: PR #${pr} ready for review`]);
     } catch (e) {
       const reason = `ready-for-review failed: ${e?.message || e}`;
-      const t = await d.transition({ to: "factory:blocked", reason });
+      const t = await toBlocked(reason);
       record([`merge: prReady FAIL — ${reason}`, ...refusal(t)]);
       return 2;
     }
 
-    // (6a-ii) KTB-15b I1: ready로 뒤집은 직후 required checks·integrity를 다시 확인한다 — 대상
-    // 저장소가 `ready_for_review`에 반응하는 자신만의 워크플로를 달아 뒀다면, 방금 확인한 (5)의
-    // GREEN이 이미 낡은 값일 수 있다. 최대 REQUIRED_CHECKS_REPOLL_ATTEMPTS회, 그 사이 REQUIRED_
-    // CHECKS_REPOLL_MS만큼 쉰다 — 첫 시도가 이미 GREEN이면(대부분의 경우 — 이미 ready였거나 대상
-    // 저장소에 그런 리스너가 없다) 추가 대기 없이 그대로 넘어간다.
+    // (6a-ii) KTB-15b I1 / KTB-19(데모 #8 재시도): ready로 뒤집은 직후 required checks·integrity를
+    // 다시 확인한다 — 대상 저장소가 `ready_for_review`에 반응하는 자신만의 워크플로를 달아 뒀다면,
+    // 방금 확인한 (5)의 GREEN이 이미 낡은 값일 수 있다. 고정 횟수 재확인(예전 방식)은 그 새 체크가
+    // 재확인 창이 끝날 때까지도 `queued`이면 그대로 blocked였다 — 그래서 이제 "몇 번"이 아니라
+    // **필수 체크가 더 이상 queued/pending/in_progress가 아닐 때까지** 기다린다(`d.prChecks`,
+    // `harness.factory.merge_check_wait_sec` 상한 — 기본 600초, 15초 간격). 안정된 뒤에만 GREEN/RED를
+    // 묻는다: RED가 있으면 그 체크 이름을 대며 blocked, 시간 안에 안정되지 않으면 "몇 초 기다렸는지"를
+    // 대며 blocked — 둘 다 재시도로 풀린다(§KTB-15b).
+    if (!d.prChecks) {
+      return await undecidable("post-ready required-check wait", "prChecks dep not wired");
+    }
+    let settle;
+    try {
+      settle = await waitForChecksSettled({
+        prChecks: d.prChecks, pr, required: d.requiredChecks ?? null, sleep,
+        waitSec: d.mergeCheckWaitSec ?? DEFAULT_MERGE_CHECK_WAIT_SEC,
+      });
+    } catch (e) {
+      const reason = `post-ready check poll failed: ${e?.message || e}`;
+      const t = await toBlocked(reason);
+      record([`merge: prChecks poll — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    if (!settle.ok) {
+      const waitSec = d.mergeCheckWaitSec ?? DEFAULT_MERGE_CHECK_WAIT_SEC;
+      const reason = `checks still pending after ${waitSec}s`;
+      const t = await toBlocked(reason);
+      record([`merge: required checks — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    const settled = relevantChecks(settle.checks, d.requiredChecks ?? null);
+    const failed = settled.filter((c) => !checkPassed(c));
+    if (failed.length) {
+      const reason = `required check(s) failed: ${failed.map((c) => c.name).join(", ")}`;
+      const t = await toBlocked(reason);
+      record([`merge: required checks — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    record(["merge: required checks settled — all GREEN"]);
+
+    // 체크는 GREEN이지만, 무결성(§KTB-5/6, base 코드로 계산)은 `prChecks`가 보지 못한다 —
+    // `mergeGates()`를 한 번 더 불러 그것까지 확인한다(그리고 checksGreen도 다시 얻어 mg를 채운다).
     let reverified;
-    for (let i = 0; i < REQUIRED_CHECKS_REPOLL_ATTEMPTS; i++) {
-      if (i > 0) await sleep(REQUIRED_CHECKS_REPOLL_MS);
-      try {
-        reverified = await d.mergeGates();
-      } catch (e) {
-        if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
-        const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
-        const t = await d.transition({ to: "factory:blocked", reason });
-        record([`merge: mergeGates re-check after ready — BLOCKED — ${e.message}`, ...refusal(t)]);
-        return 2;
-      }
-      if (reverified?.checksGreen && reverified?.integrityGreen) break;
+    try {
+      reverified = await d.mergeGates();
+    } catch (e) {
+      if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+      const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+      const t = await toBlocked(reason);
+      record([`merge: mergeGates re-check after ready — BLOCKED — ${e.message}`, ...refusal(t)]);
+      return 2;
     }
     if (!reverified?.checksGreen || !reverified?.integrityGreen) {
       const reasons = [];
       if (!reverified?.checksGreen) reasons.push("required checks not GREEN");
       if (!reverified?.integrityGreen) reasons.push("integrity not GREEN");
-      const reason = `ready_for_review retriggered a required check and it did not settle GREEN in time — ${reasons.join("; ")}`;
-      const t = await d.transition({ to: "factory:blocked", reason });
+      const reason = reasons.join("; ");
+      const t = await toBlocked(reason);
       record([`merge: mergeGates re-check after ready — ${reason}`, ...refusal(t)]);
       return 2;
     }
@@ -333,7 +433,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;
-    const t = await d.transition({ to: "factory:blocked", reason });
+    const t = await toBlocked(reason);
     record([`merge: mergePr FAIL — ${reason}`, ...refusal(t)]);
     return 2;
   }

@@ -195,6 +195,23 @@ test("stats.usage sums the run records and skips the '_retro' key", () => {
   expect(stats.usage.tokens).toEqual({ input: 100, output: 20 });
 });
 
+// O12: `input_tokens` alone understates real input for prompt-caching sessions — most of the
+// context lands in `cache_creation_input_tokens`/`cache_read_input_tokens` instead.
+test("stats.usage.tokens.input includes cache_creation + cache_read tokens, not just input_tokens (O12)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retro-harvest-cache-"));
+  appendRunRecord({
+    root: dir, issue: 92, stage: "plan", runnerId: "gha-1", now: "2026-09-01T00:00:00Z",
+    lines: [usageLine({
+      usage: { input_tokens: 8, cache_creation_input_tokens: 43117, cache_read_input_tokens: 170334, output_tokens: 15770 },
+      total_cost_usd: 11.95, num_turns: 4, terminal_reason: "completed", modelUsage: { "claude-x": { costUSD: 11.95 } },
+    })],
+  });
+  const records = new Map([[92, readFileSync(join(dir, "docs/factory/runs/92.md"), "utf8")]]);
+  const issues = [{ number: 92, title: "x", labels: [], state: "open" }];
+  const { stats } = harvest({ records, issues, commentsByIssue: new Map(), since: null });
+  expect(stats.usage.tokens).toEqual({ input: 8 + 43117 + 170334, output: 15770 });
+});
+
 test("mergeCandidates unions lessons/examples by (role,text) merging runs, flaky by id, needs_human by issue (fresh wins)", () => {
   const existing = {
     lessons: [{ role: "correctness", text: "c1", runs: [1], source: "must_fix" }],

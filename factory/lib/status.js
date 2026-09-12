@@ -139,7 +139,7 @@ export function renderStatus(s) {
   if (s.usage) {
     if (s.usage.perIssue.length === 0) lines.push("(none)");
     else for (const p of s.usage.perIssue.slice(0, 10)) {
-      lines.push(`- #${p.issue} $${p.cost_usd} · ${p.runs} runs · ${p.tokens.input}/${p.tokens.output} tokens`);
+      lines.push(`- #${p.issue} $${p.cost_usd} · ${p.runs} runs · ${p.tokens.input} input(+cache) / ${p.tokens.output} output tokens`);
     }
     lines.push(`- window (since ${s.usage.window.since}): $${s.usage.window.cost_usd} / ${s.usage.window.runs} runs`);
     lines.push(`- total: $${s.usage.total.cost_usd} / ${s.usage.total.runs} runs`);

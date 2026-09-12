@@ -79,7 +79,11 @@ export const TRANSITIONS = new Map([
   // blocked → queue/ready(KTB-15b): triage·plan도 같은 이유로 재시도 엣지가 필요하다 — 판정 불가로
   // blocked에 떨어진 런은 코드가 아니라 그 스테이지 자체를 다시 도는 게 맞고(BLOCKED_RETRY), 그
   // hop은 언제나 **그 스테이지의 정상 진입 라벨**로 되돌아간다.
-  ["factory:blocked", new Set(["factory:needs-human", "factory:queue", "factory:ready", "factory:planned", "factory:approved"])],
+  // blocked → rework(KTB-19 review I-2): a merge retry-from-blocked (label still `factory:blocked`
+  // until step (4b) re-confirms gates GREEN) can find the PR CONFLICTING at step (2) — that's a
+  // "rebase and rework" outcome, not "needs a human to decide", and previously had no edge here at
+  // all (the graph refused it and posted a confusing graph-refusal comment instead of routing to rework).
+  ["factory:blocked", new Set(["factory:needs-human", "factory:queue", "factory:ready", "factory:planned", "factory:approved", "factory:rework"])],
   ["factory:needs-human", new Set(["factory:queue"])],
   ["factory:merged", new Set([])],
   ["factory:wont-do", new Set([])],

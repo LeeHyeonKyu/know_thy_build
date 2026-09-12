@@ -152,8 +152,8 @@ test("renderStatus's 사용량 section lists top per-issue usage (by cost) befor
   const s = buildStatus(args);
   const text = renderStatus(s);
   const section = text.slice(text.indexOf("## 사용량"));
-  expect(section).toContain("#3 $5 · 2 runs · 100/20 tokens");
-  expect(section).toContain("#6 $1.5 · 1 runs · 10/2 tokens");
+  expect(section).toContain("#3 $5 · 2 runs · 100 input(+cache) / 20 output tokens");
+  expect(section).toContain("#6 $1.5 · 1 runs · 10 input(+cache) / 2 output tokens");
   expect(section.indexOf("#3")).toBeLessThan(section.indexOf("window (since"));
   expect(section).toContain("window (since 2026-09-08T12:00:00.000Z): $6.5 / 3 runs");
   expect(section).toContain("total: $6.5 / 3 runs");

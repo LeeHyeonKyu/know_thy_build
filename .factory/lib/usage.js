@@ -89,7 +89,14 @@ const round6 = (n) => Math.round(n * 1e6) / 1e6;
 /**
  * Map<issue, run-기록 텍스트> → 이슈별/기간별/전체 합산. cost_usd는 n/a(null)를 무시하고 더한다
  * (n/a를 0으로 보면 "돌았지만 비용 미보고"와 "정말 비용이 0"을 구분 못 한다 — 그냥 합산에서 뺀다).
- * tokens는 input/output만 더한다(cache는 §4.4 보고 범위 밖).
+ *
+ * tokens.input(O12 리뷰): `input_tokens` **만** 더하면 실제 청구 입력의 대부분을 빠뜨린다 — 프롬프트
+ * 캐싱을 쓰는 세션은 컨텍스트 대부분이 `cache_creation_input_tokens`(캐시에 새로 쓴 것)나
+ * `cache_read_input_tokens`(캐시에서 읽은 것)로 잡히고, `input_tokens`는 그 나머지(예: 데모 세션
+ * 하나가 input 50 / cache_read 170334였다 — "50"은 실제 입력의 0.03%다). 그래서 `tokens.input`은
+ * 세 필드를 **합산**한다 — 과금 관점의 "이 런이 모델에 넣은 입력 토큰 총량"이 그것이다.
+ * `parseRunRecord`의 개별 필드(`input_tokens`/`cache_read_tokens`/`cache_creation_tokens`)는 원본
+ * 그대로 남아 있다 — 여기서 더하는 건 이 합산 보고서 하나뿐이다.
  */
 export function summarizeUsage(records, { now, windowDays = 7 } = {}) {
   const nowMs = toMs(now);
@@ -105,7 +112,7 @@ export function summarizeUsage(records, { now, windowDays = 7 } = {}) {
       runs += 1;
       totalRuns += 1;
       if (e.cost_usd != null) { cost += e.cost_usd; totalCost += e.cost_usd; }
-      if (e.input_tokens != null) inputT += e.input_tokens;
+      inputT += (e.input_tokens ?? 0) + (e.cache_creation_tokens ?? 0) + (e.cache_read_tokens ?? 0);
       if (e.output_tokens != null) outputT += e.output_tokens;
       const ms = toMs(e.at);
       if (ms != null && ms >= sinceMs) {

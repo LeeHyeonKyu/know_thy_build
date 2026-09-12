@@ -26,6 +26,7 @@ const baseD = (over = {}) => ({
   prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" })),
   gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })),
   mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+  prChecks: vi.fn(async () => [{ name: "factory/integrity", state: "SUCCESS", bucket: "pass" }]),
   protectedPaths: vi.fn(async () => ({ ok: true, files: [] })),
   policyViolations: vi.fn(async () => ({ ok: true, files: [] })),
   comment: vi.fn(async () => {}),
@@ -37,7 +38,11 @@ const baseD = (over = {}) => ({
   ...over,
 });
 const basePostStatus = (over = {}) => Object.assign(vi.fn(async () => {}), over);
-const run = (d, over = {}) => runMergeStage({ issue: 7, defaultBranch: "main", headSha: "b".repeat(40), d, record: over.record ?? makeRecord().record, refusal, postStatus: over.postStatus ?? basePostStatus() });
+const run = (d, over = {}) => runMergeStage({
+  issue: 7, defaultBranch: "main", headSha: "b".repeat(40), d,
+  record: over.record ?? makeRecord().record, refusal, postStatus: over.postStatus ?? basePostStatus(),
+  retryFromBlocked: over.retryFromBlocked ?? false,
+});
 
 // ── (1) prInfo ───────────────────────────────────────────────────────────
 
@@ -470,17 +475,19 @@ test("(5) prReady is called immediately before mergePr — after every gate and 
     policyViolations: vi.fn(async () => { calls.push("policyViolations"); return { ok: true, files: [] }; }),
     gates: vi.fn(async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }; }),
     mergeGates: vi.fn(async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; }),
+    prChecks: vi.fn(async () => { calls.push("prChecks"); return [{ name: "factory/integrity", state: "SUCCESS", bucket: "pass" }]; }),
     prReady: vi.fn(async () => { calls.push("prReady"); }),
     mergePr: vi.fn(async () => { calls.push("mergePr"); }),
   });
   const code = await run(d);
   expect(code).toBe(0);
-  // KTB-15b I1: prReady 뒤 mergeGates가 한 번 더 불린다(대상 저장소의 ready_for_review 리스너가
-  // 새 필수 체크를 깨웠을 수 있어서다) — 첫 재확인이 이미 GREEN이므로 추가 대기 없이 곧장 mergePr다.
-  expect(calls).toEqual(["protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergeGates", "mergePr"]);
+  // KTB-19: prReady 뒤 required checks가 더 이상 진행 중이 아닐 때까지 기다린 다음(여기서는 이미
+  // 안정돼 있어 한 번의 조회로 끝난다), mergeGates가 무결성까지 한 번 더 확인한다.
+  expect(calls).toEqual(["protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "prChecks", "mergeGates", "mergePr"]);
   expect(d.prReady).toHaveBeenCalledWith(9);
+  expect(d.prChecks).toHaveBeenCalledWith(9);
   expect(d.mergeGates).toHaveBeenCalledTimes(2);
-  expect(d.sleep).not.toHaveBeenCalled();   // 첫 재확인부터 GREEN이면 재확인 사이 대기는 없다
+  expect(d.sleep).not.toHaveBeenCalled();   // 첫 조회부터 안정돼 있으면 재확인 사이 대기는 없다
 });
 
 // 게이트가 떨어진 PR을 ready로 만들어 두면, 그다음부터는 사람이 실수로 머지 버튼을 누를 수 있다 —
@@ -514,45 +521,79 @@ test("(5) no prReady dep wired → the merge still proceeds, with a record line"
   expect(lines.some((l) => /prReady dep not wired/.test(l))).toBe(true);
 });
 
-// ── (6a-ii) KTB-15b I1: re-poll mergeGates after the draft→ready flip ──────
-// A target repo may have its own workflow listening for `ready_for_review` — readying the PR
-// restarts a required check there, and the GREEN this run already saw (step 4/5) is stale.
-test("(6a-ii) the re-check settles GREEN on the second poll — one sleep, then mergePr proceeds", async () => {
-  const mergeGates = vi.fn()
-    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })      // step (5), before ready
-    .mockResolvedValueOnce({ checksGreen: false, integrityGreen: true })     // right after ready — new check still pending
-    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true });     // settles GREEN
-  const d = baseD({ mergeGates });
+// ── (6a-ii) KTB-19: wait for required checks to settle (not GREEN, but no longer running) ──────
+// Demo #8's retry: the PR branch still carried the OLD integrity.yml (with a `ready_for_review`
+// trigger) — readying it queued a new required check, and the old fixed-3×10s re-poll expired
+// while it was still queued. Now we wait until nothing required is queued/pending/in_progress
+// (bounded by `harness.factory.merge_check_wait_sec`, 15s between polls), then judge GREEN/RED.
+
+test("(6a-ii) a check queued at the ready flip settles GREEN on the second poll — mergePr proceeds", async () => {
+  const prChecks = vi.fn()
+    .mockResolvedValueOnce([{ name: "factory/integrity", state: "queued", bucket: "pending" }])
+    .mockResolvedValueOnce([{ name: "factory/integrity", state: "SUCCESS", bucket: "pass" }]);
+  const d = baseD({ prChecks, mergeCheckWaitSec: 30 });
   const code = await run(d);
   expect(code).toBe(0);
-  expect(mergeGates).toHaveBeenCalledTimes(3);
+  expect(prChecks).toHaveBeenCalledTimes(2);
+  expect(prChecks).toHaveBeenCalledWith(9);
   expect(d.sleep).toHaveBeenCalledTimes(1);
-  expect(d.sleep).toHaveBeenCalledWith(10000);
+  expect(d.sleep).toHaveBeenCalledWith(15000);
+  expect(d.mergeGates).toHaveBeenCalledTimes(2);   // step (5) + the final integrity re-check once settled
   expect(d.mergePr).toHaveBeenCalled();
 });
 
-test("(6a-ii) still not GREEN after every re-poll → factory:blocked, mergePr never called", async () => {
+test("(6a-ii) a required check settles RED → factory:blocked naming the check, mergePr never called", async () => {
   const { lines, record } = makeRecord();
-  const mergeGates = vi.fn()
-    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })
-    .mockResolvedValue({ checksGreen: false, integrityGreen: true });
-  const d = baseD({ mergeGates });
+  const prChecks = vi.fn(async () => [{ name: "factory/integrity", state: "FAILURE", bucket: "fail" }]);
+  const d = baseD({ prChecks });
   const code = await run(d, { record });
   expect(code).toBe(2);
   expect(d.mergePr).not.toHaveBeenCalled();
-  // 첫 확인(step 5) + 재확인 3회 = 4번
-  expect(mergeGates).toHaveBeenCalledTimes(4);
-  expect(d.sleep).toHaveBeenCalledTimes(2);   // 3번의 재확인 사이 대기는 2번뿐이다(첫 재확인은 곧장)
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
-    to: "factory:blocked", reason: expect.stringContaining("required checks not GREEN"),
+    to: "factory:blocked", reason: "required check(s) failed: factory/integrity",
   }));
-  expect(lines.some((l) => /mergeGates re-check after ready/.test(l))).toBe(true);
+  expect(lines.some((l) => /required check\(s\) failed: factory\/integrity/.test(l))).toBe(true);
+  expect(d.mergeGates).toHaveBeenCalledTimes(1);   // never reaches the post-settle integrity re-check
 });
 
-test("(6a-ii) mergeGates() throwing MergeBaseError during the re-check → factory:blocked, not swallowed as needs-human", async () => {
+test("(6a-ii) a non-required check stays queued forever but is ignored when required_checks names only others", async () => {
+  const prChecks = vi.fn(async () => [
+    { name: "factory/integrity", state: "SUCCESS", bucket: "pass" },
+    { name: "some-other-check", state: "queued", bucket: "pending" },
+  ]);
+  const d = baseD({ prChecks, requiredChecks: ["factory/integrity"] });
+  const code = await run(d);
+  expect(code).toBe(0);
+  expect(prChecks).toHaveBeenCalledTimes(1);
+  expect(d.sleep).not.toHaveBeenCalled();
+});
+
+test("(6a-ii) checks still pending after the wait budget → factory:blocked 'checks still pending after <n>s', retryable", async () => {
+  const { lines, record } = makeRecord();
+  const prChecks = vi.fn(async () => [{ name: "factory/integrity", state: "queued", bucket: "pending" }]);
+  const d = baseD({ prChecks, mergeCheckWaitSec: 15 });   // one attempt only (15000ms window / 15000ms interval)
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:blocked", reason: "checks still pending after 15s",
+  }));
+  expect(lines.some((l) => /checks still pending after 15s/.test(l))).toBe(true);
+});
+
+test("(6a-ii) the wait budget defaults to 600s (40 polls of 15s) when harness doesn't set it", async () => {
+  const prChecks = vi.fn(async () => [{ name: "factory/integrity", state: "queued", bucket: "pending" }]);
+  const d = baseD({ prChecks });   // no mergeCheckWaitSec override
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(prChecks).toHaveBeenCalledTimes(40);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ reason: "checks still pending after 600s" }));
+});
+
+test("(6a-ii) mergeGates() throwing MergeBaseError during the final integrity re-check → factory:blocked, not swallowed as needs-human", async () => {
   const mergeGates = vi.fn()
-    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })
-    .mockRejectedValueOnce(new MergeBaseError("origin/main: exit 1"));
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })   // step (5)
+    .mockRejectedValueOnce(new MergeBaseError("origin/main: exit 1"));    // final integrity re-check
   const d = baseD({ mergeGates });
   const code = await run(d);
   expect(code).toBe(2);
@@ -560,12 +601,35 @@ test("(6a-ii) mergeGates() throwing MergeBaseError during the re-check → facto
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringContaining("merge-base") }));
 });
 
-test("(6a-ii) with no prReady dep wired, mergeGates is never re-checked (no draft flip happened)", async () => {
+test("(6a-ii) integrity not GREEN on the final re-check (checks were fine) → factory:blocked", async () => {
+  const mergeGates = vi.fn()
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: true })
+    .mockResolvedValueOnce({ checksGreen: true, integrityGreen: false });
+  const d = baseD({ mergeGates });
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: "integrity not GREEN" }));
+});
+
+test("(6a-ii) with no prReady dep wired, prChecks/mergeGates are never re-checked (no draft flip happened)", async () => {
   const mergeGates = vi.fn(async () => ({ checksGreen: true, integrityGreen: true }));
-  const d = baseD({ mergeGates, prReady: undefined });
+  const prChecks = vi.fn();
+  const d = baseD({ mergeGates, prChecks, prReady: undefined });
   const code = await run(d);
   expect(code).toBe(0);
   expect(mergeGates).toHaveBeenCalledTimes(1);
+  expect(prChecks).not.toHaveBeenCalled();
+});
+
+test("(6a-ii) prReady wired but no prChecks dep → factory:blocked (판정 불가), mergePr never called", async () => {
+  const d = baseD({ prChecks: undefined });
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:blocked", reason: expect.stringContaining("prChecks dep not wired"),
+  }));
 });
 
 test("(5) mergePr throws → factory:blocked 'merge API failed: …'", async () => {
@@ -645,6 +709,7 @@ test("happy path: calls prInfo → protectedPaths → policyViolations → gates
     prInfo: vi.fn(async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; }),
     gates: vi.fn(async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }; }),
     mergeGates: vi.fn(async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; }),
+    prChecks: vi.fn(async () => { calls.push("prChecks"); return [{ name: "factory/integrity", state: "SUCCESS", bucket: "pass" }]; }),
     protectedPaths: vi.fn(async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; }),
     policyViolations: vi.fn(async () => { calls.push("policyViolations"); return { ok: true, files: [] }; }),
     prReady: vi.fn(async () => { calls.push("prReady"); }),
@@ -655,8 +720,97 @@ test("happy path: calls prInfo → protectedPaths → policyViolations → gates
   const { lines, record } = makeRecord();
   const code = await run(d, { record });
   expect(code).toBe(0);
-  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "prChecks", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
   expect(d.closeIssue).toHaveBeenCalledWith(9);
   // 7단계 각각의 흔적이 런 레코드에 남는다
   expect(lines.length).toBeGreaterThanOrEqual(7);
+});
+
+// ── retryFromBlocked, before the label hops back to approved (KTB-19 review I-2) ────────────────
+// While the label is still literally `factory:blocked` (steps 1–4, before (4b) re-confirms gates
+// GREEN and flips it to approved), a second undecidable/BLOCKED outcome would ask the graph for a
+// blocked→blocked self-transition — an edge this graph deliberately never has (no state transitions
+// to itself). Two things had to be fixed: (a) a CONFLICTING PR must route to `factory:rework`
+// (previously no edge existed at all), (b) any other "→ factory:blocked" must be record-only (the
+// label truly doesn't change) but still refresh the `factory-blocked-origin` marker directly, since
+// skipping `d.transition` means `lib/transition.js` never gets a chance to write a fresh one.
+
+test("(retry from blocked) a CONFLICTING PR transitions factory:blocked → factory:rework via the graph, not a refusal", async () => {
+  const { lines, record } = makeRecord();
+  const transition = graphTransition("factory:blocked");
+  const d = baseD({
+    prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "CONFLICTING" })),
+    transition,
+  });
+  const code = await run(d, { record, retryFromBlocked: "factory:approved" });
+  expect(code).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:rework" }));
+  expect(lines.some((l) => /transition refused/.test(l))).toBe(false);
+  expect(lines.some((l) => /PR #9 conflicting/.test(l))).toBe(true);
+});
+
+test("(retry from blocked) gates BLOCKED before the approved hop → record-only, fresh origin marker, no graph call", async () => {
+  const { lines, record } = makeRecord();
+  const transition = vi.fn(async () => { throw new Error("d.transition must not be called for a blocked→blocked self-transition"); });
+  const comment = vi.fn(async () => {});
+  const d = baseD({
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "cannot classify", head_sha: "a".repeat(40) })),
+    transition, comment,
+  });
+  const code = await run(d, { record, retryFromBlocked: "factory:approved" });
+  expect(code).toBe(2);
+  expect(transition).not.toHaveBeenCalled();
+  expect(comment).toHaveBeenCalledWith(7, expect.stringContaining("<!-- factory-blocked-origin from=factory:approved stage=merge -->"));
+  expect(lines.some((l) => /still blocked — no self-transition/.test(l))).toBe(true);
+  expect(d.mergeGates).not.toHaveBeenCalled();
+});
+
+test("(retry from blocked) protectedPaths undecidable before the approved hop is also record-only", async () => {
+  const transition = vi.fn(async () => { throw new Error("must not be called"); });
+  const comment = vi.fn(async () => {});
+  const d = baseD({
+    protectedPaths: vi.fn(async () => ({ ok: false, files: [], reason: "git diff exited 128" })),
+    transition, comment,
+  });
+  const code = await run(d, { retryFromBlocked: "factory:approved" });
+  expect(code).toBe(2);
+  expect(transition).not.toHaveBeenCalled();
+  expect(comment).toHaveBeenCalledWith(7, expect.stringContaining("factory-blocked-origin from=factory:approved"));
+});
+
+test("(retry from blocked) a failing origin-marker re-post is swallowed — still exit 2, never thrown", async () => {
+  const d = baseD({
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "BLOCKED", head_sha: "a".repeat(40) })),
+    transition: vi.fn(async () => { throw new Error("must not be called"); }),
+    comment: vi.fn(async () => { throw new Error("gh comment 502"); }),
+  });
+  await expect(run(d, { retryFromBlocked: "factory:approved" })).resolves.toBe(2);
+});
+
+test("(retry from blocked) once gates re-verify GREEN and the label flips to approved, a LATER blocked outcome uses the normal approved→blocked edge", async () => {
+  const transition = graphTransition("factory:blocked");
+  const d = baseD({
+    mergeGates: vi.fn(async () => { throw new MergeBaseError("origin/main: exit 1"); }),
+    transition,
+  });
+  const code = await run(d, { retryFromBlocked: "factory:approved" });
+  expect(code).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:approved" }));
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+});
+
+test("(not a retry) gates BLOCKED behaves exactly as before — real graph transition, no marker special-case", async () => {
+  // retryFromBlocked defaults to false, so `leftBlocked` starts true — the pre-existing (3) test
+  // above already covers this path with the default `graphTransition()` (starting at approved);
+  // this just pins that the self-transition special case never fires when we're not mid-retry.
+  const transition = graphTransition("factory:approved");
+  const comment = vi.fn(async () => {});
+  const d = baseD({
+    gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "x", head_sha: "a".repeat(40) })),
+    transition, comment,
+  });
+  const code = await run(d);
+  expect(code).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(comment).not.toHaveBeenCalled();   // the record-only marker re-post path never runs
 });

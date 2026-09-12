@@ -51,6 +51,14 @@ export function flakyIdFromTitle(title) {
 export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+) -->/;
 
 /**
+ * `factory-blocked-origin` 마커를 만드는 유일한 곳(KTB-19 review I-2) — `lib/transition.js`가 실제
+ * 전이 코멘트 안에 붙일 때와, `merge-stage.js`가 (그래프에 없는 blocked→blocked 자기 전이라 실제
+ * 전이 없이) 그 마커만 새로 남길 때 둘 다 이 함수를 쓴다. 문구가 두 곳에서 따로 써지면 정규식
+ * (`BLOCKED_ORIGIN`)과 어긋날 위험이 있다.
+ */
+export const blockedOriginMarker = ({ from, stage }) => `<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"} -->`;
+
+/**
  * 이슈 코멘트에서 **가장 최근** `factory-blocked-origin` 마커를 뽑는다. `{from, stage}` 또는
  * 마커가 하나도 없으면 null(사람이 API로 라벨을 직접 blocked에 붙인 경우 등 — "판정 불가"이지
  * "queue에서 왔다"가 아니다). 코멘트는 시간순으로 온다고 가정한다(sweeper의 다른 판정들과 같은 가정).

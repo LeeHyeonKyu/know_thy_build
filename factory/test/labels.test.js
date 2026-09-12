@@ -39,6 +39,9 @@ test("graph edges from §3.2", () => {
   // KTB-15b: triage·plan도 자신의 정상 진입 라벨로 되돌아가는 재시도 엣지를 얻는다(BLOCKED_RETRY).
   expect(canTransition("factory:blocked", "factory:queue")).toBe(true);
   expect(canTransition("factory:blocked", "factory:ready")).toBe(true);
+  // KTB-19 review I-2: a merge retry-from-blocked can find the PR CONFLICTING before the label
+  // hops back to approved — that's a rework outcome, not a graph dead end.
+  expect(canTransition("factory:blocked", "factory:rework")).toBe(true);
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);
 });
 

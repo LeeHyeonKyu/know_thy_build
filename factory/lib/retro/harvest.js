@@ -72,6 +72,9 @@ const round6 = (n) => Math.round(n * 1e6) / 1e6;
  * `_retro`는 retro 자신의 기록이라 건너뛴다(그 비용은 `stats.retro_usage`가 따로 든다).
  * 시각은 `afterSince`로 본다 — run 기록의 헤더 타임스탬프는 초를 생략한 짧은 ISO일 수 있지만
  * `Date.parse`가 둘 다 받는다.
+ *
+ * tokens.input(O12 리뷰): `usage.js`의 `summarizeUsage`와 같은 이유로 캐시 토큰(생성·읽기)을 함께
+ * 더한다 — `input_tokens` 하나만 세면 프롬프트 캐싱을 쓰는 런의 실제 입력 대부분이 빠진다.
  */
 function windowUsage(recs, sinceMs) {
   let cost = 0;
@@ -82,7 +85,7 @@ function windowUsage(recs, sinceMs) {
     for (const e of parseRunRecord(String(text ?? ""))) {
       if (!afterSince(e.at, sinceMs)) continue;
       if (e.cost_usd != null) cost += e.cost_usd;
-      if (e.input_tokens != null) input += e.input_tokens;
+      input += (e.input_tokens ?? 0) + (e.cache_creation_tokens ?? 0) + (e.cache_read_tokens ?? 0);
       if (e.output_tokens != null) output += e.output_tokens;
     }
   }
