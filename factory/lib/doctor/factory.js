@@ -1,9 +1,10 @@
 import { join, basename } from "node:path";
-import { mkdtempSync, writeFileSync as writeFixture, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { render as renderTemplate } from "../../cli/install.js";
 import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
+import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS } from "../bootstrap.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
@@ -135,6 +136,42 @@ export function checkAgents({ roles, root, readFile, exists }) {
     }
     out.push(violations.length ? c(id, "FAIL", violations.map((v) => `${v.rule}: ${v.msg}`).join("; ")) : c(id, "PASS"));
   }
+  return out;
+}
+
+const SKILLS_DIR = ".claude/commands/know-thy-build";
+
+/**
+ * §13.3/§13.4 — `npx know-thy-build`가 설치한 스킬 카탈로그를 검사한다. 설치 안 됐으면 안내만(PASS-info).
+ * 설치돼 있으면 그 디렉터리의 `*.md` 전부를 `installed:true`로 lint하고(존재하는 파일은 이름과 무관하게
+ * 전부 대상 — architect/designer도 §13.3 구조를 지켜야 한다, Task 2), 13개 카탈로그 중 없는 이름은 WARN.
+ */
+export function checkSkills({ root, exists, readFile, list = readdirSync }) {
+  const dir = join(root, SKILLS_DIR);
+  if (!exists(dir)) {
+    return [c("skills.installed", "PASS", "not installed — npx know-thy-build")];
+  }
+
+  const files = list(dir).filter((f) => f.endsWith(".md")).sort();
+  const found = new Set();
+  const out = [];
+  for (const f of files) {
+    const name = basename(f, ".md");
+    found.add(name);
+    const id = `skills.${name}`;
+    let violations;
+    try {
+      violations = lintSkillMd(readFile(join(dir, f)), { name, installed: true });
+    } catch (e) {
+      out.push(c(id, "FAIL", `${f} unreadable: ${e.message}`));
+      continue;
+    }
+    out.push(violations.length ? c(id, "FAIL", violations.map((v) => `${v.rule}: ${v.msg}`).join("; ")) : c(id, "PASS"));
+  }
+
+  const missing = ALL_SKILLS.filter((n) => !found.has(n));
+  out.push(missing.length ? c("skills.missing", "WARN", `missing: ${missing.join(", ")}`) : c("skills.missing", "PASS"));
+
   return out;
 }
 

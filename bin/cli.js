@@ -88,7 +88,10 @@ function installDir(srcDir, destDir, lang) {
   }
 }
 
-const LEGACY_FILES = ["know-thy-build.md", "know-thy-build-evolve.md"];
+// know-thy-build/finish.md은 하위 경로다 — join(commandsDir, file)이 "/"를 그대로 세그먼트로
+// 다뤄 commandsDir/know-thy-build/finish.md를 정확히 가리키므로 cleanLegacy는 플랫 이름과
+// 하위 경로 이름을 구분 없이 다룬다.
+const LEGACY_FILES = ["know-thy-build.md", "know-thy-build-evolve.md", "know-thy-build/finish.md"];
 
 function cleanLegacy(commandsDir) {
   let cleaned = [];
@@ -108,7 +111,10 @@ function install(lang, global) {
     : join(process.cwd(), ".claude", "commands");
 
   const cleaned = cleanLegacy(commandsDir);
-  installDir(templatesDir, commandsDir, lang);
+  // templates/ 루트에는 know-thy-build/(스킬)와 factory/(factory init이 따로 설치하는 자료)가
+  // 나란히 있다 — 여기서 templatesDir 전체를 복사하면 factory/**의 .md들(agents/commands/lessons/
+  // CHARTER)까지 .claude/commands/factory/로 새어 들어간다. 스킬 설치기는 know-thy-build/만 본다.
+  installDir(join(templatesDir, "know-thy-build"), join(commandsDir, "know-thy-build"), lang);
 
   const scope = global ? "globally (~/.claude/commands/)" : "in this project";
   if (cleaned.length > 0) {
@@ -117,22 +123,28 @@ function install(lang, global) {
   console.log(`
   Done! Installed ${scope} (${lang})
 
-  Pipeline:
+  Pipeline (13 skills — one per human decision point):
 
-    Define (once):
-      /know-thy-build:project      Define your project (What & Why)
-      /know-thy-build:technical    Define technical foundation (How)
+    Define (5):
+      /know-thy-build:project      Define what and why
+      /know-thy-build:technical    Define how to build
+      /know-thy-build:qa           QA framework + test the product
+      /know-thy-build:feature      Design a feature before building it
+      /know-thy-build:issue        Log a bug/chore/small change (no spec doc)
 
-    Per feature (worktree workflow):
-      /know-thy-build:feature      Design feature spec (main) → create worktree → dispatch sub-agent
+      Design helpers (invoked from :feature):
+        /know-thy-build:architect    Code structure (stubs, tests)
+        /know-thy-build:designer     UX design intent (UI features)
 
-      Sub-agent orchestrates in worktree:
-        Define:
-          /know-thy-build:architect    Code structure (stubs, tests)
-          /know-thy-build:designer     UX design intent (UI features)
-          /know-thy-build:qa           Test cases (what "done" means)
-        Implement → Review → Gate check
-          /know-thy-build:finish       Merge gate + squash merge + cleanup
+    Operate (8 — require \`factory init\`):
+      /know-thy-build:harness      Fix a failing doctor / adopt a brownfield repo
+      /know-thy-build:next         Pick the next issue to queue
+      /know-thy-build:clarify      Answer needs-info questions on a spec
+      /know-thy-build:unstick      Resolve a stuck issue (needs-human)
+      /know-thy-build:proposal     Review a retro/harness proposal PR
+      /know-thy-build:role         Create or edit a reviewer/plan role
+      /know-thy-build:digest       Weekly summary of what shipped
+      /know-thy-build:status       Read-only dashboard (Needs You / in progress / queue)
 
   Start with /know-thy-build:project
 `);
@@ -157,14 +169,25 @@ if (args.includes("--help") || args.includes("-h")) {
     npx know-thy-build --lang ko    Skip language prompt
     npx know-thy-build factory <init|doctor|bootstrap|run|status>   Phase 2 — see \`factory --help\`
 
-  Commands installed:
-    :project     Define what and why                → docs/PROJECT.md + CLAUDE.md + hooks
-    :technical   Define how to build                → docs/TECHNICAL.md
-    :feature     Design feature + worktree + agent  → docs/features/NNN.md + worktree
-    :architect   Code structure (stubs, tests)      → scaffold + signature tests
-    :designer    UX design intent (UI features)     → design intent in feature spec
-    :qa          QA framework + test the product    → docs/QA.md
-    :finish      Merge gate + squash merge          → main branch + cleanup
+  Commands installed (13 skills — one per human decision point):
+    Define:
+      :project     Define what and why                → docs/PROJECT.md + CLAUDE.md + hooks
+      :technical   Define how to build                → docs/TECHNICAL.md
+      :qa          QA framework + test the product     → docs/QA.md
+      :feature     Design a feature before building it → docs/features/NNN.md + issue
+      :issue       Log a bug/chore/small change         → issue only, no spec doc
+      :architect   Code structure (stubs, tests)        → scaffold + signature tests
+      :designer    UX design intent (UI features)       → design intent in feature spec
+
+    Operate (require \`factory init\`):
+      :harness     Fix a failing doctor / adopt a brownfield repo
+      :next        Pick the next issue to queue
+      :clarify     Answer needs-info questions on a spec
+      :unstick     Resolve a stuck issue (needs-human)
+      :proposal    Review a retro/harness proposal PR
+      :role        Create or edit a reviewer/plan role
+      :digest      Weekly summary of what shipped
+      :status      Read-only dashboard (Needs You / in progress / queue)
 
   Options:
     --global, -g    Install to ~/.claude/commands/ (available in all projects)

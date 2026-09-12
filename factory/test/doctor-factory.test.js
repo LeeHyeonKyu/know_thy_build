@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkCharter, checkRoles, checkAgents, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -136,6 +137,92 @@ test("checkAgents: the shipped roles.toml + agent templates are what an initiali
     "agents.plan-synthesizer", "agents.reviewer-architecture", "agents.reviewer-correctness", "agents.reviewer-qa",
     "agents.reviewer-security", "agents.reviewer-spec-conformance",
   ]);
+});
+
+// ── checkSkills (Task 1) ─────────────────────────────────────────────────────────────────────
+const SKILL_OK = (opsExtra = "") => `---
+description: Do the thing.
+allowed-tools: [Read, Write]
+---
+
+# Skill
+
+## Language
+
+**All conversation MUST be in: English**
+
+## Trigger
+
+When needed.
+
+## Reads
+
+The relevant files.
+
+## Does
+
+Summarize, then act.${opsExtra}
+
+## Produces
+
+A result.
+
+## Must not
+
+Do the wrong thing.
+`;
+
+const OPS_EXTRA = [
+  "",
+  '\n2. `node .factory/bin/transition.js <issue> <label> --human --reason "..."`.',
+  "\n3. Merging is never done here — `gh pr merge` is forbidden.",
+  "\n4. Record a `human-decision:v1` comment.",
+].join("");
+
+const READONLY_EXTRA = "\n2. Merging is never done here — `gh pr merge` is forbidden.";
+
+test("checkSkills: .claude/commands/know-thy-build/ absent → skills.installed PASS with the install hint", () => {
+  const c = by(checkSkills({ root: "/r", exists: () => false, readFile: () => "", list: () => [] }));
+  expect(c["skills.installed"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("npx know-thy-build") });
+  expect(Object.keys(c)).toEqual(["skills.installed"]);
+});
+
+test("checkSkills: installed dir with one clean ops skill and one clean Define skill → both PASS, skills.missing WARN lists the other 11", () => {
+  const files = { "harness.md": SKILL_OK(OPS_EXTRA), "project.md": SKILL_OK() };
+  const c = by(checkSkills({
+    root: "/r",
+    exists: (p) => p === "/r/.claude/commands/know-thy-build",
+    readFile: (p) => files[p.split("/").pop()],
+    list: () => Object.keys(files),
+  }));
+  expect(c["skills.harness"]).toMatchObject({ level: "PASS" });
+  expect(c["skills.project"]).toMatchObject({ level: "PASS" });
+  expect(c["skills.missing"].level).toBe("WARN");
+  for (const n of ALL_SKILLS.filter((n) => !["harness", "project"].includes(n))) {
+    expect(c["skills.missing"].detail, n).toContain(n);
+  }
+});
+
+test("checkSkills: a broken skill file (missing ## Trigger) → skills.<name> FAIL naming the violation", () => {
+  const broken = SKILL_OK().replace("## Trigger\n\nWhen needed.\n\n", "");
+  const files = { "harness.md": broken };
+  const c = by(checkSkills({ root: "/r", exists: () => true, readFile: () => broken, list: () => Object.keys(files) }));
+  expect(c["skills.harness"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("Trigger") });
+});
+
+test("checkSkills: all 13 catalog names present and clean → skills.missing PASS", () => {
+  const files = {};
+  for (const n of ALL_SKILLS) {
+    files[`${n}.md`] = SKILL_OK(DEFINE_SKILLS.includes(n) ? "" : (n === "digest" || n === "status" ? READONLY_EXTRA : OPS_EXTRA));
+  }
+  const c = by(checkSkills({
+    root: "/r",
+    exists: () => true,
+    readFile: (p) => files[p.split("/").pop()],
+    list: () => Object.keys(files),
+  }));
+  for (const n of ALL_SKILLS) expect(c[`skills.${n}`], n).toMatchObject({ level: "PASS" });
+  expect(c["skills.missing"]).toMatchObject({ level: "PASS" });
 });
 
 test("checkSettings: deny subset and hook commands", () => {
