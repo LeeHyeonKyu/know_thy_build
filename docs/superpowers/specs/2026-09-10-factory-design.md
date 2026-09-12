@@ -1521,14 +1521,14 @@ actions:
 #### `:next` — 신설
 - **Trigger** 착수할 이슈를 고를 때
 - **Reads** `backlog` 이슈 전부, 스펙 frontmatter(`depends_on`, `priority`, class), CHARTER hard limits, 현재 역압(awaiting-review 수, 격리 수, 진행 중 수), 이슈당 예산 대비 잔여
-- **Does** 요약("backlog 9건, 진행 3, 리뷰 대기 2/4, 격리 1/5") → 추천 순서와 이유(의존성 해소, tier 균형, 역압) → 선택 → `transition.sh <issue> queue --human`. "지금 넣으면 역압 상한에 걸린다"를 미리 경고
+- **Does** 요약("backlog 9건, 진행 3, 리뷰 대기 2/4, 격리 1/5") → 추천 순서와 이유(의존성 해소, tier 균형, 역압) → 선택 → `transition.js <issue> queue --human`. "지금 넣으면 역압 상한에 걸린다"를 미리 경고
 - **Produces** 라벨 전이, `human-decision` 코멘트
 - **Must not** 스펙이 없는 이슈를 queue로, 역압 상한 초과 상태에서 강행
 
 #### `:clarify` — 신설
 - **Trigger** `factory:needs-info`
 - **Reads** triage handoff의 `questions[]`, 스펙, 이슈 코멘트
-- **Does** 질문을 하나씩 소크라테스식으로 → 답을 스펙 본문과 이슈 본문에 반영 → 스펙 frontmatter 갱신 → `transition.sh <issue> queue --human`
+- **Does** 질문을 하나씩 소크라테스식으로 → 답을 스펙 본문과 이슈 본문에 반영 → 스펙 frontmatter 갱신 → `transition.js <issue> queue --human`
 - **Produces** 갱신된 스펙·이슈, 라벨 전이
 - **Must not** 질문에 스스로 답해 진행
 

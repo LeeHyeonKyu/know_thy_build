@@ -159,7 +159,7 @@ node .factory/bin/transition.js 118 factory:queue --human --reason "<decision>"
 
 #### 3d. wont-do 판단
 
-**`factory:wont-do`는 라벨 그래프에 없다** — `factory/lib/labels.js`의 전이 그래프에서 `needs-human → queue`가 유일한 출구다. 그래서 wont-do는 전이가 아니라 다음 두 동작으로 처리한다:
+**`factory:needs-human`에서는 `factory:wont-do`로 갈 수 없다** — `factory/lib/labels.js`의 전이 그래프에서 `needs-human → queue`가 유일한 출구다(`factory:wont-do` 자체는 실재하는 상태이고 `queue → wont-do`는 triage의 처분 경로로 존재하지만, `needs-human`에서는 그 엣지를 탈 수 없다). 그래서 이 지점의 wont-do는 전이가 아니라 다음 두 동작으로 처리한다:
 
 1. `human-decision:v1` 코멘트를 `decision: wont-do`로 남긴다(Step 4의 형식, transition 액션 없이).
 2. 이슈를 닫는다:

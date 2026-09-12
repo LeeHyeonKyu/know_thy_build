@@ -32,7 +32,7 @@ Pick a language, and 13 commands are installed into your `.claude/commands/` —
 | Command | Role | Output |
 |---------|------|--------|
 | `/know-thy-build:project` | Define what it is, why it exists, and what it must become | `docs/PROJECT.md` |
-| `/know-thy-build:technical` | Define how your project will be built | `docs/TECHNICAL.md` |
+| `/know-thy-build:technical` | Define how your project will be built | `docs/TECHNICAL.md` + `docs/factory/CHARTER.md` (draft) |
 | `/know-thy-build:qa` | QA the product — test framework with behavioral axes, then run and verify with evidence | `docs/QA.md` |
 | `/know-thy-build:feature` | Design a feature before building it | `docs/features/NNN.md` + `backlog` issue |
 | `/know-thy-build:issue` | Log a bug, chore, or small change — no spec doc | `backlog` issue only |

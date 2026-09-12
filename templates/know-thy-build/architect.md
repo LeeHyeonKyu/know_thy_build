@@ -653,4 +653,4 @@ After all verification passes (Phase 4 complete), update the feature spec's gate
      architect: passed  # {{date}}
    ```
 
-This gate update is recorded in the worktree. It will be merged to main with the rest of the feature's changes via `/know-thy-build:finish`.
+This gate update is recorded in the worktree. The factory merges the PR into main after review — do not merge it by hand.

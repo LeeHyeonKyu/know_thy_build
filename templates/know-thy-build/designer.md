@@ -689,4 +689,4 @@ After design work is complete and documented, update the feature spec's gate:
      designer: passed  # {{date}}
    ```
 
-This gate update is recorded in the worktree. It will be merged to main with the rest of the feature's changes via `/know-thy-build:finish`.
+This gate update is recorded in the worktree. The factory merges the PR into main after review — do not merge it by hand.

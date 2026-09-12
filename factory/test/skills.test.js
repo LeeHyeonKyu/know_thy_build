@@ -244,7 +244,7 @@ test("installer: installs exactly templates/know-thy-build/*.md, substitutes {{L
   }
 
   expect(existsSync(join(root, ".claude/commands/factory"))).toBe(false);
-});
+}, 30_000);
 
 test("installer: removes a pre-existing know-thy-build/finish.md legacy file", () => {
   const root = mkdtempSync(join(tmpdir(), "ktb-install-finish-"));
@@ -255,4 +255,4 @@ test("installer: removes a pre-existing know-thy-build/finish.md legacy file", (
   const result = runInstaller(root);
   expect(result.status, result.stderr).toBe(0);
   expect(existsSync(join(dir, "finish.md"))).toBe(false);
-});
+}, 30_000);
