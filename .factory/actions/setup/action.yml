@@ -1,0 +1,37 @@
+name: factory-setup
+description: Node 22, jq, .factory runtime deps, project runtime setup, optional Claude Code + test environment
+inputs:
+  claude:
+    description: install Claude Code CLI
+    default: "true"
+  test-env:
+    description: bring up the harness test environment (.factory/bin/test-env.js up)
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+    - shell: bash
+      run: |
+        command -v jq >/dev/null || { echo "factory: jq is required on the runner" >&2; exit 2; }
+        git config user.name "factory-bot"
+        git config user.email "factory-bot@users.noreply.github.com"
+        npm install --prefix .factory --no-audit --no-fund
+    # [runtime].setup은 반드시 자기만의 스텝이어야 한다(G1) — 다른 스텝과 합쳐지면, 그 스텝 안에서
+    # $GITHUB_PATH에 적어 넣은 줄은 "현재 실행 중인 스텝"에는 반영되지 않는다는 GitHub Actions의 규칙 때문에
+    # 눈에 보이는 실패 없이 조용히 무시된 것처럼 보일 수 있다. 스텝을 쪼개 두면 이 스텝 이후의 모든 스텝
+    # (Claude/test-env 설치, 그리고 이 composite action을 호출한 워크플로의 게이트 스텝)이 항상 갱신된
+    # PATH를 본다는 게 파일 자체로 드러난다.
+    - name: Runtime setup ([runtime].setup)
+      shell: bash
+      run: node .factory/bin/setup-env.js
+    - if: inputs.claude == 'true'
+      shell: bash
+      run: |
+        npm i -g @anthropic-ai/claude-code
+        claude --version
+    - if: inputs.test-env == 'true'
+      shell: bash
+      run: node .factory/bin/test-env.js up

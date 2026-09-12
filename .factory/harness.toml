@@ -1,0 +1,100 @@
+schema = 1
+
+# know-thy-build factory harness — self-dogfood, M0 (Plan 6 Task 5, P6-R3).
+# KTB's own source (factory/**, templates/**, bin/**) IS its build config: the [commands] gates below
+# are interpreted by that code, and templates/factory/** is what every OTHER adopter's harness/CI/hooks
+# are stamped from. Changing it changes every gate everywhere — so it is [protected] here, same as any
+# other harness/CI file, and a PR touching it can only be human-merged (controller ruling, P6-R3 / ADR-020
+# KTB-5/KTB-6: L0 integrity flags it informationally, L1 merge-stage refuses to auto-merge it).
+# No linter exists yet (P6-R3): lint/lint_file are no-ops (`node -e 0`) until one is adopted.
+
+[project]
+name           = "know-thy-build"
+spec_dir       = "docs/features"
+runs_dir       = "docs/factory/runs"
+default_branch = "main"
+
+[runtime]
+setup = "npm ci"
+node  = "22"
+
+[commands]                       # all judged by exit code
+lint       = "node -e 0"                                                              # P6-R3: no linter yet
+unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"      # P6-R3
+test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
+test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
+lint_file  = "node -e 0 {file}"                  # lint-touched.sh (logging only) — P6-R3: no linter yet
+
+[harness]
+maturity = "M0"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
+
+[factory]
+orchestration   = "workflow"     # workflow | agent
+required_checks = ["factory/gates", "factory/review", "factory/integrity"]
+
+[commands.proof]                 # fill when maturity >= M1
+# coverage        = "npx vitest run --coverage --coverage.reporter=json"
+# coverage_report = ".factory/out/coverage/coverage-final.json"
+# mutation        = "npx stryker run --incremental"
+# mutation_report = "reports/mutation/mutation.json"
+
+[gates]
+required = ["lint", "unit"]
+fast     = ["lint", "unit"]
+full     = ["lint", "unit"]
+deep     = ["lint", "unit"]
+
+[gates.thresholds]               # (protected)
+diff_coverage_pct       = 90
+mutation_score_pct      = 70
+new_test_repeats        = 3
+flaky_isolation_runs    = 3
+flaky_base_runs         = 5
+quarantine_max          = 5
+quarantine_ttl_days     = 28
+quarantine_return_after = 30
+
+[test]
+guide       = "docs/TECHNICAL.md"
+naming      = "test_{issue}_{slug}"
+smoke       = { unit = "factory/test/labels.test.js" }
+runtime_budget_min = 12
+test_glob   = ["factory/test/**/*.test.js"]
+source_glob = ["factory/**/*.js", "bin/**/*.js", "templates/**"]
+unit_report = ".factory/out/unit.json"
+
+[test.env]
+ready_timeout_sec = 90
+
+[test.fakes]
+
+[protected]                      # (protected)
+# 빌드 설정 파일도 보호한다 — [commands]의 게이트 명령(lint/unit/test_files/…)이 전부 이 파일들을
+# 거쳐 해석되므로, 에이전트가 여기를 고치면 "게이트를 통과시키는" 가장 쉬운 길이 코드를 고치는 게
+# 아니라 판정 기준을 고치는 것이 된다(테스트 제외, 린트 규칙 해제, 의존성 교체).
+# 바꿔야 한다면 경로는 하나다: `factory:harness` 이슈 → 사람이 diff를 보고 머지(§5.1).
+#
+# Self-dogfood addition (controller ruling, P6-R3): "factory/**", "templates/**", "bin/**" are added
+# because in THIS repo they are not application source — they ARE the build/gate configuration that
+# every [commands] entry above resolves through, and templates/** is what every adopter's own
+# harness/CI/.claude gets stamped from by `factory init`. A PR touching them is human-merged, never
+# auto-merged (same L0-informational/L1-refuses split as .factory/**/.claude/**).
+factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md",
+                 "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
+                 "tsconfig*.json", ".eslintrc*", "eslint.config.*",
+                 "factory/**", "templates/**", "bin/**"]
+                 # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
+                 # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
+except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
+# additive_only: 이 두 섹션에 **추가만** 허용한다(§8.1의 다크 경로). 정책이지 변조 판정이 아니므로
+# integrity 체크는 이것으로 RED가 되지 않는다 — 벗어난 편집이 있으면 merge 스테이지가 자동 머지를
+# 거부하고 사람이 머지한다(ADR-020 KTB-6). 그래야 `:role` PR과 역할 파일을 건드리는 업그레이드를
+# 사람이 머지할 수 있다.
+additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
+tests_are_load_bearing = true
+
+[load_bearing]
+paths = ["factory/lib/integrity.js", "factory/lib/merge-stage.js", "factory/lib/labels.js", "factory/bin/run-stage.js"]
+
+[evidence]
+qa_artifacts = ".factory/out/qa/**"

@@ -9,7 +9,84 @@
             "command": "bash .claude/hooks/check-merge-gate.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-dangerous.sh"
+          }
+        ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/lint-touched.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/stop-guard.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/record-agents.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/record-agents.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/verdict-format.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/stop-guard.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Bash(gh pr merge*)",
+      "Bash(git merge*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(gh api -X PUT /repos/*/branches/*/protection*)"
+    ],
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh issue *)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr comment*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr edit*)",
+      "Bash(npm *)",
+      "Bash(npx *)"
     ]
   }
 }

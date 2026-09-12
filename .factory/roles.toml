@@ -1,0 +1,103 @@
+schema = 1
+
+# ── triage ──────────────────────────────────────────
+[triage]
+agent   = ".claude/agents/factory-triage.md"
+model   = "sonnet"
+lessons = ".factory/lessons/factory-triage.md"
+output  = "factory.triage.v1"
+
+# ── plan 토론자 ─────────────────────────────────────
+[plan.product-advocate]
+agent   = ".claude/agents/plan-product-advocate.md"
+model   = "opus"
+lessons = ".factory/lessons/plan-product-advocate.md"
+stance  = "사용자 가치와 스펙 의도를 대변. 범위 축소에 저항"
+
+[plan.architect]
+agent   = ".claude/agents/plan-architect.md"
+model   = "opus"
+lessons = ".factory/lessons/plan-architect.md"
+stance  = "경계·계약·데이터 모델. TECHNICAL.md와 ADR을 근거로"
+
+[plan.skeptic]
+agent   = ".claude/agents/plan-skeptic.md"
+model   = "opus"
+lessons = ".factory/lessons/plan-skeptic.md"
+stance  = "제안을 공격. 근본 결함과 급진적 대안. '만들지 않을 것'을 주장"
+
+[plan.operator]
+agent   = ".claude/agents/plan-operator.md"
+model   = "sonnet"
+lessons = ".factory/lessons/plan-operator.md"
+stance  = "배포·장애·롤백·관측. 프로덕션에서 무엇이 깨지는가"
+
+[plan.synthesizer]
+agent   = ".claude/agents/plan-synthesizer.md"
+model   = "opus"
+lessons = ".factory/lessons/plan-synthesizer.md"
+output  = "factory.plan.v1"
+
+# ── implement ───────────────────────────────────────
+[implement.builder]
+agent   = ".claude/agents/factory-builder.md"
+model   = "opus"
+lessons = ".factory/lessons/factory-builder.md"
+
+[implement.verifier]
+agent   = ".claude/agents/factory-verifier.md"
+model   = "opus"
+lessons = ".factory/lessons/factory-verifier.md"
+cold_read = true                                  # builder 출력·코멘트를 입력에서 제거
+output  = "factory.verdict.v1"
+
+# ── review 리뷰어 ────────────────────────────────────
+[review.correctness]
+agent    = ".claude/agents/reviewer-correctness.md"
+model    = "opus"
+lessons  = ".factory/lessons/reviewer-correctness.md"
+spawn_on = ["tier:docs", "tier:standard", "tier:load-bearing"]
+cold_read = true
+output   = "factory.verdict.v1"
+
+[review.security]
+agent    = ".claude/agents/reviewer-security.md"
+model    = "opus"
+lessons  = ".factory/lessons/reviewer-security.md"
+spawn_on = ["tier:load-bearing", "path:src/auth/**", "path:src/api/public/**"]
+cold_read = true
+output   = "factory.verdict.v1"
+
+[review.architecture]
+agent    = ".claude/agents/reviewer-architecture.md"
+model    = "opus"
+lessons  = ".factory/lessons/reviewer-architecture.md"
+spawn_on = ["tier:standard", "tier:load-bearing"]
+cold_read = true
+output   = "factory.verdict.v1"
+
+[review.spec-conformance]
+agent    = ".claude/agents/reviewer-spec-conformance.md"
+model    = "sonnet"
+lessons  = ".factory/lessons/reviewer-spec-conformance.md"
+spawn_on = ["tier:docs", "tier:standard", "tier:load-bearing"]
+cold_read = false                                 # 이 역할만 plan handoff를 읽는다 (스펙 대조가 임무)
+output   = "factory.verdict.v1"
+
+[review.qa]
+agent    = ".claude/agents/reviewer-qa.md"
+model    = "sonnet"
+lessons  = ".factory/lessons/reviewer-qa.md"
+spawn_on = ["tier:standard", "tier:load-bearing"]
+cold_read = true
+tools    = ["Bash", "Read", "Grep", "Glob"]     # 1.0은 MCP 서버를 설치하지 않는다 — 브라우저는 Bash로 npx playwright
+output   = "factory.verdict.v1"
+
+# ── retro ───────────────────────────────────────────
+# merge에는 역할이 없다 — merge 스테이지는 `claude -p`를 전혀 부르지 않는 스크립트 전용이고(ADR-015 R3),
+# 충돌은 integrator가 아니라 `factory:approved → factory:rework` 전이로 implement가 다시 푼다.
+[retro.analyst]
+agent   = ".claude/agents/factory-retro.md"
+model   = "opus"
+lessons = ".factory/lessons/factory-retro.md"
+output  = "factory.retro.v1"

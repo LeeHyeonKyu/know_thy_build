@@ -1,0 +1,21 @@
+name: factory-integrity
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  integrity:
+    name: factory/integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.factory/actions/setup
+        with:
+          claude: "false"
+          test-env: "false"
+      - name: Integrity
+        run: node .factory/bin/integrity.js

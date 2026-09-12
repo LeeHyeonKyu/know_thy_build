@@ -2,3 +2,12 @@ node_modules/
 .claude/commands/
 *.tgz
 .npm/
+
+# know-thy-build factory
+.factory/out/
+.factory/node_modules/
+.factory/package-lock.json
+docs/factory/runs/
+test-results/
+coverage/
+.nyc_output/

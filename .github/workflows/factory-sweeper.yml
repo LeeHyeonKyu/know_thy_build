@@ -1,0 +1,31 @@
+name: factory-sweeper
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  # 멈춘 스테이지를 `gh workflow run`으로 다시 띄운다(KTB-8, sweeper의 세 번째 팔) — 그 호출에 필요하다.
+  # GITHUB_TOKEN이 아니라 FACTORY_BOT_TOKEN으로 나가지만, 잡 권한을 좁혀 두면 폴백이 없다.
+  actions: write
+concurrency:
+  group: factory-sweeper
+  cancel-in-progress: false
+jobs:
+  sweep:
+    runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+      - uses: ./.factory/actions/setup
+        with:
+          claude: "false"
+          test-env: "false"
+      - name: Sweep
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: node .factory/bin/sweep.js

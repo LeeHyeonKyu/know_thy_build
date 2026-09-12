@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+/**
+ * 로컬 진단용 게이트 러너 — run-stage의 `d.gates`와 같은 본체(lib/gates.js runStageGates)를 부른다.
+ * usage: gates.js [fast|full|deep] [--tier <docs|standard|load-bearing>] [--stage <implement|review|merge>] [--base <sha>]
+ * exit: 0 GREEN / 1 RED / 2 그 밖(MISCONFIGURED·BLOCKED)
+ */
+import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { run } from "../lib/exec.js";
+import { loadHarness } from "../lib/config.js";
+import { loadQuarantine } from "../lib/quarantine.js";
+import { runStageGates, verdictLine } from "../lib/gates.js";
+
+const isMain = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+if (isMain) {
+  const args = process.argv.slice(2);
+  const usage = "usage: gates.js [fast|full|deep] [--tier <docs|standard|load-bearing>] [--stage <implement|review|merge>] [--base <sha>] [--out <path>]";
+  if (args.includes("-h") || args.includes("--help")) { console.log(usage); process.exit(0); }
+  const flag = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : null; };
+  const level = args.find((a) => ["fast", "full", "deep"].includes(a)) || null;
+  const tier = flag("--tier") || "standard";
+  const stage = flag("--stage") || "implement";
+  const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
+  let harness;
+  try { harness = loadHarness(root); } catch (e) { console.error(`gates: .factory/harness.toml unreadable — ${e.message}`); process.exit(2); }
+  let base = flag("--base");
+  if (!base) {
+    // base가 없으면 diff가 없고, diff가 없으면 tier 승격도 증명 게이트도 전부 "변경 없음"으로 읽힌다.
+    const branch = harness.project?.default_branch ?? "main";
+    const mb = await run("git", ["merge-base", `origin/${branch}`, "HEAD"], { cwd: root });
+    base = mb.stdout.trim();
+    if (mb.code !== 0 || !base) { console.error(`gates: cannot compute merge-base against origin/${branch} (shallow clone?) — exit ${mb.code} ${mb.stderr.trim()}`); process.exit(2); }
+  }
+  const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
+  // gh는 넘기지 않는다 — 로컬 진단이 flaky 이슈를 열어서는 안 된다.
+  const result = await runStageGates({ run, cwd: root, harness, stage, tier, level, base, quarantine: loadQuarantine(root), readFile });
+  // 진단 결과는 스테이지 판정 파일(.factory/out/gates.json)을 덮지 않는다. 표식도 남겨서
+  // 혹시 그 자리에 놓이더라도 verifyStage가 거부한다.
+  result.diagnostic = true;
+  const outPath = flag("--out") || join(root, ".factory/out/gates.diagnostic.json");
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, JSON.stringify(result, null, 2));
+  console.log(`${verdictLine(result)} (diagnostic — written to ${outPath})`);
+  process.exit(result.status === "GREEN" ? 0 : result.status === "RED" ? 1 : 2);
+}
