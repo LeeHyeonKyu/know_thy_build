@@ -27,7 +27,7 @@ PROJECT.md, 코드
 
 ## Does
 
-기존(스택 비교·아키텍처·TDR·적대적 리뷰) 유지 + **CHARTER 초안**: TDR의 "되돌리기 어려운 결정"에서 `load_bearing` 경로를, "절대 자동화하면 안 되는 것"에서 `NEVER_AUTOMATE`를, 프로젝트 성격(개인/OSS/고객)에서 `tier_default`와 hard limits를 도출. `status: draft`로 두고 사람이 읽은 뒤 `ready`로 바꾸게 함
+기존(스택 비교·아키텍처·TDR·적대적 리뷰) 유지 + **CHARTER 초안**: TDR의 "되돌리기 어려운 결정"에서 `load_bearing` 경로를, "절대 자동화하면 안 되는 것"에서 `NEVER_AUTOMATE`를, 프로젝트 성격(개인/OSS/고객)에서 `tier_default`와 `back_pressure`를 도출. hard limits(`limits: { K, M, R }`, `plan_rounds`)는 CHARTER 템플릿의 기본값으로 시작하고 이 스킬은 그 값을 바꾸지 않는다 — 조정은 `:proposal` 경로로만 일어난다. `status: draft`로 두고 사람이 읽은 뒤 `ready`로 바꾸게 함
 
 ## Produces
 
@@ -746,7 +746,8 @@ Right after `docs/TECHNICAL.md` is written, draft the factory charter from the s
 **Derivation:**
 - **`load_bearing` paths** — from the Risk Register and any TDR whose "Consequences" note this decision is hard to reverse: list the source paths/directories that decision touches. These belong in `.factory/harness.toml [load_bearing] paths` (run `/know-thy-build:project` first if that file doesn't exist yet) — it's what makes a diff `load-bearing` tier in the Tiers table below.
 - **`NEVER_AUTOMATE`** — from anything the Technical Adversarial Review or PROJECT.md Principles flagged as "never let an agent touch this without a human": secrets, breaking public-API changes, deploy scripts, destructive data operations. Replace the `(fill in)` placeholders — don't leave them blank.
-- **`tier_default` and hard limits** — from the project's nature (PROJECT.md: personal / OSS / customer-facing). A solo/personal project can run looser hard limits; a customer-facing product should default `tier_default: standard` and keep `back_pressure.awaiting_review_max` conservative. State the reasoning as an inline comment, the way `harness.toml [gates.thresholds]` comments do.
+- **`tier_default` and `back_pressure`** — from the project's nature (PROJECT.md: personal / OSS / customer-facing). A customer-facing product should default `tier_default: standard` and keep `back_pressure.awaiting_review_max` conservative; a solo/personal project can run looser. State the reasoning as an inline comment, the way `harness.toml [gates.thresholds]` comments do.
+- **Hard limits (`limits: { K, M, R }`, `plan_rounds`) are NOT derived here.** Write the CHARTER template's defaults unchanged — `K: 3, M: 3, R: 2` and `plan_rounds: { docs: 2, default: 3 }`. These are the factory's own rework/RED/round ceilings, and changing them is a decision about the factory's behaviour that must be argued from real run data: it happens through `/know-thy-build:proposal` (a retro proposal PR a human merges), never from a first-pass technical design. Say so to the person if they ask to raise them now.
 
 **Write `docs/factory/CHARTER.md`** using the Plan 2 template's frontmatter format verbatim — only the values change:
 

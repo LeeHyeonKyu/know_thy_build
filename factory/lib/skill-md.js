@@ -59,6 +59,11 @@ export function lintSkillMd(text, { name, installed = false } = {}) {
     if (!/^##\s+Language(\s|$)/m.test(text)) {
       violations.push({ rule: "language", msg: "installed skill must have a ## Language section" });
     }
+    // 설치본에 `{{LANG}}`이 남아 있으면 설치기가 치환을 놓친 것이다 — 섹션은 있으니 위 검사는 통과하지만,
+    // 그 스킬은 실행될 때 사람에게 "언어: {{LANG}}"라고 말한다. 조용히 두면 아무도 모른다.
+    if (text.includes("{{LANG}}")) {
+      violations.push({ rule: "language", msg: "installed skill still contains the {{LANG}} placeholder — reinstall with `npx know-thy-build`" });
+    }
   } else if (!text.includes("{{LANG}}")) {
     violations.push({ rule: "language", msg: "template skill must contain the {{LANG}} placeholder" });
   }

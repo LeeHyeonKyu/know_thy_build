@@ -33,12 +33,34 @@ for (const name of NAMES) {
 
 const FORBIDDEN = ["worktree", "check-merge-gate", "finish", "sub-agent", "subagent"];
 
-for (const name of NAMES) {
+// architect/designer are the two non-catalog design helpers. They carried the same dead flow —
+// a `feature/*` worktree requirement and a `gate:` field to stamp — neither of which exists any
+// more (the factory records review state as issue labels). The scan is uniform across all 6
+// files: "sub-agent" was reworded to "agent" in architect.md, which is what it actually does
+// (it orchestrates agents), so no file needs an exemption.
+const HELPERS = ["architect", "designer"];
+
+for (const name of [...NAMES, ...HELPERS]) {
   for (const term of FORBIDDEN) {
     test(`forbidden string: templates/know-thy-build/${name}.md does not contain "${term}" (case-insensitive)`, () => {
       expect(readTemplate(name).toLowerCase()).not.toContain(term);
     });
   }
+}
+
+// `gate:` is scoped: prose may say "there is no `gate:` field" (architect/designer now do), but
+// no fenced yaml block may define one.
+for (const name of HELPERS) {
+  test(`templates/know-thy-build/${name}.md: no fenced yaml block defines a \`gate:\` field`, () => {
+    const text = readTemplate(name);
+    const re = /```yaml\n([\s\S]*?)```/g;
+    let m;
+    while ((m = re.exec(text))) expect(m[1], name).not.toMatch(/^\s*gate:/m);
+  });
+
+  test(`templates/know-thy-build/${name}.md: points at the feature spec at docs/features/NNN.md instead of a branch`, () => {
+    expect(readTemplate(name)).toContain("docs/features/NNN.md");
+  });
 }
 
 // ── forbidden string, scoped: feature.md's spec frontmatter template block must not carry a

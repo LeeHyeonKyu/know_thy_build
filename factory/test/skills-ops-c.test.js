@@ -213,15 +213,17 @@ for (const name of NAMES) {
 // ── :role-specific: the structure-validation one-liner must call lintAgentMd with expectedName,
 // and must reference the two example agent files it copies frontmatter shape from. ─────────────
 
+// 이름은 <short> 하나에서 파생된다(최종 리뷰 I2) — 파일/expectedName에는 reviewer-/plan- 접두어가 붙고,
+// TOML 키와 CHARTER 목록에는 붙지 않는다. 한 자리라도 어긋나면 역할은 lint를 통과하고도 소집되지 않는다.
 test("templates/know-thy-build/role.md: gives the exact lintAgentMd structure-validation one-liner", () => {
   const text = readTemplate("role");
-  expect(text).toContain("m.lintAgentMd(require(\"fs\").readFileSync(\".claude/agents/<name>.md\",\"utf8\"),{expectedName:\"<name>\"})");
+  expect(text).toContain("m.lintAgentMd(require(\"fs\").readFileSync(\".claude/agents/reviewer-<short>.md\",\"utf8\"),{expectedName:\"reviewer-<short>\"})");
 });
 
-test("templates/know-thy-build/role.md: shows a reviewer roles.toml block ([review.<name>]) and a plan debater block ([plan.<name>])", () => {
+test("templates/know-thy-build/role.md: shows a reviewer roles.toml block ([review.<short>]) and a plan debater block ([plan.<short>])", () => {
   const text = readTemplate("role");
-  expect(text).toContain("[review.<name>]");
-  expect(text).toContain("[plan.<name>]");
+  expect(text).toContain("[review.<short>]");
+  expect(text).toContain("[plan.<short>]");
 });
 
 // ── Fix round 1 (Critical): plan-stage spawning reads charter.plan_roles[tier] ||

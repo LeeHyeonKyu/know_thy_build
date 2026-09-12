@@ -35,6 +35,8 @@ Technical terms (e.g. CLI, PR/issue numbers, schema and field names, label names
 
 ## 집행 규칙 (읽기 전용)
 
+**Guard**: 무엇을 하기 전에 `.factory/bin/run-stage.js`가 있는지 먼저 본다 — 없으면 이 저장소에는 아직 factory가 없다. 그때는 "factory가 아직 없음 — `npx know-thy-build factory init`" 한 줄만 출력하고 즉시 멈춘다(아무것도 읽거나 쓰지 않는다).
+
 이 스킬은 읽기 전용이다 — 라벨을 전이하지 않고, 이슈나 PR을 만들거나 편집하지 않으며, `docs/factory/digests/YYYY-Wnn.md` 외에는 어떤 파일도 쓰지 않는다. 머지는 이 스킬이 다루는 대상이 아니다 — `gh pr merge` 금지, 어떤 경우에도 호출하지 않는다. 코드에서 무언가 고칠 거리를 발견해도 여기서 만들지 않는다 — `/know-thy-build:issue`로 사람을 보낸다.
 
 ---
@@ -46,8 +48,9 @@ Technical terms (e.g. CLI, PR/issue numbers, schema and field names, label names
 기본은 지난 7일이다. 사람이 다른 기간을 말하면 그것을 쓴다.
 
 ```bash
-FROM=$(date -u -d '7 days ago' +%F)   # 기본 기간 시작일 (UTC)
-TO=$(date -u +%F)
+# GNU date의 상대날짜 옵션은 macOS(BSD date)에 없다 — node로 계산한다(어디서나 같은 값, UTC).
+FROM=$(node -e 'console.log(new Date(Date.now()-7*864e5).toISOString().slice(0,10))')   # 기본 기간 시작일 (UTC)
+TO=$(node -e 'console.log(new Date().toISOString().slice(0,10))')
 gh pr list --state merged --search "merged:>=$FROM" --json number,title,body,mergedAt,url
 ```
 
@@ -98,8 +101,10 @@ cat docs/PROJECT.md
 파일명은 기간 **시작일**의 ISO 8601 주차로 정한다(UTC, `factory/lib/retro/proposals.js`의 `isoWeek()`와 같은 규칙 — 목요일이 속한 주로 정규화):
 
 ```bash
-date -u -d "$FROM" +%G-W%V
+node -e 'const d=new Date(process.argv[1]+"T00:00:00Z");d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7)+3);const y=d.getUTCFullYear();const j=new Date(Date.UTC(y,0,4));j.setUTCDate(j.getUTCDate()-((j.getUTCDay()+6)%7)+3);const w=1+Math.round((d-j)/6048e5);console.log(`${y}-W${String(w).padStart(2,"0")}`)' "$FROM"
 ```
+
+(`%G-W%V`와 같은 값이지만 GNU `date`에 기대지 않는다 — 목요일 규칙을 그대로 구현한 것이라 `isoWeek()`와 항상 일치한다.)
 
 `Write` 도구로 `docs/factory/digests/YYYY-Wnn.md`를 쓴다(예: `docs/factory/digests/2026-W37.md`). 각 절에 근거(PR 번호, 이슈 번호, run 번호)를 리터럴로 남긴다 — 다음에 사람이 "왜?"라고 물었을 때 되짚어갈 수 있어야 한다.
 

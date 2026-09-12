@@ -134,21 +134,26 @@ cat docs/QA.md 2>/dev/null | head -60
 gh issue create --label backlog --title "{{short_title}}" --body-file <tmp>
 ```
 
-### 회귀 가드 이름 보정
+### 회귀 가드 이름 보정 — 본문을 고치고, 그 사실을 코멘트로 남긴다
 
-`gh issue create`가 이슈 번호(예: `#47`)를 반환하면, 본문의 `test_NNN_<slug>`를 실제 번호로 바꾼 보정 코멘트를 남긴다 — 본문을 다시 쓰지 않는다(이슈 본문은 spec-conformance 리뷰어가 대조하는 원본이라, 조용히 고치면 무엇이 바뀌었는지 알 수 없다):
+`gh issue create`가 이슈 번호(예: `#47`)를 반환하면 `test_NNN_<slug>`의 `NNN`을 실제 번호로 바꿔야 한다. **보정은 반드시 본문(body)에 반영한다** — 팩토리가 읽는 것은 이슈 **본문과 핸드오프뿐**이고(`factory/lib/context.js`가 컨텍스트를 만들 때 코멘트 본문을 읽지 않는다), 코멘트로만 남긴 보정은 triage·plan·리뷰어 어디에도 도달하지 않는다. 조용한 수정이 되지 않도록 본문 갱신 **직후에** 무엇을 왜 바꿨는지 짧은 provenance 코멘트를 따로 남긴다:
 
 ```bash
+# 1) 본문의 test_NNN_ → test_47_ 로 치환한 새 본문 파일을 만든다
+sed 's/test_NNN_/test_47_/g' <tmp> > <tmp2>
+gh issue edit 47 --body-file <tmp2>
+
+# 2) 그 보정 사실을 코멘트로 남긴다(본문 diff의 provenance)
 gh issue comment 47 --body-file <correction-tmp>
 ```
 
 `<correction-tmp>` 내용:
 
 ```markdown
-회귀 가드 이름 보정: `test_NNN_<slug>` → `test_47_<slug>`
+회귀 가드 이름 보정: 생성 직후 본문의 `test_NNN_<slug>`를 `test_47_<slug>`로 바꿨습니다(이슈 번호는 생성 전에는 알 수 없습니다). 그 외 본문 변경은 없습니다.
 ```
 
-> "이슈 #47이 `backlog` 라벨로 생성됐습니다. 회귀 가드는 `test_47_<slug>`로 보정 코멘트를 남겼습니다. `/know-thy-build:next`로 착수를 결정하세요."
+> "이슈 #47이 `backlog` 라벨로 생성됐습니다. 본문의 회귀 가드 이름을 `test_47_<slug>`로 보정하고 그 사실을 코멘트로 남겼습니다. `/know-thy-build:next`로 착수를 결정하세요."
 
 ## `--now`: 즉시 착수
 

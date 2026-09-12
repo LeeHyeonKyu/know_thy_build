@@ -170,7 +170,9 @@ export function checkSkills({ root, exists, readFile, list = readdirSync }) {
   }
 
   const missing = ALL_SKILLS.filter((n) => !found.has(n));
-  out.push(missing.length ? c("skills.missing", "WARN", `missing: ${missing.join(", ")}`) : c("skills.missing", "PASS"));
+  out.push(missing.length
+    ? c("skills.missing", "WARN", `missing: ${missing.join(", ")} — run \`npx know-thy-build\` to (re)install`)
+    : c("skills.missing", "PASS"));
 
   return out;
 }

@@ -56,7 +56,7 @@ Pick a language, and 13 commands are installed into your `.claude/commands/` —
 
 ```
 Define:     :project → :technical → :qa setup
-Per feature: :feature → :qa review → [:designer] → implement → [:architect] → QA test → ship
+Per feature: :feature → [:designer] → [:architect] → :issue/:next → factory → ship
 ```
 
 `[ ]` = optional, invoked when needed.
@@ -75,14 +75,12 @@ These three commands run once at project start. They produce the foundation docu
 
 ```
 /know-thy-build:feature      Define the feature (problem, value, stories, AC, design intent)
-/know-thy-build:qa           Define test cases for this feature (what "done" means)
 /know-thy-build:designer     [optional] Deep UX analysis (heuristics, prototyping, accessibility)
-factory (labelled issue → triage → plan → implement → review → merge)
 /know-thy-build:architect    [optional] Code design for complex features (stubs, tests, agents)
-/know-thy-build:qa           Test the running product against QA.md test cases
+factory (labelled issue → triage → plan → implement → review → merge)
 ```
 
-A feature is complete ONLY when all its test cases in `docs/QA.md` pass with evidence.
+Verification is the factory's job, not a manual step: its review roster (including the `qa` reviewer) and the deterministic gates decide whether a PR is mergeable. `/know-thy-build:qa` sets up the framework and the per-feature test cases those roles judge against.
 
 ### Phase 2 — factory (dark build loop)
 
@@ -185,7 +183,7 @@ Result: `## Design` section in the feature spec + prototype artifact(s)
 /know-thy-build:architect
 ```
 
-Optional. For Architectural features (new subsystem, multi-component, structural change). Uses **Program Sketching** — creates code scaffolds with Design by Contract comments (PRE/POST/WHY/EXAMPLE) and signature tests, then orchestrates sub-agents.
+Optional. For Architectural features (new subsystem, multi-component, structural change). Uses **Program Sketching** — creates code scaffolds with Design by Contract comments (PRE/POST/WHY/EXAMPLE) and signature tests, then orchestrates agents.
 
 Includes CRC Cards, Adversarial Review (Minimalist/Implementer/Skeptic), Over-Specification Prevention, Hardest-First Vertical Slice.
 
@@ -200,7 +198,7 @@ When you run `/know-thy-build:project`, it generates a **Development Workflow** 
 ```
 User Session (Orchestrator only — never implements directly)
 │
-├── Dispatches Implementation Sub-Agent
+├── Dispatches Implementation Agent
 │   ├── Pre-work: reads PROJECT.md, TECHNICAL.md, feature spec, QA.md
 │   ├── Implements within defined scope
 │   │

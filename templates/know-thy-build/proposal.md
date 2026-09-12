@@ -38,6 +38,8 @@ PR 코멘트(드라이런 결과), `human-decision`
 
 ## 집행 규칙 (공통)
 
+**Guard**: 무엇을 하기 전에 `.factory/bin/run-stage.js`가 있는지 먼저 본다 — 없으면 이 저장소에는 아직 factory가 없다. 그때는 "factory가 아직 없음 — `npx know-thy-build factory init`" 한 줄만 출력하고 즉시 멈춘다(아무것도 읽거나 쓰지 않는다).
+
 라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --human --reason "<why>"`; 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
 
 이 스킬은 보통 이슈가 아니라 PR을 다룬다 — `human-decision:v1` 코멘트는 그 PR에 남기고(`gh pr comment`), 전이가 필요한 경우(예: 관련 이슈를 되돌릴 때)에만 `transition.js`를 쓴다. 어느 경우든 `gh pr merge` 호출은 금지 — 이 스킬 자신도, 사람에게 대신 실행해주겠다는 제안도 하지 않는다. 머지 버튼은 언제나 사람이 GitHub UI에서 직접 누른다.
@@ -105,15 +107,22 @@ git show origin/factory/records:docs/factory/runs/<n>.md   # 여러 run에 대�
 
   현재 임계값과 제안된 임계값 각각으로 과거 값들을 다시 판정해 바뀌는 건수를 보여준다.
 
-- **`role-new`(역할 신설)** → 과거 PR 1~2건에 `claude -p`로 그 역할만 spawn해 발견 목록을 만든다(`--agent` 파일을 지정, 실행 전 사용자 확인 후):
+- **`role-new`(역할 신설)** → 과거 PR 1~2건에 `claude -p`로 그 역할만 spawn해 발견 목록을 만든다(실행 전 사용자 확인 후).
+
+  **`--agent`는 경로가 아니라 이름을 받는다** — `.claude/agents/`에서 그 이름의 `.md`를 찾아 해석하므로 `.md`도 디렉터리도 붙이지 않는다. 그런데 신설 역할의 파일은 **아직 이 PR 안에만 있다** — 지금 체크아웃된 브랜치에는 없으므로 이름이 해석되지 않는다. 그래서 PR을 잠시 체크아웃했다가 돌아온다. 체크아웃은 작업 트리를 바꾸는 행위라, 먼저 트리가 깨끗한지 확인하고 아니면 **멈춘다**(사람의 미커밋 작업을 이 스킬이 옮기지 않는다):
 
 ```bash
-claude -p --agent <proposed-role>.md "<past PR diff나 컨텍스트>"
+[ -z "$(git status --porcelain)" ] || { echo "작업 트리가 깨끗하지 않습니다 — 커밋/stash 후 다시 시도하세요"; exit 1; }
+gh pr checkout <pr>                                    # 제안 PR을 체크아웃 — 역할 파일이 여기에만 있다
+claude -p --agent <proposed-role-name> "$(gh pr diff <past-merged-pr>)에 이 역할의 Lens로 리뷰 판정을 내려라"
+git switch -                                           # 반드시 원래 브랜치로 복귀
 ```
+
+  `<proposed-role-name>`은 PR diff가 추가한 `.claude/agents/<name>.md`의 basename이다(`reviewer-<short>` 또는 `plan-<short>`). `git switch -`는 실패하든 성공하든 반드시 실행한다 — 체크아웃한 채로 끝내면 사람이 다른 브랜치에 서 있는 줄 모르고 다음 작업을 한다.
 
   실행 전에 반드시 사람에게 "이 역할을 과거 PR 2건에 시험 실행합니다, 진행할까요?"로 확인한다 — 실제 토큰을 쓰는 호출이다.
 
-- **`role-change`(역할 변경)** → 제안된 에이전트 `.md`를 설치된 `.claude/agents/<name>.md`와 diff한 뒤, `role-new`와 같은 방식으로 과거 PR 1건에 재실행해 무엇이 달라지는지 보여준다.
+- **`role-change`(역할 변경)** → 제안된 에이전트 `.md`를 설치된 `.claude/agents/<name>.md`와 diff한 뒤, `role-new`와 똑같은 절차(깨끗한 트리 확인 → `gh pr checkout <pr>` → `claude -p --agent <name>` → `git switch -`)로 과거 PR 1건에 재실행해 무엇이 달라지는지 보여준다 — 변경된 Lens 역시 PR 안에만 있으므로 체크아웃 없이는 옛 버전이 돈다.
 
 - **`test-delete`(테스트 삭제)** → `.factory/quarantine.toml`의 격리 항목과, 그 테스트가 실패했던 run 기록을 함께 보여준다(삭제는 조용히 일어나지 않는다 — 언제나 사람이 본다).
 

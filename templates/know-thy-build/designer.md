@@ -128,20 +128,9 @@ Does this match what you're imagining? Anything that feels off?
 
 ## Before You Begin
 
-### 0. Worktree detection
+### 0. Find the feature spec
 
-Check if you're working in the correct worktree:
-
-```bash
-REPO=$(basename $(git rev-parse --show-toplevel))
-BRANCH=$(git branch --show-current)
-```
-
-**If the branch starts with `feature/`:** You're in the worktree. Proceed.
-**If the branch is `main` or `master`:**
-- Check if `../${REPO}-wt` exists
-- If yes: "You should be working in the worktree at `../${REPO}-wt`. Switch there before proceeding."
-- If no: "No worktree found. Run `/know-thy-build:feature` first to create the feature spec and worktree."
+Read the feature spec at `docs/features/NNN.md` — the issue body names it (`Spec: docs/features/NNN.md`). If no spec is named, stop and send the person to `/know-thy-build:feature`: there is nothing to design against yet.
 
 ### 1. Read all context
 
@@ -670,23 +659,6 @@ Append to the feature's `## Changes` section:
 - QA Checklist items updated to match
 - Changes recorded in the feature spec
 
-## Gate Update
+## Recording that the design is done
 
-After design work is complete and documented, update the feature spec's gate:
-
-1. Find the active feature spec:
-   ```bash
-   FEATURE_NUM=$(git branch --show-current | grep -oE '[0-9]+' | head -1)
-   FEATURE_FILE="docs/features/$(printf '%03d' $FEATURE_NUM).md"
-   ```
-
-2. Update gate status in the frontmatter:
-   Change `designer: pending` to `designer: passed` in the `gate:` section.
-
-3. Add the current date next to the status:
-   ```yaml
-   gate:
-     designer: passed  # {{date}}
-   ```
-
-This gate update is recorded in the worktree. The factory merges the PR into main after review — do not merge it by hand.
+Do not write a review-state field into the feature spec. Review state lives in the factory's issue labels — the pipeline records it, and there is no `gate:` field for this skill to set. When the design section is complete, say so to the person and hand back to `/know-thy-build:feature`; the factory's own stages take it from there and a human merges the PR.

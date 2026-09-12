@@ -123,7 +123,7 @@ function install(lang, global) {
   console.log(`
   Done! Installed ${scope} (${lang})
 
-  Pipeline (13 skills — one per human decision point):
+  Pipeline (13 skills — one per human decision point — plus 2 design helpers = 15 files):
 
     Define (5):
       /know-thy-build:project      Define what and why
@@ -169,17 +169,19 @@ if (args.includes("--help") || args.includes("-h")) {
     npx know-thy-build --lang ko    Skip language prompt
     npx know-thy-build factory <init|doctor|bootstrap|run|status>   Phase 2 — see \`factory --help\`
 
-  Commands installed (13 skills — one per human decision point):
-    Define:
-      :project     Define what and why                → docs/PROJECT.md + CLAUDE.md + hooks
-      :technical   Define how to build                → docs/TECHNICAL.md
-      :qa          QA framework + test the product     → docs/QA.md
-      :feature     Design a feature before building it → docs/features/NNN.md + issue
+  Commands installed (13 skills — one per human decision point — plus 2 design helpers = 15 files):
+    Define (5):
+      :project     Define what and why                 → docs/PROJECT.md + CLAUDE.md + hooks
+      :technical   Define how to build                 → docs/TECHNICAL.md
+      :qa          QA framework + test the product      → docs/QA.md
+      :feature     Design a feature before building it  → docs/features/NNN.md + issue
       :issue       Log a bug/chore/small change         → issue only, no spec doc
-      :architect   Code structure (stubs, tests)        → scaffold + signature tests
-      :designer    UX design intent (UI features)       → design intent in feature spec
 
-    Operate (require \`factory init\`):
+      Design helpers (invoked from :feature):
+        :architect   Code structure (stubs, tests)      → scaffold + signature tests
+        :designer    UX design intent (UI features)     → design intent in feature spec
+
+    Operate (8 — require \`factory init\`):
       :harness     Fix a failing doctor / adopt a brownfield repo
       :next        Pick the next issue to queue
       :clarify     Answer needs-info questions on a spec

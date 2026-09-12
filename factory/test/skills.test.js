@@ -1,6 +1,6 @@
 import { test, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSkillMd, lintSkillMd, SKILL_SECTIONS } from "../lib/skill-md.js";
@@ -65,11 +65,14 @@ const OPS_READONLY_OK = INSTALLED_OK.replace(
 const CLI = new URL("../../bin/cli.js", import.meta.url).pathname;
 const TEMPLATES_KTB = new URL("../../templates/know-thy-build/", import.meta.url).pathname;
 
+// spawnSync는 기본적으로 무한정 기다린다 — 설치기가 어떤 이유로든(프롬프트 대기 등) 멈추면 vitest의
+// 테스트 타임아웃이 아니라 프로세스 자체가 걸린 채로 남는다. 자식에게도 상한을 준다(install-smoke.test.js와 동일).
 function runInstaller(cwd) {
   return spawnSync(process.execPath, [CLI, "--lang", "ko"], {
     cwd,
     env: { ...process.env, HOME: cwd },
     encoding: "utf8",
+    timeout: 30_000,
   });
 }
 
@@ -230,29 +233,37 @@ test("lintSkillMd: a Define skill (project) is never held to the ops rules even 
 
 test("installer: installs exactly templates/know-thy-build/*.md, substitutes {{LANG}}, and installs nothing under .claude/commands/factory/", () => {
   const root = mkdtempSync(join(tmpdir(), "ktb-install-"));
-  const result = runInstaller(root);
-  expect(result.status, result.stderr).toBe(0);
+  try {
+    const result = runInstaller(root);
+    expect(result.status, result.stderr).toBe(0);
 
-  const dest = join(root, ".claude/commands/know-thy-build");
-  const installed = readdirSync(dest).filter((f) => f.endsWith(".md")).sort();
-  const templates = readdirSync(TEMPLATES_KTB).filter((f) => f.endsWith(".md")).sort();
-  expect(installed).toEqual(templates);
-  expect(installed).not.toContain("finish.md");
+    const dest = join(root, ".claude/commands/know-thy-build");
+    const installed = readdirSync(dest).filter((f) => f.endsWith(".md")).sort();
+    const templates = readdirSync(TEMPLATES_KTB).filter((f) => f.endsWith(".md")).sort();
+    expect(installed).toEqual(templates);
+    expect(installed).not.toContain("finish.md");
 
-  for (const f of installed) {
-    expect(readFileSync(join(dest, f), "utf8")).not.toContain("{{LANG}}");
+    for (const f of installed) {
+      expect(readFileSync(join(dest, f), "utf8")).not.toContain("{{LANG}}");
+    }
+
+    expect(existsSync(join(root, ".claude/commands/factory"))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
-
-  expect(existsSync(join(root, ".claude/commands/factory"))).toBe(false);
 }, 30_000);
 
 test("installer: removes a pre-existing know-thy-build/finish.md legacy file", () => {
   const root = mkdtempSync(join(tmpdir(), "ktb-install-finish-"));
-  const dir = join(root, ".claude/commands/know-thy-build");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "finish.md"), "legacy :finish skill\n");
+  try {
+    const dir = join(root, ".claude/commands/know-thy-build");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "finish.md"), "legacy :finish skill\n");
 
-  const result = runInstaller(root);
-  expect(result.status, result.stderr).toBe(0);
-  expect(existsSync(join(dir, "finish.md"))).toBe(false);
+    const result = runInstaller(root);
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(dir, "finish.md"))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }, 30_000);

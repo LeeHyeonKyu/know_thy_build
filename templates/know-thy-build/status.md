@@ -35,6 +35,8 @@ The CLI's own output (labels, numbers, field names) is shown as-is, unmodified. 
 
 ## 집행 규칙 (읽기 전용)
 
+**Guard**: 무엇을 하기 전에 `.factory/bin/run-stage.js`가 있는지 먼저 본다 — 없으면 이 저장소에는 아직 factory가 없다. 그때는 "factory가 아직 없음 — `npx know-thy-build factory init`" 한 줄만 출력하고 즉시 멈춘다(아무것도 읽거나 쓰지 않는다).
+
 이 스킬은 읽기 전용이다 — 라벨을 전이하지 않고, 이슈나 PR을 만들거나 편집하지 않으며, 어떤 파일도 쓰지 않는다. 머지는 이 스킬이 다루는 대상이 아니다 — `gh pr merge` 금지, 어떤 경우에도 호출하지 않는다. 상태 계산은 절대 다시 구현하지 않는다(P5-R3) — `npx know-thy-build factory status`가 유일한 소스이고, 이 스킬은 그 출력을 사람 대화로 옮기는 것뿐이다.
 
 ---
@@ -85,7 +87,7 @@ npx know-thy-build factory status --json
 - [retro-proposal] #131 "gate 승격 제안" — 다음: /know-thy-build:proposal 131
 ```
 
-**큐(`## 큐`)가 비어 있으면**: "backlog에 착수할 이슈가 없습니다 — `/know-thy-build:next`로 다음 이슈를 고르세요."
+**큐(`## 큐`)가 비어 있으면**: 이것은 "할 일이 없다"가 아니라 "**아직 착수시킨 것이 없다**"는 뜻이다 — `## 큐`가 세는 것은 `queue`/`ready`/`planned`/`approved` 상태의 이슈이고(`factory/lib/status.js`의 `QUEUE_STATES`), `backlog`에 쌓인 이슈는 여기 나타나지 않는다. 그러니 "backlog가 비었다"고 말하지 말고 이렇게 안내한다: "지금 공장이 집어 갈 이슈가 없습니다 — `/know-thy-build:next`로 backlog에서 다음 이슈를 골라 큐에 넣으세요."
 
 **역압이 상한이면**(`backPressure.awaiting_review >= backPressure.max` 또는 `backPressure.quarantined >= backPressure.quarantine_max`): 먼저 그 사실을 말하고, 임계값 자체를 조정할지는 `/know-thy-build:proposal`로, 지금 막힌 이슈를 푸는 것은 `/know-thy-build:unstick`으로 안내한다 — 이 스킬은 상한을 넘겨서 진행시키지 않는다(Must not, 상태 변경 없음).
 
