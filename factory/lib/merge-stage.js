@@ -15,6 +15,7 @@ const MERGEABILITY_REPOLL_MS = 5000;
  * d: prInfo() → PR view(number,state,mergeable,…) | null, gates() → factory.gates.v1 | null (null은 "통과"가
  *    아니라 **판정 없음**이다 — needs-human "gates missing at merge"로 떨어진다. MergeBaseError/
  *    GitDiffError를 던질 수 있다), mergeGates() → { checksGreen, integrityGreen } (마찬가지),
+ *    prReady?(pr) — draft PR을 ready로 뒤집는다(KTB-15; mergePr 직전. 없으면 건너뛰고 기록만 남긴다),
  *    mergePr(pr), transition({to,reason,mergeGatesResult?}), closeIssue(pr), sleep?(ms),
  *    protectedPaths() → { ok, files, reason? } (KTB-5 — base 브랜치 코드로 계산한 보호 경로 목록),
  *    policyViolations() → { ok, files, reason? } (KTB-6 — `additive_only` 섹션 규칙을 벗어난 역할 파일).
@@ -235,6 +236,36 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 머지되지 않았고(irreversible 아님) 재시도 판단이 필요해서다.
   const sha = headSha || gates?.head_sha || null;
   record([`merge: head ${sha ? sha.slice(0, 7) : "unknown"}`]);
+
+  // (6a) draft를 ready로 뒤집는다(KTB-15). implement는 일부러 `--draft`로 PR을 열지만
+  // (리뷰 중인 PR을 사람이 실수로 머지하지 못하게 하는 신호다) 아무도 되돌리지 않았고, GitHub은
+  // draft PR의 머지를 GraphQL 단에서 거부한다 — `gh pr merge failed (1): GraphQL: Pull Request is
+  // still a draft`. 그래서 **어떤 PR도** 자동 머지될 수 없었다(데모 #8, 라운드 3).
+  //
+  // 자리가 여기인 것이 요점이다: 보호 경로·섹션 정책·게이트·필수 체크·무결성이 **전부** 통과한
+  // 뒤, 머지 직전이다. 그 앞에 두면 거부된 PR이 ready로 남아 사람이 실수로 머지할 수 있게 된다 —
+  // draft가 막으려던 바로 그 사고다. 이미 ready인 PR에 불러도 `gh pr ready`는 exit 0이므로 멱등이고,
+  // 재시도 런이 상태를 따로 묻지 않는다.
+  //
+  // 실패는 머지 실패와 같은 등급(`factory:blocked`)이다 — 아직 머지되지 않았으므로 되돌릴 것이
+  // 없고, 재시도로 풀릴 수 있다(사람 경로: `transition.js <n> factory:approved --human` →
+  // `factory run merge <n> --remote`, §3.2의 blocked → approved 엣지).
+  if (d.prReady) {
+    try {
+      await d.prReady(pr);
+      record([`merge: PR #${pr} ready for review`]);
+    } catch (e) {
+      const reason = `ready-for-review failed: ${e?.message || e}`;
+      const t = await d.transition({ to: "factory:blocked", reason });
+      record([`merge: prReady FAIL — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+  } else {
+    // dep이 없다고 머지를 멈추지는 않는다 — 이미 ready인 PR(또는 `--draft`를 쓰지 않는 하네스)이면
+    // 아무 문제가 없고, draft라면 바로 아래 mergePr가 GitHub의 거부를 그대로 blocked로 옮긴다.
+    record(["merge: prReady dep not wired — merging without the draft flip"]);
+  }
+
   try {
     await d.mergePr(pr);
   } catch (e) {

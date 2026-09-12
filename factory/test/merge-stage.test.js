@@ -29,6 +29,7 @@ const baseD = (over = {}) => ({
   protectedPaths: vi.fn(async () => ({ ok: true, files: [] })),
   policyViolations: vi.fn(async () => ({ ok: true, files: [] })),
   comment: vi.fn(async () => {}),
+  prReady: vi.fn(async () => {}),
   mergePr: vi.fn(async () => {}),
   transition: graphTransition(),
   closeIssue: vi.fn(async () => {}),
@@ -456,7 +457,58 @@ test("(3) a clean PR range (no protected files, sections within policy) merges a
   expect(d.mergePr).toHaveBeenCalled();
 });
 
-// ── (5) mergePr / head sha ───────────────────────────────────────────────
+// ── (5) prReady / mergePr / head sha ─────────────────────────────────────
+
+// KTB-15: 데모 #8은 triage→plan→implement→review를 전부 통과하고 여기서 죽었다 —
+// `gh pr merge failed (1): GraphQL: Pull Request is still a draft`. implement는 `--draft`로 PR을
+// 열고(그건 의도된 설계다 — 리뷰 중인 PR을 사람이 실수로 머지하지 못하게), 아무도 ready로 뒤집지
+// 않았다. 그래서 **어떤 PR도** 자동 머지될 수 없었다.
+test("(5) prReady is called immediately before mergePr — after every gate and policy check", async () => {
+  const calls = [];
+  const d = baseD({
+    protectedPaths: vi.fn(async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; }),
+    policyViolations: vi.fn(async () => { calls.push("policyViolations"); return { ok: true, files: [] }; }),
+    gates: vi.fn(async () => { calls.push("gates"); return { schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }; }),
+    mergeGates: vi.fn(async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; }),
+    prReady: vi.fn(async () => { calls.push("prReady"); }),
+    mergePr: vi.fn(async () => { calls.push("mergePr"); }),
+  });
+  const code = await run(d);
+  expect(code).toBe(0);
+  expect(calls).toEqual(["protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergePr"]);
+  expect(d.prReady).toHaveBeenCalledWith(9);
+});
+
+// 게이트가 떨어진 PR을 ready로 만들어 두면, 그다음부터는 사람이 실수로 머지 버튼을 누를 수 있다 —
+// draft는 그 실수를 막는 장치이므로 **머지하지 않기로 한 런은 draft를 건드리지 않는다**.
+test("(5) a refused merge never flips the PR out of draft", async () => {
+  const d = baseD({ gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "RED", head_sha: "a".repeat(40) })) });
+  await run(d);
+  expect(d.prReady).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(5) prReady throws → factory:blocked, and mergePr is never called", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({ prReady: vi.fn(async () => { throw new Error("gh pr ready failed (1): HTTP 403"); }) });
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: "ready-for-review failed: gh pr ready failed (1): HTTP 403" }));
+  expect(d.closeIssue).not.toHaveBeenCalled();
+  expect(lines.some((l) => /merge: prReady FAIL/.test(l))).toBe(true);
+});
+
+// dep이 배선되지 않은 오래된 호출자(또는 이미 ready인 PR)를 이유로 머지를 멈추지는 않는다 —
+// `gh pr ready`는 이미 ready인 PR에 대해 exit 0이므로 이 호출 자체가 멱등이다.
+test("(5) no prReady dep wired → the merge still proceeds, with a record line", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({ prReady: undefined });
+  const code = await run(d, { record });
+  expect(code).toBe(0);
+  expect(d.mergePr).toHaveBeenCalled();
+  expect(lines.some((l) => /prReady dep not wired/.test(l))).toBe(true);
+});
 
 test("(5) mergePr throws → factory:blocked 'merge API failed: …'", async () => {
   const { lines, record } = makeRecord();
@@ -529,7 +581,7 @@ test("(7) closeIssue failure is guarded — recorded, never thrown, still exit 0
 
 // ── happy path: full order + record lines for every step ───────────────────
 
-test("happy path: calls prInfo → protectedPaths → policyViolations → gates → mergeGates → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
+test("happy path: calls prInfo → protectedPaths → policyViolations → gates → mergeGates → prReady → mergePr → transition(merged) → closeIssue, in order, exit 0", async () => {
   const calls = [];
   const d = baseD({
     prInfo: vi.fn(async () => { calls.push("prInfo"); return { number: 9, state: "OPEN", mergeable: "MERGEABLE" }; }),
@@ -537,6 +589,7 @@ test("happy path: calls prInfo → protectedPaths → policyViolations → gates
     mergeGates: vi.fn(async () => { calls.push("mergeGates"); return { checksGreen: true, integrityGreen: true }; }),
     protectedPaths: vi.fn(async () => { calls.push("protectedPaths"); return { ok: true, files: [] }; }),
     policyViolations: vi.fn(async () => { calls.push("policyViolations"); return { ok: true, files: [] }; }),
+    prReady: vi.fn(async () => { calls.push("prReady"); }),
     mergePr: vi.fn(async () => { calls.push("mergePr"); }),
     transition: vi.fn(async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; }),
     closeIssue: vi.fn(async () => { calls.push("closeIssue"); }),
@@ -544,7 +597,7 @@ test("happy path: calls prInfo → protectedPaths → policyViolations → gates
   const { lines, record } = makeRecord();
   const code = await run(d, { record });
   expect(code).toBe(0);
-  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "mergePr", "transition:factory:merged", "closeIssue"]);
+  expect(calls).toEqual(["prInfo", "protectedPaths", "policyViolations", "gates", "mergeGates", "prReady", "mergePr", "transition:factory:merged", "closeIssue"]);
   expect(d.closeIssue).toHaveBeenCalledWith(9);
   // 7단계 각각의 흔적이 런 레코드에 남는다
   expect(lines.length).toBeGreaterThanOrEqual(7);

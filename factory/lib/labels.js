@@ -38,7 +38,14 @@ export const TRANSITIONS = new Map([
   ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked"])],
   ["factory:rework", new Set(["factory:in-progress", "factory:needs-human"])],
   ["factory:approved", new Set(["factory:merged", "factory:needs-human", "factory:rework", "factory:blocked"])],   // merge-stage: conflict → rework, gates/API failure → blocked
-  ["factory:blocked", new Set(["factory:needs-human", "factory:planned"])],
+  // blocked → approved(KTB-15): merge 스테이지는 **머지만** 실패해도 blocked로 떨어진다(draft
+  // 뒤집기 실패, `gh pr merge` API 실패, 게이트 판정 불가). 그 런은 리뷰까지 전부 통과한 이슈이고
+  // 고쳐야 할 것은 코드가 아니라 머지 한 걸음이라, 되돌아갈 자리는 planned가 아니라 approved다
+  // (planned로 보내면 이미 GREEN인 구현을 통째로 다시 돈다). 요구조건은 그대로 물린다 —
+  // `requirements.js`의 `factory:approved` 규칙이 review handoff + 이번 런의 GREEN gates 파일 +
+  // PR head 일치를 계속 요구하므로, 이 엣지가 "승인을 건너뛰는 문"이 되지는 않는다.
+  // 사람 경로: `transition.js <n> factory:approved --human` → `factory run merge <n> --remote`.
+  ["factory:blocked", new Set(["factory:needs-human", "factory:planned", "factory:approved"])],
   ["factory:needs-human", new Set(["factory:queue"])],
   ["factory:merged", new Set([])],
   ["factory:wont-do", new Set([])],

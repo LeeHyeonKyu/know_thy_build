@@ -251,6 +251,15 @@ test("prView maps gh json including label names", async () => {
   expect(run.calls[0].args).toEqual(["pr", "view", "9", "-R", repo, "--json", "number,state,mergeable,headRefName,headRefOid,baseRefName,labels"]);
 });
 
+// KTB-15: implement가 여는 PR은 draft다(`gh pr create --draft`). draft는 `gh pr merge`가
+// "Pull Request is still a draft"로 거부하므로, 머지 직전에 ready로 뒤집는 호출이 필요하다.
+test("prReady flips a draft PR to ready for review", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await gh.prReady(9);
+  expect(run.calls[0].args).toEqual(["pr", "ready", "9", "-R", repo]);
+});
+
 test("mergePr defaults to squash + delete-branch; closeIssue adds --comment only when given", async () => {
   const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
   const gh = makeGh({ run, repo });

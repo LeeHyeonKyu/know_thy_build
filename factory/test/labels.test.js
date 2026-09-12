@@ -31,6 +31,7 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:approved", "factory:blocked")).toBe(true);   // merge gates BLOCKED / merge API failure
   expect(canTransition("factory:blocked", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:blocked", "factory:planned")).toBe(true);   // sweeper 재큐
+  expect(canTransition("factory:blocked", "factory:approved")).toBe(true);  // KTB-15: 머지만 실패한 런의 재시도
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);
 });
 

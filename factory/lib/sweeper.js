@@ -177,6 +177,15 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
+  // blocked 팔은 **에스컬레이션만** 한다 — 유예 시간(이 잡의 실행 주기)이 지나면 needs-human이다.
+  // 여기서 재시도하지 않는 이유: blocked는 "판정에 필요한 재료를 못 구했다"(게이트 계산 불가,
+  // 자격증명, 머지 API 실패)이고, 그 원인은 대부분 공장 밖에 있어 같은 런을 다시 돌려도 같은 자리에서
+  // 죽는다. 되살리는 것은 사람의 판단이다.
+  //
+  // merge만 실패한 런(KTB-15 — draft 뒤집기·`gh pr merge` API 실패)의 사람 경로는 §3.2의
+  // blocked → approved 엣지다: `node .factory/bin/transition.js <n> factory:approved --human`
+  // (review handoff와 이번 런의 GREEN gates 파일을 여전히 요구한다) → `factory run merge <n> --remote`.
+  // 구현이 다시 돌아야 하는 경우에만 blocked → planned다.
   for (const it of await gh.searchIssues("factory:blocked")) {
     try {
       await transition({ issue: it.number, to: "factory:needs-human", reason: "blocked (environment/credentials) — needs human" });
