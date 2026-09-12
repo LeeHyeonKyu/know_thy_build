@@ -60,6 +60,10 @@ hooks:
    띄우고 `npx playwright` 스크립트(스크린샷·콘솔 로그 수집을 포함한 `.js` 파일을 `/tmp` 아래에 만들어)로 몰고,
    비어 있으면 브라우저를 지어내지 말고 테스트 러너와 CLI로 `done_when`을 재현한 뒤 무엇을 UI에서 확인하지
    **못했는지** verified/must_fix에 그대로 쓴다.
+   playwright를 부를 때는 **반드시 출력 경로를 넘긴다** — `npx playwright test --output /tmp/qa-results`
+   (증거로 남길 것은 `[evidence].qa_artifacts` 디렉터리 `.factory/out/qa/`로). 기본값으로 두면 러너가 저장소
+   루트에 `test-results/`를 만드는데, 당신은 그것을 지울 권한이 없고(훅이 막는다) 그 흔적은 다음 스테이지의
+   더티 트리로 남는다.
 2. **증거를 `.factory/out/qa/`에 남긴다**(`[evidence].qa_artifacts` — 저장소에서 당신이 쓸 수 있는 유일한 경로,
    그리고 그 권한은 리뷰어 중 당신에게만 있다): 단계마다 스크린샷, 서버·브라우저 콘솔 로그,
    요청/응답 발췌를 파일로 저장하고 verified·must_fix에서 파일명으로 인용한다. 파일명은

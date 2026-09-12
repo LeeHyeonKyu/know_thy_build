@@ -119,12 +119,14 @@ test("deny-all-writes: malformed stdin passes through (exit 0), same as block-da
 // ── F3(c): qa만 .factory/out/qa/ 아래에 증거를 쓴다 ──────────────────────────────────────────
 test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything else (and any ..) is not", async () => {
   const write = (file_path, tool = "Write") => bash("deny-all-writes.sh", { tool_name: tool, tool_input: { file_path } });
-  for (const p of [".factory/out/qa/7-shot.png", "./.factory/out/qa/7-server.log", "/repo/.factory/out/qa/deep/7.log"]) {
+  for (const p of [".factory/out/qa/7-shot.png", "./.factory/out/qa/7-server.log", ".factory/out/qa/deep/7.log"]) {
     expect((await write(p)).code, p).toBe(0);
     expect((await write(p, "Edit")).code, p).toBe(0);
   }
+  // 예외는 저장소 상대 경로에만 준다 — 절대 경로는 이 저장소 안인지 훅이 알 수 없다
   for (const p of [".factory/out/qa/../gates.json", "src/.factory/out/qa/../../a.js", ".factory/out/gates.json",
-                   ".factory/out/qa", "x.factory/out/qa/7.log", "src/a.js", ""]) {
+                   ".factory/out/qa", "x.factory/out/qa/7.log", "src/a.js", "",
+                   "/repo/.factory/out/qa/7.log", "/tmp/evil/.factory/out/qa/7.log"]) {
     const r = await write(p);
     expect(r.code, p).toBe(2);
     expect(r.stderr, p).toMatch(/must not write files/);
@@ -136,15 +138,17 @@ test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything els
 // ── F6(a): 쓰기 금지 역할의 Bash arm ─────────────────────────────────────────────────────────
 // 전역 block-dangerous.sh는 *보호 경로*만 본다 — `echo x > src/a.js`는 아무도 막지 않았다.
 test("deny-all-writes: a Bash command that writes outside /tmp, $TMPDIR or .factory/out/qa/ is blocked", async () => {
-  const blocked = ["echo x > src/a.js", "echo x >> package.json", "cat a | tee out.txt", "cat a | tee -a out.txt",
+  const blocked = ["echo x > src/a.js", "echo x >> package.json", "echo x >| src/a.js", "cat a | tee out.txt", "cat a | tee -a out.txt",
                    "cp /tmp/evil src/a.js", "mv a.js b.js", "sed -i 's/a/b/' src/a.js", "sed -i '' 's/a/b/' src/a.js",
                    "perl -i -pe 's/a/b/' src/a.js", "python3 -c \"open('src/a.js','w').write('x')\"",
                    "git commit -m x", "git push origin HEAD", "git checkout -- src/a.js", "git add .",
+                   "git config user.name x", "git config core.hooksPath /tmp/h",
                    "touch newfile", "mkdir newdir", "rm -rf src", "echo x > .factory/out/qa/../harness.toml"];
   const allowed = ["git diff origin/main...HEAD", "git log --oneline -5", "git show HEAD:src/a.js", "git status --porcelain",
                    "git merge-base origin/main HEAD", "npx vitest run test/a.test.js", "npm test", "cat src/a.js",
                    "grep -rn mkdir src/", "node .factory/bin/prove-test.js --file test/a.test.js --name test_7_x",
-                   "echo hi > /tmp/out.txt", "cat x 2>/dev/null", "rm -rf /tmp/scratch", "cp src/a.js /tmp/a.js",
+                   "echo hi > /tmp/out.txt", "echo hi >| /tmp/out.txt", "cat x 2>/dev/null", "rm -rf /tmp/scratch", "cp src/a.js /tmp/a.js",
+                   "git config --get user.name", "git config --list", "git config --get-regexp '^remote'", "git config -l",
                    "mkdir -p .factory/out/qa/7", "echo y > .factory/out/qa/7-log.txt", "npx playwright test 2>&1"];
   await Promise.all(blocked.map(async (c) => {
     const r = await bash("deny-all-writes.sh", cmd(c));
@@ -267,6 +271,32 @@ test("stop-guard: a modified tracked .factory/quarantine.toml (script-owned) nev
   // a change outside the exclusions is still caught on the same detached HEAD
   await run("bash", ["-c", "echo y > src.txt"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
+}, 30000);
+
+// ── stop-guard on SubagentStop: 쓰기 금지 역할은 면제된다 ─────────────────────────────────────
+// 리뷰어는 playwright `test-results/`·`coverage/` 같은 untracked 산출물을 남기지만 그것을 지울 권한이
+// 없다(deny-all-writes가 막는다). 가드가 그들에게도 걸리면 서브에이전트가 영원히 멈추지 못한다.
+test("stop-guard: a write-forbidden role's SubagentStop is exempt; the builder's and the main session's are not", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "sg-subagent-"));
+  const git = (...a) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd });
+  await git("init", "-q", "-b", "main");
+  await git("commit", "-q", "--allow-empty", "-m", "init");
+  const sha = (await git("rev-parse", "HEAD")).stdout.trim();
+  await git("checkout", "-q", "--detach", sha);
+  await run("bash", ["-c", "mkdir -p test-results && echo x > test-results/trace.zip"], { cwd });
+
+  // detached HEAD + 더티 트리 — 원래라면 exit 2다
+  expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code, "main session").toBe(2);
+  for (const agent_type of ["reviewer-qa", "reviewer-correctness", "plan-skeptic", "factory-loader", "factory-triage", "factory-verifier"]) {
+    const r = await bash("stop-guard.sh", { hook_event_name: "SubagentStop", agent_type }, cwd);
+    expect(r.code, agent_type).toBe(0);
+    expect(r.stderr + r.stdout, agent_type).toBe("");
+  }
+  // builder는 면제 대상이 아니다 — 커밋+push가 그의 일이다
+  await git("checkout", "-q", "-b", "claude/fq-7");
+  const builder = await bash("stop-guard.sh", { hook_event_name: "SubagentStop", agent_type: "factory-builder" }, cwd);
+  expect(builder.code).toBe(2);
+  expect(builder.stderr).toMatch(/uncommitted/);
 }, 30000);
 
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {

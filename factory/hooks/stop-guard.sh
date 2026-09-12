@@ -9,6 +9,22 @@
 #   .factory/quarantine.toml — 게이트가 직접 갱신하는 script 소유 파일
 # 셋 다 "에이전트가 코드를 고쳐놓고 커밋하지 않았다"는 신호가 아니다 — 여기서 걸리면 Stop이 영구히 막힌다.
 input=$(cat) || true
+
+# SubagentStop에서 **쓰기 금지 역할은 이 가드를 건너뛴다**. 그들은 deny-all-writes.sh가 Edit/Write와
+# "쓰는 모양의 Bash"를 모두 막아 둔 역할이라 커밋하지 않은 *자기* 변경을 만들 수 없다. 그런데 그들이 돌리는
+# 러너는 untracked 산출물을 남긴다(playwright `test-results/`, `coverage/`) — 지우려면 쓰기가 필요하고,
+# 쓰기는 막혀 있다. 여기서 exit 2를 주면 그 서브에이전트는 영원히 멈추지 못한다(교착).
+# 이 가드는 원래 builder(커밋+push해야 한다)와 메인 세션(트리를 깨끗이 두어야 한다)을 위한 것이다.
+agent=""
+if command -v jq >/dev/null 2>&1; then
+  agent=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null) || agent=""
+fi
+# jq가 없어도 판정은 해야 한다(이 훅은 fail-open이 기본이다) — 원문에서 직접 읽는다.
+[ -n "$agent" ] || agent=$(printf '%s' "$input" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+case "$agent" in
+  reviewer-*|plan-*|factory-loader|factory-triage|factory-verifier) exit 0 ;;
+esac
+
 branch=$(git branch --show-current 2>/dev/null) || exit 0
 if [ -z "$branch" ]; then
   if [ -n "$(git status --porcelain -- ':(top)' ':(exclude,top).factory/out' ':(exclude,top)docs/factory/runs' ':(exclude,top).factory/quarantine.toml' 2>/dev/null)" ]; then

@@ -28,7 +28,9 @@ function planBody(d) {
   const debate = d.debate || {};
   const digest = arr(debate.r1).map((p) => `- R1 ${line(p.role)}: ${firstSentence(p.position)}`);
   // workflow는 R2 전문 대신 반박 **개수**만 싣는다(F7) — 사람용 다이제스트가 쓰던 것도 그 숫자 하나였다.
-  if (typeof debate.r2_objections === "number") digest.push(`- R2: ${plural(debate.r2_objections, "objection")}`);
+  // rounds < 3이면 교차검토가 아예 돌지 않았다(docs tier) — "0 objections"는 거기서 거짓말이다.
+  const skippedR2 = Number.isFinite(Number(d.rounds)) && Number(d.rounds) < 3;
+  if (typeof debate.r2_objections === "number" && !skippedR2) digest.push(`- R2: ${plural(debate.r2_objections, "objection")}`);
   const votes = arr(debate.votes);
   if (votes.length) {
     const accept = votes.filter((v) => v.vote === "accept").length;

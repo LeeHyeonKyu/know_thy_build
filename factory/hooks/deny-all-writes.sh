@@ -17,10 +17,13 @@ case "$tool" in
     file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
     # 훅 입력은 신뢰할 수 없다: `./` 한 겹만 벗겨낸 뒤 **정확한 접두** 비교를 하고, 경로에 `..`가 한 번이라도
     # 들어 있으면 예외를 적용하지 않는다(정규화 없이 탈출을 허용할 수는 없다).
+    # 예외는 **저장소 상대 경로**에만 준다. 절대 경로는 `/.factory/out/qa/`를 포함하더라도 거절한다 —
+    # 훅 입력만 보고는 그 절대 경로가 이 저장소 안인지(`/tmp/evil/.factory/out/qa/x`인지) 알 수 없고,
+    # 모르는 것을 허용하는 예외는 예외가 아니다.
     f=${file#./}
     case "$f" in
-      *..*) ;;
-      "$QA_DIR"?*|*"/$QA_DIR"?*) exit 0 ;;
+      *..*|/*) ;;
+      "$QA_DIR"?*) exit 0 ;;
     esac
     echo "factory: this role must not write files ($tool $file)" >&2
     exit 2
@@ -57,7 +60,8 @@ T='["]?[^-[:space:]"&|;<>]'
 CMD='(^|[;&|][[:space:]]*)'
 FLAGS='([[:space:]]+-[^[:space:];&|]+)*'
 
-echo "$w" | grep -Eq "(^|[^-=<])>>?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
+# `>|`는 noclobber를 무시하는 리다이렉션이다 — `>`/`>>`와 같은 쓰기이므로 같이 잡는다.
+echo "$w" | grep -Eq "(^|[^-=<])>>?\|?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
 echo "$w" | grep -Eq "${CMD}tee$FLAGS[[:space:]]+$T" && deny "tee"
 echo "$w" | grep -Eq "${CMD}(rm|rmdir|mkdir|touch|truncate|ln|chmod|chown|dd)$FLAGS[[:space:]]+$T" && deny "file mutation"
 # cp/mv는 **목적지**(세그먼트의 마지막 토큰)만 본다 — 원본이 저장소 안이어도 목적지가 /tmp면 읽기에 가깝다.
@@ -70,5 +74,9 @@ echo "$c" | grep -Eq "${CMD}sed[[:space:]]+[^;&|]*-[a-zA-Z]*i[a-zA-Z]*([[:space:
 echo "$c" | grep -Eq "${CMD}perl[[:space:]]+-[a-zA-Z]*i[^;&|]*" && deny "perl -i"
 echo "$c" | grep -Eq "${CMD}python[0-9.]*[[:space:]]+[^;&|]*-c[^;&|]*open\(" && deny "python -c open(...)"
 # 트리·기록을 옮기는 git 서브커맨드. 읽기(diff/log/show/status/rev-parse/ls-files/blame/branch/merge-base)는 그대로.
-echo "$c" | grep -Eq "${CMD}git[[:space:]]+(commit|push|add|apply|am|checkout|switch|restore|reset|rm|mv|stash|clean|cherry-pick|revert|rebase|merge|tag|init|config|worktree|update-ref|notes)([[:space:]]|$)" && deny "git write subcommand"
+echo "$c" | grep -Eq "${CMD}git[[:space:]]+(commit|push|add|apply|am|checkout|switch|restore|reset|rm|mv|stash|clean|cherry-pick|revert|rebase|merge|tag|init|worktree|update-ref|notes)([[:space:]]|$)" && deny "git write subcommand"
+# `git config`는 읽기(--get*/--list/-l)만 허용한다 — 설정을 **쓰면** hooksPath·user·alias로 다른 훅을 우회할 수 있다.
+echo "$c" | grep -Eq "${CMD}git[[:space:]]+config([[:space:]]|$)" &&
+  ! echo "$c" | grep -Eq "${CMD}git[[:space:]]+config[^;&|]*(--get[a-z-]*|--list|-l)([[:space:]=]|$)" &&
+  deny "git config write"
 exit 0

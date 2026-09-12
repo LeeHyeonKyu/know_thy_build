@@ -69,13 +69,18 @@ test("checkRoles: a missing retro agent file is WARN (Plan 4), a missing agent f
   };
   const present = (p) => !p.endsWith("factory-retro.md");
   const warn = by(checkRoles({ charter, roles: rolesRetroOnly, root: "/r", exists: present }));
-  expect(warn["roles.agent-files"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("Plan 4") });
-  expect(warn["roles.agent-files"].detail).toContain("factory-retro.md");
+  expect(warn["roles.agent-files"].level).toBe("PASS");
+  expect(warn["roles.retro-agent-file"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("Plan 4") });
+  expect(warn["roles.retro-agent-file"].detail).toContain("factory-retro.md");
 
-  // 같은 저장소에서 review 역할 파일이 없으면 다시 FAIL이고, 그 FAIL이 retro WARN보다 우선한다
+  // 두 사실은 서로 다른 줄이다 — review 역할 파일이 없으면 FAIL이 나오고, retro WARN은 그것에 가려지지 않는다
   const bothMissing = by(checkRoles({ charter, roles: rolesRetroOnly, root: "/r", exists: (p) => p.endsWith("factory-triage.md") }));
   expect(bothMissing["roles.agent-files"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("reviewer-correctness.md") });
   expect(bothMissing["roles.agent-files"].detail).not.toContain("factory-retro.md");
+  expect(bothMissing["roles.retro-agent-file"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory-retro.md") });
+
+  // retro 블록이 없거나 파일이 있으면 PASS다 — 줄 자체는 항상 나온다
+  expect(by(checkRoles({ charter, roles: rolesRetroOnly, root: "/r", exists: () => true }))["roles.retro-agent-file"].level).toBe("PASS");
 });
 
 test("checkRoles: everything present → all PASS", () => {

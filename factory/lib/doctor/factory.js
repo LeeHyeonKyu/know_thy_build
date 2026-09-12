@@ -94,15 +94,12 @@ export function checkRoles({ charter, roles, exists, root }) {
   }
   const missingLessons = entries.filter((e) => e.def.lessons && !exists(join(root, e.def.lessons))).map((e) => e.def.lessons);
 
-  const agentFiles = missingAgents.length
-    ? c("roles.agent-files", "FAIL", `agent files missing (Plan 3 installs agents): ${missingAgents.join(", ")}`)
-    : retroMissing.length
-      ? c("roles.agent-files", "WARN", `retro agent file arrives with Plan 4: ${retroMissing.join(", ")}`)
-      : c("roles.agent-files", "PASS");
-
+  // 두 줄로 나눈다 — 하나로 합치면 다른 스테이지의 FAIL이 retro WARN을 가려, 사람이 FAIL을 고친 다음에야
+  // "아직 Plan 4가 남았다"는 사실을 처음 본다. 서로 다른 사실은 서로 다른 줄이다.
   return [
     undefinedNames.length ? c("roles.roster-defined", "FAIL", `roster names not defined in roles.toml: ${undefinedNames.join(", ")}`) : c("roles.roster-defined", "PASS"),
-    agentFiles,
+    missingAgents.length ? c("roles.agent-files", "FAIL", `agent files missing (Plan 3 installs agents): ${missingAgents.join(", ")}`) : c("roles.agent-files", "PASS"),
+    retroMissing.length ? c("roles.retro-agent-file", "WARN", `retro agent file arrives with Plan 4: ${retroMissing.join(", ")}`) : c("roles.retro-agent-file", "PASS"),
     missingLessons.length ? c("roles.lessons-files", "WARN", `lessons files missing: ${missingLessons.join(", ")}`) : c("roles.lessons-files", "PASS"),
   ];
 }

@@ -77,6 +77,17 @@ test("renderHandoff plan: done_when list, dissent list, debate digest — and th
   expect(body).toContain("votes: 1 accept / 1 object");
 });
 
+test("renderHandoff plan: the docs tier (rounds 2) never ran cross-examination — no R2 line, not '0 objections'", () => {
+  const data = { ...PLAN_DATA, issue: 7, tier: "docs", rounds: 2, debate: { ...PLAN_DATA.debate, r2_objections: 0 } };
+  const { human } = roundTrip("plan", 7, data);
+  expect(human).toContain("**토론**");
+  expect(human).toContain("R1 product-advocate:");
+  expect(human).not.toContain("R2:");
+  // rounds 3이면 0이라도 줄이 나온다 — "교차검토했고 아무도 반박하지 않았다"는 사실이다
+  const three = roundTrip("plan", 7, { ...data, rounds: 3 }).human;
+  expect(three).toContain("R2: 0 objections");
+});
+
 test("renderHandoff plan: an empty debate/dissent renders no empty headings and still round-trips", () => {
   const data = { issue: 7, tier: "docs", done_when: [{ id: "dw1", text: "문서가 갱신된다", verify: "test_7_docs", level: "unit" }], dissent_log: [], files_expected: [], non_goals: [], open_risks: [] };
   const { human, h } = roundTrip("plan", 7, data);
