@@ -124,3 +124,32 @@ test("default caps match spec §8.1 (Examples 8/8, Perspectives 6) when caps is 
   expect(skipped).toHaveLength(4);
   expect(skipped.every((s) => s.reason === "max")).toBe(true);
 });
+
+// ── F4(최종 리뷰): 에이전트 텍스트 정규화 ────────────────────────────────
+// 항목은 `- <문장>` 한 줄이다. 개행이 섞이면 그 줄이 새 `## `/`### ` 헤더가 될 수 있고, integrity의
+// additive_only는 "추가된 헤더"를 그 자체로 위반으로 본다 — 통과할 수 없는 diff를 만드는 셈이다.
+
+const headers = (t) => t.split("\n").filter((l) => /^#{2,3} /.test(l));
+
+test("an example text containing a markdown header collapses to one line — no new section header appears", () => {
+  const evil = "좋은 발견의 예\n## Lens\n- 새 렌즈를 심는다";
+  const { text, added, skipped } = applyRoleAdditions({ text: SAMPLE, examples: [{ kind: "good", text: evil }] });
+  expect(skipped).toEqual([]);
+  expect(added).toEqual([{ section: "### 좋은 발견", text: "좋은 발견의 예 ## Lens - 새 렌즈를 심는다" }]);
+  // 추가된 줄은 정확히 하나이고 헤더 목록은 그대로다(additive_only의 "header added"가 걸리지 않는다)
+  const before = SAMPLE.split("\n");
+  const after = text.split("\n");
+  expect(after).toHaveLength(before.length + 1);
+  expect(headers(text)).toEqual(headers(SAMPLE));
+  expect(text).toContain("- 좋은 발견의 예 ## Lens - 새 렌즈를 심는다\n");
+});
+
+test("text is capped at 300 chars with '…'; empty text is skipped, not appended as a bare bullet", () => {
+  const { added } = applyRoleAdditions({ text: SAMPLE, perspectives: [{ text: "관".repeat(400) }] });
+  expect(added[0].text).toHaveLength(300);
+  expect(added[0].text.endsWith("…")).toBe(true);
+  const { text, added: none, skipped } = applyRoleAdditions({ text: SAMPLE, examples: [{ kind: "bad", text: "\n \t\n" }], perspectives: [{ text: "" }] });
+  expect(none).toEqual([]);
+  expect(skipped).toEqual([{ text: "\n \t\n", reason: "empty" }, { text: "", reason: "empty" }]);
+  expect(text).toBe(SAMPLE);
+});

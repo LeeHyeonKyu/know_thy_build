@@ -194,13 +194,14 @@ test("mergePr defaults to squash + delete-branch; closeIssue adds --comment only
 test("issueList maps labels to names and forwards state/limit/labels; prList forwards label/state", async () => {
   const run = makeFakeRun([
     { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 1, title: "T", labels: [{ name: "bug" }], updatedAt: "2026-09-11T00:00:00Z", closedAt: null }]), stderr: "" } },
-    { match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 9, title: "P", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]), stderr: "" } },
+    { match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 9, title: "P", body: "<!-- factory-retro:v1 period=a..b -->", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]), stderr: "" } },
   ]);
   const gh = makeGh({ run, repo });
   expect(await gh.issueList({ labels: ["bug", "backlog"], state: "closed", limit: 50 })).toEqual([{ number: 1, title: "T", labels: ["bug"], updatedAt: "2026-09-11T00:00:00Z", closedAt: null }]);
   expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--state", "closed", "--limit", "50", "--label", "bug", "--label", "backlog", "--json", "number,title,labels,updatedAt,closedAt"]);
-  expect(await gh.prList({ label: "factory:approved" })).toEqual([{ number: 9, title: "P", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]);
-  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--state", "open", "--label", "factory:approved", "--json", "number,title,headRefName,updatedAt"]);
+  // body도 받는다 — retro의 제안 PR dedup이 본문 마커로 같은 창을 알아본다
+  expect(await gh.prList({ label: "factory:approved" })).toEqual([{ number: 9, title: "P", body: "<!-- factory-retro:v1 period=a..b -->", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]);
+  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--state", "open", "--label", "factory:approved", "--json", "number,title,body,headRefName,updatedAt"]);
 });
 
 test("createPr opens a non-draft PR with labels and returns the number", async () => {

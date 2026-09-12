@@ -164,7 +164,26 @@ test("stats: merged issues are filtered by closedAt > since", () => {
   expect(stats.merged).toBe(1);
 });
 
-test("stats.usage reuses summarizeUsage over the run records, and skips the '_retro' key", () => {
+test("stats.usage is window-scoped — only run-record entries after `since` count (F2)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retro-harvest-window-"));
+  const line = (cost, input, output) => usageLine({ usage: { input_tokens: input, output_tokens: output }, total_cost_usd: cost, num_turns: 1, terminal_reason: "end_turn", modelUsage: { "claude-x": { costUSD: cost } } });
+  // 같은 이슈의 두 스테이지: 하나는 창 밖(지난 retro가 이미 센 비용), 하나는 창 안
+  appendRunRecord({ root: dir, issue: 91, stage: "plan", runnerId: "gha-1", now: "2026-09-01T00:00:00Z", lines: [line(0.5, 100, 20)] });
+  appendRunRecord({ root: dir, issue: 91, stage: "review", runnerId: "gha-1", now: "2026-09-10T00:00:00Z", lines: [line(0.25, 8, 4)] });
+  const records = new Map([[91, readFileSync(join(dir, "docs/factory/runs/91.md"), "utf8")]]);
+  const issues = [{ number: 91, title: "x", labels: [], state: "open" }];
+
+  const windowed = harvest({ records, issues, commentsByIssue: new Map(), since: "2026-09-05T00:00:00Z" }).stats;
+  expect(windowed.usage.cost_usd).toBe(0.25);
+  expect(windowed.usage.tokens).toEqual({ input: 8, output: 4 });
+
+  // since=null은 "이력 전체" — 두 스테이지가 모두 들어온다(첫 retro의 창은 전체다)
+  const all = harvest({ records, issues, commentsByIssue: new Map(), since: null }).stats;
+  expect(all.usage.cost_usd).toBe(0.75);
+  expect(all.usage.tokens).toEqual({ input: 108, output: 24 });
+});
+
+test("stats.usage sums the run records and skips the '_retro' key", () => {
   const dir = mkdtempSync(join(tmpdir(), "retro-harvest-"));
   appendRunRecord({ root: dir, issue: 90, stage: "review", runnerId: "gha-1", now: "2026-09-01T00:00:00Z",
     lines: [usageLine({ usage: { input_tokens: 100, output_tokens: 20 }, total_cost_usd: 0.5, num_turns: 3, terminal_reason: "end_turn", modelUsage: { "claude-x": { costUSD: 0.5 } } })] });

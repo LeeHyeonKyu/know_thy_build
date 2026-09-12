@@ -3,6 +3,7 @@
 // splicing으로 한다 — 다른 바이트는 절대 바꾸지 않는다(헤더 신설 금지, 기존 항목 수정·삭제 금지).
 
 import { parseAgentMd } from "../agent-md.js";
+import { normalizeItemText } from "./text.js";
 
 // `##` 최상위 헤더(Examples/Perspectives)는 **정확히** 일치해야 한다 — integrity.js의
 // `[protected].additive_only` 허용 목록(harness.toml)은 리터럴 문자열 "## Examples"/"## Perspectives"로
@@ -89,8 +90,12 @@ export function applyRoleAdditions({ text, examples = [], perspectives = [], cap
   }
 
   function process(kind, rawText) {
-    const norm = String(rawText ?? "").trim();
+    // 항목은 `- <문장>` **한 줄**이다. 에이전트 텍스트의 개행을 그대로 넣으면 그 줄이 새 `## `/`### `
+    // 헤더가 될 수 있고(예: `\n## Lens`), 그러면 우리는 삽입에 성공해도 integrity의 `additive_only`가
+    // "허용되지 않은 섹션 변경"으로 PR을 RED로 만든다 — 통과할 수 없는 diff를 만드는 셈이다.
+    const norm = normalizeItemText(rawText);
     if (kind !== "good" && kind !== "bad" && kind !== "perspectives") { skipped.push({ text: rawText, reason: "invalid-kind" }); return; }
+    if (!norm) { skipped.push({ text: rawText, reason: "empty" }); return; }
     const range = locate(kind);
     if (!range) { skipped.push({ text: rawText, reason: "missing-section" }); return; }
     const bullets = bulletsIn(lines, range);

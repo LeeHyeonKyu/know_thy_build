@@ -133,9 +133,11 @@ export function makeGh({ run, repo }) {
     async prList({ label, state = "open" } = {}) {
       const args = ["pr", "list", "-R", repo, "--state", state];
       if (label) args.push("--label", label);
-      args.push("--json", "number,title,headRefName,updatedAt");
+      // body까지 받는다 — retro의 제안 PR dedup은 본문 첫 줄의 기계 마커(`factory-retro:v1 period=…`)로
+      // 같은 창을 알아본다(제목만으로는 기간 표기가 바뀌는 순간 중복을 놓친다).
+      args.push("--json", "number,title,body,headRefName,updatedAt");
       const j = JSON.parse(await gh(args));
-      return j.map((p) => ({ number: p.number, title: p.title, headRefName: p.headRefName, updatedAt: p.updatedAt }));
+      return j.map((p) => ({ number: p.number, title: p.title, body: p.body ?? "", headRefName: p.headRefName, updatedAt: p.updatedAt }));
     },
   };
 }

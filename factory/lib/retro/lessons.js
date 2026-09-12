@@ -2,6 +2,8 @@
 // 않는다. 출력은 integrity의 `lessonsFormat`을 통과해야 한다(테스트가 그 검사 함수로 직접 확인한다).
 // 채택 여부(근거 run 수·중복·상한)를 이 모듈이 결정한다 — L1은 결과를 그대로 파일에 쓴다.
 
+import { normalizeItemText } from "./text.js";
+
 const HEADER = /<!--\s*factory-lessons:v1\s+role=([\w-]+)\s+max=(\d+)\s*-->/;
 const ENTRY_START = /^- \[(L-(\d{4}-\d{2}-\d{2})-(\d{2}))\]\s?(.*)$/;
 const CITATION = /인용:\s*(\d+)회/;
@@ -27,7 +29,9 @@ function splitEntries(text) {
   return { preamble, entries };
 }
 
-const norm = (s) => String(s ?? "").trim();
+// 에이전트가 준 문장은 **한 줄**이어야 한다(§7.4의 `- [id] <문장>` + 다음 줄 `근거:`) — 개행이 섞이면
+// integrity의 `lessonsFormat`이 형식 위반으로 읽고 다크 PR이 RED가 되어 영원히 머지되지 않는다.
+const norm = (s) => normalizeItemText(s);
 
 /**
  * 오늘 날짜의 기존 최대 NN 다음 번호부터 새 id를 발급하는 카운터. NN은 2자리(01~99)까지만
@@ -88,6 +92,8 @@ export function applyLessons({ text, adopted = [], today, minEvidence = 2 } = {}
     const itemText = norm(item?.text);
     const { distinct, refs } = formatRuns(item?.evidence_runs);
 
+    // 빈 문장은 채택할 수 없다 — `- [L-…] ` 뒤가 비면 사람에게도 integrity에게도 의미가 없는 항목이다.
+    if (!itemText) { rejected.push({ text: item?.text, reason: "empty" }); continue; }
     if (distinct.length < minEvidence) { rejected.push({ text: item?.text, reason: "insufficient-evidence" }); continue; }
     if (existingTexts.has(itemText)) { rejected.push({ text: item?.text, reason: "duplicate" }); continue; }
 

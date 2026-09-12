@@ -17,6 +17,25 @@ const NOTE = {
  * 전부 best-effort다: 이슈를 못 찾거나 코멘트가 실패해도 이미 끝난 정책 적용을 되돌리지 않고
  * actions에 흔적만 남긴다(sweeper는 절대 한 항목 때문에 통째로 죽지 않는다).
  */
+/**
+ * 이 id의 이 사건을 **이미 알렸는가**. `applyPolicy`는 만료 항목을 파일에 남기므로(게이트 제외를
+ * 계속하려면 남아야 한다) 다음 sweep도 같은 항목을 또 만료로 판정한다 — 그때마다 코멘트를 달면
+ * 이슈가 도배되고, retro는 매 창마다 "새 만료"를 읽어 재작성 이슈를 영원히 다시 만든다. 마커 자체가
+ * "알렸다"는 기록이므로 그것을 보고 침묵한다.
+ *
+ * 단, `registered` 마커 **뒤**만 본다: 같은 id가 복귀 후 다시 등록되면(retro가 `registered`를 남긴다)
+ * 그건 새 격리 주기이고 그 주기의 복귀·만료는 다시 알려야 한다. 마커 비교는 정규식이 아니라 문자열
+ * 포함이다 — id에 `>`·`.`·`(` 같은 글자가 들어 있어도(테스트 이름이 id다) 그대로 맞는다.
+ */
+function alreadyNotified(comments, kind, id) {
+  const list = Array.isArray(comments) ? comments : [];
+  const registered = quarantineComment("registered", id);
+  const mark = quarantineComment(kind, id);
+  let from = 0;
+  list.forEach((c, i) => { if (String(c?.body ?? "").includes(registered)) from = i + 1; });
+  return list.slice(from).some((c) => String(c?.body ?? "").includes(mark));
+}
+
 async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
   const groups = [["returned", returned], ["expired", expired]].filter(([, ids]) => ids.length);
   if (!groups.length) return;
@@ -35,6 +54,12 @@ async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
       try {
         const it = issues.find((i) => String(i.title ?? "").trim() === `flaky: ${id}`);
         if (!it) { actions.push({ kind: "quarantine-comment-skipped", state: kind, id, reason: "no flaky issue" }); continue; }
+        // 코멘트를 읽지 못하면 **말하지 않는다** — 이미 알렸는지 모르는 채 다시 말하면 도배가 되고,
+        // 침묵은 다음 sweep이 되돌릴 수 있다(만료 항목은 파일에 남아 다시 판정된다).
+        if (alreadyNotified(await gh.comments(it.number), kind, id)) {
+          actions.push({ kind: "quarantine-comment-skipped", state: kind, id, issue: it.number, reason: "already notified" });
+          continue;
+        }
         await gh.comment(it.number, `${quarantineComment(kind, id)}\n${NOTE[kind]}`);
         actions.push({ kind: "quarantine-comment", state: kind, id, issue: it.number });
       } catch (e) {

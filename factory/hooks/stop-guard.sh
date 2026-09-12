@@ -21,8 +21,11 @@ if command -v jq >/dev/null 2>&1; then
 fi
 # jq가 없어도 판정은 해야 한다(이 훅은 fail-open이 기본이다) — 원문에서 직접 읽는다.
 [ -n "$agent" ] || agent=$(printf '%s' "$input" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+# 이 목록은 lib/agent-md.js의 `needsDenyAllWritesHook`와 **같은 집합**이어야 한다 — hooks.test.js가
+# 역할마다 프로브를 돌려 대조한다. 한쪽에만 이름을 더하면(예: factory-retro) 그 역할은 쓰기가 막힌 채
+# 가드에 걸려 영원히 멈추지 못한다(교착).
 case "$agent" in
-  reviewer-*|plan-*|factory-loader|factory-triage|factory-verifier) exit 0 ;;
+  reviewer-*|plan-*|factory-loader|factory-triage|factory-verifier|factory-retro) exit 0 ;;
 esac
 
 branch=$(git branch --show-current 2>/dev/null) || exit 0

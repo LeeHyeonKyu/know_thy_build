@@ -48,9 +48,12 @@ import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/
 const QUEUE_LABEL = "factory:queue";
 const HARNESS_LABEL = "factory:harness";
 const FLAKY_LABEL = "factory:flaky";
+const PROPOSAL_LABEL = "factory:retro-proposal";
 const MIN_EVIDENCE = 2;                                               // lesson·예시·관점의 최소 근거 run(§8.4)
 const TITLE_MAX = 240;                                                // GitHub 이슈 제목 여유 — 자르기는 결정적이라 dedup을 깨지 않는다
 const STATE_FILE = "_retro.md";                                       // records dir 기준 — 교체 동기화의 대상
+// 제안 PR 본문 첫 줄의 기계 마커(proposals.js가 쓴다) — 같은 창의 제안 PR을 두 번 열지 않는 dedup 키다.
+const RETRO_MARKER = /<!-- factory-retro:v1 period=\S+ -->/;
 
 /** 후보 목록의 빈 값. 함수로 둔다 — 상수 객체를 퍼뜨리면 한 실행의 push가 다음 실행에 새어 나간다. */
 export const emptyCandidates = () => ({ lessons: [], examples: [], flaky: [], needs_human: [] });
@@ -118,6 +121,41 @@ const gapBody = (gap, agentReason) => [
 ].join("\n");
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const round6 = (n) => Math.round((Number(n) || 0) * 1e6) / 1e6;
+
+/**
+ * 다크 PR에 실릴 수 있는 경로는 **두 종류뿐**이다(§8.1): lessons 파일과 역할 파일. 그 둘만이 retro가
+ * 사람 없이 스스로 머지하는 변경이고(P4-R2), 그 안전성은 integrity의 `lessonsFormat`·`additive_only`가
+ * 그 두 경로에만 걸려 있다는 사실에 기댄다. 경로가 하나라도 그 밖으로 나가면 retro는 "자체 머지되는
+ * 임의 파일 쓰기"가 된다 — roles.toml이 이상한 경로를 가리키든, 에이전트가 역할 이름을 지어내든,
+ * 여기서 막는다. 하위 디렉터리도 허용하지 않는다(`[^/]+`) — 허용 목록은 글자 그대로여야 한다.
+ */
+const DARK_PATH_RULES = [/^\.factory\/lessons\/[^/]+\.md$/, /^\.claude\/agents\/[^/]+\.md$/];
+export function splitDarkFiles(files) {
+  const allowed = {};
+  const rejected = [];
+  for (const [path, content] of Object.entries(files || {})) {
+    if (DARK_PATH_RULES.some((re) => re.test(path))) allowed[path] = content;
+    else rejected.push(path);
+  }
+  return { allowed, rejected };
+}
+
+/**
+ * retro 자신이 쓴 토큰 — `claude -p`의 JSON 봉투(`total_cost_usd`/`usage`)에서 읽는다. 스테이지 비용은
+ * run 기록에 남지만 retro는 스테이지가 아니라서(라벨 상태 머신 밖의 잡) 그 기록을 쓰지 않는다 —
+ * 여기서 걷지 않으면 "공장이 자기를 돌아보는 데 든 비용"이 어디에도 남지 않는다(§4.4 보고 범위).
+ * 봉투가 없거나(호출 실패) 필드가 비면 0이다 — null이 아니다: 호출은 분명히 일어났고, 비용을 모르는
+ * 것과 "이번 창에 더할 것이 없다"는 것은 여기서 같은 값으로 충분하다(원본 stdout은 `.factory/out`에 남는다).
+ */
+export function retroUsageOf(envelope) {
+  const e = envelope || {};
+  const u = e.usage || {};
+  return {
+    cost_usd: round6(e.total_cost_usd),
+    tokens: { input: Number(u.input_tokens) || 0, output: Number(u.output_tokens) || 0 },
+  };
+}
 
 /**
  * 창(window) 통계를 누적 통계에 더한다 — **full run에서만** 부른다. 커서가 전진하는 순간이 창이 닫히는
@@ -135,13 +173,21 @@ export function accumulateStats(total, window) {
     : 0;
   const rejects = { ...(t.rejects_by_role || {}) };
   for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
-  const tok = (side) => (Number(t.usage?.tokens?.[side]) || 0) + (Number(w.usage?.tokens?.[side]) || 0);
+  const tok = (key, side) => (Number(t[key]?.tokens?.[side]) || 0) + (Number(w[key]?.tokens?.[side]) || 0);
+  const sumUsage = (key, round) => ({
+    cost_usd: round((Number(t[key]?.cost_usd) || 0) + (Number(w[key]?.cost_usd) || 0)),
+    tokens: { input: tok(key, "input"), output: tok(key, "output") },
+  });
   return {
     merged,
     review_rounds_avg: round2(avg),
     rejects_by_role: rejects,
     needs_human: (Number(t.needs_human) || 0) + (Number(w.needs_human) || 0),
-    usage: { cost_usd: round2((Number(t.usage?.cost_usd) || 0) + (Number(w.usage?.cost_usd) || 0)), tokens: { input: tok("input"), output: tok("output") } },
+    usage: sumUsage("usage", round2),
+    // retro 자신의 비용은 스테이지 비용과 **따로** 쌓는다 — 섞으면 "공장이 일하는 데 든 비용"과
+    // "공장이 자기를 돌아보는 데 든 비용"을 다시 가를 수 없고, N 자가 조정의 근거가 흐려진다.
+    // 반올림 자리가 다른 이유: 한 번의 retro 호출은 센트 미만일 수 있어 round2면 0으로 사라진다.
+    retro_usage: sumUsage("retro_usage", round6),
     retros: (Number(t.retros) || 0) + 1,
   };
 }
@@ -169,6 +215,10 @@ export function statsTable(window, total) {
     row("rejects by role", rejectCell(w), rejectCell(t)),
     row("cost (usd)", Number(w.usage?.cost_usd || 0).toFixed(2), Number(t.usage?.cost_usd || 0).toFixed(2)),
     row("tokens", `input ${w.usage?.tokens?.input || 0} / output ${w.usage?.tokens?.output || 0}`, `input ${t.usage?.tokens?.input || 0} / output ${t.usage?.tokens?.output || 0}`),
+    // retro 자신의 비용 — 스테이지 비용과 한 줄 떨어뜨려 둔다(§4.4). 이 줄이 없으면 공장은 자기를
+    // 돌아보는 데 얼마를 쓰는지 모른 채 N을 조정한다.
+    row("retro cost (usd)", Number(w.retro_usage?.cost_usd || 0).toFixed(2), Number(t.retro_usage?.cost_usd || 0).toFixed(2)),
+    row("retro tokens", `input ${w.retro_usage?.tokens?.input || 0} / output ${w.retro_usage?.tokens?.output || 0}`, `input ${t.retro_usage?.tokens?.input || 0} / output ${t.retro_usage?.tokens?.output || 0}`),
     row("full retros", "—", t.retros ?? 0),
   ].join("\n");
 }
@@ -315,17 +365,22 @@ export async function runRetro({ deps, force = false, now } = {}) {
 
         let s;
         try { s = await d.sync({ expectBlob }); }
-        catch (e) { record(`retro: records sync aborted — ${e?.message || e}`); return { ok: true }; }
+        catch (e) { record(`retro: records sync aborted — ${e?.message || e}`); return { ok: false }; }
         if (!s || s.ok !== false) return { ok: true };
-        if (!s.moved) { record(`retro: records sync failed — ${s.reason}`); return { ok: true }; }
+        if (!s.moved) { record(`retro: records sync failed — ${s.reason}`); return { ok: false }; }
 
         record(`retro: state moved on the branch — ${attemptNo === 0 ? "re-hydrating and retrying once" : "refusing to overwrite"} (${s.reason})`);
         if (attemptNo === 1) return { ok: false, moved: true };
         try {
           const again = await d.hydrate();
           if (!again?.fetched || again.stateFailed) return { ok: false, moved: true };
+          const hadState = expectBlob[STATE_FILE] != null;
           expectBlob = { [STATE_FILE]: again.stateBlob ?? null };
-          cur = await d.readState();
+          // 브랜치에서 `_retro.md`가 **사라졌는데** 우리는 교체를 걸고 있었다면(누군가 지웠다),
+          // 로컬 파일을 다시 읽으면 안 된다 — 그 파일은 방금 우리가 쓴 변이본이고, 그걸 base로 삼으면
+          // 같은 변이를 두 번 얹는다(이력 중복·머지 수 이중 계산). 상태가 없어졌으면 없어진 대로,
+          // 빈 상태에서 다시 시작한다.
+          cur = hadState && again.stateBlob == null ? parseRetroState("") : await d.readState();
         } catch (e) {
           record(`retro: re-hydrate failed — ${e?.message || e}`);
           return { ok: false, moved: true };
@@ -393,12 +448,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
     const envelope = called.ok ? called.value : null;
     const out = envelope && !envelope.is_error ? extractJson(envelope.result) : null;
     const v = out ? validate("retro.v1", out) : { ok: false, errors: [envelope ? (envelope.is_error ? "claude -p reported is_error" : "no JSON object in result") : (called.error || "claude -p failed")] };
+    // 호출이 실패했어도 토큰은 이미 쓰였다 — 비용은 성공한 회차만의 것이 아니다(F10).
+    const fullStatsBits = { candidates: h.candidates, stats: { ...(h.stats || {}), retro_usage: retroUsageOf(envelope) } };
     if (!v.ok) {
       const reason = v.errors.join("; ");
       // 실패를 상태에 남기지만 `merges_since`는 리셋하지 않는다 — 다음 머지가 다시 전체 retro를 돈다.
       record(`retro: full analysis failed — ${reason} (retrying on the next merge)`);
-      const p = await persist({ ...countBits, ...harvestBits, lastFullFailed: { at, reason } });
-      return p.moved ? 1 : 0;
+      const p = await persist({ ...countBits, ...fullStatsBits, lastFullFailed: { at, reason } });
+      return p.ok ? 0 : 1;
     }
 
     // ⑥ 집행 — 각 단계는 격리되고, 결과는 `applied`에 쌓여 `_retro.md` 이력에 남는다.
@@ -454,13 +511,30 @@ export async function runRetro({ deps, force = false, now } = {}) {
     }
 
     // (c) 다크 PR — 바뀐 파일이 하나라도 있을 때만. integrity GREEN이면 스스로 머지한다(P4-R2).
+    // 실을 수 있는 경로는 lessons·역할 파일뿐이다(F6) — 자체 머지의 안전성이 그 두 경로에만 걸린
+    // integrity 규칙에 기대고 있으므로, 그 밖의 경로는 PR에 **넣지 않고** 거절을 기록으로 남긴다.
+    const { allowed: darkFiles, rejected: rejectedPaths } = splitDarkFiles(files);
+    if (rejectedPaths.length) {
+      applied.push({ step: "publish-lessons", rejected: rejectedPaths });
+      record(`retro: refused to publish paths outside the dark allowlist — ${rejectedPaths.join(", ")}`);
+    }
     let lessonsPr = null;
-    if (Object.keys(files).length) {
-      const r = await step("publish-lessons", () => d.publishLessons({ files, date: stampOf(at) }));
+    if (Object.keys(darkFiles).length) {
+      const r = await step("publish-lessons", () => d.publishLessons({ files: darkFiles, date: stampOf(at) }));
       if (r.ok) {
         lessonsPr = r.value;
-        applied.push({ step: "publish-lessons", pr: lessonsPr?.pr ?? null, merged: lessonsPr?.merged ?? false, reason: lessonsPr?.reason ?? null, files: Object.keys(files) });
+        applied.push({ step: "publish-lessons", pr: lessonsPr?.pr ?? null, merged: lessonsPr?.merged ?? false, reason: lessonsPr?.reason ?? null, files: Object.keys(darkFiles) });
       }
+    }
+    /**
+     * **머지된 PR만이 채택이다**(F3). PR이 열리지 않았거나(경로 거절·publish 실패) RED·타임아웃·사람이
+     * 닫음으로 머지되지 못했으면 그 텍스트는 파일에 **없다**: 후보에서 내리면 다음 retro가 다시 볼 수
+     * 없어 영원히 사라지고, yield에 세면 "수확이 있었다"며 N을 줄여 토큰만 더 쓴다. 둘 다 관측되지
+     * 않은 성공을 기록하는 셈이다 — 머지 전까지 후보도 텍스트도 그대로 둔다.
+     */
+    const lessonsMerged = lessonsPr?.merged === true;
+    if (!lessonsMerged && (addedLessons || addedRoleItems)) {
+      record(`retro: lessons PR not merged (${lessonsPr?.reason ?? (lessonsPr?.pr == null ? "no PR" : "unmerged")}) — ${addedLessons + addedRoleItems} additions stay candidates`);
     }
 
     // (d) 성숙도 승격 이슈 — 판정은 위에서 이미 났고, 에이전트는 이유 문장만 보탠다. 제목으로 dedup한다
@@ -487,7 +561,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
     // `<!-- factory-quarantine expired id=… -->` 코멘트에**만** 있다 — `applyPolicy`는 만료를 플래그로만
     // 내고 `quarantine.toml`에는 저장하지 않으므로(항목은 그대로 남는다) 파일에는 흔적이 없다.
     // 닫힌 flaky 이슈에 달린 만료 코멘트도 놓치지 않으려 일반 스냅샷과 합쳐서 본다.
-    const allIssues = dedupeIssues(h.issues, h.flakyIssues);
+    const allIssues = dedupeIssues(h.issues, h.flakyAll || h.flakyIssues);
     const exp = await step("quarantine-expired", () => d.expiredIds({ issues: allIssues, commentsByIssue: h.commentsByIssue, since }));
     const expired = (exp.ok && exp.value) || [];
     const openFlaky = (h.flakyIssues || []).filter((i) => i?.state !== "closed");
@@ -516,38 +590,86 @@ export async function runRetro({ deps, force = false, now } = {}) {
     if (accepted.length) {
       const { title, body } = renderProposalPr({ period: { from: ymdOf(period.from), to: ymdOf(period.to) }, proposals: accepted, stats: snapshot.stats });
       const date = stampOf(at);
-      const r = await step("publish-proposal", () => d.publishProposal({ files: { [`docs/factory/retro/${date}.md`]: body }, title, body, date }));
-      if (r.ok) {
-        proposalPr = r.value;
-        applied.push({ step: "publish-proposal", pr: proposalPr?.pr ?? null, reason: proposalPr?.reason ?? null, proposals: accepted.map((p) => p.kind) });
+      // 제안 PR은 **사람이 머지한다** — 며칠 열려 있는 것이 정상이고, 그 사이 retro는 여러 번 돈다.
+      // 같은 기간 마커(또는 같은 제목)의 열린 PR이 이미 있으면 두 번째 PR은 사람이 읽을 것을 늘리기만
+      // 하고(둘 중 어느 쪽이 최신인지도 알 수 없다) 아무것도 더 말하지 않는다 — 그래서 열지 않는다.
+      const dupes = await step("proposal-dedup", () => d.listProposalPrs());
+      const marker = RETRO_MARKER.exec(body)?.[0] ?? null;
+      const dup = (dupes.ok ? dupes.value || [] : []).find((p) =>
+        (marker && String(p?.body ?? "").includes(marker)) || String(p?.title ?? "").trim() === title);
+      if (dup) {
+        record(`retro: proposal skipped (duplicate #${dup.number})`);
+        applied.push({ step: "publish-proposal", skipped: `duplicate #${dup.number}`, pr: dup.number ?? null, proposals: accepted.map((p) => p.kind) });
+      } else {
+        const r = await step("publish-proposal", () => d.publishProposal({ files: { [`docs/factory/retro/${date}.md`]: body }, title, body, date }));
+        if (r.ok) {
+          proposalPr = r.value;
+          applied.push({ step: "publish-proposal", pr: proposalPr?.pr ?? null, reason: proposalPr?.reason ?? null, proposals: accepted.map((p) => p.kind) });
+        }
       }
     }
 
     // ⑦ yield → N 자가 조정 → 이력 → 커서 전진(§8.4). PR이 실제로 열리지 않았으면(번호 없음) 세지 않는다.
     const proposalCount = proposalPr && proposalPr.pr != null ? 1 : 0;
-    const y = addedLessons + addedRoleItems + harnessIssues + proposalCount;
+    const landed = lessonsMerged ? addedLessons + addedRoleItems : 0;   // 머지된 PR만이 채택이다(F3)
+    const y = landed + harnessIssues + proposalCount;
     const needsHumanSince = Number(h.stats?.needs_human ?? base.stats?.needs_human ?? 0) || 0;
-    record(`retro: full — yield=${y} (lessons ${addedLessons}, role items ${addedRoleItems}, harness ${harnessIssues}, proposal PR ${proposalCount})`);
+    record(`retro: full — yield=${y} (lessons ${addedLessons}, role items ${addedRoleItems}, merged ${lessonsMerged}, harness ${harnessIssues}, proposal PR ${proposalCount})`);
     const p = await persist({
       ...countBits,
-      ...harvestBits,
+      ...fullStatsBits,
       full: {
         at,
         yield: y,
         needsHumanSince,
         bounds: d.nBounds || { min: 1, max: Infinity },
-        retire,
+        retire: lessonsMerged ? retire : [],                            // 머지되지 않았으면 후보를 내리지 않는다
         deferredProposals: deferred.map((x) => x.proposal),
         deletionCandidates: deletions,
         entry: { at, yield: y, needs_human_since: needsHumanSince, applied },
       },
     });
-    return p.moved ? 1 : 0;
+    // 여기까지 왔으면 부수 효과는 **이미 일어났다**(PR·이슈·quarantine.toml). 그 사실을 적은 상태를
+    // 쓰지 못했다면 조용히 0으로 물러날 수 없다 — 다음 회차는 같은 창을 다시 보고 같은 일을 또 한다.
+    return p.ok ? 0 : 1;
   } catch (e) {
     console.error(`factory: retro aborted — ${e?.message || e}`);
     record(`retro: aborted — ${e?.message || e}`);
     return 1;
   }
+}
+
+/**
+ * 이슈 스냅샷은 **네 갈래**다 — 목적마다 물어보는 대상이 다르다:
+ *   - `issues`: 일반 스냅샷(최근 200, state all). 창 통계(머지 수·리뷰 라운드·reject)의 재료다.
+ *   - `flakyIssues`: `factory:flaky` 라벨의 **열린** 이슈 — 격리 등록·재작성 dedup·삭제 후보. 닫힌
+ *     이슈는 사람이 끝났다고 말한 것이므로 등록 대상이 아니다(등록은 열린 부채에만 건다).
+ *   - `flakyAll`: 같은 라벨의 **모든** 이슈(state all) — 만료 코멘트 스캔 전용(F8). sweeper는 닫힌
+ *     flaky 이슈에도 `<!-- factory-quarantine expired … -->`를 남긴다(격리는 이슈가 열려 있는지와
+ *     무관하게 계속되는 부채다). 열린 목록만 보면 그 만료는 영영 읽히지 않고 재작성 이슈도 안 생긴다.
+ *   - `harnessTitles`: `factory:harness` 라벨의 열린 이슈 제목 — 성숙도 이슈 dedup.
+ * 라벨로 좁히지 않으면 "최근 200개" 창 밖으로 밀려난 flaky·harness 이슈를 못 보고 중복을 만든다.
+ * 코멘트는 창 안에서 움직인 이슈 + 모든 flaky 이슈만 읽는다(그 둘이 판정에 쓰이는 전부다).
+ */
+export async function collectIssues({ gh, since }) {
+  const withState = (list) => list.map((i) => ({ ...i, state: i.closedAt ? "closed" : "open" }));
+  const issues = withState(await gh.issueList({ state: "all", limit: 200 }));
+  const flakyIssues = withState(await gh.issueList({ labels: [FLAKY_LABEL], state: "open" }));
+  const flakyAll = withState(await gh.issueList({ labels: [FLAKY_LABEL], state: "all" }));
+  const harnessTitles = (await gh.issueList({ labels: [HARNESS_LABEL], state: "open" })).map((i) => i.title);
+
+  const sinceMs = since == null ? null : Date.parse(since);
+  const moved = (i) => {
+    if (sinceMs == null || !i.updatedAt) return true;
+    const ms = Date.parse(i.updatedAt);
+    return !Number.isFinite(ms) || ms > sinceMs;
+  };
+  const commentsByIssue = new Map();
+  for (const i of dedupeIssues(issues.filter(moved), flakyAll)) {
+    try { commentsByIssue.set(i.number, await gh.comments(i.number)); }
+    catch (e) { console.error(`factory: retro could not read comments on #${i.number} — ${e?.message || e}`); }
+  }
+  return { issues, flakyIssues, flakyAll, harnessTitles, commentsByIssue };
 }
 
 /**
@@ -632,33 +754,11 @@ async function main() {
     },
     readState: () => parseRetroState(readText(statePath), { initial: retro.initial ?? 1 }),
     writeState: (state, opts) => { mkdirSync(runsDir, { recursive: true }); writeFileSync(statePath, renderRetroState(state, opts)); },
-    /**
-     * 이슈 스냅샷은 세 갈래다 — 목적마다 물어보는 대상이 다르다:
-     *   - `issues`: 일반 스냅샷(최근 200, state all). 창 통계(머지 수·리뷰 라운드·reject)의 재료다.
-     *   - `flakyIssues`: `factory:flaky` **라벨로 좁힌** 열린 이슈 — 격리 등록·재작성 dedup·삭제 후보.
-     *   - `harnessTitles`: `factory:harness` 라벨로 좁힌 열린 이슈 제목 — 성숙도 이슈 dedup.
-     * 라벨로 좁히지 않으면 "최근 200개" 창 밖으로 밀려난 flaky·harness 이슈를 못 보고 중복을 만든다.
-     * 코멘트는 창 안에서 움직인 이슈 + 열린 flaky 이슈만 읽는다(그 둘이 판정에 쓰이는 전부다).
-     */
+    /** 이슈 스냅샷(`collectIssues`) + 기록에서 뽑은 후보·창 통계. 둘 다 결정적이다(P4-R1). */
     harvest: async ({ since, records }) => {
-      const withState = (list) => list.map((i) => ({ ...i, state: i.closedAt ? "closed" : "open" }));
-      const issues = withState(await gh.issueList({ state: "all", limit: 200 }));
-      const flakyIssues = withState(await gh.issueList({ labels: [FLAKY_LABEL], state: "open" }));
-      const harnessTitles = (await gh.issueList({ labels: [HARNESS_LABEL], state: "open" })).map((i) => i.title);
-
-      const sinceMs = since == null ? null : Date.parse(since);
-      const moved = (i) => {
-        if (sinceMs == null || !i.updatedAt) return true;
-        const ms = Date.parse(i.updatedAt);
-        return !Number.isFinite(ms) || ms > sinceMs;
-      };
-      const commentsByIssue = new Map();
-      for (const i of dedupeIssues(issues.filter(moved), flakyIssues)) {
-        try { commentsByIssue.set(i.number, await gh.comments(i.number)); }
-        catch (e) { console.error(`factory: retro could not read comments on #${i.number} — ${e?.message || e}`); }
-      }
-      const { candidates, stats } = harvestRecords({ records, issues, commentsByIssue, since });
-      return { candidates, stats, issues, flakyIssues, harnessTitles, commentsByIssue, first: earliestRecordAt(records) };
+      const snapshot = await collectIssues({ gh, since });
+      const { candidates, stats } = harvestRecords({ records, issues: snapshot.issues, commentsByIssue: snapshot.commentsByIssue, since });
+      return { candidates, stats, ...snapshot, first: earliestRecordAt(records) };
     },
     shouldRunFull: ({ state, force: f }) => shouldRunFull({ state, retro, force: f }),
     /**
@@ -716,6 +816,8 @@ async function main() {
       return { registered };
     },
     expiredIds: ({ issues, commentsByIssue, since }) => expiredFromComments({ issues, commentsByIssue, since }),
+    /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
+    listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),
     // `_retro.md`는 매번 통째로 다시 렌더링되는 상태 파일이라 꼬리 병합의 대상이 아니고(병합되면 마커·
     // JSON 펜스가 둘인 파일이 된다), 교체는 하이드레이트한 blob에만 건다 — 그 사이 상태가 움직였으면

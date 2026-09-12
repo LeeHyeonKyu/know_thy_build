@@ -60,7 +60,15 @@ function bulletsUnderSubheading(text, heading) {
   return out;
 }
 
-function needsDenyAllWritesHook(name) {
+/**
+ * 이 역할은 **아무것도 쓸 수 없어야** 하는가. 두 곳이 같은 답을 써야 한다:
+ *   - `.claude/agents/<name>.md`의 PreToolUse 훅이 `deny-all-writes.sh`에 배선돼야 하고(아래 lint),
+ *   - `hooks/stop-guard.sh`의 SubagentStop 면제 목록에 그 이름이 있어야 한다.
+ * 둘이 어긋나면 교착이다: 쓰기가 막힌 역할이 러너가 남긴 untracked 산출물을 지우지 못한 채 가드에
+ * 걸려 영원히 멈추지 못한다. 그래서 이 술어를 export한다 — 훅 테스트가 셸의 case 목록을 이 집합과
+ * 역할마다 프로브로 대조한다(F5).
+ */
+export function needsDenyAllWritesHook(name) {
   if (!name) return false;
   // factory-retro는 제안만 낸다(P4-R4) — lessons·예시 append도, 제안 PR도, 이슈 생성도 전부 L1이 한다.
   // 이 역할이 직접 쓸 수 있게 되는 순간 "근거를 세는 쪽"과 "쓰는 쪽"이 같아져서 위조 불가 전제가 무너진다.

@@ -1,6 +1,7 @@
 import { test, expect } from "vitest";
 import { run } from "../lib/exec.js";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { needsDenyAllWritesHook } from "../lib/agent-md.js";
+import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -348,6 +349,32 @@ test("stop-guard: a write-forbidden role's SubagentStop is exempt; the builder's
   const builder = await bash("stop-guard.sh", { hook_event_name: "SubagentStop", agent_type: "factory-builder" }, cwd);
   expect(builder.code).toBe(2);
   expect(builder.stderr).toMatch(/uncommitted/);
+}, 30000);
+
+// ── F5(최종 리뷰): 면제 목록 == 쓰기 금지 역할 집합 ────────────────────────
+// 두 파일이 같은 사실을 말한다: `agent-md.js`의 `needsDenyAllWritesHook`(에이전트 파일에 deny 훅을
+// 요구한다)와 `stop-guard.sh`의 case 목록(그 역할의 SubagentStop을 면제한다). 어긋나면 교착이다 —
+// 쓰기가 막힌 역할이 러너의 untracked 산출물을 지우지 못한 채 가드에 걸려 영원히 멈추지 못한다.
+// 목록을 눈으로 맞추지 않고, **실제 역할 이름마다 셸 프로브를 돌려** 두 판정이 같은지 확인한다.
+test("stop-guard: the skip list is exactly agent-md's write-free set — one probe per role", async () => {
+  const roster = readdirSync(new URL("../../templates/factory/claude/agents/", import.meta.url).pathname)
+    .filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
+  expect(roster, "the roster must contain the retro analyst — the role this test was added for").toContain("factory-retro");
+  expect(roster.some((n) => !needsDenyAllWritesHook(n)), "the roster must contain a writing role too, or the probe proves nothing").toBe(true);
+
+  const cwd = mkdtempSync(join(tmpdir(), "sg-skiplist-"));
+  const git = (...a) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd });
+  await git("init", "-q", "-b", "main");
+  await git("commit", "-q", "--allow-empty", "-m", "init");
+  await git("checkout", "-q", "-b", "claude/fq-7");
+  // 더티 트리 — 면제되지 않은 역할은 반드시 exit 2다(그래야 프로브가 두 답을 가른다)
+  await run("bash", ["-c", "mkdir -p test-results && echo x > test-results/trace.zip"], { cwd });
+
+  for (const agent_type of [...roster, "main-session", "factory-builder"]) {
+    const r = await bash("stop-guard.sh", { hook_event_name: "SubagentStop", agent_type }, cwd);
+    expect(r.code === 0, `${agent_type}: stop-guard skip=${r.code === 0} vs needsDenyAllWritesHook=${needsDenyAllWritesHook(agent_type)}`)
+      .toBe(needsDenyAllWritesHook(agent_type));
+  }
 }, 30000);
 
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {

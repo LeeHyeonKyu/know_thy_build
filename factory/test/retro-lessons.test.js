@@ -199,3 +199,43 @@ test("added[] always matches exactly what landed in the returned text, across a 
   for (const a of added) expect(out).toContain(`- [${a.id}] ${a.text}`);
   expect(lessonsFormat("f.md", out)).toEqual([]);
 });
+
+// ── F4(최종 리뷰): 에이전트 텍스트 정규화 ────────────────────────────────
+// `retro.v1`의 `text`는 그냥 문자열이라 에이전트가 여러 줄을 담을 수 있다. 그 줄바꿈이 그대로 파일에
+// 들어가면 항목이 `- [L-…] <문장>` + `근거:` 형식을 깨고(§7.4) integrity가 PR을 RED로 만들어 다크
+// 머지가 영원히 실패한다 — 형식은 이 모듈이 보장한다.
+
+test("a multi-line lesson becomes one well-formed line that passes lessonsFormat", () => {
+  const text = HEADER("r", 30);
+  const multi = "Promise.all의 부분 실패를 본다:\n\n  - 하나가 reject하면 나머지 결과가 버려진다\n\t확인: allSettled로 바꾸고 각 결과를 검사한다";
+  const { text: out, added, rejected } = applyLessons({ text, today: "2026-09-12", adopted: [{ text: multi, evidence_runs: [1, 2] }] });
+  expect(rejected).toEqual([]);
+  expect(added).toEqual([{ id: "L-2026-09-12-01", text: "Promise.all의 부분 실패를 본다: - 하나가 reject하면 나머지 결과가 버려진다 확인: allSettled로 바꾸고 각 결과를 검사한다" }]);
+  // 항목 줄은 정확히 하나고, 그 다음 줄이 근거다
+  const lines = out.split("\n");
+  const idx = lines.findIndex((l) => l.startsWith("- [L-2026-09-12-01]"));
+  expect(lines[idx + 1]).toBe("  근거: runs/1.md, runs/2.md. 인용: 0회.");
+  expect(lines.filter((l) => l.startsWith("- ["))).toHaveLength(1);
+  expect(lessonsFormat("f.md", out)).toEqual([]);
+});
+
+test("text is capped at 300 chars with a single '…', and the cap is deterministic (same input → same duplicate verdict)", () => {
+  const text = HEADER("r", 30);
+  const long = `${"가".repeat(400)}`;
+  const { text: out, added } = applyLessons({ text, today: "2026-09-12", adopted: [{ text: long, evidence_runs: [1, 2] }] });
+  expect(added[0].text).toHaveLength(300);
+  expect(added[0].text.endsWith("…")).toBe(true);
+  expect(lessonsFormat("f.md", out)).toEqual([]);
+  // 자르기가 결정적이므로, 같은 긴 텍스트를 다시 제안하면 중복으로 거부된다
+  const second = applyLessons({ text: out, today: "2026-09-12", adopted: [{ text: long, evidence_runs: [3, 4] }] });
+  expect(second.added).toEqual([]);
+  expect(second.rejected).toEqual([{ text: long, reason: "duplicate" }]);
+});
+
+test("empty or whitespace-only text is rejected, never written as a headless entry", () => {
+  const text = HEADER("r", 30);
+  const { text: out, added, rejected } = applyLessons({ text, today: "2026-09-12", adopted: [{ text: "  \n\t ", evidence_runs: [1, 2] }, { text: undefined, evidence_runs: [3, 4] }] });
+  expect(added).toEqual([]);
+  expect(rejected).toEqual([{ text: "  \n\t ", reason: "empty" }, { text: undefined, reason: "empty" }]);
+  expect(out).toBe(text);
+});

@@ -5,7 +5,7 @@
 // fs를 만지지 않는다.
 
 import { parseHandoffs } from "../handoff.js";
-import { summarizeUsage } from "../usage.js";
+import { parseRunRecord } from "../usage.js";
 import { afterSince, extractNeedsHuman, flakyIdFromTitle, TRANSITION_TO } from "./issue-comments.js";
 
 const FLAKY_LABEL = "factory:flaky";
@@ -62,6 +62,32 @@ function isMerged(issue, comments) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+/**
+ * **창 안의** 사용량(§8.4 delta) — `since` 이후에 기록된 스테이지 항목만 더한다. 통계는 전부 창
+ * 단위이고(`merged`·`review_rounds_avg`·`rejects_by_role`·`needs_human`), 누적은 L1이
+ * `accumulateStats`로 따로 쌓는다. 여기서 전체 합(`summarizeUsage(...).total`)을 쓰면 매 full retro가
+ * 공장의 전 생애 비용을 "이번 창의 비용"으로 보고하고, 그 값이 누적에 또 더해져 이중·삼중으로 부푼다.
+ * `_retro`는 retro 자신의 기록이라 건너뛴다(그 비용은 `stats.retro_usage`가 따로 든다).
+ * 시각은 `afterSince`로 본다 — run 기록의 헤더 타임스탬프는 초를 생략한 짧은 ISO일 수 있지만
+ * `Date.parse`가 둘 다 받는다.
+ */
+function windowUsage(recs, sinceMs) {
+  let cost = 0;
+  let input = 0;
+  let output = 0;
+  for (const [key, text] of recs) {
+    if (String(key) === "_retro") continue;
+    for (const e of parseRunRecord(String(text ?? ""))) {
+      if (!afterSince(e.at, sinceMs)) continue;
+      if (e.cost_usd != null) cost += e.cost_usd;
+      if (e.input_tokens != null) input += e.input_tokens;
+      if (e.output_tokens != null) output += e.output_tokens;
+    }
+  }
+  return { cost_usd: round6(cost), tokens: { input, output } };
+}
 
 /**
  * (role,text) 키로 합치며 `runs`를 유니온한다 — 같은 claim/objection이 다른 이슈에서 또 나오면 누적.
@@ -134,14 +160,7 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
     }
   }
 
-  const usageRecords = new Map([...recs].filter(([k]) => k !== "_retro"));
-  // summarizeUsage는 "지금부터 windowDays"의 창을 요구하지만 여기서 쓰는 건 window가 아니라 `.total`
-  // (레코드 전체 합)뿐이다 — now는 유효한 날짜이기만 하면 결과에 영향이 없다(new Date(NaN) 방지용).
-  const usage = summarizeUsage(usageRecords, { now: since ?? new Date(0).toISOString(), windowDays: 1 });
-  const tokens = usage.perIssue.reduce(
-    (acc, r) => ({ input: acc.input + (r.tokens.input || 0), output: acc.output + (r.tokens.output || 0) }),
-    { input: 0, output: 0 },
-  );
+  const usage = windowUsage(recs, sinceMs);
 
   return {
     candidates: {
@@ -155,7 +174,7 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
       review_rounds_avg: mergedCount ? round2(reviewRoundsSum / mergedCount) : 0,
       rejects_by_role: rejectsByRole,
       needs_human: needsHuman.length,
-      usage: { cost_usd: usage.total.cost_usd, tokens },
+      usage,
     },
   };
 }

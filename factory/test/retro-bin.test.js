@@ -1,7 +1,7 @@
 import { test, expect, vi } from "vitest";
 import {
-  accumulateStats, applyMutation, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
-  retireCandidates, roleFileMap, runRetro, stampOf, statsTable, todayOf, ymdOf,
+  accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
+  retireCandidates, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
 
@@ -42,6 +42,7 @@ const HARVEST = () => ({
   stats: { merged: 3, review_rounds_avg: 1.5, rejects_by_role: { correctness: 2 }, needs_human: 0, usage: { cost_usd: 1.5, tokens: { input: 10, output: 20 } } },
   issues: ISSUES,
   flakyIssues: FLAKY_ISSUES,
+  flakyAll: FLAKY_ISSUES,
   harnessTitles: [],
   commentsByIssue: new Map(),
   first: "2026-08-01T00:00:00Z",
@@ -67,7 +68,8 @@ function makeDeps({ state, overrides = {} } = {}) {
     writeState: vi.fn(async (s, opts) => { written.push({ state: JSON.parse(JSON.stringify(s)), opts }); }),
     harvest: vi.fn(async () => HARVEST()),
     shouldRunFull: vi.fn(({ state: s, force }) => (force || s.merges_since + 1 >= s.n ? { full: true, reason: "n" } : { full: false, reason: "n" })),
-    claudeP: vi.fn(async () => ({ result: JSON.stringify(AGENT_OUT()) })),
+    // `claude -p --output-format json`의 봉투 — 결과 텍스트만이 아니라 이 회차가 쓴 비용도 들어 있다
+    claudeP: vi.fn(async () => ({ result: JSON.stringify(AGENT_OUT()), total_cost_usd: 0.42, usage: { input_tokens: 1200, output_tokens: 300 } })),
     applyLessons: vi.fn(async ({ role }) => (role === "correctness"
       ? { path: LESSONS_PATH, text: "LESSONS-C", added: [{ id: "L-2026-09-12-01", text: "타임존" }], rejected: [], evicted: [] }
       : { path: ".factory/lessons/reviewer-qa.md", text: "LESSONS-Q", added: [], rejected: [{ text: "경계값", reason: "duplicate" }], evicted: [] })),
@@ -79,6 +81,7 @@ function makeDeps({ state, overrides = {} } = {}) {
     createIssue: vi.fn(async () => (issueSeq += 1)),
     registerQuarantine: vi.fn(async () => ({ registered: [{ id: "t1", issue: 21 }] })),
     expiredIds: vi.fn(async () => ["t2"]),
+    listProposalPrs: vi.fn(async () => []),
     publishProposal: vi.fn(async () => ({ pr: 88, reason: null })),
     sync: vi.fn(async () => ({ ok: true })),
     lightOnMerge: true,
@@ -530,12 +533,84 @@ test("full: each enforcement step is isolated — one failure never blocks the o
   expect(deps.sync).toHaveBeenCalled();
 });
 
-test("full: a lessons PR that could not be merged still counts its additions but is recorded as unmerged", async () => {
-  const state = freshState();
-  const { deps, last } = makeDeps({ state, overrides: { publishLessons: vi.fn(async () => ({ pr: 79, merged: false, reason: "integrity: .factory/lessons/x.md: additive_only" })) } });
+// ── F3(최종 리뷰): 머지된 PR만이 채택이다 ────────────────────────────────
+// 다크 PR이 머지되지 않으면 그 텍스트는 파일에 **없다**. 그래도 후보에서 내리면 다음 retro가 다시 볼
+// 수 없어 영원히 사라지고, yield에 세면 "수확이 있었다"며 N을 줄여 토큰만 더 쓴다 — 둘 다 관측되지
+// 않은 성공을 기록하는 셈이다.
+
+const unmergedLessonsPr = {
+  "RED / timeout / human close": { publishLessons: vi.fn(async () => ({ pr: 79, merged: false, reason: "integrity: .factory/lessons/x.md: additive_only" })) },
+  "no PR at all (publish threw)": { publishLessons: vi.fn(async () => { throw new Error("push failed"); }) },
+};
+
+for (const [name, overrides] of Object.entries(unmergedLessonsPr)) {
+  test(`full: an unmerged lessons PR (${name}) keeps the candidates and is excluded from the yield`, async () => {
+    const state = freshState();
+    const { deps, recorded, last } = makeDeps({ state, overrides });
+    expect(await runRetro({ deps, now: NOW })).toBe(0);
+    const s = last();
+    const h = s.history.at(-1);
+    // yield: lesson 1 + 역할 2를 빼고 harness 1 + 제안 PR 1만 남는다
+    expect(h.yield).toBe(2);
+    expect(s.n).toBe(3);                                                  // yield 1~2 → N 유지(줄이지 않는다)
+    // 후보는 그대로 — 다음 retro가 같은 것을 다시 본다
+    expect(s.candidates.lessons).toEqual([{ role: "correctness", text: "raw claim", runs: [11] }]);
+    expect(recorded.join("\n")).toContain("lessons PR not merged");
+  });
+}
+
+test("full: a merged lessons PR is what retires the candidates — the adopted text leaves the list", async () => {
+  const state = freshState({ candidates: { lessons: [{ role: "correctness", text: "타임존", runs: [11, 12] }], examples: [], flaky: [], needs_human: [] } });
+  const { deps, last } = makeDeps({ state });                             // 기본 publishLessons는 merged:true다
   expect(await runRetro({ deps, now: NOW })).toBe(0);
-  const h = last().history.at(-1);
-  expect(h.applied).toEqual(expect.arrayContaining([expect.objectContaining({ step: "publish-lessons", pr: 79, merged: false, reason: expect.stringContaining("additive_only") })]));
+  const s = last();
+  expect(s.history.at(-1).yield).toBe(5);
+  expect(s.candidates.lessons.map((l) => l.text)).not.toContain("타임존");
+  expect(s.history.at(-1).applied).toEqual(expect.arrayContaining([expect.objectContaining({ step: "publish-lessons", pr: 77, merged: true })]));
+});
+
+// ── F6(최종 리뷰): 다크 PR 경로 허용 목록 ────────────────────────────────
+// 자체 머지의 안전성은 integrity의 lessons/additive_only 규칙이 그 **두 경로**에만 걸려 있다는 사실에
+// 기댄다. roles.toml이 엉뚱한 경로를 가리키면 retro는 "자체 머지되는 임의 파일 쓰기"가 된다.
+
+test("splitDarkFiles admits only .factory/lessons/<f>.md and .claude/agents/<f>.md — no subdirs, no escapes", () => {
+  const { allowed, rejected } = splitDarkFiles({
+    ".factory/lessons/reviewer-qa.md": "a",
+    ".claude/agents/reviewer-qa.md": "b",
+    ".factory/lessons/nested/x.md": "c",
+    ".claude/agents/../../etc/passwd": "d",
+    "docs/factory/DECISIONS.md": "e",
+    ".factory/harness.toml": "f",
+  });
+  expect(Object.keys(allowed)).toEqual([".factory/lessons/reviewer-qa.md", ".claude/agents/reviewer-qa.md"]);
+  expect(rejected).toEqual([".factory/lessons/nested/x.md", ".claude/agents/../../etc/passwd", "docs/factory/DECISIONS.md", ".factory/harness.toml"]);
+});
+
+test("full: a file outside the dark allowlist never reaches the PR — it is recorded as rejected", async () => {
+  const state = freshState();
+  const { deps, recorded, last } = makeDeps({ state, overrides: {
+    // roles.toml이 엉뚱한 경로를 가리키는 상황 — lessons 쓰기는 성공했다고 주장한다
+    applyLessons: vi.fn(async () => ({ path: "docs/factory/DECISIONS.md", text: "EVIL", added: [{ id: "L-2026-09-12-01", text: "x" }], rejected: [], evicted: [] })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  const files = deps.publishLessons.mock.calls[0][0].files;
+  expect(Object.keys(files).sort()).toEqual([QA_AGENT_PATH, C_AGENT_PATH].sort());
+  expect(files["docs/factory/DECISIONS.md"]).toBeUndefined();
+  expect(last().history.at(-1).applied).toEqual(expect.arrayContaining([
+    expect.objectContaining({ step: "publish-lessons", rejected: ["docs/factory/DECISIONS.md"] }),
+  ]));
+  expect(recorded.join("\n")).toContain("outside the dark allowlist");
+});
+
+test("full: when every changed file is rejected there is no PR at all, and nothing counts as landed", async () => {
+  const state = freshState();
+  const { deps, last } = makeDeps({ state, overrides: {
+    applyLessons: vi.fn(async () => ({ path: "../../etc/passwd", text: "EVIL", added: [{ id: "L-2026-09-12-01", text: "x" }], rejected: [], evicted: [] })),
+    applyRoleAdditions: vi.fn(async () => ({ path: "scripts/deploy.sh", text: "EVIL", added: [{ section: "## Perspectives", text: "y" }], skipped: [] })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(deps.publishLessons).not.toHaveBeenCalled();
+  expect(last().history.at(-1).yield).toBe(2);                            // harness 1 + 제안 PR 1 — 착지하지 않은 텍스트는 0
 });
 
 test("full: a proposal PR that never got a number does not count toward the yield", async () => {
@@ -543,6 +618,181 @@ test("full: a proposal PR that never got a number does not count toward the yiel
   const { deps, last } = makeDeps({ state, overrides: { publishProposal: vi.fn(async () => ({ pr: null, reason: "push failed" })) } });
   expect(await runRetro({ deps, now: NOW })).toBe(0);
   expect(last().history.at(-1).yield).toBe(4);
+});
+
+// ── F8(최종 리뷰): 만료 스캔만 state:"all" ──────────────────────────────
+// sweeper는 **닫힌** flaky 이슈에도 만료 코멘트를 남긴다(사람이 이슈를 닫아도 격리는 남는 부채다).
+// 열린 목록만 보면 그 만료는 영영 읽히지 않고 "다른 레벨에서 다시 쓰라"는 이슈도 생기지 않는다.
+// 반대로 등록·dedup은 열린 이슈만 봐야 한다 — 사람이 닫은 이슈에 새 격리를 걸지 않는다.
+
+test("collectIssues: flaky is listed twice — open for registration/dedup, all for the expired scan", async () => {
+  const closedFlaky = { number: 22, title: "flaky: t2", labels: ["factory:flaky"], closedAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z" };
+  const openFlaky = { number: 21, title: "flaky: t1", labels: ["factory:flaky"], closedAt: null, updatedAt: "2026-09-11T00:00:00Z" };
+  const calls = [];
+  const gh = {
+    issueList: vi.fn(async (args) => {
+      calls.push(args);
+      if (args.labels?.[0] === "factory:flaky") return args.state === "open" ? [openFlaky] : [openFlaky, closedFlaky];
+      if (args.labels?.[0] === "factory:harness") return [{ number: 5, title: "harness: promote to M1 — x" }];
+      return [{ number: 11, title: "feat", labels: [], closedAt: null, updatedAt: "2026-09-01T00:00:00Z" }];   // 창 밖 — 코멘트를 읽지 않는다
+    }),
+    comments: vi.fn(async () => []),
+  };
+  const snap = await collectIssues({ gh, since: CURSOR });
+
+  expect(calls).toContainEqual({ labels: ["factory:flaky"], state: "open" });
+  expect(calls).toContainEqual({ labels: ["factory:flaky"], state: "all" });
+  expect(snap.flakyIssues.map((i) => i.number)).toEqual([21]);
+  expect(snap.flakyAll.map((i) => i.number)).toEqual([21, 22]);
+  expect(snap.flakyAll.find((i) => i.number === 22).state).toBe("closed");
+  expect(snap.harnessTitles).toEqual(["harness: promote to M1 — x"]);
+  // 닫힌 flaky 이슈의 코멘트도 읽는다 — 만료 마커가 거기에만 남아 있을 수 있다
+  expect([...snap.commentsByIssue.keys()].sort()).toEqual([21, 22]);
+});
+
+test("full: the expired scan sees closed flaky issues; registration still only sees the open ones", async () => {
+  const closed = { number: 22, title: "flaky: t2", labels: ["factory:flaky"], state: "closed", closedAt: "2026-09-01T00:00:00Z" };
+  const open = ISSUES[1];
+  const { deps } = makeDeps({ state: freshState(), overrides: {
+    harvest: vi.fn(async () => ({ ...HARVEST(), flakyIssues: [open], flakyAll: [open, closed] })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  const scanned = deps.expiredIds.mock.calls[0][0].issues;
+  expect(scanned.map((i) => i.number)).toContain(22);
+  expect(deps.registerQuarantine.mock.calls[0][0].issues).toEqual([open]);
+});
+
+// ── F9(최종 리뷰): 제안 PR dedup ─────────────────────────────────────────
+// 제안 PR은 사람이 머지한다 — 며칠 열려 있는 것이 정상이고 그 사이 retro는 여러 번 돈다. 같은 창의
+// 제안을 또 열면 사람이 읽을 것만 늘고(어느 쪽이 최신인지도 알 수 없다) yield까지 부풀린다.
+
+test("full: an open proposal PR carrying the same period marker suppresses a second one", async () => {
+  const marker = "<!-- factory-retro:v1 period=2026-09-05..2026-09-12 -->";
+  const { deps, recorded, last } = makeDeps({ state: freshState(), overrides: {
+    listProposalPrs: vi.fn(async () => [{ number: 66, title: "retro proposals (다른 제목)", body: `${marker}\n## Retro …` }]),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(deps.listProposalPrs).toHaveBeenCalled();
+  expect(deps.publishProposal).not.toHaveBeenCalled();
+  expect(recorded.join("\n")).toContain("retro: proposal skipped (duplicate #66)");
+  const h = last().history.at(-1);
+  expect(h.applied).toEqual(expect.arrayContaining([expect.objectContaining({ step: "publish-proposal", skipped: "duplicate #66" })]));
+  expect(h.yield).toBe(4);                                                // 열리지 않은 PR은 세지 않는다
+});
+
+test("full: the same title also counts as a duplicate; a different period does not", async () => {
+  const sameTitle = makeDeps({ state: freshState(), overrides: {
+    listProposalPrs: vi.fn(async () => [{ number: 67, title: "retro proposals 2026-09-05..2026-09-12", body: "본문이 비어도 제목이 같으면 같은 제안이다" }]),
+  } });
+  expect(await runRetro({ deps: sameTitle.deps, now: NOW })).toBe(0);
+  expect(sameTitle.deps.publishProposal).not.toHaveBeenCalled();
+
+  const otherPeriod = makeDeps({ state: freshState(), overrides: {
+    listProposalPrs: vi.fn(async () => [{ number: 68, title: "retro proposals 2026-08-01..2026-08-07", body: "<!-- factory-retro:v1 period=2026-08-01..2026-08-07 -->" }]),
+  } });
+  expect(await runRetro({ deps: otherPeriod.deps, now: NOW })).toBe(0);
+  expect(otherPeriod.deps.publishProposal).toHaveBeenCalledTimes(1);
+});
+
+test("full: a failing dedup lookup does not swallow the proposal — the PR is still opened", async () => {
+  const { deps, last } = makeDeps({ state: freshState(), overrides: {
+    listProposalPrs: vi.fn(async () => { throw new Error("gh pr list boom"); }),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(deps.publishProposal).toHaveBeenCalledTimes(1);
+  expect(last().history.at(-1).applied).toEqual(expect.arrayContaining([
+    expect.objectContaining({ step: "proposal-dedup", error: expect.stringContaining("gh pr list boom") }),
+  ]));
+});
+
+// ── F10(최종 리뷰): retro 자신의 비용 ───────────────────────────────────
+// retro는 스테이지가 아니라 run 기록에 usage 줄을 남기지 않는다 — 여기서 걷지 않으면 "공장이 자기를
+// 돌아보는 데 든 비용"이 어디에도 남지 않는다.
+
+test("retroUsageOf reads the claude -p envelope and degrades to zeros, never to nulls", () => {
+  expect(retroUsageOf({ total_cost_usd: 0.4212345678, usage: { input_tokens: 12, output_tokens: 3 } }))
+    .toEqual({ cost_usd: 0.421235, tokens: { input: 12, output: 3 } });
+  expect(retroUsageOf(null)).toEqual({ cost_usd: 0, tokens: { input: 0, output: 0 } });
+  expect(retroUsageOf({ is_error: true, result: "usage limit" })).toEqual({ cost_usd: 0, tokens: { input: 0, output: 0 } });
+});
+
+test("full: the retro's own cost lands in stats.retro_usage, accumulates into stats_total, and shows in the table", async () => {
+  const state = freshState({ stats_total: { merged: 1, retro_usage: { cost_usd: 1, tokens: { input: 100, output: 50 } }, retros: 1 } });
+  const { deps, last, written } = makeDeps({ state });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  const s = last();
+  expect(s.stats.retro_usage).toEqual({ cost_usd: 0.42, tokens: { input: 1200, output: 300 } });
+  expect(s.stats_total.retro_usage).toEqual({ cost_usd: 1.42, tokens: { input: 1300, output: 350 } });
+  // 스테이지 비용과 섞이지 않는다 — 창의 usage는 harvest가 준 값 그대로다
+  expect(s.stats.usage).toEqual({ cost_usd: 1.5, tokens: { input: 10, output: 20 } });
+  const table = written.at(-1).opts.statsTable;
+  expect(table).toContain("| retro cost (usd) | 0.42 | 1.42 |");
+  expect(table).toContain("| retro tokens | input 1200 / output 300 | input 1300 / output 350 |");
+});
+
+test("statsTable renders the retro rows even when nothing has been recorded yet", () => {
+  const t = statsTable(null, null);
+  expect(t).toContain("| retro cost (usd) | 0.00 | 0.00 |");
+  expect(t).toContain("| retro tokens | input 0 / output 0 | input 0 / output 0 |");
+});
+
+test("a failed full analysis still records what it spent", async () => {
+  const { deps, last } = makeDeps({ state: freshState({ merges_since: 2, n: 3 }), overrides: {
+    claudeP: vi.fn(async () => ({ is_error: true, result: "usage limit", total_cost_usd: 0.05, usage: { input_tokens: 900, output_tokens: 10 } })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(last().stats.retro_usage).toEqual({ cost_usd: 0.05, tokens: { input: 900, output: 10 } });
+});
+
+// ── F11(최종 리뷰): full 경로에서 상태를 못 쓰면 시끄럽게 실패한다 ───────
+// 여기까지 왔으면 부수 효과는 이미 일어났다(PR·이슈·quarantine.toml). 그 사실을 적은 상태를 쓰지
+// 못한 채 exit 0으로 물러나면 다음 회차가 같은 창을 다시 보고 같은 일을 또 한다.
+
+const stateWriteFailures = {
+  "writeState throws": { writeState: vi.fn(async () => { throw new Error("disk full"); }) },
+  "sync throws": { sync: vi.fn(async () => { throw new Error("git push exploded"); }) },
+  "sync returns ok:false (not moved)": { sync: vi.fn(async () => ({ ok: false, reason: "push failed: no upstream" })) },
+};
+
+for (const [name, overrides] of Object.entries(stateWriteFailures)) {
+  test(`full: ${name} → exit 1 (the side effects already happened)`, async () => {
+    const state = freshState({ merges_since: 2, n: 3 });
+    const { deps, recorded } = makeDeps({ state, overrides });
+    expect(await runRetro({ deps, now: NOW })).toBe(1);
+    expect(deps.publishLessons).toHaveBeenCalled();                       // 부수 효과는 실제로 일어났다
+    expect(recorded.join("\n")).toMatch(/write failed|sync aborted|sync failed/);
+  });
+
+  test(`light: ${name} → still exit 0, recorded (nothing was applied, the next merge retries)`, async () => {
+    const state = freshState({ merges_since: 0, n: 9 });
+    const { deps, recorded } = makeDeps({ state, overrides });
+    expect(await runRetro({ deps, now: NOW })).toBe(0);
+    expect(deps.claudeP).not.toHaveBeenCalled();
+    expect(recorded.join("\n")).toMatch(/write failed|sync aborted|sync failed/);
+  });
+}
+
+// ── 이월 #2: 재하이드레이트에서 브랜치의 상태 파일이 사라졌을 때 ─────────
+
+test("re-hydrate: a _retro.md that vanished from the branch restarts from the empty state, not from our own local write", async () => {
+  const base = freshState({ merges_since: 0, n: 5, history: [{ at: "2026-09-01T00:00:00Z", yield: 1, n_before: 5, n_after: 5 }] });
+  let hydrateCalls = 0;
+  const { deps, written } = makeDeps({ state: base, overrides: {
+    hydrate: vi.fn(async () => {
+      hydrateCalls += 1;
+      // 두 번째 하이드레이트: 브랜치에 `_retro.md`가 더 이상 없다(누군가 지웠다)
+      return { records: new Map(), fetched: true, exists: hydrateCalls === 1, stateBlob: hydrateCalls === 1 ? "old" : null, stateFailed: false };
+    }),
+    sync: vi.fn(async ({ expectBlob }) => (expectBlob["_retro.md"] === "old" ? { ok: false, moved: true, reason: "state moved" } : { ok: true })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  expect(hydrateCalls).toBe(2);
+  // 로컬 파일(= 방금 우리가 쓴 변이본)을 다시 읽지 않는다 — 그랬다면 같은 변이가 두 번 얹힌다
+  expect(deps.readState).toHaveBeenCalledTimes(1);
+  const finalState = written.at(-1).state;
+  expect(finalState.history).toEqual([]);                                 // 지워진 이력을 되살려 내지 않는다
+  expect(finalState.merges_since).toBe(3);                                // 이번 창의 변이만 얹는다
+  expect(deps.sync).toHaveBeenLastCalledWith({ expectBlob: { "_retro.md": null } });
 });
 
 // ── 분석 실패 경로 ───────────────────────────────────────────────────────
