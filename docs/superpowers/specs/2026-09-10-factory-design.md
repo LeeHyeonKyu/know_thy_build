@@ -47,7 +47,7 @@ Phase 1 · Define (로컬, 대화형, 사람)         Phase 2 · Build (CI, 이�
 ### 2.1 CLI
 
 ```
-npx know-thy-build                     # 스킬 12개 설치 (.claude/commands/know-thy-build/*) — Define 4 + Operate 8 (§13)
+npx know-thy-build                     # 스킬 13개 설치 (.claude/commands/know-thy-build/*) — Define 5 + Operate 8 (§13)
 npx know-thy-build factory init        # Phase 2 파일 설치 (.github/ .claude/agents|workflows|hooks .factory/ docs/factory/)
 npx know-thy-build factory doctor      # 하네스 계약 검증. 하나라도 비면 exit 1
 npx know-thy-build factory bootstrap   # 라벨 세트, branch protection, required checks (repo admin)
@@ -1005,7 +1005,7 @@ frontmatter: name, description, tools, model, hooks(선택)
 - `## Examples`의 `### 좋은 발견`/`### 나쁜 발견` 하위 불릿이 각 ≥2개.
 - `## Perspectives`의 최상위 불릿이 ≥3개.
 - `## Lessons`가 `.factory/lessons/<name>.md` 경로 문자열을 포함해야 한다.
-- 쓰기 금지 역할(이름이 `reviewer-`/`plan-`로 시작하거나 `factory-triage`/`factory-verifier`/`factory-loader`)은 frontmatter `hooks.PreToolUse`에 `deny-all-writes.sh`가 배선돼 있어야 한다.
+- 쓰기 금지 역할(이름이 `reviewer-`/`plan-`로 시작하거나 `factory-triage`/`factory-verifier`/`factory-loader`/`factory-retro`)은 frontmatter `hooks.PreToolUse`에 `deny-all-writes.sh`가 배선돼 있어야 한다.
 
 파일이 아예 없는 항목(§7.1의 `merge.integrator`/`retro.analyst`처럼 아직 설치되지 않은 역할)은 `checkAgents`가 건너뛴다 — 부재는 `roles.agent-files`가 이미 별도로 FAIL로 잡고 있어, 같은 사실을 두 줄로 보고하지 않기 위해서다.
 
@@ -1353,6 +1353,8 @@ lesson L-2026-09-14-01 → reviewer-qa (DST 스크린샷)
 
 Feature Registry(PROJECT.md)는 유지하되 `status`를 사람이 쓰지 않는다 — `factory status`가 GitHub에서 읽어 렌더링한다.
 
+`architect`/`designer`는 13개 카탈로그(§13.2, 사람 지점 1개=스킬 1개) 밖이지만 계속 설치된다 — Phase 1의 비-카탈로그 보조 스킬(`:feature`에서 대형·복잡 기능일 때 호출)로 남고, 이 둘도 §13.3의 6섹션 블록(`## Language` 다음에 `## Trigger`~`## Must not`)을 그대로 갖춘다. `doctor`(`checkSkills`)는 설치 디렉터리의 `.md` 전부를 이름과 무관하게 검사하므로 이 둘도 예외가 아니다.
+
 위 표는 기존 스킬의 변경만 다룬다. 신설 스킬 9개(`:issue` `:harness` `:next` `:clarify` `:unstick` `:proposal` `:role` `:digest` `:status`)의 정의는 §13.
 
 ---
@@ -1540,8 +1542,8 @@ actions:
      - `RED×M`: 제품 결함 인정(새 이슈) / 환경 문제(harness 이슈) / 테스트 자체가 잘못(스펙 수정)
      - `budget`: 분할 / tier 하향 / 예산 상향(CHARTER 변경 → `:proposal` 경로)
      - `quarantine back-pressure`: 격리 목록을 보고 제품 비결정성 판단 → 수정 이슈 우선 착수 / 삭제 결정
-     - `wont-do 판단`: 스펙 폐기
-  3. **실행**: 선택에 따라 스펙 편집, 이슈 생성, `transition.sh --human`, `human-decision` 기록
+     - `wont-do 판단`: 스펙 폐기(wont-do는 라벨 전이가 아니라 close + human-decision)
+  3. **실행**: 선택에 따라 스펙 편집, 이슈 생성, `transition.js --human`, `human-decision` 기록
 - **Produces** `human-decision` 코멘트, 파생 이슈, 스펙 변경, 라벨 전이
 - **Must not** 라벨만 지우고 다시 queue(사유 없는 재시도), K·M 한계를 즉석에서 변경(그건 CHARTER → `:proposal`)
 
@@ -1623,7 +1625,7 @@ P3 역할 신설: reviewer-performance
 - **Reads** 기간 내 머지된 PR, plan handoff(approach·dissent·open_risks), DECISIONS.md, TECHNICAL.md
 - **Does** "이번 주 제품이 어떻게 변했나"를 **PROJECT.md의 언어**(페르소나·저니·원칙)로 설명. 아키텍처 변화·새 의존성·미해결 dissent·open_risks를 강조. 사람이 묻는 질문에 코드 근거로 답함("왜 이렇게 했지?" → plan handoff와 R2 반박 인용)
 - **Produces** `docs/factory/digests/YYYY-Wnn.md`
-- **Must not** 코드를 바꾸거나 이슈를 만들지 않음(발견은 `:feature --bug`로 유도)
+- **Must not** 코드를 바꾸거나 이슈를 만들지 않음(발견은 `:issue`로 유도)
 
 #### `:status` — 신설
 - **Trigger** 상시
@@ -1634,7 +1636,9 @@ P3 역할 신설: reviewer-performance
 
 ### 13.4 설치와 배치
 
-`npx know-thy-build`가 13개 전부를 `.claude/commands/know-thy-build/`에 설치한다(Phase 1·2 구분 없이 하나의 세트). 운영 스킬은 factory가 init된 프로젝트에서만 의미가 있으므로, `factory init` 전에는 첫 줄에서 "factory가 아직 없음"을 안내하고 종료한다. `factory status` CLI는 `:status`의 비대화형 버전으로 남긴다(CI·스크립트용).
+`npx know-thy-build`가 13개 전부를 `.claude/commands/know-thy-build/`에 설치한다(Phase 1·2 구분 없이 하나의 세트) — 여기에 비-카탈로그 보조 스킬 `architect`/`designer`를 더해 실제로는 파일 15개가 설치된다. 설치기는 `templates/know-thy-build/`만 복사한다 — `templates/factory/**`(factory init이 따로 설치하는 자료)는 절대 건드리지 않는다 — 그리고 레거시 `finish.md`가 있으면 지운다. 운영 스킬은 factory가 init된 프로젝트에서만 의미가 있으므로, `factory init` 전에는 첫 줄에서 "factory가 아직 없음"을 안내하고 종료한다. `factory status` CLI는 `:status`의 비대화형 버전으로 남긴다(CI·스크립트용).
+
+`factory doctor`는 설치된 스킬 디렉터리의 `.md` 파일 각각을 `skills.<name>`(PASS/FAIL, `lintSkillMd(text, {name, installed:true})`) 한 줄로 보고하고, 13개 카탈로그 중 설치 디렉터리에 없는 이름이 있으면 `skills.missing`을 WARN으로 별도 보고한다(`checkSkills`, `factory/lib/doctor/factory.js`).
 
 `factory status`의 화면 구성은 Needs You → **진행 중** → **큐** → 역압 → 최근 머지 → 사용량 순이다(Plan 2 실행 판결, ADR-015). "진행 중" = `factory:in-progress`/`awaiting-review`/`rework`/`blocked`(blocked 항목엔 "sweeper → needs-human" 힌트가 붙는다 — 아직 사람 차례는 아니다); "큐" = `factory:queue`/`ready`/`planned`/`approved`(아직 어떤 스테이지도 시작 안 한 상태). 이슈별 사용량이 함께 표시되지만(상위 10개), 사용량은 어떤 경우에도 진행을 막지 않고 **보고만** 한다(ADR-005).
 

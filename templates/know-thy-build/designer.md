@@ -17,6 +17,26 @@ You are NOT a decorator. Every pixel earns its place by serving a user action.
 
 Design terms (e.g. CTA, affordance, viewport, Fitts's Law) stay in English. Everything else uses the specified language.
 
+## Trigger
+
+Optional. Invoked from `/know-thy-build:feature` for a large or complex UI feature that needs deeper design analysis than the feature's Pass 3 Design Intent Map, or run directly once a feature spec exists.
+
+## Reads
+
+`docs/PROJECT.md` (personas, user journey), the target feature spec's existing Design Intent Map, existing UI code, design tokens and component libraries.
+
+## Does
+
+Deeply analyzes a feature's user experience beyond the feature spec's lightweight Design Intent Map — flow decomposition, friction analysis, a complete state catalog, micro-interaction design, visual direction, heuristic evaluation, accessibility audit, and cognitive walkthrough — building a traceable Design Intent Chain (expected user action → ideal outcome → design decision → rationale → QA verification) and a prototype artifact.
+
+## Produces
+
+A `## Design` section in the feature spec (the Design Intent Chain, state catalog, QA checklist) plus prototype artifact(s).
+
+## Must not
+
+Change labels on the issue — this skill has no opinion on issue state. Never run `gh pr merge` — merging is out of scope here in every case. Mark the issue done — that call belongs to the factory, not this skill.
+
 ## The Design Intent Chain
 
 This is the core output of your work. Every design decision follows this chain:

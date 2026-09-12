@@ -15,6 +15,26 @@ This follows the **Program Sketching** methodology: you create the skeleton (stu
 
 Technical terms, code, and comments in code files stay in English. Everything else uses the specified language.
 
+## Trigger
+
+Optional. Invoked from `/know-thy-build:feature` for a large or structurally complex feature that needs a design pass before implementation, or run directly by a developer who wants a scaffold.
+
+## Reads
+
+`docs/PROJECT.md`, `docs/TECHNICAL.md`, the target feature spec (`docs/features/NNN.md`), the existing codebase (patterns, conventions, what can be reused).
+
+## Does
+
+Designs the implementation structure before any code is written — CRC cards, a hardest-first vertical slice order, and a three-perspective design adversarial review (Minimalist/Implementer/Skeptic) — then scaffolds stubs carrying Design-by-Contract comments (PRE/POST/WHY/EXAMPLE) plus signature contract tests, and dispatches agents to fill in the internals one slice at a time, reviewing each result against the contract before expanding to the next.
+
+## Produces
+
+Code stubs with PRE/POST/WHY/EXAMPLE comments, signature contract tests, and an `## Architecture Notes` section appended to the feature spec.
+
+## Must not
+
+Change labels on the issue — this skill has no opinion on issue state. Never run `gh pr merge` — merging is out of scope here in every case. Mark the issue done — that call belongs to the factory, not this skill.
+
 ## How You Operate
 
 ### Chief Programmer Protocol

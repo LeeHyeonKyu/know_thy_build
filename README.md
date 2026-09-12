@@ -25,16 +25,32 @@ know-thy-build exists to **define the project, design the experience, establish 
 npx know-thy-build
 ```
 
-Pick a language, and six commands are installed into your `.claude/commands/`:
+Pick a language, and 13 commands are installed into your `.claude/commands/` — one per human decision point (§13): Define (5) and Operate (8, meaningful once `factory init` has run).
+
+**Define**
 
 | Command | Role | Output |
 |---------|------|--------|
-| `/know-thy-build:project` | Define what and why | `docs/PROJECT.md` |
-| `/know-thy-build:technical` | Define how to build | `docs/TECHNICAL.md` |
-| `/know-thy-build:feature` | Design a specific feature | `docs/features/NNN.md` |
-| `/know-thy-build:qa` | Build QA framework + test | `docs/QA.md` |
-| `/know-thy-build:designer` | UX deep dive | `## Design` in feature spec |
-| `/know-thy-build:architect` | Implementation design | Code stubs + tests |
+| `/know-thy-build:project` | Define what it is, why it exists, and what it must become | `docs/PROJECT.md` |
+| `/know-thy-build:technical` | Define how your project will be built | `docs/TECHNICAL.md` |
+| `/know-thy-build:qa` | QA the product — test framework with behavioral axes, then run and verify with evidence | `docs/QA.md` |
+| `/know-thy-build:feature` | Design a feature before building it | `docs/features/NNN.md` + `backlog` issue |
+| `/know-thy-build:issue` | Log a bug, chore, or small change — no spec doc | `backlog` issue only |
+
+**Operate**
+
+| Command | Role | Output |
+|---------|------|--------|
+| `/know-thy-build:harness` | Fix a failing doctor / adopt a brownfield repo | `harness.toml`, doctor PASS |
+| `/know-thy-build:next` | Pick the next issue to queue | Label transition, `human-decision` |
+| `/know-thy-build:clarify` | Answer `needs-info` questions on a spec | Updated spec/issue, label transition |
+| `/know-thy-build:unstick` | Resolve a stuck issue (`needs-human`) | `human-decision`, derived issues, label transition |
+| `/know-thy-build:proposal` | Review a retro/harness proposal PR | PR comment (dry-run), `human-decision` |
+| `/know-thy-build:role` | Create or edit a reviewer/plan role | `.claude/agents/<role>.md`, `roles.toml` diff, PR |
+| `/know-thy-build:digest` | Weekly summary of what shipped | `docs/factory/digests/YYYY-Wnn.md` |
+| `/know-thy-build:status` | Read-only dashboard (Needs You / in progress / queue) | none (read-only) |
+
+`designer` and `architect` remain installed as optional Phase 1 helpers (invoked from `:feature` for complex UI or structural work) — 15 files installed in total.
 
 ## The pipeline
 
@@ -61,8 +77,8 @@ These three commands run once at project start. They produce the foundation docu
 /know-thy-build:feature      Define the feature (problem, value, stories, AC, design intent)
 /know-thy-build:qa           Define test cases for this feature (what "done" means)
 /know-thy-build:designer     [optional] Deep UX analysis (heuristics, prototyping, accessibility)
-implement                    Build the feature
-/know-thy-build:architect    [optional] Code design for complex features (stubs, tests, sub-agents)
+factory (labelled issue → triage → plan → implement → review → merge)
+/know-thy-build:architect    [optional] Code design for complex features (stubs, tests, agents)
 /know-thy-build:qa           Test the running product against QA.md test cases
 ```
 
