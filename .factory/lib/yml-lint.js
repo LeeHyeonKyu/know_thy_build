@@ -48,6 +48,53 @@ export function lintWorkflow(text) {
       }
     });
   }
+  const stage = STAGE_RUN.exec(text);
+  if (stage) out.push(...lintStageWorkflow(text, lines, stage[1]));
+  return out;
+}
+
+/**
+ * ADR-020 KTB-24/KTB-26 — 스테이지 워크플로에만 거는 세 규칙. "이 텍스트가 스테이지 워크플로다"의
+ * 표식은 `run-stage.js <stage> <issue>`를 **정리 플래그 없이** 실행하는 줄 하나다: 그래야 설정 조각·
+ * composite action·정리 스텝만 있는 스니펫이 규칙에 걸리지 않는다(`lintWorkflow`는 파일 이름을 받지 않는다).
+ */
+const STAGE_RUN = /run:\s*node \.factory\/bin\/run-stage\.js\s+(triage|plan|implement|review|merge)\b(?![^\n]*--aborted)/;
+
+/**
+ * KTB-24 — review·implement의 `timeout-minutes` 하한. 데모 #15의 review는 4역할 × +709줄 PR을
+ * 45분 안에 못 끝내고 **한도에 걸려** 잘렸다(45 m 19 s, 취소로 기록돼 사람의 `gh run cancel`과
+ * 로그상 구분되지 않았다). 이 둘은 에이전트가 실제로 코드를 읽고 쓰는 유일한 스테이지라, 상한이
+ * 짧으면 "작업이 실패했다"가 아니라 **"작업이 끝나기 전에 잘렸다"**가 반복된다 — 그 런의 비용은
+ * 전액 매몰되고 재실행은 같은 크기의 일을 같은 한도로 다시 한다. 값은 상수다(하네스 설정이 아니다):
+ * 워크플로 파일은 `factory init`이 **그대로** 설치하는 템플릿이라 설치 시점의 치환 지점이 없고,
+ * 치환을 도입하면 `--upgrade`가 프로젝트가 손으로 올린 값을 매번 되돌린다.
+ */
+const TIMEOUT_FLOOR = { review: 60, implement: 60 };
+
+function lintStageWorkflow(text, lines, stage) {
+  const out = [];
+  const floor = TIMEOUT_FLOOR[stage];
+  if (floor != null) {
+    const i = lines.findIndex((l) => /^\s*timeout-minutes:\s*\d+\s*$/.test(l));
+    const minutes = i === -1 ? null : Number(/(\d+)/.exec(lines[i])[1]);
+    if (minutes == null || minutes < floor) {
+      out.push({ line: i + 1 || 1, rule: "stage-timeout-floor", msg: `the ${stage} stage needs timeout-minutes ≥ ${floor} — a shorter cap cancels the job mid-work and the whole run's cost is sunk (KTB-24)` });
+    }
+  }
+  const steps = [];
+  lines.forEach((l, i) => { const m = /^\s*-\s+name:\s*(.+?)\s*$/.exec(l); if (m) steps.push({ name: m[1], line: i + 1 }); });
+  const aborted = steps.findIndex((s) => s.name === "Aborted cleanup");
+  const sweep = steps.findIndex((s) => s.name === "Sweep");
+  // (1) 취소·실패 정리 스텝이 있고, 그 스텝이 실제로 `--aborted`를 이 스테이지 이름으로 부른다.
+  if (aborted === -1 || !new RegExp(`run-stage\\.js ${stage} [^\\n]*--aborted`).test(text) || !/if:\s*cancelled\(\) \|\| failure\(\)/.test(text)) {
+    out.push({ line: aborted === -1 ? 1 : steps[aborted].line, rule: "aborted-cleanup-step", msg: `a stage workflow needs an "Aborted cleanup" step with \`if: cancelled() || failure()\` running \`run-stage.js ${stage} <issue> --aborted\` — a cancelled job never reaches run-stage's finally, so the lock is orphaned and nothing is recorded (KTB-24)` });
+  }
+  // (2) 마지막 스텝은 `Sweep`이고 `--quick`으로 돈다 — 정리보다 **뒤**여야 방금 세운 blocked까지 훑는다.
+  if (sweep === -1 || sweep !== steps.length - 1 || !/node \.factory\/bin\/sweep\.js --quick/.test(text) || !/- name: Sweep\n\s+if: always\(\)/.test(text)) {
+    out.push({ line: sweep === -1 ? lines.length : steps[sweep].line, rule: "sweep-step-last", msg: "a stage workflow must end with a `Sweep` step (`if: always()`, `sweep.js --quick`) — the cron sweeper alone is not reliable enough (KTB-26)" });
+  } else if (aborted !== -1 && aborted > sweep) {
+    out.push({ line: steps[sweep].line, rule: "sweep-step-last", msg: "the Sweep step must come after the Aborted cleanup step — sweeping before the cleanup cannot see the blocked label it is meant to pick up (KTB-26)" });
+  }
   return out;
 }
 

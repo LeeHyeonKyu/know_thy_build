@@ -207,15 +207,35 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 
 | 파일 | 트리거 | `run-stage.js` 인자 | `timeout-minutes` |
 |---|---|---|---|
-| `factory-triage.yml` | `issues: labeled` (`factory:queue`) | `triage` | 15 |
-| `factory-plan.yml` | `issues: labeled` (`factory:ready`) | `plan` | 60 (최종 리뷰 F8 — 4명 토론 R1·R2 + 종합 + 서명 2회는 opus 4대가 직렬로 도는 구간이 있어 45분으로는 상한이 먼저 온다) |
+| `factory-triage.yml` | `issues: labeled` (`factory:queue`) | `triage` | 20 |
+| `factory-plan.yml` | `issues: labeled` (`factory:ready`) | `plan` | 75 (최종 리뷰 F8 — 4명 토론 R1·R2 + 종합 + 서명 2회는 opus 4대가 직렬로 도는 구간이 있어 45분으로는 상한이 먼저 온다. 실측 42 m + 여유 — ADR-020 KTB-24) |
 | `factory-implement.yml` | `issues: labeled` (`factory:planned`, `factory:rework`) | `implement` | 90 |
-| `factory-review.yml` | `issues: labeled` (`factory:awaiting-review`) — `pull_request` 이벤트가 아니다(Plan 2 실행 판결, ADR-015 — R1: PR head는 이미 implement handoff의 `head_sha`로 묶여 있어 PR→이슈 매핑이 필요 없다) | `review` | 45 |
-| `factory-merge.yml` | `issues: labeled` (`factory:approved`) | `merge` — **스크립트 전용, `claude -p` 호출 없음**(Plan 2 실행 판결, ADR-015 — R3) | 20 |
-| `factory-retro.yml` | `pull_request: closed` + `if: merged == true`(`concurrency: { group: factory-retro, cancel-in-progress: false }` — 취소 없이 직렬, cron 없음). 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro [--force]` | 30 |
+| `factory-review.yml` | `issues: labeled` (`factory:awaiting-review`) — `pull_request` 이벤트가 아니다(Plan 2 실행 판결, ADR-015 — R1: PR head는 이미 implement handoff의 `head_sha`로 묶여 있어 PR→이슈 매핑이 필요 없다) | `review` | 90 (ADR-020 KTB-24 — 45분이 +709줄 PR × 4역할을 45 m 19 s에 잘랐다) |
+| `factory-merge.yml` | `issues: labeled` (`factory:approved`) | `merge` — **스크립트 전용, `claude -p` 호출 없음**(Plan 2 실행 판결, ADR-015 — R3) | 30 |
+| `factory-retro.yml` | `pull_request: closed` + `if: merged == true`(`concurrency: { group: factory-retro, cancel-in-progress: false }` — 취소 없이 직렬, cron 없음). 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro [--force]` | 45 |
 | `factory-sweeper.yml` | `schedule: */30` | `sweep` | 5 |
 | `factory-integrity.yml` | `pull_request: *` | `integrity` | 5 |
 | (위 다섯 스테이지 파일의 두 번째 트리거) | `workflow_dispatch` (input: `issue`) — sweeper의 **세 번째 팔**(§4.3)과 `factory run <stage> <issue> --remote`가 여기로 들어온다. 라벨이 이미 목적 상태에 있으면 같은 라벨을 다시 붙여도 `labeled` 이벤트가 나지 않으므로, 런 없이 멈춘 스테이지의 재점화 경로는 이것 하나뿐이다(KTB-8) | 라벨 이벤트와 동일 | 동일 |
+
+**타임아웃은 상수이고, 하한은 린트가 지킨다(ADR-020 KTB-24).** 위 값들은 `factory init`이 바이트 그대로
+설치하는 템플릿 안의 상수다 — 하네스 설정으로 빼면 `--upgrade`가 프로젝트가 손으로 올린 값을 매번
+되돌린다. 대신 `lib/yml-lint.js`의 `stage-timeout-floor`가 **review·implement는 `timeout-minutes ≥ 60`**
+임을 강제한다: 그 아래로 내려가면 "작업이 실패했다"가 아니라 **"작업이 끝나기 전에 잘렸다"**가 반복되고,
+그 런의 비용은 전액 매몰된다.
+
+**다섯 스테이지 워크플로의 마지막 두 스텝은 고정이다(ADR-020 KTB-24·KTB-26)** — 얇은 yml 규칙의 유일한
+예외이고, 둘 다 `.factory/bin/`의 로직을 부를 뿐이다:
+
+1. `Aborted cleanup` — `if: cancelled() || failure()`, `run-stage.js <stage> <issue> --aborted "${{ job.status }}"`.
+   잡 타임아웃·취소는 `run-stage.js`의 `finally`를 실행하지 않는다(SIGKILL): 락이 고아로 남고, 전이도
+   코멘트도 run 기록도 없이 이슈가 진입 라벨에 앉는다. 이 스텝이 `aborted:` 한 줄을 기록하고, 이슈가
+   아직 그 스테이지의 in-flight 라벨이면 `factory:blocked`로 세우고(사유 `job <status> — retry via sweeper`,
+   `factory-blocked-origin` 마커 포함), 락을 푼다. `claude`는 뜨지 않는다.
+2. `Sweep` — `if: always()`, `sweep.js --quick`(§4.3). 반드시 정리 스텝 **뒤**의 **마지막** 스텝이다.
+
+두 스텝 모두 `git checkout ${{ github.sha }} -- .factory || true`를 앞세운다: implement는 에이전트
+브랜치 위에, review·merge는 detach된 PR head 위에 있으므로 정리·sweep 코드만은 언제나 base의 것이어야
+한다. 설치는 하지 않는다 — 취소 유예 안에 끝나야 한다.
 
 (Plan 4 실행 판결, ADR-017) `factory-retro.yml`의 checkout은 `ref: ${{ github.event.pull_request.base.ref }}`다 — PR head/merge ref가 아니라 **머지 결과가 반영된 base 브랜치**를 체크아웃해야 `node .factory/bin/retro.js`가 방금 머지된 커밋을 본다.
 
@@ -458,6 +478,14 @@ const LOADER = {
   3. 격리 정책(`.factory/quarantine.toml`, §5.2.5-⑤)을 적용한다: `consecutive_passes ≥ quarantine_return_after`인 항목은 복귀시키고, `quarantine_ttl_days` 경과 또는 `since` 파싱 실패(fail-closed) 항목은 만료 처리한다.
   4. 토큰 발급일(`FACTORY_TOKEN_ISSUED_AT`)이 334일(≈11개월)을 넘으면 "토큰 갱신 필요" `factory:needs-human` 이슈를 연다 — 같은 제목의 열린 이슈가 있으면 중복 생성하지 않는다(§4.4).
   각 이슈·각 서브 스텝은 개별적으로 실패가 격리된다 — 하나가 에러를 던져도 나머지는 계속 처리된다.
+- **sweeping은 cron만이 아니다(ADR-020 KTB-26).** `schedule`은 best-effort라 실측에서 몇 시간짜리 공백이
+  났고, 취소된 sweeper 런이 이슈 하나를 30분 넘게 방치했다 — 복구 장치가 가장 필요한 순간(사고 직후)에
+  가장 늦게 돌았다. 그래서 **모든 스테이지 워크플로와 retro의 마지막 스텝**이 `if: always()`로
+  `sweep.js --quick`을 돈다(§4.1). `--quick`은 위 1·2와 멈춘 스테이지 재점화·라벨-셋 복구 — 곧 **상태
+  복구 팔만** 돌고, 시간에 묶인 3·4(격리 정책, 토큰 만료)는 cron의 몫으로 남는다. 둘은 대체가 아니라
+  겹이다: 아무 이슈도 움직이지 않는 밤에는 cron만이 유일한 눈이다. 이제 두 sweep이 같은 이슈를 같은
+  초에 볼 수 있으므로 dispatch는 실패를 삼키고(`safeDispatch`) 그 이슈만 건너뛴다 — dedupe는 기존
+  마커들이 그대로 쥔다.
 - Claude Workflow의 resume은 세션 디렉토리에 의존하므로 **쓰지 않는다.** 재진입은 브랜치·handoff에서 한다.
 
 ### 4.4 의존성과 인증

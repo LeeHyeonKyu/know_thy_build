@@ -25,7 +25,7 @@ import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from ".
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
-import { blockedOrigin } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
 import { syncRecords, hydrateRecord } from "../lib/records-branch.js";
@@ -443,6 +443,68 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
 }
 
 /**
+ * ADR-020 KTB-24 — 잡이 **취소되거나 실패로 끊겼을 때** 이 스테이지가 물고 있던 라벨.
+ *
+ * `runStage`의 `finally`(락 해제·기록 동기화)는 잡 타임아웃·취소에서는 **실행되지 않는다**: 프로세스가
+ * SIGKILL로 사라진다. 데모 #15가 남긴 잔해가 정확히 그것이다 — `refs/heads/factory/lock-15`가 고아로
+ * 남고, 이슈는 `factory:awaiting-review`에 전이·코멘트·run 기록 한 줄 없이 45분을 태운 채 앉아 있었다.
+ *
+ * 라벨이 **아직 이 값일 때만** blocked으로 세운다. 다른 라벨이면 스테이지는 이미 전이를 끝낸 뒤에
+ * (예: 아티팩트 업로드 중에) 죽은 것이라 되돌릴 것이 없고, 그때 blocked으로 밀면 성공한 전이를
+ * 취소하는 셈이 된다. merge는 이 표에 없다 — script-only라 정리는 락 해제와 기록뿐이다.
+ */
+export const IN_FLIGHT_LABEL = { triage: "factory:queue", plan: "factory:ready", implement: "factory:in-progress", review: "factory:awaiting-review" };
+/** 기록 한 줄의 문구는 한 곳에서만 만든다 — 사후 조사가 이 문자열로 grep한다. */
+export const abortedLine = (status) => `aborted: ${status} (job timeout or cancel)`;
+
+/**
+ * 취소·실패 정리 경로(`run-stage.js <stage> <issue> --aborted <job.status>`). **claude를 절대 띄우지
+ * 않는다** — 여기서 하는 일은 셋뿐이다: `aborted:` 기록 한 줄, (해당하면) `factory:blocked` 전이,
+ * 락 해제. 취소된 잡의 유예 시간은 짧으므로 조회도 최소다(라벨 한 번).
+ *
+ * 순서가 요점이다: 전이를 **먼저** 하고 락을 나중에 푼다. 반대로 하면 락이 풀린 직후 sweeper/dispatch가
+ * 같은 이슈를 물고 들어와, 이 프로세스가 막 세우려던 blocked 라벨과 경쟁한다.
+ */
+export async function abortStage({ stage, issue, status = "cancelled", deps }) {
+  const d = deps;
+  const lines = [abortedLine(status)];
+  const want = IN_FLIGHT_LABEL[stage];
+  if (!want) {
+    lines.push(`aborted: ${stage} is script-only — lock release and record only`);
+  } else {
+    let labels = null;
+    try { labels = await d.issueLabels(); }
+    catch (e) { lines.push(`aborted: entry state unreadable — ${e?.message || e}`); }
+    if (labels) {
+      let current;
+      try { current = factoryLabelOf(labels); }
+      catch (e) { current = undefined; lines.push(`aborted: label set invalid — ${e?.message || e}`); }
+      if (current === want) {
+        // 사유는 사람이 읽는 한 줄이자 sweeper의 재료다 — `lib/transition.js`가 같은 코멘트에
+        // `factory-blocked-origin from=<want> stage=<stage>` 마커를 함께 찍는다(KTB-15b I2).
+        const t = await d.transition({ to: "factory:blocked", reason: `job ${status} — retry via sweeper` });
+        lines.push(t.ok ? `aborted: ${want} → factory:blocked` : `transition refused: ${t.reason}`);
+      } else if (current !== undefined) {
+        lines.push(`aborted: label is ${current ?? "none"}, not ${want} — the stage had already moved on, no transition`);
+      }
+    }
+  }
+  const released = await d.release();
+  if (released === false) {
+    console.error(`factory: lock release failed for issue ${issue}`);
+    lines.push(`lock: release failed for issue ${issue} — delete refs/heads/factory/lock-${issue} by hand`);
+  } else {
+    lines.push(`lock: released after abort`);
+  }
+  try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+  try {
+    const s = await d.syncRecords?.();
+    if (s && !s.ok) console.error(`factory: run-record sync to factory/records failed — ${s.reason}`);
+  } catch (e) { console.error(`factory: run-record sync to factory/records aborted — ${e?.message || e}`); }
+  return 0;
+}
+
+/**
  * 지난 런이 남긴 "판정의 재료"까지 전부 지운다. gates.json만 지우고 unit.json·coverage·mutation
  * 리포트를 남겨두면, 이번 런에서 그 명령이 아예 돌지 않았을 때 낡은 리포트가 이번 판정의 근거로
  * 읽힌다(격리 제외·diff coverage·mutation score가 전부 옛 실행 얘기가 된다).
@@ -618,13 +680,32 @@ export function makeLocalEntry({ gh, issue, stage, env }) {
 
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
-  const [stage, issueArg] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const [stage, issueArg] = argv;
   const issue = Number(issueArg);
-  if (!stage || !issue || !STAGES.includes(stage)) { console.error(`usage: run-stage <${STAGES.join("|")}> <issue>`); process.exit(1); }
+  // KTB-24 — `--aborted <job.status>`. 값이 빠지면(`--aborted`만) "cancelled"로 읽는다: 이 스텝은
+  // 취소된 잡의 짧은 유예 안에서만 도는데, 인자 하나 때문에 usage로 죽으면 정리가 통째로 사라진다.
+  const abortedAt = argv.indexOf("--aborted");
+  const abortedStatus = abortedAt === -1 ? null : (argv[abortedAt + 1] || "cancelled");
+  if (!stage || !issue || !STAGES.includes(stage)) { console.error(`usage: run-stage <${STAGES.join("|")}> <issue> [--aborted <job status>]`); process.exit(1); }
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   const gh = makeGh({ run, repo });
+  // 정리 경로는 CHARTER도 harness도 읽지 않는다 — 읽을 것이 하나라도 깨져 있으면 고아 락이 그대로
+  // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
+  if (abortedStatus !== null) {
+    process.exit(await abortStage({
+      stage, issue, status: abortedStatus,
+      deps: {
+        issueLabels: async () => (await gh.issue(issue)).labels,
+        transition: ({ to, reason }) => transition({ gh, issue, to, reason, stage }),
+        release: () => release({ run, cwd: root, issue }),
+        runRecord: (lines) => appendRunRecord({ root, issue, title: "", stage, runnerId, lines }),
+        syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})` }),
+      },
+    }));
+  }
   let charter, harness, ctxCache;                                     // CHARTER는 dormancy 판정에서만 읽는다 — 없거나 깨져도 잠들 뿐 터지지 않는다
   const recordLine = (line) => { try { appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines: [line] }); } catch {} };
   const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
@@ -677,7 +758,12 @@ async function main() {
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
     /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
     resetGates: async () => { resetGateOutputs({ root, harness }); },
-    countHandoffs: async (s) => parseHandoffs(await gh.comments(issue)).filter((h) => h.stage === s && h.issue === issue).length,
+    /**
+     * KTB-25: 마지막 재큐(`… to=factory:queue`) **이후**의 handoff만 센다 — 재큐는 새 주기의 시작이고,
+     * 그 앞의 라운드는 다른 코드에 대한 판정이라 이번 K 예산에 실리면 안 된다(데모 #18: 통째로
+     * 재실행된 이슈의 첫 리뷰가 round 2로 시작해 K=3 중 2를 이미 쓴 상태였다).
+     */
+    countHandoffs: async (s) => parseHandoffs(commentsSinceRequeue(await gh.comments(issue))).filter((h) => h.stage === s && h.issue === issue).length,
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
     claudeP: async (_ctx, { harnessIssue = false } = {}) => {
       const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });

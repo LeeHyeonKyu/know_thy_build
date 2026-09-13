@@ -589,3 +589,58 @@ test("sweep: a failing gh.issueList for label-set repair is isolated — recorde
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
   expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", error: expect.stringContaining("gh issue list boom") });
 });
+
+// ── ADR-020 KTB-26 — `--quick`: 스테이지 잡이 끝날 때마다 도는 이벤트 구동 sweep ────────────────
+test("KTB-26 quick sweep: the state-recovery arms still run, the time-bound arms do not", async () => {
+  const stale = { id: 1, body: "<!-- factory-heartbeat issue=7 -->\nlast: 2026-09-11T00:00:00Z", createdAt: "2026-09-11T00:00:00Z" };
+  const gh = {
+    searchIssues: async (l) => (l === "factory:in-progress" ? [{ number: 7 }] : []),
+    comments: async () => [stale],
+    comment: vi.fn(async () => "u#issuecomment-1"),
+    issueList: async () => [],
+    createIssue: vi.fn(),
+  };
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const saveQuarantine = vi.fn();
+  // 만료가 확정된 격리 항목 + 11개월 지난 토큰 — 일반 sweep이라면 둘 다 움직인다
+  const quarantine = { quarantined: [{ id: "t1", since: "2020-01-01T00:00:00Z", consecutive_passes: 0 }] };
+  const common = { gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(async () => true), quarantine, saveQuarantine, tokenIssuedAt: "2020-01-01T00:00:00Z" };
+
+  const quickActions = await sweep({ ...common, quick: true });
+  expect(quickActions.map((a) => a.kind)).toContain("requeue");                 // 상태 복구 팔은 돈다
+  expect(quickActions.map((a) => a.kind)).not.toContain("quarantine");
+  expect(quickActions.map((a) => a.kind)).not.toContain("token-expiry");
+  expect(quickActions[0]).toEqual({ kind: "quick-sweep", skipped: ["quarantine", "token-expiry"] });
+  expect(saveQuarantine).not.toHaveBeenCalled();
+  expect(gh.createIssue).not.toHaveBeenCalled();
+
+  // 같은 입력을 cron sweep으로 돌리면 격리·토큰 팔이 실제로 움직인다(이 테스트가 "quick이 뭘 껐는지"의 대조군)
+  const fullActions = await sweep({ ...common, quick: false });
+  expect(fullActions.map((a) => a.kind)).toContain("quarantine");
+  expect(saveQuarantine).toHaveBeenCalled();
+  expect(gh.createIssue).toHaveBeenCalled();
+});
+
+// 이제 sweep은 cron 하나가 아니라 스테이지마다 돈다 — 두 sweep이 같은 이슈를 같은 초에 볼 수 있고,
+// `gh workflow run`은 그때 실패할 수 있다. 그 실패가 그 이슈의 나머지 처리를 접으면 안 된다.
+test("KTB-26: a dispatch failure is recorded and the sweep keeps going", async () => {
+  const old = "2026-09-11T00:00:00Z";
+  const transitionComment = { id: 1, body: "<!-- factory-transition:v1 from=factory:ready to=factory:planned by=script -->", createdAt: old };
+  const gh = {
+    searchIssues: async (l) => (l === "factory:planned" ? [{ number: 4 }, { number: 5 }] : []),
+    comments: async () => [transitionComment],
+    comment: vi.fn(async () => "u#issuecomment-1"),
+    issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async ({ issue }) => { if (issue === 4) throw new Error("HTTP 422 workflow dispatch"); });
+  const actions = await sweep({
+    gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30,
+    transition: vi.fn(async () => ({ ok: true })), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {},
+    dispatchStage, backPressure: async () => ({ ok: true }), quick: true,
+  });
+  expect(dispatchStage).toHaveBeenCalledTimes(2);                               // 4에서 죽지 않고 5까지 간다
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "error", step: "stalled-restart", issue: 4 }));
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "stalled-restart", issue: 5, stage: "implement" }));
+  // 실패한 쪽은 "다시 띄웠다"로 적히지 않는다
+  expect(actions.filter((a) => a.kind === "stalled-restart").map((a) => a.issue)).toEqual([5]);
+});

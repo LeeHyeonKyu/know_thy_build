@@ -71,7 +71,11 @@ test("logging hooks must end with exit 0", () => {
 
 const W = new URL("../../templates/factory/github/workflows/", import.meta.url).pathname;
 const files = readdirSync(W).filter((f) => f.endsWith(".yml"));
-const STAGE = { "factory-triage.yml": ["triage", 15, '"factory:queue"'], "factory-plan.yml": ["plan", 60, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 45, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 20, '"factory:approved"'] };
+// ADR-020 KTB-24 — §4.1 표의 새 값. 데모 #15의 review는 4역할 × +709줄 PR을 45분 안에 못 끝내고
+// **한도에 걸려** 잘렸다(45 m 19 s). 올린 값은 그 관측에서 나왔다: review는 implement과 같은 90,
+// plan은 4대 opus 직렬 구간의 실측(42 m)에 여유를 더한 75, 나머지는 정리 스텝 몫만큼 조금씩 위로.
+const STAGE = { "factory-triage.yml": ["triage", 20, '"factory:queue"'], "factory-plan.yml": ["plan", 75, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 90, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 30, '"factory:approved"'] };
+const ISSUE_EXPR = "${{ github.event.issue.number || inputs.issue }}";
 
 test("all eight workflow templates exist and pass lint", () => {
   expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
@@ -133,6 +137,54 @@ test("every stage workflow can be dispatched with an issue input (KTB-8)", () =>
   }
 });
 
+// ADR-020 KTB-24 — 취소된 잡은 `run-stage.js`의 finally를 실행하지 않는다: 데모 #15는 락 고아 +
+// 전이 없음 + run 기록 없음으로 끝났다. 정리 스텝이 그 셋을 덮는다.
+test("every stage workflow cleans up after a cancelled or failed job (KTB-24)", () => {
+  for (const [f, [stage]] of Object.entries(STAGE)) {
+    const y = readFileSync(join(W, f), "utf8");
+    expect(y, f).toContain("- name: Aborted cleanup");
+    expect(y, f).toContain("if: cancelled() || failure()");
+    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} ${ISSUE_EXPR} --aborted "\${{ job.status }}"`);
+    // 정리 코드는 base의 것이어야 한다 — implement는 에이전트 브랜치 위에, review·merge는 PR head로
+    // detach된 트리 위에 있다.
+    expect(y, f).toContain("git checkout ${{ github.sha }} -- .factory || true");
+    // 설치는 없다(setup은 이미 돌았다) — 취소 유예 안에 끝나야 한다.
+    expect(y.slice(y.indexOf("- name: Aborted cleanup")), f).not.toContain("npm install");
+  }
+});
+
+// ADR-020 KTB-26 — cron sweeper만으로는 부족했다(몇 시간짜리 공백, 취소된 sweeper 런). 스테이지가
+// 끝날 때마다 빠른 팔을 한 번 돌린다 — 그리고 반드시 정리 스텝 **뒤**여야 방금 세운 blocked을 본다.
+test("every stage workflow and retro end with a quick sweep, after the cleanup step (KTB-26)", () => {
+  for (const f of [...Object.keys(STAGE), "factory-retro.yml"]) {
+    const y = readFileSync(join(W, f), "utf8");
+    expect(y, f).toMatch(/- name: Sweep\n\s+if: always\(\)\n/);
+    expect(y, f).toContain("node .factory/bin/sweep.js --quick");
+    expect(y, f).toContain("actions: write");            // `gh workflow run`으로 재점화한다
+    const names = [...y.matchAll(/^\s*-\s+name:\s*(.+?)\s*$/gm)].map((m) => m[1]);
+    expect(names.at(-1), f).toBe("Sweep");
+    if (f !== "factory-retro.yml") expect(names.indexOf("Aborted cleanup"), f).toBeLessThan(names.indexOf("Sweep"));
+  }
+});
+
+test("yml-lint enforces the KTB-24/26 stage rules (and leaves non-stage files alone)", () => {
+  const ok = readFileSync(join(W, "factory-review.yml"), "utf8");
+  expect(lintWorkflow(ok)).toEqual([]);
+  // 45분으로 되돌리면 하한 규칙이 잡는다 — implement·review만 ≥ 60이다
+  expect(lintWorkflow(ok.replace("timeout-minutes: 90", "timeout-minutes: 45")))
+    .toEqual([expect.objectContaining({ rule: "stage-timeout-floor" })]);
+  expect(lintWorkflow(readFileSync(join(W, "factory-triage.yml"), "utf8").replace("timeout-minutes: 20", "timeout-minutes: 15"))).toEqual([]);
+  // 정리 스텝을 지우면
+  expect(lintWorkflow(ok.replace("        if: cancelled() || failure()\n", "        if: always()\n")))
+    .toEqual([expect.objectContaining({ rule: "aborted-cleanup-step" })]);
+  // sweep 스텝이 마지막이 아니면
+  const swapped = ok.replace(/ {6}- name: Sweep[\s\S]*$/, "      - name: Done\n        run: echo done\n");
+  expect(lintWorkflow(swapped)).toEqual([expect.objectContaining({ rule: "sweep-step-last" })]);
+  // 스테이지 워크플로가 아닌 텍스트에는 이 규칙들이 걸리지 않는다
+  expect(lintWorkflow("with:\n  name: x-${{ matrix.y }}\n")).toEqual([]);
+  expect(lintWorkflow(readFileSync(join(W, "factory-sweeper.yml"), "utf8"))).toEqual([]);
+});
+
 test("sweeper and integrity workflows", () => {
   const s = readFileSync(join(W, "factory-sweeper.yml"), "utf8");
   expect(s).toContain("cron: '*/30 * * * *'"); expect(s).toContain("workflow_dispatch:"); expect(s).toContain("run: node .factory/bin/sweep.js"); expect(s).toContain("timeout-minutes: 5");
@@ -149,7 +201,7 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   expect(y).toContain("if: github.event.pull_request.merged == true");   // 닫히기만 한 PR은 배울 것이 없다
   expect(y).toContain("group: factory-retro");                           // 이슈별이 아니라 잡 전체가 하나의 큐다
   expect(y).toContain("cancel-in-progress: false");
-  expect(y).toContain("timeout-minutes: 30");
+  expect(y).toContain("timeout-minutes: 45");                            // KTB-24 — retro도 30 → 45
   expect(y).toContain("fetch-depth: 0");
   // PR head/merge ref가 아니라 머지된 결과가 있는 base 브랜치를 본다 — retro는 현재 저장소 상태를 읽는다
   expect(y).toContain("ref: ${{ github.event.pull_request.base.ref }}");

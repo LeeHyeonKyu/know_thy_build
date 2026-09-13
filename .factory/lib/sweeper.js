@@ -203,7 +203,9 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         // 사라져 다음 sweep이 30분마다 같은 스테이지를 또 민다 — 재점화는 비싸고(plan 한 번 ~$12)
         // 놓친 재점화는 사람이 `--remote`로 되살릴 수 있으므로, 실패는 **덜 재시작하는 쪽**으로 기운다.
         await gh.comment(it.number, `${marker}\n\`${label}\`에서 ${staleMinutes}분 넘게 런 없이 멈춰 있었습니다 — \`factory-${stage}.yml\`을 dispatch로 다시 띄웁니다(KTB-8).`);
-        await dispatchStage({ stage, issue: it.number });
+        // dispatch가 실패하면 "다시 띄웠다"고 적지 않는다 — 마커는 이미 남았으므로 같은 창 안에서는
+        // 다시 밀지 않고, 다음 창의 sweep이 재시도한다(실패는 덜 재시작하는 쪽으로 기운다).
+        if (!await safeDispatch({ dispatchStage, stage, issue: it.number, actions, step: "stalled-restart" })) continue;
         actions.push({ kind: "stalled-restart", issue: it.number, stage, label });
       } catch (e) {
         actions.push({ kind: "error", step: "stalled-restart", issue: it.number, error: String(e.message || e) });
@@ -253,9 +255,30 @@ async function sweepLabelSetRepair({ gh, actions }) {
   }
 }
 
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null }) {
+/**
+ * ADR-020 KTB-26 — dispatch는 **경쟁하는 sweep들 사이에서 실패할 수 있다**: 이제 30분 cron만이
+ * 아니라 스테이지 잡이 끝날 때마다 sweep이 돌기 때문에, 두 sweep이 같은 이슈를 같은 초에 볼 수 있다.
+ * 마커 dedupe는 그 대부분을 막지만 조회-후-기록 사이의 틈은 남고, `gh workflow run` 자체도 레이트
+ * 리밋·중복으로 실패할 수 있다. 그래서 dispatch 실패는 그 이슈의 처리를 통째로 error로 접지 않고
+ * 자기 줄만 남긴다 — 재점화는 다음 sweep이 다시 시도하면 되는 일이다(마커는 이미 남았으므로 그
+ * 재시도는 같은 창 안에서는 조용하다).
+ */
+async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
+  try { await dispatchStage({ stage, issue }); return true; }
+  catch (e) { actions.push({ kind: "error", step, issue, error: String(e.message || e) }); return false; }
+}
+
+/**
+ * `quick`(KTB-26): 스테이지 워크플로의 마지막 스텝이 쓰는 모양(`sweep.js --quick`). 시간에 묶인 두 팔
+ * (격리 정책 적용과 토큰 만료 이슈 생성)을 건너뛰고 **상태 복구 팔만** 돌린다 — in-progress 하트비트
+ * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
+ * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
+ * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
+ */
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, quick = false }) {
   const actions = [];
   const nowMs = Date.parse(now);
+  if (quick) actions.push({ kind: "quick-sweep", skipped: ["quarantine", "token-expiry"] });
   for (const it of await gh.searchIssues("factory:in-progress")) {
     try {
       const comments = await gh.comments(it.number);
@@ -308,8 +331,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
               : `\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`;
             // 마커를 먼저 남긴다(stalled 팔과 같은 이유 — M4). dispatch 실패는 다음 sweep이 다시 시도한다.
             await gh.comment(it.number, `${marker}\n${note}`);
-            await dispatchStage({ stage: retryStage, issue: it.number });
-            actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage, ...(isApiError ? { attempt } : {}) });
+            if (await safeDispatch({ dispatchStage, stage: retryStage, issue: it.number, actions, step: "blocked-retry" })) {
+              actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage, ...(isApiError ? { attempt } : {}) });
+            }
             continue;
           }
         }
@@ -322,6 +346,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   }
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, actions });
   await sweepLabelSetRepair({ gh, actions });
+  if (quick) return actions;                       // KTB-26 — 아래 두 팔은 시간에 묶여 있다(cron의 몫)
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });
     if (pol.returned.length || pol.expired.length) {

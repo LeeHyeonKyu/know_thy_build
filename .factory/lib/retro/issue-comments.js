@@ -87,6 +87,28 @@ export function blockedOrigin(comments) {
   return found;
 }
 
+/**
+ * ADR-020 KTB-25 — **마지막 `… to=factory:queue` 전이 코멘트 이후**의 코멘트만 돌려준다(그런 전이가
+ * 한 번도 없었으면 이력 전체).
+ *
+ * 라운드 번호는 에이전트의 자기 신고가 아니라 이슈에 남은 handoff 개수로 센다(`run-stage.js`의
+ * `countHandoffs`) — 그 자체는 옳다. 틀린 것은 **세는 범위**였다: 데모 #18은 `needs-human`에서
+ * 재큐돼 triage부터 통째로 다시 돌았는데, 새 코드에 대한 **첫 리뷰**가 이전 주기의 review handoff
+ * 2개를 물려받아 `round: 2`로 시작했다(K=3 중 2를 이미 쓴 채로). 재큐(`* → factory:queue`)는 새
+ * 주기의 시작이다 — 그 앞의 라운드는 다른 코드에 대한 판정이므로 이번 예산에 세지 않는다.
+ *
+ * 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같은 가정).
+ */
+export function commentsSinceRequeue(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let from = 0;
+  list.forEach((c, i) => {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (m && m[2] === "factory:queue") from = i + 1;
+  });
+  return list.slice(from);
+}
+
 export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
   const out = [];
   for (const c of comments || []) {

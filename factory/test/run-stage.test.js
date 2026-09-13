@@ -2,9 +2,11 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
+import { runStage, abortStage, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
-import { renderHandoff } from "../lib/handoff.js";
+import { canTransition } from "../lib/labels.js";
+import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
+import { renderHandoff, parseHandoffs } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
 import { makeFakeRun } from "../lib/exec.js";
@@ -1946,4 +1948,82 @@ test("KTB-15b: a refused hop-back transition stops the stage before claude -p ru
   });
   expect(await runStage({ stage: "plan", issue: 7, deps: d })).toBe(2);
   expect(d.claudeP).not.toHaveBeenCalled();
+});
+
+// ── ADR-020 KTB-24 — 취소·실패 정리 경로 ───────────────────────────────────────────────────────
+// 잡 타임아웃과 취소는 runStage의 finally를 실행하지 않는다(프로세스가 SIGKILL로 사라진다).
+// 데모 #15가 남긴 것: 고아 락 `refs/heads/factory/lock-15`, 전이 없음, run 기록 없음, 45분 소각.
+const abortDeps = (over = {}) => ({
+  issueLabels: async () => ["factory:awaiting-review"],
+  transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  release: vi.fn(async () => true),
+  runRecord: vi.fn(),
+  syncRecords: vi.fn(async () => ({ ok: true })),
+  ...over,
+});
+
+test("KTB-24: --aborted with the stage's in-flight label → blocked + lock released + record line", async () => {
+  const lines = [];
+  const d = abortDeps({ runRecord: (l) => lines.push(...l) });
+  expect(await abortStage({ stage: "review", issue: 15, status: "cancelled", deps: d })).toBe(0);
+  expect(d.transition).toHaveBeenCalledWith({ to: "factory:blocked", reason: "job cancelled — retry via sweeper" });
+  expect(d.release).toHaveBeenCalled();
+  expect(lines).toContain("aborted: cancelled (job timeout or cancel)");
+  expect(lines).toContain("aborted: factory:awaiting-review → factory:blocked");
+  expect(lines).toContain("lock: released after abort");
+  expect(d.syncRecords).toHaveBeenCalled();
+});
+
+test("KTB-24: --aborted on a label the stage already left → record only, no transition", async () => {
+  const lines = [];
+  const d = abortDeps({ issueLabels: async () => ["factory:approved"], runRecord: (l) => lines.push(...l) });
+  expect(await abortStage({ stage: "review", issue: 15, status: "failure", deps: d })).toBe(0);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.release).toHaveBeenCalled();                                 // 락은 라벨과 무관하게 언제나 푼다
+  expect(lines).toContain("aborted: failure (job timeout or cancel)");
+  expect(lines.some((l) => l.includes("not factory:awaiting-review"))).toBe(true);
+});
+
+test("KTB-24: every stage's in-flight label, and merge is lock-release only", async () => {
+  expect(IN_FLIGHT_LABEL).toEqual({ triage: "factory:queue", plan: "factory:ready", implement: "factory:in-progress", review: "factory:awaiting-review" });
+  // 네 라벨 모두 blocked으로 나가는 엣지가 실제로 있어야 이 정리가 성립한다
+  for (const from of Object.values(IN_FLIGHT_LABEL)) expect(canTransition(from, "factory:blocked"), from).toBe(true);
+  const lines = [];
+  const d = abortDeps({ issueLabels: vi.fn(), runRecord: (l) => lines.push(...l) });
+  expect(await abortStage({ stage: "merge", issue: 15, status: "cancelled", deps: d })).toBe(0);
+  expect(d.issueLabels).not.toHaveBeenCalled();                         // 조회조차 하지 않는다
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.release).toHaveBeenCalled();
+  expect(lines).toContain("aborted: merge is script-only — lock release and record only");
+});
+
+test("KTB-24: an unreadable label set still releases the lock and says why", async () => {
+  const lines = [];
+  const d = abortDeps({ issueLabels: async () => { throw new Error("gh down"); }, runRecord: (l) => lines.push(...l) });
+  expect(await abortStage({ stage: "implement", issue: 2, status: "cancelled", deps: d })).toBe(0);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.release).toHaveBeenCalled();
+  expect(lines.some((l) => l.includes("entry state unreadable — gh down"))).toBe(true);
+});
+
+test("KTB-24: a failed lock release is never silent", async () => {
+  const lines = [];
+  const d = abortDeps({ release: async () => false, runRecord: (l) => lines.push(...l) });
+  await abortStage({ stage: "plan", issue: 7, status: "cancelled", deps: { ...d, issueLabels: async () => ["factory:ready"] } });
+  expect(lines.some((l) => l.includes("lock: release failed for issue 7"))).toBe(true);
+});
+
+// ── ADR-020 KTB-25 — 라운드는 마지막 재큐 이후부터 센다 ────────────────────────────────────────
+test("KTB-25: review handoffs before the last `→ factory:queue` transition do not count toward K", () => {
+  const handoff = (n) => ({ id: n, body: renderHandoff({ stage: "review", issue: 18, summary: "r", data: { issue: 18, round: n } }), createdAt: `2026-09-1${n}` });
+  const requeue = { id: 99, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nneeds-human → factory:queue", createdAt: "2026-09-13" };
+  const count = (comments) => parseHandoffs(commentsSinceRequeue(comments)).filter((h) => h.stage === "review" && h.issue === 18).length;
+  // 데모 #18: needs-human에서 재큐돼 triage부터 통째로 다시 돌았는데 첫 리뷰가 round 2로 시작했다
+  expect(count([handoff(1), handoff(2)])).toBe(2);
+  expect(count([handoff(1), handoff(2), requeue])).toBe(0);             // → 다음 리뷰는 round 1
+  expect(count([handoff(1), handoff(2), requeue, handoff(3)])).toBe(1); // → 그다음이 round 2
+  // 재큐가 여러 번이면 마지막 것만 센다
+  expect(count([handoff(1), requeue, handoff(2), requeue, handoff(3)])).toBe(1);
+  // 재큐가 한 번도 없으면 이력 전체(예전 동작)
+  expect(commentsSinceRequeue([])).toEqual([]);
 });

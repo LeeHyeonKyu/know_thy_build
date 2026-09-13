@@ -6,6 +6,8 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  # KTB-26 — 마지막 `Sweep` 스텝이 멈춘 스테이지를 `gh workflow run`으로 다시 띄운다.
+  actions: write
 concurrency:
   group: factory-retro
   cancel-in-progress: false
@@ -13,7 +15,7 @@ jobs:
   retro:
     if: github.event.pull_request.merged == true
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       # **첫 스텝이어야 한다**(KTB-10 I1). setup 뒤에 두면 setup이 실패했을 때 이 env가 비는데,
       # 업로드 스텝은 `if: always()`라 그때도 돌고 경로가 `/**/*.jsonl` — 러너 **루트**에 앵커된
@@ -57,3 +59,15 @@ jobs:
             ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl
           include-hidden-files: true
           if-no-files-found: ignore
+      # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
+      # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —
+      # 스테이지가 끝날 때마다(성공·실패·취소 불문) 빠른 팔만 한 번 돌린다: 멈춘 스테이지 재점화 ·
+      # blocked 처리 · 라벨-셋 복구. 격리 TTL·토큰 만료는 cron의 몫으로 남는다(`--quick`).
+      # 멱등하고 마커로 dedupe되므로 cron sweep과 겹쳐 돌아도 안전하다.
+      - name: Sweep
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/sweep.js --quick

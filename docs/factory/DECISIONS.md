@@ -732,7 +732,7 @@ You will be notified when it completes.
 
 **리뷰 leftover(M4)**: `stripLineNumbers`/`fileReadsFromTranscript`의 줄 번호 접두 정규식 `^\d+\t`는 실제 `Read` 출력(`cat -n`처럼 오른쪽 정렬해 공백으로 채운 번호, 예: `"     9\t"`)의 앞 공백을 매치하지 못해 그 줄을 못 벗기고 그대로 흘려보냈다 — 여러 조각으로 온 큰 파일을 재조립할 때 조용히 깨질 수 있는 지점이다. `^\s*(\d+)\t`로 고쳤다. 영향: `factory/lib/stage-artifact.js`. 테스트: `stage-artifact.test.js`(패딩 섞인 다중 조각 재조립 픽스처).
 
-### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26
 
 한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
@@ -927,6 +927,125 @@ API 에러로 죽어 그 프로바이더 텍스트가 `result` 전체가 된 경
 `isNonTransientApiError`), `factory/bin/run-stage.js`(verify 실패 등급 분기). 테스트:
 `verify-stage.test.js`(corroboration 5종 + 429/실제 사고 회귀), `run-stage.test.js`(401 →
 needs-human, 429/503 → blocked).
+
+#### KTB-24 — 잡 타임아웃은 사건이지 침묵이 아니다: 한도를 올리고, 잘린 잡이 스스로 뒷정리한다
+
+**질문**: 2026-09-13 03:54:03Z에 시작한 데모 #15의 review(run 34736609544)가 04:39:22Z에 `cancelled`로
+끝났다 — **45 m 19 s**, 곧 `factory-review.yml`의 `timeout-minutes: 45`에 정확히 걸렸다. 대상은 PR #20
+(+709/−19, 파일 10개)이고 리뷰어는 4역할이었다. 남은 것:
+
+```
+이슈 라벨      : factory:awaiting-review (그대로)
+전이 코멘트    : 없음
+run 기록       : implement 섹션에서 끝남 — review 섹션 자체가 없다
+마지막 하트비트: 04:34:27 (타임아웃 5분 전)
+claim 락       : refs/heads/factory/lock-15  ← 고아
+```
+
+두 가지가 틀렸다. ① **한도가 일의 크기에 맞지 않았다** — 라운드 5의 리뷰들은 24~31분이었지만 이
+규모에서는 45분을 넘겼고, 재실행도 같은 크기의 PR을 같은 한도로 리뷰하므로 다시 걸릴 가능성이 높다
+(무한 루프의 상한은 `charter.limits.R`뿐이다). ② **잘린 잡이 아무 말도 남기지 않았다** — 취소는
+`runStage`의 `finally`(락 해제·기록 동기화)를 실행하지 않는다(프로세스가 SIGKILL로 사라진다). 잡
+로그에는 "The operation was canceled."만 남아 **사람의 `gh run cancel`과 구분되지도 않는다**(관측자는
+이 세션에서 `gh run cancel`을 한 번도 부르지 않았음을 명령 이력으로 확인했다).
+
+**결정**:
+
+1. **§4.1 표의 상한을 올린다**: review 45 → **90**(implement과 같다 — 둘 다 에이전트가 코드를 실제로
+   읽고 쓰는 스테이지다), plan 60 → **75**(실측 42 m + 여유), triage 15 → **20**, merge 20 → **30**,
+   retro 30 → **45**, implement 90 유지. **하네스 설정으로 빼지 않았다**: 워크플로 파일은 `factory init`이
+   바이트 그대로 설치하는 템플릿이라 설치 시점의 치환 지점이 없고, 치환을 도입하면 `--upgrade`가
+   프로젝트가 손으로 올린 값을 매번 되돌린다. 대신 **하한을 린트로 못 박는다** — `lib/yml-lint.js`의
+   `stage-timeout-floor`: review·implement는 `timeout-minutes ≥ 60`(그 아래로 내려가면 "작업이
+   실패했다"가 아니라 "작업이 끝나기 전에 잘렸다"가 반복되고 그 런의 비용은 전액 매몰된다).
+2. **잘린 잡이 스스로 뒷정리한다.** 스테이지 워크플로 5개에 `if: cancelled() || failure()`인 스텝을
+   더했다 — `node .factory/bin/run-stage.js <stage> <issue> --aborted "${{ job.status }}"`. 이 경로
+   (`abortStage`)가 하는 일은 정확히 셋이고 **`claude`는 뜨지 않는다**:
+   - run 기록 한 줄 `aborted: <status> (job timeout or cancel)` (+ `factory/records` 동기화),
+   - 이슈가 **아직 이 스테이지의 in-flight 라벨**일 때만 `factory:blocked` 전이. `IN_FLIGHT_LABEL`은
+     triage `factory:queue` · plan `factory:ready` · implement `factory:in-progress` · review
+     `factory:awaiting-review`이고, 사유는 `job <status> — retry via sweeper`다. 라벨이 이미 다른
+     값이면 스테이지는 전이를 끝낸 **뒤에** 죽은 것이라 되돌릴 것이 없다 — 기록만 남긴다(성공한 전이를
+     취소하는 것이 더 나쁘다). merge는 표에 없다: script-only라 락 해제와 기록뿐이다.
+   - 락 해제(`lib/claim.js`의 `release`). 전이가 **먼저**고 락이 나중이다 — 반대면 락이 풀린 직후
+     들어온 런이 이 프로세스가 막 세우려던 라벨과 경쟁한다.
+
+   전이는 기존 `lib/transition.js`를 그대로 쓰므로 `factory-blocked-origin` 마커가 함께 찍힌다 —
+   sweeper의 blocked 팔과 `run-stage`의 진입 가드가 그 마커 하나로 다음 걸음을 판단한다(KTB-15b I2).
+3. **스텝은 작아야 한다.** GitHub이 취소된 잡에 주는 유예는 짧다 — 설치는 없다(setup은 이미 돌았다).
+   단 한 줄, `git checkout ${{ github.sha }} -- .factory || true`를 앞에 둔다: implement는 에이전트
+   브랜치 위에, review·merge는 `checkoutHead`가 detach한 PR head 위에 있으므로, **정리 코드만은 언제나
+   base의 것**이어야 한다(`runStage` 본체는 checkout 이전에 로드돼 이미 그 불변식을 갖고 있다).
+4. **린트가 구조를 고정한다** — `aborted-cleanup-step`: 스테이지 워크플로에는 `if: cancelled() ||
+   failure()`로 `--aborted`를 부르는 "Aborted cleanup" 스텝이 있어야 한다.
+
+**알려진 한계**: review에서 온 blocked은 `BLOCKED_RETRY`/`BLOCKED_RETRY_STAGE`에 없다(`factory:blocked
+→ review` 재시도 엣지가 없다) — sweeper는 그 이슈를 한 번 더 밀지 않고 다음 sweep에서 곧장
+`needs-human`으로 올린다. 사유 문구의 "retry via sweeper"는 그 경우 "sweeper가 사람에게 넘긴다"로
+읽힌다. 침묵보다는 낫고(사람이 이슈를 보게 된다) 한도가 90으로 올라 재발 가능성도 낮아졌지만,
+review 재시도 엣지를 열지 말지는 별도 판단으로 남긴다.
+
+**영향**: `templates/factory/github/workflows/factory-{triage,plan,implement,review,merge,retro}.yml`
+(timeout, `actions: write`, 정리 스텝), `factory/bin/run-stage.js`(`IN_FLIGHT_LABEL`·`abortedLine`·
+`abortStage`·`--aborted` CLI 분기), `factory/lib/yml-lint.js`(`stage-timeout-floor`·
+`aborted-cleanup-step`). 테스트: `run-stage.test.js`(5건 — 라벨 일치/불일치·merge·조회 실패·락 해제
+실패), `yml-lint.test.js`(§4.1 표 갱신 + 정리 스텝 1건 + 린트 규칙 1건).
+
+#### KTB-25 — 재큐는 새 주기다: 라운드는 마지막 `→ factory:queue` 이후부터 센다
+
+**질문**: 데모 #18은 `factory:needs-human`에서 재큐돼 **triage부터 통째로** 다시 돌았다(새 plan, 새
+implement, 새 구현). 그런데 그 새 코드에 대한 **첫 리뷰**가 `round: 2`로 시작했다. 라운드는 에이전트의
+자기 신고가 아니라 이슈에 남은 review handoff 개수로 세는데(`run-stage.js`의 `countHandoffs("review")`),
+그 개수를 **이슈 이력 전체**에서 셌기 때문이다 — 이슈 #18의 review handoff는 그 시점에 2개였다.
+결과: K=3 중 2를 이미 쓴 채로 시작해, rework 한 번이면 `round 3`, 그다음은 needs-human이다.
+`:unstick` 재실행이 잦을수록 이슈가 K에 조기 도달한다.
+
+**결정**: 세는 범위를 **마지막 `factory-transition:v1 … to=factory:queue` 코멘트 이후**로 좁힌다
+(`lib/retro/issue-comments.js`의 `commentsSinceRequeue`, `run-stage.js`의 `countHandoffs` dep이 그것을
+통과시킨 뒤 `parseHandoffs`한다). 재큐는 **새 주기의 시작**이고, 그 앞의 라운드는 다른 코드에 대한
+판정이므로 이번 예산에 실릴 이유가 없다. 재큐가 한 번도 없으면 이력 전체를 세는 예전 동작 그대로다
+(바뀌는 이슈가 없다). 카운터를 리셋하는 별도 마커를 새로 만들지 않은 이유: 재큐 전이 코멘트 자체가
+이미 그 사실의 유일하고 정확한 기록이고, 마커를 하나 더 두면 둘이 갈라질 수 있다.
+
+같은 dep이 implement/rework 카운터에도 쓰이므로(현재 호출자는 review 하나지만 `countHandoffs(s)`는
+스테이지를 인자로 받는다) 범위 교정은 **모든** 라운드 카운터에 동시에 적용된다.
+
+**영향**: `factory/lib/retro/issue-comments.js`(`commentsSinceRequeue`), `factory/bin/run-stage.js`
+(`countHandoffs` dep). 테스트: `run-stage.test.js` 1건(재큐 전 2개 → 0, 재큐 후 1개 → 1, 다중 재큐,
+재큐 없음).
+
+#### KTB-26 — sweeping은 cron만으로 부족하다: 스테이지가 끝날 때마다 빠른 sweep을 돈다
+
+**질문**: sweeper cron(`*/30`)은 신뢰할 수 있는 복구 경로로 설계됐지만 실측이 다르다 — 라운드 5에서는
+몇 시간짜리 공백(O13)이 났고, 라운드 6에서는 취소된 sweeper 런 때문에 #15가 30분 넘게 방치됐다.
+GitHub Actions의 `schedule`은 원래 best-effort다(부하가 걸리면 건너뛴다). 복구 장치가 **가장 필요한
+순간**(사고 직후)에 가장 늦게 도는 구조를 고칠 수 있는가.
+
+**결정**: sweeping을 **이벤트 구동이기도** 하게 만든다.
+
+1. 스테이지 워크플로 5개와 retro의 **마지막 스텝**이 `if: always()`로 `node .factory/bin/sweep.js --quick`을
+   돈다. 잡이 성공했든 실패했든 취소됐든 돈다 — 방금 끝난 그 잡이 만든 상태(특히 KTB-24가 세운
+   `factory:blocked`)를 곧바로 본다. **정리 스텝보다 뒤**여야 한다(린트 `sweep-step-last`가 그 순서와
+   "마지막 스텝"임을 고정한다): 앞에 두면 아직 세워지지 않은 라벨을 훑는다.
+2. `--quick`은 **상태 복구 팔만** 돈다 — in-progress 하트비트 재큐 · blocked 처리 · 멈춘 스테이지
+   재점화 · 라벨-셋 복구. 시간에 묶인 두 팔(격리 정책 적용, 토큰 만료 이슈)은 cron의 몫으로 남긴다:
+   "몇 시간이 지났는가"는 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고, `quarantine.toml`을
+   스테이지마다 쓰면 커밋 경쟁만 늘어난다. quick sweep은 토큰 변수 조회도 하지 않는다(gh 호출 −1).
+3. **cron은 그대로 둔다.** 이벤트 구동은 잡이 도는 동안에만 존재한다 — 아무 이슈도 움직이지 않는
+   밤에는 cron만이 유일한 눈이다. 둘은 대체가 아니라 겹이다.
+4. **동시 sweep을 견딘다.** 이제 두 sweep이 같은 이슈를 같은 초에 볼 수 있다. dedupe는 이미 마커가
+   쥐고 있고(재점화 마커·blocked-retry 마커·라벨-셋 복구 마커), 남은 틈은 `gh workflow run` 자체의
+   실패다 — `safeDispatch`가 그것을 감싸 그 이슈의 처리만 `error` 액션 한 줄로 접고 나머지 이슈로
+   넘어간다. 실패한 dispatch는 `stalled-restart`/`blocked-retry` 액션으로 **기록되지 않는다**(마커는
+   이미 남았으므로 같은 창 안에서는 다시 밀지 않고, 다음 창의 sweep이 재시도한다 — 실패는 "덜
+   재시작하는 쪽"으로 기운다).
+5. 스테이지·retro 워크플로의 `permissions`에 `actions: write`를 더했다 — sweep의 세 번째 팔이
+   `gh workflow run`을 부른다(`factory-sweeper.yml`과 같은 이유).
+
+**영향**: `templates/factory/github/workflows/*.yml`(Sweep 스텝 + `actions: write`),
+`factory/bin/sweep.js`(`--quick` 파싱, 토큰 조회 생략), `factory/lib/sweeper.js`(`quick` 인자,
+`safeDispatch`). 테스트: `sweeper.test.js` 2건(quick이 끄는 것과 cron 대조군, dispatch 실패 격리),
+`yml-lint.test.js` 2건(모든 스테이지+retro가 Sweep으로 끝난다, 린트 규칙).
 
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21

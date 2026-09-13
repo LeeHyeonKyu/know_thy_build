@@ -16,6 +16,9 @@ permissions:
   issues: write
   pull-requests: write
   statuses: write
+  # KTB-26 — 마지막 `Sweep` 스텝이 멈춘 스테이지를 `gh workflow run`으로 다시 띄운다(sweeper의 세 번째 팔).
+  # FACTORY_BOT_TOKEN으로 나가지만 잡 권한을 좁혀 두면 폴백이 없다(factory-sweeper.yml과 같은 이유).
+  actions: write
 # 워크플로마다 **다른** 그룹을 쓴다(KTB-8). GitHub는 `issues: labeled`에 라벨 이름 필터를 주지 않으므로
 # 라벨 이벤트 하나가 스테이지 워크플로 5개의 런을 전부 만든다(필터는 아래 잡 레벨 `if`에 있다).
 # 그룹을 공유하면 그 5개가 한 대기 슬롯을 두고 서로를 밀어내고(`cancel-in-progress: false`에서도
@@ -73,3 +76,31 @@ jobs:
             ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl
           include-hidden-files: true
           if-no-files-found: ignore
+      # KTB-24 — 잡 타임아웃(위 `timeout-minutes`)과 취소는 `run-stage.js`의 `finally`를 **실행하지 않는다**:
+      # 락 `refs/heads/factory/lock-<n>`이 고아로 남고, 전이도 코멘트도 run 기록도 없이 이슈가 진입 라벨에
+      # 그대로 앉는다(데모 #15: review가 45 m 19 s에 잘렸고 아무 흔적도 남지 않았다). 이 스텝이 그 잔해를
+      # 치운다 — `aborted:` 기록 한 줄 + 락 해제 + (이슈가 아직 이 스테이지의 in-flight 라벨일 때만)
+      # `factory:blocked` 전이(origin 마커가 함께 찍혀 sweeper가 다음 걸음을 안다). `claude`는 뜨지 않는다.
+      # **작아야 한다**: 취소된 잡의 유예 시간은 짧다(설치는 없다 — setup은 이미 돌았다).
+      # `.factory/`를 이벤트 sha로 되돌리는 이유: implement는 에이전트 브랜치 위에, review·merge는 PR head로
+      # detach된 트리 위에 있다 — 정리 코드만은 언제나 base의 것이어야 한다.
+      - name: Aborted cleanup
+        if: cancelled() || failure()
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/run-stage.js implement ${{ github.event.issue.number || inputs.issue }} --aborted "${{ job.status }}"
+      # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
+      # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —
+      # 스테이지가 끝날 때마다(성공·실패·취소 불문) 빠른 팔만 한 번 돌린다: 멈춘 스테이지 재점화 ·
+      # blocked 처리 · 라벨-셋 복구. 격리 TTL·토큰 만료는 cron의 몫으로 남는다(`--quick`).
+      # 멱등하고 마커로 dedupe되므로 cron sweep과 겹쳐 돌아도 안전하다.
+      - name: Sweep
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/sweep.js --quick
