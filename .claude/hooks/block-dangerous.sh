@@ -30,12 +30,25 @@ G='git([[:space:]]+(-C[[:space:]]+[^[:space:]]+|--git-dir=[^[:space:]]+|--work-t
 # **왜 이것이 진짜 방벽인가**: Claude Code의 `permissions.deny` `Bash(...)` 매처는 **접두 매칭**이다 —
 # `Bash(gh pr merge*)`는 명령이 그 문자열로 **시작할 때만** 맞는다. `out=$(gh pr merge …)`도,
 # `x && gh pr merge …`도 그 deny를 스치지 않는다. L2는 실수를 줄이는 안내판이고, 실제 경계는 이 훅이다.
-A='(^|[;&|(`={[:space:]])'
+#
+# 0452b5b **재리뷰 #1** — 경계 문자 뒤의 **백슬래시**도 흡수한다. `\gh pr merge 5`는 bash에서 alias
+# 확장만 끄고 `gh`를 그대로 실행한다(치환도, 런타임 조립도 없다 — 동사가 눈앞에 그대로 있다). 그런데
+# `\`가 클래스에 없어 `\gh pr merge`·`\git push --force`·`\rm -rf .factory/lib`가 한 글자로 모든
+# 규칙을 걸어 나갔다 — MF-3과 **정확히 같은 고장**이 한 단계 좁은 자리에서 반복된 것이다.
+# 따옴표(`"`·`'`)는 클래스에 **넣지 않는다**: `grep -rn "git merge" docs/`·`git log --grep="git merge"`가
+# 정상 작업으로 고정돼 있어 그 순간 오탐이 된다. 따옴표 뒤의 동사는 아래 **래퍼 패스**가 따로 다룬다.
+A='(^|[;&|(`={[:space:]])\\?'
 # 그리고 **뒤쪽** 경계도 같은 이유로 넓어져야 한다. `$(docker compose down)`의 `down` 뒤는 공백도 줄
 # 끝도 아닌 `)`다 — 앞 경계만 고치면 앵커 하나를 고치고 다른 앵커에 같은 구멍을 남긴다.
 # `$ZE`는 값이 `=`로 붙는 플래그(`--force-with-lease=…`)까지 받는 변형이다.
 Z='([;&|)`}[:space:]]|$)'
 ZE='([;&|)`}=[:space:]]|$)'
+
+# 모든 규칙은 **하나의 함수** 안에 있다. 이유는 아래 래퍼 패스(재리뷰 #4)다 — 같은 규칙 표를 원본
+# 명령과 "따옴표를 벗긴 사본"에 대해 **두 번** 돌린다. 표를 두 벌 유지하면 반드시 한쪽이 뒤처진다.
+# `$1`이 판정 대상 문자열이고, 전역 `$A`가 그 패스의 경계 클래스다.
+scan() {
+  local c="$1" prot qa p
 
 echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge" && block "gh pr merge"
 # REST 머지도 막는다 — gh api ... /pulls/<n>/merge (메서드 불문)
@@ -48,6 +61,13 @@ echo "$c" | grep -Eq "${A}${G}push[^;&|]*[[:space:]]\+[^[:space:]+]" && block "f
 # 짧은 colon refspec `:factory/lock-N`(git이 똑같이 받는다). 하나라도 빠지면 락 브랜치 — 이슈 단위
 # 상호배제의 **유일한** 근거 — 를 에이전트가 지울 수 있고, 그러면 같은 이슈에 두 스테이지가 겹친다.
 echo "$c" | grep -Eq "${A}${G}push[^;&|]*(--delete[^;&|]*factory/lock-|:(refs/heads/)?factory/lock-)" && block "lock branch deletion"
+# 재리뷰 #2 — **네 번째 철자는 git이 아니라 REST다**: `gh api -X DELETE /repos/o/r/git/refs/heads/factory/lock-7`.
+# 위 세 철자는 전부 `git push`를 가정했는데, 같은 브랜치를 지우는 문은 하나 더 있었다. L2의
+# `Bash(gh api -X DELETE*)` deny는 접두 매칭이라 `out=$( … )` 안에서는 아무것도 맞히지 못한다 —
+# 여기가 유일한 방벽이다. 브랜치 보호 규칙과 같은 이유로 **메서드 철자를 가리지 않는다**(-X/--method/
+# -XDELETE/대소문자를 하나씩 쫓는 것은 진 싸움이다), 호스트 접두(`https://api.github.com/…`)도, 앞의
+# `/` 유무도 가리지 않는다. 읽기(GET)까지 막히는 오탐은 손실이 없다: 락 상태는 `git ls-remote`로 본다.
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/git/refs/heads/factory/lock" && block "gh api lock ref deletion (the lock branch is the only basis of per-issue mutual exclusion)"
 # protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c.
 # 목록은 harness.toml `[protected].factory` · ci-settings.json deny와 같아야 한다(F9 / ADR-019 — 경로
 # deny는 `.claude/settings.json`이 아니라 CI 전용 `.factory/ci-settings.json`에 산다) — 셋이 갈라지면
@@ -145,6 +165,16 @@ echo "$c" | grep -Eq "${A}${G}(apply|am)${Z}" && block "git apply/am (patch cont
 # 코멘트는 막지 않는다: handoff·rework-response는 코멘트로 나간다.
 echo "$c" | grep -Eq "${A}gh[[:space:]]+issue[[:space:]]+edit[^;&|]*--(add|remove)-label[^;&|]*factory:" && block "gh issue edit --add/remove-label factory:*"
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/issues/[0-9]+/labels" && block "gh api issues labels"
+# 재리뷰 #3 — 위 두 규칙은 **이슈 한 건**의 라벨만 본다. 라벨은 저장소 자원이기도 하다:
+# `gh label delete factory:approved --yes`는 그 라벨을 **모든 이슈에서 한 번에** 떼어 내고,
+# `gh label edit factory:queue --name x`는 그래프의 이름을 바꿔 스테이지 워크플로를 통째로 재운다.
+# 이슈 단위 우회보다 **더 큰** 우회인데 규칙이 없었다. REST 짝(`/repos/{o}/{r}/labels/factory:*`,
+# 그리고 `POST /labels`의 본문에 `factory:`가 보이는 경우)도 같이 막는다 — 메서드 철자는 가리지 않는다.
+# `gh label list`·`--search`는 읽기라 그대로 통과한다. `clone`은 다른 저장소의 라벨 집합을 통째로
+# 덮어쓰므로(=`factory:*`를 이름으로 지목하지 않고도 갈아 끼운다) 대상을 가리지 않고 막는다.
+echo "$c" | grep -Eq "${A}gh[[:space:]]+label[[:space:]]+(create|edit|delete)[^;&|]*factory:" && block "gh label create/edit/delete on factory:* (the label graph is L1's, not the agent's)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+label[[:space:]]+clone${Z}" && block "gh label clone (it replaces the repo's label set wholesale)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/labels[^;&|]*factory:" && block "gh api repo label endpoint on factory:*"
 
 # ── 최종 리뷰 MF-3 / SF-2: 브랜치 보호·룰셋은 **L0 그 자체다** ────────────────────────────────────
 # 모든 스테이지의 env에 `GH_TOKEN=FACTORY_BOT_TOKEN`이 있다. 그 토큰으로 `required_status_checks`나
@@ -171,4 +201,30 @@ DOCKER_TEARDOWN_VERBS='(down|stop|rm|kill|restart)'
 echo "$c" | grep -Eq "${A}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]${DOCKER_TEARDOWN_VERBS}${Z}" && block "docker compose down/stop/rm/kill/restart tears down the test env"
 echo "$c" | grep -Eq "${A}docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}${Z}" && block "docker stop/rm/kill/restart tears down the test env"
 echo "$c" | grep -Eq "${A}docker[[:space:]]+container[[:space:]]+(stop|rm|kill)${Z}" && block "docker container stop/rm/kill tears down the test env"
+}
+
+scan "$c"
+
+# ── 0452b5b 재리뷰 #4: 인터프리터 래퍼와 ANSI-C 인용 ────────────────────────────────────────────
+# `sh -c "gh pr merge 5"` · `bash -c '…'` · `eval "…"` · `$'gh' pr merge 5`는 **동사가 명령줄에 그대로
+# 있는데도** 전부 통과했다. 동사 앞 글자가 `"`/`'`라서다. 재리뷰가 확인한 대로 이 저장소의 allow는
+# `Bash(*)`이고 deny에 `sh`/`bash`/`eval`이 없다 — "래퍼는 allow가 막는다"는 전제는 **거짓**이고
+# 이 훅이 유일한 층이다.
+# 고치는 방법은 `"`/`'`를 경계 클래스에 넣는 것이 **아니다**: 그러면 `grep -rn "git merge" docs/`가
+# 그 자리에서 오탐이 된다(고정된 정상 작업이다). 대신 **래퍼가 보일 때만** 따옴표를 지운 사본에 대고
+# 같은 규칙 표를 한 번 더 돌린다 — 따옴표가 사라지면 페이로드 안의 동사는 평범한 토큰이 되고,
+# `$'gh'` → `$gh`가 되므로 이 패스의 경계 클래스에만 `$`를 더한다.
+# **비목표(등록부에 기록)**: 런타임에 조립되는 동사 — `x=$(printf "gh pr merge"); $x` ·
+# `"$(printf gh) pr merge"` · `python3 -c "os.system('…')"` · `node -e "execSync('…')"` — 는 문자열에
+# 동사가 **연속으로 나타나지 않으므로** 이 훅이 볼 수 없다. 쫓지 않는다(ADR-020 잔여 위험 #4).
+# (`echo "gh pr merge 5" | bash`는 페이로드가 문자열에 그대로 있어 **부수적으로** 걸린다 — 런타임
+#  조립을 막는다는 뜻이 아니다.)
+WRAPPERS='((ba|z|da|k)?sh|eval|exec|source|\.)'
+wrap=0
+echo "$c" | grep -Eq "${A}${WRAPPERS}${Z}" && wrap=1
+case "$c" in *\$\'*|*\$\"*) wrap=1 ;; esac        # ANSI-C / 로케일 인용: $'gh' · $"gh"
+if [ "$wrap" = 1 ]; then
+  A='(^|[$;&|(`={[:space:]])\\?'
+  scan "$(printf '%s' "$c" | tr -d "\"'")"
+fi
 exit 0

@@ -61,9 +61,6 @@ QA_RE='\.factory/out/qa/'
 projqa=""
 [ -n "$PROJ" ] && projqa="$(ere "$PROJ")/$QA_RE[^[:space:]\"]*|"
 allow="(\./)?($projqa$esc/[^[:space:]\"]*|/tmp/[^[:space:]\"]*|/private/tmp/[^[:space:]\"]*|\\\$\{?TMPDIR\}?/[^[:space:]\"]*|$QA_RE[^[:space:]\"]*|/dev/(null|stdout|stderr))"
-# `..`가 허용 접두 뒤에 붙으면 카브아웃을 통째로 끈다(block-dangerous.sh와 같은 규칙).
-w="$c"
-printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_RE)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
 
 # 허용되지 않은 대상이 한 글자라도 남아 있는가. 앞의 `-`는 플래그이므로 대상이 아니다.
 T='["]?[^-[:space:]"&|;<>]'
@@ -74,7 +71,10 @@ T='["]?[^-[:space:]"&|;<>]'
 # 없어서 `x=$(rm -rf src)`·`` `git push` ``가 이 훅의 **모든** 규칙을 그대로 걸어 나갔다
 # (block-dangerous.sh의 같은 결함과 한 몸이다 — 둘은 같은 우회에 같이 열려 있었다).
 # `[[:space:]]*`는 그대로 둔다: `; rm x`처럼 구분자 뒤 공백을 흡수해야 한다.
-CMD='(^|[;&|(`={][[:space:]]*)'
+# 0452b5b **재리뷰 #1**: 경계 뒤의 **백슬래시**(`\rm -rf src`, `\git push origin HEAD`)도 흡수한다 —
+# bash는 alias 확장만 끄고 동사를 그대로 실행하는데 `\`가 클래스에 없어 한 글자로 빠져나갔다.
+# 따옴표는 넣지 않는다(`grep -rn mkdir src/`류 오탐) — 따옴표 뒤의 동사는 아래 래퍼 패스가 맡는다.
+CMD='(^|[;&|(`={][[:space:]]*)\\?'
 # **뒤쪽** 경계도 같이 넓어져야 한다: `$(docker compose down)`의 `down` 뒤는 공백도 줄 끝도 아닌 `)`다.
 # 앞만 고치면 앵커 하나를 고치고 다른 앵커에 같은 구멍을 남긴다. `$ZE`는 값이 `=`로 붙는 플래그까지 받는다.
 Z='([;&|)`}[:space:]]|$)'
@@ -84,6 +84,15 @@ FLAGS='([[:space:]]+-[^[:space:];&|]+)*'
 # r1의 규칙들은 플래그 뭉치 뒤에 공백이나 `=`를 요구해서 이 모양을 통째로 놓쳤다(KTB-13 r2).
 # 뭉치 뒤에 이걸 붙이면 "플래그 글자가 뭉치 안에 있다"만으로 판정이 선다 — 값이 붙어 있든 아니든.
 ATTACHED='[a-zA-Z]*[^[:space:];&|]*'
+
+# 규칙 표는 **하나의 함수** 안에 있다 — 아래 래퍼 패스(재리뷰 #4)가 같은 표를 원본 명령과 "따옴표를
+# 벗긴 사본"에 두 번 돌린다. 표를 두 벌 유지하면 반드시 한쪽이 뒤처진다. `$1`이 판정 대상이고,
+# 전역 `$CMD`가 그 패스의 명령 위치 클래스다.
+scan() {
+  local c="$1" w
+# `..`가 허용 접두 뒤에 붙으면 카브아웃을 통째로 끈다(block-dangerous.sh와 같은 규칙).
+w="$c"
+printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_RE)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
 
 # `>|`는 noclobber를 무시하는 리다이렉션이다 — `>`/`>>`와 같은 쓰기이므로 같이 잡는다.
 echo "$w" | grep -Eq "(^|[^-=<])>>?\|?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
@@ -140,4 +149,23 @@ echo "$c" | grep -Eq "${CMD}(docker[[:space:]]+compose|docker-compose)([[:space:
 echo "$c" | grep -Eq "${CMD}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]up${Z}" && deny "docker compose up (read-only role must not change test-env state)"
 echo "$c" | grep -Eq "${CMD}docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}${Z}" && deny "docker stop/rm/kill/restart (read-only role must not change test-env state)"
 echo "$c" | grep -Eq "${CMD}docker[[:space:]]+container[[:space:]]+(stop|rm|kill)${Z}" && deny "docker container stop/rm/kill (read-only role must not change test-env state)"
+}
+
+scan "$c"
+
+# ── 0452b5b 재리뷰 #4: 인터프리터 래퍼와 ANSI-C 인용 ────────────────────────────────────────────
+# `sh -c "rm -rf src"` · `eval "touch a"` · `$'rm' -rf src`는 동사가 명령줄에 그대로 있는데도 통과했다 —
+# 동사 앞 글자가 `"`/`'`라서다. 이 저장소의 allow는 `Bash(*)`이고 deny에 `sh`/`bash`/`eval`이 없으므로
+# (재리뷰가 확인했다) 이 훅이 유일한 층이다. `"`/`'`를 클래스에 넣는 대신 — 그러면 `grep -rn mkdir src/`
+# 류가 오탐이 된다 — **래퍼가 보일 때만** 따옴표를 지운 사본에 같은 표를 한 번 더 돌린다. 그 패스에서는
+# 페이로드 안의 동사가 평범한 토큰이 되므로 명령 위치 클래스에 **공백**과 (`$'rm'`→`$rm` 때문에) `$`를
+# 더한다. 런타임에 조립되는 동사(`x=$(printf "rm -rf src"); $x`)는 여전히 볼 수 없다 — 비목표다.
+WRAPPERS='((ba|z|da|k)?sh|eval|exec|source|\.)'
+wrap=0
+echo "$c" | grep -Eq "${CMD}${WRAPPERS}${Z}" && wrap=1
+case "$c" in *\$\'*|*\$\"*) wrap=1 ;; esac        # ANSI-C / 로케일 인용: $'rm' · $"rm"
+if [ "$wrap" = 1 ]; then
+  CMD='(^|[$;&|(`={[:space:]][[:space:]]*)\\?'
+  scan "$(printf '%s' "$c" | tr -d "\"'")"
+fi
 exit 0

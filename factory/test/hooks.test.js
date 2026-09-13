@@ -225,6 +225,7 @@ const EVASIONS = (verb) => [
   `false || ${verb}`,        // `||` 체인
   `{ ${verb}; }`,            // 그룹
   `echo x | xargs -I{} ${verb}`,   // 파이프 뒤
+  `\\${verb}`,               // 0452b5b 재리뷰 #1 — 백슬래시 이스케이프(alias 확장만 끈다)
 ];
 test("block-dangerous: the dangerous verb is anchored at a token boundary, not at line start (MF-3)", async () => {
   const verbs = [
@@ -239,6 +240,10 @@ test("block-dangerous: the dangerous verb is anchored at a token boundary, not a
     // 라벨 그래프 우회
     "gh issue edit 7 --add-label factory:approved",
     "gh api -X DELETE /repos/o/r/issues/7/labels/factory:approved",
+    // 재리뷰 #3: 라벨은 저장소 자원이기도 하다 — 레포 단위 삭제는 모든 이슈에서 한 번에 떼어 낸다
+    "gh label delete factory:approved --yes",
+    // 재리뷰 #2: 락 브랜치를 지우는 네 번째 철자(REST refs 엔드포인트)
+    "gh api -X DELETE /repos/o/r/git/refs/heads/factory/lock-7",
     // 브랜치 보호·룰셋 = L0 자체 (SF-2: 철자를 가리지 않는다)
     "gh api -X PUT /repos/o/r/branches/main/protection",
     "gh api --method PUT /repos/o/r/branches/main/protection -f x=1",
@@ -259,7 +264,7 @@ test("block-dangerous: the dangerous verb is anchored at a token boundary, not a
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
-}, 120000);
+}, 180000);
 
 // 넓힌 경계가 정상 작업을 잡아먹지 않는지 — 같은 글자들이 무해한 자리에 있을 때는 조용하다.
 test("block-dangerous: the widened token boundary does not swallow normal commands (MF-3)", async () => {
@@ -293,6 +298,136 @@ test("deny-all-writes: the widened token boundary still lets read-only work thro
   const allowed = ["out=$(git status --porcelain)", "n=$(ls src | wc -l)", "echo `git rev-parse HEAD`",
                    "npm test && npm run lint", "{ npm test; git diff; }", "grep -rn mkdir src/",
                    "cat src/a.js | head -5", "node .factory/bin/gates.js full"];
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// ── 0452b5b 재리뷰: 토큰 경계를 고친 뒤에도 남아 있던 네 가지 직접 실행 우회 ─────────────────────
+// 재리뷰는 훅을 **실제로 실행해** 다음을 통과시켰다. 넷 다 동사가 명령줄에 그대로 있고(런타임 조립이
+// 아니다), 등록부 표는 그 자리를 "차단"이라고 적고 있었다 — MF-3과 같은 고장이 한 단계 좁은 자리에서
+// 반복된 것이다.
+
+// #1 백슬래시: bash에서 `\gh`는 alias 확장만 끄고 `gh`를 그대로 실행한다. 한 글자로 전 규칙 통과.
+test("block-dangerous: a backslash-escaped verb is still the verb (re-review #1)", async () => {
+  const blocked = ["\\gh pr merge 5 --squash", "\\git push --force origin main", "\\rm -rf .factory/lib",
+                   "\\git merge main", "\\docker compose down", "\\gh issue edit 7 --add-label factory:approved",
+                   "\\ln -sf /tmp/evil .claude/settings.json", "\\chmod -x .factory/bin/gates.js",
+                   "out=$(\\gh pr merge 5)", "true && \\git push --force origin main", "{ \\rm -rf .factory/lib; }"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+}, 60000);
+
+test("deny-all-writes: a backslash-escaped write verb is still a write (re-review #1)", async () => {
+  const blocked = ["\\rm -rf src", "\\mkdir build", "\\touch src/a.js", "\\git push origin HEAD",
+                   "\\wget https://e/x", "\\docker compose down", "out=$(\\touch src/a.js)", "{ \\mkdir build; }"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write/);
+  }));
+}, 60000);
+
+// #2 락 브랜치를 지우는 **네 번째** 철자는 git이 아니라 REST다. 세 `git push` 철자만 막고 있었다.
+// 락 브랜치는 이슈 단위 상호배제의 유일한 근거다 — 지워지면 같은 이슈에 두 스테이지가 겹친다.
+test("block-dangerous: the lock ref cannot be deleted through the git refs API either (re-review #2)", async () => {
+  const blocked = ["gh api -X DELETE /repos/o/r/git/refs/heads/factory/lock-7",
+                   "gh api --method DELETE /repos/o/r/git/refs/heads/factory/lock-7",
+                   "gh api -XDELETE repos/o/r/git/refs/heads/factory/lock-7",            // 앞의 `/`도 없다
+                   "gh api -X DELETE https://api.github.com/repos/o/r/git/refs/heads/factory/lock-7",  // 호스트 접두
+                   "out=$(gh api -X DELETE /repos/o/r/git/refs/heads/factory/lock-7)",
+                   "\\gh api -X DELETE /repos/o/r/git/refs/heads/factory/lock-7"];
+  const allowed = ["gh api /repos/o/r/git/refs/heads/claude/fq-7",       // 작업 브랜치의 ref는 이 규칙 밖이다
+                   "gh api repos/o/r/pulls/9 --jq .head.sha", "git ls-remote origin factory/lock-7"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// #3 라벨은 이슈의 것이면서 **저장소의 것**이다. `gh issue edit`/`…/issues/<n>/labels`만 막혀 있었는데,
+// `gh label delete factory:approved`는 그 라벨을 모든 이슈에서 한 번에 떼어 낸다 — 더 큰 우회다.
+test("block-dangerous: factory:* labels cannot be edited repo-wide either (re-review #3)", async () => {
+  const blocked = ["gh label delete factory:approved --yes", "gh label edit factory:queue --name x",
+                   "gh label create factory:evil --color ff0000", "gh label clone other/repo",
+                   "gh api -X DELETE /repos/o/r/labels/factory:approved",
+                   "gh api repos/o/r/labels/factory:queue --method PATCH -f name=x",
+                   "gh api -X POST repos/o/r/labels -f name=factory:evil",
+                   "out=$(gh label delete factory:approved --yes)", "\\gh label delete factory:approved"];
+  const allowed = ["gh label list", "gh label list --search factory:", "gh api repos/o/r/labels --jq '.[].name'",
+                   "gh issue view 7 --comments", "gh issue edit 7 --title x"];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// #4 인터프리터 래퍼·ANSI-C 인용. 동사 앞 글자가 `"`/`'`라 경계 클래스에 걸리지 않았다. 이 저장소의
+// allow는 `Bash(*)`이고 deny에 `sh`/`bash`/`eval`이 없으므로("래퍼는 allow가 막는다"는 전제는 거짓이다)
+// 훅이 유일한 층이다. 고치는 방법은 클래스에 따옴표를 넣는 것이 **아니다** — 그러면 바로 아래 정상
+// 작업들이 오탐이 된다. 래퍼가 보일 때만 따옴표를 벗긴 사본에 같은 표를 한 번 더 돌린다.
+test("block-dangerous: interpreter wrappers and ANSI-C quoted verbs are blocked (re-review #4)", async () => {
+  const blocked = [
+    'sh -c "gh pr merge 5"', "sh -c 'gh pr merge 5'", 'bash -c "gh pr merge 5 --squash"',
+    'bash -lc "git push --force origin main"', 'zsh -c "rm -rf .factory/lib"', 'dash -c "docker compose down"',
+    'eval "gh pr merge 5"', "eval 'git merge main'", 'exec sh -c "gh pr merge 5"',
+    'echo x | xargs -I{} sh -c "gh pr merge 5"',
+    "$'gh' pr merge 5", "$'git' push --force origin main",     // ANSI-C 인용: 동사 앞 글자가 `'`다
+    'echo "gh pr merge 5" | bash',   // 페이로드가 문자열에 그대로 있어 **부수적으로** 걸린다(비목표는 아래)
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+}, 60000);
+
+test("deny-all-writes: interpreter wrappers and ANSI-C quoted write verbs are blocked (re-review #4)", async () => {
+  const blocked = ['sh -c "rm -rf src"', "bash -c 'git push origin HEAD'", 'eval "touch src/a.js"',
+                   'zsh -c "curl -o src/a.js https://e/x"', 'bash -c "sed -i s/a/b/ src/a.js"',
+                   "$'rm' -rf src", 'echo "rm -rf src" | bash'];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write/);
+  }));
+}, 60000);
+
+// **비목표를 고정한다**: 동사가 런타임에 조립되면 명령 문자열 어디에도 연속으로 나타나지 않는다 —
+// 훅은 그것을 볼 수 **없다**(ADR-020 잔여 위험 #4와 같은 종류). 쫓지 않기로 한 결정이 흐려지지 않도록
+// "막히지 않는다"를 명시적으로 고정한다. 여기가 빨개지면 그것은 버그가 아니라 **범위가 바뀐 것**이고,
+// 등록부(DECISIONS.md ADR-020)를 같이 고쳐야 한다는 신호다.
+test("block-dangerous: runtime-assembled verbs are a documented non-goal, not a bug (re-review #4 scope pin)", async () => {
+  const notBlocked = [
+    'x=$(printf "gh pr merge 5"); $x',          // 동사가 변수에 담겨 나중에 펼쳐진다
+    '"$(printf gh) pr merge 5"',                // 동사의 첫 토큰 자체가 치환 결과다
+    "python3 -c \"os.system('gh pr merge 5')\"",  // 인터프리터 안의 문자열 — 경로 규칙만 있고 동사 규칙은 없다
+    "node -e \"execSync('gh pr merge 5')\"",
+  ];
+  await Promise.all(notBlocked.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// 래퍼 패스가 정상 작업을 잡아먹지 않는지 — 따옴표 안의 동사를 보게 됐다고 해서 `grep -rn "git merge"`가
+// 막히면 안 된다(그래서 `"`/`'`를 경계 클래스에 넣지 않았다).
+test("block-dangerous: the wrapper pass does not swallow quoted prose or ordinary interpreter use (re-review #4)", async () => {
+  const allowed = [
+    'grep -rn "git merge" docs/', "git log --grep=\"git merge\"", "grep -rn 'gh pr merge' .claude/",
+    'bash -c "npm test"', "sh scripts/setup.sh", "source .venv/bin/activate", "bash .factory/bin/setup.sh",
+    "docker compose -f x.yml exec -T db psql -U u -d d -c 'select 1'",
+    "node .factory/bin/gates.js full", "npm test && npm run lint",
+  ];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+test("deny-all-writes: the wrapper pass leaves read-only interpreter use alone (re-review #4)", async () => {
+  const allowed = ['bash -c "npm test"', "sh -c 'git status'", "source .venv/bin/activate",
+                   "grep -rn mkdir src/", "docker compose -f x.yml exec -T db psql -U u -d d -c 'select 1'",
+                   'x=$(printf "rm -rf src"); $x'];   // 런타임 조립 — 여기서도 비목표다
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
 }, 60000);
 

@@ -1370,13 +1370,34 @@ implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이
 
 **잔여 위험 등록부.** 아래가 지금 실제로 막히는 것과 막히지 않는 것이다 — "훅이 덮는다"를 다시 검증 없이 쓰지 않기 위해 표로 고정한다.
 
-> **읽는 법 (최종 리뷰 MF-3 이후)**: 이 표의 "차단"은 **명령의 어느 자리에 있든** 차단이라는 뜻이다.
-> r1~r2의 두 훅은 동사 앞 경계를 `(^|[;&|[:space:]])`로 잡고 있어서 `out=$(gh pr merge 5 --squash)`·
-> `` `git push …` ``·`{ rm -rf .factory/lib; }`가 **표가 "차단"이라고 적은 자리를 전부 걸어 나갔다**
-> (동사가 눈앞에 그대로 있는데 규칙이 빗나갔다 — 잔여 위험 #4의 *경로* 난독화와는 다른 종류의 구멍이다).
-> 지금 경계는 토큰 경계다: 줄 시작 · 공백 · `(` · 백틱 · `;` · `&` · `|` · `=` · `{`, 그리고 뒤쪽도
-> 같은 집합(`$(docker compose down)`의 `down` 뒤는 `)`다). `hooks.test.js`의 표 기반 테스트가 여덟 가지
-> 회피형(`out=$(…)`·`$(…)`·백틱·`;`·`&&`·`||`·`{ …; }`·파이프)을 위험 동사 19개에 곱해 고정한다.
+> **읽는 법 (최종 리뷰 MF-3 + 0452b5b 재리뷰 이후)**: 이 표의 "차단"이 **정확히 어디까지**인지 먼저
+> 못 박는다 — 여기에 "어느 자리에 있든"이라고 적었던 앞 판본은 코드보다 강한 주장이었고, 그것이 바로
+> MF-3이 제기된 고장(등록부가 코드에 없는 커버리지를 주장하는 것)의 재발이었다. 지금 덮는 자리는
+> 이것이 **전부**다:
+>
+> 1. **토큰 경계**: 줄 시작 · 공백 · `(` · 백틱 · `;` · `&` · `|` · `=` · `{` 뒤. 뒤쪽 경계도 같은
+>    집합이다(`$(docker compose down)`의 `down` 뒤는 `)`다) — 앞만 고치면 한 앵커를 고치고 다른 앵커에
+>    같은 구멍을 남긴다. 그래서 `out=$(gh pr merge …)`·`` `git push …` ``·`{ rm -rf .factory/lib; }`·
+>    `x && gh pr merge …`·`echo x | xargs -I{} gh pr merge …`가 전부 걸린다.
+> 2. **백슬래시 이스케이프**: 경계 뒤의 `\`를 흡수한다(`\gh pr merge`·`\rm -rf .factory/lib`). bash에서
+>    `\`는 alias 확장만 끄고 동사를 그대로 실행한다 — 한 글자로 전 규칙이 우회됐다(재리뷰 #1).
+> 3. **명령 위치의 접두사**: `command`·`env X=1`·`VAR=v`·`nohup`·`timeout 60`·`time`·`!`·`if`/`for` 본문은
+>    동사 앞이 공백이므로 (1)에 포함된다.
+> 4. **인터프리터 래퍼와 ANSI-C 인용**(재리뷰 #4): 명령 위치에 `sh|bash|zsh|dash|ksh|eval|exec|source|.`가
+>    보이거나 `$'…'`/`$"…"`가 보이면, **따옴표를 벗긴 사본**에 같은 규칙 표를 한 번 더 돌린다 —
+>    `sh -c "gh pr merge 5"`·`eval '…'`·`$'gh' pr merge 5`가 그렇게 걸린다. 경계 클래스에 `"`/`'`를
+>    넣는 방식은 **쓰지 않는다**: `grep -rn "git merge" docs/`·`git log --grep="git merge"`가 그 순간
+>    오탐이 되기 때문이다(둘 다 정상 작업으로 테스트에 고정돼 있다).
+>
+> **덮지 않는 자리(비목표, 쫓지 않는다)**: 동사가 **런타임에 조립**되면 명령 문자열 어디에도 연속으로
+> 나타나지 않으므로 이 훅은 볼 수 없다 — `x=$(printf "gh pr merge 5"); $x` · `"$(printf gh) pr merge"` ·
+> `python3 -c "os.system('gh pr merge 5')"` · `node -e "execSync('…')"`. 잔여 위험 #4와 같은 종류이고,
+> `hooks.test.js`가 이것들을 **"막히지 않는다"로 고정**한다(범위가 바뀌면 그 테스트가 먼저 빨개진다).
+> (`echo "gh pr merge 5" | bash`는 페이로드가 문자열에 그대로 있어 (4)에 부수적으로 걸린다 — 런타임
+> 조립을 막는다는 뜻이 아니다.)
+>
+> `hooks.test.js`의 표 기반 테스트가 아홉 가지 회피형(`out=$(…)`·`$(…)`·백틱·`;`·`&&`·`||`·`{ …; }`·
+> 파이프·`\`)을 위험 동사 21개에 곱해 고정한다.
 >
 > **그리고 L2는 이 표의 근거가 아니다**: Claude Code의 `permissions.deny` `Bash(...)` 매처는 **접두
 > 매칭**이라 `Bash(gh pr merge*)`는 명령이 그 문자열로 **시작할 때만** 맞는다. `out=$(gh pr merge …)`도
@@ -1394,8 +1415,9 @@ implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이
 | `cp`/`mv` 목적지, `-t`/`--target-directory` | 보호 경로가 목적지면 차단 | 차단(카브아웃 제외) |
 | `git commit/push/add/checkout/restore/rm/mv/config` | 머지·force-push·lock 삭제·보호 경로 checkout/restore/rm/mv 차단 | 쓰기 서브커맨드 전면 차단 |
 | `git apply` / `git am` | **전면 차단**(패치 내용이 보이지 않는다) | 전면 차단 |
-| `gh pr merge`, `gh api …/merge`, `factory:*` 라벨 조작 | 차단 | 차단 |
-| 락 브랜치 삭제(`git push … --delete factory/lock-N` · `:refs/heads/factory/lock-N` · `:factory/lock-N`) | 차단(세 철자 전부 — 최종 리뷰 MF-3) | 차단(`git push` 전면) |
+| `gh pr merge`, `gh api …/merge` | 차단 | 차단 |
+| `factory:*` 라벨 조작 — 이슈 단위(`gh issue edit --add/remove-label`, `gh api …/issues/<n>/labels`) **그리고 레포 단위**(`gh label create\|edit\|delete` on `factory:*`, `gh label clone`, `gh api …/labels/factory:*`, `POST …/labels` 본문의 `factory:`) | 차단(레포 단위는 재리뷰 #3에서 추가 — 레포에서 지우면 모든 이슈에서 한 번에 떨어진다) | 차단 |
+| 락 브랜치 삭제(`git push … --delete factory/lock-N` · `:refs/heads/factory/lock-N` · `:factory/lock-N` · `gh api …/git/refs/heads/factory/lock-N`) | 차단(네 철자 전부 — 네 번째는 재리뷰 #2, 메서드 철자 불문) | 차단(`git push` 전면; `gh api`는 `block-dangerous`가 본다) |
 | 브랜치 보호·룰셋(`gh api …/branches/*/protection`, `…/rulesets`, `gh ruleset`) | **차단**(메서드 철자 불문: `-X PUT`·`--method PUT`·`-XDELETE` 전부 — 최종 리뷰 SF-2) | 차단 |
 
 **막지 못하는 것(알려진 잔여 위험)**:
@@ -1403,7 +1425,7 @@ implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이
 1. **아직 열거되지 않은 쓰기 도구.** 두 훅은 **명령 모양의 열거**다 — 화이트리스트가 아니다. `rsync`, `tar -x`, `unzip`, `patch`, `busybox`, `awk`의 `> file`이 아닌 출력 리다이렉트, `python -c` 이외의 인터프리터(`ruby -e`, `php -r`), 셸 내장 `printf -v`+`exec>`, 새로 설치된 CLI 등은 지금 목록에 없다. 이 목록은 관측될 때마다 자란다.
 2. **Bash에 닿는 역할은 builder만이 아니다.** `reviewer-*`·`factory-verifier`·`factory-loader`는 게이트·테스트를 돌려야 하므로 frontmatter `tools:`에 `Bash`가 있다. 그들의 방벽은 `deny-all-writes.sh` **하나뿐**이고, 그 훅은 위 표의 모양들만 안다. `plan-*`과 `factory-triage`·`factory-retro`는 `tools:`에 Bash가 없어 도달 자체가 없다.
 3. **L1은 PR에 도달한 diff만 본다.** merge 스테이지의 보호 경로·`additive_only` 거부와 `factory/integrity`는 **커밋되어 push된 것**을 판정한다. reviewer·verifier·loader는 커밋하지 않으므로, 그들이 워크트리에서 파일을 고쳐 게이트 결과나 자기 판정 근거를 바꾸면 **어떤 diff에도 나타나지 않는다**. 그 경로의 유일한 방벽이 (2)의 훅 하나라는 뜻이다. `stop-guard.sh`가 SubagentStop에서 더러운 트리를 거부하는 것이 부분적인 사후 감지다(쓰기 금지 역할은 그 가드에서 면제되어 있으므로 — ADR-016 F6 — 감지도 아니다). **KTB-14(아래)가 이 gap을 닫는다** — triage/plan/review에 한해 `run-stage.js` 자신이 claude -p 직후 워크트리를 다시 물어, 훅이 놓친 모양이든 무엇이든 스크래치 경로 밖의 diff를 산출물 채택 이전에 거부한다.
-4. **훅 입력은 신뢰할 수 없다.** 판정은 명령 **문자열**에 대한 정규식이다. 변수 확장(`P=pack; echo x > "$P"age.json`), base64, `eval`, 힙 스크립트 파일 경유는 문자열에 보호 경로가 보이지 않으므로 빠져나간다. ADR-013의 원칙(훅 입력 불신)이 여기서도 상한이다 — 훅은 **실수와 게으른 우회**를 막지 실행 중인 적대적 에이전트를 막지 못한다.
+4. **훅 입력은 신뢰할 수 없다 — 런타임에 조립되는 동사·경로는 비목표다.** 판정은 명령 **문자열**에 대한 정규식이다. 문자열에 동사나 보호 경로가 **연속으로 나타나지 않는** 모양은 전부 빠져나간다: 변수 확장(`P=pack; echo x > "$P"age.json`), `x=$(printf "gh pr merge 5"); $x`, `"$(printf gh) pr merge 5"`, base64, `python3 -c "os.system('…')"`·`node -e "execSync('…')"`처럼 인터프리터 문자열 안에서 조립되는 명령, 힙 스크립트 파일 경유. **이것은 고칠 항목이 아니라 범위 선언이다**(재리뷰 0452b5b가 같은 결론으로 "book it, don't chase it"이라고 적었다) — 쫓으려면 셸 파서와 인터프리터 의미론을 훅 안에 넣어야 하고, 그때 규칙은 오탐으로 무너진다. `hooks.test.js`가 이 네 모양을 **"막히지 않는다"로 고정**해 범위를 명시한다: 거기가 빨개지면 버그가 아니라 범위가 바뀐 것이고 이 문단을 같이 고쳐야 한다. 반면 **따옴표만 씌운** 직접 실행(`sh -c "…"`·`eval "…"`·`$'gh' …`)은 조립이 아니라 인용일 뿐이므로 재리뷰 #4에서 **차단으로 옮겼다**(위 읽는 법 (4)). ADR-013의 원칙(훅 입력 불신)이 여기서도 상한이다 — 훅은 **실수와 게으른 우회**를 막지 실행 중인 적대적 에이전트를 막지 못한다.
 5. **오탐(의도적).** `git restore --staged package.json`(인덱스만 건드린다), `node -p`로 보호 경로를 **읽는** 것, `rm -rf node_modules/foo/package.json`(N4), 그리고 **`git apply --check`/`--stat`/`--numstat`**(패치를 적용하지 않고 적용 가능성·통계만 본다 — 읽기다)은 막힌다. `git apply`가 전면 차단인 이유가 그대로 여기 적용된다: 패치 내용이 명령줄에 없어 훅은 `--check`가 진짜 붙었는지 이상의 것을 판정할 수 없고, 플래그 하나로 차단을 끄는 경로를 여는 것(`git apply --check; git apply p.diff`가 한 줄에 있을 때 앞의 것만 보고 통과시키는 것)이 더 나쁘다. 우회로는 `git apply`가 아니라 `git diff`/`patch --dry-run`이다. 전부 "하지 못해 불편한 쪽이 조용히 지워지는 쪽보다 낫다"는 기존 판결을 따른다.
 
 이 등록부의 요지: **넓어진 allow의 대가는 "훅이 아는 모양의 목록"에 의존하게 된 것**이고, 그 목록은 완전하지 않다. 완전해질 수도 없다 — 완전함을 원하면 allow를 다시 좁혀야 하는데, 그것이 KTB-13이 고친 바로 그 고장이다. 실제 방어선은 여전히 **L0/L1**(변조는 체크가, 보호 경로는 사람 머지가)이고, 훅은 그 앞의 싼 그물이다.
@@ -1639,9 +1661,20 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 - 락 브랜치 삭제의 **세 철자**를 다 본다: `--delete … factory/lock-N` · `:refs/heads/factory/lock-N` · `:factory/lock-N`.
 - **브랜치 보호·룰셋** 규칙을 새로 세운다(SF-2): `gh api …/branches/*/protection` · `gh api …/rulesets` · `gh ruleset`, **메서드 철자 불문**. 철자를 하나씩 쫓는 것(`-X PUT` vs `--method PUT` vs `-XPUT`)은 진 싸움이고, 모든 스테이지 env에 `GH_TOKEN=FACTORY_BOT_TOKEN`이 있는 이상 `required_status_checks`/`enforce_admins`를 끄는 것은 L0 자체를 끄는 일이다(그리고 아무 라벨도 코멘트도 나지 않는다). GET까지 막히는 오탐은 손실이 없다 — 보호 설정을 읽어야 하는 역할이 없다.
 - `ln`·`chmod`를 builder의 보호 경로 규칙에 더한다(SF-3): 둘 다 파일을 **쓰지 않고** 그 파일이 하는 일을 바꾼다(`ln -sf /tmp/evil .claude/settings.json`, `chmod -x .factory/bin/gates.js`). `mkdir`·`touch`는 더하지 않고 **등록부 표를 사실에 맞췄다** — 기존 파일의 내용도 동작도 바꾸지 못한다.
-- 등록부 표 위에 읽는 법을 못 박았다: 여기의 "차단"은 **명령의 어느 자리에 있든** 차단이고, **L2 deny는 이 표의 근거가 아니다**(접두 매칭이라 `$( … )`·체인 안에서는 무력하다). 실제 경계는 훅이다.
+- 등록부 표 위에 읽는 법을 못 박았다: **L2 deny는 이 표의 근거가 아니다**(접두 매칭이라 `$( … )`·체인 안에서는 무력하다). 실제 경계는 훅이다. (그때 함께 적은 "명령의 **어느 자리에 있든** 차단"은 **재리뷰에서 철회했다** — 아래.)
 
-**테스트**: `hooks.test.js`에 표 기반 두 쌍 — 위험 동사 19개 × 회피형 8가지(`out=$(…)`·`$(…)`·백틱·`;`·`&&`·`||`·`{ …; }`·파이프)를 전부 exit 2로 고정하고, 같은 글자들이 무해한 자리에 있는 정상 명령(`out=$(git status)`·`npm test && git commit`·`chmod +x scripts/run.sh`)은 exit 0으로 고정한다.
+**테스트**: `hooks.test.js`에 표 기반 두 쌍 — 위험 동사 21개 × 회피형 9가지(`out=$(…)`·`$(…)`·백틱·`;`·`&&`·`||`·`{ …; }`·파이프·`\`)를 전부 exit 2로 고정하고, 같은 글자들이 무해한 자리에 있는 정상 명령(`out=$(git status)`·`npm test && git commit`·`chmod +x scripts/run.sh`·`grep -rn "git merge" docs/`)은 exit 0으로 고정한다.
+
+**재리뷰(0452b5b) — 토큰 경계를 고친 뒤에도 남아 있던 네 자리, 그리고 등록부의 과대주장 한 줄.**
+재리뷰는 훅을 **실제로 실행해** 네 가지를 통과시켰다. 넷 다 동사가 명령줄에 그대로 있다(런타임 조립이 아니다) — 즉 MF-3과 **같은 고장이 한 단계 좁은 자리에서** 반복된 것이다.
+
+- **#1 백슬래시 이스케이프**: `\gh pr merge 5` · `\git push --force origin main` · `\rm -rf .factory/lib`. bash에서 `\`는 alias 확장만 끄고 동사를 그대로 실행하는데 경계 클래스에 `\`가 없었다. → 두 훅의 경계(`$A`/`$CMD`) 끝에 `\\?`를 붙였다. **따옴표는 넣지 않았다**: `grep -rn "git merge" docs/`·`git log --grep="git merge"`가 그 순간 오탐이 되고, 둘 다 정상 작업으로 고정돼 있다.
+- **#2 락 브랜치 삭제의 네 번째 철자**: `gh api -X DELETE …/git/refs/heads/factory/lock-7`. 앞의 세 철자는 전부 `git push`를 가정했다. 락 브랜치는 이슈 단위 상호배제의 **유일한** 근거이므로 문이 하나라도 열려 있으면 같은 이슈에 두 스테이지가 겹친다. → `gh api …/git/refs/heads/factory/lock` 규칙(브랜치 보호 규칙과 같은 이유로 **메서드 철자·호스트 접두 불문**). 읽기(GET)까지 막히는 오탐은 손실이 없다 — 락 상태는 `git ls-remote`로 본다.
+- **#3 레포 단위 라벨 조작**: `gh label delete|edit|create factory:*` · `gh label clone` · `gh api …/labels/factory:*` · `POST …/labels` 본문의 `factory:`. 이슈 한 건의 라벨만 막고 있었는데, 레포에서 라벨을 지우면 **모든 이슈에서 한 번에** 떨어진다 — 더 큰 우회였다. `gh label list`·`--search`는 읽기라 그대로 통과한다.
+- **#4 인터프리터 래퍼 / ANSI-C 인용**: `sh -c "gh pr merge 5"` · `bash -c '…'` · `eval "…"` · `$'gh' pr merge 5`. 재리뷰가 확인한 대로 이 저장소의 allow는 `Bash(*)`이고 `ci-settings*.json` 어디에도 `sh`/`bash`/`eval`/`python`/`node` deny가 없다 — "래퍼는 allow가 막는다"는 전제는 **거짓**이었고 훅이 유일한 층이다. → 규칙 표를 함수(`scan`)로 묶고, 명령 위치에 `sh|bash|zsh|dash|ksh|eval|exec|source|.`가 보이거나 `$'…'`/`$"…"`가 보이면 **따옴표를 벗긴 사본**에 같은 표를 한 번 더 돌린다(그 패스에서만 경계에 `$`를 더한다 — `$'gh'`가 `$gh`가 되므로). 표를 두 벌 만들지 않은 이유는 명백하다: 두 벌이면 반드시 한쪽이 뒤처진다.
+- **등록부의 과대주장**: "이 표의 '차단'은 **명령의 어느 자리에 있든** 차단"은 코드보다 강한 문장이었다(위 네 자리가 반례다). 읽는 법을 **덮는 자리의 열거**(토큰 경계 · 백슬래시 · 명령 위치 접두사 · 래퍼/ANSI-C 인용)와 **덮지 않는 자리의 열거**(런타임 조립 — 잔여 위험 #4)로 바꿨다. 등록부가 코드를 앞서가지 않게 하는 것이 MF-3이 제기된 이유 자체다.
+
+**비목표를 코드가 아니라 테스트로 고정한다**: 런타임 조립(`x=$(printf "gh pr merge 5"); $x` · `"$(printf gh) pr merge"` · `python3 -c "os.system('…')"` · `node -e "execSync('…')"`)은 `hooks.test.js`에서 **exit 0으로 고정**한다. "아직 안 막았다"와 "막지 않기로 했다"는 다르고, 뒤쪽만이 리뷰 가능한 결정이다.
 
 **하지 않은 것 — SF-1의 `persist-credentials: false` (알려진 한계)**: 스테이지의 `git push`는 **그 persisted credential로 나간다**. `claim.js`(락 브랜치 claim/release)와 `records-branch.js`(run 기록)는 `git push origin …`을 인자 없이 부르고, 토큰이 들어오는 경로는 `actions/checkout`이 심는 `http.extraheader` 하나뿐이다(`run-stage.js`의 `truncateReason` 주석이 이미 그 배선을 근거로 쓰여 있다 — 명시적 토큰 remote도 `gh auth setup-git`도 없다). 그래서 `persist-credentials: false`를 지금 켜면 **락 claim이 첫 push에서 죽는다** = 모든 스테이지가 멈춘다. 남는 노출은 이것이다: `.git/config`에 base64 토큰 헤더가 있고, 그 트리를 `Bash(*)`를 가진 builder가 읽을 수 있으며, 아티팩트는 `retention-days` 없이(90일 기본) 레포 read 권한자 누구나 받는다. 닫으려면 push 경로를 **명시적 토큰**(`git push https://x-access-token:$FACTORY_BOT_TOKEN@…` 또는 `gh auth setup-git`)으로 옮기고 그 뒤에 `persist-credentials: false` + 업로드 전 `.git/config` 스크럽 + `retention-days: 7`을 한꺼번에 거는 것이 맞다 — 그건 이 라운드의 범위(리뷰가 판정한 네 개의 must-fix)를 넘는 배선 변경이라 다음 라운드로 넘긴다.
 
