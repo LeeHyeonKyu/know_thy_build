@@ -702,6 +702,40 @@ test("factory-implement.js: a second rejection ends the stage rejected — no th
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
 });
 
+// ADR-020 KTB-23 — 데모 #2: builder는 `pg`가 필요한데 `package.json`을 못 건드렸고, 프롬프트는 그것을
+// PR 본문의 산문("Harness change needed")으로 쓰라고 시켰다. 그 산문을 읽는 기계는 없었다 —
+// 네 라운드·≈$67·머지 0건. 이제 그 요청은 handoff의 필드이고, L1이 그것을 읽어 라우팅한다.
+test("factory-implement.js: the builder asks for a protected-file change as a field, and it reaches the handoff (KTB-23)", async () => {
+  const harnessNeeded = [{ file: "package.json", change: "add dependency pg@^8 to dependencies", why: "dw1/dw3/dw4 need a Postgres client" }];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix({ harness_needed: harnessNeeded });
+    if (opts.agentType === "factory-verifier") return REJECTED;          // 테스트를 못 썼으니 당연히 reject다
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub, args: { issue: 42, context: ".factory/out/context.json" },
+  });
+  expect(result.harness_needed).toEqual(harnessNeeded);
+  expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
+  // 프롬프트가 필드를 시키고, 산문 제목은 더 이상 지시하지 않는다
+  const buildPrompt = byType(calls, "factory-builder")[0].prompt;
+  expect(buildPrompt).toContain("harness_needed");
+  expect(buildPrompt).toContain("{file: the exact path, change:");
+  expect(buildPrompt).not.toContain('"Harness change needed" heading and finish');
+});
+
+test("factory-implement.js: no harness_needed means the field is absent from the handoff, never an empty array (KTB-23)", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix({ harness_needed: [] });
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json" } });
+  expect("harness_needed" in result).toBe(false);                        // 빈 요청은 이슈를 공연히 주차시킨다
+});
+
 test("factory-implement.js: a head_sha that is not 40 hex re-spawns the builder exactly once, with the rule in the prompt", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return implLoaderFix();

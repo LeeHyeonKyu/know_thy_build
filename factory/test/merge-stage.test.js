@@ -851,3 +851,52 @@ test("(not a retry) gates BLOCKED behaves exactly as before — real graph trans
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
   expect(comment).not.toHaveBeenCalled();   // the record-only marker re-post path never runs
 });
+
+// ── (9) ADR-020 KTB-23 — 하네스 이슈가 머지되면 그것이 막고 있던 피처 이슈가 큐로 돌아온다 ────────
+test("(9) merging a harness issue unblocks the feature issue its body names (KTB-23)", async () => {
+  const { lines, record } = makeRecord();
+  const transitionOther = vi.fn(async ({ to }) => ({ ok: true, from: "factory:needs-info", to }));
+  const d = baseD({
+    issueBody: vi.fn(async () => "harness stuff\n\nBlocks: #2\n"),
+    transitionOther,
+  });
+  expect(await run(d, { record })).toBe(0);
+  expect(d.mergePr).toHaveBeenCalled();
+  expect(transitionOther).toHaveBeenCalledWith({ issue: 2, to: "factory:queue", reason: "harness issue #7 merged" });
+  expect(lines).toContain("merge: unblocked #2 — factory:needs-info → factory:queue");
+  // 그리고 그 전이는 그래프에 실제로 있다 — needs-info의 유일한 출구다
+  expect(canTransition("factory:needs-info", "factory:queue")).toBe(true);
+});
+
+test("(9) a body with several Blocks targets unblocks each; a plain issue's merge does nothing (KTB-23)", async () => {
+  const many = vi.fn(async ({ to }) => ({ ok: true, from: "factory:needs-info", to }));
+  await run(baseD({ issueBody: async () => "Blocks: #2, #5\nBlocks: #7\n", transitionOther: many }));
+  expect(many.mock.calls.map((c) => c[0].issue)).toEqual([2, 5]);        // #7은 자기 자신이라 건너뛴다
+  const none = vi.fn();
+  expect(await run(baseD({ issueBody: async () => "a normal issue body", transitionOther: none }))).toBe(0);
+  expect(none).not.toHaveBeenCalled();
+});
+
+test("(9) unblocking is best-effort — a refused or failing transition never undoes the merge (KTB-23)", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    issueBody: async () => "Blocks: #2\nBlocks: #3",
+    transitionOther: vi.fn(async ({ issue }) => {
+      if (issue === 2) return { ok: false, reason: "no factory state label on issue" };
+      throw new Error("gh down");
+    }),
+  });
+  expect(await run(d, { record })).toBe(0);                              // 머지는 이미 일어났다 — exit 0
+  expect(lines).toContain("merge: unblock #2 refused — no factory state label on issue");
+  expect(lines.some((l) => l.startsWith("merge: unblock #3 failed — "))).toBe(true);
+  // 본문 조회 자체가 실패해도 마찬가지다
+  const { lines: l2, record: r2 } = makeRecord();
+  expect(await run(baseD({ issueBody: async () => { throw new Error("boom"); }, transitionOther: vi.fn() }), { record: r2 })).toBe(0);
+  expect(l2.some((l) => l.startsWith("merge: blocked-issue lookup failed — "))).toBe(true);
+});
+
+test("(9) the deps are optional — an older wiring merges exactly as before (KTB-23)", async () => {
+  const d = baseD();                                                     // issueBody/transitionOther 없음
+  expect(await run(d)).toBe(0);
+  expect(d.closeIssue).toHaveBeenCalled();
+});

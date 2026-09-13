@@ -35,17 +35,24 @@ prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md
 # `claude -p`의 env에 넣는다 — 훅은 그 세션의 자식이라 그대로 물려받는다). 스펙 §5.2.1의 의도는
 # "인프라 작업은 factory가 하고 **사람이 그 diff를 머지한다**"인데, 그때까지 이 훅과 ci-settings.json이
 # `.factory/harness.toml`·러너 설정을 통째로 막아 승격 PR에 승격이 들어가지 못했다(도그푸딩 #15).
-# 그래서 이 플래그가 서면 **승격이 실제로 건드리는 테스트 인프라 파일만** 보호 목록에서 뺀다:
-# `.factory/harness.toml` · `vitest.config.*` · `playwright.config.*`
+# 그래서 이 플래그가 서면 **승격이 실제로 건드리는 테스트 인프라·빌드 설정 파일만** 보호 목록에서 뺀다:
+# `.factory/harness.toml` · `vitest.config.*` · `playwright.config.*` · `package.json` · `package-lock.json`
 # (`docker-compose.test.yml`·`.env.test`는 애초에 이 목록에 없어 늘 쓸 수 있었다).
+# `package.json`/락파일이 여기 들어온 것은 KTB-23이다: 데모 #2는 feature 001이 `pg` 패키지를 필요로 했는데
+# builder가 매니페스트를 못 건드려 네 라운드(≈$67)가 "Harness change needed" → verifier reject →
+# needs-human으로 끝났다. 그 요청은 이제 implement handoff의 `harness_needed`로 나가고 `factory:harness`
+# 이슈가 되는데, **그 이슈의 builder도 매니페스트를 못 쓰면 같은 벽에 다시 부딪힌다** — 의존성 추가가
+# 바로 그 이슈가 하려는 일이다. `.factory/package.json`(러너 자신의 매니페스트)만은 이름으로 다시 세워
+# 계속 막는다: 그것을 열면 게이트를 돌리는 런타임 자체를 바꿀 수 있다.
 # `.factory/`를 통짜로 여는 것이 아니라 나머지 하위 경로를 이름으로 다시 세운다 — `bin`·`lib`·`actions`·
 # `lessons`·`out`(게이트 판정 파일과 agents.jsonl이 산다: 이것이 열리면 판정을 위조할 수 있다)·
-# `ci-settings*`·`roles.toml`·`quarantine.toml`. `.factory/package.json`은 아래 `package\.json` 대안이
-# 그대로 잡는다. `.claude/**`·워크플로·CHARTER·package.json·tsconfig·eslint는 한 글자도 열리지 않는다.
+# `ci-settings*`·`roles.toml`·`quarantine.toml`·`package.json`.
+# `.claude/**`·워크플로·CHARTER·tsconfig·eslint는 한 글자도 열리지 않는다.
 # 이 목록은 `ci-settings-harness.json`의 deny와 같아야 한다(F9와 같은 이유: 훅과 L2가 갈라지면 Edit는
 # 막히는데 `echo >`는 통과한다). 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
+# **머지는 그대로 사람이다**: package.json은 `[protected].factory`에 남아 있어 L1이 자동 머지를 거부한다.
 if [ "${FACTORY_HARNESS_ISSUE:-}" = "1" ]; then
-  prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
+  prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml|package\.json)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
 fi
 
 # `.factory/out/qa/**`는 qa 리뷰어의 증거 디렉터리다(harness.toml `[protected].except`, F3) — 거기 쓰는 것만

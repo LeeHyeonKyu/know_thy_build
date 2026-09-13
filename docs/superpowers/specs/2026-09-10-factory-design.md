@@ -628,6 +628,19 @@ qa_artifacts = ".factory/out/qa/**"     # qa 리뷰어의 스크린샷·로그. 
 
 그런 PR의 **자동 머지를 거부하는 것은 merge 스테이지(L1)**다 — 둘 중 하나라도 걸리면 머지하지 않고 `factory:needs-human`으로 전이해 사람이 diff를 보고 직접 머지하게 한다. 이렇게 나누는 이유: `factory/integrity`는 branch protection에 등록된 **유일한** required context라(ADR-015 보강), 이 체크가 RED가 되면 봇만이 아니라 **사람도** 그 PR을 머지할 수 없다 — 그러면 설계가 전제하는 사람 머지 경로가 통째로 막힌다. KTB-5가 막고 있던 것은 retro-proposal PR·`factory:harness` 승격 PR·인프라 업그레이드 PR이고, KTB-6이 막고 있던 것은 **모든 역할 프롬프트 변경**이다 — `/know-thy-build:role`이 여는 PR 전부와, 에이전트 파일을 건드리는 모든 패키지 업그레이드.
 
+**보호 경로가 이슈를 막으면 그 자체가 하나의 작업이다(ADR-020 KTB-23).** builder가 `done_when`을 끝내려면
+보호 경로(새 의존성, 러너·린터 설정, 스크립트)를 바꿔야 한다고 판단하면, PR 본문에 산문으로 쓰지 않고
+implement handoff의 선택 필드 **`harness_needed: [{file, change, why}]`**에 적고 멈춘다 — 산문은 어떤
+기계도 읽지 않아, 데모 #2는 그 경로로 네 라운드(≈$67)를 "Harness change needed → verifier reject →
+needs-human → 사람이 재큐 → 같은 일"에 태웠다. L1(`run-stage`)이 그 필드를 보면 **verifier 판정보다 먼저**:
+① `factory:queue` + `factory:harness` 라벨의 이슈를 **하나** 만들고(제목 `harness: <change> — for #<n>`이
+dedupe 키다, 본문 마지막 줄이 `Blocks: #<n>`), ② 피처 이슈를 `factory:needs-info`로 주차한다(사유
+`waiting for harness issue #<m>` — needs-human이 아니다: 무엇이 필요한지 알고 있다. blocked도 아니다:
+판정 불가가 아니라 대기다), ③ merge 스테이지가 그 하네스 PR을 머지하면 본문의 `Blocks:`를 읽어 피처를
+`needs-info → queue`로 되돌린다. 하네스 이슈의 builder는 §5.2.1의 변형 경로로 매니페스트
+(`package.json`·`package-lock.json`)까지 쓸 수 있다 — 의존성 추가가 바로 그 이슈가 하려는 일이다.
+**머지는 그대로 사람이다**: `package.json`은 `[protected].factory`에 남아 L1이 자동 머지를 거부한다.
+
 `doctor`는 `[commands]`의 각 명령을 실제로 실행해 exit 0인지, `[gates].required`가 전부 `[commands]`에 있는지, `[protected].factory` glob이 실제 파일에 매치되는지, 훅 스크립트가 stdin JSON을 읽는지, `[test.env]`로 환경을 띄워 `[test].smoke` 세 개가 GREEN인지를 검사한다.
 
 ### 5.2 테스트 계약 — 테스트는 어디서 오고 어떻게 자라는가
@@ -646,7 +659,7 @@ gate의 실체는 `harness.toml`의 명령이 아니라 **main에 누적된 테�
 
 - `harness.toml [harness].maturity = "M0" | "M1" | "M2"`. `[gates].required`는 해당 성숙도까지의 명령만 요구하고, `doctor`는 선언된 것만 검사한다. CHARTER의 tier 표에서 `deep`이 필요한 tier는 M2 전까지 `full`로 강등되며 그 사실이 run 기록에 남는다.
 - **승격은 이슈다.** retro(또는 사람)가 "prisma schema가 생겼는데 M0"처럼 능력 부족을 감지하면 `factory:harness` 라벨의 이슈를 만든다. 이 이슈는 일반 파이프라인(plan→implement→review)을 타되, `harness.toml` 변경이 포함되므로 merge 스테이지(L1)가 자동 머지를 거부하고 **사람이 머지**한다(ADR-020 — `factory/integrity` 체크는 변조만 RED로 만들므로 사람의 머지는 막히지 않는다). 즉 인프라 작업은 factory가 하고, gate 정의의 변경만 사람이 승인한다(원칙 2·9와 일치).
-- **승격 이슈의 builder는 테스트 인프라 파일을 실제로 쓸 수 있다**(ADR-020 KTB-20). 앞 항목의 "인프라 작업은 factory가 한다"는 L2가 그것을 막고 있으면 성립하지 않는다 — 도그푸딩에서 retro가 만든 승격 이슈의 builder는 `.factory/harness.toml`도 컴포즈도 e2e 설정도 건드릴 수 없어(ci-settings.json의 `Edit/Write(.factory/**)` + `block-dangerous.sh`의 보호 경로 목록) "승격 PR"이 승격을 담지 못하고 전부 사람에게 미뤄졌다. 그래서 이슈에 `factory:harness` 라벨이 있으면 **implement 스테이지만** 변형 설정 파일 `.factory/ci-settings-harness.json`을 `claude -p --settings`로 싣고 builder의 env에 `FACTORY_HARNESS_ISSUE=1`을 세운다(`run-stage.js`가 진입 가드에서 이미 읽은 라벨로 판단한다). 열리는 것은 승격이 실제로 건드리는 테스트 인프라 파일뿐이다: `.factory/harness.toml`, `vitest.config.*`, `playwright.config.*`(`docker-compose.test.yml`·`.env.test`는 애초에 어느 보호 목록에도 없다). 나머지는 한 글자도 열리지 않는다 — `.factory/bin|lib|actions|lessons|out`·`.factory/ci-settings*`·`roles.toml`·`quarantine.toml`·`.claude/**`·`factory-*.yml` 워크플로·CHARTER·`package.json`·tsconfig·eslint. 훅과 설정 파일의 목록은 같아야 한다(F9와 같은 이유: 갈라지면 `Edit`는 막히는데 `echo >`는 통과한다). **merge 스테이지는 한 글자도 바뀌지 않는다** — 승격 PR은 여전히 보호 경로를 건드리므로 L1이 자동 머지를 거부하고 `factory:needs-human`으로 전이해 사람이 머지한다. 즉 이 변형이 옮기는 것은 "누가 diff를 만드는가"뿐이고, "누가 승인하는가"는 그대로 사람이다. 변형 파일이 없으면 그 이슈는 좁은 쪽으로 조용히 fallback하지 않고 `needs-human`에서 멈춘다(fallback은 "승격 없는 승격 PR"을 그대로 재현한다). `doctor`의 `settings.ci-harness`가 파일 존재와 deny 목록을 검사한다.
+- **승격 이슈의 builder는 테스트 인프라 파일을 실제로 쓸 수 있다**(ADR-020 KTB-20). 앞 항목의 "인프라 작업은 factory가 한다"는 L2가 그것을 막고 있으면 성립하지 않는다 — 도그푸딩에서 retro가 만든 승격 이슈의 builder는 `.factory/harness.toml`도 컴포즈도 e2e 설정도 건드릴 수 없어(ci-settings.json의 `Edit/Write(.factory/**)` + `block-dangerous.sh`의 보호 경로 목록) "승격 PR"이 승격을 담지 못하고 전부 사람에게 미뤄졌다. 그래서 이슈에 `factory:harness` 라벨이 있으면 **implement 스테이지만** 변형 설정 파일 `.factory/ci-settings-harness.json`을 `claude -p --settings`로 싣고 builder의 env에 `FACTORY_HARNESS_ISSUE=1`을 세운다(`run-stage.js`가 진입 가드에서 이미 읽은 라벨로 판단한다). 열리는 것은 승격이 실제로 건드리는 테스트 인프라·빌드 설정 파일뿐이다: `.factory/harness.toml`, `vitest.config.*`, `playwright.config.*`, 그리고 `package.json`·`package-lock.json`(`docker-compose.test.yml`·`.env.test`는 애초에 어느 보호 목록에도 없다). 매니페스트가 여기 들어온 것은 ADR-020 KTB-23이다 — 의존성 추가가 바로 하네스 이슈가 하려는 일인데 그것이 막혀 있으면 데모 #2의 벽(§5.1)이 하네스 이슈 안에서 그대로 재현된다. 나머지는 한 글자도 열리지 않는다 — `.factory/bin|lib|actions|lessons|out`·`.factory/ci-settings*`·`roles.toml`·`quarantine.toml`·**`.factory/package.json`**(러너 자신의 매니페스트: 열면 게이트를 돌리는 런타임을 바꿀 수 있다)·`.claude/**`·`factory-*.yml` 워크플로·CHARTER·tsconfig·eslint. 훅과 설정 파일의 목록은 같아야 한다(F9와 같은 이유: 갈라지면 `Edit`는 막히는데 `echo >`는 통과한다). **merge 스테이지는 한 글자도 바뀌지 않는다** — 승격 PR은 여전히 보호 경로를 건드리므로 L1이 자동 머지를 거부하고 `factory:needs-human`으로 전이해 사람이 머지한다. 즉 이 변형이 옮기는 것은 "누가 diff를 만드는가"뿐이고, "누가 승인하는가"는 그대로 사람이다. 변형 파일이 없으면 그 이슈는 좁은 쪽으로 조용히 fallback하지 않고 `needs-human`에서 멈춘다(fallback은 "승격 없는 승격 PR"을 그대로 재현한다). `doctor`의 `settings.ci-harness`가 파일 존재와 deny 목록을 검사한다.
 - 브라운필드는 `/project` evolve 모드가 현재 코드에서 성숙도를 판정해 M1·M2로 바로 시작한다.
 - **빈도**: M0→M1→M2는 프로젝트 생애에 최대 2번. 그 외 능력 추가(새 외부 의존성의 fake 서버, 새 도구 설정, contract test 같은 새 레벨)가 그린필드 첫 달 2~4건, 이후 월 1건 이하로 예상. retro의 감지 규칙 초기값 세 가지: 매니페스트에 외부 SDK가 추가됐는데 `[test.fakes]`에 없음 / DB 스키마가 있는데 M0 / HTTP 라우트가 있는데 M1.
 

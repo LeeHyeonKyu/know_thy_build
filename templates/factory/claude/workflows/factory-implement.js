@@ -55,6 +55,19 @@ const BUILD = {
     summary: { type: 'string' },
     tests_added: { type: 'array', items: { type: 'string' } },
     commits: { type: 'array', items: { type: 'string' } },
+    // ADR-020 KTB-23 — optional. The one way the builder can say "I cannot finish this without a
+    // change to a protected file". It used to say that in PR prose ("Harness change needed"), which
+    // no machine read: the verifier rejected the missing tests, the stage landed on needs-human, and
+    // a human re-queue replayed the whole thing (demo #2: four rounds, ~$67, zero merges). As a
+    // field it routes — run-stage opens ONE `factory:harness` issue and parks this one on needs-info.
+    harness_needed: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['file', 'change', 'why'],
+        properties: { file: { type: 'string' }, change: { type: 'string' }, why: { type: 'string' } },
+      },
+    },
     rework_response: {
       type: 'object',
       required: ['responses'],
@@ -270,11 +283,18 @@ const buildRules =
   `7. Return head_sha = the output of \`git rev-parse HEAD\` **after** the push: 40 lowercase hex ` +
   `characters, not a short sha and not a branch name.\n\n` +
   `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
-  `carrying such a change is never auto-merged — the merge stage hands it to a human instead. ` +
-  `If the change genuinely needs a new dependency, a new script, or ` +
-  `a runner/linter config change, write what is needed and why into the PR body under a ` +
-  `"Harness change needed" heading and finish the issue without it — a human opens a \`factory:harness\` ` +
-  `issue from that. Do NOT \`npm install\`, edit a lockfile, or otherwise work around the deny.\n` +
+  `carrying such a change is never auto-merged — the merge stage hands it to a human instead.\n` +
+  `8. If the change genuinely needs one of those files changed — a new dependency, a new script, a ` +
+  `runner/linter config change — fill \`harness_needed\` in your output, one entry per file: ` +
+  `{file: the exact path, change: what must change (e.g. "add dependency pg@^8 to dependencies"), ` +
+  `why: which done_when ids need it and why it cannot be done otherwise}. Then STOP: commit and push ` +
+  `whatever is genuinely finished, open (or update) the draft PR as in rule 6, and return. Do not ` +
+  `write the request as PR prose — prose is not a signal, and a "Harness change needed" heading is ` +
+  `read by nobody. The factory opens ONE \`factory:harness\` issue from your entries and parks this ` +
+  `issue until that lands, so a partial-but-honest answer costs one round; working around the deny ` +
+  `(\`npm install\`, editing a lockfile, a shell redirection) is blocked by a hook and, if it got ` +
+  `through, would only be refused at merge. Leave \`harness_needed\` out entirely when you do not ` +
+  `need one — an empty request parks the issue for nothing.\n` +
   `Never write a credential, token or key into the repository, a test fixture, or a log line.`;
 
 const reworkBlock = mustFix.length > 0
@@ -399,6 +419,12 @@ return {
   summary: built ? built.summary : undefined,
   tests_added: built ? built.tests_added : undefined,
   commits: built ? built.commits : undefined,
+  // KTB-23: only carried when the builder actually asked for something — an empty array would park
+  // the issue on needs-info for nothing (run-stage keys on "non-empty", but the handoff should not
+  // carry a field that says "I need nothing").
+  ...(built && Array.isArray(built.harness_needed) && built.harness_needed.length > 0
+    ? { harness_needed: built.harness_needed }
+    : {}),
   verifier: verdict
     ? { verdict: verdict.verdict, findings: verdict.findings || [], prove_test_read: verdict.prove_test_read === true }
     : {},

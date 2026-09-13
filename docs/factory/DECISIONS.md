@@ -1048,7 +1048,7 @@ GitHub Actions의 `schedule`은 원래 best-effort다(부하가 걸리면 건너
 `yml-lint.test.js` 2건(모든 스테이지+retro가 Sweep으로 끝난다, 린트 규칙).
 
 (이후 항목은 dogfood 진행에 따라 추가)
-### ⑤ 권한·훅 — KTB-13·14·20·21
+### ⑤ 권한·훅 — KTB-13·14·20·21·23
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
 
@@ -1172,6 +1172,73 @@ GitHub Actions의 `schedule`은 원래 best-effort다(부하가 걸리면 건너
 **알려진 한계**: re-up은 **compose 서비스**만 본다(`env.seed`·`env.app_start`가 죽어 있으면 이 방어선이 못 잡는다 — 그건 이미 `envUp`의 다른 단계이고 이 판결의 범위 밖이다). 그리고 이것은 "게이트 직전 한 번"의 스냅샷이다 — 게이트가 도는 **도중에** 무언가 env를 내리면(예: 같은 컨테이너를 공유하는 다른 잡) 여전히 못 잡는다. 실제 원인(리뷰어가 env를 내림)은 1의 훅이 막으므로, 2는 정말로 **다른 경로**로 죽은 env에 대한 마지막 방어선이다.
 
 **영향**: `factory/hooks/deny-all-writes.sh`(+ 설치본), `factory/hooks/block-dangerous.sh`(+ 설치본), `factory/lib/gates.js`(`reUpTestEnv`, `runStageGates`), `factory/bin/run-stage.js`(`gatesNote`에 `test-env: re-up …` 추가). 테스트: `hooks.test.js`(docker teardown/up 매트릭스 2건), `gates.test.js`(`reUpTestEnv` 2건 + `runStageGates` BLOCKED/성공 2건), `run-stage.test.js`(run 기록 문구 3건). `docs/factory/dogfood/2026-09-12-demo.md`(#18 review 행).
+
+#### KTB-23 — 하네스가 막고 있으면 needs-human 루프가 아니라 `factory:harness` 이슈다
+
+**질문**: 데모 #2(feature 001, "Create note")는 `done_when` 셋(dw1·dw3·dw4)이 `pg` 패키지를 요구했다.
+builder는 `package.json`을 편집할 수 없다 — 훅과 L2가 그것을 막는다(**의도된 설계다**: 게이트 명령이
+매니페스트를 통해 해석되므로 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다). 프롬프트가 시킨 대응은
+"PR 본문에 **Harness change needed** 제목으로 쓰고 그것 없이 마무리한다 — 사람이 `factory:harness`
+이슈를 연다"였다. 그런데 **그 산문을 읽는 기계가 아무 데도 없다**. 실제로 일어난 일:
+
+```
+implement → gates GREEN 4/4 → verifier: rejected("done_when에 대응하는 테스트가 없다")
+         → transition refused: verifier rejected → factory:needs-human
+사람이 재큐 → 같은 일. 네 라운드. ≈$67. 머지 0건.
+```
+
+verifier의 판정은 **옳다**(`pg` 없이는 그 테스트를 쓸 수 없으니 테스트가 없는 게 맞다). 틀린 것은
+그다음이다: 막힌 원인이 코드가 아니라 하네스인데, 라우팅이 "사람이 판단하라"로 갔고 사람이 할 수 있는
+유일한 조치(재큐)가 같은 벽을 다시 만든다. 산문은 신호가 아니다.
+
+**결정**: 요청을 **필드**로 만들고, L1이 그것을 라우팅한다.
+
+1. **스키마** — `implement.v1`(`factory/lib/schemas.js`)에 **선택** 필드 `harness_needed: [{file, change, why}]`.
+   없는 것이 정상이고, 있으면 세 문자열을 다 갖춰야 한다. 워크플로의 `BUILD` 스키마와 builder 역할
+   파일(`## Lens` 6, `## Output`, 나쁜 발견 예시)이 같은 필드를 시킨다 — "Harness change needed" 산문
+   지시는 사라졌다. 요청이 없으면 필드를 **아예 싣지 않는다**(빈 배열은 이슈를 공연히 주차시킨다).
+2. **이슈 하나** — `run-stage`가 검증된 implement handoff에서 비어 있지 않은 `harness_needed`를 보면
+   `factory:queue` + `factory:harness` 라벨의 이슈를 **하나** 만든다(제목 `harness: <change> — for #<n>`,
+   본문은 항목 표 + `Blocks: #<n>`). 제목이 dedupe 키다 — 열린 harness 이슈 중 같은 제목이 있으면
+   그것을 재사용한다(rework 라운드가 같은 요청을 또 내놓아도 이슈가 쌓이지 않는다). queue 라벨 자체가
+   triage의 진입 이벤트이므로 따로 dispatch하지 않는다.
+3. **피처는 주차한다** — 그 이슈는 `factory:needs-info`로 간다(사유 `waiting for harness issue #<m>`).
+   `needs-human`이 아니다: 무엇이 필요한지 정확히 알고 있고, 그것이 들어오면 다시 돌 수 있다.
+   `blocked`도 아니다: 판정 불가가 아니라 **대기**이고, sweeper가 30분 뒤 재점화하면 안 된다.
+   그래서 그래프에 엣지 하나를 더했다 — `factory:in-progress → factory:needs-info`(복귀 경로
+   `needs-info → queue`는 이미 있었다). **verifier 판정보다 먼저 본다**: 위 관측이 그 이유다.
+4. **복귀는 머지의 결과다** — merge 스테이지가 PR을 머지한 뒤(단계 9) 방금 머지한 이슈의 본문에서
+   `Blocks: #<n>`을 읽어 그 이슈를 `needs-info → queue`로 되돌린다(사유 `harness issue #<m> merged`).
+   retro가 아니라 merge인 이유: retro는 머지 N건마다 도는 학습 잡이라 "이번 머지"와 1:1이 아니고
+   (경량 회차는 이 판단을 아예 하지 않는다), 차단 해제는 하네스가 들어온 **그 순간**의 사실이다.
+   본문을 쓰는 쪽과 읽는 쪽이 같은 모듈(`factory/lib/harness-request.js`)이라 두 문법이 갈라질 수 없다.
+   전부 best-effort다 — 머지는 이미 일어났고 되돌릴 것이 없다.
+5. **하네스 이슈의 builder는 매니페스트를 쓸 수 있어야 한다** — KTB-20의 변형 경로를 그대로 쓰되,
+   `ci-settings-harness.json`과 `block-dangerous.sh`의 좁힌 목록에서 `package.json`·`package-lock.json`을
+   뺀다. 그러지 않으면 **하네스 이슈 안에서 데모 #2의 벽이 그대로 재현된다**: 의존성 추가가 바로 그
+   이슈가 하려는 일인데 그것이 막혀 있다. `.factory/package.json`(러너 자신의 매니페스트)만은 이름으로
+   다시 세워 계속 막는다 — 그것을 열면 게이트를 돌리는 런타임 자체를 바꿀 수 있다.
+   **머지는 그대로 사람이다**: `package.json`은 `[protected].factory`에 남아 있어 L1이 자동 머지를
+   거부하고 `needs-human`으로 넘긴다. 이 변형이 옮기는 것은 "누가 diff를 만드는가"뿐이다(KTB-20과
+   같은 문장).
+
+**fail closed 지점**: 하네스 이슈를 만들지 못하면(gh 실패) 피처를 **주차하지 않는다** — 주차는
+"누군가 저 이슈를 처리하면 돌아온다"는 약속인데, 그 이슈가 없으면 이 이슈는 아무도 보지 않는
+needs-info에 영원히 앉는다. 그때는 `needs-human`이다(사유에 실패 원인을 싣는다). 마찬가지로
+`ensureHarnessIssue`는 열린 이슈 목록 조회가 실패하면 만들지 않고 throw한다 — 중복 이슈를 여는 것보다
+사람이 보는 편이 낫다.
+
+**영향**: `factory/lib/harness-request.js`(신규 — 제목·본문·`Blocks:` 파싱·dedupe, 순수 함수),
+`factory/lib/schemas.js`(`implement.v1`의 선택 필드), `factory/lib/labels.js`(`in-progress → needs-info`
+엣지), `factory/bin/run-stage.js`(implement 분기 + `ensureHarnessIssue`·`issueBody`·`transitionOther` dep),
+`factory/lib/merge-stage.js`(단계 9), `templates/factory/claude/workflows/factory-implement.js`
+(`BUILD.harness_needed`·규칙 8·반환), `templates/factory/claude/agents/factory-builder.md`(Lens 6·Output·예시),
+`templates/factory/factory/ci-settings-harness.json`·`factory/hooks/block-dangerous.sh`(매니페스트 개방).
+테스트: `harness-request.test.js`(신규 8건 — 필드 정제·제목 dedupe·본문 왕복·`parseBlocks`·이슈 하나·
+fail closed·스키마), `run-stage.test.js`(4건 — 주차·재사용·생성 실패·비-implement/빈 요청),
+`merge-stage.test.js`(4건 — 해제·다중 대상·best-effort·dep 없는 옛 배선), `workflows.test.js`(2건),
+`hooks.test.js`·`templates.test.js`(매니페스트 개방 + `.factory/package.json`은 그대로 막힘).
+스펙 §5.1 한 문단, 데모 로그 #2 행.
 
 ### ⑥ 관찰 — O1~O12, O14·O15, G1
 

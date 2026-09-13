@@ -138,7 +138,11 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
                   "cp /tmp/h.toml .factory/harness.toml", "mv /tmp/h.toml .factory/harness.toml",
                   "python3 -c \"open('.factory/harness.toml','w').write('x')\"",
                   "cat t | tee vitest.config.js", "sed -i '' 's/a/b/' playwright.config.ts",
-                  "echo x > playwright.config.js", "git checkout HEAD~1 -- .factory/harness.toml"];
+                  "echo x > playwright.config.js", "git checkout HEAD~1 -- .factory/harness.toml",
+                  // KTB-23: 의존성 추가가 바로 하네스 이슈가 하려는 일이다 — 매니페스트를 못 쓰면
+                  // 데모 #2의 벽에 다시 부딪힌다(머지는 여전히 사람이다 — L1이 자동 머지를 거부한다).
+                  "npm pkg set dependencies.pg=^8 > package.json", "echo '{}' > package.json",
+                  "sed -i 's/1.0.0/1.0.1/' package-lock.json", "cp /tmp/lock package-lock.json"];
   for (const c of opened) {
     expect((await bash("block-dangerous.sh", cmd(c), undefined, harness)).code, `with flag: ${c}`).toBe(0);
     expect((await bash("block-dangerous.sh", cmd(c))).code, `without flag: ${c}`).toBe(2);   // 평범한 이슈는 그대로 막힌다
@@ -152,7 +156,7 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
                         "echo x > .factory/actions/setup/action.yml",
                         "echo x > .claude/settings.json", "rm -rf .claude/agents",
                         "echo y >> .github/workflows/factory-implement.yml",
-                        "cat foo | tee docs/factory/CHARTER.md", "echo '{}' > package.json",
+                        "cat foo | tee docs/factory/CHARTER.md",
                         "cat foo | tee tsconfig.json", "mv /tmp/evil eslint.config.js",
                         "gh pr merge 5", "git push --force origin x",
                         "gh issue edit 7 --add-label factory:approved"];

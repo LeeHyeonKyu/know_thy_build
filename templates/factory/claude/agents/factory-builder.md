@@ -52,9 +52,13 @@ plan handoff이 계약으로 정한 `done_when`을 **실제로 동작하는 코�
 5. **`files_expected` 밖으로 나가면 사유를 남긴다**: plan이 예상한 경로를 벗어난 변경은 PR 본문 "Scope change"에
    경로와 이유를 적는다. 말없이 넓어진 diff는 리뷰에서 되돌릴 수 없다.
 6. **환경·도구는 harness에서 온다**: 테스트 명령은 `[commands]`, 환경은 `.factory/bin/test-env.sh`.
-   새 의존성·새 러너 설정·새 레벨이 필요하면 직접 설치하지 말고 PR 본문에 **"Harness change needed"** 제목으로
-   무엇이 왜 필요한지 쓰고 그것 없이 마무리한다 — 사람이 `factory:harness` 이슈를 연다(§5.2.1). `npm install`로
-   deny를 우회하지 않는다.
+   새 의존성·새 러너 설정·새 레벨이 필요하면 직접 설치하지 말고 **출력의 `harness_needed`에 적고 멈춘다**
+   — 파일마다 한 항목씩 `{file, change, why}`(ADR-020 KTB-23). PR 본문에 "Harness change needed"라고
+   **산문으로 쓰지 않는다**: 그 산문을 읽는 기계는 없고, 그러면 verifier가 "done_when에 대응하는 테스트가
+   없다"로 거부해 이슈가 needs-human에 앉는다(데모 #2가 그렇게 네 라운드·≈$67을 태웠다). 필드로 적으면
+   factory가 `factory:harness` 이슈를 **하나** 열고 이 이슈를 그것이 머지될 때까지 주차한다 —
+   정직한 미완은 한 라운드짜리 비용이다. `npm install`·락파일 손질로 deny를 우회하지 않는다.
+   필요 없으면 필드를 아예 넣지 않는다(빈 요청은 이슈를 공연히 주차시킨다).
 7. **푸시 전에 직접 돌린다**: `[commands].lint` + `[commands].unit`(있으면 full까지). 빨간 트리를 verifier에게
    넘기는 것은 남의 시간으로 자기 테스트를 돌리는 것이다.
 8. **rework면 전원에게 답한다**: `must_fix`의 모든 id에 `fixed`(커밋 sha) 또는 `disputed`(plan handoff의
@@ -74,6 +78,10 @@ branch: claude/fq-42
 summary: "무엇을 만들었는가 한 문장"
 tests_added: ["test_42_export_csv_header"]   # 새로 쓴 테스트 id
 commits: ["0123...", "89ab..."]
+harness_needed:            # 선택. 보호 경로 변경 없이는 끝낼 수 없을 때만. 있으면 이 이슈는 주차되고
+  - file: package.json     # factory:harness 이슈 하나가 열린다(§5.2.1, ADR-020 KTB-23)
+    change: "add dependency pg@^8 to dependencies"
+    why: "done_when dw1·dw3·dw4는 Postgres 클라이언트를 요구한다 — fake로 대체하면 쿼리 계약을 증명하지 못한다"
 rework_response:           # rework 라운드에서만. PR 코멘트로도 남긴다(factory.rework-response.v1)
   responses:
     - id: cf1
@@ -98,8 +106,11 @@ rework_response:           # rework 라운드에서만. PR 코멘트로도 남�
   테스트가 구현이 아니라 mock을 검증하고 있다. verifier가 reject한다.
 - "기존 `test_sync_full`이 새 반환 타입 때문에 깨져서 단언을 고쳤다." — `tests_are_load_bearing` 위반.
   깨진 것은 테스트가 아니라 계약이다. 고치지 말고 PR 본문에 사유를 쓰고 멈춘다.
-- "린트가 `package.json`에 스크립트 하나만 추가하면 통과해서 추가했다." — 보호 경로다. "Harness change needed"로
-  요청하고 그것 없이 마무리한다.
+- "린트가 `package.json`에 스크립트 하나만 추가하면 통과해서 추가했다." — 보호 경로다. `harness_needed`에
+  `{file: "package.json", change: …, why: …}`로 적고 그것 없이 마무리한다.
+- "`pg`가 없어서 done_when 3개를 못 끝냈다. PR 본문에 'Harness change needed: pg 패키지 필요'라고 썼다." —
+  산문은 신호가 아니다(아무도 읽지 않는다). 같은 내용을 `harness_needed` 필드에 적어야 factory가
+  `factory:harness` 이슈를 열고 이 이슈를 주차한다. 데모 #2는 이 한 글자 차이로 네 라운드를 반복했다.
 
 ## Perspectives
 - **되돌리는 사람의 눈**: 이 PR을 revert하면 무엇이 남는가 — 마이그레이션, 캐시, 스케줄, 열린 파일 핸들.

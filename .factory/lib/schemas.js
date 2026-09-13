@@ -58,6 +58,14 @@ const SCHEMAS = {
     const v = req(e, o, "verifier", "object"); if (v) oneOf(e, v, "verdict", ["accepted", "accepted-with-reservations", "rejected"], "verifier");
     oneOf(e, o, "orchestration", ["workflow", "agent"]);
     oneOf(e, o, "guarantee", ["structural", "verified"]);
+    // ADR-020 KTB-23 — **선택** 필드. 있으면 배열이어야 하고 각 항목은 {file, change, why} 문자열
+    // 셋을 다 갖춰야 한다. builder가 보호 경로 변경 없이는 done_when을 끝낼 수 없을 때 여기에
+    // 적는다("Harness change needed"라는 산문 대신) — L1이 이것을 읽어 `factory:harness` 이슈를
+    // 열고 이 이슈를 주차한다. 없는 것이 정상이므로 `req`가 아니다.
+    if (o.harness_needed !== undefined && o.harness_needed !== null) {
+      const hn = req(e, o, "harness_needed", "array");
+      (hn || []).forEach((h, i) => { for (const k of ["file", "change", "why"]) req(e, h, k, "string", `harness_needed[${i}]`); });
+    }
   },
   "review.v1"(o, e) {
     req(e, o, "issue", "number"); req(e, o, "pr", "number");

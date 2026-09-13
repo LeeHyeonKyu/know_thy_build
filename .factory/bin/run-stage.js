@@ -17,6 +17,7 @@ import { claim, release } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
+import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
@@ -413,6 +414,42 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       v.data.must_fix = agg.must_fix;
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
+    /**
+     * ADR-020 KTB-23 — builder가 "보호 경로를 고쳐야 끝낼 수 있다"고 말했다. 그 말은 이제 PR 본문의
+     * 산문이 아니라 handoff의 필드(`harness_needed[]`)이고, 여기가 그것을 읽는 유일한 자리다.
+     *
+     * **verifier 판정보다 먼저 본다.** 데모 #2가 죽은 방식이 그것이다: 게이트는 GREEN인데 verifier가
+     * "done_when에 대응하는 테스트가 없다"로 reject했고(맞는 판정이다 — `pg` 없이는 그 테스트를 쓸 수
+     * 없었다), 등급은 needs-human이 됐고, 사람이 재큐하면 같은 일이 또 일어났다. 네 라운드, ≈$67,
+     * 머지 0건. 막힌 원인이 코드가 아니라 **하네스**일 때 다음 걸음은 사람의 판단이 아니라 하네스
+     * 이슈다 — 그래서 verifier가 무엇이라 했든 이 분기가 먼저다.
+     *
+     * handoff는 그대로 남긴다(이 라운드가 무엇을 했고 무엇이 막았는지는 기록이다). 이슈 생성이
+     * 실패하면 주차하지 않는다 — 주차는 "누군가 저 이슈를 처리하면 돌아온다"는 약속인데, 그 이슈가
+     * 없으면 이 이슈는 아무도 보지 않는 needs-info에 영원히 앉는다. 그때는 needs-human이다.
+     */
+    if (stage === "implement" && d.ensureHarnessIssue) {
+      const needed = harnessNeeded(v.data);
+      if (needed.length) {
+        await d.writeHandoff({ stage, data: v.data, gates });
+        let created;
+        try { created = await d.ensureHarnessIssue({ entries: needed, pr: v.data.pr ?? null }); }
+        catch (e) {
+          const reason = `harness change needed but the factory:harness issue could not be created — ${e?.message || e}`;
+          const t = await d.transition({ to: "factory:needs-human", reason });
+          record([`harness: FAIL — ${reason}`, ...refusal(t), ...gatesNote, usage]);
+          return 2;
+        }
+        const t = await d.transition({ to: "factory:needs-info", reason: parkedReason(created.issue) });
+        record([
+          "verify: ok",
+          `harness: ${created.created ? "opened" : "reusing"} factory:harness issue #${created.issue} — ${needed.map((h) => h.file).join(", ")}`,
+          ...(t.ok ? [`transition: ${t.to}`] : refusal(t)),
+          ...gatesNote, usage,
+        ]);
+        return t.ok ? 0 : 2;
+      }
+    }
     await d.writeHandoff({ stage, data: v.data, gates });
     const t = await d.transition({ to: nextState(stage, v.data), data: v.data });
     record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
@@ -765,6 +802,8 @@ async function main() {
      */
     countHandoffs: async (s) => parseHandoffs(commentsSinceRequeue(await gh.comments(issue))).filter((h) => h.stage === s && h.issue === issue).length,
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
+    /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
+    ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),
     claudeP: async (_ctx, { harnessIssue = false } = {}) => {
       const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
       const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, harnessIssue }) });
@@ -852,6 +891,10 @@ async function main() {
     prReady: (pr) => gh.prReady(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
+    /** merge 전용(KTB-23): 이 이슈의 본문 — `Blocks: #<n>`이 있으면 하네스 이슈였다는 뜻이다. */
+    issueBody: async () => (await gh.issue(issue)).body,
+    /** merge 전용(KTB-23): **다른** 이슈의 전이(위 `transition`은 이 이슈에 묶여 있다). */
+    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage }),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
     /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
      * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */

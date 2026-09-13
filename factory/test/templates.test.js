@@ -154,19 +154,27 @@ test("ci-settings-harness.json opens exactly the test-infra files a promotion to
   const baseDeny = new Set(base.permissions.deny);
   const deny = new Set(hv.permissions.deny);
 
-  // ① 열린 것: harness.toml + 러너 설정 파일. `.factory/**` 통짜 deny도 같이 사라진다(대신 ③).
+  // ① 열린 것: harness.toml + 러너 설정 파일 + 매니페스트. `.factory/**` 통짜 deny도 같이 사라진다(대신 ③).
+  // package.json/락파일은 KTB-23이 더했다 — 의존성 추가가 바로 하네스 이슈가 하려는 일이라, 그것을
+  // 막으면 데모 #2의 벽("Harness change needed" → verifier reject → needs-human)이 하네스 이슈 안에서
+  // 그대로 재현된다. 머지는 그대로 사람이다(`[protected].factory`가 package.json을 계속 들고 있다).
   for (const d of ["Edit(.factory/**)", "Write(.factory/**)",
     "Edit(vitest.config.*)", "Write(vitest.config.*)",
-    "Edit(playwright.config.*)", "Write(playwright.config.*)"]) {
+    "Edit(playwright.config.*)", "Write(playwright.config.*)",
+    "Edit(package.json)", "Write(package.json)",
+    "Edit(package-lock.json)", "Write(package-lock.json)"]) {
     expect(baseDeny.has(d), `base must deny ${d}`).toBe(true);
     expect(deny.has(d), `harness variant must NOT deny ${d}`).toBe(false);
   }
+  // 단 `.factory/package.json`(러너 자신의 매니페스트)은 이름으로 다시 막힌다 — 그것을 열면 게이트를
+  // 돌리는 런타임 자체를 바꿀 수 있다.
+  for (const d of ["Edit(.factory/package.json)", "Write(.factory/package.json)"]) expect(deny.has(d), d).toBe(true);
   // docker-compose.test.yml·.env.test는 어느 목록에도 없다 — 이미 쓸 수 있으므로 뺄 것이 없다.
   for (const d of [...baseDeny]) expect(d, d).not.toMatch(/docker-compose|\.env\.test/);
 
   // ② 나머지는 한 줄도 느슨해지지 않았다 — 변형은 base의 **부분집합**에 ③의 추가 deny만 얹는다.
   for (const d of baseDeny) {
-    if (/\.factory\/\*\*|vitest\.config|playwright\.config/.test(d)) continue;
+    if (/\(\.factory\/\*\*\)|vitest\.config|playwright\.config|\((package\.json|package-lock\.json)\)/.test(d)) continue;
     expect(deny.has(d), `harness variant dropped ${d}`).toBe(true);
   }
 

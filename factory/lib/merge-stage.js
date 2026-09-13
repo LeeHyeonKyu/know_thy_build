@@ -3,6 +3,7 @@ import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } 
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
+import { parseBlocks } from "./harness-request.js";
 
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
@@ -458,6 +459,29 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: issue #${issue} closed via PR #${pr}`]);
   } catch (e) {
     record([`merge: issue close failed — ${e?.message || e}`]);
+  }
+
+  // (9) ADR-020 KTB-23 — 방금 머지한 것이 **하네스 이슈**였다면, 그것이 막고 있던 피처 이슈를 푼다.
+  // 연결고리는 하네스 이슈 본문의 `Blocks: #<n>` 한 줄뿐이다(`lib/harness-request.js`가 그 줄을 쓰고
+  // 이 자리가 읽는다 — 같은 모듈이라 두 문법이 갈라질 수 없다). 평범한 이슈의 머지는 그런 줄이
+  // 없으므로 아무 일도 하지 않는다.
+  //
+  // **retro가 아니라 merge에서 하는 이유**: retro는 머지 N건마다 도는 학습 잡이라 "이번 머지"와 1:1이
+  // 아니다(경량 회차는 아예 이 판단을 하지 않는다). 차단 해제는 머지 그 자체의 결과여야 한다 —
+  // 하네스가 들어온 순간이 피처가 다시 돌 수 있게 된 순간이다.
+  //
+  // 전부 best-effort다: 머지는 이미 일어났고 되돌릴 것이 없다. 전이가 거부돼도(사람이 그 사이 라벨을
+  // 옮겼을 수 있다) 기록만 남기고 exit 0을 유지한다 — `needs-info → queue`는 사람도 `:unstick`으로 할 수 있다.
+  if (d.issueBody && d.transitionOther) {
+    try {
+      for (const blocked of parseBlocks(await d.issueBody())) {
+        if (blocked === issue) continue;                 // 자기 자신을 가리키는 본문은 무시한다
+        try {
+          const t = await d.transitionOther({ issue: blocked, to: "factory:queue", reason: `harness issue #${issue} merged` });
+          record([t.ok ? `merge: unblocked #${blocked} — ${t.from} → ${t.to}` : `merge: unblock #${blocked} refused — ${t.reason}`]);
+        } catch (e) { record([`merge: unblock #${blocked} failed — ${e?.message || e}`]); }
+      }
+    } catch (e) { record([`merge: blocked-issue lookup failed — ${e?.message || e}`]); }
   }
 
   return 0;

@@ -62,7 +62,12 @@ export const TRANSITIONS = new Map([
   ["factory:needs-info", new Set(["factory:queue"])],
   ["factory:ready", new Set(["factory:planned", "factory:needs-human", "factory:blocked"])],
   ["factory:planned", new Set(["factory:in-progress", "factory:needs-human"])],
-  ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:planned"])],   // sweeper 재큐
+  // in-progress → needs-info(ADR-020 KTB-23): builder가 보호 경로 변경 없이는 done_when을 끝낼 수
+  // 없다고 보고하면(implement handoff의 `harness_needed`) L1이 `factory:harness` 이슈를 하나 열고 이
+  // 이슈를 **주차**한다. 그건 "사람이 판단할 것이 있다"(needs-human)도 "판정 불가"(blocked)도 아니다 —
+  // 무엇이 필요한지는 정확히 알고 있고, 그것이 머지되면 다시 큐로 돌아온다. needs-info의 기존 출구
+  // (`needs-info → queue`)가 그 복귀 경로이고, merge 스테이지가 하네스 PR을 머지한 뒤 그 전이를 만든다.
+  ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:needs-info", "factory:planned"])],   // sweeper 재큐
   // blocked = 환경/자격증명 실패로 sweeper가 needs-human으로 에스컬레이션한다(§3.2) — review·merge
   // 게이트가 BLOCKED로 끝나는 모든 스테이지에서 겪을 수 있으므로 두 상태 모두에서 빠져나가야 한다.
   ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked"])],

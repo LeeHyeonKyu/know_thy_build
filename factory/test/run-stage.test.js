@@ -2027,3 +2027,73 @@ test("KTB-25: review handoffs before the last `→ factory:queue` transition do 
   // 재큐가 한 번도 없으면 이력 전체(예전 동작)
   expect(commentsSinceRequeue([])).toEqual([]);
 });
+
+// ── ADR-020 KTB-23 — 하네스가 막고 있으면 needs-human 루프가 아니라 factory:harness 이슈다 ────────
+const HARNESS_PG = { file: "package.json", change: "add dependency pg@^8", why: "dw1/dw3/dw4 need a Postgres client" };
+const harnessImplDeps = (over = {}) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  issueLabels: async () => ["factory:planned"],
+  heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+  buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }),
+  claudeP: async () => ({ is_error: false, result: "{}" }),
+  gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", level: "full", passed: 4, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } }),
+  verifyStage: () => ({ ok: true, reasons: [], data: { issue: 2, pr: 17, harness_needed: [HARNESS_PG], verifier: { verdict: "rejected" } } }),
+  writeHandoff: vi.fn(async () => {}),
+  ensureHarnessIssue: vi.fn(async () => ({ issue: 31, created: true, title: "harness: add dependency pg@^8 — for #2" })),
+  transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  runRecord: () => {}, release: async () => {},
+  ...over,
+});
+
+test("KTB-23: a verified implement handoff with harness_needed opens ONE factory:harness issue and parks the feature on needs-info", async () => {
+  const lines = [];
+  const d = harnessImplDeps({ runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(0);
+  expect(d.ensureHarnessIssue).toHaveBeenCalledWith({ entries: [HARNESS_PG], pr: 17 });
+  // handoff는 그대로 남는다 — 이 라운드가 무엇을 했고 무엇이 막았는지는 기록이다
+  expect(d.writeHandoff).toHaveBeenCalledTimes(1);
+  // verifier가 rejected여도 여기가 먼저다: 막은 것이 코드가 아니라 하네스일 때 다음 걸음은 사람이 아니다
+  expect(d.transition).toHaveBeenLastCalledWith({ to: "factory:needs-info", reason: "waiting for harness issue #31" });
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lines).toContain("harness: opened factory:harness issue #31 — package.json");
+  expect(lines).toContain("transition: factory:needs-info");
+  // 그리고 그 전이는 그래프에 실제로 있다(KTB-23이 더한 엣지), 복귀 경로도 그대로다
+  expect(canTransition("factory:in-progress", "factory:needs-info")).toBe(true);
+  expect(canTransition("factory:needs-info", "factory:queue")).toBe(true);
+});
+
+test("KTB-23: an existing open harness issue is reused, never duplicated", async () => {
+  const lines = [];
+  const d = harnessImplDeps({
+    ensureHarnessIssue: async () => ({ issue: 31, created: false, title: "harness: add dependency pg@^8 — for #2" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(0);
+  expect(lines).toContain("harness: reusing factory:harness issue #31 — package.json");
+});
+
+test("KTB-23: if the harness issue cannot be created the feature is NOT parked — needs-human, exit 2", async () => {
+  const lines = [];
+  const d = harnessImplDeps({
+    ensureHarnessIssue: async () => { throw new Error("gh down"); },
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(2);
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({
+    to: "factory:needs-human", reason: expect.stringContaining("could not be created — gh down"),
+  }));
+  expect(lines.some((l) => l.startsWith("harness: FAIL —"))).toBe(true);
+});
+
+test("KTB-23: no harness_needed (or an empty/ill-formed one) leaves the normal path untouched", async () => {
+  for (const data of [{ issue: 2, pr: 17 }, { issue: 2, pr: 17, harness_needed: [] }, { issue: 2, pr: 17, harness_needed: [{ file: "package.json" }] }]) {
+    const d = harnessImplDeps({ verifyStage: () => ({ ok: true, reasons: [], data }) });
+    expect(await runStage({ stage: "implement", issue: 2, deps: d }), JSON.stringify(data)).toBe(0);
+    expect(d.ensureHarnessIssue).not.toHaveBeenCalled();
+    expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
+  }
+  // 다른 스테이지의 handoff에 같은 필드가 있어도 이 분기는 implement의 것이다
+  const review = harnessImplDeps({ issueLabels: async () => ["factory:awaiting-review"], verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, decision: "approved", harness_needed: [HARNESS_PG] } }) });
+  expect(await runStage({ stage: "review", issue: 2, deps: review })).toBe(0);
+  expect(review.ensureHarnessIssue).not.toHaveBeenCalled();
+});
