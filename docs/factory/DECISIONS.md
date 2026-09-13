@@ -896,6 +896,38 @@ Workflow tool result is a background receipt…`를 사유로 남기고 `factory
 2종), `retro-bin.test.js`(사유 치환 1건), `issue-comments.test.js`(`reason` 필드 4건),
 `sweeper.test.js`(3회 재시도 후 에스컬레이션, 일반 blocked은 그대로 1회).
 
+**r1 (2026-09-13) — 자유 텍스트 폴백은 corroboration 없이 혼자 서면 안 되고, 4xx는 다 같은 등급이
+아니다.**
+
+원래 폴백(결정 1의 세 번째 갈래, `result`가 `/spend limit|rate limit|.../i`에 매치)은 문구 하나로
+판정했다 — 그런데 이 정규식은 **에이전트가 API 에러를 언급·서술한 정상 실행**과 **claude -p 자신이
+API 에러로 죽어 그 프로바이더 텍스트가 `result` 전체가 된 경우**를 구분하지 못한다. 예컨대
+`error_during_execution`으로 6턴을 다 쓰고 "재시도 핸들러가 스로틀되면 429를 반환하도록
+구현했다"고 끝난 정상 완료를, 문구 하나만 보고 API 에러로 오판하면 진짜 실패 사유(설계·구현
+자체의 문제일 수 있다)가 "환경 조건"으로 둔갑해 사람에게 가야 할 것이 조용히 재시도로 흡수된다.
+
+1. **폴백은 이제 세 가지로 뒷받침돼야 선다**(`corroboratedApiErrorText`, `hitApiError` 안): `out.is_error
+   === true`(성공 응답 안의 서술은 대상이 아니다), 매치가 **trim한 `result`의 맨 앞**에서 시작한다
+   (프로바이더 에러 텍스트가 **결과 전체**일 때만 신뢰한다 — 긴 서술 중간의 언급은 걸러낸다), 그리고
+   `num_turns <= 2` 또는 `duration_ms < 5000`(진짜 API 에러는 거의 즉시 죽는다; 6턴짜리 정상 실행
+   끝의 결과는 무엇을 말하든 API 에러가 아니다). **구조적 신호**(`terminal_reason === "api_error"`
+   또는 숫자 `api_error_status`)는 전과 같이 그 자체로 선다 — corroboration이 필요한 것은 폴백뿐이다.
+2. **비일시적 4xx는 사람의 몫이다.** `api_error_status`가 {400, 401, 403, 404, 422}(자격증명·요청
+   형식·존재하지 않는 리소스 — 재시도로 안 풀리는 *설정* 문제)면 레코드에는 여전히 API 에러로 남기고
+   프로바이더 메시지를 그대로 싣지만(`apiErrorReason`은 안 바뀐다), 등급은 `factory:blocked`이 아니라
+   `factory:needs-human`이다 — 사람이 자격증명/설정을 고쳐야 다음 시도가 다르게 끝난다. 408(요청
+   타임아웃)·425(Too Early)·429(rate limit)와 모든 5xx는 여전히 **일시적**이라 `factory:blocked`
+   그대로다(sweeper의 ≤3회 blocked-origin 재시도, 결정 6). 새 판정 함수
+   `isNonTransientApiError`(`factory/lib/verify-stage.js`)가 이 집합을 갖고, `run-stage.js`의 verify
+   실패 등급 분기(`blocked = hitMaxTurns(out) || (hitApiError(out) && !isNonTransientApiError(out))`)
+   가 그것으로 목적지를 가른다. sweeper는 바뀌지 않는다 — needs-human으로 간 4xx는 애초에 sweeper의
+   blocked 팔에 나타나지 않는다.
+
+**영향(r1)**: `factory/lib/verify-stage.js`(`hitApiError`의 corroboration, 새 export
+`isNonTransientApiError`), `factory/bin/run-stage.js`(verify 실패 등급 분기). 테스트:
+`verify-stage.test.js`(corroboration 5종 + 429/실제 사고 회귀), `run-stage.test.js`(401 →
+needs-human, 429/503 → blocked).
+
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21
 

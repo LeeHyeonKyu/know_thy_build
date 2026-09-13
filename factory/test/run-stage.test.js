@@ -1168,6 +1168,33 @@ test("KTB-22: an api-error envelope recovered from the transcript is a pass — 
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
 });
 
+// ── KTB-22 r1: 비일시적 4xx(400/401/403/404/422)는 blocked이 아니라 needs-human이다 ─────────────
+// 자격증명/설정 문제는 재시도로 안 풀린다 — 사람이 고쳐야 다음 시도가 다르다. 408/425/429와 5xx는
+// 여전히 blocked(sweeper의 ≤3회 재시도) 그대로다. 레코드에는 두 등급 다 프로바이더 메시지를 싣는다.
+
+test("KTB-22 r1: a 401 (bad credentials) api-error envelope ends the stage at factory:needs-human, carrying the provider message", async () => {
+  const lines = [];
+  const d = implDeps({
+    claudeP: async () => ({ is_error: true, terminal_reason: "api_error", api_error_status: 401, num_turns: 1, duration_ms: 250, result: "Authentication failed: invalid API key" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining("claude -p api error 401: Authentication failed: invalid API key") }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(lines.some((l) => l.startsWith("- claude -p api error 401:"))).toBe(true);
+});
+
+test("KTB-22 r1: 429 and 503 api-error envelopes still end the stage at factory:blocked (transient)", async () => {
+  for (const status of [429, 503]) {
+    const d = implDeps({
+      claudeP: async () => ({ is_error: true, terminal_reason: "api_error", api_error_status: status, num_turns: 1, duration_ms: 250, result: `provider error ${status}` }),
+    });
+    expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringContaining(`claude -p api error ${status}: provider error ${status}`) }));
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  }
+});
+
 test("F5: resetGates는 판정 파일뿐 아니라 그 재료(테스트·커버리지·mutation 리포트)까지 지운다", () => {
   const root = mkdtempSync(join(tmpdir(), "reset-gates-"));
   const harness = {

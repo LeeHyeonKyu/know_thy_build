@@ -21,7 +21,7 @@ export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소�
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
@@ -351,9 +351,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       // 머지 API 실패와 같은 등급). 여기까지 왔다는 건 트랜스크립트에서도 산출물을 복구하지 못했다는
       // 뜻이다(KTB-17) — 복구했다면 verifyStage가 이미 통과시켰다. 사유의 첫 줄이 원인(턴 한도 또는
       // 프로바이더 메시지 원문)이고 스키마 진단은 그 뒤에 붙는다.
-      const blocked = hitMaxTurns(out) || hitApiError(out);
+      //
+      // KTB-22 r1: API 에러 중에서도 **비일시적 4xx**(400/401/403/404/422 — 자격증명·설정)는 재시도로
+      // 풀리지 않는다. 프로바이더 메시지는 그대로 기록에 싣지만(`v.reasons`에 이미 있다), 등급은
+      // needs-human이다 — 사람이 자격증명/설정을 고쳐야 다음 시도가 다르게 끝난다. 408/425/429와
+      // 모든 5xx는 여전히 일시적이라 blocked(=sweeper의 ≤3회 재시도) 그대로다.
+      const apiError = hitApiError(out);
+      const blocked = hitMaxTurns(out) || (apiError && !isNonTransientApiError(out));
       const to = blocked ? "factory:blocked" : "factory:needs-human";
-      const t = await d.transition({ to, reason: `${blocked ? "stage did not finish" : "stage artifact missing or invalid"}: ${v.reasons.join("; ")}` });
+      const reasonPrefix = blocked ? "stage did not finish" : apiError ? "api error needs human (credentials/config)" : "stage artifact missing or invalid";
+      const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}` });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }

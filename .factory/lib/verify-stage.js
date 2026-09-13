@@ -46,21 +46,53 @@ export function hitMaxTurns(out) {
 export const maxTurnsReason = (out) => `claude -p hit max turns (${out?.num_turns ?? "n/a"})`;
 
 /**
- * `claude -p`가 **API 쿼터/장애**에서 잘렸는가(KTB-22). 2026-09-12 20:20Z, 데모 세 스테이지(구현
- * 둘·계획 하나)가 동시에 이 봉투로 죽었다 — `is_error:true, terminal_reason:"api_error",
+ * `claude -p`가 **API 쿼터/장애**에서 잘렸는가(KTB-22, r1 KTB-22 r1). 2026-09-12 20:20Z, 데모 세
+ * 스테이지(구현 둘·계획 하나)가 동시에 이 봉투로 죽었다 — `is_error:true, terminal_reason:"api_error",
  * api_error_status:429, result:"You've hit your org's monthly spend limit …"`. `hitMaxTurns`와
  * 같은 자리다: 설계 오류가 아니라 **환경/쿼터 조건**이라 재시도(사람 없이, sweeper의 blocked-origin
- * 재시도)로 풀린다. 세 가지를 본다 — 어느 하나만 있어도 판정한다(CLI/게이트웨이 버전에 따라 필드가
- * 갈릴 수 있다): `terminal_reason === "api_error"`, `api_error_status`가 4xx/5xx 정수, 또는
- * `result`가 프로바이더 쿼터/장애 문구(스로틀·과부하 포함)에 매치. 마지막 것은 그 두 필드를 못
- * 채우는 옛/다른 CLI 경로를 위한 안전망이다.
+ * 재시도)로 풀린다.
+ *
+ * **구조적 신호는 그 자체로 판정한다** — `terminal_reason === "api_error"` 또는 `api_error_status`가
+ * 4xx/5xx 정수. 이 둘은 CLI/게이트웨이가 실제로 API 에러를 구조화해 실은 것이라 그대로 믿는다.
+ *
+ * **자유 텍스트 폴백(`result`가 쿼터/장애 문구에 매치)은 그 두 필드를 못 채우는 옛/다른 CLI 경로를
+ * 위한 안전망일 뿐이라 혼자 서지 못한다(r1)** — 대신 세 가지로 뒷받침돼야 한다:
+ *   1. `is_error === true` — 성공 응답 안의 서술("429 응답을 반환하도록 구현했다" 같은)은 대상이
+ *      아니다.
+ *   2. 매치가 trim한 `result`의 **맨 앞**에서 시작한다 — 프로바이더 에러 텍스트가 **결과 전체**일
+ *      때만 신뢰한다. 긴 서술 중간에 "rate limit"이 언급되거나(에이전트가 그 말을 인용·설명한
+ *      것일 뿐일 수 있다), `error_during_execution` 봉투의 결과가 "429를 반환하도록…"처럼 중간에
+ *      숫자만 스친 경우를 걸러낸다.
+ *   3. `num_turns <= 2` 이거나 `duration_ms < 5000` — 실제 API 에러는 거의 즉시(적은 턴·짧은 시간)
+ *      죽는다. 6턴짜리 정상 실행 끝에 나온 결과는(무엇을 말하든) API 에러가 아니라 에이전트가
+ *      실제로 실행한 무언가의 산물이다.
  */
 const API_ERROR_RESULT_RE = /spend limit|rate limit|usage limit|overloaded|529|429/i;
+function corroboratedApiErrorText(out) {
+  if (out.is_error !== true || typeof out.result !== "string") return false;
+  const trimmed = out.result.trim();
+  const m = API_ERROR_RESULT_RE.exec(trimmed);
+  if (!m || m.index !== 0) return false;
+  return (Number.isFinite(out.num_turns) && out.num_turns <= 2) || (Number.isFinite(out.duration_ms) && out.duration_ms < 5000);
+}
 export function hitApiError(out) {
   if (!out) return false;
   if (out.terminal_reason === "api_error") return true;
   if (Number.isInteger(out.api_error_status) && out.api_error_status >= 400 && out.api_error_status < 600) return true;
-  return typeof out.result === "string" && API_ERROR_RESULT_RE.test(out.result);
+  return corroboratedApiErrorText(out);
+}
+
+/**
+ * **비일시적(non-transient) 4xx**(KTB-22 r1) — {400, 401, 403, 404, 422}는 자격증명·요청 형식 같은
+ * *설정* 문제라 재시도로 풀리지 않는다(같은 자격증명으로 다시 불러도 같은 자리에서 또 죽는다).
+ * 408(요청 타임아웃)·425(Too Early)·429(rate limit)와 5xx는 여전히 **일시적**이다 — sweeper의
+ * ≤3회 blocked-origin 재시도가 그 자리를 그대로 지킨다. `run-stage.js`가 이 판정으로 등급을
+ * 가른다: 비일시적이면 `factory:needs-human`(사람이 자격증명/설정을 고쳐야 한다), 그 외(일시적
+ * 4xx·5xx, 또는 구조적 신호 없이 텍스트로만 잡힌 경우)는 `factory:blocked`.
+ */
+const NON_TRANSIENT_API_ERROR_STATUS = new Set([400, 401, 403, 404, 422]);
+export function isNonTransientApiError(out) {
+  return Number.isInteger(out?.api_error_status) && NON_TRANSIENT_API_ERROR_STATUS.has(out.api_error_status);
 }
 /**
  * API 에러 실패의 run 기록/전이 사유 한 줄. 프로바이더 메시지를 **원문 그대로**(요약·재해석 없이)

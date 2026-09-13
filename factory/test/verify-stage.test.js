@@ -145,17 +145,43 @@ test("max_turns + a recovered artifact is a pass; max_turns without one names th
 // 2026-09-12 20:20Z 데모: claude -p 자신이 429(조직 월 지출 한도)로 죽었다 — 에이전트나 프롬프트의
 // 잘못이 아니라 환경 조건이다. 산출물을 복구했으면 성공, 못 했으면 사유는 프로바이더 메시지 원문.
 
-test("hitApiError: terminal_reason, numeric 4xx/5xx status, or a quota/outage phrase in result — any one is enough", () => {
+test("hitApiError: structural signals (terminal_reason, numeric 4xx/5xx status) fire on their own", () => {
   expect(hitApiError({ terminal_reason: "api_error" })).toBe(true);
   expect(hitApiError({ api_error_status: 429 })).toBe(true);
   expect(hitApiError({ api_error_status: 529 })).toBe(true);
   expect(hitApiError({ api_error_status: 500 })).toBe(true);
-  expect(hitApiError({ result: "You've hit your org's monthly spend limit" })).toBe(true);
-  expect(hitApiError({ result: "overloaded, please retry" })).toBe(true);
   expect(hitApiError({})).toBe(false);
   expect(hitApiError({ api_error_status: 200 })).toBe(false);
   expect(hitApiError({ api_error_status: "429" })).toBe(false);          // 문자열은 세지 않는다(오타 방지)
   expect(hitApiError(null)).toBe(false);
+});
+
+// ── KTB-22 r1: 자유 텍스트 폴백은 혼자 서지 못한다 — corroboration이 있어야 한다 ────────────────
+// is_error===true AND trim한 result의 맨 앞에서 매치 AND (num_turns<=2 OR duration_ms<5000).
+// 구조적 신호(terminal_reason/api_error_status)가 없을 때만 이 폴백이 관여한다.
+
+test("hitApiError r1: a corroborated free-text result (is_error, anchored at start, few turns/fast) is an api error", () => {
+  expect(hitApiError({ is_error: true, num_turns: 1, duration_ms: 299, result: "spend limit exceeded · ask your admin to raise it" })).toBe(true);
+  expect(hitApiError({ is_error: true, num_turns: 2, result: "Overloaded, please retry" })).toBe(true);
+  expect(hitApiError({ is_error: true, duration_ms: 4000, num_turns: 9, result: "429 Too Many Requests" })).toBe(true);
+});
+
+test("hitApiError r1: an error_during_execution envelope that merely mentions '429' mid-sentence is NOT an api error — falls to the generic is_error path", () => {
+  const out = { is_error: true, subtype: "error_during_execution", terminal_reason: "error", num_turns: 6, result: "I implemented the retry handler so it will return 429 when throttled, then committed the change." };
+  expect(hitApiError(out)).toBe(false);
+});
+
+test("hitApiError r1: 'rate limit' mentioned in the middle of a long result, with no structural signal, is NOT an api error", () => {
+  const out = { is_error: true, num_turns: 1, duration_ms: 100, result: "After investigating the failure for a while, the root cause turned out to be a rate limit on an internal dependency, which we worked around." };
+  expect(hitApiError(out)).toBe(false);
+});
+
+test("hitApiError r1: corroboration requires is_error===true — a success envelope that narrates a quota phrase is not an api error", () => {
+  expect(hitApiError({ is_error: false, num_turns: 1, duration_ms: 100, result: "spend limit reached" })).toBe(false);
+});
+
+test("hitApiError r1: corroboration requires either few turns or a fast duration — neither present fails even when anchored and is_error", () => {
+  expect(hitApiError({ is_error: true, num_turns: 6, duration_ms: 9000, result: "overloaded" })).toBe(false);
 });
 
 test("apiErrorReason: verbatim provider message, first line only, truncated to 200 chars", () => {
@@ -186,4 +212,11 @@ test("KTB-22: a recovered artifact behind a quota envelope is a pass", () => {
   const r = verifyStage({ stage: "review", out: quota, transcriptText: transcript, agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } });
   expect(r.ok).toBe(true);
   expect(r.data.verdicts).toHaveLength(2);
+});
+
+test("KTB-22 r1: an error_during_execution envelope that only mentions '429' mid-sentence is NOT an api error — falls to the generic is_error path (needs-human, not blocked)", () => {
+  const out = { is_error: true, subtype: "error_during_execution", terminal_reason: "error", num_turns: 6, result: "I implemented the retry handler so it will return 429 when throttled, then committed the change." };
+  const r = verifyStage({ stage: "review", out, agentsLog: log([]), roster: [], orchestration: "workflow" });
+  expect(r.ok).toBe(false);
+  expect(r.reasons).toContain("claude -p reported is_error");
 });
