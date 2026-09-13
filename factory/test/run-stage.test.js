@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
+import { runStage, abortStage, nextState, reviewFlips, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -71,7 +71,8 @@ test("ci-settings.json present → the stage proceeds normally", async () => {
   expect(deps.claudeP).toHaveBeenCalled();
 });
 
-test("claim failure exits 0 without doing work; verify failure → transition to needs-human, exit 2", async () => {
+// KTB-28: 거부된 claim은 더 이상 조용한 exit 0이 아니다 — 잡을 실패로 끝내고(exit 2) 기록·코멘트를 남긴다.
+test("claim failure does no work and fails the job; verify failure → transition to needs-human, exit 2", async () => {
   const base = (over) => ({
     charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
     buildContext: async () => ({ roster: [], orchestration: "workflow", limits: {} }), heartbeat: async () => ({ stop() {} }),
@@ -79,7 +80,7 @@ test("claim failure exits 0 without doing work; verify failure → transition to
     verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {}, transition: vi.fn(async () => ({ ok: true })),
     runRecord: () => {}, release: async () => {}, ...over });
   const d1 = base({ claim: async () => ({ ok: false, holder: "other" }), claudeP: vi.fn() });
-  expect(await runStage({ stage: "review", issue: 7, deps: d1 })).toBe(0);
+  expect(await runStage({ stage: "review", issue: 7, deps: d1 })).toBe(2);
   expect(d1.claudeP).not.toHaveBeenCalled();
   const d2 = base({ verifyStage: () => ({ ok: false, reasons: ["roster role not completed: qa"], data: {} }) });
   expect(await runStage({ stage: "review", issue: 7, deps: d2 })).toBe(2);
@@ -420,7 +421,7 @@ test("localEntry runs right after claim (and after hydrateRecord), before resetG
 test("localEntry is not called when claim fails", async () => {
   const localEntry = vi.fn();
   const deps = baseDeps({ claim: async () => ({ ok: false, holder: "other" }), localEntry });
-  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(0);
+  expect(await runStage({ stage: "triage", issue: 7, deps })).toBe(2);   // KTB-28: 거부는 잡 실패다
   expect(localEntry).not.toHaveBeenCalled();
 });
 
@@ -2234,4 +2235,140 @@ test("KTB-24 fix: an unreadable holder (or old wiring with no lockHolder dep) st
   const unparsed = abortDeps({ lockHolder: async () => ({ present: true, runner: null, subject: "lock" }), release: vi.fn(async () => true), runRecord: () => {} });
   await abortStage({ stage: "review", issue: 15, status: "cancelled", runnerId: "gha-111", deps: unparsed });
   expect(unparsed.release).toHaveBeenCalled();
+});
+
+// ── ADR-020 KTB-28 — 고아 락은 회수하고, 거부는 시끄럽다 ─────────────────────────────────────────
+// 데모 #15: 04:39에 타임아웃으로 죽은 review 런의 `lock-15`가 살아남아 그 뒤의 모든 dispatch가
+// `claim()`에서 26~40초 만에 죽었다 — exit 0, 기록 한 줄 없음, 코멘트 없음, 잡 결론 success.
+// 바깥에서 보면 "디스패치가 잘 됐다"였고, 그래서 네 번을 더 밀었다.
+test("KTB-28: a refused claim is LOUD — run-record line, issue comment, exit 2", async () => {
+  const lines = [];
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const deps = baseDeps({
+    claim: async () => ({ ok: false, holder: "lock issue=15 stage=review runner=gha-34736609544 at=t", runner: "gha-34736609544", status: "in_progress" }),
+    comment: vi.fn(async () => {}), claudeP: vi.fn(), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 15, deps })).toBe(2);
+  expect(deps.claudeP).not.toHaveBeenCalled();
+  expect(lines).toContain("claim refused: lock held by gha-34736609544 (in_progress)");
+  expect(deps.comment).toHaveBeenCalledWith(15, expect.stringContaining("gha-34736609544"));
+  expect(err).toHaveBeenCalledWith(expect.stringContaining("claim refused"));
+  err.mockRestore();
+});
+
+test("KTB-28: a claim that reclaimed a dead runner's lock says so in the run record", async () => {
+  const lines = [];
+  const deps = baseDeps({
+    claim: async () => ({ ok: true, commit: "c", reclaimed: { runner: "gha-34736609544", status: "completed" } }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 15, deps })).toBe(0);
+  expect(lines).toContain("lock: reclaimed from completed runner gha-34736609544");
+});
+
+test("KTB-28: a failing refusal comment never hides the refusal — still exit 2, still recorded", async () => {
+  const lines = [];
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const deps = baseDeps({
+    claim: async () => ({ ok: false, holder: "unknown", runner: null, status: "unknown" }),
+    comment: async () => { throw new Error("comment API 502"); }, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 15, deps })).toBe(2);
+  expect(lines).toContain("claim refused: lock held by unknown (unknown)");
+  expect(lines.some((l) => /claim refused: comment failed/.test(l))).toBe(true);
+  err.mockRestore();
+});
+
+// exit 2는 잡 실패다 → `Aborted cleanup` 스텝이 돈다. 그 스텝이 **지금 돌고 있는 러너의** 라벨을
+// blocked으로 밀면 KTB-28의 고침이 새 사고를 만든다 — 락이 남의 것이면 전이도 하지 않는다.
+test("KTB-28: abortStage makes no transition when the lock belongs to another live runner", async () => {
+  const lines = [];
+  const d = abortDeps({
+    issueLabels: async () => ["factory:awaiting-review"],
+    lockHolder: async () => ({ present: true, runner: "gha-222", subject: "lock issue=15 stage=review runner=gha-222 at=t" }),
+    release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
+  });
+  expect(await abortStage({ stage: "review", issue: 15, status: "failure", runnerId: "gha-111", deps: d })).toBe(0);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.release).not.toHaveBeenCalled();
+  expect(lines).toContain("lock: held by gha-222 — left alone");
+  expect(lines.some((l) => /never owned the stage/.test(l))).toBe(true);
+});
+
+// ── ADR-020 KTB-29 — review의 K 한도(스펙 §3.2 `rework → needs_human: round > K`) ────────────────
+// 데모 #18은 K=3인데 review 라운드 4에서 또 rework으로 갔다: `nextState`가 K를 아예 보지 않았다.
+const reviewVerdictK = (role, kind) => ({
+  role, verdict: kind, confidence: "high",
+  must_fix: kind === "reject" ? [{ id: `MF-${role}`, where: "a.js:1", claim: "broken", evidence: "test fails" }] : [],
+  should_fix: [], verified: [],
+});
+const kDeps = ({ round, verdicts, K = 3, ...over }) => baseDeps({
+  buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K } }),
+  countHandoffs: async (s) => (s === "review" ? round - 1 : 0),
+  verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: "a".repeat(40), verdicts } }),
+  writeHandoff: vi.fn(async () => {}), transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  ...over,
+});
+
+test("KTB-29: a reject at round K goes to needs-human, not rework — with the must_fix count in the reason", async () => {
+  const lines = [];
+  const deps = kDeps({ round: 3, verdicts: [reviewVerdictK("correctness", "reject"), reviewVerdictK("qa", "reject")], runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "review", issue: 18, deps })).toBe(0);
+  expect(deps.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human", reason: "review rounds exhausted (K=3): 2 must_fix remain",
+  }));
+  expect(deps.writeHandoff).toHaveBeenCalled();                       // 판정 자체는 기록으로 남는다
+});
+
+test("KTB-29: a reject below K still goes to rework (unchanged)", async () => {
+  const deps = kDeps({ round: 2, verdicts: [reviewVerdictK("correctness", "reject"), reviewVerdictK("qa", "approve")] });
+  expect(await runStage({ stage: "review", issue: 18, deps })).toBe(0);
+  expect(deps.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:rework" }));
+});
+
+test("KTB-29: an approve is approved at any round — K never blocks a passing review", async () => {
+  for (const round of [1, 3, 7]) {
+    const deps = kDeps({ round, verdicts: [reviewVerdictK("correctness", "approve"), reviewVerdictK("qa", "approve")] });
+    expect(await runStage({ stage: "review", issue: 18, deps }), `round ${round}`).toBe(0);
+    expect(deps.transition, `round ${round}`).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:approved" }));
+  }
+});
+
+test("KTB-29: nextState is pure — K only bites on a non-approved review with an integer round", () => {
+  expect(nextState("review", { decision: "approved", round: 9 }, { maxRounds: 3 })).toBe("factory:approved");
+  expect(nextState("review", { decision: "rework", round: 3 }, { maxRounds: 3 })).toBe("factory:needs-human");
+  expect(nextState("review", { decision: "rework", round: 4 }, { maxRounds: 3 })).toBe("factory:needs-human");
+  expect(nextState("review", { decision: "rework", round: 2 }, { maxRounds: 3 })).toBe("factory:rework");
+  expect(nextState("review", { decision: "rework", round: 9 })).toBe("factory:rework");            // K 미상 → 예전 동작
+  expect(nextState("review", { decision: "rework" }, { maxRounds: 3 })).toBe("factory:rework");     // round 미상 → 예전 동작
+  expect(nextState("implement", {})).toBe("factory:awaiting-review");
+});
+
+// §12.4 지표(O21): 같은 역할이 라운드 사이에 판정을 뒤집는 빈도. 앞 라운드의 review handoff와 비교한다.
+test("KTB-29: per-role verdict flips against the previous review handoff are recorded", () => {
+  const prev = [{ role: "correctness", verdict: "approve" }, { role: "spec-conformance", verdict: "reject" }, { role: "qa", verdict: "approve" }];
+  const now = [{ role: "correctness", verdict: "reject" }, { role: "spec-conformance", verdict: "approve" }, { role: "qa", verdict: "approve" }];
+  expect(reviewFlips(prev, now)).toEqual(["correctness approve→reject", "spec-conformance reject→approve"]);
+  expect(reviewFlips(prev, prev)).toEqual([]);
+  expect(reviewFlips(null, now)).toEqual([]);                          // 앞 라운드가 없으면 뒤집힘도 없다
+  expect(reviewFlips(prev, [{ role: "new-role", verdict: "reject" }])).toEqual([]);   // 새 역할은 뒤집힘이 아니다
+});
+
+test("KTB-29: the flips line lands in the run record, and an unreadable lookup never fails the stage", async () => {
+  const lines = [];
+  const deps = kDeps({
+    round: 2, verdicts: [reviewVerdictK("correctness", "reject"), reviewVerdictK("qa", "approve")],
+    priorReviewVerdicts: async () => [{ role: "correctness", verdict: "approve" }, { role: "qa", verdict: "approve" }],
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 18, deps })).toBe(0);
+  expect(lines).toContain("review flips: correctness approve→reject");
+
+  const broken = [];
+  const d2 = kDeps({
+    round: 2, verdicts: [reviewVerdictK("correctness", "approve"), reviewVerdictK("qa", "approve")],
+    priorReviewVerdicts: async () => { throw new Error("gh down"); }, runRecord: (l) => broken.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 18, deps: d2 })).toBe(0);
+  expect(broken.some((l) => /review flips: unreadable — gh down/.test(l))).toBe(true);
 });

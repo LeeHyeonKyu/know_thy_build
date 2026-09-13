@@ -112,6 +112,26 @@ function lintStageWorkflow(text, lines, stage) {
   } else if (aborted !== -1 && aborted > sweep) {
     out.push({ line: steps[sweep].line, rule: "sweep-step-last", msg: "the Sweep step must come after the Aborted cleanup step — sweeping before the cleanup cannot see the blocked label it is meant to pick up (KTB-26)" });
   }
+  // (3) `Run stage`와 `Aborted cleanup`은 **같은** FACTORY_RUNNER_ID 식을 실어야 한다(r1 재리뷰 M5).
+  // KTB-24 fix 이후 정리 스텝은 락 커밋 제목의 `runner=`와 자기 `FACTORY_RUNNER_ID`를 비교해 "내 락인가"를
+  // 가른다. 둘이 갈리면 정리가 자기 런의 락을 남의 것으로 읽고 그대로 두고 나간다 — 고아 락이 남고,
+  // 그 뒤의 모든 dispatch가 claim에서 죽는다(데모 #15). 값이 무엇인지는 묻지 않는다(러너마다 다를 수
+  // 있다) — **같은가**만 묻는다.
+  const runStage = steps.findIndex((s) => s.name === "Run stage");
+  const runnerIdOf = (i) => {
+    if (i === -1) return null;
+    const end = i + 1 < steps.length ? steps[i + 1].line - 1 : lines.length;
+    for (let k = steps[i].line - 1; k < end; k++) {
+      const m = /^\s*FACTORY_RUNNER_ID:\s*(.+?)\s*$/.exec(lines[k].replace(/#.*/, ""));
+      if (m) return m[1];
+    }
+    return null;
+  };
+  const runId = runnerIdOf(runStage);
+  const abortId = runnerIdOf(aborted);
+  if (runId == null || abortId == null || runId !== abortId) {
+    out.push({ line: aborted === -1 ? 1 : steps[aborted].line, rule: "runner-id-consistent", msg: "the \"Run stage\" and \"Aborted cleanup\" steps must set the identical FACTORY_RUNNER_ID expression — the cleanup compares it against the lock's `runner=` field to decide whether the lock is its own, so a drifted (or missing) value leaves an orphan lock every later dispatch dies on (KTB-24 fix / KTB-28)" });
+  }
   return out;
 }
 

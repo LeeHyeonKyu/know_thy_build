@@ -786,3 +786,149 @@ test("KTB-24 fix: a blocked issue whose origin was awaiting-review gets one revi
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 15, to: "factory:needs-human" }));
   expect(second).toContainEqual({ kind: "blocked-escalated", issue: 15 });
 });
+
+// ── ADR-020 KTB-28 — sweeper는 밀기 전에 **잔해 락**을 회수한다 ─────────────────────────────────
+// 데모 #15: stalled 팔이 네 번 밀었고 네 번 모두 `claim()`에서 죽었다(04:39에 타임아웃으로 사라진 런의
+// `lock-15`가 그대로 남아 있었다). dispatch는 락을 보지 않으므로, 락을 보는 사람이 여기 있어야 한다.
+const staleLock = (over = {}) => ({ released: true, runner: "gha-34736609544", why: "stale lock released", ...over });
+
+test("KTB-28: the stalled arm releases a stale lock before dispatching, and records it", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted],
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const order = [];
+  const releaseIfStale = vi.fn(async () => { order.push("release"); return staleLock(); });
+  const dispatchStage = vi.fn(async () => { order.push("dispatch"); });
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, releaseIfStale }));
+  expect(releaseIfStale).toHaveBeenCalledWith(15);
+  expect(order).toEqual(["release", "dispatch"]);                    // 회수가 dispatch보다 먼저다
+  expect(actions).toContainEqual({ kind: "stale-lock-released", issue: 15, runner: "gha-34736609544", step: "stalled-restart" });
+});
+
+test("KTB-28: a live lock is left alone and the dispatch still happens; a throwing lookup never stops the arm", async () => {
+  const mk = (releaseIfStale) => {
+    const posted = [];
+    return {
+      searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+      comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted],
+      comment: async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; },
+      patchComment: vi.fn(), issueList: async () => [], releaseIfStale,
+    };
+  };
+  const live = vi.fn(async () => ({ released: false, why: "held by gha-1 (in_progress)" }));
+  const d1 = vi.fn(async () => {});
+  const a1 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d1, releaseIfStale: live }));
+  expect(d1).toHaveBeenCalledWith({ stage: "plan", issue: 15 });
+  expect(a1.some((a) => a.kind === "stale-lock-released")).toBe(false);
+
+  const boom = vi.fn(async () => { throw new Error("git fetch exploded"); });
+  const d2 = vi.fn(async () => {});
+  const a2 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d2, releaseIfStale: boom }));
+  expect(d2).toHaveBeenCalled();                                     // 회수 실패가 재점화를 막지 않는다
+  expect(a2).toContainEqual({ kind: "error", step: "stalled-restart-lock", issue: 15, error: expect.stringContaining("git fetch exploded") });
+});
+
+test("KTB-28: the blocked-retry arm releases a stale lock before its dispatch too", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:blocked" ? [{ number: 15 }] : []),
+    comments: async () => [BLOCKED_ORIGIN("factory:awaiting-review", "2026-09-11T00:00:00Z"), ...posted],
+    comment: async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; },
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const releaseIfStale = vi.fn(async () => staleLock());
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, releaseIfStale }));
+  expect(releaseIfStale).toHaveBeenCalledWith(15);
+  expect(actions).toContainEqual({ kind: "stale-lock-released", issue: 15, runner: "gha-34736609544", step: "blocked-retry" });
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "review", issue: 15 });
+});
+
+test("KTB-28: with no releaseIfStale wired the arms are unchanged (older wiring)", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted],
+    comment: async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; },
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).toHaveBeenCalled();
+  expect(actions.some((a) => a.kind === "stale-lock-released")).toBe(false);
+});
+
+// KTB-28 (d): 같은 이슈+스테이지를 무한히 다시 밀지 않는다. #15는 네 번 밀렸고 네 번 다 같은 벽에
+// 부딪혔다 — 두 번째까지가 "일시적일 수 있다"의 한계고, 그 뒤는 사람이 볼 일이다.
+test("KTB-28: stalled restarts are capped at 2 per issue+stage, then escalate to needs-human", async () => {
+  const old = (n) => ({ id: n, body: restartComment("plan", 15), createdAt: "2026-09-10T00:00:00Z" });
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), old(2), old(3)],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, transition }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();                         // 마커를 또 남기지 않는다
+  expect(transition).toHaveBeenCalledWith({ issue: 15, to: "factory:needs-human", reason: "stalled restart limit (2) reached" });
+  expect(actions).toContainEqual({ kind: "stalled-restart-limit", issue: 15, stage: "plan", label: "factory:ready" });
+});
+
+test("KTB-28: one previous restart is still below the cap — the second push happens", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), { id: 2, body: restartComment("plan", 15), createdAt: "2026-09-10T00:00:00Z" }],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, transition }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "plan", issue: 15 });
+  expect(transition).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "stalled-restart", issue: 15, stage: "plan", label: "factory:ready" });
+});
+
+test("KTB-28: a refused escalation at the cap is recorded, never silent", async () => {
+  const old = (n) => ({ id: n, body: restartComment("plan", 15), createdAt: "2026-09-10T00:00:00Z" });
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), old(2), old(3)],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const actions = await sweep(stalledArgs({ gh, dispatchStage: vi.fn(), transition: async () => ({ ok: false, reason: "graph refuses ready → needs-human" }) }));
+  expect(actions).toContainEqual({ kind: "stalled-restart-limit-refused", issue: 15, stage: "plan", label: "factory:ready", reason: "graph refuses ready → needs-human" });
+});
+
+// ── r1 재리뷰 M3 — 실패한 unpark 전이가 억제 마커를 남기면 주차가 영구가 된다 ──────────────────
+test("M3: a refused harness unpark leaves NO marker — the next sweep tries again", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:needs-info" ? [{ number: 2 }] : []),
+    comments: async () => [parkComment(31), ...posted],
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const harnessSettled = async () => ({ done: true, why: "이슈가 닫혔습니다" });
+  let ok = false;
+  const transition = vi.fn(async ({ to }) => (ok ? { ok: true, to } : { ok: false, reason: "no factory state label on issue" }));
+  const first = await sweep(unparkArgs({ gh, harnessSettled, transition }));
+  expect(first).toContainEqual({ kind: "harness-unpark-refused", issue: 2, harness: 31, reason: "no factory state label on issue" });
+  expect(gh.comment).not.toHaveBeenCalled();                          // 억제 마커가 남지 않는다
+
+  ok = true;
+  const second = await sweep(unparkArgs({ gh, harnessSettled, transition }));
+  expect(second).toContainEqual({ kind: "harness-unparked", issue: 2, harness: 31 });
+  expect(gh.comment).toHaveBeenCalledWith(2, expect.stringContaining(harnessUnparkedComment(31, 2)));
+  expect(transition).toHaveBeenCalledTimes(2);
+
+  // 그리고 성공 뒤에는 마커가 dedupe다 — 세 번째 sweep은 조용하다
+  const third = await sweep(unparkArgs({ gh, harnessSettled, transition }));
+  expect(third).toContainEqual({ kind: "harness-unpark-skipped", issue: 2, harness: 31, reason: "already unparked" });
+  expect(transition).toHaveBeenCalledTimes(2);
+});

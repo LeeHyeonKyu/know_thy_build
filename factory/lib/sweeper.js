@@ -26,6 +26,17 @@ const STALLED_STAGE = {
 export const restartComment = (stage, issue) => `<!-- factory-sweeper restarted stage=${stage} issue=${issue} -->`;
 
 /**
+ * ADR-020 KTB-28 (d) — **같은 이슈+스테이지를 몇 번까지 다시 미는가.** 데모 #15는 네 번 밀렸고 네 번
+ * 모두 같은 벽(`claim()`의 고아 락)에 부딪혔다. 재점화는 "런이 만들어지지 않은 사고"를 되돌리려는
+ * 것인데, 두 번 밀어도 같은 자리에 멈춰 있으면 사라진 것은 런이 아니라 **가정**이다 — 그때부터는
+ * 사람이 봐야 한다(밀 때마다 plan 한 번 ~$12가 나갈 수 있다).
+ *
+ * 세는 것은 이슈 이력에 남은 재점화 마커 개수다(마커가 곧 기록이다 — 별도 카운터를 두면 둘이 갈라진다).
+ */
+export const STALLED_RESTART_LIMIT = 2;
+export const stalledRestartLimitReason = `stalled restart limit (${STALLED_RESTART_LIMIT}) reached`;
+
+/**
  * blocked 팔 전용 재시도 마커(KTB-19 review I-1). 예전에는 `restartComment`(stalled 팔과 **같은**
  * 마커)를 재사용했는데, 정상적인 흐름 하나가 그 dedupe를 조용히 무력화했다: `factory:approved`에서
  * 멈춘 이슈를 stalled 팔이 먼저 `factory-merge.yml`을 dispatch하며 `restartComment("merge", n)`을
@@ -173,7 +184,26 @@ async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
  * 라벨이 아니면 claude -p를 부르기 전에 exit 0으로 물러난다. 여기의 셋은 그 앞단의 비용·잡음 절감이다.
  * 전부 best-effort다: 한 이슈가 터져도 다음 이슈로 넘어간다.
  */
-async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, actions }) {
+/**
+ * ADR-020 KTB-28 (c) — **밀기 전에 잔해 락을 회수한다.** dispatch는 락을 보지 않는다: 새 런은 뜨고,
+ * `claim()`에서 26~40초 만에 죽고, (KTB-28 (b) 이전에는) 아무 기록도 남기지 않았다. 데모 #15가 그렇게
+ * 네 번 밀렸다. 주입된 `releaseIfStale`은 "소유자의 워크플로 런이 끝났는가"를 물어 끝났을 때만 지운다
+ * (`bin/sweep.js`가 `lockHolder` + `runnerState`로 조립한다) — 살아 있으면 아무것도 하지 않는다.
+ *
+ * 실패는 재점화를 막지 않는다: 회수는 성공 확률을 올리는 조치이지 전제 조건이 아니고, 락이 정말 남아
+ * 있으면 그 런은 (이제 시끄럽게) claim에서 물러난다.
+ */
+async function releaseStaleLock({ releaseIfStale, issue, actions, step }) {
+  if (!releaseIfStale) return;
+  try {
+    const r = await releaseIfStale(issue);
+    if (r?.released) actions.push({ kind: "stale-lock-released", issue, runner: r.runner ?? null, step });
+  } catch (e) {
+    actions.push({ kind: "error", step: `${step}-lock`, issue, error: String(e.message || e) });
+  }
+}
+
+async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions }) {
   if (!dispatchStage) return;
   const stale = staleMinutes * 60e3;
   // 한 sweep 안에서 흐름 제어는 한 번만 묻는다 — 이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다.
@@ -197,17 +227,28 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         const hb = comments.map((c) => HB.exec(String(c?.body ?? ""))).filter(Boolean).at(-1);
         if (hb && nowMs - Date.parse(hb[2]) <= stale) continue;          // 스테이지가 살아 있다
         const marker = restartComment(stage, it.number);
-        const restarted = comments.filter((c) => String(c?.body ?? "").includes(marker)).at(-1);
+        const restarts = comments.filter((c) => String(c?.body ?? "").includes(marker));
+        const restarted = restarts.at(-1);
         if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;
         // 흐름 제어로 세워 둔 `factory:planned`는 멈춘 것이 아니다(M5) — 조용히 넘어간다.
         if (stage === "implement") {
           const reason = await parked();
           if (reason) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `back-pressure — ${reason}` }); continue; }
         }
+        // KTB-28 (d): 두 번 밀어도 같은 자리면 사라진 것은 런이 아니라 가정이다 — 사람에게 넘긴다.
+        if (restarts.length >= STALLED_RESTART_LIMIT) {
+          const t = await transition?.({ issue: it.number, to: "factory:needs-human", reason: stalledRestartLimitReason });
+          actions.push(t && t.ok === false
+            ? { kind: "stalled-restart-limit-refused", issue: it.number, stage, label, reason: t.reason ?? "unknown" }
+            : { kind: "stalled-restart-limit", issue: it.number, stage, label });
+          continue;
+        }
         // 마커를 **먼저** 남긴다(M4). dispatch가 성공한 뒤에 코멘트가 실패하면 dedupe의 유일한 근거가
         // 사라져 다음 sweep이 30분마다 같은 스테이지를 또 민다 — 재점화는 비싸고(plan 한 번 ~$12)
         // 놓친 재점화는 사람이 `--remote`로 되살릴 수 있으므로, 실패는 **덜 재시작하는 쪽**으로 기운다.
         await gh.comment(it.number, `${marker}\n\`${label}\`에서 ${staleMinutes}분 넘게 런 없이 멈춰 있었습니다 — \`factory-${stage}.yml\`을 dispatch로 다시 띄웁니다(KTB-8).`);
+        // KTB-28 (c): 새 런이 또 고아 락에 부딪히지 않도록, 밀기 직전에 잔해 락을 회수한다.
+        await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "stalled-restart" });
         // dispatch가 실패하면 "다시 띄웠다"고 적지 않는다 — 마커는 이미 남았으므로 같은 창 안에서는
         // 다시 밀지 않고, 다음 창의 sweep이 재시도한다(실패는 덜 재시작하는 쪽으로 기운다).
         if (!await safeDispatch({ dispatchStage, stage, issue: it.number, actions, step: "stalled-restart" })) continue;
@@ -278,8 +319,12 @@ async function sweepLabelSetRepair({ gh, actions }) {
  * "이슈가 모호하다"(사람이 보강해야 한다)와 하네스 대기. 전자를 큐로 되돌리면 같은 모호함으로
  * 다시 triage를 돌린다. 마지막 전이의 사유가 그 둘을 가르는 유일한 기록이다.
  *
- * 마커 dedupe는 다른 팔들과 같은 계약이고(`harnessUnparkedComment`), 전이보다 **먼저** 남긴다 —
- * 전이가 거부돼도(사람이 그 사이 라벨을 옮겼다) 30분마다 같은 코멘트를 다시 달지 않는다.
+ * 마커 dedupe는 다른 팔들과 같은 계약이지만(`harnessUnparkedComment`), **전이가 성공한 뒤에** 남긴다
+ * (r1 재리뷰 M3). 다른 팔들은 마커를 먼저 남긴다 — 거기서 마커는 "비싼 재점화를 이 창 안에 한 번만"의
+ * 근거이고, 놓친 재점화는 다음 창이 되돌린다. 여기는 반대다: 마커가 억제하는 것은 재시도 자체이고,
+ * 이 팔이 실패하면 주차된 피처는 **영원히** 돌아오지 않는다(해제 경로가 이것 하나뿐이다 — merge 단계
+ * (9)는 하네스 PR을 사람이 머지하므로 정상 경로에서 돌지 않는다). 그래서 실패에 기우는 방향이 다르다:
+ * 전이가 거부되면 아무 흔적도 남기지 않고(액션 한 줄만), 다음 sweep이 그대로 다시 시도한다.
  */
 export const PARKED_ON_HARNESS = /waiting for harness issue #(\d+)/;
 export const harnessUnparkedComment = (harness, issue) => `<!-- factory-sweeper harness-unparked harness=${harness} issue=${issue} -->`;
@@ -306,11 +351,10 @@ async function sweepHarnessUnpark({ gh, transition, harnessSettled, actions }) {
         actions.push({ kind: "harness-unpark-skipped", issue: it.number, harness, reason: settled?.why || "harness issue not settled" });
         continue;
       }
-      await gh.comment(it.number, `${marker}\n하네스 이슈 #${harness}: ${settled.why} — \`factory:needs-info\`에서 \`factory:queue\`로 되돌립니다(ADR-020 KTB-23). 하네스 PR은 사람이 머지하므로 이 해제는 sweeper가 합니다.`);
       const t = await transition({ issue: it.number, to: "factory:queue", reason: `harness issue #${harness} closed` });
-      actions.push(t?.ok
-        ? { kind: "harness-unparked", issue: it.number, harness }
-        : { kind: "harness-unpark-refused", issue: it.number, harness, reason: t?.reason ?? "unknown" });
+      if (!t?.ok) { actions.push({ kind: "harness-unpark-refused", issue: it.number, harness, reason: t?.reason ?? "unknown" }); continue; }
+      await gh.comment(it.number, `${marker}\n하네스 이슈 #${harness}: ${settled.why} — \`factory:needs-info\`에서 \`factory:queue\`로 되돌렸습니다(ADR-020 KTB-23). 하네스 PR은 사람이 머지하므로 이 해제는 sweeper가 합니다.`);
+      actions.push({ kind: "harness-unparked", issue: it.number, harness });
     } catch (e) {
       actions.push({ kind: "error", step: "harness-unpark", issue: it.number, error: String(e.message || e) });
     }
@@ -337,7 +381,7 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, quick = false }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, releaseIfStale = null, quick = false }) {
   const actions = [];
   const nowMs = Date.parse(now);
   if (quick) actions.push({ kind: "quick-sweep", skipped: ["quarantine", "token-expiry"] });
@@ -393,6 +437,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
               : `\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`;
             // 마커를 먼저 남긴다(stalled 팔과 같은 이유 — M4). dispatch 실패는 다음 sweep이 다시 시도한다.
             await gh.comment(it.number, `${marker}\n${note}`);
+            // KTB-28 (c): stalled 팔과 같은 이유 — 잔해 락이 남아 있으면 이 재시도도 claim에서 죽는다.
+            await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "blocked-retry" });
             if (await safeDispatch({ dispatchStage, stage: retryStage, issue: it.number, actions, step: "blocked-retry" })) {
               actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage, ...(isApiError ? { attempt } : {}) });
             }
@@ -406,7 +452,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
-  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, actions });
+  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
   await sweepLabelSetRepair({ gh, actions });
   if (quick) return actions;                       // KTB-26 — 아래 두 팔은 시간에 묶여 있다(cron의 몫)

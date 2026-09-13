@@ -738,7 +738,7 @@ You will be notified when it completes.
 
 **영향**: `templates/factory/claude/commands/factory-implement.md`(+ 설치본 `.claude/commands/`), `templates/factory/claude/workflows/factory-implement.js`(+ 설치본 `.claude/workflows/`), `factory/bin/run-stage.js`(주석만 — 산출 프롬프트는 이미 옳았다). 테스트: `templates.test.js`(다섯 디스패처 md 모두 `$1`/`$2` 부재), `workflows.test.js`(`raw: "2 true"`→하네스 변형 프롬프트, `raw: "2"`→평시 규칙, `args.issue`/`args.harness_issue` 폴백).
 
-### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29
 
 한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
@@ -964,7 +964,7 @@ claim 락       : refs/heads/factory/lock-15  ← 고아
    프로젝트가 손으로 올린 값을 매번 되돌린다. 대신 **하한을 린트로 못 박는다** — `lib/yml-lint.js`의
    `stage-timeout-floor`: review·implement는 `timeout-minutes ≥ 60`(그 아래로 내려가면 "작업이
    실패했다"가 아니라 "작업이 끝나기 전에 잘렸다"가 반복되고 그 런의 비용은 전액 매몰된다).
-2. **잘린 잡이 스스로 뒷정리한다.** 스테이지 워크플로 5개에 `if: cancelled() || failure()`인 스텝을
+2. **잘린 잡이 스스로 뒷정리한다.** 스테이지 워크플로 5개에 `if: always() && job.status != 'success'`인 스텝을
    더했다 — `node .factory/bin/run-stage.js <stage> <issue> --aborted "${{ job.status }}"`. 이 경로
    (`abortStage`)가 하는 일은 정확히 셋이고 **`claude`는 뜨지 않는다**:
    - run 기록 한 줄 `aborted: <status> (job timeout or cancel)` (+ `factory/records` 동기화),
@@ -982,8 +982,12 @@ claim 락       : refs/heads/factory/lock-15  ← 고아
    단 한 줄, `git checkout ${{ github.sha }} -- .factory || true`를 앞에 둔다: implement는 에이전트
    브랜치 위에, review·merge는 `checkoutHead`가 detach한 PR head 위에 있으므로, **정리 코드만은 언제나
    base의 것**이어야 한다(`runStage` 본체는 checkout 이전에 로드돼 이미 그 불변식을 갖고 있다).
-4. **린트가 구조를 고정한다** — `aborted-cleanup-step`: 스테이지 워크플로에는 `if: cancelled() ||
-   failure()`로 `--aborted`를 부르는 "Aborted cleanup" 스텝이 있어야 한다.
+4. **린트가 구조를 고정한다** — `aborted-cleanup-step`: 스테이지 워크플로에는 `if: always() &&
+   job.status != 'success'`로 `--aborted`를 부르는 "Aborted cleanup" 스텝이 있어야 한다(이 조건의
+   근거는 아래 r1 — `cancelled() || failure()`는 잡 타임아웃·러너 소실을 덮지 못한다). 그리고
+   `runner-id-consistent`: `Run stage`와 `Aborted cleanup`이 **같은** `FACTORY_RUNNER_ID` 식을 실어야
+   한다 — 정리 스텝은 그 값으로 "이 락이 내 것인가"를 가르므로, 둘이 갈리면 자기 락을 남의 것으로 읽고
+   고아로 남긴다(r1 재리뷰 M5).
 
 **알려진 한계 (r1에서 해소)**: 최초 판결은 review에서 온 blocked을 `BLOCKED_RETRY`/`BLOCKED_RETRY_STAGE`에
 넣지 않았다 — sweeper가 그 이슈를 한 번 더 밀지 않고 곧장 `needs-human`으로 올렸고, 사유 문구의
@@ -1066,6 +1070,116 @@ GitHub Actions의 `schedule`은 원래 best-effort다(부하가 걸리면 건너
 `factory/bin/sweep.js`(`--quick` 파싱, 토큰 조회 생략), `factory/lib/sweeper.js`(`quick` 인자,
 `safeDispatch`). 테스트: `sweeper.test.js` 2건(quick이 끄는 것과 cron 대조군, dispatch 실패 격리),
 `yml-lint.test.js` 2건(모든 스테이지+retro가 Sweep으로 끝난다, 린트 규칙).
+
+#### KTB-28 — 고아 락이 네 번의 dispatch를 조용히 삼켰다: 잔해는 회수하고, 거부는 시끄럽게
+
+**질문**: 데모 #15의 review 락 `refs/heads/factory/lock-15`는 04:39에 **타임아웃으로** 사라진 런
+(러너 `gha-34736609544`, KTB-24의 정리 스텝이 배포되기 **전**)이 남긴 것이다. 그 뒤의 모든 dispatch —
+sweeper stalled 팔 ×4 + 관측자의 수동 재실행 — 가 26~40초 만에 `claim()`에서 죽었다. 그런데 그 죽음은
+`exit 0`이었다: run 기록 한 줄 없음, 이슈 코멘트 없음, 잡 결론 `success`. Actions 목록에서도 이슈
+타임라인에서도 **"디스패치가 잘 됐다"로 보였고**, 그래서 같은 벽에 네 번을 더 밀었다. 두 가지를 물었다:
+락이 잔해인지 아무도 묻지 않는 이유, 그리고 "아무 일도 하지 않았다"가 성공으로 보고되는 이유.
+
+**결정**: 넷으로 나눈다.
+
+(a) **잔해 락은 회수한다** — `factory/lib/claim.js`. push가 거부되면 지금도 소유자 제목을 읽는다
+(`lock issue=… stage=… runner=…`). 그 `runner=`가 `gha-<run_id>` 모양이면 주입된 러너로
+`gh run view <id> --json status`를 물어, 상태가 `completed`면 그 락은 **잔해**다: 지우고 다시 세운 뒤
+`{ok:true, reclaimed:{runner,status}}`로 돌려준다(`run-stage`가 `lock: reclaimed from completed runner
+gha-<id>` 한 줄을 남긴다). 삭제와 재생성 사이에 다른 러너가 먼저 잡으면 재생성이 실패하고 — 그때는
+**회수하지 못한 것**이라 평범한 거부로 돌아간다(쥐지 않은 락을 쥐었다고 말하지 않는다). 조회가
+실패했거나(자격증명·네트워크·삭제된 런) 상태를 파싱하지 못했거나 러너가 로컬(`local/<host>`, 물어볼
+API가 없다)이면 **살아 있는 것으로 본다**: fail closed — 틀린 회수는 같은 이슈에 두 스테이지를 동시에
+넣는 사고이고, 틀린 대기는 다음 sweep이 되돌린다.
+
+(b) **거부된 claim은 시끄럽다** — `factory/bin/run-stage.js`. run 기록 한 줄
+(`claim refused: lock held by gha-<id> (<status>)`) + 같은 내용의 짧은 이슈 코멘트
+(`<!-- factory-claim-refused … -->`) + **`exit 2`**. 잡이 실패로 끝나야 Actions 목록에서 빨갛게 보이고,
+"밀었는데 아무 일도 없었다"가 관측 가능해진다. 정상적인 경쟁(다른 러너가 진짜로 돌고 있다)도 이 길로
+오지만, 그 사실이 기록되는 편이 침묵보다 낫다.
+
+  이 변경은 **정리 스텝에 부작용이 있다**: `Aborted cleanup`은 `always() && job.status != 'success'`로
+  도니까, 이제 claim에 실패한 런에서 **반드시** 돈다. 그 런은 스테이지를 한 걸음도 돌지 않았는데
+  라벨은 (남의 러너가 돌고 있으므로) in-flight 값 그대로다 — KTB-24 fix의 "남의 락은 지우지 않는다"만으로는
+  부족했다. 그래서 `abortStage`가 소유자를 **먼저** 묻고, 락이 남의 것이면 **전이도 하지 않는다**
+  (`aborted: lock is held by <runner> — this run never owned the stage, no transition`). 정리 코드가
+  남의 살아 있는 스테이지를 blocked으로 쏘는 일은 없어야 한다.
+
+(c) **sweeper는 밀기 전에 회수한다** — `factory/lib/sweeper.js`의 stalled 팔과 blocked 재시도 팔이
+`releaseIfStale(issue)`(`bin/sweep.js`가 `lockHolder` + `runnerState`로 조립한다)를 dispatch **직전**에
+부른다. dispatch는 락을 보지 않으므로, 이 물음이 없으면 새 런은 뜨고 claim에서 죽는 일만 반복한다.
+회수 실패는 재점화를 막지 않는다(성공 확률을 올리는 조치이지 전제 조건이 아니다) — `error` 액션 한 줄만 남는다.
+
+(d) **재점화에는 상한이 있다** — 같은 이슈+스테이지의 stalled 재점화는 **2회**까지(`STALLED_RESTART_LIMIT`,
+세는 근거는 이슈에 남은 `factory-sweeper restarted stage=… issue=…` 마커 개수다 — 마커가 곧 기록이고,
+별도 카운터를 두면 둘이 갈라진다). 상한에 닿으면 dispatch도 코멘트도 하지 않고 `factory:needs-human`
+(사유 `stalled restart limit (2) reached`)으로 올린다. 두 번 밀어도 같은 자리에 멈춰 있으면 사라진 것은
+런이 아니라 **가정**이고, 재점화 한 번의 값은 plan 기준 ~$12다.
+
+**알려진 한계**: 회수 판정은 `gh run view`가 붙어야 성립한다 — 러너가 GitHub 밖이면(`local/<host>`)
+그 락은 영원히 "살아 있다"로 읽힌다(사람이 `factory/lib/claim.js`의 `release`로 지우는 길은 그대로다).
+그리고 (b) 때문에 **정상적인 claim 경쟁도 잡 실패로 기록된다** — 라벨 이벤트와 sweeper dispatch가 같은
+스테이지를 동시에 물었을 때가 그렇다. 실패한 잡 하나와 침묵 중에서 전자를 골랐다.
+
+**영향**: `factory/lib/claim.js`(`ghaRunIdOf`·`runnerState`·`claim`의 회수 분기·`lockHolder` 정규식),
+`factory/bin/run-stage.js`(claim 거부 경로·`abortStage`의 소유자 우선 판정), `factory/lib/sweeper.js`
+(`releaseStaleLock`·`STALLED_RESTART_LIMIT`), `factory/bin/sweep.js`(`releaseIfStale` 조립),
+`factory/lib/yml-lint.js`(`runner-id-consistent`). 테스트: `claim.test.js` 6건, `run-stage.test.js` 4건,
+`sweeper.test.js` 6건, `yml-lint.test.js` 1건.
+
+#### KTB-29 — review가 K를 물지 않았다: 라운드 4의 reject가 또 rework으로 갔다
+
+**질문**: 스펙 §3.2에는 `rework --> needs_human: round > K` 엣지가 있고 CHARTER의 `K`가 그 한도인데,
+데모 #18은 **K=3에서 리뷰 라운드 4**에 도달해 또 `factory:rework`으로 갔다. `run-stage.js`의
+`nextState`를 읽어 보면 이유가 분명하다: review 분기는 `decision === "approved"` 하나만 보고 나머지를
+전부 rework으로 보낸다. `transition.js`의 `round ≤ K` 검사는 존재하지만 **`factory:approved` 경로에만**
+걸린다 — 그런데 K를 넘기는 것은 언제나 통과하지 **못하는** 쪽이다. 즉 그 검사는 절대 발화하지 않는
+자리에 있었고, 무한 rework 루프의 실질적 상한은 없었다.
+
+**결정**: `nextState(stage, data, { maxRounds })`가 K를 본다. review에서 판정이 `approved`가 아니고
+`round >= K`이면 `factory:needs-human`으로 가고, 사유는
+`review rounds exhausted (K=<K>): <n> must_fix remain`이다(전이는 `awaiting-review → needs-human`,
+그래프에 이미 있는 엣지다). `>=`인 이유: 라운드 K의 리뷰가 또 reject이면 다음 rework은 라운드 K+1이
+되고, 그것이 스펙이 금지한 지점이다 — 예산을 다 쓴 것은 지금이다. `approved`는 어느 라운드에서든
+통과한다(K는 실패를 끊는 한도이지 성공을 막는 한도가 아니다). K를 모르면(구형 배선·컨텍스트 읽기
+실패) 예전 동작 그대로 rework이다 — 모르는 한도로 사람을 부르지 않는다. 라운드 번호는 KTB-25가 고친
+창(마지막 재큐 이후의 review handoff 개수)에서 그대로 온다.
+
+**함께**: **역할별 판정 뒤집힘**(관측 O21 — #18에서 approve → reject 두 건)이 §12.4의 지표가 된다.
+이번 라운드의 verdict를 **직전 review handoff**(같은 창)의 역할별 verdict와 비교해 뒤집힌 것만
+`review flips: correctness approve→reject, spec-conformance reject→approve` 한 줄로 run 기록에 남긴다.
+코드가 그대로인데 판정이 흔들리면 K 예산이 리뷰어의 분산에 쓰인다는 뜻이고, 그 빈도는 로스터 구성과
+프롬프트를 고칠 때 필요한 1차 데이터다. 조회 실패는 흔적만 남기고 스테이지를 죽이지 않는다 —
+지표이지 게이트가 아니다.
+
+**영향**: `factory/bin/run-stage.js`(`nextState`·`reviewRoundsExhausted`·`reviewExhaustedReason`·
+`reviewFlips`·`priorReviewVerdicts` dep), `docs/superpowers/specs/2026-09-10-factory-design.md` §3.2.
+테스트: `run-stage.test.js` 6건(라운드 K reject → needs-human, K 미만 reject → rework, 어느 라운드의
+approve든 approved, `nextState` 순수 함수, flips 계산, flips 기록과 조회 실패).
+
+#### r1 재리뷰 잔손질 (M1~M5)
+
+`2ae6f38` 재리뷰가 남긴 다섯 가지. 전부 "고침은 들어갔는데 그 고침을 설명하는 자리가 옛 상태로 남았다"
+또는 "고침이 새로 만든 틈"이다.
+
+- **M1** — 문서가 정리 스텝의 조건을 아직 `if: cancelled() || failure()`로 적고 있었다(스펙 §4.1,
+  이 ADR의 KTB-24 항목). 코드·템플릿·린트는 이미 `always() && job.status != 'success'`다 → 문서를 맞췄다.
+- **M2** — 스펙 §4.3의 sweeper 팔이 "네 가지"로 남아 있었다. 실제로는 일곱이다(in-progress 재큐 ·
+  blocked 처리 · 격리 정책 · 토큰 만료 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구;
+  `--quick`은 시간에 묶인 둘을 뺀 다섯). 재리뷰 메모는 "여섯"이라고 적었지만 소스를 세면 일곱이라
+  일곱으로 적었다. §3.2 전이도에도 blocked 재시도 엣지 여섯과 `awaiting_review → needs_human`,
+  `in_progress → needs_info`가 빠져 있었다 → 그렸다.
+- **M3** — `sweepHarnessUnpark`가 마커를 전이 **앞에** 남겼다. 다른 팔들은 그게 맞다(마커는 "비싼
+  재점화를 이 창에 한 번만"의 근거이고, 놓친 재점화는 다음 창이 되돌린다). 이 팔은 반대다: 마커가
+  억제하는 것은 재시도 자체이고, 이 팔이 실패하면 주차된 피처는 **영원히** 돌아오지 않는다(해제
+  경로가 이것뿐이다 — 하네스 PR은 사람이 머지하므로 merge 단계 (9)는 정상 경로에서 돌지 않는다).
+  → 마커는 전이가 **성공한 뒤에** 남긴다. 거부되면 아무 흔적 없이 다음 sweep이 다시 시도한다.
+- **M4** — `lockHolder`의 "없는 ref" 정규식에 `|not found`가 붙어 있었다. 그 조각은 **레포를 못 찾은
+  실패**("remote: Repository not found." — 토큰 만료·권한 박탈)까지 "락이 없다"로 읽고, 그러면
+  `abortStage`가 살아 있는 남의 락을 지우러 간다 — 이 함수가 막으려던 바로 그 사고다 → 지웠다.
+- **M5** — 린트 `runner-id-consistent`: `Run stage`와 `Aborted cleanup`은 **같은** `FACTORY_RUNNER_ID`
+  식을 실어야 한다. 정리 스텝은 그 값으로 "이 락이 내 것인가"를 가르므로(KTB-24 fix), 둘이 갈리면
+  자기 락을 남의 것으로 읽고 고아로 남긴다 — 데모 #15의 잔해가 바로 그 모양이었다.
 
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21·23

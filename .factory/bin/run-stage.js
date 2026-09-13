@@ -169,8 +169,31 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   }
   // merge는 workspace를 신뢰 등록할 필요가 없다 — claude -p를 전혀 부르지 않는다(스크립트 전용).
   if (stage !== "merge") await d.trustWorkspace();
+  /**
+   * ADR-020 KTB-28 — **거부된 claim은 시끄럽다.** 예전에는 stderr 한 줄을 남기고 `exit 0`으로 물러났다:
+   * run 기록도, 이슈 코멘트도, 잡 실패도 없었다. 데모 #15가 그 침묵 위에서 돌았다 — 04:39에 타임아웃으로
+   * 죽은 review 런(정리 스텝 이전 배포본)의 `lock-15`가 고아로 남았고, 그 뒤의 모든 dispatch(sweeper
+   * stalled ×4 + 수동)가 26~40초 만에 여기서 죽었는데 잡 결론은 전부 `success`였다. 바깥에서 보면
+   * "디스패치가 잘 됐다"였고, 그래서 같은 벽에 네 번을 더 밀었다.
+   *
+   * 이제 셋을 한다: 누가 쥐고 있고 그 러너가 어떤 상태인지 run 기록 한 줄, 같은 내용의 짧은 이슈
+   * 코멘트(사람이 이슈만 보고도 안다), 그리고 `exit 2` — 잡을 **실패로** 끝내 Actions 목록에서 빨갛게
+   * 보이게 한다. 정말 남이 돌고 있는 정상적인 경쟁도 여기로 오지만(그때는 이 런이 없어지는 게 맞다),
+   * 그 사실이 기록되는 편이 침묵보다 낫다. 락이 잔해였다면 `claim()`이 이미 회수했다(KTB-28 (a)).
+   */
   const c = await d.claim();
-  if (!c.ok) { console.error(`factory: issue #${issue} already claimed by ${c.holder}`); return 0; }
+  if (!c.ok) {
+    const holder = c.runner || c.holder || "unknown";
+    const line = `claim refused: lock held by ${holder} (${c.status || "unknown"})`;
+    console.error(`factory: issue #${issue} — ${line}`);
+    record([line]);
+    try {
+      await d.comment?.(issue, `<!-- factory-claim-refused issue=${issue} stage=${stage} -->\n\`${stage}\` 스테이지가 락을 잡지 못했습니다 — ${holder}가 쥐고 있습니다(상태: ${c.status || "unknown"}). 그 러너가 이미 끝났다면 락은 잔해이고, 다음 sweep이 회수합니다(ADR-020 KTB-28).`);
+    } catch (e) { record([`claim refused: comment failed — ${e?.message || e}`]); }
+    return 2;
+  }
+  // 잔해 락을 회수하고 들어왔다면 그 사실이 기록의 1차 증거다 — 다음 조사가 이 줄로 grep한다.
+  if (c.reclaimed) record([`lock: reclaimed from completed runner ${c.reclaimed.runner}`]);
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
@@ -437,6 +460,18 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
+     * ADR-020 KTB-29 / 관측 O21 — **같은 역할이 라운드 사이에 판정을 뒤집는 빈도**는 §12.4의 지표다
+     * (데모 #18에서 approve → reject 두 건이 관측됐다: 코드가 그대로인데 판정이 흔들리면 K 예산이
+     * 리뷰어의 분산에 쓰인다). 앞 라운드의 review handoff에 실린 역할별 verdict와 이번 것을 비교해
+     * 한 줄 남긴다. 조회 실패는 흔적만 남기고 스테이지를 죽이지 않는다 — 지표이지 게이트가 아니다.
+     */
+    if (stage === "review" && Array.isArray(v.data?.verdicts) && d.priorReviewVerdicts) {
+      try {
+        const flips = reviewFlips(await d.priorReviewVerdicts(), v.data.verdicts);
+        if (flips.length) record([`review flips: ${flips.join(", ")}`]);
+      } catch (e) { record([`review flips: unreadable — ${e?.message || e}`]); }
+    }
+    /**
      * ADR-020 KTB-23 — builder가 "보호 경로를 고쳐야 끝낼 수 있다"고 말했다. 그 말은 이제 PR 본문의
      * 산문이 아니라 handoff의 필드(`harness_needed[]`)이고, 여기가 그것을 읽는 유일한 자리다.
      *
@@ -485,7 +520,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
-    const t = await d.transition({ to: nextState(stage, v.data), data: v.data });
+    /**
+     * ADR-020 KTB-29 — K 한도는 스펙 §3.2의 엣지(`rework → needs_human: round > K`)인데 코드에는
+     * 없었다: `nextState`의 review 분기는 `decision === "approved"` 하나만 보고 나머지를 전부 rework으로
+     * 보냈다. 데모 #18은 K=3인데 리뷰 라운드 4에서 또 rework으로 갔다 — 무한 루프의 상한이 사실상
+     * 없었던 셈이다(`transition.js`의 `round ≤ K` 검사는 **approved 경로에만** 걸린다: 통과하는 리뷰는
+     * 애초에 K를 넘길 이유가 없고, 넘기는 것은 언제나 실패하는 쪽이다).
+     *
+     * K는 CHARTER의 hard limit이고 컨텍스트로 실려 온다(`ctx.limits.K`). 값이 없으면(구형 배선·읽기
+     * 실패) 예전 동작 그대로 rework이다 — 모르는 한도로 사람을 부르지 않는다.
+     */
+    const maxRounds = ctx?.limits?.K;
+    const to = nextState(stage, v.data, { maxRounds });
+    const exhausted = stage === "review" && to === "factory:needs-human";
+    const t = await d.transition({ to, data: v.data, ...(exhausted ? { reason: reviewExhaustedReason(v.data, maxRounds) } : {}) });
     record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
     return t.ok ? 0 : 2;
   } catch (e) {
@@ -539,8 +587,21 @@ export const abortedLine = (status) => `aborted: ${status} (job timeout or cance
 export async function abortStage({ stage, issue, status = "cancelled", runnerId = "unknown", deps }) {
   const d = deps;
   const lines = [abortedLine(status)];
+  /**
+   * 소유자를 **먼저** 묻는다(ADR-020 KTB-28). KTB-28 (b)로 claim 거부가 `exit 2`가 된 뒤, 이 스텝은
+   * "락을 못 잡아 물러난 런"에서 **반드시** 돈다(잡이 실패로 끝나므로). 그 런은 이 스테이지를 단 한
+   * 걸음도 돌지 않았는데, 라벨은 지금 돌고 있는 **다른** 러너 때문에 in-flight 값 그대로다 — 소유자를
+   * 묻지 않고 그 라벨을 `factory:blocked`로 밀면, 정리 코드가 남의 살아 있는 스테이지를 쏘는 셈이다
+   * (락을 지우지 않는 것만으로는 부족했다). 락이 남의 것이면 전이도 하지 않고 기록만 남긴다.
+   */
+  let held = null;
+  try { held = await d.lockHolder?.(); }
+  catch (e) { lines.push(`lock: holder lookup failed — ${e?.message || e}`); }
+  const foreign = held?.present === true && Boolean(held.runner) && held.runner !== runnerId;
   const want = IN_FLIGHT_LABEL[stage];
-  if (!want) {
+  if (foreign) {
+    lines.push(`aborted: lock is held by ${held.runner} — this run never owned the stage, no transition`);
+  } else if (!want) {
     lines.push(`aborted: ${stage} is script-only — lock release and record only`);
   } else {
     let labels = null;
@@ -571,13 +632,12 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
    * 없다), 우리 것이면 지운다, 남의 것이면 그대로 두고 누구 것인지 적는다. 소유자를 **읽지 못했을**
    * 때(조회 실패·제목 파싱 실패·구형 배선)는 예전 동작대로 지운다: 고아 락을 남기는 쪽이 이 스텝의
    * 존재 이유를 통째로 지우고, 그 경우 이 런이 락의 주인일 가능성이 압도적이다.
+   *
+   * 조회 자체는 위(전이 판단)에서 이미 했다 — 같은 런에서 두 번 묻지 않는다.
    */
-  let held = null;
-  try { held = await d.lockHolder?.(); }
-  catch (e) { lines.push(`lock: holder lookup failed — ${e?.message || e}`); }
   if (held?.present === false) {
     lines.push("lock: already released");
-  } else if (held?.present === true && held.runner && held.runner !== runnerId) {
+  } else if (foreign) {
     lines.push(`lock: held by ${held.runner} — left alone`);
   } else {
     if (held?.present === null) lines.push(`lock: holder unreadable (${held.reason}) — releasing anyway`);
@@ -670,9 +730,35 @@ export async function assertNoWriteStageClean({ run, cwd }) {
   return { ok: dirty.size === 0, dirty: [...dirty] };
 }
 
-export function nextState(stage, data) {
+/**
+ * ADR-020 KTB-29 — **리뷰 라운드 예산이 다 됐는가.** 셋이 모두 참일 때만 참이다: K가 실제 정수 한도이고,
+ * 라운드 번호를 알고 있고(`countHandoffs`가 세어 준 값 — 에이전트의 자기 신고가 아니다), 그 라운드가
+ * K에 **도달**했다. `>=`인 이유: 라운드 K의 리뷰가 또 reject이면 다음 rework은 라운드 K+1이 되고,
+ * 그건 스펙 §3.2가 "round > K"로 금지한 바로 그 지점이다 — 예산을 다 쓴 것은 지금이다.
+ */
+export const reviewRoundsExhausted = (data, maxRounds) =>
+  Number.isInteger(maxRounds) && maxRounds >= 1 && Number.isInteger(data?.round) && data.round >= maxRounds;
+/** 사람이 읽는 한 줄이자 전이 코멘트의 사유 — 남은 must_fix 개수가 "무엇이 안 끝났는가"의 요약이다. */
+export const reviewExhaustedReason = (data, maxRounds) =>
+  `review rounds exhausted (K=${maxRounds}): ${(data?.must_fix || []).length} must_fix remain`;
+
+/**
+ * ADR-020 KTB-29 / 관측 O21 — 앞 라운드의 역할별 verdict와 이번 것을 비교해 뒤집힌 것만 뽑는다
+ * (`correctness approve→reject`). 앞 라운드에 없던 역할은 뒤집힘이 아니다(비교 대상이 없다).
+ */
+export function reviewFlips(prev, now) {
+  const before = new Map((prev || []).filter((v) => v?.role).map((v) => [v.role, v.verdict]));
+  return (now || [])
+    .filter((v) => v?.role && before.has(v.role) && before.get(v.role) !== v.verdict)
+    .map((v) => `${v.role} ${before.get(v.role)}→${v.verdict}`);
+}
+
+export function nextState(stage, data, { maxRounds = null } = {}) {
   if (stage === "triage") return { ready: "factory:ready", "needs-info": "factory:needs-info", "wont-do": "factory:wont-do" }[data.disposition];
-  if (stage === "review") return data.decision === "approved" ? "factory:approved" : "factory:rework";
+  if (stage === "review") {
+    if (data.decision === "approved") return "factory:approved";       // 통과하는 리뷰에 K는 걸리지 않는다
+    return reviewRoundsExhausted(data, maxRounds) ? "factory:needs-human" : "factory:rework";
+  }
   return NEXT_OF[stage];
 }
 
@@ -859,6 +945,12 @@ async function main() {
      * 재실행된 이슈의 첫 리뷰가 round 2로 시작해 K=3 중 2를 이미 쓴 상태였다).
      */
     countHandoffs: async (s) => parseHandoffs(commentsSinceRequeue(await gh.comments(issue))).filter((h) => h.stage === s && h.issue === issue).length,
+    /**
+     * KTB-29 / 관측 O21: 이번 주기(마지막 재큐 이후)의 **직전** review handoff가 실은 역할별 verdict.
+     * `countHandoffs`와 같은 창을 본다 — 재큐 이전 라운드는 다른 코드에 대한 판정이라 "뒤집혔다"고
+     * 셀 수 없다. 없으면 null(첫 라운드) — `reviewFlips`가 빈 배열로 받는다.
+     */
+    priorReviewVerdicts: async () => latestHandoff(commentsSinceRequeue(await gh.comments(issue)), "review")?.data?.verdicts ?? null,
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
     /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
     ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),

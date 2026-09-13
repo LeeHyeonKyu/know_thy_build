@@ -110,7 +110,7 @@ stateDiagram-v2
   queue --> needs_info: triage
   queue --> wont_do: triage
   queue --> needs_human: triage 산출물 검증 실패
-  needs_info --> queue: 사람
+  needs_info --> queue: 사람 · sweeper 주차 해제
   ready --> planned: plan (3라운드 토론)
   planned --> in_progress: implement claim
   in_progress --> awaiting_review: gates GREEN + PR
@@ -127,8 +127,20 @@ stateDiagram-v2
   rework --> needs_human: round > K
   in_progress --> needs_human: RED × M · 예산(켠 경우) · 재시도 R
   blocked --> needs_human: sweeper
+  blocked --> queue: blocked 재시도 (origin=queue)
+  blocked --> ready: blocked 재시도 (origin=ready)
+  blocked --> planned: blocked 재시도 (origin=planned|in_progress)
+  blocked --> awaiting_review: blocked 재시도 (origin=awaiting_review)
+  blocked --> approved: blocked 재시도 (origin=approved, 게이트 재확인 뒤)
+  blocked --> rework: merge 재시도에서 PR CONFLICTING
+  in_progress --> needs_info: 하네스 대기 주차
+  awaiting_review --> needs_human: 산출물 검증 실패 · round ≥ K
   needs_human --> queue: 사람
 ```
+
+`blocked --> …` 재시도 엣지들은 sweeper의 blocked 팔과 `run-stage`의 진입 가드가 **`factory-blocked-origin` 마커 하나로** 함께 판정한다(§4.3-2, ADR-020 KTB-15b·22·24): 그 blocked이 **그 스테이지 자신의 정상 진입 라벨에서** 왔을 때만 되돌아간다(그 외에는 전이 없이 거부하고 사람에게 간다). 되돌아가는 자리는 언제나 그 스테이지의 진입 라벨이고(`in_progress`에서 온 blocked도 `planned`로 간다 — implement가 그 자리를 다시 채운다), merge만 예외로 게이트를 이번 런에서 다시 GREEN으로 확인한 **뒤에** `approved`로 돌아간다.
+
+`rework --> needs_human: round > K`는 review 스테이지가 **직접** 만든다(ADR-020 KTB-29): 판정이 `approved`가 아니고 이번 라운드가 K에 도달했으면 `awaiting_review`에서 곧장 `needs_human`으로 가고, 사유는 `review rounds exhausted (K=<K>): <n> must_fix remain`이다. 라운드 번호는 마지막 재큐 이후의 review handoff 개수로 센다(KTB-25).
 
 `awaiting_review --> blocked`·`approved --> blocked`는 게이트·GitHub API 조회 자체가 실패했을 때(환경·크리덴셜 문제) 두 스테이지 모두 `blocked`로 끝날 수 있어 생긴 엣지이고, `approved --> rework`는 merge 스테이지가 PR을 `CONFLICTING`으로 판정했을 때(사유 "merge conflict — rebase onto \<default\>") implement 재진입으로 돌려보내는 경로다(Plan 2 실행 판결, ADR-015 — R3).
 
@@ -226,7 +238,10 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 **다섯 스테이지 워크플로의 마지막 두 스텝은 고정이다(ADR-020 KTB-24·KTB-26)** — 얇은 yml 규칙의 유일한
 예외이고, 둘 다 `.factory/bin/`의 로직을 부를 뿐이다:
 
-1. `Aborted cleanup` — `if: cancelled() || failure()`, `run-stage.js <stage> <issue> --aborted "${{ job.status }}"`.
+1. `Aborted cleanup` — `if: always() && job.status != 'success'`, `run-stage.js <stage> <issue> --aborted "${{ job.status }}"`.
+   (`cancelled() || failure()`가 아닌 이유: 그 둘은 "런이 취소됐다"와 "앞 스텝이 실패했다"만 참으로 만들어
+   잡 타임아웃·러너 소실을 덮지 못한다 — ADR-020 KTB-24 r1. 이 스텝의 `FACTORY_RUNNER_ID`는 `Run stage`의
+   것과 **같은 식**이어야 한다: 정리가 그 값으로 "이 락이 내 것인가"를 가른다(린트 `runner-id-consistent`).)
    잡 타임아웃·취소는 `run-stage.js`의 `finally`를 실행하지 않는다(SIGKILL): 락이 고아로 남고, 전이도
    코멘트도 run 기록도 없이 이슈가 진입 라벨에 앉는다. 이 스텝이 `aborted:` 한 줄을 기록하고, 이슈가
    아직 그 스테이지의 in-flight 라벨이면 `factory:blocked`로 세우고(사유 `job <status> — retry via sweeper`,
@@ -472,11 +487,14 @@ const LOADER = {
 
 - 잡은 짧다(표 4.1). 6시간 상한은 문제가 아니다.
 - 구현 에이전트는 논리 단위마다 커밋·push한다. `Stop` 훅이 미push 변경이 있으면 종료를 거부한다.
-- **sweeper**(`factory-sweeper.yml`, 30분 주기 → `.factory/bin/sweep.js`)가 네 가지를 훑는다:
+- **sweeper**(`factory-sweeper.yml`, 30분 주기 → `.factory/bin/sweep.js`)가 **일곱 가지**를 훑는다. 1·2·5·6·7이 **상태 복구 팔**(`--quick`이 도는 것), 3·4가 **시간에 묶인 팔**(cron의 몫)이다:
   1. `factory:in-progress` 이슈의 heartbeat 코멘트(`<!-- factory-heartbeat issue=<n> -->`)가 30분 넘게 갱신되지 않았으면 lock을 회수하고, 같은 이슈의 `factory-retry issue=<n> count=<k>` 마커를 읽어 count+1이 R 이하면 `factory:planned`로 되돌린다(재큐 — §3.2 `in_progress --> planned` 엣지, 다음 재큐 코멘트에 갱신된 count가 남는다). count가 R을 넘으면 `factory:needs-human`으로 보낸다.
-  2. `factory:blocked` 이슈는 재시도하지 않고 곧바로 `factory:needs-human`으로 올린다 — 환경·크리덴셜 문제는 sweeper가 고칠 수 없다(§3.2 `blocked --> needs_human`).
+  2. `factory:blocked` 이슈는 기본적으로 `factory:needs-human`으로 올린다 — 환경·크리덴셜 문제는 sweeper가 고칠 수 없다(§3.2 `blocked --> needs_human`). **예외**(KTB-15b/22/24): `factory-blocked-origin` 마커가 말하는 origin이 그 스테이지 자신의 정상 진입 라벨이면 그 스테이지를 **한 번** 다시 띄운다(§3.2 `blocked --> queue|ready|planned|awaiting_review|approved|rework`). 사유가 API 쿼터/장애면 3회까지다. 밀기 직전에 잔해 락을 회수한다(아래 5와 같은 판정, KTB-28).
   3. 격리 정책(`.factory/quarantine.toml`, §5.2.5-⑤)을 적용한다: `consecutive_passes ≥ quarantine_return_after`인 항목은 복귀시키고, `quarantine_ttl_days` 경과 또는 `since` 파싱 실패(fail-closed) 항목은 만료 처리한다.
   4. 토큰 발급일(`FACTORY_TOKEN_ISSUED_AT`)이 334일(≈11개월)을 넘으면 "토큰 갱신 필요" `factory:needs-human` 이슈를 연다 — 같은 제목의 열린 이슈가 있으면 중복 생성하지 않는다(§4.4).
+  5. **멈춘 스테이지 재점화**(KTB-8, 위 "세 번째 팔") — `factory:ready|planned|awaiting-review|approved`에 앉아 있고 마지막 전이 코멘트가 `staleMinutes`보다 오래됐고 하트비트도 재점화 마커도 없는 이슈를 `workflow_dispatch`로 다시 띄운다. 밀기 직전에 **잔해 락을 회수한다**(KTB-28: 소유자의 워크플로 런이 `completed`면 그 락은 잔해다 — 조회 실패·로컬 러너는 살아 있는 것으로 본다). 같은 이슈+스테이지의 재점화는 **2회까지**이고, 그 뒤에는 `factory:needs-human`(사유 `stalled restart limit (2) reached`)으로 올린다.
+  6. **하네스 대기 주차 해제**(KTB-23 r1) — 마지막 전이 사유가 `waiting for harness issue #<m>`인 `factory:needs-info` 이슈에서 그 하네스 이슈가 닫혔으면(또는 그 브랜치의 PR이 머지됐으면) `factory:queue`로 되돌린다. 마커는 **전이가 성공한 뒤에** 남긴다 — 실패한 전이가 억제 마커를 남기면 그 피처는 영원히 주차된다.
+  7. **라벨-셋 복구**(KTB-18) — 상태 라벨을 2개 이상 가진 열린 이슈를 `factory:needs-human` 하나로 맞춘다(tier 라벨은 유지). 사람이 라벨을 API로 직접 얹었을 때 `run-stage`는 상태가 모호하다는 이유로 전이 없이 물러나므로, 그 이슈를 다시 보는 눈이 이것뿐이다.
   각 이슈·각 서브 스텝은 개별적으로 실패가 격리된다 — 하나가 에러를 던져도 나머지는 계속 처리된다.
 - **sweeping은 cron만이 아니다(ADR-020 KTB-26).** `schedule`은 best-effort라 실측에서 몇 시간짜리 공백이
   났고, 취소된 sweeper 런이 이슈 하나를 30분 넘게 방치했다 — 복구 장치가 가장 필요한 순간(사고 직후)에

@@ -194,6 +194,27 @@ test("yml-lint enforces the KTB-24/26 stage rules (and leaves non-stage files al
   expect(lintWorkflow(readFileSync(join(W, "factory-sweeper.yml"), "utf8"))).toEqual([]);
 });
 
+// r1 재리뷰 M5 — `Run stage`와 `Aborted cleanup`은 **같은** `FACTORY_RUNNER_ID` 식을 실어야 한다.
+// 둘이 갈리면 정리 스텝이 자기 런의 락을 "남의 것"으로 읽고(KTB-24 fix의 소유자 비교가 러너 id로
+// 이뤄진다) 고아 락을 그대로 남긴다 — 데모 #15의 잔해가 정확히 그 모양이었다.
+test("yml-lint pins FACTORY_RUNNER_ID to the same expression in both steps (M5)", () => {
+  const ok = readFileSync(join(W, "factory-review.yml"), "utf8");
+  expect(lintWorkflow(ok)).toEqual([]);
+  // 모든 스테이지 워크플로가 실제로 그렇다
+  for (const f of Object.keys(STAGE)) {
+    const ids = [...readFileSync(join(W, f), "utf8").matchAll(/^\s*FACTORY_RUNNER_ID:\s*(.+?)\s*$/gm)].map((m) => m[1]);
+    expect(ids.length, f).toBeGreaterThanOrEqual(2);
+    expect(new Set(ids).size, f).toBe(1);
+  }
+  // 정리 스텝의 값만 바꾸면 잡는다
+  const at = ok.indexOf("- name: Aborted cleanup");
+  const drifted = ok.slice(0, at) + ok.slice(at).replace("FACTORY_RUNNER_ID: gha-${{ github.run_id }}", "FACTORY_RUNNER_ID: gha-cleanup");
+  expect(lintWorkflow(drifted)).toEqual([expect.objectContaining({ rule: "runner-id-consistent" })]);
+  // 아예 빠져도 잡는다
+  const missing = ok.slice(0, at) + ok.slice(at).replace("          FACTORY_RUNNER_ID: gha-${{ github.run_id }}\n", "");
+  expect(lintWorkflow(missing)).toEqual([expect.objectContaining({ rule: "runner-id-consistent" })]);
+});
+
 test("sweeper and integrity workflows", () => {
   const s = readFileSync(join(W, "factory-sweeper.yml"), "utf8");
   expect(s).toContain("cron: '*/30 * * * *'"); expect(s).toContain("workflow_dispatch:"); expect(s).toContain("run: node .factory/bin/sweep.js"); expect(s).toContain("timeout-minutes: 5");
