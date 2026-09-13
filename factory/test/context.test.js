@@ -40,3 +40,16 @@ test("plan context uses plan_roles and plan_rounds; tier falls back to default",
   expect(ctx.rounds).toBe(3);
   expect(ctx.spec_path).toBe(null);
 });
+
+// ADR-020 KTB-23 fix — spec-conformance 리뷰어는 `factory:harness` 이슈에서 빌드/러너 설정 변경을
+// "보호 경로 위반"으로 reject하면 안 된다(그것이 그 이슈가 하는 일이다). 그 판단의 유일한 재료는
+// context.json의 `issue.labels`다 — 리뷰어 역할 파일이 그 경로를 이름으로 가리키므로 여기서 고정한다.
+test("context.json carries the issue's labels — the reviewers' only view of factory:harness", async () => {
+  const r = root();
+  const labels = ["factory:awaiting-review", "factory:harness", "factory:tier-standard"];
+  const gh = { issue: vi.fn(async () => ({ number: 15, title: "harness: promote to M2", body: "", labels })), comments: vi.fn(async () => []) };
+  const ctx = await buildContext({ root: r, gh, issue: 15, stage: "review" });
+  expect(ctx.issue.labels).toEqual(labels);
+  const onDisk = JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8"));
+  expect(onDisk.issue.labels).toEqual(labels);
+});

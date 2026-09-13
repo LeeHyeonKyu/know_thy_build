@@ -153,6 +153,8 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
                         "echo x > .factory/ci-settings.json", "echo x > .factory/ci-settings-harness.json",
                         "echo x > .factory/roles.toml", "echo x > .factory/quarantine.toml",
                         "echo x > .factory/lessons/factory-builder.md", "echo x > .factory/package.json",
+                        // KTB-23 fix: 러너 자신의 **락파일**도 같다 — 실제로 설치되는 코드를 정하는 것은 락이다.
+                        "echo x > .factory/package-lock.json", "sed -i 's/a/b/' .factory/package-lock.json",
                         "echo x > .factory/actions/setup/action.yml",
                         "echo x > .claude/settings.json", "rm -rf .claude/agents",
                         "echo y >> .github/workflows/factory-implement.yml",

@@ -143,7 +143,9 @@ test("every stage workflow cleans up after a cancelled or failed job (KTB-24)", 
   for (const [f, [stage]] of Object.entries(STAGE)) {
     const y = readFileSync(join(W, f), "utf8");
     expect(y, f).toContain("- name: Aborted cleanup");
-    expect(y, f).toContain("if: cancelled() || failure()");
+    // KTB-24 fix: `cancelled() || failure()`는 "런이 취소됐다"와 "앞 스텝이 실패했다"만 덮는다 —
+    // 잡 타임아웃·러너 소실처럼 그 어느 쪽으로도 분류되지 않는 끝맺음에서 정리가 통째로 건너뛰어진다.
+    expect(y, f).toContain("if: always() && job.status != 'success'");
     expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} ${ISSUE_EXPR} --aborted "\${{ job.status }}"`);
     // 정리 코드는 base의 것이어야 한다 — implement는 에이전트 브랜치 위에, review·merge는 PR head로
     // detach된 트리 위에 있다.
@@ -174,12 +176,19 @@ test("yml-lint enforces the KTB-24/26 stage rules (and leaves non-stage files al
   expect(lintWorkflow(ok.replace("timeout-minutes: 90", "timeout-minutes: 45")))
     .toEqual([expect.objectContaining({ rule: "stage-timeout-floor" })]);
   expect(lintWorkflow(readFileSync(join(W, "factory-triage.yml"), "utf8").replace("timeout-minutes: 20", "timeout-minutes: 15"))).toEqual([]);
-  // 정리 스텝을 지우면
-  expect(lintWorkflow(ok.replace("        if: cancelled() || failure()\n", "        if: always()\n")))
+  // 정리 스텝의 조건이 예전의 좁은 모양으로 되돌아가면 잡는다(KTB-24 fix)
+  expect(lintWorkflow(ok.replace("        if: always() && job.status != 'success'\n", "        if: cancelled() || failure()\n")))
+    .toEqual([expect.objectContaining({ rule: "aborted-cleanup-step" })]);
+  // 조건 자체가 사라져도(그냥 always()) 잡는다 — "성공한 잡에서도 정리가 돈다"는 다른 사고다
+  expect(lintWorkflow(ok.replace("        if: always() && job.status != 'success'\n", "        if: always()\n")))
     .toEqual([expect.objectContaining({ rule: "aborted-cleanup-step" })]);
   // sweep 스텝이 마지막이 아니면
   const swapped = ok.replace(/ {6}- name: Sweep[\s\S]*$/, "      - name: Done\n        run: echo done\n");
   expect(lintWorkflow(swapped)).toEqual([expect.objectContaining({ rule: "sweep-step-last" })]);
+  // KTB-24 fix: **이름 없는 `- uses:` 스텝**이 Sweep 뒤에 붙어도 잡는다. 예전 린트는 `- name:`만 세어
+  // 이 모양을 소리 없이 통과시켰다 — 그 스텝이 실패하면 방금 sweep이 훑은 상태가 다시 흔들린다.
+  expect(lintWorkflow(ok + "      - uses: actions/cache/save@v4\n"))
+    .toEqual([expect.objectContaining({ rule: "sweep-step-last" })]);
   // 스테이지 워크플로가 아닌 텍스트에는 이 규칙들이 걸리지 않는다
   expect(lintWorkflow("with:\n  name: x-${{ matrix.y }}\n")).toEqual([]);
   expect(lintWorkflow(readFileSync(join(W, "factory-sweeper.yml"), "utf8"))).toEqual([]);

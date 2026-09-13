@@ -979,11 +979,15 @@ claim 락       : refs/heads/factory/lock-15  ← 고아
 4. **린트가 구조를 고정한다** — `aborted-cleanup-step`: 스테이지 워크플로에는 `if: cancelled() ||
    failure()`로 `--aborted`를 부르는 "Aborted cleanup" 스텝이 있어야 한다.
 
-**알려진 한계**: review에서 온 blocked은 `BLOCKED_RETRY`/`BLOCKED_RETRY_STAGE`에 없다(`factory:blocked
-→ review` 재시도 엣지가 없다) — sweeper는 그 이슈를 한 번 더 밀지 않고 다음 sweep에서 곧장
-`needs-human`으로 올린다. 사유 문구의 "retry via sweeper"는 그 경우 "sweeper가 사람에게 넘긴다"로
-읽힌다. 침묵보다는 낫고(사람이 이슈를 보게 된다) 한도가 90으로 올라 재발 가능성도 낮아졌지만,
-review 재시도 엣지를 열지 말지는 별도 판단으로 남긴다.
+**알려진 한계 (r1에서 해소)**: 최초 판결은 review에서 온 blocked을 `BLOCKED_RETRY`/`BLOCKED_RETRY_STAGE`에
+넣지 않았다 — sweeper가 그 이슈를 한 번 더 밀지 않고 곧장 `needs-human`으로 올렸고, 사유 문구의
+"retry via sweeper"는 그 경우 "sweeper가 사람에게 넘긴다"로 읽혔다. 아래 r1이 그 엣지를 열었다:
+review도 `origins: ["factory:awaiting-review"]`로 한 번은 다시 돈다. 그리고 **에스컬레이션까지의
+지연도 더 이상 30분이 아니다** — KTB-26의 quick sweep이 정리 스텝 바로 뒤에서 돌므로, 잘린 잡이
+세운 blocked은 **몇 초 안에** 첫 팔(재시도 dispatch)을 받고, 그 재시도마저 실패하면 그 런의 quick
+sweep이 다시 돌며 needs-human으로 올린다. 남은 한계는 그 재시도가 **한 번뿐**이라는 것인데
+(api-error origin만 ≤3회), 잡 타임아웃의 재발은 한도가 90분으로 오른 지금 같은 크기의 일에서
+드물다고 보고 그대로 둔다.
 
 **영향**: `templates/factory/github/workflows/factory-{triage,plan,implement,review,merge,retro}.yml`
 (timeout, `actions: write`, 정리 스텝), `factory/bin/run-stage.js`(`IN_FLIGHT_LABEL`·`abortedLine`·
@@ -1041,6 +1045,16 @@ GitHub Actions의 `schedule`은 원래 best-effort다(부하가 걸리면 건너
    재시작하는 쪽"으로 기운다).
 5. 스테이지·retro 워크플로의 `permissions`에 `actions: write`를 더했다 — sweep의 세 번째 팔이
    `gh workflow run`을 부른다(`factory-sweeper.yml`과 같은 이유).
+
+**비용(API 호출량)**: quick sweep은 공짜가 아니다. 한 번 도는 데 드는 GitHub 조회는 **팔마다 검색 1회 +
+이슈마다 코멘트 1회**다 — 현재 다섯 팔(in-progress · blocked · stalled 4개 라벨 · needs-info · 라벨-셋
+복구)이므로 검색 8회(라벨-셋 복구는 `issue list` 1회) + 대기 중인 이슈 수만큼의 `issues/<n>/comments`
+(페이지네이션 포함)다. 이슈 10개가 파이프라인에 떠 있으면 sweep 한 번에 대략 20~30 요청이고, 스테이지
+잡이 시간당 6번 끝나면 시간당 120~180이다 — GitHub REST의 인증 사용자 한도(시간당 5,000)에서 보면
+작지만, 이슈 수에 **선형**이고 여기에 30분 cron이 더해진다. 지금 규모(동시 이슈 한 자리 수)에서는
+무시할 수 있고, 대기 이슈가 수십 개로 늘면 먼저 할 일은 sweep 빈도를 줄이는 것이 아니라 back-pressure를
+조이는 것이다(대기 이슈 자체가 지표다). `--quick`이 토큰 변수 조회와 격리 파일 쓰기를 빼는 것은
+그 선형 항을 조금이라도 낮추는 조치이기도 하다.
 
 **영향**: `templates/factory/github/workflows/*.yml`(Sweep 스텝 + `actions: write`),
 `factory/bin/sweep.js`(`--quick` 파싱, 토큰 조회 생략), `factory/lib/sweeper.js`(`quick` 인자,
@@ -1239,6 +1253,92 @@ fail closed·스키마), `run-stage.test.js`(4건 — 주차·재사용·생성 
 `merge-stage.test.js`(4건 — 해제·다중 대상·best-effort·dep 없는 옛 배선), `workflows.test.js`(2건),
 `hooks.test.js`·`templates.test.js`(매니페스트 개방 + `.factory/package.json`은 그대로 막힘).
 스펙 §5.1 한 문단, 데모 로그 #2 행.
+
+#### KTB-23/24 r1 — 주차는 풀려야 하고, 사슬은 생기면 안 되고, 정리는 남의 것을 건드리면 안 된다
+
+KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과 두 개의 잔손질이 나왔다. 네 개는 전부
+**같은 모양**이다: 판결이 옳았지만 그 판결이 실제로 도는 경로를 하나 놓쳤다.
+
+1. **주차가 풀리지 않았다 (CRITICAL).** KTB-23은 해제를 merge 스테이지 단계 (9)에 두었다 — 하네스
+   PR을 머지한 뒤 `Blocks: #<n>`을 읽어 피처를 큐로 되돌린다. 그런데 **하네스 PR은 구성상 보호
+   경로를 건드린다**(그것이 그 이슈의 존재 이유다). merge 스테이지는 단계 (3)에서 그런 PR의 자동
+   머지를 거부하고 `needs-human`으로 넘기므로, 단계 (9)는 **정상 경로에서 한 줄도 실행되지 않는다.**
+   같은 판결 안의 두 문장("머지는 사람이 한다" / "merge가 해제한다")이 서로를 부정하고 있었고,
+   결과는 설계대로 도는 모든 하네스 이슈에서 피처가 영원히 `needs-info`에 앉는 것이다.
+   **결정**: 해제의 1차 경로를 sweeper로 옮긴다(quick + cron 양쪽). 열린 `factory:needs-info` 이슈 중
+   **마지막 전이의 사유**가 `waiting for harness issue #<m>`인 것만 보고(같은 라벨을 triage의 "이슈가
+   모호하다"도 쓰므로, 사유가 그 둘을 가르는 유일한 기록이다 — `lastTransition`), 그 이슈가 닫혔거나
+   `claude/fq-<m>` 브랜치의 PR이 머지됐으면 `needs-info → queue`로 되돌린다. 마커
+   (`factory-sweeper harness-unparked`)로 한 번만, 전이보다 **먼저** 남긴다(다른 팔과 같은 계약).
+   단계 (9)는 빠른 경로로 남긴다 — 팩토리가 스스로 머지할 수 있었던 드문 경우를 몇 초 일찍 푼다.
+   둘은 라벨로 겹침을 피한다: (9)가 성공하면 이슈는 더 이상 needs-info가 아니라 sweeper의 조회에
+   잡히지 않는다.
+
+2. **하네스 이슈가 하네스 이슈를 불렀다 (CRITICAL).** `run-stage.js`의 implement 분기
+   (`stage === "implement" && d.ensureHarnessIssue`)는 **하네스 이슈 자신에게도** 걸렸고, implement
+   프롬프트는 `package.json`·`.factory/**`·`vitest.config`를 여전히 PROTECTED로 나열하며 규칙 8로
+   "`harness_needed`를 채우고 STOP"을 시켰다. 즉 승격 이슈의 builder가 **자기가 열려 있는 파일을 보고
+   요청서를 쓰고 멈췄고**, L1이 그 요청에서 또 하네스 이슈를 열었다 — 사슬이다. KTB-20/KTB-23이 훅
+   (`FACTORY_HARNESS_ISSUE`)과 L2(`--settings`)는 갈랐지만 **프롬프트는 그 판단을 못 받았다.**
+   **결정**: 세 겹으로 막는다. (a) 분기에 `&& !harnessIssue` — 하네스 이슈의 `harness_needed`는 run
+   기록 한 줄로 남기고 라우팅은 평소의 verifier 경로(→ awaiting-review 또는 needs-human)에 맡긴다.
+   (b) 프롬프트가 같은 판단을 받는다: `-p`의 두 번째 위치 인자(`/factory-implement <n> true|false`)를
+   디스패처가 `$2`로 읽어 워크플로 args의 `harness_issue`로 넘기고, 그때 PROTECTED에서 열린 파일이
+   빠지고 규칙 8이 "이 이슈가 그 요청이다 — 고쳐라. 머지는 여전히 사람이다"로 바뀐다. (c)
+   spec-conformance 리뷰어의 Lens 7에 카브아웃 — `context.json`의 `issue.labels`에 `factory:harness`가
+   있으면 빌드/러너 설정 변경이 diff에 있다는 **사실만으로는 reject하지 않는다**(승격 PR에 승격이
+   없으면 그 이슈는 아무것도 하지 않은 것이다). 라벨은 이미 `buildContext`가 `issue` 객체째 싣고
+   있었다 — 새로 더할 필드는 없었고, 계약으로 못 박는 테스트만 없었다.
+
+3. **정리 스텝이 남의 락을 지웠다 (IMPORTANT).** `abortStage`는 소유자를 묻지 않고 `release()`를
+   불렀다. 이 스텝은 claim에 **실패해** 물러난 런에서도 돌고(취소는 claim 이전에도 온다), 그때
+   지워지는 것은 지금 정상적으로 돌고 있는 다른 러너의 락이다 — 락이 막으려던 바로 그 사고를 정리
+   코드가 만든다. **결정**: `lib/claim.js`에 `lockHolder()`를 더해 셋으로 가른다 — 없으면
+   `lock: already released`("손으로 지우라"는 줄도 내지 않는다: 지울 것이 없다), 커밋 제목의
+   `runner=`가 `FACTORY_RUNNER_ID`와 같으면 지우고, 다르면 `lock: held by <other> — left alone`.
+   소유자를 **읽지 못했을** 때만 예전 동작(지운다)으로 떨어진다: 고아 락은 이 스텝의 존재 이유를
+   통째로 지우고, 그 경우 이 런이 주인일 가능성이 압도적이다.
+   같은 자리에서 정리 스텝의 조건도 고쳤다: `if: cancelled() || failure()` → `if: always() &&
+   job.status != 'success'`. 앞의 둘은 "런이 취소됐다"와 "앞 스텝이 실패했다"만 덮어서, 잡
+   타임아웃·러너 소실처럼 그 어느 쪽으로도 분류되지 않는 끝맺음에서 정리가 통째로 건너뛰어진다 —
+   KTB-24가 고치려던 바로 그 사고다. 린트(`aborted-cleanup-step`)가 새 문구를 요구한다.
+
+4. **review에 재시도 엣지가 없었다 (IMPORTANT).** 위 KTB-24의 "알려진 한계"가 그것이었다.
+   **결정**: `BLOCKED_RETRY.review = { origins: ["factory:awaiting-review"], hop: "factory:awaiting-review" }`,
+   `ENTRY_LABELS.review`에 `factory:blocked`, sweeper의 `BLOCKED_RETRY_STAGE`에
+   `awaiting-review → review` 행, 그래프에 `blocked → awaiting-review` 엣지. 다른 팔과 같은 계약이다 —
+   마커로 한 번만, api-error origin만 ≤3회.
+   한 가지가 더 필요했다: 그 hop은 목적 상태가 `factory:awaiting-review`라 요구조건이 "이번 런의 GREEN
+   게이트 파일 + PR head 일치"인데, hop이 일어나는 자리는 런의 맨 앞이라 그 파일이 아직 없다(fresh
+   checkout이고 `resetGates` 직전이다). 그대로 걸면 hop이 거부되고 이슈는 재시도 대신 곧장
+   needs-human으로 밀린다 — 재시도가 성립하지 않는다. 그래서 hop 전이는 `prerequisite: true`로 건다:
+   그 hop은 **이미 얻었던 라벨의 복구**이지 새 성취의 주장이 아니고(blocked-origin 마커는 **성공한**
+   전이만 남긴다 — 그때 요구조건을 이미 통과했다), 이번 런의 판정은 스테이지가 다시 돌며 만든다.
+
+5. **잔손질 넷.** (a) `factory:harness` 이슈의 dedupe 키를 제목에서 본문의 네임스페이스 마커
+   `<!-- factory-harness-request for=<n> -->`로 옮겼다 — 제목은 사람이 고쳐도 되는 줄이고 builder의
+   `change` 문구가 라운드마다 한 글자만 달라져도 같은 피처에 두 번째 하네스 이슈가 열렸다. 키는
+   "어느 피처를 막고 있는가" 하나여야 한다. (b) 하네스 변형에서 `.factory/package-lock.json`을 다시
+   막는다(훅 정규식 + `ci-settings-harness.json`) — 매니페스트만 막고 락을 열어 두면 실제로 설치되는
+   코드는 여전히 바뀐다. 템플릿 파일이 아니라 열거가 못 보므로 이름으로 못 박는 테스트를 같이 뒀다.
+   (c) `sweep-step-last` 린트가 이름 없는 `- uses:` 스텝도 센다 — 예전에는 `Sweep` 뒤에 붙은
+   `- uses:` 한 줄이 규칙을 소리 없이 빠져나갔다. (d) quick sweep의 API 호출량을 KTB-26에 명시했다.
+
+**영향**: `factory/lib/sweeper.js`(`sweepHarnessUnpark`·`PARKED_ON_HARNESS`·`harnessUnparkedComment`·
+`BLOCKED_RETRY_STAGE`의 review 행), `factory/lib/retro/issue-comments.js`(`lastTransition`),
+`factory/lib/gh.js`(`issueState`·`mergedPrForBranch`, `issueList`의 `body`), `factory/bin/sweep.js`
+(`harnessSettled` 배선), `factory/lib/harness-request.js`(마커 dedupe), `factory/lib/labels.js`
+(review의 ENTRY/BLOCKED_RETRY + `blocked → awaiting-review`), `factory/lib/claim.js`(`lockHolder`·
+`lockRunnerOf`), `factory/bin/run-stage.js`(`stagePrompt`·하네스 가드·hop의 `prerequisite`·
+`abortStage`의 소유권 판정), `factory/lib/yml-lint.js`(`ABORTED_IF`·`uses:` 스텝), `factory/lib/merge-stage.js`
+(단계 9의 위치 설명), `factory/hooks/block-dangerous.sh`·`templates/factory/factory/ci-settings-harness.json`
+(락파일), `templates/factory/claude/commands/factory-implement.md`(`$1`/`$2`),
+`templates/factory/claude/workflows/factory-implement.js`(프롬프트 변형),
+`templates/factory/claude/agents/reviewer-spec-conformance.md`(Lens 7 카브아웃),
+`templates/factory/github/workflows/factory-{triage,plan,implement,review,merge}.yml`(정리 스텝 조건).
+테스트: `sweeper.test.js` 6건, `run-stage.test.js` 7건, `claim.test.js` 3건, `harness-request.test.js` 2건,
+`issue-comments.test.js` 1건, `yml-lint.test.js`·`templates.test.js`·`hooks.test.js`·`context.test.js`·
+`workflows.test.js`·`labels.test.js` 각 1건. 스펙 §5.1, 데모 로그 #2·#15 행.
 
 ### ⑥ 관찰 — O1~O12, O14·O15, G1
 

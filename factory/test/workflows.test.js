@@ -725,6 +725,44 @@ test("factory-implement.js: the builder asks for a protected-file change as a fi
   expect(buildPrompt).not.toContain('"Harness change needed" heading and finish');
 });
 
+// ADR-020 KTB-23 fix — 하네스 이슈의 builder는 자기가 열려 있는 파일을 "보호 경로"로 읽고 있었다:
+// 프롬프트만 그 판단을 못 받았기 때문이다(훅은 env로, L2는 `--settings`로 이미 알고 있었다).
+// 그래서 승격 이슈의 builder가 `harness_needed`를 채우고 멈췄고, L1이 또 하네스 이슈를 열었다 — 사슬이다.
+test("factory-implement.js: a harness issue gets the variant rule 8 — make the change, do not ask (KTB-23 fix)", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const promptFor = async (harness_issue) => {
+    const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+      agent: stub, args: { issue: 42, context: ".factory/out/context.json", ...(harness_issue === undefined ? {} : { harness_issue }) },
+    });
+    return byType(calls, "factory-builder")[0].prompt;
+  };
+
+  const harness = await promptFor(true);
+  expect(harness).toContain("THIS IS A `factory:harness` ISSUE");
+  expect(harness).toContain("Do NOT fill `harness_needed` and do NOT stop");
+  // 열린 파일은 "보호 경로"로 나열되지 않는다 — 그 목록이 바로 이 이슈가 고치러 온 것이다
+  expect(harness).toContain("`.factory/harness.toml`, `vitest.config.*`, `playwright.config.*`, `package.json`, `package-lock.json`");
+  expect(harness).not.toContain("you must not edit `.factory/**`, `.claude/**`");
+  // 그래도 닫혀 있는 것은 그대로 닫혀 있고, 머지는 여전히 사람이다
+  expect(harness).toContain("`.factory/package.json` is the runner's own manifest and stays shut");
+  expect(harness).toContain("The merge is still a human's");
+
+  // 평범한 이슈는 한 글자도 바뀌지 않는다 — 플래그가 없거나 false면 예전 규칙 8 그대로다
+  for (const flag of [false, "false", undefined]) {
+    const normal = await promptFor(flag);
+    expect(normal, String(flag)).toContain("Protected paths — you must not edit `.factory/**`");
+    expect(normal, String(flag)).toContain("fill `harness_needed` in your output");
+    expect(normal, String(flag)).not.toContain("THIS IS A `factory:harness` ISSUE");
+  }
+  // 문자열 "true"도 받는다 — 디스패처가 `$2`를 그대로 실어 보내는 모양이다
+  expect(await promptFor("true")).toContain("THIS IS A `factory:harness` ISSUE");
+});
+
 test("factory-implement.js: no harness_needed means the field is absent from the handoff, never an empty array (KTB-23)", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return implLoaderFix();

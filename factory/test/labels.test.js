@@ -49,12 +49,14 @@ test("graph edges from §3.2", () => {
 });
 
 // ── KTB-15b I2: blocked에서 재진입할 수 있는 네 스테이지, 그리고 재시도가 허용되는 origin ──────
-test("ENTRY_LABELS: triage/plan/implement/merge accept factory:blocked; review does not", () => {
+test("ENTRY_LABELS: every stage — review included (KTB-24 fix) — accepts factory:blocked", () => {
   expect(ENTRY_LABELS.triage).toEqual(["factory:queue", "factory:blocked"]);
   expect(ENTRY_LABELS.plan).toEqual(["factory:ready", "factory:blocked"]);
   expect(ENTRY_LABELS.implement).toEqual(["factory:planned", "factory:rework", "factory:blocked"]);
   expect(ENTRY_LABELS.merge).toEqual(["factory:approved", "factory:blocked"]);
-  expect(ENTRY_LABELS.review).toEqual(["factory:awaiting-review"]);
+  // KTB-24가 만든 `Aborted cleanup`이 잘린 review 잡의 awaiting-review를 blocked으로 세운다 —
+  // review만 재진입을 못 하면 그 이슈는 **언제나** 곧장 needs-human이다(원인은 판정이 아니라 시간인데도).
+  expect(ENTRY_LABELS.review).toEqual(["factory:awaiting-review", "factory:blocked"]);
 });
 
 test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
@@ -64,7 +66,10 @@ test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
   // planned → in-progress 전이가 그 자리를 다시 채운다.
   expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" });
   expect(BLOCKED_RETRY.merge).toEqual({ origins: ["factory:approved"], hop: "factory:approved" });
-  expect(BLOCKED_RETRY.review).toBeUndefined();
+  // KTB-24 fix: review도 자기 진입 라벨로 되돌아간다. 라운드 카운터는 handoff 개수로 세므로
+  // (`countHandoffs`) 아무것도 남기지 못하고 잘린 런은 K 예산을 쓰지 않는다.
+  expect(BLOCKED_RETRY.review).toEqual({ origins: ["factory:awaiting-review"], hop: "factory:awaiting-review" });
+  expect(canTransition("factory:blocked", "factory:awaiting-review")).toBe(true);
   // 매 hop 자체가 그래프에서 유효한 엣지여야 한다 — 표와 그래프가 어긋나면 재시도가 조용히 거부된다.
   for (const { hop } of Object.values(BLOCKED_RETRY)) expect(canTransition("factory:blocked", hop), hop).toBe(true);
 });

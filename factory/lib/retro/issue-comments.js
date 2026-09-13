@@ -109,6 +109,28 @@ export function commentsSinceRequeue(comments) {
   return list.slice(from);
 }
 
+/**
+ * 이슈에 남은 **가장 최근** 전이 코멘트(`factory-transition:v1`)를 `{from, to, by, reason, at}`로
+ * 돌려준다(하나도 없으면 null). `reason`은 마커 다음 줄 `<from> → <to> — <사유>`의 `— ` 뒤 한 줄이다
+ * (사유가 없으면 빈 문자열) — `lib/transition.js`가 쓰는 그 문법 그대로다.
+ *
+ * ADR-020 KTB-23 fix에서 sweeper의 needs-info 해제 팔이 "이 이슈가 **왜** 주차됐는가"를 이것으로 읽는다:
+ * `factory:needs-info`는 두 가지 뜻을 겸한다(triage의 "이슈가 모호하다"와 하네스 대기). 그 둘을 가르는
+ * 유일한 기록이 마지막 전이의 사유다. 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같다).
+ */
+export function lastTransition(comments) {
+  let found = null;
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = TRANSITION_TO.exec(body);
+    if (!m) continue;
+    const rest = body.slice(m.index + m[0].length);
+    const dash = rest.indexOf(" — ");
+    found = { from: m[1], to: m[2], by: m[3], reason: dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim(), at: c?.createdAt ?? null };
+  }
+  return found;
+}
+
 export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
   const out = [];
   for (const c of comments || []) {

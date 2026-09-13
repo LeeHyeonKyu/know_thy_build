@@ -12,8 +12,8 @@ import { backPressure } from "../lib/back-pressure.js";
 
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
-  // KTB-26 — `--quick`: 스테이지 워크플로의 마지막 스텝이 부르는 모양이다. 빠른 세 팔(in-progress
-  // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
+  // KTB-26 — `--quick`: 스테이지 워크플로의 마지막 스텝이 부르는 모양이다. 상태 복구 팔(in-progress
+  // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
   // (격리 TTL·토큰 만료)은 30분 cron에 그대로 남는다 — 그 둘은 스테이지가 끝난 그 순간에 다시
   // 볼 이유가 없고, 매 스테이지마다 `quarantine.toml`을 쓰면 커밋 경쟁만 늘어난다.
   const quick = process.argv.slice(2).includes("--quick");
@@ -35,7 +35,26 @@ async function main() {
   // 흐름 제어로 **일부러** 세워 둔 `factory:planned`를 "멈췄다"로 읽지 않기 위한 것이다(KTB-10 M5) —
   // run-stage의 implement가 보는 바로 그 판정을 같은 헬퍼로 묻는다.
   const backPressureFn = () => backPressure({ gh, charter, quarantine, thresholds });
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, quick });
+  /**
+   * ADR-020 KTB-23 fix — "이 하네스 이슈는 끝났는가". 두 신호를 본다:
+   *   ① 이슈가 닫혔다 — builder가 PR 본문에 `Closes #<n>`을 넣으므로(implement 규칙 6) 사람이
+   *      머지 버튼을 누르는 순간 GitHub이 닫는다. 이것이 정상 경로다.
+   *   ② 그 이슈의 브랜치(`claude/fq-<n>`)에서 PR이 머지됐다 — 사람이 `Closes` 줄을 지웠거나
+   *      본문을 갈아엎은 경우의 폴백. 하네스는 들어왔는데 이슈만 열려 있는 상태다.
+   * 조회가 실패하면 done을 세우지 않는다(fail closed) — 잘못 푸는 것보다 다음 sweep이 낫다.
+   */
+  const harnessSettled = async (n) => {
+    let state = null;
+    try { state = await gh.issueState(n); }
+    catch (e) { return { done: false, why: `state unreadable — ${e?.message || e}` }; }
+    if (state?.state === "CLOSED") return { done: true, why: "이슈가 닫혔습니다" };
+    try {
+      const pr = await gh.mergedPrForBranch(`claude/fq-${n}`);
+      if (pr != null) return { done: true, why: `PR #${pr}이 머지됐습니다` };
+    } catch (e) { return { done: false, why: `merged-PR lookup failed — ${e?.message || e}` }; }
+    return { done: false, why: "아직 열려 있습니다" };
+  };
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, quick });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }

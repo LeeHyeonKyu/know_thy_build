@@ -71,6 +71,14 @@ const STAGE_RUN = /run:\s*node \.factory\/bin\/run-stage\.js\s+(triage|plan|impl
  */
 const TIMEOUT_FLOOR = { review: 60, implement: 60 };
 
+/**
+ * 정리 스텝의 `if:` (ADR-020 KTB-24 fix). 공백은 넉넉히 받되 세 토큰(`always()`, `job.status`,
+ * `success`)은 모두 있어야 한다 — 따옴표는 `'`·`"` 둘 다 허용한다(YAML에서 둘 다 유효하다).
+ * **줄 앞에 `#`가 없어야 한다**: 이 규칙이 요구하는 문자열을 설명하는 주석이 바로 그 위에 있고,
+ * 주석까지 세면 실제 `if:`를 예전 모양으로 되돌려도 린트가 통과한다(규칙이 자기 설명문을 읽는다).
+ */
+const ABORTED_IF = /^[^#\n]*\bif:\s*always\(\)\s*&&\s*job\.status\s*!=\s*['"]success['"]/m;
+
 function lintStageWorkflow(text, lines, stage) {
   const out = [];
   const floor = TIMEOUT_FLOOR[stage];
@@ -81,13 +89,22 @@ function lintStageWorkflow(text, lines, stage) {
       out.push({ line: i + 1 || 1, rule: "stage-timeout-floor", msg: `the ${stage} stage needs timeout-minutes ≥ ${floor} — a shorter cap cancels the job mid-work and the whole run's cost is sunk (KTB-24)` });
     }
   }
+  // 스텝 목록에는 `- name:`뿐 아니라 **이름 없는 `- uses:` 스텝**도 센다(KTB-24 fix). `sweep-step-last`는
+  // "Sweep이 마지막 스텝인가"를 묻는데, 이름 없는 스텝을 못 보면 `Sweep` 뒤에 붙은 `- uses: …` 한 줄이
+  // 규칙을 소리 없이 빠져나간다 — 그 스텝이 실패하면 방금 sweep이 훑은 상태가 다시 흔들린다.
   const steps = [];
-  lines.forEach((l, i) => { const m = /^\s*-\s+name:\s*(.+?)\s*$/.exec(l); if (m) steps.push({ name: m[1], line: i + 1 }); });
+  lines.forEach((l, i) => {
+    const m = /^\s*-\s+(name|uses):\s*(.+?)\s*$/.exec(l);
+    if (m) steps.push({ name: m[1] === "name" ? m[2] : `uses:${m[2]}`, line: i + 1 });
+  });
   const aborted = steps.findIndex((s) => s.name === "Aborted cleanup");
   const sweep = steps.findIndex((s) => s.name === "Sweep");
   // (1) 취소·실패 정리 스텝이 있고, 그 스텝이 실제로 `--aborted`를 이 스테이지 이름으로 부른다.
-  if (aborted === -1 || !new RegExp(`run-stage\\.js ${stage} [^\\n]*--aborted`).test(text) || !/if:\s*cancelled\(\) \|\| failure\(\)/.test(text)) {
-    out.push({ line: aborted === -1 ? 1 : steps[aborted].line, rule: "aborted-cleanup-step", msg: `a stage workflow needs an "Aborted cleanup" step with \`if: cancelled() || failure()\` running \`run-stage.js ${stage} <issue> --aborted\` — a cancelled job never reaches run-stage's finally, so the lock is orphaned and nothing is recorded (KTB-24)` });
+  // 조건은 `always() && job.status != 'success'`여야 한다(KTB-24 fix): `cancelled() || failure()`는
+  // "런이 취소됐다"와 "앞 스텝이 실패했다"만 덮어서, 잡 타임아웃·러너 소실처럼 그 어느 쪽으로도
+  // 분류되지 않는 끝맺음에서 정리가 통째로 건너뛰어진다.
+  if (aborted === -1 || !new RegExp(`run-stage\\.js ${stage} [^\\n]*--aborted`).test(text) || !ABORTED_IF.test(text)) {
+    out.push({ line: aborted === -1 ? 1 : steps[aborted].line, rule: "aborted-cleanup-step", msg: `a stage workflow needs an "Aborted cleanup" step with \`if: always() && job.status != 'success'\` running \`run-stage.js ${stage} <issue> --aborted\` — a job that ends any way but success never reaches run-stage's finally, so the lock is orphaned and nothing is recorded (KTB-24)` });
   }
   // (2) 마지막 스텝은 `Sweep`이고 `--quick`으로 돈다 — 정리보다 **뒤**여야 방금 세운 blocked까지 훑는다.
   if (sweep === -1 || sweep !== steps.length - 1 || !/node \.factory\/bin\/sweep\.js --quick/.test(text) || !/- name: Sweep\n\s+if: always\(\)/.test(text)) {

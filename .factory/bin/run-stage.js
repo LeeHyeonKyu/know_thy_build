@@ -13,7 +13,7 @@ import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
-import { claim, release } from "../lib/claim.js";
+import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
@@ -55,8 +55,20 @@ export const ciSettingsFile = (harnessIssue = false) => (harnessIssue ? CI_SETTI
  * `claude -p` 인자/환경을 한 곳에서 만든다(retro.js의 `retroClaudeArgs`와 같은 모양) — 훅이 읽는
  * `FACTORY_HARNESS_ISSUE`와 `--settings`가 **같은 판단**에서 나와야 둘이 갈라지지 않는다.
  */
+/**
+ * 디스패처 슬래시 커맨드에 실리는 프롬프트 한 줄. implement만 **두 번째 위치 인자**를 받는다
+ * (ADR-020 KTB-23 fix): `.claude/commands/factory-implement.md`가 그것을 `$2`로 읽어 워크플로 args의
+ * `harness_issue`에 그대로 넣고, 워크플로가 builder 프롬프트의 PROTECTED 목록과 규칙 8을 그 값으로
+ * 가른다. 훅(`FACTORY_HARNESS_ISSUE`)·L2(`--settings`)와 **같은 판단**에서 나와야 셋이 갈라지지 않는다:
+ * 그때까지 프롬프트만 이 판단을 못 받아서, 하네스 이슈의 builder가 자기가 열려 있는 파일을 "보호
+ * 경로"로 읽고 `harness_needed`를 채운 뒤 멈췄다 — 하네스 이슈가 또 하네스 이슈를 부르는 사슬이다.
+ * 값은 항상 싣는다(`true`/`false`) — 빠진 `$2`는 JSON을 깨뜨린다.
+ */
+export const stagePrompt = ({ stage, issue, harnessIssue = false }) =>
+  stage === "implement" ? `/factory-implement ${issue} ${harnessIssue ? "true" : "false"}` : `/factory-${stage} ${issue}`;
+
 export function stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue = false }) {
-  const args = ["-p", `/factory-${stage} ${issue}`, "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, stage)), "--output-format", "json", "--settings", join(root, ciSettingsFile(harnessIssue))];
+  const args = ["-p", stagePrompt({ stage, issue, harnessIssue }), "--permission-mode", "dontAsk", "--max-turns", String(stageMaxTurns(harness, stage)), "--output-format", "json", "--settings", join(root, ciSettingsFile(harnessIssue))];
   if (charter?.budget?.usd_per_stage) args.push("--max-budget-usd", String(charter.budget.usd_per_stage));
   return args;
 }
@@ -231,7 +243,14 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
         return 2;
       }
       if (stage !== "merge") {
-        const t = await d.transition({ to: retryCfg.hop, reason: `retry from blocked — origin ${origin.from} confirmed` });
+        // hop은 **이미 얻었던 라벨의 복구**이지 새 성취의 주장이 아니다 — 그래서 `prerequisite: true`로
+        // 건다(ADR-020 KTB-24 fix). review의 hop(`factory:awaiting-review`)이 이것을 필요로 한다:
+        // 그 목적 상태의 요구조건은 "이번 런의 GREEN 게이트 파일 + PR head 일치"인데, 여기는 런의
+        // 맨 앞이라 게이트 파일이 아직 없고(resetGates 직전이며 fresh checkout이다) 그대로 걸면 hop이
+        // 거부돼 이슈가 곧장 needs-human으로 밀린다 — 재시도 자체가 성립하지 않는다. 안전은 그대로다:
+        // 이 hop은 blocked-origin 마커가 그 라벨을 증언할 때만 도달하고(그 마커는 **성공한** 전이가
+        // 남긴다 — 즉 그때 요구조건을 이미 통과했다), 이번 런의 판정은 스테이지가 다시 돌며 만든다.
+        const t = await d.transition({ to: retryCfg.hop, reason: `retry from blocked — origin ${origin.from} confirmed`, prerequisite: true });
         if (!t.ok) { record([`${stage}: blocked retry hop refused`, ...refusal(t)]); return 2; }
         record([`${stage}: blocked retry — hopped back to ${t.to}`]);
         entryLabel = t.to;
@@ -428,7 +447,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
      * 실패하면 주차하지 않는다 — 주차는 "누군가 저 이슈를 처리하면 돌아온다"는 약속인데, 그 이슈가
      * 없으면 이 이슈는 아무도 보지 않는 needs-info에 영원히 앉는다. 그때는 needs-human이다.
      */
-    if (stage === "implement" && d.ensureHarnessIssue) {
+    /**
+     * **하네스 이슈 자신은 이 분기를 타지 않는다**(ADR-020 KTB-23 fix). 그 이슈의 builder는 열린
+     * 파일(`.factory/harness.toml`·러너 설정·매니페스트)을 실제로 쓰라고 부른 것인데, 그것들이
+     * 프롬프트에서는 여전히 "보호 경로"로 적혀 있어 builder가 `harness_needed`를 채우고 멈췄다.
+     * 여기서 그 필드를 그대로 읽으면 **하네스 이슈가 또 하네스 이슈를 연다** — 사슬이고, 주차된
+     * 피처는 그 사슬 끝까지 기다린다. 프롬프트 쪽은 `stagePrompt`/`factory-implement.js`가 고쳤고,
+     * 이 가드는 그 프롬프트가 무엇을 내놓든 사슬이 생기지 않게 하는 구조적 백스톱이다: 요청은
+     * 기록으로 남기고, 라우팅은 평소대로 verifier 판정(→ awaiting-review 또는 needs-human)에 맡긴다.
+     */
+    if (stage === "implement" && harnessIssue) {
+      const needed = harnessNeeded(v.data);
+      if (needed.length) record([`harness: this IS the harness issue — harness_needed recorded, no new issue (${needed.map((h) => h.file).join(", ")})`]);
+    } else if (stage === "implement" && d.ensureHarnessIssue) {
       const needed = harnessNeeded(v.data);
       if (needed.length) {
         await d.writeHandoff({ stage, data: v.data, gates });
@@ -502,7 +533,7 @@ export const abortedLine = (status) => `aborted: ${status} (job timeout or cance
  * 순서가 요점이다: 전이를 **먼저** 하고 락을 나중에 푼다. 반대로 하면 락이 풀린 직후 sweeper/dispatch가
  * 같은 이슈를 물고 들어와, 이 프로세스가 막 세우려던 blocked 라벨과 경쟁한다.
  */
-export async function abortStage({ stage, issue, status = "cancelled", deps }) {
+export async function abortStage({ stage, issue, status = "cancelled", runnerId = "unknown", deps }) {
   const d = deps;
   const lines = [abortedLine(status)];
   const want = IN_FLIGHT_LABEL[stage];
@@ -526,12 +557,34 @@ export async function abortStage({ stage, issue, status = "cancelled", deps }) {
       }
     }
   }
-  const released = await d.release();
-  if (released === false) {
-    console.error(`factory: lock release failed for issue ${issue}`);
-    lines.push(`lock: release failed for issue ${issue} — delete refs/heads/factory/lock-${issue} by hand`);
+  /**
+   * ADR-020 KTB-24 fix — **남의 락은 건드리지 않는다.** 이 스텝은 `if: always() && job.status != 'success'`로
+   * 도는데, 그 조건에는 이 런이 **claim에 실패해 exit 0으로 물러난 뒤 다른 이유로 실패한** 경우도 들어온다
+   * (그리고 취소는 claim 이전에도 온다). 예전 코드는 소유자를 묻지 않고 `release()`를 불렀다 —
+   * 지금 정상적으로 돌고 있는 다른 러너의 락을 지우는 일이고, 그러면 같은 이슈에 두 스테이지가 동시에
+   * 들어간다(락이 막으려던 바로 그 사고를 정리 코드가 만든다).
+   *
+   * 그래서 셋으로 가른다: 없으면 할 일 없음(사람에게 "손으로 지우라"고 말하지도 않는다 — 지울 것이
+   * 없다), 우리 것이면 지운다, 남의 것이면 그대로 두고 누구 것인지 적는다. 소유자를 **읽지 못했을**
+   * 때(조회 실패·제목 파싱 실패·구형 배선)는 예전 동작대로 지운다: 고아 락을 남기는 쪽이 이 스텝의
+   * 존재 이유를 통째로 지우고, 그 경우 이 런이 락의 주인일 가능성이 압도적이다.
+   */
+  let held = null;
+  try { held = await d.lockHolder?.(); }
+  catch (e) { lines.push(`lock: holder lookup failed — ${e?.message || e}`); }
+  if (held?.present === false) {
+    lines.push("lock: already released");
+  } else if (held?.present === true && held.runner && held.runner !== runnerId) {
+    lines.push(`lock: held by ${held.runner} — left alone`);
   } else {
-    lines.push(`lock: released after abort`);
+    if (held?.present === null) lines.push(`lock: holder unreadable (${held.reason}) — releasing anyway`);
+    const released = await d.release();
+    if (released === false) {
+      console.error(`factory: lock release failed for issue ${issue}`);
+      lines.push(`lock: release failed for issue ${issue} — delete refs/heads/factory/lock-${issue} by hand`);
+    } else {
+      lines.push(`lock: released after abort`);
+    }
   }
   try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
   try {
@@ -733,10 +786,12 @@ async function main() {
   // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
   if (abortedStatus !== null) {
     process.exit(await abortStage({
-      stage, issue, status: abortedStatus,
+      stage, issue, status: abortedStatus, runnerId,
       deps: {
         issueLabels: async () => (await gh.issue(issue)).labels,
         transition: ({ to, reason }) => transition({ gh, issue, to, reason, stage }),
+        /** KTB-24 fix: 락을 지우기 전에 **누구 것인지** 묻는다 — 이 정리 스텝은 claim에 실패한 런에서도 돈다. */
+        lockHolder: () => lockHolder({ run, cwd: root, issue }),
         release: () => release({ run, cwd: root, issue }),
         runRecord: (lines) => appendRunRecord({ root, issue, title: "", stage, runnerId, lines }),
         syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})` }),
@@ -903,10 +958,13 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult }) => {
+    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false }) => {
       const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, charter, record: recordLine });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
+      // blocked에서의 hop-back만 `prerequisite`를 세운다(KTB-24 fix) — "직전 스테이지의 산출물이
+      // 있는가"만 묻고 이번 런의 게이트·sha 바인딩은 묻지 않는다(아직 존재하지 않는다).
+      if (prerequisite) ctxExtra.prerequisite = true;
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
       // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.

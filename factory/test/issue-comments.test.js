@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { blockedOrigin, extractNeedsHuman } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
 
 // ── KTB-15b I2: factory-blocked-origin marker parsing ──────────────────────────────────────────
 // lib/transition.js writes this marker at the moment a transition into factory:blocked succeeds —
@@ -42,4 +42,24 @@ test("blockedOrigin: reason carries the api-error provider message when that's w
 test("extractNeedsHuman is unaffected by the presence of a blocked-origin marker on an unrelated comment", () => {
   const comments = [marker("factory:approved", "merge", "2026-09-11T00:00:00Z")];
   expect(extractNeedsHuman(7, comments)).toEqual([]);
+});
+
+// ── ADR-020 KTB-23 fix — sweeper의 하네스 주차 해제 팔은 "마지막 전이의 사유"로 판정한다 ────────
+// `factory:needs-info`는 두 가지 뜻을 겸한다: triage의 "이슈가 모호하다"(사람이 보강해야 한다)와
+// 하네스 대기. 전자를 자동으로 큐에 되돌리면 같은 모호함으로 triage를 다시 돌린다.
+test("lastTransition returns the most recent transition comment with its reason", () => {
+  const c = (from, to, reason, at) => ({ id: 1, body: `<!-- factory-transition:v1 from=${from} to=${to} by=script -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}`, createdAt: at });
+  expect(lastTransition([])).toBeNull();
+  expect(lastTransition([{ id: 1, body: "사람이 쓴 코멘트", createdAt: "x" }])).toBeNull();
+  expect(lastTransition([c("factory:in-progress", "factory:needs-info", "waiting for harness issue #31", "t1")])).toEqual({
+    from: "factory:in-progress", to: "factory:needs-info", by: "script", reason: "waiting for harness issue #31", at: "t1",
+  });
+  // 마지막 것이 이긴다 — 주차 뒤에 사람이 움직였으면 그 사실이 최신이다
+  const moved = lastTransition([
+    c("factory:in-progress", "factory:needs-info", "waiting for harness issue #31", "t1"),
+    c("factory:needs-info", "factory:queue", "human unstick", "t2"),
+  ]);
+  expect(moved.to).toBe("factory:queue");
+  // 사유가 없는 전이는 빈 문자열이다(null이 아니다 — 호출자가 정규식을 그대로 걸 수 있어야 한다)
+  expect(lastTransition([c("backlog", "factory:queue", "", "t")]).reason).toBe("");
 });

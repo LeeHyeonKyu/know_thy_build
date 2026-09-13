@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { harnessNeeded, harnessIssueTitle, harnessIssueBody, parseBlocks, parkedReason, ensureHarnessIssue, HARNESS_LABEL } from "../lib/harness-request.js";
+import { harnessNeeded, harnessIssueTitle, harnessIssueBody, parseBlocks, parkedReason, ensureHarnessIssue, harnessRequestMarker, parseHarnessRequestFor, HARNESS_LABEL } from "../lib/harness-request.js";
 import { validate } from "../lib/schemas.js";
 
 /**
@@ -19,10 +19,9 @@ test("harnessNeeded keeps only well-formed entries — a half-filled request is 
   expect(harnessNeeded({ harness_needed: [PG, { file: "x", change: "", why: "y" }, { file: "z" }, null] })).toEqual([PG]);
 });
 
-test("the title is the dedupe key: stable, issue-scoped, one line, and it says how many entries there are", () => {
+test("the title is the human line: issue-scoped, one line, and it says how many entries there are", () => {
   expect(harnessIssueTitle([PG], 2)).toBe("harness: add dependency pg@^8 to dependencies — for #2");
   expect(harnessIssueTitle([PG, COMPOSE], 2)).toBe("harness: add dependency pg@^8 to dependencies (+1 more) — for #2");
-  // 같은 요청은 같은 문자열을 낸다(dedupe가 성립하는 유일한 조건)
   expect(harnessIssueTitle([PG], 2)).toBe(harnessIssueTitle([{ ...PG }], 2));
   // 다른 이슈의 같은 요청은 다른 이슈다
   expect(harnessIssueTitle([PG], 5)).not.toBe(harnessIssueTitle([PG], 2));
@@ -40,6 +39,17 @@ test("the body carries every entry and ends with the Blocks line merge-stage rea
   // 왕복: 본문을 쓴 쪽과 읽는 쪽이 같은 문법을 쓴다(두 곳이 갈라지면 피처 이슈가 영원히 주차된다)
   expect(parseBlocks(body)).toEqual([2]);
   expect(harnessIssueBody({ entries: [PG], issue: 2 })).not.toContain("PR #");
+  // ADR-020 KTB-23 fix — dedupe 키는 제목이 아니라 본문 첫 줄의 기계 마커다
+  expect(body.split("\n")[0]).toBe(harnessRequestMarker(2));
+  expect(parseHarnessRequestFor(body)).toBe(2);
+});
+
+test("parseHarnessRequestFor reads the namespaced marker, and only that (KTB-23 fix)", () => {
+  expect(harnessRequestMarker(2)).toBe("<!-- factory-harness-request for=2 -->");
+  expect(parseHarnessRequestFor(harnessRequestMarker(31))).toBe(31);
+  expect(parseHarnessRequestFor("Blocks: #2")).toBeNull();        // `Blocks:`는 사람의 줄이다 — 키가 아니다
+  expect(parseHarnessRequestFor(null)).toBeNull();
+  expect(parseHarnessRequestFor(undefined)).toBeNull();
 });
 
 test("parseBlocks: several targets, several lines, dedupe — and silence for a body that has none", () => {
@@ -54,16 +64,25 @@ test("parkedReason names the harness issue — the feature issue's transition co
   expect(parkedReason(31)).toBe("waiting for harness issue #31");
 });
 
-test("ensureHarnessIssue opens ONE issue, labelled queue + harness, and reuses an open one with the same title", async () => {
+test("ensureHarnessIssue opens ONE issue, labelled queue + harness, and reuses the open one that carries this issue's marker", async () => {
   const gh = { issueList: vi.fn(async () => []), createIssue: vi.fn(async () => 31) };
   const first = await ensureHarnessIssue({ gh, issue: 2, entries: [PG], pr: 17 });
   expect(first).toEqual({ issue: 31, created: true, title: harnessIssueTitle([PG], 2) });
   expect(gh.issueList).toHaveBeenCalledWith({ labels: [HARNESS_LABEL], state: "open" });
   expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ labels: ["factory:queue", HARNESS_LABEL] }));
-  // 두 번째 라운드가 같은 요청을 또 내놓아도 이슈는 하나다
-  const gh2 = { issueList: async () => [{ number: 31, title: ` ${harnessIssueTitle([PG], 2)} ` }], createIssue: vi.fn() };
-  expect(await ensureHarnessIssue({ gh: gh2, issue: 2, entries: [PG] })).toEqual({ issue: 31, created: false, title: harnessIssueTitle([PG], 2) });
+  expect(gh.createIssue.mock.calls[0][0].body).toContain(harnessRequestMarker(2));
+
+  // ADR-020 KTB-23 fix: 두 번째 라운드의 요청이 **다르게 적혀도**(제목이 달라져도) 이슈는 하나다 —
+  // 예전에는 제목이 dedupe 키라 `change` 한 글자만 바뀌면 같은 피처에 두 번째 하네스 이슈가 열렸다.
+  const existing = { number: 31, title: "사람이 고쳐 쓴 제목", body: harnessIssueBody({ entries: [PG], issue: 2 }) };
+  const gh2 = { issueList: async () => [existing], createIssue: vi.fn() };
+  const reused = await ensureHarnessIssue({ gh: gh2, issue: 2, entries: [{ ...PG, change: "add dependency pg@^8.11" }] });
+  expect(reused).toEqual({ issue: 31, created: false, title: "사람이 고쳐 쓴 제목" });
   expect(gh2.createIssue).not.toHaveBeenCalled();
+
+  // 다른 피처의 마커를 단 열린 하네스 이슈는 재사용 대상이 아니다
+  const gh3 = { issueList: async () => [{ number: 31, title: "x", body: harnessIssueBody({ entries: [PG], issue: 5 }) }], createIssue: vi.fn(async () => 40) };
+  expect((await ensureHarnessIssue({ gh: gh3, issue: 2, entries: [PG] })).issue).toBe(40);
 });
 
 test("ensureHarnessIssue fails closed: an unreadable list or a create that returns no number throws (never a duplicate)", async () => {

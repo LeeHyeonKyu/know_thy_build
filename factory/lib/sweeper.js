@@ -1,6 +1,6 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
-import { TRANSITION_TO, blockedOrigin } from "./retro/issue-comments.js";
+import { TRANSITION_TO, blockedOrigin, lastTransition } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
@@ -75,6 +75,11 @@ const BLOCKED_RETRY_STAGE = {
   "factory:ready": "plan",
   "factory:planned": "implement",
   "factory:in-progress": "implement",
+  // ADR-020 KTB-24 fix: review도 한 번은 다시 밀어본다. KTB-24가 세운 `Aborted cleanup`이
+  // 잘린 review 잡의 `awaiting-review`를 blocked으로 바꾸는데, 이 표에 없어서 그 이슈는 **항상**
+  // 곧장 needs-human으로 갔다 — 그런데 잘린 원인은 판정이 아니라 시간이다. 다른 팔들과 같은 계약이다:
+  // 한 번뿐(마커 dedupe), api-error origin만 ≤3회.
+  "factory:awaiting-review": "review",
   "factory:approved": "merge",
 };
 
@@ -256,6 +261,63 @@ async function sweepLabelSetRepair({ gh, actions }) {
 }
 
 /**
+ * ADR-020 KTB-23 fix — **하네스 대기 주차의 해제**. 이 팔이 없으면 주차된 피처는 영원히 돌아오지 않는다.
+ *
+ * KTB-23은 해제를 merge 스테이지 단계 (9)에만 두었다: 하네스 PR을 머지한 뒤 본문의 `Blocks: #<n>`을
+ * 읽어 피처를 `needs-info → queue`로 되돌린다. 그런데 **하네스 PR은 구성상 보호 경로를 건드린다**
+ * (그것이 그 이슈의 존재 이유다) — 그래서 merge 스테이지는 단계 (3)에서 자동 머지를 거부하고
+ * `needs-human`으로 넘기고, 실제 머지는 **사람이 GitHub에서** 한다. 단계 (9)는 그 경로에서 아예
+ * 실행되지 않는다. 즉 KTB-23의 설계대로 도는 모든 하네스 이슈에서 해제가 일어나지 않았다.
+ *
+ * 그래서 해제의 1차 경로는 sweeper다: 열린 `factory:needs-info` 이슈 중 **마지막 전이의 사유**가
+ * `waiting for harness issue #<m>`인 것을 찾아, 그 하네스 이슈가 닫혔으면(또는 그 브랜치의 PR이
+ * 머지됐으면) 큐로 되돌린다. 단계 (9)는 빠른 경로로 그대로 남는다(팩토리가 스스로 머지할 수 있는
+ * 드문 하네스 PR — 예: 보호 경로에 걸리지 않는 변경만 남은 재시도).
+ *
+ * "마지막 전이의 사유"로 판정하는 이유: `factory:needs-info`는 두 가지 뜻을 겸한다 — triage의
+ * "이슈가 모호하다"(사람이 보강해야 한다)와 하네스 대기. 전자를 큐로 되돌리면 같은 모호함으로
+ * 다시 triage를 돌린다. 마지막 전이의 사유가 그 둘을 가르는 유일한 기록이다.
+ *
+ * 마커 dedupe는 다른 팔들과 같은 계약이고(`harnessUnparkedComment`), 전이보다 **먼저** 남긴다 —
+ * 전이가 거부돼도(사람이 그 사이 라벨을 옮겼다) 30분마다 같은 코멘트를 다시 달지 않는다.
+ */
+export const PARKED_ON_HARNESS = /waiting for harness issue #(\d+)/;
+export const harnessUnparkedComment = (harness, issue) => `<!-- factory-sweeper harness-unparked harness=${harness} issue=${issue} -->`;
+
+async function sweepHarnessUnpark({ gh, transition, harnessSettled, actions }) {
+  if (!harnessSettled) return;                       // 구형 배선(테스트 더블 포함)은 조용히 건너뛴다
+  let issues;
+  try { issues = await gh.searchIssues("factory:needs-info"); }
+  catch (e) { actions.push({ kind: "error", step: "harness-unpark", error: String(e.message || e) }); return; }
+  for (const it of issues) {
+    try {
+      const comments = await gh.comments(it.number);
+      const last = lastTransition(comments);
+      const m = last && last.to === "factory:needs-info" ? PARKED_ON_HARNESS.exec(last.reason || "") : null;
+      if (!m) continue;                              // 하네스 주차가 아닌 needs-info는 사람의 몫이다
+      const harness = Number(m[1]);
+      const marker = harnessUnparkedComment(harness, it.number);
+      if (comments.some((c) => String(c?.body ?? "").includes(marker))) {
+        actions.push({ kind: "harness-unpark-skipped", issue: it.number, harness, reason: "already unparked" });
+        continue;
+      }
+      const settled = await harnessSettled(harness);
+      if (!settled?.done) {
+        actions.push({ kind: "harness-unpark-skipped", issue: it.number, harness, reason: settled?.why || "harness issue not settled" });
+        continue;
+      }
+      await gh.comment(it.number, `${marker}\n하네스 이슈 #${harness}: ${settled.why} — \`factory:needs-info\`에서 \`factory:queue\`로 되돌립니다(ADR-020 KTB-23). 하네스 PR은 사람이 머지하므로 이 해제는 sweeper가 합니다.`);
+      const t = await transition({ issue: it.number, to: "factory:queue", reason: `harness issue #${harness} closed` });
+      actions.push(t?.ok
+        ? { kind: "harness-unparked", issue: it.number, harness }
+        : { kind: "harness-unpark-refused", issue: it.number, harness, reason: t?.reason ?? "unknown" });
+    } catch (e) {
+      actions.push({ kind: "error", step: "harness-unpark", issue: it.number, error: String(e.message || e) });
+    }
+  }
+}
+
+/**
  * ADR-020 KTB-26 — dispatch는 **경쟁하는 sweep들 사이에서 실패할 수 있다**: 이제 30분 cron만이
  * 아니라 스테이지 잡이 끝날 때마다 sweep이 돌기 때문에, 두 sweep이 같은 이슈를 같은 초에 볼 수 있다.
  * 마커 dedupe는 그 대부분을 막지만 조회-후-기록 사이의 틈은 남고, `gh workflow run` 자체도 레이트
@@ -271,11 +333,11 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
 /**
  * `quick`(KTB-26): 스테이지 워크플로의 마지막 스텝이 쓰는 모양(`sweep.js --quick`). 시간에 묶인 두 팔
  * (격리 정책 적용과 토큰 만료 이슈 생성)을 건너뛰고 **상태 복구 팔만** 돌린다 — in-progress 하트비트
- * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
+ * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, quick = false }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, quick = false }) {
   const actions = [];
   const nowMs = Date.parse(now);
   if (quick) actions.push({ kind: "quick-sweep", skipped: ["quarantine", "token-expiry"] });
@@ -345,6 +407,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
     }
   }
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, actions });
+  await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
   await sweepLabelSetRepair({ gh, actions });
   if (quick) return actions;                       // KTB-26 — 아래 두 팔은 시간에 묶여 있다(cron의 몫)
   try {

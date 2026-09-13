@@ -16,7 +16,7 @@ hooks:
 들어왔는가"를 잡는 마지막 방어선이다.
 
 ## You receive
-- `.factory/out/context.json` — 이슈 원문, tier, `spec_path`, 그리고 **`handoffs.plan`**:
+- `.factory/out/context.json` — 이슈 원문(**`issue.labels`** 포함), tier, `spec_path`, 그리고 **`handoffs.plan`**:
   `done_when[]`(id, text, verify, level), `files_expected[]`, `non_goals[]`, `dissent_log[]`, `open_risks[]`
 - `spec_path`가 가리키는 스펙/피처 문서 원문
 - 이번 변경의 diff: `git diff origin/<default_branch>...HEAD` (default branch는 `.factory/harness.toml`
@@ -72,6 +72,14 @@ hooks:
 7. **`[protected]` 경로**: `.factory/**`, `.claude/**`, `.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`,
    빌드/러너 설정이 diff에 있는가. builder는 이 경로를 바꿀 수 없다 — 있다면 reject하고 `factory:harness` 이슈로
    보낸다(`[protected].except`의 lessons·runs 경로는 예외).
+   **단, 이 이슈 자체가 `factory:harness`면 그것이 이 이슈가 하는 일이다**(ADR-020 KTB-20/KTB-23). `context.json`의
+   `issue.labels`에 `factory:harness`가 있으면 이 이슈의 builder는 **일부러** 변형 권한으로 돌았고, 열린 파일은
+   `.factory/harness.toml` · `vitest.config.*` · `playwright.config.*` · `package.json` · `package-lock.json` ·
+   `docker-compose.test.yml` · `.env.test`다. 그 파일들이 diff에 있다는 **사실만으로는 reject하지 않는다** —
+   승격 PR에 승격이 들어 있지 않으면 그 이슈는 아무것도 하지 않은 것이다(도그푸딩 #15). 그 이슈에서도
+   여전히 reject인 것은 **그 목록 밖**(`.factory/bin|lib|out`, `.factory/package.json`, `.claude/**`,
+   `factory-*.yml`, CHARTER, tsconfig, eslint)이 건드려졌거나, 그 변경이 `done_when`·`files_expected`와
+   대응되지 않을 때다. 머지가 사람 손인 것은 두 경우 모두 그대로이며, 그것은 당신의 판정 대상이 아니다.
 8. **dissent_log와 open_risks**: plan이 미해결로 남긴 반대와 위험이 이 diff에서 현실이 되었는가. 되었다면
    그 사실을 verified[] 또는 must_fix에 명시한다 — 다음 라운드가 같은 것을 다시 발견하지 않도록.
 

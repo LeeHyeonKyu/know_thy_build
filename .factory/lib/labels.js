@@ -21,7 +21,11 @@ export const ENTRY_LABELS = {
   triage: ["factory:queue", "factory:blocked"],
   plan: ["factory:ready", "factory:blocked"],
   implement: ["factory:planned", "factory:rework", "factory:blocked"],
-  review: ["factory:awaiting-review"],
+  // review도 blocked에서 재진입한다(ADR-020 KTB-24 fix): KTB-24가 만든 `Aborted cleanup`이
+  // 잘린 review 잡의 `factory:awaiting-review`를 `factory:blocked`으로 세우는데, review만 재시도
+  // 표에 없어서 그 이슈는 **항상** 곧장 needs-human으로 갔다 — 잘린 원인이 "판정이 틀렸다"가 아니라
+  // "시간이 모자랐다"인데도. 45분에 잘린 데모 #15가 정확히 그 경우다(한도는 90으로 올랐다).
+  review: ["factory:awaiting-review", "factory:blocked"],
   merge: ["factory:approved", "factory:blocked"],
 };
 
@@ -47,6 +51,11 @@ export const BLOCKED_RETRY = {
   triage: { origins: ["factory:queue"], hop: "factory:queue" },
   plan: { origins: ["factory:ready"], hop: "factory:ready" },
   implement: { origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" },
+  // review(ADR-020 KTB-24 fix): origin이 `factory:awaiting-review`면 그 blocked은 리뷰가
+  // **끝나기 전에** 잘렸다는 뜻이다(잡 타임아웃·취소 → `abortStage`, 또는 게이트 판정 불가).
+  // 되돌아갈 자리는 그 스테이지 자신의 진입 라벨이고, 라운드 카운터는 handoff 개수로 세므로
+  // (`countHandoffs`) 아무것도 남기지 못한 런은 예산을 쓰지 않는다 — 재시도는 공짜에 가깝다.
+  review: { origins: ["factory:awaiting-review"], hop: "factory:awaiting-review" },
   merge: { origins: ["factory:approved"], hop: "factory:approved" },
 };
 
@@ -88,7 +97,11 @@ export const TRANSITIONS = new Map([
   // until step (4b) re-confirms gates GREEN) can find the PR CONFLICTING at step (2) — that's a
   // "rebase and rework" outcome, not "needs a human to decide", and previously had no edge here at
   // all (the graph refused it and posted a confusing graph-refusal comment instead of routing to rework).
-  ["factory:blocked", new Set(["factory:needs-human", "factory:queue", "factory:ready", "factory:planned", "factory:approved", "factory:rework"])],
+  // blocked → awaiting-review(ADR-020 KTB-24 fix): 잘린 review 잡이 세운 blocked을 되돌리는 엣지다.
+  // 그 hop은 "리뷰가 통과했다"는 주장이 아니라 **이미 얻었던 라벨의 복구**이므로, run-stage가 그
+  // 전이를 `prerequisite: true`로 건다 — 이번 런에는 아직 게이트 파일도 sha 바인딩도 없다(방금
+  // resetGates 직전이고, 애초에 fresh checkout이다). 실제 판정은 이 스테이지가 다시 돌면서 만든다.
+  ["factory:blocked", new Set(["factory:needs-human", "factory:queue", "factory:ready", "factory:planned", "factory:awaiting-review", "factory:approved", "factory:rework"])],
   ["factory:needs-human", new Set(["factory:queue"])],
   ["factory:merged", new Set([])],
   ["factory:wont-do", new Set([])],

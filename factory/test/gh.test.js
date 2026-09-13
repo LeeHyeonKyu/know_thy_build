@@ -279,8 +279,10 @@ test("issueList maps labels to names and forwards state/limit/labels; prList for
     { match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 9, title: "P", body: "<!-- factory-retro:v1 period=a..b -->", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]), stderr: "" } },
   ]);
   const gh = makeGh({ run, repo });
-  expect(await gh.issueList({ labels: ["bug", "backlog"], state: "closed", limit: 50 })).toEqual([{ number: 1, title: "T", labels: ["bug"], updatedAt: "2026-09-11T00:00:00Z", closedAt: null }]);
-  expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--state", "closed", "--limit", "50", "--label", "bug", "--label", "backlog", "--json", "number,title,labels,updatedAt,closedAt"]);
+  // KTB-23 fix: issueList도 body를 받는다 — `factory:harness` 이슈의 dedupe 키가 제목이 아니라
+  // 본문의 `factory-harness-request` 마커이기 때문이다. 본문이 없는 응답은 ""로 정규화된다.
+  expect(await gh.issueList({ labels: ["bug", "backlog"], state: "closed", limit: 50 })).toEqual([{ number: 1, title: "T", body: "", labels: ["bug"], updatedAt: "2026-09-11T00:00:00Z", closedAt: null }]);
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--state", "closed", "--limit", "50", "--label", "bug", "--label", "backlog", "--json", "number,title,body,labels,updatedAt,closedAt"]);
   // body도 받는다 — retro의 제안 PR dedup이 본문 마커로 같은 창을 알아본다
   expect(await gh.prList({ label: "factory:approved" })).toEqual([{ number: 9, title: "P", body: "<!-- factory-retro:v1 period=a..b -->", headRefName: "claude/fq-7", updatedAt: "2026-09-11T00:00:00Z" }]);
   expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--state", "open", "--label", "factory:approved", "--json", "number,title,body,headRefName,updatedAt"]);
@@ -297,4 +299,25 @@ test("createPr opens a non-draft PR with labels and returns the number", async (
   ]);
   expect(run.calls[0].args).not.toContain("--draft");
   expect(run.calls[0].opts.input).toBe("B");
+});
+
+// ── ADR-020 KTB-23 fix — sweeper의 하네스 주차 해제 팔이 쓰는 두 조회 ───────────────────────────
+// `issue()`는 state를 싣지 않는다(그 함수는 라벨·본문을 읽는 자리라 필드를 늘리면 모든 호출자가 더 큰
+// 응답을 받는다) — 그래서 "닫혔는가"만 묻는 조회를 따로 둔다. 두 번째는 `Closes #n` 없이 사람이 머지한
+// 경우의 폴백이다: builder는 언제나 `claude/fq-<issue>`에서 작업하므로 브랜치 이름이 곧 이슈 번호다.
+test("issueState reads only state/closedAt; mergedPrForBranch finds the merged PR for a branch", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ number: 31, state: "CLOSED", closedAt: "2026-09-13T10:00:00Z" }), stderr: "" } },
+    { match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 24, mergedAt: "2026-09-13T09:00:00Z" }]), stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.issueState(31)).toEqual({ number: 31, state: "CLOSED", closedAt: "2026-09-13T10:00:00Z" });
+  expect(run.calls[0].args).toEqual(["issue", "view", "31", "-R", repo, "--json", "number,state,closedAt"]);
+  expect(await gh.mergedPrForBranch("claude/fq-31")).toBe(24);
+  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--head", "claude/fq-31", "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]);
+});
+
+test("mergedPrForBranch returns null when nothing was merged from that branch", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } }]);
+  expect(await makeGh({ run, repo }).mergedPrForBranch("claude/fq-31")).toBeNull();
 });

@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { backPressure } from "../lib/back-pressure.js";
-import { sweep, restartComment, blockedRetryComment, API_ERROR_MAX_RETRIES } from "../lib/sweeper.js";
+import { sweep, restartComment, blockedRetryComment, harnessUnparkedComment, API_ERROR_MAX_RETRIES } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
@@ -643,4 +643,146 @@ test("KTB-26: a dispatch failure is recorded and the sweep keeps going", async (
   expect(actions).toContainEqual(expect.objectContaining({ kind: "stalled-restart", issue: 5, stage: "implement" }));
   // 실패한 쪽은 "다시 띄웠다"로 적히지 않는다
   expect(actions.filter((a) => a.kind === "stalled-restart").map((a) => a.issue)).toEqual([5]);
+});
+
+// ── ADR-020 KTB-23 fix — 하네스 주차의 해제는 sweeper의 일이다 ──────────────────────────────────
+// KTB-23은 해제를 merge 스테이지 단계 (9)에만 두었는데, 하네스 PR은 **구성상** 보호 경로를 건드려
+// merge가 단계 (3)에서 자동 머지를 거부하고 사람에게 넘긴다 — 단계 (9)는 그 경로에서 아예 실행되지
+// 않는다. 즉 설계대로 도는 모든 하네스 이슈에서 주차된 피처가 영원히 돌아오지 않았다.
+const parkComment = (harness, at = "2026-09-11T00:00:00Z") => ({
+  id: 1,
+  body: `<!-- factory-transition:v1 from=factory:in-progress to=factory:needs-info by=script -->\nfactory:in-progress → factory:needs-info — waiting for harness issue #${harness}`,
+  createdAt: at,
+});
+const unparkArgs = (over = {}) => ({
+  gh: { searchIssues: async () => [], comments: async () => [], comment: vi.fn(), patchComment: vi.fn(), issueList: async () => [] },
+  charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30,
+  transition: vi.fn(async ({ to }) => ({ ok: true, to })), release: vi.fn(),
+  quarantine: { quarantined: [] }, saveQuarantine: () => {}, quick: true,
+  ...over,
+});
+
+test("KTB-23 fix: a needs-info issue parked on a CLOSED harness issue goes back to the queue, once", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:needs-info" ? [{ number: 2 }] : [])),
+    comments: vi.fn(async () => [parkComment(31), ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const harnessSettled = vi.fn(async () => ({ done: true, why: "이슈가 닫혔습니다" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(unparkArgs({ gh, harnessSettled, transition }));
+  expect(harnessSettled).toHaveBeenCalledWith(31);
+  expect(transition).toHaveBeenCalledWith({ issue: 2, to: "factory:queue", reason: "harness issue #31 closed" });
+  expect(gh.comment).toHaveBeenCalledWith(2, expect.stringContaining(harnessUnparkedComment(31, 2)));
+  expect(actions).toContainEqual({ kind: "harness-unparked", issue: 2, harness: 31 });
+
+  // 마커가 dedupe다 — 전이가 어떤 이유로 다시 이 이슈를 needs-info로 돌려놔도 두 번 풀지 않는다
+  const second = await sweep(unparkArgs({ gh, harnessSettled, transition }));
+  expect(second).toContainEqual({ kind: "harness-unpark-skipped", issue: 2, harness: 31, reason: "already unparked" });
+  expect(transition).toHaveBeenCalledTimes(1);
+});
+
+test("KTB-23 fix: an OPEN harness issue leaves the feature parked — no comment, no transition", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:needs-info" ? [{ number: 2 }] : []),
+    comments: async () => [parkComment(31)],
+    comment: vi.fn(), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const transition = vi.fn();
+  const actions = await sweep(unparkArgs({ gh, transition, harnessSettled: async () => ({ done: false, why: "아직 열려 있습니다" }) }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "harness-unpark-skipped", issue: 2, harness: 31, reason: "아직 열려 있습니다" });
+});
+
+test("KTB-23 fix: needs-info that is NOT a harness park (triage's 'the issue is ambiguous') is never touched", async () => {
+  const ambiguous = {
+    id: 1,
+    body: "<!-- factory-transition:v1 from=factory:queue to=factory:needs-info by=script -->\nfactory:queue → factory:needs-info — 이슈가 무엇을 요구하는지 알 수 없다",
+    createdAt: "2026-09-11T00:00:00Z",
+  };
+  const gh = {
+    searchIssues: async (l) => (l === "factory:needs-info" ? [{ number: 2 }] : []),
+    comments: async () => [ambiguous],
+    comment: vi.fn(), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const harnessSettled = vi.fn();
+  const transition = vi.fn();
+  const actions = await sweep(unparkArgs({ gh, transition, harnessSettled }));
+  expect(harnessSettled).not.toHaveBeenCalled();
+  expect(transition).not.toHaveBeenCalled();
+  expect(actions.some((a) => String(a.kind).startsWith("harness-unpark"))).toBe(false);
+
+  // 주차 뒤에 **더 최근의** 전이가 있으면(사람이 이미 큐로 돌렸다가 다시 needs-info로 보냈다) 그것이 이긴다
+  const moved = { ...ambiguous, id: 2, createdAt: "2026-09-11T00:30:00Z" };
+  const gh2 = { ...gh, comments: async () => [parkComment(31), moved] };
+  const t2 = vi.fn();
+  await sweep(unparkArgs({ gh: gh2, transition: t2, harnessSettled: async () => ({ done: true, why: "closed" }) }));
+  expect(t2).not.toHaveBeenCalled();
+});
+
+test("KTB-23 fix: a refused unpark is recorded, and one failing issue never stops the arm", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:needs-info" ? [{ number: 2 }, { number: 3 }] : []),
+    comments: async (n) => [parkComment(n === 2 ? 31 : 32)],
+    comment: vi.fn(async (n) => { if (n === 2) throw new Error("comment API 502"); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const actions = await sweep(unparkArgs({
+    gh,
+    transition: async ({ issue }) => (issue === 3 ? { ok: false, reason: "no factory state label on issue" } : { ok: true }),
+    harnessSettled: async () => ({ done: true, why: "이슈가 닫혔습니다" }),
+  }));
+  expect(actions).toContainEqual({ kind: "error", step: "harness-unpark", issue: 2, error: expect.stringContaining("comment API 502") });
+  expect(actions).toContainEqual({ kind: "harness-unpark-refused", issue: 3, harness: 32, reason: "no factory state label on issue" });
+});
+
+test("KTB-23 fix: the arm runs in both the quick and the cron sweep, and is skipped when unwired", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:needs-info" ? [{ number: 2 }] : []),
+    comments: async () => [parkComment(31)],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const settled = async () => ({ done: true, why: "closed" });
+  for (const quick of [true, false]) {
+    const transition = vi.fn(async () => ({ ok: true }));
+    const actions = await sweep(unparkArgs({ gh, transition, harnessSettled: settled, quick }));
+    expect(actions.some((a) => a.kind === "harness-unparked"), `quick=${quick}`).toBe(true);
+  }
+  // 구형 배선(harnessSettled 없음)은 조용히 건너뛴다 — "안 쓴다"와 "에러났다"를 가른다
+  const t = vi.fn();
+  const actions = await sweep(unparkArgs({ gh, transition: t }));
+  expect(t).not.toHaveBeenCalled();
+  expect(actions.some((a) => String(a.kind).startsWith("harness-unpark"))).toBe(false);
+});
+
+// ── ADR-020 KTB-24 fix — review도 blocked에서 한 번은 다시 밀린다 ───────────────────────────────
+test("KTB-24 fix: a blocked issue whose origin was awaiting-review gets one review retry, then escalates", async () => {
+  const posted = [];
+  const origin = {
+    id: 1,
+    body: "<!-- factory-transition:v1 from=factory:awaiting-review to=factory:blocked by=script -->\nfactory:awaiting-review → factory:blocked — job failure — retry via sweeper\n<!-- factory-blocked-origin from=factory:awaiting-review stage=review -->",
+    createdAt: "2026-09-11T00:00:00Z",
+  };
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:blocked" ? [{ number: 15 }] : [])),
+    comments: vi.fn(async () => [origin, ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const first = await sweep(unparkArgs({ gh, dispatchStage, transition }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "review", issue: 15 });
+  expect(gh.comment).toHaveBeenCalledWith(15, expect.stringContaining(blockedRetryComment("review", 15)));
+  expect(first).toContainEqual({ kind: "blocked-retry", issue: 15, stage: "review" });
+  expect(transition).not.toHaveBeenCalled();
+
+  // 한 번뿐이다 — 여전히 blocked이면 다음 sweep이 사람에게 넘긴다
+  const second = await sweep(unparkArgs({ gh, dispatchStage, transition }));
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 15, to: "factory:needs-human" }));
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 15 });
 });

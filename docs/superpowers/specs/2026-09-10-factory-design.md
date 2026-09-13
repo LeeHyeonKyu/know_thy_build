@@ -634,12 +634,29 @@ implement handoff의 선택 필드 **`harness_needed: [{file, change, why}]`**�
 기계도 읽지 않아, 데모 #2는 그 경로로 네 라운드(≈$67)를 "Harness change needed → verifier reject →
 needs-human → 사람이 재큐 → 같은 일"에 태웠다. L1(`run-stage`)이 그 필드를 보면 **verifier 판정보다 먼저**:
 ① `factory:queue` + `factory:harness` 라벨의 이슈를 **하나** 만들고(제목 `harness: <change> — for #<n>`이
-dedupe 키다, 본문 마지막 줄이 `Blocks: #<n>`), ② 피처 이슈를 `factory:needs-info`로 주차한다(사유
-`waiting for harness issue #<m>` — needs-human이 아니다: 무엇이 필요한지 알고 있다. blocked도 아니다:
-판정 불가가 아니라 대기다), ③ merge 스테이지가 그 하네스 PR을 머지하면 본문의 `Blocks:`를 읽어 피처를
-`needs-info → queue`로 되돌린다. 하네스 이슈의 builder는 §5.2.1의 변형 경로로 매니페스트
-(`package.json`·`package-lock.json`)까지 쓸 수 있다 — 의존성 추가가 바로 그 이슈가 하려는 일이다.
+dedupe 키는 본문 첫 줄의 마커 `<!-- factory-harness-request for=<n> -->`다 — 제목은 사람이 고쳐도 되는
+줄이고 builder의 문구가 라운드마다 달라지므로, 키는 "어느 피처를 막고 있는가" 하나여야 한다. 본문
+마지막 줄의 `Blocks: #<n>`은 사람과 merge 스테이지가 읽는 줄이다), ② 피처 이슈를 `factory:needs-info`로
+주차한다(사유 `waiting for harness issue #<m>` — needs-human이 아니다: 무엇이 필요한지 알고 있다.
+blocked도 아니다: 판정 불가가 아니라 대기다), ③ **그 하네스 이슈가 닫히면 sweeper가** 피처를
+`needs-info → queue`로 되돌린다. 해제의 주체가 sweeper인 이유는 이 절의 마지막 문장에 있다:
+하네스 PR은 **구성상 보호 경로를 건드리므로 사람이 머지한다.** merge 스테이지는 그런 PR의 자동
+머지를 거부하고 `needs-human`으로 넘기므로, 그 스테이지 안의 해제 코드(단계 9)는 정상 경로에서
+아예 실행되지 않는다 — 그것은 팩토리가 스스로 머지할 수 있었던 드문 경우의 빠른 경로로만 남는다.
+sweeper는 열린 `factory:needs-info` 이슈 중 **마지막 전이의 사유**가 `waiting for harness issue #<m>`인
+것만 본다(triage의 "이슈가 모호하다"도 같은 라벨을 쓰므로, 그 둘을 가르는 유일한 기록이 사유다),
+그 이슈가 닫혔거나 `claude/fq-<m>` 브랜치의 PR이 머지됐으면 큐로 되돌린다(마커로 한 번만).
+
+하네스 이슈의 builder는 §5.2.1의 변형 경로로 매니페스트(`package.json`·`package-lock.json`)까지 쓸 수
+있다 — 의존성 추가가 바로 그 이슈가 하려는 일이다. **그 이슈의 프롬프트도 같은 판단을 받는다**:
+implement 디스패처가 `$2`로 하네스 여부를 받아 워크플로에 넘기고, 그때 규칙 8은 "요청하고 멈춰라"가
+아니라 "이 이슈가 그 요청이다 — 고쳐라"가 된다. 그러지 않으면 하네스 이슈의 builder가 자기가 열려
+있는 파일을 보호 경로로 읽고 또 `harness_needed`를 채워, 하네스 이슈가 하네스 이슈를 부르는 사슬이
+생긴다(L1도 `factory:harness` 이슈에서는 그 필드를 기록만 하고 새 이슈를 열지 않는다 — 구조적 백스톱).
 **머지는 그대로 사람이다**: `package.json`은 `[protected].factory`에 남아 L1이 자동 머지를 거부한다.
+그래서 spec-conformance 리뷰어에게는 카브아웃이 하나 필요하다 — `context.json`의 `issue.labels`에
+`factory:harness`가 있으면 빌드/러너 설정 변경이 diff에 있다는 **사실만으로는 reject하지 않는다**
+(승격 PR에 승격이 없으면 그 이슈는 아무것도 하지 않은 것이다).
 
 `doctor`는 `[commands]`의 각 명령을 실제로 실행해 exit 0인지, `[gates].required`가 전부 `[commands]`에 있는지, `[protected].factory` glob이 실제 파일에 매치되는지, 훅 스크립트가 stdin JSON을 읽는지, `[test.env]`로 환경을 띄워 `[test].smoke` 세 개가 GREEN인지를 검사한다.
 

@@ -247,6 +247,27 @@ const PROTECTED =
   '`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, ' +
   '`.eslintrc*`, `eslint.config.*`';
 
+// ADR-020 KTB-23 fix — a `factory:harness` issue is the one issue whose whole point is to change those
+// files, and the runner already runs its builder with the variant settings + FACTORY_HARNESS_ISSUE=1
+// (KTB-20/KTB-23). The prompt was the one place that never got that judgement: it still listed
+// package.json/vitest.config/.factory as PROTECTED and rule 8 still said "fill harness_needed and STOP",
+// so the harness issue's own builder parked itself and the factory opened a harness issue for the
+// harness issue — a chain, with the parked feature waiting at the end of it. `args.harness_issue`
+// (the dispatcher's `$2`, from the same label read that picked the settings file) splits the two.
+const isHarnessIssue = args.harness_issue === true || args.harness_issue === 'true';
+
+// What the variant actually opens — the same list as `.factory/ci-settings-harness.json` and the
+// FACTORY_HARNESS_ISSUE branch of `hooks/block-dangerous.sh`. `.factory/**` stays shut apart from
+// `harness.toml`, so the exclusion is named file by file rather than as a whole directory.
+const HARNESS_OPEN =
+  '`.factory/harness.toml`, `vitest.config.*`, `playwright.config.*`, `package.json`, `package-lock.json` ' +
+  '(and `docker-compose.test.yml`/`.env.test`, which were never protected)';
+
+const PROTECTED_FOR_HARNESS_ISSUE =
+  '`.factory/**` **except `.factory/harness.toml`**, `.claude/**`, ' +
+  '`.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`, `tsconfig*.json`, `.eslintrc*`, ' +
+  '`eslint.config.*`';
+
 const builderReading =
   `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.plan.done_when and files_expected, ` +
   `harness.maturity, harness.commands), then the spec at its \`spec_path\` if one is named, ` +
@@ -256,6 +277,40 @@ const builderReading =
   `The default branch is \`[project].default_branch\` in \`.factory/harness.toml\` — read it there; the ` +
   `\`harness\` block of \`${args.context}\` does not carry it. ` +
   `Answer with the English field names of your output schema.`;
+
+// Rule 8, normal issue: the protected files are a wall, and the way through the wall is a field.
+const normalProtectedBlock =
+  `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
+  `carrying such a change is never auto-merged — the merge stage hands it to a human instead.\n` +
+  `8. If the change genuinely needs one of those files changed — a new dependency, a new script, a ` +
+  `runner/linter config change — fill \`harness_needed\` in your output, one entry per file: ` +
+  `{file: the exact path, change: what must change (e.g. "add dependency pg@^8 to dependencies"), ` +
+  `why: which done_when ids need it and why it cannot be done otherwise}. Then STOP: commit and push ` +
+  `whatever is genuinely finished, open (or update) the draft PR as in rule 6, and return. Do not ` +
+  `write the request as PR prose — prose is not a signal, and a "Harness change needed" heading is ` +
+  `read by nobody. The factory opens ONE \`factory:harness\` issue from your entries and parks this ` +
+  `issue until that lands, so a partial-but-honest answer costs one round; working around the deny ` +
+  `(\`npm install\`, editing a lockfile, a shell redirection) is blocked by a hook and, if it got ` +
+  `through, would only be refused at merge. Leave \`harness_needed\` out entirely when you do not ` +
+  `need one — an empty request parks the issue for nothing.\n`;
+
+// Rule 8, harness issue: there is nothing to ask for — you ARE the request. Asking again is a chain
+// (a harness issue that opens a harness issue), and the feature parked behind this one waits for it.
+const harnessProtectedBlock =
+  `THIS IS A \`factory:harness\` ISSUE — the issue whose whole purpose is to change the build/test ` +
+  `harness. Your session runs with the variant permissions (\`.factory/ci-settings-harness.json\` + ` +
+  `\`FACTORY_HARNESS_ISSUE=1\`), so these files ARE yours to edit for this issue: ${HARNESS_OPEN}.\n` +
+  `Still protected — you must not edit ${PROTECTED_FOR_HARNESS_ISSUE}. An \`Edit\` there is denied by ` +
+  `a hook. (\`.factory/package.json\` is the runner's own manifest and stays shut: opening it would ` +
+  `change the runtime that runs the gates.)\n` +
+  `8. Do NOT fill \`harness_needed\` and do NOT stop — make the change. Leave the field out entirely. ` +
+  `Asking for a harness change from inside the harness issue opens a second harness issue behind this ` +
+  `one and the feature parked on it waits for both; the factory refuses to chain them, so the request ` +
+  `is recorded and then ignored. Edit the files above directly, add the test that proves the new ` +
+  `capability works (a smoke test at the level you just enabled), and finish rules 5-7 as usual.\n` +
+  `The merge is still a human's: this PR carries protected paths, so the merge stage will refuse to ` +
+  `auto-merge it and hand it to a person. That is the design — you make the diff, a human approves it. ` +
+  `Do not try to merge it yourself.\n`;
 
 const buildRules =
   `1. Branch \`claude/fq-${issue}\` from \`origin/<default_branch>\`: create it if it does not exist, ` +
@@ -282,19 +337,7 @@ const buildRules =
   `\`gh pr edit <pr> --body-file <path>\` instead of opening a second one.\n` +
   `7. Return head_sha = the output of \`git rev-parse HEAD\` **after** the push: 40 lowercase hex ` +
   `characters, not a short sha and not a branch name.\n\n` +
-  `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
-  `carrying such a change is never auto-merged — the merge stage hands it to a human instead.\n` +
-  `8. If the change genuinely needs one of those files changed — a new dependency, a new script, a ` +
-  `runner/linter config change — fill \`harness_needed\` in your output, one entry per file: ` +
-  `{file: the exact path, change: what must change (e.g. "add dependency pg@^8 to dependencies"), ` +
-  `why: which done_when ids need it and why it cannot be done otherwise}. Then STOP: commit and push ` +
-  `whatever is genuinely finished, open (or update) the draft PR as in rule 6, and return. Do not ` +
-  `write the request as PR prose — prose is not a signal, and a "Harness change needed" heading is ` +
-  `read by nobody. The factory opens ONE \`factory:harness\` issue from your entries and parks this ` +
-  `issue until that lands, so a partial-but-honest answer costs one round; working around the deny ` +
-  `(\`npm install\`, editing a lockfile, a shell redirection) is blocked by a hook and, if it got ` +
-  `through, would only be refused at merge. Leave \`harness_needed\` out entirely when you do not ` +
-  `need one — an empty request parks the issue for nothing.\n` +
+  (isHarnessIssue ? harnessProtectedBlock : normalProtectedBlock) +
   `Never write a credential, token or key into the repository, a test fixture, or a log line.`;
 
 const reworkBlock = mustFix.length > 0

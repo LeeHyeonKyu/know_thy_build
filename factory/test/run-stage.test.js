@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
+import { runStage, abortStage, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -679,12 +679,30 @@ test("KTB-20: stageClaudeArgs/stageClaudeEnv pick the file and the env flag from
   const harness = stageClaudeArgs({ ...base, harnessIssue: true });
   expect(harness).toContain("/r/.factory/ci-settings-harness.json");
   expect(harness[harness.indexOf("--settings") + 1]).toBe("/r/.factory/ci-settings-harness.json");
-  // 나머지 인자는 한 글자도 달라지지 않는다 — 바뀌는 것은 `--settings` 값 하나뿐이다.
-  expect(harness.map((a) => (a.endsWith("ci-settings-harness.json") ? "SETTINGS" : a)))
-    .toEqual(normal.map((a) => (a.endsWith("ci-settings.json") ? "SETTINGS" : a)));
+  // 나머지 인자는 두 자리만 달라진다 — `--settings` 값과, KTB-23 fix가 더한 `-p` 프롬프트의 두 번째
+  // 위치 인자다(디스패처가 `$2`로 읽어 워크플로의 `harness_issue`가 된다).
+  const normalize = (args) => args.map((a) => (/ci-settings(-harness)?\.json$/.test(a) ? "SETTINGS" : a.startsWith("/factory-") ? "PROMPT" : a));
+  expect(normalize(harness)).toEqual(normalize(normal));
   expect(stageClaudeEnv({ root: "/r", harnessIssue: true }).FACTORY_HARNESS_ISSUE).toBe("1");
   expect(ciSettingsFile(true)).toBe(CI_SETTINGS_HARNESS);
   expect(ciSettingsFile(false)).toBe(CI_SETTINGS);
+});
+
+// ADR-020 KTB-23 fix — 프롬프트도 같은 판단을 받는다. 그때까지 훅(env)과 L2(`--settings`)만 하네스
+// 이슈를 알았고 **프롬프트는 몰랐다**: builder는 자기가 열려 있는 파일을 "보호 경로"로 읽고
+// `harness_needed`를 채운 뒤 멈췄다 — 하네스 이슈가 또 하네스 이슈를 부르는 사슬이다.
+test("KTB-23 fix: the implement prompt carries the harness flag as a second positional arg", () => {
+  const base = { root: "/r", stage: "implement", issue: 15, harness: {}, charter: {} };
+  expect(stagePrompt({ stage: "implement", issue: 15 })).toBe("/factory-implement 15 false");
+  expect(stagePrompt({ stage: "implement", issue: 15, harnessIssue: true })).toBe("/factory-implement 15 true");
+  // 값은 언제나 실린다 — 빠진 `$2`는 디스패처가 만드는 args JSON을 깨뜨린다
+  expect(stagePrompt({ stage: "implement", issue: 15 }).split(" ")).toHaveLength(3);
+  // 다른 스테이지의 커맨드는 `$ARGUMENTS` 하나를 읽는다 — 한 글자도 바뀌지 않는다
+  for (const stage of ["triage", "plan", "review", "merge"]) {
+    expect(stagePrompt({ stage, issue: 15, harnessIssue: true })).toBe(`/factory-${stage} 15`);
+  }
+  expect(stageClaudeArgs({ ...base, harnessIssue: true })[1]).toBe("/factory-implement 15 true");
+  expect(stageClaudeArgs(base)[1]).toBe("/factory-implement 15 false");
 });
 
 // ── KTB-9: tier 라벨은 triage가 붙인다(§3.2) ──────────────────────────────
@@ -1911,11 +1929,14 @@ test("KTB-15b: implement entering from factory:blocked whose origin matches neit
   expect(lines.some((l) => /implement: blocked did not originate from planned\|in-progress — nothing to retry \(origin=queue\)/.test(l))).toBe(true);
 });
 
-test("KTB-15b: review never accepts factory:blocked as an entry label — no BLOCKED_RETRY entry for it", async () => {
+// KTB-24 fix가 review에 blocked 재진입을 열었다 — 하지만 **origin 마커가 없으면** 여전히 아무것도
+// 재시도하지 않는다(사람이 API로 라벨을 직접 blocked에 붙인 경우 등: "판정 불가"이지 "리뷰 중이었다"가 아니다).
+test("KTB-24 fix: review from factory:blocked with no origin marker refuses — exit 2, no transition", async () => {
   const transition = vi.fn();
-  const d = baseDeps({ issueLabels: async () => ["factory:blocked"], transition });
-  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
-  expect(transition).not.toHaveBeenCalled();   // entry guard already returned 0 — "nothing to do"
+  const d = baseDeps({ issueLabels: async () => ["factory:blocked"], blockedOrigin: async () => null, transition, claudeP: vi.fn() });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(2);
+  expect(transition).not.toHaveBeenCalled();
+  expect(d.claudeP).not.toHaveBeenCalled();
 });
 
 // ── KTB-15b M1: verifyStage's `source` (which candidate won) is recorded, not dropped ───────────
@@ -2096,4 +2117,121 @@ test("KTB-23: no harness_needed (or an empty/ill-formed one) leaves the normal p
   const review = harnessImplDeps({ issueLabels: async () => ["factory:awaiting-review"], verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, decision: "approved", harness_needed: [HARNESS_PG] } }) });
   expect(await runStage({ stage: "review", issue: 2, deps: review })).toBe(0);
   expect(review.ensureHarnessIssue).not.toHaveBeenCalled();
+});
+
+// ── ADR-020 KTB-23 fix — 하네스 이슈는 자기 자신을 위한 하네스 이슈를 열지 않는다 ──────────────
+// 그 이슈의 builder는 `.factory/harness.toml`·러너 설정·매니페스트를 **쓰라고** 부른 것인데, 프롬프트는
+// 그것을 여전히 "보호 경로"로 적어 두었다(KTB-20/23이 훅과 L2만 갈랐다). 그래서 builder가 `harness_needed`를
+// 채우고 멈추면 L1이 또 하네스 이슈를 열었다 — 사슬이고, 주차된 피처는 그 끝까지 기다린다.
+test("KTB-23 fix: a harness issue's own harness_needed is recorded, never spawns another issue", async () => {
+  const lines = [];
+  const d = harnessImplDeps({
+    issueLabels: async () => ["factory:planned", "factory:harness"],
+    ciSettingsPresent: async () => true,
+    verifyStage: () => ({ ok: true, reasons: [], data: { issue: 15, pr: 20, harness_needed: [HARNESS_PG], verifier: { verdict: "accepted" } } }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: d })).toBe(0);
+  expect(d.ensureHarnessIssue).not.toHaveBeenCalled();
+  // 요청은 기록으로 남고, 라우팅은 평소의 verifier 경로다 — 주차도 needs-info도 없다
+  expect(lines).toContain("harness: this IS the harness issue — harness_needed recorded, no new issue (package.json)");
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-info" }));
+});
+
+test("KTB-23 fix: a harness issue with no harness_needed is completely unchanged", async () => {
+  const lines = [];
+  const d = harnessImplDeps({
+    issueLabels: async () => ["factory:planned", "factory:harness"],
+    ciSettingsPresent: async () => true,
+    verifyStage: () => ({ ok: true, reasons: [], data: { issue: 15, pr: 20, verifier: { verdict: "accepted" } } }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: d })).toBe(0);
+  expect(lines.some((l) => l.startsWith("harness: this IS"))).toBe(false);
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
+});
+
+// ── ADR-020 KTB-24 fix — review도 blocked에서 되돌아온다 ───────────────────────────────────────
+test("KTB-24 fix: review entering from factory:blocked whose origin was awaiting-review hops back and runs", async () => {
+  const calls = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:awaiting-review", stage: "review" }),
+    transition: vi.fn(async ({ to }) => { calls.push(`transition:${to}`); return { ok: true, to }; }),
+    claudeP: async () => { calls.push("claudeP"); return { is_error: false, result: "{}" }; },
+  });
+  expect(await runStage({ stage: "review", issue: 15, deps: d })).toBe(0);
+  expect(calls[0]).toBe("transition:factory:awaiting-review");
+  expect(calls).toContain("claudeP");
+  // hop은 **복구**이지 새 성취의 주장이 아니다 — 이번 런에는 아직 게이트 파일도 sha 바인딩도 없다.
+  // `prerequisite`를 세우지 않으면 `factory:awaiting-review` 요구조건(GREEN 게이트 파일 + PR head 일치)이
+  // 그 자리에서 hop을 거부하고, 이슈는 재시도 대신 곧장 needs-human으로 밀린다.
+  expect(d.transition).toHaveBeenNthCalledWith(1, expect.objectContaining({ to: "factory:awaiting-review", prerequisite: true }));
+});
+
+test("KTB-24 fix: a review blocked from somewhere else is still refused — no transition, no claude -p", async () => {
+  const lines = [];
+  const d = baseDeps({
+    issueLabels: async () => ["factory:blocked"],
+    blockedOrigin: async () => ({ from: "factory:in-progress", stage: "implement" }),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    claudeP: vi.fn(),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 15, deps: d })).toBe(2);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(lines.some((l) => /review: blocked did not originate from awaiting-review/.test(l))).toBe(true);
+});
+
+// ── ADR-020 KTB-24 fix — 정리 스텝은 **남의 락**을 지우지 않는다 ───────────────────────────────
+// 이 스텝은 `always() && job.status != 'success'`로 돈다 — claim에 실패해 물러난 런에서도 돌 수 있고,
+// 취소는 claim 이전에도 온다. 소유자를 묻지 않고 release()를 부르면 지금 정상적으로 돌고 있는 다른
+// 러너의 락을 지우게 되고, 그러면 같은 이슈에 두 스테이지가 동시에 들어간다.
+test("KTB-24 fix: the lock is released only when this runner holds it", async () => {
+  const run = async (stage, holder) => {
+    const lines = [];
+    const d = abortDeps({
+      issueLabels: async () => ["factory:awaiting-review"],
+      lockHolder: async () => holder,
+      release: vi.fn(async () => true),
+      runRecord: (l) => lines.push(...l),
+    });
+    await abortStage({ stage, issue: 15, status: "failure", runnerId: "gha-111", deps: d });
+    return { lines, release: d.release };
+  };
+
+  // ① 이미 풀렸다 — 지울 것도, 사람에게 "손으로 지우라"고 시킬 것도 없다
+  const gone = await run("review", { present: false });
+  expect(gone.release).not.toHaveBeenCalled();
+  expect(gone.lines).toContain("lock: already released");
+  expect(gone.lines.some((l) => l.includes("by hand"))).toBe(false);
+
+  // ② 우리 것이다 — 지운다
+  const ours = await run("review", { present: true, runner: "gha-111", subject: "lock issue=15 stage=review runner=gha-111 at=t" });
+  expect(ours.release).toHaveBeenCalled();
+  expect(ours.lines).toContain("lock: released after abort");
+
+  // ③ 남의 것이다 — 그대로 두고 누구 것인지 적는다
+  const theirs = await run("review", { present: true, runner: "gha-222", subject: "lock issue=15 stage=review runner=gha-222 at=t" });
+  expect(theirs.release).not.toHaveBeenCalled();
+  expect(theirs.lines).toContain("lock: held by gha-222 — left alone");
+});
+
+test("KTB-24 fix: an unreadable holder (or old wiring with no lockHolder dep) still releases — an orphan lock is the worse failure", async () => {
+  const lines = [];
+  const d = abortDeps({ lockHolder: async () => ({ present: null, reason: "fatal: could not read from remote" }), release: vi.fn(async () => true), runRecord: (l) => lines.push(...l) });
+  await abortStage({ stage: "review", issue: 15, status: "cancelled", runnerId: "gha-111", deps: d });
+  expect(d.release).toHaveBeenCalled();
+  expect(lines.some((l) => l.startsWith("lock: holder unreadable"))).toBe(true);
+
+  const old = abortDeps({ release: vi.fn(async () => true), runRecord: () => {} });   // lockHolder dep 없음
+  await abortStage({ stage: "review", issue: 15, status: "cancelled", deps: old });
+  expect(old.release).toHaveBeenCalled();
+
+  // 소유자를 읽었지만 제목을 파싱하지 못한 경우(runner=null)도 같다 — 이 런이 주인일 가능성이 압도적이다
+  const unparsed = abortDeps({ lockHolder: async () => ({ present: true, runner: null, subject: "lock" }), release: vi.fn(async () => true), runRecord: () => {} });
+  await abortStage({ stage: "review", issue: 15, status: "cancelled", runnerId: "gha-111", deps: unparsed });
+  expect(unparsed.release).toHaveBeenCalled();
 });

@@ -203,6 +203,12 @@ test("ci-settings-harness.json explicitly denies .factory/bin, .factory/lib, .fa
     expect(deny.has(`Edit(${dir})`), `Edit(${dir})`).toBe(true);
     expect(deny.has(`Write(${dir})`), `Write(${dir})`).toBe(true);
   }
+  // KTB-23 fix: 러너의 락파일도 템플릿 파일이 아니다(npm이 만든다) — 열거가 못 보므로 이름으로 못 박는다.
+  // 매니페스트만 막고 락을 열어 두면 "설치되는 코드"는 여전히 바뀐다.
+  for (const f of [".factory/package.json", ".factory/package-lock.json"]) {
+    expect(deny.has(`Edit(${f})`), `Edit(${f})`).toBe(true);
+    expect(deny.has(`Write(${f})`), `Write(${f})`).toBe(true);
+  }
 });
 
 test("dispatcher commands exist for the four LLM stages plus retro, and each names its workflow", () => {
@@ -222,6 +228,22 @@ test("dispatcher commands exist for the four LLM stages plus retro, and each nam
     "factory-implement.md", "factory-plan.md", "factory-retro.md", "factory-review.md", "factory-triage.md",
   ]);
   expect(existsSync(join(T, "claude/commands/factory-merge.md"))).toBe(false);
+});
+
+// ADR-020 KTB-23 fix — implement의 디스패처만 **두 개의 위치 인자**를 읽는다: `$1` 이슈 번호,
+// `$2` 하네스 이슈 여부. run-stage가 라벨에서 읽은 그 판단이 프롬프트까지 닿는 유일한 경로다
+// (그 전까지는 훅과 L2만 알았고, builder는 자기가 열려 있는 파일을 보호 경로로 읽었다).
+test("the implement dispatcher reads the harness flag as $2 (KTB-23 fix)", () => {
+  const t = read("claude/commands/factory-implement.md");
+  expect(t).toContain('{ "issue": $1, "context": ".factory/out/context.json", "harness_issue": $2 }');
+  expect(t).toContain("`true` or `false`");
+  expect(t).not.toContain("$ARGUMENTS");
+  // 나머지 세 디스패처는 한 글자도 바뀌지 않는다 — 인자가 하나뿐이다
+  for (const s of ["triage", "plan", "review"]) {
+    const o = read(`claude/commands/factory-${s}.md`);
+    expect(o, s).toContain('{ "issue": $ARGUMENTS, "context": ".factory/out/context.json" }');
+    expect(o, s).not.toContain("harness_issue");
+  }
 });
 
 /**

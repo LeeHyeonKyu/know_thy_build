@@ -59,6 +59,24 @@ export function makeGh({ run, repo }) {
       const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,title,body,labels"]));
       return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name) };
     },
+    /**
+     * 이슈가 아직 열려 있는가(ADR-020 KTB-23 fix). `issue()`는 state를 싣지 않는다 — 그 함수는
+     * 라벨·본문을 읽는 자리라 필드를 늘리면 모든 호출자가 더 큰 응답을 받는다. sweeper의 하네스
+     * 주차 해제 팔만 이 사실을 필요로 하므로 조회를 따로 둔다.
+     */
+    async issueState(n) {
+      const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,state,closedAt"]));
+      return { number: j.number, state: j.state, closedAt: j.closedAt ?? null };
+    },
+    /**
+     * 이 브랜치에서 **머지된** PR 번호(없으면 null). 하네스 이슈가 `Closes #<n>` 없이 사람 손에
+     * 머지됐을 때 "하네스가 들어왔다"를 말해 주는 유일한 신호다 — builder는 언제나
+     * `claude/fq-<issue>`에서 작업하므로(implement 규칙 1) 브랜치 이름이 곧 이슈 번호다.
+     */
+    async mergedPrForBranch(branch) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
+      return j.length ? j[0].number : null;
+    },
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
@@ -184,9 +202,11 @@ export function makeGh({ run, repo }) {
       await gh(args);
     },
     async issueList({ labels = [], state = "open", limit = 200 } = {}) {
-      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,labels,updatedAt,closedAt"];
+      // body까지 받는다(ADR-020 KTB-23 fix) — `factory:harness` 이슈의 dedupe 키는 제목이 아니라
+      // 본문의 `<!-- factory-harness-request for=<n> -->` 마커다(제목은 사람이 고쳐도 되는 줄이다).
+      const args = ["issue", "list", "-R", repo, "--state", state, "--limit", String(limit), ...labels.flatMap((l) => ["--label", l]), "--json", "number,title,body,labels,updatedAt,closedAt"];
       const j = JSON.parse(await gh(args));
-      return j.map((i) => ({ number: i.number, title: i.title, labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
+      return j.map((i) => ({ number: i.number, title: i.title, body: i.body ?? "", labels: (i.labels || []).map((l) => l.name), updatedAt: i.updatedAt, closedAt: i.closedAt }));
     },
     async prList({ label, state = "open" } = {}) {
       const args = ["pr", "list", "-R", repo, "--state", state];

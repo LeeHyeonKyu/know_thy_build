@@ -32,9 +32,11 @@ export function harnessNeeded(data) {
 }
 
 /**
- * 제목은 **dedupe 키**다(열린 `factory:harness` 이슈들과 제목으로 비교한다) — 그래서 같은 요청이
- * 같은 문자열을 내야 하고, 이슈 번호를 품어야 한다(다른 피처의 같은 의존성 요청과 섞이지 않게).
- * 항목이 여럿이면 첫 항목의 `change`에 나머지 개수를 붙인다 — 전부 이어 붙이면 제목이 문단이 된다.
+ * 사람이 읽는 제목. 항목이 여럿이면 첫 항목의 `change`에 나머지 개수를 붙인다 — 전부 이어 붙이면
+ * 제목이 문단이 된다. **dedupe 키가 아니다**(ADR-020 KTB-23 fix): 예전에는 이 문자열이 열린 harness
+ * 이슈와의 비교 기준이었는데, 제목은 사람이 고쳐도 되는 줄이고 builder의 `change` 문구가 라운드마다
+ * 한 글자만 달라져도 같은 피처에 대해 두 번째 하네스 이슈가 열렸다. 키는 본문의 기계 마커다
+ * (`harnessRequestMarker`) — 피처 이슈 하나당 열린 하네스 이슈 하나가 그 계약이다.
  */
 export function harnessIssueTitle(entries, issue) {
   const first = clip(oneLine(entries[0]?.change), CHANGE_MAX);
@@ -45,9 +47,25 @@ export function harnessIssueTitle(entries, issue) {
 /** 본문의 마지막 줄 `Blocks: #<n>`이 merge 스테이지가 읽는 유일한 연결고리다(§parseBlocks). */
 export const blocksLine = (issue) => `Blocks: #${issue}`;
 
+/**
+ * 본문 첫 줄의 네임스페이스 마커 — **이것이 dedupe 키다**(ADR-020 KTB-23 fix). `for=<n>`은 이 하네스
+ * 작업이 막고 있는 피처 이슈 번호이고, 그래서 "피처 이슈 하나당 열린 하네스 이슈 하나"가 계약이 된다:
+ * 같은 피처가 rework로 다시 돌아 문구가 조금 다른 요청을 내놓아도 이슈가 쌓이지 않는다.
+ * `Blocks: #<n>` 줄과 같은 사실을 싣지만 둘의 역할은 다르다 — `Blocks:`는 사람도 쓰는 사람의 줄이고,
+ * 이 마커는 기계만 쓰는 기계의 줄이다(사람이 `Blocks:`를 손으로 더해도 dedupe가 흔들리지 않는다).
+ */
+export const harnessRequestMarker = (issue) => `<!-- factory-harness-request for=${issue} -->`;
+
+/** 본문에서 `factory-harness-request` 마커가 가리키는 피처 이슈 번호(없으면 null). */
+export function parseHarnessRequestFor(body) {
+  const m = /<!--\s*factory-harness-request for=(\d+)\s*-->/.exec(String(body ?? ""));
+  return m ? Number(m[1]) : null;
+}
+
 export function harnessIssueBody({ entries, issue, pr = null }) {
   const rows = entries.map((e) => `| \`${oneLine(e.file)}\` | ${oneLine(e.change)} | ${oneLine(e.why)} |`);
   return [
+    harnessRequestMarker(issue),
     `#${issue}의 implement가 **보호 경로 변경 없이는 끝낼 수 없다**고 보고했습니다(implement handoff의 \`harness_needed\`).`,
     "",
     "| file | change | why |",
@@ -58,7 +76,7 @@ export function harnessIssueBody({ entries, issue, pr = null }) {
     "이 이슈는 평소의 파이프라인(triage → plan → implement → review)을 그대로 타되, `factory:harness`",
     "라벨 덕분에 builder가 테스트 인프라·빌드 설정 파일을 실제로 쓸 수 있고(ADR-020 KTB-20),",
     "**머지는 사람이 합니다** — 보호 경로를 실은 PR의 자동 머지는 L1이 계속 거부합니다.",
-    "머지되면 아래 이슈가 `factory:needs-info → factory:queue`로 자동 복귀합니다.",
+    "이 이슈가 닫히면(사람이 PR을 머지하면) sweeper가 아래 이슈를 `factory:needs-info → factory:queue`로 되돌립니다.",
     "",
     blocksLine(issue),
   ].filter((l) => l !== "").join("\n");
@@ -82,8 +100,10 @@ export function parseBlocks(body) {
 }
 
 /**
- * `factory:harness` 이슈를 **하나만** 만든다. 같은 제목의 열린 harness 이슈가 이미 있으면 그것을
- * 그대로 쓴다 — implement가 (rework로) 다시 돌아 같은 요청을 또 내놓아도 이슈가 쌓이지 않는다.
+ * `factory:harness` 이슈를 **하나만** 만든다. 이 피처 이슈를 가리키는 마커
+ * (`<!-- factory-harness-request for=<n> -->`)를 본문에 가진 열린 harness 이슈가 이미 있으면 그것을
+ * 그대로 쓴다 — implement가 (rework로) 다시 돌아 문구가 조금 다른 요청을 내놓아도 이슈가 쌓이지 않는다.
+ * 예전에는 제목으로 비교했는데(KTB-23), `change` 한 글자만 달라져도 두 번째 이슈가 열렸다.
  * 조회가 실패하면 만들지 않는다(fail closed): 중복 이슈를 여는 것보다 이번 런이 needs-human으로
  * 가는 편이 낫다 — 사람은 어느 쪽이든 보게 되지만, 중복 이슈는 사람이 손으로 치워야 한다.
  *
@@ -93,8 +113,8 @@ export function parseBlocks(body) {
 export async function ensureHarnessIssue({ gh, issue, entries, pr = null }) {
   const title = harnessIssueTitle(entries, issue);
   const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
-  const found = (open || []).find((i) => String(i.title ?? "").trim() === title);
-  if (found) return { issue: found.number, created: false, title };
+  const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
+  if (found) return { issue: found.number, created: false, title: found.title ?? title };
   const number = await gh.createIssue({
     title,
     body: harnessIssueBody({ entries, issue, pr }),

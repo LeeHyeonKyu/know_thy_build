@@ -13,6 +13,7 @@
       "Edit(.factory/roles.toml)", "Write(.factory/roles.toml)",
       "Edit(.factory/quarantine.toml)", "Write(.factory/quarantine.toml)",
       "Edit(.factory/package.json)", "Write(.factory/package.json)",
+      "Edit(.factory/package-lock.json)", "Write(.factory/package-lock.json)",
       "Edit(.claude/**)", "Write(.claude/**)",
       "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
       "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)",

@@ -470,6 +470,14 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 아니다(경량 회차는 아예 이 판단을 하지 않는다). 차단 해제는 머지 그 자체의 결과여야 한다 —
   // 하네스가 들어온 순간이 피처가 다시 돌 수 있게 된 순간이다.
   //
+  // **여기는 빠른 경로일 뿐이다**(ADR-020 KTB-23 fix). 하네스 PR은 구성상 보호 경로를 건드리므로
+  // 단계 (3)이 자동 머지를 거부하고 `needs-human`으로 넘긴다 — 실제 머지는 사람이 GitHub에서 하고,
+  // 그 경로에서 이 코드는 **한 줄도 실행되지 않는다**. 해제의 1차 경로는 sweeper의 needs-info 팔
+  // (`lib/sweeper.js`의 `sweepHarnessUnpark`)이고, 이 자리는 팩토리가 스스로 머지할 수 있었던 드문
+  // 경우(보호 경로에 걸리지 않는 변경만 남은 재시도)를 몇 초 일찍 푸는 값이다. 둘은 마커가 아니라
+  // 라벨로 겹침을 피한다: 이 전이가 성공하면 이슈는 더 이상 `factory:needs-info`가 아니라서 sweeper의
+  // 조회에 잡히지 않고, 실패하면 sweeper가 다음 sweep에서 다시 시도한다.
+  //
   // 전부 best-effort다: 머지는 이미 일어났고 되돌릴 것이 없다. 전이가 거부돼도(사람이 그 사이 라벨을
   // 옮겼을 수 있다) 기록만 남기고 exit 0을 유지한다 — `needs-info → queue`는 사람도 `:unstick`으로 할 수 있다.
   if (d.issueBody && d.transitionOther) {
