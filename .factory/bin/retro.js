@@ -45,6 +45,7 @@ import {
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
 import { stageMaxTurns } from "./run-stage.js";
+import { hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 export { HARNESS_LABEL };   // 재수출 — run-stage.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 
@@ -475,9 +476,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
     if (envelope && !envelope.is_error) {
       try { transcriptText = (await d.transcript?.(envelope)) || ""; } catch { transcriptText = ""; }
     }
+    // KTB-22: claude -p 자신의 API 쿼터/장애(429/5xx/스로틀)는 회차가 통째로 죽었다는 사실은 같지만
+    // 사유는 달라야 한다 — "claude -p reported is_error"는 사람에게 아무것도 말해주지 않지만
+    // 프로바이더 메시지 원문은 그대로 읽을 수 있다. `run-stage.js`(KTB-16)와 달리 여기서는 트랜스크립트
+    // 복구를 시도하지 않는다 — retro의 실패는 이미 무해하다(라벨을 옮기지 않고, `merges_since`를
+    // 리셋하지 않아 다음 머지가 다시 시도한다, 커서도 그대로다): 복구해서 얻는 것이 없다.
     const ex = envelope && !envelope.is_error
       ? extractStageArtifact({ envelopeResult: envelope.result, transcriptText, validate: (o) => validate("retro.v1", o) })
-      : { ok: false, reason: envelope ? "claude -p reported is_error" : (called.error || "claude -p failed") };
+      : { ok: false, reason: envelope ? (hitApiError(envelope) ? apiErrorReason(envelope) : "claude -p reported is_error") : (called.error || "claude -p failed") };
     const out = ex.ok ? ex.data : null;
     const v = { ok: ex.ok, errors: ex.ok ? [] : [ex.reason] };
     // 호출이 실패했어도 토큰은 이미 쓰였다 — 비용은 성공한 회차만의 것이 아니다(F10). `retroUsage`는

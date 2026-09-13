@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { verifyStage, extractJson } from "../lib/verify-stage.js";
+import { verifyStage, extractJson, hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -139,4 +139,51 @@ test("max_turns + a recovered artifact is a pass; max_turns without one names th
   const other = verifyStage({ ...args, out: { ...cut, subtype: "error_during_execution", terminal_reason: "error" }, transcriptText: transcript });
   expect(other.ok).toBe(false);
   expect(other.reasons).toContain("claude -p reported is_error");
+});
+
+// ── KTB-22: API 쿼터/장애도 턴 한도와 같은 자리다 ──────────────────────────
+// 2026-09-12 20:20Z 데모: claude -p 자신이 429(조직 월 지출 한도)로 죽었다 — 에이전트나 프롬프트의
+// 잘못이 아니라 환경 조건이다. 산출물을 복구했으면 성공, 못 했으면 사유는 프로바이더 메시지 원문.
+
+test("hitApiError: terminal_reason, numeric 4xx/5xx status, or a quota/outage phrase in result — any one is enough", () => {
+  expect(hitApiError({ terminal_reason: "api_error" })).toBe(true);
+  expect(hitApiError({ api_error_status: 429 })).toBe(true);
+  expect(hitApiError({ api_error_status: 529 })).toBe(true);
+  expect(hitApiError({ api_error_status: 500 })).toBe(true);
+  expect(hitApiError({ result: "You've hit your org's monthly spend limit" })).toBe(true);
+  expect(hitApiError({ result: "overloaded, please retry" })).toBe(true);
+  expect(hitApiError({})).toBe(false);
+  expect(hitApiError({ api_error_status: 200 })).toBe(false);
+  expect(hitApiError({ api_error_status: "429" })).toBe(false);          // 문자열은 세지 않는다(오타 방지)
+  expect(hitApiError(null)).toBe(false);
+});
+
+test("apiErrorReason: verbatim provider message, first line only, truncated to 200 chars", () => {
+  const out = { api_error_status: 429, result: "You've hit your org's monthly spend limit · ask your admin to raise it at claude.ai/admin-settings/usage · your session limit resets 8:30pm (UTC)" };
+  expect(apiErrorReason(out)).toBe(`claude -p api error 429: ${out.result}`);
+  const multiline = { api_error_status: 529, result: "overloaded\nsecond line ignored" };
+  expect(apiErrorReason(multiline)).toBe("claude -p api error 529: overloaded");
+  const long = { api_error_status: 429, result: "x".repeat(250) };
+  expect(apiErrorReason(long)).toBe(`claude -p api error 429: ${"x".repeat(200)}`);
+  expect(apiErrorReason({})).toBe("claude -p api error n/a: ");
+});
+
+test("KTB-22: a 429 quota envelope with no transcript recovery fails with the api-error reason, not 'no JSON object'", () => {
+  const quota = { is_error: true, subtype: "success", terminal_reason: "api_error", api_error_status: 429, num_turns: 1, duration_ms: 299, result: "You've hit your org's monthly spend limit · ask your admin to raise it at claude.ai/admin-settings/usage · your session limit resets 8:30pm (UTC)" };
+  const r = verifyStage({ stage: "review", out: quota, agentsLog: log([]), roster: [], orchestration: "workflow" });
+  expect(r.ok).toBe(false);
+  expect(r.reasons[0]).toBe(`claude -p api error 429: ${quota.result}`);
+  expect(r.reasons.join(" ")).not.toMatch(/reported is_error/);
+});
+
+test("KTB-22: a recovered artifact behind a quota envelope is a pass", () => {
+  const transcript = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "tu1" }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: "Workflow launched in background. Task ID: abc" }] } }),
+    JSON.stringify({ type: "user", message: { content: `<task-notification>\n<status>completed</status>\n<result>${JSON.stringify(review)}</result>\n</task-notification>` } }),
+  ].join("\n");
+  const quota = { is_error: true, terminal_reason: "api_error", api_error_status: 429, num_turns: 1, result: "monthly spend limit" };
+  const r = verifyStage({ stage: "review", out: quota, transcriptText: transcript, agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } });
+  expect(r.ok).toBe(true);
+  expect(r.data.verdicts).toHaveLength(2);
 });

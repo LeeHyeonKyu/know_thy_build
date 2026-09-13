@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { backPressure } from "../lib/back-pressure.js";
-import { sweep, restartComment } from "../lib/sweeper.js";
+import { sweep, restartComment, blockedRetryComment, API_ERROR_MAX_RETRIES } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
@@ -271,6 +271,62 @@ test("sweep: a stalled-arm restart marker for the same stage does not block the 
   expect(dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: 9 });
   expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "merge" });
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
+});
+
+// ── KTB-22: an api-error origin gets 3 free retries (spaced by the sweep interval), not 1 ────────
+// The origin marker's reason line is what tells sweep this blocked came from a quota/outage
+// condition (`claude -p api error …`) rather than the usual "one free retry" case.
+
+const API_ERROR_ORIGIN = (from, stage, at) => ({
+  id: 1,
+  body: `<!-- factory-transition:v1 from=${from} to=factory:blocked by=script -->\n${from} → factory:blocked — claude -p api error 429: You've hit your org's monthly spend limit\n<!-- factory-blocked-origin from=${from} stage=${stage} -->`,
+  createdAt: at,
+});
+
+test("sweep: an api-error blocked origin retries 3 times (attempt-numbered markers), then escalates on the 4th sweep", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [API_ERROR_ORIGIN("factory:planned", "implement", "2026-09-12T20:20:00Z"), ...posted] : [])),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99 + posted.length, body, createdAt: "2026-09-12T21:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-09-12T21:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage };
+
+  for (let attempt = 1; attempt <= API_ERROR_MAX_RETRIES; attempt++) {
+    const actions = await sweep(args);
+    expect(dispatchStage).toHaveBeenNthCalledWith(attempt, { stage: "implement", issue: 9 });
+    expect(gh.comment).toHaveBeenNthCalledWith(attempt, 9, expect.stringContaining(blockedRetryComment("implement", 9, attempt)));
+    expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "implement", attempt });
+    expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
+  }
+
+  // 4th sweep: 3 attempts already on record — escalate, no further dispatch
+  const fourth = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(API_ERROR_MAX_RETRIES);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
+  expect(fourth).toContainEqual({ kind: "blocked-escalated", issue: 9 });
+});
+
+test("sweep: a non-api-error blocked origin still gets exactly one free retry (KTB-15b behaviour unchanged)", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [BLOCKED_ORIGIN("factory:planned", "2026-09-12T20:20:00Z"), ...posted] : [])),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-12T21:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-09-12T21:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage };
+
+  await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  const second = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9 });
 });
 
 test("sweep: blocked with no factory-blocked-origin marker at all escalates immediately (no dispatch)", async () => {

@@ -1131,6 +1131,43 @@ test("KTB-16/17: max_turns 봉투라도 트랜스크립트에서 산출물을 �
   expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
 });
 
+// ── KTB-22: claude -p 자신의 API 쿼터/장애도 max_turns와 같은 자리(factory:blocked)다 ───────────
+// 2026-09-12 20:20Z 데모: 구현 둘·계획 하나가 동시에 429(조직 월 지출 한도)로 죽었다.
+
+test("KTB-22: a 429 quota envelope with no artifact ends the stage at factory:blocked with the provider message, not needs-human", async () => {
+  const lines = [];
+  const d = implDeps({
+    claudeP: async () => ({ is_error: true, subtype: "success", terminal_reason: "api_error", api_error_status: 429, num_turns: 1, duration_ms: 299, result: "You've hit your org's monthly spend limit · ask your admin to raise it at claude.ai/admin-settings/usage · your session limit resets 8:30pm (UTC)" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringContaining("claude -p api error 429: You've hit your org's monthly spend limit") }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lines.some((l) => l.startsWith("- claude -p api error 429:"))).toBe(true);
+  expect(lines).not.toContain("- claude -p reported is_error");
+});
+
+test("KTB-22: an api-error envelope recovered from the transcript is a pass — gates still run", async () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const transcript = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w1" }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: "Workflow launched in background. Task ID: abc" }] } }),
+    JSON.stringify({ type: "user", message: { content: `<task-notification>\n<status>completed</status>\n<result>${JSON.stringify(impl)}</result>\n</task-notification>` } }),
+  ].join("\n");
+  const gatesFile = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const lines = [];
+  const d = implDeps({
+    claudeP: async () => ({ is_error: true, terminal_reason: "api_error", api_error_status: 429, num_turns: 1, result: "monthly spend limit" }),
+    gates: vi.fn(async () => gatesFile),
+    verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, transcriptText: transcript, agentsLog: { starts: [], stops: [], completed: [], orphans: [] }, roster: [], orchestration: "workflow", gates }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+  expect(d.gates).toHaveBeenCalled();
+  expect(lines).toContain("verify: ok");
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
+});
+
 test("F5: resetGates는 판정 파일뿐 아니라 그 재료(테스트·커버리지·mutation 리포트)까지 지운다", () => {
   const root = mkdtempSync(join(tmpdir(), "reset-gates-"));
   const harness = {

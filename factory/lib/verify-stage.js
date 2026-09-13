@@ -46,6 +46,34 @@ export function hitMaxTurns(out) {
 export const maxTurnsReason = (out) => `claude -p hit max turns (${out?.num_turns ?? "n/a"})`;
 
 /**
+ * `claude -p`가 **API 쿼터/장애**에서 잘렸는가(KTB-22). 2026-09-12 20:20Z, 데모 세 스테이지(구현
+ * 둘·계획 하나)가 동시에 이 봉투로 죽었다 — `is_error:true, terminal_reason:"api_error",
+ * api_error_status:429, result:"You've hit your org's monthly spend limit …"`. `hitMaxTurns`와
+ * 같은 자리다: 설계 오류가 아니라 **환경/쿼터 조건**이라 재시도(사람 없이, sweeper의 blocked-origin
+ * 재시도)로 풀린다. 세 가지를 본다 — 어느 하나만 있어도 판정한다(CLI/게이트웨이 버전에 따라 필드가
+ * 갈릴 수 있다): `terminal_reason === "api_error"`, `api_error_status`가 4xx/5xx 정수, 또는
+ * `result`가 프로바이더 쿼터/장애 문구(스로틀·과부하 포함)에 매치. 마지막 것은 그 두 필드를 못
+ * 채우는 옛/다른 CLI 경로를 위한 안전망이다.
+ */
+const API_ERROR_RESULT_RE = /spend limit|rate limit|usage limit|overloaded|529|429/i;
+export function hitApiError(out) {
+  if (!out) return false;
+  if (out.terminal_reason === "api_error") return true;
+  if (Number.isInteger(out.api_error_status) && out.api_error_status >= 400 && out.api_error_status < 600) return true;
+  return typeof out.result === "string" && API_ERROR_RESULT_RE.test(out.result);
+}
+/**
+ * API 에러 실패의 run 기록/전이 사유 한 줄. 프로바이더 메시지를 **원문 그대로**(요약·재해석 없이)
+ * 첫 줄만, 200자로 잘라 싣는다 — "claude -p reported is_error"는 사람에게 아무것도 말해주지 않지만,
+ * 이 문장은 사람(과 sweeper의 재시도 판단)이 그대로 읽을 수 있다.
+ */
+export const apiErrorReason = (out) => {
+  const status = Number.isInteger(out?.api_error_status) ? out.api_error_status : "n/a";
+  const firstLine = String(out?.result ?? "").split("\n")[0].trim().slice(0, 200);
+  return `claude -p api error ${status}: ${firstLine}`;
+};
+
+/**
  * gates: `.factory/out/gates.json`의 내용(없으면 null). 게이트 판정의 단일 출처는 이 파일이다 —
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
@@ -78,9 +106,17 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
    * 이미 끝났고 산출물은 트랜스크립트 안에 있다**(데모 #2 plan 재실행: 30분·$12.05가 그렇게 증발했다).
    * 그래서 스키마를 통과하는 산출물을 실제로 복구했을 때만 이 예외가 열린다. 복구하지 못했으면
    * 사유는 "no JSON object in result"(증상)가 아니라 턴 한도(원인)로 적는다.
+   *
+   * 두 번째 예외가 **API 쿼터/장애**다(KTB-22, `hitApiError`) — claude -p 자신이 5xx/429/쿼터
+   * 소진으로 죽은 것이지 에이전트나 프롬프트의 잘못이 아니다. 같은 규칙: 트랜스크립트에서 산출물을
+   * 복구했으면 성공, 못 했으면 사유는 프로바이더 메시지 원문(`apiErrorReason`)이다.
    */
   const maxTurns = hitMaxTurns(out);
-  if ((!out || out.is_error) && !(maxTurns && artifact.ok)) reasons.push(maxTurns ? maxTurnsReason(out) : "claude -p reported is_error");
+  const apiError = !maxTurns && hitApiError(out);
+  const recovered = (maxTurns || apiError) && artifact.ok;
+  if ((!out || out.is_error) && !recovered) {
+    reasons.push(maxTurns ? maxTurnsReason(out) : apiError ? apiErrorReason(out) : "claude -p reported is_error");
+  }
   if (!artifact.ok) reasons.push(artifact.reason);
   if (GATED_STAGES.includes(stage)) {
     if (!gates) reasons.push("gates file missing");

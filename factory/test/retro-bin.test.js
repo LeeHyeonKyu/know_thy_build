@@ -917,6 +917,25 @@ for (const [name, overrides] of Object.entries(failures)) {
   });
 }
 
+// ── KTB-22: claude -p 자신의 API 쿼터/장애 — 사유는 프로바이더 메시지 원문, 그 외는 KTB-16처럼 무해 ──
+
+test("full: a 429 quota envelope records the provider message verbatim, not the generic is_error label — exit 0, merges_since/cursor untouched", async () => {
+  const state = freshState({ merges_since: 2, n: 3 });
+  const { deps, recorded, last } = makeDeps({ state, overrides: {
+    claudeP: vi.fn(async () => ({ is_error: true, terminal_reason: "api_error", api_error_status: 429, num_turns: 1, result: "You've hit your org's monthly spend limit · ask your admin to raise it at claude.ai/admin-settings/usage" })),
+  } });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  const s = last();
+  expect(s.last_full_failed.reason).toBe("claude -p api error 429: You've hit your org's monthly spend limit · ask your admin to raise it at claude.ai/admin-settings/usage");
+  expect(s.merges_since).toBe(3);                                       // 리셋하지 않는다 — 다음 머지가 다시 시도한다
+  expect(s.cursor.last_retro_at).toBe(CURSOR);                          // 커서도 움직이지 않는다
+  expect(deps.applyLessons).not.toHaveBeenCalled();
+  expect(deps.publishLessons).not.toHaveBeenCalled();
+  expect(deps.createIssue).not.toHaveBeenCalled();
+  expect(recorded.join("\n")).toContain("full analysis failed");
+  expect(recorded.join("\n")).not.toContain("claude -p reported is_error");
+});
+
 // ── KTB-7(재리뷰): retro도 트랜스크립트를 1순위 출처로 쓴다 ─────────────────
 // `retro.v1`은 lessons·예시·관점·제안과 각각의 근거 run을 전부 싣는다 — plan 못지않게 크고, 디스패처가
 // 그것을 최종 텍스트로 다시 타이핑하다 요약하면 회차 전체가 `last_full_failed`가 된다(데모 #2의 plan).

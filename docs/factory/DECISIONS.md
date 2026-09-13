@@ -498,7 +498,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 ## ADR-020 Dogfood 판결 — 2026-09-12 (Plan 6 Task 7, part 1 — 재구성)
 
-Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19) **⑤ 권한·훅**(KTB-13·14·20·21) **⑥ 관찰**(O1~O12, O14·O15, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
+Plan 6(데모 저장소 `LeeHyeonKyu/know-thy-build-demo` 도그푸딩 + KTB 자기 자신 + own-calendar) 중에 **실행으로 드러난** 설계 판결을 모은다. 관찰 기록 자체는 `docs/factory/dogfood/2026-09-12-demo.md`(데모)·`2026-09-12-ktb.md`(KTB 자기 자신)이고, 여기에는 그 관찰이 바꾼 **설계**만 적는다. 초판은 발견 순서대로 KTB-5부터 이어 붙인 목록이었다 — 이번 개정(Task 7 part 1)은 같은 판결의 **본문을 한 글자도 줄이지 않고** 여섯 갈래로 다시 묶었을 뿐이다: **① doctor/설치**(KTB-1·2·3·4·11·12) **② 무결성 L0/L1**(KTB-5·6) **③ 산출물 추출**(KTB-7·16·17) **④ 워크플로 동시성·재시작**(KTB-8·9·10·15·15b·18·19·22) **⑤ 권한·훅**(KTB-13·14·20·21) **⑥ 관찰**(O1~O12, O14·O15, G1). 표본·지표의 최종 숫자는 Task 7 part 2가 채운다(아래 "표본과 지표" 절의 `{{TBD}}`).
 
 ### 질문
 
@@ -732,7 +732,7 @@ You will be notified when it completes.
 
 **리뷰 leftover(M4)**: `stripLineNumbers`/`fileReadsFromTranscript`의 줄 번호 접두 정규식 `^\d+\t`는 실제 `Read` 출력(`cat -n`처럼 오른쪽 정렬해 공백으로 채운 번호, 예: `"     9\t"`)의 앞 공백을 매치하지 못해 그 줄을 못 벗기고 그대로 흘려보냈다 — 여러 조각으로 온 큰 파일을 재조립할 때 조용히 깨질 수 있는 지점이다. `^\s*(\d+)\t`로 고쳤다. 영향: `factory/lib/stage-artifact.js`. 테스트: `stage-artifact.test.js`(패딩 섞인 다중 조각 재조립 픽스처).
 
-### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22
 
 한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
@@ -834,6 +834,67 @@ You will be notified when it completes.
 4. **리뷰 지적 두 건도 같은 커밋에서 닫는다**(KTB-19 review): **I-1** — sweeper의 blocked 팔이 stalled 팔과 **같은** 재점화 마커(`restartComment`)를 재사용해, "stalled가 먼저 밀었다가 그 런이 blocked으로 떨어지는" 정상 경로에서 한 번의 공짜 재시도가 조용히 사라졌다 — 별도 마커 `factory-sweeper blocked-retry stage=<s> issue=<n>`로 완전히 갈랐다. **I-2** — 머지 재시도는 (4b)가 게이트를 재확인해 라벨을 `approved`로 되돌리기 **전까지** 여전히 `factory:blocked`다. 그 창 안에서 또 판정 불가가 나면(gates BLOCKED, protectedPaths/policyViolations 계산 실패) "전이"는 그래프에 없는 `blocked→blocked` 자기 전이가 되어 엉뚱한 그래프-거부 코멘트를 남겼다 — `factory:blocked → factory:rework`(CONFLICTING 재시도) 엣지를 추가하고, blocked→blocked는 `toBlocked()` 헬퍼가 라벨을 건드리지 않은 채 record만 남기고 `factory-blocked-origin` 마커를 직접 재게시한다(전이를 안 거치므로 `transition.js`가 대신 남겨주지 않는다).
 
 **영향**: `factory/lib/merge-stage.js`(`waitForChecksSettled`, `toBlocked`), `factory/lib/config.js`(`merge_check_wait_sec` 기본값), `factory/bin/run-stage.js`(`prChecks`/`requiredChecks`/`mergeCheckWaitSec` dep, origin hoist), `factory/lib/labels.js`(`blocked→rework` 엣지), `factory/lib/transition.js`·`factory/lib/retro/issue-comments.js`(`blockedOriginMarker` 공유), `factory/lib/sweeper.js`(`blockedRetryComment`). 테스트: `merge-stage.test.js`·`config.test.js`·`labels.test.js`·`sweeper.test.js`.
+
+#### KTB-22 — claude -p의 API 쿼터/장애는 needs-human이 아니라 blocked다: 3번은 사람 없이 다시 본다
+
+**질문**: 2026-09-12 20:20Z, 데모 세 스테이지(구현 둘 — #2 라운드 4 implement·#15 implement, 계획 하나 —
+#18 plan)가 **동시에** 죽었다. 셋 다 같은 봉투다:
+
+```
+is_error: true, subtype: "success", api_error_status: 429, terminal_reason: "api_error",
+num_turns: 1, duration_ms: 299,
+result: "You've hit your org's monthly spend limit · ask your admin to raise it at
+         claude.ai/admin-settings/usage · your session limit resets 8:30pm (UTC)"
+```
+
+`run-stage`/`verify-stage`는 이것을 여느 `is_error`와 똑같이 다뤘다 — `stage artifact missing or
+invalid: claude -p reported is_error; no candidate matched the stage schema — transcript: the
+Workflow tool result is a background receipt…`를 사유로 남기고 `factory:needs-human`으로 전이했다.
+등급도 사유도 틀렸다: 사람이 판단할 산출물도, 고쳐야 할 프롬프트도 없다 — **조직의 월 지출 한도가
+찼을 뿐**이고, 299 ms·1턴 만에 죽었으니 트랜스크립트에 산출물이 있을 리도 없다(KTB-16/17의 "복구"가
+애초에 해당하지 않는 경우). 세 스테이지가 몰린 것 자체가 신호다 — 이건 프롬프트 문제가 아니라
+계정 전체에 걸린 환경 조건이다.
+
+**결정**: `hitMaxTurns`(KTB-16)와 같은 자리에, 같은 모양으로 `hitApiError`를 세운다.
+
+1. **판정은 세 가지 중 하나만 있어도 선다**(CLI/게이트웨이 버전에 따라 필드가 갈릴 수 있어 하나만
+   보면 조용히 놓친다): `terminal_reason === "api_error"`, `api_error_status`가 4xx/5xx 정수, 또는
+   `result`가 `/spend limit|rate limit|usage limit|overloaded|529|429/i`에 매치. 마지막 것은 그
+   필드 두 개를 못 채우는 옛/다른 CLI 경로를 위한 안전망이다(`factory/lib/verify-stage.js`).
+2. **사유는 프로바이더 메시지 원문이다.** "claude -p reported is_error"는 사람에게 아무것도 말해
+   주지 않는다 — `claude -p api error <status>: <result 첫 줄, 200자 절단>`을 그대로 싣는다
+   (`apiErrorReason`). 스키마 진단은 KTB-16처럼 그 뒤에 부가 정보로 붙는다.
+3. **등급은 `factory:blocked`다.** 쿼터/장애는 설계 오류가 아니라 **환경 조건**이다 — gates
+   BLOCKED·턴 한도(KTB-16)·머지 API 실패와 같은 자리다. 그래프는 이미 이 네 스테이지 전부에
+   `→ blocked` 출구를 갖고 있다(KTB-16이 queue/ready에, KTB-15b가 planned/in-progress/approved에
+   이미 열어 뒀다) — 새 엣지는 필요 없었다.
+4. **단, 트랜스크립트를 먼저 본다(KTB-16/17과 같은 규칙).** 스키마를 통과하는 산출물을 실제로
+   복구했으면 그 런은 성공이고, 게이트도 그때는 돈다(건너뛰면 복구한 산출물이 "gates file missing"
+   으로 되떨어진다) — `run-stage.js`의 게이트 게이팅 조건에 `hitApiError(out)`을 더했다. 이번 사고는
+   1턴·299 ms라 복구할 것이 없었지만, 규칙 자체는 max_turns와 다를 이유가 없다.
+5. **retro도 같은 사유를 쓴다.** `bin/retro.js`의 `claude -p`가 API 에러로 죽으면 회차는 이미
+   무해하게 실패한다(라벨을 옮기지 않고, `merges_since`를 리셋하지 않아 다음 머지가 다시 시도하고,
+   커서도 그대로다) — 바뀌는 것은 `_retro.md`의 `last_full_failed.reason`이 "claude -p reported
+   is_error" 대신 프로바이더 메시지 원문을 담는다는 것뿐이다. 트랜스크립트 복구는 시도하지 않는다
+   (retro의 실패는 사이드 이펙트가 없어 복구해서 얻는 게 없다 — 3에서 4로 넘어가는 이유이기도 하다).
+6. **sweeper는 3번까지 다시 본다.** blocked-origin 재시도(KTB-15b)는 원래 "이슈+스테이지당 평생
+   한 번"이었다 — 판정 불가의 흔한 원인(GitHub API 순간 실패)이 한 번으로 대개 풀리기 때문이다.
+   조직 지출/속도 한도는 다르다: 몇 분~몇 시간 뒤에 풀리는 게 보통이고, sweep 간격(기본 30분)만큼
+   띄워 몇 번 다시 보는 것이 곧장 사람을 부르는 것보다 싸다. `blocked-origin` 마커의 전이 사유가
+   `api error`를 담고 있으면(`blockedOrigin(comments).reason`, `lib/retro/issue-comments.js`가
+   전이 코멘트의 "→ factory:blocked — …" 줄에서 함께 읽는다) 한도를 3회로 넓힌다 — 재점화 마커
+   (`blockedRetryComment`)가 몇 번째 시도인지(`attempt=N`)를 싣고, sweeper가 그 최댓값으로 다음
+   시도 번호를 센다. 3번째마저 blocked이면 4번째 sweep에서 needs-human으로 에스컬레이션한다.
+   일반 blocked-origin(사유에 "api error"가 없는 경우)은 예전처럼 한 번뿐이다 — 마커도 `attempt`
+   없이 예전과 바이트가 같아 KTB-15b/19의 기존 dedupe 계약을 건드리지 않는다.
+
+**영향**: `factory/lib/verify-stage.js`(`hitApiError`·`apiErrorReason`), `factory/bin/run-stage.js`
+(게이트 게이팅·verify 실패 등급에 `hitApiError` 추가), `factory/bin/retro.js`(is_error 사유 분기),
+`factory/lib/retro/issue-comments.js`(`blockedOrigin`이 `reason`도 함께 반환), `factory/lib/sweeper.js`
+(`blockedRetryComment`의 `attempt` 인자, `API_ERROR_MAX_RETRIES`, blocked 팔의 시도 카운팅). 테스트:
+`verify-stage.test.js`(429 판정·사유·복구 3종), `run-stage.test.js`(blocked 등급·마커·복구+게이트
+2종), `retro-bin.test.js`(사유 치환 1건), `issue-comments.test.js`(`reason` 필드 4건),
+`sweeper.test.js`(3회 재시도 후 에스컬레이션, 일반 blocked은 그대로 1회).
 
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21

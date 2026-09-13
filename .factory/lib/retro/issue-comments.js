@@ -59,15 +59,30 @@ export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+
 export const blockedOriginMarker = ({ from, stage }) => `<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"} -->`;
 
 /**
- * 이슈 코멘트에서 **가장 최근** `factory-blocked-origin` 마커를 뽑는다. `{from, stage}` 또는
+ * `lib/transition.js`가 남기는 전이 코멘트에서 "→ factory:blocked" 줄의 사유(있으면)만 뽑는다 —
+ * `factory-blocked-origin` 마커와 **같은 코멘트**에서, 그 마커를 만든 전이 자체의 사유를 읽는다
+ * (KTB-22). `merge-stage.js`의 `toBlocked()`처럼 전이를 거치지 않고 마커만 재게시하는 자리는 이
+ * 줄 모양을 쓰지 않으므로 매치되지 않는다 — 그때는 사유를 "모른다"(빈 문자열)로 두는 것이 맞다
+ * (재시도 카운팅이 그 사유로 API 에러 여부를 잘못 판단하는 것보다는 낫다).
+ */
+const BLOCKED_TRANSITION_REASON = /→ factory:blocked(?: — ([^\n]+))?/;
+
+/**
+ * 이슈 코멘트에서 **가장 최근** `factory-blocked-origin` 마커를 뽑는다. `{from, stage, reason}` 또는
  * 마커가 하나도 없으면 null(사람이 API로 라벨을 직접 blocked에 붙인 경우 등 — "판정 불가"이지
- * "queue에서 왔다"가 아니다). 코멘트는 시간순으로 온다고 가정한다(sweeper의 다른 판정들과 같은 가정).
+ * "queue에서 왔다"가 아니다). `reason`은 그 전이가 남긴 사유 문구(없으면 빈 문자열) — sweeper가
+ * "이 blocked이 API 쿼터/장애에서 왔는가"(KTB-22)를 가르는 데 쓴다. 코멘트는 시간순으로 온다고
+ * 가정한다(sweeper의 다른 판정들과 같은 가정).
  */
 export function blockedOrigin(comments) {
   let found = null;
   for (const c of comments || []) {
-    const m = BLOCKED_ORIGIN.exec(String(c?.body ?? ""));
-    if (m) found = { from: m[1], stage: m[2] };
+    const body = String(c?.body ?? "");
+    const m = BLOCKED_ORIGIN.exec(body);
+    if (m) {
+      const rm = BLOCKED_TRANSITION_REASON.exec(body);
+      found = { from: m[1], stage: m[2], reason: rm?.[1]?.trim() ?? "" };
+    }
   }
   return found;
 }

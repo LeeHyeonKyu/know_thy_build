@@ -35,9 +35,34 @@ export const restartComment = (stage, issue) => `<!-- factory-sweeper restarted 
  * 별도 마커로 완전히 갈라 stalled 팔의 재점화와 blocked 팔의 재점화가 서로의 dedupe를 밟지 않게
  * 한다. "origin 마커보다 최신인가"로 범위를 좁히지 않는다 — 사람이 손으로 다시 blocked을 만들며
  * origin 마커를 새로 남기면, 옛 재점화 마커는 "그 이전 것"이 돼 무한히 다시 밀리는 루프가 된다.
- * "이슈+스테이지당 평생 한 번"이 이 마커의 계약이다.
+ * "이슈+스테이지당 평생 한 번"이 이 마커의 계약이다 — **단, KTB-22의 API 쿼터/장애 origin은 예외다**
+ * (아래 `API_ERROR_MAX_RETRIES`): 그 계약은 "몇 번째 재시도인가"를 마커 자체에 싣도록 넓어졌다.
+ *
+ * `attempt`(선택, 1부터)를 생략하면 예전과 같은 마커 문자열이 난다 — 그래서 기존 dedupe(이슈+스테이지당
+ * 평생 한 번, `origins`가 그 스테이지 자신의 정상 진입 라벨일 때)는 바이트 하나 안 바뀐다. `attempt`를
+ * 주면 그 시도 번호가 마커에 실려, 같은 이슈+스테이지에 여러 번 재시도(최대 3회)할 수 있게 된다.
  */
-export const blockedRetryComment = (stage, issue) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue} -->`;
+export const blockedRetryComment = (stage, issue, attempt) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}${attempt ? ` attempt=${attempt}` : ""} -->`;
+
+/**
+ * KTB-22 — `factory-blocked-origin` 마커가 실어 온 사유(`blockedOrigin(comments).reason`)가 API
+ * 쿼터/장애(`claude -p api error …`)를 말하면, "한 번은 공짜"를 3번으로 넓힌다. 사유가 대개 몇 분~
+ * 몇 시간 안에 풀리는 조직 지출/속도 한도라서, sweep 간격(기본 30분)만큼 띄워 세 번 다시 밀어보는
+ * 것이 사람을 부르는 것보다 싸다 — 그래도 안 풀리면(3번째마저 실패) 사람에게 넘긴다(무한 재시도는
+ * 죽은 크레딧 카드를 향해 계속 돈을 태우는 것과 같다).
+ */
+export const API_ERROR_MAX_RETRIES = 3;
+const API_ERROR_REASON_RE = /api error/i;
+/** 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). */
+function lastBlockedRetryAttempt(comments, stage, issue) {
+  const re = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))? -->`);
+  let last = 0;
+  for (const c of comments || []) {
+    const m = re.exec(String(c?.body ?? ""));
+    if (m) last = Math.max(last, m[1] ? Number(m[1]) : 1);
+  }
+  return last;
+}
 
 /**
  * KTB-15b I2 — `factory-blocked-origin` 마커의 `from`(그 blocked을 만든 스테이지의 정상 진입
@@ -268,13 +293,23 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
         const origin = blockedOrigin(comments);
         const retryStage = origin && BLOCKED_RETRY_STAGE[origin.from];
         if (retryStage) {
-          const marker = blockedRetryComment(retryStage, it.number);
-          const alreadyRetried = comments.some((c) => String(c?.body ?? "").includes(marker));
-          if (!alreadyRetried) {
+          // KTB-22: API 쿼터/장애로 온 blocked만 3번까지 — 그 외는 예전처럼 한 번뿐이다.
+          const isApiError = API_ERROR_REASON_RE.test(origin.reason || "");
+          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : 1;
+          const lastAttempt = lastBlockedRetryAttempt(comments, retryStage, it.number);
+          if (lastAttempt < maxAttempts) {
+            const attempt = lastAttempt + 1;
+            // 첫 시도이고 API 에러가 아니면 예전과 바이트가 같은 마커를 쓴다(`attempt` 생략) — 기존
+            // dedupe·테스트는 이 경로에서 아무것도 안 바뀐 것처럼 본다. API 에러거나 2번째 이상이면
+            // 시도 번호를 싣는다.
+            const marker = isApiError || attempt > 1 ? blockedRetryComment(retryStage, it.number, attempt) : blockedRetryComment(retryStage, it.number);
+            const note = isApiError
+              ? `\`factory:blocked\`이 API 쿼터/장애(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — \`factory-${retryStage}.yml\`을 다시 띄웁니다(시도 ${attempt}/${maxAttempts}, KTB-22). 여전히 blocked이면 ${attempt < maxAttempts ? "다음 sweep에서 다시 시도합니다" : "다음 sweep에서 사람에게 넘어갑니다"}.`
+              : `\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`;
             // 마커를 먼저 남긴다(stalled 팔과 같은 이유 — M4). dispatch 실패는 다음 sweep이 다시 시도한다.
-            await gh.comment(it.number, `${marker}\n\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`);
+            await gh.comment(it.number, `${marker}\n${note}`);
             await dispatchStage({ stage: retryStage, issue: it.number });
-            actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage });
+            actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage, ...(isApiError ? { attempt } : {}) });
             continue;
           }
         }

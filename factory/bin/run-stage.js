@@ -21,7 +21,7 @@ export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소�
 import { buildContext } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
@@ -305,11 +305,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // claude -p가 실패를 보고했으면 게이트를 돌릴 이유가 없다 — 판정할 산출물이 없다.
     // 게이트는 건너뛰고 곧장 verify로 간다(verify가 is_error로 떨어뜨린다).
     //
-    // 예외는 **턴 한도**다(KTB-16/17): 그때 백그라운드 워크플로는 이미 끝났고 산출물은 트랜스크립트
-    // 안에 있다 — 모자란 것은 디스패처가 그것을 다시 출력할 턴뿐이었다. 게이트를 건너뛰면
-    // verifyStage가 복구한 산출물을 "gates file missing"으로 되떨어뜨려, 복구가 아무 소용이 없어진다.
+    // 예외는 **턴 한도**(KTB-16/17)와 **API 쿼터/장애**(KTB-22)다: 두 경우 모두 백그라운드 워크플로는
+    // 이미 끝났을 수 있고 산출물은 트랜스크립트 안에 있다 — 모자란 것은 디스패처가 그것을 다시 출력할
+    // 턴뿐이었거나, claude -p 자신이 응답 도중 죽었을 뿐이다. 게이트를 건너뛰면 verifyStage가 복구한
+    // 산출물을 "gates file missing"으로 되떨어뜨려, 복구가 아무 소용이 없어진다.
     let gates = null;
-    if (!out?.is_error || hitMaxTurns(out)) {
+    if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
@@ -345,13 +346,14 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // 사후 감사의 provenance다 — verifyStage가 계산해 둔 것을 그냥 흘려보내지 않고 한 줄 남긴다.
     if (v.source) record([`artifact: ${v.source}`]);
     if (!v.ok) {
-      // 턴 한도는 설계 오류가 아니라 **재시도로 풀리는 일시 조건**이다(KTB-16) — 사람이 판단할
-      // 것이 아직 없으므로 needs-human이 아니라 blocked다(gates BLOCKED·머지 API 실패와 같은 등급).
-      // 여기까지 왔다는 건 트랜스크립트에서도 산출물을 복구하지 못했다는 뜻이다(KTB-17) — 복구했다면
-      // verifyStage가 이미 통과시켰다. 사유의 첫 줄이 원인(턴 한도)이고 스키마 진단은 그 뒤에 붙는다.
-      const maxTurns = hitMaxTurns(out);
-      const to = maxTurns ? "factory:blocked" : "factory:needs-human";
-      const t = await d.transition({ to, reason: `${maxTurns ? "stage did not finish" : "stage artifact missing or invalid"}: ${v.reasons.join("; ")}` });
+      // 턴 한도(KTB-16)와 API 쿼터/장애(KTB-22)는 둘 다 설계 오류가 아니라 **재시도로 풀리는 일시
+      // 조건**이다 — 사람이 판단할 것이 아직 없으므로 needs-human이 아니라 blocked다(gates BLOCKED·
+      // 머지 API 실패와 같은 등급). 여기까지 왔다는 건 트랜스크립트에서도 산출물을 복구하지 못했다는
+      // 뜻이다(KTB-17) — 복구했다면 verifyStage가 이미 통과시켰다. 사유의 첫 줄이 원인(턴 한도 또는
+      // 프로바이더 메시지 원문)이고 스키마 진단은 그 뒤에 붙는다.
+      const blocked = hitMaxTurns(out) || hitApiError(out);
+      const to = blocked ? "factory:blocked" : "factory:needs-human";
+      const t = await d.transition({ to, reason: `${blocked ? "stage did not finish" : "stage artifact missing or invalid"}: ${v.reasons.join("; ")}` });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
