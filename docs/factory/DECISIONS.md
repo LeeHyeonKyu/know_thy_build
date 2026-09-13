@@ -1127,6 +1127,8 @@ API가 없다)이면 **살아 있는 것으로 본다**: fail closed — 틀린 
 `factory/lib/yml-lint.js`(`runner-id-consistent`). 테스트: `claim.test.js` 6건, `run-stage.test.js` 4건,
 `sweeper.test.js` 6건, `yml-lint.test.js` 1건.
 
+**r1 (c361c7d 재리뷰)**: (a)·(c)의 락 삭제는 **읽은 sha에 리스를 걸고**(`--force-with-lease=<ref>:<sha>`) 한 번의 compare-and-swap으로 하고 — 읽기와 삭제 사이에 소유자가 바뀌었으면 아무것도 지우지 않고 `stale-lock-race`로 적으며(살아 있는 락을 지운 뒤 새 런을 미는 사고가 닫힌다), 그때는 sweeper가 **dispatch도 하지 않는다**(재점화 예산도 쓰지 않는다); (b)의 `abortStage`는 fail closed로 바뀌어 **락이 이 런의 것임이 증명될 때만** 전이·해제를 하고 모르면 `abort-skipped: holder unknown`만 남긴다; (d)의 재점화 카운트는 **마지막 재큐 이후**로 좁혔다(다른 라운드 카운터와 같은 창).
+
 #### KTB-29 — review가 K를 물지 않았다: 라운드 4의 reject가 또 rework으로 갔다
 
 **질문**: 스펙 §3.2에는 `rework --> needs_human: round > K` 엣지가 있고 CHARTER의 `K`가 그 한도인데,
@@ -1156,6 +1158,8 @@ API가 없다)이면 **살아 있는 것으로 본다**: fail closed — 틀린 
 `reviewFlips`·`priorReviewVerdicts` dep), `docs/superpowers/specs/2026-09-10-factory-design.md` §3.2.
 테스트: `run-stage.test.js` 6건(라운드 K reject → needs-human, K 미만 reject → rework, 어느 라운드의
 approve든 approved, `nextState` 순수 함수, flips 계산, flips 기록과 조회 실패).
+
+**r1 (c361c7d 재리뷰)**: "approve는 어느 라운드에서든 통과한다"를 조립된 시스템에서도 참으로 만들었다 — `lib/requirements.js`의 `round > K` 검사를 지웠고(그 검사가 라운드 4의 만장일치 통과를 그래프에서 튕겨 내고 있었다), 라운드 번호는 handoff 개수가 아니라 **마지막 재큐 이후의 완료된 `→ factory:rework` 전이 수 + 1**로 센다(handoff는 전이보다 먼저 나가므로 전이에서 죽은 런이 예산을 태웠다); 집계된 must_fix가 없을 때의 사유는 "0 must_fix remain" 대신 `last verdict: <판정>`이다.
 
 #### r1 재리뷰 잔손질 (M1~M5)
 
@@ -1249,6 +1253,8 @@ cancelled|gates|undecidable|other>`를 싣는다(`abortStage`는 GitHub이 준 `
 `factory/cli/status.js`(`no-state-label`), 스펙 §3.2·§4.3. 테스트: `gh.test.js` 7건,
 `transition.test.js` 3건, `issue-comments.test.js` 3건, `sweeper.test.js` 8건, `status.test.js` 2건,
 `run-stage.test.js` 1건.
+
+**r1 (c361c7d 재리뷰 VERIFY)**: (d)·(e)의 복구가 **최신 전이 코멘트의 `to`**를 기록으로 쓰므로, `transition()`은 그 코멘트를 **라벨 스왑보다 먼저** 남긴다 — 스왑이 중간에 끊긴 바로 그 순간(라벨 2개)에 코멘트가 아직 없으면 최신 전이는 **이전** 전이이고, 복구가 그 옛 `to`로 이슈를 정리하며 방금 성공한 전이를 조용히 되돌린다. `label verify: repaired`는 스왑 뒤에 알 수 있는 사실이라 전이 마커를 들지 않은 별도 코멘트로 분리했다(`lastTransition`을 흔들지 않는다).
 
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21·23

@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, nextState, reviewFlips, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
+import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -223,19 +223,20 @@ test("I4: unverified gates are declared as self-reported on implement/review, no
   expect(verified).not.toContain(GATES_SELF_REPORTED);
 });
 
-test("I7: the review round is counted from prior handoffs, so K bites", async () => {
-  const lines = [];
-  const transition = vi.fn(async ({ data, to }) => (data?.round > 3 ? { ok: false, reason: `round ${data.round} > K=3` } : { ok: true, to }));
+// I7 + r1 SF2: 라운드 번호는 에이전트의 자기 신고가 아니라 이슈에 남은 **완료된 rework 전이** 수에서
+// 온다(`reviewRounds`) — handoff 개수가 아니다. handoff는 전이보다 먼저 나가므로, 전이에서 죽은 런이
+// 재작업을 한 적도 없이 K 예산을 태우고 있었다.
+test("I7: the review round is counted from completed rework transitions, so K bites on real rework", async () => {
   const deps = baseDeps({
     stage: "review",
     buildContext: async () => ({ roster: ["a"], orchestration: "workflow", limits: { K: 3 } }),
-    countHandoffs: async (s) => (s === "review" ? 3 : 0),               // 이미 3라운드를 돌았다
-    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, verdicts: [{ role: "a", verdict: "approve", must_fix: [] }] } }),
-    writeHandoff: vi.fn(async () => {}), transition, runRecord: (l) => lines.push(...l),
+    reviewRounds: async () => 3,                                        // 이미 세 번 rework으로 돌아갔다
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, decision: "rework", verdicts: [{ role: "a", verdict: "reject", must_fix: [] }] } }),
+    writeHandoff: vi.fn(async () => {}), transition: vi.fn(async ({ to }) => ({ ok: true, to })),
   });
-  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(2);
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
   expect(deps.writeHandoff).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ round: 4 }) }));
-  expect(lines.some((l) => /transition refused: .*round/.test(l))).toBe(true);
+  expect(deps.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
 });
 
 test("M3: a failed prerequisite assert is written to the run record", async () => {
@@ -844,9 +845,10 @@ const implHandoff = (pr) => [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: r
 
 test("C1: awaiting-review binds the branch head sha into ctxExtra", async () => {
   const gh = { branchHeadSha: vi.fn(async () => "a".repeat(40)), comments: vi.fn(), prHeadSha: vi.fn() };
-  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:awaiting-review", ctx: { roster: ["a", "b"], rounds: 3 }, charter: { limits: { K: 3 } } });
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:awaiting-review", ctx: { roster: ["a", "b"], rounds: 3 } });
   expect(gh.branchHeadSha).toHaveBeenCalledWith("claude/fq-7");
-  expect(x).toEqual({ issue: 7, roster: ["a", "b"], expectedRounds: 3, rosterSize: 2, maxRounds: 3, headSha: "a".repeat(40) });
+  // K는 여기 없다(r1 SF1) — 전이 요구조건은 approve를 라운드로 막지 않는다
+  expect(x).toEqual({ issue: 7, roster: ["a", "b"], expectedRounds: 3, rosterSize: 2, headSha: "a".repeat(40) });
 });
 
 test("C1: approved/merged bind the PR head sha read from the implement handoff", async () => {
@@ -1238,8 +1240,8 @@ test("F5: resetGates는 판정 파일뿐 아니라 그 재료(테스트·커버�
 
 test("C1: states with no commit binding get the plain ctxExtra and make no gh calls", async () => {
   const gh = { branchHeadSha: vi.fn(), comments: vi.fn(), prHeadSha: vi.fn() };
-  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:in-progress", ctx: { roster: ["a"] }, charter: { limits: { K: 5 } } });
-  expect(x).toEqual({ issue: 7, roster: ["a"], expectedRounds: undefined, rosterSize: 1, maxRounds: 5 });
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:in-progress", ctx: { roster: ["a"] } });
+  expect(x).toEqual({ issue: 7, roster: ["a"], expectedRounds: undefined, rosterSize: 1 });
   expect(gh.branchHeadSha).not.toHaveBeenCalled();
   expect(gh.comments).not.toHaveBeenCalled();
 });
@@ -1975,19 +1977,25 @@ test("KTB-15b: a refused hop-back transition stops the stage before claude -p ru
 // ── ADR-020 KTB-24 — 취소·실패 정리 경로 ───────────────────────────────────────────────────────
 // 잡 타임아웃과 취소는 runStage의 finally를 실행하지 않는다(프로세스가 SIGKILL로 사라진다).
 // 데모 #15가 남긴 것: 고아 락 `refs/heads/factory/lock-15`, 전이 없음, run 기록 없음, 45분 소각.
+// r1 MF2: 이 스텝은 **증명된 것만** 만진다 — 락이 있고 그 `runner=`가 이 런일 때만 전이·해제를 한다.
+// 그래서 기본 더블은 "우리가 쥔 락"을 돌려준다(정상 경로: 잡이 SIGKILL로 죽어 finally가 못 돌았다).
+const OUR_RUNNER = "gha-111";
+const heldByUs = { present: true, runner: OUR_RUNNER, subject: `lock issue=15 stage=review runner=${OUR_RUNNER} at=t`, sha: "a".repeat(40) };
 const abortDeps = (over = {}) => ({
   issueLabels: async () => ["factory:awaiting-review"],
+  lockHolder: async () => heldByUs,
   transition: vi.fn(async ({ to }) => ({ ok: true, to })),
   release: vi.fn(async () => true),
   runRecord: vi.fn(),
   syncRecords: vi.fn(async () => ({ ok: true })),
   ...over,
 });
+const abort = (args) => abortStage({ runnerId: OUR_RUNNER, ...args });
 
 test("KTB-24: --aborted with the stage's in-flight label → blocked + lock released + record line", async () => {
   const lines = [];
   const d = abortDeps({ runRecord: (l) => lines.push(...l) });
-  expect(await abortStage({ stage: "review", issue: 15, status: "cancelled", deps: d })).toBe(0);
+  expect(await abort({ stage: "review", issue: 15, status: "cancelled", deps: d })).toBe(0);
   expect(d.transition).toHaveBeenCalledWith({ to: "factory:blocked", reason: "job cancelled — retry via sweeper", cause: "cancelled" });
   expect(d.release).toHaveBeenCalled();
   expect(lines).toContain("aborted: cancelled (job timeout or cancel)");
@@ -1999,18 +2007,18 @@ test("KTB-24: --aborted with the stage's in-flight label → blocked + lock rele
 // ── ADR-020 O20 — 정리 스텝은 원인 등급을 **직접** 안다(GitHub이 job.status로 말해 줬다) ─────────
 test("O20: the abort path passes a cause class taken from the job status", async () => {
   const timedOut = abortDeps();
-  await abortStage({ stage: "review", issue: 15, status: "timed_out", deps: timedOut });
+  await abort({ stage: "review", issue: 15, status: "timed_out", deps: timedOut });
   expect(timedOut.transition).toHaveBeenCalledWith(expect.objectContaining({ cause: "timeout" }));
   // 표에 없는 상태는 등급을 세우지 않는다 — transition.js가 사유 문구에서 되짚는다
   const failed = abortDeps();
-  await abortStage({ stage: "review", issue: 15, status: "failure", deps: failed });
+  await abort({ stage: "review", issue: 15, status: "failure", deps: failed });
   expect(failed.transition).toHaveBeenCalledWith(expect.objectContaining({ cause: undefined }));
 });
 
 test("KTB-24: --aborted on a label the stage already left → record only, no transition", async () => {
   const lines = [];
   const d = abortDeps({ issueLabels: async () => ["factory:approved"], runRecord: (l) => lines.push(...l) });
-  expect(await abortStage({ stage: "review", issue: 15, status: "failure", deps: d })).toBe(0);
+  expect(await abort({ stage: "review", issue: 15, status: "failure", deps: d })).toBe(0);
   expect(d.transition).not.toHaveBeenCalled();
   expect(d.release).toHaveBeenCalled();                                 // 락은 라벨과 무관하게 언제나 푼다
   expect(lines).toContain("aborted: failure (job timeout or cancel)");
@@ -2023,7 +2031,7 @@ test("KTB-24: every stage's in-flight label, and merge is lock-release only", as
   for (const from of Object.values(IN_FLIGHT_LABEL)) expect(canTransition(from, "factory:blocked"), from).toBe(true);
   const lines = [];
   const d = abortDeps({ issueLabels: vi.fn(), runRecord: (l) => lines.push(...l) });
-  expect(await abortStage({ stage: "merge", issue: 15, status: "cancelled", deps: d })).toBe(0);
+  expect(await abort({ stage: "merge", issue: 15, status: "cancelled", deps: d })).toBe(0);
   expect(d.issueLabels).not.toHaveBeenCalled();                         // 조회조차 하지 않는다
   expect(d.transition).not.toHaveBeenCalled();
   expect(d.release).toHaveBeenCalled();
@@ -2033,7 +2041,7 @@ test("KTB-24: every stage's in-flight label, and merge is lock-release only", as
 test("KTB-24: an unreadable label set still releases the lock and says why", async () => {
   const lines = [];
   const d = abortDeps({ issueLabels: async () => { throw new Error("gh down"); }, runRecord: (l) => lines.push(...l) });
-  expect(await abortStage({ stage: "implement", issue: 2, status: "cancelled", deps: d })).toBe(0);
+  expect(await abort({ stage: "implement", issue: 2, status: "cancelled", deps: d })).toBe(0);
   expect(d.transition).not.toHaveBeenCalled();
   expect(d.release).toHaveBeenCalled();
   expect(lines.some((l) => l.includes("entry state unreadable — gh down"))).toBe(true);
@@ -2042,7 +2050,7 @@ test("KTB-24: an unreadable label set still releases the lock and says why", asy
 test("KTB-24: a failed lock release is never silent", async () => {
   const lines = [];
   const d = abortDeps({ release: async () => false, runRecord: (l) => lines.push(...l) });
-  await abortStage({ stage: "plan", issue: 7, status: "cancelled", deps: { ...d, issueLabels: async () => ["factory:ready"] } });
+  await abort({ stage: "plan", issue: 7, status: "cancelled", deps: { ...d, issueLabels: async () => ["factory:ready"] } });
   expect(lines.some((l) => l.includes("lock: release failed for issue 7"))).toBe(true);
 });
 
@@ -2210,8 +2218,8 @@ test("KTB-24 fix: the lock is released only when this runner holds it", async ()
       release: vi.fn(async () => true),
       runRecord: (l) => lines.push(...l),
     });
-    await abortStage({ stage, issue: 15, status: "failure", runnerId: "gha-111", deps: d });
-    return { lines, release: d.release };
+    await abortStage({ stage, issue: 15, status: "failure", runnerId: OUR_RUNNER, deps: d });
+    return { lines, release: d.release, transition: d.transition };
   };
 
   // ① 이미 풀렸다 — 지울 것도, 사람에게 "손으로 지우라"고 시킬 것도 없다
@@ -2221,7 +2229,7 @@ test("KTB-24 fix: the lock is released only when this runner holds it", async ()
   expect(gone.lines.some((l) => l.includes("by hand"))).toBe(false);
 
   // ② 우리 것이다 — 지운다
-  const ours = await run("review", { present: true, runner: "gha-111", subject: "lock issue=15 stage=review runner=gha-111 at=t" });
+  const ours = await run("review", heldByUs);
   expect(ours.release).toHaveBeenCalled();
   expect(ours.lines).toContain("lock: released after abort");
 
@@ -2231,21 +2239,55 @@ test("KTB-24 fix: the lock is released only when this runner holds it", async ()
   expect(theirs.lines).toContain("lock: held by gha-222 — left alone");
 });
 
-test("KTB-24 fix: an unreadable holder (or old wiring with no lockHolder dep) still releases — an orphan lock is the worse failure", async () => {
+/**
+ * r1 MF2 — **소유자를 모르면 아무것도 하지 않는다(fail closed).**
+ *
+ * 예전 계약은 "모르면 우리 것으로 치고 지운다"였고, 그것은 "이 스텝에 오는 런은 거의 다 락의 주인이다"
+ * 라는 전제 위에 서 있었다. KTB-28 (b)가 그 전제를 깼다: claim에 **실패한** 런도 이제 잡을 실패로
+ * 끝내므로 `Aborted cleanup`을 반드시 돈다. 그 런은 락을 쥔 적이 없는데, `git fetch` 한 번이 흔들리면
+ * (M4가 `present:null`로 정확히 분류한 그 경우들) 정리 코드가 지금 돌고 있는 A의 라벨을 blocked으로
+ * 밀고 A의 락을 지운다 — A의 리뷰 라운드가 버려지고, 락이 없어진 자리에 sweeper가 두 번째 review를
+ * 얹는다. 고아 락은 sweeper가 소유자 런의 종료를 확인한 뒤 회수한다(KTB-28 c) — 그쪽이 훨씬 싸다.
+ */
+test("MF2: an unknown holder (unreadable, unparseable, or unwired) transitions nothing and releases nothing", async () => {
+  const cases = {
+    "present:null": { lockHolder: async () => ({ present: null, reason: "fatal: could not read from remote" }) },
+    "unparseable subject": { lockHolder: async () => ({ present: true, runner: null, subject: "lock" }) },
+    "lookup throws": { lockHolder: async () => { throw new Error("gh down"); } },
+    "no lockHolder dep": { lockHolder: undefined },
+  };
+  for (const [name, over] of Object.entries(cases)) {
+    const lines = [];
+    const d = abortDeps({ release: vi.fn(async () => true), runRecord: (l) => lines.push(...l), ...over });
+    expect(await abort({ stage: "review", issue: 15, status: "cancelled", deps: d }), name).toBe(0);
+    expect(d.release, name).not.toHaveBeenCalled();
+    expect(d.transition, name).not.toHaveBeenCalled();
+    expect(lines.some((l) => l.startsWith("abort-skipped: holder unknown")), name).toBe(true);
+    expect(lines.some((l) => l.startsWith("lock: holder unknown — left alone")), name).toBe(true);
+  }
+});
+
+test("MF2: with no lock at all this run cannot prove it owned the stage — no transition, nothing to release", async () => {
   const lines = [];
-  const d = abortDeps({ lockHolder: async () => ({ present: null, reason: "fatal: could not read from remote" }), release: vi.fn(async () => true), runRecord: (l) => lines.push(...l) });
-  await abortStage({ stage: "review", issue: 15, status: "cancelled", runnerId: "gha-111", deps: d });
-  expect(d.release).toHaveBeenCalled();
-  expect(lines.some((l) => l.startsWith("lock: holder unreadable"))).toBe(true);
+  const d = abortDeps({ lockHolder: async () => ({ present: false }), release: vi.fn(async () => true), runRecord: (l) => lines.push(...l) });
+  await abort({ stage: "review", issue: 15, status: "failure", deps: d });
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.release).not.toHaveBeenCalled();
+  expect(lines).toContain("lock: already released");
+  expect(lines.some((l) => l.includes("by hand"))).toBe(false);
+});
 
-  const old = abortDeps({ release: vi.fn(async () => true), runRecord: () => {} });   // lockHolder dep 없음
-  await abortStage({ stage: "review", issue: 15, status: "cancelled", deps: old });
-  expect(old.release).toHaveBeenCalled();
-
-  // 소유자를 읽었지만 제목을 파싱하지 못한 경우(runner=null)도 같다 — 이 런이 주인일 가능성이 압도적이다
-  const unparsed = abortDeps({ lockHolder: async () => ({ present: true, runner: null, subject: "lock" }), release: vi.fn(async () => true), runRecord: () => {} });
-  await abortStage({ stage: "review", issue: 15, status: "cancelled", runnerId: "gha-111", deps: unparsed });
-  expect(unparsed.release).toHaveBeenCalled();
+// nit 8: 원격 stderr는 `factory/records` 브랜치로 커밋되는 영구 기록에 그대로 실리면 안 된다.
+test("nit8: a holder-lookup reason reaches the run record stripped of URLs and folded to one line", async () => {
+  const lines = [];
+  const d = abortDeps({
+    lockHolder: async () => ({ present: null, reason: "remote: Repository not found.\nfatal: repository 'https://x@github.com/o/r.git/' not found" }),
+    runRecord: (l) => lines.push(...l),
+  });
+  await abort({ stage: "review", issue: 15, status: "cancelled", deps: d });
+  const line = lines.find((l) => l.startsWith("abort-skipped: holder unknown"));
+  expect(line).not.toMatch(/https?:\/\//);
+  expect(line).not.toMatch(/\n/);
 });
 
 // ── ADR-020 KTB-28 — 고아 락은 회수하고, 거부는 시끄럽다 ─────────────────────────────────────────
@@ -2299,7 +2341,7 @@ test("KTB-28: abortStage makes no transition when the lock belongs to another li
     lockHolder: async () => ({ present: true, runner: "gha-222", subject: "lock issue=15 stage=review runner=gha-222 at=t" }),
     release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
   });
-  expect(await abortStage({ stage: "review", issue: 15, status: "failure", runnerId: "gha-111", deps: d })).toBe(0);
+  expect(await abort({ stage: "review", issue: 15, status: "failure", deps: d })).toBe(0);
   expect(d.transition).not.toHaveBeenCalled();
   expect(d.release).not.toHaveBeenCalled();
   expect(lines).toContain("lock: held by gha-222 — left alone");
@@ -2315,7 +2357,7 @@ const reviewVerdictK = (role, kind) => ({
 });
 const kDeps = ({ round, verdicts, K = 3, ...over }) => baseDeps({
   buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K } }),
-  countHandoffs: async (s) => (s === "review" ? round - 1 : 0),
+  reviewRounds: async () => round - 1,
   verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: "a".repeat(40), verdicts } }),
   writeHandoff: vi.fn(async () => {}), transition: vi.fn(async ({ to }) => ({ ok: true, to })),
   ...over,
@@ -2329,6 +2371,14 @@ test("KTB-29: a reject at round K goes to needs-human, not rework — with the m
     to: "factory:needs-human", reason: "review rounds exhausted (K=3): 2 must_fix remain",
   }));
   expect(deps.writeHandoff).toHaveBeenCalled();                       // 판정 자체는 기록으로 남는다
+});
+
+// nit 9: `must_fix`는 이 런이 verdict를 집계했을 때만 찬다. 에이전트가 `decision`을 직접 실어 보내면
+// 비어 있고, 그때 "0 must_fix remain"은 사람을 부르는 문장이 "아무 문제 없다"로 읽힌다.
+test("nit9: the exhausted reason never reads '0 must_fix remain' — it names the verdict instead", () => {
+  expect(reviewExhaustedReason({ decision: "rework", must_fix: [{ id: "a" }] }, 3)).toBe("review rounds exhausted (K=3): 1 must_fix remain");
+  expect(reviewExhaustedReason({ decision: "rework" }, 3)).toBe("review rounds exhausted (K=3): last verdict: rework");
+  expect(reviewExhaustedReason({}, 3)).toBe("review rounds exhausted (K=3): last verdict: unknown");
 });
 
 test("KTB-29: a reject below K still goes to rework (unchanged)", async () => {

@@ -142,7 +142,7 @@ stateDiagram-v2
 
 **전이의 원자성과 복구**(ADR-020 KTB-30): 라벨 교체는 **새 상태를 먼저 붙이고 옛 상태를 나중에 떼는** 두 번의 호출이며(각각 1s·3s·9s 재시도 + REST 폴백, 쓴 뒤 확인 1회), 그 사이에서 실패해 상태 라벨이 2개가 되거나 0개가 된 이슈는 sweeper의 라벨-셋 복구 팔(§4.3-7)과 상태-라벨 복구 팔(§4.3-8)이 **최신 전이 코멘트의 `to`** 하나로 되돌린다 — 상태 라벨이 0개인 이슈는 이벤트·sweeper·`factory status` 어디에도 나타나지 않기 때문이다.
 
-`rework --> needs_human: round > K`는 review 스테이지가 **직접** 만든다(ADR-020 KTB-29): 판정이 `approved`가 아니고 이번 라운드가 K에 도달했으면 `awaiting_review`에서 곧장 `needs_human`으로 가고, 사유는 `review rounds exhausted (K=<K>): <n> must_fix remain`이다. 라운드 번호는 마지막 재큐 이후의 review handoff 개수로 센다(KTB-25).
+`rework --> needs_human: round > K`는 review 스테이지가 **직접** 만든다(ADR-020 KTB-29): 판정이 `approved`가 아니고 이번 라운드가 K에 도달했으면 `awaiting_review`에서 곧장 `needs_human`으로 가고, 사유는 `review rounds exhausted (K=<K>): <n> must_fix remain`(집계된 must_fix가 없으면 `last verdict: <판정>`)이다. **K는 실패를 끊는 한도이지 성공을 막는 한도가 아니다** — approve는 어느 라운드에서든 통과한다(전이 요구조건에는 라운드 검사가 없다, r1 SF1). 라운드 번호는 마지막 재큐 이후(KTB-25)의 **완료된 `→ factory:rework` 전이** 수 + 1이다(r1 SF2) — handoff 코멘트는 전이보다 먼저 나가므로, handoff만 남기고 전이에서 죽은 런은 재작업을 한 적이 없고 예산도 쓰지 않는다.
 
 `awaiting_review --> blocked`·`approved --> blocked`는 게이트·GitHub API 조회 자체가 실패했을 때(환경·크리덴셜 문제) 두 스테이지 모두 `blocked`로 끝날 수 있어 생긴 엣지이고, `approved --> rework`는 merge 스테이지가 PR을 `CONFLICTING`으로 판정했을 때(사유 "merge conflict — rebase onto \<default\>") implement 재진입으로 돌려보내는 경로다(Plan 2 실행 판결, ADR-015 — R3).
 
@@ -248,6 +248,11 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
    코멘트도 run 기록도 없이 이슈가 진입 라벨에 앉는다. 이 스텝이 `aborted:` 한 줄을 기록하고, 이슈가
    아직 그 스테이지의 in-flight 라벨이면 `factory:blocked`로 세우고(사유 `job <status> — retry via sweeper`,
    `factory-blocked-origin` 마커 포함), 락을 푼다. `claude`는 뜨지 않는다.
+   **전이와 해제는 락이 이 런의 것임이 증명될 때만 한다**(r1 MF2): 락이 있고 그 `runner=`가 이 런일
+   때뿐이고, 남의 것·조회 실패(`present:null`)·제목 파싱 실패·락 없음이면 아무것도 하지 않고
+   `abort-skipped: holder unknown`만 적는다. KTB-28 (b)로 claim에 **실패한** 런도 이 스텝을 돌게 된
+   뒤로 fail-open은 "남의 살아 있는 락을 지운다"와 같은 말이 됐다 — 남은 고아 락은 sweeper가 소유자
+   런의 종료를 확인한 뒤 리스를 걸고 회수한다(§4.3-5).
 2. `Sweep` — `if: always()`, `sweep.js --quick`(§4.3). 반드시 정리 스텝 **뒤**의 **마지막** 스텝이다.
 
 두 스텝 모두 `git checkout ${{ github.sha }} -- .factory || true`를 앞세운다: implement는 에이전트
@@ -479,7 +484,7 @@ const LOADER = {
 
 #### 4.2.5 로컬과 GitHub의 경쟁 — claim이 라벨보다 먼저
 
-라벨이 `queue`가 되는 순간 GitHub Action이 뜬다. 로컬 `factory run`이 라벨부터 바꾸면 GitHub이 먼저 잡는다. 따라서 `factory run <stage> <issue>`는 **lock을 먼저 잡고 그다음 라벨을 옮긴다.** 라벨 이벤트로 뜬 GitHub 잡은 claim에 실패해 즉시 종료한다 — 로컬이 이긴다. 사람이 GitHub UI에서 라벨을 옮기면 GitHub 잡이 먼저 claim한다 — GitHub이 이긴다. 승자는 행위에서 결정되고 둘이 동시에 도는 일은 없다. lock은 스테이지 종료 시 삭제, heartbeat 끊긴 lock은 sweeper가 회수.
+라벨이 `queue`가 되는 순간 GitHub Action이 뜬다. 로컬 `factory run`이 라벨부터 바꾸면 GitHub이 먼저 잡는다. 따라서 `factory run <stage> <issue>`는 **lock을 먼저 잡고 그다음 라벨을 옮긴다.** 라벨 이벤트로 뜬 GitHub 잡은 claim에 실패해 물러난다 — 로컬이 이긴다. **그 물러남은 조용하지 않다**(ADR-020 KTB-28 b): run 기록 한 줄, 이슈에 `factory-claim-refused` 코멘트, `exit 2`(잡이 빨갛게 끝난다). 로컬 실행 중에는 그 빨간 잡과 코멘트가 정상이다 — 침묵한 채 네 번을 더 밀었던 데모 #15보다, 진 경쟁이 보이는 쪽을 골랐다. 사람이 GitHub UI에서 라벨을 옮기면 GitHub 잡이 먼저 claim한다 — GitHub이 이긴다. 승자는 행위에서 결정되고 둘이 동시에 도는 일은 없다. lock은 스테이지 종료 시 삭제, heartbeat 끊긴 lock은 sweeper가 회수.
 
 이 "claim 뒤 라벨 이동" 경로를 실제로 타는 것은 **`factory run triage`뿐이다** — 이슈 라벨이 정확히 `backlog`일 때 lock을 잡은 직후 `backlog → factory:queue`로 옮긴다(Plan 2 실행 판결, ADR-015 — R7). 다른 스테이지(`plan`/`implement`/`review`)는 라벨을 옮기지 않는다 — 전이는 오직 `assert-handoff`/`transition`이 처리한다. `factory run merge`는 CLI에 없다(§2.1).
 
@@ -491,10 +496,10 @@ const LOADER = {
 - 구현 에이전트는 논리 단위마다 커밋·push한다. `Stop` 훅이 미push 변경이 있으면 종료를 거부한다.
 - **sweeper**(`factory-sweeper.yml`, 30분 주기 → `.factory/bin/sweep.js`)가 **여덟 가지**를 훑는다. 1·2·5·6·7·8이 **상태 복구 팔**(`--quick`이 도는 것), 3·4가 **시간에 묶인 팔**(cron의 몫)이다:
   1. `factory:in-progress` 이슈의 heartbeat 코멘트(`<!-- factory-heartbeat issue=<n> -->`)가 30분 넘게 갱신되지 않았으면 lock을 회수하고, 같은 이슈의 `factory-retry issue=<n> count=<k>` 마커를 읽어 count+1이 R 이하면 `factory:planned`로 되돌린다(재큐 — §3.2 `in_progress --> planned` 엣지, 다음 재큐 코멘트에 갱신된 count가 남는다). count가 R을 넘으면 `factory:needs-human`으로 보낸다.
-  2. `factory:blocked` 이슈는 기본적으로 `factory:needs-human`으로 올린다 — 환경·크리덴셜 문제는 sweeper가 고칠 수 없다(§3.2 `blocked --> needs_human`). **예외**(KTB-15b/22/24): `factory-blocked-origin` 마커가 말하는 origin이 그 스테이지 자신의 정상 진입 라벨이면 그 스테이지를 **한 번** 다시 띄운다(§3.2 `blocked --> queue|ready|planned|awaiting_review|approved|rework`). 사유가 API 쿼터/장애면 3회까지다. 밀기 직전에 잔해 락을 회수한다(아래 5와 같은 판정, KTB-28). origin 마커의 `cause=` 등급(ADR-020 O20)이 두 가지를 가른다: 사람이 취소한 blocked(`cancelled`)은 R 예산을 쓰지 않고 **취소 사건마다** 한 번 다시 밀리며(상한 3회), 에스컬레이션 사유는 등급을 이름으로 말한다(`blocked (job cancelled) — needs human` 등).
+  2. `factory:blocked` 이슈는 기본적으로 `factory:needs-human`으로 올린다 — 환경·크리덴셜 문제는 sweeper가 고칠 수 없다(§3.2 `blocked --> needs_human`). **예외**(KTB-15b/22/24): `factory-blocked-origin` 마커가 말하는 origin이 그 스테이지 자신의 정상 진입 라벨이면 그 스테이지를 **한 번** 다시 띄운다(§3.2 `blocked --> queue|ready|planned|awaiting_review|approved|rework`). 사유가 API 쿼터/장애면 3회까지다. 밀기 직전에 잔해 락을 회수한다(아래 5와 같은 판정·같은 리스, KTB-28 — 락이 살아 있으면 이 재시도도 시도 번호를 쓰지 않고 다음 sweep으로 미룬다). origin 마커의 `cause=` 등급(ADR-020 O20)이 두 가지를 가른다: 사람이 취소한 blocked(`cancelled`)은 R 예산을 쓰지 않고 **취소 사건마다** 한 번 다시 밀리며(상한 3회), 에스컬레이션 사유는 등급을 이름으로 말한다(`blocked (job cancelled) — needs human` 등).
   3. 격리 정책(`.factory/quarantine.toml`, §5.2.5-⑤)을 적용한다: `consecutive_passes ≥ quarantine_return_after`인 항목은 복귀시키고, `quarantine_ttl_days` 경과 또는 `since` 파싱 실패(fail-closed) 항목은 만료 처리한다.
   4. 토큰 발급일(`FACTORY_TOKEN_ISSUED_AT`)이 334일(≈11개월)을 넘으면 "토큰 갱신 필요" `factory:needs-human` 이슈를 연다 — 같은 제목의 열린 이슈가 있으면 중복 생성하지 않는다(§4.4).
-  5. **멈춘 스테이지 재점화**(KTB-8, 위 "세 번째 팔") — `factory:ready|planned|awaiting-review|approved`에 앉아 있고 마지막 전이 코멘트가 `staleMinutes`보다 오래됐고 하트비트도 재점화 마커도 없는 이슈를 `workflow_dispatch`로 다시 띄운다. 밀기 직전에 **잔해 락을 회수한다**(KTB-28: 소유자의 워크플로 런이 `completed`면 그 락은 잔해다 — 조회 실패·로컬 러너는 살아 있는 것으로 본다). 같은 이슈+스테이지의 재점화는 **2회까지**이고, 그 뒤에는 `factory:needs-human`(사유 `stalled restart limit (2) reached`)으로 올린다.
+  5. **멈춘 스테이지 재점화**(KTB-8, 위 "세 번째 팔") — `factory:ready|planned|awaiting-review|approved`에 앉아 있고 마지막 전이 코멘트가 `staleMinutes`보다 오래됐고 하트비트도 재점화 마커도 없는 이슈를 `workflow_dispatch`로 다시 띄운다. 밀기 직전에 **잔해 락을 회수한다**(KTB-28: 소유자의 워크플로 런이 `completed`면 그 락은 잔해다 — 조회 실패·로컬 러너는 살아 있는 것으로 본다). 삭제는 **읽은 sha에 리스를 걸고**(`--force-with-lease=<ref>:<sha>`) 한다: 읽기와 삭제 사이에 소유자가 바뀌었으면(그 런은 방금 시작했으므로 살아 있다) 아무것도 지우지 않고 `stale-lock-race`로 적는다. 락이 **살아 있다고 판정되면 dispatch하지 않는다** — 그 런은 claim에서 거부당할 것이 정해져 있고, 마커를 남기면 재점화 예산만 태운다. 같은 이슈+스테이지의 재점화는 **마지막 재큐 이후 2회까지**이고(다른 라운드 카운터와 같은 창 — KTB-25), 그 뒤에는 `factory:needs-human`(사유 `stalled restart limit (2) reached`)으로 올린다.
   6. **하네스 대기 주차 해제**(KTB-23 r1) — 마지막 전이 사유가 `waiting for harness issue #<m>`인 `factory:needs-info` 이슈에서 그 하네스 이슈가 닫혔으면(또는 그 브랜치의 PR이 머지됐으면) `factory:queue`로 되돌린다. 마커는 **전이가 성공한 뒤에** 남긴다 — 실패한 전이가 억제 마커를 남기면 그 피처는 영원히 주차된다.
   7. **라벨-셋 복구**(KTB-18, KTB-30 확장) — 상태 라벨을 2개 이상 가진 열린 이슈를 하나로 맞춘다(tier 라벨은 유지). 사람이 라벨을 API로 직접 얹었을 때 `run-stage`는 상태가 모호하다는 이유로 전이 없이 물러나므로, 그 이슈를 다시 보는 눈이 이것뿐이다. 라벨이 정확히 2개이고 그중 하나가 **최신 전이의 `to`**면 그건 사람의 손 편집이 아니라 add-first 라벨 스왑의 부분 실패이므로(§3.2), `needs-human`이 아니라 그 `to` 하나로 잇는다.
   8. **상태 라벨 0개 복구**(KTB-30) — `factory:*` 라벨은 있는데 상태 라벨이 하나도 없는 열린 이슈를 최신 전이 코멘트의 `to`로 되살린다(전이 이력이 없으면 `factory:needs-human`). 마커는 `<!-- factory-label-set-repaired from=(none) to=<label> -->`이고 dedupe는 10분 시간 창이다. 이 상태는 이벤트도 다른 sweeper 팔도 `factory status`도 보지 못하는 유일한 상태라 별도의 눈이 필요하다 — `factory status`는 같은 이슈를 Needs You에 `[no-state-label]`로 띄운다.

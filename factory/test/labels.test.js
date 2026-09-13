@@ -67,7 +67,7 @@ test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
   expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" });
   expect(BLOCKED_RETRY.merge).toEqual({ origins: ["factory:approved"], hop: "factory:approved" });
   // KTB-24 fix: review도 자기 진입 라벨로 되돌아간다. 라운드 카운터는 handoff 개수로 세므로
-  // (`countHandoffs`) 아무것도 남기지 못하고 잘린 런은 K 예산을 쓰지 않는다.
+  // (`reviewRounds` — 완료된 rework 전이) 재작업까지 가지 못하고 잘린 런은 K 예산을 쓰지 않는다.
   expect(BLOCKED_RETRY.review).toEqual({ origins: ["factory:awaiting-review"], hop: "factory:awaiting-review" });
   expect(canTransition("factory:blocked", "factory:awaiting-review")).toBe(true);
   // 매 hop 자체가 그래프에서 유효한 엣지여야 한다 — 표와 그래프가 어긋나면 재시도가 조용히 거부된다.

@@ -61,15 +61,30 @@ test("F6: 게이트 파일이 다른 커밋을 잰 것이면 거부한다", () =
   expect(ap.reason).toMatch(/gates file describes/);
 });
 
-test("approved requires review handoff: sha == PR head, all approve, count == roster, round <= K", () => {
+test("approved requires review handoff: sha == PR head, all approve, count == roster", () => {
   const v = (role, verdict) => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: "x", where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a", "approve"), v("b", "approve")], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:approved");
-  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, maxRounds: 3 })).ok).toBe(true);
-  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3, maxRounds: 3 })).reason).toMatch(/verdict count/);
-  expect(r(checked({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2, maxRounds: 3 })).reason).toMatch(/not all approve/);
-  expect(r(checked({ comments: [c("review", { ...review, round: 4 })], prHeadSha: sha, rosterSize: 2, maxRounds: 3 })).reason).toMatch(/round/);
-  expect(r(checked({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2, maxRounds: 3 })).reason).toMatch(/head_sha/);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2 })).ok).toBe(true);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3 })).reason).toMatch(/verdict count/);
+  expect(r(checked({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2 })).reason).toMatch(/not all approve/);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2 })).reason).toMatch(/head_sha/);
+});
+
+/**
+ * ADR-020 KTB-29 r1(SF1) — **K는 approve를 막지 않는다.** 여기에 `round > K` 검사가 있는 동안 ADR의
+ * "approve는 어느 라운드에서든 통과한다"는 조립된 시스템에서 거짓이었다: 라운드 4의 만장일치 통과가
+ * 그래프에서 튕기고(run-stage는 `transition refused: round 4 > K=3`을 적고 exit 2), 이슈는
+ * `awaiting-review`에 남아 stalled 팔에 두 번 재점화된 뒤 같은 사람에게 훨씬 느리게 올라갔다.
+ * K가 무는 자리는 `nextState`의 rework 판정 하나뿐이다.
+ */
+test("SF1: an approve passes at ANY round — K is the limit on failing rounds, not on success", () => {
+  const v = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, verdicts: [v("a")], orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:approved");
+  for (const round of [1, 3, 4, 99]) {
+    expect(r(checked({ comments: [c("review", { ...review, round })], prHeadSha: sha, rosterSize: 1, maxRounds: 3 })).ok, `round ${round}`).toBe(true);
+  }
 });
 
 test("merged requires checks + integrity GREEN and approved handoff sha == PR head", () => {

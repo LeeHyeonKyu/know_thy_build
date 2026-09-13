@@ -61,8 +61,9 @@ jobs:
           if-no-files-found: ignore
       # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
       # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —
-      # 스테이지가 끝날 때마다(성공·실패·취소 불문) 빠른 팔만 한 번 돌린다: 멈춘 스테이지 재점화 ·
-      # blocked 처리 · 라벨-셋 복구. 격리 TTL·토큰 만료는 cron의 몫으로 남는다(`--quick`).
+      # 스테이지가 끝날 때마다(성공·실패·취소 불문) 상태 복구 팔만 돌린다: in-progress 하트비트 재큐 ·
+      # blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구 · 상태 라벨 0개 복구.
+      # 격리 TTL·토큰 만료는 시간에 묶인 팔이라 cron의 몫으로 남는다(`--quick`).
       # 멱등하고 마커로 dedupe되므로 cron sweep과 겹쳐 돌아도 안전하다.
       - name: Sweep
         if: always()

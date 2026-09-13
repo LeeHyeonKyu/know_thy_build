@@ -53,8 +53,8 @@ export const BLOCKED_RETRY = {
   implement: { origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" },
   // review(ADR-020 KTB-24 fix): origin이 `factory:awaiting-review`면 그 blocked은 리뷰가
   // **끝나기 전에** 잘렸다는 뜻이다(잡 타임아웃·취소 → `abortStage`, 또는 게이트 판정 불가).
-  // 되돌아갈 자리는 그 스테이지 자신의 진입 라벨이고, 라운드 카운터는 handoff 개수로 세므로
-  // (`countHandoffs`) 아무것도 남기지 못한 런은 예산을 쓰지 않는다 — 재시도는 공짜에 가깝다.
+  // 되돌아갈 자리는 그 스테이지 자신의 진입 라벨이고, 라운드 카운터는 **완료된 rework 전이**로 세므로
+  // (`reviewRounds`, r1 SF2) 재작업까지 가지 못한 런은 예산을 쓰지 않는다 — 재시도는 공짜에 가깝다.
   review: { origins: ["factory:awaiting-review"], hop: "factory:awaiting-review" },
   merge: { origins: ["factory:approved"], hop: "factory:approved" },
 };

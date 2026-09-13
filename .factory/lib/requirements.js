@@ -66,7 +66,10 @@ const RULES = {
     if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`review head_sha ${h.data.head_sha.slice(0, 7)} != PR head ${ctx.prHeadSha.slice(0, 7)}`);
     if (ctx.rosterSize != null && h.data.verdicts.length !== ctx.rosterSize) return fail(`verdict count ${h.data.verdicts.length} != roster size ${ctx.rosterSize}`);
     if (!h.data.verdicts.every((v) => v.verdict === "approve")) return fail("not all approve");
-    if (ctx.maxRounds != null && h.data.round > ctx.maxRounds) return fail(`round ${h.data.round} > K=${ctx.maxRounds}`);
+    // ADR-020 KTB-29 r1(SF1): **여기에 K 검사는 없다.** 예전에는 `round > K`면 approve까지 거부했다 —
+    // 그러면 라운드 4의 만장일치 통과가 그래프에서 튕기고, 이슈는 `awaiting-review`에 남아 stalled 팔에
+    // 두 번 재점화된 뒤 같은 사람에게 훨씬 느리고 시끄럽게 올라간다. K는 **실패를 끊는 한도**이지 성공을
+    // 막는 한도가 아니다(스펙 §3.2의 엣지는 `rework → needs_human`이다) — 그 자리는 `nextState`다.
     return pass;
   },
   "factory:merged"(ctx) {

@@ -122,8 +122,8 @@ export function blockedOrigin(comments) {
  * ADR-020 KTB-25 — **마지막 `… to=factory:queue` 전이 코멘트 이후**의 코멘트만 돌려준다(그런 전이가
  * 한 번도 없었으면 이력 전체).
  *
- * 라운드 번호는 에이전트의 자기 신고가 아니라 이슈에 남은 handoff 개수로 센다(`run-stage.js`의
- * `countHandoffs`) — 그 자체는 옳다. 틀린 것은 **세는 범위**였다: 데모 #18은 `needs-human`에서
+ * 라운드 번호는 에이전트의 자기 신고가 아니라 이슈에 남은 기록으로 센다(`run-stage.js`의 `reviewRounds`
+ * — r1 SF2 이후로는 완료된 rework 전이다) — 그 자체는 옳다. 틀린 것은 **세는 범위**였다: 데모 #18은 `needs-human`에서
  * 재큐돼 triage부터 통째로 다시 돌았는데, 새 코드에 대한 **첫 리뷰**가 이전 주기의 review handoff
  * 2개를 물려받아 `round: 2`로 시작했다(K=3 중 2를 이미 쓴 채로). 재큐(`* → factory:queue`)는 새
  * 주기의 시작이다 — 그 앞의 라운드는 다른 코드에 대한 판정이므로 이번 예산에 세지 않는다.
@@ -138,6 +138,23 @@ export function commentsSinceRequeue(comments) {
     if (m && m[2] === "factory:queue") from = i + 1;
   });
   return list.slice(from);
+}
+
+/**
+ * ADR-020 KTB-29 r1(SF2) — 주어진 코멘트들 안에서 **`to=<label>`로 성공한 전이**의 개수.
+ *
+ * 리뷰 라운드를 세는 단위가 handoff에서 이것으로 바뀌었다: handoff 코멘트는 전이보다 **먼저** 나가므로
+ * "handoff를 남기고 전이에서 죽은 런"이 라운드를 하나 태웠고, K에 이빨이 생긴 뒤로는 그 사고가
+ * 멀쩡한 이슈를 needs-human으로 밀어냈다. `→ factory:rework` 전이는 **실제로 일어난 재작업 주기**이고,
+ * 그것이 스펙 §3.2가 K로 세는 단위다. 거부 코멘트(`factory-transition-refused`)는 다른 마커라 세지 않는다.
+ */
+export function countTransitionsTo(comments, to) {
+  let n = 0;
+  for (const c of comments || []) {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (m && m[2] === to) n += 1;
+  }
+  return n;
 }
 
 /**

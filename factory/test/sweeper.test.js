@@ -978,27 +978,60 @@ test("KTB-28: the stalled arm releases a stale lock before dispatching, and reco
   expect(actions).toContainEqual({ kind: "stale-lock-released", issue: 15, runner: "gha-34736609544", step: "stalled-restart" });
 });
 
-test("KTB-28: a live lock is left alone and the dispatch still happens; a throwing lookup never stops the arm", async () => {
+/**
+ * r1 SF4 — **살아 있다고 들었으면 밀지 않는다.** 예전에는 `{released:false, why:"held by …"}`를 받고도
+ * `why`를 버리고 마커를 남긴 뒤 그대로 dispatch했다. KTB-28 (b) 이후 그 런의 결말은 정해져 있다:
+ * claim 거부 → 잡 실패 → `factory-claim-refused` 코멘트. 게다가 방금 남긴 마커가 재점화 예산(2회)을
+ * 태우므로, 하트비트만 늦은 긴 스테이지 하나가 예산을 다 쓰고 needs-human으로 올라갈 수 있었다.
+ */
+test("SF4: a live lock stops the dispatch AND spends no restart marker; a throwing lookup never stops the arm", async () => {
   const mk = (releaseIfStale) => {
     const posted = [];
     return {
       searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
       comments: async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted],
-      comment: async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; },
+      comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
       patchComment: vi.fn(), issueList: async () => [], releaseIfStale,
     };
   };
-  const live = vi.fn(async () => ({ released: false, why: "held by gha-1 (in_progress)" }));
+  const live = vi.fn(async () => ({ released: false, live: true, why: "held by gha-1 (in_progress)" }));
   const d1 = vi.fn(async () => {});
-  const a1 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d1, releaseIfStale: live }));
-  expect(d1).toHaveBeenCalledWith({ stage: "plan", issue: 15 });
+  const gh1 = mk();
+  const a1 = await sweep(stalledArgs({ gh: gh1, dispatchStage: d1, releaseIfStale: live }));
+  expect(d1).not.toHaveBeenCalled();
+  expect(gh1.comment).not.toHaveBeenCalled();                        // 마커도 남기지 않는다 = 예산을 쓰지 않는다
   expect(a1.some((a) => a.kind === "stale-lock-released")).toBe(false);
+  expect(a1).toContainEqual({ kind: "stalled-restart-skipped", issue: 15, stage: "plan", label: "factory:ready", reason: "lock still live — held by gha-1 (in_progress)" });
+
+  // MF1: 리스가 깨진 것도 "살아 있다"다(방금 누군가 다시 잡았다는 뜻) — 그 사실은 기록으로 남는다
+  const raced = vi.fn(async () => ({ released: false, live: true, race: true, runner: "gha-1", why: "stale-lock-race — gha-1's lock changed between read and delete" }));
+  const d3 = vi.fn(async () => {});
+  const a3 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d3, releaseIfStale: raced }));
+  expect(d3).not.toHaveBeenCalled();
+  expect(a3).toContainEqual({ kind: "stale-lock-race", issue: 15, runner: "gha-1", step: "stalled-restart" });
 
   const boom = vi.fn(async () => { throw new Error("git fetch exploded"); });
   const d2 = vi.fn(async () => {});
   const a2 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d2, releaseIfStale: boom }));
-  expect(d2).toHaveBeenCalled();                                     // 회수 실패가 재점화를 막지 않는다
+  expect(d2).toHaveBeenCalled();                                     // 조회 실패는 "살아 있다"가 아니다
   expect(a2).toContainEqual({ kind: "error", step: "stalled-restart-lock", issue: 15, error: expect.stringContaining("git fetch exploded") });
+});
+
+test("SF4: the blocked-retry arm also stands down on a live lock — no marker, no attempt spent", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:blocked" ? [{ number: 15 }] : []),
+    comments: async () => [BLOCKED_ORIGIN("factory:awaiting-review", "2026-09-11T00:00:00Z"), ...posted],
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, transition, releaseIfStale: async () => ({ released: false, live: true, why: "held by gha-1 (queued)" }) }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(transition).not.toHaveBeenCalled();                         // 에스컬레이션도 하지 않는다 — 돌고 있다
+  expect(actions).toContainEqual({ kind: "blocked-retry-skipped", issue: 15, stage: "review", cause: "other", reason: "lock still live — held by gha-1 (queued)" });
 });
 
 test("KTB-28: the blocked-retry arm releases a stale lock before its dispatch too", async () => {
@@ -1047,6 +1080,30 @@ test("KTB-28: stalled restarts are capped at 2 per issue+stage, then escalate to
   expect(gh.comment).not.toHaveBeenCalled();                         // 마커를 또 남기지 않는다
   expect(transition).toHaveBeenCalledWith({ issue: 15, to: "factory:needs-human", reason: "stalled restart limit (2) reached" });
   expect(actions).toContainEqual({ kind: "stalled-restart-limit", issue: 15, stage: "plan", label: "factory:ready" });
+});
+
+/**
+ * r1 SF3 — 그 예산도 **마지막 재큐 이후**로 센다. 이 저장소의 다른 모든 라운드 카운터가 그렇다(KTB-25):
+ * 재큐는 새 주기의 시작이고, 그 앞의 시도는 다른 코드에 대한 것이다. 예전에는 이것만 이력 전체를 봐서,
+ * 지난 주기에 두 번 밀렸다가 사람이 고쳐 재큐한 이슈가 **이번 주기의 첫 스톨**에서 — 재점화를 한 번도
+ * 하지 않은 채 — "stalled restart limit (2) reached"로 다시 사람에게 올라갔다.
+ */
+test("SF3: restart markers from before the last requeue do not count toward the cap", async () => {
+  const old = (n) => ({ id: n, body: restartComment("plan", 15), createdAt: "2026-09-10T00:00:00Z" });
+  const requeue = { id: 50, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nneeds-human → factory:queue", createdAt: "2026-09-10T12:00:00Z" };
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:ready" ? [{ number: 15 }] : []),
+    comments: async () => [old(2), old(3), requeue, TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted],
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, transition }));
+  expect(transition).not.toHaveBeenCalled();                         // 에스컬레이션이 아니라 재점화다
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "plan", issue: 15 });
+  expect(actions).toContainEqual({ kind: "stalled-restart", issue: 15, stage: "plan", label: "factory:ready" });
 });
 
 test("KTB-28: one previous restart is still below the cap — the second push happens", async () => {

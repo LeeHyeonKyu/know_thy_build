@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
-import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
+import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
+import { renderHandoff } from "../lib/handoff.js";
 
 // ── KTB-15b I2: factory-blocked-origin marker parsing ──────────────────────────────────────────
 // lib/transition.js writes this marker at the moment a transition into factory:blocked succeeds —
@@ -92,4 +93,27 @@ test("lastTransition returns the most recent transition comment with its reason"
   expect(moved.to).toBe("factory:queue");
   // 사유가 없는 전이는 빈 문자열이다(null이 아니다 — 호출자가 정규식을 그대로 걸 수 있어야 한다)
   expect(lastTransition([c("backlog", "factory:queue", "", "t")]).reason).toBe("");
+});
+
+// ── ADR-020 KTB-29 r1(SF2) — 리뷰 라운드는 handoff가 아니라 **완료된 rework 전이**로 센다 ─────────
+// handoff 코멘트는 전이보다 **먼저** 나간다. 그래서 "handoff는 남겼는데 전이에서 죽은" 런(그래프·요구사항
+// 거부, 전이 직전의 잡 사망)이 재작업을 한 적도 없이 라운드를 하나 태웠고, KTB-29로 K에 이빨이 생긴
+// 뒤로는 그 사고 두 번 + 진짜 reject 한 번이면 멀쩡한 이슈가 needs-human으로 올라갔다.
+test("SF2: rework rounds count completed `to=factory:rework` transitions since the last requeue — a dead handoff burns nothing", () => {
+  const handoff = (n) => ({ id: n, body: renderHandoff({ stage: "review", issue: 18, summary: "r", data: { issue: 18, round: n } }), createdAt: `t${n}` });
+  const refused = (n) => ({ id: n, body: "<!-- factory-transition-refused from=factory:awaiting-review to=factory:rework -->\n**전이 거부** …: gates file missing", createdAt: `t${n}` });
+  const to = (state, n) => ({ id: n, body: `<!-- factory-transition:v1 from=factory:awaiting-review to=${state} by=script -->\nawaiting-review → ${state}`, createdAt: `t${n}` });
+  const rounds = (comments) => countTransitionsTo(commentsSinceRequeue(comments), "factory:rework");
+
+  expect(rounds([])).toBe(0);                                          // 첫 리뷰는 round 1이 된다(+1)
+  // 라운드 하나 = handoff + 실제로 성공한 rework 전이
+  expect(rounds([handoff(1), to("factory:rework", 2)])).toBe(1);
+  // handoff는 남았는데 전이가 거부됐다 — 재작업은 일어나지 않았으므로 예산도 쓰지 않는다
+  expect(rounds([handoff(1), refused(2), handoff(3), to("factory:rework", 4)])).toBe(1);
+  // 재큐 이전의 라운드는 다른 코드에 대한 판정이다(KTB-25)
+  const requeue = { id: 9, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nneeds-human → factory:queue", createdAt: "t9" };
+  expect(rounds([to("factory:rework", 1), to("factory:rework", 2), requeue])).toBe(0);
+  expect(rounds([to("factory:rework", 1), requeue, to("factory:rework", 3)])).toBe(1);
+  // approve로 끝난 라운드는 rework이 아니다
+  expect(rounds([to("factory:approved", 1)])).toBe(0);
 });

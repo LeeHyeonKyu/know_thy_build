@@ -122,15 +122,25 @@ function lintStageWorkflow(text, lines, stage) {
     if (i === -1) return null;
     const end = i + 1 < steps.length ? steps[i + 1].line - 1 : lines.length;
     for (let k = steps[i].line - 1; k < end; k++) {
-      const m = /^\s*FACTORY_RUNNER_ID:\s*(.+?)\s*$/.exec(lines[k].replace(/#.*/, ""));
+      // YAML의 줄 끝 주석은 **공백 뒤의** `#`다 — 값 안의 `#`(`gha-#1`)를 주석으로 읽어 자르지 않는다.
+      const m = /^\s*FACTORY_RUNNER_ID:\s*(.+?)\s*$/.exec(lines[k].replace(/\s+#.*$/, ""));
       if (m) return m[1];
     }
     return null;
   };
   const runId = runnerIdOf(runStage);
   const abortId = runnerIdOf(aborted);
-  if (runId == null || abortId == null || runId !== abortId) {
-    out.push({ line: aborted === -1 ? 1 : steps[aborted].line, rule: "runner-id-consistent", msg: "the \"Run stage\" and \"Aborted cleanup\" steps must set the identical FACTORY_RUNNER_ID expression — the cleanup compares it against the lock's `runner=` field to decide whether the lock is its own, so a drifted (or missing) value leaves an orphan lock every later dispatch dies on (KTB-24 fix / KTB-28)" });
+  // r1 nit 11: 세 가지 실패를 **세 문장**으로 가른다. 예전에는 스텝 이름이 `Run stage`가 아닐 때도
+  // "FACTORY_RUNNER_ID가 어긋났다"고 말해서, 읽는 사람을 없는 문제로 보냈다.
+  const missingStep = [runStage === -1 ? '"Run stage"' : null, aborted === -1 ? '"Aborted cleanup"' : null].filter(Boolean);
+  const noValue = [runId == null && runStage !== -1 ? '"Run stage"' : null, abortId == null && aborted !== -1 ? '"Aborted cleanup"' : null].filter(Boolean);
+  const at = aborted === -1 ? 1 : steps[aborted].line;
+  if (missingStep.length) {
+    out.push({ line: at, rule: "runner-id-consistent", msg: `a stage workflow needs both a "Run stage" and an "Aborted cleanup" step, named exactly that — missing: ${missingStep.join(", ")}. The cleanup tells its own lock from someone else's by comparing FACTORY_RUNNER_ID with the lock's \`runner=\` field, and this rule reads that value per step (KTB-24 fix / KTB-28)` });
+  } else if (noValue.length) {
+    out.push({ line: at, rule: "runner-id-consistent", msg: `FACTORY_RUNNER_ID is not set in the step's own \`env:\` block on: ${noValue.join(", ")} — a job-level \`env:\` is not read by this rule, so set it on both steps. Without it the cleanup cannot prove the lock is its own and leaves it alone, and the orphan lock stalls every later dispatch (KTB-24 fix / KTB-28)` });
+  } else if (runId !== abortId) {
+    out.push({ line: at, rule: "runner-id-consistent", msg: `the "Run stage" and "Aborted cleanup" steps set DIFFERENT FACTORY_RUNNER_ID expressions (${runId} vs ${abortId}) — the cleanup compares it against the lock's \`runner=\` field, so a drifted value makes every run read its own lock as a stranger's (KTB-24 fix / KTB-28)` });
   }
   return out;
 }

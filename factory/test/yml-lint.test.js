@@ -209,10 +209,20 @@ test("yml-lint pins FACTORY_RUNNER_ID to the same expression in both steps (M5)"
   // 정리 스텝의 값만 바꾸면 잡는다
   const at = ok.indexOf("- name: Aborted cleanup");
   const drifted = ok.slice(0, at) + ok.slice(at).replace("FACTORY_RUNNER_ID: gha-${{ github.run_id }}", "FACTORY_RUNNER_ID: gha-cleanup");
-  expect(lintWorkflow(drifted)).toEqual([expect.objectContaining({ rule: "runner-id-consistent" })]);
+  expect(lintWorkflow(drifted)).toEqual([expect.objectContaining({ rule: "runner-id-consistent", msg: expect.stringContaining("DIFFERENT") })]);
   // 아예 빠져도 잡는다
   const missing = ok.slice(0, at) + ok.slice(at).replace("          FACTORY_RUNNER_ID: gha-${{ github.run_id }}\n", "");
   expect(lintWorkflow(missing)).toEqual([expect.objectContaining({ rule: "runner-id-consistent" })]);
+
+  // r1 nit 11: 세 실패는 세 문장이다 — 스텝 이름이 다른 것을 "값이 어긋났다"고 말하면 읽는 사람을
+  // 없는 문제로 보낸다(그 이름은 이 파일의 다른 규칙들도 함께 본다).
+  const renamed = ok.replace("- name: Run stage", "- name: Run the stage");
+  const both = lintWorkflow(renamed).filter((f) => f.rule === "runner-id-consistent");
+  expect(both).toHaveLength(1);
+  expect(both[0].msg).toMatch(/missing: "Run stage"/);
+  expect(both[0].msg).not.toMatch(/DIFFERENT/);
+  const noValue = lintWorkflow(missing).find((f) => f.rule === "runner-id-consistent");
+  expect(noValue.msg).toMatch(/own `env:` block/);
 });
 
 test("sweeper and integrity workflows", () => {

@@ -6,7 +6,7 @@ import { makeGh } from "../lib/gh.js";
 import { loadCharter, loadHarness } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quarantine.js";
 import { transition as transitionIssue } from "../lib/transition.js";
-import { release as releaseLock, lockHolder, runnerState } from "../lib/claim.js";
+import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
 import { sweep } from "../lib/sweeper.js";
 import { backPressure } from "../lib/back-pressure.js";
 
@@ -55,20 +55,10 @@ async function main() {
     return { done: false, why: "아직 열려 있습니다" };
   };
   /**
-   * ADR-020 KTB-28 (c) — "이 이슈의 락이 **잔해**면 지워라". 두 팔(멈춘 스테이지 재점화, blocked 재시도)이
-   * dispatch 직전에 부른다: dispatch는 락을 보지 않으므로, 고아 락 위로 민 런은 `claim()`에서 곧장
-   * 죽는다(데모 #15: 네 번). 지우는 조건은 하나뿐이다 — 락 커밋 제목의 `runner=gha-<run_id>`가 가리키는
-   * 워크플로 런이 **완료**됐다. 조회가 실패하거나 로컬 러너면 살아 있는 것으로 보고 손대지 않는다
-   * (fail closed: 틀린 회수는 같은 이슈에 두 스테이지를 동시에 넣는다).
+   * ADR-020 KTB-28 (c) — "이 이슈의 락이 **잔해**면 지워라"(판정과 리스 삭제는 `lib/claim.js`에 있다 —
+   * 여기서는 이 저장소의 `run`/`root`만 묶는다. r1 MF1: 그래야 그 판정에 테스트가 붙는다).
    */
-  const releaseIfStale = async (n) => {
-    const held = await lockHolder({ run, cwd: root, issue: n });
-    if (held?.present !== true) return { released: false, why: held?.present === false ? "no lock" : `lock unreadable — ${held?.reason}` };
-    const state = await runnerState({ run, cwd: root, runner: held.runner });
-    if (!state.completed) return { released: false, why: `held by ${held.runner ?? "unknown"} (${state.status})` };
-    const ok = await releaseLock({ run, cwd: root, issue: n });
-    return { released: ok, runner: held.runner, why: ok ? `stale lock from ${held.runner} released` : "release failed" };
-  };
+  const releaseIfStale = (n) => releaseIfStaleLock({ run, cwd: root, issue: n });
   const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, releaseIfStale, quick });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);

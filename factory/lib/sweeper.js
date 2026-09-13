@@ -1,6 +1,6 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
-import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, lastTransition } from "./retro/issue-comments.js";
+import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, lastTransition } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
@@ -31,7 +31,8 @@ export const restartComment = (stage, issue) => `<!-- factory-sweeper restarted 
  * 것인데, 두 번 밀어도 같은 자리에 멈춰 있으면 사라진 것은 런이 아니라 **가정**이다 — 그때부터는
  * 사람이 봐야 한다(밀 때마다 plan 한 번 ~$12가 나갈 수 있다).
  *
- * 세는 것은 이슈 이력에 남은 재점화 마커 개수다(마커가 곧 기록이다 — 별도 카운터를 두면 둘이 갈라진다).
+ * 세는 것은 재점화 마커 개수다(마커가 곧 기록이다 — 별도 카운터를 두면 둘이 갈라진다). r1 SF3: 범위는
+ * **마지막 재큐 이후**다(`commentsSinceRequeue`) — 이 저장소의 모든 라운드 카운터와 같은 창이다.
  */
 export const STALLED_RESTART_LIMIT = 2;
 export const stalledRestartLimitReason = `stalled restart limit (${STALLED_RESTART_LIMIT}) reached`;
@@ -230,16 +231,26 @@ async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
  * 네 번 밀렸다. 주입된 `releaseIfStale`은 "소유자의 워크플로 런이 끝났는가"를 물어 끝났을 때만 지운다
  * (`bin/sweep.js`가 `lockHolder` + `runnerState`로 조립한다) — 살아 있으면 아무것도 하지 않는다.
  *
- * 실패는 재점화를 막지 않는다: 회수는 성공 확률을 올리는 조치이지 전제 조건이 아니고, 락이 정말 남아
+ * 조회 **실패**는 재점화를 막지 않는다: 아무것도 모르는 것이지 "살아 있다"가 아니고, 락이 정말 남아
  * 있으면 그 런은 (이제 시끄럽게) claim에서 물러난다.
+ *
+ * r1 SF4 — 그러나 **살아 있다고 들었으면** 막는다(`live: true`). 그 dispatch는 결과가 정해져 있다:
+ * KTB-28 (b) 이후 락을 못 잡은 런은 잡을 빨갛게 끝내고 `factory-claim-refused` 코멘트를 남긴다. 게다가
+ * 재점화 마커는 이미 남은 뒤라 그 실패가 **재점화 예산(2회)을 태운다** — 길게 도는 스테이지 하나가
+ * 하트비트만 늦어도 예산을 다 쓰고 사람에게 올라갔다. 락이 살아 있다는 것은 그 스테이지가 돌고
+ * 있다는 뜻이므로, 멈춘 것이 아니다: 아무것도 하지 않고 다음 sweep에 다시 본다.
  */
 async function releaseStaleLock({ releaseIfStale, issue, actions, step }) {
-  if (!releaseIfStale) return;
+  if (!releaseIfStale) return { live: false };
   try {
     const r = await releaseIfStale(issue);
     if (r?.released) actions.push({ kind: "stale-lock-released", issue, runner: r.runner ?? null, step });
+    // MF1: 리스가 깨졌다 = 읽은 뒤에 락 주인이 바뀌었다. 지우지 않은 것이 옳고, 그 사실은 기록에 남는다.
+    if (r?.race) actions.push({ kind: "stale-lock-race", issue, runner: r.runner ?? null, step });
+    return { live: r?.live === true, why: r?.why ?? null };
   } catch (e) {
     actions.push({ kind: "error", step: `${step}-lock`, issue, error: String(e.message || e) });
+    return { live: false };
   }
 }
 
@@ -267,7 +278,13 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         const hb = comments.map((c) => HB.exec(String(c?.body ?? ""))).filter(Boolean).at(-1);
         if (hb && nowMs - Date.parse(hb[2]) <= stale) continue;          // 스테이지가 살아 있다
         const marker = restartComment(stage, it.number);
-        const restarts = comments.filter((c) => String(c?.body ?? "").includes(marker));
+        // r1 SF3 — 재점화 예산도 **마지막 재큐 이후**로 센다. 이 저장소의 다른 모든 라운드 카운터가
+        // 그렇다(KTB-25: 재큐는 새 주기의 시작이고, 그 앞의 시도는 다른 코드에 대한 것이다). 이것만
+        // 이력 전체를 보고 있었다 — 예전 주기에서 두 번 다시 밀렸던 이슈는 고쳐져 재큐된 뒤 **첫**
+        // 스톨에서, 이번 주기에 단 한 번도 밀어보지 않은 채 `stalled restart limit (2) reached`로
+        // 사람에게 올라갔다(사람은 이번 주기의 재점화를 하나도 볼 수 없다).
+        const cycle = commentsSinceRequeue(comments);
+        const restarts = cycle.filter((c) => String(c?.body ?? "").includes(marker));
         const restarted = restarts.at(-1);
         if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;
         // 흐름 제어로 세워 둔 `factory:planned`는 멈춘 것이 아니다(M5) — 조용히 넘어간다.
@@ -275,6 +292,12 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
           const reason = await parked();
           if (reason) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `back-pressure — ${reason}` }); continue; }
         }
+        // KTB-28 (c) + r1 SF4: 락이 **살아 있으면** 이 이슈는 멈춘 것이 아니다 — 마커도 남기지 않고
+        // (=예산을 쓰지 않고) 넘어간다. 잔해면 여기서 지운다(dispatch는 락을 보지 않으므로).
+        // 에스컬레이션보다 **앞**이다: 살아 있는 스테이지를 "재점화가 안 먹혔다"로 읽어 사람을 부르면
+        // 그 비용은 두 번 나간다(사람의 시간 + 돌고 있던 라운드).
+        const lock = await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "stalled-restart" });
+        if (lock.live) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `lock still live — ${lock.why}` }); continue; }
         // KTB-28 (d): 두 번 밀어도 같은 자리면 사라진 것은 런이 아니라 가정이다 — 사람에게 넘긴다.
         if (restarts.length >= STALLED_RESTART_LIMIT) {
           const t = await transition?.({ issue: it.number, to: "factory:needs-human", reason: stalledRestartLimitReason });
@@ -287,8 +310,6 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         // 사라져 다음 sweep이 30분마다 같은 스테이지를 또 민다 — 재점화는 비싸고(plan 한 번 ~$12)
         // 놓친 재점화는 사람이 `--remote`로 되살릴 수 있으므로, 실패는 **덜 재시작하는 쪽**으로 기운다.
         await gh.comment(it.number, `${marker}\n\`${label}\`에서 ${staleMinutes}분 넘게 런 없이 멈춰 있었습니다 — \`factory-${stage}.yml\`을 dispatch로 다시 띄웁니다(KTB-8).`);
-        // KTB-28 (c): 새 런이 또 고아 락에 부딪히지 않도록, 밀기 직전에 잔해 락을 회수한다.
-        await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "stalled-restart" });
         // dispatch가 실패하면 "다시 띄웠다"고 적지 않는다 — 마커는 이미 남았으므로 같은 창 안에서는
         // 다시 밀지 않고, 다음 창의 sweep이 재시도한다(실패는 덜 재시작하는 쪽으로 기운다).
         if (!await safeDispatch({ dispatchStage, stage, issue: it.number, actions, step: "stalled-restart" })) continue;
@@ -552,6 +573,10 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const lastAttempt = lastBlockedRetryAttempt(comments, retryStage, it.number);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
+            // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)
+            // 지우고, 살아 있는 락이면 이 재시도는 시도조차 하지 않는다(마커도, 시도 번호도 쓰지 않는다).
+            const lock = await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "blocked-retry" });
+            if (lock.live) { actions.push({ kind: "blocked-retry-skipped", issue: it.number, stage: retryStage, cause, reason: `lock still live — ${lock.why}` }); continue; }
             const attempt = lastAttempt + 1;
             // 첫 시도이고 API 에러가 아니면 예전과 바이트가 같은 마커를 쓴다(`attempt` 생략) — 기존
             // dedupe·테스트는 이 경로에서 아무것도 안 바뀐 것처럼 본다. API 에러거나 2번째 이상이면
@@ -565,8 +590,6 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
                 : `\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`;
             // 마커를 먼저 남긴다(stalled 팔과 같은 이유 — M4). dispatch 실패는 다음 sweep이 다시 시도한다.
             await gh.comment(it.number, `${marker}\n${note}`);
-            // KTB-28 (c): stalled 팔과 같은 이유 — 잔해 락이 남아 있으면 이 재시도도 claim에서 죽는다.
-            await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "blocked-retry" });
             if (await safeDispatch({ dispatchStage, stage: retryStage, issue: it.number, actions, step: "blocked-retry" })) {
               actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage, cause, ...(numbered ? { attempt } : {}) });
             }
