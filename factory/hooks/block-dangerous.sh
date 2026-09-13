@@ -225,6 +225,8 @@ echo "$c" | grep -Eq "${A}${WRAPPERS}${Z}" && wrap=1
 case "$c" in *\$\'*|*\$\"*) wrap=1 ;; esac        # ANSI-C / 로케일 인용: $'gh' · $"gh"
 if [ "$wrap" = 1 ]; then
   A='(^|[$;&|(`={[:space:]])\\?'
-  scan "$(printf '%s' "$c" | tr -d "\"'")"
+  # `$'merge'`처럼 동사 **뒤** 토큰이 ANSI-C 인용이면 따옴표만 지운 뒤 `$merge`가 남아 인접 검사가 깨진다 —
+  # 따옴표 앞의 `$`를 먼저 지운다(재리뷰 #5).
+  scan "$(printf '%s' "$c" | sed -E "s/\\\$([\"'])/\\1/g" | tr -d "\"'")"
 fi
 exit 0

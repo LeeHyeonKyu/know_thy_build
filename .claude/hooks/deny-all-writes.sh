@@ -166,6 +166,8 @@ echo "$c" | grep -Eq "${CMD}${WRAPPERS}${Z}" && wrap=1
 case "$c" in *\$\'*|*\$\"*) wrap=1 ;; esac        # ANSI-C / 로케일 인용: $'rm' · $"rm"
 if [ "$wrap" = 1 ]; then
   CMD='(^|[$;&|(`={[:space:]][[:space:]]*)\\?'
-  scan "$(printf '%s' "$c" | tr -d "\"'")"
+  # `rm $'-rf'`처럼 동사 **뒤** 토큰이 ANSI-C 인용이면 `$-rf`가 남아 인접 검사가 깨진다 — 따옴표 앞의 `$`를
+  # 먼저 지운다(재리뷰 #5).
+  scan "$(printf '%s' "$c" | sed -E "s/\\\$([\"'])/\\1/g" | tr -d "\"'")"
 fi
 exit 0

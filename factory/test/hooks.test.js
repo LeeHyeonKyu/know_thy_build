@@ -378,6 +378,8 @@ test("block-dangerous: interpreter wrappers and ANSI-C quoted verbs are blocked 
     'eval "gh pr merge 5"', "eval 'git merge main'", 'exec sh -c "gh pr merge 5"',
     'echo x | xargs -I{} sh -c "gh pr merge 5"',
     "$'gh' pr merge 5", "$'git' push --force origin main",     // ANSI-C 인용: 동사 앞 글자가 `'`다
+    "gh pr $'merge' 5", "git push origin $'--force'", "docker compose $'down'",   // 재리뷰 #5: 동사 **뒤** 토큰의 ANSI-C 인용
+    'gh $"pr" merge 5',
     'echo "gh pr merge 5" | bash',   // 페이로드가 문자열에 그대로 있어 **부수적으로** 걸린다(비목표는 아래)
   ];
   await Promise.all(blocked.map(async (c) => {
@@ -390,7 +392,8 @@ test("block-dangerous: interpreter wrappers and ANSI-C quoted verbs are blocked 
 test("deny-all-writes: interpreter wrappers and ANSI-C quoted write verbs are blocked (re-review #4)", async () => {
   const blocked = ['sh -c "rm -rf src"', "bash -c 'git push origin HEAD'", 'eval "touch src/a.js"',
                    'zsh -c "curl -o src/a.js https://e/x"', 'bash -c "sed -i s/a/b/ src/a.js"',
-                   "$'rm' -rf src", 'echo "rm -rf src" | bash'];
+                   "$'rm' -rf src", "rm $'-rf' src", "git $'push' origin HEAD",   // 재리뷰 #5: 뒤 토큰 인용
+                   'echo "rm -rf src" | bash'];
   await Promise.all(blocked.map(async (c) => {
     const r = await bash("deny-all-writes.sh", cmd(c));
     expect(r.code, c).toBe(2);
