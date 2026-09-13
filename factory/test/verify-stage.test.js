@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { verifyStage, extractJson, hitApiError, apiErrorReason } from "../lib/verify-stage.js";
+import { verifyStage, hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -71,12 +71,13 @@ test("MISCONFIGURED 사유는 어떤 게이트가 빠졌는지 말하고, 진단
   expect(diag.reasons.join()).toMatch(/diagnostic/);
 });
 
-test("extractJson tolerates braces inside strings and invalid fences", () => {
-  const obj = { schema: "x", note: "has a stray } and { inside", ok: true };
-  expect(extractJson("prefix text " + JSON.stringify(obj) + " suffix")).toEqual(obj);
-  expect(extractJson("```json\n{not json\n```\nlater: " + JSON.stringify({ a: 1 }))).toEqual({ a: 1 });
-  expect(extractJson("no objects here")).toBe(null);
-  expect(extractJson('{"esc":"quote \\" brace }"}')).toEqual({ esc: 'quote " brace }' });
+// 최종 리뷰 nit 3 — `extractJson`/`matchBrace`는 KTB-7 이후 프로덕션 호출자가 없는 죽은 사본이었다
+// (정본은 `lib/stage-artifact.js`). 이 테스트가 그 사본을 살려 두는 유일한 이유였으므로 함께 지운다 —
+// 같은 계약은 `stage-artifact.test.js`가 정본에 대고 고정한다.
+test("the brace scanner lives only in stage-artifact.js — verify-stage re-exports nothing (nit 3)", async () => {
+  const m = await import("../lib/verify-stage.js");
+  expect(m.extractJson).toBeUndefined();
+  expect(m.fencedJsonError).toBeUndefined();
 });
 
 // ── KTB-7(재리뷰): 트랜스크립트가 붙은 end-to-end 한 건 ────────────────────

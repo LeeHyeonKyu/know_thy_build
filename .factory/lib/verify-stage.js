@@ -1,34 +1,15 @@
 import { validate } from "./schemas.js";
-import { extractStageArtifact, fencedJsonError } from "./stage-artifact.js";
+import { extractStageArtifact } from "./stage-artifact.js";
 
-export { fencedJsonError };
-
+/**
+ * 최종 리뷰 nit 3 — `extractJson`/`matchBrace`와 `export { fencedJsonError }`가 여기서 사라졌다.
+ * KTB-7이 산출물 추출을 트랜스크립트 우선(`lib/stage-artifact.js`)으로 올린 뒤 **프로덕션 호출자가
+ * 하나도 남지 않았고**(`lib`·`bin`·`cli`·`templates` 전수 확인), 그런데도 같은 브레이스 스캐너가
+ * 두 파일에 두 벌 살아 있었다. 죽은 사본은 언젠가 원본과 어긋나고(그 어긋남은 테스트가 잡지 못한다 —
+ * 죽은 쪽에만 테스트가 있었다), 다음 독자에게는 "추출 경로가 둘"이라고 거짓말한다. 정본은
+ * `stage-artifact.js`의 `extractStageArtifact`·`fencedJsonError` 하나다.
+ */
 const SCHEMA_OF = { triage: "triage.v1", plan: "plan.v1", implement: "implement.v1", review: "review.v1" };
-
-/** result 텍스트에서 첫 유효 JSON 객체를 꺼낸다: ```json 펜스 우선, 없거나 무효면 모든 '{' 시작점에서 문자열·이스케이프를 인식하는 균형 스캔. */
-export function extractJson(text) {
-  if (typeof text !== "string") return null;
-  const fence = /```json\s*\n([\s\S]*?)\n```/.exec(text);
-  if (fence) { try { return JSON.parse(fence[1]); } catch { /* fall through */ } }
-  for (let start = text.indexOf("{"); start >= 0; start = text.indexOf("{", start + 1)) {
-    const end = matchBrace(text, start);
-    if (end < 0) continue;
-    try { return JSON.parse(text.slice(start, end + 1)); } catch { /* try next start */ }
-  }
-  return null;
-}
-/** start의 '{'에 대응하는 '}' 인덱스. 문자열 리터럴과 \" 이스케이프를 건너뛴다. 없으면 -1. */
-function matchBrace(text, start) {
-  let depth = 0, inStr = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inStr) { if (ch === "\\") i++; else if (ch === '"') inStr = false; continue; }
-    if (ch === '"') inStr = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") { depth--; if (depth === 0) return i; }
-  }
-  return -1;
-}
 
 const GATED_STAGES = ["implement", "review", "merge"];
 const listOf = (a) => (a && a.length ? a.join(",") : "none");

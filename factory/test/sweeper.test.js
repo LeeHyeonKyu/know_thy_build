@@ -223,7 +223,8 @@ test.each([
   ["factory:approved", "merge"],
   ["factory:ready", "plan"],
   ["factory:queue", "triage"],
-  ["factory:planned", "implement"],
+  // 최종 리뷰 nit 1: `factory:planned`는 이 표에서 빠졌다 — `planned → blocked` 엣지가 없어
+  // 그 origin 마커는 애초에 생길 수 없다(아래 회귀 테스트가 그 사실을 고정한다).
   ["factory:in-progress", "implement"],
 ])("sweep: blocked from %s dispatches %s once, then escalates on the next sweep if still blocked", async (from, stage) => {
   const posted = [];
@@ -288,7 +289,7 @@ test("sweep: an api-error blocked origin retries 3 times (attempt-numbered marke
   const posted = [];
   const gh = {
     searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
-    comments: vi.fn(async (n) => (n === 9 ? [API_ERROR_ORIGIN("factory:planned", "implement", "2026-09-12T20:20:00Z"), ...posted] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [API_ERROR_ORIGIN("factory:in-progress", "implement", "2026-09-12T20:20:00Z"), ...posted] : [])),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99 + posted.length, body, createdAt: "2026-09-12T21:00:00Z" }); return "u#issuecomment-1"; }),
     patchComment: vi.fn(),
   };
@@ -315,7 +316,7 @@ test("sweep: a non-api-error blocked origin still gets exactly one free retry (K
   const posted = [];
   const gh = {
     searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
-    comments: vi.fn(async (n) => (n === 9 ? [BLOCKED_ORIGIN("factory:planned", "2026-09-12T20:20:00Z"), ...posted] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [BLOCKED_ORIGIN("factory:in-progress", "2026-09-12T20:20:00Z"), ...posted] : [])),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-12T21:00:00Z" }); return "u#issuecomment-1"; }),
     patchComment: vi.fn(),
   };
@@ -854,6 +855,60 @@ test("KTB-23 fix: a needs-info issue parked on a CLOSED harness issue goes back 
   expect(transition).toHaveBeenCalledTimes(1);
 });
 
+/**
+ * ADR-020 최종 리뷰 MF-1 — **주차 해제의 목적지(`factory:queue`)를 보는 팔이 하나도 없었다.**
+ * 해제는 평생 dedupe 마커를 남기므로, 그 라벨 이벤트가 만든 `factory-triage` 런이 사라지면
+ * (도그푸딩에서 두 번: 동시성 물결·좀비 queued) 그 피처는 **영원히** 큐에 앉는다 — KTB-23의 존재
+ * 이유 전체가 거기서 끝난다. 이제 stalled 팔이 그것을 받는다.
+ */
+test("MF-1: after a harness unpark, a queue issue whose triage run was lost is re-dispatched by the stall arm", async () => {
+  const posted = [];
+  const unparkedAt = "2026-09-11T00:10:00Z";
+  // 해제가 끝난 뒤의 이슈 상태: needs-info → queue 전이 한 줄 + 평생 dedupe 마커. 런은 없었다.
+  const comments = () => [
+    { id: 1, body: `<!-- factory-transition:v1 from=factory:needs-info to=factory:queue by=script -->\nfactory:needs-info → factory:queue — harness issue #31 closed`, createdAt: unparkedAt },
+    { id: 2, body: `${harnessUnparkedComment(31, 2)}\n하네스 이슈 #31: 이슈가 닫혔습니다`, createdAt: unparkedAt },
+    ...posted,
+  ];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:queue" ? [{ number: 2 }] : [])),
+    comments: vi.fn(async () => comments()),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  // 주차 해제 팔은 이제 아무것도 하지 않는다(이슈는 더 이상 needs-info가 아니다) — 마커도 그대로다.
+  const harnessSettled = vi.fn(async () => ({ done: true, why: "이슈가 닫혔습니다" }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, harnessSettled }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "triage", issue: 2 });
+  expect(gh.comment).toHaveBeenCalledWith(2, expect.stringContaining(restartComment("triage", 2)));
+  expect(actions).toContainEqual({ kind: "stalled-restart", issue: 2, stage: "triage", label: "factory:queue" });
+  expect(actions.some((a) => String(a.kind).startsWith("harness-unpark"))).toBe(false);
+
+  // 그리고 같은 창 안에서는 한 번뿐이다(다른 대기 라벨과 같은 계약).
+  const second = await sweep(stalledArgs({ gh, dispatchStage, harnessSettled }));
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  expect(second.some((a) => a.kind === "stalled-restart")).toBe(false);
+});
+
+// 임계는 다른 라벨들과 같다: 하트비트가 하나도 없으면 10분(KTB-31), 그 안이면 손대지 않는다 —
+// triage는 `factory:queue`에 몇 분만 머물므로 30분을 기다릴 이유가 없었고, 그렇다고 방금 붙은
+// 라벨을 밀면 정상적으로 뜨는 중인 런 위로 두 번째 런을 얹는다.
+test("MF-1: the queue arm uses the 10-minute no-heartbeat threshold, not 30", async () => {
+  const at = (min) => new Date(Date.parse("2026-09-11T01:00:00Z") - min * 60e3).toISOString();
+  const mk = (createdAt) => ({
+    searchIssues: async (l) => (l === "factory:queue" ? [{ number: 2 }] : []),
+    comments: async () => [{ id: 1, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue", createdAt }],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  });
+  const inside = vi.fn();
+  expect((await sweep(stalledArgs({ gh: mk(at(STALL_NO_HEARTBEAT_MIN - 1)), dispatchStage: inside }))).some((a) => a.kind === "stalled-restart")).toBe(false);
+  expect(inside).not.toHaveBeenCalled();
+  const past = vi.fn(async () => {});
+  expect(await sweep(stalledArgs({ gh: mk(at(STALL_NO_HEARTBEAT_MIN + 1)), dispatchStage: past }))).toContainEqual({ kind: "stalled-restart", issue: 2, stage: "triage", label: "factory:queue" });
+  expect(past).toHaveBeenCalledWith({ stage: "triage", issue: 2 });
+});
+
 test("KTB-23 fix: an OPEN harness issue leaves the feature parked — no comment, no transition", async () => {
   const gh = {
     searchIssues: async (l) => (l === "factory:needs-info" ? [{ number: 2 }] : []),
@@ -1254,11 +1309,53 @@ test("SF2: the heartbeat-requeue arm releases only via the leased releaseIfStale
   expect(gh2.comment).not.toHaveBeenCalled();
   expect(a2).toContainEqual({ kind: "requeue-skipped", issue: 7, reason: "lock still live — held by gha-9 (in_progress)" });
 
-  // 소유자를 모르면 재큐는 하되(그 이슈는 정말 멈춰 있을 수 있다) 락은 건드리지 않았다고 적는다
+  // 최종 리뷰 MF-4: 소유자를 모르면 **재큐하지 않는다** — 두 dispatch 팔과 같은 판정이다.
+  // 임계를 넘겼으므로(하트비트가 30분보다 오래됐다) 마커를 남기고 사람에게 올린다.
   const gh3 = mkgh();
-  const a3 = await sweep(stalledArgs({ gh: gh3, transition: vi.fn(async ({ to }) => ({ ok: true, to })), release: vi.fn(), releaseIfStale: async () => ({ released: false, live: false, state: "unknown", why: "lock unreadable — fatal" }) }));
-  expect(gh3.comment.mock.calls[0][1]).toContain("lock left alone (lock unreadable — fatal)");
-  expect(a3).toContainEqual({ kind: "requeue", issue: 7, count: 1 });
+  const t3 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a3 = await sweep(stalledArgs({ gh: gh3, transition: t3, release: vi.fn(), releaseIfStale: async () => ({ released: false, live: false, state: "unknown", why: "lock unreadable — fatal" }) }));
+  expect(gh3.comment.mock.calls[0][1]).toContain(lockOwnerUnknownComment(7));
+  expect(t3).toHaveBeenCalledWith(expect.objectContaining({ issue: 7, to: "factory:needs-human" }));
+  expect(t3).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned" }));
+  expect(a3).toContainEqual({ kind: "lock-owner-unknown-escalated", issue: 7, step: "heartbeat-requeue", reason: "lock owner unknowable (lock unreadable — fatal)" });
+  expect(a3).not.toContainEqual(expect.objectContaining({ kind: "requeue" }));
+});
+
+/**
+ * ADR-020 최종 리뷰 MF-4 — **로컬 러너가 잡은 락은 영구히 `unknown`이다**(`runner=local/<host>`,
+ * `ghaRunIdOf`가 null). r2까지 이 팔은 그 판정을 "락은 그냥 둔다"로만 읽고 재큐를 강행했다:
+ * 살아 있는 `factory run implement <n>`이 R 예산을 태우고, 끝내 GREEN을 밀어도 라벨이 이미 `planned`라
+ * `in-progress → awaiting-review`가 그래프에서 거부되어 완성된 구현이 좌초했다.
+ */
+test("MF-4: a local runner's lock (runner=local/<host>) is never requeued — it escalates instead", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:in-progress" ? [{ number: 7 }] : []),
+    comments: async () => [HBC(7, "2026-09-11T00:00:00Z")],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const releaseIfStale = vi.fn(async () => ({ released: false, live: false, state: "unknown", why: "lock owner is not a workflow run (runner=local/mac-1)" }));
+  const actions = await sweep(stalledArgs({ gh, transition, release: vi.fn(), releaseIfStale }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned" }));
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 7, to: "factory:needs-human", reason: "lock owner unknowable (lock owner is not a workflow run (runner=local/mac-1))" }));
+  expect(actions).not.toContainEqual(expect.objectContaining({ kind: "requeue" }));
+  // 그리고 R 예산을 세는 `factory-retry` 코멘트는 나가지 않는다 — 그것이 이 고침의 요점이다.
+  expect(gh.comment.mock.calls.every(([, body]) => !body.includes("factory-retry"))).toBe(true);
+});
+
+// 임계 안(하트비트가 없고 마지막 전이가 최근)이면 에스컬레이션도 하지 않는다 — 정상적인 시작을
+// 그 자리에서 사람에게 넘기지 않기 위해서다(blocked 팔의 같은 판정과 짝이다).
+test("MF-4: an unknown lock inside the stall window is skipped quietly, not escalated", async () => {
+  const gh = {
+    searchIssues: async (l) => (l === "factory:in-progress" ? [{ number: 7 }] : []),
+    comments: async () => [{ id: 1, body: "<!-- factory-transition:v1 from=factory:planned to=factory:in-progress by=script -->\nfactory:planned → factory:in-progress", createdAt: "2026-09-11T00:55:00Z" }],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  };
+  const transition = vi.fn();
+  const actions = await sweep(stalledArgs({ gh, transition, release: vi.fn(), releaseIfStale: async () => ({ released: false, live: false, state: "unknown", why: "lock owner is not a workflow run (runner=local/mac-1)" }) }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "requeue-skipped", issue: 7, reason: "lock owner unknown — lock owner is not a workflow run (runner=local/mac-1)" });
 });
 
 /**

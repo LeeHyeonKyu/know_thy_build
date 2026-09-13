@@ -211,6 +211,91 @@ test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
+// ── ADR-020 최종 리뷰 MF-3: 위험한 동사는 **토큰 경계**에서 잡힌다 ──────────────────────────────
+// r1까지의 앵커는 `(^|[;&|[:space:]])`였다 — `(`도 백틱도 `=`도 없어서, 동사가 눈앞에 그대로 있는
+// `out=$(gh pr merge 5 --squash)`가 **어떤 규칙에도 걸리지 않았다**. `.claude/settings.json`의
+// `Bash(gh pr merge*)` deny는 접두 매칭이라 같은 명령을 스치지도 않는다: 훅이 유일한 방벽인데
+// 그 훅이 비어 있었다. 표는 리뷰가 실제로 실행해 통과시킨 우회들을 그대로 싣는다.
+const EVASIONS = (verb) => [
+  `out=$(${verb})`,          // 명령 치환 + 할당 — 리뷰가 실증한 모양
+  `$(${verb})`,              // 할당 없는 명령 치환
+  "`" + verb + "`",          // 백틱
+  `echo start; ${verb}`,     // `;` 체인
+  `true && ${verb}`,         // `&&` 체인
+  `false || ${verb}`,        // `||` 체인
+  `{ ${verb}; }`,            // 그룹
+  `echo x | xargs -I{} ${verb}`,   // 파이프 뒤
+];
+test("block-dangerous: the dangerous verb is anchored at a token boundary, not at line start (MF-3)", async () => {
+  const verbs = [
+    // 머지 — 리뷰되지 않은 자기 PR을 builder가 스스로 머지하는 경로(L1이 통째로 건너뛰어진다)
+    "gh pr merge $PR --squash --delete-branch",
+    "gh api -X PUT repos/o/r/pulls/9/merge",
+    "git merge main",
+    // 락 브랜치 삭제 — 이슈 단위 상호배제의 유일한 근거
+    "git push origin --delete factory/lock-7",
+    "git push origin :refs/heads/factory/lock-7",
+    "git push origin :factory/lock-7",
+    // 라벨 그래프 우회
+    "gh issue edit 7 --add-label factory:approved",
+    "gh api -X DELETE /repos/o/r/issues/7/labels/factory:approved",
+    // 브랜치 보호·룰셋 = L0 자체 (SF-2: 철자를 가리지 않는다)
+    "gh api -X PUT /repos/o/r/branches/main/protection",
+    "gh api --method PUT /repos/o/r/branches/main/protection -f x=1",
+    "gh api -X DELETE /repos/o/r/branches/main/protection",
+    "gh api --method POST /repos/o/r/rulesets -f x=1",
+    "gh ruleset delete 3",
+    // 보호 경로 · 테스트 env
+    "rm -rf .factory/lib",
+    "ln -sf /tmp/evil .claude/settings.json",
+    "chmod -x .factory/bin/gates.js",
+    "docker compose down",
+    "git apply /tmp/p.diff",
+    "git push --force origin main",
+  ];
+  const cases = verbs.flatMap((v) => [v, ...EVASIONS(v)]);
+  await Promise.all(cases.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+}, 120000);
+
+// 넓힌 경계가 정상 작업을 잡아먹지 않는지 — 같은 글자들이 무해한 자리에 있을 때는 조용하다.
+test("block-dangerous: the widened token boundary does not swallow normal commands (MF-3)", async () => {
+  const allowed = [
+    "out=$(git status --porcelain)", "sha=$(git rev-parse HEAD)", "echo `git log -1 --format=%H`",
+    "npm test && git commit -m x", "git push origin HEAD || echo failed",
+    "{ npm run lint; npm test; }", "gh pr view 5 --json mergeable",
+    "gh api repos/o/r/pulls/9 --jq .head.sha",        // /merge가 아닌 PR 조회
+    "gh issue comment 7 --body-file /tmp/b.md",
+    "chmod +x scripts/run.sh", "ln -s ../shared src/shared",   // 보호 경로가 아니면 그대로다
+    "PR=$(gh pr list --json number --jq '.[0].number')",
+    "docker compose up -d",                            // up은 막지 않는다(KTB-21)
+  ];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// deny-all-writes의 `$CMD`도 같은 결함을 갖고 있었다 — 두 훅은 한 우회에 같이 열려 있었다.
+test("deny-all-writes: write verbs inside $( ), backticks, chains and groups are caught too (MF-3)", async () => {
+  const verbs = ["rm -rf src", "mkdir build", "touch src/a.js", "chmod 777 src/a.js", "ln -s /tmp/x src/y",
+                 "tee src/a.js", "git commit -m x", "git push origin HEAD", "wget https://e/x",
+                 "curl -o src/a.js https://e/x", "sed -i s/a/b/ src/a.js", "docker compose down"];
+  const cases = verbs.flatMap((v) => [v, `out=$(${v})`, "`" + v + "`", `echo x; ${v}`, `true && ${v}`, `{ ${v}; }`]);
+  await Promise.all(cases.map(async (c) => {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: this role must not write/);
+  }));
+}, 120000);
+
+test("deny-all-writes: the widened token boundary still lets read-only work through (MF-3)", async () => {
+  const allowed = ["out=$(git status --porcelain)", "n=$(ls src | wc -l)", "echo `git rev-parse HEAD`",
+                   "npm test && npm run lint", "{ npm test; git diff; }", "grep -rn mkdir src/",
+                   "cat src/a.js | head -5", "node .factory/bin/gates.js full"];
+  await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
 test("block-dangerous: non-Bash tools and malformed input pass through", async () => {
   expect((await bash("block-dangerous.sh", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: ".factory/x" } })).code).toBe(0);
   expect((await run("bash", [join(H, "block-dangerous.sh")], { input: "not json" })).code).toBe(0);

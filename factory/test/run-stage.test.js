@@ -1929,7 +1929,8 @@ test("KTB-15b: implement entering from factory:blocked whose origin matches neit
   expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
   expect(d.transition).not.toHaveBeenCalled();
   expect(d.claudeP).not.toHaveBeenCalled();
-  expect(lines.some((l) => /implement: blocked did not originate from planned\|in-progress — nothing to retry \(origin=queue\)/.test(l))).toBe(true);
+  // 최종 리뷰 nit 1: origin 목록은 `in-progress` 하나다(`planned → blocked` 엣지가 없어 그 origin은 생길 수 없다).
+  expect(lines.some((l) => /implement: blocked did not originate from in-progress — nothing to retry \(origin=queue\)/.test(l))).toBe(true);
 });
 
 // KTB-24 fix가 review에 blocked 재진입을 열었다 — 하지만 **origin 마커가 없으면** 여전히 아무것도

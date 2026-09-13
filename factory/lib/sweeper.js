@@ -17,6 +17,24 @@ const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
  * `workflow_dispatch`뿐이고, 그 손잡이를 스테이지 워크플로 5개에 달았다.
  */
 const STALLED_STAGE = {
+  /**
+   * ADR-020 최종 리뷰 MF-1 — `factory:queue`가 이 표에서 빠져 있었다. KTB-31이 `factory:rework`에서
+   * 고친 결함과 **글자 하나 다르지 않은** 결함이 라벨 하나에 더 남아 있었던 것이다: 아무 팔도 보지
+   * 않는 대기 상태.
+   *
+   * 여기가 특히 아픈 이유는 `sweepHarnessUnpark`(아래)의 목적지가 바로 이 라벨이기 때문이다.
+   * 주차 해제는 `needs-info → queue` 전이를 만들고 **평생 dedupe** 마커를 남긴다 — 그 라벨 이벤트가
+   * 만든 다섯 런 중 하나(`factory-triage`)가 사라지면(도그푸딩에서 두 번 관측됐다: 데모 #2의 동시성
+   * 물결, #15의 Actions 장애 중 좀비 `queued`), 그 피처는 **영원히** `factory:queue`에 앉는다.
+   * 마커가 있으니 주차 해제 팔은 다시 시도하지 않고, 다른 어떤 팔도 이 라벨을 보지 않았다.
+   * KTB-23(하네스 주차)의 존재 이유 전체가 그 한 칸에서 끝났다. `needs-human → queue`(`:unstick`)와
+   * blocked 팔의 `blocked → queue` 재시도도 같은 막다른 길이었다.
+   *
+   * 이 팔이 그것을 받는다 — 다른 라벨들과 똑같이 `STALL_NO_HEARTBEAT_MIN`(10분) 임계로. triage는
+   * 하트비트를 찍기 전에 끝나는 일이 없으므로(스테이지가 시작하면 하트비트가 선다) "하트비트가
+   * 하나도 없다 = 런이 뜨지 않았다"의 판정이 여기서도 그대로 맞는다.
+   */
+  "factory:queue": "triage",
   "factory:ready": "plan",
   "factory:planned": "implement",
   // ADR-020 KTB-31 — `factory:rework`이 이 표에 없어서 **아무 팔도 보지 않는 대기 상태**가 하나 남아
@@ -142,7 +160,11 @@ function retriedSinceOrigin(comments, stage, issue) {
 const BLOCKED_RETRY_STAGE = {
   "factory:queue": "triage",
   "factory:ready": "plan",
-  "factory:planned": "implement",
+  // 최종 리뷰 nit 1 — `factory:planned`는 여기(그리고 `labels.js`의 `BLOCKED_RETRY.implement.origins`)
+  // 에 **도달할 수 없는 항목**이었다: 그래프에 `planned → blocked` 엣지가 없고(`labels.js` TRANSITIONS),
+  // `abortStage`는 라벨이 그 스테이지의 in-flight 라벨(`implement`면 `in-progress`)일 때만 전이한다.
+  // 그러므로 `from=factory:planned`인 blocked-origin 마커는 생길 수 없다. 죽은 항목을 두면 다음 독자가
+  // "planned에서도 blocked이 될 수 있구나"로 읽는다 — 표는 실제 가능한 것만 적어야 표다.
   "factory:in-progress": "implement",
   // ADR-020 KTB-24 fix: review도 한 번은 다시 밀어본다. KTB-24가 세운 `Aborted cleanup`이
   // 잘린 review 잡의 `awaiting-review`를 blocked으로 바꾸는데, 이 표에 없어서 그 이슈는 **항상**
@@ -626,6 +648,35 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       if (releaseIfStale) {
         const lock = await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "heartbeat-requeue" });
         if (lock.state === "live") { actions.push({ kind: "requeue-skipped", issue: it.number, reason: `lock still live — ${lock.why}` }); continue; }
+        /**
+         * ADR-020 최종 리뷰 MF-4 — **세 팔 중 이 하나만 r1의 계약(불리언)에 남아 있었다.** r2 MF1이
+         * `live` / `none|stale` / `unknown`을 가르고 두 dispatch 팔에 "모른다"는 "돌고 있다"가
+         * 아니다"를 가르쳤는데, 여기서는 `unknown`이 "락은 그냥 둔다"로만 읽히고 **재큐는 그대로
+         * 진행**됐다.
+         *
+         * 그 차이가 만드는 사고: 로컬 `factory run implement <n>`(§4.2.5의 지원되는 진입 경로)은
+         * `runner=local/<host>`로 락을 잡고, `ghaRunIdOf`가 null이라 판정은 **영구히** `unknown`이다.
+         * 하트비트 패치 실패는 설계상 삼켜지므로(`heartbeat.js`) GitHub 딸꾹질 한 번이면 살아 있는
+         * 런의 하트비트가 30분을 넘긴다. 그 다음 quick sweep(KTB-26 이후 **모든 스테이지 끝**에 돈다)이
+         * `in-progress → planned`로 재큐하며 R 예산을 한 칸 태우고, 살아 있던 builder가 GREEN PR을
+         * 밀고 `in-progress → awaiting-review`를 부르면 현재 라벨은 이미 `planned`라 그래프가 거부한다
+         * — 끝난 구현이 그대로 좌초하고 다음 dispatch가 처음부터 다시 돈다. GHA 러너도 `gh run view`가
+         * 실패하면(토큰 스코프, Actions 장애) 같은 문에 들어선다: 이 팔이 살아남으라고 있는 바로 그
+         * 상황이다.
+         *
+         * 그래서 두 dispatch 팔과 **같은 판정**을 한다: 재큐하지 않고, 임계를 넘겼으면 사람을 부른다.
+         * 임계는 이 팔이 이미 재고 있다 — 하트비트가 있으면 그것이 `stale`을 넘겼다는 사실로 위에서
+         * 확정됐고(넘지 않았으면 `continue`), 하나도 없으면 blocked 팔과 같이 마지막 전이의 나이로 잰다.
+         */
+        if (lock.state === "unknown") {
+          const at = hb ? Date.parse(hb[2]) : Date.parse(lastTransition(comments)?.at ?? "");
+          if (Number.isFinite(at) && nowMs - at <= stale) {
+            actions.push({ kind: "requeue-skipped", issue: it.number, reason: `lock owner unknown — ${lock.why}` });
+            continue;
+          }
+          await escalateUnknownLock({ gh, transition, issue: it.number, comments, nowMs, stale, actions, step: "heartbeat-requeue", why: lock.why });
+          continue;
+        }
         lockNote = lock.released ? "lock released" : `lock left alone (${lock.why})`;
       } else {
         await release(it.number);

@@ -64,7 +64,7 @@ test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
   expect(BLOCKED_RETRY.plan).toEqual({ origins: ["factory:ready"], hop: "factory:ready" });
   // implement의 hop은 origin이 in-progress여도 planned다 — implement 자신의 무조건적인
   // planned → in-progress 전이가 그 자리를 다시 채운다.
-  expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" });
+  expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:in-progress"], hop: "factory:planned" });
   expect(BLOCKED_RETRY.merge).toEqual({ origins: ["factory:approved"], hop: "factory:approved" });
   // KTB-24 fix: review도 자기 진입 라벨로 되돌아간다. 라운드 카운터는 handoff 개수로 세므로
   // (`reviewRounds` — 완료된 rework 전이) 재작업까지 가지 못하고 잘린 런은 K 예산을 쓰지 않는다.
@@ -72,6 +72,17 @@ test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
   expect(canTransition("factory:blocked", "factory:awaiting-review")).toBe(true);
   // 매 hop 자체가 그래프에서 유효한 엣지여야 한다 — 표와 그래프가 어긋나면 재시도가 조용히 거부된다.
   for (const { hop } of Object.values(BLOCKED_RETRY)) expect(canTransition("factory:blocked", hop), hop).toBe(true);
+});
+
+// 최종 리뷰 nit 1 — **origin은 실제로 생길 수 있는 것만 적는다.** `factory:planned`가 implement의
+// origins에 있었지만 그 마커는 만들어질 수 없다: 그래프에 `planned → blocked` 엣지가 없고
+// (`transition()`이 그래서 거부한다), `abortStage`는 라벨이 그 스테이지의 in-flight 라벨일 때만 민다.
+// 죽은 항목은 다음 독자에게 "planned에서도 blocked이 될 수 있다"고 거짓말한다.
+test("every BLOCKED_RETRY origin is a label that can actually reach factory:blocked (nit 1)", () => {
+  for (const [stage, { origins }] of Object.entries(BLOCKED_RETRY)) {
+    for (const from of origins) expect(canTransition(from, "factory:blocked"), `${stage}: ${from}`).toBe(true);
+  }
+  expect(canTransition("factory:planned", "factory:blocked")).toBe(false);
 });
 
 test("non-edges are rejected", () => {

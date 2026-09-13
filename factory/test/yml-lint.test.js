@@ -85,7 +85,10 @@ test("all eight workflow templates exist and pass lint", () => {
 test("stage workflows follow the §4.1 table and the token/concurrency rules", () => {
   for (const [f, [stage, timeout, labels]] of Object.entries(STAGE)) {
     const y = readFileSync(join(W, f), "utf8");
-    expect(y, f).toContain(`run: node .factory/bin/run-stage.js ${stage} \${{ github.event.issue.number || inputs.issue }}`);
+    // MF-2: 이슈 번호는 스텝 `env:`의 `ISSUE`로만 들어오고, 스크립트는 `"$ISSUE"`만 읽는다.
+    expect(y, f).toContain(`ISSUE: ${ISSUE_EXPR}`);
+    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} "$ISSUE"`);
+    expect(y, f).not.toContain(`run-stage.js ${stage} ${ISSUE_EXPR}`);
     expect(y, f).toContain(`timeout-minutes: ${timeout}`);
     expect(y, f).toContain(`if: github.event_name == 'workflow_dispatch' || contains(fromJSON('[${labels}]'), github.event.label.name)`);
     expect(y, f).toContain(`group: factory-issue-\${{ github.event.issue.number || inputs.issue }}-${stage}`);
@@ -133,8 +136,46 @@ test("every stage workflow can be dispatched with an issue input (KTB-8)", () =>
     expect(y, f).toContain("type: string");
     // dispatch에는 label이 없다 — 잡 조건이 이벤트 이름을 먼저 보지 않으면 재점화가 통째로 죽는다
     expect(y, f).toContain("if: github.event_name == 'workflow_dispatch' ||");
-    expect(y, f).toContain(`run-stage.js ${stage} \${{ github.event.issue.number || inputs.issue }}`);
+    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} "$ISSUE"`);
   }
+});
+
+// ADR-020 최종 리뷰 MF-2 — dispatch 입력은 **env로** 들어오고, 스크립트는 `"$ISSUE"`만 읽으며,
+// 모양이 아니면 소리내어 죽는다. `${{ inputs.issue }}`를 `run:`에 붙여 넣던 옛 모양은 `gh workflow run`
+// 권한(= 레포 write)을 시크릿 읽기로 승격시키는 주입 싱크였다 — 그 스텝의 env에 세 토큰이 다 있다.
+test("MF-2: the issue input is bound via env and validated, never interpolated into run:", () => {
+  for (const [f, [stage]] of Object.entries(STAGE)) {
+    const y = readFileSync(join(W, f), "utf8");
+    expect(y, f).toContain(`          ISSUE: ${ISSUE_EXPR}\n`);
+    expect(y, f).toContain('[[ "$ISSUE" =~ ^[0-9]+$ ]] ||');
+    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} "$ISSUE"`);
+    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} "$ISSUE" --aborted "\${{ job.status }}"`);
+    // 두 스텝(Run stage · Aborted cleanup) 모두 자기 env에 ISSUE를 싣는다 — 잡 레벨 env는 안 쓴다.
+    expect([...y.matchAll(/^ {10}ISSUE: /gm)], f).toHaveLength(2);
+    expect([...y.matchAll(/\[\[ "\$ISSUE" =~ \^\[0-9\]\+\$ \]\]/g)], f).toHaveLength(2);
+    // 그리고 린터가 그 모양을 붙들고 있다 — 어느 워크플로에도 run: 안의 inputs/github.event는 없다.
+    expect(lintWorkflow(y), f).toEqual([]);
+  }
+  // 여덟 템플릿 전부(스테이지가 아닌 것 포함)가 이 규칙을 통과한다
+  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8")).filter((v) => v.rule === "no-expression-in-run"), f).toEqual([]);
+});
+
+test("yml-lint rejects ${{ inputs.* }} / ${{ github.event.* }} inside a run: block (no-expression-in-run)", () => {
+  // 한 줄짜리 run
+  expect(lintWorkflow("  - run: node x.js ${{ inputs.issue }}\n")).toEqual([expect.objectContaining({ rule: "no-expression-in-run", line: 1 })]);
+  expect(lintWorkflow("  - run: gh issue view ${{ github.event.issue.number }}\n")).toEqual([expect.objectContaining({ rule: "no-expression-in-run", line: 1 })]);
+  // 블록 스칼라 — 본문 줄 번호를 가리킨다
+  expect(lintWorkflow("  - name: x\n    run: |\n      echo ok\n      node x.js ${{ github.event.issue.number || inputs.issue }}\n"))
+    .toEqual([expect.objectContaining({ rule: "no-expression-in-run", line: 4 })]);
+  // 셸 주석 안이어도 치환은 셸보다 **먼저** 일어난다 — 벗기지 않는다
+  expect(lintWorkflow("  - run: |\n      # ${{ inputs.issue }}\n      echo ok\n")).toEqual([expect.objectContaining({ rule: "no-expression-in-run", line: 2 })]);
+  // env 바인딩 + `\"$ISSUE\"`는 깨끗하다
+  expect(lintWorkflow('  - name: x\n    env:\n      ISSUE: ${{ github.event.issue.number || inputs.issue }}\n    run: |\n      [[ "$ISSUE" =~ ^[0-9]+$ ]] || exit 1\n      node x.js "$ISSUE"\n')).toEqual([]);
+  // 공격자가 고를 수 없는 컨텍스트는 규칙 밖이다 — 넓히면 정당한 자리까지 잡아 규칙이 꺼진다
+  expect(lintWorkflow("  - run: |\n      git checkout ${{ github.sha }} -- .factory\n      echo ${{ job.status }} ${{ github.run_id }} ${{ env.X }}\n")).toEqual([]);
+  // `run:` 블록 **밖**(with:·concurrency:·if:)은 셸이 아니다 — 잡지 않는다
+  expect(lintWorkflow("concurrency:\n  group: x-${{ github.event.issue.number || inputs.issue }}\n")).toEqual([]);
+  expect(lintWorkflow("  - uses: actions/checkout@v4\n    with:\n      ref: ${{ github.event.pull_request.base.ref }}\n")).toEqual([]);
 });
 
 // ADR-020 KTB-24 — 취소된 잡은 `run-stage.js`의 finally를 실행하지 않는다: 데모 #15는 락 고아 +
@@ -146,7 +187,7 @@ test("every stage workflow cleans up after a cancelled or failed job (KTB-24)", 
     // KTB-24 fix: `cancelled() || failure()`는 "런이 취소됐다"와 "앞 스텝이 실패했다"만 덮는다 —
     // 잡 타임아웃·러너 소실처럼 그 어느 쪽으로도 분류되지 않는 끝맺음에서 정리가 통째로 건너뛰어진다.
     expect(y, f).toContain("if: always() && job.status != 'success'");
-    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} ${ISSUE_EXPR} --aborted "\${{ job.status }}"`);
+    expect(y, f).toContain(`node .factory/bin/run-stage.js ${stage} "$ISSUE" --aborted "\${{ job.status }}"`);
     // 정리 코드는 base의 것이어야 한다 — implement는 에이전트 브랜치 위에, review·merge는 PR head로
     // detach된 트리 위에 있다.
     expect(y, f).toContain("git checkout ${{ github.sha }} -- .factory || true");

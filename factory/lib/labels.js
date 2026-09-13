@@ -50,7 +50,11 @@ export const ENTRY_LABELS = {
 export const BLOCKED_RETRY = {
   triage: { origins: ["factory:queue"], hop: "factory:queue" },
   plan: { origins: ["factory:ready"], hop: "factory:ready" },
-  implement: { origins: ["factory:planned", "factory:in-progress"], hop: "factory:planned" },
+  // 최종 리뷰 nit 1 — origin은 `factory:in-progress` 하나다. `factory:planned`는 **도달할 수 없었다**:
+  // 그래프에 `planned → blocked` 엣지가 없고(아래 TRANSITIONS), `abortStage`는 라벨이 그 스테이지의
+  // in-flight 라벨일 때만(`implement` → `in-progress`) blocked으로 민다. hop이 여전히 `planned`인 것은
+  // 그대로다 — implement 자신의 무조건적인 `planned → in-progress` 전이가 그 자리를 다시 채운다.
+  implement: { origins: ["factory:in-progress"], hop: "factory:planned" },
   // review(ADR-020 KTB-24 fix): origin이 `factory:awaiting-review`면 그 blocked은 리뷰가
   // **끝나기 전에** 잘렸다는 뜻이다(잡 타임아웃·취소 → `abortStage`, 또는 게이트 판정 불가).
   // 되돌아갈 자리는 그 스테이지 자신의 진입 라벨이고, 라운드 카운터는 **완료된 rework 전이**로 세므로

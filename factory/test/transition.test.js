@@ -1,7 +1,7 @@
 import { test, expect, vi } from "vitest";
 import { transition } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
-import { lastTransition, extractNeedsHuman } from "../lib/retro/issue-comments.js";
+import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
 
 function fakeGh(labels, comments = []) {
   return { issue: vi.fn(async () => ({ number: 7, title: "t", body: "", labels })), comments: vi.fn(async () => comments),
@@ -174,4 +174,58 @@ test("(c): a swap that throws leaves a factory-transition-failed marker — and 
   mute.setFactoryLabel = vi.fn(async () => { throw new Error("gh api 502"); });
   mute.comment = vi.fn(async (n, body) => { if (/failed/.test(body)) throw new Error("comment down"); return "u"; });
   await expect(transition({ gh: mute, issue: 7, to: "factory:ready", stage: "triage" })).rejects.toThrow(/502/);
+});
+
+/**
+ * ADR-020 최종 리뷰 SF-4 — **마커 문법은 쓰는 쪽과 읽는 쪽이 서로를 붙들어야 한다.**
+ *
+ * 전이 코멘트는 `lib/transition.js`가 템플릿 리터럴로 조립하고(렌더러 export가 없다),
+ * `retro/issue-comments.js`의 `TRANSITION_TO`·`lastTransition`·`blockedOrigin`·`countTransitionsTo`가
+ * **독립된 정규식**으로 읽는다. 그런데 열 곳이 넘는 테스트가 본문을 손으로 다시 지어 쓰고 있어서
+ * (writer 쪽 테스트도 같은 리터럴에 대고 단언한다), 필드 하나를 넣거나 순서를 바꾸면 **양쪽 다 초록인
+ * 채로** 프로덕션의 sweeper 팔 전부가 깨진다. 이 테스트만은 writer의 **실제 출력**을 parser에 그대로
+ * 먹인다 — 손으로 지은 본문은 한 글자도 쓰지 않는다.
+ */
+test("SF-4 round-trip: every transition marker the writer emits is read back by the parsers", async () => {
+  const triage = renderHandoff({ stage: "triage", issue: 7, summary: "s", data: { schema: "factory.triage.v1", issue: 7, disposition: "ready", tier: "docs" } });
+  const bodies = [];
+  const gh = fakeGh(["factory:queue"], [{ id: 1, body: triage, createdAt: "2026-09-11T00:00:00Z" }]);
+  gh.comment = vi.fn(async (n, body) => { bodies.push({ id: bodies.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
+
+  // ① 평범한 성공 전이 — from/to/by/reason이 전부 되읽힌다
+  const ok = await transition({ gh, issue: 7, to: "factory:ready", reason: "triage ready" });
+  expect(ok.ok).toBe(true);
+  expect(lastTransition(bodies)).toMatchObject({ from: "factory:queue", to: "factory:ready", by: "script", reason: "triage ready" });
+  expect(TRANSITION_TO.exec(bodies.at(-1).body)[2]).toBe("factory:ready");
+
+  // ② blocked 전이 — 같은 코멘트가 origin 마커(+ cause)까지 싣고, blockedOrigin이 셋 다 되읽는다
+  const gh2 = fakeGh(["factory:queue"], []);
+  const b2 = [];
+  gh2.comment = vi.fn(async (n, body) => { b2.push({ id: b2.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
+  await transition({ gh: gh2, issue: 7, to: "factory:blocked", stage: "triage", reason: "claude -p api error 429: spend limit" });
+  expect(blockedOrigin(b2)).toEqual({ from: "factory:queue", stage: "triage", reason: "claude -p api error 429: spend limit", cause: "api-error" });
+
+  // ③ 실패 마커 — `countTransitionsTo`가 그것으로 앞의 전이 하나를 되돌린다(K 예산의 계약)
+  const gh3 = fakeGh(["factory:awaiting-review"], []);
+  const b3 = [];
+  gh3.comment = vi.fn(async (n, body) => { b3.push({ id: b3.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
+  gh3.setFactoryLabel = vi.fn(async () => { throw new Error("gh api 502"); });
+  await expect(transition({ gh: gh3, issue: 7, to: "factory:rework", reason: "must_fix remain" })).rejects.toThrow(/502/);
+  expect(b3).toHaveLength(2);                                   // 전이 코멘트 + 실패 마커
+  expect(countTransitionsTo(b3, "factory:rework")).toBe(0);     // 실패 마커가 앞의 전이를 무효로 만든다
+
+  // ④ 요구사항 미달 거부(`reason=refused`) — 그것도 완료된 전이이므로 같은 파서가 읽는다
+  const gh4 = fakeGh(["factory:ready"], []);
+  const b4 = [];
+  gh4.comment = vi.fn(async (n, body) => { b4.push({ id: b4.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
+  await transition({ gh: gh4, issue: 7, to: "factory:planned" });
+  expect(lastTransition(b4)).toMatchObject({ from: "factory:ready", to: "factory:needs-human" });
+  expect(extractNeedsHuman(7, b4)).toEqual([{ issue: 7, reason: expect.stringContaining("plan handoff missing"), at: "2026-09-11T01:00:00Z" }]);
+
+  // ⑤ 재큐(`to=factory:queue`)는 라운드 창의 경계다 — `commentsSinceRequeue`가 writer의 출력에서 그것을 찾는다
+  const gh5 = fakeGh(["factory:needs-human"], []);
+  const b5 = [{ id: 0, body: "이전 주기의 코멘트", createdAt: "2026-09-11T00:00:00Z" }];
+  gh5.comment = vi.fn(async (n, body) => { b5.push({ id: b5.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
+  await transition({ gh: gh5, issue: 7, to: "factory:queue", human: true, reason: "unstick" });
+  expect(commentsSinceRequeue(b5)).toEqual([]);                 // 재큐 코멘트 자신까지가 경계다
 });
