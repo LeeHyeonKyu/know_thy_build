@@ -48,7 +48,34 @@ export function flakyIdFromTitle(title) {
  * "이 blocked이 어디서, 어느 스테이지의 시도에서 왔는가"의 유일한 출처다. 코멘트 이력을 다시
  * 훑어 `TRANSITION_TO`로 추측하지 않는다 — 전이가 일어나는 바로 그 순간 이 마커가 사실을 싣는다.
  */
-export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+) -->/;
+export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+)(?: cause=(\S+))? -->/;
+
+/**
+ * ADR-020 O20 — **blocked의 원인 등급.** 마커에 `cause=`가 실린다(KTB-30 이전 마커에는 없다 — 그때는
+ * 사유 문구에서 되짚는다). 이 여섯은 sweeper가 다르게 다뤄야 하는 만큼만 갈랐다:
+ *   - `api-error` — 쿼터·레이트리밋·5xx. 몇 분~몇 시간이면 풀린다 → 3회까지 재시도(KTB-22).
+ *   - `cancelled` — 사람이(또는 concurrency가) 잡을 껐다. 공장의 실패가 아니다 → R 예산을 쓰지 않고
+ *     그 취소마다 한 번 다시 민다.
+ *   - `timeout` — 잡·턴 한도. 같은 자리에서 또 잘릴 수 있지만 한 번은 값어치가 있다.
+ *   - `gates` — 게이트 판정 자체가 BLOCKED(환경이 죽었다).
+ *   - `undecidable` — merge-base·diff 같은 판정 재료를 못 구했다.
+ *   - `other` — 나머지(환경·크리덴셜). 예전의 유일한 문구가 이것이었다.
+ */
+export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "undecidable", "other"];
+const CAUSE_RULES = [
+  ["api-error", /api error|rate ?limit|quota|overloaded|\b429\b|HTTP [45]\d\d|something went wrong/i],
+  ["cancelled", /cancell?ed/i],
+  ["timeout", /tim(?:e|ed)[ _-]?out|timeout|max turns|turn limit/i],
+  ["undecidable", /cannot compute|undecidable|unreadable|unparsable|merge-base|판정 불가/i],
+  ["gates", /gates?\b/i],
+];
+
+/** 사유 문구 → 원인 등급(맞는 규칙이 없으면 `other`). 순수 함수 — 규칙 순서가 우선순위다. */
+export function blockedCause(reason) {
+  const text = String(reason ?? "");
+  for (const [cause, re] of CAUSE_RULES) if (re.test(text)) return cause;
+  return "other";
+}
 
 /**
  * `factory-blocked-origin` 마커를 만드는 유일한 곳(KTB-19 review I-2) — `lib/transition.js`가 실제
@@ -56,7 +83,8 @@ export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+
  * 전이 없이) 그 마커만 새로 남길 때 둘 다 이 함수를 쓴다. 문구가 두 곳에서 따로 써지면 정규식
  * (`BLOCKED_ORIGIN`)과 어긋날 위험이 있다.
  */
-export const blockedOriginMarker = ({ from, stage }) => `<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"} -->`;
+export const blockedOriginMarker = ({ from, stage, cause }) =>
+  `<!-- factory-blocked-origin from=${from} stage=${stage ?? "unknown"}${cause ? ` cause=${cause}` : ""} -->`;
 
 /**
  * `lib/transition.js`가 남기는 전이 코멘트에서 "→ factory:blocked" 줄의 사유(있으면)만 뽑는다 —
@@ -81,7 +109,10 @@ export function blockedOrigin(comments) {
     const m = BLOCKED_ORIGIN.exec(body);
     if (m) {
       const rm = BLOCKED_TRANSITION_REASON.exec(body);
-      found = { from: m[1], stage: m[2], reason: rm?.[1]?.trim() ?? "" };
+      const reason = rm?.[1]?.trim() ?? "";
+      // `cause=`는 KTB-30부터 마커에 실린다 — 없는(옛) 마커는 사유 문구에서 되짚는다. 그래서
+      // 호출자는 언제나 등급 하나를 받는다(등급이 없는 경우를 따로 다루지 않아도 된다).
+      found = { from: m[1], stage: m[2], reason, cause: m[3] ?? blockedCause(reason) };
     }
   }
   return found;

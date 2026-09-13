@@ -20,35 +20,115 @@ test("issue() maps gh json; comments() maps id/body/createdAt", async () => {
   expect(api.args).toEqual(["api", "repos/o/r/issues/5/comments?per_page=100", "--paginate", "--slurp"]);
 });
 
-test("setFactoryLabel removes other factory state labels and adds the new one", async () => {
+// ── ADR-020 KTB-30 — 라벨 전이는 add-first · 재시도 · REST 폴백 · 쓴 뒤 확인 ──────────────────
+// 데모에서 두 번(#2 08:52Z, #15 08:55Z) 같은 방식으로 죽었다: remove+add를 한 번의 `gh issue edit`으로
+// 보내는데 GitHub이 중간에 실패해 **옛 라벨은 지워지고 새 라벨은 안 붙었다** — 상태 라벨이 0개인
+// 이슈는 이벤트도 sweeper도 status도 보지 못한다. 순서를 뒤집으면 최악이 "두 개"(복구 가능)가 된다.
+const labelsJson = (n, names) => ({ code: 0, stdout: JSON.stringify({ number: n, title: "", body: "", labels: names.map((name) => ({ name })) }), stderr: "" });
+/** view 응답을 순서대로 돌려준다(첫 읽기 = 스왑 전, 두 번째 = 쓴 뒤 확인). */
+const scriptedViews = (...snapshots) => {
+  const q = [...snapshots];
+  return () => (q.length > 1 ? q.shift() : q[0]);
+};
+
+test("KTB-30: setFactoryLabel ADDS the new state label first, then removes the old one (two separate calls)", async () => {
   const run = makeFakeRun([
-    { match: (c, a) => a.includes("view"), result: { code: 0, stdout: JSON.stringify({ number: 5, title: "", body: "", labels: [{ name: "factory:ready" }, { name: "bug" }] }), stderr: "" } },
+    { match: (c, a) => a.includes("view"), result: scriptedViews(labelsJson(5, ["factory:ready", "bug"]), labelsJson(5, ["factory:planned", "bug"])) },
     { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
   ]);
-  const gh = makeGh({ run, repo });
-  await gh.setFactoryLabel(5, "factory:planned");
-  const edit = run.calls.find((c) => c.args.includes("edit"));
-  expect(edit.args).toEqual(["issue", "edit", "5", "-R", repo, "--remove-label", "factory:ready", "--add-label", "factory:planned"]);
+  const gh = makeGh({ run, repo, sleep: async () => {} });
+  const r = await gh.setFactoryLabel(5, "factory:planned");
+  expect(run.calls.filter((c) => c.args.includes("edit")).map((c) => c.args)).toEqual([
+    ["issue", "edit", "5", "-R", repo, "--add-label", "factory:planned"],
+    ["issue", "edit", "5", "-R", repo, "--remove-label", "factory:ready"],
+  ]);
+  expect(r).toEqual({ label: "factory:planned", removed: ["factory:ready"], verify: "ok" });
+});
+
+test("KTB-30: a failing `gh issue edit` is retried with 1s/3s/9s backoff, then falls back to the REST labels endpoint", async () => {
+  const slept = [];
+  const run = makeFakeRun([
+    { match: (c, a) => a.includes("view"), result: scriptedViews(labelsJson(2, ["factory:planned"]), labelsJson(2, ["factory:in-progress"])) },
+    { match: (c, a) => a.includes("edit"), result: { code: 1, stdout: "", stderr: "GraphQL: Something went wrong while executing your query" } },
+    { match: (c, a) => a[0] === "api", result: { code: 0, stdout: "[]", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo, sleep: async (ms) => { slept.push(ms); } });
+  const r = await gh.setFactoryLabel(2, "factory:in-progress");
+  // 네 번(첫 시도 + 재시도 3회) 시도하고 그 사이에만 잔다 — add와 remove가 각자 자기 예산을 쓴다.
+  expect(run.calls.filter((c) => c.args.includes("edit"))).toHaveLength(8);
+  expect(slept).toEqual([1000, 3000, 9000, 1000, 3000, 9000]);
+  const api = run.calls.filter((c) => c.args[0] === "api").map((c) => c.args);
+  expect(api[0]).toEqual(["api", "-X", "POST", `repos/${repo}/issues/2/labels`, "-f", "labels[]=factory:in-progress"]);
+  expect(api[1]).toEqual(["api", "-X", "DELETE", `repos/${repo}/issues/2/labels/factory%3Aplanned`]);
+  expect(r.verify).toBe("ok");
+});
+
+test("KTB-30: when both `gh issue edit` and the REST fallback fail, the original error is thrown", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a.includes("view"), result: labelsJson(2, ["factory:planned"]) },
+    { match: (c, a) => a.includes("edit"), result: { code: 1, stdout: "", stderr: "EOF" } },
+    { match: (c, a) => a[0] === "api", result: { code: 1, stdout: "", stderr: "HTTP 502" } },
+  ]);
+  const gh = makeGh({ run, repo, sleep: async () => {} });
+  await expect(gh.setFactoryLabel(2, "factory:in-progress")).rejects.toThrow(/EOF[\s\S]*REST fallback/);
+});
+
+test("KTB-30: verify-after-write re-adds the state label when the read-back says it is missing", async () => {
+  const run = makeFakeRun([
+    // 스왑은 exit 0으로 끝났는데 읽어 보니 새 라벨이 없다(GitHub이 조용히 흘렸다) — 한 번 더 붙인다.
+    { match: (c, a) => a.includes("view"), result: scriptedViews(labelsJson(2, ["factory:planned"]), labelsJson(2, [])) },
+    { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo, sleep: async () => {} });
+  const r = await gh.setFactoryLabel(2, "factory:in-progress");
+  expect(r.verify).toBe("repaired");
+  expect(run.calls.filter((c) => c.args.includes("--add-label")).map((c) => c.args.at(-1))).toEqual(["factory:in-progress", "factory:in-progress"]);
+});
+
+test("KTB-30: an unreadable verify read does not undo the swap — it reports `unverified`", async () => {
+  let reads = 0;
+  const run = makeFakeRun([
+    { match: (c, a) => a.includes("view"), result: () => (++reads === 1 ? labelsJson(2, ["factory:planned"]) : { code: 1, stdout: "", stderr: "boom" }) },
+    { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo, sleep: async () => {} });
+  expect((await gh.setFactoryLabel(2, "factory:in-progress")).verify).toBe("unverified");
+});
+
+test("KTB-30: addLabels/removeLabel get the same retry + REST fallback", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a.includes("edit"), result: { code: 1, stdout: "", stderr: "failed to update 1 issue" } },
+    { match: (c, a) => a[0] === "api", result: { code: 0, stdout: "[]", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo, sleep: async () => {} });
+  await gh.addLabels(7, ["factory:flaky", "bug"]);
+  await gh.removeLabel(7, "factory:flaky");
+  const api = run.calls.filter((c) => c.args[0] === "api").map((c) => c.args);
+  expect(api[0]).toEqual(["api", "-X", "POST", `repos/${repo}/issues/7/labels`, "-f", "labels[]=factory:flaky", "-f", "labels[]=bug"]);
+  expect(api[1]).toEqual(["api", "-X", "DELETE", `repos/${repo}/issues/7/labels/factory%3Aflaky`]);
 });
 
 // KTB-9: tier는 상태와 직교한다 — setFactoryLabel(STATES만 본다)을 태우면 상태 라벨이 떨어져 나간다.
+// KTB-30: tier도 add-first다(부분 실패가 "tier 0개"가 아니라 "tier 2개"로 남게).
 test("setTierLabel swaps only the other factory:tier-* labels, leaving state labels alone", async () => {
   const run = makeFakeRun([
-    { match: (c, a) => a.includes("view"), result: { code: 0, stdout: JSON.stringify({ number: 2, title: "", body: "", labels: [{ name: "factory:ready" }, { name: "factory:tier-docs" }, { name: "bug" }] }), stderr: "" } },
+    { match: (c, a) => a.includes("view"), result: labelsJson(2, ["factory:ready", "factory:tier-docs", "bug"]) },
     { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
   ]);
-  const gh = makeGh({ run, repo });
+  const gh = makeGh({ run, repo, sleep: async () => {} });
   await gh.setTierLabel(2, "factory:tier-standard");
-  const edit = run.calls.find((c) => c.args.includes("edit"));
-  expect(edit.args).toEqual(["issue", "edit", "2", "-R", repo, "--remove-label", "factory:tier-docs", "--add-label", "factory:tier-standard"]);
+  expect(run.calls.filter((c) => c.args.includes("edit")).map((c) => c.args)).toEqual([
+    ["issue", "edit", "2", "-R", repo, "--add-label", "factory:tier-standard"],
+    ["issue", "edit", "2", "-R", repo, "--remove-label", "factory:tier-docs"],
+  ]);
 });
 
 test("setTierLabel on an issue with no tier yet is a plain add (one gh call, no removals)", async () => {
   const run = makeFakeRun([
-    { match: (c, a) => a.includes("view"), result: { code: 0, stdout: JSON.stringify({ number: 2, title: "", body: "", labels: [{ name: "factory:queue" }] }), stderr: "" } },
+    { match: (c, a) => a.includes("view"), result: labelsJson(2, ["factory:queue"]) },
     { match: (c, a) => a.includes("edit"), result: { code: 0, stdout: "", stderr: "" } },
   ]);
-  const gh = makeGh({ run, repo });
+  const gh = makeGh({ run, repo, sleep: async () => {} });
   await gh.setTierLabel(2, "factory:tier-standard");
   expect(run.calls.filter((c) => c.args.includes("edit"))).toHaveLength(1);
   expect(run.calls.find((c) => c.args.includes("edit")).args).toEqual(["issue", "edit", "2", "-R", repo, "--add-label", "factory:tier-standard"]);

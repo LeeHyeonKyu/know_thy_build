@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { blockedOrigin, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
+import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
 
 // ── KTB-15b I2: factory-blocked-origin marker parsing ──────────────────────────────────────────
 // lib/transition.js writes this marker at the moment a transition into factory:blocked succeeds —
@@ -15,7 +15,7 @@ test("blockedOrigin returns null when no marker is present", () => {
 
 test("blockedOrigin returns {from, stage, reason} from the marker", () => {
   const comments = [marker("factory:approved", "merge", "2026-09-11T00:00:00Z")];
-  expect(blockedOrigin(comments)).toEqual({ from: "factory:approved", stage: "merge", reason: "x" });
+  expect(blockedOrigin(comments)).toEqual({ from: "factory:approved", stage: "merge", reason: "x", cause: "other" });
 });
 
 test("blockedOrigin takes the LAST marker when an issue was blocked more than once", () => {
@@ -24,19 +24,49 @@ test("blockedOrigin takes the LAST marker when an issue was blocked more than on
     { id: 2, body: "<!-- factory-transition:v1 from=factory:blocked to=factory:planned by=script -->\nblocked → planned", createdAt: "2026-09-11T00:05:00Z" },
     marker("factory:approved", "merge", "2026-09-11T01:00:00Z"),
   ];
-  expect(blockedOrigin(comments)).toEqual({ from: "factory:approved", stage: "merge", reason: "x" });
+  expect(blockedOrigin(comments)).toEqual({ from: "factory:approved", stage: "merge", reason: "x", cause: "other" });
 });
 
 // ── KTB-22: the reason text (used by the sweeper to detect an api-error origin) ─────────────────
 
 test("blockedOrigin: reason is '' when the marker was re-posted without a transition line (merge-stage's toBlocked self-retry)", () => {
   const comments = [{ id: 1, body: "<!-- factory-blocked-origin from=factory:approved stage=merge -->\n머지 재시도가 다시 판정 불가로 멈췄습니다. 사유: gates BLOCKED", createdAt: "x" }];
-  expect(blockedOrigin(comments)).toEqual({ from: "factory:approved", stage: "merge", reason: "" });
+  expect(blockedOrigin(comments)).toEqual({ from: "factory:approved", stage: "merge", reason: "", cause: "other" });
 });
 
 test("blockedOrigin: reason carries the api-error provider message when that's why the transition landed on blocked", () => {
   const body = `<!-- factory-transition:v1 from=factory:planned to=factory:blocked by=script -->\nfactory:planned → factory:blocked — claude -p api error 429: You've hit your org's monthly spend limit\n<!-- factory-blocked-origin from=factory:planned stage=implement -->`;
-  expect(blockedOrigin([{ id: 1, body, createdAt: "x" }])).toEqual({ from: "factory:planned", stage: "implement", reason: "claude -p api error 429: You've hit your org's monthly spend limit" });
+  expect(blockedOrigin([{ id: 1, body, createdAt: "x" }])).toEqual({ from: "factory:planned", stage: "implement", reason: "claude -p api error 429: You've hit your org's monthly spend limit", cause: "api-error" });
+});
+
+// ── ADR-020 O20/KTB-30 — origin 마커가 **원인 등급**을 싣는다 ──────────────────────────────────
+// "왜 blocked인가"는 재시도 예산과 에스컬레이션 문구를 동시에 가른다: 사람이 취소한 잡과 크리덴셜
+// 문제를 같은 문장("환경/크리덴셜")으로 사람에게 넘기면 사람이 잘못된 곳을 본다.
+
+test("blockedOriginMarker carries the cause class; blockedOrigin reads it back", () => {
+  expect(blockedOriginMarker({ from: "factory:awaiting-review", stage: "review", cause: "cancelled" }))
+    .toBe("<!-- factory-blocked-origin from=factory:awaiting-review stage=review cause=cancelled -->");
+  const body = `<!-- factory-transition:v1 from=factory:awaiting-review to=factory:blocked by=script -->\nfactory:awaiting-review → factory:blocked — job cancelled — retry via sweeper\n${blockedOriginMarker({ from: "factory:awaiting-review", stage: "review", cause: "cancelled" })}`;
+  expect(blockedOrigin([{ id: 1, body, createdAt: "x" }])).toEqual({
+    from: "factory:awaiting-review", stage: "review", reason: "job cancelled — retry via sweeper", cause: "cancelled",
+  });
+});
+
+test("blockedOriginMarker without a cause stays byte-identical to the old marker (old issues keep parsing)", () => {
+  expect(blockedOriginMarker({ from: "factory:planned", stage: "implement" })).toBe("<!-- factory-blocked-origin from=factory:planned stage=implement -->");
+});
+
+test("blockedCause classifies the reason text into the six classes", () => {
+  expect(blockedCause("claude -p api error 429: org monthly spend limit")).toBe("api-error");
+  expect(blockedCause("gh workflow run failed: HTTP 500")).toBe("api-error");
+  expect(blockedCause("job cancelled — retry via sweeper")).toBe("cancelled");
+  expect(blockedCause("job timed_out — retry via sweeper")).toBe("timeout");
+  expect(blockedCause("cannot compute merge-base (shallow clone?)")).toBe("undecidable");
+  expect(blockedCause("gates file status is BLOCKED")).toBe("gates");
+  expect(blockedCause("job failure — retry via sweeper")).toBe("other");
+  expect(blockedCause("")).toBe("other");
+  expect(blockedCause(null)).toBe("other");
+  expect(new Set(BLOCKED_CAUSES)).toEqual(new Set(["api-error", "timeout", "cancelled", "gates", "undecidable", "other"]));
 });
 
 test("extractNeedsHuman is unaffected by the presence of a blocked-origin marker on an unrelated comment", () => {

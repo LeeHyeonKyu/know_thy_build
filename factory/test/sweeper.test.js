@@ -242,13 +242,13 @@ test.each([
   // `restartComment` — so a stalled-dispatch-then-blocked episode still gets its one free retry.
   expect(gh.comment).toHaveBeenCalledWith(9, expect.stringContaining(`<!-- factory-sweeper blocked-retry stage=${stage} issue=9 -->`));
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
-  expect(first).toContainEqual({ kind: "blocked-retry", issue: 9, stage });
+  expect(first).toContainEqual({ kind: "blocked-retry", issue: 9, stage, cause: "other" });
 
   // still blocked next sweep — the restart marker is already there, so this time it escalates
   const second = await sweep(args);
   expect(dispatchStage).toHaveBeenCalledTimes(1);
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
-  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9 });
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9, cause: "other" });
 });
 
 // KTB-19 review I-1: the canonical failure the fix targets — the stalled arm dispatches merge
@@ -269,7 +269,7 @@ test("sweep: a stalled-arm restart marker for the same stage does not block the 
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage });
   expect(dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: 9 });
-  expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "merge" });
+  expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "merge", cause: "other" });
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
 });
 
@@ -299,7 +299,7 @@ test("sweep: an api-error blocked origin retries 3 times (attempt-numbered marke
     const actions = await sweep(args);
     expect(dispatchStage).toHaveBeenNthCalledWith(attempt, { stage: "implement", issue: 9 });
     expect(gh.comment).toHaveBeenNthCalledWith(attempt, 9, expect.stringContaining(blockedRetryComment("implement", 9, attempt)));
-    expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "implement", attempt });
+    expect(actions).toContainEqual({ kind: "blocked-retry", issue: 9, stage: "implement", attempt, cause: "api-error" });
     expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9 }));
   }
 
@@ -307,7 +307,7 @@ test("sweep: an api-error blocked origin retries 3 times (attempt-numbered marke
   const fourth = await sweep(args);
   expect(dispatchStage).toHaveBeenCalledTimes(API_ERROR_MAX_RETRIES);
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
-  expect(fourth).toContainEqual({ kind: "blocked-escalated", issue: 9 });
+  expect(fourth).toContainEqual({ kind: "blocked-escalated", issue: 9, cause: "api-error" });
 });
 
 test("sweep: a non-api-error blocked origin still gets exactly one free retry (KTB-15b behaviour unchanged)", async () => {
@@ -326,7 +326,7 @@ test("sweep: a non-api-error blocked origin still gets exactly one free retry (K
   expect(dispatchStage).toHaveBeenCalledTimes(1);
   const second = await sweep(args);
   expect(dispatchStage).toHaveBeenCalledTimes(1);
-  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9 });
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 9, cause: "other" });
 });
 
 test("sweep: blocked with no factory-blocked-origin marker at all escalates immediately (no dispatch)", async () => {
@@ -340,7 +340,7 @@ test("sweep: blocked with no factory-blocked-origin marker at all escalates imme
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage });
   expect(dispatchStage).not.toHaveBeenCalled();
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 10, to: "factory:needs-human" }));
-  expect(actions).toContainEqual({ kind: "blocked-escalated", issue: 10 });
+  expect(actions).toContainEqual({ kind: "blocked-escalated", issue: 10, cause: null });
 });
 
 // ── 격리 이탈 코멘트(Plan 1b 이월) ────────────────────────────────────────
@@ -590,6 +590,175 @@ test("sweep: a failing gh.issueList for label-set repair is isolated — recorde
   expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", error: expect.stringContaining("gh issue list boom") });
 });
 
+// ── ADR-020 KTB-30 — 상태 라벨이 **0개**인 이슈를 되살린다 ──────────────────────────────────────
+// 데모에서 두 번 났다(#2 08:52Z, #15 08:55Z): remove+add 한 번짜리 라벨 스왑이 중간에 실패해 상태
+// 라벨이 하나도 남지 않았다. 그 이슈는 `labeled` 이벤트도 못 만들고, 모든 sweeper 팔이 상태 라벨로
+// 검색하므로 아무도 다시 보지 않는다 — sweeper를 통째로 빠져나가는 유일한 실패였다.
+
+const TRANSITION_COMMENT = (from, to, at) => ({ id: 7, body: `<!-- factory-transition:v1 from=${from} to=${to} by=script -->\n${from} → ${to}`, createdAt: at });
+const zeroLabelArgs = (over = {}) => ({ gh: over.gh, charter, thresholds: T, now: "2026-09-13T09:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, ...over });
+
+test("KTB-30: an open factory issue with NO state label is restored to the `to` of its latest transition", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [{ ...openIssue(2, ["factory:tier-standard"]), updatedAt: "2026-09-13T08:52:00Z" }]),
+    comments: vi.fn(async () => [TRANSITION_COMMENT("factory:planned", "factory:in-progress", "2026-09-13T08:52:00Z")]),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  const actions = await sweep(zeroLabelArgs({ gh }));
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(2, "factory:in-progress");
+  expect(gh.comment).toHaveBeenCalledWith(2, expect.stringContaining("<!-- factory-label-set-repaired from=(none) to=factory:in-progress -->"));
+  expect(actions).toContainEqual({ kind: "state-label-restored", issue: 2, to: "factory:in-progress" });
+});
+
+test("KTB-30: with no transition comment to restore from, a label-less factory issue goes to needs-human", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [{ ...openIssue(3, ["factory:harness"]), updatedAt: "2026-09-13T08:52:00Z" }]),
+    comments: vi.fn(async () => [{ id: 1, body: "사람이 쓴 코멘트", createdAt: "2026-09-13T08:00:00Z" }]),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  const actions = await sweep(zeroLabelArgs({ gh }));
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(3, "factory:needs-human");
+  expect(actions).toContainEqual({ kind: "state-label-restored", issue: 3, to: "factory:needs-human" });
+});
+
+test("KTB-30: an issue with a transition comment but no factory label at all is still restored", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [{ ...openIssue(4, ["bug"]), updatedAt: "2026-09-13T08:55:00Z" }]),
+    comments: vi.fn(async () => [TRANSITION_COMMENT("factory:awaiting-review", "factory:rework", "2026-09-13T08:55:00Z")]),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  const actions = await sweep(zeroLabelArgs({ gh }));
+  expect(actions).toContainEqual({ kind: "state-label-restored", issue: 4, to: "factory:rework" });
+});
+
+test("KTB-30: a plain non-factory issue (no factory label, no transition comment) is never touched", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [{ ...openIssue(5, ["bug"]), updatedAt: "2026-09-13T08:55:00Z" }]),
+    comments: vi.fn(async () => [{ id: 1, body: "사람이 쓴 코멘트", createdAt: "x" }]),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  const actions = await sweep(zeroLabelArgs({ gh }));
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(actions.some((a) => a.kind === "state-label-restored")).toBe(false);
+});
+
+test("KTB-30: the zero-label repair dedupes on its marker within 10 minutes", async () => {
+  const prior = { id: 9, body: "<!-- factory-label-set-repaired from=(none) to=factory:in-progress -->\n복구했습니다.", createdAt: "2026-09-13T08:55:00Z" };
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [{ ...openIssue(2, ["factory:tier-standard"]), updatedAt: "2026-09-13T08:55:00Z" }]),
+    comments: vi.fn(async () => [TRANSITION_COMMENT("factory:planned", "factory:in-progress", "2026-09-13T08:52:00Z"), prior]),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  // 09:00Z — 마커는 5분 전 것이다: 다시 손대지 않는다
+  const within = await sweep(zeroLabelArgs({ gh }));
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(within).toContainEqual({ kind: "state-label-restore-skipped", issue: 2, reason: "repaired within 10m" });
+  // 09:10Z 이후 — 같은 이슈가 **여전히** 라벨이 없다면 그건 새 사고다: 다시 고친다
+  const after = await sweep(zeroLabelArgs({ gh, now: "2026-09-13T09:20:00Z" }));
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(2, "factory:in-progress");
+  expect(after).toContainEqual({ kind: "state-label-restored", issue: 2, to: "factory:in-progress" });
+});
+
+// KTB-30: add-first 스왑이 부분 실패하면 남는 것은 **상태 라벨 2개**다 — 그건 사람의 손 편집이 아니라
+// 기계의 잔해이고, 어느 쪽이 진짜인지도 안다(최신 전이의 `to`). needs-human으로 접지 않고 그대로 잇는다.
+test("KTB-30: exactly two state labels whose newer one is the latest transition's `to` → the older one is removed, no needs-human", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [openIssue(2, ["factory:planned", "factory:in-progress", "factory:tier-standard"])]),
+    comments: vi.fn(async () => [TRANSITION_COMMENT("factory:planned", "factory:in-progress", "2026-09-13T08:52:00Z")]),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  const actions = await sweep(zeroLabelArgs({ gh }));
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(2, "factory:in-progress");
+  expect(gh.comment).toHaveBeenCalledWith(2, expect.stringContaining("<!-- factory-label-set-repaired from=factory:planned,factory:in-progress to=factory:in-progress -->"));
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 2, from: ["factory:planned", "factory:in-progress"], to: "factory:in-progress" });
+});
+
+test("KTB-30: two state labels with no transition backing them still collapse to needs-human (KTB-18 unchanged)", async () => {
+  const gh = {
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => [openIssue(14, ["backlog", "factory:approved"])]),
+    comments: vi.fn(async () => []),
+    comment: vi.fn(async () => "u"),
+    patchComment: vi.fn(),
+    setFactoryLabel: vi.fn(async () => ({ verify: "ok" })),
+  };
+  const actions = await sweep(zeroLabelArgs({ gh }));
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(14, "factory:needs-human");
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 14, from: ["backlog", "factory:approved"] });
+});
+
+// ── ADR-020 O20 — blocked의 **원인 등급**이 재시도 예산과 에스컬레이션 문구를 가른다 ─────────────
+const CAUSE_ORIGIN = (from, stage, cause, reason, at) => ({
+  id: 1,
+  body: `<!-- factory-transition:v1 from=${from} to=factory:blocked by=script -->\n${from} → factory:blocked — ${reason}\n<!-- factory-blocked-origin from=${from} stage=${stage} cause=${cause} -->`,
+  createdAt: at,
+});
+
+test("O20: a cancelled origin is retried once per cancel — a second cancel gets its own retry (R budget untouched)", async () => {
+  const posted = [];
+  let origins = [CAUSE_ORIGIN("factory:awaiting-review", "review", "cancelled", "job cancelled — retry via sweeper", "2026-09-13T08:00:00Z")];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:blocked" ? [{ number: 15 }] : [])),
+    comments: vi.fn(async () => [...origins, ...posted].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99 + posted.length, body, createdAt: "2026-09-13T08:30:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-09-13T09:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage };
+
+  const first = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "review", issue: 15 });
+  expect(first).toContainEqual({ kind: "blocked-retry", issue: 15, stage: "review", cause: "cancelled" });
+  // 같은 취소 사건 안에서는 한 번뿐이다
+  const second = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 15, cause: "cancelled" });
+  // 사람이 **다시** 취소했다 = 새 사건: 다시 한 번 민다(예산을 쓰지 않는다)
+  origins = [...origins, CAUSE_ORIGIN("factory:awaiting-review", "review", "cancelled", "job cancelled — retry via sweeper", "2026-09-13T09:30:00Z")];
+  const third = await sweep({ ...args, now: "2026-09-13T10:00:00Z" });
+  expect(dispatchStage).toHaveBeenCalledTimes(2);
+  expect(third).toContainEqual({ kind: "blocked-retry", issue: 15, stage: "review", cause: "cancelled", attempt: 2 });
+});
+
+test("O20: the escalation reason names the cause instead of the generic environment/credentials line", async () => {
+  const escalated = async (cause, reason) => {
+    const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const gh = {
+      searchIssues: vi.fn(async (l) => (l === "factory:blocked" ? [{ number: 9 }] : [])),
+      comments: vi.fn(async () => [CAUSE_ORIGIN("backlog", "triage", cause, reason, "2026-09-13T08:00:00Z")]),
+      comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+    };
+    await sweep({ gh, charter, thresholds: T, now: "2026-09-13T09:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
+    return transition.mock.calls[0][0].reason;
+  };
+  // `backlog` origin은 재시도 표에 없다 — 곧장 에스컬레이션 경로다
+  expect(await escalated("cancelled", "job cancelled — retry via sweeper")).toBe("blocked (job cancelled) — needs human");
+  expect(await escalated("timeout", "job timed_out — retry via sweeper")).toBe("blocked (job timed out) — needs human");
+  expect(await escalated("api-error", "claude -p api error 429")).toBe("blocked (API quota/outage) — needs human");
+  expect(await escalated("gates", "gates file status is BLOCKED")).toBe("blocked (gates undecided) — needs human");
+  expect(await escalated("undecidable", "cannot compute merge-base")).toBe("blocked (undecidable) — needs human");
+  expect(await escalated("other", "something else entirely")).toBe("blocked (environment/credentials) — needs human");
+});
+
 // ── ADR-020 KTB-26 — `--quick`: 스테이지 잡이 끝날 때마다 도는 이벤트 구동 sweep ────────────────
 test("KTB-26 quick sweep: the state-recovery arms still run, the time-bound arms do not", async () => {
   const stale = { id: 1, body: "<!-- factory-heartbeat issue=7 -->\nlast: 2026-09-11T00:00:00Z", createdAt: "2026-09-11T00:00:00Z" };
@@ -777,14 +946,14 @@ test("KTB-24 fix: a blocked issue whose origin was awaiting-review gets one revi
   const first = await sweep(unparkArgs({ gh, dispatchStage, transition }));
   expect(dispatchStage).toHaveBeenCalledWith({ stage: "review", issue: 15 });
   expect(gh.comment).toHaveBeenCalledWith(15, expect.stringContaining(blockedRetryComment("review", 15)));
-  expect(first).toContainEqual({ kind: "blocked-retry", issue: 15, stage: "review" });
+  expect(first).toContainEqual({ kind: "blocked-retry", issue: 15, stage: "review", cause: "other" });
   expect(transition).not.toHaveBeenCalled();
 
   // 한 번뿐이다 — 여전히 blocked이면 다음 sweep이 사람에게 넘긴다
   const second = await sweep(unparkArgs({ gh, dispatchStage, transition }));
   expect(dispatchStage).toHaveBeenCalledTimes(1);
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 15, to: "factory:needs-human" }));
-  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 15 });
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 15, cause: "other" });
 });
 
 // ── ADR-020 KTB-28 — sweeper는 밀기 전에 **잔해 락**을 회수한다 ─────────────────────────────────

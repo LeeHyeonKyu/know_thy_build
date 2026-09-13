@@ -67,7 +67,13 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
 
   const openLists = await Promise.all(STATUS_STATE_LABELS.map((label) => ghClient.issueList({ labels: [label], state: "open" })));
   const merged = await ghClient.issueList({ labels: ["factory:merged"], state: "closed", limit: 10 });
-  const issues = [...openLists.flat(), ...merged];
+  // ADR-020 KTB-30 — 상태 라벨이 **0개**인 이슈는 위의 라벨별 조회 어디에도 안 걸린다(라벨이 없는
+  // 것을 라벨로 찾을 수는 없다). 열린 이슈 전체를 한 번 더 받아 그중 factory 라벨은 있는데 상태
+  // 라벨이 없는 것만 더한다 — `buildStatus`가 그것을 Needs You의 `no-state-label`로 낸다.
+  const seen = new Set([...openLists.flat(), ...merged].map((i) => i.number));
+  const orphans = (await ghClient.issueList({ state: "open" }))
+    .filter((i) => !seen.has(i.number) && !(i.labels || []).some((l) => STATES.has(l)) && (i.labels || []).some((l) => String(l).startsWith("factory:")));
+  const issues = [...openLists.flat(), ...merged, ...orphans];
 
   const [retroProposal, harness] = await Promise.all([
     ghClient.prList({ label: "factory:retro-proposal" }),

@@ -1181,6 +1181,75 @@ approve든 approved, `nextState` 순수 함수, flips 계산, flips 기록과 �
   식을 실어야 한다. 정리 스텝은 그 값으로 "이 락이 내 것인가"를 가르므로(KTB-24 fix), 둘이 갈리면
   자기 락을 남의 것으로 읽고 고아로 남긴다 — 데모 #15의 잔해가 바로 그 모양이었다.
 
+#### KTB-30 — 라벨 스왑이 중간에 끊겨 **상태 라벨이 0개**가 됐다: sweeper를 통째로 빠져나간 유일한 실패
+
+**질문**: 2026-09-13 08:52Z(데모 #2)와 08:55Z(#15), 4분 사이에 같은 사고가 두 번 났다. `gh issue edit
+--remove-label factory:planned --add-label factory:in-progress` 한 번이 GitHub의 일시 장애로
+(`GraphQL: Something went wrong while executing your query`, 그리고 `EOF`) 중간에 실패했고, 남은 것은
+**상태 라벨이 하나도 없는 이슈**였다. 그 상태는 이 공장에서 유일하게 **아무도 보지 못하는** 상태다:
+`labeled` 이벤트가 없으니 잡이 안 뜨고, 모든 스테이지 워크플로의 `if:`가 빗나가고, sweeper의 일곱 팔은
+전부 상태 라벨로 **검색**하므로 그 이슈를 애초에 목록에 담지 못하고, `factory status`도 상태 라벨로
+조회하므로 화면에서 사라진다. #2는 implement claim에서, #15는 **27분짜리 리뷰가 끝난 직후의 handoff**에서
+그렇게 죽었다. 관측자가 손으로 REST(`gh api -X POST repos/…/issues/N/labels`)를 쳐서 둘 다 되살렸는데,
+그때 `gh issue edit`은 계속 실패하는 중이었고 REST는 동작했다(O23의 장애 창).
+
+**결정**: 라벨 변경을 네 겹으로 다시 만든다.
+
+(a) **add-first.** `setFactoryLabel`은 이제 새 라벨을 **먼저 붙이고** 그다음 옛 라벨을 뗀다 —
+두 번의 독립된 호출이다. 같은 사고의 최악이 "라벨 0개"에서 "라벨 2개"로 바뀐다. 0개는 아무도 못 보지만
+2개는 KTB-18의 라벨-셋 복구 팔이 이미 보고 있다. `setTierLabel`도 같은 이유로 add-first다.
+
+(b) **재시도 + REST 폴백.** 모든 라벨 변경(`addLabels`·`removeLabel`·`setFactoryLabel`·`setTierLabel`)은
+`gh issue edit`을 1s·3s·9s 간격으로 네 번(첫 시도 + 재시도 3회) 시도하고, 그래도 안 되면 REST
+엔드포인트(`gh api -X POST …/labels` · `gh api -X DELETE …/labels/{name}`)로 같은 변경을 한 번 더
+시도한다. 둘 다 실패해야 throw한다(원래 에러 그대로 — 사람이 보는 것은 원인이지 폴백의 증상이 아니다).
+폴백이 필요한 이유는 추측이 아니라 실측이다: 08:52~08:55Z 창에서 CLI는 계속 실패하고 REST는 성공했다.
+
+(c) **쓴 뒤 확인.** 스왑이 끝나면 라벨을 한 번 다시 읽어 목적 라벨이 실제로 붙어 있는지 본다. 없으면
+한 번 더 붙이고 그 사실을 전이 코멘트에 `label verify: repaired` 한 줄로 남긴다(조용히 고친 라벨은 다음
+사고의 원인을 지운다). 읽기 자체가 실패하면 스왑을 되돌리지 않는다 — "확인 못 함"이지 "실패"가 아니다.
+
+(d) **여덟 번째 sweeper 팔 — 상태 라벨 0개 복구**(`sweepMissingStateLabel`, quick+cron). 확률이 0이 아닌
+한 그것을 보는 눈이 하나는 있어야 한다. 열린 이슈 중 `factory:*` 라벨(tier·보조)은 있는데 상태 라벨이
+하나도 없는 것을 찾아, **최신 전이 코멘트의 `to`**로 되살린다(전이 이력이 없으면 `factory:needs-human` —
+짐작해서 파이프라인 중간에 떨어뜨리지 않는다). 마커는 `<!-- factory-label-set-repaired from=(none)
+to=<label> -->`이고 dedupe는 **10분 시간 창**이다(평생 한 번으로 묶으면 두 번째 사고에서 다시 보이지
+않는다 — 라벨은 매번 새로 사라질 수 있다). 전이가 아니라 `setFactoryLabel`을 직접 쓴다: `transition()`은
+출발 라벨을 요구하는데 그 출발 라벨이 바로 사라진 것이다. factory 라벨이 **하나도** 없는 이슈는
+`updatedAt`이 24시간 안인 것만 코멘트를 뒤진다(라벨이 사라진 순간 `updatedAt`이 갱신된다 — 이 경계가
+없으면 저장소의 모든 열린 이슈에 sweep마다 조회가 나가고, 그건 이 고침이 막으려는 바로 그 API 부하다).
+
+(e) **라벨-셋 복구가 기계의 잔해를 사람 손 편집과 구분한다**(KTB-18 확장). 상태 라벨이 정확히 2개이고
+그중 하나가 **최신 전이의 `to`**면, 그건 사람이 얹은 라벨이 아니라 add-first 스왑의 부분 실패다 —
+`needs-human`으로 접지 않고 그 라벨 하나로 이어 준다(마커에 `to=`가 실린다). 기록이 둘 중 어느 것도
+가리키지 않으면(§12.4의 skip-attempt 프로브가 만든 `backlog`+손 `approved`) 예전처럼 `needs-human`이다.
+
+(f) **`factory status`의 `[no-state-label]`.** 상태 라벨이 0개인 이슈는 라벨별 조회 어디에도 안 걸리므로
+열린 이슈 전체를 한 번 더 받아 Needs You에 `- [no-state-label] #N <title> — sweeper → label restore`로
+띄운다. sweeper가 대개 먼저 고치지만, 고치기 전의 그 순간에도 사람이 볼 창구는 있어야 한다.
+
+**함께(O20) — blocked에 원인 등급이 생겼다.** `factory-blocked-origin` 마커가 `cause=<api-error|timeout|
+cancelled|gates|undecidable|other>`를 싣는다(`abortStage`는 GitHub이 준 `job.status`에서 직접, 그 외에는
+사유 문구에서 되짚는다 — 옛 마커도 그대로 파싱된다). 두 가지가 달라진다: ① **사람이 취소한 blocked은
+재시도 예산(R)을 쓰지 않는다.** 취소는 이 이슈의 실패가 아니므로 dedupe 범위가 "평생 한 번"이 아니라
+"이 취소 사건마다 한 번"이다(마지막 origin 마커 이후에 재시도가 있었는가 — 상한은 3회). ② **에스컬레이션
+문구가 원인을 말한다**: `blocked (job cancelled) — needs human`, `blocked (job timed out) …`,
+`blocked (API quota/outage) …`, `blocked (gates undecided) …`, `blocked (undecidable) …`. 예전에는 무엇이
+죽였든 "환경/크리덴셜" 하나였고, 그 문장을 믿은 사람은 틀린 곳을 먼저 봤다.
+
+**알려진 한계**: 재시도는 라벨 변경 하나당 최대 13초를 잔다 — 라벨 스왑이 느려지는 것은 의도한 대가다
+(그 13초가 사라진 이슈 하나보다 싸다). 그리고 (d)의 24시간 창 밖에서 factory 라벨 없이 라벨을 잃은
+이슈는 여전히 보이지 않는다(그 경우 tier 라벨조차 없다는 뜻이라 triage 이전 이슈로 한정된다).
+
+**영향**: `factory/lib/gh.js`(`labelMutation`·`LABEL_RETRY_DELAYS_MS`·add-first `setFactoryLabel`/
+`setTierLabel`·verify), `factory/lib/transition.js`(`cause` 인자·`label verify` 줄),
+`factory/lib/retro/issue-comments.js`(`BLOCKED_CAUSES`·`blockedCause`·마커의 `cause=`),
+`factory/lib/sweeper.js`(`sweepMissingStateLabel`·라벨-셋 복구의 `to`·`BLOCKED_ESCALATION_REASON`·
+`CANCELLED_MAX_RETRIES`), `factory/bin/run-stage.js`(`ABORT_CAUSE`), `factory/lib/status.js`·
+`factory/cli/status.js`(`no-state-label`), 스펙 §3.2·§4.3. 테스트: `gh.test.js` 7건,
+`transition.test.js` 3건, `issue-comments.test.js` 3건, `sweeper.test.js` 8건, `status.test.js` 2건,
+`run-stage.test.js` 1건.
+
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21·23
 
@@ -1460,7 +1529,7 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 `issue-comments.test.js` 1건, `yml-lint.test.js`·`templates.test.js`·`hooks.test.js`·`context.test.js`·
 `workflows.test.js`·`labels.test.js` 각 1건. 스펙 §5.1, 데모 로그 #2·#15 행.
 
-### ⑥ 관찰 — O1~O12, O14·O15, G1
+### ⑥ 관찰 — O1~O12, O14·O15, O20·O23, G1
 
 결함으로 승격하지 않았지만 판결의 근거이거나 앞으로의 판결에 필요한 사실들. 전부 `docs/factory/dogfood/2026-09-12-demo.md`·`2026-09-12-ktb.md`·`task-6-prep-report.md`에서 실측됐다(출처 표기).
 
@@ -1479,6 +1548,9 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 - **O13** — 미배정(번호만 비워 둔다: 라운드 4에서 후보로 잡혔다가 별도 결함으로 승격되지 않았다).
 - **O14**(라운드 4, 데모) — **`:issue` 스킬이 그리는 이슈에서는 `docs` tier가 영영 도달 불가능했다.** `templates/know-thy-build/issue.md`는 이슈 종류를 가리지 않고 회귀 가드 `test_NNN_<slug>`를 하나 초안에 넣는다. README만 고치는 이슈 #18에서도 그랬고, 그 가드 때문에 diff에 테스트 파일이 들어가 triage는 CHARTER의 tier 표("`docs` = diff가 `docs/**`, `*.md`만")대로 `standard`로 판정했다. 문서 한 줄을 고치는 데 리뷰어 로스터 전체와 `full` 게이트가 붙는다 — tier 표에 `docs`가 있는데 `:issue` 경로로는 아무도 그것을 만들 수 없었다는 뜻이다. **판결**: Impact paths가 **전부** 문서 경로(`*.md`, `docs/**`)면 스킬은 가드 테스트 없이 `done_when`을 쓰고(사람이 읽어 확인하는 문장 + `<!-- docs-only: … -->` 마커), 사용자에게 "docs-only → 회귀 가드 없음, tier는 docs"라고 한 줄로 말한다. 문서 외 경로가 **한 줄이라도** 섞이면 예외는 적용되지 않는다. tier를 정하는 것은 여전히 triage다 — 스킬이 하는 일은 tier를 고르는 것이 아니라 **Impact paths가 무엇인지 정확히 말하는 것**이고, 가드 테스트는 그 사실을 조용히 왜곡하고 있었다. 결함이 아니라 스킬 템플릿의 판단 규칙 하나라서 KTB 번호를 받지 않았다(`skills-ops-a.test.js` 1건으로 고정).
 - **O15**(라운드 4, 데모) — 첫 전체 retro가 자동 생성한 `factory:harness` 이슈 #15("promote to M2")의 승격 PR #20에 **승격이 들어 있지 않았다**: builder가 `.factory/harness.toml`·컴포즈·e2e 설정을 하나도 쓸 수 없어 전부 사람에게 미뤄졌다. 전체 판결은 ⑤의 **KTB-20**이다.
+
+- **O20**(라운드 8, 데모) — **sweeper가 같은 스테이지를 네 번 다시 밀었다**(#15 review: 05:14·05:45·07:42·08:25). 재점화 dedupe가 시간 창이라 30분마다 다시 발화했고, 매번 ~$10짜리 리뷰가 뜰 수 있었다(하트비트 가드가 실제 중복 실행은 막았다). 상한 자체는 **KTB-28 (d)**(이슈+스테이지당 2회)로 이미 닫혔고, 이 관찰이 남긴 것은 그 옆의 사실이다: **잘린 런의 blocked은 "환경/크리덴셜"이 아니다.** #15를 죽인 것은 잡 취소·타임아웃이었는데 sweeper는 그것을 크리덴셜 문제와 같은 문장으로 사람에게 넘겼다 — 사람이 틀린 곳을 먼저 본다. 판결: `factory-blocked-origin` 마커가 **원인 등급**(`api-error|timeout|cancelled|gates|undecidable|other`)을 싣고, 취소 origin은 R 예산을 쓰지 않고 그 취소마다 한 번 다시 밀리며, 에스컬레이션 사유가 원인을 이름으로 말한다(ADR-020 KTB-30의 "함께(O20)" 항목에 구현이 실렸다).
+- **O23**(라운드 8, 데모, 2026-09-13 08:50~08:55Z) — **GitHub API 불안정 창.** 5분 사이에 세 종류가 겹쳤다: 라벨 뮤테이션 실패 2건(`GraphQL: Something went wrong while executing your query`, `EOF`), `gh issue edit --add-label`의 `failed to update 1 issue`, 그리고 `gh workflow run`의 HTTP 500. 같은 창에서 **REST 엔드포인트(`gh api`)는 정상이었다** — 관측자가 손으로 친 `gh api -X POST repos/…/issues/2/labels`가 성공했고, 그 라벨 변경이 `issues: labeled`를 제대로 쏴 implement가 떴다(dispatch가 500으로 실패한 뒤였는데도). 이 사실이 KTB-30의 폴백 설계를 정한다: 재시도만으로는 부족하고 **다른 경로**가 필요하다. GitHub의 이런 창은 "다시 걸면 되는" 것이 아니라 "이 API만 아픈" 것일 수 있다.
 
 #### O11 — 스테이지가 도는 동안 대상 저장소를 업그레이드하지 않는다
 

@@ -52,6 +52,17 @@ export function buildStatus({
   for (const i of issues) {
     if (labelOf(i) === NEEDS_INFO) needsYou.push({ kind: "needs-info", number: i.number, title: i.title, hint: `:clarify ${i.number}` });
   }
+  /**
+   * ADR-020 KTB-30 — factory 라벨은 달고 있는데 **상태 라벨이 하나도 없는** 열린 이슈. 라벨 스왑이
+   * 중간에 실패한 흔적이고(데모 #2 08:52Z·#15 08:55Z), 그 이슈는 상태별 조회 어디에도 안 걸려
+   * 이 화면에서 통째로 사라졌다 — 사람이 "아무 일도 안 일어나는 이슈"를 볼 창구가 필요하다.
+   * sweeper가 대개 먼저 되살리므로 힌트는 사람이 할 일이 아니라 그 사실을 가리킨다.
+   */
+  for (const i of issues) {
+    if (labelOf(i) !== null) continue;
+    if (!(i.labels || []).some((l) => String(l).startsWith("factory:"))) continue;
+    needsYou.push({ kind: "no-state-label", number: i.number, title: i.title, hint: "sweeper → label restore" });
+  }
   for (const p of prs.retroProposal || []) {
     needsYou.push({ kind: "retro-proposal", number: p.number, title: p.title, hint: `:proposal ${p.number}` });
   }

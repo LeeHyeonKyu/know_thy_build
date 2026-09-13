@@ -577,6 +577,14 @@ export const IN_FLIGHT_LABEL = { triage: "factory:queue", plan: "factory:ready",
 export const abortedLine = (status) => `aborted: ${status} (job timeout or cancel)`;
 
 /**
+ * ADR-020 O20 — **잡 상태 → blocked 원인 등급.** 이 스텝은 등급을 추측하지 않아도 된다: GitHub이
+ * 방금 `job.status`로 말해 줬다(`--aborted <status>`). 사람이 누른 취소(`cancelled`)와 시간 초과
+ * (`timed_out`)는 sweeper가 다르게 다뤄야 하고(전자는 R 예산을 쓰지 않는다), 에스컬레이션 문구도
+ * 달라진다. 표에 없는 상태(`failure` 등)는 사유 문구에서 되짚게 둔다(`transition.js`).
+ */
+export const ABORT_CAUSE = { cancelled: "cancelled", timed_out: "timeout" };
+
+/**
  * 취소·실패 정리 경로(`run-stage.js <stage> <issue> --aborted <job.status>`). **claude를 절대 띄우지
  * 않는다** — 여기서 하는 일은 셋뿐이다: `aborted:` 기록 한 줄, (해당하면) `factory:blocked` 전이,
  * 락 해제. 취소된 잡의 유예 시간은 짧으므로 조회도 최소다(라벨 한 번).
@@ -614,7 +622,7 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
       if (current === want) {
         // 사유는 사람이 읽는 한 줄이자 sweeper의 재료다 — `lib/transition.js`가 같은 코멘트에
         // `factory-blocked-origin from=<want> stage=<stage>` 마커를 함께 찍는다(KTB-15b I2).
-        const t = await d.transition({ to: "factory:blocked", reason: `job ${status} — retry via sweeper` });
+        const t = await d.transition({ to: "factory:blocked", reason: `job ${status} — retry via sweeper`, cause: ABORT_CAUSE[status] });
         lines.push(t.ok ? `aborted: ${want} → factory:blocked` : `transition refused: ${t.reason}`);
       } else if (current !== undefined) {
         lines.push(`aborted: label is ${current ?? "none"}, not ${want} — the stage had already moved on, no transition`);
@@ -878,7 +886,7 @@ async function main() {
       stage, issue, status: abortedStatus, runnerId,
       deps: {
         issueLabels: async () => (await gh.issue(issue)).labels,
-        transition: ({ to, reason }) => transition({ gh, issue, to, reason, stage }),
+        transition: ({ to, reason, cause }) => transition({ gh, issue, to, reason, cause, stage }),
         /** KTB-24 fix: 락을 지우기 전에 **누구 것인지** 묻는다 — 이 정리 스텝은 claim에 실패한 런에서도 돈다. */
         lockHolder: () => lockHolder({ run, cwd: root, issue }),
         release: () => release({ run, cwd: root, issue }),

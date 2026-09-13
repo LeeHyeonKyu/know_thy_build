@@ -68,13 +68,35 @@ test("a successful transition into factory:blocked leaves a factory-blocked-orig
   const gh = fakeGh(["factory:approved"]);
   const r = await transition({ gh, issue: 7, to: "factory:blocked", reason: "merge API failed", stage: "merge" });
   expect(r).toEqual({ ok: true, from: "factory:approved", to: "factory:blocked" });
-  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:approved stage=merge -->/);
+  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:approved stage=merge cause=other -->/);
 });
 
 test("the origin marker falls back to stage=unknown when the caller didn't pass one", async () => {
   const gh = fakeGh(["factory:in-progress"]);
   await transition({ gh, issue: 7, to: "factory:blocked", reason: "x" });
-  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:in-progress stage=unknown -->/);
+  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:in-progress stage=unknown cause=other -->/);
+});
+
+// ── ADR-020 O20 — blocked으로 가는 전이는 **원인 등급**을 마커에 싣는다 ─────────────────────────
+test("the origin marker derives the cause class from the reason when the caller passes none", async () => {
+  const gh = fakeGh(["factory:awaiting-review"]);
+  await transition({ gh, issue: 7, to: "factory:blocked", reason: "job cancelled — retry via sweeper", stage: "review" });
+  expect(gh.comment.mock.calls[0][1]).toMatch(/<!-- factory-blocked-origin from=factory:awaiting-review stage=review cause=cancelled -->/);
+});
+
+test("an explicit cause wins over the derived one (abortStage knows the job status first-hand)", async () => {
+  const gh = fakeGh(["factory:awaiting-review"]);
+  await transition({ gh, issue: 7, to: "factory:blocked", reason: "job failure — retry via sweeper", stage: "review", cause: "timeout" });
+  expect(gh.comment.mock.calls[0][1]).toMatch(/cause=timeout -->/);
+});
+
+// ── ADR-020 KTB-30 — 쓴 뒤 확인에서 되살린 라벨은 이슈 이력에 한 줄로 남는다 ─────────────────────
+test("a repaired label verify is recorded in the transition comment and in the result", async () => {
+  const gh = fakeGh(["factory:in-progress"]);
+  gh.setFactoryLabel = vi.fn(async () => ({ label: "factory:blocked", removed: ["factory:in-progress"], verify: "repaired" }));
+  const r = await transition({ gh, issue: 7, to: "factory:blocked", reason: "x", stage: "implement" });
+  expect(r).toEqual({ ok: true, from: "factory:in-progress", to: "factory:blocked", labelVerify: "repaired" });
+  expect(gh.comment.mock.calls[0][1]).toMatch(/label verify: repaired/);
 });
 
 test("a transition NOT into blocked never carries the origin marker", async () => {

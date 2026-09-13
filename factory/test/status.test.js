@@ -60,6 +60,25 @@ test("needsYou carries needs-human, needs-info, retro-proposal PR, harness PR wi
   ]);
 });
 
+// ── ADR-020 KTB-30 — 상태 라벨이 0개인 이슈는 Needs You에 뜬다 ─────────────────────────────────
+// 그 이슈는 어떤 상태 조회에도 걸리지 않으므로, 화면에서도 **없는 것처럼** 보였다. sweeper가 대개
+// 먼저 고치지만(같은 KTB-30), 고치기 전/고치지 못한 순간에 사람이 볼 창구가 있어야 한다.
+test("an open factory issue with no state label lands in Needs You as [no-state-label]", () => {
+  const args = baseArgs();
+  args.issues = [...args.issues, { number: 20, title: "label swap died", labels: ["factory:tier-standard"], updatedAt: NOW, closedAt: null }];
+  const s = buildStatus(args);
+  expect(s.needsYou).toContainEqual({ kind: "no-state-label", number: 20, title: "label swap died", hint: "sweeper → label restore" });
+  expect(s.inProgress.some((p) => p.number === 20)).toBe(false);
+  expect(s.queue.some((q) => q.number === 20)).toBe(false);
+  expect(renderStatus(s)).toContain("- [no-state-label] #20 label swap died — sweeper → label restore");
+});
+
+test("an issue with no factory label at all is not reported as no-state-label", () => {
+  const args = baseArgs();
+  args.issues = [...args.issues, { number: 21, title: "plain bug", labels: ["bug"], updatedAt: NOW, closedAt: null }];
+  expect(buildStatus(args).needsYou.some((n) => n.number === 21)).toBe(false);
+});
+
 test("inProgress marks a 35-minute-old heartbeat stale, a 5-minute-old one not", () => {
   const s = buildStatus(baseArgs());
   const byNumber = Object.fromEntries(s.inProgress.map((p) => [p.number, p]));
@@ -187,9 +206,13 @@ function io() {
 function fakeGh() {
   const throwing = (name) => vi.fn(async () => { throw new Error(`mutator called: ${name}`); });
   return {
-    issueList: vi.fn(async ({ labels }) => {
-      const label = labels[0];
-      return baseIssues().filter((i) => i.labels.includes(label));
+    // KTB-30: 라벨 없는 조회(`{state:"open"}`)는 열린 이슈 전체다 — 상태 라벨이 0개인 이슈를 찾는
+    // 유일한 길이다(라벨로는 조회할 수 없다).
+    issueList: vi.fn(async ({ labels, state }) => {
+      const open = [...baseIssues(), { number: 20, title: "label swap died", labels: ["factory:tier-standard"], updatedAt: NOW, closedAt: null }, { number: 21, title: "plain bug", labels: ["bug"], updatedAt: NOW, closedAt: null }]
+        .filter((i) => (state === "closed" ? i.labels.includes("factory:merged") : !i.labels.includes("factory:merged")));
+      if (!labels) return open;
+      return baseIssues().filter((i) => i.labels.includes(labels[0]));
     }),
     prList: vi.fn(async ({ label }) => {
       if (label === "factory:retro-proposal") return basePrs().retroProposal;
@@ -230,7 +253,7 @@ test("statusCommand --json exits 0, emits buildStatus JSON (incl. blocked issues
   expect(code).toBe(0);
   expect(o.out).toHaveLength(1);
   const parsed = JSON.parse(o.out[0]);
-  expect(parsed.needsYou.map((n) => n.kind)).toEqual(["needs-human", "needs-info", "retro-proposal", "harness"]);
+  expect(parsed.needsYou.map((n) => n.kind)).toEqual(["needs-human", "needs-info", "no-state-label", "retro-proposal", "harness"]);
   expect(parsed.backPressure.awaiting_review).toBe(2);
   expect(parsed.recent).toHaveLength(2);
   expect(parsed.usage).toBeTruthy();
@@ -239,6 +262,9 @@ test("statusCommand --json exits 0, emits buildStatus JSON (incl. blocked issues
   expect(blocked.hint).toBe("sweeper → needs-human");
   const six = parsed.inProgress.find((p) => p.number === 6);
   expect(six.stage).toBe("review");
+  // KTB-30: 상태 라벨이 0개인 #20은 어떤 라벨 조회에도 안 걸린다 — 열린 이슈 전체 조회가 그것을 줍는다
+  expect(parsed.needsYou).toContainEqual({ kind: "no-state-label", number: 20, title: "label swap died", hint: "sweeper → label restore" });
+  expect(parsed.needsYou.some((n) => n.number === 21)).toBe(false);
 
   for (const mutator of ["comment", "patchComment", "addLabels", "removeLabel", "setFactoryLabel", "createDraftPr", "createIssue", "closeIssue", "mergePr", "setStatus", "createLabel", "putBranchProtection", "setVariable"]) {
     expect(gh[mutator]).not.toHaveBeenCalled();

@@ -1988,12 +1988,23 @@ test("KTB-24: --aborted with the stage's in-flight label → blocked + lock rele
   const lines = [];
   const d = abortDeps({ runRecord: (l) => lines.push(...l) });
   expect(await abortStage({ stage: "review", issue: 15, status: "cancelled", deps: d })).toBe(0);
-  expect(d.transition).toHaveBeenCalledWith({ to: "factory:blocked", reason: "job cancelled — retry via sweeper" });
+  expect(d.transition).toHaveBeenCalledWith({ to: "factory:blocked", reason: "job cancelled — retry via sweeper", cause: "cancelled" });
   expect(d.release).toHaveBeenCalled();
   expect(lines).toContain("aborted: cancelled (job timeout or cancel)");
   expect(lines).toContain("aborted: factory:awaiting-review → factory:blocked");
   expect(lines).toContain("lock: released after abort");
   expect(d.syncRecords).toHaveBeenCalled();
+});
+
+// ── ADR-020 O20 — 정리 스텝은 원인 등급을 **직접** 안다(GitHub이 job.status로 말해 줬다) ─────────
+test("O20: the abort path passes a cause class taken from the job status", async () => {
+  const timedOut = abortDeps();
+  await abortStage({ stage: "review", issue: 15, status: "timed_out", deps: timedOut });
+  expect(timedOut.transition).toHaveBeenCalledWith(expect.objectContaining({ cause: "timeout" }));
+  // 표에 없는 상태는 등급을 세우지 않는다 — transition.js가 사유 문구에서 되짚는다
+  const failed = abortDeps();
+  await abortStage({ stage: "review", issue: 15, status: "failure", deps: failed });
+  expect(failed.transition).toHaveBeenCalledWith(expect.objectContaining({ cause: undefined }));
 });
 
 test("KTB-24: --aborted on a label the stage already left → record only, no transition", async () => {
