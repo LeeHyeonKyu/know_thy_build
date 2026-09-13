@@ -659,7 +659,7 @@ f12a174을 다시 읽은 리뷰가 두 구멍을 더 찾았다. 둘 다 "한 판
 
 fix round 2가 "알려진 한계"로 적어 둔 구멍을 닫는다. `.factory/lessons/**`는 `[protected].except`라 보호 목록에 들어가지 않고, 삭제된 경로에는 내용 규칙도 걸리지 않으므로(N2) lessons 파일을 지우거나 옮기는 diff는 **L0에서도 L1에서도 아무 신호를 만들지 않았다** — 누적된 교훈이 조용히 사라지는 경로다. 변조로 다루지는 않는다(역할을 은퇴시키며 지우는 것은 정상 작업이고, 그것을 RED로 만들면 KTB-5와 같은 오진이 된다): `factory/lib/integrity.js`의 `integrityCheck`가 additive-only 위반과 **같은 자리**인 `policy`에 `lessons file deleted or moved away — human merge required`를 싣고, `policyViolations`(L1)도 같은 판정을 내 merge 스테이지가 자동 머지를 거부한다. 두 함수가 갈리면 체크가 알리는 것과 머지가 막는 것이 달라지므로 판정 본체를 공유한다(`lessonsGone`). rename은 `--no-renames` 덕에 `D <old>`로 보여 출발지가 그대로 잡힌다.
 
-### ③ 산출물 추출 — KTB-7·16·17
+### ③ 산출물 추출 — KTB-7·16·17·27
 
 세 판결 모두 같은 질문의 다른 층이다 — "백그라운드로 도는 Workflow 툴의 반환값을 세션 트랜스크립트에서 어떻게 신뢰성 있게 뽑아내는가." KTB-7이 원인(디스패처가 산출물을 요약해 통째로 날림)을 처음 잡았고, KTB-16(턴 한도)·KTB-17(후보 소스가 접수증을 보고 있었음)이 KTB-7의 수정이 실전에서 또 깨진 지점을 이었다.
 
@@ -731,6 +731,12 @@ You will be notified when it completes.
 **영향**: `factory/lib/stage-artifact.js`(`taskNotificationsFromTranscript`·`fileReadsFromTranscript`·`toolResultTextsFromTranscript`·`isWorkflowReceipt`·`stripLineNumbers`·후보 순서), `factory/test/stage-artifact.test.js`, 픽스처.
 
 **리뷰 leftover(M4)**: `stripLineNumbers`/`fileReadsFromTranscript`의 줄 번호 접두 정규식 `^\d+\t`는 실제 `Read` 출력(`cat -n`처럼 오른쪽 정렬해 공백으로 채운 번호, 예: `"     9\t"`)의 앞 공백을 매치하지 못해 그 줄을 못 벗기고 그대로 흘려보냈다 — 여러 조각으로 온 큰 파일을 재조립할 때 조용히 깨질 수 있는 지점이다. `^\s*(\d+)\t`로 고쳤다. 영향: `factory/lib/stage-artifact.js`. 테스트: `stage-artifact.test.js`(패딩 섞인 다중 조각 재조립 픽스처).
+
+#### KTB-27 — `$1`/`$2`는 치환되지 않는다: 다섯 디스패처 모두 `$ARGUMENTS`로 되돌린다
+
+`claude -p "/argtest 42 true"`로 실측하니 `$ARGUMENTS`("42 true")는 치환됐지만 `$1`은 `true`로, `$2`는 리터럴 `$2`로 남았다 — KTB-23 r1이 `factory-implement.md`를 위치 인자(`$1`/`$2`)로 바꾼 전제 자체가 틀렸고, 그 상태로는 매 implement 스테이지가 깨진 args로 `Workflow`를 호출했을 것이다. 다섯 디스패처를 `$ARGUMENTS` 하나만 쓰는 형태로 되돌리되, implement는 그 문자열이 두 토큰(`"<issue> <harness_issue>"`)이므로 `{ raw: "$ARGUMENTS" }`로 넘기고 워크플로가 공백 split으로 파싱한다(`args.issue`/`args.harness_issue`는 하위 호환으로 유지); `run-stage.js`의 `stagePrompt()`는 이미 `/factory-implement <n> true|false` 한 줄을 내고 있어(그 전체가 `$ARGUMENTS`가 된다) 바뀌지 않는다.
+
+**영향**: `templates/factory/claude/commands/factory-implement.md`(+ 설치본 `.claude/commands/`), `templates/factory/claude/workflows/factory-implement.js`(+ 설치본 `.claude/workflows/`), `factory/bin/run-stage.js`(주석만 — 산출 프롬프트는 이미 옳았다). 테스트: `templates.test.js`(다섯 디스패처 md 모두 `$1`/`$2` 부재), `workflows.test.js`(`raw: "2 true"`→하네스 변형 프롬프트, `raw: "2"`→평시 규칙, `args.issue`/`args.harness_issue` 폴백).
 
 ### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26
 

@@ -763,6 +763,63 @@ test("factory-implement.js: a harness issue gets the variant rule 8 — make the
   expect(await promptFor("true")).toContain("THIS IS A `factory:harness` ISSUE");
 });
 
+// KTB-27 — Claude Code does not substitute positional `$1`/`$2` in a command md, only `$ARGUMENTS`
+// (verified live: `claude -p "/argtest 42 true"` filled `$ARGUMENTS` correctly but turned `$1` into
+// "true" and left `$2` as the literal text "$2"). The implement dispatcher now passes the whole
+// `$ARGUMENTS` string as `args.raw` ("<issue> <harness_issue>"), and the workflow splits it itself.
+test('factory-implement.js: args.raw "2 true" parses into issue 2 + the harness variant (KTB-27)', async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ issue: 2 });
+    if (opts.agentType === "factory-builder") return buildFix({ branch: "claude/fq-2" });
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub, args: { raw: "2 true", context: ".factory/out/context.json" },
+  });
+  expect(result.issue).toBe(2);
+  const prompt = byType(calls, "factory-builder")[0].prompt;
+  expect(prompt).toContain("Issue #2");
+  expect(prompt).toContain("THIS IS A `factory:harness` ISSUE");
+});
+
+test('factory-implement.js: args.raw "2" (no second token) parses into issue 2 + the normal rules (KTB-27)', async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix({ issue: 2 });
+    if (opts.agentType === "factory-builder") return buildFix({ branch: "claude/fq-2" });
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub, args: { raw: "2", context: ".factory/out/context.json" },
+  });
+  expect(result.issue).toBe(2);
+  const prompt = byType(calls, "factory-builder")[0].prompt;
+  expect(prompt).toContain("Protected paths — you must not edit `.factory/**`");
+  expect(prompt).not.toContain("THIS IS A `factory:harness` ISSUE");
+});
+
+test("factory-implement.js: args.issue/args.harness_issue still work with no raw at all (backward compat, KTB-27)", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return implLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub, args: { issue: 42, harness_issue: true, context: ".factory/out/context.json" },
+  });
+  expect(result.issue).toBe(42);
+  const prompt = byType(calls, "factory-builder")[0].prompt;
+  expect(prompt).toContain("THIS IS A `factory:harness` ISSUE");
+});
+
+test("factory-implement.js: no command md contains an unsubstituted positional $1/$2 (KTB-27)", () => {
+  const t = readFileSync(new URL("../../templates/factory/claude/commands/factory-implement.md", import.meta.url).pathname, "utf8");
+  expect(t).not.toMatch(/\$1\b/);
+  expect(t).not.toMatch(/\$2\b/);
+});
+
 test("factory-implement.js: no harness_needed means the field is absent from the handoff, never an empty array (KTB-23)", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return implLoaderFix();

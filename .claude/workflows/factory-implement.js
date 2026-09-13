@@ -149,7 +149,14 @@ const loaderPrompt =
 
 const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader', model: 'sonnet', schema: LOADER }))();
 
-const issue = Number(args.issue);
+// KTB-27: Claude Code does not substitute positional `$1`/`$2` in a command md — only `$ARGUMENTS`
+// is filled in, as one string (verified live: `claude -p "/argtest 42 true"` turned `$ARGUMENTS`
+// into "42 true" but `$1` into "true" and left `$2` as the literal text "$2"). The dispatcher
+// therefore passes the whole `$ARGUMENTS` string as `raw` — "<issue> <harness_issue>" — and this
+// workflow splits it. `args.issue`/`args.harness_issue` are kept as a fallback for any caller that
+// already passes the parsed fields directly (tests, or a caller that predates this raw form).
+const [rawIssueStr, rawHarnessStr] = String(args.raw ?? args.issue ?? '').trim().split(/\s+/);
+const issue = Number(rawIssueStr);
 
 // Fail-closed on a dead loader (same in all four workflows): without it we do not know the tier, the PR,
 // or — worst — whether this run is a rework with must_fix items outstanding, so the builder would treat a
@@ -252,9 +259,10 @@ const PROTECTED =
 // (KTB-20/KTB-23). The prompt was the one place that never got that judgement: it still listed
 // package.json/vitest.config/.factory as PROTECTED and rule 8 still said "fill harness_needed and STOP",
 // so the harness issue's own builder parked itself and the factory opened a harness issue for the
-// harness issue — a chain, with the parked feature waiting at the end of it. `args.harness_issue`
-// (the dispatcher's `$2`, from the same label read that picked the settings file) splits the two.
-const isHarnessIssue = args.harness_issue === true || args.harness_issue === 'true';
+// harness issue — a chain, with the parked feature waiting at the end of it. KTB-27: the flag now
+// arrives as the second token of `args.raw` (`rawHarnessStr`, from the same label read that picked
+// the settings file), with `args.harness_issue` kept as a fallback for the old, pre-KTB-27 shape.
+const isHarnessIssue = rawHarnessStr === 'true' || args.harness_issue === true || args.harness_issue === 'true';
 
 // What the variant actually opens — the same list as `.factory/ci-settings-harness.json` and the
 // FACTORY_HARNESS_ISSUE branch of `hooks/block-dangerous.sh`. `.factory/**` stays shut apart from

@@ -56,13 +56,16 @@ export const ciSettingsFile = (harnessIssue = false) => (harnessIssue ? CI_SETTI
  * `FACTORY_HARNESS_ISSUE`와 `--settings`가 **같은 판단**에서 나와야 둘이 갈라지지 않는다.
  */
 /**
- * 디스패처 슬래시 커맨드에 실리는 프롬프트 한 줄. implement만 **두 번째 위치 인자**를 받는다
- * (ADR-020 KTB-23 fix): `.claude/commands/factory-implement.md`가 그것을 `$2`로 읽어 워크플로 args의
- * `harness_issue`에 그대로 넣고, 워크플로가 builder 프롬프트의 PROTECTED 목록과 규칙 8을 그 값으로
- * 가른다. 훅(`FACTORY_HARNESS_ISSUE`)·L2(`--settings`)와 **같은 판단**에서 나와야 셋이 갈라지지 않는다:
- * 그때까지 프롬프트만 이 판단을 못 받아서, 하네스 이슈의 builder가 자기가 열려 있는 파일을 "보호
- * 경로"로 읽고 `harness_needed`를 채운 뒤 멈췄다 — 하네스 이슈가 또 하네스 이슈를 부르는 사슬이다.
- * 값은 항상 싣는다(`true`/`false`) — 빠진 `$2`는 JSON을 깨뜨린다.
+ * 디스패처 슬래시 커맨드에 실리는 프롬프트 한 줄. implement만 **두 번째 토큰**을 받는다
+ * (ADR-020 KTB-23 fix, KTB-27로 배선 수정): `.claude/commands/factory-implement.md`는 `$ARGUMENTS`
+ * 하나로 이 줄 전체("<issue> <harness_issue>")를 받아 `raw`로 워크플로에 넘기고, 워크플로가 공백으로
+ * split해 `harness_issue`를 얻어 builder 프롬프트의 PROTECTED 목록과 규칙 8을 그 값으로 가른다
+ * (KTB-27: Claude Code는 명령 md 안의 위치 인자 `$1`/`$2`를 치환하지 않는다 — `claude -p
+ * "/argtest 42 true"`로 실측 확인; `$ARGUMENTS`만 온전히 치환된다). 훅(`FACTORY_HARNESS_ISSUE`)·
+ * L2(`--settings`)와 **같은 판단**에서 나와야 셋이 갈라지지 않는다: 그때까지 프롬프트만 이 판단을 못
+ * 받아서, 하네스 이슈의 builder가 자기가 열려 있는 파일을 "보호 경로"로 읽고 `harness_needed`를 채운
+ * 뒤 멈췄다 — 하네스 이슈가 또 하네스 이슈를 부르는 사슬이다. 값은 항상 싣는다(`true`/`false`) —
+ * 빠진 두 번째 토큰은 워크플로 쪽에서 `false`로 떨어진다.
  */
 export const stagePrompt = ({ stage, issue, harnessIssue = false }) =>
   stage === "implement" ? `/factory-implement ${issue} ${harnessIssue ? "true" : "false"}` : `/factory-${stage} ${issue}`;

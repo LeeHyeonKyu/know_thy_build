@@ -5,13 +5,16 @@ allowed-tools: Workflow(factory-implement)
 You are a dispatcher. Do exactly one thing:
 
 Call the Workflow tool with name `factory-implement` and args
-`{ "issue": $1, "context": ".factory/out/context.json", "harness_issue": $2 }`.
+`{ "raw": "$ARGUMENTS", "context": ".factory/out/context.json" }`.
 
-`$1` is the issue number and `$2` is `true` or `false` — the runner always passes
-both (`/factory-implement 42 false`). `$2` says whether this is a `factory:harness`
-issue, whose builder is deliberately allowed to edit the test-infra and build files
-that are protected for every other issue. If `$2` is missing, use `false`; never
-invent any other value.
+Claude Code fills in `$ARGUMENTS` as one string; it does not substitute individual
+positional arguments in this file, so `raw` is the only way this dispatcher reads
+them. `$ARGUMENTS` is `<issue> <harness_issue>`: the issue number and `true` or `false`
+— the runner always passes both (`/factory-implement 42 false`). `harness_issue`
+says whether this is a `factory:harness` issue, whose builder is deliberately
+allowed to edit the test-infra and build files that are protected for every other
+issue. The workflow parses `raw` itself; if the second token is missing, it treats
+`harness_issue` as `false` — never invent any other value.
 
 Your final message MUST be the workflow's return value as raw JSON — complete and
 verbatim, the whole object, exactly as the tool returned it. Nothing else: no

@@ -230,19 +230,33 @@ test("dispatcher commands exist for the four LLM stages plus retro, and each nam
   expect(existsSync(join(T, "claude/commands/factory-merge.md"))).toBe(false);
 });
 
-// ADR-020 KTB-23 fix — implement의 디스패처만 **두 개의 위치 인자**를 읽는다: `$1` 이슈 번호,
-// `$2` 하네스 이슈 여부. run-stage가 라벨에서 읽은 그 판단이 프롬프트까지 닿는 유일한 경로다
-// (그 전까지는 훅과 L2만 알았고, builder는 자기가 열려 있는 파일을 보호 경로로 읽었다).
-test("the implement dispatcher reads the harness flag as $2 (KTB-23 fix)", () => {
+// ADR-020 KTB-27 fix — Claude Code does not substitute positional `$1`/`$2` in a command md, only
+// `$ARGUMENTS` (verified live: `claude -p "/argtest 42 true"` turned `$1` into "true" and left `$2`
+// as the literal text "$2"; `$ARGUMENTS` alone came through as "42 true"). KTB-23 r1's `$1`/`$2` form
+// would have malformed every implement Workflow call, so implement carries both tokens in one
+// `$ARGUMENTS` string (`raw`) and the workflow itself splits them — no dispatcher md ever contains
+// a bare `$1` or `$2`.
+test("the implement dispatcher passes $ARGUMENTS as raw — no $1/$2 (KTB-27 fix)", () => {
   const t = read("claude/commands/factory-implement.md");
-  expect(t).toContain('{ "issue": $1, "context": ".factory/out/context.json", "harness_issue": $2 }');
+  expect(t).toContain('{ "raw": "$ARGUMENTS", "context": ".factory/out/context.json" }');
   expect(t).toContain("`true` or `false`");
-  expect(t).not.toContain("$ARGUMENTS");
+  expect(t).not.toMatch(/\$1\b/);
+  expect(t).not.toMatch(/\$2\b/);
   // 나머지 세 디스패처는 한 글자도 바뀌지 않는다 — 인자가 하나뿐이다
   for (const s of ["triage", "plan", "review"]) {
     const o = read(`claude/commands/factory-${s}.md`);
     expect(o, s).toContain('{ "issue": $ARGUMENTS, "context": ".factory/out/context.json" }');
     expect(o, s).not.toContain("harness_issue");
+  }
+});
+
+// KTB-27: no command md anywhere in the template set may read a positional `$1`/`$2` — Claude Code
+// only substitutes `$ARGUMENTS`, so a bare `$1`/`$2` is always a bug, not a valid dispatcher shape.
+test("no command md contains an unsubstituted positional $1/$2 (KTB-27)", () => {
+  for (const s of ["triage", "plan", "implement", "review", "retro"]) {
+    const t = read(`claude/commands/factory-${s}.md`);
+    expect(t, s).not.toMatch(/\$1\b/);
+    expect(t, s).not.toMatch(/\$2\b/);
   }
 });
 
