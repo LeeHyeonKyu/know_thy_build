@@ -142,6 +142,20 @@ test("ci-settings.json deny covers the build-config files, matching [protected].
   for (const d of ["Bash(gh secret*)", "Read(.env)"]) expect(s.permissions.deny, d).toContain(d);
 });
 
+// ADR-020 최종 리뷰 SF-1 — 크리덴셜은 `.env`에만 있는 것이 아니다. CI 트리의 `.git/config`에는
+// `actions/checkout`이 심은 `AUTHORIZATION: basic <base64(x-access-token:<token>)>`가 **실제로**
+// 들어 있고(락 push 때문에 끌 수 없다), 그것을 읽은 에이전트의 출력은 트랜스크립트를 타고 아티팩트로
+// 나간다. 업로드 직전 스크럽이 마지막 방어라면, 이 deny는 **애초에 읽지 않게 하는** 첫 방어다.
+// 두 변형 모두에 있어야 한다 — 하네스 이슈의 에이전트라고 해서 토큰을 읽을 이유는 없다.
+test("both CI settings deny reading credential files — .git/config, .netrc, .npmrc (SF-1)", () => {
+  for (const f of ["factory/ci-settings.json", "factory/ci-settings-harness.json"]) {
+    const deny = new Set(JSON.parse(read(f)).permissions.deny);
+    for (const d of ["Read(.git/config)", "Read(.git/**)", "Read(**/.netrc)", "Read(**/.npmrc)"]) {
+      expect(deny.has(d), `${f} ${d}`).toBe(true);
+    }
+  }
+});
+
 // ── KTB-20: `factory:harness` 이슈 전용 변형 ─────────────────────────────────────────────────────
 // 도그푸딩 관측: retro가 만든 `harness: promote to M2` 이슈(#15)에서 builder는 `.factory/harness.toml`·
 // 컴포즈·e2e 설정을 **하나도** 건드릴 수 없었다 — ci-settings.json이 `Edit/Write(.factory/**)`를 막고

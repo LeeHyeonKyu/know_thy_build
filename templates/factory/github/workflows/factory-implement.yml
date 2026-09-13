@@ -76,6 +76,27 @@ jobs:
         run: |
           [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "factory: issue input is not a number: '$ISSUE'" >&2; exit 1; }
           node .factory/bin/run-stage.js implement "$ISSUE"
+      # ADR-020 최종 리뷰 SF-1 — **업로드 전에 크리덴셜을 지운다.** 바로 아래 업로드는 `.factory/out/`과
+      # `claude -p` 세션 트랜스크립트를 통째로 올리고, 공개 저장소에서 그 아티팩트는 **레포 read 권한자
+      # 누구나** 받는다. 그리고 이 체크아웃 트리에는 토큰이 **실제로** 있다: `actions/checkout`이 심는
+      # `.git/config`의 `AUTHORIZATION: basic <base64(x-access-token:<token>)>`이다. 그 헤더는 락
+      # push(`claim.js`)와 run 기록 push(`records-branch.js`)가 나가는 유일한 경로라
+      # `persist-credentials: false`로 끌 수 없다(ADR-020의 알려진 한계) — 그래서 **노출 쪽**을 닫는다:
+      # 여기서 한 번 훑고(모양 + 리터럴), 보관은 7일이다(`retention-days`).
+      # env의 네 값은 스크립트가 **리터럴로** 지우기 위한 것이고 어디에서도 echo 되지 않는다 —
+      # 스크립트가 찍는 것은 종류별 **개수**뿐이다(값을 로그에 적으면 스크럽이 유출 경로가 된다).
+      # `.factory/`를 이벤트 sha로 되돌리는 이유는 정리 스텝과 같다: implement는 에이전트 브랜치 위에,
+      # review·merge는 PR head로 detach된 트리 위에 있다 — 스크럽 코드만은 언제나 base의 것이어야 한다.
+      - name: Scrub credentials from the artifacts
+        if: always()
+        env:
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/scrub-artifacts.js docs/factory/runs .factory/out "${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"
       - name: Upload run outputs
         if: always()
         uses: actions/upload-artifact@v4
@@ -86,6 +107,9 @@ jobs:
             .factory/out/
             ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl
           include-hidden-files: true
+          # 기본값은 90일이다 — 이 아티팩트가 공개 저장소에서 석 달 동안 내려받힌다는 뜻이다(SF-1).
+          # 값은 `yml-lint`의 `artifact-retention`이 지킨다(명시 필수, 14일 이하).
+          retention-days: 7
           if-no-files-found: ignore
       # KTB-24 — 잡 타임아웃(위 `timeout-minutes`)과 취소는 `run-stage.js`의 `finally`를 **실행하지 않는다**:
       # 락 `refs/heads/factory/lock-<n>`이 고아로 남고, 전이도 코멘트도 run 기록도 없이 이슈가 진입 라벨에

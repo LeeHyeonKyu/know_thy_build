@@ -49,6 +49,28 @@ jobs:
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
         run: node .factory/bin/retro.js
+      # ADR-020 최종 리뷰 SF-1 — **업로드 전에 크리덴셜을 지운다.** 바로 아래 업로드는 `.factory/out/`과
+      # `claude -p` 세션 트랜스크립트를 통째로 올리고, 공개 저장소에서 그 아티팩트는 **레포 read 권한자
+      # 누구나** 받는다. 그리고 이 체크아웃 트리에는 토큰이 **실제로** 있다: `actions/checkout`이 심는
+      # `.git/config`의 `AUTHORIZATION: basic <base64(x-access-token:<token>)>`이다. 그 헤더는 락
+      # push(`claim.js`)와 run 기록 push(`records-branch.js`)가 나가는 유일한 경로라
+      # `persist-credentials: false`로 끌 수 없다(ADR-020의 알려진 한계) — 그래서 **노출 쪽**을 닫는다:
+      # 여기서 한 번 훑고(모양 + 리터럴), 보관은 7일이다(`retention-days`).
+      # env의 네 값은 스크립트가 **리터럴로** 지우기 위한 것이고 어디에서도 echo 되지 않는다 —
+      # 스크립트가 찍는 것은 종류별 **개수**뿐이다(값을 로그에 적으면 스크럽이 유출 경로가 된다).
+      # `.factory/`를 되돌리는 줄은 아래 `Sweep` 스텝의 그것과 **같은 줄**이다 — retro는 base 브랜치를
+      # 체크아웃하므로 대개 no-op이지만(실패해도 `|| true`), "팩토리 코드는 언제나 base의 것"이라는
+      # 모양을 워크플로마다 같게 둔다.
+      - name: Scrub credentials from the artifacts
+        if: always()
+        env:
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git checkout ${{ github.sha }} -- .factory || true
+          node .factory/bin/scrub-artifacts.js .factory/out "${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"
       - name: Upload retro outputs
         if: always()
         uses: actions/upload-artifact@v4
@@ -58,6 +80,9 @@ jobs:
             .factory/out/
             ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl
           include-hidden-files: true
+          # 기본값은 90일이다 — 이 아티팩트가 공개 저장소에서 석 달 동안 내려받힌다는 뜻이다(SF-1).
+          # 값은 `yml-lint`의 `artifact-retention`이 지킨다(명시 필수, 14일 이하).
+          retention-days: 7
           if-no-files-found: ignore
       # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
       # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —

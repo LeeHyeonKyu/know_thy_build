@@ -310,6 +310,14 @@ jobs:
           GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}     # merge 권한 없는 토큰
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
         run: .factory/bin/run-stage.js implement ${{ github.event.issue.number }}
+      - name: Scrub credentials from the artifacts    # ADR-020 최종 리뷰 SF-1 — 업로드 **직전**에 한 번
+        if: always()
+        env:                                           # 네 시크릿은 리터럴 치환용이다. 어디에서도 echo 하지 않는다
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .factory/bin/scrub-artifacts.js docs/factory/runs .factory/out "${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"
       - name: Upload run record
         if: always()
         uses: actions/upload-artifact@v4
@@ -317,7 +325,10 @@ jobs:
           name: run-${{ github.event.issue.number }}
           path: docs/factory/runs/
           include-hidden-files: true                     # ADR-009: 템플릿 기본값. dot-디렉토리를 올릴 때(.factory/out 등) 없으면 빈 아티팩트가 된다
+          retention-days: 7                              # ADR-020 SF-1: 기본은 90일이다. 린트 규칙 `artifact-retention`이 명시 값 ≤ 14를 강제한다
 ```
+
+**아티팩트는 업로드 직전에 스크럽되고 7일만 남는다(ADR-020 최종 리뷰 SF-1).** 업로드하는 여섯 워크플로는 바로 앞 스텝에서 `.factory/bin/scrub-artifacts.js`로 올라갈 경로(run 기록 · `.factory/out/` · 세션 트랜스크립트)의 모든 텍스트 파일에서 `AUTHORIZATION: basic …`/`Bearer …` 헤더 값 · `ghp_`·`github_pat_`·`sk-ant-` 모양 · 스텝 env로 받은 네 시크릿의 리터럴 값과 그 `x-access-token:` base64를 `[REDACTED:<kind>]`로 지우고(로그에는 종류별 개수만 남는다, 바이너리는 건드리지 않는다), 업로드는 `retention-days: 7`로 노출 창을 닫는다 — 공개 저장소에서 아티팩트는 레포 read 권한자 누구나 받는데 그 안에는 `actions/checkout`이 심은 `.git/config`의 봇 토큰 헤더가 닿을 수 있는 텍스트가 함께 올라간다(그 헤더 자체는 락 push가 나가는 유일한 경로라 끌 수 없다 — ADR-020의 알려진 한계).
 
 **같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작한다** — 락은 그때 이미 풀려 있어 claim이 막지 못하므로(claim은 *동시* 러너만 막는다), `run-stage.js`는 락을 잡은 직후 이슈의 현재 상태 라벨이 그 스테이지의 진입 라벨(`triage: factory:queue` · `plan: factory:ready` · `implement: factory:planned|factory:rework` · `review: factory:awaiting-review` · `merge: factory:approved`)인지 보고, 아니면 `claude -p`를 부르기 전에 아무 전이도 handoff도 없이 exit 0으로 물러난다(KTB-10 — 중복 실행에 대한 실질적 방어는 전이 그래프가 아니라 이 가드다. 전이 그래프는 이미 돈 뒤에야 거부한다).
 

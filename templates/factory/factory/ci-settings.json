@@ -3,6 +3,7 @@
     "deny": [
       "Bash(gh secret*)", "Bash(gh variable set*)", "Bash(gh api -X DELETE*)", "Bash(gh api --method DELETE*)",
       "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)",
+      "Read(.git/config)", "Read(.git/**)", "Read(**/.netrc)", "Read(**/.npmrc)",
 
       "Edit(.factory/**)", "Write(.factory/**)",
       "Edit(.claude/**)", "Write(.claude/**)",

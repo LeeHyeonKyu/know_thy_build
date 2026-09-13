@@ -9,12 +9,16 @@ test("flow mapping with ${{ }} is a violation; block mapping is not", () => {
   expect(lintWorkflow("if: contains(fromJSON('[\"a\"]'), github.event.label.name)\n")).toEqual([]);   // fromJSON의 {}는 문자열 안
 });
 
+// SF-1 이후 모든 upload-artifact 스텝은 `retention-days`를 **명시**해야 한다(아래 artifact-retention).
+// 그래서 이 파일의 스니펫들은 자기 규칙만 남기기 위해 그 줄을 함께 싣는다.
+const RETENTION = "      retention-days: 7\n";
+
 test("upload-artifact with a dot path needs include-hidden-files", () => {
-  const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      name: r\n      path: .factory/out/\n  - run: echo\n";
+  const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      name: r\n      path: .factory/out/\n" + RETENTION + "  - run: echo\n";
   expect(lintWorkflow(bad)).toEqual([expect.objectContaining({ rule: "hidden-artifact" })]);
   const ok = bad.replace("path: .factory/out/\n", "path: .factory/out/\n      include-hidden-files: true\n");
   expect(lintWorkflow(ok)).toEqual([]);
-  const multi = "  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        docs/x/\n        .factory/out/\n      include-hidden-files: true\n";
+  const multi = "  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        docs/x/\n        .factory/out/\n      include-hidden-files: true\n" + RETENTION;
   expect(lintWorkflow(multi)).toEqual([]);
   expect(lintWorkflow(multi.replace("      include-hidden-files: true\n", ""))).toHaveLength(1);
 });
@@ -23,35 +27,54 @@ test("upload-artifact with a dot path needs include-hidden-files", () => {
 // `~/.claude/...`는 0 파일을 올리고, `if-no-files-found: ignore`라 실패조차 하지 않는다 — 트랜스크립트가
 // 산출물 추출의 1순위 출처인데 아티팩트가 조용히 비어 있었다.
 test("a `~` path in an upload-artifact step is a violation; an env-resolved absolute path is not", () => {
-  const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n        ~/.claude/projects/**/*.jsonl\n      include-hidden-files: true\n";
+  const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n        ~/.claude/projects/**/*.jsonl\n      include-hidden-files: true\n" + RETENTION;
   expect(lintWorkflow(bad)).toEqual([expect.objectContaining({ rule: "tilde-path", line: 6 })]);
   expect(lintWorkflow(bad.replace("        ~/.claude/projects/**/*.jsonl\n", "        ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl\n"))).toEqual([]);
   // 단일 값 형태와 리스트 항목 형태 둘 다 잡는다
-  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ~/x/*.log\n      include-hidden-files: true\n")).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ~/x/*.log\n      include-hidden-files: true\n" + RETENTION)).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
   // upload-artifact 스텝 **밖**의 `~`는 건드리지 않는다(셸 run 줄에서는 진짜로 확장된다)
   expect(lintWorkflow('  - run: ls ~/.claude/projects\n')).toEqual([]);
   // 따옴표 하나로 비켜 갈 수 있으면 규칙이 아니다 — YAML이 따옴표를 떼고 나면 남는 건 같은 `~/x`다(KTB-10 M3)
-  expect(lintWorkflow('  - uses: actions/upload-artifact@v4\n    with:\n      path: "~/x"\n      include-hidden-files: true\n')).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
-  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        '~/.claude/**/*.jsonl'\n      include-hidden-files: true\n")).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
+  expect(lintWorkflow('  - uses: actions/upload-artifact@v4\n    with:\n      path: "~/x"\n      include-hidden-files: true\n' + RETENTION)).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        '~/.claude/**/*.jsonl'\n      include-hidden-files: true\n" + RETENTION)).toEqual([expect.objectContaining({ rule: "tilde-path" })]);
 });
 
 // KTB-10 I1: `${{ env.X }}`로 시작하는 경로는 그 env를 세우는 스텝이 실패하면 `/**/*.jsonl` — 곧
 // 러너 **루트**에 앵커된 glob — 으로 접힌다. 업로드 스텝은 `if: always()`라 그때도 돌고,
 // `if-no-files-found: ignore`라 아무 소리도 내지 않는다. 폴백이 없으면 그 사고는 보이지 않는다.
 test("an artifact path starting with ${{ env.… }} needs a `||` fallback", () => {
-  const step = (p) => `  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n${p}      include-hidden-files: true\n`;
+  const step = (p) => `  - uses: actions/upload-artifact@v4\n    with:\n      path: |\n        .factory/out/\n${p}      include-hidden-files: true\n${RETENTION}`;
   expect(lintWorkflow(step("        ${{ env.CLAUDE_TRANSCRIPTS }}/**/*.jsonl\n")))
     .toEqual([expect.objectContaining({ rule: "env-path-no-fallback", line: 5 })]);
   expect(lintWorkflow(step("        ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl\n"))).toEqual([]);
   // 단일 값 형태와 따옴표 형태도 같다
-  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ${{ env.X }}/out\n"))
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: ${{ env.X }}/out\n" + RETENTION))
     .toEqual([expect.objectContaining({ rule: "env-path-no-fallback" })]);
-  expect(lintWorkflow('  - uses: actions/upload-artifact@v4\n    with:\n      path: "${{ env.X }}/out"\n'))
+  expect(lintWorkflow('  - uses: actions/upload-artifact@v4\n    with:\n      path: "${{ env.X }}/out"\n' + RETENTION))
     .toEqual([expect.objectContaining({ rule: "env-path-no-fallback" })]);
   // env로 **시작하지 않는** 경로는 접혀도 워크스페이스 안에 남는다 — 규칙 밖이다
-  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: out/${{ env.X }}/*.log\n")).toEqual([]);
+  expect(lintWorkflow("  - uses: actions/upload-artifact@v4\n    with:\n      path: out/${{ env.X }}/*.log\n" + RETENTION)).toEqual([]);
   // upload-artifact 스텝 밖의 env 표현식은 건드리지 않는다
   expect(lintWorkflow("  - run: echo ${{ env.X }}\n")).toEqual([]);
+});
+
+// ADR-020 최종 리뷰 SF-1: 아티팩트에는 크리덴셜이 닿은 텍스트가 들어갈 수 있고(트랜스크립트 ·
+// `.git/config`를 읽은 어떤 출력이든), 공개 저장소에서 그 아티팩트는 **레포 read 권한자 누구나**
+// 받는다. `retention-days`를 적지 않으면 기본이 90일이다 — 노출이 석 달 간다는 뜻이고, 그 사실은
+// 파일 어디에도 쓰여 있지 않다. 값이 **명시적으로** 있어야 하고 14일을 넘지 않아야 한다.
+test("every upload-artifact step needs an explicit retention-days ≤ 14 (artifact-retention)", () => {
+  const step = (extra) => `steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      name: r\n      path: out/\n${extra}`;
+  expect(lintWorkflow(step(""))).toEqual([expect.objectContaining({ rule: "artifact-retention", line: 2 })]);
+  expect(lintWorkflow(step("      retention-days: 90\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
+  expect(lintWorkflow(step("      retention-days: 0\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
+  expect(lintWorkflow(step("      retention-days: 7\n"))).toEqual([]);
+  expect(lintWorkflow(step("      retention-days: 14\n"))).toEqual([]);
+  // 표현식은 린트가 값을 읽을 수 없다 — 읽을 수 없는 값은 통과시키지 않는다(`vars.X`가 비면 90일이다)
+  expect(lintWorkflow(step("      retention-days: ${{ vars.R }}\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
+  // 규칙을 설명하는 **주석**은 규칙을 만족시키지 않는다 — 자기 설명문을 읽는 린트는 린트가 아니다
+  expect(lintWorkflow(step("      # retention-days: 7\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
+  // upload-artifact 스텝이 아닌 곳은 건드리지 않는다
+  expect(lintWorkflow("steps:\n  - uses: actions/download-artifact@v4\n    with:\n      name: r\n")).toEqual([]);
 });
 
 // KTB-15b I1: merge-stage's own draft→ready flip (KTB-15, `gh pr ready`) fires `ready_for_review` —
@@ -264,6 +287,38 @@ test("yml-lint pins FACTORY_RUNNER_ID to the same expression in both steps (M5)"
   expect(both[0].msg).not.toMatch(/DIFFERENT/);
   const noValue = lintWorkflow(missing).find((f) => f.rule === "runner-id-consistent");
   expect(noValue.msg).toMatch(/own `env:` block/);
+});
+
+// ADR-020 최종 리뷰 SF-1 — 업로드하는 모든 템플릿은 ① 업로드 **직전에** 스크럽 스텝을 돌리고,
+// ② 보관을 7일로 적는다. `if: always()`인 이유는 업로드 스텝과 같다: 사후 조사가 가장 필요한 런은
+// **실패한 런**이고, 크리덴셜은 그 런의 아티팩트에도 똑같이 들어 있다.
+test("every uploading template scrubs credentials immediately before the upload, and keeps artifacts 7 days (SF-1)", () => {
+  const uploading = [...Object.keys(STAGE), "factory-retro.yml"];
+  for (const f of uploading) {
+    const y = readFileSync(join(W, f), "utf8");
+    const scrub = y.indexOf("      - name: Scrub credentials from the artifacts\n");
+    const upload = y.indexOf("      - name: Upload ");
+    expect(scrub, f).toBeGreaterThan(-1);
+    expect(scrub, f).toBeLessThan(upload);                       // 업로드 **뒤**의 스크럽은 아무것도 지키지 않는다
+    expect(y.slice(scrub, upload), f).toMatch(/\n {8}if: always\(\)\n/);
+    // 네 시크릿은 **이 스텝의 env로만** 들어온다 — 값이 인자나 `echo`에 실리면 런 로그에 그대로 남는다
+    for (const n of ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]) {
+      expect(y.slice(scrub, upload), `${f} ${n}`).toContain(`          ${n}: \${{ secrets.${n} }}\n`);
+    }
+    expect(y.slice(scrub, upload), f).toContain("node .factory/bin/scrub-artifacts.js ");
+    expect(y.slice(scrub, upload), f).not.toContain("echo $");
+    // 스크럽이 훑는 경로는 업로드가 올리는 경로를 덮어야 한다(트랜스크립트는 merge에만 없다)
+    expect(y.slice(scrub, upload), f).toContain(".factory/out");
+    if (f !== "factory-merge.yml") expect(y.slice(scrub, upload), f).toContain('"${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"');
+    if (f !== "factory-retro.yml") expect(y.slice(scrub, upload), f).toContain("docs/factory/runs");
+    expect(y, f).toContain("          retention-days: 7\n");
+  }
+  // 업로드가 없는 두 템플릿은 스크럽할 것도 없다 — 규칙이 자기 자리를 넘지 않는지 함께 못 박는다.
+  for (const f of ["factory-sweeper.yml", "factory-integrity.yml"]) {
+    const y = readFileSync(join(W, f), "utf8");
+    expect(y, f).not.toContain("upload-artifact");
+    expect(y, f).not.toContain("scrub-artifacts");
+  }
 });
 
 test("sweeper and integrity workflows", () => {

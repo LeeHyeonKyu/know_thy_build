@@ -1,3 +1,10 @@
+/**
+ * 아티팩트 보관 상한(ADR-020 최종 리뷰 SF-1). 템플릿은 7일을 쓰고, 규칙은 14일까지 받는다 —
+ * 사후 조사에 필요한 창(사람이 다음 근무일에 들여다보는 시간)은 남기되, 90일 기본값으로는
+ * 되돌아갈 수 없게 한다.
+ */
+const RETENTION_MAX_DAYS = 14;
+
 /** ADR-009 규칙을 텍스트 수준에서 검사한다. YAML 파서 없이 — 의존성 추가 금지. */
 export function lintWorkflow(text) {
   const out = [];
@@ -28,6 +35,19 @@ export function lintWorkflow(text) {
     const hidden = block.some((b) => /(^|\s|\|)\.[\w-]+\//.test(b.replace(/#.*/, "")) && !/include-hidden-files/.test(b));
     const has = block.some((b) => /include-hidden-files:\s*true/.test(b));
     if (hidden && !has) out.push({ line: i + 1, rule: "hidden-artifact", msg: "upload-artifact with a dot-directory path needs include-hidden-files: true" });
+    // 2b) ADR-020 최종 리뷰 SF-1 — **보관 기간은 명시적이어야 하고 짧아야 한다.** 이 업로드에는
+    // `claude -p` 트랜스크립트와 `.factory/out/`이 통째로 들어가고, 그 트리에는 `actions/checkout`이
+    // 심은 `.git/config`의 basic-auth 헤더가 함께 있다(`persist-credentials`는 락 push 때문에 끌 수
+    // 없다 — ADR-020의 알려진 한계). 공개 저장소에서 아티팩트는 **레포 read 권한자 누구나** 받는다.
+    // `retention-days`가 없으면 기본은 **90일**이고, 그 숫자는 파일 어디에도 쓰여 있지 않아 아무도
+    // 그것을 결정으로 읽지 않는다. 업로드 직전의 스크럽(`scrub-artifacts.js`)이 1차 방어라면 이 값은
+    // 2차다: 스크럽이 놓친 모양이 있어도 노출 창이 7일로 닫힌다. 값을 **읽을 수 없으면**(표현식)
+    // 통과시키지 않는다 — `${{ vars.X }}`가 비어 있으면 조용히 90일로 돌아간다.
+    const retentionLine = block.map((b) => /^\s*retention-days:\s*(.+?)\s*$/.exec(b.replace(/^([^#]*?)\s+#.*$/, "$1"))).find(Boolean);
+    const days = retentionLine ? Number(retentionLine[1]) : null;
+    if (days == null || !Number.isInteger(days) || days < 1 || days > RETENTION_MAX_DAYS) {
+      out.push({ line: i + 1, rule: "artifact-retention", msg: `every actions/upload-artifact step needs an explicit \`retention-days:\` of 1–${RETENTION_MAX_DAYS} (the factory templates use 7) — the default is 90 days, and these artifacts carry the session transcript and the checkout tree whose \`.git/config\` holds the bot token's basic-auth header, downloadable by anyone with repo read (ADR-020 final review SF-1)` });
+    }
     // 3) `~`는 **셸 확장**이지 glob이 아니다. upload-artifact는 경로를 셸에 넘기지 않고 그대로 glob으로
     // 쓰므로 `~/.claude/projects/**/*.jsonl`은 아무것도 맞히지 못한다 — `if-no-files-found: ignore`까지
     // 붙어 있으면 **실패조차 하지 않고** 빈 아티팩트가 올라간다(KTB-7 재리뷰: 트랜스크립트가 산출물
