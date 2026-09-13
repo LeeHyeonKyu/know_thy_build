@@ -738,7 +738,7 @@ You will be notified when it completes.
 
 **영향**: `templates/factory/claude/commands/factory-implement.md`(+ 설치본 `.claude/commands/`), `templates/factory/claude/workflows/factory-implement.js`(+ 설치본 `.claude/workflows/`), `factory/bin/run-stage.js`(주석만 — 산출 프롬프트는 이미 옳았다). 테스트: `templates.test.js`(다섯 디스패처 md 모두 `$1`/`$2` 부재), `workflows.test.js`(`raw: "2 true"`→하네스 변형 프롬프트, `raw: "2"`→평시 규칙, `args.issue`/`args.harness_issue` 폴백).
 
-### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29·30·31
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29·30·31 (+32 이월)
 
 한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
@@ -1255,6 +1255,7 @@ cancelled|gates|undecidable|other>`를 싣는다(`abortStage`는 GitHub이 준 `
 조용히 성립하지 않는다. 기록 줄("this run cannot prove it owned the stage")도 정상 종료 뒤 잡이
 실패한 흔한 경우에는 이상 신호처럼 읽힌다. 둘 다 코드가 아니라 **한계로 적어 둔다**: 고치려면
 "우리가 락을 잡았었다"는 사실을 프로세스 밖에 남겨야 하는데, 그 기록 자체가 또 하나의 실패 지점이다.
+그리고 **(r2 리뷰가 남긴 한계)**: 락 소유자 판정의 `unknown` 상태에는 `stale`과 달리 재시도 유예가 없다(30분 재공지 dedupe뿐) — 하트비트와 `gh run view`는 같은 GitHub API·토큰을 쓰므로, 넓은 장애 창에서는 멀쩡한 런의 두 신호가 함께 침묵해 임계 뒤 `needs-human`으로 올라갈 수 있다. 조용히 얼어붙는 것보다 시끄러운 쪽을 택한 판결(MF1)의 대가이며, 그 창이 지나면 사람이 재큐한다.
 
 **영향**: `factory/lib/gh.js`(`labelMutation`·`LABEL_RETRY_DELAYS_MS`·add-first `setFactoryLabel`/
 `setTierLabel`·verify), `factory/lib/transition.js`(`cause` 인자·`label verify` 줄),
@@ -1295,6 +1296,22 @@ implement 런 34748735031은 GitHub에서 **잡 없이 `queued`인 채로** 굳�
 **영향**: `factory/lib/sweeper.js`(`STALLED_STAGE`·`STALL_NO_HEARTBEAT_MIN`·하트비트 창),
 스펙 §4.3-5. 테스트: `sweeper.test.js` 3건(rework 재점화 cron+quick, 하트비트 없음 → 10분,
 하트비트 있음 → 30분 그대로).
+
+#### KTB-32 — `needs-human`에서 나가는 길이 `queue`뿐이라, 완성된 PR도 plan부터 다시 돈다 (설계 공백, 1.1 이월)
+
+라운드 10(2026-09-13 10:22~10:38Z)에서 러너의 구독 토큰이 세션 한도(429)에 걸려 #2·#15·#18의 스테이지가
+한꺼번에 죽었다. KTB-22의 경로대로 `blocked`이 됐지만 R 예산은 앞선 인프라 장애로 이미 소진돼 있어
+곧장 `needs-human`으로 올라갔다 — 여기까지는 판결대로다. 문제는 그다음이다: #2는 **implement가 끝나
+PR #17(+1239/−11, 실제 pg 통합 테스트)이 온전한 채** review에서 죽었는데, `factory:needs-human`의
+유일한 출구가 `→ factory:queue`(§3.2)라 사람이 할 수 있는 결정은 "plan부터 다시"뿐이었다. 그 재실행은
+이슈당 plan+implement ≈ $40이고, 잃은 것은 코드가 아니라 라벨 한 칸이었다.
+
+**판결(1.1 이월 — 이번 dogfood에서는 고치지 않는다)**: `unstick` 스킬에 `retry` 결정을 추가하고,
+`factory:needs-human → <blocked-origin 상태>` 엣지를 **사람 전용**(`by=human`)으로, 그리고 이슈에
+`factory-blocked-origin` 마커가 있을 때만 연다. 원점이 `awaiting-review`면 review부터, `planned`/`rework`면
+implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이 엣지도 `transition.js`를 지나며, 전이
+코멘트와 origin 마커가 근거가 된다. 지금 고치지 않는 이유는 비용 규칙(수정 라운드 r2로 종료)이고,
+그 대가는 이번 라운드에서 #2·#15를 plan부터 다시 돌린 비용이다(#18은 보류).
 
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21·23
@@ -1575,7 +1592,7 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 `issue-comments.test.js` 1건, `yml-lint.test.js`·`templates.test.js`·`hooks.test.js`·`context.test.js`·
 `workflows.test.js`·`labels.test.js` 각 1건. 스펙 §5.1, 데모 로그 #2·#15 행.
 
-### ⑥ 관찰 — O1~O12, O14·O15, O20·O23, G1
+### ⑥ 관찰 — O1~O12, O14·O15, O20·O23·O24, G1
 
 결함으로 승격하지 않았지만 판결의 근거이거나 앞으로의 판결에 필요한 사실들. 전부 `docs/factory/dogfood/2026-09-12-demo.md`·`2026-09-12-ktb.md`·`task-6-prep-report.md`에서 실측됐다(출처 표기).
 
@@ -1597,6 +1614,7 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 
 - **O20**(라운드 8, 데모) — **sweeper가 같은 스테이지를 네 번 다시 밀었다**(#15 review: 05:14·05:45·07:42·08:25). 재점화 dedupe가 시간 창이라 30분마다 다시 발화했고, 매번 ~$10짜리 리뷰가 뜰 수 있었다(하트비트 가드가 실제 중복 실행은 막았다). 상한 자체는 **KTB-28 (d)**(이슈+스테이지당 2회)로 이미 닫혔고, 이 관찰이 남긴 것은 그 옆의 사실이다: **잘린 런의 blocked은 "환경/크리덴셜"이 아니다.** #15를 죽인 것은 잡 취소·타임아웃이었는데 sweeper는 그것을 크리덴셜 문제와 같은 문장으로 사람에게 넘겼다 — 사람이 틀린 곳을 먼저 본다. 판결: `factory-blocked-origin` 마커가 **원인 등급**(`api-error|timeout|cancelled|gates|undecidable|other`)을 싣고, 취소 origin은 R 예산을 쓰지 않고 그 취소마다 한 번 다시 밀리며, 에스컬레이션 사유가 원인을 이름으로 말한다(ADR-020 KTB-30의 "함께(O20)" 항목에 구현이 실렸다).
 - **O23**(라운드 8, 데모, 2026-09-13 08:50~08:55Z) — **GitHub API 불안정 창.** 5분 사이에 세 종류가 겹쳤다: 라벨 뮤테이션 실패 2건(`GraphQL: Something went wrong while executing your query`, `EOF`), `gh issue edit --add-label`의 `failed to update 1 issue`, 그리고 `gh workflow run`의 HTTP 500. 같은 창에서 **REST 엔드포인트(`gh api`)는 정상이었다** — 관측자가 손으로 친 `gh api -X POST repos/…/issues/2/labels`가 성공했고, 그 라벨 변경이 `issues: labeled`를 제대로 쏴 implement가 떴다(dispatch가 500으로 실패한 뒤였는데도). 이 사실이 KTB-30의 폴백 설계를 정한다: 재시도만으로는 부족하고 **다른 경로**가 필요하다. GitHub의 이런 창은 "다시 걸면 되는" 것이 아니라 "이 API만 아픈" 것일 수 있다.
+- **O24**(라운드 9, 데모, 2026-09-13 09:06Z) — **sweeper cron은 믿을 수 없다.** `factory-sweeper.yml`의 schedule 런이 05:13Z 이후 4시간 동안 한 번도 뜨지 않았고, 그 전 간격도 2~5시간이었다(GitHub은 활동이 적은 저장소의 cron을 임의로 늦춘다). KTB-26의 "스테이지 뒤 quick sweep"이 실질 안전망이지만, 같은 창에서 세 이슈의 런이 전부 GitHub 큐에 멈춰 있으면(좀비 큐, KTB-31의 발단) 어떤 스테이지도 끝나지 않으니 아무것도 쓸지 않는다. 판결: 스펙에 "cron은 최후 수단"으로 적고, 사람 도구로 `gh workflow run factory-sweeper.yml`을 `unstick`/`status` 문서에 안내한다(1.1). 같은 라운드의 비용 스냅샷: 누계 $398.48 / 166 runs(list-price 환산).
 
 #### O11 — 스테이지가 도는 동안 대상 저장소를 업그레이드하지 않는다
 
