@@ -15,7 +15,10 @@ concurrency:
 jobs:
   sweep:
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 5
+    # ADR-020 r2 SF5 — 5분은 라벨 변경이 `gh` 한 번이던 시절의 예산이다. KTB-30 이후 한 번의 스왑은
+    # 최대 ~39초를 잘 수 있고(1s·3s·9s 재시도 ×2 + verify + REST 폴백), 이 잡은 여덟 팔에서 라벨을
+    # 만진다 — 넓은 API 장애, 곧 복구 팔이 가장 할 일이 많은 상황에서 잡이 SIGKILL됐다.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:

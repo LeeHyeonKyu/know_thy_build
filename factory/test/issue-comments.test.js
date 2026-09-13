@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
+import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, transitionFailedMarker } from "../lib/retro/issue-comments.js";
 import { renderHandoff } from "../lib/handoff.js";
 
 // ── KTB-15b I2: factory-blocked-origin marker parsing ──────────────────────────────────────────
@@ -116,4 +116,30 @@ test("SF2: rework rounds count completed `to=factory:rework` transitions since t
   expect(rounds([to("factory:rework", 1), requeue, to("factory:rework", 3)])).toBe(1);
   // approve로 끝난 라운드는 rework이 아니다
   expect(rounds([to("factory:approved", 1)])).toBe(0);
+});
+
+/**
+ * ADR-020 r2 (리뷰 (c)) — SF2의 전제에 남아 있던 마지막 창. 전이 코멘트가 라벨 스왑보다 **먼저**
+ * 나가게 된 뒤로(KTB-30 r1), 스왑이 4번의 CLI 시도 + REST까지 전부 실패하면 "일어나지 않은 rework"의
+ * 코멘트가 이슈에 남는다 — K=3에서 그런 장애 두 번이면 멀쩡한 이슈가 라운드를 다 쓴다.
+ */
+test("(c): a rework transition cancelled by a following transition-failed marker does not burn a round", () => {
+  const to = (state, n) => ({ id: n, body: `<!-- factory-transition:v1 from=factory:awaiting-review to=${state} by=script -->\nawaiting-review → ${state}`, createdAt: `t${n}` });
+  const failed = (state, n) => ({ id: n, body: `${transitionFailedMarker({ from: "factory:awaiting-review", to: state })}\n**라벨 스왑 실패**`, createdAt: `t${n}` });
+  const rounds = (comments) => countTransitionsTo(commentsSinceRequeue(comments), "factory:rework");
+
+  expect(rounds([to("factory:rework", 1), failed("factory:rework", 2)])).toBe(0);
+  // 다른 목적지의 실패는 rework 예산을 건드리지 않는다
+  expect(rounds([to("factory:rework", 1), failed("factory:approved", 2)])).toBe(1);
+  // 진짜 라운드 하나 + 장애 하나 = 라운드 하나
+  expect(rounds([to("factory:rework", 1), to("factory:rework", 2), failed("factory:rework", 3)])).toBe(1);
+  // 실패 마커는 그 자체로 전이가 아니다(다음 전이를 앞당겨 지우지 않는다)
+  expect(rounds([failed("factory:rework", 1), to("factory:rework", 2)])).toBe(1);
+});
+
+// r2 SF3 — 요구사항 미달 거부가 `factory-transition:v1 … reason=refused` 마커를 달아도 needs-human
+// 수확은 그대로 한 건이고, 사유는 여전히 "**전이 거부** …: " 뒤의 문장이다.
+test("SF3: a refusal carrying the transition marker is harvested once, with its refusal reason", () => {
+  const body = "<!-- factory-transition:v1 from=factory:ready to=factory:needs-human by=script reason=refused -->\n<!-- factory-transition-refused from=factory:ready to=factory:planned -->\n**전이 거부** factory:ready → factory:planned: plan handoff missing\n\n라벨을 `factory:needs-human`으로 옮겼습니다. 산출물을 보강한 뒤 `:unstick`으로 재개하세요.";
+  expect(extractNeedsHuman(7, [{ body, createdAt: "t1" }])).toEqual([{ issue: 7, reason: "plan handoff missing", at: "t1" }]);
 });

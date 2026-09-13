@@ -227,7 +227,10 @@ test("yml-lint pins FACTORY_RUNNER_ID to the same expression in both steps (M5)"
 
 test("sweeper and integrity workflows", () => {
   const s = readFileSync(join(W, "factory-sweeper.yml"), "utf8");
-  expect(s).toContain("cron: '*/30 * * * *'"); expect(s).toContain("workflow_dispatch:"); expect(s).toContain("run: node .factory/bin/sweep.js"); expect(s).toContain("timeout-minutes: 5");
+  expect(s).toContain("cron: '*/30 * * * *'"); expect(s).toContain("workflow_dispatch:"); expect(s).toContain("run: node .factory/bin/sweep.js");
+  // r2 SF5 — 5분은 라벨 변경이 `gh` 한 번이던 시절의 예산이다. KTB-30의 재시도(스왑당 최대 ~39초)와
+  // 여덟 팔의 라벨 뮤테이션을 합치면, 넓은 API 장애에서 복구 팔에 닿기 전에 잡이 잘렸다.
+  expect(s).toContain("timeout-minutes: 15");
   const i = readFileSync(join(W, "factory-integrity.yml"), "utf8");
   expect(i).toContain("name: factory/integrity"); expect(i).toContain("pull_request:"); expect(i).toContain("run: node .factory/bin/integrity.js"); expect(i).toContain("timeout-minutes: 5");
 });

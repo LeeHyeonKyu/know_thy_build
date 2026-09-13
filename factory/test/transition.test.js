@@ -1,6 +1,7 @@
 import { test, expect, vi } from "vitest";
 import { transition } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
+import { lastTransition, extractNeedsHuman } from "../lib/retro/issue-comments.js";
 
 function fakeGh(labels, comments = []) {
   return { issue: vi.fn(async () => ({ number: 7, title: "t", body: "", labels })), comments: vi.fn(async () => comments),
@@ -131,4 +132,46 @@ test("a transition NOT into blocked never carries the origin marker", async () =
   const gh = fakeGh(["factory:queue"], [{ id: 1, body: triage, createdAt: "2026-09-11T00:00:00Z" }]);
   await transition({ gh, issue: 7, to: "factory:ready", stage: "triage" });
   expect(gh.comment.mock.calls[0][1]).not.toMatch(/factory-blocked-origin/);
+});
+
+/**
+ * ADR-020 r2 SF3(리뷰 finding 3) — **요구사항 미달 거부도 앞으로 복구돼야 한다.** r1은 성공 경로의
+ * 순서만 뒤집었고 이 경로는 스왑 → 코멘트 그대로였다. 그 순서에서 add는 되고 remove가 실패하면
+ * (KTB-30의 add-first) 라벨은 `{옛 것, needs-human}`인데 코멘트는 아직 없다 — 라벨-셋 복구 팔이
+ * "최신 전이의 `to`"로 **옛 라벨**을 골라 방금 세운 에스컬레이션을 조용히 되돌린다.
+ */
+test("SF3: the requirement-refusal path comments BEFORE the swap and carries a transition:v1 marker", async () => {
+  const order = [];
+  const gh = fakeGh(["factory:ready"]);                              // plan handoff 없음 → 요구사항 미달
+  gh.comment = vi.fn(async (n, body) => { order.push(/factory-transition:v1/.test(body) ? "transition-comment" : "other-comment"); return "u"; });
+  gh.setFactoryLabel = vi.fn(async () => { order.push("label"); return { label: "factory:needs-human", removed: ["factory:ready"], verify: "ok" }; });
+  const r = await transition({ gh, issue: 7, to: "factory:planned" });
+  expect(r).toMatchObject({ ok: false, to: "factory:needs-human" });
+  expect(order).toEqual(["transition-comment", "label"]);
+  const body = gh.comment.mock.calls[0][1];
+  expect(body).toMatch(/<!-- factory-transition:v1 from=factory:ready to=factory:needs-human by=script reason=refused -->/);
+  expect(body).toMatch(/factory-transition-refused from=factory:ready to=factory:planned/);   // 옛 마커도 그대로
+  expect(lastTransition([{ body, createdAt: "t" }])).toMatchObject({ from: "factory:ready", to: "factory:needs-human" });
+  // 그 코멘트 하나로 수확 통계의 사유도 그대로 읽힌다(두 번 세지 않는다)
+  expect(extractNeedsHuman(7, [{ body, createdAt: "t" }])).toEqual([{ issue: 7, reason: expect.stringContaining("plan handoff missing"), at: "t" }]);
+});
+
+/**
+ * ADR-020 r2 (리뷰 (c)) — 코멘트가 먼저 나가는 이상, 스왑이 통째로 실패하면 **일어나지 않은 전이의
+ * 코멘트**가 남는다. 그 거짓말을 같은 자리에서 취소한다.
+ */
+test("(c): a swap that throws leaves a factory-transition-failed marker — and still throws", async () => {
+  const triage = renderHandoff({ stage: "triage", issue: 7, summary: "s", data: { schema: "factory.triage.v1", issue: 7, disposition: "ready", tier: "docs" } });
+  const gh = fakeGh(["factory:queue"], [{ id: 1, body: triage, createdAt: "2026-09-11T00:00:00Z" }]);
+  gh.setFactoryLabel = vi.fn(async () => { throw new Error("gh api 502\nsecond line"); });
+  await expect(transition({ gh, issue: 7, to: "factory:ready", stage: "triage" })).rejects.toThrow(/502/);
+  expect(gh.comment.mock.calls[1][1]).toMatch(/<!-- factory-transition-failed:v1 from=factory:queue to=factory:ready -->/);
+  expect(gh.comment.mock.calls[1][1]).toMatch(/gh api 502/);
+  expect(gh.comment.mock.calls[1][1]).not.toMatch(/second line/);     // 한 줄만 싣는다
+
+  // 그 마커 코멘트 자체가 실패해도 원래 예외가 그대로 올라간다(기록의 실패가 원인을 가리지 않는다)
+  const mute = fakeGh(["factory:queue"], [{ id: 1, body: triage, createdAt: "2026-09-11T00:00:00Z" }]);
+  mute.setFactoryLabel = vi.fn(async () => { throw new Error("gh api 502"); });
+  mute.comment = vi.fn(async (n, body) => { if (/failed/.test(body)) throw new Error("comment down"); return "u"; });
+  await expect(transition({ gh: mute, issue: 7, to: "factory:ready", stage: "triage" })).rejects.toThrow(/502/);
 });

@@ -738,7 +738,7 @@ You will be notified when it completes.
 
 **영향**: `templates/factory/claude/commands/factory-implement.md`(+ 설치본 `.claude/commands/`), `templates/factory/claude/workflows/factory-implement.js`(+ 설치본 `.claude/workflows/`), `factory/bin/run-stage.js`(주석만 — 산출 프롬프트는 이미 옳았다). 테스트: `templates.test.js`(다섯 디스패처 md 모두 `$1`/`$2` 부재), `workflows.test.js`(`raw: "2 true"`→하네스 변형 프롬프트, `raw: "2"`→평시 규칙, `args.issue`/`args.harness_issue` 폴백).
 
-### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29·30·31
 
 한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
@@ -1129,6 +1129,8 @@ API가 없다)이면 **살아 있는 것으로 본다**: fail closed — 틀린 
 
 **r1 (c361c7d 재리뷰)**: (a)·(c)의 락 삭제는 **읽은 sha에 리스를 걸고**(`--force-with-lease=<ref>:<sha>`) 한 번의 compare-and-swap으로 하고 — 읽기와 삭제 사이에 소유자가 바뀌었으면 아무것도 지우지 않고 `stale-lock-race`로 적으며(살아 있는 락을 지운 뒤 새 런을 미는 사고가 닫힌다), 그때는 sweeper가 **dispatch도 하지 않는다**(재점화 예산도 쓰지 않는다); (b)의 `abortStage`는 fail closed로 바뀌어 **락이 이 런의 것임이 증명될 때만** 전이·해제를 하고 모르면 `abort-skipped: holder unknown`만 남긴다; (d)의 재점화 카운트는 **마지막 재큐 이후**로 좁혔다(다른 라운드 카운터와 같은 창).
 
+**r2 (19782b7 재리뷰 MF1)**: `runnerState`/락 판정이 **세 값**이 됐다 — `live`(소유자 런이 `in_progress`/`queued`) · `stale`(`completed`) · `unknown`(워크플로 런이 아니거나 — `runner=local/<host>` — 조회·파싱이 실패했다). r1은 뒤의 둘을 `live`와 한 불리언으로 묶었고, 그래서 dispatch 팔이 **물어보지 못한 것**까지 "돌고 있다"로 읽어 마커도 에스컬레이션도 없이 30분마다 영원히 물러났다(리뷰 finding 1: 랩톱이 잠든 로컬 `factory run` 하나가 이슈를 조용히 영구 정지시킨다 — `FACTORY_BOT_TOKEN`에 Actions:read가 없으면 **모든** 이슈가 그렇게 된다). 이제 `unknown`은 dispatch하지 않되 스톨 임계를 넘겼으면 `factory:needs-human`으로 올린다(사유 `lock owner unknowable (<detail>)`, 마커 `<!-- factory-sweeper lock-owner-unknown issue=<n> -->`, dedupe는 임계 시간 창). 에스컬레이션이 sweep 잡의 stdout에만 있는 경로는 남기지 않는다. 그리고 하트비트 재큐 팔의 락 삭제도 **리스 경로 하나뿐**이다(r2 SF2): 예전에는 소유자를 묻지도 리스를 걸지도 않고 지웠는데, 하트비트는 best-effort로 패치되고(재시도 없음) 30분 창은 API 장애 하나면 지나간다 — 살아 있는 소유자가 확인되면 재큐 자체를 하지 않는다(그 재큐가 R 예산을 태운다).
+
 #### KTB-29 — review가 K를 물지 않았다: 라운드 4의 reject가 또 rework으로 갔다
 
 **질문**: 스펙 §3.2에는 `rework --> needs_human: round > K` 엣지가 있고 CHARTER의 `K`가 그 한도인데,
@@ -1160,6 +1162,8 @@ API가 없다)이면 **살아 있는 것으로 본다**: fail closed — 틀린 
 approve든 approved, `nextState` 순수 함수, flips 계산, flips 기록과 조회 실패).
 
 **r1 (c361c7d 재리뷰)**: "approve는 어느 라운드에서든 통과한다"를 조립된 시스템에서도 참으로 만들었다 — `lib/requirements.js`의 `round > K` 검사를 지웠고(그 검사가 라운드 4의 만장일치 통과를 그래프에서 튕겨 내고 있었다), 라운드 번호는 handoff 개수가 아니라 **마지막 재큐 이후의 완료된 `→ factory:rework` 전이 수 + 1**로 센다(handoff는 전이보다 먼저 나가므로 전이에서 죽은 런이 예산을 태웠다); 집계된 must_fix가 없을 때의 사유는 "0 must_fix remain" 대신 `last verdict: <판정>`이다.
+
+**r2 (19782b7 재리뷰 (c))**: 그 카운터에 마지막 창 하나가 남아 있었다 — 전이 코멘트가 라벨 스왑보다 **먼저** 나가므로(KTB-30 r1), 스왑이 네 번의 CLI 시도 + REST까지 전부 실패하면 **일어나지 않은 rework**의 코멘트가 이슈에 남아 라운드를 태운다(K=3에서 장애 두 번 + 진짜 reject 하나면 멀쩡한 이슈가 사람에게 올라간다). 그래서 스왑이 던지면 그 자리에서 `<!-- factory-transition-failed:v1 from=… to=… -->`를 남기고, `countTransitionsTo`는 그 마커 **뒤**에 오는 짝 하나를 무효로 센다. 사람이 읽는 이력에서도 "코멘트는 옮겼다는데 라벨은 그대로"가 그 한 줄로 설명된다.
 
 #### r1 재리뷰 잔손질 (M1~M5)
 
@@ -1243,7 +1247,14 @@ cancelled|gates|undecidable|other>`를 싣는다(`abortStage`는 GitHub이 준 `
 
 **알려진 한계**: 재시도는 라벨 변경 하나당 최대 13초를 잔다 — 라벨 스왑이 느려지는 것은 의도한 대가다
 (그 13초가 사라진 이슈 하나보다 싸다). 그리고 (d)의 24시간 창 밖에서 factory 라벨 없이 라벨을 잃은
-이슈는 여전히 보이지 않는다(그 경우 tier 라벨조차 없다는 뜻이라 triage 이전 이슈로 한정된다).
+이슈는 여전히 보이지 않는다(그 경우 tier 라벨조차 없다는 뜻이라 triage 이전 이슈로 한정된다). 그리고
+**(b) 캐비엇(r2 리뷰 답변 (b))**: `abortStage`가 락이 **없음이 증명된**(`present:false`) 상태에서 전이를
+건너뛰는 것은 안전하지만, 그 경우 중 하나 — 락을 잡은 뒤 다른 무언가가 그 락을 지웠고 그다음 잡이
+취소된 경우 — 는 이슈를 `factory:in-progress`에 전이 없이 남기고, 그 자리를 덮는 팔은 하트비트 재큐
+팔이다. 그 팔은 **R 예산을 하나 쓴다** — 즉 O20의 "취소는 R을 쓰지 않는다"가 이 드문 경로에서는
+조용히 성립하지 않는다. 기록 줄("this run cannot prove it owned the stage")도 정상 종료 뒤 잡이
+실패한 흔한 경우에는 이상 신호처럼 읽힌다. 둘 다 코드가 아니라 **한계로 적어 둔다**: 고치려면
+"우리가 락을 잡았었다"는 사실을 프로세스 밖에 남겨야 하는데, 그 기록 자체가 또 하나의 실패 지점이다.
 
 **영향**: `factory/lib/gh.js`(`labelMutation`·`LABEL_RETRY_DELAYS_MS`·add-first `setFactoryLabel`/
 `setTierLabel`·verify), `factory/lib/transition.js`(`cause` 인자·`label verify` 줄),
@@ -1255,6 +1266,35 @@ cancelled|gates|undecidable|other>`를 싣는다(`abortStage`는 GitHub이 준 `
 `run-stage.test.js` 1건.
 
 **r1 (c361c7d 재리뷰 VERIFY)**: (d)·(e)의 복구가 **최신 전이 코멘트의 `to`**를 기록으로 쓰므로, `transition()`은 그 코멘트를 **라벨 스왑보다 먼저** 남긴다 — 스왑이 중간에 끊긴 바로 그 순간(라벨 2개)에 코멘트가 아직 없으면 최신 전이는 **이전** 전이이고, 복구가 그 옛 `to`로 이슈를 정리하며 방금 성공한 전이를 조용히 되돌린다. `label verify: repaired`는 스왑 뒤에 알 수 있는 사실이라 전이 마커를 들지 않은 별도 코멘트로 분리했다(`lastTransition`을 흔들지 않는다).
+
+**r2 (19782b7 재리뷰 SF3·SF4·SF5·SF6)**: 같은 원칙을 남은 네 자리에 마저 적용했다. ① **요구사항 미달 거부**도 코멘트가 스왑보다 먼저 나가고 `factory-transition:v1 … to=factory:needs-human by=script reason=refused` 마커를 단다 — 그 순서가 아니면 반만 성공한 스왑을 라벨-셋 복구 팔이 **옛 라벨로 되돌리며** 방금 세운 에스컬레이션을 조용히 지운다(리뷰 finding 3: 리뷰 라운드 ~$10 × 2). ② `abortStage`의 전이를 `try/catch`로 감쌌다 — KTB-30 이후 `transition()`은 던질 수 있는 호출이고, `main()`은 이 함수를 맨몸으로 부르므로 그 예외 하나가 **락 해제와 run 기록을 통째로** 건너뛰었다(하필 API 장애 창에서만). ③ sweeper 잡의 `timeout-minutes`를 5 → 15로 올리고 **두 복구 팔을 맨 앞으로** 옮겼다(cron·`--quick` 둘 다) — 스왑당 최대 ~39초를 자는 재시도와 여덟 팔의 라벨 뮤테이션을 합치면, 넓은 API 장애(= 이 팔이 가장 할 일이 많은 상황)에서 복구 팔에 닿기 전에 잡이 SIGKILL될 수 있었다. ④ `factory status`의 `[no-state-label]`이 8번 팔과 **같은 집합**을 본다: `factory:*` 라벨이 남아 있는 이슈뿐 아니라, 라벨이 하나도 없어도 전이 이력이 있는 이슈까지(24시간 창 — 상태 라벨이 그 이슈의 유일한 factory 라벨이었던 경우, 곧 triage 이전의 #2 모양). 그 밖에 `claim refused` 상태 문구도 `truncateReason`을 지난다 — 공개 이슈 코멘트가 run 기록보다 더 공개적인 자리다.
+
+#### KTB-31 — `factory:rework`을 보는 팔이 없었다: 좀비 런 하나가 이슈를 65분 세웠다
+
+**질문**: 2026-09-13 08:58Z, #15이 review에서 `factory:rework`으로 내려갔다. 그 라벨 이벤트가 만든
+implement 런 34748735031은 GitHub에서 **잡 없이 `queued`인 채로** 굳었다 — 08:50~08:55Z의 Actions
+장애 창(O23) 직후였고, 러너가 배정되지 않았다. 그 뒤 아무 일도 일어나지 않았다: 하트비트가 없으니
+1번 팔(in-progress 재큐)에 안 걸리고, blocked 라벨이 없으니 2번 팔에도 안 걸리고, 재점화 표
+(`STALLED_STAGE`)에 `factory:rework`이 **없어서** 5번 팔도 보지 못했다. 10:02Z에 관측자가 손으로
+`workflow_dispatch`를 칠 때까지 65분. 스펙 §3.2에는 `rework --> in_progress` 엣지가 있는데, 그 엣지를
+다시 밟게 하는 장치만 없었다.
+
+**결정**: 둘이다.
+
+(a) **`factory:rework → implement`을 재점화 표에 넣는다**(cron·`--quick` 둘 다). 다른 대기 라벨과
+계약이 같다: 마지막 재큐 이후 2회까지, 흐름 제어(`backPressure`)가 세워 둔 것은 멈춘 것이 아니며,
+밀기 직전에 락을 본다(MF1의 세 값). 이 표에 `rework`이 없던 이유는 설계가 아니라 누락이다 —
+`BLOCKED_RETRY_STAGE`에는 `in-progress`까지 있었다.
+
+(b) **스테이지가 시작조차 못 했으면 임계는 10분이다**(`STALL_NO_HEARTBEAT_MIN`). 30분은 "도는
+스테이지가 하트비트를 놓쳤다"의 여유인데, 이번 스테이지의 하트비트가 **하나도** 없으면 기다리는
+대상이 다르다: 런이 아예 뜨지 않았거나 뜨자마자 죽은 것이고, 그 사실은 10분이면 확정된다(워크플로
+큐 + checkout + claim + 첫 하트비트까지 실측 1~3분). 하트비트는 **마지막 전이 뒤**의 것만 센다 —
+지난 스테이지의 하트비트가 "이번 스테이지는 시작했다"를 뜻하지는 않는다.
+
+**영향**: `factory/lib/sweeper.js`(`STALLED_STAGE`·`STALL_NO_HEARTBEAT_MIN`·하트비트 창),
+스펙 §4.3-5. 테스트: `sweeper.test.js` 3건(rework 재점화 cron+quick, 하트비트 없음 → 10분,
+하트비트 있음 → 30분 그대로).
 
 (이후 항목은 dogfood 진행에 따라 추가)
 ### ⑤ 권한·훅 — KTB-13·14·20·21·23

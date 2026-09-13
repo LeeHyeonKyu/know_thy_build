@@ -1,7 +1,8 @@
 import { test, expect, vi } from "vitest";
 import { backPressure } from "../lib/back-pressure.js";
-import { sweep, restartComment, blockedRetryComment, harnessUnparkedComment, API_ERROR_MAX_RETRIES } from "../lib/sweeper.js";
+import { sweep, restartComment, blockedRetryComment, harnessUnparkedComment, lockOwnerUnknownComment, API_ERROR_MAX_RETRIES, STALL_NO_HEARTBEAT_MIN, BLOCKED_ESCALATION_REASON } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
+import { BLOCKED_CAUSES } from "../lib/retro/issue-comments.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
 const T = { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
@@ -1010,11 +1011,74 @@ test("SF4: a live lock stops the dispatch AND spends no restart marker; a throwi
   expect(d3).not.toHaveBeenCalled();
   expect(a3).toContainEqual({ kind: "stale-lock-race", issue: 15, runner: "gha-1", step: "stalled-restart" });
 
+  // r2 MF1: 조회가 터진 것은 "살아 있다"도 "잔해다"도 아니다 — `unknown`이고, 그때는 밀지 않되
+  // **사람을 부른다**(예전에는 그냥 밀었다: 살아 있는 락 위로 미는 것이고 예산도 태웠다).
   const boom = vi.fn(async () => { throw new Error("git fetch exploded"); });
   const d2 = vi.fn(async () => {});
-  const a2 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d2, releaseIfStale: boom }));
-  expect(d2).toHaveBeenCalled();                                     // 조회 실패는 "살아 있다"가 아니다
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a2 = await sweep(stalledArgs({ gh: mk(), dispatchStage: d2, transition: t2, releaseIfStale: boom }));
+  expect(d2).not.toHaveBeenCalled();
   expect(a2).toContainEqual({ kind: "error", step: "stalled-restart-lock", issue: 15, error: expect.stringContaining("git fetch exploded") });
+  expect(t2).toHaveBeenCalledWith(expect.objectContaining({ issue: 15, to: "factory:needs-human" }));
+});
+
+/**
+ * ADR-020 r2 MF1 — **리뷰 finding 1: 조용한 영구 정지.** r1 SF4는 "락이 살아 있는지 증명하지 못했다"를
+ * "스테이지가 돌고 있다"로 읽었다. 그래서 사람이 로컬에서 `factory run`을 돌리다 랩톱이 잠들어 남은
+ * 락(`runner=local/hk-mac`) 하나가 stalled 팔을 30분마다 **영원히** 물러나게 했다 — 코멘트도, 마커도,
+ * 에스컬레이션도 없이 sweep 잡의 stdout 한 줄만. 이 클러스터가 없애려던 바로 그 침묵(#15)이다.
+ */
+test("MF1 r2: an unknown lock owner does not dispatch — it escalates to needs-human with the reason", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:planned" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:planned", "2026-09-11T00:10:00Z"), ...posted],
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const unknown = async () => ({ released: false, live: false, state: "unknown", why: "owner local/hk-mac unknowable (not-a-workflow-run)" });
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, transition, releaseIfStale: unknown }));
+  expect(dispatchStage).not.toHaveBeenCalled();                      // 살아 있을 수 있는 락 위로 밀지 않는다
+  expect(transition).toHaveBeenCalledWith({ issue: 15, to: "factory:needs-human", reason: "lock owner unknowable (owner local/hk-mac unknowable (not-a-workflow-run))" });
+  expect(gh.comment).toHaveBeenCalled();                             // 에스컬레이션이 stdout에만 있으면 안 된다
+  expect(posted[0].body).toContain(lockOwnerUnknownComment(15));
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "lock-owner-unknown-escalated", issue: 15, stage: "implement", step: "stalled-restart" }));
+
+  // 같은 창 안에서 두 번 올리지 않는다(마커 dedupe) — 다음 창의 sweep은 다시 시도한다.
+  const again = await sweep(stalledArgs({ gh, dispatchStage, transition: vi.fn(async ({ to }) => ({ ok: true, to })), releaseIfStale: unknown }));
+  expect(again).toContainEqual(expect.objectContaining({ kind: "stalled-restart-skipped", issue: 15, reason: expect.stringContaining("lock owner unknown") }));
+});
+
+test("MF1 r2: the blocked arm escalates on an unknown owner too — but only after the stall threshold", async () => {
+  const mk = (at) => {
+    const posted = [];
+    return {
+      searchIssues: async (l) => (l === "factory:blocked" ? [{ number: 15 }] : []),
+      comments: async () => [{ id: 1, body: `<!-- factory-transition:v1 from=factory:awaiting-review to=factory:blocked by=script -->\nfactory:awaiting-review → factory:blocked — job cancelled\n<!-- factory-blocked-origin from=factory:awaiting-review stage=review cause=cancelled -->`, createdAt: at }, ...posted],
+      comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+      patchComment: vi.fn(), issueList: async () => [],
+    };
+  };
+  const unknown = async () => ({ released: false, live: false, state: "unknown", why: "lock unreadable — fatal: could not read from remote" });
+  // 방금 blocked이 된 이슈: 정상적인 재시도 한 번을 빼앗지 않는다(아직 임계 안)
+  const fresh = mk("2026-09-11T00:45:00Z");
+  const d1 = vi.fn(async () => {});
+  const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a1 = await sweep(stalledArgs({ gh: fresh, dispatchStage: d1, transition: t1, releaseIfStale: unknown }));
+  expect(d1).not.toHaveBeenCalled();
+  expect(t1).not.toHaveBeenCalled();
+  expect(a1).toContainEqual(expect.objectContaining({ kind: "blocked-retry-skipped", issue: 15, reason: expect.stringContaining("lock owner unknown") }));
+
+  // 임계를 넘긴 뒤: 사람에게 간다(그 전이가 이 이슈를 blocked에서 꺼내는 유일한 길이다)
+  const old = mk("2026-09-11T00:00:00Z");
+  const d2 = vi.fn(async () => {});
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a2 = await sweep(stalledArgs({ gh: old, dispatchStage: d2, transition: t2, releaseIfStale: unknown }));
+  expect(d2).not.toHaveBeenCalled();
+  expect(t2).toHaveBeenCalledWith({ issue: 15, to: "factory:needs-human", reason: expect.stringContaining("lock owner unknowable") });
+  expect(a2).toContainEqual(expect.objectContaining({ kind: "lock-owner-unknown-escalated", issue: 15, step: "blocked-retry", cause: "cancelled" }));
 });
 
 test("SF4: the blocked-retry arm also stands down on a live lock — no marker, no attempt spent", async () => {
@@ -1157,4 +1221,122 @@ test("M3: a refused harness unpark leaves NO marker — the next sweep tries aga
   const third = await sweep(unparkArgs({ gh, harnessSettled, transition }));
   expect(third).toContainEqual({ kind: "harness-unpark-skipped", issue: 2, harness: 31, reason: "already unparked" });
   expect(transition).toHaveBeenCalledTimes(2);
+});
+
+// ── ADR-020 r2 — SF2 · SF5 · KTB-31 ───────────────────────────────────────────
+const HBC = (n, last, at = last) => ({ id: 1, body: `<!-- factory-heartbeat issue=${n} -->\nstage: implement · runner: gha-1 · started: x · last: ${last}`, createdAt: at });
+
+/**
+ * r2 SF2 — 하트비트 재큐 팔의 삭제는 MF1의 리스 경로 하나뿐이다. 하트비트는 best-effort로 패치되고
+ * (에러를 삼키고 재시도하지 않는다) 30분 창은 GitHub 장애 하나면 지나간다 — 그 창에서 살아 있는 런의
+ * 락을 지우고 재큐까지 하면 같은 이슈에 두 implement가 겹친다(로컬 진입에는 concurrency 그룹도 없다).
+ */
+test("SF2: the heartbeat-requeue arm releases only via the leased releaseIfStale; a live owner → no requeue", async () => {
+  const mkgh = () => ({
+    searchIssues: async (l) => (l === "factory:in-progress" ? [{ number: 7 }] : []),
+    comments: async () => [HBC(7, "2026-09-11T00:00:00Z")],
+    comment: vi.fn(async () => "u"), patchComment: vi.fn(), issueList: async () => [],
+  });
+  const gh1 = mkgh();
+  const release = vi.fn(async () => true);
+  const releaseIfStale = vi.fn(async () => ({ released: true, live: false, state: "none", runner: "gha-1", why: "stale lock from gha-1 released" }));
+  const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a1 = await sweep(stalledArgs({ gh: gh1, transition: t1, release, releaseIfStale }));
+  expect(release).not.toHaveBeenCalled();                            // 무조건 삭제는 더 이상 없다
+  expect(releaseIfStale).toHaveBeenCalledWith(7);
+  expect(t1).toHaveBeenCalledWith(expect.objectContaining({ issue: 7, to: "factory:planned" }));
+  expect(a1).toContainEqual({ kind: "stale-lock-released", issue: 7, runner: "gha-1", step: "heartbeat-requeue" });
+
+  const gh2 = mkgh();
+  const t2 = vi.fn();
+  const a2 = await sweep(stalledArgs({ gh: gh2, transition: t2, release: vi.fn(), releaseIfStale: async () => ({ released: false, live: true, state: "live", why: "held by gha-9 (in_progress)" }) }));
+  expect(t2).not.toHaveBeenCalled();                                 // 살아 있는 런의 R 예산을 태우지 않는다
+  expect(gh2.comment).not.toHaveBeenCalled();
+  expect(a2).toContainEqual({ kind: "requeue-skipped", issue: 7, reason: "lock still live — held by gha-9 (in_progress)" });
+
+  // 소유자를 모르면 재큐는 하되(그 이슈는 정말 멈춰 있을 수 있다) 락은 건드리지 않았다고 적는다
+  const gh3 = mkgh();
+  const a3 = await sweep(stalledArgs({ gh: gh3, transition: vi.fn(async ({ to }) => ({ ok: true, to })), release: vi.fn(), releaseIfStale: async () => ({ released: false, live: false, state: "unknown", why: "lock unreadable — fatal" }) }));
+  expect(gh3.comment.mock.calls[0][1]).toContain("lock left alone (lock unreadable — fatal)");
+  expect(a3).toContainEqual({ kind: "requeue", issue: 7, count: 1 });
+});
+
+/**
+ * r2 SF5 — 라벨 변경 하나가 최대 13초를 자게 된 뒤(KTB-30 b), 넓은 API 장애에서는 앞선 팔들이 잡
+ * 시간을 다 쓰고 두 복구 팔이 실행되지 않을 수 있었다 — 장애를 치우려고 만든 팔이 장애 때 안 도는
+ * 순서였다. 이제 맨 앞이다(cron·`--quick` 둘 다).
+ */
+test("SF5: the two label-repair arms run FIRST in the sweep (cron and --quick)", async () => {
+  const order = [];
+  const gh = {
+    searchIssues: async (l) => { order.push(`search:${l}`); return []; },
+    issueList: async () => { order.push("issueList"); return []; },
+    comments: async () => [], comment: vi.fn(), patchComment: vi.fn(),
+  };
+  for (const quick of [false, true]) {
+    order.length = 0;
+    await sweep(stalledArgs({ gh, quick, dispatchStage: vi.fn(async () => {}) }));
+    expect(order.slice(0, 2), `quick=${quick}`).toEqual(["issueList", "issueList"]);
+    expect(order[2], `quick=${quick}`).toBe("search:factory:in-progress");
+  }
+});
+
+/**
+ * ADR-020 KTB-31 — 2026-09-13 08:58Z #15: `factory:rework` 라벨 이벤트가 만든 런 34748735031이 Actions
+ * 장애 직후 **잡 없이 queued인 좀비**로 굳었다. `factory:rework`은 재점화 표에 없었고 하트비트도
+ * blocked 라벨도 없어 다른 팔에도 안 걸렸다 — 10:02Z에 사람이 손으로 `workflow_dispatch`를 칠 때까지
+ * 65분이 그냥 갔다.
+ */
+test("KTB-31: a factory:rework issue with no run is restarted into implement", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: async (l) => (l === "factory:rework" ? [{ number: 15 }] : []),
+    comments: async () => [TRANSITION("factory:rework", "2026-09-11T00:10:00Z"), ...posted],
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "implement", issue: 15 });
+  expect(actions).toContainEqual({ kind: "stalled-restart", issue: 15, stage: "implement", label: "factory:rework" });
+
+  // 그리고 `--quick`에서도 같다(스테이지 잡 끝마다 도는 sweep이 이 사고를 몇 분 안에 잡는다)
+  const posted2 = [];
+  const gh2 = { ...gh, comments: async () => [TRANSITION("factory:rework", "2026-09-11T00:10:00Z"), ...posted2], comment: vi.fn(async (n, body) => { posted2.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }) };
+  const d2 = vi.fn(async () => {});
+  await sweep(stalledArgs({ gh: gh2, dispatchStage: d2, quick: true }));
+  expect(d2).toHaveBeenCalledWith({ stage: "implement", issue: 15 });
+});
+
+test("KTB-31: a stage that never started (no heartbeat at all) uses the 10-minute threshold, not 30", async () => {
+  expect(STALL_NO_HEARTBEAT_MIN).toBe(10);
+  const mk = (extra = []) => {
+    const posted = [];
+    return {
+      searchIssues: async (l) => (l === "factory:rework" ? [{ number: 15 }] : []),
+      // 전이는 15분 전 — 30분 임계에는 안 걸리고 10분 임계에는 걸린다
+      comments: async () => [TRANSITION("factory:rework", "2026-09-11T00:45:00Z"), ...extra, ...posted],
+      comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+      patchComment: vi.fn(), issueList: async () => [],
+    };
+  };
+  const d1 = vi.fn(async () => {});
+  await sweep(stalledArgs({ gh: mk(), dispatchStage: d1 }));
+  expect(d1).toHaveBeenCalledWith({ stage: "implement", issue: 15 });
+
+  // 이번 스테이지가 하트비트를 한 번이라도 찍었으면 임계는 그대로 30분이다 — 길게 도는 스테이지를
+  // 10분 만에 두 번 돌리지 않는다(implement 한 번이 ~$20다).
+  const d2 = vi.fn(async () => {});
+  // 하트비트 자체는 **오래됐다**(00:20, 40분 전) — 그래서 "살아 있다"로 넘어가는 것이 아니라, 이
+  // 스테이지가 시작은 했다는 사실로 임계가 30분이 된다.
+  const a2 = await sweep(stalledArgs({ gh: mk([HBC(15, "2026-09-11T00:20:00Z", "2026-09-11T00:46:00Z")]), dispatchStage: d2 }));
+  expect(d2).not.toHaveBeenCalled();
+  expect(a2.some((a) => a.kind === "stalled-restart")).toBe(false);
+});
+
+// 리뷰 nit 9 — 원인 등급은 두 곳에 나열돼 있다(`BLOCKED_CAUSES`와 `BLOCKED_ESCALATION_REASON`).
+// 일곱 번째가 한쪽에만 생기면 사람이 받는 문장이 조용히 "환경/크리덴셜"로 떨어진다 — O20이 없애려던
+// 그 잘못된 문장이다. 이 한 줄이 둘을 묶는다.
+test("nit 9: every blocked cause has its own escalation sentence", () => {
+  expect(Object.keys(BLOCKED_ESCALATION_REASON)).toEqual(BLOCKED_CAUSES);
 });

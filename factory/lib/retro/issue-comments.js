@@ -5,8 +5,22 @@
 
 export const NEEDS_HUMAN_LABEL = "factory:needs-human";
 
-export const TRANSITION_TO = /<!-- factory-transition:v1 from=(\S+) to=(\S+) by=(\S+) -->/;
+/**
+ * 네 번째 필드 `reason=`는 선택이다(r2 SF3): 요구사항 미달로 **라벨이 실제로 needs-human으로 옮겨진**
+ * 거부도 이제 이 마커를 단다(`reason=refused`) — 그것도 완료된 전이이기 때문이다. 옛 마커
+ * (`… by=script -->`)는 바이트 하나 안 바뀐 채 그대로 매치된다.
+ */
+export const TRANSITION_TO = /<!-- factory-transition:v1 from=(\S+) to=(\S+) by=(\S+)(?: reason=(\S+))? -->/;
 export const TRANSITION_REFUSED = /<!-- factory-transition-refused from=(\S+) to=(\S+) -->/;
+/**
+ * ADR-020 r2 (리뷰 (c)) — **"코멘트는 나갔는데 라벨은 못 옮겼다"의 기록.** 전이 코멘트가 스왑보다
+ * 먼저 나가는 이상(KTB-30 r1), 스왑이 통째로 실패하면 이슈에는 일어나지 않은 전이의 코멘트가 남는다.
+ * 그 한 줄은 사람에게도 거짓말이고(라벨은 그대로인데 "옮겼다"고 적혀 있다), 라운드 카운터에게도
+ * 거짓말이다(`countTransitionsTo`가 그것을 rework 한 번으로 센다 — K 예산을 태운다). 그래서 스왑이
+ * throw하면 그 자리에서 이 마커를 남긴다: 뒤따르는 이 마커가 앞의 전이 하나를 **무효로 만든다**.
+ */
+export const TRANSITION_FAILED = /<!-- factory-transition-failed:v1 from=(\S+) to=(\S+) -->/;
+export const transitionFailedMarker = ({ from, to }) => `<!-- factory-transition-failed:v1 from=${from} to=${to} -->`;
 // label 이름 자체가 "factory:x" 형태라 콜론을 품는다 — 진짜 구분자는 "콜론+공백"뿐이다.
 export const REFUSAL_REASON = /\*\*전이 거부\*\*.*?: ([^\n]+)/;
 // 요구사항 미달로 실제 라벨이 needs-human으로 옮겨진 거부만 골라낸다(backtick 인용 — lib/transition.js의
@@ -148,10 +162,19 @@ export function commentsSinceRequeue(comments) {
  * 멀쩡한 이슈를 needs-human으로 밀어냈다. `→ factory:rework` 전이는 **실제로 일어난 재작업 주기**이고,
  * 그것이 스펙 §3.2가 K로 세는 단위다. 거부 코멘트(`factory-transition-refused`)는 다른 마커라 세지 않는다.
  */
+/**
+ * r2 (리뷰 (c)) — 뒤따르는 `factory-transition-failed:v1 … to=<label>`은 **바로 앞의 세지 않은 전이
+ * 하나를 취소한다.** SF2의 전제("전이 코멘트 = 실제로 일어난 재작업 주기")는 전이 코멘트가 스왑보다
+ * 먼저 나가게 된 뒤로 한 가지 예외가 생겼다: 스왑이 4번의 CLI 시도 + REST까지 전부 실패하면 코멘트만
+ * 남는다. K=3에서 그런 장애 두 번이면 멀쩡한 이슈가 라운드를 다 쓴다 — 그 창을 이 마커가 닫는다.
+ */
 export function countTransitionsTo(comments, to) {
   let n = 0;
   for (const c of comments || []) {
-    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    const body = String(c?.body ?? "");
+    const f = TRANSITION_FAILED.exec(body);
+    if (f) { if (f[2] === to && n > 0) n -= 1; continue; }
+    const m = TRANSITION_TO.exec(body);
     if (m && m[2] === to) n += 1;
   }
   return n;
@@ -187,9 +210,17 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
 
     const m = TRANSITION_TO.exec(body);
     if (m && m[2] === NEEDS_HUMAN_LABEL) {
-      const rest = body.slice(m.index + m[0].length);
-      const dash = rest.indexOf(" — ");
-      const reason = dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim();
+      // r2 SF3: 요구사항 미달 거부도 이제 전이 마커를 단다(`reason=refused`) — 그 코멘트의 사유는
+      // `— ` 뒤가 아니라 "**전이 거부** …: " 뒤에 있다. 마커가 어느 문법인지 말해 준다.
+      let reason;
+      if (m[4] === "refused") {
+        const rm = REFUSAL_REASON.exec(body);
+        reason = rm ? rm[1].trim() : "";
+      } else {
+        const rest = body.slice(m.index + m[0].length);
+        const dash = rest.indexOf(" — ");
+        reason = dash === -1 ? "" : rest.slice(dash + 3).split("\n")[0].trim();
+      }
       out.push({ issue: issueNumber, reason, at: c.createdAt });
       continue;
     }

@@ -6,6 +6,8 @@ import { readRecords as realReadRecords } from "../lib/records-branch.js";
 import { loadCharter, loadHarness, THRESHOLD_DEFAULTS } from "../lib/config.js";
 import { loadQuarantine } from "../lib/quarantine.js";
 import { STATES } from "../lib/labels.js";
+import { MISSING_STATE_SCAN_HOURS } from "../lib/sweeper.js";
+import { lastTransition } from "../lib/retro/issue-comments.js";
 import { summarizeUsage } from "../lib/usage.js";
 import { buildStatus, renderStatus } from "../lib/status.js";
 
@@ -70,9 +72,21 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
   // ADR-020 KTB-30 — 상태 라벨이 **0개**인 이슈는 위의 라벨별 조회 어디에도 안 걸린다(라벨이 없는
   // 것을 라벨로 찾을 수는 없다). 열린 이슈 전체를 한 번 더 받아 그중 factory 라벨은 있는데 상태
   // 라벨이 없는 것만 더한다 — `buildStatus`가 그것을 Needs You의 `no-state-label`로 낸다.
+  // r2 SF6 — 그 집합은 sweeper 8번 팔과 **같아야** 한다: `factory:*` 라벨이 남아 있는 이슈뿐 아니라,
+  // 라벨이 하나도 없어도 **전이 이력이 있는** 이슈까지다(상태 라벨이 그 이슈의 유일한 factory 라벨이었던
+  // 경우 — triage 이전, 데모 #2의 모양). 코멘트 조회는 그 팔과 같은 24시간 창으로 좁힌다.
   const seen = new Set([...openLists.flat(), ...merged].map((i) => i.number));
-  const orphans = (await ghClient.issueList({ state: "open" }))
-    .filter((i) => !seen.has(i.number) && !(i.labels || []).some((l) => STATES.has(l)) && (i.labels || []).some((l) => String(l).startsWith("factory:")));
+  const candidates = (await ghClient.issueList({ state: "open" }))
+    .filter((i) => !seen.has(i.number) && !(i.labels || []).some((l) => STATES.has(l)));
+  const orphans = [];
+  for (const i of candidates) {
+    if ((i.labels || []).some((l) => String(l).startsWith("factory:"))) { orphans.push(i); continue; }
+    const updatedMs = Date.parse(i.updatedAt ?? "");
+    if (!(Number.isFinite(updatedMs) && Date.parse(nowIso) - updatedMs <= MISSING_STATE_SCAN_HOURS * 3600e3)) continue;
+    try {
+      if (lastTransition(await ghClient.comments(i.number))) orphans.push({ ...i, factoryTransition: true });
+    } catch { /* 읽기 전용 보고는 이슈 하나 때문에 죽지 않는다 */ }
+  }
   const issues = [...openLists.flat(), ...merged, ...orphans];
 
   const [retroProposal, harness] = await Promise.all([

@@ -19,9 +19,26 @@ const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 const STALLED_STAGE = {
   "factory:ready": "plan",
   "factory:planned": "implement",
+  // ADR-020 KTB-31 — `factory:rework`이 이 표에 없어서 **아무 팔도 보지 않는 대기 상태**가 하나 남아
+  // 있었다. 스펙 §3.2의 `rework --> in_progress`는 implement가 다시 들어와야 일어나는데, 그 재진입이
+  // 일어나지 않으면(2026-09-13 08:58Z #15: `factory:rework` 라벨 이벤트가 만든 런 34748735031이
+  // Actions 장애 직후 **잡 없이 queued인 좀비**로 굳었다) 이슈는 그냥 앉아 있는다. 하트비트도 없고
+  // (스테이지가 시작조차 못 했다) blocked 라벨도 없어 1·2번 팔에도 안 걸린다 — 손으로
+  // `workflow_dispatch`를 칠 때까지 65분이 그렇게 갔다.
+  "factory:rework": "implement",
   "factory:awaiting-review": "review",
   "factory:approved": "merge",
 };
+
+/**
+ * ADR-020 KTB-31 — **스테이지가 시작조차 못 했으면 30분을 기다리지 않는다.** 기본 임계(30분)는
+ * "도는 스테이지가 하트비트를 놓쳤다"의 여유다: plan은 37분, implement는 그 이상을 한 라벨 위에서
+ * 보내고 그동안 10분마다 하트비트를 찍는다. 그런데 하트비트가 **하나도 없으면** 기다리는 대상이
+ * 다르다 — 런이 아예 뜨지 않았거나(#2: concurrency 물결, #15: 좀비 queued) 뜨자마자 죽은 것이고,
+ * 그 사실은 10분이면 확정된다(워크플로 큐 + checkout + claim + 첫 하트비트까지 실측 1~3분).
+ * 20분을 더 기다려 봐야 같은 답을 더 늦게 얻을 뿐이다.
+ */
+export const STALL_NO_HEARTBEAT_MIN = 10;
 /** 재점화 마커 — 이것 자체가 "이미 밀어 봤다"는 기록이다(dedupe의 유일한 근거). */
 export const restartComment = (stage, issue) => `<!-- factory-sweeper restarted stage=${stage} issue=${issue} -->`;
 
@@ -234,29 +251,74 @@ async function commentOnQuarantineExit({ gh, actions, returned, expired }) {
  * 조회 **실패**는 재점화를 막지 않는다: 아무것도 모르는 것이지 "살아 있다"가 아니고, 락이 정말 남아
  * 있으면 그 런은 (이제 시끄럽게) claim에서 물러난다.
  *
- * r1 SF4 — 그러나 **살아 있다고 들었으면** 막는다(`live: true`). 그 dispatch는 결과가 정해져 있다:
+ * r1 SF4 — 그러나 **살아 있다고 들었으면** 막는다(`state: "live"`). 그 dispatch는 결과가 정해져 있다:
  * KTB-28 (b) 이후 락을 못 잡은 런은 잡을 빨갛게 끝내고 `factory-claim-refused` 코멘트를 남긴다. 게다가
  * 재점화 마커는 이미 남은 뒤라 그 실패가 **재점화 예산(2회)을 태운다** — 길게 도는 스테이지 하나가
  * 하트비트만 늦어도 예산을 다 쓰고 사람에게 올라갔다. 락이 살아 있다는 것은 그 스테이지가 돌고
  * 있다는 뜻이므로, 멈춘 것이 아니다: 아무것도 하지 않고 다음 sweep에 다시 본다.
+ *
+ * r2 MF1 — **"모른다"는 "살아 있다"가 아니다.** r1은 둘을 한 불리언으로 합쳤고, 그래서 로컬 러너가
+ * 남긴 락(`runner=local/<host>` — §4.2.5의 지원되는 진입 경로다)이나 Actions 조회 실패 하나가 두
+ * dispatch 팔을 **영원히, 조용히** 세웠다(리뷰 finding 1: 30분마다 stdout 한 줄, 이슈에는 아무것도,
+ * 에스컬레이션도 없음). 이제 `state`는 셋이다 — `live`(물러난다) · `none`/`stale`(민다) ·
+ * `unknown`(밀지 않되 **사람을 부른다**, 아래 `escalateUnknownLock`). 배선이 아예 없으면(`releaseIfStale`
+ * 미주입 — 구형 호출자·테스트 더블) 예전처럼 아무 의견도 내지 않는다(`stale`).
  */
 async function releaseStaleLock({ releaseIfStale, issue, actions, step }) {
-  if (!releaseIfStale) return { live: false };
+  if (!releaseIfStale) return { state: "stale", released: false };
   try {
     const r = await releaseIfStale(issue);
     if (r?.released) actions.push({ kind: "stale-lock-released", issue, runner: r.runner ?? null, step });
     // MF1: 리스가 깨졌다 = 읽은 뒤에 락 주인이 바뀌었다. 지우지 않은 것이 옳고, 그 사실은 기록에 남는다.
     if (r?.race) actions.push({ kind: "stale-lock-race", issue, runner: r.runner ?? null, step });
-    return { live: r?.live === true, why: r?.why ?? null };
+    // `state`가 없는 옛 더블은 `live` 불리언으로 떨어진다(그때는 unknown이라는 값이 없었다).
+    return { state: r?.state ?? (r?.live === true ? "live" : "stale"), released: r?.released === true, why: r?.why ?? null };
   } catch (e) {
+    // 조회 자체가 터졌다 = 이 락에 대해 아무것도 모른다. r1까지는 여기서 그냥 밀었다 — 살아 있는 락
+    // 위로 미는 것이고, 그 사고는 `claim()`이 막지만(KTB-28 b) 재점화 예산은 태운다.
     actions.push({ kind: "error", step: `${step}-lock`, issue, error: String(e.message || e) });
-    return { live: false };
+    return { state: "unknown", released: false, why: `lock lookup failed — ${String(e.message || e)}` };
   }
+}
+
+/**
+ * ADR-020 r2 MF1 — **소유자를 알 수 없는 락 위에서 스톨 임계를 넘긴 이슈는 사람에게 간다.**
+ *
+ * 이 자리에 오는 경우는 셋이다: 락 제목의 `runner=`가 워크플로 런이 아니거나(사람이 로컬에서
+ * `factory run`을 돌리다 랩톱이 잠들었다 — §4.2.5), Actions 조회가 죽었거나(토큰 스코프·API 장애),
+ * 락 조회 자체가 실패했다. 어느 쪽도 sweeper가 혼자 풀 수 없다: 지우면 살아 있는 락을 지울 수 있고,
+ * 밀면 claim에서 거부당하며, 침묵하면 **그 이슈는 영영 움직이지 않는다**(리뷰 finding 1의 시나리오).
+ * 그래서 셋째 길이다 — 코멘트 한 줄과 `factory:needs-human`. 이 팔이 없으면 에스컬레이션의 유일한
+ * 흔적이 sweep 잡의 stdout이 되는데, 그건 아무도 읽지 않는다.
+ *
+ * dedupe는 시간 창(`stale`)이다: 전이가 거부되면(그래프상 막힌 자리) 다음 창의 sweep이 다시 시도한다 —
+ * 마커 하나로 평생 묶으면 "한 번 말했으니 됐다"가 되고 그것이 바로 이 고침이 없애려는 침묵이다.
+ */
+export const lockOwnerUnknownComment = (issue) => `<!-- factory-sweeper lock-owner-unknown issue=${issue} -->`;
+const lockOwnerUnknownReason = (why) => `lock owner unknowable (${why})`;
+
+async function escalateUnknownLock({ gh, transition, issue, comments, nowMs, stale, actions, step, why, extra = {} }) {
+  const detail = why || "lock owner unreadable";
+  const marker = lockOwnerUnknownComment(issue);
+  const prior = (comments || []).filter((c) => String(c?.body ?? "").includes(marker)).at(-1);
+  if (prior && nowMs - Date.parse(prior.createdAt) <= stale) {
+    actions.push({ kind: `${step}-skipped`, issue, ...extra, reason: `lock owner unknown — ${detail}` });
+    return;
+  }
+  const reason = lockOwnerUnknownReason(detail);
+  await gh.comment(issue, `${marker}\n이 이슈의 락(\`refs/heads/factory/lock-${issue}\`) 소유자를 확인할 수 없습니다 — ${detail}. 락이 살아 있을 수 있어 다시 띄우지 않고(살아 있는 스테이지를 두 번 돌리는 것이 더 비쌉니다), 스톨 임계를 넘겼으므로 \`factory:needs-human\`으로 올립니다. 소유자가 이미 끝난 것이 확실하면 그 ref를 지운 뒤 \`:unstick\`으로 재개하세요(ADR-020 MF1 r2).`);
+  const t = await transition?.({ issue, to: "factory:needs-human", reason });
+  actions.push(t && t.ok === false
+    ? { kind: "lock-owner-unknown-refused", issue, step, ...extra, reason: t.reason ?? "unknown" }
+    : { kind: "lock-owner-unknown-escalated", issue, step, ...extra, reason });
 }
 
 async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions }) {
   if (!dispatchStage) return;
   const stale = staleMinutes * 60e3;
+  // KTB-31: 하트비트가 **하나도** 없으면(스테이지가 시작조차 못 했다) 임계는 10분이다. 둘 중 짧은
+  // 쪽을 쓴다 — 호출자가 staleMinutes를 10분보다 짧게 주면 그 뜻이 이긴다.
+  const noHeartbeatStale = Math.min(stale, STALL_NO_HEARTBEAT_MIN * 60e3);
   // 한 sweep 안에서 흐름 제어는 한 번만 묻는다 — 이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다.
   let bpCache;
   const parked = async () => {
@@ -272,11 +334,15 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
     for (const it of issues) {
       try {
         const comments = await gh.comments(it.number);
-        const lastTransition = comments.filter((c) => TRANSITION_TO.test(String(c?.body ?? ""))).at(-1);
-        if (!lastTransition) continue;
-        if (nowMs - Date.parse(lastTransition.createdAt) <= stale) continue;
-        const hb = comments.map((c) => HB.exec(String(c?.body ?? ""))).filter(Boolean).at(-1);
+        let lastIdx = -1;
+        comments.forEach((c, i) => { if (TRANSITION_TO.test(String(c?.body ?? ""))) lastIdx = i; });
+        if (lastIdx === -1) continue;
+        const lastTransition = comments[lastIdx];
+        // KTB-31: **이번 스테이지의** 하트비트만 센다 — 마지막 전이 뒤에 찍힌 것들이다. 지난 스테이지의
+        // 하트비트가 남아 있다고 해서 "이번 스테이지는 시작했다"가 되지는 않는다.
+        const hb = comments.slice(lastIdx + 1).map((c) => HB.exec(String(c?.body ?? ""))).filter(Boolean).at(-1);
         if (hb && nowMs - Date.parse(hb[2]) <= stale) continue;          // 스테이지가 살아 있다
+        if (nowMs - Date.parse(lastTransition.createdAt) <= (hb ? stale : noHeartbeatStale)) continue;
         const marker = restartComment(stage, it.number);
         // r1 SF3 — 재점화 예산도 **마지막 재큐 이후**로 센다. 이 저장소의 다른 모든 라운드 카운터가
         // 그렇다(KTB-25: 재큐는 새 주기의 시작이고, 그 앞의 시도는 다른 코드에 대한 것이다). 이것만
@@ -297,7 +363,13 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         // 에스컬레이션보다 **앞**이다: 살아 있는 스테이지를 "재점화가 안 먹혔다"로 읽어 사람을 부르면
         // 그 비용은 두 번 나간다(사람의 시간 + 돌고 있던 라운드).
         const lock = await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "stalled-restart" });
-        if (lock.live) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `lock still live — ${lock.why}` }); continue; }
+        if (lock.state === "live") { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `lock still live — ${lock.why}` }); continue; }
+        // r2 MF1: 소유자를 모르는 락이면 밀지 않는다 — 하지만 조용히 넘어가지도 않는다. 이 자리에
+        // 왔다는 것은 이미 스톨 임계를 넘겼다는 뜻이므로(위의 두 검사), 곧장 사람에게 올린다.
+        if (lock.state === "unknown") {
+          await escalateUnknownLock({ gh, transition, issue: it.number, comments, nowMs, stale, actions, step: "stalled-restart", why: lock.why, extra: { stage, label } });
+          continue;
+        }
         // KTB-28 (d): 두 번 밀어도 같은 자리면 사라진 것은 런이 아니라 가정이다 — 사람에게 넘긴다.
         if (restarts.length >= STALLED_RESTART_LIMIT) {
           const t = await transition?.({ issue: it.number, to: "factory:needs-human", reason: stalledRestartLimitReason });
@@ -524,17 +596,43 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
 export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, releaseIfStale = null, quick = false }) {
   const actions = [];
   const nowMs = Date.parse(now);
+  const stale = staleMinutes * 60e3;
   if (quick) actions.push({ kind: "quick-sweep", skipped: ["quarantine", "token-expiry"] });
+  /**
+   * r2 SF5 — **복구 팔이 먼저 돈다.** 라벨 변경 하나가 최대 13초를 자게 된 뒤로(KTB-30 b), 이 잡의
+   * 시간 예산은 유한한 자원이 됐다: 넓은 API 장애 — 곧 이 두 팔이 가장 많이 할 일이 있는 바로 그
+   * 상황 — 에서는 앞선 팔들이 15분을 다 쓰고 잡이 SIGKILL될 수 있었다. 장애를 치우려고 만든 팔이
+   * 장애 때 실행되지 않는 순서였다. 그래서 맨 앞으로 옮겼다(`--quick`도 같은 순서다): 이 둘은 다른
+   * 팔들의 **입력**(상태 라벨)을 고치므로, 앞에 두면 같은 sweep 안에서 나머지 팔이 고쳐진 라벨을 본다.
+   */
+  await sweepMissingStateLabel({ gh, nowMs, actions });
+  await sweepLabelSetRepair({ gh, actions });
   for (const it of await gh.searchIssues("factory:in-progress")) {
     try {
       const comments = await gh.comments(it.number);
       const hb = comments.map((c) => HB.exec(c.body)).filter(Boolean).at(-1);
       const last = hb ? Date.parse(hb[2]) : null;
-      if (last && nowMs - last <= staleMinutes * 60e3) continue;
-      await release(it.number);
+      if (last && nowMs - last <= stale) continue;
+      /**
+       * r2 SF2 — **하트비트가 늦었다는 것은 락이 잔해라는 증명이 아니다.** 예전에는 여기서 리스도
+       * 소유자 확인도 없이 `release()`를 불렀다(무조건 삭제). 하트비트는 best-effort로 패치되고
+       * (`lib/heartbeat.js` — 에러를 삼키고 재시도하지 않는다) 30분 창은 GitHub 장애 하나면 지나간다:
+       * 그 창에서 살아 있는 런의 락을 지우고 재큐까지 하면, 같은 이슈에 두 implement가 겹친다(로컬
+       * 진입에는 concurrency 그룹조차 없다). 이제 삭제는 MF1의 리스 경로 하나뿐이고 — 읽은 sha에
+       * CAS를 건다 — 소유자가 **살아 있다고 확인되면 재큐 자체를 하지 않는다**(그 재큐는 R 예산을
+       * 태우는데, 태울 이유가 없다). 배선이 없는 구형 호출자는 예전의 `release()` 그대로다.
+       */
+      let lockNote = "lock released";
+      if (releaseIfStale) {
+        const lock = await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "heartbeat-requeue" });
+        if (lock.state === "live") { actions.push({ kind: "requeue-skipped", issue: it.number, reason: `lock still live — ${lock.why}` }); continue; }
+        lockNote = lock.released ? "lock released" : `lock left alone (${lock.why})`;
+      } else {
+        await release(it.number);
+      }
       const prev = comments.map((c) => RETRY.exec(c.body)).filter(Boolean).at(-1);
       const count = (prev ? Number(prev[2]) : 0) + 1;
-      await gh.comment(it.number, `<!-- factory-retry issue=${it.number} count=${count} -->\nheartbeat stale (${hb ? hb[2] : "none"}) — lock released, retry ${count}/${charter.limits.R}`);
+      await gh.comment(it.number, `<!-- factory-retry issue=${it.number} count=${count} -->\nheartbeat stale (${hb ? hb[2] : "none"}) — ${lockNote}, retry ${count}/${charter.limits.R}`);
       if (count <= charter.limits.R) { await transition({ issue: it.number, to: "factory:planned", reason: `sweeper requeue ${count}/${charter.limits.R}` }); actions.push({ kind: "requeue", issue: it.number, count }); }
       else { await transition({ issue: it.number, to: "factory:needs-human", reason: `retries exhausted (${count - 1}/${charter.limits.R})` }); actions.push({ kind: "retries-exhausted", issue: it.number }); }
     } catch (e) {
@@ -576,7 +674,22 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)
             // 지우고, 살아 있는 락이면 이 재시도는 시도조차 하지 않는다(마커도, 시도 번호도 쓰지 않는다).
             const lock = await releaseStaleLock({ releaseIfStale, issue: it.number, actions, step: "blocked-retry" });
-            if (lock.live) { actions.push({ kind: "blocked-retry-skipped", issue: it.number, stage: retryStage, cause, reason: `lock still live — ${lock.why}` }); continue; }
+            if (lock.state === "live") { actions.push({ kind: "blocked-retry-skipped", issue: it.number, stage: retryStage, cause, reason: `lock still live — ${lock.why}` }); continue; }
+            /**
+             * r2 MF1 — 소유자를 모르는 락: 밀지 않고, **스톨 임계를 넘겼으면** 사람에게 올린다. 여기서
+             * 임계를 다시 재는 이유는 이 팔의 입구에 나이 검사가 없기 때문이다(blocked은 나이와 무관하게
+             * 집는다) — 방금 blocked이 된 이슈를 그 자리에서 needs-human으로 올리면, 정상적인 재시도
+             * 한 번을 빼앗는다. 아래 기본 경로(에스컬레이션)는 그대로 두고 이 분기만 사유가 다르다.
+             */
+            if (lock.state === "unknown") {
+              const at = Date.parse(lastTransition(comments)?.at ?? "");
+              if (Number.isFinite(at) && nowMs - at <= stale) {
+                actions.push({ kind: "blocked-retry-skipped", issue: it.number, stage: retryStage, cause, reason: `lock owner unknown — ${lock.why}` });
+                continue;
+              }
+              await escalateUnknownLock({ gh, transition, issue: it.number, comments, nowMs, stale, actions, step: "blocked-retry", why: lock.why, extra: { stage: retryStage, cause } });
+              continue;
+            }
             const attempt = lastAttempt + 1;
             // 첫 시도이고 API 에러가 아니면 예전과 바이트가 같은 마커를 쓴다(`attempt` 생략) — 기존
             // dedupe·테스트는 이 경로에서 아무것도 안 바뀐 것처럼 본다. API 에러거나 2번째 이상이면
@@ -605,8 +718,6 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   }
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
-  await sweepLabelSetRepair({ gh, actions });
-  await sweepMissingStateLabel({ gh, nowMs, actions });
   if (quick) return actions;                     // KTB-26 — 아래 두 팔은 시간에 묶여 있다(cron의 몫)
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });

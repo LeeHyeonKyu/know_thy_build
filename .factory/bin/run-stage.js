@@ -184,11 +184,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   const c = await d.claim();
   if (!c.ok) {
     const holder = c.runner || c.holder || "unknown";
-    const line = `claim refused: lock held by ${holder} (${c.status || "unknown"})`;
+    // r2 nit 7 — `c.status`는 원격 에러 문구를 그대로 실을 수 있다(`claim.js`의 `unreachable (<메시지>)`).
+    // 그것이 닿는 곳은 run 기록만이 아니라 **공개 이슈 코멘트**다 — durable artifact 중 가장 공개적인
+    // 자리이므로, r1 nit 8이 기록에 건 것과 같은 절단을 여기에도 건다(URL은 `<url>`로, 한 줄 120자).
+    const status = truncateReason(c.status) || "unknown";
+    const line = `claim refused: lock held by ${holder} (${status})`;
     console.error(`factory: issue #${issue} — ${line}`);
     record([line]);
     try {
-      await d.comment?.(issue, `<!-- factory-claim-refused issue=${issue} stage=${stage} -->\n\`${stage}\` 스테이지가 락을 잡지 못했습니다 — ${holder}가 쥐고 있습니다(상태: ${c.status || "unknown"}). 그 러너가 이미 끝났다면 락은 잔해이고, 다음 sweep이 회수합니다(ADR-020 KTB-28).`);
+      await d.comment?.(issue, `<!-- factory-claim-refused issue=${issue} stage=${stage} -->\n\`${stage}\` 스테이지가 락을 잡지 못했습니다 — ${holder}가 쥐고 있습니다(상태: ${status}). 그 러너가 이미 끝났다면 락은 잔해이고, 다음 sweep이 회수합니다(ADR-020 KTB-28).`);
     } catch (e) { record([`claim refused: comment failed — ${e?.message || e}`]); }
     return 2;
   }
@@ -660,8 +664,20 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
       if (current === want) {
         // 사유는 사람이 읽는 한 줄이자 sweeper의 재료다 — `lib/transition.js`가 같은 코멘트에
         // `factory-blocked-origin from=<want> stage=<stage>` 마커를 함께 찍는다(KTB-15b I2).
-        const t = await d.transition({ to: "factory:blocked", reason: `job ${status} — retry via sweeper`, cause: ABORT_CAUSE[status] });
-        lines.push(t.ok ? `aborted: ${want} → factory:blocked` : `transition refused: ${t.reason}`);
+        /**
+         * r2 SF4(리뷰 finding 4) — **이 전이가 던져도 락 해제와 기록은 돈다.** KTB-30이 라벨 변경에
+         * 재시도 + REST 폴백을 달면서 `transition()`은 이제 **던질 수 있는** 호출이 됐다(넷 다 실패하면
+         * 원래 에러를 그대로 올린다). 그런데 `main()`은 `abortStage`를 맨몸으로 부르므로, 그 예외 하나가
+         * 아래의 `release()`·`runRecord`·`syncRecords`를 통째로 건너뛴다 — "언제나 락을 풀고 언제나 한
+         * 줄을 남긴다"가 계약의 전부인 스텝이 하필 API 장애 창에서 둘 다 건너뛰는 것이다(고아 락은
+         * sweeper가 회수하지만 그건 한 사이클의 지연이고, 여기서는 try/catch 하나면 지연조차 없다).
+         */
+        try {
+          const t = await d.transition({ to: "factory:blocked", reason: `job ${status} — retry via sweeper`, cause: ABORT_CAUSE[status] });
+          lines.push(t.ok ? `aborted: ${want} → factory:blocked` : `transition refused: ${t.reason}`);
+        } catch (e) {
+          lines.push(`transition failed: ${want} → factory:blocked — ${truncateReason(e?.message || e)}`);
+        }
       } else if (current !== undefined) {
         lines.push(`aborted: label is ${current ?? "none"}, not ${want} — the stage had already moved on, no transition`);
       }

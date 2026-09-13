@@ -2055,6 +2055,37 @@ test("KTB-24: a failed lock release is never silent", async () => {
 });
 
 // ── ADR-020 KTB-25 — 라운드는 마지막 재큐 이후부터 센다 ────────────────────────────────────────
+/**
+ * ADR-020 r2 SF4(리뷰 finding 4) — **던지는 전이가 락 해제와 기록을 삼키면 안 된다.** KTB-30이 라벨
+ * 변경에 재시도 + REST 폴백을 달면서 `transition()`은 던질 수 있는 호출이 됐고, `main()`은 이 함수를
+ * 맨몸으로 부른다 — 그 예외 하나가 "언제나 락을 풀고 언제나 한 줄을 남긴다"는 이 스텝의 계약 전부를
+ * 건너뛰었다. 하필 API 장애 창에서만.
+ */
+test("SF4: a throwing transition still releases the (owned) lock and writes the run record", async () => {
+  const lines = [];
+  const d = abortDeps({
+    transition: vi.fn(async () => { throw new Error("gh api 502 — REST fallback (403) also failed: https://api.github.com/x") }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await abort({ stage: "review", issue: 15, status: "cancelled", deps: d })).toBe(0);
+  expect(d.release).toHaveBeenCalled();                                // 락은 풀린다
+  expect(d.syncRecords).toHaveBeenCalled();
+  expect(lines.some((l) => l.startsWith("transition failed: factory:awaiting-review → factory:blocked"))).toBe(true);
+  expect(lines.some((l) => l.includes("lock: released after abort"))).toBe(true);
+  expect(lines.join("\n")).not.toMatch(/https:\/\//);                  // 원격 문구는 절단된다(<url>)
+});
+
+// r2 nit 7 — `claim refused` 줄과 **공개 이슈 코멘트**가 함께 쓰는 상태 문자열도 절단한다
+// (`claim.js`는 unreachable일 때 원격 에러 메시지를 그대로 싣는다).
+test("nit 7: a claim-refused status is truncated before it reaches the issue comment", async () => {
+  const long = "unreachable (fatal: could not read from remote repository https://x-access-token:ghs_SECRET@github.com/o/r.git\nplease make sure)";
+  const posted = [];
+  const deps = baseDeps({ claim: async () => ({ ok: false, holder: "lock issue=7 runner=gha-1", runner: "gha-1", status: long }), comment: async (n, body) => { posted.push(body); }, runRecord: () => {} });
+  expect(await runStage({ stage: "plan", issue: 7, deps })).toBe(2);
+  expect(posted[0]).not.toMatch(/ghs_SECRET/);
+  expect(posted[0]).toMatch(/<url>/);
+});
+
 test("KTB-25: review handoffs before the last `→ factory:queue` transition do not count toward K", () => {
   const handoff = (n) => ({ id: n, body: renderHandoff({ stage: "review", issue: 18, summary: "r", data: { issue: 18, round: n } }), createdAt: `2026-09-1${n}` });
   const requeue = { id: 99, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nneeds-human → factory:queue", createdAt: "2026-09-13" };

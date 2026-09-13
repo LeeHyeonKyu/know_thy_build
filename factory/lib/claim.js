@@ -14,20 +14,39 @@ export const ghaRunIdOf = (runner) => (/^gha-(\d+)$/.exec(String(runner ?? "")) 
  * exit 0, 기록 없음, 코멘트 없음, 잡 결론 success. 바깥에서 보면 "디스패치가 잘 됐다"였다.
  *
  * `completed: true`는 **확인된 종료**일 때만 선다. 조회가 실패했거나(자격증명·네트워크·삭제된 런),
- * 상태를 파싱하지 못했거나, 애초에 워크플로 런이 아니면(로컬 러너) 전부 "살아 있다"로 떨어진다 —
+ * 상태를 파싱하지 못했거나, 애초에 워크플로 런이 아니면(로컬 러너) 전부 "지우지 않는다"로 떨어진다 —
  * 틀린 회수는 같은 이슈에 두 스테이지를 동시에 넣는 일이고, 틀린 대기는 다음 sweep이 되돌릴 수 있다.
+ *
+ * **r2 MF1 — 그런데 그 불리언 하나로는 두 번째 질문에 답할 수 없다.** 삭제의 판단("지워도 되는가")과
+ * dispatch의 판단("저 스테이지가 지금 돌고 있는가")은 같은 사실을 요구하지 않는다. r1 SF4가 `completed:
+ * false`를 그대로 "돌고 있다"로 읽으면서, **물어보지 못한 것**(로컬 러너·조회 실패·파싱 실패)까지
+ * "돌고 있다"가 됐다 — 그러면 sweeper의 두 dispatch 팔이 마커도 남기지 않고(=예산도 쓰지 않고)
+ * 30분마다 영원히 물러난다. 소리 나는 실패가 **조용한 영구 정지**로 바뀐 것이다(리뷰 finding 1).
+ * 그래서 답은 셋이다:
+ *   - `live`   — 소유자 런이 `in_progress`/`queued`(GitHub이 그렇게 답했다). 정말 돌고 있다.
+ *   - `stale`  — 소유자 런이 `completed`. 그 락은 잔해다.
+ *   - `unknown`— 물어볼 수 없었다: 워크플로 런이 아니거나(`local/<host>`), 조회가 실패했거나
+ *                (Actions API 장애·토큰 스코프), 응답을 파싱하지 못했다. **모른다는 사실 자체가 신호다** —
+ *                호출자는 지우지도 밀지도 않고, 스톨 임계를 넘겼으면 사람을 부른다.
  */
+export const RUNNER_LIVE = "live";
+export const RUNNER_STALE = "stale";
+export const RUNNER_UNKNOWN = "unknown";
+
 export async function runnerState({ run, cwd, runner }) {
   const id = ghaRunIdOf(runner);
-  if (!id) return { completed: false, status: "not-a-workflow-run" };
+  if (!id) return { completed: false, state: RUNNER_UNKNOWN, status: "not-a-workflow-run" };
   let r;
   try { r = await run("gh", ["run", "view", id, "--json", "status"], { cwd }); }
-  catch (e) { return { completed: false, status: `unreachable (${e?.message || e})` }; }
-  if (r.code !== 0) return { completed: false, status: "unreachable" };
+  catch (e) { return { completed: false, state: RUNNER_UNKNOWN, status: `unreachable (${e?.message || e})` }; }
+  if (r.code !== 0) return { completed: false, state: RUNNER_UNKNOWN, status: "unreachable" };
   let status;
   try { status = JSON.parse(r.stdout)?.status; }
-  catch { return { completed: false, status: "unparseable" }; }
-  return { completed: status === "completed", status: status || "unknown" };
+  catch { return { completed: false, state: RUNNER_UNKNOWN, status: "unparseable" }; }
+  if (status === "completed") return { completed: true, state: RUNNER_STALE, status };
+  // 상태 필드가 비어 있으면 JSON은 파싱됐어도 **답은 받지 못한 것**이다 — live가 아니라 unknown이다.
+  if (!status) return { completed: false, state: RUNNER_UNKNOWN, status: "unknown" };
+  return { completed: false, state: RUNNER_LIVE, status };
 }
 
 /**
@@ -132,20 +151,28 @@ export async function lockHolder({ run, cwd, issue }) {
  * 예전에는 그 자리에서 남의 새 락을 지우고 `stale-lock-released`라고 적은 뒤 또 하나를 dispatch했다 —
  * 같은 이슈에 두 스테이지가 동시에 들어가는, 락이 막으려던 바로 그 사고다.
  *
- * 돌려주는 값의 `live`가 호출자의 판단 재료다: **true면 dispatch하지 않는다**(r1 SF4) — 살아 있는
- * 락 위로 민 런은 `claim()`에서 반드시 거부당하고(KTB-28 b) 재점화 예산만 태운다. 리스 실패도 live다
- * (`race: true` — 방금 누군가 잡았다는 뜻이므로). 조회 실패(`present:null`)는 live가 아니다: 그때는
- * 아무것도 모르는 것이고, 멈춘 스테이지를 되살리는 일까지 멈추면 복구 장치가 GitHub 장애와 함께 멎는다.
+ * 돌려주는 값의 `state`가 호출자의 판단 재료다(r2 MF1 — 세 값이다):
+ *   - `live`    — 소유자 런이 정말 돌고 있다. **dispatch하지 않는다**(r1 SF4): 살아 있는 락 위로 민
+ *                 런은 `claim()`에서 반드시 거부당하고(KTB-28 b) 재점화 예산만 태운다. 리스 실패도
+ *                 live다(`race: true` — 방금 누군가 잡았다는 뜻이므로).
+ *   - `none`    — 락이 없다(또는 방금 우리가 지웠다). 밀어도 된다.
+ *   - `unknown` — 소유자를 **물어볼 수 없었다**: 락 조회가 실패했거나(`present:null`), 제목을 파싱하지
+ *                 못했거나, `runner=`가 워크플로 런이 아니거나(`local/<host>`), Actions 조회가 죽었다.
+ *                 예전에는 앞의 둘이 "모르니 그냥 밀자"(live:false)였고 뒤의 둘이 "살아 있다"(live:true)였다 —
+ *                 둘 다 틀렸다. 전자는 살아 있는 락 위로 밀고, 후자는 **영원히 조용히** 물러난다.
+ *                 지금은 하나다: 지우지도 밀지도 않되, 스톨 임계를 넘긴 이슈는 사람에게 올린다(sweeper).
+ * `live` 필드는 옛 호출자·테스트 더블을 위해 남는다(`state === "live"`와 같은 값).
  */
 export async function releaseIfStale({ run, cwd, issue, checkRunner = runnerState }) {
   const held = await lockHolder({ run, cwd, issue });
-  if (held?.present === false) return { released: false, live: false, why: "no lock" };
-  if (held?.present !== true) return { released: false, live: false, why: `lock unreadable — ${held?.reason}` };
+  if (held?.present === false) return { released: false, live: false, state: "none", why: "no lock" };
+  if (held?.present !== true) return { released: false, live: false, state: RUNNER_UNKNOWN, why: `lock unreadable — ${held?.reason}` };
   const state = await checkRunner({ run, cwd, runner: held.runner });
   const runner = held.runner ?? "unknown";
-  if (!state.completed) return { released: false, live: true, runner: held.runner, why: `held by ${runner} (${state.status})` };
-  if (!held.sha) return { released: false, live: true, race: true, runner: held.runner, why: `${STALE_LOCK_RACE} — lock sha unreadable` };
+  if (state.state === RUNNER_UNKNOWN) return { released: false, live: false, state: RUNNER_UNKNOWN, runner: held.runner, why: `owner ${runner} unknowable (${state.status})` };
+  if (!state.completed) return { released: false, live: true, state: RUNNER_LIVE, runner: held.runner, why: `held by ${runner} (${state.status})` };
+  if (!held.sha) return { released: false, live: true, state: RUNNER_LIVE, race: true, runner: held.runner, why: `${STALE_LOCK_RACE} — lock sha unreadable` };
   const r = await run("git", ["push", leaseArg(issue, held.sha), "origin", `:${lockRef(issue)}`], { cwd });
-  if (r.code === 0) return { released: true, live: false, runner: held.runner, why: `stale lock from ${runner} released` };
-  return { released: false, live: true, race: true, runner: held.runner, why: `${STALE_LOCK_RACE} — ${runner}'s lock changed between read and delete` };
+  if (r.code === 0) return { released: true, live: false, state: "none", runner: held.runner, why: `stale lock from ${runner} released` };
+  return { released: false, live: true, state: RUNNER_LIVE, race: true, runner: held.runner, why: `${STALE_LOCK_RACE} — ${runner}'s lock changed between read and delete` };
 }

@@ -79,6 +79,17 @@ test("an issue with no factory label at all is not reported as no-state-label", 
   expect(buildStatus(args).needsYou.some((n) => n.number === 21)).toBe(false);
 });
 
+/**
+ * r2 SF6 — sweeper 8번 팔은 라벨이 **하나도** 없어도 전이 이력이 있으면 그 이슈를 잡는다(상태 라벨이
+ * 유일한 factory 라벨이었던 경우 — triage가 tier를 붙이기 전, 데모 #2의 모양). 사람이 보는 창구가 그
+ * 팔보다 좁으면, 팔이 고치지 못한 바로 그 이슈가 화면에서도 사라진다.
+ */
+test("SF6: an issue with NO factory label but a transition history is reported too", () => {
+  const args = baseArgs();
+  args.issues = [...args.issues, { number: 22, title: "lost its only factory label", labels: ["bug"], updatedAt: NOW, closedAt: null, factoryTransition: true }];
+  expect(buildStatus(args).needsYou).toContainEqual({ kind: "no-state-label", number: 22, title: "lost its only factory label", hint: "sweeper → label restore" });
+});
+
 test("inProgress marks a 35-minute-old heartbeat stale, a 5-minute-old one not", () => {
   const s = buildStatus(baseArgs());
   const byNumber = Object.fromEntries(s.inProgress.map((p) => [p.number, p]));
@@ -209,7 +220,7 @@ function fakeGh() {
     // KTB-30: 라벨 없는 조회(`{state:"open"}`)는 열린 이슈 전체다 — 상태 라벨이 0개인 이슈를 찾는
     // 유일한 길이다(라벨로는 조회할 수 없다).
     issueList: vi.fn(async ({ labels, state }) => {
-      const open = [...baseIssues(), { number: 20, title: "label swap died", labels: ["factory:tier-standard"], updatedAt: NOW, closedAt: null }, { number: 21, title: "plain bug", labels: ["bug"], updatedAt: NOW, closedAt: null }]
+      const open = [...baseIssues(), { number: 20, title: "label swap died", labels: ["factory:tier-standard"], updatedAt: NOW, closedAt: null }, { number: 21, title: "plain bug", labels: ["bug"], updatedAt: NOW, closedAt: null }, { number: 22, title: "lost its only factory label", labels: ["bug"], updatedAt: NOW, closedAt: null }, { number: 23, title: "old plain bug", labels: ["bug"], updatedAt: "2026-09-01T00:00:00Z", closedAt: null }]
         .filter((i) => (state === "closed" ? i.labels.includes("factory:merged") : !i.labels.includes("factory:merged")));
       if (!labels) return open;
       return baseIssues().filter((i) => i.labels.includes(labels[0]));
@@ -223,6 +234,8 @@ function fakeGh() {
       if (n === 3) return [{ id: 1, body: `<!-- factory-heartbeat issue=3 -->\nstage: implement · runner: gha-1 · started: x · last: ${minutesAgo(5)}`, createdAt: NOW }];
       if (n === 4) return [{ id: 2, body: `<!-- factory-heartbeat issue=4 -->\nstage: implement · runner: gha-1 · started: x · last: ${minutesAgo(35)}`, createdAt: NOW }];
       if (n === 6) return [{ id: 3, body: `<!-- factory-heartbeat issue=6 -->\nstage: review · runner: gha-2 · started: x · last: ${minutesAgo(2)}`, createdAt: NOW }];
+      // r2 SF6: #22는 factory 라벨이 하나도 없지만 전이 이력이 있다 — 8번 팔이 보는 그 집합이다
+      if (n === 22) return [{ id: 4, body: "<!-- factory-transition:v1 from=factory:queue to=factory:ready by=script -->\nfactory:queue → factory:ready", createdAt: NOW }];
       return [];
     }),
     comment: throwing("comment"),
@@ -253,7 +266,7 @@ test("statusCommand --json exits 0, emits buildStatus JSON (incl. blocked issues
   expect(code).toBe(0);
   expect(o.out).toHaveLength(1);
   const parsed = JSON.parse(o.out[0]);
-  expect(parsed.needsYou.map((n) => n.kind)).toEqual(["needs-human", "needs-info", "no-state-label", "retro-proposal", "harness"]);
+  expect(parsed.needsYou.map((n) => n.kind)).toEqual(["needs-human", "needs-info", "no-state-label", "no-state-label", "retro-proposal", "harness"]);
   expect(parsed.backPressure.awaiting_review).toBe(2);
   expect(parsed.recent).toHaveLength(2);
   expect(parsed.usage).toBeTruthy();
@@ -265,6 +278,10 @@ test("statusCommand --json exits 0, emits buildStatus JSON (incl. blocked issues
   // KTB-30: 상태 라벨이 0개인 #20은 어떤 라벨 조회에도 안 걸린다 — 열린 이슈 전체 조회가 그것을 줍는다
   expect(parsed.needsYou).toContainEqual({ kind: "no-state-label", number: 20, title: "label swap died", hint: "sweeper → label restore" });
   expect(parsed.needsYou.some((n) => n.number === 21)).toBe(false);
+  // r2 SF6: 라벨이 하나도 없어도 전이 이력이 있으면 sweeper 8번 팔과 같은 집합에 든다(#22).
+  // 24시간 창 밖의 평범한 이슈(#23)에는 코멘트 조회조차 나가지 않는다.
+  expect(parsed.needsYou).toContainEqual({ kind: "no-state-label", number: 22, title: "lost its only factory label", hint: "sweeper → label restore" });
+  expect(gh.comments).not.toHaveBeenCalledWith(23);
 
   for (const mutator of ["comment", "patchComment", "addLabels", "removeLabel", "setFactoryLabel", "createDraftPr", "createIssue", "closeIssue", "mergePr", "setStatus", "createLabel", "putBranchProtection", "setVariable"]) {
     expect(gh[mutator]).not.toHaveBeenCalled();

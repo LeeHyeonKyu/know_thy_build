@@ -183,13 +183,46 @@ test("MF1: releaseIfStale — a live runner is left alone (live:true), an absent
   expect(running.calls.some((c) => c.args[0] === "push")).toBe(false);
 
   const gone = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "fetch", result: { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/factory/lock-7" } }]);
-  expect(await releaseIfStale({ run: gone, cwd: "/repo", issue: 7 })).toEqual({ released: false, live: false, why: "no lock" });
+  expect(await releaseIfStale({ run: gone, cwd: "/repo", issue: 7 })).toEqual({ released: false, live: false, state: "none", why: "no lock" });
 
-  // 조회 실패는 "살아 있다"가 아니다 — 그렇게 읽으면 GitHub 장애 동안 복구 장치가 통째로 멎는다
+  // 조회 실패는 "살아 있다"가 아니다 — 그렇게 읽으면 GitHub 장애 동안 복구 장치가 통째로 멎는다.
+  // r2 MF1: 그렇다고 "잔해"도 아니다 — 세 번째 값 `unknown`이다(밀지도 지우지도 않고, 사람을 부른다).
   const down = stale({ fetchCode: 128 });
   const r3 = await releaseIfStale({ run: down, cwd: "/repo", issue: 7 });
-  expect(r3).toMatchObject({ released: false, live: false });
+  expect(r3).toMatchObject({ released: false, live: false, state: "unknown" });
   expect(r3.why).toMatch(/lock unreadable/);
+});
+
+/**
+ * r2 MF1 — **"돌고 있다"와 "물어보지 못했다"는 다른 사실이다.** r1은 `completed:false` 하나로 둘을
+ * 합쳤고, sweeper는 그 불리언으로 *삭제*가 아니라 *dispatch*를 결정했다: 로컬 러너가 남긴 락
+ * (`runner=local/<host>` — §4.2.5의 지원 경로) 하나가 두 dispatch 팔을 영원히 조용히 세웠다.
+ */
+test("MF1 r2: runnerState/releaseIfStale are three-valued — live · stale · unknown", async () => {
+  const cases = [
+    [{ status: "in_progress" }, "live"],
+    [{ status: "queued" }, "live"],
+    [{ status: "completed" }, "stale"],
+  ];
+  for (const [over, want] of cases) {
+    const run = stale(over);
+    expect((await runnerState({ run, cwd: "/repo", runner: "gha-4242" })).state, JSON.stringify(over)).toBe(want);
+  }
+  // unknown 넷: 워크플로 런이 아님 · 조회 실패(exit≠0) · 조회가 던짐 · 상태 필드 없음
+  expect((await runnerState({ run: makeFakeRun([]), cwd: "/repo", runner: "local/mac" })).state).toBe("unknown");
+  const down = makeFakeRun([{ match: (c) => c === "gh", result: { code: 1, stdout: "", stderr: "HTTP 403: Resource not accessible (Actions: read)" } }]);
+  expect((await runnerState({ run: down, cwd: "/repo", runner: "gha-1" })).state).toBe("unknown");
+  const boom = makeFakeRun([{ match: (c) => c === "gh", result: () => { throw new Error("gh: network down"); } }]);
+  expect((await runnerState({ run: boom, cwd: "/repo", runner: "gha-1" })).state).toBe("unknown");
+  const empty = makeFakeRun([{ match: (c) => c === "gh", result: { code: 0, stdout: "{}", stderr: "" } }]);
+  expect((await runnerState({ run: empty, cwd: "/repo", runner: "gha-1" })).state).toBe("unknown");
+
+  // 로컬 러너가 쥔 락: 지우지 않고(fail closed), live도 아니다 — sweeper가 이것을 보고 사람을 부른다.
+  const local = stale({ subject: "lock issue=7 stage=implement runner=local/hk-mac at=t" });
+  const r = await releaseIfStale({ run: local, cwd: "/repo", issue: 7 });
+  expect(r).toMatchObject({ released: false, live: false, state: "unknown" });
+  expect(r.why).toMatch(/unknowable \(not-a-workflow-run\)/);
+  expect(local.calls.some((c) => c.args[0] === "push")).toBe(false);
 });
 
 test("KTB-28: a lock whose runner is still in_progress is NOT reclaimed — the refusal carries runner + status", async () => {
@@ -222,9 +255,9 @@ test("KTB-28: ghaRunIdOf / runnerState — only `gha-<digits>` is a workflow run
   expect(ghaRunIdOf("local/mac-air.local")).toBeNull();
   expect(ghaRunIdOf("gha-abc")).toBeNull();
   expect(ghaRunIdOf(null)).toBeNull();
-  // 로컬 러너는 조회 자체를 하지 않는다(살아 있는 것으로 본다)
+  // 로컬 러너는 조회 자체를 하지 않는다(회수하지 않는다 — r2 MF1 이후로는 `unknown`이다)
   const noGh = makeFakeRun([]);
-  expect(await runnerState({ run: noGh, cwd: "/repo", runner: "local/mac" })).toEqual({ completed: false, status: "not-a-workflow-run" });
+  expect(await runnerState({ run: noGh, cwd: "/repo", runner: "local/mac" })).toEqual({ completed: false, state: "unknown", status: "not-a-workflow-run" });
   expect(noGh.calls).toEqual([]);
   // `gh`가 던져도 살아 있는 것으로 본다
   const boom = makeFakeRun([{ match: (c) => c === "gh", result: () => { throw new Error("gh: network down"); } }]);
