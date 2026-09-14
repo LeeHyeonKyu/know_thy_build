@@ -128,3 +128,31 @@ review는 **낡은 deny 목록**으로 돌았고, 같은 자리에서 같은 이
   트리 위에서 overlay를 다시 받는다는 것이다.
 - triage·plan은 overlay를 돌지 않는다 — PR 이전 스테이지라 워킹 트리가 언제나 base다. 그 전제가
   깨지는 배선(PR ref를 체크아웃하는 커스텀 워크플로)에서는 이 Task가 막아 주지 않는다.
+
+## 7. 리뷰 batch-1 수정 — overlay가 놓친 세 파일과 "추가된 파일" (MF-3)
+
+적대적 재리뷰(`scratchpad/review-audit-batch1-report.md` §5)가 스크래치 저장소에서 overlay의 실제 의미를
+재현해 두 가지를 찾았다.
+
+1. **`CLAUDE.md`·`.mcp.json`(그리고 `AGENTS.md`)이 통째로 밖에 있었다.** `OVERLAY_ROOTS`에도,
+   `OVERLAY_PATHSPECS`에도(→ `overlayDrift`가 보지 못한다), `[protected].factory`에도, 훅 `prot`에도,
+   ci-settings deny에도 없었다. 그런데 `claude -p` 세션은 cwd가 저장소 루트라 `CLAUDE.md`를 **프로젝트
+   지시문**으로, `.mcp.json`을 **프로젝트 MCP 서버**로 읽는다 — 곧 PR 하나가 리뷰 세션에 지시문을 적어
+   넣을 수 있었고, 그 파일이 보호 경로가 아니라 **그 PR은 자동 머지까지 됐다**. KTB-37이 닫으려던 구멍이
+   파일 세 개만큼 열려 있었다. 이 저장소에 아직 그 파일들이 없어서 아무 것도 깨지지 않은 latent 결함이다.
+   **고친 것**: 셋을 `OVERLAY_ROOTS`/`OVERLAY_PATHSPECS`/`OVERLAY_LABEL`에 넣었다. `.claude/settings.local.json`은
+   `.claude/` 아래라 이미 덮인다.
+2. **PR이 *추가한* 파일은 overlay가 지우지 않았다.** `git checkout <sha> -- <pathspec>`은 그 커밋에 **있는**
+   경로만 되돌린다 — `.claude/hooks/evil.sh`처럼 PR이 새로 들여온 파일은 살아남고, `overlayDrift`가 그것을
+   잡는 것은 세션이 **이미 그 설정으로 돌고 난 뒤**였다(런은 멈추지만 판단은 주입된 설정 아래서 형성된다).
+   **고친 것**: overlay가 `git diff --name-only --diff-filter=A <sha> -- <전체 pathspec>`으로 추가된 경로를
+   찾아 `git rm -f`로 지운다. pathspec이 `present`가 아니라 **전체 목록**인 것이 요점이다 — 스테이지 커밋에
+   없는 경로야말로 PR이 새로 들여온 경로이고, `present` 필터를 쓰면 정확히 그 구멍이 남는다. 지우지 못하면
+   진행하지 않는다(fail closed). 그리고 overlay 직후, 곧 **`claude -p` 앞에서** drift 검사를 한 번 돌린다 —
+   "이 트리의 팩토리 소유 경로가 스테이지 커밋과 바이트 동일하다"가 overlay가 약속한 전부이고, 그 약속을
+   세션 전에 확인하지 않으면 약속이 아니다. 세션 **뒤**의 검사는 그대로 남는다(두 검사는 다른 것을 묻는다).
+
+**남은 것**: `CLAUDE.md`·`.mcp.json`·`AGENTS.md`를 `[protected].factory`에 넣는 일은 하지 않았다 — 그 목록은
+M8 이후 **생성물의 출처**라, 손대면 훅 `prot` 블록과 두 `ci-settings*.json`을 같은 커밋에서 다시 생성해야
+한다(`protected.parity`). 별도 변경으로 남긴다. 그때까지 overlay는 스테이지 **안에서** 그 파일들을 base의
+것으로 만들지만, 그것을 고친 PR의 **자동 머지**를 막지는 않는다(ADR-023 잔여 위험 #4).

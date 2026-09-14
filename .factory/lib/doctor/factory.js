@@ -7,7 +7,7 @@ import { findProtBlock, protBlock, writeGlobs, ciDenyEntries } from "../protecte
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
-import { L0_CONTEXTS, CODEOWNERS_PATH } from "../bootstrap.js";
+import { L0_CONTEXTS, CODEOWNERS_PATH, RECORDS_BRANCH } from "../bootstrap.js";
 import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
 
@@ -452,6 +452,27 @@ export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
 }
 
 /** gh 호출이 하나라도 throw하면(오프라인 등) 세부 검사를 포기하고 단일 WARN으로 떨어진다 — fail closed가 아니라 "확인 못 함"으로 취급(오프라인 허용). */
+/**
+ * 리뷰 batch-1 MF-2 — `protection.records`. 머지 스테이지가 리뷰 handoff를 대조하는 상대는
+ * `factory/records`의 run 기록이다. 그 브랜치가 force-push/삭제로 다시 쓰일 수 있으면 대조는
+ * 아무것도 증명하지 않는다 — 그래서 "보호가 없다"는 조용히 넘어갈 사실이 아니라 매 실행에서
+ * 소리 내어 말할 사실이다(WARN: 플랜·권한 때문에 못 거는 저장소가 정당하게 존재한다. 그때 증거를
+ * 지키는 것은 block-dangerous 훅 하나뿐이고, 그 문장이 그대로 detail에 실린다).
+ */
+export async function checkRecordsProtection({ gh }) {
+  let p = null;
+  try {
+    p = await gh.getBranchProtection(RECORDS_BRANCH);
+  } catch (e) {
+    return [c("protection.records", "WARN", `records branch unprotected — evidence relies on hooks (${RECORDS_BRANCH}: ${e.message})`)];
+  }
+  if (!p) return [c("protection.records", "WARN", `records branch unprotected — evidence relies on hooks. The merge stage checks every review handoff against the run record on ${RECORDS_BRANCH}; without force-push/deletion protection that record can be rewritten. Run \`factory bootstrap\` (the branch must exist first — the first stage run creates it)`)];
+  const force = p.allow_force_pushes?.enabled ?? p.allow_force_pushes;
+  const del = p.allow_deletions?.enabled ?? p.allow_deletions;
+  if (force || del) return [c("protection.records", "WARN", `records branch unprotected — evidence relies on hooks: ${RECORDS_BRANCH} allows ${force ? "force pushes" : ""}${force && del ? " and " : ""}${del ? "deletion" : ""}, so a recorded review verdict can be rewritten. Run \`factory bootstrap\``)];
+  return [c("protection.records", "PASS", `${RECORDS_BRANCH}: no force pushes, no deletion — the review evidence the merge stage checks against is append-only (the single-credential residual stands: the runner and the agent share one token, ADR-023)`)];
+}
+
 export async function checkGitHub({ gh, harness, labels, env = process.env, root = null, exists = null, readFile = null }) {
   // ADR-021 r1 MF-1 — CODEOWNERS는 **저장소의 파일**이지 API 상태가 아니다. gh가 하나라도 실패해
   // 아래 catch로 떨어지면 이 값은 쓰이지 않는다 — 읽기 자체는 부수효과가 없으므로 먼저 읽어 둔다.
@@ -502,6 +523,7 @@ export async function checkGitHub({ gh, harness, labels, env = process.env, root
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
       protectionCheck,
       c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.length ? l1.join(", ") : "(none configured)"}`),
+      ...(await checkRecordsProtection({ gh })),
       ...(await checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env, codeowners })),
     ];
   } catch (e) {

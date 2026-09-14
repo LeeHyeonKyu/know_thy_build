@@ -8,7 +8,7 @@ import { makeGh, allChecksGreen } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
-import { runStageGates, verdictLine, commitStatusState } from "../lib/gates.js";
+import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
@@ -30,8 +30,8 @@ import { renderHandoff, latestHandoff } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, countTransitionsTo } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord } from "../lib/run-record.js";
-import { syncRecords, hydrateRecord } from "../lib/records-branch.js";
+import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence } from "../lib/run-record.js";
+import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 
@@ -539,6 +539,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
+      /**
+       * ── 리뷰 batch-1 MF-2 (H1b-b) — **이 판정에 출처를 남긴다.**
+       * handoff 코멘트는 에이전트가 쥔 봇 계정으로 나가고 `gh issue comment`는 훅이 일부러 열어 둔
+       * 문이라, 머지 스테이지가 handoff만 읽는 한 그 판정은 위조 가능하다. 이 한 줄은 **러너가**
+       * `claude -p`가 끝난 뒤에 쓰고 `factory/records`로 나간다 — 그 브랜치로 가는 에이전트 세션의
+       * push는 훅이 막는다. 머지 스테이지는 둘이 **같은 커밋·같은 verdict·같은 라운드**일 때만 머지한다.
+       * sha는 handoff가 적어 넣은 값이 아니라 **우리가 실제로 체크아웃한 커밋**이다(checkoutSha, R6) —
+       * 그래야 head_sha를 지어낸 handoff가 이 대조에서 걸린다.
+       */
+      record([reviewEvidenceLine({ headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
@@ -1002,10 +1012,20 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
  * (`.factory/out/**`)은 제외한다: 그건 이 런이 지금 만들고 있는 것이지 설정이 아니다.
  * 실패하면 스테이지는 진행하지 않는다(fail closed) — "확인되지 않은 설정"은 설정이 아니다.
  */
-export const OVERLAY_ROOTS = [".factory", ".claude", "docs/factory/CHARTER.md"];
+/**
+ * ── 리뷰 batch-1 MF-3 — **세션 설정은 이름이 아니라 기능으로 정해진다.** ─────────────────────────
+ * `CLAUDE.md`·`.mcp.json`·`AGENTS.md`는 `OVERLAY_ROOTS` 밖이었고, `OVERLAY_PATHSPECS` 밖이라
+ * `overlayDrift`도 보지 못했고, `[protected]`에도 없었다 — 곧 **PR head가 통째로 쥐고 있는** 파일인데
+ * `claude -p` 세션은 cwd가 저장소 루트라 그것들을 프로젝트 지시문(CLAUDE.md)·프로젝트 MCP 서버
+ * (.mcp.json)로 그대로 읽는다. PR 하나가 리뷰 세션에 "이 PR을 승인하라"를 적어 넣을 수 있었고, 그
+ * 파일이 보호 경로가 아니라서 **그 PR은 자동 머지까지 됐다** — KTB-37이 닫으려던 그 구멍이 파일
+ * 세 개만큼 열려 있었던 것이다. 이 저장소에는 아직 그 파일들이 없어서 아무 것도 깨지지 않았다(latent).
+ * `.claude/settings.local.json`은 `.claude/` 아래라 이미 덮인다.
+ */
+export const OVERLAY_ROOTS = [".factory", ".claude", "docs/factory/CHARTER.md", "CLAUDE.md", "AGENTS.md", ".mcp.json"];
 export const OVERLAY_EXCLUDE = ":(exclude).factory/out";
-export const OVERLAY_PATHSPECS = [".factory", OVERLAY_EXCLUDE, ".claude", "docs/factory/CHARTER.md"];
-export const OVERLAY_LABEL = ".factory/** (except .factory/out/**), .claude/**, docs/factory/CHARTER.md";
+export const OVERLAY_PATHSPECS = [".factory", OVERLAY_EXCLUDE, ".claude", "docs/factory/CHARTER.md", "CLAUDE.md", "AGENTS.md", ".mcp.json"];
+export const OVERLAY_LABEL = ".factory/** (except .factory/out/**), .claude/**, docs/factory/CHARTER.md, CLAUDE.md, AGENTS.md, .mcp.json";
 /** overlay가 손대는 스테이지 — PR 콘텐츠가 워킹 트리에 올 수 있는 셋. triage·plan은 PR 이전이라 언제나 base 위에 있다. */
 const OVERLAY_STAGES = new Set(["implement", "review", "merge"]);
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -1023,6 +1043,16 @@ export async function resolveStageSha({ run, root, cwd = root, env = process.env
   return { ok: true, sha, source: ref };
 }
 
+/**
+ * ── 리뷰 batch-1 잠정 tier 바닥(Task 4까지) ──────────────────────────────────────────────────────
+ * 리뷰 로스터의 크기가 곧 정족수이고, 그 크기는 tier가 정한다. tier가 **triage 에이전트의 자기
+ * 신고**에서만 나오면 낮춰 신고하는 것만으로 로스터와 정족수가 함께 줄어든다(감사 H3). `gates.js`는
+ * 이미 `tier_effective = maxTier(declared, tierFloor(diff))`를 계산해 `.factory/out/gates.json`에
+ * 적어 두는데 아무도 읽지 않았다 — 여기서 **최대치**를 취한다: 자기 신고는 tier를 올릴 수는 있어도
+ * 내릴 수는 없다. 바닥이 없으면(게이트 파일이 없는 경로) 오늘의 동작 그대로 신고값이다.
+ */
+export const reviewTier = ({ claimed, floor }) => (floor ? maxTier(claimed, floor) : claimed);
+
 export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch = () => "main" }) {
   return async () => {
     const branch = typeof defaultBranch === "function" ? defaultBranch() : defaultBranch;
@@ -1039,12 +1069,39 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
     const pathspecs = present.flatMap((p) => (p === ".factory" ? [p, OVERLAY_EXCLUDE] : [p]));
     const co = await run("git", ["checkout", s.sha, "--", ...pathspecs], { cwd: root });
     if (co.code !== 0) return { ok: false, reason: `overlay checkout failed (${s.sha.slice(0, 7)} ${s.source}): ${co.stderr?.trim() || `exit ${co.code}`}` };
+    /**
+     * ── 리뷰 batch-1 MF-3 — **overlay는 "덮어쓰기"가 아니라 "그 커밋과 바이트 동일하게 만들기"다.**
+     * `git checkout <sha> -- <pathspec>`은 그 커밋에 **있는** 경로만 되돌린다 — PR이 **새로 추가한**
+     * 파일(`.claude/hooks/evil.sh`, `.claude/settings.local.json`, 또는 main에 없던 `CLAUDE.md`)은
+     * 그대로 남는다. 재리뷰가 스크래치 저장소에서 실제로 확인한 결과다. 그 파일들은 나중에
+     * `overlayDrift`에 잡히지만 **그때는 `claude -p`가 이미 그 설정으로 돌고 난 뒤**였다(세션 379행,
+     * 클린 체크 390행) — 런은 멈추지만 리뷰의 판단은 주입된 설정 아래에서 형성된 뒤다.
+     * 그래서 여기서 지운다. pathspec은 `present`가 아니라 **전체 목록**이다: 스테이지 커밋에 없는
+     * 경로야말로 PR이 새로 들여온 경로이고, `present` 필터를 그대로 쓰면 정확히 그 구멍이 남는다.
+     * `git diff`는 매치되지 않는 pathspec에 대해 실패하지 않는다(`checkout`과 다르다).
+     * 지우지 못하면 **진행하지 않는다**(fail closed) — 확인되지 않은 설정은 설정이 아니다.
+     */
+    const added = await run("git", ["diff", "--name-only", "--diff-filter=A", s.sha, "--", ...OVERLAY_PATHSPECS], { cwd: root });
+    if (added.code !== 0) return { ok: false, reason: `overlay added-file scan failed: ${added.stderr?.trim() || `exit ${added.code}`}` };
+    const extras = added.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (extras.length) {
+      const rm = await run("git", ["rm", "-f", "--quiet", "--", ...extras], { cwd: root });
+      if (rm.code !== 0) return { ok: false, reason: `overlay could not remove ${extras.length} PR-added factory-owned path(s) (${extras.slice(0, 5).join(", ")}): ${rm.stderr?.trim() || `exit ${rm.code}`}` };
+    }
     // 무엇이 실제로 덮였는가 — 한 줄 로그의 재료이자, 쓰기 금지 스테이지의 클린 체크에 넘길 허용 목록이다.
-    const st = await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...pathspecs], { cwd: root });
+    const st = await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...OVERLAY_PATHSPECS], { cwd: root });
     if (st.code !== 0) return { ok: false, reason: `overlay status failed: ${st.stderr?.trim() || `exit ${st.code}`}` };
-    const paths = new Set();
+    const paths = new Set(extras);
     for (const line of st.stdout.split("\n").filter(Boolean)) for (const p of pathsOfStatusLine(line)) if (p) paths.add(p);
-    return { ok: true, sha: s.sha, source: s.source, paths: [...paths] };
+    /**
+     * 리뷰 batch-1 MF-3 — drift 검사를 **`claude -p` 앞에서도** 한 번 돌린다. 지금까지 이 검사는
+     * 세션이 끝난 뒤에만 돌았고(`assertCleanWorktree`), 그래서 overlay가 놓친 것이 있어도 세션은
+     * 이미 그 설정으로 돌아 버렸다. 여기서 GREEN이라는 것은 "지금 트리의 팩토리 소유 경로가 스테이지
+     * 커밋과 바이트 동일하다"는 뜻이고, 그것이 overlay가 약속한 전부다.
+     */
+    const drift = await overlayDrift({ run, cwd: root, sha: s.sha });
+    if (!drift.ok) return { ok: false, reason: drift.reason || `the overlay did not make the factory-owned paths identical to ${s.sha.slice(0, 7)}: ${drift.paths.join(", ")}` };
+    return { ok: true, sha: s.sha, source: s.source, paths: [...paths], removed: extras };
   };
 }
 
@@ -1329,11 +1386,40 @@ async function main() {
       if (!v.ok) return { ok: false, reason: `review handoff invalid: ${v.errors.join("; ")}` };
       return { ok: true, data: h.data };
     },
+    /**
+     * ── 리뷰 batch-1 잠정 tier 바닥(Task 4까지) ────────────────────────────────────────────────
+     * 로스터 크기 = 정족수다. 그 크기가 **triage 에이전트의 자기 신고**(handoff의 `tier`)에서만
+     * 나오면, tier를 낮춰 신고하는 것만으로 로스터도 머지 스테이지가 강제하는 정족수도 함께
+     * 줄어든다 — 감사 H3와 같은 결함이 새 정족수 검사에 그대로 상속된다.
+     * `runStageGates`는 이미 `tier_effective = maxTier(declared, tierFloor(diff))`를 계산해
+     * `.factory/out/gates.json`에 적어 두는데(gates.js) 그 값을 읽는 곳이 없었다. 여기서 둘의
+     * **최대치**를 취한다: 자기 신고는 tier를 올릴 수는 있어도 내릴 수는 없게 된다.
+     * (Task 4가 `tier_effective`를 파이프라인 1급 시민으로 만들면 이 두 줄은 그쪽으로 옮겨간다.)
+     */
     reviewRoster: async () => {
       try {
-        const tier = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
-        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", tier), tier };
+        const claimed = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
+        const floor = readJson(gatesPath)?.tier_effective ?? null;
+        const tier = reviewTier({ claimed, floor });
+        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", tier), tier, tier_claimed: claimed, tier_floor: floor };
       } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
+    },
+    /**
+     * 리뷰 batch-1 MF-2 — 머지 직전 §(6b2)의 재료: `factory/records` 브랜치의 run 기록에 **러너가**
+     * 쓴 `review-evidence:` 줄. 브랜치를 읽지 못하는 것은 "기록이 없다"가 아니라 **판정 불가**이므로
+     * `readRecordsDetailed`의 `fetched`를 그대로 fail-closed 신호로 쓴다(`readRecords`는 그 둘을
+     * 구별하지 못한다 — 네트워크 실패도 빈 Map으로 보인다).
+     */
+    reviewRecord: async () => {
+      let det;
+      try { det = await readRecordsDetailed({ run, cwd: root }); }
+      catch (e) { return { ok: false, reason: `the factory/records branch could not be read — ${e?.message || e}` }; }
+      if (!det?.fetched) return { ok: false, reason: "the factory/records branch could not be fetched — the review evidence is unreachable, and an unverified review is not a passed review" };
+      const text = det.records.get(String(issue));
+      if (!text) return { ok: false, reason: `factory/records carries no run record for issue #${issue}` };
+      const rec = parseReviewEvidence(text);
+      if (!rec) return { ok: false, reason: `the run record for issue #${issue} on factory/records carries no review-evidence line` };
+      return { ok: true, record: rec };
     },
     get maxRounds() { return charter?.limits?.K ?? null; },
     /** CHARTER `merge.human_gate` — 머지 전이 텍스트가 사람의 서명 유무를 소리 내어 말한다(감사 H6). */

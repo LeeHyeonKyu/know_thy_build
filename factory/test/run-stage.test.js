@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason } from "../bin/run-stage.js";
+import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -1460,6 +1460,8 @@ const checkoutBaseDeps = (over = {}) => baseDeps({
 const mergeReviewDepsFor = (sha) => ({
   reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
   reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+  // 리뷰 batch-1 MF-2 — handoff의 출처: 러너가 factory/records의 run 기록에 쓴 review-evidence 줄.
+  reviewRecord: async () => ({ ok: true, record: { stage: "review", runnerId: "gha/1", headSha: sha, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
   maxRounds: 3,
   prHeadShaLive: async () => sha,
   factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
@@ -1487,6 +1489,7 @@ const mergeHappyDeps = (over = {}) => {
     mergePr: async () => {}, closeIssue: async () => {},
     reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: live, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
     reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+    reviewRecord: async () => ({ ok: true, record: { stage: "review", runnerId: "gha/1", headSha: live, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
     maxRounds: 3,
     prHeadShaLive: async () => live,
     factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
@@ -2595,4 +2598,23 @@ test("KTB-35: unhandledGateReason picks the first gate carrying the marker, and 
   expect(unhandledGateReason({ status: "GREEN", gates: { unit: { status: "GREEN", reason } } })).toBe(null);
   expect(unhandledGateReason(null)).toBe(null);
   expect(unhandledGateReason({ status: "RED" })).toBe(null);
+});
+
+// ── 리뷰 batch-1 잠정 tier 바닥(Task 4까지) ──────────────────────────────────────────────────────
+// 로스터 크기 = 정족수이고, 그 크기는 tier가 정한다. tier가 triage 에이전트의 **자기 신고**에서만
+// 나오면 낮춰 신고하는 것만으로 로스터도, 머지 스테이지가 강제하는 정족수도 함께 줄어든다(감사 H3).
+// `gates.json`의 `tier_effective`는 이미 diff로 계산된 바닥인데 아무도 읽지 않았다.
+test("review roster tier: the triage self-report can raise the tier but never lower it below the gates floor", () => {
+  // 코드를 건드린 PR을 "docs"라고 신고해도 로스터는 standard의 것이다.
+  expect(reviewTier({ claimed: "docs", floor: "standard" })).toBe("standard");
+  expect(reviewTier({ claimed: "docs", floor: "load-bearing" })).toBe("load-bearing");
+  expect(reviewTier({ claimed: "standard", floor: "load-bearing" })).toBe("load-bearing");
+  // 올리는 방향은 그대로 존중한다 — 자기 신고는 더 엄격해질 수는 있다.
+  expect(reviewTier({ claimed: "load-bearing", floor: "docs" })).toBe("load-bearing");
+  expect(reviewTier({ claimed: "standard", floor: "docs" })).toBe("standard");
+  // 바닥이 없으면(게이트 파일이 없는 경로) 오늘의 동작 그대로다.
+  expect(reviewTier({ claimed: "docs", floor: null })).toBe("docs");
+  // 모르는 값은 docs로 기울지 않는다 — 약한 쪽으로 기우는 정규화는 자기 신고를 그대로 믿는 것과 같다.
+  expect(reviewTier({ claimed: "weird", floor: "standard" })).toBe("standard");
+  expect(reviewTier({ claimed: "weird", floor: "weird" })).toBe("standard");
 });

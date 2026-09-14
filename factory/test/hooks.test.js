@@ -1073,6 +1073,114 @@ test("block-dangerous: commit status / check-run / review approval forgery is bl
   }
 }, 30000);
 
+// ── 리뷰 batch-1 MF-1 (H1b-a) — 권한 엔드포인트는 **클라이언트 × 엔드포인트 표**로 막힌다 ────────
+// 재리뷰가 실행해 확인한 결함: H1b의 모든 규칙이 리터럴 `gh`에 앵커돼 있어 `curl`/`wget`/GraphQL이
+// 같은 일을 rc=0으로 해냈다(`GH_TOKEN`은 모든 스테이지의 env에 있다). 표의 각 칸이 그 rc=0 하나다.
+const API_CLIENTS = [
+  (u, body) => `curl -X POST ${u}${body}`,
+  (u, body) => `curl -sX PUT -H "Authorization: Bearer $GH_TOKEN" ${u}${body}`,
+  (u, body) => `curl --request POST ${u}${body}`,
+  (u) => `wget --method=POST --body-data=x ${u}`,
+  (u) => `http POST ${u} state=success`,
+  (u) => `xh PUT ${u}`,
+  (u, body) => `gh api --method PATCH ${u}${body}`,
+  (u) => `node -e "fetch(\\"${u}\\",{method:\\"POST\\"})"`,
+];
+const API_ENDPOINTS = [
+  "https://api.github.com/repos/o/r/statuses/abc1234",
+  "https://api.github.com/repos/o/r/check-runs",
+  "https://api.github.com/repos/o/r/commits/abc1234/status",
+  "https://api.github.com/repos/o/r/pulls/5/reviews",
+  "https://api.github.com/repos/o/r/pulls/5/merge",
+  "https://api.github.com/repos/o/r/issues/7/labels",
+  "https://api.github.com/repos/o/r/labels/factory:approved",
+  "https://api.github.com/repos/o/r/git/refs/heads/factory/lock-7",
+  "https://api.github.com/repos/o/r/git/refs/heads/factory/records",
+  "https://api.github.com/repos/o/r/branches/main/protection",
+  "https://api.github.com/repos/o/r/rulesets",
+  "https://api.github.com/repos/o/r/environments/factory-merge",
+  // GHES 호스트에는 `api.github.com`이 없다 — 앵커는 호스트가 아니라 **경로**여야 한다.
+  "https://ghe.example.com/api/v3/repos/o/r/statuses/abc1234",
+  // 호스트 접두 없이 gh api가 받는 상대 경로도 같은 경로다.
+  "/repos/o/r/statuses/abc1234",
+];
+test("block-dangerous: GitHub authority endpoints are blocked for every HTTP client, not just `gh` (review batch-1 MF-1)", async () => {
+  const cases = [];
+  for (const mk of API_CLIENTS) for (const ep of API_ENDPOINTS) cases.push(mk(ep, " -d @body.json"));
+  await Promise.all(cases.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+}, 120000);
+
+test("block-dangerous: GraphQL mutations are the third spelling of approve/merge/status (review batch-1 MF-1)", async () => {
+  const blocked = [
+    "gh api graphql -f query='mutation { addPullRequestReview(input:{pullRequestId:\"x\",event:APPROVE}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { mergePullRequest(input:{pullRequestId:\"x\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { addLabelsToLabelable(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { removeLabelsFromLabelable(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { createCommitStatus(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { deleteRef(input:{refId:\"x\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { updateBranchProtectionRule(input:{}) { clientMutationId } }'",
+    "curl -X POST https://api.github.com/graphql -d '{\"query\":\"mutation{createRef(input:{}){clientMutationId}}\"}'",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  // 읽기 전용 GraphQL 조회는 뮤테이션 이름이 없다 — 그대로 통과한다.
+  const ok = "gh api graphql -f query='query { repository(owner:\"o\",name:\"r\") { pullRequest(number:5) { mergeable } } }'";
+  expect((await bash("block-dangerous.sh", cmd(ok))).code, ok).toBe(0);
+}, 60000);
+
+test("block-dangerous: plain GETs through any client stay allowed — the new rules bite on the write shape (review batch-1 MF-1)", async () => {
+  const allowed = [
+    "curl https://api.github.com/repos/o/r/statuses/abc1234",
+    "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/repos/o/r/commits/abc/status",
+    "wget -qO- https://api.github.com/repos/o/r/pulls/5/reviews",
+    "gh api /repos/o/r/pulls/5",
+    "gh pr view 5",
+    "gh pr checks 5",
+    // 다른 호스트의 평범한 POST는 이 저장소의 권한과 무관하다
+    "curl -X POST https://example.com/api/items -d x",
+    // 문서를 읽는 grep은 클라이언트가 아니다
+    "grep -rn \"pulls/5/merge\" docs/",
+    "grep -rn mergePullRequest docs/factory/",
+  ];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// ── 리뷰 batch-1 MF-2 (H1b-b) — `factory/records`는 리뷰 증거의 출처이므로 에이전트가 못 민다 ─────
+// 감사 전에는 `git push origin HEAD:factory/records`가 rc=0이었다(막힌 것은 `+refspec` force뿐).
+// 머지 스테이지가 handoff를 그 브랜치의 run 기록과 대조하게 된 이상, 이 문이 열려 있으면 대조가
+// 아무것도 증명하지 못한다 — 에이전트가 자기 handoff에 맞는 기록을 먼저 밀면 그만이다.
+test("block-dangerous: no agent session pushes to factory/records or factory/lock* (review batch-1 MF-2)", async () => {
+  const blocked = [
+    "git push origin HEAD:factory/records",
+    "git push origin HEAD:refs/heads/factory/records",
+    "git push origin main:refs/heads/factory/records",
+    "git push --force origin HEAD:factory/records",
+    "git push origin +HEAD:refs/heads/factory/records",
+    "git push origin --delete factory/records",
+    "git -C /repo push origin HEAD:factory/records",
+    "out=$(git push origin HEAD:factory/records)",
+    "git push origin HEAD:factory/lock-7",
+    "gh api -X DELETE /repos/o/r/git/refs/heads/factory/records",
+    "curl -X POST https://api.github.com/repos/o/r/git/refs -d '{\"ref\":\"refs/heads/factory/records\"}'",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  // 읽기는 그대로다 — 기록을 **보는** 것은 정상 작업이다.
+  for (const c of ["git fetch origin refs/heads/factory/records:refs/factory/records-remote", "git ls-remote origin refs/heads/factory/records", "git show refs/factory/records-remote:docs/factory/runs/7.md"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 60000);
+
 // M8 — 훅의 `prot`는 이제 harness.toml `[protected]`에서 생성된다. 원본 훅이 들고 있는 블록은
 // **템플릿 harness.toml**로 생성된 것이어야 한다(새 채택자가 받는 그 목록).
 test("block-dangerous: the `prot` block is generated from the template harness.toml (audit M8)", async () => {

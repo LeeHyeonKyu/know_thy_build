@@ -183,7 +183,13 @@ export const levelForTier = (tier) => LEVEL_OF_TIER[tier] || "full";
 const TIER_ORDER = ["docs", "standard", "load-bearing"];
 /** 모르는 tier는 standard로 정규화한다 — levelForTier와 같은 보수성이다. */
 const normalizeTier = (t) => (TIER_ORDER.includes(t) ? t : "standard");
-const maxTier = (a, b) => TIER_ORDER[Math.max(TIER_ORDER.indexOf(a), TIER_ORDER.indexOf(b))];
+/**
+ * 두 tier 중 **높은 쪽**. 둘 다 모르는 값이면 `normalizeTier`와 같은 보수성으로 "standard"다 —
+ * 모르는 값을 만났을 때 docs(=가장 약한 레벨)로 기우는 것은 자기 신고를 그대로 믿는 것과 같다.
+ * (리뷰 batch-1: `run-stage.js`의 `reviewRoster()`가 triage 자기 신고와 `gates.json`의
+ * `tier_effective`를 이 함수로 합친다 — export된 이유가 그것이다.)
+ */
+export const maxTier = (a, b) => TIER_ORDER[Math.max(TIER_ORDER.indexOf(a), TIER_ORDER.indexOf(b))] ?? normalizeTier(a);
 const DOC_GLOBS = ["docs/**", "*.md"];
 
 /**

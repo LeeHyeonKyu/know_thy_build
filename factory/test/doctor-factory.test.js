@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
 import { protBlock, ciDenyEntries, writeGlobs } from "../lib/protected-paths.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
@@ -839,4 +839,30 @@ test("protected.parity: agent_writable leaves the merge boundary alone but drops
   };
   expect(parityRun(files, prot).level).toBe("PASS");
   expect(files["/r/.factory/ci-settings.json"]).not.toContain("Edit(factory/**)");
+});
+
+// ── 리뷰 batch-1 MF-2 — `protection.records` ─────────────────────────────────────────────────────
+// 머지 스테이지가 리뷰 handoff를 대조하는 상대는 `factory/records`의 run 기록이다. 그 브랜치가
+// force push/삭제로 다시 쓰일 수 있으면 대조는 아무것도 증명하지 않는다 — 그 사실은 매 실행에서
+// 소리 내어 말한다(못 거는 플랜이 정당하게 존재하므로 FAIL이 아니라 WARN이다).
+test("protection.records: an unprotected records branch is a WARN that names what is holding the line", async () => {
+  const none = await checkRecordsProtection({ gh: { getBranchProtection: async () => null } });
+  expect(none[0].id).toBe("protection.records");
+  expect(none[0].level).toBe("WARN");
+  expect(none[0].detail).toContain("records branch unprotected — evidence relies on hooks");
+
+  const forceAllowed = await checkRecordsProtection({ gh: { getBranchProtection: async () => ({ allow_force_pushes: { enabled: true }, allow_deletions: { enabled: false } }) } });
+  expect(forceAllowed[0].level).toBe("WARN");
+  expect(forceAllowed[0].detail).toContain("force pushes");
+
+  // 못 읽는 것도 PASS가 아니다.
+  const unreadable = await checkRecordsProtection({ gh: { getBranchProtection: async () => { throw new Error("HTTP 403"); } } });
+  expect(unreadable[0].level).toBe("WARN");
+  expect(unreadable[0].detail).toContain("HTTP 403");
+
+  const ok = await checkRecordsProtection({ gh: { getBranchProtection: async () => ({ allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }) } });
+  expect(ok[0].level).toBe("PASS");
+  expect(ok[0].detail).toContain("append-only");
+  // 단일 자격증명 잔여 위험은 PASS 줄에서도 말한다 — 초록이 "분리됐다"를 뜻하지 않는다.
+  expect(ok[0].detail).toContain("single-credential");
 });

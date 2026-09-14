@@ -4,7 +4,7 @@ import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
-import { verifyReviewQuorum } from "./review-quorum.js";
+import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
 
 /**
  * 외부 감사 2026-09-14 H1b — 머지 직전에 **게시자까지** 확인하는 두 상태. `factory/integrity`는 빠져
@@ -103,6 +103,8 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *    "리뷰를 확인할 수 없다"이고 fail closed로 needs-human이다.
  *      reviewEvidence() → { ok, data(review.v1), reason? }  최신 review handoff(스키마 검증 포함)
  *      reviewRoster()   → { ok, roles: string[], reason? }  이 tier의 리뷰 로스터(정족수의 출처)
+ *      reviewRecord()   → { ok, record, reason? }  `factory/records`의 run 기록에 **러너가** 쓴
+ *        `review-evidence:` 줄(리뷰 batch-1 MF-2) — handoff의 출처 증명. 없거나 어긋나면 needs-human.
  *      maxRounds        → K(charter.limits.K) | null
  *      prHeadShaLive(pr)→ 지금 이 순간의 PR head sha(로컬 체크아웃이 아니라 GitHub이 답한 값)
  *      commitStatuses(sha) → [{ context, state, creatorLogin }] — **최신순**
@@ -517,7 +519,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     return 2;
   };
   {
-    const missingDeps = ["reviewEvidence", "reviewRoster", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
+    const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
     if (missingDeps.length) {
       return await reviewRefused(`review-evidence deps not wired (${missingDeps.join(", ")}) — the merge stage cannot prove a review happened, and an unverified review is not a passed review`);
     }
@@ -544,6 +546,19 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const q = verifyReviewQuorum({ data: ev.data, rosterSize: ros.roles.length, rosterRoles: ros.roles, maxRounds: d.maxRounds ?? null, prHeadSha: live });
     if (!q.ok) return await reviewRefused(q.reason);
     record([`merge: review verified — ${ros.roles.length}/${ros.roles.length} approve on ${live.slice(0, 7)}, round ${ev.data.round}${Number.isInteger(d.maxRounds) ? ` (K=${d.maxRounds})` : ""}, decision recomputed from must_fix`]);
+
+    // (b2) 리뷰 batch-1 MF-2 — **그 handoff는 실제로 돈 review 런의 것인가.** 위 (b)까지가 보는 것은
+    // handoff의 *내용*뿐이고, 그 코멘트는 모든 스테이지가 공유하는 봇 계정으로 나간다(`gh issue comment`는
+    // 훅이 일부러 열어 둔 문이다) — 곧 all-approve handoff를 손으로 지어내면 (b)를 그대로 통과했다.
+    // 그래서 `factory/records`의 run 기록에 **러너가** 남긴 `review-evidence:` 줄과 대조한다: 같은 커밋,
+    // 같은 verdict 집합, 같은 라운드여야 한다. 기록을 못 읽는 것도 통과가 아니다(fail closed).
+    let rec;
+    try { rec = await d.reviewRecord(); }
+    catch (e) { return await reviewRefused(`${NOT_BOUND} — the records branch could not be read: ${e?.message || e}`); }
+    if (!rec?.ok) return await reviewRefused(`${NOT_BOUND} — ${rec?.reason || "the review run record is unavailable"}`);
+    const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live });
+    if (!prov.ok) return await reviewRefused(prov.reason);
+    record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runnerId || "unknown"} on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
 
     // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
     // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.

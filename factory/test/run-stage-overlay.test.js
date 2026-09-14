@@ -214,3 +214,73 @@ test("OVERLAY_LABEL names exactly the factory-owned surface — one line a human
   expect(OVERLAY_LABEL).toMatch(/\.claude/);
   expect(OVERLAY_LABEL).toMatch(/CHARTER\.md/);
 });
+
+// ── 리뷰 batch-1 MF-3 — overlay는 "덮어쓰기"가 아니라 "그 커밋과 바이트 동일하게 만들기"다 ────────
+// 재리뷰가 스크래치 저장소에서 확인한 두 결함: ① `CLAUDE.md`·`.mcp.json`은 루트 밖이라 overlay도
+// drift 검사도 보지 못했는데 `claude -p` 세션은 그것을 프로젝트 지시문·MCP 서버로 읽는다(리뷰
+// 세션으로 가는 곧은 지시문 주입 경로였다), ② PR이 **추가한** 파일은 `git checkout <sha> -- …`가
+// 지우지 않아 세션이 이미 그 파일과 함께 돈 뒤에야 drift로 잡혔다.
+
+const overlayStub = ({ sha, present, added = [], drift = [], calls = [], rmCode = 0 }) => {
+  let diffCall = 0;
+  return makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "cat-file", result: (c, a) => (present.some((p) => a[2] === `${sha}:${p}`) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "not found" }) },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: (c, a) => { calls.push(a.join(" ")); return { code: 0, stdout: "", stderr: "" }; } },
+    { match: (c, a) => c === "git" && a[0] === "rm", result: (c, a) => { calls.push(a.join(" ")); return rmCode === 0 ? { code: 0, stdout: "", stderr: "" } : { code: rmCode, stdout: "", stderr: "fatal: pathspec did not match" }; } },
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: "", stderr: "" } },
+    // 첫 diff는 추가된 파일 스캔(--diff-filter=A), 두 번째는 overlay 직후의 drift 확인이다.
+    { match: (c, a) => c === "git" && a[0] === "diff", result: (c, a) => { calls.push(a.join(" ")); diffCall += 1; return { code: 0, stdout: (diffCall === 1 ? added : drift).join("\n"), stderr: "" }; } },
+  ]);
+};
+
+test("overlay: CLAUDE.md / .mcp.json / AGENTS.md are factory-owned session config and are overlaid (review batch-1 MF-3)", async () => {
+  for (const p of ["CLAUDE.md", ".mcp.json", "AGENTS.md"]) {
+    expect(OVERLAY_ROOTS, p).toContain(p);
+    expect(OVERLAY_PATHSPECS, p).toContain(p);
+    expect(OVERLAY_LABEL, p).toContain(p);
+  }
+  const sha = "c".repeat(40);
+  const calls = [];
+  // 어댑터 레포의 모양: main에도 CLAUDE.md와 .mcp.json이 있다 — PR이 고친 것을 되돌려야 한다.
+  const run = overlayStub({ sha, present: [".factory", ".claude", "CLAUDE.md", ".mcp.json"], calls });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(true);
+  const co = calls.find((c) => c.startsWith("checkout"));
+  expect(co).toContain("CLAUDE.md");
+  expect(co).toContain(".mcp.json");
+});
+
+test("overlay: files the PR ADDED under the overlay roots are removed, not left for the post-session drift check (review batch-1 MF-3)", async () => {
+  const sha = "c".repeat(40);
+  const calls = [];
+  // main에는 CLAUDE.md가 없다 — PR이 새로 들여왔다. `present` 필터만 믿으면 정확히 이 파일이 남는다.
+  const run = overlayStub({ sha, present: [".factory", ".claude"], added: ["CLAUDE.md", ".claude/hooks/x.sh", ".claude/settings.local.json"], calls });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(true);
+  expect(r.removed).toEqual(["CLAUDE.md", ".claude/hooks/x.sh", ".claude/settings.local.json"]);
+  expect(r.paths).toEqual(expect.arrayContaining(["CLAUDE.md", ".claude/hooks/x.sh", ".claude/settings.local.json"]));
+  const rm = calls.find((c) => c.startsWith("rm"));
+  expect(rm).toContain("CLAUDE.md");
+  expect(rm).toContain(".claude/hooks/x.sh");
+  // 추가된 파일 스캔은 `present`가 아니라 **전체 pathspec**을 본다 — 스테이지 커밋에 없는 경로야말로
+  // PR이 새로 들여온 경로이기 때문이다.
+  const scan = calls.find((c) => c.includes("--diff-filter=A"));
+  expect(scan).toContain("CLAUDE.md");
+  expect(scan).toContain(".mcp.json");
+});
+
+test("overlay: fail-closed — extras that cannot be removed stop the stage (review batch-1 MF-3)", async () => {
+  const sha = "c".repeat(40);
+  const run = overlayStub({ sha, present: [".factory"], added: [".claude/hooks/x.sh"], rmCode: 128 });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/could not remove 1 PR-added factory-owned path/);
+});
+
+test("overlay: the drift check runs BEFORE `claude -p` — a tree that is still not byte-identical is a refusal (review batch-1 MF-3)", async () => {
+  const sha = "c".repeat(40);
+  const run = overlayStub({ sha, present: [".factory", ".claude"], drift: [".claude/settings.json"] });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/\.claude\/settings\.json/);
+});

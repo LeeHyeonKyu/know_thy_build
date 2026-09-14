@@ -1,4 +1,60 @@
 import { aggregateReview } from "./aggregate.js";
+import { normalizeVerdicts } from "./run-record.js";
+
+/**
+ * 거부 사유의 **접두어는 하나다** — 사후 조사와 테스트가 이 문자열 하나로 이 계열의 거부를 찾는다.
+ */
+export const NOT_BOUND = "review evidence not bound to a factory run";
+
+const short = (s) => (typeof s === "string" && s.length >= 7 ? s.slice(0, 7) : String(s ?? "none"));
+
+/**
+ * ── 리뷰 batch-1 MF-2 (H1b-b) — **정족수 검사의 재료에 출처가 있는가.**
+ *
+ * `verifyReviewQuorum`은 handoff **내용**만 본다: head_sha도 verdicts도 round도 전부 에이전트가 적은
+ * 값이고, 그 코멘트를 올린 계정은 모든 스테이지가 공유하는 봇이다(`creator.login` 대조가 두 번째
+ * 권위가 되지 못하는 이유). 그래서 all-approve handoff를 손으로 지어내면 그대로 통과했다 —
+ * 재리뷰가 재현한 H1 체인의 남은 절반이 이것이다.
+ *
+ * 이 함수가 묻는 것은 하나다: **그 handoff가 실제로 돈 review 런의 것인가.** 비교 대상은
+ * `factory/records` 브랜치의 run 기록에 review 스테이지가 직접 쓴 `review-evidence:` 한 줄이다
+ * (`run-record.js`). 그 줄은 `claude -p`가 **끝난 뒤** 러너가 쓰고, 에이전트 세션의
+ * `git push … factory/records`는 훅이 막는다 — 곧 에이전트는 자기 판정을 미리 적어 둘 수 없다.
+ *
+ * **잔여 위험(반드시 소리 내어 말한다)**: 러너와 에이전트는 여전히 **같은 자격증명**을 쓴다. 훅이
+ * 보지 못하는 철자(런타임 조립)나 훅 밖의 경로로 같은 push가 나갈 수 있다면 이 바인딩도 함께
+ * 무너진다. 진짜 분리는 리뷰 증거를 다른 배우/Actions 실행 증명에 묶는 것이고, 그것은 이 주기 밖이다
+ * (ADR-023 잔여 위험 #1).
+ *
+ * @param handoff    review.v1 handoff 본문(에이전트가 쓴 쪽)
+ * @param record     `parseReviewEvidence()`가 records 브랜치 기록에서 읽은 줄(러너가 쓴 쪽) | null
+ * @param prHeadSha  지금 이 순간의 PR head. 있으면 기록이 **그 커밋**의 것인지까지 묶는다.
+ */
+export function verifyReviewProvenance({ handoff, record, prHeadSha = null }) {
+  if (!record) {
+    return { ok: false, reason: `${NOT_BOUND} — there is no review-evidence line in this issue's run record on factory/records. The review stage writes it after \`claude -p\` exits, so a handoff without one was not produced by a factory review run` };
+  }
+  if (record.stage && record.stage !== "review") {
+    return { ok: false, reason: `${NOT_BOUND} — the newest review-evidence line was written by the "${record.stage}" stage, not by review` };
+  }
+  if (!record.headSha || record.headSha === "none") {
+    return { ok: false, reason: `${NOT_BOUND} — the review-evidence line names no commit` };
+  }
+  if (prHeadSha && record.headSha !== prHeadSha) {
+    return { ok: false, reason: `${NOT_BOUND} — the review run checked out ${short(record.headSha)}, but the PR head is ${short(prHeadSha)}` };
+  }
+  if (handoff?.head_sha !== record.headSha) {
+    return { ok: false, reason: `${NOT_BOUND} — the handoff claims ${short(handoff?.head_sha)} but the review run record says ${short(record.headSha)}` };
+  }
+  const claimed = normalizeVerdicts(handoff?.verdicts);
+  if (claimed !== record.verdicts) {
+    return { ok: false, reason: `${NOT_BOUND} — the handoff's verdicts (${claimed || "none"}) are not the ones the review run recorded (${record.verdicts || "none"})` };
+  }
+  if (Number.isInteger(record.round) && Number.isInteger(handoff?.round) && record.round !== handoff.round) {
+    return { ok: false, reason: `${NOT_BOUND} — the handoff says round ${handoff.round}, the review run recorded round ${record.round}` };
+  }
+  return { ok: true };
+}
 
 /**
  * 외부 감사 2026-09-14 H1c — **"리뷰가 통과했다"를 판정하는 자리는 하나여야 한다.**

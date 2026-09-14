@@ -71,7 +71,7 @@ ZE='([;&|)`}=[:space:]]|$)'
 # 명령과 "따옴표를 벗긴 사본"에 대해 **두 번** 돌린다. 표를 두 벌 유지하면 반드시 한쪽이 뒤처진다.
 # `$1`이 판정 대상 문자열이고, 전역 `$A`가 그 패스의 경계 클래스다.
 scan() {
-  local c="$1" prot qa p
+  local c="$1" prot qa p ep API_CLIENT API_WRITE
 
 echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge" && block "gh pr merge"
 # REST 머지도 막는다 — gh api ... /pulls/<n>/merge (메서드 불문)
@@ -92,6 +92,48 @@ echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/check-runs" && block "gh api 
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/commits?/[^;&|]*/(status|check-runs)" && block "gh api commit status/check-runs"
 echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+review[^;&|]*--approve" && block "gh pr review --approve (approval belongs to the merge actor, not to a stage)"
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/pulls/[0-9]+/reviews" && block "gh api pull request reviews (the REST spelling of --approve)"
+
+# ── 리뷰 batch-1 MF-1 (H1b-a): 권한 엔드포인트의 앵커는 **클라이언트가 아니라 경로다** ───────────
+# 위의 H1b 규칙은 전부 리터럴 `gh`에 앵커돼 있었다. 그런데 모든 스테이지의 env에는 `GH_TOKEN`이 있고
+#   curl -sX POST -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/o/r/statuses/<sha> -d @-
+# 는 같은 일(=리뷰 상태 위조)을 하면서 `gh`라는 글자를 한 번도 쓰지 않는다. 재리뷰가 실제로 실행해
+# 확인한 rc=0 목록이 그것이다: statuses · check-runs · pulls/N/reviews · pulls/N/merge · issues/N/labels ·
+# git/refs(락 삭제) · branches/*/protection — **전부 curl/wget으로 열려 있었다**. 동사도 메서드도
+# 엔드포인트도 명령줄에 그대로 있는데 규칙이 클라이언트 이름 한 글자에 빗나간 것이다(H1a·MF-3과
+# 같은 계열의 고장이 한 단계 옆에서 반복됐다). 이 저장소의 `deny-all-writes.sh`는 이미 curl/wget을
+# 쓰기의 1급 철자로 다루고 있었으므로 선례도 있었다.
+#
+# 그래서 앵커를 엔드포인트로 옮긴다: **권한을 바꾸는 GitHub API 경로**가 보이고, 같은 명령이 HTTP
+# 클라이언트를 부르며, **쓰기 모양**(메서드 플래그 또는 본문 플래그)을 하고 있으면 클라이언트가
+# 무엇이든 막는다. 클라이언트 이름을 하나씩 쫓는 것은 진 싸움이지만(http·xh·node -e fetch·저장소에
+# 체크인된 헬퍼 스크립트…) **쓰기 모양**은 HTTP 자체의 문법이라 철자가 유한하다 — 그래서 목록은
+# 클라이언트 쪽을 넓게, 판정은 쓰기 모양 쪽에 건다.
+# `api.github.com`에 앵커하지 않는 이유: GHES 호스트에서는 그 문자열이 없다. 경로가 durable하다.
+#
+# **읽기(GET)는 통과한다.** 위의 `gh api …` 규칙들은 메서드 불문 그대로 남지만(그 자리에서 읽어야
+# 하는 역할이 없다), 이 클라이언트 무관 패스는 쓰기 모양이 있을 때만 문다 — `curl …/statuses/<sha>`,
+# `gh api repos/o/r/pulls/5` 같은 평범한 조회는 오늘과 똑같이 열려 있다.
+API_CLIENT="${A}(gh[[:space:]]+api|curl|wget|http|xh|fetch|node[0-9.]*|deno|bun|python[0-9.]*|ruby|perl)([[:space:]]|\()"
+# 쓰기 모양. `.{0,3}`는 따옴표·백슬래시 이스케이프를 흡수한다(`-X "POST"`, JSON 본문의 `method:\"POST\"`).
+# 마지막 갈래는 httpie/xh의 **맨몸 동사** 문법(`http POST <url> k=v`)이다 — 플래그가 아예 없다.
+API_WRITE='(-X[[:space:]]*.{0,3}(POST|PUT|PATCH|DELETE)|--method[[:space:]=]+.{0,3}(POST|PUT|PATCH|DELETE)|method[[:space:]]*[:=][[:space:]]*.{0,3}(POST|PUT|PATCH|DELETE)|--request|[[:space:]]-d([[:space:]@]|$)|--data|[[:space:]]-f[[:space:]]|[[:space:]]-F[[:space:]]|--field|--raw-field|--input|--post-data|--post-file|--body|--json|[[:space:]]-T[[:space:]]|[[:space:]](POST|PUT|PATCH|DELETE)[[:space:]])'
+for ep in '/statuses/' '/check-runs' '/commits?/[^;&|]*/(status|check-runs)' \
+          '/pulls/[0-9]+/(reviews|merge)' '/issues/[0-9]+/labels' '/labels/' \
+          '/git/refs' '/branches/[^;&|]*/protection' '/rulesets' '/environments/'; do
+  echo "$c" | grep -Eiq "$ep" || continue
+  echo "$c" | grep -Eiq "$API_CLIENT" || continue
+  echo "$c" | grep -Eiq "$API_WRITE" || continue
+  block "GitHub authority endpoint ($ep) written through an HTTP client — no client spelling is exempt (curl/wget/http/xh/node fetch are the same power as \`gh api\`; plain GETs stay allowed)"
+done
+# GraphQL은 같은 권한의 **세 번째 철자**다: `gh api graphql -f query='mutation { addPullRequestReview(…) }'`에는
+# 위의 REST 경로가 한 조각도 없다. 뮤테이션 **이름**으로 문다 — 이름은 GitHub 스키마가 정한 것이라
+# 우리가 바꿀 수 없고, 그래서 경로만큼 durable하다. `graphql`/`mutation`이라는 말이 같이 있을 때만
+# 보는 이유는 문서 grep(`grep -rn mergePullRequest docs/`)을 오탐으로 만들지 않기 위해서다.
+if echo "$c" | grep -Eiq "(graphql|mutation)"; then
+  echo "$c" | grep -Eq "(addPullRequestReview|mergePullRequest|addLabelsToLabelable|removeLabelsFromLabelable|deleteRef|createCommitStatus|createCheckRun|updateBranchProtectionRule|createRef)" \
+    && block "GraphQL mutation is the third spelling of approve/merge/status/label/ref — it carries no REST path, so the endpoint rules above cannot see it"
+fi
+
 echo "$c" | grep -Eq "${A}${G}merge${Z}" && block "git merge"
 echo "$c" | grep -Eq "${A}${G}push[^;&|]*[[:space:]](--force|-f|--force-with-lease)${ZE}" && block "force push"
 # refspec 앞의 '+'도 force push다: git push origin +main:main
@@ -107,6 +149,20 @@ echo "$c" | grep -Eq "${A}${G}push[^;&|]*(--delete[^;&|]*factory/lock-|:(refs/he
 # -XDELETE/대소문자를 하나씩 쫓는 것은 진 싸움이다), 호스트 접두(`https://api.github.com/…`)도, 앞의
 # `/` 유무도 가리지 않는다. 읽기(GET)까지 막히는 오탐은 손실이 없다: 락 상태는 `git ls-remote`로 본다.
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/git/refs/heads/factory/lock" && block "gh api lock ref deletion (the lock branch is the only basis of per-issue mutual exclusion)"
+# ── 리뷰 batch-1 MF-2 (H1b-b): `factory/records`는 **리뷰 증거의 출처다** ─────────────────────────
+# 머지 스테이지는 이제 리뷰 handoff를 `factory/records`의 run 기록(`docs/factory/runs/<n>.md`)에 적힌
+# review 런과 대조한다(review-quorum.js `verifyReviewProvenance`). 그 대조가 의미를 가지려면 기록이
+# **에이전트가 쓸 수 없는 것**이어야 하는데, 감사 전에는 `git push origin HEAD:factory/records`가
+# 훅에서 rc=0이었다(막힌 것은 `+refspec` force 형태뿐이었다) — 곧 에이전트가 자기 handoff에 맞는
+# 가짜 review 런 기록을 먼저 밀어 넣으면 대조가 그대로 통과한다.
+# 그래서 이 두 ref로 가는 **모든 push**를 막는다(삭제·force만이 아니라 append도): 러너의
+# `syncRecords`/`claim`은 Node 프로세스에서 직접 git을 부르므로 이 훅을 한 번도 거치지 않는다 —
+# 이 규칙이 막는 것은 오직 **에이전트 세션의 Bash**다. 짧은 ref 이름(`factory/records`)이든
+# 완전한 refspec(`HEAD:refs/heads/factory/records`)이든 같은 문자열을 지난다.
+# **잔여 위험(단일 자격증명)**: 러너와 에이전트가 같은 PAT을 쓰는 한, 훅을 피하는 철자(런타임 조립)나
+# 훅 밖의 경로에서는 여전히 같은 push가 가능하다 — ADR-023에 그대로 적어 둔다.
+echo "$c" | grep -Eq "${A}${G}push[^;&|]*factory/(records|lock)" && block "push to factory/records / factory/lock* (the records branch is the review evidence the merge stage checks against, and the lock branch is per-issue mutual exclusion — both belong to the runner, not to a stage session)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/git/refs[^;&|]*factory/(records|lock)" && block "gh api git/refs on factory/records|factory/lock* (the REST spelling of the push above)"
 # protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c.
 # 빌드 설정 파일(package.json·러너/린터 config)이 여기 있는 이유: gate 명령이 그 파일들을 통해
 # 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.

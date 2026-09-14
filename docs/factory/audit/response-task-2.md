@@ -158,3 +158,40 @@ CHARTER frontmatter에 `merge: { human_gate: true|false }`. `loadCharter`는 **�
   있다 — 그 지점의 방어선은 린트가 아니라 L1이다(`.github/**`가 `[protected].factory`라 사람 머지).
 - **tier는 여전히 triage handoff의 자기 신고다**(감사 H3). 머지 스테이지의 로스터도 그 tier에서
   나오므로, tier를 낮게 신고하면 정족수도 함께 낮아진다. `tier_effective`는 Task 4의 몫이다.
+
+## 5. 리뷰 batch-1 수정 — 리뷰 증거에 출처를 붙였다 (H1b-b)
+
+적대적 재리뷰(`scratchpad/review-audit-batch1-report.md` §2c)의 판정: **위조한 handoff 코멘트 하나가
+`verifyReviewQuorum`을 그대로 통과한다.** §4가 "보상 층"으로 꼽은 둘이 모두 열려 있었기 때문이다 —
+(i) 훅의 `gh api …/statuses/` 차단은 `curl` 철자로 우회되고(MF-1, ADR-023), (ii) 재계산된 정족수는
+**출처가 없는 재료**로 계산된다(`parseHandoffs`는 작성자를 버리고, `gh issue comment`는 열려 있으며,
+`creator.login` 대조는 에이전트가 쥔 바로 그 계정을 통과시킨다).
+
+**무엇을 바꿨나**
+
+1. **run 기록이 판정을 싣는다**(`factory/lib/run-record.js`). review 스테이지가 `claude -p`가 **끝난 뒤**
+   `review-evidence: head_sha=… round=… decision=… verdicts=role=verdict,…` 한 줄을 남긴다. sha는 handoff가
+   적은 값이 아니라 **스테이지가 실제로 체크아웃한 커밋**(`checkoutSha`)이다. 그 기록은 `syncRecords`가
+   `factory/records`로 민다.
+2. **머지가 둘을 대조한다**(`factory/lib/review-quorum.js` `verifyReviewProvenance`, `merge-stage.js` §(6b2)).
+   같은 커밋 · 같은 verdict 집합(역할 순서 무관) · 같은 라운드여야 하고, 기록이 없거나 읽히지 않으면
+   `review evidence not bound to a factory run`으로 **needs-human**이다(fail closed). 정족수 검사(6b)와
+   두 배우 승인(6c) **사이**가 아니라 승인 **앞**이다 — 승인 자체가 서명이다.
+3. **그 브랜치를 잠갔다.** (a) 훅이 `git push … factory/records`·`factory/lock*`과 REST `git/refs` 철자를
+   전부 막는다(러너의 `syncRecords`/`claim`은 Node에서 직접 git을 부르므로 훅을 거치지 않는다 — 이
+   규칙이 막는 것은 **에이전트 세션의 Bash**뿐이다). (b) `bootstrapPlan`이 `factory/records`에
+   force-push·삭제 금지 보호 op을 낸다. (c) doctor `protection.records`가 그 상태를 매 실행에서 말한다.
+
+**에이전트가 스테이지보다 먼저 기록을 쓸 수 있는가 — 확인한 것**: 없다. 그 줄은 `claude -p`가 종료한 **뒤**
+`runStage`가 직접 쓰고(세션 안에서는 아직 존재하지 않는다), 로컬 파일을 미리 고쳐 둬도 `syncRecords`의 꼬리
+병합이 브랜치 tip 뒤에 이어 붙일 뿐이라 **머지가 읽는 것은 브랜치의 마지막 줄**이고 그 줄은 이번 런의 것이다.
+브랜치로 직접 미는 경로는 훅이 막는다.
+
+**잔여 위험(단일 자격증명) — 소리 내어 말한다**: 러너와 에이전트는 **같은 PAT**을 쓴다. 훅이 볼 수 없는 철자
+(런타임 조립, ADR-020 잔여 위험 #4)로 push가 나가면 이 바인딩도 함께 무너진다. `restrictions`로 push를 머지
+배우에게 묶을 수는 **없다** — 기록을 쓰는 것은 모든 스테이지의 러너이고, 좁히면 증거를 지키려다 기록 자체를
+없앤다. 진짜 분리는 두 번째 배우이거나 `GITHUB_RUN_ID`에 묶인 서명 산출물이고, 그것이 다음 주기의 P0다.
+
+**tier 바닥(잠정, Task 4까지)**: `reviewRoster()`가 triage의 자기 신고와 `.factory/out/gates.json`의
+`tier_effective`를 `maxTier`로 합친다 — 자기 신고는 tier를 올릴 수는 있어도 내릴 수는 없다. §4가 남긴
+"tier는 여전히 자기 신고다"의 절반이 이것으로 닫힌다(나머지는 Task 4).

@@ -2177,3 +2177,54 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 - 런타임 조립 동사는 여전히 이 훅의 비목표다(위 H1b 참조).
 - `protected.parity`는 **설치본**을 본다 — 누군가 훅을 고치고 doctor를 돌리지 않으면 CI의 sweeper가 doctor를 돌릴 때까지 알려지지 않는다.
 - 생성기의 `.factory/**` 열거와 harness-mode 개방 목록은 코드 상수다(`FACTORY_ENUM`·`HARNESS_OPENS`). 보호 **경로**의 목록은 아니지만(그것은 harness.toml에 있다) 새 `.factory` 하위 디렉터리가 생기면 손이 필요하다 — 템플릿 트리를 훑는 `templates.test.js`의 열거 테스트가 그 사고를 잡는다.
+
+### 리뷰 batch-1 — 훅의 앵커를 클라이언트에서 엔드포인트로, 리뷰 증거에 출처를 (H1b-a, H1b-b)
+
+batch 1(Task 1/2/3/8)에 대한 적대적 재리뷰(`scratchpad/review-audit-batch1-report.md`)가 **같은 H1 체인이
+여전히 끝까지 실행된다**고 판정했다. 두 구멍 다 "동사가 명령줄에 그대로 있는데 규칙이 한 글자에 빗나갔다"는
+H1a·MF-3과 같은 계열이다.
+
+- **H1b-a — 규칙이 `gh`에 앵커돼 있었다.** 위 Task 1의 H1b 규칙은 전부 리터럴 `gh`로 시작한다. 그런데 모든
+  스테이지 env에 `GH_TOKEN`이 있으므로 `curl -X POST …/statuses/<sha>`·`wget --method=POST`·httpie·
+  `node -e fetch(…)`가 같은 일을 하고, 재리뷰가 실행해 확인한 rc=0 목록은 statuses·check-runs·
+  `pulls/N/reviews`·`pulls/N/merge`·`issues/N/labels`·`git/refs`(락 삭제)·`branches/*/protection`
+  **전부**였다. GraphQL(`addPullRequestReview`·`mergePullRequest`)은 세 번째 철자였다.
+  **막은 것**: 앵커를 **경로**로 옮겼다 — 권한 엔드포인트(`/statuses/`·`/check-runs`·`/commits/<sha>/status`·
+  `/pulls/<n>/(reviews|merge)`·`/issues/<n>/labels`·`/labels/`·`/git/refs`·`/branches/<b>/protection`·
+  `/rulesets`·`/environments/`)가 보이고, HTTP 클라이언트가 있고, **쓰기 모양**(메서드 플래그·본문 플래그·
+  httpie의 맨몸 동사)이면 클라이언트가 무엇이든 차단한다. GraphQL은 뮤테이션 **이름**으로 막는다.
+  `api.github.com`이 아니라 경로에 앵커한 이유는 GHES 호스트다. **읽기(GET)는 그대로 열려 있다** — 새
+  규칙은 쓰기 모양에만 문다(기존 `gh api` 규칙들은 메서드 불문 그대로 남는다).
+- **H1b-b — 리뷰 증거에 출처가 없었다.** 정족수 검사가 읽는 것은 review handoff **코멘트**뿐인데,
+  `gh issue comment`는 훅이 일부러 열어 둔 문이고 `parseHandoffs`는 작성자조차 남기지 않으며
+  `creator.login` 대조는 **에이전트가 쥔 바로 그 계정**을 통과시킨다. 곧 all-approve handoff를 지어내면
+  머지까지 갔다. **막은 것**: 판정의 재료를 에이전트가 쓸 수 없는 자리에 하나 더 뒀다 — review 스테이지가
+  `claude -p`가 **끝난 뒤** run 기록에 쓰는 `review-evidence:` 한 줄(`run-record.js`)이고, 그 기록은
+  `factory/records` 브랜치로 나간다. 머지 스테이지는 handoff와 그 줄이 **같은 커밋·같은 verdict 집합·같은
+  라운드**일 때만 머지한다(`review-quorum.js` `verifyReviewProvenance`, merge-stage §(6b2)); 어긋나거나
+  없으면 `review evidence not bound to a factory run`으로 needs-human이다. sha는 handoff가 적은 값이 아니라
+  **스테이지가 실제로 체크아웃한 커밋**이다. 그 브랜치도 함께 잠갔다: 훅이 `git push … factory/records`와
+  `factory/lock*`(및 REST `git/refs` 철자)를 전부 막고, `bootstrap`이 `factory/records`에
+  force-push·삭제 금지 보호를 걸며, doctor가 `protection.records`로 그 상태를 매 실행에서 말한다.
+- **MF-3 — `CLAUDE.md`·`.mcp.json`은 overlay 밖이었다**(Task 8). 둘 다 PR head가 쥐고 있고 `claude -p`가
+  프로젝트 지시문·MCP 서버로 읽는데, `OVERLAY_ROOTS`에도 drift 검사에도 없었다 — 리뷰 세션으로 가는 곧은
+  지시문 주입 경로이고, 보호 경로가 아니라 그 PR은 자동 머지까지 됐다. 셋(`AGENTS.md` 포함)을 overlay
+  루트에 넣고, **PR이 추가한** 파일을 overlay가 직접 지우며(`git checkout <sha> -- …`는 추가 파일을 남긴다),
+  drift 검사를 `claude -p` **앞에서도** 한 번 돌린다.
+- **잠정 tier 바닥**(Task 4까지). 로스터 크기 = 정족수인데 tier가 triage의 자기 신고였다 — 낮춰 신고하면
+  새 정족수 검사도 함께 약해진다. `reviewRoster()`가 `gates.json`의 `tier_effective`와 `maxTier`를 취한다:
+  자기 신고는 tier를 올릴 수는 있어도 내릴 수는 없다.
+
+**남은 위험(등록부에 추가)**
+1. **리뷰 증거는 여전히 자격증명 하나 깊이다.** 러너와 에이전트가 같은 PAT을 쓴다 — 훅이 보지 못하는 철자
+   (런타임 조립, ADR-020 잔여 위험 #4)로 `factory/records`에 append가 나가면 위의 바인딩도 함께 무너진다.
+   `restrictions`로 push를 머지 배우에 묶을 수는 **없다**: 기록을 쓰는 것은 모든 스테이지의 러너이고,
+   좁히면 증거를 지키려다 증거를 없앤다. 진짜 분리는 두 번째 배우이거나 Actions 실행 증명이고,
+   그것이 다음 주기의 P0다.
+2. **`factory/records` 보호는 플랜에 달려 있다.** GitHub Free의 private 저장소에서는 걸리지 않는다 — 그때
+   증거를 지키는 것은 훅 하나뿐이고, bootstrap과 doctor가 그 문장을 그대로 말한다.
+3. **훅은 여전히 `Bash(*)` 위의 철자 매처다.** 엔드포인트 앵커는 클라이언트 열거보다 오래가지만, 근본
+   해결은 에이전트 세션의 env에서 `GH_TOKEN`을 빼고 모든 GitHub 변경을 러너의 `gh` 래퍼로 보내는 것이다.
+4. **`CLAUDE.md`·`.mcp.json`은 아직 `[protected].factory`가 아니다.** overlay가 스테이지 **안에서는**
+   base의 것으로 만들지만, 그 파일을 고친 PR의 자동 머지를 막지는 않는다 — `[protected]` 편입은
+   훅 `prot`·ci-settings 생성 블록을 함께 다시 써야 하므로 별도 변경으로 남긴다.

@@ -161,6 +161,40 @@ const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_conversation_resolution: false,
 });
 
+/**
+ * ── 리뷰 batch-1 MF-2 (H1b-b) — **증거 브랜치에도 자물쇠가 필요하다.** ────────────────────────────
+ * 머지 스테이지는 이제 review handoff를 `factory/records`의 run 기록과 대조한다(review-quorum.js
+ * `verifyReviewProvenance`). 그런데 감사 시점의 `bootstrapPlan`은 `harness.project.default_branch`
+ * 하나만 보호했고, `git push origin HEAD:factory/records`는 훅에서도 rc=0이었다 — 대조의 상대가
+ * 에이전트가 쓸 수 있는 자리에 있으면 대조는 아무것도 증명하지 않는다. 훅은 이제 그 push를 막고,
+ * 여기서는 **브랜치 쪽에서** 같은 말을 한다.
+ *
+ * 무엇을 걸 수 있고 무엇을 걸 수 없는가(이 구분이 이 블록의 요점이다):
+ *  - `allow_force_pushes: false` · `allow_deletions: false` — **건다.** run 기록은 append-only 로그이고,
+ *    이미 기록된 판정을 **다시 쓰거나 지우는** 것이 위조의 모양이다. 러너의 `syncRecords`는 언제나
+ *    fast-forward push라 이 두 규칙에 걸리지 않는다.
+ *  - `restrictions`(push 허용 계정 목록) — **걸지 않는다.** 기록을 쓰는 것은 머지 배우가 아니라
+ *    **모든 스테이지의 러너**다(같은 봇 계정). 머지 배우로 좁히면 triage·plan·implement·review의
+ *    기록 동기화가 통째로 실패한다 — 증거를 지키려다 증거를 없애는 설정이다. 게다가 조직 저장소
+ *    전용이라 개인 저장소에서는 API가 받지도 않는다.
+ *  - 그래서 **잔여 위험은 그대로 남는다**: 러너와 에이전트가 같은 자격증명을 쓰는 한, 훅이 보지
+ *    못하는 철자로 나가는 append 하나는 이 보호를 통과한다. 진짜 분리는 두 번째 배우이거나
+ *    Actions 실행 증명이고, 그것은 이 주기 밖이다(ADR-023 잔여 위험 #1).
+ */
+export const RECORDS_BRANCH = "factory/records";
+export const RECORDS_PROTECTION_BODY = {
+  required_status_checks: null,
+  enforce_admins: false,            // 사람은 손으로 고칠 수 있어야 한다 — 이 브랜치는 기록이지 게이트가 아니다
+  required_pull_request_reviews: null,
+  restrictions: null,
+  required_linear_history: false,
+  allow_force_pushes: false,        // 이미 기록된 판정을 다시 쓰는 것이 위조의 모양이다
+  allow_deletions: false,
+  required_conversation_resolution: false,
+};
+/** 보호 PUT이 "그런 브랜치 없음"으로 실패했는가 — 첫 스테이지 런이 브랜치를 만들기 전에는 정상이다. */
+export const GH_BRANCH_NOT_FOUND_RE = /\b404\b|not found|branch not found/i;
+
 const secretNote = (label) => `gh secret set ${label} — bootstrap never writes secret values`;
 
 /**
@@ -206,6 +240,10 @@ export function bootstrapPlan({ harness, today, existing, charter = null }) {
   // "두 배우 모드라고 선언했지만 머지 토큰이 없어 머지가 영영 막힌 저장소"가 가능해진다.
   const twoActor = isTwoActor(existing?.secrets, existing?.envSecrets);
   ops.push({ kind: "protection", branch: harness.project.default_branch, twoActor, body: PROTECTION_BODY(L0_CONTEXTS, { twoActor }) });
+  // 리뷰 batch-1 MF-2 — 리뷰 증거가 사는 브랜치. 실패해도 부트스트랩을 실패로 만들지 않는다
+  // (브랜치가 아직 없거나 플랜이 지원하지 않는 것은 설정 오류가 아니다) — formatBootstrapFailure가
+  // 그 두 경우를 이름으로 갈라 말한다.
+  ops.push({ kind: "protection", branch: RECORDS_BRANCH, records: true, body: RECORDS_PROTECTION_BODY });
 
   // ADR-021 r1 — 두 배우 모드에서만 나오는 두 op. 단일 배우 모드에 이것들을 걸면 승인해 줄 두 번째
   // 계정이 없는 저장소에 "코드 오너 승인 필수"를 심는 셈이라 다크 머지가 영영 멈춘다.
@@ -271,6 +309,17 @@ export function bootstrapPlan({ harness, today, existing, charter = null }) {
  * 오해하지 않게. 그 외 실패는 지금까지의 문구를 그대로 쓴다.
  */
 export function formatBootstrapFailure({ op, error }) {
+  // 리뷰 batch-1 MF-2 — 증거 브랜치의 보호는 두 가지 이유로 "실패"할 수 있고 둘 다 사고가 아니다.
+  // 어느 쪽이든 **무엇이 꺼졌는지**를 말한다: 그 상태에서 리뷰 증거를 지키는 것은 훅 하나뿐이다.
+  if (op.kind === "protection" && op.records) {
+    if (GH_BRANCH_NOT_FOUND_RE.test(error)) {
+      return `protection ${op.branch}: the branch does not exist yet — the first stage run creates it (records sync). Re-run \`factory bootstrap\` after that; until then the records branch is unprotected and the review evidence relies on the block-dangerous hook alone`;
+    }
+    if (GH_FREE_PLAN_PROTECTION_RE.test(error)) {
+      return `protection ${op.branch}: records branch unprotected — not available on this plan (private repo on GitHub Free). The review evidence the merge stage checks against relies on hooks alone: make the repo public or upgrade to get force-push/deletion protection on ${op.branch}`;
+    }
+    return `protection ${op.branch}: records branch unprotected — ${error}. The review evidence the merge stage checks against relies on hooks alone until this is fixed`;
+  }
   if (op.kind === "protection" && GH_FREE_PLAN_PROTECTION_RE.test(error)) {
     return `protection ${op.branch}: not available on this plan (private repo on GitHub Free) — make the repo public or upgrade; L0 required-check enforcement is off, L1 (merge script requires all checks GREEN) and L2 still apply`;
   }

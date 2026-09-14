@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LABELS } from "../lib/label-catalog.js";
-import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor, CODEOWNERS_PATH, MERGE_ENVIRONMENT, MERGE_ENVIRONMENT_BODY, TWO_ACTOR_VARIABLE, codeownersOwners, codeownersMentions } from "../lib/bootstrap.js";
+import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor, CODEOWNERS_PATH, MERGE_ENVIRONMENT, MERGE_ENVIRONMENT_BODY, TWO_ACTOR_VARIABLE, codeownersOwners, codeownersMentions, RECORDS_BRANCH, RECORDS_PROTECTION_BODY, GH_BRANCH_NOT_FOUND_RE } from "../lib/bootstrap.js";
 import { bootstrapCommand } from "../cli/bootstrap.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -72,11 +72,18 @@ test("bootstrapPlan: protection op body matches the exact required shape — L0 
   const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] };
   const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
   const protectionOps = ops.filter((o) => o.kind === "protection");
-  expect(protectionOps.length).toBe(1);
+  // 리뷰 batch-1 MF-2 — 두 개다: default 브랜치(L0)와 리뷰 증거가 사는 `factory/records`.
+  expect(protectionOps.length).toBe(2);
   // factory/gates·factory/review는 이슈 파이프라인을 타는 PR에만 게시자가 있다 — L0에 넣으면 사람이
   // 머지하는 retro-proposal·harness PR과 첫 push가 영영 막힌다. 둘은 L1(allChecksGreen)이 계속 강제한다.
   expect(protectionOps[0]).toEqual({ kind: "protection", branch: "main", twoActor: false, body: PROTECTION_BODY(["factory/integrity"]) });
   expect(protectionOps[0].body.required_status_checks.strict).toBe(false);   // F3: 게이트는 sha 바인딩 — strict는 factory가 하지 않는 rebase를 요구한다
+  // 증거 브랜치: force push도 삭제도 막는다(기록을 **다시 쓰는** 것이 위조의 모양이다). `restrictions`는
+  // null이다 — 기록을 쓰는 것은 머지 배우가 아니라 모든 스테이지의 러너이고, 좁히면 동기화가 통째로 죽는다.
+  expect(protectionOps[1]).toEqual({ kind: "protection", branch: RECORDS_BRANCH, records: true, body: RECORDS_PROTECTION_BODY });
+  expect(protectionOps[1].body.allow_force_pushes).toBe(false);
+  expect(protectionOps[1].body.allow_deletions).toBe(false);
+  expect(protectionOps[1].body.restrictions).toBe(null);
   // 하네스의 required_checks는 그대로다 — 머지 스테이지(L1)가 세 개 전부를 본다
   expect(HARNESS.factory.required_checks).toEqual(["factory/gates", "factory/review", "factory/integrity"]);
 });
@@ -176,15 +183,16 @@ test("applyBootstrap: calls createLabel once per label op, putBranchProtection o
   const { applied, notes } = await applyBootstrap({ gh, ops, log: (m) => logs.push(m) });
 
   expect(gh.calls.createLabel.length).toBe(LABELS.length);
-  expect(gh.calls.putBranchProtection.length).toBe(1);
+  expect(gh.calls.putBranchProtection.length).toBe(2);
   expect(gh.calls.putBranchProtection[0].branch).toBe("main");
+  expect(gh.calls.putBranchProtection[1].branch).toBe(RECORDS_BRANCH);
   expect(gh.calls.setVariable.length).toBe(2);
   expect(gh.calls.setVariable).toEqual([
     { name: "FACTORY_TWO_ACTOR", value: "false" },
     { name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" },
   ]);
 
-  expect(applied.length).toBe(LABELS.length + 1 + 2); // labels + protection + two variables
+  expect(applied.length).toBe(LABELS.length + 2 + 2); // labels + two protections (main + factory/records) + two variables
   expect(notes.length).toBe(3); // two missing secrets + the ADR-021 mode note
   expect(logs.length).toBeGreaterThan(0);
 });
@@ -197,7 +205,7 @@ test("applyBootstrap: note ops never call any gh method", async () => {
   const { applied, notes } = await applyBootstrap({ gh, ops, log: () => {} });
   expect(gh.calls.setVariable).toEqual([{ name: "FACTORY_TWO_ACTOR", value: "false" }]);   // issued-at은 note로 대체됐다
   expect(notes.length).toBe(2);   // token-issued-at + the ADR-021 mode note
-  expect(applied.length).toBe(LABELS.length + 1 + 1); // labels + protection + the mode variable
+  expect(applied.length).toBe(LABELS.length + 2 + 1); // labels + two protections + the mode variable
 });
 
 function fakeGhCli({ labels = [], secrets = [], envSecrets = [], variable = null } = {}) {
@@ -235,7 +243,7 @@ test("bootstrapCommand: applies ops against injected gh, honors --token-issued-a
   const code = await bootstrapCommand({ root, argv: ["--token-issued-at", "2026-09-12"], io: i, gh, today: "2026-01-01" });
   expect(code).toBe(0);
   expect(gh.calls.createLabel.length).toBe(LABELS.length);
-  expect(gh.calls.putBranchProtection.length).toBe(1);
+  expect(gh.calls.putBranchProtection.length).toBe(2);
   expect(gh.calls.setVariable).toEqual([
     { name: "FACTORY_TWO_ACTOR", value: "false" },
     { name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" },   // --token-issued-at은 계획 끝으로 밀려 다시 붙는다
@@ -289,9 +297,9 @@ test("applyBootstrap: a failing op is isolated — the rest still run, failure i
   const { applied, failed, notes } = await applyBootstrap({ gh, ops, log: () => {} });
   expect(failed).toEqual([{ op: ops.find((o) => o.kind === "label" && o.name === LABELS[0].name), error: "gh: permission denied" }]);
   expect(gh.calls.createLabel.length).toBe(LABELS.length - 1); // every other label still attempted
-  expect(gh.calls.putBranchProtection.length).toBe(1); // protection still ran after the failed label
+  expect(gh.calls.putBranchProtection.length).toBe(2); // protection still ran after the failed label
   expect(gh.calls.setVariable.length).toBe(2); // variables still ran too (issued-at + the ADR-021 r1 mode variable)
-  expect(applied.length).toBe(LABELS.length - 1 + 1 + 2); // labels(minus the failed one) + protection + two variables
+  expect(applied.length).toBe(LABELS.length - 1 + 2 + 2); // labels(minus the failed one) + two protections + two variables
   expect(notes.length).toBe(3);   // two missing secrets + the ADR-021 mode note
 });
 
@@ -308,6 +316,7 @@ test("bootstrapCommand: a failing gh op → exit 1, failure printed", async () =
 // ── fix round 2 (GitHub Free branch-protection 403) ─────────────────────────
 
 const GH_FREE_403 = "gh api -X failed (1): gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)";
+const GH_FREE_403_RECORDS_LINE = "protection factory/records: records branch unprotected — not available on this plan (private repo on GitHub Free). The review evidence the merge stage checks against relies on hooks alone: make the repo public or upgrade to get force-push/deletion protection on factory/records";
 const GH_FREE_403_LINE = "protection main: not available on this plan (private repo on GitHub Free) — make the repo public or upgrade; L0 required-check enforcement is off, L1 (merge script requires all checks GREEN) and L2 still apply";
 
 test("formatBootstrapFailure: protection op + GitHub Free 403 message → the actionable line; other failures keep their old text", () => {
@@ -329,7 +338,7 @@ test("applyBootstrap: a 403 protection failure is isolated like any other — ev
   const gh = fakeGh();
   gh.putBranchProtection = async () => { throw new Error(GH_FREE_403); };
   const { applied, failed } = await applyBootstrap({ gh, ops, log: () => {} });
-  expect(failed).toEqual([{ op: ops.find((o) => o.kind === "protection"), error: GH_FREE_403 }]);
+  expect(failed).toEqual(ops.filter((o) => o.kind === "protection").map((op) => ({ op, error: GH_FREE_403 })));
   expect(gh.calls.createLabel.length).toBe(LABELS.length);   // every label still attempted
   expect(gh.calls.setVariable.length).toBe(2);               // variables still ran after the failed protection op
   expect(applied.length).toBe(LABELS.length + 2);            // labels + two variables (protection failed, not counted)
@@ -345,8 +354,8 @@ test("bootstrapCommand: branch protection 403 on GitHub Free — single actionab
   expect(code).toBe(1);
   // printed exactly once, and only that one actionable line — not the raw "Upgrade to GitHub Pro…" gh text.
   const matches = [...o.out, ...o.err].filter((l) => l.includes("not available on this plan"));
-  expect(matches).toEqual([GH_FREE_403_LINE]);
-  expect(o.err).toEqual([GH_FREE_403_LINE]);
+  expect(matches).toEqual([GH_FREE_403_LINE, GH_FREE_403_RECORDS_LINE]);
+  expect(o.err).toEqual([GH_FREE_403_LINE, GH_FREE_403_RECORDS_LINE]);
   expect(o.out.join("\n")).not.toContain("Upgrade to GitHub Pro");
   // every other op still ran despite the protection failure.
   expect(gh.calls.createLabel.length).toBe(LABELS.length);
@@ -559,7 +568,38 @@ test("bootstrapCommand (r2): the CLI wires listEnvSecrets through — a merge to
   const root = makeHarnessRoot();
   const code = await bootstrapCommand({ root, argv: [], io: i, gh, run: fakeRun, today: "2026-09-12" });
   expect(code).toBe(0);
-  expect(gh.calls.putBranchProtection).toHaveLength(1);
+  expect(gh.calls.putBranchProtection).toHaveLength(2);
   expect(gh.calls.putBranchProtection[0].body.required_pull_request_reviews).toMatchObject({ require_code_owner_reviews: true });
   expect(gh.calls.setVariable).toContainEqual({ name: "FACTORY_TWO_ACTOR", value: "true" });
+});
+
+// ── 리뷰 batch-1 MF-2 — 리뷰 증거가 사는 브랜치에도 자물쇠가 필요하다 ─────────────────────────────
+// 머지 스테이지는 이제 모든 review handoff를 `factory/records`의 run 기록과 대조한다. 대조의 상대가
+// 다시 쓰일 수 있으면 대조는 아무것도 증명하지 않는다 — 그래서 force push와 삭제를 막는다.
+// **못 걸었을 때 조용하지 않은 것**이 이 블록의 절반이다: 그 상태에서 증거를 지키는 것은 훅 하나뿐이다.
+
+test("bootstrapPlan (review batch-1 MF-2): the records branch gets its own protection op", () => {
+  const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: [] };
+  const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
+  const records = ops.filter((o) => o.kind === "protection").find((o) => o.branch === RECORDS_BRANCH);
+  expect(records).toBeTruthy();
+  expect(records.records).toBe(true);
+  expect(records.body.allow_force_pushes).toBe(false);
+  expect(records.body.allow_deletions).toBe(false);
+  // 러너(모든 스테이지)가 기록을 쓴다 — push를 머지 배우로 좁히면 기록 동기화가 통째로 죽는다.
+  expect(records.body.restrictions).toBe(null);
+  expect(records.body.required_status_checks).toBe(null);
+});
+
+test("formatBootstrapFailure (review batch-1 MF-2): a records-branch protection failure says what is unprotected", () => {
+  const op = { kind: "protection", branch: RECORDS_BRANCH, records: true, body: {} };
+  // 브랜치가 아직 없다 — 첫 스테이지 런이 만든다. 사고가 아니지만 그동안 무엇이 꺼져 있는지는 말한다.
+  const notFound = formatBootstrapFailure({ op, error: "HTTP 404: Branch not found" });
+  expect(GH_BRANCH_NOT_FOUND_RE.test("HTTP 404: Branch not found")).toBe(true);
+  expect(notFound).toContain("the branch does not exist yet");
+  expect(notFound).toContain("relies on the block-dangerous hook alone");
+  // Free 플랜: 요구한 문구 그대로.
+  expect(formatBootstrapFailure({ op, error: GH_FREE_403 })).toContain("records branch unprotected");
+  // 그 외 실패도 같은 문장을 단다 — 조용히 지나가는 갈래가 없다.
+  expect(formatBootstrapFailure({ op, error: "gh: permission denied" })).toContain("records branch unprotected");
 });
