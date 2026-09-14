@@ -13,7 +13,7 @@ function fakeGh(labels, comments = []) {
 test("human/retry from an agent or runner env is refused inside transition() before any gh call", async () => {
   for (const env of [{ CLAUDE_PROJECT_DIR: "/w" }, { GITHUB_ACTIONS: "true" }]) {
     const gh = fakeGh(["factory:needs-human"]);
-    const r = await transition({ gh, issue: 7, to: null, human: true, retry: true, env });
+    const r = await transition({ gh, issue: 7, to: null, human: true, env: {}, retry: true, env });
     expect(r.ok).toBe(false); expect(r.reason).toMatch(/agent\/runner session/);
     expect(gh.issue).not.toHaveBeenCalled(); expect(gh.setFactoryLabel).not.toHaveBeenCalled();
   }
@@ -42,7 +42,7 @@ test("graph violation → refusal comment posted (visible), no label change", as
 
 test("graph violation with human:true → no comment, no label change", async () => {
   const gh = fakeGh(["backlog"]);
-  const r = await transition({ gh, issue: 7, to: "factory:approved", human: true });
+  const r = await transition({ gh, issue: 7, to: "factory:approved", human: true, env: {} });
   expect(r.ok).toBe(false);
   expect(gh.comment).not.toHaveBeenCalled();
   expect(gh.setFactoryLabel).not.toHaveBeenCalled();
@@ -68,7 +68,7 @@ test("requirement pass → label set + transition comment", async () => {
 
 test("human override: requirement failure returns reason, does not move to needs-human", async () => {
   const gh = fakeGh(["factory:ready"]);
-  const r = await transition({ gh, issue: 7, to: "factory:planned", human: true, reason: "manual" });
+  const r = await transition({ gh, issue: 7, to: "factory:planned", human: true, env: {}, reason: "manual" });
   expect(r.ok).toBe(false); expect(r.reason).toMatch(/plan handoff missing/);
   expect(gh.setFactoryLabel).not.toHaveBeenCalled();
 });
@@ -241,7 +241,7 @@ test("SF-4 round-trip: every transition marker the writer emits is read back by 
   const gh5 = fakeGh(["factory:needs-human"], []);
   const b5 = [{ id: 0, body: "이전 주기의 코멘트", createdAt: "2026-09-11T00:00:00Z" }];
   gh5.comment = vi.fn(async (n, body) => { b5.push({ id: b5.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
-  await transition({ gh: gh5, issue: 7, to: "factory:queue", human: true, reason: "unstick" });
+  await transition({ gh: gh5, issue: 7, to: "factory:queue", human: true, env: {}, reason: "unstick" });
   expect(commentsSinceRequeue(b5)).toEqual([]);                 // 재큐 코멘트 자신까지가 경계다
 });
 
@@ -289,7 +289,7 @@ test("KTB-32: `--retry` without `--human` is refused (by=script never resumes)",
 
 test("KTB-32: a human retry to a target that is not the resume point is refused (exit 2, no label change)", async () => {
   const gh = fakeGh(["factory:needs-human"], stoppedInReview());
-  const r = await transition({ gh, issue: 7, to: "factory:planned", human: true, reason: "just re-plan it" });
+  const r = await transition({ gh, issue: 7, to: "factory:planned", human: true, env: {}, reason: "just re-plan it" });
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/factory:planned/);
   expect(r.reason).toMatch(/factory:awaiting-review/);            // 어디로 가야 하는지 사유가 말한다
@@ -299,7 +299,7 @@ test("KTB-32: a human retry to a target that is not the resume point is refused 
 test("KTB-32: a human retry to the resume point moves the label and marks the comment by=human reason=retry", async () => {
   const comments = [...stoppedInReview(), { id: 9, body: "<!-- human-decision:v1 issue=7 skill=unstick -->\n```yaml\ndecision: retry\n```", createdAt: "2026-09-14T00:00:00Z" }];
   const gh = fakeGh(["factory:needs-human"], comments);
-  const r = await transition({ gh, issue: 7, to: "factory:awaiting-review", human: true, retry: true, reason: "429 was infrastructural; PR #17 intact" });
+  const r = await transition({ gh, issue: 7, to: "factory:awaiting-review", human: true, env: {}, retry: true, reason: "429 was infrastructural; PR #17 intact" });
   expect(r).toMatchObject({ ok: true, from: "factory:needs-human", to: "factory:awaiting-review" });
   expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:awaiting-review");
   const body = gh.comment.mock.calls[0][1];
@@ -311,7 +311,7 @@ test("KTB-32: a human retry to the resume point moves the label and marks the co
 
 test("KTB-32: `--retry` with no explicit label resolves the resume point from the comments", async () => {
   const gh = fakeGh(["factory:needs-human"], stoppedInReview());
-  const r = await transition({ gh, issue: 7, human: true, retry: true, reason: "infra" });
+  const r = await transition({ gh, issue: 7, human: true, env: {}, retry: true, reason: "infra" });
   expect(r).toMatchObject({ ok: true, to: "factory:awaiting-review" });
   expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:awaiting-review");
 });
@@ -343,7 +343,7 @@ test("KTB-32: resumePoint maps every origin — in-progress splits on whether im
 
 test("KTB-32: an unresolvable resume point refuses the retry instead of guessing", async () => {
   const gh = fakeGh(["factory:needs-human"], [tcomment("factory:queue", "factory:needs-human", { reason: "triage artifact invalid" })]);
-  const r = await transition({ gh, issue: 7, human: true, retry: true, reason: "x" });
+  const r = await transition({ gh, issue: 7, human: true, env: {}, retry: true, reason: "x" });
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/resume point/);
   expect(gh.setFactoryLabel).not.toHaveBeenCalled();
@@ -366,7 +366,7 @@ test("KTB-32: a retry neither resets nor burns the review round counter", async 
   const after = [];
   const gh = fakeGh(["factory:needs-human"], before);
   gh.comment = vi.fn(async (n, body) => { after.push({ id: 99, body, createdAt: "2026-09-14T00:00:00Z" }); return "u"; });
-  const r = await transition({ gh, issue: 7, human: true, retry: true, reason: "cancel was infrastructural" });
+  const r = await transition({ gh, issue: 7, human: true, env: {}, retry: true, reason: "cancel was infrastructural" });
   expect(r).toMatchObject({ ok: true, to: "factory:rework" });
   const all = [...before, ...after];
   expect(commentsSinceRequeue(all)).toHaveLength(before.length - 1 + after.length);   // 창은 그대로(재큐가 아니다)
@@ -376,13 +376,13 @@ test("KTB-32: a retry neither resets nor burns the review round counter", async 
 // ── bin/transition.js의 인자 파싱(그 파일은 즉시 실행되므로 파서만 lib에 산다) ────────────────
 test("KTB-32: parseTransitionArgs — label, --human, --reason, and --retry in any order", () => {
   expect(parseTransitionArgs(["7", "factory:queue", "--human", "--reason", "why"]))
-    .toEqual({ issue: 7, to: "factory:queue", human: true, retry: false, reason: "why" });
+    .toEqual({ issue: 7, to: "factory:queue", human: true, env: {}, retry: false, reason: "why" });
   expect(parseTransitionArgs(["3", "--human", "--retry"]))
-    .toEqual({ issue: 3, to: null, human: true, retry: true, reason: "" });
+    .toEqual({ issue: 3, to: null, human: true, env: {}, retry: true, reason: "" });
   expect(parseTransitionArgs(["3", "--retry", "--human", "--reason", "infra"]))
-    .toEqual({ issue: 3, to: null, human: true, retry: true, reason: "infra" });
+    .toEqual({ issue: 3, to: null, human: true, env: {}, retry: true, reason: "infra" });
   expect(parseTransitionArgs(["3", "factory:awaiting-review", "--human", "--retry"]))
-    .toEqual({ issue: 3, to: "factory:awaiting-review", human: true, retry: true, reason: "" });
+    .toEqual({ issue: 3, to: "factory:awaiting-review", human: true, env: {}, retry: true, reason: "" });
   // --retry는 사람 전용이다 — 여기서 이미 막는다(lib도 한 번 더 막는다).
   expect(parseTransitionArgs(["3", "--retry"]).error).toMatch(/--human/);
   expect(parseTransitionArgs(["3"]).error).toMatch(/usage|label/i);
