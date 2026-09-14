@@ -162,11 +162,16 @@ test("upgrade replaces an old blanket-deny ci-settings.json with the enumerated 
   expect(a.action).toBe("replace");
   const deny = JSON.parse(a.content).permissions.deny;
   for (const d of ["Edit(.factory/**)", "Write(.factory/**)"]) expect(deny, d).not.toContain(d);
-  expect(deny).toContain("Edit(.factory/out/*)");
+  // KTB-40: 남아 있던 `.factory/out/*` 한 줄이 qa 디렉터리 자신(`out`의 직계 자식이다)을 물어
+  // 카브아웃을 지웠다 — 이제 하위 디렉터리에 닿을 수 없는 파일 패턴만 열거한다.
+  expect(deny).toContain("Edit(.factory/out/*.json)");
+  expect(deny).not.toContain("Edit(.factory/out/*)");
   for (const tool of ["Edit", "Write"]) {
     const globs = deny.map((d) => new RegExp(`^${tool}\\((.+)\\)$`).exec(d)?.[1]).filter(Boolean);
     expect(matchesAny(globs, ".factory/out/qa/3-shot.png"), tool).toBe(false);
+    expect(matchesAny(globs, ".factory/out/qa"), `${tool} qa dir`).toBe(false);
     expect(matchesAny(globs, ".factory/out/gates.json"), tool).toBe(true);
+    expect(matchesAny(globs, ".factory/out/agents.jsonl"), tool).toBe(true);
   }
   // 최초 `init`은 남의 저장소에 이미 있는 파일을 건드리지 않는다 — 이 교체는 `--upgrade` 전용이다.
   expect(planInstall({ manifest: m, root: "/r", mode: "init", vars, ...io })[0].action).toBe("skip");

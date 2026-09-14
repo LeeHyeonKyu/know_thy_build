@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse as toml } from "smol-toml";
 import { L0_CONTEXTS, MERGE_ENVIRONMENT } from "../lib/bootstrap.js";
+import { isolatedRunner } from "./helpers/hook-env.js";
 const by = (cs) => Object.fromEntries(cs.map((c) => [c.id, c]));
 const REAL_HOOKS_DIR = new URL("../hooks/", import.meta.url).pathname;
 const AGENT_TEMPLATES = new URL("../../templates/factory/claude/agents/", import.meta.url).pathname;
@@ -445,8 +446,11 @@ test("checkHooks: runs each hook with stdin JSON and checks exit code; verdict-f
 test("checkHooks: real verdict-format.sh exits 2 without a verdict block; record-agents.sh exits 0 regardless of the transcript", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "ktb-doctor-hooks-"));
   try {
+    // KTB-40: 진짜 훅을 돌리는 유일한 자리다 — `record-agents.sh`는 `CLAUDE_PROJECT_DIR`를 읽어
+    // `agents.jsonl`을 쓴다. 스테이지 세션 안에서 이 스위트를 돌리면 그 변수가 상속돼 tmp cwd가
+    // 아니라 **진짜 저장소의 `.factory/out/`**에 기록이 남는다. 세션 변수는 여기서 끊는다.
     const c = by(await checkHooks({
-      run, root: cwd, hooksDir: REAL_HOOKS_DIR,
+      run: isolatedRunner(run), root: cwd, hooksDir: REAL_HOOKS_DIR,
       exists: existsSync, readFile: (p) => readFileSync(p, "utf8"),
       hooks: ["record-agents.sh", "verdict-format.sh"],
     }));

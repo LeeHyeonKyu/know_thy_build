@@ -113,6 +113,11 @@ export function freshContent(e, { readFile = (p) => readFileSync(p, "utf8"), var
  * ci-settings의 `permissions.deny`에서 **경로 deny만** 갈아 끼운다. 템플릿에 남는 것은 경로가 아닌
  * 항목(`Bash(gh secret*)`·`Read(.env*)` 등)이고, `Edit(...)`/`Write(...)`는 전부 harness에서 생성된다.
  * 순서는 "템플릿의 비경로 항목 → 생성된 경로 항목"으로 고정한다(결정적이어야 diff가 읽힌다).
+ *
+ * KTB-40 — `permissions.allow`는 **그대로 통과시킨다**(템플릿이 출처다). 그 배열은 qa 증거 카브아웃을
+ * 적극적으로 선언하지만 **카브아웃을 만들지는 않는다**: Claude Code에서 deny가 allow를 이기므로,
+ * 실제로 여는 일은 `FACTORY_ENUM`의 좁은 deny가 한다. allow가 필요한 이유는 따로 있다 —
+ * `--permission-mode dontAsk`에서 allow에 없는 도구 호출은 묻지 않고 **거절**된다.
  */
 export function renderCiSettings(templateText, prot, { harnessMode = false } = {}) {
   const j = JSON.parse(templateText);

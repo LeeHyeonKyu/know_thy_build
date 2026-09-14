@@ -408,6 +408,13 @@ run-stage.js <stage> <issue>
   1. claim.js <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 **2분마다** 같은 코멘트에 PATCH로 갱신(ADR-022)
+  1.5 setup 기준선 스냅샷                     # ADR-020 KTB-39 — `[runtime].setup`(composite action의 자기 스텝, run-stage보다 **먼저** 돈다)이
+                                             #   추적 파일을 다시 쓰는 하네스가 있다(`flutter pub get` → `pubspec.lock`·생성 플러그인 등록부).
+                                             #   스테이지가 트리를 건드리기 전에 `git status --porcelain`과 경로별 diff 지문을 찍어 두고
+                                             #   (`setup dirtied: <n> path(s): …` 한 줄), 4의 쓰기 금지 클린 체크에서 **그때 그 모양 그대로인**
+                                             #   경로만 면제한다(상태 문자나 지문이 움직였으면 세션이 더 쓴 것이므로 다시 더럽다). implement는
+                                             #   면제가 아니라 **복원**이다 — 2.3 브랜치 체크아웃보다 먼저 `git checkout -- <추적 경로>` + 추적되지
+                                             #   않는 setup 산출물 삭제로, 빌더의 `git add -A`가 그것을 커밋에 싣지 못하게 한다.
   2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
   2.3 (implement만) 브랜치 체크아웃           # ADR-023 Task 8b — `claude/fq-<issue>`는 **스테이지가** 체크아웃한다(빌더가 아니라).
                                              #   원격에 있으면 `git fetch origin +refs/heads/claude/fq-<n>:refs/remotes/origin/claude/fq-<n>` 후
@@ -452,7 +459,8 @@ run-stage.js <stage> <issue>
      (쓰기 금지 스테이지 — triage/plan/review — 는 이 시점에 워크트리를 다시 묻는다: `.factory/out/**`·`docs/factory/runs/**` 밖의
       변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14).
       `git status` 자체가 실패한 것은 더러운 트리가 아니라 **판정 불가**라 needs-human이 아니라 `factory:blocked`다(KTB-14 r1). implement는
-      건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.)
+      건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.
+      허용 목록은 둘이다: 2.4 overlay가 덮은 경로와 **1.5의 setup 기준선** — 둘 다 에이전트가 만든 diff가 아니다(KTB-39).)
      (implement는 대신 **두 가지**를 다시 묻는다(ADR-023 Task 8b): `git rev-parse --abbrev-ref HEAD`가 아직 2.3이 체크아웃한
       `claude/fq-<issue>`인가, 그리고 팩토리 소유 경로가 아직 2.4의 sha와 바이트 동일한가(overlayDrift 재실행). 어느 쪽이든
       아니면 그 세션이 무슨 설정으로 무엇을 판단했는지 알 수 없다 = 판정 불가 = `factory:blocked`이고, 5·6을 돌리지 않는다.)
@@ -1007,7 +1015,7 @@ light_on_merge: true
 - **`.claude/settings.json`** — 모든 세션(CI의 `claude -p`, 그리고 사람의 대화형 세션)에 걸린다. 여기 남는 deny는 **사람에게도 걸려야 옳은 것**뿐이다: `gh pr merge*`, `git merge*`, `git push --force*`/`-f*`, branch protection PUT. allow 목록과 훅 배선도 여기 있다.
 - **`.factory/ci-settings.json`** — CI만 로드한다(`run-stage.js`·`retro.js`가 `claude -p … --settings .factory/ci-settings.json`으로 부른다; `--settings`는 병합이고 deny는 병합 결과에서도 유효하다). **경로 기반 `Edit(...)`/`Write(...)` deny 전부**가 여기 산다 — `.factory/`(아래 KTB-36의 열거), `.claude/**`, `.github/workflows/factory-*`, `docs/factory/CHARTER.md`, 그리고 게이트 명령이 해석되어 지나가는 빌드 설정 파일(`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`). CI 전용 deny(`gh secret*`, `gh api -X DELETE*`, `Read(.env*)`)도 같은 파일에 있다.
 
-**`.factory/`의 deny는 통짜가 아니라 열거다 (ADR-020 KTB-36).** `Edit/Write(.factory/**)` 한 줄은 qa 리뷰어가 **쓰도록 명령받은** 증거 디렉터리(`[evidence].qa_artifacts = ".factory/out/qa/**"`, `reviewer-qa.md`)까지 함께 막았고, 두 훅이 그 디렉터리를 카브아웃해 둔 것(F3)은 L2 앞에서 아무 소용이 없었다 — **Claude Code에서 deny는 allow를 이기므로 allow 한 줄로 예외를 만들 수 없다.** 결과는 라이브 KTB #3이다: qa는 증거를 한 줄도 남기지 못했고 spec-conformance는 "증거가 없다"로 매 라운드를 거부했다. 그래서 `.factory/`를 **이름으로 다시 세운다**: `bin/**`·`lib/**`·`actions/**`·`lessons/**`·`scenarios/**`(qa만 읽는 hold-out 시나리오)·`node_modules/**`, `out/*`(직계 파일 — 글롭의 `*`는 `/`를 넘지 않는다), `out/coverage/**`·`out/prove-wt/**`·`out/classify-wt/**`, 그리고 최상위 파일 각각(`harness.toml`·`ci-settings*.json`·`roles.toml`·`quarantine.toml`·`package.json`·`package-lock.json`). 열리는 것은 `.factory/out/qa/**` **하나**다. 열거는 조용히 늙으므로 `templates.test.js`가 `templates/factory/factory/**`의 모든 파일과 런타임 경로 목록을 매처로 훑어 전부 걸리는지 확인한다. 변형 파일 `ci-settings-harness.json`의 `.factory` 목록은 여기서 `harness.toml` 한 줄만 뺀 것이다.
+**`.factory/`의 deny는 통짜가 아니라 열거다 (ADR-020 KTB-36).** `Edit/Write(.factory/**)` 한 줄은 qa 리뷰어가 **쓰도록 명령받은** 증거 디렉터리(`[evidence].qa_artifacts = ".factory/out/qa/**"`, `reviewer-qa.md`)까지 함께 막았고, 두 훅이 그 디렉터리를 카브아웃해 둔 것(F3)은 L2 앞에서 아무 소용이 없었다 — **Claude Code에서 deny는 allow를 이기므로 allow 한 줄로 예외를 만들 수 없다.** 결과는 라이브 KTB #3이다: qa는 증거를 한 줄도 남기지 못했고 spec-conformance는 "증거가 없다"로 매 라운드를 거부했다. 그래서 `.factory/`를 **이름으로 다시 세운다**: `bin/**`·`lib/**`·`actions/**`·`lessons/**`·`scenarios/**`(qa만 읽는 hold-out 시나리오)·`node_modules/**`, `out/*.json`·`out/*.jsonl`·`out/*.pids`(직계 파일 — **KTB-40**: `out/*` 한 줄은 `.factory/out/qa` 디렉터리 자신을 물었고 Claude Code의 매처는 그보다 관대해 `out/qa/…`까지 물었다, 그래서 직계에 실제로 쓰이는 확장자만 적는다), `out/coverage/**`·`out/prove-wt/**`·`out/classify-wt/**`, 그리고 최상위 파일 각각(`harness.toml`·`ci-settings*.json`·`roles.toml`·`quarantine.toml`·`package.json`·`package-lock.json`). 열리는 것은 `.factory/out/qa/**` **하나**이고, 두 ci-settings의 `permissions.allow`가 그것을 적극적으로 선언한다(KTB-40 — 선언이지 우선권이 아니다: deny가 여전히 이긴다. `--permission-mode dontAsk`에서 allow에 없는 호출은 묻지 않고 거절되므로 필요하다). 판정 테스트는 저장소의 `globToRegex`와 `*`가 `/`를 넘는 **관대한** 두 번째 매처로 **둘 다** 돈다 — 한쪽만으로는 "우리 가정이 소비자에게 이식되지 않는다"를 볼 수 없다. 열거는 조용히 늙으므로 `templates.test.js`가 `templates/factory/factory/**`의 모든 파일과 런타임 경로 목록을 매처로 훑어 전부 걸리는지 확인한다. 변형 파일 `ci-settings-harness.json`의 `.factory` 목록은 여기서 `harness.toml` 한 줄만 뺀 것이다.
 
 **왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 merge 스테이지(L1)가 자동 머지를 거부해 사람 머지를 요구한다(ADR-015, ADR-020). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.allow`/`settings.hooks`와 `settings.ci-deny`.
 
@@ -1068,11 +1076,18 @@ light_on_merge: true
       "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)",
       // KTB-36: `.factory/**` 한 줄이 아니라 **열거**다 — 그 한 줄이 qa 리뷰어가 쓰도록 명령받은
       // 증거 디렉터리(`[evidence].qa_artifacts = ".factory/out/qa/**"`)까지 덮었고, Claude Code에서
-      // **deny가 allow를 이기므로** allow 한 줄로는 뺄 수 없었다. `out/*`는 직계 파일만 잡는다.
+      // **deny가 allow를 이기므로** allow 한 줄로는 뺄 수 없었다.
+      // KTB-40: 그때 남긴 `out/*`도 부족했다 — `.factory/out/qa` **디렉터리 자신**이 직계 자식이라
+      // `mkdir -p .factory/out/qa`가 걸렸고, Claude Code의 매처는 우리 `globToRegex`보다 관대해
+      // `out/qa/test1.log`까지 물었다(라이브 run 34840944244의 9건 거절). 이제 직계에 **실제로**
+      // 쓰이는 확장자만 적는다: `*.json`·`*.jsonl`·`*.pids`. `.log`·`.md`·`.txt`는 넣지 않는다 —
+      // 관대한 읽기에서 그 세 줄이 qa의 증거(정확히 그 확장자들)를 다시 덮는다.
       "Edit(.factory/bin/**)", "Write(.factory/bin/**)", "Edit(.factory/lib/**)", "Write(.factory/lib/**)",
       "Edit(.factory/actions/**)", "Write(.factory/actions/**)", "Edit(.factory/lessons/**)", "Write(.factory/lessons/**)",
       "Edit(.factory/scenarios/**)", "Write(.factory/scenarios/**)", "Edit(.factory/node_modules/**)", "Write(.factory/node_modules/**)",
-      "Edit(.factory/out/*)", "Write(.factory/out/*)",
+      "Edit(.factory/out/*.json)", "Write(.factory/out/*.json)",
+      "Edit(.factory/out/*.jsonl)", "Write(.factory/out/*.jsonl)",
+      "Edit(.factory/out/*.pids)", "Write(.factory/out/*.pids)",
       "Edit(.factory/out/coverage/**)", "Write(.factory/out/coverage/**)",
       "Edit(.factory/out/prove-wt/**)", "Write(.factory/out/prove-wt/**)",
       "Edit(.factory/out/classify-wt/**)", "Write(.factory/out/classify-wt/**)",
