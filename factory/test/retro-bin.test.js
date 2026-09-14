@@ -1,4 +1,11 @@
-import { test, expect, vi } from "vitest";
+import { test, expect, vi, beforeEach, afterEach } from "vitest";
+
+// retro.js reports aborts with console.error as well as `record`. Under vitest's forked workers on a
+// CI runner, writing to the worker's stderr after the pipe is torn down surfaces as an unhandled
+// `Error: write EPIPE` and fails an otherwise green run (seen on the 1.0.1 publish validate job,
+// 2026-09-14). Every assertion in this file reads `recorded`, never stderr — so silence console.error.
+beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
+afterEach(() => { vi.restoreAllMocks(); });
 import {
   accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
   retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, ymdOf,
