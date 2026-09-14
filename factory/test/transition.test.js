@@ -376,13 +376,13 @@ test("KTB-32: a retry neither resets nor burns the review round counter", async 
 // ── bin/transition.js의 인자 파싱(그 파일은 즉시 실행되므로 파서만 lib에 산다) ────────────────
 test("KTB-32: parseTransitionArgs — label, --human, --reason, and --retry in any order", () => {
   expect(parseTransitionArgs(["7", "factory:queue", "--human", "--reason", "why"]))
-    .toEqual({ issue: 7, to: "factory:queue", human: true, env: {}, retry: false, reason: "why" });
+    .toEqual({ issue: 7, to: "factory:queue", human: true, retry: false, reason: "why" });
   expect(parseTransitionArgs(["3", "--human", "--retry"]))
-    .toEqual({ issue: 3, to: null, human: true, env: {}, retry: true, reason: "" });
+    .toEqual({ issue: 3, to: null, human: true, retry: true, reason: "" });
   expect(parseTransitionArgs(["3", "--retry", "--human", "--reason", "infra"]))
-    .toEqual({ issue: 3, to: null, human: true, env: {}, retry: true, reason: "infra" });
+    .toEqual({ issue: 3, to: null, human: true, retry: true, reason: "infra" });
   expect(parseTransitionArgs(["3", "factory:awaiting-review", "--human", "--retry"]))
-    .toEqual({ issue: 3, to: "factory:awaiting-review", human: true, env: {}, retry: true, reason: "" });
+    .toEqual({ issue: 3, to: "factory:awaiting-review", human: true, retry: true, reason: "" });
   // --retry는 사람 전용이다 — 여기서 이미 막는다(lib도 한 번 더 막는다).
   expect(parseTransitionArgs(["3", "--retry"]).error).toMatch(/--human/);
   expect(parseTransitionArgs(["3"]).error).toMatch(/usage|label/i);
