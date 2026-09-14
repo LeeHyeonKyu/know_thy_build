@@ -17,6 +17,15 @@ node  = "22"
 # test-env install and before the gate commands above run in a later workflow step. A harness that needs a
 # toolchain other than Node (Flutter, Python, …) can install it here and extend PATH for every step that
 # follows, gates included — no separate `[runtime].actions` mechanism exists yet (deferred, ADR-020 G1).
+# KTB-39: **prefer setup commands that do not rewrite tracked files** (pin toolchain versions; use
+# lockfile-respecting installs — `npm ci`, not `npm install`; `flutter pub get` rewrites
+# `pubspec.lock` and the generated plugin registrants). The stage snapshots the worktree right after
+# setup and exempts exactly that diff from the no-write clean check, so a dirtying setup no longer
+# sends triage/plan/review to `factory:needs-human` — but implement **restores** those paths before
+# the builder (its `git add -A` would otherwise commit them), and setup runs only ONCE per job, so a
+# setup output that is also a build input has to be re-created by the gate command itself.
+# `factory doctor` reports this as `runtime.setup-dirties-tree` (WARN) by running setup once in a
+# scratch clone.
 # Example, Flutter:
 #   setup = "curl -fsSL https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.0-stable.tar.xz | tar -xJ -C $HOME && echo \"$HOME/flutter/bin\" >> \"$GITHUB_PATH\" && flutter --version"
 

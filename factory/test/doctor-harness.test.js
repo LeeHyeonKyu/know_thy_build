@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
-import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
+import { checkHarness, checkCommands, checkSetupDirtiesTree, runSetupProbe, SETUP_DIRTY_NOTE } from "../lib/doctor/harness.js";
 import { loadHarness, loadHarnessRaw } from "../lib/config.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
@@ -253,4 +253,55 @@ test("protected.runner-only: an empty or non-covering list is a FAIL, and so is 
   expect(by(checkHarness({ harness: h4, files }))["protected.runner-only"].level).toBe("FAIL");
   h4.protected.runner_only = ["docs/runs/**"];
   expect(by(checkHarness({ harness: h4, files }))["protected.runner-only"].level).toBe("PASS");
+});
+
+// ── ADR-020 KTB-39 — `[runtime].setup`이 추적 파일을 다시 쓰는 하네스 ─────────────────────────
+// own-calendar #3: setup이 `flutter pub get`이라 스테이지가 시작하기도 전에 추적 파일이 다시 쓰였고,
+// 쓰기 금지 스테이지의 클린 체크가 그것을 에이전트의 위반으로 읽었다. run-stage는 이제 그 기준선을
+// 판정에서 빼지만(KTB-39), 그 하네스는 여전히 고쳐야 한다 — implement는 면제가 아니라 복원이라
+// setup 산출물이 매 라운드 지워지고, setup은 잡당 한 번만 돈다. doctor가 그 사실을 미리 말한다.
+test("runtime.setup-dirties-tree: a setup that rewrites tracked files is a WARN with the paths and the fix", () => {
+  const h = tmpl(); h.runtime.setup = "flutter pub get";
+  const c = checkSetupDirtiesTree({ harness: h, status: " M client/pubspec.lock\n M client/analysis_options.yaml\n" });
+  expect(c.level).toBe("WARN");
+  expect(c.detail).toContain("client/pubspec.lock");
+  expect(c.detail).toContain(SETUP_DIRTY_NOTE);
+});
+
+test("runtime.setup-dirties-tree: untracked setup output is called out too — `git add -A` would commit it", () => {
+  const h = tmpl(); h.runtime.setup = "flutter pub get";
+  const c = checkSetupDirtiesTree({ harness: h, status: "?? client/ios/Flutter/generated_plugin_registrant.h\n" });
+  expect(c.level).toBe("WARN");
+  expect(c.detail).toMatch(/1 untracked file\(s\)/);
+});
+
+test("runtime.setup-dirties-tree: a clean sample passes; no setup, a skip, and no sample are never judged", () => {
+  const h = tmpl();                                   // 템플릿 기본값은 `npm ci` — 추적 파일을 건드리지 않는다
+  expect(checkSetupDirtiesTree({ harness: h, status: "" }).level).toBe("PASS");
+  expect(checkSetupDirtiesTree({ harness: h, skipped: "--offline" })).toMatchObject({ level: "PASS", detail: expect.stringContaining("--offline") });
+  expect(checkSetupDirtiesTree({ harness: h }).level).toBe("PASS");            // 표본 없음 = 판정 없음
+  const h2 = tmpl(); delete h2.runtime.setup;
+  expect(checkSetupDirtiesTree({ harness: h2, status: " M a.js\n" }).level).toBe("PASS");
+  // setup 자신이 실패한 표본으로는 "다시 쓴다/아니다"를 말할 수 없다 — 그 사실만 WARN으로 남긴다.
+  expect(checkSetupDirtiesTree({ harness: h, status: "", setupExit: 1 })).toMatchObject({ level: "WARN", detail: expect.stringContaining("exited 1") });
+});
+
+test("runSetupProbe: the sample comes from a scratch clone — the working tree is never touched", async () => {
+  const h = tmpl(); h.runtime.setup = "flutter pub get";
+  const seen = [];
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "clone", result: (c, a) => { seen.push(a.at(-1)); return { code: 0, stdout: "", stderr: "" }; } },
+    { match: (c) => c === "bash", result: (c, a, o) => { seen.push(`setup@${o.cwd}`); return { code: 0, stdout: "", stderr: "" }; } },
+    { match: (c, a) => c === "git" && a[0] === "status", result: (c, a, o) => { seen.push(`status@${o.cwd}`); return { code: 0, stdout: " M client/pubspec.lock\n", stderr: "" }; } },
+  ]);
+  const removed = [];
+  const r = await runSetupProbe({ run, cwd: "/repo", harness: h, mkdtemp: () => "/tmp/probe-1", rm: (p) => removed.push(p) });
+  expect(r).toMatchObject({ status: " M client/pubspec.lock\n", setupExit: 0 });
+  expect(seen).toEqual(["/tmp/probe-1", "setup@/tmp/probe-1", "status@/tmp/probe-1"]);   // 셋 다 스크래치 안에서
+  expect(removed).toEqual(["/tmp/probe-1"]);                                             // 그리고 지우고 나온다
+  // 복제가 실패하면 표본이 없다 — 없는 표본으로 판정하지 않는다(skipped).
+  const failing = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "clone", result: { code: 128, stdout: "", stderr: "fatal: repository not found" } }]);
+  const skipped = await runSetupProbe({ run: failing, cwd: "/repo", harness: h, mkdtemp: () => "/tmp/probe-2", rm: () => {} });
+  expect(skipped.skipped).toMatch(/scratch clone failed/);
+  expect(checkSetupDirtiesTree({ harness: h, ...skipped }).level).toBe("PASS");
 });

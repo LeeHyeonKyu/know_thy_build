@@ -408,6 +408,13 @@ run-stage.js <stage> <issue>
   1. claim.js <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 **2분마다** 같은 코멘트에 PATCH로 갱신(ADR-022)
+  1.5 setup 기준선 스냅샷                     # ADR-020 KTB-39 — `[runtime].setup`(composite action의 자기 스텝, run-stage보다 **먼저** 돈다)이
+                                             #   추적 파일을 다시 쓰는 하네스가 있다(`flutter pub get` → `pubspec.lock`·생성 플러그인 등록부).
+                                             #   스테이지가 트리를 건드리기 전에 `git status --porcelain`과 경로별 diff 지문을 찍어 두고
+                                             #   (`setup dirtied: <n> path(s): …` 한 줄), 4의 쓰기 금지 클린 체크에서 **그때 그 모양 그대로인**
+                                             #   경로만 면제한다(상태 문자나 지문이 움직였으면 세션이 더 쓴 것이므로 다시 더럽다). implement는
+                                             #   면제가 아니라 **복원**이다 — 2.3 브랜치 체크아웃보다 먼저 `git checkout -- <추적 경로>` + 추적되지
+                                             #   않는 setup 산출물 삭제로, 빌더의 `git add -A`가 그것을 커밋에 싣지 못하게 한다.
   2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
   2.3 (implement만) 브랜치 체크아웃           # ADR-023 Task 8b — `claude/fq-<issue>`는 **스테이지가** 체크아웃한다(빌더가 아니라).
                                              #   원격에 있으면 `git fetch origin +refs/heads/claude/fq-<n>:refs/remotes/origin/claude/fq-<n>` 후
@@ -452,7 +459,8 @@ run-stage.js <stage> <issue>
      (쓰기 금지 스테이지 — triage/plan/review — 는 이 시점에 워크트리를 다시 묻는다: `.factory/out/**`·`docs/factory/runs/**` 밖의
       변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14).
       `git status` 자체가 실패한 것은 더러운 트리가 아니라 **판정 불가**라 needs-human이 아니라 `factory:blocked`다(KTB-14 r1). implement는
-      건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.)
+      건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.
+      허용 목록은 둘이다: 2.4 overlay가 덮은 경로와 **1.5의 setup 기준선** — 둘 다 에이전트가 만든 diff가 아니다(KTB-39).)
      (implement는 대신 **두 가지**를 다시 묻는다(ADR-023 Task 8b): `git rev-parse --abbrev-ref HEAD`가 아직 2.3이 체크아웃한
       `claude/fq-<issue>`인가, 그리고 팩토리 소유 경로가 아직 2.4의 sha와 바이트 동일한가(overlayDrift 재실행). 어느 쪽이든
       아니면 그 세션이 무슨 설정으로 무엇을 판단했는지 알 수 없다 = 판정 불가 = `factory:blocked`이고, 5·6을 돌리지 않는다.)
