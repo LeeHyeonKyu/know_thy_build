@@ -25,8 +25,15 @@ on:
 # 그래서 최소 권한만 남긴다 — `contents: write`는 쓰지 않는 쓰기 자격증명을 잡에 쥐어 주는 것이었다.
 permissions:
   contents: read
+# 그룹에 ref를 넣는 이유(최종 리뷰 B-SF4): 위의 `branches: ['**']` 때문에 하네스 이슈의 **모든 빌더
+# 브랜치 push**가 이 그룹에 런을 하나씩 넣는다(잡은 `if:`에서 곧바로 건너뛰어지지만, 대기열에는 들어간다).
+# GitHub은 그룹당 pending 런을 하나만 보관하고 새 것이 옛 것을 **취소한다** — 그래서 정작 중요한 런
+# (하네스 머지 직후 기본 브랜치 push, 큐를 다시 여는 그 런)이 진행 중인 60분짜리 리허설 뒤에서
+# 대기하다 조용히 취소될 수 있다. 증상은 "하네스를 고쳤는데 큐가 계속 닫혀 있다"이고 아무 신호도 없다.
+# ref별로 그룹을 가르면 기본 브랜치의 런은 자기 그룹에서만 줄을 서고, 직렬화(같은 ref의 리허설 하나)는
+# 그대로 유지된다.
 concurrency:
-  group: factory-rehearse
+  group: factory-rehearse-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   rehearse:

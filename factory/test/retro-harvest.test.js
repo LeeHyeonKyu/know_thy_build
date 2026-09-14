@@ -343,3 +343,61 @@ test("harvest: overlap stats come from the merged issues' review handoffs in the
   expect(stats.overlap_ratio).toBe(0.25);
   expect(stats.unique_findings_by_role).toEqual({ qa: 1, correctness: 1, security: 1 });
 });
+
+
+/**
+ * ── 최종 리뷰 A-SF6 — **`qa_claims=`에 드디어 독자가 생겼다.** ────────────────────────────────
+ *
+ * ADR-024 / KTB-42 SF-3은 그 필드를 "retro가 '전부 na에 가까운 승인'을 셀 수 있게" 남기기로 했는데,
+ * `factory/lib/retro/**`·`factory/cli/**` 어디에도 그것을 읽는 코드가 없었다 — 기록만 하고 아무도
+ * 보지 않는 필드는 계약이 아니라 잔해다. 계약이 **막는** 것은 전부 `na`인 매니페스트 하나뿐이고,
+ * 계약이 **허용하지만 눈여겨봐야 할** 상태(절반 이상이 `na`인 승인)는 기록에만 남는다.
+ */
+import { reviewEvidenceLine } from "../lib/run-record.js";
+
+const evidenceRecord = ({ dir, issue, at, decision, qaClaims }) => appendRunRecord({
+  root: dir, issue, stage: "review", runnerId: "gha-1", now: at,
+  lines: [reviewEvidenceLine({ runId: `r-${issue}`, runnerId: "gha-1", headSha: "a".repeat(40), round: 1, decision, verdicts: [], qaManifest: "f".repeat(64), qaClaims })],
+});
+
+test("A-SF6: stats count the qa claim mix — qa_na_ratio and the na-heavy approvals", () => {
+  const dir = mkdtempSync(join(tmpdir(), "retro-qa-claims-"));
+  evidenceRecord({ dir, issue: 70, at: "2026-09-10T00:00:00Z", decision: "approved", qaClaims: "3c/1na" });   // 25% na
+  evidenceRecord({ dir, issue: 71, at: "2026-09-10T01:00:00Z", decision: "approved", qaClaims: "1c/3na" });   // 75% na — na-heavy
+  evidenceRecord({ dir, issue: 72, at: "2026-09-10T02:00:00Z", decision: "rework", qaClaims: "0c/4na" });     // 승인이 아니다 — 세지 않는다
+  evidenceRecord({ dir, issue: 73, at: "2026-09-10T03:00:00Z", decision: "approved", qaClaims: null });       // 필드 없음(구형·qa 없는 로스터) — 분모에서도 빠진다
+  const records = new Map([70, 71, 72, 73].map((n) => [n, readFileSync(join(dir, `docs/factory/runs/${n}.md`), "utf8")]));
+  const issues = [70, 71, 72, 73].map((number) => ({ number, title: "x", labels: [], state: "open" }));
+
+  const { stats } = harvest({ records, issues, commentsByIssue: new Map(), since: null });
+  expect(stats.qa_approvals).toBe(2);
+  expect(stats.qa_claims_total).toBe(4);
+  expect(stats.qa_na_total).toBe(4);
+  expect(stats.qa_na_ratio).toBe(0.5);
+  expect(stats.qa_na_heavy_approvals).toBe(1);
+
+  // 창 밖의 승인은 세지 않는다 — 나머지 통계와 같은 delta 규약이다.
+  const windowed = harvest({ records, issues, commentsByIssue: new Map(), since: "2026-09-10T00:30:00Z" }).stats;
+  expect(windowed.qa_approvals).toBe(1);
+  expect(windowed.qa_na_ratio).toBe(0.75);
+  expect(windowed.qa_na_heavy_approvals).toBe(1);
+
+  // qa 기록이 아예 없는 공장에서는 0이고, 표는 그것을 "없음"으로 읽는다(비율 0.00과 구별된다).
+  const none = harvest({ records: new Map(), issues: [], commentsByIssue: new Map(), since: null }).stats;
+  expect(none).toMatchObject({ qa_approvals: 0, qa_na_ratio: 0, qa_na_heavy_approvals: 0 });
+});
+
+test("A-SF6: accumulateStats sums the qa claim counts and re-derives the ratio (not an average of ratios)", async () => {
+  const { accumulateStats, statsTable } = await import("../bin/retro.js");
+  const total = accumulateStats(
+    { qa_approvals: 1, qa_claims_total: 3, qa_na_total: 1, qa_na_ratio: 0.25, qa_na_heavy_approvals: 0 },
+    { qa_approvals: 1, qa_claims_total: 1, qa_na_total: 3, qa_na_ratio: 0.75, qa_na_heavy_approvals: 1 },
+  );
+  expect(total.qa_approvals).toBe(2);
+  expect(total.qa_claims_total).toBe(4);
+  expect(total.qa_na_total).toBe(4);
+  expect(total.qa_na_ratio).toBe(0.5);                  // 0.25와 0.75의 평균이 아니라 4/8에서 다시 나온 값
+  expect(total.qa_na_heavy_approvals).toBe(1);
+  expect([statsTable({ qa_approvals: 1, qa_claims_total: 1, qa_na_total: 3, qa_na_ratio: 0.75, qa_na_heavy_approvals: 1 }, total)].flat().join("\n"))
+    .toMatch(/qa na ratio \| 0\.75 \(3\/4 claims, na-heavy 1\/1 approvals\) \| 0\.50 \(4\/8 claims, na-heavy 1\/2 approvals\)/);
+});

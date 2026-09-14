@@ -665,6 +665,41 @@ function lastRealTransition(comments) {
 }
 
 /**
+ * ── 최종 리뷰 A-MF2 — **이 head가 `factory:approved`에 실제로 닿았는가.** ──────────────────────
+ *
+ * `requirements.js`의 `humanMerged` 분기가 `qaEvidenceGate`보다 **먼저** `pass`를 돌려주는 것은 옳은
+ * 판단이다(sweep 잡에는 records 브랜치 체크아웃도 `qa_manifest` 다이제스트도 없다). 그 판단은 전제
+ * 하나에 기대고 있었다: *"이 head의 매니페스트 존재·유효성은 `factory:approved` 전이 때 이미 검사됐다."*
+ * 그런데 그 전제가 깨지는 길이 있었다 —
+ *
+ *   1주기: 리뷰 승인 → `factory:approved` 통과 → 머지 스테이지가 보호 경로에서 멈춤
+ *          → `factory:needs-human (… — human merge required: …)`.
+ *   2주기: 새 head Y. 리뷰 런이 `factory/review`·`factory/gates`를 **게이트보다 먼저** Y에 게시하고
+ *          (`run-stage.js` postReviewStatus), 그 다음 `factory:approved` 전이가 **거부된다**
+ *          (qa 증거 미검증·로스터 미해결·매니페스트 head 불일치). 거부는 `to=factory:needs-human …
+ *          reason=refused`로 남고, `lastRealTransition`은 그것을 건너뛰므로 이 팔은 여전히 1주기의
+ *          "사람의 머지를 기다린다"를 마지막 전이로 읽는다.
+ *   그리고 사람이 PR을 머지하면 `verifyMergedPrEvidence`는 2주기가 남겨 둔 상태들을 찾아 통과하고,
+ *   되돌릴 수 없는 `factory:merged`가 붙는다 — qa 증거 요구조건이 **그 커밋에 대해 한 번도 통과한 적
+ *   없는 채로**.
+ *
+ * 그래서 여기서 그 전제를 **직접 확인한다**: 완료된 `→ factory:approved` 전이 마커가 있는가. 거부된
+ * 승인 시도는 `to=factory:approved` 마커를 아예 남기지 않으므로(거부는 `→ needs-human`으로 적힌다),
+ * 이 한 줄이 qa 게이트를 포함한 `factory:approved`의 **모든** 요구조건을 한꺼번에 대신 묻는다.
+ * 추가 API 호출은 없다 — `comments`는 이미 손에 있다.
+ *
+ * **이번 주기의** 승인만 센다: 창은 마지막 재큐 이후다(`commentsSinceRequeue` — KTB-25가 라운드
+ * 카운터에 쓰는 바로 그 창). 지난 주기의 승인이 이번 주기의 증거가 되지 않는다. 머지된 head가 이번
+ * 주기의 것인지는 바로 위 stale-cycle 가드가 이미 확인했다(review handoff의 `head_sha`와 대조).
+ */
+export function approvedThisCycle(comments) {
+  return commentsSinceRequeue(Array.isArray(comments) ? comments : []).some((c) => {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    return !!m && m[2] === "factory:approved" && m[4] !== "refused";
+  });
+}
+
+/**
  * "이 머지된 PR의 증거가 GitHub에 남아 있는가"의 조회 껍데기. 판정 자체는 두 개의 공유 함수다 —
  * `verifyFactoryStatuses`(merge 스테이지 §(6b)의 판정 (d))와 `allChecksGreen`(merge 스테이지의
  * 머지 게이트가 쓰는 바로 그 함수). 여기서는 조회와 **조회 실패**만 다룬다.
@@ -784,8 +819,18 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
   // 구형 배선(테스트 더블 포함)은 조용히 건너뛴다 — 다른 dep들과 같은 계약("안 쓴다"와 "에러났다"를
   // 가른다). 조회 함수가 하나라도 없으면 증거를 **확인할 수 없다**는 뜻이고, 확인할 수 없는 것을
   // 통과로 읽지 않는다: 이 팔은 아예 돌지 않는다.
-  for (const fn of ["mergedPrForBranch", "prMergeInfo", "commitStatuses", "prChecks"]) if (typeof gh[fn] !== "function") return;
-  if (typeof factoryLogins !== "function" || typeof reviewRoster !== "function") return;
+  /**
+   * 최종 리뷰 B-nit 1 — **건너뛸 때도 소리를 낸다.** "구형 배선은 조용히 건너뛴다"는 테스트 더블에는
+   * 맞는 말이지만 프로덕션에는 틀렸다: `bin/sweep.js`에서 dep 하나가 빠지는 리팩터 한 번이 이 팔을
+   * 통째로 끄고, 그 침묵에는 액션 한 줄도 남지 않는다 — KTB-23과 이 티켓이 열린 바로 그 모양이다.
+   */
+  const missingDep = [...["mergedPrForBranch", "prMergeInfo", "commitStatuses", "prChecks"].filter((fn) => typeof gh[fn] !== "function"),
+    ...(typeof factoryLogins !== "function" ? ["factoryLogins"] : []),
+    ...(typeof reviewRoster !== "function" ? ["reviewRoster"] : [])];
+  if (missingDep.length) {
+    actions.push({ kind: "human-merged-skipped", reason: `wiring incomplete: ${missingDep.join(", ")} — this arm did not run` });
+    return;
+  }
   let issues;
   try { issues = await gh.searchIssues("factory:needs-human", { state: "all", sort: "updated-desc" }); }
   catch (e) { actions.push({ kind: "error", step: "human-merged", error: String(e.message || e) }); return; }
@@ -849,6 +894,14 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
         actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: `merged PR #${pr} head ${String(info.headSha).slice(0, 7)} ≠ latest review head ${reviewHead.slice(0, 7)} — that PR belongs to an earlier cycle` });
         continue;
       }
+      // A-MF2 — `factory:approved`가 이 head에 대해 **실제로 통과했는가**(§approvedThisCycle).
+      if (!approvedThisCycle(comments)) {
+        actions.push({
+          kind: "human-merged-skipped", issue: it.number, pr,
+          reason: `head ${String(info?.headSha ?? "unknown").slice(0, 7)} never reached factory:approved — this issue carries no completed \`→ factory:approved\` transition for this cycle, so the requirements of that label (the qa evidence gate among them) were never satisfied for the merged commit. \`:unstick\`으로 정리하세요.`,
+        });
+        continue;
+      }
       /**
        * 거부 dedupe는 **PR 범위 하나**다(r5 must_fix (b)). r3은 여기에 `transition()` 자신의 마커도
        * 함께 봤는데, 그 마커에는 PR 번호가 없어서(transition은 PR을 모른다) 한 주기 안의 **다른** PR에
@@ -897,6 +950,19 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
         actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason });
         continue;
       }
+      /**
+       * 최종 리뷰 B-SF6 — **K를 못 읽으면 조용히 약해지지 않는다.** 예전에는 `Number.isInteger`가
+       * 거짓이면 `maxRounds`를 ctxExtra에서 통째로 뺐고, `verifyReviewQuorum`은 `round > K` 검사를
+       * **액션 한 줄 없이** 건너뛰었다 — 이 팔의 나머지가 전부 "확인 못 한 것은 통과가 아니다"인데
+       * 여기만 반대였다(r3 must_fix 1이 죽이려던 바로 그 실패 모양). 되돌릴 수 없는 `factory:merged`
+       * 앞에서 한도 하나를 모르는 채로 지나가지 않는다: 이름 있는 사유로 거부하고 사람에게 넘긴다.
+       */
+      if (!Number.isInteger(charter?.limits?.K)) {
+        const reason = `CHARTER limits.K is ${charter?.limits?.K === undefined ? "missing" : `not an integer (${JSON.stringify(charter.limits.K)})`} — the review round limit cannot be re-derived, and an unmeasurable limit is not a satisfied one`;
+        await gh.comment(it.number, `${refusedMark}\nPR #${pr}이 머지돼 있지만 이 이슈를 \`factory:merged\`로 잇지 않았습니다 — ${reason}. \`docs/factory/CHARTER.md\`의 \`limits.K\`를 고친 뒤 \`:unstick\`으로 이 이슈를 정리하세요(KTB-46).`);
+        actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason });
+        continue;
+      }
       const by = info.mergedBy || "a person";
       const t = await transition({
         issue: it.number,
@@ -915,7 +981,7 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
         ctxExtra: {
           issue: it.number, prHeadSha: info.headSha,
           roster: ros.roles, rosterSize: ros.roles.length,
-          ...(Number.isInteger(charter?.limits?.K) ? { maxRounds: charter.limits.K } : {}),
+          maxRounds: charter.limits.K,                                  // 위에서 정수임을 확인했다(B-SF6)
           humanMerged: true, statusesVerified: true,
         },
       });
@@ -935,7 +1001,7 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
         actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason: t?.reason ?? "unknown" });
         continue;
       }
-      await gh.comment(it.number, `${humanMergedComment(it.number, pr)}\nPR #${pr}을 ${by}이(가) 머지했습니다 — 보호 경로 변경이라 팩토리가 자동 머지하지 않고 사람에게 넘긴 PR입니다(스펙 §12.3-2). 머지 사실과 리뷰·게이트·필수 체크 증거를 확인하고 \`factory:needs-human\`에서 \`factory:merged\`로 이었습니다(KTB-46). 증거 검사는 자동 머지와 똑같이 물렸습니다(tier ${ros.tier}, 리뷰어 ${ros.roles.length}명).`);
+      await gh.comment(it.number, `${humanMergedComment(it.number, pr)}\nPR #${pr}을 ${by}이(가) 머지했습니다 — 보호 경로 변경이라 팩토리가 자동 머지하지 않고 사람에게 넘긴 PR입니다(스펙 §12.3-2). 머지 사실과 리뷰·게이트·필수 체크 증거를 확인하고 \`factory:needs-human\`에서 \`factory:merged\`로 이었습니다(KTB-46). 이 head가 \`factory:approved\`에 실제로 도달했다는 것(= qa 증거 게이트를 포함한 그 라벨의 요구조건이 이 커밋에 대해 통과했다는 것)도 함께 확인했습니다. 다만 이 문(門)에서 **다시 계산하지 않는 검사가 둘** 있습니다 — ① \`factory/records\` run 기록과의 리뷰 provenance 대조(자동 머지의 §(6b)), ② 그 기록의 \`qa_manifest=\` 다이제스트 재대조. sweep 잡에는 records 브랜치 체크아웃이 없어서입니다. KTB-48이 둘 다 덮습니다(tier ${ros.tier}, 리뷰어 ${ros.roles.length}명).`);
       // 이슈가 아직 열려 있으면 닫는다 — `Closes #n`이 걸리지 않은 경우다(KTB #3이 그랬다).
       // `factory status`의 "Needs You"가 이미 끝난 이슈를 계속 세지 않게 하는 마지막 한 걸음이고,
       // 실패해도 전이 자체는 되돌리지 않는다(라벨이 이미 진실을 말한다).

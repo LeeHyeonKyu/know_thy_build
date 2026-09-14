@@ -501,7 +501,14 @@ export async function checkRehearsal({ gh, root, readFile, harness }) {
   const harnessText = read(".factory/harness.toml");
   if (harnessText == null) return [checkRehearsalCurrent({ current: null })];
   const current = rehearsalHash({ harnessText, charterText: read("docs/factory/CHARTER.md") || "" });
-  const recorded = await recordedRehearsal({ gh, branch: harness?.project?.default_branch || "main" });
+  /**
+   * 최종 리뷰 B-SF2 — **`current`를 같이 넘긴다.** `makeRehearsalChecker`는 넘기고 doctor만 넘기지
+   * 않아서, 두 독자가 같은 기록을 다르게 읽었다: `current`가 있으면 후보를 훑다 **일치를 만나는 순간
+   * 멈추고**(= r2의 tolerant binding), 없으면 가장 새 후보에서 읽은 해시를 끝까지 들고 간다. 되돌아보는
+   * 창 안에 기록된 해시가 둘이고 지금 지문이 옛 쪽이면(harness.toml 되돌리기, CHARTER 프론트매터 토글)
+   * `→ factory:queue`는 통과하는데 doctor는 FAIL로 1을 뱉는다.
+   */
+  const recorded = await recordedRehearsal({ gh, branch: harness?.project?.default_branch || "main", current });
   return [checkRehearsalCurrent({ recorded, current })];
 }
 

@@ -3179,6 +3179,29 @@ KTB-42 이전의 기록과 qa 없는 tier의 기록은 그대로 읽힌다.
 - doctor의 `qa.evidence-probe`는 CHARTER의 어느 로스터에도 `qa`가 없으면 묻지 않고, 자기가 만든
   디렉터리는 지운다.
 
+**리뷰 라운드 2에서 닫은 것**:
+- **래퍼도 인터프리터다.** 인터프리터 판정이 첫 낱말에서 멈춰서 `timeout 5 sh -c …`·`xargs sh -c …`·
+  `nohup sh -c …`가 그대로 통과했다. 이제 `env`·`xargs`·`timeout`·`nohup`·`stdbuf`·`nice`·`command`·
+  `busybox`·`setsid`·`exec`를 **벗겨 내고** 그 뒤의 낱말을 다시 본다. `env -S`만은 벗겨 내지 않고
+  **그 자리에서 거절한다** — `-S`는 한 문자열을 자기 문법으로 다시 쪼개므로 훅이 읽은 명령줄과 실제로
+  도는 명령줄이 갈라진다.
+- **`attach --file`의 출처를 가뒀다.** 목적지는 라운드 1이 가뒀지만(`--root` 제거) 출처는 열려 있어서
+  임의의 절대 경로가 증거 디렉터리로 복사됐고, 거기서 `reviewer-spec-conformance`가 읽어 공개 handoff에
+  인용할 수 있었다. 이제 `--file`은 **저장소 안이나 임시 디렉터리**(`/tmp`·`/private/tmp`·`$TMPDIR`)만
+  받고(심볼릭 링크는 realpath 이후로 판정), 그 파일이 **이 세션의 `Read(...)` deny 글롭**에 걸리면
+  거절한다 — 목록은 손으로 베끼지 않고 세션이 실제로 들고 도는 ci-settings에서 읽는다(읽지 못했고
+  `FACTORY_STAGE` 안이면 거절: 확인하지 못한 금지 목록은 금지 목록이 아니다).
+- **`verify-stage`의 qa 분기를 둘로 갈랐다.** 라운드 1은 `ok !== true` 전부를 "증거 **경로**의 고장"으로
+  불렀는데, 거기에는 **qa 리뷰어 자신의 부족**(빈 커버리지·전부 `na`)도 섞여 있었다 — 그것을 인프라로
+  부르면 "빌더의 일이 아니다"가 사실과 어긋나고 sweeper가 같은 부족을 상대로 리뷰를 세 번 다시 돈다.
+  이제 경로의 고장만 `qa evidence manifest unusable`(→ blocked/undecidable)이고, 리뷰어의 부족은
+  `qa evidence incomplete:` 접두어를 달고 **이 라운드의 reject**로 접힌다(합성 must_fix, role `qa`,
+  id를 부른다 → `factory:rework` 또는 K 한도의 평소 경로). 어느 쪽도
+  `stage artifact missing or invalid`가 아니고, 어느 쪽도 누락으로 `needs-human`이 되지 않는다.
+- **qa 리뷰어가 알아야 할 두 거절**: 전부 `not_applicable`인 매니페스트는 거절된다(리뷰가 아니라
+  보고서다), 그리고 해석되지 않은 `done_when`은 `ok:false`다(검사할 대상이 없다는 것은 계약을 읽지
+  못했다는 뜻이지 만족했다는 뜻이 아니다).
+
 **영향**: 스펙 §7.6(새로 추가) · §5.2.3(qa의 증거 절차) · `harness.toml [evidence]` 주석 ·
 `templates/know-thy-build/qa.md`(SETUP이 이 프로젝트의 최소선 레시피를 **한 번** 적는다) ·
 두 ci-settings의 `permissions.allow`에 `Bash(node .factory/bin/qa-evidence.js *)`
@@ -3194,6 +3217,9 @@ KTB-40의 그 교훈) · `factory doctor`의 새 검사 `qa.evidence-probe` ·
   진행 중이던 이슈는 리뷰를 한 라운드 더 돌아야 한다(그 라운드가 매니페스트를 만든다).
 - [ ] `reviewer-qa`/`reviewer-spec-conformance` 프롬프트를 커스터마이즈한 어댑터는 도구 이름
   (`.factory/bin/qa-evidence.js`)을 프롬프트에 넣어야 한다 — 없으면 `doctor`가 FAIL한다.
+- [ ] **`attach --file`의 출처가 좁아졌다**(리뷰 라운드 2 — 동작 변경): 저장소 밖·임시 디렉터리 밖의
+  절대 경로를 `attach` 하던 하네스는 그 파일을 먼저 저장소나 `/tmp`로 옮겨야 한다. `.env*`·`.git/**`·
+  `.netrc`·`.npmrc`처럼 세션의 `Read(...)` deny에 걸리는 파일은 이제 증거가 될 수 없다.
 
 ---
 
@@ -3259,7 +3285,11 @@ CHARTER 프론트매터)`. 변수 쓰기는 repo **admin**을 요구하는데 AD
 명시적 `skipRehearsal: true`가 있어야 하고, 둘 다 없으면 거부한다. 프로덕션 호출자는 **전부** 배선한다:
 사람의 `bin/transition.js`, sweeper의 하네스 주차 해제(`bin/sweep.js`), merge 스테이지의 step 9
 (`transitionOther`), flaky 수확(`gates.js` — 이슈를 `backlog`로 만든 뒤 게이트를 지나 큐로 민다),
-그리고 **로컬 진입**(`run-stage.js`의 `makeLocalEntry` — `factory run triage <n>`이 `backlog` 이슈에
+**모든 스테이지 전이가 모이는 `run-stage.js`의 `deps.transition`**(최종 리뷰 B-MF1 — 그 자리가 큐를
+겨누는 길은 triage의 blocked 재시도 hop `BLOCKED_RETRY.triage.hop` 하나다. 배선이 없으면 그 hop은
+fail closed로 **영원히** 거부된다: 새 GREEN 리허설도 풀지 못한다, 값이 낡은 것이 아니라 인자가 없기
+때문이다. 다른 목적 라벨에는 비용이 0이다 — `transition()`은 `to === "factory:queue"`일 때만 검사기를
+부른다), 그리고 **로컬 진입**(`run-stage.js`의 `makeLocalEntry` — `factory run triage <n>`이 `backlog` 이슈에
 라벨을 직접 쓰던 자리다. r2 리뷰가 찾은 마지막 우회였다: 그 자리가 열려 있으면 사람의
 `transition.js … --human`은 거부당하는데 `factory run triage <n>`은 통과하고, 그 뒤의 plan·implement·
 review는 러너에서 한 번도 리허설하지 않은 하네스 위로 간다 — 정확히 own-calendar의 실패다.

@@ -102,6 +102,12 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false }) {
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
+/**
+ * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
+ * 고정 id인 이유: 같은 부족이 두 번 접히지 않고(dedupe), rework 응답에서 사람과 builder가 그 항목을
+ * 이름으로 부를 수 있어야 한다.
+ */
+export const QA_SHORTFALL_ID = "qa-evidence";
 
 /**
  * ADR-020 KTB-35 — RED인 판정 안에서 **자기 사유를 들고 있는** 첫 게이트의 그 사유(없으면 null).
@@ -686,7 +692,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       if (typeof prior === "number") v.data.round = prior + 1;
     }
     // review handoff(review.v1)는 verdicts만 싣는다 — 집계 결정은 여기서 만들어 handoff·전이에 함께 실는다.
-    if (stage === "review" && v.data && v.data.decision == null && Array.isArray(v.data.verdicts)) {
+    // A-SF1 — `v.qaShortfall`이 있으면 산출물이 스스로 적은 decision이 있더라도 집계를 다시 돈다:
+    // 그러지 않으면 이 부족이 **조용히 사라진다**(= 누락으로 정해지는 등급, 이 수정이 없애려는 것).
+    if (stage === "review" && v.data && (v.data.decision == null || v.qaShortfall) && Array.isArray(v.data.verdicts)) {
       const roster = ctx?.roster || [];
       const agg = aggregateReview({ verdicts: v.data.verdicts, rosterSize: roster.length, rosterRoles: roster });
       const reviewDescription = (decision) => {
@@ -710,6 +718,32 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
         const t = await d.transition({ to: "factory:needs-human", reason: `review incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}` });
         record(["verify: ok", `review: incomplete — missing verdicts: ${agg.missing_roles.join(", ") || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
         return 2;
+      }
+      /**
+       * ── 최종 리뷰 A-SF1 — **qa 증거 부족은 이 라운드의 reject다.** ─────────────────────────────
+       *
+       * `verify-stage`는 그것을 `reasons`가 아니라 `qaShortfall`로 내보낸다(거기 doc 참고). 여기서
+       * 그것을 집계에 **합성 must_fix**로 접는다: 역할은 `qa`, 부족한 done_when id를 이름으로 부른다.
+       * 그러면 아래의 세 소비처가 전부 같은 결정을 읽는다 — `factory/review` 상태(failure), run 기록의
+       * `review-evidence:` 줄, 그리고 `nextState`(→ `factory:rework`, K를 넘겼으면 평소의 K 경로).
+       *
+       * 접기 전에는 이 부족이 스테이지 실패였고, 접두어는 다른 분기의 기본값(`stage artifact missing
+       * or invalid`)이었으며, 등급은 **판단이 아니라 누락으로** `factory:needs-human`이었다. 한 라운드
+       * 더 돌면 풀릴 일에 리뷰어 넷의 라운드를 버리고 사람을 부르던 자리다.
+       */
+      if (v.qaShortfall) {
+        const ids = Array.isArray(v.qaShortfall.ids) ? v.qaShortfall.ids : [];
+        if (!agg.must_fix.some((m) => m?.id === QA_SHORTFALL_ID)) {
+          agg.must_fix.push({
+            id: QA_SHORTFALL_ID,
+            where: `${qaDirRel(issue)}/manifest.json`,
+            claim: v.qaShortfall.reason,
+            evidence: ids.length ? `done_when with no usable evidence: ${ids.join(", ")}` : "the qa evidence manifest does not satisfy the contract",
+            by: "qa",
+          });
+        }
+        agg.decision = "rework";
+        record([v.qaShortfall.reason]);
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
@@ -1862,6 +1896,13 @@ async function main() {
       headSha: headSha ?? ctxCache?.handoffs?.implement?.head_sha ?? null,
     });
   };
+  /**
+   * KTB-44 / ADR-025 — **이 프로세스의 리허설 검사기는 하나다**(최종 리뷰 A-nit 2). 예전에는 같은
+   * 리터럴이 네 자리(로컬 진입·flaky 수확·step 9 주차 해제·아래 `deps.transition`)에 따로 적혀 있었고,
+   * 넷이 갈릴 수 있었다 — 갈리는 방향은 언제나 "한 자리만 배선을 잃는" 쪽이다(B-MF1이 정확히 그
+   * 모양이었다: 네 번째 자리에 아무것도 없었다).
+   */
+  const rehearsal = makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -1877,7 +1918,7 @@ async function main() {
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     // KTB-44 (r2 nf-2): 로컬 진입도 다른 네 생산자와 **같은** 검사기를 지난다.
-    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
+    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal }),
     /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
     issueLabels: async () => (await gh.issue(issue)).labels,
     /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의
@@ -2002,7 +2043,7 @@ async function main() {
         run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
         saveQuarantine: (q) => writeQuarantine(root, q),
         // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
-        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
+        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal }),
       });
       mkdirSync(join(root, ".factory/out"), { recursive: true });
       writeFileSync(gatesPath, JSON.stringify(result, null, 2));
@@ -2244,7 +2285,7 @@ async function main() {
      * 거부되면 그 이슈는 `factory:needs-info`에 남고 sweeper가 매 주기 다시 시도한다 — 사람이
      * `factory rehearse`를 돌리는 순간 통과한다(push 트리거가 보통 그보다 먼저 돈다).
      */
-    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
+    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal }),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
     /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
      * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */
@@ -2258,10 +2299,19 @@ async function main() {
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
       // merge-stage §(6b)가 이미 그 전에 판정 불가로 멈춘다).
+      /**
+       * 최종 리뷰 B-MF2 — **`factory:approved`도 로스터를 필요로 한다.** KTB-42가 그 목적 라벨에
+       * `qaEvidenceGate`를 걸었고 그 게이트는 로스터를 못 구하면 fail closed다. merge 스테이지는
+       * script-only라 `ctxCache`가 없어 `buildCtxExtra`가 `roster`를 채우지 못하는데, 그 스테이지가
+       * `factory:approved`를 목표로 삼는 자리가 하나 있다: KTB-15b의 blocked 재시도 복귀
+       * (`merge-stage.js` (4b), 게이트를 방금 GREEN으로 다시 확인한 직후). 로스터를 안 구하면 그 hop이
+       * "review roster unresolved"로 거부되고, merge 잡의 인프라 사고 한 번이 R번의 게이트 재실행과
+       * 사람 에스컬레이션으로 바뀐다. 덤으로 그 hop에서 `verifyReviewQuorum`이 실제로 잴 수 있게 된다.
+       */
       let reviewRoster = null;
-      if (stage === "merge" && to === "factory:merged") {
+      if (stage === "merge" && (to === "factory:merged" || to === "factory:approved")) {
         try { const r = await deps.reviewRoster(); if (r?.ok) reviewRoster = r.roles; }
-        catch (e) { recordLine(`merge: roster for the merged requirement unresolved — ${e?.message || e}`); }
+        catch (e) { recordLine(`merge: roster for the ${to} requirement unresolved — ${e?.message || e}`); }
       }
       const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null, qaEvidence: deps.qaEvidence, qaManifestRecorded });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
@@ -2276,7 +2326,15 @@ async function main() {
       // stage: to===factory:blocked일 때만 lib/transition.js가 origin 마커에 쓴다(KTB-15b I2).
       // cause가 명시되지 않으면 transition이 사유 문구에서 되짚는다(§blockedCause) — 명시된 자리는
       // 문구가 아니라 **판단**이 등급을 정하는 자리다(KTB-38의 stale-PR 충돌).
-      return transition({ gh, issue, to, reason, ctxExtra, stage, cause });
+      /**
+       * 최종 리뷰 B-MF1 — **여섯 번째 프로덕션 호출자도 배선한다.** 모든 스테이지 전이가 이 한 자리로
+       * 모이고, 그중 하나는 `factory:queue`를 겨눈다: triage의 blocked 재시도 hop
+       * (`BLOCKED_RETRY.triage.hop`). `transition()`은 배선되지 않은 큐 전이를 fail closed로 거부하므로
+       * (`REHEARSAL_UNWIRED`) 보안 구멍은 아니지만, 배선이 없으면 그 hop이 **영원히** 거부된다 —
+       * 리허설을 새로 GREEN으로 돌려도 풀리지 않는다(값이 낡은 것이 아니라 인자가 없는 것이다).
+       * 다른 목적 라벨에는 비용이 0이다: `transition()`은 `to === "factory:queue"`일 때만 검사기를 부른다.
+       */
+      return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),

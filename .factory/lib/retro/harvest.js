@@ -6,6 +6,7 @@
 
 import { parseHandoffs } from "../handoff.js";
 import { parseRunRecord } from "../usage.js";
+import { parseClaimCountsLabel, parseReviewEvidenceAll } from "../run-record.js";
 import { citedLessonIds } from "./lessons.js";
 import { afterSince, extractNeedsHuman, flakyIdFromTitle, TRANSITION_TO } from "./issue-comments.js";
 
@@ -176,6 +177,46 @@ function windowUsage(recs, sinceMs) {
 }
 
 /**
+ * ── ADR-024 / KTB-42 SF-3의 **독자**(최종 리뷰 A-SF6) ─────────────────────────────────────────
+ *
+ * `qa_claims=3c/1na`는 "retro가 '전부 na에 가까운 승인'을 셀 수 있게" 남기기로 하고 쓰여 왔는데,
+ * 정작 그것을 읽는 코드가 한 줄도 없었다 — 기록만 하고 아무도 보지 않는 필드는 계약이 아니라 잔해다.
+ * 여기가 그 독자다. 계약이 **막는** 것은 전부 `na`인 매니페스트 하나뿐이고(그때는 승인 자체가 나지
+ * 않는다), 계약이 **허용하지만 눈여겨봐야 할** 상태 — 절반 이상이 `na`인 승인 — 는 기록에만 남는다.
+ * 그 상태가 늘어난다는 것은 done_when이 재현 불가능한 방향으로 쓰이고 있거나 로스터의 qa가 이름만
+ * 남았다는 신호이고, 둘 다 사람이 읽어야 할 추세다.
+ *
+ * 세는 대상은 **승인된 라운드**뿐이다(reject 라운드의 구성은 "무엇이 부족했나"이지 "무엇으로
+ * 통과시켰나"가 아니다). 필드가 없는 기록(이 기능 이전·qa 없는 로스터)은 분모에서도 빠진다.
+ */
+export const QA_NA_HEAVY = 0.5;
+function qaClaimStats(recs, sinceMs) {
+  let approvals = 0, claims = 0, na = 0, naHeavy = 0;
+  for (const [key, text] of recs) {
+    if (String(key) === "_retro") continue;
+    for (const e of parseReviewEvidenceAll(String(text ?? ""))) {
+      if (e.decision !== "approved" || !afterSince(e.at, sinceMs)) continue;
+      const c = parseClaimCountsLabel(e.qaClaims);
+      if (!c) continue;
+      const total = c.claims + c.na;
+      if (!total) continue;
+      approvals += 1;
+      claims += c.claims;
+      na += c.na;
+      if (c.na / total >= QA_NA_HEAVY) naHeavy += 1;
+    }
+  }
+  // 비율만 쌓으면 누적이 "비율의 평균"이 된다 — 분자·분모를 그대로 함께 싣는다(overlap_ratio와 같은 규약).
+  return {
+    qa_approvals: approvals,
+    qa_claims_total: claims,
+    qa_na_total: na,
+    qa_na_ratio: claims + na ? round2(na / (claims + na)) : 0,
+    qa_na_heavy_approvals: naHeavy,
+  };
+}
+
+/**
  * (role,text) 키로 합치며 `runs`를 유니온한다 — 같은 claim/objection이 다른 이슈에서 또 나오면 누적.
  * 키는 항상 **원문 그대로의 텍스트 일치**다(정규화 없음 — 대소문자·표현을 통일하거나 같은 뜻의 다른
  * 문장을 하나로 묶는 일은 하지 않는다). 그건 결정적 스크립트의 일이 아니라 retro 에이전트(analyst)가
@@ -276,6 +317,8 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
       unique_findings_by_role: overlap.unique_findings_by_role,
       overlap_ratio: overlap.overlap_ratio,
       needs_human: needsHuman.length,
+      // ADR-024 / KTB-42 SF-3의 독자(§qaClaimStats) — `qa_claims=`를 읽는 유일한 자리.
+      ...qaClaimStats(recs, sinceMs),
       usage,
     },
   };

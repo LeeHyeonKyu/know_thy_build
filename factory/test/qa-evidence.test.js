@@ -9,7 +9,7 @@ import {
   evidenceFor, isUiFacing, citedClaimIds, claimCounts, claimCountsLabel, ALL_NA_PREFIX,
 } from "../lib/qa-evidence.js";
 import { runCli, gatePayload, interpreterPayload, hookPaths, shellQuote, checkAttachSource, readDenyGlobs } from "../bin/qa-evidence.js";
-import { verifyStage, qaEvidenceUnusable } from "../lib/verify-stage.js";
+import { verifyStage, qaEvidenceUnusable, QA_EVIDENCE_INCOMPLETE } from "../lib/verify-stage.js";
 import { renderCiSettings } from "../cli/install.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "qa-evidence-"));
@@ -735,21 +735,30 @@ test("re-review SF-1b: the reviewer's own shortfall is a reject naming the ids, 
     out: { is_error: false, result: JSON.stringify(data) }, transcriptText: "",
   };
 
-  // (a) 커버리지 부족 — id를 부르고, **undecidable이 아니다**.
+  /**
+   * (a) 커버리지 부족 — id를 부르고, **undecidable이 아니며**, 최종 리뷰 A-SF1 이후로는
+   * **스테이지의 실패도 아니다**: `reasons`가 아니라 `qaShortfall`로 나가 run-stage가 이 라운드의
+   * 판정(합성 must_fix → `factory:rework`)으로 접는다. 스테이지 산출물(`review.v1`)은 멀쩡하다.
+   */
   const missing = verifyStage({ ...base, qaManifest: { ok: false, missing: ["dw2", "dw4"], reason: "qa evidence manifest is incomplete — missing claims for dw2, dw4", reasons: [] } });
-  expect(missing.ok).toBe(false);
-  expect(missing.reasons.join(" ")).toMatch(/spec-evidence-missing: dw2, dw4/);
-  expect(missing.reasons.join(" ")).not.toMatch(/not the builder's work/);
+  expect(missing.ok).toBe(true);
+  expect(missing.reasons).toEqual([]);
+  expect(missing.qaShortfall.ids).toEqual(["dw2", "dw4"]);
+  expect(missing.qaShortfall.reason).toMatch(/^qa evidence incomplete: spec-evidence-missing: dw2, dw4/);
+  expect(missing.qaShortfall.reason).not.toMatch(/not the builder's work/);
   expect(qaEvidenceUnusable(missing.reasons)).toBe(false);
 
   // (b) 전부 not_applicable — SF-3의 거절이 "무시해도 되는 인프라" 채널로 배달되지 않는다.
   const allNa = verifyStage({ ...base, qaManifest: { ok: false, missing: [], reason: "x", reasons: [`${ALL_NA_PREFIX} (dw1, dw2) — that is a report, not a review`] } });
-  expect(allNa.ok).toBe(false);
-  expect(allNa.reasons.join(" ")).toMatch(/that is a report, not a review/);
+  expect(allNa.ok).toBe(true);
+  expect(allNa.qaShortfall.reason).toMatch(/that is a report, not a review/);
+  expect(allNa.qaShortfall.reason.startsWith(QA_EVIDENCE_INCOMPLETE)).toBe(true);
   expect(qaEvidenceUnusable(allNa.reasons)).toBe(false);
 
-  // (c) 진짜 경로 고장만 undecidable로 남는다.
+  // (c) 진짜 경로 고장만 undecidable로 남는다 — 그쪽은 여전히 스테이지의 실패다.
   const absent = verifyStage({ ...base, qaManifest: { ok: false, missing: [], reasons: [], reason: "no qa evidence manifest at .factory/out/qa/3/manifest.json" } });
+  expect(absent.ok).toBe(false);
+  expect(absent.qaShortfall).toBe(null);
   expect(qaEvidenceUnusable(absent.reasons)).toBe(true);
 });
 

@@ -87,7 +87,14 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   let rosterHasQa = null;
   try { rosterHasQa = Object.values(loadCharterFn(root).roster || {}).some((names) => (names || []).includes("qa")); }
   catch { /* CHARTER가 없거나 깨졌다 — 그 판정은 checkCharter의 몫이고, 여기서는 모른 채로 프로브한다 */ }
-  checks.push(checkQaEvidenceProbe({ root, rosterHasQa, skipped: noRun ? "--no-run" : offline ? "--offline" : null }));
+  /**
+   * 최종 리뷰 A-nit 1 — **`.factory/`가 없는 저장소에 디렉터리를 만들지 않는다.** 프로브는 자기가 만든
+   * 잎(`.factory/out/qa/probe/`)만 치우므로, 아직 `factory init`을 하지 않은 저장소에서 `factory doctor`를
+   * 한 번 돌리면 `.factory/out/qa/`가 남았다. 진단 도구가 사람의 저장소에 흔적을 남기는 일은 하지 않는다 —
+   * 게다가 그 상태에서 물어야 할 것은 "qa가 쓸 수 있는가"가 아니라 `factory.initialized`다(아래).
+   */
+  const initialized = exists(join(root, ".factory/bin/run-stage.js"));
+  checks.push(checkQaEvidenceProbe({ root, rosterHasQa, skipped: !initialized ? "not initialized" : noRun ? "--no-run" : offline ? "--offline" : null }));
 
   // ── test env up (wraps the command gates and the smoke) ─────────
   const smoke = harness.test?.smoke || {};
@@ -123,7 +130,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     checks.push(...(await checkCommands({ harness, run, cwd: root, skipRun: noRun, skipReason: envFailReason })));
 
     // ── factory scope (only when installed) ─────────────────────────
-    if (exists(join(root, ".factory/bin/run-stage.js"))) {
+    if (initialized) {
       const manifest = buildManifest({ pkgRoot });
       const vars = projectVars(root, pkgRoot);
       checks.push(...checkFiles({ manifest, root, exists, readFile, vars }));

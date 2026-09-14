@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { loadHarness } from "../lib/config.js";
+import { probeEvidenceDir } from "../lib/qa-evidence.js";
 import { recordRehearsal, refuseRef, rehearsalHash, rehearsalReport, renderRehearsalTable, runRehearsal } from "../lib/rehearsal.js";
 import { assertNoWriteStageClean, snapshotSetupDirty } from "./run-stage.js";
 
@@ -42,21 +43,19 @@ const hash = rehearsalHash({ harnessText: readText(".factory/harness.toml"), cha
 // 쓰였는가만 묻는다 — 스테이지의 판정과 정확히 같은 기준이다.
 const baseline = await snapshotSetupDirty({ run, cwd: root });
 
-/** qa 증거 디렉터리가 러너에서 **실제로** 쓰이는가(KTB-36/KTB-40의 카브아웃). 흔적은 남기지 않는다. */
-async function qaProbe() {
-  const dir = join(root, ".factory/out/qa");
-  const probe = join(dir, `.rehearsal-${runId}`);
-  try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(probe, "factory rehearsal write probe\n");
-    readFileSync(probe, "utf8");
-    return { ok: true, detail: "" };
-  } catch (e) {
-    return { ok: false, detail: `${e?.message || e}` };
-  } finally {
-    try { rmSync(probe, { force: true }); } catch { /* best-effort */ }
-  }
-}
+/**
+ * qa 증거 디렉터리가 러너에서 **실제로** 쓰이는가(KTB-36/KTB-40의 카브아웃).
+ *
+ * 최종 리뷰 A-SF2 — **손으로 다시 짜지 않는다.** 이 자리는 예전에 `mkdirSync`/`writeFileSync`/`rmSync`를
+ * 직접 돌렸고, 그 대상은 `.factory/out/qa`(**부모**)였다 — 리뷰 스테이지가 실제로 프로브하는 경로는
+ * `.factory/out/qa/<issue>`이고, KTB #3의 첫 거절이 바로 그 하위 디렉터리의 `mkdir -p`였다. "qa가 쓸 수
+ * 있는가"의 구현이 둘이면 반드시 갈린다. `probeEvidenceDir`은 리뷰 스테이지와 `factory doctor`가
+ * 부르는 바로 그 함수이고, unlink 실패도 보고하며 자기가 만든 디렉터리는 스스로 치운다.
+ */
+const qaProbe = async () => {
+  const p = probeEvidenceDir({ root, issue: "rehearsal" });
+  return p.ok ? { ok: true, detail: "" } : { ok: false, detail: p.reason };
+};
 
 const { steps, ok: stepsOk } = await runRehearsal({
   run, cwd: root, harness, files, runId, baseline,

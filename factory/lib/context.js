@@ -47,7 +47,15 @@ export async function resolveTier({ run, cwd, base, harness, tier }) {
  * 역할의 파일에는 handoff가 **한 글자도 들어 있지 않다**. 리뷰어가 읽지 않기로 약속할 필요가 없다 —
  * 읽을 것이 거기 없다.
  */
-const DONE_WHEN_FIELDS = ["id", "text", "verify", "level"];
+/**
+ * `ui`가 이 목록에 있어야 하는 이유(최종 리뷰 A-MF1): `qa`는 `cold_read = true`라서 **도구**
+ * (`bin/qa-evidence.js`)는 이 투영본의 `done_when`을 읽고, **러너**(`run-stage.js`
+ * `qaEvidenceSummary()`)는 plan handoff 원본을 읽는다. `lib/qa-evidence.js`의 `isUiFacing`은
+ * `w.ui === true || level === "e2e"`이므로 `ui`가 빠지면 M2에서 `ui: true`·비-e2e id 하나를 두고
+ * 도구는 "coverage: complete", 러너는 "missing"을 말한다 — 같은 `done_when`의 두 독자가 갈린다.
+ * 필드 하나가 KTB #3 모양(도구와 게이트가 '증거가 충분한가'를 다르게 답하는 것)을 재생산한다.
+ */
+const DONE_WHEN_FIELDS = ["id", "text", "verify", "level", "ui"];
 const pick = (o, keys) => {
   const out = {};
   for (const k of keys) if (o != null && o[k] !== undefined) out[k] = o[k];

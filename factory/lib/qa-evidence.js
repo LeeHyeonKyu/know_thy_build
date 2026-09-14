@@ -142,6 +142,10 @@ export function validateManifest(manifest, { doneWhen = [], maturity = "M0", tou
   const claims = Array.isArray(manifest.claims) ? manifest.claims : [];
   if (!Array.isArray(manifest.claims)) reasons.push("claims must be an array");
 
+  const ws = (Array.isArray(doneWhen) ? doneWhen : []).filter((w) => str(w?.id));
+  const ids = new Set(ws.map((w) => String(w.id)));
+  const addMissing = (id) => { if (!missing.includes(id)) missing.push(id); };
+
   claims.forEach((c, i) => {
     const at = `claims[${i}]`;
     if (!str(c?.id)) { reasons.push(`${at}.id must be a non-empty string`); return; }
@@ -153,15 +157,23 @@ export function validateManifest(manifest, { doneWhen = [], maturity = "M0", tou
     }
     if (!str(c.file)) { reasons.push(`${at} (${c.id}) file must be a non-empty string`); return; }
     if (!fileInsideIssueDir(c.file)) { reasons.push(`${at} (${c.id}) file is outside the issue dir: ${c.file}`); return; }
-    if (!fileExists(c.file)) reasons.push(`${at} (${c.id}) file does not exist: ${c.file}`);
+    /**
+     * 최종 리뷰 A-nit 5 — **가리키는 파일이 없는 claim은 그 id의 커버리지가 없는 것이다.** 예전에는
+     * 사유만 남고 `missing`이 비어서, `verify-stage`의 `reviewerSide` 술어가 거짓이 되고 그 상태는
+     * `QA_EVIDENCE_UNUSABLE`(= "증거 경로의 고장, 빌더의 일이 아니다")로 등급이 매겨졌다. 하지만
+     * 없는 파일을 가리키는 claim은 **매니페스트 자신의 상태**이지 경로의 고장이 아니다 — 그것을
+     * 인프라 채널로 배달하면 sweeper가 같은 부족을 상대로 리뷰를 세 번 다시 돌린다.
+     */
+    if (!fileExists(c.file)) {
+      reasons.push(`${at} (${c.id}) file does not exist: ${c.file}`);
+      if (ids.has(String(c.id))) addMissing(String(c.id));
+    }
     if (c.kind === "command") {
       if (!str(c.cmd)) reasons.push(`${at} (${c.id}) command claim needs the cmd it ran`);
       if (!Number.isInteger(c.exit)) reasons.push(`${at} (${c.id}) command claim needs an integer exit code`);
     }
   });
 
-  const ws = (Array.isArray(doneWhen) ? doneWhen : []).filter((w) => str(w?.id));
-  const ids = new Set(ws.map((w) => String(w.id)));
   for (const c of claims) {
     if (!str(c?.id)) continue;
     if (c.id !== SMOKE_CLAIM && !ids.has(String(c.id)) && !extras.includes(String(c.id))) extras.push(String(c.id));
@@ -195,13 +207,13 @@ export function validateManifest(manifest, { doneWhen = [], maturity = "M0", tou
     const cs = by(id);
     if (exempt(cs)) continue;
     if (!cs.some((c) => RUN_KINDS.has(c.kind))) {
-      missing.push(id);
+      addMissing(id);
       reasons.push(`done_when ${id} has no command|log claim (and no not_applicable with a reason)`);
       continue;
     }
     // M2 — 사용자가 보는 done_when은 **본 것**이 증거다.
     if (rank >= 2 && isUiFacing(w) && !cs.some((c) => c.kind === "screenshot")) {
-      missing.push(id);
+      addMissing(id);
       reasons.push(`done_when ${id} is UI-facing and this project is ${maturity} — it needs a screenshot claim`);
     }
   }
@@ -269,26 +281,33 @@ export function readManifest(root, issue, { readFile = (p) => readFileSync(p, "u
  * 아니다(게이트 파일의 `head_sha` 바인딩과 같은 규칙).
  */
 export function evidenceFor({ root, issue, doneWhen = [], maturity = "M0", touchesData = false, headSha = null, exists = existsSync }) {
+  /**
+   * 최종 리뷰 A-nit 4 — **네 갈래가 전부 같은 키를 돌려준다.** 예전에는 읽기 실패에 `digest`/`missing`이
+   * 없고, head 불일치에 `reasons`가 없었다 — 호출자마다 `|| []`·`?.`로 그 차이를 메우고 있었고, 그
+   * 방어를 한 곳에서 빠뜨리면 조용히 `undefined`가 판정으로 흘러간다. 여기서 모양을 한 번 정하고
+   * 갈래마다 값만 다르게 채운다.
+   */
+  const shape = (o) => ({ ok: false, digest: null, head_sha: null, missing: [], reasons: [], reason: null, claimIds: [], counts: { claims: 0, na: 0 }, ...o });
   const r = readManifest(root, issue, { exists });
-  if (!r.ok) return { ok: false, reason: r.reason };
+  if (!r.ok) return shape({ reason: r.reason, reasons: [r.reason] });
   const m = r.manifest;
   const v = validateManifest(m, {
     doneWhen, maturity, touchesData,
     fileExists: (rel) => exists(join(qaDir(root, issue), rel)),
   });
   const digest = manifestDigest(m);
+  const claimIds = [...new Set((Array.isArray(m?.claims) ? m.claims : []).map((c) => String(c?.id ?? "")).filter(Boolean))];
+  const counts = claimCounts(m);
   if (!v.ok) {
     const named = v.missing.length ? `missing claims for ${v.missing.join(", ")}` : v.reasons[0];
-    return { ok: false, digest, head_sha: m?.head_sha ?? null, missing: v.missing, reason: `qa evidence manifest is incomplete — ${named}`, reasons: v.reasons };
+    const reason = `qa evidence manifest is incomplete — ${named}`;
+    return shape({ digest, head_sha: m?.head_sha ?? null, missing: v.missing, reason, reasons: v.reasons, claimIds, counts });
   }
   if (headSha && m.head_sha && m.head_sha !== headSha) {
-    return { ok: false, digest, head_sha: m.head_sha, missing: [], reason: `qa evidence manifest describes ${String(m.head_sha).slice(0, 7)}, this head is ${String(headSha).slice(0, 7)}` };
+    const reason = `qa evidence manifest describes ${String(m.head_sha).slice(0, 7)}, this head is ${String(headSha).slice(0, 7)}`;
+    return shape({ digest, head_sha: m.head_sha, reason, reasons: [reason], claimIds, counts });
   }
-  return {
-    ok: true, digest, head_sha: m.head_sha ?? null, missing: [],
-    claimIds: [...new Set(m.claims.map((c) => String(c.id)))],
-    counts: claimCounts(m),
-  };
+  return shape({ ok: true, digest, head_sha: m.head_sha ?? null, claimIds, counts });
 }
 
 /**

@@ -14,6 +14,13 @@ import { REHEARSAL_WORKFLOW, rehearsalArtifactName, renderRehearsalTable } from 
  */
 const POLL_MS = 15000;
 const DEFAULT_WAIT_SEC = 3600;
+/**
+ * 최종 리뷰 B-nit 2 — **되돌아보는 런 개수를 여기서 말한다.** 아래 두 조회(dispatch 전의 `known`
+ * 집합과 폴)는 "방금 만든 런은 최신 N개 안에 있다"에 기대는데, 그 N이 `lib/gh.js`의 기본 인자에
+ * 적혀 있었다: 이 파일의 정확성 논증이 다른 파일의 기본값에 달려 있었던 셈이다. 명시하면 그 논증이
+ * 여기서 읽힌다(그리고 두 조회가 같은 창을 본다는 것도).
+ */
+export const RUN_LOOKBACK = 10;
 
 export async function rehearseCommand({
   argv = [], io, run = realRun, gh = null, repo = null,
@@ -42,7 +49,7 @@ export async function rehearseCommand({
    * 찍는다. id 집합은 그 모호함이 없다: 목록에 **없던** id, 그리고 `event === "workflow_dispatch"`.
    */
   let known;
-  try { known = new Set(((await client.workflowRuns(REHEARSAL_WORKFLOW)) || []).map((r) => r.databaseId)); }
+  try { known = new Set(((await client.workflowRuns(REHEARSAL_WORKFLOW, RUN_LOOKBACK)) || []).map((r) => r.databaseId)); }
   catch (e) {
     // 리뷰 r2 nf-4 — 목록을 못 읽으면 **아무것도 하지 않는다.** 예전에는 빈 집합으로 계속했는데,
     // 그러면 다음 폴에서 방금 끝난 **옛** 런이 "내 런"으로 뽑혀 그 표를 찍고 0으로 끝난다(SF5가
@@ -64,7 +71,7 @@ export async function rehearseCommand({
   let found = null;
   for (;;) {
     let runs = [];
-    try { runs = await client.workflowRuns(REHEARSAL_WORKFLOW); } catch (e) { io.err(`factory rehearse: gh run list failed — ${e.message}`); }
+    try { runs = await client.workflowRuns(REHEARSAL_WORKFLOW, RUN_LOOKBACK); } catch (e) { io.err(`factory rehearse: gh run list failed — ${e.message}`); }
     const mine = (runs || [])
       .filter((r) => !known.has(r.databaseId) && (!r.event || r.event === "workflow_dispatch"))
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];

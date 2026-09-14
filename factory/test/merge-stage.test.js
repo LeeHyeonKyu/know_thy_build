@@ -1405,3 +1405,70 @@ test("H6: the merged transition says whether a person signed this PR", async () 
   expect(await run(unset)).toBe(0);
   expect(unset.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", reason: expect.stringMatching(/charter\.merge-human-gate-unset/) }));
 });
+
+
+// ── 최종 리뷰 B-MF2 — merge 스테이지의 blocked 복귀 hop과 KTB-42의 qa 게이트 ────────────────────
+
+import { buildCtxExtra } from "../bin/run-stage.js";
+import { requirementFor } from "../lib/requirements.js";
+import { renderHandoff } from "../lib/handoff.js";
+
+/**
+ * merge 스테이지는 script-only다 — `buildContext`를 거치지 않으므로 `ctxCache`가 없고, `buildCtxExtra`는
+ * `roster`/`rosterSize`를 채우지 못한다. KTB-42가 `factory:approved`에 건 `qaEvidenceGate`는 로스터를
+ * 못 구하면 fail closed이므로, 그 스테이지가 `factory:approved`를 겨누는 **유일한 자리** — KTB-15b의
+ * blocked 복귀 hop((4b), 게이트를 방금 GREEN으로 다시 확인한 직후) — 이 "review roster unresolved"로
+ * 영원히 거부됐다. `main()`은 `to === "factory:merged"`일 때만 로스터를 풀고 있었다.
+ *
+ * 이 테스트는 그 hop을 **진짜 요구조건**으로 돌린다: `deps.transition`의 모양 그대로 ctxExtra를 만들고
+ * `requirementFor("factory:approved")`에 먹인다.
+ */
+const approvedHopGh = () => ({
+  comments: vi.fn(async () => [
+    { id: 1, body: renderHandoff({ stage: "implement", issue: 7, summary: "s", data: { schema: "factory.implement.v1", issue: 7, pr: 9, head_sha: HEAD } }), createdAt: "2026-09-14T08:00:00Z" },
+    { id: 2, body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: REVIEW_OK }), createdAt: "2026-09-14T09:00:00Z" },
+  ]),
+  prHeadSha: vi.fn(async () => HEAD),
+});
+const GREEN_GATES_FILE = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+
+/** `run-stage.js`의 `deps.transition`이 merge 스테이지에서 하는 일 그대로(로스터 해석 조건이 인자다). */
+const mergeHopRequirement = async ({ to, resolveRosterFor }) => {
+  const gh = approvedHopGh();
+  const reviewRoster = resolveRosterFor.includes(to) ? ["correctness", "qa"] : null;
+  const ctxExtra = await buildCtxExtra({
+    gh, issue: 7, to, data: undefined, ctx: undefined, reviewRoster, maxRounds: 3,
+    // 머지 잡에는 매니페스트 파일이 없다 — 로스터에 qa가 없을 때의 모양(skipped)이 아니라,
+    // 리뷰 런이 이 커밋에 대해 유효하다고 판정한 요약을 그대로 흉내낸다.
+    qaEvidence: async () => ({ ok: true, digest: QA_DIGEST, head_sha: HEAD, missing: [], reasons: [], claimIds: ["dw1"], counts: { claims: 1, na: 0 } }),
+  });
+  ctxExtra.gatesChecked = true;
+  ctxExtra.gatesFile = GREEN_GATES_FILE;
+  return requirementFor(to)({ comments: await gh.comments(7), ...ctxExtra });
+};
+
+test("B-MF2: the merge stage's blocked→approved hop passes the qa gate when the roster is resolved for that target too", async () => {
+  // 고쳐진 모양: `factory:merged`와 `factory:approved` 둘 다 로스터를 푼다.
+  const fixed = await mergeHopRequirement({ to: "factory:approved", resolveRosterFor: ["factory:merged", "factory:approved"] });
+  expect(fixed).toEqual({ ok: true });
+
+  // 회귀: `factory:merged`에만 풀면 같은 hop이 로스터 미해결로 fail closed가 된다 — 그 상태에서는
+  // 게이트를 몇 번 다시 GREEN으로 돌려도 merge 잡이 blocked에서 빠져나오지 못한다.
+  const regressed = await mergeHopRequirement({ to: "factory:approved", resolveRosterFor: ["factory:merged"] });
+  expect(regressed.ok).toBe(false);
+  expect(regressed.reason).toMatch(/review roster unresolved/);
+});
+
+test("B-MF2: the same fix makes the quorum measurable on that hop — a short roster is caught, not silently skipped", async () => {
+  const gh = approvedHopGh();
+  const ctxExtra = await buildCtxExtra({
+    gh, issue: 7, to: "factory:approved", data: undefined, ctx: undefined,
+    reviewRoster: ["correctness", "qa", "security"],                 // 리뷰는 둘만 돌았다
+    qaEvidence: async () => ({ ok: true, digest: QA_DIGEST, head_sha: HEAD, missing: [], reasons: [], claimIds: ["dw1"], counts: { claims: 1, na: 0 } }),
+  });
+  ctxExtra.gatesChecked = true;
+  ctxExtra.gatesFile = GREEN_GATES_FILE;
+  const r = requirementFor("factory:approved")({ comments: await gh.comments(7), ...ctxExtra });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/verdict count 2 != roster size 3/);
+});
