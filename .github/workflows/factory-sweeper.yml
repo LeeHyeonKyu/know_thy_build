@@ -32,3 +32,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
         run: node .factory/bin/sweep.js
+      # ADR-021 r1 finding 2 — **머지 권한 판정은 여기에서만 진짜가 된다.** `tokens.agent-is-admin`,
+      # `tokens.agent-workflow-scope`, `protection.codeowners`는 전부 "에이전트 배우가 쥔 토큰이
+      # 무엇인가"를 묻는데, 그 토큰으로 `gh`가 도는 곳은 이 잡뿐이다(머지 잡의 `GH_TOKEN`은 머지
+      # 배우의 것이라 거기서 물으면 **엉뚱한 계정**을 판정한다). 사람의 로컬 doctor는 이 셋을
+      # WARN "unverified until CI"로 남기고, 이 스텝이 그 WARN을 실제 등급으로 바꾼다.
+      #
+      # `continue-on-error: true`인 이유: doctor의 FAIL은 **보고**지 sweeping의 실패가 아니다.
+      # 잡을 빨갛게 만들면 락 회수·재점화·라벨 복구 — 곧 팩토리가 멈췄을 때 가장 필요한 팔들 — 이
+      # "CI가 빨갛다"는 이유로 사람 손에 꺼지게 된다. 스텝 결과는 non-zero로 남고(런 화면에서 노란
+      # 느낌표), 판정 줄은 잡 요약(`$GITHUB_STEP_SUMMARY`)에 그대로 찍힌다.
+      - name: Doctor (merge authority)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: node .factory/bin/doctor-ci.js

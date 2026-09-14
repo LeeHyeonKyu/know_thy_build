@@ -271,6 +271,32 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       return JSON.parse(await gh(["api", "user"])).login;
     },
     /**
+     * ADR-021 r1 MF-2 a — **지금 이 토큰이 어떤 스코프를 쥐고 있는가.** classic PAT은 응답 헤더
+     * `X-OAuth-Scopes`로 자기 스코프를 말한다(`gh api -i`가 헤더를 함께 찍는다). 값 자체는 절대
+     * 읽지 않는다 — 묻는 것은 "이 토큰에 `workflow`가 붙어 있는가" 하나다.
+     *
+     * `null`은 "모른다"가 아니라 **"classic PAT이 아니다"**의 신호다(fine-grained PAT·GitHub App
+     * 설치 토큰·GITHUB_TOKEN에는 이 헤더가 없다). 그 토큰들에는 classic `workflow` 스코프라는
+     * 개념 자체가 없으므로 doctor는 그 경우를 통과로 읽는다 — 없는 위험을 경보로 만들지 않는다.
+     */
+    async viewerScopes() {
+      const r = await run("gh", ["api", "-i", "user"]);
+      if (r.code !== 0) throw new Error(`gh api -i user failed (${r.code}): ${r.stderr.trim() || r.stdout.trim()}`);
+      // `\s`는 `\r`·`\n`도 먹는다 — 헤더가 비어 있으면(`x-oauth-scopes: `) 그 다음 빈 줄을 건너뛰고
+      // **본문의 첫 줄**을 스코프로 읽는다(= `{}`가 스코프가 된다). 줄 안에서만 본다.
+      const m = /^x-oauth-scopes:[^\S\r\n]*([^\r\n]*)$/im.exec(r.stdout);
+      if (!m) return null;
+      return m[1].split(",").map((s) => s.trim()).filter(Boolean);
+    },
+    /**
+     * ADR-021 r1 MF-2 b — `factory-merge` 환경을 만든다(멱등: 같은 body의 PUT을 반복해도 같은 결과).
+     * `deployment_branch_policy.protected_branches: true`가 이 환경의 시크릿을 **보호된 브랜치에서
+     * 시작한 잡에만** 준다 — 에이전트의 `claude/fq-*` 브랜치에서 도는 워크플로는 빈 문자열을 본다.
+     */
+    async putEnvironment(name, body) {
+      await gh(["api", "-X", "PUT", `repos/${repo}/environments/${name}`, "--input", "-"], { input: JSON.stringify(body) });
+    },
+    /**
      * ADR-021 doctor — 그 계정이 이 저장소에 대해 가진 권한(`admin`|`maintain`|`write`|`triage`|`read`).
      * 두 배우 모드에서 에이전트 배우가 `admin`이면 branch protection의 승인 요건을 **스스로 바꿀 수**
      * 있으므로 두 배우 모드는 이름만 남는다 — doctor가 FAIL로 세운다.

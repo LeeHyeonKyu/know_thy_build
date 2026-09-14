@@ -34,6 +34,15 @@ jobs:
     # `github.event.label.name`은 null이고 contains()는 false다 — 이벤트 이름으로 먼저 가른다.
     if: github.event_name == 'workflow_dispatch' || contains(fromJSON('["factory:approved"]'), github.event.label.name)
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # ADR-021 r1 MF-2 b — **머지 토큰은 환경 시크릿이다.** 저장소 시크릿은 같은 저장소의 **어느
+    # 브랜치에서 돌든** 워크플로에 주어진다(fork 제한은 same-repo 브랜치에 걸리지 않는다) — 곧
+    # 에이전트가 자기 `claude/fq-*` 브랜치에 워크플로 한 장을 올리는 것만으로 admin PAT을 읽어 갈 수
+    # 있었다. `factory-merge` 환경의 배포 브랜치 정책은 `protected_branches: true`이므로, 이 잡이
+    # **기본 브랜치에서 시작했을 때만** 그 시크릿이 주어진다. `factory bootstrap`이 환경을 만들고,
+    # 값은 사람이 넣는다: `gh secret set FACTORY_MERGE_TOKEN --env factory-merge`.
+    # 환경이 없거나 이 플랜이 지원하지 않으면 이 줄은 아무 것도 깨뜨리지 않는다 — 환경이 자동 생성되고
+    # 시크릿은 저장소 레벨에서 해석된다(그때의 위험은 bootstrap의 note와 doctor가 말한다).
+    environment: factory-merge
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +88,10 @@ jobs:
       # `.factory/`를 이벤트 sha로 되돌리는 이유는 정리 스텝과 같다: implement는 에이전트 브랜치 위에,
       # review·merge는 PR head로 detach된 트리 위에 있다 — 스크럽 코드만은 언제나 base의 것이어야 한다.
       - name: Scrub credentials from the artifacts
+        # ADR-021 r1 finding 5 — `merge-token-scope` exempts this step only when it BOTH declares this
+        # exact `id:` and actually runs scrub-artifacts.js in its `run:`. A free-text step name was
+        # not enough of a key: the exception is what lets one step hold every credential at once.
+        id: scrub-artifacts
         if: always()
         env:
           FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}

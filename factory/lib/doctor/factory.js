@@ -6,12 +6,14 @@ import { render as renderTemplate, mergeSettings, MOVED_DENIES_ADR_019 } from ".
 import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
-import { L0_CONTEXTS, isTwoActor, MERGE_TOKEN_SECRET } from "../bootstrap.js";
+import { L0_CONTEXTS, CODEOWNERS_PATH } from "../bootstrap.js";
+import { checkMergeAuthority } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
 const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity"].map((n) => `factory-${n}.yml`);
+const WORKFLOWS_DIR = ".github/workflows";
 
 const HOOK_INPUT = {
   "block-dangerous.sh": { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "echo doctor" } },
@@ -347,24 +349,54 @@ export async function checkHooks({
   return out;
 }
 
-export function checkWorkflows({ root, exists, readFile }) {
-  const missing = WORKFLOWS.filter((w) => !exists(join(root, ".github/workflows", w)));
+/**
+ * **존재 검사는 팩토리의 일곱 파일에만, lint는 `.github/workflows/*.yml` 전부에** 건다(ADR-021 r1 MF-2 d).
+ *
+ * 예전에는 둘 다 그 일곱 이름만 돌았고, 그것이 `merge-token-scope`의 파일 범위 갈래를 무력하게
+ * 만들었다: 목록에 없는 이름(`ci.yml`·`x.yml`·에이전트가 방금 밀어 넣은 아무 파일)은 머지 토큰을
+ * 통째로 env에 실어도 린트가 **쳐다보지도 않았다**. 규칙의 넓이가 목록의 길이였던 셈이다.
+ * 이제 디렉터리를 읽어 실재하는 모든 워크플로를 돈다 — 규칙이 저장소를 따라다닌다.
+ *
+ * 디렉터리를 못 읽으면(`.github/workflows`가 없는 저장소) 일곱 파일의 부재가 이미 FAIL로 보고되므로
+ * lint 쪽은 조용히 빈 목록으로 둔다 — 같은 사실을 두 줄로 말하지 않는다.
+ */
+export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
+  const dir = join(root, WORKFLOWS_DIR);
+  const missing = WORKFLOWS.filter((w) => !exists(join(dir, w)));
+  let files = [];
+  try {
+    files = list(dir).filter((f) => /\.ya?ml$/.test(f)).sort();
+  } catch {
+    files = WORKFLOWS.filter((w) => exists(join(dir, w)));
+  }
   const violations = [];
-  for (const w of WORKFLOWS) {
-    if (missing.includes(w)) continue;
-    const text = readFile(join(root, ".github/workflows", w));
+  for (const w of files) {
+    let text;
+    try {
+      text = readFile(join(dir, w));
+    } catch (e) {
+      violations.push(`${w}: unreadable — ${e.message}`);
+      continue;
+    }
     // 파일명을 함께 넘긴다(ADR-021) — `merge-token-scope`의 파일 범위 갈래는 "이 텍스트가 어느
     // 워크플로인가"를 알아야만 판정할 수 있다(이름 없는 스니펫에서는 침묵한다).
     for (const v of lintWorkflow(text, { file: w })) violations.push(`${w}:${v.line} ${v.rule}`);
   }
   return [
     missing.length ? c("workflows.present", "FAIL", `missing: ${missing.join(", ")}`) : c("workflows.present", "PASS"),
-    violations.length ? c("workflows.lint", "FAIL", violations.join("; ")) : c("workflows.lint", "PASS"),
+    violations.length ? c("workflows.lint", "FAIL", violations.join("; ")) : c("workflows.lint", "PASS", `linted ${files.length} file(s) in ${WORKFLOWS_DIR}`),
   ];
 }
 
 /** gh 호출이 하나라도 throw하면(오프라인 등) 세부 검사를 포기하고 단일 WARN으로 떨어진다 — fail closed가 아니라 "확인 못 함"으로 취급(오프라인 허용). */
-export async function checkGitHub({ gh, harness, labels, env = process.env }) {
+export async function checkGitHub({ gh, harness, labels, env = process.env, root = null, exists = null, readFile = null }) {
+  // ADR-021 r1 MF-1 — CODEOWNERS는 **저장소의 파일**이지 API 상태가 아니다. gh가 하나라도 실패해
+  // 아래 catch로 떨어지면 이 값은 쓰이지 않는다 — 읽기 자체는 부수효과가 없으므로 먼저 읽어 둔다.
+  let codeowners = null;
+  if (root && exists && readFile) {
+    const p = join(root, CODEOWNERS_PATH);
+    if (exists(p)) { try { codeowners = readFile(p); } catch { codeowners = null; } }
+  }
   try {
     const secrets = await gh.listSecrets();
     const hasClaude = secrets.includes("CLAUDE_CODE_OAUTH_TOKEN") || secrets.includes("ANTHROPIC_API_KEY");
@@ -407,68 +439,9 @@ export async function checkGitHub({ gh, harness, labels, env = process.env }) {
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
       protectionCheck,
       c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.length ? l1.join(", ") : "(none configured)"}`),
-      ...(await checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env })),
+      ...(await checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env, codeowners })),
     ];
   } catch (e) {
     return [c("github.unavailable", "WARN", `gh unavailable — ${e.message}`)];
   }
-}
-
-/**
- * ADR-021 — **머지 권한이 어디에 있는가**를 세 줄로 보고한다. 나머지 doctor 체크와 달리 이 셋은
- * "설정이 있는가"가 아니라 "에이전트가 쥔 토큰으로 base 브랜치를 바꿀 수 있는가"를 묻는다.
- *
- * 1. `tokens.two-actor`(PASS) / `tokens.single-actor`(WARN) — 모드 자체. 단일 배우 모드는 **틀린
- *    설정이 아니다**(Free 플랜의 개인 저장소처럼 두 계정을 둘 수 없는 곳이 있다) — 그래서 WARN이다.
- *    다만 그 저장소에서 머지를 막는 유일한 층이 훅이라는 사실은 조용히 지나가면 안 된다.
- * 2. `protection.two-actor` — 보호 규칙의 **모양이 모드와 맞는가**. 두 배우 모드인데 승인 요건이
- *    없으면 FAIL이다(머지 토큰만 있고 문은 열려 있다 = 두 배우 모드가 이름뿐이다). 거꾸로 단일
- *    배우 모드인데 승인이 필수면 WARN이다 — 승인해 줄 두 번째 계정이 없어 다크 머지가 영영 멈춘다.
- * 3. `tokens.agent-is-admin` — 에이전트 배우의 **실제 저장소 권한**. 두 배우 모드의 전제는 그 계정이
- *    평범한 write 협력자라는 것이다: `admin`/`maintain`이면 그 토큰으로 branch protection을 고쳐
- *    승인 요건을 지울 수 있으므로 두 배우 모드가 강제하는 것이 아무것도 없다(그래서 FAIL). 단일
- *    배우 모드에서는 같은 사실이 WARN이다 — 그 모드는 애초에 권한으로 막고 있지 않다.
- *
- *    이 판정은 **CI에서만** 의미가 있다: `gh`가 봇 계정의 토큰으로 도는 곳이 거기뿐이고, 사람의
- *    로컬 `gh`는 사람 자신(대개 admin)이다. 로컬에서 물으면 언제나 "admin"이라 늘 틀린 경보가 된다 —
- *    그래서 토큰 없는 환경에서는 건너뛰고 그 사실을 detail로 말한다. 토큰 **값**은 어디에서도
- *    읽지 않는다(존재만 본다) — 보고하는 것은 로그인 이름과 권한 등급뿐이다.
- */
-async function checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env }) {
-  const twoActor = isTwoActor(secrets);
-  const out = [twoActor
-    ? c("tokens.two-actor", "PASS", `${MERGE_TOKEN_SECRET} is set — merging the base branch needs an approval the agent actor cannot give`)
-    : c("tokens.single-actor", "WARN", `merge power is reachable from agent stages; hooks are the only layer (set ${MERGE_TOKEN_SECRET} + a non-admin FACTORY_BOT_TOKEN for two-actor mode)`)];
-
-  const approvals = protection?.required_pull_request_reviews?.required_approving_review_count ?? 0;
-  if (protectionUnavailable) {
-    out.push(c("protection.two-actor", "WARN", "branch protection unavailable on this plan — merge authority cannot be split by permission here; hooks are the only layer (ADR-021)"));
-  } else if (!protection) {
-    out.push(c("protection.two-actor", "WARN", `no branch protection on ${branch} — run factory bootstrap`));
-  } else if (twoActor) {
-    out.push(approvals >= 1
-      ? c("protection.two-actor", "PASS", `${branch}: ${approvals} approving review required, dismiss_stale_reviews=${Boolean(protection.required_pull_request_reviews?.dismiss_stale_reviews)}`)
-      : c("protection.two-actor", "FAIL", `${MERGE_TOKEN_SECRET} is set but ${branch} requires no approving review — the agent actor can still merge its own PR. Run factory bootstrap to apply two-actor protection`));
-  } else {
-    out.push(approvals >= 1
-      ? c("protection.two-actor", "WARN", `${branch} requires ${approvals} approving review but there is no ${MERGE_TOKEN_SECRET} — no second account can approve the agent's own PR, so dark merge is impossible. Set ${MERGE_TOKEN_SECRET} or drop the review requirement`)
-      : c("protection.two-actor", "PASS", "single-actor mode: no review requirement, as designed"));
-  }
-
-  // CI에서만 판정한다(위 doc 참고). 표식은 "CI이고 토큰이 있다" — 둘 다여야 한다.
-  if (!(env?.CI && (env.FACTORY_BOT_TOKEN || env.GH_TOKEN))) {
-    out.push(c("tokens.agent-is-admin", "PASS", "skipped — no CI token here; the agent actor's repo permission is checked in CI, where gh runs as the bot account"));
-    return out;
-  }
-  try {
-    const login = await gh.viewerLogin();
-    const permission = await gh.collaboratorPermission(login);
-    const elevated = permission === "admin" || permission === "maintain";
-    out.push(!elevated
-      ? c("tokens.agent-is-admin", "PASS", `${login}: ${permission}`)
-      : c("tokens.agent-is-admin", twoActor ? "FAIL" : "WARN", `${login} has ${permission} on this repo — an admin agent actor can rewrite branch protection, so ${twoActor ? "two-actor mode enforces nothing" : "nothing but hooks stands between it and a merge"}. Make the bot account a plain write collaborator (ADR-021)`));
-  } catch (e) {
-    out.push(c("tokens.agent-is-admin", "WARN", `could not read the agent actor's permission — ${e.message}`));
-  }
-  return out;
 }

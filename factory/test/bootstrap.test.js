@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LABELS } from "../lib/label-catalog.js";
-import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor } from "../lib/bootstrap.js";
+import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor, CODEOWNERS_PATH, MERGE_ENVIRONMENT, MERGE_ENVIRONMENT_BODY, TWO_ACTOR_VARIABLE, codeownersOwners, codeownersMentions } from "../lib/bootstrap.js";
 import { bootstrapCommand } from "../cli/bootstrap.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -27,7 +27,7 @@ const HARNESS = { project: { default_branch: "main" }, factory: { required_check
 const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_status_checks: { strict: false, contexts },
   enforce_admins: true,
-  required_pull_request_reviews: twoActor ? { required_approving_review_count: 1, dismiss_stale_reviews: true } : null,
+  required_pull_request_reviews: twoActor ? { required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true } : null,
   restrictions: null,
   required_linear_history: true,
   allow_force_pushes: false,
@@ -85,14 +85,20 @@ test("bootstrapPlan: FACTORY_TOKEN_ISSUED_AT absent → variable op with today's
   const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: null }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] };
   const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
   const varOps = ops.filter((o) => o.kind === "variable");
-  expect(varOps).toEqual([{ kind: "variable", name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" }]);
+  // ADR-021 r1 finding 2 — `FACTORY_TWO_ACTOR`는 언제나 나온다(CI가 모드를 스스로 관측할 수 없기 때문에
+  // 부트스트랩이 관측한 사실을 적어 두는 자리다). issued-at 변수와 나란히 계획된다.
+  expect(varOps).toEqual([
+    { kind: "variable", name: "FACTORY_TWO_ACTOR", value: "false" },
+    { kind: "variable", name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" },
+  ]);
   expect(ops.some((o) => o.kind === "note" && /FACTORY_TOKEN_ISSUED_AT/.test(o.message))).toBe(false);
 });
 
 test("bootstrapPlan: FACTORY_TOKEN_ISSUED_AT present → note instead of variable op", () => {
   const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] };
   const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
-  expect(ops.some((o) => o.kind === "variable")).toBe(false);
+  expect(ops.some((o) => o.kind === "variable" && o.name === "FACTORY_TOKEN_ISSUED_AT")).toBe(false);
+  expect(ops.filter((o) => o.kind === "variable")).toEqual([{ kind: "variable", name: "FACTORY_TWO_ACTOR", value: "false" }]);
   expect(ops.some((o) => o.kind === "note" && /FACTORY_TOKEN_ISSUED_AT/.test(o.message))).toBe(true);
 });
 
@@ -120,7 +126,7 @@ test("bootstrapPlan (ADR-021): FACTORY_MERGE_TOKEN present → two-actor protect
   const protection = ops.find((o) => o.kind === "protection");
   expect(protection).toEqual({ kind: "protection", branch: "main", twoActor: true, body: PROTECTION_BODY(["factory/integrity"], { twoActor: true }) });
   // 이 두 줄이 "에이전트 토큰으로는 머지가 불가능하다"의 전부다 — 작성자는 자기 PR을 승인할 수 없다.
-  expect(protection.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 1, dismiss_stale_reviews: true });
+  expect(protection.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true });
   expect(protection.body.enforce_admins).toBe(true);
   expect(protection.body.restrictions).toBe(null);          // Free 플랜에는 push 제한이 없다 — 승인 요건이 그 자리를 대신한다
   expect(protection.body.required_status_checks).toEqual({ strict: false, contexts: ["factory/integrity"] });
@@ -141,7 +147,7 @@ test("bootstrapPlan (ADR-021): the mode is always named in a note — single-act
 
   const two = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY", "FACTORY_MERGE_TOKEN"] } });
   const twoNote = two.filter((o) => o.kind === "note").map((o) => o.message).find((m) => /two-actor mode/.test(m));
-  expect(twoNote).toMatch(/cannot merge it/);
+  expect(twoNote).toMatch(/CODE OWNER/);
   // 노트는 시크릿의 **이름**만 말한다 — 값은 bootstrap이 읽지도 쓰지도 않는다.
   expect(two.filter((o) => o.kind === "note").every((o) => !/ghp_|github_pat_/.test(o.message))).toBe(true);
 });
@@ -172,10 +178,13 @@ test("applyBootstrap: calls createLabel once per label op, putBranchProtection o
   expect(gh.calls.createLabel.length).toBe(LABELS.length);
   expect(gh.calls.putBranchProtection.length).toBe(1);
   expect(gh.calls.putBranchProtection[0].branch).toBe("main");
-  expect(gh.calls.setVariable.length).toBe(1);
-  expect(gh.calls.setVariable[0]).toEqual({ name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" });
+  expect(gh.calls.setVariable.length).toBe(2);
+  expect(gh.calls.setVariable).toEqual([
+    { name: "FACTORY_TWO_ACTOR", value: "false" },
+    { name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" },
+  ]);
 
-  expect(applied.length).toBe(LABELS.length + 1 + 1); // labels + protection + variable
+  expect(applied.length).toBe(LABELS.length + 1 + 2); // labels + protection + two variables
   expect(notes.length).toBe(3); // two missing secrets + the ADR-021 mode note
   expect(logs.length).toBeGreaterThan(0);
 });
@@ -186,9 +195,9 @@ test("applyBootstrap: note ops never call any gh method", async () => {
   expect(ops.some((o) => o.kind === "note")).toBe(true); // the token-issued-at note
   const gh = fakeGh();
   const { applied, notes } = await applyBootstrap({ gh, ops, log: () => {} });
-  expect(gh.calls.setVariable.length).toBe(0);
+  expect(gh.calls.setVariable).toEqual([{ name: "FACTORY_TWO_ACTOR", value: "false" }]);   // issued-at은 note로 대체됐다
   expect(notes.length).toBe(2);   // token-issued-at + the ADR-021 mode note
-  expect(applied.length).toBe(LABELS.length + 1); // labels + protection only, no variable
+  expect(applied.length).toBe(LABELS.length + 1 + 1); // labels + protection + the mode variable
 });
 
 function fakeGhCli({ labels = [], secrets = [], variable = null } = {}) {
@@ -226,8 +235,10 @@ test("bootstrapCommand: applies ops against injected gh, honors --token-issued-a
   expect(code).toBe(0);
   expect(gh.calls.createLabel.length).toBe(LABELS.length);
   expect(gh.calls.putBranchProtection.length).toBe(1);
-  expect(gh.calls.setVariable.length).toBe(1);
-  expect(gh.calls.setVariable[0]).toEqual({ name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" });
+  expect(gh.calls.setVariable).toEqual([
+    { name: "FACTORY_TWO_ACTOR", value: "false" },
+    { name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" },   // --token-issued-at은 계획 끝으로 밀려 다시 붙는다
+  ]);
 });
 
 // ── fix round 1 ─────────────────────────────────────────────────────────────
@@ -260,7 +271,10 @@ test("bootstrapCommand: valid --token-issued-at forces the variable op even when
   const root = makeHarnessRoot();
   const code = await bootstrapCommand({ root, argv: ["--token-issued-at", "2026-09-12"], io: i, gh, today: "2026-01-01" });
   expect(code).toBe(0);
-  expect(gh.calls.setVariable).toEqual([{ name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" }]);
+  expect(gh.calls.setVariable).toEqual([
+    { name: "FACTORY_TWO_ACTOR", value: "false" },
+    { name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" },
+  ]);
 });
 
 test("applyBootstrap: a failing op is isolated — the rest still run, failure is reported, not thrown", async () => {
@@ -275,8 +289,8 @@ test("applyBootstrap: a failing op is isolated — the rest still run, failure i
   expect(failed).toEqual([{ op: ops.find((o) => o.kind === "label" && o.name === LABELS[0].name), error: "gh: permission denied" }]);
   expect(gh.calls.createLabel.length).toBe(LABELS.length - 1); // every other label still attempted
   expect(gh.calls.putBranchProtection.length).toBe(1); // protection still ran after the failed label
-  expect(gh.calls.setVariable.length).toBe(1); // variable still ran too
-  expect(applied.length).toBe(LABELS.length - 1 + 1 + 1); // labels(minus the failed one) + protection + variable
+  expect(gh.calls.setVariable.length).toBe(2); // variables still ran too (issued-at + the ADR-021 r1 mode variable)
+  expect(applied.length).toBe(LABELS.length - 1 + 1 + 2); // labels(minus the failed one) + protection + two variables
   expect(notes.length).toBe(3);   // two missing secrets + the ADR-021 mode note
 });
 
@@ -316,8 +330,8 @@ test("applyBootstrap: a 403 protection failure is isolated like any other — ev
   const { applied, failed } = await applyBootstrap({ gh, ops, log: () => {} });
   expect(failed).toEqual([{ op: ops.find((o) => o.kind === "protection"), error: GH_FREE_403 }]);
   expect(gh.calls.createLabel.length).toBe(LABELS.length);   // every label still attempted
-  expect(gh.calls.setVariable.length).toBe(1);               // variable still ran after the failed protection op
-  expect(applied.length).toBe(LABELS.length + 1);            // labels + variable (protection failed, not counted)
+  expect(gh.calls.setVariable.length).toBe(2);               // variables still ran after the failed protection op
+  expect(applied.length).toBe(LABELS.length + 2);            // labels + two variables (protection failed, not counted)
 });
 
 test("bootstrapCommand: branch protection 403 on GitHub Free — single actionable line on stderr, exit 1, every other op still applied", async () => {
@@ -335,8 +349,8 @@ test("bootstrapCommand: branch protection 403 on GitHub Free — single actionab
   expect(o.out.join("\n")).not.toContain("Upgrade to GitHub Pro");
   // every other op still ran despite the protection failure.
   expect(gh.calls.createLabel.length).toBe(LABELS.length);
-  expect(gh.calls.setVariable.length).toBe(1);
-  expect(o.out.join("\n")).toContain(`bootstrap: applied ${LABELS.length + 1} ops`); // labels + variable, not protection
+  expect(gh.calls.setVariable.length).toBe(2);
+  expect(o.out.join("\n")).toContain(`bootstrap: applied ${LABELS.length + 2} ops`); // labels + two variables, not protection
 });
 
 test("bootstrapCommand: no gh injected → builds one via the injected run, including the `gh repo view` repo-detect fallback", async () => {
@@ -367,4 +381,95 @@ test("bootstrapCommand: missing harness.toml → exit 1, message mentions harnes
   expect(code).toBe(1);
   expect(o.err.join("\n")).toContain("harness.toml");
   rmSync(root, { recursive: true, force: true });
+});
+
+// ── ADR-021 fix round r1 — CODEOWNERS (MF-1) + the factory-merge environment (MF-2 b) ──────
+
+const TWO = ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY", "FACTORY_MERGE_TOKEN"];
+const planTwoActor = (extra = {}) =>
+  bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: TWO, ...extra } });
+
+test("bootstrapPlan (r1 MF-1): two-actor protection requires a CODE OWNER review — counting approvals alone lets the agent approve a PR it did not author", () => {
+  const protection = planTwoActor().find((o) => o.kind === "protection");
+  expect(protection.body.required_pull_request_reviews.require_code_owner_reviews).toBe(true);
+  // single-actor는 그대로 null이다 — 승인해 줄 두 번째 계정이 없다.
+  const single = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: {}, secrets: ["FACTORY_BOT_TOKEN"] } });
+  expect(single.find((o) => o.kind === "protection").body.required_pull_request_reviews).toBe(null);
+});
+
+test("bootstrapPlan (r1 MF-1): two-actor mode plans a CODEOWNERS op naming the merge actor — and the agent login never appears in it", () => {
+  const ops = planTwoActor({ mergeActorLogin: "owner-human", loginSource: "gh api user under FACTORY_MERGE_TOKEN" });
+  const co = ops.find((o) => o.kind === "codeowners");
+  expect(co).toMatchObject({ path: CODEOWNERS_PATH, login: "owner-human", replacing: false });
+  expect(codeownersOwners(co.content)).toEqual(["owner-human"]);
+  expect(codeownersMentions(co.content)).toEqual(["owner-human"]);   // 주석에도 다른 계정을 적지 않는다
+  expect(ops.some((o) => o.kind === "note" && /gh api user under FACTORY_MERGE_TOKEN/.test(o.message))).toBe(true);
+});
+
+test("bootstrapPlan (r1 MF-1): a CODEOWNERS that already owns `*` with the merge actor is left alone; a different owner is replaced", () => {
+  const same = planTwoActor({ mergeActorLogin: "Owner-Human", codeowners: "* @owner-human\n" });
+  expect(same.some((o) => o.kind === "codeowners")).toBe(false);     // 대소문자 무시 — GitHub 로그인은 대소문자를 가리지 않는다
+  expect(same.some((o) => o.kind === "note" && /already makes @Owner-Human a code owner/.test(o.message))).toBe(true);
+
+  const other = planTwoActor({ mergeActorLogin: "owner-human", codeowners: "* @factory-bot\n" });
+  expect(other.find((o) => o.kind === "codeowners")).toMatchObject({ login: "owner-human", replacing: true });
+});
+
+test("bootstrapPlan (r1 MF-1): with no resolvable login nothing is written — a placeholder owner would lock the repo, not protect it", () => {
+  const ops = planTwoActor({ mergeActorLogin: null });
+  expect(ops.some((o) => o.kind === "codeowners")).toBe(false);
+  const note = ops.filter((o) => o.kind === "note").map((o) => o.message).find((m) => /could not resolve the merge actor/.test(m));
+  expect(note).toMatch(/never the agent actor/);
+  expect(note).toMatch(/unapprovable/);
+});
+
+test("bootstrapPlan (r1 MF-2 b): two-actor mode plans the factory-merge environment, default-branch deployments only; single-actor plans none", () => {
+  const env = planTwoActor().find((o) => o.kind === "environment");
+  expect(env).toEqual({ kind: "environment", name: MERGE_ENVIRONMENT, body: MERGE_ENVIRONMENT_BODY });
+  expect(env.body.deployment_branch_policy).toEqual({ protected_branches: true, custom_branch_policies: false });
+  const single = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: {}, secrets: ["FACTORY_BOT_TOKEN"] } });
+  expect(single.some((o) => o.kind === "environment" || o.kind === "codeowners")).toBe(false);
+});
+
+test("bootstrapPlan (r1): the mode variable records what bootstrap OBSERVED — CI cannot read `gh secret list` with a non-admin bot token", () => {
+  expect(planTwoActor().find((o) => o.kind === "variable" && o.name === TWO_ACTOR_VARIABLE)).toEqual({ kind: "variable", name: TWO_ACTOR_VARIABLE, value: "true" });
+});
+
+test("applyBootstrap (r1): the codeowners op writes through the injected writer; with no writer it degrades to a note, never a silent file", async () => {
+  const ops = planTwoActor({ mergeActorLogin: "owner-human" });
+  const gh = { ...fakeGh(), async putEnvironment() {} };
+  const written = [];
+  const { applied } = await applyBootstrap({ gh, ops, log: () => {}, writeFile: (path, content) => written.push({ path, content }) });
+  expect(written).toHaveLength(1);
+  expect(written[0].path).toBe(CODEOWNERS_PATH);
+  expect(written[0].content).toContain("* @owner-human");
+  expect(applied.some((o) => o.kind === "codeowners")).toBe(true);
+
+  const { applied: a2, notes } = await applyBootstrap({ gh: { ...fakeGh(), async putEnvironment() {} }, ops, log: () => {} });
+  expect(a2.some((o) => o.kind === "codeowners")).toBe(false);
+  expect(notes.some((n) => /no file writer/.test(n))).toBe(true);
+});
+
+test("applyBootstrap (r1 MF-2 b): an environment that this plan cannot create is a NOTE, not a failure — and the note states the repo-secret risk", async () => {
+  const ops = planTwoActor({ mergeActorLogin: "owner-human" });
+  const gh = { ...fakeGh(), async putEnvironment() { throw new Error("HTTP 404: Not Found (environments are a paid feature here)"); } };
+  const { failed, notes, applied } = await applyBootstrap({ gh, ops, log: () => {}, writeFile: () => {} });
+  expect(failed).toEqual([]);                                   // 부트스트랩을 실패로 만들지 않는다
+  expect(applied.some((o) => o.kind === "environment")).toBe(false);
+  const note = notes.find((n) => /falling back to a REPOSITORY secret/.test(n));
+  expect(note).toMatch(/ANY same-repo branch/);
+  expect(note).toMatch(/workflow` scope/);
+
+  const ok = { ...fakeGh(), calls2: [], async putEnvironment(name, body) { this.calls2.push({ name, body }); } };
+  const r = await applyBootstrap({ gh: ok, ops, log: () => {}, writeFile: () => {} });
+  expect(ok.calls2).toEqual([{ name: MERGE_ENVIRONMENT, body: MERGE_ENVIRONMENT_BODY }]);
+  expect(r.failed).toEqual([]);
+});
+
+test("codeownersOwners / codeownersMentions: comments are stripped, non-`*` patterns do not own everything", () => {
+  const text = "# @not-an-owner in a comment\n*       @merge-actor\ndocs/  @someone-else\n";
+  expect(codeownersOwners(text)).toEqual(["merge-actor"]);
+  expect(codeownersMentions(text)).toEqual(["merge-actor", "someone-else"]);
+  expect(codeownersOwners("")).toEqual([]);
+  expect(codeownersOwners("# only a comment\n")).toEqual([]);
 });

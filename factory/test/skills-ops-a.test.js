@@ -211,9 +211,13 @@ test("templates/know-thy-build/harness.md: finds the promotion PR by head branch
 
 const DOCTOR_HARNESS_SRC = new URL("../lib/doctor/harness.js", import.meta.url);
 const DOCTOR_FACTORY_SRC = new URL("../lib/doctor/factory.js", import.meta.url);
+const DOCTOR_MERGE_AUTHORITY_SRC = new URL("../lib/doctor/merge-authority.js", import.meta.url);
 
 function doctorSource() {
-  return readFileSync(DOCTOR_HARNESS_SRC, "utf8") + "\n" + readFileSync(DOCTOR_FACTORY_SRC, "utf8");
+  // ADR-021 r1 — 머지 권한 판정은 `doctor/merge-authority.js`로 떨어져 나왔다(설치된 트리에서 CI가
+  // 부를 수 있어야 하고, `doctor/factory.js`는 `cli/install.js`를 import해 거기서는 로드되지 않는다).
+  // 체크 id의 출처가 세 파일이 됐으므로 이 표 검증도 셋을 다 읽어야 한다.
+  return [DOCTOR_HARNESS_SRC, DOCTOR_FACTORY_SRC, DOCTOR_MERGE_AUTHORITY_SRC].map((f) => readFileSync(f, "utf8")).join("\n");
 }
 
 // Static ids: string-literal doctor ids, e.g. c("harness.schema", ...).

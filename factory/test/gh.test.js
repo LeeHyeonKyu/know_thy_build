@@ -401,3 +401,35 @@ test("mergedPrForBranch returns null when nothing was merged from that branch", 
   const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } }]);
   expect(await makeGh({ run, repo }).mergedPrForBranch("claude/fq-31")).toBeNull();
 });
+
+// ── ADR-021 fix round r1 ────────────────────────────────────────────────────
+
+test("viewerScopes reads X-OAuth-Scopes from `gh api -i user` — the token value is never in the arguments", async () => {
+  const headers = "HTTP/2.0 200 OK\r\nX-OAuth-Scopes: repo, read:org\r\nX-Accepted-OAuth-Scopes: \r\n\r\n{\"login\":\"factory-bot\"}";
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "-i", result: { code: 0, stdout: headers, stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.viewerScopes()).toEqual(["repo", "read:org"]);
+  expect(run.calls[0].args).toEqual(["api", "-i", "user"]);
+});
+
+test("viewerScopes: no X-OAuth-Scopes header → null (a fine-grained PAT or an App token — the classic `workflow` scope does not exist there)", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "api", result: { code: 0, stdout: "HTTP/2.0 200 OK\r\n\r\n{}", stderr: "" } }]);
+  expect(await makeGh({ run, repo }).viewerScopes()).toBeNull();
+
+  // 빈 스코프 문자열은 "classic PAT인데 스코프가 없다"이지 "classic PAT이 아니다"가 아니다.
+  const empty = makeFakeRun([{ match: (c, a) => a[0] === "api", result: { code: 0, stdout: "HTTP/2.0 200 OK\r\nx-oauth-scopes: \r\n\r\n{}", stderr: "" } }]);
+  expect(await makeGh({ run: empty, repo }).viewerScopes()).toEqual([]);
+});
+
+test("viewerScopes: a failing call throws with the stderr, so doctor reports WARN instead of a silent PASS", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "gh: Bad credentials" } }]);
+  await expect(makeGh({ run, repo }).viewerScopes()).rejects.toThrow(/Bad credentials/);
+});
+
+test("putEnvironment PUTs the deployment branch policy by stdin — the body never reaches the argv", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "-X", result: { code: 0, stdout: "{}", stderr: "" } }]);
+  const body = { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } };
+  await makeGh({ run, repo }).putEnvironment("factory-merge", body);
+  expect(run.calls[0].args).toEqual(["api", "-X", "PUT", `repos/${repo}/environments/factory-merge`, "--input", "-"]);
+  expect(JSON.parse(run.calls[0].opts.input)).toEqual(body);
+});

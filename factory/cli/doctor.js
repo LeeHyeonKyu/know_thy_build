@@ -173,7 +173,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
         // `gh api repos//branches/main/protection`처럼 깨진 경로로 호출해 거짓 "보호 없음"을 보고하지 않도록.
         // 해석 자체가 실패하면(로그인 안 됨·git repo 아님) github.* 전체를 건너뛰고 오프라인 허용 WARN 하나로 남긴다.
         if (gh) {
-          checks.push(...(await checkGitHubFn({ gh, harness, labels: LABELS })));
+          checks.push(...(await checkGitHubFn({ gh, harness, labels: LABELS, root, exists, readFile })));
         } else {
           let repo;
           try {
@@ -183,7 +183,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
           }
           if (repo) {
             const ghClient = makeGh({ run, repo });
-            checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: LABELS })));
+            checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: LABELS, root, exists, readFile })));
           }
         }
       }

@@ -23,8 +23,43 @@ const AGENT_TOKEN_RE = /\b(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)\b/;
  * **리터럴로 지우려고** 모든 시크릿을 env로 받는다 — `claude`를 띄우지 않고, `run:`은
  * `scrub-artifacts.js` 한 줄이다. 이 예외가 없으면 "지우기 위해 받는 것"과 "쓰기 위해 받는 것"을
  * 규칙이 구분하지 못해, 머지 토큰만 스크럽 대상에서 빠지는(=아티팩트에 남는) 결과가 된다.
+ *
+ * **ADR-021 r1 finding 5 — 예외의 열쇠는 두 개다.** 예전에는 블록 어디에든 `scrub-artifacts.js`라는
+ * 문자열이 있으면 통과였다: 스텝 이름도, 주석 한 줄도, `run:` 안의 `node …scrub-artifacts.js &&
+ * claude -p …`도 전부 같은 값이었다. 이제는 (a) 스텝이 **`id: scrub-artifacts`를 선언**하고
+ * (b) 그 블록의 **`run:` 줄 중 하나가 실제로 `scrub-artifacts.js`를 실행**해야 한다. `id:`는 YAML의
+ * 스텝 식별자라 워크플로 안에서 유일해야 하고(자유 텍스트인 `name:`과 다르다), `run:`은 그 스텝이
+ * 실제로 무엇을 하는지다 — 둘을 함께 요구하면 "예외를 쓰려면 스텝을 스크럽 스텝으로 **선언하고**
+ * 정말로 스크럽을 실행해야 한다"가 된다.
+ *
+ * 그래도 이것은 **템플릿을 고칠 수 있는 사람**을 막지 못한다(둘 다 쓰고 뒤에 `claude`를 붙이면 된다).
+ * 그 지점을 막는 것은 린트가 아니라 L1이다: `.github/**`가 `[protected].factory`에 있으므로
+ * 워크플로를 건드리는 PR은 자동 머지되지 않고 사람이 diff를 읽고 머지한다(ADR-021 r1 MF-2 c).
  */
-const SCRUB_STEP_RE = /scrub-artifacts\.js/;
+const SCRUB_STEP_ID_RE = /^\s*id:\s*(['"]?)scrub-artifacts\1\s*$/;
+const SCRUB_STEP_RUN_RE = /scrub-artifacts\.js/;
+const isScrubStep = (block) => block.some((l) => SCRUB_STEP_ID_RE.test(l)) && runLines(block).some((l) => SCRUB_STEP_RUN_RE.test(l));
+
+/**
+ * 스텝 블록에서 `run:` 스칼라의 본문 줄만 뽑는다 — 한 줄짜리 `run: …`은 그 줄 자체, 블록 스칼라
+ * (`run: |`)는 더 깊이 들여쓴 줄들. `env:`·`name:`·주석은 포함되지 않는다.
+ */
+function runLines(block) {
+  const out = [];
+  for (let i = 0; i < block.length; i++) {
+    const m = /^(\s*)(?:-\s+)?run:(.*)$/.exec(block[i]);
+    if (!m) continue;
+    const rest = m[2].trim();
+    if (rest !== "" && !/^[|>][-+0-9]*$/.test(rest)) { out.push(rest); continue; }
+    const indent = block[i].search(/\S/);
+    for (let j = i + 1; j < block.length; j++) {
+      if (block[j].trim() === "") continue;
+      if (block[j].search(/\S/) <= indent) break;
+      out.push(block[j]);
+    }
+  }
+  return out;
+}
 
 /** ADR-009 규칙을 텍스트 수준에서 검사한다. YAML 파서 없이 — 의존성 추가 금지. */
 export function lintWorkflow(text, { file = null } = {}) {
@@ -178,7 +213,7 @@ function lintMergeTokenScope(lines, file) {
     const [from, to] = range ?? [0, bare.length];
     if (flagged.has(from)) continue;
     const block = bare.slice(from, to);
-    if (block.some((l) => SCRUB_STEP_RE.test(l))) continue;  // 지우기 위해 받는 스텝은 예외
+    if (isScrubStep(block)) continue;  // 지우기 위해 받는 스텝은 예외 — `id:`와 `run:` 둘 다 맞을 때만
     if (!block.some((l) => AGENT_TOKEN_RE.test(l))) continue;
     flagged.add(from);
     out.push({ line: i + 1, rule: "merge-token-scope", msg: `${MERGE_TOKEN} is in the same step as CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY — that is a step where \`claude -p\` runs, and ADR-021 exists so that merge power is unreachable from there by permission, not by command pattern. The only exception is the credential-scrub step, which holds every secret as a literal to redact and never starts an agent` });

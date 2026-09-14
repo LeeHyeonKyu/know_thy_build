@@ -1,4 +1,5 @@
 import { test, expect } from "vitest";
+import { MERGE_ENVIRONMENT } from "../lib/bootstrap.js";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse as toml } from "smol-toml";
@@ -48,7 +49,8 @@ test("harness.toml template protects the build-config files the gate commands re
     expect(h.protected.factory, g).toContain(g);
   }
   // 기존 보호 대상은 그대로다
-  for (const g of [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md"]) {
+  // ADR-021 r1 MF-2 c — 워크플로 일곱 장이 아니라 `.github/**` 전부다(다른 이름의 워크플로도, CODEOWNERS도).
+  for (const g of [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md"]) {
     expect(h.protected.factory, g).toContain(g);
   }
   expect(h.protected.except).toContain(".factory/lessons/**");
@@ -136,7 +138,7 @@ test("ci-settings.json deny covers the build-config files, matching [protected].
   }
   // 팩토리 소유 경로도 통째로 여기 있다 — 스펙 §6.3의 목록이 통째로 CI 파일로 옮겨왔다는 뜻이다.
   for (const d of ["Edit(.factory/**)", "Write(.factory/**)", "Edit(.claude/**)", "Write(.claude/**)",
-    "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
+    "Edit(.github/**)", "Write(.github/**)",
     "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)"]) expect(s.permissions.deny, d).toContain(d);
   // CI 전용 deny(비밀·삭제)는 그대로 남아 있다.
   for (const d of ["Bash(gh secret*)", "Read(.env)"]) expect(s.permissions.deny, d).toContain(d);
@@ -335,4 +337,31 @@ test("ci-settings, package.json, quarantine templates parse", () => {
   const p = JSON.parse(read("factory/package.json"));
   expect(p.type).toBe("module"); expect(p.private).toBe(true); expect(p.dependencies["smol-toml"]).toMatch(/^\d+\.\d+\.\d+$/);
   expect(toml(read("factory/quarantine.toml"))).toEqual({ quarantined: [] });
+});
+
+
+// ── ADR-021 fix round r1 — the shipped workflow templates carry the new wiring ───────────────
+
+test("r1 MF-2 b: the merge job declares the `factory-merge` environment — a repo secret is readable from any same-repo branch", () => {
+  const merge = read("github/workflows/factory-merge.yml");
+  expect(merge).toMatch(/^\s{4}environment: factory-merge$/m);
+  // 그 환경 이름은 bootstrap이 만드는 이름과 같아야 한다 — 갈라지면 시크릿이 해석되지 않고 머지가 조용히 실패한다.
+  expect(merge).toContain(MERGE_ENVIRONMENT);
+});
+
+test("r1 finding 5: every credential-scrub step declares `id: scrub-artifacts` — the lint exception is keyed on it", () => {
+  for (const f of ["triage", "plan", "implement", "review", "merge", "retro"]) {
+    const text = read(`github/workflows/factory-${f}.yml`);
+    expect(text, f).toMatch(/^\s+- name: Scrub credentials from the artifacts$/m);
+    expect(text, f).toMatch(/^\s+id: scrub-artifacts$/m);
+  }
+});
+
+test("r1 finding 2: the sweeper runs the merge-authority doctor under the bot token, and cannot break sweeping", () => {
+  const sweeper = read("github/workflows/factory-sweeper.yml");
+  expect(sweeper).toContain("node .factory/bin/doctor-ci.js");
+  expect(sweeper).toMatch(/continue-on-error: true/);
+  // 그 스텝의 토큰은 **에이전트 배우의 것**이어야 한다 — 머지 배우의 토큰으로 물으면 엉뚱한 계정을 판정한다.
+  expect(sweeper).not.toContain("FACTORY_MERGE_TOKEN");
+  expect(sweeper).toContain("FACTORY_BOT_TOKEN");
 });

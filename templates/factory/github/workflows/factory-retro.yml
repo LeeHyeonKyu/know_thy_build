@@ -62,6 +62,10 @@ jobs:
       # 체크아웃하므로 대개 no-op이지만(실패해도 `|| true`), "팩토리 코드는 언제나 base의 것"이라는
       # 모양을 워크플로마다 같게 둔다.
       - name: Scrub credentials from the artifacts
+        # ADR-021 r1 finding 5 — `merge-token-scope` exempts this step only when it BOTH declares this
+        # exact `id:` and actually runs scrub-artifacts.js in its `run:`. A free-text step name was
+        # not enough of a key: the exception is what lets one step hold every credential at once.
+        id: scrub-artifacts
         if: always()
         env:
           FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}

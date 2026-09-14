@@ -89,7 +89,14 @@ ready_timeout_sec = 90
 # 거쳐 해석되므로, 에이전트가 여기를 고치면 "게이트를 통과시키는" 가장 쉬운 길이 코드를 고치는 게
 # 아니라 판정 기준을 고치는 것이 된다(테스트 제외, 린트 규칙 해제, 의존성 교체).
 # 바꿔야 한다면 경로는 하나다: `factory:harness` 이슈 → 사람이 diff를 보고 머지(§5.1).
-factory       = [".factory/**", ".claude/**", ".github/workflows/factory-*.yml", "docs/factory/CHARTER.md",
+#
+# ADR-021 r1 MF-2 c — `.github/**`는 워크플로 파일 일곱 장이 아니라 **디렉터리 전부**다.
+# `.github/workflows/factory-*.yml`만 보호하던 시절에는 다른 이름의 워크플로 한 장(`ci.yml`·`x.yml`)이
+# L1/L2 어디에도 걸리지 않았고, 같은 저장소 브랜치에서 도는 워크플로에는 저장소 시크릿이 그대로
+# 주어지므로 그 한 장이 `FACTORY_MERGE_TOKEN`을 밖으로 실어 나를 수 있었다. `.github/CODEOWNERS`도
+# 같은 이유로 여기 들어온다 — 그 파일이 곧 "누구의 승인이 머지를 여는가"이므로, 그것을 바꾸는 PR은
+# 반드시 사람이 읽고 머지해야 한다.
+factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md",
                  "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
                  "tsconfig*.json", ".eslintrc*", "eslint.config.*"]
                  # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를

@@ -7,7 +7,7 @@
 
       "Edit(.factory/**)", "Write(.factory/**)",
       "Edit(.claude/**)", "Write(.claude/**)",
-      "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
+      "Edit(.github/**)", "Write(.github/**)",
       "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)",
       "Edit(package.json)", "Write(package.json)",
       "Edit(package-lock.json)", "Write(package-lock.json)",

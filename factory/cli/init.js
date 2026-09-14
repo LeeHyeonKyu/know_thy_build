@@ -61,13 +61,25 @@ Next:
   1. Edit .factory/harness.toml (or run /know-thy-build:project) and docs/factory/CHARTER.md (status: ready when done)
   2. npx know-thy-build factory doctor
   3. git add -A && git commit && git push    # push BEFORE bootstrap — branch protection blocks the first push
-  4. gh secret set FACTORY_BOT_TOKEN         # a NON-ADMIN machine user's PAT (write collaborator; scopes repo, workflow)
+  4. gh secret set FACTORY_BOT_TOKEN         # a NON-ADMIN machine user's PAT (plain WRITE collaborator).
+                                             # Scope \`repo\` ONLY — never \`workflow\`: that scope lets the agent push
+                                             # .github/workflows/*.yml onto its own branch, and a workflow on a same-repo
+                                             # branch is handed the repository secrets (ADR-021 r1 MF-2).
      gh secret set CLAUDE_CODE_OAUTH_TOKEN   # or ANTHROPIC_API_KEY
-     gh secret set FACTORY_MERGE_TOKEN       # optional but recommended: an ADMIN account's PAT — a DIFFERENT account (ADR-021)
-  5. npx know-thy-build factory bootstrap    # labels, branch protection, token issue date
-                                             # with FACTORY_MERGE_TOKEN set it configures two-actor mode: the base branch
-                                             # requires 1 approving review, so the agent's own token can never merge.
-                                             # Without it, merge power stays reachable from agent stages (doctor WARNs).
+  5. npx know-thy-build factory bootstrap    # labels, branch protection, token issue date,
+                                             # .github/CODEOWNERS, and the \`factory-merge\` environment.
+                                             # Without FACTORY_MERGE_TOKEN it bootstraps SINGLE-ACTOR mode: merge power
+                                             # stays reachable from agent stages and hooks are the only layer (doctor WARNs).
+  6. Two-actor mode (recommended — ADR-021). An ADMIN account's PAT, a DIFFERENT account from the bot:
+     gh secret set FACTORY_MERGE_TOKEN --env factory-merge   # an ENVIRONMENT secret, not a repo secret:
+                                             # a repo secret is readable by a workflow on ANY same-repo branch.
+     npx know-thy-build factory bootstrap    # re-run: adds \`1 code-owner approving review\` to the base branch
+                                             # and writes .github/CODEOWNERS with \`* @<merge actor>\`.
+     git add .github/CODEOWNERS && git commit && git push    # GitHub reads CODEOWNERS from the BASE branch
+  7. npx know-thy-build factory doctor       # tokens.two-actor / protection.two-actor / protection.codeowners.
+                                             # tokens.agent-is-admin, tokens.agent-workflow-scope and the CODEOWNERS
+                                             # identity check are WARN "unverified until CI" locally — the sweeper's
+                                             # \`Doctor (merge authority)\` step grades them under the bot token.
                                              # See docs §4.4 and ADR-021.`);
   return 0;
 }

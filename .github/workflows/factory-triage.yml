@@ -88,6 +88,10 @@ jobs:
       # `.factory/`를 이벤트 sha로 되돌리는 이유는 정리 스텝과 같다: implement는 에이전트 브랜치 위에,
       # review·merge는 PR head로 detach된 트리 위에 있다 — 스크럽 코드만은 언제나 base의 것이어야 한다.
       - name: Scrub credentials from the artifacts
+        # ADR-021 r1 finding 5 — `merge-token-scope` exempts this step only when it BOTH declares this
+        # exact `id:` and actually runs scrub-artifacts.js in its `run:`. A free-text step name was
+        # not enough of a key: the exception is what lets one step hold every credential at once.
+        id: scrub-artifacts
         if: always()
         env:
           FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}

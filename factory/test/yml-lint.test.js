@@ -446,6 +446,7 @@ test("merge-token-scope: the merge token never shares a step with an agent token
 test("merge-token-scope: the credential-scrub step is the one exception — it holds every secret to redact it, and starts no agent", () => {
   const scrub = [
     "  - name: Scrub credentials from the artifacts",
+    "    id: scrub-artifacts",
     "    env:",
     "      FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
     "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
@@ -479,4 +480,67 @@ test("merge-token-scope: the shipped templates obey it — only factory-merge.ym
   const merge = readFileSync(join(W, "factory-merge.yml"), "utf8");
   expect(merge).toContain("FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}");
   expect(merge).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}");
+});
+
+
+// ── ADR-021 fix round r1 finding 5 — the scrub exception has TWO keys ───────
+
+test("merge-token-scope (r1 finding 5): the scrub exception needs BOTH `id: scrub-artifacts` and a `run:` that actually invokes the script", () => {
+  const step = (lines) => ["  - name: Scrub", ...lines, ""].join("\n");
+  const env = [
+    "    env:",
+    "      FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+  ];
+  const both = step(["    id: scrub-artifacts", ...env, "    run: node .factory/bin/scrub-artifacts.js out"]);
+  expect(lintWorkflow(both, { file: "factory-merge.yml" })).toEqual([]);
+
+  // id는 있는데 run이 스크럽을 부르지 않는다 — 선언만으로는 예외가 아니다.
+  const idOnly = step(["    id: scrub-artifacts", ...env, "    run: claude -p go"]);
+  expect(lintWorkflow(idOnly, { file: "factory-merge.yml" }).map((v) => v.rule)).toEqual(["merge-token-scope"]);
+
+  // run은 스크럽을 부르는데 id가 없다 — 예전에는 이것만으로 통과였다.
+  const runOnly = step([...env, "    run: node .factory/bin/scrub-artifacts.js out"]);
+  expect(lintWorkflow(runOnly, { file: "factory-merge.yml" }).map((v) => v.rule)).toEqual(["merge-token-scope"]);
+});
+
+test("merge-token-scope (r1 finding 5): the old spoof — the script name in a step NAME or a COMMENT — no longer buys the exception", () => {
+  const byName = [
+    "  - name: run scrub-artifacts.js and also the agent",
+    "    env:",
+    "      FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
+    "    run: claude -p go",
+    "",
+  ].join("\n");
+  expect(lintWorkflow(byName, { file: "factory-merge.yml" }).map((v) => v.rule)).toEqual(["merge-token-scope"]);
+
+  const byComment = [
+    "  - name: Agent",
+    "    # this step is NOT .factory/bin/scrub-artifacts.js, whatever this comment says",
+    "    env:",
+    "      FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}",
+    "    run: claude -p go",
+    "",
+  ].join("\n");
+  expect(lintWorkflow(byComment, { file: "factory-merge.yml" }).map((v) => v.rule)).toEqual(["merge-token-scope"]);
+});
+
+test("merge-token-scope (r1 finding 5): a declared scrub step that ALSO starts an agent in the same `run:` is still a violation", () => {
+  const chained = [
+    "  - name: Scrub",
+    "    id: scrub-artifacts",
+    "    env:",
+    "      FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+    "    run: |",
+    "      node .factory/bin/scrub-artifacts.js out",
+    "      claude -p 'now leak it'",
+    "",
+  ].join("\n");
+  // 이 모양은 규칙이 **막지 못한다**(id와 run이 둘 다 맞다) — 그리고 그것이 ADR-021 r1의 알려진 한계 7이다:
+  // 막는 것은 린트가 아니라 L1이다(`.github/**`·`templates/**`가 `[protected].factory`라 사람이 머지한다).
+  // 이 테스트는 그 경계를 **문서화**한다 — 나중에 규칙을 좁힐 때 여기가 깨져서 판단을 다시 하게 된다.
+  expect(lintWorkflow(chained, { file: "factory-merge.yml" })).toEqual([]);
 });

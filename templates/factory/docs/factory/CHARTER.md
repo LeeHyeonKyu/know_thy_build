@@ -44,12 +44,17 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 
 | 배우 | 시크릿 | 계정 | 쓰이는 곳 |
 |---|---|---|---|
-| 에이전트 배우 | `FACTORY_BOT_TOKEN` | **admin이 아닌** 머신 유저 — 저장소의 평범한 **write 협력자** | 체크아웃 · 코멘트 · 라벨 · 락 브랜치 · PR 생성 · `claude/*`·`factory/*` push. `claude -p`가 도는 모든 스테이지 |
-| 머지 배우 | `FACTORY_MERGE_TOKEN` | admin/owner (에이전트 배우와 **반드시 다른 계정**) | 머지 스테이지(스크립트 전용 — `claude`를 띄우지 않는다)와 그 잡의 자격증명 스크럽 스텝. 그 외 어디에도 없다 |
+| 에이전트 배우 | `FACTORY_BOT_TOKEN` | **admin이 아닌** 머신 유저 — 저장소의 평범한 **write 협력자**. PAT 스코프는 **`repo` 하나** (`workflow`를 주지 않는다) | 체크아웃 · 코멘트 · 라벨 · 락 브랜치 · PR 생성 · `claude/*`·`factory/*` push. `claude -p`가 도는 모든 스테이지 |
+| 머지 배우 | `FACTORY_MERGE_TOKEN` | admin/owner (에이전트 배우와 **반드시 다른 계정**). `.github/CODEOWNERS`의 유일한 코드 오너 | 머지 스테이지(스크립트 전용 — `claude`를 띄우지 않는다)와 그 잡의 자격증명 스크럽 스텝. 그 외 어디에도 없다. 값은 **`factory-merge` 환경 시크릿**으로 둔다(저장소 시크릿이 아니다) |
 
-- **두 배우 모드**(두 시크릿 모두 설정): base 브랜치가 승인 1건을 요구한다. PR을 여는 것은 언제나
-  에이전트 배우이고 GitHub은 자기 PR의 승인을 거부하므로, 그 계정의 토큰으로는 어떤 명령을 어떻게
-  조립해도 머지가 **권한상** 불가능하다. 훅은 그 위의 한 겹으로 남는다.
+- **두 배우 모드**(두 시크릿 모두 설정): base 브랜치가 **코드 오너의** 승인 1건을 요구한다
+  (`require_code_owner_reviews` + `.github/CODEOWNERS`의 `* @<머지 배우>`). 그래서 에이전트 배우가 쥔
+  토큰으로는 **어떤 PR도** 머지할 수 없다 — 자기가 연 PR은 GitHub이 자기-승인을 거부해서, 남이 연 PR은
+  승인이 머지 배우의 것이어야 해서. 수만 세는 규칙(`required_approving_review_count`만)으로는 후자가
+  열려 있었다(ADR-021 r1 MF-1). 훅은 그 위의 한 겹으로 남는다.
+- **에이전트 PAT에 `workflow` 스코프를 주지 않는다**(r1 MF-2): 주면 에이전트가 자기 브랜치에 워크플로
+  한 장을 올려 저장소 시크릿을 읽어 갈 수 있다(같은 저장소 브랜치의 워크플로에는 시크릿이 주어진다).
+  `.github/**`는 `[protected].factory`라 그 경로를 건드리는 PR은 언제나 사람이 머지한다.
 - **단일 배우 모드**(`FACTORY_MERGE_TOKEN` 없음): 승인 요건을 걸지 않는다 — 걸면 승인해 줄 두 번째
   계정이 없어 다크 머지가 불가능해진다. 머지 권한이 에이전트 스테이지에서 도달 가능한 채로 남고,
   훅이 유일한 층이다. `factory doctor`의 `tokens.single-actor` WARN이 그 사실을 매번 말한다.

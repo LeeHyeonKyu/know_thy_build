@@ -456,6 +456,30 @@ test("checkWorkflows: all seven present and lint-clean → PASS", () => {
   expect(c["workflows.lint"].level).toBe("PASS");
 });
 
+// ADR-021 r1 MF-2 d — 린트의 넓이가 **목록의 길이**였던 문제. 팩토리의 일곱 이름만 돌던 시절에는
+// 다른 이름의 워크플로가 머지 토큰을 통째로 실어도 규칙이 쳐다보지 않았다.
+test("checkWorkflows (r1 MF-2 d): every .yml in .github/workflows is linted, not just the seven factory names", () => {
+  const files = { "factory-triage.yml": "on: push\n", "ci.yml": "on: pull_request\nenv:\n  T: ${{ secrets.FACTORY_MERGE_TOKEN }}\n" };
+  const c = by(checkWorkflows({
+    root: "/r",
+    exists: () => true,
+    readFile: (p) => files[p.split("/").pop()] ?? "on: push\n",
+    list: () => ["factory-triage.yml", "ci.yml", "notes.md"],
+  }));
+  expect(c["workflows.present"].level).toBe("PASS");
+  expect(c["workflows.lint"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("ci.yml") });
+  expect(c["workflows.lint"].detail).toContain("merge-token-scope");
+});
+
+test("checkWorkflows (r1): an unreadable workflows directory falls back to the seven known names — the missing-file FAIL already says it", () => {
+  const c = by(checkWorkflows({
+    root: "/r", exists: () => true, readFile: () => "on: push\n",
+    list: () => { throw new Error("ENOENT"); },
+  }));
+  expect(c["workflows.present"].level).toBe("PASS");
+  expect(c["workflows.lint"].level).toBe("PASS");
+});
+
 test("checkGitHub: secrets, token date, labels, protection", async () => {
   // 보호 규칙에 factory/gates만 있고 L0가 요구하는 factory/integrity는 없다 → protection WARN
   const gh = { listSecrets: async () => ["FACTORY_BOT_TOKEN"], getVariable: async () => null, listLabels: async () => ["backlog"], getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates"] } }) };
@@ -552,7 +576,8 @@ test("checkGitHub: all green → PASS across the board", async () => {
 
 // ── ADR-021 two-actor merge authority ───────────────────────────────────────
 
-const ghFor = ({ secrets, protection, login = "factory-bot", permission = "write" }) => ({
+const ghFor = ({ secrets, protection, login = "factory-bot", permission = "write", scopes = ["repo"] }) => ({
+  viewerScopes: async () => scopes,
   listSecrets: async () => secrets,
   getVariable: async () => "2026-01-01",
   listLabels: async () => ["backlog"],
@@ -562,9 +587,17 @@ const ghFor = ({ secrets, protection, login = "factory-bot", permission = "write
 });
 const HARNESS_MAIN = { project: { default_branch: "main" }, factory: { required_checks: [] } };
 const L0_ONLY = { required_status_checks: { contexts: [...L0_CONTEXTS] } };
-const withReview = { required_status_checks: { contexts: [...L0_CONTEXTS] }, required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true } };
-async function authority(gh, env = {}) {
-  return by(await checkGitHub({ gh, harness: HARNESS_MAIN, labels: [{ name: "backlog" }], env }));
+// ADR-021 r1 MF-1 — 승인 요건은 수 + **신원**이다. `require_code_owner_reviews`가 없는 모양은 이제
+// "두 배우 모드인데 아무나 승인해도 되는 상태"라 FAIL이다(아래 전용 테스트).
+const withReview = { required_status_checks: { contexts: [...L0_CONTEXTS] }, required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true } };
+const withCountOnly = { required_status_checks: { contexts: [...L0_CONTEXTS] }, required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true } };
+const CODEOWNERS_OK = "* @owner-human\n";
+/** CODEOWNERS는 디스크의 파일이다 — checkGitHub는 root/exists/readFile을 통해서만 그것을 본다. */
+async function authority(gh, env = {}, codeowners = CODEOWNERS_OK) {
+  return by(await checkGitHub({
+    gh, harness: HARNESS_MAIN, labels: [{ name: "backlog" }], env,
+    root: "/repo", exists: (p) => codeowners !== null && p === "/repo/.github/CODEOWNERS", readFile: () => codeowners,
+  }));
 }
 
 test("checkGitHub (ADR-021): no FACTORY_MERGE_TOKEN → tokens.single-actor WARN naming what is left standing", async () => {
@@ -581,6 +614,13 @@ test("checkGitHub (ADR-021): FACTORY_MERGE_TOKEN + review requirement → tokens
   expect(c["tokens.two-actor"].level).toBe("PASS");
   expect(c["tokens.single-actor"]).toBeUndefined();
   expect(c["protection.two-actor"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("dismiss_stale_reviews=true") });
+  expect(c["protection.two-actor"].detail).toContain("code-owner approving review required");
+});
+
+test("checkGitHub (ADR-021 r1 MF-1): one approval but NO require_code_owner_reviews → protection.two-actor FAIL — counting approvals only asks for \"not the author\"", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withCountOnly }));
+  expect(c["protection.two-actor"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("require_code_owner_reviews") });
+  expect(c["protection.two-actor"].detail).toMatch(/any PR it did not author/);
 });
 
 test("checkGitHub (ADR-021): merge token set but the base branch requires no review → protection.two-actor FAIL (two-actor mode in name only)", async () => {
@@ -607,7 +647,11 @@ test("checkGitHub (ADR-021): locally (no CI token) the agent-permission check is
   let asked = false;
   gh.viewerLogin = async () => { asked = true; return "someone"; };
   const c = await authority(gh, {});                       // CI 아님
-  expect(c["tokens.agent-is-admin"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("skipped") });
+  // ADR-021 r1 finding 2 — 건너뛴 판정은 **PASS가 아니라 WARN**이다. 한 번도 평가된 적 없는 불변식이
+  // 매 로컬 실행에서 초록이면, 그것을 부르는 CI 잡이 아예 없다는 사실이 아무에게도 보이지 않는다
+  // (4fa2c7f가 정확히 그 상태였다: `tokens.agent-is-admin`에 호출자가 없었다).
+  expect(c["tokens.agent-is-admin"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("unverified until CI") });
+  expect(c["tokens.agent-workflow-scope"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("unverified until CI") });
   expect(asked).toBe(false);                               // 사람의 로컬 gh는 사람 자신이다 — 물으면 늘 admin이라 늘 오보다
 });
 
