@@ -104,6 +104,34 @@ With both actor tokens set, `factory bootstrap` requires **1 approving review fr
 - `factory run retro [--force]` — run the merge-triggered retro job (light deterministic harvest every merge; full analysis + dark lessons/examples PR, human-approved proposal PR, or `--force` to skip the merge-count threshold)
 - `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
 - **Live progress in the heartbeat comment (ADR-022)** — a running stage edits one issue comment every 2 minutes with the current step, every agent's status and last tool, and tokens/cost so far, plus a machine-readable `<!-- factory-progress:v1 {…} -->` marker that also lands in `docs/factory/runs/<n>.md` when the run ends. It is read off the session transcripts the agents already write, never from tool *results* — so no file content or secret can ride out on a public comment.
+- `factory board` — the viewer for all of that, across repositories. See below.
+
+### factory board
+
+```bash
+npx know-thy-build factory board                                   # the current repo, http://127.0.0.1:4173
+npx know-thy-build factory board --repo owner/a --repo owner/b     # several repos in one board
+npx know-thy-build factory board --port 8080 --interval 30         # bind elsewhere / poll faster
+npx know-thy-build factory board --once --json | jq .issues        # one snapshot for a script
+```
+
+A local, read-only viewer of every issue the factory is carrying (ADR-022 Task B). Three views:
+
+- **레인 보드 (lanes)** — a column per state in graph order (queue · ready · planned · in-progress · awaiting-review · approved · merged) with side lanes for needs-human / blocked / needs-info. Each card carries the stage, the elapsed time in that state, a freshness dot (heartbeat fresh < 5 min · stale < 30 · dead — the same 30 minutes the sweeper calls stale), the **current step**, a mini agent table (`label · status · last tool · in/out tokens`), cost so far, a link to the Actions run, and the last handoff one-liner. Several issues running at once are several cards; several repos put a repo chip on each card and a repo filter in the header.
+- **타임라인 (timeline)** — one row per issue, x axis 6h / 24h / 7d, one bar per stage coloured by state. Retries show as a second bar in the same state with the blocked gap between them; hover gives the exact durations.
+- **상세 패널 (detail)** — click a card for the full transition list with per-state durations, every agent with tokens and cost, the files touched, and the links.
+
+**Where the data comes from.** Nothing new is written: state is the label, "since when" is the transition comment, "is it alive" is the heartbeat's first line, "what is it doing" is that comment's `factory-progress:v1` marker, "how much" is the `usage:` lines on the `factory/records` branch, and "which job" is `gh run list`. **Every GitHub call goes through your own `gh` CLI** — the board never reads, stores or prints a token, which is why private repos just work.
+
+**Two ways to open the page.** `docs/factory/board/index.html` is installed by `factory init` and is the very file the CLI serves — no build step, no CDN, no external request at all.
+
+| | CLI mode (`factory board`) | Static mode (file / GitHub Pages) |
+|---|---|---|
+| data | `/api/board` + SSE push on change | `api.github.com` direct, `?repo=owner/name` |
+| auth | your local `gh` (private repos work) | unauthenticated (60 req/h, remaining quota shown) or a personal token kept in `localStorage` only |
+| cost | finished runs (records branch) + live run | live run only — the chip says `live` |
+
+The reduced static model is deliberate: implementing the same cost sum twice is how "live $0.41 / final $0.38" happens (ADR-022 decision 5). The page's header help says all of this in the UI.
 
 Design and rationale: [`docs/superpowers/specs/2026-09-10-factory-design.md`](docs/superpowers/specs/2026-09-10-factory-design.md) · decisions: [`docs/factory/DECISIONS.md`](docs/factory/DECISIONS.md)
 

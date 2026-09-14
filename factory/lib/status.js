@@ -165,5 +165,10 @@ export function renderStatus(s) {
     lines.push("(no data)");
   }
 
+  // ADR-022 Task B — 이 보고서는 **한 시점**이다. 스테이지가 8–35분을 도는 동안 무엇이 일어나는지는
+  // 여기 없다(하트비트의 age_min 한 숫자뿐이다). 보드가 그 자리를 채운다는 사실을 사람이 알 수 있는
+  // 곳은 사람이 이미 보고 있는 이 화면이다 — 그래서 마지막 한 줄로 남긴다.
+  lines.push("", "board: npx know-thy-build factory board");
+
   return lines.join("\n");
 }
