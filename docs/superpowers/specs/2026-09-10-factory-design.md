@@ -266,6 +266,7 @@ review와 merge도 각자 자기 티어의 게이트를 돌린다(§4.2.1 step 5
 | `factory-retro.yml` | `pull_request: closed` + `if: merged == true`(`concurrency: { group: factory-retro, cancel-in-progress: false }` — 취소 없이 직렬, cron 없음). 마지막 retro 이후 머지 수가 CHARTER `## Retro`의 N 이상일 때만 전체 실행, 아니면 경량 추출만(§8.4) | `retro [--force]` | 45 |
 | `factory-sweeper.yml` | `schedule: */30` | `sweep` | 5 |
 | `factory-integrity.yml` | `pull_request: *` | `integrity` | 5 |
+| `factory-rehearse.yml` | `workflow_dispatch` + `push`(기본 브랜치, `paths: .factory/harness.toml`·`docs/factory/CHARTER.md`) | `rehearse` — **스크립트 전용, 이슈도 라벨도 `claude -p`도 없음**(§4.6, ADR-025) | 60 |
 | (위 다섯 스테이지 파일의 두 번째 트리거) | `workflow_dispatch` (input: `issue`) — sweeper의 **세 번째 팔**(§4.3)과 `factory run <stage> <issue> --remote`가 여기로 들어온다. 라벨이 이미 목적 상태에 있으면 같은 라벨을 다시 붙여도 `labeled` 이벤트가 나지 않으므로, 런 없이 멈춘 스테이지의 재점화 경로는 이것 하나뿐이다(KTB-8) | 라벨 이벤트와 동일 | 동일 |
 
 **타임아웃은 상수이고, 하한은 린트가 지킨다(ADR-020 KTB-24).** 위 값들은 `factory init`이 바이트 그대로
@@ -646,6 +647,35 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 | 웹/API e2e | **가능** | 위 조합 |
 | 모바일 네이티브 (iOS 시뮬레이터) | **제한** — macOS 러너 필요(분당 비용 10배), Android 에뮬레이터는 ubuntu에서 느림 | 로직·API는 웹 레벨 e2e, 모바일 UI는 위젯 테스트 + 빌드 성공까지만 gate. 필요 시 self-hosted macOS 러너(`vars.FACTORY_RUNNER`) |
 | 자원 | ≈4 vCPU / 16GB / 14GB SSD | **동시 실행 검증됨**(ADR-004, `ubuntu-latest`): compose(postgres) + 앱 + chromium + playwright MCP를 함께 띄운 뒤에도 가용 메모리 6.5~6.7GB/7.9GB 유지, env_up 36s. 대형 러너 불필요. 단 측정 대상이 사소한 데모 앱이라 `runtime_budget_min` 기본값 12는 dogfood(§12.3)까지 그대로 둔다 |
+
+### 4.6 리허설 — 첫 이슈 전에 하네스를 러너에서 한 번 (ADR-025)
+
+`doctor`가 PASS라는 것은 **하네스가 계약을 지킨다**는 뜻이지 **그 명령이 러너에서 돈다**는 뜻이 아니다.
+그 둘의 거리는 own-calendar의 첫 다크 이슈에서 다크 라운드 **3개**로 나타났다(2026-09-14): `[runtime].setup`이
+툴체인을 깔지 않아 게이트가 exit 127, `analyze`가 기존 info에 걸려 exit 1, `cd <subdir>` 뒤의
+`test_files`/`test_one`이 레포 루트 기준 경로를 받아 파일을 못 찾음. 셋 다 정적 검사로는 볼 수 없고
+(`--no-run`/`--offline`), `--run`은 **사람의 노트북**에서 돈다.
+
+`factory-rehearse.yml`이 그 셋을 **한 번의 잡**으로 옮긴다 — 스테이지가 러너에서 하는 일을 이슈 없이
+그대로 한 번 한다. 한 스텝이 RED여도 나머지는 계속 돈다(결함이 하나씩 드러나는 것이 3라운드의 원인이었다).
+
+| 스텝 | 무엇을 증명하는가 |
+|---|---|
+| `lint` · `unit` | 게이트 명령이 러너의 PATH·설치본에서 exit 0으로 끝나는가(exit 127·기존 경고 실패가 여기서 보인다) |
+| `test_files` · `test_one` | 자리표시자가 채워진 **실제 호출**이 실재하는 파일·테스트 이름을 찾는가(작업 디렉터리 문제가 여기서 보인다). 테스트 이름을 못 읽으면 SKIPPED |
+| `lint_file` | `lint-touched` 훅이 부르는 모양 |
+| `qa-evidence` | `.factory/out/qa/`가 러너에서 실제로 쓰이는가(KTB-36/KTB-40의 카브아웃) |
+| `clean-check` | KTB-39 기준선 대비 쓰기 금지 스테이지의 클린 체크 — setup이 다시 쓴 파일이 위반으로 읽히지 않는가 |
+| `prove-test` | base 워크트리 생성 + 의존성 설치(감사 M2의 기계) |
+| `gh-auth` · `gh-labels` · `gh-push` | 봇 토큰이 스테이지가 필요로 하는 세 가지를 실제로 할 수 있는가(`git push --dry-run`은 `factory/rehearsal-<run id>`로) |
+
+판정은 표 하나로 잡 요약과 `.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 남는다.
+GREEN이면 그 사실이 저장소에 적힌다: 변수 `FACTORY_REHEARSED = sha256(harness.toml + CHARTER 프론트매터)`
+(변수 쓰기에 admin이 필요하면 기본 브랜치 head의 `factory/rehearsal` commit status가 폴백).
+`transition.js`는 `→ factory:queue`를 그 해시로 막는다 — 스크립트도 사람도, 기록이 없거나 해시가
+어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"**로 거부하고 라벨은 그대로다.
+doctor의 `rehearsal.current`가 같은 사실을 PASS/WARN/FAIL로 말하고, `factory rehearse`가 워크플로를
+띄우고 기다렸다가 같은 표를 찍는다(RED면 non-zero).
 
 ---
 
@@ -1717,6 +1747,24 @@ Plan 6이 위 네 기준을 실제 GitHub Actions + 구독 토큰으로 처음 �
 | (참고) 비용 | $563.01 / 226 runs(list-price 환산, 구독 토큰) — 대부분 429·GitHub 장애·라벨 유실로 죽은 스테이지의 재실행 |
 
 1.0 성공 기준은 이 표본으로 충족되지 않았다. 출시 판단은 사용자의 것이며 ADR-020이 그 입력(표본·결함 31건·이월 8건)을 남긴다. own-calendar·KTB 자기 원격 실행은 PARKED(사용자 조치)로 표본에 들어오지 못했다.
+
+### 12.5 채택 체크리스트 — `install → doctor → rehearse → first issue` (ADR-025)
+
+새 저장소에 factory를 이식하는 순서는 넷이고, **세 번째를 건너뛰면 첫 이슈가 하네스 디버거가 된다**
+(own-calendar 2026-09-14: 다크 라운드 3개 = 결함 3개, 라운드마다 하나씩).
+
+1. **install** — `npx know-thy-build factory init` → `.factory/`·`.claude/`·`.github/workflows/`·`docs/factory/`.
+   하네스 초안은 `/know-thy-build:harness`(브라운필드) 또는 `/know-thy-build:project`(그린필드)가 쓴다.
+2. **doctor** — `npx know-thy-build factory doctor`. **계약**을 판정한다: 스키마·게이트 레벨·자리표시자·
+   보호 경로·훅·워크플로·GitHub 설정. 여기까지가 "하네스가 말이 되는가"이고, 여기서 PASS라고
+   **러너에서 돈다는 뜻은 아니다**.
+3. **rehearse** — `npx know-thy-build factory rehearse`. 러너에서 하네스를 한 번 돌린다(§4.6).
+   RED면 표가 무엇이 왜 빨간지 말하고, 고친 뒤 다시 돌린다. GREEN이면 그 해시가 저장소에 기록된다.
+4. **first issue** — `/know-thy-build:next`(또는 `:issue --now`)가 `→ factory:queue`로 민다.
+   3이 GREEN이 아니면 그 전이가 거부된다: `harness changed since the last rehearsal — run \`factory rehearse\``.
+
+하네스나 CHARTER 프론트매터를 고치면 2→3을 다시 지난다(기본 브랜치 push는 리허설을 자동으로 띄운다).
+`factory bootstrap`(라벨·보호·토큰)은 1과 3 사이 어디서든 좋지만 **첫 push 뒤**여야 한다.
 
 ---
 

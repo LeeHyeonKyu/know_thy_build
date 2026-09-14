@@ -3074,3 +3074,62 @@ KTB-40의 교훈은 규칙이다: **생성물의 판정 테스트는 우리 매�
 - [ ] **plan 기본값이 바뀐다**: 4역할 토론 대신 단일 opus 1패스+skeptic 1패스가 기본이고,
   load-bearing tier(처음 열리는 영속/외부 쓰기 경로, 처음 고정되는 공개 와이어 계약, 또는
   `[protected]` 변경)에서만 토론이 유지된다.
+
+---
+
+## ADR-025 리허설 — 첫 이슈 전에 하네스를 러너에서 한 번 — 2026-09-14
+
+**질문**: 소유자가 2026-09-14에 물었다 — "새 프로젝트에 이식할 때마다 이 짓을 해야 하나?" 그 "이 짓"은
+own-calendar의 첫 다크 이슈가 요구한 **하네스 디버깅 3라운드**다. 결함은 셋이었고, 라운드마다 정확히
+하나씩 드러났다:
+
+| 라운드 | 무엇이 드러났나 | 왜 그때까지 안 보였나 |
+|---|---|---|
+| 1 | `[runtime].setup`이 Flutter를 설치하지 않아 게이트가 **exit 127** | setup은 러너에서만 돈다 — 사람의 노트북에는 이미 Flutter가 있었다 |
+| 2 | `flutter analyze`가 **기존 info**에 걸려 exit 1 | 게이트 명령을 그 저장소 전체에 대해 돌려 본 적이 없었다 |
+| 3 | `cd client` 뒤의 `test_files`/`test_one`이 **레포 루트 기준 경로**를 받아 파일을 못 찾음 | 자리표시자는 스테이지가 채운다 — 하네스를 읽는 눈에는 보이지 않는다 |
+
+**doctor는 이것을 볼 수 없다 — 구조적으로.** `--no-run`·`--offline`은 정적 검사이고(텍스트와 글롭),
+`--run`은 명령을 **사람의 노트북에서** 돌린다: 러너의 PATH도, `.factory/actions/setup`이 만든 상태도,
+스테이지가 실제로 넘기는 인자도 그 자리에는 없다. 세 결함은 전부 "러너에서 명령이 실제로 돌 때만"
+참/거짓이 갈리는 명제였다. 그래서 doctor를 더 똑똑하게 만드는 길은 없다 — **한 번 돌려 보는 잡**이 있어야 한다.
+
+**판결**: `factory-rehearse.yml` — 이슈도 라벨도 `claude -p`도 없는 잡 하나가, 스테이지가 러너에서 하는
+일을 그대로 한 번 한다. 열한 스텝이고 **하나가 RED여도 멈추지 않는다**(3라운드의 비용은 결함이 하나씩
+드러났기 때문에 생겼다 — 한 번의 리허설은 전부 보여줘야 한다):
+
+`lint`(레포 전체) · `unit`(전체) · `test_files`(`[test].test_glob`의 실재하는 파일 하나) ·
+`test_one`(그 파일의 첫 테스트 이름 — 못 읽으면 SKIPPED) · `lint_file`(소스 파일 하나) ·
+`qa-evidence`(`.factory/out/qa/` 쓰기 프로브) · `clean-check`(KTB-39 기준선 대비 쓰기 금지 클린 체크) ·
+`prove-test`(base 워크트리 생성 + 의존성 설치 — 감사 M2의 그 기계) · `gh-auth` · `gh-labels` ·
+`gh-push`(`factory/rehearsal-<run id>` 스크래치 브랜치로 `git push --dry-run`).
+
+각 스텝에는 상한이 있다(`timeout`, 124는 실패와 구별해 적는다). 판정은 표 하나로 잡 요약과
+`.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 **같은 모양으로** 남는다.
+
+**게이트**: GREEN인 리허설만 저장소에 기록된다 — 변수 `FACTORY_REHEARSED = sha256(harness.toml +
+CHARTER 프론트매터)`, 변수 쓰기에 admin이 필요한 저장소에서는 기본 브랜치 head의 `factory/rehearsal`
+commit status가 폴백이다. `transition.js`는 `→ factory:queue`를 그 해시로 막는다(스크립트도 사람도):
+기록이 없거나 해시가 어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"**
+한 문장으로 거부하고, 이슈 상태는 한 글자도 바뀌지 않는다. 다른 목적 라벨은 리허설을 묻지 않는다 —
+멈춘 이슈를 앞으로 미는 길까지 막으면 사고가 하나 더 는다.
+
+**왜 CHARTER 프론트매터까지인가**: `tier_default`·`limits`·`merge.human_gate`·`plan.*`는 러너가 무엇을
+얼마나 도는지를 바꾼다. 반대로 산문(NEVER_AUTOMATE 설명, Definition of Done의 문장)은 지문에서 뺀다 —
+그것까지 세면 문서 한 줄을 고칠 때마다 큐가 닫힌다.
+
+**등급의 셋**: doctor `rehearsal.current`는 어긋난 기록을 **FAIL**(큐가 실제로 막혀 있다), 기록 없음을
+**WARN**(설치 직후의 정상 상태 — 채택 순서가 install → doctor → rehearse → 첫 이슈다), 오프라인을
+**WARN**(판정 불가)으로 가른다. `factory rehearse`(CLI)는 워크플로를 띄우고, 기다리고, 같은 표를 찍고,
+RED면 non-zero로 끝난다.
+
+**대가와 잔여 위험**:
+- 잡 하나(≈ unit 한 번 + 설치 한 번)의 비용과 시간이 채택마다 더해진다. 3라운드(다크 라운드 ×3 =
+  triage/plan/implement/review 세 바퀴)와 바꾼 값이라 크지 않다 — 그것이 소유자 질문의 답이다:
+  "이 짓"은 한 번의 잡으로 줄어든다.
+- 리허설은 **하네스가 러너에서 도는가**를 증명하지, 그 게이트가 좋은 게이트인가를 증명하지 않는다
+  (`lint`가 아무것도 검사하지 않는 명령이면 doctor의 `gates.lint-noop`이 그것을 본다).
+- 리허설과 첫 이슈 사이에 러너 이미지가 바뀌면(ubuntu-latest의 이동) 지문은 그대로인데 사실이 바뀐다.
+  `push` 트리거(하네스·CHARTER 변경)와 사람의 재실행이 그 창을 좁히는 전부다.
+- `gh-push`는 `--dry-run`이라 권한은 증명하되 브랜치를 만들지 않는다. 스크래치 삭제는 관용적으로
+  덧붙인다(예전 런이 진짜로 만든 것이 남아 있을 수 있다).

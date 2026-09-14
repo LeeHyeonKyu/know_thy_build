@@ -203,6 +203,17 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async dispatchWorkflow(workflow, inputs = {}) {
       await gh(["workflow", "run", workflow, "-R", repo, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
     },
+    /**
+     * KTB-44 — `factory rehearse`가 자기 dispatch가 만든 런을 찾는다. 최신순이고, `createdAt`으로
+     * "내가 부른 그 런"을 가른다(dispatch는 런 id를 돌려주지 않는다 — GitHub API의 한계).
+     */
+    async workflowRuns(workflow, limit = 10) {
+      return JSON.parse(await gh(["run", "list", "--workflow", workflow, "-R", repo, "--limit", String(limit), "--json", "databaseId,status,conclusion,createdAt,event"]));
+    },
+    /** 그 런이 올린 판정 표(`rehearsal.json`)를 로컬로 가져온다. */
+    async downloadRunArtifact(runId, name, dir) {
+      await gh(["run", "download", String(runId), "-R", repo, "-n", name, "-D", dir]);
+    },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
@@ -228,7 +239,9 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      */
     async commitStatuses(sha) {
       const j = JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/statuses?per_page=100`, "--paginate", "--slurp"])).flat();
-      return j.map((s) => ({ context: s.context, state: s.state, creatorLogin: s.creator?.login ?? null, createdAt: s.created_at }));
+      // `description`은 KTB-44가 쓴다: 저장소 변수를 쓸 수 없는(admin이 필요한) 저장소에서 리허설의
+      // 해시는 이 필드에 실려 온다(`factory/rehearsal` context).
+      return j.map((s) => ({ context: s.context, state: s.state, description: s.description ?? null, creatorLogin: s.creator?.login ?? null, createdAt: s.created_at }));
     },
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);

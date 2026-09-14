@@ -10,11 +10,14 @@ import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS, CODEOWNERS_PATH, RECORDS_BRANCH } from "../bootstrap.js";
 import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
+import { checkRehearsalCurrent, recordedRehearsal, rehearsalHash } from "../rehearsal.js";
 import { TRIAGE_DEFAULT_VALUES } from "../config.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
-const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity"].map((n) => `factory-${n}.yml`);
+// KTB-44 — `factory-rehearse.yml`이 여덟 번째다(ADR-025). 스테이지 워크플로가 아니라 **첫 이슈 전에
+// 한 번 도는 잡**이지만, 없으면 `factory rehearse`가 띄울 것이 없고 큐가 영영 닫힌 채로 남는다.
+const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity", "rehearse"].map((n) => `factory-${n}.yml`);
 const WORKFLOWS_DIR = ".github/workflows";
 
 const HOOK_INPUT = {
@@ -477,6 +480,26 @@ export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
     missing.length ? c("workflows.present", "FAIL", `missing: ${missing.join(", ")}`) : c("workflows.present", "PASS"),
     violations.length ? c("workflows.lint", "FAIL", violations.join("; ")) : c("workflows.lint", "PASS", `linted ${files.length} file(s) in ${WORKFLOWS_DIR}`),
   ];
+}
+
+/**
+ * KTB-44 / ADR-025 — `rehearsal.current`. **기록된 리허설이 지금의 하네스에 대한 것인가.**
+ * 지문은 로컬에서 계산하고(harness.toml + CHARTER 프론트매터), 기록은 저장소에서 읽는다
+ * (변수 `FACTORY_REHEARSED` → 폴백으로 기본 브랜치 head의 `factory/rehearsal` 상태).
+ * gh가 없거나(오프라인) 아무 말도 하지 않으면 판정 불가 WARN이다 — 없는 사실을 FAIL로 만들지 않는다.
+ */
+export async function checkRehearsal({ gh, root, readFile, harness }) {
+  const read = (p) => { try { return readFile(join(root, p)); } catch { return null; } };
+  const harnessText = read(".factory/harness.toml");
+  if (harnessText == null) return [checkRehearsalCurrent({ current: null })];
+  const current = rehearsalHash({ harnessText, charterText: read("docs/factory/CHARTER.md") || "" });
+  let recorded = null;
+  try {
+    recorded = (await recordedRehearsal({ gh, branch: harness?.project?.default_branch || "main" })).hash;
+  } catch (e) {
+    return [checkRehearsalCurrent({ skipped: `gh unavailable — ${e.message}` })];
+  }
+  return [checkRehearsalCurrent({ recorded, current })];
 }
 
 /** gh 호출이 하나라도 throw하면(오프라인 등) 세부 검사를 포기하고 단일 WARN으로 떨어진다 — fail closed가 아니라 "확인 못 함"으로 취급(오프라인 허용). */

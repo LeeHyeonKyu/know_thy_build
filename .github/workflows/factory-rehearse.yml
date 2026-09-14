@@ -1,0 +1,69 @@
+name: factory-rehearse
+# ADR-025 — **첫 이슈 전에 하네스를 러너에서 한 번 돌린다.** own-calendar의 첫 다크 이슈(2026-09-14)는
+# 하네스 초안의 결함 세 개를 라운드마다 하나씩 드러냈다: `[runtime].setup`이 툴체인을 깔지 않아 게이트가
+# exit 127, `analyze`가 기존 info에 걸려 exit 1, `cd <subdir>` 뒤의 `test_files`/`test_one`이 레포 루트 기준
+# 경로를 받아 파일을 못 찾음. 셋 다 명령이 **러너에서 실제로 돌 때만** 보이고, doctor는 정적이라
+# (`--no-run`/`--offline`) 구조적으로 볼 수 없으며 `--run`은 사람의 노트북에서 돈다. 이 잡이 그 세
+# 라운드를 한 번으로 바꾼다.
+on:
+  workflow_dispatch:
+  # 하네스나 CHARTER가 바뀌면 기록된 리허설은 그 순간 낡는다(transition.js가 해시로 그것을 안다) —
+  # 기본 브랜치에 그 변경이 들어오는 순간 자동으로 한 번 더 돈다.
+  push:
+    branches: [main, master]
+    paths:
+      - .factory/harness.toml
+      - docs/factory/CHARTER.md
+permissions:
+  contents: write
+  # 라벨 목록 조회(스테이지가 매번 하는 일) — 읽기면 된다.
+  issues: read
+  # 저장소 변수 쓰기가 admin을 요구하는 저장소의 폴백: 기본 브랜치 head의 `factory/rehearsal` 상태.
+  statuses: write
+concurrency:
+  group: factory-rehearse
+  cancel-in-progress: false
+jobs:
+  rehearse:
+    runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # 게이트 전체(unit 포함) + base 워크트리 설치가 한 잡 안에서 돈다 — 스테이지의 상한과 같은 자리.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+      # 스테이지와 **같은** setup이어야 한다 — 리허설이 증명하려는 것이 바로 이 스텝의 산출물이다
+      # ([runtime].setup이 툴체인을 깔았는가, PATH가 다음 스텝에 서는가).
+      - uses: ./.factory/actions/setup
+        with:
+          claude: "false"
+          test-env: "true"
+      - name: Rehearse
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_RUN_ID: ${{ github.run_id }}
+        run: node .factory/bin/rehearse.js
+      # ADR-020 최종 리뷰 SF-1 — 업로드 전에 크리덴셜을 지운다. 이 잡에는 `claude`가 뜨지 않지만
+      # 체크아웃 트리의 `.git/config`에는 봇 토큰의 basic-auth 헤더가 그대로 있고, 판정 표에는 게이트
+      # 명령의 출력 세 줄이 실린다(그 안에 무엇이 있을지는 저장소마다 다르다).
+      - name: Scrub credentials from the artifacts
+        id: scrub-artifacts
+        if: always()
+        env:
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .factory/bin/scrub-artifacts.js .factory/out
+      - name: Upload the rehearsal report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # `factory rehearse`(CLI)가 이 이름으로 내려받는다 — 바꾸면 그 명령이 표를 찾지 못한다.
+          name: factory-rehearsal-${{ github.run_id }}
+          path: .factory/out/rehearsal.json
+          include-hidden-files: true
+          # 기본값은 90일이다(yml-lint의 `artifact-retention`이 명시를 강제한다).
+          retention-days: 7
+          if-no-files-found: warn

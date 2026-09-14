@@ -49,7 +49,23 @@ async function swapLabel({ gh, issue, from, to }) {
  */
 export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry";
 
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env }) {
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env, rehearsal = null }) {
+  /**
+   * ── KTB-44 / ADR-025 — **리허설 없이는 큐가 열리지 않는다.** ───────────────────────────────────
+   * own-calendar의 첫 다크 이슈는 하네스 초안의 결함 세 개를 **라운드마다 하나씩** 드러냈다(exit 127의
+   * 누락된 툴체인, 기존 info에 걸리는 analyze, `cd` 뒤의 상대 경로). 전부 러너에서만 보이는 사실이라
+   * doctor는 구조적으로 볼 수 없었고, 그 대가는 다크 라운드 3개였다. `factory rehearse`가 그것을 잡
+   * 하나로 바꾸고, 이 검사가 그 잡을 **첫 이슈보다 앞에** 세운다.
+   *
+   * 사람도 면제되지 않는다: 리허설이 증명하는 것은 "누가 큐에 넣었는가"가 아니라 "이 하네스가 러너에서
+   * 도는가"다. 네트워크보다 먼저 끊는다 — 거부는 이슈 상태를 한 글자도 바꾸지 않는다.
+   * `rehearsal`을 주지 않은 호출자(스테이지 내부의 전이 등)는 이 검사를 지나간다: 큐로 가는 길은
+   * 사람의 CLI(`bin/transition.js`)와 스킬뿐이고, 그 입구가 값을 싣는다.
+   */
+  if (to === "factory:queue" && rehearsal) {
+    const r = typeof rehearsal === "function" ? await rehearsal() : rehearsal;
+    if (r && r.ok === false) return { ok: false, from: null, to, reason: r.reason || "harness changed since the last rehearsal — run `factory rehearse`" };
+  }
   // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
   // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.
   // 그래서 판정을 라이브러리 함수 자신에 둔다 — 어느 입구로 들어오든 여기서 같은 답을 받는다.

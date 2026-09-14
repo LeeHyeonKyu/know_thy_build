@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands, checkSetupDirtiesTree, runSetupProbe } from "../lib/doctor/harness.js";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity, checkRehearsal } from "../lib/doctor/factory.js";
+import { checkRehearsalCurrent } from "../lib/rehearsal.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
@@ -36,6 +37,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   const loadRolesFn = deps.loadRoles || loadRoles;
   const loadCharterFn = deps.loadCharter || loadCharter;
   const checkGitHubFn = deps.checkGitHub || checkGitHub;
+  const checkRehearsalFn = deps.checkRehearsal || checkRehearsal;
   const resolveRepoFn = deps.resolveRepo || resolveRepo;
   const envUpFn = deps.envUp || envUp;
   const envDownFn = deps.envDown || envDown;
@@ -182,20 +184,26 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
         // 주입이 없으면 status.js와 같은 방식으로 repo를 해석한다(KTB-4) — FACTORY_REPO가 비어 있어도
         // `gh api repos//branches/main/protection`처럼 깨진 경로로 호출해 거짓 "보호 없음"을 보고하지 않도록.
         // 해석 자체가 실패하면(로그인 안 됨·git repo 아님) github.* 전체를 건너뛰고 오프라인 허용 WARN 하나로 남긴다.
-        if (gh) {
-          checks.push(...(await checkGitHubFn({ gh, harness, labels: LABELS, root, exists, readFile })));
-        } else {
+        let client = gh;
+        if (!client) {
           let repo;
           try {
             repo = await resolveRepoFn({ run });
           } catch (e) {
             checks.push({ id: "github.unavailable", level: "WARN", detail: `could not resolve repo — ${e.message}` });
           }
-          if (repo) {
-            const ghClient = makeGh({ run, repo });
-            checks.push(...(await checkGitHubFn({ gh: ghClient, harness, labels: LABELS, root, exists, readFile })));
-          }
+          if (repo) client = makeGh({ run, repo });
         }
+        if (client) {
+          checks.push(...(await checkGitHubFn({ gh: client, harness, labels: LABELS, root, exists, readFile })));
+          // KTB-44 / ADR-025 — 기록된 리허설이 지금의 하네스에 대한 것인가. 이 판정만이 "큐가 열려
+          // 있는가"를 doctor에서 말한다(transition.js가 같은 해시로 `→ factory:queue`를 막는다).
+          checks.push(...(await checkRehearsalFn({ gh: client, root, readFile, harness })));
+        } else {
+          checks.push(checkRehearsalCurrent({ skipped: "repo unresolved" }));
+        }
+      } else {
+        checks.push(checkRehearsalCurrent({ skipped: "--offline" }));
       }
     } else {
       checks.push({ id: "factory.initialized", level: "PASS", detail: "not initialized — run factory init" });
