@@ -106,7 +106,24 @@ export const TRANSITIONS = new Map([
   // 전이를 `prerequisite: true`로 건다 — 이번 런에는 아직 게이트 파일도 sha 바인딩도 없다(방금
   // resetGates 직전이고, 애초에 fresh checkout이다). 실제 판정은 이 스테이지가 다시 돌면서 만든다.
   ["factory:blocked", new Set(["factory:needs-human", "factory:queue", "factory:ready", "factory:planned", "factory:awaiting-review", "factory:approved", "factory:rework"])],
-  ["factory:needs-human", new Set(["factory:queue"])],
+  /**
+   * KTB-46 — **`needs-human → merged`.** 스펙 §12.3-2의 예외 경로(보호 경로 PR은 사람이 머지한다)가
+   * 이 엣지 없이는 끝나지 않았다: merge 스테이지가 단계 (3)에서 자동 머지를 거부하고 이슈를
+   * `factory:needs-human`으로 올린 뒤 사람이 GitHub에서 squash-merge 하면, 그 이슈를 `factory:merged`로
+   * 옮길 길이 그래프에 **하나도** 없었다(KTB #3: `Closes #n`도 안 걸려 이슈는 열린 채였고, 머지 뒤
+   * 실행되는 merge 단계 (9)는 이 경로에서 아예 돌지 않는다). 운영자가 손으로 라벨을 붙이고 닫았다.
+   *
+   * 이 엣지는 **평범한 그래프 엣지**다 — `HUMAN_RETRY_TARGETS`(사람 전용)가 아니다. 이유는 방향이
+   * 반대이기 때문이다: 사람 전용 엣지는 "사람의 판단이 요구조건을 대신한다"는 자리이고, 여기서
+   * 필요한 것은 그 반대 — sweeper라는 **스크립트**가 밟아야 하고, 대신 `requirementFor("factory:merged")`
+   * 의 증거 검사(review handoff · 정족수 all-approve · K · 게이트 · PR head sha 바인딩)는 한 칸도
+   * 깎이지 않는다. 사람이 리뷰를 거치지 않은 `claude/fq-<n>` PR을 머지해 버리면 그 전이는 거부되고
+   * 이슈는 needs-human에 그대로 남는다. **사람의 머지가 예외이지 증거가 예외인 것이 아니다.**
+   *
+   * `factory:merged`는 여전히 막다른 상태다(아래 `["factory:merged", new Set([])]`) — 이 엣지는
+   * 들어가는 문 하나를 더 여는 것이지 나오는 문을 만들지 않는다.
+   */
+  ["factory:needs-human", new Set(["factory:queue", "factory:merged"])],
   ["factory:merged", new Set([])],
   ["factory:wont-do", new Set([])],
 ]);

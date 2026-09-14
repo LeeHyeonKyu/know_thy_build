@@ -167,10 +167,15 @@ test("searchIssues lists open issues by label", async () => {
   expect(call.args).toEqual(["issue", "list", "-R", repo, "--label", "factory:awaiting-review", "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]);
 });
 
-test("KTB-46: searchIssues takes a state option — closed issues keep their state label and must still be seen", async () => {
+test("KTB-46: searchIssues takes state and sort options — closed issues keep their label, and ordering moves to the API", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } }]);
-  await makeGh({ run, repo }).searchIssues("factory:needs-human", { state: "all" });
+  const gh = makeGh({ run, repo });
+  await gh.searchIssues("factory:needs-human", { state: "all" });
   expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--label", "factory:needs-human", "--state", "all", "--limit", "200", "--json", "number,title,updatedAt"]);
+  // 정렬 수식어는 `--search`로만 갈 수 있으므로 그때는 라벨도 검색 문법으로 옮긴다 — 그래야 그 200개가
+  // "번호가 큰 200개"가 아니라 "가장 최근에 움직인 200개"가 된다(닫힌 이슈는 무한히 쌓인다).
+  await gh.searchIssues("factory:needs-human", { state: "all", sort: "updated-desc" });
+  expect(run.calls[1].args).toEqual(["issue", "list", "-R", repo, "--search", 'label:"factory:needs-human" sort:updated-desc', "--state", "all", "--limit", "200", "--json", "number,title,updatedAt"]);
 });
 
 test("KTB-46: prMergeInfo reports who merged the PR and on which head sha — missing fields stay null", async () => {

@@ -3,7 +3,8 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { resolveReviewRoster } from "../lib/review-roster.js";
 import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quarantine.js";
 import { transition as transitionIssue } from "../lib/transition.js";
 import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
@@ -13,7 +14,7 @@ import { backPressure } from "../lib/back-pressure.js";
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
   // KTB-26 — `--quick`: 스테이지 워크플로의 마지막 스텝이 부르는 모양이다. 상태 복구 팔(in-progress
-  // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 사람 머지 반영 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
+  // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
   // (격리 TTL·토큰 만료)은 30분 cron에 그대로 남는다 — 그 둘은 스테이지가 끝난 그 순간에 다시
   // 볼 이유가 없고, 매 스테이지마다 `quarantine.toml`을 쓰면 커밋 경쟁만 늘어난다.
   const quick = process.argv.slice(2).includes("--quick");
@@ -21,7 +22,8 @@ async function main() {
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const gh = makeGh({ run, repo });
   const charter = loadCharter(root);
-  const thresholds = loadHarness(root).gates.thresholds;
+  const harness = loadHarness(root);
+  const thresholds = harness.gates.thresholds;
   const quarantine = loadQuarantine(root);
   const saveQuarantine = (q) => saveQuarantineTo(root, q);
   // KTB-46: `ctxExtra`를 그대로 흘려보낸다. sweeper의 팔 대부분은 주지 않지만(그때는 `{}`),
@@ -68,7 +70,18 @@ async function main() {
    * merge deps가 쓰는 바로 그 해석기를 그대로 쓴다 — `gh api user`가 두 벌이 되면 갈라진다.
    */
   const factoryLogins = () => resolveFactoryLogins({ gh });
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, releaseIfStale, quick });
+  /**
+   * KTB-46 r3 must_fix 1 — **정족수를 잴 자.** 이것을 넘기지 않으면 `verifyReviewQuorum`은 로스터
+   * 크기·빠진 역할·K를 전부 건너뛰고 "있는 verdict가 전부 approve인가"만 본다 — 4명짜리 로스터의
+   * 이슈가 1명의 approve로 `factory:merged`에 도달했다. 해석은 merge 스테이지의 `reviewRoster` dep과
+   * **같은 함수**다(`lib/review-roster.js`). 실효 tier(diff로 올리는 H3 계산)만 주입하지 않는다:
+   * 머지가 끝난 뒤에는 `claude/fq-<n>`이 지워져 `base...HEAD`의 한쪽 끝이 없다 — 그때는 선언 tier가
+   * 유일하게 남은 기록이고, 없는 것을 지어내는 것보다 그쪽이 맞다.
+   */
+  const reviewRoster = (comments) => resolveReviewRoster({ charter, roles: loadRoles(root), comments });
+  /** KTB-46 r3 must_fix 4 — 머지된 PR의 필수 체크도 확인한다(merge 스테이지와 같은 목록·같은 판정 함수). */
+  const requiredChecks = harness?.factory?.required_checks ?? null;
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, quick });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }

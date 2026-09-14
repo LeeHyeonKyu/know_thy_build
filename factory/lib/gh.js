@@ -235,9 +235,19 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 라벨은 상태를 말하는데 그 상태를 아무도 다시 보지 않는 자리다. 그 이슈를 `factory:merged`로
      * 잇는 팔(`sweepHumanMerged`)은 닫힌 것도 봐야 한다. 기본값은 건드리지 않으므로 기존 호출자의
      * 인자 한 글자도 바뀌지 않는다.
+     *
+     * r3 should_fix 2 — 그런데 `--state all`은 **후보 풀에 바닥이 없다**: 열린 needs-human은 몇 개뿐이지만
+     * 닫힌 것은 저장소의 수명 내내 쌓인다. `gh issue list`는 생성 역순으로 답하므로, 그 라벨을 한 번이라도
+     * 달았던 이슈가 200개를 넘는 순간 **번호가 낮은 이슈는 페이지에서 떨어진다** — 방금 needs-human이
+     * 됐고 방금 사람이 머지한 그 이슈가, 아무 소리 없이. `sort: "updated-desc"`는 정렬을 API 쪽으로
+     * 옮겨 그 200개가 "가장 최근에 움직인 200개"가 되게 한다. 정렬 수식어는 `--search`로만 갈 수 있어
+     * 그때는 `--label`도 검색 문법(`label:"…"`)으로 옮긴다.
      */
-    async searchIssues(label, { state = "open" } = {}) {
-      return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"]));
+    async searchIssues(label, { state = "open", sort = null } = {}) {
+      const args = sort
+        ? ["issue", "list", "-R", repo, "--search", `label:"${label}" sort:${sort}`, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"]
+        : ["issue", "list", "-R", repo, "--label", label, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"];
+      return JSON.parse(await gh(args));
     },
     /**
      * 워크플로를 손으로 띄운다(KTB-8). 라벨은 이미 목적 상태에 있어 `labeled` 이벤트를 다시 만들 수

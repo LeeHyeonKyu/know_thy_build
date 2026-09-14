@@ -1,6 +1,6 @@
 import { canTransition, factoryLabelOf, HUMAN_RETRY_FROM, HUMAN_RETRY_TARGETS } from "./labels.js";
 import { requirementFor } from "./requirements.js";
-import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker } from "./retro/issue-comments.js";
+import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker, transitionRefusedMarker } from "./retro/issue-comments.js";
 
 export const NEEDS_HUMAN = "factory:needs-human";
 export const NEEDS_INFO = "factory:needs-info";
@@ -84,7 +84,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
     const graphReason = `transition ${from} → ${to} not allowed`;
     // 그래프에 없는 전이는 라벨을 건드리지 않는다(어느 쪽으로도 안전한 기본값이 없다 — 예: merged/wont-do는
     // needs-human으로도 못 나간다) — 하지만 조용히 실패하지는 않는다. 사람이 볼 수 있게 코멘트는 남긴다.
-    if (!human) await gh.comment(issue, `<!-- factory-transition-refused from=${from} to=${to} -->\n**전이 거부** ${from} → ${to}: ${graphReason}`);
+    if (!human) await gh.comment(issue, `${transitionRefusedMarker({ from, to })}\n**전이 거부** ${from} → ${to}: ${graphReason}`);
     return { ok: false, from, to, reason: graphReason };
   }
   comments ??= await gh.comments(issue);
@@ -105,7 +105,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
      * 전이(옛 라벨)라, 방금 세운 에스컬레이션을 조용히 **되돌린다**. 사람은 아무것도 못 보고, 그
      * 스테이지는 같은 자리에서 두 번 더 죽는다(리뷰 finding 3: 리뷰 라운드 ~$10 × 2).
      */
-    await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script reason=refused -->\n<!-- factory-transition-refused from=${from} to=${to} -->\n**전이 거부** ${from} → ${to}: ${req.reason}\n\n라벨을 \`factory:needs-human\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`);
+    await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script reason=refused -->\n${transitionRefusedMarker({ from, to })}\n**전이 거부** ${from} → ${to}: ${req.reason}\n\n라벨을 \`factory:needs-human\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`);
     await swapLabel({ gh, issue, from, to: "factory:needs-human" });
     return { ok: false, from, to: "factory:needs-human", reason: req.reason };
   }

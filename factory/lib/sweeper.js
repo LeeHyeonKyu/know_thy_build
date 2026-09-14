@@ -1,8 +1,9 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
-import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, lastTransition } from "./retro/issue-comments.js";
+import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, lastTransition, transitionRefusedMarker } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
 import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
+import { allChecksGreen } from "./gh.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -607,15 +608,20 @@ async function sweepHarnessUnpark({ gh, transition, harnessSettled, actions }) {
   }
 }
 
-/**
- * 닫힌 이슈까지 훑는 창(KTB-46). `MISSING_STATE_SCAN_HOURS`와 같은 이유로 유한하다 — 이 경계가
- * 없으면 sweep마다 저장소의 **모든** 닫힌 `factory:needs-human` 이슈에 코멘트 조회가 나간다.
- * 7일보다 오래된 사람의 머지는 sweeper가 조용히 되살리기보다 사람이 보는 편이 맞다.
- */
-export const HUMAN_MERGE_SCAN_HOURS = 7 * 24;
 export const humanMergedComment = (issue, pr) => `<!-- factory-sweeper human-merged issue=${issue} pr=${pr} -->`;
-/** `transition()`이 거부할 때 스스로 남기는 마커 — 이 팔의 거부 dedupe는 그것을 근거로 한다. */
-export const HUMAN_MERGE_REFUSED_MARKER = "<!-- factory-transition-refused from=factory:needs-human to=factory:merged -->";
+/**
+ * 이 팔 자신의 **거부** 마커 — PR 번호까지 싣는다(r3 must_fix 3). 성공 마커와 같은 이유다: 거부는
+ * "이 이슈는 영영 안 된다"가 아니라 **"이 PR로는 안 된다"**이다. 보호 경로 이슈는 `:unstick`으로
+ * 재큐돼도 다음 주기의 PR이 또 보호 경로를 건드리고(그것이 이 이슈가 이 경로에 있는 이유다) 또
+ * 사람이 머지한다 — 이슈 단위 마커는 그 두 번째 머지를 영원히 막았다.
+ */
+export const humanMergeRefusedComment = (issue, pr) => `<!-- factory-sweeper human-merge-refused issue=${issue} pr=${pr} -->`;
+/**
+ * `transition()`이 요구조건 미달로 거부할 때 **스스로** 남기는 마커. 손으로 베끼지 않고 생산자와
+ * 같은 생성자를 부른다(r3 should_fix 3) — 예전에는 같은 문자열이 두 파일에 각각 적혀 있어서, 한쪽
+ * 형식이 바뀌면 dedupe가 **테스트가 전부 초록인 채로** 아무것도 찾지 못했다.
+ */
+export const HUMAN_MERGE_REFUSED_MARKER = transitionRefusedMarker({ from: "factory:needs-human", to: "factory:merged" });
 
 /**
  * 이 이슈가 **마지막으로 실제로 도달한** 전이. `reason=refused` 마커는 건너뛴다.
@@ -625,7 +631,8 @@ export const HUMAN_MERGE_REFUSED_MARKER = "<!-- factory-transition-refused from=
  * 팔의 판정 근거는 오직 "마지막 전이의 사유"이고, 거부는 `from`도 `to`도 `factory:needs-human`인 데다
  * 사유 문법마저 다르다 — 그것을 마지막 전이로 읽으면 **거부 한 번이 원래 사유를 영구히 가린다**.
  * 그러면 그 팔은 이슈를 다시는 보지 않고, 그 침묵에는 액션 한 줄도 남지 않는다(KTB-23이 죽었던
- * 방식 그대로다). 거부를 건너뛰면 dedupe는 `HUMAN_MERGE_REFUSED_MARKER`가 **말하면서** 한다.
+ * 방식 그대로다). 진짜 전이(`→ queue` 재큐 등)는 그대로 읽으므로, 재큐된 이슈는 이 팔이 정확히
+ * 거절한다 — 그 이슈는 더 이상 사람의 머지를 기다리고 있지 않다.
  */
 function lastRealTransition(comments) {
   const list = Array.isArray(comments) ? comments : [];
@@ -635,6 +642,52 @@ function lastRealTransition(comments) {
     return lastTransition([list[i]]);
   }
   return null;
+}
+
+/**
+ * "이 머지된 PR의 증거가 GitHub에 남아 있는가"의 조회 껍데기. 판정 자체는 두 개의 공유 함수다 —
+ * `verifyFactoryStatuses`(merge 스테이지 §(6b)의 판정 (d))와 `allChecksGreen`(merge 스테이지의
+ * 머지 게이트가 쓰는 바로 그 함수). 여기서는 조회와 **조회 실패**만 다룬다.
+ *
+ * r3 must_fix 2 — 돌려주는 실패는 **두 종류**이고 호출자가 그 둘을 다르게 다룬다:
+ *   - `transient: true` — 조회가 안 됐다(로그인 해석·상태·체크 조회의 throw, head sha 부재). 시간이
+ *     푸는 종류다. 마커도 코멘트도 남기지 않고 다음 sweep이 그대로 다시 본다. 여기에 영구 마커를
+ *     남기면 `502` 한 번이 그 이슈에서 이 팔을 **영원히** 끈다(= KTB-46 그 자체가 다시 생긴다).
+ *   - 그냥 `{ ok:false, reason }` — 판정이다(머지되지 않았거나, 상태가 없거나, success가 아니거나,
+ *     팩토리가 올린 것이 아니거나, 필수 체크가 GREEN이 아니다). 시간이 풀지 않는다 — 사람이 볼
+ *     것이고, 그래서 마커가 남는다.
+ *
+ * r3 must_fix 4 — **필수 체크도 여기서 확인한다.** 예전 라운드는 "보호 브랜치가 `factory/integrity`를
+ * required로 걸고 있으니 머지된 것 자체가 증거"라고 주장했는데, 그 전제는 두 군데서 거짓이다:
+ * 보호가 없는 저장소는 지원되는 상태이고(doctor는 FAIL이 아니라 WARN이다), `harness.factory.required_checks`는
+ * `factory/integrity` 말고도 더 걸 수 있다(브랜치 보호는 L0 하나만 강제한다). 게다가 `factory/integrity`는
+ * **check run**이라 `commitStatuses`(commit **status** API)에는 아예 나타나지 않는다 — `gh.prChecks`가
+ * 그것을 보는 유일한 창이다. 그래서 그 함수로 직접 본다.
+ */
+async function verifyMergedPrEvidence({ gh, factoryLogins, requiredChecks, pr, info }) {
+  if (!info?.headSha) return { ok: false, transient: true, reason: `PR #${pr} reports no head sha — the merged commit cannot be named` };
+  // r3 should_fix 4 — `mergedPrForBranch`의 `--state merged` 필터에만 기대지 않는다. 머지 사실은
+  // 이 팔의 **전제**이므로 그 전제를 스스로 한 번 확인한다(다음 호출자도 보호한다).
+  if (!info.mergedAt) return { ok: false, reason: `PR #${pr} is not merged — it reports no mergedAt` };
+  const headSha = info.headSha;
+  let lg;
+  try { lg = await factoryLogins(); }
+  catch (e) { return { ok: false, transient: true, reason: `the factory's own account could not be resolved (gh api user): ${e?.message || e}` }; }
+  if (!lg?.ok || !Array.isArray(lg.logins) || !lg.logins.length) {
+    return { ok: false, transient: true, reason: `the factory's own account could not be resolved (gh api user): ${lg?.reason || "unknown"}` };
+  }
+  let statuses;
+  try { statuses = await gh.commitStatuses(headSha); }
+  catch (e) { return { ok: false, transient: true, reason: `commit statuses for ${headSha.slice(0, 7)} unreadable: ${e?.message || e}` }; }
+  const posted = verifyFactoryStatuses({ sha: headSha, statuses, logins: lg.logins });
+  if (!posted.ok) return posted;
+  let checks;
+  try { checks = await gh.prChecks(pr); }
+  catch (e) { return { ok: false, transient: true, reason: `checks for PR #${pr} unreadable: ${e?.message || e}` }; }
+  if (!allChecksGreen(checks ?? [], requiredChecks ?? null)) {
+    return { ok: false, reason: `required checks on PR #${pr} are not all GREEN (${(requiredChecks ?? ["<all>"]).join(", ")}) — the merge went in without them` };
+  }
+  return { ok: true };
 }
 
 /**
@@ -648,121 +701,135 @@ function lastRealTransition(comments) {
  * 애초에 실행되지 않는다(KTB-23의 하네스 주차 해제가 죽었던 것과 **정확히 같은** 구멍이다).
  * 운영자가 손으로 라벨을 붙이고 닫았다.
  *
- * 판정은 세 가지다:
- *   1. 마지막 전이가 `→ factory:needs-human`이고 그 **사유**가 `HUMAN_MERGE_REQUIRED`와 맞는가.
+ * 판정은 넷이고, **merge 스테이지가 자동 머지 앞에서 묻는 것과 같은 것들**이다(그래야 사람의 머지를
+ * 잇는 문이 팩토리 자신의 문보다 싸지 않다):
+ *   1. 마지막 **실제** 전이가 `→ factory:needs-human`이고 그 사유가 `HUMAN_MERGE_REQUIRED`와 맞는가.
  *      `factory:needs-human`은 이 공장에서 가장 많은 뜻을 겸하는 라벨이다(재점화 한도, 락 소유자
  *      불명, 리뷰 라운드 소진, 게이트 RED…). 사유 한 줄만이 "사람이 머지해 주기를 기다리는 중"을
  *      나머지와 가른다 — 그 문구의 출처는 `merge-stage.js`가 내보내는 정규식 하나뿐이다.
- *   2. `claude/fq-<n>`에서 머지된 PR이 있는가(`mergedPrForBranch`). builder는 언제나 그 브랜치에서
- *      작업하므로 브랜치 이름이 곧 이슈 번호다.
- *   3. **게이트 증거**: 그 머지된 head sha에 `factory/gates`·`factory/review` 상태가 붙어 있고 둘 다
- *      success이며 **팩토리 계정이 올린 것**인가(`verifyFactoryStatuses` — merge 스테이지 §(6b)의
- *      판정 (d)와 같은 함수다). 이 팔에는 체크아웃도 이번 런의 `.factory/out/gates.json`도 없고,
- *      있을 수도 없다 — 머지는 이미 일어났고 그 커밋에 대해 남아 있는 증거는 GitHub이 들고 있는
- *      이 두 상태뿐이다. 확인되지 않으면 전이를 **부르지도 않는다**(fail closed).
- *   4. 그리고 **전이 자신의 요구조건**(`requirements.js`의 `factory:merged`). 이 팔은 그것을 한 칸도
- *      깎지 않는다 — review handoff가 이 PR head sha에 묶여 있는지, 정족수 all-approve와 K를
- *      `must_fix`에서 다시 계산한 결과가 통과인지 그대로 물린다. 리뷰를 거치지 않은 PR을 사람이
- *      머지하면 그 전이는 거부되고 이슈는 needs-human에 남는다.
- *      **사람의 머지가 예외이지 증거가 예외인 것이 아니다**(§12.3-2).
+ *   2. `claude/fq-<n>`에서 머지된 PR이 있는가(`mergedPrForBranch` + `mergedAt`). builder는 언제나
+ *      그 브랜치에서 작업하므로 브랜치 이름이 곧 이슈 번호다.
+ *   3. **게이트·체크 증거**(`verifyMergedPrEvidence`): 그 head sha의 `factory/gates`·`factory/review`
+ *      상태가 success이고 팩토리 계정이 올린 것인가, 그리고 그 PR의 필수 체크가 전부 GREEN인가.
+ *      이 팔에는 체크아웃도 이번 런의 `.factory/out/gates.json`도 없고 있을 수도 없다 — 머지는 이미
+ *      일어났고, 그 커밋에 대해 남아 있는 증거는 GitHub이 들고 있는 이것들이다.
+ *   4. 그리고 **전이 자신의 요구조건**(`requirements.js`의 `factory:merged`): review handoff가 이 PR
+ *      head sha에 묶여 있는가, 그리고 **이 tier의 로스터로** 정족수 all-approve와 K를 `must_fix`에서
+ *      다시 계산한 결과가 통과인가. 그 로스터와 K는 이 팔이 직접 실어 보낸다 — r3 must_fix 1까지
+ *      보내지 않아서, 4명짜리 로스터의 이슈가 **1명의 approve**로도 통과했다(정족수 검사는 잴 자가
+ *      없으면 통째로 무음이 된다). **사람의 머지가 예외이지 증거가 예외인 것이 아니다**(§12.3-2).
  *
  * **닫힌 이슈도 본다**(`state: "all"`). `Closes #n`이 실제로 걸리는 경우 이슈는 `factory:needs-human`
  * 라벨을 그대로 단 채 닫히고 — 그건 "끝났다"가 아니라 **상태 라벨이 거짓말을 하는 이슈**다(retro의
- * 수확 통계가 그것을 needs-human 한 건으로 센다). 창은 7일: 그 뒤에 사람이 머지한 것은 sweeper가
- * 조용히 되살리기보다 사람이 보는 편이 맞다(그리고 이 창이 없으면 sweep마다 저장소의 모든 닫힌
- * needs-human 이슈에 코멘트 조회가 나간다 — `MISSING_STATE_SCAN_HOURS`와 같은 이유다).
+ * 수확 통계가 그것을 needs-human 한 건으로 센다). 후보를 자르는 것은 시간 창이 아니라 **API 쪽
+ * 정렬**이다(`sort:updated-desc`, r3 should_fix 1·2): `updatedAt`은 *이슈*의 활동이라 사람이 PR만
+ * 머지하면 움직이지 않고 — 이 경로의 이슈는 정확히 그렇게 며칠씩 앉아 있다 — 시간 창은 그 이슈를
+ * 조용히 떨어뜨렸다. 그리고 창 대신 번호순 200개를 쓰면 라벨을 거쳐 간 이슈가 200개를 넘는 순간
+ * 번호가 낮은 이슈가 역시 조용히 사라진다.
  *
- * 실패가 기우는 방향은 `sweepHarnessUnpark`와 같다: 성공 마커는 **전이가 성공한 뒤에** 남기고,
- * 거부는 액션 한 줄만 남긴다. 다만 거부에는 하나가 더 붙는다 — `transition()`이 거부할 때 이슈에
- * `factory-transition-refused` 코멘트를 **스스로** 남기므로, 그 마커가 이미 있으면 다시 시도하지
- * 않는다. 그러지 않으면 리뷰를 거치지 않은 채 머지된 PR 하나가 30분마다 같은 거부 코멘트를 쌓는다.
+ * **cron 전용이다**(`quick`이 아니다, r3 nit 3). 사람이 머지 버튼을 누르는 사건은 스테이지 잡이
+ * 끝나는 순간과 아무 상관이 없고 30분 안에 반영되면 충분하다 — 매 스테이지마다 돌리면 주차된
+ * 이슈마다 "아직 머지 안 됨" 줄만 쌓인다.
+ *
+ * 실패가 기우는 방향: 성공 마커는 **전이가 성공한 뒤에** 남기고, **판정**으로 거부한 것만 PR 범위의
+ * 거부 마커를 남긴다. 조회 실패(transient)는 액션 한 줄뿐이라 다음 sweep이 그대로 다시 시도한다.
+ * 그리고 모든 건너뜀은 **소리를 낸다**(`human-merged-skipped` + 사유) — 조용한 건너뜀이 바로
+ * KTB-23과 이 티켓이 열린 이유다.
  */
-/**
- * "이 머지된 PR head에 팩토리가 올린 리뷰·게이트 상태가 있는가"의 조회 껍데기. 판정 자체는
- * `verifyFactoryStatuses`(merge 스테이지와 공유)이고, 여기서는 조회와 **조회 실패**만 다룬다 —
- * 로그인을 해석하지 못한 것도, 상태를 읽지 못한 것도, head sha를 모르는 것도 전부 "확인 못 함"이다.
- * 머지는 되돌릴 수 없으므로 확인 못 한 것을 통과로 읽지 않는다(merge 스테이지와 같은 원칙).
- */
-async function verifyMergedPrEvidence({ gh, factoryLogins, pr, headSha }) {
-  if (!headSha) return { ok: false, reason: `PR #${pr} reports no head sha — the merged commit cannot be named` };
-  let lg;
-  try { lg = await factoryLogins(); }
-  catch (e) { lg = { ok: false, reason: String(e?.message || e) }; }
-  if (!lg?.ok || !Array.isArray(lg.logins) || !lg.logins.length) {
-    return { ok: false, reason: `the factory's own account could not be resolved (gh api user): ${lg?.reason || "unknown"}` };
-  }
-  let statuses;
-  try { statuses = await gh.commitStatuses(headSha); }
-  catch (e) { return { ok: false, reason: `commit statuses for ${headSha.slice(0, 7)} unreadable: ${e?.message || e}` }; }
-  return verifyFactoryStatuses({ sha: headSha, statuses, logins: lg.logins });
-}
-
-async function sweepHumanMerged({ gh, transition, factoryLogins, nowMs, actions }) {
+async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, requiredChecks, charter, actions }) {
   // 구형 배선(테스트 더블 포함)은 조용히 건너뛴다 — 다른 dep들과 같은 계약("안 쓴다"와 "에러났다"를
-  // 가른다). `commitStatuses`/`factoryLogins`가 없으면 게이트 증거를 **확인할 수 없다**는 뜻이고,
-  // 확인할 수 없는 것을 통과로 읽지 않는다: 이 팔은 아예 돌지 않는다.
-  if (typeof gh.mergedPrForBranch !== "function" || typeof gh.prMergeInfo !== "function") return;
-  if (typeof gh.commitStatuses !== "function" || typeof factoryLogins !== "function") return;
+  // 가른다). 조회 함수가 하나라도 없으면 증거를 **확인할 수 없다**는 뜻이고, 확인할 수 없는 것을
+  // 통과로 읽지 않는다: 이 팔은 아예 돌지 않는다.
+  for (const fn of ["mergedPrForBranch", "prMergeInfo", "commitStatuses", "prChecks"]) if (typeof gh[fn] !== "function") return;
+  if (typeof factoryLogins !== "function" || typeof reviewRoster !== "function") return;
   let issues;
-  try { issues = await gh.searchIssues("factory:needs-human", { state: "all" }); }
+  try { issues = await gh.searchIssues("factory:needs-human", { state: "all", sort: "updated-desc" }); }
   catch (e) { actions.push({ kind: "error", step: "human-merged", error: String(e.message || e) }); return; }
   for (const it of issues) {
     try {
-      const updatedMs = Date.parse(it.updatedAt ?? "");
-      if (Number.isFinite(updatedMs) && nowMs - updatedMs > HUMAN_MERGE_SCAN_HOURS * 3600e3) continue;
       const comments = await gh.comments(it.number);
       const last = lastRealTransition(comments);
-      if (!last || last.to !== "factory:needs-human" || !HUMAN_MERGE_REQUIRED.test(last.reason || "")) continue;
-      const pr = await gh.mergedPrForBranch(`claude/fq-${it.number}`);
-      if (pr == null) {
-        actions.push({ kind: "human-merged-skipped", issue: it.number, reason: "no merged PR on claude/fq-" + it.number });
+      if (!last || last.to !== "factory:needs-human" || !HUMAN_MERGE_REQUIRED.test(last.reason || "")) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, reason: `not parked on a human merge — last transition ${last ? `→ ${last.to} (${last.reason || "no reason"})` : "none"}` });
         continue;
       }
-      const marker = humanMergedComment(it.number, pr);
-      if (comments.some((c) => String(c?.body ?? "").includes(marker))) {
+      let pr;
+      try { pr = await gh.mergedPrForBranch(`claude/fq-${it.number}`); }
+      catch (e) { actions.push({ kind: "error", step: "human-merged", issue: it.number, error: String(e.message || e) }); continue; }
+      if (pr == null) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, reason: `no merged PR on claude/fq-${it.number} — waiting for a person to merge` });
+        continue;
+      }
+      if (comments.some((c) => String(c?.body ?? "").includes(humanMergedComment(it.number, pr)))) {
         actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "already reconciled" });
         continue;
       }
-      // 이미 한 번 거부당했으면 다시 묻지 않는다. 거부의 원인(리뷰 증거 부족)은 시간이 풀어 주는
-      // 종류가 아니라 **사람이 볼 것**이고, 30분마다 같은 거부 코멘트를 쌓는 것은 그 사람이 읽어야
-      // 할 이슈를 덮는 일이다. 되살리는 길은 남아 있다 — `:unstick`의 재큐가 이 이슈를 새 주기로
-      // 보내고, 그 주기에서 파이프라인이 정상적으로 머지에 도달한다.
-      if (comments.some((c) => String(c?.body ?? "").includes(HUMAN_MERGE_REFUSED_MARKER))) {
-        actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "already refused" });
+      /**
+       * 거부 dedupe는 **이번 주기 × 이 PR**이다(r3 must_fix 3). 예전에는 이슈 전체 이력에서 마커
+       * 하나만 찾으면 영원히 침묵했는데, 이 경로의 정상적인 후속은 정확히 "재큐 → 새 주기 → 또
+       * 보호 경로 PR → 또 사람이 머지"다. `commentsSinceRequeue`가 `:unstick`의 재큐를 새 출발선으로
+       * 삼고, PR 번호가 같은 주기 안의 다음 PR을 가른다. `transition()` 자신의 거부 마커도 같은
+       * 창에서 본다(그 마커에는 PR 번호가 없다 — transition은 PR을 모른다).
+       */
+      const cycle = commentsSinceRequeue(comments);
+      const refusedMark = humanMergeRefusedComment(it.number, pr);
+      const refused = cycle.some((c) => {
+        const b = String(c?.body ?? "");
+        return b.includes(refusedMark) || b.includes(HUMAN_MERGE_REFUSED_MARKER);
+      });
+      if (refused) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "already refused in this cycle" });
         continue;
       }
-      const info = await gh.prMergeInfo(pr);
-      const by = info?.mergedBy || "a person";
-      const headSha = info?.headSha ?? null;
-      /**
-       * 게이트 증거. merge 스테이지 §(6b)의 판정 (d)와 **같은 함수**이고, 조회 실패는 전부
-       * "확인 못 함"이지 통과가 아니다. 확인되지 않으면 `transition()`을 부르지도 않는다 —
-       * 부르면 거부 코멘트가 요구조건 미달로 나가고, 사람은 진짜 원인(상태가 없거나 남이 올렸다)을
-       * 볼 수 없다. 여기서 거부하면 그 문장이 그대로 이슈에 남는다.
-       */
-      const ev = await verifyMergedPrEvidence({ gh, factoryLogins, pr, headSha });
+      let info;
+      try { info = await gh.prMergeInfo(pr); }
+      catch (e) { actions.push({ kind: "error", step: "human-merged", issue: it.number, error: String(e.message || e) }); continue; }
+      const ev = await verifyMergedPrEvidence({ gh, factoryLogins, requiredChecks, pr, info });
       if (!ev.ok) {
-        await gh.comment(it.number, `${HUMAN_MERGE_REFUSED_MARKER}\nPR #${pr}이 머지돼 있지만 이 이슈를 \`factory:merged\`로 잇지 않았습니다 — ${ev.reason}. 보호 경로 PR을 사람이 머지해도 리뷰·게이트 증거는 자동 머지와 똑같이 요구됩니다(KTB-46, 스펙 §12.3-2). 리뷰를 거치지 않은 머지라면 \`:unstick\`으로 이 이슈를 정리하세요 — sweeper는 이 거부를 다시 말하지 않습니다.`);
+        // transient는 **조회가 안 된 것**이지 판정이 아니다 — 마커도 코멘트도 남기지 않는다.
+        if (ev.transient) { actions.push({ kind: "error", step: "human-merged", issue: it.number, error: ev.reason }); continue; }
+        await gh.comment(it.number, `${refusedMark}\nPR #${pr}이 머지돼 있지만 이 이슈를 \`factory:merged\`로 잇지 않았습니다 — ${ev.reason}. 보호 경로 PR을 사람이 머지해도 리뷰·게이트 증거는 자동 머지와 똑같이 요구됩니다(KTB-46, 스펙 §12.3-2). \`:unstick\`으로 이 이슈를 정리하세요 — sweeper는 이 PR에 대해 같은 말을 다시 하지 않습니다.`);
         actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason: ev.reason });
         continue;
       }
+      /**
+       * 정족수의 자(尺). 이것이 없으면 `verifyReviewQuorum`은 "있는 verdict가 전부 approve인가"만 보고
+       * **로스터 크기·빠진 역할·K를 전부 건너뛴다** — 검사가 있는 것처럼 보이는데 잴 자가 없는 상태다.
+       * 해석은 merge 스테이지와 같은 `resolveReviewRoster`이고(실효 tier만 없다 — 머지된 뒤에는
+       * `claude/fq-<n>`이 지워져 diff를 다시 낼 수 없다), 못 구하면 **거부한다**: 이 팔의 나머지와
+       * 같은 원칙으로 확인 못 한 것을 통과로 읽지 않는다.
+       */
+      const ros = await reviewRoster(comments);
+      if (!ros?.ok || !Array.isArray(ros.roles) || !ros.roles.length) {
+        const reason = ros?.reason || "review roster unresolvable — quorum cannot be checked";
+        await gh.comment(it.number, `${refusedMark}\nPR #${pr}이 머지돼 있지만 이 이슈를 \`factory:merged\`로 잇지 않았습니다 — ${reason}. 정족수를 잴 자가 없으면 리뷰 증거를 확인할 수 없고, 확인 못 한 것은 통과가 아닙니다(KTB-46).`);
+        actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason });
+        continue;
+      }
+      const by = info.mergedBy || "a person";
       const t = await transition({
         issue: it.number,
         to: "factory:merged",
         reason: `PR #${pr} merged by ${by} (protected paths — human merge)`,
         /**
          * 증거는 깎지 않고 **출처만 바꾼다**. `humanMerged`는 "이 전이는 사람이 이미 만든 머지의
-         * 사후 기록"이라는 뜻이고, `statusesVerified`는 그 게이트 증거를 방금 `verifyFactoryStatuses`로
-         * 확인했다는 뜻이다(`requirements.js`의 `gatesGate`가 이 둘을 함께 요구한다 — 앞의 것만으로는
-         * 아무것도 열리지 않는다). `prHeadSha`는 그대로 남아 review handoff를 그 커밋에 묶고,
-         * 정족수·K 재계산은 손대지 않는다. `issue`는 handoff 마커의 이슈 번호까지 대조하게 한다.
-         * 이 두 플래그의 **유일한 생산자는 이 자리**다 — `bin/transition.js`는 `gatesChecked`와
-         * `gatesFile`만 담은 닫힌 리터럴을 넘기고 알 수 없는 플래그는 파서가 거절한다.
+         * 사후 기록"이라는 뜻이고, `statusesVerified`는 그 게이트·체크 증거를 방금
+         * `verifyMergedPrEvidence`로 확인했다는 뜻이다(`requirements.js`가 이 둘을 **함께** 요구한다 —
+         * 앞의 것만으로는 아무것도 열리지 않는다). 나머지 넷(`prHeadSha`·`roster`·`rosterSize`·
+         * `maxRounds`)은 merge 스테이지가 같은 전이에 싣는 것과 같은 값이고, `issue`는 handoff
+         * 마커의 이슈 번호까지 대조하게 한다. 이 두 플래그의 **유일한 생산자는 이 자리**다 —
+         * `bin/transition.js`는 `gatesChecked`·`gatesFile`만 담은 닫힌 리터럴을 넘기고 알 수 없는
+         * 플래그는 파서가 거절한다.
          */
-        ctxExtra: { issue: it.number, prHeadSha: headSha, humanMerged: true, statusesVerified: true },
+        ctxExtra: {
+          issue: it.number, prHeadSha: info.headSha,
+          roster: ros.roles, rosterSize: ros.roles.length,
+          ...(Number.isInteger(charter?.limits?.K) ? { maxRounds: charter.limits.K } : {}),
+          humanMerged: true, statusesVerified: true,
+        },
       });
       if (!t?.ok) { actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason: t?.reason ?? "unknown" }); continue; }
-      await gh.comment(it.number, `${marker}\nPR #${pr}을 ${by}이(가) 머지했습니다 — 보호 경로 변경이라 팩토리가 자동 머지하지 않고 사람에게 넘긴 PR입니다(스펙 §12.3-2). 머지 사실을 확인하고 \`factory:needs-human\`에서 \`factory:merged\`로 이었습니다(KTB-46). 리뷰·게이트 증거 검사는 자동 머지와 똑같이 물렸습니다.`);
+      await gh.comment(it.number, `${humanMergedComment(it.number, pr)}\nPR #${pr}을 ${by}이(가) 머지했습니다 — 보호 경로 변경이라 팩토리가 자동 머지하지 않고 사람에게 넘긴 PR입니다(스펙 §12.3-2). 머지 사실과 리뷰·게이트·필수 체크 증거를 확인하고 \`factory:needs-human\`에서 \`factory:merged\`로 이었습니다(KTB-46). 증거 검사는 자동 머지와 똑같이 물렸습니다(tier ${ros.tier}, 리뷰어 ${ros.roles.length}명).`);
       // 이슈가 아직 열려 있으면 닫는다 — `Closes #n`이 걸리지 않은 경우다(KTB #3이 그랬다).
       // `factory status`의 "Needs You"가 이미 끝난 이슈를 계속 세지 않게 하는 마지막 한 걸음이고,
       // 실패해도 전이 자체는 되돌리지 않는다(라벨이 이미 진실을 말한다).
@@ -773,7 +840,7 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, nowMs, actions 
       } catch (e) {
         actions.push({ kind: "error", step: "human-merged-close", issue: it.number, error: String(e.message || e) });
       }
-      actions.push({ kind: "human-merged", issue: it.number, pr, mergedBy: info?.mergedBy ?? null, closed });
+      actions.push({ kind: "human-merged", issue: it.number, pr, mergedBy: info.mergedBy ?? null, closed });
     } catch (e) {
       actions.push({ kind: "error", step: "human-merged", issue: it.number, error: String(e.message || e) });
     }
@@ -796,11 +863,11 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
 /**
  * `quick`(KTB-26): 스테이지 워크플로의 마지막 스텝이 쓰는 모양(`sweep.js --quick`). 시간에 묶인 두 팔
  * (격리 정책 적용과 토큰 만료 이슈 생성)을 건너뛰고 **상태 복구 팔만** 돌린다 — in-progress 하트비트
- * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 사람 머지 반영 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
+ * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, releaseIfStale = null, quick = false }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, quick = false }) {
   const actions = [];
   const nowMs = Date.parse(now);
   const stale = staleMinutes * 60e3;
@@ -954,8 +1021,11 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   }
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
-  await sweepHumanMerged({ gh, transition, factoryLogins, nowMs, actions });
-  if (quick) return actions;                     // KTB-26 — 아래 두 팔은 시간에 묶여 있다(cron의 몫)
+  if (quick) return actions;                     // KTB-26 — 아래 팔들은 시간에 묶여 있다(cron의 몫)
+  // KTB-46 (r3 nit 3): 사람이 머지 버튼을 누르는 사건은 스테이지 잡이 끝나는 순간과 무관하다 —
+  // cron 주기(≤30분) 안에 반영되면 충분하고, 매 스테이지마다 돌리면 주차된 이슈마다 "아직 머지
+  // 안 됨" 줄만 쌓인다. 그래서 격리·토큰 만료와 같은 쪽에 선다.
+  await sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, requiredChecks, charter, actions });
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });
     if (pol.returned.length || pol.expired.length) {

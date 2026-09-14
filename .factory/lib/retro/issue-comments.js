@@ -21,6 +21,14 @@ export const TRANSITION_REFUSED = /<!-- factory-transition-refused from=(\S+) to
  */
 export const TRANSITION_FAILED = /<!-- factory-transition-failed:v1 from=(\S+) to=(\S+) -->/;
 export const transitionFailedMarker = ({ from, to }) => `<!-- factory-transition-failed:v1 from=${from} to=${to} -->`;
+/**
+ * 거부된 전이의 마커(위 `TRANSITION_REFUSED`가 읽는 바로 그 문자열). KTB-46까지 이 형식에는
+ * **생산자만 있고 생성자가 없었다** — `lib/transition.js`가 두 자리에서 템플릿 리터럴로 직접 쓰고,
+ * 그것을 읽는 쪽(sweeper의 사람-머지 반영 dedupe)은 같은 문자열을 손으로 베껴 왔다. 한쪽의 형식이
+ * 바뀌면 다른 쪽은 **테스트가 전부 초록인 채로** 아무것도 찾지 못한다. `transitionFailedMarker`와
+ * 같은 계약으로 맞춘다: 쓰는 쪽도 읽는 쪽도 이 함수 하나를 부른다.
+ */
+export const transitionRefusedMarker = ({ from, to }) => `<!-- factory-transition-refused from=${from} to=${to} -->`;
 // label 이름 자체가 "factory:x" 형태라 콜론을 품는다 — 진짜 구분자는 "콜론+공백"뿐이다.
 export const REFUSAL_REASON = /\*\*전이 거부\*\*.*?: ([^\n]+)/;
 // 요구사항 미달로 실제 라벨이 needs-human으로 옮겨진 거부만 골라낸다(backtick 인용 — lib/transition.js의

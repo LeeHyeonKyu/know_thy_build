@@ -131,15 +131,19 @@ const RULES = {
     if (!q.ok) return fail(q.reason);
     if (ctx.prerequisite === true) return pass;
     /**
-     * KTB-46 — 아래 두 검사는 **"지금 머지해도 되는가"**를 묻는다. 사람 머지 반영 경로에서 그 질문은
-     * 이미 답이 나와 있다: 머지는 **일어났고**, 그것도 보호된 base 브랜치로 들어갔다 — `factory/integrity`는
-     * 그 브랜치의 **required status check**라(ADR-015, `bootstrap.js`의 `L0_CONTEXTS`) 통과하지 않으면
-     * GitHub이 사람의 머지 버튼조차 막는다. 즉 이 두 줄이 확인하려던 사실을 GitHub이 이미 강제했고,
-     * sweeper가 그것을 다시 "확인"한다고 주장하는 것이야말로 지어낸 증거다.
+     * KTB-46 — 아래 두 검사도 **출처만 바뀐다**(위 `gatesGate`와 같은 계약). 자동 머지 경로에서 그
+     * 값은 `mergeGates()`가 머지 직전에 계산하는데, 사람 머지 반영 경로에는 그 런이 없다. 대신
+     * sweeper가 **같은 것을 같은 함수로** 본다: 머지된 PR의 체크를 `gh.prChecks(pr)`로 읽어
+     * `allChecksGreen(checks, harness.factory.required_checks)`에 걸고, `factory/gates`·`factory/review`
+     * 상태의 게시자를 `verifyFactoryStatuses`로 대조한 뒤에야 `statusesVerified`를 세운다.
+     * 그 둘이 모두 통과했을 때만 이 분기가 열린다.
      *
-     * 반대로 **리뷰**는 GitHub이 강제하지 않는다 — 그래서 위의 정족수 all-approve·K 재계산과 handoff의
-     * head sha 바인딩은 이 분기보다 **앞**에 있고, 여기까지 오려면 전부 통과해야 한다. `statusesVerified`를
-     * 함께 요구하는 것은 `gatesGate`와 같은 이유다: `humanMerged` 한 플래그만으로는 아무것도 열리지 않는다.
+     * r2까지는 대신 "보호된 base 브랜치가 `factory/integrity`를 required로 걸고 있으니 머지된 것
+     * 자체가 증거"라고 주장했는데, 그 전제는 **지원되는 구성에서 거짓이다**(r3 must_fix 4): 브랜치
+     * 보호가 없는 저장소는 doctor가 FAIL이 아니라 WARN으로 두는 정상 상태이고(GitHub Free의 private
+     * repo는 아예 불가능하다), `required_checks`는 L0 하나보다 넓을 수 있으며(브랜치 보호는 그 하나만
+     * 강제한다), 결정적으로 `factory/integrity`는 **check run**이라 commit status 목록에는 나타나지도
+     * 않는다. 그래서 그 주장을 버리고 실제로 확인한다.
      */
     if (ctx.humanMerged === true) return ctx.statusesVerified === true ? pass : fail(HUMAN_MERGE_STATUSES_UNVERIFIED);
     // 머지는 되돌릴 수 없다 — "확인하지 않았음"과 "확인해보니 RED"를 같게 취급한다(fail closed).

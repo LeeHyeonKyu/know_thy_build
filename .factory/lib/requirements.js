@@ -35,8 +35,35 @@ const sameSet = (a, b) => a.length === b.length && [...a].sort().every((x, i) =>
 const restoring = (ctx) => ctx.prerequisite === true || ctx.humanRetry === true;
 
 export const GATES_UNVERIFIED = "gates not verified for this transition";
-function gatesGate(ctx) {
+export const HUMAN_MERGE_STATUSES_UNVERIFIED = "human-merge reconcile: factory commit statuses not verified";
+/**
+ * `to`: 이 게이트를 부른 목적 상태. KTB-46의 사람-머지 분기 **하나 때문에** 생긴 인자다 —
+ * 이 함수는 `awaiting-review`·`approved`·`merged` 셋이 공유하므로, 목적지를 묻지 않으면 그 분기가
+ * 세 문을 한꺼번에 연다(사람이 머지한 적도 없는 PR을 `factory:approved`로 올리는 문까지). 나머지
+ * 검사는 목적지와 무관하므로 `to`를 보지 않는다.
+ */
+function gatesGate(ctx, to) {
   if (restoring(ctx)) return null;
+  /**
+   * KTB-46 — **사람이 이미 머지한 보호 경로 PR의 사후 기록**(스펙 §12.3-2). 이 경로의 게이트 증거는
+   * 러너의 로컬 파일이 아니라 **러너가 그 커밋에 올린 `factory/gates` 상태**다: sweeper가 머지된 PR의
+   * head sha로 `verifyFactoryStatuses`를 돌려 그 상태가 success이고 **팩토리 계정이 올린 것**임을
+   * 확인한 뒤에만 `statusesVerified`를 세운다(merge 스테이지 §(6b) 판정 (d)와 같은 함수다).
+   *
+   * 파일을 요구할 수 없는 이유는 그 파일이 존재할 수 없기 때문이다 — sweep 잡에는 체크아웃이 없고,
+   * 애초에 merge 스테이지는 보호 경로를 이유로 단계 (3)에서 물러나 게이트(단계 4)를 돌지도 못했다.
+   * 그렇다고 이 자리를 열어 두면 되돌릴 수 없는 라벨이 증거 없이 붙는다 — 그래서 **두 플래그를 함께**
+   * 요구한다: `humanMerged`만으로는 아무것도 열리지 않고, 확인에 실패한 sweeper는 전이를 부르지도
+   * 않는다. 이 둘의 유일한 생산자는 `lib/sweeper.js`의 `sweepHumanMerged`다(`bin/transition.js`는
+   * `gatesChecked`·`gatesFile`만 담은 닫힌 리터럴을 넘기고, 알 수 없는 플래그는 파서가 거절한다).
+   *
+   * 면제되는 것은 **이 검사 하나**이고, 그것도 **`factory:merged` 한 목적지에서만**이다: 이 함수는
+   * `awaiting-review`·`approved`도 부르는데 거기서 열리면, 사람이 머지한 적도 없는 PR을 승인 상태로
+   * 올리는 문이 된다(그 전제 자체가 없다). `shaBound`는 그대로라 review handoff가 이 PR head sha에
+   * 묶여야 하고, `factory:merged` 규칙의 정족수 all-approve·K 재계산도 그대로 돈다 — 사람이 리뷰를
+   * 거치지 않은 PR을 머지하면 이슈는 `needs-human`에 그대로 남는다. 그것이 이 설계의 요점이다.
+   */
+  if (ctx.humanMerged === true && to === "factory:merged") return ctx.statusesVerified === true ? null : fail(HUMAN_MERGE_STATUSES_UNVERIFIED);
   if (ctx.gatesChecked !== true) return fail(GATES_UNVERIFIED);
   if (!ctx.gatesFile) return fail("gates file missing");
   if (ctx.gatesFile.diagnostic === true) return fail("gates file is diagnostic output");
@@ -65,14 +92,14 @@ const RULES = {
   "factory:awaiting-review"(ctx) {
     const { h, err } = need(ctx, "implement", "implement.v1"); if (err) return err;
     // 게이트 판정의 출처는 handoff가 아니라 러너가 쓴 파일이다 — handoff의 자기 신고는 대체재가 아니다.
-    const g = gatesGate(ctx); if (g) return g;
+    const g = gatesGate(ctx, "factory:awaiting-review"); if (g) return g;
     if (shaBound(ctx) && ctx.headSha && h.data.head_sha !== ctx.headSha) return fail(`implement head_sha ${h.data.head_sha.slice(0, 7)} != branch head ${ctx.headSha.slice(0, 7)}`);
     if (h.data.verifier.verdict === "rejected") return fail("verifier rejected");
     return pass;
   },
   "factory:approved"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
-    const g = gatesGate(ctx); if (g) return g;
+    const g = gatesGate(ctx, "factory:approved"); if (g) return g;
     if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`review head_sha ${h.data.head_sha.slice(0, 7)} != PR head ${ctx.prHeadSha.slice(0, 7)}`);
     // 정족수·all-approve의 판정은 `lib/review-quorum.js` 한 곳이다(외부 감사 H1c) — handoff가 스스로
     // 적은 `decision`이 아니라 `must_fix`에서 aggregate로 다시 계산한다.
@@ -87,7 +114,7 @@ const RULES = {
   },
   "factory:merged"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
-    const g = gatesGate(ctx); if (g) return g;
+    const g = gatesGate(ctx, "factory:merged"); if (g) return g;
     if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`approved handoff head_sha != PR head`);
     /**
      * 외부 감사 2026-09-14 H1c — **정족수를 여기서 다시 묻는다.** 예전에는 이 규칙이 `need(review)`로
@@ -103,6 +130,22 @@ const RULES = {
     const q = verifyReviewQuorum({ data: h.data, rosterSize: ctx.rosterSize ?? null, rosterRoles: ctx.roster || [], maxRounds: ctx.maxRounds ?? null });
     if (!q.ok) return fail(q.reason);
     if (ctx.prerequisite === true) return pass;
+    /**
+     * KTB-46 — 아래 두 검사도 **출처만 바뀐다**(위 `gatesGate`와 같은 계약). 자동 머지 경로에서 그
+     * 값은 `mergeGates()`가 머지 직전에 계산하는데, 사람 머지 반영 경로에는 그 런이 없다. 대신
+     * sweeper가 **같은 것을 같은 함수로** 본다: 머지된 PR의 체크를 `gh.prChecks(pr)`로 읽어
+     * `allChecksGreen(checks, harness.factory.required_checks)`에 걸고, `factory/gates`·`factory/review`
+     * 상태의 게시자를 `verifyFactoryStatuses`로 대조한 뒤에야 `statusesVerified`를 세운다.
+     * 그 둘이 모두 통과했을 때만 이 분기가 열린다.
+     *
+     * r2까지는 대신 "보호된 base 브랜치가 `factory/integrity`를 required로 걸고 있으니 머지된 것
+     * 자체가 증거"라고 주장했는데, 그 전제는 **지원되는 구성에서 거짓이다**(r3 must_fix 4): 브랜치
+     * 보호가 없는 저장소는 doctor가 FAIL이 아니라 WARN으로 두는 정상 상태이고(GitHub Free의 private
+     * repo는 아예 불가능하다), `required_checks`는 L0 하나보다 넓을 수 있으며(브랜치 보호는 그 하나만
+     * 강제한다), 결정적으로 `factory/integrity`는 **check run**이라 commit status 목록에는 나타나지도
+     * 않는다. 그래서 그 주장을 버리고 실제로 확인한다.
+     */
+    if (ctx.humanMerged === true) return ctx.statusesVerified === true ? pass : fail(HUMAN_MERGE_STATUSES_UNVERIFIED);
     // 머지는 되돌릴 수 없다 — "확인하지 않았음"과 "확인해보니 RED"를 같게 취급한다(fail closed).
     if (ctx.checksGreen !== true) return fail("required checks not verified GREEN");
     if (ctx.integrityGreen !== true) return fail("integrity check not verified GREEN");

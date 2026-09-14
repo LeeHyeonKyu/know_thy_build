@@ -1,8 +1,10 @@
 import { test, expect, vi } from "vitest";
 import { backPressure } from "../lib/back-pressure.js";
-import { sweep, restartComment, blockedRetryComment, harnessUnparkedComment, humanMergedComment, HUMAN_MERGE_REFUSED_MARKER, lockOwnerUnknownComment, API_ERROR_MAX_RETRIES, STALL_NO_HEARTBEAT_MIN, BLOCKED_ESCALATION_REASON } from "../lib/sweeper.js";
+import { sweep, restartComment, blockedRetryComment, harnessUnparkedComment, humanMergedComment, humanMergeRefusedComment, HUMAN_MERGE_REFUSED_MARKER, lockOwnerUnknownComment, API_ERROR_MAX_RETRIES, STALL_NO_HEARTBEAT_MIN, BLOCKED_ESCALATION_REASON } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
-import { BLOCKED_CAUSES } from "../lib/retro/issue-comments.js";
+import { BLOCKED_CAUSES, transitionRefusedMarker } from "../lib/retro/issue-comments.js";
+import { requirementFor } from "../lib/requirements.js";
+import { renderHandoff } from "../lib/handoff.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
 const T = { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
@@ -988,27 +990,35 @@ test("KTB-23 fix: the arm runs in both the quick and the cron sweep, and is skip
 // required: …`로 거부 → 소유자가 PR #4를 손으로 머지 → **아무것도 이슈를 움직이지 않았다**
 // (그래프에 엣지 없음, `Closes #n` 안 걸림, merge 단계 (9)는 이 경로에서 돌지 않음).
 const HUMAN_MERGE_AT = "2026-09-11T00:30:00Z";
-const humanMergeParkComment = (from = "factory:approved", reason = "protected paths changed — human merge required: .factory/harness.toml (see PR #4)") => ({
+const MERGED_HEAD = "c".repeat(40);
+const humanMergeParkComment = (from = "factory:approved", reason = "protected paths changed — human merge required: .factory/harness.toml (see PR #4)", at = HUMAN_MERGE_AT) => ({
   id: 1,
   body: `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script -->\n${from} → factory:needs-human — ${reason}`,
-  createdAt: HUMAN_MERGE_AT,
+  createdAt: at,
 });
+/** 팩토리 계정이 머지된 head sha에 올린 리뷰·게이트 상태 — 이 팔의 게이트 증거 절반이다. */
+const factoryStatuses = () => [
+  { context: "factory/review", state: "success", creatorLogin: "ktb-bot" },
+  { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" },
+];
+/** 나머지 절반: 머지된 PR의 필수 체크(r3 must_fix 4 — `factory/integrity`는 check run이라 여기에만 보인다). */
+const greenChecks = () => [
+  { name: "factory/gates", state: "SUCCESS", bucket: "pass" },
+  { name: "factory/review", state: "SUCCESS", bucket: "pass" },
+  { name: "factory/integrity", state: "SUCCESS", bucket: "pass" },
+];
+const REQUIRED = ["factory/gates", "factory/review", "factory/integrity"];
 const mergedArgs = (over = {}) => ({
   gh: { searchIssues: async () => [], comments: async () => [], comment: vi.fn(), patchComment: vi.fn(), issueList: async () => [] },
   charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30,
   transition: vi.fn(async ({ to }) => ({ ok: true, to })), release: vi.fn(),
   factoryLogins: vi.fn(async () => ({ ok: true, logins: ["ktb-bot", "ktb-owner"] })),
-  quarantine: { quarantined: [] }, saveQuarantine: () => {}, quick: true,
+  reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "standard" })),
+  requiredChecks: REQUIRED,
+  quarantine: { quarantined: [] }, saveQuarantine: () => {},
   ...over,
 });
-const MERGED_HEAD = "c".repeat(40);
-/** 팩토리 계정이 머지된 head sha에 올린 리뷰·게이트 상태 — 이 팔의 게이트 증거다(KTB-46). */
-const factoryStatuses = (over = []) => [
-  { context: "factory/review", state: "success", creatorLogin: "ktb-bot" },
-  { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" },
-  ...over,
-];
-/** 이 팔이 쓰는 gh 조각 — `state: "all"` 검색 + 머지된 PR + 머지 정보 + 커밋 상태 + 이슈 상태. */
+/** 이 팔이 쓰는 gh 조각 — 검색 + 머지된 PR + 머지 정보 + 커밋 상태 + PR 체크 + 이슈 상태. */
 const mergedGh = (over = {}) => {
   const posted = [];
   const base = {
@@ -1019,6 +1029,7 @@ const mergedGh = (over = {}) => {
     mergedPrForBranch: vi.fn(async () => 4),
     prMergeInfo: vi.fn(async () => ({ headSha: MERGED_HEAD, mergeSha: "d".repeat(40), mergedAt: "2026-09-11T00:45:00Z", mergedBy: "LeeHyeonKyu" })),
     commitStatuses: vi.fn(async () => factoryStatuses()),
+    prChecks: vi.fn(async () => greenChecks()),
     issueState: vi.fn(async () => ({ number: 3, state: "OPEN", closedAt: null })),
     closeIssue: vi.fn(async () => {}),
   };
@@ -1029,14 +1040,20 @@ test("KTB-46 (a): a human-merged protected-path PR moves the issue to factory:me
   const gh = mergedGh();
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
   const actions = await sweep(mergedArgs({ gh, transition }));
-  expect(gh.searchIssues).toHaveBeenCalledWith("factory:needs-human", { state: "all" });
+  // r3 should_fix 2: 후보 자르기는 API 쪽 정렬이다(번호순 200개가 아니라 최근 갱신순 200개).
+  expect(gh.searchIssues).toHaveBeenCalledWith("factory:needs-human", { state: "all", sort: "updated-desc" });
   expect(gh.mergedPrForBranch).toHaveBeenCalledWith("claude/fq-3");
-  // 증거는 깎이지 않는다 — 넘기는 것은 PR head sha(+이슈 번호)뿐이다.
   expect(gh.commitStatuses).toHaveBeenCalledWith(MERGED_HEAD);
+  expect(gh.prChecks).toHaveBeenCalledWith(4);
+  // r3 must_fix 1: 정족수의 자(로스터·K)가 실제로 실린다 — 이것이 없으면 검사는 무음이 된다.
   expect(transition).toHaveBeenCalledWith({
     issue: 3, to: "factory:merged",
     reason: "PR #4 merged by LeeHyeonKyu (protected paths — human merge)",
-    ctxExtra: { issue: 3, prHeadSha: MERGED_HEAD, humanMerged: true, statusesVerified: true },
+    ctxExtra: {
+      issue: 3, prHeadSha: MERGED_HEAD,
+      roster: ["correctness", "qa"], rosterSize: 2, maxRounds: charter.limits.K,
+      humanMerged: true, statusesVerified: true,
+    },
   });
   expect(gh.comment).toHaveBeenCalledWith(3, expect.stringContaining(humanMergedComment(3, 4)));
   expect(gh.closeIssue).toHaveBeenCalledWith(3);
@@ -1048,40 +1065,38 @@ test("KTB-46 (a): a human-merged protected-path PR moves the issue to factory:me
   expect(transition).toHaveBeenCalledTimes(1);
 });
 
-test("KTB-46 (b): a needs-human issue stopped for any OTHER reason is left alone, merged PR or not", async () => {
+test("KTB-46 (b): a needs-human issue stopped for any OTHER reason is left alone — and says so", async () => {
   const gh = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment("factory:ready", "stalled restart limit (2) reached")]) });
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
   const actions = await sweep(mergedArgs({ gh, transition }));
   expect(gh.mergedPrForBranch).not.toHaveBeenCalled();
   expect(transition).not.toHaveBeenCalled();
   expect(gh.closeIssue).not.toHaveBeenCalled();
-  expect(actions.some((a) => String(a.kind).startsWith("human-merged"))).toBe(false);
+  // r3 should_fix 1: 조용한 건너뜀은 없다 — 모든 건너뜀이 사유와 함께 한 줄을 남긴다.
+  expect(actions).toContainEqual({ kind: "human-merged-skipped", issue: 3, reason: expect.stringContaining("not parked on a human merge") });
 });
 
-test("KTB-46 (c): a merged PR with no review evidence is refused once — the next sweep adds no second refusal", async () => {
+test("KTB-46 (c): a merged PR the transition refuses is refused once — the next sweep adds no second refusal", async () => {
   const posted = [];
   const gh = mergedGh({
     comments: vi.fn(async () => [humanMergeParkComment(), ...posted]),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
   });
   /**
-   * 실제 `transition()`이 요구조건 미달로 거부할 때 남기는 코멘트 **그대로**(lib/transition.js:108).
-   * 그 코멘트가 `reason=refused` 전이 마커를 달기 때문에, 순진하게 `lastTransition`을 보면 거부 한 번이
-   * 원래의 "human merge required" 사유를 영구히 가리고 이 팔은 그 이슈를 다시는 보지 않는다 —
-   * 조용히. `lastRealTransition`이 그것을 건너뛰고, dedupe는 거부 마커가 **말하면서** 한다.
+   * 실제 `transition()`이 요구조건 미달로 거부할 때 남기는 코멘트 — 마커는 **진짜 생성자**로 만든다
+   * (r3 should_fix 3: 예전에는 같은 문자열을 테스트에 손으로 베껴 놓아서, `transition.js`의 형식이
+   * 바뀌어도 테스트는 전부 초록인 채 dedupe만 조용히 죽었다).
    */
   const transition = vi.fn(async ({ issue }) => {
-    await gh.comment(issue, `<!-- factory-transition:v1 from=factory:needs-human to=factory:needs-human by=script reason=refused -->\n${HUMAN_MERGE_REFUSED_MARKER}\n**전이 거부** factory:needs-human → factory:merged: review handoff missing\n\n라벨을 \`factory:needs-human\`으로 옮겼습니다.`);
+    await gh.comment(issue, `<!-- factory-transition:v1 from=factory:needs-human to=factory:needs-human by=script reason=refused -->\n${transitionRefusedMarker({ from: "factory:needs-human", to: "factory:merged" })}\n**전이 거부** factory:needs-human → factory:merged: review handoff missing`);
     return { ok: false, from: "factory:needs-human", to: "factory:needs-human", reason: "review handoff missing" };
   });
   const first = await sweep(mergedArgs({ gh, transition }));
   expect(first).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: "review handoff missing" });
   expect(gh.closeIssue).not.toHaveBeenCalled();
-  const refusalsAfterFirst = posted.filter((c) => c.body.includes(HUMAN_MERGE_REFUSED_MARKER)).length;
-  expect(refusalsAfterFirst).toBe(1);
 
   const second = await sweep(mergedArgs({ gh, transition }));
-  expect(second).toContainEqual({ kind: "human-merged-skipped", issue: 3, pr: 4, reason: "already refused" });
+  expect(second).toContainEqual({ kind: "human-merged-skipped", issue: 3, pr: 4, reason: "already refused in this cycle" });
   expect(transition).toHaveBeenCalledTimes(1);
   expect(posted.filter((c) => c.body.includes(HUMAN_MERGE_REFUSED_MARKER)).length).toBe(1);
 });
@@ -1095,23 +1110,19 @@ test("KTB-46 (d): an already-CLOSED issue still carrying the label is reconciled
   expect(actions).toContainEqual({ kind: "human-merged", issue: 3, pr: 4, mergedBy: "LeeHyeonKyu", closed: false });
 });
 
-test("KTB-46 (e): a failing merged-PR lookup is an error line, never a transition", async () => {
+test("KTB-46 (e): a failing merged-PR lookup is an error line, never a transition and never a marker", async () => {
   const gh = mergedGh({ mergedPrForBranch: vi.fn(async () => { throw new Error("gh pr list 502"); }) });
   const transition = vi.fn();
   const actions = await sweep(mergedArgs({ gh, transition }));
   expect(transition).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
   expect(actions).toContainEqual({ kind: "error", step: "human-merged", issue: 3, error: expect.stringContaining("gh pr list 502") });
 });
 
-test("KTB-46: no merged PR yet (the person has not merged) → skipped, and issues older than the window are not scanned", async () => {
+test("KTB-46: no merged PR yet (the person has not merged) → an audible skip", async () => {
   const gh = mergedGh({ mergedPrForBranch: vi.fn(async () => null) });
   const actions = await sweep(mergedArgs({ gh }));
-  expect(actions).toContainEqual({ kind: "human-merged-skipped", issue: 3, reason: "no merged PR on claude/fq-3" });
-
-  const stale = mergedGh({ searchIssues: vi.fn(async (l, o) => (l === "factory:needs-human" && o?.state === "all" ? [{ number: 3, updatedAt: "2026-09-01T00:00:00Z" }] : [])) });
-  const staleActions = await sweep(mergedArgs({ gh: stale }));
-  expect(stale.comments).not.toHaveBeenCalled();
-  expect(staleActions.some((a) => String(a.kind).startsWith("human-merged"))).toBe(false);
+  expect(actions).toContainEqual({ kind: "human-merged-skipped", issue: 3, reason: expect.stringContaining("no merged PR on claude/fq-3") });
 });
 
 /**
@@ -1132,11 +1143,11 @@ test("KTB-46 r2: a factory/gates status posted by a NON-factory login is refused
   expect(transition).not.toHaveBeenCalled();
   expect(gh.closeIssue).not.toHaveBeenCalled();
   expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringMatching(/posted by @mallory.*not a factory account/s) });
-  expect(gh.comment).toHaveBeenCalledWith(3, expect.stringContaining(HUMAN_MERGE_REFUSED_MARKER));
+  expect(gh.comment).toHaveBeenCalledWith(3, expect.stringContaining(humanMergeRefusedComment(3, 4)));
   // 그리고 그 거부는 한 번뿐이다 — 다음 sweep은 마커를 보고 침묵한다.
   const second = await sweep(mergedArgs({ gh, transition }));
-  expect(second).toContainEqual({ kind: "human-merged-skipped", issue: 3, pr: 4, reason: "already refused" });
-  expect(gh.comment.mock.calls.filter(([, b]) => b.includes(HUMAN_MERGE_REFUSED_MARKER)).length).toBe(1);
+  expect(second).toContainEqual({ kind: "human-merged-skipped", issue: 3, pr: 4, reason: "already refused in this cycle" });
+  expect(gh.comment.mock.calls.filter(([, b]) => b.includes(humanMergeRefusedComment(3, 4))).length).toBe(1);
 });
 
 test("KTB-46 r2: a failing factory/gates status is refused — a status that is not success is not evidence", async () => {
@@ -1152,28 +1163,143 @@ test("KTB-46 r2: a failing factory/gates status is refused — a status that is 
   expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining('factory/gates on ccccccc is "failure", not success') });
 });
 
-test("KTB-46 r2: unreadable statuses / unresolvable factory logins are 'not verified', never a pass", async () => {
-  const boom = mergedGh({ commitStatuses: vi.fn(async () => { throw new Error("gh api 502"); }) });
-  const t1 = vi.fn();
-  expect(await sweep(mergedArgs({ gh: boom, transition: t1 }))).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("gh api 502") });
-  expect(t1).not.toHaveBeenCalled();
-
-  const noLogin = mergedGh();
-  const t2 = vi.fn();
-  const actions = await sweep(mergedArgs({ gh: noLogin, transition: t2, factoryLogins: async () => ({ ok: false, reason: "gh api user failed — 401" }) }));
-  expect(t2).not.toHaveBeenCalled();
-  expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("gh api user failed — 401") });
+/**
+ * r3 must_fix 4 — **필수 체크도 확인한다.** `factory/integrity`는 Actions 잡(check run)이라
+ * `commitStatuses`(commit status API)에는 **절대** 나타나지 않는다 — `gh.prChecks`가 그것을 보는
+ * 유일한 창이다. 그리고 "보호 브랜치가 막아 줬을 것"은 전제로 쓸 수 없다: 보호가 없는 저장소는
+ * 지원되는 상태이고, `required_checks`는 L0 하나보다 넓을 수 있다.
+ */
+test("KTB-46 r3: a merged PR whose required checks are not all GREEN is refused — branch protection is not assumed", async () => {
+  const gh = mergedGh({
+    prChecks: vi.fn(async () => [
+      { name: "factory/gates", state: "SUCCESS", bucket: "pass" },
+      { name: "factory/review", state: "SUCCESS", bucket: "pass" },
+      { name: "factory/integrity", state: "FAILURE", bucket: "fail" },
+    ]),
+  });
+  const transition = vi.fn();
+  const actions = await sweep(mergedArgs({ gh, transition }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("required checks on PR #4 are not all GREEN") });
+  // 체크가 아예 없는 것도 통과가 아니다(fail closed — `allChecksGreen`의 계약 그대로).
+  const none = mergedGh({ prChecks: vi.fn(async () => []) });
+  expect(await sweep(mergedArgs({ gh: none, transition: vi.fn() })))
+    .toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("not all GREEN") });
 });
 
-test("KTB-46: the arm runs in both the quick and the cron sweep, and is skipped when gh is an older double", async () => {
-  for (const quick of [true, false]) {
-    const gh = mergedGh();
-    const actions = await sweep(mergedArgs({ gh, quick }));
-    expect(actions.some((a) => a.kind === "human-merged"), `quick=${quick}`).toBe(true);
-  }
-  // `prMergeInfo`·`commitStatuses`를 모르는 구형 배선, 그리고 `factoryLogins` 미배선은 조용히
-  // 건너뛴다 — "안 쓴다"와 "에러났다"를 가르고, 증거를 확인할 수 없는 채로 잇지 않는다.
-  for (const drop of ["prMergeInfo", "commitStatuses"]) {
+/**
+ * r3 must_fix 2 — **조회 실패는 판정이 아니다.** 예전에는 `502` 하나가 영구 마커를 남겨 그 이슈에서
+ * 이 팔을 영원히 껐다 — KTB-46 그 자체가 API 딸꾹질 한 번으로 되살아나는 모양이었다.
+ */
+test("KTB-46 r3: a transient lookup failure leaves no marker — the next healthy sweep reconciles", async () => {
+  let blowUp = true;
+  const posted = [];
+  const gh = mergedGh({
+    comments: vi.fn(async () => [humanMergeParkComment(), ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    commitStatuses: vi.fn(async () => { if (blowUp) throw new Error("gh api 502"); return factoryStatuses(); }),
+  });
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const first = await sweep(mergedArgs({ gh, transition }));
+  expect(first).toContainEqual({ kind: "error", step: "human-merged", issue: 3, error: expect.stringContaining("gh api 502") });
+  expect(transition).not.toHaveBeenCalled();
+  expect(posted).toEqual([]);                       // 마커도 코멘트도 남지 않았다
+
+  blowUp = false;
+  const second = await sweep(mergedArgs({ gh, transition }));
+  expect(transition).toHaveBeenCalledTimes(1);
+  expect(second).toContainEqual({ kind: "human-merged", issue: 3, pr: 4, mergedBy: "LeeHyeonKyu", closed: true });
+});
+
+test("KTB-46 r3: an unresolvable factory login is transient too — no marker, retried next sweep", async () => {
+  const gh = mergedGh();
+  const transition = vi.fn();
+  const actions = await sweep(mergedArgs({ gh, transition, factoryLogins: async () => ({ ok: false, reason: "gh api user failed — 401" }) }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "error", step: "human-merged", issue: 3, error: expect.stringContaining("gh api user failed — 401") });
+});
+
+/**
+ * r3 must_fix 3 — **거부는 이 PR에 대한 것이지 이 이슈에 대한 것이 아니다.** 보호 경로 이슈의
+ * 정상적인 후속은 "재큐 → 새 주기 → 또 보호 경로 PR → 또 사람이 머지"다. 이슈 단위 마커는 그
+ * 두 번째 머지를 영원히 막았다(그리고 `:unstick`이 탈출구라는 주석은 거짓이었다 — 새 주기의 PR도
+ * 보호 경로를 건드리므로 자동 머지되지 않는다).
+ */
+test("KTB-46 r3: a refusal does not outlive its cycle — unstick, a new PR, a second human merge reconciles", async () => {
+  const posted = [];
+  const history = [humanMergeParkComment()];
+  const gh = mergedGh({
+    comments: vi.fn(async () => [...history, ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    commitStatuses: vi.fn(async () => [
+      { context: "factory/review", state: "success", creatorLogin: "ktb-bot" },
+      { context: "factory/gates", state: "success", creatorLogin: "mallory" },
+    ]),
+  });
+  expect(await sweep(mergedArgs({ gh, transition: vi.fn() })))
+    .toContainEqual(expect.objectContaining({ kind: "human-merged-refused", issue: 3, pr: 4 }));
+
+  // 사람이 `:unstick`으로 재큐했고, 새 주기가 돌아 PR #9가 또 보호 경로에서 멈췄고, 또 사람이 머지했다.
+  history.push(
+    { id: 200, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue — unstick: requeue", createdAt: "2026-09-12T00:00:00Z" },
+    humanMergeParkComment("factory:approved", "protected paths changed — human merge required: .factory/harness.toml (see PR #9)", "2026-09-13T00:00:00Z"),
+  );
+  const healthy = Object.assign(gh, {
+    mergedPrForBranch: vi.fn(async () => 9),
+    commitStatuses: vi.fn(async () => factoryStatuses()),
+  });
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(mergedArgs({ gh: healthy, transition }));
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 3, to: "factory:merged", reason: expect.stringContaining("PR #9") }));
+  expect(actions).toContainEqual({ kind: "human-merged", issue: 3, pr: 9, mergedBy: "LeeHyeonKyu", closed: true });
+});
+
+/**
+ * r3 should_fix 5(c) — `lastRealTransition`이 **진짜** 나중 전이를 가리지 않는다. 재큐된 이슈가 다른
+ * 이유로 다시 needs-human이 되면 그것은 사람의 머지를 기다리는 이슈가 아니다.
+ */
+test("KTB-46 r3: a later genuine transition wins over the parked reason — a requeued issue is not reconciled", async () => {
+  const gh = mergedGh({
+    comments: vi.fn(async () => [
+      humanMergeParkComment(),
+      { id: 2, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue — unstick: requeue", createdAt: "2026-09-12T00:00:00Z" },
+      humanMergeParkComment("factory:ready", "stalled restart limit (2) reached", "2026-09-13T00:00:00Z"),
+    ]),
+  });
+  const transition = vi.fn();
+  const actions = await sweep(mergedArgs({ gh, transition }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "human-merged-skipped", issue: 3, reason: expect.stringContaining("stalled restart limit") });
+});
+
+test("KTB-46 r3: an unmerged PR (no mergedAt) is refused, independent of the mergedPrForBranch filter", async () => {
+  const gh = mergedGh({ prMergeInfo: vi.fn(async () => ({ headSha: MERGED_HEAD, mergeSha: null, mergedAt: null, mergedBy: null })) });
+  const transition = vi.fn();
+  const actions = await sweep(mergedArgs({ gh, transition }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("is not merged") });
+});
+
+test("KTB-46 r3: an unresolvable review roster refuses — a quorum with no yardstick is not a quorum", async () => {
+  const gh = mergedGh();
+  const transition = vi.fn();
+  const actions = await sweep(mergedArgs({ gh, transition, reviewRoster: async () => ({ ok: false, reason: "no review roster for tier weird in CHARTER" }) }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: "no review roster for tier weird in CHARTER" });
+  expect(gh.comment).toHaveBeenCalledWith(3, expect.stringContaining(humanMergeRefusedComment(3, 4)));
+});
+
+test("KTB-46 r3: the arm is cron-only, and is skipped when the wiring is an older double", async () => {
+  // nit 3: quick sweep(스테이지 끝마다 돈다)에서는 아예 돌지 않는다 — 사람의 머지는 그 순간과 무관하다.
+  const quickGh = mergedGh();
+  const quickActions = await sweep(mergedArgs({ gh: quickGh, quick: true }));
+  expect(quickActions.some((a) => String(a.kind).startsWith("human-merged"))).toBe(false);
+  expect(quickGh.mergedPrForBranch).not.toHaveBeenCalled();
+  expect((await sweep(mergedArgs({ gh: mergedGh() }))).some((a) => a.kind === "human-merged")).toBe(true);
+
+  // 조회 함수가 하나라도 없으면 증거를 확인할 수 없다 — 조용히 건너뛴다("안 쓴다"와 "에러났다"를 가른다).
+  for (const drop of ["prMergeInfo", "commitStatuses", "prChecks"]) {
     const old = mergedGh();
     delete old[drop];
     const transition = vi.fn();
@@ -1181,10 +1307,45 @@ test("KTB-46: the arm runs in both the quick and the cron sweep, and is skipped 
     expect(transition, drop).not.toHaveBeenCalled();
     expect(actions.some((a) => String(a.kind).startsWith("human-merged")), drop).toBe(false);
   }
-  const transition = vi.fn();
-  const actions = await sweep(mergedArgs({ gh: mergedGh(), transition, factoryLogins: null }));
-  expect(transition).not.toHaveBeenCalled();
-  expect(actions.some((a) => String(a.kind).startsWith("human-merged"))).toBe(false);
+  for (const dep of ["factoryLogins", "reviewRoster"]) {
+    const transition = vi.fn();
+    const actions = await sweep(mergedArgs({ gh: mergedGh(), transition, [dep]: null }));
+    expect(transition, dep).not.toHaveBeenCalled();
+    expect(actions.some((a) => String(a.kind).startsWith("human-merged")), dep).toBe(false);
+  }
+});
+
+/**
+ * r3 must_fix 1 / should_fix 5(a) — **이음매 테스트.** 위 테스트들은 `transition`을 더블로 막아
+ * 놓으므로, 팔이 만든 `ctxExtra`가 진짜 요구조건을 통과하는지는 아무도 보지 않았다. 여기서는 팔이
+ * 실제로 넘긴 `ctxExtra`를 그대로 `requirementFor("factory:merged")`에 먹인다.
+ */
+test("KTB-46 r3: the arm's real ctxExtra meets the real factory:merged requirement — and a short roster or an over-K round does not", async () => {
+  const HEAD = MERGED_HEAD;
+  const ap = (role, verdict = "approve") => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: `${role}1`, where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
+  const review = (over = {}) => ({ schema: "factory.review.v1", issue: 3, pr: 4, head_sha: HEAD, round: 2, decision: "approved", verdicts: [ap("correctness"), ap("qa")], orchestration: "workflow", guarantee: "verified", ...over });
+  const handoff = (data) => ({ id: 50, createdAt: "2026-09-11T00:40:00Z", body: renderHandoff({ stage: "review", issue: 3, summary: "s", data }) });
+
+  // 팔을 돌려 ctxExtra를 뽑아낸다(전이는 더블이지만, 그 인자는 프로덕션 코드가 만든 진짜 값이다).
+  const capture = async (handoffData) => {
+    const gh = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment(), handoff(handoffData)]) });
+    const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    await sweep(mergedArgs({ gh, transition, reviewRoster: async () => ({ ok: true, roles: ["correctness", "qa", "security", "perf"], tier: "load-bearing" }) }));
+    const { ctxExtra } = transition.mock.calls[0][0];
+    return requirementFor("factory:merged")({ comments: [handoff(handoffData)], ...ctxExtra });
+  };
+
+  // 4명짜리 로스터인데 2명만 판정했다 — r3 전에는 이것이 통과했다(로스터를 안 넘겼으므로).
+  expect((await capture(review())).reason).toMatch(/verdict count 2 != roster size 4/);
+  // 1명만 approve한 handoff도 마찬가지로 막힌다(리뷰가 지적한 바로 그 시나리오).
+  expect((await capture(review({ verdicts: [ap("correctness")] }))).reason).toMatch(/verdict count 1 != roster size 4/);
+  // 라운드가 K를 넘으면 되돌릴 수 없는 이 전이에서는 막는다 — `maxRounds`가 실려야만 무는 검사다.
+  const four = [ap("correctness"), ap("qa"), ap("security"), ap("perf")];
+  expect((await capture(review({ verdicts: four, round: charter.limits.K + 1 }))).reason).toMatch(new RegExp(`round ${charter.limits.K + 1} > K=${charter.limits.K}`));
+  // 만장일치가 아니면 막힌다.
+  expect((await capture(review({ verdicts: [ap("correctness"), ap("qa"), ap("security"), ap("perf", "reject")] }))).reason).toMatch(/not all approve/);
+  // 그리고 로스터를 다 채운 4/4 approve는 통과한다.
+  expect((await capture(review({ verdicts: four }))).ok).toBe(true);
 });
 
 // ── ADR-020 KTB-24 fix — review도 blocked에서 한 번은 다시 밀린다 ───────────────────────────────

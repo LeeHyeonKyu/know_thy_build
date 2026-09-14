@@ -486,9 +486,9 @@ test("KTB-46: the transition CLI cannot inject humanMerged/statusesVerified into
   expect(Object.keys(parseTransitionArgs(["7", "factory:merged"])).sort())
     .toEqual(["human", "issue", "reason", "retry", "to"]);
 
+  // r3 nit 2: 소스 텍스트를 통째로 정규식에 거는 단언은 무해한 서식 변경에 깨지면서 정작 성질은
+  // 증명하지 못한다. 증명하는 것은 위의 두 단언과, "이 이름이 그 파일에 등장하지도 않는다"이다.
   const src = readFileSync(new URL("../bin/transition.js", import.meta.url), "utf8");
-  const literal = /const ctxExtra = \{ gatesChecked: true, \.\.\.\(gatesFile \? \{ gatesFile \} : \{\}\) \};/.test(src);
-  expect(literal, "bin/transition.js must build ctxExtra as a closed literal").toBe(true);
   expect(src).not.toMatch(/humanMerged|statusesVerified/);
 });
 

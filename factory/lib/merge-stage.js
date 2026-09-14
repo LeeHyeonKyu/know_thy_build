@@ -23,12 +23,15 @@ export const REVIEW_EVIDENCE_STATUSES = ["factory/review", "factory/gates"];
  * 락 소유자 불명, 리뷰 라운드 소진…)을 가른다 — 그 둘을 섞으면 사람이 아직 보지도 않은 이슈를
  * 머지된 것으로 이으려 든다.
  *
- * 그래서 문구와 판정은 **같은 출처**에서 나온다: 아래 다섯 사유는 전부 이 정규식의 `source`로
- * 만들어진다. 문구를 고치면 판정이 따라 움직이고, 둘이 조용히 갈라질 수 없다(sweeper가 어제의
- * 문구를 찾는 동안 merge 스테이지가 오늘의 문구를 쓰는 일 — 이 팔이 죽는 가장 조용한 방식이다).
+ * 그래서 문구와 판정은 **같은 출처**에서 나온다: 리터럴이 먼저이고 정규식이 그것에서 만들어지며,
+ * 아래 다섯 사유는 전부 그 리터럴로 조립된다. 문구를 고치면 판정이 따라 움직이고, 둘이 조용히
+ * 갈라질 수 없다(sweeper가 어제의 문구를 찾는 동안 merge 스테이지가 오늘의 문구를 쓰는 일 —
+ * 이 팔이 죽는 가장 조용한 방식이다). 방향이 이쪽인 이유(r3 nit 1): 반대로 하면 정규식의 `source`가
+ * 사람이 읽는 문장이 되고, 누군가 앵커·대안(`|`)·이스케이프를 하나 넣는 순간 다섯 개의 거부 메시지가
+ * 정규식 문법으로 바뀐다.
  */
-export const HUMAN_MERGE_REQUIRED = /human merge required/;
-const HUMAN_MERGE_REQUIRED_TEXT = HUMAN_MERGE_REQUIRED.source;
+const HUMAN_MERGE_REQUIRED_TEXT = "human merge required";
+export const HUMAN_MERGE_REQUIRED = new RegExp(HUMAN_MERGE_REQUIRED_TEXT);
 
 /**
  * 외부 감사 H1b의 판정 (d)를 **순수 함수로** 꺼낸 것. 이 커밋에 `factory/review`·`factory/gates`
@@ -659,10 +662,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     let statuses;
     try { statuses = await d.commitStatuses(live); }
     catch (e) { return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable: ${e?.message || e}`); }
-    if (!Array.isArray(statuses)) return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable — no list returned`);
 
     // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
-    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다.
+    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
+    // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
     const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
     if (!posted.ok) return await reviewRefused(posted.reason);
     record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);

@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
@@ -20,6 +20,7 @@ import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier } from "../lib/context.js";
+import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -2051,10 +2052,14 @@ async function main() {
      * 계산으로 대체됐다 — gates.json은 PR head에서 쓰이지만 이것은 base + diff에서 도출된다.)
      */
     reviewRoster: async () => {
+      // KTB-46 r3: 해석은 `lib/review-roster.js` 하나다 — sweeper의 사람-머지 반영 팔이 같은 함수를
+      // 부른다(판정이 두 벌이면 한쪽 문이 조용히 싸진다). 여기만이 diff로 tier를 올릴 수 있다.
+      // 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
       try {
-        const declared = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
-        const t = await resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier: declared });
-        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", t.tier_effective), tier: t.tier_effective, tier_declared: declared, tier_source: t.tier_source };
+        return await resolveReviewRoster({
+          charter, roles: loadRoles(root), comments: await gh.comments(issue),
+          effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier }),
+        });
       } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
     },
     /**
