@@ -97,7 +97,7 @@ ready_timeout_sec = 90
 # every [commands] entry above resolves through, and templates/** is what every adopter's own
 # harness/CI/.claude gets stamped from by `factory init`. A PR touching them is human-merged, never
 # auto-merged (same L0-informational/L1-refuses split as .factory/**/.claude/**).
-factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md",
+factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md", "CLAUDE.md", "AGENTS*.md", ".mcp*.json",
                  "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
                  "tsconfig*.json", ".eslintrc*", "eslint.config.*",
                  "factory/**", "templates/**", "bin/**"]

@@ -9,40 +9,6 @@ export const meta = {
   ],
 };
 
-// LOADER schema — every workflow shares this exact literal (Plan 3 Global Constraints).
-const LOADER = {
-  type: 'object',
-  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
-  properties: {
-    issue: { type: 'number' },
-    stage: { type: 'string' },
-    tier: { type: 'string' },
-    maturity: { type: 'string' },
-    roster: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['name', 'agentType', 'model'],
-        properties: {
-          name: { type: 'string' },
-          agentType: { type: 'string' },
-          model: { type: 'string' },
-          lessons: { type: 'string' },
-        },
-      },
-    },
-    rounds: { type: 'number' },
-    plan: { type: 'object' },
-    limits: { type: 'object' },
-    spec_path: { type: 'string' },
-    pr: { type: 'number' },
-    head_sha: { type: 'string' },
-    must_fix: { type: 'array', items: { type: 'object' } },
-    disputed: { type: 'array', items: { type: 'object' } },
-    orchestration: { type: 'string' },
-  },
-};
-
 // One reviewer's independent judgement (§7.3, `factory.verdict.v1` + the `role` that L1's roster check
 // needs). `role` is asked for so the answer is self-describing in the log, but the workflow overwrites it
 // with the roster name — a reviewer that misnames itself must not be able to fake a missing role.
@@ -156,21 +122,14 @@ function once(fn) {
 
 phase('Load');
 
-const loaderPrompt =
-  `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
-  `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
-  `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, plan (the context's \`plan\` object verbatim — {mode, max_done_when} — omit it if absent), ` +
-  `limits, spec_path, maturity = harness.maturity, orchestration; ` +
-  `pr/head_sha from handoffs.implement if present; ` +
-  `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
-  `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
-  `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
-  `Note: for stage "triage" the roster in context.json is intentionally empty (triage is a single named ` +
-  `role, not a debate roster) — in that case return roster: [{name: "triage", agentType: "factory-triage", ` +
-  `model: <.factory/roles.toml [triage].model>}].`;
-
-const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader', model: 'sonnet', schema: LOADER }))();
+// 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
+// `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적는 것뿐이었는데, 그 한 번의 복사에 스테이지마다 sonnet
+// 호출 하나가 들었고, 복사는 틀릴 수 있었다 — `model`은 이미 `factory/lib/context.js`가 `def.model`로
+// 들고 있었다. 이제 그 파일이 같은 객체를 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓰고,
+// 디스패처가 그것을 그대로 Workflow의 `args.loaded`로 넘긴다(워크플로 스크립트는 파일을 읽을 수 없다,
+// §4.2.3). 역할 에이전트가 **스스로** 읽는 경로는 그대로 남는다 — 바뀐 것은 스크립트가 제 제어 흐름을
+// 위해 쓰던 재료의 출처뿐이다.
+const loaded = args.loaded ?? null;
 
 const issue = Number(args.issue);
 
@@ -181,7 +140,7 @@ const issue = Number(args.issue);
 if (!loaded) {
   return {
     issue,
-    error: 'loader returned nothing',
+    error: 'context payload missing',
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -194,7 +153,7 @@ if (!loaded) {
 if (Number(loaded.issue) !== issue) {
   return {
     issue,
-    error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
+    error: `context issue mismatch: the context payload says ${loaded.issue}, dispatcher asked for ${args.issue}`,
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -211,6 +170,13 @@ const byRole = new Map();
 for (const r of roster) byRole.set(r.name, r);
 
 const lessonsOf = (r) => (typeof r.lessons === 'string' && r.lessons !== '' ? r.lessons : `.factory/lessons/${r.agentType}.md`);
+
+// 감사 H4 — **리뷰어는 오케스트레이터의 문맥 파일을 받지 않는다.** `factory/lib/context.js`가 역할마다
+// `context.<role>.json`을 따로 쓰고, `cold_read = true`인 역할의 파일에는 handoff가 아예 없다(verifier
+// 판정도, builder의 PR 설명도, 다른 리뷰어의 판정도). 그래서 "읽지 마라"라고 부탁할 필요가 없다 —
+// 이 워크플로는 전체 파일의 경로를 리뷰어에게 **한 번도 주지 않는다**. 읽기는 훅으로 막을 수 없으니
+// (감사 H4의 핵심 지적), 막는 자리를 파일 경계로 옮긴 것이다.
+const contextFor = (r) => (loaded.contexts && loaded.contexts[r.name]) || `.factory/out/context.${r.name}.json`;
 
 // must_fix ids are `<prefix><n>` so that a builder's rework response, and the next round's dispute ruling,
 // can be routed back to the reviewer that raised them without any extra bookkeeping. Longest prefix first:
@@ -261,9 +227,10 @@ for (const d of disputed) {
 
 const disputePrompt = (role, items) => {
   return (
-    `Read \`${args.context}\` — the issue, and the plan handoff's \`non_goals\` and \`files_expected\` ` +
-    `(scope is the one thing §7.5 grounds in the plan, because that is where the contract for this change ` +
-    `was signed). You may read the diff \`git diff origin/<default_branch>...HEAD\` (default branch from ` +
+    `Read \`${contextFor(byRole.get(role) || { name: role })}\` — your own context file. It carries the issue, ` +
+    `the scope fields you are allowed to see, and nothing the builder wrote; if a field you expect is not in ` +
+    `it, that is the answer, not an invitation to go looking elsewhere. ` +
+    `You may read the diff \`git diff origin/<default_branch>...HEAD\` (default branch from ` +
     `\`.factory/harness.toml\` [project].default_branch). Do not read the PR description or any other note ` +
     `the builder wrote beyond the dispute text quoted below.\n\n` +
     `Issue #${issue} (tier ${tier})${pr === undefined ? '' : `, PR #${pr}`}. In the last round the builder ` +
@@ -327,35 +294,29 @@ phase('R1');
 
 // Cold read (§7.1, Plan 3 Global Constraints) excludes what the BUILDER wrote — its summary, the PR
 // description and comments, the commit bodies — and the other reviewers' R1. It does not exclude the
-// contract. Two roles are handed the plan handoff, and only the fields their job needs:
-// spec-conformance judges the contract itself (done_when + files_expected + non_goals + dissent_log,
-// `roles.toml cold_read = false`), and qa reproduces `done_when` as a user (§5.2.3 — id/text/verify/level
-// only; scope is not its call). correctness, security and architecture judge the code and get none of it.
-const PLAN_FIELDS = new Map([
-  ['spec-conformance', '`done_when` (id, text, verify, level), `files_expected`, `non_goals`, `dissent_log`'],
-  ['qa', '`done_when` (id, text, verify, level) and nothing else from it — not `files_expected`, not `non_goals`'],
-]);
-
+// contract: the plan's `done_when` (id/text/verify/level) is in every reviewer's file, because "does the
+// change do what was agreed" is not answerable without it (§5.2.3). What differs by role is how much MORE
+// of the plan is there — spec-conformance (`roles.toml cold_read = false`) judges the contract itself and
+// gets the whole handoff; everyone else gets `done_when` and nothing else of it.
+//
+// 감사 H4 — 이 문단은 이제 **설명**이지 강제가 아니다. 강제는 `context.<role>.json`이 한다: 각 역할이
+// 받는 파일에 그 역할이 볼 수 있는 것만 들어 있고, 프롬프트가 다른 경로를 알려 주지 않는다.
 const r1Prompt = (r) => {
-  const planFields = PLAN_FIELDS.get(r.name);
   const prefix = prefixFor(r.name);
   const upheld = upheldBy.get(r.name) || [];
   return (
-    `Cold read. Read: \`${args.context}\` (the issue text, tier, spec_path` +
-    (planFields === undefined ? '' : `, and \`handoffs.plan\` — ${planFields}`) +
-    `), the spec at its \`spec_path\` if one is named, the diff ` +
+    `Cold read. Read: \`${contextFor(r)}\` — **your own** context file, built for the \`${r.name}\` role. ` +
+    `It carries the issue, tier, roster, spec_path, the PR number and head sha, the gate summary, and the ` +
+    `plan's \`done_when\`; whatever is not in it is not yours to judge on. Then read the spec at its ` +
+    `\`spec_path\` if one is named, the diff ` +
     `\`git diff origin/<default_branch>...HEAD\` (default branch from \`.factory/harness.toml\` ` +
     `[project].default_branch), the files that diff touches, and your lessons file at ` +
     `\`${lessonsOf(r)}\` (treat every entry as a checklist item). Also read \`.factory/out/gates.json\` ` +
     `**if present** — in the review stage the gates for this commit run after you, so it is normally ` +
     `absent; judge the diff and the tests themselves.\n` +
-    (planFields === undefined
-      ? `Do NOT read handoffs.plan, the PR description, the PR comments, the commit message bodies, or ` +
-        `any note the builder wrote — and do not go looking for them. Explanation is persuasion; you judge ` +
-        `the diff.\n`
-      : `You are given those plan fields and no more of it. Do NOT read the PR description, the PR ` +
-        `comments, the commit message bodies, or any note the builder wrote — and do not go looking for ` +
-        `them. The contract is evidence; the builder's explanation is persuasion.\n`) +
+    `Do NOT open \`.factory/out/context.json\` or another role's context file, the PR description, the PR ` +
+    `comments, the commit message bodies, or any note the builder wrote — and do not go looking for them. ` +
+    `Explanation is persuasion; you judge the diff.\n` +
     `\nIssue #${issue} (tier ${tier})${pr === undefined ? '' : `, PR #${pr}`}` +
     `${headSha === undefined ? '' : `, head ${headSha}`} — judge that commit as the \`${r.name}\` reviewer, ` +
     `through the Lens in your own role file.\n` +

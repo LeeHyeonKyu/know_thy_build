@@ -151,6 +151,22 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
       : literal.length ? c("protected.globs-match", "WARN", `no file matches: ${literal.join(", ")}`)
         : c("protected.globs-match", "PASS", wildcard.length ? `(optional, no match): ${wildcard.join(", ")}` : "")
   );
+  /**
+   * 감사 H3의 나머지 절반 — **`[load_bearing].paths`가 아무 파일도 가리키지 않는 드리프트.**
+   * 여기는 `[protected]`와 판정이 반대다(그쪽 와일드카드는 "미래의 경로 모양"을 막아 두는 것이라
+   * 지금 매치가 없는 것이 정상이다): load-bearing 경로는 **지금 존재하는 코드**를 가리켜야 tier 바닥이
+   * 선다. 매치가 0인 항목은 오타이거나, 파일이 옮겨졌거나, 레이아웃이 갈린 것이다 — 이 저장소의
+   * 소스는 `factory/lib/…`인데 설치본은 `.factory/lib/…`이고, 한쪽만 적으면 목록은 그럴듯한데 그 경로를
+   * 건드리는 PR이 조용히 load-bearing이 아니게 된다. 목록이 아예 비어 있으면 바닥은 영원히 standard다 —
+   * 신규 저장소의 정상 상태이므로 FAIL이 아니라 WARN이다(§5.2.1의 하네스 스킬이 채운다).
+   */
+  const lbPaths = h.load_bearing?.paths || [];
+  const lbUnmatched = lbPaths.filter((g) => !files.some((f) => matchesAny([g], f)));
+  out.push(
+    !lbPaths.length ? c("load-bearing.paths-exist", "WARN", "[load_bearing].paths is empty — every diff floors at standard; no PR can be load-bearing tier")
+      : lbUnmatched.length ? c("load-bearing.paths-exist", "FAIL", `no file matches: ${lbUnmatched.join(", ")} — tier floor silently gone (installed layout is .factory/… , this repo's source is factory/…)`)
+        : c("load-bearing.paths-exist", "PASS", `${lbPaths.length} path(s)`)
+  );
   return out;
 }
 

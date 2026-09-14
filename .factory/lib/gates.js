@@ -180,27 +180,40 @@ const entry = (status, log) => ({ status, code: null, duration_ms: 0, log });
 const LEVEL_OF_TIER = { docs: "fast", standard: "full", "load-bearing": "deep" };
 export const levelForTier = (tier) => LEVEL_OF_TIER[tier] || "full";
 
-const TIER_ORDER = ["docs", "standard", "load-bearing"];
+export const TIER_ORDER = ["docs", "standard", "load-bearing"];
 /** 모르는 tier는 standard로 정규화한다 — levelForTier와 같은 보수성이다. */
-const normalizeTier = (t) => (TIER_ORDER.includes(t) ? t : "standard");
+export const normalizeTier = (t) => (TIER_ORDER.includes(t) ? t : "standard");
 /**
- * 두 tier 중 **높은 쪽**. 둘 다 모르는 값이면 `normalizeTier`와 같은 보수성으로 "standard"다 —
- * 모르는 값을 만났을 때 docs(=가장 약한 레벨)로 기우는 것은 자기 신고를 그대로 믿는 것과 같다.
- * (리뷰 batch-1: `run-stage.js`의 `reviewRoster()`가 triage 자기 신고와 `gates.json`의
- * `tier_effective`를 이 함수로 합친다 — export된 이유가 그것이다.)
+ * 두 tier 중 **높은 쪽**. 모르는 값은 `normalizeTier`의 보수성으로 "standard"다 — 모르는 값을
+ * 만났을 때 docs(=가장 약한 레벨)로 기우는 것은 자기 신고를 그대로 믿는 것과 같다.
+ * (감사 H3 / Task 4: `lib/context.js`의 `resolveTier`와 `run-stage.js`의 `reviewRoster()`가
+ * triage 자기 신고와 diff 바닥을 이 함수로 합친다 — export된 이유가 그것이다.)
  */
-export const maxTier = (a, b) => TIER_ORDER[Math.max(TIER_ORDER.indexOf(a), TIER_ORDER.indexOf(b))] ?? normalizeTier(a);
+export const maxTier = (a, b) => TIER_ORDER[Math.max(TIER_ORDER.indexOf(normalizeTier(a)), TIER_ORDER.indexOf(normalizeTier(b)))];
 const DOC_GLOBS = ["docs/**", "*.md"];
+/**
+ * 외부 감사 M12 — **문서처럼 생겼지만 문서가 아닌 것들.** `DOC_GLOBS`만으로 판정하던 시절
+ * `docs/factory/CHARTER.md`(판정 기준 그 자체)와 `.claude/agents/reviewer-*.md`(리뷰어 프롬프트)의
+ * 변경이 `docs` tier로 떨어졌다 — 그 PR은 fast 레벨에 리뷰어 한 명을 받는다. 곧 "무엇이 통과인가"와
+ * "누가 채점하는가"를 고치는 diff가 가장 가벼운 심사를 받았다.
+ *
+ * 이 목록은 **경로의 모양**으로 그것을 막는다(설정·프롬프트·워크플로·템플릿·팩토리 소스). 여기에
+ * `[protected].factory` 글롭이 더해진다 — 저장소마다 다른 "사람이 머지해야 하는 경로"는 정의상
+ * docs tier가 아니다(그 diff는 사람이 읽어야 하는 diff다). 둘 다 **바닥을 올리기만** 한다.
+ */
+export const NEVER_DOCS_GLOBS = [".claude/**", "templates/**", ".factory/**", ".github/**", "factory/**"];
 
 /**
  * diff가 정하는 tier의 **바닥**. tier는 triage 에이전트의 자기 신고이고, 자기 신고는 게이트 레벨을
  * 낮추는 방향으로 틀릴 수 있다 — 코드를 건드린 PR이 "docs"라고 말해도 docs 레벨로 통과시키지 않는다.
+ * (감사 H3: 이 바닥은 게이트 레벨뿐 아니라 **로스터·계획 라운드**의 출처이기도 하다 — `lib/context.js`.)
  */
 export function tierFloor({ changed, harness }) {
   const files = changed?.all || [];
   const lb = harness.load_bearing?.paths || [];
   if (files.some((f) => matchesAny(lb, f))) return "load-bearing";
-  if (files.some((f) => !matchesAny(DOC_GLOBS, f))) return "standard";
+  const prot = harness.protected?.factory || [];
+  if (files.some((f) => !matchesAny(DOC_GLOBS, f) || matchesAny(NEVER_DOCS_GLOBS, f) || matchesAny(prot, f))) return "standard";
   return "docs";
 }
 

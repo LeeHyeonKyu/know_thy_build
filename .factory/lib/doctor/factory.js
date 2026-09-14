@@ -171,12 +171,13 @@ export function checkRoles({ charter, roles, exists, root }) {
   ];
 }
 
-// loader는 roles.toml에 없다 — 로스터 역할이 아니라 workflow의 첫 스텝(P3-R1)이라 어떤 [stage.<name>] 블록에도
-// 속하지 않는다. 그래도 설치되는 역할 파일이고 §7.2 규칙을 그대로 지켜야 하므로 lint 대상에 직접 넣는다.
-const LOADER_AGENT = ".claude/agents/factory-loader.md";
+// 외부 감사 2026-09-14 M5 — `factory-loader`는 없어졌다. workflow의 첫 스텝이 LLM 호출이 아니라
+// `factory/lib/context.js`가 Node에서 만드는 `.factory/out/loaded.json`이 되면서, roles.toml에 없는데도
+// lint 대상에 따로 넣어야 했던 역할 파일 하나가 통째로 사라졌다. 그래서 여기엔 예외 목록이 없다 —
+// lint 대상은 `roles.toml`이 가리키는 경로 전부이고, 그것으로 끝이다.
 
 /**
- * roles.toml이 가리키는 역할 `.md`(+ loader)를 전부 §7.2 규칙으로 lint한다 — 섹션·frontmatter·Examples 개수·
+ * roles.toml이 가리키는 역할 `.md`를 전부 §7.2 규칙으로 lint한다 — 섹션·frontmatter·Examples 개수·
  * lessons 경로·쓰기 금지 훅. 파일이 **없는** 항목은 건너뛴다: 부재는 `roles.agent-files`가 이미 FAIL로 잡고
  * 있어서, 여기서 또 잡으면 같은 사실이 서로 다른 두 줄로 보고되고 사람이 두 번 고치려 든다.
  * id는 `agents.<파일 basename>`이다 — 파일명 = frontmatter name = agent_type 규약(Global Constraints)이라
@@ -185,7 +186,6 @@ const LOADER_AGENT = ".claude/agents/factory-loader.md";
 export function checkAgents({ roles, root, readFile, exists }) {
   const paths = [];
   for (const e of collectAllRoleEntries(roles)) if (e.def.agent && !paths.includes(e.def.agent)) paths.push(e.def.agent);
-  if (!paths.includes(LOADER_AGENT)) paths.push(LOADER_AGENT);
 
   const out = [];
   for (const rel of paths) {

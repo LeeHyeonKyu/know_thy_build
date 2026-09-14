@@ -1,7 +1,7 @@
 import { verdictLine } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
-import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE } from "./integrity.js";
+import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
 import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
@@ -265,7 +265,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // M9(ADR-023): harness.toml의 얼어붙은 섹션도 같은 배열에 실려 온다 — 세 번째 제목으로 가른다.
     const frozen = (pol.violations || []).filter((v) => HARNESS_SECTION_RULE_RE.test(v.rule));
     const frozenFiles = [...new Set(frozen.map((v) => v.file))];
-    const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f));
+    // 외부 감사 H5: 네 번째 제목 — 기존 테스트의 수정·삭제.
+    const testsChanged = (pol.violations || []).filter((v) => TESTS_RULE_RE.test(v.rule));
+    const testFiles = [...new Set(testsChanged.map((v) => v.file))];
+    const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f));
     const sections = [], reasons = [];
     if (additive.length) {
       reasons.push(`agent role sections edited outside Examples/Perspectives — human merge required: ${additive.join(", ")}`);
@@ -308,6 +311,26 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
           "", `바뀐 섹션: ${which.map((s) => `[${s}]`).join(", ")}`,
         ],
         files: frozenFiles,
+      });
+    }
+    /**
+     * 외부 감사 H5 — **기존 테스트를 고치는 것은 "무엇이 통과인가"를 고치는 것이다.** 변조로 다루지
+     * 않는 이유는 스펙이 바뀌면 기존 단언이 실제로 틀리기 때문이고(그때는 이슈 본문의
+     * `tests_changed_allowed:`가 길을 연다 — 그 표식은 **이슈**에 있어야 한다: PR diff 안에 있으면
+     * 그 PR이 스스로를 허가한다), 그럼에도 자동 머지가 안 되는 이유는 그 판단이 사람의 것이기 때문이다.
+     */
+    if (testsChanged.length) {
+      reasons.push(`existing tests modified or deleted — human merge required: ${testFiles.join(", ")}`);
+      sections.push({
+        heading: "기존 테스트의 수정·삭제",
+        why: [
+          "`[protected].tests_are_load_bearing`이 이 저장소의 규약입니다: 테스트는 하중을 받습니다.",
+          "기존 테스트의 단언을 바꾸거나 파일을 지우는 것은 코드를 고치는 일이 아니라 **합격선을**",
+          "고치는 일이라, 팩토리가 스스로 머지하지 않습니다. 스펙이 바뀌어 그 단언이 실제로 틀렸다면",
+          "이슈 본문에 `tests_changed_allowed:`로 그 파일을 적으면 됩니다(외부 감사 H5 / ADR-023).",
+          "", "바뀌거나 사라진 기존 테스트:",
+        ],
+        files: testFiles,
       });
     }
     return await handToHuman({ reason: reasons.join("; "), sections });
