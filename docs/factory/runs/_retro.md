@@ -1,39 +1,67 @@
 # Retro State
 
-- last retro: 없음
+- last retro: 2026-09-14T14:00:58.920Z
 - merges since last retro: 0
 - current N: 1
 
 ## History (last 5)
 
-_이력 없음_
+| at | yield | n_before | n_after | needs_human_since |
+| --- | --- | --- | --- | --- |
+| 2026-09-14T14:00:58.920Z | 0 | 1 | 1 | 6 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 0 |
-| review rounds avg | 0 | 0 |
-| needs-human | 5 | 0 |
-| rejects by role | 없음 | 없음 |
-| reviewer overlap | 없음 | 없음 |
-| unique findings by role | 없음 | 없음 |
-| cost (usd) | 87.51 | 0.00 |
-| tokens | input 1624645 / output 161941 | input 0 / output 0 |
-| retro cost (usd) | 0.00 | 0.00 |
-| retro tokens | input 0 / output 0 | input 0 / output 0 |
-| full retros | — | 0 |
+| merged | 1 | 1 |
+| review rounds avg | 3 | 3 |
+| needs-human | 6 | 6 |
+| rejects by role | spec-conformance 2 | spec-conformance 2 |
+| reviewer overlap | 0.00 (0/2, runs 3) | 0.00 (0/2, runs 3) |
+| unique findings by role | spec-conformance 2 | spec-conformance 2 |
+| cost (usd) | 96.07 | 96.07 |
+| tokens | input 1732420 / output 175679 | input 1732420 / output 175679 |
+| retro cost (usd) | 0.90 | 0.90 |
+| retro tokens | input 2 / output 2419 | input 2 / output 2419 |
+| full retros | — | 1 |
 
 <!-- factory-retro-state:v1 -->
 ```json
 {
   "cursor": {
-    "last_retro_at": null,
+    "last_retro_at": "2026-09-14T14:00:58.920Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
   "n": 1,
-  "history": [],
+  "history": [
+    {
+      "at": "2026-09-14T14:00:58.920Z",
+      "yield": 0,
+      "needs_human_since": 6,
+      "applied": [
+        {
+          "step": "role:plan-operator",
+          "added": [],
+          "deferred": [
+            {
+              "kind": "good",
+              "text": "위치: #7 plan 라운드(`docs/factory/runs/7.md` · plan gha-34822164859) — 제목이 '— for #3'인 파생 harness 이슈. 주장: 'M0에서 (spec-conformance) 규칙 5의 두 번째 분기는 구조적으로 성립할 수 없다'는 결론이 #7 자신의 `.factory/out/context.json`만을 근거로 삼고 있으므로, 규칙이 오적용됐다는 판정은 실제 사건(#3의 review 라운드에서 나온 must_fix)에 대해 증명된 것이 아니라 #7의 현재 상태로부터 유추된 것이다. 근거: #7은 #3의 implement 스테이지가 연 이슈이고(runs/3.md의 `harness: opened factory:harness issue #7`, runs/7.md:1의 '— for #3'), 문제의 판정은 #3의 review에서 내려졌다 — 결론을 쓰려면 #3의 plan handoff와 #3 당시의 `harness.maturity`를 인용해야 한다. 요구: 파생 이슈에서 부모 이슈의 판정을 뒤집는 주장은 부모 이슈의 기록을 인용한 뒤에만 결론으로 쓴다.",
+              "reason": "insufficient-evidence"
+            },
+            {
+              "kind": "perspectives",
+              "text": "**파생 이슈를 읽는 사람의 눈**: 이 이슈가 다른 이슈의 스테이지가 열어준 harness 이슈라면(제목 '— for #N'), 사실관계는 내 `context.json`이 아니라 `docs/factory/runs/N.md`와 그때의 `harness.maturity`에 있다 — 내 컨텍스트만 인용한 결론은 부모 이슈에 대해 아직 증명되지 않았다.",
+              "reason": "insufficient-evidence"
+            }
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    }
+  ],
   "candidates": {
     "lessons": [
       {
@@ -68,8 +96,8 @@ _이력 없음_
     "needs_human": [
       {
         "issue": 3,
-        "reason": "stage artifact missing or invalid: gates RED: failing=lint",
-        "at": "2026-09-14T11:45:16Z"
+        "reason": "protected paths changed — human merge required: factory/cli/status.js, factory/test/status.test.js (see PR #4)",
+        "at": "2026-09-14T13:57:47Z"
       },
       {
         "issue": 7,
@@ -89,22 +117,65 @@ _이력 없음_
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
+    "merged": 1,
+    "review_rounds_avg": 3,
+    "rejects_by_role": {
+      "spec-conformance": 2
+    },
+    "review_runs": 3,
+    "findings_total": 2,
     "overlapping_findings": 0,
-    "unique_findings_by_role": {},
+    "unique_findings_by_role": {
+      "spec-conformance": 2
+    },
     "overlap_ratio": 0,
-    "needs_human": 5,
+    "needs_human": 6,
     "usage": {
-      "cost_usd": 87.511645,
+      "cost_usd": 96.068543,
       "tokens": {
-        "input": 1624645,
-        "output": 161941
+        "input": 1732420,
+        "output": 175679
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 0.900202,
+      "tokens": {
+        "input": 2,
+        "output": 2419
       }
     }
-  }
+  },
+  "stats_total": {
+    "merged": 1,
+    "review_rounds_avg": 3,
+    "rejects_by_role": {
+      "spec-conformance": 2
+    },
+    "review_runs": 3,
+    "findings_total": 2,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {
+      "spec-conformance": 2
+    },
+    "overlap_ratio": 0,
+    "needs_human": 6,
+    "usage": {
+      "cost_usd": 96.068543,
+      "tokens": {
+        "input": 1732420,
+        "output": 175679
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 0.900202,
+      "tokens": {
+        "input": 2,
+        "output": 2419
+      }
+    },
+    "retros": 1
+  },
+  "deferred_proposals": [],
+  "deletion_candidates": []
 }
 ```
