@@ -144,8 +144,17 @@ stateDiagram-v2
 
 `needs_human --> {ready, planned, rework, awaiting_review}`는 **사람 전용 재시도 엣지**다(ADR-020 KTB-32).
 그래프의 나머지와 달리 이 넷은 `TRANSITIONS`에 들어 있지 않다 — `canTransition(from, to, {human:true})`
-에서만 열리므로 **스크립트는 어떤 경로로도 밟을 수 없고**(시도하면 평소의 그래프 거부 코멘트가 남는다),
-전이 코멘트의 `by=human reason=retry`가 그 사실의 증거로 남는다. 사람이라고 아무 자리로나 가지는 않는다:
+에서만 열린다. `human:true`는 호출자의 자기 신고일 뿐이라 그래프 검사 혼자서는 "정말 사람인가"를
+보증하지 못한다 — 그래서 **두 자물쇠**가 그 앞을 지킨다(리뷰 3c63672 MF-2): (1) `hooks/block-dangerous.sh`가
+PreToolUse 경계에서 `transition.js … --human`/`--retry` 셸 호출 자체를 차단하고(래퍼·`$( )`·체인·백슬래시
+형태까지 — MF-3/재리뷰 #1·#4가 넓혀 둔 같은 경계 클래스를 쓴다), (2) `bin/transition.js`가
+`refuseHumanFlag`로 `CLAUDE_PROJECT_DIR`나 `GITHUB_ACTIONS`가 서 있으면(=에이전트가 띄운 스테이지
+세션이거나 CI 러너다 — `run-stage.js`가 매 스테이지의 `claude -p` env에 `CLAUDE_PROJECT_DIR`를 심는다)
+`gh`를 부르기도 전에 exit 2로 거절한다. **스크립트는 이 두 자물쇠를 다 지나야만 도달하는 자리에
+있는데, 그 자리 자체가 스크립트에게는 없다**(시도하면 훅이나 CLI가 먼저 막는다; 어느 쪽도 뚫으면
+그래프의 `human:true` 검사가 마지막으로 있고, 시도했는데도 그래프가 거부하면 평소의 거부 코멘트가
+남는다) — 전이 코멘트의 `by=human reason=retry`가 세 층을 모두 지났다는 증거로 남는다. 사람이라고
+아무 자리로나 가지는 않는다:
 `transition.js`가 이슈 코멘트에서 **중단 지점**을 다시 계산해 목적 라벨과 대조하고, 다르면 전이 없이 exit 2다.
 중단 지점 = 마지막으로 `→ blocked` 또는 `→ needs_human`으로 간 전이의 `from`(단 그 `from`이 그 자신
 정지 상태인 전이는 건너뛴다 — `blocked → needs_human`은 sweeper의 에스컬레이션이지 일이 멈춘 자리가 아니다);

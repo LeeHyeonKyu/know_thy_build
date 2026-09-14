@@ -16,7 +16,14 @@
  * 두 가지 안전장치가 이 파일의 존재 이유다:
  *   - **진행 읽기가 실패해도 하트비트는 죽지 않는다.** `progress()`가 던지면 1번 두 줄만 보낸다.
  *     스테이지의 생명선이 관측 기능 때문에 끊기면 안 된다(그러면 sweeper가 살아 있는 런을 재큐한다).
- *   - **바뀐 게 없으면 PATCH하지 않는다.** 2분 주기 × 35분 = 17번의 쓰기이고, 대부분은 같은 내용이다.
+ *   - **매 틱 PATCH가 실제로 나간다 — "바뀐 게 없으면 쓰지 않는다"는 여기서는 죽은 최적화다**
+ *     (리뷰 3c63672 A3 nit, 2026-09-14). `next === lastBody` 비교는 남아 있지만, `head`의 `last: `가
+ *     매번 새 타임스탬프를 싣고 마커의 `updated`도 매 틱 갱신되므로 본문이 매번 달라져 이 비교는
+ *     실제로는 참이 되지 않는다 — 2분 주기 × 35분이면 ~17번을 그대로 PATCH한다. 그리고 그게 맞다:
+ *     sweeper의 30분 stale 판정은 하트비트가 계속 새로 찍히는 것 자체에 기댄다 — "달라진 게 없으면
+ *     쓰지 않는다"를 실제로 구현하면 오래 도는 스테이지의 갱신 간격이 늘어나 좀비 판정을 앞당긴다.
+ *     이 비교는 (예: `now`가 같은 값을 두 번 돌려주는 등) 본문이 우연히 같아지는 경우를 위한 안전망일
+ *     뿐, 쓰기 횟수를 줄이는 장치가 아니다.
  */
 
 import { progressMarker, parseProgressMarker } from "./progress.js";
@@ -122,7 +129,7 @@ export async function startHeartbeat({ gh, issue, stage, runnerId, intervalMs = 
   }
   const timer = setInterval(() => {
     const next = body(now());
-    if (next === lastBody) return;                                   // 바뀐 게 없으면 쓰지 않는다
+    if (next === lastBody) return;                                   // 안전망일 뿐이다 — 실제로는 거의 항상 false(위 docblock)
     lastBody = next;
     gh.patchComment(id, next).catch(() => {});
   }, intervalMs);

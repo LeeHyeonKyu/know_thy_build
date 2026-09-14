@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { run } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
-import { parseTransitionArgs, transition } from "../lib/transition.js";
+import { parseTransitionArgs, refuseHumanFlag, transition } from "../lib/transition.js";
 
 const USAGE = [
   "usage: transition <issue> [<to-label>] [--human] [--retry] [--reason <text>]",
@@ -20,6 +20,19 @@ const USAGE = [
 const args = parseTransitionArgs(process.argv.slice(2));
 if (args.error) { console.error(`transition: ${args.error}\n\n${USAGE}`); process.exit(1); }
 const { issue, to, human, retry, reason } = args;
+
+// 리뷰 3c63672 MF-2 — 두 번째 자물쇠(`refuseHumanFlag`의 근거는 `lib/transition.js`에 있다). 첫 번째는
+// `hooks/block-dangerous.sh`(셸 경계)고, 이것은 그 훅을 뚫고 여기까지 온 호출을 위한 방어선이다.
+// `gh`를 부르기 전에(네트워크 호출 없이) 거절한다.
+if ((human || retry) && refuseHumanFlag(process.env)) {
+  console.error(
+    "transition: --human/--retry refused — this looks like an agent session or CI runner " +
+    "(CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set), not a person's own shell. " +
+    "--human/--retry is the person's edge (ADR-020 KTB-32, review 3c63672 MF-2) — stages transition in-process."
+  );
+  process.exit(2);
+}
+
 const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
 // 전이 경로다 — 게이트 판정 파일을 읽어서 넘긴다(gatesChecked). 파일이 없으면 없는 대로 넘기고
 // requirements가 "확인 안 됨"으로 거부한다. 사람이 실행해도 판정 파일을 대신 써주지는 않는다.

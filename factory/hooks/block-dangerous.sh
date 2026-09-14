@@ -176,6 +176,19 @@ echo "$c" | grep -Eq "${A}gh[[:space:]]+label[[:space:]]+(create|edit|delete)[^;
 echo "$c" | grep -Eq "${A}gh[[:space:]]+label[[:space:]]+clone${Z}" && block "gh label clone (it replaces the repo's label set wholesale)"
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/labels[^;&|]*factory:" && block "gh api repo label endpoint on factory:*"
 
+# ── 리뷰 review-3c63672 MF-2 — `transition.js --human`/`--retry`는 **사람의** 엣지다(ADR-020 KTB-32) ──
+# `--human`은 `canTransition(from, to, {human:true})`을 열어 `needs-human → {ready, planned, rework,
+# awaiting-review}`로 되돌아가는, 그래프 나머지와 달리 `TRANSITIONS`에 없는 엣지다. `human:true`는
+# 호출자의 신원을 증명하지 않는다 — **누가** 그 플래그를 세웠는지는 이 CLI가 모른다. `Bash(*)`가
+# 허용된 채로 그 사실이 아무 데서도 강제되지 않으면 에이전트가 스스로를 "사람"이라 자칭해 리뷰
+# 게이트를 건너뛴 채 이슈를 되돌릴 수 있다(라벨 그래프의 정규 검사 전부를 우회하는 것과 같은 급이다).
+# 이 훅이 첫 번째 자물쇠다 — 두 번째는 `bin/transition.js` 자신의 `CLAUDE_PROJECT_DIR`/`GITHUB_ACTIONS`
+# 검사(에이전트 세션·CI 러너에서는 그 값이 서 있다 — `run-stage.js`가 매 스테이지의 `claude -p` env에
+# `CLAUDE_PROJECT_DIR`를 심는다). 목적 라벨 유무·플래그 순서를 가리지 않는다: `--human` 하나만 있어도
+# `RETRY_SCRIPT_REFUSED`로 거절되는 것이 아니라 그대로 `human:true`가 넘어가 그래프가 열리기 때문이다.
+echo "$c" | grep -Eq "${A}[^;&|]*transition\.js[^;&|]*[[:space:]]--(human|retry)${Z}" \
+  && block "transition.js --human/--retry is the person's edge (ADR-020 KTB-32) — stages transition in-process, not through this CLI"
+
 # ── 최종 리뷰 MF-3 / SF-2: 브랜치 보호·룰셋은 **L0 그 자체다** ────────────────────────────────────
 # 모든 스테이지의 env에 `GH_TOKEN=FACTORY_BOT_TOKEN`이 있다. 그 토큰으로 `required_status_checks`나
 # `enforce_admins`를 한 번 끄면 `factory/integrity`와 리뷰 게이트는 **존재하되 아무것도 막지 않는** 상태가

@@ -211,6 +211,42 @@ test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
+// ── 리뷰 review-3c63672 MF-2: transition.js --human/--retry is the person's edge (ADR-020 KTB-32) ──
+// `--human`은 `canTransition(...,{human:true})`을 열어 `needs-human → {ready, planned, rework,
+// awaiting-review}`로 되돌아가는, 나머지 그래프와 달리 `TRANSITIONS`에 없는 엣지다. 이 CLI는 누가
+// 그 플래그를 세웠는지 모른다 — `Bash(*)`가 허용된 채로 아무 층도 막지 않으면 에이전트가 스스로를
+// "사람"이라 자칭해 리뷰 게이트를 건너뛴 채 이슈를 되돌릴 수 있다. 이 훅이 첫 번째 자물쇠, 두 번째는
+// `bin/transition.js` 자신의 env 검사(transition.test.js)다.
+test("block-dangerous: transition.js --human/--retry is blocked; the ordinary script path (no flag) stays allowed (review 3c63672 MF-2)", async () => {
+  const blocked = [
+    "node .factory/bin/transition.js 3 --human --retry",
+    "node .factory/bin/transition.js 3 --retry --human",
+    "node .factory/bin/transition.js 3 factory:awaiting-review --human",
+    "node .factory/bin/transition.js 3 --human",
+    "node factory/bin/transition.js 3 --retry",
+    "\\node .factory/bin/transition.js 3 --human --retry",             // 백슬래시 이스케이프
+    "out=$(node .factory/bin/transition.js 3 --human --retry)",         // 명령 치환
+    "true && node .factory/bin/transition.js 3 --human",                // `&&` 체인
+    "{ node .factory/bin/transition.js 3 --human; }",                   // 그룹
+    'sh -c "node .factory/bin/transition.js 3 --human --retry"',        // 인터프리터 래퍼
+  ];
+  // 목적지 라벨을 명시한 사람 전이는 그래프에서 중단 지점과 대조되므로(§3.2) --human만으로도
+  // 열리는 엣지인 것은 그대로다 — 훅은 플래그의 존재만 본다.
+  const allowed = [
+    "node .factory/bin/transition.js 3 factory:planned",   // 스크립트 경로 — --human이 없으면 그대로 허용
+    "node .factory/bin/transition.js 3 factory:queue",
+    "node .factory/bin/transition.js 3",
+    "node .factory/bin/run-stage.js implement",
+    "cat .factory/bin/transition.js",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 30000);
+
 // ── ADR-020 최종 리뷰 MF-3: 위험한 동사는 **토큰 경계**에서 잡힌다 ──────────────────────────────
 // r1까지의 앵커는 `(^|[;&|[:space:]])`였다 — `(`도 백틱도 `=`도 없어서, 동사가 눈앞에 그대로 있는
 // `out=$(gh pr merge 5 --squash)`가 **어떤 규칙에도 걸리지 않았다**. `.claude/settings.json`의

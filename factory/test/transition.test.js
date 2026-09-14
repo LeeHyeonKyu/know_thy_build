@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { transition, parseTransitionArgs } from "../lib/transition.js";
+import { transition, parseTransitionArgs, refuseHumanFlag } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, resumePoint } from "../lib/retro/issue-comments.js";
 
@@ -374,3 +374,27 @@ test("KTB-32: parseTransitionArgs — label, --human, --reason, and --retry in a
   expect(parseTransitionArgs([]).error).toMatch(/usage|issue/i);
   expect(parseTransitionArgs(["x", "factory:queue"]).error).toMatch(/usage|issue/i);
 });
+
+// ── 리뷰 review-3c63672 MF-2: refuseHumanFlag (bin/transition.js's own env refusal, the second lock) ──
+// 첫 번째 자물쇠는 `hooks/block-dangerous.sh`(셸 경계, hooks.test.js). `refuseHumanFlag`는 그 훅을
+// 뚫고 온 호출을 위한 방어선의 판정부다 — 순수 함수로 뺀 것은 "env가 서 있으면 false를 반환한다"를
+// 프로세스를 띄우지 않고 고정하기 위해서다(CI가 아닌 로컬에서도 결정적이다).
+test("refuseHumanFlag: CLAUDE_PROJECT_DIR or GITHUB_ACTIONS marks the caller as not-a-person; neither set is a person's shell (review 3c63672 MF-2)", () => {
+  expect(refuseHumanFlag({ CLAUDE_PROJECT_DIR: "/repo" })).toBe(true);
+  expect(refuseHumanFlag({ GITHUB_ACTIONS: "true" })).toBe(true);
+  expect(refuseHumanFlag({ CLAUDE_PROJECT_DIR: "/repo", GITHUB_ACTIONS: "true" })).toBe(true);
+  expect(refuseHumanFlag({})).toBe(false);
+  expect(refuseHumanFlag({ FACTORY_REPO: "o/r" })).toBe(false);
+});
+
+// bin/transition.js가 이 판정을 실제로 물어 `gh`를 부르기 **전에** exit 2로 거절하는지는 실행해서
+// 고정한다 — 거절이 네트워크 호출보다 먼저이므로 gh 인증이 없는 샌드박스에서도 안전하게 돈다.
+test("bin/transition.js refuses --human/--retry before any gh call when CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set (review 3c63672 MF-2)", async () => {
+  const { run } = await import("../lib/exec.js");
+  const bin = new URL("../bin/transition.js", import.meta.url).pathname;
+  for (const extraEnv of [{ CLAUDE_PROJECT_DIR: "/repo" }, { GITHUB_ACTIONS: "true" }]) {
+    const r = await run("node", [bin, "3", "--human", "--retry"], { env: extraEnv });
+    expect(r.code, JSON.stringify(extraEnv)).toBe(2);
+    expect(r.stderr, JSON.stringify(extraEnv)).toMatch(/--human\/--retry refused/);
+  }
+}, 30000);
