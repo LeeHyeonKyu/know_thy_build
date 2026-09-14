@@ -249,7 +249,7 @@ export async function reUpTestEnv({ run, cwd, harness }) {
  * - `blocked`(base 워크트리를 못 만들어 "PR이 깨뜨렸다"를 판정할 수 없음)가 하나라도 있으면
  *   status를 BLOCKED로 올린다 — GREEN도 RED도 아닌, 사람이 봐야 하는 상태다.
  */
-export async function runStageGates({ run: injectedRun, cwd, harness, stage, tier, level: levelArg, base, quarantine = { quarantined: [] }, gh, issue, readFile = defaultReadFile, now, saveQuarantine }) {
+export async function runStageGates({ run: injectedRun, cwd, harness, stage, tier, level: levelArg, base, quarantine = { quarantined: [] }, gh, issue, readFile = defaultReadFile, now, saveQuarantine, transitionIssue = null }) {
   // 이 아래의 **모든** 하위 프로세스는 자격증명 없는 환경에서 돈다(ADR-020 fix round 1). 게이트·
   // 증명 게이트·분류는 전부 `harness.commands`, 곧 PR이 쓴 코드를 bash로 실행한다 — merge 잡의
   // 토큰이 그 안에 있으면 게이트 스크립트 한 줄이 4b 검사를 건너뛰고 스스로 머지할 수 있다.
@@ -342,9 +342,30 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
         const title = `flaky: ${c.id}`;
         const existing = open.find((i) => i.title === title);
         if (existing) { result.flaky_issues.push(existing.number); continue; }
-        // 격리 이슈를 못 만들어도 판정은 계속한다 — gh 실패로 스테이지를 죽이지 않는다.
-        try { result.flaky_issues.push(await gh?.createIssue({ title, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["factory:queue", "factory:flaky"] })); }
-        catch (e) { result.flaky_issues.push(`error: ${e?.message || e}`); }
+        /**
+         * 격리 이슈를 못 만들어도 판정은 계속한다 — gh 실패로 스테이지를 죽이지 않는다.
+         *
+         * KTB-44 / ADR-025 (리뷰 should_fix 3) — 이슈는 **`backlog`로 태어나고**, 큐로 가는 한 걸음은
+         * 다른 모든 큐 전이와 같은 게이트를 지난다. 예전에는 `labels: ["factory:queue", …]`로 바로
+         * 태어나서, 리허설한 적 없는 하네스 위에서도 triage 런이 시작됐다 — 게이트를 통째로 비켜 가는
+         * 유일한 생산 경로였다. 거부되면 이슈는 `backlog`에 남고(사람의 `:next`가 집는다) 그 이유를
+         * 코멘트로 적는다. `harness-request.js`의 하네스 이슈는 여전히 바로 큐로 간다(그건 설계다 —
+         * 리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 잠긴다).
+         */
+        try {
+          const n = await gh?.createIssue({ title, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"] });
+          result.flaky_issues.push(n);
+          if (n != null) {
+            const t = transitionIssue
+              ? await transitionIssue({ issue: n, to: "factory:queue", reason: `flaky test harvested while implementing #${issue}` })
+              : { ok: false, reason: "no transition wiring in this gate run — the issue stays in backlog" };
+            if (!t?.ok) {
+              (result.flaky_issues_backlogged ??= []).push({ issue: n, reason: t?.reason || "unknown" });
+              try { await gh?.comment(n, `<!-- factory-flaky-not-queued issue=${n} -->\n이 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이가 거부됐습니다: ${t?.reason || "unknown"}\n\n하네스를 러너에서 한 번 돌린 뒤(\`factory rehearse\`) \`/know-thy-build:next\`로 큐에 넣으세요(ADR-025).`); }
+              catch { /* 기록의 실패가 수확의 실패는 아니다 */ }
+            }
+          }
+        } catch (e) { result.flaky_issues.push(`error: ${e?.message || e}`); }
       }
       result.tests.failed = result.tests.failing.length;
     }

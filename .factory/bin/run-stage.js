@@ -18,6 +18,8 @@ import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
+import { makeRehearsalChecker } from "../lib/rehearsal.js";
+import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
@@ -1768,7 +1770,7 @@ export const overlayLine = (ov) => {
  * 마커 코멘트를 남긴다 — 락은 이미 이 프로세스가 쥐고 있으므로, 라벨 이벤트로 따라 뜨는 GitHub의
  * triage 잡은 claim에 실패해 exit 0으로 물러난다(의도된 설계, 중복 실행 방지).
  */
-export function makeLocalEntry({ gh, issue, stage, env }) {
+export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
   return async () => {
     if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
     const it = await gh.issue(issue);
@@ -1779,6 +1781,16 @@ export function makeLocalEntry({ gh, issue, stage, env }) {
     // null disjunct). Two STATE labels at once (an invalid label combo) makes factoryLabelOf throw —
     // that's not swallowed here, the caller's best-effort catch (run-stage.js runStage) records it.
     if (factoryLabelOf(it.labels) === "backlog") {
+      /**
+       * KTB-44 / ADR-025 (리뷰 r2 nf-2) — **이 자리도 리허설을 지난다.** 여기는 `transition()`을 거치지
+       * 않는 유일한 큐 진입이었고(라벨을 직접 쓴다), 그래서 `transition.js <n> factory:queue --human`은
+       * 거부당하는데 `factory run triage <n>`은 통과하는 비대칭이 있었다 — 그 뒤로 plan·implement·review는
+       * **러너에서** 한 번도 리허설하지 않은 하네스 위로 간다. 정확히 own-calendar의 실패다.
+       * `transition()`으로 우회하지 않는 이유는 그 함수가 요구조건 검사와 두 번째 전이 코멘트를 더하기
+       * 때문이다 — 같은 검사기를 부르고 같은 문장으로 거부하는 것으로 충분하다.
+       */
+      const r = await rehearsal?.();
+      if (!r || r.ok !== true) return `local entry refused: ${r?.reason || REHEARSAL_UNWIRED}`;
       await gh.setFactoryLabel(issue, "factory:queue");
       await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
       return "local entry: backlog → factory:queue";
@@ -1863,7 +1875,8 @@ async function main() {
     backPressure: () => backPressure({ gh, charter, quarantine: loadQuarantine(root), thresholds: harness.gates.thresholds }),
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
-    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env }),
+    // KTB-44 (r2 nf-2): 로컬 진입도 다른 네 생산자와 **같은** 검사기를 지난다.
+    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
     /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
     issueLabels: async () => (await gh.issue(issue)).labels,
     /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의
@@ -1984,7 +1997,12 @@ async function main() {
     gates: async (ctx) => {
       if (!GATED_STAGES.has(stage)) return null;
       const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default) : ctx.tier;
-      const result = await runStageGates({ run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile, saveQuarantine: (q) => writeQuarantine(root, q) });
+      const result = await runStageGates({
+        run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
+        saveQuarantine: (q) => writeQuarantine(root, q),
+        // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
+        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
+      });
       mkdirSync(join(root, ".factory/out"), { recursive: true });
       writeFileSync(gatesPath, JSON.stringify(result, null, 2));
       console.log(verdictLine(result));
@@ -2226,8 +2244,14 @@ async function main() {
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     /** merge 전용(KTB-23): 이 이슈의 본문 — `Blocks: #<n>`이 있으면 하네스 이슈였다는 뜻이다. */
     issueBody: async () => (await gh.issue(issue)).body,
-    /** merge 전용(KTB-23): **다른** 이슈의 전이(위 `transition`은 이 이슈에 묶여 있다). */
-    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage }),
+    /**
+     * merge 전용(KTB-23): **다른** 이슈의 전이(위 `transition`은 이 이슈에 묶여 있다).
+     * KTB-44 / ADR-025 — 하네스 이슈가 머지된 뒤의 주차 해제(step 9)도 리허설 게이트를 지난다:
+     * 방금 머지된 것이 **하네스**라면 지문이 바뀌었고, 그 하네스는 아직 러너에서 돌아 본 적이 없다.
+     * 거부되면 그 이슈는 `factory:needs-info`에 남고 sweeper가 매 주기 다시 시도한다 — 사람이
+     * `factory rehearse`를 돌리는 순간 통과한다(push 트리거가 보통 그보다 먼저 돈다).
+     */
+    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
     /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
      * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */

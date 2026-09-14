@@ -3193,3 +3193,118 @@ KTB-40의 그 교훈) · `factory doctor`의 새 검사 `qa.evidence-probe` ·
   진행 중이던 이슈는 리뷰를 한 라운드 더 돌아야 한다(그 라운드가 매니페스트를 만든다).
 - [ ] `reviewer-qa`/`reviewer-spec-conformance` 프롬프트를 커스터마이즈한 어댑터는 도구 이름
   (`.factory/bin/qa-evidence.js`)을 프롬프트에 넣어야 한다 — 없으면 `doctor`가 FAIL한다.
+
+---
+
+## ADR-025 리허설 — 첫 이슈 전에 하네스를 러너에서 한 번 — 2026-09-14
+
+**질문**: 소유자가 2026-09-14에 물었다 — "새 프로젝트에 이식할 때마다 이 짓을 해야 하나?" 그 "이 짓"은
+own-calendar의 첫 다크 이슈가 요구한 **하네스 디버깅 3라운드**다. 결함은 셋이었고, 라운드마다 정확히
+하나씩 드러났다:
+
+| 라운드 | 무엇이 드러났나 | 왜 그때까지 안 보였나 |
+|---|---|---|
+| 1 | `[runtime].setup`이 Flutter를 설치하지 않아 게이트가 **exit 127** | setup은 러너에서만 돈다 — 사람의 노트북에는 이미 Flutter가 있었다 |
+| 2 | `flutter analyze`가 **기존 info**에 걸려 exit 1 | 게이트 명령을 그 저장소 전체에 대해 돌려 본 적이 없었다 |
+| 3 | `cd client` 뒤의 `test_files`/`test_one`이 **레포 루트 기준 경로**를 받아 파일을 못 찾음 | 자리표시자는 스테이지가 채운다 — 하네스를 읽는 눈에는 보이지 않는다 |
+
+**doctor는 이것을 볼 수 없다 — 구조적으로.** `--no-run`·`--offline`은 정적 검사이고(텍스트와 글롭),
+`--run`은 명령을 **사람의 노트북에서** 돌린다: 러너의 PATH도, `.factory/actions/setup`이 만든 상태도,
+스테이지가 실제로 넘기는 인자도 그 자리에는 없다. 세 결함은 전부 "러너에서 명령이 실제로 돌 때만"
+참/거짓이 갈리는 명제였다. 그래서 doctor를 더 똑똑하게 만드는 길은 없다 — **한 번 돌려 보는 잡**이 있어야 한다.
+
+**판결**: `factory-rehearse.yml` — 이슈도 라벨도 `claude -p`도 없는 잡 하나가, 스테이지가 러너에서 하는
+일을 그대로 한 번 한다. 열한 스텝이고 **하나가 RED여도 멈추지 않는다**(3라운드의 비용은 결함이 하나씩
+드러났기 때문에 생겼다 — 한 번의 리허설은 전부 보여줘야 한다):
+
+`lint`(레포 전체) · `unit`(전체) · `test_files`(`[test].test_glob`의 실재하는 파일 하나) ·
+`test_one`(그 파일의 첫 테스트 이름 — 못 읽으면 SKIPPED) · `lint_file`(소스 파일 하나) ·
+`qa-evidence`(`.factory/out/qa/` 쓰기 프로브) · `clean-check`(KTB-39 기준선 대비 쓰기 금지 클린 체크) ·
+`prove-test`(base 워크트리 생성 + 의존성 설치 — 감사 M2의 그 기계) · `gh-auth` · `gh-labels` ·
+`gh-push`(`factory/rehearsal-<run id>` 스크래치 브랜치로 `git push --dry-run`).
+
+각 스텝에는 상한이 있다(`timeout`, 124는 실패와 구별해 적는다). 판정은 표 하나로 잡 요약과
+`.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 **같은 모양으로** 남는다.
+
+**게이트**: GREEN인 리허설만 저장소에 기록된다 — 변수 `FACTORY_REHEARSED = sha256(harness.toml +
+CHARTER 프론트매터)`. 변수 쓰기는 repo **admin**을 요구하는데 ADR-021의 권장 구성에서 워크플로가 쥔
+것은 비-admin 봇 토큰이므로, 실제로는 **폴백이 본선이다**: `factory/rehearsal` commit status를 **지문
+경로(`.factory/harness.toml`·`docs/factory/CHARTER.md`)를 건드린 커밋들**에 올린다. 브랜치 head가 아닌
+이유는 r1 리뷰가 재현한 결함이다 — head는 무관한 머지마다 움직여서 **첫 머지 직후** 기록이 고아가
+되고, 그 순간부터 모든 큐 전이가 "harness changed…"로 거부됐다(아무것도 바뀌지 않았는데).
+
+**그 묶음은 느슨하다(tolerant), 정확하지 않다**(r2). 쓰기는 경로마다 **최신 커밋**에 하나씩 올리고
+(같은 커밋이면 한 번), 읽기는 경로마다 **최근 10개** 커밋을 후보로 훑어 `factory/rehearsal` 상태에서
+지금의 지문을 찾으면 그 자리에서 통과시킨다. 정확한 한 커밋에 묶었던 r1은 두 가지로 깨졌다:
+(a) 쓰기(러너의 로컬 이력)와 읽기(경로별 최신 커밋의 날짜 비교)가 **커밋 시각이 같은 초**일 때 서로
+다른 커밋을 골랐고 — git의 날짜 해상도는 1초다 — 그러면 리허설을 몇 번 다시 돌려도 큐가 영영 열리지
+않았다(결정론적으로 엇갈린 채 고정된다); (b) **해시를 바꾸지 않는 편집**(harness의 주석 한 줄, CHARTER의
+산문 — 지문은 프론트매터만 센다)이 새 커밋을 만들어 기록을 고아로 만들었다. 이제 쓰기와 읽기는 같은
+원격 조회를 쓰고(러너도 예외가 아니다), 후보 훑기가 (b)를 흡수한다. 느슨해진 것은 **어느 커밋에서 찾는가**
+뿐이고 통과의 조건은 그대로다: 후보 어디에서도 지금의 지문과 같은 해시를 찾지 못하면 거부한다.
+
+읽을 때는 **두 출처를 모두** 보고 하나라도 맞으면 연다 — 한때 admin 토큰으로 변수를 썼다가 봇 토큰으로
+옮긴 저장소가 얼어붙은 변수 때문에 영영 큐를 못 여는 일이 없도록(여전히 fail closed: 둘 다 어긋나면 거부).
+
+`transition.js`는 `→ factory:queue`를 그 해시로 막는다(스크립트도 사람도): 기록이 없거나 해시가
+어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"** 한 문장으로 거부하고,
+이슈 상태는 한 글자도 바뀌지 않는다. 다른 목적 라벨은 리허설을 묻지 않는다 — 멈춘 이슈를 앞으로 미는
+길까지 막으면 사고가 하나 더 는다.
+
+**그 검사는 opt-out이다, opt-in이 아니다**(r1 리뷰 must_fix 3). 처음 구현은 `rehearsal` 인자를 준
+호출자만 검사했는데, 그것은 이 함수에 세 번째 자물쇠를 둔 이유를 그대로 되돌리는 모양이었다:
+`node -e "import('.factory/lib/transition.js').then(m => m.transition({gh, issue, to:'factory:queue'}))"`
+한 줄이 — **인자를 빼는 것만으로** — 게이트를 껐다. 이제 큐로 가는 전이는 배선된 검사기가 있거나
+명시적 `skipRehearsal: true`가 있어야 하고, 둘 다 없으면 거부한다. 프로덕션 호출자는 **전부** 배선한다:
+사람의 `bin/transition.js`, sweeper의 하네스 주차 해제(`bin/sweep.js`), merge 스테이지의 step 9
+(`transitionOther`), flaky 수확(`gates.js` — 이슈를 `backlog`로 만든 뒤 게이트를 지나 큐로 민다),
+그리고 **로컬 진입**(`run-stage.js`의 `makeLocalEntry` — `factory run triage <n>`이 `backlog` 이슈에
+라벨을 직접 쓰던 자리다. r2 리뷰가 찾은 마지막 우회였다: 그 자리가 열려 있으면 사람의
+`transition.js … --human`은 거부당하는데 `factory run triage <n>`은 통과하고, 그 뒤의 plan·implement·
+review는 러너에서 한 번도 리허설하지 않은 하네스 위로 간다 — 정확히 own-calendar의 실패다.
+`transition()`으로 우회시키지 않은 이유는 그 함수가 요구조건 검사와 두 번째 전이 코멘트를 더하기
+때문이다: 같은 검사기를 부르고 같은 문장으로 거부하는 것으로 족하다).
+`skipRehearsal`은 **테스트 전용**이다. 로봇의 재큐가 거부되는 것은 사고가 아니다: 그 팔들은 매 주기
+다시 시도하고(이미 실패 편향이다), 사람이 `factory rehearse`를 돌리는 순간 통과한다 — 그리고 사람이
+`:unstick`에서 거부당하는데 로봇만 조용히 통과하는 비대칭이 사라진다.
+
+**리허설은 기본 브랜치에서만 돈다.** 워크플로 잡에 `if: github.ref == format('refs/heads/{0}',
+github.event.repository.default_branch)`가 걸리고, 체크아웃도 그 브랜치를 본다. `rehearse.js` 자신도
+`GITHUB_REF_NAME`을 하네스의 기본 브랜치와 대조해 다르면 **기록 없이 exit 1** 한다. 이중인 이유:
+`gh workflow run --ref <branch>`는 레포 write면 누구나(= 모든 에이전트 스테이지가) 부를 수 있고
+`.factory/**`는 브랜치 push 시점에 훅도 integrity도 보지 않는다 — 그 조합이면 브랜치의 스크립트가
+main의 지문으로 GREEN을 기록할 수 있었다(게이트 명령을 한 줄도 돌리지 않고).
+
+**기록의 성패는 판정의 일부다.** `rehearsal.json`은 `recorded: {via, variable, status, sha}`를 싣고,
+`ok`는 "스텝 전부 GREEN **그리고** 어느 한쪽 기록이 성공"일 때만 참이다. r1에서는 표가 GREEN이면
+아티팩트도 `ok: true`였고 기록 실패는 잡 로그에만 남아서, 잡이 빨간데 `factory rehearse`는 "the queue
+is open"을 찍고 0으로 끝났다 — 사람은 첫 이슈가 거부될 때까지 그 사실을 몰랐다.
+
+**왜 CHARTER 프론트매터까지인가**: `tier_default`·`limits`·`merge.human_gate`·`plan.*`는 러너가 무엇을
+얼마나 도는지를 바꾼다. 반대로 산문(NEVER_AUTOMATE 설명, Definition of Done의 문장)은 지문에서 뺀다 —
+그것까지 세면 문서 한 줄을 고칠 때마다 큐가 닫힌다.
+
+**등급의 셋**: doctor `rehearsal.current`는 어긋난 기록을 **FAIL**(큐가 실제로 막혀 있다), 기록 없음을
+**WARN**(설치 직후의 정상 상태 — 채택 순서가 install → doctor → rehearse → 첫 이슈다), 오프라인을
+**WARN**(판정 불가)으로 가른다. `factory rehearse`(CLI)는 워크플로를 띄우고, 기다리고, 같은 표를 찍고,
+RED면 non-zero로 끝난다.
+
+**대가와 잔여 위험**:
+- 잡 하나(≈ unit 한 번 + 설치 한 번)의 비용과 시간이 채택마다 더해진다. 3라운드(다크 라운드 ×3 =
+  triage/plan/implement/review 세 바퀴)와 바꾼 값이라 크지 않다 — 그것이 소유자 질문의 답이다:
+  "이 짓"은 한 번의 잡으로 줄어든다.
+- 리허설은 **하네스가 러너에서 도는가**를 증명하지, 그 게이트가 좋은 게이트인가를 증명하지 않는다
+  (`lint`가 아무것도 검사하지 않는 명령이면 doctor의 `gates.lint-noop`이 그것을 본다).
+- 리허설과 첫 이슈 사이에 러너 이미지가 바뀌면(ubuntu-latest의 이동) 지문은 그대로인데 사실이 바뀐다.
+  `push` 트리거(하네스·CHARTER 변경)와 사람의 재실행이 그 창을 좁히는 전부다.
+- `gh-push`는 `--dry-run`이라 권한은 증명하되 브랜치를 만들지 않는다. 스크래치 삭제는 관용적으로
+  덧붙인다(예전 런이 진짜로 만든 것이 남아 있을 수 있다).
+- 하네스 이슈는 여전히 `factory:queue`로 바로 태어난다 — `harness-request.js`의 `ensureHarnessIssue`와
+  retro의 성숙도 격차 이슈(`bin/retro.js`, 같은 부류다: 둘 다 `factory:harness` 라벨을 함께 단다).
+  그것이 **설계**다: 리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 통째로 잠긴다.
+  반대로 flaky 수확은 `backlog`로 태어나 게이트를 지난다(r1 리뷰 should_fix 3). 이 둘이 게이트를
+  지나지 않는 **유일한** 생산자이고, 그 사실은 여기에 적혀 있어야 grep으로 찾을 수 있다.
+- 지문 해시의 구분자는 `\u0000` **이스케이프**로 적는다. r1은 리터럴 NUL 바이트를 넣었고, 그 두
+  바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
+  정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
+  `factory/bin/lint.js`의 `nul-byte` 규칙이 재발을 막는다.

@@ -60,3 +60,30 @@ test("main(['doctor','--no-run','--offline']) wires a real run() — it returns 
     console.log = log; console.error = err;
   }
 }, 30000);
+
+// ── KTB-44 (리뷰 nit 7): `factory rehearse`의 디스패치 줄을 실제로 밟는다 ─────────────────────
+// 스위치의 오타는 런타임에만 드러난다 — HELP에 적혀 있는 명령이 `unknown factory command`로 떨어지는
+// 사고는 사람이 그 명령을 처음 부르는 순간에야 보인다.
+test("main(['rehearse']) reaches the rehearse command (not the unknown-command branch)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb-cli-rehearse-"));
+  await realRun("git", ["init", "-q", "-b", "main"], { cwd: root });
+  const cwd = process.cwd();
+  const log = console.log, err = console.error;
+  const lines = [];
+  console.log = (s) => lines.push(String(s)); console.error = (s) => lines.push(String(s));
+  try {
+    process.chdir(root);
+    // gh 세션이 없는 임시 저장소라 repo 해석이나 dispatch에서 실패한다 — 확인하는 것은 "그 명령에
+    // 닿았다"이지 성공이 아니다(unknown 분기였다면 HELP가 찍힌다).
+    const code = await main(["rehearse"]);
+    expect(typeof code).toBe("number");
+    expect(lines.join("\n")).not.toMatch(/unknown factory command/);
+  } finally {
+    process.chdir(cwd);
+    console.log = log; console.error = err;
+  }
+}, 30000);
+
+test("HELP names rehearse — the adoption order is install → doctor → rehearse → first issue", () => {
+  expect(HELP).toMatch(/factory rehearse/);
+});

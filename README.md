@@ -90,6 +90,7 @@ Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipel
 
 - `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files). On the Claude side that's 4 workflow scripts (`.claude/workflows/factory-{triage,plan,implement,review}.js`), 14 role agents (`.claude/agents/*.md`), and 4 dispatcher commands (`.claude/commands/factory-*.md`)
 - `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
+- `factory rehearse` — run the harness **once on the runner** before the first issue (ADR-025). See "Adopting a repo" below
 - `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`). It also picks the **merge-authority mode** from the secrets it finds — see below
 
 **Secrets — two actors, two tokens (ADR-021).** The factory wants merge power to be unreachable from any stage an agent runs in, by permission rather than by blocking command patterns:
@@ -105,6 +106,43 @@ With both actor tokens set, `factory bootstrap` requires **1 approving review fr
 - `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
 - **Live progress in the heartbeat comment (ADR-022)** — a running stage edits one issue comment every 2 minutes with the current step, every agent's status and last tool, and tokens/cost so far, plus a machine-readable `<!-- factory-progress:v1 {…} -->` marker that also lands in `docs/factory/runs/<n>.md` when the run ends. It is read off the session transcripts the agents already write, never from tool *results* — so no file content or secret can ride out on a public comment.
 - `factory board` — the viewer for all of that, across repositories. See below.
+
+### Adopting a repo: install → doctor → **rehearse** → first issue (ADR-025)
+
+`factory doctor` PASS means the harness is *coherent*, not that its commands *run on the runner* — it is a
+static check (`--no-run`/`--offline`), and `--run` runs the commands on your laptop, with your PATH and your
+toolchain. The first repo adopted after that distinction was noticed (own-calendar, 2026-09-14) paid for it
+with **three dark rounds**, one defect each: `[runtime].setup` never installed the toolchain so the gate exited
+127; `analyze` exited 1 on pre-existing infos; `test_files`/`test_one` were handed repo-root-relative paths
+after the harness did `cd client`. None of the three is visible anywhere but a runner.
+
+```bash
+npx know-thy-build factory rehearse      # dispatches factory-rehearse.yml, waits, prints the table
+```
+
+The job runs what a stage runs, with no issue, no labels and no `claude -p`: `lint` (whole repo) · `unit`
+(full) · `test_files` on a real file from `[test].test_glob` · `test_one` on a real test name from that file ·
+`lint_file` on a source file · a write probe into `.factory/out/qa/` · the no-write clean check against the
+setup baseline · the prove-test machinery (base worktree + dependency install) · `gh api user`, the label list
+and a `git push --dry-run` to a scratch branch. Every step is timed and capped; **one RED does not stop the
+rest** — the three-round bill came from finding the defects one at a time. The verdict is one markdown table
+in the job summary and in `.factory/out/rehearsal.json` (uploaded, scrubbed, 7 days).
+
+A GREEN rehearsal writes `FACTORY_REHEARSED = sha256(harness.toml + CHARTER frontmatter)` as a repo variable
+and — where variables need admin, which is the normal case under the two-actor setup, since the workflow holds
+a non-admin bot token — as a `factory/rehearsal` commit status on the **fingerprint commit**: the last
+default-branch commit that touched `.factory/harness.toml` or `docs/factory/CHARTER.md`. (Not the branch head:
+that moves on every unrelated merge, which would orphan the record and shut the queue from the first merge
+onward.) Both sources are read and either may open the queue; if neither matches, the queue stays shut.
+
+`transition.js` refuses `→ factory:queue` — for scripts and for people — while that record is missing or its
+hash no longer matches: *harness changed since the last rehearsal — run `factory rehearse`*. The check is
+opt-out, not opt-in: a queue transition needs a wired checker (the human CLI, the sweeper's harness unpark, the
+merge stage, the flaky harvester all wire it) or an explicit test-only bypass, and refuses without one. The job
+itself only runs on the default branch, and a recording failure makes the run RED — `factory rehearse` says
+"not recorded — queue stays closed" and exits non-zero rather than claiming the queue is open. `factory doctor`
+says the same thing as `rehearsal.current` (PASS / WARN when never rehearsed / FAIL when stale), and a push to
+the default branch that touches `.factory/harness.toml` or `docs/factory/CHARTER.md` re-runs the rehearsal by itself.
 
 ### factory board
 

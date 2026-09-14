@@ -67,7 +67,12 @@ export async function proveTest({ run, cwd, harness, base, addedTests, tmp = `${
         return { ok: false, misconfigured: true, inconclusive: [...addedTests], detail: `base dependency install failed (${install}, exit ${ins.code}) — the base run cannot prove anything: ${String(ins.stderr || ins.stdout || "").trim().slice(0, 200)}` };
       }
     }
-    const cmd = harness.commands.test_files.replace("{files}", addedTests.map(q).join(" "));
+    // KTB-44 리뷰 should_fix 8 — `replaceAll`이다. `replace`는 **첫 번째** 자리표시자만 채우므로
+    // `{files}`가 두 번 나오는 하네스(`cd client && npx vitest {files} --reporter=… {files}` 같은
+    // 모양)에서는 두 번째가 리터럴 `{files}`로 셸에 남아, 게이트가 "그런 파일 없음"으로 죽는다.
+    // 리허설(rehearsal.js)은 처음부터 `replaceAll`이었다 — 리허설이 스테이지와 다르게 돌면 리허설이
+    // 증명하는 것은 스테이지가 아니다.
+    const cmd = harness.commands.test_files.replaceAll("{files}", addedTests.map(q).join(" "));
     const r = await run("bash", ["-lc", cmd], { cwd: tmp });
     if (r.code === 0) return { ok: false, detail: `new tests passed on base ${base.slice(0, 7)} — they do not prove the change` };
     const output = `${r.stdout || ""}\n${r.stderr || ""}`;
@@ -85,7 +90,7 @@ export async function repeatNewTests({ run, cwd, harness, addedTests, times, ful
   if (!(times >= 1)) return { ok: false, misconfigured: true, runs: [], detail: "new_test_repeats missing" };
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES, runs: [] };
   if (!addedTests?.length) return { ok: true, runs: [], detail: "no new tests" };
-  const cmd = harness.commands.test_files.replace("{files}", addedTests.map(q).join(" "));
+  const cmd = harness.commands.test_files.replaceAll("{files}", addedTests.map(q).join(" "));
   const runs = [];
   for (let i = 0; i < times; i++) {
     const noisy = i === 0 && fullSuiteCmd ? run("bash", ["-lc", fullSuiteCmd], { cwd }) : null;

@@ -148,6 +148,21 @@ npx know-thy-build factory doctor --no-run   # 먼저 계약만
 npx know-thy-build factory doctor            # 그다음 실제 실행
 ```
 
+### Step 6: 리허설 — **첫 이슈 전에 러너에서 한 번** (ADR-025)
+
+doctor PASS는 "하네스가 계약을 지킨다"이지 "이 명령이 러너에서 돈다"가 아니다. 그 거리는 own-calendar에서
+다크 라운드 3개로 나타났다(setup이 툴체인을 안 깔아 exit 127, analyze가 기존 info에 걸려 exit 1,
+`cd <subdir>` 뒤의 레포 루트 기준 경로). 전부 러너에서만 보인다.
+
+```bash
+npx know-thy-build factory rehearse          # factory-rehearse.yml을 띄우고 기다렸다가 표를 찍는다
+```
+
+표가 RED면 그 줄(스텝 이름 + 실패 첫 3줄)이 곧 다음에 고칠 하네스 항목이다 — 고치고 다시 돌린다.
+GREEN이어야 `→ factory:queue`가 열린다(`transition.js`가 `harness.toml`+CHARTER 프론트매터 해시로 막는다:
+*harness changed since the last rehearsal — run `factory rehearse`*). doctor의 `rehearsal.current`가 같은
+사실을 말하고, 하네스를 고친 뒤에는 **언제나** 이 스텝을 다시 지난다.
+
 ## 경로 (c): 승격 PR 검토
 
 `factory:harness` 라벨은 **이슈에만** 붙는다 — retro(`factory/bin/retro.js`)가 `createIssue`로 그 이슈를 열 때 `[factory:queue, factory:harness]`를 준다. 그 이슈가 일반 파이프라인(plan→implement→review)을 타면서 열리는 구현 PR에는 라벨이 없다: `gh pr create --draft`로 열리고(`factory/lib/gh.js`의 `createPr`), 브랜치는 `claude/fq-<issue>`, 본문에 `Closes #<issue>`가 있다. 그래서 PR은 라벨로 찾지 않고 **head 브랜치로** 찾는다. 찾은 PR이 `harness.toml`(또는 다른 `[protected]` 경로)을 건드리므로 merge 스테이지(L1)가 자동 머지를 거부한다 — 사람이 GitHub UI에서 머지해야 한다(`factory/integrity` 체크는 변조만 보므로 GREEN일 수 있다). 이 스킬은 그 diff를 사람이 5분 안에 판단할 수 있는 요약으로 바꾼다.
@@ -201,6 +216,6 @@ gh pr comment <pr> --body-file <tmp>
 
 ## Closing
 
-- (a)/(b): `factory doctor` PASS가 이 경로의 완료 기준이다.
+- (a)/(b): `factory doctor` PASS **그리고 `factory rehearse` GREEN**이 이 경로의 완료 기준이다(ADR-025) — doctor는 계약을, 리허설은 러너를 증명한다.
 - (c): 리뷰 요약 코멘트와 GitHub 링크까지가 이 스킬의 끝이다. 머지는 사람의 몫이다.
 - 세 경로 모두 `[protected]`·`[load_bearing]`을 좁히는 방향의 변경은 만들지 않는다(Must not).
