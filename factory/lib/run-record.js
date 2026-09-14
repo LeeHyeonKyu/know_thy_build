@@ -89,10 +89,13 @@ const EVIDENCE = new RegExp(`^${REVIEW_EVIDENCE_PREFIX} run_id=(\\S+) runner=(\\
  * 둘 이상이고 내용이 서로 다르면 그것도 null이다 — 그 파일에 둘 중 하나를 지어낸 사람이 있다는 뜻이고,
  * 되돌릴 수 없는 단계 앞에서 둘 중 하나를 고를 근거가 우리에게 없다.
  */
-export function parseReviewEvidence(text, { runId = null } = {}) {
-  if (typeof text !== "string" || !text) return null;
-  const want = runId === null || runId === undefined ? "" : String(runId).trim();
-  if (!want || want === "none") return null;
+/**
+ * run 기록 본문의 **모든** review-evidence 줄. 판정 경로는 이것을 직접 쓰지 않는다(그 자리는 아래
+ * `parseReviewEvidence`의 신원 필터다) — 이것을 쓰는 것은 **관측**이다: retro가 창 안의 승인들을
+ * 훑어 qa claim 구성을 집계한다(§`retro` stats의 `qa_na_ratio`).
+ */
+export function parseReviewEvidenceAll(text) {
+  if (typeof text !== "string" || !text) return [];
   let section = null;
   const found = [];
   for (const raw of text.split("\n")) {
@@ -101,7 +104,6 @@ export function parseReviewEvidence(text, { runId = null } = {}) {
     if (m) { section = { stage: m[1], at: m[2], runnerId: m[3].trim() }; continue; }
     const e = EVIDENCE.exec(line);
     if (!e) continue;
-    if (e[1] !== want) continue;
     const round = Number(e[4]);
     found.push({
       stage: section?.stage ?? null,
@@ -122,8 +124,24 @@ export function parseReviewEvidence(text, { runId = null } = {}) {
       qaClaims: e[10] && e[10] !== "none" ? e[10] : null,
     });
   }
+  return found;
+}
+
+export function parseReviewEvidence(text, { runId = null } = {}) {
+  const want = runId === null || runId === undefined ? "" : String(runId).trim();
+  if (!want || want === "none") return null;
+  const found = parseReviewEvidenceAll(text).filter((r) => r.runId === want);
   if (!found.length) return null;
   const shape = (r) => `${r.stage}|${r.runnerId}|${r.headSha}|${r.round}|${r.decision}|${r.verdicts}|${r.qaManifest ?? "none"}|${r.qaClaims ?? "none"}`;
   if (new Set(found.map(shape)).size > 1) return null;
   return found[found.length - 1];
+}
+
+/**
+ * `3c/1na` → `{ claims: 3, na: 1 }`. 읽을 수 없으면 null — 구형 기록(필드 없음)과 깨진 값을
+ * 집계에서 똑같이 **빼기** 위해서다(지어낸 0은 비율을 거짓으로 낮춘다).
+ */
+export function parseClaimCountsLabel(label) {
+  const m = /^(\d+)c\/(\d+)na$/.exec(String(label ?? "").trim());
+  return m ? { claims: Number(m[1]), na: Number(m[2]) } : null;
 }

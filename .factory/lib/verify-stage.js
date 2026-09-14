@@ -21,6 +21,13 @@ const SCHEMA_OF = { triage: "triage.v1", plan: "plan.v1", implement: "implement.
 export const QA_EVIDENCE_UNUSABLE = "qa evidence manifest unusable";
 export const qaEvidenceUnusable = (reasons = []) => reasons.some((r) => String(r).startsWith(QA_EVIDENCE_UNUSABLE));
 
+/**
+ * 최종 리뷰 A-SF1 — qa **리뷰어 자신의** 증거 부족을 부르는 접두사. 위의 것과 반대편이다: 경로는
+ * 멀쩡하고 산출물도 멀쩡하며, 비어 있는 것은 커버리지다. 그래서 이 문장은 스테이지 실패가 아니라
+ * 이 라운드의 **reject**로 배달된다(합성 must_fix → `factory:rework`).
+ */
+export const QA_EVIDENCE_INCOMPLETE = "qa evidence incomplete:";
+
 const GATED_STAGES = ["implement", "review", "merge"];
 const listOf = (a) => (a && a.length ? a.join(",") : "none");
 
@@ -195,6 +202,8 @@ export function neverAutomateHits(paths, globs) {
 
 export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null }) {
   const reasons = [];
+  /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
+  let qaShortfall = null;
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
    * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
@@ -299,11 +308,26 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
      * ③ SF-3이 막 만든 거절("that is a report, not a review")이 "무시해도 되는 인프라" 채널로 배달된다.
      * 그래서 여기서는 **id를 부르는 거절**로 내보낸다 — 등급은 평범한 산출물 실패(사람에게 간다)다.
      */
+    /**
+     * 최종 리뷰 A-SF1 — **그 부족은 스테이지의 실패가 아니라 이 라운드의 판정이다.** r2는 "누구의
+     * 부족인가"까지 갈랐지만 배달 채널은 그대로 `reasons`였다: `v.ok`가 거짓이 되고, run-stage는 그
+     * 사유에 기본 접두어(`stage artifact missing or invalid`)를 붙여 `factory:needs-human`으로 보냈다.
+     * 두 번 틀린다 — ① `review.v1` 산출물은 멀쩡한데 산출물 탓을 하고(ADR-024가 없애려던 바로 그
+     * 문장 계열), ② 리뷰어 넷이 돈 라운드가 통째로 버려지고 **한 라운드 더 돌면 풀릴 일**이 사람에게
+     * 올라간다 — 등급이 판단이 아니라 누락(다른 분기의 기본값)으로 정해진 자리였다.
+     *
+     * 그래서 `reasons`가 아니라 `qaShortfall`로 내보낸다. run-stage가 그것을 이 라운드의 집계에
+     * **합성 must_fix**(role qa, id를 부른다)로 접어 넣어 `factory:rework`(또는 K 한도의 평소 경로)로
+     * 보낸다. 접두어도 자기 것을 쓴다(`qa evidence incomplete:`).
+     */
     const reviewerSide = (qaManifest.missing?.length ?? 0) > 0
       || (qaManifest.reasons || []).some((r) => String(r).startsWith(ALL_NA_PREFIX));
     if (qaManifest.ok !== true && reviewerSide) {
       const named = qaManifest.missing?.length ? `spec-evidence-missing: ${qaManifest.missing.join(", ")}` : (qaManifest.reasons || [])[0];
-      reasons.push(`qa evidence is incomplete — ${named}; the qa reviewer records it with \`node .factory/bin/qa-evidence.js record|attach|na\` and checks it with \`finish\``);
+      qaShortfall = {
+        ids: [...(qaManifest.missing || [])],
+        reason: `${QA_EVIDENCE_INCOMPLETE} ${named}; the qa reviewer records it with \`node .factory/bin/qa-evidence.js record|attach|na\` and checks it with \`finish\``,
+      };
     } else if (qaManifest.ok !== true) {
       reasons.push(`${QA_EVIDENCE_UNUSABLE}: ${qaManifest.reason || "unknown"} — this is the evidence path, not the builder's work (ADR-024); .factory/out/qa/<issue>/manifest.json is written by \`node .factory/bin/qa-evidence.js\``);
     } else {
@@ -317,5 +341,5 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
   // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)
   // 지금까지 여기서 버려졌다. run-stage가 이 값을 run 기록 한 줄로 남긴다(§run-stage.js `artifact:`).
-  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null };
+  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall };
 }

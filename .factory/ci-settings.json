@@ -5,6 +5,8 @@
       "Bash(gh variable set*)",
       "Bash(gh api -X DELETE*)",
       "Bash(gh api --method DELETE*)",
+      "Bash(gh workflow run factory-rehearse*)",
+      "Bash(gh workflow run factory-rehearse.yml*)",
       "Read(.env)",
       "Read(.env.*)",
       "Read(**/.env)",

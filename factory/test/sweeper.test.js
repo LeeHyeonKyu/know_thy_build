@@ -37,11 +37,17 @@ test("sweep: stale heartbeat → release + retry comment + planned; retries exha
   expect(actions.map((a) => a.kind)).toEqual(expect.arrayContaining(["requeue", "retries-exhausted", "blocked-escalated"]));
 });
 
+/**
+ * 최종 리뷰 B-nit 1 — 사람-머지 팔은 dep이 하나라도 없으면 **소리를 내고** 건너뛴다(구형 더블이
+ * 정확히 그 상태다). 이 파일의 다른 팔들을 보는 단언에서는 그 한 줄을 걷어낸다.
+ */
+const withoutWiringSkip = (actions) => actions.filter((a) => !String(a?.reason ?? "").startsWith("wiring incomplete:"));
+
 test("sweep: fresh heartbeat is left alone", async () => {
   const gh = { searchIssues: async (l) => (l === "factory:in-progress" ? [{ number: 7 }] : []), comments: async () => [{ id: 1, body: "<!-- factory-heartbeat issue=7 -->\nlast: 2026-09-11T00:50:00Z", createdAt: "x" }], comment: vi.fn(), patchComment: vi.fn() };
   const transition = vi.fn();
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
-  expect(transition).not.toHaveBeenCalled(); expect(actions).toEqual([]);
+  expect(transition).not.toHaveBeenCalled(); expect(withoutWiringSkip(actions)).toEqual([]);
 });
 
 test("sweep: a failing issue is isolated — error recorded, other issues still processed", async () => {
@@ -103,7 +109,7 @@ test("sweep: a fresh factory:ready transition, and one whose stage is alive (fre
     comment: vi.fn(), patchComment: vi.fn(),
   };
   const d1 = vi.fn();
-  expect(await sweep(stalledArgs({ gh: fresh, dispatchStage: d1 }))).toEqual([]);
+  expect(withoutWiringSkip(await sweep(stalledArgs({ gh: fresh, dispatchStage: d1 })))).toEqual([]);
   expect(d1).not.toHaveBeenCalled();
 
   // 전이는 오래됐지만 스테이지가 살아 있다(plan은 37분 동안 `factory:ready`에 머문다) — 하트비트가 증거다
@@ -116,7 +122,7 @@ test("sweep: a fresh factory:ready transition, and one whose stage is alive (fre
     comment: vi.fn(), patchComment: vi.fn(),
   };
   const d2 = vi.fn();
-  expect(await sweep(stalledArgs({ gh: alive, dispatchStage: d2 }))).toEqual([]);
+  expect(withoutWiringSkip(await sweep(stalledArgs({ gh: alive, dispatchStage: d2 })))).toEqual([]);
   expect(d2).not.toHaveBeenCalled();
 });
 
@@ -208,7 +214,7 @@ test("sweep: no transition comment at all → nothing is dispatched (age unknown
     comment: vi.fn(), patchComment: vi.fn(),
   };
   const dispatchStage = vi.fn();
-  expect(await sweep(stalledArgs({ gh, dispatchStage }))).toEqual([]);
+  expect(withoutWiringSkip(await sweep(stalledArgs({ gh, dispatchStage })))).toEqual([]);
   expect(dispatchStage).not.toHaveBeenCalled();
 });
 
@@ -582,7 +588,7 @@ test("sweep: label-set repair isolates a failing issue — one bad apple doesn't
 test("sweep: label-set repair is inert when gh.issueList isn't wired (older test doubles) — no error, no crash", async () => {
   const gh = { searchIssues: vi.fn(async () => []), comment: vi.fn(), patchComment: vi.fn() };
   const actions = await sweep({ gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {} });
-  expect(actions).toEqual([]);
+  expect(withoutWiringSkip(actions)).toEqual([]);
 });
 
 test("sweep: a failing gh.issueList for label-set repair is isolated — recorded, sweep still completes", async () => {
@@ -998,6 +1004,16 @@ const humanMergeParkComment = (from = "factory:approved", reason = "protected pa
   body: `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script -->\n${from} → factory:needs-human — ${reason}`,
   createdAt: at,
 });
+/**
+ * 최종 리뷰 A-MF2 — **이 주기가 `factory:approved`에 실제로 닿았다는 기록.** 이 팔은 이것 없이는
+ * 잇지 않는다: 그 라벨의 요구조건(qa 증거 게이트를 포함한)이 이 커밋에 대해 한 번도 통과한 적 없는
+ * 채로 되돌릴 수 없는 `factory:merged`가 붙는 길을 닫는다.
+ */
+const approvedComment = (at = "2026-09-11T00:20:00Z", id = 0) => ({
+  id,
+  body: "<!-- factory-transition:v1 from=factory:awaiting-review to=factory:approved by=script -->\nfactory:awaiting-review \u2192 factory:approved",
+  createdAt: at,
+});
 /** 팩토리 계정이 머지된 head sha에 올린 리뷰·게이트 상태 — 이 팔의 게이트 증거 절반이다. */
 const factoryStatuses = () => [
   { context: "factory/review", state: "success", creatorLogin: "ktb-bot" },
@@ -1025,7 +1041,7 @@ const mergedGh = (over = {}) => {
   const posted = [];
   const base = {
     searchIssues: vi.fn(async (l, opts) => (l === "factory:needs-human" && opts?.state === "all" ? [{ number: 3, updatedAt: HUMAN_MERGE_AT }] : [])),
-    comments: vi.fn(async () => [humanMergeParkComment(), ...posted]),
+    comments: vi.fn(async () => [approvedComment(), humanMergeParkComment(), ...posted]),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
     patchComment: vi.fn(), issueList: async () => [],
     mergedPrForBranch: vi.fn(async () => 4),
@@ -1081,7 +1097,7 @@ test("KTB-46 (b): a needs-human issue stopped for any OTHER reason is left alone
 test("KTB-46 (c): a merged PR the transition refuses is refused once — the next sweep adds no second refusal", async () => {
   const posted = [];
   const gh = mergedGh({
-    comments: vi.fn(async () => [humanMergeParkComment(), ...posted]),
+    comments: vi.fn(async () => [approvedComment(), humanMergeParkComment(), ...posted]),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
   });
   /**
@@ -1215,7 +1231,7 @@ test("KTB-46 r3: a transient lookup failure leaves no marker — the next health
   let blowUp = true;
   const posted = [];
   const gh = mergedGh({
-    comments: vi.fn(async () => [humanMergeParkComment(), ...posted]),
+    comments: vi.fn(async () => [approvedComment(), humanMergeParkComment(), ...posted]),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
     commitStatuses: vi.fn(async () => { if (blowUp) throw new Error("gh api 502"); return factoryStatuses(); }),
   });
@@ -1248,7 +1264,7 @@ test("KTB-46 r3: an unresolvable factory login is transient too — no marker, r
  */
 test("KTB-46 r3: a refusal does not outlive its cycle — unstick, a new PR, a second human merge reconciles", async () => {
   const posted = [];
-  const history = [humanMergeParkComment()];
+  const history = [approvedComment(), humanMergeParkComment()];
   const gh = mergedGh({
     comments: vi.fn(async () => [...history, ...posted]),
     comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
@@ -1263,6 +1279,8 @@ test("KTB-46 r3: a refusal does not outlive its cycle — unstick, a new PR, a s
   // 사람이 `:unstick`으로 재큐했고, 새 주기가 돌아 PR #9가 또 보호 경로에서 멈췄고, 또 사람이 머지했다.
   history.push(
     { id: 200, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue — unstick: requeue", createdAt: "2026-09-12T00:00:00Z" },
+    // A-MF2 — 주기 2도 자기 승인을 남긴다(창은 마지막 재큐 이후다: 주기 1의 승인은 여기서 쓰이지 않는다).
+    approvedComment("2026-09-12T23:00:00Z", 201),
     humanMergeParkComment("factory:approved", "protected paths changed — human merge required: .factory/harness.toml (see PR #9)", "2026-09-13T00:00:00Z"),
   );
   const healthy = Object.assign(gh, {
@@ -1291,9 +1309,12 @@ test("KTB-46 r5: a previous cycle's merged PR is skipped audibly, and the real s
   const posted = [];
   // 주기 2: 재큐됐고, 새 PR #9가 또 보호 경로에서 멈췄고, 그 리뷰는 #9의 head를 서술한다.
   const history = [
+    approvedComment(),
     humanMergeParkComment(),
     { id: 200, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue — unstick: requeue", createdAt: "2026-09-12T00:00:00Z" },
     reviewHandoff(CYCLE2_HEAD, 9),
+    // 주기 2도 자기 승인을 남긴다 — A-MF2의 창은 **마지막 재큐 이후**라 주기 1의 승인은 여기서 쓰이지 않는다.
+    approvedComment("2026-09-12T23:00:00Z", 201),
     humanMergeParkComment("factory:approved", "protected paths changed — human merge required: .factory/harness.toml (see PR #9)", "2026-09-13T00:00:00Z"),
   ];
   const gh = mergedGh({
@@ -1330,7 +1351,7 @@ test("KTB-46 r5: the candidate list is bounded — stale closed issues and anyth
     searchIssues: vi.fn(async (l, opts) => (l === "factory:needs-human" && opts?.state === "all"
       ? [{ number: 7, updatedAt: "2026-06-01T00:00:00Z", state: "CLOSED" }, ...many]   // #7은 30일 넘게 닫혀 있다
       : [])),
-    comments: vi.fn(async () => [humanMergeParkComment()]),
+    comments: vi.fn(async () => [approvedComment(), humanMergeParkComment()]),
     mergedPrForBranch: vi.fn(async () => null),
   });
   const actions = await sweep(mergedArgs({ gh }));
@@ -1384,20 +1405,24 @@ test("KTB-46 r3: the arm is cron-only, and is skipped when the wiring is an olde
   expect(quickGh.mergedPrForBranch).not.toHaveBeenCalled();
   expect((await sweep(mergedArgs({ gh: mergedGh() }))).some((a) => a.kind === "human-merged")).toBe(true);
 
-  // 조회 함수가 하나라도 없으면 증거를 확인할 수 없다 — 조용히 건너뛴다("안 쓴다"와 "에러났다"를 가른다).
+  // 조회 함수가 하나라도 없으면 증거를 확인할 수 없다 — 이 팔은 아예 돌지 않는다. 최종 리뷰 B-nit 1:
+  // 그 건너뜀은 **조용하지 않다** — 어느 dep이 빠졌는지를 액션 한 줄로 이름 붙여 남긴다(그러지 않으면
+  // `bin/sweep.js`에서 dep 하나를 떨어뜨리는 리팩터가 이 팔을 통째로, 아무 신호 없이 끈다).
   for (const drop of ["prMergeInfo", "commitStatuses", "prChecks"]) {
     const old = mergedGh();
     delete old[drop];
     const transition = vi.fn();
     const actions = await sweep(mergedArgs({ gh: old, transition }));
     expect(transition, drop).not.toHaveBeenCalled();
-    expect(actions.some((a) => String(a.kind).startsWith("human-merged")), drop).toBe(false);
+    expect(actions.some((a) => a.kind === "human-merged"), drop).toBe(false);
+    expect(actions, drop).toContainEqual({ kind: "human-merged-skipped", reason: `wiring incomplete: ${drop} — this arm did not run` });
   }
   for (const dep of ["factoryLogins", "reviewRoster"]) {
     const transition = vi.fn();
     const actions = await sweep(mergedArgs({ gh: mergedGh(), transition, [dep]: null }));
     expect(transition, dep).not.toHaveBeenCalled();
-    expect(actions.some((a) => String(a.kind).startsWith("human-merged")), dep).toBe(false);
+    expect(actions.some((a) => a.kind === "human-merged"), dep).toBe(false);
+    expect(actions, dep).toContainEqual({ kind: "human-merged-skipped", reason: `wiring incomplete: ${dep} — this arm did not run` });
   }
 });
 
@@ -1423,7 +1448,7 @@ test("KTB-46 r4: the roster is never smaller than the review handoff's recorded 
   const roster = (comments, handoffTier = null) => resolveReviewRoster({ charter: CHARTER, roles: ROLES, comments, effectiveTier: handoffTier ? tierFromReviewHandoff(handoffTier) : null });
 
   // 선언은 standard(2명)인데 리뷰 런은 load-bearing(6명)으로 판정했다 → 6명짜리 로스터를 요구한다.
-  const upgraded = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment(), triageHandoff, reviewHandoff({ tier_effective: "load-bearing", tier_source: "floor" })]) });
+  const upgraded = mergedGh({ comments: vi.fn(async () => [approvedComment(), humanMergeParkComment(), triageHandoff, reviewHandoff({ tier_effective: "load-bearing", tier_source: "floor" })]) });
   const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
   const a1 = await sweep(mergedArgs({ gh: upgraded, transition: t1, reviewRoster: roster }));
   const ctx1 = t1.mock.calls[0][0].ctxExtra;
@@ -1435,7 +1460,7 @@ test("KTB-46 r4: the roster is never smaller than the review handoff's recorded 
     .toMatch(/verdict count 4 != roster size 6/);
 
   // 1.2 이전 기록: `tier_effective`가 없다 → 선언 tier(2명)로 내려가되 **소리를 낸다**.
-  const legacy = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment(), triageHandoff, reviewHandoff()]) });
+  const legacy = mergedGh({ comments: vi.fn(async () => [approvedComment(), humanMergeParkComment(), triageHandoff, reviewHandoff()]) });
   const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
   const a2 = await sweep(mergedArgs({ gh: legacy, transition: t2, reviewRoster: roster }));
   expect(t2.mock.calls[0][0].ctxExtra.roster).toEqual(["correctness", "qa"]);
@@ -1455,7 +1480,7 @@ test("KTB-46 r3: the arm's real ctxExtra meets the real factory:merged requireme
 
   // 팔을 돌려 ctxExtra를 뽑아낸다(전이는 더블이지만, 그 인자는 프로덕션 코드가 만든 진짜 값이다).
   const capture = async (handoffData) => {
-    const gh = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment(), handoff(handoffData)]) });
+    const gh = mergedGh({ comments: vi.fn(async () => [approvedComment(), humanMergeParkComment(), handoff(handoffData)]) });
     const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
     await sweep(mergedArgs({ gh, transition, reviewRoster: async () => ({ ok: true, roles: ["correctness", "qa", "security", "perf"], tier: "load-bearing" }) }));
     const { ctxExtra } = transition.mock.calls[0][0];
@@ -1956,4 +1981,57 @@ test("KTB-35: a gates-unhandled blocked gets one retry, then escalates with a se
   expect(second).toContainEqual({ kind: "blocked-escalated", issue: 3, cause: "gates-unhandled" });
   expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 3, to: "factory:needs-human", reason: BLOCKED_ESCALATION_REASON["gates-unhandled"] }));
   expect(BLOCKED_ESCALATION_REASON["gates-unhandled"]).toMatch(/0 failing tests/);
+});
+
+
+/**
+ * ── 최종 리뷰 A-MF2 — **qa 게이트가 거부한 승인은 사람의 머지로 세탁되지 않는다.** ─────────────
+ *
+ * 재현한 사슬: ① 주기 1이 승인을 받고 머지 스테이지가 보호 경로에서 멈춰 `factory:needs-human
+ * (… — human merge required: …)`로 주차됐다. ② 사람이 재큐했고, 주기 2의 리뷰 런이 새 head Y에
+ * `factory/review`·`factory/gates`를 게이트보다 **먼저** 게시한 뒤 `factory:approved` 전이가 qa 증거
+ * 게이트에서 **거부**됐다(마커는 `to=factory:needs-human … reason=refused`). ③ `lastRealTransition`은
+ * 거부를 건너뛰므로 이 팔은 여전히 "사람의 머지를 기다린다"를 읽는다. ④ 사람이 Y를 머지하면
+ * `verifyMergedPrEvidence`는 ②가 남긴 상태들을 찾아 통과하고, 되돌릴 수 없는 `factory:merged`가
+ * **qa 증거 요구조건이 그 커밋에 대해 한 번도 통과한 적 없는 채로** 붙었다.
+ *
+ * 이제 이 팔은 이번 주기에 완료된 `→ factory:approved` 전이를 요구한다 — 없으면 소리를 내고 넘어간다.
+ */
+test("A-MF2: a head whose factory:approved was refused by the qa gate is never laundered into factory:merged", async () => {
+  const REFUSED_CYCLE = [
+    approvedComment("2026-09-11T00:20:00Z"),                          // 주기 1의 승인
+    humanMergeParkComment(),                                          // 주기 1: 보호 경로로 주차
+    { id: 200, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:queue by=human -->\nfactory:needs-human → factory:queue — unstick: requeue", createdAt: "2026-09-12T00:00:00Z" },
+    // 주기 2: 승인 전이가 qa 증거 게이트에서 거부됐다 — 그 기록은 `to=factory:needs-human … reason=refused`다.
+    { id: 201, body: "<!-- factory-transition:v1 from=factory:awaiting-review to=factory:needs-human by=script reason=refused -->\n**전이 거부** factory:awaiting-review → factory:approved: qa evidence manifest not verified for this transition", createdAt: "2026-09-12T23:00:00Z" },
+  ];
+  const CYCLE2_PARK = humanMergeParkComment("factory:approved", "protected paths changed — human merge required: .factory/harness.toml (see PR #4)", "2026-09-13T00:00:00Z");
+  const gh = mergedGh({ comments: vi.fn(async () => [...REFUSED_CYCLE, CYCLE2_PARK]) });
+  const transition = vi.fn();
+  const actions = await sweep(mergedArgs({ gh, transition }));
+  expect(transition).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();                          // 판정이 아니라 건너뜀이다 — 마커를 남기지 않는다
+  expect(actions).toContainEqual({ kind: "human-merged-skipped", issue: 3, pr: 4, reason: expect.stringContaining("never reached factory:approved") });
+
+  // 그리고 그 주기가 **실제로** 승인을 받으면(같은 이력에 완료된 승인 한 줄이 더해지면) 정상적으로 이어진다.
+  const healed = mergedGh({ comments: vi.fn(async () => [...REFUSED_CYCLE, approvedComment("2026-09-12T23:30:00Z", 202), CYCLE2_PARK]) });
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  expect(await sweep(mergedArgs({ gh: healed, transition: t2 })))
+    .toContainEqual({ kind: "human-merged", issue: 3, pr: 4, mergedBy: "LeeHyeonKyu", closed: true });
+});
+
+/**
+ * 최종 리뷰 B-SF6 — **K를 못 읽으면 조용히 약해지지 않는다.** `charter.limits.K`가 없거나 정수가
+ * 아니면 예전에는 `maxRounds`가 ctxExtra에서 빠졌고, `verifyReviewQuorum`이 `round > K` 검사를 액션
+ * 한 줄 없이 건너뛰었다 — 되돌릴 수 없는 `factory:merged` 앞에서 한도 하나를 모른 채 지나가던 자리다.
+ */
+test("B-SF6: an unreadable CHARTER limits.K refuses the human-merge reconcile with a named reason", async () => {
+  for (const limits of [{}, { K: "3" }]) {
+    const gh = mergedGh();
+    const transition = vi.fn();
+    const actions = await sweep(mergedArgs({ gh, transition, charter: { ...charter, limits } }));
+    expect(transition, JSON.stringify(limits)).not.toHaveBeenCalled();
+    expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("CHARTER limits.K is") });
+    expect(gh.comment).toHaveBeenCalledWith(3, expect.stringContaining(humanMergeRefusedComment(3, 4)));
+  }
 });

@@ -261,8 +261,21 @@ export function harnessMaturity(root, { readFile = (p) => readFileSync(p, "utf8"
  * 못한 금지 목록은 금지 목록이 아니다.
  */
 export const ALLOWED_SOURCE_ROOTS = (root, env = process.env) => [root, "/tmp", "/private/tmp", ...(env.TMPDIR ? [env.TMPDIR] : [])];
-export function readDenyGlobs(root, { readFile = (p) => readFileSync(p, "utf8") } = {}) {
-  for (const f of [".factory/ci-settings.json", ".factory/ci-settings-harness.json"]) {
+/**
+ * 최종 리뷰 A-SF5 — **세션이 실제로 들고 도는 파일을 고른다.** 위 문단의 약속("목록은 손으로 베끼지
+ * 않는다")이 파일 선택에는 걸려 있지 않아서, `--settings .factory/ci-settings-harness.json`으로 뜬
+ * 세션에서도 언제나 `.factory/ci-settings.json`을 먼저 읽었다. 오늘은 두 파일의 `Read(...)` 금지가
+ * 같아 아무것도 갈리지 않지만, 갈리는 날 이 도구는 **자기 세션이 아닌 목록**으로 판정한다.
+ *
+ * 판단의 출처는 `run-stage.js`의 `ciSettingsFile(harnessIssue)`와 같다 — 그 스테이지가 세션에 세우는
+ * `FACTORY_HARNESS_ISSUE=1`이 여기까지 그대로 내려온다(훅과 같은 신호). 나머지 하나는 폴백으로 남긴다:
+ * 고른 파일을 못 읽었다고 목록 없이 진행하는 것보다 다른 사본이라도 읽는 편이 fail-closed에 가깝다.
+ */
+export const CI_SETTINGS_FOR = (env = process.env) => (env.FACTORY_HARNESS_ISSUE === "1"
+  ? [".factory/ci-settings-harness.json", ".factory/ci-settings.json"]
+  : [".factory/ci-settings.json", ".factory/ci-settings-harness.json"]);
+export function readDenyGlobs(root, { readFile = (p) => readFileSync(p, "utf8"), env = process.env } = {}) {
+  for (const f of CI_SETTINGS_FOR(env)) {
     try {
       const deny = JSON.parse(readFile(join(root, f)))?.permissions?.deny || [];
       const globs = deny.map((d) => /^Read\((.+)\)$/.exec(String(d))?.[1]).filter(Boolean);
@@ -279,7 +292,7 @@ const insideAny = (p, roots) => roots.some((r) => {
 });
 
 export function checkAttachSource(src, { root, env = process.env, denyGlobs, realpath = realpathSync } = {}) {
-  const globs = denyGlobs === undefined ? readDenyGlobs(root) : denyGlobs;
+  const globs = denyGlobs === undefined ? readDenyGlobs(root, { env }) : denyGlobs;
   let abs;
   try { abs = realpath(resolve(root, src)); }
   catch (e) { return { ok: false, reason: `factory: --file cannot be read: ${src} (${e?.message || e})` }; }

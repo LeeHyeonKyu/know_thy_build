@@ -31,7 +31,13 @@ export const REVIEW_EVIDENCE_STATUSES = ["factory/review", "factory/gates"];
  * 정규식 문법으로 바뀐다.
  */
 const HUMAN_MERGE_REQUIRED_TEXT = "human merge required";
-export const HUMAN_MERGE_REQUIRED = new RegExp(HUMAN_MERGE_REQUIRED_TEXT);
+/**
+ * 최종 리뷰 B-nit 3 — **구분자까지 포함해 앵커한다.** 맨 문구만 찾는 정규식은 자유 문장인 전이 사유
+ * 어디에 그 말이 나와도 참이다: `:unstick`의 결정 노트가 "human merge required였는데…"를 인용하기만
+ * 해도 sweeper의 사람-머지 팔이 그 이슈를 "사람의 머지를 기다리는 중"으로 읽는다. 아래 다섯 생산자는
+ * 전부 `— ${TEXT}: …` 꼴로 조립하므로, 구분자(`— `)를 함께 요구해도 다섯 개가 모두 계속 걸린다.
+ */
+export const HUMAN_MERGE_REQUIRED = new RegExp(`— ${HUMAN_MERGE_REQUIRED_TEXT}`);
 
 /**
  * 외부 감사 H1b의 판정 (d)를 **순수 함수로** 꺼낸 것. 이 커밋에 `factory/review`·`factory/gates`

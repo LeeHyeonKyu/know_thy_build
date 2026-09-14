@@ -686,9 +686,12 @@ GREEN이면 그 사실이 저장소에 적힌다: 변수 `FACTORY_REHEARSED = sh
 어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"**로 거부하고 라벨은 그대로다.
 그 검사는 **opt-out**이다: 큐로 가는 전이는 배선된 검사기이거나 명시적 `skipRehearsal: true`(테스트
 전용)여야 하고, 둘 다 없으면 거부한다 — 인자를 생략하는 것이 게이트를 끄는 길이면 게이트가 아니다.
-프로덕션 호출자는 전부 배선한다: 사람의 CLI, sweeper의 하네스 주차 해제, merge 스테이지의 step 9,
-flaky 수확(이슈는 `backlog`로 태어나 게이트를 지나 큐로 간다), 그리고 `factory run triage <n>`의 로컬
-진입. 하네스 이슈만 예외로 바로 큐로 간다(`harness-request.js`와 retro의 성숙도 격차 이슈) —
+프로덕션 호출자는 전부 배선한다(여섯): 사람의 CLI, sweeper의 하네스 주차 해제, merge 스테이지의 step 9,
+flaky 수확(이슈는 `backlog`로 태어나 게이트를 지나 큐로 간다), `factory run triage <n>`의 로컬 진입,
+그리고 **모든 스테이지 전이가 모이는 `run-stage.js`의 `deps.transition`** — 그 자리가 큐를 겨누는 길이
+하나 있다: triage의 blocked 재시도 hop(`BLOCKED_RETRY.triage.hop`). 배선이 없으면 그 hop은 fail closed로
+**영원히** 거부되고(리허설을 새로 돌려도 풀리지 않는다 — 값이 낡은 것이 아니라 인자가 없는 것이다),
+triage 스테이지의 인프라 딸꾹질 하나가 사람 에스컬레이션으로 바뀐다. 하네스 이슈만 예외로 바로 큐로 간다(`harness-request.js`와 retro의 성숙도 격차 이슈) —
 리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 잠긴다.
 
 잡은 **기본 브랜치에서만** 돈다(잡 레벨 `if:` + 체크아웃 `ref:` + `rehearse.js`의 `GITHUB_REF_NAME`
@@ -1583,7 +1586,7 @@ qa 리뷰어의 증거는 "디렉터리에 파일이 좀 있다"가 아니라 **
 | M1 | M0와 같음 | 영향 경로가 데이터를 건드리면 `state` claim ≥1 |
 | M2 | M1과 같음 | UI-facing id(`level = e2e` 또는 `ui = true`)마다 `screenshot` ≥1 |
 
-#### 도구 `.factory/bin/qa-evidence.js` — 쓰기의 유일한 길
+#### 도구 `.factory/bin/qa-evidence.js` — 쓰기의 정본
 
 ```
 record --issue N --claim <id> --summary "…" [--timeout ms] -- <cmd…>   # 실행 + stdout/stderr/exit 저장
@@ -1601,9 +1604,24 @@ probe  --issue N          # mkdir -p + write + unlink. 쓸 수 없으면 exit 2
 `deny-all-writes.sh`와 `block-dangerous.sh`에 그대로 먹이고, 어느 하나가 exit 2면 도구가 거절한다
 (exit 1). 훅은 **도구 자신의 위치**에서 풀고(`.factory/bin/` → `.claude/hooks/`), 스테이지 안에서 찾지
 못하면 fail closed다. 그리고 **인터프리터는 페이로드가 될 수 없다**(`sh|bash|zsh|dash -c …`,
-`node -e/-p`, `python -c`, `perl -e`, `env <interp>`) — 따옴표 안은 훅이 읽을 수 없는 두 번째 명령줄이다.
+`node -e/-p`, `python -c`, `perl -e`) — 따옴표 안은 훅이 읽을 수 없는 두 번째 명령줄이다.
 이 규칙이 없으면 ci-settings의 접두 allow(`Bash(node .factory/bin/qa-evidence.js *)`)가 쓰기 금지
 역할에게 임의 실행을 그대로 열어 준다(적대적 리뷰가 실측: 직접 `rm -rf src`는 exit 2, 도구로 감싸면 0).
+
+**래퍼도 인터프리터다(리뷰 라운드 2).** 인터프리터 판정은 첫 낱말에서 멈추지 않는다 —
+`env`·`xargs`·`timeout`·`nohup`·`stdbuf`·`nice`·`command`·`busybox`·`setsid`·`exec`는 **벗겨 내고** 그
+뒤의 낱말을 다시 본다(`timeout 5 sh -c …`, `xargs sh -c …`, `busybox sh -c …`가 전부 거절된다).
+`env -S`는 벗겨 내지 않고 **그 자리에서 거절한다**: `-S`는 한 문자열을 자기 문법으로 다시 쪼개므로
+훅이 읽은 명령줄과 실제로 도는 명령줄이 달라진다.
+
+**`attach --file`의 출처도 가둔다(리뷰 라운드 2 — 채택자가 부딪히는 동작 변경).** `--file`은 이제
+**저장소 안이나 임시 디렉터리**(`/tmp`·`/private/tmp`·`$TMPDIR`)의 파일만 받고, 심볼릭 링크는 realpath
+이후로 판정한다. 그리고 그 파일이 **이 세션의 `Read(...)` deny 글롭**(`.env*`·`.git/**`·`.netrc`·
+`.npmrc` — ci-settings에서 읽는다, 손으로 베끼지 않는다)에 걸리면 거절한다: 증거 디렉터리의 파일은
+다른 역할이 읽어 공개 handoff에 인용하므로, 팩토리가 읽기를 거부하는 파일은 증거도 될 수 없다.
+deny 목록을 읽지 못했고 `FACTORY_STAGE` 안이면 거절한다(확인하지 못한 금지 목록은 금지 목록이 아니다).
+*업그레이드 노트*: 1.2까지 임의 경로를 `attach` 하던 하네스는 그 파일을 먼저 저장소나 임시 디렉터리로
+옮겨야 한다.
 
 **이 계약이 주장하지 않는 것**: 매니페스트는 진위 경계가 **아니다**. qa는 증거 디렉터리에 쓸 수 있으므로
 매니페스트를 손으로 지어낼 수 있고, 러너는 그 파일을 digest한다 — `qa_manifest=`가 증명하는 것은
@@ -1616,7 +1634,17 @@ probe  --issue N          # mkdir -p + write + unlink. 쓸 수 없으면 exit 2
 1. **review 스테이지** — 오버레이 직후·`claude -p` 이전에 `probe`. 실패는 review reject가 아니라
    `factory:blocked`(cause `undecidable`). `factory doctor`의 `qa.evidence-probe`가 사람의 자리에서 같은 확인.
 2. **`verify-stage` (`review.v1`)** — qa verdict가 매니페스트의 claim id를 하나도 인용하지 않으면 그
-   라운드의 산출물을 받지 않는다.
+   라운드의 산출물을 받지 않는다. 매니페스트가 **불충분한** 경우는 리뷰 라운드 2에서 둘로 갈렸다:
+   *경로의 고장*(파일이 없다·읽을 수 없다·지난 커밋의 것이다)은 `qa evidence manifest unusable`로
+   `factory:blocked` + cause `undecidable`이고, *리뷰어 자신의 부족*(빈 커버리지·전부 `na`)은
+   `qa evidence incomplete:` 접두어를 달고 **이 라운드의 reject**로 접힌다 — 합성 must_fix(role `qa`,
+   부족한 id를 부른다)가 되어 `factory:rework`(또는 K 한도의 평소 경로)로 간다. 어느 쪽도
+   `stage artifact missing or invalid`가 아니고, 어느 쪽도 누락으로 `needs-human`이 되지 않는다.
+
+   qa 리뷰어가 라운드를 버리지 않으려면 알아야 할 두 규칙: **전부 `not_applicable`인 매니페스트는
+   거절된다**(그것은 리뷰가 아니라 보고서다 — 그럴 상황이면 그 tier의 로스터에 qa가 없어야 한다), 그리고
+   **`done_when`을 해석하지 못한 것은 "충족"이 아니다**(빈 `done_when`은 `ok:false`다 — 검사할 대상이
+   없다는 것은 계약을 읽지 못했다는 뜻이지 계약을 만족했다는 뜻이 아니다).
 3. **`factory:approved`** — 로스터에 `qa`가 있으면 매니페스트가 유효하고 PR head에 묶여 있어야 한다.
 4. **`factory:merged`** — 매니페스트 파일은 커밋되지 않으므로(`.factory/out/`는 gitignore) 머지가 보는
    것은 review 런이 run 기록에 남긴 `qa_manifest=<sha256>` 한 줄이다(§ADR-014의 `factory/records`).
