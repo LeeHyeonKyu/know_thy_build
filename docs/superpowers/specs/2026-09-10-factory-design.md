@@ -509,28 +509,26 @@ error verbatim.
 | workflow | `args`(이슈 번호, context 경로) + 에이전트가 돌려준 schema 값 | 인자와 반환값뿐 — 파일을 못 읽음 |
 | 역할 에이전트 | 자기 `.md`, `context.json`, `.factory/lessons/<role>.md`(프롬프트에 경로가 주어지고 직접 읽는다), diff·코드(cold read 규칙 내에서) | 러너 파일시스템 |
 
-workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 이번 잡의 로스터를 `context.json`에 확정해 쓰고, workflow의 첫 스텝인 loader 에이전트(sonnet)가 그 파일을 읽어 schema로 돌려준다. loader가 역할을 지어내면 다음 `agent({agentType})`이 존재하지 않는 파일로 실패하고, 6에서 로스터 불일치로 잡힌다.
+workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 이번 잡의 로스터를 `context.json`에 확정해 쓰고, 같은 실행에서 그 로스터의 **workflow용 부분집합**을 `.factory/out/loaded.json`으로 따로 떨군다. 디스패처 커맨드는 그 작은 파일 하나를 그대로 Workflow의 `args.loaded`로 넘긴다 — 로스터를 옮겨 적는 일에 LLM이 끼지 않으므로, 역할을 지어낼 자리도 없다(외부 감사 2026-09-14 M5, 아래 확정 문장).
 
-**loader 확정 문장** (Plan 3 실행 판결, ADR-016): `factory-loader`(sonnet, `tools: Read, Bash, Grep`, `hooks.PreToolUse`는 `deny-all-writes.sh`)는 `roles.toml`의 어떤 `[stage.<name>]` 블록에도 속하지 않는다 — 로스터 역할이 아니라 네 workflow 모두의 첫 스텝이라서다. 네 workflow(`factory-triage.js`/`factory-plan.js`/`factory-implement.js`/`factory-review.js`)는 바이트 단위로 동일한 `LOADER` schema 리터럴을 공유한다:
+**loader 확정 문장 — 취소됨** (외부 감사 2026-09-14 M5, P2-14). `factory-loader`(sonnet)는 삭제됐다. 그 에이전트가 한 일은 `context.json`과 `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적는 것뿐이었는데, 그 복사에 **스테이지마다 LLM 호출 하나**가 들었고 복사는 틀릴 수 있었다 — 그리고 그것이 읽어야 했던 유일한 값(`model`)은 이미 `factory/lib/context.js`가 `def.model`로 들고 있었다. 지금은 `buildContext`가 같은 객체를 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓴다:
 
 ```js
-const LOADER = {
-  type: 'object',
-  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
-  properties: {
-    issue: { type: 'number' }, stage: { type: 'string' }, tier: { type: 'string' },
-    maturity: { type: 'string' },   // harness.maturity 그대로 — plan이 done_when level을 이걸로 묶는다
-    roster: { type: 'array', items: { type: 'object', required: ['name', 'agentType', 'model'],
-      properties: { name: { type: 'string' }, agentType: { type: 'string' }, model: { type: 'string' }, lessons: { type: 'string' } } } },
-    rounds: { type: 'number' }, limits: { type: 'object' }, spec_path: { type: 'string' },
-    pr: { type: 'number' }, head_sha: { type: 'string' },
-    must_fix: { type: 'array', items: { type: 'object' } }, disputed: { type: 'array', items: { type: 'object' } },
-    orchestration: { type: 'string' },
-  },
-};
+// factory/lib/context.js — loadedFor()
+{
+  issue, stage, tier,
+  roster: [{ name, agentType, model, lessons, context }],   // model은 roles.toml의 그 값 그대로
+  contexts: { '<role>': '.factory/out/context.<role>.json' },
+  rounds, plan, limits, spec_path, maturity, orchestration,
+  pr, head_sha,                    // handoffs.implement에서
+  must_fix,                        // handoffs.review.decision === 'rework'일 때의 verdicts[].must_fix 합집합
+  disputed,                        // PR 코멘트의 최신 factory.rework-response.v1 중 status === 'disputed'
+}
 ```
 
-위 표의 "역할 에이전트가 `context.json`을 읽는다"는 문자 그대로다 — 네 workflow의 역할 프롬프트는 전부 `Read \`${args.context}\`` (즉 `.factory/out/context.json`)로 시작하고, 각 역할이 그 파일을 자기 손으로 다시 연다. loader가 있는 이유는 역할이 아니라 **workflow 스크립트 자신**이 파일을 못 읽기 때문이다(§4.2 표의 workflow 행) — loader는 그 파일을 읽어 로스터 부분집합(이름·`agentType`·`model` 등)만 schema로 workflow에 돌려주고, workflow는 그 schema 값으로 몇 명을 어떤 이름·모델로 spawn할지만 결정한다. 즉 loader의 산출물은 workflow의 분기 재료이지 역할 에이전트에게 전달되는 `context.json`의 대체물이 아니다 — 역할 에이전트는 loader를 거치지 않고 같은 파일을 독립적으로 연다. loader-null(1회 재spawn 후에도 null 또는 throw)과 issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)는 네 workflow 모두 같은 모양으로 fail-closed 응답한다 — `{issue, error, orchestration: 'workflow', guarantee: 'structural'}`뿐, stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)는 아예 싣지 않는다. 각 스테이지 schema가 그 필드를 required로 두므로 `verify-stage`가 그대로 실패시켜 needs-human이 된다 — 별도의 에러 처리 경로가 필요 없다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다.
+네 workflow(`factory-triage.js`/`factory-plan.js`/`factory-implement.js`/`factory-review.js`)는 이 값을 `const loaded = args.loaded ?? null;` 한 줄로 받는다 — 그 Load 블록은 여전히 **바이트 단위로 동일**하고(`factory/test/workflows.test.js`), `LOADER` schema 리터럴과 loader 프롬프트는 네 파일 어디에도 남아 있지 않다. payload가 아예 없으면(디스패처가 넘기지 못했으면) 네 스테이지 모두 `{issue, error: 'context payload missing', orchestration: 'workflow', guarantee: 'structural'}`로 fail-closed하고, issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)도 같은 모양이다 — stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)를 아예 싣지 않으므로 각 스테이지 schema의 required가 `verify-stage`에서 그대로 실패해 needs-human이 된다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다(역할 호출에는 그대로 쓴다).
+
+역할 에이전트가 파일을 여는 경로는 그대로다 — 다만 **리뷰어는 `context.json`이 아니라 자기 `context.<role>.json`을 연다**(§7.1 cold read).
 
 #### 4.2.4 orchestration 모드 — 후퇴는 설정이지 동작이 아니다
 
@@ -1215,6 +1213,8 @@ output = "factory.retro.v1"
 
 `model` 값은 `docs/research/multi-agent-model-guidance-for-repo.md`의 balanced 프로파일을 기본으로 한다. CHARTER에서 프로파일(`quality | balanced | budget`)을 바꾸면 레지스트리의 model이 프로파일 표로 치환된다.
 
+**cold read는 구조다** (외부 감사 2026-09-14 H4). `cold_read = true`는 프롬프트가 리뷰어에게 하는 부탁이 아니라 **그 역할이 받는 파일의 모양**이다. `factory/lib/context.js`의 `buildContext`는 오케스트레이터용 `.factory/out/context.json`(전체) 외에 로스터의 역할마다 `.factory/out/context.<role>.json`을 따로 쓰고, `roleContextFor`가 `cold_read = true`인 역할의 사본에서 handoff를 통째로 들어낸다 — 남는 것은 이슈, tier, 로스터, 그 역할의 lessons 경로, PR 번호와 head sha, 게이트 요약, 그리고 계획의 `done_when`(id/text/verify/level)뿐이다. verifier 판정도, `tests_added`도, builder가 쓴 PR 설명도, 다른 리뷰어의 판정도 그 파일에 **존재하지 않는다**. `factory-review.js`는 각 리뷰어에게 자기 파일의 경로만 넘기고 전체 파일의 경로는 한 번도 주지 않는다. 훅은 읽기를 막을 수 없으므로(감사 H4의 지적 그대로) 막는 자리를 파일 경계로 옮긴 것이다: 읽지 않기로 약속할 필요가 없다, 읽을 것이 거기 없다. `cold_read = false`(spec-conformance)는 그 반대이고, 계약 대조가 임무인 그 역할만 전체 파일에 더해 이슈 본문의 acceptance 절을 함께 받는다.
+
 **설치 범위** (Plan 3 실행 판결, ADR-016): `[merge.integrator]`·`[retro.analyst]` 블록은 위 예시에 verbatim으로 남아 있지만, `factory-integrator.md`·`factory-retro.md` 에이전트 파일은 Plan 3에서 설치되지 않는다 — merge는 스크립트 전용이라 integrator를 spawn하지 않고(ADR-015 R3), retro는 Plan 4 몫이다. `doctor`의 `checkRoles`는 그래서 이 두 항목에 한해 `roles.agent-files` FAIL을 보고한다 — 이것은 Plan 4까지의 알려진 gap이며, `checkAgents`(§7.2)는 파일이 없는 항목을 lint 대상에서 건너뛴다.
 
 ### 7.2 역할 정의 파일의 필수 구조
@@ -1233,7 +1233,7 @@ frontmatter: name, description, tools, model, hooks(선택)
 ## Lessons           — lessons 파일 경로와 "체크리스트로 읽어라" 지시 (include 문법에 의존하지 않는다)
 ```
 
-**doctor의 검사 = `lintAgentMd` 규칙** (Plan 3 실행 판결, ADR-016): `factory/lib/agent-md.js`의 `lintAgentMd(text, {expectedName})`이 `checkAgents`(`factory/lib/doctor/factory.js`)를 통해 `roles.toml`이 가리키는 모든 role `.md` + loader(§4.2.3)에 적용하는 규칙은 다음과 같다.
+**doctor의 검사 = `lintAgentMd` 규칙** (Plan 3 실행 판결, ADR-016): `factory/lib/agent-md.js`의 `lintAgentMd(text, {expectedName})`이 `checkAgents`(`factory/lib/doctor/factory.js`)를 통해 `roles.toml`이 가리키는 모든 role `.md`에 적용하는 규칙은 다음과 같다(감사 M5로 loader가 사라지면서 roles.toml 밖의 예외 항목은 없어졌다).
 
 - frontmatter `name`이 파일 basename(확장자 제외)과 정확히 같아야 한다 — 이름이 어긋나면 훅 로그 대조(`rolePrefix + role`)가 깨진다(Global Constraints).
 - frontmatter `model`은 `opus|sonnet|haiku` 중 하나.

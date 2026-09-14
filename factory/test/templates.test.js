@@ -97,7 +97,7 @@ test("CHARTER template is a draft with the §5.3 frontmatter", () => {
 
 test("lessons skeletons carry the integrity header", () => {
   const files = readdirSync(join(T, "factory/lessons"));
-  expect(files.length).toBe(15);
+  expect(files.length).toBe(14);   // 감사 M5 — factory-loader의 lessons 파일이 역할과 함께 사라졌다
   for (const f of files) {
     const role = f.replace(/\.md$/, "");
     expect(read(`factory/lessons/${f}`)).toMatch(new RegExp(`<!--\\s*factory-lessons:v1\\s+role=${role}\\s+max=\\d+\\s*-->`));
@@ -312,7 +312,10 @@ test("dispatcher commands exist for the four LLM stages plus retro, and each nam
     const t = read(`claude/commands/factory-${s}.md`);
     expect(t).toMatch(new RegExp(`allowed-tools: Workflow\\(factory-${s}\\)`));
     expect(t).toContain("`factory-" + s + "`");
-    expect(t).toContain(".factory/out/context.json");
+    // 감사 M5 — 네 디스패처 모두 `.factory/out/loaded.json`(Node가 만든 문맥 payload)을 넘긴다.
+    // review만은 `context.json` 경로를 args에 아예 싣지 않는다 — 리뷰어는 역할별 파일만 본다(H4).
+    expect(t).toContain(".factory/out/loaded.json");
+    if (s !== "review") expect(t).toContain(".factory/out/context.json");
   }
   // retro는 스테이지가 아니다(라벨 상태 머신 밖의 잡) — context.json이 아니라 L1이 써 둔 후보 파일을 받는다.
   const retro = read("claude/commands/factory-retro.md");
@@ -334,14 +337,14 @@ test("dispatcher commands exist for the four LLM stages plus retro, and each nam
 // a bare `$1` or `$2`.
 test("the implement dispatcher passes $ARGUMENTS as raw — no $1/$2 (KTB-27 fix)", () => {
   const t = read("claude/commands/factory-implement.md");
-  expect(t).toContain('{ "raw": "$ARGUMENTS", "context": ".factory/out/context.json" }');
+  expect(t).toContain('{ "raw": "$ARGUMENTS", "context": ".factory/out/context.json", "loaded": <that object> }');
   expect(t).toContain("`true` or `false`");
   expect(t).not.toMatch(/\$1\b/);
   expect(t).not.toMatch(/\$2\b/);
   // 나머지 세 디스패처는 한 글자도 바뀌지 않는다 — 인자가 하나뿐이다
   for (const s of ["triage", "plan", "review"]) {
     const o = read(`claude/commands/factory-${s}.md`);
-    expect(o, s).toContain('{ "issue": $ARGUMENTS, "context": ".factory/out/context.json" }');
+    expect(o, s).toContain(s === "review" ? '{ "issue": $ARGUMENTS, "loaded": <that object> }' : '{ "issue": $ARGUMENTS, "context": ".factory/out/context.json", "loaded": <that object> }');
     expect(o, s).not.toContain("harness_issue");
   }
 });
@@ -399,8 +402,9 @@ test("every roles.toml agent path resolves to a real agent template — retro in
     for (const [name, def] of Object.entries(roles[stage])) entries.push([`${stage}.${name}`, def]);
   }
   for (const [id, def] of entries) expect(existsSync(agentPath(def.agent)), `${id} → ${def.agent}`).toBe(true);
-  // loader는 roles.toml에 없다(로스터 역할이 아니라 workflow의 첫 스텝이다) — 그래도 설치는 된다.
-  expect(existsSync(agentPath(".claude/agents/factory-loader.md"))).toBe(true);
+  // 외부 감사 2026-09-14 M5 — loader는 없어졌다: workflow의 첫 스텝은 이제 LLM 호출이 아니라
+  // `factory/lib/context.js`가 쓰는 `.factory/out/loaded.json`이다. 설치되는 파일도 없어야 한다.
+  expect(existsSync(agentPath(".claude/agents/factory-loader.md"))).toBe(false);
   // merge에는 역할 블록 자체가 없다(F5 / ADR-015 R3 — merge는 `claude -p`를 부르지 않는 스크립트 전용이라
   // integrator를 정의해 두면 "언젠가 에이전트가 머지한다"는 약속이 roles.toml에 남는다).
   expect(roles.merge).toBeUndefined();

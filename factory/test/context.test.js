@@ -2,16 +2,25 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildContext } from "../lib/context.js";
+import { buildContext, roleContextFor } from "../lib/context.js";
 import { renderHandoff } from "../lib/handoff.js";
 
 function root() {
   const r = mkdtempSync(join(tmpdir(), "ctx-"));
   mkdirSync(join(r, ".factory"), { recursive: true }); mkdirSync(join(r, "docs/factory"), { recursive: true });
   writeFileSync(join(r, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
-  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
-  writeFileSync(join(r, ".factory/roles.toml"), `[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\nlessons = ".factory/lessons/reviewer-correctness.md"\n[review.qa]\nagent = ".claude/agents/reviewer-qa.md"\n[plan.architect]\nagent = "a.md"\n[plan.skeptic]\nagent = "s.md"\n[plan.operator]\nagent = "o.md"\n[plan.synthesizer]\nagent = "syn.md"\n`);
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa, spec-conformance]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\nmodel = "opus"\nlessons = ".factory/lessons/reviewer-correctness.md"\ncold_read = true\n[review.qa]\nagent = ".claude/agents/reviewer-qa.md"\nmodel = "sonnet"\ncold_read = true\n[review.spec-conformance]\nagent = ".claude/agents/reviewer-spec-conformance.md"\nmodel = "sonnet"\ncold_read = false\n[plan.architect]\nagent = "a.md"\nmodel = "opus"\n[plan.skeptic]\nagent = "s.md"\nmodel = "opus"\n[plan.operator]\nagent = "o.md"\nmodel = "sonnet"\n[plan.synthesizer]\nagent = "syn.md"\nmodel = "opus"\n`);
   return r;
+}
+
+/** 객체 어디에든 이 이름의 키가 있는가 — cold read 문맥에서 "없다"를 구조적으로 확인하는 데 쓴다. */
+function keysDeep(value, found = new Set()) {
+  if (Array.isArray(value)) { for (const v of value) keysDeep(v, found); return found; }
+  if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) { found.add(k); keysDeep(v, found); }
+  }
+  return found;
 }
 
 test("review context: tier from triage handoff, roster from charter, agents/lessons from roles, handoffs, spec_path from body", async () => {
@@ -78,4 +87,155 @@ test("context.json carries the issue's labels — the reviewers' only view of fa
   expect(ctx.issue.labels).toEqual(labels);
   const onDisk = JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8"));
   expect(onDisk.issue.labels).toEqual(labels);
+});
+
+// ── 감사 H4: cold read는 프롬프트의 약속이 아니라 파일 경계다 ──────────────────────────────────
+
+const planHandoff = (issue) => renderHandoff({
+  stage: "plan", issue, summary: "s",
+  data: {
+    schema: "factory.plan.v1", issue, tier: "standard", summary: "export CSV",
+    done_when: [{ id: "dw1", text: "header row", verify: "test_h", level: "unit", rationale: "계획의 산문" }],
+    files_expected: ["src/export/csv.js"], non_goals: ["streaming"],
+    dissent_log: [{ role: "skeptic", objection: "이건 만들지 말자", resolution: "unresolved" }],
+  },
+});
+const implementHandoff = (issue) => renderHandoff({
+  stage: "implement", issue, summary: "s",
+  data: {
+    schema: "factory.implement.v1", issue, pr: 31, head_sha: "a".repeat(40),
+    verifier: { verdict: "approve", confidence: "high", findings: [] },
+    tests_added: ["test/export.test.js"], summary: "builder가 스스로 설명한 말",
+  },
+});
+
+function reviewRoot() {
+  const r = root();
+  const issue = 7;
+  const gh = {
+    issue: vi.fn(async () => ({ number: issue, title: "T", body: "see docs/features/012.md\n\n## Acceptance\n- CSV에 헤더 줄이 있다\n\n## Notes\nn/a" })),
+    comments: vi.fn(async () => [
+      { id: 1, body: renderHandoff({ stage: "triage", issue, summary: "s", data: { schema: "factory.triage.v1", issue, disposition: "ready", tier: "standard" } }), createdAt: "2026-09-11T00:00:00Z" },
+      { id: 2, body: planHandoff(issue), createdAt: "2026-09-12T00:00:00Z" },
+      { id: 3, body: implementHandoff(issue), createdAt: "2026-09-13T00:00:00Z" },
+    ]),
+  };
+  return { r, gh, issue };
+}
+
+test("H4: buildContext writes context.json (full) AND one context.<role>.json per roster role", async () => {
+  const { r, gh, issue } = reviewRoot();
+  await buildContext({ root: r, gh, issue, stage: "review" });
+  expect(existsSync(join(r, ".factory/out/context.json"))).toBe(true);
+  for (const role of ["correctness", "qa", "spec-conformance"]) {
+    expect(existsSync(join(r, `.factory/out/context.${role}.json`)), role).toBe(true);
+  }
+  // 오케스트레이터의 파일은 여전히 전부를 담는다 — 걷어내는 것은 역할이 받는 사본뿐이다.
+  expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).handoffs.implement.verifier.verdict).toBe("approve");
+});
+
+test("H4: no cold-read reviewer context contains handoffs.implement / the verifier verdict — the file simply does not have them", async () => {
+  const { r, gh, issue } = reviewRoot();
+  await buildContext({ root: r, gh, issue, stage: "review" });
+  for (const role of ["correctness", "qa"]) {
+    const rc = JSON.parse(readFileSync(join(r, `.factory/out/context.${role}.json`), "utf8"));
+    expect(rc.cold_read, role).toBe(true);
+    const keys = keysDeep(rc);
+    for (const forbidden of ["handoffs", "implement", "verifier", "tests_added", "dissent_log", "files_expected", "non_goals", "verdicts"]) {
+      expect(keys.has(forbidden), `${role} must not carry ${forbidden}`).toBe(false);
+    }
+    // 받는 것: 이슈·tier·로스터·자기 lessons·PR 번호/head sha·게이트 요약·done_when(4필드)뿐.
+    expect(rc.issue.number).toBe(issue);
+    expect(rc.tier).toBe("standard");
+    expect(rc.roster).toEqual(["correctness", "qa", "spec-conformance"]);
+    expect(rc.pr).toBe(31);
+    expect(rc.head_sha).toBe("a".repeat(40));
+    expect(rc.gates.required).toEqual(["unit"]);
+    expect(rc.done_when).toEqual([{ id: "dw1", text: "header row", verify: "test_h", level: "unit" }]);
+  }
+  expect(JSON.parse(readFileSync(join(r, ".factory/out/context.correctness.json"), "utf8")).lessons)
+    .toBe(".factory/lessons/reviewer-correctness.md");
+});
+
+test("H4: spec-conformance (cold_read = false) gets the full file plus the issue's acceptance text", async () => {
+  const { r, gh, issue } = reviewRoot();
+  await buildContext({ root: r, gh, issue, stage: "review" });
+  const rc = JSON.parse(readFileSync(join(r, ".factory/out/context.spec-conformance.json"), "utf8"));
+  expect(rc.cold_read).toBe(false);
+  expect(rc.handoffs.plan.files_expected).toEqual(["src/export/csv.js"]);
+  expect(rc.acceptance).toBe("- CSV에 헤더 줄이 있다");
+});
+
+test("H4: roleContextFor is a pure function of the context and the role's cold_read flag", async () => {
+  const { r, gh, issue } = reviewRoot();
+  const ctx = await buildContext({ root: r, gh, issue, stage: "review" });
+  expect(roleContextFor(ctx, "qa").handoffs).toBeUndefined();
+  expect(roleContextFor(ctx, "spec-conformance").handoffs.implement.pr).toBe(31);
+});
+
+// ── 감사 M5: 로더가 돌려주던 것을 Node가 결정적으로 만든다 ─────────────────────────────────────
+
+test("M5: context.json carries roles[<name>].model + cold_read, and .factory/out/loaded.json is the loader's payload", async () => {
+  const { r, gh, issue } = reviewRoot();
+  const ctx = await buildContext({ root: r, gh, issue, stage: "review" });
+  expect(ctx.roles.correctness).toEqual({
+    agent: ".claude/agents/reviewer-correctness.md", agentType: "reviewer-correctness", model: "opus",
+    lessons: ".factory/lessons/reviewer-correctness.md", cold_read: true, context: ".factory/out/context.correctness.json",
+  });
+  expect(ctx.roles["spec-conformance"].cold_read).toBe(false);
+
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.issue).toBe(issue);
+  expect(loaded.stage).toBe("review");
+  expect(loaded.tier).toBe("standard");
+  expect(loaded.maturity).toBe("M0");
+  expect(loaded.orchestration).toBe("workflow");
+  expect(loaded.pr).toBe(31);
+  expect(loaded.head_sha).toBe("a".repeat(40));
+  expect(loaded.roster.map((x) => [x.name, x.agentType, x.model])).toEqual([
+    ["correctness", "reviewer-correctness", "opus"],
+    ["qa", "reviewer-qa", "sonnet"],
+    ["spec-conformance", "reviewer-spec-conformance", "sonnet"],
+  ]);
+  expect(loaded.contexts.qa).toBe(".factory/out/context.qa.json");
+});
+
+test("M5: triage's loaded roster is the single named role, with its model from roles.toml", async () => {
+  const r = root();
+  const gh = { issue: vi.fn(async () => ({ number: 12, title: "T", body: "" })), comments: vi.fn(async () => []) };
+  await buildContext({ root: r, gh, issue: 12, stage: "triage" });
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.roster).toEqual([{ name: "triage", agentType: "factory-triage", model: "sonnet" }]);
+  expect(loaded.must_fix).toEqual([]);
+  expect(loaded.disputed).toEqual([]);
+});
+
+test("M5: must_fix is the union of the rework round's verdicts, and disputed comes from the latest rework-response PR comment", async () => {
+  const r = root();
+  const issue = 8;
+  const reviewH = renderHandoff({
+    stage: "review", issue, summary: "s",
+    data: {
+      schema: "factory.review.v1", issue, round: 1, decision: "rework",
+      verdicts: [
+        { role: "correctness", verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "a.js:1", claim: "c", evidence: "e" }], should_fix: [], verified: [] },
+        { role: "qa", verdict: "reject", confidence: "high", must_fix: [{ id: "qa1", where: "b.js:2", claim: "c", evidence: "e" }], should_fix: [], verified: [] },
+      ],
+    },
+  });
+  const rework = "```json\n" + JSON.stringify({ schema: "factory.rework-response.v1", issue, responses: [{ id: "cf1", status: "fixed", commit: "abc" }, { id: "qa1", status: "disputed", reason: "out of scope" }] }) + "\n```";
+  const gh = {
+    issue: vi.fn(async () => ({ number: issue, title: "T", body: "" })),
+    comments: vi.fn(async (n) => (n === 31
+      ? [{ id: 9, body: rework, createdAt: "2026-09-13T02:00:00Z" }]
+      : [
+        { id: 1, body: renderHandoff({ stage: "implement", issue, summary: "s", data: { schema: "factory.implement.v1", issue, pr: 31, head_sha: "b".repeat(40) } }), createdAt: "2026-09-13T00:00:00Z" },
+        { id: 2, body: reviewH, createdAt: "2026-09-13T01:00:00Z" },
+      ])),
+  };
+  await buildContext({ root: r, gh, issue, stage: "implement" });
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.must_fix.map((m) => m.id)).toEqual(["cf1", "qa1"]);
+  expect(loaded.disputed).toEqual([{ id: "qa1", status: "disputed", reason: "out of scope" }]);
+  expect(loaded.pr).toBe(31);
 });

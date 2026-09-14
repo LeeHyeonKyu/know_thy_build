@@ -65,6 +65,62 @@ const round2 = (n) => Math.round(n * 100) / 100;
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 /**
+ * 외부 감사 2026-09-14 P2-13 — **리뷰어들이 서로 다른 것을 보는가.**
+ *
+ * R2의 `on_others[{id, stance, reason}]`는 생성만 되고 아무도 소비하지 않았다(감사 §4). 그런데 그 배열이
+ * 답하는 질문은 리뷰어 5명을 한 커밋에 붙이는 일 전체의 근거다: 다섯이 같은 결함을 다섯 번 찾는다면
+ * 로스터는 중복이고, 각자 다른 것을 찾는다면 겹치지 않는 렌즈가 실제로 값을 사고 있다.
+ *
+ * 한 리뷰 런에서 finding 하나를 "제기한 역할"은 (a) 그것을 must_fix에 적은 역할과 (b) R2에서
+ * `stance: "agree"`로 같은 id를 지지한 역할이다. 아무도 적지 않은 id에 대한 agree는 세지 않는다
+ * (사라진 라운드의 id이거나 오기이고, 없는 finding에 겹침을 만들어 주면 안 된다).
+ *   - `unique_findings_by_role[role]` — 그 역할만이 제기한 finding 수(그 역할이 소유자인 것만).
+ *   - `overlap_ratio` — 두 역할 이상이 제기한 finding ÷ 전체 finding.
+ *
+ * 순수 함수다: 입력은 리뷰 런마다의 `verdicts[]` 배열이고, 스코프(창·머지 여부)는 호출자가 정한다.
+ */
+export function overlapFrom(verdictSets) {
+  const uniqueByRole = {};
+  let total = 0;
+  let overlapping = 0;
+  let runs = 0;
+  for (const verdicts of verdictSets || []) {
+    const list = Array.isArray(verdicts) ? verdicts.filter(Boolean) : [];
+    if (list.length === 0) continue;
+    runs += 1;
+    const raisedBy = new Map();   // id → Set<role>
+    const owner = new Map();      // id → 그 항목을 실제로 적어 낸 역할
+    for (const v of list) {
+      for (const mf of Array.isArray(v.must_fix) ? v.must_fix : []) {
+        if (!mf?.id) continue;
+        if (!raisedBy.has(mf.id)) { raisedBy.set(mf.id, new Set()); owner.set(mf.id, v.role); }
+        raisedBy.get(mf.id).add(v.role);
+      }
+    }
+    for (const v of list) {
+      for (const o of Array.isArray(v.on_others) ? v.on_others : []) {
+        if (o?.stance !== "agree" || !o?.id) continue;
+        if (!raisedBy.has(o.id)) continue;
+        raisedBy.get(o.id).add(v.role);
+      }
+    }
+    for (const [id, roles] of raisedBy) {
+      total += 1;
+      if (roles.size >= 2) { overlapping += 1; continue; }
+      const role = owner.get(id);
+      uniqueByRole[role] = (uniqueByRole[role] || 0) + 1;
+    }
+  }
+  return {
+    review_runs: runs,
+    findings_total: total,
+    overlapping_findings: overlapping,
+    unique_findings_by_role: uniqueByRole,
+    overlap_ratio: total ? round2(overlapping / total) : 0,
+  };
+}
+
+/**
  * **창 안의** 사용량(§8.4 delta) — `since` 이후에 기록된 스테이지 항목만 더한다. 통계는 전부 창
  * 단위이고(`merged`·`review_rounds_avg`·`rejects_by_role`·`needs_human`), 누적은 L1이
  * `accumulateStats`로 따로 쌓는다. 여기서 전체 합(`summarizeUsage(...).total`)을 쓰면 매 full retro가
@@ -132,6 +188,7 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
   let mergedCount = 0;
   let reviewRoundsSum = 0;
   const rejectsByRole = {};
+  const verdictSets = [];
 
   for (const issue of issues || []) {
     const comments = byIssue.get(issue.number) || [];
@@ -159,11 +216,15 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
         for (const v of Array.isArray(h.data?.verdicts) ? h.data.verdicts : []) {
           if (v?.verdict === "reject") rejectsByRole[v.role] = (rejectsByRole[v.role] || 0) + 1;
         }
+        // P2-13: 한 리뷰 handoff = 한 리뷰 런. 겹침은 런 안에서만 뜻이 있다(다른 라운드의 같은 id는
+        // 다른 코드에 대한 판정이다) — 그래서 런 단위로 모아 두고 `overlapFrom`이 각각을 따로 센다.
+        if (Array.isArray(h.data?.verdicts)) verdictSets.push(h.data.verdicts);
       }
     }
   }
 
   const usage = windowUsage(recs, sinceMs);
+  const overlap = overlapFrom(verdictSets);
 
   return {
     candidates: {
@@ -176,6 +237,12 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
       merged: mergedCount,
       review_rounds_avg: mergedCount ? round2(reviewRoundsSum / mergedCount) : 0,
       rejects_by_role: rejectsByRole,
+      // P2-13 — reject 수는 "얼마나 막았는가"이고, 이 셋은 "서로 다른 것을 보았는가"다.
+      review_runs: overlap.review_runs,
+      findings_total: overlap.findings_total,
+      overlapping_findings: overlap.overlapping_findings,
+      unique_findings_by_role: overlap.unique_findings_by_role,
+      overlap_ratio: overlap.overlap_ratio,
       needs_human: needsHuman.length,
       usage,
     },
