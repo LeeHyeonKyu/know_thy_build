@@ -407,6 +407,11 @@ run-stage.js <stage> <issue>
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 **2분마다** 같은 코멘트에 PATCH로 갱신(ADR-022)
   2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
+  2.4 (implement/review/merge) overlay        # ADR-020 KTB-37 — 스테이지는 **PR의 코드** 위에서 돌지만 **팩토리 자신의 설정**은 언제나 스테이지 자신의 커밋(CI는 `GITHUB_SHA`,
+                                             #   로컬은 `origin/<default_branch>`)의 것이다: 체크아웃 직후 `.factory/**`(단 `.factory/out/**` 제외) · `.claude/**` ·
+                                             #   `docs/factory/CHARTER.md`를 그 커밋에서 덮어쓰고(`git checkout <sha> -- …`) 무엇을 덮었는지 한 줄 기록한다.
+                                             #   실패하면 진행하지 않는다(fail closed → `factory:blocked`). implement에서 덮을 것이 **있으면**(= 트리가 base가 아니었다)
+                                             #   빌더를 띄우지 않는다 — overlay가 PR 커밋에 실려 나갈 경로 자체를 없앤다. 무결성·보호 경로 판정은 영향 없다(`git show <base>:<file>`로 읽는다).
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.js <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
