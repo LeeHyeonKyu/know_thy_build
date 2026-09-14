@@ -471,6 +471,61 @@ test("checkWorkflows (r1 MF-2 d): every .yml in .github/workflows is linted, not
   expect(c["workflows.lint"].detail).toContain("merge-token-scope");
 });
 
+// KTB-34 own-calendar (2026-09-14) — MF-2 d widened *which files* merge-token-scope can see, but the fix
+// didn't split scope, so factory-shaped rules (artifact-retention, no-expression-in-run, …) rode along
+// onto the adopter's own `build.yml` (an app build that uploads artifacts, no `retention-days` needed by
+// the factory's own rules). checkWorkflows must now judge those rules only on factory-*.yml files.
+test("checkWorkflows (KTB-34): an adopter's own build.yml is not held to factory-shaped rules — only merge-token-scope reaches it", () => {
+  const files = {
+    "factory-triage.yml": "on: push\n",
+    "build.yml": [
+      "on:",
+      "  push:",
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - run: echo ${{ github.event.head_commit.message }}",   // would trip no-expression-in-run if scoped as factory
+      "      - uses: actions/upload-artifact@v4",
+      "        with:",
+      "          name: dist",
+      "          path: dist/",                                        // no retention-days — would trip artifact-retention if scoped as factory
+      "",
+    ].join("\n"),
+  };
+  const c = by(checkWorkflows({
+    root: "/r",
+    exists: () => true,
+    readFile: (p) => files[p.split("/").pop()] ?? "on: push\n",
+    list: () => ["factory-triage.yml", "build.yml"],
+  }));
+  expect(c["workflows.lint"].level).toBe("PASS");
+});
+
+test("checkWorkflows (KTB-34): merge-token-scope still reaches build.yml — the merge token must not leak into ANY agent step", () => {
+  const files = {
+    "factory-triage.yml": "on: push\n",
+    "build.yml": [
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - name: Agent",
+      "        env:",
+      "          FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+      "          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+      "        run: claude -p go",
+      "",
+    ].join("\n"),
+  };
+  const c = by(checkWorkflows({
+    root: "/r",
+    exists: () => true,
+    readFile: (p) => files[p.split("/").pop()] ?? "on: push\n",
+    list: () => ["factory-triage.yml", "build.yml"],
+  }));
+  expect(c["workflows.lint"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("build.yml") });
+  expect(c["workflows.lint"].detail).toContain("merge-token-scope");
+});
+
 test("checkWorkflows (r1): an unreadable workflows directory falls back to the seven known names — the missing-file FAIL already says it", () => {
   const c = by(checkWorkflows({
     root: "/r", exists: () => true, readFile: () => "on: push\n",

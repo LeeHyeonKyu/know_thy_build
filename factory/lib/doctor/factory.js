@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from 
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { render as renderTemplate, mergeSettings, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
-import { lintWorkflow, lintLoggingHook } from "../yml-lint.js";
+import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS, CODEOWNERS_PATH } from "../bootstrap.js";
@@ -380,7 +380,13 @@ export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
     }
     // 파일명을 함께 넘긴다(ADR-021) — `merge-token-scope`의 파일 범위 갈래는 "이 텍스트가 어느
     // 워크플로인가"를 알아야만 판정할 수 있다(이름 없는 스니펫에서는 침묵한다).
-    for (const v of lintWorkflow(text, { file: w })) violations.push(`${w}:${v.line} ${v.rule}`);
+    //
+    // KTB-34: 소유권도 여기서 판정해 넘긴다 — "어떤 이름이 팩토리 것인가"는 `factory init`이 무엇을
+    // 설치하는지 아는 이 모듈의 지식이지, 순수 텍스트 린터(`lintWorkflow`)의 지식이 아니다. 소유가
+    // 아니면(예: 입양자의 `build.yml`) 팩토리 템플릿 모양을 가정하는 규칙들은 침묵하고,
+    // `merge-token-scope`(ADR-021)만 어느 파일에서든 그대로 판정한다.
+    const factoryOwned = isFactoryWorkflowFile(w);
+    for (const v of lintWorkflow(text, { file: w, factoryOwned })) violations.push(`${w}:${v.line} ${v.rule}`);
   }
   return [
     missing.length ? c("workflows.present", "FAIL", `missing: ${missing.join(", ")}`) : c("workflows.present", "PASS"),
