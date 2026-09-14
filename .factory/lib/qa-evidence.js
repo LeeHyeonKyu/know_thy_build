@@ -62,6 +62,13 @@ export const MATURITIES = Object.freeze(["M0", "M1", "M2", "M3"]);
 /** M0 최소선을 실제로 만족시키는 종류 — "실행했다/관측했다". 스크린샷 하나는 재현이 아니다. */
 const RUN_KINDS = new Set(["command", "log"]);
 
+/**
+ * 재리뷰 SF-1b — 이 접두사는 **판정의 귀속**을 가른다: 전부 `not_applicable`인 것은 증거 경로의 고장이
+ * 아니라 **qa 리뷰어의 부족**이다. `verify-stage`가 이 문자열로 그 둘을 구분하므로 상수로 둔다
+ * (문자열을 두 파일에 손으로 적으면 언젠가 갈라지고, 갈라지는 순간 귀속이 조용히 뒤집힌다).
+ */
+export const ALL_NA_PREFIX = "every done_when id is not_applicable";
+
 export const qaDirRel = (issue) => `.factory/out/qa/${issue}`;
 export const qaDir = (root, issue) => join(root, ".factory", "out", "qa", String(issue));
 export const manifestPath = (root, issue) => join(qaDir(root, issue), "manifest.json");
@@ -181,7 +188,7 @@ export function validateManifest(manifest, { doneWhen = [], maturity = "M0", tou
    * qa가 없어야 한다(그 경우 이 규칙 전체가 발화하지 않는다).
    */
   if (ws.length > 0 && ws.every((w) => exempt(by(String(w.id))))) {
-    reasons.push(`every done_when id is not_applicable (${ws.map((w) => w.id).join(", ")}) — that is a report, not a review; a roster with qa means at least one id was meant to be reproduced`);
+    reasons.push(`${ALL_NA_PREFIX} (${ws.map((w) => w.id).join(", ")}) — that is a report, not a review; a roster with qa means at least one id was meant to be reproduced`);
   }
   for (const w of ws) {
     const id = String(w.id);
@@ -317,8 +324,10 @@ export function probeEvidenceDir({ root, issue = "probe", now = Date.now(), keep
   catch (e) { return { ok: false, dir, reason: `mkdir -p ${qaDirRel(issue)} failed: ${e?.message || e}` }; }
   try { writeFileSync(file, "factory qa evidence probe\n"); }
   catch (e) { tidy(); return { ok: false, dir, reason: `writing into ${qaDirRel(issue)} failed: ${e?.message || e}` }; }
+  // 재리뷰 nit 4 — unlink 실패 경로에서도 우리가 만든 디렉터리는 치운다. 여기만 빠져 있어서,
+  // 하필 **디렉터리와 프로브 파일이 둘 다 남는** 유일한 경우가 SF-6의 약속이 깨지는 자리였다.
   try { unlinkSync(file); }
-  catch (e) { return { ok: false, dir, reason: `the probe file in ${qaDirRel(issue)} could not be removed: ${e?.message || e}` }; }
+  catch (e) { tidy(); return { ok: false, dir, reason: `the probe file in ${qaDirRel(issue)} could not be removed: ${e?.message || e}` }; }
   tidy();
   return { ok: true, dir, created: !preexisting };
 }

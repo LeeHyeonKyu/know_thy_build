@@ -1,13 +1,14 @@
 import { test, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, cpSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   QA_SCHEMA, KINDS, SMOKE_CLAIM, qaDirRel, qaDir, manifestPath, newManifest,
   validateManifest, manifestDigest, coverageTable, readManifest, probeEvidenceDir,
-  evidenceFor, isUiFacing, citedClaimIds, claimCounts, claimCountsLabel,
+  evidenceFor, isUiFacing, citedClaimIds, claimCounts, claimCountsLabel, ALL_NA_PREFIX,
 } from "../lib/qa-evidence.js";
-import { runCli, gatePayload, interpreterPayload, hookPaths } from "../bin/qa-evidence.js";
+import { runCli, gatePayload, interpreterPayload, hookPaths, shellQuote, checkAttachSource, readDenyGlobs } from "../bin/qa-evidence.js";
 import { verifyStage, qaEvidenceUnusable } from "../lib/verify-stage.js";
 import { renderCiSettings } from "../cli/install.js";
 
@@ -459,6 +460,53 @@ test("MF-1: end to end — a legitimate payload goes through the real gate, runs
   expect(m.claims[0]).toMatchObject({ id: "dw1", kind: "command", exit: 0 });
 }, 60000);
 
+/**
+ * ── 재리뷰 SF-2 — 래퍼 한 겹이면 인터프리터 검사가 통째로 비켜갔다 ────────────────────────────────
+ * `env -S "bash -c …"`는 `-S`가 플래그로 건너뛰어지고 그 **값**이 프로그램 이름 자리에 왔다
+ * (실측: 그 페이로드는 실제로 셸을 열고 파일을 만들었다). 직접 Bash도 그것을 막지 못하므로 도구가
+ * 더 넓어진 것은 아니지만, 이름으로 선언한 예외가 한 플래그에 지면 그 방어는 실제보다 강해 보인다.
+ */
+test("re-review SF-2: wrapped interpreters are refused — env -S, xargs, timeout, nohup, command, busybox", () => {
+  const refused = [
+    ["env", "-S", "bash -c 'rm -rf src'"],
+    ["env", "--split-string=bash -c ls"],
+    ["env", "-i", "-u", "PATH", "sh", "-c", "ls"],
+    ["xargs", "sh", "-c", "echo hi"],
+    ["xargs", "-I", "{}", "bash", "-c", "echo {}"],
+    ["timeout", "5", "sh", "-c", "echo hi"],
+    ["timeout", "--kill-after", "2", "5s", "zsh", "-c", "ls"],
+    ["nohup", "sh", "-c", "ls"],
+    ["command", "sh", "-c", "ls"],
+    ["busybox", "sh", "-c", "ls"],
+    ["setsid", "nohup", "dash", "-c", "ls"],
+    ["stdbuf", "-o0", "python3", "-c", "print(1)"],
+    ["nice", "node", "-e", "1"],
+  ];
+  for (const argv of refused) expect(interpreterPayload(argv), argv.join(" ")).toBeTruthy();
+
+  // 래퍼 자체는 죄가 없다 — 감싼 것이 인터프리터가 아니면 통과한다(천장은 직접 호출과 같은 노출이다).
+  const allowed = [
+    ["timeout", "300", "npm", "test"],
+    ["xargs", "-n1", "npx", "vitest", "run"],
+    ["env", "CI=1", "npm", "test"],
+    ["nohup", "npx", "playwright", "test"],
+    ["command", "flutter", "test"],
+    ["busybox", "ls"],
+    ["nice", "node", "scripts/seed.js"],
+  ];
+  for (const argv of allowed) expect(interpreterPayload(argv), argv.join(" ")).toBe(null);
+});
+
+test("re-review nit 5: the hook sees the string a person would type — arguments are shell-quoted", () => {
+  // 인용하지 않으면 인자 **안의** `>`가 훅에게 리다이렉션으로 보여, 직접 호출과 판정이 갈렸다.
+  expect(shellQuote("npm")).toBe("npm");
+  expect(shellQuote(".a > 1")).toBe("'.a > 1'");
+  expect(shellQuote("it's")).toBe(`'it'\\''s'`);
+  let seen = null;
+  gatePayload(["jq", ".a > 1", "f.json"], { env: {}, hooks: ["/x/deny.sh"], spawn: (_c, _a, o) => { seen = JSON.parse(o.input).tool_input.command; return { status: 0 }; } });
+  expect(seen).toBe(`jq '.a > 1' f.json`);
+});
+
 test("MF-1: inside a stage, a payload no hook could judge is refused (fail closed)", () => {
   const root = tmp();
   const errs = [];
@@ -482,6 +530,42 @@ test("MF-1: inside a stage, a payload no hook could judge is refused (fail close
   expect(unjudged.reason).toMatch(/could not judge the payload/);
 });
 
+/**
+ * ── 재리뷰 MF — 퍼센트 인코딩된 경로에서 도구가 자기 자신을 찾지 못했다 ──────────────────────────
+ * `new URL(...).pathname`은 디코딩하지 않는다: `/sp ace/`는 `/sp%20ace/`로 남고 `existsSync`가 전부
+ * false가 된다 → 훅을 못 찾고 → `FACTORY_STAGE` 안에서는 **모든 페이로드가 거절된다**(qa가 아무것도
+ * 기록하지 못하는 KTB #3의 모양). 공백이 든 체크아웃 경로는 실재한다.
+ */
+test("re-review MF: hook and tool resolution survives a path with a space (fileURLToPath, not .pathname)", async () => {
+  const spaced = mkdtempSync(join(tmpdir(), "qa sp ace-"));
+  cpSync(fileURLToPath(new URL("../", import.meta.url)), join(spaced, "factory"), { recursive: true, filter: (p) => !/[\\/]test[\\/]/.test(p) });
+  expect(existsSync(join(spaced, "factory/hooks/deny-all-writes.sh"))).toBe(true);
+
+  // 인자로 준 경로(공백 포함)에서 찾는다 — 그리고 이 디렉터리에는 진짜 훅 두 개가 있다.
+  const viaArg = hookPaths(join(spaced, "factory", "bin"));
+  expect(viaArg).toHaveLength(2);
+  expect(viaArg[0]).toContain("sp ace");
+
+  // **기본 인자**(모듈 자신의 위치)도 같은 규칙으로 풀린다: 공백 디렉터리에 복사한 사본을 import해
+  // 인자 없이 부른다. `.pathname`이던 시절 이 줄은 null이었다.
+  const copied = await import(pathToFileURL(join(spaced, "factory/bin/qa-evidence.js")).href);
+  const viaSelf = copied.hookPaths();
+  expect(viaSelf, "hookPaths() from a copy under a path with a space").toHaveLength(2);
+  expect(viaSelf.every((p) => !p.includes("%20"))).toBe(true);
+  // 그리고 그 사본은 실제로 페이로드를 판정할 수 있다(거절이 경로 문제로 나오지 않는다).
+  expect(copied.gatePayload(["npm", "test"], { env: { FACTORY_STAGE: "review" } })).toMatchObject({ ok: true });
+});
+
+test("re-review MF: the probe refuses to fall back silently when its own bin dir does not resolve", async () => {
+  // run-stage의 프로브는 자기 옆에서 도구를 푼다. 디렉터리 자체가 없다고 나오면 그것은 "설치되지
+  // 않았다"가 아니라 경로가 망가졌다는 뜻이고, 그때 in-process 프로브가 `ok`를 찍으면 "qa가 쓸 수
+  // 있는가"를 묻는 유일한 검사가 초록을 보고하는 동안 `record`는 죽어 있다.
+  const src = readFileSync(fileURLToPath(new URL("../bin/run-stage.js", import.meta.url)), "utf8");
+  expect(src).toContain("fileURLToPath(import.meta.url)");
+  expect(src).not.toMatch(/new URL\("\.\/qa-evidence\.js", import\.meta\.url\)\.pathname/);
+  expect(src).toContain("refusing to fall back silently");
+});
+
 test("MF-3: there is no --root — the tool always writes under the process cwd", () => {
   const root = tmp();
   const elsewhere = tmp();
@@ -489,6 +573,60 @@ test("MF-3: there is no --root — the tool always writes under the process cwd"
   expect(existsSync(manifestPath(root, 3))).toBe(true);
   expect(existsSync(manifestPath(elsewhere, 3))).toBe(false);
   expect(existsSync(join(elsewhere, ".factory"))).toBe(false);
+});
+
+/**
+ * ── 재리뷰 SF-3 — `attach --file`의 **출처**도 가둔다 ──────────────────────────────────────────
+ * MF-3이 목적지를 가뒀지만 출처는 열려 있었다: 저장소 밖의 파일도, 세션이 `Read(...)`로 막아 둔
+ * `.env`도 그대로 읽혀 증거가 됐고, 거기서 spec-conformance가 읽어 handoff에 인용하면 공개 이슈로 나간다.
+ */
+test("re-review SF-3: attach refuses a source outside the repo and temp dirs", () => {
+  const root = tmp();
+  const outside = mkdtempSync(join(tmpdir(), "elsewhere-"));
+  // `/tmp` 아래가 아닌 "밖"을 만들려면 뿌리 목록에 없는 곳이어야 한다 — 저장소 안에 심볼릭 링크를 두고
+  // 그 링크가 밖을 가리키게 한다(realpath 이후 판정이라는 사실까지 함께 고정한다).
+  const secret = join(outside, "keys.txt");
+  writeFileSync(secret, "s3cret");
+  const link = join(root, "innocent.txt");
+  try { symlinkSync(secret, link); } catch { return; }          // 심볼릭 링크를 못 만드는 환경이면 건너뛴다
+
+  const r = checkAttachSource(link, { root, env: {}, denyGlobs: [], realpath: (p) => (p === link ? secret : p) });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/must live inside the repo or a temp dir/);
+
+  const errs = [];
+  // env를 비워 TMPDIR를 허용 뿌리에서 뺀다 — macOS의 tmpdir는 /var/folders라, 그것이 열려 있으면
+  // "밖"을 만들 자리가 없다(테스트가 자기도 모르게 아무것도 검사하지 않게 된다).
+  expect(runCli(["attach", "--issue", "3", "--claim", "dw1", "--kind", "log", "--file", link, "--summary", "leak"], cliOpts(root, { env: {}, err: (s) => errs.push(s) }))).toBe(1);
+  expect(errs.join("\n")).toMatch(/must live inside the repo or a temp dir/);
+  expect(existsSync(manifestPath(root, 3))).toBe(false);        // 거절된 출처는 한 바이트도 남기지 않는다
+});
+
+test("re-review SF-3: attach refuses a source the session's own Read deny list covers (.env, .git, .npmrc)", () => {
+  const root = tmp();
+  mkdirSync(join(root, ".factory"), { recursive: true });
+  // 목록은 **손으로 베끼지 않는다** — 세션이 들고 도는 그 파일에서 읽는다(여기서는 실제 템플릿을 쓴다).
+  const template = readFileSync(new URL("../../templates/factory/factory/ci-settings.json", import.meta.url), "utf8");
+  writeFileSync(join(root, ".factory/ci-settings.json"), template);
+  expect(readDenyGlobs(root)).toContain(".env");
+
+  for (const name of [".env", ".env.local", ".npmrc"]) {
+    writeFileSync(join(root, name), "SECRET=1");
+    const errs = [];
+    expect(runCli(["attach", "--issue", "3", "--claim", "dw1", "--kind", "log", "--file", name, "--summary", "leak"], cliOpts(root, { err: (s) => errs.push(s) })), name).toBe(1);
+    expect(errs.join("\n"), name).toMatch(/deny rule/);
+  }
+  // 평범한 증거 파일은 그대로 들어간다.
+  writeFileSync(join(root, "shot.png"), "not really a png");
+  expect(runCli(["attach", "--issue", "3", "--claim", "dw1", "--kind", "screenshot", "--file", "shot.png", "--summary", "the screen"], cliOpts(root))).toBe(0);
+  expect(JSON.parse(readFileSync(manifestPath(root, 3), "utf8")).claims).toHaveLength(1);
+});
+
+test("re-review SF-3: inside a stage, an unreadable deny list is a refusal (fail closed)", () => {
+  const root = tmp();
+  writeFileSync(join(root, "note.txt"), "x");
+  expect(checkAttachSource("note.txt", { root, env: { FACTORY_STAGE: "review" }, denyGlobs: null }).ok).toBe(false);
+  expect(checkAttachSource("note.txt", { root, env: {}, denyGlobs: null })).toMatchObject({ ok: true, unchecked: true });
 });
 
 test("nit 2: a claim id that would be rewritten for the filename is refused, not silently renamed", () => {
@@ -580,6 +718,39 @@ test("MF-2: an absent or stale manifest is named as the evidence path, not as th
   const cited = verifyStage({ ...base, qaManifest: { ok: true, claimIds: ["dw1"] } });
   expect(cited.ok).toBe(true);
   expect(qaEvidenceUnusable(cited.reasons)).toBe(false);
+});
+
+/**
+ * 재리뷰 SF-1b — **누구의 부족인가로 한 번 더 가른다.** 1라운드는 `ok !== true` 전부를 "증거 경로의
+ * 고장"으로 불렀는데, 커버리지가 빈 id들과 전부 `na`인 매니페스트는 **qa 리뷰어 자신의** 부족이다.
+ * 그것을 인프라(`undecidable`)로 부르면 sweeper가 같은 부족을 상대로 리뷰를 세 번 다시 돌리고,
+ * "빌더의 일이 아니다"라는 문장이 사실과 어긋난다.
+ */
+test("re-review SF-1b: the reviewer's own shortfall is a reject naming the ids, not an infrastructure failure", () => {
+  const data = { schema: "factory.review.v1", issue: 3, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: ["dw1 reproduced"] }] };
+  const base = {
+    stage: "review", roster: ["qa"], rolePrefix: "reviewer-",
+    agentsLog: { completed: ["reviewer-qa"] }, gates: { status: "GREEN", level: "unit" },
+    out: { is_error: false, result: JSON.stringify(data) }, transcriptText: "",
+  };
+
+  // (a) 커버리지 부족 — id를 부르고, **undecidable이 아니다**.
+  const missing = verifyStage({ ...base, qaManifest: { ok: false, missing: ["dw2", "dw4"], reason: "qa evidence manifest is incomplete — missing claims for dw2, dw4", reasons: [] } });
+  expect(missing.ok).toBe(false);
+  expect(missing.reasons.join(" ")).toMatch(/spec-evidence-missing: dw2, dw4/);
+  expect(missing.reasons.join(" ")).not.toMatch(/not the builder's work/);
+  expect(qaEvidenceUnusable(missing.reasons)).toBe(false);
+
+  // (b) 전부 not_applicable — SF-3의 거절이 "무시해도 되는 인프라" 채널로 배달되지 않는다.
+  const allNa = verifyStage({ ...base, qaManifest: { ok: false, missing: [], reason: "x", reasons: [`${ALL_NA_PREFIX} (dw1, dw2) — that is a report, not a review`] } });
+  expect(allNa.ok).toBe(false);
+  expect(allNa.reasons.join(" ")).toMatch(/that is a report, not a review/);
+  expect(qaEvidenceUnusable(allNa.reasons)).toBe(false);
+
+  // (c) 진짜 경로 고장만 undecidable로 남는다.
+  const absent = verifyStage({ ...base, qaManifest: { ok: false, missing: [], reasons: [], reason: "no qa evidence manifest at .factory/out/qa/3/manifest.json" } });
+  expect(qaEvidenceUnusable(absent.reasons)).toBe(true);
 });
 
 test("verify-stage: no qa in the roster means the qa evidence rule does not fire", () => {

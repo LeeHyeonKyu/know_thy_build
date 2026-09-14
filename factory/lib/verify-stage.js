@@ -1,7 +1,7 @@
 import { validate } from "./schemas.js";
 import { extractStageArtifact } from "./stage-artifact.js";
 import { matchesAny } from "./glob.js";
-import { citedClaimIds } from "./qa-evidence.js";
+import { citedClaimIds, ALL_NA_PREFIX } from "./qa-evidence.js";
 
 /**
  * 최종 리뷰 nit 3 — `extractJson`/`matchBrace`와 `export { fencedJsonError }`가 여기서 사라졌다.
@@ -290,7 +290,21 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
      * `needs-human`으로 등급이 매겨져, "한 라운드 더 돌면 매니페스트가 생긴다"는 ADR의 업그레이드
      * 경로를 스스로 막았다.
      */
-    if (qaManifest.ok !== true) {
+    /**
+     * 재리뷰 SF-1b — **누구의 부족인가로 한 번 더 가른다.** 1라운드의 분기는 `ok !== true` 전부를
+     * "증거 경로의 고장"으로 불렀는데, `evidenceFor`의 실패에는 **qa 리뷰어 자신의 부족**도 들어 있다:
+     * 커버리지가 빈 id들(`missing`)과 전부 `not_applicable`인 매니페스트. 그 둘을 인프라로 부르면
+     * ① "빌더의 일이 아니다"라는 문장이 사실과 어긋나고(그 상태는 **qa**의 일이다),
+     * ② `undecidable`로 등급이 매겨져 sweeper가 같은 부족을 상대로 리뷰 스테이지를 세 번 다시 돌리고,
+     * ③ SF-3이 막 만든 거절("that is a report, not a review")이 "무시해도 되는 인프라" 채널로 배달된다.
+     * 그래서 여기서는 **id를 부르는 거절**로 내보낸다 — 등급은 평범한 산출물 실패(사람에게 간다)다.
+     */
+    const reviewerSide = (qaManifest.missing?.length ?? 0) > 0
+      || (qaManifest.reasons || []).some((r) => String(r).startsWith(ALL_NA_PREFIX));
+    if (qaManifest.ok !== true && reviewerSide) {
+      const named = qaManifest.missing?.length ? `spec-evidence-missing: ${qaManifest.missing.join(", ")}` : (qaManifest.reasons || [])[0];
+      reasons.push(`qa evidence is incomplete — ${named}; the qa reviewer records it with \`node .factory/bin/qa-evidence.js record|attach|na\` and checks it with \`finish\``);
+    } else if (qaManifest.ok !== true) {
       reasons.push(`${QA_EVIDENCE_UNUSABLE}: ${qaManifest.reason || "unknown"} — this is the evidence path, not the builder's work (ADR-024); .factory/out/qa/<issue>/manifest.json is written by \`node .factory/bin/qa-evidence.js\``);
     } else {
       const v = (Array.isArray(data.verdicts) ? data.verdicts : []).find((x) => x?.role === "qa");

@@ -202,6 +202,22 @@ test("KTB-42/MF-2: an unusable qa manifest is blocked/undecidable, and the reaso
   expect(lines.join("\n")).toMatch(/manifest\.json/);
 });
 
+// 재리뷰 SF-1b — qa 리뷰어 자신의 부족은 인프라가 아니다: sweeper가 같은 부족을 세 번 다시 돌리면
+// 안 되고, 그 문장이 "빌더의 일이 아니다"라고 말해서도 안 된다(그 상태는 **qa**의 일이다).
+test("re-review SF-1b: missing coverage is graded as an ordinary artifact failure, not blocked/undecidable", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const d = overlayDeps({
+    verifyStage: () => ({ ok: false, reasons: ["qa evidence is incomplete — spec-evidence-missing: dw2, dw4; the qa reviewer records it with `node .factory/bin/qa-evidence.js record|attach|na`"] }),
+    transition,
+  });
+  expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: expect.stringContaining("spec-evidence-missing: dw2, dw4"),
+  }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "undecidable" }));
+});
+
 test("KTB-42/MF-2: an ordinary artifact failure still goes to needs-human — only the evidence path is regraded", async () => {
   const transition = vi.fn(async () => ({ ok: true }));
   const d = overlayDeps({

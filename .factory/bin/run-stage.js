@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { isAbsolute, join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
@@ -2009,7 +2009,15 @@ async function main() {
        * 러너의 환경으로 돌린다(KTB-37이 닫은 구멍의 다른 철자). `import.meta.url`은 지금 돌고 있는
        * run-stage 자신의 위치이고, 그 옆의 파일은 정의상 팩토리의 것이다.
        */
-      const tool = new URL("./qa-evidence.js", import.meta.url).pathname;
+      // 재리뷰 MF — `fileURLToPath`이지 `.pathname`이 아니다(퍼센트 인코딩: `/sp ace/` → `/sp%20ace/`).
+      // 그리고 **조용히 폴백하지 않는다**: 우리 자신의 디렉터리조차 없다고 나오면 그것은 "설치되지
+      // 않았다"가 아니라 경로가 망가졌다는 뜻이고, 그 상태에서 in-process 프로브가 `ok`를 찍으면
+      // "qa가 쓸 수 있는가"를 묻는 유일한 검사가 초록을 보고하는 동안 `record`는 죽어 있게 된다.
+      const toolDir = dirname(fileURLToPath(import.meta.url));
+      if (!existsSync(toolDir)) {
+        return { ok: false, reason: `the factory's own bin directory does not resolve (${toolDir}) — refusing to fall back silently, because a mangled path would make this probe report ok while the tool cannot run` };
+      }
+      const tool = join(toolDir, "qa-evidence.js");
       if (!existsSync(tool)) {
         const p = probeEvidenceDir({ root, issue });
         return p.ok

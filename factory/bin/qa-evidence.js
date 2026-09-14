@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, extname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { latestHandoff } from "../lib/handoff.js";
+import { matchesAny } from "../lib/glob.js";
 import { isBinary, scrubText, SECRET_ENV } from "./scrub-artifacts.js";
 import {
   DATA_PATH_RE, KINDS, QA_SCHEMA, SMOKE_CLAIM, TOOL_VERSION, coverageTable, evidenceFor, manifestPath,
@@ -69,7 +70,22 @@ export const DEFAULT_TIMEOUT_MS = 300000;
  * 테스트 러너·CLI이지 셸이 아니고, 파이프라인이 필요하면 그것을 `.factory/scenarios/`의 스크립트로
  * 만들어 파일로 실행하면 된다.
  */
-const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "exec", "source"]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "source"]);
+/**
+ * 재리뷰 SF-2 — **래퍼를 벗기고 나서 프로그램을 본다.** `env`만 벗기던 판정은 한 플래그에 졌다:
+ * `env -S "bash -c …"`는 `-S`가 "플래그"로 건너뛰어지고 그 **값**(셸 명령줄 전체)이 프로그램 이름
+ * 자리에 와서 `null`이 나왔다(실측: 그 페이로드는 실제로 셸을 열고 파일을 만들었다). 같은 구멍이
+ * `xargs sh -c …`·`timeout 5 sh -c …`·`nohup sh -c …`·`busybox sh -c …`에도 있었다.
+ *
+ * 직접 Bash 호출도 그 철자들을 막지 못하므로(실측: 양쪽 다 exit 0) 이것이 **도구 경로를 더 넓게**
+ * 만든 것은 아니다 — 천장은 여전히 "직접 호출과 같은 노출"이다. 그래도 고치는 이유는 이 예외가
+ * 이름으로 선언돼 있기 때문이다: `env <interp>`를 막는다고 적어 놓고 한 플래그에 지면, 그 방어는
+ * 실제보다 강해 보인다.
+ */
+const WRAPPERS = new Set(["env", "xargs", "timeout", "nohup", "stdbuf", "nice", "command", "busybox", "setsid", "exec"]);
+/** 값을 **다음 토큰**으로 받는 래퍼 플래그(그 토큰은 프로그램 이름이 아니다). */
+// (`env -i`는 값을 받지 않는다 — 여기 넣으면 그 다음 토큰을 삼켜 프로그램 이름을 놓친다.)
+const WRAPPER_FLAG_TAKES_VALUE = /^(-u|--unset|-C|--chdir|-k|--kill-after|-s|--signal|-I|-L|-n|-P|-o|--output)$/;
 /** 프로그램 이름 → 그 이름이 **인라인 스크립트 모드**로 도는 플래그. 그 플래그가 있을 때만 인터프리터다. */
 const INLINE_FLAGS = [
   { re: /^node[0-9.]*$/, flags: /^(-[a-zA-Z]*[ep][a-zA-Z]*|--eval|--print)/ },
@@ -78,16 +94,35 @@ const INLINE_FLAGS = [
 ];
 const baseName = (p) => String(p ?? "").split(/[\\/]/).pop();
 
+/** POSIX 셸 인용 — 사람이 그 명령을 칠 때 쓸 바로 그 형태. 안전한 문자만이면 그대로 둔다. */
+export const shellQuote = (a) => {
+  const s = String(a ?? "");
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) && s !== "" ? s : `'${s.split("'").join(`'\\''`)}'`;
+};
+
 /**
  * 페이로드의 프로그램이 인터프리터인가. `env VAR=1 sh -c …`처럼 `env`로 감싼 것도 같은 대접을 받는다
  * (그 래퍼가 정확히 이 검사를 우회하려고 존재하는 모양이다). 아니면 null.
  */
 export function interpreterPayload(argv = []) {
   let i = 0;
-  while (i < argv.length && baseName(argv[i]) === "env") {
+  let guard = 0;
+  while (i < argv.length && WRAPPERS.has(baseName(argv[i])) && guard++ < 16) {
+    const wrapper = baseName(argv[i]);
     i++;
     while (i < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(String(argv[i]))) i++;   // env VAR=VAL …
-    while (i < argv.length && /^-/.test(String(argv[i]))) i++;                          // env -i, env -u X
+    while (i < argv.length && /^-/.test(String(argv[i]))) {
+      const flag = String(argv[i]);
+      // `env -S '<셸 명령줄 전체>'`는 래퍼가 아니라 **인터프리터**다: 한 인자 안에 명령줄이 들어 있고,
+      // 그것은 훅도 이 함수도 읽을 수 없다. 값이 붙어 있든(`-S…`) 떨어져 있든 통째로 거절한다.
+      if (/^(-[a-zA-Z]*S|--split-string)/.test(flag)) {
+        return `${wrapper} -S — it carries a whole command line inside one argument, which no hook can read`;
+      }
+      i++;
+      if (WRAPPER_FLAG_TAKES_VALUE.test(flag)) i++;
+    }
+    // `timeout <duration> <prog>` — 기간은 프로그램 이름이 아니다.
+    if (wrapper === "timeout" && i < argv.length && /^[0-9]+(\.[0-9]+)?[smhd]?$/.test(String(argv[i]))) i++;
   }
   const prog = baseName(argv[i]);
   if (!prog) return null;
@@ -103,8 +138,15 @@ export function interpreterPayload(argv = []) {
  * 이 도구 옆의 훅 스크립트를 찾는다. 두 레이아웃이다 — 설치본(`.factory/bin/` → `../../.claude/hooks/`)과
  * 이 패키지 자신(`factory/bin/` → `../hooks/`). **도구 자신의 위치에서** 푸는 이유는 KTB-37과 같다:
  * 작업 트리의 경로로 풀면 PR이 심어 둔 훅을 그 PR의 리뷰가 쓰게 된다.
+ *
+ * 재리뷰 MF — **`fileURLToPath`이지 `.pathname`이 아니다.** `URL.pathname`은 퍼센트 인코딩을 풀지 않는다:
+ * 체크아웃이 `/Users/x/sp ace`에 있으면 `import.meta.url`은 `file:///Users/x/sp%20ace/…`이고 `.pathname`은
+ * `%20`을 그대로 들고 온다 → `existsSync`가 전부 false → 훅을 못 찾는다 → `FACTORY_STAGE` 안에서는
+ * **모든 페이로드가 거절된다**(= qa가 아무것도 기록하지 못하는 KTB #3의 모양이 새 방아쇠로 재현된다).
+ * 공백·`#`·`?`·`%`가 든 경로는 실재한다(`My Projects`, 잡 이름에 공백이 있는 CI 워크스페이스).
+ * 저장소의 다른 진입점들(`bin/cli.js`, `factory/cli/index.js`)이 쓰는 관용을 그대로 쓴다.
  */
-export function hookPaths(here = new URL(".", import.meta.url).pathname) {
+export function hookPaths(here = dirname(fileURLToPath(import.meta.url))) {
   const names = ["deny-all-writes.sh", "block-dangerous.sh"];
   const roots = [join(here, "..", "hooks"), join(here, "..", "..", ".claude", "hooks")];
   for (const dir of roots) {
@@ -127,9 +169,11 @@ export function gatePayload(argv, { env = process.env, spawn = spawnSync, hooks 
       ? { ok: false, reason: "factory: qa-evidence cannot find the hook scripts next to itself — refusing to run a payload no boundary has judged (run `npx know-thy-build factory init --upgrade`)" }
       : { ok: true, unchecked: true };
   }
-  // 훅이 보는 것과 **같은 모양**으로 만든다: 따옴표를 씌우지 않는다. 인자 안의 `;`·`>`가 그대로
-  // 남아야 훅이 그것을 구분자로 읽고 더 엄하게 판정한다(관용은 이 방향으로 기울면 안 된다).
-  const line = argv.join(" ");
+  // 재리뷰 nit 5 — 훅이 보는 것은 **사람이 쳤을 그 문자열**이어야 한다: 인자를 셸 규칙대로 인용한다.
+  // 인용하지 않으면 인자 **안의** `>`·`;`(`jq '.a > 1'`)가 훅에게 리다이렉션·구분자로 보여, 직접
+  // 호출과 판정이 갈린다. 천장은 언제나 "직접 Bash 호출과 같은 노출"이므로 양쪽이 같은 문자열을 봐야
+  // 한다 — 이것은 관용이 아니라 **대칭**이다(따옴표 안의 `>`는 직접 호출에서도 그 훅이 여전히 문다).
+  const line = argv.map(shellQuote).join(" ");
   const input = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: line } });
   for (const hook of hooks) {
     const r = spawn("bash", [hook], { input, encoding: "utf8", env });
@@ -203,6 +247,57 @@ export function harnessMaturity(root, { readFile = (p) => readFileSync(p, "utf8"
     const t = readFile(join(root, ".factory/harness.toml"));
     return /^\s*maturity\s*=\s*["'](M\d)["']/m.exec(t)?.[1] ?? null;
   } catch { return null; }
+}
+
+/**
+ * ── 재리뷰 SF-3 — **`attach --file`의 출처도 가둔다** ──────────────────────────────────────────
+ * MF-3이 목적지를 가뒀지만(`--root` 제거) 출처는 열려 있었다: `attach --file <아무 절대 경로>`가 그대로
+ * 읽혀 증거 디렉터리에 복사됐고, 거기서 `reviewer-spec-conformance`가 읽어 handoff에 인용하면 그 내용이
+ * GitHub 이슈로 나간다. ci-settings는 바로 그 파일들을 `Read(...)`로 막고 있는데(`.env*`·`.git/**`·
+ * `.netrc`·`.npmrc`) 이 한 경로만 그 목록을 몰랐다.
+ *
+ * 목록은 **손으로 베끼지 않는다** — 세션이 실제로 들고 도는 `.factory/ci-settings.json`에서 읽는다.
+ * 그 파일을 읽지 못했고 `FACTORY_STAGE` 안이면 거절한다(`gatePayload`와 같은 fail-closed): 확인하지
+ * 못한 금지 목록은 금지 목록이 아니다.
+ */
+export const ALLOWED_SOURCE_ROOTS = (root, env = process.env) => [root, "/tmp", "/private/tmp", ...(env.TMPDIR ? [env.TMPDIR] : [])];
+export function readDenyGlobs(root, { readFile = (p) => readFileSync(p, "utf8") } = {}) {
+  for (const f of [".factory/ci-settings.json", ".factory/ci-settings-harness.json"]) {
+    try {
+      const deny = JSON.parse(readFile(join(root, f)))?.permissions?.deny || [];
+      const globs = deny.map((d) => /^Read\((.+)\)$/.exec(String(d))?.[1]).filter(Boolean);
+      if (globs.length) return globs;
+    } catch { /* 다음 후보로 */ }
+  }
+  return null;
+}
+
+/** realpath 이후의 경로가 허용된 뿌리 **안**인가 — 심볼릭 링크로 걸어 나가지 못하게. */
+const insideAny = (p, roots) => roots.some((r) => {
+  const rel = relative(r, p);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+});
+
+export function checkAttachSource(src, { root, env = process.env, denyGlobs, realpath = realpathSync } = {}) {
+  const globs = denyGlobs === undefined ? readDenyGlobs(root) : denyGlobs;
+  let abs;
+  try { abs = realpath(resolve(root, src)); }
+  catch (e) { return { ok: false, reason: `factory: --file cannot be read: ${src} (${e?.message || e})` }; }
+  const declared = ALLOWED_SOURCE_ROOTS(root, env);
+  const roots = declared.map((r) => { try { return realpath(r); } catch { return resolve(r); } });
+  if (!insideAny(abs, roots)) {
+    return { ok: false, reason: `factory: --file must live inside the repo or a temp dir (${declared.join(", ")}) — ${src} resolves to ${abs}, and evidence is copied where other roles read it and quote it into a public handoff` };
+  }
+  if (!globs) {
+    return env.FACTORY_STAGE
+      ? { ok: false, reason: "factory: the session's Read deny list (.factory/ci-settings.json) is unreadable — refusing to copy a file whose restrictions could not be checked" }
+      : { ok: true, abs, unchecked: true };
+  }
+  const rel = relative(root, abs).split(sep).join("/");
+  const candidates = [rel, abs, baseName(abs)].filter(Boolean);
+  const hit = globs.find((g) => candidates.some((c) => matchesAny([g], c)));
+  if (hit) return { ok: false, reason: `factory: --file ${src} matches this session's \`Read(${hit})\` deny rule — the factory refuses to read that file, so it cannot become evidence either` };
+  return { ok: true, abs };
 }
 
 /**
@@ -302,16 +397,19 @@ function cmdAttach({ root, issue, flags, env, log, err, now, spawn }) {
     err(`factory: --kind must be one of ${KINDS.filter((x) => x !== "not_applicable").join("|")} (use \`na\` for not_applicable)`);
     return 1;
   }
+  // SF-3 — 출처를 **먼저** 판정한다(디렉터리를 만들기도 전에). 읽지 말아야 할 파일은 증거도 아니다.
+  const source = checkAttachSource(src, { root, env });
+  if (!source.ok) { err(source.reason); return 1; }
   if (!ensureDir(root, issue, err)) return 2;
   let buf;
-  try { buf = readFileSync(src); } catch (e) { err(`factory: --file cannot be read: ${src} (${e?.message || e})`); return 1; }
+  try { buf = readFileSync(source.abs); } catch (e) { err(`factory: --file cannot be read: ${src} (${e?.message || e})`); return 1; }
   const at = now();
   const m = loadOrOpenManifest(root, issue, { ...stageStamp(root, issue, spawn), now: at });
-  const ext = extname(basename(src)) || ".bin";
+  const ext = extname(basename(source.abs)) || ".bin";
   const file = `${safeClaim(claim)}-${nextIndex(m, claim)}${ext}`;
   const dest = join(qaDir(root, issue), file);
   // 바이너리(스크린샷)는 한 바이트도 건드리지 않는다 — 텍스트로 다시 쓰면 증거가 깨진다.
-  if (isBinary(buf)) copyFileSync(src, dest);
+  if (isBinary(buf)) copyFileSync(source.abs, dest);
   else writeFileSync(dest, scrubText(buf.toString("utf8"), { secrets: secretsFrom(env) }).text);
   m.claims.push({ id: String(claim), kind: k, file, summary });
   saveManifest(root, issue, m);
