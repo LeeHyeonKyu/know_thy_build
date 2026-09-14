@@ -333,8 +333,11 @@ const buildRules =
   `proves nothing, and the verifier runs \`prove-test\` to check exactly that.\n` +
   `3. Never modify or delete an existing test (\`tests_are_load_bearing\`, spec §5.2.4) and never add a ` +
   `skip/ignore pragma (\`.skip\`, \`xit\`, \`@pytest.mark.skip\`, \`# pragma: no cover\`, ` +
-  `\`istanbul ignore\`, \`Stryker disable\`). If an existing test truly must change, stop and write why ` +
-  `in the PR body instead — spec-conformance approves that explicitly or it does not happen.\n` +
+  `\`istanbul ignore\`, \`Stryker disable\`). This is now enforced, not just asked: a removed or changed ` +
+  `line in a file matched by \`harness.test.test_glob\` (and a deleted test file) is a policy violation ` +
+  `that stops the auto-merge and hands the PR to a human (external audit H5). Adding new tests is always ` +
+  `fine. The only exception is an existing test the ISSUE BODY lists under \`tests_changed_allowed:\` — ` +
+  `if the change you need is not listed there, stop and write why in the PR body instead.\n` +
   `4. Stay inside \`handoffs.plan.files_expected\`. If the work honestly needs a path outside it, record ` +
   `the path and the reason in the PR body under a "Scope change" heading.\n` +
   `5. Run \`[commands].lint\` and \`[commands].unit\` from \`harness.commands\` yourself (plus the full ` +

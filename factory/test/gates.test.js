@@ -643,3 +643,34 @@ test("M4: 제외가 실제로 일어나면 quarantine_applied에 그 사실이 �
   expect(r.quarantine_refused).toEqual([]);
   expect(r.status).toBe("GREEN");
 });
+
+// ── 외부 감사 M12: `docs` tier는 **문서에만** 적용된다 ────────────────────────────────
+// `DOC_GLOBS = ["docs/**", "*.md"]`는 `.claude/agents/reviewer-*.md`(리뷰어 프롬프트)와
+// `docs/factory/CHARTER.md`(판정 기준 그 자체)를 문서로 읽었다 — 그 PR은 fast 레벨에 리뷰어 한 명을
+// 받았다. 설정·프롬프트·워크플로·팩토리 소스, 그리고 `[protected]`에 걸리는 **모든** 경로는 문서처럼
+// 생겼어도 docs가 아니다.
+import { tierFloor } from "../lib/gates.js";
+
+const floorHarness = { load_bearing: { paths: [] }, protected: { factory: [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md"] } };
+const floorOf = (...files) => tierFloor({ changed: { all: files }, harness: floorHarness });
+
+test("M12: 진짜 문서만 docs다", () => {
+  expect(floorOf("docs/features/012-export.md", "README.md")).toBe("docs");
+});
+
+test("M12: 설정·프롬프트·템플릿·워크플로·팩토리 소스는 .md여도 docs가 아니다", () => {
+  expect(floorOf(".claude/agents/reviewer-qa.md")).toBe("standard");
+  expect(floorOf("templates/factory/claude/agents/reviewer-qa.md")).toBe("standard");
+  expect(floorOf(".factory/lessons/reviewer-qa.md")).toBe("standard");
+  expect(floorOf(".github/workflows/factory-merge.yml")).toBe("standard");
+  expect(floorOf("factory/lib/gates.js")).toBe("standard");
+});
+
+test("M12: `[protected]`에 걸리는 문서(CHARTER)도 docs가 아니다 — 판정 기준 자체다", () => {
+  expect(floorOf("docs/factory/CHARTER.md")).toBe("standard");
+  expect(floorOf("docs/factory/audit/2026-09-14-external-audit.md")).toBe("docs");
+});
+
+test("M12: load_bearing 경로는 여전히 가장 센 바닥이다", () => {
+  expect(tierFloor({ changed: { all: ["factory/lib/integrity.js"] }, harness: { ...floorHarness, load_bearing: { paths: ["factory/lib/integrity.js"] } } })).toBe("load-bearing");
+});

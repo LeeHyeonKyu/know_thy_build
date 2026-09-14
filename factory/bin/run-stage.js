@@ -19,7 +19,7 @@ import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, T
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext } from "../lib/context.js";
+import { buildContext, resolveTier } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
@@ -1252,7 +1252,18 @@ async function main() {
       const drift = await overlayDrift({ run, cwd: root, sha: overlaySha });
       return drift.ok ? clean : { ok: false, dirty: drift.paths, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
     },
-    buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
+    /**
+     * 감사 H3 — 컨텍스트는 `run`/`base`를 받아야 tier 바닥(diff)을 계산할 수 있다. base를 못 구하는
+     * 것은 판정 불가이지 "바닥 없음"이 아니지만, **여기서** 스테이지를 죽이지는 않는다: 곧이어 도는
+     * `gates` dep이 같은 `mergeBase()`로 MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는
+     * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
+     */
+    buildContext: async () => {
+      let base = null;
+      try { base = await mergeBase(); }
+      catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
+      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base }));
+    },
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
     /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
@@ -1306,7 +1317,15 @@ async function main() {
       if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
       return v;
     },
-    writeHandoff: async ({ data }) => { await gh.comment(issue, renderHandoff({ stage, issue, summary: data.summary || `### ${stage} 완료`, data })); },
+    /**
+     * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
+     * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
+     * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
+     */
+    writeHandoff: async ({ data }) => {
+      const d2 = ctxCache?.tier_effective ? { ...data, tier_effective: ctxCache.tier_effective, tier_source: ctxCache.tier_source } : data;
+      await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
+    },
     /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
     setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
@@ -1352,7 +1371,15 @@ async function main() {
      * `git show <rev>:<file>`로 읽는다 — checkoutHead 뒤의 트리는 PR의 것이다.
      */
     policyViolations: async () => {
-      try { return await policyViolations({ run, cwd: root, base: await mergeBase(), harness }); }
+      /**
+       * 감사 H5 — 기존 테스트의 수정·삭제도 이 dep이 실어 온다. 예외 표식(`tests_changed_allowed:`)은
+       * **이슈 본문**에서만 읽는다: PR diff 안에 있으면 그 PR이 스스로를 허가하게 된다. 본문을 못 읽으면
+       * 빈 문자열이고, 그때는 허가가 없는 것으로 친다(fail closed — 사람이 머지한다).
+       */
+      let issueBody = "";
+      try { issueBody = (await gh.issue(issue))?.body ?? ""; }
+      catch (e) { recordLine(`policy: issue body unreadable — tests_changed_allowed ignored (${e?.message || e})`); }
+      try { return await policyViolations({ run, cwd: root, base: await mergeBase(), harness, issueBody }); }
       catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
     },
     /** 이슈(또는 PR — 같은 번호 공간)에 코멘트를 남긴다. KTB-18의 라벨-무효 알림과 merge stage의
@@ -1387,21 +1414,18 @@ async function main() {
       return { ok: true, data: h.data };
     },
     /**
-     * ── 리뷰 batch-1 잠정 tier 바닥(Task 4까지) ────────────────────────────────────────────────
-     * 로스터 크기 = 정족수다. 그 크기가 **triage 에이전트의 자기 신고**(handoff의 `tier`)에서만
-     * 나오면, tier를 낮춰 신고하는 것만으로 로스터도 머지 스테이지가 강제하는 정족수도 함께
-     * 줄어든다 — 감사 H3와 같은 결함이 새 정족수 검사에 그대로 상속된다.
-     * `runStageGates`는 이미 `tier_effective = maxTier(declared, tierFloor(diff))`를 계산해
-     * `.factory/out/gates.json`에 적어 두는데(gates.js) 그 값을 읽는 곳이 없었다. 여기서 둘의
-     * **최대치**를 취한다: 자기 신고는 tier를 올릴 수는 있어도 내릴 수는 없게 된다.
-     * (Task 4가 `tier_effective`를 파이프라인 1급 시민으로 만들면 이 두 줄은 그쪽으로 옮겨간다.)
+     * 감사 H3 — 정족수의 출처인 이 로스터도 **실효 tier**로 뽑는다. 예전에는 triage handoff의 자기
+     * 신고를 그대로 읽었다: "docs"라고 적힌 이슈는 리뷰어 한 명만 있으면 정족수가 찼고, 그 diff가
+     * 무엇을 건드렸는지는 아무도 묻지 않았다. `resolveTier`는 `lib/context.js`의 것과 같은 함수이고,
+     * 같은 diff(`base...HEAD`)를 본다 — 리뷰 스테이지의 `context.json`과 머지 스테이지의 정족수가
+     * 한 규칙에서 나온다. (리뷰 batch-1의 잠정 `reviewTier(claimed, gates.json)` 바닥은 이 canonical
+     * 계산으로 대체됐다 — gates.json은 PR head에서 쓰이지만 이것은 base + diff에서 도출된다.)
      */
     reviewRoster: async () => {
       try {
-        const claimed = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
-        const floor = readJson(gatesPath)?.tier_effective ?? null;
-        const tier = reviewTier({ claimed, floor });
-        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", tier), tier, tier_claimed: claimed, tier_floor: floor };
+        const declared = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
+        const t = await resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier: declared });
+        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", t.tier_effective), tier: t.tier_effective, tier_declared: declared, tier_source: t.tier_source };
       } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
     },
     /**
