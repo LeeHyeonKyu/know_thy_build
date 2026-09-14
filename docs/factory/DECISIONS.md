@@ -2040,3 +2040,15 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 **알려진 한계**: (a) 정적 모드의 모델은 축소판이고 페이지가 자기 사본의 정규식을 든다 — 그 사본이 낡으면 정적 모드만 조용히 성기어진다(CLI 모드는 영향 없다). (b) `matched_by: "workflow"`는 best-effort다: `gh run list`는 워크플로 입력을 싣지 않으므로 같은 제목의 이슈가 둘이면 틀릴 수 있다. (c) 코멘트 조회가 이슈당 한 번이라 이슈가 아주 많은 저장소에서는 첫 훑기가 느리다(라벨 없는 이슈는 24시간 창 + 20개로 막아 뒀다 — sweeper 8번 팔·`factory status`와 같은 창).
 
 **영향(Task B)**: `factory/lib/board.js`(신규·순수), `factory/cli/board.js`(신규·서버와 조회), `factory/cli/index.js`(배선), `templates/factory/docs/factory/board/index.html`(신규·설치되는 페이지), `factory/lib/status.js`(마지막 줄의 board 힌트), `factory/cli/init.js`(next-steps), `.factory/**`·`docs/factory/board/**` 미러, `README.md`. 테스트: `board.test.js`·`board-cli.test.js`·`board-page.test.js`(신규), `status.test.js`.
+
+**리뷰 714a45d 수정** (2026-09-14, `factory/cli/board.js`·`factory/lib/board-static.js`·`templates/factory/docs/factory/board/index.html`):
+- `--host`는 loopback(`127.0.0.1`·`localhost`·`::1`)만 받는다 — 그 외 값은 exit 2, 결정 1을 이름으로 지목한 메시지로 거부한다. `/api/board`·`/api/events`에는 인증이 없으므로 이 검증이 없으면 `--host 0.0.0.0`이 프라이빗 이슈·핸드오프·비용을 같은 네트워크의 누구에게나 연다.
+- 정적 모드는 GitHub 호출 예산을 스스로 지킨다: 남은 호출이 3 이하이고 아직 reset 전이면 폴 자체(이슈 목록 재조회까지)를 건너뛰고 헤더에 "API 예산 소진 — HH:MM 재시도"를 보여 준다.
+- 정적 모드는 코멘트를 24시간 안에 갱신된 이슈에만 받는다(collectRepo의 라벨-없는-이슈 창과 같다) — 나머지는 라벨만으로 그리고 `stale-data`로 고발한다.
+- 정적 모드의 폴링 주기는 토큰 유무로 갈린다: 토큰 없음(시간당 60회) 10분, 토큰 있음(시간당 5000회) 2분.
+- 이 세 가지를 뽑아낸 순수 함수 `planStaticPull`은 `factory/lib/board-static.js`에 있고, 페이지의 인라인 사본은 **글자 그대로 같은 텍스트**다(`board-page.test.js`가 두 소스를 바이트 단위로 비교한다).
+- GitHub의 ratelimit 헤더는 403(예산 소진) 응답에도 실려 오므로, 위 skip 로직이 그 사실을 다음 폴에서 그대로 소비한다 — 즉시 재시도하는 루프가 없다.
+- SSE의 두 방송 루프(`refresh`의 push, keepalive ping) 모두 `res.write`를 try/catch로 감싸고 죽은 클라이언트를 그 자리에서 버린다 — 하나가 끊겼다고 나머지가 밀리지 않는다.
+- `--repo`의 `REPO_RE`는 `.`/`..` 세그먼트를 거부한다(`repos/../..`가 API 루트로 조용히 정규화되는 것을 애초에 허용하지 않는다).
+- 페이지의 `?repo=`는 부팅 시 설정 폼과 **같은 정규식**으로 검사한다 — 실패하면 저장소 입력 화면으로 떨어진다(전에는 폼만 검사했고 쿼리 파라미터는 그대로 API 경로에 이어붙었다).
+- SSE의 "바뀔 때만 민다"는 시간만 지나도 값이 움직이는 필드(`generated_at`·`fetched_at`·`*_min`·열린 타임라인 구간의 `to`)를 뺀 투영으로 비교해야 진짜다 — 예전 비교는 모델 전체 문자열이라 매 폴마다 밀었다(테스트가 시계를 고정해 둬서 가려져 있었다). 시계를 전진시키는 새 테스트가 "시간만 지나면 안 민다 / 상태가 바뀌면 민다"를 함께 증명한다.

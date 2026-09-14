@@ -101,6 +101,32 @@ test("parseBoardArgs refuses a nonsense repo and a nonsense port instead of gues
   expect(() => parseBoardArgs(["--interval", "-3"])).toThrow(/--interval/);
 });
 
+test("parseBoardArgs refuses a `..` segment in --repo (review 714a45d should-fix 1b)", () => {
+  expect(() => parseBoardArgs(["--repo", "../.."])).toThrow(/owner\/name/);
+  expect(() => parseBoardArgs(["--repo", "owner/.."])).toThrow(/owner\/name/);
+  expect(() => parseBoardArgs(["--repo", "../name"])).toThrow(/owner\/name/);
+});
+
+// ── --host (ADR-022 decision 1: loopback only) ──────────────────────────────
+
+test("parseBoardArgs defaults --host to 127.0.0.1 and accepts the other two loopback spellings", () => {
+  expect(parseBoardArgs([]).host).toBe("127.0.0.1");
+  expect(parseBoardArgs(["--host", "localhost"]).host).toBe("localhost");
+  expect(parseBoardArgs(["--host", "::1"]).host).toBe("::1");
+});
+
+test("parseBoardArgs refuses a non-loopback --host and names ADR-022 decision 1 (review 714a45d MUST-FIX 1)", () => {
+  expect(() => parseBoardArgs(["--host", "0.0.0.0"])).toThrow(/ADR-022 decision 1/);
+  expect(() => parseBoardArgs(["--host", "0.0.0.0"])).toThrow(/loopback/);
+});
+
+test("boardCommand exits 2 (not 1) on a rejected --host — a policy refusal, not a generic flag error", async () => {
+  const { io: i, o } = io();
+  const code = await boardCommand({ root: repoRoot, pkgRoot: repoRoot, argv: ["--host", "0.0.0.0"], io: i, run: fakeGh({ "o/r": repoFixture() }), now: () => NOW });
+  expect(code).toBe(2);
+  expect(o.err.join("\n")).toMatch(/ADR-022 decision 1/);
+});
+
 // ── --once --json ───────────────────────────────────────────────────────────
 
 test("--once --json prints the whole model on one line and exits 0", async () => {
@@ -251,6 +277,45 @@ test("a refresh that changes nothing pushes no second event; a changed model pus
     await s.refresh();
     expect(events.length).toBe(1);
     expect(JSON.parse(events[0]).issues[0].state).toBe("factory:awaiting-review");
+  });
+});
+
+/**
+ * `now: () => NOW`로 시계를 고정해 둔 테스트는 dedupe가 죽어 있어도 `JSON.stringify(model)`이 그대로
+ * 같아서 통과한다 — 실서비스에서는 매 폴마다 `now`가 움직이고, `generated_at`·`fetched_at`·`since_min`·
+ * `heartbeat.age_min`·열린 타임라인 구간의 `duration_min`/`to`가 사실과 무관하게 바뀐다(review 714a45d
+ * should-fix 5). 이 테스트는 시계를 **직접 전진**시켜서 그 차이가 push를 만들지 않는다는 것과, 진짜
+ * 상태 변화는 여전히 push를 만든다는 것을 함께 증명한다.
+ */
+test("advancing the clock alone pushes nothing; a real state change still pushes exactly one event", async () => {
+  const fx = repoFixture();
+  const run = fakeGh({ "o/r": fx });
+  let clock = Date.parse(NOW);
+  const advancingNow = () => new Date(clock).toISOString();
+  // 30초씩만 전진시킨다 — 하트비트는 ago(1)(NOW보다 1분 전)이라, FRESH_MIN(5분) 문턱을 넘으면
+  // freshness 자체가 fresh→stale로 바뀌는 **진짜** 변화가 생겨 이 테스트의 전제(시간만 지났다)가
+  // 깨진다. 문턱에서 충분히 떨어진 폭을 쓴다.
+  await withServer({ run, now: advancingNow }, async (s) => {
+    const events = [];
+    s.onPush = (payload) => events.push(payload);
+
+    clock += 30_000;                                      // 30초 지남 — 사실은 그대로
+    await s.refresh();
+    expect(events.length).toBe(0);
+
+    clock += 30_000;                                       // 또 30초 — 여전히 사실은 그대로
+    await s.refresh();
+    expect(events.length).toBe(0);
+
+    fx.issues[0].labels = ["factory:awaiting-review"];     // 이번엔 진짜 변화
+    clock += 30_000;
+    await s.refresh();
+    expect(events.length).toBe(1);
+    expect(JSON.parse(events[0]).issues[0].state).toBe("factory:awaiting-review");
+
+    clock += 30_000;                                       // 다시 시간만 지남 — 더 밀지 않는다
+    await s.refresh();
+    expect(events.length).toBe(1);
   });
 });
 

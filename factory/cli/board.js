@@ -39,7 +39,16 @@ export const RUNS_DIR = "docs/factory/runs";
 /** 상태 라벨이 없는 이슈를 전이 코멘트로 찾을 때의 상한 — sweeper 8번 팔·`factory status`와 같은 창. */
 const ORPHAN_SCAN_CAP = 20;
 
-const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
+// `..`/`.` 세그먼트를 막는다 — `repos/../..`가 API 루트로 정규화되는 것을 굳이 허용할 이유가 없다
+// (should-fix 1b, review 714a45d).
+const REPO_RE = /^(?!\.\.?\/)(?!.*\/\.\.?$)[\w.-]+\/[\w.-]+$/;
+
+/**
+ * `--host`는 loopback만 받는다(ADR-022 결정 1: "서버는 `127.0.0.1`에만 바인딩한다"). `/api/board`와
+ * `/api/events`에는 인증이 없다 — 이 서버가 0.0.0.0 같은 값에 열리면 프라이빗 이슈 제목·핸드오프
+ * 요약·에이전트 도구 문자열·비용이 같은 네트워크의 누구에게나 보인다(review 714a45d MUST-FIX 1).
+ */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
 export function parseBoardArgs(argv = []) {
   const out = { repos: [], port: DEFAULT_PORT, interval: DEFAULT_INTERVAL_S, host: "127.0.0.1", once: false, json: false };
@@ -58,7 +67,15 @@ export function parseBoardArgs(argv = []) {
       const v = Number(value());
       if (!Number.isFinite(v) || v <= 0) throw new Error(`--interval must be a positive number of seconds`);
       out.interval = v;
-    } else if (a === "--host") out.host = value();
+    } else if (a === "--host") {
+      const v = value();
+      if (!LOOPBACK_HOSTS.has(v)) {
+        const err = new Error(`--host must be a loopback address (127.0.0.1 | localhost | ::1) — ADR-022 decision 1 binds the server to 127.0.0.1 only, and /api/board has no authentication`);
+        err.exitCode = 2;
+        throw err;
+      }
+      out.host = v;
+    }
     else if (a === "--once") out.once = true;
     else if (a === "--json") out.json = true;
     else throw new Error(`unknown flag: ${a}`);
@@ -183,12 +200,38 @@ export function resolvePagePath({ pkgRoot, root }) {
 
 const SSE_KEEPALIVE_MS = 25_000;
 
+/**
+ * "모델이 바뀔 때만 민다"(ADR-022 결정 1·10)를 실제로 지키려면 비교 자체가 시간에 무관해야 한다.
+ * `generated_at`·`fetched_at`·`*_min`(`since_min`·`age_min`·`duration_min`, 즉 freshness가 재는 나이들)은
+ * **사실이 그대로여도 매 폴마다 값이 바뀐다** — `now`가 움직이기 때문이다. 열린(진행 중인) 타임라인
+ * 구간의 `to`도 마찬가지다(`buildTimeline`이 마지막 구간을 `now`에서 닫는다). 이 넷을 뺀 투영이 같으면
+ * 실제로 바뀐 것이 없다(review 714a45d should-fix 5 — 예전 코드는 전체 문자열을 비교해서 매 틱마다
+ * 밀었다: 테스트가 시계를 고정해 둬서 그 사실이 가려져 있었다).
+ */
+function dedupeKey(model) {
+  return JSON.stringify(model, function (key, value) {
+    if (key === "generated_at" || key === "fetched_at") return undefined;
+    if (key.endsWith("_min")) return undefined;
+    if (key === "to" && this && this.open === true) return undefined;
+    return value;
+  });
+}
+
+/** 죽은 클라이언트로의 write는 `ERR_STREAM_DESTROYED`를 던진다 — 그 하나 때문에 나머지가 밀리지 않게 한다. */
+function sseWrite(clients, chunk) {
+  for (const res of clients) {
+    try { res.write(chunk); }
+    catch { clients.delete(res); }
+  }
+}
+
 export async function startBoardServer({ repos, run = realRun, now = () => new Date().toISOString(), port = DEFAULT_PORT, host = "127.0.0.1", interval = DEFAULT_INTERVAL_S, pagePath, io = null }) {
   const blobCache = new Map();
   const fetchedAt = new Map();
   const entries = new Map();
   const clients = new Set();
   let serialized = null;
+  let lastKey = null;
   let model = null;
 
   const api = {
@@ -204,9 +247,11 @@ export async function startBoardServer({ repos, run = realRun, now = () => new D
       }
       model = buildBoard({ repos: repos.map((r) => entries.get(r)).filter(Boolean), now: nowIso });
       const next = JSON.stringify(model);
-      if (next === serialized) return model;               // 바뀐 게 없으면 아무도 깨우지 않는다
-      serialized = next;
-      for (const res of clients) res.write(`event: board\ndata: ${next}\n\n`);
+      serialized = next;                                    // /api/board와 새 SSE 구독자는 언제나 최신 스냅샷을 본다
+      const nextKey = dedupeKey(model);
+      if (nextKey === lastKey) return model;                // 시간만 지났다 — 아무도 깨우지 않는다
+      lastKey = nextKey;
+      sseWrite(clients, `event: board\ndata: ${next}\n\n`);
       api.onPush?.(next);
       return model;
     },
@@ -249,7 +294,7 @@ export async function startBoardServer({ repos, run = realRun, now = () => new D
   });
 
   const poll = setInterval(() => { api.refresh().catch((e) => io?.err?.(`factory board: refresh failed — ${e.message}`)); }, interval * 1000);
-  const ping = setInterval(() => { for (const res of clients) res.write(": ping\n\n"); }, SSE_KEEPALIVE_MS);
+  const ping = setInterval(() => { sseWrite(clients, ": ping\n\n"); }, SSE_KEEPALIVE_MS);
 
   const addr = server.address();
   api.port = addr.port;
@@ -300,7 +345,7 @@ export function renderBoardText(model) {
 export async function boardCommand({ root, pkgRoot, argv = [], io, run = realRun, now = () => new Date().toISOString() }) {
   let opts;
   try { opts = parseBoardArgs(argv); }
-  catch (e) { io.err(`factory board: ${e.message}`); return 1; }
+  catch (e) { io.err(`factory board: ${e.message}`); return e.exitCode ?? 1; }
 
   let repos = opts.repos;
   if (repos.length === 0) {

@@ -91,6 +91,7 @@ main { padding: 14px 16px 40px; }
 .tag.flag.blocked { background: var(--blocked); }
 .tag.flag.zombie-queued { background: var(--review); color: #1a1a1a; }
 .tag.flag.no-state-label, .tag.flag.two-state-labels { background: var(--info); }
+.tag.flag.stale-data { background: var(--chip); color: var(--muted); }
 .step { margin-top: 6px; font-size: 12px; }
 .step .label { color: var(--ink); }
 table.agents { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
@@ -228,6 +229,9 @@ var LANE_COLOR = {
   "needs-human": "--human", blocked: "--blocked", "needs-info": "--info", other: "--other"
 };
 var FRESH_MIN = 5, STALE_MIN = 30, ZOMBIE_QUEUED_MIN = 10;
+// `?repo=`(부팅)와 설정 폼(askRepo)이 같은 검사를 쓴다 — 하나만 검사하면 다른 쪽으로 새는 값이 생긴다
+// (review 714a45d should-fix 3).
+var REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 var LANE_OF_STATE = {};
 LANES.concat(SIDE_LANES, [OTHER_LANE]).forEach(function (l) { l.states.forEach(function (s) { LANE_OF_STATE[s] = l.id; }); });
 function laneOf(state) { return LANE_OF_STATE[state] || "other"; }
@@ -260,6 +264,32 @@ var state = { model: null, view: "lanes", repoFilter: "", selected: null, window
 var TOKEN_KEY = "ktb-board-token";
 function token() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
 function setToken(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+
+/**
+ * 정적 모드의 호출 예산 계획. `factory/lib/board-static.js`의 **글자 그대로 같은** 사본이다 — 페이지가
+ * 외부 스크립트를 불러올 수 없어서(스모크 테스트가 검사한다) 여기 인라인으로 들고 있을 수밖에 없다.
+ * `board-page.test.js`가 두 소스 텍스트를 바이트 단위로 비교하므로, 고칠 때는 **양쪽을 같이** 고친다.
+ */
+function planStaticPull(opts) {
+  var rate = opts.rate, issues = opts.issues || [], now = opts.now, hasToken = opts.hasToken;
+  var DAY_MS = 24 * 3600 * 1000;
+  var skip = !!(rate && rate.remaining <= 3 && now < rate.reset);
+  var commentIssues = [], staleIssues = [];
+  if (!skip) {
+    issues.forEach(function (i) {
+      var t = Date.parse((i && i.updated_at) || "");
+      if (isFinite(t) && now - t <= DAY_MS) commentIssues.push(i);
+      else staleIssues.push(i);
+    });
+  }
+  return {
+    skip: skip,
+    resetAt: skip ? rate.reset : null,
+    commentIssues: commentIssues,
+    staleIssues: staleIssues,
+    intervalMs: hasToken ? 120000 : 600000
+  };
+}
 
 function ghApi(path) {
   var headers = { Accept: "application/vnd.github+json" };
@@ -343,7 +373,7 @@ function matchRunClient(runs, opts) {
   return cands.length ? shape(cands[0], "workflow") : null;
 }
 
-function buildCardClient(repo, issue, comments, runs, now) {
+function buildCardClient(repo, issue, comments, runs, now, staleData) {
   var labels = (issue.labels || []).map(function (l) { return typeof l === "string" ? l : l.name; });
   var stateLabels = labels.filter(function (l) { return STATES.indexOf(l) !== -1; });
   var st = stateLabels.length ? stateLabels[0] : null;
@@ -364,6 +394,9 @@ function buildCardClient(repo, issue, comments, runs, now) {
   if (stateLabels.length > 1) flags.push({ kind: "two-state-labels", detail: stateLabels.join(", ") });
   var qm = run && run.status === "queued" ? mins(run.created_at, now) : null;
   if (qm != null && qm > ZOMBIE_QUEUED_MIN && (!hb || fr === "dead")) flags.push({ kind: "zombie-queued", detail: Math.round(qm) + "m" });
+  // 예산을 아끼려고 이 이슈는 코멘트를 아예 받지 않았다(24시간 안에 갱신되지 않았다) — 라벨만으로 그린
+  // 카드라는 것을 화면이 알아야 한다(review 714a45d MUST-FIX 2b).
+  if (staleData) flags.push({ kind: "stale-data" });
   var live = progress && progress.totals ? Number(progress.totals.cost_usd) || 0 : 0;
   return {
     key: repo + "#" + issue.number, repo: repo, number: issue.number, title: issue.title || "",
@@ -382,7 +415,8 @@ function buildCardClient(repo, issue, comments, runs, now) {
 }
 
 function loadFromGitHub(repos) {
-  var now = new Date().toISOString();
+  var nowMs = Date.now();
+  var now = new Date(nowMs).toISOString();
   return Promise.all(repos.map(function (repo) {
     return Promise.all([
       ghApi("/repos/" + repo + "/issues?state=open&per_page=100"),
@@ -393,10 +427,16 @@ function loadFromGitHub(repos) {
       var picked = open.filter(function (i) {
         return (i.labels || []).some(function (l) { return String(l.name || l).indexOf("factory:") === 0; });
       }).concat(r[1].filter(function (i) { return !i.pull_request; }));
-      return Promise.all(picked.map(function (i) {
+      // 코멘트 조회는 이슈당 한 번씩이라 예산의 대부분을 먹는다 — 최근 24시간 안에 갱신된 이슈만
+      // 받는다(review 714a45d MUST-FIX 2b). 나머지는 코멘트 없이 라벨만으로 카드를 그리고
+      // `stale-data`로 고발한다.
+      var plan = planStaticPull({ rate: state.rate, issues: picked, now: nowMs, hasToken: !!token() });
+      return Promise.all(plan.commentIssues.map(function (i) {
         return ghApi("/repos/" + repo + "/issues/" + i.number + "/comments?per_page=100")
           .then(function (cs) { return buildCardClient(repo, i, cs, r[2], now); }, function () { return buildCardClient(repo, i, [], r[2], now); });
-      })).then(function (cards) {
+      }).concat(plan.staleIssues.map(function (i) {
+        return buildCardClient(repo, i, [], r[2], now, true);
+      }))).then(function (cards) {
         cards.sort(function (a, b) { return a.number - b.number; });
         return { repo: repo, cards: cards };
       });
@@ -721,6 +761,16 @@ function boot() {
     state.mode = "static";
     $("#setup").hidden = true;
     var pull = function () {
+      // 예산이 3회 이하로 남았고 아직 reset 전이면 이슈 목록조차 다시 받지 않는다 — 그 호출도
+      // 예산이다(review 714a45d MUST-FIX 2a). 다음 setInterval 틱까지 그냥 기다린다: 즉시 재시도하는
+      // 루프가 아니다.
+      var plan = planStaticPull({ rate: state.rate, issues: [], now: Date.now(), hasToken: !!token() });
+      if (plan.skip) {
+        var d = new Date(plan.resetAt);
+        var hh = String(d.getHours()).padStart(2, "0"), mm = String(d.getMinutes()).padStart(2, "0");
+        conn("stale", "정적 모드 · API 예산 소진 — " + hh + ":" + mm + " 재시도");
+        return;
+      }
       conn("stale", "정적 모드 · 읽는 중…");
       loadFromGitHub(repos).then(function (m) {
         setModel(m);
@@ -728,7 +778,9 @@ function boot() {
       }, function (e) { conn("dead", "정적 모드 · " + (e.message || e)); });
     };
     pull();
-    setInterval(pull, 120000);   // 정적 모드는 인증 없이 시간당 60회다 — 2분 주기가 상한선이다
+    // 토큰이 없으면 인증 없는 시간당 60회 예산이라 10분 주기, 토큰이 있으면(시간당 5000회) 2분
+    // 주기다(review 714a45d MUST-FIX 2c).
+    setInterval(pull, planStaticPull({ hasToken: !!token() }).intervalMs);
   };
   var askRepo = function () {
     $("#setup").hidden = false;
@@ -737,13 +789,16 @@ function boot() {
     $("#setup-token").value = token();
     $("#setup-go").addEventListener("click", function () {
       var r = $("#setup-repo").value.trim();
-      if (!/^[\w.-]+\/[\w.-]+$/.test(r)) { $("#setup-repo").focus(); return; }
+      if (!REPO_RE.test(r)) { $("#setup-repo").focus(); return; }
       setToken($("#setup-token").value.trim());
       location.search = "?repo=" + encodeURIComponent(r);
     });
   };
 
-  if (repoParam.length) { startStatic(repoParam); return; }
+  // `?repo=`는 폼과 같은 검사를 거친다(review 714a45d should-fix 3) — 안 그러면
+  // `?repo=x/y/../../users/z` 같은 값이 곧장 API 경로에 이어붙는다.
+  if (repoParam.length && repoParam.every(function (r) { return REPO_RE.test(r); })) { startStatic(repoParam); return; }
+  if (repoParam.length) { askRepo(); return; }
   fetch("/api/board", { cache: "no-store" }).then(function (res) {
     if (!res.ok) throw new Error("no server");
     return res.json();
