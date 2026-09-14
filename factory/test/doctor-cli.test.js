@@ -105,9 +105,9 @@ test("(a2) the factory scope lints every installed agent file — an agent that 
   const { io: iOk, o: oOk } = io();
   await doctorCommand({ root, pkgRoot, argv: ["--json", "--offline", "--no-run"], io: iOk, run, gh: fakeGh });
   const ok = JSON.parse(oOk.out.join("")).checks.filter((c) => c.id.startsWith("agents."));
-  expect(ok.length).toBe(15);                                   // 14 roles.toml 역할(retro 포함) + loader — stub은 더 이상 없다(F5)
+  expect(ok.length).toBe(14);                                   // 14 roles.toml 역할(retro 포함) — stub은 더 이상 없고(F5), loader는 감사 M5로 사라졌다
   expect(ok.every((c) => c.level === "PASS")).toBe(true);
-  expect(ok.some((c) => c.id === "agents.factory-loader")).toBe(true);   // roles.toml에 없지만 검사한다
+  expect(ok.some((c) => c.id === "agents.factory-loader")).toBe(false);  // 감사 M5 — 검사할 파일 자체가 없다
 
   const agent = join(root, ".claude/agents/reviewer-correctness.md");
   writeFileSync(agent, readFileSync(agent, "utf8").replace(/## Lens\n[\s\S]*?(?=\n## )/, ""));

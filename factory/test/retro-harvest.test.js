@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { harvest, mergeCandidates } from "../lib/retro/harvest.js";
+import { harvest, mergeCandidates, overlapFrom } from "../lib/retro/harvest.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { appendRunRecord } from "../lib/run-record.js";
 import { usageLine } from "../bin/run-stage.js";
@@ -240,4 +240,73 @@ test("harvest defaults: missing collections behave like empty ones", () => {
   expect(stats.merged).toBe(0);
   expect(stats.review_rounds_avg).toBe(0);
   expect(stats.usage).toEqual({ cost_usd: 0, tokens: { input: 0, output: 0 } });
+  expect(stats.overlap_ratio).toBe(0);
+  expect(stats.unique_findings_by_role).toEqual({});
+});
+
+// ── 감사 P2-13: R2의 `on_others`를 드디어 소비한다 ──────────────────────────────────────────────
+
+const finding = (id) => ({ id, where: "a.ts:1", claim: `${id} claim`, evidence: `${id} evidence` });
+const V = (role, ids, onOthers = []) => ({
+  role,
+  verdict: ids.length ? "reject" : "approve",
+  confidence: "high",
+  must_fix: ids.map(finding),
+  should_fix: [],
+  verified: [],
+  on_others: onOthers,
+});
+
+/**
+ * 네 벌의 verdict set — 겹침이 다 다르다.
+ *   run 1: cf1을 security·architecture가 agree → 3역할이 제기(겹침). qa1은 qa 혼자.
+ *   run 2: 전원 approve, 아무 finding 없음 → 이 런은 분모에 아무것도 더하지 않는다.
+ *   run 3: 각자 자기 것만 — 겹침 0, 고유 2.
+ *   run 4: disagree는 "제기"가 아니다. 아무도 적지 않은 id(zz9)에 대한 agree도 세지 않는다.
+ */
+const VERDICT_SETS = [
+  [
+    V("correctness", ["cf1"]),
+    V("security", [], [{ id: "cf1", stance: "agree", reason: "같은 줄에서 확인" }]),
+    V("architecture", [], [{ id: "cf1", stance: "agree", reason: "경계가 깨진다" }]),
+    V("qa", ["qa1"], [{ id: "cf1", stance: "disagree", reason: "재현되지 않는다" }]),
+  ],
+  [V("correctness", []), V("security", []), V("qa", [])],
+  [V("correctness", ["cf2"]), V("security", ["sec1"])],
+  [
+    V("correctness", ["cf3"], [{ id: "zz9", stance: "agree", reason: "없는 id" }]),
+    V("security", ["sec2"], [{ id: "cf3", stance: "disagree", reason: "동의하지 않는다" }]),
+  ],
+];
+
+test("overlapFrom: a finding raised by ≥2 roles is overlap; agree promotes, disagree does not, and an unowned id is ignored", () => {
+  const o = overlapFrom(VERDICT_SETS);
+  // findings: cf1, qa1 (run1) · cf2, sec1 (run3) · cf3, sec2 (run4) = 6. 전원 approve인 run2는 런으로도 세지 않는다.
+  expect(o.review_runs).toBe(4);
+  expect(o.findings_total).toBe(6);
+  expect(o.overlapping_findings).toBe(1);              // cf1만 correctness + security + architecture
+  expect(o.overlap_ratio).toBe(0.17);
+  expect(o.unique_findings_by_role).toEqual({ qa: 1, correctness: 2, security: 2 });
+});
+
+test("overlapFrom: no findings at all is ratio 0, not a division by zero", () => {
+  expect(overlapFrom([[V("correctness", []), V("qa", [])]])).toMatchObject({ findings_total: 0, overlap_ratio: 0, unique_findings_by_role: {} });
+  expect(overlapFrom([])).toMatchObject({ review_runs: 0, findings_total: 0, overlap_ratio: 0 });
+});
+
+test("harvest: overlap stats come from the merged issues' review handoffs in the window", () => {
+  const commentsByIssue = new Map([
+    [40, [reviewHandoff(40, { round: 1, at: "2026-09-10T00:00:00Z", verdicts: VERDICT_SETS[0] })]],
+    [41, [reviewHandoff(41, { round: 1, at: "2026-09-10T00:00:00Z", verdicts: VERDICT_SETS[2] })]],
+  ]);
+  const issues = [
+    { number: 40, title: "a", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-11T00:00:00Z" },
+    { number: 41, title: "b", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-11T00:00:00Z" },
+  ];
+  const { stats } = harvest({ records: new Map(), issues, commentsByIssue, since: "2026-09-01T00:00:00Z" });
+  expect(stats.review_runs).toBe(2);
+  expect(stats.findings_total).toBe(4);
+  expect(stats.overlapping_findings).toBe(1);
+  expect(stats.overlap_ratio).toBe(0.25);
+  expect(stats.unique_findings_by_role).toEqual({ qa: 1, correctness: 1, security: 1 });
 });

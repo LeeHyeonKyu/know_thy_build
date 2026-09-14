@@ -176,6 +176,11 @@ export function accumulateStats(total, window) {
     : 0;
   const rejects = { ...(t.rejects_by_role || {}) };
   for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
+  // P2-13: 겹침은 **비율의 합**이 아니라 분자·분모의 합에서 다시 나온다(비율의 평균은 비율이 아니다).
+  const unique = { ...(t.unique_findings_by_role || {}) };
+  for (const [role, n] of Object.entries(w.unique_findings_by_role || {})) unique[role] = (unique[role] || 0) + (Number(n) || 0);
+  const findingsTotal = (Number(t.findings_total) || 0) + (Number(w.findings_total) || 0);
+  const overlapping = (Number(t.overlapping_findings) || 0) + (Number(w.overlapping_findings) || 0);
   const tok = (key, side) => (Number(t[key]?.tokens?.[side]) || 0) + (Number(w[key]?.tokens?.[side]) || 0);
   // 누적 비용은 **1e-6 자리로만** 반올림한다(센트로 깎지 않는다) — 센트 미만인 창을 round2로 접으면
   // 그 창의 비용이 누적에서 영구히 사라지고(0을 더한다) 작은 회차를 많이 도는 공장의 총계가 0에 머문다.
@@ -188,6 +193,11 @@ export function accumulateStats(total, window) {
     merged,
     review_rounds_avg: round2(avg),
     rejects_by_role: rejects,
+    review_runs: (Number(t.review_runs) || 0) + (Number(w.review_runs) || 0),
+    findings_total: findingsTotal,
+    overlapping_findings: overlapping,
+    unique_findings_by_role: unique,
+    overlap_ratio: findingsTotal ? round2(overlapping / findingsTotal) : 0,
     needs_human: (Number(t.needs_human) || 0) + (Number(w.needs_human) || 0),
     usage: sumUsage("usage"),
     // retro 자신의 비용은 스테이지 비용과 **따로** 쌓는다 — 섞으면 "공장이 일하는 데 든 비용"과
@@ -200,6 +210,20 @@ export function accumulateStats(total, window) {
 const rejectCell = (s) => {
   const rejects = Object.entries(s?.rejects_by_role || {});
   return rejects.length ? rejects.map(([r, n]) => `${r} ${n}`).join(", ") : "없음";
+};
+
+/**
+ * 외부 감사 2026-09-14 P2-13 — 리뷰어 겹침. `overlap_ratio`만으로는 "0.00"이 "겹치지 않았다"인지
+ * "판정할 finding이 없었다"인지 가를 수 없어서, 분자/분모를 그대로 함께 적는다.
+ */
+const overlapCell = (s) => {
+  const total = Number(s?.findings_total) || 0;
+  if (total === 0) return "없음";
+  return `${Number(s?.overlap_ratio ?? 0).toFixed(2)} (${Number(s?.overlapping_findings) || 0}/${total}, runs ${Number(s?.review_runs) || 0})`;
+};
+const uniqueCell = (s) => {
+  const uniq = Object.entries(s?.unique_findings_by_role || {});
+  return uniq.length ? uniq.map(([r, n]) => `${r} ${n}`).join(", ") : "없음";
 };
 
 /**
@@ -218,6 +242,8 @@ export function statsTable(window, total) {
     row("review rounds avg", w.review_rounds_avg ?? 0, t.review_rounds_avg ?? 0),
     row("needs-human", w.needs_human ?? 0, t.needs_human ?? 0),
     row("rejects by role", rejectCell(w), rejectCell(t)),
+    row("reviewer overlap", overlapCell(w), overlapCell(t)),
+    row("unique findings by role", uniqueCell(w), uniqueCell(t)),
     row("cost (usd)", Number(w.usage?.cost_usd || 0).toFixed(2), Number(t.usage?.cost_usd || 0).toFixed(2)),
     row("tokens", `input ${w.usage?.tokens?.input || 0} / output ${w.usage?.tokens?.output || 0}`, `input ${t.usage?.tokens?.input || 0} / output ${t.usage?.tokens?.output || 0}`),
     // retro 자신의 비용 — 스테이지 비용과 한 줄 떨어뜨려 둔다(§4.4). 이 줄이 없으면 공장은 자기를

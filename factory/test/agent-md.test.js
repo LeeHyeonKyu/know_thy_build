@@ -184,23 +184,12 @@ test("lintAgentMd: a deny-all-writes hook whose matcher omits any write tool →
   expect(narrow("Edit|Write|MultiEdit|NotebookEdit|BashTool")).toEqual([{ rule: "deny-hook", msg: expect.stringContaining("Bash") }]);
 });
 
-// Task 2: factory-loader.md / factory-triage.md templates (full suite lint is switched on in Task 6).
-test("lintAgentMd: templates/factory/claude/agents/factory-loader.md passes with no violations", () => {
-  const text = readAgent("factory-loader");
-  expect(lintAgentMd(text, { expectedName: "factory-loader" })).toEqual([]);
-});
-
+// Task 2: factory-triage.md 템플릿(전체 lint는 Task 6에서 켜진다). factory-loader.md는 외부 감사
+// 2026-09-14 M5로 삭제됐다 — workflow의 첫 스텝은 LLM 호출이 아니라 `factory/lib/context.js`가 쓰는
+// `.factory/out/loaded.json`이다.
 test("lintAgentMd: templates/factory/claude/agents/factory-triage.md passes with no violations", () => {
   const text = readAgent("factory-triage");
   expect(lintAgentMd(text, { expectedName: "factory-triage" })).toEqual([]);
-});
-
-test("parseAgentMd: factory-loader.md frontmatter — sonnet model, read-only tools, deny-all-writes hook", () => {
-  const { frontmatter } = parseAgentMd(readAgent("factory-loader"));
-  expect(frontmatter.name).toBe("factory-loader");
-  expect(frontmatter.model).toBe("sonnet");
-  expect(frontmatter.tools).toEqual(["Read", "Bash", "Grep"]);
-  expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
 });
 
 // Task 3: the five plan debate agents.
@@ -384,10 +373,10 @@ test("reviewer-spec-conformance.md: defers structural justification to architect
 // Task 6: the sweep. The per-task tests above pin what each role file says; this one is the gate that no
 // agent template can be added (or edited) past §7.2 — `doctor checkAgents` runs exactly this lint on the
 // installed copies, so a template that fails here fails the installed repo's doctor too.
-test("every templates/factory/claude/agents/*.md lints clean, and the set is the 15 roles Plan 3+4 install", () => {
+test("every templates/factory/claude/agents/*.md lints clean, and the set is the 14 roles Plan 3+4 install (감사 M5로 loader는 빠졌다)", () => {
   const files = agentFiles();
   expect(files).toEqual([
-    "factory-builder.md", "factory-loader.md", "factory-retro.md", "factory-triage.md", "factory-verifier.md",
+    "factory-builder.md", "factory-retro.md", "factory-triage.md", "factory-verifier.md",
     "plan-architect.md", "plan-operator.md", "plan-product-advocate.md", "plan-skeptic.md", "plan-synthesizer.md",
     "reviewer-architecture.md", "reviewer-correctness.md", "reviewer-qa.md", "reviewer-security.md",
     "reviewer-spec-conformance.md",

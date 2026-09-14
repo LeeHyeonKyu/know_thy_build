@@ -43,7 +43,7 @@ function labelFallbackStage(state) {
 
 export function buildStatus({
   issues = [], prs = {}, heartbeats = new Map(), quarantine = { quarantined: [] },
-  thresholds = {}, charter = {}, usage = null, now, staleMinutes = 30,
+  thresholds = {}, charter = {}, usage = null, overlap = null, now, staleMinutes = 30,
 } = {}) {
   const needsYou = [];
   for (const i of issues) {
@@ -117,7 +117,22 @@ export function buildStatus({
     quarantine_max: thresholds.quarantine_max,
   };
 
-  return { needsYou, queue, inProgress, recent, backPressure, usage };
+  return { needsYou, queue, inProgress, recent, backPressure, usage, overlap };
+}
+
+/**
+ * 외부 감사 2026-09-14 P2-13 — 리뷰어 겹침 한 줄. 이 화면은 "지금 무엇을 기다리는가"를 보여주지만,
+ * 리뷰어 5명을 계속 띄울지 말지는 **겹침**이 답한다: 겹침이 1에 가까우면 다섯이 같은 것을 다섯 번
+ * 찾고 있다는 뜻이고, 0에 가까우면 각 렌즈가 자기만 보는 것을 들고 온다는 뜻이다. 분모가 0인 창은
+ * 비율을 만들지 않는다 — "겹치지 않았다"와 "판정할 finding이 없었다"는 다른 사실이다.
+ */
+export function overlapLine(o) {
+  if (!o || !Number.isFinite(Number(o.findings_total))) return "- review overlap (30d): (no data)";
+  const total = Number(o.findings_total) || 0;
+  if (total === 0) return `- review overlap (30d): no findings in ${Number(o.review_runs) || 0} review run(s)`;
+  const uniq = Object.entries(o.unique_findings_by_role || {});
+  const uniqText = uniq.length ? uniq.map(([r, n]) => `${r} ${n}`).join(", ") : "none";
+  return `- review overlap (30d): ${Number(o.overlap_ratio ?? 0).toFixed(2)} (${Number(o.overlapping_findings) || 0}/${total} findings raised by ≥2 roles, ${Number(o.review_runs) || 0} review run(s)) · unique: ${uniqText}`;
 }
 
 /** §13 `:status`와 같은 섹션 순서: Needs You → 진행 중 → 큐 → 역압 → 최근 머지 → 사용량. */
@@ -151,6 +166,7 @@ export function renderStatus(s) {
   lines.push("## 최근 머지");
   if (s.recent.length === 0) lines.push("(none)");
   else for (const r of s.recent) lines.push(`- #${r.number} ${r.title} · ${r.mergedAt}`);
+  lines.push(overlapLine(s.overlap));
   lines.push("");
 
   lines.push("## 사용량");

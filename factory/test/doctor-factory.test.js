@@ -175,12 +175,11 @@ test("checkRoles: everything present → all PASS", () => {
   expect(c["roles.lessons-files"].level).toBe("PASS");
 });
 
-test("checkAgents: lints every installed roles.toml agent, skips the ones that are not there, and covers factory-loader", () => {
+test("checkAgents: lints every installed roles.toml agent and skips the ones that are not there", () => {
   const files = {
     "/r/.claude/agents/reviewer-correctness.md": agentText("reviewer-correctness"),
     // 설치된 사본에서 ## Lens가 지워진 상태 — 템플릿은 멀쩡해도 repo의 사본이 어긋날 수 있다(그게 doctor의 일이다)
     "/r/.claude/agents/plan-architect.md": agentText("plan-architect").replace(/## Lens\n[\s\S]*?(?=\n## )/, ""),
-    "/r/.claude/agents/factory-loader.md": agentText("factory-loader"),
   };
   const roles = {
     triage: { agent: ".claude/agents/factory-triage.md" }, // 설치 안 됨 → roles.agent-files의 몫, 여기선 건너뛴다
@@ -192,7 +191,7 @@ test("checkAgents: lints every installed roles.toml agent, skips the ones that a
   expect(c["agents.plan-architect"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("## Lens") });
   expect(c["agents.plan-architect"].detail).toContain("section");
   expect(c["agents.factory-triage"]).toBeUndefined();          // 부재는 중복 보고하지 않는다
-  expect(c["agents.factory-loader"].level).toBe("PASS");       // roles.toml에 없지만 설치되는 파일이다
+  expect(c["agents.factory-loader"]).toBeUndefined();          // 감사 M5 — 로더는 없어졌다
 });
 
 test("checkAgents: a name that does not match its filename FAILs", () => {
@@ -211,10 +210,10 @@ test("checkAgents: the shipped roles.toml + agent templates are what an initiali
     readFile: (p) => readFileSync(asInstalled(p), "utf8"),
   });
   for (const ch of checks) expect(ch.level, `${ch.id}: ${ch.detail}`).toBe("PASS");
-  // 14 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5 + retro 1) + loader. merge에는 역할이
+  // 14 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5 + retro 1). 감사 M5로 loader는 사라졌다. merge에는 역할이
   // 아예 없고(ADR-015 R3 — F5에서 [merge.integrator] 삭제), retro.analyst는 Plan 4가 파일을 채웠다.
   expect(checks.map((ch) => ch.id).sort()).toEqual([
-    "agents.factory-builder", "agents.factory-loader", "agents.factory-retro", "agents.factory-triage", "agents.factory-verifier",
+    "agents.factory-builder", "agents.factory-retro", "agents.factory-triage", "agents.factory-verifier",
     "agents.plan-architect", "agents.plan-operator", "agents.plan-product-advocate", "agents.plan-skeptic",
     "agents.plan-synthesizer", "agents.reviewer-architecture", "agents.reviewer-correctness", "agents.reviewer-qa",
     "agents.reviewer-security", "agents.reviewer-spec-conformance",
