@@ -14,12 +14,12 @@ _이력 없음_
 | --- | --- | --- |
 | merged | 0 | 0 |
 | review rounds avg | 0 | 0 |
-| needs-human | 4 | 0 |
+| needs-human | 5 | 0 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| cost (usd) | 74.10 | 0.00 |
-| tokens | input 1283061 / output 141855 | input 0 / output 0 |
+| cost (usd) | 84.10 | 0.00 |
+| tokens | input 1577069 / output 158637 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -80,6 +80,11 @@ _이력 없음_
         "issue": 9,
         "reason": "resolved upstream in KTB (KTB-37)",
         "at": "2026-09-14T09:00:46Z"
+      },
+      {
+        "issue": 13,
+        "reason": "resolved upstream in KTB (KTB-40)",
+        "at": "2026-09-14T12:54:05Z"
       }
     ]
   },
@@ -92,12 +97,12 @@ _이력 없음_
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 4,
+    "needs_human": 5,
     "usage": {
-      "cost_usd": 74.098798,
+      "cost_usd": 84.104087,
       "tokens": {
-        "input": 1283061,
-        "output": 141855
+        "input": 1577069,
+        "output": 158637
       }
     }
   }
