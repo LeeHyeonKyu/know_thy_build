@@ -8,6 +8,23 @@ const HEADER = /<!--\s*factory-lessons:v1\s+role=([\w-]+)\s+max=(\d+)\s*-->/;
 const ENTRY_START = /^- \[(L-(\d{4}-\d{2}-\d{2})-(\d{2}))\]\s?(.*)$/;
 const CITATION = /인용:\s*(\d+)회/;
 
+/**
+ * 외부 감사 2026-09-14 M11 — **인용 표식.** `인용: N회`는 §7.4가 정한 필드인데 그것을 올리는 코드가
+ * 어디에도 없었다: 15개 전 항목이 영원히 0회였고, 곧 은퇴 규칙("인용 0회인 것부터")은 "가장 오래된
+ * 것부터"의 다른 이름이었다 — 실제로 쓰인 교훈과 아무도 읽지 않은 교훈이 구별되지 않았다.
+ *
+ * 표식은 판정문 본문에 **에이전트가 직접 적는다**: `lesson:L-2026-09-12-01`. 별도 필드가 아니라
+ * 마커인 이유는, 그 자리가 곧 "이 교훈을 여기서 썼다"는 문맥이기 때문이다(리뷰어 프롬프트가
+ * must_fix 문장 안에 그대로 쓰게 한다). 파싱은 id 형식을 그대로 요구한다 — `lesson:` 뒤가
+ * `L-YYYY-MM-DD-NN`이 아니면 인용이 아니다(사람이 산문으로 쓴 "lesson: 타임존"은 세지 않는다).
+ */
+export const LESSON_CITATION_RE = /\blesson:(L-\d{4}-\d{2}-\d{2}-\d{2})\b/g;
+export function citedLessonIds(text) {
+  const out = [];
+  for (const m of String(text ?? "").matchAll(LESSON_CITATION_RE)) if (!out.includes(m[1])) out.push(m[1]);
+  return out;
+}
+
 /** 텍스트를 {preamble, entries[]}로 나눈다. entries[]의 각 항목은 원본 블록(raw 줄들)을 그대로 보존
  * 하고, `isNew:false`로 시작한다 — 이번 호출에서 파일에 이미 있던 항목임을 표시한다. */
 function splitEntries(text) {
@@ -55,14 +72,48 @@ function formatRuns(evidenceRuns) {
 
 /**
  * `entries` 중 이번 호출에서 evict할 수 있는 후보 — **이번 호출에서 새로 추가된 항목은 절대
- * 대상이 아니다**(`isNew`) — 방금 채택한 걸 자리 부족을 이유로 곧바로 지우는 건 모순이다. 원래
- * 파일에 있던 항목 중 인용 0회인 것만, 가장 오래된 것(date 오름차순, 동일 date는 nn 오름차순)
- * 부터 최대 `count`개.
+ * 대상이 아니다**(`isNew`) — 방금 채택한 걸 자리 부족을 이유로 곧바로 지우는 건 모순이다.
+ *
+ * 감사 M11 — 은퇴 순서는 **인용 0회 먼저, 그 다음 나이**다. 예전 규칙은 인용 0회만 후보로 삼았고
+ * (그래서 자리가 없으면 채택이 'max'로 거부됐다), 어차피 카운터가 한 번도 오르지 않아 그 필터는
+ * 아무것도 걸러내지 않았다 — 사실상 "가장 오래된 것부터"였다. 이제 카운터가 실제로 오르므로 그
+ * 순서가 의미를 갖는다: 한 번이라도 쓰인 교훈은 **마지막에** 나간다. 그래도 자리는 유한하므로,
+ * 인용된 것만 남았을 때는 그중 가장 오래된 것이 나간다 — 예전 규칙(인용 항목은 절대 evict 불가)은
+ * 파일이 상한에 닿는 순간 **새 교훈을 영원히 받지 못하게** 만들었다(전부 'max' 거부).
+ * 키는 둘뿐이다: (1) 인용 0회인가, (2) 나이. 인용 **횟수**로 줄을 세우지 않는다 — 많이 인용된
+ * 교훈이 더 오래 버티는 것은 이 규칙의 목적이 아니고(그건 인기 투표다), 순서를 읽는 사람에게
+ * "한 번도 안 쓰인 것부터"라는 한 문장이 남아야 한다.
  */
 function oldestEvictable(entries, count) {
-  const pool = entries.filter((e) => !e.isNew && e.citations === 0);
-  pool.sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.nn - b.nn));
+  const rank = (e) => (e.citations === 0 ? 0 : 1);
+  const pool = entries.filter((e) => !e.isNew);
+  pool.sort((a, b) => (rank(a) !== rank(b)
+    ? rank(a) - rank(b)
+    : a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.nn - b.nn));
   return pool.slice(0, count);
+}
+
+/**
+ * 감사 M11 — 인용 카운터를 항목의 원문(raw) 안에서 올린다. `인용: N회` 표식이 있으면 그 숫자만
+ * 바꾸고(나머지 바이트는 그대로), 없으면(옛 형식) `근거:` 줄 끝에 붙인다 — 표식이 없다는 이유로
+ * 조용히 세지 않으면 그 항목은 영원히 은퇴 1순위로 남는다.
+ */
+function bumpCitations(entries, citations) {
+  const cited = [];
+  for (const [id, add] of Object.entries(citations || {})) {
+    const n = Number(add);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const e = entries.find((x) => x.id === id);
+    if (!e) continue;                                                 // 이 역할의 파일에 없는 id — 발명하지 않는다
+    const from = e.citations;
+    const to = from + n;
+    e.citations = to;
+    e.raw = CITATION.test(e.raw)
+      ? e.raw.replace(CITATION, `인용: ${to}회`)
+      : e.raw.replace(/(근거:[^\n]*?)\s*$/m, `$1 인용: ${to}회.`);
+    cited.push({ id, from, to });
+  }
+  return cited;
 }
 
 /**
@@ -77,11 +128,14 @@ function oldestEvictable(entries, count) {
  * 모자라면 아무것도 evict하지 않고 reason 'max'로 거부한다(evict를 하고 나서야 실패를 아는, 자리를
  * 낭비하는 일이 없다). `added[]`는 언제나 반환된 `text`에 실제로 반영된 항목과 정확히 일치한다.
  */
-export function applyLessons({ text, adopted = [], today, minEvidence = 2 } = {}) {
+export function applyLessons({ text, adopted = [], today, minEvidence = 2, citations = {} } = {}) {
   const head = HEADER.exec(text || "");
   const max = head ? Number(head[2]) : Infinity;
   const { preamble, entries } = splitEntries(text);
 
+  // 감사 M11 — **인용을 먼저 센다.** 순서가 중요하다: 이번 회차에 인용된 항목은 같은 회차의 evict
+  // 대상에서 뒤로 밀려야 한다(방금 쓰인 교훈을 자리 부족으로 지우는 것은 정확히 반대 방향이다).
+  const cited = bumpCitations(entries, citations);
   const nextId = idCounter(entries, today);
   const added = [];
   const rejected = [];
@@ -119,14 +173,14 @@ export function applyLessons({ text, adopted = [], today, minEvidence = 2 } = {}
     added.push({ id, text: itemText });
   }
 
-  // 아무것도 채택/evict되지 않았으면 원문을 바이트 그대로 돌려준다 — 실패한 시도가 포맷을
+  // 아무것도 채택/evict/인용되지 않았으면 원문을 바이트 그대로 돌려준다 — 실패한 시도가 포맷을
   // 재조립하며 개행 하나라도 바꿔서는 안 된다.
-  if (!added.length && !evicted.length) return { text: text ?? "", added, rejected, evicted };
+  if (!added.length && !evicted.length && !cited.length) return { text: text ?? "", added, rejected, evicted, cited };
 
   const body = entries.map((e) => e.raw).join("\n");
   const joined = preamble
     ? (body ? `${preamble.replace(/\n$/, "")}\n${body}\n` : (preamble.endsWith("\n") ? preamble : `${preamble}\n`))
     : (body ? `${body}\n` : "");
 
-  return { text: joined, added, rejected, evicted };
+  return { text: joined, added, rejected, evicted, cited };
 }

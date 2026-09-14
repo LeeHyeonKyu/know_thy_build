@@ -36,6 +36,15 @@ const SCHEMAS = {
     const d = oneOf(e, o, "disposition", ["ready", "needs-info", "wont-do"]);
     if (d === "ready" || !["needs-info", "wont-do"].includes(d)) oneOf(e, o, "tier", ["docs", "standard", "load-bearing"]);
     if (d === "needs-info") req(e, o, "questions", "array");
+    /*
+     * 감사 M1 — `impact_paths`는 **선택** 필드다: triage가 예상하는 변경 경로. 스크립트가 CHARTER의
+     * NEVER_AUTOMATE 글롭을 다시 대는 재료이고(`verify-stage.js` neverAutomateHits), 없으면 그
+     * 재확인이 도는 대상이 없을 뿐 handoff가 무효는 아니다(옛 handoff와의 호환).
+     */
+    if (o?.impact_paths !== undefined && o.impact_paths !== null) {
+      const ps = req(e, o, "impact_paths", "array") || [];
+      ps.forEach((p, i) => { if (typeof p !== "string") e.push(`impact_paths[${i}] must be a string`); });
+    }
   },
   "plan.v1"(o, e) {
     req(e, o, "issue", "number");

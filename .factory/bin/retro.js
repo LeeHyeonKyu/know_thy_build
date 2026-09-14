@@ -106,6 +106,25 @@ export function earliestRecordAt(records) {
 export const distinctRuns = (runs) => new Set((Array.isArray(runs) ? runs : []).map((r) => String(r))).size;
 
 /**
+ * 외부 감사 2026-09-14 M10/M11 — 근거로 적힌 run 중 **records 브랜치에 없는** 것들. 비어 있으면
+ * 모두 실재한다는 뜻이다. `known`이 비어 있으면(기록이 하나도 없는 저장소) 검사를 걸지 않는다 —
+ * 첫 retro에서 모든 제안을 거부해 버리면 그 회차가 통째로 무의미해지고, 그때의 "근거 없음"은
+ * 에이전트의 지어냄이 아니라 이 저장소에 아직 run 기록이 없다는 사실이기 때문이다.
+ */
+export function unknownRuns(runs, known) {
+  if (!(known instanceof Set) || known.size === 0) return [];
+  const seen = new Set();
+  const out = [];
+  for (const r of Array.isArray(runs) ? runs : []) {
+    const k = String(r);
+    if (seen.has(k) || known.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+/**
  * 성숙도 격차 이슈의 제목. `target`이 있으면 §5.2.1의 승격 제목(`harness: promote to M<n> — <reason>`)
  * 그대로 — 이 문자열이 dedup 키다. `target`이 null인 규칙(외부 SDK에 fake가 없음)은 **승격이 아니라
  * 경고**라 "promote to null"이 될 수 없으므로 규칙 이름으로 제목을 만든다(dedup 키는 여전히 제목이다).
@@ -537,20 +556,42 @@ export async function runRetro({ deps, force = false, now } = {}) {
     const pending = [];
     let harnessIssues = 0;
 
+    /**
+     * 외부 감사 2026-09-14 M10/M11 — **근거 run은 실재해야 한다.** 예전 검사는 `evidence_runs`의
+     * *길이*만 셌다: `[1, 2]`라고 적으면 그 이슈가 존재하든 말든, 이 공장이 돌린 적이 있든 말든
+     * 창이 찼다. 곧 "근거 2건 이상"은 에이전트가 숫자 두 개를 타이핑했다는 뜻이었다.
+     * 이제 records 브랜치(`docs/factory/runs/<issue>.md`)에 실제로 있는 run id만 근거로 센다.
+     */
+    const knownRunIds = new Set([...(hy.records?.keys?.() ?? [])].map((k) => String(k)));
+    const unknownRunsOf = (runs) => unknownRuns(runs, knownRunIds);
+    const citationsOf = h.citations || {};
+
     // (a) lesson — 역할별로 한 번. 근거 run ≥2(서로 다른 이슈)는 `applyLessons`가 다시 센다.
-    for (const [role, items] of byRole(out.lessons)) {
+    // 인용이 있는 역할은 **채택이 없어도** 돈다(감사 M11): 인용 카운터를 올리는 것 자체가 변경이다.
+    const lessonsByRole = byRole(out.lessons);
+    const lessonRoles = [...new Set([...lessonsByRole.keys(), ...Object.keys(citationsOf)])];
+    for (const role of lessonRoles) {
+      const items = lessonsByRole.get(role) || [];
+      const unknownRejects = [];
+      const adopted = [];
+      for (const i of items) {
+        const bad = unknownRunsOf(i.evidence_runs);
+        if (bad.length) { unknownRejects.push({ text: i.text, reason: `unknown-evidence-run: ${bad.join(", ")}` }); continue; }
+        adopted.push({ text: i.text, evidence_runs: i.evidence_runs });
+      }
       const r = await step(`lessons:${role}`, () => d.applyLessons({
         role,
-        adopted: items.map((i) => ({ text: i.text, evidence_runs: i.evidence_runs })),
+        adopted,
         today: todayOf(at),
         minEvidence: MIN_EVIDENCE,
+        citations: citationsOf[role] || {},
       }));
       if (!r.ok || !r.value) continue;
       const res = r.value;
-      applied.push({ step: `lessons:${role}`, added: (res.added || []).map((a) => a.id), rejected: res.rejected || [], evicted: res.evicted || [] });
+      applied.push({ step: `lessons:${role}`, added: (res.added || []).map((a) => a.id), rejected: [...unknownRejects, ...(res.rejected || [])], evicted: res.evicted || [], cited: res.cited || [] });
       // 실제로 바뀐 파일만 PR에 싣는다 — 채택이 하나도 없으면 `applyLessons`는 원문을 바이트 그대로
       // 돌려주므로, 넣어도 빈 diff가 되고 "변경 없음" 커밋이 실패한다.
-      if (res.path && ((res.added || []).length || (res.evicted || []).length)) files[res.path] = res.text;
+      if (res.path && ((res.added || []).length || (res.evicted || []).length || (res.cited || []).length)) files[res.path] = res.text;
       if (res.path && (res.added || []).length) pending.push({ kind: "lessons", path: res.path, texts: res.added.map((a) => a.text) });
     }
 
@@ -563,10 +604,14 @@ export async function runRetro({ deps, force = false, now } = {}) {
       roleItems.get(role)[key].push(item);
     };
     for (const x of out.examples || []) {
+      const bad = unknownRunsOf(x?.evidence_runs);
+      if (bad.length) { push(x?.role, "deferred", { kind: x?.kind, text: x?.text, reason: `unknown-evidence-run: ${bad.join(", ")}` }); continue; }
       if (distinctRuns(x?.evidence_runs) < MIN_EVIDENCE) { push(x?.role, "deferred", { kind: x?.kind, text: x?.text, reason: "insufficient-evidence" }); continue; }
       push(x?.role, "examples", { kind: x.kind, text: x.text });
     }
     for (const p of out.perspectives || []) {
+      const bad = unknownRunsOf(p?.evidence_runs);
+      if (bad.length) { push(p?.role, "deferred", { kind: "perspectives", text: p?.text, reason: `unknown-evidence-run: ${bad.join(", ")}` }); continue; }
       if (distinctRuns(p?.evidence_runs) < MIN_EVIDENCE) { push(p?.role, "deferred", { kind: "perspectives", text: p?.text, reason: "insufficient-evidence" }); continue; }
       push(p?.role, "perspectives", { text: p.text });
     }
@@ -671,7 +716,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
     }));
 
     // (h) 제안 PR — 최소 근거 창(§8.4)은 L1이 센다. 미달 제안은 버리지 않고 상태에 남긴다.
-    const { accepted, deferred } = filterByEvidence([...(out.proposals || []), ...deletionProposals]);
+    const { accepted, deferred } = filterByEvidence([...(out.proposals || []), ...deletionProposals], { knownRuns: knownRunIds });
     if (deferred.length) applied.push({ step: "proposals", deferred: deferred.map((x) => ({ kind: x.proposal?.kind, title: x.proposal?.title, reason: x.reason })) });
     let proposalPr = null;
     if (accepted.length) {
@@ -856,8 +901,8 @@ async function main() {
     /** 이슈 스냅샷(`collectIssues`) + 기록에서 뽑은 후보·창 통계. 둘 다 결정적이다(P4-R1). */
     harvest: async ({ since, records }) => {
       const snapshot = await collectIssues({ gh, since });
-      const { candidates, stats } = harvestRecords({ records, issues: snapshot.issues, commentsByIssue: snapshot.commentsByIssue, since });
-      return { candidates, stats, ...snapshot, first: earliestRecordAt(records) };
+      const { candidates, stats, citations } = harvestRecords({ records, issues: snapshot.issues, commentsByIssue: snapshot.commentsByIssue, since });
+      return { candidates, stats, citations, ...snapshot, first: earliestRecordAt(records) };
     },
     shouldRunFull: ({ state, force: f }) => shouldRunFull({ state, retro, force: f }),
     /**
@@ -879,12 +924,12 @@ async function main() {
      * "트랜스크립트가 1순위 출처"라는 계약이 한쪽만 고쳐지는 순간 갈라진다.
      */
     transcript: (envelope) => readTranscript({ root, home: homedir(), sessionId: envelope?.session_id, readFile: (p) => (existsSync(p) ? readFileSync(p, "utf8") : null) }) || "",
-    applyLessons: ({ role, adopted, today, minEvidence }) => {
+    applyLessons: ({ role, adopted, today, minEvidence, citations }) => {
       const rel = fileOf.get(role)?.lessons;
       const text = rel ? readText(join(root, rel)) : "";
       // 파일이 없으면 만들지 않는다 — lessons 파일은 역할의 존재 증명이고, retro는 역할을 신설하지 않는다.
-      if (!rel || !text) return { path: null, text: "", added: [], rejected: adopted.map((a) => ({ text: a.text, reason: rel ? "empty-lessons-file" : "unknown-role" })), evicted: [] };
-      return { path: rel, ...applyLessonsText({ text, adopted, today, minEvidence }) };
+      if (!rel || !text) return { path: null, text: "", added: [], rejected: (adopted || []).map((a) => ({ text: a.text, reason: rel ? "empty-lessons-file" : "unknown-role" })), evicted: [], cited: [] };
+      return { path: rel, ...applyLessonsText({ text, adopted, today, minEvidence, citations }) };
     },
     applyRoleAdditions: ({ role, examples, perspectives }) => {
       const rel = fileOf.get(role)?.agent;

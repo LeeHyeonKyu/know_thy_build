@@ -40,8 +40,36 @@ export function loadHarnessRaw(root) {
 export function loadRoles(root) {
   return parseToml(readFileSync(join(root, ".factory/roles.toml"), "utf8"));
 }
+/** CHARTER `triage.default`이 가질 수 있는 값. 세 번째 값은 없다 — `wont-do`는 판정이지 기본값이 아니다. */
+export const TRIAGE_DEFAULT_VALUES = ["needs-info", "ready"];
+
+/**
+ * 외부 감사 2026-09-14 M1 — NEVER_AUTOMATE 항목 중 **경로 글롭으로 적힌 것**만 뽑는다.
+ *
+ * 그 목록은 사람이 읽는 산문이고 대부분은 글롭으로 표현되지 않는다("배포는 사람이 태그를 찍는다").
+ * 하지만 `auth/**`·`billing/**`처럼 **경로 하나로 끝나는** 항목은 에이전트의 판단을 기다릴 이유가
+ * 없다 — 스크립트가 그대로 다시 셀 수 있고(`neverAutomateHits`), 그래야 "triage가 못 봤다"가
+ * 통하지 않는다. 뽑는 기준은 백틱 안의 토큰 중 `/`나 `*`를 든 것 하나뿐이다: `package.json`·
+ * `version`처럼 글롭이 아닌 것을 글롭으로 읽으면 그 파일을 스치는 모든 PR이 wont-do가 된다.
+ * 섹션 밖(Definition of Done 등)의 경로는 보지 않는다 — 이 목록의 권위는 그 제목에서 나온다.
+ */
+export function neverAutomateGlobs(body) {
+  const m = /^##\s+NEVER_AUTOMATE.*$/m.exec(body || "");
+  if (!m) return [];
+  const rest = String(body).slice(m.index + m[0].length);
+  const section = rest.split(/^##\s+/m)[0];
+  const out = [];
+  for (const tok of section.matchAll(/`([^`]+)`/g)) {
+    const g = tok[1].trim();
+    if (!/^[\w.*/@{}!,[\]-]+$/.test(g)) continue;                     // 공백이 섞이면 산문이지 경로가 아니다
+    if (!/[/*]/.test(g)) continue;                                    // 글롭으로 표현 가능한 것만 (§5.3)
+    if (!out.includes(g)) out.push(g);
+  }
+  return out;
+}
+
 export function loadCharter(root) {
-  const { data } = parseFrontmatter(readFileSync(join(root, "docs/factory/CHARTER.md"), "utf8"));
+  const { data, body } = parseFrontmatter(readFileSync(join(root, "docs/factory/CHARTER.md"), "utf8"));
   if (data.schema !== "factory.charter.v1") throw new Error("CHARTER.md frontmatter must declare schema: factory.charter.v1");
   return {
     status: data.status ?? "draft",
@@ -60,6 +88,16 @@ export function loadCharter(root) {
      * 후자는 FAIL(`charter.merge-human-gate-unset`)로 가른다. 기본값을 채우면 그 구분이 사라진다.
      */
     merge: { ...(data.merge || {}) },
+    /**
+     * 외부 감사 2026-09-14 M1 — `triage.default`. `merge.human_gate`와 **같은 이유로 기본값을
+     * 채우지 않는다**: 애매한 이슈를 멈춰 세울 것인가(`needs-info`) 통과시킬 것인가(`ready`)는
+     * 기본값이 아니라 소유자의 선언이고, 없는 것은 "아무도 고른 적이 없다"이다 — doctor가
+     * `charter.triage-default-unset`(FAIL)로 그 침묵을 깬다. 채우면 그 구분이 사라지고, 감사가
+     * 지적한 default-allow가 조용히 돌아온다.
+     */
+    triage: { ...(data.triage || {}) },
+    /** 프론트매터가 아니라 **본문**에서 온다 — NEVER_AUTOMATE는 사람이 읽는 목록이 정본이다. */
+    never_automate: neverAutomateGlobs(body),
     budget: data.budget || {},
     retro: data.retro || { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true },
   };

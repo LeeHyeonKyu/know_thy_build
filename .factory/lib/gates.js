@@ -366,6 +366,14 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
     if (effectiveTier !== "docs") {
       const pt = await proveTest({ run, cwd, harness, base, addedTests: ch.tests });
       result.gates["prove-test"] = { status: pt.misconfigured ? "MISCONFIGURED" : pt.ok ? "GREEN" : "RED", code: null, duration_ms: 0, log: pt.detail };
+      /*
+       * 감사 M2 — **판정 불가는 판정 결과와 따로 기록된다.** base에서 테스트가 아예 돌지 못한 것은
+       * GREEN(증명됨)도 RED(증명 실패)도 아니라 "이 게이트가 무엇을 말하는지 모른다"이고,
+       * `proveTest`가 그것을 `misconfigured`로 돌려주므로 위 줄에서 이미 MISCONFIGURED다 —
+       * 곧 `recomputeStatus`의 required 규칙에 걸려 이 PR은 절대 GREEN이 되지 않는다.
+       * 여기 남기는 `prove_test.inconclusive[]`는 사람이 "어느 테스트가 그랬는가"를 읽는 자리다.
+       */
+      if (pt.inconclusive?.length) result.prove_test = { inconclusive: [...pt.inconclusive] };
     }
     const rp = await repeatNewTests({ run, cwd, harness, addedTests: ch.tests, times: harness.gates.thresholds.new_test_repeats });
     result.gates["new-test-repeat"] = { status: rp.misconfigured ? "MISCONFIGURED" : rp.ok ? "GREEN" : "RED", code: null, duration_ms: 0, log: rp.detail };

@@ -38,14 +38,25 @@ const distinctRuns = (runs) => {
  * 창이 정의되지 않은 종류는 **defer**한다(fail closed) — 스키마가 5종만 허용하므로 모르는 kind는
  * 검증을 거치지 않은 출력이라는 뜻이고, "창이 없으니 통과"로 읽으면 근거 검사를 우회하는 구멍이 된다.
  */
-export function filterByEvidence(proposals = [], { windows = {} } = {}) {
+export function filterByEvidence(proposals = [], { windows = {}, knownRuns = null } = {}) {
   const w = { ...DEFAULT_WINDOWS, ...windows };
   const accepted = [];
   const deferred = [];
   for (const p of proposals || []) {
     const kind = p?.kind;
+    // `test-delete`는 근거 수로 판단하지 않고 **언제나 사람이 본다** — 그 제안이 인용하는 것도 run
+    // 기록이 아니라 재작성 이슈 번호다. 그래서 아래 실재 검사도 지나간다.
     if (ALWAYS_ACCEPTED.has(kind)) { accepted.push(p); continue; }
     if (!(kind in w)) { deferred.push({ proposal: p, reason: `unknown-kind: ${kind}` }); continue; }
+    /*
+     * 감사 M10/M11 — **근거는 실재해야 한다.** 길이만 세던 검사는 "숫자 두 개를 타이핑했는가"를
+     * 물었을 뿐이다. `knownRuns`(records 브랜치의 run id 집합)가 주어지면 그 안에 없는 id를 든
+     * 제안은 미룬다 — 버리지 않는 이유는 나머지와 같다: 다음 retro가 진짜 근거와 함께 다시 본다.
+     */
+    if (knownRuns instanceof Set && knownRuns.size) {
+      const unknown = [...new Set((Array.isArray(p?.evidence_runs) ? p.evidence_runs : []).map(String))].filter((r) => !knownRuns.has(r));
+      if (unknown.length) { deferred.push({ proposal: p, reason: `unknown-evidence-run: ${unknown.join(", ")} (no such run record on the records branch)` }); continue; }
+    }
     const need = w[kind];
     const have = distinctRuns(p?.evidence_runs).length;
     if (have >= need) accepted.push(p);

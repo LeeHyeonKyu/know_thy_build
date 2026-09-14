@@ -6,6 +6,7 @@
 
 import { parseHandoffs } from "../handoff.js";
 import { parseRunRecord } from "../usage.js";
+import { citedLessonIds } from "./lessons.js";
 import { afterSince, extractNeedsHuman, flakyIdFromTitle, TRANSITION_TO } from "./issue-comments.js";
 
 const FLAKY_LABEL = "factory:flaky";
@@ -50,6 +51,32 @@ function extractLessonsAndExamples(issueNumber, handoffs, sinceMs) {
     }
   }
   return { lessons, examples };
+}
+
+/**
+ * 외부 감사 2026-09-14 M11 — **lesson이 실제로 쓰였다는 증거를 센다.** 판정문(리뷰 verdict)이나
+ * 구현 handoff가 `lesson:<id>` 마커를 달고 나오면, 그것이 "이 교훈이 이번 라운드에서 무언가를
+ * 잡았다"는 유일한 관측이다. 역할별로 센다 — lessons 파일은 역할마다 따로이고 id는 파일 안에서만
+ * 유일하므로(같은 `L-2026-09-14-01`이 역할마다 있다), 역할을 잃으면 엉뚱한 파일의 숫자가 오른다.
+ * 구현 handoff의 인용은 빌더의 것이다(`roleFileMap`이 `builder`와 `factory-builder`를 모두 안다).
+ */
+export const BUILDER_ROLE = "builder";
+function countCitations(handoffs, sinceMs, into) {
+  const bump = (role, id) => {
+    if (!role) return;
+    if (!into[role]) into[role] = {};
+    into[role][id] = (into[role][id] || 0) + 1;
+  };
+  for (const h of handoffs) {
+    if (!afterSince(h.createdAt, sinceMs)) continue;
+    if (h.stage === "review") {
+      for (const v of Array.isArray(h.data?.verdicts) ? h.data.verdicts : []) {
+        for (const id of citedLessonIds(JSON.stringify(v))) bump(v?.role, id);
+      }
+    } else if (h.stage === "implement") {
+      for (const id of citedLessonIds(`${JSON.stringify(h.data)}\n${h.summary || ""}`)) bump(BUILDER_ROLE, id);
+    }
+  }
 }
 
 function isMerged(issue, comments) {
@@ -185,6 +212,7 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
   const flaky = [];
   let needsHuman = [];
 
+  const citations = {};                                               // 감사 M11 — { role: { lessonId: n } }
   let mergedCount = 0;
   let reviewRoundsSum = 0;
   const rejectsByRole = {};
@@ -196,6 +224,7 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
 
     if (hasLabel(issue, FLAKY_LABEL)) flaky.push({ id: flakyIdFromTitle(issue.title), issue: issue.number });
 
+    countCitations(handoffs, sinceMs, citations);
     const { lessons: ls, examples: ex } = extractLessonsAndExamples(issue.number, handoffs, sinceMs);
     for (const l of ls) lessons = foldByRoleText(lessons, l);
     for (const x of ex) examples = foldByRoleText(examples, x);
@@ -233,6 +262,9 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
       flaky,
       needs_human: needsHuman,
     },
+    // 감사 M11 — 이번 창에서 관측된 인용. 후보(`candidates`)와 달리 **누적되지 않는다**: 커서가
+    // 지나간 창의 인용은 이미 파일의 숫자에 반영됐고, 다시 더하면 같은 인용을 두 번 세게 된다.
+    citations,
     stats: {
       merged: mergedCount,
       review_rounds_avg: mergedCount ? round2(reviewRoundsSum / mergedCount) : 0,
