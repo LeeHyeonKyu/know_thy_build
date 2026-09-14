@@ -880,7 +880,8 @@ roster:
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }
+plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
@@ -895,11 +896,11 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
-## Plan 토론 로스터
-| tier | 토론자 | 라운드 |
-|---|---|---|
-| docs | architect, skeptic | 2 (입장 → 교차검토, synthesizer가 종합) |
-| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+## Plan 로스터
+| tier | 모드 | 역할 | 라운드 |
+|---|---|---|---|
+| docs / standard | single | synthesizer(계획자) + skeptic | 2 (계획 1패스 → 반박 1패스) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 |
 
 ## Hard limits
 - review rounds K = 3
@@ -931,7 +932,9 @@ every_merges: { initial: 1, min: 1, max: 20 }   # N은 수확량에 따라 자�
 light_on_merge: true
 ```
 
-기계가 읽는 값(`loadCharter`)은 위 **frontmatter뿐**이다. 본문의 표(Tiers·Plan 토론 로스터·Hard limits·Retro)는 **사람이 읽는 문서**이며, 값이 갱신될 때 frontmatter와 어긋나면 frontmatter가 정본이다.
+기계가 읽는 값(`loadCharter`)은 위 **frontmatter뿐**이다. 본문의 표(Tiers·Plan 로스터·Hard limits·Retro)는 **사람이 읽는 문서**이며, 값이 갱신될 때 frontmatter와 어긋나면 frontmatter가 정본이다.
+
+**plan은 기본이 토론이 아니다(감사 Task 9).** `plan: { mode, debate_tiers, max_done_when }`이 plan 스테이지의 모양을 정한다 — 기본 `mode: single`은 **opus 계획자 1패스 + skeptic 1패스(2콜)**이고, 종합은 계획자 자신의 최종본이다(합성 에이전트도 서명 라운드도 없다). skeptic의 출력 스키마에는 삭제·수정 필드가 아예 없어 **추가만** 가능하다. 4역할 토론(R1→R2→종합→서명, `plan_roles`·`plan_rounds`)은 `debate_tiers`에 이름이 있는 tier — 기본값은 `load-bearing` 하나 — 에서만 돌고, `mode: debate`는 tier와 무관하게 언제나 토론이다. `planRoundsFor`는 `{mode, rounds}`를 돌려주지만 `rounds`는 여전히 숫자 하나이고 `plan.v1` 핸드오프 스키마는 바뀌지 않는다(다운스트림 스테이지는 모드를 모른다). 그리고 계획은 이제 **검증된다**: `verify-stage`의 plan 검증기가 ① `severity ≥ medium`(또는 severity 없는) `dissent_log` 항목을 `done_when`의 `covers: [id]`가 짚지 않으면, ② `done_when`이 `max_done_when`(기본 6)을 넘으면, ③ 이슈가 가드를 요구하지 않았는데 `done_when`이 화이트리스트·등장 금지·순서·저장소 전수 정규식 모양이면 핸드오프를 **무효**로 판정한다(스키마 미달과 같은 경로 — 스테이지는 GREEN이 되지 않는다). 근거와 재측정 조건(n≥10), 그리고 ③의 휴리스틱 목록이 조잡한 필터라는 사실은 `docs/factory/audit/response-task-9.md`에 있다.
 
 `status: ready`가 아니면 모든 factory 잡이 첫 줄에서 종료한다. 그린필드에서 Phase 1이 끝나기 전에 factory가 도는 일을 막는다.
 

@@ -32,6 +32,7 @@ const LOADER = {
       },
     },
     rounds: { type: 'number' },
+    plan: { type: 'object' },
     limits: { type: 'object' },
     spec_path: { type: 'string' },
     pr: { type: 'number' },
@@ -138,7 +139,8 @@ const loaderPrompt =
   `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
   `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
   `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
+  `rounds, plan (the context's \`plan\` object verbatim — {mode, max_done_when} — omit it if absent), ` +
+  `limits, spec_path, maturity = harness.maturity, orchestration; ` +
   `pr/head_sha from handoffs.implement if present; ` +
   `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
   `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +

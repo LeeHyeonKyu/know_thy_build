@@ -10,7 +10,8 @@ roster:
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }
+plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
@@ -25,11 +26,16 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
-## Plan 토론 로스터
-| tier | 토론자 | 라운드 |
-|---|---|---|
-| docs | architect, skeptic | 2 (입장 → synthesizer 종합; 교차검토 생략) |
-| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+## Plan 로스터 (감사 Task 9 — 기본은 토론이 아니다)
+| tier | 모드 | 역할 | 라운드 |
+|---|---|---|---|
+| docs / standard | single | synthesizer(계획자, opus) + skeptic | 2 (계획 1패스 → 반박 1패스; 반박은 **추가만** 한다) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 (`plan_rounds`) |
+
+근거: `docs/factory/dogfood/2026-09-14-plan-baseline.md` · `docs/factory/audit/response-task-9.md`.
+4역할 토론은 이슈당 5.4×–33.7×를 쓰고도 #15·#18에서 단일 패스보다 못했고, must_fix 15건 중 5건이
+토론이 스스로 발명한 done_when 때문에 생겼다. 토론이 값을 산 곳은 표본에서 유일한 load-bearing
+이슈(#2) 하나다. `plan.mode: debate`로 언제든 전부 토론으로 되돌릴 수 있다.
 
 ## Hard limits
 - review rounds K = 3

@@ -22,6 +22,24 @@ test("plan.v1 requires done_when with verify+level, files_expected, dissent_log,
   expect(validate("plan.v1", { ...good, done_when: [] }).ok).toBe(false);
 });
 
+/**
+ * 감사 Task 9: 핸드오프의 **모양**은 그대로다(다운스트림 스테이지는 한 글자도 바뀌지 않는다).
+ * 새로 생긴 것은 선택 필드 둘 — done_when의 `covers`(그 항목이 막는 dissent id)와 dissent_log의
+ * `id`/`severity`다. 있으면 모양을 검사하고, 없으면 예전 핸드오프 그대로 통과한다.
+ * 두 필드를 **요구**하는 것은 스키마가 아니라 verify-stage의 plan 검증기다.
+ */
+test("plan.v1: done_when.covers and dissent_log id/severity are optional but shape-checked", () => {
+  const good = { schema: "factory.plan.v1", issue: 1, tier: "standard", roles: ["a", "b"], rounds: 2,
+    done_when: [{ id: "dw1", text: "t", verify: "test_1_t", level: "unit", covers: ["d1"] }], files_expected: [],
+    dissent_log: [{ id: "d1", role: "skeptic", objection: "o", resolution: "r", severity: "high" }], non_goals: [], open_risks: [] };
+  expect(validate("plan.v1", good).ok).toBe(true);
+
+  const badCovers = { ...good, done_when: [{ ...good.done_when[0], covers: "d1" }] };
+  expect(validate("plan.v1", badCovers).errors.join(" ")).toMatch(/done_when\[0\]\.covers must be array/);
+  const badSeverity = { ...good, dissent_log: [{ ...good.dissent_log[0], severity: "catastrophic" }] };
+  expect(validate("plan.v1", badSeverity).errors.join(" ")).toMatch(/dissent_log\[0\]\.severity must be one of/);
+});
+
 test("implement.v1 requires gates GREEN fields, head_sha, verifier verdict, pr", () => {
   const good = { schema: "factory.implement.v1", issue: 1, head_sha: "a".repeat(40), pr: 5, gates: { status: "GREEN", level: "full" },
     verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
