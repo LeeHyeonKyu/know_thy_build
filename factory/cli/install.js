@@ -1,7 +1,8 @@
 import { dirname, join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from "node:fs";
+import { replaceProtBlock, writeGlobs, ciDenyEntries } from "../lib/protected-paths.js";
 
-export const render = (text, vars = {}) => text.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+export const render = (text, vars = {}) => text.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars && typeof vars[k] !== "object" ? String(vars[k]) : m));
 
 const uniq = (arr) => [...new Set(arr)];
 /** 결정적 병합: deny/allow는 합집합(기존 순서 유지), 훅은 command가 없을 때만 append, 그 외 키는 기존 값 유지. */
@@ -61,6 +62,66 @@ export function pruneMovedDenies(settings, moved = MOVED_DENIES_ADR_019) {
   return { settings: out, pruned: deny.length - kept.length };
 }
 
+/**
+ * 죽은 훅 엔트리를 settings.json에서 **뺀다**(외부 감사 M6). `mergeSettings`는 가산적이라 한 번 들어간
+ * 훅은 `--upgrade`로 절대 사라지지 않는다 — `check-merge-gate.sh`는 `$TOOL_INPUT`(Claude Code가 세우지
+ * 않는 변수)을 읽어 **항상 첫 줄에서 exit 0**이었는데, 스펙 §1581이 삭제를 적어 둔 뒤에도 설치본의
+ * settings.json에는 남아 "머지 게이트 훅이 걸려 있다"는 그림만 만들었다. 유령 게이트는 없는 게이트보다
+ * 나쁘다: 사람이 그것을 있다고 세기 때문이다.
+ * 파일도 함께 지운다(`planInstall`의 `remove` 액션).
+ */
+export const DEAD_HOOKS = Object.freeze(["check-merge-gate.sh"]);
+export function pruneDeadHooks(settings, dead = DEAD_HOOKS) {
+  const hooks = settings?.hooks;
+  if (!hooks || typeof hooks !== "object") return { settings, pruned: 0 };
+  const isDead = (h) => dead.some((d) => String(h?.command || "").includes(d));
+  let pruned = 0;
+  const out = structuredClone(settings);
+  for (const [ev, entries] of Object.entries(out.hooks)) {
+    if (!Array.isArray(entries)) continue;
+    const kept = [];
+    for (const entry of entries) {
+      const hs = (entry.hooks || []).filter((h) => { if (isDead(h)) { pruned++; return false; } return true; });
+      if (hs.length) kept.push({ ...entry, hooks: hs });
+      else if (!(entry.hooks || []).length) kept.push(entry);          // 애초에 비어 있던 엔트리는 우리 것이 아니다
+    }
+    if (kept.length) out.hooks[ev] = kept; else delete out.hooks[ev];
+  }
+  return pruned ? { settings: out, pruned } : { settings, pruned: 0 };
+}
+
+/**
+ * 설치 대상 한 건의 **최종 내용**. 세 단계다: 읽기 → `{{VAR}}` 치환 → 생성기.
+ * 호출자가 셋이라(설치 `planInstall`, doctor의 `files.stale`, 자기 미러 테스트) 여기 한 곳에 둔다 —
+ * 갈라지면 "설치되는 것"과 "설치됐는지 검사하는 것"이 서로 다른 파일이 된다.
+ *
+ * 생성기(외부 감사 M8)는 `harness.toml [protected]`에서 훅의 `prot`와 ci-settings의 경로 deny를 만든다.
+ * `vars.PROTECTED`가 그 섹션이고, 없으면 **throw한다** — 조용히 템플릿 값을 설치하면 그게 바로 M8이다.
+ */
+export function freshContent(e, { readFile = (p) => readFileSync(p, "utf8"), vars = {} } = {}) {
+  const raw = readFile(e.src);
+  const text = e.owner === "factory" || e.owner === "project" ? render(raw, vars) : raw;
+  if (!e.generate) return text;
+  const prot = vars.PROTECTED;
+  if (!prot || !Array.isArray(prot.factory)) throw new Error(`${e.dest}: harness.toml [protected].factory is missing — refusing to install a protected list that was not derived from it`);
+  if (e.generate === "hook-protected") return replaceProtBlock(text, prot);
+  if (e.generate === "ci-settings" || e.generate === "ci-settings-harness") return renderCiSettings(text, prot, { harnessMode: e.generate === "ci-settings-harness" });
+  throw new Error(`${e.dest}: unknown generator ${e.generate}`);
+}
+
+/**
+ * ci-settings의 `permissions.deny`에서 **경로 deny만** 갈아 끼운다. 템플릿에 남는 것은 경로가 아닌
+ * 항목(`Bash(gh secret*)`·`Read(.env*)` 등)이고, `Edit(...)`/`Write(...)`는 전부 harness에서 생성된다.
+ * 순서는 "템플릿의 비경로 항목 → 생성된 경로 항목"으로 고정한다(결정적이어야 diff가 읽힌다).
+ */
+export function renderCiSettings(templateText, prot, { harnessMode = false } = {}) {
+  const j = JSON.parse(templateText);
+  j.permissions ??= {};
+  const keep = (j.permissions.deny || []).filter((d) => !/^(Edit|Write)\(/.test(d));
+  j.permissions.deny = [...keep, ...ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true }))];
+  return JSON.stringify(j, null, 2) + "\n";
+}
+
 const GITIGNORE_HEADER = "# know-thy-build factory";
 
 /** 헤더가 이미 있으면 그 블록 뒤에 누락분만 덧붙인다 — 헤더를 중복 생성하지 않는다. */
@@ -81,9 +142,15 @@ export function ensureGitignore(text, entries) {
 
 export function planInstall({ manifest, root, mode, vars = {}, exists = existsSync, readFile = (p) => readFileSync(p, "utf8") }) {
   const actions = [];
+  // M6 — 죽은 훅 파일은 설치본에서 **지운다**. 남겨 두면 settings.json에서 항목만 빼도 파일이 그대로
+  // 남아 다음 사람이 다시 배선한다.
+  for (const dead of DEAD_HOOKS) {
+    const p = `.claude/hooks/${dead}`;
+    if (exists(join(root, p))) actions.push({ dest: p, owner: "factory", action: "remove" });
+  }
   for (const e of manifest) {
     const target = join(root, e.dest);
-    const fresh = e.owner === "factory" || e.owner === "project" ? render(readFile(e.src), vars) : readFile(e.src);
+    const fresh = freshContent(e, { readFile, vars });
     const present = exists(target);
     const base = { dest: e.dest, owner: e.owner, mode: e.mode };
     if (!present) { actions.push({ ...base, action: "create", content: fresh }); continue; }
@@ -94,8 +161,11 @@ export function planInstall({ manifest, root, mode, vars = {}, exists = existsSy
       // 제거는 `--upgrade`에서만 한다(ADR-019). 최초 `init`은 남의 저장소에 이미 있던 설정을 더하기만
       // 하는 연산이고, 거기서 줄을 지우면 "설치가 내 설정을 지웠다"가 된다 — 되돌리기를 요청한 사람만 받는다.
       const pruneResult = mode === "upgrade" ? pruneMovedDenies(cur) : { settings: cur, pruned: 0 };
-      const merged = JSON.stringify(mergeSettings(pruneResult.settings, JSON.parse(fresh)), null, 2) + "\n";
-      actions.push({ ...base, action: merged === current ? "skip" : "merge", content: merged, pruned: pruneResult.pruned });
+      // 죽은 훅 제거는 `init`에서도 한다(ADR-019의 deny 제거와 달리). 그 항목은 사용자가 넣은 설정이
+      // 아니라 우리가 배선했던 훅이고, 지금은 **아무 일도 하지 않는** 파일을 가리킨다(M6).
+      const hookPrune = pruneDeadHooks(pruneResult.settings);
+      const merged = JSON.stringify(mergeSettings(hookPrune.settings, JSON.parse(fresh)), null, 2) + "\n";
+      actions.push({ ...base, action: merged === current ? "skip" : "merge", content: merged, pruned: pruneResult.pruned + hookPrune.pruned });
       continue;
     }
     if (mode === "init") { actions.push({ ...base, action: "skip" }); continue; }
@@ -107,8 +177,8 @@ export function planInstall({ manifest, root, mode, vars = {}, exists = existsSy
   return actions;
 }
 
-export function applyInstall({ actions, root, writeFile = writeFileSync, mkdir = (d) => mkdirSync(d, { recursive: true }), chmod = chmodSync }) {
-  const counts = { created: 0, replaced: 0, merged: 0, skipped: 0, kept: 0, pruned: 0 };
+export function applyInstall({ actions, root, writeFile = writeFileSync, mkdir = (d) => mkdirSync(d, { recursive: true }), chmod = chmodSync, remove = (p) => rmSync(p, { force: true }) }) {
+  const counts = { created: 0, replaced: 0, merged: 0, skipped: 0, kept: 0, pruned: 0, removed: 0 };
   for (const a of actions) {
     const target = join(root, a.dest);
     if (a.action === "create" || a.action === "replace" || a.action === "merge") {
@@ -116,7 +186,8 @@ export function applyInstall({ actions, root, writeFile = writeFileSync, mkdir =
       writeFile(target, a.content);
       if (a.mode) chmod(target, a.mode);
     }
-    counts[{ create: "created", replace: "replaced", merge: "merged", skip: "skipped", keep: "kept" }[a.action]]++;
+    if (a.action === "remove") remove(target);
+    counts[{ create: "created", replace: "replaced", merge: "merged", skip: "skipped", keep: "kept", remove: "removed" }[a.action]]++;
     counts.pruned += a.pruned || 0;
   }
   return counts;

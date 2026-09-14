@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { buildManifest } from "./manifest.js";
 import { planInstall, applyInstall, ensureGitignore } from "./install.js";
 import { run as realRun } from "../lib/exec.js";
+import { parse as parseToml } from "smol-toml";
 
 // run 기록은 `factory/records` 브랜치에 산다(ADR-014) — 작업 브랜치에서는 추적하지 않는다.
 // 추적하면 hydrateRecord가 스테이지 시작에 복원한 파일이 그대로 "미커밋 변경"이 되어 stop-guard가
@@ -16,15 +17,30 @@ import { run as realRun } from "../lib/exec.js";
 // 무결성 검사에는 `.factory/**`(보호 경로)로 보여 사람 머지 신호까지 만들었다.
 export const GITIGNORE_ENTRIES = [".factory/out/", ".factory/node_modules/", ".factory/package-lock.json", "docs/factory/runs/", "test-results/", "coverage/", ".nyc_output/"];
 
-export function projectVars(root) {
+/**
+ * 설치 렌더링에 쓰이는 값들. `PROJECT_NAME`은 `{{PROJECT_NAME}}` 치환용 문자열이고, `PROTECTED`는
+ * **생성기**가 읽는 harness.toml `[protected]` 섹션이다(외부 감사 M8 — 보호 목록의 단일 출처).
+ * `render`는 객체 값을 치환하지 않으므로 `PROTECTED`가 템플릿 텍스트에 새어 들어갈 일은 없다.
+ *
+ * 최초 `factory init`에는 아직 `.factory/harness.toml`이 없다 — 그때는 **이번 설치가 깔 템플릿**이
+ * 곧 그 프로젝트의 harness다. 그래서 프로젝트 파일이 없으면 패키지의 템플릿에서 읽는다.
+ * 둘 다 못 읽으면 던지지 않고 `PROTECTED`를 비워 둔다 — `freshContent`가 그 자리에서 이유를 말하며
+ * 실패한다(생성되지 않은 목록을 조용히 설치하는 것보다 낫다).
+ */
+export function projectVars(root, pkgRoot = null) {
   let name = basename(root);
   try { name = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).name || name; } catch {}
-  return { PROJECT_NAME: name };
+  let PROTECTED = null;
+  for (const p of [join(root, ".factory/harness.toml"), ...(pkgRoot ? [join(pkgRoot, "templates/factory/factory/harness.toml")] : [])]) {
+    try { PROTECTED = parseToml(readFileSync(p, "utf8")).protected; } catch {}
+    if (PROTECTED) break;
+  }
+  return { PROJECT_NAME: name, PROTECTED };
 }
 
 export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun }) {
   const upgrade = argv.includes("--upgrade"), diff = argv.includes("--diff"), json = argv.includes("--json");
-  const vars = projectVars(root);
+  const vars = projectVars(root, pkgRoot);
   const manifest = buildManifest({ pkgRoot });
   const actions = planInstall({ manifest, root, mode: upgrade || diff ? "upgrade" : "init", vars });
   if (diff) {
@@ -52,9 +68,10 @@ export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun 
   const after = ensureGitignore(before, GITIGNORE_ENTRIES);
   if (after !== before) writeFileSync(gi, after);
   if (json) { io.out(JSON.stringify({ counts, actions: actions.map(({ content, ...a }) => a) }, null, 2)); return 0; }
-  io.out(`factory init${upgrade ? " --upgrade" : ""}: created ${counts.created} · replaced ${counts.replaced} · merged ${counts.merged} · skipped ${counts.skipped} · kept ${counts.kept} · pruned ${counts.pruned}`);
+  io.out(`factory init${upgrade ? " --upgrade" : ""}: created ${counts.created} · replaced ${counts.replaced} · merged ${counts.merged} · skipped ${counts.skipped} · kept ${counts.kept} · pruned ${counts.pruned} · removed ${counts.removed}`);
   // 제거는 조용히 일어나면 안 된다 — 사람의 settings.json에서 줄이 사라진 것이므로 이유를 말한다.
-  if (counts.pruned) io.out(`  pruned ${counts.pruned} path deny entries from .claude/settings.json — they moved to .factory/ci-settings.json (ADR-019); they were blocking the human-point skills`);
+  if (counts.pruned) io.out(`  pruned ${counts.pruned} stale entries from .claude/settings.json — path denies moved to .factory/ci-settings.json (ADR-019), and dead hooks (check-merge-gate.sh) are unwired (audit M6)`);
+  if (counts.removed) io.out(`  removed ${counts.removed} dead hook file(s) — they never ran (they read $TOOL_INPUT, which Claude Code does not set) and a phantom gate is worse than no gate (audit M6)`);
   for (const a of actions) if (a.action !== "skip") io.out(`  ${a.action.padEnd(8)} ${a.dest}${a.owner !== "factory" ? `  (${a.owner}-owned)` : ""}`);
   io.out(`
 Next:

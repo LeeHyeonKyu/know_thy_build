@@ -115,6 +115,18 @@ factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTE
                  # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
                  # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
 except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
+# ── 2026-09-14 외부 감사 M8 / ADR-023: 이 섹션이 보호 경로의 **단일 출처**다 ─────────────────────
+# `factory init`이 여기서 두 가지를 생성한다: `.claude/hooks/block-dangerous.sh`의 `prot` 정규식과
+# `.factory/ci-settings*.json`의 `Edit(...)`/`Write(...)` deny. 감사 전에는 셋이 손으로 유지되는 별개
+# 목록이었고 실제로 갈라져 있었다(훅은 `.github/workflows/factory-`만 막는데 여기는 `.github/**`).
+# doctor의 `protected.parity`가 드리프트를 FAIL로 잡는다 — 생성물을 손으로 고치지 말고 여기를 고친 뒤
+# `npx know-thy-build factory init --upgrade`를 돌린다.
+#
+# `agent_writable`은 **머지 경계와 쓰기 경계가 갈라지는** 자리다. 위 목록은 "이 경로를 건드린 PR은
+# 사람이 머지한다"(L1)이고, 생성되는 deny/`prot`는 "에이전트 세션이 이 파일을 쓰지 못한다"(L2/훅)다.
+# 둘이 갈라져야 하는 경로 — 사람이 머지해야 하지만 에이전트가 정상 업무로 편집하는 경로 — 만 여기
+# 적는다. 대부분의 저장소는 비어 있다(팩토리 자신을 개발하는 저장소가 예외다).
+agent_writable = []
 # additive_only: 이 두 섹션에 **추가만** 허용한다(§8.1의 다크 경로). 정책이지 변조 판정이 아니므로
 # integrity 체크는 이것으로 RED가 되지 않는다 — 벗어난 편집이 있으면 merge 스테이지가 자동 머지를
 # 거부하고 사람이 머지한다(ADR-020 KTB-6). 그래야 `:role` PR과 역할 파일을 건드리는 업그레이드를

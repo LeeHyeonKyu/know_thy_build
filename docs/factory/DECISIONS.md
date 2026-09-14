@@ -2125,3 +2125,55 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 - `--repo`의 `REPO_RE`는 `.`/`..` 세그먼트를 거부한다(`repos/../..`가 API 루트로 조용히 정규화되는 것을 애초에 허용하지 않는다).
 - 페이지의 `?repo=`는 부팅 시 설정 폼과 **같은 정규식**으로 검사한다 — 실패하면 저장소 입력 화면으로 떨어진다(전에는 폼만 검사했고 쿼리 파라미터는 그대로 API 경로에 이어붙었다).
 - SSE의 "바뀔 때만 민다"는 시간만 지나도 값이 움직이는 필드(`generated_at`·`fetched_at`·`*_min`·열린 타임라인 구간의 `to`)를 뺀 투영으로 비교해야 진짜다 — 예전 비교는 모델 전체 문자열이라 매 폴마다 밀었다(테스트가 시계를 고정해 둬서 가려져 있었다). 시계를 전진시키는 새 테스트가 "시간만 지나면 안 민다 / 상태가 바뀌면 민다"를 함께 증명한다.
+
+---
+
+## ADR-023 외부 감사 대응 — 재현된 우회를 스크립트가 막는 경계로 바꾼다 — 2026-09-14
+
+**질문**: 2026-09-14, `2ab390c`에 대한 외부 감사(`docs/factory/audit/2026-09-14-external-audit.md`)가 훅을 직접 실행해 **리뷰를 건너뛰고 머지까지 가는 경로**를 재현했고, 게이트가 fail-open이며, 선언만 있고 배선되지 않은 통제가 여럿이라고 판정했다. 한 문장 요약은 "오케스트레이션은 구현했고 검증은 구현하지 않았다"였다. 대응은 `docs/superpowers/plans/2026-09-14-factory-audit-hardening.md`가 Task로 나눈다 — 이 ADR은 **감사 id ↔ Task ↔ 실제로 무엇이 바뀌었는가**의 대조표이고, 각 Task가 자기 항목을 채운다.
+
+**원칙(이 대응 전체에 걸리는 것)**:
+- 감사가 재현한 실패마다 **먼저 빨간 테스트**를 만들고 그 테스트를 고친다. 프로즈만의 통제는 코드로 배선하거나 그 주장을 문서에서 뺀다.
+- 훅은 defense in depth다. 권한·그래프·requirements가 권위다 — 훅에서 막았다고 그 위층을 생략하지 않는다.
+- fail-closed: 읽지 못한 입력은 GREEN도 "진행"도 되지 않는다.
+
+**감사 id ↔ Task 대조표**
+
+| 감사 id | 무엇이었나 | Task | 상태 |
+|---|---|---|---|
+| H1a | `block-dangerous.sh`가 줄 단위 매칭이라 `\`+개행 하나로 전 규칙 우회 | 1 | 닫힘 — 판정 전 정규화 |
+| H1b | 스테이지가 자기 commit status를 게시해 머지 게이트를 염 | 1(훅) / 2(게시자 검증) | 부분 — 훅이 명령을 막음, 게시자 검증은 Task 2 |
+| H1c | `mergePr`가 리뷰 검증보다 먼저 | 2 | 미착수 |
+| H2 | `recomputeStatus`가 `misconfigured`를 GREEN으로 | 3 | 미착수 |
+| H3 | tier 자기 신고, `tier_effective` 소비처 0 | 4 | 미착수 |
+| H4 | `cold_read` 미구현 | 5 | 미착수 |
+| H5 | 기존 테스트 삭제·단언 변경 탐지 없음 | 4 | 미착수 |
+| H6 | 인간 게이트가 사실상 없음 | 2 | 미착수 |
+| M6 | 죽은 훅 `check-merge-gate.sh`(`$TOOL_INPUT`) | 1 | 닫힘 — 파일·설정 항목 모두 제거 |
+| M8 | 보호 목록이 세 곳에 손으로, 실제로 갈라져 있었다 | 1 | 닫힘 — 생성 + `protected.parity` |
+| M9 | harness 모드에서 `harness.toml`의 판정 기준 섹션 편집 가능 | 1 | 닫힘 — L1 `policy` 위반 |
+| M1·M2·M13·M10/M11 | triage default-allow, prove-test base env, 중복 실행, lessons 증거 | 6 | 미착수 |
+| M3·M4·M12 | flaky 분류, quarantine 범위, docs tier 글롭 | 3·4 | 미착수 |
+| M5·P2-13 | `factory-loader` LLM 호출, `on_others` 미소비 | 5 | 미착수 |
+| P2-10/11 | 단일 에이전트 plan baseline 실험 | 7 | 미착수 |
+| P2-15 | 리뷰어 한 명을 다른 프로바이더로 | — | 소유자 결정(두 번째 키가 필요하다) — 구현하지 않는다 |
+
+### Task 1 — 훅 정규화 · 상태/승인 위조 · 보호 목록 단일 출처 (H1a, H1b, M6, M8, M9)
+
+**재현한 것 → 막은 것**
+
+- **H1a (재현)**. `factory/test/hooks.test.js`의 "backslash-newline continuations are joined before matching"이 감사의 케이스를 그대로 실행해 **exit 0**을 받았다: `gh pr \⏎merge 5 --squash`, `git push origin \⏎--force main`, `gh issue edit 7 \⏎--add-label factory:approved`, `git \⏎merge feature`, `rm -rf \⏎.factory/lib`, `gh api \⏎-X DELETE …/factory/lock-7`. 원인은 모든 규칙이 `echo "$c" | grep -E`, 곧 **줄 단위**였다는 것이다 — 셸에서 `\`+개행은 토큰을 잇는데 훅이 보는 줄은 쪼개진다. **고친 방법**: 판정 **전에** 명령을 한 문자열로 정규화한다 — (1) `\`+개행 → 공백, (2) 남은 개행 → `;`, (3) 탭 → 공백, 공백 런 → 하나. 개행을 공백이 아니라 `;`로 바꾸는 것이 요점이다: 개행은 이음줄이 아닐 때 **명령 구분자**이고, 규칙들의 `[^;&|]*`·경계 클래스가 이미 `;`를 그렇게 읽는다. 공백으로 이으면 `echo git⏎merge x`가 없던 매치를 만든다 — 오탐을 새로 만드는 정규화는 정규화가 아니다(그 사실을 고정하는 테스트가 따로 있다). 같은 결함이 `deny-all-writes.sh`에도 있었다(감사는 재현하지 않았지만 `rm \⏎-rf src`가 통과한다) — 같은 정규화를 넣었다.
+- **H1b (재현)**. `mergeGates`가 리뷰의 증거로 보는 것은 required check의 **상태**뿐이고(`run-stage.js` → `gh.js` `allChecksGreen`) 게시자를 검증하지 않는다. 모든 스테이지 env의 `FACTORY_BOT_TOKEN`은 `repo` 스코프라 commit status를 쓸 수 있고, 훅에는 그 규칙이 없었다. **막은 것**: `gh api …/statuses/…`(메서드·호스트 접두 불문), `gh api …/check-runs`, `gh api …/commits/<sha>/{status,check-runs}`, `gh pr review --approve`, `gh api …/pulls/<n>/reviews`. 읽기(GET)까지 막히지만 체크 상태를 읽어야 하는 역할이 없고 `gh pr checks`는 열려 있다. **범위 밖(이 Task)**: 상태의 **게시자 검증**은 머지 스테이지의 일이라 Task 2가 한다 — 훅만으로는 "봇이 아닌 누군가가 올린 green"을 구별할 수 없다. 그리고 **런타임에 조립되는 동사**(`x=$(printf "gh pr merge"); $x`, `node -e "execSync(…)"`)는 여전히 비목표다(ADR-020 잔여 위험 #4): 문자열에 동사가 연속으로 나타나지 않으면 이 훅은 볼 수 없고, 그 경계는 ADR-021의 **토큰 분리**가 맡는다.
+- **M6 (죽은 훅)**. `.claude/hooks/check-merge-gate.sh`는 `$TOOL_INPUT`을 읽었다 — Claude Code가 세우지 않는 변수라 **항상 첫 줄에서 exit 0**이었다. 스펙 §1581이 이미 삭제를 적어 두었는데도 파일과 `settings.json` 항목이 남아 "머지 게이트 훅이 걸려 있다"는 그림만 만들었다. 유령 게이트는 없는 게이트보다 나쁘다 — 사람이 그것을 세기 때문이다. 파일을 지우고 항목을 뺐고, `mergeSettings`가 가산적이라 `--upgrade`로는 사라지지 않으므로 `pruneDeadHooks`를 설치기에 넣어 **채택자의 설치본에서도** 배선이 풀리고 파일이 삭제되게 했다.
+- **M8 (보호 목록 세 곳)**. 실제 드리프트를 확인했다: 훅은 `.github/workflows/factory-`만 막는데 `[protected].factory`는 `.github/**` 전부를 보호하고(= 다른 이름의 워크플로 한 장이 훅을 그대로 지나갔다), 훅의 harness 변형은 `.factory/(bin|lib|actions|lessons|out)`만 열거하는데 ci-settings는 `scenarios`·`node_modules`까지 막는다. **고친 방법**: `harness.toml [protected]`가 단일 출처가 되고, `factory init`/`--upgrade`가 `factory/lib/protected-paths.js`로 (a) 훅의 `prot`(마커로 둘러싼 생성 블록)와 (b) ci-settings 두 파일의 `Edit(...)`/`Write(...)` deny를 **생성한다**. 템플릿의 ci-settings에는 이제 비경로 항목만 남는다(= 세 번째 손 목록이 사라졌다). doctor에 `protected.parity`를 더해 드리프트를 **FAIL**로 잡는다(WARN이면 그 경고를 안고 사는 동안 훅과 L2가 서로 다른 파일을 막는다). KTB-36의 `.factory/…` 열거와 `.factory/out/qa/**` 카브아웃은 그대로 보존된다 — `.factory/**`는 생성기가 형제 경로 열거로 펴고, 훅에서는 기존 `$qa` sed가 계속 그 일을 한다.
+  - **머지 경계 ≠ 쓰기 경계**. `[protected].factory`는 "이 경로를 건드린 PR은 사람이 머지한다"(L1)이고, 생성되는 deny/`prot`는 "에이전트 세션이 이 파일을 쓰지 못한다"(L2/훅)다. 이 저장소에서는 `factory/**`·`templates/**`·`bin/**`가 둘의 갈라지는 유일한 자리다 — 팩토리의 소스가 곧 제품이라 builder가 그것을 편집하는 것이 정상 업무인데(쓰기는 열려야 한다), 그 diff는 모든 게이트의 정의를 바꾼다(자동 머지는 안 된다). 그 예외를 코드가 아니라 **설정**으로 선언하려고 `[protected].agent_writable`을 새로 두었다(템플릿 기본값은 빈 목록).
+- **M9 (harness 모드의 얼어붙은 섹션)**. `FACTORY_HARNESS_ISSUE=1`이면 builder가 `.factory/harness.toml`을 편집할 수 있다(KTB-20 — 승격이 하려는 일이 바로 그것이다). 그런데 `[protected]`·`[gates.thresholds]`·`[load_bearing]`은 **판정 기준 자체**라, 거기를 고치면 그 PR이 스스로를 통과시킨다(보호 목록에서 자기를 빼거나, coverage 임계값을 낮추거나, 하중 경로를 비운다). **훅 규칙은 답이 될 수 없다 — 그리고 그 이유가 이 항목의 핵심이다**: 훅이 보는 것은 명령줄과 `Edit/Write`의 `file_path`뿐이라 "이 편집이 **어느 TOML 섹션**에 떨어지는가"를 알 방법이 없다. 그 판정은 **내용 기반**이고 diff를 읽어야 성립한다. 같은 이유로 L2 경로 deny도 안 된다(경로는 하나고 섹션은 여럿이다). 그래서 `integrity.js`의 섹션 diff 기계(`additive_only`와 같은 자리)에 얹어 **L1 `policy` 위반**(사람 머지)으로 집행한다 — 변조(`violations`)가 아니다: L0가 RED가 되면 required context가 빨개져 사람조차 머지할 수 없다(KTB-5/KTB-6과 같은 이유). 추가된 줄은 head 내용으로, 삭제된 줄은 base 내용(`git show <base>:<file>`)으로 섹션을 판정하고, 섹션 헤더 자체의 추가·삭제도 위반이다(주입된 헤더가 자기 주변 줄을 소급 정당화할 수 없다 — additive-only가 이미 쓰는 규칙). `FACTORY_HARNESS_ISSUE` 여부로 조건을 달지 **않는다**: 그 변수는 에이전트 세션의 env이고 integrity 잡·머지 스테이지에는 서 있지 않다 — 신뢰할 수 없는 입력에 판정을 맡기지 않는다(평범한 이슈에서는 harness.toml이 이미 `[protected]`라 판정이 같다).
+
+**다른 방법을 택하지 않은 이유**
+- 훅의 `prot`를 `{{PROTECTED_RE}}` 치환으로 만들지 않았다 — 그러면 `factory/hooks/block-dangerous.sh` 원본이 그 자체로 실행되지 않고, 테스트와 doctor의 `checkHooks`가 **설치되지 않을 파일**을 검사하게 된다. 대신 원본은 템플릿 harness로 생성된 블록을 들고 있고(=새 채택자가 받는 목록), 설치기가 그 블록만 다시 쓴다. 자기 미러 테스트의 비교 기준도 "소스 바이트"에서 "`freshContent`가 쓸 내용"으로 옮겼다 — 설치가 쓰는 것과 검사하는 것이 같은 함수여야 한다.
+- `[protected].except`는 쓰기 목록에서 빼지 않는다. `except`는 **머지 면제**(자동 머지해도 되는 경로)이지 쓰기 허가가 아니다 — `.factory/lessons/**`는 retro만 쓴다.
+
+**남은 위험(등록부)**
+- 런타임 조립 동사는 여전히 이 훅의 비목표다(위 H1b 참조).
+- `protected.parity`는 **설치본**을 본다 — 누군가 훅을 고치고 doctor를 돌리지 않으면 CI의 sweeper가 doctor를 돌릴 때까지 알려지지 않는다.
+- 생성기의 `.factory/**` 열거와 harness-mode 개방 목록은 코드 상수다(`FACTORY_ENUM`·`HARNESS_OPENS`). 보호 **경로**의 목록은 아니지만(그것은 harness.toml에 있다) 새 `.factory` 하위 디렉터리가 생기면 손이 필요하다 — 템플릿 트리를 훑는 `templates.test.js`의 열거 테스트가 그 사고를 잡는다.
