@@ -20,16 +20,35 @@
  *
  * `[protected].except`는 여기서 빼지 **않는다**. `except`는 "자동 머지해도 되는 경로"(머지 면제)이지
  * "에이전트가 써도 되는 경로"가 아니다 — `.factory/lessons/**`는 retro만 쓰고 builder는 못 쓴다.
- * 유일한 쓰기 카브아웃은 qa 증거 디렉터리이고, 그것은 아래 `FACTORY_ENUM`의 `.factory/out/*`
- * 열거(KTB-36)와 훅의 `$qa` sed가 함께 표현한다.
+ * 유일한 쓰기 카브아웃은 qa 증거 디렉터리이고, 그것은 아래 `FACTORY_ENUM`의 `.factory/out/*.<ext>`
+ * 열거(KTB-36 → KTB-40)와 훅의 `$qa` sed가 함께 표현한다.
  */
 
 /**
  * `.factory/**`는 `[protected]`에서는 글롭 하나지만, 두 소비자가 그 안에서 **카브아웃**을 표현해야 해서
  * 열거로 편다.
  *  - KTB-36: `.factory/out/qa/**`는 qa 리뷰어의 증거 디렉터리라 열려 있어야 한다. Claude Code에서는
- *    **deny가 allow를 이기므로** allow로 뺄 수 없다 — 형제 경로를 열거하는 것이 유일한 방법이다
- *    (`.factory/out/*`는 직계 자식만 맞고 `.factory/out/qa/…`에는 닿지 않는다).
+ *    **deny가 allow를 이기므로** allow로 뺄 수 없다 — 형제 경로를 열거하는 것이 유일한 방법이다.
+ *  - **KTB-40**: KTB-36의 좁히기는 **모자랐다**. 그때 남긴 `.factory/out/*`는 우리 `globToRegex`에서
+ *    "직계 자식만"이지만, 직계 자식에는 **`qa` 디렉터리 자신이 포함된다** — 그리고 Claude Code의 매처는
+ *    그보다 관대해서 `.factory/out/qa/test1.log`까지 문 것으로 관측됐다. 라이브 KTB #3 리뷰 R2
+ *    (run 34840944244)에서 qa 리뷰어의 Bash 9건이 훅이 아니라 **Claude Code의 권한 계층**에 거절당했다:
+ *    `mkdir -p .factory/out/qa/`, `printf … > .factory/out/qa/test1.log`, `node … > …/qa/3-repro-…log`.
+ *    그래서 이제 `*` 하나를 남기지 않고 **확장자까지 적은 파일 패턴**만 열거한다: `*.json`·`*.jsonl`·
+ *    `*.pids`. 그것이 `.factory/out/` 직계에 실제로 쓰이는 전부다(`grep -r '\.factory/out/'`:
+ *    run-stage의 `<stage>.json`/`<stage>.envelope.json`·`context*.json`, 게이트의 `gates*.json`·
+ *    `unit|e2e|integration.json`, `loaded.json`, `retro*.json`, `agents.jsonl`, `test-env.pids`).
+ *    확장자가 없는 `.factory/out/qa`는 어떤 읽기에서도 이 중 무엇과도 맞지 않는다.
+ *
+ *    **`.md`·`.log`·`.txt`는 일부러 넣지 않는다.** 관대한 읽기에서 `*`가 `/`를 넘으면
+ *    `.factory/out/*.log`가 `.factory/out/qa/a/b.log`를 문다 — 그리고 qa의 증거는 정확히 `.log`·`.md`·
+ *    `.png`다. 즉 그 세 줄은 KTB-36이 만들려던 카브아웃을 **다시** 지운다. 지금 `.factory/out/` 직계에
+ *    그 확장자로 쓰는 코드도 없다. 새로 생긴다면 그때 **qa가 쓰지 않는 이름**으로 못 박을 것 —
+ *    이 열거의 규칙은 "직계를 막되 `out/qa/` 아래의 어떤 이름도 접미사로 겹치지 않는다"이다.
+ *
+ *    카브아웃을 **적극적으로** 말하는 `permissions.allow`도 두 ci-settings 템플릿에 함께 넣었다 —
+ *    선언이지 우선권이 아니다(deny가 여전히 이긴다). `--permission-mode dontAsk`에서 allow에 걸리지
+ *    않는 도구 호출은 묻지 않고 거절되므로, 그 선언이 없으면 `mkdir -p .factory/out/qa`가 다시 막힌다.
  *  - KTB-20/KTB-23: `factory:harness` 이슈의 builder에게는 `.factory/harness.toml`이 열려야 한다
  *    (승격이 하려는 일이 바로 그 파일의 편집이다). 열거가 없으면 `.factory/**`를 통째로 열게 된다.
  * 순서는 그대로 출력 순서다 — 생성물이 결정적이어야 diff가 읽힌다.
@@ -37,7 +56,8 @@
 export const FACTORY_ENUM = Object.freeze([
   ".factory/bin/**", ".factory/lib/**", ".factory/actions/**", ".factory/lessons/**",
   ".factory/scenarios/**", ".factory/node_modules/**",
-  ".factory/out/*", ".factory/out/coverage/**", ".factory/out/prove-wt/**", ".factory/out/classify-wt/**",
+  ".factory/out/*.json", ".factory/out/*.jsonl", ".factory/out/*.pids",
+  ".factory/out/coverage/**", ".factory/out/prove-wt/**", ".factory/out/classify-wt/**",
   ".factory/harness.toml", ".factory/ci-settings*.json", ".factory/roles.toml", ".factory/quarantine.toml",
   ".factory/package.json", ".factory/package-lock.json",
 ]);

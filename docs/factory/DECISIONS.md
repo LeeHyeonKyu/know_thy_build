@@ -1899,6 +1899,65 @@ do not rewrite tracked files (pin toolchain versions; use lockfile-respecting in
 스테이지는 복원하지 않는다), `factory/test/doctor-harness.test.js`(+4). 채택자 조치: `factory init
 --upgrade`로 `.factory/bin/run-stage.js`·`.factory/lib/doctor/harness.js` 미러 갱신.
 
+#### KTB-40 — KTB-36의 좁히기는 모자랐다: `.factory/out/*` 한 줄이 qa 디렉터리를 계속 덮고 있었다
+
+**관측**(라이브, KTB 자기 자신 #3 — review R2, run 34840944244 트랜스크립트, 2026-09-14 12:50Z):
+KTB-36이 머지된 **뒤에도** qa 리뷰어는 증거를 한 줄도 남기지 못했다. 이번에는 실패의 모양이 달랐다 —
+훅이 막은 것이 아니라 **Claude Code의 권한 계층**이 Bash 호출 자체를 거절했다. 트랜스크립트의 9건:
+
+```
+Permission to use Bash with command mkdir -p .factory/out/qa/ has been denied
+Permission to use Bash with command printf 'hello\n' > .factory/out/qa/test1.log … has been denied
+Permission to use Bash with command node /tmp/qa3_repro.mjs > …/.factory/out/qa/3-repro-fix-after.log … has been denied
+```
+
+**무엇이 어긋났나**: KTB-36의 열거는 `.factory/out/*`를 남겼다. 두 가지가 겹쳤다.
+1. **우리 매처로도 이미 틀렸다.** `.factory/out/*`는 "직계 자식"을 문다 — 그런데 **`qa` 디렉터리 자신이
+   그 직계 자식이다**. `mkdir -p .factory/out/qa`의 대상이 정확히 그것이라, 거절당한 첫 명령이 첫 번째
+   거절이었다. KTB-36의 테스트는 `out/qa/3-shot.png` 같은 **파일**만 물어봤기 때문에 이것을 못 봤다.
+2. **Claude Code의 매처는 우리 가정보다 관대하다.** `printf … > .factory/out/qa/test1.log`까지 걸린 것을
+   보면 그 계층의 `*`는 `/`를 넘는다(또는 접두 매칭이다). 우리 `globToRegex`의 계약("`*`는 `/`를 넘지
+   않는다")은 **우리 코드 안에서만** 참이고, 생성물의 소비자에게는 통하지 않았다. 생성기의 출력이 남의
+   매처에 먹히는데 우리 매처로만 검증하면, 그 검증은 고장을 영원히 못 본다.
+
+**결정**:
+(a) `FACTORY_ENUM`에서 `.factory/out/*`를 **하위 디렉터리에 닿을 수 없는 파일 패턴**들로 편다 —
+`out/*.json`·`*.jsonl`·`*.pids`·`*.md`·`*.log`·`*.txt`. 이것이 run-stage·게이트·진행·`loaded.json`·
+`agents.jsonl`·`test-env.pids`가 `.factory/out/` 직계에 쓰는 전부다(`grep '\.factory/out/'`로 열거).
+확장자가 없는 `.factory/out/qa`는 **어떤 읽기에서도** 이 중 무엇과도 맞지 않는다. 중첩 deny
+(`coverage/**`·`prove-wt/**`·`classify-wt/**`)는 그대로다.
+(b) 두 ci-settings 템플릿에 `permissions.allow`를 넣어 카브아웃을 **적극적으로 선언한다**:
+`Write/Edit(.factory/out/qa/**)`, `Bash(mkdir -p .factory/out/qa*)`, `Bash(mkdir -p ./.factory/out/qa*)`.
+이것은 **선언이지 우선권이 아니다** — Claude Code에서 deny는 여전히 allow를 이기고, 그래서 (a)가
+필요했다. allow가 따로 필요한 이유는 반대편이다: `--permission-mode dontAsk`에서 allow에 걸리지 않는
+도구 호출은 묻지 않고 **거절**된다(ADR-020 KTB-13이 확인한 사실). ADR-019는 allow를
+`.claude/settings.json`에 두었지만 CI 세션은 `--settings .factory/ci-settings.json`도 함께 읽는다.
+(c) **테스트는 두 매처로 같은 질문을 한다**(`factory/test/protected-paths-out-qa.test.js`): 저장소의
+`globToRegex`와, `*`가 `/`를 넘는 **관대한** 두 번째 매처(관측된 거절이 성립하는 가장 단순한 의미).
+`.factory/out/qa`·`.factory/out/qa/`·`./.factory/out/qa`·`out/qa/x.png`·`out/qa/a/b.log`가 두 읽기
+모두에서 어느 deny에도 걸리지 않아야 하고, 직계 파일 14종은 전과 같이 전부 걸려야 한다.
+
+**함께 고친 것 — 훅 테스트가 세션 env를 물려받고 있었다**: `lib/exec.js`의 `run()`은 `process.env`
+위에 `opts.env`를 얹는다. 그래서 `hooks.test.js`를 **팩토리 스테이지 안에서** 돌리면
+(`run-stage.js`가 `claude -p`의 env에 `FACTORY_STAGE`를 심고, 그 세션이 `npm test`를 부른다)
+"세션 밖에서는 브랜치 이동이 사람의 평범한 동작이다"(ADR-023 Task 8b)가 **환경 때문에** 빨개진다.
+판정이 테스트의 진술이 아니라 실행 위치로 결정되면 그 테스트는 아무것도 고정하지 않는다. 이제
+`factory/test/helpers/hook-env.js`의 `baseEnv()`가 `FACTORY_STAGE`·`FACTORY_HARNESS_ISSUE`·
+`CLAUDE_PROJECT_DIR`를 지운 환경을 만들고, 모든 훅 spawn이 `replaceEnv: true`로 그것을 쓴다 —
+테스트가 명시적으로 준 값만 얹힌다. 같은 표를 `FACTORY_STAGE` 없이(허용)·세운 채로(차단) 두 번
+돌리는 테스트가 그 대조를 한 자리에 못 박는다. `doctor-factory.test.js`의 실제 훅 실행에도 같은
+헬퍼를 걸었다 — `record-agents.sh`는 `CLAUDE_PROJECT_DIR`를 읽어 `agents.jsonl`을 쓰므로, 상속되면
+tmp cwd가 아니라 **진짜 저장소**에 기록이 남는다.
+
+**영향**: `factory/lib/protected-paths.js`(`FACTORY_ENUM` + 주석), `factory/cli/install.js`
+(`renderCiSettings` 주석 — allow는 그대로 통과), `templates/factory/factory/ci-settings.json`·
+`ci-settings-harness.json`(`permissions.allow` 신설), `.factory/` 미러(생성물 재생성).
+테스트: `factory/test/protected-paths-out-qa.test.js`(신규 6건), `templates.test.js`(qa 목록에
+디렉터리 자신 추가 + out 열거 갱신), `install.test.js`(업그레이드 교체 pin 갱신),
+`hooks.test.js`(`baseEnv()` 전면 적용 + 스테이지 대조 1건), `doctor-factory.test.js`(격리 실행기).
+채택자 조치: `factory init --upgrade`로 `.factory/ci-settings*.json`·`.factory/lib/protected-paths.js`
+갱신 — 하지 않으면 doctor의 `protected.parity`가 FAIL로 말한다.
+
 ### ⑥ 관찰 — O1~O12, O14·O15, O20·O23·O24, G1
 
 결함으로 승격하지 않았지만 판결의 근거이거나 앞으로의 판결에 필요한 사실들. 전부 `docs/factory/dogfood/2026-09-12-demo.md`·`2026-09-12-ktb.md`·`task-6-prep-report.md`에서 실측됐다(출처 표기).
@@ -2905,6 +2964,17 @@ PAT을 쓴다 — 훅이 못 보는 철자(런타임 조립)로 push가 나가�
 여전히 안 보인다). 이 경계를 실제로 닫는 것은 훅이 아니라 ADR-021의 **토큰 분리**(에이전트 배우가
 쥔 토큰으로는 애초에 그 API가 거부된다)다 — H1/M7/Task 1/2가 훅 쪽에서 할 수 있는 것을 다 했다는
 뜻이지, 훅이 완결됐다는 뜻은 아니다.
+
+**M8의 생성물은 *우리* 매처가 아니라 *소비자*의 매처에 먹힌다** (KTB-40, 2026-09-14). M8이 만든 단일
+출처는 옳았지만, 그 출력의 **의미**를 우리는 저장소의 `lib/glob.js`(`*`는 `/`를 넘지 않는다)로만
+검증했다. 그 생성물을 실제로 읽는 것은 Claude Code의 권한 계층이고, 라이브 관측(KTB #3 review R2,
+run 34840944244)은 그 계층이 더 관대하게 읽는다는 것을 보여 줬다 — `.factory/out/*` 하나가
+`mkdir -p .factory/out/qa/`와 `printf … > .factory/out/qa/test1.log`를 **둘 다** 거절시켰다. 즉
+**KTB-36의 deny 좁히기는 충분하지 않았다**: 그 열거에 남은 `*` 한 글자가 카브아웃을 계속 덮고 있었고,
+우리 매처로는 `qa/x.png`가 통과하니 테스트도 초록이었다(게다가 우리 매처로도 `.factory/out/qa`
+**디렉터리 자신**은 직계 자식이라 이미 걸리고 있었다 — 아무도 그것을 물어보지 않았을 뿐이다).
+KTB-40의 교훈은 규칙이다: **생성물의 판정 테스트는 우리 매처와 "더 관대한" 매처 두 개로 돌린다.**
+한쪽만으로는 "우리 가정이 이식되지 않는다"를 절대 볼 수 없다.
 
 ### 1.2.0 채택자 영향 (체크리스트)
 

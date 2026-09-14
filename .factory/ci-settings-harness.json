@@ -25,8 +25,12 @@
       "Write(.factory/scenarios/**)",
       "Edit(.factory/node_modules/**)",
       "Write(.factory/node_modules/**)",
-      "Edit(.factory/out/*)",
-      "Write(.factory/out/*)",
+      "Edit(.factory/out/*.json)",
+      "Write(.factory/out/*.json)",
+      "Edit(.factory/out/*.jsonl)",
+      "Write(.factory/out/*.jsonl)",
+      "Edit(.factory/out/*.pids)",
+      "Write(.factory/out/*.pids)",
       "Edit(.factory/out/coverage/**)",
       "Write(.factory/out/coverage/**)",
       "Edit(.factory/out/prove-wt/**)",
@@ -63,6 +67,12 @@
       "Write(eslint.config.*)",
       "Edit(docs/factory/runs/**)",
       "Write(docs/factory/runs/**)"
+    ],
+    "allow": [
+      "Write(.factory/out/qa/**)",
+      "Edit(.factory/out/qa/**)",
+      "Bash(mkdir -p .factory/out/qa*)",
+      "Bash(mkdir -p ./.factory/out/qa*)"
     ]
   }
 }

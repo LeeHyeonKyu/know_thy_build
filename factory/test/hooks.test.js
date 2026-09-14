@@ -1,12 +1,23 @@
 import { test, expect } from "vitest";
 import { run } from "../lib/exec.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
+import { baseEnv, isolatedEnvOpts } from "./helpers/hook-env.js";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const H = new URL("../hooks/", import.meta.url).pathname;
-const bash = (script, input, cwd, env) => run("bash", [join(H, script)], { input: JSON.stringify(input), cwd, env });
+
+/**
+ * KTB-40 — 이 파일의 **모든** 훅 spawn은 `baseEnv()`(helpers/hook-env.js)를 바탕으로 쓴다.
+ * `run()`은 기본으로 `process.env`를 얹으므로, 그러지 않으면 팩토리 스테이지 안에서 `npm test`를
+ * 돌릴 때 `FACTORY_STAGE`/`FACTORY_HARNESS_ISSUE`/`CLAUDE_PROJECT_DIR`가 그대로 흘러들어 훅의
+ * 판정이 **테스트의 진술이 아니라 실행 위치**로 결정된다. 자세한 근거는 그 헬퍼의 주석에 있다.
+ */
+/** 훅 하나를 돌린다. `env`는 **추가분**이다 — 바탕은 언제나 `baseEnv()`(세션 변수가 지워진 환경)다. */
+const runHook = (script, input, cwd, env, bin = "bash") =>
+  run(bin, [join(H, script)], { input, cwd, ...isolatedEnvOpts(env || {}) });
+const bash = (script, input, cwd, env) => runHook(script, JSON.stringify(input), cwd, env);
 const cmd = (c) => ({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: c } });
 
 test("block-dangerous: blocks merges, force pushes, protected writes; allows normal commands", async () => {
@@ -476,11 +487,11 @@ test("deny-all-writes: the wrapper pass leaves read-only interpreter use alone (
 
 test("block-dangerous: non-Bash tools and malformed input pass through", async () => {
   expect((await bash("block-dangerous.sh", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: ".factory/x" } })).code).toBe(0);
-  expect((await run("bash", [join(H, "block-dangerous.sh")], { input: "not json" })).code).toBe(0);
+  expect((await runHook("block-dangerous.sh", "not json")).code).toBe(0);
 }, 30000);
 
 test("block-dangerous: without jq the hook fails CLOSED (exit 2)", async () => {
-  const r = await run("/bin/bash", [join(H, "block-dangerous.sh")], { input: JSON.stringify(cmd("echo hi")), env: { PATH: "/nonexistent" } });
+  const r = await runHook("block-dangerous.sh", JSON.stringify(cmd("echo hi")), undefined, { PATH: "/nonexistent" }, "/bin/bash");
   expect(r.code).toBe(2);
   expect(r.stderr).toMatch(/jq missing/);
 }, 30000);
@@ -505,13 +516,13 @@ test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows eve
   expect((await bash("deny-all-writes.sh", { tool_name: "Read", tool_input: { file_path: "src/a.js" } })).code).toBe(0);
   expect((await bash("deny-all-writes.sh", { tool_name: "Bash", tool_input: { command: "ls" } })).code).toBe(0);
 
-  const noJq = await run("/bin/bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify({ tool_name: "Edit" }), env: { PATH: "/nonexistent" } });
+  const noJq = await runHook("deny-all-writes.sh", JSON.stringify({ tool_name: "Edit" }), undefined, { PATH: "/nonexistent" }, "/bin/bash");
   expect(noJq.code).toBe(2);
   expect(noJq.stderr).toMatch(/jq missing/);
 }, 30000);
 
 test("deny-all-writes: malformed stdin passes through (exit 0), same as block-dangerous", async () => {
-  expect((await run("bash", [join(H, "deny-all-writes.sh")], { input: "not json" })).code).toBe(0);
+  expect((await runHook("deny-all-writes.sh", "not json")).code).toBe(0);
 }, 30000);
 
 // ── F3(c): qa만 .factory/out/qa/ 아래에 증거를 쓴다 ──────────────────────────────────────────
@@ -538,7 +549,7 @@ test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything els
 test("deny-all-writes: an absolute qa path is accepted only under $CLAUDE_PROJECT_DIR", async () => {
   const proj = "/repo";
   const write = (file_path, env, tool = "Write") =>
-    run("bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify({ tool_name: tool, tool_input: { file_path } }), env: { ...process.env, ...env } });
+    runHook("deny-all-writes.sh", JSON.stringify({ tool_name: tool, tool_input: { file_path } }), undefined, env);
 
   for (const p of ["/repo/.factory/out/qa/7.png", "/repo/.factory/out/qa/deep/7.log"]) {
     expect((await write(p, { CLAUDE_PROJECT_DIR: proj })).code, p).toBe(0);
@@ -565,7 +576,7 @@ test("deny-all-writes: an absolute qa path is accepted only under $CLAUDE_PROJEC
 
 test("deny-all-writes: the Bash arm accepts the same absolute qa target under $CLAUDE_PROJECT_DIR", async () => {
   const sh = (command, env) =>
-    run("bash", [join(H, "deny-all-writes.sh")], { input: JSON.stringify(cmd(command)), env: { ...process.env, ...env } });
+    runHook("deny-all-writes.sh", JSON.stringify(cmd(command)), undefined, env);
   const proj = { CLAUDE_PROJECT_DIR: "/repo" };
 
   for (const c of ["echo x > /repo/.factory/out/qa/7.log",
@@ -744,10 +755,7 @@ test("deny-all-writes: docker compose/docker teardown AND up are blocked; ps/log
 
 test("deny-all-writes: $TMPDIR is honoured as a write target, and prove-test's own worktree dir is not blocked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dw-tmpdir-"));
-  const r = await run("bash", [join(H, "deny-all-writes.sh")], {
-    input: JSON.stringify(cmd(`echo x > ${join(dir, "note.txt")}`)),
-    env: { ...process.env, TMPDIR: tmpdir() },
-  });
+  const r = await runHook("deny-all-writes.sh", JSON.stringify(cmd(`echo x > ${join(dir, "note.txt")}`)), undefined, { TMPDIR: tmpdir() });
   expect(r.code).toBe(0);
   // 리터럴 `$TMPDIR`도 같은 대접을 받는다 (훅은 확장 전의 명령 문자열을 본다)
   expect((await bash("deny-all-writes.sh", cmd("echo x > $TMPDIR/note.txt"))).code).toBe(0);
@@ -793,7 +801,7 @@ test("stop-guard: dirty file at repo root is still caught when the hook runs fro
   await run("git", ["checkout", "-q", "-b", "claude/fq-7"], { cwd });
   // dirty file at root, hook run from a subdirectory → still blocked
   await run("bash", ["-c", "mkdir -p sub && echo y > root-dirty.txt"], { cwd });
-  const r3 = await run("bash", [join(H, "stop-guard.sh")], { input: "{}", cwd: join(cwd, "sub") });
+  const r3 = await runHook("stop-guard.sh", "{}", join(cwd, "sub"));
   expect(r3.code).toBe(2);
   expect(r3.stderr).toMatch(/uncommitted/);   // upstream이 없어도 exit 2가 나오므로, 이유가 "uncommitted"인지까지 확인한다
 }, 30000);
@@ -912,7 +920,7 @@ test("stop-guard: the skip list is exactly agent-md's write-free set — one pro
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 1'"\n`);
-  const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd } });
+  const r = await runHook("lint-touched.sh", JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, { CLAUDE_PROJECT_DIR: cwd });
   expect(r.code).toBe(0); expect(r.stderr).toMatch(/LINT src\/a\.js/);
 }, 30000);
 test("verdict-format: reviewer stop without verdict json → exit 2; with → 0; non-reviewer → 0", async () => {
@@ -920,12 +928,12 @@ test("verdict-format: reviewer stop without verdict json → exit 2; with → 0;
   const t = join(dir, "t.jsonl");
   const msg = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
   writeFileSync(t, msg("thinking...") + "\n" + msg("Here is my verdict:\n```json\n{\"verdict\":\"approve\",\"confidence\":\"high\",\"must_fix\":[],\"should_fix\":[],\"verified\":[]}\n```") + "\n");
-  const ok = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
+  const ok = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }));
   expect(ok.code).toBe(0);
   writeFileSync(t, msg("I approve, looks fine.") + "\n");
-  const bad = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
+  const bad = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }));
   expect(bad.code).toBe(2); expect(bad.stderr).toMatch(/verdict JSON/);
-  const other = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "factory-builder", agent_transcript_path: t }) });
+  const other = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "factory-builder", agent_transcript_path: t }));
   expect(other.code).toBe(0);
 }, 30000);
 
@@ -938,7 +946,7 @@ test("verdict-format: a reviewer may stop on any of the three review schemas (ve
   const msg = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
   const fenced = (json) => msg("Here it is:\n```json\n" + json + "\n```");
   const stop = (agent_type = "reviewer-qa") =>
-    run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type, agent_transcript_path: t }) });
+    runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type, agent_transcript_path: t }));
 
   const bodies = {
     "verdict (R1 / R2 full)": `{"role":"qa","verdict":"approve","confidence":"high","must_fix":[],"should_fix":[],"verified":[]}`,
@@ -966,7 +974,7 @@ test("lint-touched: shell-escapes file_path — no command injection via Edit/Wr
   const pwnDir = mkdtempSync(join(tmpdir(), "lt-pwn-"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "echo LINT {file}"\n`);
   const evil = `x.js; touch ${pwnDir}/PWNED #`;
-  const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: evil } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd } });
+  const r = await runHook("lint-touched.sh", JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: evil } }), cwd, { CLAUDE_PROJECT_DIR: cwd });
   expect(r.code).toBe(0);
   expect(existsSync(join(pwnDir, "PWNED"))).toBe(false);
 }, 30000);
@@ -975,7 +983,7 @@ test("lint-touched: enforces a timeout on the lint command (no system `timeout` 
   const cwd = mkdtempSync(join(tmpdir(), "lt-to-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "sleep 5; echo late {file}"\n`);
   const start = Date.now();
-  const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd, FACTORY_LINT_TIMEOUT_MS: "500" } });
+  const r = await runHook("lint-touched.sh", JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, { CLAUDE_PROJECT_DIR: cwd, FACTORY_LINT_TIMEOUT_MS: "500" });
   expect(Date.now() - start).toBeLessThan(3000);
   expect(r.code).toBe(0);
   expect(r.stderr).toMatch(/exit 124/);
@@ -985,7 +993,7 @@ test("lint-touched: 쓰레기 FACTORY_LINT_TIMEOUT_MS는 기본 60s로 떨어진
   const cwd = mkdtempSync(join(tmpdir(), "lt-nan-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 3'"\n`);
   for (const bad of ["abc", "", "0", "-1"]) {
-    const r = await run("bash", [join(H, "lint-touched.sh")], { input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, env: { CLAUDE_PROJECT_DIR: cwd, FACTORY_LINT_TIMEOUT_MS: bad } });
+    const r = await runHook("lint-touched.sh", JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, { CLAUDE_PROJECT_DIR: cwd, FACTORY_LINT_TIMEOUT_MS: bad });
     expect(r.code, bad).toBe(0);
     expect(r.stderr, bad).toMatch(/exit 3/);            // 124(즉시 kill)가 아니라 실제 lint 결과가 온다
     expect(r.stderr, bad).toMatch(/LINT src\/a\.js/);
@@ -997,10 +1005,10 @@ test("verdict-format: only the LAST assistant text message counts", async () => 
   const t = join(dir, "t.jsonl");
   const msg = (text) => JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
   writeFileSync(t, msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n" + msg("changed my mind") + "\n");
-  const r = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
+  const r = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }));
   expect(r.code).toBe(2);
   writeFileSync(t, msg("changed my mind") + "\n" + msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n");
-  const r2 = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
+  const r2 = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }));
   expect(r2.code).toBe(0);
 }, 30000);
 
@@ -1366,6 +1374,27 @@ test("block-dangerous: outside a stage session a branch switch is a person's ord
   // 세션 밖이어도 overlay 뿌리를 덮는 체크아웃은 그대로 막힌다(아래 표와 같은 규칙).
   expect((await bash("block-dangerous.sh", cmd("git checkout origin/pr -- .claude/hooks/x.sh"))).code).toBe(2);
 }, 30000);
+
+/**
+ * KTB-40 — 위 두 테스트가 서로의 **대조군**이라는 사실을 한 테스트 안에서 못 박는다. 같은 표를 두
+ * 번 돌린다: `FACTORY_STAGE` 없이(허용) 그리고 세운 채로(차단). 지금까지 "없이"는 진짜로 없는 것이
+ * 아니라 **테스트 프로세스의 환경이 어떻든 그것**이었다 — 팩토리 스테이지가 `npm test`를 부르면
+ * `FACTORY_STAGE=implement`가 그대로 흘러들어 이 판정이 뒤집혔다. `baseEnv()`가 그 통로를 끊는다.
+ */
+test("block-dangerous: the branch-switch rule is decided by FACTORY_STAGE alone — unset allows, set blocks (KTB-40)", async () => {
+  const table = ["git checkout main", "git switch -", "git switch -c claude/fq-7", "git checkout -b factory/role-x"];
+  // 세션 변수가 실제로 지워졌다는 것부터 확인한다 — 이 테스트의 전제다.
+  expect(baseEnv()).not.toHaveProperty("FACTORY_STAGE");
+  expect(baseEnv({ FACTORY_STAGE: "implement" }).FACTORY_STAGE).toBe("implement");
+  for (const c of table) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, `unset: ${c}`).toBe(0);
+    const r = await bash("block-dangerous.sh", cmd(c), undefined, STAGE);
+    expect(r.code, `stage: ${c}`).toBe(2);
+    expect(r.stderr, `stage: ${c}`).toMatch(/factory: blocked/);
+  }
+  // 빈 문자열은 "세션이 아니다"로 읽힌다(훅의 `${FACTORY_STAGE:-}` 계약) — 그 경계도 여기서 고정한다.
+  expect((await bash("block-dangerous.sh", cmd("git switch main"), undefined, { FACTORY_STAGE: "" })).code).toBe(0);
+}, 60000);
 
 test("block-dangerous: whole-tree restores that would swap the factory config are blocked everywhere (Task 8b)", async () => {
   const C = "\\\n";
