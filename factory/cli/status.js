@@ -133,6 +133,17 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
   catch { records = new Map(); }
   if (!records || records.size === 0) records = localRecords(root);
 
+  // `docs/factory/runs/`는 이슈 기록 전용 네임스페이스가 아니다 — retro 상태 파일 `_retro.md`가 같은
+  // 디렉터리에 산다(lib/retro/state.js `renderRetroState`, ADR-014 보강). 두 기록 출처(브랜치 readRecords와
+  // 로컬 fallback)가 한 Map으로 합류한 **뒤**, 합산 전에 이슈 번호 모양이 아닌 키를 조용히 버린다 — 그러지
+  // 않으면 `#_retro`가 존재하지 않는 이슈 행으로 찍히고 그 기록의 usage가 합계에까지 섞인다(#3).
+  // `records.size === 0` 판정 **뒤**여야 한다: 앞에 두면 `_retro`만 있는 브랜치가 "빈 기록"으로 보여
+  // gitignore된 로컬 docs/factory/runs/로 조용히 떨어진다.
+  // 이름 denylist가 아니라 숫자 allowlist인 이유는 다음 상태 파일(`_lessons.md` 등)이 생겨도 같은 유령
+  // 행이 재발하지 않게 하기 위해서다. 같은 판단의 다른 사본이 둘 더 있다(둘 다 `=== "_retro"`):
+  // bin/retro.js의 스킵과 lib/retro/harvest.js의 `windowUsage` — 셋을 공유 술어로 모으는 것은 별도 이슈다.
+  records = new Map([...records].filter(([issue]) => /^\d+$/.test(String(issue))));
+
   const usage = summarizeUsage(records, { now: nowIso, windowDays: 7 });
 
   const overlap = await collectOverlap(ghClient, merged, nowIso);
