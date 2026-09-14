@@ -125,13 +125,16 @@ A local, read-only viewer of every issue the factory is carrying (ADR-022 Task B
 
 **Two ways to open the page.** `docs/factory/board/index.html` is installed by `factory init` and is the very file the CLI serves — no build step, no CDN, no external request at all.
 
+**The CLI server binds loopback only.** `/api/board` and `/api/events` carry no authentication, so `--host` accepts only `127.0.0.1`, `localhost` or `::1` (ADR-022 decision 1) — anything else is refused (exit 2) rather than quietly publishing issue titles, handoff summaries and cost to the network.
+
 | | CLI mode (`factory board`) | Static mode (file / GitHub Pages) |
 |---|---|---|
 | data | `/api/board` + SSE push on change | `api.github.com` direct, `?repo=owner/name` |
 | auth | your local `gh` (private repos work) | unauthenticated (60 req/h, remaining quota shown) or a personal token kept in `localStorage` only |
 | cost | finished runs (records branch) + live run | live run only — the chip says `live` |
+| polling | every `--interval` seconds (default 60) | 10 min without a token, 2 min with one |
 
-The reduced static model is deliberate: implementing the same cost sum twice is how "live $0.41 / final $0.38" happens (ADR-022 decision 5). The page's header help says all of this in the UI.
+The reduced static model is deliberate: implementing the same cost sum twice is how "live $0.41 / final $0.38" happens (ADR-022 decision 5). Static mode also guards its own call budget: it skips a pull entirely once the remaining quota drops to 3 or below (showing when it will retry), and only fetches comments for issues updated in the last 24 hours — the rest render from labels alone, flagged `stale-data`. The page's header help says all of this in the UI.
 
 Design and rationale: [`docs/superpowers/specs/2026-09-10-factory-design.md`](docs/superpowers/specs/2026-09-10-factory-design.md) · decisions: [`docs/factory/DECISIONS.md`](docs/factory/DECISIONS.md)
 
