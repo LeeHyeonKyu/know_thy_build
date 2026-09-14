@@ -142,41 +142,116 @@ function humanMergeSection(md) {
   return m ? m[1] : "";
 }
 
-/** 사람이 CHARTER에 적용해야 하는 문장의 내용(templates/factory/docs/factory/CHARTER.md:82-91). */
-const THE_TWO_GAPS = [
-  "① `factory/records` run 기록과의 리뷰 provenance 대조(자동 머지의 §(6b))",
-  "② 그 기록의 `qa_manifest=` 다이제스트 재대조 — sweep 잡에 records 브랜치 체크아웃이 없어서이고,",
-  "KTB-48이 둘 다 덮습니다. 그 둘을 뺀 나머지는 자동 머지와 같습니다.",
+/**
+ * dw1의 계약을 **한 곳에** 적은 술어. 문단 하나를 받아 "아직 틀린 점"의 목록을 돌려준다(빈 배열 = 통과).
+ * 아래 두 테스트가 **같은 함수**를 서로 다른 본문에 대고 부른다 — 살아 있는 CHARTER와, 이미 리뷰를 거쳐
+ * 채택 저장소로 나가는 템플릿 문단. 그래서 이 단언은 "만족 불가능한 요구"가 아니라 **판별하는 술어**라는
+ * 사실 자체가 게이트에 실린다: 올바른 본문에는 빈 목록, 지금의 본문에는 항목이 남는다.
+ */
+export function humanMergeParagraphFindings(section) {
+  const out = [];
+  if (!String(section).trim()) return ["사람 머지 절을 찾지 못했다 — `## 머지 권한 — 사람 게이트 …` 제목이 바뀌었나?"];
+  // ① 더 이상 "그 전이도 자동 머지와 똑같은 증거 검사를 지난다"를 가르치지 않는다.
+  //    (줄바꿈으로 끊겨 있어도 잡히게 `\s*`로 잇는다.)
+  if (/똑같은\s*증거\s*검사/.test(section)) out.push('아직 "자동 머지와 똑같은 증거 검사"를 주장한다 — KTB-46 이후 거짓이다');
+  // ② 대신 **다시 계산하지 않는 검사 둘**을 이름으로 말한다. 지우기만 해서는 독자에게 구멍이 남는다.
+  for (const [what, re] of [
+    ["다시 계산하지 않는 검사가 있다는 사실", /다시\s*계산하지\s*않는/],
+    ["① records 브랜치의 run 기록(`factory/records`)", /factory\/records/],
+    ["① 리뷰 provenance 대조", /provenance/],
+    ["② `qa_manifest=` 다이제스트 재대조", /qa_manifest/],
+    ["둘 다 덮는 티켓(KTB-48)", /KTB-48/],
+  ]) if (!re.test(section)) out.push(`${what}을(를) 말하지 않는다`);
+  // ③ 그래도 바뀌지 않는 사실: 리뷰를 거치지 않은 PR을 머지하면 이슈는 needs-human에 그대로 남는다.
+  if (!/리뷰를\s*거치지\s*않은\s*PR/.test(section)) out.push("리뷰를 거치지 않은 PR을 머지한 경우를 말하지 않는다");
+  if (!/needs-human/.test(section)) out.push("그 경우 이슈가 `needs-human`에 남는다는 사실을 말하지 않는다");
+  return out;
+}
+
+/**
+ * 사람이 docs/factory/CHARTER.md:61-65에 그대로 붙여 넣을 문단. 이 PR이 그것을 직접 쓰지 못하는 이유는
+ * 네 겹이고 전부 이미 게이트에 실려 있다 — .factory/ci-settings-harness.json:56-57의 Edit/Write deny,
+ * .claude/hooks/block-dangerous.sh:226의 `prot`(FACTORY_HARNESS_ISSUE=1 가지에서도 이 파일은 닫혀 있다,
+ * hooks.test.js:172), factory/lib/protected-paths.js:71-73의 HARNESS_OPENS(이 파일이 없다), 그리고
+ * .factory/bin/run-stage.js:1685의 overlayPathspecs(true)(harness 모드에서도 이 파일을 base로 되돌린다,
+ * run-stage-overlay.test.js:467). 곧 이 문단은 **사람이 main에 적용해야** 아래 테스트가 초록이 된다.
+ * 아래 두 번째 테스트가 이 문단이 술어를 통과한다는 것을 증명하므로, 적용은 한 번에 끝난다.
+ */
+/** 갈아 끼울 대상 — 오늘 docs/factory/CHARTER.md:61-65에 실제로 적혀 있는 문단(픽스처다). */
+const TODAYS_PARAGRAPH = [
+  "사람이 여전히 머지하는 경로는 그대로다 — 보호 경로·역할 섹션 정책·무결성 위반에 걸린 PR은",
+  "`factory:needs-human`이고 사람이 diff를 읽고 GitHub에서 머지한다. 머지한 뒤에는 손댈 것이 없다:",
+  "sweeper가 한 회차(≤30분) 안에 그 이슈를 `factory:merged`로 옮기고 닫는다(KTB-46). 그 전이도 자동",
+  "머지와 똑같은 증거 검사를 지나므로, 리뷰를 거치지 않은 PR을 머지했다면 이슈는 `needs-human`에",
+  "그대로 남는다 — 사람의 머지가 예외이지 증거가 예외인 것이 아니다.",
+].join("\n");
+
+const CHARTER_PARAGRAPH = [
+  "사람이 여전히 머지하는 경로는 그대로다 — 보호 경로·역할 섹션 정책·무결성 위반에 걸린 PR은",
+  "`factory:needs-human`이고 사람이 diff를 읽고 GitHub에서 머지한다. 머지한 뒤에는 손댈 것이 없다:",
+  "sweeper가 한 회차(≤30분) 안에 그 이슈를 `factory:merged`로 옮기고 닫는다(KTB-46). 그 전이는 리뷰",
+  "정족수·K·게이트·PR head sha·필수 체크를 **자동 머지와 같은 함수로** 다시 묻는다 — 그래서 리뷰를",
+  "거치지 않은 PR을 머지했다면 이슈는 `needs-human`에 그대로 남는다. 사람의 머지가 예외이지 증거가",
+  "예외인 것이 아니다. 다만 이 문(門)이 **다시 계산하지 않는 검사가 둘** 있다 — ① `factory/records`",
+  "run 기록과의 리뷰 provenance 대조(자동 머지의 §(6b)), ② 그 기록의 `qa_manifest=` 다이제스트 재대조.",
+  "sweep 잡에 records 브랜치 체크아웃이 없어서이고, KTB-48이 둘 다 덮는다. 그 둘을 뺀 나머지는 자동",
+  "머지와 같다.",
 ].join("\n");
 
 test("test_20_charter_human_merge_names_the_two_gaps", () => {
-  const section = humanMergeSection(readFileSync(REPO_CHARTER, "utf8"));
-  expect(section, "docs/factory/CHARTER.md에서 사람 머지 절(`## 머지 권한 — 사람 게이트 …`)을 찾지 못했다").not.toBe("");
-
-  // ① 더 이상 "그 전이도 자동 머지와 똑같은 증거 검사를 지난다"를 가르치지 않는다.
-  //    (줄바꿈으로 끊겨 있어도 잡히게 `\s*`로 잇는다.)
+  const findings = humanMergeParagraphFindings(humanMergeSection(readFileSync(REPO_CHARTER, "utf8")));
   expect(
-    /똑같은\s*증거\s*검사/.test(section),
-    `docs/factory/CHARTER.md의 사람 머지 절이 아직 "자동 머지와 똑같은 증거 검사"를 주장한다. KTB-46 이후 거짓이다.\n적용할 문장:\n${THE_TWO_GAPS}`,
-  ).toBe(false);
+    findings,
+    `docs/factory/CHARTER.md의 사람 머지 절이 아직 KTB-46 이후의 사실을 말하지 않는다:\n` +
+      findings.map((f) => `  - ${f}`).join("\n") +
+      `\n\n그 절(61-65행)을 이 문단으로 갈아 끼우면 된다 — 아래 test_20_charter_paragraph_demanded_is_the_reviewed_template_wording가\n` +
+      `이 문단이 위 술어를 통과한다는 것을 이미 증명한다(곧 이 빨강은 테스트가 아니라 문서의 상태다):\n\n${CHARTER_PARAGRAPH}`,
+  ).toEqual([]);
+});
 
-  // ② 대신 **다시 계산하지 않는 검사 둘**을 이름으로 말한다.
-  for (const [what, re] of [
-    ["다시 계산하지 않는 검사가 있다는 사실", /다시\s*계산하지\s*않는/],
-    ["① records 브랜치의 run 기록", /factory\/records/],
-    ["① 리뷰 provenance 대조", /provenance/],
-    ["② qa_manifest 다이제스트", /qa_manifest/],
-    ["둘 다 덮는 티켓(KTB-48)", /KTB-48/],
-  ]) {
-    expect(
-      re.test(section),
-      `docs/factory/CHARTER.md의 사람 머지 절이 ${what}을(를) 말하지 않는다 — 지우기만 해서는 독자에게 구멍이 남는다.\n적용할 문장:\n${THE_TWO_GAPS}`,
-    ).toBe(true);
-  }
+/**
+ * dw1의 단언이 **판별한다**는 것을 증명한다 — 게으른 반론 둘을 동시에 닫는다: "그 단언은 어떤 본문으로도
+ * 만족시킬 수 없는 것 아닌가"(→ 아니다, 이 문단이 통과한다)와 "그 문단은 빌더가 지어낸 것 아닌가"
+ * (→ 아니다, 이미 templates/…/CHARTER.md:82-91로 나가는 문장이고 어미만 이 저장소의 해라체다).
+ * 세 번째로, 지금 살아 있는 문장을 **픽스처로 박아** 술어가 그것을 실제로 거절하는지 본다 — 사람이 위
+ * 문단을 적용한 뒤에도 이 테스트는 초록으로 남는다(살아 있는 파일을 읽지 않으므로).
+ */
+test("test_20_charter_paragraph_demanded_is_the_reviewed_template_wording", () => {
+  const flat = (s) => s.replace(/\s+/g, " ").trim();
 
-  // ③ 그래도 바뀌지 않는 사실: 리뷰를 거치지 않은 PR을 머지하면 이슈는 needs-human에 그대로 남는다.
-  expect(/리뷰를\s*거치지\s*않은\s*PR/.test(section)).toBe(true);
-  expect(/needs-human/.test(section)).toBe(true);
+  // ① 요구하는 문단은 술어를 통과한다 — dw1은 만족 가능한 계약이다.
+  expect(humanMergeParagraphFindings(CHARTER_PARAGRAPH)).toEqual([]);
+
+  // ② 그리고 그 내용은 이미 리뷰를 거쳐 채택 저장소로 나가는 템플릿의 문장이다(어미만 다르다).
+  const tpl = flat(readFileSync(TEMPLATE_CHARTER, "utf8"));
+  for (const fragment of [
+    "다시 계산하지 않는 검사가 둘",
+    "① `factory/records` run 기록과의 리뷰 provenance 대조(자동 머지의 §(6b))",
+    "② 그 기록의 `qa_manifest=` 다이제스트 재대조",
+    "KTB-48이 둘 다 덮습니다",
+    "그 둘을 뺀 나머지는 자동 머지와 같습니다",
+  ]) expect(tpl, `templates/factory/docs/factory/CHARTER.md가 더 이상 "${fragment}"을(를) 말하지 않는다 — 이 PR이 요구하는 문단의 출처가 사라졌다`).toContain(fragment);
+
+  // ③ 술어는 지금 살아 있는 문장을 거절한다 — "아무 본문이나 초록"인 술어가 아니다. 픽스처로 박아
+  //    두었으므로(살아 있는 파일을 읽지 않는다) 사람이 ①의 문단을 적용한 뒤에도 이 단언은 유효하다.
+  expect(humanMergeParagraphFindings(TODAYS_PARAGRAPH)).toContain('아직 "자동 머지와 똑같은 증거 검사"를 주장한다 — KTB-46 이후 거짓이다');
+  // 지우기만 한 본문도 거절한다 — dw1의 후반부(두 검사를 이름으로 말한다)가 실제로 하중을 받는다.
+  const DELETION_ONLY = TODAYS_PARAGRAPH.replace("그 전이도 자동\n머지와 똑같은 증거 검사를 지나므로, ", "");
+  expect(humanMergeParagraphFindings(DELETION_ONLY).length, "절만 지운 본문이 통과한다면 독자는 두 예외를 영영 못 읽는다").toBeGreaterThan(0);
+
+  // ④ 그리고 그 치환은 **살아 있는 파일 위에서** 한 번에 끝난다: 그 자리에 끼워 넣은 CHARTER의 절
+  //    전체가 술어를 통과한다. 사람이 이미 적용했다면 치환은 no-op이고 이 단언은 그대로 초록이다 —
+  //    곧 이 테스트는 고쳐진 세계에서도 살아남는다(고쳐지면 빨개지는 테스트는 증거가 아니다).
+  const live = readFileSync(REPO_CHARTER, "utf8");
+  const applied = live.replace(TODAYS_PARAGRAPH, CHARTER_PARAGRAPH);
+  expect(
+    applied !== live || humanMergeParagraphFindings(humanMergeSection(live)).length === 0,
+    "치환할 원문을 CHARTER에서 찾지 못했는데 CHARTER도 아직 술어를 통과하지 않는다 — 이 파일이 안내하는 원문(61-65행)이 낡았다",
+  ).toBe(true);
+  expect(
+    humanMergeParagraphFindings(humanMergeSection(applied)),
+    "요구 문단을 그 자리에 끼워도 절이 여전히 술어를 통과하지 못한다 — 안내가 틀렸다는 뜻이다",
+  ).toEqual([]);
 });
 
 test("test_20_human_merge_door_still_skips_the_two_the_charter_names", async () => {
