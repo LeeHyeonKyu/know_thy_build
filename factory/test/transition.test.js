@@ -75,7 +75,9 @@ test("human override: requirement failure returns reason, does not move to needs
 
 test("issue with no factory label is treated as from=null and rejected", async () => {
   const gh = fakeGh(["bug"]);
-  const r = await transition({ gh, issue: 7, to: "factory:queue" });
+  // KTB-44: 큐로 가는 전이는 리허설 배선을 요구한다(opt-out) — 이 테스트가 보려는 것은 그 뒤의
+  // "상태 라벨이 없다" 판정이므로 면제를 명시한다(`skipRehearsal`은 테스트 전용 손잡이다).
+  const r = await transition({ gh, issue: 7, to: "factory:queue", skipRehearsal: true });
   expect(r.ok).toBe(false); expect(r.reason).toMatch(/no factory state label/);
 });
 
@@ -241,7 +243,7 @@ test("SF-4 round-trip: every transition marker the writer emits is read back by 
   const gh5 = fakeGh(["factory:needs-human"], []);
   const b5 = [{ id: 0, body: "이전 주기의 코멘트", createdAt: "2026-09-11T00:00:00Z" }];
   gh5.comment = vi.fn(async (n, body) => { b5.push({ id: b5.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
-  await transition({ gh: gh5, issue: 7, to: "factory:queue", human: true, env: {}, reason: "unstick" });
+  await transition({ gh: gh5, issue: 7, to: "factory:queue", human: true, env: {}, reason: "unstick", skipRehearsal: true });
   expect(commentsSinceRequeue(b5)).toEqual([]);                 // 재큐 코멘트 자신까지가 경계다
 });
 

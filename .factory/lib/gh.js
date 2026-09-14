@@ -204,6 +204,16 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       await gh(["workflow", "run", workflow, "-R", repo, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
     },
     /**
+     * KTB-44 — **어떤 커밋이 이 경로를 마지막으로 바꿨는가**(기본 브랜치 기준). 리허설의 폴백
+     * commit status는 브랜치 head가 아니라 그 커밋에 붙는다: head는 무관한 머지마다 움직여서
+     * 기록이 첫 머지에 고아가 되지만, 지문 파일을 건드린 커밋은 지문이 바뀔 때만 바뀐다.
+     * `?path=`는 경로를 하나만 받으므로 호출자가 경로마다 부르고 더 새것을 고른다.
+     */
+    async commitsForPath(branch, path, perPage = 1) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/commits?sha=${encodeURIComponent(branch)}&path=${encodeURIComponent(path)}&per_page=${perPage}`]));
+      return (j || []).map((c) => ({ sha: c.sha, date: c.commit?.committer?.date ?? c.commit?.author?.date ?? null }));
+    },
+    /**
      * KTB-44 — `factory rehearse`가 자기 dispatch가 만든 런을 찾는다. 최신순이고, `createdAt`으로
      * "내가 부른 그 런"을 가른다(dispatch는 런 id를 돌려주지 않는다 — GitHub API의 한계).
      */

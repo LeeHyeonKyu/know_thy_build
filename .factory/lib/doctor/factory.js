@@ -484,21 +484,20 @@ export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
 
 /**
  * KTB-44 / ADR-025 — `rehearsal.current`. **기록된 리허설이 지금의 하네스에 대한 것인가.**
- * 지문은 로컬에서 계산하고(harness.toml + CHARTER 프론트매터), 기록은 저장소에서 읽는다
- * (변수 `FACTORY_REHEARSED` → 폴백으로 기본 브랜치 head의 `factory/rehearsal` 상태).
- * gh가 없거나(오프라인) 아무 말도 하지 않으면 판정 불가 WARN이다 — 없는 사실을 FAIL로 만들지 않는다.
+ * 지문은 로컬에서 계산하고(harness.toml + CHARTER 프론트매터), 기록은 저장소에서 읽는다 — 변수
+ * `FACTORY_REHEARSED`와 **지문 커밋**의 `factory/rehearsal` 상태를 **둘 다** 본다(하나라도 맞으면 PASS,
+ * 리뷰 should_fix 1). gh가 없으면(오프라인) 호출자가 `skipped`로 WARN을 세운다.
+ *
+ * `recordedRehearsal`은 자기 안에서 모든 throw를 삼키고 항상 resolve한다 — 그래서 여기에 catch를 두지
+ * 않는다(리뷰 nit 2: 죽은 코드였다). 조회가 통째로 실패한 경우는 "기록 없음"과 같은 모양으로 도착하고,
+ * 그 등급은 WARN이다(설치 직후와 구별되지 않는다 — 그 구별은 `factory rehearse`의 출력이 한다).
  */
 export async function checkRehearsal({ gh, root, readFile, harness }) {
   const read = (p) => { try { return readFile(join(root, p)); } catch { return null; } };
   const harnessText = read(".factory/harness.toml");
   if (harnessText == null) return [checkRehearsalCurrent({ current: null })];
   const current = rehearsalHash({ harnessText, charterText: read("docs/factory/CHARTER.md") || "" });
-  let recorded = null;
-  try {
-    recorded = (await recordedRehearsal({ gh, branch: harness?.project?.default_branch || "main" })).hash;
-  } catch (e) {
-    return [checkRehearsalCurrent({ skipped: `gh unavailable — ${e.message}` })];
-  }
+  const recorded = await recordedRehearsal({ gh, branch: harness?.project?.default_branch || "main" });
   return [checkRehearsalCurrent({ recorded, current })];
 }
 

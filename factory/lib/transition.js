@@ -49,7 +49,10 @@ async function swapLabel({ gh, issue, from, to }) {
  */
 export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry";
 
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env, rehearsal = null }) {
+/** 리허설 배선이 아예 없는 큐 전이의 거부 사유 — 그 자체가 배선 지시문이다(리뷰 must_fix 3). */
+export const REHEARSAL_UNWIRED = "no rehearsal checker is wired into this transition — `→ factory:queue` is refused (fail closed). Pass `rehearsal` (see bin/transition.js / sweep.js) or, in tests only, `skipRehearsal: true`";
+
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env, rehearsal = null, skipRehearsal = false }) {
   /**
    * ── KTB-44 / ADR-025 — **리허설 없이는 큐가 열리지 않는다.** ───────────────────────────────────
    * own-calendar의 첫 다크 이슈는 하네스 초안의 결함 세 개를 **라운드마다 하나씩** 드러냈다(exit 127의
@@ -59,12 +62,18 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
    *
    * 사람도 면제되지 않는다: 리허설이 증명하는 것은 "누가 큐에 넣었는가"가 아니라 "이 하네스가 러너에서
    * 도는가"다. 네트워크보다 먼저 끊는다 — 거부는 이슈 상태를 한 글자도 바꾸지 않는다.
-   * `rehearsal`을 주지 않은 호출자(스테이지 내부의 전이 등)는 이 검사를 지나간다: 큐로 가는 길은
-   * 사람의 CLI(`bin/transition.js`)와 스킬뿐이고, 그 입구가 값을 싣는다.
+   *
+   * **기본값은 opt-out이다**(리뷰 must_fix 3). 인자를 생략하면 통과하던 r1의 모양은 바로 위의 세 번째
+   * 자물쇠가 존재하는 이유를 되돌린다: `node -e "import('.factory/lib/transition.js').then(m =>
+   * m.transition({gh, issue, to:'factory:queue'}))"` 한 줄이 — 인자를 **빼는 것만으로** — 게이트를
+   * 껐다. 이제 큐로 가는 전이는 배선된 `rehearsal`이 있거나 명시적인 `skipRehearsal: true`가 있어야
+   * 하고, 둘 다 없으면 거부한다. 프로덕션 호출자는 전부 배선한다(`bin/transition.js`·`bin/sweep.js`·
+   * merge 스테이지) — `skipRehearsal`은 **테스트 전용**이다(ADR-025).
    */
-  if (to === "factory:queue" && rehearsal) {
+  if (to === "factory:queue" && !skipRehearsal) {
     const r = typeof rehearsal === "function" ? await rehearsal() : rehearsal;
-    if (r && r.ok === false) return { ok: false, from: null, to, reason: r.reason || "harness changed since the last rehearsal — run `factory rehearse`" };
+    if (!r) return { ok: false, from: null, to, reason: REHEARSAL_UNWIRED };
+    if (r.ok !== true) return { ok: false, from: null, to, reason: r.reason || "harness changed since the last rehearsal — run `factory rehearse`" };
   }
   // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
   // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.

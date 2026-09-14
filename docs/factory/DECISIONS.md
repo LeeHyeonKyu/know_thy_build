@@ -3108,11 +3108,42 @@ own-calendar의 첫 다크 이슈가 요구한 **하네스 디버깅 3라운드*
 `.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 **같은 모양으로** 남는다.
 
 **게이트**: GREEN인 리허설만 저장소에 기록된다 — 변수 `FACTORY_REHEARSED = sha256(harness.toml +
-CHARTER 프론트매터)`, 변수 쓰기에 admin이 필요한 저장소에서는 기본 브랜치 head의 `factory/rehearsal`
-commit status가 폴백이다. `transition.js`는 `→ factory:queue`를 그 해시로 막는다(스크립트도 사람도):
-기록이 없거나 해시가 어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"**
-한 문장으로 거부하고, 이슈 상태는 한 글자도 바뀌지 않는다. 다른 목적 라벨은 리허설을 묻지 않는다 —
-멈춘 이슈를 앞으로 미는 길까지 막으면 사고가 하나 더 는다.
+CHARTER 프론트매터)`. 변수 쓰기는 repo **admin**을 요구하는데 ADR-021의 권장 구성에서 워크플로가 쥔
+것은 비-admin 봇 토큰이므로, 실제로는 **폴백이 본선이다**: `factory/rehearsal` commit status를
+**지문 커밋**(= `.factory/harness.toml`·`docs/factory/CHARTER.md`를 마지막으로 건드린 기본 브랜치 커밋)에
+올린다. 브랜치 head가 아닌 이유는 r1 리뷰가 재현한 결함이다 — head는 무관한 머지마다 움직여서 **첫
+머지 직후** 기록이 고아가 되고, 그 순간부터 모든 큐 전이가 "harness changed…"로 거부됐다(아무것도
+바뀌지 않았는데). 지문 커밋의 sha는 지문이 바뀔 때 정확히 함께 바뀐다. 읽을 때는 **두 출처를 모두**
+보고 하나라도 맞으면 연다 — 한때 admin 토큰으로 변수를 썼다가 봇 토큰으로 옮긴 저장소가 얼어붙은
+변수 때문에 영영 큐를 못 여는 일이 없도록(여전히 fail closed: 둘 다 어긋나면 거부).
+
+`transition.js`는 `→ factory:queue`를 그 해시로 막는다(스크립트도 사람도): 기록이 없거나 해시가
+어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"** 한 문장으로 거부하고,
+이슈 상태는 한 글자도 바뀌지 않는다. 다른 목적 라벨은 리허설을 묻지 않는다 — 멈춘 이슈를 앞으로 미는
+길까지 막으면 사고가 하나 더 는다.
+
+**그 검사는 opt-out이다, opt-in이 아니다**(r1 리뷰 must_fix 3). 처음 구현은 `rehearsal` 인자를 준
+호출자만 검사했는데, 그것은 이 함수에 세 번째 자물쇠를 둔 이유를 그대로 되돌리는 모양이었다:
+`node -e "import('.factory/lib/transition.js').then(m => m.transition({gh, issue, to:'factory:queue'}))"`
+한 줄이 — **인자를 빼는 것만으로** — 게이트를 껐다. 이제 큐로 가는 전이는 배선된 검사기가 있거나
+명시적 `skipRehearsal: true`가 있어야 하고, 둘 다 없으면 거부한다. 프로덕션 호출자는 **전부** 배선한다:
+사람의 `bin/transition.js`, sweeper의 하네스 주차 해제(`bin/sweep.js`), merge 스테이지의 step 9
+(`transitionOther`), 그리고 flaky 수확(`gates.js` — 이슈를 `backlog`로 만든 뒤 게이트를 지나 큐로 민다).
+`skipRehearsal`은 **테스트 전용**이다. 로봇의 재큐가 거부되는 것은 사고가 아니다: 그 팔들은 매 주기
+다시 시도하고(이미 실패 편향이다), 사람이 `factory rehearse`를 돌리는 순간 통과한다 — 그리고 사람이
+`:unstick`에서 거부당하는데 로봇만 조용히 통과하는 비대칭이 사라진다.
+
+**리허설은 기본 브랜치에서만 돈다.** 워크플로 잡에 `if: github.ref == format('refs/heads/{0}',
+github.event.repository.default_branch)`가 걸리고, 체크아웃도 그 브랜치를 본다. `rehearse.js` 자신도
+`GITHUB_REF_NAME`을 하네스의 기본 브랜치와 대조해 다르면 **기록 없이 exit 1** 한다. 이중인 이유:
+`gh workflow run --ref <branch>`는 레포 write면 누구나(= 모든 에이전트 스테이지가) 부를 수 있고
+`.factory/**`는 브랜치 push 시점에 훅도 integrity도 보지 않는다 — 그 조합이면 브랜치의 스크립트가
+main의 지문으로 GREEN을 기록할 수 있었다(게이트 명령을 한 줄도 돌리지 않고).
+
+**기록의 성패는 판정의 일부다.** `rehearsal.json`은 `recorded: {via, variable, status, sha}`를 싣고,
+`ok`는 "스텝 전부 GREEN **그리고** 어느 한쪽 기록이 성공"일 때만 참이다. r1에서는 표가 GREEN이면
+아티팩트도 `ok: true`였고 기록 실패는 잡 로그에만 남아서, 잡이 빨간데 `factory rehearse`는 "the queue
+is open"을 찍고 0으로 끝났다 — 사람은 첫 이슈가 거부될 때까지 그 사실을 몰랐다.
 
 **왜 CHARTER 프론트매터까지인가**: `tier_default`·`limits`·`merge.human_gate`·`plan.*`는 러너가 무엇을
 얼마나 도는지를 바꾼다. 반대로 산문(NEVER_AUTOMATE 설명, Definition of Done의 문장)은 지문에서 뺀다 —
@@ -3133,3 +3164,10 @@ RED면 non-zero로 끝난다.
   `push` 트리거(하네스·CHARTER 변경)와 사람의 재실행이 그 창을 좁히는 전부다.
 - `gh-push`는 `--dry-run`이라 권한은 증명하되 브랜치를 만들지 않는다. 스크래치 삭제는 관용적으로
   덧붙인다(예전 런이 진짜로 만든 것이 남아 있을 수 있다).
+- 하네스 이슈(`harness-request.js`)는 여전히 `factory:queue`로 바로 태어난다 — 그것이 **설계**다:
+  리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 통째로 잠긴다. 반대로 flaky 수확은
+  `backlog`로 태어나 게이트를 지난다(r1 리뷰 should_fix 3).
+- 지문 해시의 구분자는 `\u0000` **이스케이프**로 적는다. r1은 리터럴 NUL 바이트를 넣었고, 그 두
+  바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
+  정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
+  `factory/bin/lint.js`의 `nul-byte` 규칙이 재발을 막는다.

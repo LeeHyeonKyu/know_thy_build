@@ -18,6 +18,7 @@ import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
+import { makeRehearsalChecker } from "../lib/rehearsal.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
@@ -1917,7 +1918,12 @@ async function main() {
     gates: async (ctx) => {
       if (!GATED_STAGES.has(stage)) return null;
       const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default) : ctx.tier;
-      const result = await runStageGates({ run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile, saveQuarantine: (q) => writeQuarantine(root, q) });
+      const result = await runStageGates({
+        run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
+        saveQuarantine: (q) => writeQuarantine(root, q),
+        // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
+        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
+      });
       mkdirSync(join(root, ".factory/out"), { recursive: true });
       writeFileSync(gatesPath, JSON.stringify(result, null, 2));
       console.log(verdictLine(result));
@@ -2119,8 +2125,14 @@ async function main() {
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     /** merge 전용(KTB-23): 이 이슈의 본문 — `Blocks: #<n>`이 있으면 하네스 이슈였다는 뜻이다. */
     issueBody: async () => (await gh.issue(issue)).body,
-    /** merge 전용(KTB-23): **다른** 이슈의 전이(위 `transition`은 이 이슈에 묶여 있다). */
-    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage }),
+    /**
+     * merge 전용(KTB-23): **다른** 이슈의 전이(위 `transition`은 이 이슈에 묶여 있다).
+     * KTB-44 / ADR-025 — 하네스 이슈가 머지된 뒤의 주차 해제(step 9)도 리허설 게이트를 지난다:
+     * 방금 머지된 것이 **하네스**라면 지문이 바뀌었고, 그 하네스는 아직 러너에서 돌아 본 적이 없다.
+     * 거부되면 그 이슈는 `factory:needs-info`에 남고 sweeper가 매 주기 다시 시도한다 — 사람이
+     * `factory rehearse`를 돌리는 순간 통과한다(push 트리거가 보통 그보다 먼저 돈다).
+     */
+    transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal: makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" }) }),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
     /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
      * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */

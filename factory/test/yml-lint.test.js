@@ -2,6 +2,7 @@ import { test, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../lib/yml-lint.js";
+import { lintFile, NUL_RULE } from "../bin/lint.js";
 
 test("flow mapping with ${{ }} is a violation; block mapping is not", () => {
   expect(lintWorkflow("with: { name: x-${{ matrix.y }}, path: .spike/ }\n")).toEqual([expect.objectContaining({ line: 1, rule: "flow-interpolation" })]);
@@ -652,4 +653,17 @@ test("merge-token-scope (r1 finding 5): a declared scrub step that ALSO starts a
   // 막는 것은 린트가 아니라 L1이다(`.github/**`·`templates/**`가 `[protected].factory`라 사람이 머지한다).
   // 이 테스트는 그 경계를 **문서화**한다 — 나중에 규칙을 좁힐 때 여기가 깨져서 판단을 다시 하게 된다.
   expect(lintWorkflow(chained, { file: "factory-merge.yml" })).toEqual([]);
+});
+
+// ── KTB-44 (리뷰 must_fix 1): 소스의 NUL 바이트는 위반이다 ────────────────────────────────────
+// 0x00이 하나라도 들어가면 git이 그 파일을 binary로 분류하고, 그 순간 `git diff`는 내용을 영영
+// 보여주지 않는다 — 사람도, 리뷰 스테이지도 읽지 못한 채 머지된다(게이트를 정의하는 파일에서
+// 실제로 일어났다). 그 재발을 이 규칙이 막는다.
+test("lint: a JS source file containing a NUL byte is a violation, and clean files are not", () => {
+  const withNul = `export const x = "a${String.fromCharCode(0)}b";\n`;
+  const v = lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => withNul });
+  expect(v.some((e) => e.rule === NUL_RULE.rule)).toBe(true);
+  expect(v[0].msg).toMatch(/binary/);
+  expect(lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => 'export const x = "ab";\n' })
+    .some((e) => e.rule === NUL_RULE.rule)).toBe(false);
 });

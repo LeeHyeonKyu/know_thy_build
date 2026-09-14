@@ -669,13 +669,31 @@ workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 
 | `prove-test` | base 워크트리 생성 + 의존성 설치(감사 M2의 기계) |
 | `gh-auth` · `gh-labels` · `gh-push` | 봇 토큰이 스테이지가 필요로 하는 세 가지를 실제로 할 수 있는가(`git push --dry-run`은 `factory/rehearsal-<run id>`로) |
 
-판정은 표 하나로 잡 요약과 `.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 남는다.
-GREEN이면 그 사실이 저장소에 적힌다: 변수 `FACTORY_REHEARSED = sha256(harness.toml + CHARTER 프론트매터)`
-(변수 쓰기에 admin이 필요하면 기본 브랜치 head의 `factory/rehearsal` commit status가 폴백).
+판정은 표 하나로 잡 요약과 `.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 남고, 그 파일은
+`recorded: {via, variable, status, sha}`까지 싣는다 — **기록의 성패가 판정의 일부다**(스텝이 전부
+GREEN이어도 기록이 실패했으면 큐는 닫혀 있고, `ok`는 false다).
+
+GREEN이면 그 사실이 저장소에 적힌다: 변수 `FACTORY_REHEARSED = sha256(harness.toml + CHARTER 프론트매터)`,
+그리고 변수 쓰기가 admin을 요구하면(ADR-021의 권장 구성에서는 **늘 그렇다** — 워크플로는 비-admin 봇
+토큰을 쥔다) **지문 커밋**의 `factory/rehearsal` commit status가 폴백이다. 지문 커밋은
+`.factory/harness.toml`·`docs/factory/CHARTER.md`를 마지막으로 건드린 기본 브랜치 커밋이다 — 브랜치
+head에 붙이면 무관한 머지 하나로 기록이 고아가 되어 **첫 머지부터 큐가 영구히 닫힌다**(ADR-025 r1).
+읽을 때는 두 출처를 모두 보고 하나라도 맞으면 연다(둘 다 어긋나면 거부 — fail closed).
+
 `transition.js`는 `→ factory:queue`를 그 해시로 막는다 — 스크립트도 사람도, 기록이 없거나 해시가
 어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"**로 거부하고 라벨은 그대로다.
+그 검사는 **opt-out**이다: 큐로 가는 전이는 배선된 검사기이거나 명시적 `skipRehearsal: true`(테스트
+전용)여야 하고, 둘 다 없으면 거부한다 — 인자를 생략하는 것이 게이트를 끄는 길이면 게이트가 아니다.
+프로덕션 호출자는 전부 배선한다: 사람의 CLI, sweeper의 하네스 주차 해제, merge 스테이지의 step 9,
+flaky 수확(이슈는 `backlog`로 태어나 게이트를 지나 큐로 간다). 하네스 이슈만 예외로 바로 큐로 간다 —
+리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 잠긴다.
+
+잡은 **기본 브랜치에서만** 돈다(잡 레벨 `if:` + 체크아웃 `ref:` + `rehearse.js`의 `GITHUB_REF_NAME`
+대조). `gh workflow run --ref <branch>`는 레포 write면 누구나 부를 수 있으므로, 그 가드가 없으면
+브랜치의 스크립트가 기본 브랜치의 지문으로 GREEN을 기록할 수 있다.
+
 doctor의 `rehearsal.current`가 같은 사실을 PASS/WARN/FAIL로 말하고, `factory rehearse`가 워크플로를
-띄우고 기다렸다가 같은 표를 찍는다(RED면 non-zero).
+띄우고(자기 dispatch가 만든 런만 기다린다) 같은 표를 찍는다 — RED거나 기록되지 않았으면 non-zero다.
 
 ---
 

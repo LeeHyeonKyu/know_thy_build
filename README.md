@@ -129,9 +129,18 @@ rest** — the three-round bill came from finding the defects one at a time. The
 in the job summary and in `.factory/out/rehearsal.json` (uploaded, scrubbed, 7 days).
 
 A GREEN rehearsal writes `FACTORY_REHEARSED = sha256(harness.toml + CHARTER frontmatter)` as a repo variable
-(or, where variables need admin, a `factory/rehearsal` commit status on the default branch head).
+and — where variables need admin, which is the normal case under the two-actor setup, since the workflow holds
+a non-admin bot token — as a `factory/rehearsal` commit status on the **fingerprint commit**: the last
+default-branch commit that touched `.factory/harness.toml` or `docs/factory/CHARTER.md`. (Not the branch head:
+that moves on every unrelated merge, which would orphan the record and shut the queue from the first merge
+onward.) Both sources are read and either may open the queue; if neither matches, the queue stays shut.
+
 `transition.js` refuses `→ factory:queue` — for scripts and for people — while that record is missing or its
-hash no longer matches: *harness changed since the last rehearsal — run `factory rehearse`*. `factory doctor`
+hash no longer matches: *harness changed since the last rehearsal — run `factory rehearse`*. The check is
+opt-out, not opt-in: a queue transition needs a wired checker (the human CLI, the sweeper's harness unpark, the
+merge stage, the flaky harvester all wire it) or an explicit test-only bypass, and refuses without one. The job
+itself only runs on the default branch, and a recording failure makes the run RED — `factory rehearse` says
+"not recorded — queue stays closed" and exits non-zero rather than claiming the queue is open. `factory doctor`
 says the same thing as `rehearsal.current` (PASS / WARN when never rehearsed / FAIL when stale), and a push to
 the default branch that touches `.factory/harness.toml` or `docs/factory/CHARTER.md` re-runs the rehearsal by itself.
 

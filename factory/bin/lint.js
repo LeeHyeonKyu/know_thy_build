@@ -35,12 +35,25 @@ const NOT_A_MODULE = /(^|\/)\.?claude\/workflows\//;
 const WORKFLOW_DIR = ".github/workflows";
 const SKILL_DIR = "templates/know-thy-build";
 
+/**
+ * KTB-44 리뷰 must_fix 1 — **소스에 NUL 바이트가 있으면 위반이다.** 0x00이 하나라도 들어가면 git이
+ * 그 파일을 binary로 분류하고, 그 순간 `git diff`는 내용을 영영 보여주지 않는다: 사람도, diff 기반
+ * 도구도, **팩토리 자신의 리뷰 스테이지도** 그 파일을 읽지 못한 채 머지한다(리뷰 면제 파일이 생긴다).
+ * `grep`/`rg`도 기본값으로 건너뛰어 저장소 전체 검색에서 조용히 사라진다. 그 바이트가 정말 필요하면
+ * `\u0000` 이스케이프로 적는다 — 런타임 바이트는 같고 파일은 텍스트로 남는다.
+ */
+const NUL = String.fromCharCode(0);   // 이 파일 자신이 NUL을 품지 않도록 리터럴 대신 코드포인트로 만든다
+export const NUL_RULE = { rule: "nul-byte", msg: "source file contains NUL (0x00) bytes — git classifies it as binary and `git diff` will never show its contents (write the byte as a \\u0000 escape instead)" };
+
 /** 한 파일에 대한 위반 목록. 읽을 수 없는 파일은 "문제 없음"이 아니다 — 그 자체가 위반이다. */
-export function lintFile(file, { root = process.cwd() } = {}) {
+export function lintFile(file, { root = process.cwd(), readFile = readFileSync, exists = existsSync } = {}) {
   const abs = join(root, file);
   const out = [];
-  if (!existsSync(abs)) return out;                       // 삭제된 파일은 린트 대상이 아니다
+  if (!exists(abs)) return out;                           // 삭제된 파일은 린트 대상이 아니다
   if (JS.has(extname(file)) && !NOT_A_MODULE.test(file)) {
+    try {
+      if (readFile(abs, "utf8").includes(NUL)) out.push({ file, ...NUL_RULE });
+    } catch (e) { return [{ file, rule: "unreadable", msg: e.message }]; }
     const r = spawnSync(process.execPath, ["--check", abs], { encoding: "utf8" });
     if (r.status !== 0) out.push({ file, rule: "parse", msg: (r.stderr || "").trim().split("\n").slice(0, 3).join(" ") });
     return out;

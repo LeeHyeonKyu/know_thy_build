@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { loadHarness } from "../lib/config.js";
-import { recordRehearsal, rehearsalHash, rehearsalReport, renderRehearsalTable, runRehearsal } from "../lib/rehearsal.js";
+import { fingerprintShaLocal, recordRehearsal, rehearsalHash, rehearsalReport, renderRehearsalTable, runRehearsal } from "../lib/rehearsal.js";
 import { assertNoWriteStageClean, snapshotSetupDirty } from "./run-stage.js";
 
 /**
@@ -19,6 +19,21 @@ const runId = process.env.FACTORY_RUN_ID || process.env.GITHUB_RUN_ID || "local"
 const readText = (p, fallback = "") => { try { return readFileSync(join(root, p), "utf8"); } catch { return fallback; } };
 
 const harness = loadHarness(root);
+const defaultBranch = harness.project?.default_branch || "main";
+
+/**
+ * ADR-025 / 리뷰 must_fix 4 — **기본 브랜치가 아니면 아무것도 하지 않는다.** 워크플로의 `if:`가 1차
+ * 방어지만 그 파일은 이 스크립트와 함께 움직이지 않는다(에이전트는 `.github/**`를 못 만지지만
+ * `.factory/**`는 브랜치 push로 바꿀 수 있고, `gh workflow run --ref <branch>`는 레포 write면 부를 수
+ * 있다). 그 조합에서 이 스크립트가 브랜치의 트리로 돌면 **main의 지문에 GREEN을 적을 수 있다** —
+ * 게이트 명령이 한 줄도 돌지 않은 채로. 그래서 기록하는 쪽이 스스로 한 번 더 묻는다.
+ */
+const refName = process.env.GITHUB_REF_NAME || null;
+if (refName && refName !== defaultBranch) {
+  console.error(`rehearse: refusing to run on \`${refName}\` — the rehearsal is only meaningful (and only recorded) on the default branch \`${defaultBranch}\` (ADR-025). Dispatch it without --ref, or from ${defaultBranch}.`);
+  process.exit(1);
+}
+
 const files = (await run("git", ["ls-files"], { cwd: root })).stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 const hash = rehearsalHash({ harnessText: readText(".factory/harness.toml"), charterText: readText("docs/factory/CHARTER.md") });
 
@@ -43,43 +58,52 @@ async function qaProbe() {
   }
 }
 
-const { steps, ok } = await runRehearsal({
+const { steps, ok: stepsOk } = await runRehearsal({
   run, cwd: root, harness, files, runId, baseline,
   readFile: (p) => readText(p),
   qaProbe,
   cleanCheck: (b) => assertNoWriteStageClean({ run, cwd: root, baseline: b }),
 });
 
-const report = rehearsalReport({ steps, hash, runId });
+/**
+ * 기록은 **스텝이 전부 GREEN일 때만** 일어나고, 그 성패는 **판정의 일부다**(리뷰 must_fix 5):
+ * 보고서를 먼저 쓰고 기록을 나중에 하면, 기록이 실패한 런의 아티팩트가 `ok: true`로 남아
+ * `factory rehearse`가 "the queue is open"을 찍고 0으로 끝난다 — 그러고 나면 첫 이슈가 거부된다.
+ * 폴백 status는 **지문 커밋**에 붙는다(must_fix 2) — 그 sha는 러너에 체크아웃이 있으므로 로컬에서 읽는다.
+ */
+let recorded = null;
+if (stepsOk) {
+  try {
+    const repo = process.env.FACTORY_REPO || (await resolveRepo({ run }));
+    const gh = makeGh({ run, repo });
+    const url = process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
+      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${runId}`
+      : undefined;
+    const sha = await fingerprintShaLocal({ run, cwd: root });
+    recorded = await recordRehearsal({ gh, hash, branch: defaultBranch, sha, targetUrl: url });
+  } catch (e) {
+    recorded = { via: null, variable: `error: ${e?.message || e}`, status: "not attempted", sha: null };
+  }
+}
+
+const report = rehearsalReport({ steps, hash, runId, recorded });
 const outDir = join(root, ".factory/out");
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, "rehearsal.json"), JSON.stringify(report, null, 2));
 
 const table = renderRehearsalTable(steps);
 console.log(table);
+const recordLine = recorded
+  ? (recorded.via
+    ? `recorded ${hash.slice(0, 12)} via ${recorded.via}${recorded.sha ? ` on ${recorded.sha.slice(0, 7)}` : ""}`
+    : `NOT RECORDED — variable: ${recorded.variable}; status: ${recorded.status}. \`→ factory:queue\` stays refused`)
+  : "not recorded (a RED rehearsal is never recorded)";
+console.log(`rehearse: ${recordLine}`);
 if (process.env.GITHUB_STEP_SUMMARY) {
   try {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## factory rehearsal — ${ok ? "GREEN" : "RED"}\n\n${table}\n\nharness fingerprint \`${hash.slice(0, 12)}\`\n`);
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## factory rehearsal — ${report.ok ? "GREEN" : "RED"}\n\n${table}\n\nharness fingerprint \`${hash.slice(0, 12)}\` — ${recordLine}\n`);
   } catch (e) { console.error(`rehearse: could not write the job summary — ${e.message}`); }
 }
+if (recorded && !recorded.via) console.error(`rehearse: every step was GREEN but the result could not be recorded — ${recorded.variable}; ${recorded.status}`);
 
-// 기록은 **GREEN일 때만** 일어난다 — 이 변수 하나가 `→ factory:queue`를 여는 열쇠다(transition.js).
-if (ok) {
-  try {
-    const repo = process.env.FACTORY_REPO || (await resolveRepo({ run }));
-    const gh = makeGh({ run, repo });
-    const branch = harness.project?.default_branch || "main";
-    const url = process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
-      ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${runId}`
-      : undefined;
-    const r = await recordRehearsal({ gh, hash, branch, targetUrl: url });
-    if (r.via) console.log(`rehearse: recorded ${hash.slice(0, 12)} via ${r.via}${r.error ? ` (repo variable refused: ${r.error})` : ""}`);
-    else console.error(`rehearse: GREEN but the result could not be recorded — ${r.error}. \`→ factory:queue\` stays refused until it is`);
-    if (!r.via) process.exit(1);
-  } catch (e) {
-    console.error(`rehearse: GREEN but the result could not be recorded — ${e.message}`);
-    process.exit(1);
-  }
-}
-
-process.exit(ok ? 0 : 1);
+process.exit(report.ok ? 0 : 1);

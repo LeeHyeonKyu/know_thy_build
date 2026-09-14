@@ -43,7 +43,7 @@ export async function main(argv) {
     case "doctor": return (await import("./doctor.js")).doctorCommand({ root, pkgRoot, argv: rest, io, run: realRun });
     case "bootstrap": return (await import("./bootstrap.js")).bootstrapCommand({ root, argv: rest, io });
     // rehearse는 doctor처럼 실주입이 필요하다 — 이 명령의 일은 러너에 주문을 넣고 결과를 가져오는 것이다.
-    case "rehearse": return (await import("./rehearse.js")).rehearseCommand({ root, argv: rest, io, run: realRun });
+    case "rehearse": return (await import("./rehearse.js")).rehearseCommand({ argv: rest, io, run: realRun });
     case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io });
     case "status": return (await import("./status.js")).statusCommand({ root, argv: rest, io });
     // board는 `pkgRoot`가 필요하다(ADR-022 Task B) — CLI가 내는 페이지와 `factory init`이 설치하는
