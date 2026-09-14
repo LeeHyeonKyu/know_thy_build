@@ -31,6 +31,25 @@ test("passes in PR isolation, fails on base too → flaky-existing", async () =>
   const [r] = await classifyFailures({ run, cwd: "/repo", harness, failing: [f], base: "b", thresholds: T, addedTests: [], tmp: "/tmp/wt" });
   expect(r.verdict).toBe("flaky-existing");
 });
+/**
+ * 감사 M3 — **base가 5/5 실패하는 것은 흔들림이 아니다.** 격리 실행에서는 통과하고 base에서 한두 번
+ * 실패하는 것이 flaky다. base에서 **매번** 실패한다면 그 테스트는 main에서 이미 깨져 있는 것이고,
+ * 그것을 `flaky-existing`으로 부르면 게이트가 그 실패를 제외하고 GREEN으로 넘어간다 — main이 빨간
+ * 채로 자동 머지가 이어진다. 별도의 판정(`broken-base`)으로 나눠 사람에게 올린다.
+ */
+test("M3: base에서 5/5 전부 실패하면 flaky-existing이 아니라 broken-base다", async () => {
+  const run = makeFakeRun([wt, pr([0, 0, 0]), base([1, 1, 1, 1, 1])]);
+  const [r] = await classifyFailures({ run, cwd: "/repo", harness, failing: [f], base: "b", thresholds: T, addedTests: [], tmp: "/tmp/wt" });
+  expect(r.verdict).toBe("broken-base");
+  expect(r.evidence.base).toEqual([1, 1, 1, 1, 1]);
+});
+
+test("M3: base가 섞여 있으면(일부만 실패) 그대로 flaky-existing이다", async () => {
+  const run = makeFakeRun([wt, pr([0, 0, 0]), base([1, 0, 1, 1, 1])]);
+  const [r] = await classifyFailures({ run, cwd: "/repo", harness, failing: [f], base: "b", thresholds: T, addedTests: [], tmp: "/tmp/wt" });
+  expect(r.verdict).toBe("flaky-existing");
+});
+
 test("F8: {name}도 lib이 따옴표를 붙인다 — 이름의 작은따옴표가 명령을 깨지 않는다", async () => {
   const tricky = { id: "test/a.test.js::it's 'quoted'", file: "test/a.test.js", name: "it's 'quoted'" };
   const run = makeFakeRun([wt, pr([0, 0, 0]), base([0, 0, 0, 0, 0])]);

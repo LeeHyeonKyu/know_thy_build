@@ -2,7 +2,7 @@ import { test, expect } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadHarness, loadCharter, loadRoles, rosterFor } from "../lib/config.js";
+import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor, PLAN_DEFAULTS, PLAN_SINGLE_ROLES } from "../lib/config.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "ktb-"));
@@ -10,7 +10,7 @@ function fixture() {
   mkdirSync(join(root, "docs/factory"), { recursive: true });
   writeFileSync(join(root, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M1"\n[factory]\norchestration = "workflow"\n[commands]\nlint = "npm run lint"\nunit = "npm test"\n[gates]\nrequired = ["lint","unit"]\nfast = ["lint","unit"]\nfull = ["lint","unit"]\ndeep = ["lint","unit"]\n`);
   writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nlimits: { K: 3, M: 3, R: 2 }\nroster:\n  docs: [correctness, spec-conformance]\n  standard: [correctness, architecture, spec-conformance, qa]\n  load-bearing: [correctness, security, architecture, spec-conformance, qa]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [product-advocate, architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\nback_pressure: { awaiting_review_max: 4 }\nbudget: {}\n---\n# Charter\n`);
-  writeFileSync(join(root, ".factory/roles.toml"), `schema = 1\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\n[review.security]\nagent = ".claude/agents/reviewer-security.md"\n[review.architecture]\nagent = "x"\n[review.spec-conformance]\nagent = "x"\n[review.qa]\nagent = "x"\n[plan.architect]\nagent = "x"\n[plan.skeptic]\nagent = "x"\n[plan.product-advocate]\nagent = "x"\n[plan.operator]\nagent = "x"\n`);
+  writeFileSync(join(root, ".factory/roles.toml"), `schema = 1\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\n[review.security]\nagent = ".claude/agents/reviewer-security.md"\n[review.architecture]\nagent = "x"\n[review.spec-conformance]\nagent = "x"\n[review.qa]\nagent = "x"\n[plan.architect]\nagent = "x"\n[plan.skeptic]\nagent = "x"\n[plan.product-advocate]\nagent = "x"\n[plan.operator]\nagent = "x"\n[plan.synthesizer]\nagent = "x"\n`);
   return root;
 }
 
@@ -30,9 +30,44 @@ test("rosterFor: review roster by tier must exist in roles.toml; plan roster by 
   const ch = loadCharter(root), roles = loadRoles(root);
   expect(rosterFor(ch, roles, "review", "docs")).toEqual(["correctness", "spec-conformance"]);
   expect(rosterFor(ch, roles, "review", "load-bearing")).toHaveLength(5);
-  expect(rosterFor(ch, roles, "plan", "docs")).toEqual(["architect", "skeptic"]);
-  expect(rosterFor(ch, roles, "plan", "standard")).toEqual(["product-advocate", "architect", "skeptic", "operator"]);
+  // 감사 Task 9: plan 기본은 단일 패스다 — docs/standard의 plan 로스터는 `plan_roles`가 아니라
+  // 단일 모드 로스터(계획자 + skeptic)다. `plan_roles`는 토론 tier에서만 읽힌다.
+  expect(rosterFor(ch, roles, "plan", "docs")).toEqual(["synthesizer", "skeptic"]);
+  expect(rosterFor(ch, roles, "plan", "standard")).toEqual(["synthesizer", "skeptic"]);
+  expect(rosterFor(ch, roles, "plan", "load-bearing")).toEqual(["product-advocate", "architect", "skeptic", "operator"]);
   expect(() => rosterFor({ ...ch, roster: { docs: ["ghost"] } }, roles, "review", "docs")).toThrow(/not defined in roles.toml: ghost/);
+});
+
+// --- 감사 Task 9 (P2, 2026-09-14 plan 베이스라인): plan 기본 = 단일 opus 1패스 + skeptic 1패스 ---
+
+test("charter.plan defaults: mode single, debate_tiers [load-bearing], max_done_when 6", () => {
+  const ch = loadCharter(fixture());
+  expect(ch.plan).toEqual({ mode: "single", debate_tiers: ["load-bearing"], max_done_when: 6 });
+  expect(PLAN_DEFAULTS.mode).toBe("single");
+  expect(PLAN_SINGLE_ROLES).toEqual(["synthesizer", "skeptic"]);
+});
+
+test("charter.plan takes partial overrides — missing keys keep the defaults", () => {
+  const root = fixture();
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\nplan: { max_done_when: 4 }\n---\n`);
+  expect(loadCharter(root).plan).toEqual({ mode: "single", debate_tiers: ["load-bearing"], max_done_when: 4 });
+});
+
+test("planRoundsFor returns {mode, rounds}: single (2) by default, debate on a debate tier", () => {
+  const ch = loadCharter(fixture());
+  expect(planRoundsFor(ch, "docs")).toEqual({ mode: "single", rounds: 2 });
+  expect(planRoundsFor(ch, "standard")).toEqual({ mode: "single", rounds: 2 });
+  // load-bearing만 4역할 토론을 산다 — plan_rounds가 그 라운드 수의 출처로 남는다.
+  expect(planRoundsFor(ch, "load-bearing")).toEqual({ mode: "debate", rounds: 3 });
+});
+
+test("plan.mode debate forces the 4-role debate on every tier; debate_tiers [] never debates", () => {
+  const ch = loadCharter(fixture());
+  const always = { ...ch, plan: { ...ch.plan, mode: "debate" } };
+  expect(planRoundsFor(always, "docs")).toEqual({ mode: "debate", rounds: 2 });
+  expect(planRoundsFor(always, "standard")).toEqual({ mode: "debate", rounds: 3 });
+  const never = { ...ch, plan: { ...ch.plan, debate_tiers: [] } };
+  expect(planRoundsFor(never, "load-bearing")).toEqual({ mode: "single", rounds: 2 });
 });
 
 test("loadCharter reports status verbatim (dormancy는 호출자가 판단한다)", () => {
@@ -55,7 +90,8 @@ test("limits는 부분 오버라이드를 받는다 — 빠진 키는 기본값�
 test("loadHarness fills gates.thresholds / test / commands.proof defaults and keeps overrides", () => {
   const root = fixture();
   const h = loadHarness(root);
-  expect(h.gates.thresholds).toEqual({ diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 });
+  // flaky_max / quarantine_max_effective: 감사 M3·M4 — PR당 제외 상한(ADR-023).
+  expect(h.gates.thresholds).toEqual({ diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, flaky_max: 2, quarantine_max: 5, quarantine_max_effective: 3, quarantine_ttl_days: 28, quarantine_return_after: 30 });
   expect(h.test.unit_report).toBe(".factory/out/unit.json");
   expect(h.test.test_glob).toEqual([]);
   expect(h.commands.proof).toEqual({});

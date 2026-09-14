@@ -143,11 +143,15 @@ test("KTB-6 policyViolations: reads file content ONLY via git show — never the
   for (const c of run.calls) expect(c.cmd).toBe("git");              // 파일 시스템 접근이 아예 없다
 });
 
-test("KTB-6 policyViolations: only additive_only files are diffed — a plain source change costs no git show", async () => {
-  const run = makeFakeRun([names("M\tsrc/a.js\nM\t.factory/harness.toml\n")]);
+test("KTB-6 policyViolations: only additive_only files (and harness.toml) are diffed — a plain source change costs no git show", async () => {
+  const run = makeFakeRun([names("M\tsrc/a.js\nM\tREADME.md\n")]);
   const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
   expect(r).toMatchObject({ ok: true, files: [] });
   expect(run.calls).toHaveLength(1);                                  // name-status 한 번뿐
+  // M9 이후 `.factory/harness.toml`은 예외다 — 그 파일이 diff에 있으면 섹션 판정을 위해 내용을 읽는다.
+  const withHarness = makeFakeRun([names("M\tsrc/a.js\nM\t.factory/harness.toml\n"), u0(""), { match: (c, a) => a[0] === "show", result: { code: 0, stdout: "[commands]\nlint = \"x\"\n", stderr: "" } }]);
+  expect(await policyViolations({ run: withHarness, cwd: "/repo", base: "b", head: "h", harness })).toMatchObject({ ok: true, files: [] });
+  expect(withHarness.calls.length).toBeGreaterThan(1);
 });
 
 test("KTB-6 policyViolations: base 없음 / git 실패는 ok:false — 빈 목록을 '정책 위반 없음'으로 읽지 않는다", async () => {
@@ -430,4 +434,156 @@ test("fix round 2 (N2): protectedPaths counts a deleted additive_only source too
 test("fix round 2 (N2): a live additive_only file is still exempt from the protected list (retro's dark path survives)", async () => {
   const r = await protectedPaths({ run: makeFakeRun([names(`M\t${AGENT_PATH}\n`)]), cwd: "/repo", base: "b", head: "h", harness });
   expect(r.files).toEqual([]);
+});
+
+// ── 외부 감사 M9 (ADR-023): harness 모드에서도 harness.toml의 세 섹션은 얼어 있다 ──────────────
+// `FACTORY_HARNESS_ISSUE=1`이면 builder가 `.factory/harness.toml`을 편집할 수 있다(KTB-20). 그런데
+// `[protected]`·`[gates.thresholds]`·`[load_bearing]`은 **판정 기준 자체**라, 거기를 고치면 그 PR이
+// 스스로를 통과시킨다. 훅으로는 못 막는다 — 어느 섹션에 떨어지는 편집인지는 내용을 읽어야 안다.
+const HARNESS_BASE = [
+  "schema = 1", "", "[commands]", 'lint = "node -e 0"', 'unit = "npx vitest run"', "",
+  "[gates.thresholds]", "diff_coverage_pct = 90", "mutation_score_pct = 70", "",
+  "[protected]", 'factory = [".factory/**"]', "", "[load_bearing]", 'paths = ["factory/lib/integrity.js"]', "",
+].join("\n");
+const showRev = (rev, file, body) => ({ match: (c, a) => a[0] === "show" && a[1] === `${rev}:${file}`, result: { code: 0, stdout: body, stderr: "" } });
+
+test("M9: [gates.thresholds]의 임계값을 낮추면 policy 위반 — 자동 머지 거부(사람 머지)", async () => {
+  const diff = `+++ b/.factory/harness.toml\n@@ -8,1 +8,1 @@\n-diff_coverage_pct = 90\n+diff_coverage_pct = 10\n`;
+  const head = HARNESS_BASE.replace("diff_coverage_pct = 90", "diff_coverage_pct = 10");
+  const run = makeFakeRun([names("M\t.factory/harness.toml\n"), u0(diff), showRev("b", ".factory/harness.toml", HARNESS_BASE)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => head });
+  expect(r.ok).toBe(true);                                  // 변조가 아니라 정책이다 — L0는 RED가 되지 않는다
+  expect(r.policy).toContainEqual({ file: ".factory/harness.toml", rule: "harness.toml [gates.thresholds] edited — human merge required" });
+});
+
+test("M9: [protected] 목록을 넓히는 편집도 policy 위반", async () => {
+  const diff = `+++ b/.factory/harness.toml\n@@ -12,1 +12,1 @@\n-factory = [".factory/**"]\n+factory = []\n`;
+  const head = HARNESS_BASE.replace('factory = [".factory/**"]', "factory = []");
+  const run = makeFakeRun([names("M\t.factory/harness.toml\n"), u0(diff), showRev("b", ".factory/harness.toml", HARNESS_BASE)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => head });
+  expect(r.policy.map((v) => v.rule)).toContain("harness.toml [protected] edited — human merge required");
+});
+
+test("M9: [load_bearing].paths를 비우는 편집도 policy 위반", async () => {
+  const diff = `+++ b/.factory/harness.toml\n@@ -15,1 +15,1 @@\n-paths = ["factory/lib/integrity.js"]\n+paths = []\n`;
+  const head = HARNESS_BASE.replace('paths = ["factory/lib/integrity.js"]', "paths = []");
+  const run = makeFakeRun([names("M\t.factory/harness.toml\n"), u0(diff), showRev("b", ".factory/harness.toml", HARNESS_BASE)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => head });
+  expect(r.policy.map((v) => v.rule)).toContain("harness.toml [load_bearing] edited — human merge required");
+});
+
+test("M9: 얼지 않은 섹션([commands])의 편집은 위반이 아니다 — 승격이 하려는 일이 바로 그것이다", async () => {
+  const diff = `+++ b/.factory/harness.toml\n@@ -4,1 +4,1 @@\n-lint = "node -e 0"\n+lint = "npx eslint ."\n`;
+  const head = HARNESS_BASE.replace('lint = "node -e 0"', 'lint = "npx eslint ."');
+  const run = makeFakeRun([names("M\t.factory/harness.toml\n"), u0(diff), showRev("b", ".factory/harness.toml", HARNESS_BASE)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => head });
+  expect(r.policy).toEqual([]);
+  expect(r.protected).toEqual([".factory/harness.toml"]);   // 머지 권한은 그대로 사람이다
+});
+
+test("M9: L1(policyViolations)도 같은 판정을 낸다 — 내용은 워킹 트리가 아니라 revision blob에서 읽는다", async () => {
+  const diff = `+++ b/.factory/harness.toml\n@@ -8,1 +8,1 @@\n-diff_coverage_pct = 90\n+diff_coverage_pct = 10\n`;
+  const head = HARNESS_BASE.replace("diff_coverage_pct = 90", "diff_coverage_pct = 10");
+  const run = makeFakeRun([names("M\t.factory/harness.toml\n"), u0(diff), showRev("h", ".factory/harness.toml", head), showRev("b", ".factory/harness.toml", HARNESS_BASE)]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual([".factory/harness.toml"]);
+  expect(r.violations.map((v) => v.rule)).toEqual(["harness.toml [gates.thresholds] edited — human merge required"]);
+});
+
+test("M9: 섹션 헤더를 통째로 추가하는 것도 위반이다(주입된 헤더가 자기 뒤 줄을 정당화할 수 없다)", async () => {
+  const head = HARNESS_BASE + "\n[gates.thresholds]\nflaky_max = 99\n";
+  const diff = `+++ b/.factory/harness.toml\n@@ -17,0 +18,2 @@\n+[gates.thresholds]\n+flaky_max = 99\n`;
+  const run = makeFakeRun([names("M\t.factory/harness.toml\n"), u0(diff), showRev("b", ".factory/harness.toml", HARNESS_BASE)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => head });
+  expect(r.policy.map((v) => v.rule)).toContain("harness.toml [gates.thresholds] edited — human merge required");
+});
+
+// ── 외부 감사 H5: 기존 테스트의 삭제·수정은 **정책**이다(사람이 머지한다) ────────────────
+// 예전에는 `test_glob` 파일에서 skip/ignore pragma가 **추가**된 것만 봤다 — 단언 하나를
+// `toHaveLength(3)`→`(2)`로 바꾸거나 테스트 파일을 통째로 지우는 diff는 위반 0으로 자동 머지됐다.
+// `[protected].tests_are_load_bearing`이 그 규칙의 스위치이고, 판정은 protected/additive_only와
+// 같은 자리(`policy`)에 실린다: L0는 GREEN을 유지하고(그래야 사람이 머지할 수 있다) L1이 자동
+// 머지를 거부한다. 추가만 있는 diff(새 테스트)는 그대로 통과한다 — 그것이 정상 업무다.
+
+const testsHarness = { ...harness, protected: { ...harness.protected, tests_are_load_bearing: true } };
+
+test("H5: 기존 테스트의 단언이 바뀌면(toHaveLength(3)→(2)) policy 위반 — L0는 GREEN, 사람이 머지한다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-  expect(rows).toHaveLength(3);\n+  expect(rows).toHaveLength(2);\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "" });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([]);
+  expect(r.policy).toEqual([{ file: "test/a.test.js", rule: "tests-modified — 1 line(s) removed from an existing test — human merge required" }]);
+});
+
+test("H5: 기존 테스트 파일의 삭제도 같은 위반이다 — 사라진 파일에는 내용 규칙이 안 걸리므로 이 자리가 유일한 신호다", async () => {
+  const run = makeFakeRun([names("D\ttest/a.test.js\n"), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.policy).toEqual([{ file: "test/a.test.js", rule: "tests-modified — existing test file deleted — human merge required" }]);
+});
+
+test("H5: 새 테스트 파일(추가만)은 통과한다 — 테스트를 더 쓰는 것이 이 공장의 정상 업무다", async () => {
+  const diff = `+++ b/test/new.test.js\n@@ -0,0 +1,2 @@\n+test("x", () => {});\n+// added\n`;
+  const run = makeFakeRun([names("A\ttest/new.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "" });
+  expect(r.ok).toBe(true);
+  expect(r.policy).toEqual([]);
+});
+
+test("H5: 이슈 본문의 `tests_changed_allowed:`에 적힌 파일은 위반이 아니라 기록이다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-  expect(rows).toHaveLength(3);\n+  expect(rows).toHaveLength(2);\n`;
+  const body = "### 배경\n스펙이 바뀌어 기존 단언이 틀렸다.\n\ntests_changed_allowed:\n- test/a.test.js\n";
+  const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "", issueBody: body });
+  expect(r.policy).toEqual([]);
+  expect(r.tests_allowed).toEqual([{ file: "test/a.test.js", rule: "tests-modified (allowed by issue)" }]);
+});
+
+test("H5: 허용 목록은 **그 파일에만** 적용된다 — 같은 PR의 다른 테스트 수정은 그대로 위반이다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-a\n+b\n+++ b/test/b.test.js\n@@ -3,1 +3,1 @@\n-c\n+d\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\nM\ttest/b.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "", issueBody: "tests_changed_allowed: `test/a.test.js`" });
+  expect(r.policy.map((v) => v.file)).toEqual(["test/b.test.js"]);
+  expect(r.tests_allowed.map((v) => v.file)).toEqual(["test/a.test.js"]);
+});
+
+test("H5: `tests_are_load_bearing = false`인 하네스에서는 이 규칙이 아예 돌지 않는다", async () => {
+  const h = { ...harness, protected: { ...harness.protected, tests_are_load_bearing: false } };
+  const run = makeFakeRun([names("D\ttest/a.test.js\n"), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: h, readFile: () => null });
+  expect(r.policy).toEqual([]);
+});
+
+test("H5: L1(policyViolations)도 같은 판정을 낸다 — merge 스테이지가 자동 머지를 거부하는 재료", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,2 +12,1 @@\n-  expect(rows).toHaveLength(3);\n-  expect(rows[0]).toBe(1);\n+  expect(rows).toHaveLength(2);\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\nD\ttest/gone.test.js\n"), u0(diff)]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([
+    { file: "test/a.test.js", rule: "tests-modified — 2 line(s) removed from an existing test — human merge required" },
+    { file: "test/gone.test.js", rule: "tests-modified — existing test file deleted — human merge required" },
+  ]);
+  expect(r.files).toEqual(["test/a.test.js", "test/gone.test.js"]);
+});
+
+test("H5: L1도 이슈 본문의 허용 표식을 읽는다 — 허용된 파일은 violations에 실리지 않는다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-a\n+b\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(diff)]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, issueBody: "tests_changed_allowed: test/a.test.js" });
+  expect(r.violations).toEqual([]);
+  expect(r.tests_allowed).toEqual([{ file: "test/a.test.js", rule: "tests-modified (allowed by issue)" }]);
+});
+
+// ── 리뷰 batch-2 MF-3 — L1의 보호 경계도 깊이를 가리지 않는다 ────────────────────────────────────
+// 재리뷰가 확인한 것: `[protected].factory`의 `"CLAUDE.md"`는 루트만 맞는다(글롭이 `^…$`로 앵커된다).
+// 그래서 `docs/CLAUDE.md`를 새로 들여오는 PR은 L1이 **자동 머지**했다 — 다음 세션의 지시문을 담은
+// 파일인데도. 이제 harness가 `**/CLAUDE*.md`를 적고, 같은 diff가 사람 머지로 간다.
+test("review batch-2 MF-3: nested session config is protected for L1 (docs/CLAUDE.md, src/AGENTS.md, CLAUDE.local.md)", async () => {
+  const h = { protected: { factory: ["**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json"], except: [], additive_only: {} } };
+  const ns = "A\tdocs/CLAUDE.md\nM\tsrc/AGENTS.md\nA\tCLAUDE.local.md\nM\tpkg/.mcp.local.json\nM\tsrc/app.js\nM\tdocs/features/012.md\n";
+  const r = await protectedPaths({ run: makeFakeRun([names(ns)]), cwd: "/repo", base: "b", head: "h", harness: h });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual(["docs/CLAUDE.md", "src/AGENTS.md", "CLAUDE.local.md", "pkg/.mcp.local.json"]);
 });

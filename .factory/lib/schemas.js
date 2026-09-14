@@ -36,6 +36,15 @@ const SCHEMAS = {
     const d = oneOf(e, o, "disposition", ["ready", "needs-info", "wont-do"]);
     if (d === "ready" || !["needs-info", "wont-do"].includes(d)) oneOf(e, o, "tier", ["docs", "standard", "load-bearing"]);
     if (d === "needs-info") req(e, o, "questions", "array");
+    /*
+     * 감사 M1 — `impact_paths`는 **선택** 필드다: triage가 예상하는 변경 경로. 스크립트가 CHARTER의
+     * NEVER_AUTOMATE 글롭을 다시 대는 재료이고(`verify-stage.js` neverAutomateHits), 없으면 그
+     * 재확인이 도는 대상이 없을 뿐 handoff가 무효는 아니다(옛 handoff와의 호환).
+     */
+    if (o?.impact_paths !== undefined && o.impact_paths !== null) {
+      const ps = req(e, o, "impact_paths", "array") || [];
+      ps.forEach((p, i) => { if (typeof p !== "string") e.push(`impact_paths[${i}] must be a string`); });
+    }
   },
   "plan.v1"(o, e) {
     req(e, o, "issue", "number");
@@ -44,9 +53,26 @@ const SCHEMAS = {
     req(e, o, "rounds", "number");
     const dw = req(e, o, "done_when", "array") || [];
     if (dw.length === 0) e.push("done_when must have ≥1 item");
-    dw.forEach((d, i) => { for (const k of ["id", "text", "verify"]) req(e, d, k, "string", `done_when[${i}]`); oneOf(e, d, "level", ["unit", "integration", "e2e"], `done_when[${i}]`); });
+    /*
+     * `covers`는 **선택** 필드다(감사 Task 9): 이 done_when이 어느 dissent를 막는가(dissent id 배열).
+     * 있어야 한다고 요구하는 것은 스키마가 아니라 verify-stage의 plan 검증기다 — 요구는 "dissent가
+     * 있을 때"만 성립하고, 스키마는 dissent를 세지 않는다. 여기서는 모양만 본다.
+     */
+    dw.forEach((d, i) => {
+      for (const k of ["id", "text", "verify"]) req(e, d, k, "string", `done_when[${i}]`);
+      oneOf(e, d, "level", ["unit", "integration", "e2e"], `done_when[${i}]`);
+      if (d?.covers !== undefined && d.covers !== null) {
+        const c = req(e, d, "covers", "array", `done_when[${i}]`) || [];
+        c.forEach((x, j) => { if (typeof x !== "string") e.push(`done_when[${i}].covers[${j}] must be a string`); });
+      }
+    });
     req(e, o, "files_expected", "array");
-    req(e, o, "dissent_log", "array");
+    const dl = req(e, o, "dissent_log", "array") || [];
+    // `id`·`severity`도 선택이다 — 없는 항목은 검증기가 위치(d1, d2 …)와 "심각도 미상"으로 읽는다.
+    dl.forEach((d, i) => {
+      if (d?.id !== undefined && d.id !== null) req(e, d, "id", "string", `dissent_log[${i}]`);
+      if (d?.severity !== undefined && d.severity !== null) oneOf(e, d, "severity", ["low", "medium", "high", "critical"], `dissent_log[${i}]`);
+    });
     req(e, o, "non_goals", "array");
     req(e, o, "open_risks", "array");
   },

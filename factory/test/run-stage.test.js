@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason } from "../bin/run-stage.js";
+import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -524,15 +524,83 @@ test("I2: the guard runs AFTER local entry — `factory run triage` on a backlog
   expect(d.claudeP).toHaveBeenCalled();
 });
 
-test("I2: an unreadable label set never blocks the stage — the guard is a cost defense, not a safety gate", async () => {
+/**
+ * 외부 감사 2026-09-14 M13 — **이 판정은 뒤집혔다.** KTB-10의 원래 규칙은 "라벨 조회 실패는 막지
+ * 않는다(가드는 비용 방어일 뿐, 안전은 전이 그래프가 쥔다)"였는데, 그 전제가 틀렸다: 조회가 실패하면
+ * 이 런은 **자기가 어떤 상태에서 출발했는지 모르는 채로** claude -p를 띄우고, 그 뒤의 전이 그래프는
+ * "지금 라벨"만 볼 뿐 "돌기 전에 무엇이었는가"를 복원해 주지 않는다. 곧 이미 끝난 스테이지의 재점화가
+ * 조회 장애 한 번으로 그대로 통과한다(중복 handoff, plan 한 번 ~$12).
+ * 모르면 멈춘다: `factory:blocked`(cause `api-error`, KTB-22와 같은 등급 — sweeper가 재시도한다).
+ */
+test("M13: a label lookup that throws aborts the stage as blocked/api-error before claude -p", async () => {
   const lines = [];
+  const transition = vi.fn(async () => ({ ok: true, to: "factory:blocked" }));
   const d = baseDeps({
     issueLabels: async () => { throw new Error("gh issue view failed"); },
+    claudeP: vi.fn(), buildContext: vi.fn(), writeHandoff: vi.fn(),
+    transition, release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(2);
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(d.buildContext).not.toHaveBeenCalled();
+  expect(d.writeHandoff).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "api-error", reason: expect.stringContaining("gh issue view failed") }));
+  expect(d.release).toHaveBeenCalled();                             // 잡았던 락은 반드시 놓는다
+  expect(lines.some((l) => /entry state: unreadable — gh issue view failed/.test(l))).toBe(true);
+});
+
+// ── 감사 M13 (b): 같은 head로 이미 끝난 스테이지는 두 번 돌지 않는다 ────────────────
+
+test("M13: completedForHead only sees this turn's handoffs, and only for the same head", async () => {
+  const HEAD = "a".repeat(40), OTHER = "b".repeat(40);
+  const handoff = (sha, stage = "review") => ({ id: 2, createdAt: "2026-09-14T01:00:00Z", body: renderHandoff({ stage, issue: 7, summary: "s", data: { schema: `factory.${stage}.v1`, issue: 7, head_sha: sha } }) });
+  const to = (label) => ({ id: 1, createdAt: "2026-09-14T02:00:00Z", body: `<!-- factory-transition:v1 from=factory:x to=${label} by=script -->` });
+  expect(completedForHead({ comments: [handoff(HEAD)], stage: "review", headSha: HEAD })).toMatchObject({ head: HEAD });
+  expect(completedForHead({ comments: [handoff(OTHER)], stage: "review", headSha: HEAD })).toBe(null);
+  expect(completedForHead({ comments: [handoff(HEAD)], stage: "implement", headSha: HEAD })).toBe(null);
+  expect(completedForHead({ comments: [handoff(HEAD), to("factory:queue")], stage: "review", headSha: HEAD })).toBe(null);
+  expect(completedForHead({ comments: [handoff(HEAD)], stage: "review", headSha: null })).toBe(null);
+  /*
+   * 재작업이 죽지 않는다: rework 전이 시점의 PR head는 아직 그대로라 이전 implement handoff의
+   * head sha가 현재 head와 같다 — 진입 라벨 전이에서 창을 자르지 않으면 이 이슈는 그대로 멈춘다.
+   */
+  expect(completedForHead({ comments: [handoff(HEAD, "implement"), to("factory:rework")], stage: "implement", headSha: HEAD })).toBe(null);
+  // 같은 차례 안의 재점화는 그대로 걸린다(전이가 handoff보다 **앞**에 있다).
+  expect(completedForHead({ comments: [to("factory:rework"), handoff(HEAD, "implement")], stage: "implement", headSha: HEAD })).toMatchObject({ head: HEAD });
+});
+
+test("M13: a duplicate run exits 0 with no side effects at all", async () => {
+  const lines = [];
+  const d = baseDeps({
+    duplicateRun: async () => ({ head: "c".repeat(40), at: "2026-09-14T01:00:00Z" }),
+    claudeP: vi.fn(), buildContext: vi.fn(), transition: vi.fn(), writeHandoff: vi.fn(), comment: vi.fn(),
+    localEntry: vi.fn(), issueLabels: vi.fn(), release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  for (const fn of [d.claudeP, d.buildContext, d.transition, d.writeHandoff, d.comment, d.localEntry, d.issueLabels]) expect(fn).not.toHaveBeenCalled();
+  expect(d.release).toHaveBeenCalled();                             // 락만은 놓는다
+  expect(lines.some((l) => /^duplicate-run: skipped/.test(l))).toBe(true);
+});
+
+test("M13: a duplicate-run check that throws does not stop the stage — it is a cost defense", async () => {
+  const lines = [];
+  const d = baseDeps({
+    duplicateRun: async () => { throw new Error("gh comments failed"); },
     claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })), runRecord: (l) => lines.push(...l),
   });
-  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(0);
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
   expect(d.claudeP).toHaveBeenCalled();
-  expect(lines.some((l) => /entry state: unreadable — gh issue view failed/.test(l))).toBe(true);
+  expect(lines.some((l) => /duplicate-run: check failed — gh comments failed/.test(l))).toBe(true);
+});
+
+test("M13: a label lookup that returns nothing at all is the same abort — absence is not permission", async () => {
+  const transition = vi.fn(async () => ({ ok: true, to: "factory:blocked" }));
+  for (const labels of [null, undefined, "not-an-array"]) {
+    const d = baseDeps({ issueLabels: async () => labels, claudeP: vi.fn(), transition });
+    expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(2);
+    expect(d.claudeP).not.toHaveBeenCalled();
+  }
+  expect(transition).toHaveBeenCalledTimes(3);
 });
 
 test("I2: with no issueLabels dep wired the guard is inert (existing callers unchanged)", async () => {
@@ -663,10 +731,21 @@ test("KTB-20: a harness issue with the variant file missing stops before claude 
   expect(lines.some((l) => /ci-settings: FAIL — \.factory\/ci-settings-harness\.json missing/.test(l))).toBe(true);
 });
 
-test("KTB-20: an unreadable label set falls back to the narrower settings (not the variant)", async () => {
+/**
+ * KTB-20의 원래 질문은 "라벨을 못 읽었을 때 **어느 settings 파일**로 도는가"였고(더 좁은 쪽),
+ * 감사 M13이 그 질문을 지웠다: 라벨을 못 읽으면 스테이지가 아예 돌지 않는다. 좁은 쪽 기본값은
+ * 라벨을 **읽었지만** `factory:harness`가 없을 때의 규칙으로 그대로 남는다 — 그것이 아래 단언이다.
+ */
+test("KTB-20/M13: an unreadable label set never reaches claude -p at all; a read one without factory:harness takes the narrower settings", async () => {
   const seen = [];
-  const d = baseDeps({
+  const unreadable = baseDeps({
     issueLabels: async () => { throw new Error("gh issue view failed"); },
+    claudeP: vi.fn(), transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: unreadable })).toBe(2);
+  expect(unreadable.claudeP).not.toHaveBeenCalled();
+  const d = baseDeps({
+    issueLabels: async () => ["factory:planned"],
     claudeP: vi.fn(async (_ctx, opts) => { seen.push(opts); return { is_error: false, result: "{}" }; }),
     transition: async ({ to }) => ({ ok: true, to }),
   });
@@ -892,6 +971,24 @@ test("C1: approved/merged bind the PR head sha read from the implement handoff",
   }
 });
 
+/**
+ * 외부 감사 2026-09-14 H1c — merge는 script-only라 `buildContext`를 거치지 않는다(ctx=null). 그래서
+ * `factory:merged` 규칙에 정족수 검사를 넣어도 **잴 자가 없었다**: roster도 rosterSize도 undefined.
+ * 호출자가 CHARTER에서 읽은 로스터와 K를 실어 줘야 그 규칙이 실제로 물린다.
+ */
+test("H1c: the merged transition carries a roster and K even with no ctx — merge has no buildContext", async () => {
+  const gh = { comments: vi.fn(async () => implHandoff(9)), prHeadSha: vi.fn(async () => "b".repeat(40)), branchHeadSha: vi.fn() };
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:merged", ctx: null, reviewRoster: ["correctness", "qa"], maxRounds: 3 });
+  expect(x.roster).toEqual(["correctness", "qa"]);
+  expect(x.rosterSize).toBe(2);
+  expect(x.maxRounds).toBe(3);
+
+  // approved는 K를 받지 않는다(ADR-020 KTB-29 r1 SF1) — 통과하는 리뷰를 라운드로 막지 않는다.
+  const gh2 = { comments: vi.fn(async () => implHandoff(9)), prHeadSha: vi.fn(async () => "b".repeat(40)), branchHeadSha: vi.fn() };
+  const y = await buildCtxExtra({ gh: gh2, issue: 7, to: "factory:approved", ctx: null, reviewRoster: ["correctness"], maxRounds: 3 });
+  expect(y.maxRounds).toBeUndefined();
+});
+
 test("C1: a gh failure yields no sha plus a run-record line — never a crash", async () => {
   const lines = [];
   const gh = { branchHeadSha: async () => { throw new Error("HTTP 404"); }, comments: vi.fn(), prHeadSha: vi.fn() };
@@ -981,6 +1078,7 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
     mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
     protectedPaths: async () => ({ ok: true, files: [] }),
     policyViolations: async () => ({ ok: true, files: [] }),
+    ...mergeReviewDepsFor("a".repeat(40)),                          // 감사 H1c — 머지 전 리뷰 검증(같은 커밋)
     mergePr: async () => {}, closeIssue: async () => {},
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
@@ -1434,17 +1532,66 @@ const checkoutBaseDeps = (over = {}) => baseDeps({
   ...over,
 });
 
-/** merge는 checkoutBaseDeps 위에 runMergeStage의 7단계 deps(happy path)를 얹는다. */
-const mergeHappyDeps = (over = {}) => checkoutBaseDeps({
-  defaultBranch: "main",
-  prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
-  gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
-  mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
-  protectedPaths: async () => ({ ok: true, files: [] }),          // KTB-5: 보호 경로 없음 = 자동 머지 가능
-  policyViolations: async () => ({ ok: true, files: [] }),        // KTB-6: 역할 섹션 규칙도 통과
-  mergePr: async () => {}, closeIssue: async () => {},
-  ...over,
+/**
+ * 외부 감사 2026-09-14 H1c/H1b — 주어진 커밋에 대한 "통과한 리뷰"의 재료 한 벌. merge 스테이지는
+ * 이제 `mergePr` 전에 이것들을 전부 묻는다(§merge-stage (6b)).
+ */
+const mergeReviewDepsFor = (sha) => ({
+  reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
+  reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+  // 리뷰 batch-1 MF-2 — handoff의 출처: 러너가 factory/records의 run 기록에 쓴 review-evidence 줄.
+  // 리뷰 batch-2 MF-2 — 그 줄은 런을 지목하고(`runId`), 기대값은 이슈의 review 하트비트에서 따로 온다.
+  reviewRunId: async () => ({ ok: true, runId: "4242", runnerId: "gha-4242" }),
+  reviewRecord: async () => ({ ok: true, record: { stage: "review", runId: "4242", runnerId: "gha-4242", headSha: sha, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
+  maxRounds: 3,
+  prHeadShaLive: async () => sha,
+  factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
+  commitStatuses: async () => [
+    { context: "factory/review", state: "success", creatorLogin: "factory-bot" },
+    { context: "factory/gates", state: "success", creatorLogin: "factory-bot" },
+  ],
 });
+
+/** merge는 checkoutBaseDeps 위에 runMergeStage의 7단계 deps(happy path)를 얹는다. */
+const mergeHappyDeps = (over = {}) => {
+  /**
+   * 외부 감사 2026-09-14 H1c/H1b — 머지 직전 리뷰 검증(§merge-stage (6b))의 재료. 이 런이 **실제로
+   * 체크아웃한 sha**를 그대로 따라간다: 테스트마다 checkoutHead가 다른 sha를 주는데, 리뷰 증거가
+   * 그 커밋의 것이 아니면 "PR head가 움직였다"로 떨어지는 것이 (이제) 올바른 동작이기 때문이다.
+   */
+  let live = "b".repeat(40);
+  const deps = checkoutBaseDeps({
+    defaultBranch: "main",
+    prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+    gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
+    mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+    protectedPaths: async () => ({ ok: true, files: [] }),          // KTB-5: 보호 경로 없음 = 자동 머지 가능
+    policyViolations: async () => ({ ok: true, files: [] }),        // KTB-6: 역할 섹션 규칙도 통과
+    mergePr: async () => {}, closeIssue: async () => {},
+    reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: live, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
+    reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+    reviewRunId: async () => ({ ok: true, runId: "4242", runnerId: "gha-4242" }),
+    reviewRecord: async () => ({ ok: true, record: { stage: "review", runId: "4242", runnerId: "gha-4242", headSha: live, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
+    maxRounds: 3,
+    prHeadShaLive: async () => live,
+    factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
+    commitStatuses: async () => [
+      { context: "factory/review", state: "success", creatorLogin: "factory-bot" },
+      { context: "factory/gates", state: "success", creatorLogin: "factory-bot" },
+    ],
+    ...over,
+  });
+  // checkoutHead가 아예 없는 배선(옛 테스트)은 그대로 둔다 — 없으면 runStage가 체크아웃을 건너뛴다.
+  const base = deps.checkoutHead;
+  if (base) {
+    deps.checkoutHead = async (...args) => {
+      const r = await base(...args);
+      if (r?.ok && r.sha) live = r.sha;
+      return r;
+    };
+  }
+  return deps;
+};
 
 test("review: checkoutHead is called right after assertHandoff, before buildContext/gates", async () => {
   const calls = [];
@@ -1581,6 +1728,8 @@ test("merge: postStatus posts factory/gates via run-stage's reportStatus when a 
   const reportStatus = vi.fn(async () => {});
   const d = mergeHappyDeps({
     gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "e".repeat(40) }),
+    // 감사 H1c — 이 런의 head는 게이트 파일의 `e…`다(checkoutHead가 없는 배선). 리뷰 증거도 같은 커밋이어야 한다.
+    ...mergeReviewDepsFor("e".repeat(40)),
     reportStatus,
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
@@ -2531,4 +2680,23 @@ test("KTB-35: unhandledGateReason picks the first gate carrying the marker, and 
   expect(unhandledGateReason({ status: "GREEN", gates: { unit: { status: "GREEN", reason } } })).toBe(null);
   expect(unhandledGateReason(null)).toBe(null);
   expect(unhandledGateReason({ status: "RED" })).toBe(null);
+});
+
+// ── 리뷰 batch-1 잠정 tier 바닥(Task 4까지) ──────────────────────────────────────────────────────
+// 로스터 크기 = 정족수이고, 그 크기는 tier가 정한다. tier가 triage 에이전트의 **자기 신고**에서만
+// 나오면 낮춰 신고하는 것만으로 로스터도, 머지 스테이지가 강제하는 정족수도 함께 줄어든다(감사 H3).
+// `gates.json`의 `tier_effective`는 이미 diff로 계산된 바닥인데 아무도 읽지 않았다.
+test("review roster tier: the triage self-report can raise the tier but never lower it below the gates floor", () => {
+  // 코드를 건드린 PR을 "docs"라고 신고해도 로스터는 standard의 것이다.
+  expect(reviewTier({ claimed: "docs", floor: "standard" })).toBe("standard");
+  expect(reviewTier({ claimed: "docs", floor: "load-bearing" })).toBe("load-bearing");
+  expect(reviewTier({ claimed: "standard", floor: "load-bearing" })).toBe("load-bearing");
+  // 올리는 방향은 그대로 존중한다 — 자기 신고는 더 엄격해질 수는 있다.
+  expect(reviewTier({ claimed: "load-bearing", floor: "docs" })).toBe("load-bearing");
+  expect(reviewTier({ claimed: "standard", floor: "docs" })).toBe("standard");
+  // 바닥이 없으면(게이트 파일이 없는 경로) 오늘의 동작 그대로다.
+  expect(reviewTier({ claimed: "docs", floor: null })).toBe("docs");
+  // 모르는 값은 docs로 기울지 않는다 — 약한 쪽으로 기우는 정규화는 자기 신고를 그대로 믿는 것과 같다.
+  expect(reviewTier({ claimed: "weird", floor: "standard" })).toBe("standard");
+  expect(reviewTier({ claimed: "weird", floor: "weird" })).toBe("standard");
 });

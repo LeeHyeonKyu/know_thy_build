@@ -1,5 +1,6 @@
 import { latestHandoff } from "./handoff.js";
 import { validate } from "./schemas.js";
+import { verifyReviewQuorum } from "./review-quorum.js";
 
 const fail = (reason) => ({ ok: false, reason });
 const pass = { ok: true };
@@ -73,18 +74,34 @@ const RULES = {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
     const g = gatesGate(ctx); if (g) return g;
     if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`review head_sha ${h.data.head_sha.slice(0, 7)} != PR head ${ctx.prHeadSha.slice(0, 7)}`);
-    if (ctx.rosterSize != null && h.data.verdicts.length !== ctx.rosterSize) return fail(`verdict count ${h.data.verdicts.length} != roster size ${ctx.rosterSize}`);
-    if (!h.data.verdicts.every((v) => v.verdict === "approve")) return fail("not all approve");
-    // ADR-020 KTB-29 r1(SF1): **여기에 K 검사는 없다.** 예전에는 `round > K`면 approve까지 거부했다 —
-    // 그러면 라운드 4의 만장일치 통과가 그래프에서 튕기고, 이슈는 `awaiting-review`에 남아 stalled 팔에
-    // 두 번 재점화된 뒤 같은 사람에게 훨씬 느리고 시끄럽게 올라간다. K는 **실패를 끊는 한도**이지 성공을
-    // 막는 한도가 아니다(스펙 §3.2의 엣지는 `rework → needs_human`이다) — 그 자리는 `nextState`다.
+    // 정족수·all-approve의 판정은 `lib/review-quorum.js` 한 곳이다(외부 감사 H1c) — handoff가 스스로
+    // 적은 `decision`이 아니라 `must_fix`에서 aggregate로 다시 계산한다.
+    // ADR-020 KTB-29 r1(SF1): **여기에 K 검사는 없다**(maxRounds를 넘기지 않는다). 예전에는 `round > K`면
+    // approve까지 거부했다 — 그러면 라운드 4의 만장일치 통과가 그래프에서 튕기고, 이슈는
+    // `awaiting-review`에 남아 stalled 팔에 두 번 재점화된 뒤 같은 사람에게 훨씬 느리고 시끄럽게
+    // 올라간다. K는 **실패를 끊는 한도**이지 성공을 막는 한도가 아니다(스펙 §3.2의 엣지는
+    // `rework → needs_human`이다) — 그 자리는 `nextState`다. 되돌릴 수 없는 `factory:merged`만 예외다(아래).
+    const q = verifyReviewQuorum({ data: h.data, rosterSize: ctx.rosterSize ?? null, rosterRoles: ctx.roster || [] });
+    if (!q.ok) return fail(q.reason);
     return pass;
   },
   "factory:merged"(ctx) {
     const { h, err } = need(ctx, "review", "review.v1"); if (err) return err;
     const g = gatesGate(ctx); if (g) return g;
     if (shaBound(ctx) && ctx.prHeadSha && h.data.head_sha !== ctx.prHeadSha) return fail(`approved handoff head_sha != PR head`);
+    /**
+     * 외부 감사 2026-09-14 H1c — **정족수를 여기서 다시 묻는다.** 예전에는 이 규칙이 `need(review)`로
+     * handoff의 존재·스키마만 보고, 정족수·all-approve는 `factory:approved`에만 있었다. 그런데
+     * `factory:approved` 라벨은 라벨 편집 한 번(훅 우회 — H1a)으로도 붙고, `merge-stage.js`는
+     * `mergePr`를 **이 규칙이 평가되기 전에** 부른다(:476 merge → :487 transition). 곧 이 규칙이
+     * 리뷰를 다시 세지 않는 동안, "리뷰어가 한 번도 뜨지 않은 머지"의 마지막 방어선이 비어 있었다.
+     *
+     * 여기서는 K도 묻는다(`factory:approved`와 달리 — 위 참고). KTB-29 이후 `nextState`가 `round >= K`인
+     * rework을 곧장 needs-human으로 보내므로 `round > K`인 approve는 정상 경로에서 만들어지지 않는다 —
+     * 그런 handoff는 이 그래프를 거치지 않고 생긴 것이고, 되돌릴 수 없는 단계 앞에서 통과시킬 이유가 없다.
+     */
+    const q = verifyReviewQuorum({ data: h.data, rosterSize: ctx.rosterSize ?? null, rosterRoles: ctx.roster || [], maxRounds: ctx.maxRounds ?? null });
+    if (!q.ok) return fail(q.reason);
     if (ctx.prerequisite === true) return pass;
     // 머지는 되돌릴 수 없다 — "확인하지 않았음"과 "확인해보니 RED"를 같게 취급한다(fail closed).
     if (ctx.checksGreen !== true) return fail("required checks not verified GREEN");

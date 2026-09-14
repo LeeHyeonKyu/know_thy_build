@@ -2,13 +2,15 @@ import { join, basename } from "node:path";
 import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { render as renderTemplate, mergeSettings, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
+import { render as renderTemplate, mergeSettings, freshContent, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
+import { findProtBlock, protBlock, writeGlobs, ciDenyEntries } from "../protected-paths.js";
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
-import { L0_CONTEXTS, CODEOWNERS_PATH } from "../bootstrap.js";
-import { checkMergeAuthority } from "./merge-authority.js";
+import { L0_CONTEXTS, CODEOWNERS_PATH, RECORDS_BRANCH } from "../bootstrap.js";
+import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
+import { TRIAGE_DEFAULT_VALUES } from "../config.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
@@ -52,7 +54,11 @@ function settingsIsStale(installedText, freshText) {
   return !isDeepStrictEqual(mergeSettings(installed, template), installed);
 }
 
-/** manifest 중 owner === "factory" 항목만 대상(project/script 소유 파일은 CHARTER 등 사람이 편집하므로 비교 대상이 아니다). */
+/**
+ * manifest 중 owner === "factory" 항목만 대상(project/script 소유 파일은 CHARTER 등 사람이 편집하므로
+ * 비교 대상이 아니다). "신선한 내용"은 `freshContent` 하나로 계산한다 — 설치가 쓰는 것과 여기서
+ * 비교하는 것이 같은 함수여야 생성물(M8의 훅 `prot`·ci-settings 경로 deny)이 매번 stale로 뜨지 않는다.
+ */
 export function checkFiles({ manifest, root, exists, readFile, render = renderTemplate, vars = {} }) {
   const missing = [];
   const stale = [];
@@ -60,7 +66,7 @@ export function checkFiles({ manifest, root, exists, readFile, render = renderTe
     if (e.owner !== "factory") continue;
     const target = join(root, e.dest);
     if (!exists(target)) { missing.push(e.dest); continue; }
-    const fresh = render(readFile(e.src), vars);
+    const fresh = e.generate ? freshContent(e, { readFile, vars }) : render(readFile(e.src), vars);
     const installed = readFile(target);
     const isStale = e.merge === "settings" ? settingsIsStale(installed, fresh) : installed !== fresh;
     if (isStale) stale.push(e.dest);
@@ -112,7 +118,35 @@ export function checkCharter({ root, loadCharter }) {
     const enoent = e.code === "ENOENT" || /ENOENT/.test(e.message || "");
     return [enoent ? c("charter", "WARN", "no CHARTER yet") : c("charter", "FAIL", e.message)];
   }
-  return [charter.status !== "ready" ? c("charter", "WARN", `CHARTER status is ${charter.status} (not ready)`) : c("charter", "PASS")];
+  return [
+    charter.status !== "ready" ? c("charter", "WARN", `CHARTER status is ${charter.status} (not ready)`) : c("charter", "PASS"),
+    // 외부 감사 H6 — 사람 게이트는 gh를 전혀 필요로 하지 않는 CHARTER-only 판정이라 여기에 산다
+    // (`checkGitHub`은 gh가 없으면 통째로 WARN 하나로 접힌다 — 이 선언은 그 침묵에 묻히면 안 된다).
+    ...checkHumanGate(charter),
+    // 외부 감사 M1 — 같은 모양의 CHARTER-only 선언. gh를 필요로 하지 않는다.
+    ...checkTriageDefault(charter),
+  ];
+}
+
+/**
+ * 외부 감사 2026-09-14 M1 — **triage의 기본 판정은 기본값이 아니라 선언이다.**
+ *
+ * 감사 이전의 `factory-triage.md`는 "NEVER_AUTOMATE도 아니고 done_when도 쓸 수 있으면 `ready`"였다.
+ * 곧 **판단이 서지 않는 이슈의 기본값이 통과**였고, 그것을 고른 저장소는 하나도 없었다 —
+ * 침묵이 곧 승인이었다.
+ *
+ * 세 상태를 가른다(`merge.human_gate`와 같은 규칙):
+ *  - `triage.default: needs-info` → PASS. 애매하면 멈춘다 — 템플릿의 기본이고, 침묵은 정지다.
+ *  - `triage.default: ready`      → WARN `triage.default-allow`. 틀린 설정이 아니다(KTB·데모처럼
+ *    다크 루프 자체가 산출물인 저장소는 이쪽을 고른다). 하지만 "애매한 이슈가 그냥 들어온다"는
+ *    사실은 매 실행에서 소리 내어 말해야 한다.
+ *  - 없거나 두 값이 아님 → FAIL `charter.triage-default-unset`.
+ */
+export function checkTriageDefault(charter) {
+  const v = charter?.triage?.default;
+  if (v === "needs-info") return [c("charter.triage-default", "PASS", "triage.default: needs-info — an issue the triage agent cannot write a concrete done_when for stops for a person; silence is not approval (audit M1)")];
+  if (v === "ready") return [c("triage.default-allow", "WARN", "triage.default: ready — an issue that matches nothing in NEVER_AUTOMATE and carries a writable done_when goes straight into the factory without a person. That is a deliberate CHARTER choice; set `triage: { default: needs-info }` to make silence stop instead (audit M1)")];
+  return [c("charter.triage-default-unset", "FAIL", `CHARTER declares no \`triage.default\` — whether an ambiguous issue stops or proceeds is not a default, it is a choice that has to be written down. Add \`triage: { default: needs-info }\` (silence stops) or \`triage: { default: ready }\` (default-allow, stated on purpose) to the CHARTER frontmatter; allowed values are ${TRIAGE_DEFAULT_VALUES.join(" | ")} (audit M1)`)];
 }
 
 const rosterUnion = (obj) => [...new Set(Object.values(obj || {}).flat())];
@@ -161,12 +195,13 @@ export function checkRoles({ charter, roles, exists, root }) {
   ];
 }
 
-// loader는 roles.toml에 없다 — 로스터 역할이 아니라 workflow의 첫 스텝(P3-R1)이라 어떤 [stage.<name>] 블록에도
-// 속하지 않는다. 그래도 설치되는 역할 파일이고 §7.2 규칙을 그대로 지켜야 하므로 lint 대상에 직접 넣는다.
-const LOADER_AGENT = ".claude/agents/factory-loader.md";
+// 외부 감사 2026-09-14 M5 — `factory-loader`는 없어졌다. workflow의 첫 스텝이 LLM 호출이 아니라
+// `factory/lib/context.js`가 Node에서 만드는 `.factory/out/loaded.json`이 되면서, roles.toml에 없는데도
+// lint 대상에 따로 넣어야 했던 역할 파일 하나가 통째로 사라졌다. 그래서 여기엔 예외 목록이 없다 —
+// lint 대상은 `roles.toml`이 가리키는 경로 전부이고, 그것으로 끝이다.
 
 /**
- * roles.toml이 가리키는 역할 `.md`(+ loader)를 전부 §7.2 규칙으로 lint한다 — 섹션·frontmatter·Examples 개수·
+ * roles.toml이 가리키는 역할 `.md`를 전부 §7.2 규칙으로 lint한다 — 섹션·frontmatter·Examples 개수·
  * lessons 경로·쓰기 금지 훅. 파일이 **없는** 항목은 건너뛴다: 부재는 `roles.agent-files`가 이미 FAIL로 잡고
  * 있어서, 여기서 또 잡으면 같은 사실이 서로 다른 두 줄로 보고되고 사람이 두 번 고치려 든다.
  * id는 `agents.<파일 basename>`이다 — 파일명 = frontmatter name = agent_type 규약(Global Constraints)이라
@@ -175,7 +210,6 @@ const LOADER_AGENT = ".claude/agents/factory-loader.md";
 export function checkAgents({ roles, root, readFile, exists }) {
   const paths = [];
   for (const e of collectAllRoleEntries(roles)) if (e.def.agent && !paths.includes(e.def.agent)) paths.push(e.def.agent);
-  if (!paths.includes(LOADER_AGENT)) paths.push(LOADER_AGENT);
 
   const out = [];
   for (const rel of paths) {
@@ -308,6 +342,57 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate, ciHa
 }
 
 /**
+ * `protected.parity` — 보호 목록 세 곳이 **한 출처에서 나왔는가**(2026-09-14 외부 감사 M8 / ADR-023).
+ *
+ * 감사가 확인한 상태: `harness.toml [protected].factory`, `.factory/ci-settings*.json`의 Edit/Write deny,
+ * `.claude/hooks/block-dangerous.sh`의 `prot` 정규식이 **손으로 유지되는 세 목록**이었고 실제로 갈라져
+ * 있었다. 갈라진 목록은 "Edit는 막히는데 `echo > x`는 통과한다"를 만든다.
+ * 리뷰 batch-2 MF-2 — 생성의 출처는 `[protected].factory` **하나가 아니다**: `[protected].runner_only`
+ * (러너만 쓰는 경로, 예: `docs/factory/runs/**`)가 쓰기 경계 쪽에만 더해진다(`writeGlobs`). 이 검사는
+ * 그 합을 그대로 비교하므로, runner_only를 고치고 `--upgrade`를 안 돌린 것도 FAIL로 잡힌다.
+ *
+ * 이제 `factory init`이 나머지 둘을 harness에서 생성하므로, 이 검사는 "생성 후에 손으로 고쳤는가 /
+ * harness를 고치고 `--upgrade`를 안 돌렸는가"를 묻는다. 드리프트는 **FAIL**이다 — WARN이면 그 경고를
+ * 안고 사는 동안 훅과 L2가 서로 다른 파일을 막는다.
+ *
+ * 파일을 못 읽는 것도 FAIL이다(판정 불능은 "안전"이 아니다). 목록이 비어 있는 것도 FAIL이다 — 빈
+ * `[protected].factory`는 보호가 없다는 뜻이고, 그러면 생성된 `prot`가 아무것도 막지 않는다.
+ */
+export function checkProtectedParity({ root, exists, readFile, harness }) {
+  const prot = harness?.protected;
+  if (!prot || !Array.isArray(prot.factory) || !prot.factory.length) {
+    return [c("protected.parity", "FAIL", "harness.toml [protected].factory is missing or empty — nothing derives the hook's protected list or the CI path denies")];
+  }
+  const problems = [];
+  const hookPath = join(root, ".claude/hooks/block-dangerous.sh");
+  if (!exists(hookPath)) {
+    problems.push(".claude/hooks/block-dangerous.sh missing");
+  } else {
+    let text; try { text = readFile(hookPath); } catch (e) { text = null; problems.push(`block-dangerous.sh unreadable: ${e.message}`); }
+    if (text != null) {
+      const found = findProtBlock(text);
+      if (found === null) problems.push("block-dangerous.sh has no `factory:protected` generated block (hand-maintained list)");
+      else if (found !== protBlock(prot)) problems.push("block-dangerous.sh `prot` list differs from harness.toml [protected]");
+    }
+  }
+  for (const [file, harnessMode] of [[".factory/ci-settings.json", false], [".factory/ci-settings-harness.json", true]]) {
+    const p = join(root, file);
+    if (!exists(p)) { problems.push(`${file} missing`); continue; }
+    let deny;
+    try { deny = JSON.parse(readFile(p))?.permissions?.deny || []; } catch (e) { problems.push(`${file} unreadable: ${e.message}`); continue; }
+    const have = deny.filter((d) => /^(Edit|Write)\(/.test(d));
+    const want = ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true }));
+    const missing = want.filter((d) => !have.includes(d));
+    const extra = have.filter((d) => !want.includes(d));
+    if (missing.length) problems.push(`${file} deny missing: ${missing.join(", ")}`);
+    if (extra.length) problems.push(`${file} deny has entries not derived from harness.toml [protected]: ${extra.join(", ")}`);
+  }
+  return [problems.length
+    ? c("protected.parity", "FAIL", `${problems.join("; ")} — run \`npx know-thy-build factory init --upgrade\` (the hook's prot list and the CI path denies are generated from harness.toml [protected]; edit that file, not the generated ones)`)
+    : c("protected.parity", "PASS")];
+}
+
+/**
  * 훅을 실제로 실행해 종료 코드와(로깅 훅이면) exit-0 규칙을 검사한다. 파일이 없으면 실행하지 않고 바로 FAIL.
  * record-agents.sh/verdict-format.sh를 검사 목록에 포함하면, 그 훅들이 실제로 읽을 수 있는 transcript 파일을
  * 임시 디렉터리에 하나 만들어 공유한다(둘 다 SubagentStop이므로 같은 파일을 써도 된다) — finally에서 정리한다.
@@ -395,6 +480,27 @@ export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
 }
 
 /** gh 호출이 하나라도 throw하면(오프라인 등) 세부 검사를 포기하고 단일 WARN으로 떨어진다 — fail closed가 아니라 "확인 못 함"으로 취급(오프라인 허용). */
+/**
+ * 리뷰 batch-1 MF-2 — `protection.records`. 머지 스테이지가 리뷰 handoff를 대조하는 상대는
+ * `factory/records`의 run 기록이다. 그 브랜치가 force-push/삭제로 다시 쓰일 수 있으면 대조는
+ * 아무것도 증명하지 않는다 — 그래서 "보호가 없다"는 조용히 넘어갈 사실이 아니라 매 실행에서
+ * 소리 내어 말할 사실이다(WARN: 플랜·권한 때문에 못 거는 저장소가 정당하게 존재한다. 그때 증거를
+ * 지키는 것은 block-dangerous 훅 하나뿐이고, 그 문장이 그대로 detail에 실린다).
+ */
+export async function checkRecordsProtection({ gh }) {
+  let p = null;
+  try {
+    p = await gh.getBranchProtection(RECORDS_BRANCH);
+  } catch (e) {
+    return [c("protection.records", "WARN", `records branch unprotected — evidence relies on hooks (${RECORDS_BRANCH}: ${e.message})`)];
+  }
+  if (!p) return [c("protection.records", "WARN", `records branch unprotected — evidence relies on hooks. The merge stage checks every review handoff against the run record on ${RECORDS_BRANCH}; without force-push/deletion protection that record can be rewritten. Run \`factory bootstrap\` (the branch must exist first — the first stage run creates it)`)];
+  const force = p.allow_force_pushes?.enabled ?? p.allow_force_pushes;
+  const del = p.allow_deletions?.enabled ?? p.allow_deletions;
+  if (force || del) return [c("protection.records", "WARN", `records branch unprotected — evidence relies on hooks: ${RECORDS_BRANCH} allows ${force ? "force pushes" : ""}${force && del ? " and " : ""}${del ? "deletion" : ""}, so a recorded review verdict can be rewritten. Run \`factory bootstrap\``)];
+  return [c("protection.records", "PASS", `${RECORDS_BRANCH}: no force pushes, no deletion — the review evidence the merge stage checks against is append-only (the single-credential residual stands: the runner and the agent share one token, ADR-023)`)];
+}
+
 export async function checkGitHub({ gh, harness, labels, env = process.env, root = null, exists = null, readFile = null }) {
   // ADR-021 r1 MF-1 — CODEOWNERS는 **저장소의 파일**이지 API 상태가 아니다. gh가 하나라도 실패해
   // 아래 catch로 떨어지면 이 값은 쓰이지 않는다 — 읽기 자체는 부수효과가 없으므로 먼저 읽어 둔다.
@@ -445,6 +551,7 @@ export async function checkGitHub({ gh, harness, labels, env = process.env, root
       missingLabels.length ? c("github.labels", "WARN", `run factory bootstrap — missing labels: ${missingLabels.join(", ")}`) : c("github.labels", "PASS"),
       protectionCheck,
       c("github.required-checks", "PASS", `enforced by L1 at merge: ${l1.length ? l1.join(", ") : "(none configured)"}`),
+      ...(await checkRecordsProtection({ gh })),
       ...(await checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env, codeowners })),
     ];
   } catch (e) {

@@ -216,6 +216,24 @@ test("renderStatus ends with the board hint — the one line that says a live vi
   expect(text.trimEnd().split("\n").pop()).toContain("board:");
 });
 
+/**
+ * 외부 감사 2026-09-14 P2-13 — 리뷰어 겹침 한 줄. 사람이 "리뷰어를 다섯 계속 띄울까"를 판단할 유일한
+ * 숫자이고, 분모가 0인 창에서는 비율을 만들지 않는다.
+ */
+test("renderStatus prints the last-30-day reviewer overlap line under 최근 머지", () => {
+  const s = buildStatus({ ...baseArgs(), overlap: { review_runs: 4, findings_total: 6, overlapping_findings: 1, unique_findings_by_role: { correctness: 2, qa: 1 }, overlap_ratio: 0.17 } });
+  const text = renderStatus(s);
+  expect(text).toContain("- review overlap (30d): 0.17 (1/6 findings raised by ≥2 roles, 4 review run(s)) · unique: correctness 2, qa 1");
+  expect(text.indexOf("review overlap")).toBeGreaterThan(text.indexOf("## 최근 머지"));
+  expect(text.indexOf("review overlap")).toBeLessThan(text.indexOf("## 사용량"));
+});
+
+test("renderStatus overlap line: no findings and no data are different sentences", () => {
+  expect(renderStatus(buildStatus({ ...baseArgs(), overlap: { review_runs: 2, findings_total: 0, overlapping_findings: 0, unique_findings_by_role: {}, overlap_ratio: 0 } })))
+    .toContain("- review overlap (30d): no findings in 2 review run(s)");
+  expect(renderStatus(buildStatus(baseArgs()))).toContain("- review overlap (30d): (no data)");
+});
+
 // ── statusCommand ────────────────────────────────────────────────
 
 function io() {

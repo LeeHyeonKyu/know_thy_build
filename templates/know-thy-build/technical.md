@@ -747,7 +747,7 @@ Right after `docs/TECHNICAL.md` is written, draft the factory charter from the s
 - **`load_bearing` paths** — from the Risk Register and any TDR whose "Consequences" note this decision is hard to reverse: list the source paths/directories that decision touches. These belong in `.factory/harness.toml [load_bearing] paths` (run `/know-thy-build:project` first if that file doesn't exist yet) — it's what makes a diff `load-bearing` tier in the Tiers table below.
 - **`NEVER_AUTOMATE`** — from anything the Technical Adversarial Review or PROJECT.md Principles flagged as "never let an agent touch this without a human": secrets, breaking public-API changes, deploy scripts, destructive data operations. Replace the `(fill in)` placeholders — don't leave them blank.
 - **`tier_default` and `back_pressure`** — from the project's nature (PROJECT.md: personal / OSS / customer-facing). A customer-facing product should default `tier_default: standard` and keep `back_pressure.awaiting_review_max` conservative; a solo/personal project can run looser. State the reasoning as an inline comment, the way `harness.toml [gates.thresholds]` comments do.
-- **Hard limits (`limits: { K, M, R }`, `plan_rounds`) are NOT derived here.** Write the CHARTER template's defaults unchanged — `K: 3, M: 3, R: 2` and `plan_rounds: { docs: 2, default: 3 }`. These are the factory's own rework/RED/round ceilings, and changing them is a decision about the factory's behaviour that must be argued from real run data: it happens through `/know-thy-build:proposal` (a retro proposal PR a human merges), never from a first-pass technical design. Say so to the person if they ask to raise them now.
+- **Hard limits (`limits: { K, M, R }`, `plan_rounds`, `plan`) are NOT derived here.** Write the CHARTER template's defaults unchanged — `K: 3, M: 3, R: 2`, `plan_rounds: { docs: 2, default: 3 }` and `plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }`. These are the factory's own rework/RED/round ceilings, and changing them is a decision about the factory's behaviour that must be argued from real run data: it happens through `/know-thy-build:proposal` (a retro proposal PR a human merges), never from a first-pass technical design. Say so to the person if they ask to raise them now. In particular `plan.mode: single` (one opus planner pass + one skeptic pass) is the measured default, not a placeholder — `docs/factory/audit/response-task-9.md` has the numbers; the 4-role debate costs 5.4×–33.7× and only paid for itself on the one load-bearing issue in that sample, which is why `debate_tiers` names exactly that tier.
 
 **Write `docs/factory/CHARTER.md`** using the Plan 2 template's frontmatter format verbatim — only the values change:
 
@@ -764,7 +764,8 @@ roster:
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }
+plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }
 back_pressure: { awaiting_review_max: {{awaiting_review_max}} }
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }

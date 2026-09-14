@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { run } from "../lib/exec.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
-import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -998,4 +998,321 @@ test("verdict-format: only the LAST assistant text message counts", async () => 
   writeFileSync(t, msg("changed my mind") + "\n" + msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n");
   const r2 = await run("bash", [join(H, "verdict-format.sh")], { input: JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }) });
   expect(r2.code).toBe(0);
+}, 30000);
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 2026-09-14 외부 감사 H1a / H1b / M8 / M9 (ADR-023). 아래 세 테스트는 **감사가 직접 재현한 우회**를
+// 그대로 고정한다 — 고치기 전에 먼저 빨갛게 만든 것들이다.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// H1a — 규칙이 `echo "$c" | grep -E`라 **줄 단위**였다. 셸에서 `\` + 개행은 토큰을 잇는 이음줄이고
+// 명령은 한 문장 그대로인데, 훅이 보는 "줄"은 둘로 쪼개져 어느 쪽도 규칙에 맞지 않는다.
+// 감사 원문: `gh pr \⏎merge 5 --squash`, `git push origin \⏎--force main`,
+// `gh issue edit 7 \⏎--add-label factory:approved`가 전부 exit 0.
+test("block-dangerous: backslash-newline continuations are joined before matching (audit H1a)", async () => {
+  const C = "\\\n";                                   // 명령줄에 실제로 실리는 두 글자: `\` + 개행
+  const blocked = [
+    `gh pr ${C}merge 5 --squash`,
+    `git push origin ${C}--force main`,
+    `gh issue edit 7 ${C}--add-label factory:approved`,
+    `git ${C}merge feature`,
+    `rm -rf ${C}.factory/lib`,
+    `gh api ${C}-X DELETE /repos/o/r/git/refs/heads/factory/lock-7`,
+    // 이음줄 뒤 공백까지 흡수해야 한다 — `\⏎    merge`는 공백이 여러 개다.
+    `gh pr ${C}    merge 5`,
+    // 탭·연속 공백도 하나로 줄인다: 규칙은 `[[:space:]]+`를 쓰지만 `gh\t\tpr  merge`처럼 섞이면
+    // `[^;&|]*` 구간에서 모양이 흐트러진다.
+    `gh\t\tpr   merge 5`,
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, JSON.stringify(c)).toBe(2);
+  }
+}, 30000);
+
+// 개행은 이음줄이 아닐 때 **명령 구분자**다(`;`와 같다). 정규화가 개행을 공백으로 바꾸면 서로 다른 두
+// 문장이 한 문장으로 이어져 없던 매치가 생긴다 — `echo git⏎merge x`가 `git merge`가 되는 식이다.
+// 그래서 이음줄만 공백으로 잇고 나머지 개행은 `;`로 바꾼다(규칙의 `[^;&|]*`가 그 경계를 이미 안다).
+test("block-dangerous: a bare newline stays a command separator, not a token join", async () => {
+  const allowed = [
+    "echo git\nmerge_helper x",                       // 두 문장이다 — 이어 붙이면 `git merge`가 된다
+    "echo gh pr\ncat notes.md",
+    // 여러 줄 문자열이 동사를 **언급**만 하는 경우(기존 오탐 가드가 지키는 자리)
+    "grep -rn \"git merge\" docs/",
+    "git log --grep=\"git merge\"",
+  ];
+  for (const c of allowed) expect((await bash("block-dangerous.sh", cmd(c))).code, JSON.stringify(c)).toBe(0);
+}, 30000);
+
+// H1b — `mergeGates`가 리뷰의 증거로 보는 것은 required check의 **상태**뿐이고(run-stage.js → allChecksGreen)
+// 게시자를 검증하지 않는다. 그래서 스테이지가 자기 손으로 `factory/review`를 success로 올리면 리뷰어가
+// 한 번도 뜨지 않고 머지 게이트가 열린다. 승인도 같다 — `gh pr review --approve`는 머지 배우의 것이다.
+test("block-dangerous: commit status / check-run / review approval forgery is blocked (audit H1b)", async () => {
+  const blocked = [
+    "gh api -X POST /repos/o/r/statuses/abc123 -f state=success -f context=factory/review",
+    "gh api --method POST repos/o/r/statuses/abc123 -f state=success",
+    "gh api https://api.github.com/repos/o/r/statuses/abc123",
+    "out=$(gh api -X POST /repos/o/r/statuses/abc -f state=success)",
+    "gh api -X POST /repos/o/r/check-runs -f name=factory/review -f conclusion=success",
+    "gh api /repos/o/r/commits/abc123/status",
+    "gh api /repos/o/r/commits/abc123/check-runs",
+    "gh pr review 5 --approve",
+    "gh pr review --approve 5",
+    "gh api -X POST /repos/o/r/pulls/5/reviews -f event=APPROVE",
+    // 이음줄 우회도 같이 막혀야 한다(H1a와 한 몸이다)
+    "gh api \\\n-X POST /repos/o/r/statuses/abc -f state=success",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  // 읽기 전용의 평범한 gh 호출은 그대로다
+  for (const c of ["gh pr view 5", "gh pr checks 5", "gh api /repos/o/r/pulls/5"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
+// ── 리뷰 batch-1 MF-1 (H1b-a) — 권한 엔드포인트는 **클라이언트 × 엔드포인트 표**로 막힌다 ────────
+// 재리뷰가 실행해 확인한 결함: H1b의 모든 규칙이 리터럴 `gh`에 앵커돼 있어 `curl`/`wget`/GraphQL이
+// 같은 일을 rc=0으로 해냈다(`GH_TOKEN`은 모든 스테이지의 env에 있다). 표의 각 칸이 그 rc=0 하나다.
+const API_CLIENTS = [
+  (u, body) => `curl -X POST ${u}${body}`,
+  (u, body) => `curl -sX PUT -H "Authorization: Bearer $GH_TOKEN" ${u}${body}`,
+  (u, body) => `curl --request POST ${u}${body}`,
+  (u) => `wget --method=POST --body-data=x ${u}`,
+  (u) => `http POST ${u} state=success`,
+  (u) => `xh PUT ${u}`,
+  (u, body) => `gh api --method PATCH ${u}${body}`,
+  (u) => `node -e "fetch(\\"${u}\\",{method:\\"POST\\"})"`,
+];
+const API_ENDPOINTS = [
+  "https://api.github.com/repos/o/r/statuses/abc1234",
+  "https://api.github.com/repos/o/r/check-runs",
+  "https://api.github.com/repos/o/r/commits/abc1234/status",
+  "https://api.github.com/repos/o/r/pulls/5/reviews",
+  "https://api.github.com/repos/o/r/pulls/5/merge",
+  "https://api.github.com/repos/o/r/issues/7/labels",
+  "https://api.github.com/repos/o/r/labels/factory:approved",
+  "https://api.github.com/repos/o/r/git/refs/heads/factory/lock-7",
+  "https://api.github.com/repos/o/r/git/refs/heads/factory/records",
+  "https://api.github.com/repos/o/r/branches/main/protection",
+  "https://api.github.com/repos/o/r/rulesets",
+  "https://api.github.com/repos/o/r/environments/factory-merge",
+  // GHES 호스트에는 `api.github.com`이 없다 — 앵커는 호스트가 아니라 **경로**여야 한다.
+  "https://ghe.example.com/api/v3/repos/o/r/statuses/abc1234",
+  // 호스트 접두 없이 gh api가 받는 상대 경로도 같은 경로다.
+  "/repos/o/r/statuses/abc1234",
+];
+test("block-dangerous: GitHub authority endpoints are blocked for every HTTP client, not just `gh` (review batch-1 MF-1)", async () => {
+  const cases = [];
+  for (const mk of API_CLIENTS) for (const ep of API_ENDPOINTS) cases.push(mk(ep, " -d @body.json"));
+  await Promise.all(cases.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+}, 120000);
+
+test("block-dangerous: GraphQL mutations are the third spelling of approve/merge/status (review batch-1 MF-1)", async () => {
+  const blocked = [
+    "gh api graphql -f query='mutation { addPullRequestReview(input:{pullRequestId:\"x\",event:APPROVE}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { mergePullRequest(input:{pullRequestId:\"x\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { addLabelsToLabelable(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { removeLabelsFromLabelable(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { createCommitStatus(input:{}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { deleteRef(input:{refId:\"x\"}) { clientMutationId } }'",
+    "gh api graphql -f query='mutation { updateBranchProtectionRule(input:{}) { clientMutationId } }'",
+    "curl -X POST https://api.github.com/graphql -d '{\"query\":\"mutation{createRef(input:{}){clientMutationId}}\"}'",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  // 읽기 전용 GraphQL 조회는 뮤테이션 이름이 없다 — 그대로 통과한다.
+  const ok = "gh api graphql -f query='query { repository(owner:\"o\",name:\"r\") { pullRequest(number:5) { mergeable } } }'";
+  expect((await bash("block-dangerous.sh", cmd(ok))).code, ok).toBe(0);
+}, 60000);
+
+test("block-dangerous: plain GETs through any client stay allowed — the new rules bite on the write shape (review batch-1 MF-1)", async () => {
+  const allowed = [
+    "curl https://api.github.com/repos/o/r/statuses/abc1234",
+    "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/repos/o/r/commits/abc/status",
+    "wget -qO- https://api.github.com/repos/o/r/pulls/5/reviews",
+    "gh api /repos/o/r/pulls/5",
+    "gh pr view 5",
+    "gh pr checks 5",
+    // 다른 호스트의 평범한 POST는 이 저장소의 권한과 무관하다
+    "curl -X POST https://example.com/api/items -d x",
+    // 문서를 읽는 grep은 클라이언트가 아니다
+    "grep -rn \"pulls/5/merge\" docs/",
+    "grep -rn mergePullRequest docs/factory/",
+  ];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// ── 리뷰 batch-1 MF-2 (H1b-b) — `factory/records`는 리뷰 증거의 출처이므로 에이전트가 못 민다 ─────
+// 감사 전에는 `git push origin HEAD:factory/records`가 rc=0이었다(막힌 것은 `+refspec` force뿐).
+// 머지 스테이지가 handoff를 그 브랜치의 run 기록과 대조하게 된 이상, 이 문이 열려 있으면 대조가
+// 아무것도 증명하지 못한다 — 에이전트가 자기 handoff에 맞는 기록을 먼저 밀면 그만이다.
+test("block-dangerous: no agent session pushes to factory/records or factory/lock* (review batch-1 MF-2)", async () => {
+  const blocked = [
+    "git push origin HEAD:factory/records",
+    "git push origin HEAD:refs/heads/factory/records",
+    "git push origin main:refs/heads/factory/records",
+    "git push --force origin HEAD:factory/records",
+    "git push origin +HEAD:refs/heads/factory/records",
+    "git push origin --delete factory/records",
+    "git -C /repo push origin HEAD:factory/records",
+    "out=$(git push origin HEAD:factory/records)",
+    "git push origin HEAD:factory/lock-7",
+    "gh api -X DELETE /repos/o/r/git/refs/heads/factory/records",
+    "curl -X POST https://api.github.com/repos/o/r/git/refs -d '{\"ref\":\"refs/heads/factory/records\"}'",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  // 읽기는 그대로다 — 기록을 **보는** 것은 정상 작업이다.
+  for (const c of ["git fetch origin refs/heads/factory/records:refs/factory/records-remote", "git ls-remote origin refs/heads/factory/records", "git show refs/factory/records-remote:docs/factory/runs/7.md"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 60000);
+
+// ── 리뷰 batch-2 MF-1 — 표에 빠져 있던 권한 엔드포인트와 쓰기 철자 ────────────────────────────────
+// 재리뷰가 실행해 **rc=0**으로 확인한 목록이 그대로 이 표다. `POST /merges`가 그중 가장 큰 것이다:
+// 보호 경로를 한 글자도 건드리지 않고 브랜치를 합친다. SDK 모양(`octokit.request("POST /…")`·`.post(`)은
+// 같은 계열의 고장이 한 단계 옆에서 반복된 것이다 — 동사도 엔드포인트도 명령줄에 그대로 있는데
+// **메서드의 철자만** 플래그에서 문자열/메서드 이름으로 옮겨 갔다.
+test("block-dangerous: issue/PR edits, branch merges and SDK write shapes are blocked too (review batch-2 MF-1)", async () => {
+  const blocked = [
+    // 엔드포인트 셋 (라벨·본문 편집의 REST 철자 / 브랜치 머지 / PR base 재지정)
+    "curl -X PATCH https://api.github.com/repos/o/r/issues/7 -d '{\"labels\":[\"factory:approved\"]}'",
+    "curl -X POST https://api.github.com/repos/o/r/merges -d '{\"base\":\"main\",\"head\":\"pr\"}'",
+    "curl -X PATCH https://api.github.com/repos/o/r/pulls/5 -d '{\"base\":\"x\"}'",
+    "gh api --method PATCH /repos/o/r/issues/7 -f body=x",
+    "gh api -X POST repos/o/r/merges -f base=main -f head=claude/fq-7",
+    "xh PATCH https://api.github.com/repos/o/r/pulls/5 base=x",
+    "http POST https://api.github.com/repos/o/r/merges base=main",
+    "wget --method=POST --body-data=x https://api.github.com/repos/o/r/merges",
+    // 쓰기 모양 넷
+    "curl --upload-file b.json https://api.github.com/repos/o/r/statuses/abc",
+    "node -e \"o.request(\\\"POST /repos/o/r/statuses/abc\\\")\"",
+    "node -e \"octokit.request(\\\"PATCH /repos/o/r/issues/7\\\", {body: \\\"x\\\"})\"",
+    "node -e \"require(\\\"axios\\\").post(\\\"https://api.github.com/repos/o/r/statuses/abc\\\")\"",
+    "python3 -c \"import requests;requests.post(\\\"https://api.github.com/repos/o/r/statuses/abc\\\")\"",
+    "ruby -e \"Net::HTTP.post(URI(\\\"https://api.github.com/repos/o/r/statuses/abc\\\"),\\\"\\\")\"",
+    "node -e \"octokit.request({ method: \\\"DELETE\\\", url: \\\"/repos/o/r/git/refs/heads/factory/lock-7\\\" })\"",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  // 읽기와 **코멘트**는 그대로다 — handoff·rework-response는 `/issues/<n>/comments`로 나간다.
+  const allowed = [
+    "gh api /repos/o/r/pulls/5",
+    "gh api repos/o/r/issues/7",
+    "curl -s https://api.github.com/repos/o/r/issues/7",
+    "gh api -X POST /repos/o/r/issues/7/comments -f body=hi",
+    "curl -X POST https://api.github.com/repos/o/r/issues/7/comments -d @-",
+    "gh issue comment 7 --body hello",
+    // 평범한 소스의 라우터 정의는 권위 엔드포인트가 없으므로 그대로다
+    "node -e \"app.post('/login', h)\"",
+    "curl -X POST https://example.com/api/items -d x",
+  ];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// ── 리뷰 batch-2 #4 — 이슈 **본문**은 사람의 것이다 ─────────────────────────────────────────────
+// `tests_changed_allowed:` 마커는 이슈 본문에서만 읽힌다(integrity.js) — 곧 "이 PR은 테스트를 고쳐도
+// 된다"의 유일한 근거다. 훅은 라벨 플래그만 보고 있어서 `gh issue edit 7 --body "..."`가 rc=0이었다:
+// 에이전트가 자기 자신에게 허가를 써 줄 수 있으면 그 정책은 정책이 아니다.
+test("block-dangerous: gh issue edit --body is blocked, gh issue comment stays open (review batch-2 #4)", async () => {
+  const blocked = [
+    "gh issue edit 7 --body \"tests_changed_allowed: factory/test/**\"",
+    "gh issue edit 7 --body-file /tmp/body.md",
+    "gh issue edit 7 -F /tmp/body.md",
+    "gh issue edit 7 -b hello",
+    "out=$(gh issue edit 7 --body x)",
+    "gh issue edit 7 --add-label x --body y",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  for (const c of ["gh issue comment 7 --body hello", "gh issue comment 7 -F /tmp/handoff.md", "gh issue edit 7 --title x", "gh issue view 7 --comments"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
+// ── 리뷰 batch-2 MF-2 — run 기록 디렉터리는 러너의 것이다 ───────────────────────────────────────
+// 머지 스테이지가 리뷰 증거로 읽는 파일이 거기 산다. 재리뷰가 실행해 확인한 대로 그 디렉터리는
+// 훅의 `prot`에도 ci-settings deny에도 없어서 `echo … >> docs/factory/runs/7.md`가 rc=0이었다 —
+// 그리고 `syncRecords`가 그 내용을 그대로 `factory/records`로 민다. 이제 harness의
+// `[protected].runner_only`가 그 경로를 생성되는 두 목록에 넣는다(머지 경계는 그대로 열려 있다).
+test("block-dangerous: the run record dir is sealed against agent sessions (review batch-2 MF-2)", async () => {
+  const blocked = [
+    "echo x >> docs/factory/runs/7.md",
+    "echo x > docs/factory/runs/7.md",
+    "cat /tmp/forged | tee -a docs/factory/runs/7.md",
+    "sed -i 's/rework/approved/' docs/factory/runs/7.md",
+    "rm docs/factory/runs/7.md",
+    "cp /tmp/forged docs/factory/runs/7.md",
+    "python3 -c \"open('docs/factory/runs/7.md','a').write('x')\"",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  // 읽기는 그대로다 — 기록을 보는 것은 정상 작업이다.
+  for (const c of ["cat docs/factory/runs/7.md", "grep -n review-evidence docs/factory/runs/7.md"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
+// ── 리뷰 batch-2 MF-3 — 세션 설정 보호는 **깊이를 가리지 않는다** ────────────────────────────────
+// 생성되는 `prot`는 앵커 없는 부분 문자열 매칭이라 `**/` 접두를 지운 형태로 들어간다 —
+// 그 한 조각이 루트·중첩·`.local` 변형을 모두 문다.
+test("block-dangerous: session config at any depth is a protected write (review batch-2 MF-3)", async () => {
+  const blocked = [
+    "echo x > CLAUDE.md", "echo x > CLAUDE.local.md", "echo x > docs/CLAUDE.md", "echo x > src/AGENTS.md",
+    "echo {} > packages/x/.mcp.json", "sed -i 's/a/b/' docs/CLAUDE.md", "rm -f src/AGENTS.local.md",
+    "cp /tmp/evil docs/CLAUDE.md",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  for (const c of ["cat docs/CLAUDE.md", "echo x > src/app.js", "echo x > docs/features/012.md"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
+// M8 — 훅의 `prot`는 이제 harness.toml `[protected]`에서 생성된다. 원본 훅이 들고 있는 블록은
+// **템플릿 harness.toml**로 생성된 것이어야 한다(새 채택자가 받는 그 목록).
+test("block-dangerous: the `prot` block is generated from the template harness.toml (audit M8)", async () => {
+  const { findProtBlock, protBlock } = await import("../lib/protected-paths.js");
+  const { parse: parseToml } = await import("smol-toml");
+  const pkgRoot = new URL("../../", import.meta.url).pathname;
+  const text = readFileSync(join(H, "block-dangerous.sh"), "utf8");
+  const harness = parseToml(readFileSync(join(pkgRoot, "templates/factory/factory/harness.toml"), "utf8"));
+  expect(findProtBlock(text)).toBe(protBlock(harness.protected));
+  // 그 목록은 harness의 `.github/**`를 통째로 덮어야 한다 — 감사 전에는 `.github/workflows/factory-`만
+  // 막아서 다른 이름의 워크플로 한 장이 훅을 그대로 지나갔다(M8의 실제 드리프트).
+  expect((await bash("block-dangerous.sh", cmd("echo x > .github/workflows/ci.yml"))).code).toBe(2);
+  expect((await bash("block-dangerous.sh", cmd("rm .github/CODEOWNERS"))).code).toBe(2);
+}, 30000);
+
+// deny-all-writes.sh도 같은 줄 단위 결함을 갖고 있었다 — 쓰기 금지 역할의 유일한 셸 경계다.
+test("deny-all-writes: backslash-newline continuations are joined before matching (audit H1a)", async () => {
+  const C = "\\\n";
+  for (const c of [`rm ${C}-rf src`, `echo x ${C}> src/a.js`, `git ${C}commit -m x`, `sed ${C}-i 's/a/b/' src/a.js`]) {
+    expect((await bash("deny-all-writes.sh", cmd(c))).code, JSON.stringify(c)).toBe(2);
+  }
 }, 30000);

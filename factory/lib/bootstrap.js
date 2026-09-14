@@ -57,6 +57,35 @@ export const MERGE_ENVIRONMENT_BODY = {
 };
 
 /**
+ * 외부 감사 2026-09-14 H6 — **사람의 서명을 PR마다 요구하는 유일한 손잡이.** 감사 이전의 `factory-merge`
+ * 환경에는 `deployment_branch_policy`만 있었다(시크릿을 보호 브랜치의 잡에만 준다) — 그건 *토큰이
+ * 어디로 새는가*를 막을 뿐, *사람이 이 머지를 봤는가*와는 아무 상관이 없다. `merge-stage.js:465`의
+ * `approvePr`가 admin PAT으로 자동 승인하므로, 사람의 서명은 토큰을 한 번 등록한 것이 전부였다.
+ *
+ * `reviewers`를 넣으면 GitHub이 이 환경을 쓰는 **모든 잡을** 시작 전에 멈춰 세우고 그 사람의 승인을
+ * 기다린다 — 곧 머지 PR 하나당 사람의 클릭 하나다. 이것이 다크 루프를 끄는 스위치이므로 기본값이
+ * 아니라 **CHARTER의 명시적 선택**(`merge.human_gate`)이고, 끄는 쪽을 고른 저장소는 doctor가
+ * 매번 그 사실을 WARN으로 말한다.
+ *
+ * 소유자 id를 해석하지 못했으면 `reviewers`를 **넣지 않는다**: 존재하지 않는 리뷰어를 넣으면 PUT
+ * 자체가 422로 실패해 환경이 아예 만들어지지 않고, 그러면 시크릿 보호(deployment_branch_policy)까지
+ * 함께 잃는다. 그 경우는 note로 소리 내어 말한다(계획 단계).
+ */
+export function mergeEnvironmentBody({ humanGate = false, reviewerId = null } = {}) {
+  const body = { ...MERGE_ENVIRONMENT_BODY };
+  if (humanGate && Number.isInteger(reviewerId)) body.reviewers = [{ type: "User", id: reviewerId }];
+  return body;
+}
+
+/**
+ * CHARTER `merge.human_gate`를 부트스트랩이 읽는 방식. **없으면 true로 읽는다**(fail closed):
+ * 아무도 고른 적 없는 저장소에 다크 머지를 기본값으로 주지 않는다. doctor는 같은 상태를 FAIL로
+ * 세워 사람에게 고르라고 말한다 — 두 자리의 역할이 다르다(여기는 "지금 무엇을 설정할까", 거기는
+ * "이 선언이 있는가").
+ */
+export const humanGateOf = (charter) => charter?.merge?.human_gate !== false;
+
+/**
  * CODEOWNERS 본문. 주석이 길어도 되는 자리다 — 이 파일을 여는 사람은 "왜 한 사람만 적혀 있는가"를
  * 묻는 사람이고, 그 답이 곧 ADR-021의 요지다.
  */
@@ -132,6 +161,40 @@ const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_conversation_resolution: false,
 });
 
+/**
+ * ── 리뷰 batch-1 MF-2 (H1b-b) — **증거 브랜치에도 자물쇠가 필요하다.** ────────────────────────────
+ * 머지 스테이지는 이제 review handoff를 `factory/records`의 run 기록과 대조한다(review-quorum.js
+ * `verifyReviewProvenance`). 그런데 감사 시점의 `bootstrapPlan`은 `harness.project.default_branch`
+ * 하나만 보호했고, `git push origin HEAD:factory/records`는 훅에서도 rc=0이었다 — 대조의 상대가
+ * 에이전트가 쓸 수 있는 자리에 있으면 대조는 아무것도 증명하지 않는다. 훅은 이제 그 push를 막고,
+ * 여기서는 **브랜치 쪽에서** 같은 말을 한다.
+ *
+ * 무엇을 걸 수 있고 무엇을 걸 수 없는가(이 구분이 이 블록의 요점이다):
+ *  - `allow_force_pushes: false` · `allow_deletions: false` — **건다.** run 기록은 append-only 로그이고,
+ *    이미 기록된 판정을 **다시 쓰거나 지우는** 것이 위조의 모양이다. 러너의 `syncRecords`는 언제나
+ *    fast-forward push라 이 두 규칙에 걸리지 않는다.
+ *  - `restrictions`(push 허용 계정 목록) — **걸지 않는다.** 기록을 쓰는 것은 머지 배우가 아니라
+ *    **모든 스테이지의 러너**다(같은 봇 계정). 머지 배우로 좁히면 triage·plan·implement·review의
+ *    기록 동기화가 통째로 실패한다 — 증거를 지키려다 증거를 없애는 설정이다. 게다가 조직 저장소
+ *    전용이라 개인 저장소에서는 API가 받지도 않는다.
+ *  - 그래서 **잔여 위험은 그대로 남는다**: 러너와 에이전트가 같은 자격증명을 쓰는 한, 훅이 보지
+ *    못하는 철자로 나가는 append 하나는 이 보호를 통과한다. 진짜 분리는 두 번째 배우이거나
+ *    Actions 실행 증명이고, 그것은 이 주기 밖이다(ADR-023 잔여 위험 #1).
+ */
+export const RECORDS_BRANCH = "factory/records";
+export const RECORDS_PROTECTION_BODY = {
+  required_status_checks: null,
+  enforce_admins: false,            // 사람은 손으로 고칠 수 있어야 한다 — 이 브랜치는 기록이지 게이트가 아니다
+  required_pull_request_reviews: null,
+  restrictions: null,
+  required_linear_history: false,
+  allow_force_pushes: false,        // 이미 기록된 판정을 다시 쓰는 것이 위조의 모양이다
+  allow_deletions: false,
+  required_conversation_resolution: false,
+};
+/** 보호 PUT이 "그런 브랜치 없음"으로 실패했는가 — 첫 스테이지 런이 브랜치를 만들기 전에는 정상이다. */
+export const GH_BRANCH_NOT_FOUND_RE = /\b404\b|not found|branch not found/i;
+
 const secretNote = (label) => `gh secret set ${label} — bootstrap never writes secret values`;
 
 /**
@@ -170,13 +233,17 @@ function codeownersOps(existing) {
  * variable: FACTORY_TOKEN_ISSUED_AT이 없을 때만 오늘 날짜로 세팅 — 있으면 값을 덮어쓰지 않고 note만 남긴다.
  * secrets: bootstrap은 값을 쓸 수 없으므로(비밀이라) 부재를 note로만 알린다.
  */
-export function bootstrapPlan({ harness, today, existing }) {
+export function bootstrapPlan({ harness, today, existing, charter = null }) {
   const ops = LABELS.map((l) => ({ kind: "label", name: l.name, color: l.color, description: l.description }));
 
   // ADR-021 — 모드는 **관측된 시크릿 목록**에서 나온다(사람이 플래그로 고르지 않는다). 플래그였다면
   // "두 배우 모드라고 선언했지만 머지 토큰이 없어 머지가 영영 막힌 저장소"가 가능해진다.
   const twoActor = isTwoActor(existing?.secrets, existing?.envSecrets);
   ops.push({ kind: "protection", branch: harness.project.default_branch, twoActor, body: PROTECTION_BODY(L0_CONTEXTS, { twoActor }) });
+  // 리뷰 batch-1 MF-2 — 리뷰 증거가 사는 브랜치. 실패해도 부트스트랩을 실패로 만들지 않는다
+  // (브랜치가 아직 없거나 플랜이 지원하지 않는 것은 설정 오류가 아니다) — formatBootstrapFailure가
+  // 그 두 경우를 이름으로 갈라 말한다.
+  ops.push({ kind: "protection", branch: RECORDS_BRANCH, records: true, body: RECORDS_PROTECTION_BODY });
 
   // ADR-021 r1 — 두 배우 모드에서만 나오는 두 op. 단일 배우 모드에 이것들을 걸면 승인해 줄 두 번째
   // 계정이 없는 저장소에 "코드 오너 승인 필수"를 심는 셈이라 다크 머지가 영영 멈춘다.
@@ -189,8 +256,18 @@ export function bootstrapPlan({ harness, today, existing }) {
 
   if (twoActor) {
     ops.push(...codeownersOps(existing));
+    // 외부 감사 H6 — 환경 body가 두 가지를 싣는다: 시크릿을 보호 브랜치의 잡에만 주는
+    // `deployment_branch_policy`(r1 MF-2 b)와, CHARTER가 그렇게 선언했을 때의 **사람 리뷰어 1명**.
+    const humanGate = humanGateOf(charter);
+    const reviewerId = existing?.mergeActorId ?? null;
     // 환경은 멱등하다(같은 body로 PUT을 반복해도 결과가 같다) — 존재 여부를 먼저 묻지 않는 이유다.
-    ops.push({ kind: "environment", name: MERGE_ENVIRONMENT, body: MERGE_ENVIRONMENT_BODY });
+    ops.push({ kind: "environment", name: MERGE_ENVIRONMENT, body: mergeEnvironmentBody({ humanGate, reviewerId }) });
+    if (humanGate && !Number.isInteger(reviewerId)) {
+      ops.push({ kind: "note", message: `CHARTER \`merge.human_gate\` is on but the merge actor's numeric user id could not be resolved — the \`${MERGE_ENVIRONMENT}\` environment is created WITHOUT a required reviewer, so every merge job runs unattended. Add the reviewer by hand (repo Settings → Environments → ${MERGE_ENVIRONMENT} → Required reviewers) or re-run bootstrap with ${MERGE_TOKEN_SECRET} in your local env (audit H6)` });
+    }
+    ops.push({ kind: "note", message: humanGate
+      ? `${MERGE_ENVIRONMENT} requires a human reviewer before every merge job starts${Number.isInteger(reviewerId) ? ` (user id ${reviewerId})` : ""} — CHARTER \`merge.human_gate: true\`. Each PR therefore carries one person's signature, not just the one-off token registration (audit H6)`
+      : `${MERGE_ENVIRONMENT} has NO required reviewer — CHARTER declares \`merge.human_gate: false\`, so merges are fully dark: the only human signature in the whole loop is the one-off token registration. That is a deliberate owner choice and \`factory doctor\` says so on every run (\`merge.dark\`, audit H6)` });
   }
 
   const issuedAt = existing?.variables?.FACTORY_TOKEN_ISSUED_AT;
@@ -232,6 +309,17 @@ export function bootstrapPlan({ harness, today, existing }) {
  * 오해하지 않게. 그 외 실패는 지금까지의 문구를 그대로 쓴다.
  */
 export function formatBootstrapFailure({ op, error }) {
+  // 리뷰 batch-1 MF-2 — 증거 브랜치의 보호는 두 가지 이유로 "실패"할 수 있고 둘 다 사고가 아니다.
+  // 어느 쪽이든 **무엇이 꺼졌는지**를 말한다: 그 상태에서 리뷰 증거를 지키는 것은 훅 하나뿐이다.
+  if (op.kind === "protection" && op.records) {
+    if (GH_BRANCH_NOT_FOUND_RE.test(error)) {
+      return `protection ${op.branch}: the branch does not exist yet — the first stage run creates it (records sync). Re-run \`factory bootstrap\` after that; until then the records branch is unprotected and the review evidence relies on the block-dangerous hook alone`;
+    }
+    if (GH_FREE_PLAN_PROTECTION_RE.test(error)) {
+      return `protection ${op.branch}: records branch unprotected — not available on this plan (private repo on GitHub Free). The review evidence the merge stage checks against relies on hooks alone: make the repo public or upgrade to get force-push/deletion protection on ${op.branch}`;
+    }
+    return `protection ${op.branch}: records branch unprotected — ${error}. The review evidence the merge stage checks against relies on hooks alone until this is fixed`;
+  }
   if (op.kind === "protection" && GH_FREE_PLAN_PROTECTION_RE.test(error)) {
     return `protection ${op.branch}: not available on this plan (private repo on GitHub Free) — make the repo public or upgrade; L0 required-check enforcement is off, L1 (merge script requires all checks GREEN) and L2 still apply`;
   }

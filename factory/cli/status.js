@@ -8,6 +8,8 @@ import { loadQuarantine } from "../lib/quarantine.js";
 import { STATES } from "../lib/labels.js";
 import { MISSING_STATE_SCAN_HOURS } from "../lib/sweeper.js";
 import { lastTransition } from "../lib/retro/issue-comments.js";
+import { parseHandoffs } from "../lib/handoff.js";
+import { overlapFrom } from "../lib/retro/harvest.js";
 import { summarizeUsage } from "../lib/usage.js";
 import { buildStatus, renderStatus } from "../lib/status.js";
 
@@ -51,6 +53,27 @@ async function collectHeartbeats(gh, eligibleIssues) {
     if (lastM) map.set(i.number, { last: lastM[1], stage: stageM ? stageM[1] : null, runner: runnerM ? runnerM[1] : null });
   }
   return map;
+}
+
+/**
+ * 외부 감사 2026-09-14 P2-13 — 최근 30일에 머지된 이슈들의 리뷰 handoff에서 리뷰어 겹침을 센다.
+ * 조회는 이미 받아 온 `factory:merged` closed 목록으로 좁힌다(이 명령이 새로 여는 호출은 그 이슈들의
+ * 코멘트뿐이다). 실패는 삼킨다 — 읽기 전용 보고는 지표 하나 때문에 죽지 않는다.
+ */
+export const OVERLAP_WINDOW_DAYS = 30;
+async function collectOverlap(gh, merged, nowIso) {
+  const cutoff = Date.parse(nowIso) - OVERLAP_WINDOW_DAYS * 86400e3;
+  const sets = [];
+  for (const i of merged) {
+    const closedMs = Date.parse(i.closedAt ?? "");
+    if (!(Number.isFinite(closedMs) && closedMs >= cutoff)) continue;
+    try {
+      for (const h of parseHandoffs(await gh.comments(i.number))) {
+        if (h.stage === "review" && Array.isArray(h.data?.verdicts)) sets.push(h.data.verdicts);
+      }
+    } catch { /* 이슈 하나의 코멘트 조회 실패가 보고를 멈추지 않는다 */ }
+  }
+  return overlapFrom(sets);
 }
 
 // STATES에서 status가 직접 조회할 상태 라벨 — backlog(factory 상태가 아님)·factory:merged(별도 closed
@@ -112,7 +135,9 @@ export async function statusCommand({ root, argv = [], io, gh, run = realRun, no
 
   const usage = summarizeUsage(records, { now: nowIso, windowDays: 7 });
 
-  const status = buildStatus({ issues, prs, heartbeats, quarantine, thresholds, charter, usage, now: nowIso });
+  const overlap = await collectOverlap(ghClient, merged, nowIso);
+
+  const status = buildStatus({ issues, prs, heartbeats, quarantine, thresholds, charter, usage, overlap, now: nowIso });
 
   if (json) io.out(JSON.stringify(status));
   else io.out(renderStatus(status));

@@ -216,6 +216,20 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const body = { state, context, description: (description || "").slice(0, 140), target_url: targetUrl };
       await gh(["api", "-X", "POST", `repos/${repo}/statuses/${sha}`, "--input", "-"], { input: JSON.stringify(body) });
     },
+    /**
+     * 외부 감사 2026-09-14 H1b — **누가 이 상태를 올렸는가.** `gh pr checks`도 combined status API도
+     * 게시자를 싣지 않는다(`allChecksGreen`이 게시자를 검증하지 못한 이유가 그것이다). 목록 API
+     * `GET /repos/{repo}/commits/{sha}/statuses`만이 항목마다 `creator`를 준다 — 그리고 **최신순**으로
+     * 답하므로, 같은 context가 여러 번 게시됐으면 첫 항목이 지금 유효한 상태다.
+     *
+     * 조회 대상 sha가 곧 "이 상태가 붙은 커밋"이다 — 호출자가 PR head로 물으면 target sha 검사는
+     * 구조적으로 참이 된다(따로 비교할 필드가 없다). 실패는 삼키지 않는다: 머지 스테이지가
+     * "확인 못 함"으로 받아 fail closed 한다.
+     */
+    async commitStatuses(sha) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/commits/${sha}/statuses?per_page=100`, "--paginate", "--slurp"])).flat();
+      return j.map((s) => ({ context: s.context, state: s.state, creatorLogin: s.creator?.login ?? null, createdAt: s.created_at }));
+    },
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
     },

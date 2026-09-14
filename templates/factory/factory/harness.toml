@@ -21,6 +21,9 @@ node  = "22"
 #   setup = "curl -fsSL https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.0-stable.tar.xz | tar -xJ -C $HOME && echo \"$HOME/flutter/bin\" >> \"$GITHUB_PATH\" && flutter --version"
 
 [commands]                       # all judged by exit code
+# lint: plug YOUR linter here (eslint, ruff, golangci-lint, `dart analyze`, …). A command that always
+# exits 0 (`node -e 0`, `true`, `:`) is NOT a gate — doctor FAILs it as `gates.lint-noop`, because a
+# placeholder that reports "lint GREEN" is worse than no lint gate at all (audit P1-7).
 lint       = "npm run lint"
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
@@ -50,10 +53,18 @@ max_turns       = 12
 # mutation_report = "reports/mutation/mutation.json"
 
 [gates]
+# The levels MUST differ (audit H2 — doctor FAILs `gates.levels-identical` otherwise): the whole point of
+# tier→level is that a load-bearing change gets more than a docs change. fast is what every PR pays;
+# full adds the proof gates (`prove-test`: the new tests fail on base; `new-test-repeat`: they are not
+# flaky); deep is where integration/e2e/diff_coverage/mutation go once they are configured.
+# `required` is enforced regardless of the selected level: a required gate that did not run is
+# MISCONFIGURED, not "not asked" (audit H2). So only name gates here that run at EVERY level you use.
+# At maturity M0 every run is capped at `fast` — prove-test/new-test-repeat below never run until M1
+# (doctor WARNs `gates.m0-downgrade`; each run records `downgraded_from`).
 required = ["lint", "unit"]
 fast     = ["lint", "unit"]
-full     = ["lint", "unit"]
-deep     = ["lint", "unit"]
+full     = ["lint", "unit", "prove-test", "new-test-repeat"]
+deep     = ["lint", "unit", "prove-test", "new-test-repeat"]   # + "integration"/"e2e"/"diff_coverage"/"mutation" when configured
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90
@@ -61,7 +72,9 @@ mutation_score_pct      = 70
 new_test_repeats        = 3
 flaky_isolation_runs    = 3
 flaky_base_runs         = 5
+flaky_max               = 2      # per PR: existing tests excusable as `flaky-existing` (audit M3). Above it, all stay RED
 quarantine_max          = 5
+quarantine_max_effective = 3     # per PR: quarantined tests that may flip a gate RED→GREEN (audit M4)
 quarantine_ttl_days     = 28
 quarantine_return_after = 30
 
@@ -96,12 +109,35 @@ ready_timeout_sec = 90
 # 주어지므로 그 한 장이 `FACTORY_MERGE_TOKEN`을 밖으로 실어 나를 수 있었다. `.github/CODEOWNERS`도
 # 같은 이유로 여기 들어온다 — 그 파일이 곧 "누구의 승인이 머지를 여는가"이므로, 그것을 바꾸는 PR은
 # 반드시 사람이 읽고 머지해야 한다.
-factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md",
+# 리뷰 batch-2 MF-3 — 세션 설정 파일은 `**/`로 적는다. Claude Code는 세션이 건드리는 디렉터리의
+# `CLAUDE.md`/`AGENTS.md`를 함께 읽으므로 `docs/CLAUDE.md`·`src/AGENTS.md`도 같은 주입 채널이다.
+# 루트만 적어 두면 그 PR은 L1의 보호 밖이고(자동 머지), tier도 `docs`로 떨어진다 —
+# 재리뷰가 실행해 확인한 그대로다. `**/`는 0개 디렉터리도 맞으므로 루트 파일도 그대로 포함된다.
+factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md", "**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json",
                  "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
                  "tsconfig*.json", ".eslintrc*", "eslint.config.*"]
                  # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
                  # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
 except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
+# ── 리뷰 batch-2 MF-2 — `runner_only`: **러너만 쓰는 경로**(쓰기 경계이지 머지 경계가 아니다) ─────
+# run 기록(`docs/factory/runs/**`)은 머지 스테이지가 리뷰 증거로 읽는 파일이다(`review-evidence:` 한 줄).
+# 재리뷰가 확인한 대로 그 디렉터리는 에이전트 세션이 쓸 수 있었고(`echo … >> docs/factory/runs/7.md` rc=0)
+# `syncRecords`는 그 내용을 그대로 `factory/records`로 민다 — 곧 에이전트가 자기 판정을 미리 적어 둘 수 있었다.
+# `[protected].factory`에 넣을 수는 없다: 그 파일은 러너가 매 스테이지 덧붙이고 사람 없이 머지돼야 한다
+# (그래서 위 `except`에 있다). 그래서 **생성되는 훅 `prot`와 ci-settings deny에만** 들어간다.
+runner_only   = ["docs/factory/runs/**"]
+# ── 2026-09-14 외부 감사 M8 / ADR-023: 이 섹션이 보호 경로의 **단일 출처**다 ─────────────────────
+# `factory init`이 여기서 두 가지를 생성한다: `.claude/hooks/block-dangerous.sh`의 `prot` 정규식과
+# `.factory/ci-settings*.json`의 `Edit(...)`/`Write(...)` deny. 감사 전에는 셋이 손으로 유지되는 별개
+# 목록이었고 실제로 갈라져 있었다(훅은 `.github/workflows/factory-`만 막는데 여기는 `.github/**`).
+# doctor의 `protected.parity`가 드리프트를 FAIL로 잡는다 — 생성물을 손으로 고치지 말고 여기를 고친 뒤
+# `npx know-thy-build factory init --upgrade`를 돌린다.
+#
+# `agent_writable`은 **머지 경계와 쓰기 경계가 갈라지는** 자리다. 위 목록은 "이 경로를 건드린 PR은
+# 사람이 머지한다"(L1)이고, 생성되는 deny/`prot`는 "에이전트 세션이 이 파일을 쓰지 못한다"(L2/훅)다.
+# 둘이 갈라져야 하는 경로 — 사람이 머지해야 하지만 에이전트가 정상 업무로 편집하는 경로 — 만 여기
+# 적는다. 대부분의 저장소는 비어 있다(팩토리 자신을 개발하는 저장소가 예외다).
+agent_writable = []
 # additive_only: 이 두 섹션에 **추가만** 허용한다(§8.1의 다크 경로). 정책이지 변조 판정이 아니므로
 # integrity 체크는 이것으로 RED가 되지 않는다 — 벗어난 편집이 있으면 merge 스테이지가 자동 머지를
 # 거부하고 사람이 머지한다(ADR-020 KTB-6). 그래야 `:role` PR과 역할 파일을 건드리는 업그레이드를
@@ -110,6 +146,14 @@ additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true
 
 [load_bearing]
+# 되돌리기 어려운 경로 — 스키마·공개 API·결제/인증처럼 "틀리면 되돌릴 수 없는" 코드. 여기 걸리는
+# diff는 tier가 `load-bearing`으로 올라가고(triage가 뭐라 신고했든 — 외부 감사 H3), deep 레벨의
+# 게이트와 가장 넓은 리뷰 로스터를 받는다. `/know-thy-build:harness`가 코드에서 후보를 뽑아 채운다.
+#
+# **설치된 레이아웃 그대로 적는다.** 이 저장소에서 팩토리 코드는 `.factory/lib/…`·`.factory/bin/…`에
+# 산다(팩토리 자신을 개발하는 저장소만 `factory/…`가 소스다) — 남의 레이아웃을 베껴 오면 매치가 0이
+# 되고, 그러면 목록은 그럴듯한데 tier 바닥이 통째로 사라진다. doctor의 `load-bearing.paths-exist`가
+# 매치 0인 항목을 FAIL로, 빈 목록을 WARN으로 잡는다(빈 목록 = 어떤 PR도 load-bearing이 될 수 없다).
 paths = []
 
 [evidence]

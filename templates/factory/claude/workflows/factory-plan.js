@@ -10,39 +10,6 @@ export const meta = {
   ],
 };
 
-// LOADER schema — every workflow shares this exact literal (Plan 3 Global Constraints).
-const LOADER = {
-  type: 'object',
-  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
-  properties: {
-    issue: { type: 'number' },
-    stage: { type: 'string' },
-    tier: { type: 'string' },
-    maturity: { type: 'string' },
-    roster: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['name', 'agentType', 'model'],
-        properties: {
-          name: { type: 'string' },
-          agentType: { type: 'string' },
-          model: { type: 'string' },
-          lessons: { type: 'string' },
-        },
-      },
-    },
-    rounds: { type: 'number' },
-    limits: { type: 'object' },
-    spec_path: { type: 'string' },
-    pr: { type: 'number' },
-    head_sha: { type: 'string' },
-    must_fix: { type: 'array', items: { type: 'object' } },
-    disputed: { type: 'array', items: { type: 'object' } },
-    orchestration: { type: 'string' },
-  },
-};
-
 const DONE_WHEN_ITEM = {
   type: 'object',
   required: ['id', 'text', 'verify', 'level'],
@@ -102,6 +69,45 @@ const PLAN_V1 = {
     },
     non_goals: { type: 'array', items: { type: 'string' } },
     open_risks: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+// Single mode (audit Task 9) — the skeptic's one pass. It may only ADD: risks it wants on the record,
+// done_when items that turn those risks into gates, and dissent entries for what it could not resolve.
+// There is no field for removing or rewriting the planner's items, by construction.
+const SKEPTIC_ADD = {
+  type: 'object',
+  required: ['risks', 'done_when'],
+  properties: {
+    risks: { type: 'array', items: { type: 'string' } },
+    done_when: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['id', 'text', 'verify', 'level'],
+        properties: {
+          id: { type: 'string' },
+          text: { type: 'string' },
+          verify: { type: 'string' },
+          level: { type: 'string', enum: ['unit', 'integration', 'e2e'] },
+          covers: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    dissent: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['role', 'objection', 'resolution'],
+        properties: {
+          id: { type: 'string' },
+          role: { type: 'string' },
+          objection: { type: 'string' },
+          resolution: { type: 'string' },
+          severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+        },
+      },
+    },
   },
 };
 
@@ -174,20 +180,14 @@ function boundToMaturity(p) {
 
 phase('Load');
 
-const loaderPrompt =
-  `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
-  `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
-  `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
-  `pr/head_sha from handoffs.implement if present; ` +
-  `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
-  `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
-  `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
-  `Note: for stage "triage" the roster in context.json is intentionally empty (triage is a single named ` +
-  `role, not a debate roster) — in that case return roster: [{name: "triage", agentType: "factory-triage", ` +
-  `model: <.factory/roles.toml [triage].model>}].`;
-
-const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader', model: 'sonnet', schema: LOADER }))();
+// 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
+// `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적는 것뿐이었는데, 그 한 번의 복사에 스테이지마다 sonnet
+// 호출 하나가 들었고, 복사는 틀릴 수 있었다 — `model`은 이미 `factory/lib/context.js`가 `def.model`로
+// 들고 있었다. 이제 그 파일이 같은 객체를 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓰고,
+// 디스패처가 그것을 그대로 Workflow의 `args.loaded`로 넘긴다(워크플로 스크립트는 파일을 읽을 수 없다,
+// §4.2.3). 역할 에이전트가 **스스로** 읽는 경로는 그대로 남는다 — 바뀐 것은 스크립트가 제 제어 흐름을
+// 위해 쓰던 재료의 출처뿐이다.
+const loaded = args.loaded ?? null;
 
 const issue = Number(args.issue);
 
@@ -197,7 +197,7 @@ const issue = Number(args.issue);
 if (!loaded) {
   return {
     issue,
-    error: 'loader returned nothing',
+    error: 'context payload missing',
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -209,7 +209,7 @@ if (!loaded) {
 if (Number(loaded.issue) !== issue) {
   return {
     issue,
-    error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
+    error: `context issue mismatch: the context payload says ${loaded.issue}, dispatcher asked for ${args.issue}`,
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -222,6 +222,14 @@ const maturity = loaded.maturity;
 // CHARTER plan_rounds, via the loader: docs tier debates in 2 rounds (positions → synthesis), every
 // other tier in 3 (positions → cross-examination → synthesis). Sign-off is not a round.
 const rounds = Number(loaded.rounds) || 3;
+// Audit Task 9: how this plan runs. `single` is one opus planner pass + one skeptic pass (2 calls);
+// `debate` is the R1/R2/synthesis/sign-off room below. The CHARTER decides (`plan.mode` +
+// `plan.debate_tiers`, default: single everywhere but `load-bearing`) and context.json carries the
+// answer — the workflow never re-derives it from the tier. A context with no `plan` block is an
+// un-upgraded mirror: fall back to `debate`, the behaviour that repo already had, rather than
+// silently cutting a load-bearing plan down to one pass.
+const mode = loaded.plan?.mode === 'single' ? 'single' : 'debate';
+const maxDoneWhen = Number(loaded.plan?.max_done_when) || 6;
 
 // The shared reading order. The workflow cannot read files — every role opens these itself.
 const reading = (r) =>
@@ -233,6 +241,99 @@ const reading = (r) =>
   `Every done_when \`level\` must stay within \`harness.maturity\`: M0 → \`unit\` only, ` +
   `M1 → \`unit\` or \`integration\`, M2 → \`unit\`, \`integration\` or \`e2e\`. ` +
   `Answer with the English field names of your output schema.`;
+
+// The contract both modes must satisfy, stated once. The validator in verify-stage enforces every
+// line of it — a plan that breaks one is an invalid artifact, not a warning (audit Task 9).
+const planRules =
+  `Three rules bind the plan, and a script rejects the handoff that breaks one:\n` +
+  `1. done_when has at most ${maxDoneWhen} items. Fewer is better — every item you invent is a new ` +
+  `surface the reviewers will judge, and in the 2026-09-14 baseline a third of all must_fix items came ` +
+  `from done_when the plan invented rather than from the issue.\n` +
+  `2. Any risk you leave in dissent_log with severity medium or higher must be named by a done_when ` +
+  `item's \`covers: [<dissent id>]\`. A risk you saw and left as prose is the single most expensive ` +
+  `failure this factory has measured — recognition is not a contract.\n` +
+  `3. done_when observes user-visible behaviour. It does not prescribe the shape of the test: no ` +
+  `whitelists of paths or prefixes, no "must not appear anywhere", no required ordering of sections, ` +
+  `no regex over the repository's files — unless the issue itself asks for a guard.`;
+
+if (mode === 'single') {
+  // One opus planner writes the whole plan; one skeptic gets one pass at it. No cross-examination,
+  // no synthesizer, no sign-off round — the planner's own output, plus whatever the skeptic could
+  // ADD to it, is the final plan. The phases below stay declared so `meta` is one shape for both modes.
+  const planner = roster.find((r) => r.name === 'synthesizer') || roster[0];
+  const sk = roster.find((r) => r !== planner && r.name === 'skeptic') || roster.find((r) => r !== planner) || null;
+
+  phase('Positions');
+
+  let plan = planner
+    ? boundToMaturity(await once(() => agent(
+        `${reading(planner)}\n\n` +
+        `Issue #${issue} (tier ${tier}). Write the plan the builder will work from — the whole plan, ` +
+        `in one pass. done_when is the contract: each item verifiable by a named test of the form ` +
+        `test_${issue}_<slug>. files_expected is the repository paths the change honestly needs and no ` +
+        `more. non_goals names what this issue will not do, so review cannot widen it later. ` +
+        `open_risks is what you saw and are not gating on; dissent_log is where a risk you are ` +
+        `knowingly not resolving goes, each entry with an \`id\`, the \`role\` that would raise it and ` +
+        `a \`severity\`.\n\n${planRules}`,
+        { agentType: planner.agentType, model: planner.model, label: `plan:${planner.name}`, schema: PLAN_V1 },
+      ))())
+    : null;
+
+  phase('Cross-examination');
+
+  // The skeptic's schema has no field for deleting or rewriting — it can only add. That is the
+  // property that makes a second pass cheap: there is no negotiation to converge, so there is no R2.
+  let added = null;
+  if (plan && sk) {
+    const add = await once(() => agent(
+      `${reading(sk)}\n\n` +
+      `Issue #${issue} (tier ${tier}). The plan, in full:\n${JSON.stringify(plan, null, 2)}\n\n` +
+      `Attack it once. You cannot rewrite or delete anything in it — you can only add. Return: ` +
+      `risks (what this plan does not see, one line each), done_when (ONLY items that turn a risk you ` +
+      `just named into a gate — give each a fresh id not already in the plan, and \`covers\` naming the ` +
+      `dissent ids it answers), and dissent (risks you could not turn into a gate, each with an id, ` +
+      `severity and the reason it stays open). The plan already has ${(plan.done_when || []).length} ` +
+      `done_when items and the ceiling is ${maxDoneWhen} — if you have nothing that clears that bar, ` +
+      `return empty arrays. An added item that merely restates one already in the plan is worse than ` +
+      `no item at all.\n\n${planRules}`,
+      { agentType: sk.agentType, model: sk.model, label: `skeptic:${sk.name}`, schema: SKEPTIC_ADD },
+    ))();
+
+    phase('Synthesis');
+
+    if (add) {
+      const dwIds = new Set((plan.done_when || []).map((d) => d && d.id));
+      const newDw = (Array.isArray(add.done_when) ? add.done_when : []).filter((d) => d && !dwIds.has(d.id));
+      const risks = Array.isArray(plan.open_risks) ? [...plan.open_risks] : [];
+      const newRisks = (Array.isArray(add.risks) ? add.risks : []).filter((r) => r && !risks.includes(r));
+      const newDissent = (Array.isArray(add.dissent) ? add.dissent : []).filter(Boolean);
+      added = { done_when: newDw.length, risks: newRisks.length, dissent: newDissent.length };
+      plan = boundToMaturity({
+        ...plan,
+        done_when: [...(plan.done_when || []), ...newDw],
+        open_risks: [...risks, ...newRisks],
+        dissent_log: [...(Array.isArray(plan.dissent_log) ? plan.dissent_log : []), ...newDissent],
+      });
+    }
+  } else {
+    phase('Synthesis');
+  }
+
+  phase('Sign-off');
+
+  return {
+    ...(plan || {}),
+    issue,
+    tier,
+    roles: rosterNames,
+    rounds,
+    orchestration: 'workflow',
+    guarantee: 'structural',
+    // Same digest slot as the debate, different shape: there was no room, so there is nothing to
+    // summarise except who wrote the plan and how much the one challenge actually added.
+    debate: { mode: 'single', planner: planner ? planner.name : null, skeptic: sk ? sk.name : null, skeptic_added: added },
+  };
+}
 
 phase('Positions');
 
@@ -292,8 +393,9 @@ let plan = r1.length > 0
       `Produce the single plan the builder will work from. done_when is the contract — each item ` +
       `verifiable by a named test. files_expected starts from what the positions agree on. non_goals ` +
       `names what this issue will not do, so review cannot widen it later. Every objection from round 2 ` +
-      `that you did not resolve goes into dissent_log verbatim with the role that raised it — deleting an ` +
-      `objection is forging consensus, not reaching it.`,
+      `that you did not resolve goes into dissent_log verbatim with the role that raised it (with an ` +
+      `\`id\` and a \`severity\`) — deleting an objection is forging consensus, not reaching it.\n\n` +
+      `${planRules}`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))())
   : null;
@@ -360,6 +462,7 @@ return {
   // 사람이 읽을 수 없는 크기가 되고, 그 비용을 implement·review가 매번 다시 치른다.
   // 남는 것: 누가 무엇을 주장했는지(한 줄), 반박이 몇 건이었는지, 서명 결과. 나머지는 dissent_log가 들고 있다.
   debate: {
+    mode: 'debate',
     r1: r1.map(({ role, position }) => ({ role, position })),
     r2_objections: r2.reduce((n, x) => n + (Array.isArray(x.objections) ? x.objections.length : 0), 0),
     votes,

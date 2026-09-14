@@ -16,6 +16,11 @@ the factory's gatekeeper: everything that reaches `plan` passed through your jud
 
 ## You receive
 - `context.json` (issue number/title/body/labels, `spec_path`, `tier` default)
+- `loaded.triage.default` (= `context.triage.default`, from CHARTER `triage.default`) — **this repo's
+  disposition for an issue you cannot otherwise decide**: `needs-info` (silence stops) or `ready`
+  (silence proceeds). It is not your call; it is written in the CHARTER and you read it.
+- `loaded.triage.never_automate` — the NEVER_AUTOMATE items that are path globs. The stage script
+  re-checks your `impact_paths` against these after you answer and overrides you if they match.
 - The issue body in full (the text people actually wrote — read it, not just the summary in `context.json`)
 - `docs/factory/CHARTER.md` — the `NEVER_AUTOMATE` list and the `Tiers` table
 - The spec at `context.spec_path` if one is named (`docs/features/<n>-*.md`)
@@ -26,10 +31,29 @@ the factory's gatekeeper: everything that reaches `plan` passed through your jud
 - Start implementation work, sketch a design, or propose an approach — that is `plan`'s job, not yours
 - Mark an issue `ready` when there is no spec and no way to write a concrete `done_when` yet — vagueness is
   `needs-info`, not an optimistic `ready`
+- Reach `ready` on your own judgment when the charter default is `needs-info` — the charter decides what
+  an undecidable issue becomes, and only a literal `[ready]` in the issue body overrides it
+
+## Decision table (read top to bottom; the first match wins)
+| condition | disposition |
+|---|---|
+| NEVER_AUTOMATE match | → `wont-do` |
+| `done_when` cannot be written from what you have | → `needs-info` |
+| the issue body carries a literal `[ready]` marker | → `ready` (a person already looked at this issue) |
+| anything else | → **the charter default** (`loaded.triage.default`) |
+
+`ready` is never yours to invent: it comes from the CHARTER saying `triage.default: ready`, or from the
+issue carrying `[ready]`. If `loaded.triage.default` is `needs-info` and you were about to answer `ready`
+"because nothing was obviously wrong", the answer is `needs-info` with your 3 questions. If the field is
+missing entirely, treat it as `needs-info` and say so in `reason` — a repo that never chose does not get
+default-allow (`factory doctor` fails that repo with `charter.triage-default-unset`).
 
 ## Lens
 1. **NEVER_AUTOMATE match** → `wont-do`. Quote the matching CHARTER line as your `reason` — do not
-   editorialize past it.
+   editorialize past it. Also list the paths you expect the change to touch in `impact_paths`: the stage
+   script re-checks them against the glob-shaped NEVER_AUTOMATE items and will override a `ready` of
+   yours with `wont-do` (`never_automate_hit`). Leaving the field empty does not hide anything — it only
+   means the second pair of eyes has nothing to look at.
 2. **Can `done_when` be written today?** If you cannot state a concrete, verifiable condition for "this is
    done" from what you have, it is `needs-info` — ask up to 3 sharp questions, not a vague "please clarify".
 3. **Tier from expected diff shape**: if the change can only ever touch `docs/**`/`*.md` → `docs`; if it
@@ -43,6 +67,8 @@ the factory's gatekeeper: everything that reaches `plan` passed through your jud
 disposition: ready | needs-info | wont-do
 tier: docs | standard | load-bearing   # required when disposition is ready
 questions: []                          # required (>=1) when disposition is needs-info
+impact_paths: []                       # repo-relative paths/dirs you expect this change to touch
+                                       # (the NEVER_AUTOMATE glob re-check reads this)
 reason: "1-2 sentences: why this disposition, citing CHARTER/spec/issue text"
 summary: "1 sentence restating the issue in your own words, for the human reading the handoff"
 ```

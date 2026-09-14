@@ -48,6 +48,28 @@ export function downgradeUnknownMode(checks, variableName) {
     : c));
 }
 
+/**
+ * 외부 감사 2026-09-14 H6 — **사람 게이트는 기본값이 아니라 선언이다.**
+ *
+ * 감사 이전에는 "사람이 머지를 본다"가 어디에도 기록되지 않았다: `approvePr`가 admin PAT으로 자동
+ * 승인했고, `awaiting_review_max`는 사람의 주의력이 아니라 동시 잡 수를 보호했으며, `factory-merge`
+ * 환경에는 `reviewers`가 없었다. 곧 **전 저장소가 조용히 다크 머지**였고, 그것을 고른 사람도 그것을
+ * 아는 사람도 없었다.
+ *
+ * 세 상태를 가른다:
+ *  - `merge.human_gate: true`  → PASS. 부트스트랩이 `factory-merge` 환경에 리뷰어 1명을 건다.
+ *  - `merge.human_gate: false` → WARN `merge.dark`. 틀린 설정이 아니다 — 다크 도그푸드는 정당한
+ *    선택이다. 하지만 "PR마다의 사람 서명이 없다"는 사실은 매 실행에서 소리 내어 말해야 한다.
+ *  - 필드 자체가 없음        → FAIL `charter.merge-human-gate-unset`. 아무도 고른 적이 없는 것을
+ *    조용히 다크로 읽지 않는다. 고치는 법은 한 줄을 적는 것이고, 그 한 줄이 곧 결정의 기록이다.
+ */
+export function checkHumanGate(charter) {
+  const v = charter?.merge?.human_gate;
+  if (v === true) return [c("charter.merge-human-gate", "PASS", "merge.human_gate: true — the factory-merge environment holds every merge job for a human reviewer, so each PR carries a person's signature (audit H6)")];
+  if (v === false) return [c("merge.dark", "WARN", "merge.dark — no per-PR human signature (merge.human_gate=false): the only human signature in the loop is the one-off token registration. This is a deliberate CHARTER choice; set merge.human_gate: true to require a reviewer on the factory-merge environment (audit H6)")];
+  return [c("charter.merge-human-gate-unset", "FAIL", "CHARTER declares no `merge.human_gate` — whether a person signs off on every merge is not a default, it is a choice that has to be written down. Add `merge: { human_gate: true }` (a required reviewer on the factory-merge environment) or `merge: { human_gate: false }` (dark merge, stated on purpose) to the CHARTER frontmatter, then re-run `factory bootstrap` (audit H6)")];
+}
+
 export async function checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env, codeowners = null }) {
   // ADR-021 r2 (KTB-33 finding MF-A) — the repo secret list alone is not the whole picture: the owner
   // checklist tells owners to move FACTORY_MERGE_TOKEN into the `factory-merge` environment and delete

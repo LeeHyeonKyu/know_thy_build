@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
+import { protBlock, ciDenyEntries, writeGlobs } from "../lib/protected-paths.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -174,12 +175,11 @@ test("checkRoles: everything present → all PASS", () => {
   expect(c["roles.lessons-files"].level).toBe("PASS");
 });
 
-test("checkAgents: lints every installed roles.toml agent, skips the ones that are not there, and covers factory-loader", () => {
+test("checkAgents: lints every installed roles.toml agent and skips the ones that are not there", () => {
   const files = {
     "/r/.claude/agents/reviewer-correctness.md": agentText("reviewer-correctness"),
     // 설치된 사본에서 ## Lens가 지워진 상태 — 템플릿은 멀쩡해도 repo의 사본이 어긋날 수 있다(그게 doctor의 일이다)
     "/r/.claude/agents/plan-architect.md": agentText("plan-architect").replace(/## Lens\n[\s\S]*?(?=\n## )/, ""),
-    "/r/.claude/agents/factory-loader.md": agentText("factory-loader"),
   };
   const roles = {
     triage: { agent: ".claude/agents/factory-triage.md" }, // 설치 안 됨 → roles.agent-files의 몫, 여기선 건너뛴다
@@ -191,7 +191,7 @@ test("checkAgents: lints every installed roles.toml agent, skips the ones that a
   expect(c["agents.plan-architect"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("## Lens") });
   expect(c["agents.plan-architect"].detail).toContain("section");
   expect(c["agents.factory-triage"]).toBeUndefined();          // 부재는 중복 보고하지 않는다
-  expect(c["agents.factory-loader"].level).toBe("PASS");       // roles.toml에 없지만 설치되는 파일이다
+  expect(c["agents.factory-loader"]).toBeUndefined();          // 감사 M5 — 로더는 없어졌다
 });
 
 test("checkAgents: a name that does not match its filename FAILs", () => {
@@ -210,10 +210,10 @@ test("checkAgents: the shipped roles.toml + agent templates are what an initiali
     readFile: (p) => readFileSync(asInstalled(p), "utf8"),
   });
   for (const ch of checks) expect(ch.level, `${ch.id}: ${ch.detail}`).toBe("PASS");
-  // 14 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5 + retro 1) + loader. merge에는 역할이
+  // 14 roles.toml 역할(triage 1 + plan 5 + implement 2 + review 5 + retro 1). 감사 M5로 loader는 사라졌다. merge에는 역할이
   // 아예 없고(ADR-015 R3 — F5에서 [merge.integrator] 삭제), retro.analyst는 Plan 4가 파일을 채웠다.
   expect(checks.map((ch) => ch.id).sort()).toEqual([
-    "agents.factory-builder", "agents.factory-loader", "agents.factory-retro", "agents.factory-triage", "agents.factory-verifier",
+    "agents.factory-builder", "agents.factory-retro", "agents.factory-triage", "agents.factory-verifier",
     "agents.plan-architect", "agents.plan-operator", "agents.plan-product-advocate", "agents.plan-skeptic",
     "agents.plan-synthesizer", "agents.reviewer-architecture", "agents.reviewer-correctness", "agents.reviewer-qa",
     "agents.reviewer-security", "agents.reviewer-spec-conformance",
@@ -772,4 +772,96 @@ test("checkGitHub (r2): FACTORY_MERGE_TOKEN left over as a repo secret (also in 
   const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], envSecrets: ["FACTORY_MERGE_TOKEN"], protection: withReview }));
   expect(c["tokens.two-actor"].level).toBe("PASS");
   expect(c["tokens.merge-token-repo-level"]).toMatchObject({ level: "WARN", detail: expect.stringContaining(MERGE_ENVIRONMENT) });
+});
+
+// ── 2026-09-14 외부 감사 M8 / ADR-023: protected.parity ────────────────────────────────────────
+// 보호 목록 세 곳(harness `[protected].factory` · ci-settings의 경로 deny · 훅의 `prot`)이 한 출처에서
+// 나왔는가. 감사 시점에는 셋이 손으로 유지됐고 실제로 갈라져 있었다 — 드리프트는 "Edit는 막히는데
+// `echo > x`는 통과한다"를 만들므로 WARN이 아니라 FAIL이다.
+const parityProt = { factory: [".factory/**", ".claude/**", "docs/factory/CHARTER.md"], except: [".factory/out/qa/**"], agent_writable: [] };
+function parityFiles(over = {}) {
+  const hook = ["#!/usr/bin/env bash", protBlock(parityProt), "exit 0"].join("\n");
+  const ci = (harnessMode) => JSON.stringify({ permissions: { deny: ["Bash(gh secret*)", ...ciDenyEntries(writeGlobs(parityProt, { harnessMode, enumerateFactory: true }))] } });
+  return {
+    "/r/.claude/hooks/block-dangerous.sh": hook,
+    "/r/.factory/ci-settings.json": ci(false),
+    "/r/.factory/ci-settings-harness.json": ci(true),
+    ...over,
+  };
+}
+const parityRun = (files, prot = parityProt) =>
+  checkProtectedParity({ root: "/r", exists: (p) => p in files, readFile: (p) => files[p], harness: { protected: prot } })[0];
+
+test("protected.parity: generated hook + ci-settings that match harness [protected] → PASS", () => {
+  expect(parityRun(parityFiles())).toMatchObject({ id: "protected.parity", level: "PASS" });
+});
+
+test("protected.parity: a hand-edited `prot` in the hook is FAIL (M8's actual drift: .github/workflows/factory- vs .github/**)", () => {
+  const f = parityFiles();
+  f["/r/.claude/hooks/block-dangerous.sh"] = f["/r/.claude/hooks/block-dangerous.sh"].replace("\\.claude/", "\\.github/workflows/factory-");
+  expect(parityRun(f)).toMatchObject({ level: "FAIL" });
+  expect(parityRun(f).detail).toMatch(/prot` list differs/);
+});
+
+test("protected.parity: a hook with no generated block at all is FAIL (that IS the hand-maintained list)", () => {
+  expect(parityRun(parityFiles({ "/r/.claude/hooks/block-dangerous.sh": "#!/usr/bin/env bash\nprot='(\\.factory/)'\nexit 0\n" })).detail).toMatch(/no `factory:protected` generated block/);
+});
+
+test("protected.parity: adding a glob to harness without re-running --upgrade is FAIL on both ci-settings files", () => {
+  const prot = { ...parityProt, factory: [...parityProt.factory, "Makefile"] };
+  const r = parityRun(parityFiles(), prot);
+  expect(r.level).toBe("FAIL");
+  expect(r.detail).toMatch(/ci-settings\.json deny missing: Edit\(Makefile\), Write\(Makefile\)/);
+  expect(r.detail).toMatch(/ci-settings-harness\.json deny missing/);
+});
+
+test("protected.parity: a deny entry that no harness glob derives is FAIL too (drift is symmetric)", () => {
+  const f = parityFiles();
+  const j = JSON.parse(f["/r/.factory/ci-settings.json"]);
+  j.permissions.deny.push("Edit(src/**)");
+  f["/r/.factory/ci-settings.json"] = JSON.stringify(j);
+  expect(parityRun(f).detail).toMatch(/not derived from harness\.toml \[protected\]: Edit\(src\/\*\*\)/);
+});
+
+test("protected.parity: unreadable or missing inputs are FAIL, never PASS (an unchecked list is not a safe list)", () => {
+  expect(parityRun({}).level).toBe("FAIL");
+  expect(parityRun(parityFiles(), { factory: [] }).detail).toMatch(/missing or empty/);
+  expect(parityRun(parityFiles({ "/r/.factory/ci-settings.json": "{oops" })).detail).toMatch(/unreadable/);
+});
+
+test("protected.parity: agent_writable leaves the merge boundary alone but drops out of the write boundary", () => {
+  const prot = { ...parityProt, factory: [...parityProt.factory, "factory/**"], agent_writable: ["factory/**"] };
+  const files = {
+    "/r/.claude/hooks/block-dangerous.sh": protBlock(prot),
+    "/r/.factory/ci-settings.json": JSON.stringify({ permissions: { deny: ciDenyEntries(writeGlobs(prot, { enumerateFactory: true })) } }),
+    "/r/.factory/ci-settings-harness.json": JSON.stringify({ permissions: { deny: ciDenyEntries(writeGlobs(prot, { harnessMode: true, enumerateFactory: true })) } }),
+  };
+  expect(parityRun(files, prot).level).toBe("PASS");
+  expect(files["/r/.factory/ci-settings.json"]).not.toContain("Edit(factory/**)");
+});
+
+// ── 리뷰 batch-1 MF-2 — `protection.records` ─────────────────────────────────────────────────────
+// 머지 스테이지가 리뷰 handoff를 대조하는 상대는 `factory/records`의 run 기록이다. 그 브랜치가
+// force push/삭제로 다시 쓰일 수 있으면 대조는 아무것도 증명하지 않는다 — 그 사실은 매 실행에서
+// 소리 내어 말한다(못 거는 플랜이 정당하게 존재하므로 FAIL이 아니라 WARN이다).
+test("protection.records: an unprotected records branch is a WARN that names what is holding the line", async () => {
+  const none = await checkRecordsProtection({ gh: { getBranchProtection: async () => null } });
+  expect(none[0].id).toBe("protection.records");
+  expect(none[0].level).toBe("WARN");
+  expect(none[0].detail).toContain("records branch unprotected — evidence relies on hooks");
+
+  const forceAllowed = await checkRecordsProtection({ gh: { getBranchProtection: async () => ({ allow_force_pushes: { enabled: true }, allow_deletions: { enabled: false } }) } });
+  expect(forceAllowed[0].level).toBe("WARN");
+  expect(forceAllowed[0].detail).toContain("force pushes");
+
+  // 못 읽는 것도 PASS가 아니다.
+  const unreadable = await checkRecordsProtection({ gh: { getBranchProtection: async () => { throw new Error("HTTP 403"); } } });
+  expect(unreadable[0].level).toBe("WARN");
+  expect(unreadable[0].detail).toContain("HTTP 403");
+
+  const ok = await checkRecordsProtection({ gh: { getBranchProtection: async () => ({ allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }) } });
+  expect(ok[0].level).toBe("PASS");
+  expect(ok[0].detail).toContain("append-only");
+  // 단일 자격증명 잔여 위험은 PASS 줄에서도 말한다 — 초록이 "분리됐다"를 뜻하지 않는다.
+  expect(ok[0].detail).toContain("single-credential");
 });

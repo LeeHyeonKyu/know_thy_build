@@ -122,3 +122,7 @@ rework_response:           # rework 라운드에서만. PR 코멘트로도 남�
 ## Lessons
 Before writing a line, read `.factory/lessons/factory-builder.md` (path is also given in your prompt)
 and treat each entry as a checklist item.
+When an entry actually changed what you wrote, **cite it in the handoff's `notes`** with the marker
+`lesson:<id>` (e.g. `lesson:L-2026-09-01-03`). That marker is the only record that the lesson did any
+work: retro counts it into the entry's `인용`, and a lesson nobody ever cites is the first one retired.
+Never cite a lesson you did not use — the count is evidence, not courtesy.

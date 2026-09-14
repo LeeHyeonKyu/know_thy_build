@@ -1,11 +1,19 @@
 ---
 description: factory implement stage dispatcher
-allowed-tools: Workflow(factory-implement)
+allowed-tools: Workflow(factory-implement), Read(.factory/out/loaded.json)
 ---
-You are a dispatcher. Do exactly one thing:
+You are a dispatcher. Do exactly two things, in order:
 
-Call the Workflow tool with name `factory-implement` and args
-`{ "raw": "$ARGUMENTS", "context": ".factory/out/context.json" }`.
+1. Read `.factory/out/loaded.json`. It is a small object the factory already built in
+   Node — issue, stage, tier, the roster with each role's agent type and model, the
+   per-role context paths, pr/head_sha, must_fix and disputed.
+2. Call the Workflow tool with name `factory-implement` and args
+   `{ "raw": "$ARGUMENTS", "context": ".factory/out/context.json", "loaded": <that object> }`.
+
+Pass the object through **verbatim** — the whole thing, exactly as the file has it.
+It is the workflow's entire view of this run: a field you drop or reword is a role
+that never spawns, a finding that never comes back, or a stage that judges the wrong
+commit. Never invent, summarize or "fix" a value in it.
 
 Claude Code fills in `$ARGUMENTS` as one string; it does not substitute individual
 positional arguments in this file, so `raw` is the only way this dispatcher reads
@@ -26,5 +34,5 @@ the value is parsed by a machine and validated against a schema, so an abridged
 copy is not a smaller answer — it is a wrong one. Length is never a reason to
 shorten it; if it is long, emit all of it anyway.
 
-Do not read files, run commands, or edit anything. If the workflow fails, return
+Do not read any other file, run any command, or edit anything. If the workflow fails, return
 its error verbatim.

@@ -40,7 +40,17 @@ export async function classifyFailures({ run, cwd, harness, failing, base, thres
       }
       const baseRuns = [];
       for (let i = 0; i < thresholds.flaky_base_runs; i++) baseRuns.push((await one(f, tmp)).code);
-      out.push({ id: f.id, verdict: baseRuns.every((c) => c === 0) ? "introduced" : "flaky-existing", evidence: { pr_isolation, base: baseRuns } });
+      /**
+       * 감사 M3 — base 실행이 **전부** 실패하면 그것은 흔들림이 아니다. flaky의 증거는 "같은 커밋에서
+       * 같은 테스트가 어떤 때는 통과하고 어떤 때는 실패한다"이고, base 5/5 실패는 그 반대의 증거다 —
+       * main에서 이미 깨져 있는 테스트다. 둘을 같은 이름으로 부르면 게이트가 그 실패를 제외하고
+       * GREEN으로 넘어가, main이 빨간 채 자동 머지가 이어진다. 판정을 나눈다: `broken-base`는
+       * 제외 대상이 아니라 사람이 볼 RED다(gates.js).
+       */
+      const verdict = baseRuns.every((c) => c === 0) ? "introduced"
+        : baseRuns.every((c) => c !== 0) ? "broken-base"
+          : "flaky-existing";
+      out.push({ id: f.id, verdict, evidence: { pr_isolation, base: baseRuns } });
     }
   } finally {
     if (wtReady) await run("git", ["worktree", "remove", "--force", tmp], { cwd });

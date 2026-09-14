@@ -154,6 +154,7 @@ export function lintWorkflow(text, { file = null, factoryOwned = true } = {}) {
     out.push(...lintExpressionsInRun(lines));
   }
   out.push(...lintMergeTokenScope(lines, file));
+  out.push(...lintMergeTokenFallback(lines));
   if (factoryOwned) {
     const stage = STAGE_RUN.exec(text);
     if (stage) out.push(...lintStageWorkflow(text, lines, stage[1]));
@@ -253,6 +254,31 @@ function lintMergeTokenScope(lines, file) {
     out.push({ line: i + 1, rule: "merge-token-scope", msg: `${MERGE_TOKEN} is in the same step as CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY — that is a step where \`claude -p\` runs, and ADR-021 exists so that merge power is unreachable from there by permission, not by command pattern. The only exception is the credential-scrub step, which holds every secret as a literal to redact and never starts an agent` });
   }
   return out;
+}
+
+/**
+ * 외부 감사 2026-09-14 M7 — **두 배우 모드의 무성 강등.** `GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN ||
+ * secrets.FACTORY_BOT_TOKEN }}`은 단일 배우 모드를 위한 폴백인데, 두 배우 모드에서도 똑같이 조용히
+ * 작동한다: 환경이 적용되지 않았거나(보호되지 않은 브랜치에서 시작한 dispatch) 시크릿이 지워지면
+ * `secrets.FACTORY_MERGE_TOKEN`이 빈 문자열이 되고, 잡은 **에이전트 배우의 토큰으로** 머지한다.
+ * ADR-021이 권한으로 세운 벽이 로그 한 줄 없이 사라지고, 사후에 구별할 방법도 없다.
+ *
+ * 폴백 자체를 금지하지는 않는다 — 단일 배우 모드에는 그것이 정답이다. 요구하는 것은 **가드 스텝의
+ * 존재**다: `id: two-actor-token-guard`를 선언하고 `vars.FACTORY_TWO_ACTOR`와 머지 토큰의 유무를
+ * 대조해 어긋나면 잡을 죽이는 스텝. `id:`를 열쇠로 쓰는 이유는 `merge-token-scope`의 스크럽 예외와
+ * 같다(§`isScrubStep`): `name:`은 자유 텍스트라 아무 스텝이나 흉내 낼 수 있지만 `id:`는 워크플로
+ * 안에서 유일한 식별자다.
+ *
+ * `scope: "repo"` — 머지 토큰 폴백이 어느 파일에 있든 같은 위험이므로 팩토리 소유 여부를 묻지 않는다.
+ */
+const MERGE_TOKEN_FALLBACK_RE = new RegExp(`secrets\\.${MERGE_TOKEN}\\s*\\|\\|`);
+const TWO_ACTOR_GUARD_ID_RE = /^\s*id:\s*(['"]?)two-actor-token-guard\1\s*$/;
+function lintMergeTokenFallback(lines) {
+  const bare = lines.map((l) => l.replace(/#.*/, ""));
+  const at = bare.findIndex((l) => MERGE_TOKEN_FALLBACK_RE.test(l));
+  if (at === -1) return [];
+  if (bare.some((l) => TWO_ACTOR_GUARD_ID_RE.test(l))) return [];
+  return [{ line: at + 1, rule: "merge-token-required-when-two-actor", msg: `\`secrets.${MERGE_TOKEN} || …\` falls back to the agent actor's token whenever the merge token is empty — in two-actor mode that is a silent downgrade of the one control ADR-021 enforces by permission, and a merge done with the wrong actor cannot be told apart afterwards. Keep the fallback for single-actor mode, but add a first step with \`id: two-actor-token-guard\` that fails the job when \`vars.FACTORY_TWO_ACTOR == 'true'\` and \`secrets.${MERGE_TOKEN} == ''\` (audit M7)` }];
 }
 
 /**

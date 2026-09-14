@@ -99,6 +99,8 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 
 `factory:queue` → `factory:needs-human`: triage 산출물이 검증 실패하면(요구 검사 실패, §3.3) `ready`로 넘어가지 못하고 여기서 바로 전이한다.
 
+triage가 판단할 수 없는 이슈의 기본 판정은 기본값이 아니라 CHARTER가 적어 두는 선택이다(`triage.default = needs-info | ready`, 템플릿 기본은 `needs-info` — 침묵은 정지이고, 필드를 지우면 `factory doctor`가 `charter.triage-default-unset`으로 FAIL한다): NEVER_AUTOMATE에 걸리면 언제나 `wont-do`, `done_when`을 쓸 수 없으면 언제나 `needs-info`, 이슈 본문에 `[ready]` 표식이 있으면 그 이슈만 예외로 `ready`이며, 그 밖의 모든 경우가 이 기본값으로 간다. NEVER_AUTOMATE 항목 중 경로 글롭으로 적힌 것은 `verify-stage`가 triage handoff의 `impact_paths`에 다시 대어 에이전트의 판정과 무관하게 `wont-do`로 덮어쓴다(`never_automate_hit`, 외부 감사 M1).
+
 ### 3.2 전이도
 
 ```mermaid
@@ -365,7 +367,7 @@ jobs:
 
 **아티팩트는 업로드 직전에 스크럽되고 7일만 남는다(ADR-020 최종 리뷰 SF-1).** 업로드하는 여섯 워크플로는 바로 앞 스텝에서 `.factory/bin/scrub-artifacts.js`로 올라갈 경로(run 기록 · `.factory/out/` · 세션 트랜스크립트)의 모든 텍스트 파일에서 `AUTHORIZATION: basic …`/`Bearer …` 헤더 값 · `ghp_`·`github_pat_`·`sk-ant-` 모양 · 스텝 env로 받은 네 시크릿의 리터럴 값과 그 `x-access-token:` base64를 `[REDACTED:<kind>]`로 지우고(로그에는 종류별 개수만 남는다, 바이너리는 건드리지 않는다), 업로드는 `retention-days: 7`로 노출 창을 닫는다 — 공개 저장소에서 아티팩트는 레포 read 권한자 누구나 받는데 그 안에는 `actions/checkout`이 심은 `.git/config`의 봇 토큰 헤더가 닿을 수 있는 텍스트가 함께 올라간다(그 헤더 자체는 락 push가 나가는 유일한 경로라 끌 수 없다 — ADR-020의 알려진 한계).
 
-**같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작한다** — 락은 그때 이미 풀려 있어 claim이 막지 못하므로(claim은 *동시* 러너만 막는다), `run-stage.js`는 락을 잡은 직후 이슈의 현재 상태 라벨이 그 스테이지의 진입 라벨(`triage: factory:queue` · `plan: factory:ready` · `implement: factory:planned|factory:rework` · `review: factory:awaiting-review` · `merge: factory:approved`)인지 보고, 아니면 `claude -p`를 부르기 전에 아무 전이도 handoff도 없이 exit 0으로 물러난다(KTB-10 — 중복 실행에 대한 실질적 방어는 전이 그래프가 아니라 이 가드다. 전이 그래프는 이미 돈 뒤에야 거부한다).
+**같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작한다** — 락은 그때 이미 풀려 있어 claim이 막지 못하므로(claim은 *동시* 러너만 막는다), `run-stage.js`는 락을 잡은 직후 이슈의 현재 상태 라벨이 그 스테이지의 진입 라벨(`triage: factory:queue` · `plan: factory:ready` · `implement: factory:planned|factory:rework` · `review: factory:awaiting-review` · `merge: factory:approved`)인지 보고, 아니면 `claude -p`를 부르기 전에 아무 전이도 handoff도 없이 exit 0으로 물러난다(KTB-10 — 중복 실행에 대한 실질적 방어는 전이 그래프가 아니라 이 가드다. 전이 그래프는 이미 돈 뒤에야 거부한다). 라벨 조회가 **실패하면** 스테이지는 진행하지 않고 `factory:blocked`(cause `api-error`)로 멈춘다(외부 감사 M13): 진입 상태를 모르는 런은 자기가 이미 끝난 스테이지를 다시 도는 중인지 알 수 없다. 같은 사유로, **이번 차례**(마지막 재큐 이후 + 이 스테이지의 진입 라벨로 들어온 마지막 전이 이후)에 **같은 head sha로** 이 스테이지의 handoff가 이미 있으면 전이·코멘트·`claude -p` 없이 `duplicate-run: skipped`로 exit 0이다 — 진입 라벨 전이에서 창을 자르지 않으면 rework가 이전 implement handoff와 같은 head를 들고 있어 재작업이 중복으로 읽힌다.
 
 ### 4.2 제어 계층 — 오케스트레이터는 세 겹, LLM은 하나
 
@@ -407,6 +409,11 @@ run-stage.js <stage> <issue>
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 **2분마다** 같은 코멘트에 PATCH로 갱신(ADR-022)
   2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
+  2.4 (implement/review/merge) overlay        # ADR-020 KTB-37 — 스테이지는 **PR의 코드** 위에서 돌지만 **팩토리 자신의 설정**은 언제나 스테이지 자신의 커밋(CI는 `GITHUB_SHA`,
+                                             #   로컬은 `origin/<default_branch>`)의 것이다: 체크아웃 직후 `.factory/**`(단 `.factory/out/**` 제외) · `.claude/**` ·
+                                             #   `docs/factory/CHARTER.md`를 그 커밋에서 덮어쓰고(`git checkout <sha> -- …`) 무엇을 덮었는지 한 줄 기록한다.
+                                             #   실패하면 진행하지 않는다(fail closed → `factory:blocked`). implement에서 덮을 것이 **있으면**(= 트리가 base가 아니었다)
+                                             #   빌더를 띄우지 않는다 — overlay가 PR 커밋에 실려 나갈 경로 자체를 없앤다. 무결성·보호 경로 판정은 영향 없다(`git show <base>:<file>`로 읽는다).
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.js <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
@@ -504,28 +511,26 @@ error verbatim.
 | workflow | `args`(이슈 번호, context 경로) + 에이전트가 돌려준 schema 값 | 인자와 반환값뿐 — 파일을 못 읽음 |
 | 역할 에이전트 | 자기 `.md`, `context.json`, `.factory/lessons/<role>.md`(프롬프트에 경로가 주어지고 직접 읽는다), diff·코드(cold read 규칙 내에서) | 러너 파일시스템 |
 
-workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 이번 잡의 로스터를 `context.json`에 확정해 쓰고, workflow의 첫 스텝인 loader 에이전트(sonnet)가 그 파일을 읽어 schema로 돌려준다. loader가 역할을 지어내면 다음 `agent({agentType})`이 존재하지 않는 파일로 실패하고, 6에서 로스터 불일치로 잡힌다.
+workflow가 파일을 못 읽으므로 로스터는 두 단계로 간다: L1이 이번 잡의 로스터를 `context.json`에 확정해 쓰고, 같은 실행에서 그 로스터의 **workflow용 부분집합**을 `.factory/out/loaded.json`으로 따로 떨군다. 디스패처 커맨드는 그 작은 파일 하나를 그대로 Workflow의 `args.loaded`로 넘긴다 — 로스터를 옮겨 적는 일에 LLM이 끼지 않으므로, 역할을 지어낼 자리도 없다(외부 감사 2026-09-14 M5, 아래 확정 문장).
 
-**loader 확정 문장** (Plan 3 실행 판결, ADR-016): `factory-loader`(sonnet, `tools: Read, Bash, Grep`, `hooks.PreToolUse`는 `deny-all-writes.sh`)는 `roles.toml`의 어떤 `[stage.<name>]` 블록에도 속하지 않는다 — 로스터 역할이 아니라 네 workflow 모두의 첫 스텝이라서다. 네 workflow(`factory-triage.js`/`factory-plan.js`/`factory-implement.js`/`factory-review.js`)는 바이트 단위로 동일한 `LOADER` schema 리터럴을 공유한다:
+**loader 확정 문장 — 취소됨** (외부 감사 2026-09-14 M5, P2-14). `factory-loader`(sonnet)는 삭제됐다. 그 에이전트가 한 일은 `context.json`과 `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적는 것뿐이었는데, 그 복사에 **스테이지마다 LLM 호출 하나**가 들었고 복사는 틀릴 수 있었다 — 그리고 그것이 읽어야 했던 유일한 값(`model`)은 이미 `factory/lib/context.js`가 `def.model`로 들고 있었다. 지금은 `buildContext`가 같은 객체를 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓴다:
 
 ```js
-const LOADER = {
-  type: 'object',
-  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
-  properties: {
-    issue: { type: 'number' }, stage: { type: 'string' }, tier: { type: 'string' },
-    maturity: { type: 'string' },   // harness.maturity 그대로 — plan이 done_when level을 이걸로 묶는다
-    roster: { type: 'array', items: { type: 'object', required: ['name', 'agentType', 'model'],
-      properties: { name: { type: 'string' }, agentType: { type: 'string' }, model: { type: 'string' }, lessons: { type: 'string' } } } },
-    rounds: { type: 'number' }, limits: { type: 'object' }, spec_path: { type: 'string' },
-    pr: { type: 'number' }, head_sha: { type: 'string' },
-    must_fix: { type: 'array', items: { type: 'object' } }, disputed: { type: 'array', items: { type: 'object' } },
-    orchestration: { type: 'string' },
-  },
-};
+// factory/lib/context.js — loadedFor()
+{
+  issue, stage, tier,
+  roster: [{ name, agentType, model, lessons, context }],   // model은 roles.toml의 그 값 그대로
+  contexts: { '<role>': '.factory/out/context.<role>.json' },
+  rounds, plan, limits, spec_path, maturity, orchestration,
+  pr, head_sha,                    // handoffs.implement에서
+  must_fix,                        // handoffs.review.decision === 'rework'일 때의 verdicts[].must_fix 합집합
+  disputed,                        // PR 코멘트의 최신 factory.rework-response.v1 중 status === 'disputed'
+}
 ```
 
-위 표의 "역할 에이전트가 `context.json`을 읽는다"는 문자 그대로다 — 네 workflow의 역할 프롬프트는 전부 `Read \`${args.context}\`` (즉 `.factory/out/context.json`)로 시작하고, 각 역할이 그 파일을 자기 손으로 다시 연다. loader가 있는 이유는 역할이 아니라 **workflow 스크립트 자신**이 파일을 못 읽기 때문이다(§4.2 표의 workflow 행) — loader는 그 파일을 읽어 로스터 부분집합(이름·`agentType`·`model` 등)만 schema로 workflow에 돌려주고, workflow는 그 schema 값으로 몇 명을 어떤 이름·모델로 spawn할지만 결정한다. 즉 loader의 산출물은 workflow의 분기 재료이지 역할 에이전트에게 전달되는 `context.json`의 대체물이 아니다 — 역할 에이전트는 loader를 거치지 않고 같은 파일을 독립적으로 연다. loader-null(1회 재spawn 후에도 null 또는 throw)과 issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)는 네 workflow 모두 같은 모양으로 fail-closed 응답한다 — `{issue, error, orchestration: 'workflow', guarantee: 'structural'}`뿐, stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)는 아예 싣지 않는다. 각 스테이지 schema가 그 필드를 required로 두므로 `verify-stage`가 그대로 실패시켜 needs-human이 된다 — 별도의 에러 처리 경로가 필요 없다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다.
+네 workflow(`factory-triage.js`/`factory-plan.js`/`factory-implement.js`/`factory-review.js`)는 이 값을 `const loaded = args.loaded ?? null;` 한 줄로 받는다 — 그 Load 블록은 여전히 **바이트 단위로 동일**하고(`factory/test/workflows.test.js`), `LOADER` schema 리터럴과 loader 프롬프트는 네 파일 어디에도 남아 있지 않다. payload가 아예 없으면(디스패처가 넘기지 못했으면) 네 스테이지 모두 `{issue, error: 'context payload missing', orchestration: 'workflow', guarantee: 'structural'}`로 fail-closed하고, issue-mismatch(`Number(loaded.issue) !== issue`, 스테일 `context.json` 방지)도 같은 모양이다 — stage 필드(`disposition`/`done_when`/`verifier`/`verdicts` 등)를 아예 싣지 않으므로 각 스테이지 schema의 required가 `verify-stage`에서 그대로 실패해 needs-human이 된다. `once(fn)`은 null과 throw를 모두 "대답 없음"으로 묶어 정확히 1회만 재spawn한다(역할 호출에는 그대로 쓴다).
+
+역할 에이전트가 파일을 여는 경로는 그대로다 — 다만 **리뷰어는 `context.json`이 아니라 자기 `context.<role>.json`을 연다**(§7.1 cold read).
 
 #### 4.2.4 orchestration 모드 — 후퇴는 설정이지 동작이 아니다
 
@@ -794,6 +799,8 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 
 **대상 파일 — "새 테스트"와 "변경된 테스트"는 다른 로직에 쓰인다.** `prove-test`·`new-test-repeat`은 이번 PR에서 **변경된 테스트 파일 전부**(추가 A + 수정 M, rename R은 새 경로 기준. 삭제 D는 제외 — 돌릴 수도 커버리지를 잴 수도 없다)를 대상으로 한다: 기존 파일에 케이스를 추가했을 뿐이어도 base에 얹으면 실패해야 증명된다. 반면 `classify-failure.js`의 "새 테스트 → red" 규칙(§5.2.5-③ step 1)은 **git이 `A`로 잡은 파일만**(`addedTests`)을 새 테스트로 본다 — 기존 파일을 수정해 만든 케이스는 새 테스트 취급하지 않고 기존 테스트의 flaky/introduced 분류 경로를 그대로 탄다. `new_test_repeats` 임계가 설정돼 있지 않으면(`[gates.thresholds]` 누락) `new-test-repeat` 게이트는 "돌았지만 통과"가 아니라 **`MISCONFIGURED`**다 — 반복 횟수를 모르면 "흔들리지 않음"을 주장할 근거가 없다.
 
+**base 워크트리는 돌 수 있어야 한다(외부 감사 M2).** `prove-test`는 새 테스트를 base 위에 얹어 돌리는데, `git worktree add`가 만드는 것은 소스뿐이라 의존성이 없으면 거의 모든 테스트가 `Cannot find module`로 죽고 그 exit≠0이 "증명"으로 읽혔다 — 그래서 base 워크트리에 먼저 의존성을 깔고(`[runtime].setup`이 있으면 그것, 없으면 lockfile 유무에 따라 `npm ci`/`npm install --no-audit`), 그래도 base 실행이 모듈 해석·import 오류로 죽으면 그 결과는 증명이 아니라 **판정 불가**(`prove_test.inconclusive[]`)로 기록되고 게이트는 `MISCONFIGURED`가 된다(fail closed — required 증명 게이트가 판정 불가인 PR은 절대 GREEN이 아니다).
+
 **증명 게이트 — 커버리지와 mutation은 역할이 다르고 둘 다 쓴다.**
 
 | 게이트 | 재는 것 | 레벨 | 성숙도 | 임계(예) |
@@ -880,8 +887,10 @@ roster:
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }
+plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
+triage: { default: needs-info }             # 판단이 서지 않는 이슈를 멈출 것인가(needs-info) 통과시킬 것인가(ready) — 지우면 doctor FAIL(§3.1, 감사 M1)
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -895,11 +904,11 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
-## Plan 토론 로스터
-| tier | 토론자 | 라운드 |
-|---|---|---|
-| docs | architect, skeptic | 2 (입장 → 교차검토, synthesizer가 종합) |
-| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+## Plan 로스터
+| tier | 모드 | 역할 | 라운드 |
+|---|---|---|---|
+| docs / standard | single | synthesizer(계획자) + skeptic | 2 (계획 1패스 → 반박 1패스) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 |
 
 ## Hard limits
 - review rounds K = 3
@@ -931,7 +940,9 @@ every_merges: { initial: 1, min: 1, max: 20 }   # N은 수확량에 따라 자�
 light_on_merge: true
 ```
 
-기계가 읽는 값(`loadCharter`)은 위 **frontmatter뿐**이다. 본문의 표(Tiers·Plan 토론 로스터·Hard limits·Retro)는 **사람이 읽는 문서**이며, 값이 갱신될 때 frontmatter와 어긋나면 frontmatter가 정본이다.
+기계가 읽는 값(`loadCharter`)은 위 **frontmatter뿐**이다. 본문의 표(Tiers·Plan 로스터·Hard limits·Retro)는 **사람이 읽는 문서**이며, 값이 갱신될 때 frontmatter와 어긋나면 frontmatter가 정본이다.
+
+**plan은 기본이 토론이 아니다(감사 Task 9).** `plan: { mode, debate_tiers, max_done_when }`이 plan 스테이지의 모양을 정한다 — 기본 `mode: single`은 **opus 계획자 1패스 + skeptic 1패스(2콜)**이고, 종합은 계획자 자신의 최종본이다(합성 에이전트도 서명 라운드도 없다). skeptic의 출력 스키마에는 삭제·수정 필드가 아예 없어 **추가만** 가능하다. 4역할 토론(R1→R2→종합→서명, `plan_roles`·`plan_rounds`)은 `debate_tiers`에 이름이 있는 tier — 기본값은 `load-bearing` 하나 — 에서만 돌고, `mode: debate`는 tier와 무관하게 언제나 토론이다. `planRoundsFor`는 `{mode, rounds}`를 돌려주지만 `rounds`는 여전히 숫자 하나이고 `plan.v1` 핸드오프 스키마는 바뀌지 않는다(다운스트림 스테이지는 모드를 모른다). 그리고 계획은 이제 **검증된다**: `verify-stage`의 plan 검증기가 ① `severity ≥ medium`(또는 severity 없는) `dissent_log` 항목을 `done_when`의 `covers: [id]`가 짚지 않으면, ② `done_when`이 `max_done_when`(기본 6)을 넘으면, ③ 이슈가 가드를 요구하지 않았는데 `done_when`이 화이트리스트·등장 금지·순서·저장소 전수 정규식 모양이면 핸드오프를 **무효**로 판정한다(스키마 미달과 같은 경로 — 스테이지는 GREEN이 되지 않는다). 근거와 재측정 조건(n≥10), 그리고 ③의 휴리스틱 목록이 조잡한 필터라는 사실은 `docs/factory/audit/response-task-9.md`에 있다.
 
 `status: ready`가 아니면 모든 factory 잡이 첫 줄에서 종료한다. 그린필드에서 Phase 1이 끝나기 전에 factory가 도는 일을 막는다.
 
@@ -1207,6 +1218,8 @@ output = "factory.retro.v1"
 
 `model` 값은 `docs/research/multi-agent-model-guidance-for-repo.md`의 balanced 프로파일을 기본으로 한다. CHARTER에서 프로파일(`quality | balanced | budget`)을 바꾸면 레지스트리의 model이 프로파일 표로 치환된다.
 
+**cold read는 구조다** (외부 감사 2026-09-14 H4). `cold_read = true`는 프롬프트가 리뷰어에게 하는 부탁이 아니라 **그 역할이 받는 파일의 모양**이다. `factory/lib/context.js`의 `buildContext`는 오케스트레이터용 `.factory/out/context.json`(전체) 외에 로스터의 역할마다 `.factory/out/context.<role>.json`을 따로 쓰고, `roleContextFor`가 `cold_read = true`인 역할의 사본에서 handoff를 통째로 들어낸다 — 남는 것은 이슈, tier, 로스터, 그 역할의 lessons 경로, PR 번호와 head sha, 게이트 요약, 그리고 계획의 `done_when`(id/text/verify/level)뿐이다. verifier 판정도, `tests_added`도, builder가 쓴 PR 설명도, 다른 리뷰어의 판정도 그 파일에 **존재하지 않는다**. `factory-review.js`는 각 리뷰어에게 자기 파일의 경로만 넘기고 전체 파일의 경로는 한 번도 주지 않는다. 훅은 읽기를 막을 수 없으므로(감사 H4의 지적 그대로) 막는 자리를 파일 경계로 옮긴 것이다: 읽지 않기로 약속할 필요가 없다, 읽을 것이 거기 없다. `cold_read = false`(spec-conformance)는 그 반대이고, 계약 대조가 임무인 그 역할만 전체 파일에 더해 이슈 본문의 acceptance 절을 함께 받는다.
+
 **설치 범위** (Plan 3 실행 판결, ADR-016): `[merge.integrator]`·`[retro.analyst]` 블록은 위 예시에 verbatim으로 남아 있지만, `factory-integrator.md`·`factory-retro.md` 에이전트 파일은 Plan 3에서 설치되지 않는다 — merge는 스크립트 전용이라 integrator를 spawn하지 않고(ADR-015 R3), retro는 Plan 4 몫이다. `doctor`의 `checkRoles`는 그래서 이 두 항목에 한해 `roles.agent-files` FAIL을 보고한다 — 이것은 Plan 4까지의 알려진 gap이며, `checkAgents`(§7.2)는 파일이 없는 항목을 lint 대상에서 건너뛴다.
 
 ### 7.2 역할 정의 파일의 필수 구조
@@ -1225,7 +1238,7 @@ frontmatter: name, description, tools, model, hooks(선택)
 ## Lessons           — lessons 파일 경로와 "체크리스트로 읽어라" 지시 (include 문법에 의존하지 않는다)
 ```
 
-**doctor의 검사 = `lintAgentMd` 규칙** (Plan 3 실행 판결, ADR-016): `factory/lib/agent-md.js`의 `lintAgentMd(text, {expectedName})`이 `checkAgents`(`factory/lib/doctor/factory.js`)를 통해 `roles.toml`이 가리키는 모든 role `.md` + loader(§4.2.3)에 적용하는 규칙은 다음과 같다.
+**doctor의 검사 = `lintAgentMd` 규칙** (Plan 3 실행 판결, ADR-016): `factory/lib/agent-md.js`의 `lintAgentMd(text, {expectedName})`이 `checkAgents`(`factory/lib/doctor/factory.js`)를 통해 `roles.toml`이 가리키는 모든 role `.md`에 적용하는 규칙은 다음과 같다(감사 M5로 loader가 사라지면서 roles.toml 밖의 예외 항목은 없어졌다).
 
 - frontmatter `name`이 파일 basename(확장자 제외)과 정확히 같아야 한다 — 이름이 어긋나면 훅 로그 대조(`rolePrefix + role`)가 깨진다(Global Constraints).
 - frontmatter `model`은 `opus|sonnet|haiku` 중 하나.
@@ -1311,6 +1324,10 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 ## Lessons
 Before reviewing, read `.factory/lessons/reviewer-correctness.md` (path is also given in your prompt)
 and treat each entry as a checklist item.
+When an entry actually shapes a finding, **cite it inside that finding's own `claim`** with the marker
+`lesson:<id>` (e.g. `lesson:L-2026-09-01-03`). That marker is the only record that the lesson did any
+work: retro counts it into the entry's `인용`, and a lesson nobody ever cites is the first one retired.
+Never cite a lesson you did not use — the count is evidence, not courtesy.
 ```
 
 ### 7.4 예시 — `.factory/lessons/reviewer-correctness.md`
@@ -1326,6 +1343,8 @@ and treat each entry as a checklist item.
 - [L-2026-09-05-03] `Promise.all` 안의 부분 실패는 성공한 쪽의 부수효과를 남긴다. 트랜잭션 또는 `allSettled` + 보상 로직을 확인한다.
   근거: runs/110.md, runs/112.md. 인용: 0회. → gate 승격 후보: eslint rule `no-promise-all-side-effects` (retro 제안 #131)
 ```
+
+`인용: N회`를 올리는 유일한 입력은 판정문 안의 `lesson:<id>` 마커다(외부 감사 M11): 리뷰어는 그 교훈이 실제로 만든 발견의 `claim` 안에, 빌더는 implement handoff의 `notes`에 마커를 적고, retro가 창 안의 handoff에서 그것을 **역할별로** 세어 이 숫자를 올린다. 은퇴 순서는 "인용 0회 먼저, 그 다음 나이"이고, 인용된 항목도 자리가 없으면 마지막 순서로 은퇴한다 — 인용 항목을 영구 보존하면 상한에 닿은 파일이 새 교훈을 영원히 받지 못한다. 근거 run(`근거:`·`evidence_runs`)은 **records 브랜치에 실재하는 run id**여야 한다(감사 M10): 없는 번호를 든 제안은 `unknown-evidence-run`으로 미뤄진다.
 
 ### 7.5 역할 간 소통 구조
 

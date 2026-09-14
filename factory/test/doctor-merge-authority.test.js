@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { checkMergeAuthority, isCiWithToken, downgradeUnknownMode } from "../lib/doctor/merge-authority.js";
+import { checkMergeAuthority, checkHumanGate, isCiWithToken, downgradeUnknownMode } from "../lib/doctor/merge-authority.js";
 import { codeownersContent } from "../lib/bootstrap.js";
 
 /**
@@ -192,4 +192,26 @@ test("downgradeUnknownMode: FAIL becomes WARN and says why — a repo that never
   expect(after[0].detail).toMatch(/downgraded: FACTORY_TWO_ACTOR is not set/);
   expect(after[0].detail).toMatch(/factory bootstrap/);
   expect(after[1]).toEqual(before[1]);                                // FAIL이 아닌 줄은 손대지 않는다
+});
+
+// ── 외부 감사 2026-09-14 H6 — 사람 게이트 ──────────────────────────────────────────────
+
+/**
+ * 감사가 짚은 것: "인간 게이트가 사실상 없는데 back-pressure는 인간을 지키는 척한다." 그 상태가
+ * **어디에도 기록되지 않았다**는 점이 결함의 절반이다 — 아무도 고르지 않았고 아무도 몰랐다.
+ * 그래서 세 상태를 가른다: 선언했고 켰다(PASS) / 선언했고 껐다(WARN) / 선언 자체가 없다(FAIL).
+ */
+test("H6: merge.human_gate — true PASSes, false WARNs as merge.dark, absent FAILs (nobody ever chose)", () => {
+  expect(by(checkHumanGate({ merge: { human_gate: true } }))["charter.merge-human-gate"].level).toBe("PASS");
+
+  const dark = by(checkHumanGate({ merge: { human_gate: false } }))["merge.dark"];
+  expect(dark.level).toBe("WARN");
+  expect(dark.detail).toMatch(/^merge\.dark — no per-PR human signature \(merge\.human_gate=false\)/);
+
+  for (const charter of [{}, { merge: {} }, null, undefined]) {
+    const unset = by(checkHumanGate(charter))["charter.merge-human-gate-unset"];
+    expect(unset.level, JSON.stringify(charter)).toBe("FAIL");
+    expect(unset.detail).toMatch(/merge: \{ human_gate: true \}/);
+    expect(unset.detail).toMatch(/merge: \{ human_gate: false \}/);
+  }
 });

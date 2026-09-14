@@ -6,7 +6,11 @@ schema = 1
 # are stamped from. Changing it changes every gate everywhere — so it is [protected] here, same as any
 # other harness/CI file, and a PR touching it can only be human-merged (controller ruling, P6-R3 / ADR-020
 # KTB-5/KTB-6: L0 integrity flags it informationally, L1 merge-stage refuses to auto-merge it).
-# No linter exists yet (P6-R3): lint/lint_file are no-ops (`node -e 0`) until one is adopted.
+# lint (audit P1-7, ADR-023): `node -e 0` was not a gate — it reported "lint GREEN" while checking
+# nothing. `factory/bin/lint.js` is the real one: `node --check` over JS + the ADR-009/ADR-021 workflow
+# rules (`factory/lib/yml-lint.js`) over `.github/workflows/**` + the skill-doc contract
+# (`factory/lib/skill-md.js`) over `templates/know-thy-build/*.md`. No new dependency — it wires up the
+# checks this repo already owns.
 
 [project]
 name           = "know-thy-build"
@@ -19,11 +23,11 @@ setup = "npm ci"
 node  = "22"
 
 [commands]                       # all judged by exit code
-lint       = "node -e 0"                                                              # P6-R3: no linter yet
+lint       = "node factory/bin/lint.js"                                               # ADR-023 (audit P1-7)
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"      # P6-R3
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
-lint_file  = "node -e 0 {file}"                  # lint-touched.sh (logging only) — P6-R3: no linter yet
+lint_file  = "node factory/bin/lint.js --file {file}"   # lint-touched.sh (logging only)
 
 [harness]
 maturity = "M0"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
@@ -39,10 +43,15 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 # mutation_report = "reports/mutation/mutation.json"
 
 [gates]
+# 레벨은 서로 달라야 한다(감사 H2 — doctor `gates.levels-identical`): tier→level의 값이 "무거운
+# 변경에는 더 많은 것이 돈다"인데 셋이 같으면 tier가 아무것도 정하지 않는다. full은 증명 게이트를
+# 더한다(prove-test: 새 테스트가 base에서 실패하는가, new-test-repeat: 그 테스트가 흔들리지 않는가).
+# required는 레벨 목록과 무관하게 강제된다 — 돌지 않은 required는 MISCONFIGURED다.
+# M0이라 모든 런은 fast로 강등된다(doctor `gates.m0-downgrade` WARN, 판정 파일의 `downgraded_from`).
 required = ["lint", "unit"]
 fast     = ["lint", "unit"]
-full     = ["lint", "unit"]
-deep     = ["lint", "unit"]
+full     = ["lint", "unit", "prove-test", "new-test-repeat"]
+deep     = ["lint", "unit", "prove-test", "new-test-repeat"]
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90
@@ -50,7 +59,9 @@ mutation_score_pct      = 70
 new_test_repeats        = 3
 flaky_isolation_runs    = 3
 flaky_base_runs         = 5
+flaky_max               = 2      # PR당 flaky-existing 제외 상한(감사 M3) — 넘으면 전부 RED
 quarantine_max          = 5
+quarantine_max_effective = 3     # PR당 격리가 RED→GREEN으로 뒤집을 수 있는 수(감사 M4)
 quarantine_ttl_days     = 28
 quarantine_return_after = 30
 
@@ -86,13 +97,38 @@ ready_timeout_sec = 90
 # every [commands] entry above resolves through, and templates/** is what every adopter's own
 # harness/CI/.claude gets stamped from by `factory init`. A PR touching them is human-merged, never
 # auto-merged (same L0-informational/L1-refuses split as .factory/**/.claude/**).
-factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md",
+# 리뷰 batch-2 MF-3 — 세션 설정 파일은 `**/`로 적는다(그리고 `CLAUDE*.md`다: 재리뷰가 실행해 확인한
+# 대로 이 저장소는 `CLAUDE.md`만 적어 두어 `CLAUDE.local.md`가 rc=0이었다 — Claude Code가 읽는 파일이다).
+# `docs/CLAUDE.md`·`src/AGENTS.md`도 같은 주입 채널이므로 깊이를 가리지 않는다. `**/`는 0개 디렉터리도 맞는다.
+factory       = [".factory/**", ".claude/**", ".github/**", "docs/factory/CHARTER.md", "**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json",
                  "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*",
                  "tsconfig*.json", ".eslintrc*", "eslint.config.*",
                  "factory/**", "templates/**", "bin/**"]
                  # `.factory/out/qa/**`는 qa 리뷰어의 증거물 저장소다 — 판정의 근거가 되는 스크린샷·로그를
                  # 남길 수 없으면 §5.2.3의 "증거 없는 재현은 일어나지 않은 재현"이 성립하지 않는다.
 except        = [".factory/lessons/**", "docs/factory/runs/**", ".factory/out/qa/**"]
+# ── 리뷰 batch-2 MF-2 — `runner_only`: **러너만 쓰는 경로**(쓰기 경계이지 머지 경계가 아니다) ─────
+# run 기록(`docs/factory/runs/**`)은 머지 스테이지가 리뷰 증거로 읽는 파일이다(`review-evidence:` 한 줄).
+# 재리뷰가 확인한 대로 그 디렉터리는 에이전트 세션이 쓸 수 있었고(`echo … >> docs/factory/runs/7.md` rc=0)
+# `syncRecords`는 그 내용을 그대로 `factory/records`로 민다 — 곧 에이전트가 자기 판정을 미리 적어 둘 수 있었다.
+# `[protected].factory`에 넣을 수는 없다: 그 파일은 러너가 매 스테이지 덧붙이고 사람 없이 머지돼야 한다
+# (그래서 위 `except`에 있다). 그래서 **생성되는 훅 `prot`와 ci-settings deny에만** 들어간다.
+runner_only   = ["docs/factory/runs/**"]
+# ── 2026-09-14 외부 감사 M8 / ADR-023: 이 섹션이 보호 경로의 **단일 출처**다 ─────────────────────
+# `factory init`이 여기서 두 가지를 생성한다: `.claude/hooks/block-dangerous.sh`의 `prot` 정규식과
+# `.factory/ci-settings*.json`의 `Edit(...)`/`Write(...)` deny. doctor의 `protected.parity`가 드리프트를
+# FAIL로 잡는다. 그 생성물들을 손으로 고치지 말 것 — 여기를 고치고 `factory init --upgrade`를 돌린다.
+#
+# `agent_writable`은 `[protected].factory` 안에서 **머지 경계와 쓰기 경계가 갈라지는** 자리다.
+# 위 목록은 "이 경로를 건드린 PR은 사람이 머지한다"(L1)를 뜻하고, 생성되는 deny/`prot`는 "에이전트
+# 세션이 이 파일을 쓰지 못한다"(L2/훅)를 뜻한다. 이 저장소에서 `factory/**`·`templates/**`·`bin/**`는
+# 둘이 갈라지는 유일한 경우다: **팩토리의 소스가 곧 제품**이라 builder가 평범한 이슈에서 그것을
+# 편집하는 것이 정상 업무인데(그래서 쓰기는 열려 있어야 한다), 그 diff는 모든 게이트의 정의를 바꾸므로
+# 자동 머지는 안 된다(그래서 위 목록에는 남아 있다).
+# `except`는 여기서 빼지 않는다 — `except`는 머지 면제이지 쓰기 허가가 아니다(`.factory/lessons/**`는
+# retro만 쓴다). 유일한 쓰기 카브아웃은 qa 증거 디렉터리이고, 그것은 `.factory/out/*` 열거(KTB-36)와
+# 훅의 `$qa` sed가 함께 표현한다.
+agent_writable = ["factory/**", "templates/**", "bin/**"]
 # additive_only: 이 두 섹션에 **추가만** 허용한다(§8.1의 다크 경로). 정책이지 변조 판정이 아니므로
 # integrity 체크는 이것으로 RED가 되지 않는다 — 벗어난 편집이 있으면 merge 스테이지가 자동 머지를
 # 거부하고 사람이 머지한다(ADR-020 KTB-6). 그래야 `:role` PR과 역할 파일을 건드리는 업그레이드를
@@ -101,7 +137,14 @@ additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true
 
 [load_bearing]
-paths = ["factory/lib/integrity.js", "factory/lib/merge-stage.js", "factory/lib/labels.js", "factory/bin/run-stage.js"]
+# ── 2026-09-14 외부 감사 H3 / ADR-023: 경로는 **실제로 도는 레이아웃**을 가리켜야 한다 ──────────
+# 이 저장소에는 같은 코드가 두 벌 있다: 소스(`factory/…`)와 스테이지가 실행하는 설치본(`.factory/…`,
+# self-mirror). 소스 경로만 적어 두면 미러만 고치는 diff가 조용히 load-bearing이 아니게 되고, 반대로
+# 채택 저장소에 `factory/lib/…`를 적으면 **아무 파일도 매치하지 않아** tier 바닥이 통째로 사라진다.
+# 매치가 0인 항목은 doctor의 `load-bearing.paths-exist`가 FAIL로 잡는다(오타·이동·레이아웃 드리프트가
+# 전부 같은 모양으로 나타나기 때문이다).
+paths = ["factory/lib/integrity.js", "factory/lib/merge-stage.js", "factory/lib/labels.js", "factory/bin/run-stage.js",
+         ".factory/lib/integrity.js", ".factory/lib/merge-stage.js", ".factory/lib/labels.js", ".factory/bin/run-stage.js"]
 
 [evidence]
 qa_artifacts = ".factory/out/qa/**"

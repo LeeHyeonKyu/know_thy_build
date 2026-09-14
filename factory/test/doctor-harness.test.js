@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
 import { loadHarness, loadHarnessRaw } from "../lib/config.js";
 import { makeFakeRun } from "../lib/exec.js";
@@ -129,6 +130,56 @@ test("maturity-level mismatch: deep listed but M0 → WARN; proof gates listed w
   expect(by(checkHarness({ harness: h2, files }))["proof.commands"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("coverage") });
 });
 
+// ── 감사 H2 / P1-7 (Task 3) — 레벨이 전부 같고 lint가 no-op이면 실효 게이트는 하나뿐이다 ──────
+// 감사 실측: `harness.toml:53-56` fast/full/deep 동일, `lint = "node -e 0"`, `MAX_LEVEL.M0 = "fast"`.
+// 세 가지가 겹치면 어떤 tier의 PR이든 실제로 도는 게이트는 `unit` 하나다 — 그리고 그 구성이 템플릿
+// 그대로 모든 입양자에게 배포된다. doctor가 세 갈래를 각각 잡는다.
+
+test("H2: full이 fast에 아무것도 더하지 않으면 FAIL (gates.levels-identical)", () => {
+  const h = tmpl(); h.gates.full = [...h.gates.fast]; h.gates.deep = [...h.gates.fast];
+  expect(by(checkHarness({ harness: h, files }))["gates.levels-identical"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("full") });
+
+  const h2 = tmpl(); h2.gates.deep = [...h2.gates.fast];
+  expect(by(checkHarness({ harness: h2, files }))["gates.levels-identical"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("deep") });
+
+  // 템플릿 자신은 통과해야 한다 — full = fast + 증명 게이트.
+  expect(by(checkHarness({ harness: tmpl(), files }))["gates.levels-identical"].level).toBe("PASS");
+});
+
+test("H2: deep이 full과 같은데 더 설정된 게이트가 있으면 FAIL, 없으면 PASS", () => {
+  const h = tmpl(); h.commands.e2e = "playwright test";        // 설정은 했는데 deep이 그것을 안 부른다
+  expect(by(checkHarness({ harness: h, files }))["gates.levels-identical"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("e2e") });
+});
+
+test("P1-7: no-op lint는 린트가 아니다 — gates.lint-noop FAIL", () => {
+  for (const cmd of ["node -e 0", 'node -e ""', "true", ":", "   ", "exit 0"]) {
+    const h = tmpl(); h.commands.lint = cmd;
+    expect(by(checkHarness({ harness: h, files }))["gates.lint-noop"], cmd)
+      .toMatchObject({ level: "FAIL", detail: expect.stringContaining("[commands].lint") });
+  }
+  const h2 = tmpl(); h2.commands.lint_file = "node -e 0 {file}";
+  expect(by(checkHarness({ harness: h2, files }))["gates.lint-noop"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("[commands].lint_file") });
+  expect(by(checkHarness({ harness: tmpl(), files }))["gates.lint-noop"].level).toBe("PASS");
+});
+
+test("H2: M0의 fast 강등은 조용하지 않다 — gates.m0-downgrade WARN", () => {
+  const c = by(checkHarness({ harness: tmpl(), files }));      // 템플릿은 M0이고 full/deep에 더 있는 게이트가 있다
+  expect(c["gates.m0-downgrade"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("fast") });
+  expect(c["gates.m0-downgrade"].detail).toContain("prove-test");
+  const h = tmpl(); h.harness.maturity = "M1";
+  expect(by(checkHarness({ harness: h, files }))["gates.m0-downgrade"].level).toBe("PASS");
+});
+
+test("H2: required는 도는 모든 레벨에 있어야 한다 — 한 레벨에서라도 빠지면 FAIL", () => {
+  const h = tmpl(); h.gates.fast = ["unit"];                   // lint가 fast에서 빠졌다 → fast PR은 lint 없이 GREEN
+  expect(by(checkHarness({ harness: h, files }))["gates.required-in-levels"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("lint") });
+});
+
 test("checkCommands runs each non-templated command and reports exit codes; skipRun marks WARN", async () => {
   const h = tmpl();
   const run = makeFakeRun([{ match: (c, a) => a[1].startsWith("npm run lint"), result: { code: 0, stdout: "", stderr: "" } }, { match: () => true, result: { code: 1, stdout: "", stderr: "no tests" } }]);
@@ -139,4 +190,67 @@ test("checkCommands runs each non-templated command and reports exit codes; skip
   expect(run.calls.every((x) => x.cmd === "bash" && x.args[0] === "-lc")).toBe(true);
   const skipped = by(await checkCommands({ harness: h, run, cwd: "/r", skipRun: true }));
   expect(skipped["commands.run"].level).toBe("WARN");
+});
+
+// ── 외부 감사 H3의 절반: `[load_bearing].paths`가 **아무 파일도 가리키지 않는** 드리프트 ────────
+// 이 저장소의 소스는 `factory/lib/…`인데 설치본은 `.factory/lib/…`다. 한쪽만 적으면 목록은 그럴듯한데
+// 매치가 0이고, 그러면 tier 바닥이 조용히 사라진다(그 PR은 load-bearing이 아니게 된다). 오타·이동·
+// 레이아웃 드리프트는 전부 같은 모양으로 나타나므로 doctor가 경로별로 매치를 확인한다.
+test("load-bearing.paths-exist: 매치가 0인 경로는 FAIL, 매치가 있으면 PASS", () => {
+  const h = tmpl(); h.load_bearing = { paths: [".factory/lib/integrity.js"] };
+  expect(by(checkHarness({ harness: h, files }))["load-bearing.paths-exist"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining(".factory/lib/integrity.js") });
+  expect(by(checkHarness({ harness: h, files: [...files, ".factory/lib/integrity.js"] }))["load-bearing.paths-exist"].level).toBe("PASS");
+});
+
+test("load-bearing.paths-exist: 목록이 비어 있으면 WARN — 모든 PR의 바닥이 standard에 머문다는 사실을 소리 내어 말한다", () => {
+  const h = tmpl(); h.load_bearing = { paths: [] };
+  expect(by(checkHarness({ harness: h, files }))["load-bearing.paths-exist"].level).toBe("WARN");
+});
+
+test("load-bearing.paths-exist: 글롭도 실제 파일을 가리켜야 한다", () => {
+  const h = tmpl(); h.load_bearing = { paths: ["src/**"] };
+  expect(by(checkHarness({ harness: h, files }))["load-bearing.paths-exist"].level).toBe("PASS");
+  const h2 = tmpl(); h2.load_bearing = { paths: ["srcc/**"] };
+  expect(by(checkHarness({ harness: h2, files }))["load-bearing.paths-exist"].level).toBe("FAIL");
+});
+
+// 이 저장소 자신의 하네스: 소스(`factory/…`)와 설치본(`.factory/…`) 두 레이아웃을 모두 적어야
+// 실제로 도는 코드가 load-bearing이 된다 — 스테이지는 `.factory/…`의 사본을 실행한다.
+test("KTB의 harness.toml [load_bearing].paths는 소스와 설치본을 모두 가리키고, 전부 실재한다", () => {
+  const h = loadHarness(new URL("../..", import.meta.url).pathname);
+  const paths = h.load_bearing?.paths || [];
+  expect(paths.some((p) => p.startsWith("factory/"))).toBe(true);
+  expect(paths.some((p) => p.startsWith(".factory/"))).toBe(true);
+  for (const p of paths) expect(existsSync(new URL(`../../${p}`, import.meta.url).pathname), `${p} does not exist`).toBe(true);
+});
+
+// ── 리뷰 batch-2 MF-2 — run 기록 디렉터리는 러너의 것이어야 한다 ────────────────────────────────
+// 머지 스테이지는 review handoff를 `docs/factory/runs/<n>.md`의 `review-evidence:` 줄과 대조한다.
+// 그 디렉터리가 에이전트에게 열려 있으면 대조가 아무것도 증명하지 못한다(재리뷰가 rc=0으로 확인).
+// 그런데 `[protected].factory`에 넣을 수는 없다 — 러너가 매 스테이지 쓰고 사람 없이 머지돼야 한다.
+// 그 반쪽(쓰기 경계)이 `[protected].runner_only`이고, 이 검사가 그 둘이 갈라지지 않았는지 본다.
+test("protected.runner-only: the template seals the runs dir for agents but not for L1 (review batch-2 MF-2)", () => {
+  const c = by(checkHarness({ harness: tmpl(), files }));
+  expect(c["protected.runner-only"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("docs/factory/runs/**") });
+  // 머지 경계에는 들어가지 않는다 — 들어가면 run 기록 PR마다 사람이 머지해야 한다.
+  expect(tmpl().protected.factory).not.toContain("docs/factory/runs/**");
+  expect(tmpl().protected.except).toContain("docs/factory/runs/**");
+});
+
+test("protected.runner-only: an empty or non-covering list is a FAIL, and so is overlap with [protected].factory", () => {
+  const h = tmpl(); h.protected.runner_only = [];
+  expect(by(checkHarness({ harness: h, files }))["protected.runner-only"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("docs/factory/runs/**") });
+
+  const h2 = tmpl(); h2.protected.runner_only = [".factory/out/qa/**"];   // 다른 경로를 적어도 runs_dir가 열려 있으면 FAIL
+  expect(by(checkHarness({ harness: h2, files }))["protected.runner-only"].level).toBe("FAIL");
+
+  const h3 = tmpl(); h3.protected.factory = [...h3.protected.factory, "docs/factory/runs/**"];
+  expect(by(checkHarness({ harness: h3, files }))["protected.runner-only"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("WRITE boundary") });
+
+  // `[project].runs_dir`를 옮긴 저장소는 그 경로가 덮여야 한다(글롭이 따라오지 않으면 FAIL).
+  const h4 = tmpl(); h4.project.runs_dir = "docs/runs";
+  expect(by(checkHarness({ harness: h4, files }))["protected.runner-only"].level).toBe("FAIL");
+  h4.protected.runner_only = ["docs/runs/**"];
+  expect(by(checkHarness({ harness: h4, files }))["protected.runner-only"].level).toBe("PASS");
 });

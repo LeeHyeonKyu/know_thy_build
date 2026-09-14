@@ -26,7 +26,14 @@ export function buildManifest({ pkgRoot, list = readdirRecursive }) {
   const entries = [];
   for (const p of list(join(pkgRoot, "factory/lib"))) if (p.endsWith(".js")) entries.push({ src: p, dest: `.factory/lib/${rel(join(pkgRoot, "factory/lib"), p)}`, owner: "factory" });
   for (const p of list(join(pkgRoot, "factory/bin"))) if (p.endsWith(".js")) entries.push({ src: p, dest: `.factory/bin/${rel(join(pkgRoot, "factory/bin"), p)}`, owner: "factory" });
-  for (const p of list(join(pkgRoot, "factory/hooks"))) if (p.endsWith(".sh")) entries.push({ src: p, dest: `.claude/hooks/${rel(join(pkgRoot, "factory/hooks"), p)}`, owner: "factory", mode: 0o755 });
+  for (const p of list(join(pkgRoot, "factory/hooks"))) {
+    if (!p.endsWith(".sh")) continue;
+    const dest = `.claude/hooks/${rel(join(pkgRoot, "factory/hooks"), p)}`;
+    const e = { src: p, dest, owner: "factory", mode: 0o755 };
+    // 외부 감사 M8 — `prot` 목록은 harness.toml `[protected]`에서 생성한다(install.js `freshContent`).
+    if (dest === ".claude/hooks/block-dangerous.sh") e.generate = "hook-protected";
+    entries.push(e);
+  }
   const tRoot = join(pkgRoot, "templates/factory");
   for (const p of list(tRoot)) {
     const r = rel(tRoot, p);
@@ -35,6 +42,9 @@ export function buildManifest({ pkgRoot, list = readdirRecursive }) {
     const dest = [PREFIX[head], ...rest].join("/");
     const e = { src: p, dest, owner: ownerOf(dest) };
     if (dest === ".claude/settings.json") e.merge = "settings";
+    // 외부 감사 M8 — 경로 deny는 harness.toml `[protected]`에서 생성한다(install.js `freshContent`).
+    if (dest === ".factory/ci-settings.json") e.generate = "ci-settings";
+    if (dest === ".factory/ci-settings-harness.json") e.generate = "ci-settings-harness";
     entries.push(e);
   }
   const seen = new Set();

@@ -1,5 +1,9 @@
 import { test, expect } from "vitest";
-import { proveTest, repeatNewTests } from "../lib/prove-test.js";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { proveTest, repeatNewTests, baseInstallCommand, inconclusiveOnBase } from "../lib/prove-test.js";
+import { runStageGates } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const harness = { commands: { test_files: "vitest run {files}", unit: "vitest run" } };
@@ -55,4 +59,102 @@ test("repeatNewTests runs N times, first alongside the full suite; any failure �
   const r = await repeatNewTests({ run, cwd: "/repo", harness, addedTests: ["test/new.test.js"], times: 3 });
   expect(r.ok).toBe(false); expect(r.runs.map((x) => x.code)).toEqual([0, 1, 0]);
   expect(run.calls.filter((c) => c.args[1] === "vitest run")).toHaveLength(1);
+});
+
+// --- 외부 감사 2026-09-14 M2: base 워크트리에는 의존성이 없었다 ---
+
+test("baseInstallCommand: harness [runtime].setup wins, then the lockfile, then package.json, else none", () => {
+  const has = (...names) => (p) => names.some((n) => p.endsWith(n));
+  expect(baseInstallCommand({ runtime: { setup: "pnpm i --frozen-lockfile" } }, "/wt", has("package-lock.json"))).toBe("pnpm i --frozen-lockfile");
+  expect(baseInstallCommand({}, "/wt", has("package-lock.json", "package.json"))).toBe("npm ci");
+  expect(baseInstallCommand({}, "/wt", has("package.json"))).toBe("npm install --no-audit");
+  expect(baseInstallCommand({}, "/wt", () => false)).toBe(null);
+});
+
+test("inconclusiveOnBase: module-resolution failures are not proof; a missing export still is", () => {
+  expect(inconclusiveOnBase("Error: Cannot find module 'vitest'")).toBe(true);
+  expect(inconclusiveOnBase("code: 'ERR_MODULE_NOT_FOUND'")).toBe(true);
+  expect(inconclusiveOnBase("SyntaxError: Unexpected token 'export'")).toBe(true);
+  expect(inconclusiveOnBase("TypeError: undefined is not a function")).toBe(true);
+  // 이것들은 base가 실제로 말해 준 사실이다 — 증명이지 설정 오류가 아니다.
+  expect(inconclusiveOnBase("AssertionError: expected 3 to be 4")).toBe(false);
+  expect(inconclusiveOnBase("SyntaxError: The requested module does not provide an export named 'parseX'")).toBe(false);
+  expect(inconclusiveOnBase("TypeError: lib.parseX is not a function")).toBe(false);
+});
+
+test("proveTest installs dependencies in the base worktree before running the new tests", async () => {
+  const run = makeFakeRun([
+    wt(ok),
+    { match: (c) => c === "cp", result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "npm ci", result: ok },
+    { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: fail },
+  ]);
+  const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt", exists: (p) => p.endsWith("package-lock.json") });
+  expect(r.ok).toBe(true);
+  const bash = run.calls.filter((c) => c.cmd === "bash");
+  expect(bash[0].args[1]).toBe("npm ci");                              // 테스트보다 **먼저**, 그리고 워크트리 안에서
+  expect(bash[0].opts.cwd).toBe("/tmp/wt");
+  expect(bash[1].args[1]).toContain("vitest run");
+});
+
+test("proveTest: a base install that fails is fail-closed — misconfigured, not proof", async () => {
+  const run = makeFakeRun([
+    wt(ok),
+    { match: (c) => c === "cp", result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "npm ci", result: { code: 1, stdout: "", stderr: "ENOTFOUND registry" } },
+  ]);
+  const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt", exists: (p) => p.endsWith("package-lock.json") });
+  expect(r).toMatchObject({ ok: false, misconfigured: true, inconclusive: ["test/new.test.js"] });
+  expect(r.detail).toMatch(/base dependency install failed/);
+  expect(run.calls.some((c) => c.cmd === "bash" && c.args[1].includes("vitest"))).toBe(false);
+});
+
+test("proveTest: a base run that dies on module resolution is INCONCLUSIVE, never proof", async () => {
+  const run = makeFakeRun([
+    wt(ok),
+    { match: (c) => c === "cp", result: ok },
+    { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: { code: 1, stdout: "Error: Cannot find module '../lib/thing.js'", stderr: "" } },
+  ]);
+  const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt", exists: () => false });
+  expect(r.ok).toBe(false);
+  expect(r.misconfigured).toBe(true);                                  // 게이트는 GREEN도 RED도 아니다 — 설정 오류다
+  expect(r.inconclusive).toEqual(["test/new.test.js"]);
+  expect(r.detail).toMatch(/inconclusive/);
+});
+
+test("stage gates: an inconclusive prove-test is MISCONFIGURED and listed in prove_test.inconclusive — never GREEN", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "prove-gates-"));
+  const stageHarness = {
+    harness: { maturity: "M2" },
+    commands: { unit: "vitest --json", test_files: "vitest run {files}", proof: {} },
+    gates: { required: ["unit", "prove-test"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 2, flaky_max: 2, quarantine_max_effective: 3 } },
+    test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
+  };
+  const TF = "vitest run 'test/new.test.js'";
+  const run = makeFakeRun([
+    { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "Error: Cannot find module 'vitest'", stderr: "" } },
+    { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: ok },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "A\ttest/new.test.js\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"h".repeat(40)}\n`, stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c) => c === "cp", result: ok },
+  ]);
+  const r = await runStageGates({ run, cwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), readFile: () => null });
+  expect(r.gates["prove-test"].status).toBe("MISCONFIGURED");
+  expect(r.prove_test).toEqual({ inconclusive: ["test/new.test.js"] });
+  expect(r.status).toBe("MISCONFIGURED");                              // fail closed — 이 PR은 이 게이트로 머지되지 않는다
+  expect(r.misconfigured).toContain("prove-test");
+});
+
+test("proveTest: a real failure on base is still proof, with dependencies installed", async () => {
+  const run = makeFakeRun([
+    wt(ok),
+    { match: (c) => c === "cp", result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "npm ci", result: ok },
+    { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: { code: 1, stdout: "AssertionError: expected 3 to be 4", stderr: "" } },
+  ]);
+  const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt", exists: (p) => p.endsWith("package-lock.json") });
+  expect(r).toMatchObject({ ok: true });
+  expect(r.inconclusive).toBeUndefined();
 });

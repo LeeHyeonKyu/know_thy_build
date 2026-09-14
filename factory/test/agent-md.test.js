@@ -83,6 +83,10 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 ## Lessons
 Before reviewing, read \`.factory/lessons/reviewer-correctness.md\` (path is also given in your prompt)
 and treat each entry as a checklist item.
+When an entry actually shapes a finding, **cite it inside that finding's own \`claim\`** with the marker
+\`lesson:<id>\` (e.g. \`lesson:L-2026-09-01-03\`). That marker is the only record that the lesson did any
+work: retro counts it into the entry's \`인용\`, and a lesson nobody ever cites is the first one retired.
+Never cite a lesson you did not use — the count is evidence, not courtesy.
 `;
 
 test("parseAgentMd: frontmatter (tools split, hooks list-of-maps) + all required sections present", () => {
@@ -184,23 +188,12 @@ test("lintAgentMd: a deny-all-writes hook whose matcher omits any write tool →
   expect(narrow("Edit|Write|MultiEdit|NotebookEdit|BashTool")).toEqual([{ rule: "deny-hook", msg: expect.stringContaining("Bash") }]);
 });
 
-// Task 2: factory-loader.md / factory-triage.md templates (full suite lint is switched on in Task 6).
-test("lintAgentMd: templates/factory/claude/agents/factory-loader.md passes with no violations", () => {
-  const text = readAgent("factory-loader");
-  expect(lintAgentMd(text, { expectedName: "factory-loader" })).toEqual([]);
-});
-
+// Task 2: factory-triage.md 템플릿(전체 lint는 Task 6에서 켜진다). factory-loader.md는 외부 감사
+// 2026-09-14 M5로 삭제됐다 — workflow의 첫 스텝은 LLM 호출이 아니라 `factory/lib/context.js`가 쓰는
+// `.factory/out/loaded.json`이다.
 test("lintAgentMd: templates/factory/claude/agents/factory-triage.md passes with no violations", () => {
   const text = readAgent("factory-triage");
   expect(lintAgentMd(text, { expectedName: "factory-triage" })).toEqual([]);
-});
-
-test("parseAgentMd: factory-loader.md frontmatter — sonnet model, read-only tools, deny-all-writes hook", () => {
-  const { frontmatter } = parseAgentMd(readAgent("factory-loader"));
-  expect(frontmatter.name).toBe("factory-loader");
-  expect(frontmatter.model).toBe("sonnet");
-  expect(frontmatter.tools).toEqual(["Read", "Bash", "Grep"]);
-  expect(frontmatter.hooks.PreToolUse[0].hooks[0].command).toContain("deny-all-writes.sh");
 });
 
 // Task 3: the five plan debate agents.
@@ -302,6 +295,20 @@ for (const name of REVIEW_AGENTS) {
   });
 }
 
+/**
+ * 외부 감사 2026-09-14 M11 — 인용 카운터(`인용: N회`)를 올릴 수 있는 유일한 입력은 판정문 안의
+ * `lesson:<id>` 마커다. 그 마커를 내놓으라고 말하는 곳이 프롬프트뿐이므로, 말하지 않으면 카운터는
+ * 영원히 0이고 은퇴 규칙("인용 0회부터")은 그냥 "오래된 것부터"가 된다.
+ */
+test("M11: every role that reads lessons is told to cite `lesson:<id>` when it used one", () => {
+  for (const name of [...REVIEW_AGENTS, "factory-builder"]) {
+    const md = readAgent(name);
+    expect(md, name).toMatch(/lesson:<id>/);
+    expect(md, name).toMatch(/lesson:L-\d{4}-\d{2}-\d{2}-\d{2}/);      // 형식을 예시로 보여 준다
+    expect(md, name).toMatch(/인용/);
+  }
+});
+
 test("reviewer agents: roles.toml models and tools, every one behind deny-all-writes", () => {
   const models = {
     "reviewer-correctness": "opus", "reviewer-security": "opus", "reviewer-architecture": "opus",
@@ -384,10 +391,10 @@ test("reviewer-spec-conformance.md: defers structural justification to architect
 // Task 6: the sweep. The per-task tests above pin what each role file says; this one is the gate that no
 // agent template can be added (or edited) past §7.2 — `doctor checkAgents` runs exactly this lint on the
 // installed copies, so a template that fails here fails the installed repo's doctor too.
-test("every templates/factory/claude/agents/*.md lints clean, and the set is the 15 roles Plan 3+4 install", () => {
+test("every templates/factory/claude/agents/*.md lints clean, and the set is the 14 roles Plan 3+4 install (감사 M5로 loader는 빠졌다)", () => {
   const files = agentFiles();
   expect(files).toEqual([
-    "factory-builder.md", "factory-loader.md", "factory-retro.md", "factory-triage.md", "factory-verifier.md",
+    "factory-builder.md", "factory-retro.md", "factory-triage.md", "factory-verifier.md",
     "plan-architect.md", "plan-operator.md", "plan-product-advocate.md", "plan-skeptic.md", "plan-synthesizer.md",
     "reviewer-architecture.md", "reviewer-correctness.md", "reviewer-qa.md", "reviewer-security.md",
     "reviewer-spec-conformance.md",

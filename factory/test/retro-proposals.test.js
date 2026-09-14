@@ -3,6 +3,26 @@ import { filterByEvidence, renderProposalPr, DEFAULT_WINDOWS } from "../lib/retr
 
 const p = (kind, runs, extra = {}) => ({ kind, title: `${kind} 제안`, body: `${kind} 본문`, evidence_runs: runs, ...extra });
 
+// ── 외부 감사 2026-09-14 M10/M11: 근거 run은 실재해야 한다 ──────────────────────────────
+
+test("a proposal citing a run that has no record on the records branch is deferred with that reason", () => {
+  const known = new Set(["1", "2", "3"]);
+  const { accepted, deferred } = filterByEvidence([p("gate", [1, 2, 3]), p("gate", [1, 2, 99])], { knownRuns: known });
+  expect(accepted).toHaveLength(1);
+  expect(accepted[0].evidence_runs).toEqual([1, 2, 3]);
+  expect(deferred[0].reason).toMatch(/unknown-evidence-run: 99/);
+});
+
+test("numbers and strings are the same run id; test-delete and an empty known set skip the check", () => {
+  const known = new Set(["1", "2", "3"]);
+  expect(filterByEvidence([p("gate", ["1", 2, 3])], { knownRuns: known }).accepted).toHaveLength(1);
+  // 삭제 제안은 run 기록이 아니라 재작성 이슈를 인용한다 — 언제나 사람이 본다.
+  expect(filterByEvidence([p("test-delete", [404])], { knownRuns: known }).accepted).toHaveLength(1);
+  // 기록이 하나도 없는 저장소(첫 retro)에서는 검사를 걸지 않는다 — 전부 거부하면 그 회차가 무의미하다.
+  expect(filterByEvidence([p("gate", [7, 8, 9])], { knownRuns: new Set() }).accepted).toHaveLength(1);
+  expect(filterByEvidence([p("gate", [7, 8, 9])]).accepted).toHaveLength(1);
+});
+
 test("gate proposals need >=3 distinct evidence runs", () => {
   const { accepted, deferred } = filterByEvidence([p("gate", [1, 2]), p("gate", [1, 2, 3])]);
   expect(accepted.map((x) => x.evidence_runs.length)).toEqual([3]);

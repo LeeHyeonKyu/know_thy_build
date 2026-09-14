@@ -397,6 +397,60 @@ test("composite setup action runs [runtime].setup as its own step, not sharing o
   expect(setupStep).toMatch(/run:\s*node \.factory\/bin\/setup-env\.js\s*\n?$/);
 });
 
+// ── 외부 감사 2026-09-14 M7 — merge-token-required-when-two-actor ────────────
+
+/**
+ * 감사가 짚은 한 줄: `GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}`.
+ * 단일 배우 모드에는 그 폴백이 정답이지만, 두 배우 모드에서도 **똑같이 조용히** 작동한다 —
+ * 환경이 적용되지 않으면 머지가 에이전트 배우의 토큰으로 나가고 ADR-021이 로그 없이 사라진다.
+ */
+test("merge-token-required-when-two-actor: the `|| FACTORY_BOT_TOKEN` fallback needs a guard step that fails the job when the mode says two-actor", () => {
+  // 스테이지 규칙(KTB-24/26)까지 함께 발화하지 않도록 `run-stage.js <stage> "$ISSUE"` 줄은 넣지 않는다 —
+  // 이 테스트가 묻는 것은 토큰 폴백 하나다.
+  const fallback = [
+    "  - name: Run stage",
+    "    env:",
+    "      GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}",
+    "    run: echo merge",
+    "",
+  ].join("\n");
+  expect(lintWorkflow(fallback, { file: "factory-merge.yml" }))
+    .toEqual([expect.objectContaining({ rule: "merge-token-required-when-two-actor", line: 3 })]);
+
+  // 가드 스텝이 있으면 폴백은 그대로 둔다 — 막는 것은 폴백이 아니라 **무성 강등**이다.
+  const guarded = [
+    "  - name: Require the merge token in two-actor mode",
+    "    id: two-actor-token-guard",
+    "    env:",
+    "      TWO_ACTOR_DECLARED: ${{ vars.FACTORY_TWO_ACTOR }}",
+    "      MERGE_TOKEN_PRESENT: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}",
+    "    run: |",
+    "      if [[ \"$TWO_ACTOR_DECLARED\" == \"true\" && \"$MERGE_TOKEN_PRESENT\" != \"true\" ]]; then exit 1; fi",
+    fallback,
+  ].join("\n");
+  expect(lintWorkflow(guarded, { file: "factory-merge.yml" })).toEqual([]);
+
+  // 스텝 **이름**만 흉내 낸 것은 열쇠가 아니다 — `id:`가 열쇠다(merge-token-scope의 스크럽 예외와 같다).
+  const nameOnly = ["  - name: two-actor-token-guard", "    run: echo hi", fallback].join("\n");
+  expect(lintWorkflow(nameOnly, { file: "factory-merge.yml" }))
+    .toEqual([expect.objectContaining({ rule: "merge-token-required-when-two-actor" })]);
+
+  // 주석 안의 언급은 발화시키지 않는다 — 이 규칙을 설명하는 주석이 바로 그 파일 안에 있다.
+  expect(lintWorkflow("      # GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}\n", { file: "factory-merge.yml" })).toEqual([]);
+  // 폴백이 없으면 규칙은 침묵한다.
+  expect(lintWorkflow("      GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}\n", { file: "factory-merge.yml" })).toEqual([]);
+});
+
+test("the factory-merge template carries the two-actor token guard as its FIRST step (audit M7)", () => {
+  const y = readFileSync(join(W, "factory-merge.yml"), "utf8");
+  expect(y).toContain("id: two-actor-token-guard");
+  // 첫 스텝이어야 한다 — 체크아웃보다도, 어떤 토큰이 쓰이기도 전에 죽는다.
+  expect(y.indexOf("id: two-actor-token-guard")).toBeLessThan(y.indexOf("uses: actions/checkout@v4"));
+  expect(y).toContain("vars.FACTORY_TWO_ACTOR");
+  // 감사 H1b — 머지 잡은 에이전트 배우의 **로그인 이름**을 해석해 상태 게시자 대조에 쓴다(토큰이 아니다).
+  expect(y).toContain("FACTORY_BOT_LOGIN=$login");
+});
+
 // ── ADR-021 merge-token-scope ───────────────────────────────────────────────
 
 test("merge-token-scope: FACTORY_MERGE_TOKEN in any workflow but factory-merge.yml is a violation", () => {

@@ -126,7 +126,7 @@ test("factory-triage.js: meta.name equals the file's own basename", () => {
   expect(m[1]).toBe(basename(FACTORY_TRIAGE_WORKFLOW, ".js"));
 });
 
-test("factory-triage.js: loader → triage call order, valid triage.v1 result, workflow orchestration, Load/Triage phases", async () => {
+test("factory-triage.js: triage call order, valid triage.v1 result, workflow orchestration, Load/Triage phases", async () => {
   const loaderFix = {
     issue: 7,
     stage: "triage",
@@ -145,11 +145,11 @@ test("factory-triage.js: loader → triage call order, valid triage.v1 result, w
   // the dispatcher command may hand the workflow a stringly-typed issue — the workflow must Number() it.
   const { result, calls, phases } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
     agent: stub,
-    args: { issue: "7", context: ".factory/out/context.json" },
+    args: { issue: "7", context: ".factory/out/context.json", loaded: loaderFix },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-triage"]);
-  expect(calls[1].opts.model).toBe("sonnet");
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-triage"]);
+  expect(calls[0].opts.model).toBe("sonnet");
   expect(result).toMatchObject({ issue: 7, disposition: "ready", tier: "standard", orchestration: "workflow", guarantee: "structural" });
   expect(validate("triage.v1", result).ok).toBe(true);
   expect(phases).toEqual(["Load", "Triage"]);
@@ -171,7 +171,7 @@ test("factory-triage.js: a null factory-triage result re-spawns once; a second n
 
   const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
     agent: stub,
-    args: { issue: 9, context: ".factory/out/context.json" },
+    args: { issue: 9, context: ".factory/out/context.json", loaded: loaderFix },
   });
 
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(2);
@@ -181,7 +181,7 @@ test("factory-triage.js: a null factory-triage result re-spawns once; a second n
   expect(result.guarantee).toBe("structural");
 });
 
-test("factory-triage.js: loader/dispatcher issue mismatch fails closed — no triage call, error surfaced, no disposition", async () => {
+test("factory-triage.js: payload/dispatcher issue mismatch fails closed — no triage call, error surfaced, no disposition", async () => {
   const loaderFix = {
     issue: 99, // loader read a stale/wrong context.json
     stage: "triage",
@@ -196,10 +196,10 @@ test("factory-triage.js: loader/dispatcher issue mismatch fails closed — no tr
 
   const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
     agent: stub,
-    args: { issue: 7, context: ".factory/out/context.json" },
+    args: { issue: 7, context: ".factory/out/context.json", loaded: loaderFix },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader"]);
+  expect(calls).toEqual([]);
   expect(result.issue).toBe(7);
   expect(result.error).toMatch(/context issue mismatch/);
   expect(result.disposition).toBeUndefined();
@@ -208,7 +208,7 @@ test("factory-triage.js: loader/dispatcher issue mismatch fails closed — no tr
   expect(validate("triage.v1", result).ok).toBe(false);
 });
 
-test("factory-triage.js: a null factory-loader result re-spawns once; a second null fails the stage closed with a named error and no role call", async () => {
+test("factory-triage.js: a missing args.loaded fails the stage closed with a named error and no role call", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return null;
     return null;
@@ -216,13 +216,13 @@ test("factory-triage.js: a null factory-loader result re-spawns once; a second n
 
   const { calls, phases, result } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, {
     agent: stub,
-    args: { issue: 11, context: ".factory/out/context.json" },
+    args: { issue: 11, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls.filter((c) => c.opts.agentType === "factory-loader")).toHaveLength(2);
+  expect(calls).toEqual([]);
   expect(phases).toEqual(["Load"]);
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(0);
-  expect(result).toEqual({ issue: 11, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(result).toEqual({ issue: 11, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("triage.v1", result).ok).toBe(false);
 });
 
@@ -284,7 +284,7 @@ test("factory-plan.js: meta.name equals the file's own basename", () => {
   expect(m[1]).toBe(basename(FACTORY_PLAN_WORKFLOW, ".js"));
 });
 
-test("factory-plan.js: standard tier runs R1/R2/synthesis/sign-off over the loader roster and returns a valid plan.v1", async () => {
+test("factory-plan.js: standard tier runs R1/R2/synthesis/sign-off over the context payload's roster and returns a valid plan.v1", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return planLoaderFix();
     if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
@@ -296,7 +296,7 @@ test("factory-plan.js: standard tier runs R1/R2/synthesis/sign-off over the load
 
   const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: "42", context: ".factory/out/context.json" },
+    args: { issue: "42", context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   expect(labelled(calls, "R1:")).toHaveLength(4);
@@ -341,7 +341,7 @@ test("factory-plan.js: R1 is independent (no other role's position in the prompt
   };
   const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   for (const c of labelled(calls, "R1:")) expect(c.prompt).not.toContain("POSITION-OF-");
@@ -371,7 +371,7 @@ test("factory-plan.js: one objection at sign-off re-runs the synthesizer once; a
 
   const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(2);
@@ -398,7 +398,7 @@ test("factory-plan.js: an objection that survives the re-synthesis is recorded i
 
   const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(2);
@@ -422,7 +422,7 @@ test("factory-plan.js: docs tier (rounds 2, roster 2) skips cross-examination en
 
   const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ tier: "docs", rounds: 2, roster: docsRoster }) },
   });
 
   expect(labelled(calls, "R1:")).toHaveLength(2);
@@ -448,7 +448,7 @@ test("factory-plan.js: a debater that returns null twice in R1 is re-spawned onc
 
   const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   // 4 debaters + exactly one insurance re-spawn for the role that came back null (ADR-003)
@@ -462,7 +462,7 @@ test("factory-plan.js: a debater that returns null twice in R1 is re-spawned onc
   expect(result.roles).toEqual(PLAN_ROSTER.map((r) => r.name));
 });
 
-test("factory-plan.js: loader/dispatcher issue mismatch fails closed — no debate at all, error surfaced, plan.v1 invalid", async () => {
+test("factory-plan.js: payload/dispatcher issue mismatch fails closed — no debate at all, error surfaced, plan.v1 invalid", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return planLoaderFix({ issue: 99 });
     return planFix();
@@ -470,10 +470,10 @@ test("factory-plan.js: loader/dispatcher issue mismatch fails closed — no deba
 
   const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ issue: 99 }) },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader"]);
+  expect(calls).toEqual([]);
   expect(result.issue).toBe(42);
   expect(result.error).toMatch(/context issue mismatch/);
   expect(result.done_when).toBeUndefined();
@@ -482,17 +482,17 @@ test("factory-plan.js: loader/dispatcher issue mismatch fails closed — no deba
   expect(validate("plan.v1", result).ok).toBe(false);
 });
 
-test("factory-plan.js: a null factory-loader fails the stage closed — no debate, named error, plan.v1 invalid", async () => {
+test("factory-plan.js: a missing args.loaded fails the stage closed — no debate, named error, plan.v1 invalid", async () => {
   const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? null : planFix());
 
   const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-loader"]);
+  expect(calls).toEqual([]);
   expect(phases).toEqual(["Load"]);
-  expect(result).toEqual({ issue: 42, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("plan.v1", result).ok).toBe(false);
 });
 
@@ -519,7 +519,7 @@ test("factory-plan.js: an objection the synthesizer already logged is superseded
 
   const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   expect(result.dissent_log.filter((d) => d.role === "skeptic" && d.objection === OBJECTION)).toHaveLength(1);
@@ -551,7 +551,7 @@ test("factory-plan.js: synthesis sees R1 and R2; the second sign-off votes on th
 
   const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
   });
 
   // the synthesizer is given both rounds of the debate, not just the positions
@@ -570,6 +570,128 @@ test("factory-plan.js: synthesis sees R1 and R2; the second sign-off votes on th
     expect(c.prompt).not.toContain("PLAN-DRAFT-1");
   }
   expect(result.summary).toBe("PLAN-DRAFT-2");
+});
+
+/*
+ * --- 감사 Task 9 (P2): plan 기본 = 단일 opus 1패스 + skeptic 1패스 ---
+ *
+ * 근거는 `docs/factory/dogfood/2026-09-14-plan-baseline.md`다: 4역할 토론은 이슈당 5.4×–33.7×를
+ * 쓰고도 #15·#18에서 단일 패스보다 못했고, must_fix 15건 중 5건이 토론이 스스로 발명한 done_when
+ * 때문에 생겼다. 토론은 load-bearing tier에만 남는다.
+ */
+
+const SINGLE_ROSTER = [
+  { name: "synthesizer", agentType: "plan-synthesizer", model: "opus", lessons: ".factory/lessons/plan-synthesizer.md" },
+  { name: "skeptic", agentType: "plan-skeptic", model: "opus", lessons: ".factory/lessons/plan-skeptic.md" },
+];
+const singleLoaderFix = (over = {}) => planLoaderFix({ roster: SINGLE_ROSTER, rounds: 2, plan: { mode: "single", max_done_when: 6 }, ...over });
+const singlePlanFix = (over = {}) => planFix({ roles: ["synthesizer", "skeptic"], rounds: 2, ...over });
+
+test("factory-plan.js: single mode runs exactly two passes — one opus planner, one skeptic — and no debate at all", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    if (opts.label === "plan:synthesizer") return singlePlanFix();
+    if (opts.label === "skeptic:skeptic") return { risks: [], done_when: [] };
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub, args: { issue: "42", context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+
+  const agents = calls.filter((c) => c.opts.agentType !== "factory-loader");
+  expect(agents).toHaveLength(2);
+  expect(agents.map((c) => c.opts.agentType)).toEqual(["plan-synthesizer", "plan-skeptic"]);
+  expect(agents.map((c) => c.opts.model)).toEqual(["opus", "opus"]);
+  expect(labelled(calls, "R1:")).toHaveLength(0);
+  expect(labelled(calls, "R2:")).toHaveLength(0);
+  expect(labelled(calls, "sign:")).toHaveLength(0);
+
+  expect(validate("plan.v1", result).ok).toBe(true);
+  expect(result).toMatchObject({ issue: 42, tier: "standard", rounds: 2, orchestration: "workflow", guarantee: "structural" });
+  expect(result.roles).toEqual(["synthesizer", "skeptic"]);
+  expect(result.debate.mode).toBe("single");
+  // 선언된 phase 집합은 모드와 무관하게 고정이다(meta는 하나다).
+  expect(phases).toEqual(["Load", "Positions", "Cross-examination", "Synthesis", "Sign-off"]);
+  // done_when 상한은 skeptic이 알아야 한다 — 상한을 모르면 7번째 항목을 더해 핸드오프를 무효로 만든다.
+  expect(agents[1].prompt).toContain("6");
+});
+
+test("factory-plan.js: the skeptic pass may only ADD — planner items are never replaced or dropped", async () => {
+  const planner = singlePlanFix({
+    done_when: [{ id: "dw1", text: "PLANNER-TEXT", verify: "test_42_a", level: "unit" }],
+    open_risks: ["planner risk"],
+    dissent_log: [],
+  });
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    if (opts.label === "plan:synthesizer") return planner;
+    if (opts.label === "skeptic:skeptic") return {
+      risks: ["skeptic risk", "planner risk"],                                    // 중복은 한 번만
+      done_when: [
+        { id: "dw1", text: "SKEPTIC-OVERWRITE", verify: "test_42_a", level: "unit" },   // 같은 id — 무시된다
+        { id: "dw2", text: "connection failure without err.code still returns 503", verify: "test_42_b", level: "unit", covers: ["d1"] },
+      ],
+      dissent: [{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "covered by dw2" }],
+    };
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub, args: { issue: "42", context: ".factory/out/context.json", loaded: singleLoaderFix() },
+  });
+
+  expect(result.done_when.map((d) => d.id)).toEqual(["dw1", "dw2"]);
+  expect(result.done_when[0].text).toBe("PLANNER-TEXT");
+  expect(result.done_when[1].covers).toEqual(["d1"]);
+  expect(result.open_risks).toEqual(["planner risk", "skeptic risk"]);
+  expect(result.dissent_log).toEqual([{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "covered by dw2" }]);
+  expect(result.summary).toBe(planner.summary);                                   // 종합은 계획자 자신의 최종본이다
+  // skeptic은 계획을 통째로 본다 — 무엇에 반대하는지 알아야 하기 때문이다.
+  expect(calls.find((c) => c.opts.label === "skeptic:skeptic").prompt).toContain("PLANNER-TEXT");
+  expect(result.debate.skeptic_added).toEqual({ done_when: 1, risks: 1, dissent: 1 });
+});
+
+test("factory-plan.js: a dead skeptic leaves the planner's plan standing (re-spawned once, then dropped)", async () => {
+  let skepticCalls = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    if (opts.label === "plan:synthesizer") return singlePlanFix({ summary: "PLANNER-ONLY" });
+    if (opts.label === "skeptic:skeptic") { skepticCalls++; return null; }
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: "42", context: ".factory/out/context.json", loaded: singleLoaderFix() } });
+  expect(skepticCalls).toBe(2);                                                   // 보험 재spawn 1회
+  expect(validate("plan.v1", result).ok).toBe(true);
+  expect(result.summary).toBe("PLANNER-ONLY");
+  expect(result.debate.skeptic_added).toBe(null);
+});
+
+test("factory-plan.js: a dead planner fails the single-mode stage closed — no plan, plan.v1 invalid", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: "42", context: ".factory/out/context.json", loaded: singleLoaderFix() } });
+  expect(calls.filter((c) => c.opts.label === "plan:synthesizer")).toHaveLength(2);
+  expect(calls.filter((c) => c.opts.label === "skeptic:skeptic")).toHaveLength(0); // 계획이 없으면 반박할 것도 없다
+  expect(validate("plan.v1", result).ok).toBe(false);
+});
+
+test("factory-plan.js: load-bearing keeps the 4-role debate — the payload's mode is the authority", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix({ tier: "load-bearing", plan: { mode: "debate", max_done_when: 6 } });
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix({ tier: "load-bearing" });
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: "42", context: ".factory/out/context.json", loaded: planLoaderFix({ tier: "load-bearing", plan: { mode: "debate", max_done_when: 6 } }) } });
+  expect(labelled(calls, "R1:")).toHaveLength(4);
+  expect(labelled(calls, "R2:")).toHaveLength(4);
+  expect(labelled(calls, "sign:")).toHaveLength(4);
+  expect(validate("plan.v1", result).ok).toBe(true);
 });
 
 // --- Task 4: templates/factory/claude/workflows/factory-implement.js ---
@@ -617,7 +739,7 @@ test("factory-implement.js: meta.name equals the file's own basename", () => {
   expect(m[1]).toBe(basename(FACTORY_IMPLEMENT_WORKFLOW, ".js"));
 });
 
-test("factory-implement.js: loader → builder → verifier, Load/Build/Verify/Fix phases, and a valid implement.v1 handoff", async () => {
+test("factory-implement.js: builder → verifier, Load/Build/Verify/Fix phases, and a valid implement.v1 handoff", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return implLoaderFix();
     if (opts.agentType === "factory-builder") return buildFix();
@@ -627,12 +749,12 @@ test("factory-implement.js: loader → builder → verifier, Load/Build/Verify/F
 
   const { result, calls, phases } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: "42", context: ".factory/out/context.json" },
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-builder", "factory-verifier"]);
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-builder", "factory-verifier"]);
+  expect(calls[0].opts.model).toBe("opus");
   expect(calls[1].opts.model).toBe("opus");
-  expect(calls[2].opts.model).toBe("opus");
   // the fix phase is declared even when nothing is rejected — phases are the script's shape, not its history
   expect(phases).toEqual(["Load", "Build", "Verify", "Fix"]);
 
@@ -664,7 +786,7 @@ test("factory-implement.js: a rejected verdict buys exactly one fix round — th
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
 
   expect(byType(calls, "factory-builder")).toHaveLength(2);
@@ -689,12 +811,12 @@ test("factory-implement.js: a second rejection ends the stage rejected — no th
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
 
   expect(byType(calls, "factory-builder")).toHaveLength(2);
   expect(byType(calls, "factory-verifier")).toHaveLength(2);
-  expect(calls).toHaveLength(5);
+  expect(calls).toHaveLength(4);
   expect(result.verifier.verdict).toBe("rejected");
   expect(result.verifier.findings).toEqual(REJECTED.findings);
   // implement.v1 still validates — `rejected` is a legal verdict. requirements.js refuses the
@@ -714,7 +836,7 @@ test("factory-implement.js: the builder asks for a protected-file change as a fi
     return null;
   };
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
-    agent: stub, args: { issue: 42, context: ".factory/out/context.json" },
+    agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
   expect(result.harness_needed).toEqual(harnessNeeded);
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
@@ -737,7 +859,7 @@ test("factory-implement.js: a harness issue gets the variant rule 8 — make the
   };
   const promptFor = async (harness_issue) => {
     const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
-      agent: stub, args: { issue: 42, context: ".factory/out/context.json", ...(harness_issue === undefined ? {} : { harness_issue }) },
+      agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix(), ...(harness_issue === undefined ? {} : { harness_issue }) },
     });
     return byType(calls, "factory-builder")[0].prompt;
   };
@@ -775,7 +897,7 @@ test('factory-implement.js: args.raw "2 true" parses into issue 2 + the harness 
     return null;
   };
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
-    agent: stub, args: { raw: "2 true", context: ".factory/out/context.json" },
+    agent: stub, args: { raw: "2 true", context: ".factory/out/context.json", loaded: implLoaderFix({ issue: 2 }) },
   });
   expect(result.issue).toBe(2);
   const prompt = byType(calls, "factory-builder")[0].prompt;
@@ -791,7 +913,7 @@ test('factory-implement.js: args.raw "2" (no second token) parses into issue 2 +
     return null;
   };
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
-    agent: stub, args: { raw: "2", context: ".factory/out/context.json" },
+    agent: stub, args: { raw: "2", context: ".factory/out/context.json", loaded: implLoaderFix({ issue: 2 }) },
   });
   expect(result.issue).toBe(2);
   const prompt = byType(calls, "factory-builder")[0].prompt;
@@ -807,7 +929,7 @@ test("factory-implement.js: args.issue/args.harness_issue still work with no raw
     return null;
   };
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
-    agent: stub, args: { issue: 42, harness_issue: true, context: ".factory/out/context.json" },
+    agent: stub, args: { issue: 42, harness_issue: true, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
   expect(result.issue).toBe(42);
   const prompt = byType(calls, "factory-builder")[0].prompt;
@@ -827,7 +949,7 @@ test("factory-implement.js: no harness_needed means the field is absent from the
     if (opts.agentType === "factory-verifier") return verdictFix();
     return null;
   };
-  const { result } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json" } });
+  const { result } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() } });
   expect("harness_needed" in result).toBe(false);                        // 빈 요청은 이슈를 공연히 주차시킨다
 });
 
@@ -841,7 +963,7 @@ test("factory-implement.js: a head_sha that is not 40 hex re-spawns the builder 
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
 
   expect(byType(calls, "factory-builder")).toHaveLength(2);
@@ -872,7 +994,7 @@ test("factory-implement.js: rework — every must_fix id reaches the builder pro
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ pr: 31, head_sha: SHA_A, must_fix: mustFix, disputed: [{ id: "arch2", status: "disputed", reason: "out of scope per non_goals" }] }) },
   });
 
   const build = byType(calls, "factory-builder")[0];
@@ -902,7 +1024,7 @@ test("factory-implement.js: the verifier reads cold — nothing of the builder's
 
   const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
 
   const verify = byType(calls, "factory-verifier")[0];
@@ -914,7 +1036,7 @@ test("factory-implement.js: the verifier reads cold — nothing of the builder's
   expect(verify.prompt).toMatch(/do not read/i);
 });
 
-test("factory-implement.js: loader/dispatcher issue mismatch fails closed — nothing is built, implement.v1 invalid", async () => {
+test("factory-implement.js: payload/dispatcher issue mismatch fails closed — nothing is built, implement.v1 invalid", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-loader") return implLoaderFix({ issue: 99 });
     return buildFix();
@@ -922,10 +1044,10 @@ test("factory-implement.js: loader/dispatcher issue mismatch fails closed — no
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ issue: 99 }) },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader"]);
+  expect(calls).toEqual([]);
   expect(result.issue).toBe(42);
   expect(result.error).toMatch(/context issue mismatch/);
   expect(result.head_sha).toBeUndefined();
@@ -942,7 +1064,7 @@ test("factory-implement.js: a builder that dies twice is not invented around —
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
 
   expect(byType(calls, "factory-builder")).toHaveLength(2);
@@ -960,7 +1082,7 @@ test("factory-implement.js: the builder prompt carries the protected build-confi
   };
   const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
   const build = byType(calls, "factory-builder")[0].prompt;
   for (const p of [".factory/**", ".claude/**", "docs/factory/CHARTER.md", "package.json", "package-lock.json", "vitest.config.*", "playwright.config.*", "tsconfig*.json", ".eslintrc*", "eslint.config.*"]) {
@@ -995,7 +1117,7 @@ test("factory-implement.js: a rework answer that skips a must_fix id re-spawns t
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX }) },
   });
 
   expect(byType(calls, "factory-builder")).toHaveLength(2);
@@ -1018,7 +1140,7 @@ test("factory-implement.js: a rework answer still incomplete after the re-spawn 
 
   const { result, calls, phases } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX }) },
   });
 
   expect(byType(calls, "factory-builder")).toHaveLength(2);
@@ -1043,7 +1165,7 @@ test("factory-implement.js: a malformed rework entry (fixed with no commit, unkn
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX }) },
   });
 
   const completion = byType(calls, "factory-builder")[1].prompt;
@@ -1069,7 +1191,7 @@ test("factory-implement.js: the rework block is repeated in the fix prompt — a
 
   const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ pr: 31, must_fix: REWORK_MUST_FIX }) },
   });
 
   const fix = byType(calls, "factory-builder")[1].prompt;
@@ -1080,17 +1202,17 @@ test("factory-implement.js: the rework block is repeated in the fix prompt — a
   expect(result.rework_response.responses).toHaveLength(2);
 });
 
-test("factory-implement.js: a null factory-loader fails the stage closed — nothing is built, named error", async () => {
+test("factory-implement.js: a missing args.loaded fails the stage closed — nothing is built, named error", async () => {
   const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? null : buildFix());
 
   const { result, calls, phases } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-loader"]);
+  expect(calls).toEqual([]);
   expect(phases).toEqual(["Load"]);
-  expect(result).toEqual({ issue: 42, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(false);
 });
 
@@ -1102,7 +1224,7 @@ test("factory-implement.js: the verifier must quote prove-test's expected/observ
   };
   const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix() },
   });
   const verify = byType(calls, "factory-verifier")[0].prompt;
   expect(verify).toContain("expected/observed");
@@ -1178,7 +1300,7 @@ test("factory-review.js: unanimous approve with nothing missed — R1 ×4 then l
 
   const { result, calls, phases } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: "42", context: ".factory/out/context.json" },
+    args: { issue: "42", context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   expect(phases).toEqual(["Load", "Disputes", "R1", "R2"]);
@@ -1186,7 +1308,7 @@ test("factory-review.js: unanimous approve with nothing missed — R1 ×4 then l
   expect(withLabel(calls, "R2-light:")).toHaveLength(4);
   expect(withLabel(calls, "R2:")).toHaveLength(0);
   expect(withLabel(calls, "dispute:")).toHaveLength(0);
-  expect(calls).toHaveLength(9);
+  expect(calls).toHaveLength(8);
 
   // every reviewer is spawned as its own agent file, with the model the loader carried from roles.toml
   expect(withLabel(calls, "R1:").map((c) => c.opts.agentType)).toEqual([
@@ -1226,7 +1348,7 @@ test("factory-review.js: one R1 reject turns R2 into a full exchange — revise 
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   expect(withLabel(calls, "R1:")).toHaveLength(4);
@@ -1275,7 +1397,7 @@ test("factory-review.js: a light R2 that reports `missed` promotes only that rev
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   expect(withLabel(calls, "R2-light:")).toHaveLength(4);
@@ -1307,7 +1429,7 @@ test("factory-review.js: a disputed cf1 goes to correctness only — uphold forc
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix({ disputed, must_fix: [finding("cf1")] }) },
   });
 
   const disputeCalls = withLabel(calls, "dispute:");
@@ -1341,7 +1463,7 @@ test("factory-review.js: a withdrawn dispute is not forced back in — the R1 ve
 
   const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix({ disputed, must_fix: [finding("cf1")] }) },
   });
 
   const cf = result.verdicts.find((v) => v.role === "correctness");
@@ -1374,7 +1496,7 @@ test("factory-review.js: a disputed id is routed by its prefix — sec/arch/spec
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix({ roster, disputed }) },
   });
 
   const disputeCalls = withLabel(calls, "dispute:");
@@ -1400,7 +1522,7 @@ test("factory-review.js: a reviewer that dies twice is dropped, not invented —
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   expect(withLabel(calls, "R1:qa")).toHaveLength(2); // one insurance re-spawn (ADR-003), then it is dropped
@@ -1413,9 +1535,8 @@ test("factory-review.js: a reviewer that dies twice is dropped, not invented —
   expect(validate("review.v1", result).ok).toBe(true);
 });
 
-test("factory-review.js: R1 is a cold read — only spec-conformance is pointed at handoffs.plan, and nobody sees another verdict", async () => {
+test("factory-review.js: R1 is a cold read — every reviewer is pointed at its OWN context file, never the orchestrator's", async () => {
   const stub = async (prompt, opts) => {
-    if (opts.agentType === "factory-loader") return reviewLoaderFix();
     const label = opts.label;
     if (label.startsWith("R1:")) {
       const role = label.slice(3);
@@ -1427,28 +1548,21 @@ test("factory-review.js: R1 is a cold read — only spec-conformance is pointed 
 
   const { calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   const r1 = withLabel(calls, "R1:");
-  // the contract is not builder output: spec-conformance judges it, qa reproduces its done_when (§5.2.3)
-  const spec = r1.find((c) => labelOf(c) === "R1:spec-conformance").prompt;
-  expect(spec).toContain("handoffs.plan");
-  expect(spec).not.toContain("Do NOT read handoffs.plan");
-  expect(spec).toContain("files_expected");
-  expect(spec).toContain("PR description");
-
-  const qa = r1.find((c) => labelOf(c) === "R1:qa").prompt;
-  expect(qa).toContain("handoffs.plan");
-  expect(qa).toContain("done_when");
-  expect(qa).not.toContain("Do NOT read handoffs.plan");
-  // qa gets done_when and nothing else of the plan — scope stays spec-conformance's call
-  expect(qa).toContain("not `files_expected`");
-  expect(qa).toContain("PR description");
-
-  for (const c of r1.filter((x) => !["R1:spec-conformance", "R1:qa"].includes(labelOf(x)))) {
-    expect(c.prompt, labelOf(c)).toContain("Do NOT read handoffs.plan");
+  // 감사 H4 — cold read는 프롬프트의 부탁이 아니라 **파일 경계**다: 리뷰어가 받는 경로는 자기
+  // `context.<role>.json`뿐이고, 오케스트레이터의 전체 파일 경로는 어떤 프롬프트에도 등장하지 않는다
+  // (등장하는 유일한 자리는 "그 파일을 열지 마라"는 금지 문장이다).
+  for (const c of r1) {
+    const role = labelOf(c).slice(3);
+    expect(c.prompt, labelOf(c)).toContain(`.factory/out/context.${role}.json`);
+    expect(c.prompt, labelOf(c)).toContain("Do NOT open `.factory/out/context.json`");
     expect(c.prompt, labelOf(c)).toContain("PR description");
+    // 역할별 파일을 주는 이상 프롬프트가 handoff 필드를 이름으로 배분할 이유가 없다 — 그 분배는
+    // 이미 `factory/lib/context.js`(roleContextFor)가 파일을 쓸 때 끝났다.
+    expect(c.prompt, labelOf(c)).not.toContain("handoffs.plan —");
   }
   // no R1 prompt carries another reviewer's judgement, and every one carries the diff + gates
   for (const c of r1) {
@@ -1483,7 +1597,7 @@ test("factory-review.js: a light R2 shows only the others' verified[] — no ver
 
   const { calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   const light = withLabel(calls, "R2-light:").find((c) => labelOf(c) === "R2-light:correctness").prompt;
@@ -1493,29 +1607,29 @@ test("factory-review.js: a light R2 shows only the others' verified[] — no ver
   expect(light).not.toContain("correctness: read the diff"); // not its own verified list back
 });
 
-test("factory-review.js: a null factory-loader fails the stage closed — no reviewer runs, named error", async () => {
+test("factory-review.js: a missing args.loaded fails the stage closed — no reviewer runs, named error", async () => {
   const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? null : approveV("correctness"));
 
   const { result, calls, phases } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: null },
   });
 
-  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-loader", "factory-loader"]);
+  expect(calls).toEqual([]);
   expect(phases).toEqual(["Load"]);
-  expect(result).toEqual({ issue: 42, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+  expect(result).toEqual({ issue: 42, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   expect(validate("review.v1", result).ok).toBe(false);
 });
 
-test("factory-review.js: loader/dispatcher issue mismatch fails closed — nothing is reviewed, review.v1 invalid", async () => {
-  const stub = async (prompt, opts) => (opts.agentType === "factory-loader" ? reviewLoaderFix({ issue: 7 }) : approveV("correctness"));
+test("factory-review.js: payload/dispatcher issue mismatch fails closed — nothing is reviewed, review.v1 invalid", async () => {
+  const stub = async () => approveV("correctness");
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix({ issue: 7 }) },
   });
 
-  expect(calls).toHaveLength(1);
+  expect(calls).toHaveLength(0);
   expect(result.error).toContain("context issue mismatch");
   expect(result.verdicts).toBeUndefined();
   expect(validate("review.v1", result).ok).toBe(false);
@@ -1536,7 +1650,7 @@ test("factory-review.js: the findings decide the verdict — an approve carrying
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   // a reject in R1 — even a derived one — is what turns R2 into the full exchange
@@ -1567,7 +1681,7 @@ test("factory-review.js: a reject with an empty must_fix becomes approve — sho
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   // an unactionable reject cannot hold the round hostage — `review.v1` refuses it outright
@@ -1596,7 +1710,7 @@ test("factory-review.js: a `revise` that empties must_fix flips the reject to ap
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   const cf = result.verdicts.find((v) => v.role === "correctness");
@@ -1625,7 +1739,7 @@ test("factory-review.js: an R2 that dies twice leaves the R1 judgement standing"
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix() },
   });
 
   expect(withLabel(calls, "R2:correctness")).toHaveLength(2); // one insurance re-spawn, then give up
@@ -1652,7 +1766,7 @@ test("factory-review.js: a dispute nobody answers is recorded as `unruled` and c
 
   const { result, calls } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix({ disputed, must_fix: [finding("cf1"), finding("cf2")] }) },
   });
 
   expect(withLabel(calls, "dispute:")).toHaveLength(2); // one insurance re-spawn
@@ -1686,7 +1800,7 @@ test("factory-review.js: a partial ruling list upholds the ids it skipped and re
 
   const { result } = await runWorkflow(FACTORY_REVIEW_WORKFLOW, {
     agent: stub,
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: { issue: 42, context: ".factory/out/context.json", loaded: reviewLoaderFix({ roster, disputed, must_fix: [finding("sec1"), finding("sec2")] }) },
   });
 
   expect(result.disputes.map((d) => [d.id, d.ruling])).toEqual([["sec1", "withdraw"], ["sec2", "unruled"]]);
@@ -1706,53 +1820,54 @@ const blockOf = (src, re, what) => {
   return m[0];
 };
 
-test("the four workflows share a byte-identical LOADER literal, loader prompt and once() — and the schema carries `maturity`", () => {
+/**
+ * 감사 M5 — 로더는 없어졌지만 **네 워크플로가 같은 한 블록을 공유한다**는 성질은 그대로 지킨다.
+ * 이제 공유되는 것은 스키마 리터럴이 아니라 "문맥은 어디서 오는가"의 한 줄과 `once()`다: 한 파일에서만
+ * 출처를 바꾸면 그 스테이지만 다른 문맥을 받고, 그 차이는 실행 중에야 드러난다.
+ */
+test("the four workflows take the context payload from args.loaded — one shared line, no loader agent anywhere", () => {
   const srcs = WORKFLOW_FILES.map((f) => readFileSync(f, "utf8"));
-  const loaders = srcs.map((s) => blockOf(s, /const LOADER = \{[\s\S]*?\n\};/, "LOADER"));
-  const prompts = srcs.map((s) => blockOf(s, /const loaderPrompt =\n[\s\S]*?;\n/, "loaderPrompt"));
+  const loads = srcs.map((s) => blockOf(s, /phase\('Load'\);\n\n\/\/ 감사 M5[\s\S]*?\nconst loaded = args\.loaded \?\? null;\n/, "Load"));
   const onces = srcs.map((s) => blockOf(s, /function once\(fn\) \{[\s\S]*?\n\}/, "once"));
 
-  // 네 스크립트가 같은 로더를 부른다는 것은 "같은 스키마로 같은 것을 묻는다"는 뜻이다 — 한 파일에서만
-  // 필드를 늘리면 그 스테이지만 다른 문맥을 받고, 그 차이는 실행 중에야 드러난다.
-  for (const [what, set] of [["LOADER", loaders], ["loaderPrompt", prompts], ["once", onces]]) {
+  for (const [what, set] of [["Load", loads], ["once", onces]]) {
     for (let i = 1; i < set.length; i += 1) expect(set[i], `${what} in ${WORKFLOW_FILES[i]}`).toBe(set[0]);
   }
-  expect(loaders[0]).toContain("maturity: { type: 'string' }");
-  expect(prompts[0]).toContain("maturity = harness.maturity");
+  // 로더 에이전트를 띄우는 줄이 한 파일에도 남아 있으면 안 된다 — 그것이 M5가 없앤 스테이지당 LLM 호출이다.
+  for (let i = 0; i < srcs.length; i += 1) {
+    expect(srcs[i].includes("agentType: 'factory-loader'"), WORKFLOW_FILES[i]).toBe(false);
+    expect(srcs[i].includes("const LOADER"), WORKFLOW_FILES[i]).toBe(false);
+    expect(srcs[i].includes("loaderPrompt"), WORKFLOW_FILES[i]).toBe(false);
+  }
 });
 
 test("once(): an agent that throws is re-spawned exactly once, and the second answer stands", async () => {
   let attempts = 0;
-  const stub = async (prompt, opts) => {
-    if (opts.agentType === "factory-loader") {
-      return { issue: 7, stage: "triage", tier: "standard", roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }], orchestration: "workflow" };
-    }
+  const stub = async () => {
     attempts += 1;
     if (attempts === 1) throw new Error("subagent died mid-turn");
     return { disposition: "ready", tier: "standard", reason: "done_when is concrete", summary: "add CSV export" };
   };
 
-  const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, { agent: stub, args: { issue: 7, context: ".factory/out/context.json" } });
+  const loaded = { issue: 7, stage: "triage", tier: "standard", roster: [{ name: "triage", agentType: "factory-triage", model: "sonnet" }], orchestration: "workflow" };
+  const { result, calls } = await runWorkflow(FACTORY_TRIAGE_WORKFLOW, { agent: stub, args: { issue: 7, context: ".factory/out/context.json", loaded } });
   expect(calls.filter((c) => c.opts.agentType === "factory-triage")).toHaveLength(2);
   expect(result.disposition).toBe("ready");
   expect(validate("triage.v1", result).ok).toBe(true);
 });
 
-test("once(): a loader that throws twice fails every stage closed — a thrown agent is not a crashed workflow", async () => {
+test("a missing args.loaded fails every stage closed — no role runs, and the error names what was missing", async () => {
   for (const file of WORKFLOW_FILES) {
-    const stub = async (prompt, opts) => {
-      if (opts.agentType === "factory-loader") throw new Error("loader exploded");
-      return null;
-    };
+    const stub = async () => null;
     const { result, calls, phases } = await runWorkflow(file, { agent: stub, args: { issue: 5, context: ".factory/out/context.json" } });
-    expect(calls.map((c) => c.opts.agentType), file).toEqual(["factory-loader", "factory-loader"]);
+    expect(calls, file).toEqual([]);
     expect(phases, file).toEqual(["Load"]);
-    expect(result, file).toEqual({ issue: 5, error: "loader returned nothing", orchestration: "workflow", guarantee: "structural" });
+    expect(result, file).toEqual({ issue: 5, error: "context payload missing", orchestration: "workflow", guarantee: "structural" });
   }
 });
 
+const planLevelArgs = (maturity, extra = {}) => ({ issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ maturity, ...extra }) });
 const planLevelStub = (maturity, doneWhen, extra = {}) => async (prompt, opts) => {
-  if (opts.agentType === "factory-loader") return planLoaderFix({ maturity, ...extra });
   if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
   if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
   if (opts.agentType === "plan-synthesizer") return planFix({ done_when: doneWhen });
@@ -1768,7 +1883,7 @@ test("factory-plan.js: a done_when level beyond the harness maturity is downgrad
   ];
   const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
     agent: planLevelStub("M0", doneWhen),
-    args: { issue: 42, context: ".factory/out/context.json" },
+    args: planLevelArgs("M0"),
   });
 
   expect(result.done_when.map((w) => [w.id, w.level])).toEqual([["dw1", "unit"], ["dw2", "unit"], ["dw3", "unit"]]);
@@ -1784,11 +1899,11 @@ test("factory-plan.js: M1 allows integration and downgrades only e2e; M2 leaves 
     { id: "dw1", text: "a", verify: "test_42_a", level: "integration" },
     { id: "dw2", text: "b", verify: "test_42_b", level: "e2e" },
   ];
-  const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: { issue: 42, context: "c" } });
+  const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: planLevelArgs("M1") });
   expect(m1.result.done_when.map((w) => w.level)).toEqual(["integration", "integration"]);
   expect(m1.result.dissent_log).toEqual([{ role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
 
-  const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: { issue: 42, context: "c" } });
+  const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: planLevelArgs("M2") });
   expect(m2.result.done_when.map((w) => w.level)).toEqual(["integration", "e2e"]);
   expect(m2.result.dissent_log).toEqual([]);
 });
@@ -1800,19 +1915,19 @@ test("factory-plan.js: the filter only ever downgrades — an unrecognized or mi
     { id: "dw3", text: "c", verify: "test_42_c", level: "e2e" },
   ];
   // M2: 아무것도 낮출 것이 없다 — 빈 칸과 오타를 e2e로 "채워 넣지" 않는다(스키마 위반은 plan.v1 검사의 몫)
-  const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: { issue: 42, context: "c" } });
+  const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: planLevelArgs("M2") });
   expect(m2.result.done_when).toEqual(doneWhen);
   expect(m2.result.dissent_log).toEqual([]);
 
   // M1: 알려진 레벨 중 한도를 넘는 e2e만 내려가고, 나머지 둘은 그대로다
-  const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: { issue: 42, context: "c" } });
+  const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: planLevelArgs("M1") });
   expect(m1.result.done_when).toEqual([doneWhen[0], doneWhen[1], { ...doneWhen[2], level: "integration" }]);
   expect(m1.result.dissent_log).toEqual([{ role: "workflow", objection: "done_when dw3 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
 });
 
-test("factory-plan.js: a loader that reported no maturity leaves the levels alone — the workflow does not invent a bound", async () => {
+test("factory-plan.js: a context payload with no maturity leaves the levels alone — the workflow does not invent a bound", async () => {
   const doneWhen = [{ id: "dw1", text: "a", verify: "test_42_a", level: "e2e" }];
-  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub(undefined, doneWhen), args: { issue: 42, context: "c" } });
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub(undefined, doneWhen), args: planLevelArgs(undefined) });
   expect(result.done_when.map((w) => w.level)).toEqual(["e2e"]);
   expect(result.dissent_log).toEqual([]);
 });
@@ -1837,7 +1952,7 @@ test("factory-plan.js: the re-synthesized plan is bound too — an objection rou
     return null;
   };
 
-  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c" } });
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c", loaded: planLoaderFix({ maturity: "M0" }) } });
   expect(synthesis).toBe(2);
   expect(result.done_when.map((w) => w.level)).toEqual(["unit"]);
   expect(result.dissent_log).toContainEqual({ role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" });
@@ -1864,7 +1979,7 @@ test("factory-plan.js: a workflow downgrade the re-synthesis echoes back is supe
     return null;
   };
 
-  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c" } });
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c", loaded: planLoaderFix({ maturity: "M0" }) } });
   expect(synthesis).toBe(2);
   expect(result.done_when.map((w) => w.level)).toEqual(["unit"]);
   expect(result.dissent_log).toEqual([note]);   // 하나의 반박, 하나의 줄
@@ -1878,7 +1993,7 @@ test("factory-implement.js: PR bodies and rework comments go through --body-file
     }
     return verdictFix();
   };
-  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json" } });
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded: implLoaderFix({ must_fix: REWORK_MUST_FIX, pr: 31 }) } });
   const build = byType(calls, "factory-builder")[0].prompt;
 
   expect(build).toContain("--body-file");

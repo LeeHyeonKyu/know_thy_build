@@ -52,6 +52,12 @@ cold_read = true                                  # builder 출력·코멘트를
 output  = "factory.verdict.v1"
 
 # ── review 리뷰어 ────────────────────────────────────
+# cold_read (외부 감사 2026-09-14 H4) — 이 플래그는 이제 **JS가 읽는다**. `factory/lib/context.js`의
+# `roleContextFor`가 역할마다 `.factory/out/context.<role>.json`을 따로 쓰고, cold_read = true인 역할의
+# 파일에는 handoff가 들어 있지 않다(verifier 판정·builder의 PR 설명·다른 리뷰어의 판정 전부 없다 —
+# 이슈·tier·로스터·자기 lessons·PR 번호/head sha·게이트 요약·계획의 done_when만 남는다). 워크플로는
+# 그 역할에게 전체 파일의 경로를 아예 주지 않으므로, "읽지 마라"는 부탁이 아니라 읽을 것이 없는 상태다.
+# cold_read = false는 그 반대다 — 그 역할만 전체 파일을 받는다.
 [review.correctness]
 agent    = ".claude/agents/reviewer-correctness.md"
 model    = "opus"

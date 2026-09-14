@@ -22,7 +22,40 @@ const graphTransition = (startFrom = "factory:approved") => {
   });
 };
 
+/**
+ * 외부 감사 2026-09-14 H1c/H1b — 머지 직전 리뷰 검증(§(6b))의 기본 재료. 통과하는 모양이 기본값이고,
+ * 개별 테스트가 한 조각씩 무너뜨린다. `run()`의 headSha와 같은 sha여야 한다("PR head가 움직였다"로
+ * 떨어지지 않게).
+ */
+const HEAD = "b".repeat(40);
+const approve = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+const REVIEW_OK = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: HEAD, round: 2, decision: "approved", verdicts: [approve("correctness"), approve("qa")], orchestration: "workflow", guarantee: "verified" };
+/**
+ * 리뷰 batch-1 MF-2 — handoff의 **출처**. 러너가 `factory/records`의 run 기록에 쓴 `review-evidence:`
+ * 줄을 파싱한 모양 그대로다(run-record.js `parseReviewEvidence`). 기본값은 handoff와 일치한다.
+ *
+ * 리뷰 batch-2 MF-2 — 그 줄은 **어느 런의 것인지** 말하고(`runId`), 머지 스테이지는 그 기대값을
+ * `reviewRunId`(이슈의 review 하트비트)에서 따로 읽는다. 기본값은 둘이 같은 런을 말한다.
+ */
+const RUN = "34809992796";
+const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runId: RUN, runnerId: `gha-${RUN}`, headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve" };
+const reviewDeps = (over = {}) => ({
+  reviewEvidence: vi.fn(async () => ({ ok: true, data: REVIEW_OK })),
+  reviewRunId: vi.fn(async () => ({ ok: true, runId: RUN, runnerId: `gha-${RUN}` })),
+  reviewRecord: vi.fn(async () => ({ ok: true, record: RECORD_OK })),
+  reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"] })),
+  maxRounds: 3,
+  prHeadShaLive: vi.fn(async () => HEAD),
+  factoryLogins: vi.fn(async () => ({ ok: true, logins: ["ktb-bot", "ktb-owner"] })),
+  commitStatuses: vi.fn(async () => [
+    { context: "factory/review", state: "success", creatorLogin: "ktb-bot" },
+    { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" },
+  ]),
+  ...over,
+});
+
 const baseD = (over = {}) => ({
+  ...reviewDeps(),
   prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" })),
   gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })),
   mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
@@ -349,6 +382,34 @@ test("(3b') a PR that does both gets both headings, each above its own file list
     to: "factory:needs-human",
     reason: expect.stringMatching(/agent role sections edited outside.*; lessons files deleted or moved away/),
   }));
+});
+
+// ── (3b'') 같은 dep이 실어 오는 **네 번째** 규칙: 기존 테스트의 수정·삭제 (외부 감사 H5) ──────
+// 테스트를 고치는 것은 "무엇이 통과인가"를 고치는 것이다 — 변조로 다루지 않는 이유는 스펙이 바뀌면
+// 기존 단언이 실제로 틀리기 때문이고(그때는 이슈 본문의 `tests_changed_allowed:`가 길을 연다),
+// 그래도 자동 머지는 안 되는 이유는 그 판단이 사람의 것이기 때문이다.
+
+test("(3b'') 기존 테스트 수정은 자기 제목으로 거부된다 — 자동 머지 없음", async () => {
+  const comment = vi.fn(async () => {});
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    policyViolations: vi.fn(async () => ({
+      ok: true, files: ["test/a.test.js"],
+      violations: [{ file: "test/a.test.js", rule: "tests-modified — 3 line(s) removed from an existing test — human merge required" }],
+    })),
+    comment,
+  });
+  expect(await run(d, { record })).toBe(2);
+  const [, body] = comment.mock.calls[0];
+  expect(body).toContain("**기존 테스트의 수정·삭제 — 팩토리가 자동 머지하지 않습니다.**");
+  expect(body).toMatch(/`test\/a\.test\.js`/);
+  expect(body).not.toContain("역할 프롬프트의 허용 섹션 밖 편집");
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "existing tests modified or deleted — human merge required: test/a.test.js (see PR #9)",
+  }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(lines.some((l) => /existing tests modified or deleted/.test(l))).toBe(true);
 });
 
 test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {
@@ -682,8 +743,15 @@ test("(5) mergePr throws → factory:blocked 'merge API failed: …'", async () 
 
 test("(5) the merged sha is recorded before and after the merge call", async () => {
   const { lines, record } = makeRecord();
-  const d = baseD();
-  await runMergeStage({ issue: 7, defaultBranch: "main", headSha: "c".repeat(40), d, record, refusal, postStatus: basePostStatus() });
+  // 이 런의 head는 `c…`다 — 리뷰 증거도 같은 커밋의 것이어야 한다(감사 H1c: 다른 sha의 리뷰는
+  // 지금 머지하려는 트리의 얘기가 아니므로 needs-human이다).
+  const other = "c".repeat(40);
+  const d = baseD({
+    reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, head_sha: other } })),
+    reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, headSha: other } })),
+    prHeadShaLive: vi.fn(async () => other),
+  });
+  await runMergeStage({ issue: 7, defaultBranch: "main", headSha: other, d, record, refusal, postStatus: basePostStatus() });
   expect(lines).toContain(`merge: head ${"c".repeat(7)}`);
   expect(lines).toContain(`merge: merged ${"c".repeat(7)} via PR #9`);
 });
@@ -959,4 +1027,282 @@ test("(6b) single-actor mode is unchanged — no approval call, merge exactly as
   expect(await run(d)).toBe(0);
   expect(d.approvePr).not.toHaveBeenCalled();
   expect(d.mergePr).toHaveBeenCalledWith(9);
+});
+
+// ── (6b) 외부 감사 2026-09-14 H1c/H1b — 머지 전에 리뷰를 확인한다 ─────────────────────────
+
+/** 실패 전이의 사유를 한 줄로 꺼낸다 — 모든 리뷰 검증 실패는 같은 접두사를 쓴다. */
+const lastReason = (d) => d.transition.mock.calls.at(-1)[0].reason;
+const refusedReview = (d) => {
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.closeIssue).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lastReason(d)).toMatch(/^review verification failed — /);
+};
+
+/**
+ * 감사가 재현한 체인의 마지막 고리: `mergePr`(:476)가 `transition(merged)`(:487)보다 **앞**이고,
+ * 정족수 검사는 `factory:approved` 규칙에만 있었다 — 곧 머지 스테이지 자신은 리뷰 증거를 한 번도
+ * 보지 않았다. 재료(dep)가 아예 없는 런이 그대로 머지까지 갔다는 사실이 그 구멍 자체다.
+ */
+test("H1c: with no review-evidence deps wired the stage refuses to merge — an unverified review is not a passed review", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({ reviewEvidence: undefined, reviewRoster: undefined, prHeadShaLive: undefined, commitStatuses: undefined, factoryLogins: undefined });
+  expect(await run(d, { record })).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review-evidence deps not wired/);
+  expect(lines.some((l) => l.includes("review verification failed"))).toBe(true);
+});
+
+/**
+ * **위조된 판정.** handoff는 스스로 `decision: "approved"`라고 적었지만 verdict 하나가 reject이고
+ * must_fix가 차 있다. 감사 전 코드는 머지 경로에서 리뷰를 아예 읽지 않았고, `factory:merged` 규칙도
+ * 정족수를 묻지 않았다 — 이 한 줄이 그대로 머지됐다.
+ */
+test("H1c: a review handoff that calls itself approved while a verdict rejects does not merge — the self-reported decision is ignored", async () => {
+  const forged = {
+    ...REVIEW_OK,
+    decision: "approved",
+    verdicts: [approve("correctness"), { role: "qa", verdict: "reject", confidence: "high", must_fix: [{ id: "qa1", where: "x.js", claim: "c", evidence: "e" }], should_fix: [], verified: [] }],
+  };
+  const d = baseD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: forged })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/not all approve/);
+});
+
+/**
+ * 모두 approve여도 판정은 must_fix에서 **다시 계산한다**: 분쟁 항목을 uphold한 ruling은
+ * (`aggregate.js`) approve만 늘어놓은 handoff에서도 must_fix를 되살린다. 자기 신고를 믿었다면
+ * 이 PR은 그대로 머지됐다.
+ */
+test("H1c: all-approve verdicts with an upheld ruling still recompute to rework — the decision comes from must_fix", async () => {
+  const withRuling = { ...REVIEW_OK, decision: "approved", rulings: [{ id: "cf1", ruling: "uphold", by: "correctness" }] };
+  const d = baseD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: withRuling })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/recomputed from must_fix is "rework"/);
+  expect(lastReason(d)).toMatch(/the handoff claims "approved"/);
+  expect(lastReason(d)).toMatch(/cf1/);
+});
+
+test("H1c: a review handoff bound to a different commit does not merge", async () => {
+  const d = baseD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, head_sha: "f".repeat(40) } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/head_sha .* != PR head/);
+});
+
+test("H1c: fewer verdicts than the tier's roster does not merge — quorum is the roster size", async () => {
+  const d = baseD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, verdicts: [approve("correctness")] } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/verdict count 1 != roster size 2/);
+});
+
+test("H1c: one role approving twice does not fill the quorum", async () => {
+  const d = baseD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, verdicts: [approve("correctness"), approve("correctness")] } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review incomplete — qa/);
+});
+
+test("H1c: a round beyond K does not merge", async () => {
+  const d = baseD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, round: 4 } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/round 4 > K=3/);
+});
+
+test("H1c: an unresolvable roster is undecidable, not a pass", async () => {
+  const d = baseD({ reviewRoster: vi.fn(async () => ({ ok: false, reason: "no review roster for tier weird in CHARTER" })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/no review roster for tier weird/);
+});
+
+/**
+ * H1b — 상태의 게시자를 확인하지 않으면 `gh api -X POST /repos/o/r/statuses/<sha> -f state=success
+ * -f context=factory/review` 한 번이 "리뷰가 통과했다"가 된다. 봇 토큰은 `repo` 스코프라 그 호출이
+ * 실제로 나간다(훅은 그 위의 한 겹일 뿐이다).
+ */
+test("H1b: a factory/review status posted by an account that is not the factory does not merge", async () => {
+  const d = baseD({
+    commitStatuses: vi.fn(async () => [
+      { context: "factory/review", state: "success", creatorLogin: "drive-by" },
+      { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" },
+    ]),
+  });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/posted by @drive-by/);
+});
+
+test("H1b: a missing factory/gates status on the PR head does not merge", async () => {
+  const d = baseD({ commitStatuses: vi.fn(async () => [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }]) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/no factory\/gates commit status/);
+});
+
+test("H1b: an unresolvable factory login fails closed — no way to tell who posted the statuses", async () => {
+  const d = baseD({ factoryLogins: vi.fn(async () => ({ ok: false, reason: "gh api user failed (1): HTTP 401" })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/could not be resolved/);
+  expect(lastReason(d)).toMatch(/HTTP 401/);
+});
+
+test("H1c: a PR head that moved during the merge run is refused — the gates verified another tree", async () => {
+  const d = baseD({ prHeadShaLive: vi.fn(async () => "9".repeat(40)) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/PR head moved during this run/);
+});
+
+test("H1c: review verification runs BEFORE the two-actor approval — a bad review costs no approval", async () => {
+  const d = baseD({ twoActor: true, approvePr: vi.fn(async () => {}), reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, round: 9 } })) });
+  expect(await run(d)).toBe(2);
+  expect(d.approvePr).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("H1c: a verified review merges, and the record names what was verified", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD();
+  expect(await run(d, { record })).toBe(0);
+  expect(d.mergePr).toHaveBeenCalledWith(9);
+  expect(d.prHeadShaLive).toHaveBeenCalledWith(9);
+  expect(d.commitStatuses).toHaveBeenCalledWith(HEAD);
+  expect(lines.some((l) => /^merge: review verified — 2\/2 approve/.test(l))).toBe(true);
+  expect(lines.some((l) => l.includes("factory/review + factory/gates"))).toBe(true);
+  expect(lines.some((l) => l.includes("review evidence bound to the factory/records run record"))).toBe(true);
+});
+
+// ── (6b2) 리뷰 batch-1 MF-2 — handoff의 **출처**가 factory/records의 run 기록에 묶인다 ────────────
+// 재리뷰가 재현한 체인의 남은 절반: handoff 코멘트는 모든 스테이지가 쥔 봇 계정으로 나가고
+// `parseHandoffs`는 작성자조차 남기지 않는다 — 곧 all-approve handoff를 손으로 지어내면 정족수
+// 검사를 그대로 통과했다. 이제 러너가 `claude -p` **뒤에** 쓴 기록과 같아야 한다.
+
+test("MF-2: a forged all-approve handoff with no review run record does not merge", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: false, reason: "factory/records carries no run record for issue #7" })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("MF-2: a run record with no review-evidence line does not merge", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: null })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+  expect(lastReason(d)).toMatch(/no review-evidence line/);
+});
+
+test("MF-2: a handoff whose verdicts differ from the recorded ones does not merge", async () => {
+  // 기록은 qa가 reject했다고 말한다 — handoff는 2/2 approve라고 말한다. 둘 중 하나는 지어낸 것이다.
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, decision: "rework", verdicts: "correctness=approve,qa=reject" } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+  expect(lastReason(d)).toMatch(/are not the ones the review run recorded/);
+});
+
+test("MF-2: a handoff bound to a commit the review run never checked out does not merge", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, headSha: "e".repeat(40) } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+});
+
+test("MF-2: a replayed round number does not merge — the record pins the round too", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, round: 1 } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/the handoff says round 2, the review run recorded round 1/);
+});
+
+test("MF-2: an unreachable records branch fails closed — an unverified review is not a passed review", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => { throw new Error("git fetch failed: network"); }) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+  expect(lastReason(d)).toMatch(/network/);
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("MF-2: the reviewRecord dep is required — a merge stage that cannot read the records branch refuses", async () => {
+  const d = baseD({ reviewRecord: undefined });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review-evidence deps not wired/);
+  expect(lastReason(d)).toMatch(/reviewRecord/);
+});
+
+// ── 리뷰 batch-2 MF-2 — 증거는 **이 이슈의 review 런**에 묶인다(파일의 마지막 줄이 아니라) ────────
+// 재리뷰가 재현한 것: `docs/factory/runs/**`는 에이전트가 쓸 수 있었고 파서는 마지막 줄을 골랐다 —
+// 곧 implement 에이전트가 가짜 `## review` 섹션을 심으면 그것이 권위 있는 증거가 됐다.
+
+test("MF-2b: the expected run id comes from the issue's review heartbeat and is handed to the record lookup", async () => {
+  const d = baseD();
+  expect(await run(d)).toBe(0);
+  expect(d.reviewRunId).toHaveBeenCalled();
+  expect(d.reviewRecord).toHaveBeenCalledWith({ runId: RUN });
+});
+
+test("MF-2b: a record line written by a different run does not merge (the forged section)", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, runId: "999", runnerId: "gha-999" } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/written by run 999, but the review stage on this issue ran as 34809992796/);
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("MF-2b: no review heartbeat on the issue is undecidable, not a pass", async () => {
+  const d = baseD({ reviewRunId: vi.fn(async () => ({ ok: false, reason: "no review-stage heartbeat on issue #7" })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+  expect(lastReason(d)).toMatch(/no review-stage heartbeat/);
+  expect(d.reviewRecord).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("MF-2b: the reviewRunId dep is required — without it the merge stage cannot name the review run", async () => {
+  const d = baseD({ reviewRunId: undefined });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review-evidence deps not wired/);
+  expect(lastReason(d)).toMatch(/reviewRunId/);
+});
+
+test("MF-2b: the record line naming no run at all does not merge", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, runId: "none" } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/names no factory run/);
+});
+
+test("MF-2: provenance is checked BEFORE the two-actor approval", async () => {
+  const d = baseD({ twoActor: true, approvePr: vi.fn(async () => {}), reviewRecord: vi.fn(async () => ({ ok: true, record: null })) });
+  expect(await run(d)).toBe(2);
+  expect(d.approvePr).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+// ── (7) 외부 감사 H6 — 머지 전이 텍스트가 사람의 서명 유무를 말한다 ─────────────────────────
+
+test("H6: the merged transition says whether a person signed this PR", async () => {
+  const on = baseD({ humanGate: true });
+  expect(await run(on)).toBe(0);
+  expect(on.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", reason: expect.stringMatching(/required reviewer/) }));
+
+  const off = baseD({ humanGate: false });
+  expect(await run(off)).toBe(0);
+  expect(off.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", reason: expect.stringMatching(/no per-PR human signature \(CHARTER merge\.human_gate=false\)/) }));
+
+  const unset = baseD();
+  expect(await run(unset)).toBe(0);
+  expect(unset.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", reason: expect.stringMatching(/charter\.merge-human-gate-unset/) }));
 });

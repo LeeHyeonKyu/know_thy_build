@@ -8,6 +8,29 @@ tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
 c=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$c" ] || exit 0
 
+# ── 2026-09-14 외부 감사 H1a: 판정 **전에** 명령을 한 문자열로 정규화한다 ─────────────────────
+# 모든 규칙이 `echo "$c" | grep -E`, 곧 **줄 단위**였다. 셸에서 `\` + 개행은 토큰을 잇는 이음줄이라
+# `gh pr \⏎merge 5 --squash`는 한 문장 그대로 `gh pr merge 5 --squash`를 실행하는데, 훅이 보는 "줄"은
+# `gh pr \`와 `merge 5 --squash` 둘로 쪼개져 **어느 쪽도 규칙에 맞지 않았다**. 감사가 직접 실행해
+# 확인한 여섯 케이스가 전부 exit 0이었다(`gh pr merge`, `git push --force`, `gh issue edit --add-label
+# factory:approved` 포함) — 그리고 `permissions.deny`의 접두 매칭도 같은 이유로 동시에 빗나간다.
+# 런타임 조립이 아니다: 동사가 명령줄에 그대로 있는데 규칙이 한 글자에 빗나갔다(MF-3·재리뷰 #1과
+# 같은 계열의 고장이 앵커가 아니라 **입력 모양**에서 반복된 것이다).
+#
+# 정규화는 셸의 문법을 그대로 따른다:
+#   1. `\` + 개행 → 공백 하나. 이음줄은 토큰을 잇는다.
+#   2. 남은 개행 → `;`. 개행은 이음줄이 아닐 때 **명령 구분자**이고, 아래 규칙들의 `[^;&|]*`·경계
+#      클래스가 이미 `;`를 그렇게 다룬다. 공백으로 바꾸면 서로 다른 두 문장이 한 문장으로 이어져
+#      `echo git⏎merge x`가 없던 `git merge` 매치를 만든다 — 오탐을 새로 만드는 정규화는 정규화가 아니다.
+#   3. 탭 → 공백, 공백 런 → 하나. `gh⇥⇥pr   merge`처럼 섞이면 `[[:space:]]+`를 쓰는 규칙은 통과해도
+#      `[^;&|]*` 구간을 끼고 있는 규칙들의 모양이 흐트러진다.
+# 이 뒤로 `$c`는 **한 줄**이다 — 그래서 `^`/`$` 앵커도 문자열 전체에 대한 앵커가 된다.
+c=${c//$'\r'/}
+c=${c//\\$'\n'/ }
+c=${c//$'\n'/;}
+c=${c//$'\t'/ }
+while [ "$c" != "${c//  / }" ]; do c=${c//  / }; done
+
 block() { echo "factory: blocked — $1" >&2; exit 2; }
 
 # git의 **전역 옵션**은 동사 앞에 온다: `git -C <dir> rm …`, `git --git-dir=… merge …`,
@@ -48,11 +71,85 @@ ZE='([;&|)`}=[:space:]]|$)'
 # 명령과 "따옴표를 벗긴 사본"에 대해 **두 번** 돌린다. 표를 두 벌 유지하면 반드시 한쪽이 뒤처진다.
 # `$1`이 판정 대상 문자열이고, 전역 `$A`가 그 패스의 경계 클래스다.
 scan() {
-  local c="$1" prot qa p
+  local c="$1" prot qa p ep API_CLIENT API_WRITE
 
 echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge" && block "gh pr merge"
 # REST 머지도 막는다 — gh api ... /pulls/<n>/merge (메서드 불문)
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/pulls/[0-9]+/merge" && block "gh api pulls merge"
+# ── 2026-09-14 외부 감사 H1b: 에이전트는 자기 리뷰 판정을 게시할 수 없다 ─────────────────────
+# `mergeGates`가 리뷰의 증거로 보는 것은 required check의 **상태**뿐이다(`run-stage.js` → `allChecksGreen`).
+# 그 함수는 체크가 green인지만 묻고 **누가 올렸는지는 묻지 않는다**. 모든 스테이지의 env에는
+# `GH_TOKEN=FACTORY_BOT_TOKEN`이 있고 그 PAT는 `repo` 스코프라 commit status를 쓸 수 있다 — 그래서
+# `gh api -X POST /repos/o/r/statuses/<sha> -f state=success -f context=factory/review` 한 줄이면
+# 리뷰어가 한 번도 뜨지 않은 채 머지 게이트가 열린다(감사가 재현한 H1 체인의 두 번째 고리).
+# check-run은 같은 일을 하는 다른 이름이고, `gh pr review --approve`는 **머지 배우의** 권한이다.
+# 메서드 철자도 호스트 접두도 가리지 않는다(브랜치 보호 규칙과 같은 이유 — 철자를 쫓는 것은 진 싸움이다).
+# 읽기(GET)까지 막히는 오탐은 손실이 없다: 체크 상태를 읽어야 하는 역할이 없고, `gh pr checks`는 열려 있다.
+# **이것이 전부가 아니다**: 상태의 **게시자 검증**은 머지 스테이지의 일이고(Task 2), 이 훅은 그 앞의
+# 값싼 문 하나다. 런타임에 조립되는 동사(`node -e "execSync(...)"` 등)는 여전히 비목표다(ADR-020 잔여 위험 #4).
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/statuses/" && block "gh api commit statuses (a stage must never post its own required check — the merge gate reads status STATE, not author)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/check-runs" && block "gh api check-runs (same power as a commit status under a different name)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/commits?/[^;&|]*/(status|check-runs)" && block "gh api commit status/check-runs"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+review[^;&|]*--approve" && block "gh pr review --approve (approval belongs to the merge actor, not to a stage)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/pulls/[0-9]+/reviews" && block "gh api pull request reviews (the REST spelling of --approve)"
+
+# ── 리뷰 batch-1 MF-1 (H1b-a): 권한 엔드포인트의 앵커는 **클라이언트가 아니라 경로다** ───────────
+# 위의 H1b 규칙은 전부 리터럴 `gh`에 앵커돼 있었다. 그런데 모든 스테이지의 env에는 `GH_TOKEN`이 있고
+#   curl -sX POST -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/o/r/statuses/<sha> -d @-
+# 는 같은 일(=리뷰 상태 위조)을 하면서 `gh`라는 글자를 한 번도 쓰지 않는다. 재리뷰가 실제로 실행해
+# 확인한 rc=0 목록이 그것이다: statuses · check-runs · pulls/N/reviews · pulls/N/merge · issues/N/labels ·
+# git/refs(락 삭제) · branches/*/protection — **전부 curl/wget으로 열려 있었다**. 동사도 메서드도
+# 엔드포인트도 명령줄에 그대로 있는데 규칙이 클라이언트 이름 한 글자에 빗나간 것이다(H1a·MF-3과
+# 같은 계열의 고장이 한 단계 옆에서 반복됐다). 이 저장소의 `deny-all-writes.sh`는 이미 curl/wget을
+# 쓰기의 1급 철자로 다루고 있었으므로 선례도 있었다.
+#
+# 그래서 앵커를 엔드포인트로 옮긴다: **권한을 바꾸는 GitHub API 경로**가 보이고, 같은 명령이 HTTP
+# 클라이언트를 부르며, **쓰기 모양**(메서드 플래그 또는 본문 플래그)을 하고 있으면 클라이언트가
+# 무엇이든 막는다. 클라이언트 이름을 하나씩 쫓는 것은 진 싸움이지만(http·xh·node -e fetch·저장소에
+# 체크인된 헬퍼 스크립트…) **쓰기 모양**은 HTTP 자체의 문법이라 철자가 유한하다 — 그래서 목록은
+# 클라이언트 쪽을 넓게, 판정은 쓰기 모양 쪽에 건다.
+# `api.github.com`에 앵커하지 않는 이유: GHES 호스트에서는 그 문자열이 없다. 경로가 durable하다.
+#
+# **읽기(GET)는 통과한다.** 위의 `gh api …` 규칙들은 메서드 불문 그대로 남지만(그 자리에서 읽어야
+# 하는 역할이 없다), 이 클라이언트 무관 패스는 쓰기 모양이 있을 때만 문다 — `curl …/statuses/<sha>`,
+# `gh api repos/o/r/pulls/5` 같은 평범한 조회는 오늘과 똑같이 열려 있다.
+API_CLIENT="${A}(gh[[:space:]]+api|curl|wget|http|xh|fetch|node[0-9.]*|deno|bun|python[0-9.]*|ruby|perl)([[:space:]]|\()"
+# 쓰기 모양. `.{0,3}`는 따옴표·백슬래시 이스케이프를 흡수한다(`-X "POST"`, JSON 본문의 `method:\"POST\"`).
+# 마지막 갈래는 httpie/xh의 **맨몸 동사** 문법(`http POST <url> k=v`)이다 — 플래그가 아예 없다.
+#
+# ── 리뷰 batch-2 MF-1 — 표에 빠진 세 엔드포인트와 네 가지 쓰기 철자 ──────────────────────────────
+# 재리뷰가 실행해 rc=0으로 확인한 것들이다:
+#   · `PATCH /repos/o/r/issues/7`      = `gh issue edit --add-label`의 REST 철자(본문·라벨을 함께 쓴다)
+#   · `POST  /repos/o/r/merges`        = **머지 그 자체**. 어떤 보호 경로도 건드리지 않고 브랜치를 합친다.
+#   · `PATCH /repos/o/r/pulls/5`       = PR의 base 재지정(리뷰가 본 diff와 머지되는 diff가 달라진다)
+#   · `curl --upload-file`             = 본문 플래그의 네 번째 철자
+#   · SDK 메서드 모양: `octokit.request("POST /repos/…")` · `.post(`/`.patch(`/`.put(`/`.delete(`
+# 마지막 둘이 특히 같은 계열이다 — 동사도 메서드도 엔드포인트도 명령줄에 그대로 있는데, **메서드의
+# 철자만** 플래그에서 문자열/메서드 이름으로 옮겨 갔다. 세 규칙 모두 권위 엔드포인트가 같은 명령에
+# 있을 때만 물므로 평범한 소스의 `app.post("/login")`은 그대로다.
+# 뒤쪽 경계는 `([^0-9/]|$)`다 — `/issues/7`과 `/issues/7/comments`를 가르는 것이 전부이고(코멘트는
+# handoff가 나가는 문이라 계속 열려 있어야 한다), 문자를 **열거하지 않는다**: 열거하면 JSON 안의
+# 이스케이프된 따옴표(`\"`)처럼 미처 적지 않은 한 글자에 규칙이 통째로 빗나간다(그 고장을 실행해서
+# 확인했다 — `octokit.request("PATCH /repos/o/r/issues/7", …)`가 그대로 지나갔다).
+API_WRITE='(-X[[:space:]]*.{0,3}(POST|PUT|PATCH|DELETE)|--method[[:space:]=]+.{0,3}(POST|PUT|PATCH|DELETE)|method[[:space:]]*[:=][[:space:]]*.{0,3}(POST|PUT|PATCH|DELETE)|--request|[[:space:]]-d([[:space:]@]|$)|--data|[[:space:]]-f[[:space:]]|[[:space:]]-F[[:space:]]|--field|--raw-field|--input|--post-data|--post-file|--body|--json|[[:space:]]-T[[:space:]]|--upload-file|\.(post|put|patch|delete)[[:space:]]*\(|["'"'"'](POST|PUT|PATCH|DELETE)[[:space:]]+/|[[:space:]](POST|PUT|PATCH|DELETE)[[:space:]])'
+for ep in '/statuses/' '/check-runs' '/commits?/[^;&|]*/(status|check-runs)' \
+          '/pulls/[0-9]+/(reviews|merge)' '/issues/[0-9]+/labels' '/labels/' \
+          '/issues/[0-9]+([^0-9/]|$)' '/pulls/[0-9]+([^0-9/]|$)' '/merges' \
+          '/git/refs' '/branches/[^;&|]*/protection' '/rulesets' '/environments/'; do
+  echo "$c" | grep -Eiq "$ep" || continue
+  echo "$c" | grep -Eiq "$API_CLIENT" || continue
+  echo "$c" | grep -Eiq "$API_WRITE" || continue
+  block "GitHub authority endpoint ($ep) written through an HTTP client — no client spelling is exempt (curl/wget/http/xh/node fetch are the same power as \`gh api\`; plain GETs stay allowed)"
+done
+# GraphQL은 같은 권한의 **세 번째 철자**다: `gh api graphql -f query='mutation { addPullRequestReview(…) }'`에는
+# 위의 REST 경로가 한 조각도 없다. 뮤테이션 **이름**으로 문다 — 이름은 GitHub 스키마가 정한 것이라
+# 우리가 바꿀 수 없고, 그래서 경로만큼 durable하다. `graphql`/`mutation`이라는 말이 같이 있을 때만
+# 보는 이유는 문서 grep(`grep -rn mergePullRequest docs/`)을 오탐으로 만들지 않기 위해서다.
+if echo "$c" | grep -Eiq "(graphql|mutation)"; then
+  echo "$c" | grep -Eq "(addPullRequestReview|mergePullRequest|addLabelsToLabelable|removeLabelsFromLabelable|deleteRef|createCommitStatus|createCheckRun|updateBranchProtectionRule|createRef)" \
+    && block "GraphQL mutation is the third spelling of approve/merge/status/label/ref — it carries no REST path, so the endpoint rules above cannot see it"
+fi
+
 echo "$c" | grep -Eq "${A}${G}merge${Z}" && block "git merge"
 echo "$c" | grep -Eq "${A}${G}push[^;&|]*[[:space:]](--force|-f|--force-with-lease)${ZE}" && block "force push"
 # refspec 앞의 '+'도 force push다: git push origin +main:main
@@ -68,14 +165,35 @@ echo "$c" | grep -Eq "${A}${G}push[^;&|]*(--delete[^;&|]*factory/lock-|:(refs/he
 # -XDELETE/대소문자를 하나씩 쫓는 것은 진 싸움이다), 호스트 접두(`https://api.github.com/…`)도, 앞의
 # `/` 유무도 가리지 않는다. 읽기(GET)까지 막히는 오탐은 손실이 없다: 락 상태는 `git ls-remote`로 본다.
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/git/refs/heads/factory/lock" && block "gh api lock ref deletion (the lock branch is the only basis of per-issue mutual exclusion)"
+# ── 리뷰 batch-1 MF-2 (H1b-b): `factory/records`는 **리뷰 증거의 출처다** ─────────────────────────
+# 머지 스테이지는 이제 리뷰 handoff를 `factory/records`의 run 기록(`docs/factory/runs/<n>.md`)에 적힌
+# review 런과 대조한다(review-quorum.js `verifyReviewProvenance`). 그 대조가 의미를 가지려면 기록이
+# **에이전트가 쓸 수 없는 것**이어야 하는데, 감사 전에는 `git push origin HEAD:factory/records`가
+# 훅에서 rc=0이었다(막힌 것은 `+refspec` force 형태뿐이었다) — 곧 에이전트가 자기 handoff에 맞는
+# 가짜 review 런 기록을 먼저 밀어 넣으면 대조가 그대로 통과한다.
+# 그래서 이 두 ref로 가는 **모든 push**를 막는다(삭제·force만이 아니라 append도): 러너의
+# `syncRecords`/`claim`은 Node 프로세스에서 직접 git을 부르므로 이 훅을 한 번도 거치지 않는다 —
+# 이 규칙이 막는 것은 오직 **에이전트 세션의 Bash**다. 짧은 ref 이름(`factory/records`)이든
+# 완전한 refspec(`HEAD:refs/heads/factory/records`)이든 같은 문자열을 지난다.
+# **잔여 위험(단일 자격증명)**: 러너와 에이전트가 같은 PAT을 쓰는 한, 훅을 피하는 철자(런타임 조립)나
+# 훅 밖의 경로에서는 여전히 같은 push가 가능하다 — ADR-023에 그대로 적어 둔다.
+echo "$c" | grep -Eq "${A}${G}push[^;&|]*factory/(records|lock)" && block "push to factory/records / factory/lock* (the records branch is the review evidence the merge stage checks against, and the lock branch is per-issue mutual exclusion — both belong to the runner, not to a stage session)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/git/refs[^;&|]*factory/(records|lock)" && block "gh api git/refs on factory/records|factory/lock* (the REST spelling of the push above)"
 # protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c.
-# 목록은 harness.toml `[protected].factory` · ci-settings.json deny와 같아야 한다(F9 / ADR-019 — 경로
-# deny는 `.claude/settings.json`이 아니라 CI 전용 `.factory/ci-settings.json`에 산다) — 셋이 갈라지면
-# Edit는 막히는데 `echo > package.json`은 통과하고, integrity가 사후에야 잡는다.
 # 빌드 설정 파일(package.json·러너/린터 config)이 여기 있는 이유: gate 명령이 그 파일들을 통해
 # 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.
-prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
-
+#
+# ── 2026-09-14 외부 감사 M8: 이 목록은 이제 **생성물이다** ─────────────────────────────────────
+# 같은 목록이 세 곳에 손으로 적혀 있었고(harness.toml `[protected].factory` · `.factory/ci-settings*.json`
+# 의 Edit/Write deny · 여기 `prot`) 감사가 확인한 대로 셋이 갈라져 있었다: 이 훅은
+# `.github/workflows/factory-`만 막는데 harness는 `.github/**` 전부를 보호했고(다른 이름의 워크플로
+# 한 장이 그대로 지나갔다), harness 변형은 `(bin|lib|actions|lessons|out)`만 열거하는데 ci-settings는
+# `scenarios`·`node_modules`까지 막았다. 갈라진 목록은 "Edit는 막히는데 `echo > x`는 통과한다"를
+# 만들고, 어느 쪽이 맞는지는 아무도 모른다.
+# 이제 출처는 `harness.toml [protected]` 하나이고, 아래 블록은 `factory init`/`--upgrade`가
+# `factory/lib/protected-paths.js`로 다시 쓴다. doctor의 `protected.parity`가 드리프트를 FAIL로 잡는다.
+# **손으로 고치지 말 것** — 고쳐야 한다면 harness.toml을 고치고 `factory init --upgrade`를 돌린다.
+# (블록 안의 값은 이 패키지의 템플릿 harness.toml로 생성돼 있다 = 새 채택자가 받는 목록.)
 # KTB-20: `factory:harness` 이슈의 implement 스테이지만 `FACTORY_HARNESS_ISSUE=1`로 온다(run-stage.js가
 # `claude -p`의 env에 넣는다 — 훅은 그 세션의 자식이라 그대로 물려받는다). 스펙 §5.2.1의 의도는
 # "인프라 작업은 factory가 하고 **사람이 그 diff를 머지한다**"인데, 그때까지 이 훅과 ci-settings.json이
@@ -101,9 +219,13 @@ prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md
 # 여기 `prot`의 `out/`는 그 카브아웃이 이미 `$p`에서 qa 토큰을 지운 뒤에 적용되므로 그대로 둔다.
 # 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
 # **머지는 그대로 사람이다**: package.json은 `[protected].factory`에 남아 있어 L1이 자동 머지를 거부한다.
+
+# >>> factory:protected — generated by `factory init` from harness.toml [protected] (audit M8) — do not edit by hand
+prot='(\.factory/|\.claude/|\.github/|docs/factory/CHARTER\.md|CLAUDE[a-zA-Z0-9._-]*\.md|AGENTS[a-zA-Z0-9._-]*\.md|\.mcp[a-zA-Z0-9._-]*\.json|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.|docs/factory/runs/)'
 if [ "${FACTORY_HARNESS_ISSUE:-}" = "1" ]; then
-  prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml|package\.json|package-lock\.json)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
+  prot='(\.factory/bin/|\.factory/lib/|\.factory/actions/|\.factory/lessons/|\.factory/scenarios/|\.factory/node_modules/|\.factory/out/|\.factory/out/coverage/|\.factory/out/prove-wt/|\.factory/out/classify-wt/|\.factory/ci-settings[a-zA-Z0-9._-]*\.json|\.factory/roles\.toml|\.factory/quarantine\.toml|\.factory/package\.json|\.factory/package-lock\.json|\.claude/|\.github/|docs/factory/CHARTER\.md|CLAUDE[a-zA-Z0-9._-]*\.md|AGENTS[a-zA-Z0-9._-]*\.md|\.mcp[a-zA-Z0-9._-]*\.json|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.|docs/factory/runs/)'
 fi
+# <<< factory:protected
 
 # `.factory/out/qa/**`는 qa 리뷰어의 증거 디렉터리다(harness.toml `[protected].except`, F3) — 거기 쓰는 것만
 # 예외로 통과시킨다. 보호 경로 검사에만 쓰는 사본 `$p`에서 그 토큰을 지우는 방식이라 `.factory/`의 나머지는
@@ -117,7 +239,12 @@ echo "$p" | grep -Eq "(>>?|tee[[:space:]]+(-a[[:space:]]+)?)[[:space:]]*[\"']?[^
 # KTB-15b: `-i`도 값을 붙여 받는다(`sed -i.bak …`) — deny-all-writes.sh의 같은 수정과 짝이다.
 # `--in-place[=SUFFIX]`(GNU 긴 옵션)도 같이 잡는다.
 echo "$p" | grep -Eq "sed[[:space:]]+(-[a-zA-Z]*i[^;&|[:space:]]*[[:space:]]+|--in-place(=[^;&|[:space:]]*)?[[:space:]]+)[^;&|]*$prot" && block "sed -i on protected path"
-echo "$p" | grep -Eq "${A}(cp|mv)[[:space:]]+[^;&|]*[[:space:]]$prot" && block "cp/mv onto protected path"
+# 리뷰 batch-2 MF-3 — 목적지 토큰의 **앞부분**(디렉터리 접두)을 흡수한다. 예전 모양은 보호 패턴이
+# 공백 **바로 뒤**에 와야 해서 `cp /tmp/evil docs/CLAUDE.md`가 통과했다(`CLAUDE…` 앞이 `docs/`다) —
+# 깊이 무관 글롭을 넣어 놓고 이 규칙만 루트 모양을 가정하면 그 글롭은 절반만 산다.
+# 출발지 읽기(`cp .factory/harness.toml /tmp/backup`)는 그대로 허용된다: 보호 패턴이 **두 번째**
+# 공백 뒤 토큰에 있어야 매치한다.
+echo "$p" | grep -Eq "${A}(cp|mv)[[:space:]]+[^;&|]*[[:space:]][^[:space:];&|]*$prot" && block "cp/mv onto protected path"
 echo "$p" | grep -Eq "${A}perl[[:space:]]+-[a-zA-Z]*i[^;&|]*$prot" && block "perl -i on protected path"
 echo "$p" | grep -Eq "${A}python[0-9.]*[[:space:]]+-c[^;&|]*$prot" && block "python -c touching protected path"
 # 보호 경로를 **옮기거나 지우는** 것도 편집이다(ADR-020 fix round 1). `git mv`로 보호 경로를 보호되지
@@ -168,6 +295,13 @@ echo "$c" | grep -Eq "${A}${G}(apply|am)${Z}" && block "git apply/am (patch cont
 # 거부했어야 할 전이가 조용히 일어나고, 다음 스테이지 워크플로가 그 라벨 이벤트로 깨어난다(F13).
 # 코멘트는 막지 않는다: handoff·rework-response는 코멘트로 나간다.
 echo "$c" | grep -Eq "${A}gh[[:space:]]+issue[[:space:]]+edit[^;&|]*--(add|remove)-label[^;&|]*factory:" && block "gh issue edit --add/remove-label factory:*"
+# ── 리뷰 batch-2 MF-1/#4 — **이슈 본문은 사람의 것이다.** ────────────────────────────────────────
+# `tests_changed_allowed:` 마커는 이슈 **본문**에서만 읽힌다(integrity.js `testsChangedAllowed`) —
+# 곧 "이 PR은 테스트를 고쳐도 된다"를 허락하는 유일한 자리다. 그런데 훅은 라벨 플래그만 보고 있어서
+# `gh issue edit 7 --body "tests_changed_allowed: factory/test/**"`가 rc=0이었다(재리뷰가 실행해 확인).
+# 에이전트가 자기 자신에게 허가를 써 줄 수 있으면 그 정책은 정책이 아니다. REST 철자(`PATCH /issues/N`)는
+# 위 엔드포인트 표가 막는다. **코멘트는 그대로 열려 있다** — handoff·rework-response가 그리로 나간다.
+echo "$c" | grep -Eq "${A}gh[[:space:]]+issue[[:space:]]+edit[^;&|]*[[:space:]](--body(-file)?|-b|-F)([[:space:]=]|$)" && block "gh issue edit --body/--body-file (the issue body is where tests_changed_allowed: is read from — a stage cannot write its own authorization; use gh issue comment)"
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/issues/[0-9]+/labels" && block "gh api issues labels"
 # 재리뷰 #3 — 위 두 규칙은 **이슈 한 건**의 라벨만 본다. 라벨은 저장소 자원이기도 하다:
 # `gh label delete factory:approved --yes`는 그 라벨을 **모든 이슈에서 한 번에** 떼어 내고,

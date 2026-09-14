@@ -9,39 +9,6 @@ export const meta = {
   ],
 };
 
-// LOADER schema — every workflow shares this exact literal (Plan 3 Global Constraints).
-const LOADER = {
-  type: 'object',
-  required: ['issue', 'stage', 'tier', 'roster', 'orchestration'],
-  properties: {
-    issue: { type: 'number' },
-    stage: { type: 'string' },
-    tier: { type: 'string' },
-    maturity: { type: 'string' },
-    roster: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['name', 'agentType', 'model'],
-        properties: {
-          name: { type: 'string' },
-          agentType: { type: 'string' },
-          model: { type: 'string' },
-          lessons: { type: 'string' },
-        },
-      },
-    },
-    rounds: { type: 'number' },
-    limits: { type: 'object' },
-    spec_path: { type: 'string' },
-    pr: { type: 'number' },
-    head_sha: { type: 'string' },
-    must_fix: { type: 'array', items: { type: 'object' } },
-    disputed: { type: 'array', items: { type: 'object' } },
-    orchestration: { type: 'string' },
-  },
-};
-
 // What the builder hands back. `head_sha` is the contract with L1: `verify-stage` checks the handoff
 // against `factory.implement.v1` (40-hex) and `run-stage` only posts statuses on the commit it can
 // actually check out, so a short sha or a branch name here costs the stage a needs-human.
@@ -134,20 +101,14 @@ const isSha40 = (s) => typeof s === 'string' && /^[0-9a-f]{40}$/.test(s);
 
 phase('Load');
 
-const loaderPrompt =
-  `Read \`${args.context}\`. Return exactly: issue=issue.number, stage, tier, ` +
-  `roster = for each name in roster: {name, agentType: basename of role_agents[name] without .md, ` +
-  `model: from \`.factory/roles.toml\` [<stage-section>.<name>].model (read the file), lessons: lessons[name]}, ` +
-  `rounds, limits, spec_path, maturity = harness.maturity, orchestration; ` +
-  `pr/head_sha from handoffs.implement if present; ` +
-  `must_fix = union of handoffs.review.verdicts[].must_fix when handoffs.review.decision === "rework"; ` +
-  `disputed = entries of the latest factory.rework-response.v1 PR comment with status disputed ` +
-  `(read via \`gh pr view <pr> --comments\` only if pr exists). Do not invent roles. ` +
-  `Note: for stage "triage" the roster in context.json is intentionally empty (triage is a single named ` +
-  `role, not a debate roster) — in that case return roster: [{name: "triage", agentType: "factory-triage", ` +
-  `model: <.factory/roles.toml [triage].model>}].`;
-
-const loaded = await once(() => agent(loaderPrompt, { agentType: 'factory-loader', model: 'sonnet', schema: LOADER }))();
+// 감사 M5 (2026-09-14) — `factory-loader`는 사라졌다. 그 에이전트가 한 일은 `context.json`과
+// `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적는 것뿐이었는데, 그 한 번의 복사에 스테이지마다 sonnet
+// 호출 하나가 들었고, 복사는 틀릴 수 있었다 — `model`은 이미 `factory/lib/context.js`가 `def.model`로
+// 들고 있었다. 이제 그 파일이 같은 객체를 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓰고,
+// 디스패처가 그것을 그대로 Workflow의 `args.loaded`로 넘긴다(워크플로 스크립트는 파일을 읽을 수 없다,
+// §4.2.3). 역할 에이전트가 **스스로** 읽는 경로는 그대로 남는다 — 바뀐 것은 스크립트가 제 제어 흐름을
+// 위해 쓰던 재료의 출처뿐이다.
+const loaded = args.loaded ?? null;
 
 // KTB-27: Claude Code does not substitute positional `$1`/`$2` in a command md — only `$ARGUMENTS`
 // is filled in, as one string (verified live: `claude -p "/argtest 42 true"` turned `$ARGUMENTS`
@@ -165,7 +126,7 @@ const issue = Number(rawIssueStr);
 if (!loaded) {
   return {
     issue,
-    error: 'loader returned nothing',
+    error: 'context payload missing',
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -178,7 +139,7 @@ if (!loaded) {
 if (Number(loaded.issue) !== issue) {
   return {
     issue,
-    error: `context issue mismatch: loader saw ${loaded.issue}, dispatcher asked for ${args.issue}`,
+    error: `context issue mismatch: the context payload says ${loaded.issue}, dispatcher asked for ${args.issue}`,
     orchestration: 'workflow',
     guarantee: 'structural',
   };
@@ -331,8 +292,11 @@ const buildRules =
   `proves nothing, and the verifier runs \`prove-test\` to check exactly that.\n` +
   `3. Never modify or delete an existing test (\`tests_are_load_bearing\`, spec §5.2.4) and never add a ` +
   `skip/ignore pragma (\`.skip\`, \`xit\`, \`@pytest.mark.skip\`, \`# pragma: no cover\`, ` +
-  `\`istanbul ignore\`, \`Stryker disable\`). If an existing test truly must change, stop and write why ` +
-  `in the PR body instead — spec-conformance approves that explicitly or it does not happen.\n` +
+  `\`istanbul ignore\`, \`Stryker disable\`). This is now enforced, not just asked: a removed or changed ` +
+  `line in a file matched by \`harness.test.test_glob\` (and a deleted test file) is a policy violation ` +
+  `that stops the auto-merge and hands the PR to a human (external audit H5). Adding new tests is always ` +
+  `fine. The only exception is an existing test the ISSUE BODY lists under \`tests_changed_allowed:\` — ` +
+  `if the change you need is not listed there, stop and write why in the PR body instead.\n` +
   `4. Stay inside \`handoffs.plan.files_expected\`. If the work honestly needs a path outside it, record ` +
   `the path and the reason in the PR body under a "Scope change" heading.\n` +
   `5. Run \`[commands].lint\` and \`[commands].unit\` from \`harness.commands\` yourself (plus the full ` +

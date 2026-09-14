@@ -10,8 +10,23 @@ roster:
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }
+plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
+# 사람이 PR마다 서명하는가(외부 감사 2026-09-14 H6). true면 `factory bootstrap`이 `factory-merge` 환경에
+# required reviewer 1명(소유자)을 걸어 **모든 머지 잡이 사람 앞에서 멈춘다**. false면 다크 머지 —
+# 사람의 서명은 토큰 등록 1회뿐이고, `factory doctor`가 매번 `merge.dark`로 그 사실을 말한다.
+# **이 줄을 지우면 doctor FAIL이다**(`charter.merge-human-gate-unset`): 사람이 머지를 보는지 아닌지는
+# 기본값이 아니라 적어 두는 선택이다. 다크로 가려면 그 말을 소리 내어 쓴다.
+# 데모/도그푸드용으로 다크를 고르려면: merge: { human_gate: false }   # 이유를 아래 "머지 권한" 절에 적을 것
+merge: { human_gate: true }
+# triage가 **판단이 서지 않을 때** 이슈를 어떻게 하는가(외부 감사 2026-09-14 M1). `needs-info`는
+# 멈춘다 — 침묵은 승인이 아니다. `ready`는 통과시킨다(다크 루프 자체가 산출물인 저장소의 선택).
+# NEVER_AUTOMATE에 걸리면 언제나 `wont-do`이고, done_when을 못 쓰면 언제나 `needs-info`다 —
+# 이 필드가 정하는 것은 **그 둘이 아닌 나머지**뿐이다. 이슈 본문에 `[ready]` 표식이 있으면
+# 그 이슈 하나만 예외로 통과한다(사람이 그 이슈를 봤다는 뜻).
+# **이 줄을 지우면 doctor FAIL이다**(`charter.triage-default-unset`).
+triage: { default: needs-info }
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -25,11 +40,16 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
-## Plan 토론 로스터
-| tier | 토론자 | 라운드 |
-|---|---|---|
-| docs | architect, skeptic | 2 (입장 → synthesizer 종합; 교차검토 생략) |
-| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+## Plan 로스터 (기본은 토론이 아니다)
+| tier | 모드 | 역할 | 라운드 |
+|---|---|---|---|
+| docs / standard | single | synthesizer(계획자, opus) + skeptic | 2 (계획 1패스 → 반박 1패스; 반박은 **추가만** 한다) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 (`plan_rounds`) |
+
+`plan.debate_tiers`에 이름이 있는 tier만 4역할 토론을 돈다. `plan.mode: debate`면 tier와 무관하게
+언제나 토론이다(되돌리는 스위치). `plan.max_done_when`은 계획이 스스로 만드는 결함 표면의 상한이고,
+`verify-stage`의 plan 검증기가 그 상한과 "dissent는 done_when으로 나온다"를 **스크립트로** 집행한다.
+근거는 `docs/factory/audit/response-task-9.md`.
 
 ## Hard limits
 - review rounds K = 3
@@ -62,7 +82,29 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 - **사람의 머지 경로는 달라지지 않는다**: 보호 경로·역할 섹션 정책에 걸린 PR은 그대로 `needs-human`이고,
   admin 권한의 사람이 diff를 읽고 GitHub에서 머지한다.
 
+### 사람 게이트 — `merge.human_gate` (외부 감사 2026-09-14 H6)
+두 배우 모드는 "에이전트가 머지할 수 없다"를 권한으로 세운다. 그것은 **머지 배우가 누구인가**의 문제이지
+**사람이 이 PR을 봤는가**의 문제가 아니다 — 머지 배우의 승인은 `merge-stage`가 머지 직전에 자동으로
+넣으므로(ADR-021), 사람의 서명은 토큰을 한 번 등록한 것이 전부다. 감사가 "인간 게이트가 사실상 없다"고
+지적한 지점이 여기다.
+
+`merge.human_gate: true`이면 `factory bootstrap`이 `factory-merge` 환경에 **required reviewer 1명**(머지
+배우 계정)을 건다. GitHub은 그 환경을 쓰는 잡을 시작 전에 멈춰 세우고 그 사람의 승인을 기다리므로,
+머지 PR 하나마다 사람의 클릭 하나가 실제로 든다.
+
+`false`는 그것을 끄는 선택이고, 끈 이유를 **여기에 적는다**. `factory doctor`는 그때마다
+`merge.dark — no per-PR human signature (merge.human_gate=false)`를 WARN으로 남긴다. 필드를 아예 지우면
+FAIL(`charter.merge-human-gate-unset`)이다 — 아무도 고른 적 없는 것을 조용히 다크로 읽지 않는다.
+
+## triage 기본 판정 — `triage.default` (외부 감사 2026-09-14 M1)
+판단이 서지 않는 이슈를 멈춰 세울 것인가, 통과시킬 것인가. 템플릿의 기본은 `needs-info`다 —
+**침묵은 정지**이고, `ready`는 CHARTER가 소리 내어 고를 때만 나온다. `factory doctor`는 `ready`를
+고른 저장소에 매 실행 `triage.default-allow` WARN을, 필드를 지운 저장소에 FAIL을 남긴다.
+
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
+경로 글롭(`auth/**` 같은)으로 적은 항목은 **스크립트가 다시 센다**: triage handoff의 `impact_paths`가
+그 글롭에 걸리면 에이전트가 무엇이라 판정했든 `wont-do`로 덮어쓰고 `never_automate_hit`으로 기록한다
+(감사 M1). 글롭으로 적을 수 있는 것은 글롭으로 적어라 — 산문은 에이전트만 읽지만 글롭은 둘 다 읽는다.
 - (fill in)
 - (fill in)
 - 공개 API(`src/api/public/**`)의 breaking change
