@@ -14,10 +14,10 @@ _이력 없음_
 | --- | --- | --- |
 | merged | 0 | 0 |
 | review rounds avg | 0 | 0 |
-| needs-human | 1 | 0 |
+| needs-human | 2 | 0 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 26.21 | 0.00 |
-| tokens | input 456915 / output 62257 | input 0 / output 0 |
+| cost (usd) | 29.00 | 0.00 |
+| tokens | input 528766 / output 66213 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -50,6 +50,11 @@ _이력 없음_
         "issue": 3,
         "reason": "stage artifact missing or invalid: gates RED: failing=unit",
         "at": "2026-09-14T05:43:12Z"
+      },
+      {
+        "issue": 7,
+        "reason": "resolved upstream in KTB (KTB-36); will be closed when 1.1.1 lands",
+        "at": "2026-09-14T08:21:09Z"
       }
     ]
   },
@@ -57,12 +62,12 @@ _이력 없음_
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 1,
+    "needs_human": 2,
     "usage": {
-      "cost_usd": 26.212316,
+      "cost_usd": 28.999006,
       "tokens": {
-        "input": 456915,
-        "output": 62257
+        "input": 528766,
+        "output": 66213
       }
     }
   }
