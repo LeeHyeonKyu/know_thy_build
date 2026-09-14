@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { runMergeStage, HUMAN_MERGE_REQUIRED } from "../lib/merge-stage.js";
+import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVIDENCE_STATUSES } from "../lib/merge-stage.js";
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
@@ -446,6 +446,38 @@ test("KTB-46: every human-merge refusal reason carries the exported HUMAN_MERGE_
     expect(HUMAN_MERGE_REQUIRED.test(reason), `${name}: ${reason}`).toBe(true);
     expect(d.mergePr, name).not.toHaveBeenCalled();
   }
+});
+
+/**
+ * KTB-46 r2 — §(6b)의 판정 (d)를 꺼낸 순수 함수. sweeper의 사람-머지 반영 팔이 **같은 함수**를
+ * 부른다(판정을 두 벌 구현하면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다). 위의 §(6b)
+ * 테스트들이 그대로 초록인 것이 "동작이 한 글자도 바뀌지 않았다"의 증거다.
+ */
+test("KTB-46 r2: verifyFactoryStatuses — success + factory creator on both contexts, else a named refusal", () => {
+  const SHA = "b".repeat(40);
+  const ok = REVIEW_EVIDENCE_STATUSES.map((context) => ({ context, state: "success", creatorLogin: "ktb-bot" }));
+  const logins = ["ktb-bot", "ktb-owner"];
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok, logins })).toEqual({ ok: true });
+  // 대소문자는 무시한다(GitHub 로그인은 대소문자를 구분하지 않는다).
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok.map((s) => ({ ...s, creatorLogin: "KTB-Bot" })), logins })).toEqual({ ok: true });
+
+  const bad = (over, re) => {
+    const r = verifyFactoryStatuses({ sha: SHA, statuses: ok.map((s, i) => (i === 1 ? { ...s, ...over } : s)), logins });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(re);
+  };
+  bad({ state: "failure" }, /is "failure", not success/);
+  bad({ creatorLogin: "mallory" }, /posted by @mallory.*not a factory account/s);
+  bad({ creatorLogin: "" }, /names no creator/);
+
+  // 상태가 아예 없는 것은 통과가 아니다 — "리뷰 스테이지가 이 커밋에 올린 적이 없다"이다.
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: [], logins }).reason).toMatch(/no factory\/review commit status/);
+  // 조회 결과가 목록이 아니거나 대조할 계정이 없으면 **판정 불가**다(fail closed).
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: null, logins }).reason).toMatch(/unreadable — no list returned/);
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok, logins: [] }).reason).toMatch(/could not be resolved/);
+  // 같은 context가 여러 번이면 **가장 최근 것**(목록의 첫 항목)이 유효한 상태다.
+  const stale = [{ context: "factory/review", state: "failure", creatorLogin: "ktb-bot" }, ...ok];
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: stale, logins }).reason).toMatch(/factory\/review on bbbbbbb is "failure"/);
 });
 
 test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {

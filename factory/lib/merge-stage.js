@@ -31,6 +31,43 @@ export const HUMAN_MERGE_REQUIRED = /human merge required/;
 const HUMAN_MERGE_REQUIRED_TEXT = HUMAN_MERGE_REQUIRED.source;
 
 /**
+ * 외부 감사 H1b의 판정 (d)를 **순수 함수로** 꺼낸 것. 이 커밋에 `factory/review`·`factory/gates`
+ * 상태가 붙어 있고, 그 둘이 success이고, **팩토리 자신의 계정이 올린 것**인가.
+ *
+ * 상태는 repo 스코프 토큰을 쥔 무엇이든 쓸 수 있다 — 그래서 "success다"는 아무것도 증명하지 않고,
+ * 게시자까지 대조해야 비로소 "리뷰·게이트가 실제로 돌았다"의 기계적 흔적이 된다. 조회 대상 sha가 곧
+ * 그 상태가 붙은 커밋이므로 target sha 검사는 구조적으로 참이다(호출자가 PR head로 묻는다).
+ *
+ * KTB-46이 이것을 꺼낸 이유: 사람이 머지한 보호 경로 PR을 sweeper가 `factory:merged`로 이을 때
+ * **같은 판정**이 필요한데, 그 팔에는 체크아웃도 이번 런의 게이트 파일도 없다. 머지는 이미 일어났고
+ * 되돌릴 수 없으며, 그 커밋에 대해 남아 있는 증거는 GitHub이 들고 있는 이 두 상태다. 판정을 두 번
+ * 구현하면 두 판정이 갈라진다 — 같은 함수를 두 곳이 부른다.
+ *
+ * 순수 함수다: 조회(로그인 해석·상태 조회)와 그 실패 처리는 호출자의 몫이고, 여기서는 **이미 읽은
+ * 것**만 본다. `logins`가 비면 통과가 아니라 거부다(게시자를 대조할 기준이 없다 = 판정 불가).
+ */
+export function verifyFactoryStatuses({ sha, statuses, logins }) {
+  const short = String(sha || "").slice(0, 7);
+  const known = new Set((logins || []).filter(Boolean).map((l) => String(l).toLowerCase()));
+  if (!known.size) return { ok: false, reason: `the factory's own account could not be resolved — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}` };
+  if (!Array.isArray(statuses)) return { ok: false, reason: `commit statuses for ${short} unreadable — no list returned` };
+  for (const context of REVIEW_EVIDENCE_STATUSES) {
+    // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
+    // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
+    const posted = statuses.filter((s) => s?.context === context);
+    if (!posted.length) return { ok: false, reason: `no ${context} commit status on PR head ${short} — the review stage never posted it for this commit` };
+    const latest = posted[0];
+    if (String(latest.state).toLowerCase() !== "success") return { ok: false, reason: `${context} on ${short} is "${latest.state}", not success` };
+    const by = String(latest.creatorLogin || "").trim();
+    if (!by) return { ok: false, reason: `${context} on ${short} names no creator — the poster cannot be identified` };
+    if (!known.has(by.toLowerCase())) {
+      return { ok: false, reason: `${context} on ${short} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
  * 외부 감사 2026-09-14 H6 — 머지 전이 코멘트가 **사람의 서명이 어디 있었는지**를 한 줄로 말한다.
  * `merge.human_gate`(CHARTER)는 설정이 아니라 선언이다: true면 `factory-merge` 환경의 required
  * reviewer가 이 잡을 PR마다 한 번 멈춰 세웠고, false면 사람은 토큰을 한 번 등록했을 뿐이다.
@@ -619,26 +656,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!logins?.ok || !Array.isArray(logins.logins) || logins.logins.length === 0) {
       return await reviewRefused(`the factory's own account could not be resolved (gh api user) — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}: ${logins?.reason || "unknown"}`);
     }
-    const known = new Set(logins.logins.filter(Boolean).map((l) => String(l).toLowerCase()));
-
     let statuses;
     try { statuses = await d.commitStatuses(live); }
     catch (e) { return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable: ${e?.message || e}`); }
     if (!Array.isArray(statuses)) return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable — no list returned`);
 
-    for (const context of REVIEW_EVIDENCE_STATUSES) {
-      // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
-      // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
-      const posted = statuses.filter((s) => s?.context === context);
-      if (!posted.length) return await reviewRefused(`no ${context} commit status on PR head ${live.slice(0, 7)} — the review stage never posted it for this commit`);
-      const latest = posted[0];
-      if (String(latest.state).toLowerCase() !== "success") return await reviewRefused(`${context} on ${live.slice(0, 7)} is "${latest.state}", not success`);
-      const by = String(latest.creatorLogin || "").trim();
-      if (!by) return await reviewRefused(`${context} on ${live.slice(0, 7)} names no creator — the poster cannot be identified`);
-      if (!known.has(by.toLowerCase())) {
-        return await reviewRefused(`${context} on ${live.slice(0, 7)} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal`);
-      }
-    }
+    // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
+    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다.
+    const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
+    if (!posted.ok) return await reviewRefused(posted.reason);
     record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
   }
 

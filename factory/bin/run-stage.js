@@ -4,7 +4,7 @@ import { homedir, hostname } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh, allChecksGreen } from "../lib/gh.js";
+import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
@@ -2099,20 +2099,8 @@ async function main() {
     get humanGate() { return charter?.merge?.human_gate; },
     prHeadShaLive: (pr) => gh.prHeadSha(pr),
     commitStatuses: (sha) => gh.commitStatuses(sha),
-    /**
-     * 팩토리 자신의 계정 **이름**(값이 아니다). 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만
-     * `factory/review` 상태를 올린 것은 **에이전트 배우**다 — 그래서 둘 다 받는다. 봇 로그인은
-     * 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다).
-     * 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` — 머지 스테이지가 fail closed로 멈춘다.
-     */
-    factoryLogins: async () => {
-      const logins = [];
-      const bot = (process.env.FACTORY_BOT_LOGIN || "").trim();
-      if (bot) logins.push(bot);
-      try { logins.push(await gh.viewerLogin()); }
-      catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
-      return { ok: true, logins: [...new Set(logins.filter(Boolean))] };
-    },
+    /** 팩토리 자신의 계정 이름(값이 아니다) — 판정과 해석은 `lib/gh.js`의 `resolveFactoryLogins` 하나다(KTB-46). */
+    factoryLogins: () => resolveFactoryLogins({ gh }),
     /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
     approvePr: (pr) => gh.approvePr(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),

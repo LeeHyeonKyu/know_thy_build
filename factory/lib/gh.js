@@ -60,6 +60,26 @@ export async function resolveRepo({ run }) {
 export const LABEL_RETRY_DELAYS_MS = [1000, 3000, 9000];
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 팩토리 자신의 계정 **이름**(값이 아니다) — commit status의 게시자를 대조할 기준(외부 감사 H1b).
+ *
+ * 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만 `factory/review` 상태를 올린 것은 **에이전트
+ * 배우**다 — 그래서 둘 다 받는다. 봇 로그인은 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은
+ * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` —
+ * 호출자는 fail closed 한다(누가 올렸는지 모르는 상태는 통과가 아니다).
+ *
+ * KTB-46에 `bin/sweep.js`가 두 번째 호출자로 붙으면서 `bin/run-stage.js`의 클로저에서 여기로 옮겼다 —
+ * `gh api user` 해석이 두 벌이 되면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다.
+ */
+export async function resolveFactoryLogins({ gh, env = process.env }) {
+  const logins = [];
+  const bot = (env.FACTORY_BOT_LOGIN || "").trim();
+  if (bot) logins.push(bot);
+  try { logins.push(await gh.viewerLogin()); }
+  catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+  return { ok: true, logins: [...new Set(logins.filter(Boolean))] };
+}
+
 export function makeGh({ run, repo, sleep = realSleep }) {
   async function gh(args, opts = {}) {
     const r = await run("gh", args, opts);
