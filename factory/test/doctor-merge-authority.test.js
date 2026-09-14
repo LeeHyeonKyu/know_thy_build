@@ -18,10 +18,11 @@ const SINGLE = ["FACTORY_BOT_TOKEN"];
 const PROTECTED = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true } };
 const OWNERS = "* @owner-human\n";
 
-const gh = ({ login = "factory-bot", permission = "write", scopes = ["repo", "read:org"] } = {}) => ({
+const gh = ({ login = "factory-bot", permission = "write", scopes = ["repo", "read:org"], envSecrets = [] } = {}) => ({
   viewerLogin: async () => login,
   collaboratorPermission: async () => permission,
   viewerScopes: async () => scopes,
+  listEnvSecrets: async () => envSecrets,
 });
 
 const run = (opts = {}) =>
@@ -140,6 +141,41 @@ test("isCiWithToken: both CI and a token are required — neither alone", () => 
   expect(isCiWithToken({ CI: "true" })).toBe(false);
   expect(isCiWithToken({ GH_TOKEN: "x" })).toBe(false);
   expect(isCiWithToken(undefined)).toBe(false);
+});
+
+// ── ADR-021 fix round r2 (KTB-33 finding MF-A) — the factory-merge environment secret ───────
+// The r1 advice (and the owner checklist) is to move FACTORY_MERGE_TOKEN into the `factory-merge`
+// environment and delete the repo copy. `secrets` here is always the REPO secret list only — the
+// environment list comes from `gh.listEnvSecrets`, which these tests stub directly.
+
+test("tokens.two-actor (r2): PASS when the merge token is present ONLY in the factory-merge environment secret list", async () => {
+  const c = await run({ secrets: SINGLE, gh: { envSecrets: ["FACTORY_MERGE_TOKEN"] } });
+  expect(c["tokens.two-actor"].level).toBe("PASS");
+  expect(c["tokens.single-actor"]).toBeUndefined();
+  // it is not a repo secret, so there is nothing to warn about moving
+  expect(c["tokens.merge-token-repo-level"]).toBeUndefined();
+});
+
+test("tokens.merge-token-repo-level: WARN when the merge token is present in BOTH the repo and the environment", async () => {
+  const c = await run({ secrets: TWO, gh: { envSecrets: ["FACTORY_MERGE_TOKEN"] } });
+  expect(c["tokens.two-actor"].level).toBe("PASS");
+  expect(c["tokens.merge-token-repo-level"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory-merge") });
+  expect(c["tokens.merge-token-repo-level"].detail).toMatch(/gh secret set FACTORY_MERGE_TOKEN --env factory-merge/);
+});
+
+test("tokens.merge-token-repo-level: also WARN when the merge token is a repo secret and NOT (yet) in the environment", async () => {
+  const c = await run({ secrets: TWO, gh: { envSecrets: [] } });
+  expect(c["tokens.merge-token-repo-level"].level).toBe("WARN");
+});
+
+test("tokens.merge-token-repo-level: not raised when the token is ONLY in the environment (the recommended setup)", async () => {
+  const c = await run({ secrets: SINGLE, gh: { envSecrets: ["FACTORY_MERGE_TOKEN"] } });
+  expect(c["tokens.merge-token-repo-level"]).toBeUndefined();
+});
+
+test("tokens.merge-token-repo-level: not raised in single-actor mode — there is no merge token anywhere to leave behind", async () => {
+  const c = await run({ secrets: SINGLE, protection: { required_pull_request_reviews: null }, codeowners: null });
+  expect(c["tokens.merge-token-repo-level"]).toBeUndefined();
 });
 
 // ── finding 2: the CI entry point's "mode unknown" downgrade ────────────────

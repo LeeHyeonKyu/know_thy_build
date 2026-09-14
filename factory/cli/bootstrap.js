@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
 import { loadHarness } from "../lib/config.js";
-import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor, CODEOWNERS_PATH, MERGE_TOKEN_SECRET } from "../lib/bootstrap.js";
+import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor, CODEOWNERS_PATH, MERGE_TOKEN_SECRET, MERGE_ENVIRONMENT } from "../lib/bootstrap.js";
 
 const TOKEN_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
@@ -73,18 +73,20 @@ export async function bootstrapCommand({ root, argv = [], io, gh, run = realRun,
 
   const ghClient = gh || makeGh({ run, repo: process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner });
 
-  const [labels, variableValue, secrets] = await Promise.all([
+  const [labels, variableValue, secrets, envSecrets] = await Promise.all([
     ghClient.listLabels(),
     ghClient.getVariable("FACTORY_TOKEN_ISSUED_AT"),
     ghClient.listSecrets(),
+    ghClient.listEnvSecrets(MERGE_ENVIRONMENT),
   ]);
   const codeownersAbs = join(root, CODEOWNERS_PATH);
   const existing = {
     labels,
     variables: { FACTORY_TOKEN_ISSUED_AT: variableValue },
     secrets,
+    envSecrets,
     codeowners: existsSync(codeownersAbs) ? readFileSync(codeownersAbs, "utf8") : null,
-    ...(isTwoActor(secrets) ? await resolveMergeActor({ run, env }) : {}),
+    ...(isTwoActor(secrets, envSecrets) ? await resolveMergeActor({ run, env }) : {}),
   };
 
   let ops = bootstrapPlan({ harness, today: day, existing });

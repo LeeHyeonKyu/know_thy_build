@@ -200,12 +200,13 @@ test("applyBootstrap: note ops never call any gh method", async () => {
   expect(applied.length).toBe(LABELS.length + 1 + 1); // labels + protection + the mode variable
 });
 
-function fakeGhCli({ labels = [], secrets = [], variable = null } = {}) {
+function fakeGhCli({ labels = [], secrets = [], envSecrets = [], variable = null } = {}) {
   const calls = { createLabel: [], putBranchProtection: [], setVariable: [] };
   return {
     calls,
     async listLabels() { return labels; },
     async listSecrets() { return secrets; },
+    async listEnvSecrets() { return envSecrets; },
     async getVariable() { return variable; },
     async createLabel(args) { calls.createLabel.push(args); },
     async putBranchProtection(branch, body) { calls.putBranchProtection.push({ branch, body }); },
@@ -472,4 +473,57 @@ test("codeownersOwners / codeownersMentions: comments are stripped, non-`*` patt
   expect(codeownersMentions(text)).toEqual(["merge-actor", "someone-else"]);
   expect(codeownersOwners("")).toEqual([]);
   expect(codeownersOwners("# only a comment\n")).toEqual([]);
+});
+
+// ── ADR-021 fix round r2 (KTB-33 finding MF-A) — the environment secret also counts ─────────
+// The owner checklist (r1) tells owners to move FACTORY_MERGE_TOKEN into the `factory-merge`
+// environment and delete the repo copy. A repo-secrets-only check never sees that, so a repo that
+// followed the r1 advice to the letter looked single-actor forever, and a re-bootstrap stripped the
+// code-owner requirement (KTB-33 MF-A).
+
+test("isTwoActor (r2): the merge token counts from EITHER the repo secret list or the environment secret list", () => {
+  expect(isTwoActor([], [])).toBe(false);
+  expect(isTwoActor([], ["FACTORY_MERGE_TOKEN"])).toBe(true);
+  expect(isTwoActor(["FACTORY_MERGE_TOKEN"], [])).toBe(true);
+  expect(isTwoActor(["FACTORY_MERGE_TOKEN"], ["FACTORY_MERGE_TOKEN"])).toBe(true);
+  expect(isTwoActor()).toBe(false); // no args at all — still fail closed to single-actor
+});
+
+test("bootstrapPlan (r2): FACTORY_MERGE_TOKEN present ONLY as an environment secret still turns on two-actor protection", () => {
+  const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"], envSecrets: ["FACTORY_MERGE_TOKEN"] };
+  const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
+  const protection = ops.find((o) => o.kind === "protection");
+  expect(protection.twoActor).toBe(true);
+  expect(protection.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true });
+  expect(ops.find((o) => o.kind === "variable" && o.name === TWO_ACTOR_VARIABLE)).toEqual({ kind: "variable", name: TWO_ACTOR_VARIABLE, value: "true" });
+  // the token is not a repo secret — no "still a repository secret" leftover note
+  expect(ops.some((o) => o.kind === "note" && /still a repository secret/.test(o.message))).toBe(false);
+});
+
+test("bootstrapPlan (r2): a leftover REPO-level copy of the merge token gets its own note, whether or not it is also in the environment", () => {
+  const bothPlaces = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], envSecrets: ["FACTORY_MERGE_TOKEN"] } });
+  const noteBoth = bothPlaces.filter((o) => o.kind === "note").map((o) => o.message).find((m) => /still a repository secret/.test(m));
+  expect(noteBoth).toMatch(new RegExp(MERGE_ENVIRONMENT));
+  expect(noteBoth).toMatch(/gh secret set FACTORY_MERGE_TOKEN --env factory-merge/);
+
+  const repoOnly = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], envSecrets: [] } });
+  expect(repoOnly.some((o) => o.kind === "note" && /still a repository secret/.test(o.message))).toBe(true);
+
+  // single-actor mode never gets this note — there is no merge token anywhere to leave behind.
+  const single = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: {}, secrets: ["FACTORY_BOT_TOKEN"] } });
+  expect(single.some((o) => o.kind === "note" && /still a repository secret/.test(o.message))).toBe(false);
+});
+
+test("bootstrapCommand (r2): the CLI wires listEnvSecrets through — a merge token seen ONLY via listEnvSecrets still plans two-actor protection", async () => {
+  const gh = fakeGhCli({ labels: [], secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"], envSecrets: ["FACTORY_MERGE_TOKEN"], variable: null });
+  const fakeRun = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 0, stdout: JSON.stringify({ login: "owner-human" }), stderr: "" } },
+  ]);
+  const { io: i } = io();
+  const root = makeHarnessRoot();
+  const code = await bootstrapCommand({ root, argv: [], io: i, gh, run: fakeRun, today: "2026-09-12" });
+  expect(code).toBe(0);
+  expect(gh.calls.putBranchProtection).toHaveLength(1);
+  expect(gh.calls.putBranchProtection[0].body.required_pull_request_reviews).toMatchObject({ require_code_owner_reviews: true });
+  expect(gh.calls.setVariable).toContainEqual({ name: "FACTORY_TWO_ACTOR", value: "true" });
 });

@@ -287,6 +287,19 @@ test("listSecrets/listLabels map to name arrays; createLabel forces the color/de
   expect(run.calls[2].args).toEqual(["label", "create", "factory:ready", "-R", repo, "--color", "00ff00", "--description", "ready for review", "--force"]);
 });
 
+test("listEnvSecrets: parses the name array; a 404/missing environment (or any non-zero exit, or unparsable stdout) resolves to [], never throws", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "secret" && a[1] === "list" && a.includes("--env"), result: { code: 0, stdout: JSON.stringify([{ name: "FACTORY_MERGE_TOKEN" }]), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.listEnvSecrets("factory-merge")).toEqual(["FACTORY_MERGE_TOKEN"]);
+  expect(run.calls[0].args).toEqual(["secret", "list", "--env", "factory-merge", "-R", repo, "--json", "name"]);
+
+  const run404 = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 404: Not Found (environments are a paid feature here)" } }]);
+  expect(await makeGh({ run: run404, repo }).listEnvSecrets("factory-merge")).toEqual([]);
+
+  const runBadJson = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  expect(await makeGh({ run: runBadJson, repo }).listEnvSecrets("factory-merge")).toEqual([]);
+});
+
 test("getBranchProtection returns parsed json, or null on non-zero exit (404); putBranchProtection PUTs body on stdin", async () => {
   const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: JSON.stringify({ required_status_checks: { contexts: ["ci"] } }), stderr: "" } }]);
   const gh = makeGh({ run, repo });

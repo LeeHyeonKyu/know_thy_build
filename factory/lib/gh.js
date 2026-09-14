@@ -219,6 +219,24 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
     },
+    /**
+     * ADR-021 r2 (KTB-33 finding MF-A) — **환경 시크릿은 저장소 시크릿과 다른 목록이다.**
+     * `listSecrets()`는 `gh secret list -R`(저장소 시크릿)만 보는데, 소유자 체크리스트는 정확히
+     * `FACTORY_MERGE_TOKEN`을 `factory-merge` **환경** 시크릿으로 옮기고 저장소 사본을 지우라고
+     * 시킨다(ADR-021 r1의 위험 문구가 이유였다) — 그 권고를 따른 저장소는 `listSecrets()`만 보는
+     * 판정에서 영원히 단일 배우 모드로 보이고, 재부트스트랩은 코드 오너 요건이 빠진 보호 규칙을
+     * 덮어쓴다.
+     *
+     * `getBranchProtection`·`getVariable`과 같은 패턴이다: gh가 0이 아닌 종료 코드로 답하면(환경이
+     * 아직 없거나 이 플랜이 환경을 지원하지 않는 경우) "확인 못 함"이 아니라 "시크릿이 없다"이므로
+     * throw하지 않고 빈 배열로 떨어뜨린다. stdout이 JSON으로 파싱되지 않아도(빈 문자열 등) 마찬가지다.
+     */
+    async listEnvSecrets(envName) {
+      const r = await run("gh", ["secret", "list", "--env", envName, "-R", repo, "--json", "name"]);
+      if (r.code !== 0) return [];
+      try { return JSON.parse(r.stdout).map((s) => s.name); }
+      catch { return []; }
+    },
     async listLabels() {
       return JSON.parse(await gh(["label", "list", "-R", repo, "--json", "name", "--limit", "200"])).map((l) => l.name);
     },

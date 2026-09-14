@@ -21,7 +21,13 @@ export const L0_CONTEXTS = ["factory/integrity"];
  * 자기 PR을 승인할 수 없고, 승인해 줄 다른 계정이 없다.
  */
 export const MERGE_TOKEN_SECRET = "FACTORY_MERGE_TOKEN";
-export const isTwoActor = (secrets = []) => secrets.includes(MERGE_TOKEN_SECRET);
+/**
+ * ADR-021 r2 (KTB-33 finding MF-A) — 모드는 저장소 시크릿 **OR** `factory-merge` 환경 시크릿, 둘 중
+ * 하나에라도 토큰이 있으면 켜진다. 소유자 체크리스트는 정확히 "환경으로 옮기고 저장소 사본을
+ * 지워라"라고 시키므로(ADR-021 r1), 저장소 시크릿 목록만 보면 그 권고를 따른 저장소가 영원히
+ * 단일 배우 모드로 보이고 재부트스트랩이 코드 오너 요건 없는 보호 규칙을 덮어쓴다.
+ */
+export const isTwoActor = (secrets = [], envSecrets = []) => secrets.includes(MERGE_TOKEN_SECRET) || envSecrets.includes(MERGE_TOKEN_SECRET);
 
 /**
  * ADR-021 r1 MF-1 — **승인은 수가 아니라 신원이어야 한다.** `required_approving_review_count: 1`은
@@ -169,7 +175,7 @@ export function bootstrapPlan({ harness, today, existing }) {
 
   // ADR-021 — 모드는 **관측된 시크릿 목록**에서 나온다(사람이 플래그로 고르지 않는다). 플래그였다면
   // "두 배우 모드라고 선언했지만 머지 토큰이 없어 머지가 영영 막힌 저장소"가 가능해진다.
-  const twoActor = isTwoActor(existing?.secrets);
+  const twoActor = isTwoActor(existing?.secrets, existing?.envSecrets);
   ops.push({ kind: "protection", branch: harness.project.default_branch, twoActor, body: PROTECTION_BODY(L0_CONTEXTS, { twoActor }) });
 
   // ADR-021 r1 — 두 배우 모드에서만 나오는 두 op. 단일 배우 모드에 이것들을 걸면 승인해 줄 두 번째
@@ -203,8 +209,17 @@ export function bootstrapPlan({ harness, today, existing }) {
   // protection body 한 줄뿐이라 조용히 지나가면 사람이 "머지 권한이 여전히 에이전트 손에 있다"는
   // 사실을 모른 채로 운영하게 된다(그것이 단일 배우 모드의 실질적 위험이다).
   ops.push({ kind: "note", message: twoActor
-    ? `two-actor mode: ${MERGE_TOKEN_SECRET} is set — the base branch requires 1 approving review FROM A CODE OWNER (${CODEOWNERS_PATH}), so no PR can be merged with the agent actor's token whoever authored it; the merge stage approves with the merge actor and then merges. Move the secret out of the repo and into the \`${MERGE_ENVIRONMENT}\` environment: \`gh secret set ${MERGE_TOKEN_SECRET} --env ${MERGE_ENVIRONMENT}\` (then delete the repo-level one) — a repo secret is readable by a workflow on ANY same-repo branch (ADR-021 r1)`
-    : `single-actor mode: no ${MERGE_TOKEN_SECRET} — merge power is reachable from agent stages and hooks are the only layer. Set ${MERGE_TOKEN_SECRET} (admin PAT) + a non-admin FACTORY_BOT_TOKEN and re-run bootstrap for two-actor mode (ADR-021)` });
+    ? `two-actor mode: ${MERGE_TOKEN_SECRET} is set (as a repo secret and/or the \`${MERGE_ENVIRONMENT}\` environment secret) — the base branch requires 1 approving review FROM A CODE OWNER (${CODEOWNERS_PATH}), so no PR can be merged with the agent actor's token whoever authored it; the merge stage approves with the merge actor and then merges.`
+    : `single-actor mode: no ${MERGE_TOKEN_SECRET} — merge power is reachable from agent stages and hooks are the only layer. Set ${MERGE_TOKEN_SECRET} (admin PAT, best kept as an environment secret in \`${MERGE_ENVIRONMENT}\`) + a non-admin FACTORY_BOT_TOKEN and re-run bootstrap for two-actor mode (ADR-021)` });
+
+  // ADR-021 r2 (KTB-33 finding MF-A) — the mode can now be true purely from the environment secret,
+  // which is the state the r1 advice above (and the owner checklist) actually recommends. A REPO-level
+  // copy that is still there — whether or not it is ALSO in the environment — keeps the r1 MF-2 b risk
+  // alive: a repository secret is handed to a workflow on ANY same-repo branch. Single-actor mode has
+  // nothing to flag here (no merge token anywhere means nothing for a workflow to exfiltrate).
+  if (twoActor && (existing?.secrets || []).includes(MERGE_TOKEN_SECRET)) {
+    ops.push({ kind: "note", message: `${MERGE_TOKEN_SECRET} is still a repository secret; move it to the \`${MERGE_ENVIRONMENT}\` environment (\`gh secret set ${MERGE_TOKEN_SECRET} --env ${MERGE_ENVIRONMENT}\`) and delete the repo copy — a repository secret is readable by a workflow on ANY same-repo branch (ADR-021 r1)` });
+  }
 
   return ops;
 }

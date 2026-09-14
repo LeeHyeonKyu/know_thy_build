@@ -11,6 +11,10 @@ import { isTwoActor, MERGE_TOKEN_SECRET, MERGE_ENVIRONMENT, CODEOWNERS_PATH, cod
  *
  * 1. `tokens.two-actor`(PASS) / `tokens.single-actor`(WARN) — 모드 자체. 단일 배우 모드는 **틀린
  *    설정이 아니다**(Free 플랜의 개인 저장소처럼 두 계정을 둘 수 없는 곳이 있다) — 그래서 WARN이다.
+ *    r2(KTB-33 MF-A)부터 이 판정은 저장소 시크릿 OR `factory-merge` 환경 시크릿, 둘 중 하나다.
+ * 1-b. `tokens.merge-token-repo-level`(WARN, 두 배우 모드에서만) — 토큰이 **여전히 저장소 시크릿으로
+ *    남아 있는가**(환경에도 있든 없든). 남아 있으면 ADR-021 r1이 환경으로 옮긴 이유(같은 저장소
+ *    어느 브랜치의 워크플로에도 저장소 시크릿이 주어진다)가 그대로 열려 있다는 뜻이다.
  * 2. `protection.two-actor` — 보호 규칙의 **모양이 모드와 맞는가**(승인 1건 + 코드 오너 요건).
  * 3. `protection.codeowners` — 그 승인을 줄 수 있는 계정이 **누구인가**(r1 MF-1).
  * 4. `tokens.agent-is-admin` — 에이전트 배우의 실제 저장소 권한.
@@ -45,10 +49,22 @@ export function downgradeUnknownMode(checks, variableName) {
 }
 
 export async function checkMergeAuthority({ gh, secrets, branch, protection, protectionUnavailable, env, codeowners = null }) {
-  const twoActor = isTwoActor(secrets);
+  // ADR-021 r2 (KTB-33 finding MF-A) — the repo secret list alone is not the whole picture: the owner
+  // checklist tells owners to move FACTORY_MERGE_TOKEN into the `factory-merge` environment and delete
+  // the repo copy, and `gh secret list -R` never sees an environment secret. listEnvSecrets never
+  // throws (404 / missing environment → []), so this is safe to call unconditionally.
+  const envSecrets = await gh.listEnvSecrets(MERGE_ENVIRONMENT);
+  const twoActor = isTwoActor(secrets, envSecrets);
   const out = [twoActor
     ? c("tokens.two-actor", "PASS", `${MERGE_TOKEN_SECRET} is set — merging the base branch needs a code-owner approval the agent actor cannot give`)
     : c("tokens.single-actor", "WARN", `merge power is reachable from agent stages; hooks are the only layer (set ${MERGE_TOKEN_SECRET} + a non-admin FACTORY_BOT_TOKEN for two-actor mode)`)];
+
+  // r2 — a REPO-level copy left behind (whether or not it is also in the environment) keeps the r1
+  // MF-2 b risk alive: a repository secret is handed to a workflow on ANY same-repo branch. Single-actor
+  // mode has nothing to flag (no merge token anywhere means nothing for a workflow to exfiltrate).
+  if (twoActor && (secrets || []).includes(MERGE_TOKEN_SECRET)) {
+    out.push(c("tokens.merge-token-repo-level", "WARN", `${MERGE_TOKEN_SECRET} is still a repository secret; move it to the ${MERGE_ENVIRONMENT} environment (gh secret set ${MERGE_TOKEN_SECRET} --env ${MERGE_ENVIRONMENT}) and delete the repo copy`));
+  }
 
   const reviews = protection?.required_pull_request_reviews;
   const approvals = reviews?.required_approving_review_count ?? 0;

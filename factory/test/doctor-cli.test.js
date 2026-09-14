@@ -58,6 +58,7 @@ function makeDoctorRunSmokeThrows(root) {
 
 const fakeGh = {
   listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
+  listEnvSecrets: async () => [],
   getVariable: async () => "2026-01-01T00:00:00Z",
   listLabels: async () => ["backlog"],
   getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates", "factory/review", "factory/integrity"] } }),

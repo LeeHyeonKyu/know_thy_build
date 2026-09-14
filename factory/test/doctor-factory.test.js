@@ -6,7 +6,7 @@ import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse as toml } from "smol-toml";
-import { L0_CONTEXTS } from "../lib/bootstrap.js";
+import { L0_CONTEXTS, MERGE_ENVIRONMENT } from "../lib/bootstrap.js";
 const by = (cs) => Object.fromEntries(cs.map((c) => [c.id, c]));
 const REAL_HOOKS_DIR = new URL("../hooks/", import.meta.url).pathname;
 const AGENT_TEMPLATES = new URL("../../templates/factory/claude/agents/", import.meta.url).pathname;
@@ -482,7 +482,7 @@ test("checkWorkflows (r1): an unreadable workflows directory falls back to the s
 
 test("checkGitHub: secrets, token date, labels, protection", async () => {
   // 보호 규칙에 factory/gates만 있고 L0가 요구하는 factory/integrity는 없다 → protection WARN
-  const gh = { listSecrets: async () => ["FACTORY_BOT_TOKEN"], getVariable: async () => null, listLabels: async () => ["backlog"], getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates"] } }) };
+  const gh = { listSecrets: async () => ["FACTORY_BOT_TOKEN"], listEnvSecrets: async () => [], getVariable: async () => null, listLabels: async () => ["backlog"], getBranchProtection: async () => ({ required_status_checks: { contexts: ["factory/gates"] } }) };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review", "factory/integrity"] } }, labels: [{ name: "backlog" }, { name: "factory:queue" }] }));
   expect(c["github.claude-secret"].level).toBe("FAIL");
   expect(c["github.bot-token"].level).toBe("PASS");
@@ -496,6 +496,7 @@ test("checkGitHub: protection is judged against L0_CONTEXTS only — required_ch
   // 그건 머지 스테이지(L1)가 보는 목록이므로 protection은 PASS여야 한다 — 아니면 고칠 수 없는 WARN이 영원히 남는다.
   const gh = {
     listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
+    listEnvSecrets: async () => [],
     getVariable: async () => "2026-01-01T00:00:00Z",
     listLabels: async () => ["backlog"],
     getBranchProtection: async () => ({ required_status_checks: { contexts: [...L0_CONTEXTS] } }),
@@ -507,7 +508,7 @@ test("checkGitHub: protection is judged against L0_CONTEXTS only — required_ch
 });
 
 test("checkGitHub: no branch protection at all → protection WARN naming the L0 contexts bootstrap would set", async () => {
-  const gh = { listSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
+  const gh = { listSecrets: async () => [], listEnvSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
   expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
   // L1 목록이 비어 있어도 줄은 나온다 — "설정되지 않았다"를 빈 문자열로 말하면 아무도 못 읽는다
@@ -521,6 +522,7 @@ const GH_FREE_403 = "gh api -X failed (1): gh: Upgrade to GitHub Pro or make thi
 test("checkGitHub: getBranchProtection throws the GitHub-Free 403 → github.protection is WARN (not FAIL), with the plan-specific detail, and every other github.* check still runs", async () => {
   const gh = {
     listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"],
+    listEnvSecrets: async () => [],
     getVariable: async () => "2026-01-01T00:00:00Z",
     listLabels: async () => ["backlog", "factory:queue"],
     getBranchProtection: async () => { throw new Error(GH_FREE_403); },
@@ -551,7 +553,7 @@ test("checkGitHub: a getBranchProtection failure that is NOT the GitHub-Free wor
 });
 
 test("checkGitHub: no branch protection yet (404 → null, no throw) is unaffected by the 403 handling — still the existing missing-L0-contexts WARN", async () => {
-  const gh = { listSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
+  const gh = { listSecrets: async () => [], listEnvSecrets: async () => [], getVariable: async () => null, listLabels: async () => [], getBranchProtection: async () => null };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: [] } }, labels: [] }));
   expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
   expect(c["github.protection"].detail).not.toContain("GitHub Free");
@@ -565,7 +567,7 @@ test("checkGitHub: gh unavailable → single WARN, no other github.* checks", as
 });
 
 test("checkGitHub: all green → PASS across the board", async () => {
-  const gh = { listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"], getVariable: async () => "2026-01-01T00:00:00Z", listLabels: async () => ["backlog", "factory:queue"], getBranchProtection: async () => ({ required_status_checks: { contexts: [...L0_CONTEXTS, "factory/gates"] } }) };
+  const gh = { listSecrets: async () => ["CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_BOT_TOKEN"], listEnvSecrets: async () => [], getVariable: async () => "2026-01-01T00:00:00Z", listLabels: async () => ["backlog", "factory:queue"], getBranchProtection: async () => ({ required_status_checks: { contexts: [...L0_CONTEXTS, "factory/gates"] } }) };
   const c = by(await checkGitHub({ gh, harness: { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review"] } }, labels: [{ name: "backlog" }, { name: "factory:queue" }] }));
   expect(c["github.claude-secret"].level).toBe("PASS");
   expect(c["github.bot-token"].level).toBe("PASS");
@@ -576,9 +578,10 @@ test("checkGitHub: all green → PASS across the board", async () => {
 
 // ── ADR-021 two-actor merge authority ───────────────────────────────────────
 
-const ghFor = ({ secrets, protection, login = "factory-bot", permission = "write", scopes = ["repo"] }) => ({
+const ghFor = ({ secrets, envSecrets = [], protection, login = "factory-bot", permission = "write", scopes = ["repo"] }) => ({
   viewerScopes: async () => scopes,
   listSecrets: async () => secrets,
+  listEnvSecrets: async () => envSecrets,
   getVariable: async () => "2026-01-01",
   listLabels: async () => ["backlog"],
   getBranchProtection: async () => protection,
@@ -678,4 +681,19 @@ test("checkGitHub (ADR-021): in CI, a plain write agent actor passes; an unreada
   gh.collaboratorPermission = async () => { throw new Error("gh api failed (1): Not Found"); };
   const unknown = await authority(gh, env);
   expect(unknown["tokens.agent-is-admin"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("Not Found") });
+});
+
+// ── ADR-021 fix round r2 (KTB-33 finding MF-A) — the factory-merge environment secret ───────
+
+test("checkGitHub (r2): FACTORY_MERGE_TOKEN present ONLY in the factory-merge environment still yields tokens.two-actor PASS, end to end", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"], envSecrets: ["FACTORY_MERGE_TOKEN"], protection: withReview }));
+  expect(c["tokens.two-actor"].level).toBe("PASS");
+  expect(c["tokens.single-actor"]).toBeUndefined();
+  expect(c["tokens.merge-token-repo-level"]).toBeUndefined(); // not a repo secret — nothing to warn about
+});
+
+test("checkGitHub (r2): FACTORY_MERGE_TOKEN left over as a repo secret (also in the environment) → tokens.merge-token-repo-level WARN", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], envSecrets: ["FACTORY_MERGE_TOKEN"], protection: withReview }));
+  expect(c["tokens.two-actor"].level).toBe("PASS");
+  expect(c["tokens.merge-token-repo-level"]).toMatchObject({ level: "WARN", detail: expect.stringContaining(MERGE_ENVIRONMENT) });
 });
