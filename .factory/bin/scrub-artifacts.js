@@ -22,6 +22,10 @@ import { pathToFileURL } from "node:url";
  *       `ANTHROPIC_API_KEY`·`GITHUB_TOKEN`의 **리터럴 값** — env는 이 스텝에만 싣고 **절대 echo 하지 않는다**
  *       (`FACTORY_MERGE_TOKEN`은 머지 잡에만 실린다 — ADR-021, `yml-lint`의 `merge-token-scope`)
  *   (e) 그 값들의 `x-access-token:<token>` base64(= git이 심는 헤더의 그 형태)
+ *   (f) 리뷰 3c63672 MF-1 — URL 안의 userinfo(`scheme://user:pass@host`). `git push
+ *       https://x-access-token:<token>@github.com/…`(actions/checkout이 심는 그 모양 그대로, 평문이라
+ *       (e)의 base64 규칙이 잡지 못한다)와 `postgres://user:pw@host/db` 같은 DSN이 실측 사례다. **모양**
+ *       기반이라 env에 없는(=SECRET_ENV 밖의) 토큰도 잡는다 — 뒤의 `@`는 남겨 URL이 계속 읽힌다.
  *
  * 로그는 **종류별 개수만** 적는다. 스크럽 스텝의 stdout은 런 로그에 남고 런 로그는 아티팩트보다 더
  * 넓게 읽힌다 — 거기에 값을 적으면 스크럽 자신이 유출 경로가 된다.
@@ -60,6 +64,9 @@ const PATTERNS = [
   // 길이 하한(16/20)은 산문 속의 `ghp_…` 같은 **설명**을 잡지 않기 위한 것이다 — 실제 토큰은 훨씬 길다.
   { kind: "gh-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g },
   { kind: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{16,}/g },
+  // (f) — `keep`이 남기는 head는 `://`, 두 번째 캡처(tail)는 뒤의 `@`. 사이의 `user:pass`(콜론이 몇 개든)를
+  // 통째로 지운다: `x-access-token:<token>`도 `user:pw`도 "/·공백·@가 없는 문자열 + : + 같은 문자열"이다.
+  { kind: "url-userinfo", re: /(:\/\/)[^/\s@]+:[^/\s@]+(@)/g, keep: true },
 ];
 
 /**
@@ -88,7 +95,9 @@ export function scrubText(text, { secrets = [] } = {}) {
 
   for (const p of PATTERNS) {
     let n = 0;
-    out = out.replace(p.re, (m, head) => { n++; return p.keep ? `${head}${REDACTED(p.kind)}` : REDACTED(p.kind); });
+    // `tail`은 `url-userinfo`처럼 head 뒤에도 남겨야 하는 캡처(예: `@`)가 있을 때만 쓰인다 — 캡처가
+    // 하나뿐인 패턴(basic·bearer)은 tail이 undefined라 빈 문자열이 붙는다(동작 변화 없음).
+    out = out.replace(p.re, (m, head, tail) => { n++; return p.keep ? `${head}${REDACTED(p.kind)}${tail || ""}` : REDACTED(p.kind); });
     bump(p.kind, n);
   }
   return { text: out, counts, ignored };

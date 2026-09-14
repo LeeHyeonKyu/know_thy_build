@@ -83,11 +83,40 @@ test("an unknown model costs nothing rather than guessing a price", () => {
 
 // ── last_tool ───────────────────────────────────────────────────────────────
 
-test("last_tool is '<Tool> <short arg>' — path, or the first 60 chars of a command", () => {
+// 리뷰 3c63672 MF-1 전에는 이 테스트가 "잘리기 전 원문 그대로"를 계약으로 고정하고 있었다 — 여기
+// 쓰인 "x" 반복 문자열은 크리덴셜 모양이 아니므로 scrubText를 거쳐도 그대로다(스크럽은 no-op).
+// 실제로 스크럽이 지우는 크리덴셜 모양은 아래 별도 테스트에서 고정한다.
+test("last_tool is '<Tool> <short arg>' — path, or the first 60 chars of a (scrubbed) command", () => {
   expect(toolLabel(toolUse("Read", { file_path: "factory/cli/status.js" }))).toBe("Read factory/cli/status.js");
   expect(toolLabel(toolUse("Bash", { command: "x".repeat(200), description: "d" }))).toBe(`Bash ${"x".repeat(60)}…`);
   expect(toolLabel(toolUse("Grep", { pattern: "startHeartbeat" }))).toBe("Grep startHeartbeat");
   expect(toolLabel(toolUse("Workflow", {}))).toBe("Workflow");          // 인자를 못 고르면 이름만
+});
+
+// 리뷰 3c63672 MF-1 — last_tool은 공개 이슈 코멘트(하트비트)로 나간다. 모양 기반 규칙은 env에 아무
+// 것도 없어도 잡아야 한다: actions/checkout이 심는 바로 그 URL 모양, Bearer 헤더, DSN userinfo.
+test("toolLabel scrubs credential shapes before truncating, even with no matching SECRET_ENV value", () => {
+  const ghs = "ghs_" + "x".repeat(20);
+  const push = toolLabel(toolUse("Bash", { command: `git push https://x-access-token:${ghs}@github.com/o/r` }), { env: {} });
+  expect(push).toBe("Bash git push https://[REDACTED:url-userinfo]@github.com/o/r");
+  expect(push).not.toContain(ghs);
+
+  const bearer = toolLabel(toolUse("Bash", { command: `curl -H "Authorization: Bearer sk-ant-${"a".repeat(20)}" https://api.example.com/x` }), { env: {} });
+  expect(bearer).toContain("Authorization: Bearer [REDACTED:bearer]");
+  expect(bearer).not.toContain("sk-ant-");
+
+  const dsn = toolLabel(toolUse("Bash", { command: "psql postgres://appuser:s3cr3tpass@db.internal:5432/app" }), { env: {} });
+  expect(dsn).toBe("Bash psql postgres://[REDACTED:url-userinfo]@db.internal:5432/app");
+  expect(dsn).not.toContain("s3cr3tpass");
+});
+
+// 모양이 아니라 이 프로세스의 env에 실제로 실린 SECRET_ENV 리터럴도 잡는다(gates.js의 unhandledGateLog와
+// 같은 규칙 출처) — env는 toolLabel의 두 번째 인자로 주입한다(테스트가 process.env를 건드리지 않는다).
+test("toolLabel redacts a literal SECRET_ENV value present in env, wherever it appears in the arg", () => {
+  const secret = "s".repeat(40);
+  const label = toolLabel(toolUse("Bash", { command: `curl https://internal/x?token=${secret}` }), { env: { GITHUB_TOKEN: secret } });
+  expect(label).not.toContain(secret);
+  expect(label).toContain("[REDACTED:env-value]");
 });
 
 test("last_tool is the most recent tool_use; a turn with no tool_use keeps the previous one", () => {

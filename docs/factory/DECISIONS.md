@@ -1337,11 +1337,26 @@ review부터, `planned`/`rework`면 implement부터 이어 간다. 손 라벨 �
   않는다. 재시도는 재큐가 아니므로 라운드 창(`commentsSinceRequeue`)을 열지도 않는다 — `rework`로
   되돌아가는 재시도가 K 예산을 한 칸 태우면 이 엣지의 값어치가 그만큼 준다.
 
-**영향**: `factory/lib/labels.js`, `factory/lib/transition.js`(+`bin/transition.js`의 `--retry`),
-`factory/lib/requirements.js`, `factory/lib/retro/issue-comments.js`(`resumePoint`·`lastHumanDecision`·
-`countTransitionsTo`), `templates/know-thy-build/unstick.md`(결정 `retry`, 3f), 스펙 §3.2.
+**보강 — MF-2 잠금(리뷰 3c63672, 2026-09-14)**: 위 구현이 `human:true`를 그래프의 자물쇠로 놓았지만,
+그 값 자체는 **누가** 세우는지 아무 데도 강제하지 않았다 — `.claude/settings.json`의 `Bash(*)` 허용과
+`factory/hooks/block-dangerous.sh`에 이 CLI를 가리키는 규칙이 없어, 에이전트가 `node .factory/bin/transition.js
+<n> --human --retry`를 직접 실행해 스스로를 "사람"이라 자칭할 수 있었다(스크립트가 그래프 엣지를 열 수
+없다던 §3.2의 문장을 이 CLI 경계에서 반증한다). 두 자물쇠로 닫는다: (1) `hooks/block-dangerous.sh`가
+PreToolUse 경계에서 `transition.js … --human`/`--retry` 셸 호출 자체를 차단한다(기존 `$A`/`$Z` 경계
+클래스를 그대로 써서 래퍼·`$( )`·체인·백슬래시 형태까지 잡는다 — MF-3/재리뷰 #1·#4와 같은 방식). (2)
+`factory/lib/transition.js`의 새 순수 함수 `refuseHumanFlag(env)`가 `CLAUDE_PROJECT_DIR`나
+`GITHUB_ACTIONS`가 서 있으면 true를 돌려주고, `bin/transition.js`는 그 값이 true면 `gh`를 부르기도
+전에 `--human`/`--retry`를 exit 2로 거절한다 — `run-stage.js:84`가 모든 스테이지의 `claude -p` env에
+`CLAUDE_PROJECT_DIR`를 심으므로(자식 프로세스가 그대로 물려받는다) 에이전트 세션과 CI 러너를 신뢰성
+있게 가려낸다. 둘 다 없는 사람의 노트북 셸에서만 통과한다.
+
+**영향**: `factory/lib/labels.js`, `factory/lib/transition.js`(+`bin/transition.js`의 `--retry`,
+`refuseHumanFlag`), `factory/lib/requirements.js`, `factory/lib/retro/issue-comments.js`(`resumePoint`·
+`lastHumanDecision`·`countTransitionsTo`), `factory/hooks/block-dangerous.sh`(MF-2 규칙),
+`templates/know-thy-build/unstick.md`(결정 `retry`, 3f), 스펙 §3.2.
 테스트: `labels.test.js`·`transition.test.js`(스크립트 거부, 잘못된 목적지 거부, 원점별 해석, 라운드 불변,
-인자 파싱)·`requirements.test.js`·`skills-ops-b.test.js`.
+인자 파싱, `refuseHumanFlag`·bin의 env 거절)·`hooks.test.js`(`transition.js --human/--retry` 차단 +
+`--human` 없는 스크립트 경로는 그대로 허용)·`requirements.test.js`·`skills-ops-b.test.js`.
 
 #### KTB-35 — 테스트는 하나도 깨지지 않았는데 게이트가 RED다 (판정의 문장이 틀렸다)
 

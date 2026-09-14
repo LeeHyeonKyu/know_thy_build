@@ -7,6 +7,19 @@ export const RETRY_SCRIPT_REFUSED = "retry from factory:needs-human is human-onl
 export const NO_RESUME_POINT = "cannot resolve a resume point from this issue's history — no transition into factory:blocked/needs-human names a label the factory can resume from";
 
 /**
+ * 리뷰 3c63672 MF-2 — 두 번째 자물쇠(순수 판정). 첫 번째는 `hooks/block-dangerous.sh`(셸 경계) —
+ * 이 함수는 그 훅을 뚫고 온 호출을 위한 방어선이다. `--human`은 그래프 밖 엣지(`needs-human →
+ * {ready, planned, rework, awaiting-review}`, ADR-020 KTB-32)를 열지만, 그 값은 호출자의 자기 신고다 —
+ * 이 CLI 자신은 **누가** 세웠는지 증명할 수 없다. `CLAUDE_PROJECT_DIR`·`GITHUB_ACTIONS`는 "사람의
+ * 셸이 아니다"의 신뢰할 수 있는 신호다: `run-stage.js:84`가 모든 스테이지의 `claude -p` 세션 env에
+ * 전자를 심고(자식 프로세스로 그대로 물려받는다), GitHub Actions 러너는 후자를 스스로 세운다. 둘
+ * 다 없는 사람의 노트북 셸에서만 false다. `bin/transition.js`가 이 값으로 `--human`/`--retry`를
+ * 네트워크 호출 전에 거절한다(exit 2) — 순수 함수로 뺀 이유는 그 거절을 프로세스를 띄우지 않고도
+ * 테스트할 수 있게 하기 위해서다.
+ */
+export const refuseHumanFlag = (env = process.env) => Boolean(env?.CLAUDE_PROJECT_DIR || env?.GITHUB_ACTIONS);
+
+/**
  * ADR-020 r2 (리뷰 (c)) — **전이 코멘트가 스왑보다 먼저 나가는 대가를 여기서 갚는다.** 그 순서는
  * 복구 팔이 부분 실패를 앞으로 잇게 하려고 고른 것인데(KTB-30 r1), 스왑이 **통째로** 실패하면 이슈에
  * 일어나지 않은 전이의 코멘트가 남는다. 그 한 줄은 두 곳에서 거짓이 된다: 사람이 읽는 이력(라벨은

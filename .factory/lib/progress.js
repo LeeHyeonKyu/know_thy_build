@@ -14,7 +14,9 @@
  * **읽는 것과 절대 읽지 않는 것.** assistant 줄의 `message.usage`(토큰)·`message.model`(가격)·
  * `content[].tool_use`(어떤 툴을 어떤 인자로 불렀는지)만 본다. `tool_result`는 **파싱조차 하지
  * 않는다** — 그 안에는 파일 전문·`env` 덤프·비밀이 그대로 들어 있고, 이 객체는 공개 이슈 코멘트로
- * 나간다. 이 경계는 테스트가 지킨다("last_tool never carries tool RESULT text").
+ * 나간다. 이 경계는 테스트가 지킨다("last_tool never carries tool RESULT text"). `tool_use`의
+ * **입력**도 안전하지는 않다(리뷰 3c63672 MF-1) — `command`·`url` 인자는 크리덴셜을 실어 나를 수
+ * 있고 이 값도 같은 코멘트로 나가므로, `toolLabel`은 자르기 전에 `scrub-artifacts.js`로 한 번 훑는다.
  *
  * **모양의 근거.** 실측 `~/.claude/projects/<슬러그>/<session_id>.jsonl`(2026-09-14): 줄 하나가 이벤트 하나이고
  * `{type, timestamp, message:{model, usage:{input_tokens, output_tokens, cache_read_input_tokens,
@@ -29,6 +31,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { costFromUsage } from "./usage.js";
 import { transcriptPathFrom } from "./stage-artifact.js";
+import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
 
 /** 코멘트에 싣는 기계 계약. Task B(뷰어)와 `parseProgressMarker`가 이 한 줄만 본다. */
 export const PROGRESS_MARKER_RE = /<!-- factory-progress:v1 (\{.*\}) -->/;
@@ -54,8 +57,18 @@ const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const TOOL_ARG_KEYS = ["file_path", "notebook_path", "command", "pattern", "path", "query", "url", "skill", "subagent_type", "name"];
 const ARG_MAX = 60;
 
+/**
+ * 리뷰 3c63672 MF-1 — `command`·`url`은 짧고 이름에 가깝다고 해서 안전하지는 않다. `git push
+ * https://x-access-token:<token>@…`·`curl -H "Authorization: Bearer …"`·`postgres://user:pw@…`가
+ * 전부 이 자리를 지나가고, 이 값은 **공개 이슈 코멘트**(하트비트)로 나간다. 그래서 고른 값을 자르기
+ * **전에** `scrub-artifacts.js`(gates.js가 stderr 꼬리에 쓰는 것과 같은 모듈, `gates.js:12`)로 한 번
+ * 통과시킨다: 모양 기반 규칙(Bearer·gh 토큰·sk-ant-·URL userinfo)은 env 없이도 잡고, `SECRET_ENV`
+ * 다섯 개는 지금 프로세스의 env에 실제로 있는 값만 리터럴로 잡는다.
+ */
+const toolSecrets = (env) => SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+
 /** `<ToolName> <short arg>` 한 조각. 인자를 못 고르면 툴 이름만. */
-export function toolLabel(block) {
+export function toolLabel(block, { env = process.env } = {}) {
   const name = String(block?.name ?? "").trim();
   if (!name) return null;
   const input = block?.input;
@@ -63,7 +76,8 @@ export function toolLabel(block) {
   for (const k of TOOL_ARG_KEYS) {
     const v = input[k];
     if (typeof v !== "string" || !v.trim()) continue;
-    const one = v.replace(/\s+/g, " ").trim();
+    const collapsed = v.replace(/\s+/g, " ").trim();
+    const one = scrubText(collapsed, { secrets: toolSecrets(env) }).text;
     return `${name} ${one.length > ARG_MAX ? one.slice(0, ARG_MAX) + "…" : one}`;
   }
   return name;
