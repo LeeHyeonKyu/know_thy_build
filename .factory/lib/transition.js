@@ -46,7 +46,13 @@ async function swapLabel({ gh, issue, from, to }) {
  * 왔는가"를 다시 코멘트 이력을 파싱해 추측하지 않도록(KTB-15b I2), 그 사실을 전이가 일어나는
  * **바로 이 순간** 마커로 남긴다 — 이 함수가 유일한 출처다.
  */
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause }) {
+export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry";
+
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env }) {
+  // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
+  // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.
+  // 그래서 판정을 라이브러리 함수 자신에 둔다 — 어느 입구로 들어오든 여기서 같은 답을 받는다.
+  if ((human || retry) && refuseHumanFlag(env)) return { ok: false, from: null, to, reason: HUMAN_FLAG_REFUSED };
   const it = await gh.issue(issue);
   const from = factoryLabelOf(it.labels);
   if (!from) return { ok: false, from, to, reason: "no factory state label on issue" };

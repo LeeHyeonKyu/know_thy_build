@@ -61,14 +61,15 @@ export const MIN_LITERAL = 12;
 const PATTERNS = [
   { kind: "basic", re: /(AUTHORIZATION:\s*basic\s+)([A-Za-z0-9+/=_-]+)/gi, keep: true },
   { kind: "bearer", re: /(Authorization:\s*Bearer\s+)([A-Za-z0-9._~+/=-]+)/gi, keep: true },
-  // 길이 하한(16/20)은 산문 속의 `ghp_…` 같은 **설명**을 잡지 않기 위한 것이다 — 실제 토큰은 훨씬 길다.
-  { kind: "gh-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g },
-  { kind: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{16,}/g },
   // (f) — `keep`이 남기는 head는 `://`; 뒤의 `@`는 **lookahead**로 남긴다(캡처가 아니다 — basic·bearer의
   // 두 번째 캡처는 지워야 할 값 자체라, 캡처를 되붙이는 방식은 그 값을 도로 살린다: 리뷰 aab3db8 뒤 실측).
   // 사이의 `user:pass`(콜론이 몇 개든)를 통째로 지운다. 문자 클래스에서 `[`·`]`를 빼 이미 찍힌
   // `[REDACTED:x-access-token]`(콜론 포함)을 다시 잡지 않는다 — 리터럴 규칙이 먼저 돈 뒤의 멱등성.
+  // 토큰 모양 규칙(gh-token 등)보다 **앞**에 둔다: userinfo 전체가 한 마커로 지워져야 URL이 한 조각으로 남는다.
   { kind: "url-userinfo", re: /(:\/\/)[^/\s@[\]]+:[^/\s@[\]]+(?=@)/g, keep: true },
+  // 길이 하한(16/20)은 산문 속의 `ghp_…` 같은 **설명**을 잡지 않기 위한 것이다 — 실제 토큰은 훨씬 길다.
+  { kind: "gh-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g },
+  { kind: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{16,}/g },
 ];
 
 /**
