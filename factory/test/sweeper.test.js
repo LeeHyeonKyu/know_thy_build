@@ -1437,3 +1437,31 @@ test("KTB-31: a stage that never started (no heartbeat at all) uses the 10-minut
 test("nit 9: every blocked cause has its own escalation sentence", () => {
   expect(Object.keys(BLOCKED_ESCALATION_REASON)).toEqual(BLOCKED_CAUSES);
 });
+
+/**
+ * ADR-020 KTB-35 — 일곱 번째 원인 등급. 이 blocked은 대개 일시적 인프라(포크된 워커의 stderr EPIPE)라
+ * 다른 등급과 같은 계약을 받는다: **같은 스테이지를 한 번** 다시 돌리고, 그래도 blocked이면 사람에게
+ * 올린다. 다른 것은 그때 사람이 받는 문장이다 — "환경/크리덴셜"이 아니라 원인을 이름으로 말한다.
+ */
+test("KTB-35: a gates-unhandled blocked gets one retry, then escalates with a sentence that names it", async () => {
+  const posted = [];
+  const origin = { id: 1, createdAt: "2026-09-11T00:00:00Z", body: "<!-- factory-transition:v1 from=factory:in-progress to=factory:blocked by=script -->\nfactory:in-progress → factory:blocked — command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)\n<!-- factory-blocked-origin from=factory:in-progress stage=implement cause=gates-unhandled -->" };
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 3 }] : [])),
+    comments: vi.fn(async (n) => (n === 3 ? [origin, ...posted] : [])),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-09-11T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage };
+
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 3, stage: "implement", cause: "gates-unhandled" });
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "implement", issue: 3 });
+
+  const second = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(1);                    // 한 번뿐
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 3, cause: "gates-unhandled" });
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 3, to: "factory:needs-human", reason: BLOCKED_ESCALATION_REASON["gates-unhandled"] }));
+  expect(BLOCKED_ESCALATION_REASON["gates-unhandled"]).toMatch(/0 failing tests/);
+});

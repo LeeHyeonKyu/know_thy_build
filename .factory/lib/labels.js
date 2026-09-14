@@ -120,9 +120,41 @@ export const STAGE_OF_TARGET = {
   "factory:merged": "merge",
 };
 
-export function canTransition(from, to) {
+/**
+ * ADR-020 KTB-32 — **`needs-human`에서 중단 지점으로 되돌아가는 사람 전용 엣지.**
+ *
+ * 라운드 10의 데모 #2는 implement가 끝나 PR(+1239/−11, 실제 pg 통합 테스트)이 온전한 채 review에서
+ * 429로 죽었는데, `factory:needs-human`의 유일한 출구가 `→ factory:queue`(§3.2)라 사람이 내릴 수
+ * 있는 결정은 "plan부터 다시"(이슈당 ≈ 1시간·$40)뿐이었다. 잃은 것은 코드가 아니라 **라벨 한 칸**이다.
+ *
+ * 이 엣지들은 `TRANSITIONS`에 넣지 않는다 — 그래프에 넣으면 스크립트도 밟을 수 있고, 그러면 어떤
+ * 스테이지든 판정을 건너뛰고 자기가 원하는 자리로 이슈를 옮길 수 있다. 대신 `canTransition`의
+ * `{human:true}`에서만 열리고, 그 위에 `lib/transition.js`가 두 번째 자물쇠를 건다: 목적 라벨이
+ * 이 이슈의 **중단 지점**(`resumePoint`, 마지막 `→ blocked|needs-human` 전이의 `from`)과 정확히
+ * 같아야 한다. 사람의 의도만으로는 부족하고, 이슈에 남은 기록이 그 자리를 증언해야 한다.
+ *
+ * 목록에 `factory:queue`가 없는 이유: 그것은 사람 전용이 아니라 그래프의 정규 출구다(`:unstick`의
+ * 재큐·분할·범위 축소가 계속 쓴다). 목록의 넷은 전부 어느 스테이지의 **정상 진입 라벨**이다 —
+ * 되돌아간 자리에서 그 스테이지가 처음부터 정상적으로 이어진다.
+ */
+export const HUMAN_RETRY_TARGETS = new Set([
+  "factory:ready",              // triage까지 끝났다 → plan부터
+  "factory:planned",            // plan까지 끝났다 → implement부터
+  "factory:rework",             // implement까지 끝났고 리뷰 지적이 있었다 → implement(재작업)부터
+  "factory:awaiting-review",    // implement가 끝났다 → review만 다시 돈다(#2·KTB #3이 이 자리였다)
+]);
+export const HUMAN_ONLY_TRANSITIONS = new Map([["factory:needs-human", HUMAN_RETRY_TARGETS]]);
+
+/**
+ * `opts.human`은 **사람이 직접 실행했다**는 사실(transition.js `--human`)이지 "검사를 건너뛴다"가
+ * 아니다 — 그래프의 나머지는 사람에게도 그대로 물린다(merged → 어디로도 못 간다).
+ */
+export function canTransition(from, to, { human = false } = {}) {
   const tos = TRANSITIONS.get(from);
-  return Boolean(tos && tos.has(to));
+  if (tos && tos.has(to)) return true;
+  if (!human) return false;
+  const humanTos = HUMAN_ONLY_TRANSITIONS.get(from);
+  return Boolean(humanTos && humanTos.has(to));
 }
 
 /** 이슈 라벨 배열에서 factory 상태 라벨 하나를 고른다. 0개면 null, 2개 이상이면 throw. */

@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY } from "../lib/labels.js";
+import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, HUMAN_RETRY_TARGETS } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { HARNESS_LABEL as HARNESS_LABEL_RUN_STAGE } from "../bin/run-stage.js";
 import { HARNESS_LABEL as HARNESS_LABEL_RETRO } from "../bin/retro.js";
@@ -83,6 +83,34 @@ test("every BLOCKED_RETRY origin is a label that can actually reach factory:bloc
     for (const from of origins) expect(canTransition(from, "factory:blocked"), `${stage}: ${from}`).toBe(true);
   }
   expect(canTransition("factory:planned", "factory:blocked")).toBe(false);
+});
+
+// ── ADR-020 KTB-32: needs-human에서 **중단 지점으로** 되돌아가는 사람 전용 엣지 ────────────────
+// 이 엣지는 그래프(TRANSITIONS)에 없다 — `canTransition`에 `{human:true}`를 넘길 때만 열린다.
+// 스크립트는 어떤 경로로도 이 엣지를 밟을 수 없다(전이 코멘트의 `by=`가 그 증거다).
+test("KTB-32: needs-human → resume point is a human-only edge (script refused)", () => {
+  expect([...HUMAN_RETRY_TARGETS].sort()).toEqual([
+    "factory:awaiting-review", "factory:planned", "factory:ready", "factory:rework",
+  ]);
+  for (const to of HUMAN_RETRY_TARGETS) {
+    expect(canTransition("factory:needs-human", to), `script ${to}`).toBe(false);
+    expect(canTransition("factory:needs-human", to, { human: true }), `human ${to}`).toBe(true);
+  }
+  // queue는 사람 전용 엣지가 아니다 — 그래프의 정규 출구 그대로다(스크립트도 밟는다).
+  expect(HUMAN_RETRY_TARGETS.has("factory:queue")).toBe(false);
+  expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);
+  // 사람이라고 아무 데나 가지는 않는다 — 이 네 개 + queue가 전부다.
+  for (const to of ["factory:merged", "factory:approved", "factory:in-progress", "factory:wont-do"]) {
+    expect(canTransition("factory:needs-human", to, { human: true }), to).toBe(false);
+  }
+  // 사람 전용 엣지는 needs-human에만 있다 — `{human:true}`가 그래프 전체를 느슨하게 만들지 않는다.
+  expect(canTransition("factory:merged", "factory:queue", { human: true })).toBe(false);
+  expect(canTransition("factory:queue", "factory:planned", { human: true })).toBe(false);
+});
+
+test("every human-only retry target is a label the factory can actually resume from (an ENTRY_LABEL)", () => {
+  const entry = new Set(Object.values(ENTRY_LABELS).flat());
+  for (const to of HUMAN_RETRY_TARGETS) expect(entry.has(to), to).toBe(true);
 });
 
 test("non-edges are rejected", () => {

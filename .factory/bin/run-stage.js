@@ -89,6 +89,18 @@ export function stageClaudeEnv({ root, harnessIssue = false }) {
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 
+/**
+ * ADR-020 KTB-35 — RED인 판정 안에서 **자기 사유를 들고 있는** 첫 게이트의 그 사유(없으면 null).
+ * `reason`은 `lib/gates.js`가 단 한 경우에만 단다: 테스트 명령이 exit≠0인데 읽어낸 리포트의 실패
+ * 테스트가 0개 — 즉 깨진 테스트가 없는 RED다. RED가 아닌 판정에서는 보지 않는다(GREEN으로 뒤집힌
+ * 게이트의 잔여 사유가 스테이지를 blocked으로 만들면 안 된다).
+ */
+export function unhandledGateReason(gates) {
+  if (gates?.status !== "RED") return null;
+  for (const g of Object.values(gates.gates || {})) if (g?.status === "RED" && g.reason) return g.reason;
+  return null;
+}
+
 // MergeBaseError/isMergeBaseError/MERGE_BASE_BLOCKED_REASON/GIT_DIFF_BLOCKED_REASON now live in
 // lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
 export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
@@ -403,6 +415,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // 같은 불변식: 사람이 손으로 만든 GREEN이 커밋 상태로 새어나가면 안 된다.
     if (GATED_STAGES.has(stage) && gates != null && gates.diagnostic !== true) {
       await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+    }
+    /**
+     * ADR-020 KTB-35 — **테스트가 하나도 깨지지 않은 RED는 다른 사고다.** 게이트가 그 사실을 스스로
+     * 적어 두었으면(`gates.js`의 `reason`) 그 문장을 그대로 전이에 싣는다 — 그러지 않으면 사람이
+     * 받는 것은 `stage artifact missing or invalid: gates RED: failing=unit`이고, 그 문장은 없는
+     * 제품 결함을 가리킨다. 등급도 needs-human이 아니라 **blocked(cause=`gates-unhandled`)**다:
+     * 원인은 대개 테스트 밖의 일시적 인프라(포크된 워커의 stderr EPIPE)이므로, KTB-15b 경로가 같은
+     * 스테이지를 한 번 다시 돌리고 그래도 같으면 sweeper가 사람에게 올린다.
+     */
+    const unhandled = unhandledGateReason(gates);
+    if (unhandled) {
+      const t = await d.transition({ to: "factory:blocked", reason: unhandled, cause: "gates-unhandled" });
+      record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
+      return 2;
     }
     const v = d.verifyStage({ stage, out, ctx, gates });
     // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는

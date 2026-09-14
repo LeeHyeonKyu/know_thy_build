@@ -9,6 +9,7 @@ import { proveTest, repeatNewTests } from "./prove-test.js";
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
 import { scrubbedRunner } from "./exec.js";
+import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
 
 const LEVELS = ["fast", "full", "deep"];
 const MAX_LEVEL = { M0: "fast", M1: "full", M2: "deep" };
@@ -21,6 +22,26 @@ const TEST_GATES = new Set(["unit", "integration", "e2e"]);
  * 직접 수정한 뒤에도 다시 불러 일관된 판정을 얻을 수 있다).
  */
 export const EMPTY_LEVEL = "<level list empty>";
+
+/**
+ * ADR-020 KTB-35 — **exit≠0인데 깨진 테스트는 0개.** 라이브(KTB #3 implement R2, run 34809992796):
+ * `unit`이 code 1로 RED인데 `unit.json`은 1715/1715 통과였다. 그 전 publish CI에서는 vitest가 포크된
+ * 워커의 `console.error`에서 `Error: write EPIPE`로 죽었다 — 테스트는 전부 끝난 뒤였다.
+ *
+ * 판정은 **그대로 RED다**(fail closed — 무엇이 죽였는지 모르는 채 GREEN으로 부르지 않는다). 바뀌는
+ * 것은 사람이 받는 문장이다: `gates RED: failing=unit`은 "테스트가 깨졌다"로 읽히는데 깨진 테스트는
+ * 없었고, 그 오독은 사람을 제품 코드로 보낸다. 그래서 이 게이트는 **왜 RED인지**를 스스로 적고
+ * (`reason`), 원인이 실제로 있는 자리(명령의 stderr 꼬리)를 `log`에 싣는다.
+ */
+export const UNHANDLED_TAIL_LINES = 20;
+export const unhandledReason = (code) => `command exited ${code} with 0 failing tests — unhandled error outside tests (see gate log)`;
+/** stderr(비면 stdout)의 마지막 N줄 — 크리덴셜은 지우고(`scrub-artifacts.js`가 유일한 규칙 출처다). */
+export function unhandledGateLog(stderr, stdout, { env = process.env } = {}) {
+  const text = String(stderr || "").trim() || String(stdout || "");
+  const tail = text.split("\n").slice(-UNHANDLED_TAIL_LINES).join("\n");
+  const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+  return scrubText(tail, { secrets }).text.slice(-2000);
+}
 
 export function recomputeStatus(result, harness) {
   const gates = result.gates;
@@ -67,7 +88,7 @@ export async function runGates({ run, cwd, harness, level, quarantine, readFile 
     let status = r.code === 0 ? "GREEN" : "RED";
     // parsed/failing_ids: 이 게이트의 RED가 "어떤 테스트 때문인지" 아는가. 리포트를 못 읽었으면
     // (parsed:false) 그 RED의 이유를 모르는 것이고, 나중에 어떤 근거로도 GREEN으로 뒤집으면 안 된다.
-    let reportParsed = false, failing_ids = null;
+    let reportParsed = false, failing_ids = null, unhandled = false;
     if (TEST_GATES.has(name)) {
       const rep = harness.test[`${name}_report`] || `.factory/out/${name}.json`;
       const reportPath = isAbsolute(rep) ? rep : join(cwd, rep);
@@ -85,9 +106,17 @@ export async function runGates({ run, cwd, harness, level, quarantine, readFile 
         // 반대 방향도 막는다: 리포트가 격리 대상이 아닌 실패를 보여주는데 명령이 exit 0이면
         // (리포터가 삼켰거나 `|| true`가 붙었거나) 그건 통과가 아니다 — 리포트가 이긴다.
         if (status === "GREEN" && remaining.length > 0) status = "RED";
+        // KTB-35: 리포트를 **실제로 읽었고**(parsed) 그 안의 실패가 0인데 명령이 실패했다 —
+        // 테스트 밖에서 무언가 죽었다는 뜻이다. 리포트를 못 읽은 RED는 이 경로가 아니다(그 RED의
+        // 이유는 "모른다"이지 "테스트 밖 오류"가 아니다 — 아는 것만 말한다).
+        if (status === "RED" && reportParsed && r.code !== 0 && parsed.failed === 0 && parsed.failing.length === 0) unhandled = true;
       }
     }
-    gates[name] = { status, code: r.code, duration_ms: Date.now() - t0, log: (r.stderr + r.stdout).slice(-2000) };
+    gates[name] = {
+      status, code: r.code, duration_ms: Date.now() - t0,
+      log: unhandled ? unhandledGateLog(r.stderr, r.stdout) : (r.stderr + r.stdout).slice(-2000),
+    };
+    if (unhandled) gates[name].reason = unhandledReason(r.code);
     if (TEST_GATES.has(name)) { gates[name].parsed = reportParsed; gates[name].failing_ids = failing_ids || []; }
   }
   const result = { schema: "factory.gates.v1", level, requested_level, downgraded_from: level === requested_level ? null : requested_level, status: null, gates, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests, ran_at: now };

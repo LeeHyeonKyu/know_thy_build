@@ -67,7 +67,10 @@ test("blockedCause classifies the reason text into the six classes", () => {
   expect(blockedCause("job failure — retry via sweeper")).toBe("other");
   expect(blockedCause("")).toBe("other");
   expect(blockedCause(null)).toBe("other");
-  expect(new Set(BLOCKED_CAUSES)).toEqual(new Set(["api-error", "timeout", "cancelled", "gates", "undecidable", "other"]));
+  // ADR-020 KTB-35 — 일곱 번째 등급: 테스트 명령이 exit≠0인데 리포트의 실패 테스트는 0개.
+  // `gates` 규칙(`/gates?\b/`)보다 **먼저** 물려야 한다 — 사유 문구에 "gate log"가 들어 있다.
+  expect(blockedCause("command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)")).toBe("gates-unhandled");
+  expect(new Set(BLOCKED_CAUSES)).toEqual(new Set(["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other"]));
 });
 
 test("extractNeedsHuman is unaffected by the presence of a blocked-origin marker on an unrelated comment", () => {

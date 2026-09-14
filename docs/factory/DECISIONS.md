@@ -738,7 +738,7 @@ You will be notified when it completes.
 
 **영향**: `templates/factory/claude/commands/factory-implement.md`(+ 설치본 `.claude/commands/`), `templates/factory/claude/workflows/factory-implement.js`(+ 설치본 `.claude/workflows/`), `factory/bin/run-stage.js`(주석만 — 산출 프롬프트는 이미 옳았다). 테스트: `templates.test.js`(다섯 디스패처 md 모두 `$1`/`$2` 부재), `workflows.test.js`(`raw: "2 true"`→하네스 변형 프롬프트, `raw: "2"`→평시 규칙, `args.issue`/`args.harness_issue` 폴백).
 
-### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29·30·31 (+32 이월)
+### ④ 워크플로 동시성·재시작 — KTB-8·9·10·15·15b·18·19·22·24·25·26·28·29·30·31·32·35
 
 한 이슈의 라벨 전이 하나가 GitHub Actions concurrency 그룹·재시도·머지 재확인이라는 세 겹의 타이밍 문제를 연달아 드러냈다. KTB-9(tier 라벨 부여)는 이 배치(KTB-8과 같은 커밋 계열)에서 함께 고쳐졌고 `run-stage.js`의 같은 진입 경로를 바꾸므로 여기 둔다 — 브리프가 명시한 여섯 항목(KTB-8/10/15/15b/18/19)에 KTB-9를 더한 것이며, 이 재배치 자체를 Task 7 반환 사항에 기록한다.
 
@@ -1297,7 +1297,7 @@ implement 런 34748735031은 GitHub에서 **잡 없이 `queued`인 채로** 굳�
 스펙 §4.3-5. 테스트: `sweeper.test.js` 3건(rework 재점화 cron+quick, 하트비트 없음 → 10분,
 하트비트 있음 → 30분 그대로).
 
-#### KTB-32 — `needs-human`에서 나가는 길이 `queue`뿐이라, 완성된 PR도 plan부터 다시 돈다 (설계 공백, 1.1 이월)
+#### KTB-32 — `needs-human`에서 나가는 길이 `queue`뿐이라, 완성된 PR도 plan부터 다시 돈다 (설계 공백 — **1.1에서 구현됨**)
 
 라운드 10(2026-09-13 10:22~10:38Z)에서 러너의 구독 토큰이 세션 한도(429)에 걸려 #2·#15·#18의 스테이지가
 한꺼번에 죽었다. KTB-22의 경로대로 `blocked`이 됐지만 R 예산은 앞선 인프라 장애로 이미 소진돼 있어
@@ -1306,12 +1306,73 @@ PR #17(+1239/−11, 실제 pg 통합 테스트)이 온전한 채** review에서 
 유일한 출구가 `→ factory:queue`(§3.2)라 사람이 할 수 있는 결정은 "plan부터 다시"뿐이었다. 그 재실행은
 이슈당 plan+implement ≈ $40이고, 잃은 것은 코드가 아니라 라벨 한 칸이었다.
 
-**판결(1.1 이월 — 이번 dogfood에서는 고치지 않는다)**: `unstick` 스킬에 `retry` 결정을 추가하고,
-`factory:needs-human → <blocked-origin 상태>` 엣지를 **사람 전용**(`by=human`)으로, 그리고 이슈에
-`factory-blocked-origin` 마커가 있을 때만 연다. 원점이 `awaiting-review`면 review부터, `planned`/`rework`면
-implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이 엣지도 `transition.js`를 지나며, 전이
-코멘트와 origin 마커가 근거가 된다. 지금 고치지 않는 이유는 비용 규칙(수정 라운드 r2로 종료)이고,
-그 대가는 이번 라운드에서 #2·#15를 plan부터 다시 돌린 비용이다(#18은 보류).
+**판결**: `unstick` 스킬에 `retry` 결정을 추가하고,
+`factory:needs-human → <중단 지점>` 엣지를 **사람 전용**(`by=human`)으로 연다. 원점이 `awaiting-review`면
+review부터, `planned`/`rework`면 implement부터 이어 간다. 손 라벨 차단(§12.4)은 그대로다 — 이 엣지도
+`transition.js`를 지나며, 전이 코멘트와 중단 지점이 근거가 된다.
+
+**보강 — 구현(1.1, 2026-09-14)**: 이월로 남겼던 이 판결을 그대로 구현했다. 계기는 같은 결함이 KTB 자기
+자신의 #3에서 다시 났다는 것이다(implement는 끝났고 review가 인프라로 죽었다 — plan부터 다시 돌릴 이유가
+없다). 판결과 **한 곳만** 다르다: 중단 지점의 출처를 `factory-blocked-origin` 마커가 아니라 **전이 코멘트**로
+잡았다. 그 마커는 `→ blocked` 전이에만 붙는데, 요구사항 미달 거부처럼 `blocked`을 거치지 않고 곧장
+`needs-human`으로 간 경로에는 마커가 없어서 그 이슈들이 통째로 재시도 밖에 남기 때문이다. 대신 규칙은
+같은 사실을 더 넓게 읽는다: **마지막으로 `→ factory:blocked` 또는 `→ factory:needs-human`으로 간 전이의
+`from=`**, 단 그 `from` 자신이 정지 상태인 전이는 건너뛴다(`blocked → needs-human`은 sweeper의
+에스컬레이션이지 "일이 멈춘 자리"가 아니다 — 라이브 #3이 정확히 이 모양이다).
+
+- **엣지**(`factory/lib/labels.js`): `HUMAN_RETRY_TARGETS = {ready, planned, rework, awaiting-review}`는
+  `TRANSITIONS`에 **넣지 않았다** — 그래프에 넣으면 스크립트도 밟을 수 있고, 그러면 어느 스테이지든
+  판정을 건너뛰고 원하는 자리로 이슈를 옮길 수 있다. `canTransition(from, to, {human:true})`에서만 열린다.
+  `queue`는 이 목록에 없다(그래프의 정규 출구 그대로다).
+- **두 번째 자물쇠**(`factory/lib/transition.js`): 사람이라고 아무 데나 가지 않는다. 목적 라벨이
+  `resumePoint(comments)`와 정확히 같아야 하고, 다르면 전이 없이 exit 2다(사유가 올바른 목적지를 말한다).
+  `in-progress`에서 멈춘 이슈는 **이번 주기**(마지막 재큐 이후)에 implement handoff가 있으면 `rework`로,
+  없으면 `planned`로 간다. `transition.js <n> --human --retry`는 목적 라벨을 생략하는 축약이고, 라벨을
+  명시한 사람 전이도 같은 검사를 지난다.
+- **요구조건**(`factory/lib/requirements.js`): 재시도는 `prerequisite`와 **같은 것만** 면제한다(이번 런의
+  게이트 파일·sha 바인딩 — 사람의 노트북에 있을 수 없고, 그 판정은 되돌아간 스테이지가 다시 만든다).
+  handoff의 존재·유효성·내용(verifier 판정 등)은 그대로 물린다: `awaiting-review`로 착지하려면 유효한
+  implement handoff(= PR 번호 포함)가 있어야 한다.
+- **라운드 카운터**: 재시도 전이는 마커에 `reason=retry`를 달고, `countTransitionsTo`가 그 전이를 세지
+  않는다. 재시도는 재큐가 아니므로 라운드 창(`commentsSinceRequeue`)을 열지도 않는다 — `rework`로
+  되돌아가는 재시도가 K 예산을 한 칸 태우면 이 엣지의 값어치가 그만큼 준다.
+
+**영향**: `factory/lib/labels.js`, `factory/lib/transition.js`(+`bin/transition.js`의 `--retry`),
+`factory/lib/requirements.js`, `factory/lib/retro/issue-comments.js`(`resumePoint`·`lastHumanDecision`·
+`countTransitionsTo`), `templates/know-thy-build/unstick.md`(결정 `retry`, 3f), 스펙 §3.2.
+테스트: `labels.test.js`·`transition.test.js`(스크립트 거부, 잘못된 목적지 거부, 원점별 해석, 라운드 불변,
+인자 파싱)·`requirements.test.js`·`skills-ops-b.test.js`.
+
+#### KTB-35 — 테스트는 하나도 깨지지 않았는데 게이트가 RED다 (판정의 문장이 틀렸다)
+
+KTB 자기 자신의 #3 implement R2(run 34809992796)에서 `unit` 게이트가 code 1로 RED였는데
+`.factory/out/unit.json`은 **1715/1715 통과**였다. 그 런이 사람에게 남긴 문장은
+`stage artifact missing or invalid: gates RED: failing=unit` — "테스트가 깨졌다"로 읽히는데 깨진 테스트는
+없었다. 같은 저장소의 publish CI에서 앞서 관측된 것이 원인을 말해 준다: vitest가 **포크된 워커의
+`console.error`**에서 `Error: write EPIPE`로 죽었다. 테스트는 전부 끝난 뒤였고, 죽은 것은 테스트 밖이다.
+
+**판결**: 세 자리를 고친다.
+
+1. **원인을 줄인다** — `vitest.config.js`에 `silent: true`. 워커가 테스트 본문의 콘솔 출력을 이미 닫힌
+   파이프에 쓰지 않는다. 리포터 출력과 `--reporter=json --outputFile` 리포트 **파일**은 그대로다(게이트의
+   판정 재료가 그 파일이므로 이것이 조건이었다).
+2. **판정은 그대로 RED, 문장만 바꾼다** — `factory/lib/gates.js`: 테스트 게이트의 명령이 exit≠0인데
+   **읽어낸 리포트의 실패가 0개**면 RED를 유지하되(fail closed — 무엇이 죽였는지 모르는 채 GREEN으로
+   부르지 않는다) `reason: "command exited <code> with 0 failing tests — unhandled error outside tests
+   (see gate log)"`를 달고, `log`에 그 명령의 **stderr 마지막 20줄**을 싣는다(`scrub-artifacts.js`의
+   `scrubText`로 크리덴셜을 지운 뒤). 리포트를 못 읽은 RED는 이 경로가 **아니다** — 그 RED의 이유는
+   "모른다"이지 "테스트 밖 오류"가 아니다.
+3. **등급은 needs-human이 아니라 blocked** — `factory/bin/run-stage.js`가 그 `reason`을 그대로 전이 사유로
+   싣고 `factory:blocked`(cause `gates-unhandled`)으로 세운다. 원인이 대개 일시적 인프라이므로 KTB-15b
+   경로가 같은 스테이지를 **한 번** 다시 돌리고(sweeper 기본 예산 1회), 그래도 같으면 사람에게 올린다 —
+   그때의 문장도 원인을 이름으로 말한다(`BLOCKED_ESCALATION_REASON["gates-unhandled"]`). `undecidable`로
+   묶지 않은 이유: 그 등급은 "판정 재료를 못 구했다"인데 여기서는 재료(리포트)를 온전히 구했고, 어긋난
+   것은 명령의 종료 코드다. 등급을 갈라 두어야 사람이 받는 문장과 재시도 계약이 각각 맞는다.
+
+**영향**: `vitest.config.js`, `factory/lib/gates.js`, `factory/bin/run-stage.js`,
+`factory/lib/retro/issue-comments.js`(`BLOCKED_CAUSES` + 원인 규칙 — `gates`보다 **먼저** 물려야 한다:
+사유 문구에 "gate log"가 들어 있다), `factory/lib/sweeper.js`(에스컬레이션 문장). 테스트:
+`gates.test.js`·`run-stage.test.js`·`sweeper.test.js`·`issue-comments.test.js`.
 
 (이후 항목은 dogfood 진행에 따라 추가)
 #### 최종 리뷰 (Plan 6) — MF-1 · MF-4: 아무 팔도 보지 않는 대기 상태 하나, 세 팔 중 하나만 남은 옛 계약
@@ -1795,7 +1856,7 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 
 ### 1.1 이월 (이 dogfood가 고치지 않고 남긴 것)
 
-1. **KTB-32** — `needs-human → <blocked-origin 상태>` 사람 전용 엣지(`unstick`의 `retry`). 완성된 PR을 plan부터 다시 돌린 비용이 근거.
+1. ~~**KTB-32**~~ — **1.1에서 구현됨**(2026-09-14, 위 KTB-32 항목의 "보강 — 구현"). 번호는 그대로 둔다: 아래 항목들의 번호가 다른 문서에서 인용되고 있다.
 2. **O24** — sweeper cron 신뢰 불가: `gh workflow run factory-sweeper.yml`을 사람 도구로 문서화, 스펙에 "cron은 최후 수단".
 3. **O25** — `claude -p hit max turns`가 blocked 원인 `timeout`("job timed out")으로 표기된다(#15 plan, 14:26Z). 턴 상한은 잡 타임아웃이 아니다 → `undecidable`/`other`로 분류하고, harness 이슈의 plan에는 더 큰 `factory.max_turns`가 필요하다(KTB-16의 기본값이 harness 워크플로를 쓰는 plan에는 작다).
 4. **리뷰 R2 패스 생략** — R1 만장일치 approve면 경량 R2를 돌리지 않는다(이슈당 리뷰 비용의 절반).

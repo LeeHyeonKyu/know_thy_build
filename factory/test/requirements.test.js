@@ -146,3 +146,25 @@ test("states without a handoff requirement always pass", () => {
     expect(requirementFor(s)({ comments: [] }).ok).toBe(true);
   }
 });
+
+/**
+ * ADR-020 KTB-32 — **사람의 재시도가 착지하는 자리도 같은 종류의 "복구"다.** `--human --retry`는
+ * 이미 얻었던 라벨을 되돌리는 것이지 새 성취를 주장하는 것이 아니다: 사람의 노트북에는 이번 런의
+ * `.factory/out/gates.json`도, 그 sha 바인딩도 존재할 수 없다(그 판정은 스테이지가 다시 돌면서
+ * 만든다). 그래서 `humanRetry`는 `prerequisite`와 **같은 것만** 건너뛴다 — handoff의 존재와 유효성
+ * (= implement handoff + PR 번호)은 그대로 물린다. 그것이 "PR이 온전하다"의 증거이기 때문이다.
+ */
+test("KTB-32: humanRetry lands on awaiting-review with only the implement handoff — gates/sha are the re-run's job", () => {
+  const impl = { schema: "factory.implement.v1", issue: 7, head_sha: sha, pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:awaiting-review");
+  expect(r({ comments: [c("implement", impl)], headSha: "f".repeat(40), humanRetry: true }).ok).toBe(true);
+  // handoff가 아예 없으면(= 구현이 끝난 적이 없으면) 재시도도 여기 착지하지 못한다
+  expect(r({ comments: [], humanRetry: true }).reason).toMatch(/implement handoff missing/);
+  // handoff는 있지만 verifier가 거절했으면 그대로 거부된다 — 재시도가 판정을 덮지 않는다
+  expect(r({ comments: [c("implement", { ...impl, verifier: { verdict: "rejected" } })], humanRetry: true }).reason).toMatch(/verifier rejected/);
+  // rework에는 애초에 규칙이 없다(그래서 재시도가 그대로 통과한다). ready·planned는 각자의
+  // handoff를 계속 요구한다 — 재시도는 게이트/sha만 면제하지 산출물의 존재를 면제하지 않는다.
+  expect(requirementFor("factory:rework")({ comments: [], humanRetry: true }).ok).toBe(true);
+  expect(requirementFor("factory:planned")({ comments: [], humanRetry: true }).reason).toMatch(/plan handoff missing/);
+  expect(requirementFor("factory:ready")({ comments: [], humanRetry: true }).reason).toMatch(/triage handoff missing/);
+});

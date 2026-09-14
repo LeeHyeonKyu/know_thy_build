@@ -212,3 +212,19 @@ test("templates/know-thy-build/proposal.md: covers a needs-human-blocked lessons
   expect(text).toMatch(/rebase/i);
   expect(text).toContain("factory:needs-human");
 });
+
+// ── ADR-020 KTB-32 — `:unstick`의 여섯 번째 결정: `retry`(중단 지점으로 되돌리기) ───────────────
+// 인프라가 멈춘 런은 "무엇을 다시 판단할 것"이 없다 — 잃은 것은 코드가 아니라 라벨 한 칸이다.
+// 그 사실이 스킬 본문에 없으면 사람은 여전히 `queue`(= plan부터 ≈$40)밖에 고르지 못한다.
+test("templates/know-thy-build/unstick.md: documents the retry decision and its exact command (KTB-32)", () => {
+  const text = readTemplate("unstick");
+  expect(text).toMatch(/decision:\s*retry/);
+  expect(text).toContain("--human --retry");
+  expect(text).toMatch(/transition\.js .*--human --retry/);
+  // 언제 고르는가 — 인프라성 중단의 네 얼굴이 모두 이름으로 적혀 있어야 한다.
+  for (const sign of ["429", "timeout", "cancel", "0 failing tests"]) expect(text.toLowerCase(), sign).toContain(sign.toLowerCase());
+  // 어디에 착지하는가 — implement가 끝났으면 review만 다시 돈다(그것이 이 결정의 값어치다).
+  expect(text).toMatch(/awaiting-review/);
+  // 사람 전용 엣지라는 사실과, 목적지가 중단 지점 하나뿐이라는 사실.
+  expect(text).toMatch(/사람 전용|human-only|by=human/);
+});

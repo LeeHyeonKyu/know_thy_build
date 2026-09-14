@@ -73,14 +73,20 @@ export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+
  *   - `timeout` — 잡·턴 한도. 같은 자리에서 또 잘릴 수 있지만 한 번은 값어치가 있다.
  *   - `gates` — 게이트 판정 자체가 BLOCKED(환경이 죽었다).
  *   - `undecidable` — merge-base·diff 같은 판정 재료를 못 구했다.
+ *   - `gates-unhandled` — 테스트 명령이 exit≠0인데 리포트의 실패 테스트는 **0개**(KTB-35). 깨진
+ *     테스트가 없으므로 "제품이 틀렸다"가 아니고, 대개 테스트 **밖**의 일시적 인프라다(포크된
+ *     워커의 stderr `write EPIPE`가 실측 원인이었다) → 같은 스테이지를 한 번 다시 돌린다.
  *   - `other` — 나머지(환경·크리덴셜). 예전의 유일한 문구가 이것이었다.
  */
-export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "undecidable", "other"];
+export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other"];
 const CAUSE_RULES = [
   ["api-error", /api error|rate ?limit|quota|overloaded|\b429\b|HTTP [45]\d\d|something went wrong/i],
   ["cancelled", /cancell?ed/i],
   ["timeout", /tim(?:e|ed)[ _-]?out|timeout|max turns|turn limit/i],
   ["undecidable", /cannot compute|undecidable|unreadable|unparsable|merge-base|판정 불가/i],
+  // KTB-35는 `gates`보다 **먼저** 물려야 한다 — 그 사유 문구에는 "gate log"가 들어 있어서
+  // 뒤에 두면 전부 `gates`로 떨어진다(그러면 재시도 계약도 에스컬레이션 문장도 옛것이 된다).
+  ["gates-unhandled", /0 failing tests|unhandled error outside tests/i],
   ["gates", /gates?\b/i],
 ];
 
@@ -175,7 +181,10 @@ export function countTransitionsTo(comments, to) {
     const f = TRANSITION_FAILED.exec(body);
     if (f) { if (f[2] === to && n > 0) n -= 1; continue; }
     const m = TRANSITION_TO.exec(body);
-    if (m && m[2] === to) n += 1;
+    // ADR-020 KTB-32 — **사람의 재시도는 라운드가 아니다.** `reason=retry` 전이는 인프라가 끊은
+    // 자리로 **이미 얻었던 라벨을 되돌리는** 것이지 새 재작업 주기가 아니다. 세면 `rework`로
+    // 되돌아가는 재시도 한 번이 K 예산을 한 칸 태운다 — 재시도의 값어치가 그만큼 줄어든다.
+    if (m && m[2] === to && m[4] !== "retry") n += 1;
   }
   return n;
 }
@@ -189,6 +198,67 @@ export function countTransitionsTo(comments, to) {
  * `factory:needs-info`는 두 가지 뜻을 겸한다(triage의 "이슈가 모호하다"와 하네스 대기). 그 둘을 가르는
  * 유일한 기록이 마지막 전이의 사유다. 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같다).
  */
+/**
+ * ADR-020 KTB-32 — **이 이슈가 멈춘 자리(resume point).** `factory:needs-human`에서 사람이
+ * `:unstick`의 `retry`를 고를 때, 되돌아갈 수 있는 라벨은 **하나**뿐이다: 인프라가 런을 죽이기 직전에
+ * 이슈가 갖고 있던 그 라벨. 그것을 추측하지 않고 기록에서 읽는다.
+ *
+ * 규칙: 전이 코멘트들 중 `to=`가 **정지 상태**(`blocked`·`needs-human`)인 마지막 것의 `from=`.
+ * 단 `from=`도 정지 상태인 전이는 건너뛴다 — `blocked → needs-human`은 sweeper의 에스컬레이션이지
+ * "일이 멈춘 자리"가 아니다(라이브 KTB #3이 정확히 이 모양이다: `awaiting-review → blocked` 뒤에
+ * `blocked → needs-human`). 그래서 되돌아갈 자리는 `awaiting-review`다.
+ *
+ * 그 `from`을 목적 라벨로 옮긴다:
+ *   - `ready`/`planned`/`rework`/`awaiting-review` → 그대로(전부 어느 스테이지의 진입 라벨이다).
+ *   - `in-progress` → implement는 그 자리에서 **끝나지 않았다**. 이번 주기(마지막 재큐 이후)에
+ *     implement handoff가 있으면 구현은 이미 한 번 완성됐다는 뜻이므로 `rework`로, 없으면 `planned`로
+ *     이어간다(둘 다 implement의 정상 진입 라벨이고, implement가 그 자리에서 다시 시작한다).
+ *   - 그 외(`queue` 등) → `target: null`. 재개할 자리를 모른다는 뜻이고, 호출자는 추측 대신 거부한다.
+ *
+ * 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같은 가정).
+ */
+export const STOP_STATES = new Set(["factory:blocked", "factory:needs-human"]);
+const RESUME_TARGET = {
+  "factory:ready": "factory:ready",
+  "factory:planned": "factory:planned",
+  "factory:rework": "factory:rework",
+  "factory:awaiting-review": "factory:awaiting-review",
+};
+const IMPLEMENT_HANDOFF = /<!--\s*factory-handoff:v1\s+stage=implement\s+issue=\d+\s*-->/;
+
+export function resumePoint(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let stop = null;
+  for (const c of list) {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (!m) continue;
+    const [, from, to] = m;
+    if (!STOP_STATES.has(to) || STOP_STATES.has(from)) continue;
+    stop = { stoppedAt: from, at: c?.createdAt ?? null };
+  }
+  if (!stop) return null;
+  if (stop.stoppedAt === "factory:in-progress") {
+    const implemented = commentsSinceRequeue(list).some((c) => IMPLEMENT_HANDOFF.test(String(c?.body ?? "")));
+    return { ...stop, target: implemented ? "factory:rework" : "factory:planned" };
+  }
+  return { ...stop, target: RESUME_TARGET[stop.stoppedAt] ?? null };
+}
+
+/**
+ * ADR-020 KTB-32 — 사람의 재시도가 인용하는 근거: 가장 최근 `human-decision:v1` 코멘트
+ * (`:unstick`이 전이 **직전**에 남긴다). 없으면 null — 전이를 막지는 않는다(막으면 스킬 밖에서
+ * 손으로 복구하는 길이 사라진다). 전이 코멘트가 그 사실을 그대로 적을 뿐이다.
+ */
+export const HUMAN_DECISION = /<!--\s*human-decision:v1\s+issue=(\d+)(?:\s+skill=(\S+))?\s*-->/;
+export function lastHumanDecision(comments) {
+  let found = null;
+  for (const c of comments || []) {
+    const m = HUMAN_DECISION.exec(String(c?.body ?? ""));
+    if (m) found = { issue: Number(m[1]), skill: m[2] ?? null, at: c?.createdAt ?? null };
+  }
+  return found;
+}
+
 export function lastTransition(comments) {
   let found = null;
   for (const c of comments || []) {

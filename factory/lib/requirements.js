@@ -24,9 +24,18 @@ const sameSet = (a, b) => a.length === b.length && [...a].sort().every((x, i) =>
  * "직전 스테이지가 산출물을 남겼는가"를 묻는 것이지 이번 런의 게이트를 묻는 게 아니다 — 그 시점엔
  * 이번 런의 게이트도 sha 바인딩도 존재하지 않는다(resetGates가 지운 직후다).
  */
+/**
+ * ADR-020 KTB-32 — **사람의 재시도(`transition.js --human --retry`)도 같은 종류의 "복구"다.**
+ * 인프라가 끊은 자리로 되돌아가는 것이지 새 성취를 주장하는 것이 아니다: 사람의 노트북에는 이번
+ * 런의 `.factory/out/gates.json`도 그 sha 바인딩도 존재할 수 없고(fresh checkout조차 아니다),
+ * 실제 판정은 되돌아간 스테이지가 다시 돌며 만든다. 그래서 `prerequisite`와 **정확히 같은 것만**
+ * 면제한다 — handoff의 존재·유효성·내용 검사(verifier 판정 등)는 그대로 물린다.
+ */
+const restoring = (ctx) => ctx.prerequisite === true || ctx.humanRetry === true;
+
 export const GATES_UNVERIFIED = "gates not verified for this transition";
 function gatesGate(ctx) {
-  if (ctx.prerequisite === true) return null;
+  if (restoring(ctx)) return null;
   if (ctx.gatesChecked !== true) return fail(GATES_UNVERIFIED);
   if (!ctx.gatesFile) return fail("gates file missing");
   if (ctx.gatesFile.diagnostic === true) return fail("gates file is diagnostic output");
@@ -38,7 +47,7 @@ function gatesGate(ctx) {
   if (head && of && of !== head) return fail(`gates file describes ${of.slice(0, 7)}, PR head is ${head.slice(0, 7)}`);
   return null;
 }
-const shaBound = (ctx) => ctx.prerequisite !== true;
+const shaBound = (ctx) => !restoring(ctx);
 
 const RULES = {
   "factory:ready"(ctx) {
