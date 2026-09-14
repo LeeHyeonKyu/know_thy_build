@@ -2,6 +2,7 @@ import { test, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../lib/yml-lint.js";
+import { lintFile, NUL_RULE } from "../bin/lint.js";
 
 test("flow mapping with ${{ }} is a violation; block mapping is not", () => {
   expect(lintWorkflow("with: { name: x-${{ matrix.y }}, path: .spike/ }\n")).toEqual([expect.objectContaining({ line: 1, rule: "flow-interpolation" })]);
@@ -100,8 +101,10 @@ const files = readdirSync(W).filter((f) => f.endsWith(".yml"));
 const STAGE = { "factory-triage.yml": ["triage", 20, '"factory:queue"'], "factory-plan.yml": ["plan", 75, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 90, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 30, '"factory:approved"'] };
 const ISSUE_EXPR = "${{ github.event.issue.number || inputs.issue }}";
 
-test("all eight workflow templates exist and pass lint", () => {
-  expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
+test("all nine workflow templates exist and pass lint", () => {
+  // KTB-44 — 아홉 번째는 `factory-rehearse.yml`(ADR-025): 스테이지가 아니라 **첫 이슈 전에** 하네스를
+  // 러너에서 한 번 돌리는 잡이다. 스테이지 규칙(`STAGE` 표)에는 들어가지 않는다 — run-stage를 부르지 않는다.
+  expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-rehearse.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
   // 파일명을 함께 넘긴다 — `merge-token-scope`(ADR-021)의 파일 범위 갈래는 그래야 판정한다(doctor가 그렇게 부른다).
   for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8"), { file: f }), f).toEqual([]);
 });
@@ -650,4 +653,20 @@ test("merge-token-scope (r1 finding 5): a declared scrub step that ALSO starts a
   // 막는 것은 린트가 아니라 L1이다(`.github/**`·`templates/**`가 `[protected].factory`라 사람이 머지한다).
   // 이 테스트는 그 경계를 **문서화**한다 — 나중에 규칙을 좁힐 때 여기가 깨져서 판단을 다시 하게 된다.
   expect(lintWorkflow(chained, { file: "factory-merge.yml" })).toEqual([]);
+});
+
+// ── KTB-44 (리뷰 must_fix 1): 소스의 NUL 바이트는 위반이다 ────────────────────────────────────
+// 0x00이 하나라도 들어가면 git이 그 파일을 binary로 분류하고, 그 순간 `git diff`는 내용을 영영
+// 보여주지 않는다 — 사람도, 리뷰 스테이지도 읽지 못한 채 머지된다(게이트를 정의하는 파일에서
+// 실제로 일어났다). 그 재발을 이 규칙이 막는다.
+test("lint: a JS source file containing a NUL byte is a violation, and the check stops there", () => {
+  const withNul = `export const x = "a${String.fromCharCode(0)}b";\n`;
+  const v = lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => withNul });
+  // 리뷰 r2 nf-3 — 규칙 하나만 남고 거기서 끝난다: binary 파일의 파스 출력은 잡음이고, 무엇보다
+  // 이 경로는 더 이상 `node --check` 프로세스를 띄우지 않는다(그 spawn이 이 테스트를 흔들었다).
+  expect(v).toEqual([{ file: "factory/lib/fake.js", ...NUL_RULE }]);
+  expect(v[0].msg).toMatch(/binary/);
+  // 깨끗한 파일은 이 규칙에 걸리지 않는다(그 경로는 평소대로 `node --check`까지 간다).
+  const clean = lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => 'export const x = "ab";\n' });
+  expect(clean.some((e) => e.rule === NUL_RULE.rule)).toBe(false);
 });

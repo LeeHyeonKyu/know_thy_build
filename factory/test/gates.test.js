@@ -98,8 +98,9 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
-  const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
-  const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit });
+  const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []), comment: vi.fn(async () => "u") };
+  const transitionIssue = vi.fn(async () => ({ ok: true, from: "backlog", to: "factory:queue" }));
+  const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit, transitionIssue });
   expect(r.level).toBe("full");
   expect(r.tests.excluded).toEqual(["test/a.test.js::flaky one"]);
   expect(r.tests.failing).toEqual([]);
@@ -112,8 +113,12 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
   // 설정 오류로 **돌지 않은 게이트**는 "통과"가 아니다: 하나라도 있으면 판정은 MISCONFIGURED다.
   expect(r.status).toBe("MISCONFIGURED");
   expect(r.misconfigured).toEqual(expect.arrayContaining(["diff_coverage", "mutation"]));
-  expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one", labels: ["factory:queue", "factory:flaky"] }));
+  // KTB-44 / ADR-025 — 수확된 flaky 이슈는 **`backlog`로 태어나** 게이트를 지나 큐로 간다(리뷰 should_fix 3):
+  // 예전에는 `factory:queue`로 바로 태어나 리허설 게이트를 통째로 비켜 가는 유일한 생산 경로였다.
+  expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one", labels: ["backlog", "factory:flaky"] }));
+  expect(transitionIssue).toHaveBeenCalledWith(expect.objectContaining({ issue: 101, to: "factory:queue" }));
   expect(r.flaky_issues).toEqual([101]);
+  expect(r.flaky_issues_backlogged).toBeUndefined();
   // 증명 대상은 추가된 테스트만이 아니라 수정된 테스트 파일까지다
   expect(run.calls.some((c) => c.cmd === "bash" && c.args[1] === TF && c.opts.cwd.endsWith("prove-wt"))).toBe(true);
 });

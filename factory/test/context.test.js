@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildContext, roleContextFor } from "../lib/context.js";
 import { renderHandoff } from "../lib/handoff.js";
+import { validateManifest } from "../lib/qa-evidence.js";
 
 function root() {
   const r = mkdtempSync(join(tmpdir(), "ctx-"));
@@ -340,4 +341,46 @@ test("M5: must_fix is the union of the rework round's verdicts, and disputed com
   expect(loaded.must_fix.map((m) => m.id)).toEqual(["cf1", "qa1"]);
   expect(loaded.disputed).toEqual([{ id: "qa1", status: "disputed", reason: "out of scope" }]);
   expect(loaded.pr).toBe(31);
+});
+
+
+/**
+ * ── 최종 리뷰 A-MF1 — **도구와 러너가 같은 `done_when`을 읽고 같은 답을 내야 한다.** ────────────
+ *
+ * `qa`는 `cold_read = true`라 도구(`bin/qa-evidence.js`)는 `context.qa.json`의 투영된 `done_when`을
+ * 읽고, 러너(`run-stage.js`의 `qaEvidenceSummary()`)는 plan handoff의 **원본**을 읽는다. `ui`가
+ * `DONE_WHEN_FIELDS`에서 빠져 있던 동안 M2에서 그 둘이 갈렸다: 도구는 "coverage: complete"(exit 0),
+ * 러너는 `missing: ["dw1"]`. 곧 qa 리뷰어가 프롬프트가 시키는 대로 `finish`를 돌려 표를 읽고 승인했는데
+ * `verify-stage`가 그 라운드를 죽였다 — 도구가 없다고 말한 부족을 이유로. KTB #3의 모양 그대로다.
+ *
+ * 이 테스트는 그 이음매를 고정한다: 같은 매니페스트를 두 `done_when`으로 검사해 **같은 판정**이 나와야 한다.
+ */
+test("A-MF1: the qa cold-read context and the plan handoff yield the same M2 verdict for a `ui: true` id", async () => {
+  const r = root();
+  const doneWhen = [{ id: "dw1", text: "t", verify: "v", level: "integration", ui: true }];
+  const plan = renderHandoff({ stage: "plan", issue: 7, summary: "s", data: { schema: "factory.plan.v1", issue: 7, done_when: doneWhen } });
+  const gh = {
+    issue: vi.fn(async () => ({ number: 7, title: "T", body: "", labels: ["factory:awaiting-review"] })),
+    comments: vi.fn(async () => [{ id: 1, body: plan, createdAt: "2026-09-11T00:00:00Z" }]),
+  };
+  const ctx = await buildContext({ root: r, gh, issue: 7, stage: "review" });
+  const qaCtx = roleContextFor(ctx, "qa");
+  expect(qaCtx.cold_read).toBe(true);
+  expect(qaCtx.done_when).toEqual(doneWhen);                      // `ui`가 투영본에 살아 있다
+
+  // 도구가 보는 것(투영본)과 러너가 보는 것(원본)을 같은 계약에 먹인다.
+  const manifest = {
+    schema: "factory.qa-evidence.v1", issue: 7, head_sha: null, maturity: "M2",
+    claims: [{ id: "dw1", kind: "command", summary: "ran it", file: "dw1-1.log", cmd: "npm test", exit: 0 }],
+    created_at: "2026-09-11T00:00:00Z", tool_version: 1,
+  };
+  const opts = { maturity: "M2", fileExists: () => true };
+  const tool = validateManifest(manifest, { ...opts, doneWhen: qaCtx.done_when });
+  const runner = validateManifest(manifest, { ...opts, doneWhen: ctx.handoffs.plan.done_when });
+  expect(tool).toEqual(runner);
+  expect(tool.ok).toBe(false);                                    // M2 + ui:true면 스크린샷이 필요하다
+  expect(tool.missing).toEqual(["dw1"]);
+
+  // 그리고 그 요구는 M2에서만 뜬다(계약이 없는 규칙을 발명하지 않는다).
+  expect(validateManifest(manifest, { doneWhen: qaCtx.done_when, maturity: "M1", fileExists: () => true }).ok).toBe(true);
 });

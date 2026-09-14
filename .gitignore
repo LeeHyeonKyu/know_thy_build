@@ -12,3 +12,4 @@ docs/factory/runs/
 test-results/
 coverage/
 .nyc_output/
+.claude/worktrees/

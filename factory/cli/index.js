@@ -12,6 +12,8 @@ export const HELP = `
     factory doctor [--no-run] [--offline] [--json]
                                         Verify the harness contract (exit 1 on any FAIL)
     factory bootstrap [--dry-run]       Labels, branch protection, required checks, FACTORY_TOKEN_ISSUED_AT (repo admin)
+    factory rehearse [--json]           Run the harness once ON THE RUNNER before the first issue (ADR-025);
+                                        prints the step table and exits non-zero on RED
     factory run <stage> <issue>         Run a stage locally with the same scripts CI uses (triage|plan|implement|review)
     factory run retro [--force]         Run the retro job locally (--force ignores the merge count N)
     factory status [--json]             Needs You / queue / in progress / recent merges / usage (read-only)
@@ -40,6 +42,8 @@ export async function main(argv) {
     // 실주입을 해야 한다. 빠뜨리면 첫 `run("git", ["ls-files"])`에서 TypeError로 죽는다.
     case "doctor": return (await import("./doctor.js")).doctorCommand({ root, pkgRoot, argv: rest, io, run: realRun });
     case "bootstrap": return (await import("./bootstrap.js")).bootstrapCommand({ root, argv: rest, io });
+    // rehearse는 doctor처럼 실주입이 필요하다 — 이 명령의 일은 러너에 주문을 넣고 결과를 가져오는 것이다.
+    case "rehearse": return (await import("./rehearse.js")).rehearseCommand({ argv: rest, io, run: realRun });
     case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io });
     case "status": return (await import("./status.js")).statusCommand({ root, argv: rest, io });
     // board는 `pkgRoot`가 필요하다(ADR-022 Task B) — CLI가 내는 페이지와 `factory init`이 설치하는

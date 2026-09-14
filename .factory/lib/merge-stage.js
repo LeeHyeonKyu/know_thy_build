@@ -15,6 +15,68 @@ import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-
 export const REVIEW_EVIDENCE_STATUSES = ["factory/review", "factory/gates"];
 
 /**
+ * KTB-46 — **"이 `factory:needs-human`은 자동 머지 거부에서 왔는가"의 유일한 표식.**
+ *
+ * `handToHuman`이 만드는 사유 문구(보호 경로·역할 섹션·lessons 삭제·harness.toml 얼어붙은 섹션·
+ * 기존 테스트 편집)는 전이 코멘트에 그대로 실려 이슈에 남는다. sweeper의 `sweepHumanMerged` 팔은
+ * 그 한 줄만 보고 "사람이 머지해 주기를 기다리는 이슈"와 나머지 모든 needs-human(재점화 한도,
+ * 락 소유자 불명, 리뷰 라운드 소진…)을 가른다 — 그 둘을 섞으면 사람이 아직 보지도 않은 이슈를
+ * 머지된 것으로 이으려 든다.
+ *
+ * 그래서 문구와 판정은 **같은 출처**에서 나온다: 리터럴이 먼저이고 정규식이 그것에서 만들어지며,
+ * 아래 다섯 사유는 전부 그 리터럴로 조립된다. 문구를 고치면 판정이 따라 움직이고, 둘이 조용히
+ * 갈라질 수 없다(sweeper가 어제의 문구를 찾는 동안 merge 스테이지가 오늘의 문구를 쓰는 일 —
+ * 이 팔이 죽는 가장 조용한 방식이다). 방향이 이쪽인 이유(r3 nit 1): 반대로 하면 정규식의 `source`가
+ * 사람이 읽는 문장이 되고, 누군가 앵커·대안(`|`)·이스케이프를 하나 넣는 순간 다섯 개의 거부 메시지가
+ * 정규식 문법으로 바뀐다.
+ */
+const HUMAN_MERGE_REQUIRED_TEXT = "human merge required";
+/**
+ * 최종 리뷰 B-nit 3 — **구분자까지 포함해 앵커한다.** 맨 문구만 찾는 정규식은 자유 문장인 전이 사유
+ * 어디에 그 말이 나와도 참이다: `:unstick`의 결정 노트가 "human merge required였는데…"를 인용하기만
+ * 해도 sweeper의 사람-머지 팔이 그 이슈를 "사람의 머지를 기다리는 중"으로 읽는다. 아래 다섯 생산자는
+ * 전부 `— ${TEXT}: …` 꼴로 조립하므로, 구분자(`— `)를 함께 요구해도 다섯 개가 모두 계속 걸린다.
+ */
+export const HUMAN_MERGE_REQUIRED = new RegExp(`— ${HUMAN_MERGE_REQUIRED_TEXT}`);
+
+/**
+ * 외부 감사 H1b의 판정 (d)를 **순수 함수로** 꺼낸 것. 이 커밋에 `factory/review`·`factory/gates`
+ * 상태가 붙어 있고, 그 둘이 success이고, **팩토리 자신의 계정이 올린 것**인가.
+ *
+ * 상태는 repo 스코프 토큰을 쥔 무엇이든 쓸 수 있다 — 그래서 "success다"는 아무것도 증명하지 않고,
+ * 게시자까지 대조해야 비로소 "리뷰·게이트가 실제로 돌았다"의 기계적 흔적이 된다. 조회 대상 sha가 곧
+ * 그 상태가 붙은 커밋이므로 target sha 검사는 구조적으로 참이다(호출자가 PR head로 묻는다).
+ *
+ * KTB-46이 이것을 꺼낸 이유: 사람이 머지한 보호 경로 PR을 sweeper가 `factory:merged`로 이을 때
+ * **같은 판정**이 필요한데, 그 팔에는 체크아웃도 이번 런의 게이트 파일도 없다. 머지는 이미 일어났고
+ * 되돌릴 수 없으며, 그 커밋에 대해 남아 있는 증거는 GitHub이 들고 있는 이 두 상태다. 판정을 두 번
+ * 구현하면 두 판정이 갈라진다 — 같은 함수를 두 곳이 부른다.
+ *
+ * 순수 함수다: 조회(로그인 해석·상태 조회)와 그 실패 처리는 호출자의 몫이고, 여기서는 **이미 읽은
+ * 것**만 본다. `logins`가 비면 통과가 아니라 거부다(게시자를 대조할 기준이 없다 = 판정 불가).
+ */
+export function verifyFactoryStatuses({ sha, statuses, logins }) {
+  const short = String(sha || "").slice(0, 7);
+  const known = new Set((logins || []).filter(Boolean).map((l) => String(l).toLowerCase()));
+  if (!known.size) return { ok: false, reason: `the factory's own account could not be resolved — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}` };
+  if (!Array.isArray(statuses)) return { ok: false, reason: `commit statuses for ${short} unreadable — no list returned` };
+  for (const context of REVIEW_EVIDENCE_STATUSES) {
+    // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
+    // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
+    const posted = statuses.filter((s) => s?.context === context);
+    if (!posted.length) return { ok: false, reason: `no ${context} commit status on PR head ${short} — the review stage never posted it for this commit` };
+    const latest = posted[0];
+    if (String(latest.state).toLowerCase() !== "success") return { ok: false, reason: `${context} on ${short} is "${latest.state}", not success` };
+    const by = String(latest.creatorLogin || "").trim();
+    if (!by) return { ok: false, reason: `${context} on ${short} names no creator — the poster cannot be identified` };
+    if (!known.has(by.toLowerCase())) {
+      return { ok: false, reason: `${context} on ${short} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
  * 외부 감사 2026-09-14 H6 — 머지 전이 코멘트가 **사람의 서명이 어디 있었는지**를 한 줄로 말한다.
  * `merge.human_gate`(CHARTER)는 설정이 아니라 선언이다: true면 `factory-merge` 환경의 required
  * reviewer가 이 잡을 PR마다 한 번 멈춰 세웠고, false면 사람은 토큰을 한 번 등록했을 뿐이다.
@@ -236,7 +298,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!prot?.ok) return await undecidable("protected-path check", prot?.reason);
   if (prot.files.length) {
     return await handToHuman({
-      reason: `protected paths changed — human merge required: ${prot.files.join(", ")}`,
+      reason: `protected paths changed — ${HUMAN_MERGE_REQUIRED_TEXT}: ${prot.files.join(", ")}`,
       sections: [{
         heading: "보호 경로 변경",
         why: [
@@ -271,7 +333,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f));
     const sections = [], reasons = [];
     if (additive.length) {
-      reasons.push(`agent role sections edited outside Examples/Perspectives — human merge required: ${additive.join(", ")}`);
+      reasons.push(`agent role sections edited outside Examples/Perspectives — ${HUMAN_MERGE_REQUIRED_TEXT}: ${additive.join(", ")}`);
       sections.push({
         heading: "역할 프롬프트의 허용 섹션 밖 편집",
         why: [
@@ -284,7 +346,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       });
     }
     if (lessons.length) {
-      reasons.push(`lessons files deleted or moved away — human merge required: ${lessons.join(", ")}`);
+      reasons.push(`lessons files deleted or moved away — ${HUMAN_MERGE_REQUIRED_TEXT}: ${lessons.join(", ")}`);
       sections.push({
         heading: "lessons 파일 삭제/이동",
         why: [
@@ -299,7 +361,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     }
     if (frozen.length) {
       const which = [...new Set(frozen.map((v) => /\[([a-z._]+)\]/.exec(v.rule)?.[1]).filter(Boolean))];
-      reasons.push(`harness.toml frozen sections edited — human merge required: ${which.map((s) => `[${s}]`).join(", ")}`);
+      reasons.push(`harness.toml frozen sections edited — ${HUMAN_MERGE_REQUIRED_TEXT}: ${which.map((s) => `[${s}]`).join(", ")}`);
       sections.push({
         heading: "harness.toml의 판정 기준 섹션 편집",
         why: [
@@ -320,7 +382,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
      * 그 PR이 스스로를 허가한다), 그럼에도 자동 머지가 안 되는 이유는 그 판단이 사람의 것이기 때문이다.
      */
     if (testsChanged.length) {
-      reasons.push(`existing tests modified or deleted — human merge required: ${testFiles.join(", ")}`);
+      reasons.push(`existing tests modified or deleted — ${HUMAN_MERGE_REQUIRED_TEXT}: ${testFiles.join(", ")}`);
       sections.push({
         heading: "기존 테스트의 수정·삭제",
         why: [
@@ -535,6 +597,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   //
   // 하나라도 확인 불가면(dep 미배선·조회 실패·로그인 미해결) GREEN이 아니라 **판정 불가**이고,
   // 머지는 되돌릴 수 없으므로 fail closed로 `needs-human`이다.
+  // KTB-42 — review 런이 run 기록에 남긴 qa 증거 매니페스트의 지문. 아래 (b2)에서 채워지고
+  // `factory:merged` 전이에 그대로 실린다(`lib/requirements.js` qaEvidenceGate가 다시 묻는다).
+  let qaManifestRecorded = null;
   const reviewRefused = async (reason) => {
     const line = `review verification failed — ${reason}`;
     const t = await d.transition({ to: "factory:needs-human", reason: line });
@@ -593,6 +658,23 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!prov.ok) return await reviewRefused(prov.reason);
     record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
 
+    /**
+     * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────
+     * 매니페스트 파일(`.factory/out/qa/<issue>/manifest.json`)은 커밋되지 않으므로 머지 스테이지의 새
+     * 체크아웃에는 존재하지 않는다. 볼 수 있는 것은 review 런이 run 기록에 남긴 지문 하나뿐이고,
+     * 그 자리는 러너만 쓴다(에이전트 세션의 `factory/records` push는 훅이 막는다).
+     * 로스터에 `qa`가 있는데 그 지문이 없다 = 유효한 증거가 있었다는 증인이 없다 = 판정 불가.
+     * KTB #3의 교훈을 뒤집어 적용한다: "증거가 없다"는 이제 빌더를 가리키지 않고, **되돌릴 수 없는
+     * 단계 앞에서 멈추는 이유**가 된다.
+     */
+    if (ros.roles.includes("qa")) {
+      qaManifestRecorded = rec.record.qaManifest ?? null;
+      if (!qaManifestRecorded) {
+        return await reviewRefused(`${NOT_BOUND} — this tier's roster includes qa, but the review run recorded no qa_manifest digest for ${live.slice(0, 7)}. A valid qa evidence manifest (\`node .factory/bin/qa-evidence.js finish --issue ${issue}\`) is what that digest names, and without it nothing witnesses that the evidence existed`);
+      }
+      record([`merge: qa evidence manifest ${qaManifestRecorded.slice(0, 12)} bound to the review run record`]);
+    }
+
     // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
     // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.
     // 팩토리 자신의 계정(들)을 `gh api user`로 한 번 해석하고 그것과 대조한다. 해석 실패는 통과가
@@ -603,26 +685,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!logins?.ok || !Array.isArray(logins.logins) || logins.logins.length === 0) {
       return await reviewRefused(`the factory's own account could not be resolved (gh api user) — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}: ${logins?.reason || "unknown"}`);
     }
-    const known = new Set(logins.logins.filter(Boolean).map((l) => String(l).toLowerCase()));
-
     let statuses;
     try { statuses = await d.commitStatuses(live); }
     catch (e) { return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable: ${e?.message || e}`); }
-    if (!Array.isArray(statuses)) return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable — no list returned`);
 
-    for (const context of REVIEW_EVIDENCE_STATUSES) {
-      // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
-      // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
-      const posted = statuses.filter((s) => s?.context === context);
-      if (!posted.length) return await reviewRefused(`no ${context} commit status on PR head ${live.slice(0, 7)} — the review stage never posted it for this commit`);
-      const latest = posted[0];
-      if (String(latest.state).toLowerCase() !== "success") return await reviewRefused(`${context} on ${live.slice(0, 7)} is "${latest.state}", not success`);
-      const by = String(latest.creatorLogin || "").trim();
-      if (!by) return await reviewRefused(`${context} on ${live.slice(0, 7)} names no creator — the poster cannot be identified`);
-      if (!known.has(by.toLowerCase())) {
-        return await reviewRefused(`${context} on ${live.slice(0, 7)} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal`);
-      }
-    }
+    // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
+    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
+    // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
+    const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
+    if (!posted.ok) return await reviewRefused(posted.reason);
     record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
   }
 
@@ -675,7 +746,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // true이면 이 잡 자체가 `factory-merge` 환경의 required reviewer 앞에서 한 번 멈췄다는 뜻이고
   // (곧 사람이 PR마다 "돌려라"를 눌렀다), false이면 사람의 서명은 토큰 등록 1회뿐이다 — 그것이
   // 다크 루프의 정의이고, 기록에 소리 내어 남아야 한다. 값이 없으면(구형 CHARTER) 그 사실을 적는다.
-  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg });
+  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg, qaManifestRecorded });
   record([...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
 
   // (8) 추적 이슈를 닫는다 — 코드는 이미 머지됐다. 이것도 실패해도 머지 자체는 되돌릴 게 없으므로

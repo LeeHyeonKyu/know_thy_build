@@ -455,3 +455,30 @@ test("r1 finding 2: the sweeper runs the merge-authority doctor under the bot to
   expect(sweeper).not.toContain("FACTORY_MERGE_TOKEN");
   expect(sweeper).toContain("FACTORY_BOT_TOKEN");
 });
+
+
+/**
+ * ── 최종 리뷰 B-SF5 — **리허설 워크플로의 dispatch도 에이전트에게는 닫혀 있다.** ──────────────
+ *
+ * 위조 경로는 이미 두 겹으로 닫혀 있다(잡 레벨 `if:` + `rehearse.js`의 `refuseRef`) — 남은 것은
+ * **비용**이다: 레포 write를 쥔 아무 스테이지나 60분짜리 러너 잡을 마음대로, 반복해서 주문할 수 있고,
+ * 그 하나하나가 `factory-rehearse` 동시성 그룹을 점유한다. `factory rehearse`는 사람의 명령이다.
+ *
+ * 두 철자를 다 막는다: `gh workflow run factory-rehearse`(파일 이름 없이)와 `… factory-rehearse.yml`.
+ * 접두 매칭이라 앞의 하나로 둘 다 걸리지만, 명시된 두 줄이 다음 독자에게 그 사실을 말한다.
+ */
+test("B-SF5: both ci-settings deny `gh workflow run factory-rehearse` — the rehearsal is a person's command", () => {
+  const spellings = ["Bash(gh workflow run factory-rehearse*)", "Bash(gh workflow run factory-rehearse.yml*)"];
+  for (const f of ["factory/ci-settings.json", "factory/ci-settings-harness.json"]) {
+    const s = JSON.parse(read(f));
+    for (const d of spellings) expect(s.permissions.deny, `${f}: ${d}`).toContain(d);
+    // allow에 그것을 여는 줄이 없어야 한다(Claude Code에서 deny가 allow를 이기지만, 둘이 싸우는
+    // 상태를 남겨 두면 다음 독자가 어느 쪽이 참인지 파일에서 읽을 수 없다).
+    for (const a of s.permissions.allow || []) expect(a, `${f}: ${a}`).not.toMatch(/gh workflow run/);
+  }
+  // 그리고 이 저장소에 설치된 사본에도 같은 두 줄이 있다(템플릿 ≡ 설치본).
+  for (const f of [".factory/ci-settings.json", ".factory/ci-settings-harness.json"]) {
+    const s = JSON.parse(readFileSync(new URL(`../../${f}`, import.meta.url).pathname, "utf8"));
+    for (const d of spellings) expect(s.permissions.deny, `${f}: ${d}`).toContain(d);
+  }
+});

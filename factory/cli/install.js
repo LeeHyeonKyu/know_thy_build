@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from "node:fs";
-import { replaceProtBlock, writeGlobs, ciDenyEntries } from "../lib/protected-paths.js";
+import { replaceProtBlock, writeGlobs, ciDenyEntries, qaManifestDeny } from "../lib/protected-paths.js";
 
 export const render = (text, vars = {}) => text.replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars && typeof vars[k] !== "object" ? String(vars[k]) : m));
 
@@ -123,7 +123,10 @@ export function renderCiSettings(templateText, prot, { harnessMode = false } = {
   const j = JSON.parse(templateText);
   j.permissions ??= {};
   const keep = (j.permissions.deny || []).filter((d) => !/^(Edit|Write)\(/.test(d));
-  j.permissions.deny = [...keep, ...ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true }))];
+  // KTB-42 SF-1b — 생성된 경로 deny 뒤에 매니페스트 한 쌍을 **언제나** 덧붙인다. harness의
+  // `[protected]`에서 유도되는 목록이 아니라(그 목록은 qa 디렉터리를 일부러 **열어** 둔다) 이 계약이
+  // 스스로 닫는 한 철자이므로, 템플릿이 아니라 여기서 못 박는다(§protected-paths.js `qaManifestDeny`).
+  j.permissions.deny = [...keep, ...ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true })), ...qaManifestDeny()];
   return JSON.stringify(j, null, 2) + "\n";
 }
 

@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { runMergeStage } from "../lib/merge-stage.js";
+import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVIDENCE_STATUSES } from "../lib/merge-stage.js";
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
@@ -38,7 +38,10 @@ const REVIEW_OK = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: HEAD
  * `reviewRunId`(이슈의 review 하트비트)에서 따로 읽는다. 기본값은 둘이 같은 런을 말한다.
  */
 const RUN = "34809992796";
-const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runId: RUN, runnerId: `gha-${RUN}`, headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve" };
+// KTB-42 — 이 로스터에는 `qa`가 있으므로 run 기록의 줄은 qa 증거 매니페스트의 지문도 싣는다.
+// 그 필드가 없으면 머지는 거부한다(아래 "KTB-42" 테스트가 그 자리를 직접 친다).
+const QA_DIGEST = "f".repeat(64);
+const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runId: RUN, runnerId: `gha-${RUN}`, headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve", qaManifest: QA_DIGEST };
 const reviewDeps = (over = {}) => ({
   reviewEvidence: vi.fn(async () => ({ ok: true, data: REVIEW_OK })),
   reviewRunId: vi.fn(async () => ({ ok: true, runId: RUN, runnerId: `gha-${RUN}` })),
@@ -410,6 +413,74 @@ test("(3b'') 기존 테스트 수정은 자기 제목으로 거부된다 — 자
   }));
   expect(d.mergePr).not.toHaveBeenCalled();
   expect(lines.some((l) => /existing tests modified or deleted/.test(l))).toBe(true);
+});
+
+/**
+ * KTB-46 — **사유 문구와 sweeper의 판정은 같은 출처에서 나와야 한다.** `sweepHumanMerged`는
+ * `HUMAN_MERGE_REQUIRED` 하나로 "사람이 머지해 주기를 기다리는 needs-human"을 나머지 전부와 가른다.
+ * 다섯 거부 갈래 중 하나라도 그 문구를 잃으면 그 갈래의 이슈는 사람이 머지한 뒤에도 영원히
+ * needs-human에 남는다 — 그리고 그 실패는 **조용하다**(아무 에러도, 아무 코멘트도 나지 않는다).
+ */
+test("KTB-46: every human-merge refusal reason carries the exported HUMAN_MERGE_REQUIRED phrase", async () => {
+  const cases = {
+    "protected paths": { protectedPaths: async () => ({ ok: true, files: [".factory/harness.toml"] }) },
+    "agent role sections": { policyViolations: async () => ({ ok: true, files: [".claude/agents/x.md"] }) },
+    lessons: {
+      policyViolations: async () => ({ ok: true, files: [".factory/lessons/reviewer-qa.md"], violations: [LESSONS_GONE] }),
+    },
+    "harness.toml frozen sections": {
+      policyViolations: async () => ({
+        ok: true, files: [".factory/harness.toml"],
+        violations: [{ file: ".factory/harness.toml", rule: "harness.toml [gates.thresholds] edited — human merge required" }],
+      }),
+    },
+    "existing tests": {
+      policyViolations: async () => ({
+        ok: true, files: ["test/a.test.js"],
+        violations: [{ file: "test/a.test.js", rule: "tests-modified — 3 line(s) removed from an existing test — human merge required" }],
+      }),
+    },
+  };
+  for (const [name, over] of Object.entries(cases)) {
+    const d = baseD(over);
+    expect(await run(d), name).toBe(2);
+    const { to, reason } = d.transition.mock.calls.at(-1)[0];
+    expect(to, name).toBe("factory:needs-human");
+    expect(HUMAN_MERGE_REQUIRED.test(reason), `${name}: ${reason}`).toBe(true);
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+  }
+});
+
+/**
+ * KTB-46 r2 — §(6b)의 판정 (d)를 꺼낸 순수 함수. sweeper의 사람-머지 반영 팔이 **같은 함수**를
+ * 부른다(판정을 두 벌 구현하면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다). 위의 §(6b)
+ * 테스트들이 그대로 초록인 것이 "동작이 한 글자도 바뀌지 않았다"의 증거다.
+ */
+test("KTB-46 r2: verifyFactoryStatuses — success + factory creator on both contexts, else a named refusal", () => {
+  const SHA = "b".repeat(40);
+  const ok = REVIEW_EVIDENCE_STATUSES.map((context) => ({ context, state: "success", creatorLogin: "ktb-bot" }));
+  const logins = ["ktb-bot", "ktb-owner"];
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok, logins })).toEqual({ ok: true });
+  // 대소문자는 무시한다(GitHub 로그인은 대소문자를 구분하지 않는다).
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok.map((s) => ({ ...s, creatorLogin: "KTB-Bot" })), logins })).toEqual({ ok: true });
+
+  const bad = (over, re) => {
+    const r = verifyFactoryStatuses({ sha: SHA, statuses: ok.map((s, i) => (i === 1 ? { ...s, ...over } : s)), logins });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(re);
+  };
+  bad({ state: "failure" }, /is "failure", not success/);
+  bad({ creatorLogin: "mallory" }, /posted by @mallory.*not a factory account/s);
+  bad({ creatorLogin: "" }, /names no creator/);
+
+  // 상태가 아예 없는 것은 통과가 아니다 — "리뷰 스테이지가 이 커밋에 올린 적이 없다"이다.
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: [], logins }).reason).toMatch(/no factory\/review commit status/);
+  // 조회 결과가 목록이 아니거나 대조할 계정이 없으면 **판정 불가**다(fail closed).
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: null, logins }).reason).toMatch(/unreadable — no list returned/);
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok, logins: [] }).reason).toMatch(/could not be resolved/);
+  // 같은 context가 여러 번이면 **가장 최근 것**(목록의 첫 항목)이 유효한 상태다.
+  const stale = [{ context: "factory/review", state: "failure", creatorLogin: "ktb-bot" }, ...ok];
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: stale, logins }).reason).toMatch(/factory\/review on bbbbbbb is "failure"/);
 });
 
 test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {
@@ -1291,6 +1362,34 @@ test("MF-2: provenance is checked BEFORE the two-actor approval", async () => {
   expect(d.mergePr).not.toHaveBeenCalled();
 });
 
+// ── ADR-024 / KTB-42 — qa 증거 매니페스트의 지문은 run 기록에서만 읽을 수 있다 ──────────────────
+// `.factory/out/`는 gitignore다 — 머지 잡의 새 체크아웃에 매니페스트 파일은 존재하지 않는다.
+// 그래서 머지가 볼 수 있는 유일한 증인이 review 런이 남긴 `qa_manifest=` 한 줄이다.
+
+test("KTB-42: the roster includes qa but the review run recorded no qa_manifest → refuse, and name the tool", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, qaManifest: null } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/no qa_manifest digest/);
+  expect(lastReason(d)).toMatch(/qa-evidence\.js finish/);
+});
+
+test("KTB-42: the recorded digest rides along to the merged transition (requirements re-asks there)", async () => {
+  const d = baseD();
+  expect(await run(d)).toBe(0);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", qaManifestRecorded: QA_DIGEST }));
+});
+
+test("KTB-42: a roster without qa needs no manifest — an uncalled reviewer's missing evidence is not a defect", async () => {
+  const d = baseD({
+    reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness"] })),
+    reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, verdicts: REVIEW_OK.verdicts.filter((v) => v.role !== "qa") } })),
+    reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, verdicts: "correctness=approve", qaManifest: null } })),
+  });
+  expect(await run(d)).toBe(0);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", qaManifestRecorded: null }));
+});
+
 // ── (7) 외부 감사 H6 — 머지 전이 텍스트가 사람의 서명 유무를 말한다 ─────────────────────────
 
 test("H6: the merged transition says whether a person signed this PR", async () => {
@@ -1305,4 +1404,71 @@ test("H6: the merged transition says whether a person signed this PR", async () 
   const unset = baseD();
   expect(await run(unset)).toBe(0);
   expect(unset.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", reason: expect.stringMatching(/charter\.merge-human-gate-unset/) }));
+});
+
+
+// ── 최종 리뷰 B-MF2 — merge 스테이지의 blocked 복귀 hop과 KTB-42의 qa 게이트 ────────────────────
+
+import { buildCtxExtra } from "../bin/run-stage.js";
+import { requirementFor } from "../lib/requirements.js";
+import { renderHandoff } from "../lib/handoff.js";
+
+/**
+ * merge 스테이지는 script-only다 — `buildContext`를 거치지 않으므로 `ctxCache`가 없고, `buildCtxExtra`는
+ * `roster`/`rosterSize`를 채우지 못한다. KTB-42가 `factory:approved`에 건 `qaEvidenceGate`는 로스터를
+ * 못 구하면 fail closed이므로, 그 스테이지가 `factory:approved`를 겨누는 **유일한 자리** — KTB-15b의
+ * blocked 복귀 hop((4b), 게이트를 방금 GREEN으로 다시 확인한 직후) — 이 "review roster unresolved"로
+ * 영원히 거부됐다. `main()`은 `to === "factory:merged"`일 때만 로스터를 풀고 있었다.
+ *
+ * 이 테스트는 그 hop을 **진짜 요구조건**으로 돌린다: `deps.transition`의 모양 그대로 ctxExtra를 만들고
+ * `requirementFor("factory:approved")`에 먹인다.
+ */
+const approvedHopGh = () => ({
+  comments: vi.fn(async () => [
+    { id: 1, body: renderHandoff({ stage: "implement", issue: 7, summary: "s", data: { schema: "factory.implement.v1", issue: 7, pr: 9, head_sha: HEAD } }), createdAt: "2026-09-14T08:00:00Z" },
+    { id: 2, body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: REVIEW_OK }), createdAt: "2026-09-14T09:00:00Z" },
+  ]),
+  prHeadSha: vi.fn(async () => HEAD),
+});
+const GREEN_GATES_FILE = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+
+/** `run-stage.js`의 `deps.transition`이 merge 스테이지에서 하는 일 그대로(로스터 해석 조건이 인자다). */
+const mergeHopRequirement = async ({ to, resolveRosterFor }) => {
+  const gh = approvedHopGh();
+  const reviewRoster = resolveRosterFor.includes(to) ? ["correctness", "qa"] : null;
+  const ctxExtra = await buildCtxExtra({
+    gh, issue: 7, to, data: undefined, ctx: undefined, reviewRoster, maxRounds: 3,
+    // 머지 잡에는 매니페스트 파일이 없다 — 로스터에 qa가 없을 때의 모양(skipped)이 아니라,
+    // 리뷰 런이 이 커밋에 대해 유효하다고 판정한 요약을 그대로 흉내낸다.
+    qaEvidence: async () => ({ ok: true, digest: QA_DIGEST, head_sha: HEAD, missing: [], reasons: [], claimIds: ["dw1"], counts: { claims: 1, na: 0 } }),
+  });
+  ctxExtra.gatesChecked = true;
+  ctxExtra.gatesFile = GREEN_GATES_FILE;
+  return requirementFor(to)({ comments: await gh.comments(7), ...ctxExtra });
+};
+
+test("B-MF2: the merge stage's blocked→approved hop passes the qa gate when the roster is resolved for that target too", async () => {
+  // 고쳐진 모양: `factory:merged`와 `factory:approved` 둘 다 로스터를 푼다.
+  const fixed = await mergeHopRequirement({ to: "factory:approved", resolveRosterFor: ["factory:merged", "factory:approved"] });
+  expect(fixed).toEqual({ ok: true });
+
+  // 회귀: `factory:merged`에만 풀면 같은 hop이 로스터 미해결로 fail closed가 된다 — 그 상태에서는
+  // 게이트를 몇 번 다시 GREEN으로 돌려도 merge 잡이 blocked에서 빠져나오지 못한다.
+  const regressed = await mergeHopRequirement({ to: "factory:approved", resolveRosterFor: ["factory:merged"] });
+  expect(regressed.ok).toBe(false);
+  expect(regressed.reason).toMatch(/review roster unresolved/);
+});
+
+test("B-MF2: the same fix makes the quorum measurable on that hop — a short roster is caught, not silently skipped", async () => {
+  const gh = approvedHopGh();
+  const ctxExtra = await buildCtxExtra({
+    gh, issue: 7, to: "factory:approved", data: undefined, ctx: undefined,
+    reviewRoster: ["correctness", "qa", "security"],                 // 리뷰는 둘만 돌았다
+    qaEvidence: async () => ({ ok: true, digest: QA_DIGEST, head_sha: HEAD, missing: [], reasons: [], claimIds: ["dw1"], counts: { claims: 1, na: 0 } }),
+  });
+  ctxExtra.gatesChecked = true;
+  ctxExtra.gatesFile = GREEN_GATES_FILE;
+  const r = requirementFor("factory:approved")({ comments: await gh.comments(7), ...ctxExtra });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/verdict count 2 != roster size 3/);
 });

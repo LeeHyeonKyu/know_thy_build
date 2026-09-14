@@ -101,6 +101,13 @@ Next:
                                              # tokens.agent-is-admin, tokens.agent-workflow-scope and the CODEOWNERS
                                              # identity check are WARN "unverified until CI" locally — the sweeper's
                                              # \`Doctor (merge authority)\` step grades them under the bot token.
-                                             # See docs §4.4 and ADR-021.`);
+                                             # See docs §4.4 and ADR-021.
+  9. npx know-thy-build factory rehearse     # runs the harness ONCE ON THE RUNNER before the first issue (ADR-025):
+                                             # lint · unit · test_files · test_one · lint_file · qa evidence ·
+                                             # the no-write clean check · prove-test machinery · gh auth/labels/push.
+                                             # doctor is static and \`--run\` is your laptop — the defects that cost
+                                             # own-calendar three dark rounds (exit 127, analyze on pre-existing infos,
+                                             # repo-root-relative paths after \`cd\`) are only visible here.
+                                             # \`→ factory:queue\` is refused until this is GREEN for this harness.`);
   return 0;
 }

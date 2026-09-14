@@ -2,12 +2,14 @@
   "permissions": {
     "deny": [
       "Bash(gh secret*)", "Bash(gh variable set*)", "Bash(gh api -X DELETE*)", "Bash(gh api --method DELETE*)",
+      "Bash(gh workflow run factory-rehearse*)", "Bash(gh workflow run factory-rehearse.yml*)",
       "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)",
       "Read(.git/config)", "Read(.git/**)", "Read(**/.netrc)", "Read(**/.npmrc)"
     ],
     "allow": [
       "Write(.factory/out/qa/**)", "Edit(.factory/out/qa/**)",
-      "Bash(mkdir -p .factory/out/qa*)", "Bash(mkdir -p ./.factory/out/qa*)"
+      "Bash(mkdir -p .factory/out/qa*)", "Bash(mkdir -p ./.factory/out/qa*)",
+      "Bash(node .factory/bin/qa-evidence.js *)", "Bash(node ./.factory/bin/qa-evidence.js *)"
     ]
   }
 }

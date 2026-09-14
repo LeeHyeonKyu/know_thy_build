@@ -1,6 +1,6 @@
 import { canTransition, factoryLabelOf, HUMAN_RETRY_FROM, HUMAN_RETRY_TARGETS } from "./labels.js";
 import { requirementFor } from "./requirements.js";
-import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker } from "./retro/issue-comments.js";
+import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker, transitionRefusedMarker } from "./retro/issue-comments.js";
 
 export const NEEDS_HUMAN = "factory:needs-human";
 export const NEEDS_INFO = "factory:needs-info";
@@ -49,7 +49,32 @@ async function swapLabel({ gh, issue, from, to }) {
  */
 export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry";
 
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env }) {
+/** 리허설 배선이 아예 없는 큐 전이의 거부 사유 — 그 자체가 배선 지시문이다(리뷰 must_fix 3). */
+export const REHEARSAL_UNWIRED = "no rehearsal checker is wired into this transition — `→ factory:queue` is refused (fail closed). Pass `rehearsal` (see bin/transition.js / sweep.js) or, in tests only, `skipRehearsal: true`";
+
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env, rehearsal = null, skipRehearsal = false }) {
+  /**
+   * ── KTB-44 / ADR-025 — **리허설 없이는 큐가 열리지 않는다.** ───────────────────────────────────
+   * own-calendar의 첫 다크 이슈는 하네스 초안의 결함 세 개를 **라운드마다 하나씩** 드러냈다(exit 127의
+   * 누락된 툴체인, 기존 info에 걸리는 analyze, `cd` 뒤의 상대 경로). 전부 러너에서만 보이는 사실이라
+   * doctor는 구조적으로 볼 수 없었고, 그 대가는 다크 라운드 3개였다. `factory rehearse`가 그것을 잡
+   * 하나로 바꾸고, 이 검사가 그 잡을 **첫 이슈보다 앞에** 세운다.
+   *
+   * 사람도 면제되지 않는다: 리허설이 증명하는 것은 "누가 큐에 넣었는가"가 아니라 "이 하네스가 러너에서
+   * 도는가"다. 네트워크보다 먼저 끊는다 — 거부는 이슈 상태를 한 글자도 바꾸지 않는다.
+   *
+   * **기본값은 opt-out이다**(리뷰 must_fix 3). 인자를 생략하면 통과하던 r1의 모양은 바로 위의 세 번째
+   * 자물쇠가 존재하는 이유를 되돌린다: `node -e "import('.factory/lib/transition.js').then(m =>
+   * m.transition({gh, issue, to:'factory:queue'}))"` 한 줄이 — 인자를 **빼는 것만으로** — 게이트를
+   * 껐다. 이제 큐로 가는 전이는 배선된 `rehearsal`이 있거나 명시적인 `skipRehearsal: true`가 있어야
+   * 하고, 둘 다 없으면 거부한다. 프로덕션 호출자는 전부 배선한다(`bin/transition.js`·`bin/sweep.js`·
+   * merge 스테이지) — `skipRehearsal`은 **테스트 전용**이다(ADR-025).
+   */
+  if (to === "factory:queue" && !skipRehearsal) {
+    const r = typeof rehearsal === "function" ? await rehearsal() : rehearsal;
+    if (!r) return { ok: false, from: null, to, reason: REHEARSAL_UNWIRED };
+    if (r.ok !== true) return { ok: false, from: null, to, reason: r.reason || "harness changed since the last rehearsal — run `factory rehearse`" };
+  }
   // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
   // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.
   // 그래서 판정을 라이브러리 함수 자신에 둔다 — 어느 입구로 들어오든 여기서 같은 답을 받는다.
@@ -84,7 +109,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
     const graphReason = `transition ${from} → ${to} not allowed`;
     // 그래프에 없는 전이는 라벨을 건드리지 않는다(어느 쪽으로도 안전한 기본값이 없다 — 예: merged/wont-do는
     // needs-human으로도 못 나간다) — 하지만 조용히 실패하지는 않는다. 사람이 볼 수 있게 코멘트는 남긴다.
-    if (!human) await gh.comment(issue, `<!-- factory-transition-refused from=${from} to=${to} -->\n**전이 거부** ${from} → ${to}: ${graphReason}`);
+    if (!human) await gh.comment(issue, `${transitionRefusedMarker({ from, to })}\n**전이 거부** ${from} → ${to}: ${graphReason}`);
     return { ok: false, from, to, reason: graphReason };
   }
   comments ??= await gh.comments(issue);
@@ -105,7 +130,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
      * 전이(옛 라벨)라, 방금 세운 에스컬레이션을 조용히 **되돌린다**. 사람은 아무것도 못 보고, 그
      * 스테이지는 같은 자리에서 두 번 더 죽는다(리뷰 finding 3: 리뷰 라운드 ~$10 × 2).
      */
-    await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script reason=refused -->\n<!-- factory-transition-refused from=${from} to=${to} -->\n**전이 거부** ${from} → ${to}: ${req.reason}\n\n라벨을 \`factory:needs-human\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`);
+    await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script reason=refused -->\n${transitionRefusedMarker({ from, to })}\n**전이 거부** ${from} → ${to}: ${req.reason}\n\n라벨을 \`factory:needs-human\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`);
     await swapLabel({ gh, issue, from, to: "factory:needs-human" });
     return { ok: false, from, to: "factory:needs-human", reason: req.reason };
   }

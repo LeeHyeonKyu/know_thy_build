@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
-import { checkHarness, checkCommands, checkSetupDirtiesTree, runSetupProbe, SETUP_DIRTY_NOTE } from "../lib/doctor/harness.js";
+import { checkHarness, checkCommands, checkSetupDirtiesTree, checkQaEvidenceProbe, runSetupProbe, SETUP_DIRTY_NOTE } from "../lib/doctor/harness.js";
 import { loadHarness, loadHarnessRaw } from "../lib/config.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
@@ -304,4 +304,43 @@ test("runSetupProbe: the sample comes from a scratch clone — the working tree 
   const skipped = await runSetupProbe({ run: failing, cwd: "/repo", harness: h, mkdtemp: () => "/tmp/probe-2", rm: () => {} });
   expect(skipped.skipped).toMatch(/scratch clone failed/);
   expect(checkSetupDirtiesTree({ harness: h, ...skipped }).level).toBe("PASS");
+});
+
+// ── ADR-024 / KTB-42 — `qa.evidence-probe` ───────────────────────────────────────────────────
+// review 스테이지가 `claude -p` 전에 돌리는 것과 같은 프로브를 사람의 자리에서도 한 번 돌린다.
+
+test("KTB-42: doctor's qa.evidence-probe PASSes on a writable tree and names the KTB-42 failure mode when it cannot write", () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb-qa-"));
+  const ok = checkQaEvidenceProbe({ root });
+  expect(ok.id).toBe("qa.evidence-probe");
+  expect(ok.level).toBe("PASS");
+
+  const blocked = mkdtempSync(join(tmpdir(), "ktb-qa-"));
+  mkdirSync(join(blocked, ".factory/out"), { recursive: true });
+  writeFileSync(join(blocked, ".factory/out/qa"), "not a directory");   // mkdir -p가 실패하는 유일한 이식성 있는 방법
+  const bad = checkQaEvidenceProbe({ root: blocked });
+  expect(bad.level).toBe("FAIL");
+  expect(bad.detail).toMatch(/qa evidence dir not writable/);
+  expect(bad.detail).toMatch(/spec-conformance will read that as the builder's missing evidence/);
+});
+
+test("KTB-42: --offline/--no-run cannot run the probe — that is a WARN, never a PASS", () => {
+  for (const skipped of ["--offline", "--no-run"]) {
+    const r = checkQaEvidenceProbe({ root: "/nonexistent", skipped, probe: () => { throw new Error("must not run"); } });
+    expect(r.level).toBe("WARN");
+    expect(r.detail).toContain(skipped);
+  }
+});
+
+// 리뷰 라운드 1 SF-6 — qa를 부르지 않는 저장소에는 물어볼 것이 없다(그리고 자국도 남기지 않는다).
+test("KTB-42/SF-6: a CHARTER with no qa in any roster is not probed; an unknown roster still is", () => {
+  const skip = checkQaEvidenceProbe({ root: "/nonexistent", rosterHasQa: false, probe: () => { throw new Error("must not run"); } });
+  expect(skip.level).toBe("PASS");
+  expect(skip.detail).toMatch(/no review roster in this CHARTER includes qa/);
+
+  // 모르면(null) 프로브한다 — 프로브는 싸고, 실패는 언제나 진짜 신호다.
+  let asked = 0;
+  expect(checkQaEvidenceProbe({ root: "/x", rosterHasQa: null, probe: () => { asked++; return { ok: true }; } }).level).toBe("PASS");
+  expect(checkQaEvidenceProbe({ root: "/x", rosterHasQa: true, probe: () => { asked++; return { ok: true }; } }).level).toBe("PASS");
+  expect(asked).toBe(2);
 });

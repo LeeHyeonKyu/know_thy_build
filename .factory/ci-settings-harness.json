@@ -5,6 +5,8 @@
       "Bash(gh variable set*)",
       "Bash(gh api -X DELETE*)",
       "Bash(gh api --method DELETE*)",
+      "Bash(gh workflow run factory-rehearse*)",
+      "Bash(gh workflow run factory-rehearse.yml*)",
       "Read(.env)",
       "Read(.env.*)",
       "Read(**/.env)",
@@ -66,13 +68,17 @@
       "Edit(eslint.config.*)",
       "Write(eslint.config.*)",
       "Edit(docs/factory/runs/**)",
-      "Write(docs/factory/runs/**)"
+      "Write(docs/factory/runs/**)",
+      "Edit(.factory/out/qa/**/manifest.json)",
+      "Write(.factory/out/qa/**/manifest.json)"
     ],
     "allow": [
       "Write(.factory/out/qa/**)",
       "Edit(.factory/out/qa/**)",
       "Bash(mkdir -p .factory/out/qa*)",
-      "Bash(mkdir -p ./.factory/out/qa*)"
+      "Bash(mkdir -p ./.factory/out/qa*)",
+      "Bash(node .factory/bin/qa-evidence.js *)",
+      "Bash(node ./.factory/bin/qa-evidence.js *)"
     ]
   }
 }

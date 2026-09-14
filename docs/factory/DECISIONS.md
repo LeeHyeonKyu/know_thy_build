@@ -2135,6 +2135,7 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 6. **M6** — 리뷰 workflow 요약의 "Light/Full round 2"를 "pass 2"로(리뷰 라운드 K와 혼동).
 7. **GitHub App 토큰** — `FACTORY_BOT_TOKEN` PAT 발급이 사람 손을 타는 문제.
 8. **persist-credentials** — 잠금·records push를 명시 토큰 remote로 옮긴 뒤 `persist-credentials: false`(SF-1의 남은 반).
+9. ~~**KTB-46**~~ — **1.2에서 구현됨**(2026-09-14). 보호 경로 PR을 **사람이 머지한 뒤** 이슈를 `factory:merged`로 잇는 것이 아무 데도 없었다: KTB #3이 리뷰 4/4로 승인됐고 merge 단계 (3)이 `protected paths changed — human merge required: …`로 자동 머지를 거부해(설계대로다 — 스펙 §12.3-2) `factory:needs-human`이 됐는데, 소유자가 PR #4를 손으로 squash-merge 한 뒤 이슈를 움직이는 것이 **하나도 없었다** — 그래프에 `needs-human → merged` 엣지가 없었고, `Closes #n`은 걸리지 않았으며, 머지 뒤에 도는 merge 단계 (9)는 이 경로에서 애초에 실행되지 않는다(KTB-23의 하네스 주차 해제가 죽었던 것과 같은 구멍이다). 운영자가 손으로 라벨을 붙이고 닫았다. 고침: 그래프에 `factory:needs-human → factory:merged` 엣지 하나(사람 전용이 아니다)와 cron sweeper 팔 `sweepHumanMerged`. 그 팔은 열린·닫힌 `factory:needs-human` 이슈를 **최근 갱신순**(`sort:updated-desc` — `updatedAt` 시간 창은 틀린 시계였다: 사람이 PR만 머지하면 이슈는 움직이지 않고, 이 경로의 이슈는 정확히 그렇게 며칠씩 앉아 있다) 200개까지 훑어 **마지막 실제 전이의 사유**가 `merge-stage.js`가 내보내는 `HUMAN_MERGE_REQUIRED`와 맞는 것만 고르고, `claude/fq-<n>`에 머지된 PR이 있으면 **자동 머지와 같은 증거를 같은 함수로** 확인한 뒤에만 잇는다: PR head sha의 `factory/gates`·`factory/review` 상태가 success이고 팩토리 계정이 올린 것인가(`verifyFactoryStatuses` — merge 스테이지 §(6b) 판정 (d)를 순수 함수로 꺼낸 것), 그 PR의 필수 체크가 전부 GREEN인가(`gh.prChecks` + `allChecksGreen` — `factory/integrity`는 check run이라 commit status 목록에는 나타나지 않는다), 그리고 **이 tier의 로스터와 K로** 정족수 all-approve를 `must_fix`에서 다시 계산한 결과가 통과인가(`resolveReviewRoster` — merge 스테이지의 `reviewRoster` dep과 같은 함수). 게이트 증거의 **출처만** 러너의 로컬 파일에서 그 커밋에 남은 상태로 바뀌고(sweep 잡에는 체크아웃이 없고, 애초에 merge 스테이지가 단계 (3)에서 물러나 게이트를 돌지도 못했다), 판정의 엄격함은 그대로다. **사람의 머지가 예외이지 증거가 예외인 것이 아니다** — 리뷰를 거치지 않은 PR을 사람이 머지하면 그 전이는 거부되고 이슈는 needs-human에 그대로 남는다. 거부 마커는 **PR 범위**다 — 요구조건 거부까지 포함해 이 팔의 모든 거부가 `human-merge-refused issue=<n> pr=<pr>`를 남기므로 재큐 뒤의 새 PR은 새 판정이다(`transition()` 자신의 마커는 PR을 모르므로 dedupe의 근거가 아니다). 그리고 애초에 **이번 주기의 PR이 아니면 보지 않는다**: 머지된 PR의 head sha가 최신 review handoff의 `head_sha`와 다르면 지난 주기의 PR이므로 소리만 내고 넘어간다(그러지 않으면 지난 주기의 머지가 이번 주기를 거부로 오염시켜 진짜 두 번째 머지를 영원히 삼킨다). 조회 실패(API 502·토큰 회전)는 마커를 남기지 않고 다음 sweep이 다시 본다(그러지 않으면 딸꾹질 한 번이 그 이슈에서 이 팔을 영원히 끈다 — KTB-46이 그대로 되살아난다), 그리고 모든 건너뜀은 사유와 함께 한 줄을 남긴다(조용한 건너뜀이 KTB-23과 이 티켓이 열린 이유였다).
 
 (ADR-020 끝. 이후 dogfood 라운드가 있으면 새 ADR로 연다.)
 
@@ -3074,3 +3075,267 @@ KTB-40의 교훈은 규칙이다: **생성물의 판정 테스트는 우리 매�
 - [ ] **plan 기본값이 바뀐다**: 4역할 토론 대신 단일 opus 1패스+skeptic 1패스가 기본이고,
   load-bearing tier(처음 열리는 영속/외부 쓰기 경로, 처음 고정되는 공개 와이어 계약, 또는
   `[protected]` 변경)에서만 토론이 유지된다.
+
+---
+
+## ADR-024 qa 증거 계약 — 증거는 디렉터리가 아니라 매니페스트이고, 도구로만 쓰인다 — 2026-09-14 (KTB-42)
+
+**질문**: KTB #3은 implement를 **8라운드** 태웠다. 매 라운드 `reviewer-spec-conformance`가 같은 문장으로
+거부했다 — `spec1: qa evidence missing`. 빌더는 여덟 번 무언가를 고쳤고, 여덟 번 같은 자리에서 다시
+막혔다. 원인은 빌더가 아니었다: qa 리뷰어가 `.factory/out/qa/`에 **한 글자도 쓸 수 없었다**
+(KTB-36 → KTB-37 → KTB-40: deny 목록의 `.factory/out/*`, PR head의 설정으로 도는 스테이지, 우리보다
+관대한 Claude Code의 매처). 권한은 KTB-40에서 닫혔다. 그런데 **같은 사고가 다시 날 수 있는 구조**는
+그대로였다. 사람의 판결(2026-09-14): "qa 증거 파일을 잘 만들 수 있게 구성하는 게 근본 해결".
+
+**관측(무엇이 실제로 여덟 라운드를 만들었나)**: 셋이 겹쳤다.
+
+1. **증거의 모양이 산문이었다.** 계약이라고 부를 수 있는 것은 `harness.toml`의
+   `[evidence].qa_artifacts = ".factory/out/qa/**"` 한 줄과 두 리뷰어 프롬프트의 문단 몇 개뿐이었다.
+   "무엇이 있으면 충분한가"에 두 역할이 서로 다른 답을 들고 있었고, 어느 쪽도 스크립트가 아니었다.
+2. **증거를 남기는 길이 즉흥적이었다.** `printf … > .factory/out/qa/x.log`, `cp … .factory/out/qa/`.
+   그 길이 막히면 **아무것도 남지 않는다** — 리뷰어에게는 "나는 증거를 남길 수 없었다"를 판정 안에
+   적을 방법조차 없었고, 다음 역할이 보는 것은 빈 디렉터리 하나였다.
+3. **아무도 미리 묻지 않았다.** 쓸 수 있는지는 27분짜리 리뷰가 끝난 **뒤에**, 그것도 빌더를 가리키는
+   문장으로만 드러났다.
+
+**결정**: 셋을 각각 닫는다 — 계약 / 도구 / 프로브.
+
+- **계약** (`factory/lib/qa-evidence.js`): 증거는 `.factory/out/qa/<issue>/manifest.json` 하나로
+  선언된다(`factory.qa-evidence.v1`). `claims[]`는 **`done_when` id에 묶이고**(하네스 스모크만 예약어
+  `smoke`), 종류는 다섯이다 — `command`(실행했다: 명령 + 종료 코드) · `log`(관측했다) ·
+  `state`(데이터가 그렇게 됐다) · `screenshot`(사용자가 그 화면을 봤다) ·
+  `not_applicable`(**사유 필수** — 사유 없는 면제는 면제가 아니라 공백이다).
+  최소선은 성숙도가 정한다: **M0** 모든 id에 `command`나 `log`(또는 사유 있는 `na`), **M1** 영향
+  경로가 데이터를 건드리면 `state` 하나 이상, **M2** UI로 확인되는 id(level=e2e 또는 ui=true)마다
+  `screenshot`. 파일 포인터는 **이슈 디렉터리 안의 상대 경로**여야 하고 실재해야 한다(절대 경로·`..`는
+  무효 — 훅의 qa 카브아웃이 `..`에서 통째로 꺼지는 것과 같은 규칙이다).
+- **도구** (`factory/bin/qa-evidence.js`, `.factory/bin/`으로 설치, 의존성 없음): 증거를 남기는 **정본** 길.
+  `record … -- <cmd>`는 명령을 실제로 돌려 stdout+stderr와 종료 코드를 한 파일에 담고(시크릿은
+  `scrub-artifacts.js`로 지운 뒤에 쓴다), `attach`는 스크린샷·상태 덤프를 들이고(바이너리는 한 바이트도
+  건드리지 않는다), `na`는 사유와 함께 비우고, `finish`는 커버리지 표를 찍는다. 디렉터리에 쓸 수 없으면
+  **exit 2**로 즉시 죽는다 — 조용한 실패가 이 사고의 절반이었다.
+- **프로브**: review 스테이지가 오버레이 **직후**, `claude -p` **이전**에 `probe`를 돌린다(로스터에
+  `qa`가 있을 때). 실패는 리뷰의 reject가 **아니라** `factory:blocked` + cause `undecidable`이다 —
+  GREEN도 RED도 아닌 판정 불가이고, 이 저장소에서 그 자리는 언제나 blocked이다. `factory doctor`의
+  `qa.evidence-probe`가 사람의 자리에서 같은 확인을 한다(`--offline`/`--no-run`은 WARN).
+
+**소비처(같은 계약을 네 자리가 읽는다)**:
+- `reviewer-qa.md` — 도구로만 쓰고, verdict의 `evidence`·`verified`는 **claim id를 인용한다**.
+- `reviewer-spec-conformance.md` — `finish`의 표(또는 매니페스트)를 읽고 **id를 부르며** 거부한다:
+  `spec-evidence-missing: dw2, dw4`. "디렉터리가 비었다"는 **금지 문구**다 — 그 문장은 누구의 결함인지
+  말하지 않으면서 언제나 빌더를 가리켰다.
+- `verify-stage` (`review.v1`) — qa verdict가 매니페스트의 claim id를 하나도 인용하지 않으면 그 리뷰
+  라운드는 산출물로 인정되지 않는다.
+- `requirements.js` — 로스터에 `qa`가 있을 때 `factory:approved`는 **매니페스트 파일**을(커버리지 +
+  커밋 바인딩), `factory:merged`는 **run 기록의 지문**을 요구한다.
+
+**왜 승인과 머지가 서로 다른 것을 보는가**: `.factory/out/`은 gitignore다. 매니페스트는 커밋되지 않고,
+머지 스테이지는 별도 잡의 새 체크아웃이라 그 파일을 영영 볼 수 없다. 그래서 review 런이 run 기록의
+`review-evidence:` 줄에 `qa_manifest=<sha256>`를 함께 남긴다 — 러너가 쓰고 에이전트 세션은 push할 수
+없는 자리다(ADR-020 리뷰 batch-1/2 MF-2와 같은 구조). 머지는 그 한 줄을 본다. 필드는 **선택**이다:
+KTB-42 이전의 기록과 qa 없는 tier의 기록은 그대로 읽힌다.
+
+**이 계약이 주장하지 않는 것**(리뷰 라운드 1 SF-1 — 정직하게 다시 쓴다): 매니페스트는 **진위 경계가
+아니다.** qa 역할은 `.factory/out/qa/`에 쓸 수 있고(그것이 이 역할의 존재 이유다), 도구를 한 번도 부르지
+않고 스키마에 맞는 매니페스트와 그 파일들을 손으로 지어낼 수 있다. 러너는 그 파일을 digest하고 그것으로
+머지한다 — 곧 `qa_manifest=`가 증명하는 것은 정확히 *"리뷰 시점에 이 커밋에 대한 유효한 매니페스트가
+있었고 그 뒤 바뀌지 않았다"*이지 *"도구가 그것을 만들었다"*가 아니다. 계약이 실제로 하는 일은 **비용과
+가시성**이다: 조작하려면 스키마·id별 커버리지·실재하는 파일을 전부 맞춰야 하고, 그 전부가 한 파일로
+읽힌다. 그 위에 **가장 값싼 철자 하나**를 닫아 둔다 — 두 ci-settings의
+`Edit/Write(.factory/out/qa/**/manifest.json)` deny와 `deny-all-writes.sh`의 `manifest.json` 절
+(리다이렉션·tee·cp). 합법 경로는 도구의 **자식 프로세스**라 그 deny에 걸리지 않으므로 비용이 0이다.
+판정 자체는 여전히 qa 역할을 신뢰한다 — 그 신뢰를 만드는 것은 이 파일이 아니라 로스터다.
+
+**왜 산문으로 남겨 둔 것**(의도적으로 계약이 아닌 것):
+- **무엇을 재현할 것인가** — 어떤 실패 경로를 밟을지, 어떤 화면을 볼지는 여전히 프롬프트와 사람의
+  판단이다. 계약은 "증거가 있다/없다"를 기계로 만들 뿐, "충분히 의심했는가"는 세지 않는다.
+- **요약문의 질** — `summary`는 자유 텍스트다. 그것을 스키마로 조이면 리뷰어는 스키마를 만족시키고
+  관찰을 멈춘다(계획의 done_when이 정교해질수록 결함 표면이 됐던 것과 같은 계열의 고장).
+- **`touchesData` 판정** — `impact_paths`에 대한 이름 열거다. 알려진 조잡한 필터이고, 기울기는 일부러
+  한쪽이다: **놓치면 요구하지 않는다**. 뜰 수 없는 증거를 요구하는 쪽이 더 나쁜 고장이기 때문이다.
+
+**리뷰 라운드 1에서 닫은 것**(적대적 리뷰가 훅을 **실행해** 재현한 것들):
+- **`record -- <cmd>`가 `deny-all-writes.sh`를 우회했다.** allow는 접두 매치라 `--` 뒤가 전부 통과하고,
+  그 훅의 규칙은 **명령 위치**에 앵커돼 있어 인자 자리의 동사를 보지 못한다(직접 `rm -rf src`는 exit 2,
+  도구로 감싸면 exit 0). 자유 형식 페이로드는 유지하되 — 즉흥적 재현이 qa의 일이다 — 스폰 **전에**
+  안쪽 명령줄을 재구성해 두 훅에 그대로 먹이고, 어느 하나가 exit 2면 거절한다(exit 1, 훅 문구 인용).
+  훅은 **도구 자신의 위치**에서 푼다(`.factory/bin/` → `../../.claude/hooks/`, 이 패키지는 `../hooks/`);
+  스테이지 안에서 훅을 못 찾으면 fail closed. 그리고 **인터프리터는 페이로드가 될 수 없다**
+  (`sh -c …`는 훅이 읽을 수 없는 두 번째 셸이다) — `sh|bash|zsh|dash`, `node -e/-p`, `python -c`,
+  `perl -e`, 그리고 `env`로 감싼 같은 것들.
+- **매니페스트가 없는 것을 "qa가 인용을 안 했다"로 말했다.** `verify-stage`가 두 상태를 가르지 않아
+  증거 **경로**의 고장이 리뷰어의 인용 습관 탓으로 기록됐고(= 없애려던 그 문장의 다른 철자), 등급도
+  `needs-human`이라 ADR이 약속한 "한 라운드 더 돌면 매니페스트가 생긴다"를 스스로 막았다. 이제 사유는
+  `qa evidence manifest unusable: …`이고 등급은 `factory:blocked` + `undecidable`(프로브 실패와 같다).
+- **`--root`를 지웠다.** 에이전트가 정할 수 있는 뿌리는 훅이 볼 수 없는 탈출구였다(저장소 밖에
+  `<root>/.factory/out/qa/…`를 만들 수 있었다). 뿌리는 언제나 프로세스의 cwd다.
+- **`done_when`을 못 읽으면 `ok:false`다.** 전에는 빈 `done_when`에서 `claims: []`도 "coverage: complete"였다
+  — 이 파일의 원칙("판정 불가는 통과가 아니다")이 자기 자신에게만 걸려 있지 않았다.
+- **전부 `not_applicable`인 매니페스트는 거부한다**(그 상태는 리뷰가 아니라 보고서다). 그리고 구성은
+  run 기록에 남는다(`qa_claims=3c/1na`) — 계약이 허용하지만 눈여겨봐야 할 상태를 retro가 셀 수 있게.
+- **로스터를 못 읽으면 qa 요구조건은 꺼지지 않는다**(`requirements.js`) — "모르겠다"는 면제가 아니다.
+- **프로브가 실행하는 파일은 작업 트리가 아니라 run-stage 자신의 옆**이다(`import.meta.url`): overlay는
+  PR head가 **추가한** 파일을 지우지 않으므로, 그 경로로 풀면 러너가 PR이 쓴 코드를 돌릴 수 있었다.
+- doctor의 `qa.evidence-probe`는 CHARTER의 어느 로스터에도 `qa`가 없으면 묻지 않고, 자기가 만든
+  디렉터리는 지운다.
+
+**리뷰 라운드 2에서 닫은 것**:
+- **래퍼도 인터프리터다.** 인터프리터 판정이 첫 낱말에서 멈춰서 `timeout 5 sh -c …`·`xargs sh -c …`·
+  `nohup sh -c …`가 그대로 통과했다. 이제 `env`·`xargs`·`timeout`·`nohup`·`stdbuf`·`nice`·`command`·
+  `busybox`·`setsid`·`exec`를 **벗겨 내고** 그 뒤의 낱말을 다시 본다. `env -S`만은 벗겨 내지 않고
+  **그 자리에서 거절한다** — `-S`는 한 문자열을 자기 문법으로 다시 쪼개므로 훅이 읽은 명령줄과 실제로
+  도는 명령줄이 갈라진다.
+- **`attach --file`의 출처를 가뒀다.** 목적지는 라운드 1이 가뒀지만(`--root` 제거) 출처는 열려 있어서
+  임의의 절대 경로가 증거 디렉터리로 복사됐고, 거기서 `reviewer-spec-conformance`가 읽어 공개 handoff에
+  인용할 수 있었다. 이제 `--file`은 **저장소 안이나 임시 디렉터리**(`/tmp`·`/private/tmp`·`$TMPDIR`)만
+  받고(심볼릭 링크는 realpath 이후로 판정), 그 파일이 **이 세션의 `Read(...)` deny 글롭**에 걸리면
+  거절한다 — 목록은 손으로 베끼지 않고 세션이 실제로 들고 도는 ci-settings에서 읽는다(읽지 못했고
+  `FACTORY_STAGE` 안이면 거절: 확인하지 못한 금지 목록은 금지 목록이 아니다).
+- **`verify-stage`의 qa 분기를 둘로 갈랐다.** 라운드 1은 `ok !== true` 전부를 "증거 **경로**의 고장"으로
+  불렀는데, 거기에는 **qa 리뷰어 자신의 부족**(빈 커버리지·전부 `na`)도 섞여 있었다 — 그것을 인프라로
+  부르면 "빌더의 일이 아니다"가 사실과 어긋나고 sweeper가 같은 부족을 상대로 리뷰를 세 번 다시 돈다.
+  이제 경로의 고장만 `qa evidence manifest unusable`(→ blocked/undecidable)이고, 리뷰어의 부족은
+  `qa evidence incomplete:` 접두어를 달고 **이 라운드의 reject**로 접힌다(합성 must_fix, role `qa`,
+  id를 부른다 → `factory:rework` 또는 K 한도의 평소 경로). 어느 쪽도
+  `stage artifact missing or invalid`가 아니고, 어느 쪽도 누락으로 `needs-human`이 되지 않는다.
+- **qa 리뷰어가 알아야 할 두 거절**: 전부 `not_applicable`인 매니페스트는 거절된다(리뷰가 아니라
+  보고서다), 그리고 해석되지 않은 `done_when`은 `ok:false`다(검사할 대상이 없다는 것은 계약을 읽지
+  못했다는 뜻이지 만족했다는 뜻이 아니다).
+
+**영향**: 스펙 §7.6(새로 추가) · §5.2.3(qa의 증거 절차) · `harness.toml [evidence]` 주석 ·
+`templates/know-thy-build/qa.md`(SETUP이 이 프로젝트의 최소선 레시피를 **한 번** 적는다) ·
+두 ci-settings의 `permissions.allow`에 `Bash(node .factory/bin/qa-evidence.js *)`
+(deny가 allow를 이기지만, `--permission-mode dontAsk`에서 allow에 없는 호출은 **묻지 않고 거절**된다 —
+KTB-40의 그 교훈) · `factory doctor`의 새 검사 `qa.evidence-probe` ·
+`lintAgentMd`의 새 규칙 `qa-evidence-tool`(두 리뷰어 프롬프트가 도구를 이름으로 말해야 한다).
+
+**업그레이드 노트(기존 채택자)**:
+- [ ] `npx know-thy-build factory init --upgrade`가 `.factory/bin/qa-evidence.js`·
+  `.factory/lib/qa-evidence.js`와 두 `ci-settings*.json`을 설치한다. **업그레이드하지 않으면** review
+  스테이지의 프로브는 in-process로 돌지만(경고 한 줄), qa 세션은 도구를 부를 수 없다.
+- [ ] 로스터에 `qa`가 있는 tier의 PR은 이제 **매니페스트 없이는 머지되지 않는다**. 업그레이드 직후
+  진행 중이던 이슈는 리뷰를 한 라운드 더 돌아야 한다(그 라운드가 매니페스트를 만든다).
+- [ ] `reviewer-qa`/`reviewer-spec-conformance` 프롬프트를 커스터마이즈한 어댑터는 도구 이름
+  (`.factory/bin/qa-evidence.js`)을 프롬프트에 넣어야 한다 — 없으면 `doctor`가 FAIL한다.
+- [ ] **`attach --file`의 출처가 좁아졌다**(리뷰 라운드 2 — 동작 변경): 저장소 밖·임시 디렉터리 밖의
+  절대 경로를 `attach` 하던 하네스는 그 파일을 먼저 저장소나 `/tmp`로 옮겨야 한다. `.env*`·`.git/**`·
+  `.netrc`·`.npmrc`처럼 세션의 `Read(...)` deny에 걸리는 파일은 이제 증거가 될 수 없다.
+
+---
+
+## ADR-025 리허설 — 첫 이슈 전에 하네스를 러너에서 한 번 — 2026-09-14
+
+**질문**: 소유자가 2026-09-14에 물었다 — "새 프로젝트에 이식할 때마다 이 짓을 해야 하나?" 그 "이 짓"은
+own-calendar의 첫 다크 이슈가 요구한 **하네스 디버깅 3라운드**다. 결함은 셋이었고, 라운드마다 정확히
+하나씩 드러났다:
+
+| 라운드 | 무엇이 드러났나 | 왜 그때까지 안 보였나 |
+|---|---|---|
+| 1 | `[runtime].setup`이 Flutter를 설치하지 않아 게이트가 **exit 127** | setup은 러너에서만 돈다 — 사람의 노트북에는 이미 Flutter가 있었다 |
+| 2 | `flutter analyze`가 **기존 info**에 걸려 exit 1 | 게이트 명령을 그 저장소 전체에 대해 돌려 본 적이 없었다 |
+| 3 | `cd client` 뒤의 `test_files`/`test_one`이 **레포 루트 기준 경로**를 받아 파일을 못 찾음 | 자리표시자는 스테이지가 채운다 — 하네스를 읽는 눈에는 보이지 않는다 |
+
+**doctor는 이것을 볼 수 없다 — 구조적으로.** `--no-run`·`--offline`은 정적 검사이고(텍스트와 글롭),
+`--run`은 명령을 **사람의 노트북에서** 돌린다: 러너의 PATH도, `.factory/actions/setup`이 만든 상태도,
+스테이지가 실제로 넘기는 인자도 그 자리에는 없다. 세 결함은 전부 "러너에서 명령이 실제로 돌 때만"
+참/거짓이 갈리는 명제였다. 그래서 doctor를 더 똑똑하게 만드는 길은 없다 — **한 번 돌려 보는 잡**이 있어야 한다.
+
+**판결**: `factory-rehearse.yml` — 이슈도 라벨도 `claude -p`도 없는 잡 하나가, 스테이지가 러너에서 하는
+일을 그대로 한 번 한다. 열한 스텝이고 **하나가 RED여도 멈추지 않는다**(3라운드의 비용은 결함이 하나씩
+드러났기 때문에 생겼다 — 한 번의 리허설은 전부 보여줘야 한다):
+
+`lint`(레포 전체) · `unit`(전체) · `test_files`(`[test].test_glob`의 실재하는 파일 하나) ·
+`test_one`(그 파일의 첫 테스트 이름 — 못 읽으면 SKIPPED) · `lint_file`(소스 파일 하나) ·
+`qa-evidence`(`.factory/out/qa/` 쓰기 프로브) · `clean-check`(KTB-39 기준선 대비 쓰기 금지 클린 체크) ·
+`prove-test`(base 워크트리 생성 + 의존성 설치 — 감사 M2의 그 기계) · `gh-auth` · `gh-labels` ·
+`gh-push`(`factory/rehearsal-<run id>` 스크래치 브랜치로 `git push --dry-run`).
+
+각 스텝에는 상한이 있다(`timeout`, 124는 실패와 구별해 적는다). 판정은 표 하나로 잡 요약과
+`.factory/out/rehearsal.json`(7일 보관, 업로드 전 스크럽)에 **같은 모양으로** 남는다.
+
+**게이트**: GREEN인 리허설만 저장소에 기록된다 — 변수 `FACTORY_REHEARSED = sha256(harness.toml +
+CHARTER 프론트매터)`. 변수 쓰기는 repo **admin**을 요구하는데 ADR-021의 권장 구성에서 워크플로가 쥔
+것은 비-admin 봇 토큰이므로, 실제로는 **폴백이 본선이다**: `factory/rehearsal` commit status를 **지문
+경로(`.factory/harness.toml`·`docs/factory/CHARTER.md`)를 건드린 커밋들**에 올린다. 브랜치 head가 아닌
+이유는 r1 리뷰가 재현한 결함이다 — head는 무관한 머지마다 움직여서 **첫 머지 직후** 기록이 고아가
+되고, 그 순간부터 모든 큐 전이가 "harness changed…"로 거부됐다(아무것도 바뀌지 않았는데).
+
+**그 묶음은 느슨하다(tolerant), 정확하지 않다**(r2). 쓰기는 경로마다 **최신 커밋**에 하나씩 올리고
+(같은 커밋이면 한 번), 읽기는 경로마다 **최근 10개** 커밋을 후보로 훑어 `factory/rehearsal` 상태에서
+지금의 지문을 찾으면 그 자리에서 통과시킨다. 정확한 한 커밋에 묶었던 r1은 두 가지로 깨졌다:
+(a) 쓰기(러너의 로컬 이력)와 읽기(경로별 최신 커밋의 날짜 비교)가 **커밋 시각이 같은 초**일 때 서로
+다른 커밋을 골랐고 — git의 날짜 해상도는 1초다 — 그러면 리허설을 몇 번 다시 돌려도 큐가 영영 열리지
+않았다(결정론적으로 엇갈린 채 고정된다); (b) **해시를 바꾸지 않는 편집**(harness의 주석 한 줄, CHARTER의
+산문 — 지문은 프론트매터만 센다)이 새 커밋을 만들어 기록을 고아로 만들었다. 이제 쓰기와 읽기는 같은
+원격 조회를 쓰고(러너도 예외가 아니다), 후보 훑기가 (b)를 흡수한다. 느슨해진 것은 **어느 커밋에서 찾는가**
+뿐이고 통과의 조건은 그대로다: 후보 어디에서도 지금의 지문과 같은 해시를 찾지 못하면 거부한다.
+
+읽을 때는 **두 출처를 모두** 보고 하나라도 맞으면 연다 — 한때 admin 토큰으로 변수를 썼다가 봇 토큰으로
+옮긴 저장소가 얼어붙은 변수 때문에 영영 큐를 못 여는 일이 없도록(여전히 fail closed: 둘 다 어긋나면 거부).
+
+`transition.js`는 `→ factory:queue`를 그 해시로 막는다(스크립트도 사람도): 기록이 없거나 해시가
+어긋나면 **"harness changed since the last rehearsal — run `factory rehearse`"** 한 문장으로 거부하고,
+이슈 상태는 한 글자도 바뀌지 않는다. 다른 목적 라벨은 리허설을 묻지 않는다 — 멈춘 이슈를 앞으로 미는
+길까지 막으면 사고가 하나 더 는다.
+
+**그 검사는 opt-out이다, opt-in이 아니다**(r1 리뷰 must_fix 3). 처음 구현은 `rehearsal` 인자를 준
+호출자만 검사했는데, 그것은 이 함수에 세 번째 자물쇠를 둔 이유를 그대로 되돌리는 모양이었다:
+`node -e "import('.factory/lib/transition.js').then(m => m.transition({gh, issue, to:'factory:queue'}))"`
+한 줄이 — **인자를 빼는 것만으로** — 게이트를 껐다. 이제 큐로 가는 전이는 배선된 검사기가 있거나
+명시적 `skipRehearsal: true`가 있어야 하고, 둘 다 없으면 거부한다. 프로덕션 호출자는 **전부** 배선한다:
+사람의 `bin/transition.js`, sweeper의 하네스 주차 해제(`bin/sweep.js`), merge 스테이지의 step 9
+(`transitionOther`), flaky 수확(`gates.js` — 이슈를 `backlog`로 만든 뒤 게이트를 지나 큐로 민다),
+**모든 스테이지 전이가 모이는 `run-stage.js`의 `deps.transition`**(최종 리뷰 B-MF1 — 그 자리가 큐를
+겨누는 길은 triage의 blocked 재시도 hop `BLOCKED_RETRY.triage.hop` 하나다. 배선이 없으면 그 hop은
+fail closed로 **영원히** 거부된다: 새 GREEN 리허설도 풀지 못한다, 값이 낡은 것이 아니라 인자가 없기
+때문이다. 다른 목적 라벨에는 비용이 0이다 — `transition()`은 `to === "factory:queue"`일 때만 검사기를
+부른다), 그리고 **로컬 진입**(`run-stage.js`의 `makeLocalEntry` — `factory run triage <n>`이 `backlog` 이슈에
+라벨을 직접 쓰던 자리다. r2 리뷰가 찾은 마지막 우회였다: 그 자리가 열려 있으면 사람의
+`transition.js … --human`은 거부당하는데 `factory run triage <n>`은 통과하고, 그 뒤의 plan·implement·
+review는 러너에서 한 번도 리허설하지 않은 하네스 위로 간다 — 정확히 own-calendar의 실패다.
+`transition()`으로 우회시키지 않은 이유는 그 함수가 요구조건 검사와 두 번째 전이 코멘트를 더하기
+때문이다: 같은 검사기를 부르고 같은 문장으로 거부하는 것으로 족하다).
+`skipRehearsal`은 **테스트 전용**이다. 로봇의 재큐가 거부되는 것은 사고가 아니다: 그 팔들은 매 주기
+다시 시도하고(이미 실패 편향이다), 사람이 `factory rehearse`를 돌리는 순간 통과한다 — 그리고 사람이
+`:unstick`에서 거부당하는데 로봇만 조용히 통과하는 비대칭이 사라진다.
+
+**리허설은 기본 브랜치에서만 돈다.** 워크플로 잡에 `if: github.ref == format('refs/heads/{0}',
+github.event.repository.default_branch)`가 걸리고, 체크아웃도 그 브랜치를 본다. `rehearse.js` 자신도
+`GITHUB_REF_NAME`을 하네스의 기본 브랜치와 대조해 다르면 **기록 없이 exit 1** 한다. 이중인 이유:
+`gh workflow run --ref <branch>`는 레포 write면 누구나(= 모든 에이전트 스테이지가) 부를 수 있고
+`.factory/**`는 브랜치 push 시점에 훅도 integrity도 보지 않는다 — 그 조합이면 브랜치의 스크립트가
+main의 지문으로 GREEN을 기록할 수 있었다(게이트 명령을 한 줄도 돌리지 않고).
+
+**기록의 성패는 판정의 일부다.** `rehearsal.json`은 `recorded: {via, variable, status, sha}`를 싣고,
+`ok`는 "스텝 전부 GREEN **그리고** 어느 한쪽 기록이 성공"일 때만 참이다. r1에서는 표가 GREEN이면
+아티팩트도 `ok: true`였고 기록 실패는 잡 로그에만 남아서, 잡이 빨간데 `factory rehearse`는 "the queue
+is open"을 찍고 0으로 끝났다 — 사람은 첫 이슈가 거부될 때까지 그 사실을 몰랐다.
+
+**왜 CHARTER 프론트매터까지인가**: `tier_default`·`limits`·`merge.human_gate`·`plan.*`는 러너가 무엇을
+얼마나 도는지를 바꾼다. 반대로 산문(NEVER_AUTOMATE 설명, Definition of Done의 문장)은 지문에서 뺀다 —
+그것까지 세면 문서 한 줄을 고칠 때마다 큐가 닫힌다.
+
+**등급의 셋**: doctor `rehearsal.current`는 어긋난 기록을 **FAIL**(큐가 실제로 막혀 있다), 기록 없음을
+**WARN**(설치 직후의 정상 상태 — 채택 순서가 install → doctor → rehearse → 첫 이슈다), 오프라인을
+**WARN**(판정 불가)으로 가른다. `factory rehearse`(CLI)는 워크플로를 띄우고, 기다리고, 같은 표를 찍고,
+RED면 non-zero로 끝난다.
+
+**대가와 잔여 위험**:
+- 잡 하나(≈ unit 한 번 + 설치 한 번)의 비용과 시간이 채택마다 더해진다. 3라운드(다크 라운드 ×3 =
+  triage/plan/implement/review 세 바퀴)와 바꾼 값이라 크지 않다 — 그것이 소유자 질문의 답이다:
+  "이 짓"은 한 번의 잡으로 줄어든다.
+- 리허설은 **하네스가 러너에서 도는가**를 증명하지, 그 게이트가 좋은 게이트인가를 증명하지 않는다
+  (`lint`가 아무것도 검사하지 않는 명령이면 doctor의 `gates.lint-noop`이 그것을 본다).
+- 리허설과 첫 이슈 사이에 러너 이미지가 바뀌면(ubuntu-latest의 이동) 지문은 그대로인데 사실이 바뀐다.
+  `push` 트리거(하네스·CHARTER 변경)와 사람의 재실행이 그 창을 좁히는 전부다.
+- `gh-push`는 `--dry-run`이라 권한은 증명하되 브랜치를 만들지 않는다. 스크래치 삭제는 관용적으로
+  덧붙인다(예전 런이 진짜로 만든 것이 남아 있을 수 있다).
+- 하네스 이슈는 여전히 `factory:queue`로 바로 태어난다 — `harness-request.js`의 `ensureHarnessIssue`와
+  retro의 성숙도 격차 이슈(`bin/retro.js`, 같은 부류다: 둘 다 `factory:harness` 라벨을 함께 단다).
+  그것이 **설계**다: 리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 통째로 잠긴다.
+  반대로 flaky 수확은 `backlog`로 태어나 게이트를 지난다(r1 리뷰 should_fix 3). 이 둘이 게이트를
+  지나지 않는 **유일한** 생산자이고, 그 사실은 여기에 적혀 있어야 grep으로 찾을 수 있다.
+- 지문 해시의 구분자는 `\u0000` **이스케이프**로 적는다. r1은 리터럴 NUL 바이트를 넣었고, 그 두
+  바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
+  정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
+  `factory/bin/lint.js`의 `nul-byte` 규칙이 재발을 막는다.

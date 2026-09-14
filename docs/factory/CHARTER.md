@@ -59,7 +59,10 @@ false`다 — 기본값이 아니라 **명시적 선택**이고, `factory doctor
 다크 머지를 기본으로 심지 않는다.
 
 사람이 여전히 머지하는 경로는 그대로다 — 보호 경로·역할 섹션 정책·무결성 위반에 걸린 PR은
-`factory:needs-human`이고 사람이 diff를 읽고 GitHub에서 머지한다.
+`factory:needs-human`이고 사람이 diff를 읽고 GitHub에서 머지한다. 머지한 뒤에는 손댈 것이 없다:
+sweeper가 한 회차(≤30분) 안에 그 이슈를 `factory:merged`로 옮기고 닫는다(KTB-46). 그 전이도 자동
+머지와 똑같은 증거 검사를 지나므로, 리뷰를 거치지 않은 PR을 머지했다면 이슈는 `needs-human`에
+그대로 남는다 — 사람의 머지가 예외이지 증거가 예외인 것이 아니다.
 
 ## triage 기본 판정 (`triage.default: ready`, 외부 감사 2026-09-14 M1)
 `merge.human_gate: false`와 **같은 이유의 같은 선택**이다: 이 저장소에서 재는 것은 "이슈 하나가 사람의

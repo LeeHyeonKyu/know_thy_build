@@ -1,0 +1,90 @@
+name: factory-rehearse
+# ADR-025 — **첫 이슈 전에 하네스를 러너에서 한 번 돌린다.** own-calendar의 첫 다크 이슈(2026-09-14)는
+# 하네스 초안의 결함 세 개를 라운드마다 하나씩 드러냈다: `[runtime].setup`이 툴체인을 깔지 않아 게이트가
+# exit 127, `analyze`가 기존 info에 걸려 exit 1, `cd <subdir>` 뒤의 `test_files`/`test_one`이 레포 루트 기준
+# 경로를 받아 파일을 못 찾음. 셋 다 명령이 **러너에서 실제로 돌 때만** 보이고, doctor는 정적이라
+# (`--no-run`/`--offline`) 구조적으로 볼 수 없으며 `--run`은 사람의 노트북에서 돈다. 이 잡이 그 세
+# 라운드를 한 번으로 바꾼다.
+on:
+  workflow_dispatch:
+  # 하네스나 CHARTER가 바뀌면 기록된 리허설은 그 순간 낡는다(transition.js가 해시로 그것을 안다) —
+  # 기본 브랜치에 그 변경이 들어오는 순간 자동으로 한 번 더 돈다.
+  #
+  # `branches: ['**']`인 이유(리뷰 r2 nf-5): 기본 브랜치의 이름은 저장소마다 다르다. `[main, master]`로
+  # 적어 두면 `trunk`·`develop`을 쓰는 저장소에서는 이 트리거가 **영영 발화하지 않아** 하네스를 고쳐도
+  # 리허설이 다시 돌지 않는다(사람이 알아채고 손으로 돌릴 때까지 큐가 닫힌 채로 남는다). 필터는 아래
+  # 잡 레벨 `if:`가 한다 — 그쪽은 GitHub이 주는 **실제** 기본 브랜치 이름과 대조하므로 이름을 모른 채로도
+  # 정확하고, 다른 브랜치의 push는 잡이 시작되기 전에 건너뛰어진다.
+  push:
+    branches: ['**']
+    paths:
+      - .factory/harness.toml
+      - docs/factory/CHARTER.md
+# 이 잡의 `GITHUB_TOKEN`은 **아무 스텝도 쓰지 않는다**: 체크아웃은 `FACTORY_BOT_TOKEN`으로 하고,
+# `rehearse.js` 안의 `gh`/`git`도 같은 토큰으로 나간다(그 토큰이 status·variable·push 권한의 출처다).
+# 그래서 최소 권한만 남긴다 — `contents: write`는 쓰지 않는 쓰기 자격증명을 잡에 쥐어 주는 것이었다.
+permissions:
+  contents: read
+# 그룹에 ref를 넣는 이유(최종 리뷰 B-SF4): 위의 `branches: ['**']` 때문에 하네스 이슈의 **모든 빌더
+# 브랜치 push**가 이 그룹에 런을 하나씩 넣는다(잡은 `if:`에서 곧바로 건너뛰어지지만, 대기열에는 들어간다).
+# GitHub은 그룹당 pending 런을 하나만 보관하고 새 것이 옛 것을 **취소한다** — 그래서 정작 중요한 런
+# (하네스 머지 직후 기본 브랜치 push, 큐를 다시 여는 그 런)이 진행 중인 60분짜리 리허설 뒤에서
+# 대기하다 조용히 취소될 수 있다. 증상은 "하네스를 고쳤는데 큐가 계속 닫혀 있다"이고 아무 신호도 없다.
+# ref별로 그룹을 가르면 기본 브랜치의 런은 자기 그룹에서만 줄을 서고, 직렬화(같은 ref의 리허설 하나)는
+# 그대로 유지된다.
+concurrency:
+  group: factory-rehearse-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  rehearse:
+    # ADR-025 / 리뷰 must_fix 4 — **기본 브랜치에서만 돈다.** `gh workflow run … --ref <branch>`는 레포
+    # write면 누구나(= 모든 에이전트 스테이지가) 부를 수 있고, `.factory/**`는 브랜치 push 시점에는
+    # 훅도 integrity도 보지 않는다 — 그 조합이면 브랜치의 `rehearse.js`가 main의 지문으로 GREEN을
+    # 기록할 수 있었다(게이트가 열리고, 아무 게이트 명령도 돌지 않은 채로). `rehearse.js` 자신도
+    # `GITHUB_REF_NAME`을 하네스의 기본 브랜치와 대조해 다르면 기록 없이 exit 1 한다(이중 방어).
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # 게이트 전체(unit 포함) + base 워크트리 설치가 한 잡 안에서 돈다 — 스테이지의 상한과 같은 자리.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 트리거가 dispatch든 push든 **기본 브랜치의 트리**를 본다(위 `if:`와 한 쌍이다).
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+      # 스테이지와 **같은** setup이어야 한다 — 리허설이 증명하려는 것이 바로 이 스텝의 산출물이다
+      # ([runtime].setup이 툴체인을 깔았는가, PATH가 다음 스텝에 서는가).
+      - uses: ./.factory/actions/setup
+        with:
+          claude: "false"
+          test-env: "true"
+      - name: Rehearse
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_RUN_ID: ${{ github.run_id }}
+        run: node .factory/bin/rehearse.js
+      # ADR-020 최종 리뷰 SF-1 — 업로드 전에 크리덴셜을 지운다. 이 잡이 올리는 것은 파일 하나
+      # (`.factory/out/rehearsal.json`)이고 체크아웃 트리는 올리지 않는다 — 그래도 스크럽이 필요하다:
+      # 그 파일에는 **게이트 명령의 출력 세 줄**이 스텝마다 실려 있고, 무엇이 거기 찍히는지는 저장소의
+      # 빌드 스크립트가 정한다(토큰을 에코하는 설치 스크립트는 드물지 않다).
+      - name: Scrub credentials from the artifacts
+        id: scrub-artifacts
+        if: always()
+        env:
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .factory/bin/scrub-artifacts.js .factory/out
+      - name: Upload the rehearsal report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # `factory rehearse`(CLI)가 이 이름으로 내려받는다 — 바꾸면 그 명령이 표를 찾지 못한다.
+          name: factory-rehearsal-${{ github.run_id }}
+          path: .factory/out/rehearsal.json
+          include-hidden-files: true
+          # 기본값은 90일이다(yml-lint의 `artifact-retention`이 명시를 강제한다).
+          retention-days: 7
+          if-no-files-found: warn

@@ -167,6 +167,31 @@ test("searchIssues lists open issues by label", async () => {
   expect(call.args).toEqual(["issue", "list", "-R", repo, "--label", "factory:awaiting-review", "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]);
 });
 
+test("KTB-46: searchIssues takes state and sort options — closed issues keep their label, and ordering moves to the API", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await gh.searchIssues("factory:needs-human", { state: "all" });
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--label", "factory:needs-human", "--state", "all", "--limit", "200", "--json", "number,title,updatedAt"]);
+  // 정렬 수식어는 `--search`로만 갈 수 있으므로 그때는 라벨도 검색 문법으로 옮긴다 — 그래야 그 200개가
+  // "번호가 큰 200개"가 아니라 "가장 최근에 움직인 200개"가 된다(닫힌 이슈는 무한히 쌓인다).
+  // 정렬을 쓰는 호출만 `state`도 받아 온다 — 그 팔은 닫힌 이슈까지 보므로 "열려 있는가"가 후보를
+  // 자르는 기준의 절반이다(r5). 기본 호출의 필드 목록은 위 단언대로 그대로다.
+  await gh.searchIssues("factory:needs-human", { state: "all", sort: "updated-desc" });
+  expect(run.calls[1].args).toEqual(["issue", "list", "-R", repo, "--search", 'label:"factory:needs-human" sort:updated-desc', "--state", "all", "--limit", "200", "--json", "number,title,updatedAt,state"]);
+});
+
+test("KTB-46: prMergeInfo reports who merged the PR and on which head sha — missing fields stay null", async () => {
+  const body = { number: 4, headRefOid: "c".repeat(40), mergeCommit: { oid: "d".repeat(40) }, mergedAt: "2026-09-14T13:59:00Z", mergedBy: { login: "LeeHyeonKyu" } };
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify(body), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.prMergeInfo(4)).toEqual({ headSha: "c".repeat(40), mergeSha: "d".repeat(40), mergedAt: "2026-09-14T13:59:00Z", mergedBy: "LeeHyeonKyu" });
+  expect(run.calls[0].args).toEqual(["pr", "view", "4", "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]);
+
+  // 머지되지 않은 PR: 아무것도 지어내지 않는다.
+  const run2 = makeFakeRun([{ match: (c, a) => a[0] === "pr", result: { code: 0, stdout: JSON.stringify({ number: 4, headRefOid: "c".repeat(40), mergeCommit: null, mergedAt: null, mergedBy: null }), stderr: "" } }]);
+  expect(await makeGh({ run: run2, repo }).prMergeInfo(4)).toEqual({ headSha: "c".repeat(40), mergeSha: null, mergedAt: null, mergedBy: null });
+});
+
 test("createIssue returns the issue number parsed from the created URL", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "create", result: { code: 0, stdout: "https://github.com/o/r/issues/42\n", stderr: "" } }]);
   const gh = makeGh({ run, repo });

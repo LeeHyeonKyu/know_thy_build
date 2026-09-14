@@ -2,6 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
@@ -855,7 +856,7 @@ test("makeLocalEntry: backlog issue with no factory label → sets factory:queue
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog", "priority:p1"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   const line = await entry();
   expect(line).toBe("local entry: backlog → factory:queue");
   expect(setFactoryLabel).toHaveBeenCalledWith(12, "factory:queue");
@@ -863,11 +864,35 @@ test("makeLocalEntry: backlog issue with no factory label → sets factory:queue
   expect(comment).toHaveBeenCalledWith(12, expect.stringContaining("backlog → factory:queue — claimed locally first (§4.2.5)"));
 });
 
+test("makeLocalEntry: a stale or unwired rehearsal refuses the local entry — the label is never written (KTB-44 nf-2)", async () => {
+  // 리뷰 r2 nf-2 — 여기는 `transition()`을 거치지 않는 유일한 큐 진입이었다. 그 비대칭 때문에
+  // `transition.js <n> factory:queue --human`은 거부당하는데 `factory run triage <n>`은 통과했고,
+  // 그 뒤의 plan·implement·review는 **러너에서** 한 번도 리허설하지 않은 하네스 위로 갔다.
+  for (const rehearsal of [
+    async () => ({ ok: false, reason: "harness changed since the last rehearsal — run `factory rehearse`" }),
+    null,                                     // 배선 자체가 없는 경우도 통과가 아니다(fail closed)
+  ]) {
+    const setFactoryLabel = vi.fn(async () => {});
+    const comment = vi.fn(async () => {});
+    const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] }), setFactoryLabel, comment };
+    const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal })();
+    expect(line).toMatch(/^local entry refused: /);
+    expect(setFactoryLabel).not.toHaveBeenCalled();
+    expect(comment).not.toHaveBeenCalled();
+  }
+});
+
+test("makeLocalEntry: the refusal carries the same sentence the human CLI gets", async () => {
+  const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] }), setFactoryLabel: vi.fn(), comment: vi.fn() };
+  const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: false, reason: REHEARSAL_STALE }) })();
+  expect(line).toContain(REHEARSAL_STALE);
+});
+
 test("makeLocalEntry: issue already carries a factory label → no-op, returns null", async () => {
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["factory:ready"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(setFactoryLabel).not.toHaveBeenCalled();
   expect(comment).not.toHaveBeenCalled();
@@ -877,7 +902,7 @@ test("makeLocalEntry: backlog issue but no factory label and no backlog label ei
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["priority:p1"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(setFactoryLabel).not.toHaveBeenCalled();
 });
@@ -886,7 +911,7 @@ test("makeLocalEntry: unlabeled issue → null, no gh mutation", async () => {
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: [] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(setFactoryLabel).not.toHaveBeenCalled();
   expect(comment).not.toHaveBeenCalled();
@@ -896,7 +921,7 @@ test("makeLocalEntry: FACTORY_LOCAL_ENTRY unset → no-op, returns null, gh unto
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: vi.fn(async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] })), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: {} });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: {}, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(gh.issue).not.toHaveBeenCalled();
   expect(setFactoryLabel).not.toHaveBeenCalled();
@@ -2699,4 +2724,127 @@ test("review roster tier: the triage self-report can raise the tier but never lo
   // 모르는 값은 docs로 기울지 않는다 — 약한 쪽으로 기우는 정규화는 자기 신고를 그대로 믿는 것과 같다.
   expect(reviewTier({ claimed: "weird", floor: "standard" })).toBe("standard");
   expect(reviewTier({ claimed: "weird", floor: "weird" })).toBe("standard");
+});
+
+
+// ── 최종 리뷰 B-MF1 / A-SF1 — run-stage의 두 이음매 ────────────────────────────────────────────
+
+import { transition as realTransition } from "../lib/transition.js";
+import { REHEARSAL_UNWIRED } from "../lib/transition.js";
+import { QA_SHORTFALL_ID } from "../bin/run-stage.js";
+
+/**
+ * B-MF1 — **triage의 blocked 재시도 hop은 `factory:queue`를 겨눈다.** 모든 스테이지 전이가 모이는
+ * `deps.transition`은 `transition()`의 여섯 번째 프로덕션 호출자인데 리허설 검사기가 배선돼 있지
+ * 않았다. `transition()`은 배선 없는 큐 전이를 fail closed로 거부하므로 보안 구멍은 아니지만, 그 hop은
+ * **영원히** 거부된다 — 리허설을 새로 GREEN으로 돌려도 풀리지 않는다(값이 낡은 게 아니라 인자가 없다).
+ * 결과는 triage 스테이지의 인프라 딸꾹질 하나마다 R번의 재시도와 사람 에스컬레이션이다.
+ *
+ * 여기서는 그 hop을 **진짜 `transition()`으로** 돌린다 — 배선된 자리의 모양 그대로.
+ */
+const blockedTriageDeps = ({ gh, rehearsal }) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), release: async () => {}, runRecord: () => {},
+  issueLabels: async () => ["factory:blocked"],
+  blockedOrigin: async () => ({ from: "factory:queue", stage: "triage" }),
+  // `main()`이 만드는 자리와 같은 모양: 모든 스테이지 전이가 여기로 모이고, 검사기가 함께 실린다.
+  transition: async ({ to, reason, prerequisite = false }) => realTransition({
+    gh, issue: 7, to, reason, stage: "triage",
+    ctxExtra: { gatesChecked: true, ...(prerequisite ? { prerequisite: true } : {}) },
+    ...(rehearsal === undefined ? {} : { rehearsal }),
+  }),
+  // hop 이후로는 가지 않는다 — 이 테스트가 보는 것은 hop 하나다.
+  assertHandoff: async () => ({ ok: false, reason: "stop here" }),
+});
+
+const blockedGh = () => ({
+  issue: vi.fn(async () => ({ number: 7, title: "t", body: "", labels: ["factory:blocked"] })),
+  comments: vi.fn(async () => []),
+  setFactoryLabel: vi.fn(async () => {}),
+  comment: vi.fn(async () => "url#issuecomment-1"),
+});
+
+test("B-MF1: the triage blocked-retry hop passes with a GREEN rehearsal checker wired into deps.transition", async () => {
+  const gh = blockedGh();
+  const lines = [];
+  const deps = { ...blockedTriageDeps({ gh, rehearsal: async () => ({ ok: true, source: "variable" }) }), runRecord: (l) => lines.push(...l) };
+  await runStage({ stage: "triage", issue: 7, deps });
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:queue");
+  expect(lines.some((l) => /triage: blocked retry — hopped back to factory:queue/.test(l))).toBe(true);
+});
+
+test("B-MF1: a stale rehearsal refuses the same hop — and an UNWIRED deps.transition is the regression this closes", async () => {
+  // (a) 낡은 리허설: 거부는 정상이고, 사람이 `factory rehearse`를 돌리면 풀린다.
+  const staleGh = blockedGh();
+  const staleLines = [];
+  const stale = { ...blockedTriageDeps({ gh: staleGh, rehearsal: async () => ({ ok: false, reason: `${REHEARSAL_STALE} — recorded abc, current def` }) }), runRecord: (l) => staleLines.push(...l) };
+  expect(await runStage({ stage: "triage", issue: 7, deps: stale })).toBe(2);
+  expect(staleGh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(staleLines.join("\n")).toMatch(REHEARSAL_STALE);
+
+  // (b) 배선이 아예 없으면 사유는 "리허설이 낡았다"가 아니라 **배선 오류**다 — 그리고 그 상태는
+  //     새 GREEN 리허설로도 풀리지 않는다. 이것이 B-MF1이 닫은 실패다.
+  const unwiredGh = blockedGh();
+  const unwiredLines = [];
+  const unwired = { ...blockedTriageDeps({ gh: unwiredGh, rehearsal: undefined }), runRecord: (l) => unwiredLines.push(...l) };
+  expect(await runStage({ stage: "triage", issue: 7, deps: unwired })).toBe(2);
+  expect(unwiredGh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(unwiredLines.join("\n")).toMatch(REHEARSAL_UNWIRED);
+});
+
+/**
+ * A-SF1 — **qa 증거 부족은 이 라운드의 reject이지 스테이지의 실패가 아니다.** 예전에는 `verify-stage`가
+ * 그 부족을 `reasons`로 내보냈고, run-stage가 다른 분기의 기본 접두어(`stage artifact missing or
+ * invalid`)를 붙여 `factory:needs-human`으로 보냈다 — 산출물은 멀쩡한데 산출물 탓을 했고, 리뷰어 넷이
+ * 돈 라운드를 버리고 **한 라운드 더 돌면 풀릴 일**을 사람에게 올렸다(등급이 판단이 아니라 누락이었다).
+ */
+const qaShortfallDeps = ({ transition, record, round = 1, maxRounds = 3 }) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  resetGates: async () => {}, assertHandoff: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), resetAgentsLog: async () => {},
+  buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: maxRounds } }),
+  claudeP: async () => ({ is_error: false, result: "{}" }),
+  gates: async () => null,
+  reviewRounds: async () => round - 1,
+  verifyStage: () => ({
+    ok: true, reasons: [], source: "result",
+    data: {
+      schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round,
+      orchestration: "workflow", guarantee: "verified",
+      verdicts: [
+        { role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: ["read it"] },
+        { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: ["dw1 reproduced"] },
+      ],
+    },
+    qaShortfall: { ids: ["dw2", "dw4"], reason: "qa evidence incomplete: spec-evidence-missing: dw2, dw4; the qa reviewer records it with `node .factory/bin/qa-evidence.js record|attach|na` and checks it with `finish`" },
+  }),
+  writeHandoff: async () => {}, transition, runRecord: record, release: async () => {},
+});
+
+test("A-SF1: a qa-only shortfall becomes a synthetic must_fix and the round goes to factory:rework", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const lines = [];
+  const code = await runStage({ stage: "review", issue: 7, deps: qaShortfallDeps({ transition, record: (l) => lines.push(...l) }) });
+  expect(code).toBe(0);
+  const call = transition.mock.calls.at(-1)[0];
+  expect(call.to).toBe("factory:rework");
+  expect(call.data.decision).toBe("rework");
+  const mf = call.data.must_fix.find((m) => m.id === QA_SHORTFALL_ID);
+  expect(mf.by).toBe("qa");                                         // 역할이 이름으로 실린다
+  expect(mf.evidence).toMatch(/dw2, dw4/);                          // 부족한 id가 이름으로 실린다
+  expect(mf.claim.startsWith("qa evidence incomplete:")).toBe(true);
+  // 절대 쓰지 않는 두 문장: 산출물 탓, 그리고 누락으로 정해진 needs-human.
+  expect(lines.join("\n")).not.toMatch(/stage artifact missing or invalid/);
+  expect(transition.mock.calls.every((c) => c[0].to !== "factory:needs-human")).toBe(true);
+  expect(lines.join("\n")).toMatch(/qa evidence incomplete: spec-evidence-missing: dw2, dw4/);
+});
+
+test("A-SF1: at the K limit the same shortfall takes the normal K path, not a stage failure", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const lines = [];
+  await runStage({ stage: "review", issue: 7, deps: qaShortfallDeps({ transition, record: (l) => lines.push(...l), round: 3, maxRounds: 3 }) });
+  const call = transition.mock.calls.at(-1)[0];
+  expect(call.to).toBe("factory:needs-human");
+  expect(call.reason).toMatch(/review rounds/);                     // K의 문장이지 산출물의 문장이 아니다
+  expect(lines.join("\n")).not.toMatch(/stage artifact missing or invalid/);
 });

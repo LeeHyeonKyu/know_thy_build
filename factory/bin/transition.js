@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { run } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
 import { parseTransitionArgs, refuseHumanFlag, transition } from "../lib/transition.js";
+import { makeRehearsalChecker } from "../lib/rehearsal.js";
+import { loadHarness } from "../lib/config.js";
 
 const USAGE = [
   "usage: transition <issue> [<to-label>] [--human] [--retry] [--reason <text>]",
@@ -44,6 +46,18 @@ if (existsSync(gatesPath)) {
   catch (e) { console.error(`transition: ${gatesPath} unreadable — ${e.message}`); }
 }
 const ctxExtra = { gatesChecked: true, ...(gatesFile ? { gatesFile } : {}) };
-const r = await transition({ gh: makeGh({ run, repo }), issue, to, human, retry, reason, ctxExtra });
+const gh = makeGh({ run, repo });
+
+/**
+ * KTB-44 / ADR-025 — **큐로 가는 전이만** 리허설을 묻는다. 지문은 로컬에서 계산하고(harness.toml +
+ * CHARTER 프론트매터), 기록은 저장소에서 읽는다. 읽지 못하면 통과가 아니라 거부다(fail closed) —
+ * own-calendar의 3라운드는 "러너에서 한 번도 돌려보지 않은 하네스로 이슈를 시작한" 대가였다.
+ * 검사기는 목적 라벨이 `factory:queue`일 때만 불린다(다른 전이는 gh 호출 하나도 더 하지 않는다).
+ */
+let defaultBranch = "main";
+try { defaultBranch = loadHarness(root)?.project?.default_branch || "main"; } catch { /* 기본값 그대로 */ }
+const rehearsal = makeRehearsalChecker({ gh, root, branch: defaultBranch });
+
+const r = await transition({ gh, issue, to, human, retry, reason, ctxExtra, rehearsal });
 console.log(JSON.stringify(r));
 process.exit(r.ok ? 0 : 2);

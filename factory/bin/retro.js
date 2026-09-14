@@ -200,6 +200,8 @@ export function accumulateStats(total, window) {
   for (const [role, n] of Object.entries(w.unique_findings_by_role || {})) unique[role] = (unique[role] || 0) + (Number(n) || 0);
   const findingsTotal = (Number(t.findings_total) || 0) + (Number(w.findings_total) || 0);
   const overlapping = (Number(t.overlapping_findings) || 0) + (Number(w.overlapping_findings) || 0);
+  const qaClaims = (Number(t.qa_claims_total) || 0) + (Number(w.qa_claims_total) || 0);
+  const qaNa = (Number(t.qa_na_total) || 0) + (Number(w.qa_na_total) || 0);
   const tok = (key, side) => (Number(t[key]?.tokens?.[side]) || 0) + (Number(w[key]?.tokens?.[side]) || 0);
   // 누적 비용은 **1e-6 자리로만** 반올림한다(센트로 깎지 않는다) — 센트 미만인 창을 round2로 접으면
   // 그 창의 비용이 누적에서 영구히 사라지고(0을 더한다) 작은 회차를 많이 도는 공장의 총계가 0에 머문다.
@@ -218,6 +220,13 @@ export function accumulateStats(total, window) {
     unique_findings_by_role: unique,
     overlap_ratio: findingsTotal ? round2(overlapping / findingsTotal) : 0,
     needs_human: (Number(t.needs_human) || 0) + (Number(w.needs_human) || 0),
+    // ADR-024 / KTB-42 SF-3 — qa claim 구성(최종 리뷰 A-SF6). 겹침과 같은 규약이다: 비율은 쌓지 않고
+    // 분자·분모를 쌓아 거기서 다시 낸다(비율의 평균은 비율이 아니다).
+    qa_approvals: (Number(t.qa_approvals) || 0) + (Number(w.qa_approvals) || 0),
+    qa_claims_total: qaClaims,
+    qa_na_total: qaNa,
+    qa_na_ratio: qaClaims + qaNa ? round2(qaNa / (qaClaims + qaNa)) : 0,
+    qa_na_heavy_approvals: (Number(t.qa_na_heavy_approvals) || 0) + (Number(w.qa_na_heavy_approvals) || 0),
     usage: sumUsage("usage"),
     // retro 자신의 비용은 스테이지 비용과 **따로** 쌓는다 — 섞으면 "공장이 일하는 데 든 비용"과
     // "공장이 자기를 돌아보는 데 든 비용"을 다시 가를 수 없고, N 자가 조정의 근거가 흐려진다.
@@ -246,6 +255,19 @@ const uniqueCell = (s) => {
 };
 
 /**
+ * ADR-024 / KTB-42 SF-3 — qa 승인의 claim 구성(최종 리뷰 A-SF6). `overlapCell`과 같은 이유로 비율
+ * 하나로 끝내지 않는다: "0.00"이 "na가 없었다"인지 "qa 기록이 있는 승인이 한 건도 없었다"인지
+ * 가를 수 있어야 한다. 뒤의 괄호가 그 분모이고, `na-heavy`는 절반 이상을 `na`로 덮은 승인 수다.
+ */
+const qaNaCell = (s) => {
+  const approvals = Number(s?.qa_approvals) || 0;
+  if (approvals === 0) return "없음";
+  const na = Number(s?.qa_na_total) || 0;
+  const total = na + (Number(s?.qa_claims_total) || 0);
+  return `${Number(s?.qa_na_ratio ?? 0).toFixed(2)} (${na}/${total} claims, na-heavy ${Number(s?.qa_na_heavy_approvals) || 0}/${approvals} approvals)`;
+};
+
+/**
  * `_retro.md` 위쪽에 사람이 먼저 읽는 통계 표(§8.3 "통계" 절과 같은 수치). 두 열이다: 이번 창(N 자가
  * 조정을 움직이는 값)과 누적(공장의 전체 이력). 창만 보면 "공장이 지금까지 무엇을 했는가"를 알 수 없고,
  * 누적만 보면 "이번에 무엇이 달라졌는가"를 알 수 없다.
@@ -263,6 +285,7 @@ export function statsTable(window, total) {
     row("rejects by role", rejectCell(w), rejectCell(t)),
     row("reviewer overlap", overlapCell(w), overlapCell(t)),
     row("unique findings by role", uniqueCell(w), uniqueCell(t)),
+    row("qa na ratio", qaNaCell(w), qaNaCell(t)),
     row("cost (usd)", Number(w.usage?.cost_usd || 0).toFixed(2), Number(t.usage?.cost_usd || 0).toFixed(2)),
     row("tokens", `input ${w.usage?.tokens?.input || 0} / output ${w.usage?.tokens?.output || 0}`, `input ${t.usage?.tokens?.input || 0} / output ${t.usage?.tokens?.output || 0}`),
     // retro 자신의 비용 — 스테이지 비용과 한 줄 떨어뜨려 둔다(§4.4). 이 줄이 없으면 공장은 자기를

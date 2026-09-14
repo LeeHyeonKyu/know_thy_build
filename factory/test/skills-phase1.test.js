@@ -40,13 +40,28 @@ const FORBIDDEN = ["worktree", "check-merge-gate", "finish", "sub-agent", "subag
 // (it orchestrates agents), so no file needs an exemption.
 const HELPERS = ["architect", "designer"];
 
+/**
+ * ADR-024 / KTB-42 — **정확히 한 문자열만 예외다**: `qa-evidence.js finish`(와 그 인자 `finish --issue`).
+ * 그것은 죽은 Phase-1 흐름의 "finish"가 아니라 증거 도구의 하위 명령 이름이고, `docs/QA.md` 템플릿은
+ * 그 명령을 **이름으로** 적어야 한다(적지 않으면 리뷰어가 즉흥 리다이렉션으로 돌아간다). 예외는
+ * 낱말이 아니라 **그 두 구절**에 걸린다 — 스캔에서 구절만 지운 사본을 검사하므로, 산문 속의 맨
+ * "finish"는 여전히 걸린다.
+ */
+const QA_EVIDENCE_FINISH = [/qa-evidence\.js finish/g, /`?finish --issue/g];
+const scannable = (text) => QA_EVIDENCE_FINISH.reduce((t, re) => t.replace(re, "「qa-evidence 하위 명령」"), text.toLowerCase());
+
 for (const name of [...NAMES, ...HELPERS]) {
   for (const term of FORBIDDEN) {
     test(`forbidden string: templates/know-thy-build/${name}.md does not contain "${term}" (case-insensitive)`, () => {
-      expect(readTemplate(name).toLowerCase()).not.toContain(term);
+      expect(scannable(readTemplate(name))).not.toContain(term);
     });
   }
 }
+
+test("KTB-42: the exemption is exactly the qa-evidence subcommand — bare prose 'finish' is still forbidden", () => {
+  expect(scannable("run `node .factory/bin/qa-evidence.js finish --issue 3`")).not.toContain("finish");
+  expect(scannable("finish the worktree and report")).toContain("finish");
+});
 
 // `gate:` is scoped: prose may say "there is no `gate:` field" (architect/designer now do), but
 // no fenced yaml block may define one.

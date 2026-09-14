@@ -132,3 +132,44 @@ test("provenance: the handoff must match the run record — a forged all-approve
   // 런을 지목하지 않는 줄도 증거가 아니다.
   expect(verifyReviewProvenance({ handoff: honest, record: { ...record, runId: "none" }, prHeadSha: HEAD, expectedRunId: RUN }).reason).toMatch(/names no factory run/);
 });
+
+/**
+ * ADR-024 / KTB-42 — `qa_manifest=<sha256>`는 이 줄의 **선택** 필드다. 매니페스트 파일은 커밋되지
+ * 않으므로(`.factory/out/`는 gitignore) 머지 스테이지가 볼 수 있는 유일한 증인이 이 값이고, 동시에
+ * 이 기능 이전의 기록과 qa 없는 tier의 기록은 그 필드 없이 그대로 읽혀야 한다.
+ */
+test("KTB-42: the review-evidence line carries the qa manifest digest, and an old line without it still parses", () => {
+  const digest = "a".repeat(64);
+  const line = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: "b".repeat(40), round: 1, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], qaManifest: digest });
+  expect(line).toContain(`qa_manifest=${digest}`);
+  expect(parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${line}\n`, { runId: "7" }).qaManifest).toBe(digest);
+
+  // 지문 없이 쓴 줄(로스터에 qa가 없는 tier)은 `none`으로 나가고 null로 읽힌다.
+  const bare = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: "b".repeat(40), round: 1, decision: "approved", verdicts: [] });
+  expect(parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${bare}\n`, { runId: "7" }).qaManifest).toBe(null);
+
+  // KTB-42 이전에 쓰인 줄(필드 자체가 없다)도 계속 읽힌다 — append-only 로그는 뒤를 부정하지 않는다.
+  const legacy = "review-evidence: run_id=7 runner=gha-7 head_sha=" + "b".repeat(40) + " round=1 decision=approved verdicts=qa=approve";
+  const parsed = parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${legacy}\n`, { runId: "7" });
+  expect(parsed.qaManifest).toBe(null);
+  expect(parsed.verdicts).toBe("qa=approve");
+});
+
+/**
+ * 리뷰 라운드 1 SF-3 — `qa_claims=3c/1na`. 판정에는 쓰이지 않는다(계약이 막는 것은 *전부* na인
+ * 경우뿐이다): retro가 "na가 대부분인 승인"을 셀 수 있게 하려는 관측값이고, 그래서 **기록에만** 있다.
+ */
+test("KTB-42/SF-3: the review-evidence line carries the claim composition, and lines without it still parse", () => {
+  const line = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: "b".repeat(40), round: 1, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], qaManifest: "a".repeat(64), qaClaims: "3c/1na" });
+  const parsed = parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${line}\n`, { runId: "7" });
+  expect(parsed.qaClaims).toBe("3c/1na");
+  expect(parsed.qaManifest).toBe("a".repeat(64));
+  expect(parsed.verdicts).toBe("qa=approve");
+
+  // 지문은 있고 구성은 없는 줄(KTB-42 1라운드에 쓰인 모양)도 그대로 읽힌다.
+  const noCounts = "review-evidence: run_id=7 runner=gha-7 head_sha=" + "b".repeat(40) + " round=1 decision=approved verdicts=qa=approve qa_manifest=" + "a".repeat(64);
+  const older = parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${noCounts}\n`, { runId: "7" });
+  expect(older.qaManifest).toBe("a".repeat(64));
+  expect(older.qaClaims).toBe(null);
+  expect(older.verdicts).toBe("qa=approve");
+});

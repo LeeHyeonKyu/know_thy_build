@@ -3,18 +3,21 @@ import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from 
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { render as renderTemplate, mergeSettings, freshContent, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
-import { findProtBlock, protBlock, writeGlobs, ciDenyEntries } from "../protected-paths.js";
+import { findProtBlock, protBlock, writeGlobs, ciDenyEntries, qaManifestDeny } from "../protected-paths.js";
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS, CODEOWNERS_PATH, RECORDS_BRANCH } from "../bootstrap.js";
 import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
+import { checkRehearsalCurrent, recordedRehearsal, rehearsalHash } from "../rehearsal.js";
 import { TRIAGE_DEFAULT_VALUES } from "../config.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
-const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity"].map((n) => `factory-${n}.yml`);
+// KTB-44 — `factory-rehearse.yml`이 여덟 번째다(ADR-025). 스테이지 워크플로가 아니라 **첫 이슈 전에
+// 한 번 도는 잡**이지만, 없으면 `factory rehearse`가 띄울 것이 없고 큐가 영영 닫힌 채로 남는다.
+const WORKFLOWS = ["triage", "plan", "implement", "review", "merge", "sweeper", "integrity", "rehearse"].map((n) => `factory-${n}.yml`);
 const WORKFLOWS_DIR = ".github/workflows";
 
 const HOOK_INPUT = {
@@ -381,7 +384,11 @@ export function checkProtectedParity({ root, exists, readFile, harness }) {
     let deny;
     try { deny = JSON.parse(readFile(p))?.permissions?.deny || []; } catch (e) { problems.push(`${file} unreadable: ${e.message}`); continue; }
     const have = deny.filter((d) => /^(Edit|Write)\(/.test(d));
-    const want = ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true }));
+    // ADR-024 / KTB-42(리뷰 라운드 1 SF-1b) — 매니페스트 한 쌍은 `[protected]`에서 **유도되지 않는다**:
+    // 그 목록은 qa 디렉터리를 일부러 열어 두고, 이 한 파일만 그 안에서 다시 닫는 것은 증거 계약의
+    // 결정이다(`install.js` renderCiSettings가 언제나 덧붙인다). parity가 그것을 "유도되지 않은 항목"으로
+    // 읽으면 갓 설치한 저장소가 FAIL이 된다 — 기대값에 포함시켜, 빠진 경우도 여기서 잡히게 한다.
+    const want = [...ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true })), ...qaManifestDeny()];
     const missing = want.filter((d) => !have.includes(d));
     const extra = have.filter((d) => !want.includes(d));
     if (missing.length) problems.push(`${file} deny missing: ${missing.join(", ")}`);
@@ -477,6 +484,32 @@ export function checkWorkflows({ root, exists, readFile, list = readdirSync }) {
     missing.length ? c("workflows.present", "FAIL", `missing: ${missing.join(", ")}`) : c("workflows.present", "PASS"),
     violations.length ? c("workflows.lint", "FAIL", violations.join("; ")) : c("workflows.lint", "PASS", `linted ${files.length} file(s) in ${WORKFLOWS_DIR}`),
   ];
+}
+
+/**
+ * KTB-44 / ADR-025 — `rehearsal.current`. **기록된 리허설이 지금의 하네스에 대한 것인가.**
+ * 지문은 로컬에서 계산하고(harness.toml + CHARTER 프론트매터), 기록은 저장소에서 읽는다 — 변수
+ * `FACTORY_REHEARSED`와 **지문 커밋**의 `factory/rehearsal` 상태를 **둘 다** 본다(하나라도 맞으면 PASS,
+ * 리뷰 should_fix 1). gh가 없으면(오프라인) 호출자가 `skipped`로 WARN을 세운다.
+ *
+ * `recordedRehearsal`은 자기 안에서 모든 throw를 삼키고 항상 resolve한다 — 그래서 여기에 catch를 두지
+ * 않는다(리뷰 nit 2: 죽은 코드였다). 조회가 통째로 실패한 경우는 "기록 없음"과 같은 모양으로 도착하고,
+ * 그 등급은 WARN이다(설치 직후와 구별되지 않는다 — 그 구별은 `factory rehearse`의 출력이 한다).
+ */
+export async function checkRehearsal({ gh, root, readFile, harness }) {
+  const read = (p) => { try { return readFile(join(root, p)); } catch { return null; } };
+  const harnessText = read(".factory/harness.toml");
+  if (harnessText == null) return [checkRehearsalCurrent({ current: null })];
+  const current = rehearsalHash({ harnessText, charterText: read("docs/factory/CHARTER.md") || "" });
+  /**
+   * 최종 리뷰 B-SF2 — **`current`를 같이 넘긴다.** `makeRehearsalChecker`는 넘기고 doctor만 넘기지
+   * 않아서, 두 독자가 같은 기록을 다르게 읽었다: `current`가 있으면 후보를 훑다 **일치를 만나는 순간
+   * 멈추고**(= r2의 tolerant binding), 없으면 가장 새 후보에서 읽은 해시를 끝까지 들고 간다. 되돌아보는
+   * 창 안에 기록된 해시가 둘이고 지금 지문이 옛 쪽이면(harness.toml 되돌리기, CHARTER 프론트매터 토글)
+   * `→ factory:queue`는 통과하는데 doctor는 FAIL로 1을 뱉는다.
+   */
+  const recorded = await recordedRehearsal({ gh, branch: harness?.project?.default_branch || "main", current });
+  return [checkRehearsalCurrent({ recorded, current })];
 }
 
 /** gh 호출이 하나라도 throw하면(오프라인 등) 세부 검사를 포기하고 단일 WARN으로 떨어진다 — fail closed가 아니라 "확인 못 함"으로 취급(오프라인 허용). */
