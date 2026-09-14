@@ -50,6 +50,18 @@ esac
 c=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$c" ] || exit 0
 
+# ── 외부 감사 H1a: 판정 전에 한 문자열로 정규화한다(block-dangerous.sh와 같은 규칙, 같은 순서) ──
+# 이 훅의 규칙도 전부 줄 단위였다 — `rm \⏎-rf src`는 `rm \`(대상 없음)와 `-rf src`(`$T`가 `-`를
+# 대상에서 제외한다)로 쪼개져 둘 다 맞지 않았다. 감사는 block-dangerous.sh만 재현했지만 결함은
+# 한 몸이다: 쓰기 금지 역할에게 이 훅이 **유일한** 셸 경계다.
+# 1) `\`+개행 → 공백(이음줄), 2) 남은 개행 → `;`(명령 구분자 — `$CMD`가 이미 그렇게 읽는다),
+# 3) 탭 → 공백, 공백 런 → 하나.
+c=${c//$'\r'/}
+c=${c//\\$'\n'/ }
+c=${c//$'\n'/;}
+c=${c//$'\t'/ }
+while [ "$c" != "${c//  / }" ]; do c=${c//  / }; done
+
 deny() { echo "factory: this role must not write (bash: $1)" >&2; exit 2; }
 
 ere() { printf '%s' "$1" | sed -E 's/[][^$.*+?(){}|\\]/\\&/g'; }

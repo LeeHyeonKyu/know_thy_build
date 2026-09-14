@@ -8,6 +8,29 @@ tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null) || exit 0
 c=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [ -n "$c" ] || exit 0
 
+# ── 2026-09-14 외부 감사 H1a: 판정 **전에** 명령을 한 문자열로 정규화한다 ─────────────────────
+# 모든 규칙이 `echo "$c" | grep -E`, 곧 **줄 단위**였다. 셸에서 `\` + 개행은 토큰을 잇는 이음줄이라
+# `gh pr \⏎merge 5 --squash`는 한 문장 그대로 `gh pr merge 5 --squash`를 실행하는데, 훅이 보는 "줄"은
+# `gh pr \`와 `merge 5 --squash` 둘로 쪼개져 **어느 쪽도 규칙에 맞지 않았다**. 감사가 직접 실행해
+# 확인한 여섯 케이스가 전부 exit 0이었다(`gh pr merge`, `git push --force`, `gh issue edit --add-label
+# factory:approved` 포함) — 그리고 `permissions.deny`의 접두 매칭도 같은 이유로 동시에 빗나간다.
+# 런타임 조립이 아니다: 동사가 명령줄에 그대로 있는데 규칙이 한 글자에 빗나갔다(MF-3·재리뷰 #1과
+# 같은 계열의 고장이 앵커가 아니라 **입력 모양**에서 반복된 것이다).
+#
+# 정규화는 셸의 문법을 그대로 따른다:
+#   1. `\` + 개행 → 공백 하나. 이음줄은 토큰을 잇는다.
+#   2. 남은 개행 → `;`. 개행은 이음줄이 아닐 때 **명령 구분자**이고, 아래 규칙들의 `[^;&|]*`·경계
+#      클래스가 이미 `;`를 그렇게 다룬다. 공백으로 바꾸면 서로 다른 두 문장이 한 문장으로 이어져
+#      `echo git⏎merge x`가 없던 `git merge` 매치를 만든다 — 오탐을 새로 만드는 정규화는 정규화가 아니다.
+#   3. 탭 → 공백, 공백 런 → 하나. `gh⇥⇥pr   merge`처럼 섞이면 `[[:space:]]+`를 쓰는 규칙은 통과해도
+#      `[^;&|]*` 구간을 끼고 있는 규칙들의 모양이 흐트러진다.
+# 이 뒤로 `$c`는 **한 줄**이다 — 그래서 `^`/`$` 앵커도 문자열 전체에 대한 앵커가 된다.
+c=${c//$'\r'/}
+c=${c//\\$'\n'/ }
+c=${c//$'\n'/;}
+c=${c//$'\t'/ }
+while [ "$c" != "${c//  / }" ]; do c=${c//  / }; done
+
 block() { echo "factory: blocked — $1" >&2; exit 2; }
 
 # git의 **전역 옵션**은 동사 앞에 온다: `git -C <dir> rm …`, `git --git-dir=… merge …`,
@@ -53,6 +76,22 @@ scan() {
 echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge" && block "gh pr merge"
 # REST 머지도 막는다 — gh api ... /pulls/<n>/merge (메서드 불문)
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/pulls/[0-9]+/merge" && block "gh api pulls merge"
+# ── 2026-09-14 외부 감사 H1b: 에이전트는 자기 리뷰 판정을 게시할 수 없다 ─────────────────────
+# `mergeGates`가 리뷰의 증거로 보는 것은 required check의 **상태**뿐이다(`run-stage.js` → `allChecksGreen`).
+# 그 함수는 체크가 green인지만 묻고 **누가 올렸는지는 묻지 않는다**. 모든 스테이지의 env에는
+# `GH_TOKEN=FACTORY_BOT_TOKEN`이 있고 그 PAT는 `repo` 스코프라 commit status를 쓸 수 있다 — 그래서
+# `gh api -X POST /repos/o/r/statuses/<sha> -f state=success -f context=factory/review` 한 줄이면
+# 리뷰어가 한 번도 뜨지 않은 채 머지 게이트가 열린다(감사가 재현한 H1 체인의 두 번째 고리).
+# check-run은 같은 일을 하는 다른 이름이고, `gh pr review --approve`는 **머지 배우의** 권한이다.
+# 메서드 철자도 호스트 접두도 가리지 않는다(브랜치 보호 규칙과 같은 이유 — 철자를 쫓는 것은 진 싸움이다).
+# 읽기(GET)까지 막히는 오탐은 손실이 없다: 체크 상태를 읽어야 하는 역할이 없고, `gh pr checks`는 열려 있다.
+# **이것이 전부가 아니다**: 상태의 **게시자 검증**은 머지 스테이지의 일이고(Task 2), 이 훅은 그 앞의
+# 값싼 문 하나다. 런타임에 조립되는 동사(`node -e "execSync(...)"` 등)는 여전히 비목표다(ADR-020 잔여 위험 #4).
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/statuses/" && block "gh api commit statuses (a stage must never post its own required check — the merge gate reads status STATE, not author)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/check-runs" && block "gh api check-runs (same power as a commit status under a different name)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/commits?/[^;&|]*/(status|check-runs)" && block "gh api commit status/check-runs"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+review[^;&|]*--approve" && block "gh pr review --approve (approval belongs to the merge actor, not to a stage)"
+echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/pulls/[0-9]+/reviews" && block "gh api pull request reviews (the REST spelling of --approve)"
 echo "$c" | grep -Eq "${A}${G}merge${Z}" && block "git merge"
 echo "$c" | grep -Eq "${A}${G}push[^;&|]*[[:space:]](--force|-f|--force-with-lease)${ZE}" && block "force push"
 # refspec 앞의 '+'도 force push다: git push origin +main:main
@@ -69,13 +108,20 @@ echo "$c" | grep -Eq "${A}${G}push[^;&|]*(--delete[^;&|]*factory/lock-|:(refs/he
 # `/` 유무도 가리지 않는다. 읽기(GET)까지 막히는 오탐은 손실이 없다: 락 상태는 `git ls-remote`로 본다.
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/git/refs/heads/factory/lock" && block "gh api lock ref deletion (the lock branch is the only basis of per-issue mutual exclusion)"
 # protected paths written via shell redirection / sed -i / tee / cp / mv / perl -i / python -c.
-# 목록은 harness.toml `[protected].factory` · ci-settings.json deny와 같아야 한다(F9 / ADR-019 — 경로
-# deny는 `.claude/settings.json`이 아니라 CI 전용 `.factory/ci-settings.json`에 산다) — 셋이 갈라지면
-# Edit는 막히는데 `echo > package.json`은 통과하고, integrity가 사후에야 잡는다.
 # 빌드 설정 파일(package.json·러너/린터 config)이 여기 있는 이유: gate 명령이 그 파일들을 통해
 # 해석되므로, 그것을 고칠 수 있으면 게이트 자체를 고칠 수 있다.
-prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
-
+#
+# ── 2026-09-14 외부 감사 M8: 이 목록은 이제 **생성물이다** ─────────────────────────────────────
+# 같은 목록이 세 곳에 손으로 적혀 있었고(harness.toml `[protected].factory` · `.factory/ci-settings*.json`
+# 의 Edit/Write deny · 여기 `prot`) 감사가 확인한 대로 셋이 갈라져 있었다: 이 훅은
+# `.github/workflows/factory-`만 막는데 harness는 `.github/**` 전부를 보호했고(다른 이름의 워크플로
+# 한 장이 그대로 지나갔다), harness 변형은 `(bin|lib|actions|lessons|out)`만 열거하는데 ci-settings는
+# `scenarios`·`node_modules`까지 막았다. 갈라진 목록은 "Edit는 막히는데 `echo > x`는 통과한다"를
+# 만들고, 어느 쪽이 맞는지는 아무도 모른다.
+# 이제 출처는 `harness.toml [protected]` 하나이고, 아래 블록은 `factory init`/`--upgrade`가
+# `factory/lib/protected-paths.js`로 다시 쓴다. doctor의 `protected.parity`가 드리프트를 FAIL로 잡는다.
+# **손으로 고치지 말 것** — 고쳐야 한다면 harness.toml을 고치고 `factory init --upgrade`를 돌린다.
+# (블록 안의 값은 이 패키지의 템플릿 harness.toml로 생성돼 있다 = 새 채택자가 받는 목록.)
 # KTB-20: `factory:harness` 이슈의 implement 스테이지만 `FACTORY_HARNESS_ISSUE=1`로 온다(run-stage.js가
 # `claude -p`의 env에 넣는다 — 훅은 그 세션의 자식이라 그대로 물려받는다). 스펙 §5.2.1의 의도는
 # "인프라 작업은 factory가 하고 **사람이 그 diff를 머지한다**"인데, 그때까지 이 훅과 ci-settings.json이
@@ -101,9 +147,13 @@ prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md
 # 여기 `prot`의 `out/`는 그 카브아웃이 이미 `$p`에서 qa 토큰을 지운 뒤에 적용되므로 그대로 둔다.
 # 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
 # **머지는 그대로 사람이다**: package.json은 `[protected].factory`에 남아 있어 L1이 자동 머지를 거부한다.
+
+# >>> factory:protected — generated by `factory init` from harness.toml [protected] (audit M8) — do not edit by hand
+prot='(\.factory/|\.claude/|\.github/|docs/factory/CHARTER\.md|package\.json|package-lock\.json|vitest\.config\.|playwright\.config\.|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
 if [ "${FACTORY_HARNESS_ISSUE:-}" = "1" ]; then
-  prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml|package\.json|package-lock\.json)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
+  prot='(\.factory/bin/|\.factory/lib/|\.factory/actions/|\.factory/lessons/|\.factory/scenarios/|\.factory/node_modules/|\.factory/out/|\.factory/out/coverage/|\.factory/out/prove-wt/|\.factory/out/classify-wt/|\.factory/ci-settings[a-zA-Z0-9._-]*\.json|\.factory/roles\.toml|\.factory/quarantine\.toml|\.factory/package\.json|\.factory/package-lock\.json|\.claude/|\.github/|docs/factory/CHARTER\.md|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'
 fi
+# <<< factory:protected
 
 # `.factory/out/qa/**`는 qa 리뷰어의 증거 디렉터리다(harness.toml `[protected].except`, F3) — 거기 쓰는 것만
 # 예외로 통과시킨다. 보호 경로 검사에만 쓰는 사본 `$p`에서 그 토큰을 지우는 방식이라 `.factory/`의 나머지는

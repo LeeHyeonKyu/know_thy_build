@@ -6,9 +6,20 @@ import { parse as toml } from "smol-toml";
 import { parseFrontmatter } from "../lib/frontmatter.js";
 import { matchesAny } from "../lib/glob.js";
 import { readdirRecursive } from "../cli/manifest.js";
+import { renderCiSettings } from "../cli/install.js";
 
 const T = new URL("../../templates/factory/", import.meta.url).pathname;
-const read = (p) => readFileSync(join(T, p), "utf8");
+const readRaw = (p) => readFileSync(join(T, p), "utf8");
+/**
+ * 2026-09-14 외부 감사 M8 이후 `ci-settings*.json`의 경로 deny는 **생성물**이다 — 템플릿 파일에는
+ * 비경로 항목(`Bash(gh secret*)`·`Read(.env*)`)만 남고, `Edit(...)`/`Write(...)`는 `factory init`이
+ * `harness.toml [protected]`에서 만든다. 아래 테스트들이 묻는 것은 "채택자에게 설치되는 L2가 무엇을
+ * 막는가"이므로, 그 두 파일만 생성 결과로 읽는다(나머지 템플릿은 파일 그대로).
+ */
+const TEMPLATE_PROTECTED = toml(readRaw("factory/harness.toml")).protected;
+const read = (p) => (/^factory\/ci-settings[^/]*\.json$/.test(p)
+  ? renderCiSettings(readRaw(p), TEMPLATE_PROTECTED, { harnessMode: p.includes("harness") })
+  : readRaw(p));
 
 test("harness.toml template parses and is an M0 fast-only harness", () => {
   const h = toml(read("factory/harness.toml"));

@@ -1,7 +1,7 @@
 import { verdictLine } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
-import { LESSONS_POLICY_RULE as LESSONS_RULE_RE } from "./integrity.js";
+import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE } from "./integrity.js";
 import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
 
@@ -231,7 +231,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 뒤는 누적된 교훈이 통째로 사라지는 diff다. 그래서 파일 목록을 규칙으로 갈라 각자의 제목으로 낸다.
   if (pol.files.length) {
     const lessons = [...new Set((pol.violations || []).filter((v) => LESSONS_RULE_RE.test(v.rule)).map((v) => v.file))];
-    const additive = pol.files.filter((f) => !lessons.includes(f));
+    // M9(ADR-023): harness.toml의 얼어붙은 섹션도 같은 배열에 실려 온다 — 세 번째 제목으로 가른다.
+    const frozen = (pol.violations || []).filter((v) => HARNESS_SECTION_RULE_RE.test(v.rule));
+    const frozenFiles = [...new Set(frozen.map((v) => v.file))];
+    const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f));
     const sections = [], reasons = [];
     if (additive.length) {
       reasons.push(`agent role sections edited outside Examples/Perspectives — human merge required: ${additive.join(", ")}`);
@@ -258,6 +261,22 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
           "", "사라진 lessons 파일:",
         ],
         files: lessons,
+      });
+    }
+    if (frozen.length) {
+      const which = [...new Set(frozen.map((v) => /\[([a-z._]+)\]/.exec(v.rule)?.[1]).filter(Boolean))];
+      reasons.push(`harness.toml frozen sections edited — human merge required: ${which.map((s) => `[${s}]`).join(", ")}`);
+      sections.push({
+        heading: "harness.toml의 판정 기준 섹션 편집",
+        why: [
+          "`factory:harness` 이슈의 builder는 `.factory/harness.toml`을 편집할 수 있지만(§5.2.1),",
+          "`[protected]`·`[gates.thresholds]`·`[load_bearing]`은 **판정 기준 자체**입니다 — 보호 목록을",
+          "넓히거나 임계값을 낮추면 그 PR이 스스로를 통과시키게 됩니다. 훅이나 경로 deny로는 막을 수",
+          "없습니다(어느 섹션에 떨어지는 편집인지는 내용을 읽어야 압니다). 그래서 사람이 머지합니다",
+          "(외부 감사 M9 / ADR-023).",
+          "", `바뀐 섹션: ${which.map((s) => `[${s}]`).join(", ")}`,
+        ],
+        files: frozenFiles,
       });
     }
     return await handToHuman({ reason: reasons.join("; "), sections });

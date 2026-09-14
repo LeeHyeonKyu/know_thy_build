@@ -2,7 +2,8 @@ import { join, basename } from "node:path";
 import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { render as renderTemplate, mergeSettings, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
+import { render as renderTemplate, mergeSettings, freshContent, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
+import { findProtBlock, protBlock, writeGlobs, ciDenyEntries } from "../protected-paths.js";
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
@@ -52,7 +53,11 @@ function settingsIsStale(installedText, freshText) {
   return !isDeepStrictEqual(mergeSettings(installed, template), installed);
 }
 
-/** manifest 중 owner === "factory" 항목만 대상(project/script 소유 파일은 CHARTER 등 사람이 편집하므로 비교 대상이 아니다). */
+/**
+ * manifest 중 owner === "factory" 항목만 대상(project/script 소유 파일은 CHARTER 등 사람이 편집하므로
+ * 비교 대상이 아니다). "신선한 내용"은 `freshContent` 하나로 계산한다 — 설치가 쓰는 것과 여기서
+ * 비교하는 것이 같은 함수여야 생성물(M8의 훅 `prot`·ci-settings 경로 deny)이 매번 stale로 뜨지 않는다.
+ */
 export function checkFiles({ manifest, root, exists, readFile, render = renderTemplate, vars = {} }) {
   const missing = [];
   const stale = [];
@@ -60,7 +65,7 @@ export function checkFiles({ manifest, root, exists, readFile, render = renderTe
     if (e.owner !== "factory") continue;
     const target = join(root, e.dest);
     if (!exists(target)) { missing.push(e.dest); continue; }
-    const fresh = render(readFile(e.src), vars);
+    const fresh = e.generate ? freshContent(e, { readFile, vars }) : render(readFile(e.src), vars);
     const installed = readFile(target);
     const isStale = e.merge === "settings" ? settingsIsStale(installed, fresh) : installed !== fresh;
     if (isStale) stale.push(e.dest);
@@ -305,6 +310,53 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate, ciHa
   out.push(missingHooks.length ? c("settings.hooks", "FAIL", `hook commands missing from settings.json: ${missingHooks.join(", ")}`) : c("settings.hooks", "PASS"));
 
   return out;
+}
+
+/**
+ * `protected.parity` — 보호 목록 세 곳이 **한 출처에서 나왔는가**(2026-09-14 외부 감사 M8 / ADR-023).
+ *
+ * 감사가 확인한 상태: `harness.toml [protected].factory`, `.factory/ci-settings*.json`의 Edit/Write deny,
+ * `.claude/hooks/block-dangerous.sh`의 `prot` 정규식이 **손으로 유지되는 세 목록**이었고 실제로 갈라져
+ * 있었다. 갈라진 목록은 "Edit는 막히는데 `echo > x`는 통과한다"를 만든다.
+ * 이제 `factory init`이 나머지 둘을 harness에서 생성하므로, 이 검사는 "생성 후에 손으로 고쳤는가 /
+ * harness를 고치고 `--upgrade`를 안 돌렸는가"를 묻는다. 드리프트는 **FAIL**이다 — WARN이면 그 경고를
+ * 안고 사는 동안 훅과 L2가 서로 다른 파일을 막는다.
+ *
+ * 파일을 못 읽는 것도 FAIL이다(판정 불능은 "안전"이 아니다). 목록이 비어 있는 것도 FAIL이다 — 빈
+ * `[protected].factory`는 보호가 없다는 뜻이고, 그러면 생성된 `prot`가 아무것도 막지 않는다.
+ */
+export function checkProtectedParity({ root, exists, readFile, harness }) {
+  const prot = harness?.protected;
+  if (!prot || !Array.isArray(prot.factory) || !prot.factory.length) {
+    return [c("protected.parity", "FAIL", "harness.toml [protected].factory is missing or empty — nothing derives the hook's protected list or the CI path denies")];
+  }
+  const problems = [];
+  const hookPath = join(root, ".claude/hooks/block-dangerous.sh");
+  if (!exists(hookPath)) {
+    problems.push(".claude/hooks/block-dangerous.sh missing");
+  } else {
+    let text; try { text = readFile(hookPath); } catch (e) { text = null; problems.push(`block-dangerous.sh unreadable: ${e.message}`); }
+    if (text != null) {
+      const found = findProtBlock(text);
+      if (found === null) problems.push("block-dangerous.sh has no `factory:protected` generated block (hand-maintained list)");
+      else if (found !== protBlock(prot)) problems.push("block-dangerous.sh `prot` list differs from harness.toml [protected]");
+    }
+  }
+  for (const [file, harnessMode] of [[".factory/ci-settings.json", false], [".factory/ci-settings-harness.json", true]]) {
+    const p = join(root, file);
+    if (!exists(p)) { problems.push(`${file} missing`); continue; }
+    let deny;
+    try { deny = JSON.parse(readFile(p))?.permissions?.deny || []; } catch (e) { problems.push(`${file} unreadable: ${e.message}`); continue; }
+    const have = deny.filter((d) => /^(Edit|Write)\(/.test(d));
+    const want = ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true }));
+    const missing = want.filter((d) => !have.includes(d));
+    const extra = have.filter((d) => !want.includes(d));
+    if (missing.length) problems.push(`${file} deny missing: ${missing.join(", ")}`);
+    if (extra.length) problems.push(`${file} deny has entries not derived from harness.toml [protected]: ${extra.join(", ")}`);
+  }
+  return [problems.length
+    ? c("protected.parity", "FAIL", `${problems.join("; ")} — run \`npx know-thy-build factory init --upgrade\` (the hook's prot list and the CI path denies are generated from harness.toml [protected]; edit that file, not the generated ones)`)
+    : c("protected.parity", "PASS")];
 }
 
 /**

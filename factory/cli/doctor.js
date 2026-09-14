@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity } from "../lib/doctor/factory.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { LABELS } from "../lib/label-catalog.js";
@@ -108,7 +108,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     // ── factory scope (only when installed) ─────────────────────────
     if (exists(join(root, ".factory/bin/run-stage.js"))) {
       const manifest = buildManifest({ pkgRoot });
-      const vars = projectVars(root);
+      const vars = projectVars(root, pkgRoot);
       checks.push(...checkFiles({ manifest, root, exists, readFile, vars }));
       checks.push(...(await checkFilesTracked({ manifest, root, exists, run })));
       checks.push(...checkCharter({ root, loadCharter: loadCharterFn }));
@@ -164,6 +164,8 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
       }
       if (template) checks.push(...checkSettings({ settings, template, ciSettings, ciTemplate, ciHarness, ciHarnessTemplate }));
 
+      // M8 — 훅의 `prot`와 CI 경로 deny가 harness.toml [protected]에서 나왔는가(생성 후 손댔거나 harness만 고쳤으면 FAIL).
+      checks.push(...checkProtectedParity({ root, exists, readFile, harness }));
       checks.push(...(await checkHooks({ run, root, exists, readFile, hooks: DOCTOR_HOOKS })));
       checks.push(...checkWorkflows({ root, exists, readFile }));
 

@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity } from "../lib/doctor/factory.js";
+import { protBlock, ciDenyEntries, writeGlobs } from "../lib/protected-paths.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -772,4 +773,70 @@ test("checkGitHub (r2): FACTORY_MERGE_TOKEN left over as a repo secret (also in 
   const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], envSecrets: ["FACTORY_MERGE_TOKEN"], protection: withReview }));
   expect(c["tokens.two-actor"].level).toBe("PASS");
   expect(c["tokens.merge-token-repo-level"]).toMatchObject({ level: "WARN", detail: expect.stringContaining(MERGE_ENVIRONMENT) });
+});
+
+// ── 2026-09-14 외부 감사 M8 / ADR-023: protected.parity ────────────────────────────────────────
+// 보호 목록 세 곳(harness `[protected].factory` · ci-settings의 경로 deny · 훅의 `prot`)이 한 출처에서
+// 나왔는가. 감사 시점에는 셋이 손으로 유지됐고 실제로 갈라져 있었다 — 드리프트는 "Edit는 막히는데
+// `echo > x`는 통과한다"를 만들므로 WARN이 아니라 FAIL이다.
+const parityProt = { factory: [".factory/**", ".claude/**", "docs/factory/CHARTER.md"], except: [".factory/out/qa/**"], agent_writable: [] };
+function parityFiles(over = {}) {
+  const hook = ["#!/usr/bin/env bash", protBlock(parityProt), "exit 0"].join("\n");
+  const ci = (harnessMode) => JSON.stringify({ permissions: { deny: ["Bash(gh secret*)", ...ciDenyEntries(writeGlobs(parityProt, { harnessMode, enumerateFactory: true }))] } });
+  return {
+    "/r/.claude/hooks/block-dangerous.sh": hook,
+    "/r/.factory/ci-settings.json": ci(false),
+    "/r/.factory/ci-settings-harness.json": ci(true),
+    ...over,
+  };
+}
+const parityRun = (files, prot = parityProt) =>
+  checkProtectedParity({ root: "/r", exists: (p) => p in files, readFile: (p) => files[p], harness: { protected: prot } })[0];
+
+test("protected.parity: generated hook + ci-settings that match harness [protected] → PASS", () => {
+  expect(parityRun(parityFiles())).toMatchObject({ id: "protected.parity", level: "PASS" });
+});
+
+test("protected.parity: a hand-edited `prot` in the hook is FAIL (M8's actual drift: .github/workflows/factory- vs .github/**)", () => {
+  const f = parityFiles();
+  f["/r/.claude/hooks/block-dangerous.sh"] = f["/r/.claude/hooks/block-dangerous.sh"].replace("\\.claude/", "\\.github/workflows/factory-");
+  expect(parityRun(f)).toMatchObject({ level: "FAIL" });
+  expect(parityRun(f).detail).toMatch(/prot` list differs/);
+});
+
+test("protected.parity: a hook with no generated block at all is FAIL (that IS the hand-maintained list)", () => {
+  expect(parityRun(parityFiles({ "/r/.claude/hooks/block-dangerous.sh": "#!/usr/bin/env bash\nprot='(\\.factory/)'\nexit 0\n" })).detail).toMatch(/no `factory:protected` generated block/);
+});
+
+test("protected.parity: adding a glob to harness without re-running --upgrade is FAIL on both ci-settings files", () => {
+  const prot = { ...parityProt, factory: [...parityProt.factory, "Makefile"] };
+  const r = parityRun(parityFiles(), prot);
+  expect(r.level).toBe("FAIL");
+  expect(r.detail).toMatch(/ci-settings\.json deny missing: Edit\(Makefile\), Write\(Makefile\)/);
+  expect(r.detail).toMatch(/ci-settings-harness\.json deny missing/);
+});
+
+test("protected.parity: a deny entry that no harness glob derives is FAIL too (drift is symmetric)", () => {
+  const f = parityFiles();
+  const j = JSON.parse(f["/r/.factory/ci-settings.json"]);
+  j.permissions.deny.push("Edit(src/**)");
+  f["/r/.factory/ci-settings.json"] = JSON.stringify(j);
+  expect(parityRun(f).detail).toMatch(/not derived from harness\.toml \[protected\]: Edit\(src\/\*\*\)/);
+});
+
+test("protected.parity: unreadable or missing inputs are FAIL, never PASS (an unchecked list is not a safe list)", () => {
+  expect(parityRun({}).level).toBe("FAIL");
+  expect(parityRun(parityFiles(), { factory: [] }).detail).toMatch(/missing or empty/);
+  expect(parityRun(parityFiles({ "/r/.factory/ci-settings.json": "{oops" })).detail).toMatch(/unreadable/);
+});
+
+test("protected.parity: agent_writable leaves the merge boundary alone but drops out of the write boundary", () => {
+  const prot = { ...parityProt, factory: [...parityProt.factory, "factory/**"], agent_writable: ["factory/**"] };
+  const files = {
+    "/r/.claude/hooks/block-dangerous.sh": protBlock(prot),
+    "/r/.factory/ci-settings.json": JSON.stringify({ permissions: { deny: ciDenyEntries(writeGlobs(prot, { enumerateFactory: true })) } }),
+    "/r/.factory/ci-settings-harness.json": JSON.stringify({ permissions: { deny: ciDenyEntries(writeGlobs(prot, { harnessMode: true, enumerateFactory: true })) } }),
+  };
+  expect(parityRun(files, prot).level).toBe("PASS");
+  expect(files["/r/.factory/ci-settings.json"]).not.toContain("Edit(factory/**)");
 });

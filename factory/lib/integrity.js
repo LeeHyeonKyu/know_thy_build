@@ -52,6 +52,20 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
       }));
       if (!gone) continue;        // 살아 있는 동안만 additive 규칙이 이 파일을 전담한다 — 삭제·이동은 아래 보호 목록으로도 간다
     }
+    // M9 — harness.toml의 얼어붙은 섹션. 삭제된 줄의 섹션을 알려면 **base** 내용이 필요하다:
+    // `readFileAt`이 주입돼 있으면 그것으로, 아니면 `git show <base>:<f>`로 읽는다(워킹 트리가 아니다 —
+    // 이 검사가 도는 트리는 PR head이므로 base 내용은 거기에 없다). 못 읽으면 빈 문자열이고, 그때는
+    // 삭제 줄의 섹션 판정이 서지 않으므로 추가 줄만으로 판정한다.
+    if (f === HARNESS_FILE && !gone) {
+      const added = addedByFile.get(f) || [], removed = removedByFile.get(f) || [];
+      // base 내용은 **삭제된 줄이 있을 때만** 필요하다 — 추가만 있는 diff에 git을 한 번 더 부르지 않는다.
+      let baseText = "";
+      if (removed.length) {
+        baseText = readFileAt(`${cwd}/${f}`, base) || "";
+        if (!baseText) { const shown = await run("git", ["show", `${base}:${f}`], { cwd }); baseText = shown.code === 0 ? shown.stdout : ""; }
+      }
+      policy.push(...harnessSectionViolations({ file: f, added, removed, headText: text || "", baseText }));
+    }
     if (isProtectedPath(f, prot)) protectedFiles.push(f);       // 위반이 아니라 "사람이 머지해야 한다"는 사실 (KTB-5)
     // 내용 규칙은 여기서 끝 (N2) — 사라진 lessons만 정책으로 센다. `deleted`(diff가 D로 보고)와
     // "트리에는 있는데 읽히지 않음"(text === null)은 사유 문구를 다르게 낸다(M8).
@@ -104,6 +118,69 @@ export function additiveOnlyViolations({ file, allowed, added, removed, headText
   return v;
 }
 
+// ── 외부 감사 M9: harness 모드에서도 얼어 있는 harness.toml의 세 섹션 (ADR-023) ────────────────
+/**
+ * `factory:harness` 이슈의 builder는 `FACTORY_HARNESS_ISSUE=1`로 `.factory/harness.toml`을 **편집할 수
+ * 있다**(KTB-20: 승격이 하려는 일이 바로 그 파일의 편집이다). 그런데 그 파일 안에는 편집이 곧
+ * 판정 기준의 변경인 세 섹션이 있다:
+ *   `[protected]`        — 무엇이 사람 머지인가. 여기를 넓히면 자기 PR을 보호 목록 밖으로 낼 수 있다.
+ *   `[gates.thresholds]` — coverage/mutation/flaky 한계. 여기를 낮추면 게이트가 통과한다.
+ *   `[load_bearing]`     — 어떤 파일이 하중을 받는가. 여기를 비우면 tier 바닥이 사라진다.
+ *
+ * **훅 규칙으로는 이것을 막을 수 없다**. 훅이 보는 것은 명령줄(그리고 Edit/Write의 `file_path`)뿐이라
+ * "이 편집이 harness.toml의 **어느 섹션**에 떨어지는가"를 알 방법이 없다 — 그 판정은 내용 기반이다.
+ * 같은 이유로 L2 deny(경로 글롭)도 답이 될 수 없다: 경로는 하나고 섹션은 여럿이다. 그래서 집행은
+ * diff를 읽는 이 자리(L0가 보고, L1이 자동 머지를 거부)에 있다.
+ *
+ * 변조(`violations`)가 아니라 **정책**(`policy`)이다 — `additive_only`와 같은 취급이다. L0가 RED가 되면
+ * required context가 빨개져 사람조차 머지할 수 없다(KTB-5/KTB-6와 같은 이유).
+ *
+ * harness 모드가 아닐 때도 그대로 센다. 이 검사는 CI의 integrity 잡과 merge 스테이지에서 도는데 거기엔
+ * `FACTORY_HARNESS_ISSUE`가 서 있지 않고(그 변수는 에이전트 세션의 env다), 평범한 이슈에서는
+ * harness.toml이 이미 `[protected].factory`라 판정이 같다(사람 머지) — 조건을 달면 신뢰할 수 없는
+ * 입력(=PR이 고를 수 있는 값)에 판정을 맡기게 된다.
+ */
+export const HARNESS_FILE = ".factory/harness.toml";
+export const FROZEN_HARNESS_SECTIONS = Object.freeze(["protected", "gates.thresholds", "load_bearing"]);
+const FROZEN_HEADER_RE = new RegExp(`^\\s*\\[(${FROZEN_HARNESS_SECTIONS.map((s) => s.replace(/\./g, "\\.")).join("|")})\\]`);
+/** `harnessSectionViolations`가 만드는 규칙 문자열의 단일 출처 — L1이 거부 문구를 규칙별로 가른다. */
+export const HARNESS_SECTION_POLICY_RULE = /^harness\.toml \[[a-z._]+\] edited — human merge required$/;
+
+/** TOML 섹션 판정: lineNo(1-indexed)가 속한 가장 가까운 `[section]` 헤더 이름. 이번 diff가 **추가한** 헤더는 경계로 인정하지 않는다(additive-only의 `sectionAt`과 같은 이유 — 주입된 헤더가 자기 앞의 줄을 소급 정당화할 수 없다). */
+function tomlSectionAt(lines, lineNo, addedLineNos = new Set()) {
+  let current = null;
+  for (let i = 0; i < lineNo - 1 && i < lines.length; i++) {
+    const m = /^\s*\[\[?([A-Za-z0-9_.-]+)\]\]?/.exec(lines[i]);
+    if (m && !addedLineNos.has(i + 1)) current = m[1];
+  }
+  return current;
+}
+
+/**
+ * harness.toml의 얼어붙은 섹션을 건드렸는가. 추가된 줄은 **head** 내용으로, 삭제된 줄은 **base**
+ * 내용으로 섹션을 판정한다 — 지워진 줄은 head에 없으므로 head만 보면 삭제가 통째로 보이지 않는다.
+ * 섹션 헤더 자체를 추가·삭제한 것도 위반이다(섹션을 통째로 들이거나 없애는 것이 가장 큰 편집이다).
+ */
+export function harnessSectionViolations({ file = HARNESS_FILE, added = [], removed = [], headText = "", baseText = "" }) {
+  const hit = new Set();
+  const addedLineNos = new Set(added.map((l) => l.line));
+  const headLines = (headText || "").split("\n");
+  const baseLines = (baseText || "").split("\n");
+  for (const l of added) {
+    const h = FROZEN_HEADER_RE.exec(l.text);
+    if (h) { hit.add(h[1]); continue; }
+    const s = tomlSectionAt(headLines, l.line, addedLineNos);
+    if (FROZEN_HARNESS_SECTIONS.includes(s)) hit.add(s);
+  }
+  for (const l of removed) {
+    const h = FROZEN_HEADER_RE.exec(l.text);
+    if (h) { hit.add(h[1]); continue; }
+    const s = tomlSectionAt(baseLines, l.line);
+    if (FROZEN_HARNESS_SECTIONS.includes(s)) hit.add(s);
+  }
+  return FROZEN_HARNESS_SECTIONS.filter((s) => hit.has(s)).map((s) => ({ file, rule: `harness.toml [${s}] edited — human merge required` }));
+}
+
 /**
  * `policyViolations({run, cwd, base, head, harness}) → { ok, files, violations, reason? }` —
  * L1(머지 스테이지)이 쓰는 **섹션 정책** 계산이다(KTB-6). `protectedPaths()`는 name-status만으로
@@ -124,6 +201,20 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness 
   const violations = [];
   // 사라진 lessons는 글롭과 무관하게 센다 — L0가 `policy`로 올린 것과 **같은 판정**이어야 한다.
   for (const e of changed) if (e.deleted) violations.push(...lessonsGone(e.path, true));
+  // M9 — harness.toml의 얼어붙은 섹션도 글롭과 무관하게 센다(L0와 같은 판정). 내용은 워킹 트리가
+  // 아니라 revision의 blob으로 읽는다: 이 스테이지는 PR head를 체크아웃한 트리 위에서 돌기 때문에
+  // 트리를 읽으면 PR이 자기 판정의 재료를 고르게 된다.
+  if (changed.some((e) => e.path === HARNESS_FILE && !e.deleted)) {
+    const u0r = await run("git", U0(base, head, HARNESS_FILE), { cwd });
+    if (u0r.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason(`git diff -U0 -- ${HARNESS_FILE}`, u0r) };
+    const headShow = await run("git", ["show", `${head}:${HARNESS_FILE}`], { cwd });
+    const baseShow = await run("git", ["show", `${base}:${HARNESS_FILE}`], { cwd });
+    violations.push(...harnessSectionViolations({
+      file: HARNESS_FILE,
+      added: addedLines(u0r.stdout).get(HARNESS_FILE) || [], removed: removedLines(u0r.stdout).get(HARNESS_FILE) || [],
+      headText: headShow.code === 0 ? headShow.stdout : "", baseText: baseShow.code === 0 ? baseShow.stdout : "",
+    }));
+  }
   const entries = Object.keys(prot.additive_only || {}).length
     ? changed.map((e) => [e.path, additiveGlobFor(e.path, prot)]).filter(([, g]) => g)
     : [];
@@ -209,7 +300,7 @@ const isProtectedEntry = ({ path, deleted }, prot) => (!deleted && additiveGlobF
 const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], checked: { files: [] } });
 const gitReason = (what, r) => `${what} exited ${r.code}${r.stderr ? `: ${r.stderr.trim().slice(0, 200)}` : ""}`;
 
-const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 /** 파일 귀속: "+++ b/X" → X, 삭제 diff의 "+++ /dev/null"은 직전 "--- a/X"의 X로 귀속시킨다 */
 function fileFor(line, current, pendingOld) {
@@ -224,7 +315,7 @@ function addedLines(u0) {
     if (line.startsWith("--- ")) { pendingOld = line.startsWith("--- a/") ? line.slice(6) : null; continue; }
     if (line.startsWith("+++ ")) { file = fileFor(line, file, pendingOld); continue; }
     const h = HUNK_HEADER.exec(line);
-    if (h) { newLine = Number(h[1]); continue; }
+    if (h) { newLine = Number(h[2]); continue; }
     if (file && line.startsWith("+") && !line.startsWith("+++")) {
       if (!m.has(file)) m.set(file, []);
       m.get(file).push({ text: line.slice(1), line: newLine });
@@ -233,13 +324,23 @@ function addedLines(u0) {
   }
   return m;
 }
-/** 삭제된 줄은 위치를 안 따진다(있으면 위반) — 삭제 전용 diff도 옛 파일명으로 귀속시킨다 */
+/**
+ * 삭제된 줄. `additive_only` 판정은 위치를 안 따지지만(있으면 위반), harness.toml 섹션 판정(M9)은
+ * **어느 섹션에서 지워졌는가**를 물어야 해서 base 파일 기준 줄 번호(`line`, 1-indexed)를 함께 싣는다.
+ * 삭제 전용 diff도 옛 파일명으로 귀속시킨다.
+ */
 function removedLines(u0) {
-  const m = new Map(); let file = null, pendingOld = null;
+  const m = new Map(); let file = null, pendingOld = null, oldLine = 0;
   for (const line of u0.split("\n")) {
     if (line.startsWith("--- ")) { pendingOld = line.startsWith("--- a/") ? line.slice(6) : null; continue; }
     if (line.startsWith("+++ ")) { file = fileFor(line, file, pendingOld); continue; }
-    if (file && line.startsWith("-") && !line.startsWith("---")) { if (!m.has(file)) m.set(file, []); m.get(file).push({ text: line.slice(1) }); }
+    const h = HUNK_HEADER.exec(line);
+    if (h) { oldLine = Number(h[1]); continue; }
+    if (file && line.startsWith("-") && !line.startsWith("---")) {
+      if (!m.has(file)) m.set(file, []);
+      m.get(file).push({ text: line.slice(1), line: oldLine });
+      oldLine++;
+    }
   }
   return m;
 }
