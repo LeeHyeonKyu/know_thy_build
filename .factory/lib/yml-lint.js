@@ -61,73 +61,103 @@ function runLines(block) {
   return out;
 }
 
+/**
+ * KTB-34 own-calendar 결함 — `checkWorkflows`가 `.github/workflows/*.yml` 전부를 도는 것(ADR-021 r1
+ * MF-2 d, merge-token-scope가 팩토리 밖 파일도 봐야 하므로)은 **머지 토큰 규칙 하나**의 요구였는데,
+ * 구현이 파일 범위를 나누지 않아 `artifact-retention`·`no-expression-in-run`·`runner-id-consistent`
+ * 등 "팩토리 스테이지는 이런 모양이어야 한다"는 규칙까지 입양자의 자기 워크플로(`build.yml` 같은
+ * 앱 빌드)에 적용됐다. own-calendar(2026-09-14)의 `build.yml`은 아티팩트를 올리지만 팩토리가 설치한
+ * 파일이 아니다 — 팩토리가 그 파일의 `retention-days`를 요구할 근거가 없다.
+ *
+ * 그래서 규칙을 두 스코프로 가른다: `scope: "factory"`(파일이 팩토리 템플릿이라고 **가정하는** 모든
+ * 규칙 — 아래 첫 두 블록, `no-expression-in-run`, `lintStageWorkflow`의 sweep-list 규칙 전부)는
+ * **팩토리 소유 워크플로 파일**(`factory-*.yml` — `factory init`이 설치하는 이름들과 같은 접두사;
+ * 이 저장소 자신의 `publish.yml`은 팩토리 소유가 아니다)에서만 판정한다. `merge-token-scope`
+ * (ADR-021)만 `scope: "repo"`로 남아 모든 파일에서 판정한다 — 머지 배우의 토큰이 **어느** 워크플로의
+ * 에이전트 스텝에도 있으면 안 된다는 불변식은 파일이 팩토리 소유인지와 무관하기 때문이다.
+ *
+ * 소유 여부는 호출자(doctor의 `checkWorkflows`)가 판정해 `factoryOwned`로 넘긴다 — 이름 규칙(어떤
+ * 접두사가 팩토리 것인가)은 그쪽의 지식이지 린터의 지식이 아니다. 인자를 생략하면(테스트의 이름 없는
+ * 스니펫들처럼) 기본값 `true`로 예전 동작을 그대로 유지한다.
+ */
+export function isFactoryWorkflowFile(file) {
+  return typeof file === "string" && /^factory-[\w-]+\.ya?ml$/.test(file);
+}
+
 /** ADR-009 규칙을 텍스트 수준에서 검사한다. YAML 파서 없이 — 의존성 추가 금지. */
-export function lintWorkflow(text, { file = null } = {}) {
+export function lintWorkflow(text, { file = null, factoryOwned = true } = {}) {
   const out = [];
   const lines = text.split("\n");
-  lines.forEach((l, i) => {
-    // 1) flow mapping 안의 ${{ }}: 같은 줄에서 여는 '{' (단, '${{'의 일부가 아님) 뒤에 '${{'가 온다
-    const stripped = l.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
-    if (/(^|[^$])\{[^}\n]*\$\{\{/.test(stripped)) out.push({ line: i + 1, rule: "flow-interpolation", msg: "${{ }} inside a flow mapping breaks the workflow file — use a block mapping" });
-    // 1b) `ready_for_review`는 어떤 factory 워크플로의 트리거에도 있으면 안 된다(KTB-15b I1) —
-    // merge-stage가 머지 직전 draft PR을 ready로 뒤집으면(`gh pr ready`, KTB-15) 그 자체가
-    // `ready_for_review` 이벤트를 만든다. 그 이벤트를 듣는 워크플로(예: factory-integrity)가 diff는
-    // 그대로인데 새 필수 체크 런을 또 시작하고, 그 런이 끝나기 전에 `gh pr merge`가 먼저 불려
-    // required-checks 판정이 흔들릴 수 있다(레이스). 주석에서의 언급은 괜찮다 — 실제 트리거 목록에
-    // 있는 토큰만 본다.
-    if (/\bready_for_review\b/.test(l.replace(/#.*/, ""))) {
-      out.push({ line: i + 1, rule: "ready-for-review-trigger", msg: "pull_request types must not include ready_for_review — the merge stage's own draft→ready flip (KTB-15) would retrigger this workflow and race `gh pr merge`" });
-    }
-  });
-  // 2) upload-artifact 스텝: 스텝 블록(다음 '- '까지) 안에 dot-경로가 있으면 include-hidden-files: true 필수
-  for (let i = 0; i < lines.length; i++) {
-    if (!/uses:\s*actions\/upload-artifact@/.test(lines[i])) continue;
-    const indent = lines[i].search(/\S/);
-    let j = i + 1; const block = [];
-    while (j < lines.length && (lines[j].trim() === "" || lines[j].search(/\S/) > indent || (lines[j].search(/\S/) === indent && !lines[j].trim().startsWith("- ")))) {
-      if (lines[j].search(/\S/) === indent && lines[j].trim().startsWith("- ")) break;
-      block.push(lines[j]); j++;
-    }
-    const hidden = block.some((b) => /(^|\s|\|)\.[\w-]+\//.test(b.replace(/#.*/, "")) && !/include-hidden-files/.test(b));
-    const has = block.some((b) => /include-hidden-files:\s*true/.test(b));
-    if (hidden && !has) out.push({ line: i + 1, rule: "hidden-artifact", msg: "upload-artifact with a dot-directory path needs include-hidden-files: true" });
-    // 2b) ADR-020 최종 리뷰 SF-1 — **보관 기간은 명시적이어야 하고 짧아야 한다.** 이 업로드에는
-    // `claude -p` 트랜스크립트와 `.factory/out/`이 통째로 들어가고, 그 트리에는 `actions/checkout`이
-    // 심은 `.git/config`의 basic-auth 헤더가 함께 있다(`persist-credentials`는 락 push 때문에 끌 수
-    // 없다 — ADR-020의 알려진 한계). 공개 저장소에서 아티팩트는 **레포 read 권한자 누구나** 받는다.
-    // `retention-days`가 없으면 기본은 **90일**이고, 그 숫자는 파일 어디에도 쓰여 있지 않아 아무도
-    // 그것을 결정으로 읽지 않는다. 업로드 직전의 스크럽(`scrub-artifacts.js`)이 1차 방어라면 이 값은
-    // 2차다: 스크럽이 놓친 모양이 있어도 노출 창이 7일로 닫힌다. 값을 **읽을 수 없으면**(표현식)
-    // 통과시키지 않는다 — `${{ vars.X }}`가 비어 있으면 조용히 90일로 돌아간다.
-    const retentionLine = block.map((b) => /^\s*retention-days:\s*(.+?)\s*$/.exec(b.replace(/^([^#]*?)\s+#.*$/, "$1"))).find(Boolean);
-    const days = retentionLine ? Number(retentionLine[1]) : null;
-    if (days == null || !Number.isInteger(days) || days < 1 || days > RETENTION_MAX_DAYS) {
-      out.push({ line: i + 1, rule: "artifact-retention", msg: `every actions/upload-artifact step needs an explicit \`retention-days:\` of 1–${RETENTION_MAX_DAYS} (the factory templates use 7) — the default is 90 days, and these artifacts carry the session transcript and the checkout tree whose \`.git/config\` holds the bot token's basic-auth header, downloadable by anyone with repo read (ADR-020 final review SF-1)` });
-    }
-    // 3) `~`는 **셸 확장**이지 glob이 아니다. upload-artifact는 경로를 셸에 넘기지 않고 그대로 glob으로
-    // 쓰므로 `~/.claude/projects/**/*.jsonl`은 아무것도 맞히지 못한다 — `if-no-files-found: ignore`까지
-    // 붙어 있으면 **실패조차 하지 않고** 빈 아티팩트가 올라간다(KTB-7 재리뷰: 트랜스크립트가 산출물
-    // 추출의 1순위 출처인데 몇 회차째 비어 있었다). $HOME은 선행 스텝에서 GITHUB_ENV로 넘긴다.
-    block.forEach((b, k) => {
-      // 인용부호는 벗기고 본다 — `path: "~/x"`도 같은 버그다(YAML이 따옴표를 떼고 나면 남는 건 `~/x`이고,
-      // upload-artifact는 그것을 셸이 아니라 glob으로 쓴다). 따옴표 하나로 규칙을 비켜 갈 수 있으면 규칙이 아니다.
-      const bare = unquotePathValue(b.replace(/#.*/, ""));
-      if (/^\s*(?:-\s*)?(?:path:\s*)?~\//.test(bare)) {
-        out.push({ line: i + 2 + k, rule: "tilde-path", msg: "upload-artifact does not expand `~` — export $HOME via $GITHUB_ENV and use ${{ env.… }}" });
-      }
-      // 4) `${{ env.X }}`로 시작하는 경로에 `||` 폴백이 없으면, 그 env를 세우는 스텝이 실패했을 때
-      // 경로가 `/**/*.jsonl`로 — 곧 **루트 앵커 glob**으로 — 접힌다. 업로드 스텝은 `if: always()`라
-      // 그때도 돌고, `if-no-files-found: ignore`라 조용하다: 러너 파일시스템 전체를 훑는 일이
-      // 아무 경고 없이 일어난다(KTB-10 I1). 폴백은 반드시 워크스페이스 안을 가리켜야 한다.
-      if (/^\s*(?:-\s*)?(?:path:\s*)?\$\{\{\s*env\./.test(bare) && !/\|\|/.test(bare)) {
-        out.push({ line: i + 2 + k, rule: "env-path-no-fallback", msg: "an artifact path starting with ${{ env.… }} needs a `||` fallback — an unset env collapses it to a root-anchored glob" });
+  if (factoryOwned) {
+    lines.forEach((l, i) => {
+      // 1) flow mapping 안의 ${{ }}: 같은 줄에서 여는 '{' (단, '${{'의 일부가 아님) 뒤에 '${{'가 온다
+      const stripped = l.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+      if (/(^|[^$])\{[^}\n]*\$\{\{/.test(stripped)) out.push({ line: i + 1, rule: "flow-interpolation", msg: "${{ }} inside a flow mapping breaks the workflow file — use a block mapping" });
+      // 1b) `ready_for_review`는 어떤 factory 워크플로의 트리거에도 있으면 안 된다(KTB-15b I1) —
+      // merge-stage가 머지 직전 draft PR을 ready로 뒤집으면(`gh pr ready`, KTB-15) 그 자체가
+      // `ready_for_review` 이벤트를 만든다. 그 이벤트를 듣는 워크플로(예: factory-integrity)가 diff는
+      // 그대로인데 새 필수 체크 런을 또 시작하고, 그 런이 끝나기 전에 `gh pr merge`가 먼저 불려
+      // required-checks 판정이 흔들릴 수 있다(레이스). 주석에서의 언급은 괜찮다 — 실제 트리거 목록에
+      // 있는 토큰만 본다.
+      if (/\bready_for_review\b/.test(l.replace(/#.*/, ""))) {
+        out.push({ line: i + 1, rule: "ready-for-review-trigger", msg: "pull_request types must not include ready_for_review — the merge stage's own draft→ready flip (KTB-15) would retrigger this workflow and race `gh pr merge`" });
       }
     });
+    // 2) upload-artifact 스텝: 스텝 블록(다음 '- '까지) 안에 dot-경로가 있으면 include-hidden-files: true 필수
+    for (let i = 0; i < lines.length; i++) {
+      if (!/uses:\s*actions\/upload-artifact@/.test(lines[i])) continue;
+      const indent = lines[i].search(/\S/);
+      let j = i + 1; const block = [];
+      while (j < lines.length && (lines[j].trim() === "" || lines[j].search(/\S/) > indent || (lines[j].search(/\S/) === indent && !lines[j].trim().startsWith("- ")))) {
+        if (lines[j].search(/\S/) === indent && lines[j].trim().startsWith("- ")) break;
+        block.push(lines[j]); j++;
+      }
+      const hidden = block.some((b) => /(^|\s|\|)\.[\w-]+\//.test(b.replace(/#.*/, "")) && !/include-hidden-files/.test(b));
+      const has = block.some((b) => /include-hidden-files:\s*true/.test(b));
+      if (hidden && !has) out.push({ line: i + 1, rule: "hidden-artifact", msg: "upload-artifact with a dot-directory path needs include-hidden-files: true" });
+      // 2b) ADR-020 최종 리뷰 SF-1 — **보관 기간은 명시적이어야 하고 짧아야 한다.** 이 업로드에는
+      // `claude -p` 트랜스크립트와 `.factory/out/`이 통째로 들어가고, 그 트리에는 `actions/checkout`이
+      // 심은 `.git/config`의 basic-auth 헤더가 함께 있다(`persist-credentials`는 락 push 때문에 끌 수
+      // 없다 — ADR-020의 알려진 한계). 공개 저장소에서 아티팩트는 **레포 read 권한자 누구나** 받는다.
+      // `retention-days`가 없으면 기본은 **90일**이고, 그 숫자는 파일 어디에도 쓰여 있지 않아 아무도
+      // 그것을 결정으로 읽지 않는다. 업로드 직전의 스크럽(`scrub-artifacts.js`)이 1차 방어라면 이 값은
+      // 2차다: 스크럽이 놓친 모양이 있어도 노출 창이 7일로 닫힌다. 값을 **읽을 수 없으면**(표현식)
+      // 통과시키지 않는다 — `${{ vars.X }}`가 비어 있으면 조용히 90일로 돌아간다.
+      //
+      // 이 규칙은 **팩토리 소유 워크플로에만** 건다(KTB-34): 팩토리 템플릿의 크리덴셜 노출을 막는
+      // 규칙이지, 입양자가 올리는 자기 앱 빌드 아티팩트의 보관 정책을 팩토리가 정할 근거는 없다.
+      const retentionLine = block.map((b) => /^\s*retention-days:\s*(.+?)\s*$/.exec(b.replace(/^([^#]*?)\s+#.*$/, "$1"))).find(Boolean);
+      const days = retentionLine ? Number(retentionLine[1]) : null;
+      if (days == null || !Number.isInteger(days) || days < 1 || days > RETENTION_MAX_DAYS) {
+        out.push({ line: i + 1, rule: "artifact-retention", msg: `every actions/upload-artifact step needs an explicit \`retention-days:\` of 1–${RETENTION_MAX_DAYS} (the factory templates use 7) — the default is 90 days, and these artifacts carry the session transcript and the checkout tree whose \`.git/config\` holds the bot token's basic-auth header, downloadable by anyone with repo read (ADR-020 final review SF-1)` });
+      }
+      // 3) `~`는 **셸 확장**이지 glob이 아니다. upload-artifact는 경로를 셸에 넘기지 않고 그대로 glob으로
+      // 쓰므로 `~/.claude/projects/**/*.jsonl`은 아무것도 맞히지 못한다 — `if-no-files-found: ignore`까지
+      // 붙어 있으면 **실패조차 하지 않고** 빈 아티팩트가 올라간다(KTB-7 재리뷰: 트랜스크립트가 산출물
+      // 추출의 1순위 출처인데 몇 회차째 비어 있었다). $HOME은 선행 스텝에서 GITHUB_ENV로 넘긴다.
+      block.forEach((b, k) => {
+        // 인용부호는 벗기고 본다 — `path: "~/x"`도 같은 버그다(YAML이 따옴표를 떼고 나면 남는 건 `~/x`이고,
+        // upload-artifact는 그것을 셸이 아니라 glob으로 쓴다). 따옴표 하나로 규칙을 비켜 갈 수 있으면 규칙이 아니다.
+        const bare = unquotePathValue(b.replace(/#.*/, ""));
+        if (/^\s*(?:-\s*)?(?:path:\s*)?~\//.test(bare)) {
+          out.push({ line: i + 2 + k, rule: "tilde-path", msg: "upload-artifact does not expand `~` — export $HOME via $GITHUB_ENV and use ${{ env.… }}" });
+        }
+        // 4) `${{ env.X }}`로 시작하는 경로에 `||` 폴백이 없으면, 그 env를 세우는 스텝이 실패했을 때
+        // 경로가 `/**/*.jsonl`로 — 곧 **루트 앵커 glob**으로 — 접힌다. 업로드 스텝은 `if: always()`라
+        // 그때도 돌고, `if-no-files-found: ignore`라 조용하다: 러너 파일시스템 전체를 훑는 일이
+        // 아무 경고 없이 일어난다(KTB-10 I1). 폴백은 반드시 워크스페이스 안을 가리켜야 한다.
+        if (/^\s*(?:-\s*)?(?:path:\s*)?\$\{\{\s*env\./.test(bare) && !/\|\|/.test(bare)) {
+          out.push({ line: i + 2 + k, rule: "env-path-no-fallback", msg: "an artifact path starting with ${{ env.… }} needs a `||` fallback — an unset env collapses it to a root-anchored glob" });
+        }
+      });
+    }
+    out.push(...lintExpressionsInRun(lines));
   }
-  out.push(...lintExpressionsInRun(lines));
   out.push(...lintMergeTokenScope(lines, file));
-  const stage = STAGE_RUN.exec(text);
-  if (stage) out.push(...lintStageWorkflow(text, lines, stage[1]));
+  if (factoryOwned) {
+    const stage = STAGE_RUN.exec(text);
+    if (stage) out.push(...lintStageWorkflow(text, lines, stage[1]));
+  }
   return out;
 }
 
@@ -177,6 +207,10 @@ function lintExpressionsInRun(lines) {
 
 /**
  * ADR-021 `merge-token-scope` — 머지 배우의 토큰은 **머지 워크플로 밖으로 나가지 않는다.**
+ *
+ * KTB-34: `lintWorkflow`가 받는 `factoryOwned`와 무관하게 **항상** 판정한다(위 `scope: "repo"`) —
+ * 이 규칙이 보는 것은 "이 파일이 팩토리 템플릿의 모양을 지켰는가"가 아니라 "머지 토큰이 어딘가의
+ * 에이전트 스텝에 새고 있는가"이고, 그 물음은 파일이 팩토리 소유든 입양자의 자기 워크플로든 같다.
  *
  * 두 갈래로 본다:
  * 1. **파일 범위** — `file`을 받은 호출(doctor의 `checkWorkflows`)에서만 판정한다. `lintWorkflow`는

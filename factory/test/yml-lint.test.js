@@ -1,7 +1,7 @@
 import { test, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { lintWorkflow, lintLoggingHook } from "../lib/yml-lint.js";
+import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../lib/yml-lint.js";
 
 test("flow mapping with ${{ }} is a violation; block mapping is not", () => {
   expect(lintWorkflow("with: { name: x-${{ matrix.y }}, path: .spike/ }\n")).toEqual([expect.objectContaining({ line: 1, rule: "flow-interpolation" })]);
@@ -525,6 +525,59 @@ test("merge-token-scope (r1 finding 5): the old spoof — the script name in a s
     "",
   ].join("\n");
   expect(lintWorkflow(byComment, { file: "factory-merge.yml" }).map((v) => v.rule)).toEqual(["merge-token-scope"]);
+});
+
+// ── KTB-34 own-calendar — rule scope split: factory-shaped rules vs repo-wide merge-token-scope ────
+
+test("isFactoryWorkflowFile: factory-*.yml is owned; other names — including this repo's own publish.yml — are not", () => {
+  expect(isFactoryWorkflowFile("factory-merge.yml")).toBe(true);
+  expect(isFactoryWorkflowFile("factory-retro.yml")).toBe(true);   // not in doctor's WORKFLOWS list, but still factory-owned by prefix
+  expect(isFactoryWorkflowFile("publish.yml")).toBe(false);
+  expect(isFactoryWorkflowFile("build.yml")).toBe(false);
+  expect(isFactoryWorkflowFile(null)).toBe(false);
+});
+
+test("KTB-34: a non-factory workflow (an adopter's own build.yml) is not held to factory-shaped rules", () => {
+  const build = [
+    "on:",
+    "  push:",
+    "jobs:",
+    "  build:",
+    "    steps:",
+    "      - run: echo ${{ github.event.head_commit.message }}",     // would trip no-expression-in-run if scoped as factory
+    "      - uses: actions/upload-artifact@v4",
+    "        with:",
+    "          name: dist",
+    "          path: dist/",                                          // no retention-days — would trip artifact-retention if scoped as factory
+    "",
+  ].join("\n");
+  // doctor's checkWorkflows judges ownership by filename and passes it in — this is that call shape.
+  expect(lintWorkflow(build, { file: "build.yml", factoryOwned: false })).toEqual([]);
+});
+
+test("KTB-34: the same non-factory file still trips merge-token-scope when the merge token shares a step with an agent token", () => {
+  const build = [
+    "jobs:",
+    "  build:",
+    "    steps:",
+    "      - name: Agent",
+    "        env:",
+    "          FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+    "        run: claude -p go",
+    "",
+  ].join("\n");
+  // both the file-scope branch (build.yml isn't factory-merge.yml) and the step-scope branch (shares a
+  // step with an agent token) fire here — both are merge-token-scope, and that's the point: it's the one
+  // rule that never goes quiet just because the file isn't factory-owned.
+  const violations = lintWorkflow(build, { file: "build.yml", factoryOwned: false });
+  expect(violations.length).toBeGreaterThanOrEqual(1);
+  for (const v of violations) expect(v.rule).toBe("merge-token-scope");
+});
+
+test("KTB-34: the shipped factory templates are still fully linted (factoryOwned defaults to true)", () => {
+  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8"), { file: f }), f).toEqual([]);
+  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8"), { file: f, factoryOwned: true }), f).toEqual([]);
 });
 
 test("merge-token-scope (r1 finding 5): a declared scrub step that ALSO starts an agent in the same `run:` is still a violation", () => {
