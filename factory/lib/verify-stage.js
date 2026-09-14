@@ -1,5 +1,6 @@
 import { validate } from "./schemas.js";
 import { extractStageArtifact } from "./stage-artifact.js";
+import { matchesAny } from "./glob.js";
 
 /**
  * 최종 리뷰 nit 3 — `extractJson`/`matchBrace`와 `export { fencedJsonError }`가 여기서 사라졌다.
@@ -165,7 +166,25 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
  */
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody }) {
+/**
+ * 외부 감사 2026-09-14 M1 — CHARTER의 NEVER_AUTOMATE 중 **글롭으로 적힌 항목**을 이슈의 영향 경로에
+ * 다시 댄다. triage 에이전트도 같은 목록을 읽지만, 그 판정은 LLM의 것이고 이 판정은 스크립트의
+ * 것이다: "에이전트가 목록을 못 봤다"가 통하지 않아야 그 목록이 실제로 벽이다.
+ * → `[{path, glob}]`. 글롭이 없거나 경로가 없으면 빈 배열(없는 규칙을 발명하지 않는다).
+ */
+export function neverAutomateHits(paths, globs) {
+  const gs = (Array.isArray(globs) ? globs : []).filter((g) => typeof g === "string" && g);
+  if (!gs.length) return [];
+  const hits = [];
+  for (const p of Array.isArray(paths) ? paths : []) {
+    if (typeof p !== "string" || !p) continue;
+    const g = gs.find((x) => matchesAny([x], p));
+    if (g) hits.push({ path: p, glob: g });
+  }
+  return hits;
+}
+
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [] }) {
   const reasons = [];
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
@@ -221,6 +240,23 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   if (data && SCHEMA_OF[stage]) {
     const v = validate(SCHEMA_OF[stage], data);
     if (!v.ok) reasons.push(`schema ${SCHEMA_OF[stage]}: ${v.errors.join("; ")}`);
+  }
+  /*
+   * 감사 M1 — 글롭으로 적힌 NEVER_AUTOMATE 항목은 **에이전트의 판정을 덮어쓴다**. 실패가 아니라
+   * 판정의 교정이라 `reasons`에 넣지 않는다: 이 이슈는 `factory:wont-do`로 정상 종료해야 하고,
+   * 여기서 verify를 FAIL시키면 CHARTER가 이미 답을 정해 둔 이슈가 사람에게 올라간다.
+   * 무엇이 덮었는지는 `never_automate_hit`으로 handoff·run 기록에 그대로 남는다.
+   */
+  if (stage === "triage" && data) {
+    const hits = neverAutomateHits(data.impact_paths, neverAutomate);
+    if (hits.length) {
+      const where = hits.map((h) => `${h.path} (${h.glob})`).join(", ");
+      data.never_automate_hit = hits;
+      if (data.disposition !== "wont-do") {
+        data.disposition = "wont-do";
+        data.reason = `CHARTER NEVER_AUTOMATE matches this issue's impact paths — ${where}. (script override of the triage verdict; audit M1)`;
+      }
+    }
   }
   if (data && orchestration && data.orchestration !== orchestration) reasons.push(`orchestration ${data.orchestration} != configured ${orchestration}`);
   if (stage === "plan" && data && expectedRounds != null && data.rounds !== expectedRounds) reasons.push(`rounds ${data.rounds} != expected ${expectedRounds}`);

@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
+import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -524,15 +524,83 @@ test("I2: the guard runs AFTER local entry — `factory run triage` on a backlog
   expect(d.claudeP).toHaveBeenCalled();
 });
 
-test("I2: an unreadable label set never blocks the stage — the guard is a cost defense, not a safety gate", async () => {
+/**
+ * 외부 감사 2026-09-14 M13 — **이 판정은 뒤집혔다.** KTB-10의 원래 규칙은 "라벨 조회 실패는 막지
+ * 않는다(가드는 비용 방어일 뿐, 안전은 전이 그래프가 쥔다)"였는데, 그 전제가 틀렸다: 조회가 실패하면
+ * 이 런은 **자기가 어떤 상태에서 출발했는지 모르는 채로** claude -p를 띄우고, 그 뒤의 전이 그래프는
+ * "지금 라벨"만 볼 뿐 "돌기 전에 무엇이었는가"를 복원해 주지 않는다. 곧 이미 끝난 스테이지의 재점화가
+ * 조회 장애 한 번으로 그대로 통과한다(중복 handoff, plan 한 번 ~$12).
+ * 모르면 멈춘다: `factory:blocked`(cause `api-error`, KTB-22와 같은 등급 — sweeper가 재시도한다).
+ */
+test("M13: a label lookup that throws aborts the stage as blocked/api-error before claude -p", async () => {
   const lines = [];
+  const transition = vi.fn(async () => ({ ok: true, to: "factory:blocked" }));
   const d = baseDeps({
     issueLabels: async () => { throw new Error("gh issue view failed"); },
+    claudeP: vi.fn(), buildContext: vi.fn(), writeHandoff: vi.fn(),
+    transition, release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(2);
+  expect(d.claudeP).not.toHaveBeenCalled();
+  expect(d.buildContext).not.toHaveBeenCalled();
+  expect(d.writeHandoff).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "api-error", reason: expect.stringContaining("gh issue view failed") }));
+  expect(d.release).toHaveBeenCalled();                             // 잡았던 락은 반드시 놓는다
+  expect(lines.some((l) => /entry state: unreadable — gh issue view failed/.test(l))).toBe(true);
+});
+
+// ── 감사 M13 (b): 같은 head로 이미 끝난 스테이지는 두 번 돌지 않는다 ────────────────
+
+test("M13: completedForHead only sees this turn's handoffs, and only for the same head", async () => {
+  const HEAD = "a".repeat(40), OTHER = "b".repeat(40);
+  const handoff = (sha, stage = "review") => ({ id: 2, createdAt: "2026-09-14T01:00:00Z", body: renderHandoff({ stage, issue: 7, summary: "s", data: { schema: `factory.${stage}.v1`, issue: 7, head_sha: sha } }) });
+  const to = (label) => ({ id: 1, createdAt: "2026-09-14T02:00:00Z", body: `<!-- factory-transition:v1 from=factory:x to=${label} by=script -->` });
+  expect(completedForHead({ comments: [handoff(HEAD)], stage: "review", headSha: HEAD })).toMatchObject({ head: HEAD });
+  expect(completedForHead({ comments: [handoff(OTHER)], stage: "review", headSha: HEAD })).toBe(null);
+  expect(completedForHead({ comments: [handoff(HEAD)], stage: "implement", headSha: HEAD })).toBe(null);
+  expect(completedForHead({ comments: [handoff(HEAD), to("factory:queue")], stage: "review", headSha: HEAD })).toBe(null);
+  expect(completedForHead({ comments: [handoff(HEAD)], stage: "review", headSha: null })).toBe(null);
+  /*
+   * 재작업이 죽지 않는다: rework 전이 시점의 PR head는 아직 그대로라 이전 implement handoff의
+   * head sha가 현재 head와 같다 — 진입 라벨 전이에서 창을 자르지 않으면 이 이슈는 그대로 멈춘다.
+   */
+  expect(completedForHead({ comments: [handoff(HEAD, "implement"), to("factory:rework")], stage: "implement", headSha: HEAD })).toBe(null);
+  // 같은 차례 안의 재점화는 그대로 걸린다(전이가 handoff보다 **앞**에 있다).
+  expect(completedForHead({ comments: [to("factory:rework"), handoff(HEAD, "implement")], stage: "implement", headSha: HEAD })).toMatchObject({ head: HEAD });
+});
+
+test("M13: a duplicate run exits 0 with no side effects at all", async () => {
+  const lines = [];
+  const d = baseDeps({
+    duplicateRun: async () => ({ head: "c".repeat(40), at: "2026-09-14T01:00:00Z" }),
+    claudeP: vi.fn(), buildContext: vi.fn(), transition: vi.fn(), writeHandoff: vi.fn(), comment: vi.fn(),
+    localEntry: vi.fn(), issueLabels: vi.fn(), release: vi.fn(async () => true), runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
+  for (const fn of [d.claudeP, d.buildContext, d.transition, d.writeHandoff, d.comment, d.localEntry, d.issueLabels]) expect(fn).not.toHaveBeenCalled();
+  expect(d.release).toHaveBeenCalled();                             // 락만은 놓는다
+  expect(lines.some((l) => /^duplicate-run: skipped/.test(l))).toBe(true);
+});
+
+test("M13: a duplicate-run check that throws does not stop the stage — it is a cost defense", async () => {
+  const lines = [];
+  const d = baseDeps({
+    duplicateRun: async () => { throw new Error("gh comments failed"); },
     claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })), runRecord: (l) => lines.push(...l),
   });
-  expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(0);
+  expect(await runStage({ stage: "review", issue: 7, deps: d })).toBe(0);
   expect(d.claudeP).toHaveBeenCalled();
-  expect(lines.some((l) => /entry state: unreadable — gh issue view failed/.test(l))).toBe(true);
+  expect(lines.some((l) => /duplicate-run: check failed — gh comments failed/.test(l))).toBe(true);
+});
+
+test("M13: a label lookup that returns nothing at all is the same abort — absence is not permission", async () => {
+  const transition = vi.fn(async () => ({ ok: true, to: "factory:blocked" }));
+  for (const labels of [null, undefined, "not-an-array"]) {
+    const d = baseDeps({ issueLabels: async () => labels, claudeP: vi.fn(), transition });
+    expect(await runStage({ stage: "plan", issue: 5, deps: d })).toBe(2);
+    expect(d.claudeP).not.toHaveBeenCalled();
+  }
+  expect(transition).toHaveBeenCalledTimes(3);
 });
 
 test("I2: with no issueLabels dep wired the guard is inert (existing callers unchanged)", async () => {
@@ -663,10 +731,21 @@ test("KTB-20: a harness issue with the variant file missing stops before claude 
   expect(lines.some((l) => /ci-settings: FAIL — \.factory\/ci-settings-harness\.json missing/.test(l))).toBe(true);
 });
 
-test("KTB-20: an unreadable label set falls back to the narrower settings (not the variant)", async () => {
+/**
+ * KTB-20의 원래 질문은 "라벨을 못 읽었을 때 **어느 settings 파일**로 도는가"였고(더 좁은 쪽),
+ * 감사 M13이 그 질문을 지웠다: 라벨을 못 읽으면 스테이지가 아예 돌지 않는다. 좁은 쪽 기본값은
+ * 라벨을 **읽었지만** `factory:harness`가 없을 때의 규칙으로 그대로 남는다 — 그것이 아래 단언이다.
+ */
+test("KTB-20/M13: an unreadable label set never reaches claude -p at all; a read one without factory:harness takes the narrower settings", async () => {
   const seen = [];
-  const d = baseDeps({
+  const unreadable = baseDeps({
     issueLabels: async () => { throw new Error("gh issue view failed"); },
+    claudeP: vi.fn(), transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "implement", issue: 15, deps: unreadable })).toBe(2);
+  expect(unreadable.claudeP).not.toHaveBeenCalled();
+  const d = baseDeps({
+    issueLabels: async () => ["factory:planned"],
     claudeP: vi.fn(async (_ctx, opts) => { seen.push(opts); return { is_error: false, result: "{}" }; }),
     transition: async ({ to }) => ({ ok: true, to }),
   });

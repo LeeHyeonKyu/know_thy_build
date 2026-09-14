@@ -99,6 +99,8 @@ npx know-thy-build factory status      # Needs You / 큐 / 진행 중 / 최근 �
 
 `factory:queue` → `factory:needs-human`: triage 산출물이 검증 실패하면(요구 검사 실패, §3.3) `ready`로 넘어가지 못하고 여기서 바로 전이한다.
 
+triage가 판단할 수 없는 이슈의 기본 판정은 기본값이 아니라 CHARTER가 적어 두는 선택이다(`triage.default = needs-info | ready`, 템플릿 기본은 `needs-info` — 침묵은 정지이고, 필드를 지우면 `factory doctor`가 `charter.triage-default-unset`으로 FAIL한다): NEVER_AUTOMATE에 걸리면 언제나 `wont-do`, `done_when`을 쓸 수 없으면 언제나 `needs-info`, 이슈 본문에 `[ready]` 표식이 있으면 그 이슈만 예외로 `ready`이며, 그 밖의 모든 경우가 이 기본값으로 간다. NEVER_AUTOMATE 항목 중 경로 글롭으로 적힌 것은 `verify-stage`가 triage handoff의 `impact_paths`에 다시 대어 에이전트의 판정과 무관하게 `wont-do`로 덮어쓴다(`never_automate_hit`, 외부 감사 M1).
+
 ### 3.2 전이도
 
 ```mermaid
@@ -365,7 +367,7 @@ jobs:
 
 **아티팩트는 업로드 직전에 스크럽되고 7일만 남는다(ADR-020 최종 리뷰 SF-1).** 업로드하는 여섯 워크플로는 바로 앞 스텝에서 `.factory/bin/scrub-artifacts.js`로 올라갈 경로(run 기록 · `.factory/out/` · 세션 트랜스크립트)의 모든 텍스트 파일에서 `AUTHORIZATION: basic …`/`Bearer …` 헤더 값 · `ghp_`·`github_pat_`·`sk-ant-` 모양 · 스텝 env로 받은 네 시크릿의 리터럴 값과 그 `x-access-token:` base64를 `[REDACTED:<kind>]`로 지우고(로그에는 종류별 개수만 남는다, 바이너리는 건드리지 않는다), 업로드는 `retention-days: 7`로 노출 창을 닫는다 — 공개 저장소에서 아티팩트는 레포 read 권한자 누구나 받는데 그 안에는 `actions/checkout`이 심은 `.git/config`의 봇 토큰 헤더가 닿을 수 있는 텍스트가 함께 올라간다(그 헤더 자체는 락 push가 나가는 유일한 경로라 끌 수 없다 — ADR-020의 알려진 한계).
 
-**같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작한다** — 락은 그때 이미 풀려 있어 claim이 막지 못하므로(claim은 *동시* 러너만 막는다), `run-stage.js`는 락을 잡은 직후 이슈의 현재 상태 라벨이 그 스테이지의 진입 라벨(`triage: factory:queue` · `plan: factory:ready` · `implement: factory:planned|factory:rework` · `review: factory:awaiting-review` · `merge: factory:approved`)인지 보고, 아니면 `claude -p`를 부르기 전에 아무 전이도 handoff도 없이 exit 0으로 물러난다(KTB-10 — 중복 실행에 대한 실질적 방어는 전이 그래프가 아니라 이 가드다. 전이 그래프는 이미 돈 뒤에야 거부한다).
+**같은 그룹의 PENDING 런은 앞 런이 끝난 뒤에 시작한다** — 락은 그때 이미 풀려 있어 claim이 막지 못하므로(claim은 *동시* 러너만 막는다), `run-stage.js`는 락을 잡은 직후 이슈의 현재 상태 라벨이 그 스테이지의 진입 라벨(`triage: factory:queue` · `plan: factory:ready` · `implement: factory:planned|factory:rework` · `review: factory:awaiting-review` · `merge: factory:approved`)인지 보고, 아니면 `claude -p`를 부르기 전에 아무 전이도 handoff도 없이 exit 0으로 물러난다(KTB-10 — 중복 실행에 대한 실질적 방어는 전이 그래프가 아니라 이 가드다. 전이 그래프는 이미 돈 뒤에야 거부한다). 라벨 조회가 **실패하면** 스테이지는 진행하지 않고 `factory:blocked`(cause `api-error`)로 멈춘다(외부 감사 M13): 진입 상태를 모르는 런은 자기가 이미 끝난 스테이지를 다시 도는 중인지 알 수 없다. 같은 사유로, **이번 차례**(마지막 재큐 이후 + 이 스테이지의 진입 라벨로 들어온 마지막 전이 이후)에 **같은 head sha로** 이 스테이지의 handoff가 이미 있으면 전이·코멘트·`claude -p` 없이 `duplicate-run: skipped`로 exit 0이다 — 진입 라벨 전이에서 창을 자르지 않으면 rework가 이전 implement handoff와 같은 head를 들고 있어 재작업이 중복으로 읽힌다.
 
 ### 4.2 제어 계층 — 오케스트레이터는 세 겹, LLM은 하나
 
@@ -797,6 +799,8 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 
 **대상 파일 — "새 테스트"와 "변경된 테스트"는 다른 로직에 쓰인다.** `prove-test`·`new-test-repeat`은 이번 PR에서 **변경된 테스트 파일 전부**(추가 A + 수정 M, rename R은 새 경로 기준. 삭제 D는 제외 — 돌릴 수도 커버리지를 잴 수도 없다)를 대상으로 한다: 기존 파일에 케이스를 추가했을 뿐이어도 base에 얹으면 실패해야 증명된다. 반면 `classify-failure.js`의 "새 테스트 → red" 규칙(§5.2.5-③ step 1)은 **git이 `A`로 잡은 파일만**(`addedTests`)을 새 테스트로 본다 — 기존 파일을 수정해 만든 케이스는 새 테스트 취급하지 않고 기존 테스트의 flaky/introduced 분류 경로를 그대로 탄다. `new_test_repeats` 임계가 설정돼 있지 않으면(`[gates.thresholds]` 누락) `new-test-repeat` 게이트는 "돌았지만 통과"가 아니라 **`MISCONFIGURED`**다 — 반복 횟수를 모르면 "흔들리지 않음"을 주장할 근거가 없다.
 
+**base 워크트리는 돌 수 있어야 한다(외부 감사 M2).** `prove-test`는 새 테스트를 base 위에 얹어 돌리는데, `git worktree add`가 만드는 것은 소스뿐이라 의존성이 없으면 거의 모든 테스트가 `Cannot find module`로 죽고 그 exit≠0이 "증명"으로 읽혔다 — 그래서 base 워크트리에 먼저 의존성을 깔고(`[runtime].setup`이 있으면 그것, 없으면 lockfile 유무에 따라 `npm ci`/`npm install --no-audit`), 그래도 base 실행이 모듈 해석·import 오류로 죽으면 그 결과는 증명이 아니라 **판정 불가**(`prove_test.inconclusive[]`)로 기록되고 게이트는 `MISCONFIGURED`가 된다(fail closed — required 증명 게이트가 판정 불가인 PR은 절대 GREEN이 아니다).
+
 **증명 게이트 — 커버리지와 mutation은 역할이 다르고 둘 다 쓴다.**
 
 | 게이트 | 재는 것 | 레벨 | 성숙도 | 임계(예) |
@@ -886,6 +890,7 @@ plan_roles:
 plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
 plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
+triage: { default: needs-info }             # 판단이 서지 않는 이슈를 멈출 것인가(needs-info) 통과시킬 것인가(ready) — 지우면 doctor FAIL(§3.1, 감사 M1)
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -1319,6 +1324,10 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 ## Lessons
 Before reviewing, read `.factory/lessons/reviewer-correctness.md` (path is also given in your prompt)
 and treat each entry as a checklist item.
+When an entry actually shapes a finding, **cite it inside that finding's own `claim`** with the marker
+`lesson:<id>` (e.g. `lesson:L-2026-09-01-03`). That marker is the only record that the lesson did any
+work: retro counts it into the entry's `인용`, and a lesson nobody ever cites is the first one retired.
+Never cite a lesson you did not use — the count is evidence, not courtesy.
 ```
 
 ### 7.4 예시 — `.factory/lessons/reviewer-correctness.md`
@@ -1334,6 +1343,8 @@ and treat each entry as a checklist item.
 - [L-2026-09-05-03] `Promise.all` 안의 부분 실패는 성공한 쪽의 부수효과를 남긴다. 트랜잭션 또는 `allSettled` + 보상 로직을 확인한다.
   근거: runs/110.md, runs/112.md. 인용: 0회. → gate 승격 후보: eslint rule `no-promise-all-side-effects` (retro 제안 #131)
 ```
+
+`인용: N회`를 올리는 유일한 입력은 판정문 안의 `lesson:<id>` 마커다(외부 감사 M11): 리뷰어는 그 교훈이 실제로 만든 발견의 `claim` 안에, 빌더는 implement handoff의 `notes`에 마커를 적고, retro가 창 안의 handoff에서 그것을 **역할별로** 세어 이 숫자를 올린다. 은퇴 순서는 "인용 0회 먼저, 그 다음 나이"이고, 인용된 항목도 자리가 없으면 마지막 순서로 은퇴한다 — 인용 항목을 영구 보존하면 상한에 닿은 파일이 새 교훈을 영원히 받지 못한다. 근거 run(`근거:`·`evidence_runs`)은 **records 브랜치에 실재하는 run id**여야 한다(감사 M10): 없는 번호를 든 제안은 `unknown-evidence-run`으로 미뤄진다.
 
 ### 7.5 역할 간 소통 구조
 

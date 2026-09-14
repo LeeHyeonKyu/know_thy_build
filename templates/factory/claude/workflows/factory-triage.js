@@ -11,6 +11,9 @@ const TRIAGE = {
     disposition: { type: 'string', enum: ['ready', 'needs-info', 'wont-do'] },
     tier: { type: 'string', enum: ['docs', 'standard', 'load-bearing'] },
     questions: { type: 'array', items: { type: 'string' } },
+    // 감사 M1 — 이 변경이 건드릴 것으로 보는 경로들. `verify-stage`가 CHARTER의 NEVER_AUTOMATE
+    // 글롭을 여기에 다시 대고, 걸리면 disposition을 wont-do로 덮는다(never_automate_hit).
+    impact_paths: { type: 'array', items: { type: 'string' } },
     reason: { type: 'string' },
     summary: { type: 'string' },
   },
@@ -83,6 +86,14 @@ if (Number(loaded.issue) !== issue) {
 const roster = Array.isArray(loaded.roster) ? loaded.roster : [];
 const role = roster.find((r) => r && r.name === 'triage');
 
+// 감사 M1 (2026-09-14) — **애매한 이슈의 기본 판정은 CHARTER가 정한다.** 예전 프롬프트는 "NEVER_AUTOMATE도
+// 아니고 done_when도 쓸 수 있으면 ready"로 끝나 있었고, 그것이 default-allow였다. 기본값은 컨텍스트가
+// 싣고(`loaded.triage.default`), 없으면 좁은 쪽(`needs-info`)으로 읽는다 — 아무도 고른 적 없는 것을
+// 통과로 읽지 않는다(그 저장소는 `factory doctor`가 이미 FAIL로 말하고 있다).
+const triageDefault = loaded.triage?.default === 'ready' || loaded.triage?.default === 'needs-info'
+  ? loaded.triage.default
+  : 'needs-info';
+
 let verdict = null;
 if (role) {
   const triagePrompt =
@@ -90,10 +101,13 @@ if (role) {
     `\`docs/factory/CHARTER.md\` (sections NEVER_AUTOMATE and Tiers), the spec named by context.spec_path if present, ` +
     `and \`.factory/harness.toml\` [load_bearing]. Judge whether issue #${issue} is something the factory can build ` +
     `and, if so, its tier — per your Lens (a NEVER_AUTOMATE match -> wont-do; done_when not yet writable concretely ` +
-    `-> needs-info with <=3 questions; predicted diff paths under docs/** only -> tier docs; touches ` +
+    `-> needs-info with <=3 questions; a literal [ready] marker in the issue body -> ready; anything else -> this ` +
+    `repo's charter default, which is \`${triageDefault}\` (CHARTER triage.default) — do NOT invent a \`ready\` of ` +
+    `your own; predicted diff paths under docs/** only -> tier docs; touches ` +
     `[load_bearing].paths -> tier load-bearing; otherwise -> tier standard; a bug report with no repro steps -> ` +
     `needs-info). Return exactly the factory.triage.v1 fields: disposition, tier (required when ready), ` +
-    `questions (required when needs-info), reason, summary.`;
+    `questions (required when needs-info), impact_paths (repo-relative paths this change would touch — the stage ` +
+    `re-checks them against the glob-shaped NEVER_AUTOMATE items), reason, summary.`;
 
   verdict = await once(() => agent(triagePrompt, { agentType: role.agentType, model: role.model, schema: TRIAGE }))();
 }

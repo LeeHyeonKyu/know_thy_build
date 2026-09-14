@@ -26,9 +26,9 @@ import { readAgentsLog } from "../lib/agents-log.js";
 import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from "../lib/verify-stage.js";
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
-import { renderHandoff, latestHandoff } from "../lib/handoff.js";
+import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, countTransitionsTo } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence } from "../lib/run-record.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
@@ -228,6 +228,26 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // triage 스테이지가 스스로 backlog → factory:queue로 밀어 넣는다 — claim 직후(라벨 이동일 뿐
     // 기록과는 무관하다. 기록 하이드레이트는 이미 charterReady 직후에 끝났다).
     // best-effort — 실패해도 흔적만 남기고 스테이지는 계속된다.
+    /**
+     * 외부 감사 2026-09-14 M13 — **중복 실행.** 락은 *동시* 러너만 막는다(끝난 런의 락은 이미
+     * 풀려 있다). concurrency 슬롯에서 풀려난 PENDING 런이나 sweeper의 재점화가 **같은 head**로
+     * 같은 스테이지를 처음부터 다시 도는 경로가 그래서 열려 있었다: 라벨 가드는 라벨이 아직
+     * 진입 상태로 남아 있을 때(전이가 실패했거나 review가 같은 라벨로 돌아올 때) 통과시키고,
+     * 그 뒤는 전부 다시 돈다 — 같은 handoff가 두 번, 비용도 두 번.
+     *
+     * 판정 재료는 하나다: **마지막 재큐 이후, 이 스테이지의 handoff 중 head sha가 같은 것**이
+     * 이미 있는가. 있으면 이 런이 할 일은 없다 — 전이도 코멘트도 claude -p도 없이 exit 0이다
+     * (락은 finally가 놓는다). 조회가 실패하면 막지 않는다: 그건 중복 판정을 못 한 것일 뿐이고,
+     * 진입 상태 가드와 전이 그래프는 그대로 남아 있다.
+     */
+    try {
+      const dup = await d.duplicateRun?.();
+      if (dup) {
+        record([`duplicate-run: skipped — ${stage} already completed for head ${String(dup.head || "").slice(0, 12)} (handoff ${dup.at || "n/a"})`]);
+        console.error(`factory: issue #${issue} — duplicate-run: skipped (${stage} already completed for this head)`);
+        return 0;
+      }
+    } catch (e) { record([`duplicate-run: check failed — ${e?.message || e}`]); }
     try {
       const localMsg = await d.localEntry?.();
       if (localMsg) record([localMsg]);
@@ -239,8 +259,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // handoff 코멘트를 중복으로 남긴 **뒤**다. 그래서 락을 잡은 직후 이슈의 현재 상태 라벨을 읽어
     // 이 스테이지의 진입 라벨이 아니면 아무것도 하지 않고 물러난다(전이 없음, handoff 없음, claude -p 없음).
     // localEntry **뒤**인 이유: 로컬 진입(§4.2.5)이 backlog → factory:queue를 바로 위에서 만든다.
-    // 라벨을 못 읽은 것(조회 실패)은 막지 않고 흔적만 남긴다 — 가드는 비용 방어이지 안전 게이트가
-    // 아니고, 실제 안전은 뒤의 전이 그래프가 그대로 쥐고 있다. 하지만 **읽은 라벨 자체가 무효**
+    //
+    // 외부 감사 2026-09-14 M13 — **라벨을 못 읽으면 멈춘다**(예전 규칙은 "막지 않고 흔적만"이었다).
+    // 조회가 실패한 런은 자기가 어떤 상태에서 출발했는지 모르는 채로 claude -p를 띄우고, 뒤의 전이
+    // 그래프는 "지금 라벨"만 볼 뿐 "돌기 전에 무엇이었는가"를 복원해 주지 않는다 — 곧 이미 끝난
+    // 스테이지의 재점화가 조회 장애 한 번으로 통과했다(중복 handoff, plan 한 번 ~$12). 등급은
+    // `factory:blocked` cause `api-error`(KTB-22와 같은 자리): 자격증명이 아니라 일시 장애이므로
+    // sweeper의 blocked-origin 재시도가 그대로 다시 집는다. **읽은 라벨 자체가 무효**
     // (상태 라벨 2개 이상 — 사람이 손으로 `factory:approved` 같은 라벨을 backlog 위에 덧붙였을 때
     // 등)이면 얘기가 다르다(KTB-18): 예전에는 이 자리에서도 조용히 넘어갔고, 그러면 나중에
     // `d.transition`(내부의 `factoryLabelOf`)이 똑같은 이유로 **잡히지 않은 예외**를 던져 스테이지가
@@ -254,8 +279,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     if (d.issueLabels) {
       const expected = ENTRY_LABELS[stage] || [];
       let labels = null;
+      let lookupError = null;
       try { labels = await d.issueLabels(); }
-      catch (e) { record([`entry state: unreadable — ${e?.message || e}`]); }
+      catch (e) { lookupError = e?.message || String(e); }
+      // 감사 M13 — 던졌든(lookupError) 아무것도 안 돌려줬든(null/undefined/배열 아님) 결과는 같다:
+      // 진입 상태를 확인하지 못했다. 라벨이 **없는** 이슈(빈 배열)는 이 경우가 아니다 — 그건 읽은
+      // 사실이고, 아래 `expected`가 "할 일 없음"으로 정상 처리한다.
+      if (lookupError || !Array.isArray(labels)) {
+        const why = lookupError || `label lookup returned ${labels === null ? "null" : typeof labels}`;
+        record([`entry state: unreadable — ${why}`]);
+        const t = await d.transition({ to: "factory:blocked", reason: `entry state unreadable — ${why} (cannot confirm this stage has not already run)`, cause: "api-error" });
+        console.error(`factory: stage ${stage} aborted — entry state unreadable: ${why}`);
+        record([...refusal(t)]);
+        return 2;
+      }
       if (labels) {
         const found = labels.filter((l) => STATES.has(l));
         if (found.length > 1) {
@@ -482,6 +519,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}` });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
+    }
+    // 감사 M1 — 스크립트가 에이전트의 판정을 덮었다면 그 사실이 run 기록의 1차 증거다(다음 조사가
+    // 이 줄로 grep한다). handoff에도 `never_automate_hit`으로 같은 내용이 실린다.
+    if (stage === "triage" && v.data?.never_automate_hit?.length) {
+      record([`never_automate_hit: ${v.data.never_automate_hit.map((h) => `${h.path} (${h.glob})`).join(", ")} — disposition forced to wont-do by CHARTER NEVER_AUTOMATE`]);
     }
     // tier 라벨은 triage가 붙인다(스펙 §3.2, KTB-9). `label-catalog.js`가 세 라벨을 만들어 두는데
     // 붙이는 코드가 어디에도 없었고, tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수
@@ -977,6 +1019,33 @@ export async function mergeGates({ gh, root, harness, pr, prHeadSha, base, readF
  * 움직였으면(추가 커밋·force-push) 검증하지 않은 코드를 검증한 것으로 속지 않도록 거부한다.
  * detach checkout이라 로컬 브랜치를 건드리지 않는다 — mergeBase()는 이후 지연 계산되어 이 HEAD를 본다.
  */
+/**
+ * 외부 감사 2026-09-14 M13 — 이 스테이지가 **이번 차례에** 같은 head sha로 이미 handoff를 남겼는가.
+ * 남겼다면 이 런은 중복이다(락은 *동시* 러너만 막는다 — 끝난 런의 락은 이미 풀려 있다).
+ *
+ * "이번 차례"의 경계가 이 함수의 전부다. 창은 두 번 잘린다:
+ *  1. 마지막 재큐(`→ factory:queue`) — KTB-25와 같은 이유로, 되돌아온 이슈는 새 사이클이다.
+ *  2. **이 스테이지의 진입 라벨로 들어온 마지막 전이** — 이것이 없으면 재작업이 통째로 죽는다:
+ *     review가 rework를 띄우면 PR head는 아직 그대로이므로, 이전 implement handoff의 head sha가
+ *     현재 head와 같아 "이미 끝났다"로 읽힌다. `→ factory:rework` 전이가 그 handoff보다 뒤에
+ *     있으므로, 그 자리에서 창을 자르면 재작업은 정상적으로 돌고 **같은 차례의** 재점화만 걸린다.
+ *
+ * head sha가 없으면(그 스테이지가 head를 적지 않거나 PR이 아직 없으면) 비교할 것이 없으므로 null —
+ * 없는 근거로 런을 지우지 않는다.
+ */
+export function completedForHead({ comments, stage, headSha, entryLabels = ENTRY_LABELS[stage] || [] }) {
+  if (typeof headSha !== "string" || !headSha) return null;
+  const since = commentsSinceRequeue(Array.isArray(comments) ? comments : []);
+  let from = 0;
+  since.forEach((c, i) => {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (m && entryLabels.includes(m[2])) from = i + 1;
+  });
+  const hs = parseHandoffs(since.slice(from)).filter((h) => h.stage === stage && h.data?.head_sha === headSha);
+  if (!hs.length) return null;
+  return { head: headSha, at: hs[hs.length - 1].createdAt ?? null };
+}
+
 export function makeCheckoutHead({ gh, run, root, issue }) {
   return async () => {
     const handoff = latestHandoff(await gh.comments(issue), "implement");
@@ -1311,7 +1380,9 @@ async function main() {
       return result;
     },
     verifyStage: ({ out, gates }) => {
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body });
+      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
+      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate });
       // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
       // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
       if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
@@ -1332,6 +1403,20 @@ async function main() {
     prInfo: async () => {
       const h = latestHandoff(await gh.comments(issue), "implement");
       return h?.data?.pr == null ? null : gh.prView(h.data.pr);
+    },
+    /**
+     * 감사 M13 — "이 스테이지가 **이 head로** 이미 끝났는가". head는 PR의 라이브 head다(핸드오프가
+     * 적어 둔 값이 아니라): 재점화된 런이 보는 것과 같은 사실이어야 중복인지 아닌지가 갈린다.
+     * PR이 없는 스테이지(triage·plan)는 비교할 head가 없어 이 가드가 돌지 않는다 — 그쪽은 진입
+     * 라벨 가드가 같은 사고를 이미 막는다(전이가 라벨을 옮기므로).
+     */
+    duplicateRun: async () => {
+      const comments = await gh.comments(issue);
+      const impl = latestHandoff(comments, "implement");
+      const pr = impl?.data?.pr ?? null;
+      if (pr == null) return null;
+      const head = await gh.prHeadSha(pr);
+      return completedForHead({ comments, stage, headSha: head });
     },
     /**
      * merge stage 전용: 필수 체크 + 무결성. checkoutHead가 이미 로컬 HEAD를 implement handoff의

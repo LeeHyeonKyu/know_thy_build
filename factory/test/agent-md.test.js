@@ -83,6 +83,10 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 ## Lessons
 Before reviewing, read \`.factory/lessons/reviewer-correctness.md\` (path is also given in your prompt)
 and treat each entry as a checklist item.
+When an entry actually shapes a finding, **cite it inside that finding's own \`claim\`** with the marker
+\`lesson:<id>\` (e.g. \`lesson:L-2026-09-01-03\`). That marker is the only record that the lesson did any
+work: retro counts it into the entry's \`인용\`, and a lesson nobody ever cites is the first one retired.
+Never cite a lesson you did not use — the count is evidence, not courtesy.
 `;
 
 test("parseAgentMd: frontmatter (tools split, hooks list-of-maps) + all required sections present", () => {
@@ -290,6 +294,20 @@ for (const name of REVIEW_AGENTS) {
     expect(lintAgentMd(readAgent(name), { expectedName: name })).toEqual([]);
   });
 }
+
+/**
+ * 외부 감사 2026-09-14 M11 — 인용 카운터(`인용: N회`)를 올릴 수 있는 유일한 입력은 판정문 안의
+ * `lesson:<id>` 마커다. 그 마커를 내놓으라고 말하는 곳이 프롬프트뿐이므로, 말하지 않으면 카운터는
+ * 영원히 0이고 은퇴 규칙("인용 0회부터")은 그냥 "오래된 것부터"가 된다.
+ */
+test("M11: every role that reads lessons is told to cite `lesson:<id>` when it used one", () => {
+  for (const name of [...REVIEW_AGENTS, "factory-builder"]) {
+    const md = readAgent(name);
+    expect(md, name).toMatch(/lesson:<id>/);
+    expect(md, name).toMatch(/lesson:L-\d{4}-\d{2}-\d{2}-\d{2}/);      // 형식을 예시로 보여 준다
+    expect(md, name).toMatch(/인용/);
+  }
+});
 
 test("reviewer agents: roles.toml models and tools, every one behind deny-all-writes", () => {
   const models = {

@@ -49,6 +49,39 @@ test("must_fix(reject) claims become lesson candidates; identical claim across d
   expect(candidates.lessons[0]).toEqual({ role: "correctness", text: "에러 처리 누락", runs: [10, 11], source: "must_fix" });
 });
 
+// ── 외부 감사 2026-09-14 M11: `lesson:<id>` 인용을 역할별로 센다 ─────────────────────────
+
+test("citations: a verdict citing lesson:<id> counts for that reviewer; an implement handoff counts for the builder", () => {
+  const implementHandoff = (issue, at, summary) => ({ id: `c-impl-${issue}`, createdAt: at, body: renderHandoff({
+    stage: "implement", issue, summary,
+    data: { schema: "factory.implement.v1", issue, pr: issue, head_sha: "b".repeat(40), branch: `claude/fq-${issue}`, gates: { status: "GREEN", level: "full" }, orchestration: "workflow", tests_added: ["t"], notes: "used lesson:L-2026-09-01-02" },
+  }) });
+  const cite = (role, claim) => ({ role, verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "a.ts:1", claim, evidence: "e" }], should_fix: [], verified: [] });
+  const commentsByIssue = new Map([
+    [10, [
+      reviewHandoff(10, { round: 1, at: "2026-09-02T00:00:00Z", verdicts: [
+        cite("correctness", "lesson:L-2026-09-01-01 타임존 기본값을 확인하지 않았다"),
+        cite("qa", "경계값 누락"),                                     // 인용 없음 — 세지 않는다
+      ] }),
+      implementHandoff(10, "2026-09-02T01:00:00Z", "구현 완료"),
+    ]],
+    [11, [reviewHandoff(11, { round: 1, at: "2026-09-03T00:00:00Z", verdicts: [cite("correctness", "또 lesson:L-2026-09-01-01")] })]],
+  ]);
+  const issues = [{ number: 10, title: "a", labels: [], state: "open" }, { number: 11, title: "b", labels: [], state: "open" }];
+  const { citations } = harvest({ records: new Map(), issues, commentsByIssue, since: null });
+  expect(citations).toEqual({
+    correctness: { "L-2026-09-01-01": 2 },
+    builder: { "L-2026-09-01-02": 1 },
+  });
+});
+
+test("citations: handoffs older than the cursor are not counted again", () => {
+  const cite = (role) => ({ role, verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "a:1", claim: "lesson:L-2026-09-01-01 again", evidence: "e" }], should_fix: [], verified: [] });
+  const commentsByIssue = new Map([[10, [reviewHandoff(10, { at: "2026-09-01T00:00:00Z", verdicts: [cite("correctness")] })]]]);
+  const issues = [{ number: 10, title: "a", labels: [], state: "open" }];
+  expect(harvest({ records: new Map(), issues, commentsByIssue, since: "2026-09-05T00:00:00Z" }).citations).toEqual({});
+});
+
 test("approve verdicts and non-reject must_fix are never harvested as lessons", () => {
   const approve = { role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: ["t1"] };
   const commentsByIssue = new Map([[20, [reviewHandoff(20, { at: "2026-09-01T00:00:00Z", verdicts: [approve] })]]]);

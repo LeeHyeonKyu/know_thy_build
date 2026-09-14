@@ -10,6 +10,7 @@ import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS, CODEOWNERS_PATH, RECORDS_BRANCH } from "../bootstrap.js";
 import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
+import { TRIAGE_DEFAULT_VALUES } from "../config.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
@@ -122,7 +123,30 @@ export function checkCharter({ root, loadCharter }) {
     // 외부 감사 H6 — 사람 게이트는 gh를 전혀 필요로 하지 않는 CHARTER-only 판정이라 여기에 산다
     // (`checkGitHub`은 gh가 없으면 통째로 WARN 하나로 접힌다 — 이 선언은 그 침묵에 묻히면 안 된다).
     ...checkHumanGate(charter),
+    // 외부 감사 M1 — 같은 모양의 CHARTER-only 선언. gh를 필요로 하지 않는다.
+    ...checkTriageDefault(charter),
   ];
+}
+
+/**
+ * 외부 감사 2026-09-14 M1 — **triage의 기본 판정은 기본값이 아니라 선언이다.**
+ *
+ * 감사 이전의 `factory-triage.md`는 "NEVER_AUTOMATE도 아니고 done_when도 쓸 수 있으면 `ready`"였다.
+ * 곧 **판단이 서지 않는 이슈의 기본값이 통과**였고, 그것을 고른 저장소는 하나도 없었다 —
+ * 침묵이 곧 승인이었다.
+ *
+ * 세 상태를 가른다(`merge.human_gate`와 같은 규칙):
+ *  - `triage.default: needs-info` → PASS. 애매하면 멈춘다 — 템플릿의 기본이고, 침묵은 정지다.
+ *  - `triage.default: ready`      → WARN `triage.default-allow`. 틀린 설정이 아니다(KTB·데모처럼
+ *    다크 루프 자체가 산출물인 저장소는 이쪽을 고른다). 하지만 "애매한 이슈가 그냥 들어온다"는
+ *    사실은 매 실행에서 소리 내어 말해야 한다.
+ *  - 없거나 두 값이 아님 → FAIL `charter.triage-default-unset`.
+ */
+export function checkTriageDefault(charter) {
+  const v = charter?.triage?.default;
+  if (v === "needs-info") return [c("charter.triage-default", "PASS", "triage.default: needs-info — an issue the triage agent cannot write a concrete done_when for stops for a person; silence is not approval (audit M1)")];
+  if (v === "ready") return [c("triage.default-allow", "WARN", "triage.default: ready — an issue that matches nothing in NEVER_AUTOMATE and carries a writable done_when goes straight into the factory without a person. That is a deliberate CHARTER choice; set `triage: { default: needs-info }` to make silence stop instead (audit M1)")];
+  return [c("charter.triage-default-unset", "FAIL", `CHARTER declares no \`triage.default\` — whether an ambiguous issue stops or proceeds is not a default, it is a choice that has to be written down. Add \`triage: { default: needs-info }\` (silence stops) or \`triage: { default: ready }\` (default-allow, stated on purpose) to the CHARTER frontmatter; allowed values are ${TRIAGE_DEFAULT_VALUES.join(" | ")} (audit M1)`)];
 }
 
 const rosterUnion = (obj) => [...new Set(Object.values(obj || {}).flat())];
