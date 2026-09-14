@@ -64,9 +64,11 @@ const PATTERNS = [
   // 길이 하한(16/20)은 산문 속의 `ghp_…` 같은 **설명**을 잡지 않기 위한 것이다 — 실제 토큰은 훨씬 길다.
   { kind: "gh-token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/g },
   { kind: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{16,}/g },
-  // (f) — `keep`이 남기는 head는 `://`, 두 번째 캡처(tail)는 뒤의 `@`. 사이의 `user:pass`(콜론이 몇 개든)를
-  // 통째로 지운다: `x-access-token:<token>`도 `user:pw`도 "/·공백·@가 없는 문자열 + : + 같은 문자열"이다.
-  { kind: "url-userinfo", re: /(:\/\/)[^/\s@]+:[^/\s@]+(@)/g, keep: true },
+  // (f) — `keep`이 남기는 head는 `://`; 뒤의 `@`는 **lookahead**로 남긴다(캡처가 아니다 — basic·bearer의
+  // 두 번째 캡처는 지워야 할 값 자체라, 캡처를 되붙이는 방식은 그 값을 도로 살린다: 리뷰 aab3db8 뒤 실측).
+  // 사이의 `user:pass`(콜론이 몇 개든)를 통째로 지운다. 문자 클래스에서 `[`·`]`를 빼 이미 찍힌
+  // `[REDACTED:x-access-token]`(콜론 포함)을 다시 잡지 않는다 — 리터럴 규칙이 먼저 돈 뒤의 멱등성.
+  { kind: "url-userinfo", re: /(:\/\/)[^/\s@[\]]+:[^/\s@[\]]+(?=@)/g, keep: true },
 ];
 
 /**
@@ -95,9 +97,8 @@ export function scrubText(text, { secrets = [] } = {}) {
 
   for (const p of PATTERNS) {
     let n = 0;
-    // `tail`은 `url-userinfo`처럼 head 뒤에도 남겨야 하는 캡처(예: `@`)가 있을 때만 쓰인다 — 캡처가
-    // 하나뿐인 패턴(basic·bearer)은 tail이 undefined라 빈 문자열이 붙는다(동작 변화 없음).
-    out = out.replace(p.re, (m, head, tail) => { n++; return p.keep ? `${head}${REDACTED(p.kind)}${tail || ""}` : REDACTED(p.kind); });
+    // `keep`은 첫 캡처(head)만 남긴다. 그 뒤의 캡처는 지워야 할 값이므로 절대 되붙이지 않는다.
+    out = out.replace(p.re, (m, head) => { n++; return p.keep ? `${head}${REDACTED(p.kind)}` : REDACTED(p.kind); });
     bump(p.kind, n);
   }
   return { text: out, counts, ignored };
