@@ -38,6 +38,11 @@ jobs:
   publish:
     needs: validate
     runs-on: ubuntu-latest
+    # npm trusted publishing (OIDC): the registry trusts this repo + workflow directly,
+    # so no NPM_TOKEN secret is needed — only the id-token permission.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +50,9 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
+        run: npm install -g npm@latest && npm --version
 
       - name: Check if version changed
         id: version
@@ -59,8 +67,6 @@ jobs:
             echo "Version $LOCAL already published, skipping"
           fi
 
-      - name: Publish
+      - name: Publish (trusted publishing, provenance attached)
         if: steps.version.outputs.changed == 'true'
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
