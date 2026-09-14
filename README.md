@@ -86,7 +86,7 @@ Verification is the factory's job, not a manual step: its review roster (includi
 
 Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipeline in CI (triage → plan → implement → review → merge):
 
-**Status**: 1.0.0-alpha — dogfooded on the demo repo (first dark completion 2026-09-12: issue #8 → PR #10); numbers in ADR-020.
+**Status**: 1.3.0 — self-dogfooded on this repo (KTB #3 → PR #4, 2026-09-14) and adopted on another repo, own-calendar (#3 → PR #5, 2026-09-14); numbers in ADR-020.
 
 - `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files). On the Claude side that's 4 workflow scripts (`.claude/workflows/factory-{triage,plan,implement,review}.js`), 14 role agents (`.claude/agents/*.md`), and 4 dispatcher commands (`.claude/commands/factory-*.md`)
 - `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
@@ -106,6 +106,84 @@ With both actor tokens set, `factory bootstrap` requires **1 approving review fr
 - `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
 - **Live progress in the heartbeat comment (ADR-022)** — a running stage edits one issue comment every 2 minutes with the current step, every agent's status and last tool, and tokens/cost so far, plus a machine-readable `<!-- factory-progress:v1 {…} -->` marker that also lands in `docs/factory/runs/<n>.md` when the run ends. It is read off the session transcripts the agents already write, never from tool *results* — so no file content or secret can ride out on a public comment.
 - `factory board` — the viewer for all of that, across repositories. See below.
+
+#### qa evidence — the contract, the tool, the probe (ADR-024)
+
+The `qa` reviewer does not describe what it saw; it **leaves the artifacts** and cites them. One issue's
+evidence is one file — `.factory/out/qa/<issue>/manifest.json` (`factory.qa-evidence.v1`) — and the only
+supported way to write it is the shipped CLI (no dependencies, installed by `factory init`). Five subcommands:
+
+```bash
+node .factory/bin/qa-evidence.js probe  --issue 42
+node .factory/bin/qa-evidence.js record --issue 42 --claim dw2 --summary "export writes the header row" -- npx vitest run test/export.test.js
+node .factory/bin/qa-evidence.js attach --issue 42 --claim dw3 --kind screenshot --file /tmp/export-dialog.png --summary "the dialog the user actually sees"
+node .factory/bin/qa-evidence.js na     --issue 42 --claim dw5 --reason "this tier has no UI surface"
+node .factory/bin/qa-evidence.js finish --issue 42
+```
+
+- **`record`** runs a command for real and stores its stdout, stderr and exit code as one claim (secrets are
+  scrubbed before the file is written, and the payload after `--` is judged by the same hooks a direct `Bash`
+  call would hit — the tool is not an escape hatch).
+- **`attach`** takes in a screenshot, a state dump or a log you already have (binaries are copied byte for byte).
+- **`na`** closes an id with a **reason** — an exemption without a reason is a gap, not an exemption.
+- **`finish`** prints the per-`done_when` coverage table and fails if the manifest does not meet the maturity
+  minimum (M0 a `command` or `log` per id · M1 a `state` claim when the impact paths touch data · M2 a
+  `screenshot` per UI-facing id).
+- **`probe`** asks the one question that used to be asked too late: *can this session write there at all?*
+
+**The probe runs before the review, not after it.** The review stage runs `probe` right after the overlay and
+**before** `claude -p` whenever the roster contains `qa`. If the evidence path is broken, the outcome is
+**not a builder reject** and not a RED review — it is `factory:blocked` with cause `undecidable`, because
+nobody has judged anything yet. (KTB #3 burned 8 implement rounds on `spec1: qa evidence missing` while the defect
+was a deny rule; "the directory is empty" is now a forbidden phrase in a reviewer's verdict.) `factory doctor`
+asks the same question as `qa.evidence-probe`.
+
+**Three things get a qa round rejected**, each by name rather than by "evidence missing":
+
+1. **An all-`na` manifest** — when every `done_when` id is `not_applicable`, that is a report, not a review; a
+   roster carrying `qa` means at least one id was meant to be reproduced.
+2. **An unresolvable contract** — when the plan handoff's `done_when` could not be resolved, coverage is
+   undecidable, so the round is graded `factory:blocked`/`undecidable` rather than passed.
+3. **An out-of-bounds `attach`** — when `attach --file` points outside the repo (and the temp dirs), or the
+   path matches this session's own `Read(...)` deny rule, the tool refuses: the factory will not copy a file it
+   is forbidden to read into a public handoff.
+
+What the manifest does **not** claim: it is not a proof of authorship. The `qa` role can write there by design,
+so `qa_manifest=<sha256>` on the run record proves *"a valid manifest for this commit existed at review time
+and has not changed since"* — not *"the tool produced it"*. The contract buys cost and visibility; the roster
+buys trust.
+
+#### When a person merges a protected-path PR (KTB-46)
+
+A PR that touches a protected path (`.factory/**`, `.claude/**`, `.github/**`, `docs/factory/CHARTER.md`, the
+build config — the `[protected]` block of `.factory/harness.toml` is the single source) is never auto-merged.
+The merge stage **refuses** with `protected paths changed — human merge required` and the issue goes to
+`factory:needs-human`. Then:
+
+1. **You merge it on GitHub**, by hand, after reading the diff. That is the whole manual step.
+2. **You do not touch the labels.** Within one sweeper pass (≤ 30 min) the `sweepHumanMerged` arm finds the
+   issue, finds the merged PR on `claude/fq-<n>`, and moves it `factory:needs-human → factory:merged`,
+   closing it if `Closes #n` did not (KTB-46, spec §12.3-2).
+3. **The evidence is not waived — only its source is.** Before that transition the sweeper re-asks, with the
+   same functions the auto-merge path uses: the merged PR's **head sha** equals the latest **review handoff**'s
+   `head_sha` (otherwise the merged PR belongs to an earlier cycle and it stays quiet); this head really
+   reached `factory:approved`; the review quorum is all-approve over the roster resolved at the handoff's
+   `tier_effective`, within `limits.K`; and the factory-posted commit statuses plus every required check in
+   `[factory].required_checks` are green on that head, posted by the factory's own logins. Any of those
+   missing leaves the issue in `needs-human` with one refusal comment — the sweeper will not repeat itself for
+   that PR.
+
+**Two checks this door does not re-derive** (KTB-48, plan task 12):
+① the `factory/records` provenance cross-check against the review run record (auto-merge's §(6b)), and
+② the re-comparison of that record's `qa_manifest=` digest against the handoff's manifest.
+The sweep job has no records checkout. Everything else is the same as an auto
+merge; KTB-48 covers both and the "not re-derived" sentence goes away when it lands.
+
+**And a `:unstick` retry after K currently buys nothing** (KTB-47, plan task 11): a human retry resumes at the
+label the issue came from and the extra round, even when it approves 4/4, is refused at the merge stage's
+`review round > K` check — so the run ends in a human merge anyway. Until KTB-47 lands (resume at
+`factory:rework`, and `K_effective = K + one round per human retry`), treat a K-exhausted issue as one you
+will merge yourself.
 
 ### Adopting a repo: install → doctor → **rehearse** → first issue (ADR-025)
 
