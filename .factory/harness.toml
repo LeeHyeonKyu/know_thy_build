@@ -127,7 +127,14 @@ additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true
 
 [load_bearing]
-paths = ["factory/lib/integrity.js", "factory/lib/merge-stage.js", "factory/lib/labels.js", "factory/bin/run-stage.js"]
+# ── 2026-09-14 외부 감사 H3 / ADR-023: 경로는 **실제로 도는 레이아웃**을 가리켜야 한다 ──────────
+# 이 저장소에는 같은 코드가 두 벌 있다: 소스(`factory/…`)와 스테이지가 실행하는 설치본(`.factory/…`,
+# self-mirror). 소스 경로만 적어 두면 미러만 고치는 diff가 조용히 load-bearing이 아니게 되고, 반대로
+# 채택 저장소에 `factory/lib/…`를 적으면 **아무 파일도 매치하지 않아** tier 바닥이 통째로 사라진다.
+# 매치가 0인 항목은 doctor의 `load-bearing.paths-exist`가 FAIL로 잡는다(오타·이동·레이아웃 드리프트가
+# 전부 같은 모양으로 나타나기 때문이다).
+paths = ["factory/lib/integrity.js", "factory/lib/merge-stage.js", "factory/lib/labels.js", "factory/bin/run-stage.js",
+         ".factory/lib/integrity.js", ".factory/lib/merge-stage.js", ".factory/lib/labels.js", ".factory/bin/run-stage.js"]
 
 [evidence]
 qa_artifacts = ".factory/out/qa/**"

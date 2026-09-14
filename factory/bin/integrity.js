@@ -3,7 +3,7 @@ import { realpathSync, readFileSync, existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { loadHarness } from "../lib/config.js";
-import { integrityCheck } from "../lib/integrity.js";
+import { integrityCheck, TESTS_MODIFIED_POLICY_RULE } from "../lib/integrity.js";
 const isMain = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
 if (isMain) {
   const args = process.argv.slice(2); const bi = args.indexOf("--base");
@@ -27,6 +27,12 @@ if (isMain) {
   // additive-only도 마찬가지다(KTB-6): "역할 프롬프트를 누가 고쳐도 되는가"는 정책이지 이 커밋에
   // 대한 사실이 아니다. 여기서 RED로 만들면 `:role` PR도, 에이전트 파일을 건드리는 패키지
   // 업그레이드도 사람이 머지할 수 없다 — 집행은 L1이 자동 머지를 거부하는 것으로 한다.
-  if (r.policy?.length) console.log(`integrity: agent role sections edited outside the allowed sections (human merge required): ${[...new Set(r.policy.map((v) => v.file))].join(", ")}`);
+  // H5도 같은 자리다: 기존 테스트의 수정·삭제는 "이 커밋에 대한 사실"이 아니라 "누가 머지해도
+  // 되는가"의 정책이다 — 여기서 RED로 만들면 스펙이 바뀐 정상적인 PR을 사람도 머지할 수 없다.
+  // (허용 표식은 이슈 본문에 있고, 이 잡은 이슈를 모른다 — 판정은 이슈를 아는 L1이 다시 한다.)
+  const tests = (r.policy || []).filter((v) => TESTS_MODIFIED_POLICY_RULE.test(v.rule));
+  if (tests.length) console.log(`integrity: existing tests modified or deleted (human merge required unless the issue lists them under tests_changed_allowed:): ${[...new Set(tests.map((v) => v.file))].join(", ")}`);
+  const sections = (r.policy || []).filter((v) => !TESTS_MODIFIED_POLICY_RULE.test(v.rule));
+  if (sections.length) console.log(`integrity: agent role sections edited outside the allowed sections (human merge required): ${[...new Set(sections.map((v) => v.file))].join(", ")}`);
   process.exit(r.ok ? 0 : 1);
 }

@@ -135,6 +135,14 @@ additive_only = { ".claude/agents/*.md" = ["## Examples", "## Perspectives"] }
 tests_are_load_bearing = true
 
 [load_bearing]
+# 되돌리기 어려운 경로 — 스키마·공개 API·결제/인증처럼 "틀리면 되돌릴 수 없는" 코드. 여기 걸리는
+# diff는 tier가 `load-bearing`으로 올라가고(triage가 뭐라 신고했든 — 외부 감사 H3), deep 레벨의
+# 게이트와 가장 넓은 리뷰 로스터를 받는다. `/know-thy-build:harness`가 코드에서 후보를 뽑아 채운다.
+#
+# **설치된 레이아웃 그대로 적는다.** 이 저장소에서 팩토리 코드는 `.factory/lib/…`·`.factory/bin/…`에
+# 산다(팩토리 자신을 개발하는 저장소만 `factory/…`가 소스다) — 남의 레이아웃을 베껴 오면 매치가 0이
+# 되고, 그러면 목록은 그럴듯한데 tier 바닥이 통째로 사라진다. doctor의 `load-bearing.paths-exist`가
+# 매치 0인 항목을 FAIL로, 빈 목록을 WARN으로 잡는다(빈 목록 = 어떤 PR도 load-bearing이 될 수 없다).
 paths = []
 
 [evidence]

@@ -498,3 +498,80 @@ test("M9: 섹션 헤더를 통째로 추가하는 것도 위반이다(주입된 
   const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness, readFile: () => head });
   expect(r.policy.map((v) => v.rule)).toContain("harness.toml [gates.thresholds] edited — human merge required");
 });
+
+// ── 외부 감사 H5: 기존 테스트의 삭제·수정은 **정책**이다(사람이 머지한다) ────────────────
+// 예전에는 `test_glob` 파일에서 skip/ignore pragma가 **추가**된 것만 봤다 — 단언 하나를
+// `toHaveLength(3)`→`(2)`로 바꾸거나 테스트 파일을 통째로 지우는 diff는 위반 0으로 자동 머지됐다.
+// `[protected].tests_are_load_bearing`이 그 규칙의 스위치이고, 판정은 protected/additive_only와
+// 같은 자리(`policy`)에 실린다: L0는 GREEN을 유지하고(그래야 사람이 머지할 수 있다) L1이 자동
+// 머지를 거부한다. 추가만 있는 diff(새 테스트)는 그대로 통과한다 — 그것이 정상 업무다.
+
+const testsHarness = { ...harness, protected: { ...harness.protected, tests_are_load_bearing: true } };
+
+test("H5: 기존 테스트의 단언이 바뀌면(toHaveLength(3)→(2)) policy 위반 — L0는 GREEN, 사람이 머지한다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-  expect(rows).toHaveLength(3);\n+  expect(rows).toHaveLength(2);\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "" });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([]);
+  expect(r.policy).toEqual([{ file: "test/a.test.js", rule: "tests-modified — 1 line(s) removed from an existing test — human merge required" }]);
+});
+
+test("H5: 기존 테스트 파일의 삭제도 같은 위반이다 — 사라진 파일에는 내용 규칙이 안 걸리므로 이 자리가 유일한 신호다", async () => {
+  const run = makeFakeRun([names("D\ttest/a.test.js\n"), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => null });
+  expect(r.ok).toBe(true);
+  expect(r.policy).toEqual([{ file: "test/a.test.js", rule: "tests-modified — existing test file deleted — human merge required" }]);
+});
+
+test("H5: 새 테스트 파일(추가만)은 통과한다 — 테스트를 더 쓰는 것이 이 공장의 정상 업무다", async () => {
+  const diff = `+++ b/test/new.test.js\n@@ -0,0 +1,2 @@\n+test("x", () => {});\n+// added\n`;
+  const run = makeFakeRun([names("A\ttest/new.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "" });
+  expect(r.ok).toBe(true);
+  expect(r.policy).toEqual([]);
+});
+
+test("H5: 이슈 본문의 `tests_changed_allowed:`에 적힌 파일은 위반이 아니라 기록이다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-  expect(rows).toHaveLength(3);\n+  expect(rows).toHaveLength(2);\n`;
+  const body = "### 배경\n스펙이 바뀌어 기존 단언이 틀렸다.\n\ntests_changed_allowed:\n- test/a.test.js\n";
+  const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "", issueBody: body });
+  expect(r.policy).toEqual([]);
+  expect(r.tests_allowed).toEqual([{ file: "test/a.test.js", rule: "tests-modified (allowed by issue)" }]);
+});
+
+test("H5: 허용 목록은 **그 파일에만** 적용된다 — 같은 PR의 다른 테스트 수정은 그대로 위반이다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-a\n+b\n+++ b/test/b.test.js\n@@ -3,1 +3,1 @@\n-c\n+d\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\nM\ttest/b.test.js\n"), u0(diff)]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, readFile: () => "", issueBody: "tests_changed_allowed: `test/a.test.js`" });
+  expect(r.policy.map((v) => v.file)).toEqual(["test/b.test.js"]);
+  expect(r.tests_allowed.map((v) => v.file)).toEqual(["test/a.test.js"]);
+});
+
+test("H5: `tests_are_load_bearing = false`인 하네스에서는 이 규칙이 아예 돌지 않는다", async () => {
+  const h = { ...harness, protected: { ...harness.protected, tests_are_load_bearing: false } };
+  const run = makeFakeRun([names("D\ttest/a.test.js\n"), u0("")]);
+  const r = await integrityCheck({ run, cwd: "/repo", base: "b", head: "h", harness: h, readFile: () => null });
+  expect(r.policy).toEqual([]);
+});
+
+test("H5: L1(policyViolations)도 같은 판정을 낸다 — merge 스테이지가 자동 머지를 거부하는 재료", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,2 +12,1 @@\n-  expect(rows).toHaveLength(3);\n-  expect(rows[0]).toBe(1);\n+  expect(rows).toHaveLength(2);\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\nD\ttest/gone.test.js\n"), u0(diff)]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness });
+  expect(r.ok).toBe(true);
+  expect(r.violations).toEqual([
+    { file: "test/a.test.js", rule: "tests-modified — 2 line(s) removed from an existing test — human merge required" },
+    { file: "test/gone.test.js", rule: "tests-modified — existing test file deleted — human merge required" },
+  ]);
+  expect(r.files).toEqual(["test/a.test.js", "test/gone.test.js"]);
+});
+
+test("H5: L1도 이슈 본문의 허용 표식을 읽는다 — 허용된 파일은 violations에 실리지 않는다", async () => {
+  const diff = `+++ b/test/a.test.js\n@@ -12,1 +12,1 @@\n-a\n+b\n`;
+  const run = makeFakeRun([names("M\ttest/a.test.js\n"), u0(diff)]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness: testsHarness, issueBody: "tests_changed_allowed: test/a.test.js" });
+  expect(r.violations).toEqual([]);
+  expect(r.tests_allowed).toEqual([{ file: "test/a.test.js", rule: "tests-modified (allowed by issue)" }]);
+});

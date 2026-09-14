@@ -373,6 +373,34 @@ test("(3b') a PR that does both gets both headings, each above its own file list
   }));
 });
 
+// ── (3b'') 같은 dep이 실어 오는 **네 번째** 규칙: 기존 테스트의 수정·삭제 (외부 감사 H5) ──────
+// 테스트를 고치는 것은 "무엇이 통과인가"를 고치는 것이다 — 변조로 다루지 않는 이유는 스펙이 바뀌면
+// 기존 단언이 실제로 틀리기 때문이고(그때는 이슈 본문의 `tests_changed_allowed:`가 길을 연다),
+// 그래도 자동 머지는 안 되는 이유는 그 판단이 사람의 것이기 때문이다.
+
+test("(3b'') 기존 테스트 수정은 자기 제목으로 거부된다 — 자동 머지 없음", async () => {
+  const comment = vi.fn(async () => {});
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    policyViolations: vi.fn(async () => ({
+      ok: true, files: ["test/a.test.js"],
+      violations: [{ file: "test/a.test.js", rule: "tests-modified — 3 line(s) removed from an existing test — human merge required" }],
+    })),
+    comment,
+  });
+  expect(await run(d, { record })).toBe(2);
+  const [, body] = comment.mock.calls[0];
+  expect(body).toContain("**기존 테스트의 수정·삭제 — 팩토리가 자동 머지하지 않습니다.**");
+  expect(body).toMatch(/`test\/a\.test\.js`/);
+  expect(body).not.toContain("역할 프롬프트의 허용 섹션 밖 편집");
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: "existing tests modified or deleted — human merge required: test/a.test.js (see PR #9)",
+  }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(lines.some((l) => /existing tests modified or deleted/.test(l))).toBe(true);
+});
+
 test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {
   const d = baseD({ policyViolations: vi.fn(async () => ({ ok: false, files: [], reason: "git show exited 128" })) });
   expect(await run(d)).toBe(2);

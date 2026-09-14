@@ -20,7 +20,7 @@ const SKIP_PRAGMAS = [/\.skip\s*\(/, /\bxit\s*\(/, /\bxdescribe\s*\(/, /@pytest\
  * 패키지 업그레이드)을 막고 있었다. 두 정책의 집행은 자동 머지 직전의 L1(`lib/merge-stage.js`)이
  * `protectedPaths()`·`policyViolations()`로 한다 — 사람을 막지 않고 봇만 막는 자리다.
  */
-export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, readFile, readFileAt = () => "" }) {
+export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, readFile, readFileAt = () => "", issueBody = "" }) {
   // 무결성은 "검사했더니 깨끗하다"는 주장이다. diff를 얻지 못했는데 violations가 비었다고 ok:true를
   // 돌려주면 "검사하지 못했음"이 "통과"로 둔갑한다 — base가 비었거나 git이 실패하면 fail-closed다.
   if (!base) return cannotCompute("base is empty (merge-base not resolved)");
@@ -34,8 +34,13 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
   const u0 = u0r.stdout;
   const addedByFile = addedLines(u0), removedByFile = removedLines(u0);
   const prot = harness.protected || {};
-  const protectedFiles = [], policy = [];
+  const protectedFiles = [], policy = [], testsAllowed = [];
+  // H5 — 기존 테스트의 수정·삭제. 허용 표식은 **이슈 본문**에서만 읽는다(diff가 스스로를 허가할 수 없다).
+  const testsRule = testsPolicy({ harness, issueBody });
   for (const { path: f, deleted } of entries) {
+    for (const v of testsRule({ file: f, deleted, removed: (removedByFile.get(f) || []).length })) {
+      (v.allowed ? testsAllowed : policy).push({ file: v.file, rule: v.rule });
+    }
     // 사라진 경로에는 **내용 규칙**을 적용할 수 없다(fix round 2, N2). `readFile`이 null인 것은
     // "포맷이 틀렸다"가 아니라 "읽을 파일이 없다"인데, 그것을 위반으로 읽으면 lessons 파일을
     // 지우거나 옮기는 PR이 L0 RED가 되어 아무도 머지할 수 없다(KTB-5와 같은 계열의 오진).
@@ -75,7 +80,79 @@ export async function integrityCheck({ run, cwd, base, head = "HEAD", harness, r
       if ((addedByFile.get(f) || []).some((l) => SKIP_PRAGMAS.some((re) => re.test(l.text)))) violations.push({ file: f, rule: "test skip/ignore pragma added" });
     }
   }
-  return { ok: violations.length === 0, violations, protected: protectedFiles, policy, checked: { files } };
+  return { ok: violations.length === 0, violations, protected: protectedFiles, policy, tests_allowed: testsAllowed, checked: { files } };
+}
+
+/**
+ * ── 외부 감사 H5: **기존 테스트의 수정·삭제는 정책이다** ─────────────────────────────────
+ *
+ * 예전의 테스트 방어는 `test_glob` 파일에 **추가된** 줄의 skip/ignore pragma 하나뿐이었다. 그래서
+ * `expect(rows).toHaveLength(3)`을 `(2)`로 바꾸거나 테스트 파일을 통째로 지우는 diff는 위반 0으로
+ * 자동 머지됐다 — 곧 "무엇이 통과인가"를 에이전트가 스스로 고칠 수 있었다(`[protected]
+ * .tests_are_load_bearing = true`가 이미 그러면 안 된다고 적어 두고 있었지만 집행하는 코드가 없었다).
+ *
+ * **변조(`violations`)가 아니라 정책(`policy`)이다.** 이유는 protected/additive_only와 같다:
+ * `factory/integrity`는 branch protection의 유일한 required context라, 여기서 RED를 만들면 **사람도**
+ * 그 PR을 머지할 수 없다. 스펙이 바뀌어 기존 단언이 실제로 틀린 경우는 정상적으로 있고, 그때 필요한
+ * 것은 "머지 금지"가 아니라 "사람이 읽고 머지"다. 집행은 L1(merge 스테이지)이 자동 머지를 거부한다.
+ *
+ * **추가만 있는 diff는 통과한다** — 새 테스트를 쓰는 것이 이 공장의 정상 업무다. 삭제된 줄이 하나라도
+ * 있으면(수정은 diff에서 삭제+추가로 나타난다) 그 파일은 "기존 테스트가 바뀐" 파일이다.
+ *
+ * **예외는 이슈 본문의 `tests_changed_allowed:` 표식뿐이다.** 그 표식이 사는 곳이 요점이다: 이슈 본문은
+ * 사람이 쓰고(또는 사람이 읽고 `factory:ready`를 붙이고), PR diff는 에이전트가 쓴다 — 허가가 diff 안에
+ * 있으면 그 PR이 스스로를 허가한다. 허용된 파일은 위반이 아니라 **기록**으로 남는다(`tests_allowed`):
+ * 사람이 나중에 "이 라운드에서 어떤 테스트가 왜 바뀌었나"를 그 자리에서 읽을 수 있어야 한다.
+ */
+export const TESTS_MODIFIED_POLICY_RULE = /^tests-modified — /;
+export const TESTS_ALLOWED_RULE = "tests-modified (allowed by issue)";
+const testsModifiedRule = (removed) => `tests-modified — ${removed} line(s) removed from an existing test — human merge required`;
+const TESTS_DELETED_RULE = "tests-modified — existing test file deleted — human merge required";
+
+/**
+ * 이 하네스에서 이 이슈에 대해 "테스트 파일 하나"를 판정하는 함수를 만든다 — L0(`integrityCheck`)와
+ * L1(`policyViolations`)이 **같은 함수**를 쓴다(additive-only와 같은 이유: 둘이 갈라지면 체크가 알리는
+ * 것과 머지가 막는 것이 달라진다). `tests_are_load_bearing = false`인 하네스에서는 아무것도 내지 않는다.
+ */
+function testsPolicy({ harness, issueBody }) {
+  const globs = harness?.test?.test_glob || [];
+  const on = (harness?.protected?.tests_are_load_bearing ?? true) !== false && globs.length > 0;
+  const allowed = on ? testsChangedAllowed(issueBody) : [];
+  return ({ file, deleted, removed }) => {
+    if (!on || !matchesAny(globs, file)) return [];
+    if (!deleted && !removed) return [];                        // 추가만 있는 diff — 새 테스트는 정상 업무다
+    if (matchesAny(allowed, file)) return [{ file, rule: TESTS_ALLOWED_RULE, allowed: true }];
+    return [{ file, rule: deleted ? TESTS_DELETED_RULE : testsModifiedRule(removed), allowed: false }];
+  };
+}
+
+/**
+ * 이슈 본문의 `tests_changed_allowed:` 표식 파싱. 한 줄 목록과 그 아래의 불릿 목록을 모두 받는다:
+ *
+ *     tests_changed_allowed: test/a.test.js, `test/b.test.js`
+ *     tests_changed_allowed:
+ *     - test/a.test.js
+ *
+ * 글롭으로 매치한다(정확한 경로도 글롭의 특수 케이스다). 경로처럼 보이지 않는 토큰(`/`도 `.`도 없는
+ * 낱말)은 버린다 — 산문이 실수로 허가로 읽히지 않게.
+ */
+export function testsChangedAllowed(body = "") {
+  const lines = String(body || "").split("\n");
+  const out = [];
+  // 글롭은 살려 둔다(`test/**/*.test.js`) — 벗기는 것은 마크다운·구두점의 **껍질**뿐이다.
+  const clean = (x) => x.replace(/^[`"'(\[*]+/, "").replace(/[`"')\]*,.;:]+$/, "").trim();
+  const pathsIn = (s) => String(s).split(/[,\s]+/).map(clean).filter((x) => x && /[/.]/.test(x));
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*(?:[-*]\s+)?`?tests_changed_allowed`?\s*:\s*(.*)$/i.exec(lines[i]);
+    if (!m) continue;
+    out.push(...pathsIn(m[1]));
+    for (let j = i + 1; j < lines.length; j++) {
+      const item = /^\s*[-*]\s+(.+)$/.exec(lines[j]);
+      if (!item) break;
+      out.push(...pathsIn(item[1]));
+    }
+  }
+  return [...new Set(out)];
 }
 
 /**
@@ -192,13 +269,34 @@ export function harnessSectionViolations({ file = HARNESS_FILE, added = [], remo
  * 삭제된 파일은 `git show <head>:<f>`가 실패하는데, 그것은 판정 불가가 아니라 **빈 내용**이다
  * (삭제 = 전부 removal = 정책 위반). 그 외 git 실패는 fail-closed `ok:false`다.
  */
-export async function policyViolations({ run, cwd, base, head = "HEAD", harness }) {
+export async function policyViolations({ run, cwd, base, head = "HEAD", harness, issueBody = "" }) {
   if (!base) return { ok: false, files: [], violations: [], reason: "base is empty (merge-base not resolved)" };
   const prot = harness?.protected || {};
   const ns = await run("git", NAME_STATUS(base, head), { cwd });
   if (ns.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason("git diff --name-status", ns) };
   const changed = changedEntries(ns.stdout);
-  const violations = [];
+  const violations = [], testsAllowed = [];
+  /**
+   * H5 — 기존 테스트의 수정·삭제(L0와 **같은 판정**: `testsPolicy` 한 몸을 쓴다). 삭제는 name-status만으로
+   * 알 수 있고, 수정은 삭제된 줄 수를 세야 한다 — 살아 있는 테스트 파일 전체에 대해 `-U0`를 **한 번**
+   * 부른다(파일마다 부르면 테스트 열 개를 건드린 PR이 git을 열 번 부른다).
+   */
+  const testsRule = testsPolicy({ harness, issueBody });
+  const touchedTests = changed.filter((e) => matchesAny(harness?.test?.test_glob || [], e.path));
+  if (touchedTests.length && (harness?.protected?.tests_are_load_bearing ?? true) !== false) {
+    const live = touchedTests.filter((e) => !e.deleted).map((e) => e.path);
+    let removedByFile = new Map();
+    if (live.length) {
+      const u0r = await run("git", U0(base, head, live), { cwd });
+      if (u0r.code !== 0) return { ok: false, files: [], violations: [], reason: gitReason(`git diff -U0 -- ${live.join(" ")}`, u0r) };
+      removedByFile = removedLines(u0r.stdout);
+    }
+    for (const e of touchedTests) {
+      for (const v of testsRule({ file: e.path, deleted: e.deleted, removed: (removedByFile.get(e.path) || []).length })) {
+        (v.allowed ? testsAllowed : violations).push({ file: v.file, rule: v.rule });
+      }
+    }
+  }
   // 사라진 lessons는 글롭과 무관하게 센다 — L0가 `policy`로 올린 것과 **같은 판정**이어야 한다.
   for (const e of changed) if (e.deleted) violations.push(...lessonsGone(e.path, true));
   // M9 — harness.toml의 얼어붙은 섹션도 글롭과 무관하게 센다(L0와 같은 판정). 내용은 워킹 트리가
@@ -229,7 +327,7 @@ export async function policyViolations({ run, cwd, base, head = "HEAD", harness 
       headText: shown.code === 0 ? shown.stdout : "",
     }));
   }
-  return { ok: true, files: [...new Set(violations.map((v) => v.file))], violations };
+  return { ok: true, files: [...new Set(violations.map((v) => v.file))], violations, tests_allowed: testsAllowed };
 }
 
 /**
@@ -266,7 +364,10 @@ const NAME_STATUS = (base, head) => ["diff", "--no-renames", "--name-status", `$
  * 보호 목록에도 닿지 않는다 — `mv .claude/agents/reviewer-qa.md docs/x.md`가 L0 GREEN에 protected
  * 빈 목록으로 빠져나간다(실측). 같은 플래그면 그 변경은 전체 삭제로 보여 removal 규칙에 걸린다.
  */
-const U0 = (base, head, file) => ["diff", "--no-renames", "-U0", `${base}...${head}`, ...(file ? ["--", file] : [])];
+const U0 = (base, head, file) => {
+  const files = file == null ? [] : (Array.isArray(file) ? file : [file]);
+  return ["diff", "--no-renames", "-U0", `${base}...${head}`, ...(files.length ? ["--", ...files] : [])];
+};
 
 /**
  * `git diff --name-status` 한 줄 = "<status>\t<path>"이고, rename/copy는 "<status>\told\tnew"다.
@@ -297,7 +398,7 @@ const isProtectedPath = (f, prot) => matchesAny(prot.factory || [], f) && !match
 const isProtectedEntry = ({ path, deleted }, prot) => (!deleted && additiveGlobFor(path, prot) ? false : isProtectedPath(path, prot));
 
 /** 판정 불가 — ok:false에 이유를 한 줄로 싣는다(file은 "-": 특정 파일의 위반이 아니다). */
-const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], checked: { files: [] } });
+const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], tests_allowed: [], checked: { files: [] } });
 const gitReason = (what, r) => `${what} exited ${r.code}${r.stderr ? `: ${r.stderr.trim().slice(0, 200)}` : ""}`;
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
