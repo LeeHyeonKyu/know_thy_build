@@ -14,10 +14,12 @@ _이력 없음_
 | --- | --- | --- |
 | merged | 0 | 0 |
 | review rounds avg | 0 | 0 |
-| needs-human | 2 | 0 |
+| needs-human | 3 | 0 |
 | rejects by role | 없음 | 없음 |
-| cost (usd) | 29.00 | 0.00 |
-| tokens | input 528766 / output 66213 | input 0 / output 0 |
+| reviewer overlap | 없음 | 없음 |
+| unique findings by role | 없음 | 없음 |
+| cost (usd) | 53.72 | 0.00 |
+| tokens | input 987738 / output 115181 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -43,7 +45,17 @@ _이력 없음_
         "source": "must_fix"
       }
     ],
-    "examples": [],
+    "examples": [
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "M0에서 규칙 5의 두 번째 분기가 구조적으로 성립할 수 없다는 주장은 #7 자신의 context.json만 근거로 삼고 있는데, must_fix spec1을 낸 실제 사건은 #3의 review 라운드다. #3의 plan handoff나 #3 당시의 harness.maturity를 인용하지 않고서는 '규칙이 오적용됐다'는 결론이 #3에 대해 증명된 것이 아니라 #7의 현재 상태로부터 유추된 것이다.",
+        "runs": [
+          7
+        ],
+        "source": "dissent"
+      }
+    ],
     "flaky": [],
     "needs_human": [
       {
@@ -55,6 +67,11 @@ _이력 없음_
         "issue": 7,
         "reason": "resolved upstream in KTB (KTB-36); will be closed when 1.1.1 lands",
         "at": "2026-09-14T08:21:09Z"
+      },
+      {
+        "issue": 9,
+        "reason": "resolved upstream in KTB (KTB-37)",
+        "at": "2026-09-14T09:00:46Z"
       }
     ]
   },
@@ -62,12 +79,17 @@ _이력 없음_
     "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
-    "needs_human": 2,
+    "review_runs": 0,
+    "findings_total": 0,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 0,
+    "needs_human": 3,
     "usage": {
-      "cost_usd": 28.999006,
+      "cost_usd": 53.720262,
       "tokens": {
-        "input": 528766,
-        "output": 66213
+        "input": 987738,
+        "output": 115181
       }
     }
   }
