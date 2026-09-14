@@ -357,6 +357,36 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
         blockedOriginFrom = origin.from;
       }
     }
+    /**
+     * ADR-020 KTB-39 — **`[runtime].setup`이 이미 더럽힌 트리의 스냅샷.** setup은 run-stage보다 먼저,
+     * 같은 잡의 자기 스텝에서 돈다(`.factory/actions/setup` → `bin/setup-env.js`) — `flutter pub get`
+     * 류는 그때 추적 파일을 다시 쓴다. 여기가 그 사실을 찍는 유일한 자리다: 스테이지가 트리를 아직
+     * 아무것도 건드리지 않은 시점(resetGates·브랜치 체크아웃·overlay **이전**)이라, 이 목록에 담기는
+     * 것은 setup이 남긴 것뿐이다. 실패해도 스테이지는 계속된다 — 기준선이 없으면 아무 경로도
+     * 면제되지 않는다(예전 동작 그대로, 더 엄격한 쪽).
+     */
+    let setupDirty = null;
+    if (d.setupBaseline) {
+      const snap = await d.setupBaseline();
+      if (!snap?.ok) record([`setup baseline: unavailable — ${snap?.reason || "unknown"} (no path is exempt from the clean check)`]);
+      else {
+        setupDirty = snap;
+        if (snap.entries?.length) record([setupDirtyLine(snap.entries)]);
+        if (snap.statReason) record([`setup baseline: diff fingerprint unavailable — ${snap.statReason} (baseline paths compared by status only)`]);
+      }
+    }
+    /**
+     * KTB-39 — implement만은 **면제가 아니라 복원**이다: 빌더는 `git add -A`로 커밋하므로 setup이
+     * 남긴 diff가 그대로 PR에 실린다. 브랜치 체크아웃보다도 먼저 하는 이유가 둘 있다 — ①
+     * `git checkout -B <branch> origin/<branch>`는 충돌하는 로컬 수정이 있으면 거부한다(그 실패는
+     * `factory:blocked`이었다), ② overlay는 트리가 팩토리 소유 경로를 base와 다르게 들고 있으면
+     * implement의 빌더를 아예 띄우지 않는데(KTB-37), setup이 그 경로를 건드린 하네스에서는 그 판정이
+     * 에이전트와 무관한 이유로 서게 된다. 복원 실패는 멈춤이 아니다(판정 불가가 아니라 커밋이
+     * 지저분해지는 문제다) — 기록에 남기고 계속한다.
+     */
+    if (stage === "implement" && setupDirty?.entries?.length && d.restoreSetupDirty) {
+      record([setupRestoreLine(await d.restoreSetupDirty(setupDirty))]);
+    }
     await d.resetGates?.();                                           // 지난 런의 판정 파일이 이번 런의 전이를 대신하지 못하게 — in-progress 전이보다 먼저
     hb = await d.heartbeat();
     const a = await d.assertHandoff();
@@ -473,7 +503,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     // verifyStage조차 부르지 않는다.
     if (isNoWriteStage(stage)) {
       // KTB-37 — overlay가 덮은 경로는 팩토리가 만든 diff다(에이전트가 아니라). 그 목록만 허용한다.
-      const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths) : { ok: true };
+      // KTB-39 — 허용 목록은 둘이다: overlay가 덮은 경로(`overlaidPaths`, 팩토리가 만든 diff)와
+      // 스테이지가 시작할 때 이미 있던 diff(`setupDirty`, `[runtime].setup`이 만든 것). 어느 쪽도
+      // 에이전트가 쓴 것이 아니다 — 그리고 둘 다 "그때 그 모양 그대로일 때만" 면제다.
+      const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
       if (!clean.ok) {
         // 두 실패는 등급이 다르다(KTB-14 r1). **더러운 트리**는 사람이 볼 것이 있다 — 어떤 파일이
         // 어떻게 바뀌었는지 보고 판단해야 하므로 needs-human이다. **`git status` 자체가 실패한 것**은
@@ -956,7 +989,126 @@ function pathsOfStatusLine(line) {
  * 없으므로 fail-closed(`ok:false`)다 — 이 저장소의 다른 "판정 불가" 계약(`integrityCheck`의
  * `cannotCompute`, `mergeGates`)과 같다.
  */
-export async function assertNoWriteStageClean({ run, cwd, allow = [] }) {
+/** `git status --porcelain` 한 덩어리 → `{path, code}` 목록(rename은 양쪽 경로, 같은 상태 문자). */
+export function parseStatusEntries(porcelain) {
+  const out = [];
+  for (const line of String(porcelain ?? "").split("\n").filter(Boolean)) {
+    const code = line.slice(0, 2);
+    for (const p of pathsOfStatusLine(line)) if (p) out.push({ path: p, code });
+  }
+  return out;
+}
+
+/** `??`는 추적되지 않는 파일이다 — 되돌리는 방법이 `git checkout`이 아니라 삭제인 유일한 경우. */
+const isUntrackedCode = (code) => code === "??";
+
+/**
+ * 기준선의 경로별 **diff 지문**. `git diff HEAD --numstat`(스테이징 여부와 무관하게 HEAD 대비)
+ * 한 번으로 `path → "<added>/<deleted>"`를 만든다. 경로 이름만으로 면제하면 "setup이 건드린
+ * 파일이니 에이전트가 그 위에 무엇을 더 써도 통과"가 되므로, 그 구멍을 이 지문이 막는다.
+ * **알려진 한계**: 추가·삭제 줄 수가 정확히 같은 재편집은 구별하지 못한다(그리고 추적되지 않는
+ * 파일은 numstat에 아예 나오지 않아 경로+상태 문자만으로 비교된다). 완전한 내용 해시는 경로마다
+ * 프로세스를 하나씩 띄워야 해서 이 자리의 값(스테이지 시작·종료 각 1회)과 맞지 않는다.
+ */
+async function diffFingerprint({ run, cwd, paths }) {
+  if (!paths.length) return { ok: true, map: new Map() };
+  const r = await run("git", ["diff", "HEAD", "--numstat", "--", ...paths], { cwd });
+  if (r.code !== 0) return { ok: false, reason: `git diff --numstat failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
+  const map = new Map();
+  for (const line of r.stdout.split("\n").filter(Boolean)) {
+    const [added, deleted, ...rest] = line.split("\t");
+    const p = rest.join("\t");
+    if (p) map.set(p, `${added}/${deleted}`);
+  }
+  return { ok: true, map };
+}
+
+const statOf = (stat, p) => (stat instanceof Map ? stat.get(p) : stat?.[p]) ?? null;
+
+/**
+ * ADR-020 KTB-39 — **스테이지가 시작할 때 이미 더러웠던 것들.** `[runtime].setup`
+ * (`.factory/actions/setup`의 자기 스텝, `bin/setup-env.js`)은 run-stage보다 **먼저** 돌고, 하네스에
+ * 따라 추적 파일을 다시 쓴다: own-calendar의 `flutter pub get`이 `client/pubspec.lock`·
+ * `client/<platform>/flutter/generated_plugin…`·`client/analysis_options.yaml`을 매번 고쳐 놓는다. 그 diff는
+ * 에이전트의 것이 아닌데 쓰기 금지 스테이지의 클린 체크는 그것을 위반으로 읽었다(own-calendar #3,
+ * 2026-09-14 — triage가 아무것도 쓰지 않았는데 `factory:needs-human`). 데모가 이 벽을 못 만난 것은
+ * `npm ci`가 추적 파일을 건드리지 않기 때문이지 체크가 옳아서가 아니다.
+ *
+ * 스냅샷은 **스테이지가 트리를 건드리기 전**(overlay·브랜치 체크아웃·resetGates 이전)에 찍는다 —
+ * 그래야 이 목록이 "setup이 남긴 것"만 담는다. 실패는 치명적이지 않다: 기준선이 없으면 아무 경로도
+ * 면제되지 않는다(= 예전 동작, 더 엄격한 쪽).
+ */
+export async function snapshotSetupDirty({ run, cwd }) {
+  const r = await run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
+  if (r.code !== 0) return { ok: false, entries: [], stat: new Map(), reason: `git status failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
+  // 스크래치 경로는 어차피 클린 체크의 대상이 아니다 — 기준선에 실어 봐야 바뀌는 것이 없고,
+  // implement의 복원이 러너 자신의 산출물을 지우게 만들 뿐이다.
+  const entries = parseStatusEntries(r.stdout).filter((e) => !isScratchPath(e.path));
+  const tracked = [...new Set(entries.filter((e) => !isUntrackedCode(e.code)).map((e) => e.path))];
+  const f = await diffFingerprint({ run, cwd, paths: tracked });
+  // 지문을 못 읽는 것은 스냅샷의 실패가 아니다(경로+상태 문자 비교로 떨어진다) — 흔적만 남긴다.
+  return { ok: true, entries, stat: f.ok ? f.map : new Map(), ...(f.ok ? {} : { statReason: f.reason }) };
+}
+
+/** run 기록 한 줄. 경로 목록은 잘라 싣는다 — 기록은 증거이지 덤프가 아니다. */
+export const SETUP_DIRTY_CAP = 10;
+export function setupDirtyLine(entries, cap = SETUP_DIRTY_CAP) {
+  const paths = [...new Set((entries || []).map((e) => e.path))];
+  const more = paths.length > cap ? `, … (+${paths.length - cap} more)` : "";
+  return `setup dirtied: ${paths.length} path(s): ${paths.slice(0, cap).join(", ")}${more}`;
+}
+export const setupRestoreLine = (r) =>
+  r?.ok
+    ? `setup restore: ${r.tracked.length} tracked path(s) checked out, ${r.untracked.length} untracked path(s) removed before the builder`
+    : `setup restore: FAILED — ${r?.reason || "unknown"} (the builder's \`git add -A\` may carry setup output into the commit)`;
+
+/**
+ * ADR-020 KTB-39 — implement는 **유일한 쓰기 스테이지**라 기준선을 면제 목록으로 쓸 수 없다: 빌더는
+ * `git add -A`로 커밋하므로, setup이 남긴 diff가 그대로 PR에 실린다(own-calendar #3의 첫 PR에는
+ * `pubspec.lock` 재생성이 들어 있었다). 그래서 여기서는 **면제 대신 복원**이다 — 추적 파일은
+ * `git checkout -- <paths>`로 HEAD의 내용으로 돌리고, setup이 만든 추적되지 않는 파일은 지운다.
+ * 빌더가 뜨기 전에 끝난다.
+ *
+ * **왜 삭제인가, 그리고 그 대가**: 추적되지 않는 setup 산출물은 `.gitignore`에 없으니(있었다면
+ * `git status`에 나오지도 않는다) `git add -A`가 반드시 집는다. 대가는 게이트다 — `[runtime].setup`은
+ * 잡에서 **한 번만** 돌고(`.factory/actions/setup`의 자기 스텝), 게이트는 같은 잡의 뒤 스텝에서
+ * 돌므로 **다시 돌지 않는다**. 지워진 것이 빌드 입력이면 게이트 명령이 스스로 다시 만들어야 한다.
+ * 그래서 하네스 템플릿의 권고는 "추적 파일을 다시 쓰지 않는 setup"이고, doctor의
+ * `runtime.setup-dirties-tree`가 그 사실을 미리 말한다.
+ *
+ * 경로는 레포 밖으로 나가지 않는다(`core.quotePath`가 만든 인용 경로처럼 이상한 이름이 와도
+ * 남의 파일을 지우지 않는다 — `gateOutputPaths`와 같은 계약).
+ */
+export function makeRestoreSetupDirty({ run, root, rm = (p) => rmSync(p, { force: true }) }) {
+  return async (baseline) => {
+    const entries = baseline?.entries || [];
+    const tracked = [...new Set(entries.filter((e) => !isUntrackedCode(e.code)).map((e) => e.path))];
+    const untrackedAll = [...new Set(entries.filter((e) => isUntrackedCode(e.code)).map((e) => e.path))];
+    const rootAbs = resolve(root);
+    const under = (p) => p === rootAbs || p.startsWith(rootAbs + sep);
+    const untracked = untrackedAll.filter((p) => !isAbsolute(p) && under(resolve(rootAbs, p)));
+    const failures = untrackedAll.filter((p) => !untracked.includes(p)).map((p) => `refused to remove ${p} (outside the repo root)`);
+    if (tracked.length) {
+      const r = await run("git", ["checkout", "--", ...tracked], { cwd: root });
+      if (r.code !== 0) failures.push(`git checkout -- failed: ${r.stderr?.trim() || `exit ${r.code}`}`);
+    }
+    for (const p of untracked) {
+      try { rm(resolve(rootAbs, p)); } catch (e) { failures.push(`rm ${p}: ${e?.message || e}`); }
+    }
+    return { ok: !failures.length, tracked, untracked, reason: failures.join("; ") || null };
+  };
+}
+
+/**
+ * `run-stage.js`가 claude -p 이후, verifyStage 이전에 묻는 구조적 백스톱(ADR-020 KTB-14 — KTB-13 r1
+ * 잔여 위험 등록부 gap 3을 닫는다). `reviewer-*`·`plan-*`·`factory-triage`는 `tools:`에 Bash를 들고
+ * 있고, 훅(`deny-all-writes.sh`)은 **명령 모양의 열거**일 뿐이라 훅이 모르는 모양이면 그냥 통과한다
+ * (KTB-13 r1). 이 체크는 모양이 아니라 **결과**(워크트리 diff)만 본다 — 어떤 셸 모양으로 만들었든
+ * 스크래치 경로 밖의 변화는 전부 위반이다. `git status` 자체가 실패하면 "깨끗하다"를 증명할 수
+ * 없으므로 fail-closed(`ok:false`)다 — 이 저장소의 다른 "판정 불가" 계약(`integrityCheck`의
+ * `cannotCompute`, `mergeGates`)과 같다.
+ */
+export async function assertNoWriteStageClean({ run, cwd, allow = [], baseline = null }) {
   const r = await run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
   if (r.code !== 0) return { ok: false, dirty: [], reason: `git status failed: ${r.stderr.trim()}` };
   // KTB-37 — `allow`는 이 런의 **overlay가 덮은 정확한 경로들**이다(팩토리가 스스로 만든 diff이지
@@ -964,9 +1116,26 @@ export async function assertNoWriteStageClean({ run, cwd, allow = [] }) {
   // 않았다는 것은 `overlayDrift`가 sha와 직접 비교해 따로 증명한다 — 여기서 넓게 열어 주는 것은
   // `.claude/**`가 아니라 그 순간 덮인 파일 이름들뿐이다.
   const allowed = new Set(allow);
+  // KTB-39 — `baseline`은 **스테이지가 시작할 때 이미 있던** diff다(= `[runtime].setup`이 만든 것).
+  // 면제는 경로 이름이 아니라 **그 경로가 아직 그때 그 모양일 때**만 성립한다: 상태 문자가 바뀌었거나
+  // (unstaged → staged) diff 지문이 움직였으면 세션이 그 위에 더 쓴 것이므로 다시 더럽다.
+  const base = new Map((baseline?.entries || []).map((e) => [e.path, e.code]));
+  let now = new Map();
+  if (base.size) {
+    const f = await diffFingerprint({ run, cwd, paths: [...base.keys()] });
+    // 지문을 다시 읽지 못하면 "그대로다"를 증명할 수 없다 — 판정 불가는 깨끗함이 아니다(fail closed).
+    if (!f.ok) return { ok: false, dirty: [], reason: f.reason };
+    now = f.map;
+  }
+  const unchanged = (p, code) => base.get(p) === code && statOf(now, p) === statOf(baseline?.stat, p);
   const dirty = new Set();
   for (const line of r.stdout.split("\n").filter(Boolean)) {
-    for (const p of pathsOfStatusLine(line)) if (p && !isScratchPath(p) && !allowed.has(p)) dirty.add(p);
+    const code = line.slice(0, 2);
+    for (const p of pathsOfStatusLine(line)) {
+      if (!p || isScratchPath(p) || allowed.has(p)) continue;
+      if (base.has(p) && unchanged(p, code)) continue;
+      dirty.add(p);
+    }
   }
   return { ok: dirty.size === 0, dirty: [...dirty] };
 }
@@ -1520,6 +1689,12 @@ async function main() {
       if (!req.ok) { await transition({ gh, issue, to: "factory:needs-human", reason: `prerequisite handoff missing: ${req.reason}` }); }
       return req;
     },
+    /**
+     * KTB-39 — 스테이지 시작 시점의 워크트리 스냅샷(= `[runtime].setup`이 남긴 것). 클린 체크의
+     * 기준선이고, implement에서는 복원 목록이다.
+     */
+    setupBaseline: () => snapshotSetupDirty({ run, cwd: root }),
+    restoreSetupDirty: makeRestoreSetupDirty({ run, root }),
     checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
     /**
      * ADR-023 Task 8b — implement의 브랜치는 스테이지가 체크아웃한다(빌더가 아니라). `harness`는
@@ -1545,8 +1720,8 @@ async function main() {
      * KTB-37: overlay가 덮은 경로(`allow`)는 팩토리가 만든 diff라 더러움으로 세지 않는다 — 대신 그
      * 경로들이 세션 중에 **또** 바뀌지 않았는지를 sha와 직접 비교해 확인한다(`overlayDrift`, fail closed).
      */
-    assertCleanWorktree: async (allow = []) => {
-      const clean = await assertNoWriteStageClean({ run, cwd: root, allow });
+    assertCleanWorktree: async (allow = [], baseline = null) => {
+      const clean = await assertNoWriteStageClean({ run, cwd: root, allow, baseline });
       if (!clean.ok || !overlaySha) return clean;
       const drift = await overlayDrift({ run, cwd: root, sha: overlaySha });
       return drift.ok ? clean : { ok: false, dirty: drift.paths, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };

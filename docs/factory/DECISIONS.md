@@ -1428,7 +1428,7 @@ KTB 자기 자신의 #3 implement R2(run 34809992796)에서 `unit` 게이트가 
 
 **영향**: `factory/lib/sweeper.js`(`STALLED_STAGE`·heartbeat 팔·`BLOCKED_RETRY_STAGE`), `factory/lib/labels.js`, `factory/test/sweeper.test.js`·`labels.test.js`·`run-stage.test.js`, 스펙 §4.3-1·§4.3-5.
 
-### ⑤ 권한·훅 — KTB-13·14·20·21·23·36
+### ⑤ 권한·훅 — KTB-13·14·20·21·23·36·39
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
 
@@ -1839,6 +1839,65 @@ deny에 걸릴 것, (b) 템플릿 트리에 없는 런타임 경로(`bin`·`lib`
 스펙 §6.3. 테스트: `templates.test.js`(qa 카브아웃 2건 + KTB-20 계약 갱신), `install.test.js`(업그레이드
 교체 1건), `doctor-factory.test.js`(열거 상위집합 1건). 코드 변경은 없다 — 고친 것은 **설정 한 줄**이고,
 그 한 줄이 리뷰 라운드 전체를 거짓 거부로 만들고 있었다.
+
+#### KTB-39 — `[runtime].setup`이 스스로 더럽힌 트리를 에이전트의 위반으로 읽고 있었다
+
+**관측**(라이브, own-calendar #3 triage, 2026-09-14 12:25Z): 에이전트가 **아무것도 쓰지 않은**
+triage가 `factory:needs-human`으로 떨어졌다. 사유는 `worktree dirty after triage (no-write stage):
+client/pubspec.lock, client/analysis_options.yaml, …`. 원인은 세션 밖에 있었다 — 그 하네스의
+`[runtime].setup`이 `flutter pub get`이고, 그 스텝은 `.factory/actions/setup` 안에서 **run-stage보다
+먼저** 돌면서 추적 파일(`pubspec.lock`·생성 플러그인 등록부·`analysis_options.yaml`)을 다시 쓴다.
+KTB-14의 클린 체크는 **결과만** 본다(그것이 그 체크의 미덕이다: 어떤 셸 모양으로 만들었든 잡는다) —
+그래서 setup이 만든 diff와 에이전트가 만든 diff를 구별할 수가 없었다. 데모가 이 벽을 못 만난 것은
+설계가 옳아서가 아니라 `npm ci`가 추적 파일을 건드리지 않기 때문이다.
+
+**결정**: **기준선(baseline)을 찍는다.** 스테이지가 트리를 아직 아무것도 건드리지 않은 시점
+(resetGates·브랜치 체크아웃·overlay **이전**)에 `git status --porcelain --untracked-files=all`과
+경로별 diff 지문(`git diff HEAD --numstat`)을 한 번 찍어 `setup dirtied: <n> path(s): …` 한 줄로
+기록하고, 쓰기 금지 스테이지의 클린 체크는 그 목록을 **면제**한다. 면제의 단위는 경로 이름이 아니라
+**그때 그 모양**이다: 상태 문자가 바뀌었거나(unstaged → staged) 지문이 움직였으면 세션이 그 위에 더
+쓴 것이므로 다시 더럽다 — 그러지 않으면 "setup이 건드린 파일이면 무엇을 써도 통과"라는 훨씬 큰
+구멍이 열린다. 지문을 **다시** 읽지 못하면 "그대로다"를 증명할 수 없으므로 fail closed이고
+(`factory:blocked`, 판정 불가), 스냅샷 자체가 실패하면 기준선이 없다 = 아무 경로도 면제되지 않는다
+(예전 동작, 더 엄격한 쪽). 알려진 한계: 추가·삭제 줄 수가 정확히 같은 재편집은 numstat 지문으로
+구별되지 않는다(경로마다 내용 해시를 뜨려면 프로세스를 그만큼 띄워야 한다 — 스테이지당 2회라는
+이 자리의 예산과 맞지 않는다).
+
+**implement는 면제가 아니라 복원이다.** 빌더는 `git add -A`로 커밋하므로 면제는 곧 "setup의 diff가
+PR에 실린다"는 뜻이다. 그래서 빌더 앞에서 되돌린다 — 추적 경로는 `git checkout -- <paths>`,
+setup이 만든 추적되지 않는 파일은 삭제(그 파일들은 `.gitignore`에 없다 — 있었다면 `git status`에
+나오지도 않는다). **브랜치 체크아웃(2.3)보다도 먼저** 하는 이유가 둘 더 있다: ①
+`git checkout -B <branch> origin/<branch>`는 충돌하는 로컬 수정이 있으면 거부한다(그 실패는
+`factory:blocked`이었다), ② overlay(2.4)는 트리가 팩토리 소유 경로를 base와 다르게 들고 있으면
+implement의 빌더를 아예 띄우지 않는데(KTB-37), setup이 그 경로를 건드리는 하네스에서는 그 판정이
+에이전트와 무관한 이유로 서게 된다. 복원을 먼저 하면 overlay·drift·커밋 검사 모두가 기준선을
+보지 않는다 — 이것이 "기준선을 그 검사들에서 뺀다"의 실제 구현이다. 복원 실패는 **멈춤이 아니다**:
+판정 불가가 아니라 커밋이 지저분해지는 문제이므로 `setup restore: FAILED — …`를 기록하고 계속한다.
+
+**대가와 그 경계**(순서 확인 결과): `[runtime].setup`은 잡당 **한 번만** 돈다 —
+`.factory/actions/setup/action.yml`의 자기 스텝(`node .factory/bin/setup-env.js`)이고, 게이트는 같은
+잡의 **뒤 스텝**에서 `run-stage.js`가 인프로세스로 돌린다(`bin/gates.js`도 setup을 부르지 않는다).
+즉 **게이트 전에 setup이 다시 돌지 않는다**. 지워진 추적되지 않는 산출물이 빌드 입력이면 게이트
+명령이 스스로 다시 만들어야 한다(`flutter test`는 그렇게 한다). 툴체인 자체는 영향받지 않는다 —
+되돌리는 것은 워크트리의 추적 파일과 setup이 만든 비추적 파일뿐이고, `.dart_tool/`·`node_modules/`
+같은 무시된 경로는 `git status`에 애초에 나오지 않아 기준선에 들어가지 않는다.
+
+**doctor가 미리 말한다**: `runtime.setup-dirties-tree`(WARN). 판정은 순수 함수이고(표본은
+"`git status` 한 덩어리"), 표본은 `--run` 모드에서만 만든다 — 이 저장소를 임시 디렉터리에 로컬
+복제해 거기서 setup을 한 번 돌린다(작업 트리는 건드리지 않는다). `--offline`·`--no-run`에서는
+돌리지 않고 "안 돌려 봤다"로 남긴다(setup은 몇 분이 걸릴 수 있다) — 안 돌려 본 것을 PASS로도
+WARN으로도 적지 않는다. 권고 문장은 하네스 템플릿에도 그대로 들어간다: *prefer setup commands that
+do not rewrite tracked files (pin toolchain versions; use lockfile-respecting installs)*.
+
+**영향**: `factory/bin/run-stage.js`(`parseStatusEntries`·`snapshotSetupDirty`·`setupDirtyLine`·
+`setupRestoreLine`·`makeRestoreSetupDirty`·`assertNoWriteStageClean`의 `baseline`·runStage 배선 두
+자리·`deps.setupBaseline`/`restoreSetupDirty`), `factory/lib/doctor/harness.js`
+(`checkSetupDirtiesTree`·`runSetupProbe`·`SETUP_DIRTY_NOTE`), `factory/cli/doctor.js`(프로브 배선),
+`templates/factory/factory/harness.toml`(`[runtime]` 주석), 스펙 §4.2.1 step 1.5·step 4.
+테스트: `factory/test/run-stage-setup-dirty.test.js`(신규 17건 — 파서·스냅샷·기록 줄·면제·에이전트
+경로는 여전히 더럽다·더 쓴 기준선 경로·fail closed·복원 순서·복원 실패는 멈추지 않는다·쓰기 금지
+스테이지는 복원하지 않는다), `factory/test/doctor-harness.test.js`(+4). 채택자 조치: `factory init
+--upgrade`로 `.factory/bin/run-stage.js`·`.factory/lib/doctor/harness.js` 미러 갱신.
 
 ### ⑥ 관찰 — O1~O12, O14·O15, O20·O23·O24, G1
 
@@ -2829,6 +2888,12 @@ implement는 이제 `claude -p` 앞에서 `claude/fq-<issue>`를 직접 체크�
 훅이 막으며, 세션 뒤에 HEAD와 팩토리 설정을 다시 확인한다. 남은 자리는 두 개다: ① 브랜치가 팩토리
 소유 경로를 들고 있는 rework 라운드는 사람에게 넘어간다(위 "판정 하나"), ② 훅이 못 보는 철자
 (런타임 조립)는 여전히 비목표이고, 그 자리를 메우는 것은 세션 뒤의 브랜치·drift 확인이다.
+
+**KTB-39 — 스테이지가 시작하기도 전에 더러워진 트리**: **닫혔다**(ADR-020 ⑤의 KTB-39 절).
+`[runtime].setup`이 남긴 diff는 기준선으로 클린 체크에서 빠지고, implement는 빌더 앞에서 그것을
+복원한다. 남은 자리는 둘이다: ① numstat 지문은 추가·삭제 줄 수가 같은 재편집을 구별하지 못한다,
+② 복원으로 지워진 비추적 setup 산출물은 게이트가 스스로 다시 만들어야 한다(setup은 잡당 한 번만
+돈다) — 그래서 doctor의 `runtime.setup-dirties-tree`가 그런 하네스를 WARN으로 부른다.
 
 **단일 자격증명 잔여** (Task 2 "알려진 한계", batch-1 "남은 위험" 1). 러너와 에이전트가 여전히 같은
 PAT을 쓴다 — 훅이 못 보는 철자(런타임 조립)로 push가 나가면 리뷰 증거 바인딩·기록 브랜치 보호가

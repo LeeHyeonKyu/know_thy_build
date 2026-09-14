@@ -1,6 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { matchesAny } from "../glob.js";
 import { THRESHOLD_DEFAULTS } from "../config.js";
-import { STAGES } from "../../bin/run-stage.js";
+import { STAGES, parseStatusEntries } from "../../bin/run-stage.js";
 
 const PROOF_GATES = { diff_coverage: ["coverage", "coverage_report"], mutation: ["mutation", "mutation_report"], "prove-test": [], "new-test-repeat": [] };
 const TEMPLATED = { lint_file: ["{file}"], test_files: ["{files}"], test_one: ["{file}", "{name}"] };
@@ -190,6 +193,63 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
         : c("load-bearing.paths-exist", "PASS", `${lbPaths.length} path(s)`)
   );
   return out;
+}
+
+/**
+ * ── ADR-020 KTB-39 — **`[runtime].setup`이 추적 파일을 다시 쓰는가.** ─────────────────────────
+ * own-calendar #3(2026-09-14, 라이브): setup이 `flutter pub get`이라 스테이지가 시작하기도 전에
+ * `client/pubspec.lock`·`client/<platform>/flutter/generated_plugin…`·`client/analysis_options.yaml`이 다시
+ * 쓰였고, 쓰기 금지 스테이지(triage)의 클린 체크가 그 diff를 에이전트의 위반으로 읽어 이슈가
+ * `factory:needs-human`으로 갔다. run-stage는 이제 그 기준선을 판정에서 빼지만(KTB-39), **그
+ * 하네스는 여전히 고쳐야 할 것**이다: implement는 면제가 아니라 복원이라 setup 산출물이 매 라운드
+ * 지워지고, 그중 빌드 입력이 있으면 게이트가 스스로 다시 만들어야 한다(setup은 잡당 한 번만 돈다).
+ *
+ * 판정은 **순수 함수**다 — `status`는 "이 저장소의 깨끗한 복제본에서 setup을 한 번 돌린 뒤의
+ * `git status --porcelain`"이고, 그 표본을 만드는 것은 `runSetupProbe`(아래)다. 표본이 없으면
+ * (오프라인·`--no-run`) 판정하지 않는다: 안 돌려 본 것을 PASS로도 WARN으로도 적지 않는다.
+ */
+export const SETUP_DIRTY_NOTE = "prefer setup commands that do not rewrite tracked files (pin toolchain versions; use lockfile-respecting installs)";
+const SETUP_DIRTY_ID = "runtime.setup-dirties-tree";
+export function checkSetupDirtiesTree({ harness: h, status = null, skipped = null, setupExit = 0 }) {
+  const setup = h.runtime?.setup;
+  if (!setup) return c(SETUP_DIRTY_ID, "PASS", "no [runtime].setup — nothing runs before the stage");
+  if (skipped) return c(SETUP_DIRTY_ID, "PASS", `not probed: ${skipped}`);
+  if (status == null) return c(SETUP_DIRTY_ID, "PASS", "not probed (offline or --no-run)");
+  if (setupExit) return c(SETUP_DIRTY_ID, "WARN", `\`${setup}\` exited ${setupExit} in a scratch clone — cannot tell whether it rewrites tracked files`);
+  const entries = parseStatusEntries(status);
+  const tracked = [...new Set(entries.filter((e) => e.code !== "??").map((e) => e.path))];
+  const untracked = [...new Set(entries.filter((e) => e.code === "??").map((e) => e.path))];
+  if (!tracked.length && !untracked.length) return c(SETUP_DIRTY_ID, "PASS", `\`${setup}\` leaves the tree clean`);
+  const shown = tracked.slice(0, 10).join(", ") + (tracked.length > 10 ? `, … (+${tracked.length - 10} more)` : "");
+  const parts = [];
+  if (tracked.length) parts.push(`${tracked.length} tracked path(s) rewritten by \`${setup}\`: ${shown}`);
+  // 추적되지 않는 산출물도 무해하지 않다 — `.gitignore`에 없으니 빌더의 `git add -A`가 집는다.
+  if (untracked.length) parts.push(`${untracked.length} untracked file(s) created (not gitignored — the builder's \`git add -A\` would commit them)`);
+  return c(SETUP_DIRTY_ID, "WARN", `${parts.join("; ")} — ${SETUP_DIRTY_NOTE}`);
+}
+
+/**
+ * 위 판정의 표본을 만든다(**부수 효과 있음**): 이 저장소를 임시 디렉터리에 로컬 복제하고, 거기서
+ * `[runtime].setup`을 한 번 돌린 뒤 `git status`를 읽는다. 작업 트리에서 돌리지 않는 이유는 명백하다 —
+ * doctor가 사람의 변경 위에 setup을 덮어쓰면 안 된다. 복제는 `--local`(하드링크 없음)이라
+ * **커밋된 상태**만 담는다: 커밋되지 않은 하네스 수정은 이 프로브에 보이지 않는다(알려진 한계).
+ */
+export async function runSetupProbe({ run, cwd, harness: h, tmpRoot = tmpdir(), mkdtemp = mkdtempSync, rm = rmSync }) {
+  const setup = h.runtime?.setup;
+  if (!setup) return { skipped: "no [runtime].setup" };
+  let dir;
+  try { dir = mkdtemp(join(tmpRoot, "factory-setup-probe-")); }
+  catch (e) { return { skipped: `scratch dir unavailable: ${e?.message || e}` }; }
+  try {
+    const cl = await run("git", ["clone", "--local", "--no-hardlinks", "--quiet", cwd, dir], { cwd });
+    if (cl.code !== 0) return { skipped: `scratch clone failed: ${cl.stderr?.trim() || `exit ${cl.code}`}` };
+    const s = await run("bash", ["-lc", setup], { cwd: dir });
+    const st = await run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir });
+    if (st.code !== 0) return { skipped: `git status failed in the scratch clone: ${st.stderr?.trim() || `exit ${st.code}`}` };
+    return { status: st.stdout, setupExit: s.code };
+  } finally {
+    try { rm(dir, { recursive: true, force: true }); } catch { /* best-effort — 임시 디렉터리다 */ }
+  }
 }
 
 /**

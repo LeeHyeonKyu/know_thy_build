@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkHarness, checkCommands } from "../lib/doctor/harness.js";
+import { checkHarness, checkCommands, checkSetupDirtiesTree, runSetupProbe } from "../lib/doctor/harness.js";
 import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity } from "../lib/doctor/factory.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
@@ -71,6 +71,14 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
   const lsFiles = await run("git", ["ls-files"], { cwd: root });
   const files = lsFiles.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   checks.push(...checkHarness({ harness, files, raw: harnessRaw }));
+  // KTB-39 — `[runtime].setup`이 추적 파일을 다시 쓰는가. 판정은 순수 함수이고, 표본은 **깨끗한
+  // 스크래치 복제본**에서 setup을 한 번 돌려 얻는다(작업 트리를 건드리지 않는다). `--no-run`·
+  // `--offline`에서는 돌리지 않고 "안 돌려 봤다"로 남긴다 — setup은 몇 분이 걸릴 수 있다.
+  const setupProbeFn = deps.runSetupProbe || runSetupProbe;
+  const probe = noRun || offline
+    ? { skipped: noRun ? "--no-run" : "--offline" }
+    : await setupProbeFn({ run, cwd: root, harness }).catch((e) => ({ skipped: `probe failed: ${e?.message || e}` }));
+  checks.push(checkSetupDirtiesTree({ harness, ...probe }));
 
   // ── test env up (wraps the command gates and the smoke) ─────────
   const smoke = harness.test?.smoke || {};
