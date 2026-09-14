@@ -137,7 +137,7 @@ export function disputedFrom(comments) {
   return (Array.isArray(latest.obj.responses) ? latest.obj.responses : []).filter((r) => r?.status === "disputed");
 }
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null }) {
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -191,6 +191,13 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     handoffs,
     harness: { maturity: harness.harness?.maturity, commands: harness.commands, gates: harness.gates },
     roles: roleBlock,
+    /**
+     * ADR-020 KTB-43 — **`[runtime].setup`이 이 런에서 이미 다시 쓴 경로들**(KTB-39의 기준선,
+     * `run-stage.js`가 스테이지 맨 앞에서 찍는다). 빌더에게 "이 파일들은 커밋하지 마라"를 말하려면
+     * 그 목록이 프롬프트에 있어야 하는데, 워크플로 스크립트는 파일을 읽을 수 없다(§4.2.3) — 그래서
+     * `loaded.json`을 타고 간다. 비어 있는 것이 정상이다(대부분의 하네스는 트리를 더럽히지 않는다).
+     */
+    setup_dirty: [...new Set((setupDirty?.entries || []).map((e) => e.path))],
   };
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh });
   mkdirSync(join(root, ".factory/out"), { recursive: true });
@@ -254,6 +261,8 @@ async function loadedFor({ ctx, roleBlock, gh }) {
     orchestration: ctx.orchestration,
     ...(pr === undefined ? {} : { pr }),
     ...(typeof impl.head_sha === "string" ? { head_sha: impl.head_sha } : {}),
+    // KTB-43 — 빌더 프롬프트가 "커밋하지 말 것" 목록으로 읽는다(§buildContext setup_dirty).
+    setup_dirty: ctx.setup_dirty ?? [],
     must_fix: mustFix,
     disputed,
   };
