@@ -681,3 +681,18 @@ test("the stages substitute every placeholder, exactly like the rehearsal does",
     expect(src, f).toMatch(/\.replaceAll\("\{(files|file|name)\}"/);
   }
 });
+
+test("makeRehearsalChecker resolves a lazy branch at call time, not at construction (integration 1.3.0)", async () => {
+  const seen = [];
+  const gh = {
+    getVariable: async () => null,
+    commitsForPath: async (branch) => { seen.push(branch); return []; },
+    commitStatuses: async () => [],
+  };
+  let defaultBranch;                       // undefined at construction — like run-stage before charterReady
+  const check = makeRehearsalChecker({ gh, root: "/nonexistent", branch: () => defaultBranch || "main", readFile: () => { throw new Error("no file"); } });
+  defaultBranch = "trunk";                 // harness.toml read later
+  await check();
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen.every((b) => b === "trunk")).toBe(true);
+});

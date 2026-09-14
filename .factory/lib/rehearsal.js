@@ -383,11 +383,15 @@ export async function recordRehearsal({ gh, hash, branch = "main", targets = nul
  */
 export function makeRehearsalChecker({ gh, root, branch = "main", readFile = (p) => readFileSync(p, "utf8") }) {
   return async () => {
+    // `branch`는 값이거나 **지연 함수**다(통합 1.3.0): run-stage는 deps를 조립할 때 아직 harness.toml을
+    // 읽지 않았으므로(`charterReady`가 나중에 읽는다) 값으로 넘기면 언제나 "main"으로 굳는다 — 기본
+    // 브랜치가 `master`/`trunk`인 저장소에서는 기록을 엉뚱한 브랜치에서 찾아 큐가 영영 닫힌다.
+    const branchNow = typeof branch === "function" ? (branch() || "main") : branch;
     const read = (p) => { try { return readFile(join(root, p)); } catch { return null; } };
     const harnessText = read(FINGERPRINT_PATHS[0]);
     const current = harnessText == null ? null : rehearsalHash({ harnessText, charterText: read(FINGERPRINT_PATHS[1]) || "" });
     // `current`를 함께 넘긴다 — 읽기가 후보를 훑다가 일치를 만나면 그 자리에서 멈춘다(r2 MF2).
-    const recorded = await recordedRehearsal({ gh, branch, current });
+    const recorded = await recordedRehearsal({ gh, branch: branchNow, current });
     return rehearsalGate({ recorded, current });
   };
 }

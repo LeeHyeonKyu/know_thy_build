@@ -1902,7 +1902,7 @@ async function main() {
    * 넷이 갈릴 수 있었다 — 갈리는 방향은 언제나 "한 자리만 배선을 잃는" 쪽이다(B-MF1이 정확히 그
    * 모양이었다: 네 번째 자리에 아무것도 없었다).
    */
-  const rehearsal = makeRehearsalChecker({ gh, root, branch: harness?.project?.default_branch || "main" });
+  const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });   // 지연: harness는 charterReady에서 읽힌다
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
