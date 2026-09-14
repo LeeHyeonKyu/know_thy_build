@@ -30,7 +30,8 @@ import { renderHandoff, latestHandoff } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, countTransitionsTo } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence } from "../lib/run-record.js";
+import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
@@ -152,7 +153,7 @@ export function usageLine(out, progress = null) {
   return progress ? `${line}\n${progressMarker(progress)}` : line;
 }
 
-export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
+export async function runStage({ stage, issue, deps, runnerId = "unknown", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
   const d = deps;
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
@@ -547,8 +548,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
        * push는 훅이 막는다. 머지 스테이지는 둘이 **같은 커밋·같은 verdict·같은 라운드**일 때만 머지한다.
        * sha는 handoff가 적어 넣은 값이 아니라 **우리가 실제로 체크아웃한 커밋**이다(checkoutSha, R6) —
        * 그래야 head_sha를 지어낸 handoff가 이 대조에서 걸린다.
+       *
+       * 리뷰 batch-2 MF-2 — 그리고 **이 런의 이름**을 같이 싣는다(`run_id`/`runner`). 그래야 머지
+       * 스테이지가 "파일의 마지막 줄"이 아니라 "이 이슈의 review 하트비트가 지목하는 런이 쓴 줄"을
+       * 고를 수 있다 — 위조하려면 아직 일어나지 않은 런의 id를 맞혀야 한다.
        */
-      record([reviewEvidenceLine({ headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts })]);
+      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
@@ -1022,10 +1027,24 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
  * 세 개만큼 열려 있었던 것이다. 이 저장소에는 아직 그 파일들이 없어서 아무 것도 깨지지 않았다(latent).
  * `.claude/settings.local.json`은 `.claude/` 아래라 이미 덮인다.
  */
-export const OVERLAY_ROOTS = [".factory", ".claude", "docs/factory/CHARTER.md", "CLAUDE.md", "AGENTS.md", ".mcp.json"];
+/**
+ * ── 리뷰 batch-2 MF-3 — **세션 설정 파일은 루트에만 있는 것이 아니다.** ──────────────────────────
+ * batch-1은 그 셋을 루트 이름(`CLAUDE.md`)으로 적었다. 그런데 Claude Code는 세션이 건드리는 디렉터리의
+ * `CLAUDE.md`/`AGENTS.md`를 함께 읽고(리뷰 세션은 정의상 소스 디렉터리를 건드린다), `CLAUDE.local.md`
+ * 같은 변형도 읽는다. 재리뷰가 확인한 결과: `docs/CLAUDE.md`·`src/AGENTS.md`는 overlay 밖, drift 검사
+ * 밖, `[protected]` 밖, `Write()` deny 밖이었고 tier는 `docs`로 떨어졌다 — 곧 주입 채널은 그대로
+ * 열려 있었고, 그 PR은 가장 가벼운 심사를 받았다.
+ * 그래서 세 이름을 **깊이에 무관한 글롭**으로 표현한다. git 쪽은 `:(glob)` pathspec(루트도 매치),
+ * harness `[protected].factory`·`NEVER_DOCS_GLOBS`는 같은 뜻의 깊이 무관 글롭이다.
+ */
+export const SESSION_CONFIG_GLOBS = ["**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json"];
+export const SESSION_CONFIG_PATHSPECS = SESSION_CONFIG_GLOBS.map((g) => `:(glob)${g}`);
+/** 같은 집합을 **경로 문자열**로 판정할 때(스테이지 커밋 스캔). git 글롭과 같은 의미다 — 루트 포함, 어느 깊이든. */
+export const SESSION_CONFIG_RE = /(^|\/)(CLAUDE[^/]*\.md|AGENTS[^/]*\.md|\.mcp[^/]*\.json)$/;
+export const OVERLAY_ROOTS = [".factory", ".claude", "docs/factory/CHARTER.md"];
 export const OVERLAY_EXCLUDE = ":(exclude).factory/out";
-export const OVERLAY_PATHSPECS = [".factory", OVERLAY_EXCLUDE, ".claude", "docs/factory/CHARTER.md", "CLAUDE.md", "AGENTS.md", ".mcp.json"];
-export const OVERLAY_LABEL = ".factory/** (except .factory/out/**), .claude/**, docs/factory/CHARTER.md, CLAUDE.md, AGENTS.md, .mcp.json";
+export const OVERLAY_PATHSPECS = [".factory", OVERLAY_EXCLUDE, ".claude", "docs/factory/CHARTER.md", ...SESSION_CONFIG_PATHSPECS];
+export const OVERLAY_LABEL = `.factory/** (except .factory/out/**), .claude/**, docs/factory/CHARTER.md, ${SESSION_CONFIG_GLOBS.join(", ")}`;
 /** overlay가 손대는 스테이지 — PR 콘텐츠가 워킹 트리에 올 수 있는 셋. triage·plan은 PR 이전이라 언제나 base 위에 있다. */
 const OVERLAY_STAGES = new Set(["implement", "review", "merge"]);
 const SHA40 = /^[0-9a-f]{40}$/;
@@ -1065,8 +1084,17 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
       const e = await run("git", ["cat-file", "-e", `${s.sha}:${p}`], { cwd: root });
       if (e.code === 0) present.push(p);
     }
-    if (present.length === 0) return { ok: false, reason: `the stage sha ${s.sha.slice(0, 7)} (${s.source}) carries none of ${OVERLAY_LABEL}` };
-    const pathspecs = present.flatMap((p) => (p === ".factory" ? [p, OVERLAY_EXCLUDE] : [p]));
+    /**
+     * 리뷰 batch-2 MF-3 — 세션 설정 파일은 **어느 깊이에나** 있을 수 있으므로 이름으로 물을 수 없다.
+     * 스테이지 커밋의 트리를 한 번 훑어 실제 경로를 뽑는다(`git ls-tree`는 `:(glob)` 매직을 받지
+     * 않는다 — 그래서 스캔은 여기서 하고, 아래 diff/status만 glob pathspec을 쓴다).
+     * 스캔이 실패하면 진행하지 않는다(fail closed): 무엇을 덮어야 하는지 모르는 overlay는 overlay가 아니다.
+     */
+    const tree = await run("git", ["ls-tree", "-r", "--name-only", s.sha], { cwd: root });
+    if (tree.code !== 0) return { ok: false, reason: `overlay session-config scan failed (${s.sha.slice(0, 7)} ${s.source}): ${tree.stderr?.trim() || `exit ${tree.code}`}` };
+    const sessionConfig = tree.stdout.split("\n").map((l) => l.trim()).filter((l) => l && SESSION_CONFIG_RE.test(l));
+    if (present.length === 0 && sessionConfig.length === 0) return { ok: false, reason: `the stage sha ${s.sha.slice(0, 7)} (${s.source}) carries none of ${OVERLAY_LABEL}` };
+    const pathspecs = [...present.flatMap((p) => (p === ".factory" ? [p, OVERLAY_EXCLUDE] : [p])), ...sessionConfig];
     const co = await run("git", ["checkout", s.sha, "--", ...pathspecs], { cwd: root });
     if (co.code !== 0) return { ok: false, reason: `overlay checkout failed (${s.sha.slice(0, 7)} ${s.source}): ${co.stderr?.trim() || `exit ${co.code}`}` };
     /**
@@ -1434,16 +1462,36 @@ async function main() {
      * `readRecordsDetailed`의 `fetched`를 그대로 fail-closed 신호로 쓴다(`readRecords`는 그 둘을
      * 구별하지 못한다 — 네트워크 실패도 빈 Map으로 보인다).
      */
-    reviewRecord: async () => {
+    reviewRecord: async ({ runId: want = null } = {}) => {
       let det;
       try { det = await readRecordsDetailed({ run, cwd: root }); }
       catch (e) { return { ok: false, reason: `the factory/records branch could not be read — ${e?.message || e}` }; }
       if (!det?.fetched) return { ok: false, reason: "the factory/records branch could not be fetched — the review evidence is unreachable, and an unverified review is not a passed review" };
       const text = det.records.get(String(issue));
       if (!text) return { ok: false, reason: `factory/records carries no run record for issue #${issue}` };
-      const rec = parseReviewEvidence(text);
-      if (!rec) return { ok: false, reason: `the run record for issue #${issue} on factory/records carries no review-evidence line` };
+      const rec = parseReviewEvidence(text, { runId: want });
+      if (!rec) return { ok: false, reason: `the run record for issue #${issue} on factory/records carries no review-evidence line written by run ${want ?? "(unknown)"} (a line from another run, a conflicting pair of lines claiming that run, or no line at all — none of those is evidence that this review ran)` };
       return { ok: true, record: rec };
+    },
+    /**
+     * 리뷰 batch-2 MF-2 — **어느 런이 이 이슈의 리뷰를 돌렸는가**, 기록과 무관한 자리에서 읽는다.
+     * 워크플로는 매 스테이지에 `FACTORY_RUNNER_ID: gha-${{ github.run_id }}`를 심고, 하트비트 코멘트의
+     * 첫 두 줄이 그 값을 그대로 싣는다(ADR-022 결정 3: 이 모양은 바뀌지 않는 계약이다). 그래서 이 값은
+     * run 기록과 **다른 채널**에서 온다 — 기록 쪽을 지어내도 이 값과 맞출 수 없다.
+     * 리뷰 하트비트가 없으면 통과가 아니라 **판정 불능**이다(리뷰가 돌았다는 증거가 없다).
+     */
+    reviewRunId: async () => {
+      let comments;
+      try { comments = await gh.comments(issue); }
+      catch (e) { return { ok: false, reason: `the issue's comments could not be read — ${e?.message || e}` }; }
+      const beats = (Array.isArray(comments) ? comments : [])
+        .map((c) => parseHeartbeatComment(c?.body))
+        .filter((h) => h && h.issue === Number(issue) && h.stage === "review" && h.runner);
+      if (!beats.length) return { ok: false, reason: `no review-stage heartbeat on issue #${issue} — there is no independent record of which factory run produced this review` };
+      const runner = beats[beats.length - 1].runner;
+      const runId = runIdOfRunner(runner);
+      if (!runId) return { ok: false, reason: `the review heartbeat on issue #${issue} names no runner (got "${runner}")` };
+      return { ok: true, runId, runnerId: runner };
     },
     get maxRounds() { return charter?.limits?.K ?? null; },
     /** CHARTER `merge.human_gate` — 머지 전이 텍스트가 사람의 서명 유무를 소리 내어 말한다(감사 H6). */

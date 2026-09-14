@@ -2693,12 +2693,45 @@ id 없는 `dissent_log` 항목은 위치로 부른다(`d1`,`d2`,…). `covers`/`
 
 ---
 
-### 리뷰 batch-2
+### 리뷰 batch-2 수정
 
-이 통합 시점까지 **batch-2 재리뷰는 기록되지 않았다.** 있었던 적대적 재리뷰는 위 "리뷰 batch-1"
-(Task 1/2/3/8 대상, `scratchpad/review-audit-batch1-report.md`) 하나뿐이다 — Task 4/5/9는 batch-1
-이후에 머지됐고(git 이력상 `339c10b` batch-1 커밋보다 뒤), 아직 같은 방식의 적대적 재리뷰를 받지
-않았다. 다음 사이클의 첫 항목으로 batch-2(Task 4/5/9 대상)를 잡는다.
+batch-2 적대적 재리뷰(`scratchpad/review-audit-batch2-report.md`, 범위 `02d8599..05c3960` = batch-1
+must-fix + Task 4/5 + 컨트롤러 미러)는 **NEEDS-FIX**였다. 판정의 무게중심은 하나다: batch-1이 닫았다고
+적어 둔 두 곳에서 **코드가 그 주장을 지탱하지 못했다.** 리뷰어는 훅 두 벌을 ~70개 합성 stdin으로 직접
+실행했고, 손으로 위조한 run 기록에 `verifyReviewProvenance`를 돌려 `{ok:true}`를 재현했다. 네 가지를 고쳤다.
+
+1. **엔드포인트 표의 구멍(MF-1)**. `PATCH /issues/<n>`(라벨·본문), `POST /merges`(보호 경로를 하나도
+   건드리지 않는 머지), `PATCH /pulls/<n>`(base 재지정), `curl --upload-file`, 그리고 SDK 철자
+   (`octokit.request("POST /…")`·`.post(`/`.patch(`/…)가 전부 rc=0이었다 — 동사도 엔드포인트도 명령줄에
+   그대로 있는데 **메서드의 철자만** 플래그에서 문자열·메서드 이름으로 옮겨 간 것이다. 셋 다 권위
+   엔드포인트가 같은 명령에 있을 때만 문다. 뒤쪽 경계는 `([^0-9/]|$)`로 잡아 `/issues/7`과
+   `/issues/7/comments`를 가른다(코멘트는 handoff가 나가는 문이다).
+2. **리뷰 증거의 바인딩이 위조 가능했다(MF-2)**. `docs/factory/runs/**`는 에이전트 세션이 쓸 수 있었고
+   (`echo … >> docs/factory/runs/7.md` rc=0) 파서는 **파일의 마지막 줄**을 골랐다 — 곧 implement 에이전트가
+   가짜 `## review` 섹션을 심으면 그것이 권위 있는 증거가 됐다. 이제 증거 줄이 `run_id=<GITHUB_RUN_ID>`와
+   러너를 싣고, 머지 스테이지는 기대하는 런 id를 **이슈의 review 하트비트**(`runner: gha-<run id>`,
+   기록과 다른 채널)에서 읽어 그 런이 쓴 줄만 고른다. 같은 런 id를 말하는 줄이 둘이면 판정 불능이다.
+   쓰기 경계도 함께 닫았다: 새 harness 키 `[protected].runner_only`가 그 디렉터리를 **생성되는 훅 `prot`와
+   ci-settings deny에만** 넣는다(L1 머지 경계는 그대로 — run 기록은 러너가 쓰고 사람 없이 머지돼야 한다).
+   doctor의 `protected.runner-only`가 그 둘이 갈라지는 것을 FAIL로 잡는다.
+3. **세션 설정 보호가 전부 루트 앵커였다(MF-3)**. `docs/CLAUDE.md`·`src/AGENTS.md`·중첩 `.mcp.json`은
+   overlay 밖, drift 검사 밖, `[protected]` 밖, `Write()` deny 밖이었고 tier는 `docs`(가장 작은 로스터)로
+   떨어졌다. 게다가 이 저장소는 `CLAUDE.md`만 적어 두어 `CLAUDE.local.md`가 열려 있었다. 두 harness의
+   글롭을 깊이 무관 형태로 바꾸고(`**/CLAUDE*.md`·`**/AGENTS*.md`·`**/.mcp*.json`), overlay는 스테이지
+   커밋을 `git ls-tree`로 훑어 그 이름들을 찾고(스캔 실패는 fail closed) diff·status는 `:(glob)` pathspec을
+   쓴다. `NEVER_DOCS_GLOBS`에도 같은 셋을 넣어 어느 깊이의 세션 설정도 docs tier가 될 수 없다.
+4. **이슈 본문이 열려 있었다(#4)**. `tests_changed_allowed:` 마커는 이슈 본문에서만 읽히는데
+   `gh issue edit … --body`가 rc=0이었다 — 에이전트가 자기 자신에게 테스트 수정 허가를 써 줄 수 있었다.
+   `--body/--body-file/-b/-F`를 막는다(`gh issue comment`는 그대로 열려 있다).
+
+**영향**: `factory/hooks/block-dangerous.sh`(엔드포인트·쓰기 모양·issue edit·cp/mv 목적지 접두),
+`factory/lib/run-record.js`(`run_id`/`runner`, `parseReviewEvidence(text, {runId})`, `runIdOfRunner`),
+`factory/lib/review-quorum.js`(`expectedRunId`), `factory/bin/run-stage.js`(`reviewRunId` dep, overlay 글롭),
+`factory/lib/merge-stage.js`, `factory/lib/gates.js`, `factory/lib/protected-paths.js`(`runner_only`,
+깊이 무관 글롭 → ERE), `factory/lib/doctor/{harness,factory}.js`, 두 `harness.toml`과 그 생성물(미러 포함).
+**남은 한계**: 기대 런 id의 출처인 하트비트 코멘트도 봇 계정이 쓴다 — 단일 자격증명 잔여(아래)가 풀리기
+전까지 이 바인딩은 "훅이 보지 못하는 철자"까지 막지는 못한다. 그리고 `docs/factory/runs/**`는 여전히
+no-write 스테이지의 스크래치 경로다(러너가 세션 중에 덧붙이므로) — 닫힌 것은 **에이전트의 쓰기**다.
 
 ### 남은 것 (Task 6 · Task 8b — 이번 사이클에 착수하지 않았다)
 

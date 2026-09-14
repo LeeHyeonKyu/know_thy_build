@@ -542,7 +542,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     return 2;
   };
   {
-    const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
+    const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "reviewRunId", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
     if (missingDeps.length) {
       return await reviewRefused(`review-evidence deps not wired (${missingDeps.join(", ")}) — the merge stage cannot prove a review happened, and an unverified review is not a passed review`);
     }
@@ -575,13 +575,23 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // 훅이 일부러 열어 둔 문이다) — 곧 all-approve handoff를 손으로 지어내면 (b)를 그대로 통과했다.
     // 그래서 `factory/records`의 run 기록에 **러너가** 남긴 `review-evidence:` 줄과 대조한다: 같은 커밋,
     // 같은 verdict 집합, 같은 라운드여야 한다. 기록을 못 읽는 것도 통과가 아니다(fail closed).
+    //
+    // 리뷰 batch-2 MF-2 — 그런데 **어느 줄이 그 런의 것인가**를 파일 순서로 정하면("마지막 줄") 그
+    // 기록 파일에 줄을 덧붙일 수 있는 누구든 판정을 대신 쓸 수 있다(재리뷰가 rc=0으로 확인했다).
+    // 그래서 런 id를 먼저, **기록과 다른 채널**에서 읽는다: 이 이슈의 review 하트비트가 싣는
+    // `runner: gha-<run id>`. 그 값을 기대값으로 넘겨 같은 런이 쓴 줄만 고르고, 대조한다.
+    let expected;
+    try { expected = await d.reviewRunId(); }
+    catch (e) { return await reviewRefused(`${NOT_BOUND} — the review run id could not be read from this issue: ${e?.message || e}`); }
+    if (!expected?.ok || !expected.runId) return await reviewRefused(`${NOT_BOUND} — ${expected?.reason || "the review run that produced this handoff could not be named"}`);
+
     let rec;
-    try { rec = await d.reviewRecord(); }
+    try { rec = await d.reviewRecord({ runId: expected.runId }); }
     catch (e) { return await reviewRefused(`${NOT_BOUND} — the records branch could not be read: ${e?.message || e}`); }
     if (!rec?.ok) return await reviewRefused(`${NOT_BOUND} — ${rec?.reason || "the review run record is unavailable"}`);
-    const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live });
+    const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
     if (!prov.ok) return await reviewRefused(prov.reason);
-    record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runnerId || "unknown"} on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
+    record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
 
     // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
     // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.

@@ -575,3 +575,15 @@ test("H5: L1도 이슈 본문의 허용 표식을 읽는다 — 허용된 파일
   expect(r.violations).toEqual([]);
   expect(r.tests_allowed).toEqual([{ file: "test/a.test.js", rule: "tests-modified (allowed by issue)" }]);
 });
+
+// ── 리뷰 batch-2 MF-3 — L1의 보호 경계도 깊이를 가리지 않는다 ────────────────────────────────────
+// 재리뷰가 확인한 것: `[protected].factory`의 `"CLAUDE.md"`는 루트만 맞는다(글롭이 `^…$`로 앵커된다).
+// 그래서 `docs/CLAUDE.md`를 새로 들여오는 PR은 L1이 **자동 머지**했다 — 다음 세션의 지시문을 담은
+// 파일인데도. 이제 harness가 `**/CLAUDE*.md`를 적고, 같은 diff가 사람 머지로 간다.
+test("review batch-2 MF-3: nested session config is protected for L1 (docs/CLAUDE.md, src/AGENTS.md, CLAUDE.local.md)", async () => {
+  const h = { protected: { factory: ["**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json"], except: [], additive_only: {} } };
+  const ns = "A\tdocs/CLAUDE.md\nM\tsrc/AGENTS.md\nA\tCLAUDE.local.md\nM\tpkg/.mcp.local.json\nM\tsrc/app.js\nM\tdocs/features/012.md\n";
+  const r = await protectedPaths({ run: makeFakeRun([names(ns)]), cwd: "/repo", base: "b", head: "h", harness: h });
+  expect(r.ok).toBe(true);
+  expect(r.files).toEqual(["docs/CLAUDE.md", "src/AGENTS.md", "CLAUDE.local.md", "pkg/.mcp.local.json"]);
+});

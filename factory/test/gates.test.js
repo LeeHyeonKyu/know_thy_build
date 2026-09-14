@@ -674,3 +674,15 @@ test("M12: `[protected]`에 걸리는 문서(CHARTER)도 docs가 아니다 — �
 test("M12: load_bearing 경로는 여전히 가장 센 바닥이다", () => {
   expect(tierFloor({ changed: { all: ["factory/lib/integrity.js"] }, harness: { ...floorHarness, load_bearing: { paths: ["factory/lib/integrity.js"] } } })).toBe("load-bearing");
 });
+
+// ── 리뷰 batch-2 MF-3 — 세션 설정 파일은 **깊이를 가리지 않고** docs가 아니다 ────────────────────
+// 재리뷰가 확인한 것: `tierFloor`가 보는 글롭이 전부 루트 앵커라 `docs/CLAUDE.md`를 건드린 PR이
+// tier `docs`로 떨어졌다 — 가장 작은 로스터, 가장 작은 정족수. 그 파일이 하는 일은 그 로스터에게
+// 무엇을 승인하라고 적어 두는 것이다.
+test("review batch-2 MF-3: CLAUDE.md/AGENTS.md/.mcp.json at ANY depth floor at standard", () => {
+  for (const f of ["CLAUDE.md", "CLAUDE.local.md", "docs/CLAUDE.md", "src/AGENTS.md", "packages/x/.mcp.json", "a/b/c/AGENTS.local.md"]) {
+    expect(floorOf(f), f).toBe("standard");
+  }
+  // 그 옆의 평범한 문서는 그대로 docs다 — 바닥을 올리는 규칙이 문서 tier 자체를 없애지는 않는다.
+  expect(floorOf("docs/features/012-export.md")).toBe("docs");
+});

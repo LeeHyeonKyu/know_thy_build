@@ -51,12 +51,12 @@
       "Write(.github/**)",
       "Edit(docs/factory/CHARTER.md)",
       "Write(docs/factory/CHARTER.md)",
-      "Edit(CLAUDE.md)",
-      "Write(CLAUDE.md)",
-      "Edit(AGENTS*.md)",
-      "Write(AGENTS*.md)",
-      "Edit(.mcp*.json)",
-      "Write(.mcp*.json)",
+      "Edit(**/CLAUDE*.md)",
+      "Write(**/CLAUDE*.md)",
+      "Edit(**/AGENTS*.md)",
+      "Write(**/AGENTS*.md)",
+      "Edit(**/.mcp*.json)",
+      "Write(**/.mcp*.json)",
       "Edit(package.json)",
       "Write(package.json)",
       "Edit(package-lock.json)",
@@ -70,7 +70,9 @@
       "Edit(.eslintrc*)",
       "Write(.eslintrc*)",
       "Edit(eslint.config.*)",
-      "Write(eslint.config.*)"
+      "Write(eslint.config.*)",
+      "Edit(docs/factory/runs/**)",
+      "Write(docs/factory/runs/**)"
     ]
   }
 }

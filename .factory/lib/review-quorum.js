@@ -26,13 +26,34 @@ const short = (s) => (typeof s === "string" && s.length >= 7 ? s.slice(0, 7) : S
  * 무너진다. 진짜 분리는 리뷰 증거를 다른 배우/Actions 실행 증명에 묶는 것이고, 그것은 이 주기 밖이다
  * (ADR-023 잔여 위험 #1).
  *
- * @param handoff    review.v1 handoff 본문(에이전트가 쓴 쪽)
- * @param record     `parseReviewEvidence()`가 records 브랜치 기록에서 읽은 줄(러너가 쓴 쪽) | null
- * @param prHeadSha  지금 이 순간의 PR head. 있으면 기록이 **그 커밋**의 것인지까지 묶는다.
+ * ── 리뷰 batch-2 MF-2 — **"러너가 쓴 쪽"이라는 말이 참이 되게 한다.** ────────────────────────────
+ * batch-1의 이 함수는 기록의 *내용*만 봤고, 그 기록을 고르는 일은 `parseReviewEvidence`가 "파일의
+ * 마지막 줄"로 했다. 그런데 `docs/factory/runs/**`는 에이전트 세션이 쓸 수 있는 스크래치 경로였고
+ * (재리뷰가 rc=0으로 확인했다) `syncRecords`는 그 파일을 그대로 민다 — 곧 implement 에이전트가 가짜
+ * `## review · …` 섹션을 마지막에 적어 두면 이 함수는 `{ok:true}`를 돌려줬다(재리뷰가 재현했다).
+ * 그래서 이제 **런 id로 묶는다**: 줄이 `run_id=<GITHUB_RUN_ID>`를 싣고, 머지 스테이지는 그 기대값을
+ * 이슈의 review 하트비트(워크플로가 `FACTORY_RUNNER_ID: gha-${{ github.run_id }}`로 심는 값)에서
+ * **독립적으로** 읽어 넘긴다. 위조하려면 아직 일어나지 않은 런의 id를 맞혀야 한다.
+ * (쓰기 경계도 함께 닫혔다: `[protected].runner_only`가 그 디렉터리를 훅/L2 deny에 넣는다.)
+ *
+ * @param handoff       review.v1 handoff 본문(에이전트가 쓴 쪽)
+ * @param record        `parseReviewEvidence()`가 records 브랜치 기록에서 읽은 줄(러너가 쓴 쪽) | null
+ * @param prHeadSha     지금 이 순간의 PR head. 있으면 기록이 **그 커밋**의 것인지까지 묶는다.
+ * @param expectedRunId 이슈의 review 하트비트가 지목하는 런 id. **필수다** — 없으면 판정 불능이다.
  */
-export function verifyReviewProvenance({ handoff, record, prHeadSha = null }) {
+export function verifyReviewProvenance({ handoff, record, prHeadSha = null, expectedRunId = null }) {
+  const want = expectedRunId === null || expectedRunId === undefined ? "" : String(expectedRunId).trim();
+  if (!want || want === "none") {
+    return { ok: false, reason: `${NOT_BOUND} — the review run that produced this handoff could not be named (no factory run id on the issue's review heartbeat), so there is nothing to bind the run record to` };
+  }
   if (!record) {
-    return { ok: false, reason: `${NOT_BOUND} — there is no review-evidence line in this issue's run record on factory/records. The review stage writes it after \`claude -p\` exits, so a handoff without one was not produced by a factory review run` };
+    return { ok: false, reason: `${NOT_BOUND} — this issue's run record on factory/records carries no review-evidence line for run ${want}. The review stage writes it after \`claude -p\` exits, so a handoff without one was not produced by that review run` };
+  }
+  if (!record.runId || record.runId === "none") {
+    return { ok: false, reason: `${NOT_BOUND} — the review-evidence line names no factory run` };
+  }
+  if (String(record.runId) !== want) {
+    return { ok: false, reason: `${NOT_BOUND} — the review-evidence line was written by run ${record.runId}, but the review stage on this issue ran as ${want}` };
   }
   if (record.stage && record.stage !== "review") {
     return { ok: false, reason: `${NOT_BOUND} — the newest review-evidence line was written by the "${record.stage}" stage, not by review` };

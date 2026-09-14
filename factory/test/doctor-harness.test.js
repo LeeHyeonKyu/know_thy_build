@@ -224,3 +224,33 @@ test("KTB의 harness.toml [load_bearing].paths는 소스와 설치본을 모두 
   expect(paths.some((p) => p.startsWith(".factory/"))).toBe(true);
   for (const p of paths) expect(existsSync(new URL(`../../${p}`, import.meta.url).pathname), `${p} does not exist`).toBe(true);
 });
+
+// ── 리뷰 batch-2 MF-2 — run 기록 디렉터리는 러너의 것이어야 한다 ────────────────────────────────
+// 머지 스테이지는 review handoff를 `docs/factory/runs/<n>.md`의 `review-evidence:` 줄과 대조한다.
+// 그 디렉터리가 에이전트에게 열려 있으면 대조가 아무것도 증명하지 못한다(재리뷰가 rc=0으로 확인).
+// 그런데 `[protected].factory`에 넣을 수는 없다 — 러너가 매 스테이지 쓰고 사람 없이 머지돼야 한다.
+// 그 반쪽(쓰기 경계)이 `[protected].runner_only`이고, 이 검사가 그 둘이 갈라지지 않았는지 본다.
+test("protected.runner-only: the template seals the runs dir for agents but not for L1 (review batch-2 MF-2)", () => {
+  const c = by(checkHarness({ harness: tmpl(), files }));
+  expect(c["protected.runner-only"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("docs/factory/runs/**") });
+  // 머지 경계에는 들어가지 않는다 — 들어가면 run 기록 PR마다 사람이 머지해야 한다.
+  expect(tmpl().protected.factory).not.toContain("docs/factory/runs/**");
+  expect(tmpl().protected.except).toContain("docs/factory/runs/**");
+});
+
+test("protected.runner-only: an empty or non-covering list is a FAIL, and so is overlap with [protected].factory", () => {
+  const h = tmpl(); h.protected.runner_only = [];
+  expect(by(checkHarness({ harness: h, files }))["protected.runner-only"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("docs/factory/runs/**") });
+
+  const h2 = tmpl(); h2.protected.runner_only = [".factory/out/qa/**"];   // 다른 경로를 적어도 runs_dir가 열려 있으면 FAIL
+  expect(by(checkHarness({ harness: h2, files }))["protected.runner-only"].level).toBe("FAIL");
+
+  const h3 = tmpl(); h3.protected.factory = [...h3.protected.factory, "docs/factory/runs/**"];
+  expect(by(checkHarness({ harness: h3, files }))["protected.runner-only"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("WRITE boundary") });
+
+  // `[project].runs_dir`를 옮긴 저장소는 그 경로가 덮여야 한다(글롭이 따라오지 않으면 FAIL).
+  const h4 = tmpl(); h4.project.runs_dir = "docs/runs";
+  expect(by(checkHarness({ harness: h4, files }))["protected.runner-only"].level).toBe("FAIL");
+  h4.protected.runner_only = ["docs/runs/**"];
+  expect(by(checkHarness({ harness: h4, files }))["protected.runner-only"].level).toBe("PASS");
+});

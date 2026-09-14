@@ -1,18 +1,20 @@
 import { test, expect, vi } from "vitest";
-import { runStage, makeFactoryOverlay, resolveStageSha, overlayDrift, assertNoWriteStageClean, OVERLAY_PATHSPECS, OVERLAY_ROOTS, OVERLAY_LABEL } from "../bin/run-stage.js";
+import { runStage, makeFactoryOverlay, resolveStageSha, overlayDrift, assertNoWriteStageClean, OVERLAY_PATHSPECS, OVERLAY_ROOTS, OVERLAY_LABEL, SESSION_CONFIG_GLOBS, SESSION_CONFIG_PATHSPECS, SESSION_CONFIG_RE } from "../bin/run-stage.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 /**
  * KTB-37 — 스테이지는 PR의 **코드**를 돌지만 팩토리 자신의 **설정**은 base(스테이지 자신의 커밋)의 것이어야 한다.
  * 아래 스텁은 `git` 호출만 흉내낸다: cat-file(존재 확인) → checkout(덮어쓰기) → status(무엇이 덮였나).
  */
-const gitStub = ({ sha = "b".repeat(40), present = OVERLAY_ROOTS, checkoutCode = 0, statusOut = "", revParse = null, calls = [] } = {}) =>
+const gitStub = ({ sha = "b".repeat(40), present = OVERLAY_ROOTS, checkoutCode = 0, statusOut = "", revParse = null, calls = [], tree = [], lsTreeCode = 0 } = {}) =>
   makeFakeRun([
     { match: (c, a) => c === "git" && a[0] === "rev-parse", result: () => (revParse === null ? { code: 128, stdout: "", stderr: "unknown revision" } : { code: 0, stdout: `${revParse}\n`, stderr: "" }) },
     { match: (c, a) => c === "git" && a[0] === "cat-file", result: (c, a) => { calls.push(a.join(" ")); return present.some((p) => a[2] === `${sha}:${p}`) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "not found" }; } },
     { match: (c, a) => c === "git" && a[0] === "checkout", result: (c, a) => { calls.push(a.join(" ")); return checkoutCode === 0 ? { code: 0, stdout: "", stderr: "" } : { code: checkoutCode, stdout: "", stderr: "error: pathspec did not match" }; } },
     { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: statusOut, stderr: "" } },
     { match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "", stderr: "" } },
+    // 리뷰 batch-2 MF-3 — 스테이지 커밋의 트리 스캔(세션 설정 파일을 깊이 무관하게 찾는다).
+    { match: (c, a) => c === "git" && a[0] === "ls-tree", result: () => (lsTreeCode === 0 ? { code: 0, stdout: `${tree.join("\n")}\n`, stderr: "" } : { code: lsTreeCode, stdout: "", stderr: "fatal: bad object" }) },
   ]);
 
 test("overlay: restores the factory-owned paths from the stage's own sha, and excludes .factory/out/**", async () => {
@@ -221,9 +223,10 @@ test("OVERLAY_LABEL names exactly the factory-owned surface — one line a human
 // 세션으로 가는 곧은 지시문 주입 경로였다), ② PR이 **추가한** 파일은 `git checkout <sha> -- …`가
 // 지우지 않아 세션이 이미 그 파일과 함께 돈 뒤에야 drift로 잡혔다.
 
-const overlayStub = ({ sha, present, added = [], drift = [], calls = [], rmCode = 0 }) => {
+const overlayStub = ({ sha, present, added = [], drift = [], calls = [], rmCode = 0, tree = [], lsTreeCode = 0 }) => {
   let diffCall = 0;
   return makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "ls-tree", result: (c, a) => { calls.push(a.join(" ")); return lsTreeCode === 0 ? { code: 0, stdout: `${tree.join("\n")}\n`, stderr: "" } : { code: lsTreeCode, stdout: "", stderr: "fatal: bad object" }; } },
     { match: (c, a) => c === "git" && a[0] === "cat-file", result: (c, a) => (present.some((p) => a[2] === `${sha}:${p}`) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "not found" }) },
     { match: (c, a) => c === "git" && a[0] === "checkout", result: (c, a) => { calls.push(a.join(" ")); return { code: 0, stdout: "", stderr: "" }; } },
     { match: (c, a) => c === "git" && a[0] === "rm", result: (c, a) => { calls.push(a.join(" ")); return rmCode === 0 ? { code: 0, stdout: "", stderr: "" } : { code: rmCode, stdout: "", stderr: "fatal: pathspec did not match" }; } },
@@ -234,20 +237,70 @@ const overlayStub = ({ sha, present, added = [], drift = [], calls = [], rmCode 
 };
 
 test("overlay: CLAUDE.md / .mcp.json / AGENTS.md are factory-owned session config and are overlaid (review batch-1 MF-3)", async () => {
-  for (const p of ["CLAUDE.md", ".mcp.json", "AGENTS.md"]) {
-    expect(OVERLAY_ROOTS, p).toContain(p);
-    expect(OVERLAY_PATHSPECS, p).toContain(p);
-    expect(OVERLAY_LABEL, p).toContain(p);
+  for (const g of ["**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json"]) {
+    expect(SESSION_CONFIG_GLOBS, g).toContain(g);
+    expect(OVERLAY_PATHSPECS, g).toContain(`:(glob)${g}`);
+    expect(OVERLAY_LABEL, g).toContain(g);
   }
   const sha = "c".repeat(40);
   const calls = [];
   // 어댑터 레포의 모양: main에도 CLAUDE.md와 .mcp.json이 있다 — PR이 고친 것을 되돌려야 한다.
-  const run = overlayStub({ sha, present: [".factory", ".claude", "CLAUDE.md", ".mcp.json"], calls });
+  const run = overlayStub({ sha, present: [".factory", ".claude"], tree: ["CLAUDE.md", ".mcp.json", "src/app.js"], calls });
   const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
   expect(r.ok).toBe(true);
   const co = calls.find((c) => c.startsWith("checkout"));
   expect(co).toContain("CLAUDE.md");
   expect(co).toContain(".mcp.json");
+  expect(co).not.toContain("src/app.js");
+});
+
+// ── 리뷰 batch-2 MF-3 — 그 보호는 전부 **루트에 앵커돼** 있었다 ─────────────────────────────────
+// `globToRegex`는 `^…$`로 앵커하므로 `"CLAUDE.md"`는 루트만 맞는다. 그런데 Claude Code는 세션이
+// 건드리는 디렉터리의 `CLAUDE.md`/`AGENTS.md`를 함께 읽는다 — 리뷰 세션은 정의상 소스 디렉터리를
+// 건드린다. 곧 `docs/CLAUDE.md` 한 장이 overlay·drift·[protected]·Write deny를 전부 비켜 갔다.
+
+test("overlay: nested session config (docs/CLAUDE.md, src/AGENTS.md, CLAUDE.local.md) is overlaid too (review batch-2 MF-3)", async () => {
+  const sha = "c".repeat(40);
+  const calls = [];
+  const nested = ["CLAUDE.md", "CLAUDE.local.md", "docs/CLAUDE.md", "src/AGENTS.md", "packages/x/.mcp.local.json"];
+  const run = overlayStub({ sha, present: [".factory"], tree: [...nested, "src/app.js", "docs/README.md"], calls });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(true);
+  const co = calls.find((c) => c.startsWith("checkout"));
+  for (const p of nested) expect(co, p).toContain(p);
+  // 세션 설정이 아닌 파일은 overlay의 대상이 아니다(그건 PR의 코드다).
+  expect(co).not.toContain("src/app.js");
+  expect(co).not.toContain("docs/README.md");
+  // 추가 파일 스캔과 drift 검사는 깊이 무관 pathspec으로 돈다 — 스테이지 커밋에 **없는** 경로가
+  // 바로 PR이 새로 들여온 경로이므로, 그쪽은 목록이 아니라 글롭이어야 한다.
+  const scan = calls.find((c) => c.includes("--diff-filter=A"));
+  for (const g of SESSION_CONFIG_PATHSPECS) expect(scan, g).toContain(g);
+});
+
+test("SESSION_CONFIG_RE matches the three names at any depth, and nothing else (review batch-2 MF-3)", () => {
+  for (const p of ["CLAUDE.md", "CLAUDE.local.md", "docs/CLAUDE.md", "a/b/c/CLAUDE.md", "AGENTS.md", "src/AGENTS.override.md", ".mcp.json", "pkg/.mcp.local.json"]) {
+    expect(SESSION_CONFIG_RE.test(p), p).toBe(true);
+  }
+  for (const p of ["src/app.js", "docs/README.md", "docs/CLAUDE.md.bak", "claude.md.txt", "mcp.json", "docs/AGENTS.txt"]) {
+    expect(SESSION_CONFIG_RE.test(p), p).toBe(false);
+  }
+});
+
+test("overlay: fail-closed — the session-config scan failing stops the stage (review batch-2 MF-3)", async () => {
+  const sha = "c".repeat(40);
+  const run = overlayStub({ sha, present: [".factory", ".claude"], lsTreeCode: 128 });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/session-config scan failed/);
+});
+
+test("overlay: a repo with only nested session config and no .factory/.claude still overlays it (review batch-2 MF-3)", async () => {
+  const sha = "c".repeat(40);
+  const calls = [];
+  const run = overlayStub({ sha, present: [], tree: ["docs/CLAUDE.md"], calls });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(true);
+  expect(calls.find((c) => c.startsWith("checkout"))).toContain("docs/CLAUDE.md");
 });
 
 test("overlay: files the PR ADDED under the overlay roots are removed, not left for the post-session drift check (review batch-1 MF-3)", async () => {
@@ -265,8 +318,7 @@ test("overlay: files the PR ADDED under the overlay roots are removed, not left 
   // 추가된 파일 스캔은 `present`가 아니라 **전체 pathspec**을 본다 — 스테이지 커밋에 없는 경로야말로
   // PR이 새로 들여온 경로이기 때문이다.
   const scan = calls.find((c) => c.includes("--diff-filter=A"));
-  expect(scan).toContain("CLAUDE.md");
-  expect(scan).toContain(".mcp.json");
+  for (const g of SESSION_CONFIG_PATHSPECS) expect(scan, g).toContain(g);
 });
 
 test("overlay: fail-closed — extras that cannot be removed stop the stage (review batch-1 MF-3)", async () => {

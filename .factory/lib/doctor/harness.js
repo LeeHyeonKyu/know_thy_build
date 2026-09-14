@@ -152,6 +152,28 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
         : c("protected.globs-match", "PASS", wildcard.length ? `(optional, no match): ${wildcard.join(", ")}` : "")
   );
   /**
+   * ── 리뷰 batch-2 MF-2 — **run 기록 디렉터리는 러너의 것인가.** ───────────────────────────────
+   * 머지 스테이지는 review handoff를 `docs/factory/runs/<n>.md`의 `review-evidence:` 줄과 대조한다.
+   * 그 대조가 의미를 가지려면 그 파일이 **에이전트가 쓸 수 없는 것**이어야 하는데, 그 경로는
+   * `[protected].factory`에 넣을 수 없다 — 러너가 매 스테이지 덧붙이고 사람 없이 머지돼야 한다.
+   * 그 반쪽(쓰기 경계만)이 `[protected].runner_only`이고, 이 검사가 두 가지를 묻는다:
+   *   ① `[project].runs_dir`가 실제로 그 목록에 덮이는가(아니면 훅/L2 deny가 그 디렉터리를 비운 채 생성된다),
+   *   ② `runner_only`가 `[protected].factory`와 겹치지 않는가(겹치면 L1이 run 기록 PR을 사람에게 돌린다 —
+   *      머지 경계와 쓰기 경계를 갈라 두려고 만든 키가 도로 붙어 버린다).
+   * 판정은 FAIL이다: 이 목록이 비면 batch-2가 닫은 위조 경로가 그대로 다시 열린다.
+   */
+  const runnerOnly = h.protected?.runner_only || [];
+  const runsDir = (h.project?.runs_dir || "docs/factory/runs").replace(/\/+$/, "");
+  const runsProbe = `${runsDir}/7.md`;
+  const overlap = runnerOnly.filter((g) => (h.protected?.factory || []).includes(g));
+  out.push(
+    !runnerOnly.length || !matchesAny(runnerOnly, runsProbe)
+      ? c("protected.runner-only", "FAIL", `[protected].runner_only does not cover ${runsDir}/** — the run record is the review evidence the merge stage checks against, so an agent session that can write it can write its own verdict (add "${runsDir}/**" and run \`factory init --upgrade\`)`)
+      : overlap.length
+        ? c("protected.runner-only", "FAIL", `${overlap.join(", ")} is in both [protected].factory and [protected].runner_only — runner_only is the WRITE boundary only; listing it under factory makes every run-record PR a human merge`)
+        : c("protected.runner-only", "PASS", runnerOnly.join(", "))
+  );
+  /**
    * 감사 H3의 나머지 절반 — **`[load_bearing].paths`가 아무 파일도 가리키지 않는 드리프트.**
    * 여기는 `[protected]`와 판정이 반대다(그쪽 와일드카드는 "미래의 경로 모양"을 막아 두는 것이라
    * 지금 매치가 없는 것이 정상이다): load-bearing 경로는 **지금 존재하는 코드**를 가리켜야 tier 바닥이

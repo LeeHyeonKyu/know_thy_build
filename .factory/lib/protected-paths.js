@@ -53,8 +53,18 @@ export const HARNESS_OPENS = Object.freeze([
 ]);
 
 /**
- * 쓰기 경계의 글롭 목록. `[protected].factory` − `agent_writable` (− harness 모드에서 `HARNESS_OPENS`),
- * `.factory/**`는 필요할 때 `FACTORY_ENUM`으로 편다.
+ * ── 리뷰 batch-2 MF-2 — `[protected].runner_only`: **러너만 쓰는 경로** ─────────────────────────
+ * `docs/factory/runs/**`는 머지 스테이지가 리뷰 증거로 읽는 run 기록이 사는 곳이다. 그런데 그 디렉터리는
+ * `[protected].factory`에 넣을 수 **없다**: 넣으면 L1이 그 파일을 건드린 PR을 전부 사람 머지로 돌리는데,
+ * 러너 스크립트가 매 스테이지 그 파일에 줄을 덧붙인다(그래서 `[protected].except`에 있다).
+ * 필요한 것은 머지 경계가 아니라 **쓰기 경계**다 — 이 키가 정확히 그 반쪽만 표현한다: 생성되는 훅 `prot`와
+ * ci-settings deny에는 들어가고(에이전트 세션이 못 쓴다), `[protected].factory`에는 들어가지 않는다
+ * (L1은 그대로 자동 머지한다). doctor의 `protected.runner-only`가 그 둘이 갈라지지 않았는지 본다.
+ */
+
+/**
+ * 쓰기 경계의 글롭 목록. `[protected].factory` − `agent_writable` (− harness 모드에서 `HARNESS_OPENS`)
+ * + `[protected].runner_only`, `.factory/**`는 필요할 때 `FACTORY_ENUM`으로 편다.
  * @param {object} prot harness.toml의 `[protected]` 객체
  * @param {{harnessMode?: boolean, enumerateFactory?: boolean}} opts
  */
@@ -66,6 +76,7 @@ export function writeGlobs(prot = {}, { harnessMode = false, enumerateFactory = 
     if (g === ".factory/**" && enumerateFactory) { for (const e of FACTORY_ENUM) if (!drop.has(e)) out.push(e); continue; }
     out.push(g);
   }
+  for (const g of prot.runner_only || []) if (!out.includes(g)) out.push(g);
   return out;
 }
 
@@ -76,10 +87,15 @@ export function writeGlobs(prot = {}, { harnessMode = false, enumerateFactory = 
  *   `tsconfig*.json` → `tsconfig[a-zA-Z0-9._-]*\.json`      `.eslintrc*` → `\.eslintrc`
  * 중간의 `*`는 경로 한 세그먼트 안의 문자만 받는다(`/`를 넘지 않는다) — 넘으면 `tsconfig*.json`이
  * `tsconfig` 이후 아무 경로나 삼킨다.
+ *
+ * 리뷰 batch-2 MF-3 — 선두의 "모든 디렉터리" 접두(이중 별표 + 슬래시)는 **지운다**. 이 정규식은 애초에
+ * 앵커가 없는 부분 문자열 매칭이라 `CLAUDE[a-zA-Z0-9._-]*\.md` 하나가 `CLAUDE.md`·`docs/CLAUDE.md`·
+ * `CLAUDE.local.md`를 전부 문다. 그대로 두면 `[a-zA-Z0-9._-]*` 뒤에 슬래시가 붙어 **루트의 파일이
+ * 빠져나간다** — 깊이를 넓히려다 루트를 잃는 것이 정확히 이 계열의 고장이다(그 글롭은 0개 디렉터리도 맞는다).
  */
 export function globToEre(glob) {
   if (/'/.test(glob)) throw new Error(`protected glob contains a single quote — it cannot be embedded in the hook: ${glob}`);
-  const body = glob.replace(/\/\*\*(\/\*)?$/, "/");
+  const body = glob.replace(/^\*\*\//, "").replace(/\/\*\*(\/\*)?$/, "/");
   const parts = body.split("*");
   // 끝의 `*`(마지막 조각이 빈 문자열)는 버린다 — 접두 매칭이므로 남길 필요가 없다.
   if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();

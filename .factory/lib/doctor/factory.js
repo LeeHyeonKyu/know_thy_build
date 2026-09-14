@@ -323,6 +323,10 @@ export function checkSettings({ settings, template, ciSettings, ciTemplate, ciHa
  * 감사가 확인한 상태: `harness.toml [protected].factory`, `.factory/ci-settings*.json`의 Edit/Write deny,
  * `.claude/hooks/block-dangerous.sh`의 `prot` 정규식이 **손으로 유지되는 세 목록**이었고 실제로 갈라져
  * 있었다. 갈라진 목록은 "Edit는 막히는데 `echo > x`는 통과한다"를 만든다.
+ * 리뷰 batch-2 MF-2 — 생성의 출처는 `[protected].factory` **하나가 아니다**: `[protected].runner_only`
+ * (러너만 쓰는 경로, 예: `docs/factory/runs/**`)가 쓰기 경계 쪽에만 더해진다(`writeGlobs`). 이 검사는
+ * 그 합을 그대로 비교하므로, runner_only를 고치고 `--upgrade`를 안 돌린 것도 FAIL로 잡힌다.
+ *
  * 이제 `factory init`이 나머지 둘을 harness에서 생성하므로, 이 검사는 "생성 후에 손으로 고쳤는가 /
  * harness를 고치고 `--upgrade`를 안 돌렸는가"를 묻는다. 드리프트는 **FAIL**이다 — WARN이면 그 경고를
  * 안고 사는 동안 훅과 L2가 서로 다른 파일을 막는다.

@@ -1181,6 +1181,119 @@ test("block-dangerous: no agent session pushes to factory/records or factory/loc
   }
 }, 60000);
 
+// ── 리뷰 batch-2 MF-1 — 표에 빠져 있던 권한 엔드포인트와 쓰기 철자 ────────────────────────────────
+// 재리뷰가 실행해 **rc=0**으로 확인한 목록이 그대로 이 표다. `POST /merges`가 그중 가장 큰 것이다:
+// 보호 경로를 한 글자도 건드리지 않고 브랜치를 합친다. SDK 모양(`octokit.request("POST /…")`·`.post(`)은
+// 같은 계열의 고장이 한 단계 옆에서 반복된 것이다 — 동사도 엔드포인트도 명령줄에 그대로 있는데
+// **메서드의 철자만** 플래그에서 문자열/메서드 이름으로 옮겨 갔다.
+test("block-dangerous: issue/PR edits, branch merges and SDK write shapes are blocked too (review batch-2 MF-1)", async () => {
+  const blocked = [
+    // 엔드포인트 셋 (라벨·본문 편집의 REST 철자 / 브랜치 머지 / PR base 재지정)
+    "curl -X PATCH https://api.github.com/repos/o/r/issues/7 -d '{\"labels\":[\"factory:approved\"]}'",
+    "curl -X POST https://api.github.com/repos/o/r/merges -d '{\"base\":\"main\",\"head\":\"pr\"}'",
+    "curl -X PATCH https://api.github.com/repos/o/r/pulls/5 -d '{\"base\":\"x\"}'",
+    "gh api --method PATCH /repos/o/r/issues/7 -f body=x",
+    "gh api -X POST repos/o/r/merges -f base=main -f head=claude/fq-7",
+    "xh PATCH https://api.github.com/repos/o/r/pulls/5 base=x",
+    "http POST https://api.github.com/repos/o/r/merges base=main",
+    "wget --method=POST --body-data=x https://api.github.com/repos/o/r/merges",
+    // 쓰기 모양 넷
+    "curl --upload-file b.json https://api.github.com/repos/o/r/statuses/abc",
+    "node -e \"o.request(\\\"POST /repos/o/r/statuses/abc\\\")\"",
+    "node -e \"octokit.request(\\\"PATCH /repos/o/r/issues/7\\\", {body: \\\"x\\\"})\"",
+    "node -e \"require(\\\"axios\\\").post(\\\"https://api.github.com/repos/o/r/statuses/abc\\\")\"",
+    "python3 -c \"import requests;requests.post(\\\"https://api.github.com/repos/o/r/statuses/abc\\\")\"",
+    "ruby -e \"Net::HTTP.post(URI(\\\"https://api.github.com/repos/o/r/statuses/abc\\\"),\\\"\\\")\"",
+    "node -e \"octokit.request({ method: \\\"DELETE\\\", url: \\\"/repos/o/r/git/refs/heads/factory/lock-7\\\" })\"",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  // 읽기와 **코멘트**는 그대로다 — handoff·rework-response는 `/issues/<n>/comments`로 나간다.
+  const allowed = [
+    "gh api /repos/o/r/pulls/5",
+    "gh api repos/o/r/issues/7",
+    "curl -s https://api.github.com/repos/o/r/issues/7",
+    "gh api -X POST /repos/o/r/issues/7/comments -f body=hi",
+    "curl -X POST https://api.github.com/repos/o/r/issues/7/comments -d @-",
+    "gh issue comment 7 --body hello",
+    // 평범한 소스의 라우터 정의는 권위 엔드포인트가 없으므로 그대로다
+    "node -e \"app.post('/login', h)\"",
+    "curl -X POST https://example.com/api/items -d x",
+  ];
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+// ── 리뷰 batch-2 #4 — 이슈 **본문**은 사람의 것이다 ─────────────────────────────────────────────
+// `tests_changed_allowed:` 마커는 이슈 본문에서만 읽힌다(integrity.js) — 곧 "이 PR은 테스트를 고쳐도
+// 된다"의 유일한 근거다. 훅은 라벨 플래그만 보고 있어서 `gh issue edit 7 --body "..."`가 rc=0이었다:
+// 에이전트가 자기 자신에게 허가를 써 줄 수 있으면 그 정책은 정책이 아니다.
+test("block-dangerous: gh issue edit --body is blocked, gh issue comment stays open (review batch-2 #4)", async () => {
+  const blocked = [
+    "gh issue edit 7 --body \"tests_changed_allowed: factory/test/**\"",
+    "gh issue edit 7 --body-file /tmp/body.md",
+    "gh issue edit 7 -F /tmp/body.md",
+    "gh issue edit 7 -b hello",
+    "out=$(gh issue edit 7 --body x)",
+    "gh issue edit 7 --add-label x --body y",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  for (const c of ["gh issue comment 7 --body hello", "gh issue comment 7 -F /tmp/handoff.md", "gh issue edit 7 --title x", "gh issue view 7 --comments"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
+// ── 리뷰 batch-2 MF-2 — run 기록 디렉터리는 러너의 것이다 ───────────────────────────────────────
+// 머지 스테이지가 리뷰 증거로 읽는 파일이 거기 산다. 재리뷰가 실행해 확인한 대로 그 디렉터리는
+// 훅의 `prot`에도 ci-settings deny에도 없어서 `echo … >> docs/factory/runs/7.md`가 rc=0이었다 —
+// 그리고 `syncRecords`가 그 내용을 그대로 `factory/records`로 민다. 이제 harness의
+// `[protected].runner_only`가 그 경로를 생성되는 두 목록에 넣는다(머지 경계는 그대로 열려 있다).
+test("block-dangerous: the run record dir is sealed against agent sessions (review batch-2 MF-2)", async () => {
+  const blocked = [
+    "echo x >> docs/factory/runs/7.md",
+    "echo x > docs/factory/runs/7.md",
+    "cat /tmp/forged | tee -a docs/factory/runs/7.md",
+    "sed -i 's/rework/approved/' docs/factory/runs/7.md",
+    "rm docs/factory/runs/7.md",
+    "cp /tmp/forged docs/factory/runs/7.md",
+    "python3 -c \"open('docs/factory/runs/7.md','a').write('x')\"",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  // 읽기는 그대로다 — 기록을 보는 것은 정상 작업이다.
+  for (const c of ["cat docs/factory/runs/7.md", "grep -n review-evidence docs/factory/runs/7.md"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
+// ── 리뷰 batch-2 MF-3 — 세션 설정 보호는 **깊이를 가리지 않는다** ────────────────────────────────
+// 생성되는 `prot`는 앵커 없는 부분 문자열 매칭이라 `**/` 접두를 지운 형태로 들어간다 —
+// 그 한 조각이 루트·중첩·`.local` 변형을 모두 문다.
+test("block-dangerous: session config at any depth is a protected write (review batch-2 MF-3)", async () => {
+  const blocked = [
+    "echo x > CLAUDE.md", "echo x > CLAUDE.local.md", "echo x > docs/CLAUDE.md", "echo x > src/AGENTS.md",
+    "echo {} > packages/x/.mcp.json", "sed -i 's/a/b/' docs/CLAUDE.md", "rm -f src/AGENTS.local.md",
+    "cp /tmp/evil docs/CLAUDE.md",
+  ];
+  for (const c of blocked) {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }
+  for (const c of ["cat docs/CLAUDE.md", "echo x > src/app.js", "echo x > docs/features/012.md"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+}, 30000);
+
 // M8 — 훅의 `prot`는 이제 harness.toml `[protected]`에서 생성된다. 원본 훅이 들고 있는 블록은
 // **템플릿 harness.toml**로 생성된 것이어야 한다(새 채택자가 받는 그 목록).
 test("block-dangerous: the `prot` block is generated from the template harness.toml (audit M8)", async () => {

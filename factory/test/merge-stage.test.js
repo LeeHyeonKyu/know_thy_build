@@ -33,10 +33,15 @@ const REVIEW_OK = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: HEAD
 /**
  * 리뷰 batch-1 MF-2 — handoff의 **출처**. 러너가 `factory/records`의 run 기록에 쓴 `review-evidence:`
  * 줄을 파싱한 모양 그대로다(run-record.js `parseReviewEvidence`). 기본값은 handoff와 일치한다.
+ *
+ * 리뷰 batch-2 MF-2 — 그 줄은 **어느 런의 것인지** 말하고(`runId`), 머지 스테이지는 그 기대값을
+ * `reviewRunId`(이슈의 review 하트비트)에서 따로 읽는다. 기본값은 둘이 같은 런을 말한다.
  */
-const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runnerId: "gha/1234", headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve" };
+const RUN = "34809992796";
+const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runId: RUN, runnerId: `gha-${RUN}`, headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve" };
 const reviewDeps = (over = {}) => ({
   reviewEvidence: vi.fn(async () => ({ ok: true, data: REVIEW_OK })),
+  reviewRunId: vi.fn(async () => ({ ok: true, runId: RUN, runnerId: `gha-${RUN}` })),
   reviewRecord: vi.fn(async () => ({ ok: true, record: RECORD_OK })),
   reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"] })),
   maxRounds: 3,
@@ -1233,6 +1238,50 @@ test("MF-2: the reviewRecord dep is required — a merge stage that cannot read 
   refusedReview(d);
   expect(lastReason(d)).toMatch(/review-evidence deps not wired/);
   expect(lastReason(d)).toMatch(/reviewRecord/);
+});
+
+// ── 리뷰 batch-2 MF-2 — 증거는 **이 이슈의 review 런**에 묶인다(파일의 마지막 줄이 아니라) ────────
+// 재리뷰가 재현한 것: `docs/factory/runs/**`는 에이전트가 쓸 수 있었고 파서는 마지막 줄을 골랐다 —
+// 곧 implement 에이전트가 가짜 `## review` 섹션을 심으면 그것이 권위 있는 증거가 됐다.
+
+test("MF-2b: the expected run id comes from the issue's review heartbeat and is handed to the record lookup", async () => {
+  const d = baseD();
+  expect(await run(d)).toBe(0);
+  expect(d.reviewRunId).toHaveBeenCalled();
+  expect(d.reviewRecord).toHaveBeenCalledWith({ runId: RUN });
+});
+
+test("MF-2b: a record line written by a different run does not merge (the forged section)", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, runId: "999", runnerId: "gha-999" } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/written by run 999, but the review stage on this issue ran as 34809992796/);
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("MF-2b: no review heartbeat on the issue is undecidable, not a pass", async () => {
+  const d = baseD({ reviewRunId: vi.fn(async () => ({ ok: false, reason: "no review-stage heartbeat on issue #7" })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review evidence not bound to a factory run/);
+  expect(lastReason(d)).toMatch(/no review-stage heartbeat/);
+  expect(d.reviewRecord).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("MF-2b: the reviewRunId dep is required — without it the merge stage cannot name the review run", async () => {
+  const d = baseD({ reviewRunId: undefined });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/review-evidence deps not wired/);
+  expect(lastReason(d)).toMatch(/reviewRunId/);
+});
+
+test("MF-2b: the record line naming no run at all does not merge", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, runId: "none" } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/names no factory run/);
 });
 
 test("MF-2: provenance is checked BEFORE the two-actor approval", async () => {

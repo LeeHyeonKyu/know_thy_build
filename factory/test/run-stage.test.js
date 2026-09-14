@@ -1461,7 +1461,9 @@ const mergeReviewDepsFor = (sha) => ({
   reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
   reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
   // 리뷰 batch-1 MF-2 — handoff의 출처: 러너가 factory/records의 run 기록에 쓴 review-evidence 줄.
-  reviewRecord: async () => ({ ok: true, record: { stage: "review", runnerId: "gha/1", headSha: sha, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
+  // 리뷰 batch-2 MF-2 — 그 줄은 런을 지목하고(`runId`), 기대값은 이슈의 review 하트비트에서 따로 온다.
+  reviewRunId: async () => ({ ok: true, runId: "4242", runnerId: "gha-4242" }),
+  reviewRecord: async () => ({ ok: true, record: { stage: "review", runId: "4242", runnerId: "gha-4242", headSha: sha, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
   maxRounds: 3,
   prHeadShaLive: async () => sha,
   factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
@@ -1489,7 +1491,8 @@ const mergeHappyDeps = (over = {}) => {
     mergePr: async () => {}, closeIssue: async () => {},
     reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: live, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
     reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
-    reviewRecord: async () => ({ ok: true, record: { stage: "review", runnerId: "gha/1", headSha: live, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
+    reviewRunId: async () => ({ ok: true, runId: "4242", runnerId: "gha-4242" }),
+    reviewRecord: async () => ({ ok: true, record: { stage: "review", runId: "4242", runnerId: "gha-4242", headSha: live, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
     maxRounds: 3,
     prHeadShaLive: async () => live,
     factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),

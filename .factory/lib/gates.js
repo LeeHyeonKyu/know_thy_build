@@ -200,8 +200,15 @@ const DOC_GLOBS = ["docs/**", "*.md"];
  * 이 목록은 **경로의 모양**으로 그것을 막는다(설정·프롬프트·워크플로·템플릿·팩토리 소스). 여기에
  * `[protected].factory` 글롭이 더해진다 — 저장소마다 다른 "사람이 머지해야 하는 경로"는 정의상
  * docs tier가 아니다(그 diff는 사람이 읽어야 하는 diff다). 둘 다 **바닥을 올리기만** 한다.
+ *
+ * 리뷰 batch-2 MF-3 — 깊이 무관 글롭(CLAUDE*.md·AGENTS*.md·.mcp*.json)이 여기 들어온 이유: 그것들은
+ * "문서처럼 생긴" 정도가 아니라 **다음 세션의 지시문**이다. `docs/CLAUDE.md` 한 장이 tier `docs`로
+ * 떨어지면 가장 작은 로스터가 그 PR을 본다 — 리뷰 세션에게 무엇을 승인하라고 적어 놓은 그 파일을.
+ * `[protected].factory`에도 같은 글롭이 있지만 그쪽은 저장소마다 다르다: 이 목록은 **모든 채택자**에게
+ * 같은 바닥을 준다.
  */
-export const NEVER_DOCS_GLOBS = [".claude/**", "templates/**", ".factory/**", ".github/**", "factory/**"];
+export const NEVER_DOCS_GLOBS = [".claude/**", "templates/**", ".factory/**", ".github/**", "factory/**",
+  "**/CLAUDE*.md", "**/AGENTS*.md", "**/.mcp*.json"];
 
 /**
  * diff가 정하는 tier의 **바닥**. tier는 triage 에이전트의 자기 신고이고, 자기 신고는 게이트 레벨을
