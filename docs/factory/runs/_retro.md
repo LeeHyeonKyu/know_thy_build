@@ -14,16 +14,17 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 1 |
-| review rounds avg | 3 | 3 |
-| needs-human | 6 | 6 |
-| rejects by role | spec-conformance 2 | spec-conformance 2 |
-| reviewer overlap | 0.00 (0/2, runs 3) | 0.00 (0/2, runs 3) |
-| unique findings by role | spec-conformance 2 | spec-conformance 2 |
-| cost (usd) | 96.07 | 96.07 |
-| tokens | input 1732420 / output 175679 | input 1732420 / output 175679 |
-| retro cost (usd) | 0.90 | 0.90 |
-| retro tokens | input 2 / output 2419 | input 2 / output 2419 |
+| merged | 0 | 1 |
+| review rounds avg | 0 | 3 |
+| needs-human | 0 | 6 |
+| rejects by role | 없음 | spec-conformance 2 |
+| reviewer overlap | 없음 | 0.00 (0/2, runs 3) |
+| unique findings by role | 없음 | spec-conformance 2 |
+| qa na ratio | 없음 | 없음 |
+| cost (usd) | 0.00 | 96.07 |
+| tokens | input 0 / output 0 | input 1732420 / output 175679 |
+| retro cost (usd) | 0.00 | 0.90 |
+| retro tokens | input 0 / output 0 | input 2 / output 2419 |
 | full retros | — | 1 |
 
 <!-- factory-retro-state:v1 -->
@@ -117,31 +118,25 @@
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 3,
-    "rejects_by_role": {
-      "spec-conformance": 2
-    },
-    "review_runs": 3,
-    "findings_total": 2,
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "rejects_by_role": {},
+    "review_runs": 0,
+    "findings_total": 0,
     "overlapping_findings": 0,
-    "unique_findings_by_role": {
-      "spec-conformance": 2
-    },
+    "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 6,
+    "needs_human": 0,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 96.068543,
+      "cost_usd": 0,
       "tokens": {
-        "input": 1732420,
-        "output": 175679
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 0.900202,
-      "tokens": {
-        "input": 2,
-        "output": 2419
+        "input": 0,
+        "output": 0
       }
     }
   },
