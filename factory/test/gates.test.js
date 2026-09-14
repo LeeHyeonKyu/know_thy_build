@@ -1,7 +1,7 @@
 import { test, expect, vi } from "vitest";
 import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -415,4 +415,67 @@ test("runStageGates scrubs merge-capable credentials from every child process it
   }
   // 게이트 명령 자체도 그 환경으로 돌았다(git 호출만 스크럽된 것이 아니다)
   expect(run.calls.some((c) => c.cmd === "bash" && c.args[1] === "vitest --json")).toBe(true);
+});
+
+// ── ADR-020 KTB-35 — 명령은 exit≠0인데 리포트의 실패 테스트는 0개 ───────────────────────────────
+//
+// 라이브: KTB #3 implement R2(run 34809992796)에서 `unit` 게이트가 code 1로 RED인데 `unit.json`은
+// 1715/1715 통과였다(그 전 publish CI에서는 vitest가 포크된 워커의 console.error에서 `write EPIPE`로
+// 죽었다). 판정은 그대로 RED다(fail closed — 무엇이 죽었는지 모르는 채 GREEN으로 부르지 않는다).
+// 바뀌는 것은 **사람이 받는 문장**이다: "failing=unit"은 테스트가 깨졌다고 말하지만, 깨진 테스트는
+// 하나도 없었다.
+const REPORT_ALL_PASS = JSON.stringify({ numTotalTests: 1715, numPassedTests: 1715, numFailedTests: 0, testResults: [] });
+
+test("KTB-35: exit≠0 with 0 failing tests stays RED but says why, and carries the stderr tail", async () => {
+  const stderr = "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:161:15)";
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, { code: 1, stdout: "", stderr })]);
+  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? REPORT_ALL_PASS : null) });
+  expect(r.status).toBe("RED");                                  // fail closed — 뒤집지 않는다
+  expect(r.failing).toEqual(["unit"]);
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.gates.unit.reason).toBe("command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)");
+  expect(r.gates.unit.log).toContain("write EPIPE");
+});
+
+test("KTB-35: the captured tail is the last 20 stderr lines, scrubbed of secrets", async () => {
+  const stderr = [...Array(30)].map((_, i) => `line ${i + 1}`).concat([`token ghp_${"a".repeat(30)} leaked`]).join("\n");
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, { code: 1, stdout: "", stderr })]);
+  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? REPORT_ALL_PASS : null) });
+  const log = r.gates.unit.log;
+  expect(log.split("\n")).toHaveLength(20);
+  expect(log).toContain("line 30");
+  expect(log).not.toContain("line 11");
+  expect(log).not.toContain("ghp_");
+  expect(log).toContain("[REDACTED:gh-token]");
+});
+
+test("KTB-35: an ordinary RED (the report names failing tests) carries no unhandled reason", async () => {
+  const report = JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/repo/test/a.test.js", assertionResults: [{ fullName: "broken", status: "failed" }] }] });
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, bad)]);
+  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.gates.unit.reason).toBeUndefined();
+  // 리포트를 아예 못 읽은 RED도 이 경로가 아니다 — 그 RED의 이유는 "모른다"이지 "테스트 밖 오류"가 아니다.
+  const blind = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, bad)]);
+  const rb = await runGates({ run: blind, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(rb.gates.unit.reason).toBeUndefined();
+  // 명령이 exit 0인데 리포트에 실패가 있는 경우(리포터가 삼킴)도 그대로 RED이고, 이 사유는 아니다.
+  const swallowed = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, ok)]);
+  const rs = await runGates({ run: swallowed, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  expect(rs.gates.unit.status).toBe("RED");
+  expect(rs.gates.unit.reason).toBeUndefined();
+});
+
+/**
+ * KTB-35 ①: 워커가 파이프가 끊긴 stdout/stderr에 테스트 콘솔 출력을 쓰다 죽는 것이 원인이었다
+ * (`Error: write EPIPE` from console.error in a forked worker). `silent: true`가 그 쓰기를 막는다 —
+ * 리포터 출력(그리고 JSON 리포터 **파일**)은 그대로다. 이 저장소 자신의 `unit` 게이트가 그 파일을
+ * 읽으므로, 설정과 하네스 명령은 서로를 붙들어야 한다.
+ */
+test("KTB-35: the repo's own vitest config is silent, and the JSON report file is untouched", async () => {
+  const cfg = readFileSync(new URL("../../vitest.config.js", import.meta.url), "utf8");
+  expect(cfg).toMatch(/silent:\s*true/);
+  const toml = readFileSync(new URL("../../.factory/harness.toml", import.meta.url), "utf8");
+  expect(toml).toContain("--reporter=json");
+  expect(toml).toContain("--outputFile=.factory/out/unit.json");
 });

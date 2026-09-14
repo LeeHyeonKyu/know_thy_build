@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
+import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
@@ -2495,4 +2495,40 @@ test("KTB-29: the flips line lands in the run record, and an unreadable lookup n
   });
   expect(await runStage({ stage: "review", issue: 18, deps: d2 })).toBe(0);
   expect(broken.some((l) => /review flips: unreadable — gh down/.test(l))).toBe(true);
+});
+
+/**
+ * ADR-020 KTB-35 — **테스트가 하나도 깨지지 않은 RED는 사람에게 다르게 말해야 한다.**
+ *
+ * 라이브(KTB #3 implement R2, run 34809992796): `unit`이 code 1로 RED인데 `unit.json`은 1715/1715
+ * 통과였다. 그 런이 사람에게 남긴 문장은 `stage artifact missing or invalid: gates RED: failing=unit` —
+ * "테스트가 깨졌다"고 읽히는데 깨진 테스트는 없었다. 등급도 틀렸다: 이것은 설계 오류가 아니라 대개
+ * 일시적 인프라(포크된 워커의 stderr EPIPE)이므로, `needs-human`이 아니라 `blocked`(cause
+ * `gates-unhandled`)으로 세우고 KTB-15b 경로가 같은 스테이지를 **한 번** 다시 돌린다.
+ */
+test("KTB-35: a test gate that exited ≠0 with 0 failing tests → blocked(cause=gates-unhandled), reason names the cause", async () => {
+  const lines = [];
+  const reason = "command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)";
+  const gates = {
+    schema: "factory.gates.v1", level: "full", status: "RED", failing: ["unit"], passed: 3, failed: 1, skipped: [], misconfigured: [],
+    tests: { total: 1715, passed: 1715, failed: 0, failing: [], excluded: [] },
+    gates: { unit: { status: "RED", code: 1, reason, log: "Error: write EPIPE" } },
+  };
+  const d = implDeps({ gates: async () => gates, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "r" })).toBe(2);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", reason, cause: "gates-unhandled" }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lines.some((l) => /gates: RED \(unhandled\)/.test(l))).toBe(true);
+  expect(lines.some((l) => /FACTORY_GATES: .*status=RED/.test(l))).toBe(true);   // 판정 줄은 그대로 남는다
+  // 판정 줄 그대로의 옛 문장은 더 이상 나가지 않는다
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ reason: expect.stringContaining("stage artifact missing or invalid") }));
+});
+
+test("KTB-35: unhandledGateReason picks the first gate carrying the marker, and stays silent otherwise", () => {
+  const reason = "command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)";
+  expect(unhandledGateReason({ status: "RED", gates: { lint: { status: "GREEN" }, unit: { status: "RED", reason } } })).toBe(reason);
+  expect(unhandledGateReason({ status: "RED", gates: { unit: { status: "RED" } } })).toBe(null);
+  expect(unhandledGateReason({ status: "GREEN", gates: { unit: { status: "GREEN", reason } } })).toBe(null);
+  expect(unhandledGateReason(null)).toBe(null);
+  expect(unhandledGateReason({ status: "RED" })).toBe(null);
 });

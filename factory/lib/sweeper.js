@@ -121,6 +121,10 @@ export const BLOCKED_ESCALATION_REASON = {
   timeout: "blocked (job timed out) — needs human",
   cancelled: "blocked (job cancelled) — needs human",
   gates: "blocked (gates undecided) — needs human",
+  // KTB-35: 재시도 한 번으로도 같은 자리에서 죽었다 — 그러면 EPIPE 같은 일시적 인프라가 아니라
+  // 이 저장소의 테스트 명령이 테스트 **밖에서** 죽고 있다는 뜻이다(게이트 로그의 stderr 꼬리가
+  // 그 자리를 가리킨다). 문장이 그렇게 말해야 사람이 제품 코드가 아니라 그곳부터 본다.
+  "gates-unhandled": "blocked (test command exited non-zero with 0 failing tests — unhandled error outside tests, see the gate log) — needs human",
   undecidable: "blocked (undecidable) — needs human",
   other: "blocked (environment/credentials) — needs human",
 };

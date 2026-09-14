@@ -1,7 +1,7 @@
 import { test, expect, vi } from "vitest";
-import { transition } from "../lib/transition.js";
+import { transition, parseTransitionArgs } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
-import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition } from "../lib/retro/issue-comments.js";
+import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, resumePoint } from "../lib/retro/issue-comments.js";
 
 function fakeGh(labels, comments = []) {
   return { issue: vi.fn(async () => ({ number: 7, title: "t", body: "", labels })), comments: vi.fn(async () => comments),
@@ -228,4 +228,149 @@ test("SF-4 round-trip: every transition marker the writer emits is read back by 
   gh5.comment = vi.fn(async (n, body) => { b5.push({ id: b5.length + 1, body, createdAt: "2026-09-11T01:00:00Z" }); return "u#issuecomment-1"; });
   await transition({ gh: gh5, issue: 7, to: "factory:queue", human: true, reason: "unstick" });
   expect(commentsSinceRequeue(b5)).toEqual([]);                 // 재큐 코멘트 자신까지가 경계다
+});
+
+// ── ADR-020 KTB-32 — `needs-human`에서 **중단 지점으로** 되돌아가는 사람 전용 재시도 ────────────
+//
+// 라운드 10의 #2는 implement가 끝나 PR이 온전한 채 review에서 429로 죽었는데, `needs-human`의 유일한
+// 출구가 `queue`라 사람이 할 수 있는 결정은 "plan부터 다시"(≈$40)뿐이었다. 이 엣지는 그 한 칸을
+// 되돌린다 — **사람만**, 그리고 **중단 지점으로만**.
+
+/** 전이 코멘트 하나(파서가 읽는 그 문법 그대로 — writer와의 계약은 위 SF-4 라운드트립이 지킨다). */
+const tcomment = (from, to, { by = "script", at = "2026-09-13T10:00:00Z", reason = "", marker = "" } = {}) => ({
+  id: Math.floor(Math.random() * 1e6),
+  body: `<!-- factory-transition:v1 from=${from} to=${to} by=${by}${marker} -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}`,
+  createdAt: at,
+});
+const implementHandoff = (issue = 7) => renderHandoff({
+  stage: "implement", issue, summary: "done",
+  data: { schema: "factory.implement.v1", issue, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" },
+});
+/** 라운드 10의 #2·KTB #3이 실제로 남긴 모양: review가 죽어 blocked → sweeper가 needs-human으로 올림. */
+const stoppedInReview = (issue = 7) => [
+  { id: 1, body: implementHandoff(issue), createdAt: "2026-09-13T09:00:00Z" },
+  tcomment("factory:in-progress", "factory:awaiting-review", { at: "2026-09-13T09:10:00Z" }),
+  tcomment("factory:awaiting-review", "factory:blocked", { at: "2026-09-13T10:22:00Z", reason: "claude -p api error 429" }),
+  tcomment("factory:blocked", "factory:needs-human", { at: "2026-09-13T10:38:00Z", reason: "blocked (API quota/outage) — needs human" }),
+];
+
+test("KTB-32: a script may not take the retry edge — needs-human → awaiting-review is refused, no label change", async () => {
+  const gh = fakeGh(["factory:needs-human"], stoppedInReview());
+  const r = await transition({ gh, issue: 7, to: "factory:awaiting-review" });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/not allowed/);
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  // 평소의 그래프 거부와 똑같이 보인다 — 사람이 이슈에서 그 시도를 볼 수 있다.
+  expect(gh.comment.mock.calls[0][1]).toMatch(/factory-transition-refused from=factory:needs-human to=factory:awaiting-review/);
+});
+
+test("KTB-32: `--retry` without `--human` is refused (by=script never resumes)", async () => {
+  const gh = fakeGh(["factory:needs-human"], stoppedInReview());
+  const r = await transition({ gh, issue: 7, retry: true });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/human/);
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+});
+
+test("KTB-32: a human retry to a target that is not the resume point is refused (exit 2, no label change)", async () => {
+  const gh = fakeGh(["factory:needs-human"], stoppedInReview());
+  const r = await transition({ gh, issue: 7, to: "factory:planned", human: true, reason: "just re-plan it" });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/factory:planned/);
+  expect(r.reason).toMatch(/factory:awaiting-review/);            // 어디로 가야 하는지 사유가 말한다
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+});
+
+test("KTB-32: a human retry to the resume point moves the label and marks the comment by=human reason=retry", async () => {
+  const comments = [...stoppedInReview(), { id: 9, body: "<!-- human-decision:v1 issue=7 skill=unstick -->\n```yaml\ndecision: retry\n```", createdAt: "2026-09-14T00:00:00Z" }];
+  const gh = fakeGh(["factory:needs-human"], comments);
+  const r = await transition({ gh, issue: 7, to: "factory:awaiting-review", human: true, retry: true, reason: "429 was infrastructural; PR #17 intact" });
+  expect(r).toMatchObject({ ok: true, from: "factory:needs-human", to: "factory:awaiting-review" });
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:awaiting-review");
+  const body = gh.comment.mock.calls[0][1];
+  expect(body).toMatch(/<!-- factory-transition:v1 from=factory:needs-human to=factory:awaiting-review by=human reason=retry -->/);
+  expect(body).toMatch(/429 was infrastructural/);
+  expect(body).toMatch(/human-decision:v1/);                      // 사람의 결정이 근거로 인용된다
+  expect(body).toMatch(/unstick/);
+});
+
+test("KTB-32: `--retry` with no explicit label resolves the resume point from the comments", async () => {
+  const gh = fakeGh(["factory:needs-human"], stoppedInReview());
+  const r = await transition({ gh, issue: 7, human: true, retry: true, reason: "infra" });
+  expect(r).toMatchObject({ ok: true, to: "factory:awaiting-review" });
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:awaiting-review");
+});
+
+test("KTB-32: resumePoint reads past the blocked → needs-human escalation to where the work actually stopped", () => {
+  expect(resumePoint(stoppedInReview())).toMatchObject({ stoppedAt: "factory:awaiting-review", target: "factory:awaiting-review" });
+});
+
+test("KTB-32: resumePoint maps every origin — in-progress splits on whether implement finished", () => {
+  const stop = (from) => [tcomment(from, "factory:blocked", { reason: "job cancelled" })];
+  expect(resumePoint(stop("factory:ready"))).toMatchObject({ target: "factory:ready" });
+  expect(resumePoint(stop("factory:planned"))).toMatchObject({ target: "factory:planned" });
+  expect(resumePoint(stop("factory:rework"))).toMatchObject({ target: "factory:rework" });
+  expect(resumePoint(stop("factory:awaiting-review"))).toMatchObject({ target: "factory:awaiting-review" });
+  // in-progress: implement handoff이 (마지막 재큐 이후에) 있으면 구현은 끝났다 → rework로 이어간다.
+  expect(resumePoint(stop("factory:in-progress"))).toMatchObject({ target: "factory:planned" });
+  expect(resumePoint([{ id: 1, body: implementHandoff(), createdAt: "2026-09-13T09:00:00Z" }, ...stop("factory:in-progress")]))
+    .toMatchObject({ target: "factory:rework" });
+  // 재큐 **이전**의 implement handoff는 다른 주기의 것이다 — 이번 주기는 아직 구현하지 않았다.
+  expect(resumePoint([
+    { id: 1, body: implementHandoff(), createdAt: "2026-09-13T08:00:00Z" },
+    tcomment("factory:needs-human", "factory:queue", { by: "human", at: "2026-09-13T08:30:00Z" }),
+    ...stop("factory:in-progress"),
+  ])).toMatchObject({ target: "factory:planned" });
+  // 이력이 없거나 재개할 수 없는 자리(queue)에서 멈췄으면 목적지가 없다 — 추측하지 않는다.
+  expect(resumePoint([])).toBe(null);
+  expect(resumePoint(stop("factory:queue"))).toMatchObject({ stoppedAt: "factory:queue", target: null });
+});
+
+test("KTB-32: an unresolvable resume point refuses the retry instead of guessing", async () => {
+  const gh = fakeGh(["factory:needs-human"], [tcomment("factory:queue", "factory:needs-human", { reason: "triage artifact invalid" })]);
+  const r = await transition({ gh, issue: 7, human: true, retry: true, reason: "x" });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/resume point/);
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+});
+
+/**
+ * 재시도는 **재큐가 아니다** — 라운드 창(`commentsSinceRequeue`)을 열지 않고, 이미 일어난 재작업
+ * 주기를 다시 세지도 않는다(`reason=retry` 마커는 `countTransitionsTo`에서 빠진다). 그러지 않으면
+ * rework로 되돌아가는 재시도 한 번이 K 예산을 한 칸 태운다.
+ */
+test("KTB-32: a retry neither resets nor burns the review round counter", async () => {
+  const before = [
+    tcomment("factory:needs-human", "factory:queue", { by: "human", at: "2026-09-13T07:00:00Z" }),
+    { id: 2, body: implementHandoff(), createdAt: "2026-09-13T08:00:00Z" },
+    tcomment("factory:awaiting-review", "factory:rework", { at: "2026-09-13T09:00:00Z", reason: "must_fix" }),
+    tcomment("factory:rework", "factory:blocked", { at: "2026-09-13T09:30:00Z", reason: "job cancelled" }),
+    tcomment("factory:blocked", "factory:needs-human", { at: "2026-09-13T09:40:00Z" }),
+  ];
+  expect(countTransitionsTo(commentsSinceRequeue(before), "factory:rework")).toBe(1);
+  const after = [];
+  const gh = fakeGh(["factory:needs-human"], before);
+  gh.comment = vi.fn(async (n, body) => { after.push({ id: 99, body, createdAt: "2026-09-14T00:00:00Z" }); return "u"; });
+  const r = await transition({ gh, issue: 7, human: true, retry: true, reason: "cancel was infrastructural" });
+  expect(r).toMatchObject({ ok: true, to: "factory:rework" });
+  const all = [...before, ...after];
+  expect(commentsSinceRequeue(all)).toHaveLength(before.length - 1 + after.length);   // 창은 그대로(재큐가 아니다)
+  expect(countTransitionsTo(commentsSinceRequeue(all), "factory:rework")).toBe(1);    // 라운드는 그대로
+});
+
+// ── bin/transition.js의 인자 파싱(그 파일은 즉시 실행되므로 파서만 lib에 산다) ────────────────
+test("KTB-32: parseTransitionArgs — label, --human, --reason, and --retry in any order", () => {
+  expect(parseTransitionArgs(["7", "factory:queue", "--human", "--reason", "why"]))
+    .toEqual({ issue: 7, to: "factory:queue", human: true, retry: false, reason: "why" });
+  expect(parseTransitionArgs(["3", "--human", "--retry"]))
+    .toEqual({ issue: 3, to: null, human: true, retry: true, reason: "" });
+  expect(parseTransitionArgs(["3", "--retry", "--human", "--reason", "infra"]))
+    .toEqual({ issue: 3, to: null, human: true, retry: true, reason: "infra" });
+  expect(parseTransitionArgs(["3", "factory:awaiting-review", "--human", "--retry"]))
+    .toEqual({ issue: 3, to: "factory:awaiting-review", human: true, retry: true, reason: "" });
+  // --retry는 사람 전용이다 — 여기서 이미 막는다(lib도 한 번 더 막는다).
+  expect(parseTransitionArgs(["3", "--retry"]).error).toMatch(/--human/);
+  expect(parseTransitionArgs(["3"]).error).toMatch(/usage|label/i);
+  expect(parseTransitionArgs([]).error).toMatch(/usage|issue/i);
+  expect(parseTransitionArgs(["x", "factory:queue"]).error).toMatch(/usage|issue/i);
 });
