@@ -136,6 +136,17 @@ export const STAGE_OF_TARGET = {
  * 목록에 `factory:queue`가 없는 이유: 그것은 사람 전용이 아니라 그래프의 정규 출구다(`:unstick`의
  * 재큐·분할·범위 축소가 계속 쓴다). 목록의 넷은 전부 어느 스테이지의 **정상 진입 라벨**이다 —
  * 되돌아간 자리에서 그 스테이지가 처음부터 정상적으로 이어진다.
+ *
+ * **확장(KTB-36 라운드): `factory:needs-info`도 같은 문을 받는다.** 그 라벨은 두 가지 뜻을 겸하는데
+ * (triage의 "이슈가 모호하다"와 KTB-23의 하네스 대기 주차), 후자는 implement **한가운데서** 선다:
+ * builder가 `harness_needed`를 채우면 L1이 하네스 이슈를 하나 열고 이 이슈를 `in-progress →
+ * needs-info`로 주차한다. 그리고 그 하네스 PR은 구성상 보호 경로를 건드리므로 **사람이** 머지한다.
+ * 사람이 손으로 고치고 돌아왔을 때 §3.2가 준 길은 `→ queue` 하나뿐이라, 플랜이 한 글자도 바뀌지
+ * 않았는데 plan을 처음부터 다시 돌았다 — KTB-32가 `needs-human`에서 고친 것과 **같은** 낭비다.
+ * sweeper의 자동 해제 팔은 그대로 `→ queue`다(스크립트는 이 엣지를 밟을 수 없다): 사람이 플랜을
+ * 건드리지 않았다고 **판단**했을 때만 `--retry`가 중단 지점으로 되돌린다. triage의 needs-info는
+ * `queue`에서 왔으므로 `resumePoint`가 재개할 자리를 찾지 못하고 재시도가 거부된다 — 그 이슈는
+ * 실제로 보강 후 재큐가 맞다.
  */
 export const HUMAN_RETRY_TARGETS = new Set([
   "factory:ready",              // triage까지 끝났다 → plan부터
@@ -143,7 +154,12 @@ export const HUMAN_RETRY_TARGETS = new Set([
   "factory:rework",             // implement까지 끝났고 리뷰 지적이 있었다 → implement(재작업)부터
   "factory:awaiting-review",    // implement가 끝났다 → review만 다시 돈다(#2·KTB #3이 이 자리였다)
 ]);
-export const HUMAN_ONLY_TRANSITIONS = new Map([["factory:needs-human", HUMAN_RETRY_TARGETS]]);
+export const HUMAN_ONLY_TRANSITIONS = new Map([
+  ["factory:needs-human", HUMAN_RETRY_TARGETS],
+  ["factory:needs-info", HUMAN_RETRY_TARGETS],
+]);
+/** 사람의 `--retry`가 열리는 출발 라벨. `transition.js`의 두 번째 자물쇠가 이 집합을 읽는다. */
+export const HUMAN_RETRY_FROM = new Set(HUMAN_ONLY_TRANSITIONS.keys());
 
 /**
  * `opts.human`은 **사람이 직접 실행했다**는 사실(transition.js `--human`)이지 "검사를 건너뛴다"가

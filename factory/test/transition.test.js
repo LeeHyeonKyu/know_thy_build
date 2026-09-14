@@ -373,6 +373,85 @@ test("KTB-32: a retry neither resets nor burns the review round counter", async 
   expect(countTransitionsTo(commentsSinceRequeue(all), "factory:rework")).toBe(1);    // 라운드는 그대로
 });
 
+// ── KTB-32 확장: `factory:needs-info`(하네스 대기 주차)에서도 같은 재시도가 열린다 ──────────────
+//
+// KTB-23의 주차는 implement 한가운데서 일어난다: builder가 `harness_needed`를 채우면 L1이 하네스
+// 이슈를 하나 열고 이 이슈를 `in-progress → needs-info`로 세운다. 그 하네스 이슈를 **사람이** 손으로
+// 고쳐 머지한 뒤 돌아올 자리는 `queue` 하나뿐이었다(§3.2) — 플랜은 한 글자도 바뀌지 않았는데 plan을
+// 처음부터 다시 돈다. 사람이 `--retry`를 고르면 중단 지점(`needs-info`의 `from=`)으로 되돌린다.
+// sweeper의 자동 해제는 그대로 `→ queue`다(스크립트가 이 엣지를 밟을 수 없는 것이 그 이유다).
+
+const planHandoff = (issue = 7) => renderHandoff({
+  stage: "plan", issue, summary: "plan",
+  data: {
+    schema: "factory.plan.v1", issue, tier: "standard", roles: ["product-advocate", "architect"], rounds: 3,
+    done_when: [{ id: "dw1", text: "x", verify: `test_${issue}_x`, level: "unit" }],
+    files_expected: ["src/a.js"], dissent_log: [], non_goals: [], open_risks: [],
+  },
+});
+/** 라이브 모양: plan → implement 중 harness_needed → 주차. 이번 주기에 implement handoff가 없다. */
+const parkedOnHarness = (issue = 7) => [
+  { id: 1, body: planHandoff(issue), createdAt: "2026-09-13T07:50:00Z" },
+  tcomment("factory:ready", "factory:planned", { at: "2026-09-13T08:00:00Z" }),
+  tcomment("factory:planned", "factory:in-progress", { at: "2026-09-13T08:30:00Z" }),
+  tcomment("factory:in-progress", "factory:needs-info", { at: "2026-09-13T09:00:00Z", reason: "waiting for harness issue #12" }),
+];
+
+test("KTB-32: resumePoint treats needs-info as a stop state — a harness park resolves to planned (or rework once implement finished)", () => {
+  expect(resumePoint(parkedOnHarness())).toMatchObject({ stoppedAt: "factory:in-progress", target: "factory:planned" });
+  // 이번 주기에 implement handoff가 이미 있었으면(부분 구현 뒤 주차) 재작업으로 이어간다.
+  expect(resumePoint([
+    tcomment("factory:planned", "factory:in-progress", { at: "2026-09-13T08:30:00Z" }),
+    { id: 2, body: implementHandoff(), createdAt: "2026-09-13T08:45:00Z" },
+    tcomment("factory:in-progress", "factory:needs-info", { at: "2026-09-13T09:00:00Z", reason: "waiting for harness issue #12" }),
+  ])).toMatchObject({ target: "factory:rework" });
+  // triage의 needs-info(`queue`에서 왔다)는 재개할 자리가 아니다 — 사람이 이슈를 보강해 재큐해야 한다.
+  expect(resumePoint([tcomment("factory:queue", "factory:needs-info", { reason: "ambiguous" })]))
+    .toMatchObject({ stoppedAt: "factory:queue", target: null });
+  // `needs-info → queue`(sweeper 해제)는 정지 전이가 아니다 — 그 뒤에도 중단 지점은 그대로 읽힌다.
+  expect(resumePoint([...parkedOnHarness(), tcomment("factory:needs-info", "factory:queue", { at: "2026-09-13T11:00:00Z", reason: "harness issue #12 closed" })]))
+    .toMatchObject({ stoppedAt: "factory:in-progress", target: "factory:planned" });
+});
+
+test("KTB-32: a human retry from needs-info resumes the stop point; a script may not take that edge", async () => {
+  const script = fakeGh(["factory:needs-info"], parkedOnHarness());
+  const s = await transition({ gh: script, issue: 7, to: "factory:planned" });
+  expect(s.ok).toBe(false);
+  expect(s.reason).toMatch(/not allowed/);
+  expect(script.setFactoryLabel).not.toHaveBeenCalled();
+
+  const gh = fakeGh(["factory:needs-info"], [...parkedOnHarness(),
+    { id: 9, body: "<!-- human-decision:v1 issue=7 skill=unstick -->\n```yaml\ndecision: retry\n```", createdAt: "2026-09-14T00:00:00Z" }]);
+  const r = await transition({ gh, issue: 7, human: true, env: {}, retry: true, reason: "harness #12 merged by hand; the plan is unchanged" });
+  expect(r).toMatchObject({ ok: true, from: "factory:needs-info", to: "factory:planned" });
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:planned");
+  const body = gh.comment.mock.calls[0][1];
+  expect(body).toMatch(/<!-- factory-transition:v1 from=factory:needs-info to=factory:planned by=human reason=retry -->/);
+  expect(body).toMatch(/harness #12 merged by hand/);
+  expect(body).toMatch(/human-decision:v1/);
+});
+
+test("KTB-32: from needs-info the wrong target is refused, and a triage needs-info has no resume point at all", async () => {
+  const wrong = fakeGh(["factory:needs-info"], parkedOnHarness());
+  const w = await transition({ gh: wrong, issue: 7, to: "factory:awaiting-review", human: true, env: {}, reason: "skip ahead" });
+  expect(w.ok).toBe(false);
+  expect(w.reason).toMatch(/factory:planned/);
+  expect(wrong.setFactoryLabel).not.toHaveBeenCalled();
+
+  const triage = fakeGh(["factory:needs-info"], [tcomment("factory:queue", "factory:needs-info", { reason: "ambiguous" })]);
+  const t = await transition({ gh: triage, issue: 7, human: true, env: {}, retry: true, reason: "x" });
+  expect(t.ok).toBe(false);
+  expect(t.reason).toMatch(/resume point/);
+  expect(triage.setFactoryLabel).not.toHaveBeenCalled();
+
+  // 세 자물쇠는 그대로다: 에이전트/러너 env는 `needs-info`에서도 거절된다.
+  const agent = fakeGh(["factory:needs-info"], parkedOnHarness());
+  const a = await transition({ gh: agent, issue: 7, human: true, retry: true, env: { GITHUB_ACTIONS: "true" } });
+  expect(a.ok).toBe(false);
+  expect(a.reason).toMatch(/agent\/runner session/);
+  expect(agent.issue).not.toHaveBeenCalled();
+});
+
 // ── bin/transition.js의 인자 파싱(그 파일은 즉시 실행되므로 파서만 lib에 산다) ────────────────
 test("KTB-32: parseTransitionArgs — label, --human, --reason, and --retry in any order", () => {
   expect(parseTransitionArgs(["7", "factory:queue", "--human", "--reason", "why"]))

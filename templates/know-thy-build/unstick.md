@@ -197,8 +197,8 @@ node .factory/bin/transition.js 118 factory:queue --human --reason "<decision>"
 KTB-35), 그리고 라벨 유실. 이때 잃은 것은 코드가 아니라 **라벨 한 칸**이다.
 
 **어디로**: 목적지는 사람이 고르지 않는다 — 이슈에 남은 기록이 정한다. `transition.js`가 마지막
-`→ factory:blocked` / `→ factory:needs-human` 전이의 출발 라벨(= 멈춘 자리)을 읽어 그 자리로만
-되돌린다(`blocked → needs-human`은 sweeper의 에스컬레이션이므로 건너뛰고 그 앞을 본다):
+`→ factory:blocked` / `→ factory:needs-human` / `→ factory:needs-info` 전이의 출발 라벨(= 멈춘 자리)을
+읽어 그 자리로만 되돌린다(`blocked → needs-human`은 sweeper의 에스컬레이션이므로 건너뛰고 그 앞을 본다):
 
 | 멈춘 자리 | 되돌아가는 라벨 | 다시 도는 스테이지 |
 |---|---|---|
@@ -208,6 +208,15 @@ KTB-35), 그리고 라벨 유실. 이때 잃은 것은 코드가 아니라 **라
 | `factory:planned` / `factory:rework` / `factory:ready` | 같은 라벨 | 그 스테이지부터 |
 
 그 외의 자리(예: `factory:queue`)에서 멈췄으면 재시도할 것이 없다 — 3e(재큐)로 간다.
+
+**`factory:needs-info`에서도 같은 재시도가 열린다**(ADR-020 KTB-32 보강). 그 라벨에는 두 종류가 앉는데,
+재시도가 성립하는 것은 **하네스 대기 주차**(마지막 전이 사유가 `waiting for harness issue #<m>`)뿐이다 —
+그 주차는 `in-progress`에서 섰으므로 위 표대로 `rework`(implement handoff 있음) 또는 `planned`로
+되돌아간다. sweeper는 하네스 이슈가 닫히면 **자동으로 `→ queue`**로 푼다(스크립트 경로) — 그쪽이
+기본이고, 하네스 수정이 **플랜을 한 글자도 건드리지 않고** 착지했다고 사람이 판단했을 때만
+`--retry`가 더 싸다(plan 한 판을 아낀다). 플랜이 흔들렸으면(의존성이 설계를 바꿨다, done_when이
+달라진다) 그대로 `queue`로 두고 다시 계획하게 한다. triage가 세운 `needs-info`("이슈가 모호하다")는
+중단 지점이 `queue`라 재시도가 거부된다 — 그것은 `/know-thy-build:clarify`의 일이다.
 
 **먼저 확인한다**(재시도는 "그대로 이어간다"는 주장이므로, 이어갈 것이 실제로 있어야 한다):
 
@@ -236,7 +245,7 @@ actions:
   - transition: { issue: 118, to: awaiting-review, via: "--human --retry" }
 ```
 
-전이 코멘트는 `<!-- factory-transition:v1 from=factory:needs-human to=<X> by=human reason=retry -->`로
+전이 코멘트는 `<!-- factory-transition:v1 from=<factory:needs-human|factory:needs-info> to=<X> by=human reason=retry -->`로
 남고, 그 `reason=retry`가 리뷰 라운드 카운터에서 이 전이를 빼 준다(재시도는 재작업 주기가 아니다 —
 K 예산을 태우지 않는다). 재시도 뒤에는 라벨이 그 자리에 앉아 있을 뿐이므로, 스테이지가 자동으로
 뜨지 않으면 사람이 한 번 민다: `gh workflow run factory-<stage>.yml -f issue=118`.

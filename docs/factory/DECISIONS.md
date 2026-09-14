@@ -1352,6 +1352,28 @@ PreToolUse 경계에서 `transition.js … --human`/`--retry` 셸 호출 자체�
 `CLAUDE_PROJECT_DIR`를 심으므로(자식 프로세스가 그대로 물려받는다) 에이전트 세션과 CI 러너를 신뢰성
 있게 가려낸다. 둘 다 없는 사람의 노트북 셸에서만 통과한다.
 
+**보강 — `needs-info`까지 (KTB-36 라운드, 2026-09-14)**: 같은 낭비가 **다른 라벨**에서 그대로 남아
+있었다. KTB-23의 하네스 대기 주차는 implement 한가운데서 이슈를 `in-progress → needs-info`로 세우고,
+그 하네스 PR은 구성상 보호 경로를 건드리므로 **사람이** 머지한다(KTB-23/24 r1의 1번이 그 사실 때문에
+해제 팔을 sweeper로 옮겼다). 그런데 `factory:needs-info`의 출구는 §3.2에서 `→ queue` 하나뿐이라,
+사람이 하네스를 손으로 고치고 돌아오면 — 플랜이 한 글자도 바뀌지 않았는데 — plan부터 다시 돈다.
+`needs-human`에서 고친 것과 같은 결함이고, 고치는 방법도 같다.
+
+- **엣지**: `HUMAN_ONLY_TRANSITIONS`가 이제 `{needs-human, needs-info} → HUMAN_RETRY_TARGETS`다
+  (목적지 넷은 그대로 — 전부 어느 스테이지의 정상 진입 라벨이다). 그래프(`TRANSITIONS`)는 한 줄도
+  바뀌지 않았다: 스크립트가 밟을 수 있는 needs-info의 출구는 여전히 `→ queue` 하나다.
+- **중단 지점**: `STOP_STATES`에 `factory:needs-info`를 더한다 — `resumePoint`는 `to=`가 정지 상태인
+  마지막 전이의 `from=`을 읽으므로, 하네스 주차(`in-progress → needs-info`)가 자연히 중단 지점이
+  된다(이번 주기에 implement handoff가 있으면 `rework`, 없으면 `planned` — `in-progress`의 기존 규칙
+  그대로다). triage가 세운 `queue → needs-info`도 같은 규칙에 걸리지만 `from=queue`라 `target: null`이
+  되어 재시도가 **거부된다** — 그 이슈는 실제로 보강 후 재큐(`:clarify`)가 맞고, 추측하지 않는다.
+  `needs-info → queue`(sweeper의 해제)는 `to`가 정지 상태가 아니라 이 판정을 흔들지 않는다.
+- **자물쇠 셋은 한 글자도 바뀌지 않았다**: 훅(`block-dangerous.sh`의 `transition.js … --human/--retry`
+  차단)·CLI(`refuseHumanFlag`)·라이브러리(`transition()` 첫 줄)가 출발 라벨과 무관하게 같은 답을 한다.
+- **sweeper는 그대로 `→ queue`다**(스크립트 경로). 그것이 이 엣지를 사람 전용으로 둔 이유다 — "플랜은
+  건드리지 않았다"는 **판단**을 스위퍼가 대신할 수는 없다. 하네스 수정이 플랜을 건드리지 않고 착지한
+  경우에만 사람이 `--retry`를 고르고, 그 판단은 `human-decision:v1` 코멘트로 남는다(`:unstick` 3f).
+
 **영향**: `factory/lib/labels.js`, `factory/lib/transition.js`(+`bin/transition.js`의 `--retry`,
 `refuseHumanFlag`), `factory/lib/requirements.js`, `factory/lib/retro/issue-comments.js`(`resumePoint`·
 `lastHumanDecision`·`countTransitionsTo`), `factory/hooks/block-dangerous.sh`(MF-2 규칙),
@@ -1406,7 +1428,7 @@ KTB 자기 자신의 #3 implement R2(run 34809992796)에서 `unit` 게이트가 
 
 **영향**: `factory/lib/sweeper.js`(`STALLED_STAGE`·heartbeat 팔·`BLOCKED_RETRY_STAGE`), `factory/lib/labels.js`, `factory/test/sweeper.test.js`·`labels.test.js`·`run-stage.test.js`, 스펙 §4.3-1·§4.3-5.
 
-### ⑤ 권한·훅 — KTB-13·14·20·21·23
+### ⑤ 권한·훅 — KTB-13·14·20·21·23·36
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
 
@@ -1768,6 +1790,55 @@ KTB-23·24·25·26을 소스에 대고 다시 읽은 결과 네 개의 결함과
 **여전히 남는 것(정직하게)**: 토큰은 **잡이 사는 동안 체크아웃 트리 안에 그대로 있다** — `persist-credentials: false`는 위 문단의 이유로 아직 켤 수 없고, 그 토큰으로 할 수 있는 일에는 아무 변화가 없다. ③의 `Read(...)` deny는 **Read 툴만** 막는다: `Bash(cat .git/config)`·`git config --get-regexp http.*`·`env` 덤프는 그대로 가능하고(L2 deny는 접두 매칭이며 훅은 *쓰기* 동사를 본다), 그 출력이 트랜스크립트에 실리면 ①의 (a)·(d)·(e)가 그것을 지운다 — 그러나 스크럽은 **모양을 아는 것만** 지운다: 새 토큰 접두사, 에이전트가 스스로 인코딩한 형태(예: 토큰을 잘라 붙이거나 hex로 바꾼 출력)는 놓친다. 즉 이 라운드가 닫은 것은 **사고성 유출과 노출 기간**이고, **의도적 유출**은 여전히 열려 있다. 그 문은 push 경로를 명시적 토큰으로 옮기고 `persist-credentials: false`를 켤 때 닫힌다.
 
 **영향**: `templates/factory/github/workflows/factory-{triage,plan,implement,review,merge,retro}.yml`, 새 `factory/bin/scrub-artifacts.js`, `factory/lib/yml-lint.js`, `factory/hooks/block-dangerous.sh`, `factory/hooks/deny-all-writes.sh`, `templates/factory/factory/ci-settings{,-harness}.json`, `factory/test/scrub-artifacts.test.js`(신규)·`yml-lint.test.js`·`templates.test.js`·`hooks.test.js`, 스펙 §4.1, 이 문서의 잔여 위험 등록부.
+
+#### KTB-36 — qa는 증거를 남기라는 명령을 받았고, L2는 그 디렉터리를 막고 있었다 (deny가 allow를 이긴다)
+
+**관측**(라이브, KTB 자기 자신 #3 — implement R3 뒤의 review, 그리고 그 라운드가 연 하네스 이슈 #7):
+`reviewer-spec-conformance`가 매 라운드 같은 이유로 거부했다 — `.factory/out/qa/**`에 qa 리뷰어의
+산출물이 **하나도 없다**. 그런데 qa는 게으르지 않았다: 그 역할 파일이 증거를 정확히 그 디렉터리에
+남기라고 **명령하고** 있고(`reviewer-qa.md:33`, `harness.toml [evidence].qa_artifacts =
+".factory/out/qa/**"`), 두 훅은 F3에서 그 디렉터리를 이미 카브아웃해 두었다
+(`deny-all-writes.sh`의 `QA_DIR`, `block-dangerous.sh`의 `qa` 토큰 지우기).
+
+**무엇이 어긋났나**: 모든 스테이지는 `--settings .factory/ci-settings.json`으로 L2를 받는다
+(`run-stage.js`). 그 파일의 deny에는 `Edit(.factory/**)`·`Write(.factory/**)` **한 줄**이 있었고,
+그 한 줄이 증거 디렉터리까지 덮었다. **Claude Code에서 deny는 allow를 이긴다** — 그래서 이 카브아웃은
+allow에 `Write(.factory/out/qa/**)`를 더해도 **만들 수 없다**(KTB-13이 같은 문장을 반대 방향으로
+확인했다: "넓어진 것은 부여이지 방벽이 아니다"). 세 곳(역할 프롬프트·훅·harness.toml `[protected].except`)이
+전부 "여기는 열려 있다"고 적어 두었는데 L2 한 줄이 조용히 그 셋을 무효로 만들고 있었고, 증상은
+qa가 아니라 **spec-conformance의 거부**로 나타났다 — 원인에서 가장 먼 자리다.
+
+**결정**: `.factory/`의 통짜 deny를 **열거**로 바꾼다(`ci-settings.json`·`ci-settings-harness.json` 양쪽).
+`.factory/out/qa/**`를 제외한 전부를 이름으로 다시 세운다:
+`bin/**`·`lib/**`·`actions/**`·`lessons/**`·`scenarios/**`(qa만 읽는 hold-out 시나리오 — builder가
+읽지도 쓰지도 못해야 한다)·`node_modules/**`, `out/*`, `out/coverage/**`·`out/prove-wt/**`·
+`out/classify-wt/**`, 그리고 최상위 파일 각각(`harness.toml`·`ci-settings*.json`·`roles.toml`·
+`quarantine.toml`·`package.json`·`package-lock.json`). `out/*`가 `out/`의 **직계 파일만** 잡는 것이
+이 열거의 전제다(게이트 판정 파일 `gates.json`·`unit.json`·`context.json`·`agents.jsonl`·
+`test-env.pids`가 전부 거기 있다) — 글롭의 `*`는 `/`를 넘지 않는다(저장소의 `lib/glob.js`가 같은
+의미이고, 테스트가 그 매처로 판정을 고정한다). 변형 파일은 여기서 `harness.toml` 한 줄만 뺀 것이다
+(KTB-20의 계약 그대로).
+
+**왜 negation이 아닌가**: deny 패턴에 "이것만 빼고"를 적을 수 있는 문법이 없고, 있더라도 allow가
+deny를 이기지 못하는 이상 예외는 deny 목록 **밖**에서 만들 수 없다. 남는 길은 열거뿐이다. 열거는
+조용히 늙으므로 — 새 `.factory` 하위 디렉터리가 생기면 아무도 모르게 쓰기 가능해진다 —
+`templates.test.js`가 두 겹으로 못 박는다: (a) `templates/factory/factory/**`의 **모든** 템플릿 파일이
+deny에 걸릴 것, (b) 템플릿 트리에 없는 런타임 경로(`bin`·`lib`·`out`·`node_modules`·`scenarios`와
+`out`의 하위 디렉터리들)를 이름으로 적은 목록도 전부 걸릴 것, 그리고 `.factory/out/qa/**`의 어떤
+경로도 **어느 deny에도 걸리지 않을 것**. 판정에는 Claude Code의 `**`/`*` 의미를 그대로 갖는
+`lib/glob.js`의 `matchesAny`를 쓴다.
+
+**기존 설치본**: `.factory/ci-settings*.json`은 manifest owner가 `factory`라 `factory init --upgrade`가
+**통째로 교체한다** — 옛 통짜 줄은 그 한 번으로 사라진다(`install.test.js`가 옛 파일 픽스처로 그
+경로를 고정한다). doctor의 `settings.ci-deny`/`settings.ci-harness`는 템플릿의 상위집합 검사라 새
+열거를 그대로 요구하고, 아직 업그레이드하지 않은 저장소는 **FAIL**로 드러난다(그 상태의 qa는 증거를
+남길 수 없으므로 WARN이 아니다).
+
+**영향**: `templates/factory/factory/ci-settings.json`·`ci-settings-harness.json`,
+`factory/hooks/block-dangerous.sh`(F9 주석), `templates/factory/claude/workflows/factory-implement.js`(주석),
+스펙 §6.3. 테스트: `templates.test.js`(qa 카브아웃 2건 + KTB-20 계약 갱신), `install.test.js`(업그레이드
+교체 1건), `doctor-factory.test.js`(열거 상위집합 1건). 코드 변경은 없다 — 고친 것은 **설정 한 줄**이고,
+그 한 줄이 리뷰 라운드 전체를 거짓 거부로 만들고 있었다.
 
 ### ⑥ 관찰 — O1~O12, O14·O15, O20·O23·O24, G1
 

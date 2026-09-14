@@ -136,12 +136,67 @@ test("ci-settings.json deny covers the build-config files, matching [protected].
     expect(s.permissions.deny, `Write(${g})`).toContain(`Write(${g})`);
     expect(h.protected.factory, g).toContain(g);   // 두 목록이 갈라지면 L2가 막는 것과 L1 integrity가 보는 것이 달라진다
   }
-  // 팩토리 소유 경로도 통째로 여기 있다 — 스펙 §6.3의 목록이 통째로 CI 파일로 옮겨왔다는 뜻이다.
-  for (const d of ["Edit(.factory/**)", "Write(.factory/**)", "Edit(.claude/**)", "Write(.claude/**)",
+  // 팩토리 소유 경로도 여기 있다 — 스펙 §6.3의 목록이 통째로 CI 파일로 옮겨왔다는 뜻이다.
+  // KTB-36: `.factory/**` 한 줄은 더 이상 없다(그 한 줄이 qa의 증거 디렉터리까지 덮었다) — 열거가 대신한다.
+  for (const d of ["Edit(.factory/bin/**)", "Write(.factory/bin/**)", "Edit(.factory/harness.toml)",
+    "Edit(.claude/**)", "Write(.claude/**)",
     "Edit(.github/**)", "Write(.github/**)",
     "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)"]) expect(s.permissions.deny, d).toContain(d);
+  for (const d of ["Edit(.factory/**)", "Write(.factory/**)"]) expect(s.permissions.deny, d).not.toContain(d);
   // CI 전용 deny(비밀·삭제)는 그대로 남아 있다.
   for (const d of ["Bash(gh secret*)", "Read(.env)"]) expect(s.permissions.deny, d).toContain(d);
+});
+
+// ── KTB-36: L2의 `.factory/**` 통짜 deny가 qa의 증거 디렉터리를 덮고 있었다 ────────────────────
+// 라이브 KTB #3(라운드 R3 → 하네스 이슈 #7): qa 리뷰어는 증거를 `.factory/out/qa/**`에 남기도록
+// **명령받고**(`reviewer-qa.md`, `[evidence].qa_artifacts`), 두 훅은 정확히 그 디렉터리를 카브아웃
+// 해 두었다(F3). 그런데 모든 스테이지가 `--settings .factory/ci-settings.json`으로 받는 L2는
+// `Edit/Write(.factory/**)`를 deny하고 있었고, **Claude Code에서 deny는 allow를 이긴다** — allow에
+// 한 줄을 더해도 카브아웃이 되지 않는다. 결과: qa는 증거를 한 줄도 남기지 못하고,
+// spec-conformance는 "증거가 없다"로 매 라운드를 거부했다. 통짜 deny를 **열거**로 바꿔 푼다.
+//
+// 매처는 저장소의 `lib/glob.js`(`**` = 디렉터리 임의 깊이, `*` = 슬래시를 넘지 않음)를 쓴다 —
+// Claude Code의 경로 글롭 의미와 같고, 그래서 `.factory/out/*`는 **직계 자식만** 잡는다.
+const QA_EVIDENCE = [
+  ".factory/out/qa/3-shot.png", ".factory/out/qa/3-server.log", ".factory/out/qa/deep/3.log",
+];
+// 열거가 반드시 덮어야 하는 것들. 런타임에만 생기는 경로(bin·lib·out·node_modules)는 템플릿 트리를
+// 훑어도 보이지 않으므로 여기서 이름으로 못 박는다(KTB-20의 같은 이유).
+const PROTECTED_FACTORY = [
+  ".factory/harness.toml", ".factory/roles.toml", ".factory/quarantine.toml",
+  ".factory/ci-settings.json", ".factory/ci-settings-harness.json",
+  ".factory/package.json", ".factory/package-lock.json",
+  ".factory/bin/run-stage.js", ".factory/lib/gates.js", ".factory/actions/setup/action.yml",
+  ".factory/lessons/factory-builder.md", ".factory/scenarios/export.md",
+  ".factory/node_modules/smol-toml/index.js",
+  ".factory/out/gates.json", ".factory/out/context.json", ".factory/out/agents.jsonl",
+  ".factory/out/test-env.pids", ".factory/out/unit.json", ".factory/out/triage.envelope.json",
+  ".factory/out/coverage/coverage-final.json", ".factory/out/prove-wt/src/a.js",
+  ".factory/out/classify-wt/src/a.js",
+];
+const denyGlobs = (file, tool) =>
+  JSON.parse(read(file)).permissions.deny.map((d) => new RegExp(`^${tool}\\((.+)\\)$`).exec(d)?.[1]).filter(Boolean);
+
+test("ci-settings.json lets qa write its mandated evidence — no deny pattern matches .factory/out/qa/** (KTB-36)", () => {
+  for (const f of ["factory/ci-settings.json", "factory/ci-settings-harness.json"]) {
+    for (const tool of ["Edit", "Write"]) {
+      const globs = denyGlobs(f, tool);
+      for (const p of QA_EVIDENCE) expect(matchesAny(globs, p), `${f} ${tool} ${p}`).toBe(false);
+    }
+  }
+});
+
+test("ci-settings.json still denies every other .factory path — the enumeration replaces the blanket, it does not open it (KTB-36)", () => {
+  for (const tool of ["Edit", "Write"]) {
+    const globs = denyGlobs("factory/ci-settings.json", tool);
+    for (const p of PROTECTED_FACTORY) expect(matchesAny(globs, p), `${tool} ${p}`).toBe(true);
+    // 템플릿 트리의 모든 파일도 같은 대접을 받는다 — 새 `.factory` 템플릿 파일이 생기면 여기서 걸린다.
+    const fRoot = join(T, "factory");
+    for (const p of readdirRecursive(fRoot)) {
+      const dest = `.factory/${p.slice(fRoot.length + 1)}`;
+      expect(matchesAny(globs, dest), `${tool} ${dest}`).toBe(true);
+    }
+  }
 });
 
 // ADR-020 최종 리뷰 SF-1 — 크리덴셜은 `.env`에만 있는 것이 아니다. CI 트리의 `.git/config`에는
@@ -174,7 +229,9 @@ test("ci-settings-harness.json opens exactly the test-infra files a promotion to
   // package.json/락파일은 KTB-23이 더했다 — 의존성 추가가 바로 하네스 이슈가 하려는 일이라, 그것을
   // 막으면 데모 #2의 벽("Harness change needed" → verifier reject → needs-human)이 하네스 이슈 안에서
   // 그대로 재현된다. 머지는 그대로 사람이다(`[protected].factory`가 package.json을 계속 들고 있다).
-  for (const d of ["Edit(.factory/**)", "Write(.factory/**)",
+  // KTB-36: base의 `.factory/**` 통짜 deny는 열거로 바뀌었다 — 이 변형이 빼는 `.factory` 항목도
+  // 이제 `harness.toml` **한 줄**이다(나머지 `.factory` 열거는 base와 글자 그대로 같다).
+  for (const d of ["Edit(.factory/harness.toml)", "Write(.factory/harness.toml)",
     "Edit(vitest.config.*)", "Write(vitest.config.*)",
     "Edit(playwright.config.*)", "Write(playwright.config.*)",
     "Edit(package.json)", "Write(package.json)",
@@ -190,7 +247,7 @@ test("ci-settings-harness.json opens exactly the test-infra files a promotion to
 
   // ② 나머지는 한 줄도 느슨해지지 않았다 — 변형은 base의 **부분집합**에 ③의 추가 deny만 얹는다.
   for (const d of baseDeny) {
-    if (/\(\.factory\/\*\*\)|vitest\.config|playwright\.config|\((package\.json|package-lock\.json)\)/.test(d)) continue;
+    if (/\(\.factory\/harness\.toml\)|vitest\.config|playwright\.config|\((package\.json|package-lock\.json)\)/.test(d)) continue;
     expect(deny.has(d), `harness variant dropped ${d}`).toBe(true);
   }
 
@@ -215,9 +272,21 @@ test("ci-settings-harness.json opens exactly the test-infra files a promotion to
 test("ci-settings-harness.json explicitly denies .factory/bin, .factory/lib, .factory/out — the enumeration can't see them (KTB-20)", () => {
   const hv = JSON.parse(read("factory/ci-settings-harness.json"));
   const deny = new Set(hv.permissions.deny);
-  for (const dir of [".factory/bin/**", ".factory/lib/**", ".factory/out/**"]) {
+  // KTB-36: `.factory/out/**`는 qa의 증거 디렉터리까지 덮으므로 더는 쓰지 않는다 — 직계 파일
+  // (`out/*`)과 qa가 아닌 하위 디렉터리를 이름으로 막는다. 두 변형의 out 열거는 글자 그대로 같다.
+  for (const dir of [".factory/bin/**", ".factory/lib/**", ".factory/out/*",
+    ".factory/out/coverage/**", ".factory/out/prove-wt/**", ".factory/out/classify-wt/**"]) {
     expect(deny.has(`Edit(${dir})`), `Edit(${dir})`).toBe(true);
     expect(deny.has(`Write(${dir})`), `Write(${dir})`).toBe(true);
+  }
+  for (const d of ["Edit(.factory/out/**)", "Write(.factory/out/**)"]) expect(deny.has(d), d).toBe(false);
+  // 그리고 그 열거가 실제로 qa만 남기는지는 매처로 확인한다(KTB-36 테스트와 같은 의미).
+  for (const tool of ["Edit", "Write"]) {
+    const globs = denyGlobs("factory/ci-settings-harness.json", tool);
+    for (const p of PROTECTED_FACTORY) {
+      if (p === ".factory/harness.toml") continue;                 // 이 변형의 존재 이유
+      expect(matchesAny(globs, p), `${tool} ${p}`).toBe(true);
+    }
   }
   // KTB-23 fix: 러너의 락파일도 템플릿 파일이 아니다(npm이 만든다) — 열거가 못 보므로 이름으로 못 박는다.
   // 매니페스트만 막고 락을 열어 두면 "설치되는 코드"는 여전히 바뀐다.

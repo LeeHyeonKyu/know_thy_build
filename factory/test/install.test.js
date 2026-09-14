@@ -1,5 +1,7 @@
 import { test, expect } from "vitest";
 import { render, planInstall, applyInstall, mergeSettings, ensureGitignore, pruneMovedDenies, MOVED_DENIES_ADR_019 } from "../cli/install.js";
+import { readFileSync } from "node:fs";
+import { matchesAny } from "../lib/glob.js";
 
 const manifest = [
   { src: "/pkg/templates/factory/factory/harness.toml", dest: ".factory/harness.toml", owner: "project" },
@@ -138,6 +140,32 @@ test("a second upgrade is a no-op — pruned 0, action skip", () => {
     .find((x) => x.dest === ".claude/settings.json");
   expect(again.pruned).toBe(0);
   expect(again.action).toBe("skip");
+});
+
+/**
+ * KTB-36 — 이미 설치된 저장소의 `.factory/ci-settings.json`은 옛 통짜 `Edit/Write(.factory/**)`를
+ * 들고 있다. 그 한 줄이 살아 있는 동안 qa는 `[evidence].qa_artifacts`에 증거를 한 줄도 못 남기고
+ * (deny가 allow를 이긴다), spec-conformance는 매 라운드를 "증거 없음"으로 거부한다 — 라이브 KTB #3.
+ * 이 파일은 **팩토리 소유**라 `--upgrade`가 통째로 교체한다: 여기서 그 사실을 실제 템플릿으로 고정한다.
+ */
+test("upgrade replaces an old blanket-deny ci-settings.json with the enumerated one that spares qa (KTB-36)", () => {
+  const src = new URL("../../templates/factory/factory/ci-settings.json", import.meta.url).pathname;
+  const m = [{ src, dest: ".factory/ci-settings.json", owner: "factory" }];
+  const files = { "/r/.factory/ci-settings.json": JSON.stringify({ permissions: { deny: ["Edit(.factory/**)", "Write(.factory/**)"] } }, null, 2) };
+  const io = { exists: (p) => p in files, readFile: (p) => files[p] ?? readFileSync(p, "utf8") };
+
+  const [a] = planInstall({ manifest: m, root: "/r", mode: "upgrade", vars: {}, ...io });
+  expect(a.action).toBe("replace");
+  const deny = JSON.parse(a.content).permissions.deny;
+  for (const d of ["Edit(.factory/**)", "Write(.factory/**)"]) expect(deny, d).not.toContain(d);
+  expect(deny).toContain("Edit(.factory/out/*)");
+  for (const tool of ["Edit", "Write"]) {
+    const globs = deny.map((d) => new RegExp(`^${tool}\\((.+)\\)$`).exec(d)?.[1]).filter(Boolean);
+    expect(matchesAny(globs, ".factory/out/qa/3-shot.png"), tool).toBe(false);
+    expect(matchesAny(globs, ".factory/out/gates.json"), tool).toBe(true);
+  }
+  // 최초 `init`은 남의 저장소에 이미 있는 파일을 건드리지 않는다 — 이 교체는 `--upgrade` 전용이다.
+  expect(planInstall({ manifest: m, root: "/r", mode: "init", vars: {}, ...io })[0].action).toBe("skip");
 });
 
 test("applyInstall reports the pruned count in the summary counts", () => {

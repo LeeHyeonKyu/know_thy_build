@@ -140,9 +140,18 @@ stateDiagram-v2
   needs_human --> planned: 사람 재시도 (중단 지점=planned|in_progress)
   needs_human --> rework: 사람 재시도 (중단 지점=rework|in_progress+implement handoff)
   needs_human --> awaiting_review: 사람 재시도 (중단 지점=awaiting_review)
+  needs_info --> planned: 사람 재시도 (하네스 주차, 중단 지점=in_progress)
+  needs_info --> rework: 사람 재시도 (하네스 주차, 중단 지점=in_progress+implement handoff)
 ```
 
 `needs_human --> {ready, planned, rework, awaiting_review}`는 **사람 전용 재시도 엣지**다(ADR-020 KTB-32).
+`needs_info`도 **같은** 엣지 집합을 받는다(KTB-36 라운드의 확장) — 그 라벨에는 KTB-23의 하네스 대기
+주차(`in_progress → needs_info`)가 서고, 그 하네스 PR은 구성상 보호 경로를 건드려 **사람이** 머지하므로,
+사람이 돌아왔을 때 `→ queue` 하나만 있으면 플랜이 한 글자도 바뀌지 않았는데 plan을 처음부터 다시 돈다.
+sweeper의 자동 주차 해제는 그대로 `→ queue`다(스크립트는 이 엣지를 밟을 수 없다) — 플랜을 건드리지
+않았다는 **판단**을 한 사람만 `--retry`로 중단 지점에 되돌린다. triage가 세운 `needs_info`
+(`queue → needs_info`)는 중단 지점이 `queue`라 `resumePoint`가 목적지를 찾지 못하고 재시도가 거부된다:
+그 이슈는 실제로 보강 후 재큐(`:clarify`)가 맞다.
 그래프의 나머지와 달리 이 넷은 `TRANSITIONS`에 들어 있지 않다 — `canTransition(from, to, {human:true})`
 에서만 열린다. `human:true`는 호출자의 자기 신고일 뿐이라 그래프 검사 혼자서는 "정말 사람인가"를
 보증하지 못한다 — 그래서 **두 자물쇠**가 그 앞을 지킨다(리뷰 3c63672 MF-2): (1) `hooks/block-dangerous.sh`가
@@ -156,7 +165,7 @@ PreToolUse 경계에서 `transition.js … --human`/`--retry` 셸 호출 자체�
 남는다) — 전이 코멘트의 `by=human reason=retry`가 세 층을 모두 지났다는 증거로 남는다. 사람이라고
 아무 자리로나 가지는 않는다:
 `transition.js`가 이슈 코멘트에서 **중단 지점**을 다시 계산해 목적 라벨과 대조하고, 다르면 전이 없이 exit 2다.
-중단 지점 = 마지막으로 `→ blocked` 또는 `→ needs_human`으로 간 전이의 `from`(단 그 `from`이 그 자신
+중단 지점 = 마지막으로 `→ blocked`·`→ needs_human`·`→ needs_info`로 간 전이의 `from`(단 그 `from`이 그 자신
 정지 상태인 전이는 건너뛴다 — `blocked → needs_human`은 sweeper의 에스컬레이션이지 일이 멈춘 자리가 아니다);
 `in_progress`는 이번 주기의 implement handoff가 있으면 `rework`, 없으면 `planned`로 옮긴다. 착지 상태의
 요구조건은 그대로 물리되(예: `awaiting_review`는 유효한 implement handoff + PR 번호), **이번 런의 게이트
@@ -544,7 +553,7 @@ const LOADER = {
   3. 격리 정책(`.factory/quarantine.toml`, §5.2.5-⑤)을 적용한다: `consecutive_passes ≥ quarantine_return_after`인 항목은 복귀시키고, `quarantine_ttl_days` 경과 또는 `since` 파싱 실패(fail-closed) 항목은 만료 처리한다.
   4. 토큰 발급일(`FACTORY_TOKEN_ISSUED_AT`)이 334일(≈11개월)을 넘으면 "토큰 갱신 필요" `factory:needs-human` 이슈를 연다 — 같은 제목의 열린 이슈가 있으면 중복 생성하지 않는다(§4.4).
   5. **멈춘 스테이지 재점화**(KTB-8, 위 "세 번째 팔") — `factory:queue|ready|planned|rework|awaiting-review|approved`에 앉아 있고 마지막 전이 코멘트가 임계보다 오래됐고 하트비트도 재점화 마커도 없는 이슈를 `workflow_dispatch`로 다시 띄운다(`rework → implement`는 ADR-020 KTB-31이, `queue → triage`는 최종 리뷰 MF-1이 더했다 — 둘 다 "그 라벨을 보는 팔이 하나도 없다"는 같은 결함이었고, 전자는 좀비 런 하나가 이슈를 65분 세웠고 후자는 **아래 6의 주차 해제가 끝나는 자리**였다: 해제 마커는 평생 dedupe라 그 라벨 이벤트가 만든 triage 런이 사라지면 그 피처는 영원히 큐에 앉았다). 임계는 30분이지만, **이번 스테이지의 하트비트가 하나도 없으면**(= 스테이지가 시작조차 못 했다) 10분이다(`STALL_NO_HEARTBEAT_MIN`) — 기다리는 대상이 "하트비트를 놓친 런"이 아니라 "뜨지 않은 런"이고 그건 10분이면 확정된다. 밀기 직전에 **잔해 락을 회수한다**(KTB-28: 소유자의 워크플로 런이 `completed`면 그 락은 잔해다 — 조회 실패·로컬 러너는 살아 있는 것으로 본다). 삭제는 **읽은 sha에 리스를 걸고**(`--force-with-lease=<ref>:<sha>`) 한다: 읽기와 삭제 사이에 소유자가 바뀌었으면(그 런은 방금 시작했으므로 살아 있다) 아무것도 지우지 않고 `stale-lock-race`로 적는다. 락 판정은 **세 값**이다(ADR-020 r2 MF1): `live`(소유자 런이 `in_progress`/`queued`)면 **dispatch하지 않는다** — 그 런은 claim에서 거부당할 것이 정해져 있고, 마커를 남기면 재점화 예산만 태운다; `stale`(`completed`)이면 지우고 민다; `unknown`(워크플로 런이 아니거나 — 로컬 러너 — 조회·파싱이 실패했다)이면 지우지도 밀지도 않되 **스톨 임계를 넘겼으면 `factory:needs-human`으로 올린다**(사유 `lock owner unknowable (<detail>)`). "모른다"를 "돌고 있다"로 읽으면 그 이슈는 sweep 잡의 stdout 한 줄만 남긴 채 영원히 멈춘다 — 이 클러스터가 없애려는 바로 그 침묵이다. 같은 이슈+스테이지의 재점화는 **마지막 재큐 이후 2회까지**이고(다른 라운드 카운터와 같은 창 — KTB-25), 그 뒤에는 `factory:needs-human`(사유 `stalled restart limit (2) reached`)으로 올린다.
-  6. **하네스 대기 주차 해제**(KTB-23 r1) — 마지막 전이 사유가 `waiting for harness issue #<m>`인 `factory:needs-info` 이슈에서 그 하네스 이슈가 닫혔으면(또는 그 브랜치의 PR이 머지됐으면) `factory:queue`로 되돌린다. 마커는 **전이가 성공한 뒤에** 남긴다 — 실패한 전이가 억제 마커를 남기면 그 피처는 영원히 주차된다.
+  6. **하네스 대기 주차 해제**(KTB-23 r1) — 마지막 전이 사유가 `waiting for harness issue #<m>`인 `factory:needs-info` 이슈에서 그 하네스 이슈가 닫혔으면(또는 그 브랜치의 PR이 머지됐으면) `factory:queue`로 되돌린다. 마커는 **전이가 성공한 뒤에** 남긴다 — 실패한 전이가 억제 마커를 남기면 그 피처는 영원히 주차된다. 이 팔은 `→ queue`로 남는다(스크립트 경로): 같은 이슈에서 사람은 `--retry`로 **중단 지점**(§3.2의 `needs_info` 재시도 엣지)으로 되돌려 plan 한 판을 아낄 수 있지만, "하네스 수정이 플랜을 건드리지 않았다"는 판단은 사람의 것이다.
   7. **라벨-셋 복구**(KTB-18, KTB-30 확장) — 상태 라벨을 2개 이상 가진 열린 이슈를 하나로 맞춘다(tier 라벨은 유지). 사람이 라벨을 API로 직접 얹었을 때 `run-stage`는 상태가 모호하다는 이유로 전이 없이 물러나므로, 그 이슈를 다시 보는 눈이 이것뿐이다. 라벨이 정확히 2개이고 그중 하나가 **최신 전이의 `to`**면 그건 사람의 손 편집이 아니라 add-first 라벨 스왑의 부분 실패이므로(§3.2), `needs-human`이 아니라 그 `to` 하나로 잇는다.
   8. **상태 라벨 0개 복구**(KTB-30) — `factory:*` 라벨은 있는데 상태 라벨이 하나도 없는 열린 이슈를 최신 전이 코멘트의 `to`로 되살린다(전이 이력이 없으면 `factory:needs-human`). 마커는 `<!-- factory-label-set-repaired from=(none) to=<label> -->`이고 dedupe는 10분 시간 창이다. 이 상태는 이벤트도 다른 sweeper 팔도 `factory status`도 보지 못하는 유일한 상태라 별도의 눈이 필요하다 — `factory status`는 같은 이슈를 Needs You에 `[no-state-label]`로 띄운다.
   각 이슈·각 서브 스텝은 개별적으로 실패가 격리된다 — 하나가 에러를 던져도 나머지는 계속 처리된다.
@@ -963,7 +972,9 @@ light_on_merge: true
 **어느 deny가 어느 파일에 사는가 (ADR-019).** deny 규칙은 세션 종류를 가리지 않고 걸리며 allow로 덮을 수 없다. 그래서 두 파일로 나눈다:
 
 - **`.claude/settings.json`** — 모든 세션(CI의 `claude -p`, 그리고 사람의 대화형 세션)에 걸린다. 여기 남는 deny는 **사람에게도 걸려야 옳은 것**뿐이다: `gh pr merge*`, `git merge*`, `git push --force*`/`-f*`, branch protection PUT. allow 목록과 훅 배선도 여기 있다.
-- **`.factory/ci-settings.json`** — CI만 로드한다(`run-stage.js`·`retro.js`가 `claude -p … --settings .factory/ci-settings.json`으로 부른다; `--settings`는 병합이고 deny는 병합 결과에서도 유효하다). **경로 기반 `Edit(...)`/`Write(...)` deny 전부**가 여기 산다 — `.factory/**`, `.claude/**`, `.github/workflows/factory-*`, `docs/factory/CHARTER.md`, 그리고 게이트 명령이 해석되어 지나가는 빌드 설정 파일(`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`). CI 전용 deny(`gh secret*`, `gh api -X DELETE*`, `Read(.env*)`)도 같은 파일에 있다.
+- **`.factory/ci-settings.json`** — CI만 로드한다(`run-stage.js`·`retro.js`가 `claude -p … --settings .factory/ci-settings.json`으로 부른다; `--settings`는 병합이고 deny는 병합 결과에서도 유효하다). **경로 기반 `Edit(...)`/`Write(...)` deny 전부**가 여기 산다 — `.factory/`(아래 KTB-36의 열거), `.claude/**`, `.github/workflows/factory-*`, `docs/factory/CHARTER.md`, 그리고 게이트 명령이 해석되어 지나가는 빌드 설정 파일(`package.json`, `package-lock.json`, `vitest.config.*`, `playwright.config.*`, `tsconfig*.json`, `.eslintrc*`, `eslint.config.*`). CI 전용 deny(`gh secret*`, `gh api -X DELETE*`, `Read(.env*)`)도 같은 파일에 있다.
+
+**`.factory/`의 deny는 통짜가 아니라 열거다 (ADR-020 KTB-36).** `Edit/Write(.factory/**)` 한 줄은 qa 리뷰어가 **쓰도록 명령받은** 증거 디렉터리(`[evidence].qa_artifacts = ".factory/out/qa/**"`, `reviewer-qa.md`)까지 함께 막았고, 두 훅이 그 디렉터리를 카브아웃해 둔 것(F3)은 L2 앞에서 아무 소용이 없었다 — **Claude Code에서 deny는 allow를 이기므로 allow 한 줄로 예외를 만들 수 없다.** 결과는 라이브 KTB #3이다: qa는 증거를 한 줄도 남기지 못했고 spec-conformance는 "증거가 없다"로 매 라운드를 거부했다. 그래서 `.factory/`를 **이름으로 다시 세운다**: `bin/**`·`lib/**`·`actions/**`·`lessons/**`·`scenarios/**`(qa만 읽는 hold-out 시나리오)·`node_modules/**`, `out/*`(직계 파일 — 글롭의 `*`는 `/`를 넘지 않는다), `out/coverage/**`·`out/prove-wt/**`·`out/classify-wt/**`, 그리고 최상위 파일 각각(`harness.toml`·`ci-settings*.json`·`roles.toml`·`quarantine.toml`·`package.json`·`package-lock.json`). 열리는 것은 `.factory/out/qa/**` **하나**다. 열거는 조용히 늙으므로 `templates.test.js`가 `templates/factory/factory/**`의 모든 파일과 런타임 경로 목록을 매처로 훑어 전부 걸리는지 확인한다. 변형 파일 `ci-settings-harness.json`의 `.factory` 목록은 여기서 `harness.toml` 한 줄만 뺀 것이다.
 
 **왜 나누는가.** 경로 deny를 `.claude/settings.json`에 두면 사람-지점 스킬(`:harness`가 `harness.toml`을, `:role`이 `.claude/agents/*`와 `roles.toml`을, `:technical`이 CHARTER를 쓴다)이 자기 일을 할 수 없다 — 그 쓰기는 "에이전트가 게이트를 우회한 것"이 아니라 **사람이 게이트를 정한 것**이고, 그것이 그 스킬의 존재 이유다. CI 에이전트가 받는 L2는 달라지지 않으며, 사람의 세션에서도 셸 모양의 쓰기(`echo >`, `sed -i`, `cp`/`mv`, `perl -i`, `python -c`)는 `block-dangerous.sh`(L0 훅, 설정 파일과 무관하게 항상 실행)가 계속 막고, 보호 경로를 건드린 PR은 merge 스테이지(L1)가 자동 머지를 거부해 사람 머지를 요구한다(ADR-015, ADR-020). `factory doctor`는 두 파일을 모두 검사한다 — `settings.present`/`settings.deny`/`settings.allow`/`settings.hooks`와 `settings.ci-deny`.
 
@@ -1022,7 +1033,22 @@ light_on_merge: true
     "deny": [
       "Bash(gh secret*)", "Bash(gh variable set*)", "Bash(gh api -X DELETE*)", "Bash(gh api --method DELETE*)",
       "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)",
-      "Edit(.factory/**)", "Write(.factory/**)",
+      // KTB-36: `.factory/**` 한 줄이 아니라 **열거**다 — 그 한 줄이 qa 리뷰어가 쓰도록 명령받은
+      // 증거 디렉터리(`[evidence].qa_artifacts = ".factory/out/qa/**"`)까지 덮었고, Claude Code에서
+      // **deny가 allow를 이기므로** allow 한 줄로는 뺄 수 없었다. `out/*`는 직계 파일만 잡는다.
+      "Edit(.factory/bin/**)", "Write(.factory/bin/**)", "Edit(.factory/lib/**)", "Write(.factory/lib/**)",
+      "Edit(.factory/actions/**)", "Write(.factory/actions/**)", "Edit(.factory/lessons/**)", "Write(.factory/lessons/**)",
+      "Edit(.factory/scenarios/**)", "Write(.factory/scenarios/**)", "Edit(.factory/node_modules/**)", "Write(.factory/node_modules/**)",
+      "Edit(.factory/out/*)", "Write(.factory/out/*)",
+      "Edit(.factory/out/coverage/**)", "Write(.factory/out/coverage/**)",
+      "Edit(.factory/out/prove-wt/**)", "Write(.factory/out/prove-wt/**)",
+      "Edit(.factory/out/classify-wt/**)", "Write(.factory/out/classify-wt/**)",
+      "Edit(.factory/harness.toml)", "Write(.factory/harness.toml)",
+      "Edit(.factory/ci-settings*.json)", "Write(.factory/ci-settings*.json)",
+      "Edit(.factory/roles.toml)", "Write(.factory/roles.toml)",
+      "Edit(.factory/quarantine.toml)", "Write(.factory/quarantine.toml)",
+      "Edit(.factory/package.json)", "Write(.factory/package.json)",
+      "Edit(.factory/package-lock.json)", "Write(.factory/package-lock.json)",
       "Edit(.claude/**)", "Write(.claude/**)",
       "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",
       "Edit(docs/factory/CHARTER.md)", "Write(docs/factory/CHARTER.md)",

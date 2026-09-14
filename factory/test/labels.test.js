@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, HUMAN_RETRY_TARGETS } from "../lib/labels.js";
+import { STATES, canTransition, factoryLabelOf, STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, HUMAN_RETRY_TARGETS, HUMAN_ONLY_TRANSITIONS } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { HARNESS_LABEL as HARNESS_LABEL_RUN_STAGE } from "../bin/run-stage.js";
 import { HARNESS_LABEL as HARNESS_LABEL_RETRO } from "../bin/retro.js";
@@ -106,6 +106,28 @@ test("KTB-32: needs-human → resume point is a human-only edge (script refused)
   // 사람 전용 엣지는 needs-human에만 있다 — `{human:true}`가 그래프 전체를 느슨하게 만들지 않는다.
   expect(canTransition("factory:merged", "factory:queue", { human: true })).toBe(false);
   expect(canTransition("factory:queue", "factory:planned", { human: true })).toBe(false);
+});
+
+/**
+ * KTB-32 확장 — `factory:needs-info`도 같은 문을 받는다. 그 라벨의 유일한 출구는 `→ queue`이고
+ * (§3.2), 하네스 대기 주차(KTB-23)가 바로 그 자리에 이슈를 세운다: 사람이 하네스 이슈를 손으로
+ * 고쳐 머지한 뒤 `queue`로 돌아가면 plan을 처음부터 다시 돈다 — 플랜이 한 글자도 바뀌지 않았는데도.
+ * 그래서 `needs-human`과 **같은** 사람 전용 엣지를 준다(같은 목적지 넷, 같은 두 번째 자물쇠).
+ * sweeper의 주차 해제 팔은 그대로 `→ queue`다(스크립트 경로는 이 엣지를 밟을 수 없다).
+ */
+test("KTB-32: needs-info → resume point is the same human-only edge (script refused, queue unchanged)", () => {
+  for (const to of HUMAN_RETRY_TARGETS) {
+    expect(canTransition("factory:needs-info", to), `script ${to}`).toBe(false);
+    expect(canTransition("factory:needs-info", to, { human: true }), `human ${to}`).toBe(true);
+  }
+  // 그래프의 정규 출구는 그대로다 — sweeper의 주차 해제가 계속 쓴다.
+  expect(canTransition("factory:needs-info", "factory:queue")).toBe(true);
+  // 사람이라고 아무 데나 가지 않는다.
+  for (const to of ["factory:merged", "factory:approved", "factory:in-progress", "factory:wont-do"]) {
+    expect(canTransition("factory:needs-info", to, { human: true }), to).toBe(false);
+  }
+  // 사람 전용 엣지는 이 둘에만 있다.
+  expect([...HUMAN_ONLY_TRANSITIONS.keys()].sort()).toEqual(["factory:needs-human", "factory:needs-info"]);
 });
 
 test("every human-only retry target is a label the factory can actually resume from (an ENTRY_LABEL)", () => {
