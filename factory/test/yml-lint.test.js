@@ -102,7 +102,8 @@ const ISSUE_EXPR = "${{ github.event.issue.number || inputs.issue }}";
 
 test("all eight workflow templates exist and pass lint", () => {
   expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
-  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8")), f).toEqual([]);
+  // 파일명을 함께 넘긴다 — `merge-token-scope`(ADR-021)의 파일 범위 갈래는 그래야 판정한다(doctor가 그렇게 부른다).
+  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8"), { file: f }), f).toEqual([]);
 });
 
 test("stage workflows follow the §4.1 table and the token/concurrency rules", () => {
@@ -180,7 +181,7 @@ test("MF-2: the issue input is bound via env and validated, never interpolated i
     expect(lintWorkflow(y), f).toEqual([]);
   }
   // 여덟 템플릿 전부(스테이지가 아닌 것 포함)가 이 규칙을 통과한다
-  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8")).filter((v) => v.rule === "no-expression-in-run"), f).toEqual([]);
+  for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8"), { file: f }).filter((v) => v.rule === "no-expression-in-run"), f).toEqual([]);
 });
 
 test("yml-lint rejects ${{ inputs.* }} / ${{ github.event.* }} inside a run: block (no-expression-in-run)", () => {
@@ -394,4 +395,88 @@ test("composite setup action runs [runtime].setup as its own step, not sharing o
   expect(setupStep).not.toContain("if: always()");
   // 이 스텝의 run: 값은 setup-env.js 호출 한 줄뿐이어야 한다 — 다른 명령과 여러 줄로 합쳐져 있지 않다는 뜻이다.
   expect(setupStep).toMatch(/run:\s*node \.factory\/bin\/setup-env\.js\s*\n?$/);
+});
+
+// ── ADR-021 merge-token-scope ───────────────────────────────────────────────
+
+test("merge-token-scope: FACTORY_MERGE_TOKEN in any workflow but factory-merge.yml is a violation", () => {
+  const step = "  - name: x\n    env:\n      GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}\n";
+  expect(lintWorkflow(step, { file: "factory-implement.yml" }))
+    .toEqual([expect.objectContaining({ rule: "merge-token-scope", line: 3 })]);
+  expect(lintWorkflow(step, { file: "factory-sweeper.yml" }))
+    .toEqual([expect.objectContaining({ rule: "merge-token-scope" })]);
+  // 머지 워크플로에서는 정상이다 — 거기가 유일한 자리다.
+  expect(lintWorkflow(step, { file: "factory-merge.yml" })).toEqual([]);
+  // 파일명 없이 부르면(스니펫) 파일 범위 갈래는 침묵한다 — lintWorkflow는 이름 없는 조각도 받는다.
+  expect(lintWorkflow(step)).toEqual([]);
+});
+
+test("merge-token-scope: the merge token never shares a step with an agent token — that step is where `claude -p` runs", () => {
+  const agentStep = [
+    "  - name: Run stage",
+    "    env:",
+    "      GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+    "    run: |",
+    "      claude -p ok",
+    "",
+  ].join("\n");
+  // 파일명이 factory-merge.yml이어도(=파일 범위는 통과) 스텝 범위가 잡는다.
+  expect(lintWorkflow(agentStep, { file: "factory-merge.yml" }))
+    .toEqual([expect.objectContaining({ rule: "merge-token-scope", msg: expect.stringMatching(/same step as CLAUDE_CODE_OAUTH_TOKEN/) })]);
+  expect(lintWorkflow(agentStep.replace("CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}"), { file: "factory-merge.yml" }))
+    .toEqual([expect.objectContaining({ rule: "merge-token-scope" })]);
+  // 이름 없는 스니펫에서도 스텝 범위 갈래는 언제나 발화한다.
+  expect(lintWorkflow(agentStep)).toEqual([expect.objectContaining({ rule: "merge-token-scope" })]);
+  // 다른 스텝에 있으면 위반이 아니다 — 같은 파일이어도 자리가 다르다.
+  const separate = [
+    "  - name: Run stage",
+    "    env:",
+    "      GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "    run: node run-stage.js",
+    "  - name: Agent",
+    "    env:",
+    "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+    "    run: claude -p ok",
+    "",
+  ].join("\n");
+  expect(lintWorkflow(separate, { file: "factory-merge.yml" })).toEqual([]);
+});
+
+test("merge-token-scope: the credential-scrub step is the one exception — it holds every secret to redact it, and starts no agent", () => {
+  const scrub = [
+    "  - name: Scrub credentials from the artifacts",
+    "    env:",
+    "      FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}",
+    "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+    "    run: |",
+    "      node .factory/bin/scrub-artifacts.js docs/factory/runs",
+    "",
+  ].join("\n");
+  expect(lintWorkflow(scrub, { file: "factory-merge.yml" })).toEqual([]);
+});
+
+test("merge-token-scope: a comment naming the token is not an occurrence — the rule must not read its own rationale", () => {
+  const commented = [
+    "  - name: Agent",
+    "    env:",
+    "      # FACTORY_MERGE_TOKEN is deliberately absent here (ADR-021)",
+    "      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}",
+    "    run: claude -p ok",
+    "",
+  ].join("\n");
+  expect(lintWorkflow(commented, { file: "factory-implement.yml" })).toEqual([]);
+});
+
+test("merge-token-scope: the shipped templates obey it — only factory-merge.yml names the token, and never beside an agent token", () => {
+  for (const f of files) {
+    const y = readFileSync(join(W, f), "utf8");
+    const names = y.split("\n").some((l) => l.replace(/#.*/, "").includes("FACTORY_MERGE_TOKEN"));
+    expect(names, f).toBe(f === "factory-merge.yml");
+    expect(lintWorkflow(y, { file: f }).filter((v) => v.rule === "merge-token-scope"), f).toEqual([]);
+  }
+  // 그리고 머지 템플릿은 값이 아니라 **불리언**으로 모드를 옮긴다(사본을 하나 더 만들지 않는다).
+  const merge = readFileSync(join(W, "factory-merge.yml"), "utf8");
+  expect(merge).toContain("FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}");
+  expect(merge).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}");
 });

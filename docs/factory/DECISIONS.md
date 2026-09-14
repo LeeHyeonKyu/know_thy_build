@@ -1804,3 +1804,61 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 8. **persist-credentials** — 잠금·records push를 명시 토큰 remote로 옮긴 뒤 `persist-credentials: false`(SF-1의 남은 반).
 
 (ADR-020 끝. 이후 dogfood 라운드가 있으면 새 ADR로 연다.)
+
+---
+
+## ADR-021 머지 권한은 두 배우로 나눈다 — 에이전트가 쥔 토큰으로는 base 브랜치를 머지·push할 수 없다 — 2026-09-14
+
+**질문**: ADR-020 KTB-13(그리고 최종 리뷰 MF-3)은 `gh pr merge`·`git push origin main` 같은 **명령 모양**을 훅(`factory/hooks/block-dangerous.sh`)에서 막는 방식으로 머지 권한을 지켰다. 재리뷰 다섯 회차가 그 훅에서 우회를 계속 찾아냈다 — 토큰 경계, 백슬래시 이스케이프, 인터프리터 래퍼, refs API를 통한 삭제, ANSI-C 인용. 소유자의 판정은 그 목록을 더 늘리는 것이 답이 아니라는 것이었다: "`gh`를 부르는 방법을 전부 열거할 수는 없다 — 명령에 대한 정적 분석으로는 풀리지 않는다. 에이전트가 `gh pr merge`를 실행하더라도, **그가 쥔 토큰에 그 권한이 없어서** 불가능해야 한다." 되돌릴 수 없는 능력(보호된 base 브랜치로의 머지·push)을 에이전트가 도는 **어느 스테이지에서도** 도달 불가능하게 만들되, 다크 머지 자체는 계속 가능하게 하려면 무엇을 바꿔야 하는가.
+
+**관측**:
+
+- **훅은 원리적으로 완결될 수 없다.** 훅이 보는 것은 셸 명령 문자열이고, 같은 API 호출에 도달하는 문자열의 수는 무한하다(래퍼·인코딩·런타임 조립·다른 엔드포인트). ADR-020의 잔여 위험 #4가 "런타임 조립 동사는 비목표"라고 적은 것이 그 사실의 자백이다. 반면 **토큰에 권한이 없으면** 문자열이 무엇이든 GitHub이 거부한다 — 방어의 성질이 "열거"에서 "능력"으로 바뀐다.
+- **팩토리는 이미 두 토큰을 위한 자리를 갖고 있었다.** `templates/factory/github/workflows/factory-merge.yml`의 머지 스텝은 `GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}`으로 부르고 있었다(ADR-015 R2). 그때의 의도는 "상위 토큰을 **쓸 수 있다**"였고, 이번 판결은 그것을 "에이전트 토큰은 그 일을 **할 수 없다**"로 뒤집는다 — 같은 배선, 반대 방향의 불변식이다.
+- **GitHub은 자기 PR의 승인을 거부한다**(422 `Can not approve your own pull request`). 이것이 이 설계가 기대는 유일한 GitHub 고유 성질이다: base 브랜치가 승인 1건을 요구하면, PR을 **연** 계정은 그 PR을 머지할 수 없다 — 그 계정의 토큰으로 어떤 명령을 어떻게 조립해도 그렇다. 팩토리의 PR은 언제나 에이전트 배우가 연다(implement 스테이지가 `claude/fq-<issue>`에서 `gh pr create`를 부른다).
+- **`restrictions`(push 허용 목록)는 쓸 수 없다.** GitHub Free의 개인 저장소에서는 지원되지 않는다(조직 전용). 대신 `required_pull_request_reviews`가 같은 결과를 낸다 — 그리고 `enforce_admins: true`가 이미 있으므로 머지 배우도 required check를 건너뛰지는 못한다.
+- **모드를 사람이 선언하게 하면 안 된다.** "두 배우 모드"를 플래그로 고르게 하면 "선언은 했지만 머지 토큰이 없어 머지가 영영 막힌 저장소"가 가능해진다. 모드는 **관측된 사실**(`gh secret list`에 `FACTORY_MERGE_TOKEN`이 있는가)에서만 나와야 한다.
+
+**결정**: 머지 권한을 **두 배우**로 나눈다.
+
+- **에이전트 배우 = `FACTORY_BOT_TOKEN`** — admin이 아닌 계정(write 권한의 머신 유저, 나중에는 GitHub App)이다. 체크아웃·코멘트·라벨·락 브랜치·PR 생성·`factory/*` 브랜치 push가 전부 이 토큰으로 나간다. `claude -p`가 도는 모든 스테이지가 보는 유일한 자격증명이다.
+- **머지 배우 = `FACTORY_MERGE_TOKEN`** — admin/owner PAT(나중에는 bypass 권한의 GitHub App)이다. **스크립트 전용 잡에서만** 등장한다: 머지 스테이지의 `Run stage` 스텝(`claude`를 띄우지 않는다 — `setup`의 `claude: "false"`)과 그 잡의 자격증명 스크럽 스텝뿐이다. 에이전트 스테이지의 `checkout` `token:`에도, 그 스텝들의 env에도 들어가지 않는다(오늘도 들어가 있지 않다 — 그 상태를 **규칙으로** 고정한다). sweeper는 이 토큰을 받지 않는다: sweeper가 하는 일(락 브랜치 삭제 — 보호되지 않은 `refs/heads/factory/lock-*`, 라벨 변경, `workflow run`)은 전부 write 권한으로 충분하고, 필요하지 않은 곳에 admin을 주는 것은 머지 권한이 도는 자리를 하나 늘리는 일이다.
+
+1. **부트스트랩이 모드를 관측하고 보호 규칙을 그에 맞춘다**(`factory/lib/bootstrap.js`). `existing.secrets`에 `FACTORY_MERGE_TOKEN`이 있으면 **두 배우 모드**: base 브랜치에 `required_status_checks = { strict: false, contexts: ["factory/integrity"] }`(그대로) + `enforce_admins: true`(그대로) + `required_pull_request_reviews = { required_approving_review_count: 1, dismiss_stale_reviews: true }` + `restrictions: null`. 없으면 **단일 배우 모드**: 오늘까지의 보호 규칙 그대로다(승인 요건 없음) — 넣는 순간 에이전트의 PR을 승인해 줄 두 번째 계정이 없어 다크 머지가 구조적으로 불가능해지기 때문이다. 어느 모드로 부트스트랩했는지는 항상 note 한 줄로 출력된다. 메커니즘은 계속 **classic branch protection API** 하나다(ruleset을 섞지 않는다 — 두 메커니즘이 같은 브랜치에 겹치면 어느 쪽이 판정했는지 아무도 말할 수 없다).
+2. **머지 스테이지가 승인하고 나서 머지한다**(`factory/lib/merge-stage.js`, 단계 6b). 두 배우 모드에서는 보호 경로·섹션 정책·게이트·필수 체크·무결성이 **전부** 통과한 뒤, `gh pr merge` 직전에 `gh pr review --approve`를 한 번 부른다. 그 호출은 머지 배우의 토큰(`GH_TOKEN`)으로 나가고, PR 작성자는 에이전트 배우이므로 서로 다른 계정이다 — 승인은 유효하다. 자리가 머지 직전인 이유는 `dismiss_stale_reviews: true`다(승인 뒤에 커밋이 들어오면 그 승인은 다른 diff의 것이다). **거부는 `needs-human`이지 `blocked`이 아니다**: 승인이 거부되는 원인(같은 계정, 토큰 스코프 부족, 머지 배우가 협력자가 아님)은 전부 사람이 계정 설정을 고쳐야 풀리고, 같은 호출을 다시 하면 같은 422가 돌아올 뿐이다 — blocked으로 세우면 sweeper와 재시도 경로가 비용만 태우는 루프를 돈다. 단일 배우 모드에서는 이 단계가 통째로 없다(오늘까지의 동작 그대로).
+3. **모드는 값이 아니라 불리언으로 옮긴다.** `factory-merge.yml`의 `Run stage` 스텝이 `FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — 시크릿 사본을 env에 하나 더 만들지 않는다(그 사본 자체가 유출면이다). `GH_TOKEN`이 이미 그 토큰이다. 로컬 `factory run merge`나 아직 업그레이드하지 않은 워크플로를 위해 `FACTORY_MERGE_TOKEN`이 env에 직접 있는 경우도 같은 뜻으로 받는다.
+4. **`yml-lint`의 새 규칙 `merge-token-scope`가 그 범위를 지킨다**(`factory/lib/yml-lint.js`). 두 갈래다: (a) **파일 범위** — `FACTORY_MERGE_TOKEN`은 `factory-merge.yml`에만 나올 수 있다(파일명을 받은 호출, 곧 doctor의 `checkWorkflows`에서만 판정한다 — `lintWorkflow`는 이름 없는 스니펫도 받는다). (b) **스텝 범위** — 파일명과 무관하게, 머지 토큰이 `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`와 **같은 스텝의 env**에 있으면 위반이다(그 스텝은 `claude -p`가 도는 자리다). 예외는 자격증명 스크럽 스텝 하나다 — 그 스텝은 시크릿을 **쓰려고**가 아니라 아티팩트에서 **리터럴로 지우려고** 받는다(`scrub-artifacts.js`의 `SECRET_ENV`에 `FACTORY_MERGE_TOKEN`을 더했다: 가장 강한 자격증명을 스크럽 목록에서 빼면 그것만 아티팩트에 남는다). 주석은 벗기고 본다 — 이 규칙을 설명하는 주석이 바로 그 파일들 안에 있다.
+5. **`factory doctor`가 세 줄로 보고한다**(`factory/lib/doctor/factory.js`의 `checkMergeAuthority`). `tokens.two-actor`(PASS) / `tokens.single-actor`(WARN — `merge power is reachable from agent stages; hooks are the only layer (set FACTORY_MERGE_TOKEN + a non-admin FACTORY_BOT_TOKEN for two-actor mode)`), `protection.two-actor`(보호 규칙의 모양이 모드와 맞는가 — 두 배우 모드인데 승인 요건이 없으면 FAIL, 단일 배우 모드인데 승인이 필수면 WARN, 보호 자체가 없거나 플랜이 지원하지 않으면 WARN), `tokens.agent-is-admin`(에이전트 배우의 실제 저장소 권한 — `gh api user`로 로그인 이름을 얻고 `gh api repos/{r}/collaborators/{login}/permission`으로 등급을 묻는다. `admin`/`maintain`이면 두 배우 모드에서 FAIL, 단일 배우 모드에서 WARN). 마지막 것은 **CI에서만** 판정한다(`CI` + `GH_TOKEN`/`FACTORY_BOT_TOKEN`): 사람의 로컬 `gh`는 사람 자신이라 물으면 언제나 admin이고, 그러면 늘 틀린 경보가 된다 — 토큰 없는 환경에서는 건너뛰고 그 사실을 detail로 말한다. 토큰 **값**은 어디에서도 읽지도 찍지도 않는다.
+
+**이제 권한으로 불가능한 것 (에이전트 배우가 쥔 토큰으로는)**:
+
+- **보호된 base 브랜치로의 머지.** `gh pr merge`·`gh api -X PUT …/merge`·GraphQL `mergePullRequest` — 무엇을 어떻게 조립하든 GitHub이 "승인이 없다"로 거부한다. 자기가 연 PR을 스스로 승인할 수 없으므로 그 승인은 만들 수 없다.
+- **보호된 base 브랜치로의 직접 push.** `allow_force_pushes: false` + `required_linear_history` + PR 요건 — 보호 규칙이 admin에게도 걸린다(`enforce_admins: true`).
+- **보호 규칙 자체의 수정.** admin이 아닌 계정은 `PUT /repos/{r}/branches/{b}/protection`을 호출할 수 없다. (그래서 `tokens.agent-is-admin`이 FAIL이어야 하는 것이다 — 에이전트 배우가 admin이면 이 줄 전체가 거짓말이 된다.)
+
+**여전히 훅만이 막는 것 (그리고 그것이 깨졌을 때의 복구 팔)**:
+
+- **락 브랜치 삭제** (`refs/heads/factory/lock-<issue>`) — 보호되지 않은 브랜치라 write 권한이면 지울 수 있다. 훅(`block-dangerous.sh`)이 `git push --delete`와 refs API 삭제를 둘 다 막는다. 뚫리면: 다른 러너가 같은 이슈를 동시에 claim할 수 있다. **복구 팔** — claim은 원자적 push라 두 번째 러너가 `{ok:false, holder}`로 fail closed하고, sweeper의 오래된 락 회수(KTB-28)가 고아 락을 치운다. 손실은 중복 실행 한 번의 비용이지 되돌릴 수 없는 변경이 아니다.
+- **라벨 편집** — 상태 라벨은 write 권한의 일이다. 훅이 `gh issue edit --add-label`/labels API를 에이전트 세션에서 막는다. 뚫리면: 스테이지를 건너뛰는 손 라벨이 가능하다. **복구 팔** — `transition.js`의 그래프 검사가 handoff·게이트 없는 전이를 거부하고, 그 거부는 코멘트 + `needs-human`으로 남는다(데모 #14 프로브에서 2/2 확인). 머지 자체는 여전히 위 권한 층을 통과해야 한다.
+- **`factory/*` 브랜치의 force-push** — 에이전트 브랜치와 `factory/records`는 보호되지 않는다. 뚫리면: 그 브랜치의 히스토리가 다시 쓰인다. **결과** — run 기록은 재생성 가능하고(`hydrateRecord`), 에이전트 브랜치는 PR head sha로 게이트가 묶여 있어 조용한 교체는 required check를 다시 통과해야 한다. base는 영향을 받지 않는다.
+
+**단일 배우 모드로의 퇴화**: `FACTORY_MERGE_TOKEN`이 없는 저장소(두 번째 계정을 만들 수 없거나, own-calendar처럼 branch protection 자체가 불가능한 GitHub Free private 저장소)는 오늘까지의 모습 그대로 돈다 — 보호 규칙에 승인 요건이 없고, 머지 스테이지는 승인 없이 머지하며, **머지 권한이 에이전트 스테이지에서 도달 가능한 채로 남는다**. 그 저장소에서 머지를 막는 유일한 층은 훅이고, 훅은 완결될 수 없다(위 관측). doctor의 `tokens.single-actor` WARN이 그 사실을 매번 이름으로 말한다 — 이 모드는 **틀린 설정이 아니라 알려진 약화**이고, 조용히 지나가는 것만이 틀린 것이다.
+
+**알려진 한계**:
+
+1. **머지 배우의 토큰은 여전히 하나의 시크릿이다.** 머지 잡 안에서 `GH_TOKEN`으로 노출되고, 그 잡에서 도는 것은 팩토리 자신의 스크립트와 **PR이 쓴 게이트 명령**이다. 게이트 하위 프로세스는 `scrubbedRunner`가 env에서 모든 자격증명을 빼고(ADR-020 fix round 1, `MERGE_CAPABLE_ENV`에 `FACTORY_MERGE_TOKEN`이 이미 있다), 보호 경로를 실은 PR은 게이트가 **한 줄도 돌기 전에** 사람에게 넘어간다(KTB-5). 그래도 "머지 잡 안에서 PR의 코드가 돈다"는 사실 자체는 남는다 — 그 창을 완전히 닫으려면 머지를 별도 워크플로(`workflow_run`)로 떼어내야 하고, 그것은 1.1의 일이다.
+2. **PAT은 사람 손을 탄다.** 머신 유저 + 두 개의 PAT은 발급·갱신·회수가 전부 수동이다(ADR-020 1.1 이월 7번의 GitHub App이 이 한계의 답이다 — App 설치 토큰은 자동 회전되고 권한이 저장소 단위로 좁다). `FACTORY_TOKEN_ISSUED_AT` + sweeper의 11개월 알림은 `FACTORY_BOT_TOKEN` 하나만 본다.
+3. **`gh pr review --approve`는 승인의 의미를 희석한다.** 머지 배우의 승인은 "사람이 diff를 읽었다"가 아니라 "L1의 모든 게이트가 통과했다"의 기계적 표현이다. 사람이 GitHub UI에서 approve 수를 보고 "누군가 읽었다"고 읽으면 오해다 — 그래서 승인 본문이 `factory: approved by the merge actor (two-actor mode, ADR-021)`로 자기 정체를 말한다.
+4. **에이전트 배우가 admin이면 이 ADR 전체가 무효다.** 그 사실은 CI에서만 확인할 수 있고(위 5), 확인은 doctor가 도는 순간의 스냅샷이다 — 누군가 나중에 그 계정을 admin으로 올리면 다음 doctor 실행까지 아무도 모른다.
+
+**영향**: `factory/lib/bootstrap.js`(`MERGE_TOKEN_SECRET`·`isTwoActor`·모드별 `PROTECTION_BODY`·모드 note), `factory/lib/gh.js`(`approvePr`·`viewerLogin`·`collaboratorPermission`), `factory/lib/merge-stage.js`(단계 6b), `factory/bin/run-stage.js`(`twoActor`·`approvePr` dep), `factory/lib/yml-lint.js`(`merge-token-scope`, `lintWorkflow(text, { file })`), `factory/lib/doctor/factory.js`(`checkMergeAuthority`·`checkWorkflows`가 파일명을 넘긴다), `factory/bin/scrub-artifacts.js`(`SECRET_ENV`), `templates/factory/github/workflows/factory-merge.yml`(`FACTORY_TWO_ACTOR`·스크럽 env), `templates/factory/docs/factory/CHARTER.md`(머지 권한 절), 스펙 §4.4·§6.1, `README.md`, `templates/know-thy-build/harness.md`(doctor 체크 표). 테스트: `bootstrap.test.js`·`merge-stage.test.js`·`doctor-factory.test.js`·`yml-lint.test.js`·`scrub-artifacts.test.js`.
+
+**소유자가 두 배우 모드를 켜기 위해 해야 하는 일** (팩토리가 대신할 수 없다 — 계정과 시크릿은 사람의 것이다):
+
+1. **머신 유저 계정 하나**를 만들고(예: `<project>-factory-bot`) 저장소에 **write 협력자**로 초대한다 — `admin`도 `maintain`도 아니어야 한다(doctor의 `tokens.agent-is-admin`이 CI에서 확인한다).
+2. 그 계정으로 로그인해 **classic PAT**을 발급한다 — 스코프 `repo`, `workflow`(워크플로 파일을 실은 PR을 push해야 한다). 값을 저장소 시크릿 **`FACTORY_BOT_TOKEN`**에 넣는다: `gh secret set FACTORY_BOT_TOKEN`.
+3. **소유자 자신(또는 다른 admin 계정)**으로 두 번째 classic PAT을 발급한다 — 스코프 `repo`(+ 조직 저장소라면 `admin:org`는 필요 없다). 값을 **`FACTORY_MERGE_TOKEN`**에 넣는다: `gh secret set FACTORY_MERGE_TOKEN`. **두 토큰은 반드시 서로 다른 계정의 것이어야 한다** — 같은 계정이면 승인이 422로 거부되고 머지 스테이지가 `needs-human`으로 선다(그 거부 메시지가 정확히 이 사실을 말한다).
+4. `npx know-thy-build factory bootstrap`을 다시 돌린다 — 시크릿 목록에서 두 배우 모드를 관측하고 base 브랜치의 보호 규칙에 승인 요건을 건다(출력의 note 한 줄이 어느 모드인지 말한다).
+5. `npx know-thy-build factory doctor`로 확인한다 — `tokens.two-actor` PASS · `protection.two-actor` PASS. `tokens.agent-is-admin`은 로컬에서 skip이고, 다음 CI 실행에서 실제 등급이 찍힌다.
+
+(되돌리려면 `FACTORY_MERGE_TOKEN`을 지우고 `factory bootstrap`을 다시 돌린다 — 승인 요건이 빠지고 단일 배우 모드로 돌아간다.)

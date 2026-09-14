@@ -13,10 +13,34 @@ import { GH_FREE_PLAN_PROTECTION_RE } from "./gh.js";
  */
 export const L0_CONTEXTS = ["factory/integrity"];
 
-const PROTECTION_BODY = (contexts) => ({
+/**
+ * ADR-021 — **두 배우 모드의 표식은 `FACTORY_MERGE_TOKEN` 시크릿 하나다.** 이 시크릿이 있으면
+ * 저장소는 "에이전트 배우(`FACTORY_BOT_TOKEN`, 비-admin write)"와 "머지 배우(admin PAT)"를
+ * 나눠 쓰고 있다는 뜻이고, 그때만 base 브랜치에 **리뷰 승인 1건**을 요구할 수 있다. 단일 배우
+ * 모드에서 같은 규칙을 걸면 다크 머지가 구조적으로 불가능해진다 — PR 작성자(에이전트 배우)는
+ * 자기 PR을 승인할 수 없고, 승인해 줄 다른 계정이 없다.
+ */
+export const MERGE_TOKEN_SECRET = "FACTORY_MERGE_TOKEN";
+export const isTwoActor = (secrets = []) => secrets.includes(MERGE_TOKEN_SECRET);
+
+/**
+ * ADR-021 — 두 배우 모드에서만 `required_pull_request_reviews`가 붙는다.
+ *
+ * 이것이 이 설계의 **유일하게 되돌릴 수 없는 문**이다: 승인 1건이 필수가 되는 순간, PR을 연
+ * 계정(에이전트 배우)은 GitHub 규칙상 **자기 PR을 승인할 수 없으므로** 그 계정이 쥔 토큰으로는
+ * `gh pr merge`가 어떤 모양으로 불려도 통과하지 못한다 — 명령 패턴을 열거해 막는 것이 아니라
+ * **권한으로** 막는다(훅은 그 위의 defense in depth로 남는다). `dismiss_stale_reviews: true`인
+ * 이유: 승인 뒤에 새 커밋이 밀려 들어오면 그 승인은 다른 diff에 대한 것이다.
+ *
+ * `enforce_admins: true`는 두 모드 모두 유지한다 — 머지 배우도 required check를 우회하지 못한다
+ * (승인 요건만 충족하면 머지할 수 있고, 그것이 두 배우 모드가 여는 유일한 문이다).
+ * `restrictions`는 두 모드 모두 null이다: push 제한은 GitHub Free의 개인 저장소에서 지원되지 않고
+ * (조직 전용), 그것 없이도 위의 승인 요건이 같은 결과를 낸다.
+ */
+const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_status_checks: { strict: false, contexts },
   enforce_admins: true,
-  required_pull_request_reviews: null,
+  required_pull_request_reviews: twoActor ? { required_approving_review_count: 1, dismiss_stale_reviews: true } : null,
   restrictions: null,
   required_linear_history: true,
   allow_force_pushes: false,
@@ -37,7 +61,10 @@ const secretNote = (label) => `gh secret set ${label} — bootstrap never writes
 export function bootstrapPlan({ harness, today, existing }) {
   const ops = LABELS.map((l) => ({ kind: "label", name: l.name, color: l.color, description: l.description }));
 
-  ops.push({ kind: "protection", branch: harness.project.default_branch, body: PROTECTION_BODY(L0_CONTEXTS) });
+  // ADR-021 — 모드는 **관측된 시크릿 목록**에서 나온다(사람이 플래그로 고르지 않는다). 플래그였다면
+  // "두 배우 모드라고 선언했지만 머지 토큰이 없어 머지가 영영 막힌 저장소"가 가능해진다.
+  const twoActor = isTwoActor(existing?.secrets);
+  ops.push({ kind: "protection", branch: harness.project.default_branch, twoActor, body: PROTECTION_BODY(L0_CONTEXTS, { twoActor }) });
 
   const issuedAt = existing?.variables?.FACTORY_TOKEN_ISSUED_AT;
   if (issuedAt) {
@@ -51,6 +78,12 @@ export function bootstrapPlan({ harness, today, existing }) {
   if (!secrets.includes("CLAUDE_CODE_OAUTH_TOKEN") && !secrets.includes("ANTHROPIC_API_KEY")) {
     ops.push({ kind: "note", message: secretNote("CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY)") });
   }
+  // ADR-021 — 어느 모드로 부트스트랩했는지는 **출력에서 읽을 수 있어야 한다**. 두 모드의 차이는
+  // protection body 한 줄뿐이라 조용히 지나가면 사람이 "머지 권한이 여전히 에이전트 손에 있다"는
+  // 사실을 모른 채로 운영하게 된다(그것이 단일 배우 모드의 실질적 위험이다).
+  ops.push({ kind: "note", message: twoActor
+    ? `two-actor mode: ${MERGE_TOKEN_SECRET} is set — the base branch requires 1 approving review, so the agent actor (which authors the PR) cannot merge it with any command; the merge stage approves with the merge actor and then merges (ADR-021)`
+    : `single-actor mode: no ${MERGE_TOKEN_SECRET} — merge power is reachable from agent stages and hooks are the only layer. Set ${MERGE_TOKEN_SECRET} (admin PAT) + a non-admin FACTORY_BOT_TOKEN and re-run bootstrap for two-actor mode (ADR-021)` });
 
   return ops;
 }

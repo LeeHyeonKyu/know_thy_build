@@ -900,3 +900,63 @@ test("(9) the deps are optional — an older wiring merges exactly as before (KT
   expect(await run(d)).toBe(0);
   expect(d.closeIssue).toHaveBeenCalled();
 });
+
+// ── (6b) ADR-021 two-actor merge authority ──────────────────────────────────
+
+test("(6b) two-actor mode: the merge actor approves BEFORE merging — order is the whole point", async () => {
+  const order = [];
+  const d = baseD({
+    twoActor: true,
+    approvePr: vi.fn(async () => { order.push("approve"); }),
+    mergePr: vi.fn(async () => { order.push("merge"); }),
+  });
+  const code = await run(d);
+  expect(code).toBe(0);
+  expect(d.approvePr).toHaveBeenCalledWith(9);
+  expect(order).toEqual(["approve", "merge"]);          // 승인이 낡지 않으려면(dismiss_stale_reviews) 머지 직전이어야 한다
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged" }));
+});
+
+test("(6b) two-actor mode: approval comes only after every gate — a rejected PR is never approved", async () => {
+  const d = baseD({ twoActor: true, approvePr: vi.fn(async () => {}), mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) });
+  expect(await run(d)).toBe(2);
+  expect(d.approvePr).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+test("(6b) two-actor mode: a refused approval (GitHub 422 on self-approval) → needs-human naming the cause, no merge, no retry loop", async () => {
+  const { lines, record } = makeRecord();
+  const d = baseD({
+    twoActor: true,
+    approvePr: vi.fn(async () => { throw new Error("gh pr review failed (1): GraphQL: Can not approve your own pull request"); }),
+  });
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(d.approvePr).toHaveBeenCalledTimes(1);                          // 한 번만 — 같은 422가 반복될 뿐이다
+  expect(d.mergePr).not.toHaveBeenCalled();
+  // blocked이 아니다: blocked은 sweeper·재시도 경로가 자동으로 다시 미는 상태이고, 이 실패는 사람이
+  // 계정 설정을 고쳐야 풀린다.
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: expect.stringMatching(/approve your own pull request/),
+  }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  const reason = d.transition.mock.calls.at(-1)[0].reason;
+  expect(reason).toMatch(/FACTORY_MERGE_TOKEN/);
+  expect(reason).toMatch(/ADR-021/);
+  expect(lines.some((l) => l.startsWith("merge: approvePr FAIL — "))).toBe(true);
+});
+
+test("(6b) two-actor mode with the approvePr dep missing → needs-human, never a merge attempt that the base branch would reject", async () => {
+  const d = baseD({ twoActor: true });                                   // approvePr 없음
+  expect(await run(d)).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/approvePr dep is not wired/) }));
+});
+
+test("(6b) single-actor mode is unchanged — no approval call, merge exactly as before", async () => {
+  const d = baseD({ approvePr: vi.fn(async () => {}) });                 // twoActor falsy
+  expect(await run(d)).toBe(0);
+  expect(d.approvePr).not.toHaveBeenCalled();
+  expect(d.mergePr).toHaveBeenCalledWith(9);
+});

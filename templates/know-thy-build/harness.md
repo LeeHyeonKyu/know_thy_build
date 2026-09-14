@@ -83,6 +83,7 @@ ls .factory/harness.toml docs/PROJECT.md 2>/dev/null
 | `hooks.<hook>` | 그 훅(`.claude/hooks/<hook>`)이 없거나 실행 결과가 기대와 다름 |
 | `workflows.present`, `workflows.lint` | `.github/workflows/factory-*.yml`이 없거나 lint 위반 |
 | `github.claude-secret`, `github.bot-token`, `github.token-issued-at`, `github.labels`, `github.protection`, `github.required-checks`, `github.unavailable` | secret 미설정, 라벨 미부트스트랩, branch protection 미설정(대부분 WARN — `factory bootstrap` 재실행으로 해결), 또는 `gh` 자체가 오프라인(WARN) |
+| `tokens.two-actor` / `tokens.single-actor`, `protection.two-actor`, `tokens.agent-is-admin` | 머지 권한이 어디에 있는가(ADR-021). `tokens.single-actor` WARN = `FACTORY_MERGE_TOKEN`이 없어 머지 권한이 에이전트 스테이지에서 도달 가능하다(훅이 유일한 층). `protection.two-actor` FAIL = 머지 토큰은 있는데 base 브랜치에 승인 요건이 없다 → `factory bootstrap` 재실행. `tokens.agent-is-admin` FAIL = 봇 계정이 admin/maintain이라 두 배우 모드가 아무것도 강제하지 못한다 → write 협력자로 낮춘다(CI에서만 판정, 로컬에서는 skip) |
 
 ### Step 1: 한 화면 요약
 

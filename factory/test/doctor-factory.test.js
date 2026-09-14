@@ -549,3 +549,89 @@ test("checkGitHub: all green → PASS across the board", async () => {
   expect(c["github.labels"].level).toBe("PASS");
   expect(c["github.protection"].level).toBe("PASS");
 });
+
+// ── ADR-021 two-actor merge authority ───────────────────────────────────────
+
+const ghFor = ({ secrets, protection, login = "factory-bot", permission = "write" }) => ({
+  listSecrets: async () => secrets,
+  getVariable: async () => "2026-01-01",
+  listLabels: async () => ["backlog"],
+  getBranchProtection: async () => protection,
+  viewerLogin: async () => login,
+  collaboratorPermission: async () => permission,
+});
+const HARNESS_MAIN = { project: { default_branch: "main" }, factory: { required_checks: [] } };
+const L0_ONLY = { required_status_checks: { contexts: [...L0_CONTEXTS] } };
+const withReview = { required_status_checks: { contexts: [...L0_CONTEXTS] }, required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true } };
+async function authority(gh, env = {}) {
+  return by(await checkGitHub({ gh, harness: HARNESS_MAIN, labels: [{ name: "backlog" }], env }));
+}
+
+test("checkGitHub (ADR-021): no FACTORY_MERGE_TOKEN → tokens.single-actor WARN naming what is left standing", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"], protection: L0_ONLY }));
+  expect(c["tokens.single-actor"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("merge power is reachable from agent stages; hooks are the only layer") });
+  expect(c["tokens.single-actor"].detail).toContain("FACTORY_MERGE_TOKEN");
+  expect(c["tokens.two-actor"]).toBeUndefined();
+  // 단일 배우 모드에서 승인 요건이 없는 것은 설계대로다 — 없으면 다크 머지가 불가능하다.
+  expect(c["protection.two-actor"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("single-actor") });
+});
+
+test("checkGitHub (ADR-021): FACTORY_MERGE_TOKEN + review requirement → tokens.two-actor PASS and protection.two-actor PASS", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withReview }));
+  expect(c["tokens.two-actor"].level).toBe("PASS");
+  expect(c["tokens.single-actor"]).toBeUndefined();
+  expect(c["protection.two-actor"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("dismiss_stale_reviews=true") });
+});
+
+test("checkGitHub (ADR-021): merge token set but the base branch requires no review → protection.two-actor FAIL (two-actor mode in name only)", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: L0_ONLY }));
+  expect(c["protection.two-actor"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("factory bootstrap") });
+  expect(c["protection.two-actor"].detail).toMatch(/can still merge its own PR/);
+});
+
+test("checkGitHub (ADR-021): review required but no merge token → WARN, because nobody can approve the agent's own PR", async () => {
+  const c = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN"], protection: withReview }));
+  expect(c["protection.two-actor"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("dark merge is impossible") });
+});
+
+test("checkGitHub (ADR-021): no protection / plan without protection → protection.two-actor WARN, never a false PASS", async () => {
+  const none = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: null }));
+  expect(none["protection.two-actor"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("run factory bootstrap") });
+
+  const free = await authority({ ...ghFor({ secrets: ["FACTORY_BOT_TOKEN"], protection: null }), getBranchProtection: async () => { throw new Error(GH_FREE_403); } });
+  expect(free["protection.two-actor"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("hooks are the only layer") });
+});
+
+test("checkGitHub (ADR-021): locally (no CI token) the agent-permission check is skipped with a note, and gh is never asked", async () => {
+  const gh = ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withReview });
+  let asked = false;
+  gh.viewerLogin = async () => { asked = true; return "someone"; };
+  const c = await authority(gh, {});                       // CI 아님
+  expect(c["tokens.agent-is-admin"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("skipped") });
+  expect(asked).toBe(false);                               // 사람의 로컬 gh는 사람 자신이다 — 물으면 늘 admin이라 늘 오보다
+});
+
+test("checkGitHub (ADR-021): in CI, an admin agent actor is a FAIL in two-actor mode and a WARN in single-actor mode", async () => {
+  const env = { CI: "true", GH_TOKEN: "x" };
+  const two = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withReview, permission: "admin" }), env);
+  expect(two["tokens.agent-is-admin"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("plain write collaborator") });
+  expect(two["tokens.agent-is-admin"].detail).toContain("factory-bot");
+  expect(two["tokens.agent-is-admin"].detail).not.toContain("x");   // 토큰 값은 어디에도 찍히지 않는다
+
+  const maintain = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withReview, permission: "maintain" }), env);
+  expect(maintain["tokens.agent-is-admin"].level).toBe("FAIL");
+
+  const single = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN"], protection: L0_ONLY, permission: "admin" }), env);
+  expect(single["tokens.agent-is-admin"].level).toBe("WARN");
+});
+
+test("checkGitHub (ADR-021): in CI, a plain write agent actor passes; an unreadable permission is WARN, not a silent PASS", async () => {
+  const env = { CI: "true", FACTORY_BOT_TOKEN: "x" };
+  const ok = await authority(ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withReview, permission: "write" }), env);
+  expect(ok["tokens.agent-is-admin"]).toMatchObject({ level: "PASS", detail: "factory-bot: write" });
+
+  const gh = ghFor({ secrets: ["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"], protection: withReview });
+  gh.collaboratorPermission = async () => { throw new Error("gh api failed (1): Not Found"); };
+  const unknown = await authority(gh, env);
+  expect(unknown["tokens.agent-is-admin"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("Not Found") });
+});

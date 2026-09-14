@@ -1117,6 +1117,17 @@ async function main() {
     comment: (number, body) => gh.comment(number, body),
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
+    /**
+     * ADR-021 — 두 배우 모드의 표식. 워크플로(`factory-merge.yml`)가 `FACTORY_TWO_ACTOR`에
+     * `${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — **토큰 값을 한 번 더 복사하지 않고**
+     * "있느냐"만 옮기는 것이 요점이다(env에 놓인 시크릿 사본은 그 자체가 유출면이다). 그래도
+     * `FACTORY_MERGE_TOKEN`이 직접 env에 있는 경우(로컬 `factory run merge`, 아직 업그레이드하지
+     * 않은 워크플로)도 같은 뜻으로 받는다. merge는 `claude -p`를 아예 띄우지 않는 스크립트 전용
+     * 스테이지라, 이 두 값 중 어느 것도 에이전트 세션이 보는 환경에 들어가지 않는다.
+     */
+    get twoActor() { return process.env.FACTORY_TWO_ACTOR === "true" || Boolean(process.env.FACTORY_MERGE_TOKEN); },
+    /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
+    approvePr: (pr) => gh.approvePr(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     /** merge 전용(KTB-23): 이 이슈의 본문 — `Blocks: #<n>`이 있으면 하네스 이슈였다는 뜻이다. */

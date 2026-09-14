@@ -254,6 +254,30 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async prReady(pr) {
       await gh(["pr", "ready", String(pr), "-R", repo]);
     },
+    /**
+     * ADR-021 — 두 배우 모드의 승인 한 번. **머지 배우의 토큰으로만** 의미가 있다: PR을 연 계정
+     * (에이전트 배우)이 이걸 부르면 GitHub이 422(`Can not approve your own pull request`)로 거부하고,
+     * 그 거부가 곧 이 설계가 증명하려는 사실이다 — 에이전트가 쥔 토큰으로는 승인도, 따라서 머지도
+     * 할 수 없다. 실패는 삼키지 않는다(호출자가 `needs-human`으로 올린다).
+     */
+    async approvePr(pr, body = "factory: approved by the merge actor (two-actor mode, ADR-021)") {
+      await gh(["pr", "review", String(pr), "-R", repo, "--approve", "--body-file", "-"], { input: body });
+    },
+    /**
+     * ADR-021 doctor — **지금 이 토큰이 누구인가**. 값은 절대 찍지 않고 로그인 이름만 돌려준다.
+     * `gh api user`는 PAT이 붙은 계정을 그대로 말한다(GitHub App 설치 토큰이면 `<app>[bot]`).
+     */
+    async viewerLogin() {
+      return JSON.parse(await gh(["api", "user"])).login;
+    },
+    /**
+     * ADR-021 doctor — 그 계정이 이 저장소에 대해 가진 권한(`admin`|`maintain`|`write`|`triage`|`read`).
+     * 두 배우 모드에서 에이전트 배우가 `admin`이면 branch protection의 승인 요건을 **스스로 바꿀 수**
+     * 있으므로 두 배우 모드는 이름만 남는다 — doctor가 FAIL로 세운다.
+     */
+    async collaboratorPermission(login) {
+      return JSON.parse(await gh(["api", `repos/${repo}/collaborators/${login}/permission`])).permission;
+    },
     async mergePr(pr, { method = "squash", deleteBranch = true } = {}) {
       const args = ["pr", "merge", String(pr), "-R", repo, `--${method}`];
       if (deleteBranch) args.push("--delete-branch");

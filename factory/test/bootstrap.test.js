@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LABELS } from "../lib/label-catalog.js";
-import { bootstrapPlan, applyBootstrap, formatBootstrapFailure } from "../lib/bootstrap.js";
+import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor } from "../lib/bootstrap.js";
 import { bootstrapCommand } from "../cli/bootstrap.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -24,10 +24,10 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 
 const HARNESS = { project: { default_branch: "main" }, factory: { required_checks: ["factory/gates", "factory/review", "factory/integrity"] } };
 
-const PROTECTION_BODY = (contexts) => ({
+const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_status_checks: { strict: false, contexts },
   enforce_admins: true,
-  required_pull_request_reviews: null,
+  required_pull_request_reviews: twoActor ? { required_approving_review_count: 1, dismiss_stale_reviews: true } : null,
   restrictions: null,
   required_linear_history: true,
   allow_force_pushes: false,
@@ -75,7 +75,7 @@ test("bootstrapPlan: protection op body matches the exact required shape — L0 
   expect(protectionOps.length).toBe(1);
   // factory/gates·factory/review는 이슈 파이프라인을 타는 PR에만 게시자가 있다 — L0에 넣으면 사람이
   // 머지하는 retro-proposal·harness PR과 첫 push가 영영 막힌다. 둘은 L1(allChecksGreen)이 계속 강제한다.
-  expect(protectionOps[0]).toEqual({ kind: "protection", branch: "main", body: PROTECTION_BODY(["factory/integrity"]) });
+  expect(protectionOps[0]).toEqual({ kind: "protection", branch: "main", twoActor: false, body: PROTECTION_BODY(["factory/integrity"]) });
   expect(protectionOps[0].body.required_status_checks.strict).toBe(false);   // F3: 게이트는 sha 바인딩 — strict는 factory가 하지 않는 rebase를 요구한다
   // 하네스의 required_checks는 그대로다 — 머지 스테이지(L1)가 세 개 전부를 본다
   expect(HARNESS.factory.required_checks).toEqual(["factory/gates", "factory/review", "factory/integrity"]);
@@ -105,11 +105,51 @@ test("bootstrapPlan: missing secrets → note ops that never carry a value; pres
 
   const existingClaude = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] };
   const opsGreen = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: existingClaude });
-  expect(opsGreen.some((o) => o.kind === "note" && /BOT_TOKEN|OAUTH_TOKEN|ANTHROPIC_API_KEY/.test(o.message))).toBe(false);
+  expect(opsGreen.some((o) => o.kind === "note" && /gh secret set/.test(o.message))).toBe(false);
 
   const existingAnthropic = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] };
   const opsGreen2 = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: existingAnthropic });
-  expect(opsGreen2.some((o) => o.kind === "note" && /BOT_TOKEN|OAUTH_TOKEN|ANTHROPIC_API_KEY/.test(o.message))).toBe(false);
+  expect(opsGreen2.some((o) => o.kind === "note" && /gh secret set/.test(o.message))).toBe(false);
+});
+
+// ── ADR-021 two-actor mode ──────────────────────────────────────────────────
+
+test("bootstrapPlan (ADR-021): FACTORY_MERGE_TOKEN present → two-actor protection (1 approving review, dismiss stale), enforce_admins kept, restrictions null", () => {
+  const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY", "FACTORY_MERGE_TOKEN"] };
+  const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
+  const protection = ops.find((o) => o.kind === "protection");
+  expect(protection).toEqual({ kind: "protection", branch: "main", twoActor: true, body: PROTECTION_BODY(["factory/integrity"], { twoActor: true }) });
+  // 이 두 줄이 "에이전트 토큰으로는 머지가 불가능하다"의 전부다 — 작성자는 자기 PR을 승인할 수 없다.
+  expect(protection.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 1, dismiss_stale_reviews: true });
+  expect(protection.body.enforce_admins).toBe(true);
+  expect(protection.body.restrictions).toBe(null);          // Free 플랜에는 push 제한이 없다 — 승인 요건이 그 자리를 대신한다
+  expect(protection.body.required_status_checks).toEqual({ strict: false, contexts: ["factory/integrity"] });
+});
+
+test("bootstrapPlan (ADR-021): no FACTORY_MERGE_TOKEN → single-actor protection unchanged (no review requirement — dark merge would be impossible)", () => {
+  const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] };
+  const protection = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing }).find((o) => o.kind === "protection");
+  expect(protection.twoActor).toBe(false);
+  expect(protection.body.required_pull_request_reviews).toBe(null);
+});
+
+test("bootstrapPlan (ADR-021): the mode is always named in a note — single-actor says merge power is reachable from agent stages", () => {
+  const single = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY"] } });
+  const singleNote = single.filter((o) => o.kind === "note").map((o) => o.message).find((m) => /single-actor mode/.test(m));
+  expect(singleNote).toMatch(/merge power is reachable from agent stages/);
+  expect(singleNote).toMatch(/FACTORY_MERGE_TOKEN/);
+
+  const two = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY", "FACTORY_MERGE_TOKEN"] } });
+  const twoNote = two.filter((o) => o.kind === "note").map((o) => o.message).find((m) => /two-actor mode/.test(m));
+  expect(twoNote).toMatch(/cannot merge it/);
+  // 노트는 시크릿의 **이름**만 말한다 — 값은 bootstrap이 읽지도 쓰지도 않는다.
+  expect(two.filter((o) => o.kind === "note").every((o) => !/ghp_|github_pat_/.test(o.message))).toBe(true);
+});
+
+test("isTwoActor: the mode comes from the observed secret list, never from a flag", () => {
+  expect(isTwoActor(["FACTORY_BOT_TOKEN"])).toBe(false);
+  expect(isTwoActor(["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN"])).toBe(true);
+  expect(isTwoActor()).toBe(false);
 });
 
 function fakeGh() {
@@ -136,7 +176,7 @@ test("applyBootstrap: calls createLabel once per label op, putBranchProtection o
   expect(gh.calls.setVariable[0]).toEqual({ name: "FACTORY_TOKEN_ISSUED_AT", value: "2026-09-12" });
 
   expect(applied.length).toBe(LABELS.length + 1 + 1); // labels + protection + variable
-  expect(notes.length).toBe(2); // two missing secrets
+  expect(notes.length).toBe(3); // two missing secrets + the ADR-021 mode note
   expect(logs.length).toBeGreaterThan(0);
 });
 
@@ -147,7 +187,7 @@ test("applyBootstrap: note ops never call any gh method", async () => {
   const gh = fakeGh();
   const { applied, notes } = await applyBootstrap({ gh, ops, log: () => {} });
   expect(gh.calls.setVariable.length).toBe(0);
-  expect(notes.length).toBe(1);
+  expect(notes.length).toBe(2);   // token-issued-at + the ADR-021 mode note
   expect(applied.length).toBe(LABELS.length + 1); // labels + protection only, no variable
 });
 
@@ -237,7 +277,7 @@ test("applyBootstrap: a failing op is isolated — the rest still run, failure i
   expect(gh.calls.putBranchProtection.length).toBe(1); // protection still ran after the failed label
   expect(gh.calls.setVariable.length).toBe(1); // variable still ran too
   expect(applied.length).toBe(LABELS.length - 1 + 1 + 1); // labels(minus the failed one) + protection + variable
-  expect(notes.length).toBe(2);
+  expect(notes.length).toBe(3);   // two missing secrets + the ADR-021 mode note
 });
 
 test("bootstrapCommand: a failing gh op → exit 1, failure printed", async () => {

@@ -5,8 +5,29 @@
  */
 const RETENTION_MAX_DAYS = 14;
 
+/**
+ * ADR-021 — `FACTORY_MERGE_TOKEN`(머지 배우, admin PAT)이 나타나도 되는 **유일한** 파일.
+ * 소유자의 요구를 한 줄로 옮기면: "에이전트가 `gh pr merge`를 어떤 모양으로 부르든, **그 토큰이
+ * 없어서** 불가능해야 한다." 그 불변식은 파일 목록 하나로만 지켜진다 — 머지 토큰이 에이전트가 도는
+ * 잡의 env에 한 번이라도 실리면, 그 잡 안의 모든 우회 경로가 다시 열린다.
+ *
+ * sweeper는 이 목록에 **없다**: sweeper가 건드리는 것은 `refs/heads/factory/lock-*`(보호되지 않은
+ * 브랜치)·라벨·`workflow run`뿐이라 전부 write 권한이면 된다. 관리자 권한이 필요한 일을 sweeper에
+ * 주는 순간 "머지 권한이 도는 자리"가 하나 늘어난다.
+ */
+const MERGE_TOKEN = "FACTORY_MERGE_TOKEN";
+const MERGE_TOKEN_FILES = new Set(["factory-merge.yml"]);
+const AGENT_TOKEN_RE = /\b(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)\b/;
+/**
+ * 예외는 스크럽 스텝 하나다(ADR-020 SF-1). 그 스텝은 자격증명을 **쓰려고**가 아니라 아티팩트에서
+ * **리터럴로 지우려고** 모든 시크릿을 env로 받는다 — `claude`를 띄우지 않고, `run:`은
+ * `scrub-artifacts.js` 한 줄이다. 이 예외가 없으면 "지우기 위해 받는 것"과 "쓰기 위해 받는 것"을
+ * 규칙이 구분하지 못해, 머지 토큰만 스크럽 대상에서 빠지는(=아티팩트에 남는) 결과가 된다.
+ */
+const SCRUB_STEP_RE = /scrub-artifacts\.js/;
+
 /** ADR-009 규칙을 텍스트 수준에서 검사한다. YAML 파서 없이 — 의존성 추가 금지. */
-export function lintWorkflow(text) {
+export function lintWorkflow(text, { file = null } = {}) {
   const out = [];
   const lines = text.split("\n");
   lines.forEach((l, i) => {
@@ -69,6 +90,7 @@ export function lintWorkflow(text) {
     });
   }
   out.push(...lintExpressionsInRun(lines));
+  out.push(...lintMergeTokenScope(lines, file));
   const stage = STAGE_RUN.exec(text);
   if (stage) out.push(...lintStageWorkflow(text, lines, stage[1]));
   return out;
@@ -114,6 +136,52 @@ function lintExpressionsInRun(lines) {
       if (lines[j].search(/\S/) <= indent) break;
       flag(j, lines[j]);
     }
+  }
+  return out;
+}
+
+/**
+ * ADR-021 `merge-token-scope` — 머지 배우의 토큰은 **머지 워크플로 밖으로 나가지 않는다.**
+ *
+ * 두 갈래로 본다:
+ * 1. **파일 범위** — `file`을 받은 호출(doctor의 `checkWorkflows`)에서만 판정한다. `lintWorkflow`는
+ *    원래 이름 없는 스니펫도 받으므로(테스트·부분 조각), 파일명이 없으면 이 갈래는 침묵한다.
+ * 2. **스텝 범위** — 파일명과 무관하게 언제나 판정한다. 머지 토큰과 에이전트 토큰
+ *    (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`)이 **같은 스텝의 env**에 함께 있으면, 그것은
+ *    `claude -p`가 도는 자리에 머지 권한이 들어왔다는 뜻이다 — 정확히 이 ADR이 닫은 문이다.
+ *    스크럽 스텝만 예외다(위 주석).
+ *
+ * 주석은 벗기고 본다 — 이 규칙을 **설명하는** 주석(그리고 ADR 인용)이 바로 그 파일들 안에 있고,
+ * 그것까지 세면 규칙이 자기 설명문을 읽고 발화한다.
+ */
+function lintMergeTokenScope(lines, file) {
+  const out = [];
+  const bare = lines.map((l) => l.replace(/#.*/, ""));
+  const hits = bare.map((l, i) => (l.includes(MERGE_TOKEN) ? i : -1)).filter((i) => i !== -1);
+  if (!hits.length) return out;
+
+  if (file && !MERGE_TOKEN_FILES.has(file)) {
+    out.push({ line: hits[0] + 1, rule: "merge-token-scope", msg: `${MERGE_TOKEN} may appear only in ${[...MERGE_TOKEN_FILES].join(", ")} — it is the merge actor's admin credential, and the whole point of ADR-021 is that no stage where an agent runs can reach it. Lock-branch deletes, label edits and \`factory/*\` pushes need plain write, so FACTORY_BOT_TOKEN is enough everywhere else` });
+  }
+
+  // 스텝 경계: `- name:`/`- uses:` 줄에서 다음 그런 줄 직전까지.
+  const starts = bare.map((l, i) => (/^\s*-\s+(name|uses):/.test(l) ? i : -1)).filter((i) => i !== -1);
+  const stepRange = (i) => {
+    const s = starts.filter((x) => x <= i).pop();
+    if (s === undefined) return null;                       // 스텝보다 앞(잡 레벨 env 등) — 아래에서 파일 전체로 본다
+    const nextIdx = starts.find((x) => x > s);
+    return [s, nextIdx === undefined ? bare.length : nextIdx];
+  };
+  const flagged = new Set();
+  for (const i of hits) {
+    const range = stepRange(i);
+    const [from, to] = range ?? [0, bare.length];
+    if (flagged.has(from)) continue;
+    const block = bare.slice(from, to);
+    if (block.some((l) => SCRUB_STEP_RE.test(l))) continue;  // 지우기 위해 받는 스텝은 예외
+    if (!block.some((l) => AGENT_TOKEN_RE.test(l))) continue;
+    flagged.add(from);
+    out.push({ line: i + 1, rule: "merge-token-scope", msg: `${MERGE_TOKEN} is in the same step as CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY — that is a step where \`claude -p\` runs, and ADR-021 exists so that merge power is unreachable from there by permission, not by command pattern. The only exception is the credential-scrub step, which holds every secret as a literal to redact and never starts an agent` });
   }
   return out;
 }

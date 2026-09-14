@@ -44,9 +44,16 @@ jobs:
         with:
           claude: "false"
           test-env: "true"
+      # 이 스텝은 **스크립트 전용**이다 — `claude -p`를 띄우지 않는다(setup의 `claude: "false"`).
+      # ADR-021이 머지 권한을 두는 유일한 자리이고, 그 사실이 이 잡 전체의 전제다.
       - name: Run stage
         env:
           GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}
+          # ADR-021 — **토큰이 아니라 "있느냐"만 옮긴다.** merge-stage는 두 배우 모드에서 머지 직전에
+          # `gh pr review --approve`를 한 번 부르는데(base 브랜치가 승인 1건을 요구한다), 그 판단에
+          # 필요한 것은 불리언 하나뿐이다. 시크릿 값을 env에 한 번 더 복사하면 사본이 하나 더 생길
+          # 뿐이다 — `GH_TOKEN`이 이미 그 토큰이다.
+          FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           # ADR-020 최종 리뷰 MF-2 — **`${{ … }}`를 `run:` 안에 붙여 넣지 않는다.** `inputs.issue`는
           # 자유 문자열이고(`type: string`), 그 값은 Actions가 셸에 넘기기 **전에** 텍스트로 치환된다:
@@ -75,6 +82,11 @@ jobs:
         if: always()
         env:
           FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          # ADR-021 — 머지 배우의 토큰이 **값으로** 등장하는 유일한 다른 자리다. 쓰기 위해서가 아니라
+          # 아티팩트에서 리터럴로 지우기 위해서다: 이 잡의 `gh`가 그 토큰으로 돌았으므로 트리·로그
+          # 어딘가에 남을 수 있고, 그것이 가장 강한 자격증명이다. `yml-lint`의 `merge-token-scope`가
+          # 스크럽 스텝만 예외로 두는 이유가 이것이다(이 스텝은 `claude`를 띄우지 않는다).
+          FACTORY_MERGE_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

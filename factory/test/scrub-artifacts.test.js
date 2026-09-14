@@ -147,6 +147,21 @@ test("CLI: no paths is the only non-zero exit", () => {
   expect(err.join("")).toContain("usage:");
 });
 
-test("SECRET_ENV names the four env vars the workflow templates pass to the scrub step", () => {
-  expect(SECRET_ENV).toEqual(["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]);
+test("SECRET_ENV names the env vars the workflow templates pass to the scrub step — FACTORY_MERGE_TOKEN included (ADR-021)", () => {
+  expect(SECRET_ENV).toEqual(["FACTORY_BOT_TOKEN", "FACTORY_MERGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]);
+});
+
+test("scrubText redacts the merge actor's token literal too — it is the strongest credential in the run (ADR-021)", () => {
+  // 모양 규칙(ghp_/github_pat_)에 걸리지 않는 값을 일부러 쓴다 — 리터럴 경로가 실제로 도는지 봐야 한다.
+  const token = "MERGEACTOR-" + "M".repeat(24);
+  const { text, counts } = scrubText(`gh pr merge used ${token} here`, { secrets: [token] });
+  expect(text).not.toContain(token);
+  expect(text).toContain(REDACTED("env-value"));
+  expect(counts["env-value"]).toBe(1);
+});
+
+test("a workflow that does not set FACTORY_MERGE_TOKEN scrubs exactly as before — a missing env is skipped, not matched", () => {
+  const env = { FACTORY_BOT_TOKEN: "ghp_" + "b".repeat(36) };
+  const secrets = SECRET_ENV.map((n) => env[n]).filter((v) => typeof v === "string" && v.length > 0);
+  expect(secrets).toEqual([env.FACTORY_BOT_TOKEN]);
 });

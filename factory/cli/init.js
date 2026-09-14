@@ -61,7 +61,13 @@ Next:
   1. Edit .factory/harness.toml (or run /know-thy-build:project) and docs/factory/CHARTER.md (status: ready when done)
   2. npx know-thy-build factory doctor
   3. git add -A && git commit && git push    # push BEFORE bootstrap — branch protection blocks the first push
-  4. npx know-thy-build factory bootstrap    # labels, branch protection, token issue date
-  5. gh secret set FACTORY_BOT_TOKEN; gh secret set CLAUDE_CODE_OAUTH_TOKEN   # see docs §4.4`);
+  4. gh secret set FACTORY_BOT_TOKEN         # a NON-ADMIN machine user's PAT (write collaborator; scopes repo, workflow)
+     gh secret set CLAUDE_CODE_OAUTH_TOKEN   # or ANTHROPIC_API_KEY
+     gh secret set FACTORY_MERGE_TOKEN       # optional but recommended: an ADMIN account's PAT — a DIFFERENT account (ADR-021)
+  5. npx know-thy-build factory bootstrap    # labels, branch protection, token issue date
+                                             # with FACTORY_MERGE_TOKEN set it configures two-actor mode: the base branch
+                                             # requires 1 approving review, so the agent's own token can never merge.
+                                             # Without it, merge power stays reachable from agent stages (doctor WARNs).
+                                             # See docs §4.4 and ADR-021.`);
   return 0;
 }

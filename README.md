@@ -90,7 +90,15 @@ Once Phase 1 is done, `npx know-thy-build factory` runs the labelled-issue pipel
 
 - `factory init` — install `.factory/`, `.claude/`, `.github/workflows/`, `docs/factory/` into the repo root (never overwrites; `--diff`/`--upgrade` to refresh package-owned files). On the Claude side that's 4 workflow scripts (`.claude/workflows/factory-{triage,plan,implement,review}.js`), 14 role agents (`.claude/agents/*.md`), and 4 dispatcher commands (`.claude/commands/factory-*.md`)
 - `factory doctor` — verify the harness contract (commands, gates, hooks, workflows, GitHub setup); exit 1 on any FAIL
-- `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`)
+- `factory bootstrap` — labels, branch protection, required checks, `FACTORY_TOKEN_ISSUED_AT` (run it **after** the first `git push`). It also picks the **merge-authority mode** from the secrets it finds — see below
+
+**Secrets — two actors, two tokens (ADR-021).** The factory wants merge power to be unreachable from any stage an agent runs in, by permission rather than by blocking command patterns:
+
+- `FACTORY_BOT_TOKEN` — the **agent actor**. A PAT belonging to a *non-admin* account (a machine user invited as a plain **write** collaborator; scopes `repo` + `workflow`). Every agent stage uses it: checkout, comments, labels, lock branches, PR creation, pushing `claude/*` and `factory/*` branches.
+- `FACTORY_MERGE_TOKEN` — the **merge actor**. An admin/owner PAT (scope `repo`) belonging to a *different* account. It appears only in script-only jobs (the merge stage, which never starts `claude`, and that job's credential-scrub step) — never in a checkout token or an agent step. A lint rule (`merge-token-scope`) enforces that.
+- `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) — the model credential.
+
+With both actor tokens set, `factory bootstrap` requires **1 approving review** on the base branch. The agent actor authors every factory PR and GitHub refuses self-approval, so no command it can assemble will merge; the merge stage approves as the merge actor and then merges. With only `FACTORY_BOT_TOKEN` (single-actor mode — e.g. a private repo on GitHub Free, where branch protection is unavailable at all), everything still works but merge power stays reachable from agent stages and hooks are the only layer: `factory doctor` says so with a `tokens.single-actor` WARN on every run.
 - `factory run <stage> <issue>` — run a stage locally with the exact scripts CI uses
 - `factory run <stage> <issue> --remote` — dispatch the same stage as a GitHub Actions workflow run instead of running it locally (also restarts a stalled/blocked stage; `merge` accepted)
 - `factory run retro [--force]` — run the merge-triggered retro job (light deterministic harvest every merge; full analysis + dark lessons/examples PR, human-approved proposal PR, or `--force` to skip the merge-count threshold)

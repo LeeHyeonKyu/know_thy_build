@@ -72,6 +72,9 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *    GitDiffError를 던질 수 있다), mergeGates() → { checksGreen, integrityGreen } (마찬가지),
  *    prReady?(pr) — draft PR을 ready로 뒤집는다(KTB-15; mergePr 직전. 없으면 건너뛰고 기록만 남긴다),
  *    mergePr(pr), transition({to,reason,mergeGatesResult?}), closeIssue(pr), sleep?(ms),
+ *    twoActor?(bool) + approvePr?(pr) — ADR-021 두 배우 모드: base 브랜치가 승인 1건을 요구하므로
+ *    머지 배우(`FACTORY_MERGE_TOKEN`)가 머지 **직전에** 승인한다. 단일 배우 모드면 `twoActor`가
+ *    falsy이고 이 경로는 통째로 없다(오늘까지의 동작 그대로),
  *    protectedPaths() → { ok, files, reason? } (KTB-5 — base 브랜치 코드로 계산한 보호 경로 목록),
  *    policyViolations() → { ok, files, reason? } (KTB-6 — `additive_only` 섹션 규칙을 벗어난 역할 파일).
  *    둘 다 ok:false거나 dep이 없으면 "위반 없음"이 아니라 **판정 불가**라 blocked다.
@@ -435,6 +438,38 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // dep이 없다고 머지를 멈추지는 않는다 — 이미 ready인 PR(또는 `--draft`를 쓰지 않는 하네스)이면
     // 아무 문제가 없고, draft라면 바로 아래 mergePr가 GitHub의 거부를 그대로 blocked로 옮긴다.
     record(["merge: prReady dep not wired — merging without the draft flip"]);
+  }
+
+  // (6b) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는
+  // 승인 1건을 요구하므로(`required_pull_request_reviews`), 승인 없이 부른 `gh pr merge`는 GitHub이
+  // 거부한다. 승인은 **머지 배우**(`FACTORY_MERGE_TOKEN`, 이 잡의 `GH_TOKEN`)로 나가고, PR을 연
+  // 계정은 에이전트 배우라 서로 다르다 — 그래서 이 승인은 유효하다. 반대로 에이전트 스테이지가
+  // 자기 토큰으로 같은 호출을 해도 GitHub이 422(`Can not approve your own pull request`)로 막는다:
+  // 이 설계가 "명령 열거"가 아니라 "권한"으로 서 있는 지점이 여기다.
+  //
+  // **자리가 여기인 이유**: 승인은 PR head sha에 묶이고 `dismiss_stale_reviews: true`라 새 커밋이
+  // 들어오면 무효가 된다 — 모든 게이트·체크가 끝난 뒤, 머지 직전이 승인이 낡지 않는 유일한 자리다.
+  //
+  // **거부는 `needs-human`이지 `blocked`이 아니다.** blocked은 sweeper와 재시도 경로가 자동으로 다시
+  // 미는 상태인데(§KTB-15b), 승인 거부의 원인(같은 계정·토큰 스코프 부족·머지 배우가 협력자가 아님)은
+  // 전부 **사람이 계정 설정을 고쳐야** 풀린다. 같은 호출을 다시 하면 같은 422가 돌아올 뿐이고,
+  // 그 재시도는 비용만 태운다. 그래서 한 번 실패하면 사유를 이름으로 대고 사람에게 넘긴다.
+  if (d.twoActor) {
+    if (!d.approvePr) {
+      const reason = "two-actor mode is on but the approvePr dep is not wired — the merge actor cannot approve, and the base branch requires 1 approving review (ADR-021)";
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    try {
+      await d.approvePr(pr);
+      record([`merge: PR #${pr} approved by the merge actor (two-actor mode)`]);
+    } catch (e) {
+      const reason = `two-actor approval refused — the merge actor could not approve PR #${pr}: ${e?.message || e}. The approving account must differ from the PR author (GitHub rejects self-approval with 422) — check that FACTORY_MERGE_TOKEN belongs to an admin account other than the FACTORY_BOT_TOKEN account (ADR-021)`;
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: approvePr FAIL — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
   }
 
   try {
