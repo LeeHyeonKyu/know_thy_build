@@ -79,8 +79,14 @@ export function stageClaudeArgs({ root, stage, issue, harness, charter, harnessI
   return args;
 }
 
-export function stageClaudeEnv({ root, harnessIssue = false }) {
-  const env = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root };
+export function stageClaudeEnv({ root, stage, harnessIssue = false }) {
+  // ADR-023 Task 8b — **이 세션은 스테이지의 세션이다**를 훅에게 말하는 한 글자. `block-dangerous.sh`가
+  // 이것으로 브랜치 이동(`git checkout <ref>`·`git switch`)을 막는다: 브랜치 체크아웃은 이제 스테이지의
+  // 일이고(§makeCheckoutBranch), 세션 안에서 브랜치가 바뀌면 디스크의 훅 스크립트·settings·CLAUDE.md가
+  // PR의 것으로 갈린다(훅 스크립트는 **호출마다** 디스크에서 읽힌다 — overlay가 세션 도중 무효가 된다).
+  // 사람의 자기 세션에는 이 변수가 없으므로 평범한 `git switch -`는 그대로 열려 있다. 세션이 스스로
+  // 지울 수 없다: 훅은 Claude Code가 **세션 env**로 띄우는 프로세스라 명령줄의 `VAR= git …` 접두사가 닿지 않는다.
+  const env = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root, FACTORY_STAGE: stage || "1" };
   // 훅은 `claude -p` 세션의 자식 프로세스라 이 변수를 그대로 물려받는다 — block-dangerous.sh가 이것으로
   // 보호 경로 목록을 좁힌다. 값이 정확히 "1"일 때만 선다(훅 쪽 계약).
   if (harnessIssue) env.FACTORY_HARNESS_ISSUE = "1";
@@ -223,6 +229,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
   if (c.reclaimed) record([`lock: reclaimed from completed runner ${c.reclaimed.runner}`]);
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
+  let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
@@ -364,6 +371,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       }
       checkoutSha = co.sha;
     }
+    // ADR-023 Task 8b — implement의 브랜치 체크아웃은 **스테이지의 일이다**. 예전에는 빌더가 세션 안에서
+    // 자기 브랜치를 체크아웃했고, 그 순간 디스크의 훅 스크립트·settings·CLAUDE.md가 PR의 것으로 갈렸다
+    // (훅 스크립트는 호출마다 디스크에서 읽힌다 — overlay가 세션 도중 무효가 된다). 순서가 곧 수정이다:
+    // 브랜치 체크아웃 → overlay(+drift) → 빌더. 실패는 진행이 아니라 정지다(원인은 대개 러너 쪽이다).
+    if (stage === "implement" && d.checkoutBranch) {
+      const cb = await d.checkoutBranch();
+      if (!cb.ok) {
+        const t = await d.transition({ to: "factory:blocked", reason: `branch checkout failed — ${cb.reason}` });
+        record([`branch: FAIL — ${cb.reason}`, ...refusal(t)]);
+        return 2;
+      }
+      stageBranchName = cb.branch;
+      record([branchLine(cb)]);
+    }
     // KTB-37 — 체크아웃이 끝난 트리 위에 **팩토리 소유 설정만** 스테이지 자신의 커밋에서 덮는다
     // (§makeFactoryOverlay). review·merge는 방금 detach된 PR head 위에서, implement는 빌더가 돌기
     // 전에 한다. 실패는 진행이 아니라 정지다 — PR head의 훅·settings·리뷰어 프롬프트로 도는 스테이지는
@@ -378,12 +399,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
         return 2;
       }
       overlaidPaths = ov.paths || [];
-      // implement는 **유일한 쓰기 스테이지**다: 여기서 overlay가 실제로 파일을 바꿨다는 것은 워크플로가
-      // 준 트리가 스테이지 자신의 커밋이 아니었다는 뜻이고, 그 트리 위에서 빌더가 `git add -A`로 커밋하면
-      // overlay가 PR에 실려 나간다. 그래서 덮을 것이 있으면 **빌더를 띄우지 않는다** — implement의 커밋이
-      // 팩토리 설정을 담을 수 있는 경로 자체가 사라진다(정상 경로에서 이 overlay는 언제나 no-op이다).
+      // implement는 **유일한 쓰기 스테이지**다: 여기서 overlay가 실제로 파일을 바꿨다는 것은 이 트리가
+      // 팩토리 소유 경로를 base와 다르게 들고 있다는 뜻이고, 그 위에서 빌더가 `git add -A`로 커밋하면
+      // overlay의 되돌림이 PR에 실려 나간다(= PR 자신의 변경이 말없이 사라진다). 그래서 덮을 것이 있으면
+      // **빌더를 띄우지 않는다** — implement의 커밋이 팩토리 설정을 담을 수 있는 경로 자체가 사라진다.
+      // Task 8b 이후 이 자리의 원인이 하나 늘었다: 스테이지가 체크아웃한 `claude/fq-<issue>` 브랜치가
+      // 팩토리 소유 경로를 고쳐 들고 있는 경우다(예: `.claude/**`를 건드린 PR의 rework 라운드).
+      // 그런 PR은 어차피 사람이 머지한다(`[protected]`) — 그 라운드도 사람에게 넘긴다. 세션을 PR의
+      // 설정으로 돌리는 것과 PR의 작업을 말없이 되돌리는 것 중 어느 쪽도 스테이지가 고를 일이 아니다.
       if (stage === "implement" && overlaidPaths.length) {
-        const reason = `the implement tree is not the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} factory-owned path(s): ${overlaidPaths.slice(0, 10).join(", ")}`;
+        const reason = `the implement tree carries factory-owned paths that differ from the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} path(s): ${overlaidPaths.slice(0, 10).join(", ")}`;
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
         return 2;
@@ -420,6 +445,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
     const usage = usageLine(out, finalProgress);
+    // ADR-023 Task 8b — implement의 구조적 백스톱. 쓰기 스테이지라 클린 체크는 할 수 없지만(빌더가
+    // 파일을 쓰는 것이 이 스테이지의 일이다) **두 가지**는 세션 뒤에도 참이어야 한다: HEAD가 아직
+    // 스테이지가 체크아웃한 브랜치이고, 팩토리 소유 경로가 아직 스테이지 커밋의 바이트라는 것.
+    // 어느 쪽이든 아니면 그 세션이 어떤 설정으로 무엇을 판단했는지 알 수 없다 = 판정 불가 =
+    // `factory:blocked`(GREEN도 RED도 아니다). 산출물은 받지 않는다 — gates도 verify도 부르지 않는다.
+    if (stage === "implement" && stageBranchName && d.assertStageBranch) {
+      const b = await d.assertStageBranch();
+      if (!b.ok) {
+        const reason = `undecidable — ${b.reason}`;
+        const t = await d.transition({ to: "factory:blocked", reason });
+        record([`branch: FAIL — ${b.reason}`, ...refusal(t), usage]);
+        return 2;
+      }
+    }
     // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
     // 다시 묻는다(ADR-020 KTB-14). implement(유일한 쓰기 스테이지)는 건너뛴다 — merge는 여기 오지도
     // 않는다(위에서 이미 return). 훅이 놓친 모양으로 어떻게 건드렸든, 스크래치 경로(`.factory/out/**`·
@@ -1071,6 +1110,73 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
   };
 }
 
+/** implement가 쓰는 브랜치 이름. 이름을 한 군데서만 만든다 — 체크아웃·사후 확인·컨텍스트가 같은 문자열을 봐야 한다. */
+export const stageBranch = (issue) => `claude/fq-${issue}`;
+
+/**
+ * ── ADR-023 Task 8b — **브랜치 체크아웃은 스테이지의 것이다** ─────────────────────────────────────
+ * Task 8(KTB-37)은 스테이지 **시작** 시점의 팩토리 설정을 base로 고정했지만, implement의 rework
+ * 라운드는 빌더가 `claude -p` 세션 **안에서** 자기 브랜치를 체크아웃했다 — 커맨드 템플릿이 규칙 1로
+ * 그렇게 지시했다. `--settings`와 훅 **배선**은 세션 시작 시점의 것으로 굳지만 훅 **스크립트**는
+ * 호출마다 디스크에서 읽히고, `.claude/settings*.json`·`CLAUDE.md`·`.factory/**`도 마찬가지로
+ * 그 순간부터 PR의 것이 된다. 곧 overlay가 깔아 둔 base 설정이 세션 중간에 통째로 갈렸다.
+ *
+ * 그래서 체크아웃을 스테이지가 한다: 원격에 브랜치가 있으면 fetch 후 `checkout -B`(지난 라운드
+ * 위에 정확히 선다), 없으면 스테이지 **자신의 커밋**에서 새로 만든다. 그다음이 overlay이고, 그다음이
+ * 빌더다 — 이 순서가 이 Task의 전부다.
+ *
+ * **로컬에만 있는 브랜치는 건드리지 않는다**(fail closed): 원격에 없는데 로컬에 있다는 것은 지난
+ * 라운드의 push가 실패했거나 사람이 뭔가 하고 있다는 뜻이고, `-B`는 그것을 말없이 지운다.
+ */
+export function makeCheckoutBranch({ run, root, issue, env = process.env, defaultBranch = () => "main" }) {
+  return async () => {
+    const branch = stageBranch(issue);
+    const s = await resolveStageSha({ run, root, env, defaultBranch: typeof defaultBranch === "function" ? defaultBranch() : defaultBranch });
+    if (!s.ok) return { ok: false, reason: s.reason };
+    // "원격에 있는가"를 fetch의 종료 코드로 묻지 않는다 — 네트워크 실패와 "없는 브랜치"가 같은 코드로
+    // 오고, 그 둘을 섞으면 rework 라운드가 조용히 새 브랜치로 시작해 지난 라운드의 작업을 버린다.
+    const ls = await run("git", ["ls-remote", "--heads", "origin", branch], { cwd: root });
+    if (ls.code !== 0) return { ok: false, reason: `git ls-remote failed for ${branch}: ${ls.stderr?.trim() || `exit ${ls.code}`}` };
+    if (ls.stdout.trim()) {
+      // refspec을 명시해 원격 추적 ref를 확실히 세운다(`FETCH_HEAD`만으로는 `-B`의 출발점이 모호하다).
+      const f = await run("git", ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { cwd: root });
+      if (f.code !== 0) return { ok: false, reason: `git fetch failed for ${branch}: ${f.stderr?.trim() || `exit ${f.code}`}` };
+      const co = await run("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: root });
+      if (co.code !== 0) return { ok: false, reason: `git checkout -B ${branch} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
+      return { ok: true, branch, base: `origin/${branch}`, existed: true };
+    }
+    const local = await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
+    if (local.code === 0) {
+      return { ok: false, reason: `${branch} exists locally (${local.stdout.trim().slice(0, 7)}) but not on origin — refusing to reset a branch whose commits were never pushed` };
+    }
+    const co = await run("git", ["checkout", "-b", branch, s.sha], { cwd: root });
+    if (co.code !== 0) return { ok: false, reason: `git checkout -b ${branch} ${s.sha.slice(0, 7)} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
+    return { ok: true, branch, base: s.sha, source: s.source, existed: false };
+  };
+}
+
+/** run 기록의 한 줄 — 누가 어디에서 이 브랜치를 세웠는가. */
+export const branchLine = (cb) =>
+  `branch: ${cb.branch} checked out by the stage from ${cb.existed ? cb.base : `${String(cb.base).slice(0, 7)} (${cb.source || "base"}, new branch)`} — the builder never runs git checkout/switch`;
+
+/**
+ * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
+ * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
+ * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
+ * detach면(`HEAD`) 증명할 수 없는 것이고, 이 저장소에서 판정 불가의 자리는 `factory:blocked`다.
+ */
+export async function assertStageBranch({ run, cwd, issue, sha }) {
+  const branch = stageBranch(issue);
+  const r = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+  if (r.code !== 0) return { ok: false, reason: `git rev-parse --abbrev-ref HEAD failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
+  const at = r.stdout.trim();
+  if (at !== branch) return { ok: false, reason: `the session left ${branch} — HEAD is now ${at || "(empty)"}, so the factory config on disk was no longer the stage's from that moment on` };
+  if (!sha) return { ok: true, branch: at };
+  const drift = await overlayDrift({ run, cwd, sha });
+  if (!drift.ok) return { ok: false, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
+  return { ok: true, branch: at };
+}
+
 /**
  * ADR-020 KTB-37 — **스테이지는 PR의 코드를 돌지만, 팩토리 자신의 설정은 스테이지 자신의 커밋(base)의
  * 것이어야 한다.** 위 `makeCheckoutHead`가 워킹 트리를 PR head로 detach하고 나면, 그 트리에 있는
@@ -1330,6 +1436,16 @@ async function main() {
     },
     checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
     /**
+     * ADR-023 Task 8b — implement의 브랜치는 스테이지가 체크아웃한다(빌더가 아니라). `harness`는
+     * charterReady에서 이미 로드됐다 — overlay와 같은 기본 브랜치를 늦게 읽는다.
+     */
+    checkoutBranch: async () => {
+      const cb = await makeCheckoutBranch({ run, root, issue, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
+      return cb;
+    },
+    /** 세션 뒤: HEAD가 아직 그 브랜치이고 팩토리 설정이 아직 스테이지 커밋의 것인가(fail closed). */
+    assertStageBranch: async () => assertStageBranch({ run, cwd: root, issue, sha: overlaySha }),
+    /**
      * ADR-020 KTB-37 — 체크아웃된 트리 위에 팩토리 소유 설정만 스테이지 자신의 커밋에서 덮는다.
      * `harness`는 charterReady에서 이미 로드됐다 — 기본 브랜치는 그때 굳은 값을 늦게 읽는다.
      */
@@ -1385,7 +1501,7 @@ async function main() {
     ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),
     claudeP: async (_ctx, { harnessIssue = false } = {}) => {
       const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
-      const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, harnessIssue }) });
+      const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, stage, harnessIssue }) });
       mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
       writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
       // envelope을 이름 붙여 한 벌 더 남긴다 — `<stage>.json`은 산출물 추출이 성공하면 그 객체로

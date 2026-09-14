@@ -138,7 +138,7 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
                   "cp /tmp/h.toml .factory/harness.toml", "mv /tmp/h.toml .factory/harness.toml",
                   "python3 -c \"open('.factory/harness.toml','w').write('x')\"",
                   "cat t | tee vitest.config.js", "sed -i '' 's/a/b/' playwright.config.ts",
-                  "echo x > playwright.config.js", "git checkout HEAD~1 -- .factory/harness.toml",
+                  "echo x > playwright.config.js",
                   // KTB-23: 의존성 추가가 바로 하네스 이슈가 하려는 일이다 — 매니페스트를 못 쓰면
                   // 데모 #2의 벽에 다시 부딪힌다(머지는 여전히 사람이다 — L1이 자동 머지를 거부한다).
                   "npm pkg set dependencies.pg=^8 > package.json", "echo '{}' > package.json",
@@ -161,7 +161,11 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
                         "cat foo | tee docs/factory/CHARTER.md",
                         "cat foo | tee tsconfig.json", "mv /tmp/evil eslint.config.js",
                         "gh pr merge 5", "git push --force origin x",
-                        "gh issue edit 7 --add-label factory:approved"];
+                        "gh issue edit 7 --add-label factory:approved",
+                        // ADR-023 Task 8b — 카브아웃이 여는 것은 파일 **편집**이다. 다른 커밋의 내용으로
+                        // 워킹 트리를 덮는 것은 편집이 아니라 **세션 설정 교체**이고(overlay가 base로
+                        // 고정한 바로 그 바이트다), 그래서 harness 이슈에서도 열리지 않는다.
+                        "git checkout HEAD~1 -- .factory/harness.toml"];
   for (const c of stillBlocked) {
     const r = await bash("block-dangerous.sh", cmd(c), undefined, harness);
     expect(r.code, c).toBe(2);
@@ -1315,4 +1319,90 @@ test("deny-all-writes: backslash-newline continuations are joined before matchin
   for (const c of [`rm ${C}-rf src`, `echo x ${C}> src/a.js`, `git ${C}commit -m x`, `sed ${C}-i 's/a/b/' src/a.js`]) {
     expect((await bash("deny-all-writes.sh", cmd(c))).code, JSON.stringify(c)).toBe(2);
   }
+}, 30000);
+
+// ── ADR-023 Task 8b: 세션은 브랜치를 바꾸지 않는다 ───────────────────────────────────────────────
+// implement 빌더는 세션 **안에서** `git checkout claude/fq-<n>`을 했다. 훅 스크립트는 호출마다
+// 디스크에서 읽히므로, 그 브랜치가 변조한 `.claude/hooks/*.sh`를 들고 있으면 그 순간부터 세션의
+// 모든 판정이 **PR이 쓴 훅**으로 이뤄진다 — base overlay(KTB-37)가 세션 도중 통째로 갈린다.
+// 이제 체크아웃은 스테이지의 일이고, 세션 안의 브랜치 이동은 여기서 막힌다. 스테이지 세션임을
+// 아는 방법은 `FACTORY_STAGE`다(run-stage.js가 `claude -p`의 env에 심는다 — 명령줄의 env 접두사는
+// 훅 프로세스의 환경이 아니므로 세션이 스스로 지울 수 없다). 사람의 자기 세션은 그대로 둔다:
+// `know-thy-build` 스킬들이 `gh pr checkout <pr>` → `git switch -`를 사람에게 시킨다.
+const STAGE = { FACTORY_STAGE: "implement" };
+
+test("block-dangerous: a stage session cannot switch branches at all (Task 8b)", async () => {
+  const C = "\\\n";
+  const blocked = [
+    "git checkout main", "git checkout claude/fq-7", "git checkout -b claude/fq-7", "git checkout -B claude/fq-7 origin/claude/fq-7",
+    "git checkout --detach HEAD", "git checkout origin/main", "git checkout -",
+    "git switch main", "git switch -", "git switch -c claude/fq-7", "git switch --detach HEAD",
+    // 프레임워크가 이미 덮는 우회들이 이 규칙에도 그대로 적용돼야 한다.
+    "git -C /repo switch main", "git --git-dir=.git checkout main", "git -c core.pager=cat switch main",
+    `git ${C}switch main`, `git checkout ${C}main`,
+    'sh -c "git switch main"', "bash -c 'git checkout main'", 'eval "git switch main"',
+    "out=$(git checkout main)", "true && git switch main", "\\git switch main", "$'git' switch main",
+  ];
+  const allowed = [
+    // 파일 복원은 브랜치 이동이 아니다 — `--` 뒤는 pathspec이다.
+    "git checkout -- src/x.js", "git checkout HEAD~1 -- src/a.js", "git checkout origin/main -- src/a.js",
+    "git restore src/a.js", "git restore --staged src/a.js",
+    "git status", "git log --oneline -5", "git rev-parse --abbrev-ref HEAD",
+    "gh pr checkout 5",                                  // gh는 스테이지가 쓰지 않지만 이 규칙의 대상도 아니다
+    'grep -rn "git switch" docs/', "git log --grep='git checkout'",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c), undefined, STAGE);
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c), undefined, STAGE)).code, c).toBe(0)));
+}, 60000);
+
+test("block-dangerous: outside a stage session a branch switch is a person's ordinary move", async () => {
+  for (const c of ["git checkout main", "git switch -", "git checkout -b factory/role-x"]) {
+    expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
+  }
+  // 세션 밖이어도 overlay 뿌리를 덮는 체크아웃은 그대로 막힌다(아래 표와 같은 규칙).
+  expect((await bash("block-dangerous.sh", cmd("git checkout origin/pr -- .claude/hooks/x.sh"))).code).toBe(2);
+}, 30000);
+
+test("block-dangerous: whole-tree restores that would swap the factory config are blocked everywhere (Task 8b)", async () => {
+  const C = "\\\n";
+  const blocked = [
+    // `--hard`는 pathspec이 없다 = 트리 전체 = overlay 뿌리 전부를 브랜치의 것으로 되돌린다.
+    "git reset --hard", "git reset --hard origin/claude/fq-7", "git reset --hard HEAD",
+    "git -C /repo reset --hard", `git reset ${C}--hard HEAD`, 'sh -c "git reset --hard"', "out=$(git reset --hard)",
+    // stash도 같은 일을 두 방향으로 한다: push는 overlay를 걷어 내고, pop/apply는 다른 트리를 덮는다.
+    "git stash", "git stash push", "git stash save wip", "git stash pop", "git stash apply", "git stash apply stash@{0}",
+    "git stash branch tmp", "git -C /repo stash pop", 'bash -c "git stash pop"',
+    // `--source`는 다른 커밋의 내용으로 워킹 트리를 덮는다 — overlay 뿌리를 지목하면 설정 교체다.
+    "git restore --source=origin/claude/fq-7 -- .claude/hooks/block-dangerous.sh",
+    "git restore --source origin/claude/fq-7 .factory/ci-settings.json",
+    "git checkout origin/claude/fq-7 -- .claude/settings.json",
+    "git checkout HEAD~1 -- docs/factory/CHARTER.md", "git checkout HEAD~1 -- docs/CLAUDE.md",
+    "git checkout HEAD~1 -- src/AGENTS.md", "git checkout HEAD~1 -- .mcp.json",
+  ];
+  const allowed = [
+    "git reset --soft HEAD~1", "git reset HEAD -- src/a.js", "git reset src/a.js",
+    "git stash list", "git stash show -p", "git stash drop",
+    "git restore src/a.js", "git restore --source=HEAD~1 -- src/a.js",
+  ];
+  await Promise.all(blocked.map(async (c) => {
+    const r = await bash("block-dangerous.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/factory: blocked/);
+  }));
+  await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
+}, 60000);
+
+test("block-dangerous: the overlay roots do not bend for a factory:harness issue (Task 8b)", async () => {
+  // KTB-20의 카브아웃은 **편집**을 연다(`.factory/harness.toml`을 Edit할 수 있다). 그러나 다른 커밋의
+  // 내용으로 덮는 것은 편집이 아니라 **세션 설정 교체**다 — overlay가 base로 고정한 바로 그 바이트다.
+  const harness = { FACTORY_HARNESS_ISSUE: "1" };
+  for (const c of ["git checkout HEAD~1 -- .factory/harness.toml", "git restore --source=HEAD~1 .factory/harness.toml", "git reset --hard", "git stash pop"]) {
+    expect((await bash("block-dangerous.sh", cmd(c), undefined, harness)).code, c).toBe(2);
+  }
+  // 반면 평범한 편집은 그 이슈에서 열려 있다(기존 계약 그대로).
+  expect((await bash("block-dangerous.sh", cmd("echo x > .factory/harness.toml"), undefined, harness)).code).toBe(0);
 }, 30000);
