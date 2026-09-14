@@ -150,7 +150,7 @@ PreToolUse 경계에서 `transition.js … --human`/`--retry` 셸 호출 자체�
 형태까지 — MF-3/재리뷰 #1·#4가 넓혀 둔 같은 경계 클래스를 쓴다), (2) `bin/transition.js`가
 `refuseHumanFlag`로 `CLAUDE_PROJECT_DIR`나 `GITHUB_ACTIONS`가 서 있으면(=에이전트가 띄운 스테이지
 세션이거나 CI 러너다 — `run-stage.js`가 매 스테이지의 `claude -p` env에 `CLAUDE_PROJECT_DIR`를 심는다)
-`gh`를 부르기도 전에 exit 2로 거절한다. **스크립트는 이 두 자물쇠를 다 지나야만 도달하는 자리에
+`gh`를 부르기도 전에 exit 2로 거절한다; (3) 같은 판정이 `lib/transition.js`의 `transition()` 안에도 있어, CLI 래퍼를 건너뛰고 라이브러리를 직접 import하는 호출(`node -e`)도 같은 답을 받는다. **스크립트는 이 자물쇠들을 다 지나야만 도달하는 자리에
 있는데, 그 자리 자체가 스크립트에게는 없다**(시도하면 훅이나 CLI가 먼저 막는다; 어느 쪽도 뚫으면
 그래프의 `human:true` 검사가 마지막으로 있고, 시도했는데도 그래프가 거부하면 평소의 거부 코멘트가
 남는다) — 전이 코멘트의 `by=human reason=retry`가 세 층을 모두 지났다는 증거로 남는다. 사람이라고

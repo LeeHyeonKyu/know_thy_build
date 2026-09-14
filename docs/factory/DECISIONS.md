@@ -1346,7 +1346,9 @@ PreToolUse 경계에서 `transition.js … --human`/`--retry` 셸 호출 자체�
 클래스를 그대로 써서 래퍼·`$( )`·체인·백슬래시 형태까지 잡는다 — MF-3/재리뷰 #1·#4와 같은 방식). (2)
 `factory/lib/transition.js`의 새 순수 함수 `refuseHumanFlag(env)`가 `CLAUDE_PROJECT_DIR`나
 `GITHUB_ACTIONS`가 서 있으면 true를 돌려주고, `bin/transition.js`는 그 값이 true면 `gh`를 부르기도
-전에 `--human`/`--retry`를 exit 2로 거절한다 — `run-stage.js:84`가 모든 스테이지의 `claude -p` env에
+전에 `--human`/`--retry`를 exit 2로 거절한다. (3, 리뷰 aab3db8) 같은 판정이 `transition()` 함수 첫 줄에도
+있다 — `node -e "import('lib/transition.js')…"`처럼 CLI를 건너뛰는 호출은 훅의 `--human` 토큰도 래퍼의
+검사도 지나치므로, 문은 라이브러리 자신이 잠근다 — `run-stage.js:84`가 모든 스테이지의 `claude -p` env에
 `CLAUDE_PROJECT_DIR`를 심으므로(자식 프로세스가 그대로 물려받는다) 에이전트 세션과 CI 러너를 신뢰성
 있게 가려낸다. 둘 다 없는 사람의 노트북 셸에서만 통과한다.
 

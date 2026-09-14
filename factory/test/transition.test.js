@@ -8,6 +8,21 @@ function fakeGh(labels, comments = []) {
     setFactoryLabel: vi.fn(async () => {}), comment: vi.fn(async () => "url#issuecomment-1") };
 }
 
+// 리뷰 aab3db8 — 세 번째 자물쇠: 라이브러리 함수 자신이 에이전트/러너 env에서 --human/--retry를 거절한다.
+// (`node -e "import('lib/transition.js')…"`는 훅의 `--human` 토큰도, CLI 래퍼의 검사도 지나치기 때문.)
+test("human/retry from an agent or runner env is refused inside transition() before any gh call", async () => {
+  for (const env of [{ CLAUDE_PROJECT_DIR: "/w" }, { GITHUB_ACTIONS: "true" }]) {
+    const gh = fakeGh(["factory:needs-human"]);
+    const r = await transition({ gh, issue: 7, to: null, human: true, retry: true, env });
+    expect(r.ok).toBe(false); expect(r.reason).toMatch(/agent\/runner session/);
+    expect(gh.issue).not.toHaveBeenCalled(); expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  }
+  // 사람의 셸(둘 다 없음)에서는 이 자물쇠가 열려 다음 검사(resume point)로 간다.
+  const gh = fakeGh(["factory:needs-human"]);
+  const r = await transition({ gh, issue: 7, to: null, human: true, retry: true, env: {} });
+  expect(gh.issue).toHaveBeenCalled(); expect(r.reason).not.toMatch(/agent\/runner session/);
+});
+
 test("graph violation → ok:false, no label change", async () => {
   const gh = fakeGh(["backlog"]);
   const r = await transition({ gh, issue: 7, to: "factory:approved" });
