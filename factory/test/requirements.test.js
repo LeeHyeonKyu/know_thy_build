@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { requirementFor } from "../lib/requirements.js";
+import { requirementFor, GATES_UNVERIFIED, HUMAN_MERGE_STATUSES_UNVERIFIED } from "../lib/requirements.js";
 import { renderHandoff } from "../lib/handoff.js";
 
 const sha = "c".repeat(40);
@@ -127,6 +127,35 @@ test("H1c: factory:merged re-checks quorum, all-approve (recomputed from must_fi
   expect(r(ctx({ review: { ...review, round: 4 } })).reason).toMatch(/round 4 > K=3/);
   // K를 모르면(구형 배선) 라운드는 묻지 않는다 — 정족수는 그대로 문다
   expect(r(ctx({ review: { ...review, round: 4 }, maxRounds: undefined })).ok).toBe(true);
+});
+
+/**
+ * KTB-46 r2 — **사람이 이미 머지한 보호 경로 PR의 사후 기록**(스펙 §12.3-2). 게이트 증거의 출처만
+ * 바뀐다(러너의 로컬 파일 → 러너가 그 커밋에 올린 `factory/gates` 상태, sweeper가 `verifyFactoryStatuses`로
+ * 게시자까지 확인한 뒤 `statusesVerified`를 세운다). **리뷰 증거는 하나도 면제되지 않는다** — 그것이
+ * 이 설계의 요점이다: 사람이 리뷰를 거치지 않은 PR을 머지하면 이슈는 needs-human에 그대로 남는다.
+ */
+test("KTB-46: humanMerged+statusesVerified swaps the gates source only — quorum, K and sha binding still bite", () => {
+  const v = (role, verdict = "approve") => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: `${role}1`, where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a"), v("b")], orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:merged");
+  // sweeper가 넘기는 ctx 그대로 — 게이트 파일도, checksGreen/integrityGreen도 없다(있을 수 없다).
+  const ctx = (over = {}) => ({ comments: [c("review", over.review ?? review)], issue: 7, prHeadSha: sha, rosterSize: 2, roster: ["a", "b"], maxRounds: 3, humanMerged: true, statusesVerified: true, ...over });
+
+  expect(r(ctx()).ok).toBe(true);
+  // `humanMerged` 한 플래그만으로는 아무것도 열리지 않는다 — 상태 확인이 그 문의 열쇠다.
+  expect(r(ctx({ statusesVerified: undefined })).reason).toBe(HUMAN_MERGE_STATUSES_UNVERIFIED);
+  expect(r(ctx({ statusesVerified: false })).reason).toBe(HUMAN_MERGE_STATUSES_UNVERIFIED);
+  // 리뷰 증거는 그대로 물린다: 정족수 미달 · 만장일치 아님 · K 초과 · 다른 커밋의 handoff.
+  expect(r(ctx({ review: { ...review, verdicts: [v("a")] } })).reason).toMatch(/verdict count 1 != roster size 2/);
+  expect(r(ctx({ review: { ...review, decision: "approved", verdicts: [v("a"), v("b", "reject")] } })).reason).toMatch(/not all approve/);
+  expect(r(ctx({ review: { ...review, round: 4 } })).reason).toMatch(/round 4 > K=3/);
+  expect(r(ctx({ prHeadSha: "e".repeat(40) })).reason).toMatch(/head_sha != PR head/);
+  expect(r(ctx({ comments: [] })).reason).toMatch(/review handoff missing/);
+  // 다른 이슈의 handoff는 이 이슈의 증거가 아니다.
+  expect(r(ctx({ issue: 8 })).reason).toMatch(/handoff issue mismatch/);
+  // 그리고 이 문은 `factory:merged` 전용이다 — `factory:approved`는 여전히 게이트 파일을 요구한다.
+  expect(requirementFor("factory:approved")(ctx()).reason).toBe(GATES_UNVERIFIED);
 });
 
 test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing, GREEN이 아니면 거부 (전이 경로에서만)", () => {

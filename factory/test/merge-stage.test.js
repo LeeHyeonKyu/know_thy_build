@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { runMergeStage } from "../lib/merge-stage.js";
+import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVIDENCE_STATUSES } from "../lib/merge-stage.js";
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
@@ -413,6 +413,74 @@ test("(3b'') 기존 테스트 수정은 자기 제목으로 거부된다 — 자
   }));
   expect(d.mergePr).not.toHaveBeenCalled();
   expect(lines.some((l) => /existing tests modified or deleted/.test(l))).toBe(true);
+});
+
+/**
+ * KTB-46 — **사유 문구와 sweeper의 판정은 같은 출처에서 나와야 한다.** `sweepHumanMerged`는
+ * `HUMAN_MERGE_REQUIRED` 하나로 "사람이 머지해 주기를 기다리는 needs-human"을 나머지 전부와 가른다.
+ * 다섯 거부 갈래 중 하나라도 그 문구를 잃으면 그 갈래의 이슈는 사람이 머지한 뒤에도 영원히
+ * needs-human에 남는다 — 그리고 그 실패는 **조용하다**(아무 에러도, 아무 코멘트도 나지 않는다).
+ */
+test("KTB-46: every human-merge refusal reason carries the exported HUMAN_MERGE_REQUIRED phrase", async () => {
+  const cases = {
+    "protected paths": { protectedPaths: async () => ({ ok: true, files: [".factory/harness.toml"] }) },
+    "agent role sections": { policyViolations: async () => ({ ok: true, files: [".claude/agents/x.md"] }) },
+    lessons: {
+      policyViolations: async () => ({ ok: true, files: [".factory/lessons/reviewer-qa.md"], violations: [LESSONS_GONE] }),
+    },
+    "harness.toml frozen sections": {
+      policyViolations: async () => ({
+        ok: true, files: [".factory/harness.toml"],
+        violations: [{ file: ".factory/harness.toml", rule: "harness.toml [gates.thresholds] edited — human merge required" }],
+      }),
+    },
+    "existing tests": {
+      policyViolations: async () => ({
+        ok: true, files: ["test/a.test.js"],
+        violations: [{ file: "test/a.test.js", rule: "tests-modified — 3 line(s) removed from an existing test — human merge required" }],
+      }),
+    },
+  };
+  for (const [name, over] of Object.entries(cases)) {
+    const d = baseD(over);
+    expect(await run(d), name).toBe(2);
+    const { to, reason } = d.transition.mock.calls.at(-1)[0];
+    expect(to, name).toBe("factory:needs-human");
+    expect(HUMAN_MERGE_REQUIRED.test(reason), `${name}: ${reason}`).toBe(true);
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+  }
+});
+
+/**
+ * KTB-46 r2 — §(6b)의 판정 (d)를 꺼낸 순수 함수. sweeper의 사람-머지 반영 팔이 **같은 함수**를
+ * 부른다(판정을 두 벌 구현하면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다). 위의 §(6b)
+ * 테스트들이 그대로 초록인 것이 "동작이 한 글자도 바뀌지 않았다"의 증거다.
+ */
+test("KTB-46 r2: verifyFactoryStatuses — success + factory creator on both contexts, else a named refusal", () => {
+  const SHA = "b".repeat(40);
+  const ok = REVIEW_EVIDENCE_STATUSES.map((context) => ({ context, state: "success", creatorLogin: "ktb-bot" }));
+  const logins = ["ktb-bot", "ktb-owner"];
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok, logins })).toEqual({ ok: true });
+  // 대소문자는 무시한다(GitHub 로그인은 대소문자를 구분하지 않는다).
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok.map((s) => ({ ...s, creatorLogin: "KTB-Bot" })), logins })).toEqual({ ok: true });
+
+  const bad = (over, re) => {
+    const r = verifyFactoryStatuses({ sha: SHA, statuses: ok.map((s, i) => (i === 1 ? { ...s, ...over } : s)), logins });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(re);
+  };
+  bad({ state: "failure" }, /is "failure", not success/);
+  bad({ creatorLogin: "mallory" }, /posted by @mallory.*not a factory account/s);
+  bad({ creatorLogin: "" }, /names no creator/);
+
+  // 상태가 아예 없는 것은 통과가 아니다 — "리뷰 스테이지가 이 커밋에 올린 적이 없다"이다.
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: [], logins }).reason).toMatch(/no factory\/review commit status/);
+  // 조회 결과가 목록이 아니거나 대조할 계정이 없으면 **판정 불가**다(fail closed).
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: null, logins }).reason).toMatch(/unreadable — no list returned/);
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: ok, logins: [] }).reason).toMatch(/could not be resolved/);
+  // 같은 context가 여러 번이면 **가장 최근 것**(목록의 첫 항목)이 유효한 상태다.
+  const stale = [{ context: "factory/review", state: "failure", creatorLogin: "ktb-bot" }, ...ok];
+  expect(verifyFactoryStatuses({ sha: SHA, statuses: stale, logins }).reason).toMatch(/factory\/review on bbbbbbb is "failure"/);
 });
 
 test("(3b) policyViolations could not be computed → factory:blocked, no gates, no merge", async () => {

@@ -2,11 +2,11 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
-import { loadCharter, loadHarness } from "../lib/config.js";
+import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
+import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { resolveReviewRoster, tierFromReviewHandoff } from "../lib/review-roster.js";
 import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quarantine.js";
 import { transition as transitionIssue } from "../lib/transition.js";
-import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
 import { sweep } from "../lib/sweeper.js";
 import { backPressure } from "../lib/back-pressure.js";
@@ -26,14 +26,10 @@ async function main() {
   const thresholds = harness.gates.thresholds;
   const quarantine = loadQuarantine(root);
   const saveQuarantine = (q) => saveQuarantineTo(root, q);
-  /**
-   * KTB-44 / ADR-025 (리뷰 must_fix 3 · should_fix 4) — sweeper의 하네스 주차 해제도 **게이트를 지난다**.
-   * 예전에는 인자를 생략하는 것만으로 면제였고, 그러면 사람은 `:unstick`에서 "리허설이 낡았다"고
-   * 거부당하는데 로봇은 같은 이슈를 조용히 큐에 넣었다. 거부된 재큐는 사고가 아니다 — 이 팔은 매
-   * sweep마다 다시 시도하고(이미 실패 편향이다), 그 사이에 사람이 `factory rehearse`를 돌린다.
-   */
-  const rehearsal = makeRehearsalChecker({ gh, root, branch: harness.project?.default_branch || "main" });
-  const transition = ({ issue, to, reason }) => transitionIssue({ gh, issue, to, reason, rehearsal });
+  // KTB-46: `ctxExtra`를 그대로 흘려보낸다. sweeper의 팔 대부분은 주지 않지만(그때는 `{}`),
+  // 사람 머지 반영 팔은 PR head sha를 실어 `requirements.js`의 `factory:merged` 증거 검사가
+  // review handoff를 그 커밋에 묶게 한다 — 여기서 떨어뜨리면 그 검사는 묶을 대상을 잃는다.
+  const transition = ({ issue, to, reason, ctxExtra }) => transitionIssue({ gh, issue, to, reason, ctxExtra });
   const release = (issue) => releaseLock({ run, cwd: root, issue });
   // quick sweep은 토큰 만료 팔을 돌지 않으므로 그 조회도 하지 않는다(스테이지마다 gh를 한 번 덜 때린다).
   const tokenIssuedAt = quick ? null : await gh.getVariable("FACTORY_TOKEN_ISSUED_AT");
@@ -68,7 +64,30 @@ async function main() {
    * 여기서는 이 저장소의 `run`/`root`만 묶는다. r1 MF1: 그래야 그 판정에 테스트가 붙는다).
    */
   const releaseIfStale = (n) => releaseIfStaleLock({ run, cwd: root, issue: n });
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, releaseIfStale, quick });
+  /**
+   * KTB-46 — 사람 머지 반영 팔의 게이트 증거는 그 커밋에 붙은 `factory/gates`·`factory/review` 상태이고,
+   * 그 상태가 **팩토리 계정의 것인지**를 대조할 기준이 이 이름들이다(외부 감사 H1b). `run-stage.js`의
+   * merge deps가 쓰는 바로 그 해석기를 그대로 쓴다 — `gh api user`가 두 벌이 되면 갈라진다.
+   */
+  const factoryLogins = () => resolveFactoryLogins({ gh });
+  /**
+   * KTB-46 r3 must_fix 1 — **정족수를 잴 자.** 이것을 넘기지 않으면 `verifyReviewQuorum`은 로스터
+   * 크기·빠진 역할·K를 전부 건너뛰고 "있는 verdict가 전부 approve인가"만 본다 — 4명짜리 로스터의
+   * 이슈가 1명의 approve로 `factory:merged`에 도달했다. 해석은 merge 스테이지의 `reviewRoster` dep과
+   * **같은 함수**다(`lib/review-roster.js`). 실효 tier(H3)도 같은 주입점으로 간다 — 다만 여기서는
+   * diff를 다시 내지 않는다(머지 뒤에는 `claude/fq-<n>`이 없다): **review 런이 계산해 handoff에
+   * 실어 둔 `tier_effective`**를 팔이 읽어 넘기고, `maxTier(선언, handoff)`로 합친다(r4).
+   * 그 필드가 없는 1.2 이전 기록에서는 선언 tier로 내려가고, 팔이 그 사실을 한 줄로 말한다.
+   */
+  const reviewRoster = (comments, handoffTier = null) => resolveReviewRoster({
+    // r5 nit 6: 함수로 넘겨 `roles.toml` 읽기까지 lib의 catch 안에서 일어나게 한다 — 그래야 깨진
+    // 파일이 merge 스테이지와 **같은 문장**으로 접힌다.
+    charter, roles: () => loadRoles(root), comments,
+    effectiveTier: handoffTier ? tierFromReviewHandoff(handoffTier) : null,
+  });
+  /** KTB-46 r3 must_fix 4 — 머지된 PR의 필수 체크도 확인한다(merge 스테이지와 같은 목록·같은 판정 함수). */
+  const requiredChecks = harness?.factory?.required_checks ?? null;
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, quick });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }

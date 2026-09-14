@@ -1,4 +1,5 @@
 import { test, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { transition, parseTransitionArgs, refuseHumanFlag } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, resumePoint } from "../lib/retro/issue-comments.js";
@@ -469,6 +470,28 @@ test("KTB-32: parseTransitionArgs — label, --human, --reason, and --retry in a
   expect(parseTransitionArgs(["3"]).error).toMatch(/usage|label/i);
   expect(parseTransitionArgs([]).error).toMatch(/usage|issue/i);
   expect(parseTransitionArgs(["x", "factory:queue"]).error).toMatch(/usage|issue/i);
+});
+
+/**
+ * KTB-46 r2 — **`humanMerged`/`statusesVerified`는 프로세스 밖에서 도착할 수 없다.** 그 두 플래그는
+ * `requirements.js`의 게이트 검사를 "러너의 로컬 파일" 대신 "그 커밋에 붙은 팩토리 상태"로 바꾸는
+ * 문이다 — CLI가 임의의 플래그를 `ctxExtra`로 흘려보낸다면 사람의 셸 한 줄이 그 문을 대신 열 수 있다.
+ * 두 가지를 고정한다: ① 파서가 모르는 옵션을 **거절**한다(통과시키지 않는다), ② `bin/transition.js`가
+ * 만드는 `ctxExtra`는 `gatesChecked`·`gatesFile`만 담은 **닫힌 리터럴**이다(인자에서 유도되지 않는다).
+ * 유일한 생산자는 `lib/sweeper.js`의 `sweepHumanMerged`다.
+ */
+test("KTB-46: the transition CLI cannot inject humanMerged/statusesVerified into ctxExtra", () => {
+  for (const flag of ["--human-merged", "--humanMerged", "--statuses-verified", "--ctx-extra", "--gates-checked"]) {
+    expect(parseTransitionArgs(["7", "factory:merged", flag]).error, flag).toMatch(/unknown option/);
+  }
+  // 파싱 결과에는 ctxExtra로 흘러갈 수 있는 열린 통로가 없다 — 필드는 이 다섯뿐이다.
+  expect(Object.keys(parseTransitionArgs(["7", "factory:merged"])).sort())
+    .toEqual(["human", "issue", "reason", "retry", "to"]);
+
+  // r3 nit 2: 소스 텍스트를 통째로 정규식에 거는 단언은 무해한 서식 변경에 깨지면서 정작 성질은
+  // 증명하지 못한다. 증명하는 것은 위의 두 단언과, "이 이름이 그 파일에 등장하지도 않는다"이다.
+  const src = readFileSync(new URL("../bin/transition.js", import.meta.url), "utf8");
+  expect(src).not.toMatch(/humanMerged|statusesVerified/);
 });
 
 // ── 리뷰 review-3c63672 MF-2: refuseHumanFlag (bin/transition.js's own env refusal, the second lock) ──

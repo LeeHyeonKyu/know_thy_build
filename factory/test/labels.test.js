@@ -48,6 +48,22 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);
 });
 
+/**
+ * KTB-46 — 보호 경로 PR을 사람이 머지한 뒤 이슈를 잇는 엣지(스펙 §12.3-2의 예외 경로). **사람 전용이
+ * 아니다**: 이것을 밟는 것은 sweeper라는 스크립트이고, 대신 `requirements.js`의 `factory:merged`
+ * 증거 검사(review handoff·정족수·K·게이트·PR head sha)가 한 칸도 깎이지 않은 채 그대로 물린다.
+ */
+test("KTB-46: needs-human → merged is a normal graph edge, and merged stays a dead end", () => {
+  expect(canTransition("factory:needs-human", "factory:merged")).toBe(true);
+  expect(HUMAN_RETRY_TARGETS.has("factory:merged")).toBe(false);
+  // 들어가는 문 하나가 늘었을 뿐 나오는 문은 없다 — merged는 여전히 막다른 상태다.
+  for (const to of [...STATES]) expect(canTransition("factory:merged", to), to).toBe(false);
+  for (const to of [...STATES]) expect(canTransition("factory:merged", to, { human: true }), `human ${to}`).toBe(false);
+  // needs-human의 출구는 정확히 둘이다 — 다른 상태로 새 문이 열리지 않았다.
+  const opened = [...STATES].filter((to) => canTransition("factory:needs-human", to));
+  expect(opened.sort()).toEqual(["factory:merged", "factory:queue"]);
+});
+
 // ── KTB-15b I2: blocked에서 재진입할 수 있는 네 스테이지, 그리고 재시도가 허용되는 origin ──────
 test("ENTRY_LABELS: every stage — review included (KTB-24 fix) — accepts factory:blocked", () => {
   expect(ENTRY_LABELS.triage).toEqual(["factory:queue", "factory:blocked"]);
@@ -99,10 +115,12 @@ test("KTB-32: needs-human → resume point is a human-only edge (script refused)
   // queue는 사람 전용 엣지가 아니다 — 그래프의 정규 출구 그대로다(스크립트도 밟는다).
   expect(HUMAN_RETRY_TARGETS.has("factory:queue")).toBe(false);
   expect(canTransition("factory:needs-human", "factory:queue")).toBe(true);
-  // 사람이라고 아무 데나 가지는 않는다 — 이 네 개 + queue가 전부다.
-  for (const to of ["factory:merged", "factory:approved", "factory:in-progress", "factory:wont-do"]) {
+  // 사람이라고 아무 데나 가지는 않는다 — 이 네 개 + queue + merged(KTB-46, 사람 전용이 아니라
+  // 그래프의 정규 엣지다)가 전부다.
+  for (const to of ["factory:approved", "factory:in-progress", "factory:wont-do"]) {
     expect(canTransition("factory:needs-human", to, { human: true }), to).toBe(false);
   }
+  expect(HUMAN_RETRY_TARGETS.has("factory:merged")).toBe(false);
   // 사람 전용 엣지는 needs-human에만 있다 — `{human:true}`가 그래프 전체를 느슨하게 만들지 않는다.
   expect(canTransition("factory:merged", "factory:queue", { human: true })).toBe(false);
   expect(canTransition("factory:queue", "factory:planned", { human: true })).toBe(false);

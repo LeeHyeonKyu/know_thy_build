@@ -19,6 +19,19 @@ export const allChecksGreen = (checks, required = null) => {
   return checks.length > 0 && checks.every(isGreen);
 };
 
+/**
+ * `gh pr checks`가 **체크가 하나도 없는 PR**에 대해 내는 실패(`no checks reported on the '<branch>'
+ * branch`, gh `checks.go`의 `populateStatusChecks`). exit code가 0이 아니라 이 어댑터의 래퍼는
+ * 그것을 throw로 올린다 — 그런데 그것은 조회 실패(transport)가 아니라 **판정**이다: 체크가 없다는
+ * 사실 자체가 `allChecksGreen([])`이 이미 내리는 그 판정(fail closed)이다.
+ *
+ * merge 스테이지는 이 구분이 필요 없다(`mergeGates`의 catch가 `checksGreen`을 세우지 않고 떠나면
+ * `requirements.js`가 "required checks not verified GREEN"으로 접는다 — 어느 쪽이든 거부다). sweeper의
+ * 사람-머지 반영 팔은 transport와 판정을 갈라 다르게 다루므로(전자는 재시도, 후자는 마커) 그 경계를
+ * 알아야 한다. 문구를 손으로 베끼지 않도록 여기 한 곳에 둔다(KTB-46 r5).
+ */
+export const GH_NO_CHECKS_RE = /no (?:required )?checks reported/i;
+
 const STATUS_STATES = new Set(["success", "failure", "pending", "error"]);
 
 // GitHub Free 플랜의 private repo는 branch protection API 자체를 막는다 — gh CLI가 그 사실을 이 문구로
@@ -59,6 +72,26 @@ export async function resolveRepo({ run }) {
  */
 export const LABEL_RETRY_DELAYS_MS = [1000, 3000, 9000];
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 팩토리 자신의 계정 **이름**(값이 아니다) — commit status의 게시자를 대조할 기준(외부 감사 H1b).
+ *
+ * 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만 `factory/review` 상태를 올린 것은 **에이전트
+ * 배우**다 — 그래서 둘 다 받는다. 봇 로그인은 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은
+ * 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다). 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` —
+ * 호출자는 fail closed 한다(누가 올렸는지 모르는 상태는 통과가 아니다).
+ *
+ * KTB-46에 `bin/sweep.js`가 두 번째 호출자로 붙으면서 `bin/run-stage.js`의 클로저에서 여기로 옮겼다 —
+ * `gh api user` 해석이 두 벌이 되면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다.
+ */
+export async function resolveFactoryLogins({ gh, env = process.env }) {
+  const logins = [];
+  const bot = (env.FACTORY_BOT_LOGIN || "").trim();
+  if (bot) logins.push(bot);
+  try { logins.push(await gh.viewerLogin()); }
+  catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+  return { ok: true, logins: [...new Set(logins.filter(Boolean))] };
+}
 
 export function makeGh({ run, repo, sleep = realSleep }) {
   async function gh(args, opts = {}) {
@@ -108,6 +141,20 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async mergedPrForBranch(branch) {
       const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
       return j.length ? j[0].number : null;
+    },
+    /**
+     * KTB-46 — **머지된 PR의 머지 사실 그 자체.** `mergedPrForBranch`는 번호만 준다("머지된 PR이
+     * 있다"). 이슈를 `factory:merged`로 이으려면 그보다 두 가지가 더 필요하다:
+     *   - `headSha`: 그 전이의 증거 검사(`requirements.js`의 `factory:merged`)가 review handoff의
+     *     `head_sha`를 묶을 대상. 이것이 없으면 "어느 커밋에 대한 승인인가"를 말할 수 없다.
+     *   - `mergedBy`: 전이 사유에 실릴 **누가 머지했는가**. 이 경로의 존재 이유가 "사람이 머지했다"
+     *     이므로, 그 사람의 이름이 이슈 이력에 남아야 나중에 왜 자동 머지가 아니었는지 읽힌다.
+     * `mergeSha`·`mergedAt`은 같은 조회로 공짜라 함께 싣는다(run 기록·retro가 쓸 수 있다).
+     * 없는 필드는 지어내지 않고 null이다 — 머지되지 않은 PR에 부르면 전부 null로 답한다.
+     */
+    async prMergeInfo(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
+      return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
     },
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
@@ -192,8 +239,30 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
       await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
     },
-    async searchIssues(label) {
-      return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]));
+    /**
+     * 이 라벨이 붙은 이슈들. 기본은 **열린 것만** — sweeper의 모든 팔과 back-pressure가 묻는 것은
+     * "지금 파이프라인 위에 있는 이슈"이기 때문이다.
+     *
+     * KTB-46: `state: "all"`이 하나 필요해졌다. 사람이 보호 경로 PR을 머지할 때 그 PR 본문의
+     * `Closes #<n>`이 실제로 걸리면 이슈는 **`factory:needs-human` 라벨을 그대로 단 채 닫힌다** —
+     * 라벨은 상태를 말하는데 그 상태를 아무도 다시 보지 않는 자리다. 그 이슈를 `factory:merged`로
+     * 잇는 팔(`sweepHumanMerged`)은 닫힌 것도 봐야 한다. 기본값은 건드리지 않으므로 기존 호출자의
+     * 인자 한 글자도 바뀌지 않는다.
+     *
+     * r3 should_fix 2 — 그런데 `--state all`은 **후보 풀에 바닥이 없다**: 열린 needs-human은 몇 개뿐이지만
+     * 닫힌 것은 저장소의 수명 내내 쌓인다. `gh issue list`는 생성 역순으로 답하므로, 그 라벨을 한 번이라도
+     * 달았던 이슈가 200개를 넘는 순간 **번호가 낮은 이슈는 페이지에서 떨어진다** — 방금 needs-human이
+     * 됐고 방금 사람이 머지한 그 이슈가, 아무 소리 없이. `sort: "updated-desc"`는 정렬을 API 쪽으로
+     * 옮겨 그 200개가 "가장 최근에 움직인 200개"가 되게 한다. 정렬 수식어는 `--search`로만 갈 수 있어
+     * 그때는 `--label`도 검색 문법(`label:"…"`)으로 옮긴다.
+     */
+    async searchIssues(label, { state = "open", sort = null } = {}) {
+      // 정렬을 쓰는 쪽(사람-머지 반영 팔)만 `state`도 받는다 — 그 팔은 닫힌 이슈까지 보므로 "열려
+      // 있는가"가 후보를 자르는 기준의 절반이다(r5 should_fix 2). 기본 호출은 바이트 그대로다.
+      const args = sort
+        ? ["issue", "list", "-R", repo, "--search", `label:"${label}" sort:${sort}`, "--state", state, "--limit", "200", "--json", "number,title,updatedAt,state"]
+        : ["issue", "list", "-R", repo, "--label", label, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"];
+      return JSON.parse(await gh(args));
     },
     /**
      * 워크플로를 손으로 띄운다(KTB-8). 라벨은 이미 목적 상태에 있어 `labeled` 이벤트를 다시 만들 수
