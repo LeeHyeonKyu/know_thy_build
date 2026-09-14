@@ -65,7 +65,7 @@ test("approved requires review handoff: sha == PR head, all approve, count == ro
   const v = (role, verdict) => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: "x", where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a", "approve"), v("b", "approve")], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:approved");
-  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2 })).ok).toBe(true);
+  expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, roster: ["a", "b"] })).ok).toBe(true);
   expect(r(checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 3 })).reason).toMatch(/verdict count/);
   expect(r(checked({ comments: [c("review", { ...review, verdicts: [v("a", "approve"), v("b", "reject")] })], prHeadSha: sha, rosterSize: 2 })).reason).toMatch(/not all approve/);
   expect(r(checked({ comments: [c("review", review)], prHeadSha: "e".repeat(40), rosterSize: 2 })).reason).toMatch(/head_sha/);
@@ -83,14 +83,14 @@ test("SF1: an approve passes at ANY round — K is the limit on failing rounds, 
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, verdicts: [v("a")], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:approved");
   for (const round of [1, 3, 4, 99]) {
-    expect(r(checked({ comments: [c("review", { ...review, round })], prHeadSha: sha, rosterSize: 1, maxRounds: 3 })).ok, `round ${round}`).toBe(true);
+    expect(r(checked({ comments: [c("review", { ...review, round })], prHeadSha: sha, rosterSize: 1, roster: ["a"], maxRounds: 3 })).ok, `round ${round}`).toBe(true);
   }
 });
 
 test("merged requires checks + integrity GREEN and approved handoff sha == PR head", () => {
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
   const r = requirementFor("factory:merged");
-  const base = checked({ comments: [c("review", review)], prHeadSha: sha });
+  const base = checked({ comments: [c("review", review)], prHeadSha: sha, roster: ["a"] });
   expect(r({ ...base, checksGreen: true, integrityGreen: true }).ok).toBe(true);
   expect(r({ ...base, checksGreen: false, integrityGreen: true }).reason).toMatch(/checks/);
   expect(r({ ...base, checksGreen: true, integrityGreen: false }).reason).toMatch(/integrity/);
@@ -131,7 +131,8 @@ test("H1c: factory:merged re-checks quorum, all-approve (recomputed from must_fi
 
 test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing, GREEN이 아니면 거부 (전이 경로에서만)", () => {
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
-  const ctx = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, maxRounds: 3, checksGreen: true, integrityGreen: true, gatesChecked: true };
+  // KTB-42 SF-5 — 로스터는 이제 **명시돼야 한다**: "모르겠다"는 qa 요구조건의 면제가 아니다.
+  const ctx = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, roster: ["a"], maxRounds: 3, checksGreen: true, integrityGreen: true, gatesChecked: true };
   for (const to of ["factory:approved", "factory:merged"]) {
     const r = requirementFor(to);
     expect(r(ctx).reason, to).toMatch(/gates file missing/);
@@ -196,4 +197,60 @@ test("KTB-32: humanRetry lands on awaiting-review with only the implement handof
   expect(requirementFor("factory:rework")({ comments: [], humanRetry: true }).ok).toBe(true);
   expect(requirementFor("factory:planned")({ comments: [], humanRetry: true }).reason).toMatch(/plan handoff missing/);
   expect(requirementFor("factory:ready")({ comments: [], humanRetry: true }).reason).toMatch(/triage handoff missing/);
+});
+
+/**
+ * ── ADR-024 / KTB-42 — **qa 증거는 계약이고, 계약은 전이에서 물린다.** ─────────────────────────
+ * 규칙은 로스터에 `qa`가 있을 때만 발화한다(부르지 않은 사람이 남기지 않은 증거는 결함이 아니다 —
+ * ADR-020 F3의 그 문장). 그리고 두 자리가 **서로 다른 재료**를 본다: 승인은 매니페스트 파일
+ * (`ctx.qaEvidence`), 머지는 review 런이 run 기록에 남긴 지문(`ctx.qaManifestRecorded`) — 머지 잡의
+ * 새 체크아웃에 `.factory/out/`는 존재하지 않기 때문이다.
+ */
+test("KTB-42: approved needs a valid qa manifest for the PR head when the roster includes qa", () => {
+  const v = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [v("correctness"), v("qa")], orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:approved");
+  const ctx = (over) => checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, roster: ["correctness", "qa"], ...over });
+
+  expect(r(ctx({ qaEvidence: { ok: true, digest: "a".repeat(64), head_sha: sha } })).ok).toBe(true);
+  // 확인하지 않은 것은 통과가 아니다(fail closed) — 게이트 파일과 같은 원칙.
+  expect(r(ctx({})).reason).toMatch(/qa evidence manifest not verified/);
+  // 거부 문구는 **id를 부른다** — "디렉터리가 비었다"가 KTB #3의 8라운드를 만든 문장이다.
+  expect(r(ctx({ qaEvidence: { ok: false, missing: ["dw2", "dw4"], reason: "incomplete" } })).reason).toMatch(/spec-evidence-missing: dw2, dw4/);
+  // 지난 라운드의 증거는 이 트리의 얘기가 아니다.
+  expect(r(ctx({ qaEvidence: { ok: true, digest: "a".repeat(64), head_sha: "e".repeat(40) } })).reason).toMatch(/qa evidence manifest describes/);
+  // 로스터에 qa가 없으면 규칙 자체가 발화하지 않는다.
+  const noQa = checked({ comments: [c("review", { ...review, verdicts: [v("correctness")] })], prHeadSha: sha, rosterSize: 1, roster: ["correctness"] });
+  expect(r(noQa).ok).toBe(true);
+});
+
+test("KTB-42: merged needs the review run's recorded qa_manifest digest — the file itself is unreadable there", () => {
+  const v = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [v("correctness"), v("qa")], orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:merged");
+  const ctx = (over) => checked({ comments: [c("review", review)], prHeadSha: sha, rosterSize: 2, roster: ["correctness", "qa"], checksGreen: true, integrityGreen: true, ...over });
+
+  expect(r(ctx({ qaManifestRecorded: "b".repeat(64) })).ok).toBe(true);
+  expect(r(ctx({})).reason).toMatch(/qa evidence not bound/);
+  expect(r(ctx({ qaManifestRecorded: "none" })).reason).toMatch(/qa evidence not bound/);
+  // 파일까지 읽을 수 있는 호출자라면 지문이 그때 그것인지도 본다.
+  expect(r(ctx({ qaManifestRecorded: "b".repeat(64), qaEvidence: { ok: true, digest: "c".repeat(64) } })).reason).toMatch(/changed after the review run/);
+  // 복구 경로(blocked hop-back)는 게이트와 같은 취급을 받는다 — 그 자리엔 아직 이번 런의 증거가 없다.
+  expect(r(ctx({ prerequisite: true })).ok).toBe(true);
+});
+
+/**
+ * 리뷰 라운드 1 SF-5 — **로스터를 모르면 면제가 아니다.** 예전에는 `ctx.roster`가 비어 있으면
+ * (조회 실패로 `buildCtxExtra`가 비워 둔 경우 포함) qa 요구조건이 조용히 꺼졌다. 이 파일의 나머지가
+ * 전부 "확인되지 않은 것은 거부"인데 여기만 반대 방향이었다.
+ */
+test("KTB-42/SF-5: an unresolved roster refuses — it does not silently disable the qa requirement", () => {
+  const v = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [v("correctness")], orchestration: "workflow", guarantee: "verified" };
+  const base = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, checksGreen: true, integrityGreen: true };
+  for (const to of ["factory:approved", "factory:merged"]) {
+    expect(requirementFor(to)(checked({ ...base })).reason, to).toMatch(/review roster unresolved/);
+    // 로스터를 **알고** qa가 없으면 그대로 통과한다 — 규칙은 무지가 아니라 사실에 반응한다.
+    expect(requirementFor(to)(checked({ ...base, roster: ["correctness"] })).ok, to).toBe(true);
+  }
 });

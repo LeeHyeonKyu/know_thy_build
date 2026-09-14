@@ -23,8 +23,11 @@ hooks:
   `[project].default_branch`)
 - `.factory/out/gates.json` **if present** — in the review stage the gates for this commit run after you, so it is normally absent; judge the diff and the tests themselves
 - `.factory/harness.toml` — `[protected]`, `tests_are_load_bearing`, `[evidence].qa_artifacts`
-- `.factory/out/qa/**` — qa 리뷰어가 남긴 증거물 (존재 여부를 당신이 확인한다 — **이번 tier의 로스터에 `qa`가
-  있을 때만**. 이 디렉터리에 쓸 수 있는 것은 qa뿐이고, 당신은 읽기만 한다)
+- `.factory/out/qa/<issue>/manifest.json` — qa 리뷰어의 **증거 매니페스트**(ADR-024). 계약은 파일 목록이 아니라
+  이 매니페스트다: `done_when` id마다 `command`/`log`/`state`/`screenshot`/`not_applicable` claim이 달려 있다.
+  읽는 방법은 둘 중 하나다 — `node .factory/bin/qa-evidence.js finish --issue <n>`의 커버리지 표를 읽거나,
+  매니페스트를 직접 읽는다. **이번 tier의 로스터에 `qa`가 있을 때만** 본다. 이 디렉터리에 쓸 수 있는 것은
+  qa뿐이고, 당신은 읽기만 한다
 - `.factory/lessons/reviewer-spec-conformance.md`
 - 저장소 전체 (읽기 전용)
 
@@ -61,12 +64,20 @@ hooks:
    파일의 단언 변경·삭제는 원칙적으로 금지다(§5.2.4). 불가피한 경우 **당신이** 사유와 함께 명시적으로 승인하고,
    그 사실을 verified[]에 `must_approve_explicitly: <파일>:<줄> — <사유>` 형태로 남긴다. 사유 없는 기존 테스트
    수정, skip/ignore 프라그마 추가는 자동 reject. 예외는 `factory:flaky` 이슈가 지목한 테스트 id뿐이다.
-5. **증거(`[evidence].qa_artifacts`) 존재 확인 — 단, 이번 이슈의 tier 로스터에 `qa`가 있을 때만**:
-   `context.json`의 `roster`에 `qa`가 들어 있고 `done_when`에 사용자 가시적 항목이나 e2e 레벨이 있으면,
-   `.factory/out/qa/**`에 qa 리뷰어의 산출물(스크린샷·로그)이 실제로 있는가. 파일이 없는데 "확인함"이라고 적힌
-   상태는 reject — 증거 없는 주장은 이 공장에서 통화가 아니다. 로스터에 `qa`가 **없는** tier(예: docs)에서는
-   그 디렉터리가 비어 있는 것이 정상이며, 그것으로 must_fix를 만들지 않는다 — 부르지 않은 사람이 남기지 않은
-   증거는 결함이 아니다.
+5. **증거 매니페스트의 커버리지 — 단, 이번 이슈의 tier 로스터에 `qa`가 있을 때만**(ADR-024 / KTB-42):
+   `context.json`의 `roster`에 `qa`가 있으면 `node .factory/bin/qa-evidence.js finish --issue <n>`을 돌려
+   커버리지 표를 읽는다(도구를 부를 수 없으면 `.factory/out/qa/<issue>/manifest.json`을 직접 읽는다).
+   판정의 대상은 **`done_when` id**다: 표가 `MISSING`이라고 말하는 id가 있으면 그 id들을 이름으로 부르며
+   reject한다 — must_fix의 claim은 반드시
+   **`spec-evidence-missing: <id>, <id>`** 형태로 시작한다. **"디렉터리가 비었다"·"증거가 없다"라고 쓰지 않는다**:
+   KTB #3에서 그 문장이 8라운드를 태웠다. 원인은 빌더가 아니라 qa가 그 디렉터리에 쓸 수 없었던 것이었는데,
+   그 문장은 언제나 빌더를 가리켰기 때문이다. id를 부르면 사람은 "무엇이 비었는지"를 즉시 읽고, 그 id에
+   `not_applicable`(사유 포함)이 달려 있으면 그것은 **채워진 것**이다.
+   매니페스트 자체가 없으면 그것은 빌더의 결함이 아니라 **증거 경로의 고장**이다 — must_fix 대신
+   `open_risk`/should_fix로 그 사실을 적고, 판정은 나머지 계약으로 내린다(러너의 `qa.evidence-probe`와
+   review 스테이지의 프로브가 그 자리를 따로 감시한다).
+   로스터에 `qa`가 **없는** tier(예: docs)에서는 매니페스트가 없는 것이 정상이며, 그것으로 must_fix를 만들지
+   않는다 — 부르지 않은 사람이 남기지 않은 증거는 결함이 아니다.
 6. **이슈 ↔ plan ↔ diff의 삼각 대조**: 이슈가 요구한 것 중 `done_when`에 없는 것이 있는가(plan의 누락),
    `done_when`에 있는데 아무도 건드리지 않은 것이 있는가(구현의 누락).
 7. **`[protected]` 경로**: `.factory/**`, `.claude/**`, `.github/workflows/factory-*.yml`, `docs/factory/CHARTER.md`,
@@ -115,7 +126,7 @@ must_fix의 id 접두사는 **반드시 `spec`**다 — builder의 rework 응답
 ## Perspectives
 - **계약 독해자**: `done_when`의 문장과 테스트의 단언을 한 줄씩 나란히 놓는다. 문장은 "빈 테이블도 헤더만 출력"인데 단언이 "행이 3개"면 둘은 같은 것을 말하고 있지 않다.
 - **범위의 문지기**: 이 PR이 리뷰된 범위는 plan이 승인한 범위다. 그 밖은 아무도 보지 않았다 — 좋아 보여도 리뷰되지 않은 코드가 머지되는 것이다.
-- **증거 회계사**: 주장 하나에 증거 파일 하나. `.factory/out/qa/`에 없는 스크린샷은 찍히지 않은 스크린샷이다.
+- **증거 회계사**: 주장 하나에 claim 하나. 매니페스트에 없는 스크린샷은 찍히지 않은 스크린샷이다 — 그리고 비어 있는 자리는 **id로** 부른다("디렉터리가 비었다"는 누구의 결함인지 말하지 않는 문장이다).
 - **plan의 독자이자 감사자**: 계약 자체가 이슈를 배신했는지도 본다. plan이 빠뜨린 요구는 builder의 잘못이 아니지만, 그대로 머지되면 이슈는 닫히지 않는다.
 
 ## Lessons

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { matchesAny } from "../glob.js";
+import { probeEvidenceDir } from "../qa-evidence.js";
 import { THRESHOLD_DEFAULTS } from "../config.js";
 import { STAGES, parseStatusEntries } from "../../bin/run-stage.js";
 
@@ -208,6 +209,29 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
  * `git status --porcelain`"이고, 그 표본을 만드는 것은 `runSetupProbe`(아래)다. 표본이 없으면
  * (오프라인·`--no-run`) 판정하지 않는다: 안 돌려 본 것을 PASS로도 WARN으로도 적지 않는다.
  */
+/**
+ * ── ADR-024 / KTB-42 — `qa.evidence-probe` ───────────────────────────────────────────────────
+ * review 스테이지가 `claude -p` 전에 돌리는 것과 **같은 프로브**를 로컬에서도 한 번 돌린다
+ * (`mkdir -p` + 쓰기 + 지우기). KTB #3에서 이 확인이 없어서 "qa가 증거를 남길 수 없다"는 사실이
+ * 8라운드 뒤에야, 그것도 빌더를 가리키는 문장으로 드러났다 — doctor는 그 사실을 **사람이 손으로
+ * 돌리는 자리**에서 먼저 말해야 한다.
+ *
+ * `--offline`/`--no-run`에서는 WARN이다: 프로브는 파일을 만들었다 지우므로 "아무것도 실행하지
+ * 말라"는 요청을 무시할 수 없고, 안 돌려 본 것을 PASS로 적을 수도 없다.
+ */
+const QA_PROBE_ID = "qa.evidence-probe";
+export function checkQaEvidenceProbe({ root, skipped = null, rosterHasQa = null, probe = probeEvidenceDir }) {
+  if (skipped) return c(QA_PROBE_ID, "WARN", `not probed: ${skipped} — run \`factory doctor\` without it to check that .factory/out/qa/ is writable`);
+  // 리뷰 라운드 1 SF-6 — 어떤 tier의 리뷰 로스터에도 `qa`가 없는 저장소에는 물어볼 것이 없다.
+  // 그런 저장소에서 이 검사는 디렉터리를 만들었다 지우는 일만 한다(그리고 실패하면 상관없는 FAIL을
+  // 만든다). "모르겠다"(null)일 때는 프로브한다 — 프로브는 싸고, 실패는 언제나 진짜 신호다.
+  if (rosterHasQa === false) return c(QA_PROBE_ID, "PASS", "no review roster in this CHARTER includes qa — no evidence dir is required");
+  const r = probe({ root, issue: "probe" });
+  return r.ok
+    ? c(QA_PROBE_ID, "PASS", ".factory/out/qa/ is writable (the qa reviewer can record evidence)")
+    : c(QA_PROBE_ID, "FAIL", `qa evidence dir not writable: ${r.reason} — the qa reviewer cannot record anything, and spec-conformance will read that as the builder's missing evidence (KTB-42)`);
+}
+
 export const SETUP_DIRTY_NOTE = "prefer setup commands that do not rewrite tracked files (pin toolchain versions; use lockfile-respecting installs)";
 const SETUP_DIRTY_ID = "runtime.setup-dirties-tree";
 export function checkSetupDirtiesTree({ harness: h, status = null, skipped = null, setupExit = 0 }) {

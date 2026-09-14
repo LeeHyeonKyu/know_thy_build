@@ -76,13 +76,17 @@
       "Edit(eslint.config.*)",
       "Write(eslint.config.*)",
       "Edit(docs/factory/runs/**)",
-      "Write(docs/factory/runs/**)"
+      "Write(docs/factory/runs/**)",
+      "Edit(.factory/out/qa/**/manifest.json)",
+      "Write(.factory/out/qa/**/manifest.json)"
     ],
     "allow": [
       "Write(.factory/out/qa/**)",
       "Edit(.factory/out/qa/**)",
       "Bash(mkdir -p .factory/out/qa*)",
-      "Bash(mkdir -p ./.factory/out/qa*)"
+      "Bash(mkdir -p ./.factory/out/qa*)",
+      "Bash(node .factory/bin/qa-evidence.js *)",
+      "Bash(node ./.factory/bin/qa-evidence.js *)"
     ]
   }
 }

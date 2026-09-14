@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { isAbsolute, join, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
@@ -23,7 +23,7 @@ import { buildContext, resolveTier } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable } from "../lib/verify-stage.js";
 import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
 import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
@@ -37,6 +37,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
+import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -454,6 +455,25 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       }
       record([overlayLine(ov)]);
     }
+    /**
+     * ADR-024 / KTB-42 — **증거 디렉터리에 쓸 수 있는지는 리뷰 전에 묻는다.** 자리는 여기다:
+     * overlay가 끝난 **직후**(디스크의 훅·settings가 이제 팩토리의 것이다)이고 `claude -p`보다 **앞**이다.
+     * KTB #3에서는 이 확인이 없어서 "qa가 한 글자도 쓸 수 없다"가 리뷰가 끝난 뒤에야, 그것도
+     * `spec1: qa evidence missing`이라는 **빌더를 가리키는 문장**으로 드러났다. 여덟 라운드가 그렇게 갔다.
+     *
+     * 실패는 리뷰의 reject가 **아니다** — GREEN도 RED도 아닌 판정 불가이고, 이 저장소에서 그 자리는
+     * 언제나 `factory:blocked` + cause `undecidable`이다(sweeper의 재시도 등급도 그래야 맞다).
+     */
+    if (stage === "review" && d.qaEvidenceProbe) {
+      const p = await d.qaEvidenceProbe();
+      if (!p.ok) {
+        const reason = `qa evidence dir not writable: ${p.reason}`;
+        const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+        record([`qa evidence probe: FAIL — ${p.reason}`, ...refusal(t)]);
+        return 2;
+      }
+      if (p.line) record([p.line]);
+    }
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
     // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
@@ -615,11 +635,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       // 풀리지 않는다. 프로바이더 메시지는 그대로 기록에 싣지만(`v.reasons`에 이미 있다), 등급은
       // needs-human이다 — 사람이 자격증명/설정을 고쳐야 다음 시도가 다르게 끝난다. 408/425/429와
       // 모든 5xx는 여전히 일시적이라 blocked(=sweeper의 ≤3회 재시도) 그대로다.
+      //
+      // ADR-024 / KTB-42(리뷰 라운드 1 MF-2): **qa 증거 경로의 고장도 같은 계열이다.** 매니페스트가
+      // 없거나 지난 커밋의 것이면 그것은 에이전트 산출물의 결함이 아니라 판정 불가다 — 프로브 실패와
+      // 같은 등급(`factory:blocked` + `undecidable`)이어야 하고, 그래야 ADR이 약속한 "업그레이드 직후
+      // 한 라운드 더 돌면 매니페스트가 생긴다"가 실제로 성립한다(needs-human은 그 길을 막는다).
       const apiError = hitApiError(out);
-      const blocked = hitMaxTurns(out) || (apiError && !isNonTransientApiError(out));
+      const qaPath = qaEvidenceUnusable(v.reasons);
+      const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
       const to = blocked ? "factory:blocked" : "factory:needs-human";
-      const reasonPrefix = blocked ? "stage did not finish" : apiError ? "api error needs human (credentials/config)" : "stage artifact missing or invalid";
-      const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}` });
+      const reasonPrefix = qaPath ? "qa evidence path" : blocked ? "stage did not finish" : apiError ? "api error needs human (credentials/config)" : "stage artifact missing or invalid";
+      const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}`, ...(qaPath ? { cause: "undecidable" } : {}) });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
@@ -697,7 +723,22 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
        * 스테이지가 "파일의 마지막 줄"이 아니라 "이 이슈의 review 하트비트가 지목하는 런이 쓴 줄"을
        * 고를 수 있다 — 위조하려면 아직 일어나지 않은 런의 id를 맞혀야 한다.
        */
-      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts })]);
+      /**
+       * ADR-024 / KTB-42 — 그 줄에 **qa 증거 매니페스트의 지문**을 같이 싣는다. 매니페스트 자신은
+       * `.factory/out/`에 사는 스크래치라 커밋되지 않는다 — 머지 스테이지는 그 파일을 영영 볼 수 없고,
+       * 볼 수 있는 것은 러너가 여기 남긴 이 한 줄뿐이다(에이전트 세션의 `factory/records` push는 훅이 막는다).
+       * 곧 "이 커밋에 대해 유효한 증거가 실제로 있었다"의 유일한 증인이 이 값이다.
+       */
+      let qaDigest = null, qaClaims = null;
+      if (d.qaEvidence) {
+        try {
+          const qa = await d.qaEvidence({ headSha: checkoutSha ?? v.data.head_sha });
+          if (qa?.skipped) record([`qa evidence: ${qa.skipped}`]);
+          else if (qa?.ok) { qaDigest = qa.digest; qaClaims = claimCountsLabel(qa.counts); record([`qa evidence: manifest ${String(qa.digest).slice(0, 12)} valid for ${String(qa.head_sha ?? "unknown").slice(0, 7)} (${qaClaims})`]); }
+          else record([`qa evidence: INVALID — ${qa?.reason || "unknown"}`]);
+        } catch (e) { record([`qa evidence: unreadable — ${e?.message || e}`]); }
+      }
+      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
@@ -1314,7 +1355,7 @@ export function nextState(stage, data, { maxRounds = null } = {}) {
  * 전이 요구조건에 커밋/PR을 실제로 묶는다. 게이트는 "무엇을 검사했는가"를 알아야만 물린다.
  * gh 호출이 실패하면 sha 없이(undefined) 돌려주고 record()로 흔적을 남긴다 — 런을 죽이지 않는다.
  */
-export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null }) {
+export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null, qaEvidence = null, qaManifestRecorded = null }) {
   // K(`charter.limits.K`)는 `factory:approved`로는 오지 않는다(ADR-020 KTB-29 r1 SF1) — 전이 요구조건은
   // approve를 라운드로 막지 않고, K는 `nextState`가 rework 판정에서만 쓴다.
   //
@@ -1336,6 +1377,16 @@ export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {
   } catch (e) {
     record(`commit binding: lookup failed for ${to} — ${e?.message || e}`);
   }
+  /**
+   * ADR-024 / KTB-42 — 승인 앞에서는 **매니페스트 파일 자신**이 재료다(review 스테이지는 그것을 읽을 수
+   * 있다). 머지 앞에서는 읽을 수 없으므로 run 기록의 지문을 그대로 싣는다 — 무엇을 실을 수 있는지가
+   * 다르지 그 판정이 다른 게 아니다(`lib/requirements.js` qaEvidenceGate).
+   */
+  if (to === "factory:approved" && typeof qaEvidence === "function") {
+    try { ctxExtra.qaEvidence = await qaEvidence({ headSha: ctxExtra.prHeadSha ?? ctxExtra.headSha ?? null }); }
+    catch (e) { record(`qa evidence: lookup failed for ${to} — ${e?.message || e}`); }
+  }
+  if (qaManifestRecorded) ctxExtra.qaManifestRecorded = qaManifestRecorded;
   return ctxExtra;
 }
 
@@ -1782,6 +1833,22 @@ async function main() {
     return (baseSha = sha);
   };
   const runStartedAt = new Date().toISOString();                      // 이 런의 시작 — progress:v1의 `started`
+  /**
+   * ADR-024 / KTB-42 — qa 증거 매니페스트의 요약. 재료는 **전부 러너가 이미 들고 있는 것**이다:
+   * 계획의 `done_when`, 하네스의 성숙도, implement handoff의 커밋, triage의 영향 경로. 로스터에 qa가
+   * 없으면 아무것도 요구하지 않는다(`skipped`) — 부르지 않은 사람이 남기지 않은 증거는 결함이 아니다.
+   */
+  const qaEvidenceSummary = ({ headSha = null } = {}) => {
+    const roster = Array.isArray(ctxCache?.roster) ? ctxCache.roster : [];
+    if (!roster.includes("qa")) return { ok: true, skipped: "roster has no qa — no manifest required", claimIds: [] };
+    return evidenceFor({
+      root, issue,
+      doneWhen: ctxCache?.handoffs?.plan?.done_when ?? [],
+      maturity: ctxCache?.harness?.maturity ?? "M0",
+      touchesData: touchesDataPaths(ctxCache?.handoffs?.triage?.impact_paths ?? []),
+      headSha: headSha ?? ctxCache?.handoffs?.implement?.head_sha ?? null,
+    });
+  };
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -1923,10 +1990,50 @@ async function main() {
       console.log(verdictLine(result));
       return result;
     },
+    /**
+     * ADR-024 / KTB-42 — 리뷰가 시작되기 전에 "증거를 남길 수 있는가"를 **실물로** 확인한다.
+     * 도구가 설치돼 있으면 그 도구를 부른다(리뷰어가 부를 바로 그 명령이라, 여기서 통과한 것은
+     * 세션 안에서도 통과한다). 아직 `--upgrade`하지 않은 저장소를 위해 같은 확인을 in-process로도
+     * 할 수 있게 해 둔다 — 도구가 없다는 이유로 리뷰를 blocked으로 세우는 것은 이 확인의 목적이 아니다.
+     */
+    qaEvidenceProbe: async () => {
+      let roles = null;
+      try { const r = await deps.reviewRoster(); if (r?.ok && Array.isArray(r.roles)) roles = r.roles; }
+      catch { /* 로스터를 모르면 그냥 프로브한다 — 프로브는 싸고, 실패는 언제나 진짜 신호다 */ }
+      if (roles && !roles.includes("qa")) return { ok: true, line: "qa evidence probe: skipped — this tier's roster has no qa" };
+      /**
+       * 리뷰 라운드 1 SF-4 — 도구는 **작업 트리가 아니라 이 스크립트 옆에서** 푼다. overlay가 보통
+       * `.factory/**`를 스테이지 자신의 커밋으로 되돌리지만, `git checkout <base> -- .factory`는 PR head가
+       * **새로 추가한** 파일을 지우지 않는다 — 그리고 그 "아직 업그레이드하지 않은" 상태가 이 코드가
+       * 대비하는 바로 그 상태다. 그 자리에서 작업 트리의 경로를 실행하면 러너가 PR이 쓴 코드를
+       * 러너의 환경으로 돌린다(KTB-37이 닫은 구멍의 다른 철자). `import.meta.url`은 지금 돌고 있는
+       * run-stage 자신의 위치이고, 그 옆의 파일은 정의상 팩토리의 것이다.
+       */
+      // 재리뷰 MF — `fileURLToPath`이지 `.pathname`이 아니다(퍼센트 인코딩: `/sp ace/` → `/sp%20ace/`).
+      // 그리고 **조용히 폴백하지 않는다**: 우리 자신의 디렉터리조차 없다고 나오면 그것은 "설치되지
+      // 않았다"가 아니라 경로가 망가졌다는 뜻이고, 그 상태에서 in-process 프로브가 `ok`를 찍으면
+      // "qa가 쓸 수 있는가"를 묻는 유일한 검사가 초록을 보고하는 동안 `record`는 죽어 있게 된다.
+      const toolDir = dirname(fileURLToPath(import.meta.url));
+      if (!existsSync(toolDir)) {
+        return { ok: false, reason: `the factory's own bin directory does not resolve (${toolDir}) — refusing to fall back silently, because a mangled path would make this probe report ok while the tool cannot run` };
+      }
+      const tool = join(toolDir, "qa-evidence.js");
+      if (!existsSync(tool)) {
+        const p = probeEvidenceDir({ root, issue });
+        return p.ok
+          ? { ok: true, line: `qa evidence probe: ok (in-process — ${tool} is not installed; run \`npx know-thy-build factory init --upgrade\`)` }
+          : { ok: false, reason: p.reason };
+      }
+      const res = await run("node", [tool, "probe", "--issue", String(issue)], { cwd: root });
+      if (res.code !== 0) return { ok: false, reason: (res.stderr || res.stdout).trim().split("\n").filter(Boolean).pop() || `qa-evidence.js probe exited ${res.code}` };
+      return { ok: true, line: `qa evidence probe: ok — ${qaDirRel(issue)} is writable` };
+    },
+    /** 매니페스트 요약(§qaEvidenceSummary) — review 스테이지의 기록과 `factory:approved` 요구조건이 함께 읽는다. */
+    qaEvidence: async ({ headSha = null } = {}) => qaEvidenceSummary({ headSha }),
     verifyStage: ({ out, gates }) => {
       // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
       // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate });
+      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
       // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
       // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
       if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
@@ -2129,7 +2236,7 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause }) => {
+    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -2139,7 +2246,7 @@ async function main() {
         try { const r = await deps.reviewRoster(); if (r?.ok) reviewRoster = r.roles; }
         catch (e) { recordLine(`merge: roster for the merged requirement unresolved — ${e?.message || e}`); }
       }
-      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null });
+      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null, qaEvidence: deps.qaEvidence, qaManifestRecorded });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
       // blocked에서의 hop-back만 `prerequisite`를 세운다(KTB-24 fix) — "직전 스테이지의 산출물이

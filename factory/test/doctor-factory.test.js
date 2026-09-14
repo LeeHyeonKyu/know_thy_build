@@ -1,6 +1,6 @@
 import { test, expect } from "vitest";
 import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
-import { protBlock, ciDenyEntries, writeGlobs } from "../lib/protected-paths.js";
+import { protBlock, ciDenyEntries, qaManifestDeny, writeGlobs } from "../lib/protected-paths.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
 import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -785,7 +785,9 @@ test("checkGitHub (r2): FACTORY_MERGE_TOKEN left over as a repo secret (also in 
 const parityProt = { factory: [".factory/**", ".claude/**", "docs/factory/CHARTER.md"], except: [".factory/out/qa/**"], agent_writable: [] };
 function parityFiles(over = {}) {
   const hook = ["#!/usr/bin/env bash", protBlock(parityProt), "exit 0"].join("\n");
-  const ci = (harnessMode) => JSON.stringify({ permissions: { deny: ["Bash(gh secret*)", ...ciDenyEntries(writeGlobs(parityProt, { harnessMode, enumerateFactory: true }))] } });
+  // KTB-42 SF-1b — 설치되는 deny에는 매니페스트 한 쌍이 언제나 함께 있다(harness에서 유도되지 않는,
+  // 증거 계약 자신의 결정이다 — `install.js` renderCiSettings가 덧붙이고 parity가 그것을 기대한다).
+  const ci = (harnessMode) => JSON.stringify({ permissions: { deny: ["Bash(gh secret*)", ...ciDenyEntries(writeGlobs(parityProt, { harnessMode, enumerateFactory: true })), ...qaManifestDeny()] } });
   return {
     "/r/.claude/hooks/block-dangerous.sh": hook,
     "/r/.factory/ci-settings.json": ci(false),
@@ -837,8 +839,8 @@ test("protected.parity: agent_writable leaves the merge boundary alone but drops
   const prot = { ...parityProt, factory: [...parityProt.factory, "factory/**"], agent_writable: ["factory/**"] };
   const files = {
     "/r/.claude/hooks/block-dangerous.sh": protBlock(prot),
-    "/r/.factory/ci-settings.json": JSON.stringify({ permissions: { deny: ciDenyEntries(writeGlobs(prot, { enumerateFactory: true })) } }),
-    "/r/.factory/ci-settings-harness.json": JSON.stringify({ permissions: { deny: ciDenyEntries(writeGlobs(prot, { harnessMode: true, enumerateFactory: true })) } }),
+    "/r/.factory/ci-settings.json": JSON.stringify({ permissions: { deny: [...ciDenyEntries(writeGlobs(prot, { enumerateFactory: true })), ...qaManifestDeny()] } }),
+    "/r/.factory/ci-settings-harness.json": JSON.stringify({ permissions: { deny: [...ciDenyEntries(writeGlobs(prot, { harnessMode: true, enumerateFactory: true })), ...qaManifestDeny()] } }),
   };
   expect(parityRun(files, prot).level).toBe("PASS");
   expect(files["/r/.factory/ci-settings.json"]).not.toContain("Edit(factory/**)");

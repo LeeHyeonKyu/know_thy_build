@@ -38,7 +38,10 @@ const REVIEW_OK = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: HEAD
  * `reviewRunId`(이슈의 review 하트비트)에서 따로 읽는다. 기본값은 둘이 같은 런을 말한다.
  */
 const RUN = "34809992796";
-const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runId: RUN, runnerId: `gha-${RUN}`, headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve" };
+// KTB-42 — 이 로스터에는 `qa`가 있으므로 run 기록의 줄은 qa 증거 매니페스트의 지문도 싣는다.
+// 그 필드가 없으면 머지는 거부한다(아래 "KTB-42" 테스트가 그 자리를 직접 친다).
+const QA_DIGEST = "f".repeat(64);
+const RECORD_OK = { stage: "review", at: "2026-09-14T09:02Z", runId: RUN, runnerId: `gha-${RUN}`, headSha: HEAD, round: 2, decision: "approved", verdicts: "correctness=approve,qa=approve", qaManifest: QA_DIGEST };
 const reviewDeps = (over = {}) => ({
   reviewEvidence: vi.fn(async () => ({ ok: true, data: REVIEW_OK })),
   reviewRunId: vi.fn(async () => ({ ok: true, runId: RUN, runnerId: `gha-${RUN}` })),
@@ -1289,6 +1292,34 @@ test("MF-2: provenance is checked BEFORE the two-actor approval", async () => {
   expect(await run(d)).toBe(2);
   expect(d.approvePr).not.toHaveBeenCalled();
   expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+// ── ADR-024 / KTB-42 — qa 증거 매니페스트의 지문은 run 기록에서만 읽을 수 있다 ──────────────────
+// `.factory/out/`는 gitignore다 — 머지 잡의 새 체크아웃에 매니페스트 파일은 존재하지 않는다.
+// 그래서 머지가 볼 수 있는 유일한 증인이 review 런이 남긴 `qa_manifest=` 한 줄이다.
+
+test("KTB-42: the roster includes qa but the review run recorded no qa_manifest → refuse, and name the tool", async () => {
+  const d = baseD({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, qaManifest: null } })) });
+  expect(await run(d)).toBe(2);
+  refusedReview(d);
+  expect(lastReason(d)).toMatch(/no qa_manifest digest/);
+  expect(lastReason(d)).toMatch(/qa-evidence\.js finish/);
+});
+
+test("KTB-42: the recorded digest rides along to the merged transition (requirements re-asks there)", async () => {
+  const d = baseD();
+  expect(await run(d)).toBe(0);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", qaManifestRecorded: QA_DIGEST }));
+});
+
+test("KTB-42: a roster without qa needs no manifest — an uncalled reviewer's missing evidence is not a defect", async () => {
+  const d = baseD({
+    reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness"] })),
+    reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, verdicts: REVIEW_OK.verdicts.filter((v) => v.role !== "qa") } })),
+    reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, verdicts: "correctness=approve", qaManifest: null } })),
+  });
+  expect(await run(d)).toBe(0);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", qaManifestRecorded: null }));
 });
 
 // ── (7) 외부 감사 H6 — 머지 전이 텍스트가 사람의 서명 유무를 말한다 ─────────────────────────

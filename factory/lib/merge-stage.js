@@ -535,6 +535,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   //
   // 하나라도 확인 불가면(dep 미배선·조회 실패·로그인 미해결) GREEN이 아니라 **판정 불가**이고,
   // 머지는 되돌릴 수 없으므로 fail closed로 `needs-human`이다.
+  // KTB-42 — review 런이 run 기록에 남긴 qa 증거 매니페스트의 지문. 아래 (b2)에서 채워지고
+  // `factory:merged` 전이에 그대로 실린다(`lib/requirements.js` qaEvidenceGate가 다시 묻는다).
+  let qaManifestRecorded = null;
   const reviewRefused = async (reason) => {
     const line = `review verification failed — ${reason}`;
     const t = await d.transition({ to: "factory:needs-human", reason: line });
@@ -592,6 +595,23 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
     if (!prov.ok) return await reviewRefused(prov.reason);
     record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
+
+    /**
+     * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────
+     * 매니페스트 파일(`.factory/out/qa/<issue>/manifest.json`)은 커밋되지 않으므로 머지 스테이지의 새
+     * 체크아웃에는 존재하지 않는다. 볼 수 있는 것은 review 런이 run 기록에 남긴 지문 하나뿐이고,
+     * 그 자리는 러너만 쓴다(에이전트 세션의 `factory/records` push는 훅이 막는다).
+     * 로스터에 `qa`가 있는데 그 지문이 없다 = 유효한 증거가 있었다는 증인이 없다 = 판정 불가.
+     * KTB #3의 교훈을 뒤집어 적용한다: "증거가 없다"는 이제 빌더를 가리키지 않고, **되돌릴 수 없는
+     * 단계 앞에서 멈추는 이유**가 된다.
+     */
+    if (ros.roles.includes("qa")) {
+      qaManifestRecorded = rec.record.qaManifest ?? null;
+      if (!qaManifestRecorded) {
+        return await reviewRefused(`${NOT_BOUND} — this tier's roster includes qa, but the review run recorded no qa_manifest digest for ${live.slice(0, 7)}. A valid qa evidence manifest (\`node .factory/bin/qa-evidence.js finish --issue ${issue}\`) is what that digest names, and without it nothing witnesses that the evidence existed`);
+      }
+      record([`merge: qa evidence manifest ${qaManifestRecorded.slice(0, 12)} bound to the review run record`]);
+    }
 
     // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
     // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.
@@ -675,7 +695,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // true이면 이 잡 자체가 `factory-merge` 환경의 required reviewer 앞에서 한 번 멈췄다는 뜻이고
   // (곧 사람이 PR마다 "돌려라"를 눌렀다), false이면 사람의 서명은 토큰 등록 1회뿐이다 — 그것이
   // 다크 루프의 정의이고, 기록에 소리 내어 남아야 한다. 값이 없으면(구형 CHARTER) 그 사실을 적는다.
-  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg });
+  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg, qaManifestRecorded });
   record([...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
 
   // (8) 추적 이슈를 닫는다 — 코드는 이미 머지됐다. 이것도 실패해도 머지 자체는 되돌릴 게 없으므로

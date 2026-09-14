@@ -618,6 +618,65 @@ test("deny-all-writes: a Bash command that writes outside /tmp, $TMPDIR or .fact
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
 }, 30000);
 
+/**
+ * ── ADR-024 / KTB-42 — **도구의 철자가 두 훅을 그대로 지난다** ───────────────────────────────────
+ * 증거는 이제 `node .factory/bin/qa-evidence.js …`로만 쓰인다. 훅이 보는 것은 그 **Bash 명령줄**뿐이고
+ * (실제 쓰기는 자식 프로세스 안에서 일어난다), 그 줄에는 쓰기 동사가 하나도 없다 — 그래서 통과해야 한다.
+ * 이 테스트가 지키는 것은 두 가지다: ① 도구가 지금 막히지 않는다, ② 앞으로도 막히지 않는다. 특히
+ * 플래그를 **긴 이름**(`--issue`)으로 유지해야 한다: `-e`/`-p` 한 글자 플래그를 도입하는 순간
+ * `node` 인라인 스크립트 규칙(`-[a-zA-Z]*[ep]…`)에 걸려 도구가 자기 훅에 막힌다.
+ */
+test("KTB-42: the qa-evidence tool's own Bash spelling passes deny-all-writes and block-dangerous", async () => {
+  const spellings = [
+    'node .factory/bin/qa-evidence.js probe --issue 3',
+    'node .factory/bin/qa-evidence.js record --issue 3 --claim dw1 --summary "export returns 200" -- npm test',
+    'node .factory/bin/qa-evidence.js record --issue 3 --claim dw2 --summary "e2e" -- npx playwright test tests/e2e.spec.ts',
+    'node .factory/bin/qa-evidence.js attach --issue 3 --claim dw2 --kind screenshot --file /tmp/shot.png --summary "the export screen"',
+    'node .factory/bin/qa-evidence.js na --issue 3 --claim dw5 --reason "no UI surface in this tier"',
+    'node .factory/bin/qa-evidence.js finish --issue 3',
+    'node ./.factory/bin/qa-evidence.js finish --issue 3',
+  ];
+  for (const c of spellings) {
+    for (const hook of ["deny-all-writes.sh", "block-dangerous.sh"]) {
+      const r = await bash(hook, cmd(c), undefined, { CLAUDE_PROJECT_DIR: "/repo" });
+      expect(r.code, `${hook} :: ${c} :: ${r.stderr}`).toBe(0);
+    }
+  }
+  // 반대 방향도 여전히 참이다 — 도구의 이름을 흉내 낸 즉흥 리다이렉션은 막힌다.
+  expect((await bash("deny-all-writes.sh", cmd("node .factory/bin/qa-evidence.js finish --issue 3 > src/a.js"))).code).toBe(2);
+  expect((await bash("block-dangerous.sh", cmd("echo x > .factory/bin/qa-evidence.js"))).code).toBe(2);
+}, 30000);
+
+/**
+ * ── 리뷰 라운드 1 SF-1b — **매니페스트만 카브아웃에서 다시 뺀다** ─────────────────────────────────
+ * `.factory/out/qa/`는 qa가 써야 하지만, 그 안의 `manifest.json`으로 가는 합법 경로는 도구의 **자식
+ * 프로세스**뿐이다(훅은 그 자식을 보지 않는다). 손으로 쓰는 철자만 막으므로 정당한 사용의 비용은 0이다.
+ * 진위 경계는 아니다 — 도구를 거쳐 지어낸 claim은 여전히 가능하다(ADR-024의 정직한 재진술).
+ */
+test("KTB-42/SF-1b: writing the qa evidence manifest by hand is blocked; every other evidence file is not", async () => {
+  const blocked = [
+    "printf x > .factory/out/qa/3/manifest.json",
+    "cat /tmp/m.json > ./.factory/out/qa/3/manifest.json",
+    "cat /tmp/m.json >> .factory/out/qa/3/manifest.json",
+    "cat /tmp/m.json | tee .factory/out/qa/3/manifest.json",
+    "cp /tmp/m.json .factory/out/qa/3/manifest.json",
+    "mv /tmp/m.json .factory/out/qa/3/manifest.json",
+  ];
+  const allowed = [
+    "printf x > .factory/out/qa/3/dw1-1.log",
+    "cp /tmp/shot.png .factory/out/qa/3/dw2-1.png",
+    "mkdir -p .factory/out/qa/3",
+    "cat .factory/out/qa/3/manifest.json",                       // 읽기는 그대로다(spec-conformance가 읽는다)
+    "node .factory/bin/qa-evidence.js record --issue 3 --claim dw1 --summary s -- npm test",
+  ];
+  for (const c of blocked) {
+    const r = await bash("deny-all-writes.sh", cmd(c));
+    expect(r.code, c).toBe(2);
+    expect(r.stderr, c).toMatch(/qa evidence manifest/);
+  }
+  for (const c of allowed) expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0);
+}, 60000);
+
 // ── KTB-13 r1: 쓰기 금지 역할에게도 `Bash(*)`가 열렸다 ───────────────────────────────────────────
 // 이 역할들은 `sed -i`·리다이렉션만으로 쓰지 않는다 — `node -e`로 fs를 부르고, `curl -o`/`wget`으로 파일을
 // 내려받고, `install`로 복사할 수 있다. 판정 방향은 이 훅의 나머지와 같다: /tmp·$TMPDIR·.factory/out/qa/가
