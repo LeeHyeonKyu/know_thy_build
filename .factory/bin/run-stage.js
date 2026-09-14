@@ -5,10 +5,10 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen } from "../lib/gh.js";
-import { loadCharter, loadHarness } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
-import { runStageGates, verdictLine } from "../lib/gates.js";
+import { runStageGates, verdictLine, commitStatusState } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
@@ -27,6 +27,7 @@ import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from ".
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff } from "../lib/handoff.js";
+import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, countTransitionsTo } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
@@ -220,6 +221,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
   // 잔해 락을 회수하고 들어왔다면 그 사실이 기록의 1차 증거다 — 다음 조사가 이 줄로 grep한다.
   if (c.reclaimed) record([`lock: reclaimed from completed runner ${c.reclaimed.runner}`]);
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
+  let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
@@ -324,6 +326,32 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
       }
       checkoutSha = co.sha;
     }
+    // KTB-37 — 체크아웃이 끝난 트리 위에 **팩토리 소유 설정만** 스테이지 자신의 커밋에서 덮는다
+    // (§makeFactoryOverlay). review·merge는 방금 detach된 PR head 위에서, implement는 빌더가 돌기
+    // 전에 한다. 실패는 진행이 아니라 정지다 — PR head의 훅·settings·리뷰어 프롬프트로 도는 스테이지는
+    // 자기 자신을 검증하는 스테이지이고, 그건 검증이 아니다.
+    if (OVERLAY_STAGES.has(stage) && d.overlayFactoryConfig) {
+      const ov = await d.overlayFactoryConfig();
+      if (!ov.ok) {
+        // 판정 불가다(GREEN도 RED도 아니다) — 이 저장소의 그 자리는 언제나 factory:blocked이고,
+        // 원인은 대개 러너 쪽이라 재시도로 풀린다.
+        const t = await d.transition({ to: "factory:blocked", reason: `factory config overlay failed — ${ov.reason}` });
+        record([`overlay: FAIL — ${ov.reason}`, ...refusal(t)]);
+        return 2;
+      }
+      overlaidPaths = ov.paths || [];
+      // implement는 **유일한 쓰기 스테이지**다: 여기서 overlay가 실제로 파일을 바꿨다는 것은 워크플로가
+      // 준 트리가 스테이지 자신의 커밋이 아니었다는 뜻이고, 그 트리 위에서 빌더가 `git add -A`로 커밋하면
+      // overlay가 PR에 실려 나간다. 그래서 덮을 것이 있으면 **빌더를 띄우지 않는다** — implement의 커밋이
+      // 팩토리 설정을 담을 수 있는 경로 자체가 사라진다(정상 경로에서 이 overlay는 언제나 no-op이다).
+      if (stage === "implement" && overlaidPaths.length) {
+        const reason = `the implement tree is not the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} factory-owned path(s): ${overlaidPaths.slice(0, 10).join(", ")}`;
+        const t = await d.transition({ to: "factory:blocked", reason });
+        record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
+        return 2;
+      }
+      record([overlayLine(ov)]);
+    }
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
     // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
@@ -360,7 +388,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // `docs/factory/runs/**`) 밖의 diff가 하나라도 있으면 그 산출물은 애초에 받아들이지 않는다 —
     // verifyStage조차 부르지 않는다.
     if (isNoWriteStage(stage)) {
-      const clean = d.assertCleanWorktree ? await d.assertCleanWorktree() : { ok: true };
+      // KTB-37 — overlay가 덮은 경로는 팩토리가 만든 diff다(에이전트가 아니라). 그 목록만 허용한다.
+      const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths) : { ok: true };
       if (!clean.ok) {
         // 두 실패는 등급이 다르다(KTB-14 r1). **더러운 트리**는 사람이 볼 것이 있다 — 어떤 파일이
         // 어떻게 바뀌었는지 보고 판단해야 하므로 needs-human이다. **`git status` 자체가 실패한 것**은
@@ -414,7 +443,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // diagnostic(bin/gates.js가 손으로 남긴 로컬 진단 결과)은 스테이지 판정이 아니다 — verify-stage/requirements와
     // 같은 불변식: 사람이 손으로 만든 GREEN이 커밋 상태로 새어나가면 안 된다.
     if (GATED_STAGES.has(stage) && gates != null && gates.diagnostic !== true) {
-      await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+      // GREEN 하나만 success다 — MISCONFIGURED·RED·그 밖은 전부 failure(gates.js commitStatusState, 감사 H2).
+      await postStatus({ context: "factory/gates", state: commitStatusState(gates.status), description: verdictLine(gates), sha: gates.head_sha });
     }
     /**
      * ADR-020 KTB-35 — **테스트가 하나도 깨지지 않은 RED는 다른 사고다.** 게이트가 그 사실을 스스로
@@ -823,12 +853,17 @@ function pathsOfStatusLine(line) {
  * 없으므로 fail-closed(`ok:false`)다 — 이 저장소의 다른 "판정 불가" 계약(`integrityCheck`의
  * `cannotCompute`, `mergeGates`)과 같다.
  */
-export async function assertNoWriteStageClean({ run, cwd }) {
+export async function assertNoWriteStageClean({ run, cwd, allow = [] }) {
   const r = await run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd });
   if (r.code !== 0) return { ok: false, dirty: [], reason: `git status failed: ${r.stderr.trim()}` };
+  // KTB-37 — `allow`는 이 런의 **overlay가 덮은 정확한 경로들**이다(팩토리가 스스로 만든 diff이지
+  // 에이전트가 만든 것이 아니다). 목록은 overlay 직후에 굳고, 그 경로들이 세션 중에 **또** 바뀌지
+  // 않았다는 것은 `overlayDrift`가 sha와 직접 비교해 따로 증명한다 — 여기서 넓게 열어 주는 것은
+  // `.claude/**`가 아니라 그 순간 덮인 파일 이름들뿐이다.
+  const allowed = new Set(allow);
   const dirty = new Set();
   for (const line of r.stdout.split("\n").filter(Boolean)) {
-    for (const p of pathsOfStatusLine(line)) if (p && !isScratchPath(p)) dirty.add(p);
+    for (const p of pathsOfStatusLine(line)) if (p && !isScratchPath(p) && !allowed.has(p)) dirty.add(p);
   }
   return { ok: dirty.size === 0, dirty: [...dirty] };
 }
@@ -878,10 +913,17 @@ export function nextState(stage, data, { maxRounds = null } = {}) {
  * 전이 요구조건에 커밋/PR을 실제로 묶는다. 게이트는 "무엇을 검사했는가"를 알아야만 물린다.
  * gh 호출이 실패하면 sha 없이(undefined) 돌려주고 record()로 흔적을 남긴다 — 런을 죽이지 않는다.
  */
-export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {} }) {
-  // K(`charter.limits.K`)는 여기로 오지 않는다(r1 SF1) — 전이 요구조건은 approve를 라운드로 막지 않고,
-  // K는 `nextState`가 rework 판정에서만 쓴다. 안 쓰는 값을 실으면 다음 독자가 그 검사를 되살린다.
-  const ctxExtra = { issue, roster: ctx?.roster, expectedRounds: ctx?.rounds, rosterSize: ctx?.roster?.length };
+export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null }) {
+  // K(`charter.limits.K`)는 `factory:approved`로는 오지 않는다(ADR-020 KTB-29 r1 SF1) — 전이 요구조건은
+  // approve를 라운드로 막지 않고, K는 `nextState`가 rework 판정에서만 쓴다.
+  //
+  // 외부 감사 2026-09-14 H1c — **`factory:merged`만 예외다.** merge는 script-only라 `buildContext`를
+  // 거치지 않으므로 `ctx`가 null이고, 그러면 `roster`/`rosterSize`가 undefined가 되어 정족수 검사가
+  // 통째로 무음이 된다(규칙은 있는데 잴 자가 없다). 그래서 merge 경로에서는 호출자가 CHARTER에서
+  // 직접 읽은 로스터와 K를 넘긴다 — 되돌릴 수 없는 전이가 그 둘을 실제로 묻게.
+  const roster = ctx?.roster ?? reviewRoster ?? undefined;
+  const ctxExtra = { issue, roster, expectedRounds: ctx?.rounds, rosterSize: roster?.length };
+  if (to === "factory:merged" && Number.isInteger(maxRounds)) ctxExtra.maxRounds = maxRounds;
   try {
     if (to === "factory:awaiting-review") {
       ctxExtra.headSha = await gh.branchHeadSha(`claude/fq-${issue}`);
@@ -946,6 +988,85 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
 }
 
 /**
+ * ADR-020 KTB-37 — **스테이지는 PR의 코드를 돌지만, 팩토리 자신의 설정은 스테이지 자신의 커밋(base)의
+ * 것이어야 한다.** 위 `makeCheckoutHead`가 워킹 트리를 PR head로 detach하고 나면, 그 트리에 있는
+ * `.factory/ci-settings.json`(`claude -p --settings`가 읽는 L2 deny 목록) · `.claude/hooks/*`(PreToolUse
+ * 훅) · `.claude/agents/*`(리뷰어 프롬프트) · `.claude/settings.json` · `docs/factory/CHARTER.md`는 전부
+ * **PR의 것**이다. 결과는 두 가지였다(KTB #3 → harness #9, 2026-09-14):
+ *   ① main의 하네스 수정(KTB-36의 deny 예외)보다 앞선 head를 가진 PR은 그 수정을 **영원히 못 받는다** —
+ *      리뷰는 낡은 설정으로 돌고, 같은 실패를 반복한다.
+ *   ② 에이전트 PR이 훅·settings·리뷰어 프롬프트·`.factory/lib/*`를 고치면 **자기 리뷰가 그 변조된
+ *      설정으로 실행된다**(보호 경로는 *머지*를 사람 손에 맡길 뿐, 스테이지는 이미 돌아 버린 뒤다).
+ * 그래서 체크아웃 직후 팩토리 소유 경로만 스테이지의 커밋에서 덮어쓴다 — 워크플로의 스크럽/정리 스텝이
+ * 같은 이유로 이미 하고 있는 `git checkout ${{ github.sha }} -- .factory`의 일반화다. 스테이지 산출물
+ * (`.factory/out/**`)은 제외한다: 그건 이 런이 지금 만들고 있는 것이지 설정이 아니다.
+ * 실패하면 스테이지는 진행하지 않는다(fail closed) — "확인되지 않은 설정"은 설정이 아니다.
+ */
+export const OVERLAY_ROOTS = [".factory", ".claude", "docs/factory/CHARTER.md"];
+export const OVERLAY_EXCLUDE = ":(exclude).factory/out";
+export const OVERLAY_PATHSPECS = [".factory", OVERLAY_EXCLUDE, ".claude", "docs/factory/CHARTER.md"];
+export const OVERLAY_LABEL = ".factory/** (except .factory/out/**), .claude/**, docs/factory/CHARTER.md";
+/** overlay가 손대는 스테이지 — PR 콘텐츠가 워킹 트리에 올 수 있는 셋. triage·plan은 PR 이전이라 언제나 base 위에 있다. */
+const OVERLAY_STAGES = new Set(["implement", "review", "merge"]);
+const SHA40 = /^[0-9a-f]{40}$/;
+
+/** 이 스테이지 **자신의** 커밋. CI는 `GITHUB_SHA`(이벤트 sha = 기본 브랜치 tip), 로컬은 `origin/<default>`. */
+export async function resolveStageSha({ run, root, cwd = root, env = process.env, defaultBranch = "main" }) {
+  const fromEnv = env?.GITHUB_SHA;
+  // 40-hex가 아니면 거부한다 — ref 이름은 나중에 `git checkout <rev> -- <pathspec>`의 <rev> 자리에
+  // 들어가고, 그 자리는 모호하면 안 된다(같은 이름의 파일이 있으면 git이 되묻는 자리다).
+  if (fromEnv) return SHA40.test(fromEnv) ? { ok: true, sha: fromEnv, source: "GITHUB_SHA" } : { ok: false, reason: `GITHUB_SHA is not a 40-hex sha: ${fromEnv}` };
+  const ref = `origin/${defaultBranch}`;
+  const r = await run("git", ["rev-parse", ref], { cwd });
+  const sha = r.stdout.trim();
+  if (r.code !== 0 || !SHA40.test(sha)) return { ok: false, reason: `cannot resolve the stage sha (${ref}): ${r.stderr?.trim() || "no such ref"}` };
+  return { ok: true, sha, source: ref };
+}
+
+export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch = () => "main" }) {
+  return async () => {
+    const branch = typeof defaultBranch === "function" ? defaultBranch() : defaultBranch;
+    const s = await resolveStageSha({ run, root, env, defaultBranch: branch });
+    if (!s.ok) return { ok: false, reason: s.reason };
+    // 이 커밋이 실제로 들고 있는 경로만 pathspec에 넣는다 — 없는 경로 하나가 `git checkout`을 통째로
+    // 실패시키고(`error: pathspec … did not match`), 어댑터 레포는 `.claude/`가 없을 수 있다.
+    const present = [];
+    for (const p of OVERLAY_ROOTS) {
+      const e = await run("git", ["cat-file", "-e", `${s.sha}:${p}`], { cwd: root });
+      if (e.code === 0) present.push(p);
+    }
+    if (present.length === 0) return { ok: false, reason: `the stage sha ${s.sha.slice(0, 7)} (${s.source}) carries none of ${OVERLAY_LABEL}` };
+    const pathspecs = present.flatMap((p) => (p === ".factory" ? [p, OVERLAY_EXCLUDE] : [p]));
+    const co = await run("git", ["checkout", s.sha, "--", ...pathspecs], { cwd: root });
+    if (co.code !== 0) return { ok: false, reason: `overlay checkout failed (${s.sha.slice(0, 7)} ${s.source}): ${co.stderr?.trim() || `exit ${co.code}`}` };
+    // 무엇이 실제로 덮였는가 — 한 줄 로그의 재료이자, 쓰기 금지 스테이지의 클린 체크에 넘길 허용 목록이다.
+    const st = await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...pathspecs], { cwd: root });
+    if (st.code !== 0) return { ok: false, reason: `overlay status failed: ${st.stderr?.trim() || `exit ${st.code}`}` };
+    const paths = new Set();
+    for (const line of st.stdout.split("\n").filter(Boolean)) for (const p of pathsOfStatusLine(line)) if (p) paths.add(p);
+    return { ok: true, sha: s.sha, source: s.source, paths: [...paths] };
+  };
+}
+
+/**
+ * overlay가 깔아 둔 팩토리 설정이 세션 **뒤에도** 그 커밋의 것 그대로인가. 클린 체크에 넘기는 허용
+ * 목록(overlay가 덮은 경로들)이 에이전트의 세션 중 수정까지 덮어 주면 안 되므로, 그 경로들만 sha와
+ * 직접 비교한다. `git diff` 자체가 실패하면 "그대로다"를 증명할 수 없으므로 fail closed다.
+ */
+export async function overlayDrift({ run, cwd, sha }) {
+  const r = await run("git", ["diff", "--name-only", sha, "--", ...OVERLAY_PATHSPECS], { cwd });
+  if (r.code !== 0) return { ok: false, paths: [], reason: `overlay drift check failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
+  const paths = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  return paths.length === 0 ? { ok: true, paths: [] } : { ok: false, paths };
+}
+
+/** run 기록의 한 줄 — 무엇을, 어느 커밋에서 덮었는지. */
+export const overlayLine = (ov) =>
+  ov.paths?.length
+    ? `overlay: ${ov.paths.length} path(s) from ${ov.sha.slice(0, 7)} (${ov.source || "base"}) — ${ov.paths.slice(0, 10).join(", ")}${ov.paths.length > 10 ? ", …" : ""} [${OVERLAY_LABEL}]`
+    : `overlay: clean — factory config already at ${ov.sha.slice(0, 7)} (${ov.source || "base"}) [${OVERLAY_LABEL}]`;
+
+/**
  * 로컬 진입(§4.2.5): `factory run triage <issue>`가 락을 먼저 잡았을 때만 의미가 있다 — main()이
  * `FACTORY_LOCAL_ENTRY=1`을 심어야 켜진다(GitHub 이벤트로 뜬 triage 잡은 이 env가 없다). backlog
  * 라벨만 있고 아직 factory 상태 라벨이 없는 이슈에 한해 factory:queue로 스스로 밀어 넣고 전이
@@ -1007,6 +1128,7 @@ async function main() {
   const readJson = (p) => { try { const t = readFile(p); return t ? JSON.parse(t) : null; } catch { return null; } };
   const gatesPath = join(root, ".factory/out/gates.json");
   let baseSha = null;                                                 // 한 런 안에서 base는 하나다 — 두 번 물어보면 두 답이 나올 수 있다
+  let overlaySha = null;                                              // KTB-37 — overlay가 설정을 가져온 커밋(세션 뒤 drift 비교의 기준)
   const mergeBase = async () => {
     if (baseSha) return baseSha;
     const branch = harness.project?.default_branch ?? "main";
@@ -1053,8 +1175,26 @@ async function main() {
       return req;
     },
     checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
-    /** ADR-020 KTB-14 — 쓰기 금지 스테이지의 구조적 백스톱. review는 checkoutHead가 이미 detach해 둔 PR head를 그대로 본다. */
-    assertCleanWorktree: () => assertNoWriteStageClean({ run, cwd: root }),
+    /**
+     * ADR-020 KTB-37 — 체크아웃된 트리 위에 팩토리 소유 설정만 스테이지 자신의 커밋에서 덮는다.
+     * `harness`는 charterReady에서 이미 로드됐다 — 기본 브랜치는 그때 굳은 값을 늦게 읽는다.
+     */
+    overlayFactoryConfig: async () => {
+      const ov = await makeFactoryOverlay({ run, root, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
+      if (ov.ok) overlaySha = ov.sha;
+      return ov;
+    },
+    /**
+     * ADR-020 KTB-14 — 쓰기 금지 스테이지의 구조적 백스톱. review는 checkoutHead가 이미 detach해 둔 PR head를 그대로 본다.
+     * KTB-37: overlay가 덮은 경로(`allow`)는 팩토리가 만든 diff라 더러움으로 세지 않는다 — 대신 그
+     * 경로들이 세션 중에 **또** 바뀌지 않았는지를 sha와 직접 비교해 확인한다(`overlayDrift`, fail closed).
+     */
+    assertCleanWorktree: async (allow = []) => {
+      const clean = await assertNoWriteStageClean({ run, cwd: root, allow });
+      if (!clean.ok || !overlaySha) return clean;
+      const drift = await overlayDrift({ run, cwd: root, sha: overlaySha });
+      return drift.ok ? clean : { ok: false, dirty: drift.paths, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
+    },
     buildContext: async () => (ctxCache = await buildContext({ root, gh, issue, stage })),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
@@ -1172,6 +1312,48 @@ async function main() {
      * 스테이지라, 이 두 값 중 어느 것도 에이전트 세션이 보는 환경에 들어가지 않는다.
      */
     get twoActor() { return process.env.FACTORY_TWO_ACTOR === "true" || Boolean(process.env.FACTORY_MERGE_TOKEN); },
+    /**
+     * 외부 감사 2026-09-14 H1c/H1b — 머지 직전 리뷰 검증(`merge-stage.js` §(6b))의 재료.
+     *
+     * merge는 script-only라 `buildContext`를 거치지 않는다 — 곧 `ctxCache`가 null이고, 전이
+     * 요구조건(`requirements.js`)에 실리는 `roster`/`rosterSize`/`maxRounds`도 비어 있었다. 그것이
+     * 감사 H1c의 절반이다: `factory:merged` 규칙이 정족수를 물어도 **물을 재료가 없었다.** 그래서
+     * 여기서 CHARTER와 roles.toml을 직접 읽어 로스터와 K를 만든다. tier는 `gates:` dep과 같은
+     * 출처다(triage handoff의 자기 신고 → 없으면 CHARTER 기본값).
+     */
+    reviewEvidence: async () => {
+      const h = latestHandoff(await gh.comments(issue), "review");
+      if (!h) return { ok: false, reason: "no review handoff on this issue" };
+      if (h.issue !== Number(issue)) return { ok: false, reason: `review handoff is for issue #${h.issue}, not #${issue}` };
+      const v = validate("review.v1", h.data);
+      if (!v.ok) return { ok: false, reason: `review handoff invalid: ${v.errors.join("; ")}` };
+      return { ok: true, data: h.data };
+    },
+    reviewRoster: async () => {
+      try {
+        const tier = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
+        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", tier), tier };
+      } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
+    },
+    get maxRounds() { return charter?.limits?.K ?? null; },
+    /** CHARTER `merge.human_gate` — 머지 전이 텍스트가 사람의 서명 유무를 소리 내어 말한다(감사 H6). */
+    get humanGate() { return charter?.merge?.human_gate; },
+    prHeadShaLive: (pr) => gh.prHeadSha(pr),
+    commitStatuses: (sha) => gh.commitStatuses(sha),
+    /**
+     * 팩토리 자신의 계정 **이름**(값이 아니다). 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만
+     * `factory/review` 상태를 올린 것은 **에이전트 배우**다 — 그래서 둘 다 받는다. 봇 로그인은
+     * 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다).
+     * 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` — 머지 스테이지가 fail closed로 멈춘다.
+     */
+    factoryLogins: async () => {
+      const logins = [];
+      const bot = (process.env.FACTORY_BOT_LOGIN || "").trim();
+      if (bot) logins.push(bot);
+      try { logins.push(await gh.viewerLogin()); }
+      catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+      return { ok: true, logins: [...new Set(logins.filter(Boolean))] };
+    },
     /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
     approvePr: (pr) => gh.approvePr(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
@@ -1189,7 +1371,16 @@ async function main() {
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false }) => {
-      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine });
+      // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
+      // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
+      // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
+      // merge-stage §(6b)가 이미 그 전에 판정 불가로 멈춘다).
+      let reviewRoster = null;
+      if (stage === "merge" && to === "factory:merged") {
+        try { const r = await deps.reviewRoster(); if (r?.ok) reviewRoster = r.roles; }
+        catch (e) { recordLine(`merge: roster for the merged requirement unresolved — ${e?.message || e}`); }
+      }
+      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
       // blocked에서의 hop-back만 `prerequisite`를 세운다(KTB-24 fix) — "직전 스테이지의 산출물이

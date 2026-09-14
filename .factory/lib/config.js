@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { parseFrontmatter } from "./frontmatter.js";
 
-export const THRESHOLD_DEFAULTS = { diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
+// flaky_max(감사 M3)·quarantine_max_effective(감사 M4): 한 PR이 "원래 흔들리던 것"으로 밀어낼 수 있는
+// 기존 테스트 수와, 격리 목록으로 RED를 뒤집을 수 있는 테스트 수의 상한. 상한이 없으면 목록이 긴
+// 저장소에서 "빨간 테스트가 전부 목록에 있어서 GREEN"이 성립한다.
+export const THRESHOLD_DEFAULTS = { diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, flaky_max: 2, quarantine_max: 5, quarantine_max_effective: 3, quarantine_ttl_days: 28, quarantine_return_after: 30 };
 export function loadHarness(root) {
   const h = parseToml(readFileSync(join(root, ".factory/harness.toml"), "utf8"));
   h.gates ??= {}; h.gates.thresholds = { ...THRESHOLD_DEFAULTS, ...(h.gates.thresholds || {}) };
@@ -40,6 +43,13 @@ export function loadCharter(root) {
     plan_rounds: { docs: 2, default: 3, ...(data.plan_rounds || {}) },
     // quarantine 캡의 단일 출처는 harness [gates.thresholds].quarantine_max다 — 여기엔 두지 않는다.
     back_pressure: { awaiting_review_max: 4, ...(data.back_pressure || {}) },
+    /**
+     * 외부 감사 2026-09-14 H6 — `merge.human_gate`. **기본값을 여기서 채우지 않는다**(다른 필드와
+     * 다른 점이다): 없는 것과 false는 다른 사실이기 때문이다. false는 "소유자가 다크 머지를 골랐다"는
+     * 선언이고, 없는 것은 "아무도 고른 적이 없다"이다 — doctor가 전자는 WARN(`merge.dark`),
+     * 후자는 FAIL(`charter.merge-human-gate-unset`)로 가른다. 기본값을 채우면 그 구분이 사라진다.
+     */
+    merge: { ...(data.merge || {}) },
     budget: data.budget || {},
     retro: data.retro || { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true },
   };

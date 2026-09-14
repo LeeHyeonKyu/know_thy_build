@@ -13,6 +13,17 @@ const MAX_TURNS_STAGE_KEYS = new Set([...STAGES, "retro"]);
 const c = (id, level, detail = "") => ({ id, level, detail });
 
 /**
+ * "무엇도 검사하지 않고 항상 성공하는 명령"인가(감사 P1-7). 텍스트 판정이라 완전할 수 없다 — 의도적으로
+ * 감추려는 사람(`node -e 'process.exit(0)'`)은 잡지 못한다. 목표는 그것이 아니라 **관성**이다: 린터를
+ * 붙이기 전의 자리표시자가 그대로 배포되어 "lint GREEN"을 찍는 것을 막는 것.
+ */
+export function isNoopCommand(cmd) {
+  const s = String(cmd ?? "").trim().replace(/\{file\}|\{files\}/g, "").trim();
+  if (!s) return true;
+  return [/^true$/, /^:$/, /^exit\s+0$/, /^node\s+-e\s+(['"])?0\1?$/, /^node\s+-e\s+(['"])\1$/, /^echo\b[^|&;]*$/].some((re) => re.test(s));
+}
+
+/**
  * harness.toml의 스키마·게이트·명령·임계값·보호 범위를 정적으로 검사한다 (프로세스 실행 없음).
  * `raw`(옵션, 기본값 `h`)는 `loadHarness`의 기본값 채움 **이전** 파스다 — `[factory].max_turns`가
  * 파일에 아예 없는지(WARN) vs 정상적으로 채워졌는지(PASS)는 정규화된 `h`만으로는 절대 구별할 수
@@ -56,9 +67,54 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
   const unknown = required.filter((g) => !known(g));
   out.push(unknown.length ? c("gates.required-in-commands", "FAIL", `required gates not in [commands] or proof set: ${unknown.join(", ")}`) : c("gates.required-in-commands", "PASS"));
   const maxLevel = MAX_LEVEL[h.harness?.maturity] || "fast";
-  const allowed = new Set(LEVELS.slice(0, LEVELS.indexOf(maxLevel) + 1).flatMap((l) => h.gates?.[l] || []));
-  const notInLevels = required.filter((g) => !allowed.has(g) && !["prove-test", "new-test-repeat"].includes(g));
-  out.push(notInLevels.length ? c("gates.required-in-levels", "FAIL", `required gates absent from every level up to ${maxLevel}: ${notInLevels.join(", ")}`) : c("gates.required-in-levels", "PASS"));
+  const runnableLevels = LEVELS.slice(0, LEVELS.indexOf(maxLevel) + 1);
+  /**
+   * 감사 H2 — required는 레벨 목록보다 강해졌다(gates.js `recomputeStatus`): 어느 레벨이 뽑히든
+   * required 게이트가 돌지 않았으면 MISCONFIGURED다. 그러니 "어느 한 레벨에라도 있으면 된다"는
+   * 예전 기준으로는 부족하다 — **돌 수 있는 모든 레벨에** 있어야 그 하네스가 상시 MISCONFIGURED로
+   * 멈추지 않는다. 증명 게이트(prove-test/new-test-repeat)도 이제 레벨 멤버라 예외가 없다.
+   */
+  const notInLevels = required.filter((g) => runnableLevels.some((l) => !(h.gates?.[l] || []).includes(g)));
+  out.push(notInLevels.length
+    ? c("gates.required-in-levels", "FAIL", `required gates absent from at least one level up to ${maxLevel} (they would never run there → MISCONFIGURED): ${notInLevels.join(", ")}`)
+    : c("gates.required-in-levels", "PASS"));
+  /**
+   * 감사 H2 — **레벨이 전부 같으면 tier는 아무것도 정하지 않는다.** 실측 구성에서 fast/full/deep이
+   * 글자 그대로 같았고, 그래서 load-bearing PR이 docs PR과 정확히 같은 게이트를 받았다. 레벨의 값은
+   * "무거운 변경에는 더 많은 것이 돈다"이므로, full은 fast에 무언가를 더해야 하고 deep은 full을
+   * 포함해야 한다. deep이 full과 같은 것은 **더 설정된 게이트가 없을 때만** 정상이다(M0 신규 저장소).
+   */
+  const fastSet = new Set(h.gates?.fast || []), fullSet = new Set(h.gates?.full || []), deepSet = new Set(h.gates?.deep || []);
+  const configurable = ["integration", "e2e"].filter((g) => cmds[g]).concat(cmds.proof?.coverage ? ["diff_coverage"] : [], cmds.proof?.mutation ? ["mutation"] : []);
+  const unlisted = configurable.filter((g) => !deepSet.has(g));
+  const identical = [];
+  if (![...fullSet].some((g) => !fastSet.has(g))) identical.push("full adds nothing to fast");
+  if ([...fullSet].some((g) => !deepSet.has(g))) identical.push("deep is weaker than full (it must contain every full gate)");
+  else if (![...deepSet].some((g) => !fullSet.has(g)) && unlisted.length) identical.push(`deep adds nothing to full though ${unlisted.join(", ")} is configured`);
+  out.push(identical.length
+    ? c("gates.levels-identical", "FAIL", `${identical.join("; ")} — tier then decides nothing (every PR gets the same gates)`)
+    : c("gates.levels-identical", "PASS", deepSet.size === fullSet.size ? "deep == full (nothing more configured yet)" : ""));
+  /**
+   * 감사 H2 — M0의 `fast` 천장은 설계된 것이지만 **조용하면 안 된다**: full/deep에 적어 둔 게이트는
+   * M0 동안 한 줄도 돌지 않는다(판정 파일의 `downgraded_from`이 그 사실을 남긴다).
+   */
+  const neverRun = [...new Set([...fullSet, ...deepSet])].filter((g) => !fastSet.has(g));
+  out.push(h.harness?.maturity === "M0" && neverRun.length
+    ? c("gates.m0-downgrade", "WARN", `maturity M0 caps every run at level fast — ${neverRun.join(", ")} never run until M1/M2 (each run records downgraded_from)`)
+    : c("gates.m0-downgrade", "PASS"));
+  /**
+   * 감사 P1-7 — `lint = "node -e 0"`는 린트가 아니라 **항상 통과하는 게이트**다. required에 이름이
+   * 올라 있으니 판정 파일에는 "lint GREEN"이 남고, 사람은 린트가 돌았다고 읽는다. 아무것도 검사하지
+   * 않는 명령은 게이트가 아니므로 FAIL이다 — 린터를 붙이거나, 붙일 때까지 required에서 빼라.
+   */
+  const noop = [];
+  for (const k of ["lint", "lint_file"]) {
+    const cmd = cmds[k];
+    if (cmd !== undefined && isNoopCommand(cmd)) noop.push(`[commands].${k} = ${JSON.stringify(cmd)} checks nothing`);
+  }
+  out.push(noop.length
+    ? c("gates.lint-noop", "FAIL", `${noop.join("; ")} — a command that always exits 0 is not a gate; plug a real linter or drop lint from [gates].required`)
+    : c("gates.lint-noop", "PASS"));
   const beyond = LEVELS.slice(LEVELS.indexOf(maxLevel) + 1).filter((l) => (h.gates?.[l] || []).some((g) => !(h.gates?.[maxLevel] || []).includes(g)));
   out.push(beyond.length ? c("gates.levels-vs-maturity", "WARN", `${beyond.join(",")} list gates beyond maturity ${h.harness?.maturity}; they will be downgraded to ${maxLevel}`) : c("gates.levels-vs-maturity", "PASS"));
   // 모든 레벨을 훑는다 — 의도적이다: 증명 도구는 그 레벨이 활성화되기 전, 게이트를 도입하는
@@ -72,6 +128,9 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
   for (const k of ["diff_coverage_pct", "mutation_score_pct"]) if (!(t[k] >= 0 && t[k] <= 100)) badT.push(`${k}=${t[k]} out of 0..100`);
   if (!(t.new_test_repeats >= 2)) badT.push(`new_test_repeats=${t.new_test_repeats} must be ≥ 2`);
   for (const k of ["flaky_isolation_runs", "flaky_base_runs", "quarantine_max", "quarantine_ttl_days", "quarantine_return_after"]) if (!(t[k] >= 1)) badT.push(`${k}=${t[k]} must be ≥ 1`);
+  // flaky_max·quarantine_max_effective는 0을 받는다 — "이 저장소에서는 아무것도 제외하지 않는다"는
+  // 유효한(가장 엄격한) 설정이다. 음수·비수치만 잡는다.
+  for (const k of ["flaky_max", "quarantine_max_effective"]) if (!(t[k] >= 0)) badT.push(`${k}=${t[k]} must be ≥ 0`);
   out.push(badT.length ? c("thresholds.range", "FAIL", badT.join("; ")) : c("thresholds.range", "PASS"));
   // test
   out.push((h.test?.test_glob || []).length ? c("test.test_glob", "PASS") : c("test.test_glob", "FAIL", "[test].test_glob must not be empty"));
