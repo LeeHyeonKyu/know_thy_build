@@ -1888,3 +1888,45 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 **영향(r1)**: `factory/lib/bootstrap.js`(`require_code_owner_reviews`·`CODEOWNERS_PATH`·`codeownersContent`/`codeownersOwners`/`codeownersMentions`·`MERGE_ENVIRONMENT`·`TWO_ACTOR_VARIABLE`·`codeowners`/`environment` op), `factory/cli/bootstrap.js`(`resolveMergeActor`·파일 writer), `factory/lib/gh.js`(`putEnvironment`·`viewerScopes`), `factory/lib/doctor/merge-authority.js`(신규 — `doctor/factory.js`에서 분리), `factory/lib/doctor/factory.js`(`checkWorkflows`가 디렉터리를 읽는다·CODEOWNERS를 넘긴다), `factory/cli/doctor.js`(`root`/`exists`/`readFile` 전달), `factory/bin/doctor-ci.js`(신규), `factory/lib/yml-lint.js`(스크럽 예외 두 열쇠), `templates/factory/github/workflows/*.yml`(`id: scrub-artifacts` ×6, 머지 잡의 `environment:`, sweeper의 doctor 스텝), `templates/factory/factory/harness.toml`·`.factory/harness.toml`(`.github/**`), `templates/factory/factory/ci-settings{,-harness}.json`·설치본(`.github/**` deny), `templates/factory/docs/factory/CHARTER.md`, `factory/cli/init.js`(next steps), 스펙 §4.4·§6.1, `README.md`. 테스트: `bootstrap.test.js`·`doctor-factory.test.js`·`doctor-merge-authority.test.js`(신규)·`yml-lint.test.js`·`gh.test.js`·`templates.test.js`.
 
 **r2 (KTB-33 finding MF-A)**: 두 배우 모드 판정은 이제 저장소 시크릿뿐 아니라 `factory-merge` 환경 시크릿도 본다(`gh.listEnvSecrets`, 404/미존재 환경은 `[]`) — 소유자 체크리스트가 시킨 대로 토큰을 환경으로 옮기고 저장소 사본을 지운 저장소도 두 배우 모드로 인식되고, 재부트스트랩이 코드 오너 요건을 지우지 않는다. 저장소 사본이 남아 있으면(환경에도 있든 없든) bootstrap이 note를, doctor가 `tokens.merge-token-repo-level`(WARN)을 남겨 지우라고 알린다.
+
+---
+
+## ADR-022 factory board — 진행 신호와 뷰어 — 2026-09-14
+
+**질문**: 스테이지 하나가 8–35분을 돈다. 그동안 밖에서 볼 수 있는 것은 10분마다 갱신되는 하트비트 두 줄(`stage · runner · started · last`)뿐이다. 그 줄은 "살아 있다"는 말하지만 **무엇을 하고 있는지**는 한 글자도 말하지 않는다 — 지금 어느 스텝인지, 어떤 에이전트가 무엇을 읽고 있는지, 토큰을 얼마나 태웠는지. 소유자는 이슈별로 그것을 보고 싶어 하고, KTB를 설치한 **모든 저장소**에서 그래야 한다.
+
+**관측**:
+- 답은 이미 디스크에 있다. `claude -p`의 세션 JSONL은 러너의 홈에서 **한 줄씩 자라고**, 서브에이전트도 각자 트랜스크립트를 갖는다(`hooks/record-agents.sh`가 SubagentStart/Stop의 페이로드 전문을 `.factory/out/agents.jsonl`에 적어 두고, 그 안에 `agent_transcript_path`가 있다). 즉 진행 신호를 만들기 위해 에이전트에게 **아무것도 더 시키지 않아도 된다** — 이미 쓰고 있는 것을 읽기만 하면 된다.
+- 러너 밖으로 나가는 실시간 채널은 하나다. 잡의 stdout은 잡이 끝나야 읽기 좋고, 아티팩트도 마찬가지다. **이슈 코멘트만이** 도는 중에 갱신되고 누구나 즉시 본다. 그리고 그 자리에는 이미 하트비트 코멘트가 있다.
+- 실측(2026-09-14) 트랜스크립트 모양: assistant 줄이 `message.model`·`message.usage.{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens}`·`content[].tool_use{name, input}`을 싣는다. `type`은 `assistant`·`user`·`system`·`progress`를 포함해 십수 가지가 섞이고 버전마다 는다.
+- 실측 훅 페이로드는 **일정하지 않다**. 어떤 버전은 Stop만, `{hook_event_name, agent_type, agent_transcript_path}`만 싣는다(`agent_id`도 `description`도 없다).
+
+**결정**:
+
+1. **`progress:v1`이 계약이다.** `factory/lib/progress.js`가 트랜스크립트들을 마지막으로 읽은 오프셋부터 이어 읽어(tail) 객체 하나로 접는다:
+   `{stage, issue, runner, started, updated, step:{phase, label, since}, agents:[{label, kind, status, started, ended, last_tool, turns, input_tokens, output_tokens, cache_read_tokens, cost_usd}], totals:{…}, files_touched:[…]}`.
+   이 객체는 하트비트 코멘트와 런 기록 양쪽에 **똑같은 마커**(`<!-- factory-progress:v1 {…} -->`) 한 줄로 실린다 — 그래서 뷰어는 도는 런과 끝난 런을 정규식 하나로 읽는다. 사람이 보는 표는 그 JSON에서 **파생될 뿐**이고, 둘이 어긋날 수 없도록 렌더러는 마커에 실제로 실린 객체만 본다.
+
+2. **하트비트가 유일한 실시간 채널이고, 주기는 2분이다.** 10분은 "살아 있는가"에는 충분했지만 8분짜리 스테이지를 갱신 한 번으로 끝낸다. sweeper의 stale 임계는 30분이므로 2분은 15번을 놓쳐야 좀비 판정이 되는 넉넉한 예산이고, 이슈당 쓰기 17회는 API 한도에 비해 무시할 수 있다. 코멘트는 **언제나 같은 코멘트를 PATCH**한다(새 코멘트 금지 — 알림 폭탄). 본문이 바뀌지 않았으면 쓰지 않는다.
+
+3. **관측 기능이 스테이지의 생명선을 끊지 못한다.** `progress()`가 던지면 그 주기는 **예전의 두 줄짜리 본문 그대로** 나간다. 이 폴백이 없으면 진행 읽기의 버그 하나가 하트비트를 멈추고, sweeper는 그것을 "런이 죽었다"로 읽어 **살아 있는** 스테이지를 재큐한다(R 예산을 태우고, 완성된 구현이 라벨 그래프에서 좌초한다 — ADR-020 MF-4가 정확히 그 사고다). 그래서 하트비트의 첫 두 줄은 **모양이 바뀌지 않는다**: `lib/sweeper.js`가 그것을 읽고, `heartbeat.test.js`의 SF-4 왕복 테스트가 두 쪽을 한 줄에 세워 둔다.
+
+4. **크기와 비밀은 설계 제약이지 나중 일이 아니다.** 이 객체는 **공개 이슈 코멘트**로 나간다.
+   - **`tool_result`는 파싱조차 하지 않는다.** 그 안에는 파일 전문·`env` 덤프·토큰이 그대로 들어 있다. `last_tool`은 `tool_use`의 **인자**에서만 만들고(경로·패턴·명령의 앞 60자), `prompt`·`content`·`new_string` 같은 큰 자유 텍스트 필드는 후보에서 아예 뺐다. 이 경계는 테스트가 지킨다.
+   - GitHub 코멘트 상한은 64 KB다. 마커 JSON은 60 KB 예산 안에서 스스로 줄고, **버리는 순서가 정해져 있다**: `files_touched` → 에이전트를 뒤에서부터. `totals`는 절대 버리지 않는다 — 표가 비어도 "이 런이 얼마를 태웠나"는 남아야 한다. 에이전트는 40개, 파일은 30개에서 자르고, 잘렸다는 사실과 개수를 본문에 적는다(합계는 잘린 것까지 포함한다 — 표만 짧아지고 숫자는 거짓말하지 않는다).
+
+5. **비용은 가격표 한 벌에서만 나온다.** 끝난 런의 비용은 `claude -p` 봉투가 말해 주지만(`total_cost_usd`), 도는 중인 런은 아무도 말해 주지 않는다 — 트랜스크립트에는 모델 이름과 토큰 수만 있다. 그래서 `lib/usage.js`에 모델별 list price를 두고(`MODEL_PRICES`/`modelPrice`/`costFromUsage`, 캐시는 읽기 0.1×·쓰기 1.25×) `progress.js`가 그것을 **불러 쓴다**. 표를 두 벌 두면 "라이브 $0.41 / 최종 $0.38"처럼 조용히 어긋난다. 모르는 모델은 `null`이고 비용은 0으로 더해진다 — 아무 가격이나 붙여 그럴듯한 숫자를 만드는 것보다 "비용 미상"이 낫다(`summarizeUsage`가 `n/a`를 합산에서 빼는 것과 같은 원칙).
+
+6. **`step`은 최선의 추측이고, 그렇다고 말한다.** 지금 도는 서브에이전트 중 가장 늦게 시작한 것의 라벨이 스텝이고, `phase`는 그 라벨의 `:` 앞부분이다(`R1:architecture` → `R1`). 워크플로가 `phase('R1')`과 `label: 'R1:${name}'`을 같은 축으로 붙여 주기 때문에 성립한다(`workflows/factory-review.js`). `:`가 없는 라벨에는 phase를 **지어내지 않는다** — `null`이다.
+
+7. **훅 페이로드의 어떤 키도 필수가 아니다.** 신원은 `agent_id` → 없으면 `agent_transcript_path`, 라벨은 `description`/`label` → 없으면 `agent_type`. 버전이 바뀌어 키가 사라지면 진행 표시가 성기어질 뿐, 아무것도 깨지지 않는다. 같은 원칙으로 **모르는 JSONL 줄 종류는 전부 조용히 건너뛴다**.
+
+8. **러너 쪽 코드는 factory 파일이다.** `lib/progress.js`·`lib/heartbeat.js`는 `factory init`이 `.factory/lib/`로 미러링하는 파일이라, KTB를 설치한 모든 저장소가 자동으로 이 신호를 얻는다(self-mirror 테스트가 드리프트를 막는다).
+
+**알려진 한계**: 오케스트레이터 트랜스크립트 경로는 훅이 `transcript_path`를 싣지 않는 버전에서 **추측**이다 — 스테이지가 도는 중이라 `session_id`를 아직 모르므로(봉투는 런이 끝나야 쓰인다) 이 cwd의 프로젝트 디렉터리에서 가장 최근에 수정된 `.jsonl`을 고른다. CI 러너에는 이 저장소의 세션이 하나뿐이라 정확하고, 로컬에서 사람이 같은 저장소로 딴 세션을 돌리고 있으면 그 세션을 볼 수 있다 — 진행 표시가 조금 틀릴 뿐 아무것도 깨뜨리지 않는 종류의 오차라 best-effort로 둔다.
+
+**영향(Task A)**: `factory/lib/progress.js`(신규), `factory/lib/heartbeat.js`(본문 렌더링·2분 주기·변경 시에만 PATCH·폴백), `factory/lib/usage.js`(`MODEL_PRICES`/`modelPrice`/`costFromUsage`), `factory/bin/run-stage.js`(`progress` dep 배선, `usageLine(out, progress)`가 런 기록에 마커를 남긴다), `.factory/**` 미러, 스펙 §4.2.1 step 1, `README.md`. 테스트: `progress.test.js`(신규), `heartbeat.test.js`, `run-stage.test.js`.
+
+### Task B — 뷰어 (`factory board` CLI + 자체 완결 HTML)
+
+*(다음 작업. 여기서 읽는 것은 위 `progress:v1` 마커 하나다 — 하트비트 코멘트에서는 도는 런을, `docs/factory/runs/<n>.md`에서는 끝난 런을 같은 정규식으로 집는다. 이 절은 그 판결이 나오면 채운다.)*
