@@ -45,6 +45,31 @@ jobs:
     environment: factory-merge
     timeout-minutes: 30
     steps:
+      # 외부 감사 2026-09-14 M7 — **두 배우 모드는 조용히 강등되지 않는다.** 아래 `Run stage`의
+      # `GH_TOKEN`은 `secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN`이다. 그 폴백은 단일
+      # 배우 모드를 위한 것인데, **두 배우 모드에서도 똑같이 조용히 작동했다**: 환경이 적용되지
+      # 않았거나(보호되지 않은 브랜치에서 시작한 dispatch), 시크릿이 지워졌거나, 환경 이름이 어긋나면
+      # `secrets.FACTORY_MERGE_TOKEN`은 빈 문자열이 되고 — 잡은 **에이전트 배우의 토큰으로** 머지를
+      # 시도한다. 그러면 ADR-021이 권한으로 세운 벽이 로그 한 줄 없이 사라진다.
+      #
+      # `vars.FACTORY_TWO_ACTOR`는 `factory bootstrap`이 **관측해서 적어 둔** 모드다(사람이 고르는
+      # 플래그가 아니다). 그것이 true인데 이 잡에 머지 토큰이 없다면, 답은 폴백이 아니라 **정지**다:
+      # 머지는 되돌릴 수 없고, 잘못된 배우로 한 머지는 사후에 구별되지도 않는다.
+      # 첫 스텝인 것이 요점이다 — 체크아웃보다도, 어떤 토큰이 쓰이기도 전에 죽는다.
+      # `id:`는 yml-lint의 `merge-token-required-when-two-actor` 규칙이 찾는 키다(자유 문구가 아니다).
+      - name: Require the merge token in two-actor mode
+        id: two-actor-token-guard
+        env:
+          TWO_ACTOR_DECLARED: ${{ vars.FACTORY_TWO_ACTOR }}
+          MERGE_TOKEN_PRESENT: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
+        run: |
+          if [[ "$TWO_ACTOR_DECLARED" == "true" && "$MERGE_TOKEN_PRESENT" != "true" ]]; then
+            echo "factory: this repository is bootstrapped in two-actor mode (vars.FACTORY_TWO_ACTOR=true) but FACTORY_MERGE_TOKEN is empty in this job." >&2
+            echo "factory: refusing to fall back to FACTORY_BOT_TOKEN — that would merge with the agent actor's credentials and silently undo ADR-021." >&2
+            echo "factory: check that the secret exists in the 'factory-merge' environment and that this job started from a protected branch (audit M7)." >&2
+            exit 1
+          fi
+          echo "factory: merge-token check ok (two-actor declared: ${TWO_ACTOR_DECLARED:-unset}, merge token present: $MERGE_TOKEN_PRESENT)"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -53,6 +78,25 @@ jobs:
         with:
           claude: "false"
           test-env: "true"
+      # 외부 감사 2026-09-14 H1b — 머지 스테이지는 `factory/review`·`factory/gates` 상태를 **누가
+      # 올렸는지** 확인한다(상태는 repo 스코프 토큰이면 무엇이든 쓸 수 있으므로 "success다"만으로는
+      # 아무것도 증명되지 않는다). 두 배우 모드에서 이 잡의 `GH_TOKEN`은 **머지 배우**인데 그 상태를
+      # 올린 것은 앞 스테이지의 **에이전트 배우**다 — 그래서 봇의 로그인이 따로 필요하다.
+      # 로그인 **이름**은 비밀이 아니다(토큰이 아니다). 여기서 한 번 해석해 $GITHUB_ENV로 넘기면
+      # `Run stage` 스텝의 env에 봇 토큰 사본을 만들지 않고도 대조할 수 있다.
+      # 실패해도 잡을 죽이지 않는다: 그러면 머지 스테이지가 잡 토큰의 로그인만으로 대조하고,
+      # 맞지 않으면 스스로 fail closed 한다(needs-human).
+      - name: Resolve the agent actor's login
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+        run: |
+          login="$(gh api user --jq .login 2>/dev/null || true)"
+          if [[ -n "$login" ]]; then
+            echo "FACTORY_BOT_LOGIN=$login" >> "$GITHUB_ENV"
+            echo "factory: agent actor login resolved"
+          else
+            echo "factory: could not resolve the agent actor's login — the merge stage will compare against the job token's account only" >&2
+          fi
       # 이 스텝은 **스크립트 전용**이다 — `claude -p`를 띄우지 않는다(setup의 `claude: "false"`).
       # ADR-021이 머지 권한을 두는 유일한 자리이고, 그 사실이 이 잡 전체의 전제다.
       - name: Run stage

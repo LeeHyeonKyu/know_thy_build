@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen } from "../lib/gh.js";
-import { loadCharter, loadHarness } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine } from "../lib/gates.js";
@@ -27,6 +27,7 @@ import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from ".
 import { readTranscript } from "../lib/stage-artifact.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff } from "../lib/handoff.js";
+import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, countTransitionsTo } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord } from "../lib/run-record.js";
@@ -878,10 +879,17 @@ export function nextState(stage, data, { maxRounds = null } = {}) {
  * 전이 요구조건에 커밋/PR을 실제로 묶는다. 게이트는 "무엇을 검사했는가"를 알아야만 물린다.
  * gh 호출이 실패하면 sha 없이(undefined) 돌려주고 record()로 흔적을 남긴다 — 런을 죽이지 않는다.
  */
-export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {} }) {
-  // K(`charter.limits.K`)는 여기로 오지 않는다(r1 SF1) — 전이 요구조건은 approve를 라운드로 막지 않고,
-  // K는 `nextState`가 rework 판정에서만 쓴다. 안 쓰는 값을 실으면 다음 독자가 그 검사를 되살린다.
-  const ctxExtra = { issue, roster: ctx?.roster, expectedRounds: ctx?.rounds, rosterSize: ctx?.roster?.length };
+export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null }) {
+  // K(`charter.limits.K`)는 `factory:approved`로는 오지 않는다(ADR-020 KTB-29 r1 SF1) — 전이 요구조건은
+  // approve를 라운드로 막지 않고, K는 `nextState`가 rework 판정에서만 쓴다.
+  //
+  // 외부 감사 2026-09-14 H1c — **`factory:merged`만 예외다.** merge는 script-only라 `buildContext`를
+  // 거치지 않으므로 `ctx`가 null이고, 그러면 `roster`/`rosterSize`가 undefined가 되어 정족수 검사가
+  // 통째로 무음이 된다(규칙은 있는데 잴 자가 없다). 그래서 merge 경로에서는 호출자가 CHARTER에서
+  // 직접 읽은 로스터와 K를 넘긴다 — 되돌릴 수 없는 전이가 그 둘을 실제로 묻게.
+  const roster = ctx?.roster ?? reviewRoster ?? undefined;
+  const ctxExtra = { issue, roster, expectedRounds: ctx?.rounds, rosterSize: roster?.length };
+  if (to === "factory:merged" && Number.isInteger(maxRounds)) ctxExtra.maxRounds = maxRounds;
   try {
     if (to === "factory:awaiting-review") {
       ctxExtra.headSha = await gh.branchHeadSha(`claude/fq-${issue}`);
@@ -1172,6 +1180,48 @@ async function main() {
      * 스테이지라, 이 두 값 중 어느 것도 에이전트 세션이 보는 환경에 들어가지 않는다.
      */
     get twoActor() { return process.env.FACTORY_TWO_ACTOR === "true" || Boolean(process.env.FACTORY_MERGE_TOKEN); },
+    /**
+     * 외부 감사 2026-09-14 H1c/H1b — 머지 직전 리뷰 검증(`merge-stage.js` §(6b))의 재료.
+     *
+     * merge는 script-only라 `buildContext`를 거치지 않는다 — 곧 `ctxCache`가 null이고, 전이
+     * 요구조건(`requirements.js`)에 실리는 `roster`/`rosterSize`/`maxRounds`도 비어 있었다. 그것이
+     * 감사 H1c의 절반이다: `factory:merged` 규칙이 정족수를 물어도 **물을 재료가 없었다.** 그래서
+     * 여기서 CHARTER와 roles.toml을 직접 읽어 로스터와 K를 만든다. tier는 `gates:` dep과 같은
+     * 출처다(triage handoff의 자기 신고 → 없으면 CHARTER 기본값).
+     */
+    reviewEvidence: async () => {
+      const h = latestHandoff(await gh.comments(issue), "review");
+      if (!h) return { ok: false, reason: "no review handoff on this issue" };
+      if (h.issue !== Number(issue)) return { ok: false, reason: `review handoff is for issue #${h.issue}, not #${issue}` };
+      const v = validate("review.v1", h.data);
+      if (!v.ok) return { ok: false, reason: `review handoff invalid: ${v.errors.join("; ")}` };
+      return { ok: true, data: h.data };
+    },
+    reviewRoster: async () => {
+      try {
+        const tier = latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default;
+        return { ok: true, roles: rosterFor(charter, loadRoles(root), "review", tier), tier };
+      } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
+    },
+    get maxRounds() { return charter?.limits?.K ?? null; },
+    /** CHARTER `merge.human_gate` — 머지 전이 텍스트가 사람의 서명 유무를 소리 내어 말한다(감사 H6). */
+    get humanGate() { return charter?.merge?.human_gate; },
+    prHeadShaLive: (pr) => gh.prHeadSha(pr),
+    commitStatuses: (sha) => gh.commitStatuses(sha),
+    /**
+     * 팩토리 자신의 계정 **이름**(값이 아니다). 두 배우 모드에서 이 잡의 `GH_TOKEN`은 머지 배우이지만
+     * `factory/review` 상태를 올린 것은 **에이전트 배우**다 — 그래서 둘 다 받는다. 봇 로그인은
+     * 워크플로가 `FACTORY_BOT_LOGIN`으로 넘긴다(이름은 비밀이 아니라 env로 옮겨도 사본이 늘지 않는다).
+     * 잡 토큰의 로그인조차 해석되지 않으면 `ok:false` — 머지 스테이지가 fail closed로 멈춘다.
+     */
+    factoryLogins: async () => {
+      const logins = [];
+      const bot = (process.env.FACTORY_BOT_LOGIN || "").trim();
+      if (bot) logins.push(bot);
+      try { logins.push(await gh.viewerLogin()); }
+      catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+      return { ok: true, logins: [...new Set(logins.filter(Boolean))] };
+    },
     /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
     approvePr: (pr) => gh.approvePr(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
@@ -1189,7 +1239,16 @@ async function main() {
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false }) => {
-      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine });
+      // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
+      // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
+      // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
+      // merge-stage §(6b)가 이미 그 전에 판정 불가로 멈춘다).
+      let reviewRoster = null;
+      if (stage === "merge" && to === "factory:merged") {
+        try { const r = await deps.reviewRoster(); if (r?.ok) reviewRoster = r.roles; }
+        catch (e) { recordLine(`merge: roster for the merged requirement unresolved — ${e?.message || e}`); }
+      }
+      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
       // blocked에서의 hop-back만 `prerequisite`를 세운다(KTB-24 fix) — "직전 스테이지의 산출물이

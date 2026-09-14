@@ -100,6 +100,35 @@ test("merged requires checks + integrity GREEN and approved handoff sha == PR he
   expect(r({ ...base, checksGreen: true }).reason).toMatch(/integrity check not verified GREEN/);
 });
 
+/**
+ * 외부 감사 2026-09-14 H1c — **`factory:merged` 규칙이 정족수를 다시 센다.**
+ *
+ * 감사 시점의 규칙은 `need(review)` + 게이트 + sha 바인딩 + checks/integrity뿐이었다: review handoff가
+ * "있고 스키마에 맞으면" 통과였고, 정족수·all-approve는 `factory:approved`에만 있었다. 그런데
+ * `factory:approved` 라벨은 훅 우회(H1a)로도 붙고, `merge-stage.js`는 `mergePr`를 이 규칙보다 **먼저**
+ * 부른다 — 곧 되돌릴 수 없는 단계의 마지막 방어선이 리뷰를 세지 않고 있었다.
+ */
+test("H1c: factory:merged re-checks quorum, all-approve (recomputed from must_fix) and K — not only that a review handoff exists", () => {
+  const v = (role, verdict = "approve") => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: `${role}1`, where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a"), v("b")], orchestration: "workflow", guarantee: "verified" };
+  const r = requirementFor("factory:merged");
+  const ctx = (over = {}) => checked({ comments: [c("review", over.review ?? review)], prHeadSha: sha, rosterSize: 2, roster: ["a", "b"], maxRounds: 3, checksGreen: true, integrityGreen: true, ...over });
+
+  expect(r(ctx()).ok).toBe(true);
+  // 정족수 미달
+  expect(r(ctx({ review: { ...review, verdicts: [v("a")] } })).reason).toMatch(/verdict count 1 != roster size 2/);
+  // 한 역할이 두 번 — 개수는 맞지만 로스터가 비었다
+  expect(r(ctx({ review: { ...review, verdicts: [v("a"), v("a")] } })).reason).toMatch(/review incomplete — b/);
+  // 자기 신고 decision은 무시한다 — verdict가 판정이다
+  expect(r(ctx({ review: { ...review, decision: "approved", verdicts: [v("a"), v("b", "reject")] } })).reason).toMatch(/not all approve/);
+  // 모두 approve여도 must_fix에서 다시 계산한다 — uphold된 ruling이 rework을 되살린다
+  expect(r(ctx({ review: { ...review, decision: "approved", rulings: [{ id: "cf1", ruling: "uphold", by: "a" }] } })).reason).toMatch(/recomputed from must_fix is "rework"/);
+  // K 초과 — approved와 달리 되돌릴 수 없는 이 전이에서는 막는다
+  expect(r(ctx({ review: { ...review, round: 4 } })).reason).toMatch(/round 4 > K=3/);
+  // K를 모르면(구형 배선) 라운드는 묻지 않는다 — 정족수는 그대로 문다
+  expect(r(ctx({ review: { ...review, round: 4 }, maxRounds: undefined })).ok).toBe(true);
+});
+
 test("approved/merged도 게이트 파일을 요구한다 — 없으면 missing, GREEN이 아니면 거부 (전이 경로에서만)", () => {
   const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" };
   const ctx = { comments: [c("review", review)], prHeadSha: sha, rosterSize: 1, maxRounds: 3, checksGreen: true, integrityGreen: true, gatesChecked: true };

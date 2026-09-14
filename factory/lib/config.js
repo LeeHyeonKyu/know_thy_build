@@ -40,6 +40,13 @@ export function loadCharter(root) {
     plan_rounds: { docs: 2, default: 3, ...(data.plan_rounds || {}) },
     // quarantine 캡의 단일 출처는 harness [gates.thresholds].quarantine_max다 — 여기엔 두지 않는다.
     back_pressure: { awaiting_review_max: 4, ...(data.back_pressure || {}) },
+    /**
+     * 외부 감사 2026-09-14 H6 — `merge.human_gate`. **기본값을 여기서 채우지 않는다**(다른 필드와
+     * 다른 점이다): 없는 것과 false는 다른 사실이기 때문이다. false는 "소유자가 다크 머지를 골랐다"는
+     * 선언이고, 없는 것은 "아무도 고른 적이 없다"이다 — doctor가 전자는 WARN(`merge.dark`),
+     * 후자는 FAIL(`charter.merge-human-gate-unset`)로 가른다. 기본값을 채우면 그 구분이 사라진다.
+     */
+    merge: { ...(data.merge || {}) },
     budget: data.budget || {},
     retro: data.retro || { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true },
   };

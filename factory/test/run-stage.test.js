@@ -892,6 +892,24 @@ test("C1: approved/merged bind the PR head sha read from the implement handoff",
   }
 });
 
+/**
+ * 외부 감사 2026-09-14 H1c — merge는 script-only라 `buildContext`를 거치지 않는다(ctx=null). 그래서
+ * `factory:merged` 규칙에 정족수 검사를 넣어도 **잴 자가 없었다**: roster도 rosterSize도 undefined.
+ * 호출자가 CHARTER에서 읽은 로스터와 K를 실어 줘야 그 규칙이 실제로 물린다.
+ */
+test("H1c: the merged transition carries a roster and K even with no ctx — merge has no buildContext", async () => {
+  const gh = { comments: vi.fn(async () => implHandoff(9)), prHeadSha: vi.fn(async () => "b".repeat(40)), branchHeadSha: vi.fn() };
+  const x = await buildCtxExtra({ gh, issue: 7, to: "factory:merged", ctx: null, reviewRoster: ["correctness", "qa"], maxRounds: 3 });
+  expect(x.roster).toEqual(["correctness", "qa"]);
+  expect(x.rosterSize).toBe(2);
+  expect(x.maxRounds).toBe(3);
+
+  // approved는 K를 받지 않는다(ADR-020 KTB-29 r1 SF1) — 통과하는 리뷰를 라운드로 막지 않는다.
+  const gh2 = { comments: vi.fn(async () => implHandoff(9)), prHeadSha: vi.fn(async () => "b".repeat(40)), branchHeadSha: vi.fn() };
+  const y = await buildCtxExtra({ gh: gh2, issue: 7, to: "factory:approved", ctx: null, reviewRoster: ["correctness"], maxRounds: 3 });
+  expect(y.maxRounds).toBeUndefined();
+});
+
 test("C1: a gh failure yields no sha plus a run-record line — never a crash", async () => {
   const lines = [];
   const gh = { branchHeadSha: async () => { throw new Error("HTTP 404"); }, comments: vi.fn(), prHeadSha: vi.fn() };
@@ -981,6 +999,7 @@ test("merge: 선행 handoff 확인은 게이트 파일을 요구하지 않는다
     mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
     protectedPaths: async () => ({ ok: true, files: [] }),
     policyViolations: async () => ({ ok: true, files: [] }),
+    ...mergeReviewDepsFor("a".repeat(40)),                          // 감사 H1c — 머지 전 리뷰 검증(같은 커밋)
     mergePr: async () => {}, closeIssue: async () => {},
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
@@ -1434,17 +1453,60 @@ const checkoutBaseDeps = (over = {}) => baseDeps({
   ...over,
 });
 
-/** merge는 checkoutBaseDeps 위에 runMergeStage의 7단계 deps(happy path)를 얹는다. */
-const mergeHappyDeps = (over = {}) => checkoutBaseDeps({
-  defaultBranch: "main",
-  prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
-  gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
-  mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
-  protectedPaths: async () => ({ ok: true, files: [] }),          // KTB-5: 보호 경로 없음 = 자동 머지 가능
-  policyViolations: async () => ({ ok: true, files: [] }),        // KTB-6: 역할 섹션 규칙도 통과
-  mergePr: async () => {}, closeIssue: async () => {},
-  ...over,
+/**
+ * 외부 감사 2026-09-14 H1c/H1b — 주어진 커밋에 대한 "통과한 리뷰"의 재료 한 벌. merge 스테이지는
+ * 이제 `mergePr` 전에 이것들을 전부 묻는다(§merge-stage (6b)).
+ */
+const mergeReviewDepsFor = (sha) => ({
+  reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
+  reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+  maxRounds: 3,
+  prHeadShaLive: async () => sha,
+  factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
+  commitStatuses: async () => [
+    { context: "factory/review", state: "success", creatorLogin: "factory-bot" },
+    { context: "factory/gates", state: "success", creatorLogin: "factory-bot" },
+  ],
 });
+
+/** merge는 checkoutBaseDeps 위에 runMergeStage의 7단계 deps(happy path)를 얹는다. */
+const mergeHappyDeps = (over = {}) => {
+  /**
+   * 외부 감사 2026-09-14 H1c/H1b — 머지 직전 리뷰 검증(§merge-stage (6b))의 재료. 이 런이 **실제로
+   * 체크아웃한 sha**를 그대로 따라간다: 테스트마다 checkoutHead가 다른 sha를 주는데, 리뷰 증거가
+   * 그 커밋의 것이 아니면 "PR head가 움직였다"로 떨어지는 것이 (이제) 올바른 동작이기 때문이다.
+   */
+  let live = "b".repeat(40);
+  const deps = checkoutBaseDeps({
+    defaultBranch: "main",
+    prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+    gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "b".repeat(40) }),
+    mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+    protectedPaths: async () => ({ ok: true, files: [] }),          // KTB-5: 보호 경로 없음 = 자동 머지 가능
+    policyViolations: async () => ({ ok: true, files: [] }),        // KTB-6: 역할 섹션 규칙도 통과
+    mergePr: async () => {}, closeIssue: async () => {},
+    reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: live, round: 1, verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }], orchestration: "workflow", guarantee: "verified" } }),
+    reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+    maxRounds: 3,
+    prHeadShaLive: async () => live,
+    factoryLogins: async () => ({ ok: true, logins: ["factory-bot"] }),
+    commitStatuses: async () => [
+      { context: "factory/review", state: "success", creatorLogin: "factory-bot" },
+      { context: "factory/gates", state: "success", creatorLogin: "factory-bot" },
+    ],
+    ...over,
+  });
+  // checkoutHead가 아예 없는 배선(옛 테스트)은 그대로 둔다 — 없으면 runStage가 체크아웃을 건너뛴다.
+  const base = deps.checkoutHead;
+  if (base) {
+    deps.checkoutHead = async (...args) => {
+      const r = await base(...args);
+      if (r?.ok && r.sha) live = r.sha;
+      return r;
+    };
+  }
+  return deps;
+};
 
 test("review: checkoutHead is called right after assertHandoff, before buildContext/gates", async () => {
   const calls = [];
@@ -1581,6 +1643,8 @@ test("merge: postStatus posts factory/gates via run-stage's reportStatus when a 
   const reportStatus = vi.fn(async () => {});
   const d = mergeHappyDeps({
     gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "e".repeat(40) }),
+    // 감사 H1c — 이 런의 head는 게이트 파일의 `e…`다(checkoutHead가 없는 배선). 리뷰 증거도 같은 커밋이어야 한다.
+    ...mergeReviewDepsFor("e".repeat(40)),
     reportStatus,
   });
   expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);

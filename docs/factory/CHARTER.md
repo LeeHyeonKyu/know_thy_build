@@ -12,6 +12,7 @@ plan_roles:
   default: [product-advocate, architect, skeptic, operator]
 plan_rounds: { docs: 2, default: 3 }
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
+merge: { human_gate: false }                # 소유자 결정: 이 저장소는 다크 루프를 증명하는 것이 목적이다 (아래 "머지 권한 — 사람 게이트" 참고)
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -37,6 +38,21 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 - runner retries R = 2
 - review 대기(awaiting-review) 이슈가 4개 이상이면 implement는 새 claim을 하지 않는다 (back-pressure)
 - budget_tokens_per_issue: unset   # 선택·기본 off (ADR-005). 켜면 초과 시 **새 claim만** 거부하고 진행 중 스테이지는 죽이지 않는다. 기본 동작은 보고만(§4.4)
+
+## 머지 권한 — 사람 게이트 (`merge.human_gate: false`, 외부 감사 2026-09-14 H6)
+이 저장소는 **다크 루프를 증명하는 것 자체가 산출물**이다: 이슈 하나가 사람의 개입 없이 triage → plan →
+implement → review → merge를 통과할 수 있는가를 재는 것이 도그푸딩의 전부이고, 머지 잡마다 사람의 클릭을
+요구하면 그 측정이 성립하지 않는다(측정 대상이 곧 사라진다). 그래서 소유자 결정으로 `merge.human_gate:
+false`다 — 기본값이 아니라 **명시적 선택**이고, `factory doctor`가 매 실행에서
+`merge.dark — no per-PR human signature (merge.human_gate=false)`를 WARN으로 남긴다.
+
+대가는 정확히 이것이다: 이 저장소에서 사람의 서명은 **토큰을 한 번 등록한 것**뿐이다. 그 대가를 감당할 수
+있는 이유는 되돌릴 수 있어서다 — 저장소 하나, 소유자 한 명, 모든 머지가 squash라 `git revert` 한 번이다.
+**채택 저장소의 기본값은 반대다**(`templates/factory/docs/factory/CHARTER.md`는 `true`): 남의 코드베이스에
+다크 머지를 기본으로 심지 않는다.
+
+사람이 여전히 머지하는 경로는 그대로다 — 보호 경로·역할 섹션 정책·무결성 위반에 걸린 PR은
+`factory:needs-human`이고 사람이 diff를 읽고 GitHub에서 머지한다.
 
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
 - npm에 publish하는 모든 것(`.github/workflows/publish.yml`의 트리거·`package.json`의 `version` 필드) — 배포는 사람이 태그를 찍고 사람이 승인한다
