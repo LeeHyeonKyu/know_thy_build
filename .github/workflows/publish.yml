@@ -12,7 +12,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
+
+      - name: Install
+        run: npm ci
+
+      - name: Test suite
+        run: npm test
 
       - name: CLI smoke test
         run: node bin/cli.js --help
@@ -37,7 +43,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       - name: Check if version changed
