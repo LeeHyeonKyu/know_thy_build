@@ -2621,7 +2621,7 @@ review는 낡은 deny 목록으로 돌아 같은 자리에서 같은 이유로 �
 `know-thy-build` 스킬들이 시키는 `gh pr checkout <pr>` → `git switch -`는 그대로 돈다.
 
 **Task 8b가 남기는 판정 하나**: 스테이지가 체크아웃한 브랜치가 팩토리 소유 경로를 base와 다르게
-들고 있으면(예: `.claude/**`를 고친 PR의 rework 라운드, `factory:harness` 이슈의 2라운드) overlay가
+들고 있으면(예: `.claude/**`를 고친 PR의 rework 라운드) overlay가
 실제로 파일을 바꾸고, 그 자리의 규칙은 KTB-37 그대로다 — **빌더를 띄우지 않는다**(`factory:blocked`).
 대안이 둘뿐이기 때문이다: 세션을 PR의 설정으로 돌리거나(이 Task가 닫으려는 바로 그것), 빌더의
 `git add -A`가 overlay의 되돌림을 PR에 실어 PR 자신의 변경을 말없이 지우거나. 어느 쪽도 스테이지가
@@ -2636,6 +2636,51 @@ review는 낡은 deny 목록으로 돌아 같은 자리에서 같은 이유로 �
 4갈래·로컬 전용 브랜치·세션 뒤 브랜치/drift·runStage 순서 고정·프롬프트 grep),
 `factory/test/hooks.test.js`(표 4개 — 스테이지 세션의 브랜치 이동, 사람 세션의 정상 동작, 트리 전체
 복원, harness 이슈에서도 안 열리는 overlay 뿌리).
+
+**Task 8b 후속 ① — 하네스 이슈의 rework가 자기 `harness.toml`을 잃지 않는다.** 위 "판정 하나"를
+그대로 두면 `factory:harness` 이슈는 **한 라운드 이상 갈 수 없다**: 그 이슈의 rework 라운드는 정의상
+`.factory/harness.toml`(그리고 `HARNESS_OPENS`의 나머지)을 고친 브랜치 위에서 돌고, overlay가 그것을
+base로 되돌리는 순간 `overlaidPaths`가 비지 않아 빌더가 뜨지 않는다. 하네스 승격은 게이트를 새로
+세우는 일이라 1라운드에 끝나는 쪽이 예외다 — 곧 이 규칙은 승격 기능 자체를 막는다. 그래서
+`FACTORY_HARNESS_ISSUE=1`인 implement에서는 overlay가 **`HARNESS_OPENS`를 제외한다**
+(`overlayPathspecs(harnessIssue)` — `:(exclude,glob)…`가 덮는 `checkout`, PR 추가 파일 스캔, `status`,
+`overlayDrift`(세션 전·후) 네 자리 모두에 같은 목록이 들어간다). 열린 목록의 출처는 그대로
+`factory/lib/protected-paths.js`의 `HARNESS_OPENS` 하나다 — L2 deny(`ci-settings-harness.json`)·훅
+`prot`·overlay가 같은 문장을 말한다. 나머지(훅 스크립트·`.claude/settings*`·에이전트 프롬프트·
+ci-settings·CHARTER·`CLAUDE*.md`/`AGENTS*.md`/`.mcp*.json`)는 **여전히 base의 것**이고, 그것들을 고친
+하네스 브랜치는 예전 그대로 blocked이다. 무엇이 남아 지키는가: ① harness.toml 안의 위험한 섹션은
+L1의 섹션 검사(Task 1 — `[protected]`·`[gates.thresholds]`·`[load_bearing]` 편집 → 사람 머지)가 보고,
+② 이 런이 자기 판정에 쓰는 harness는 체크아웃 **전에** `charterReady`가 읽어 메모리에 있다(브랜치의
+파일이 이번 런의 임계값·보호 목록을 바꾸지 못한다), ③ 머지는 어차피 사람이다(`[protected]`).
+
+**Task 8b 후속 ② — KTB-38: 낡은 PR 위에서 도는 rework는 base의 도구를 들고 돌아야 한다.**
+실측(KTB #3 R5, 2026-09-14): PR #4의 head는 1.2.0 **이전**이라 트리에 `factory/bin/lint.js`가 없었는데,
+overlay가 깔아 준 base의 `.factory/harness.toml`은 바로 그 파일을 부르는 lint 명령을 들고 있었다 —
+게이트가 통째로 RED였고 빌더는 자기 diff와 무관한, 자기가 고칠 수도 없는 실패를 라운드마다 다시 봤다.
+Task 8이 **설정을 base로 고정한 순간부터 이것은 구조적 결과다**: 설정은 base인데 트리는 낡은 PR이면
+그 둘이 가리키는 파일 집합이 갈라진다. 그래서 `makeCheckoutBranch`가 **기존 브랜치**를 체크아웃한
+직후 base를 얹는다 — `git merge --no-edit --no-ff <stage sha>`(이미 조상이면 건너뛴다: 빈 머지 커밋을
+라운드마다 쌓지 않는다), 그리고 빌더가 뜨기 **전에** `git push origin claude/fq-<n>`한다(빌더가
+아무것도 바꾸지 않는 라운드에도 PR head가 그 머지를 반영해야 review·merge가 같은 트리를 본다 —
+빌더의 push는 빌더의 커밋만 싣는다). 머지 커밋의 저자는 팩토리다(`user.name factory`, 메일은
+`FACTORY_BOT_LOGIN`이 있으면 그 로그인의 noreply). 머지 대상이 `origin/<default_branch>`가 **아니라
+2.4 overlay와 같은 sha**인 것이 중요하다: 그 사이 main이 더 나갔다면 `origin/main`은 overlay의 sha보다
+앞서 있고, 그것을 머지하면 트리의 팩토리 경로가 overlay의 sha와 달라져 overlay가 되돌리고, 그 되돌림이
+다시 "덮을 것이 있다 → blocked"이 된다. **한 런 안에서 base는 하나다.** 충돌은 스테이지가 풀 일이
+아니다: `git merge --abort`으로 트리를 되돌리고 `factory:blocked` cause `undecidable`, 사유는
+`stale PR conflicts with base — rebase by hand` — 사람이 리베이스한다(그래서 `deps.transition`이
+`cause`를 그대로 실어 보낸다: 이 자리는 문구가 아니라 **판단**이 등급을 정한다). 새 브랜치 라운드는
+애초에 base에서 만들어지므로 머지하지 않는다. 런 기록에 `base_merged: <sha> … pushed before the
+builder` 한 줄이 남는다.
+
+**영향(후속 ①②)**: `factory/bin/run-stage.js`(`overlayPathspecs`·`harnessOpenExcludes`·
+`makeFactoryOverlay`·`overlayDrift`·`assertStageBranch`·`overlayLine`·`mergeBaseIntoBranch`·
+`baseMergedLine`·`makeCheckoutBranch`·runStage 배선 세 자리·`deps.transition`의 `cause`),
+스펙 §4.2.1 step 2.3·2.4. 테스트: `factory/test/run-stage-branch.test.js`(+8 — 머지/push 순서·팩토리
+저자·이미 조상·첫 라운드 무머지·충돌 abort·fail closed 2갈래·runStage의 undecidable 전이·
+`base_merged` 기록), `factory/test/run-stage-overlay.test.js`(+6 — 네 자리 제외 목록·평범한 이슈
+불변·세션 뒤 drift·하네스 rework가 빌더를 띄운다·`.claude/hooks/**`는 여전히 blocked·기본값은
+harness 모드가 아니다). 채택자 조치: `factory init --upgrade`로 `.factory/bin/run-stage.js` 미러 갱신.
 
 **영향**: `factory/bin/run-stage.js`(`resolveStageSha`, `makeFactoryOverlay`),
 `factory/test/run-stage-overlay.test.js`(17건 — 경로 복원·out 제외·조용한 부분 pathspec·fail closed

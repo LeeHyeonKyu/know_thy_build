@@ -413,6 +413,13 @@ run-stage.js <stage> <issue>
                                              #   원격에 있으면 `git fetch origin +refs/heads/claude/fq-<n>:refs/remotes/origin/claude/fq-<n>` 후
                                              #   `git checkout -B claude/fq-<n> origin/claude/fq-<n>`, 없으면 스테이지 자신의 커밋에서 `git checkout -b claude/fq-<n> <sha>`.
                                              #   원격에 없는데 로컬에만 있으면 진행하지 않는다(push되지 않은 커밋을 `-B`로 지우지 않는다). 실패는 `factory:blocked`.
+                                             #   **KTB-38 — 기존 브랜치에는 base를 머지한다**: `checkout -B` 직후 스테이지 자신의 커밋을
+                                             #   `git merge --no-edit --no-ff <stage sha>`로 브랜치에 얹고(이미 조상이면 건너뛴다) 빌더가 뜨기 **전에**
+                                             #   `git push origin claude/fq-<n>`한다 — 2.4의 overlay가 설정을 base로 고정하므로, 트리가 낡은 PR이면
+                                             #   그 설정이 부르는 파일이 트리에 없어 게이트가 통째로 RED가 된다(실측: KTB #3 R5 — PR head가 1.2.0
+                                             #   이전이라 `factory/bin/lint.js`가 없었다). 머지 커밋은 팩토리의 것이고(`user.name factory`), 충돌하면
+                                             #   `git merge --abort` 후 `factory:blocked` cause `undecidable`("stale PR conflicts with base — rebase by hand").
+                                             #   머지 대상은 `origin/<default_branch>`가 아니라 **2.4와 같은 sha**다 — 갈라지면 overlay가 그 차이를 되돌린다.
                                              #   **왜 스테이지가 하는가**: 예전에는 빌더가 `claude -p` 세션 **안에서** 체크아웃했고, 훅 스크립트는 호출마다
                                              #   디스크에서 읽히므로 그 순간부터 세션의 모든 판정이 PR의 `.claude/hooks/*`·settings·CLAUDE.md로 이뤄졌다
                                              #   (2.4의 overlay가 세션 도중 무효가 됐다). 이제 세션 안의 브랜치 이동은 훅이 막는다(`FACTORY_STAGE` 세션 한정).
@@ -421,6 +428,11 @@ run-stage.js <stage> <issue>
                                              #   `docs/factory/CHARTER.md`를 그 커밋에서 덮어쓰고(`git checkout <sha> -- …`) 무엇을 덮었는지 한 줄 기록한다.
                                              #   실패하면 진행하지 않는다(fail closed → `factory:blocked`). implement에서 덮을 것이 **있으면**(= 트리가 base가 아니었다)
                                              #   빌더를 띄우지 않는다 — overlay가 PR 커밋에 실려 나갈 경로 자체를 없앤다. 무결성·보호 경로 판정은 영향 없다(`git show <base>:<file>`로 읽는다).
+                                             #   **예외 하나(ADR-023 Task 8b 후속)**: `factory:harness` 이슈의 implement에서는 `HARNESS_OPENS`
+                                             #   (`.factory/harness.toml`·`package.json`·`package-lock.json`·`vitest.config.*`·`playwright.config.*` — L2 deny가
+                                             #   여는 바로 그 목록)를 overlay가 **덮지 않는다**: 그 파일을 고치는 것이 그 이슈의 일이라, 덮으면 모든 하네스
+                                             #   rework 라운드가 위 규칙에 걸려 멈춘다. 나머지(훅·settings·에이전트 프롬프트·ci-settings·CHARTER·세션 설정)는
+                                             #   그대로 base의 것이고, harness.toml의 위험한 섹션은 L1의 섹션 검사가 계속 사람 머지로 돌린다.
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.js <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드

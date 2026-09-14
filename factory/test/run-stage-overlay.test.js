@@ -1,5 +1,6 @@
 import { test, expect, vi } from "vitest";
-import { runStage, makeFactoryOverlay, resolveStageSha, overlayDrift, assertNoWriteStageClean, OVERLAY_PATHSPECS, OVERLAY_ROOTS, OVERLAY_LABEL, SESSION_CONFIG_GLOBS, SESSION_CONFIG_PATHSPECS, SESSION_CONFIG_RE } from "../bin/run-stage.js";
+import { runStage, makeFactoryOverlay, resolveStageSha, overlayDrift, assertStageBranch, assertNoWriteStageClean, overlayPathspecs, OVERLAY_PATHSPECS, OVERLAY_ROOTS, OVERLAY_LABEL, SESSION_CONFIG_GLOBS, SESSION_CONFIG_PATHSPECS, SESSION_CONFIG_RE } from "../bin/run-stage.js";
+import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 /**
@@ -335,4 +336,104 @@ test("overlay: the drift check runs BEFORE `claude -p` — a tree that is still 
   const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/\.claude\/settings\.json/);
+});
+
+// ── ADR-023 Task 8b 후속 — `factory:harness` 이슈의 rework는 자기 harness.toml을 지킨다 ──────────
+// Task 8b가 체크아웃을 스테이지에게 준 뒤 생긴 회귀: 하네스 이슈의 rework 라운드는 **정의상**
+// `.factory/harness.toml`을 고친 브랜치 위에서 돈다(그것이 그 이슈가 하는 일이다). overlay가 그 파일을
+// base로 되돌리면 `overlaidPaths`가 비지 않고, implement의 "덮을 것이 있으면 빌더를 띄우지 않는다"
+// 규칙이 **모든** 하네스 rework를 막는다 — 승격 자체가 한 라운드 이상 갈 수 없게 된다.
+// 그래서 harness 모드에서는 `HARNESS_OPENS`(= L2 deny에서도 열리는 그 목록)를 overlay에서 뺀다:
+// 훅·settings·에이전트 프롬프트·CHARTER·세션 설정은 그대로 base의 것이고, 그 파일들의 위험한 섹션은
+// L1 섹션 검사(`[protected]`/`[gates.thresholds]`/`[load_bearing]` → 사람 머지)가 계속 지킨다.
+
+const harnessRun = ({ sha, present = OVERLAY_ROOTS, tree = [] } = {}) =>
+  makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "ls-tree", result: { code: 0, stdout: `${tree.join("\n")}\n`, stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "cat-file", result: (c, a) => (present.some((p) => a[2] === `${sha}:${p}`) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "" }) },
+    { match: (c, a) => c === "git" && a[0] === "checkout", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "status", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+
+const pathspecArgs = (run, pred) => run.calls.filter(({ cmd, args }) => cmd === "git" && pred(args)).map(({ args }) => args.join(" "));
+
+test("overlay: a factory:harness issue leaves HARNESS_OPENS to the branch — its own harness.toml survives", async () => {
+  const sha = "c".repeat(40);
+  const run = harnessRun({ sha });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main", harnessIssue: true })();
+  expect(r.ok).toBe(true);
+  expect(r.harnessIssue).toBe(true);
+  // 덮는 쪽(checkout)·지우는 쪽(diff --diff-filter=A)·읽는 쪽(status)·증명하는 쪽(drift diff) 넷 다
+  // 같은 제외 목록을 들어야 한다 — 하나라도 빠지면 그 자리가 다시 빌더를 막는다.
+  const seen = pathspecArgs(run, (a) => ["checkout", "status", "diff"].includes(a[0]));
+  expect(seen.length).toBeGreaterThanOrEqual(4);
+  for (const line of seen) for (const g of HARNESS_OPENS) expect(line, line).toContain(`:(exclude,glob)${g}`);
+  for (const g of HARNESS_OPENS) expect(overlayPathspecs(true)).toContain(`:(exclude,glob)${g}`);
+  // 나머지는 그대로 base의 것이다 — 훅도 settings도 에이전트 프롬프트도 열리지 않는다.
+  const co = seen.find((l) => l.startsWith("checkout"));
+  expect(co).toContain(".claude");
+  expect(co).toContain("docs/factory/CHARTER.md");
+});
+
+test("overlay: a plain issue overlays harness.toml exactly as before — the carve-out is harness-mode only", async () => {
+  const sha = "c".repeat(40);
+  const run = harnessRun({ sha });
+  const r = await makeFactoryOverlay({ run, root: "/repo", env: { GITHUB_SHA: sha }, defaultBranch: () => "main" })();
+  expect(r.ok).toBe(true);
+  expect(r.harnessIssue).toBeFalsy();
+  for (const line of pathspecArgs(run, (a) => ["checkout", "status", "diff"].includes(a[0]))) expect(line).not.toContain("exclude,glob");
+  expect(overlayPathspecs(false)).toEqual(OVERLAY_PATHSPECS);
+});
+
+test("overlayDrift: the post-session check honours the same harness carve-out (or it would block every harness rework)", async () => {
+  const seen = [];
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "diff", result: (c, a) => { seen.push(a.join(" ")); return { code: 0, stdout: "", stderr: "" }; } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: "claude/fq-3\n", stderr: "" } },
+  ]);
+  await assertStageBranch({ run, cwd: "/repo", issue: 3, sha: "c".repeat(40), harnessIssue: true });
+  expect(seen[0]).toContain(":(exclude,glob).factory/harness.toml");
+});
+
+test("implement: a harness issue's rework round launches the builder — the branch's harness.toml is not a blocker", async () => {
+  let sawHarness = null;
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const d = overlayDeps({
+    checkoutHead: undefined, claudeP, ciSettingsPresent: async () => true,
+    issueLabels: async () => ["factory:rework", "factory:harness"],
+    overlayFactoryConfig: async (h) => { sawHarness = h; return { ok: true, sha: "b".repeat(40), paths: [], harnessIssue: h }; },
+    checkoutBranch: async () => ({ ok: true, branch: "claude/fq-3", base: "origin/claude/fq-3", existed: true }),
+    assertStageBranch: async () => ({ ok: true, branch: "claude/fq-3" }),
+  });
+  expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(0);
+  expect(sawHarness).toBe(true);
+  expect(claudeP).toHaveBeenCalled();
+});
+
+test("implement: a harness issue that edited .claude/hooks/** is still blocked — the carve-out is only HARNESS_OPENS", async () => {
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const transition = vi.fn(async () => ({ ok: true, to: "factory:blocked" }));
+  const d = overlayDeps({
+    checkoutHead: undefined, claudeP, transition, ciSettingsPresent: async () => true,
+    issueLabels: async () => ["factory:rework", "factory:harness"],
+    overlayFactoryConfig: async () => ({ ok: true, sha: "b".repeat(40), paths: [".claude/hooks/x.sh"], harnessIssue: true }),
+    checkoutBranch: async () => ({ ok: true, branch: "claude/fq-3", base: "origin/claude/fq-3", existed: true }),
+  });
+  expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(2);
+  expect(claudeP).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+});
+
+test("implement: a plain issue's overlay is asked in plain mode — harness mode is never the default", async () => {
+  let sawHarness = "unset";
+  const d = overlayDeps({
+    checkoutHead: undefined, ciSettingsPresent: async () => true,
+    issueLabels: async () => ["factory:planned"],
+    overlayFactoryConfig: async (h) => { sawHarness = h; return { ok: true, sha: "b".repeat(40), paths: [] }; },
+    checkoutBranch: async () => ({ ok: true, branch: "claude/fq-3", base: "origin/claude/fq-3", existed: true }),
+    assertStageBranch: async () => ({ ok: true, branch: "claude/fq-3" }),
+  });
+  expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(0);
+  expect(sawHarness).toBe(false);
 });
