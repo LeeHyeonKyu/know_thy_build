@@ -1988,6 +1988,40 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 
 **영향(Task A)**: `factory/lib/progress.js`(신규), `factory/lib/heartbeat.js`(본문 렌더링·2분 주기·변경 시에만 PATCH·폴백), `factory/lib/usage.js`(`MODEL_PRICES`/`modelPrice`/`costFromUsage`), `factory/bin/run-stage.js`(`progress` dep 배선, `usageLine(out, progress)`가 런 기록에 마커를 남긴다), `.factory/**` 미러, 스펙 §4.2.1 step 1, `README.md`. 테스트: `progress.test.js`(신규), `heartbeat.test.js`, `run-stage.test.js`.
 
-### Task B — 뷰어 (`factory board` CLI + 자체 완결 HTML)
+### Task B — 뷰어 (`factory board` CLI + 자체 완결 HTML) — 2026-09-14
 
-*(다음 작업. 여기서 읽는 것은 위 `progress:v1` 마커 하나다 — 하트비트 코멘트에서는 도는 런을, `docs/factory/runs/<n>.md`에서는 끝난 런을 같은 정규식으로 집는다. 이 절은 그 판결이 나오면 채운다.)*
+**질문**: Task A가 신호를 만들었지만 그 신호는 **이슈마다 흩어져 있다**. 소유자가 묻는 것은 "이슈 #7이 어디쯤인가"가 아니다: "지금 **모든** 이슈가 어디에 있고, 어느 스텝이 돌고, 어떤 에이전트가 무엇을 하고, 토큰을 얼마나 태웠는가 — KTB를 설치한 **모든 저장소**에 대해, 여러 이슈가 동시에 돌 때도." 그 화면을 무엇으로, 어디서 띄우는가?
+
+**관측**:
+- 재료는 전부 GitHub에 이미 있다: 상태=라벨, "언제부터"=전이 코멘트, "살아 있는가"=하트비트 첫 줄, "무엇을 하는가"=그 코멘트의 `progress:v1` 마커, "얼마"=기록 브랜치의 `usage:` 줄, "어느 잡"=`gh run list`. **새 신호는 하나도 필요 없다.**
+- 그 재료를 읽으려면 **누군가의 자격증명**이 필요하다. 프라이빗 저장소가 기본이고, `factory/records` 브랜치는 특히 그렇다.
+- 사람의 노트북에는 이미 인증된 `gh` CLI가 있다. 그것이 이 저장소에서 자격증명을 다루는 **유일하게 안전한 방법**이다 — 우리가 토큰을 읽지도, 저장하지도, 찍지도 않는다.
+- 도는 런은 2분마다 갱신된다(결정 2). 그보다 자주 물어도 새 사실이 없다.
+
+**결정**:
+
+1. **로컬 CLI가 gh를 프록시한다.** `factory board`가 node `http`만으로(의존성 0) 세 개의 엔드포인트를 낸다 — `GET /`(페이지 파일 그대로), `GET /api/board`(모델 JSON), `GET /api/events`(SSE, **모델이 바뀔 때만** `board` 이벤트). 모든 GitHub 조회는 `gh api`·`gh issue list`·`gh run list`로 나간다: 토큰을 읽는 코드가 없으므로 새어 나갈 자리도 없고, 사람이 볼 수 있는 저장소는 전부 그대로 보인다. 서버는 `127.0.0.1`에만 바인딩한다.
+
+2. **모델을 만드는 코드는 순수 함수 한 파일이다**(`lib/board.js`). gh·fs·시계를 만지지 않으므로(`now`는 인자다) 테스트가 픽스처 코멘트·런 기록·`gh run list` JSON만으로 모델 전체를 고정한다. 조회·캐시·HTTP는 `cli/board.js`에만 있다. **파서를 새로 쓰지 않는 것이 이 파일의 규칙이다** — `PROGRESS_MARKER_RE`·`TRANSITION_TO`·`TRANSITION_FAILED`·`BLOCKED_ORIGIN`·`parseRunRecord`·`parseHandoffs`를 전부 원래 주인에게서 가져다 쓴다. 뷰어가 자기 사본을 들면 "보드가 말하는 사실"과 "공장이 아는 사실"이 조용히 갈라진다.
+
+3. **기록 브랜치는 `gh api` contents 엔드포인트로 읽는다**(`git fetch`+`git show`가 아니라). `lib/records-branch.js`의 방법은 **로컬 클론을 전제**하는데, 이 화면의 요구는 "설치한 모든 저장소"다 — `--repo owner/other`가 그 자리에서 동작해야 하고, 남의 저장소를 보려고 클론을 뜨게 하는 것은 뷰어가 할 짓이 아니다. 대신 디렉터리 목록을 한 번 받아 **blob sha**를 비교하고, 안 바뀐 기록은 본문을 다시 받지 않는다(기록은 스테이지가 끝날 때만 움직이므로 대부분의 주기에서 그 호출은 전부 생략된다).
+
+4. **비용은 두 번 세지 않는다.** `finished_usd`는 기록 브랜치의 `usage:` 줄들, `live_usd`는 도는 런의 `progress.totals.cost_usd`다(가격표는 `lib/usage.js` 한 벌 — 결정 5). 하트비트 코멘트는 런이 끝나도 이슈에 그대로 남으므로, 같은 `runner`+`stage`의 기록 섹션이 이미 있으면 **그 런은 끝났고 기록이 진실**로 보고 라이브를 0으로 둔다. 러너를 모르면(로컬 실행) 더하는 쪽을 고르고 `progress_source`가 출처를 밝힌다.
+
+5. **왜 아티팩트가 아닌가.** "잡이 HTML을 만들어 아티팩트로 올린다"가 가장 싸 보이지만 셋 다 틀린다: (a) 아티팩트는 **잡이 끝나야** 나온다 — 이 화면의 요구는 정확히 그 8–35분 **동안**이다. (b) 아티팩트는 한 저장소·한 잡의 산출물이라 여러 저장소를 한 화면에 모을 수 없다. (c) 아티팩트를 열려면 로그인하고 zip을 내려받아 풀어야 한다 — 2분마다 그러지는 않는다. 같은 이유로 "공장이 상태를 어딘가에 push한다"도 뺐다: 그건 새 쓰기 경로이고, 새 쓰기 경로는 새 실패 방식이다. **보드는 읽기 전용이어야 한다** — 관측이 관측 대상을 깨뜨리지 않는다(결정 3의 같은 원칙).
+
+6. **페이지는 파일 하나이고, 두 모드로 열린다.** `templates/factory/docs/factory/board/index.html` — `factory init`이 설치하고 CLI가 **그 파일을 그대로** 낸다(두 벌이 되면 서버로 본 화면과 정적으로 연 화면이 달라진다 — 테스트가 바이트 동일성을 잡는다). 외부 리소스는 0이다(CDN·폰트·분석 전부 없음, 스모크 테스트가 검사한다).
+   - **CLI 모드** — `/api/board` + SSE. 완전한 모델.
+   - **정적 모드**(GitHub Pages·파일 열기) — `?repo=owner/name`이면 페이지가 `api.github.com`을 직접 부른다. 인증 없이 공개 저장소(시간당 60회, **남은 횟수를 화면에 띄운다**), 프라이빗은 localStorage에 담긴 개인 토큰으로. 이 모드의 모델은 **의도적으로 축소판**이다: 완료 런 비용을 합산하지 않고 칩에 `live`라고 적는다. 같은 합산을 두 벌 구현하면 "라이브 $0.41 / 최종 $0.38"로 어긋나고(결정 5가 경고한 바로 그 함정), 그 어긋남은 조용하다. 두 모드의 차이는 페이지 상단 도움말이 직접 설명한다.
+
+7. **레인은 전이 그래프를 왼쪽에서 오른쪽으로 편 것이다** — queue · ready · planned · in-progress · awaiting-review · approved · merged. 카드가 오른쪽으로 가는 것 자체가 진척이다. `factory:rework`만 자기 열이 없다: 재작업은 **implement의 재진입**이지 새 단계가 아니라(`ENTRY_LABELS.implement`가 `planned`와 `rework`를 같은 진입 라벨로 묶는다) in-progress 열에 들어가고, 카드에는 진짜 상태 칩이 그대로 붙으므로 숨겨지는 사실이 없다. needs-human·blocked·needs-info는 **옆 레인**이다 — 사람 차례이거나 회수 중이라 흐름에서 빠져 있고, 같은 줄에 두면 "왼쪽→오른쪽"이라는 읽기가 깨진다. 상태 라벨이 0개인 이슈(KTB-30)는 `기타` 레인에 뜬다 — 그 이슈가 화면에서 사라지는 것이 원래의 사고였다.
+
+8. **신선도 임계는 sweeper와 같은 숫자다.** fresh < 5분(주기 2분을 한 번 놓쳐도 정상) · stale < 30분 · 그 뒤 dead. **30분은 우연이 아니라 `lib/sweeper.js`의 stale 임계 그 값이다** — 보드가 "죽었다"고 부르는 순간과 공장이 좀비로 판정하는 순간이 어긋나면, 사람이 빨간 카드를 보는데 공장은 아직 아무것도 하지 않는 구간이 생긴다. `zombie-queued`는 다른 사고다: 잡이 10분 넘게 **큐에 앉아 있고** 하트비트가 한 줄도 없는 것 — 동시성 한도에 걸려 영영 시작하지 않는 런이 정확히 그 모양이고, 하트비트가 없으므로 sweeper의 좀비 판정에도 걸리지 않는다.
+
+9. **런 매칭은 신원 먼저, 추측은 그렇다고 말한다.** 워크플로가 `FACTORY_RUNNER_ID: gha-${{ github.run_id }}`를 넘기고 하트비트가 그 값을 그대로 싣는다 — `gha-<databaseId>`는 **신원**이다(`matched_by: "runner"`). 하트비트가 아직 없는 런(=큐에 걸린 잡, 즉 사람이 꼭 봐야 하는 것)에는 쓸 수 없으므로 스테이지 워크플로 이름 + `displayTitle`로 떨어지고, 그때는 `matched_by: "workflow"`라고 **모델이 밝힌다**.
+
+10. **갱신 주기 60초, 저장소당 캐시.** 하트비트가 2분 주기이므로 그보다 빨리 물어도 새 사실이 없다. 저장소 하나를 한 번 훑는 데 드는 gh 호출은 대략 `3 + 이슈 수`이고(+기록 본문은 sha가 움직일 때만), 60초면 REST 한도 5000/h 안에서 저장소 여러 개를 하루 종일 띄워 둘 수 있다. `/api/board`는 캐시가 유효하면 GitHub을 다시 묻지 않고, SSE는 **모델이 바뀔 때만** 민다.
+
+**알려진 한계**: (a) 정적 모드의 모델은 축소판이고 페이지가 자기 사본의 정규식을 든다 — 그 사본이 낡으면 정적 모드만 조용히 성기어진다(CLI 모드는 영향 없다). (b) `matched_by: "workflow"`는 best-effort다: `gh run list`는 워크플로 입력을 싣지 않으므로 같은 제목의 이슈가 둘이면 틀릴 수 있다. (c) 코멘트 조회가 이슈당 한 번이라 이슈가 아주 많은 저장소에서는 첫 훑기가 느리다(라벨 없는 이슈는 24시간 창 + 20개로 막아 뒀다 — sweeper 8번 팔·`factory status`와 같은 창).
+
+**영향(Task B)**: `factory/lib/board.js`(신규·순수), `factory/cli/board.js`(신규·서버와 조회), `factory/cli/index.js`(배선), `templates/factory/docs/factory/board/index.html`(신규·설치되는 페이지), `factory/lib/status.js`(마지막 줄의 board 힌트), `factory/cli/init.js`(next-steps), `.factory/**`·`docs/factory/board/**` 미러, `README.md`. 테스트: `board.test.js`·`board-cli.test.js`·`board-page.test.js`(신규), `status.test.js`.

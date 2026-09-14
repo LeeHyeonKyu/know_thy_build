@@ -206,6 +206,16 @@ test("empty repo: every section renders a (none) placeholder", () => {
   expect(text.match(/\(none\)/g)).toHaveLength(5);
 });
 
+/**
+ * ADR-022 Task B — `status`는 **한 시점의 텍스트**다. "지금 무엇이 돌고 있는가"를 계속 보려면 보드가
+ * 있어야 하고, 그 사실을 알 수 있는 자리는 사람이 이미 보고 있는 이 화면의 마지막 줄뿐이다.
+ */
+test("renderStatus ends with the board hint — the one line that says a live viewer exists", () => {
+  const text = renderStatus(buildStatus(baseArgs()));
+  expect(text).toContain("board: npx know-thy-build factory board");
+  expect(text.trimEnd().split("\n").pop()).toContain("board:");
+});
+
 // ── statusCommand ────────────────────────────────────────────────
 
 function io() {

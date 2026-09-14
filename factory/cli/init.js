@@ -76,7 +76,11 @@ Next:
      npx know-thy-build factory bootstrap    # re-run: adds \`1 code-owner approving review\` to the base branch
                                              # and writes .github/CODEOWNERS with \`* @<merge actor>\`.
      git add .github/CODEOWNERS && git commit && git push    # GitHub reads CODEOWNERS from the BASE branch
-  7. npx know-thy-build factory doctor       # tokens.two-actor / protection.two-actor / protection.codeowners.
+  7. npx know-thy-build factory board        # live viewer: lanes, timeline, per-agent progress and cost
+                                             # (http://127.0.0.1:4173 — reads GitHub through YOUR gh CLI;
+                                             # add --repo owner/name to watch other repos in the same board).
+                                             # The same page is installed at docs/factory/board/index.html.
+  8. npx know-thy-build factory doctor       # tokens.two-actor / protection.two-actor / protection.codeowners.
                                              # tokens.agent-is-admin, tokens.agent-workflow-scope and the CODEOWNERS
                                              # identity check are WARN "unverified until CI" locally — the sweeper's
                                              # \`Doctor (merge authority)\` step grades them under the bot token.

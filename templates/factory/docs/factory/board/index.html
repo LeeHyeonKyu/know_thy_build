@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>factory board</title>
+<!--
+  factory board — ADR-022 Task B.
+
+  이 파일 하나가 전부다. 외부 스크립트도, 폰트도, 이미지도 불러오지 않는다(`factory doctor`의
+  이웃인 board 스모크 테스트가 그 사실을 검사한다). 두 가지 방식으로 열린다:
+
+    1. `npx know-thy-build factory board` — 로컬 CLI가 이 파일을 내고 `/api/board`·`/api/events`로
+       모델을 준다. 모든 GitHub 조회는 **사람의 `gh` CLI**를 통해 나가므로 프라이빗 저장소도 보이고
+       토큰은 브라우저에 한 번도 들어오지 않는다. 기록 브랜치(`factory/records`)의 완료 런 비용까지
+       합산된 완전한 모델이 이 경로에만 있다.
+
+    2. 정적 파일 / GitHub Pages — `?repo=owner/name`을 붙이면 페이지가 `api.github.com`을 **직접**
+       부른다. 인증 없이(공개 저장소, 시간당 60회) 또는 아래 토큰 칸에 넣은 개인 토큰으로. 이 경로의
+       모델은 **축소판**이다: 라벨·전이·하트비트·진행·Actions 런까지 전부 보이지만, 완료 런의 비용은
+       합산하지 않는다(그 값은 기록 브랜치에 있고, 같은 합산을 두 벌 구현하면 "라이브 $0.41 /
+       최종 $0.38"처럼 조용히 어긋난다 — ADR-022 결정 5의 그 함정이다). 비용 칩이 `live` 라고 말한다.
+-->
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #61656e; --line: #dfe2e8;
+  --chip: #eef0f4; --shadow: 0 1px 2px rgba(16,18,29,.08), 0 4px 12px rgba(16,18,29,.05);
+  --queue: #8a8f98; --ready: #4c7bd9; --planned: #6f5bd6; --progress: #2e9e6b;
+  --review: #c98a17; --approved: #2a8fa8; --merged: #5f6673;
+  --human: #d1495b; --blocked: #b3521f; --info: #a05ec9; --other: #8a8f98;
+  --fresh: #2e9e6b; --stale: #c98a17; --dead: #d1495b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --ink: #e8eaee; --muted: #9aa0aa; --line: #2c313a;
+    --chip: #262b33; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
+    --queue: #9aa0aa; --ready: #7aa2f7; --planned: #9d8bf0; --progress: #56c68f;
+    --review: #e0ad3a; --approved: #4fb3cc; --merged: #868d9b;
+    --human: #f06b7e; --blocked: #dd7a45; --info: #c088e6;
+    --fresh: #56c68f; --stale: #e0ad3a; --dead: #f06b7e;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans KR", "Apple SD Gothic Neo", Roboto, sans-serif;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: .92em; }
+a { color: inherit; }
+header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+h1 { font-size: 14px; margin: 0 8px 0 0; letter-spacing: .02em; }
+h1 .en { color: var(--muted); font-weight: 400; }
+.tabs { display: flex; gap: 2px; background: var(--chip); border-radius: 7px; padding: 2px; }
+.tabs button { border: 0; background: transparent; color: var(--muted); padding: 4px 11px; border-radius: 5px; cursor: pointer; font: inherit; }
+.tabs button[aria-selected="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+select, input[type=text], input[type=password], button.ghost {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit;
+}
+button.ghost { cursor: pointer; }
+.spacer { flex: 1 1 auto; }
+.pill { display: inline-flex; align-items: center; gap: 5px; background: var(--chip); border-radius: 999px; padding: 2px 9px; color: var(--muted); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.fresh { background: var(--fresh); } .dot.stale { background: var(--stale); } .dot.dead { background: var(--dead); }
+.dot.fresh { animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+details.help { margin-top: 8px; }
+details.help summary { cursor: pointer; color: var(--muted); }
+details.help div { margin-top: 6px; padding: 10px 12px; background: var(--chip); border-radius: 8px; color: var(--muted); max-width: 100ch; }
+details.help p { margin: 0 0 6px; }
+
+main { padding: 14px 16px 40px; }
+#view-lanes { display: flex; gap: 12px; overflow-x: auto; align-items: flex-start; padding-bottom: 8px; }
+.lane { flex: 0 0 260px; min-width: 260px; }
+.lane.side { flex-basis: 230px; min-width: 230px; }
+.lane > h2 { font-size: 12px; margin: 0 0 8px; display: flex; gap: 6px; align-items: center; color: var(--muted); font-weight: 600; }
+.lane > h2 .en { font-weight: 400; opacity: .75; }
+.lane > h2 .count { margin-left: auto; background: var(--chip); border-radius: 999px; padding: 0 7px; }
+.lane .rail { height: 3px; border-radius: 2px; background: var(--queue); margin-bottom: 8px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--queue); border-radius: 9px; padding: 9px 10px; margin-bottom: 8px; cursor: pointer; box-shadow: var(--shadow); }
+.card:hover { border-color: var(--muted); }
+.card[aria-selected="true"] { outline: 2px solid var(--ready); }
+.card .top { display: flex; gap: 6px; align-items: baseline; }
+.card .num { color: var(--muted); }
+.card .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; color: var(--muted); font-size: 12px; }
+.tag { background: var(--chip); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+.tag.repo { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.tag.flag { color: #fff; background: var(--human); }
+.tag.flag.blocked { background: var(--blocked); }
+.tag.flag.zombie-queued { background: var(--review); color: #1a1a1a; }
+.tag.flag.no-state-label, .tag.flag.two-state-labels { background: var(--info); }
+.step { margin-top: 6px; font-size: 12px; }
+.step .label { color: var(--ink); }
+table.agents { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+table.agents td { padding: 1px 0; vertical-align: top; }
+table.agents td.l { color: var(--ink); max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.agents td.t { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.agents td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.handoff { margin-top: 6px; font-size: 11.5px; color: var(--muted); border-left: 2px solid var(--line); padding-left: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.empty { color: var(--muted); padding: 8px 0; }
+
+#view-timeline .tl-head { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.tl-row { display: grid; grid-template-columns: 210px 1fr; gap: 10px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.tl-row .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.tl-track { position: relative; height: 20px; background: var(--chip); border-radius: 4px; overflow: hidden; }
+.tl-seg { position: absolute; top: 0; bottom: 0; background: var(--queue); opacity: .9; }
+.tl-seg.open { background-image: linear-gradient(135deg, rgba(255,255,255,.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.28) 50%, rgba(255,255,255,.28) 75%, transparent 75%); background-size: 9px 9px; }
+.tl-axis { display: grid; grid-template-columns: 210px 1fr; gap: 10px; color: var(--muted); font-size: 11px; }
+.tl-axis .ticks { display: flex; justify-content: space-between; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); margin-top: 10px; font-size: 11.5px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+
+#detail-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); background: var(--panel); border-left: 1px solid var(--line); box-shadow: var(--shadow); overflow-y: auto; padding: 14px 16px 40px; z-index: 10; }
+#detail-panel h2 { font-size: 14px; margin: 0 0 4px; }
+#detail-panel h3 { font-size: 12px; color: var(--muted); margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .06em; }
+#detail-panel .close { position: absolute; top: 10px; right: 12px; }
+#detail-panel table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#detail-panel table th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 6px 3px 0; }
+#detail-panel table td { padding: 3px 6px 3px 0; vertical-align: top; border-top: 1px solid var(--line); }
+#detail-panel td.n { text-align: right; font-variant-numeric: tabular-nums; }
+#detail-panel ul { margin: 0; padding-left: 18px; }
+#detail-panel li { margin-bottom: 4px; }
+.kv { display: grid; grid-template-columns: 92px 1fr; gap: 3px 10px; font-size: 12px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; }
+#setup { max-width: 60ch; margin: 40px auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+#setup input { width: 100%; margin: 6px 0 10px; }
+@media (max-width: 720px) {
+  #view-lanes { display: block; } .lane, .lane.side { min-width: 0; }
+  .tl-row, .tl-axis { grid-template-columns: 120px 1fr; }
+  #detail-panel { width: 100vw; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <h1>factory board <span class="en">· KTB</span></h1>
+    <div class="tabs" role="tablist">
+      <button id="tab-lanes" role="tab" aria-selected="true" aria-controls="view-lanes">레인 보드 <span class="en">lanes</span></button>
+      <button id="tab-timeline" role="tab" aria-selected="false" aria-controls="view-timeline">타임라인 <span class="en">timeline</span></button>
+    </div>
+    <label class="pill">저장소 <select id="repo-filter"><option value="">전체 (all)</option></select></label>
+    <div class="spacer"></div>
+    <span class="pill" id="totals"></span>
+    <span class="pill" id="conn"><span class="dot"></span><span id="conn-text">연결 중…</span></span>
+    <button class="ghost" id="reload">새로고침</button>
+  </div>
+  <details class="help">
+    <summary>이 화면은 어디서 데이터를 읽는가? <span class="en">(data sources)</span></summary>
+    <div>
+      <p><b>CLI 모드</b> — <code>npx know-thy-build factory board [--repo owner/name]…</code>로 열면 로컬 프로세스가
+      <code>/api/board</code>(모델)와 <code>/api/events</code>(SSE)를 준다. 모든 GitHub 조회는 여러분의 <code>gh</code> CLI를
+      통해 나가므로 <b>프라이빗 저장소도 그대로 보이고, 토큰은 브라우저에 들어오지 않는다</b>. 기록 브랜치
+      (<code>factory/records</code>)의 완료 런 비용까지 합산된 완전한 모델은 이 경로에만 있다.</p>
+      <p><b>정적 모드</b> — 이 파일을 그냥 열거나 GitHub Pages에 올리고 <code>?repo=owner/name</code>을 붙이면
+      페이지가 <code>api.github.com</code>을 직접 부른다. 인증 없이는 공개 저장소만, 시간당 60회다(남은 횟수는 오른쪽
+      위에 표시된다). 프라이빗 저장소는 아래 토큰 칸에 <code>repo</code> 스코프 토큰을 넣으면 되고, 그 값은
+      <b>이 브라우저의 localStorage에만</b> 저장된다 — 어디로도 전송되지 않는다. 이 모드의 비용 칩은
+      <code>live</code>(도는 런)만 센다.</p>
+      <p><b>읽는 신호</b> — 상태는 라벨, "언제부터"는 전이 코멘트(<code>factory-transition:v1</code>), "살아 있는가"는
+      하트비트 첫 줄, "지금 무엇을 하는가"는 그 코멘트의 <code>factory-progress:v1</code> 마커(ADR-022).
+      새 신호를 만들지 않는다 — 공장이 이미 남기는 것만 읽는다.</p>
+    </div>
+  </details>
+</header>
+
+<main>
+  <section id="view-lanes" role="tabpanel" aria-labelledby="tab-lanes"></section>
+  <section id="view-timeline" role="tabpanel" aria-labelledby="tab-timeline" hidden>
+    <div class="tl-head">
+      <span class="pill">창 <span class="en">window</span></span>
+      <div class="tabs" id="tl-window">
+        <button data-h="6" aria-selected="false">6h</button>
+        <button data-h="24" aria-selected="true">24h</button>
+        <button data-h="168" aria-selected="false">7d</button>
+      </div>
+      <span class="pill" id="tl-note"></span>
+    </div>
+    <div id="tl-rows"></div>
+    <div class="tl-axis"><div></div><div class="ticks" id="tl-ticks"></div></div>
+    <div class="legend" id="tl-legend"></div>
+  </section>
+  <section id="setup" hidden>
+    <h2>저장소를 고르세요 <span class="en">pick a repository</span></h2>
+    <p class="empty">이 페이지는 지금 <b>정적 모드</b>입니다(로컬 <code>factory board</code> 서버가 없습니다).
+    <code>owner/name</code>을 넣으면 <code>api.github.com</code>을 직접 읽습니다.</p>
+    <label>저장소 <input type="text" id="setup-repo" placeholder="owner/name"></label>
+    <label>개인 토큰 <span class="en">(선택 · private repo)</span>
+      <input type="password" id="setup-token" placeholder="ghp_… — 이 브라우저에만 저장됩니다"></label>
+    <button class="ghost" id="setup-go">열기</button>
+  </section>
+</main>
+
+<aside id="detail-panel" hidden aria-label="상세"></aside>
+
+<script>
+"use strict";
+(function () {
+// ── 상수: 레인과 색 ─────────────────────────────────────────────────────────
+// 서버 모드에서는 모델이 자기 레인 목록을 싣고 그것이 이깁니다(단일 출처). 아래 사본은 정적 모드가
+// 모델을 스스로 만들 때만 쓰입니다 — `factory/lib/board.js`의 LANES/SIDE_LANES와 같은 순서·같은 이름.
+var LANES = [
+  { id: "queue", label: "큐", states: ["factory:queue"] },
+  { id: "ready", label: "계획 대기", states: ["factory:ready"] },
+  { id: "planned", label: "구현 대기", states: ["factory:planned"] },
+  { id: "in-progress", label: "구현 중", states: ["factory:in-progress", "factory:rework"] },
+  { id: "awaiting-review", label: "리뷰 중", states: ["factory:awaiting-review"] },
+  { id: "approved", label: "머지 대기", states: ["factory:approved"] },
+  { id: "merged", label: "머지됨", states: ["factory:merged"] }
+];
+var SIDE_LANES = [
+  { id: "needs-human", label: "사람 필요", states: ["factory:needs-human"] },
+  { id: "blocked", label: "막힘", states: ["factory:blocked"] },
+  { id: "needs-info", label: "정보 필요", states: ["factory:needs-info"] }
+];
+var OTHER_LANE = { id: "other", label: "기타", states: ["backlog", "factory:wont-do"] };
+var STAGE_BY_STATE = {
+  "factory:queue": "triage", "factory:ready": "plan", "factory:planned": "implement",
+  "factory:in-progress": "implement", "factory:rework": "implement",
+  "factory:awaiting-review": "review", "factory:approved": "merge"
+};
+var LANE_COLOR = {
+  queue: "--queue", ready: "--ready", planned: "--planned", "in-progress": "--progress",
+  "awaiting-review": "--review", approved: "--approved", merged: "--merged",
+  "needs-human": "--human", blocked: "--blocked", "needs-info": "--info", other: "--other"
+};
+var FRESH_MIN = 5, STALE_MIN = 30, ZOMBIE_QUEUED_MIN = 10;
+var LANE_OF_STATE = {};
+LANES.concat(SIDE_LANES, [OTHER_LANE]).forEach(function (l) { l.states.forEach(function (s) { LANE_OF_STATE[s] = l.id; }); });
+function laneOf(state) { return LANE_OF_STATE[state] || "other"; }
+function color(laneId) { return "var(" + (LANE_COLOR[laneId] || "--queue") + ")"; }
+
+// ── 작은 도구들 ─────────────────────────────────────────────────────────────
+var $ = function (sel) { return document.querySelector(sel); };
+function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); return n; }
+function ms(iso) { var t = Date.parse(iso || ""); return isFinite(t) ? t : null; }
+function mins(a, b) { var x = ms(a), y = ms(b); return x == null || y == null ? null : (y - x) / 60000; }
+function dur(m) {
+  if (m == null) return "—";
+  if (m < 60) return Math.round(m) + "m";
+  if (m < 1440) return Math.floor(m / 60) + "h " + Math.round(m % 60) + "m";
+  return Math.floor(m / 1440) + "d " + Math.floor((m % 1440) / 60) + "h";
+}
+function k(n) { n = Number(n) || 0; return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n); }
+function usd(n) { return "$" + (Number(n) || 0).toFixed(2); }
+function freshness(last, now) { var m = mins(last, now); if (m == null) return null; return m < FRESH_MIN ? "fresh" : (m < STALE_MIN ? "stale" : "dead"); }
+
+// ── 상태 ────────────────────────────────────────────────────────────────────
+var state = { model: null, view: "lanes", repoFilter: "", selected: null, windowH: 24, mode: null, rate: null };
+
+// ══════════════════════════════════════════════════════════════════════════
+// 정적 모드 — api.github.com을 직접 읽어 **축소 모델**을 만든다.
+// (완전한 모델은 CLI 쪽 `factory/lib/board.js`에 있다. 여기서 기록 브랜치 비용을 다시 합산하지
+//  않는 것이 의도다 — 같은 합산을 두 벌 두면 조용히 어긋난다. ADR-022 결정 5.)
+// ══════════════════════════════════════════════════════════════════════════
+var TOKEN_KEY = "ktb-board-token";
+function token() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+function setToken(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+
+function ghApi(path) {
+  var headers = { Accept: "application/vnd.github+json" };
+  var t = token();
+  if (t) headers.Authorization = "Bearer " + t;
+  return fetch("https://api.github.com" + path, { headers: headers }).then(function (res) {
+    var rem = res.headers.get("x-ratelimit-remaining"), reset = res.headers.get("x-ratelimit-reset");
+    if (rem != null) state.rate = { remaining: Number(rem), reset: Number(reset) * 1000 };
+    if (!res.ok) throw new Error("GitHub " + res.status + " · " + path);
+    return res.json();
+  });
+}
+
+var RE_TRANSITION = /<!-- factory-transition:v1 from=(\S+) to=(\S+) by=(\S+)(?: reason=(\S+))? -->/;
+var RE_TRANSITION_FAILED = /<!-- factory-transition-failed:v1 from=(\S+) to=(\S+) -->/;
+var RE_HEARTBEAT = /<!--\s*factory-heartbeat issue=(\d+)\s*-->/;
+var RE_PROGRESS = /<!-- factory-progress:v1 (\{.*\}) -->/;
+var RE_BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+)(?: cause=(\S+))? -->/;
+var RE_HANDOFF = /<!--\s*factory-handoff:v1\s+stage=([a-z-]+)\s+issue=(\d+)\s*-->/;
+var STATES = ["backlog", "factory:queue", "factory:ready", "factory:needs-info", "factory:wont-do", "factory:planned",
+  "factory:in-progress", "factory:awaiting-review", "factory:rework", "factory:approved", "factory:merged",
+  "factory:blocked", "factory:needs-human"];
+
+function transitionsOf(comments) {
+  var out = [];
+  comments.forEach(function (c) {
+    var body = String(c.body || "");
+    var f = RE_TRANSITION_FAILED.exec(body);
+    if (f) { for (var i = out.length - 1; i >= 0; i--) if (out[i].to === f[2]) { out.splice(i, 1); break; } return; }
+    var m = RE_TRANSITION.exec(body);
+    if (!m) return;
+    var rest = body.slice(m.index + m[0].length), d = rest.indexOf(" — ");
+    out.push({ from: m[1], to: m[2], by: m[3], reason: d === -1 ? "" : rest.slice(d + 3).split("\n")[0].trim(), at: c.created_at || c.createdAt || null });
+  });
+  return out;
+}
+function timelineOf(transitions, createdAt, now) {
+  var segs = [], i;
+  var ts = transitions.filter(function (t) { return ms(t.at) != null; });
+  if (createdAt && ts.length) segs.push({ state: ts[0].from, from: createdAt, to: ts[0].at, by: null, reason: "" });
+  for (i = 0; i < ts.length; i++) segs.push({ state: ts[i].to, from: ts[i].at, to: i + 1 < ts.length ? ts[i + 1].at : now, by: ts[i].by, reason: ts[i].reason });
+  return segs.map(function (s, idx) {
+    return { state: s.state, from: s.from, to: s.to, by: s.by, reason: s.reason, lane: laneOf(s.state),
+      stage: STAGE_BY_STATE[s.state] || null, duration_min: mins(s.from, s.to) || 0, open: idx === segs.length - 1 };
+  });
+}
+function heartbeatOf(comments, number) {
+  var found = null;
+  comments.forEach(function (c) {
+    var body = String(c.body || ""), m = RE_HEARTBEAT.exec(body);
+    if (!m || Number(m[1]) !== Number(number)) return;
+    var head = body.split("\n").slice(0, 2).join("\n");
+    var pick = function (name) { var r = new RegExp(name + ":\\s*(\\S+)").exec(head); return r ? r[1] : null; };
+    var p = RE_PROGRESS.exec(body), progress = null;
+    if (p) { try { progress = JSON.parse(p[1]); } catch (e) { progress = null; } }
+    found = { stage: pick("stage"), runner: pick("runner"), started: pick("started"), last: pick("last"), progress: progress, comment_id: c.id };
+  });
+  return found;
+}
+function handoffOf(comments) {
+  var found = null;
+  comments.forEach(function (c) {
+    var body = String(c.body || ""), m = RE_HANDOFF.exec(body);
+    if (!m) return;
+    var after = body.slice(m.index + m[0].length).trim();
+    found = { stage: m[1], summary: after.split("\n")[0].trim(), at: c.created_at || null };
+  });
+  return found;
+}
+function matchRunClient(runs, opts) {
+  var m = opts.runner && /^gha-(\d+)$/.exec(opts.runner);
+  var shape = function (r, by) { return { id: r.id, status: r.status, conclusion: r.conclusion, workflow: r.name, url: r.html_url, created_at: r.created_at, event: r.event, matched_by: by }; };
+  var hit = m && runs.filter(function (r) { return String(r.id) === m[1]; })[0];
+  if (hit) return shape(hit, "runner");
+  if (!opts.stage) return null;
+  var t = String(opts.title || "").trim();
+  var cands = runs.filter(function (r) {
+    return r.name === "factory-" + opts.stage &&
+      ((t && String(r.display_title || "").indexOf(t) !== -1) || String(r.display_title || "").indexOf("#" + opts.number) !== -1);
+  }).sort(function (a, b) { return ms(b.created_at) - ms(a.created_at); });
+  return cands.length ? shape(cands[0], "workflow") : null;
+}
+
+function buildCardClient(repo, issue, comments, runs, now) {
+  var labels = (issue.labels || []).map(function (l) { return typeof l === "string" ? l : l.name; });
+  var stateLabels = labels.filter(function (l) { return STATES.indexOf(l) !== -1; });
+  var st = stateLabels.length ? stateLabels[0] : null;
+  var tierL = labels.filter(function (l) { return l.indexOf("factory:tier-") === 0; })[0];
+  var ts = transitionsOf(comments), last = ts[ts.length - 1] || null;
+  var hb = heartbeatOf(comments, issue.number);
+  var fr = hb ? freshness(hb.last, now) : null;
+  var progress = hb && fr !== "dead" ? hb.progress : null;
+  var run = matchRunClient(runs, { runner: hb && hb.runner, stage: (hb && hb.stage) || STAGE_BY_STATE[st] || null, number: issue.number, title: issue.title });
+  var flags = [];
+  if (st === "factory:needs-human") flags.push({ kind: "needs-human" });
+  if (st === "factory:blocked") {
+    var origin = null;
+    comments.forEach(function (c) { var m = RE_BLOCKED_ORIGIN.exec(String(c.body || "")); if (m) origin = m; });
+    flags.push({ kind: "blocked", detail: (origin && origin[3]) || "other" });
+  }
+  if (st === null) flags.push({ kind: "no-state-label" });
+  if (stateLabels.length > 1) flags.push({ kind: "two-state-labels", detail: stateLabels.join(", ") });
+  var qm = run && run.status === "queued" ? mins(run.created_at, now) : null;
+  if (qm != null && qm > ZOMBIE_QUEUED_MIN && (!hb || fr === "dead")) flags.push({ kind: "zombie-queued", detail: Math.round(qm) + "m" });
+  var live = progress && progress.totals ? Number(progress.totals.cost_usd) || 0 : 0;
+  return {
+    key: repo + "#" + issue.number, repo: repo, number: issue.number, title: issue.title || "",
+    url: issue.html_url, state: st, lane: laneOf(st), tier: tierL ? tierL.slice("factory:tier-".length) : null, labels: labels,
+    stage: hb ? hb.stage : null, expected_stage: STAGE_BY_STATE[st] || null,
+    since: last ? last.at : null, since_min: last ? mins(last.at, now) : null,
+    heartbeat: hb ? { runner: hb.runner, stage: hb.stage, started: hb.started, last: hb.last, age_min: mins(hb.last, now), freshness: fr, comment_id: hb.comment_id } : null,
+    progress: progress, progress_source: progress ? "heartbeat" : null,
+    step: progress ? progress.step : null, agents: (progress && progress.agents) || [],
+    totals: progress ? progress.totals : null, files_touched: (progress && progress.files_touched) || [],
+    handoff: handoffOf(comments), run: run,
+    timeline: timelineOf(ts, issue.created_at, now), transitions: ts,
+    cost: { live_usd: live, finished_usd: 0, total_usd: live, runs: 0, partial: true },
+    flags: flags
+  };
+}
+
+function loadFromGitHub(repos) {
+  var now = new Date().toISOString();
+  return Promise.all(repos.map(function (repo) {
+    return Promise.all([
+      ghApi("/repos/" + repo + "/issues?state=open&per_page=100"),
+      ghApi("/repos/" + repo + "/issues?state=closed&labels=factory%3Amerged&per_page=20"),
+      ghApi("/repos/" + repo + "/actions/runs?per_page=50").then(function (j) { return j.workflow_runs || []; }, function () { return []; })
+    ]).then(function (r) {
+      var open = r[0].filter(function (i) { return !i.pull_request; });
+      var picked = open.filter(function (i) {
+        return (i.labels || []).some(function (l) { return String(l.name || l).indexOf("factory:") === 0; });
+      }).concat(r[1].filter(function (i) { return !i.pull_request; }));
+      return Promise.all(picked.map(function (i) {
+        return ghApi("/repos/" + repo + "/issues/" + i.number + "/comments?per_page=100")
+          .then(function (cs) { return buildCardClient(repo, i, cs, r[2], now); }, function () { return buildCardClient(repo, i, [], r[2], now); });
+      })).then(function (cards) {
+        cards.sort(function (a, b) { return a.number - b.number; });
+        return { repo: repo, cards: cards };
+      });
+    }, function (e) { return { repo: repo, error: String(e.message || e), cards: [] }; });
+  })).then(function (per) {
+    var issues = [];
+    per.forEach(function (p) { issues = issues.concat(p.cards); });
+    var withIssues = function (lane) {
+      return { id: lane.id, label: lane.label, states: lane.states,
+        issues: issues.filter(function (i) { return i.lane === lane.id; }).map(function (i) { return i.key; }) };
+    };
+    return {
+      version: 1, generated_at: now, partial: true,
+      repos: per.map(function (p) { return { repo: p.repo, error: p.error || null, issue_count: p.cards.length, fetched_at: now }; }),
+      lanes: LANES.map(withIssues), side_lanes: SIDE_LANES.map(withIssues), other_lane: withIssues(OTHER_LANE),
+      issues: issues,
+      totals: {
+        issues: issues.length,
+        cost_usd: issues.reduce(function (s, i) { return s + i.cost.total_usd; }, 0),
+        live: issues.filter(function (i) { return i.heartbeat && i.heartbeat.freshness !== "dead"; }).length,
+        needs_you: issues.filter(function (i) { return i.flags.some(function (f) { return f.kind === "needs-human" || f.kind === "no-state-label"; }); }).length
+      }
+    };
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 렌더링 — 두 모드가 **같은 모델 모양**을 주므로 이 아래는 출처를 모른다.
+// ══════════════════════════════════════════════════════════════════════════
+function visibleIssues() {
+  var m = state.model;
+  if (!m) return [];
+  return m.issues.filter(function (i) { return !state.repoFilter || i.repo === state.repoFilter; });
+}
+function multiRepo() { return state.model && state.model.repos.length > 1; }
+
+function freshnessDot(card) {
+  var d = el("span", "dot");
+  if (card.heartbeat && card.heartbeat.freshness) d.className = "dot " + card.heartbeat.freshness;
+  d.title = card.heartbeat
+    ? "heartbeat " + card.heartbeat.freshness + " · " + dur(card.heartbeat.age_min) + " 전 · runner " + card.heartbeat.runner
+    : "하트비트 없음 (no heartbeat)";
+  return d;
+}
+
+function renderCard(card) {
+  var node = el("div", "card");
+  node.style.borderLeftColor = color(card.lane);
+  node.setAttribute("data-key", card.key);
+  if (state.selected === card.key) node.setAttribute("aria-selected", "true");
+
+  var top = el("div", "top");
+  top.appendChild(freshnessDot(card));
+  top.appendChild(el("span", "num", "#" + card.number));
+  var t = el("span", "title", card.title); t.title = card.title;
+  top.appendChild(t);
+  node.appendChild(top);
+
+  var meta = el("div", "meta");
+  if (multiRepo()) meta.appendChild(el("span", "tag repo", card.repo));
+  meta.appendChild(el("span", "tag", card.stage ? "stage " + card.stage : (card.expected_stage ? card.expected_stage + " 대기" : "stage ?")));
+  if (card.tier) meta.appendChild(el("span", "tag", card.tier));
+  meta.appendChild(el("span", "tag", "경과 " + dur(card.since_min)));
+  if (card.cost.total_usd) meta.appendChild(el("span", "tag", usd(card.cost.total_usd) + (card.cost.partial ? " live" : "")));
+  if (card.run) {
+    var a = el("a", "tag", "run " + card.run.status);
+    a.href = card.run.url || "#"; a.target = "_blank"; a.rel = "noreferrer";
+    a.title = "Actions run " + card.run.id + " · " + (card.run.workflow || "") + " · matched by " + card.run.matched_by;
+    a.addEventListener("click", function (e) { e.stopPropagation(); });
+    meta.appendChild(a);
+  }
+  card.flags.forEach(function (f) {
+    meta.appendChild(el("span", "tag flag " + f.kind, f.detail ? f.kind + " · " + f.detail : f.kind));
+  });
+  node.appendChild(meta);
+
+  if (card.step && (card.step.label || card.step.phase)) {
+    var step = el("div", "step");
+    step.appendChild(document.createTextNode("스텝 "));
+    step.appendChild(el("b", "label", [card.step.phase, card.step.label].filter(Boolean).join(" · ")));
+    if (card.step.since) step.appendChild(el("span", null, " (" + dur(mins(card.step.since, state.model.generated_at)) + ")"));
+    node.appendChild(step);
+  }
+  var agents = (card.agents || []).filter(function (a) { return a.status !== "done"; });
+  if (!agents.length) agents = (card.agents || []).slice(-3);
+  if (agents.length) {
+    var tbl = el("table", "agents");
+    agents.slice(0, 5).forEach(function (a) {
+      var tr = el("tr");
+      tr.appendChild(el("td", "l", a.label));
+      tr.appendChild(el("td", null, a.status === "running" ? "●" : (a.status === "waiting" ? "○" : "✓")));
+      var tool = el("td", "t", a.last_tool || "—"); tool.title = a.last_tool || "";
+      tr.appendChild(tool);
+      tr.appendChild(el("td", "n", k(a.input_tokens) + " / " + k(a.output_tokens)));
+      tbl.appendChild(tr);
+    });
+    node.appendChild(tbl);
+    if (card.agents.length > 5) node.appendChild(el("div", "handoff", "…외 " + (card.agents.length - 5) + "개 에이전트"));
+  }
+  if (card.handoff && card.handoff.summary) {
+    node.appendChild(el("div", "handoff", card.handoff.stage + ": " + card.handoff.summary));
+  }
+  node.addEventListener("click", function () { select(card.key); });
+  return node;
+}
+
+function renderLanes() {
+  var root = clear($("#view-lanes"));
+  var m = state.model;
+  if (!m) return;
+  var visible = visibleIssues();
+  var byKey = {};
+  visible.forEach(function (i) { byKey[i.key] = i; });
+  var all = m.lanes.concat(m.side_lanes, [m.other_lane]);
+  all.forEach(function (lane) {
+    var cards = lane.issues.map(function (kk) { return byKey[kk]; }).filter(Boolean);
+    if (lane.id === "other" && !cards.length) return;
+    var col = el("div", "lane" + (LANES.some(function (l) { return l.id === lane.id; }) ? "" : " side"));
+    var h = el("h2");
+    h.appendChild(el("span", null, lane.label));
+    h.appendChild(el("span", "en", lane.id));
+    h.appendChild(el("span", "count", String(cards.length)));
+    col.appendChild(h);
+    var rail = el("div", "rail"); rail.style.background = color(lane.id); col.appendChild(rail);
+    if (!cards.length) col.appendChild(el("div", "empty", "—"));
+    cards.forEach(function (c) { col.appendChild(renderCard(c)); });
+    root.appendChild(col);
+  });
+}
+
+function renderTimeline() {
+  var rows = clear($("#tl-rows")), ticks = clear($("#tl-ticks")), legend = clear($("#tl-legend"));
+  var m = state.model;
+  if (!m) return;
+  var now = ms(m.generated_at) || Date.now();
+  var span = state.windowH * 3600e3, from = now - span;
+  var issues = visibleIssues().slice().sort(function (a, b) {
+    return (LANES.concat(SIDE_LANES).findIndex(function (l) { return l.id === a.lane; })) - (LANES.concat(SIDE_LANES).findIndex(function (l) { return l.id === b.lane; })) || a.number - b.number;
+  });
+  $("#tl-note").textContent = issues.length + "개 이슈 · " + new Date(from).toLocaleString() + " →";
+  issues.forEach(function (card) {
+    var row = el("div", "tl-row");
+    var who = el("div", "who", (multiRepo() ? card.repo + " " : "") + "#" + card.number + " " + card.title);
+    who.title = card.title;
+    who.addEventListener("click", function () { select(card.key); });
+    row.appendChild(who);
+    var track = el("div", "tl-track");
+    (card.timeline || []).forEach(function (seg) {
+      var a = ms(seg.from), b = ms(seg.to) || now;
+      if (a == null || b <= from || a >= now) return;
+      var s = Math.max(a, from), e = Math.min(b, now);
+      var bar = el("div", "tl-seg" + (seg.open ? " open" : ""));
+      bar.style.left = ((s - from) / span * 100) + "%";
+      bar.style.width = Math.max(0.4, (e - s) / span * 100) + "%";
+      bar.style.background = color(seg.lane);
+      bar.title = seg.state + (seg.stage ? " (" + seg.stage + ")" : "") + " · " + dur(seg.duration_min)
+        + "\n" + new Date(a).toLocaleString() + " → " + (seg.open ? "지금" : new Date(b).toLocaleString())
+        + (seg.by ? "\nby " + seg.by : "") + (seg.reason ? "\n" + seg.reason : "");
+      track.appendChild(bar);
+    });
+    row.appendChild(track);
+    rows.appendChild(row);
+  });
+  if (!issues.length) rows.appendChild(el("div", "empty", "이 창에 보여 줄 이슈가 없습니다."));
+  var steps = 6;
+  for (var i = 0; i <= steps; i++) {
+    var t = new Date(from + span * i / steps);
+    ticks.appendChild(el("span", null, state.windowH > 48 ? (t.getMonth() + 1) + "/" + t.getDate() : String(t.getHours()).padStart(2, "0") + ":00"));
+  }
+  LANES.concat(SIDE_LANES).forEach(function (l) {
+    var s = el("span", null);
+    var i2 = el("i"); i2.style.background = color(l.id);
+    s.appendChild(i2); s.appendChild(document.createTextNode(l.label + " (" + l.id + ")"));
+    legend.appendChild(s);
+  });
+}
+
+function renderDetail() {
+  var panel = $("#detail-panel");
+  var card = (state.model && state.model.issues.filter(function (i) { return i.key === state.selected; })[0]) || null;
+  if (!card) { panel.hidden = true; clear(panel); return; }
+  clear(panel); panel.hidden = false;
+
+  var close = el("button", "ghost close", "닫기");
+  close.addEventListener("click", function () { select(null); });
+  panel.appendChild(close);
+
+  var h = el("h2");
+  var link = el("a", null, card.repo + " #" + card.number);
+  link.href = card.url; link.target = "_blank"; link.rel = "noreferrer";
+  h.appendChild(link);
+  panel.appendChild(h);
+  panel.appendChild(el("div", null, card.title));
+
+  var kv = el("dl", "kv");
+  var add = function (key, val) { kv.appendChild(el("dt", null, key)); kv.appendChild(el("dd", null, val)); };
+  add("상태 state", card.state || "(없음)");
+  add("스테이지", (card.stage || card.expected_stage || "?") + (card.stage ? "" : " (대기)"));
+  add("tier", card.tier || "—");
+  add("경과", dur(card.since_min) + (card.since ? " · " + new Date(card.since).toLocaleString() : ""));
+  add("하트비트", card.heartbeat ? card.heartbeat.freshness + " · " + dur(card.heartbeat.age_min) + " 전 · " + card.heartbeat.runner : "없음");
+  add("비용", usd(card.cost.total_usd) + " (완료 " + usd(card.cost.finished_usd) + " / 라이브 " + usd(card.cost.live_usd) + " · " + card.cost.runs + " runs)"
+    + (card.cost.partial ? " · 정적 모드: 라이브만" : ""));
+  if (card.totals) add("토큰", k(card.totals.input_tokens) + " in / " + k(card.totals.output_tokens) + " out · " + (card.totals.turns || 0) + " turns");
+  if (card.run) add("런 run", card.run.workflow + " · " + card.run.status + (card.run.conclusion ? " / " + card.run.conclusion : "") + " · #" + card.run.id);
+  panel.appendChild(kv);
+
+  if (card.run && card.run.url) {
+    var ra = el("a", null, "→ Actions 런 열기");
+    ra.href = card.run.url; ra.target = "_blank"; ra.rel = "noreferrer";
+    panel.appendChild(el("div", null)).appendChild(ra);
+  }
+  if (card.flags.length) {
+    panel.appendChild(el("h3", null, "flags"));
+    var fl = el("div", "meta");
+    card.flags.forEach(function (f) { fl.appendChild(el("span", "tag flag " + f.kind, f.detail ? f.kind + " · " + f.detail : f.kind)); });
+    panel.appendChild(fl);
+  }
+
+  if (card.handoff) {
+    panel.appendChild(el("h3", null, "마지막 handoff"));
+    panel.appendChild(el("div", null, card.handoff.stage + " · " + (card.handoff.at ? new Date(card.handoff.at).toLocaleString() : "")));
+    panel.appendChild(el("div", "handoff", card.handoff.summary || "—"));
+  }
+
+  if ((card.agents || []).length) {
+    panel.appendChild(el("h3", null, "에이전트 agents"));
+    var t1 = el("table");
+    var hr = el("tr");
+    ["agent", "status", "last tool", "in", "out", "$"].forEach(function (x) { hr.appendChild(el("th", null, x)); });
+    t1.appendChild(hr);
+    card.agents.forEach(function (a) {
+      var tr = el("tr");
+      tr.appendChild(el("td", null, a.label));
+      tr.appendChild(el("td", null, a.status));
+      var td = el("td", null, a.last_tool || "—"); td.title = a.last_tool || ""; tr.appendChild(td);
+      tr.appendChild(el("td", "n", k(a.input_tokens)));
+      tr.appendChild(el("td", "n", k(a.output_tokens)));
+      tr.appendChild(el("td", "n", usd(a.cost_usd)));
+      t1.appendChild(tr);
+    });
+    panel.appendChild(t1);
+  }
+
+  if ((card.files_touched || []).length) {
+    panel.appendChild(el("h3", null, "건드린 파일 files_touched"));
+    var ul = el("ul");
+    card.files_touched.forEach(function (f) { ul.appendChild(el("li", "mono", f)); });
+    panel.appendChild(ul);
+  }
+
+  panel.appendChild(el("h3", null, "전이 transitions"));
+  var t2 = el("table");
+  var hr2 = el("tr");
+  ["when", "from → to", "by", "머문 시간"].forEach(function (x) { hr2.appendChild(el("th", null, x)); });
+  t2.appendChild(hr2);
+  (card.timeline || []).forEach(function (seg) {
+    var tr = el("tr");
+    tr.appendChild(el("td", null, seg.from ? new Date(seg.from).toLocaleString() : "—"));
+    tr.appendChild(el("td", null, seg.state + (seg.stage ? " (" + seg.stage + ")" : "")));
+    tr.appendChild(el("td", null, seg.by || "—"));
+    tr.appendChild(el("td", "n", dur(seg.duration_min) + (seg.open ? " …" : "")));
+    t2.appendChild(tr);
+  });
+  panel.appendChild(t2);
+  if (!(card.timeline || []).length) panel.appendChild(el("div", "empty", "전이 기록이 없습니다."));
+}
+
+function renderChrome() {
+  var m = state.model;
+  var sel = $("#repo-filter");
+  var wanted = m ? m.repos.map(function (r) { return r.repo; }) : [];
+  if (sel.dataset.repos !== wanted.join(",")) {
+    sel.dataset.repos = wanted.join(",");
+    clear(sel);
+    sel.appendChild(el("option", null, "전체 (all)"));
+    sel.firstChild.value = "";
+    wanted.forEach(function (r) { var o = el("option", null, r); o.value = r; sel.appendChild(o); });
+    sel.value = state.repoFilter;
+  }
+  var errs = m ? m.repos.filter(function (r) { return r.error; }) : [];
+  $("#totals").textContent = m
+    ? m.totals.issues + " issues · live " + m.totals.live + " · " + usd(m.totals.cost_usd)
+      + (m.totals.needs_you ? " · 사람 필요 " + m.totals.needs_you : "")
+      + (errs.length ? " · 오류 " + errs.length : "")
+    : "";
+  $("#totals").title = errs.map(function (r) { return r.repo + ": " + r.error; }).join("\n");
+}
+
+function render() {
+  renderChrome();
+  if (state.view === "lanes") renderLanes(); else renderTimeline();
+  renderDetail();
+}
+
+function select(key) {
+  state.selected = state.selected === key ? null : key;
+  render();
+}
+
+function setModel(m) { state.model = m; render(); }
+function conn(cls, text) {
+  $("#conn").firstChild.className = "dot " + (cls || "");
+  $("#conn-text").textContent = text;
+}
+
+// ── 부팅 ────────────────────────────────────────────────────────────────────
+function boot() {
+  var params = new URLSearchParams(location.search);
+  var repoParam = params.getAll("repo").filter(Boolean);
+  var startServer = function () {
+    state.mode = "server";
+    conn("fresh", "CLI 모드 · 연결됨");
+    var es;
+    try { es = new EventSource("/api/events"); } catch (e) { es = null; }
+    if (es) {
+      es.addEventListener("board", function (ev) { try { setModel(JSON.parse(ev.data)); conn("fresh", "CLI 모드 · 실시간"); } catch (e) {} });
+      es.addEventListener("error", function () { conn("stale", "CLI 모드 · 재연결 중…"); });
+    }
+  };
+  var startStatic = function (repos) {
+    state.mode = "static";
+    $("#setup").hidden = true;
+    var pull = function () {
+      conn("stale", "정적 모드 · 읽는 중…");
+      loadFromGitHub(repos).then(function (m) {
+        setModel(m);
+        conn("fresh", "정적 모드 · 남은 호출 " + (state.rate ? state.rate.remaining : "?"));
+      }, function (e) { conn("dead", "정적 모드 · " + (e.message || e)); });
+    };
+    pull();
+    setInterval(pull, 120000);   // 정적 모드는 인증 없이 시간당 60회다 — 2분 주기가 상한선이다
+  };
+  var askRepo = function () {
+    $("#setup").hidden = false;
+    $("#view-lanes").hidden = true;
+    conn("dead", "저장소 필요");
+    $("#setup-token").value = token();
+    $("#setup-go").addEventListener("click", function () {
+      var r = $("#setup-repo").value.trim();
+      if (!/^[\w.-]+\/[\w.-]+$/.test(r)) { $("#setup-repo").focus(); return; }
+      setToken($("#setup-token").value.trim());
+      location.search = "?repo=" + encodeURIComponent(r);
+    });
+  };
+
+  if (repoParam.length) { startStatic(repoParam); return; }
+  fetch("/api/board", { cache: "no-store" }).then(function (res) {
+    if (!res.ok) throw new Error("no server");
+    return res.json();
+  }).then(function (m) { setModel(m); startServer(); }, function () { askRepo(); });
+}
+
+$("#tab-lanes").addEventListener("click", function () { state.view = "lanes"; $("#tab-lanes").setAttribute("aria-selected", "true"); $("#tab-timeline").setAttribute("aria-selected", "false"); $("#view-lanes").hidden = false; $("#view-timeline").hidden = true; render(); });
+$("#tab-timeline").addEventListener("click", function () { state.view = "timeline"; $("#tab-timeline").setAttribute("aria-selected", "true"); $("#tab-lanes").setAttribute("aria-selected", "false"); $("#view-timeline").hidden = false; $("#view-lanes").hidden = true; render(); });
+$("#repo-filter").addEventListener("change", function (e) { state.repoFilter = e.target.value; render(); });
+$("#reload").addEventListener("click", function () {
+  if (state.mode === "server") fetch("/api/board", { cache: "no-store" }).then(function (r) { return r.json(); }).then(setModel);
+  else location.reload();
+});
+Array.prototype.forEach.call(document.querySelectorAll("#tl-window button"), function (b) {
+  b.addEventListener("click", function () {
+    Array.prototype.forEach.call(document.querySelectorAll("#tl-window button"), function (x) { x.setAttribute("aria-selected", "false"); });
+    b.setAttribute("aria-selected", "true");
+    state.windowH = Number(b.dataset.h);
+    render();
+  });
+});
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") select(null); });
+
+boot();
+})();
+</script>
+</body>
+</html>
