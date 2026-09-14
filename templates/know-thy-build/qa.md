@@ -440,6 +440,13 @@ Based on the analysis above, write an **Interaction Playbook** for this project 
 |---|---|---|
 | {{evidence type}} | {{tool}} | {{when}} |
 
+### Evidence Contract (ADR-024) — fill the maturity minimums for THIS project
+| Maturity | Claim kind required | This project's concrete recipe |
+|---|---|---|
+| M0 (all ids) | `command` / `log` | {{the command that reproduces a done_when, wrapped in `qa-evidence.js record … -- <cmd>`}} |
+| M1 (data-touching issues) | `state` | {{how a DB/API state dump is produced here}} |
+| M2 (UI-facing ids) | `screenshot` | {{how a screenshot is produced here — the playwright script above}} |
+
 ### Failure Injection Strategy
 | Failure Type | Injection Method | Automatable |
 |---|---|---|
@@ -608,6 +615,33 @@ date: {{date}}
 |---|---|---|
 | {{type}} | {{tool}} | {{when}} |
 
+### Evidence Contract — how evidence is recorded (ADR-024)
+
+Evidence is **never** written with a shell redirect. Every artefact goes through one tool, which also
+maintains the manifest (`.factory/out/qa/<issue>/manifest.json`) that `reviewer-spec-conformance`, the
+review stage and the merge stage all read:
+
+```bash
+node .factory/bin/qa-evidence.js record --issue <n> --claim <done_when id> --summary "…" -- {{repro command}}
+node .factory/bin/qa-evidence.js attach --issue <n> --claim <done_when id> --kind screenshot --file /tmp/shot.png --summary "…"
+node .factory/bin/qa-evidence.js na     --issue <n> --claim <done_when id> --reason "…"
+node .factory/bin/qa-evidence.js finish --issue <n>     # coverage table — run before verdict
+```
+
+**Minimum coverage at this project's maturity ({{maturity}}):**
+
+| Maturity | Every `done_when` id needs | Plus |
+|---|---|---|
+| M0 | one `command` or `log` claim (or a `not_applicable` **with a reason**) | — |
+| M1 | the M0 minimum | ≥1 `state` claim (DB/API state dump) when the issue's impact paths touch data: {{data paths in this project}} |
+| M2 | the M1 minimum | ≥1 `screenshot` for every UI-facing `done_when` (`level = e2e` or `ui = true`) |
+
+For **this** project that means: {{concrete commands for a command claim, how a state dump is taken
+(e.g. `psql -c 'select …'`, `curl …/api/x`), how a screenshot is produced (e.g. the playwright script
+in the Interaction Playbook) — written by SETUP, not invented per review}}.
+
+Claim ids are always `done_when` ids; the harness smoke suite uses the reserved id `smoke`.
+
 ### Failure State Injection Methods
 
 | Type | Method | Tool | Applicable When |
@@ -647,6 +681,10 @@ date: {{date}}
 - [ ] Interaction Playbook built — every real user action mapped to a tool/method
 - [ ] Unavailable interactions explicitly listed with manual checklist items
 - [ ] Evidence collection strategy defined for this product type
+- [ ] **Evidence Contract section written** (ADR-024): the `qa-evidence.js` commands spelled out for *this*
+      project, and the maturity minimums made concrete — which command produces a `command` claim, how a
+      `state` dump is taken (M1, data-touching issues), how a `screenshot` is produced (M2, UI-facing
+      `done_when`). SETUP writes this once; `reviewer-qa` must not invent it per review.
 - [ ] Behavioral axes mapped to project persona
 - [ ] At least 5 test profiles defined (risk-ordered)
 - [ ] At least 20 turn-level scenarios generated

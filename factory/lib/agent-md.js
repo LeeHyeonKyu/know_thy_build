@@ -84,6 +84,13 @@ export function needsDenyAllWritesHook(name) {
  * 아무도 막지 않는다. `MultiEdit`(KTB-13 r1): allow가 이제 `Edit`·`Write`·`MultiEdit`·`NotebookEdit`을
  * 전역으로 부여하므로, 매처가 좁으면 리뷰어가 그 한 도구로 트리를 고칠 수 있다.
  */
+/**
+ * ADR-024 / KTB-42 — qa 증거 도구의 경로와, 그것을 반드시 이름으로 알아야 하는 두 역할.
+ * qa는 **쓰는 쪽**, spec-conformance는 **읽는 쪽**이다 — 한쪽만 알면 계약이 절반만 선다.
+ */
+export const QA_EVIDENCE_TOOL = ".factory/bin/qa-evidence.js";
+export const QA_EVIDENCE_ROLES = new Set(["reviewer-qa", "reviewer-spec-conformance"]);
+
 export const DENY_WRITES_TOOLS = Object.freeze(["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"]);
 export const DENY_WRITES_MATCHER = DENY_WRITES_TOOLS.join("|");
 
@@ -139,6 +146,18 @@ export function lintAgentMd(text, { expectedName } = {}) {
   if (lessons !== undefined) {
     const expected = `.factory/lessons/${expectedName}.md`;
     if (!lessons.includes(expected)) violations.push({ rule: "lessons-path", msg: `Lessons must reference ${expected}` });
+  }
+
+  /**
+   * ADR-024 / KTB-42 — **증거를 다루는 두 역할은 도구를 이름으로 안다.** qa는 그 도구로만 쓰고
+   * (`record`/`attach`/`na`/`finish`), spec-conformance는 그 도구가 만든 매니페스트를 읽어 id로
+   * 거부한다. 프롬프트가 그 이름을 말하지 않으면 둘은 다시 즉흥 리다이렉션과 "디렉터리가 비었다"로
+   * 돌아가고, 그 조합이 KTB #3의 8라운드였다. 그래서 산문이 아니라 **lint**다 — doctor가 FAIL한다.
+   */
+  if (QA_EVIDENCE_ROLES.has(frontmatter.name)) {
+    if (!text.includes(QA_EVIDENCE_TOOL)) {
+      violations.push({ rule: "qa-evidence-tool", msg: `${frontmatter.name} must name the evidence tool (${QA_EVIDENCE_TOOL}) — evidence is written through it, never through ad-hoc redirects (KTB-42)` });
+    }
   }
 
   if (needsDenyAllWritesHook(frontmatter.name)) {

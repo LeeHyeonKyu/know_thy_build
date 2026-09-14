@@ -1,6 +1,7 @@
 import { validate } from "./schemas.js";
 import { extractStageArtifact } from "./stage-artifact.js";
 import { matchesAny } from "./glob.js";
+import { citedClaimIds } from "./qa-evidence.js";
 
 /**
  * 최종 리뷰 nit 3 — `extractJson`/`matchBrace`와 `export { fencedJsonError }`가 여기서 사라졌다.
@@ -184,7 +185,7 @@ export function neverAutomateHits(paths, globs) {
   return hits;
 }
 
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [] }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null }) {
   const reasons = [];
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
@@ -264,6 +265,20 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   if (stage === "plan" && data) reasons.push(...validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody }));
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
+  }
+  /**
+   * ADR-024 / KTB-42 — **qa의 판정은 자기 증거를 부른다.** 매니페스트가 있고 로스터에 qa가 있으면,
+   * qa의 verdict는 그 매니페스트 안에 실재하는 claim id를 **최소 하나** 인용해야 한다. 인용 없는
+   * 판정은 증거와 판정이 서로를 모르는 상태이고, KTB #3에서 정확히 그 상태가 여덟 라운드 동안
+   * "증거가 없다"와 "증거를 남겼다"를 동시에 참으로 만들었다. 도구가 만든 id 말고는 인용할 것이
+   * 없으므로, 이 규칙은 리뷰어를 도구 쪽으로 민다(산문 대신 계약).
+   */
+  if (stage === "review" && data && qaManifest && roster.includes("qa")) {
+    const v = (Array.isArray(data.verdicts) ? data.verdicts : []).find((x) => x?.role === "qa");
+    const ids = Array.isArray(qaManifest.claimIds) ? qaManifest.claimIds : [];
+    if (v && citedClaimIds(v, ids).length === 0) {
+      reasons.push(`qa verdict cites no qa evidence claim id (manifest claims: ${ids.join(", ") || "none"}) — evidence lives in .factory/out/qa/<issue>/ and is written by \`node .factory/bin/qa-evidence.js\``);
+    }
   }
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
   // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)

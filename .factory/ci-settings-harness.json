@@ -72,7 +72,9 @@
       "Write(.factory/out/qa/**)",
       "Edit(.factory/out/qa/**)",
       "Bash(mkdir -p .factory/out/qa*)",
-      "Bash(mkdir -p ./.factory/out/qa*)"
+      "Bash(mkdir -p ./.factory/out/qa*)",
+      "Bash(node .factory/bin/qa-evidence.js *)",
+      "Bash(node ./.factory/bin/qa-evidence.js *)"
     ]
   }
 }

@@ -1487,6 +1487,73 @@ responses:
 #### 왜 독립 → 교환 순서인가
 동시에 보여주면 첫 리뷰어의 의견에 수렴한다(집단사고). 교환이 없으면 각자의 사각이 남는다. 문헌: "93.4%의 발견이 4개 리뷰어 중 정확히 하나에서만 잡힘" — 다양성은 독립에서 나오고, 판정의 질은 교환에서 나온다.
 
+### 7.6 qa 증거 계약 (ADR-024, KTB-42)
+
+qa 리뷰어의 증거는 "디렉터리에 파일이 좀 있다"가 아니라 **계약**이다. 라이브 KTB #3이 그 차이를 값으로
+보여 줬다: `spec1: qa evidence missing` 하나로 implement가 8라운드를 돌았는데, 진짜 원인은 qa가
+`.factory/out/qa/`에 **쓸 수 없었다**는 것이었고 그 사실은 어디에도 기록되지 않았다(§5.1 KTB-36/37/40).
+
+#### 매니페스트 `factory.qa-evidence.v1`
+
+`.factory/out/qa/<issue>/manifest.json` — **이 파일이 계약이다**. 디렉터리 글롭
+(`harness.toml [evidence].qa_artifacts`)은 그 주소일 뿐이다.
+
+```json
+{
+  "schema": "factory.qa-evidence.v1",
+  "issue": 42, "head_sha": "<40-hex>", "maturity": "M1",
+  "claims": [
+    { "id": "dw1", "kind": "command", "file": "dw1-1.log", "cmd": "npx playwright test e2e/export.spec.ts",
+      "exit": 0, "summary": "3행 시드로 Export → CSV 다운로드, 헤더 순서 일치" },
+    { "id": "dw2", "kind": "screenshot", "file": "dw2-1.png", "summary": "빈 테이블에서 500 화면" },
+    { "id": "dw3", "kind": "state",  "file": "dw3-1.json", "summary": "export 후 reports 테이블 3행" },
+    { "id": "dw4", "kind": "not_applicable", "reason": "이 tier에는 UI 표면이 없다", "summary": "…" }
+  ],
+  "created_at": "2026-09-14T09:02:00Z", "tool_version": "1"
+}
+```
+
+- `claims[].id`는 **언제나 plan handoff의 `done_when` id**다. 예외는 예약어 `smoke`(하네스 스모크) 하나.
+- `kind`는 다섯: `command`(실행했다 — 명령과 종료 코드가 함께) · `log`(관측했다) · `state`(데이터가
+  그렇게 됐다) · `screenshot`(사용자가 봤다) · `not_applicable`(**사유 필수**).
+- `file`은 **이슈 디렉터리 기준 상대 경로**이고 실재해야 한다. 절대 경로·`..`는 무효다.
+
+#### 성숙도별 최소선
+
+| maturity | 모든 `done_when` id | 추가 |
+|---|---|---|
+| M0 | `command` 또는 `log` 하나 (또는 사유 있는 `not_applicable`) | — |
+| M1 | M0와 같음 | 영향 경로가 데이터를 건드리면 `state` claim ≥1 |
+| M2 | M1과 같음 | UI-facing id(`level = e2e` 또는 `ui = true`)마다 `screenshot` ≥1 |
+
+#### 도구 `.factory/bin/qa-evidence.js` — 쓰기의 유일한 길
+
+```
+record --issue N --claim <id> --summary "…" [--timeout ms] -- <cmd…>   # 실행 + stdout/stderr/exit 저장
+attach --issue N --claim <id> --kind screenshot|log|state --file <경로> --summary "…"
+na     --issue N --claim <id> --reason "…"
+finish --issue N          # 커버리지 표. 미충족이면 exit 1 (`spec-evidence-missing: <ids>`)
+probe  --issue N          # mkdir -p + write + unlink. 쓸 수 없으면 exit 2
+```
+
+리다이렉션으로 직접 쓰는 것은 금지다(프롬프트 규칙 + `lintAgentMd`의 `qa-evidence-tool`). 이유는 하나다 —
+**즉흥 리다이렉션은 조용히 실패하고**, 실패한 자리에서 "증거 없음"은 언제나 빌더를 가리켰다. 도구는
+시크릿을 지운 뒤(`scrub-artifacts.js`) 쓰고, 바이너리(스크린샷)는 한 바이트도 건드리지 않는다.
+
+#### 판정이 물리는 자리 넷
+
+1. **review 스테이지** — 오버레이 직후·`claude -p` 이전에 `probe`. 실패는 review reject가 아니라
+   `factory:blocked`(cause `undecidable`). `factory doctor`의 `qa.evidence-probe`가 사람의 자리에서 같은 확인.
+2. **`verify-stage` (`review.v1`)** — qa verdict가 매니페스트의 claim id를 하나도 인용하지 않으면 그
+   라운드의 산출물을 받지 않는다.
+3. **`factory:approved`** — 로스터에 `qa`가 있으면 매니페스트가 유효하고 PR head에 묶여 있어야 한다.
+4. **`factory:merged`** — 매니페스트 파일은 커밋되지 않으므로(`.factory/out/`는 gitignore) 머지가 보는
+   것은 review 런이 run 기록에 남긴 `qa_manifest=<sha256>` 한 줄이다(§ADR-014의 `factory/records`).
+   로스터에 `qa`가 없으면 이 규칙들은 발화하지 않는다 — 부르지 않은 사람이 남기지 않은 증거는 결함이 아니다.
+
+`reviewer-spec-conformance`의 거부 문구는 **id를 부른다**: `spec-evidence-missing: dw2, dw4`.
+"디렉터리가 비었다"는 금지다 — 그 문장이 KTB #3의 8라운드를 만들었다.
+
 ---
 
 ## 8. Retro와 lesson

@@ -60,12 +60,20 @@ export const normalizeVerdicts = (verdicts = []) =>
     .sort()
     .join(",");
 
-export function reviewEvidenceLine({ headSha, round, decision, verdicts = [], runId, runnerId }) {
-  return `${REVIEW_EVIDENCE_PREFIX} run_id=${runId ?? "none"} runner=${runnerId ?? "none"} head_sha=${headSha ?? "none"} round=${round ?? "none"} decision=${decision ?? "none"} verdicts=${normalizeVerdicts(verdicts) || "none"}`;
+/**
+ * ── ADR-024 / KTB-42: `qa_manifest=<sha256>` ─────────────────────────────────────────────────
+ * qa 증거 매니페스트(`.factory/out/qa/<issue>/manifest.json`)는 **커밋되지 않는다** — `.factory/out/`는
+ * gitignore다. 그래서 머지 스테이지는 그 파일을 열 수 없고, "이 커밋에 대해 유효한 증거가 있었다"를
+ * 말해 줄 수 있는 것은 review 런이 여기 남긴 지문 하나뿐이다. 필드는 **선택**이다(뒤에 붙는다):
+ * 이 기능 이전의 기록과 로스터에 qa가 없는 tier의 기록은 그 필드 없이 그대로 읽혀야 한다.
+ */
+export function reviewEvidenceLine({ headSha, round, decision, verdicts = [], runId, runnerId, qaManifest = null }) {
+  const base = `${REVIEW_EVIDENCE_PREFIX} run_id=${runId ?? "none"} runner=${runnerId ?? "none"} head_sha=${headSha ?? "none"} round=${round ?? "none"} decision=${decision ?? "none"} verdicts=${normalizeVerdicts(verdicts) || "none"}`;
+  return `${base} qa_manifest=${qaManifest ?? "none"}`;
 }
 
 const SECTION = /^##\s+(\S+)\s+·\s+(\S+)\s+·\s+(.+)$/;
-const EVIDENCE = new RegExp(`^${REVIEW_EVIDENCE_PREFIX} run_id=(\\S+) runner=(\\S+) head_sha=(\\S+) round=(\\S+) decision=(\\S+) verdicts=(\\S*)$`);
+const EVIDENCE = new RegExp(`^${REVIEW_EVIDENCE_PREFIX} run_id=(\\S+) runner=(\\S+) head_sha=(\\S+) round=(\\S+) decision=(\\S+) verdicts=(\\S*?)( qa_manifest=(\\S+))?$`);
 
 /**
  * run 기록 본문에서 **기대하는 런**(`runId`)이 쓴 review-evidence 줄을 그 섹션 헤더(스테이지·시각·
@@ -106,10 +114,13 @@ export function parseReviewEvidence(text, { runId = null } = {}) {
       round: Number.isInteger(round) ? round : null,
       decision: e[5],
       verdicts: e[6] === "none" ? "" : e[6],
+      // KTB-42 — 없는 기록(이 기능 이전, 또는 qa 없는 로스터)은 null이다. "없음"과 "다름"을 호출자가
+      // 구분할 수 있어야 한다: 전자는 로스터에 qa가 없을 때 정상이고, 후자는 언제나 판정 불가다.
+      qaManifest: e[8] && e[8] !== "none" ? e[8] : null,
     });
   }
   if (!found.length) return null;
-  const shape = (r) => `${r.stage}|${r.runnerId}|${r.headSha}|${r.round}|${r.decision}|${r.verdicts}`;
+  const shape = (r) => `${r.stage}|${r.runnerId}|${r.headSha}|${r.round}|${r.decision}|${r.verdicts}|${r.qaManifest ?? "none"}`;
   if (new Set(found.map(shape)).size > 1) return null;
   return found[found.length - 1];
 }

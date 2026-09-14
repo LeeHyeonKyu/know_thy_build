@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { checkHarness, checkCommands, checkSetupDirtiesTree, runSetupProbe } from "../lib/doctor/harness.js";
+import { checkHarness, checkCommands, checkSetupDirtiesTree, checkQaEvidenceProbe, runSetupProbe } from "../lib/doctor/harness.js";
 import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity } from "../lib/doctor/factory.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
@@ -79,6 +79,9 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     ? { skipped: noRun ? "--no-run" : "--offline" }
     : await setupProbeFn({ run, cwd: root, harness }).catch((e) => ({ skipped: `probe failed: ${e?.message || e}` }));
   checks.push(checkSetupDirtiesTree({ harness, ...probe }));
+  // ADR-024 / KTB-42 — review 스테이지가 `claude -p` 전에 돌리는 것과 **같은 프로브**를 여기서도.
+  // 파일을 하나 만들었다 지우므로 `--no-run`/`--offline`에서는 WARN으로만 남긴다.
+  checks.push(checkQaEvidenceProbe({ root, skipped: noRun ? "--no-run" : offline ? "--offline" : null }));
 
   // ── test env up (wraps the command gates and the smoke) ─────────
   const smoke = harness.test?.smoke || {};

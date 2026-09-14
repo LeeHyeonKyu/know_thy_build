@@ -147,6 +147,53 @@ test("review: the overlay runs after the detach and before claude -p, and says w
   expect(line).toContain(".factory/ci-settings.json");
 });
 
+// ── ADR-024 / KTB-42 — 증거 디렉터리 프로브는 오버레이 **직후**, `claude -p` **이전** ─────────────
+// KTB #3: qa는 `.factory/out/qa/`에 한 글자도 쓸 수 없었고, 그 사실은 리뷰가 끝난 뒤 `spec1: qa
+// evidence missing`이라는 **빌더를 가리키는 문장**으로만 드러났다(8라운드). 이제 먼저 묻는다.
+
+test("KTB-42: the qa evidence probe runs after the overlay and before claude -p, and leaves a line", async () => {
+  const calls = [];
+  const lines = [];
+  const d = overlayDeps({
+    overlayFactoryConfig: async () => { calls.push("overlay"); return { ok: true, sha: "b".repeat(40), paths: [] }; },
+    qaEvidenceProbe: async () => { calls.push("probe"); return { ok: true, line: "qa evidence probe: ok — .factory/out/qa/3 is writable" }; },
+    claudeP: async () => { calls.push("claude"); return { is_error: false, result: "{}" }; },
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(0);
+  expect(calls).toEqual(["overlay", "probe", "claude"]);
+  expect(lines.some((l) => /qa evidence probe: ok/.test(l))).toBe(true);
+});
+
+test("KTB-42: a non-writable evidence dir is factory:blocked/undecidable — never a review reject", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const lines = [];
+  const d = overlayDeps({
+    qaEvidenceProbe: async () => ({ ok: false, reason: "mkdir -p .factory/out/qa/3 failed: EACCES: permission denied" }),
+    transition, claudeP, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(2);
+  expect(claudeP).not.toHaveBeenCalled();
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:blocked",
+    cause: "undecidable",
+    reason: expect.stringContaining("qa evidence dir not writable"),
+  }));
+  expect(lines.some((l) => /qa evidence probe: FAIL/.test(l))).toBe(true);
+});
+
+test("KTB-42: the probe is a review-stage thing — implement never runs it", async () => {
+  const probe = vi.fn(async () => ({ ok: false, reason: "should not be asked" }));
+  const d = overlayDeps({
+    checkoutHead: undefined, ciSettingsPresent: async () => true,
+    overlayFactoryConfig: async () => ({ ok: true, sha: "b".repeat(40), paths: [] }),
+    qaEvidenceProbe: probe,
+  });
+  expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(0);
+  expect(probe).not.toHaveBeenCalled();
+});
+
 test("review: the overlay failing aborts the stage — the review never runs on PR-head config", async () => {
   const transition = vi.fn(async () => ({ ok: true }));
   const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));

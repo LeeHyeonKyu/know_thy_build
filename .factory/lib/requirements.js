@@ -50,6 +50,53 @@ function gatesGate(ctx) {
 }
 const shaBound = (ctx) => !restoring(ctx);
 
+/**
+ * ── ADR-024 / KTB-42 — **qa 증거는 머지 조건이다(로스터에 qa가 있을 때).** ─────────────────────
+ *
+ * KTB #3은 이 규칙이 **산문으로만** 있었을 때 무슨 일이 일어나는지 보여 줬다: `reviewer-spec-conformance`가
+ * 매 라운드 "증거 없음"으로 거부했지만, 그 거부는 스크립트의 판정이 아니라 한 리뷰어의 독해였고,
+ * 정작 증거를 남길 수 없었던 진짜 원인(쓰기 권한)은 어디에도 기록되지 않았다. 이제 판정의 출처는
+ * 파일 하나다: `.factory/out/qa/<issue>/manifest.json`(계약은 `lib/qa-evidence.js`).
+ *
+ * 두 자리가 **서로 다른 것**을 본다 — 볼 수 있는 것이 다르기 때문이다:
+ *  - `factory:approved`(review 스테이지): 매니페스트 **파일**을 읽어 done_when 커버리지와 커밋 바인딩을
+ *    검사한다(`ctx.qaEvidence`).
+ *  - `factory:merged`(merge 스테이지): 그 파일을 볼 수 **없다**(`.factory/out/`는 gitignore, 머지는 별도
+ *    잡의 새 체크아웃이다). 대신 review 런이 `factory/records`의 run 기록에 남긴 지문
+ *    (`qa_manifest=<sha256>`, `ctx.qaManifestRecorded`)을 본다 — 러너만 쓸 수 있는 자리다.
+ *
+ * 로스터에 `qa`가 없으면 이 규칙은 **발화하지 않는다**: 부르지 않은 사람이 남기지 않은 증거는 결함이
+ * 아니다(ADR-020 F3의 같은 문장, docs tier).
+ */
+export const QA_EVIDENCE_UNVERIFIED = "qa evidence manifest not verified for this transition";
+export const QA_EVIDENCE_NOT_BOUND = "qa evidence not bound — the review run recorded no qa_manifest digest for this commit (the roster includes qa, so a valid manifest is required; see `node .factory/bin/qa-evidence.js finish`)";
+function qaEvidenceGate(ctx, { merged = false } = {}) {
+  if (restoring(ctx)) return null;
+  const roster = Array.isArray(ctx.roster) ? ctx.roster : null;
+  if (!roster || !roster.includes("qa")) return null;
+  const ev = ctx.qaEvidence;
+  const recorded = typeof ctx.qaManifestRecorded === "string" && ctx.qaManifestRecorded && ctx.qaManifestRecorded !== "none" ? ctx.qaManifestRecorded : null;
+  if (merged) {
+    if (!recorded) return fail(QA_EVIDENCE_NOT_BOUND);
+    // 파일까지 읽을 수 있는 호출자(로컬 재현·테스트)라면 지문이 그때 그것인지도 본다.
+    if (ev && ev.ok === false) return fail(`qa evidence manifest invalid: ${ev.reason || "unknown"}`);
+    if (ev && ev.ok === true && ev.digest && ev.digest !== recorded) {
+      return fail(`qa evidence manifest changed after the review run (record says ${recorded.slice(0, 12)}, the tree says ${String(ev.digest).slice(0, 12)})`);
+    }
+    return null;
+  }
+  if (!ev) return fail(QA_EVIDENCE_UNVERIFIED);
+  if (ev.ok !== true) {
+    const named = Array.isArray(ev.missing) && ev.missing.length ? `spec-evidence-missing: ${ev.missing.join(", ")}` : ev.reason || "unknown";
+    return fail(`qa evidence manifest invalid — ${named}`);
+  }
+  const head = ctx.prHeadSha || ctx.headSha;
+  if (head && ev.head_sha && ev.head_sha !== head) {
+    return fail(`qa evidence manifest describes ${String(ev.head_sha).slice(0, 7)}, PR head is ${String(head).slice(0, 7)}`);
+  }
+  return null;
+}
+
 const RULES = {
   "factory:ready"(ctx) {
     const { h, err } = need(ctx, "triage", "triage.v1"); if (err) return err;
@@ -83,6 +130,7 @@ const RULES = {
     // `rework → needs_human`이다) — 그 자리는 `nextState`다. 되돌릴 수 없는 `factory:merged`만 예외다(아래).
     const q = verifyReviewQuorum({ data: h.data, rosterSize: ctx.rosterSize ?? null, rosterRoles: ctx.roster || [] });
     if (!q.ok) return fail(q.reason);
+    const qa = qaEvidenceGate(ctx); if (qa) return qa;
     return pass;
   },
   "factory:merged"(ctx) {
@@ -103,6 +151,7 @@ const RULES = {
     const q = verifyReviewQuorum({ data: h.data, rosterSize: ctx.rosterSize ?? null, rosterRoles: ctx.roster || [], maxRounds: ctx.maxRounds ?? null });
     if (!q.ok) return fail(q.reason);
     if (ctx.prerequisite === true) return pass;
+    const qa = qaEvidenceGate(ctx, { merged: true }); if (qa) return qa;
     // 머지는 되돌릴 수 없다 — "확인하지 않았음"과 "확인해보니 RED"를 같게 취급한다(fail closed).
     if (ctx.checksGreen !== true) return fail("required checks not verified GREEN");
     if (ctx.integrityGreen !== true) return fail("integrity check not verified GREEN");

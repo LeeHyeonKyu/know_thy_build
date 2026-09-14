@@ -3009,3 +3009,86 @@ KTB-40의 교훈은 규칙이다: **생성물의 판정 테스트는 우리 매�
 - [ ] **plan 기본값이 바뀐다**: 4역할 토론 대신 단일 opus 1패스+skeptic 1패스가 기본이고,
   load-bearing tier(처음 열리는 영속/외부 쓰기 경로, 처음 고정되는 공개 와이어 계약, 또는
   `[protected]` 변경)에서만 토론이 유지된다.
+
+---
+
+## ADR-024 qa 증거 계약 — 증거는 디렉터리가 아니라 매니페스트이고, 도구로만 쓰인다 — 2026-09-14 (KTB-42)
+
+**질문**: KTB #3은 implement를 **8라운드** 태웠다. 매 라운드 `reviewer-spec-conformance`가 같은 문장으로
+거부했다 — `spec1: qa evidence missing`. 빌더는 여덟 번 무언가를 고쳤고, 여덟 번 같은 자리에서 다시
+막혔다. 원인은 빌더가 아니었다: qa 리뷰어가 `.factory/out/qa/`에 **한 글자도 쓸 수 없었다**
+(KTB-36 → KTB-37 → KTB-40: deny 목록의 `.factory/out/*`, PR head의 설정으로 도는 스테이지, 우리보다
+관대한 Claude Code의 매처). 권한은 KTB-40에서 닫혔다. 그런데 **같은 사고가 다시 날 수 있는 구조**는
+그대로였다. 사람의 판결(2026-09-14): "qa 증거 파일을 잘 만들 수 있게 구성하는 게 근본 해결".
+
+**관측(무엇이 실제로 여덟 라운드를 만들었나)**: 셋이 겹쳤다.
+
+1. **증거의 모양이 산문이었다.** 계약이라고 부를 수 있는 것은 `harness.toml`의
+   `[evidence].qa_artifacts = ".factory/out/qa/**"` 한 줄과 두 리뷰어 프롬프트의 문단 몇 개뿐이었다.
+   "무엇이 있으면 충분한가"에 두 역할이 서로 다른 답을 들고 있었고, 어느 쪽도 스크립트가 아니었다.
+2. **증거를 남기는 길이 즉흥적이었다.** `printf … > .factory/out/qa/x.log`, `cp … .factory/out/qa/`.
+   그 길이 막히면 **아무것도 남지 않는다** — 리뷰어에게는 "나는 증거를 남길 수 없었다"를 판정 안에
+   적을 방법조차 없었고, 다음 역할이 보는 것은 빈 디렉터리 하나였다.
+3. **아무도 미리 묻지 않았다.** 쓸 수 있는지는 27분짜리 리뷰가 끝난 **뒤에**, 그것도 빌더를 가리키는
+   문장으로만 드러났다.
+
+**결정**: 셋을 각각 닫는다 — 계약 / 도구 / 프로브.
+
+- **계약** (`factory/lib/qa-evidence.js`): 증거는 `.factory/out/qa/<issue>/manifest.json` 하나로
+  선언된다(`factory.qa-evidence.v1`). `claims[]`는 **`done_when` id에 묶이고**(하네스 스모크만 예약어
+  `smoke`), 종류는 다섯이다 — `command`(실행했다: 명령 + 종료 코드) · `log`(관측했다) ·
+  `state`(데이터가 그렇게 됐다) · `screenshot`(사용자가 그 화면을 봤다) ·
+  `not_applicable`(**사유 필수** — 사유 없는 면제는 면제가 아니라 공백이다).
+  최소선은 성숙도가 정한다: **M0** 모든 id에 `command`나 `log`(또는 사유 있는 `na`), **M1** 영향
+  경로가 데이터를 건드리면 `state` 하나 이상, **M2** UI로 확인되는 id(level=e2e 또는 ui=true)마다
+  `screenshot`. 파일 포인터는 **이슈 디렉터리 안의 상대 경로**여야 하고 실재해야 한다(절대 경로·`..`는
+  무효 — 훅의 qa 카브아웃이 `..`에서 통째로 꺼지는 것과 같은 규칙이다).
+- **도구** (`factory/bin/qa-evidence.js`, `.factory/bin/`으로 설치, 의존성 없음): 쓰기의 **유일한** 길.
+  `record … -- <cmd>`는 명령을 실제로 돌려 stdout+stderr와 종료 코드를 한 파일에 담고(시크릿은
+  `scrub-artifacts.js`로 지운 뒤에 쓴다), `attach`는 스크린샷·상태 덤프를 들이고(바이너리는 한 바이트도
+  건드리지 않는다), `na`는 사유와 함께 비우고, `finish`는 커버리지 표를 찍는다. 디렉터리에 쓸 수 없으면
+  **exit 2**로 즉시 죽는다 — 조용한 실패가 이 사고의 절반이었다.
+- **프로브**: review 스테이지가 오버레이 **직후**, `claude -p` **이전**에 `probe`를 돌린다(로스터에
+  `qa`가 있을 때). 실패는 리뷰의 reject가 **아니라** `factory:blocked` + cause `undecidable`이다 —
+  GREEN도 RED도 아닌 판정 불가이고, 이 저장소에서 그 자리는 언제나 blocked이다. `factory doctor`의
+  `qa.evidence-probe`가 사람의 자리에서 같은 확인을 한다(`--offline`/`--no-run`은 WARN).
+
+**소비처(같은 계약을 네 자리가 읽는다)**:
+- `reviewer-qa.md` — 도구로만 쓰고, verdict의 `evidence`·`verified`는 **claim id를 인용한다**.
+- `reviewer-spec-conformance.md` — `finish`의 표(또는 매니페스트)를 읽고 **id를 부르며** 거부한다:
+  `spec-evidence-missing: dw2, dw4`. "디렉터리가 비었다"는 **금지 문구**다 — 그 문장은 누구의 결함인지
+  말하지 않으면서 언제나 빌더를 가리켰다.
+- `verify-stage` (`review.v1`) — qa verdict가 매니페스트의 claim id를 하나도 인용하지 않으면 그 리뷰
+  라운드는 산출물로 인정되지 않는다.
+- `requirements.js` — 로스터에 `qa`가 있을 때 `factory:approved`는 **매니페스트 파일**을(커버리지 +
+  커밋 바인딩), `factory:merged`는 **run 기록의 지문**을 요구한다.
+
+**왜 승인과 머지가 서로 다른 것을 보는가**: `.factory/out/`은 gitignore다. 매니페스트는 커밋되지 않고,
+머지 스테이지는 별도 잡의 새 체크아웃이라 그 파일을 영영 볼 수 없다. 그래서 review 런이 run 기록의
+`review-evidence:` 줄에 `qa_manifest=<sha256>`를 함께 남긴다 — 러너가 쓰고 에이전트 세션은 push할 수
+없는 자리다(ADR-020 리뷰 batch-1/2 MF-2와 같은 구조). 머지는 그 한 줄을 본다. 필드는 **선택**이다:
+KTB-42 이전의 기록과 qa 없는 tier의 기록은 그대로 읽힌다.
+
+**왜 산문으로 남겨 둔 것**(의도적으로 계약이 아닌 것):
+- **무엇을 재현할 것인가** — 어떤 실패 경로를 밟을지, 어떤 화면을 볼지는 여전히 프롬프트와 사람의
+  판단이다. 계약은 "증거가 있다/없다"를 기계로 만들 뿐, "충분히 의심했는가"는 세지 않는다.
+- **요약문의 질** — `summary`는 자유 텍스트다. 그것을 스키마로 조이면 리뷰어는 스키마를 만족시키고
+  관찰을 멈춘다(계획의 done_when이 정교해질수록 결함 표면이 됐던 것과 같은 계열의 고장).
+- **`touchesData` 판정** — `impact_paths`에 대한 이름 열거다. 알려진 조잡한 필터이고, 기울기는 일부러
+  한쪽이다: **놓치면 요구하지 않는다**. 뜰 수 없는 증거를 요구하는 쪽이 더 나쁜 고장이기 때문이다.
+
+**영향**: 스펙 §7.6(새로 추가) · §5.2.3(qa의 증거 절차) · `harness.toml [evidence]` 주석 ·
+`templates/know-thy-build/qa.md`(SETUP이 이 프로젝트의 최소선 레시피를 **한 번** 적는다) ·
+두 ci-settings의 `permissions.allow`에 `Bash(node .factory/bin/qa-evidence.js *)`
+(deny가 allow를 이기지만, `--permission-mode dontAsk`에서 allow에 없는 호출은 **묻지 않고 거절**된다 —
+KTB-40의 그 교훈) · `factory doctor`의 새 검사 `qa.evidence-probe` ·
+`lintAgentMd`의 새 규칙 `qa-evidence-tool`(두 리뷰어 프롬프트가 도구를 이름으로 말해야 한다).
+
+**업그레이드 노트(기존 채택자)**:
+- [ ] `npx know-thy-build factory init --upgrade`가 `.factory/bin/qa-evidence.js`·
+  `.factory/lib/qa-evidence.js`와 두 `ci-settings*.json`을 설치한다. **업그레이드하지 않으면** review
+  스테이지의 프로브는 in-process로 돌지만(경고 한 줄), qa 세션은 도구를 부를 수 없다.
+- [ ] 로스터에 `qa`가 있는 tier의 PR은 이제 **매니페스트 없이는 머지되지 않는다**. 업그레이드 직후
+  진행 중이던 이슈는 리뷰를 한 라운드 더 돌아야 한다(그 라운드가 매니페스트를 만든다).
+- [ ] `reviewer-qa`/`reviewer-spec-conformance` 프롬프트를 커스터마이즈한 어댑터는 도구 이름
+  (`.factory/bin/qa-evidence.js`)을 프롬프트에 넣어야 한다 — 없으면 `doctor`가 FAIL한다.

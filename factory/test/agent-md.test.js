@@ -191,6 +191,34 @@ test("lintAgentMd: a deny-all-writes hook whose matcher omits any write tool →
 // Task 2: factory-triage.md 템플릿(전체 lint는 Task 6에서 켜진다). factory-loader.md는 외부 감사
 // 2026-09-14 M5로 삭제됐다 — workflow의 첫 스텝은 LLM 호출이 아니라 `factory/lib/context.js`가 쓰는
 // `.factory/out/loaded.json`이다.
+/**
+ * ── ADR-024 / KTB-42 — 증거를 다루는 두 역할은 도구를 **이름으로** 안다 ────────────────────────
+ * qa는 그 도구로만 쓰고, spec-conformance는 그 도구가 만든 매니페스트로 판정한다. 프롬프트가 그
+ * 이름을 잃어버리면 둘은 즉흥 리다이렉션과 "디렉터리가 비었다"로 돌아간다 — KTB #3의 8라운드.
+ */
+test("KTB-42: reviewer-qa and reviewer-spec-conformance must name the evidence tool, others need not", () => {
+  for (const name of ["reviewer-qa", "reviewer-spec-conformance"]) {
+    const text = readAgent(name);
+    expect(text, name).toContain(".factory/bin/qa-evidence.js");
+    expect(lintAgentMd(text, { expectedName: name }), name).toEqual([]);
+    const stripped = text.split(".factory/bin/qa-evidence.js").join(".factory/out/qa/");
+    expect(lintAgentMd(stripped, { expectedName: name })).toEqual([{ rule: "qa-evidence-tool", msg: expect.stringContaining("qa-evidence.js") }]);
+  }
+  // 다른 역할에는 이 규칙이 걸리지 않는다 — 증거를 쓰지도 읽지도 않는다.
+  expect(lintAgentMd(FIXTURE, { expectedName: "reviewer-correctness" })).toEqual([]);
+});
+
+test("KTB-42: reviewer-qa spells the four subcommands and the maturity minimums; spec-conformance rejects by id", () => {
+  const qa = readAgent("reviewer-qa");
+  for (const sub of ["record", "attach", "na ", "finish"]) expect(qa, sub).toContain(sub);
+  for (const m of ["M0", "M1", "M2"]) expect(qa, m).toContain(m);
+  expect(qa).toMatch(/claim:dw/);                          // 판정이 claim id를 인용하는 모양
+
+  const spec = readAgent("reviewer-spec-conformance");
+  expect(spec).toContain("spec-evidence-missing");
+  expect(spec).toMatch(/디렉터리가 비었다|directory is empty/);   // 그 문구를 **쓰지 말라**고 말한다
+});
+
 test("lintAgentMd: templates/factory/claude/agents/factory-triage.md passes with no violations", () => {
   const text = readAgent("factory-triage");
   expect(lintAgentMd(text, { expectedName: "factory-triage" })).toEqual([]);
@@ -414,7 +442,8 @@ test("reviewer-security.md / reviewer-architecture.md / reviewer-spec-conformanc
   // scope is spec-conformance's call, not architecture's
   expect(arch).toContain("spec-conformance");
   const conf = lens("reviewer-spec-conformance");
-  for (const s of ["done_when", "files_expected", "non_goals", "must_approve_explicitly", "qa_artifacts"]) expect(conf, s).toContain(s);
+  // KTB-42 — 증거의 이름이 바뀌었다: `[evidence].qa_artifacts`(디렉터리)에서 매니페스트(계약)로.
+  for (const s of ["done_when", "files_expected", "non_goals", "must_approve_explicitly", "manifest.json"]) expect(conf, s).toContain(s);
   const qa = lens("reviewer-qa");
   for (const s of [".factory/out/qa/", ".factory/scenarios/", "Design Intent"]) expect(qa, s).toContain(s);
   // F3: MCP 없이 Bash로 브라우저를 몬다는 사실과, app_start가 비어 있을 때의 대체 경로를 렌즈가 말한다
@@ -431,9 +460,10 @@ test("reviewer-qa.md says .factory/out/qa/ is the one writable path, and spec-co
 
   // "증거가 없으면 발견" 규칙은 유지하되, qa가 로스터에 있을 때로 한정한다 — docs tier에는 qa가 없다.
   const conf = [...parseAgentMd(readAgent("reviewer-spec-conformance")).sections.entries()].find(([k]) => k.startsWith("Lens"))[1];
-  expect(conf).toContain("qa_artifacts");
+  expect(conf).toContain("manifest.json");      // KTB-42: 판정의 대상은 디렉터리가 아니라 매니페스트다
   expect(conf).toContain("reject");             // 규칙 자체는 그대로다
   expect(conf).toMatch(/로스터/);                // 다만 tier 로스터에 qa가 있을 때만
+  expect(conf).toContain("spec-evidence-missing");   // 그리고 거부는 **id를 부른다**
 });
 
 // ── Plan 4 Task 5: factory-retro — 쓰기 금지 역할이 하나 늘었다 ────────────────────────────────
