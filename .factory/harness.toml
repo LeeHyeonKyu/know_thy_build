@@ -6,7 +6,11 @@ schema = 1
 # are stamped from. Changing it changes every gate everywhere — so it is [protected] here, same as any
 # other harness/CI file, and a PR touching it can only be human-merged (controller ruling, P6-R3 / ADR-020
 # KTB-5/KTB-6: L0 integrity flags it informationally, L1 merge-stage refuses to auto-merge it).
-# No linter exists yet (P6-R3): lint/lint_file are no-ops (`node -e 0`) until one is adopted.
+# lint (audit P1-7, ADR-023): `node -e 0` was not a gate — it reported "lint GREEN" while checking
+# nothing. `factory/bin/lint.js` is the real one: `node --check` over JS + the ADR-009/ADR-021 workflow
+# rules (`factory/lib/yml-lint.js`) over `.github/workflows/**` + the skill-doc contract
+# (`factory/lib/skill-md.js`) over `templates/know-thy-build/*.md`. No new dependency — it wires up the
+# checks this repo already owns.
 
 [project]
 name           = "know-thy-build"
@@ -19,11 +23,11 @@ setup = "npm ci"
 node  = "22"
 
 [commands]                       # all judged by exit code
-lint       = "node -e 0"                                                              # P6-R3: no linter yet
+lint       = "node factory/bin/lint.js"                                               # ADR-023 (audit P1-7)
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"      # P6-R3
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
-lint_file  = "node -e 0 {file}"                  # lint-touched.sh (logging only) — P6-R3: no linter yet
+lint_file  = "node factory/bin/lint.js --file {file}"   # lint-touched.sh (logging only)
 
 [harness]
 maturity = "M0"                  # M0 | M1 | M2 — promotion is a factory:harness issue + human merge
@@ -39,10 +43,15 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 # mutation_report = "reports/mutation/mutation.json"
 
 [gates]
+# 레벨은 서로 달라야 한다(감사 H2 — doctor `gates.levels-identical`): tier→level의 값이 "무거운
+# 변경에는 더 많은 것이 돈다"인데 셋이 같으면 tier가 아무것도 정하지 않는다. full은 증명 게이트를
+# 더한다(prove-test: 새 테스트가 base에서 실패하는가, new-test-repeat: 그 테스트가 흔들리지 않는가).
+# required는 레벨 목록과 무관하게 강제된다 — 돌지 않은 required는 MISCONFIGURED다.
+# M0이라 모든 런은 fast로 강등된다(doctor `gates.m0-downgrade` WARN, 판정 파일의 `downgraded_from`).
 required = ["lint", "unit"]
 fast     = ["lint", "unit"]
-full     = ["lint", "unit"]
-deep     = ["lint", "unit"]
+full     = ["lint", "unit", "prove-test", "new-test-repeat"]
+deep     = ["lint", "unit", "prove-test", "new-test-repeat"]
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90
@@ -50,7 +59,9 @@ mutation_score_pct      = 70
 new_test_repeats        = 3
 flaky_isolation_runs    = 3
 flaky_base_runs         = 5
+flaky_max               = 2      # PR당 flaky-existing 제외 상한(감사 M3) — 넘으면 전부 RED
 quarantine_max          = 5
+quarantine_max_effective = 3     # PR당 격리가 RED→GREEN으로 뒤집을 수 있는 수(감사 M4)
 quarantine_ttl_days     = 28
 quarantine_return_after = 30
 

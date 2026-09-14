@@ -129,6 +129,56 @@ test("maturity-level mismatch: deep listed but M0 → WARN; proof gates listed w
   expect(by(checkHarness({ harness: h2, files }))["proof.commands"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("coverage") });
 });
 
+// ── 감사 H2 / P1-7 (Task 3) — 레벨이 전부 같고 lint가 no-op이면 실효 게이트는 하나뿐이다 ──────
+// 감사 실측: `harness.toml:53-56` fast/full/deep 동일, `lint = "node -e 0"`, `MAX_LEVEL.M0 = "fast"`.
+// 세 가지가 겹치면 어떤 tier의 PR이든 실제로 도는 게이트는 `unit` 하나다 — 그리고 그 구성이 템플릿
+// 그대로 모든 입양자에게 배포된다. doctor가 세 갈래를 각각 잡는다.
+
+test("H2: full이 fast에 아무것도 더하지 않으면 FAIL (gates.levels-identical)", () => {
+  const h = tmpl(); h.gates.full = [...h.gates.fast]; h.gates.deep = [...h.gates.fast];
+  expect(by(checkHarness({ harness: h, files }))["gates.levels-identical"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("full") });
+
+  const h2 = tmpl(); h2.gates.deep = [...h2.gates.fast];
+  expect(by(checkHarness({ harness: h2, files }))["gates.levels-identical"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("deep") });
+
+  // 템플릿 자신은 통과해야 한다 — full = fast + 증명 게이트.
+  expect(by(checkHarness({ harness: tmpl(), files }))["gates.levels-identical"].level).toBe("PASS");
+});
+
+test("H2: deep이 full과 같은데 더 설정된 게이트가 있으면 FAIL, 없으면 PASS", () => {
+  const h = tmpl(); h.commands.e2e = "playwright test";        // 설정은 했는데 deep이 그것을 안 부른다
+  expect(by(checkHarness({ harness: h, files }))["gates.levels-identical"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("e2e") });
+});
+
+test("P1-7: no-op lint는 린트가 아니다 — gates.lint-noop FAIL", () => {
+  for (const cmd of ["node -e 0", 'node -e ""', "true", ":", "   ", "exit 0"]) {
+    const h = tmpl(); h.commands.lint = cmd;
+    expect(by(checkHarness({ harness: h, files }))["gates.lint-noop"], cmd)
+      .toMatchObject({ level: "FAIL", detail: expect.stringContaining("[commands].lint") });
+  }
+  const h2 = tmpl(); h2.commands.lint_file = "node -e 0 {file}";
+  expect(by(checkHarness({ harness: h2, files }))["gates.lint-noop"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("[commands].lint_file") });
+  expect(by(checkHarness({ harness: tmpl(), files }))["gates.lint-noop"].level).toBe("PASS");
+});
+
+test("H2: M0의 fast 강등은 조용하지 않다 — gates.m0-downgrade WARN", () => {
+  const c = by(checkHarness({ harness: tmpl(), files }));      // 템플릿은 M0이고 full/deep에 더 있는 게이트가 있다
+  expect(c["gates.m0-downgrade"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("fast") });
+  expect(c["gates.m0-downgrade"].detail).toContain("prove-test");
+  const h = tmpl(); h.harness.maturity = "M1";
+  expect(by(checkHarness({ harness: h, files }))["gates.m0-downgrade"].level).toBe("PASS");
+});
+
+test("H2: required는 도는 모든 레벨에 있어야 한다 — 한 레벨에서라도 빠지면 FAIL", () => {
+  const h = tmpl(); h.gates.fast = ["unit"];                   // lint가 fast에서 빠졌다 → fast PR은 lint 없이 GREEN
+  expect(by(checkHarness({ harness: h, files }))["gates.required-in-levels"])
+    .toMatchObject({ level: "FAIL", detail: expect.stringContaining("lint") });
+});
+
 test("checkCommands runs each non-templated command and reports exit codes; skipRun marks WARN", async () => {
   const h = tmpl();
   const run = makeFakeRun([{ match: (c, a) => a[1].startsWith("npm run lint"), result: { code: 0, stdout: "", stderr: "" } }, { match: () => true, result: { code: 1, stdout: "", stderr: "no tests" } }]);

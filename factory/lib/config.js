@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { parseFrontmatter } from "./frontmatter.js";
 
-export const THRESHOLD_DEFAULTS = { diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
+// flaky_max(감사 M3)·quarantine_max_effective(감사 M4): 한 PR이 "원래 흔들리던 것"으로 밀어낼 수 있는
+// 기존 테스트 수와, 격리 목록으로 RED를 뒤집을 수 있는 테스트 수의 상한. 상한이 없으면 목록이 긴
+// 저장소에서 "빨간 테스트가 전부 목록에 있어서 GREEN"이 성립한다.
+export const THRESHOLD_DEFAULTS = { diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, flaky_max: 2, quarantine_max: 5, quarantine_max_effective: 3, quarantine_ttl_days: 28, quarantine_return_after: 30 };
 export function loadHarness(root) {
   const h = parseToml(readFileSync(join(root, ".factory/harness.toml"), "utf8"));
   h.gates ??= {}; h.gates.thresholds = { ...THRESHOLD_DEFAULTS, ...(h.gates.thresholds || {}) };

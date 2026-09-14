@@ -21,6 +21,9 @@ node  = "22"
 #   setup = "curl -fsSL https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.0-stable.tar.xz | tar -xJ -C $HOME && echo \"$HOME/flutter/bin\" >> \"$GITHUB_PATH\" && flutter --version"
 
 [commands]                       # all judged by exit code
+# lint: plug YOUR linter here (eslint, ruff, golangci-lint, `dart analyze`, …). A command that always
+# exits 0 (`node -e 0`, `true`, `:`) is NOT a gate — doctor FAILs it as `gates.lint-noop`, because a
+# placeholder that reports "lint GREEN" is worse than no lint gate at all (audit P1-7).
 lint       = "npm run lint"
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
 test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
@@ -50,10 +53,18 @@ max_turns       = 12
 # mutation_report = "reports/mutation/mutation.json"
 
 [gates]
+# The levels MUST differ (audit H2 — doctor FAILs `gates.levels-identical` otherwise): the whole point of
+# tier→level is that a load-bearing change gets more than a docs change. fast is what every PR pays;
+# full adds the proof gates (`prove-test`: the new tests fail on base; `new-test-repeat`: they are not
+# flaky); deep is where integration/e2e/diff_coverage/mutation go once they are configured.
+# `required` is enforced regardless of the selected level: a required gate that did not run is
+# MISCONFIGURED, not "not asked" (audit H2). So only name gates here that run at EVERY level you use.
+# At maturity M0 every run is capped at `fast` — prove-test/new-test-repeat below never run until M1
+# (doctor WARNs `gates.m0-downgrade`; each run records `downgraded_from`).
 required = ["lint", "unit"]
 fast     = ["lint", "unit"]
-full     = ["lint", "unit"]
-deep     = ["lint", "unit"]
+full     = ["lint", "unit", "prove-test", "new-test-repeat"]
+deep     = ["lint", "unit", "prove-test", "new-test-repeat"]   # + "integration"/"e2e"/"diff_coverage"/"mutation" when configured
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90
@@ -61,7 +72,9 @@ mutation_score_pct      = 70
 new_test_repeats        = 3
 flaky_isolation_runs    = 3
 flaky_base_runs         = 5
+flaky_max               = 2      # per PR: existing tests excusable as `flaky-existing` (audit M3). Above it, all stay RED
 quarantine_max          = 5
+quarantine_max_effective = 3     # per PR: quarantined tests that may flip a gate RED→GREEN (audit M4)
 quarantine_ttl_days     = 28
 quarantine_return_after = 30
 

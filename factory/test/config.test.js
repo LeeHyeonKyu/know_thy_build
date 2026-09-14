@@ -55,7 +55,8 @@ test("limits는 부분 오버라이드를 받는다 — 빠진 키는 기본값�
 test("loadHarness fills gates.thresholds / test / commands.proof defaults and keeps overrides", () => {
   const root = fixture();
   const h = loadHarness(root);
-  expect(h.gates.thresholds).toEqual({ diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 });
+  // flaky_max / quarantine_max_effective: 감사 M3·M4 — PR당 제외 상한(ADR-023).
+  expect(h.gates.thresholds).toEqual({ diff_coverage_pct: 90, mutation_score_pct: 70, new_test_repeats: 3, flaky_isolation_runs: 3, flaky_base_runs: 5, flaky_max: 2, quarantine_max: 5, quarantine_max_effective: 3, quarantine_ttl_days: 28, quarantine_return_after: 30 });
   expect(h.test.unit_report).toBe(".factory/out/unit.json");
   expect(h.test.test_glob).toEqual([]);
   expect(h.commands.proof).toEqual({});

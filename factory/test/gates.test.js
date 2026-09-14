@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv } from "../lib/gates.js";
+import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv, commitStatusState } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +11,9 @@ const harness = {
   gates: { required: ["lint", "typecheck", "unit", "integration", "build"], fast: ["lint", "typecheck", "unit"], full: ["lint", "typecheck", "unit", "integration", "build", "diff_coverage"], deep: ["lint", "typecheck", "unit", "integration", "build", "diff_coverage", "e2e"], thresholds: {} },
   test: { unit_report: ".factory/out/unit.json" },
 };
+// 감사 H2 이후 required는 레벨 목록과 무관하게 강제된다 — fast만 도는 케이스는 required도 fast 목록이어야
+// 한다(그러지 않으면 "돌지도 않은 required"가 MISCONFIGURED이고, 그건 이 테스트들이 보려는 것이 아니다).
+const fastHarness = { ...harness, gates: { ...harness.gates, required: ["lint", "typecheck", "unit"] } };
 const ok = { code: 0, stdout: "", stderr: "" }, bad = { code: 1, stdout: "", stderr: "boom" };
 const sh = (cmd, res) => ({ match: (c, a) => c === "bash" && a[1] === cmd, result: res });
 
@@ -41,11 +44,9 @@ test("maturity downgrade: M1 asked for deep → full, recorded", async () => {
 });
 
 test("quarantined test failures are excluded from the unit verdict", async () => {
-  // required(lint/typecheck/unit/integration/build)가 fast 목록(lint/typecheck/unit)의 상위집합이어도
-  // fast에 없는 required는 이 레벨의 실패가 아니다 — 트림된 fastHarness 없이 harness를 그대로 쓴다.
   const report = JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/repo/test/a.test.js", assertionResults: [{ fullName: "flaky one", status: "failed" }, { fullName: "solid", status: "passed" }] }] });
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, bad)]);
-  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [{ id: "test/a.test.js::flaky one" }] }, readFile: (p) => p.endsWith("unit.json") ? report : null });
+  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [{ id: "test/a.test.js::flaky one" }] }, readFile: (p) => p.endsWith("unit.json") ? report : null });
   expect(r.gates.unit.status).toBe("GREEN"); expect(r.status).toBe("GREEN");
   expect(r.tests.excluded).toEqual(["test/a.test.js::flaky one"]); expect(r.tests.failing).toEqual([]);
   expect(verdictLine(r)).toContain("excluded=test/a.test.js::flaky one");
@@ -62,12 +63,18 @@ test("runGates without readFile uses the default (real fs); no report file → u
 const stageHarness = {
   harness: { maturity: "M2" },
   commands: { unit: "vitest --json", test_files: "vitest run {files}", test_one: "vitest run {file} -t {name}", proof: {} },
-  gates: { required: ["unit"], fast: ["unit"], full: ["unit", "diff_coverage", "mutation"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 1 } },
+  gates: { required: ["unit"], fast: ["unit"], full: ["unit", "diff_coverage", "mutation"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 2, flaky_max: 2, quarantine_max_effective: 3 } },
   test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
 };
 // 수정된 테스트 파일(test/a.test.js)도 증명 대상이므로 test_files 명령에 함께 실린다.
 // {name}도 lib이 따옴표를 붙인다(§5.1 test_one 계약) — 하네스는 맨 플레이스홀더만 쓴다.
 const TF = "vitest run 'test/a.test.js' 'test/new.test.js'", TO = "vitest run 'test/a.test.js' -t 'flaky one'";
+/**
+ * 감사 M3 — base에서 **섞여** 실패해야 flaky다. base 실행이 전부 실패하면 그건 흔들림이 아니라
+ * main이 빨간 것(`broken-base`)이므로, flaky 경로를 보는 테스트는 base를 [실패, 통과]로 준다.
+ * 매 호출마다 새 카운터를 만든다(테이블을 공유하면 테스트 사이에 상태가 샌다).
+ */
+const baseMixed = () => { const codes = [1, 0]; let i = 0; return { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: () => (codes[i++] === 0 ? ok : bad) }; };
 const diffOut = { code: 0, stdout: "M\tsrc/a.js\nM\ttest/a.test.js\nA\ttest/new.test.js\n", stderr: "" };
 const HEAD = "h".repeat(40);
 const revParse = { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEAD}\n`, stderr: "" } };
@@ -84,7 +91,7 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
   const run = makeFakeRun([
     { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },   // 새 테스트는 base에서 실패해야 한다
     { match: (c, a) => c === "bash" && a[1] === TF, result: ok },                                                                     // PR 코드에서는 통과
-    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: bad },                                // base에서도 실패 → 원래 흔들리던 테스트
+    baseMixed(),
     { match: (c, a) => c === "bash" && a[1] === TO, result: ok },                                                                     // PR 격리 실행은 통과
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     diffNames, revParse,
@@ -101,7 +108,10 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
   expect(r.gates["new-test-repeat"].status).toBe("GREEN");
   expect(r.gates.diff_coverage.status).toBe("MISCONFIGURED");      // commands.proof.coverage 없음
   expect(r.gates.mutation.status).toBe("MISCONFIGURED");
-  expect(r.status).toBe("GREEN");                                  // required는 unit뿐 — misconfigured가 required면 전체 MISCONFIGURED
+  // 감사 H2 — 예전에는 여기가 GREEN이었다(`misconfigured`가 required가 아니면 판정에 영향이 없었다).
+  // 설정 오류로 **돌지 않은 게이트**는 "통과"가 아니다: 하나라도 있으면 판정은 MISCONFIGURED다.
+  expect(r.status).toBe("MISCONFIGURED");
+  expect(r.misconfigured).toEqual(expect.arrayContaining(["diff_coverage", "mutation"]));
   expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one", labels: ["factory:queue", "factory:flaky"] }));
   expect(r.flaky_issues).toEqual([101]);
   // 증명 대상은 추가된 테스트만이 아니라 수정된 테스트 파일까지다
@@ -112,7 +122,7 @@ test("이미 열려 있는 flaky 이슈는 다시 만들지 않는다", async ()
   const run = makeFakeRun([
     { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },
     { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
-    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: bad },
+    baseMixed(),
     { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     diffNames, revParse,
@@ -131,7 +141,7 @@ test("리포트를 못 읽은 RED 테스트 게이트는 flaky 제외로도 뒤�
   const run = makeFakeRun([
     { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },
     { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
-    { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: bad },
+    baseMixed(),
     { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     { match: (c, a) => c === "bash" && a[1] === "playwright", result: bad },        // e2e RED, 리포트 없음
@@ -212,7 +222,9 @@ test("runStageGates: re-up 실패 → [commands]는 한 줄도 돌지 않고 BLO
 });
 
 test("runStageGates: re-up 성공은 (compose가 있을 때만) 결과에 test_env_reup으로 남는다", async () => {
-  const h = { ...stageHarness, test: { ...stageHarness.test, env: { compose: "docker-compose.test.yml" } } };
+  // full에서 증명 게이트를 뺀다 — 이 하네스에는 [commands.proof]가 없어 그것들은 MISCONFIGURED이고,
+  // 감사 H2 이후 MISCONFIGURED 하나면 판정 전체가 MISCONFIGURED다(여기서 보려는 것은 test_env_reup이다).
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] }, test: { ...stageHarness.test, env: { compose: "docker-compose.test.yml" } } };
   const run = makeFakeRun([
     { match: (c, a) => c === "node" && a[0] === ".factory/bin/test-env.js" && a[1] === "up", result: ok },
     unitOk, diffOf("M\tsrc/a.js\n"), revParse,
@@ -297,8 +309,11 @@ test("F7: 리포트를 하나도 못 읽었으면 격리 통계를 건드리지 
   expect(saved).toHaveLength(0);
 });
 
-// ── F3: required는 "선택된 레벨 안에서, 돌아서 GREEN이었는가"를 묻는다(§6.2) ──────
-// spec 기준 하네스: required는 8개 상위집합, fast(3)/full(6)/deep(8)은 그 부분집합이다.
+// ── H2 이후: required는 "돌아서 GREEN이었는가"를 레벨 목록과 무관하게 묻는다 ──────
+// 감사 H2: 예전 규칙(`names.includes(n)`)은 "required지만 이 레벨 목록에 없는 게이트"를 실패가 아니라
+// **질문 대상 아님**으로 읽었다. 그래서 required를 8개 적어 두고 fast(3)만 도는 PR이 GREEN이 됐다 —
+// 선언한 필수 게이트 다섯 개가 한 번도 돌지 않은 채로. required는 레벨 목록보다 강하다: 적어 두었으면
+// 그 레벨에서도 돌아야 하고, 돌지 않았으면 MISCONFIGURED다(레벨 목록을 고치거나 required에서 빼라).
 const specHarness = {
   harness: { maturity: "M2" },
   commands: { lint: "npm run lint", typecheck: "tsc", unit: "vitest run", integration: "vitest run --project integration", build: "npm run build", e2e: "playwright test", proof: {} },
@@ -312,16 +327,24 @@ const specHarness = {
   test: {},
 };
 
-test("F3: fast 레벨은 목록 밖 required를 묻지 않는다 — 목록에 있는 것만 GREEN이면 fast도 GREEN", async () => {
+test("H2: fast 레벨에서 목록 밖 required는 '묻지 않음'이 아니라 MISCONFIGURED다", async () => {
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok)]);
   const r = await runGates({ run, cwd: "/repo", harness: specHarness, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
-  expect(r.status).toBe("GREEN");
-  expect(r.required_missing).toEqual([]);
+  expect(r.status).toBe("MISCONFIGURED");
+  expect(r.required_missing).toEqual(["integration", "build", "e2e", "diff_coverage", "mutation"]);
 });
 
-test("F3: full 레벨도 마찬가지로 목록에 있는 required가 전부 GREEN이면 GREEN", async () => {
+test("H2: full 레벨도 목록에 없는 required(diff_coverage/mutation)를 그냥 넘기지 않는다", async () => {
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok), sh("vitest run --project integration", ok), sh("npm run build", ok), sh("playwright test", ok)]);
   const r = await runGates({ run, cwd: "/repo", harness: specHarness, level: "full", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(r.status).toBe("MISCONFIGURED");
+  expect(r.required_missing).toEqual(["diff_coverage", "mutation"]);
+});
+
+test("H2: required가 실제로 매 레벨에서 돌면 GREEN이다 — 이것이 고친 뒤의 GREEN 조건이다", async () => {
+  const h = { ...specHarness, gates: { ...specHarness.gates, required: ["lint", "typecheck", "unit"] } };
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok)]);
+  const r = await runGates({ run, cwd: "/repo", harness: h, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
   expect(r.status).toBe("GREEN");
   expect(r.required_missing).toEqual([]);
 });
@@ -331,7 +354,7 @@ test("F3: 레벨 목록 안의 required 게이트에 명령이 없으면 MISCONF
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh("vitest run", ok), sh("npm run build", ok), sh("playwright test", ok)]);
   const r = await runGates({ run, cwd: "/repo", harness: h, level: "full", quarantine: { quarantined: [] }, readFile: () => null });
   expect(r.status).toBe("MISCONFIGURED");
-  expect(r.required_missing).toEqual(["integration"]);
+  expect(r.required_missing).toEqual(expect.arrayContaining(["integration"]));
 });
 
 test("F3: 레벨 목록 안의 required 게이트가 SKIPPED로 남으면 MISCONFIGURED", async () => {
@@ -371,7 +394,7 @@ test("SKIPPED/MISCONFIGURED 엔트리도 다른 게이트와 같은 모양(code/
 test("리포트가 격리 대상 아닌 실패를 보여주면 exit 0이어도 RED다", async () => {
   const report = JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/repo/test/a.test.js", assertionResults: [{ fullName: "real failure", status: "failed" }] }] });
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, ok)]);   // 명령은 exit 0 — 리포터가 삼켰다
-  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
   expect(r.gates.unit.status).toBe("RED");
   expect(r.status).toBe("RED");
   expect(r.tests.failing.map((f) => f.id)).toEqual(["test/a.test.js::real failure"]);
@@ -429,7 +452,7 @@ const REPORT_ALL_PASS = JSON.stringify({ numTotalTests: 1715, numPassedTests: 17
 test("KTB-35: exit≠0 with 0 failing tests stays RED but says why, and carries the stderr tail", async () => {
   const stderr = "Error: write EPIPE\n    at afterWriteDispatched (node:internal/stream_base_commons:161:15)";
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, { code: 1, stdout: "", stderr })]);
-  const r = await runGates({ run, cwd: "/repo", harness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? REPORT_ALL_PASS : null) });
+  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [] }, readFile: (p) => (p.endsWith("unit.json") ? REPORT_ALL_PASS : null) });
   expect(r.status).toBe("RED");                                  // fail closed — 뒤집지 않는다
   expect(r.failing).toEqual(["unit"]);
   expect(r.gates.unit.status).toBe("RED");
@@ -478,4 +501,145 @@ test("KTB-35: the repo's own vitest config is silent, and the JSON report file i
   const toml = readFileSync(new URL("../../.factory/harness.toml", import.meta.url), "utf8");
   expect(toml).toContain("--reporter=json");
   expect(toml).toContain("--outputFile=.factory/out/unit.json");
+});
+
+// ── 감사 H2/M3/M4 (Task 3) — 게이트가 게이트다 ───────────────────────────────────────────
+//
+// 감사가 실측한 것: `status=GREEN misconfigured=prove-test,new-test-repeat,diff_coverage,mutation`.
+// 아래 묶음은 그 GREEN을 만든 갈래를 각각 재현한 뒤 뒤집는다.
+//  ① 설정 오류는 통과가 아니다(위 H2 묶음)        ② 증명 게이트도 레벨 멤버라 required가 될 수 있다
+//  ③ base가 늘 빨간 테스트는 flaky가 아니다(M3)    ④ 격리는 PR이 건드린 테스트를 뒤집지 못한다(M4)
+
+test("H2: MISCONFIGURED는 커밋 상태로 절대 success가 되지 않는다", () => {
+  expect(commitStatusState("GREEN")).toBe("success");
+  for (const s of ["RED", "MISCONFIGURED", "BLOCKED", null, undefined]) expect(commitStatusState(s), String(s)).toBe("failure");
+});
+
+const proofRequiredHarness = {
+  ...stageHarness,
+  gates: {
+    required: ["unit", "prove-test", "new-test-repeat"],
+    fast: ["unit"], full: ["unit", "prove-test", "new-test-repeat"], deep: ["unit", "prove-test", "new-test-repeat"],
+    thresholds: stageHarness.gates.thresholds,
+  },
+};
+
+test("H2: required가 prove-test/new-test-repeat를 부를 수 있다 — implement에서 실제로 돌면 GREEN", async () => {
+  const run = makeFakeRun([
+    { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: ok },
+    diffNames, revParse,
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c) => c === "cp", result: ok },
+  ]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: proofRequiredHarness, stage: "implement", tier: "standard", base: "b".repeat(40), issue: 7, readFile: () => null });
+  expect(r.level).toBe("full");
+  expect(r.gates["prove-test"].status).toBe("GREEN");
+  expect(r.gates["new-test-repeat"].status).toBe("GREEN");
+  expect(r.required_missing).toEqual([]);
+  expect(r.status).toBe("GREEN");
+});
+
+test("H2: 돌 수 없었던 required 증명 게이트는 SKIPPED로 남지 않고 MISCONFIGURED다", async () => {
+  // review 스테이지는 prove-test를 돌리지 않는다 — required가 그것을 부르고 있으면 GREEN이 아니다.
+  const run = makeFakeRun([unitOk, diffOf("M\tsrc/a.js\n"), revParse]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: proofRequiredHarness, stage: "review", tier: "standard", base: "b".repeat(40), readFile: () => null });
+  expect(r.gates["prove-test"].status).toBe("SKIPPED");
+  expect(r.status).toBe("MISCONFIGURED");
+  expect(r.required_missing).toEqual(["prove-test", "new-test-repeat"]);
+});
+
+test("M3: base가 전부 실패하는 테스트는 제외되지 않고 RED로 남는다 — 'main is red on <test>'", async () => {
+  const baseAllFail = { match: (c, a, o) => c === "bash" && a[1] === TO && o.cwd.endsWith("classify-wt"), result: bad };
+  const run = makeFakeRun([
+    { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
+    baseAllFail,
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    diffNames, revParse,
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c) => c === "cp", result: ok },
+  ]);
+  const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit });
+  expect(r.classification[0].verdict).toBe("broken-base");
+  expect(r.broken_base).toEqual(["test/a.test.js::flaky one"]);
+  expect(r.tests.excluded).toEqual([]);
+  expect(r.tests.failing.map((f) => f.id)).toEqual(["test/a.test.js::flaky one"]);
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.gates.unit.reason).toBe("main is red on test/a.test.js::flaky one");
+  expect(r.status).toBe("RED");
+  expect(r.needs_human).toBe(true);
+  expect(gh.createIssue).not.toHaveBeenCalled();          // flaky 이슈가 아니다 — main을 고쳐야 한다
+  expect(verdictLine(r)).toContain("broken_base=test/a.test.js::flaky one");
+});
+
+test("M3: flaky-existing은 PR당 flaky_max까지만 제외된다 — 넘으면 전부 RED로 남는다", async () => {
+  const names = ["a", "b", "c"];
+  const ids = names.map((n) => `test/${n}.test.js::flaky`);
+  const report = JSON.stringify({
+    numTotalTests: 3, numPassedTests: 0, numFailedTests: 3,
+    testResults: names.map((n) => ({ name: join(stageCwd, `test/${n}.test.js`), assertionResults: [{ fullName: "flaky", status: "failed" }] })),
+  });
+  const one = (n) => `vitest run 'test/${n}.test.js' -t 'flaky'`;
+  const baseFor = (n) => { const codes = [1, 0]; let i = 0; return { match: (c, a, o) => c === "bash" && a[1] === one(n) && o.cwd.endsWith("classify-wt"), result: () => (codes[i++] === 0 ? ok : bad) }; };
+  const run = makeFakeRun([
+    ...names.map(baseFor),                                                  // base: [실패, 통과] → flaky
+    ...names.map((n) => ({ match: (c, a) => c === "bash" && a[1] === one(n), result: ok })),   // PR 격리는 통과
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    diffOf("M\tsrc/a.js\n"), revParse,
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
+  const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"], thresholds: { ...stageHarness.gates.thresholds, flaky_max: 2 } } };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  expect(r.classification.map((c) => c.verdict)).toEqual(["flaky-existing", "flaky-existing", "flaky-existing"]);
+  expect(r.flaky_over_cap).toEqual({ count: 3, max: 2 });
+  expect(r.tests.excluded).toEqual([]);                    // 상한을 넘으면 하나도 제외하지 않는다
+  expect(r.tests.failing.map((f) => f.id)).toEqual(ids);
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.needs_human).toBe(true);
+  expect(gh.createIssue).not.toHaveBeenCalled();
+});
+
+test("M4: PR diff에 있는 테스트 파일은 격리되어 있어도 뒤집히지 않는다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad }, diffNames, revParse]);
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } };
+  const q = { quarantined: [{ id: "test/a.test.js::flaky one", since: "2026-09-01T00:00:00Z" }] };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: "b".repeat(40), quarantine: q, readFile: readUnit });
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.status).toBe("RED");
+  expect(r.tests.excluded).toEqual([]);
+  expect(r.quarantine_applied).toEqual([]);
+  expect(r.quarantine_refused).toEqual([{ id: "test/a.test.js::flaky one", gate: "unit", reason: "test file is in this PR's diff" }]);
+});
+
+test("M4: 한 PR에서 뒤집을 수 있는 격리는 quarantine_max_effective개까지다", async () => {
+  const names = ["a", "b", "c", "d"];
+  const report = JSON.stringify({
+    numTotalTests: 4, numPassedTests: 0, numFailedTests: 4,
+    testResults: names.map((n) => ({ name: `/repo/test/${n}.test.js`, assertionResults: [{ fullName: "q", status: "failed" }] })),
+  });
+  const h = { ...harness, gates: { ...harness.gates, required: ["lint", "typecheck", "unit"], thresholds: { quarantine_max_effective: 3 } } };
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, bad)]);
+  const q = { quarantined: names.map((n) => ({ id: `test/${n}.test.js::q` })) };
+  const r = await runGates({ run, cwd: "/repo", harness: h, level: "fast", quarantine: q, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  expect(r.quarantine_applied).toEqual(names.slice(0, 3).map((n) => ({ id: `test/${n}.test.js::q`, gate: "unit" })));
+  expect(r.quarantine_refused).toEqual([{ id: "test/d.test.js::q", gate: "unit", reason: "quarantine cap 3 reached for this PR" }]);
+  expect(r.tests.failing.map((f) => f.id)).toEqual(["test/d.test.js::q"]);
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.status).toBe("RED");
+});
+
+test("M4: 제외가 실제로 일어나면 quarantine_applied에 그 사실이 남는다", async () => {
+  const report = JSON.stringify({ numTotalTests: 1, numPassedTests: 0, numFailedTests: 1, testResults: [{ name: "/repo/test/z.test.js", assertionResults: [{ fullName: "q", status: "failed" }] }] });
+  const h = { ...harness, gates: { ...harness.gates, required: ["lint", "typecheck", "unit"] } };
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, bad)]);
+  const r = await runGates({ run, cwd: "/repo", harness: h, level: "fast", quarantine: { quarantined: [{ id: "test/z.test.js::q" }] }, readFile: (p) => (p.endsWith("unit.json") ? report : null) });
+  expect(r.quarantine_applied).toEqual([{ id: "test/z.test.js::q", gate: "unit" }]);
+  expect(r.quarantine_refused).toEqual([]);
+  expect(r.status).toBe("GREEN");
 });

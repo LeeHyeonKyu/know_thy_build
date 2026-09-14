@@ -8,7 +8,7 @@ import { makeGh, allChecksGreen } from "../lib/gh.js";
 import { loadCharter, loadHarness } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
-import { runStageGates, verdictLine } from "../lib/gates.js";
+import { runStageGates, verdictLine, commitStatusState } from "../lib/gates.js";
 import { isGitDiffError } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
@@ -414,7 +414,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown" }) {
     // diagnostic(bin/gates.js가 손으로 남긴 로컬 진단 결과)은 스테이지 판정이 아니다 — verify-stage/requirements와
     // 같은 불변식: 사람이 손으로 만든 GREEN이 커밋 상태로 새어나가면 안 된다.
     if (GATED_STAGES.has(stage) && gates != null && gates.diagnostic !== true) {
-      await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+      // GREEN 하나만 success다 — MISCONFIGURED·RED·그 밖은 전부 failure(gates.js commitStatusState, 감사 H2).
+      await postStatus({ context: "factory/gates", state: commitStatusState(gates.status), description: verdictLine(gates), sha: gates.head_sha });
     }
     /**
      * ADR-020 KTB-35 — **테스트가 하나도 깨지지 않은 RED는 다른 사고다.** 게이트가 그 사실을 스스로
