@@ -659,11 +659,14 @@ test("merge-token-scope (r1 finding 5): a declared scrub step that ALSO starts a
 // 0x00이 하나라도 들어가면 git이 그 파일을 binary로 분류하고, 그 순간 `git diff`는 내용을 영영
 // 보여주지 않는다 — 사람도, 리뷰 스테이지도 읽지 못한 채 머지된다(게이트를 정의하는 파일에서
 // 실제로 일어났다). 그 재발을 이 규칙이 막는다.
-test("lint: a JS source file containing a NUL byte is a violation, and clean files are not", () => {
+test("lint: a JS source file containing a NUL byte is a violation, and the check stops there", () => {
   const withNul = `export const x = "a${String.fromCharCode(0)}b";\n`;
   const v = lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => withNul });
-  expect(v.some((e) => e.rule === NUL_RULE.rule)).toBe(true);
+  // 리뷰 r2 nf-3 — 규칙 하나만 남고 거기서 끝난다: binary 파일의 파스 출력은 잡음이고, 무엇보다
+  // 이 경로는 더 이상 `node --check` 프로세스를 띄우지 않는다(그 spawn이 이 테스트를 흔들었다).
+  expect(v).toEqual([{ file: "factory/lib/fake.js", ...NUL_RULE }]);
   expect(v[0].msg).toMatch(/binary/);
-  expect(lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => 'export const x = "ab";\n' })
-    .some((e) => e.rule === NUL_RULE.rule)).toBe(false);
+  // 깨끗한 파일은 이 규칙에 걸리지 않는다(그 경로는 평소대로 `node --check`까지 간다).
+  const clean = lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => 'export const x = "ab";\n' });
+  expect(clean.some((e) => e.rule === NUL_RULE.rule)).toBe(false);
 });

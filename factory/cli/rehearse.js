@@ -41,9 +41,15 @@ export async function rehearseCommand({
    * 60s`)으로 고르면 30초 전에 끝난 리허설이 "내 런"으로 뽑혀, 방금 주문한 런은 읽지도 않고 옛 표를
    * 찍는다. id 집합은 그 모호함이 없다: 목록에 **없던** id, 그리고 `event === "workflow_dispatch"`.
    */
-  let known = new Set();
+  let known;
   try { known = new Set(((await client.workflowRuns(REHEARSAL_WORKFLOW)) || []).map((r) => r.databaseId)); }
-  catch (e) { io.err(`factory rehearse: could not list existing runs (${e.message}) — the newest dispatch run will be used instead`); }
+  catch (e) {
+    // 리뷰 r2 nf-4 — 목록을 못 읽으면 **아무것도 하지 않는다.** 예전에는 빈 집합으로 계속했는데,
+    // 그러면 다음 폴에서 방금 끝난 **옛** 런이 "내 런"으로 뽑혀 그 표를 찍고 0으로 끝난다(SF5가
+    // 고친 바로 그 버그가 오류 경로로 되살아난다). 목록 조회의 실패는 이미 gh가 성치 않다는 신호다.
+    io.err(`factory rehearse: cannot identify the run I dispatched — gh is unhealthy (run list failed: ${e.message}). Nothing was dispatched; try again.`);
+    return 1;
+  }
 
   try {
     await client.dispatchWorkflow(REHEARSAL_WORKFLOW, {});
@@ -68,6 +74,16 @@ export async function rehearseCommand({
       return 1;
     }
     await sleep(pollMs);
+  }
+
+  /**
+   * 리뷰 r2 nf-9 — 잡이 `if:`에 걸려 건너뛰어지면 상태는 `completed`이고 결론은 `skipped`다. 그때
+   * 아티팩트가 없는 것은 사고가 아니라 **그 잡이 기본 브랜치에서만 돈다는 사실**이고, 사람에게
+   * 필요한 것은 "아티팩트를 못 받았다"가 아니라 그 한 문장이다.
+   */
+  if (found.conclusion === "skipped") {
+    io.err(`factory rehearse: run ${found.databaseId} was skipped — the rehearsal is pinned to the default branch (the job's \`if:\` filters every other ref, ADR-025). Dispatch it from the default branch.`);
+    return 1;
   }
 
   const dir = mkdtemp(join(tmpdir(), "factory-rehearsal-"));

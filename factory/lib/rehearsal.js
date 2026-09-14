@@ -68,36 +68,59 @@ export function rehearsalHash({ harnessText = "", charterText = "" } = {}) {
 }
 
 /**
- * 지문이 사는 두 파일. 폴백 commit status는 **이 파일들을 마지막으로 건드린 커밋**에 붙는다 —
- * 그 sha는 지문이 바뀔 때 정확히 함께 바뀌므로 무관한 머지가 기록을 고아로 만들지 않는다
- * (리뷰 must_fix 2: 기본 브랜치 head에 붙였더니 **첫 머지부터** 큐가 영구히 닫혔다 — 그리고 그
- * 폴백은 예외가 아니라 본선이다: 저장소 변수 쓰기는 admin을 요구하고 ADR-021의 권장 구성에서
- * 워크플로가 쥔 것은 비-admin 봇 토큰이다).
+ * 지문이 사는 두 파일. 폴백 commit status는 **이 파일들을 건드린 커밋들**에 붙는다 — 기본 브랜치
+ * head가 아니다(리뷰 r1 MF2: head는 무관한 머지마다 움직여 **첫 머지부터** 기록을 고아로 만들었다).
+ * 그 폴백은 예외가 아니라 본선이다: 저장소 변수 쓰기는 repo admin을 요구하고, ADR-021의 권장 구성에서
+ * 워크플로가 쥔 것은 비-admin 봇 토큰이다.
+ *
+ * **쓰기와 읽기가 같은 커밋을 고르지 않아도 된다**(리뷰 r2 MF2 잔여 + nf-5). r1은 쓰기를 러너의
+ * `git log -1 -- <두 경로>`로, 읽기를 경로별 최신 커밋의 날짜 비교로 했는데 그 둘은 **커밋 시각이
+ * 같은 초**일 때 다른 커밋을 골랐고(git의 날짜 해상도는 1초다), 그러면 리허설을 몇 번 다시 돌려도
+ * 큐가 영영 열리지 않았다 — 쓰는 곳과 읽는 곳이 결정론적으로 엇갈린 채 고정된다. 그래서:
+ *   · 쓰기: **경로마다 최신 커밋**에 하나씩 올린다(같은 커밋이면 한 번).
+ *   · 읽기: 경로마다 **최근 N개** 커밋을 후보로 훑어 `factory/rehearsal` 상태에서 지금의 해시를
+ *     찾으면 그 자리에서 통과시킨다. 그러면 해시를 바꾸지 않는 편집(harness의 주석 한 줄, CHARTER의
+ *     산문)이 새 커밋을 만들어도 기록은 여전히 후보 안에 있다(nf-5) — 그 편집은 러너의 동작을 바꾸지
+ *     않으므로 큐를 닫을 이유가 없다.
+ * 어느 쪽도 느슨하지 않다: 통과의 조건은 여전히 **지금의 지문과 같은 해시**이고, 후보 어디에서도
+ * 그것을 찾지 못하면 거부한다.
  */
 export const FINGERPRINT_PATHS = [".factory/harness.toml", "docs/factory/CHARTER.md"];
 
-/** 러너(체크아웃 있음)의 지문 커밋 — 기본 브랜치를 체크아웃한 잡에서 부른다. */
-export async function fingerprintShaLocal({ run, cwd }) {
-  const r = await run("git", ["log", "-1", "--format=%H", "--", ...FINGERPRINT_PATHS], { cwd });
-  const sha = String(r?.stdout || "").trim().split("\n")[0];
-  return r?.code === 0 && /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
-}
+/** 읽기가 훑는 경로별 커밋 수. 10은 "산문 편집 몇 번은 견디되 저장소의 역사를 뒤지지는 않는다"의 선이다. */
+export const FINGERPRINT_LOOKBACK = 10;
 
-/**
- * 체크아웃이 없는 독자(사람의 `transition.js`·doctor)의 지문 커밋. `?path=`는 경로를 하나만 받으므로
- * 둘을 각각 묻고 **더 새것**을 고른다. 한쪽이 아직 없는 저장소(CHARTER 이전)는 나머지로 판정한다.
- */
-export async function fingerprintShaRemote({ gh, branch = "main" }) {
-  const seen = [];
+/** 쓰기 대상: 경로마다 **최신** 커밋(중복 제거). 둘이 같은 커밋이면 한 번만 올린다. */
+export async function fingerprintTargets({ gh, branch = "main" }) {
+  const out = [];
   for (const p of FINGERPRINT_PATHS) {
     try {
       const c = (await gh.commitsForPath(branch, p, 1))?.[0];
-      if (c?.sha) seen.push({ sha: c.sha, at: c.date ? Date.parse(c.date) : 0 });
-    } catch { /* 없는 경로·조회 실패는 나머지 한쪽으로 떨어진다 */ }
+      if (c?.sha && !out.includes(c.sha)) out.push(c.sha);
+    } catch { /* 없는 경로(CHARTER 이전)·조회 실패는 나머지 한쪽으로 떨어진다 */ }
   }
-  if (!seen.length) return null;
-  return seen.sort((a, b) => b.at - a.at)[0].sha;
+  return out;
 }
+
+/** 읽기 후보: 경로마다 최근 `lookback`개 커밋을, 경로 순서대로, 중복 없이. */
+export async function fingerprintCandidates({ gh, branch = "main", lookback = FINGERPRINT_LOOKBACK }) {
+  const out = [];
+  for (const p of FINGERPRINT_PATHS) {
+    try {
+      for (const c of (await gh.commitsForPath(branch, p, lookback)) || []) {
+        if (c?.sha && !out.includes(c.sha)) out.push(c.sha);
+      }
+    } catch { /* 같은 이유 */ }
+  }
+  return out;
+}
+
+/**
+ * ADR-025 / 리뷰 r1 must_fix 4 · r2 nf-8 — **기본 브랜치가 아닌 ref에서는 리허설을 돌리지 않는다.**
+ * 순수 술어라서 프로세스를 띄우지 않고 시험된다. `refName`이 없으면(로컬 실행) 거부하지 않는다 —
+ * 그 자리에는 GitHub의 ref라는 개념이 없고, 기록은 어차피 gh 권한이 판정한다.
+ */
+export const refuseRef = ({ refName = null, defaultBranch = "main" } = {}) => Boolean(refName) && refName !== defaultBranch;
 
 /** 글롭에 맞는 **실재하는** 첫 파일. 없으면 null — 리허설은 없는 파일을 발명하지 않는다. */
 export function pickFile(files = [], globs = []) {
@@ -284,36 +307,42 @@ export function rehearsalGate({ recorded = null, current = null } = {}) {
 const hashInText = (s) => (/\b([0-9a-f]{64})\b/.exec(String(s || "")) || [])[1] || null;
 
 /**
- * 기록된 리허설 해시 — **두 출처를 모두 읽는다**: 저장소 변수와, 지문 커밋(`FINGERPRINT_PATHS`를
- * 마지막으로 건드린 기본 브랜치 커밋)의 `factory/rehearsal` commit status. 어느 쪽도 우선하지 않는다
- * (`rehearsalGate`가 "하나라도 맞으면"으로 판정한다). gh가 통째로 말을 안 해도 throw하지 않는다 —
- * 호출자가 "확인 못 함"으로 fail closed 한다.
+ * 기록된 리허설 해시 — **두 출처를 모두 읽는다**: 저장소 변수와, 지문 경로를 건드린 최근 커밋들의
+ * `factory/rehearsal` commit status. 어느 쪽도 우선하지 않는다(`rehearsalGate`가 "하나라도 맞으면"으로
+ * 판정한다). `current`를 주면 후보를 훑다가 **그것과 같은 해시를 만나는 순간 멈춘다** — 그 조기 종료가
+ * 곧 tolerant binding이다(r2 MF2). 못 만나면 가장 새 후보에서 읽은 해시를 돌려준다: 거부 메시지가
+ * "무엇이 기록돼 있는가"를 말할 수 있어야 사람이 다음 행동을 안다.
+ *
+ * gh가 통째로 말을 안 해도 throw하지 않는다 — 호출자가 "확인 못 함"으로 fail closed 한다.
  */
-export async function recordedRehearsal({ gh, branch = "main", sha = null }) {
-  let variable = null, status = null, fpSha = sha;
+export async function recordedRehearsal({ gh, branch = "main", current = null, lookback = FINGERPRINT_LOOKBACK }) {
+  let variable = null;
   try { variable = hashInText(await gh.getVariable(REHEARSAL_VARIABLE)); }
   catch { /* 변수를 못 읽는 것은 그 기록이 없는 것과 같은 행동을 요구한다 */ }
-  try {
-    fpSha = fpSha || (await fingerprintShaRemote({ gh, branch }));
-    if (fpSha) {
-      const statuses = await gh.commitStatuses(fpSha);
-      const s = (statuses || []).find((x) => x.context === REHEARSAL_STATUS_CONTEXT && x.state === "success");
-      status = hashInText(s?.description);
-    }
-  } catch { /* 같은 이유 */ }
+
+  let status = null, sha = null;
+  for (const candidate of await fingerprintCandidates({ gh, branch, lookback })) {
+    let found = null;
+    try {
+      const statuses = await gh.commitStatuses(candidate);
+      found = hashInText((statuses || []).find((x) => x.context === REHEARSAL_STATUS_CONTEXT && x.state === "success")?.description);
+    } catch { continue; }
+    if (!found) continue;
+    if (current && found === current) { status = found; sha = candidate; break; }
+    if (!status) { status = found; sha = candidate; }   // 최신 후보의 기록 — 거부 메시지의 재료
+  }
   const sources = [variable ? "variable" : null, status ? "status" : null].filter(Boolean);
-  return { variable, status, sha: fpSha ?? null, source: sources.join("+") || null };
+  return { variable, status, sha, source: sources.join("+") || null };
 }
 
 /**
  * GREEN인 리허설만 기록한다. 변수가 1순위이고(성공하면 그것으로 끝), admin을 요구해 실패하면
- * **지문 커밋**에 commit status를 올린다 — 기본 브랜치 head가 아니다(must_fix 2): head는 무관한
- * 머지마다 움직여서 첫 머지 직후 기록이 고아가 되고, 그 순간부터 모든 큐 전이가 거부됐다.
- * 지문 커밋의 sha는 harness.toml·CHARTER가 바뀔 때 **정확히 함께** 바뀐다.
+ * **지문 경로마다 최신 커밋**에 commit status를 올린다 — 둘이 같은 커밋이면 한 번이다. 러너도 이
+ * 원격 조회를 쓴다(r2 MF2: 러너만 `git log`로 고르던 시절에는 쓰는 커밋과 읽는 커밋이 엇갈릴 수 있었다).
  *
  * 돌려주는 것은 판정 재료다(`rehearsal.json`의 `recorded`): 어느 쪽이 성공/실패했고 어느 sha에 붙었는가.
  */
-export async function recordRehearsal({ gh, hash, branch = "main", sha = null, targetUrl = undefined }) {
+export async function recordRehearsal({ gh, hash, branch = "main", targets = null, targetUrl = undefined }) {
   const out = { via: null, variable: null, status: null, sha: null };
   try {
     await gh.setVariable(REHEARSAL_VARIABLE, hash);
@@ -325,12 +354,20 @@ export async function recordRehearsal({ gh, hash, branch = "main", sha = null, t
     out.variable = `error: ${e?.message || e}`;
   }
   try {
-    const target = sha || (await fingerprintShaRemote({ gh, branch }));
-    if (!target) throw new Error(`could not resolve the fingerprint commit (${FINGERPRINT_PATHS.join(", ")} on ${branch})`);
-    await gh.setStatus({ sha: target, context: REHEARSAL_STATUS_CONTEXT, state: "success", description: `rehearsal GREEN ${hash}`, targetUrl });
+    const shas = targets || (await fingerprintTargets({ gh, branch }));
+    if (!shas.length) throw new Error(`could not resolve any fingerprint commit (${FINGERPRINT_PATHS.join(", ")} on ${branch})`);
+    const posted = [], failed = [];
+    for (const sha of shas) {
+      try {
+        await gh.setStatus({ sha, context: REHEARSAL_STATUS_CONTEXT, state: "success", description: `rehearsal GREEN ${hash}`, targetUrl });
+        posted.push(sha);
+      } catch (e) { failed.push(`${String(sha).slice(0, 7)}: ${e?.message || e}`); }
+    }
+    // 하나라도 붙으면 기록은 성립한다 — 읽기는 후보를 전부 훑기 때문이다.
+    if (!posted.length) throw new Error(failed.join("; ") || "no status could be posted");
     out.via = "status";
-    out.status = "ok";
-    out.sha = target;
+    out.status = failed.length ? `ok on ${posted.map((x) => x.slice(0, 7)).join(", ")}; failed on ${failed.join("; ")}` : "ok";
+    out.sha = posted.join(",");
   } catch (e2) {
     out.status = `error: ${e2?.message || e2}`;
   }
@@ -349,7 +386,8 @@ export function makeRehearsalChecker({ gh, root, branch = "main", readFile = (p)
     const read = (p) => { try { return readFile(join(root, p)); } catch { return null; } };
     const harnessText = read(FINGERPRINT_PATHS[0]);
     const current = harnessText == null ? null : rehearsalHash({ harnessText, charterText: read(FINGERPRINT_PATHS[1]) || "" });
-    const recorded = await recordedRehearsal({ gh, branch });
+    // `current`를 함께 넘긴다 — 읽기가 후보를 훑다가 일치를 만나면 그 자리에서 멈춘다(r2 MF2).
+    const recorded = await recordedRehearsal({ gh, branch, current });
     return rehearsalGate({ recorded, current });
   };
 }

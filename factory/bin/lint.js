@@ -52,7 +52,10 @@ export function lintFile(file, { root = process.cwd(), readFile = readFileSync, 
   if (!exists(abs)) return out;                           // 삭제된 파일은 린트 대상이 아니다
   if (JS.has(extname(file)) && !NOT_A_MODULE.test(file)) {
     try {
-      if (readFile(abs, "utf8").includes(NUL)) out.push({ file, ...NUL_RULE });
+      // NUL이 있으면 **거기서 끝낸다**(리뷰 r2 nf-3): binary 파일의 파스 출력은 잡음이고, 이 규칙이
+      // 이미 무엇을 고쳐야 하는지 말한다. 부수 효과로 이 경로는 `node --check` 프로세스를 띄우지
+      // 않는다 — 주입된 `readFile`로 도는 단위 테스트가 실제 spawn 때문에 느려지고 흔들렸다.
+      if (readFile(abs, "utf8").includes(NUL)) { out.push({ file, ...NUL_RULE }); return out; }
     } catch (e) { return [{ file, rule: "unreadable", msg: e.message }]; }
     const r = spawnSync(process.execPath, ["--check", abs], { encoding: "utf8" });
     if (r.status !== 0) out.push({ file, rule: "parse", msg: (r.stderr || "").trim().split("\n").slice(0, 3).join(" ") });

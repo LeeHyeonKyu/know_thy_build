@@ -2,6 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
@@ -855,7 +856,7 @@ test("makeLocalEntry: backlog issue with no factory label → sets factory:queue
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog", "priority:p1"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   const line = await entry();
   expect(line).toBe("local entry: backlog → factory:queue");
   expect(setFactoryLabel).toHaveBeenCalledWith(12, "factory:queue");
@@ -863,11 +864,35 @@ test("makeLocalEntry: backlog issue with no factory label → sets factory:queue
   expect(comment).toHaveBeenCalledWith(12, expect.stringContaining("backlog → factory:queue — claimed locally first (§4.2.5)"));
 });
 
+test("makeLocalEntry: a stale or unwired rehearsal refuses the local entry — the label is never written (KTB-44 nf-2)", async () => {
+  // 리뷰 r2 nf-2 — 여기는 `transition()`을 거치지 않는 유일한 큐 진입이었다. 그 비대칭 때문에
+  // `transition.js <n> factory:queue --human`은 거부당하는데 `factory run triage <n>`은 통과했고,
+  // 그 뒤의 plan·implement·review는 **러너에서** 한 번도 리허설하지 않은 하네스 위로 갔다.
+  for (const rehearsal of [
+    async () => ({ ok: false, reason: "harness changed since the last rehearsal — run `factory rehearse`" }),
+    null,                                     // 배선 자체가 없는 경우도 통과가 아니다(fail closed)
+  ]) {
+    const setFactoryLabel = vi.fn(async () => {});
+    const comment = vi.fn(async () => {});
+    const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] }), setFactoryLabel, comment };
+    const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal })();
+    expect(line).toMatch(/^local entry refused: /);
+    expect(setFactoryLabel).not.toHaveBeenCalled();
+    expect(comment).not.toHaveBeenCalled();
+  }
+});
+
+test("makeLocalEntry: the refusal carries the same sentence the human CLI gets", async () => {
+  const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] }), setFactoryLabel: vi.fn(), comment: vi.fn() };
+  const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: false, reason: REHEARSAL_STALE }) })();
+  expect(line).toContain(REHEARSAL_STALE);
+});
+
 test("makeLocalEntry: issue already carries a factory label → no-op, returns null", async () => {
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["factory:ready"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(setFactoryLabel).not.toHaveBeenCalled();
   expect(comment).not.toHaveBeenCalled();
@@ -877,7 +902,7 @@ test("makeLocalEntry: backlog issue but no factory label and no backlog label ei
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["priority:p1"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(setFactoryLabel).not.toHaveBeenCalled();
 });
@@ -886,7 +911,7 @@ test("makeLocalEntry: unlabeled issue → null, no gh mutation", async () => {
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: [] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" } });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(setFactoryLabel).not.toHaveBeenCalled();
   expect(comment).not.toHaveBeenCalled();
@@ -896,7 +921,7 @@ test("makeLocalEntry: FACTORY_LOCAL_ENTRY unset → no-op, returns null, gh unto
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: vi.fn(async () => ({ number: 12, title: "t", body: "", labels: ["backlog"] })), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: {} });
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: {}, rehearsal: async () => ({ ok: true }) });
   expect(await entry()).toBeNull();
   expect(gh.issue).not.toHaveBeenCalled();
   expect(setFactoryLabel).not.toHaveBeenCalled();

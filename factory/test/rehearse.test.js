@@ -2,9 +2,9 @@ import { test, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  FINGERPRINT_PATHS, REHEARSAL_STALE, REHEARSAL_STATUS_CONTEXT, REHEARSAL_VARIABLE, REHEARSAL_WORKFLOW,
-  charterFrontmatter, checkRehearsalCurrent, fingerprintShaLocal, fingerprintShaRemote, firstTestName, makeRehearsalChecker,
-  pickFile, recordRehearsal, recordedRehearsal, rehearsalArtifactName, rehearsalGate, rehearsalHash, rehearsalOk,
+  FINGERPRINT_LOOKBACK, FINGERPRINT_PATHS, REHEARSAL_STALE, REHEARSAL_STATUS_CONTEXT, REHEARSAL_VARIABLE, REHEARSAL_WORKFLOW,
+  charterFrontmatter, checkRehearsalCurrent, fingerprintCandidates, fingerprintTargets, firstTestName, makeRehearsalChecker,
+  pickFile, recordRehearsal, recordedRehearsal, refuseRef, rehearsalArtifactName, rehearsalGate, rehearsalHash, rehearsalOk,
   rehearsalReport, renderRehearsalTable, runRehearsal,
 } from "../lib/rehearsal.js";
 import { REHEARSAL_UNWIRED, transition } from "../lib/transition.js";
@@ -278,79 +278,158 @@ test("rehearsalGate: a stale variable does not shadow a fresh status — either 
   expect(r.reason).toMatch(/status cccc/);
 });
 
-test("fingerprintSha: the status is bound to the commit that last touched harness.toml/CHARTER, not to the moving head", async () => {
-  const run = async (cmd, args) => {
-    expect(cmd).toBe("git");
-    expect(args.slice(0, 3)).toEqual(["log", "-1", "--format=%H"]);
-    expect(args.slice(4)).toEqual(FINGERPRINT_PATHS);
-    return { code: 0, stdout: "abc123def456\n", stderr: "" };
-  };
-  expect(await fingerprintShaLocal({ run, cwd: "/repo" })).toBe("abc123def456");
-  expect(await fingerprintShaLocal({ run: async () => ({ code: 128, stdout: "", stderr: "fatal" }), cwd: "/repo" })).toBe(null);
+/**
+ * 지문 커밋 픽스처: 경로마다 커밋 목록을, 커밋마다 status 목록을 준다.
+ * `statuses`에 없는 커밋은 상태가 비어 있다.
+ */
+const fpGh = ({ harness = [], charter = [], statuses = {}, variable = null } = {}) => ({
+  getVariable: vi.fn(async () => variable),
+  commitsForPath: vi.fn(async (branch, path, perPage = 1) => (path === FINGERPRINT_PATHS[0] ? harness : charter).slice(0, perPage)),
+  commitStatuses: vi.fn(async (sha) => (statuses[sha] || [])),
+  setVariable: vi.fn(async () => { throw new Error("HTTP 403: Resource not accessible by integration"); }),
+  setStatus: vi.fn(async () => {}),
+});
+const greenStatus = (hash) => [{ context: REHEARSAL_STATUS_CONTEXT, state: "success", description: `rehearsal GREEN ${hash}` }];
 
-  const gh = {
-    commitsForPath: vi.fn(async (branch, path) => (path === ".factory/harness.toml"
-      ? [{ sha: "old111", date: "2026-09-01T00:00:00Z" }]
-      : [{ sha: "new222", date: "2026-09-14T00:00:00Z" }])),
-  };
-  expect(await fingerprintShaRemote({ gh, branch: "trunk" })).toBe("new222");
-  expect(gh.commitsForPath).toHaveBeenCalledTimes(2);
-  const onlyOne = { commitsForPath: async (b, path) => { if (path !== ".factory/harness.toml") throw new Error("404"); return [{ sha: "only1", date: "2026-09-01T00:00:00Z" }]; } };
-  expect(await fingerprintShaRemote({ gh: onlyOne })).toBe("only1");
-  expect(await fingerprintShaRemote({ gh: { commitsForPath: async () => [] } })).toBe(null);
+test("fingerprintTargets/Candidates: the writer takes each path's newest commit, the reader walks the last N of each", async () => {
+  const gh = fpGh({
+    harness: [{ sha: "h1", date: "2026-09-14T00:00:00Z" }, { sha: "h2", date: "2026-09-13T00:00:00Z" }],
+    charter: [{ sha: "c1", date: "2026-09-14T00:00:00Z" }],
+  });
+  expect(await fingerprintTargets({ gh, branch: "trunk" })).toEqual(["h1", "c1"]);
+  expect(gh.commitsForPath).toHaveBeenCalledWith("trunk", FINGERPRINT_PATHS[0], 1);
+  const cands = await fingerprintCandidates({ gh, branch: "trunk" });
+  expect(cands).toEqual(["h1", "h2", "c1"]);
+  expect(gh.commitsForPath).toHaveBeenCalledWith("trunk", FINGERPRINT_PATHS[0], FINGERPRINT_LOOKBACK);
+
+  // 두 경로가 **같은 커밋**이면 쓰기는 한 번이다(중복 제거).
+  const same = fpGh({ harness: [{ sha: "x1", date: "d" }], charter: [{ sha: "x1", date: "d" }] });
+  expect(await fingerprintTargets({ gh: same })).toEqual(["x1"]);
+  // 한쪽 경로가 아직 없는 저장소(CHARTER 이전)도 판정이 선다.
+  const one = { commitsForPath: async (b, path) => { if (path !== FINGERPRINT_PATHS[0]) throw new Error("404"); return [{ sha: "only1", date: "d" }]; } };
+  expect(await fingerprintTargets({ gh: one })).toEqual(["only1"]);
+  expect(await fingerprintTargets({ gh: { commitsForPath: async () => [] } })).toEqual([]);
 });
 
-test("recordedRehearsal: both sources are read, and the status is read on the fingerprint commit", async () => {
+test("record→read round-trip: a same-second tie no longer locks the queue permanently", async () => {
+  // r1의 결함(리뷰 r2 MF2 잔여): 쓰기는 러너의 로컬 이력에서 한 커밋을 골랐고 읽기는 경로별 최신
+  // 커밋을 날짜로 비교했다 — 두 커밋의 **초가 같으면** 둘이 다른 커밋을 고르고, 그 뒤로는 리허설을
+  // 몇 번 다시 돌려도 큐가 열리지 않았다(결정론적으로 엇갈린 채 고정된다).
+  const hash = "a".repeat(64);
+  const statuses = {};
+  const gh = fpGh({
+    harness: [{ sha: "0f6360f", date: "2026-09-10T00:00:00Z" }],
+    charter: [{ sha: "3f90036", date: "2026-09-10T00:00:00Z" }],   // 같은 초
+    statuses,
+  });
+  gh.setStatus = vi.fn(async ({ sha, description }) => { statuses[sha] = greenStatus(/\b([0-9a-f]{64})\b/.exec(description)[1]); });
+
+  const rec = await recordRehearsal({ gh, hash, branch: "main" });
+  expect(rec.via).toBe("status");
+  // 동률에서 한쪽을 "고르지" 않는다 — 양쪽 다 올린다.
+  expect(gh.setStatus).toHaveBeenCalledTimes(2);
+  expect(rec.sha).toBe("0f6360f,3f90036");
+
+  const read = await recordedRehearsal({ gh, branch: "main", current: hash });
+  expect(read.status).toBe(hash);
+  expect(rehearsalGate({ recorded: read, current: hash })).toMatchObject({ ok: true, source: "status" });
+});
+
+test("a hash-preserving edit (a comment, CHARTER prose) does not shut the queue; a real harness change does", async () => {
+  // 리뷰 r2 nf-5 — 지문을 바꾸지 않는 편집은 새 커밋을 만들지만 러너의 동작을 바꾸지 않는다.
+  // 읽기가 최근 커밋들을 후보로 훑으므로 그 기록은 여전히 찾힌다.
+  const hash = "b".repeat(64);
+  const gh = fpGh({
+    harness: [{ sha: "prose2", date: "2026-09-15T00:00:00Z" }, { sha: "rehearsed1", date: "2026-09-14T00:00:00Z" }],
+    charter: [{ sha: "prose2", date: "2026-09-15T00:00:00Z" }],
+    statuses: { rehearsed1: greenStatus(hash) },                    // 리허설은 옛 커밋에 기록돼 있다
+  });
+  const open = await recordedRehearsal({ gh, branch: "main", current: hash });
+  expect(open.status).toBe(hash);
+  expect(open.sha).toBe("rehearsed1");
+  expect(rehearsalGate({ recorded: open, current: hash }).ok).toBe(true);
+
+  // 하네스를 **실제로** 고치면 지문이 바뀐다 — 그때는 어느 후보에도 그 해시가 없다(닫힌다).
+  const changed = "c".repeat(64);
+  const shut = await recordedRehearsal({ gh, branch: "main", current: changed });
+  expect(shut.status).toBe(hash);                                   // 기록은 읽되
+  expect(rehearsalGate({ recorded: shut, current: changed }).ok).toBe(false);   // 지금의 지문이 아니다
+
+  // 후보 밖으로 밀려날 만큼 오래된 기록도 닫힌다(lookback을 1로 좁혀 재현).
+  const far = await recordedRehearsal({ gh, branch: "main", current: hash, lookback: 1 });
+  expect(far.status).toBe(null);
+  expect(rehearsalGate({ recorded: far, current: hash }).ok).toBe(false);
+});
+
+test("recordedRehearsal: both sources are read, the walk stops at the first matching candidate", async () => {
   const hash = "c".repeat(64);
-  const both = {
-    getVariable: vi.fn(async () => `${hash}\n`),
-    commitsForPath: vi.fn(async () => [{ sha: "fp1234", date: "2026-09-14T00:00:00Z" }]),
-    commitStatuses: vi.fn(async () => [
-      { context: "factory/gates", state: "success", description: "x" },
-      { context: REHEARSAL_STATUS_CONTEXT, state: "success", description: `rehearsal GREEN ${hash}` },
-    ]),
-    branchHeadSha: vi.fn(),
-  };
-  expect(await recordedRehearsal({ gh: both, branch: "main" })).toEqual({ variable: hash, status: hash, sha: "fp1234", source: "variable+status" });
-  // 브랜치 head는 아예 묻지 않는다 — 그것이 must_fix 2의 결함이었다.
-  expect(both.branchHeadSha).not.toHaveBeenCalled();
-  expect(both.commitStatuses).toHaveBeenCalledWith("fp1234");
+  const statuses = { h1: greenStatus("d".repeat(64)), h2: greenStatus(hash), c1: greenStatus(hash) };
+  const gh = fpGh({
+    harness: [{ sha: "h1", date: "2026-09-14T00:00:00Z" }, { sha: "h2", date: "2026-09-13T00:00:00Z" }],
+    charter: [{ sha: "c1", date: "2026-09-14T00:00:00Z" }],
+    statuses, variable: `${hash}\n`,
+  });
+  const r = await recordedRehearsal({ gh, branch: "main", current: hash });
+  expect(r).toMatchObject({ variable: hash, status: hash, sha: "h2", source: "variable+status" });
+  // h2에서 멈췄으므로 c1은 조회하지 않는다 — 후보 훑기는 첫 일치에서 끝난다.
+  expect(gh.commitStatuses).toHaveBeenCalledWith("h2");
+  expect(gh.commitStatuses).not.toHaveBeenCalledWith("c1");
 
-  const statusOnly = { getVariable: async () => null, commitsForPath: async () => [{ sha: "fp1234", date: "2026-09-14T00:00:00Z" }], commitStatuses: async () => [{ context: REHEARSAL_STATUS_CONTEXT, state: "success", description: `rehearsal GREEN ${hash}` }] };
-  expect(await recordedRehearsal({ gh: statusOnly })).toMatchObject({ variable: null, status: hash, source: "status" });
+  // 일치가 없으면 **가장 새 후보의 기록**을 돌려준다 — 거부 메시지가 "무엇이 기록돼 있는가"를 말한다.
+  const stale = await recordedRehearsal({ gh, branch: "main", current: "e".repeat(64) });
+  expect(stale.status).toBe("d".repeat(64));
+  expect(stale.sha).toBe("h1");
 
-  const red = { getVariable: async () => null, commitsForPath: async () => [{ sha: "fp1234", date: "x" }], commitStatuses: async () => [{ context: REHEARSAL_STATUS_CONTEXT, state: "failure", description: `rehearsal RED ${hash}` }] };
-  expect(await recordedRehearsal({ gh: red })).toMatchObject({ variable: null, status: null, source: null });
+  // 실패한 리허설의 상태는 기록이 아니다.
+  const red = fpGh({ harness: [{ sha: "h1", date: "d" }], statuses: { h1: [{ context: REHEARSAL_STATUS_CONTEXT, state: "failure", description: `rehearsal RED ${hash}` }] } });
+  expect(await recordedRehearsal({ gh: red, current: hash })).toMatchObject({ status: null, source: null });
 
+  // gh가 통째로 말을 안 해도 throw하지 않는다 — 호출자가 "확인 못 함"으로 fail closed 한다.
   const dead = { getVariable: async () => { throw new Error("offline"); }, commitsForPath: async () => { throw new Error("offline"); }, commitStatuses: async () => { throw new Error("offline"); } };
-  expect(await recordedRehearsal({ gh: dead })).toMatchObject({ variable: null, status: null });
+  expect(await recordedRehearsal({ gh: dead, current: hash })).toMatchObject({ variable: null, status: null });
 });
 
-test("recordRehearsal: the variable is primary, the fallback status lands on the fingerprint commit, and both outcomes are reported", async () => {
+test("recordRehearsal: the variable is primary; the fallback posts on every fingerprint target and reports both outcomes", async () => {
   const hash = "d".repeat(64);
   const ok = { setVariable: vi.fn(async () => {}), commitsForPath: vi.fn(), setStatus: vi.fn() };
   expect(await recordRehearsal({ gh: ok, hash, branch: "main" })).toMatchObject({ via: "variable", variable: "ok" });
   expect(ok.setVariable).toHaveBeenCalledWith(REHEARSAL_VARIABLE, hash);
   expect(ok.setStatus).not.toHaveBeenCalled();
 
-  const noAdmin = {
-    setVariable: vi.fn(async () => { throw new Error("HTTP 403: Resource not accessible by integration"); }),
-    commitsForPath: vi.fn(async () => [{ sha: "fp9999", date: "2026-09-14T00:00:00Z" }]),
-    setStatus: vi.fn(async () => {}),
-  };
+  const noAdmin = fpGh({ harness: [{ sha: "fp9999", date: "2026-09-14T00:00:00Z" }], charter: [{ sha: "fp8888", date: "2026-09-13T00:00:00Z" }] });
   const r = await recordRehearsal({ gh: noAdmin, hash, branch: "main" });
-  expect(r).toMatchObject({ via: "status", status: "ok", sha: "fp9999" });
+  expect(r).toMatchObject({ via: "status", status: "ok", sha: "fp9999,fp8888" });
   expect(r.variable).toMatch(/403/);
   expect(noAdmin.setStatus).toHaveBeenCalledWith(expect.objectContaining({ sha: "fp9999", context: REHEARSAL_STATUS_CONTEXT, state: "success" }));
   expect(noAdmin.setStatus.mock.calls[0][0].description).toContain(hash);
-  const given = { setVariable: async () => { throw new Error("403"); }, commitsForPath: vi.fn(), setStatus: vi.fn(async () => {}) };
-  expect(await recordRehearsal({ gh: given, hash, sha: "local77" })).toMatchObject({ via: "status", sha: "local77" });
-  expect(given.commitsForPath).not.toHaveBeenCalled();
 
-  const none = { setVariable: async () => { throw new Error("403"); }, commitsForPath: async () => [{ sha: "fp9999", date: "x" }], setStatus: async () => { throw new Error("no statuses: write"); } };
+  // 하나만 붙어도 기록은 성립한다 — 읽기가 후보를 전부 훑기 때문이다. 다만 실패한 쪽을 적어 둔다.
+  const half = fpGh({ harness: [{ sha: "good", date: "d" }], charter: [{ sha: "bad", date: "d" }] });
+  half.setStatus = vi.fn(async ({ sha }) => { if (sha === "bad") throw new Error("422 no commit"); });
+  const h = await recordRehearsal({ gh: half, hash });
+  expect(h.via).toBe("status");
+  expect(h.status).toMatch(/failed on bad/);
+
+  // 둘 다 실패하면 `via`가 없다 — 그 사실이 보고서로 들어가고 CLI가 그것으로 non-zero 한다.
+  const none = fpGh({ harness: [{ sha: "fp", date: "d" }] });
+  none.setStatus = async () => { throw new Error("no statuses: write"); };
   const failed = await recordRehearsal({ gh: none, hash });
   expect(failed.via).toBe(null);
   expect(failed.status).toMatch(/no statuses: write/);
+
+  // 지문 커밋을 하나도 못 찾으면 기록은 실패다(조용한 성공이 아니다).
+  const empty = { setVariable: async () => { throw new Error("403"); }, commitsForPath: async () => [] };
+  expect((await recordRehearsal({ gh: empty, hash })).via).toBe(null);
+});
+
+test("refuseRef: the rehearsal only runs (and only records) on the harness default branch", () => {
+  // 리뷰 r2 nf-8 — 소스 텍스트가 아니라 **동작**을 시험한다.
+  expect(refuseRef({ refName: "claude/fq-3", defaultBranch: "main" })).toBe(true);
+  expect(refuseRef({ refName: "main", defaultBranch: "main" })).toBe(false);
+  expect(refuseRef({ refName: "trunk", defaultBranch: "trunk" })).toBe(false);
+  // ref가 없는 자리(사람의 로컬 실행)는 거부하지 않는다 — 거기에는 GitHub의 ref가 없다.
+  expect(refuseRef({ refName: null, defaultBranch: "main" })).toBe(false);
+  expect(refuseRef({})).toBe(false);
 });
 
 test("checkRehearsalCurrent: PASS when current, FAIL when stale, WARN when never rehearsed or unverifiable", () => {
@@ -372,7 +451,7 @@ test("doctor's checkRehearsal: the fingerprint is computed locally, the record i
     throw new Error(`ENOENT ${p}`);
   };
   const harness = { project: { default_branch: "trunk" } };
-  const noStatus = { commitsForPath: async () => [], commitStatuses: async () => [] };
+  const noStatus = { commitsForPath: async () => [], commitStatuses: async () => [] };   // 상태 기록이 없는 저장소
 
   const green = { getVariable: vi.fn(async () => current), ...noStatus };
   expect(await checkRehearsal({ gh: green, root: "/repo", readFile, harness })).toEqual([expect.objectContaining({ id: "rehearsal.current", level: "PASS" })]);
@@ -543,6 +622,32 @@ test("factory rehearse: all-GREEN steps but nothing recorded → non-zero and 't
   expect(out.join("\n")).not.toMatch(/queue is open/);
 });
 
+test("factory rehearse: a failed pre-dispatch listing refuses outright — it never falls back to an older run", async () => {
+  // 리뷰 r2 nf-4 — 빈 집합으로 계속하면 다음 폴에서 방금 끝난 **옛** 런이 "내 런"으로 뽑힌다
+  // (SF5가 고친 그 버그가 오류 경로로 되살아난다). 목록 조회의 실패는 이미 gh가 성치 않다는 신호다.
+  const err = [];
+  const io = { out: () => {}, err: (s) => err.push(s) };
+  const gh = {
+    dispatchWorkflow: vi.fn(async () => {}),
+    workflowRuns: vi.fn(async () => { throw new Error("HTTP 503"); }),
+    downloadRunArtifact: vi.fn(async () => {}),
+  };
+  expect(await rehearseCommand({ argv: [], io, gh, sleep: async () => {} })).toBe(1);
+  expect(err.join("\n")).toMatch(/cannot identify the run I dispatched/);
+  expect(gh.dispatchWorkflow).not.toHaveBeenCalled();
+  expect(gh.downloadRunArtifact).not.toHaveBeenCalled();
+});
+
+test("factory rehearse: a run skipped by the default-branch pin says so, not 'artifact could not be downloaded'", async () => {
+  // 리뷰 r2 nf-9 — 잡이 `if:`에 걸리면 completed/skipped다. 아티팩트가 없는 것은 사고가 아니다.
+  const err = [];
+  const io = { out: () => {}, err: (s) => err.push(s) };
+  const gh = cliGh([{ databaseId: 77, status: "completed", conclusion: "skipped", createdAt: "2026-09-14T01:00:00Z", event: "workflow_dispatch" }]);
+  expect(await rehearseCommand({ argv: [], io, gh, sleep: async () => {} })).toBe(1);
+  expect(err.join("\n")).toMatch(/pinned to the default branch/);
+  expect(gh.downloadRunArtifact).not.toHaveBeenCalled();
+});
+
 // ── the workflow file ───────────────────────────────────────────────────────
 test("the factory-rehearse workflow passes yml-lint and is installed next to the stage workflows", () => {
   const text = readFileSync(join(repoRoot, "templates/factory/github/workflows/factory-rehearse.yml"), "utf8");
@@ -564,17 +669,6 @@ test("the factory-rehearse workflow passes yml-lint and is installed next to the
   // 이 저장소 자신도 그 워크플로를 설치해 두었는가(self-dogfood).
   const installed = readFileSync(join(repoRoot, ".github/workflows/factory-rehearse.yml"), "utf8");
   expect(installed).toBe(text);
-});
-
-test("bin/rehearse.js refuses any ref but the harness default branch — the record is only meaningful there", () => {
-  // 워크플로의 `if:`는 1차 방어이고 그 파일은 이 스크립트와 함께 움직이지 않는다(에이전트는 `.github/**`를
-  // 못 만지지만 `.factory/**`는 브랜치 push로 바꿀 수 있다). 그래서 기록하는 쪽이 스스로 한 번 더 묻는다.
-  const src = readFileSync(join(repoRoot, "factory/bin/rehearse.js"), "utf8");
-  expect(src).toMatch(/GITHUB_REF_NAME/);
-  expect(src).toMatch(/refName !== defaultBranch/);
-  expect(src).toMatch(/process\.exit\(1\)/);
-  // 기록은 그 가드 **뒤에** 있다 — 가드가 통과해야 recordRehearsal에 닿는다.
-  expect(src.indexOf("GITHUB_REF_NAME")).toBeLessThan(src.indexOf("recordRehearsal("));
 });
 
 test("the stages substitute every placeholder, exactly like the rehearsal does", () => {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
 import { loadHarness } from "../lib/config.js";
-import { fingerprintShaLocal, recordRehearsal, rehearsalHash, rehearsalReport, renderRehearsalTable, runRehearsal } from "../lib/rehearsal.js";
+import { recordRehearsal, refuseRef, rehearsalHash, rehearsalReport, renderRehearsalTable, runRehearsal } from "../lib/rehearsal.js";
 import { assertNoWriteStageClean, snapshotSetupDirty } from "./run-stage.js";
 
 /**
@@ -29,7 +29,7 @@ const defaultBranch = harness.project?.default_branch || "main";
  * 게이트 명령이 한 줄도 돌지 않은 채로. 그래서 기록하는 쪽이 스스로 한 번 더 묻는다.
  */
 const refName = process.env.GITHUB_REF_NAME || null;
-if (refName && refName !== defaultBranch) {
+if (refuseRef({ refName, defaultBranch })) {
   console.error(`rehearse: refusing to run on \`${refName}\` — the rehearsal is only meaningful (and only recorded) on the default branch \`${defaultBranch}\` (ADR-025). Dispatch it without --ref, or from ${defaultBranch}.`);
   process.exit(1);
 }
@@ -69,7 +69,9 @@ const { steps, ok: stepsOk } = await runRehearsal({
  * 기록은 **스텝이 전부 GREEN일 때만** 일어나고, 그 성패는 **판정의 일부다**(리뷰 must_fix 5):
  * 보고서를 먼저 쓰고 기록을 나중에 하면, 기록이 실패한 런의 아티팩트가 `ok: true`로 남아
  * `factory rehearse`가 "the queue is open"을 찍고 0으로 끝난다 — 그러고 나면 첫 이슈가 거부된다.
- * 폴백 status는 **지문 커밋**에 붙는다(must_fix 2) — 그 sha는 러너에 체크아웃이 있으므로 로컬에서 읽는다.
+ * 폴백 status는 **지문 경로마다 최신 커밋**에 붙는다(r1 must_fix 2 / r2 잔여): 러너도 읽는 쪽과 **같은**
+ * 원격 조회를 쓴다 — 러너만 로컬 이력으로 고르던 시절에는 쓰는 커밋과 읽는 커밋이 같은-초 동률에서
+ * 엇갈릴 수 있었고, 그러면 리허설을 몇 번 다시 돌려도 큐가 열리지 않았다.
  */
 let recorded = null;
 if (stepsOk) {
@@ -79,8 +81,7 @@ if (stepsOk) {
     const url = process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY
       ? `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${runId}`
       : undefined;
-    const sha = await fingerprintShaLocal({ run, cwd: root });
-    recorded = await recordRehearsal({ gh, hash, branch: defaultBranch, sha, targetUrl: url });
+    recorded = await recordRehearsal({ gh, hash, branch: defaultBranch, targetUrl: url });
   } catch (e) {
     recorded = { via: null, variable: `error: ${e?.message || e}`, status: "not attempted", sha: null };
   }

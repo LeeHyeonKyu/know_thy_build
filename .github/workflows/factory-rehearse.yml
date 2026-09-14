@@ -9,8 +9,14 @@ on:
   workflow_dispatch:
   # 하네스나 CHARTER가 바뀌면 기록된 리허설은 그 순간 낡는다(transition.js가 해시로 그것을 안다) —
   # 기본 브랜치에 그 변경이 들어오는 순간 자동으로 한 번 더 돈다.
+  #
+  # `branches: ['**']`인 이유(리뷰 r2 nf-5): 기본 브랜치의 이름은 저장소마다 다르다. `[main, master]`로
+  # 적어 두면 `trunk`·`develop`을 쓰는 저장소에서는 이 트리거가 **영영 발화하지 않아** 하네스를 고쳐도
+  # 리허설이 다시 돌지 않는다(사람이 알아채고 손으로 돌릴 때까지 큐가 닫힌 채로 남는다). 필터는 아래
+  # 잡 레벨 `if:`가 한다 — 그쪽은 GitHub이 주는 **실제** 기본 브랜치 이름과 대조하므로 이름을 모른 채로도
+  # 정확하고, 다른 브랜치의 push는 잡이 시작되기 전에 건너뛰어진다.
   push:
-    branches: [main, master]
+    branches: ['**']
     paths:
       - .factory/harness.toml
       - docs/factory/CHARTER.md
