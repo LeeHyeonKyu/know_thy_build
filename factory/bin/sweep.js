@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
-import { resolveReviewRoster } from "../lib/review-roster.js";
+import { resolveReviewRoster, tierFromReviewHandoff } from "../lib/review-roster.js";
 import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quarantine.js";
 import { transition as transitionIssue } from "../lib/transition.js";
 import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
@@ -74,11 +74,15 @@ async function main() {
    * KTB-46 r3 must_fix 1 — **정족수를 잴 자.** 이것을 넘기지 않으면 `verifyReviewQuorum`은 로스터
    * 크기·빠진 역할·K를 전부 건너뛰고 "있는 verdict가 전부 approve인가"만 본다 — 4명짜리 로스터의
    * 이슈가 1명의 approve로 `factory:merged`에 도달했다. 해석은 merge 스테이지의 `reviewRoster` dep과
-   * **같은 함수**다(`lib/review-roster.js`). 실효 tier(diff로 올리는 H3 계산)만 주입하지 않는다:
-   * 머지가 끝난 뒤에는 `claude/fq-<n>`이 지워져 `base...HEAD`의 한쪽 끝이 없다 — 그때는 선언 tier가
-   * 유일하게 남은 기록이고, 없는 것을 지어내는 것보다 그쪽이 맞다.
+   * **같은 함수**다(`lib/review-roster.js`). 실효 tier(H3)도 같은 주입점으로 간다 — 다만 여기서는
+   * diff를 다시 내지 않는다(머지 뒤에는 `claude/fq-<n>`이 없다): **review 런이 계산해 handoff에
+   * 실어 둔 `tier_effective`**를 팔이 읽어 넘기고, `maxTier(선언, handoff)`로 합친다(r4).
+   * 그 필드가 없는 1.2 이전 기록에서는 선언 tier로 내려가고, 팔이 그 사실을 한 줄로 말한다.
    */
-  const reviewRoster = (comments) => resolveReviewRoster({ charter, roles: loadRoles(root), comments });
+  const reviewRoster = (comments, handoffTier = null) => resolveReviewRoster({
+    charter, roles: loadRoles(root), comments,
+    effectiveTier: handoffTier ? tierFromReviewHandoff(handoffTier) : null,
+  });
   /** KTB-46 r3 must_fix 4 — 머지된 PR의 필수 체크도 확인한다(merge 스테이지와 같은 목록·같은 판정 함수). */
   const requiredChecks = harness?.factory?.required_checks ?? null;
   const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, quick });

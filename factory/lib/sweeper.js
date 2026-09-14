@@ -4,6 +4,7 @@ import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, las
 import { STATES } from "./labels.js";
 import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
 import { allChecksGreen } from "./gh.js";
+import { latestHandoff } from "./handoff.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -717,7 +718,9 @@ async function verifyMergedPrEvidence({ gh, factoryLogins, requiredChecks, pr, i
  *      head sha에 묶여 있는가, 그리고 **이 tier의 로스터로** 정족수 all-approve와 K를 `must_fix`에서
  *      다시 계산한 결과가 통과인가. 그 로스터와 K는 이 팔이 직접 실어 보낸다 — r3 must_fix 1까지
  *      보내지 않아서, 4명짜리 로스터의 이슈가 **1명의 approve**로도 통과했다(정족수 검사는 잴 자가
- *      없으면 통째로 무음이 된다). **사람의 머지가 예외이지 증거가 예외인 것이 아니다**(§12.3-2).
+ *      없으면 통째로 무음이 된다). tier도 merge 스테이지와 같은 것을 쓴다(r4): diff를 다시 내는 대신
+ *      review handoff에 기록된 `tier_effective`를 읽어 선언 tier와 `maxTier`로 합친다 — 로스터는
+ *      어느 쪽보다도 작아지지 않는다. **사람의 머지가 예외이지 증거가 예외인 것이 아니다**(§12.3-2).
  *
  * **닫힌 이슈도 본다**(`state: "all"`). `Closes #n`이 실제로 걸리는 경우 이슈는 `factory:needs-human`
  * 라벨을 그대로 단 채 닫히고 — 그건 "끝났다"가 아니라 **상태 라벨이 거짓말을 하는 이슈**다(retro의
@@ -799,7 +802,22 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
        * `claude/fq-<n>`이 지워져 diff를 다시 낼 수 없다), 못 구하면 **거부한다**: 이 팔의 나머지와
        * 같은 원칙으로 확인 못 한 것을 통과로 읽지 않는다.
        */
-      const ros = await reviewRoster(comments);
+      /**
+       * r4 — **실효 tier의 parity.** merge 스테이지는 `base...HEAD` diff로 tier 바닥을 계산해 로스터를
+       * 넓히는데(감사 H3), 이 팔은 그 diff를 다시 낼 수 없다(squash 머지와 함께 브랜치가 지워졌다).
+       * 다시 계산하는 대신 **이미 계산된 값을 읽는다**: 이 PR head에 묶인 review handoff의
+       * `tier_effective`는 리뷰 런이 `resolveTier`로 만든 바로 그 값이다. `resolveReviewRoster`가
+       * `maxTier(선언, handoff)`로 합치므로 로스터는 **어느 쪽보다도 작아지지 않는다**.
+       *
+       * 1.2 이전 기록에는 그 필드가 없다 — 그때는 선언 tier로 내려가되 **조용히 내려가지 않는다**:
+       * 한 줄을 남겨 "이 이슈에서는 tier parity를 확인할 수 없었다"고 말한다. 조용한 약화가 바로
+       * r3 must_fix 1이 잡아낸 실패 모양이다.
+       */
+      const handoffTier = latestHandoff(comments, "review")?.data?.tier_effective ?? null;
+      if (!handoffTier) {
+        actions.push({ kind: "human-merged-note", issue: it.number, pr, note: "review handoff carries no tier_effective (pre-1.2 record) — the roster falls back to the declared tier, so tier parity with the merge stage could not be confirmed" });
+      }
+      const ros = await reviewRoster(comments, handoffTier);
       if (!ros?.ok || !Array.isArray(ros.roles) || !ros.roles.length) {
         const reason = ros?.reason || "review roster unresolvable — quorum cannot be checked";
         await gh.comment(it.number, `${refusedMark}\nPR #${pr}이 머지돼 있지만 이 이슈를 \`factory:merged\`로 잇지 않았습니다 — ${reason}. 정족수를 잴 자가 없으면 리뷰 증거를 확인할 수 없고, 확인 못 한 것은 통과가 아닙니다(KTB-46).`);

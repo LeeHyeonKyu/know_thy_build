@@ -5,6 +5,7 @@ import { canTransition } from "../lib/labels.js";
 import { BLOCKED_CAUSES, transitionRefusedMarker } from "../lib/retro/issue-comments.js";
 import { requirementFor } from "../lib/requirements.js";
 import { renderHandoff } from "../lib/handoff.js";
+import { resolveReviewRoster, tierFromReviewHandoff } from "../lib/review-roster.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
 const T = { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
@@ -1313,6 +1314,47 @@ test("KTB-46 r3: the arm is cron-only, and is skipped when the wiring is an olde
     expect(transition, dep).not.toHaveBeenCalled();
     expect(actions.some((a) => String(a.kind).startsWith("human-merged")), dep).toBe(false);
   }
+});
+
+/**
+ * r4 — **tier parity.** merge 스테이지는 `base...HEAD` diff로 tier 바닥을 계산해 로스터를 넓힌다
+ * (감사 H3). 이 팔은 그 diff를 다시 낼 수 없지만(브랜치가 지워졌다) **리뷰 런이 이미 계산해
+ * handoff에 실어 둔 값**을 읽을 수 있다 — 그래서 로스터는 선언 tier와 그 값 중 높은 쪽이다.
+ */
+test("KTB-46 r4: the roster is never smaller than the review handoff's recorded tier_effective", async () => {
+  const CHARTER = { ...charter, tier_default: "standard", roster: { docs: ["qa"], standard: ["correctness", "qa"], "load-bearing": ["correctness", "qa", "security", "architecture", "spec-conformance", "operator"] } };
+  const ROLES = { review: { correctness: {}, qa: {}, security: {}, architecture: {}, "spec-conformance": {}, operator: {} } };
+  const ap = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  const reviewHandoff = (over = {}) => ({
+    id: 50, createdAt: "2026-09-11T00:40:00Z",
+    body: renderHandoff({ stage: "review", issue: 3, summary: "s", data: {
+      schema: "factory.review.v1", issue: 3, pr: 4, head_sha: MERGED_HEAD, round: 2, decision: "approved",
+      verdicts: [ap("correctness"), ap("qa"), ap("security"), ap("architecture")],
+      orchestration: "workflow", guarantee: "verified", ...over,
+    } }),
+  });
+  const triageHandoff = { id: 40, createdAt: "2026-09-11T00:10:00Z", body: renderHandoff({ stage: "triage", issue: 3, summary: "s", data: { schema: "factory.triage.v1", issue: 3, disposition: "ready", tier: "standard" } }) };
+  // 프로덕션의 배선 그대로 — `bin/sweep.js`가 조립하는 것과 같은 모양이다.
+  const roster = (comments, handoffTier = null) => resolveReviewRoster({ charter: CHARTER, roles: ROLES, comments, effectiveTier: handoffTier ? tierFromReviewHandoff(handoffTier) : null });
+
+  // 선언은 standard(2명)인데 리뷰 런은 load-bearing(6명)으로 판정했다 → 6명짜리 로스터를 요구한다.
+  const upgraded = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment(), triageHandoff, reviewHandoff({ tier_effective: "load-bearing", tier_source: "floor" })]) });
+  const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a1 = await sweep(mergedArgs({ gh: upgraded, transition: t1, reviewRoster: roster }));
+  const ctx1 = t1.mock.calls[0][0].ctxExtra;
+  expect(ctx1.rosterSize).toBe(6);
+  expect(ctx1.roster).toContain("operator");
+  expect(a1.some((a) => a.kind === "human-merged-note")).toBe(false);
+  // 그리고 그 로스터로 재면 4/4 approve는 정족수 미달이다 — 이것이 parity의 실제 효과다.
+  expect(requirementFor("factory:merged")({ comments: [reviewHandoff({ tier_effective: "load-bearing" })], ...ctx1 }).reason)
+    .toMatch(/verdict count 4 != roster size 6/);
+
+  // 1.2 이전 기록: `tier_effective`가 없다 → 선언 tier(2명)로 내려가되 **소리를 낸다**.
+  const legacy = mergedGh({ comments: vi.fn(async () => [humanMergeParkComment(), triageHandoff, reviewHandoff()]) });
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a2 = await sweep(mergedArgs({ gh: legacy, transition: t2, reviewRoster: roster }));
+  expect(t2.mock.calls[0][0].ctxExtra.roster).toEqual(["correctness", "qa"]);
+  expect(a2).toContainEqual({ kind: "human-merged-note", issue: 3, pr: 4, note: expect.stringContaining("no tier_effective") });
 });
 
 /**
