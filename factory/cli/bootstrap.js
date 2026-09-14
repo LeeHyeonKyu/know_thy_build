@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
-import { loadHarness } from "../lib/config.js";
+import { loadHarness, loadCharter } from "../lib/config.js";
 import { bootstrapPlan, applyBootstrap, formatBootstrapFailure, isTwoActor, CODEOWNERS_PATH, MERGE_TOKEN_SECRET, MERGE_ENVIRONMENT } from "../lib/bootstrap.js";
 
 const TOKEN_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -44,11 +44,14 @@ async function resolveMergeActor({ run, env }) {
     const r = await run("gh", ["api", "user"], a.opts);
     if (r.code !== 0) continue;
     try {
-      const login = JSON.parse(r.stdout).login;
-      if (login) return { mergeActorLogin: login, loginSource: a.source };
+      const { login, id } = JSON.parse(r.stdout);
+      // 외부 감사 H6 — `reviewers`는 로그인이 아니라 **숫자 id**를 받는다(GitHub의 환경 API). 같은
+      // `gh api user` 응답에 둘 다 있으므로 호출을 늘리지 않는다. id가 없으면 null로 남긴다:
+      // 계획 단계가 리뷰어 없는 환경을 만들고 그 사실을 note로 말한다(422로 환경을 통째로 잃지 않게).
+      if (login) return { mergeActorLogin: login, mergeActorId: Number.isInteger(id) ? id : null, loginSource: a.source };
     } catch {}
   }
-  return { mergeActorLogin: null, loginSource: null };
+  return { mergeActorLogin: null, mergeActorId: null, loginSource: null };
 }
 
 export async function bootstrapCommand({ root, argv = [], io, gh, run = realRun, today, env = process.env }) {
@@ -89,7 +92,14 @@ export async function bootstrapCommand({ root, argv = [], io, gh, run = realRun,
     ...(isTwoActor(secrets, envSecrets) ? await resolveMergeActor({ run, env }) : {}),
   };
 
-  let ops = bootstrapPlan({ harness, today: day, existing });
+  // 외부 감사 H6 — CHARTER는 부트스트랩의 **입력**이 됐다(`merge.human_gate`). 읽히지 않아도
+  // 부트스트랩을 멈추지 않는다: 그때는 `humanGateOf(null)`이 true로 떨어져 **더 좁은 쪽**(사람 게이트
+  // 켜짐)이 설정되고, 그 사실은 아래 note와 `factory doctor`가 말한다.
+  let charter = null;
+  try { charter = loadCharter(root); }
+  catch (e) { io.out(`note: CHARTER unreadable (${e.message}) — assuming merge.human_gate: true (a required reviewer on ${MERGE_ENVIRONMENT})`); }
+
+  let ops = bootstrapPlan({ harness, today: day, existing, charter });
 
   if (forcedTokenDate) {
     ops = ops.filter((op) => !(op.kind === "variable" && op.name === "FACTORY_TOKEN_ISSUED_AT") && !(op.kind === "note" && /FACTORY_TOKEN_ISSUED_AT/.test(op.message)));

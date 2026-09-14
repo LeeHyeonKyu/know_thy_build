@@ -7,7 +7,7 @@ import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lin
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
 import { L0_CONTEXTS, CODEOWNERS_PATH } from "../bootstrap.js";
-import { checkMergeAuthority } from "./merge-authority.js";
+import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
@@ -112,7 +112,12 @@ export function checkCharter({ root, loadCharter }) {
     const enoent = e.code === "ENOENT" || /ENOENT/.test(e.message || "");
     return [enoent ? c("charter", "WARN", "no CHARTER yet") : c("charter", "FAIL", e.message)];
   }
-  return [charter.status !== "ready" ? c("charter", "WARN", `CHARTER status is ${charter.status} (not ready)`) : c("charter", "PASS")];
+  return [
+    charter.status !== "ready" ? c("charter", "WARN", `CHARTER status is ${charter.status} (not ready)`) : c("charter", "PASS"),
+    // 외부 감사 H6 — 사람 게이트는 gh를 전혀 필요로 하지 않는 CHARTER-only 판정이라 여기에 산다
+    // (`checkGitHub`은 gh가 없으면 통째로 WARN 하나로 접힌다 — 이 선언은 그 침묵에 묻히면 안 된다).
+    ...checkHumanGate(charter),
+  ];
 }
 
 const rosterUnion = (obj) => [...new Set(Object.values(obj || {}).flat())];

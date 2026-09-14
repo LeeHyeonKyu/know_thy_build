@@ -387,8 +387,8 @@ test("bootstrapCommand: missing harness.toml → exit 1, message mentions harnes
 // ── ADR-021 fix round r1 — CODEOWNERS (MF-1) + the factory-merge environment (MF-2 b) ──────
 
 const TWO = ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY", "FACTORY_MERGE_TOKEN"];
-const planTwoActor = (extra = {}) =>
-  bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: TWO, ...extra } });
+const planTwoActor = (extra = {}, charter = null) =>
+  bootstrapPlan({ harness: HARNESS, today: "2026-09-12", charter, existing: { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "x" }, secrets: TWO, ...extra } });
 
 test("bootstrapPlan (r1 MF-1): two-actor protection requires a CODE OWNER review — counting approvals alone lets the agent approve a PR it did not author", () => {
   const protection = planTwoActor().find((o) => o.kind === "protection");
@@ -430,6 +430,42 @@ test("bootstrapPlan (r1 MF-2 b): two-actor mode plans the factory-merge environm
   expect(env.body.deployment_branch_policy).toEqual({ protected_branches: true, custom_branch_policies: false });
   const single = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing: { labels: [], variables: {}, secrets: ["FACTORY_BOT_TOKEN"] } });
   expect(single.some((o) => o.kind === "environment" || o.kind === "codeowners")).toBe(false);
+});
+
+// ── 외부 감사 2026-09-14 H6 — 사람 게이트는 CHARTER의 명시적 선택이다 ──────────────────────
+
+/**
+ * 감사 시점의 `MERGE_ENVIRONMENT_BODY`에는 `deployment_branch_policy`만 있었다 — 그것은 *토큰이
+ * 어디로 새는가*를 막을 뿐, *사람이 이 머지를 봤는가*와는 무관하다. `reviewers` 한 줄이 그 차이다.
+ */
+test("H6: merge.human_gate: true puts a required reviewer on the factory-merge environment — every merge job then waits for a person", () => {
+  const env = planTwoActor({ mergeActorLogin: "owner-human", mergeActorId: 4242 }, { merge: { human_gate: true } }).find((o) => o.kind === "environment");
+  expect(env.body.reviewers).toEqual([{ type: "User", id: 4242 }]);
+  expect(env.body.deployment_branch_policy).toEqual({ protected_branches: true, custom_branch_policies: false });
+});
+
+test("H6: merge.human_gate: false plans NO reviewer, and the note says out loud what that costs", () => {
+  const ops = planTwoActor({ mergeActorLogin: "owner-human", mergeActorId: 4242 }, { merge: { human_gate: false } });
+  expect(ops.find((o) => o.kind === "environment").body.reviewers).toBeUndefined();
+  const note = ops.filter((o) => o.kind === "note").map((o) => o.message).find((m) => /NO required reviewer/.test(m));
+  expect(note).toMatch(/merge\.human_gate: false/);
+  expect(note).toMatch(/one-off token registration/);
+});
+
+/** 필드가 없거나 CHARTER를 못 읽었으면 **더 좁은 쪽**으로 떨어진다 — 다크는 기본값이 아니다. */
+test("H6: an absent merge.human_gate (or an unreadable CHARTER) defaults to the human gate, not to dark", () => {
+  const env = planTwoActor({ mergeActorLogin: "owner-human", mergeActorId: 7 }).find((o) => o.kind === "environment");
+  expect(env.body.reviewers).toEqual([{ type: "User", id: 7 }]);
+});
+
+/**
+ * 리뷰어 id를 모를 때 `reviewers`를 넣으면 PUT 자체가 422로 실패해 환경이 아예 안 만들어지고,
+ * 그러면 시크릿 보호(deployment_branch_policy)까지 함께 잃는다 — 환경은 만들되 소리 내어 말한다.
+ */
+test("H6: with no resolvable user id the environment is still created (secrets stay protected) and a note names the gap", () => {
+  const ops = planTwoActor({ mergeActorLogin: "owner-human", mergeActorId: null }, { merge: { human_gate: true } });
+  expect(ops.find((o) => o.kind === "environment").body.reviewers).toBeUndefined();
+  expect(ops.some((o) => o.kind === "note" && /numeric user id could not be resolved/.test(o.message))).toBe(true);
 });
 
 test("bootstrapPlan (r1): the mode variable records what bootstrap OBSERVED — CI cannot read `gh secret list` with a non-admin bot token", () => {
