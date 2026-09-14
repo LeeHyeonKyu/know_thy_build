@@ -87,11 +87,85 @@ export const apiErrorReason = (out) => {
 };
 
 /**
+ * ── plan 검증기 (감사 Task 9, P2) ─────────────────────────────────────────────
+ *
+ * 세 규칙 전부 **스크립트 집행**이다. 산문으로 적힌 같은 규칙은 데모 #2에서 9라운드·$118을 막지
+ * 못했다(`docs/factory/dogfood/2026-09-14-plan-baseline.md`). 위반한 계획 핸드오프는 "스키마를
+ * 통과하지 못한 산출물"과 똑같이 취급된다 — 스테이지는 GREEN이 되지 않고 사람에게 간다.
+ *
+ * (a) **dissent without done_when** — `dissent_log`에 남긴 위험 중 `severity`가 medium 이상이거나
+ *     아예 없는 항목은, 그것을 막는 `done_when` 항목이 `covers: [<dissent id>]`로 짚어야 한다.
+ *     #2의 단일 원인이 이것이다: 팩토리는 M2-1("npm start가 pg를 건드리지 않는다")을 **알고도**
+ *     open_risk에 두었고, 그 뒤 리뷰 9라운드가 같은 것을 다시 말했다. 인식은 계약이 아니다.
+ * (b) **done_when 상한** — `charter.plan.max_done_when`(기본 6). must_fix 15건 중 5건이 계획이
+ *     스스로 발명한 done_when에서 나왔다. 라운드를 돌릴수록 done_when이 정교해지고, 정교해진
+ *     done_when이 새 결함 표면이 됐다.
+ * (c) **가드 모양의 done_when** — 화이트리스트·등장 금지·순서·저장소 전수 정규식으로 문서를
+ *     검증하는 done_when(#18 dw2·dw4, #15 dw1–dw3)은 그 자체가 결함 표면이다. 이슈가 실제로
+ *     가드를 요구하면(본문에 "guard"/"가드"/`[guard]`) 예외다.
+ */
+const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+/**
+ * **알려진 조잡한 필터다**(ADR 텍스트에 그대로 기록한다 — `docs/factory/audit/response-task-9.md`).
+ * 문구 매칭이라 거짓 양성(가드가 아닌데 "ordering of sections"라고 쓴 계획)과 거짓 음성(같은 것을
+ * 다른 말로 쓴 계획)이 둘 다 가능하다. 그래서 탈출구를 사람이 아니라 **이슈 본문**에 뒀다: 가드를
+ * 원한 이슈는 그 말을 쓰게 된다. 이 목록은 실측(#15·#18에서 실제로 must_fix를 만든 done_when)에서
+ * 뽑았고, 다음 표본에서 거짓 판정이 나오면 목록을 고치지 규칙을 끄지 않는다.
+ */
+export const GUARD_SHAPED_PATTERNS = [
+  /whitelist|allowlist|화이트리스트/i,
+  /must not appear|등장하지 않는다|나타나지 않는다/i,
+  /only these files|이 파일들만/i,
+  /regex over|정규식으로 훑|정규식으로 검사/i,
+  /ordering of sections|순서를 (강제|검사|요구)/i,
+  /line layout|줄 배치/i,
+  // 저장소 전수 파일 목록 위에서 단언하는 모양 — #18 dw4가 정확히 이것이었다.
+  /every file in the repo|all files in the repo|repository-wide|저장소 전체의? 파일/i,
+];
+const GUARD_REQUESTED = /\bguard\b|가드|\[guard\]/i;
+
+/**
+ * `plan.v1` 핸드오프를 CHARTER의 plan 규칙으로 검사한다. 반환은 사유 문자열 배열(빈 배열 = 유효).
+ * 스키마 검사와 별개다 — 스키마는 "모양", 이것은 "계약".
+ */
+export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = {}) {
+  const reasons = [];
+  if (!plan || typeof plan !== "object") return reasons;
+  const doneWhen = Array.isArray(plan.done_when) ? plan.done_when : [];
+  const dissent = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
+
+  // (a) 위험은 risks가 아니라 done_when으로 나온다.
+  const covered = new Set();
+  for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c));
+  const uncovered = dissent
+    // id가 없는 항목은 위치로 부른다 — 검증기가 id를 발명하는 게 아니라, 사람이 셀 수 있는 이름을 준다.
+    .map((d, i) => ({ id: typeof d?.id === "string" && d.id ? d.id : `d${i + 1}`, severity: d?.severity }))
+    .filter(({ severity }) => !(typeof severity === "string" && SEVERITY_RANK[severity] < SEVERITY_RANK.medium))
+    .filter(({ id }) => !covered.has(id))
+    .map(({ id }) => id);
+  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")}`);
+
+  // (b) 계획이 만드는 결함 표면의 상한.
+  if (doneWhen.length > maxDoneWhen) reasons.push(`done_when has ${doneWhen.length} items (max ${maxDoneWhen})`);
+
+  // (c) 가드의 가드 금지 — 이슈가 가드를 요구했으면 통과.
+  if (!GUARD_REQUESTED.test(String(issueBody || ""))) {
+    const guardish = doneWhen
+      .filter((d) => GUARD_SHAPED_PATTERNS.some((re) => re.test(String(d?.text ?? ""))))
+      .map((d, i) => (typeof d?.id === "string" && d.id ? d.id : `dw${i + 1}`));
+    if (guardish.length) {
+      reasons.push(`guard-shaped done_when: ${guardish.join(", ")} — done_when observes user-visible behaviour; say "guard" in the issue if a guard is what you want`);
+    }
+  }
+  return reasons;
+}
+
+/**
  * gates: `.factory/out/gates.json`의 내용(없으면 null). 게이트 판정의 단일 출처는 이 파일이다 —
  * 워크플로가 handoff에 적은 gates는 파일과 **일치해야만** 인정되고, 비어 있으면 파일 값으로 채운다.
  * (그래서 schema 검증은 data.gates를 채운 뒤에 돈다.)
  */
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody }) {
   const reasons = [];
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
@@ -150,6 +224,8 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   }
   if (data && orchestration && data.orchestration !== orchestration) reasons.push(`orchestration ${data.orchestration} != configured ${orchestration}`);
   if (stage === "plan" && data && expectedRounds != null && data.rounds !== expectedRounds) reasons.push(`rounds ${data.rounds} != expected ${expectedRounds}`);
+  // CHARTER의 plan 규칙(감사 Task 9). 상한이 안 넘어오면 기본 6 — 규칙이 조용히 꺼지지는 않는다.
+  if (stage === "plan" && data) reasons.push(...validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody }));
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
   }

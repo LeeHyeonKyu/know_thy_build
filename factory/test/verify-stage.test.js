@@ -52,6 +52,78 @@ test("plan checks rounds", () => {
   expect(bad.reasons.join()).toMatch(/rounds/);
 });
 
+/**
+ * 감사 Task 9 — plan 검증기(P2, `docs/factory/dogfood/2026-09-14-plan-baseline.md`).
+ * 세 규칙 전부 **스크립트 집행**이다: 산문 규칙은 #2에서 9라운드·$118을 막지 못했다.
+ */
+const planFix = (over = {}) => ({
+  schema: "factory.plan.v1", issue: 7, tier: "standard", roles: ["synthesizer", "skeptic"], rounds: 2,
+  done_when: [{ id: "dw1", text: "POST /notes returns 201 with the created id", verify: "test_7_create", level: "unit" }],
+  files_expected: [], dissent_log: [], non_goals: [], open_risks: [], orchestration: "workflow", ...over,
+});
+const verifyPlan = (plan, extra = {}) => verifyStage({
+  stage: "plan", out: out(plan), agentsLog: log(["plan-synthesizer", "plan-skeptic"]),
+  roster: ["synthesizer", "skeptic"], rolePrefix: "plan-", expectedRounds: 2, orchestration: "workflow", ...extra,
+});
+
+test("plan validator: a medium-or-worse dissent no done_when covers is invalid", () => {
+  const dissent = [{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "unresolved — proceeding" }];
+  const bad = verifyPlan(planFix({ dissent_log: dissent }));
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons.join("; ")).toMatch(/dissent without done_when: d1/);
+
+  const covered = verifyPlan(planFix({
+    dissent_log: dissent,
+    done_when: [{ id: "dw1", text: "npm start writes a row to pg", verify: "test_7_start", level: "integration", covers: ["d1"] }],
+  }));
+  expect(covered.ok).toBe(true);
+});
+
+test("plan validator: dissent with no severity still needs a done_when; low severity does not", () => {
+  const noSeverity = verifyPlan(planFix({ dissent_log: [{ role: "skeptic", objection: "o", resolution: "unresolved — proceeding" }] }));
+  expect(noSeverity.reasons.join("; ")).toMatch(/dissent without done_when: d1/);   // id 없는 항목은 위치로 d<n>
+  const low = verifyPlan(planFix({ dissent_log: [{ id: "d1", role: "skeptic", severity: "low", objection: "o", resolution: "wording" }] }));
+  expect(low.ok).toBe(true);
+});
+
+test("plan validator: done_when is capped at charter plan.max_done_when (default 6)", () => {
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ id: `dw${i + 1}`, text: `t${i + 1}`, verify: `test_7_t${i + 1}`, level: "unit" }));
+  expect(verifyPlan(planFix({ done_when: many(6) })).ok).toBe(true);
+  const over = verifyPlan(planFix({ done_when: many(7) }));
+  expect(over.ok).toBe(false);
+  expect(over.reasons.join("; ")).toMatch(/done_when has 7 items \(max 6\)/);
+  // 상한은 CHARTER가 정한다 — 검증기는 그 값을 받아 쓴다.
+  expect(verifyPlan(planFix({ done_when: many(3) }), { planLimits: { max_done_when: 2 } }).reasons.join("; ")).toMatch(/done_when has 3 items \(max 2\)/);
+});
+
+test("plan validator: guard-shaped done_when is invalid unless the issue asks for a guard", () => {
+  const guardish = planFix({ done_when: [{ id: "dw4", text: "a test asserts every backticked path token is in the prefix whitelist", verify: "test_7_paths", level: "unit" }] });
+  const bad = verifyPlan(guardish);
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons.join("; ")).toMatch(/guard-shaped done_when: dw4/);
+
+  // 이슈가 가드를 요구하면 통과한다 — 영어 "guard", 한국어 "가드", `[guard]` 마커 셋 다.
+  expect(verifyPlan(guardish, { issueBody: "Add a guard test for README paths" }).ok).toBe(true);
+  expect(verifyPlan(guardish, { issueBody: "README 경로 가드를 추가한다" }).ok).toBe(true);
+  expect(verifyPlan(guardish, { issueBody: "[guard] README paths" }).ok).toBe(true);
+});
+
+test("plan validator: the other guard heuristics — ordering, regex-over-the-repo, repository-wide file lists", () => {
+  const reasonFor = (text) => verifyPlan(planFix({ done_when: [{ id: "dw1", text, verify: "test_7_x", level: "unit" }] })).reasons.join("; ");
+  expect(reasonFor("the test asserts the ordering of sections (a) → (b) → (c)")).toMatch(/guard-shaped done_when: dw1/);
+  expect(reasonFor("a regex over the repository's markdown files")).toMatch(/guard-shaped done_when: dw1/);
+  expect(reasonFor("only these files may change")).toMatch(/guard-shaped done_when: dw1/);
+  expect(reasonFor("the string `TODO` must not appear anywhere")).toMatch(/guard-shaped done_when: dw1/);
+  expect(reasonFor("the test walks every file in the repository and checks the header")).toMatch(/guard-shaped done_when: dw1/);
+  // 사용자가 보는 행동을 관측하는 done_when은 걸리지 않는다.
+  expect(reasonFor("GET /healthz responds 200 with Cache-Control: no-store")).not.toMatch(/guard-shaped/);
+});
+
+test("plan validator does not run for other stages", () => {
+  const r = verifyStage({ stage: "review", out: out(review), agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" }, planLimits: { max_done_when: 1 } });
+  expect(r.ok).toBe(true);
+});
+
 test("implement/review/merge require a gates file; handoff gates must match the file", () => {
   const impl = { schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" };
   const noFile = verifyStage({ stage: "implement", out: out(impl), agentsLog: log([]), roster: [], orchestration: "workflow", gates: null });

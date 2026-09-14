@@ -572,6 +572,128 @@ test("factory-plan.js: synthesis sees R1 and R2; the second sign-off votes on th
   expect(result.summary).toBe("PLAN-DRAFT-2");
 });
 
+/*
+ * --- 감사 Task 9 (P2): plan 기본 = 단일 opus 1패스 + skeptic 1패스 ---
+ *
+ * 근거는 `docs/factory/dogfood/2026-09-14-plan-baseline.md`다: 4역할 토론은 이슈당 5.4×–33.7×를
+ * 쓰고도 #15·#18에서 단일 패스보다 못했고, must_fix 15건 중 5건이 토론이 스스로 발명한 done_when
+ * 때문에 생겼다. 토론은 load-bearing tier에만 남는다.
+ */
+
+const SINGLE_ROSTER = [
+  { name: "synthesizer", agentType: "plan-synthesizer", model: "opus", lessons: ".factory/lessons/plan-synthesizer.md" },
+  { name: "skeptic", agentType: "plan-skeptic", model: "opus", lessons: ".factory/lessons/plan-skeptic.md" },
+];
+const singleLoaderFix = (over = {}) => planLoaderFix({ roster: SINGLE_ROSTER, rounds: 2, plan: { mode: "single", max_done_when: 6 }, ...over });
+const singlePlanFix = (over = {}) => planFix({ roles: ["synthesizer", "skeptic"], rounds: 2, ...over });
+
+test("factory-plan.js: single mode runs exactly two passes — one opus planner, one skeptic — and no debate at all", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    if (opts.label === "plan:synthesizer") return singlePlanFix();
+    if (opts.label === "skeptic:skeptic") return { risks: [], done_when: [] };
+    return null;
+  };
+
+  const { result, calls, phases } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub, args: { issue: "42", context: ".factory/out/context.json" },
+  });
+
+  const agents = calls.filter((c) => c.opts.agentType !== "factory-loader");
+  expect(agents).toHaveLength(2);
+  expect(agents.map((c) => c.opts.agentType)).toEqual(["plan-synthesizer", "plan-skeptic"]);
+  expect(agents.map((c) => c.opts.model)).toEqual(["opus", "opus"]);
+  expect(labelled(calls, "R1:")).toHaveLength(0);
+  expect(labelled(calls, "R2:")).toHaveLength(0);
+  expect(labelled(calls, "sign:")).toHaveLength(0);
+
+  expect(validate("plan.v1", result).ok).toBe(true);
+  expect(result).toMatchObject({ issue: 42, tier: "standard", rounds: 2, orchestration: "workflow", guarantee: "structural" });
+  expect(result.roles).toEqual(["synthesizer", "skeptic"]);
+  expect(result.debate.mode).toBe("single");
+  // 선언된 phase 집합은 모드와 무관하게 고정이다(meta는 하나다).
+  expect(phases).toEqual(["Load", "Positions", "Cross-examination", "Synthesis", "Sign-off"]);
+  // done_when 상한은 skeptic이 알아야 한다 — 상한을 모르면 7번째 항목을 더해 핸드오프를 무효로 만든다.
+  expect(agents[1].prompt).toContain("6");
+});
+
+test("factory-plan.js: the skeptic pass may only ADD — planner items are never replaced or dropped", async () => {
+  const planner = singlePlanFix({
+    done_when: [{ id: "dw1", text: "PLANNER-TEXT", verify: "test_42_a", level: "unit" }],
+    open_risks: ["planner risk"],
+    dissent_log: [],
+  });
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    if (opts.label === "plan:synthesizer") return planner;
+    if (opts.label === "skeptic:skeptic") return {
+      risks: ["skeptic risk", "planner risk"],                                    // 중복은 한 번만
+      done_when: [
+        { id: "dw1", text: "SKEPTIC-OVERWRITE", verify: "test_42_a", level: "unit" },   // 같은 id — 무시된다
+        { id: "dw2", text: "connection failure without err.code still returns 503", verify: "test_42_b", level: "unit", covers: ["d1"] },
+      ],
+      dissent: [{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "covered by dw2" }],
+    };
+    return null;
+  };
+
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: stub, args: { issue: "42", context: ".factory/out/context.json" },
+  });
+
+  expect(result.done_when.map((d) => d.id)).toEqual(["dw1", "dw2"]);
+  expect(result.done_when[0].text).toBe("PLANNER-TEXT");
+  expect(result.done_when[1].covers).toEqual(["d1"]);
+  expect(result.open_risks).toEqual(["planner risk", "skeptic risk"]);
+  expect(result.dissent_log).toEqual([{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "covered by dw2" }]);
+  expect(result.summary).toBe(planner.summary);                                   // 종합은 계획자 자신의 최종본이다
+  // skeptic은 계획을 통째로 본다 — 무엇에 반대하는지 알아야 하기 때문이다.
+  expect(calls.find((c) => c.opts.label === "skeptic:skeptic").prompt).toContain("PLANNER-TEXT");
+  expect(result.debate.skeptic_added).toEqual({ done_when: 1, risks: 1, dissent: 1 });
+});
+
+test("factory-plan.js: a dead skeptic leaves the planner's plan standing (re-spawned once, then dropped)", async () => {
+  let skepticCalls = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    if (opts.label === "plan:synthesizer") return singlePlanFix({ summary: "PLANNER-ONLY" });
+    if (opts.label === "skeptic:skeptic") { skepticCalls++; return null; }
+    return null;
+  };
+  const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: "42", context: ".factory/out/context.json" } });
+  expect(skepticCalls).toBe(2);                                                   // 보험 재spawn 1회
+  expect(validate("plan.v1", result).ok).toBe(true);
+  expect(result.summary).toBe("PLANNER-ONLY");
+  expect(result.debate.skeptic_added).toBe(null);
+});
+
+test("factory-plan.js: a dead planner fails the single-mode stage closed — no plan, plan.v1 invalid", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return singleLoaderFix();
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: "42", context: ".factory/out/context.json" } });
+  expect(calls.filter((c) => c.opts.label === "plan:synthesizer")).toHaveLength(2);
+  expect(calls.filter((c) => c.opts.label === "skeptic:skeptic")).toHaveLength(0); // 계획이 없으면 반박할 것도 없다
+  expect(validate("plan.v1", result).ok).toBe(false);
+});
+
+test("factory-plan.js: load-bearing keeps the 4-role debate — the loader's mode is the authority", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix({ tier: "load-bearing", plan: { mode: "debate", max_done_when: 6 } });
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") return planFix({ tier: "load-bearing" });
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: "42", context: ".factory/out/context.json" } });
+  expect(labelled(calls, "R1:")).toHaveLength(4);
+  expect(labelled(calls, "R2:")).toHaveLength(4);
+  expect(labelled(calls, "sign:")).toHaveLength(4);
+  expect(validate("plan.v1", result).ok).toBe(true);
+});
+
 // --- Task 4: templates/factory/claude/workflows/factory-implement.js ---
 
 const FACTORY_IMPLEMENT_WORKFLOW = new URL("../../templates/factory/claude/workflows/factory-implement.js", import.meta.url).pathname;

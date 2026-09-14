@@ -145,7 +145,9 @@ stance  = "<이 역할이 토론에서 대변하는 입장, 한 문장>"
 
 ### Step 4: CHARTER 로스터/`plan_roles` diff 제안 — 조용히 적용하지 않는다
 
-여기서 **역할 종류에 따라 편집할 필드가 다르다** — 리뷰어와 plan 토론자는 서로 다른 소집 경로를 탄다(`factory/lib/config.js`의 `rosterFor`): review 스테이지는 `charter.roster[tier]`를, plan 스테이지는 `charter.plan_roles[tier] || charter.plan_roles.default`를 읽는다. **`roles.toml`에 블록이 있고 `lintAgentMd`/`doctor`가 전부 통과해도, CHARTER의 해당 필드에 이름이 없으면 그 역할은 절대 소집되지 않는다** — lint는 파일 구조만 보고, 소집 여부는 CHARTER가 결정한다. 둘 다 통과했다고 해서 실제로 도는 것은 아니다.
+여기서 **역할 종류에 따라 편집할 필드가 다르다** — 리뷰어와 plan 토론자는 서로 다른 소집 경로를 탄다(`factory/lib/config.js`의 `rosterFor`): review 스테이지는 `charter.roster[tier]`를, plan 스테이지는 **모드에 따라** `charter.plan_roles.single`(기본 `[synthesizer, skeptic]`) 또는 `charter.plan_roles[tier] || charter.plan_roles.default`를 읽는다. **`roles.toml`에 블록이 있고 `lintAgentMd`/`doctor`가 전부 통과해도, CHARTER의 해당 필드에 이름이 없으면 그 역할은 절대 소집되지 않는다** — lint는 파일 구조만 보고, 소집 여부는 CHARTER가 결정한다. 둘 다 통과했다고 해서 실제로 도는 것은 아니다.
+
+**plan 토론자를 새로 만들기 전에 이 사실을 사람에게 먼저 말한다: plan의 기본 모드는 토론이 아니다.** `plan: { mode: single, debate_tiers: [load-bearing] }`이 기본이므로 `plan_roles`에 이름을 넣어도 그 역할은 **`load-bearing` tier에서만** 소집된다(감사 Task 9 — `docs/factory/audit/response-task-9.md`: 4역할 토론은 5.4×–33.7×를 쓰고도 표본의 유일한 load-bearing 이슈에서만 단일 패스를 이겼다). 모든 tier에서 그 역할을 돌리고 싶다면 `plan.mode: debate`로 바꾸는 것이고, 그것은 역할 추가가 아니라 **팩토리 비용 정책의 변경**이라 `/know-thy-build:proposal` 경로로 실측을 들고 가야 한다.
 
 **리뷰어(`[review.<short>]`)** → `docs/factory/CHARTER.md` frontmatter `roster:`(`docs: [...]`, `standard: [...]`, `load-bearing: [...]`)에 추가하는 diff — 여기 들어가는 것은 접두어 없는 `<short>`다(`correctness`·`security`처럼):
 

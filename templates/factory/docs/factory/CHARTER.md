@@ -10,7 +10,8 @@ roster:
 plan_roles:
   docs: [architect, skeptic]
   default: [product-advocate, architect, skeptic, operator]
-plan_rounds: { docs: 2, default: 3 }
+plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
+plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 # 사람이 PR마다 서명하는가(외부 감사 2026-09-14 H6). true면 `factory bootstrap`이 `factory-merge` 환경에
 # required reviewer 1명(소유자)을 걸어 **모든 머지 잡이 사람 앞에서 멈춘다**. false면 다크 머지 —
@@ -32,11 +33,16 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
-## Plan 토론 로스터
-| tier | 토론자 | 라운드 |
-|---|---|---|
-| docs | architect, skeptic | 2 (입장 → synthesizer 종합; 교차검토 생략) |
-| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+## Plan 로스터 (기본은 토론이 아니다)
+| tier | 모드 | 역할 | 라운드 |
+|---|---|---|---|
+| docs / standard | single | synthesizer(계획자, opus) + skeptic | 2 (계획 1패스 → 반박 1패스; 반박은 **추가만** 한다) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 (`plan_rounds`) |
+
+`plan.debate_tiers`에 이름이 있는 tier만 4역할 토론을 돈다. `plan.mode: debate`면 tier와 무관하게
+언제나 토론이다(되돌리는 스위치). `plan.max_done_when`은 계획이 스스로 만드는 결함 표면의 상한이고,
+`verify-stage`의 plan 검증기가 그 상한과 "dissent는 done_when으로 나온다"를 **스크립트로** 집행한다.
+근거는 `docs/factory/audit/response-task-9.md`.
 
 ## Hard limits
 - review rounds K = 3

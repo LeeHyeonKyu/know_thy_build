@@ -62,6 +62,8 @@ export function verifyStageCli({ root, argv = [], home = homedir(), readFile = r
     agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")),
     roster: ctx.roster || [], rolePrefix: ROLE_PREFIX[stage] || "",
     expectedRounds: ctx.rounds, orchestration: ctx.orchestration,
+    // plan 검증기(감사 Task 9)의 두 입력은 CHARTER의 상한과 이슈 본문(가드 면제)이다 — 둘 다 context.json에 있다.
+    planLimits: ctx.plan, issueBody: ctx.issue?.body,
   });
   return { ok: r.ok, reasons: r.reasons, transcript: from };
 }
