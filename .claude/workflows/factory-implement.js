@@ -149,6 +149,10 @@ if (Number(loaded.issue) !== issue) {
 // (`roles.toml [implement.builder]` / `[implement.verifier]`, both opus), not a CHARTER-driven debate
 // roster. The loader still runs — it is where issue/tier/pr/must_fix/disputed come from.
 const tier = loaded.tier;
+// ADR-020 KTB-43 — the paths `[runtime].setup` already rewrote in THIS run (run-stage's KTB-39
+// baseline, carried through `loaded.json` because a workflow script cannot read files, §4.2.3).
+// The builder is told never to commit them; empty is the normal case.
+const setupDirty = Array.isArray(loaded.setup_dirty) ? loaded.setup_dirty.filter(Boolean) : [];
 const mustFix = Array.isArray(loaded.must_fix) ? loaded.must_fix.filter(Boolean) : [];
 const disputed = Array.isArray(loaded.disputed) ? loaded.disputed.filter(Boolean) : [];
 const priorPr = typeof loaded.pr === 'number' ? loaded.pr : null;
@@ -218,7 +222,7 @@ const PROTECTED =
 // ADR-020 KTB-23 fix — a `factory:harness` issue is the one issue whose whole point is to change those
 // files, and the runner already runs its builder with the variant settings + FACTORY_HARNESS_ISSUE=1
 // (KTB-20/KTB-23). The prompt was the one place that never got that judgement: it still listed
-// package.json/vitest.config/.factory as PROTECTED and rule 8 still said "fill harness_needed and STOP",
+// package.json/vitest.config/.factory as PROTECTED and rule 8 (now rule 9) still said "fill harness_needed and STOP",
 // so the harness issue's own builder parked itself and the factory opened a harness issue for the
 // harness issue — a chain, with the parked feature waiting at the end of it. KTB-27: the flag now
 // arrives as the second token of `args.raw` (`rawHarnessStr`, from the same label read that picked
@@ -254,7 +258,7 @@ const builderReading =
 const normalProtectedBlock =
   `Protected paths — you must not edit ${PROTECTED}. An \`Edit\` there is denied by a hook, and a PR ` +
   `carrying such a change is never auto-merged — the merge stage hands it to a human instead.\n` +
-  `8. If the change genuinely needs one of those files changed — a new dependency, a new script, a ` +
+  `9. If the change genuinely needs one of those files changed — a new dependency, a new script, a ` +
   `runner/linter config change — fill \`harness_needed\` in your output, one entry per file: ` +
   `{file: the exact path, change: what must change (e.g. "add dependency pg@^8 to dependencies"), ` +
   `why: which done_when ids need it and why it cannot be done otherwise}. Then STOP: commit and push ` +
@@ -275,7 +279,7 @@ const harnessProtectedBlock =
   `Still protected — you must not edit ${PROTECTED_FOR_HARNESS_ISSUE}. An \`Edit\` there is denied by ` +
   `a hook. (\`.factory/package.json\` is the runner's own manifest and stays shut: opening it would ` +
   `change the runtime that runs the gates.)\n` +
-  `8. Do NOT fill \`harness_needed\` and do NOT stop — make the change. Leave the field out entirely. ` +
+  `9. Do NOT fill \`harness_needed\` and do NOT stop — make the change. Leave the field out entirely. ` +
   `Asking for a harness change from inside the harness issue opens a second harness issue behind this ` +
   `one and the feature parked on it waits for both; the factory refuses to chain them, so the request ` +
   `is recorded and then ignored. Edit the files above directly, add the test that proves the new ` +
@@ -283,6 +287,26 @@ const harnessProtectedBlock =
   `The merge is still a human's: this PR carries protected paths, so the merge stage will refuse to ` +
   `auto-merge it and hand it to a person. That is the design — you make the diff, a human approves it. ` +
   `Do not try to merge it yourself.\n`;
+
+// ADR-020 KTB-43 — the rule the own-calendar #3 builder did not have. It committed its work, wrote the
+// handoff with that sha, then ran `flutter test`, which regenerated the toolchain files `[runtime].setup`
+// had already written once, and committed THOSE as "reconcile flutter toolchain drift left by verification
+// run". The branch head no longer matched the head_sha in the handoff and the issue went to needs-human.
+// Two rules, not one: what not to commit (regenerated files) and when to stop committing (after the
+// handoff). The stage now repairs the drift-only case on its own — this is so it does not have to.
+const driftRule =
+  `8. NEVER commit a file that setup or the tests regenerate, and NEVER commit anything at all after you ` +
+  `have returned your answer. This run's regenerated paths are ` +
+  (setupDirty.length > 0
+    ? `\`setup_dirty\` in the context payload: ${setupDirty.map((p) => `\`${p}\``).join(', ')}. `
+    : `listed as \`setup_dirty\` in the context payload (empty for this run). `) +
+  `\`[runtime].setup\` rewrote them before your session started and the stage restored them for you; ` +
+  `rule 5's commands — or any verification you run — can rewrite them again. If that happens, LEAVE THE ` +
+  `TREE DIRTY: the stage restores it, an uncommitted file never reaches the PR, and "reconciling toolchain ` +
+  `drift" in a follow-up commit is not tidying up — it makes the branch head differ from the head_sha you ` +
+  `reported, which is a mismatch the factory refuses. Do not \`git add\` them, do not amend, do not push ` +
+  `again after rule 7. The stage drops such a commit by itself when it touches ONLY those paths, but a ` +
+  `commit that mixes them with real work cannot be dropped and stops the round (ADR-020 KTB-43).\n`;
 
 const buildRules =
   `1. You are ALREADY on the branch \`claude/fq-${issue}\` — the stage checked it out before this session ` +
@@ -314,7 +338,9 @@ const buildRules =
   `file, then pass \`--body-file <path>\`. If the PR already exists, push to it and update its body with ` +
   `\`gh pr edit <pr> --body-file <path>\` instead of opening a second one.\n` +
   `7. Return head_sha = the output of \`git rev-parse HEAD\` **after** the push: 40 lowercase hex ` +
-  `characters, not a short sha and not a branch name.\n\n` +
+  `characters, not a short sha and not a branch name.\n` +
+  driftRule +
+  `\n` +
   (isHarnessIssue ? harnessProtectedBlock : normalProtectedBlock) +
   `Never write a credential, token or key into the repository, a test fixture, or a log line.`;
 

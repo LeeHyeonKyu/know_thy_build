@@ -245,6 +245,24 @@ test("factory-builder.md: opus, may write, and is NOT behind deny-all-writes —
   expect(frontmatter.hooks?.PreToolUse).toBeUndefined();
 });
 
+/**
+ * ADR-020 KTB-43 — own-calendar #3: 핸드오프를 쓴 뒤에 붙인 "toolchain drift 정리" 커밋 하나가
+ * 브랜치 head를 핸드오프의 `head_sha`와 갈라 놓아 이슈가 needs-human에 앉았다. 스테이지가 그
+ * 드리프트 전용 커밋을 떨어뜨리게 됐지만(run-stage), 애초에 만들지 않는 것이 한 라운드 싸다.
+ */
+test("factory-builder.md: never commit regenerated files, never commit after the handoff (KTB-43)", () => {
+  const { sections } = parseAgentMd(readAgent("factory-builder"));
+  const find = (k) => [...sections.entries()].find(([key]) => key.startsWith(k))[1];
+  const mustNot = find("You must not");
+  expect(mustNot).toContain("setup_dirty");
+  expect(mustNot).toMatch(/setup·테스트가 다시 만드는 파일을 커밋한다/);
+  expect(mustNot).toMatch(/핸드오프를 쓴 뒤에 커밋한다/);
+  expect(mustNot).toContain("KTB-43");
+  // 규칙은 "지우라"가 아니라 "그냥 둬라"다 — 스테이지가 되돌린다(KTB-39의 복원 경로).
+  expect(mustNot).toMatch(/그냥 둔다/);
+  expect(find("Lens")).toContain("setup_dirty");
+});
+
 test("factory-builder.md: the protected build-config paths are off-limits in both You must not and Lens, with the harness-change escape hatch", () => {
   const text = readAgent("factory-builder");
   const { sections } = parseAgentMd(text);

@@ -464,6 +464,12 @@ run-stage.js <stage> <issue>
      (implement는 대신 **두 가지**를 다시 묻는다(ADR-023 Task 8b): `git rev-parse --abbrev-ref HEAD`가 아직 2.3이 체크아웃한
       `claude/fq-<issue>`인가, 그리고 팩토리 소유 경로가 아직 2.4의 sha와 바이트 동일한가(overlayDrift 재실행). 어느 쪽이든
       아니면 그 세션이 무슨 설정으로 무엇을 판단했는지 알 수 없다 = 판정 불가 = `factory:blocked`이고, 5·6을 돌리지 않는다.)
+     (그리고 implement만, **5보다 먼저**: 브랜치 head가 세션 산출물의 `head_sha`보다 앞서 있고 그 사이 커밋이 건드린 파일이 전부
+      1.5의 기준선이거나 `[runtime].setup_generated` 글롭이면 — 즉 빌더가 핸드오프를 쓴 뒤 툴체인 재생성물만 커밋했으면 —
+      스테이지가 `git reset --hard <head_sha>` + `git push --force-with-lease=<branch>:<head>`로 그 커밋을 떨어뜨리고
+      `dropped post-handoff drift commit(s): …` 한 줄과 `<!-- factory-drift-dropped … -->` 마커를 남긴 뒤 계속한다(ADR-020 KTB-43;
+      5보다 먼저인 이유는 `gates.json`의 `head_sha`가 브랜치 head에 다시 묶이기 때문이다). 드리프트 밖의 파일이 하나라도
+      섞였거나 리스가 깨졌으면 되돌리지 않고 **파일 이름을 실어** `factory:needs-human`으로 거부한다 — 핸드오프(7)는 그대로 나간 뒤에.)
   5. gates.js <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
                                              #   gates.json이 진실이다 — handoff(7)에 실리는 gates 필드는 이 파일의 복사본일 뿐이고, 워크플로가
                                              #   다른 값을 써 넣으면 6이 "handoff gates mismatch"로 거부하며, 아예 빠뜨렸으면 6이 파일 값으로 채운다(ADR-010).

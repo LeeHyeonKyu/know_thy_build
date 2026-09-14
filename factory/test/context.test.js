@@ -284,6 +284,24 @@ test("M5: context.json carries roles[<name>].model + cold_read, and .factory/out
   expect(loaded.contexts.qa).toBe(".factory/out/context.qa.json");
 });
 
+/**
+ * ADR-020 KTB-43 — 빌더에게 "이 파일들은 커밋하지 마라"를 말하려면 그 목록이 프롬프트에 있어야
+ * 하는데, 워크플로 스크립트는 파일을 읽을 수 없다(§4.2.3). 그래서 스테이지가 찍은 KTB-39 기준선이
+ * `loaded.json`을 타고 간다 — 없으면 빈 배열이지 `undefined`가 아니다(워크플로가 그대로 filter한다).
+ */
+test("KTB-43: the stage's setup_dirty baseline reaches context.json and the loaded payload", async () => {
+  const { r, gh, issue } = reviewRoot();
+  const setupDirty = { ok: true, entries: [{ path: "client/analysis_options.yaml", code: " M" }, { path: "client/analysis_options.yaml", code: " M" }, { path: "client/gen/x.dart", code: "??" }] };
+  const ctx = await buildContext({ root: r, gh, issue, stage: "review", setupDirty });
+  expect(ctx.setup_dirty).toEqual(["client/analysis_options.yaml", "client/gen/x.dart"]);   // 중복은 접힌다
+  expect(JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8")).setup_dirty)
+    .toEqual(["client/analysis_options.yaml", "client/gen/x.dart"]);
+
+  const clean = reviewRoot();
+  await buildContext({ root: clean.r, gh: clean.gh, issue: clean.issue, stage: "review" });
+  expect(JSON.parse(readFileSync(join(clean.r, ".factory/out/loaded.json"), "utf8")).setup_dirty).toEqual([]);
+});
+
 test("M5: triage's loaded roster is the single named role, with its model from roles.toml", async () => {
   const r = root();
   const gh = { issue: vi.fn(async () => ({ number: 12, title: "T", body: "" })), comments: vi.fn(async () => []) };

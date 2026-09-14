@@ -885,6 +885,42 @@ test("factory-implement.js: a harness issue gets the variant rule 8 — make the
   expect(await promptFor("true")).toContain("THIS IS A `factory:harness` ISSUE");
 });
 
+/**
+ * ADR-020 KTB-43 — own-calendar #3 implement: 빌더가 커밋하고(`bfff638`) 그 sha로 핸드오프를 쓴 뒤
+ * `flutter test`가 다시 만든 툴체인 파일을 또 커밋해(`f1909c6`) 브랜치 head가 핸드오프와 갈렸고,
+ * 이슈는 needs-human으로 갔다. 프롬프트에 없던 규칙 둘을 여기서 못 박는다: **무엇을** 커밋하지
+ * 않는가(재생성 파일), **언제까지만** 커밋하는가(핸드오프 전까지).
+ */
+test("factory-implement.js: the builder is told never to commit regenerated files, never to commit after the handoff, and is given this run's setup_dirty list (KTB-43)", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const promptFor = async (loaded) => {
+    const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+      agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded },
+    });
+    return byType(calls, "factory-builder")[0].prompt;
+  };
+
+  const dirty = await promptFor(implLoaderFix({ setup_dirty: ["client/analysis_options.yaml", "client/macos/Flutter/GeneratedPluginRegistrant.swift"] }));
+  expect(dirty).toContain("NEVER commit a file that setup or the tests regenerate");
+  expect(dirty).toContain("NEVER commit anything at all after you have returned your answer");
+  expect(dirty).toContain("LEAVE THE TREE DIRTY");
+  // 목록은 산문이 아니라 이번 런의 사실이다 — 스테이지가 찍어 `loaded.json`으로 실어 보낸 그것.
+  expect(dirty).toContain("`client/analysis_options.yaml`");
+  expect(dirty).toContain("`client/macos/Flutter/GeneratedPluginRegistrant.swift`");
+  expect(dirty).toContain("ADR-020 KTB-43");
+
+  // 목록이 비는 것이 정상이다(대부분의 하네스는 트리를 더럽히지 않는다) — 그래도 규칙은 그대로 간다.
+  const clean = await promptFor(implLoaderFix());
+  expect(clean).toContain("`setup_dirty` in the context payload (empty for this run)");
+  expect(clean).toContain("NEVER commit a file that setup or the tests regenerate");
+  // 보호 경로 블록은 그 뒤로 한 칸 밀렸을 뿐 그대로다
+  expect(clean).toContain("9. If the change genuinely needs one of those files changed");
+});
+
 // KTB-27 — Claude Code does not substitute positional `$1`/`$2` in a command md, only `$ARGUMENTS`
 // (verified live: `claude -p "/argtest 42 true"` filled `$ARGUMENTS` correctly but turned `$1` into
 // "true" and left `$2` as the literal text "$2"). The implement dispatcher now passes the whole
