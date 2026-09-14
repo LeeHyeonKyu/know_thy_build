@@ -409,11 +409,30 @@ run-stage.js <stage> <issue>
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
                                              #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 **2분마다** 같은 코멘트에 PATCH로 갱신(ADR-022)
   2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
+  2.3 (implement만) 브랜치 체크아웃           # ADR-023 Task 8b — `claude/fq-<issue>`는 **스테이지가** 체크아웃한다(빌더가 아니라).
+                                             #   원격에 있으면 `git fetch origin +refs/heads/claude/fq-<n>:refs/remotes/origin/claude/fq-<n>` 후
+                                             #   `git checkout -B claude/fq-<n> origin/claude/fq-<n>`, 없으면 스테이지 자신의 커밋에서 `git checkout -b claude/fq-<n> <sha>`.
+                                             #   원격에 없는데 로컬에만 있으면 진행하지 않는다(push되지 않은 커밋을 `-B`로 지우지 않는다). 실패는 `factory:blocked`.
+                                             #   **KTB-38 — 기존 브랜치에는 base를 머지한다**: `checkout -B` 직후 스테이지 자신의 커밋을
+                                             #   `git merge --no-edit --no-ff <stage sha>`로 브랜치에 얹고(이미 조상이면 건너뛴다) 빌더가 뜨기 **전에**
+                                             #   `git push origin claude/fq-<n>`한다 — 2.4의 overlay가 설정을 base로 고정하므로, 트리가 낡은 PR이면
+                                             #   그 설정이 부르는 파일이 트리에 없어 게이트가 통째로 RED가 된다(실측: KTB #3 R5 — PR head가 1.2.0
+                                             #   이전이라 `factory/bin/lint.js`가 없었다). 머지 커밋은 팩토리의 것이고(`user.name factory`), 충돌하면
+                                             #   `git merge --abort` 후 `factory:blocked` cause `undecidable`("stale PR conflicts with base — rebase by hand").
+                                             #   머지 대상은 `origin/<default_branch>`가 아니라 **2.4와 같은 sha**다 — 갈라지면 overlay가 그 차이를 되돌린다.
+                                             #   **왜 스테이지가 하는가**: 예전에는 빌더가 `claude -p` 세션 **안에서** 체크아웃했고, 훅 스크립트는 호출마다
+                                             #   디스크에서 읽히므로 그 순간부터 세션의 모든 판정이 PR의 `.claude/hooks/*`·settings·CLAUDE.md로 이뤄졌다
+                                             #   (2.4의 overlay가 세션 도중 무효가 됐다). 이제 세션 안의 브랜치 이동은 훅이 막는다(`FACTORY_STAGE` 세션 한정).
   2.4 (implement/review/merge) overlay        # ADR-020 KTB-37 — 스테이지는 **PR의 코드** 위에서 돌지만 **팩토리 자신의 설정**은 언제나 스테이지 자신의 커밋(CI는 `GITHUB_SHA`,
                                              #   로컬은 `origin/<default_branch>`)의 것이다: 체크아웃 직후 `.factory/**`(단 `.factory/out/**` 제외) · `.claude/**` ·
                                              #   `docs/factory/CHARTER.md`를 그 커밋에서 덮어쓰고(`git checkout <sha> -- …`) 무엇을 덮었는지 한 줄 기록한다.
                                              #   실패하면 진행하지 않는다(fail closed → `factory:blocked`). implement에서 덮을 것이 **있으면**(= 트리가 base가 아니었다)
                                              #   빌더를 띄우지 않는다 — overlay가 PR 커밋에 실려 나갈 경로 자체를 없앤다. 무결성·보호 경로 판정은 영향 없다(`git show <base>:<file>`로 읽는다).
+                                             #   **예외 하나(ADR-023 Task 8b 후속)**: `factory:harness` 이슈의 implement에서는 `HARNESS_OPENS`
+                                             #   (`.factory/harness.toml`·`package.json`·`package-lock.json`·`vitest.config.*`·`playwright.config.*` — L2 deny가
+                                             #   여는 바로 그 목록)를 overlay가 **덮지 않는다**: 그 파일을 고치는 것이 그 이슈의 일이라, 덮으면 모든 하네스
+                                             #   rework 라운드가 위 규칙에 걸려 멈춘다. 나머지(훅·settings·에이전트 프롬프트·ci-settings·CHARTER·세션 설정)는
+                                             #   그대로 base의 것이고, harness.toml의 위험한 섹션은 L1의 섹션 검사가 계속 사람 머지로 돌린다.
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.js <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
                                              #   · CHARTER 한계 · lessons 경로 · orchestration 모드
@@ -434,6 +453,9 @@ run-stage.js <stage> <issue>
       변화가 하나라도 있으면 6을 건너뛰고 곧장 needs-human, exit 2 — 훅이 놓친 모양의 구조적 백스톱이다(ADR-020 KTB-14).
       `git status` 자체가 실패한 것은 더러운 트리가 아니라 **판정 불가**라 needs-human이 아니라 `factory:blocked`다(KTB-14 r1). implement는
       건너뛴다(유일한 쓰기 스테이지), merge는 애초에 이 단계 자체를 타지 않는다.)
+     (implement는 대신 **두 가지**를 다시 묻는다(ADR-023 Task 8b): `git rev-parse --abbrev-ref HEAD`가 아직 2.3이 체크아웃한
+      `claude/fq-<issue>`인가, 그리고 팩토리 소유 경로가 아직 2.4의 sha와 바이트 동일한가(overlayDrift 재실행). 어느 쪽이든
+      아니면 그 세션이 무슨 설정으로 무엇을 판단했는지 알 수 없다 = 판정 불가 = `factory:blocked`이고, 5·6을 돌리지 않는다.)
   5. gates.js <level>                        # implement/review/merge. 에이전트 밖에서 실행. 판정 파일 .factory/out/gates.json 생성
                                              #   gates.json이 진실이다 — handoff(7)에 실리는 gates 필드는 이 파일의 복사본일 뿐이고, 워크플로가
                                              #   다른 값을 써 넣으면 6이 "handoff gates mismatch"로 거부하며, 아예 빠뜨렸으면 6이 파일 값으로 채운다(ADR-010).
