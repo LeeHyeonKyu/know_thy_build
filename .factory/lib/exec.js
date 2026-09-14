@@ -51,6 +51,10 @@ export function run(cmd, args = [], opts = {}) {
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (e) => resolve({ code: 127, stdout, stderr: stderr + String(e) }));
     child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    // 자식이 stdin을 읽기 전에 끝나면(예: jq가 없어 즉시 exit 2 하는 훅) 쓰기가 EPIPE로 터진다 — 그 오류는
+    // 자식의 종료 코드로 이미 판정되므로 삼킨다. 놓치면 Node의 unhandled 'error'가 되어 러너/vitest가 죽는다
+    // (1.3.0 publish validate, Linux에서만 재현: 타이밍이 macOS보다 빠르다).
+    child.stdin.on("error", () => {});
     if (opts.input != null) child.stdin.write(opts.input);
     child.stdin.end();
   });

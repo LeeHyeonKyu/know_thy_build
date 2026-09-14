@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, cpSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, readdirSync, cpSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -582,9 +582,10 @@ test("MF-3: there is no --root — the tool always writes under the process cwd"
  */
 test("re-review SF-3: attach refuses a source outside the repo and temp dirs", () => {
   const root = tmp();
-  const outside = mkdtempSync(join(tmpdir(), "elsewhere-"));
-  // `/tmp` 아래가 아닌 "밖"을 만들려면 뿌리 목록에 없는 곳이어야 한다 — 저장소 안에 심볼릭 링크를 두고
-  // 그 링크가 밖을 가리키게 한다(realpath 이후 판정이라는 사실까지 함께 고정한다).
+  // "밖"은 허용 뿌리(`root`, /tmp, /private/tmp, $TMPDIR) 어디에도 속하지 않아야 한다. Linux 러너의
+  // `tmpdir()`은 `/tmp`라 그 아래는 **안**이다(1.3.0 publish validate가 여기서 깨졌다) — 홈 디렉터리 아래에 만든다.
+  const outside = mkdtempSync(join(homedir(), ".ktb-elsewhere-"));
+  // 저장소 안에 심볼릭 링크를 두고 그 링크가 밖을 가리키게 한다(realpath 이후 판정이라는 사실까지 함께 고정한다).
   const secret = join(outside, "keys.txt");
   writeFileSync(secret, "s3cret");
   const link = join(root, "innocent.txt");
@@ -600,6 +601,7 @@ test("re-review SF-3: attach refuses a source outside the repo and temp dirs", (
   expect(runCli(["attach", "--issue", "3", "--claim", "dw1", "--kind", "log", "--file", link, "--summary", "leak"], cliOpts(root, { env: {}, err: (s) => errs.push(s) }))).toBe(1);
   expect(errs.join("\n")).toMatch(/must live inside the repo or a temp dir/);
   expect(existsSync(manifestPath(root, 3))).toBe(false);        // 거절된 출처는 한 바이트도 남기지 않는다
+  rmSync(outside, { recursive: true, force: true });
 });
 
 test("re-review SF-3: attach refuses a source the session's own Read deny list covers (.env, .git, .npmrc)", () => {
