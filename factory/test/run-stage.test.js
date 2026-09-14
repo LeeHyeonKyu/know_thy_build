@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runStage, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS } from "../bin/run-stage.js";
@@ -10,6 +10,9 @@ import { renderHandoff, parseHandoffs } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
 import { makeFakeRun } from "../lib/exec.js";
+import { parseProgressMarker } from "../lib/progress.js";
+import { appendRunRecord } from "../lib/run-record.js";
+import { parseRunRecord } from "../lib/usage.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
   const calls = [];
@@ -837,6 +840,34 @@ test("M4: the usage line carries num_turns, terminal_reason and per-model cost",
   expect(line).toContain("claude-opus-4-6=$0.4");
   expect(line).toContain("claude-haiku-4-5=$0.02");
   expect(usageLine(undefined)).toContain("models: n/a");               // claude가 아무것도 못 뱉어도 터지지 않는다
+  expect(usageLine(undefined).split("\n")).toHaveLength(1);            // progress를 안 주면 예전 그대로 한 줄
+});
+
+/**
+ * ADR-022 — 런 기록에 **에이전트별** 토큰이 남는다. 봉투의 `usage`는 "이 런이 $12를 썼다"까지만
+ * 말한다: 그 돈을 어느 리뷰어가 썼는지는 진행 스냅샷에만 있고, 그게 로스터를 손볼 때의 유일한 근거다.
+ * 마커는 하트비트 코멘트와 **같은 모양**이라 뷰어가 살아 있는 런과 끝난 런을 하나의 파서로 읽는다.
+ */
+test("the usage line carries the final progress:v1 marker, and appendRunRecord keeps it in the section", () => {
+  const progress = {
+    stage: "review", issue: 7, runner: "gha-1", started: "2026-09-14T10:00:00Z", updated: "2026-09-14T10:30:00Z",
+    step: { phase: "R2", label: "R2:qa", since: "2026-09-14T10:25:00Z" },
+    agents: [{ label: "R1:correctness", kind: "subagent", status: "done", started: "2026-09-14T10:00:00Z", ended: "2026-09-14T10:12:00Z", last_tool: "Read a.js", turns: 9, input_tokens: 120000, output_tokens: 8000, cache_read_tokens: 0, cost_usd: 0.8 }],
+    totals: { turns: 9, input_tokens: 120000, output_tokens: 8000, cache_read_tokens: 0, cost_usd: 0.8 },
+    files_touched: [],
+  };
+  const line = usageLine({ usage: { input_tokens: 10 }, total_cost_usd: 0.8, num_turns: 9, terminal_reason: "end_turn" }, progress);
+  const [first, second] = line.split("\n");
+  expect(first).toMatch(/^usage: /);                                   // 기존 파서(`lib/usage.js`의 USAGE_RE)는 첫 줄만 본다
+  expect(parseProgressMarker(second)).toEqual(progress);
+
+  const root = mkdtempSync(join(tmpdir(), "rs-prog-"));
+  const p = appendRunRecord({ root, issue: 7, stage: "review", runnerId: "gha-1", now: "2026-09-14T10:30:00Z", lines: ["verify: ok", line] });
+  const text = readFileSync(p, "utf8");
+  // 같은 섹션 안이다 — parseRunRecord가 읽는 usage 줄과 마커가 한 헤더 아래 있다
+  const section = text.slice(text.indexOf("## review · "));
+  expect(parseProgressMarker(section).totals.input_tokens).toBe(120000);
+  expect(parseRunRecord(text)[0]).toMatchObject({ stage: "review", num_turns: 9, cost_usd: 0.8 });
 });
 
 // ── C1: 커밋/PR 바인딩 ────────────────────────────────────────────────────

@@ -103,6 +103,7 @@ With both actor tokens set, `factory bootstrap` requires **1 approving review fr
 - `factory run <stage> <issue> --remote` — dispatch the same stage as a GitHub Actions workflow run instead of running it locally (also restarts a stalled/blocked stage; `merge` accepted)
 - `factory run retro [--force]` — run the merge-triggered retro job (light deterministic harvest every merge; full analysis + dark lessons/examples PR, human-approved proposal PR, or `--force` to skip the merge-count threshold)
 - `factory status` — Needs You / queue / in progress / recent merges / usage (read-only)
+- **Live progress in the heartbeat comment (ADR-022)** — a running stage edits one issue comment every 2 minutes with the current step, every agent's status and last tool, and tokens/cost so far, plus a machine-readable `<!-- factory-progress:v1 {…} -->` marker that also lands in `docs/factory/runs/<n>.md` when the run ends. It is read off the session transcripts the agents already write, never from tool *results* — so no file content or secret can ride out on a public comment.
 
 Design and rationale: [`docs/superpowers/specs/2026-09-10-factory-design.md`](docs/superpowers/specs/2026-09-10-factory-design.md) · decisions: [`docs/factory/DECISIONS.md`](docs/factory/DECISIONS.md)
 

@@ -87,6 +87,50 @@ export function parseRunRecord(text) {
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 /**
+ * §4.4 — **모델별 list price (USD / 1M 토큰), 이 저장소의 유일한 가격표**(ADR-022).
+ *
+ * 여기 있는 이유: 끝난 런의 비용은 `claude -p` 봉투가 직접 말해 주지만(`total_cost_usd`·`modelUsage`),
+ * **도는 중인** 런은 아무도 말해 주지 않는다 — 트랜스크립트에는 모델 이름과 토큰 수만 있다. 그래서
+ * `lib/progress.js`가 실시간 비용을 여기서 계산한다. 표를 두 벌 두면 "라이브 $0.41 / 최종 $0.38"처럼
+ * 조용히 어긋나므로, 가격을 아는 곳은 이 파일 하나다.
+ *
+ * 매칭은 **패턴 순서대로 첫 히트**다(정확한 ID 목록이 아니다): 모델 ID는 계속 늘어나고, 로스터는
+ * `opus`/`sonnet`/`haiku` 별칭으로도 적힌다(`roles.toml`). 어느 패턴에도 걸리지 않으면 `null`이고,
+ * 비용은 **0으로 더해진다** — 모르는 모델에 아무 가격이나 붙여 그럴듯한 숫자를 만드는 것보다
+ * "비용 미상"이 낫다(`summarizeUsage`가 `n/a`를 합산에서 빼는 것과 같은 원칙).
+ *
+ * 값의 출처: Anthropic 공개 list price(2026-06 기준). 캐시는 파생값이다 — 읽기 0.1×, 쓰기 1.25×.
+ */
+export const MODEL_PRICES = [
+  [/fable|mythos/, { input: 10, output: 50 }],
+  [/opus/, { input: 5, output: 25 }],
+  [/sonnet-4|sonnet-3/, { input: 3, output: 15 }],
+  [/sonnet/, { input: 2, output: 10 }],
+  [/haiku/, { input: 1, output: 5 }],
+];
+export const CACHE_READ_MULTIPLIER = 0.1;
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+
+/** 모델 이름(또는 별칭) → `{input, output}` USD/1M. 모르는 모델은 null. */
+export function modelPrice(model) {
+  const m = String(model ?? "").toLowerCase();
+  if (!m) return null;
+  for (const [re, price] of MODEL_PRICES) if (re.test(m)) return price;
+  return null;
+}
+
+/** 한 번의 응답(또는 합산된 usage) → USD. 모르는 모델이면 0 — 지어내지 않는다. */
+export function costFromUsage({ model, input_tokens = 0, output_tokens = 0, cache_read_tokens = 0, cache_creation_tokens = 0 } = {}) {
+  const p = modelPrice(model);
+  if (!p) return 0;
+  const perToken = (rate) => rate / 1e6;
+  return (input_tokens * perToken(p.input))
+    + (output_tokens * perToken(p.output))
+    + (cache_read_tokens * perToken(p.input) * CACHE_READ_MULTIPLIER)
+    + (cache_creation_tokens * perToken(p.input) * CACHE_WRITE_MULTIPLIER);
+}
+
+/**
  * Map<issue, run-기록 텍스트> → 이슈별/기간별/전체 합산. cost_usd는 n/a(null)를 무시하고 더한다
  * (n/a를 0으로 보면 "돌았지만 비용 미보고"와 "정말 비용이 0"을 구분 못 한다 — 그냥 합산에서 뺀다).
  *

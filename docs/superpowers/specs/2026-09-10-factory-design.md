@@ -370,7 +370,7 @@ run-stage.js <stage> <issue>
                                              #   돌고, 개발자의 ~/.claude.json을 말없이 고쳐서는 안 된다. 가드는 trust-workspace 자신의 코드다(Plan 1a) — 별도 composite action이 아니다.
   1. claim.js <issue> <stage>                # 모든 스테이지. lock 브랜치 factory/lock-<issue> push (git ref 생성은 원자적).
                                              #   lock 커밋은 `git commit-tree <빈 트리> -m "lock issue=<issue> stage=<stage> runner=<runnerId> at=<ts>"` — 빈 트리 + 고유 메시지가 매 시도 다른 SHA를 만든다.
-                                             #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 10분마다 같은 코멘트에 PATCH로 갱신
+                                             #   실패 = 다른 러너/로컬이 선점 → exit 0. heartbeat 시작 — 이슈 코멘트 `<!-- factory-heartbeat issue=<issue> -->` 마커를 **2분마다** 같은 코멘트에 PATCH로 갱신(ADR-022)
   2. assert-handoff.js <stage> <issue>       # 3.3의 요구 handoff 확인. 없으면 needs-human, exit 2
   2.5 (implement만) transition → in-progress # assert 직후·claude 호출 전. planned|rework → in-progress ("implement claim", §3.2). 거부되면 기록하고 exit 2, 스테이지를 돌리지 않는다
   3. build-context.js <stage> <issue>        # .factory/out/context.json: 이슈 본문 · 스펙 · 직전 handoff · 이번 잡의 로스터(roles.toml × tier)
@@ -431,6 +431,8 @@ run-stage.js <stage> <issue>
 **merge 스테이지의 판정.** `factory:merged` 전이가 보는 `checksGreen`·`integrityGreen`은 `run-stage.js`가 아니라 `mergeGates`(L1)가 채운다: `integrityGreen`은 **로컬 체크아웃 HEAD가 PR head sha와 같을 때만** 계산한다 — 다르면 integrity를 돌리지도 않고 false로 둔다(PR head가 아닌 커밋에 대한 판정은 의미가 없다; 머지 스테이지는 PR head를 체크아웃한 상태로 도는 것이 전제다). `checksGreen`은 `gh pr checks`가 돌려준 체크 전부가 통과일 때만 true다 — 체크가 0개면 "확인 못 함"으로 보고 false(fail-closed). **required 체크만 걸러내는 이름 목록은 아직 없다**: 지금은 모든 체크가 통과해야 하므로 optional 체크의 실패도 머지를 막는다 — 이 필터는 Plan 2의 설정 항목으로 미룬다. `gh pr checks`/integrity 조회 자체가 실패하면 두 플래그 다 세우지 않는다 — 세우지 않은 채로는 §3.3의 `merged` 요구를 통과할 수 없다.
 
 merge 스테이지는 **스크립트 전용**이다 — step 4의 `claude -p "/factory-merge <issue>"` 호출이 없다(Plan 2 실행 판결, ADR-015 — R3, 확정). `merge.integrator`(§7.1)를 spawn해 충돌을 해소하는 대신, PR이 `CONFLICTING`이면 `factory:approved → factory:rework`로 전이해 implement 재진입이 같은 일을 한다. mergeability가 `UNKNOWN`(GitHub 계산 중)이면 `prInfo`를 5초 후 한 번 재조회하고, 그래도 `MERGEABLE`이 아니면 `factory:needs-human`으로 전이한다(사유 "mergeability unknown after re-poll") — 무한정 기다리지 않는 fail-closed 처리다(Plan 2 실행 판결, ADR-015 — R3).
+
+**하트비트는 진행 신호를 싣는다(ADR-022).** 스테이지는 8–35분을 돌고, 그동안 러너 밖으로 나가는 실시간 채널은 이 코멘트 하나뿐이다(잡 stdout·아티팩트는 잡이 끝나야 읽기 좋다). 그래서 코멘트 본문은 세 겹이다: ① `<!-- factory-heartbeat issue=<n> -->` + `stage · runner · started · last` — **예전 그대로**이고 `lib/sweeper.js`의 좀비 감시가 읽는 계약이라 모양이 바뀌지 않는다; ② `<!-- factory-progress:v1 {…} -->` — 기계 계약. `factory/lib/progress.js`가 세션 JSONL과 각 서브에이전트 트랜스크립트(`.factory/out/agents.jsonl`의 `agent_transcript_path`)를 마지막으로 읽은 오프셋부터 이어 읽어 접은 `{step, agents[], totals, files_touched}`이고, 런이 끝나면 **같은 마커**가 `docs/factory/runs/<n>.md`의 usage 줄 뒤에 한 번 더 남는다 — 뷰어는 도는 런과 끝난 런을 정규식 하나로 읽는다; ③ 그 JSON에서 파생된 사람용 스텝 줄과 에이전트 표. 세 가지 제약이 설계를 지배한다: **`tool_result`는 파싱조차 하지 않고**(파일 전문·`env` 덤프·토큰이 들어 있고 이 코멘트는 공개다 — `last_tool`은 `tool_use`의 인자에서만 만든다), 본문은 GitHub 상한 64 KB 안에서 `files_touched` → 에이전트 순으로 스스로 줄이되 `totals`는 절대 버리지 않으며, **진행 읽기가 실패하면 그 주기는 ①의 두 줄만 내보낸다** — 관측 기능의 버그가 하트비트를 멈추면 sweeper가 살아 있는 런을 재큐한다(ADR-020 MF-4).
 
 #### 4.2.2 커맨드 파일 — `.claude/commands/factory-implement.md`
 
