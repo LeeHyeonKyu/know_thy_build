@@ -168,8 +168,10 @@ test("ci-settings.json deny covers the build-config files, matching [protected].
 //
 // 매처는 저장소의 `lib/glob.js`(`**` = 디렉터리 임의 깊이, `*` = 슬래시를 넘지 않음)를 쓴다 —
 // Claude Code의 경로 글롭 의미와 같고, 그래서 `.factory/out/*`는 **직계 자식만** 잡는다.
+// KTB-40: 디렉터리 자신(`mkdir -p .factory/out/qa`의 대상)도 이 목록에 있다 — `out/*`가 그것을
+// 물고 있었고, 라이브 리뷰에서 거절당한 첫 명령이 정확히 그 `mkdir`이었다.
 const QA_EVIDENCE = [
-  ".factory/out/qa/3-shot.png", ".factory/out/qa/3-server.log", ".factory/out/qa/deep/3.log",
+  ".factory/out/qa", ".factory/out/qa/3-shot.png", ".factory/out/qa/3-server.log", ".factory/out/qa/deep/3.log",
 ];
 // 열거가 반드시 덮어야 하는 것들. 런타임에만 생기는 경로(bin·lib·out·node_modules)는 템플릿 트리를
 // 훑어도 보이지 않으므로 여기서 이름으로 못 박는다(KTB-20의 같은 이유).
@@ -283,14 +285,18 @@ test("ci-settings-harness.json opens exactly the test-infra files a promotion to
 test("ci-settings-harness.json explicitly denies .factory/bin, .factory/lib, .factory/out — the enumeration can't see them (KTB-20)", () => {
   const hv = JSON.parse(read("factory/ci-settings-harness.json"));
   const deny = new Set(hv.permissions.deny);
-  // KTB-36: `.factory/out/**`는 qa의 증거 디렉터리까지 덮으므로 더는 쓰지 않는다 — 직계 파일
-  // (`out/*`)과 qa가 아닌 하위 디렉터리를 이름으로 막는다. 두 변형의 out 열거는 글자 그대로 같다.
-  for (const dir of [".factory/bin/**", ".factory/lib/**", ".factory/out/*",
+  // KTB-36: `.factory/out/**`는 qa의 증거 디렉터리까지 덮으므로 더는 쓰지 않는다 — 직계 파일과
+  // qa가 아닌 하위 디렉터리를 이름으로 막는다. 두 변형의 out 열거는 글자 그대로 같다.
+  // KTB-40: 그 "직계 파일"이 `out/*`이면 **`qa` 디렉터리 자신**도 직계 자식이라 함께 물린다 —
+  // 이제 하위 디렉터리에 닿을 수 없는 확장자 패턴으로 편다.
+  for (const dir of [".factory/bin/**", ".factory/lib/**",
+    ".factory/out/*.json", ".factory/out/*.jsonl", ".factory/out/*.pids",
     ".factory/out/coverage/**", ".factory/out/prove-wt/**", ".factory/out/classify-wt/**"]) {
     expect(deny.has(`Edit(${dir})`), `Edit(${dir})`).toBe(true);
     expect(deny.has(`Write(${dir})`), `Write(${dir})`).toBe(true);
   }
-  for (const d of ["Edit(.factory/out/**)", "Write(.factory/out/**)"]) expect(deny.has(d), d).toBe(false);
+  for (const d of ["Edit(.factory/out/**)", "Write(.factory/out/**)",
+    "Edit(.factory/out/*)", "Write(.factory/out/*)"]) expect(deny.has(d), d).toBe(false);
   // 그리고 그 열거가 실제로 qa만 남기는지는 매처로 확인한다(KTB-36 테스트와 같은 의미).
   for (const tool of ["Edit", "Write"]) {
     const globs = denyGlobs("factory/ci-settings-harness.json", tool);

@@ -30,6 +30,14 @@ node  = "22"
 #   setup = "curl -fsSL https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.0-stable.tar.xz | tar -xJ -C $HOME && echo \"$HOME/flutter/bin\" >> \"$GITHUB_PATH\" && flutter --version"
 
 [commands]                       # all judged by exit code
+# KTB-40 — **a test that executes this repo's hooks (or any script whose behaviour depends on the
+# factory's env) must isolate the child environment.** Stages run these commands from inside a
+# `claude -p` session whose env carries `FACTORY_STAGE`, `FACTORY_HARNESS_ISSUE` and
+# `CLAUDE_PROJECT_DIR`; a spawn helper that layers `process.env` underneath its own `env` passes all
+# three through, and then the hook under test decides by WHERE the suite ran rather than by what the
+# test said. KTB's own suite does this now (`factory/test/helpers/hook-env.js` → `baseEnv()` +
+# `replaceEnv: true`); do the same in yours, or your gate is green locally and red in CI (or worse:
+# green in both while asserting nothing).
 # lint: plug YOUR linter here (eslint, ruff, golangci-lint, `dart analyze`, …). A command that always
 # exits 0 (`node -e 0`, `true`, `:`) is NOT a gate — doctor FAILs it as `gates.lint-noop`, because a
 # placeholder that reports "lint GREEN" is worse than no lint gate at all (audit P1-7).
