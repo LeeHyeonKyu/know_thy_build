@@ -14,6 +14,7 @@ plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (�
 plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 merge: { human_gate: false }                # 소유자 결정: 이 저장소는 다크 루프를 증명하는 것이 목적이다 (아래 "머지 권한 — 사람 게이트" 참고)
+triage: { default: ready }                  # 소유자 결정: 같은 이유 — 아래 "triage 기본 판정" 참고 (감사 M1). 채택 저장소의 기본값은 needs-info다
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -60,7 +61,20 @@ false`다 — 기본값이 아니라 **명시적 선택**이고, `factory doctor
 사람이 여전히 머지하는 경로는 그대로다 — 보호 경로·역할 섹션 정책·무결성 위반에 걸린 PR은
 `factory:needs-human`이고 사람이 diff를 읽고 GitHub에서 머지한다.
 
+## triage 기본 판정 (`triage.default: ready`, 외부 감사 2026-09-14 M1)
+`merge.human_gate: false`와 **같은 이유의 같은 선택**이다: 이 저장소에서 재는 것은 "이슈 하나가 사람의
+개입 없이 triage → merge를 통과할 수 있는가"이고, 애매한 이슈마다 `needs-info`로 멈추면 그 측정이
+성립하지 않는다. 그래서 소유자 결정으로 `ready`이고, `factory doctor`가 매 실행에서
+`triage.default-allow`를 WARN으로 남긴다.
+
+대가는 이것이다: NEVER_AUTOMATE에도 안 걸리고 done_when도 쓸 수 있는 이슈는 사람을 거치지 않고
+plan으로 간다. 감당할 수 있는 이유는 뒤의 층이 남아 있어서다 — 글롭으로 적힌 NEVER_AUTOMATE 항목은
+`verify-stage`가 `impact_paths`로 다시 세고(에이전트 판정을 덮어쓴다), 보호 경로에 걸린 PR은 여전히
+`factory:needs-human`이다. **채택 저장소의 기본값은 반대다**(`templates/…/CHARTER.md`는 `needs-info`).
+
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
+경로 글롭으로 적은 항목은 `verify-stage`가 triage handoff의 `impact_paths`에 다시 대고, 걸리면
+에이전트의 판정과 무관하게 `wont-do`로 덮어쓴다(`never_automate_hit`, 감사 M1).
 - npm에 publish하는 모든 것(`.github/workflows/publish.yml`의 트리거·`package.json`의 `version` 필드) — 배포는 사람이 태그를 찍고 사람이 승인한다
 - `harness.toml [protected]` 또는 `harness.toml [gates.thresholds]`를 바꾸는 변경 — 판정 기준 자체를 건드리는 diff는 항상 사람 머지(§5.1)
 - `templates/factory/**`의 게이트 판정 로직(semantics) 변경 — L0/L1/L2가 무엇을 막는지가 바뀌면 이 템플릿을 설치한 모든 채택 저장소의 동작이 함께 바뀐다(항상 사람 리뷰·ADR-020)

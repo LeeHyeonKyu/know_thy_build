@@ -8,7 +8,7 @@ beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); });
 import {
   accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
-  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, ymdOf,
+  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
 
@@ -89,7 +89,9 @@ function makeDeps({ state, overrides = {} } = {}) {
   const deps = {
     now: NOW,
     record: (line) => recorded.push(line),
-    hydrate: vi.fn(async () => ({ records: new Map([["11", "# run 11"]]), fetched: true, exists: true, stateBlob: "b10b", stateFailed: false })),
+    // 감사 M10 — 근거 run은 **records 브랜치에 실재해야** 근거로 센다. 그래서 이 픽스처의 기록
+    // 목록은 AGENT_OUT이 인용하는 run을 전부 담는다: 담지 않으면 그 인용은 (정확히) 거부된다.
+    hydrate: vi.fn(async () => ({ records: new Map([11, 12, 13, 14, 15, 17, 18].map((n) => [String(n), `# run ${n}`])), fetched: true, exists: true, stateBlob: "b10b", stateFailed: false })),
     readState: vi.fn(async () => state),
     writeState: vi.fn(async (s, opts) => { written.push({ state: JSON.parse(JSON.stringify(s)), opts }); }),
     harvest: vi.fn(async () => HARVEST()),
@@ -408,6 +410,53 @@ test("an ordinary (non-moved) sync failure is recorded but does not change the e
   expect(await runRetro({ deps, now: NOW })).toBe(0);
   expect(deps.sync).toHaveBeenCalledTimes(1);
   expect(recorded.join("\n")).toContain("records sync failed — push failed");
+});
+
+// ── 외부 감사 2026-09-14 M10/M11 ────────────────────────────────────────
+
+test("unknownRuns: only ids with no record on the branch; an empty known set never rejects", () => {
+  const known = new Set(["11", "12"]);
+  expect(unknownRuns([11, "12"], known)).toEqual([]);
+  expect(unknownRuns([11, 99, 99, 100], known)).toEqual(["99", "100"]);
+  expect(unknownRuns([99], new Set())).toEqual([]);                    // 기록이 없는 저장소의 첫 retro
+  expect(unknownRuns(null, known)).toEqual([]);
+});
+
+test("M10: a lesson whose evidence_runs name a run with no record is rejected, with the reason recorded", async () => {
+  const state = freshState({ merges_since: 2, n: 3 });
+  const { deps, last } = makeDeps({
+    state,
+    overrides: {
+      hydrate: vi.fn(async () => ({ records: new Map([["11", "# run 11"]]), fetched: true, exists: true, stateBlob: "b", stateFailed: false })),
+    },
+  });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  // correctness의 lesson은 runs 11·12를 인용하는데 12는 브랜치에 없다 → 채택 후보에서 빠진다.
+  const c = deps.applyLessons.mock.calls.find((x) => x[0].role === "correctness")[0];
+  expect(c.adopted).toEqual([]);
+  const applied = last().history.at(-1).applied;
+  const step = applied.find((a) => a.step === "lessons:correctness");
+  expect(step.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ reason: expect.stringContaining("unknown-evidence-run: 12") })]));
+  // 같은 규칙이 제안에도 걸린다 — gate 제안은 11·12·13을 인용한다.
+  const proposals = applied.find((a) => a.step === "proposals");
+  expect(proposals.deferred.some((x) => /unknown-evidence-run/.test(x.reason))).toBe(true);
+});
+
+test("M11: citations observed in the window are applied to the role's lessons file, even with nothing adopted", async () => {
+  const state = freshState({ merges_since: 2, n: 3 });
+  const { deps } = makeDeps({
+    state,
+    overrides: {
+      harvest: vi.fn(async () => ({ ...HARVEST(), citations: { security: { "L-2026-09-01-01": 2 } } })),
+      applyLessons: vi.fn(async ({ role }) => ({ path: `.factory/lessons/reviewer-${role}.md`, text: `LESSONS-${role}`, added: [], rejected: [], evicted: [], cited: role === "security" ? [{ id: "L-2026-09-01-01", from: 0, to: 2 }] : [] })),
+    },
+  });
+  expect(await runRetro({ deps, now: NOW })).toBe(0);
+  // lesson 채택이 하나도 없는 역할이라도, 인용이 있으면 그 역할의 파일이 열린다.
+  const sec = deps.applyLessons.mock.calls.find((x) => x[0].role === "security");
+  expect(sec[0].citations).toEqual({ "L-2026-09-01-01": 2 });
+  // 그리고 인용만 바뀐 파일도 다크 PR에 실린다 — 실리지 않으면 카운터는 영원히 0이다.
+  expect(deps.publishLessons.mock.calls[0][0].files[".factory/lessons/reviewer-security.md"]).toBe("LESSONS-security");
 });
 
 // ── 전체 경로 ────────────────────────────────────────────────────────────

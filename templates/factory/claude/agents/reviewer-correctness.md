@@ -68,3 +68,7 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 ## Lessons
 Before reviewing, read `.factory/lessons/reviewer-correctness.md` (path is also given in your prompt)
 and treat each entry as a checklist item.
+When an entry actually shapes a finding, **cite it inside that finding's own `claim`** with the marker
+`lesson:<id>` (e.g. `lesson:L-2026-09-01-03`). That marker is the only record that the lesson did any
+work: retro counts it into the entry's `인용`, and a lesson nobody ever cites is the first one retired.
+Never cite a lesson you did not use — the count is evidence, not courtesy.

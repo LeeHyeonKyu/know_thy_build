@@ -20,6 +20,13 @@ back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는
 # 기본값이 아니라 적어 두는 선택이다. 다크로 가려면 그 말을 소리 내어 쓴다.
 # 데모/도그푸드용으로 다크를 고르려면: merge: { human_gate: false }   # 이유를 아래 "머지 권한" 절에 적을 것
 merge: { human_gate: true }
+# triage가 **판단이 서지 않을 때** 이슈를 어떻게 하는가(외부 감사 2026-09-14 M1). `needs-info`는
+# 멈춘다 — 침묵은 승인이 아니다. `ready`는 통과시킨다(다크 루프 자체가 산출물인 저장소의 선택).
+# NEVER_AUTOMATE에 걸리면 언제나 `wont-do`이고, done_when을 못 쓰면 언제나 `needs-info`다 —
+# 이 필드가 정하는 것은 **그 둘이 아닌 나머지**뿐이다. 이슈 본문에 `[ready]` 표식이 있으면
+# 그 이슈 하나만 예외로 통과한다(사람이 그 이슈를 봤다는 뜻).
+# **이 줄을 지우면 doctor FAIL이다**(`charter.triage-default-unset`).
+triage: { default: needs-info }
 budget: {}
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
@@ -89,7 +96,15 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 `merge.dark — no per-PR human signature (merge.human_gate=false)`를 WARN으로 남긴다. 필드를 아예 지우면
 FAIL(`charter.merge-human-gate-unset`)이다 — 아무도 고른 적 없는 것을 조용히 다크로 읽지 않는다.
 
+## triage 기본 판정 — `triage.default` (외부 감사 2026-09-14 M1)
+판단이 서지 않는 이슈를 멈춰 세울 것인가, 통과시킬 것인가. 템플릿의 기본은 `needs-info`다 —
+**침묵은 정지**이고, `ready`는 CHARTER가 소리 내어 고를 때만 나온다. `factory doctor`는 `ready`를
+고른 저장소에 매 실행 `triage.default-allow` WARN을, 필드를 지운 저장소에 FAIL을 남긴다.
+
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
+경로 글롭(`auth/**` 같은)으로 적은 항목은 **스크립트가 다시 센다**: triage handoff의 `impact_paths`가
+그 글롭에 걸리면 에이전트가 무엇이라 판정했든 `wont-do`로 덮어쓰고 `never_automate_hit`으로 기록한다
+(감사 M1). 글롭으로 적을 수 있는 것은 글롭으로 적어라 — 산문은 에이전트만 읽지만 글롭은 둘 다 읽는다.
 - (fill in)
 - (fill in)
 - 공개 API(`src/api/public/**`)의 breaking change

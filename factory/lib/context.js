@@ -180,6 +180,12 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
     rounds: planning ? planning.rounds : undefined,
     plan: planning ? { mode: planning.mode, max_done_when: charter.plan.max_done_when } : undefined,
     limits: charter.limits, back_pressure: charter.back_pressure,
+    /**
+     * 감사 M1 — triage 스테이지에만 실린다: 이 저장소가 **애매한 이슈를 어떻게 하기로 했는가**
+     * (`charter.triage.default`)와, 스크립트가 다시 대는 NEVER_AUTOMATE 글롭. 프롬프트는 전자를
+     * 읽어 판정하고, `verify-stage`는 후자로 그 판정을 덮어쓴다 — 둘은 같은 CHARTER에서 온다.
+     */
+    ...(stage === "triage" ? { triage: { default: charter.triage?.default ?? null, never_automate: charter.never_automate ?? [] } } : {}),
     orchestration: harness.factory?.orchestration ?? "workflow",
     spec_path: spec ? spec[0] : null,
     handoffs,
@@ -239,6 +245,9 @@ async function loadedFor({ ctx, roleBlock, gh }) {
     contexts,
     ...(ctx.rounds === undefined ? {} : { rounds: ctx.rounds }),
     ...(ctx.plan === undefined ? {} : { plan: ctx.plan }),
+    // 감사 M1 — 디스패처가 `args.loaded`로 그대로 넘기는 파일이라, triage 프롬프트가 읽는 기본값은
+    // 여기에 있어야 한다(워크플로 스크립트는 파일을 읽을 수 없다, §4.2.3).
+    ...(ctx.triage === undefined ? {} : { triage: ctx.triage }),
     limits: ctx.limits,
     spec_path: ctx.spec_path,
     maturity: ctx.harness?.maturity ?? null,
