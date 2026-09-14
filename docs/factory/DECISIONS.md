@@ -2594,11 +2594,93 @@ review는 낡은 deny 목록으로 돌아 같은 자리에서 같은 이유로 �
 <issue>`는 `origin`이 없는 체크아웃에서 blocked로 선다(`git fetch origin` 한 번이면 풀린다). 필요한
 조치: `factory init --upgrade`로 `.factory/bin/run-stage.js` 미러 갱신.
 
-**알려진 한계(이 Task가 닫지 않은 것 — 아래 "남은 것"의 Task 8b로 이월)**: rework 라운드의 세션 **내**
+**알려진 한계(이 Task가 닫지 않은 것 — 아래 Task 8b가 닫았다)**: rework 라운드의 세션 **내**
 체크아웃. implement 빌더는 세션 안에서 자기 브랜치(`claude/fq-<issue>`)를 체크아웃한다 — 그 브랜치가
 `.claude/hooks/*`를 변조해 들고 있으면 세션 도중 디스크의 훅 스크립트가 PR의 것으로 바뀔 수 있다
 (`--settings`와 훅 배선은 세션 시작 시점 것이지만, 훅 **스크립트**는 호출마다 디스크에서 읽힌다).
 완전한 봉쇄는 스테이지가 브랜치 체크아웃을 직접 소유해야 가능하다.
+
+**Task 8b — 그 한계를 닫는다: 브랜치 체크아웃은 스테이지의 것이다.** implement는 이제 `claude -p`
+**앞에서** 자기 브랜치를 체크아웃한다(§4.2.1 step 2.3): 원격에 `claude/fq-<issue>`가 있으면
+`git fetch origin +refs/heads/claude/fq-<n>:refs/remotes/origin/claude/fq-<n>` 후
+`git checkout -B claude/fq-<n> origin/claude/fq-<n>`, 없으면 스테이지 자신의 커밋에서
+`git checkout -b`. 원격에 없는데 로컬에만 있으면 **진행하지 않는다**(push되지 않은 커밋을 `-B`로
+말없이 지우지 않는다). 그 다음이 overlay(+ PR이 추가한 파일 제거 + 세션 전 drift 검사)이고, 그 다음이
+빌더다 — **이 순서가 수정의 전부다**. 빌더 프롬프트·커맨드·에이전트 `.md`에서 체크아웃 지시는
+사라졌고("you are ALREADY on the branch"), 훅(`block-dangerous.sh`)이 그것을 강제한다:
+`FACTORY_STAGE`가 선 세션에서는 `git switch`와 `--` pathspec 없는 `git checkout <ref>`가 전부 막히고
+(`git checkout -- src/x.js` 같은 파일 복원은 그대로 열려 있다), 세션 여부와 무관하게 overlay 뿌리
+(`.factory/`·`.claude/`·`CLAUDE*.md`·`AGENTS*.md`·`.mcp*.json`·`docs/factory/CHARTER.md`)를 다른
+커밋의 것으로 덮는 `checkout`/`restore --source`와 트리 전체를 갈아 끼우는 `git reset --hard`·
+`git stash`(push/pop/apply)가 막힌다 — 이 뿌리는 `factory:harness` 이슈에서도 **열리지 않는다**
+(그 카브아웃이 여는 것은 파일 *편집*이지 세션 설정 교체가 아니다). 세션이 끝나면 스테이지가 다시
+묻는다: HEAD가 아직 그 브랜치인가, 그리고 팩토리 소유 경로가 아직 스테이지 커밋과 바이트 동일한가
+(`overlayDrift` 재실행). 어느 쪽이든 아니면 **판정 불가**이므로 `factory:blocked`이고 게이트도 verify도
+돌지 않는다. `FACTORY_STAGE`는 세션이 스스로 지울 수 없다 — 훅은 Claude Code가 세션 env로 띄우는
+프로세스라 명령줄의 `VAR= git …` 접두사가 닿지 않는다. 사람의 자기 세션에는 이 변수가 없으므로
+`know-thy-build` 스킬들이 시키는 `gh pr checkout <pr>` → `git switch -`는 그대로 돈다.
+
+**Task 8b가 남기는 판정 하나**: 스테이지가 체크아웃한 브랜치가 팩토리 소유 경로를 base와 다르게
+들고 있으면(예: `.claude/**`를 고친 PR의 rework 라운드) overlay가
+실제로 파일을 바꾸고, 그 자리의 규칙은 KTB-37 그대로다 — **빌더를 띄우지 않는다**(`factory:blocked`).
+대안이 둘뿐이기 때문이다: 세션을 PR의 설정으로 돌리거나(이 Task가 닫으려는 바로 그것), 빌더의
+`git add -A`가 overlay의 되돌림을 PR에 실어 PR 자신의 변경을 말없이 지우거나. 어느 쪽도 스테이지가
+고를 일이 아니다 — 그런 PR은 어차피 `[protected]`라 사람이 머지하므로 그 라운드도 사람에게 넘긴다.
+
+**영향(Task 8b)**: `factory/bin/run-stage.js`(`stageBranch`·`makeCheckoutBranch`·`branchLine`·
+`assertStageBranch`·`stageClaudeEnv`의 `FACTORY_STAGE`·runStage 배선 두 자리),
+`factory/hooks/block-dangerous.sh`(`ovl` 뿌리 + 브랜치 이동 + `reset --hard`/`stash`),
+`templates/factory/claude/workflows/factory-implement.js`·`.../commands/factory-implement.md`(변경
+없음 — 체크아웃 지시가 없었다)·`.../agents/factory-builder.md`, 스펙 §4.2.1 step 2.3·step 4.
+테스트: `factory/test/run-stage-branch.test.js`(13건 — fetch/checkout 순서·첫 라운드·fail closed
+4갈래·로컬 전용 브랜치·세션 뒤 브랜치/drift·runStage 순서 고정·프롬프트 grep),
+`factory/test/hooks.test.js`(표 4개 — 스테이지 세션의 브랜치 이동, 사람 세션의 정상 동작, 트리 전체
+복원, harness 이슈에서도 안 열리는 overlay 뿌리).
+
+**Task 8b 후속 ① — 하네스 이슈의 rework가 자기 `harness.toml`을 잃지 않는다.** 위 "판정 하나"를
+그대로 두면 `factory:harness` 이슈는 **한 라운드 이상 갈 수 없다**: 그 이슈의 rework 라운드는 정의상
+`.factory/harness.toml`(그리고 `HARNESS_OPENS`의 나머지)을 고친 브랜치 위에서 돌고, overlay가 그것을
+base로 되돌리는 순간 `overlaidPaths`가 비지 않아 빌더가 뜨지 않는다. 하네스 승격은 게이트를 새로
+세우는 일이라 1라운드에 끝나는 쪽이 예외다 — 곧 이 규칙은 승격 기능 자체를 막는다. 그래서
+`FACTORY_HARNESS_ISSUE=1`인 implement에서는 overlay가 **`HARNESS_OPENS`를 제외한다**
+(`overlayPathspecs(harnessIssue)` — `:(exclude,glob)…`가 덮는 `checkout`, PR 추가 파일 스캔, `status`,
+`overlayDrift`(세션 전·후) 네 자리 모두에 같은 목록이 들어간다). 열린 목록의 출처는 그대로
+`factory/lib/protected-paths.js`의 `HARNESS_OPENS` 하나다 — L2 deny(`ci-settings-harness.json`)·훅
+`prot`·overlay가 같은 문장을 말한다. 나머지(훅 스크립트·`.claude/settings*`·에이전트 프롬프트·
+ci-settings·CHARTER·`CLAUDE*.md`/`AGENTS*.md`/`.mcp*.json`)는 **여전히 base의 것**이고, 그것들을 고친
+하네스 브랜치는 예전 그대로 blocked이다. 무엇이 남아 지키는가: ① harness.toml 안의 위험한 섹션은
+L1의 섹션 검사(Task 1 — `[protected]`·`[gates.thresholds]`·`[load_bearing]` 편집 → 사람 머지)가 보고,
+② 이 런이 자기 판정에 쓰는 harness는 체크아웃 **전에** `charterReady`가 읽어 메모리에 있다(브랜치의
+파일이 이번 런의 임계값·보호 목록을 바꾸지 못한다), ③ 머지는 어차피 사람이다(`[protected]`).
+
+**Task 8b 후속 ② — KTB-38: 낡은 PR 위에서 도는 rework는 base의 도구를 들고 돌아야 한다.**
+실측(KTB #3 R5, 2026-09-14): PR #4의 head는 1.2.0 **이전**이라 트리에 `factory/bin/lint.js`가 없었는데,
+overlay가 깔아 준 base의 `.factory/harness.toml`은 바로 그 파일을 부르는 lint 명령을 들고 있었다 —
+게이트가 통째로 RED였고 빌더는 자기 diff와 무관한, 자기가 고칠 수도 없는 실패를 라운드마다 다시 봤다.
+Task 8이 **설정을 base로 고정한 순간부터 이것은 구조적 결과다**: 설정은 base인데 트리는 낡은 PR이면
+그 둘이 가리키는 파일 집합이 갈라진다. 그래서 `makeCheckoutBranch`가 **기존 브랜치**를 체크아웃한
+직후 base를 얹는다 — `git merge --no-edit --no-ff <stage sha>`(이미 조상이면 건너뛴다: 빈 머지 커밋을
+라운드마다 쌓지 않는다), 그리고 빌더가 뜨기 **전에** `git push origin claude/fq-<n>`한다(빌더가
+아무것도 바꾸지 않는 라운드에도 PR head가 그 머지를 반영해야 review·merge가 같은 트리를 본다 —
+빌더의 push는 빌더의 커밋만 싣는다). 머지 커밋의 저자는 팩토리다(`user.name factory`, 메일은
+`FACTORY_BOT_LOGIN`이 있으면 그 로그인의 noreply). 머지 대상이 `origin/<default_branch>`가 **아니라
+2.4 overlay와 같은 sha**인 것이 중요하다: 그 사이 main이 더 나갔다면 `origin/main`은 overlay의 sha보다
+앞서 있고, 그것을 머지하면 트리의 팩토리 경로가 overlay의 sha와 달라져 overlay가 되돌리고, 그 되돌림이
+다시 "덮을 것이 있다 → blocked"이 된다. **한 런 안에서 base는 하나다.** 충돌은 스테이지가 풀 일이
+아니다: `git merge --abort`으로 트리를 되돌리고 `factory:blocked` cause `undecidable`, 사유는
+`stale PR conflicts with base — rebase by hand` — 사람이 리베이스한다(그래서 `deps.transition`이
+`cause`를 그대로 실어 보낸다: 이 자리는 문구가 아니라 **판단**이 등급을 정한다). 새 브랜치 라운드는
+애초에 base에서 만들어지므로 머지하지 않는다. 런 기록에 `base_merged: <sha> … pushed before the
+builder` 한 줄이 남는다.
+
+**영향(후속 ①②)**: `factory/bin/run-stage.js`(`overlayPathspecs`·`harnessOpenExcludes`·
+`makeFactoryOverlay`·`overlayDrift`·`assertStageBranch`·`overlayLine`·`mergeBaseIntoBranch`·
+`baseMergedLine`·`makeCheckoutBranch`·runStage 배선 세 자리·`deps.transition`의 `cause`),
+스펙 §4.2.1 step 2.3·2.4. 테스트: `factory/test/run-stage-branch.test.js`(+8 — 머지/push 순서·팩토리
+저자·이미 조상·첫 라운드 무머지·충돌 abort·fail closed 2갈래·runStage의 undecidable 전이·
+`base_merged` 기록), `factory/test/run-stage-overlay.test.js`(+6 — 네 자리 제외 목록·평범한 이슈
+불변·세션 뒤 drift·하네스 rework가 빌더를 띄운다·`.claude/hooks/**`는 여전히 blocked·기본값은
+harness 모드가 아니다). 채택자 조치: `factory init --upgrade`로 `.factory/bin/run-stage.js` 미러 갱신.
 
 **영향**: `factory/bin/run-stage.js`(`resolveStageSha`, `makeFactoryOverlay`),
 `factory/test/run-stage-overlay.test.js`(17건 — 경로 복원·out 제외·조용한 부분 pathspec·fail closed
@@ -2733,7 +2815,7 @@ must-fix + Task 4/5 + 컨트롤러 미러)는 **NEEDS-FIX**였다. 판정의 무
 전까지 이 바인딩은 "훅이 보지 못하는 철자"까지 막지는 못한다. 그리고 `docs/factory/runs/**`는 여전히
 no-write 스테이지의 스크래치 경로다(러너가 세션 중에 덧붙이므로) — 닫힌 것은 **에이전트의 쓰기**다.
 
-### 남은 것 (Task 6 · Task 8b — 이번 사이클에 착수하지 않았다)
+### 남은 것 (Task 6 — 이번 사이클에 착수하지 않았다)
 
 **Task 6 — triage default-deny, prove-test base env, label-guard fail-closed, lessons 증거 (M1,
 M2, M13, M10/M11)**. 착수하지 않았다. 감사가 남긴 것 그대로다: CHARTER `triage.default`가 여전히
@@ -2742,12 +2824,11 @@ default-allow(M1, `factory-triage.md:31-37`), `prove-test`는 base exit≠0만 �
 (M13 부분), lessons 15개가 전부 헤더뿐이고 `evidence_runs`는 길이만 검사하며 인용 카운터가 증가하지
 않는다(M10/M11). 다음 사이클의 P2.
 
-**Task 8b — 스테이지가 브랜치 체크아웃을 직접 소유한다**. Task 8이 스테이지 **시작** 시점의 팩토리
-설정은 base의 것으로 고정했지만, implement의 rework 라운드는 빌더가 세션 **안에서** 자기
-브랜치(`claude/fq-<issue>`)를 체크아웃한다 — 그 브랜치가 변조한 훅 스크립트를 들고 있으면 세션
-도중 디스크의 스크립트가 PR의 것으로 바뀔 수 있다(위 Task 8 "알려진 한계" 참고). 완전한 봉쇄는
-스테이지가 그 체크아웃 자체를 소유(세션에 브랜치를 넘기지 않고 팩토리가 체크아웃해서 넘기거나,
-세션을 read-only 브랜치 뷰로 제한)해야 가능하다 — 착수하지 않았다.
+**Task 8b — 스테이지가 브랜치 체크아웃을 직접 소유한다**: **닫혔다**(위 Task 8 절의 "Task 8b" 문단).
+implement는 이제 `claude -p` 앞에서 `claude/fq-<issue>`를 직접 체크아웃하고, 세션 안의 브랜치 이동은
+훅이 막으며, 세션 뒤에 HEAD와 팩토리 설정을 다시 확인한다. 남은 자리는 두 개다: ① 브랜치가 팩토리
+소유 경로를 들고 있는 rework 라운드는 사람에게 넘어간다(위 "판정 하나"), ② 훅이 못 보는 철자
+(런타임 조립)는 여전히 비목표이고, 그 자리를 메우는 것은 세션 뒤의 브랜치·drift 확인이다.
 
 **단일 자격증명 잔여** (Task 2 "알려진 한계", batch-1 "남은 위험" 1). 러너와 에이전트가 여전히 같은
 PAT을 쓴다 — 훅이 못 보는 철자(런타임 조립)로 push가 나가면 리뷰 증거 바인딩·기록 브랜치 보호가
@@ -2784,6 +2865,10 @@ PAT을 쓴다 — 훅이 못 보는 철자(런타임 조립)로 push가 나가�
 - [ ] **review·merge·implement 스테이지가 시작 시 PR의 `.factory/**`·`.claude/**`·CHARTER를 base
   것으로 되돌린다**(overlay). PR이 하네스를 고쳐도 그 PR **자신의** 스테이지에는 안 들어간다 —
   머지되고 다음 런부터.
+- [ ] **implement의 브랜치는 스테이지가 체크아웃한다**(Task 8b): 빌더 세션은 이미 `claude/fq-<issue>`
+  위에서 시작하고, 세션 안의 `git checkout`/`git switch`/`git reset --hard`/`git stash`는 훅이 막는다
+  (`git checkout -- <path>`는 그대로). 세션이 끝날 때 HEAD가 그 브랜치가 아니면 `factory:blocked`.
+  빌더 프롬프트를 커스터마이즈한 어댑터는 "브랜치를 체크아웃하라"는 문장을 **지워야 한다**.
 - [ ] **테스트 변조가 human-merge 정책 위반이 된다**: 기존 test_glob 파일에서 줄 삭제·파일 삭제
   diff는 이슈 본문 `tests_changed_allowed:` 없이는 자동 머지되지 않는다.
 - [ ] **plan 기본값이 바뀐다**: 4역할 토론 대신 단일 opus 1패스+skeptic 1패스가 기본이고,

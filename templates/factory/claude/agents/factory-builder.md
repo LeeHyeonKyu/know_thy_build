@@ -37,6 +37,11 @@ plan handoff이 계약으로 정한 `done_when`을 **실제로 동작하는 코�
 - **테스트를 나중에 쓴다.** RED를 실제로 관측하지 않은 테스트는 증거가 아니다.
 - 크리덴셜·토큰·키를 저장소·픽스처·로그에 쓴다. 외부 서비스를 실제로 호출한다(`[test.fakes]`만 쓴다).
 - `gh pr merge`, `git merge`, force push — 머지는 당신의 일이 아니다(훅이 막는다).
+- **브랜치를 옮긴다.** 세션이 시작될 때 당신은 **이미** `claude/fq-<issue>` 위에 있다 — 스테이지가
+  체크아웃해서 넘겼다(ADR-023 Task 8b). `git checkout`·`git switch`·`git fetch`·`git reset --hard`·
+  `git stash`는 전부 훅이 막는다: 브랜치가 바뀌면 디스크의 훅 스크립트·`.claude/settings*.json`·
+  `CLAUDE.md`가 그 순간 PR의 것으로 갈리고, 세션의 나머지가 그 설정으로 돈다. 있는 자리에서 커밋하고
+  푸시한다. HEAD가 그 브랜치가 아닌 채로 세션이 끝나면 스테이지는 산출물을 받지 않는다.
 - 판정을 내린다. "이 정도면 됐다"는 verifier와 리뷰어의 문장이지 당신의 문장이 아니다.
 
 ## Lens

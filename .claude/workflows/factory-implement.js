@@ -285,8 +285,11 @@ const harnessProtectedBlock =
   `Do not try to merge it yourself.\n`;
 
 const buildRules =
-  `1. Branch \`claude/fq-${issue}\` from \`origin/<default_branch>\`: create it if it does not exist, ` +
-  `otherwise check it out (it is yours from an earlier round).\n` +
+  `1. You are ALREADY on the branch \`claude/fq-${issue}\` — the stage checked it out before this session ` +
+  `started (ADR-023 Task 8b) and it is the only branch this session may be on. Never run \`git checkout\`, ` +
+  `\`git switch\`, \`git fetch\`, \`git reset --hard\` or \`git stash\`: a branch switch swaps the hook ` +
+  `scripts and settings on disk underneath the session, so a PreToolUse hook blocks all of them. Commit ` +
+  `and push where you are.\n` +
   `2. TDD, in this order: write the tests named by \`handoffs.plan.done_when[].verify\` FIRST and run ` +
   `them to watch them fail (RED), then implement until they pass (GREEN). A test you never saw fail ` +
   `proves nothing, and the verifier runs \`prove-test\` to check exactly that.\n` +
@@ -407,7 +410,8 @@ if (built && verdict && verdict.verdict === 'rejected') {
     `${builderReading}\n\n` +
     `Issue #${issue} (tier ${tier}). The verifier REJECTED your change on PR #${built.pr} ` +
     `(head ${built.head_sha}). Its findings:\n${JSON.stringify(verdict.findings || [], null, 2)}\n\n` +
-    `Answer every finding on the same branch \`claude/fq-${issue}\`. A finding about a test is a finding ` +
+    `Answer every finding where you are — you are still on \`claude/fq-${issue}\` and must stay there. ` +
+    `A finding about a test is a finding ` +
     `about the test: strengthen the assertion or the fixture rather than the code that makes it pass. ` +
     `This is your only fix round — the next verdict ends the stage either way.\n\n` +
     `${buildRules}${reworkBlock}`;

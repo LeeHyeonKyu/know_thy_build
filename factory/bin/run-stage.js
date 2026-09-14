@@ -35,6 +35,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
+import { HARNESS_OPENS } from "../lib/protected-paths.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -79,8 +80,14 @@ export function stageClaudeArgs({ root, stage, issue, harness, charter, harnessI
   return args;
 }
 
-export function stageClaudeEnv({ root, harnessIssue = false }) {
-  const env = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root };
+export function stageClaudeEnv({ root, stage, harnessIssue = false }) {
+  // ADR-023 Task 8b — **이 세션은 스테이지의 세션이다**를 훅에게 말하는 한 글자. `block-dangerous.sh`가
+  // 이것으로 브랜치 이동(`git checkout <ref>`·`git switch`)을 막는다: 브랜치 체크아웃은 이제 스테이지의
+  // 일이고(§makeCheckoutBranch), 세션 안에서 브랜치가 바뀌면 디스크의 훅 스크립트·settings·CLAUDE.md가
+  // PR의 것으로 갈린다(훅 스크립트는 **호출마다** 디스크에서 읽힌다 — overlay가 세션 도중 무효가 된다).
+  // 사람의 자기 세션에는 이 변수가 없으므로 평범한 `git switch -`는 그대로 열려 있다. 세션이 스스로
+  // 지울 수 없다: 훅은 Claude Code가 **세션 env**로 띄우는 프로세스라 명령줄의 `VAR= git …` 접두사가 닿지 않는다.
+  const env = { CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", CLAUDE_PROJECT_DIR: root, FACTORY_STAGE: stage || "1" };
   // 훅은 `claude -p` 세션의 자식 프로세스라 이 변수를 그대로 물려받는다 — block-dangerous.sh가 이것으로
   // 보호 경로 목록을 좁힌다. 값이 정확히 "1"일 때만 선다(훅 쪽 계약).
   if (harnessIssue) env.FACTORY_HARNESS_ISSUE = "1";
@@ -223,6 +230,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
   if (c.reclaimed) record([`lock: reclaimed from completed runner ${c.reclaimed.runner}`]);
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
+  let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
@@ -364,12 +372,32 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       }
       checkoutSha = co.sha;
     }
+    // ADR-023 Task 8b — implement의 브랜치 체크아웃은 **스테이지의 일이다**. 예전에는 빌더가 세션 안에서
+    // 자기 브랜치를 체크아웃했고, 그 순간 디스크의 훅 스크립트·settings·CLAUDE.md가 PR의 것으로 갈렸다
+    // (훅 스크립트는 호출마다 디스크에서 읽힌다 — overlay가 세션 도중 무효가 된다). 순서가 곧 수정이다:
+    // 브랜치 체크아웃 → overlay(+drift) → 빌더. 실패는 진행이 아니라 정지다(원인은 대개 러너 쪽이다).
+    if (stage === "implement" && d.checkoutBranch) {
+      const cb = await d.checkoutBranch();
+      if (!cb.ok) {
+        // KTB-38 — 충돌한 머지는 "체크아웃 실패"가 아니라 **판정 불가**다: 트리는 abort로 되돌아갔고,
+        // 사람이 리베이스해야 이 브랜치가 다시 돌 수 있다. cause를 명시해 sweeper의 재시도 등급이
+        // 러너 장애(api-error)와 섞이지 않게 한다.
+        const reason = cb.undecidable ? cb.reason : `branch checkout failed — ${cb.reason}`;
+        const t = await d.transition({ to: "factory:blocked", reason, ...(cb.undecidable ? { cause: "undecidable" } : {}) });
+        record([`branch: FAIL — ${cb.reason}`, ...refusal(t)]);
+        return 2;
+      }
+      stageBranchName = cb.branch;
+      record([branchLine(cb), ...(cb.merged ? [baseMergedLine(cb)] : [])]);
+    }
     // KTB-37 — 체크아웃이 끝난 트리 위에 **팩토리 소유 설정만** 스테이지 자신의 커밋에서 덮는다
     // (§makeFactoryOverlay). review·merge는 방금 detach된 PR head 위에서, implement는 빌더가 돌기
     // 전에 한다. 실패는 진행이 아니라 정지다 — PR head의 훅·settings·리뷰어 프롬프트로 도는 스테이지는
     // 자기 자신을 검증하는 스테이지이고, 그건 검증이 아니다.
     if (OVERLAY_STAGES.has(stage) && d.overlayFactoryConfig) {
-      const ov = await d.overlayFactoryConfig();
+      // harness 이슈의 implement만 `HARNESS_OPENS`를 브랜치에 남긴다(§overlayPathspecs) — 그 이슈가
+      // 하려는 일이 바로 그 파일들의 편집이고, `harnessIssue`는 implement에서만 선다(§316행).
+      const ov = await d.overlayFactoryConfig(harnessIssue);
       if (!ov.ok) {
         // 판정 불가다(GREEN도 RED도 아니다) — 이 저장소의 그 자리는 언제나 factory:blocked이고,
         // 원인은 대개 러너 쪽이라 재시도로 풀린다.
@@ -378,12 +406,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
         return 2;
       }
       overlaidPaths = ov.paths || [];
-      // implement는 **유일한 쓰기 스테이지**다: 여기서 overlay가 실제로 파일을 바꿨다는 것은 워크플로가
-      // 준 트리가 스테이지 자신의 커밋이 아니었다는 뜻이고, 그 트리 위에서 빌더가 `git add -A`로 커밋하면
-      // overlay가 PR에 실려 나간다. 그래서 덮을 것이 있으면 **빌더를 띄우지 않는다** — implement의 커밋이
-      // 팩토리 설정을 담을 수 있는 경로 자체가 사라진다(정상 경로에서 이 overlay는 언제나 no-op이다).
+      // implement는 **유일한 쓰기 스테이지**다: 여기서 overlay가 실제로 파일을 바꿨다는 것은 이 트리가
+      // 팩토리 소유 경로를 base와 다르게 들고 있다는 뜻이고, 그 위에서 빌더가 `git add -A`로 커밋하면
+      // overlay의 되돌림이 PR에 실려 나간다(= PR 자신의 변경이 말없이 사라진다). 그래서 덮을 것이 있으면
+      // **빌더를 띄우지 않는다** — implement의 커밋이 팩토리 설정을 담을 수 있는 경로 자체가 사라진다.
+      // Task 8b 이후 이 자리의 원인이 하나 늘었다: 스테이지가 체크아웃한 `claude/fq-<issue>` 브랜치가
+      // 팩토리 소유 경로를 고쳐 들고 있는 경우다(예: `.claude/**`를 건드린 PR의 rework 라운드).
+      // 그런 PR은 어차피 사람이 머지한다(`[protected]`) — 그 라운드도 사람에게 넘긴다. 세션을 PR의
+      // 설정으로 돌리는 것과 PR의 작업을 말없이 되돌리는 것 중 어느 쪽도 스테이지가 고를 일이 아니다.
       if (stage === "implement" && overlaidPaths.length) {
-        const reason = `the implement tree is not the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} factory-owned path(s): ${overlaidPaths.slice(0, 10).join(", ")}`;
+        const reason = `the implement tree carries factory-owned paths that differ from the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} path(s): ${overlaidPaths.slice(0, 10).join(", ")}`;
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
         return 2;
@@ -420,6 +452,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
     const usage = usageLine(out, finalProgress);
+    // ADR-023 Task 8b — implement의 구조적 백스톱. 쓰기 스테이지라 클린 체크는 할 수 없지만(빌더가
+    // 파일을 쓰는 것이 이 스테이지의 일이다) **두 가지**는 세션 뒤에도 참이어야 한다: HEAD가 아직
+    // 스테이지가 체크아웃한 브랜치이고, 팩토리 소유 경로가 아직 스테이지 커밋의 바이트라는 것.
+    // 어느 쪽이든 아니면 그 세션이 어떤 설정으로 무엇을 판단했는지 알 수 없다 = 판정 불가 =
+    // `factory:blocked`(GREEN도 RED도 아니다). 산출물은 받지 않는다 — gates도 verify도 부르지 않는다.
+    if (stage === "implement" && stageBranchName && d.assertStageBranch) {
+      const b = await d.assertStageBranch(harnessIssue);
+      if (!b.ok) {
+        const reason = `undecidable — ${b.reason}`;
+        const t = await d.transition({ to: "factory:blocked", reason });
+        record([`branch: FAIL — ${b.reason}`, ...refusal(t), usage]);
+        return 2;
+      }
+    }
     // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
     // 다시 묻는다(ADR-020 KTB-14). implement(유일한 쓰기 스테이지)는 건너뛴다 — merge는 여기 오지도
     // 않는다(위에서 이미 return). 훅이 놓친 모양으로 어떻게 건드렸든, 스크래치 경로(`.factory/out/**`·
@@ -1071,6 +1117,123 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
   };
 }
 
+/** implement가 쓰는 브랜치 이름. 이름을 한 군데서만 만든다 — 체크아웃·사후 확인·컨텍스트가 같은 문자열을 봐야 한다. */
+export const stageBranch = (issue) => `claude/fq-${issue}`;
+
+/**
+ * ── ADR-023 Task 8b — **브랜치 체크아웃은 스테이지의 것이다** ─────────────────────────────────────
+ * Task 8(KTB-37)은 스테이지 **시작** 시점의 팩토리 설정을 base로 고정했지만, implement의 rework
+ * 라운드는 빌더가 `claude -p` 세션 **안에서** 자기 브랜치를 체크아웃했다 — 커맨드 템플릿이 규칙 1로
+ * 그렇게 지시했다. `--settings`와 훅 **배선**은 세션 시작 시점의 것으로 굳지만 훅 **스크립트**는
+ * 호출마다 디스크에서 읽히고, `.claude/settings*.json`·`CLAUDE.md`·`.factory/**`도 마찬가지로
+ * 그 순간부터 PR의 것이 된다. 곧 overlay가 깔아 둔 base 설정이 세션 중간에 통째로 갈렸다.
+ *
+ * 그래서 체크아웃을 스테이지가 한다: 원격에 브랜치가 있으면 fetch 후 `checkout -B`(지난 라운드
+ * 위에 정확히 선다), 없으면 스테이지 **자신의 커밋**에서 새로 만든다. 그다음이 overlay이고, 그다음이
+ * 빌더다 — 이 순서가 이 Task의 전부다.
+ *
+ * **로컬에만 있는 브랜치는 건드리지 않는다**(fail closed): 원격에 없는데 로컬에 있다는 것은 지난
+ * 라운드의 push가 실패했거나 사람이 뭔가 하고 있다는 뜻이고, `-B`는 그것을 말없이 지운다.
+ */
+export function makeCheckoutBranch({ run, root, issue, env = process.env, defaultBranch = () => "main" }) {
+  return async () => {
+    const branch = stageBranch(issue);
+    const s = await resolveStageSha({ run, root, env, defaultBranch: typeof defaultBranch === "function" ? defaultBranch() : defaultBranch });
+    if (!s.ok) return { ok: false, reason: s.reason };
+    // "원격에 있는가"를 fetch의 종료 코드로 묻지 않는다 — 네트워크 실패와 "없는 브랜치"가 같은 코드로
+    // 오고, 그 둘을 섞으면 rework 라운드가 조용히 새 브랜치로 시작해 지난 라운드의 작업을 버린다.
+    const ls = await run("git", ["ls-remote", "--heads", "origin", branch], { cwd: root });
+    if (ls.code !== 0) return { ok: false, reason: `git ls-remote failed for ${branch}: ${ls.stderr?.trim() || `exit ${ls.code}`}` };
+    if (ls.stdout.trim()) {
+      // refspec을 명시해 원격 추적 ref를 확실히 세운다(`FETCH_HEAD`만으로는 `-B`의 출발점이 모호하다).
+      const f = await run("git", ["fetch", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { cwd: root });
+      if (f.code !== 0) return { ok: false, reason: `git fetch failed for ${branch}: ${f.stderr?.trim() || `exit ${f.code}`}` };
+      const co = await run("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: root });
+      if (co.code !== 0) return { ok: false, reason: `git checkout -B ${branch} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
+      const m = await mergeBaseIntoBranch({ run, root, branch, sha: s.sha, source: s.source, env });
+      if (!m.ok) return m;
+      return { ok: true, branch, base: `origin/${branch}`, existed: true, merged: m.merged, source: s.source };
+    }
+    const local = await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
+    if (local.code === 0) {
+      return { ok: false, reason: `${branch} exists locally (${local.stdout.trim().slice(0, 7)}) but not on origin — refusing to reset a branch whose commits were never pushed` };
+    }
+    const co = await run("git", ["checkout", "-b", branch, s.sha], { cwd: root });
+    if (co.code !== 0) return { ok: false, reason: `git checkout -b ${branch} ${s.sha.slice(0, 7)} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
+    return { ok: true, branch, base: s.sha, source: s.source, existed: false };
+  };
+}
+
+/**
+ * ── KTB-38 — **낡은 PR 위에서 도는 rework는 base의 도구를 들고 돌아야 한다** ─────────────────────
+ * 실측(KTB #3 R5, 2026-09-14): PR #4의 head는 1.2.0 **이전**이라 `factory/bin/lint.js`가 트리에 없었다.
+ * 그런데 overlay가 깔아 준 base의 `.factory/harness.toml`은 바로 그 파일을 부르는 lint 명령을 들고 있다 —
+ * 게이트가 통째로 RED였고, 빌더는 자기 diff와 무관한, 자기가 고칠 수도 없는 실패를 라운드마다 다시 봤다.
+ * Task 8이 설정을 base로 고정한 순간부터 이것은 구조적 결과다: **설정은 base인데 트리는 낡은 PR**이면
+ * 그 둘이 가리키는 파일 집합이 갈라진다.
+ *
+ * 그래서 rework 라운드 **전에** 스테이지가 base를 브랜치로 머지한다. 머지 대상은 `origin/<base>`가
+ * **아니라 스테이지 자신의 커밋(`s.sha`)**이다 — overlay가 덮는 커밋과 같아야 하기 때문이다. 그 사이
+ * main이 더 나갔다면 `origin/main`은 overlay의 sha보다 **앞서 있고**, 그것을 머지하면 트리의 팩토리
+ * 경로가 overlay의 sha와 달라져 overlay가 그것을 되돌리고, 그 되돌림이 다시 "덮을 것이 있다 → blocked"이
+ * 된다. 한 런 안에서 base는 하나다.
+ *
+ * 충돌은 스테이지가 풀 일이 아니다: `git merge --abort`으로 트리를 되돌리고 **판정 불가**로 멈춘다
+ * (`factory:blocked` cause `undecidable`) — 사람이 리베이스한다. 머지 커밋은 팩토리의 것이고
+ * (`user.name factory`), 빌더가 뜨기 **전에** push한다: 빌더가 아무것도 바꾸지 않는 라운드에도 PR head는
+ * 그 머지를 반영해야 하고(그래야 review·merge가 같은 트리를 본다), 빌더의 push는 빌더의 커밋만 싣는다.
+ */
+export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "base", env = process.env }) {
+  // "이미 base를 들고 있는가"를 머지의 출력으로 묻지 않는다 — 물어보고 나서 머지하면 빈 머지 커밋도
+  // push도 생기지 않는다(라운드마다 의미 없는 커밋이 쌓이는 것은 그 자체로 diff를 읽기 어렵게 한다).
+  const anc = await run("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: root });
+  if (anc.code === 0) return { ok: true, merged: null };
+  // 1 = "조상이 아니다"(정상 답). 그 밖은 답이 아니라 고장이다 — 판정할 수 없으면 진행하지 않는다.
+  if (anc.code !== 1) return { ok: false, reason: `cannot tell whether ${branch} already carries ${sha.slice(0, 7)} (${source}) — git merge-base --is-ancestor: ${anc.stderr?.trim() || `exit ${anc.code}`}` };
+  const bot = (env?.FACTORY_BOT_LOGIN || "").trim();
+  const ident = ["-c", "user.name=factory", "-c", `user.email=${bot ? `${bot}@users.noreply.github.com` : "factory-bot@users.noreply.github.com"}`];
+  const mg = await run("git", [...ident, "merge", "--no-edit", "--no-ff", sha], { cwd: root });
+  if (mg.code !== 0) {
+    const ab = await run("git", ["merge", "--abort"], { cwd: root });
+    return {
+      ok: false,
+      undecidable: true,
+      reason: `stale PR conflicts with base — rebase by hand (merging ${sha.slice(0, 7)} (${source}) into ${branch} conflicted${ab.code === 0 ? ", merge aborted" : `; git merge --abort also failed: ${ab.stderr?.trim() || `exit ${ab.code}`}`})`,
+    };
+  }
+  const push = await run("git", ["push", "origin", branch], { cwd: root });
+  if (push.code !== 0) return { ok: false, reason: `git push origin ${branch} failed after merging base ${sha.slice(0, 7)} — ${push.stderr?.trim() || `exit ${push.code}`}` };
+  return { ok: true, merged: sha };
+}
+
+/** run 기록의 한 줄 — 누가 어디에서 이 브랜치를 세웠는가. */
+export const branchLine = (cb) =>
+  `branch: ${cb.branch} checked out by the stage from ${cb.existed ? cb.base : `${String(cb.base).slice(0, 7)} (${cb.source || "base"}, new branch)`} — the builder never runs git checkout/switch`;
+
+/** KTB-38 — 이 라운드가 어떤 base 위에서 돌았는지. 머지가 실제로 붙은 라운드에만 나온다. */
+export const baseMergedLine = (cb) =>
+  `base_merged: ${String(cb.merged).slice(0, 7)} (${cb.source || "base"}) merged into ${cb.branch} by the stage and pushed before the builder — the PR tree carries base's tooling`;
+
+/**
+ * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
+ * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
+ * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
+ * detach면(`HEAD`) 증명할 수 없는 것이고, 이 저장소에서 판정 불가의 자리는 `factory:blocked`다.
+ */
+export async function assertStageBranch({ run, cwd, issue, sha, harnessIssue = false }) {
+  const branch = stageBranch(issue);
+  const r = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+  if (r.code !== 0) return { ok: false, reason: `git rev-parse --abbrev-ref HEAD failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
+  const at = r.stdout.trim();
+  if (at !== branch) return { ok: false, reason: `the session left ${branch} — HEAD is now ${at || "(empty)"}, so the factory config on disk was no longer the stage's from that moment on` };
+  if (!sha) return { ok: true, branch: at };
+  // harness 이슈는 overlay가 애초에 덮지 않은 경로(`HARNESS_OPENS`)를 세션 뒤에도 묻지 않는다 —
+  // 빌더가 그 파일을 고치는 것이 그 이슈의 일이다(§overlayPathspecs).
+  const drift = await overlayDrift({ run, cwd, sha, harnessIssue });
+  if (!drift.ok) return { ok: false, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
+  return { ok: true, branch: at };
+}
+
 /**
  * ADR-020 KTB-37 — **스테이지는 PR의 코드를 돌지만, 팩토리 자신의 설정은 스테이지 자신의 커밋(base)의
  * 것이어야 한다.** 위 `makeCheckoutHead`가 워킹 트리를 PR head로 detach하고 나면, 그 트리에 있는
@@ -1113,6 +1276,27 @@ export const SESSION_CONFIG_RE = /(^|\/)(CLAUDE[^/]*\.md|AGENTS[^/]*\.md|\.mcp[^
 export const OVERLAY_ROOTS = [".factory", ".claude", "docs/factory/CHARTER.md"];
 export const OVERLAY_EXCLUDE = ":(exclude).factory/out";
 export const OVERLAY_PATHSPECS = [".factory", OVERLAY_EXCLUDE, ".claude", "docs/factory/CHARTER.md", ...SESSION_CONFIG_PATHSPECS];
+/**
+ * ── ADR-023 Task 8b 후속 — **하네스 이슈의 rework는 자기 `harness.toml`을 지킨다** ───────────────
+ * Task 8b가 체크아웃을 스테이지에게 준 뒤 하나가 뒤집혔다: `factory:harness` 이슈의 rework 라운드는
+ * **정의상** `.factory/harness.toml`을 고친 브랜치 위에서 돈다(그 파일을 고치는 것이 그 이슈의 일이다).
+ * overlay가 그것을 base로 되돌리면 `overlaidPaths`가 비지 않고, implement의 "덮을 것이 있으면 빌더를
+ * 띄우지 않는다" 규칙이 **모든** 하네스 rework를 막는다 — 승격이 1라운드 안에 끝나지 못하면 영원히
+ * 끝나지 못한다(그리고 하네스 승격은 게이트를 새로 세우는 일이라 대개 1라운드에 끝나지 않는다).
+ *
+ * 그래서 harness 모드에서는 overlay가 `HARNESS_OPENS`를 **덮지 않는다** — 열린 목록이 한 곳
+ * (`protected-paths.js`)에서 나오므로 L2 deny(`ci-settings-harness.json`)·훅 `prot`·overlay가 같은
+ * 문장을 말한다. 나머지는 그대로다: 훅 스크립트·settings·에이전트 프롬프트·ci-settings·CHARTER·세션
+ * 설정(CLAUDE.md/AGENTS.md/.mcp.json)은 여전히 스테이지 자신의 커밋에서 덮인다.
+ *
+ * **무엇이 지키는가**: harness.toml 안의 위험한 섹션은 L1이 본다(Task 1의 섹션 검사 —
+ * `[protected]`·`[gates.thresholds]`·`[load_bearing]`을 건드린 PR은 사람이 머지한다). 그리고 이
+ * 스테이지가 자기 판정에 쓰는 harness는 이미 메모리에 있다(`charterReady`가 체크아웃 **전에**,
+ * 곧 스테이지 자신의 커밋에서 읽었다) — 브랜치의 harness.toml이 이 런의 게이트 임계값이나 보호 목록을
+ * 바꾸지는 못한다.
+ */
+export const harnessOpenExcludes = () => HARNESS_OPENS.map((g) => `:(exclude,glob)${g}`);
+export const overlayPathspecs = (harnessIssue = false) => (harnessIssue ? [...OVERLAY_PATHSPECS, ...harnessOpenExcludes()] : OVERLAY_PATHSPECS);
 export const OVERLAY_LABEL = `.factory/** (except .factory/out/**), .claude/**, docs/factory/CHARTER.md, ${SESSION_CONFIG_GLOBS.join(", ")}`;
 /** overlay가 손대는 스테이지 — PR 콘텐츠가 워킹 트리에 올 수 있는 셋. triage·plan은 PR 이전이라 언제나 base 위에 있다. */
 const OVERLAY_STAGES = new Set(["implement", "review", "merge"]);
@@ -1141,9 +1325,13 @@ export async function resolveStageSha({ run, root, cwd = root, env = process.env
  */
 export const reviewTier = ({ claimed, floor }) => (floor ? maxTier(claimed, floor) : claimed);
 
-export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch = () => "main" }) {
-  return async () => {
+export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch = () => "main", harnessIssue = false }) {
+  return async (harnessMode = harnessIssue) => {
     const branch = typeof defaultBranch === "function" ? defaultBranch() : defaultBranch;
+    // harness 모드에서 열리는 경로는 **브랜치의 것으로 남는다**(§overlayPathspecs). 네 자리가 전부
+    // 같은 목록을 써야 한다: 덮는 checkout, PR이 추가한 파일 스캔, 무엇이 덮였나 status, 그리고 drift.
+    const specs = overlayPathspecs(harnessMode);
+    const excludes = harnessMode ? harnessOpenExcludes() : [];
     const s = await resolveStageSha({ run, root, env, defaultBranch: branch });
     if (!s.ok) return { ok: false, reason: s.reason };
     // 이 커밋이 실제로 들고 있는 경로만 pathspec에 넣는다 — 없는 경로 하나가 `git checkout`을 통째로
@@ -1163,7 +1351,7 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
     if (tree.code !== 0) return { ok: false, reason: `overlay session-config scan failed (${s.sha.slice(0, 7)} ${s.source}): ${tree.stderr?.trim() || `exit ${tree.code}`}` };
     const sessionConfig = tree.stdout.split("\n").map((l) => l.trim()).filter((l) => l && SESSION_CONFIG_RE.test(l));
     if (present.length === 0 && sessionConfig.length === 0) return { ok: false, reason: `the stage sha ${s.sha.slice(0, 7)} (${s.source}) carries none of ${OVERLAY_LABEL}` };
-    const pathspecs = [...present.flatMap((p) => (p === ".factory" ? [p, OVERLAY_EXCLUDE] : [p])), ...sessionConfig];
+    const pathspecs = [...present.flatMap((p) => (p === ".factory" ? [p, OVERLAY_EXCLUDE] : [p])), ...sessionConfig, ...excludes];
     const co = await run("git", ["checkout", s.sha, "--", ...pathspecs], { cwd: root });
     if (co.code !== 0) return { ok: false, reason: `overlay checkout failed (${s.sha.slice(0, 7)} ${s.source}): ${co.stderr?.trim() || `exit ${co.code}`}` };
     /**
@@ -1178,7 +1366,7 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
      * `git diff`는 매치되지 않는 pathspec에 대해 실패하지 않는다(`checkout`과 다르다).
      * 지우지 못하면 **진행하지 않는다**(fail closed) — 확인되지 않은 설정은 설정이 아니다.
      */
-    const added = await run("git", ["diff", "--name-only", "--diff-filter=A", s.sha, "--", ...OVERLAY_PATHSPECS], { cwd: root });
+    const added = await run("git", ["diff", "--name-only", "--diff-filter=A", s.sha, "--", ...specs], { cwd: root });
     if (added.code !== 0) return { ok: false, reason: `overlay added-file scan failed: ${added.stderr?.trim() || `exit ${added.code}`}` };
     const extras = added.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
     if (extras.length) {
@@ -1186,7 +1374,7 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
       if (rm.code !== 0) return { ok: false, reason: `overlay could not remove ${extras.length} PR-added factory-owned path(s) (${extras.slice(0, 5).join(", ")}): ${rm.stderr?.trim() || `exit ${rm.code}`}` };
     }
     // 무엇이 실제로 덮였는가 — 한 줄 로그의 재료이자, 쓰기 금지 스테이지의 클린 체크에 넘길 허용 목록이다.
-    const st = await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...OVERLAY_PATHSPECS], { cwd: root });
+    const st = await run("git", ["status", "--porcelain", "--untracked-files=all", "--", ...specs], { cwd: root });
     if (st.code !== 0) return { ok: false, reason: `overlay status failed: ${st.stderr?.trim() || `exit ${st.code}`}` };
     const paths = new Set(extras);
     for (const line of st.stdout.split("\n").filter(Boolean)) for (const p of pathsOfStatusLine(line)) if (p) paths.add(p);
@@ -1196,9 +1384,9 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
      * 이미 그 설정으로 돌아 버렸다. 여기서 GREEN이라는 것은 "지금 트리의 팩토리 소유 경로가 스테이지
      * 커밋과 바이트 동일하다"는 뜻이고, 그것이 overlay가 약속한 전부다.
      */
-    const drift = await overlayDrift({ run, cwd: root, sha: s.sha });
+    const drift = await overlayDrift({ run, cwd: root, sha: s.sha, harnessIssue: harnessMode });
     if (!drift.ok) return { ok: false, reason: drift.reason || `the overlay did not make the factory-owned paths identical to ${s.sha.slice(0, 7)}: ${drift.paths.join(", ")}` };
-    return { ok: true, sha: s.sha, source: s.source, paths: [...paths], removed: extras };
+    return { ok: true, sha: s.sha, source: s.source, paths: [...paths], removed: extras, harnessIssue: harnessMode };
   };
 }
 
@@ -1207,18 +1395,22 @@ export function makeFactoryOverlay({ run, root, env = process.env, defaultBranch
  * 목록(overlay가 덮은 경로들)이 에이전트의 세션 중 수정까지 덮어 주면 안 되므로, 그 경로들만 sha와
  * 직접 비교한다. `git diff` 자체가 실패하면 "그대로다"를 증명할 수 없으므로 fail closed다.
  */
-export async function overlayDrift({ run, cwd, sha }) {
-  const r = await run("git", ["diff", "--name-only", sha, "--", ...OVERLAY_PATHSPECS], { cwd });
+export async function overlayDrift({ run, cwd, sha, harnessIssue = false }) {
+  const r = await run("git", ["diff", "--name-only", sha, "--", ...overlayPathspecs(harnessIssue)], { cwd });
   if (r.code !== 0) return { ok: false, paths: [], reason: `overlay drift check failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
   const paths = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   return paths.length === 0 ? { ok: true, paths: [] } : { ok: false, paths };
 }
 
 /** run 기록의 한 줄 — 무엇을, 어느 커밋에서 덮었는지. */
-export const overlayLine = (ov) =>
-  ov.paths?.length
-    ? `overlay: ${ov.paths.length} path(s) from ${ov.sha.slice(0, 7)} (${ov.source || "base"}) — ${ov.paths.slice(0, 10).join(", ")}${ov.paths.length > 10 ? ", …" : ""} [${OVERLAY_LABEL}]`
-    : `overlay: clean — factory config already at ${ov.sha.slice(0, 7)} (${ov.source || "base"}) [${OVERLAY_LABEL}]`;
+export const overlayLine = (ov) => {
+  // harness 이슈에서는 무엇이 **열려 있었는지**도 같은 줄에 적는다 — 나중에 이 런을 읽는 사람이
+  // "왜 저 파일은 base로 돌아가지 않았나"를 되짚을 자리가 여기뿐이다.
+  const scope = `[${OVERLAY_LABEL}${ov.harnessIssue ? ` — harness issue: ${HARNESS_OPENS.join(", ")} left to the branch` : ""}]`;
+  return ov.paths?.length
+    ? `overlay: ${ov.paths.length} path(s) from ${ov.sha.slice(0, 7)} (${ov.source || "base"}) — ${ov.paths.slice(0, 10).join(", ")}${ov.paths.length > 10 ? ", …" : ""} ${scope}`
+    : `overlay: clean — factory config already at ${ov.sha.slice(0, 7)} (${ov.source || "base"}) ${scope}`;
+};
 
 /**
  * 로컬 진입(§4.2.5): `factory run triage <issue>`가 락을 먼저 잡았을 때만 의미가 있다 — main()이
@@ -1330,11 +1522,21 @@ async function main() {
     },
     checkoutHead: makeCheckoutHead({ gh, run, root, issue }),
     /**
+     * ADR-023 Task 8b — implement의 브랜치는 스테이지가 체크아웃한다(빌더가 아니라). `harness`는
+     * charterReady에서 이미 로드됐다 — overlay와 같은 기본 브랜치를 늦게 읽는다.
+     */
+    checkoutBranch: async () => {
+      const cb = await makeCheckoutBranch({ run, root, issue, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
+      return cb;
+    },
+    /** 세션 뒤: HEAD가 아직 그 브랜치이고 팩토리 설정이 아직 스테이지 커밋의 것인가(fail closed). */
+    assertStageBranch: async (harnessIssue = false) => assertStageBranch({ run, cwd: root, issue, sha: overlaySha, harnessIssue }),
+    /**
      * ADR-020 KTB-37 — 체크아웃된 트리 위에 팩토리 소유 설정만 스테이지 자신의 커밋에서 덮는다.
      * `harness`는 charterReady에서 이미 로드됐다 — 기본 브랜치는 그때 굳은 값을 늦게 읽는다.
      */
-    overlayFactoryConfig: async () => {
-      const ov = await makeFactoryOverlay({ run, root, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
+    overlayFactoryConfig: async (harnessIssue = false) => {
+      const ov = await makeFactoryOverlay({ run, root, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main", harnessIssue })();
       if (ov.ok) overlaySha = ov.sha;
       return ov;
     },
@@ -1385,7 +1587,7 @@ async function main() {
     ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),
     claudeP: async (_ctx, { harnessIssue = false } = {}) => {
       const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
-      const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, harnessIssue }) });
+      const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, stage, harnessIssue }) });
       mkdirSync(join(root, ".factory/out"), { recursive: true });     // 파싱에 실패해도 원본 stdout은 남긴다
       writeFileSync(join(root, ".factory/out", `${stage}.json`), r.stdout);
       // envelope을 이름 붙여 한 벌 더 남긴다 — `<stage>.json`은 산출물 추출이 성공하면 그 객체로
@@ -1613,7 +1815,7 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false }) => {
+    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -1634,7 +1836,9 @@ async function main() {
       // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.
       if (to === "factory:merged") Object.assign(ctxExtra, mergeGatesResult ?? await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
       // stage: to===factory:blocked일 때만 lib/transition.js가 origin 마커에 쓴다(KTB-15b I2).
-      return transition({ gh, issue, to, reason, ctxExtra, stage });
+      // cause가 명시되지 않으면 transition이 사유 문구에서 되짚는다(§blockedCause) — 명시된 자리는
+      // 문구가 아니라 **판단**이 등급을 정하는 자리다(KTB-38의 stale-PR 충돌).
+      return transition({ gh, issue, to, reason, ctxExtra, stage, cause });
     },
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),

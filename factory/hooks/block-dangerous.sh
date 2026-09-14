@@ -71,7 +71,7 @@ ZE='([;&|)`}=[:space:]]|$)'
 # 명령과 "따옴표를 벗긴 사본"에 대해 **두 번** 돌린다. 표를 두 벌 유지하면 반드시 한쪽이 뒤처진다.
 # `$1`이 판정 대상 문자열이고, 전역 `$A`가 그 패스의 경계 클래스다.
 scan() {
-  local c="$1" prot qa p ep API_CLIENT API_WRITE
+  local c="$1" prot ovl qa p ep API_CLIENT API_WRITE
 
 echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge" && block "gh pr merge"
 # REST 머지도 막는다 — gh api ... /pulls/<n>/merge (메서드 불문)
@@ -284,6 +284,37 @@ echo "$p" | grep -Eq "${A}wget[[:space:]]+[^;&|]*$prot" && block "wget downloadi
 # 알려진 오탐: `git restore --staged package.json`(인덱스만)도 막힌다 — 워킹 트리를 덮는 형태와 명령줄에서
 # 구별되지 않으므로 막는 쪽을 택한다.
 echo "$p" | grep -Eq "${A}${G}(checkout|restore)[[:space:]]+[^;&|]*$prot" && block "git checkout/restore onto protected path"
+# ── ADR-023 Task 8b — **세션 설정은 세션 도중에 바뀌지 않는다** ──────────────────────────────────
+# KTB-37의 overlay는 스테이지 **시작** 시점에 팩토리 소유 경로를 base의 바이트로 고정한다. 그런데 훅
+# 스크립트는 **호출마다** 디스크에서 읽히고 `.claude/settings*.json`·`CLAUDE.md`·`.factory/**`도 그
+# 순간의 디스크가 전부다 — 곧 세션 도중에 워킹 트리를 다른 커밋의 것으로 바꾸는 명령은 **L2와 훅
+# 자신을 갈아 끼우는 명령**이다. implement 빌더는 실제로 그렇게 했다(세션 안에서 자기 PR 브랜치를
+# 체크아웃했다): 그 브랜치가 변조한 훅을 들고 있으면 그 뒤의 모든 판정이 PR의 훅으로 이뤄졌다.
+# 아래 `ovl`은 overlay가 고정하는 뿌리다 — `prot`과 달리 `factory:harness` 이슈에서도 **열리지 않는다**:
+# 그 이슈가 여는 것은 파일 **편집**이지, 세션 설정을 다른 커밋의 것으로 바꾸는 일이 아니다.
+ovl='(\.factory/|\.claude/|CLAUDE[a-zA-Z0-9._-]*\.md|AGENTS[a-zA-Z0-9._-]*\.md|\.mcp[a-zA-Z0-9._-]*\.json|docs/factory/CHARTER\.md)'
+# `git restore --source=<ref> <path>`는 `git checkout <ref> -- <path>`의 다른 철자다. 위 `prot` 규칙이
+# 대부분을 덮지만 harness 이슈에서 열린 경로(`.factory/harness.toml`)는 여기서 다시 닫힌다.
+echo "$c" | grep -Eq "${A}${G}(checkout|restore)[[:space:]]+[^;&|]*$ovl" && block "git checkout/restore of an overlay root ($ovl) — the factory config is pinned to the stage's own commit for the whole session (ADR-023 Task 8b)"
+# `--hard`에는 pathspec이 없다 = 트리 전체 = overlay 뿌리 전부가 HEAD(=PR 브랜치)의 것으로 돌아간다.
+echo "$c" | grep -Eq "${A}${G}reset[^;&|]*[[:space:]]--hard${Z}" && block "git reset --hard (a whole-tree reset puts the PR's .claude/**, .factory/** and CLAUDE.md back on disk — the overlay is gone)"
+# stash는 같은 일을 두 방향으로 한다: push(맨몸 `git stash` 포함)는 overlay를 걷어 내고, pop/apply는
+# 다른 트리를 덮는다. 읽기(`list`/`show`)와 `drop`은 워킹 트리를 건드리지 않으므로 그대로 통과한다.
+echo "$c" | grep -Eq "${A}${G}stash[[:space:]]*([;&|)\`}]|$)" && block "git stash (it strips the factory config overlay off the working tree)"
+echo "$c" | grep -Eq "${A}${G}stash[[:space:]]+(push|save|pop|apply|branch)${Z}" && block "git stash push/pop/apply (it swaps the working tree — the factory config on disk with it)"
+# ── 브랜치 이동 자체 — **스테이지 세션에서만** ────────────────────────────────────────────────────
+# 체크아웃은 이제 스테이지의 일이다(`run-stage.js` makeCheckoutBranch): 세션은 이미 자기 브랜치 위에서
+# 시작하고, 거기서 움직일 이유가 없다. `--` pathspec이 있는 `git checkout … -- <path>`는 파일 복원이라
+# 그대로 두고(위 두 규칙이 보호 경로를 본다), `--`가 없는 checkout과 모든 `git switch`가 브랜치 이동이다.
+# 사람의 자기 세션(`FACTORY_STAGE` 없음)에는 걸지 않는다 — `know-thy-build` 스킬들이 사람에게
+# `gh pr checkout <pr>` → `git switch -`를 시키고, 그것은 이 훅이 지키려는 계약과 아무 상관이 없다.
+if [ -n "${FACTORY_STAGE:-}" ]; then
+  echo "$c" | grep -Eq "${A}${G}switch${Z}" && block "git switch in a stage session — the stage owns the branch checkout (ADR-023 Task 8b); switching swaps the hooks and settings on disk mid-session"
+  if echo "$c" | grep -Eq "${A}${G}checkout${Z}"; then
+    echo "$c" | grep -Eq "${A}${G}checkout[^;&|]*[[:space:]]--[[:space:]]" \
+      || block "git checkout <ref> in a stage session is a branch switch — the stage already put you on your branch (ADR-023 Task 8b); \`git checkout -- <path>\` (restore a file) stays allowed"
+  fi
+fi
 # `git apply`/`git am`은 **패치 파일**이 쓰는 내용을 명령줄에 싣지 않는다 — 이 훅은 무엇이 쓰이는지 볼 수조차
 # 없으므로 보호 경로만 골라 막을 방법이 없다. 판정 불능은 "안전"이 아니다(이 파일 맨 위의 jq 규칙과 같은 원칙):
 # 전면 차단한다. builder는 손실이 없다 — KTB-13 이후 `Edit`/`Write`가 allow에 있어서 파일을 직접 쓴다.
