@@ -174,8 +174,10 @@ test("KTB-46: searchIssues takes state and sort options — closed issues keep t
   expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--label", "factory:needs-human", "--state", "all", "--limit", "200", "--json", "number,title,updatedAt"]);
   // 정렬 수식어는 `--search`로만 갈 수 있으므로 그때는 라벨도 검색 문법으로 옮긴다 — 그래야 그 200개가
   // "번호가 큰 200개"가 아니라 "가장 최근에 움직인 200개"가 된다(닫힌 이슈는 무한히 쌓인다).
+  // 정렬을 쓰는 호출만 `state`도 받아 온다 — 그 팔은 닫힌 이슈까지 보므로 "열려 있는가"가 후보를
+  // 자르는 기준의 절반이다(r5). 기본 호출의 필드 목록은 위 단언대로 그대로다.
   await gh.searchIssues("factory:needs-human", { state: "all", sort: "updated-desc" });
-  expect(run.calls[1].args).toEqual(["issue", "list", "-R", repo, "--search", 'label:"factory:needs-human" sort:updated-desc', "--state", "all", "--limit", "200", "--json", "number,title,updatedAt"]);
+  expect(run.calls[1].args).toEqual(["issue", "list", "-R", repo, "--search", 'label:"factory:needs-human" sort:updated-desc', "--state", "all", "--limit", "200", "--json", "number,title,updatedAt,state"]);
 });
 
 test("KTB-46: prMergeInfo reports who merged the PR and on which head sha — missing fields stay null", async () => {

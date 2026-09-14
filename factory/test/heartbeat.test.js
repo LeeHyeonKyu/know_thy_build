@@ -64,7 +64,7 @@ test("SF-4 round-trip: the body startHeartbeat writes is what sweep's staleness 
   });
 
   const fresh = sweepArgs(posted);
-  expect(await sweep(fresh)).toEqual([{ kind: "quick-sweep", skipped: ["quarantine", "token-expiry"] }]);
+  expect(await sweep(fresh)).toEqual([{ kind: "quick-sweep", skipped: ["quarantine", "token-expiry", "human-merged"] }]);
   expect(fresh.transition).not.toHaveBeenCalled();               // 파서가 `last:`를 읽었다 = 살아 있다
   expect(fresh.release).not.toHaveBeenCalled();
 

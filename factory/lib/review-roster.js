@@ -37,13 +37,20 @@ export const tierFromReviewHandoff = (tier) => async (declared) => ({
  * 실패(handoff 파싱·CHARTER 읽기·tier 계산)는 전부 `{ ok:false, reason }`이다 — 호출자는 그것을
  * "로스터를 확인 못 했다"로 읽고 fail closed 한다(빈 로스터를 통과로 읽지 않는다).
  */
+/**
+ * `roles`는 `roles.toml`의 파싱 결과이거나 **그것을 읽는 함수**다(r5 nit 6). 후자를 받는 이유는
+ * `loadRoles(root)`가 인자 자리에서 평가되면 그 파일이 깨졌을 때 예외가 이 함수의 catch **밖으로**
+ * 빠져나가, 호출자가 `ok:false, reason` 대신 원시 예외를 받기 때문이다 — 두 문(merge 스테이지와
+ * sweeper)이 같은 실패에 다른 문장을 내게 된다. 함수로 넘기면 읽기도 이 try 안에서 일어난다.
+ */
 export async function resolveReviewRoster({ charter, roles, comments, effectiveTier = null }) {
   try {
+    const roleDefs = typeof roles === "function" ? roles() : roles;
     const declared = latestHandoff(comments, "triage")?.data?.tier ?? charter.tier_default;
     const t = effectiveTier
       ? await effectiveTier(declared)
       : { tier_effective: declared, tier_source: "declared" };
-    return { ok: true, roles: rosterFor(charter, roles, "review", t.tier_effective), tier: t.tier_effective, tier_declared: declared, tier_source: t.tier_source };
+    return { ok: true, roles: rosterFor(charter, roleDefs, "review", t.tier_effective), tier: t.tier_effective, tier_declared: declared, tier_source: t.tier_source };
   } catch (e) {
     return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` };
   }

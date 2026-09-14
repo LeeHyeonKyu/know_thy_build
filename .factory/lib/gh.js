@@ -19,6 +19,19 @@ export const allChecksGreen = (checks, required = null) => {
   return checks.length > 0 && checks.every(isGreen);
 };
 
+/**
+ * `gh pr checks`가 **체크가 하나도 없는 PR**에 대해 내는 실패(`no checks reported on the '<branch>'
+ * branch`, gh `checks.go`의 `populateStatusChecks`). exit code가 0이 아니라 이 어댑터의 래퍼는
+ * 그것을 throw로 올린다 — 그런데 그것은 조회 실패(transport)가 아니라 **판정**이다: 체크가 없다는
+ * 사실 자체가 `allChecksGreen([])`이 이미 내리는 그 판정(fail closed)이다.
+ *
+ * merge 스테이지는 이 구분이 필요 없다(`mergeGates`의 catch가 `checksGreen`을 세우지 않고 떠나면
+ * `requirements.js`가 "required checks not verified GREEN"으로 접는다 — 어느 쪽이든 거부다). sweeper의
+ * 사람-머지 반영 팔은 transport와 판정을 갈라 다르게 다루므로(전자는 재시도, 후자는 마커) 그 경계를
+ * 알아야 한다. 문구를 손으로 베끼지 않도록 여기 한 곳에 둔다(KTB-46 r5).
+ */
+export const GH_NO_CHECKS_RE = /no (?:required )?checks reported/i;
+
 const STATUS_STATES = new Set(["success", "failure", "pending", "error"]);
 
 // GitHub Free 플랜의 private repo는 branch protection API 자체를 막는다 — gh CLI가 그 사실을 이 문구로
@@ -244,8 +257,10 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 그때는 `--label`도 검색 문법(`label:"…"`)으로 옮긴다.
      */
     async searchIssues(label, { state = "open", sort = null } = {}) {
+      // 정렬을 쓰는 쪽(사람-머지 반영 팔)만 `state`도 받는다 — 그 팔은 닫힌 이슈까지 보므로 "열려
+      // 있는가"가 후보를 자르는 기준의 절반이다(r5 should_fix 2). 기본 호출은 바이트 그대로다.
       const args = sort
-        ? ["issue", "list", "-R", repo, "--search", `label:"${label}" sort:${sort}`, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"]
+        ? ["issue", "list", "-R", repo, "--search", `label:"${label}" sort:${sort}`, "--state", state, "--limit", "200", "--json", "number,title,updatedAt,state"]
         : ["issue", "list", "-R", repo, "--label", label, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"];
       return JSON.parse(await gh(args));
     },

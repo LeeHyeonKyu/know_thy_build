@@ -80,7 +80,9 @@ async function main() {
    * 그 필드가 없는 1.2 이전 기록에서는 선언 tier로 내려가고, 팔이 그 사실을 한 줄로 말한다.
    */
   const reviewRoster = (comments, handoffTier = null) => resolveReviewRoster({
-    charter, roles: loadRoles(root), comments,
+    // r5 nit 6: 함수로 넘겨 `roles.toml` 읽기까지 lib의 catch 안에서 일어나게 한다 — 그래야 깨진
+    // 파일이 merge 스테이지와 **같은 문장**으로 접힌다.
+    charter, roles: () => loadRoles(root), comments,
     effectiveTier: handoffTier ? tierFromReviewHandoff(handoffTier) : null,
   });
   /** KTB-46 r3 must_fix 4 — 머지된 PR의 필수 체크도 확인한다(merge 스테이지와 같은 목록·같은 판정 함수). */

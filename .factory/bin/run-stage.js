@@ -2057,7 +2057,7 @@ async function main() {
       // 코멘트 조회의 실패도 예전과 같은 문장으로 접는다(그 조회는 helper 밖에서 일어난다).
       try {
         return await resolveReviewRoster({
-          charter, roles: loadRoles(root), comments: await gh.comments(issue),
+          charter, roles: () => loadRoles(root), comments: await gh.comments(issue),
           effectiveTier: async (tier) => resolveTier({ run, cwd: root, base: await mergeBase(), harness, tier }),
         });
       } catch (e) { return { ok: false, reason: `review roster for this tier could not be resolved — ${e?.message || e}` }; }
