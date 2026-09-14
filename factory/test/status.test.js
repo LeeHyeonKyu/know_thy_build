@@ -476,7 +476,18 @@ test("test_3_rendered_usage_rows_all_numeric_and_silent: every rendered 사용�
   for (const r of rows) expect(r).toMatch(/^\d+$/);
   // "skipped silently" — 건너뛴 기록에 대한 새 줄은 stdout에도 stderr에도 없다.
   expect(o.err).toEqual([]);
-  expect(text).not.toMatch(/_retro|notes|skip/i);
+  // 침묵을 픽스처 **문구**로 재지 않는다(라운드1 cf-s2 / verifier 지적: 전체 stdout에 건 `/notes|skip/i`는
+  // 언젠가 픽스처 이슈 제목이 그 낱말을 담는 날 엉뚱한 이유로 빨간불이 된다). 대신 계약을 직접 잰다:
+  // 비숫자 키를 애초에 주지 않은 기준 실행과 stdout 전체가 **바이트 동일**해야 한다. 건너뛴 기록이
+  // 경고·카운트·빈 줄 어느 형태로든 출력에 흔적을 남기면 여기서 죽고, 픽스처 문구와는 무관하다.
+  const { io: iBase, o: oBase } = io();
+  const baseCode = await statusCommand({
+    root, argv: [], io: iBase, gh: fakeGh(), run: vi.fn(), now: () => NOW,
+    readRecords: vi.fn(async () => new Map([["8", REC_8]])),
+  });
+  expect(baseCode).toBe(0);
+  expect(text).toBe(oBase.out.join("\n"));
+  expect(oBase.err).toEqual([]);
 });
 
 test("test_3_status_usage_none_when_only_retro: a branch holding only _retro still reports (none) instead of falling through to local records", async () => {
