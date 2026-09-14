@@ -15,6 +15,22 @@ import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-
 export const REVIEW_EVIDENCE_STATUSES = ["factory/review", "factory/gates"];
 
 /**
+ * KTB-46 — **"이 `factory:needs-human`은 자동 머지 거부에서 왔는가"의 유일한 표식.**
+ *
+ * `handToHuman`이 만드는 사유 문구(보호 경로·역할 섹션·lessons 삭제·harness.toml 얼어붙은 섹션·
+ * 기존 테스트 편집)는 전이 코멘트에 그대로 실려 이슈에 남는다. sweeper의 `sweepHumanMerged` 팔은
+ * 그 한 줄만 보고 "사람이 머지해 주기를 기다리는 이슈"와 나머지 모든 needs-human(재점화 한도,
+ * 락 소유자 불명, 리뷰 라운드 소진…)을 가른다 — 그 둘을 섞으면 사람이 아직 보지도 않은 이슈를
+ * 머지된 것으로 이으려 든다.
+ *
+ * 그래서 문구와 판정은 **같은 출처**에서 나온다: 아래 다섯 사유는 전부 이 정규식의 `source`로
+ * 만들어진다. 문구를 고치면 판정이 따라 움직이고, 둘이 조용히 갈라질 수 없다(sweeper가 어제의
+ * 문구를 찾는 동안 merge 스테이지가 오늘의 문구를 쓰는 일 — 이 팔이 죽는 가장 조용한 방식이다).
+ */
+export const HUMAN_MERGE_REQUIRED = /human merge required/;
+const HUMAN_MERGE_REQUIRED_TEXT = HUMAN_MERGE_REQUIRED.source;
+
+/**
  * 외부 감사 2026-09-14 H6 — 머지 전이 코멘트가 **사람의 서명이 어디 있었는지**를 한 줄로 말한다.
  * `merge.human_gate`(CHARTER)는 설정이 아니라 선언이다: true면 `factory-merge` 환경의 required
  * reviewer가 이 잡을 PR마다 한 번 멈춰 세웠고, false면 사람은 토큰을 한 번 등록했을 뿐이다.
@@ -236,7 +252,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!prot?.ok) return await undecidable("protected-path check", prot?.reason);
   if (prot.files.length) {
     return await handToHuman({
-      reason: `protected paths changed — human merge required: ${prot.files.join(", ")}`,
+      reason: `protected paths changed — ${HUMAN_MERGE_REQUIRED_TEXT}: ${prot.files.join(", ")}`,
       sections: [{
         heading: "보호 경로 변경",
         why: [
@@ -271,7 +287,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const additive = pol.files.filter((f) => !lessons.includes(f) && !frozenFiles.includes(f) && !testFiles.includes(f));
     const sections = [], reasons = [];
     if (additive.length) {
-      reasons.push(`agent role sections edited outside Examples/Perspectives — human merge required: ${additive.join(", ")}`);
+      reasons.push(`agent role sections edited outside Examples/Perspectives — ${HUMAN_MERGE_REQUIRED_TEXT}: ${additive.join(", ")}`);
       sections.push({
         heading: "역할 프롬프트의 허용 섹션 밖 편집",
         why: [
@@ -284,7 +300,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       });
     }
     if (lessons.length) {
-      reasons.push(`lessons files deleted or moved away — human merge required: ${lessons.join(", ")}`);
+      reasons.push(`lessons files deleted or moved away — ${HUMAN_MERGE_REQUIRED_TEXT}: ${lessons.join(", ")}`);
       sections.push({
         heading: "lessons 파일 삭제/이동",
         why: [
@@ -299,7 +315,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     }
     if (frozen.length) {
       const which = [...new Set(frozen.map((v) => /\[([a-z._]+)\]/.exec(v.rule)?.[1]).filter(Boolean))];
-      reasons.push(`harness.toml frozen sections edited — human merge required: ${which.map((s) => `[${s}]`).join(", ")}`);
+      reasons.push(`harness.toml frozen sections edited — ${HUMAN_MERGE_REQUIRED_TEXT}: ${which.map((s) => `[${s}]`).join(", ")}`);
       sections.push({
         heading: "harness.toml의 판정 기준 섹션 편집",
         why: [
@@ -320,7 +336,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
      * 그 PR이 스스로를 허가한다), 그럼에도 자동 머지가 안 되는 이유는 그 판단이 사람의 것이기 때문이다.
      */
     if (testsChanged.length) {
-      reasons.push(`existing tests modified or deleted — human merge required: ${testFiles.join(", ")}`);
+      reasons.push(`existing tests modified or deleted — ${HUMAN_MERGE_REQUIRED_TEXT}: ${testFiles.join(", ")}`);
       sections.push({
         heading: "기존 테스트의 수정·삭제",
         why: [

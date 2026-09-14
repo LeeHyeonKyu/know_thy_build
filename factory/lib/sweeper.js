@@ -2,6 +2,7 @@ import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
 import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, lastTransition } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
+import { HUMAN_MERGE_REQUIRED } from "./merge-stage.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -607,6 +608,129 @@ async function sweepHarnessUnpark({ gh, transition, harnessSettled, actions }) {
 }
 
 /**
+ * 닫힌 이슈까지 훑는 창(KTB-46). `MISSING_STATE_SCAN_HOURS`와 같은 이유로 유한하다 — 이 경계가
+ * 없으면 sweep마다 저장소의 **모든** 닫힌 `factory:needs-human` 이슈에 코멘트 조회가 나간다.
+ * 7일보다 오래된 사람의 머지는 sweeper가 조용히 되살리기보다 사람이 보는 편이 맞다.
+ */
+export const HUMAN_MERGE_SCAN_HOURS = 7 * 24;
+export const humanMergedComment = (issue, pr) => `<!-- factory-sweeper human-merged issue=${issue} pr=${pr} -->`;
+/** `transition()`이 거부할 때 스스로 남기는 마커 — 이 팔의 거부 dedupe는 그것을 근거로 한다. */
+export const HUMAN_MERGE_REFUSED_MARKER = "<!-- factory-transition-refused from=factory:needs-human to=factory:merged -->";
+
+/**
+ * 이 이슈가 **마지막으로 실제로 도달한** 전이. `reason=refused` 마커는 건너뛴다.
+ *
+ * 그 마커는 상태가 바뀐 기록이 아니라 **바뀌지 않았다는 기록**이다(ADR-020 r2 SF3이 거부에도 전이
+ * 문법을 붙인 이유는 라벨-셋 복구 팔이 에스컬레이션을 되돌리지 않게 하려는 것이었다). 그런데 아래
+ * 팔의 판정 근거는 오직 "마지막 전이의 사유"이고, 거부는 `from`도 `to`도 `factory:needs-human`인 데다
+ * 사유 문법마저 다르다 — 그것을 마지막 전이로 읽으면 **거부 한 번이 원래 사유를 영구히 가린다**.
+ * 그러면 그 팔은 이슈를 다시는 보지 않고, 그 침묵에는 액션 한 줄도 남지 않는다(KTB-23이 죽었던
+ * 방식 그대로다). 거부를 건너뛰면 dedupe는 `HUMAN_MERGE_REFUSED_MARKER`가 **말하면서** 한다.
+ */
+function lastRealTransition(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = TRANSITION_TO.exec(String(list[i]?.body ?? ""));
+    if (!m || m[4] === "refused") continue;
+    return lastTransition([list[i]]);
+  }
+  return null;
+}
+
+/**
+ * KTB-46 — **사람이 머지한 보호 경로 PR을 이슈에 잇는다.**
+ *
+ * KTB #3(2026-09-14 13:59Z)이 그 구멍을 라이브로 보여 줬다: 리뷰 R3가 4/4 승인했고, merge 스테이지는
+ * 단계 (3)에서 `protected paths changed — human merge required: …`로 자동 머지를 거부하며 이슈를
+ * `factory:needs-human`으로 올렸다(설계대로다 — §12.3-2). 소유자가 PR #4를 손으로 squash-merge 했다.
+ * 그런데 그 뒤에 이슈를 움직이는 것이 **아무것도 없었다**: 그래프에 `needs-human → merged` 엣지가
+ * 없었고, `Closes #n`은 걸리지 않아 이슈는 열린 채였고, 머지 뒤에 도는 merge 단계 (9)는 이 경로에서
+ * 애초에 실행되지 않는다(KTB-23의 하네스 주차 해제가 죽었던 것과 **정확히 같은** 구멍이다).
+ * 운영자가 손으로 라벨을 붙이고 닫았다.
+ *
+ * 판정은 세 가지다:
+ *   1. 마지막 전이가 `→ factory:needs-human`이고 그 **사유**가 `HUMAN_MERGE_REQUIRED`와 맞는가.
+ *      `factory:needs-human`은 이 공장에서 가장 많은 뜻을 겸하는 라벨이다(재점화 한도, 락 소유자
+ *      불명, 리뷰 라운드 소진, 게이트 RED…). 사유 한 줄만이 "사람이 머지해 주기를 기다리는 중"을
+ *      나머지와 가른다 — 그 문구의 출처는 `merge-stage.js`가 내보내는 정규식 하나뿐이다.
+ *   2. `claude/fq-<n>`에서 머지된 PR이 있는가(`mergedPrForBranch`). builder는 언제나 그 브랜치에서
+ *      작업하므로 브랜치 이름이 곧 이슈 번호다.
+ *   3. 그리고 **전이 자신의 요구조건**(`requirements.js`의 `factory:merged`). 이 팔은 그것을 한 칸도
+ *      깎지 않는다 — 넘기는 것은 PR head sha 하나뿐이고, review handoff·정족수 all-approve·K·게이트
+ *      바인딩은 그대로 물린다. 사람의 머지가 예외이지 증거가 예외인 것이 아니다(§12.3-2).
+ *
+ * **닫힌 이슈도 본다**(`state: "all"`). `Closes #n`이 실제로 걸리는 경우 이슈는 `factory:needs-human`
+ * 라벨을 그대로 단 채 닫히고 — 그건 "끝났다"가 아니라 **상태 라벨이 거짓말을 하는 이슈**다(retro의
+ * 수확 통계가 그것을 needs-human 한 건으로 센다). 창은 7일: 그 뒤에 사람이 머지한 것은 sweeper가
+ * 조용히 되살리기보다 사람이 보는 편이 맞다(그리고 이 창이 없으면 sweep마다 저장소의 모든 닫힌
+ * needs-human 이슈에 코멘트 조회가 나간다 — `MISSING_STATE_SCAN_HOURS`와 같은 이유다).
+ *
+ * 실패가 기우는 방향은 `sweepHarnessUnpark`와 같다: 성공 마커는 **전이가 성공한 뒤에** 남기고,
+ * 거부는 액션 한 줄만 남긴다. 다만 거부에는 하나가 더 붙는다 — `transition()`이 거부할 때 이슈에
+ * `factory-transition-refused` 코멘트를 **스스로** 남기므로, 그 마커가 이미 있으면 다시 시도하지
+ * 않는다. 그러지 않으면 리뷰를 거치지 않은 채 머지된 PR 하나가 30분마다 같은 거부 코멘트를 쌓는다.
+ */
+async function sweepHumanMerged({ gh, transition, nowMs, actions }) {
+  // 구형 배선(테스트 더블 포함)은 조용히 건너뛴다 — 다른 dep들과 같은 계약("안 쓴다"와 "에러났다"를 가른다).
+  if (typeof gh.mergedPrForBranch !== "function" || typeof gh.prMergeInfo !== "function") return;
+  let issues;
+  try { issues = await gh.searchIssues("factory:needs-human", { state: "all" }); }
+  catch (e) { actions.push({ kind: "error", step: "human-merged", error: String(e.message || e) }); return; }
+  for (const it of issues) {
+    try {
+      const updatedMs = Date.parse(it.updatedAt ?? "");
+      if (Number.isFinite(updatedMs) && nowMs - updatedMs > HUMAN_MERGE_SCAN_HOURS * 3600e3) continue;
+      const comments = await gh.comments(it.number);
+      const last = lastRealTransition(comments);
+      if (!last || last.to !== "factory:needs-human" || !HUMAN_MERGE_REQUIRED.test(last.reason || "")) continue;
+      const pr = await gh.mergedPrForBranch(`claude/fq-${it.number}`);
+      if (pr == null) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, reason: "no merged PR on claude/fq-" + it.number });
+        continue;
+      }
+      const marker = humanMergedComment(it.number, pr);
+      if (comments.some((c) => String(c?.body ?? "").includes(marker))) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "already reconciled" });
+        continue;
+      }
+      // 이미 한 번 거부당했으면 다시 묻지 않는다. 거부의 원인(리뷰 증거 부족)은 시간이 풀어 주는
+      // 종류가 아니라 **사람이 볼 것**이고, 30분마다 같은 거부 코멘트를 쌓는 것은 그 사람이 읽어야
+      // 할 이슈를 덮는 일이다. 되살리는 길은 남아 있다 — `:unstick`의 재큐가 이 이슈를 새 주기로
+      // 보내고, 그 주기에서 파이프라인이 정상적으로 머지에 도달한다.
+      if (comments.some((c) => String(c?.body ?? "").includes(HUMAN_MERGE_REFUSED_MARKER))) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "already refused" });
+        continue;
+      }
+      const info = await gh.prMergeInfo(pr);
+      const by = info?.mergedBy || "a person";
+      const t = await transition({
+        issue: it.number,
+        to: "factory:merged",
+        reason: `PR #${pr} merged by ${by} (protected paths — human merge)`,
+        // 증거는 깎지 않는다 — PR head sha 하나만 넘긴다(`requirements.js`가 review handoff의
+        // head_sha를 여기에 묶는다). `issue`는 handoff 마커의 이슈 번호까지 대조하게 한다.
+        ctxExtra: { issue: it.number, prHeadSha: info?.headSha ?? null },
+      });
+      if (!t?.ok) { actions.push({ kind: "human-merged-refused", issue: it.number, pr, reason: t?.reason ?? "unknown" }); continue; }
+      await gh.comment(it.number, `${marker}\nPR #${pr}을 ${by}이(가) 머지했습니다 — 보호 경로 변경이라 팩토리가 자동 머지하지 않고 사람에게 넘긴 PR입니다(스펙 §12.3-2). 머지 사실을 확인하고 \`factory:needs-human\`에서 \`factory:merged\`로 이었습니다(KTB-46). 리뷰·게이트 증거 검사는 자동 머지와 똑같이 물렸습니다.`);
+      // 이슈가 아직 열려 있으면 닫는다 — `Closes #n`이 걸리지 않은 경우다(KTB #3이 그랬다).
+      // `factory status`의 "Needs You"가 이미 끝난 이슈를 계속 세지 않게 하는 마지막 한 걸음이고,
+      // 실패해도 전이 자체는 되돌리지 않는다(라벨이 이미 진실을 말한다).
+      let closed = false;
+      try {
+        const st = typeof gh.issueState === "function" ? await gh.issueState(it.number) : null;
+        if (st && st.state !== "CLOSED" && typeof gh.closeIssue === "function") { await gh.closeIssue(it.number); closed = true; }
+      } catch (e) {
+        actions.push({ kind: "error", step: "human-merged-close", issue: it.number, error: String(e.message || e) });
+      }
+      actions.push({ kind: "human-merged", issue: it.number, pr, mergedBy: info?.mergedBy ?? null, closed });
+    } catch (e) {
+      actions.push({ kind: "error", step: "human-merged", issue: it.number, error: String(e.message || e) });
+    }
+  }
+}
+
+/**
  * ADR-020 KTB-26 — dispatch는 **경쟁하는 sweep들 사이에서 실패할 수 있다**: 이제 30분 cron만이
  * 아니라 스테이지 잡이 끝날 때마다 sweep이 돌기 때문에, 두 sweep이 같은 이슈를 같은 초에 볼 수 있다.
  * 마커 dedupe는 그 대부분을 막지만 조회-후-기록 사이의 틈은 남고, `gh workflow run` 자체도 레이트
@@ -622,7 +746,7 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
 /**
  * `quick`(KTB-26): 스테이지 워크플로의 마지막 스텝이 쓰는 모양(`sweep.js --quick`). 시간에 묶인 두 팔
  * (격리 정책 적용과 토큰 만료 이슈 생성)을 건너뛰고 **상태 복구 팔만** 돌린다 — in-progress 하트비트
- * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
+ * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 사람 머지 반영 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
@@ -780,6 +904,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   }
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
+  await sweepHumanMerged({ gh, transition, nowMs, actions });
   if (quick) return actions;                     // KTB-26 — 아래 두 팔은 시간에 묶여 있다(cron의 몫)
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });

@@ -109,6 +109,20 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
       return j.length ? j[0].number : null;
     },
+    /**
+     * KTB-46 — **머지된 PR의 머지 사실 그 자체.** `mergedPrForBranch`는 번호만 준다("머지된 PR이
+     * 있다"). 이슈를 `factory:merged`로 이으려면 그보다 두 가지가 더 필요하다:
+     *   - `headSha`: 그 전이의 증거 검사(`requirements.js`의 `factory:merged`)가 review handoff의
+     *     `head_sha`를 묶을 대상. 이것이 없으면 "어느 커밋에 대한 승인인가"를 말할 수 없다.
+     *   - `mergedBy`: 전이 사유에 실릴 **누가 머지했는가**. 이 경로의 존재 이유가 "사람이 머지했다"
+     *     이므로, 그 사람의 이름이 이슈 이력에 남아야 나중에 왜 자동 머지가 아니었는지 읽힌다.
+     * `mergeSha`·`mergedAt`은 같은 조회로 공짜라 함께 싣는다(run 기록·retro가 쓸 수 있다).
+     * 없는 필드는 지어내지 않고 null이다 — 머지되지 않은 PR에 부르면 전부 null로 답한다.
+     */
+    async prMergeInfo(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
+      return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
+    },
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
@@ -192,8 +206,18 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
       await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
     },
-    async searchIssues(label) {
-      return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]));
+    /**
+     * 이 라벨이 붙은 이슈들. 기본은 **열린 것만** — sweeper의 모든 팔과 back-pressure가 묻는 것은
+     * "지금 파이프라인 위에 있는 이슈"이기 때문이다.
+     *
+     * KTB-46: `state: "all"`이 하나 필요해졌다. 사람이 보호 경로 PR을 머지할 때 그 PR 본문의
+     * `Closes #<n>`이 실제로 걸리면 이슈는 **`factory:needs-human` 라벨을 그대로 단 채 닫힌다** —
+     * 라벨은 상태를 말하는데 그 상태를 아무도 다시 보지 않는 자리다. 그 이슈를 `factory:merged`로
+     * 잇는 팔(`sweepHumanMerged`)은 닫힌 것도 봐야 한다. 기본값은 건드리지 않으므로 기존 호출자의
+     * 인자 한 글자도 바뀌지 않는다.
+     */
+    async searchIssues(label, { state = "open" } = {}) {
+      return JSON.parse(await gh(["issue", "list", "-R", repo, "--label", label, "--state", state, "--limit", "200", "--json", "number,title,updatedAt"]));
     },
     /**
      * 워크플로를 손으로 띄운다(KTB-8). 라벨은 이미 목적 상태에 있어 `labeled` 이벤트를 다시 만들 수

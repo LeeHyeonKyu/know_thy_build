@@ -167,6 +167,24 @@ test("searchIssues lists open issues by label", async () => {
   expect(call.args).toEqual(["issue", "list", "-R", repo, "--label", "factory:awaiting-review", "--state", "open", "--limit", "200", "--json", "number,title,updatedAt"]);
 });
 
+test("KTB-46: searchIssues takes a state option — closed issues keep their state label and must still be seen", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } }]);
+  await makeGh({ run, repo }).searchIssues("factory:needs-human", { state: "all" });
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", repo, "--label", "factory:needs-human", "--state", "all", "--limit", "200", "--json", "number,title,updatedAt"]);
+});
+
+test("KTB-46: prMergeInfo reports who merged the PR and on which head sha — missing fields stay null", async () => {
+  const body = { number: 4, headRefOid: "c".repeat(40), mergeCommit: { oid: "d".repeat(40) }, mergedAt: "2026-09-14T13:59:00Z", mergedBy: { login: "LeeHyeonKyu" } };
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify(body), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.prMergeInfo(4)).toEqual({ headSha: "c".repeat(40), mergeSha: "d".repeat(40), mergedAt: "2026-09-14T13:59:00Z", mergedBy: "LeeHyeonKyu" });
+  expect(run.calls[0].args).toEqual(["pr", "view", "4", "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]);
+
+  // 머지되지 않은 PR: 아무것도 지어내지 않는다.
+  const run2 = makeFakeRun([{ match: (c, a) => a[0] === "pr", result: { code: 0, stdout: JSON.stringify({ number: 4, headRefOid: "c".repeat(40), mergeCommit: null, mergedAt: null, mergedBy: null }), stderr: "" } }]);
+  expect(await makeGh({ run: run2, repo }).prMergeInfo(4)).toEqual({ headSha: "c".repeat(40), mergeSha: null, mergedAt: null, mergedBy: null });
+});
+
 test("createIssue returns the issue number parsed from the created URL", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "create", result: { code: 0, stdout: "https://github.com/o/r/issues/42\n", stderr: "" } }]);
   const gh = makeGh({ run, repo });

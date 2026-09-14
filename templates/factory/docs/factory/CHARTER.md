@@ -80,7 +80,10 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
   훅이 유일한 층이다. `factory doctor`의 `tokens.single-actor` WARN이 그 사실을 매번 말한다.
   branch protection 자체가 불가능한 저장소(GitHub Free의 private repo)는 항상 이 모드다.
 - **사람의 머지 경로는 달라지지 않는다**: 보호 경로·역할 섹션 정책에 걸린 PR은 그대로 `needs-human`이고,
-  admin 권한의 사람이 diff를 읽고 GitHub에서 머지한다.
+  admin 권한의 사람이 diff를 읽고 GitHub에서 머지한다. **머지한 뒤에는 손댈 것이 없다** — sweeper가
+  한 회차(≤30분) 안에 그 이슈를 `factory:merged`로 옮기고 닫는다(KTB-46). 라벨을 손으로 옮기지 마세요:
+  그 전이는 자동 머지와 **똑같은** 증거 검사(리뷰 정족수·게이트·PR head sha)를 지나고, 리뷰를 거치지
+  않은 PR을 머지했다면 거부 코멘트 한 줄과 함께 이슈는 `needs-human`에 그대로 남습니다.
 
 ### 사람 게이트 — `merge.human_gate` (외부 감사 2026-09-14 H6)
 두 배우 모드는 "에이전트가 머지할 수 없다"를 권한으로 세운다. 그것은 **머지 배우가 누구인가**의 문제이지

@@ -13,7 +13,7 @@ import { backPressure } from "../lib/back-pressure.js";
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
   // KTB-26 — `--quick`: 스테이지 워크플로의 마지막 스텝이 부르는 모양이다. 상태 복구 팔(in-progress
-  // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
+  // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 사람 머지 반영 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
   // (격리 TTL·토큰 만료)은 30분 cron에 그대로 남는다 — 그 둘은 스테이지가 끝난 그 순간에 다시
   // 볼 이유가 없고, 매 스테이지마다 `quarantine.toml`을 쓰면 커밋 경쟁만 늘어난다.
   const quick = process.argv.slice(2).includes("--quick");
@@ -24,7 +24,10 @@ async function main() {
   const thresholds = loadHarness(root).gates.thresholds;
   const quarantine = loadQuarantine(root);
   const saveQuarantine = (q) => saveQuarantineTo(root, q);
-  const transition = ({ issue, to, reason }) => transitionIssue({ gh, issue, to, reason });
+  // KTB-46: `ctxExtra`를 그대로 흘려보낸다. sweeper의 팔 대부분은 주지 않지만(그때는 `{}`),
+  // 사람 머지 반영 팔은 PR head sha를 실어 `requirements.js`의 `factory:merged` 증거 검사가
+  // review handoff를 그 커밋에 묶게 한다 — 여기서 떨어뜨리면 그 검사는 묶을 대상을 잃는다.
+  const transition = ({ issue, to, reason, ctxExtra }) => transitionIssue({ gh, issue, to, reason, ctxExtra });
   const release = (issue) => releaseLock({ run, cwd: root, issue });
   // quick sweep은 토큰 만료 팔을 돌지 않으므로 그 조회도 하지 않는다(스테이지마다 gh를 한 번 덜 때린다).
   const tokenIssuedAt = quick ? null : await gh.getVariable("FACTORY_TOKEN_ISSUED_AT");

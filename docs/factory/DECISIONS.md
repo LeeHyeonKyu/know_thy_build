@@ -2135,6 +2135,7 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 6. **M6** — 리뷰 workflow 요약의 "Light/Full round 2"를 "pass 2"로(리뷰 라운드 K와 혼동).
 7. **GitHub App 토큰** — `FACTORY_BOT_TOKEN` PAT 발급이 사람 손을 타는 문제.
 8. **persist-credentials** — 잠금·records push를 명시 토큰 remote로 옮긴 뒤 `persist-credentials: false`(SF-1의 남은 반).
+9. ~~**KTB-46**~~ — **1.2에서 구현됨**(2026-09-14). 보호 경로 PR을 **사람이 머지한 뒤** 이슈를 `factory:merged`로 잇는 것이 아무 데도 없었다: KTB #3이 리뷰 4/4로 승인됐고 merge 단계 (3)이 `protected paths changed — human merge required: …`로 자동 머지를 거부해(설계대로다 — 스펙 §12.3-2) `factory:needs-human`이 됐는데, 소유자가 PR #4를 손으로 squash-merge 한 뒤 이슈를 움직이는 것이 **하나도 없었다** — 그래프에 `needs-human → merged` 엣지가 없었고, `Closes #n`은 걸리지 않았으며, 머지 뒤에 도는 merge 단계 (9)는 이 경로에서 애초에 실행되지 않는다(KTB-23의 하네스 주차 해제가 죽었던 것과 같은 구멍이다). 운영자가 손으로 라벨을 붙이고 닫았다. 고침: 그래프에 `factory:needs-human → factory:merged` 엣지 하나(사람 전용이 아니다 — `requirementFor("factory:merged")`의 증거 검사는 한 칸도 깎이지 않는다)와 sweeper 팔 `sweepHumanMerged`(열린·닫힌 `factory:needs-human` 이슈를 7일 창으로 훑어 **마지막 실제 전이의 사유**가 `merge-stage.js`가 내보내는 `HUMAN_MERGE_REQUIRED`와 맞는 것만 고르고, `claude/fq-<n>`에서 머지된 PR이 있으면 그 PR head sha를 실어 전이한 뒤 이슈를 닫는다). **사람의 머지가 예외이지 증거가 예외인 것이 아니다** — 리뷰를 거치지 않은 PR을 사람이 머지하면 그 전이는 거부되고 이슈는 needs-human에 그대로, 거부 코멘트는 한 번만 남는다.
 
 (ADR-020 끝. 이후 dogfood 라운드가 있으면 새 ADR로 연다.)
 
