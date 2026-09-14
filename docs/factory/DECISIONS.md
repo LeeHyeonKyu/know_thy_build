@@ -2142,21 +2142,24 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 | 감사 id | 무엇이었나 | Task | 상태 |
 |---|---|---|---|
 | H1a | `block-dangerous.sh`가 줄 단위 매칭이라 `\`+개행 하나로 전 규칙 우회 | 1 | 닫힘 — 판정 전 정규화 |
-| H1b | 스테이지가 자기 commit status를 게시해 머지 게이트를 염 | 1(훅) / 2(게시자 검증) | 부분 — 훅이 명령을 막음, 게시자 검증은 Task 2 |
-| H1c | `mergePr`가 리뷰 검증보다 먼저 | 2 | 미착수 |
-| H2 | `recomputeStatus`가 `misconfigured`를 GREEN으로 | 3 | 미착수 |
-| H3 | tier 자기 신고, `tier_effective` 소비처 0 | 4 | 미착수 |
-| H4 | `cold_read` 미구현 | 5 | 미착수 |
-| H5 | 기존 테스트 삭제·단언 변경 탐지 없음 | 4 | 미착수 |
-| H6 | 인간 게이트가 사실상 없음 | 2 | 미착수 |
+| H1b | 스테이지가 자기 commit status를 게시해 머지 게이트를 염 | 1(훅)·2(게시자 검증)·batch-1(엔드포인트 앵커) | 닫힘 — 세 겹(정규화 + 게시자 검증 + 엔드포인트 앵커). 런타임 조립 동사는 여전히 비목표(아래 "남은 것") |
+| H1c | `mergePr`가 리뷰 검증보다 먼저 | 2 | 닫힘 — 머지 직전 정족수·all-approve·K 재검증 |
+| H2 | `recomputeStatus`가 `misconfigured`를 GREEN으로 | 3 | 닫힘 — fail-closed 7원칙 |
+| H3 | tier 자기 신고, `tier_effective` 소비처 0 | 2(잠정 바닥)·4(단일 출처 `resolveTier`) | 닫힘 |
+| H4 | `cold_read` 미구현 | 5 | 닫힘 — 역할별 `context.<role>.json` |
+| H5 | 기존 테스트 삭제·단언 변경 탐지 없음 | 4 | 닫힘 — `tests-modified` policy 위반 |
+| H6 | 인간 게이트가 사실상 없음 | 2 | 닫힘 — `merge.human_gate` 명시적 선언 |
 | M6 | 죽은 훅 `check-merge-gate.sh`(`$TOOL_INPUT`) | 1 | 닫힘 — 파일·설정 항목 모두 제거 |
+| M7 | 두 배우 모드에서 `FACTORY_MERGE_TOKEN \|\| FACTORY_BOT_TOKEN`이 무성 강등 | 2 | 닫힘 — 첫 스텝 가드(`two-actor-token-guard`)로 exit 1 |
 | M8 | 보호 목록이 세 곳에 손으로, 실제로 갈라져 있었다 | 1 | 닫힘 — 생성 + `protected.parity` |
 | M9 | harness 모드에서 `harness.toml`의 판정 기준 섹션 편집 가능 | 1 | 닫힘 — L1 `policy` 위반 |
-| M1·M2·M13·M10/M11 | triage default-allow, prove-test base env, 중복 실행, lessons 증거 | 6 | 미착수 |
-| M3·M4·M12 | flaky 분류, quarantine 범위, docs tier 글롭 | 3·4 | 미착수 |
-| M5·P2-13 | `factory-loader` LLM 호출, `on_others` 미소비 | 5 | 미착수 |
-| P2-10/11 | 단일 에이전트 plan baseline 실험 | 7 | 미착수 |
+| M1·M2·M13·M10/M11 | triage default-allow, prove-test base env, 중복 실행, lessons 증거 | 6 | **미착수** — 아래 "남은 것" |
+| M3·M4·M12 | flaky 분류, quarantine 범위, docs tier 글롭 | 3·4 | 닫힘 |
+| M5·P2-13 | `factory-loader` LLM 호출, `on_others` 미소비 | 5 | 닫힘 |
+| P2-10/11 | 단일 에이전트 plan baseline 실험 | 7·9 | 닫힘 — 실험 완료(n=4), plan 기본값을 단일 패스로 변경 |
 | P2-15 | 리뷰어 한 명을 다른 프로바이더로 | — | 소유자 결정(두 번째 키가 필요하다) — 구현하지 않는다 |
+| (감사 밖, KTB-37) | 스테이지가 PR head 설정(훅·프롬프트·CHARTER)으로 자기 자신을 심판 | 8 | 닫힘 — 팩토리 설정 overlay + fail-closed. 도그푸딩(KTB #3)에서 발견, 원 감사에는 없는 항목 |
+| (감사 밖, KTB-37 이월) | rework 라운드의 세션 내 체크아웃이 팩토리 브랜치를 직접 소유하지 않음 | 8b | **미착수** — 아래 "남은 것" |
 
 ### Task 1 — 훅 정규화 · 상태/승인 위조 · 보호 목록 단일 출처 (H1a, H1b, M6, M8, M9)
 
@@ -2228,3 +2231,528 @@ H1a·MF-3과 같은 계열이다.
 4. **`CLAUDE.md`·`.mcp.json`은 아직 `[protected].factory`가 아니다.** overlay가 스테이지 **안에서는**
    base의 것으로 만들지만, 그 파일을 고친 PR의 자동 머지를 막지는 않는다 — `[protected]` 편입은
    훅 `prot`·ci-settings 생성 블록을 함께 다시 써야 하므로 별도 변경으로 남긴다.
+
+---
+
+### Task 2 — 리뷰는 머지 전에 검증되고, 인간 게이트는 명시적 선택이다 (H1c, H1b 게시자 검증, H6, M7)
+
+**질문**: H1c는 `merge-stage.js`가 `mergePr`(:476)를 리뷰 handoff를 한 번도 읽지 않고 부른 **뒤에야**
+`transition("factory:merged")`(:487)를 부른다고 지적했다 — 되돌릴 수 없는 단계의 마지막 방어선이 비어
+있었다. H6는 사람의 서명이 토큰 등록 1회뿐인데 그 상태 자체가 어디에도 선언돼 있지 않다고 지적했다.
+M7은 두 배우 모드의 `GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}` 폴백이
+두 배우 모드에서도 조용히 작동해, 환경이 안 걸리거나 시크릿이 지워지면 로그 한 줄 없이 에이전트 배우의
+토큰으로 머지된다고 지적했다. Task 1이 훅으로만 막은 H1b(상태 게시자 미검증)의 나머지 절반도 여기서
+닫는다.
+
+**관측**:
+- `factory:merged` 규칙은 리뷰 handoff의 존재와 스키마만 봤다 — 정족수·all-approve는 `factory:approved`
+  규칙에만 있었고, 그 라벨이 붙은 뒤에는 아무도 다시 세지 않았다.
+- `mergeGates`의 유일한 리뷰 증거는 required check 상태(`allChecksGreen`)였고 그 함수는 `context`와
+  `state`만 본다 — `repo` 스코프의 봇 토큰이 `gh api -X POST /repos/o/r/statuses/<sha> -f state=success
+  -f context=factory/review`를 실제로 낼 수 있었다.
+- `MERGE_ENVIRONMENT_BODY`는 `deployment_branch_policy`만 규정했다 — *토큰이 어디로 새는가*의
+  통제이지 *사람이 봤는가*가 아니다. 다크 여부를 아무도 선언한 적이 없는데 전 저장소가 다크였다.
+
+**결정**: 머지 스테이지에 두 겹을 더하고, 인간 게이트를 CHARTER의 명시적 필드로 승격한다.
+
+#### H1c — 머지 직전 리뷰 검증 (`merge-stage.js` §6b)
+`approvePr`보다 앞에서 라이브 PR head로 네 가지를 다시 묻는다: ① 그 sha에 묶인 `review.v1` handoff가
+있는가, ② 정족수(tier 로스터 크기)+all-approve — handoff의 자기 신고 `decision`이 아니라 `must_fix`에서
+`aggregate.js`로 재계산(`review-quorum.js`), ③ `round ≤ K`, ④ `factory/review`·`factory/gates` 상태의
+`creator.login`이 팩토리 계정인가. 하나라도 확인 불가면 GREEN이 아니라 `factory:needs-human`이고,
+사유는 전이 코멘트·run 기록에 정확한 한 줄로 남는다. 새 파일 `factory/lib/review-quorum.js`가
+"리뷰가 통과했다"의 유일한 판정처다 — `factory:approved` 규칙, `factory:merged` 규칙, 머지 스테이지
+셋이 같은 함수를 부른다. **K는 여전히 `factory:approved`에는 걸지 않는다**(ADR-020 KTB-29 r1 SF1
+유지 — 실패를 끊는 한도이지 성공을 막는 한도가 아니다). merge는 `buildContext`를 거치지 않으므로
+`buildCtxExtra`가 CHARTER에서 읽은 로스터와 K를 직접 받도록 배선했다 — 규칙에 검사를 넣는 것과 그
+검사가 실제로 물리는 것은 다른 일이었다. 재현 테스트: `merge-stage.test.js`의
+`H1c: with no review-evidence deps wired the stage refuses to merge` 외 5건, `requirements.test.js`의
+`H1c: factory:merged re-checks quorum, all-approve … and K`, `run-stage.test.js`의
+`H1c: the merged transition carries a roster and K even with no ctx`.
+
+#### H1b(게시자 검증) — 상태에 출처를 묻는다
+`gh.commitStatuses(sha)`를 신설했다 — `GET /repos/{repo}/commits/{sha}/statuses`만 항목마다 `creator`를
+준다(combined status API도 `gh pr checks`도 안 준다). 두 배우 모드에서는 이 잡의 `GH_TOKEN`이 머지
+배우인데 `factory/review`를 올린 것은 에이전트 배우이므로, `factory-merge.yml`에
+`Resolve the agent actor's login` 스텝을 붙여 봇 토큰으로 `gh api user`를 한 번 불러 로그인 이름을
+`FACTORY_BOT_LOGIN`으로 넘긴다. 로그인조차 못 구하면 fail closed. 재현:
+`H1b: a factory/review status posted by an account that is not the factory does not merge`,
+`…a missing factory/gates status on the PR head does not merge`,
+`…an unresolvable factory login fails closed`.
+
+#### H6 — 인간 게이트는 CHARTER의 명시적 선택이 됐다
+frontmatter `merge: { human_gate: true|false }`. `loadCharter`는 기본값을 채우지 않는다 — "없음"과
+"false"는 다른 사실이다.
+
+| 상태 | bootstrap | doctor |
+|---|---|---|
+| `true` | `factory-merge` 환경에 소유자를 required reviewer로 건다 — 모든 머지 잡이 사람 앞에서 멈춘다 | PASS `charter.merge-human-gate` |
+| `false` | 리뷰어 없음 + 무엇을 잃는지 말하는 note | WARN `merge.dark — no per-PR human signature (merge.human_gate=false)` |
+| 없음 | `true`로 읽는다(fail closed — 다크는 기본값이 아니다) | **FAIL** `charter.merge-human-gate-unset` |
+
+소유자 id는 `gh api user`의 `id`로 얻는다; 못 얻으면 `reviewers`를 넣지 않는다(빈 리뷰어로 PUT하면
+422로 환경 자체가 안 만들어져 시크릿 보호까지 잃는다) — 그 공백은 note가 이름으로 말한다. 머지 전이
+텍스트(`humanGateNote`)가 사람이 서명했는지·다크였는지·선언 자체가 없었는지를 이슈 코멘트와 run
+기록에 매번 남긴다. **KTB 자신은 `false`다** — 다크 루프를 증명하는 것 자체가 산출물이고, 대가(토큰
+등록 1회)를 감당할 수 있는 이유(저장소 하나·소유자 한 명·전부 squash)를 CHARTER에 적어 뒀다.
+**채택 저장소 템플릿 기본값은 `true`다** — 남의 코드베이스에 다크 머지를 기본으로 심지 않는다.
+
+#### M7 — 두 배우 모드의 무성 강등을 막는다
+`factory-merge.yml`의 **첫 스텝**(`id: two-actor-token-guard`, 체크아웃보다 앞)이
+`vars.FACTORY_TWO_ACTOR == 'true'`인데 `secrets.FACTORY_MERGE_TOKEN == ''`이면 `exit 1`한다. 폴백
+자체는 단일 배우 모드를 위해 남는다. `yml-lint`의 `merge-token-required-when-two-actor`가 "폴백이
+있으면 가드 스텝도 있어야 한다"를 고정한다(열쇠는 `id:` — `merge-token-scope`의 스크럽 예외와 같은
+방식).
+
+**알려진 한계**:
+- 게시자 확인은 *제3자의* 위조와 *상태 자체의 부재*만 거른다 — 에이전트 배우 **자신**의 위조는 훅
+  (Task 1)과 정족수 재계산(H1c) 두 겹이 맡는다. 근본 해결(리뷰 증거를 커밋 상태가 아니라 서명된
+  산출물로 옮기는 것)은 이 사이클 밖이다.
+- `FACTORY_BOT_LOGIN`은 워크플로가 넘기는 값이다 — 워크플로를 고칠 수 있는 주체는 이 값을 속일 수
+  있고, 그 지점의 방어선은 린트가 아니라 L1(`.github/**`가 `[protected].factory`)이다.
+- tier는 이 시점까지도 triage handoff의 자기 신고였다 — `reviewRoster()`가 자기 신고와
+  `gates.json.tier_effective`를 `maxTier`로 합쳐 **잠정 바닥**을 세웠다(올릴 수는 있어도 내릴 수는
+  없다). 단일 출처(`resolveTier()`)로 정리하는 것은 Task 4의 몫이다 — Task 4가 머지될 때 이 잠정
+  계산은 삭제됐다.
+- 리뷰 증거는 여전히 자격증명 하나 깊이다(러너와 에이전트가 같은 PAT) — 이 잔여 위험은 batch-1
+  재리뷰가 다시 다룬다(아래).
+
+**영향**: `factory/lib/merge-stage.js`(§6b), `factory/lib/review-quorum.js`(신규), `factory/lib/requirements.js`
+(`factory:merged`), `factory/lib/gh.js`(`commitStatuses`), `factory/bin/run-stage.js`(`buildCtxExtra`),
+`factory/lib/bootstrap.js`(`merge.human_gate` 처리), `factory/cli/bootstrap.js`,
+`templates/factory/github/workflows/factory-merge.yml`(로그인 해석 스텝·가드 스텝),
+`templates/factory/docs/factory/CHARTER.md`(`merge.human_gate: true`), `docs/factory/CHARTER.md`
+(KTB 자신 — `false`, 이유 절). 테스트: `merge-stage.test.js`, `requirements.test.js`,
+`run-stage.test.js`, `doctor-merge-authority.test.js`, `bootstrap.test.js`, `yml-lint.test.js`.
+
+---
+
+### Task 3 — 게이트는 게이트다: fail-closed 7원칙 (H2, P1-5/6/7, M3, M4)
+
+**질문**: 실측 한 줄이 게이트 계층을 무효화했다 — `status=GREEN misconfigured=prove-test,new-test-repeat,
+diff_coverage,mutation`. required 8개 중 5개가 한 번도 돌지 않은 PR이 GREEN이었다. 원인 다섯이 서로를
+받치고 있었다: ① `recomputeStatus`가 `misconfigured`를 판정에 안 썼다(required가 아니면 무시), ②
+`required`를 `names.includes(n)`으로 걸러 레벨 목록에 없는 required 게이트는 "확인 대상 아님"이 됐다,
+③ `prove-test`/`new-test-repeat`가 레벨 목록 밖에서 사후 주입돼 애초에 required가 될 수 없었다, ④
+`harness.toml`의 `fast`/`full`/`deep`이 글자 그대로 같고 `lint = "node -e 0"`이라 tier→level이 아무것도
+정하지 않았다(그 구성 그대로 템플릿이 배포됐다), ⑤ `gates.test.js`의 단언이 이 동작을 정답으로 고정하고
+있었다. 여기에 flaky/격리 두 개가 더 붙는다: base 5/5 실패도 `flaky-existing`으로 불려 제외됐고(M3),
+격리는 스테이지·PR을 가리지 않고 RED를 GREEN으로 뒤집었다(M4).
+
+**관측**: 다섯 결함이 서로를 받쳐 주는 구조라는 것이 핵심이다 — 하나만 고치면 나머지가 같은 구멍을
+다시 연다(①만 고쳐도 ③ 때문에 증명 게이트는 여전히 required가 될 수 없다).
+
+**결정**: 게이트는 fail-closed다. 모르면 GREEN이 아니다.
+
+#### H2 — 설정 오류는 통과가 아니다
+`recomputeStatus`: `misconfigured.length || requiredMissing.length → MISCONFIGURED`(exit 2, `success`가
+아니다). `required`에서 `names.includes(n)` 필터를 뺐다 — required 게이트가 이번 레벨에서 안 돌았으면
+(목록에 없어서든, 명령이 없어서든, SKIPPED로 남았든) MISCONFIGURED다. `prove-test`·`new-test-repeat`도
+`diff_coverage`·`mutation`과 같은 `DEFERRED_GATES`로 레벨의 정식 멤버가 됐다 — 목록에 있으면 SKIPPED
+자리를 먼저 잡고 스테이지가 잰 뒤 채운다. 커밋 상태는 `commitStatusState()` 한 함수로 모았다: GREEN
+하나만 `success`, RED·MISCONFIGURED·BLOCKED·판정 없음은 전부 `failure`. doctor
+`gates.required-in-levels`가 required와 레벨 목록의 짝을 맞춘다.
+
+레벨은 서로 달라야 한다: 템플릿 `fast=[lint,unit]`, `full=fast+[prove-test,new-test-repeat]`,
+`deep=full`(+ 설정되는 대로 `integration`/`e2e`/`diff_coverage`/`mutation`). doctor
+`gates.levels-identical`: `full`이 `fast`에 아무것도 안 더하면 FAIL, `deep`이 `full`을 포함 안 하면
+FAIL, `deep==full`인데 설정은 됐으나 목록에 없는 게이트가 있으면 FAIL(신규 M0 저장소의 `deep==full`은
+PASS — 아무도 못 고치는 경고를 상시로 안 띄운다). `MAX_LEVEL.M0="fast"` 강등은 유지하되 조용하지
+않다 — 판정 파일의 `downgraded_from`과 doctor `gates.m0-downgrade` WARN 두 자리에 남긴다.
+
+#### P1-7 — no-op lint는 게이트가 아니다
+doctor `gates.lint-noop` FAIL: `node -e 0`, `node -e ""`, `true`, `:`, 빈 문자열(텍스트 판정이라
+`node -e 'process.exit(0)'`는 못 잡는다 — 목표는 "린터 붙일 때까지"의 자리표시자가 그대로 배포되는
+관성을 막는 것). KTB 자신의 lint는 `factory/bin/lint.js`로 교체했다(새 의존성 없음): `node --check`
+(바뀐 JS) + `yml-lint.js`(ADR-009/021 워크플로 규칙) + `skill-md.js`. Workflow 툴 스크립트
+(`**/claude/workflows/**`)는 최상위 `return`을 쓰는 함수 본문이라 `--check` 대상에서 뺐다
+(`workflows.test.js`가 그 계약을 검사).
+
+#### M3/M4 — flaky와 격리에 상한과 경계를 준다
+`classify-failure.js`가 실패를 `introduced`/`broken-base`/`flaky-existing` 셋으로 나눈다.
+**`broken-base`**: base 실행이 전부 실패하면 그건 흔들림이 아니라 main이 빨간 것 — 제외하지 않고
+RED로 남기며 `needs_human: true`와 `broken_base[]`가 판정과 verdict 줄에 붙는다(고칠 것은 이 PR이
+아니라 main이다). **`flaky_max`(기본 2)**: 넘으면 하나도 제외하지 않는다(부분 제외는 "어느 둘을
+봐줬나"라는 임의의 선택을 남긴다). **격리는 PR이 건드린 테스트를 뒤집지 못한다**(diff에 있는 파일은
+격리 목록에 있어도 제외 안 함 — 건드린 테스트를 자기가 면제하는 것은 자기 채점). **`quarantine_max_
+effective`(기본 3)**: 한 PR에서 격리가 RED→GREEN으로 뒤집을 수 있는 수의 상한. 제외든 거절이든 판정
+파일에 남는다(`quarantine_applied[]`, `quarantine_refused[]`).
+
+**알려진 한계**: `.factory/**` 미러(설치본)는 이 커밋에서 재생성하지 않았다 — `factory init --upgrade`가
+별도로 돌아야 `self-mirror` 테스트가 다시 초록이 된다(`factory/bin/lint.js`가 새 파일이라).
+
+**영향**: `required`에 적었으나 레벨 목록에 없던 게이트가 있던 하네스는 이제 MISCONFIGURED로 멈춘다 —
+이번 변경에서 가장 시끄러운 부분이고 의도한 바다. `[gates.thresholds]`에 `flaky_max=2`·
+`quarantine_max_effective=3`이 추가된다(protected 섹션). 레벨이 셋 다 같던 하네스, lint가 no-op인
+하네스는 doctor FAIL이 된다. 판정 파일(`factory.gates.v1`)에 `quarantine_applied[]`/
+`quarantine_refused[]`/`broken_base[]`/`broken_base_reason`/`flaky_over_cap`/`needs_human` 필드가
+늘었다. 파일: `factory/lib/gates.js`, `factory/lib/classify-failure.js`,
+`templates/factory/factory/harness.toml`, `factory/lib/doctor/harness.js`. 테스트: `gates.test.js`
+(단언을 먼저 뒤집고 고쳤다), `classify-failure.test.js`, `doctor-harness.test.js`.
+
+---
+
+### Task 4 — 테스트 변조는 정책 위반이고, tier는 단일 출처를 가진다 (H5, H3, M12)
+
+**질문**: H5는 `integrity.js`의 테스트 방어가 test_glob 파일에 **추가된** 줄의 skip pragma 하나뿐이라고
+지적했다 — 기존 단언을 고치거나(`toHaveLength(3)`→`(2)`) 테스트 파일을 통째로 지우는 diff가 위반 0으로
+자동 머지됐다. H3은 tier가 triage의 자기 신고 한 줄이었고, `tierFloor`가 게이트 레벨만 올리고
+`tier_effective`를 읽는 소비처가 0곳이라고 지적했다. M12는 `DOC_GLOBS=["docs/**","*.md"]`가
+`docs/factory/CHARTER.md`(판정 기준 그 자체)까지 문서로 읽는다고 지적했다.
+
+**관측**: `[protected].tests_are_load_bearing = true`가 이미 "테스트는 하중을 받는다"고 선언하고
+있었지만 그것을 **집행하는 코드가 없었다** — 선언과 집행의 간극이 이 Task 전체의 패턴이다(tier도
+마찬가지: `tierFloor`는 있었지만 아무도 그 결과를 읽지 않았다). 감사가 짚은 부수 드리프트: 이
+저장소의 소스는 `factory/lib/…`인데 스테이지가 실행하는 설치본은 `.factory/lib/…`라,
+`[load_bearing].paths`가 한쪽만 적으면 매치 0으로 tier 바닥이 조용히 사라진다.
+
+**결정**:
+
+#### H5 — 기존 테스트를 고치는 것은 "무엇이 통과인가"를 고치는 것이다
+`test_glob`에 매치하는 기존 파일에서 삭제된 줄이 하나라도 있거나(수정은 diff에서 삭제+추가로
+나타난다) 테스트 파일이 삭제되면 `policy` 위반: `tests-modified — N line(s) removed from an existing
+test — human merge required` / `…existing test file deleted…`. **변조(`violations`)가 아니라
+정책(`policy`)인 이유**는 protected/additive_only와 같다 — `factory/integrity`가 branch protection의
+유일한 required context라 여기서 RED를 만들면 **사람도** 그 PR을 머지할 수 없다(KTB-5/KTB-6가 그렇게
+죽었다). L0(`integrityCheck`)는 GREEN을 유지하며 목록만 싣고, **L1(`merge-stage`)이 자동 머지를
+거부**한다. 새 테스트를 쓰는 것(추가만 있는 diff)은 통과한다. 예외는 **이슈 본문**의
+`tests_changed_allowed:` 표식 하나뿐이다 — 표식이 이슈 본문(사람이 쓰거나 읽고 승인)에 살고 PR
+diff(에이전트가 씀)에는 살지 않는 것이 요점이며, 본문을 못 읽으면 허가가 없는 것으로 친다(fail
+closed). 허용된 파일은 위반이 아니라 `tests_allowed` 기록으로 남는다. L0/L1은 `testsPolicy()` 한 몸을
+쓴다(additive-only와 같은 이유). `tests_are_load_bearing=false` 하네스에서는 규칙이 아예 안 돈다.
+빌더 프롬프트(`factory-implement.js` rule 3)도 "부탁"이 아니라 "집행되는 규칙"이라고 바뀌었다.
+
+#### H3 — `resolveTier()`가 단일 출처가 됐다
+```
+tier_effective = maxTier(triage tier, tierFloor(base...HEAD diff))
+tier_source    = "triage" | "floor"
+```
+이것을 읽는 곳: `rosterFor`(리뷰·계획 로스터), `planRoundsFor`(Task 9의 `mode`와 라운드 수),
+`context.json`, 스테이지 handoff(러너가 `tier_effective`/`tier_source`를 덧쓴다 — 에이전트가 적은
+`tier`는 자기 신고 그대로 보존), 그리고 **merge 스테이지의 `reviewRoster`**(정족수의 출처). 신고값은
+지우지 않는다(신고와 실효가 갈린 이슈는 retro가 볼 신호). diff를 못 읽으면 바닥은 `standard`다(판정
+불가가 docs로 내려앉으면 구멍이 그대로 다시 열린다). Task 2가 세운 **잠정 tier 바닥**(`reviewRoster()`가
+triage 자기 신고와 `gates.json.tier_effective`를 `maxTier`로 합치는 것)은 이 커밋에서 삭제한다 —
+`reviewRoster`가 이제 `resolveTier`로 같은 값을 base·diff에서 직접 계산한다.
+
+#### M12 — docs tier는 문서에만 적용된다
+`tierFloor`가 두 목록을 더 본다: `NEVER_DOCS_GLOBS=[".claude/**","templates/**",".factory/**",
+".github/**","factory/**"]`(`.md`여도 문서가 아니다)와 `[protected].factory` 글롭(저장소마다 다른
+"사람이 머지해야 하는 경로"는 정의상 docs tier가 아니다) — `docs/factory/CHARTER.md`가 여기서
+걸린다. 둘 다 바닥을 올리기만 한다; 진짜 문서(`docs/features/…`, `README.md`)는 그대로 docs다.
+
+#### `[load_bearing].paths` — 설치된 레이아웃을 가리켜야 한다
+doctor `load-bearing.paths-exist`: 매치 0인 경로가 있으면 **FAIL**(그 경로를 건드리는 PR이
+load-bearing이 아니게 된다), 목록이 비면 **WARN**(신규 저장소의 정상 상태), 전부 매치하면 PASS.
+`[protected]`의 글롭 판정과 반대가 의도다 — 보호 경로는 "미래의 경로 모양"을 막아 두는 것이라 지금
+매치가 없어도 정상이지만, load-bearing 경로는 지금 존재하는 코드를 가리켜야 바닥이 선다. KTB 자신은
+소스 4개+설치본 4개를 모두 적는다(`.factory/lib/{integrity,merge-stage,labels}.js`,
+`.factory/bin/run-stage.js`).
+
+**알려진 한계**:
+- 워크플로 프롬프트는 이 커밋 시점까지 신고 tier를 보여준다(`factory-review.js`/`factory-plan.js`의
+  `loaded.tier`) — 판정에는 영향 없음(로스터·라운드는 이미 실효 tier로 뽑힌다), Task 5가
+  `factory-loader`를 걷어내며 `tier_effective`로 자연스럽게 옮긴다.
+- `tier_source` 어휘가 두 벌이다(`gates.json`은 `declared`/`promoted-by-diff`, `context.json`/
+  handoff는 `triage`/`floor`) — 판정 파일 스키마를 건드리는 일이라 이 Task 범위 밖.
+- `tests_changed_allowed:`는 글롭을 받는다 — `test/**/*.test.js` 한 줄로 모든 테스트가 열릴 수
+  있다(사람이 그렇게 적으면 사람의 결정); 표식이 넓을수록 `tests_allowed` 기록도 파일별로 남아
+  리뷰에서 보인다.
+- 이 브랜치는 `factory/lib/**`·`templates/**`를 고쳤지만 `factory init --upgrade`를 이 커밋에서
+  돌리지 않았다 — 통합 시점에 미러를 재생성해야 `self-mirror.test.js`가 초록이 된다.
+
+**영향**: `factory/lib/integrity.js`(`testsPolicy`), `factory/lib/context.js`, `factory/lib/gates.js`
+(`tierFloor`, `resolveTier`), `factory/lib/merge-stage.js`(`reviewRoster`),
+`factory/lib/doctor/harness.js`(`load-bearing.paths-exist`), `factory/bin/run-stage.js`,
+`factory/bin/build-context.js`, `factory/bin/integrity.js`, `.factory/harness.toml`,
+`templates/factory/factory/harness.toml`, `templates/factory/claude/workflows/factory-implement.js`
+(rule 3).
+
+---
+
+### Task 5 — cold read는 파일 경계가 되고, 로더는 사라지고, 겹침은 측정된다 (H4, M5, P2-13)
+
+**질문**: 세 지적이 같은 원인을 가리켰다 — **선언을 강제로 착각했다.** H4: `roles.toml`의
+`cold_read=true`(다섯 역할)를 읽는 JS가 하나도 없었다. `context.js`는 네 스테이지 handoff 전부를
+`context.json`에 썼고, `factory-review.js`는 리뷰어에게 그 파일을 읽으라고 지시한 뒤 "plan은 읽지
+마라"고 **부탁**했다 — `handoffs.implement`(verifier 판정, 신고된 테스트 목록)는 금지 목록에조차
+없었고 훅은 읽기를 막지 않는다. M5: 네 workflow가 매번 `factory-loader`(sonnet)를 띄워
+`context.json`+`roles.toml`을 읽어 JSON을 JSON으로 옮겨 적게 했는데, 그 에이전트가 필요했던 유일한
+이유(`model` 필드)는 `context.js`가 이미 `def.model`로 들고 있었다. P2-13: R2 스키마가 요구하는
+`on_others[{id,stance,reason}]`을 리뷰어들이 매 라운드 채워 냈는데 소비하는 코드가 0곳이었다 —
+리뷰어 5명을 붙이는 일의 정당성("각자 다른 것을 본다")을 검증할 유일한 재료가 생성만 되고 버려지고
+있었다.
+
+**관측**: 감사가 정확히 짚은 대로 **읽기는 훅으로 막을 수 없다**(PreToolUse의 `deny-all-writes.sh`는
+쓰기만 본다). 지시로 막는 cold read는 모델이 한 번만 호기심을 내면 무너지고, 무너진 사실이 로그
+어디에도 남지 않는다.
+
+**결정**: 막는 자리를 프롬프트에서 파일로 옮긴다 — **읽지 않기로 약속할 필요가 없다, 읽을 것이 거기
+없다.**
+
+#### H4 — cold read는 파일 경계다
+`buildContext`가 두 종류를 쓴다: `.factory/out/context.json`(오케스트레이터·verify-stage용, 전부)과
+`.factory/out/context.<role>.json`(그 역할 하나, `roles.toml`의 `cold_read`가 정한 부분집합).
+`roleContextFor(ctx, role)`가 부분집합을 만든다 — `cold_read=true` 역할은 이슈(번호·제목·본문·라벨),
+`stage`, `tier`, 로스터 이름, lessons 경로, `spec_path`, CHARTER `limits`, **PR 번호와 head sha**
+(builder의 설명이 아니라 "무엇을 판정하는가"의 좌표), 게이트 요약·`maturity`, `done_when`을 네
+필드(`id`/`text`/`verify`/`level`)로 깎은 것만 받는다. `handoffs` 키 자체가 파일에 없다 — verifier
+판정도, `tests_added`도, `files_expected`/`non_goals`/`dissent_log`도, 다른 리뷰어의 `verdicts`도
+존재하지 않는다. `factory-review.js`는 각 리뷰어에게 `contextFor(r)` 경로만 넘기고 전체 파일 경로는
+한 번도 주지 않는다(등장하는 유일한 자리는 "열지 마라"는 금지 문장). `cold_read=false`인
+spec-conformance는 반대로 전체 파일 + 이슈 본문에서 뽑은 `acceptance` 필드를 받는다(계약 대조가
+임무이니 계약이 이슈 본문 안에 있으면 찾아 헤매게 두지 않는다).
+
+#### M5 — `factory-loader`는 삭제됐다
+`context.js`가 로더의 산출물을 Node에서 결정적으로 만들어 `.factory/out/loaded.json`에 쓴다
+(`issue`/`stage`/`tier`, `roster[{name,agentType,model,lessons,context}]`, `contexts`, `rounds`,
+`plan`, `limits`, `spec_path`, `maturity`, `orchestration`, `pr`/`head_sha`, `must_fix`, `disputed`).
+디스패처가 그 파일을 Workflow의 `args.loaded`로 그대로 넘기고, 네 workflow는
+`const loaded = args.loaded ?? null;` 한 줄로 받는다. 아낀 것: 스테이지마다 sonnet 서브에이전트
+1회(triage·plan·implement·review × 매 라운드 — K=3까지 도는 이슈 하나에서 로더 호출이 여섯 번 넘게
+있었다). 함께 사라진 것: `.claude/agents/factory-loader.md`, `.factory/lessons/factory-loader.md`,
+doctor의 `LOADER_AGENT` 예외, 네 workflow가 공유하던 `LOADER` schema 리터럴. 유지한 것: 네
+workflow가 같은 블록을 바이트 단위로 공유한다는 성질(공유 대상이 schema에서 Load 블록으로 바뀌었을
+뿐). fail-closed: payload가 없으면 stage 필드 없는 에러 객체뿐이라 `verify-stage`가 needs-human으로
+떨어뜨린다.
+
+#### P2-13 — 리뷰어 겹침을 센다
+`overlapFrom(verdictSets)`(순수 함수, `factory/lib/retro/harvest.js`). finding 하나를 "제기한 역할"은
+(a) must_fix에 적은 역할과 (b) R2에서 `stance:"agree"`로 그 id를 지지한 역할 — `disagree`는 제기가
+아니고, 아무도 적지 않은 id에 대한 agree는 세지 않는다. `unique_findings_by_role[role]`(그 역할
+혼자 제기한 수)과 `overlap_ratio`(두 역할 이상이 제기한 finding ÷ 전체)를 낸다. 겹침은 런 안에서만
+뜻이 있어 `harvest`가 창 안 머지 이슈의 review handoff를 런 단위로 따로 센다; 누적은 비율의 평균이
+아니라 분자·분모의 합에서 다시 나온다. `factory status`의 `## 최근 머지` 밑 한 줄과 retro 통계
+표(`reviewer overlap`/`unique findings by role`)에 뜬다. 분모가 0인 창은 비율을 만들지 않는다
+("판정할 finding이 없었다"와 "겹치지 않았다"는 다른 사실).
+
+**알려진 한계**:
+- `disputed`는 Node가 PR 코멘트에서 뽑는다 — 조회 실패 시 빈 배열이며, 이것은 fail-open이 아니다
+  (빌더가 이의를 제기하지 않았다는 뜻이 되고 리뷰어의 must_fix는 그대로 살아 있다).
+- `agent-md.js`의 쓰기 금지 역할 목록과 `stop-guard.sh`에 `factory-loader` 이름이 아직 있다 —
+  존재하지 않는 agent_type에 대한 더 엄격한 규칙이라 해로울 것이 없어 그대로 뒀다.
+- 겹침 수치는 표본이 얇다(다크 완주 머지 1건) — 첫 판단 근거가 되려면 리뷰 런이 쌓여야 하고, 그때까지
+  이 줄의 역할은 "재료를 버리지 않는다"다.
+
+**영향**: `factory/lib/context.js`(`roleContextFor`, `buildContext`),
+`templates/factory/claude/workflows/factory-review.js`, `factory-plan.js`, `factory-triage.js`,
+`factory-implement.js`(Load 블록 공유), `factory/lib/retro/harvest.js`(`overlapFrom`),
+`factory/lib/status.js`, `.factory/roles.toml`. 파일이 늘었다(`.factory/out/`에 로스터 크기+1 —
+전부 스크래치 경로라 무결성·더티 트리 판정 대상이 아니다).
+
+---
+
+### Task 8 — 스테이지는 자기 자신의 설정으로 돈다, PR head의 것이 아니라 (KTB-37, 도그푸딩 발견 — 원 감사 항목 없음)
+
+**질문**: KTB #3(이 저장소의 도그푸드 이슈)가 하네스 이슈 #9로 드러낸 것: `run-stage.js`의
+`makeCheckoutHead`가 review·merge 스테이지의 게이트 커밋을 implement handoff의 `head_sha`에 detach로
+고정하는데, 그 뒤 뜨는 `claude -p`가 읽는 것 — `--settings .factory/ci-settings.json`,
+`.claude/hooks/*`, `.claude/settings.json`, `.claude/agents/*.md`, `docs/factory/CHARTER.md` — 전부
+**detach된 워킹 트리**, 곧 **PR의 것**이었다. 이것은 감사 원문의 H1–H6/M1–M13 어디에도 없는, KTB
+자신을 다크로 돌리다 발견한 P0급 구멍이라 별도 항목으로 다룬다.
+
+**관측**: 두 결과가 났다. (1) 하네스 수정이 열린 PR에 영원히 닿지 않는다 — KTB #3의 PR head는
+KTB-36(CI deny 목록이 `.factory/out/qa`를 여는 수정)보다 앞서서, main에 그 수정이 들어간 뒤에도 #3의
+review는 낡은 deny 목록으로 돌아 같은 자리에서 같은 이유로 다시 막혔다(리베이스하려면 한 라운드 더
+돌아야 하고, 그 라운드가 또 낡은 설정으로 돈다). (2) 보안: `.claude/hooks/*`·`.claude/settings.json`·
+`.factory/ci-settings*.json`·`.claude/agents/*.md`(리뷰어 프롬프트)·`.factory/lib/*`를 바꾼 PR은
+**자기 자신의 review·implement 스테이지를 그 변조된 설정으로 실행시킨다** — 보호 경로는 그런 PR의
+머지를 사람 손에 맡기지만, 스테이지는 그 전에 이미 돌아 버린 뒤라 사람이 보는 것은 "PR이 써 준
+프롬프트와 훅으로 승인된 리뷰"다.
+
+**결정**: 스테이지는 **PR의 코드**를 심판하는 자리이지, 그 심판의 규칙까지 피심판자에게서 받으면
+안 된다.
+
+- `resolveStageSha({run,root,env,defaultBranch})` — 이 스테이지 자신의 커밋(CI는 `GITHUB_SHA`, 로컬은
+  `origin/<default_branch>`; 40-hex가 아닌 `GITHUB_SHA`는 거부).
+- `makeFactoryOverlay(...)` — 그 커밋에서 팩토리 소유 경로만 덮어쓴다:
+  `git checkout <stage sha> -- .factory ':(exclude).factory/out' .claude docs/factory/CHARTER.md`
+  (`.factory/out/**`은 제외 — 그건 설정이 아니라 이 런이 만들고 있는 산출물). 커밋이 안 들고 있는
+  경로는 pathspec에서 빼고(어댑터 레포에 `.claude/`가 없을 수 있다), 덮은 뒤
+  `git status --porcelain`으로 실제로 덮인 것을 읽어 런 기록 한 줄로 남긴다
+  (`overlay: N path(s) from <sha> …` / 덮을 것이 없으면 `overlay: clean`).
+- `runStage`: review·merge의 detach 직후, implement는 빌더를 띄우기 전에 overlay를 돈다.
+  **fail closed**: sha를 못 구하거나 커밋이 팩토리 경로를 하나도 안 들고 있거나 `git checkout`/
+  `git status`가 실패하면 `factory:blocked`로 전이하고 exit 2 — PR head 설정으로 도는 스테이지는
+  없다.
+- **implement는 규칙이 뒤집힌다.** implement는 유일한 쓰기 스테이지라 커밋을 빌더가 세션 안에서
+  직접 한다(팩토리가 가로챌 수 있는 자리가 아니다) — 그래서 overlay가 **실제로 파일을 바꿨다면**
+  그건 워크플로가 준 트리가 스테이지 자신의 커밋이 아니었다는 뜻이고, 그때는 빌더를 **띄우지
+  않는다**(blocked). 정상 경로에서 이 overlay는 언제나 no-op이다(`factory-implement.yml`의
+  checkout이 이미 이벤트 sha).
+- **클린 체크와의 관계.** review의 세션 후 클린 체크(KTB-14)에 overlay가 덮은 **정확한 파일 이름**만
+  허용 목록으로 넘긴다(`.claude/**`를 통째로 여는 게 아니다). 세션 중 그 파일들이 다시 바뀌지 않았다는
+  것은 `overlayDrift`가 sha와 직접 비교해 따로 증명한다(diff 자체가 실패하면 fail closed).
+- 무결성·보호 경로 판정에는 영향이 없다 — `integrity.js`/`protectedPaths`는 워킹 트리가 아니라
+  `git diff --name-status`/`git show`로 판정하고(KTB-6/KTB-14와 같은 설계), overlay는 워킹 트리만
+  바꾸고 HEAD·base는 건드리지 않는다.
+
+**채택자 영향**: review·merge·implement 스테이지 시작 시 `.factory/**`(out/** 제외)·`.claude/**`·
+`docs/factory/CHARTER.md`가 base의 것으로 되돌아간다 — PR이 이 경로들을 고쳤어도 그 변경으로
+스테이지가 돌지 않는다(머지 뒤 다음 런부터 적용). 워크플로를 고쳐 PR head를 체크아웃하도록 바꾼
+어댑터의 implement 잡은 이제 `factory:blocked`로 선다(의도된 거부). 로컬 `factory run <stage>
+<issue>`는 `origin`이 없는 체크아웃에서 blocked로 선다(`git fetch origin` 한 번이면 풀린다). 필요한
+조치: `factory init --upgrade`로 `.factory/bin/run-stage.js` 미러 갱신.
+
+**알려진 한계(이 Task가 닫지 않은 것 — 아래 "남은 것"의 Task 8b로 이월)**: rework 라운드의 세션 **내**
+체크아웃. implement 빌더는 세션 안에서 자기 브랜치(`claude/fq-<issue>`)를 체크아웃한다 — 그 브랜치가
+`.claude/hooks/*`를 변조해 들고 있으면 세션 도중 디스크의 훅 스크립트가 PR의 것으로 바뀔 수 있다
+(`--settings`와 훅 배선은 세션 시작 시점 것이지만, 훅 **스크립트**는 호출마다 디스크에서 읽힌다).
+완전한 봉쇄는 스테이지가 브랜치 체크아웃을 직접 소유해야 가능하다.
+
+**영향**: `factory/bin/run-stage.js`(`resolveStageSha`, `makeFactoryOverlay`),
+`factory/test/run-stage-overlay.test.js`(17건 — 경로 복원·out 제외·조용한 부분 pathspec·fail closed
+4갈래·overlayDrift·클린 체크 허용 목록·배선 순서).
+
+이 Task는 위 **리뷰 batch-1**(H1b-b, MF-3)에서 두 구멍이 더 드러난다: overlay가 `CLAUDE.md`·
+`.mcp.json`·`AGENTS.md`를 놓치고 있었고, PR이 **추가한** 파일은 `git checkout -- <pathspec>`로
+지워지지 않았다. 그 절이 이 Task의 최종 상태다.
+
+---
+
+### Task 9 — plan 기본값은 단일 패스다 (P2-10/11의 결과, Task 7 실험 기반)
+
+**질문**: 감사 P2가 "plan 토론(4토론자×3라운드, 19 에이전트 스폰)이 이슈당 비용의 약 40%인데 그
+토론이 막아낸 결함의 기록이 없다"고 지적하며 "plan 기본값을 베이스라인 실험의 결과로 정하라"고
+요구했다(P2-10/11). Task 7이 그 실험을 만들었다: `factory/bin/plan-baseline.js`로 단일 opus 1패스+
+skeptic 계획을 오프라인으로 돌려 실제 도그푸드 기록(#8/#2/#15/#18)의 review `must_fix`와 대조했다
+(`docs/factory/dogfood/2026-09-14-plan-baseline.md`, n=4).
+
+**관측 — 실험 결과**:
+- 요구사항 단위 커버리지(느슨 기준, #8 제외): **팩토리 7/15 = 0.47, 베이스라인 8.5/14 = 0.61** —
+  베이스라인이 우세.
+  - #8(healthz): 둘 다 0/0(공허참) — 단, 팩토리의 **4역할 토론이 스스로 만든 dw1("진입점을
+    spawn한다")**이 should_fix 4건의 원인이었다.
+  - #2(001 Create note, 저장소 유일의 load-bearing 이슈 — 첫 영속 쓰기 경로+첫 공개 와이어 계약):
+    팩토리 4/9=0.44 vs 베이스라인 2.5/8=0.31 — **여기서만 토론이 이겼다**.
+  - #15(harness M1→M2): 팩토리 2/3=0.67 vs 베이스라인 3/3=1.00.
+  - #18(README): 팩토리 1/3=0.33 vs 베이스라인 3/3=1.00.
+- 비용: plan 1패스 기준 **5.4×**, 이슈 전체(재실행 포함) 기준 **33.7×** — $270.26(19패스) vs $8.01.
+  #8은 plan에만 $7.78을 쓰고 must_fix 0건, $1.58짜리 1패스가 같은 결과.
+- **자해**: must_fix 15건 중 **5건(33%)이 계획이 스스로 발명한 `done_when` 때문**이었다(M15-1,
+  M18-1, M18-3, M2-7 + #8 should_fix 4건). 라운드를 더 돌릴수록 `done_when`이 정교해지고, 정교해진
+  `done_when`이 새 결함 표면이 됐다.
+- 감사의 결정규칙("베이스라인 done_when ⊇ must_fix가 4개 중 3개 이상")을 **엄격 적용하면 2.5/4 —
+  미발화**다(#8 ✅ 공허참, #15 ✅, #18 △, #2 ❌). 규칙이 못 잰 것 둘: 비용(위)과 자해(위). 그리고 실패한
+  한 건(#2)의 성격이 결정을 정했다 — 유일한 load-bearing 이슈였고, 토론이 베이스라인을 이긴 곳도
+  거기뿐이다.
+
+**결정**: 규칙은 발화하지 않았지만(2.5/4) 비용과 자해 증거로 **기본값을 바꾼다**: 4역할 토론을 끄지
+않고 **load-bearing tier로 좁힌다**.
+
+#### 기본 = 단일 opus 1패스 + skeptic 1패스
+CHARTER에 `plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }`.
+`planRoundsFor(charter, tier)`가 숫자가 아니라 `{mode, rounds}`를 돌려준다 — `mode`는
+`plan.mode==="debate"`거나 tier가 `debate_tiers`에 있으면 `debate`, 아니면 `single`; `rounds`는 여전히
+숫자 하나라 `verify-stage`의 `expectedRounds` 계약과 `plan.v1` 스키마는 바뀌지 않는다. 단일 모드
+로스터는 `["synthesizer","skeptic"]`(`plan_roles`는 토론 tier에서만 읽힌다). 워크플로 단일 경로:
+계획자 1패스(opus, `plan.v1` 전문) → skeptic 1패스(삭제·수정 필드 없음 — `risks`/`done_when`/
+`dissent`뿐, 같은 id를 다시 보내도 계획자 문장이 이긴다 — "추가만 한다"가 부탁이 아니라 타입) → 종합은
+계획자 자신의 최종본(합성 에이전트 호출 없음, 서명 라운드 없음). `context.json`에 `plan` 블록이 없는
+업그레이드 전 미러는 `debate`로 떨어진다(조용히 load-bearing 계획을 깎는 것보다 낫다).
+
+#### plan 검증기 — 스크립트 집행
+`verifyStage`가 plan 스테이지에서 `validatePlanHandoff`를 돌린다. 위반은 스키마 위반과 동일하게
+취급(스테이지 GREEN 없음 → 사람).
+
+| 규칙 | 사유 문구 | 근거 |
+|---|---|---|
+| (a) `severity>=medium`이거나 severity 없는 `dissent_log` 항목은 어떤 `done_when.covers`가 짚어야 한다 | `dissent without done_when: <ids>` | #2의 단일 원인 — M2-1을 **알고도** `open_risks`에 뒀고, 9라운드·재실행 3회·plan $118을 쓰고서야 `dw1`이 됐다 |
+| (b) `done_when.length <= plan.max_done_when`(기본 6) | `done_when has N items (max M)` | must_fix의 33%가 계획이 발명한 done_when에서 나왔다 |
+| (c) 가드 모양 `done_when`(화이트리스트·순서·정규식 등, `GUARD_SHAPED_PATTERNS`)은 이슈가 가드를 요구하지 않는 한 무효 | `guard-shaped done_when: <ids> — …` | #18 dw2/dw4, #15 dw1–dw3이 리뷰어가 3라운드를 태운 바로 그 대상 |
+
+id 없는 `dissent_log` 항목은 위치로 부른다(`d1`,`d2`,…). `covers`/`dissent_log.id`/`severity`는
+스키마에서 선택 필드(옛 핸드오프는 통과). (c)는 **알려진 조잡한 필터**다 — 거짓 양성·거짓 음성이
+둘 다 가능하고, 실측(#15·#18에서 실제로 must_fix를 만든 done_when)에서 뽑았을 뿐 분류기가 아니다.
+탈출구는 이슈 본문에 `guard`/`가드`/`[guard]`가 있으면 규칙 전체 면제. 다음 표본에서 거짓 판정이
+나오면 목록을 고치지 규칙을 끄지 않는다.
+
+**알려진 한계**:
+- 단일 모드는 skeptic 한 번에 전부를 건다 — 그 패스가 죽으면 계획은 계획자 1패스 그대로 나가고,
+  토론 모드의 "역할 하나가 빠져도 나머지가 돈다"에 해당하는 완충이 없다(대신 조용하지 않다 —
+  `debate.skeptic_added: null`이 핸드오프에 남는다).
+- `synthesizer`가 `roles.toml`에 없는 채택 저장소는 plan 스테이지에서 즉시 죽는다(조용한 폴백
+  없음) — 템플릿에는 있으므로 `factory init`로 설치한 저장소는 해당 없다.
+- 검증기는 `covers`의 **내용**을 읽지 않는다 — dissent id를 짚기만 하면 통과("그 done_when이 정말
+  그 위험을 막는가"는 여전히 spec-conformance 리뷰어의 몫).
+- 표본은 n=4, load-bearing 1건뿐이다. **되돌림 조건**: load-bearing 이슈 3건 이상을 같은 프로토콜로
+  A/B하기 전까지 토론 축소를 되돌리지 않는다. **재측정 조건**: plan을 태운 이슈가 n≥10 쌓이면 같은
+  대조를 다시 돈다 — ① 단일 모드에서 리뷰 라운드가 늘었는가(토론이 사던 "인식"을 잃었는가), ②
+  계획 유발 must_fix 비율이 33%에서 내려갔는가, ③ 검증기 (a)가 반려한 계획이 재실행에서 정말
+  나아졌는가(라운드만 늘렸다면 (a)는 규칙에서 경고로 내린다; ②가 안 내려가면 상한을 6보다 낮춘다).
+- 베이스라인 문서 자신의 한계가 그대로 승계된다: must_fix는 계획이 아니라 **구현된** 것을 리뷰어가
+  판정한 결과라 "회피" 판정 4건은 계획 텍스트만 근거, #2 스냅샷 비대칭(베이스라인이 받은
+  `package.json`에는 사람 머지 d7f7996 이후의 `pg`가 이미 있었다 — M2-2는 베이스라인 분모에서
+  뺐다), 비용 비교는 실측 청구액 대 토큰×정가 추정(85:15 입출력 가정, 팩토리에 불리한 쪽).
+
+**영향**: `factory/lib/config.js`(`plan` 블록, `planRoundsFor`, `rosterFor`), `factory/lib/context.js`,
+`factory/lib/verify-stage.js`(`validatePlanHandoff`, `GUARD_SHAPED_PATTERNS`), `factory/lib/schemas.js`
+(선택 필드), `templates/factory/claude/workflows/factory-plan.js`(단일 모드 경로),
+`templates/factory/docs/factory/CHARTER.md`·`docs/factory/CHARTER.md`(`plan` 블록). 실험 산출물:
+`factory/bin/plan-baseline.js`, `docs/factory/dogfood/2026-09-14-plan-baseline.md`.
+
+---
+
+### 리뷰 batch-2
+
+이 통합 시점까지 **batch-2 재리뷰는 기록되지 않았다.** 있었던 적대적 재리뷰는 위 "리뷰 batch-1"
+(Task 1/2/3/8 대상, `scratchpad/review-audit-batch1-report.md`) 하나뿐이다 — Task 4/5/9는 batch-1
+이후에 머지됐고(git 이력상 `339c10b` batch-1 커밋보다 뒤), 아직 같은 방식의 적대적 재리뷰를 받지
+않았다. 다음 사이클의 첫 항목으로 batch-2(Task 4/5/9 대상)를 잡는다.
+
+### 남은 것 (Task 6 · Task 8b — 이번 사이클에 착수하지 않았다)
+
+**Task 6 — triage default-deny, prove-test base env, label-guard fail-closed, lessons 증거 (M1,
+M2, M13, M10/M11)**. 착수하지 않았다. 감사가 남긴 것 그대로다: CHARTER `triage.default`가 여전히
+default-allow(M1, `factory-triage.md:31-37`), `prove-test`는 base exit≠0만 보고 base에 `npm ci`가
+없어 "정말 실패"와 "설치가 안 됐다"를 구별하지 못한다(M2), entry-label 조회 실패가 통과로 떨어진다
+(M13 부분), lessons 15개가 전부 헤더뿐이고 `evidence_runs`는 길이만 검사하며 인용 카운터가 증가하지
+않는다(M10/M11). 다음 사이클의 P2.
+
+**Task 8b — 스테이지가 브랜치 체크아웃을 직접 소유한다**. Task 8이 스테이지 **시작** 시점의 팩토리
+설정은 base의 것으로 고정했지만, implement의 rework 라운드는 빌더가 세션 **안에서** 자기
+브랜치(`claude/fq-<issue>`)를 체크아웃한다 — 그 브랜치가 변조한 훅 스크립트를 들고 있으면 세션
+도중 디스크의 스크립트가 PR의 것으로 바뀔 수 있다(위 Task 8 "알려진 한계" 참고). 완전한 봉쇄는
+스테이지가 그 체크아웃 자체를 소유(세션에 브랜치를 넘기지 않고 팩토리가 체크아웃해서 넘기거나,
+세션을 read-only 브랜치 뷰로 제한)해야 가능하다 — 착수하지 않았다.
+
+**단일 자격증명 잔여** (Task 2 "알려진 한계", batch-1 "남은 위험" 1). 러너와 에이전트가 여전히 같은
+PAT을 쓴다 — 훅이 못 보는 철자(런타임 조립)로 push가 나가면 리뷰 증거 바인딩·기록 브랜치 보호가
+함께 무너진다. `restrictions`로 push를 머지 배우에 묶을 수 없다(기록을 쓰는 것은 모든 스테이지의
+러너다). 진짜 분리는 두 번째 배우이거나 `GITHUB_RUN_ID`에 묶인 서명 산출물 — 다음 주기의 P0.
+
+**런타임 조립 동사는 비목표** (ADR-020 잔여 위험 #4, 이 ADR 전반에서 반복 확인). 훅은 명령줄에
+동사가 연속으로 나타나야 볼 수 있다(`x=$(printf "gh pr merge"); $x`, `node -e "execSync(…)"` 류는
+여전히 안 보인다). 이 경계를 실제로 닫는 것은 훅이 아니라 ADR-021의 **토큰 분리**(에이전트 배우가
+쥔 토큰으로는 애초에 그 API가 거부된다)다 — H1/M7/Task 1/2가 훅 쪽에서 할 수 있는 것을 다 했다는
+뜻이지, 훅이 완결됐다는 뜻은 아니다.
+
+### 1.2.0 채택자 영향 (체크리스트)
+
+`factory init --upgrade`가 해야 할 일과, 업그레이드 전후로 달라지는 판정:
+
+- [ ] **새 doctor FAIL 다섯**: `charter.merge-human-gate-unset`(CHARTER에 `merge.human_gate`가
+  없으면), `gates.lint-noop`(`node -e 0` 류), `gates.levels-identical`(`full`/`deep`이 `fast`와
+  같으면), `protected.parity`(훅·ci-settings의 보호 목록이 harness.toml과 갈리면),
+  `load-bearing.paths-exist`(`[load_bearing].paths`에 매치 0인 경로가 있으면).
+- [ ] **새 CHARTER 필드**: `merge.human_gate: true|false`(템플릿 기본 `true`, KTB 자신은 `false`),
+  `plan.mode`/`plan.debate_tiers`/`plan.max_done_when`(기본 `single`/`["load-bearing"]`/`6`).
+- [ ] **`factory init --upgrade`가 다시 생성하는 것**: `.claude/hooks/*`의 `prot` 블록과 두
+  `ci-settings*.json`의 deny(단일 출처 `harness.toml [protected]`에서), `.factory/**` 미러 전체,
+  `templates/factory/docs/factory/CHARTER.md`.
+- [ ] **`factory-loader` 에이전트가 제거된다**: `.claude/agents/factory-loader.md`·
+  `.factory/lessons/factory-loader.md`가 사라진다(설치본에서도 배선이 풀린다 — M6와 같은 원칙).
+- [ ] **required 게이트가 레벨 목록에 없으면 이제 MISCONFIGURED다**(전에는 조용히 무시됐다).
+  업그레이드 직후 가장 시끄러운 변화 — 레벨 목록에 넣거나 required에서 빼야 한다.
+- [ ] **머지가 더 자주 `factory:needs-human`으로 떨어진다**: 리뷰 handoff가 PR head에 안 묶였거나,
+  정족수가 안 맞거나, `factory/review`·`factory/gates` 상태가 팩토리 계정이 아니면 자동 머지가
+  멈춘다. 업그레이드 직후 가장 흔한 원인은 옛 워크플로가 `FACTORY_BOT_LOGIN`을 안 넘겨 두 배우
+  모드의 게시자 검증이 막히는 것 — `init --upgrade`로 워크플로를 갱신하면 풀린다.
+- [ ] **review·merge·implement 스테이지가 시작 시 PR의 `.factory/**`·`.claude/**`·CHARTER를 base
+  것으로 되돌린다**(overlay). PR이 하네스를 고쳐도 그 PR **자신의** 스테이지에는 안 들어간다 —
+  머지되고 다음 런부터.
+- [ ] **테스트 변조가 human-merge 정책 위반이 된다**: 기존 test_glob 파일에서 줄 삭제·파일 삭제
+  diff는 이슈 본문 `tests_changed_allowed:` 없이는 자동 머지되지 않는다.
+- [ ] **plan 기본값이 바뀐다**: 4역할 토론 대신 단일 opus 1패스+skeptic 1패스가 기본이고,
+  load-bearing tier(처음 열리는 영속/외부 쓰기 경로, 처음 고정되는 공개 와이어 계약, 또는
+  `[protected]` 변경)에서만 토론이 유지된다.

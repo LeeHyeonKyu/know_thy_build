@@ -3,6 +3,7 @@
 평가일: 2026-09-14 · 대상: `LeeHyeonKyu/know_thy_build` @ `2ab390c` (414 파일)
 기준: SW Factory 조사(addyosmani/factory, spec-kit, 12-factor-agents, StrongDM, Stanford CodeX, arXiv:2604.02460, Osmani 146 PR 실측)
 출처: 사용자가 제공한 외부 평가 원문. 이 파일은 원문을 보존하고, 대응은 `docs/superpowers/plans/2026-09-14-factory-audit-hardening.md`와 ADR-023이 맡는다.
+대응: ADR-023 (`docs/factory/DECISIONS.md`)
 
 ---
 
