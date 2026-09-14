@@ -1,9 +1,10 @@
-import { canTransition, factoryLabelOf, HUMAN_RETRY_TARGETS } from "./labels.js";
+import { canTransition, factoryLabelOf, HUMAN_RETRY_FROM, HUMAN_RETRY_TARGETS } from "./labels.js";
 import { requirementFor } from "./requirements.js";
 import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker } from "./retro/issue-comments.js";
 
 export const NEEDS_HUMAN = "factory:needs-human";
-export const RETRY_SCRIPT_REFUSED = "retry from factory:needs-human is human-only (transition.js --human)";
+export const NEEDS_INFO = "factory:needs-info";
+export const RETRY_SCRIPT_REFUSED = "retry from factory:needs-human/needs-info is human-only (transition.js --human)";
 export const NO_RESUME_POINT = "cannot resolve a resume point from this issue's history — no transition into factory:blocked/needs-human names a label the factory can resume from";
 
 /**
@@ -57,8 +58,9 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   const from = factoryLabelOf(it.labels);
   if (!from) return { ok: false, from, to, reason: "no factory state label on issue" };
   /**
-   * ADR-020 KTB-32 — **사람의 재시도.** `needs-human`에서 중단 지점으로 되돌아가는 엣지는 그래프에
-   * 없다(`labels.js`의 `HUMAN_RETRY_TARGETS`) — 여기서 두 자물쇠를 모두 풀어야 열린다:
+   * ADR-020 KTB-32 — **사람의 재시도.** `needs-human`(그리고 KTB-36 라운드에서 더해진 `needs-info` —
+   * KTB-23의 하네스 대기 주차가 서는 자리다)에서 중단 지점으로 되돌아가는 엣지는 그래프에
+   * 없다(`labels.js`의 `HUMAN_ONLY_TRANSITIONS`) — 여기서 두 자물쇠를 모두 풀어야 열린다:
    *   (a) `by=human`(`transition.js --human`)일 것. 스크립트는 이 분기에 들어오지도 못하고, 아래
    *       `canTransition`이 평소처럼 "그래프에 없는 전이"로 거부한다(라벨 불변, 거부 코멘트).
    *   (b) 목적 라벨이 이 이슈의 **중단 지점**과 같을 것(`resumePoint` — 이슈에 남은 기록만이 출처다).
@@ -66,7 +68,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
    * 검사를 지난다 — "사람이 골랐다"가 아무 자리로나 가는 문이 되지 않게.
    */
   let humanRetry = false, resume = null, comments = null;
-  if (from === NEEDS_HUMAN && (retry || HUMAN_RETRY_TARGETS.has(to)) && human) {
+  if (HUMAN_RETRY_FROM.has(from) && (retry || HUMAN_RETRY_TARGETS.has(to)) && human) {
     comments = await gh.comments(issue);
     resume = resumePoint(comments);
     if (!resume?.target) return { ok: false, from, to, reason: `${NO_RESUME_POINT}${resume ? ` (stopped at ${resume.stoppedAt})` : ""}` };
@@ -77,7 +79,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   // 스크립트가 이 엣지를 시도하면 아래 `canTransition`이 평소의 그래프 거부로 떨어뜨린다 — 라벨은
   // 그대로이고 거부 코멘트가 남는다(사람이 볼 수 있게). 목적 라벨조차 없는 `--retry`만 여기서
   // 끊는다: 거부 코멘트에 적을 `to`가 없고, 그 요청은 애초에 사람 전용 문법이다.
-  if (to == null) return { ok: false, from, to, reason: retry ? RETRY_SCRIPT_REFUSED : "no target label (use `--retry` only from factory:needs-human)" };
+  if (to == null) return { ok: false, from, to, reason: retry ? RETRY_SCRIPT_REFUSED : "no target label (use `--retry` only from factory:needs-human or factory:needs-info)" };
   if (!canTransition(from, to, { human: humanRetry })) {
     const graphReason = `transition ${from} → ${to} not allowed`;
     // 그래프에 없는 전이는 라벨을 건드리지 않는다(어느 쪽으로도 안전한 기본값이 없다 — 예: merged/wont-do는

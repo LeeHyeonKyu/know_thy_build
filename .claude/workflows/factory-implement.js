@@ -267,6 +267,9 @@ const isHarnessIssue = rawHarnessStr === 'true' || args.harness_issue === true |
 // What the variant actually opens — the same list as `.factory/ci-settings-harness.json` and the
 // FACTORY_HARNESS_ISSUE branch of `hooks/block-dangerous.sh`. `.factory/**` stays shut apart from
 // `harness.toml`, so the exclusion is named file by file rather than as a whole directory.
+// (KTB-36: neither settings file carries a blanket `.factory/**` any more — both enumerate, so that
+// `.factory/out/qa/**` can stay writable for the qa reviewer's evidence. A builder still writes
+// nothing under `.factory/out/`; that carve-out belongs to the review stage, not to this one.)
 const HARNESS_OPEN =
   '`.factory/harness.toml`, `vitest.config.*`, `playwright.config.*`, `package.json`, `package-lock.json` ' +
   '(and `docker-compose.test.yml`/`.env.test`, which were never protected)';

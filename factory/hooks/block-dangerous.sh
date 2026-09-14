@@ -95,7 +95,11 @@ prot='(\.factory/|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md
 # `ci-settings*`·`roles.toml`·`quarantine.toml`·`package.json`·`package-lock.json`.
 # `.claude/**`·워크플로·CHARTER·tsconfig·eslint는 한 글자도 열리지 않는다.
 # 이 목록은 `ci-settings-harness.json`의 deny와 같아야 한다(F9와 같은 이유: 훅과 L2가 갈라지면 Edit는
-# 막히는데 `echo >`는 통과한다). 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
+# 막히는데 `echo >`는 통과한다). 두 설정 파일은 KTB-36에서 `.factory/out/**`를 `out/*` + `out/`의
+# qa 아닌 하위 디렉터리 열거로 바꿨다 — 아래 `qa` 카브아웃이 이 훅에서 하는 일을 L2에서도 하게
+# 만드는 유일한 방법이다(Claude Code에서 **deny가 allow를 이기므로** allow로는 뺄 수 없다).
+# 여기 `prot`의 `out/`는 그 카브아웃이 이미 `$p`에서 qa 토큰을 지운 뒤에 적용되므로 그대로 둔다.
+# 플래그가 없으면(=평범한 이슈) 이 블록은 아무 일도 하지 않는다.
 # **머지는 그대로 사람이다**: package.json은 `[protected].factory`에 남아 있어 L1이 자동 머지를 거부한다.
 if [ "${FACTORY_HARNESS_ISSUE:-}" = "1" ]; then
   prot='(\.factory/(bin|lib|actions|lessons|out)/|\.factory/(ci-settings[a-zA-Z0-9._-]*\.json|roles\.toml|quarantine\.toml|package\.json|package-lock\.json)|\.claude/|\.github/workflows/factory-|docs/factory/CHARTER\.md|tsconfig[a-zA-Z0-9._-]*\.json|\.eslintrc|eslint\.config\.)'

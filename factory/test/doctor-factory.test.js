@@ -383,6 +383,27 @@ test("checkSettings: ci-settings-harness.json missing or short of its template �
   expect(full["settings.ci-harness"].level).toBe("PASS");
 });
 
+/**
+ * KTB-36 — `settings.ci-deny`는 **템플릿의 상위집합**만 본다. 통짜 `.factory/**` 하나를 열거 스물몇
+ * 줄로 바꾸면 옛 설치본은 그 줄들을 하나도 갖고 있지 않으므로 FAIL이어야 하고(그것이 "`--upgrade`를
+ * 돌려라"의 신호다), 새 열거를 그대로 담은 설치본은 PASS여야 한다. 옛 통짜 줄이 **남아 있어도**
+ * PASS다 — 그 줄이 있으면 qa 카브아웃이 죽지만 그 판정은 doctor가 아니라 아래 install 테스트가
+ * 고정하는 `--upgrade`의 통째 교체가 책임진다(이 파일은 팩토리 소유다).
+ */
+test("checkSettings: the enumerated .factory deny set is what ci-deny now requires (KTB-36)", () => {
+  const template = { permissions: { deny: ["A"] }, hooks: {} };
+  const settings = { permissions: { deny: ["A"] }, hooks: {} };
+  const enumerated = ["Edit(.factory/bin/**)", "Edit(.factory/out/*)", "Edit(.factory/harness.toml)"];
+  const ciTemplate = { permissions: { deny: enumerated } };
+
+  // 옛 설치본: 통짜 한 줄만 들고 있다 → 열거가 전부 빠졌다고 말해야 한다.
+  const old = by(checkSettings({ settings, template, ciSettings: { permissions: { deny: ["Edit(.factory/**)"] } }, ciTemplate }));
+  expect(old["settings.ci-deny"]).toMatchObject({ level: "FAIL", detail: expect.stringContaining("Edit(.factory/out/*)") });
+
+  const upgraded = by(checkSettings({ settings, template, ciSettings: { permissions: { deny: enumerated } }, ciTemplate }));
+  expect(upgraded["settings.ci-deny"].level).toBe("PASS");
+});
+
 // ADR-019 이월: `mergeSettings`가 가산적이라 옛 경로 deny는 `--upgrade`로도 안 지워졌었다.
 // 이제 설치기가 지우고, doctor는 아직 남아 있는 저장소에 WARN으로 알린다.
 test("checkSettings: leftover moved denies in .claude/settings.json → settings.stale-deny WARN naming the fix", () => {

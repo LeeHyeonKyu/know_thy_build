@@ -203,10 +203,16 @@ export function countTransitionsTo(comments, to) {
  * `:unstick`의 `retry`를 고를 때, 되돌아갈 수 있는 라벨은 **하나**뿐이다: 인프라가 런을 죽이기 직전에
  * 이슈가 갖고 있던 그 라벨. 그것을 추측하지 않고 기록에서 읽는다.
  *
- * 규칙: 전이 코멘트들 중 `to=`가 **정지 상태**(`blocked`·`needs-human`)인 마지막 것의 `from=`.
- * 단 `from=`도 정지 상태인 전이는 건너뛴다 — `blocked → needs-human`은 sweeper의 에스컬레이션이지
- * "일이 멈춘 자리"가 아니다(라이브 KTB #3이 정확히 이 모양이다: `awaiting-review → blocked` 뒤에
- * `blocked → needs-human`). 그래서 되돌아갈 자리는 `awaiting-review`다.
+ * 규칙: 전이 코멘트들 중 `to=`가 **정지 상태**(`blocked`·`needs-human`·`needs-info`)인 마지막 것의
+ * `from=`. 단 `from=`도 정지 상태인 전이는 건너뛴다 — `blocked → needs-human`은 sweeper의
+ * 에스컬레이션이지 "일이 멈춘 자리"가 아니다(라이브 KTB #3이 정확히 이 모양이다:
+ * `awaiting-review → blocked` 뒤에 `blocked → needs-human`). 그래서 되돌아갈 자리는 `awaiting-review`다.
+ *
+ * KTB-36 라운드 확장: `needs-info`가 정지 상태에 들어온 것은 KTB-23의 **하네스 대기 주차**가 그
+ * 라벨을 쓰기 때문이다(`in-progress → needs-info`). 그 자리는 blocked과 같은 뜻이다 — 일이 멈췄고,
+ * 멈춘 이유는 이 이슈의 산출물이 아니다. triage가 세운 `queue → needs-info`도 같은 규칙에 걸리지만
+ * `from=queue`라 `target: null`이 되어 재시도가 거부된다(그 이슈는 실제로 보강 후 재큐가 맞다).
+ * `needs-info → queue`(sweeper의 주차 해제)는 `to`가 정지 상태가 아니므로 이 판정을 흔들지 않는다.
  *
  * 그 `from`을 목적 라벨로 옮긴다:
  *   - `ready`/`planned`/`rework`/`awaiting-review` → 그대로(전부 어느 스테이지의 진입 라벨이다).
@@ -217,7 +223,7 @@ export function countTransitionsTo(comments, to) {
  *
  * 코멘트는 시간순으로 온다고 가정한다(이 파일의 다른 판정들과 같은 가정).
  */
-export const STOP_STATES = new Set(["factory:blocked", "factory:needs-human"]);
+export const STOP_STATES = new Set(["factory:blocked", "factory:needs-human", "factory:needs-info"]);
 const RESUME_TARGET = {
   "factory:ready": "factory:ready",
   "factory:planned": "factory:planned",
