@@ -26,6 +26,16 @@ node  = "22"
 # setup output that is also a build input has to be re-created by the gate command itself.
 # `factory doctor` reports this as `runtime.setup-dirties-tree` (WARN) by running setup once in a
 # scratch clone.
+# setup_generated (KTB-43, optional — default empty): globs for files your setup OR your test/gate
+# commands regenerate. The implement stage already knows what setup itself dirtied (it snapshots the
+# tree, KTB-39); this key is for the ones that come back LATER — `flutter test` re-writes the generated
+# plugin registrants that `flutter pub get` wrote. If the builder commits such a file after it has
+# already written its handoff, the branch head no longer matches the handoff's `head_sha` and the
+# transition is refused; the stage drops that commit by itself (`git reset --hard` + a leased
+# force-push) when EVERY file in it is a setup-dirtied path or matches one of these globs. Widen this
+# only for paths no human change should ever land in — a commit that mixes real work with drift is
+# never dropped, it is handed to a person with the file list.
+#   setup_generated = ["client/*/flutter/generated_plugin_*", "client/macos/Flutter/GeneratedPluginRegistrant.swift"]
 # Example, Flutter:
 #   setup = "curl -fsSL https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.24.0-stable.tar.xz | tar -xJ -C $HOME && echo \"$HOME/flutter/bin\" >> \"$GITHUB_PATH\" && flutter --version"
 

@@ -363,3 +363,152 @@ test("statusCommand falls back to canonical caps (awaiting_review_max: 4, quaran
   expect(parsed.backPressure.max).toBe(4);
   expect(parsed.backPressure.quarantine_max).toBe(THRESHOLD_DEFAULTS.quarantine_max);
 });
+
+// ── #3 — `docs/factory/runs/` holds state files as well as issue records ───────────────────────
+// `_retro.md`(lib/retro/state.js renderRetroState)는 records 브랜치의 **상태 파일**이지 이슈 기록이
+// 아니다(ADR-020 O5). readRecords(lib/records-branch.js:286)도 localRecords(cli/status.js:24-33)도
+// 디렉터리의 모든 `*.md`를 그대로 키로 만들므로, 사용량 표는 그것을 `#_retro`라는 없는 이슈 번호로
+// 보고했다. 규칙은 이름(`_retro`)이 아니라 모양(`/^\d+$/`)이어야 하므로 아래 픽스처는 전부
+// **두 번째 비숫자 키**를 함께 싣는다 — 이름 특수 케이스 구현이 반드시 빨간불이 되도록.
+
+/** 숫자 이슈 기록 하나 — 스테이지 헤더 1개, cost 0.5. */
+const REC_8 = [
+  "# Run · #8",
+  "",
+  "## implement · 2026-09-15T00:00Z · gha-1",
+  'usage: {"input_tokens":5,"output_tokens":1} cost_usd: 0.5 num_turns: 1 terminal_reason: end_turn models: m=$0.5',
+  "",
+].join("\n");
+
+/** 오늘의 `_retro.md` 모양(renderRetroState) — usage.js HEADER_RE에 걸리는 섹션이 없다. */
+const REC_RETRO = ["# Retro State", "", "## History (last 5)", "- 2026-09-08 · window 1", "", "## Stats", "- runs: 3", ""].join("\n");
+
+/** 두 번째 비숫자 키 — `=== "_retro"` denylist 구현을 죽인다. */
+const REC_NOTES = ["# scratch", "", "someone left a note under docs/factory/runs/", ""].join("\n");
+
+test("test_3_branch_records_skip_non_numeric: branch-path records whose key is not an issue number never become usage rows", async () => {
+  const root = mkdtempSync(join(tmpdir(), "status-cli-3-branch-"));
+  const gh = fakeGh();
+  const { io: i, o } = io();
+  // 이슈가 적은 실제 repro: factory/records 브랜치에 _retro.md가 있는 저장소 → readRecords가
+  // non-empty Map을 돌려주므로 localRecords fallback은 아예 실행되지 않는다.
+  const readRecords = vi.fn(async () => new Map([["8", REC_8], ["_retro", REC_RETRO], ["notes", REC_NOTES]]));
+
+  const code = await statusCommand({ root, argv: ["--json"], io: i, gh, run: vi.fn(), now: () => NOW, readRecords });
+
+  expect(code).toBe(0);
+  expect(readRecords).toHaveBeenCalled();
+  const parsed = JSON.parse(o.out[0]);
+  expect(parsed.usage.perIssue).toHaveLength(1);
+  expect(parsed.usage.perIssue[0].issue).toBe("8");
+  expect(parsed.usage.perIssue[0].runs).toBe(1);
+  expect(o.out.join("\n")).not.toContain("_retro");
+  expect(o.out.join("\n")).not.toContain("notes");
+});
+
+test("test_3_non_numeric_excluded_from_totals: a non-numeric record carrying a real stage header is excluded from window/total, not just from the row list", async () => {
+  const root = mkdtempSync(join(tmpdir(), "status-cli-3-totals-"));
+  const gh = fakeGh();
+  const { io: i, o } = io();
+  // 적대적 픽스처: 비숫자 기록이 usage.js HEADER_RE가 **실제로 인정하는** 헤더(`## retro · …`)와
+  // cost 9짜리 usage 줄을 싣는다. 행만 거르고 합계에 남기는 구현은 여기서 죽는다.
+  const hostile = [
+    "# Retro State",
+    "",
+    "## retro · 2026-09-15T00:00Z · gha-1",
+    'usage: {"input_tokens":100,"output_tokens":20} cost_usd: 9 num_turns: 4 terminal_reason: end_turn models: m=$9',
+    "",
+  ].join("\n");
+  const readRecords = vi.fn(async () => new Map([["8", REC_8], ["_retro", hostile], ["notes", hostile]]));
+
+  const code = await statusCommand({ root, argv: ["--json"], io: i, gh, run: vi.fn(), now: () => NOW, readRecords });
+
+  expect(code).toBe(0);
+  const parsed = JSON.parse(o.out[0]);
+  expect(parsed.usage.perIssue.map((p) => p.issue)).toEqual(["8"]);
+  expect(parsed.usage.total.cost_usd).toBe(0.5);
+  expect(parsed.usage.total.runs).toBe(1);
+  expect(parsed.usage.window.runs).toBe(1);
+  expect(parsed.usage.window.cost_usd).toBe(0.5);
+});
+
+test("test_3_local_fallback_matches_branch_path: the local docs/factory/runs fallback reaches the same usage object as the branch path", async () => {
+  const gh1 = fakeGh();
+  const { io: i1, o: o1 } = io();
+  const branchRoot = mkdtempSync(join(tmpdir(), "status-cli-3-eq-branch-"));
+  await statusCommand({
+    root: branchRoot, argv: ["--json"], io: i1, gh: gh1, run: vi.fn(), now: () => NOW,
+    readRecords: vi.fn(async () => new Map([["8", REC_8], ["_retro", REC_RETRO], ["notes", REC_NOTES]])),
+  });
+
+  const localRoot = mkdtempSync(join(tmpdir(), "status-cli-3-eq-local-"));
+  mkdirSync(join(localRoot, "docs/factory/runs"), { recursive: true });
+  writeFileSync(join(localRoot, "docs/factory/runs/8.md"), REC_8);
+  writeFileSync(join(localRoot, "docs/factory/runs/_retro.md"), REC_RETRO);
+  writeFileSync(join(localRoot, "docs/factory/runs/notes.md"), REC_NOTES);
+  const gh2 = fakeGh();
+  const { io: i2, o: o2 } = io();
+  const code = await statusCommand({
+    root: localRoot, argv: ["--json"], io: i2, gh: gh2, run: vi.fn(), now: () => NOW,
+    readRecords: vi.fn(async () => new Map()),
+  });
+
+  expect(code).toBe(0);
+  // 같은 리터럴을 두 번 단언하는 대신 두 출처의 결과를 서로 비교한다 — 수정이 한쪽 경로에만
+  // 떨어지면(cli/status.js:24-33 vs :109-113) 이 단언이 깨진다.
+  expect(JSON.parse(o2.out[0]).usage).toEqual(JSON.parse(o1.out[0]).usage);
+  expect(JSON.parse(o2.out[0]).usage.perIssue.map((p) => p.issue)).toEqual(["8"]);
+});
+
+test("test_3_rendered_usage_rows_all_numeric_and_silent: every rendered 사용량 row is a numeric issue and skipped records produce no warning line", async () => {
+  const root = mkdtempSync(join(tmpdir(), "status-cli-3-render-"));
+  const gh = fakeGh();
+  const { io: i, o } = io();
+  const readRecords = vi.fn(async () => new Map([["8", REC_8], ["_retro", REC_RETRO], ["notes", REC_NOTES]]));
+
+  const code = await statusCommand({ root, argv: [], io: i, gh, run: vi.fn(), now: () => NOW, readRecords });
+
+  expect(code).toBe(0);
+  const text = o.out.join("\n");
+  const section = text.slice(text.indexOf("## 사용량"));
+  const rows = [...section.matchAll(/^- #(\S+) /gm)].map((m) => m[1]);
+  expect(rows).toHaveLength(1);
+  for (const r of rows) expect(r).toMatch(/^\d+$/);
+  // "skipped silently" — 건너뛴 기록에 대한 새 줄은 stdout에도 stderr에도 없다.
+  expect(o.err).toEqual([]);
+  // 침묵을 픽스처 **문구**로 재지 않는다(라운드1 cf-s2 / verifier 지적: 전체 stdout에 건 `/notes|skip/i`는
+  // 언젠가 픽스처 이슈 제목이 그 낱말을 담는 날 엉뚱한 이유로 빨간불이 된다). 대신 계약을 직접 잰다:
+  // 비숫자 키를 애초에 주지 않은 기준 실행과 stdout 전체가 **바이트 동일**해야 한다. 건너뛴 기록이
+  // 경고·카운트·빈 줄 어느 형태로든 출력에 흔적을 남기면 여기서 죽고, 픽스처 문구와는 무관하다.
+  const { io: iBase, o: oBase } = io();
+  const baseCode = await statusCommand({
+    root, argv: [], io: iBase, gh: fakeGh(), run: vi.fn(), now: () => NOW,
+    readRecords: vi.fn(async () => new Map([["8", REC_8]])),
+  });
+  expect(baseCode).toBe(0);
+  expect(text).toBe(oBase.out.join("\n"));
+  expect(oBase.err).toEqual([]);
+});
+
+test("test_3_status_usage_none_when_only_retro: a branch holding only _retro still reports (none) instead of falling through to local records", async () => {
+  const root = mkdtempSync(join(tmpdir(), "status-cli-3-onlyretro-"));
+  // gitignore된 로컬 상태(.gitignore: docs/factory/runs/)가 남아 있는 흔한 저장소 모양 — 필터를
+  // `records.size === 0` 판정 **앞**에 두면 여기로 조용히 떨어진다.
+  mkdirSync(join(root, "docs/factory/runs"), { recursive: true });
+  writeFileSync(join(root, "docs/factory/runs/99.md"), REC_8.replace("#8", "#99"));
+  const readRecords = () => vi.fn(async () => new Map([["_retro", REC_RETRO]]));
+
+  const { io: iJson, o: oJson } = io();
+  const jsonCode = await statusCommand({ root, argv: ["--json"], io: iJson, gh: fakeGh(), run: vi.fn(), now: () => NOW, readRecords: readRecords() });
+  expect(jsonCode).toBe(0);
+  expect(JSON.parse(oJson.out[0]).usage.perIssue).toEqual([]);
+
+  const { io: iText, o: oText } = io();
+  const textCode = await statusCommand({ root, argv: [], io: iText, gh: fakeGh(), run: vi.fn(), now: () => NOW, readRecords: readRecords() });
+  expect(textCode).toBe(0);
+  const section = oText.out.join("\n").slice(oText.out.join("\n").indexOf("## 사용량"));
+  expect(section).toContain("(none)");
+  expect(section).toContain(": $0 / 0 runs");
+  expect(section).toContain("- total: $0 / 0 runs");
+  expect(oText.err).toEqual([]);
+});

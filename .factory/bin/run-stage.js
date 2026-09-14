@@ -24,7 +24,8 @@ import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
 import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from "../lib/verify-stage.js";
-import { readTranscript } from "../lib/stage-artifact.js";
+import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
+import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
@@ -232,6 +233,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
   let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
+  let driftRefusal = null;                                            // KTB-43 — 핸드오프 뒤의 커밋이 드리프트 경로 밖이었다(핸드오프를 쓴 뒤에 거부한다)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
     // 로컬 진입(§4.2.5): backlog 이슈를 사람이 손으로 큐에 넣기 전에 로컬에서 먼저 락을 잡았을 때,
@@ -494,7 +496,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       return 2;
     }
     if (harnessIssue) record([`harness issue: builder runs with ${settingsFile} + FACTORY_HARNESS_ISSUE=1 (test-infra files writable; merge still needs a human)`]);
-    const ctx = await d.buildContext();
+    // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
+    const ctx = await d.buildContext({ setupDirty });
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     const out = await d.claudeP(ctx, { harnessIssue });
     // 마지막 진행 스냅샷은 claude가 끝난 **직후**에 찍는다 — 그때 트랜스크립트는 완성돼 있고
@@ -514,6 +517,26 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`branch: FAIL — ${b.reason}`, ...refusal(t), usage]);
         return 2;
+      }
+    }
+    /**
+     * ADR-020 KTB-43 — **핸드오프 뒤에 붙은 드리프트 커밋은 스테이지가 떨어뜨린다**(§makeDropPostHandoffDrift).
+     * 게이트보다 **먼저**다: `gates.json`의 `head_sha`는 게이트가 돈 시점의 HEAD이고 전이 요구조건이
+     * 그 값을 브랜치 head와 다시 묶으므로(`requirements.gatesGate`), 게이트 뒤에 되돌리면 한 거부를
+     * 다른 거부로 바꿀 뿐이다. 거부는 여기서 곧장 내지 않는다 — 핸드오프를 쓴 **뒤에** 낸다(아래
+     * §driftRefusal): 사람이 받는 이슈에는 이 라운드가 무엇을 했는지가 남아 있어야 한다.
+     */
+    if (stage === "implement" && stageBranchName && d.dropPostHandoffDrift) {
+      const handoffSha = (await d.handoffHeadSha?.(out)) ?? null;
+      const drift = await d.dropPostHandoffDrift({ handoffSha, baseline: setupDirty });
+      if (!drift.ok) {
+        driftRefusal = drift.reason;
+        record([`drift: REFUSED — ${drift.reason}`]);
+      } else if (drift.dropped?.length) {
+        record([driftDroppedLine(drift)]);
+        try {
+          await d.comment?.(issue, `${driftDroppedMarker(drift)}\n빌더가 핸드오프(\`${drift.to.slice(0, 7)}\`)를 쓴 뒤에 붙인 커밋 ${drift.dropped.length}개는 setup/테스트가 다시 만드는 파일만 담고 있어 스테이지가 되돌렸습니다(${drift.files.length}개 파일). 브랜치는 다시 \`${drift.to.slice(0, 7)}\`입니다 — ADR-020 KTB-43.`);
+        } catch (e) { record([`drift: comment failed — ${e?.message || e}`]); }
       }
     }
     // 쓰기 금지 스테이지(triage/plan/review)는 claude -p가 끝나자마자, 게이트·verify보다 먼저 워크트리를
@@ -773,6 +796,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
+    /**
+     * ADR-020 KTB-43 — 브랜치가 핸드오프 sha보다 앞서 있는데 그 차이가 드리프트가 아니었다. 전이
+     * 요구조건도 이것을 거부하지만(`implement head_sha … != branch head …`) 그 문장은 sha 두 개뿐이라
+     * 사람이 무슨 일이 있었는지 알 수 없다 — **어떤 파일이** 걸렸는지를 실어 여기서 먼저 거부한다.
+     * 핸드오프는 이미 위에서 나갔다: 이 라운드가 무엇을 했는지는 이슈에 남는다.
+     */
+    if (driftRefusal) {
+      const t = await d.transition({ to: "factory:needs-human", reason: driftRefusal });
+      record(["verify: ok", `drift: refused the transition — ${driftRefusal}`, ...refusal(t), ...gatesNote, usage]);
+      return 2;
+    }
     /**
      * ADR-020 KTB-29 — K 한도는 스펙 §3.2의 엣지(`rework → needs_human: round > K`)인데 코드에는
      * 없었다: `nextState`의 review 분기는 `decision === "approved"` 하나만 보고 나머지를 전부 rework으로
@@ -1131,6 +1165,101 @@ export function makeRestoreSetupDirty({ run, root, rm = (p) => rmSync(p, { force
       try { rm(resolve(rootAbs, p)); } catch (e) { failures.push(`rm ${p}: ${e?.message || e}`); }
     }
     return { ok: !failures.length, tracked, untracked, reason: failures.join("; ") || null };
+  };
+}
+
+/**
+ * ── ADR-020 KTB-43 — **핸드오프 뒤에 붙은 툴체인 재생성 커밋은 사람이 볼 사건이 아니다** ────────
+ * own-calendar #3 implement(라이브, 2026-09-14 13:32Z): 빌더가 작업을 커밋하고(`bfff638`) 그 sha로
+ * 핸드오프를 쓴 다음, 자기 검증(`flutter test`)이 툴체인 파일을 다시 만들었고 그것을
+ * `f1909c6 "chore(3): reconcile flutter toolchain drift left by verification run"`으로 커밋했다 —
+ * 건드린 파일(`client/analysis_options.yaml`·`client/{linux,windows}/flutter/generated_plugin*`·
+ * `client/macos/Flutter/GeneratedPluginRegistrant.swift`)은 KTB-39의 `setup_dirty` 기준선 집합
+ * **그대로**였다. `requirements.js`가 `implement head_sha bfff638 != branch head f1909c6`으로 전이를
+ * 거부했고 이슈는 needs-human에 앉았다. fail-closed는 옳다 — 틀린 것은 복구가 자동이 아니었다는 것이다.
+ *
+ * 그래서 스테이지가 되돌린다. 조건은 둘 다 참일 때뿐이다: 브랜치 head가 핸드오프 sha의 **자손**이고,
+ * 그 사이 커밋들이 건드린 파일이 **전부** 드리프트 경로일 것(KTB-39 기준선 ∪ `[runtime].setup_generated`
+ * 글롭). 하나라도 벗어나면 되돌리지 않는다 — 그건 빌더가 실제로 한 작업이고, 스테이지가 남의 작업을
+ * 말없이 지우는 자리는 이 저장소에 없다. 그때는 **파일 이름을 실어** 거부한다(예전에는 sha 두 개만
+ * 보였다 — 사람이 무슨 일이 있었는지 알 수 없는 문장이었다).
+ *
+ * **왜 게이트보다 먼저인가**: `gates.json`의 `head_sha`는 게이트가 돈 시점의 로컬 HEAD이고, 전이
+ * 요구조건은 그 값과 브랜치 head를 다시 묶는다(`requirements.gatesGate`). 게이트 뒤에 되돌리면
+ * "게이트는 f1909c6을 봤는데 브랜치 head는 bfff638"이 되어, 한 거부를 다른 거부로 바꿀 뿐이다.
+ *
+ * **리스 없는 force는 없다.** `--force-with-lease=<branch>:<head>`의 `<head>`는 우리가 방금 읽은 그
+ * 커밋이다 — 그 사이 누가 브랜치를 움직였으면 push는 거절되고, 그 거절은 실패가 아니라 **판정**이다
+ * (되돌릴 대상이 우리가 본 그것이 아니다). 그 자리에서 `--force`로 바꾸지 않는다.
+ */
+export const driftRefusedReason = (files) => `post-handoff commits touch non-drift paths: ${files.join(", ")}`;
+
+/** 기준선(KTB-39의 `setup_dirty`) ∪ `[runtime].setup_generated` 글롭 = 에이전트의 것이 아닌 경로. */
+export function isDriftPath(path, { baseline = null, generated = [] } = {}) {
+  const base = (baseline?.entries || []).some((e) => e.path === path);
+  return base || (generated.length > 0 && matchesAny(generated, path));
+}
+
+export const DRIFT_FILE_CAP = 10;
+/** run 기록 한 줄. 파일 목록은 잘라 싣는다 — 기록은 증거이지 덤프가 아니다(`setupDirtyLine`과 같은 계약). */
+export function driftDroppedLine({ dropped = [], files = [], cap = DRIFT_FILE_CAP } = {}) {
+  const more = files.length > cap ? `, … (+${files.length - cap} more)` : "";
+  return `dropped post-handoff drift commit(s): ${dropped.map((s) => String(s).slice(0, 7)).join(", ")} (${files.length} files: ${files.slice(0, cap).join(", ")}${more})`;
+}
+/** 이슈에 남기는 한 줄짜리 마커 — 사후 조사가 `factory-drift-dropped`로 grep한다. */
+export const driftDroppedMarker = ({ branch, from, to, dropped = [], files = [] } = {}) =>
+  `<!-- factory-drift-dropped branch=${branch} from=${from} to=${to} commits=${dropped.join(",")} files=${files.length} -->`;
+
+/**
+ * 세션 산출물에서 빌더가 적은 `head_sha`를 **게이트보다 먼저** 읽는다. 후보 채점은 `verifyStage`와
+ * 같은 방식이다(`withGates`): 이 시점에는 `gates.json`이 아직 없으므로 자리표시자를 채워 넣는다 —
+ * `implement.v1`의 `gates`는 존재와 `status` 열거만 보므로(§schemas) 후보 선택 결과는 동일하다.
+ * 읽지 못하면 `null`이고, 그때는 아무것도 되돌리지 않는다(전이 요구조건이 예전처럼 판단한다).
+ */
+export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
+  const placeholder = (o) => (o && !o.gates ? { ...o, gates: { status: "GREEN", level: "unit" } } : o);
+  const a = extractStageArtifact({
+    envelopeResult: out?.result,
+    transcriptText,
+    validate: (o) => validate("implement.v1", placeholder(o)),
+  });
+  const sha = a.ok ? a.data?.head_sha : null;
+  return typeof sha === "string" && SHA40.test(sha) ? sha : null;
+}
+
+/**
+ * 위 §KTB-43의 실행부. 반환은 셋 중 하나다:
+ *   `{ok:true, dropped:[]}`           — 되돌릴 것이 없다(브랜치 head가 곧 핸드오프 sha다).
+ *   `{ok:true, dropped:[sha…], …}`    — 드리프트만 얹혀 있었다: reset + 리스 push까지 끝났다.
+ *   `{ok:false, reason, files?}`      — 되돌리지 않는다. 사유는 그대로 전이에 실린다.
+ */
+export function makeDropPostHandoffDrift({ run, root, issue }) {
+  return async ({ handoffSha = null, baseline = null, generated = [] } = {}) => {
+    const branch = stageBranch(issue);
+    const rp = await run("git", ["rev-parse", "HEAD"], { cwd: root });
+    if (rp.code !== 0) return { ok: false, reason: `git rev-parse HEAD failed: ${rp.stderr?.trim() || `exit ${rp.code}`}` };
+    const head = rp.stdout.trim();
+    // 핸드오프의 sha를 읽지 못했으면 비교할 것이 없다 — 예전 경로 그대로(전이 요구조건이 판단한다).
+    if (!handoffSha || !head || handoffSha === head) return { ok: true, dropped: [] };
+    const anc = await run("git", ["merge-base", "--is-ancestor", handoffSha, "HEAD"], { cwd: root });
+    if (anc.code !== 0) {
+      return { ok: false, reason: `branch head ${head.slice(0, 7)} does not descend from the implement handoff's head_sha ${handoffSha.slice(0, 7)} — the stage will not rewrite a branch it cannot explain` };
+    }
+    const names = await run("git", ["diff", "--name-only", `${handoffSha}..${head}`], { cwd: root });
+    if (names.code !== 0) return { ok: false, reason: `git diff --name-only ${handoffSha.slice(0, 7)}..${head.slice(0, 7)} failed: ${names.stderr?.trim() || `exit ${names.code}`}` };
+    const files = [...new Set(names.stdout.split("\n").map((s) => s.trim()).filter(Boolean))];
+    const offBaseline = files.filter((f) => !isDriftPath(f, { baseline, generated }));
+    if (offBaseline.length) return { ok: false, files: offBaseline, reason: driftRefusedReason(offBaseline) };
+    const rl = await run("git", ["rev-list", `${handoffSha}..${head}`], { cwd: root });
+    if (rl.code !== 0) return { ok: false, reason: `git rev-list ${handoffSha.slice(0, 7)}..${head.slice(0, 7)} failed: ${rl.stderr?.trim() || `exit ${rl.code}`}` };
+    const dropped = rl.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+    const rs = await run("git", ["reset", "--hard", handoffSha], { cwd: root });
+    if (rs.code !== 0) return { ok: false, reason: `git reset --hard ${handoffSha.slice(0, 7)} failed: ${rs.stderr?.trim() || `exit ${rs.code}`}` };
+    const push = await run("git", ["push", `--force-with-lease=${branch}:${head}`, "origin", branch], { cwd: root });
+    if (push.code !== 0) {
+      return { ok: false, reason: `git push --force-with-lease=${branch}:${head.slice(0, 7)} refused — ${truncateReason(push.stderr?.trim() || `exit ${push.code}`)} (the branch moved under the stage; it never force-pushes without a lease)` };
+    }
+    return { ok: true, dropped, files, branch, from: head, to: handoffSha };
   };
 }
 
@@ -1768,6 +1897,16 @@ async function main() {
     /** 세션 뒤: HEAD가 아직 그 브랜치이고 팩토리 설정이 아직 스테이지 커밋의 것인가(fail closed). */
     assertStageBranch: async (harnessIssue = false) => assertStageBranch({ run, cwd: root, issue, sha: overlaySha, harnessIssue }),
     /**
+     * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
+     * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
+     */
+    handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
+    dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
+      handoffSha, baseline,
+      generated: Array.isArray(harness?.runtime?.setup_generated) ? harness.runtime.setup_generated : [],
+    }),
+    /**
      * ADR-020 KTB-37 — 체크아웃된 트리 위에 팩토리 소유 설정만 스테이지 자신의 커밋에서 덮는다.
      * `harness`는 charterReady에서 이미 로드됐다 — 기본 브랜치는 그때 굳은 값을 늦게 읽는다.
      */
@@ -1793,11 +1932,11 @@ async function main() {
      * `gates` dep이 같은 `mergeBase()`로 MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는
      * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
      */
-    buildContext: async () => {
+    buildContext: async ({ setupDirty = null } = {}) => {
       let base = null;
       try { base = await mergeBase(); }
       catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
-      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base }));
+      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty }));
     },
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },

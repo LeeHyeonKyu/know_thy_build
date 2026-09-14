@@ -1428,7 +1428,7 @@ KTB 자기 자신의 #3 implement R2(run 34809992796)에서 `unit` 게이트가 
 
 **영향**: `factory/lib/sweeper.js`(`STALLED_STAGE`·heartbeat 팔·`BLOCKED_RETRY_STAGE`), `factory/lib/labels.js`, `factory/test/sweeper.test.js`·`labels.test.js`·`run-stage.test.js`, 스펙 §4.3-1·§4.3-5.
 
-### ⑤ 권한·훅 — KTB-13·14·20·21·23·36·39
+### ⑤ 권한·훅 — KTB-13·14·20·21·23·36·39·40·43
 
 `--permission-mode dontAsk`의 실제 동작이 스파이크 시점(ADR-002/ADR-008)과 달라져 있었다는 발견(KTB-13, 재리뷰 r1·r2)과, 그로 인해 넓어진 allow가 열어 준 "쓰기 금지 역할이 훅 모르게 워크트리를 건드릴 수 있다"는 잔여 위험을 구조적으로 닫은 결정(KTB-14)을 묶는다.
 
@@ -1957,6 +1957,71 @@ tmp cwd가 아니라 **진짜 저장소**에 기록이 남는다.
 `hooks.test.js`(`baseEnv()` 전면 적용 + 스테이지 대조 1건), `doctor-factory.test.js`(격리 실행기).
 채택자 조치: `factory init --upgrade`로 `.factory/ci-settings*.json`·`.factory/lib/protected-paths.js`
 갱신 — 하지 않으면 doctor의 `protected.parity`가 FAIL로 말한다.
+
+#### KTB-43 — 핸드오프를 쓴 **뒤에** 붙은 툴체인 재생성 커밋 하나가 라운드를 needs-human으로 보냈다
+
+**관측**(라이브, own-calendar #3 implement, 2026-09-14 13:32Z): KTB-38의 base 머지(`fe11981`) 위에서
+빌더가 자기 작업을 커밋하고(`bfff638`) implement 핸드오프를 `head_sha=bfff638`로 썼다. 그다음 자기
+검증(`flutter test`)을 돌렸고, 그 명령이 툴체인 파일을 다시 만들자 그것을
+`f1909c6 "chore(3): reconcile flutter toolchain drift left by verification run"`으로 **또 커밋했다**.
+그 커밋이 건드린 파일은 `client/analysis_options.yaml`·`client/{linux,windows}/flutter/generated_plugin*`·
+`client/macos/Flutter/GeneratedPluginRegistrant.swift` — KTB-39가 스테이지 맨 앞에서 찍는 `setup_dirty`
+기준선 집합 **그대로**다. `requirements.js:69`가 `implement head_sha bfff638 != branch head f1909c6`으로
+`factory:awaiting-review` 전이를 거부했고, 이슈는 라벨만 `factory:needs-human`으로 옮겨 앉았다.
+
+**판단**: fail-closed는 옳다. 검증된 sha와 머지될 sha가 다르면 그 GREEN은 이 트리의 이야기가 아니고,
+그 규칙은 그대로 둔다. 틀린 것은 **복구가 사람의 일이었다는 것**이다 — 이 차이는 에이전트가 한 판단이
+아니라 툴체인이 남긴 부스러기이고, 부스러기를 치우는 데 사람의 라운드를 쓰는 것은 이 공장의 계약이
+아니다. 그리고 사유 문장이 sha 두 개뿐이라(`bfff638 != f1909c6`) 사람도 무슨 일이 있었는지 알 수 없었다.
+
+**결정 ① — 스테이지가 되돌린다(드리프트 전용일 때만).** 세션이 끝난 직후, **게이트(5)보다 먼저**,
+implement는 세션 산출물의 `head_sha`(`implementHeadShaOf` — `verifyStage`와 같은 추출기를 자리표시자
+gates로 한 번 더 돌린다)와 브랜치 head를 비교한다. head가 그 sha의 **자손**이고
+`git diff --name-only <handoff>..<head>`의 **모든** 파일이 1.5의 기준선이거나 `[runtime].setup_generated`
+글롭이면: `git reset --hard <handoff sha>` → `git push --force-with-lease=<branch>:<head> origin <branch>`
+(Task 8b 이후 브랜치는 스테이지의 것이다) → run 기록 `dropped post-handoff drift commit(s): <shas> (<n> files: …)`
++ 이슈 코멘트 마커 `<!-- factory-drift-dropped … -->` 한 줄 → 계속. **게이트보다 먼저인 이유**가
+설계의 요점이다: `gates.json`의 `head_sha`는 게이트가 돈 시점의 HEAD이고 전이 요구조건이 그것을 브랜치
+head에 다시 묶으므로(`gatesGate`), 게이트 뒤에 되돌리면 한 거부(`head_sha != branch head`)를 다른 거부
+(`gates file describes … , PR head is …`)로 바꿀 뿐이다. **리스 없는 force는 없다**: `<head>`는 방금
+우리가 읽은 커밋이고, 그 사이 누가 브랜치를 움직였으면 push가 거절되며 그 거절은 실패가 아니라
+판정이다(되돌릴 대상이 우리가 본 그것이 아니다) — `--force`로 바꾸지 않고 거부한다.
+
+**결정 ② — 그 밖은 전부 거부하되, 파일 이름을 실어서.** 드리프트 밖의 파일이 하나라도 섞였으면
+되돌리지 않는다. 그건 빌더가 실제로 한 작업이고, 스테이지가 남의 작업을 말없이 지우는 자리는 이
+저장소에 없다. 사유는 `post-handoff commits touch non-drift paths: <files>`이고, **핸드오프를 쓴
+뒤에** 낸다 — 사람이 받는 이슈에는 이 라운드가 무엇을 했는지가 남아 있어야 한다. 자손이 아닌 head도
+같은 자리다(설명할 수 없는 브랜치는 다시 쓰지 않는다).
+
+**결정 ③ — 빌더에게 규칙을 준다(둘이다).** 프롬프트에는 "무엇을 커밋하지 않는가"만이 아니라
+"언제까지만 커밋하는가"도 있어야 한다: 재생성 파일을 커밋하지 말 것, 그리고 핸드오프를 쓴 뒤에는
+아무것도 커밋하지 말 것. 검증이 트리를 더럽혔으면 **그냥 둔다** — 커밋되지 않은 파일은 PR에 실리지
+않고, 다음 런의 KTB-39 복원이 치운다. 그 목록은 산문이 아니라 이번 런의 사실이어야 하므로
+(`setup_dirty`), 스테이지가 찍은 기준선이 `context.json` → `loaded.json` → 워크플로의 규칙 8로
+실려 간다(워크플로 스크립트는 파일을 읽을 수 없다, §4.2.3). 보호 경로 블록은 규칙 9로 한 칸 밀렸다.
+
+**새 하네스 키**: `[runtime].setup_generated`(선택, 기본 빈 배열). 기준선은 **setup이 더럽힌 것**만
+담는데, own-calendar의 재생성물은 그보다 **늦게**(`flutter test`에서) 돌아온다 — 그 하네스가 그 사실을
+직접 적을 자리다. 넓히는 것은 위험을 늘리지 않는다: 이 글롭은 "떨어뜨려도 되는가"만 정하고, 진짜
+작업이 섞인 커밋은 여전히 떨어지지 않는다(결정 ②).
+
+**반대 순서는 이미 닫혀 있다**(확인): 세션이 트리를 더럽혀 두고 **커밋하지 않은** 채 끝난 경우 —
+HEAD는 여전히 핸드오프의 sha이므로 이 규칙은 아무것도 하지 않고, implement는 유일한 쓰기 스테이지라
+클린 체크를 돌지 않으며(그 diff는 PR에 실리지 않는다), 다음 런의 KTB-39 복원이 빌더 앞에서 치운다.
+테스트가 그 경로를 명시적으로 고정한다.
+
+**영향**: `factory/bin/run-stage.js`(`implementHeadShaOf`·`isDriftPath`·`driftDroppedLine`·
+`driftDroppedMarker`·`driftRefusedReason`·`makeDropPostHandoffDrift`·runStage 배선 두 자리·
+`deps.handoffHeadSha`/`dropPostHandoffDrift`/`buildContext({setupDirty})`), `factory/lib/context.js`
+(`buildContext`의 `setupDirty` → `ctx.setup_dirty` → `loadedFor`), `templates/factory/claude/workflows/
+factory-implement.js`(규칙 8 신설, 보호 블록 8→9), `templates/factory/claude/agents/factory-builder.md`
+(`You must not` 2건 + Lens 7), `templates/factory/factory/harness.toml`(`[runtime].setup_generated` 주석),
+스펙 §4.2.1 step 4. `requirements.js`는 **바뀌지 않았다** — 고친 것은 그 앞이다.
+테스트: `factory/test/run-stage-drift.test.js`(신규 14건 — 산출물 sha 추출·드리프트 전용 드롭·글롭
+확장·소스 파일 혼입 거부·되돌릴 것 없음·자손 아님·리스 실패·기록 줄과 마커·게이트보다 먼저라는 순서·
+핸드오프는 그대로 나간다·비커밋 드리프트·implement 전용), `workflows.test.js`(+1), `agent-md.test.js`(+1),
+`context.test.js`(+1). 채택자 조치: `factory init --upgrade`로 `.factory/bin/run-stage.js`·
+`.factory/lib/context.js` 미러와 워크플로·빌더 프롬프트 갱신.
 
 ### ⑥ 관찰 — O1~O12, O14·O15, O20·O23·O24, G1
 
