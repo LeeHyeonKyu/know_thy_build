@@ -14,12 +14,12 @@ _이력 없음_
 | --- | --- | --- |
 | merged | 0 | 0 |
 | review rounds avg | 0 | 0 |
-| needs-human | 3 | 0 |
+| needs-human | 4 | 0 |
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| cost (usd) | 53.72 | 0.00 |
-| tokens | input 987738 / output 115181 | input 0 / output 0 |
+| cost (usd) | 62.22 | 0.00 |
+| tokens | input 1080027 / output 121956 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -60,8 +60,8 @@ _이력 없음_
     "needs_human": [
       {
         "issue": 3,
-        "reason": "stage artifact missing or invalid: gates RED: failing=unit",
-        "at": "2026-09-14T05:43:12Z"
+        "reason": "stage artifact missing or invalid: gates RED: failing=lint",
+        "at": "2026-09-14T11:45:16Z"
       },
       {
         "issue": 7,
@@ -84,12 +84,12 @@ _이력 없음_
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 3,
+    "needs_human": 4,
     "usage": {
-      "cost_usd": 53.720262,
+      "cost_usd": 62.219857,
       "tokens": {
-        "input": 987738,
-        "output": 115181
+        "input": 1080027,
+        "output": 121956
       }
     }
   }
