@@ -7,6 +7,7 @@ import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { resolveReviewRoster, tierFromReviewHandoff } from "../lib/review-roster.js";
 import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quarantine.js";
 import { transition as transitionIssue } from "../lib/transition.js";
+import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
 import { sweep } from "../lib/sweeper.js";
 import { backPressure } from "../lib/back-pressure.js";
@@ -26,10 +27,17 @@ async function main() {
   const thresholds = harness.gates.thresholds;
   const quarantine = loadQuarantine(root);
   const saveQuarantine = (q) => saveQuarantineTo(root, q);
+  /**
+   * KTB-44 / ADR-025 (리뷰 must_fix 3 · should_fix 4) — sweeper의 하네스 주차 해제도 **게이트를 지난다**.
+   * 예전에는 인자를 생략하는 것만으로 면제였고, 그러면 사람은 `:unstick`에서 "리허설이 낡았다"고
+   * 거부당하는데 로봇은 같은 이슈를 조용히 큐에 넣었다. 거부된 재큐는 사고가 아니다 — 이 팔은 매
+   * sweep마다 다시 시도하고(이미 실패 편향이다), 그 사이에 사람이 `factory rehearse`를 돌린다.
+   */
+  const rehearsal = makeRehearsalChecker({ gh, root, branch: harness.project?.default_branch || "main" });
   // KTB-46: `ctxExtra`를 그대로 흘려보낸다. sweeper의 팔 대부분은 주지 않지만(그때는 `{}`),
   // 사람 머지 반영 팔은 PR head sha를 실어 `requirements.js`의 `factory:merged` 증거 검사가
   // review handoff를 그 커밋에 묶게 한다 — 여기서 떨어뜨리면 그 검사는 묶을 대상을 잃는다.
-  const transition = ({ issue, to, reason, ctxExtra }) => transitionIssue({ gh, issue, to, reason, ctxExtra });
+  const transition = ({ issue, to, reason, ctxExtra }) => transitionIssue({ gh, issue, to, reason, ctxExtra, rehearsal });
   const release = (issue) => releaseLock({ run, cwd: root, issue });
   // quick sweep은 토큰 만료 팔을 돌지 않으므로 그 조회도 하지 않는다(스테이지마다 gh를 한 번 덜 때린다).
   const tokenIssuedAt = quick ? null : await gh.getVariable("FACTORY_TOKEN_ISSUED_AT");
