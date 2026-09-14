@@ -18,8 +18,8 @@ _이력 없음_
 | rejects by role | 없음 | 없음 |
 | reviewer overlap | 없음 | 없음 |
 | unique findings by role | 없음 | 없음 |
-| cost (usd) | 84.10 | 0.00 |
-| tokens | input 1577069 / output 158637 | input 0 / output 0 |
+| cost (usd) | 87.51 | 0.00 |
+| tokens | input 1624645 / output 161941 | input 0 / output 0 |
 | retro cost (usd) | 0.00 | 0.00 |
 | retro tokens | input 0 / output 0 | input 0 / output 0 |
 | full retros | — | 0 |
@@ -99,10 +99,10 @@ _이력 없음_
     "overlap_ratio": 0,
     "needs_human": 5,
     "usage": {
-      "cost_usd": 84.104087,
+      "cost_usd": 87.511645,
       "tokens": {
-        "input": 1577069,
-        "output": 158637
+        "input": 1624645,
+        "output": 161941
       }
     }
   }
