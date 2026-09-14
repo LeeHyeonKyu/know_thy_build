@@ -13,6 +13,14 @@ import { citedClaimIds } from "./qa-evidence.js";
  */
 const SCHEMA_OF = { triage: "triage.v1", plan: "plan.v1", implement: "implement.v1", review: "review.v1" };
 
+/**
+ * ADR-024 / KTB-42(리뷰 라운드 1 MF-2) — qa **증거 경로**의 고장을 부르는 사유 접두사. run-stage가
+ * 이 문자열로 등급을 가른다: 이것은 에이전트의 산출물 결함이 아니라 판정 불가이므로 `needs-human`이
+ * 아니라 `factory:blocked` + cause `undecidable`이다(프로브 실패와 같은 등급).
+ */
+export const QA_EVIDENCE_UNUSABLE = "qa evidence manifest unusable";
+export const qaEvidenceUnusable = (reasons = []) => reasons.some((r) => String(r).startsWith(QA_EVIDENCE_UNUSABLE));
+
 const GATED_STAGES = ["implement", "review", "merge"];
 const listOf = (a) => (a && a.length ? a.join(",") : "none");
 
@@ -274,10 +282,22 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
    * 없으므로, 이 규칙은 리뷰어를 도구 쪽으로 민다(산문 대신 계약).
    */
   if (stage === "review" && data && qaManifest && roster.includes("qa")) {
-    const v = (Array.isArray(data.verdicts) ? data.verdicts : []).find((x) => x?.role === "qa");
-    const ids = Array.isArray(qaManifest.claimIds) ? qaManifest.claimIds : [];
-    if (v && citedClaimIds(v, ids).length === 0) {
-      reasons.push(`qa verdict cites no qa evidence claim id (manifest claims: ${ids.join(", ") || "none"}) — evidence lives in .factory/out/qa/<issue>/ and is written by \`node .factory/bin/qa-evidence.js\``);
+    /**
+     * 리뷰 라운드 1 MF-2 — **두 상태를 가른다.** 예전에는 매니페스트가 아예 없거나 지난 커밋의
+     * 것이어도 이 규칙이 그대로 발화해서 `claimIds`가 비었고, 결과 문구는 "qa가 아무것도 인용하지
+     * 않았다"였다 — 곧 **증거 경로의 고장을 리뷰어의 인용 습관 탓으로** 돌렸다. 그것은 ADR-024가
+     * 없애려던 바로 그 문장(`spec1: qa evidence missing`)의 다른 철자다. 게다가 그 사유는 run-stage에서
+     * `needs-human`으로 등급이 매겨져, "한 라운드 더 돌면 매니페스트가 생긴다"는 ADR의 업그레이드
+     * 경로를 스스로 막았다.
+     */
+    if (qaManifest.ok !== true) {
+      reasons.push(`${QA_EVIDENCE_UNUSABLE}: ${qaManifest.reason || "unknown"} — this is the evidence path, not the builder's work (ADR-024); .factory/out/qa/<issue>/manifest.json is written by \`node .factory/bin/qa-evidence.js\``);
+    } else {
+      const v = (Array.isArray(data.verdicts) ? data.verdicts : []).find((x) => x?.role === "qa");
+      const ids = Array.isArray(qaManifest.claimIds) ? qaManifest.claimIds : [];
+      if (v && citedClaimIds(v, ids).length === 0) {
+        reasons.push(`qa verdict cites no qa evidence claim id (manifest claims: ${ids.join(", ") || "none"}) — evidence lives in .factory/out/qa/<issue>/ and is written by \`node .factory/bin/qa-evidence.js\``);
+      }
     }
   }
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는

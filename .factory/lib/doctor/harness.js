@@ -220,8 +220,12 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
  * 말라"는 요청을 무시할 수 없고, 안 돌려 본 것을 PASS로 적을 수도 없다.
  */
 const QA_PROBE_ID = "qa.evidence-probe";
-export function checkQaEvidenceProbe({ root, skipped = null, probe = probeEvidenceDir }) {
+export function checkQaEvidenceProbe({ root, skipped = null, rosterHasQa = null, probe = probeEvidenceDir }) {
   if (skipped) return c(QA_PROBE_ID, "WARN", `not probed: ${skipped} — run \`factory doctor\` without it to check that .factory/out/qa/ is writable`);
+  // 리뷰 라운드 1 SF-6 — 어떤 tier의 리뷰 로스터에도 `qa`가 없는 저장소에는 물어볼 것이 없다.
+  // 그런 저장소에서 이 검사는 디렉터리를 만들었다 지우는 일만 한다(그리고 실패하면 상관없는 FAIL을
+  // 만든다). "모르겠다"(null)일 때는 프로브한다 — 프로브는 싸고, 실패는 언제나 진짜 신호다.
+  if (rosterHasQa === false) return c(QA_PROBE_ID, "PASS", "no review roster in this CHARTER includes qa — no evidence dir is required");
   const r = probe({ root, issue: "probe" });
   return r.ok
     ? c(QA_PROBE_ID, "PASS", ".factory/out/qa/ is writable (the qa reviewer can record evidence)")

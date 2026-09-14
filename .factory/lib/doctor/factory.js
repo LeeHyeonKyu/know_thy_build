@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync as writeFixture, rmSync, readdirSync } from 
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { render as renderTemplate, mergeSettings, freshContent, MOVED_DENIES_ADR_019 } from "../../cli/install.js";
-import { findProtBlock, protBlock, writeGlobs, ciDenyEntries } from "../protected-paths.js";
+import { findProtBlock, protBlock, writeGlobs, ciDenyEntries, qaManifestDeny } from "../protected-paths.js";
 import { lintWorkflow, lintLoggingHook, isFactoryWorkflowFile } from "../yml-lint.js";
 import { lintAgentMd } from "../agent-md.js";
 import { lintSkillMd, ALL_SKILLS } from "../skill-md.js";
@@ -381,7 +381,11 @@ export function checkProtectedParity({ root, exists, readFile, harness }) {
     let deny;
     try { deny = JSON.parse(readFile(p))?.permissions?.deny || []; } catch (e) { problems.push(`${file} unreadable: ${e.message}`); continue; }
     const have = deny.filter((d) => /^(Edit|Write)\(/.test(d));
-    const want = ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true }));
+    // ADR-024 / KTB-42(리뷰 라운드 1 SF-1b) — 매니페스트 한 쌍은 `[protected]`에서 **유도되지 않는다**:
+    // 그 목록은 qa 디렉터리를 일부러 열어 두고, 이 한 파일만 그 안에서 다시 닫는 것은 증거 계약의
+    // 결정이다(`install.js` renderCiSettings가 언제나 덧붙인다). parity가 그것을 "유도되지 않은 항목"으로
+    // 읽으면 갓 설치한 저장소가 FAIL이 된다 — 기대값에 포함시켜, 빠진 경우도 여기서 잡히게 한다.
+    const want = [...ciDenyEntries(writeGlobs(prot, { harnessMode, enumerateFactory: true })), ...qaManifestDeny()];
     const missing = want.filter((d) => !have.includes(d));
     const extra = have.filter((d) => !want.includes(d));
     if (missing.length) problems.push(`${file} deny missing: ${missing.join(", ")}`);

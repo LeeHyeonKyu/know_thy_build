@@ -106,6 +106,15 @@ scan() {
 w="$c"
 printf '%s' "$c" | grep -Eq "($esc|/tmp|/private/tmp|$QA_RE)[^[:space:]\"]*\.\." || w=$(printf '%s' "$c" | sed -E "s#$allow##g")
 
+# ── ADR-024 / KTB-42 — qa 증거 **매니페스트**는 도구가 쓴다(그 하나만 예외에서 다시 뺀다) ─────────
+# `.factory/out/qa/`는 qa가 쓸 수 있어야 하지만(그것이 이 카브아웃의 이유다), 그 안의 `manifest.json`으로
+# 가는 합법 경로는 `node .factory/bin/qa-evidence.js`의 **자식 프로세스**뿐이다 — 리다이렉션·tee·cp로
+# 그 파일을 만드는 것은 도구를 건너뛰고 계약을 손으로 지어내는 모양이다. 진위 경계는 아니다(qa는 여전히
+# 도구로 무엇이든 남길 수 있다): 가장 값싼 철자 하나를 닫아 비용과 가시성을 올릴 뿐이다.
+MANIFEST_RE="$QA_RE[^[:space:]\"']*manifest\.json"
+echo "$c" | grep -Eq "(>>?\|?[[:space:]]*|${CMD}tee$FLAGS[[:space:]]+)[\"']?[^[:space:]\"']*$MANIFEST_RE" && deny "writing the qa evidence manifest directly — it is written by \`node .factory/bin/qa-evidence.js record|attach|na\` (ADR-024)"
+echo "$c" | grep -Eq "${CMD}(cp|mv|install)[[:space:]][^;&|]*$MANIFEST_RE" && deny "copying onto the qa evidence manifest — it is written by \`node .factory/bin/qa-evidence.js\` (ADR-024)"
+
 # `>|`는 noclobber를 무시하는 리다이렉션이다 — `>`/`>>`와 같은 쓰기이므로 같이 잡는다.
 echo "$w" | grep -Eq "(^|[^-=<])>>?\|?[[:space:]]*$T" && deny "redirection to a path outside /tmp, \$TMPDIR or $QA_DIR"
 echo "$w" | grep -Eq "${CMD}tee$FLAGS[[:space:]]+$T" && deny "tee"

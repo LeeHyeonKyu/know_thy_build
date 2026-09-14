@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -24,6 +24,19 @@ import { join } from "node:path";
  * **매니페스트는 커밋되지 않는다**(`.factory/out/`는 gitignore다). 그래서 머지 스테이지는 파일을 볼 수
  * 없고, 대신 review 런이 run 기록에 남긴 `qa_manifest=<sha256>` 한 줄을 본다 — 러너가 쓰고 에이전트는
  * 쓸 수 없는 자리다(`lib/run-record.js`).
+ *
+ * ## 이 계약이 **주장하지 않는 것**(리뷰 라운드 1 SF-1 — 정직하게 다시 쓴다)
+ * 매니페스트는 **진위 경계가 아니다.** qa 역할은 `.factory/out/qa/` 아래에 쓸 수 있고(그것이 이 역할의
+ * 존재 이유다), 그 권한에는 `manifest.json` 자신도 포함된다 — 도구를 한 번도 부르지 않고 스키마에 맞는
+ * 매니페스트와 그것이 가리키는 파일들을 손으로 지어낼 수 있다. 러너는 **그 파일**을 digest하고, 그
+ * digest를 기록하고, 그것으로 머지한다. 곧 `qa_manifest=`가 증명하는 것은 정확히
+ * *"리뷰 시점에 이 커밋에 대한 유효한 매니페스트가 있었고 그 뒤로 바뀌지 않았다"*이지,
+ * *"그 매니페스트를 도구가 만들었다"*가 아니다.
+ * 이 계약이 실제로 하는 일은 **비용과 가시성**이다: 조작하려면 스키마를 맞추고, id별 커버리지를 맞추고,
+ * 실재하는 파일을 만들어야 하며, 그 전부가 사후 조사에서 한 파일로 읽힌다. 판정 자체는 여전히 qa 역할을
+ * 신뢰한다 — 그 신뢰는 이 파일이 만드는 것이 아니라 로스터가 만드는 것이다.
+ * (그래서 ci-settings의 deny와 `deny-all-writes.sh`가 `manifest.json`의 **직접 쓰기 철자**를 막는다:
+ * 합법 경로는 도구의 자식 프로세스라 아무 비용도 치르지 않고, 손으로 쓰는 길만 한 겹 더 시끄러워진다.)
  */
 
 /** 매니페스트의 스키마 이름. 모양이 바뀌면 `v2`이고, 옛 파일은 그 이름으로 거부된다. */
@@ -147,9 +160,29 @@ export function validateManifest(manifest, { doneWhen = [], maturity = "M0", tou
     if (c.id !== SMOKE_CLAIM && !ids.has(String(c.id)) && !extras.includes(String(c.id))) extras.push(String(c.id));
   }
 
+  /**
+   * 리뷰 라운드 1 SF-2 — **계약을 읽지 못한 것은 "충족"이 아니다.** `doneWhen`이 비어 있으면 예전에는
+   * 검사할 대상이 없어서 `claims: []`인 매니페스트도 `ok:true`였고, `finish`는 `coverage: complete`를
+   * 찍어 리뷰어에게 "증거가 충분하다"고 말했다. 이 파일의 원칙("판정 불가는 통과가 아니다")이
+   * 자기 자신에게는 걸려 있지 않았던 자리다. 러너 경로에는 언제나 plan handoff의 `done_when`이 있고,
+   * 없다면 그것 자체가 사람이 볼 사건이다.
+   */
+  if (ws.length === 0) {
+    reasons.push("done_when could not be resolved — coverage is undecidable (the plan handoff's done_when is the contract this manifest must cover)");
+  }
+
   const rank = maturityRank(maturity);
   const by = (id) => claims.filter((c) => String(c?.id) === id);
   const exempt = (cs) => cs.some((c) => c.kind === "not_applicable" && str(c.reason));
+  /**
+   * 리뷰 라운드 1 SF-3 — **전부 `not_applicable`인 매니페스트는 리뷰가 아니라 보고서다.** `na`는 사유만
+   * 있으면 무엇이든 덮고, 그 상태로도 `factory:approved`·`factory:merged`를 통과했다. 한 항목도 재현하지
+   * 않은 라운드가 "증거 계약을 만족했다"고 말할 수는 없다 — 그럴 상황이라면 그 tier의 로스터에 애초에
+   * qa가 없어야 한다(그 경우 이 규칙 전체가 발화하지 않는다).
+   */
+  if (ws.length > 0 && ws.every((w) => exempt(by(String(w.id))))) {
+    reasons.push(`every done_when id is not_applicable (${ws.map((w) => w.id).join(", ")}) — that is a report, not a review; a roster with qa means at least one id was meant to be reproduced`);
+  }
   for (const w of ws) {
     const id = String(w.id);
     const cs = by(id);
@@ -244,24 +277,50 @@ export function evidenceFor({ root, issue, doneWhen = [], maturity = "M0", touch
   if (headSha && m.head_sha && m.head_sha !== headSha) {
     return { ok: false, digest, head_sha: m.head_sha, missing: [], reason: `qa evidence manifest describes ${String(m.head_sha).slice(0, 7)}, this head is ${String(headSha).slice(0, 7)}` };
   }
-  return { ok: true, digest, head_sha: m.head_sha ?? null, missing: [], claimIds: [...new Set(m.claims.map((c) => String(c.id)))] };
+  return {
+    ok: true, digest, head_sha: m.head_sha ?? null, missing: [],
+    claimIds: [...new Set(m.claims.map((c) => String(c.id)))],
+    counts: claimCounts(m),
+  };
 }
+
+/**
+ * claim의 구성을 두 숫자로. run 기록의 `qa_claims=3c/1na`가 이 값이다(리뷰 라운드 1 SF-3):
+ * `na`만으로 채운 승인이 있었는지를 **retro가 셀 수 있어야** 한다 — 계약이 막는 상태(전부 `na`)와
+ * 계약이 허용하지만 눈여겨봐야 할 상태(절반이 `na`)는 다르고, 후자는 기록에만 남길 수 있다.
+ */
+export function claimCounts(manifest) {
+  const claims = Array.isArray(manifest?.claims) ? manifest.claims : [];
+  const na = claims.filter((c) => c?.kind === "not_applicable").length;
+  return { claims: claims.length - na, na };
+}
+/** `3c/1na` — run 기록 한 줄에 들어갈 정규형. */
+export const claimCountsLabel = (counts) => `${counts?.claims ?? 0}c/${counts?.na ?? 0}na`;
 
 /**
  * ③ — **쓸 수 있는지는 리뷰 전에 묻는다.** `mkdir -p` + 파일 하나 쓰기 + 지우기. 그게 전부인 이유:
  * KTB #3에서 실제로 실패한 것이 정확히 그 세 동작이었다(`mkdir -p .factory/out/qa/`가 첫 거절이었다).
  * 남기는 것은 없다 — 프로브 파일은 지운다(쓰기 금지 스테이지의 클린 트리 검사가 바로 뒤에 있다).
  */
-export function probeEvidenceDir({ root, issue = "probe", now = Date.now() } = {}) {
+export function probeEvidenceDir({ root, issue = "probe", now = Date.now(), keep = false } = {}) {
   const dir = qaDir(root, issue);
   const file = join(dir, `.probe-${now}`);
+  // 리뷰 라운드 1 SF-6/nit 5 — 우리가 **만든** 디렉터리는 우리가 지운다. 남겨 둬도 트리는 더러워지지
+  // 않지만(`.factory/out/**`는 gitignore이고 no-write 클린 체크의 `git status --porcelain`은 무시 경로를
+  // 세지 않는다) `factory doctor` 한 번에 사람의 저장소에 빈 `.factory/out/qa/probe/`가 생기는 것은
+  // 진단 도구가 할 일이 아니다. 이미 있던 디렉터리(= 이번 이슈의 실제 증거함)는 건드리지 않는다.
+  // `keep`은 **곧 쓸 사람**(도구의 `record`/`attach`/`na`)이 부를 때다: 거기서 디렉터리를 지우면
+  // 바로 다음 줄의 쓰기가 ENOENT로 죽는다. 지우는 것은 순수한 진단(프로브·doctor)일 때뿐이다.
+  const preexisting = existsSync(dir);
+  const tidy = () => { if (!preexisting && !keep) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* 남아도 무해하다 */ } } };
   try { mkdirSync(dir, { recursive: true }); }
   catch (e) { return { ok: false, dir, reason: `mkdir -p ${qaDirRel(issue)} failed: ${e?.message || e}` }; }
   try { writeFileSync(file, "factory qa evidence probe\n"); }
-  catch (e) { return { ok: false, dir, reason: `writing into ${qaDirRel(issue)} failed: ${e?.message || e}` }; }
+  catch (e) { tidy(); return { ok: false, dir, reason: `writing into ${qaDirRel(issue)} failed: ${e?.message || e}` }; }
   try { unlinkSync(file); }
   catch (e) { return { ok: false, dir, reason: `the probe file in ${qaDirRel(issue)} could not be removed: ${e?.message || e}` }; }
-  return { ok: true, dir };
+  tidy();
+  return { ok: true, dir, created: !preexisting };
 }
 
 /**

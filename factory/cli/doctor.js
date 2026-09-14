@@ -80,8 +80,12 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
     : await setupProbeFn({ run, cwd: root, harness }).catch((e) => ({ skipped: `probe failed: ${e?.message || e}` }));
   checks.push(checkSetupDirtiesTree({ harness, ...probe }));
   // ADR-024 / KTB-42 — review 스테이지가 `claude -p` 전에 돌리는 것과 **같은 프로브**를 여기서도.
-  // 파일을 하나 만들었다 지우므로 `--no-run`/`--offline`에서는 WARN으로만 남긴다.
-  checks.push(checkQaEvidenceProbe({ root, skipped: noRun ? "--no-run" : offline ? "--offline" : null }));
+  // 파일을 하나 만들었다 지우므로 `--no-run`/`--offline`에서는 WARN으로만 남긴다. CHARTER의 어느
+  // tier 로스터에도 qa가 없으면 물어볼 것이 없다(SF-6) — CHARTER를 못 읽으면 `null`(=프로브한다).
+  let rosterHasQa = null;
+  try { rosterHasQa = Object.values(loadCharterFn(root).roster || {}).some((names) => (names || []).includes("qa")); }
+  catch { /* CHARTER가 없거나 깨졌다 — 그 판정은 checkCharter의 몫이고, 여기서는 모른 채로 프로브한다 */ }
+  checks.push(checkQaEvidenceProbe({ root, rosterHasQa, skipped: noRun ? "--no-run" : offline ? "--offline" : null }));
 
   // ── test env up (wraps the command gates and the smoke) ─────────
   const smoke = harness.test?.smoke || {};

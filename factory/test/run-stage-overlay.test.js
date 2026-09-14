@@ -183,6 +183,38 @@ test("KTB-42: a non-writable evidence dir is factory:blocked/undecidable — nev
   expect(lines.some((l) => /qa evidence probe: FAIL/.test(l))).toBe(true);
 });
 
+// 리뷰 라운드 1 MF-2 — 증거 **경로**의 고장은 `needs-human`이 아니라 blocked/undecidable이다.
+// 그래야 ADR이 약속한 "한 라운드 더 돌면 매니페스트가 생긴다"가 실제로 성립한다.
+test("KTB-42/MF-2: an unusable qa manifest is blocked/undecidable, and the reason names the manifest", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const lines = [];
+  const d = overlayDeps({
+    verifyStage: () => ({ ok: false, reasons: ["qa evidence manifest unusable: no qa evidence manifest at .factory/out/qa/3/manifest.json — this is the evidence path, not the builder's work (ADR-024)"] }),
+    transition, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:blocked",
+    cause: "undecidable",
+    reason: expect.stringContaining("qa evidence path:"),
+  }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lines.join("\n")).toMatch(/manifest\.json/);
+});
+
+test("KTB-42/MF-2: an ordinary artifact failure still goes to needs-human — only the evidence path is regraded", async () => {
+  const transition = vi.fn(async () => ({ ok: true }));
+  const d = overlayDeps({
+    verifyStage: () => ({ ok: false, reasons: ["schema review.v1: verdicts must have ≥1 item"] }),
+    transition,
+  });
+  expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(2);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-human",
+    reason: expect.stringContaining("stage artifact missing or invalid"),
+  }));
+});
+
 test("KTB-42: the probe is a review-stage thing — implement never runs it", async () => {
   const probe = vi.fn(async () => ({ ok: false, reason: "should not be asked" }));
   const d = overlayDeps({

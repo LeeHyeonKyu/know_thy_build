@@ -23,7 +23,7 @@ import { buildContext, resolveTier } from "../lib/context.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable } from "../lib/verify-stage.js";
 import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
 import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
@@ -37,7 +37,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
-import { evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
+import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -635,11 +635,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       // 풀리지 않는다. 프로바이더 메시지는 그대로 기록에 싣지만(`v.reasons`에 이미 있다), 등급은
       // needs-human이다 — 사람이 자격증명/설정을 고쳐야 다음 시도가 다르게 끝난다. 408/425/429와
       // 모든 5xx는 여전히 일시적이라 blocked(=sweeper의 ≤3회 재시도) 그대로다.
+      //
+      // ADR-024 / KTB-42(리뷰 라운드 1 MF-2): **qa 증거 경로의 고장도 같은 계열이다.** 매니페스트가
+      // 없거나 지난 커밋의 것이면 그것은 에이전트 산출물의 결함이 아니라 판정 불가다 — 프로브 실패와
+      // 같은 등급(`factory:blocked` + `undecidable`)이어야 하고, 그래야 ADR이 약속한 "업그레이드 직후
+      // 한 라운드 더 돌면 매니페스트가 생긴다"가 실제로 성립한다(needs-human은 그 길을 막는다).
       const apiError = hitApiError(out);
-      const blocked = hitMaxTurns(out) || (apiError && !isNonTransientApiError(out));
+      const qaPath = qaEvidenceUnusable(v.reasons);
+      const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
       const to = blocked ? "factory:blocked" : "factory:needs-human";
-      const reasonPrefix = blocked ? "stage did not finish" : apiError ? "api error needs human (credentials/config)" : "stage artifact missing or invalid";
-      const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}` });
+      const reasonPrefix = qaPath ? "qa evidence path" : blocked ? "stage did not finish" : apiError ? "api error needs human (credentials/config)" : "stage artifact missing or invalid";
+      const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}`, ...(qaPath ? { cause: "undecidable" } : {}) });
       record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
@@ -723,16 +729,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
        * 볼 수 있는 것은 러너가 여기 남긴 이 한 줄뿐이다(에이전트 세션의 `factory/records` push는 훅이 막는다).
        * 곧 "이 커밋에 대해 유효한 증거가 실제로 있었다"의 유일한 증인이 이 값이다.
        */
-      let qaDigest = null;
+      let qaDigest = null, qaClaims = null;
       if (d.qaEvidence) {
         try {
           const qa = await d.qaEvidence({ headSha: checkoutSha ?? v.data.head_sha });
           if (qa?.skipped) record([`qa evidence: ${qa.skipped}`]);
-          else if (qa?.ok) { qaDigest = qa.digest; record([`qa evidence: manifest ${String(qa.digest).slice(0, 12)} valid for ${String(qa.head_sha ?? "unknown").slice(0, 7)}`]); }
+          else if (qa?.ok) { qaDigest = qa.digest; qaClaims = claimCountsLabel(qa.counts); record([`qa evidence: manifest ${String(qa.digest).slice(0, 12)} valid for ${String(qa.head_sha ?? "unknown").slice(0, 7)} (${qaClaims})`]); }
           else record([`qa evidence: INVALID — ${qa?.reason || "unknown"}`]);
         } catch (e) { record([`qa evidence: unreadable — ${e?.message || e}`]); }
       }
-      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest })]);
+      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
@@ -1995,7 +2001,15 @@ async function main() {
       try { const r = await deps.reviewRoster(); if (r?.ok && Array.isArray(r.roles)) roles = r.roles; }
       catch { /* 로스터를 모르면 그냥 프로브한다 — 프로브는 싸고, 실패는 언제나 진짜 신호다 */ }
       if (roles && !roles.includes("qa")) return { ok: true, line: "qa evidence probe: skipped — this tier's roster has no qa" };
-      const tool = join(root, ".factory/bin/qa-evidence.js");
+      /**
+       * 리뷰 라운드 1 SF-4 — 도구는 **작업 트리가 아니라 이 스크립트 옆에서** 푼다. overlay가 보통
+       * `.factory/**`를 스테이지 자신의 커밋으로 되돌리지만, `git checkout <base> -- .factory`는 PR head가
+       * **새로 추가한** 파일을 지우지 않는다 — 그리고 그 "아직 업그레이드하지 않은" 상태가 이 코드가
+       * 대비하는 바로 그 상태다. 그 자리에서 작업 트리의 경로를 실행하면 러너가 PR이 쓴 코드를
+       * 러너의 환경으로 돌린다(KTB-37이 닫은 구멍의 다른 철자). `import.meta.url`은 지금 돌고 있는
+       * run-stage 자신의 위치이고, 그 옆의 파일은 정의상 팩토리의 것이다.
+       */
+      const tool = new URL("./qa-evidence.js", import.meta.url).pathname;
       if (!existsSync(tool)) {
         const p = probeEvidenceDir({ root, issue });
         return p.ok

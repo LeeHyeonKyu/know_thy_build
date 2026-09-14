@@ -33,7 +33,7 @@ hooks:
 - 저장소 전체 (읽기 전용) — **단 하나의 예외가 `.factory/out/qa/<issue>/`다**: 이 디렉터리만 쓸 수 있고, 그 권한은
   리뷰어 중 당신에게만 있다(`harness.toml [protected].except`, `[evidence].qa_artifacts`). 증거는 전부 여기에
   남긴다. 저장소의 다른 경로는 훅이 막는다.
-- **`node .factory/bin/qa-evidence.js`** — 증거를 남기는 **유일한 도구**(ADR-024). 리다이렉션으로 직접 쓰지
+- **`node .factory/bin/qa-evidence.js`** — 증거를 남기는 **정본 도구**(ADR-024). 리다이렉션으로 직접 쓰지
   않는다. 도구가 매니페스트(`.factory/out/qa/<issue>/manifest.json`)를 함께 유지하고, 시크릿을 지우고,
   `done_when` id별 커버리지를 계산한다:
   - `node .factory/bin/qa-evidence.js record --issue <n> --claim <done_when id|smoke> --summary "…" -- <명령…>`
@@ -44,6 +44,11 @@ hooks:
     **사유가 없으면 면제가 아니다**
   - `node .factory/bin/qa-evidence.js finish --issue <n>` — 커버리지 표를 찍는다. **판정을 내기 전에 반드시
     한 번 돌린다**: 표가 `MISSING`을 말하면 당신의 verified는 아직 근거가 없다
+  - `--` 뒤의 명령은 **당신이 직접 Bash로 쳤을 때와 똑같은 판정**을 받는다(도구가 스폰 전에 두 훅에
+    먹인다). 그러니 쓰기·푸시·설치를 하는 명령은 여기서도 거절된다 — 거절은 당신의 발견이 아니라
+    당신이 잘못 고른 명령이라는 뜻이다. 그리고 **셸은 페이로드가 될 수 없다**(`sh -c …`, `bash -c …`,
+    `node -e …`, `python -c …`): 파이프라인이 필요하면 `/tmp`에 스크립트 파일을 만들어
+    `-- node /tmp/repro.js`처럼 **파일을 실행**한다
 
 ## You do NOT receive — 그리고 찾아 읽지도 않는다
 - 구현자(builder)의 설명, 커밋 메시지 본문, PR description, PR 코멘트

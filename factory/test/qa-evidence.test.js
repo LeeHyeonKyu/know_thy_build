@@ -5,10 +5,11 @@ import { join } from "node:path";
 import {
   QA_SCHEMA, KINDS, SMOKE_CLAIM, qaDirRel, qaDir, manifestPath, newManifest,
   validateManifest, manifestDigest, coverageTable, readManifest, probeEvidenceDir,
-  evidenceFor, isUiFacing, citedClaimIds,
+  evidenceFor, isUiFacing, citedClaimIds, claimCounts, claimCountsLabel,
 } from "../lib/qa-evidence.js";
-import { runCli } from "../bin/qa-evidence.js";
-import { verifyStage } from "../lib/verify-stage.js";
+import { runCli, gatePayload, interpreterPayload, hookPaths } from "../bin/qa-evidence.js";
+import { verifyStage, qaEvidenceUnusable } from "../lib/verify-stage.js";
+import { renderCiSettings } from "../cli/install.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "qa-evidence-"));
 
@@ -121,6 +122,62 @@ test("validateManifest: claim ids outside done_when are extras, but `smoke` alwa
   expect(r.extras).toEqual(["dw9"]);
 });
 
+// ── 리뷰 라운드 1 SF-2 / SF-3 — 읽지 못한 계약도, 전부 면제한 계약도 "충족"이 아니다 ─────────────
+
+test("SF-2: an unresolved done_when is undecidable, not complete", () => {
+  const m = manifest([{ id: "dw1", kind: "command", file: "dw1-1.log", cmd: "npm test", exit: 0, summary: "ok" }]);
+  const r = validateManifest(m, { doneWhen: [], maturity: "M0", fileExists: always });
+  expect(r.ok).toBe(false);
+  expect(r.reasons.join(" ")).toMatch(/done_when could not be resolved/);
+  // 빈 매니페스트도 마찬가지다 — 예전에는 이 조합이 `coverage: complete`였다.
+  expect(validateManifest(manifest([]), { doneWhen: [], maturity: "M0", fileExists: always }).ok).toBe(false);
+});
+
+test("SF-2: finish exits 1 and says why when done_when cannot be resolved (no id to name)", () => {
+  const root = tmp();
+  runCli(["na", "--issue", "3", "--claim", "dw1", "--reason", "no context here"], cliOpts(root));
+  const errs = [];
+  expect(runCli(["finish", "--issue", "3"], cliOpts(root, { log: () => {}, err: (s) => errs.push(s), spawn: () => ({ status: 1, stdout: "", stderr: "" }) }))).toBe(1);
+  expect(errs.join("\n")).toMatch(/qa evidence not acceptable/);
+  expect(errs.join("\n")).toMatch(/done_when could not be resolved/);
+  expect(errs.join("\n")).not.toMatch(/see reasons above/);
+});
+
+test("SF-3: a manifest where every done_when id is not_applicable is refused — that is a report, not a review", () => {
+  const all = manifest([
+    { id: "dw1", kind: "not_applicable", summary: "x", reason: "cannot reproduce" },
+    { id: "dw2", kind: "not_applicable", summary: "y", reason: "cannot reproduce" },
+  ]);
+  const r = validateManifest(all, { doneWhen: dw("dw1", "dw2"), maturity: "M0", fileExists: always });
+  expect(r.ok).toBe(false);
+  expect(r.reasons.join(" ")).toMatch(/every done_when id is not_applicable/);
+  // 하나라도 실제로 재현했으면 통과한다 — na 자체를 금지하는 규칙이 아니다.
+  const mixed = manifest([
+    { id: "dw1", kind: "command", file: "dw1-1.log", cmd: "npm test", exit: 0, summary: "ran" },
+    { id: "dw2", kind: "not_applicable", summary: "y", reason: "no UI in this tier" },
+  ]);
+  expect(validateManifest(mixed, { doneWhen: dw("dw1", "dw2"), maturity: "M0", fileExists: always }).ok).toBe(true);
+});
+
+test("SF-3: claim counts ride to the run record so a retro can see an na-heavy approval", () => {
+  const m = manifest([
+    { id: "dw1", kind: "command", file: "dw1-1.log", cmd: "npm test", exit: 0, summary: "ran" },
+    { id: "dw2", kind: "not_applicable", summary: "y", reason: "no UI" },
+  ]);
+  expect(claimCounts(m)).toEqual({ claims: 1, na: 1 });
+  expect(claimCountsLabel(claimCounts(m))).toBe("1c/1na");
+});
+
+test("SF-6: the probe removes a directory it created, and leaves one it did not", () => {
+  const root = tmp();
+  expect(probeEvidenceDir({ root, issue: "probe" })).toMatchObject({ ok: true, created: true });
+  expect(existsSync(qaDir(root, "probe"))).toBe(false);        // 진단이 사람의 저장소에 자국을 남기지 않는다
+
+  runCli(["na", "--issue", "7", "--claim", "dw1", "--reason", "r"], cliOpts(root));
+  expect(probeEvidenceDir({ root, issue: 7 })).toMatchObject({ ok: true, created: false });
+  expect(existsSync(manifestPath(root, 7))).toBe(true);        // 실제 증거함은 건드리지 않는다
+});
+
 test("manifestDigest is deterministic, key-order independent, and content sensitive", () => {
   const a = manifest([{ id: "dw1", kind: "log", file: "dw1-1.log", summary: "x" }]);
   const b = { claims: a.claims, tool_version: a.tool_version, created_at: a.created_at, maturity: a.maturity, head_sha: a.head_sha, issue: a.issue, schema: a.schema };
@@ -143,7 +200,8 @@ test("probe: exit 0 when the dir can be created and written, exit 2 with a preci
   const root = tmp();
   const out = [];
   expect(runCli(["probe", "--issue", "3"], { cwd: root, log: (s) => out.push(s), err: (s) => out.push(s) })).toBe(0);
-  expect(existsSync(qaDir(root, 3))).toBe(true);
+  expect(existsSync(join(root, ".factory/out/qa"))).toBe(true);   // 쓸 수 있다는 것은 확인됐고
+  expect(existsSync(qaDir(root, 3))).toBe(false);                 // 프로브가 만든 자국은 남지 않는다(SF-6)
   expect(out.join("\n")).toMatch(/writable/);
 
   // `.factory/out/qa`를 **파일**로 만들어 두면 mkdir -p 자체가 실패한다 — 루트 권한이 없는 CI에서도
@@ -157,21 +215,41 @@ test("probe: exit 0 when the dir can be created and written, exit 2 with a preci
   expect(errs.join("\n")).toMatch(/\.factory\/out\/qa\/3/);
 });
 
-test("probeEvidenceDir leaves nothing behind — the probe file is unlinked", () => {
+test("probeEvidenceDir leaves nothing behind — the probe file is unlinked and the dir it created is removed", () => {
   const root = tmp();
   const r = probeEvidenceDir({ root, issue: 3 });
   expect(r.ok).toBe(true);
-  expect(readdirSync(qaDir(root, 3))).toEqual([]);
+  expect(existsSync(qaDir(root, 3))).toBe(false);
+  // 그래도 부모(`.factory/out/qa`)는 남는다 — 그것을 만든 것이 프로브의 일이고, 다음 `record`가 쓴다.
+  expect(existsSync(join(root, ".factory/out/qa"))).toBe(true);
 });
 
 // ── 4. 도구: record / attach / na / finish ────────────────────────────────────────────────────
 
-const cliOpts = (root, extra = {}) => ({ cwd: root, log: () => {}, err: () => {}, now: () => "2026-09-14T00:00:00Z", ...extra });
+/**
+ * 기본값으로 **페이로드 판정기를 통과시킨다**: 그 판정은 훅 스크립트 두 개를 실제로 띄우므로(초 단위),
+ * 판정 자체를 검사하지 않는 테스트까지 그 값을 치를 이유가 없다. MF-1 테스트들은 `gate: undefined`로
+ * 기본값(진짜 `gatePayload`)을 되살려 **실제 훅**에 대고 검사한다.
+ */
+const cliOpts = (root, extra = {}) => ({ cwd: root, log: () => {}, err: () => {}, now: () => "2026-09-14T00:00:00Z", gate: () => ({ ok: true }), ...extra });
+/** MF-1 전용 — 진짜 훅으로 판정한다(기본 인자가 되살아나도록 `undefined`를 명시한다). */
+const realGate = (root, extra = {}) => cliOpts(root, { gate: undefined, ...extra });
+
+/**
+ * 테스트가 띄우는 자식 프로세스. **`node -e`를 쓰지 않는다** — MF-1 이후 인라인 스크립트는 페이로드로
+ * 거절되기 때문이다(훅이 읽을 수 없는 두 번째 명령줄이다). 그래서 리뷰어가 실제로 쓸 모양 그대로
+ * **파일을 실행한다**: `node <path>`는 두 훅을 통과하고 인터프리터 검사에도 걸리지 않는다.
+ */
+const script = (body) => {
+  const p = join(mkdtempSync(join(tmpdir(), "qa-script-")), "s.js");
+  writeFileSync(p, body);
+  return ["node", p];
+};
 
 test("record: runs the command, stores stdout+stderr with an exit header, and appends a command claim", () => {
   const root = tmp();
   const code = runCli(
-    ["record", "--issue", "3", "--claim", "dw1", "--summary", "export returns 200", "--", "node", "-e", "console.log('hi'); console.error('warn'); process.exit(3)"],
+    ["record", "--issue", "3", "--claim", "dw1", "--summary", "export returns 200", "--", ...script("console.log('hi'); console.error('warn'); process.exit(3)")],
     cliOpts(root),
   );
   expect(code).toBe(0);
@@ -186,7 +264,7 @@ test("record: runs the command, stores stdout+stderr with an exit header, and ap
   expect(log).toMatch(/warn/);
 
   // 두 번째 record는 같은 claim 아래 `-2`로 쌓인다 — 덮어쓰지 않는다.
-  runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "again", "--", "node", "-e", "1"], cliOpts(root));
+  runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "again", "--", ...script("1")], cliOpts(root));
   const m2 = JSON.parse(readFileSync(manifestPath(root, 3), "utf8"));
   expect(m2.claims.map((c) => c.file)).toEqual(["dw1-1.log", "dw1-2.log"]);
 }, 30000);   // 이 테스트는 실제로 프로세스를 띄운다 — 전체 스위트와 함께 돌 때 기본 5s로는 모자란다
@@ -195,7 +273,7 @@ test("record: secrets in the captured output are scrubbed before they land in th
   const root = tmp();
   const token = "ghp_" + "b".repeat(36);
   runCli(
-    ["record", "--issue", "3", "--claim", "dw1", "--summary", "auth probe", "--", "node", "-e", `console.log("token ${token}")`],
+    ["record", "--issue", "3", "--claim", "dw1", "--summary", "auth probe", "--", ...script(`console.log("token ${token}")`)],
     cliOpts(root, { env: { GITHUB_TOKEN: token } }),
   );
   const log = readFileSync(join(qaDir(root, 3), "dw1-1.log"), "utf8");
@@ -241,7 +319,7 @@ test("finish: prints the coverage table and exits 1 while a done_when id is unco
     harness: { maturity: "M0" },
     handoffs: { plan: { done_when: dw("dw1", "dw2") } },
   }));
-  runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "ran", "--", "node", "-e", "1"], cliOpts(root));
+  runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "ran", "--", ...script("1")], cliOpts(root));
 
   const out = [];
   expect(runCli(["finish", "--issue", "3"], cliOpts(root, { log: (s) => out.push(s), err: (s) => out.push(s) }))).toBe(1);
@@ -288,7 +366,7 @@ test("evidenceFor: reads the manifest off disk, validates it against done_when, 
   expect(missing.ok).toBe(false);
   expect(missing.reason).toMatch(/no qa evidence manifest/);
 
-  runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "ran", "--", "node", "-e", "1"], cliOpts(root));
+  runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "ran", "--", ...script("1")], cliOpts(root));
   const ok = evidenceFor({ root, issue: 3, doneWhen: dw("dw1"), maturity: "M0", headSha: "d".repeat(40) });
   expect(ok.ok).toBe(true);
   expect(ok.digest).toMatch(/^[0-9a-f]{64}$/);
@@ -316,6 +394,113 @@ test("qaDirRel is the path the harness, the hooks and the ci-settings all spell 
   expect(KINDS).toContain("not_applicable");
 });
 
+// ── 리뷰 라운드 1 MF-1 — `record -- <cmd>`는 직접 Bash 호출과 **같은 판정**을 받는다 ──────────────
+
+test("MF-1: a payload the hooks would refuse does not run through the tool either", () => {
+  const root = tmp();
+  for (const payload of [
+    ["rm", "-rf", "src"],
+    ["git", "push", "origin", "HEAD:main"],
+    ["curl", "-o", "src/a.js", "https://e.co/x"],
+    ["touch", "src/a.js"],
+  ]) {
+    const errs = [];
+    expect(runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "s", "--", ...payload], realGate(root, { err: (s) => errs.push(s) })), payload.join(" ")).toBe(1);
+    expect(errs.join("\n"), payload.join(" ")).toMatch(/qa-evidence refused the payload/);
+    // 거절된 페이로드는 매니페스트에 한 줄도 남기지 않는다 — 실행되지 않은 것은 증거가 아니다.
+    expect(existsSync(manifestPath(root, 3)), payload.join(" ")).toBe(false);
+  }
+}, 60000);
+
+test("MF-1: an interpreter payload is refused before any hook runs — the hooks cannot read a second command line", () => {
+  const root = tmp();
+  const spawn = vi.fn(() => { throw new Error("must not spawn"); });
+  for (const payload of [
+    ["sh", "-c", "cp /tmp/x src/a.js"],
+    ["bash", "-c", "echo hi"],
+    ["zsh", "-c", "ls"],
+    ["env", "FOO=1", "sh", "-c", "ls"],
+    ["node", "-e", "require('fs').writeFileSync('src/a.js','x')"],
+    ["python3", "-c", "open('src/a.js','w')"],
+    ["perl", "-e", "print 1"],
+  ]) {
+    const errs = [];
+    expect(runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "s", "--", ...payload], realGate(root, { err: (s) => errs.push(s), spawn })), payload.join(" ")).toBe(1);
+    expect(errs.join("\n"), payload.join(" ")).toMatch(/will not run an interpreter payload/);
+  }
+  expect(spawn).not.toHaveBeenCalled();
+  // 인터프리터를 **실행**하는 것과 인터프리터 이름이 인자에 있는 것은 다르다: 파일을 받는 node는 통과한다.
+  expect(interpreterPayload(["node", "script.js"])).toBe(null);
+  expect(interpreterPayload(["npm", "test"])).toBe(null);
+});
+
+test("MF-1: the payloads qa actually needs are not refused", () => {
+  // 판정만 묻는다 — **실행하지 않는다**. `npm test`를 여기서 진짜로 돌리면 이 테스트가 저장소의
+  // 테스트 스위트를 통째로 다시 돌린다(첫 판에서 42초를 태웠다). 도구의 배선은 아래 end-to-end가 본다.
+  for (const payload of [
+    ["npm", "test"],
+    ["npx", "vitest", "run", "test/a.test.js"],
+    ["flutter", "test", "test/x_test.dart"],
+    ["npx", "playwright", "test", "e2e/export.spec.ts", "--output", "/tmp/qa-results"],
+    ["psql", "-c", "select count(*) from reports"],
+    ["node", "scripts/seed.js"],
+  ]) {
+    expect(gatePayload(payload, { env: {} }), payload.join(" ")).toMatchObject({ ok: true });
+  }
+}, 60000);
+
+test("MF-1: end to end — a legitimate payload goes through the real gate, runs, and becomes a claim", () => {
+  const root = tmp();
+  const errs = [];
+  expect(runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "ran the repro", "--", ...script("console.log('ok')")], realGate(root, { err: (s) => errs.push(s) }))).toBe(0);
+  expect(errs).toEqual([]);
+  const m = JSON.parse(readFileSync(manifestPath(root, 3), "utf8"));
+  expect(m.claims).toHaveLength(1);
+  expect(m.claims[0]).toMatchObject({ id: "dw1", kind: "command", exit: 0 });
+}, 60000);
+
+test("MF-1: inside a stage, a payload no hook could judge is refused (fail closed)", () => {
+  const root = tmp();
+  const errs = [];
+  const gated = gatePayload(["npm", "test"], { env: { FACTORY_STAGE: "review" }, hooks: null });
+  expect(gated.ok).toBe(false);
+  expect(gated.reason).toMatch(/cannot find the hook scripts/);
+  // 스테이지 밖(사람의 노트북)에서는 통과시킨다 — 거기서 이 도구는 경계가 아니라 편의다.
+  expect(gatePayload(["npm", "test"], { env: {}, hooks: null })).toMatchObject({ ok: true, unchecked: true });
+  expect(errs).toEqual([]);
+
+  // 훅은 **도구 자신의 옆에서** 푼다: 이 패키지에서는 `factory/bin/` → `factory/hooks/`,
+  // 설치본에서는 `.factory/bin/` → `.claude/hooks/`. 작업 트리의 경로로 풀지 않는다(KTB-37).
+  const found = hookPaths();
+  expect(found).toHaveLength(2);
+  expect(found[0]).toMatch(/deny-all-writes\.sh$/);
+  expect(found[1]).toMatch(/block-dangerous\.sh$/);
+  expect(hookPaths("/nowhere/at/all/")).toBe(null);
+  // 훅을 판정할 수 없는 응답(exit 1 등)도 통과가 아니다 — 판정되지 않은 페이로드는 허용된 페이로드가 아니다.
+  const unjudged = gatePayload(["npm", "test"], { env: {}, hooks: ["/x/deny-all-writes.sh"], spawn: () => ({ status: 1, stdout: "", stderr: "jq missing" }) });
+  expect(unjudged.ok).toBe(false);
+  expect(unjudged.reason).toMatch(/could not judge the payload/);
+});
+
+test("MF-3: there is no --root — the tool always writes under the process cwd", () => {
+  const root = tmp();
+  const elsewhere = tmp();
+  runCli(["na", "--issue", "3", "--claim", "dw1", "--reason", "x", "--root", elsewhere], cliOpts(root));
+  expect(existsSync(manifestPath(root, 3))).toBe(true);
+  expect(existsSync(manifestPath(elsewhere, 3))).toBe(false);
+  expect(existsSync(join(elsewhere, ".factory"))).toBe(false);
+});
+
+test("nit 2: a claim id that would be rewritten for the filename is refused, not silently renamed", () => {
+  const root = tmp();
+  const errs = [];
+  for (const bad of ["a b", "dw/1", "dw:1", "x".repeat(65)]) {
+    expect(runCli(["na", "--issue", "3", "--claim", bad, "--reason", "r"], cliOpts(root, { err: (s) => errs.push(s) })), bad).toBe(1);
+  }
+  expect(errs.join("\n")).toMatch(/--claim must be a done_when id/);
+  expect(runCli(["na", "--issue", "3", "--claim", "dw1", "--reason", "r"], cliOpts(root))).toBe(0);
+});
+
 test("KTB-42: both ci-settings templates allow the tool's Bash spelling — dontAsk refuses whatever allow omits", () => {
   for (const f of ["ci-settings.json", "ci-settings-harness.json"]) {
     const j = JSON.parse(readFileSync(new URL(`../../templates/factory/factory/${f}`, import.meta.url).pathname, "utf8"));
@@ -323,8 +508,17 @@ test("KTB-42: both ci-settings templates allow the tool's Bash spelling — dont
     for (const a of ["Bash(node .factory/bin/qa-evidence.js *)", "Bash(node ./.factory/bin/qa-evidence.js *)"]) {
       expect(allow.has(a), `${f} allow ${a}`).toBe(true);
     }
-    // deny는 여전히 경로 deny만 담는다 — 도구를 막는 항목이 새로 들어오지 않았는지 본다.
+    // deny에는 도구를 막는 항목이 없다 — 그리고 매니페스트의 **직접 쓰기** 철자만 닫혀 있다(SF-1b).
     expect((j.permissions.deny || []).some((d) => /qa-evidence/.test(d)), f).toBe(false);
+  }
+  // 그 deny는 템플릿이 아니라 설치 시점에 생성된다(`renderCiSettings`가 경로 deny를 통째로 다시 쓴다).
+  const prot = { factory: [".factory/**"], agent_writable: [], runner_only: [] };
+  for (const harnessMode of [false, true]) {
+    const rendered = JSON.parse(renderCiSettings(JSON.stringify({ permissions: { deny: ["Read(.env)"], allow: [] } }), prot, { harnessMode }));
+    expect(rendered.permissions.deny, String(harnessMode)).toContain("Write(.factory/out/qa/**/manifest.json)");
+    expect(rendered.permissions.deny, String(harnessMode)).toContain("Edit(.factory/out/qa/**/manifest.json)");
+    // 증거 **디렉터리** 자체는 열려 있어야 한다 — 닫혔다면 그것이 KTB #3의 재발이다.
+    expect(rendered.permissions.deny.some((d) => /\((\.factory\/out\/qa\/\*\*)\)$/.test(d))).toBe(false);
   }
 });
 
@@ -360,6 +554,32 @@ test("verify-stage: a qa verdict that cites no manifest claim id fails the revie
 
   const good = verifyStage({ ...base, out: { is_error: false, result: JSON.stringify(data("claim:dw2 — dw2-1.log:18")) }, transcriptText: "" });
   expect(good.ok).toBe(true);
+});
+
+// ── 리뷰 라운드 1 MF-2 — 없는 매니페스트는 "인용하지 않았다"가 아니다 ────────────────────────────
+
+test("MF-2: an absent or stale manifest is named as the evidence path, not as the reviewer's citation habits", () => {
+  const data = { schema: "factory.review.v1", issue: 3, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: ["dw1 reproduced"] }] };
+  const base = {
+    stage: "review", roster: ["qa"], rolePrefix: "reviewer-",
+    agentsLog: { completed: ["reviewer-qa"] }, gates: { status: "GREEN", level: "unit" },
+    out: { is_error: false, result: JSON.stringify(data) }, transcriptText: "",
+  };
+  for (const reason of ["no qa evidence manifest at .factory/out/qa/3/manifest.json", "qa evidence manifest describes bbbbbbb, this head is aaaaaaa"]) {
+    const r = verifyStage({ ...base, qaManifest: { ok: false, reason } });
+    expect(r.ok).toBe(false);
+    expect(r.reasons.join(" ")).toMatch(/qa evidence manifest unusable/);
+    expect(r.reasons.join(" ")).toContain(reason);
+    expect(r.reasons.join(" ")).toMatch(/this is the evidence path, not the builder's work/);
+    // **그리고 인용 문구는 나오지 않는다** — 두 상태가 한 문장으로 뭉개지던 것이 이 결함이었다.
+    expect(r.reasons.join(" ")).not.toMatch(/cites no qa evidence claim id/);
+    expect(qaEvidenceUnusable(r.reasons)).toBe(true);
+  }
+  // 매니페스트가 멀쩡하면 예전 규칙 그대로 인용을 묻는다.
+  const cited = verifyStage({ ...base, qaManifest: { ok: true, claimIds: ["dw1"] } });
+  expect(cited.ok).toBe(true);
+  expect(qaEvidenceUnusable(cited.reasons)).toBe(false);
 });
 
 test("verify-stage: no qa in the roster means the qa evidence rule does not fire", () => {

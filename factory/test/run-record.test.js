@@ -154,3 +154,22 @@ test("KTB-42: the review-evidence line carries the qa manifest digest, and an ol
   expect(parsed.qaManifest).toBe(null);
   expect(parsed.verdicts).toBe("qa=approve");
 });
+
+/**
+ * 리뷰 라운드 1 SF-3 — `qa_claims=3c/1na`. 판정에는 쓰이지 않는다(계약이 막는 것은 *전부* na인
+ * 경우뿐이다): retro가 "na가 대부분인 승인"을 셀 수 있게 하려는 관측값이고, 그래서 **기록에만** 있다.
+ */
+test("KTB-42/SF-3: the review-evidence line carries the claim composition, and lines without it still parse", () => {
+  const line = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: "b".repeat(40), round: 1, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], qaManifest: "a".repeat(64), qaClaims: "3c/1na" });
+  const parsed = parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${line}\n`, { runId: "7" });
+  expect(parsed.qaClaims).toBe("3c/1na");
+  expect(parsed.qaManifest).toBe("a".repeat(64));
+  expect(parsed.verdicts).toBe("qa=approve");
+
+  // 지문은 있고 구성은 없는 줄(KTB-42 1라운드에 쓰인 모양)도 그대로 읽힌다.
+  const noCounts = "review-evidence: run_id=7 runner=gha-7 head_sha=" + "b".repeat(40) + " round=1 decision=approved verdicts=qa=approve qa_manifest=" + "a".repeat(64);
+  const older = parseReviewEvidence(`## review · 2026-09-14T09:02Z · gha-7\n${noCounts}\n`, { runId: "7" });
+  expect(older.qaManifest).toBe("a".repeat(64));
+  expect(older.qaClaims).toBe(null);
+  expect(older.verdicts).toBe("qa=approve");
+});

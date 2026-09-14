@@ -331,3 +331,16 @@ test("KTB-42: --offline/--no-run cannot run the probe — that is a WARN, never 
     expect(r.detail).toContain(skipped);
   }
 });
+
+// 리뷰 라운드 1 SF-6 — qa를 부르지 않는 저장소에는 물어볼 것이 없다(그리고 자국도 남기지 않는다).
+test("KTB-42/SF-6: a CHARTER with no qa in any roster is not probed; an unknown roster still is", () => {
+  const skip = checkQaEvidenceProbe({ root: "/nonexistent", rosterHasQa: false, probe: () => { throw new Error("must not run"); } });
+  expect(skip.level).toBe("PASS");
+  expect(skip.detail).toMatch(/no review roster in this CHARTER includes qa/);
+
+  // 모르면(null) 프로브한다 — 프로브는 싸고, 실패는 언제나 진짜 신호다.
+  let asked = 0;
+  expect(checkQaEvidenceProbe({ root: "/x", rosterHasQa: null, probe: () => { asked++; return { ok: true }; } }).level).toBe("PASS");
+  expect(checkQaEvidenceProbe({ root: "/x", rosterHasQa: true, probe: () => { asked++; return { ok: true }; } }).level).toBe("PASS");
+  expect(asked).toBe(2);
+});

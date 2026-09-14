@@ -1546,6 +1546,20 @@ probe  --issue N          # mkdir -p + write + unlink. 쓸 수 없으면 exit 2
 **즉흥 리다이렉션은 조용히 실패하고**, 실패한 자리에서 "증거 없음"은 언제나 빌더를 가리켰다. 도구는
 시크릿을 지운 뒤(`scrub-artifacts.js`) 쓰고, 바이너리(스크린샷)는 한 바이트도 건드리지 않는다.
 
+`record`의 `--` 뒤 페이로드는 **직접 Bash로 친 것과 같은 판정**을 받는다: 스폰 전에 그 명령줄을
+`deny-all-writes.sh`와 `block-dangerous.sh`에 그대로 먹이고, 어느 하나가 exit 2면 도구가 거절한다
+(exit 1). 훅은 **도구 자신의 위치**에서 풀고(`.factory/bin/` → `.claude/hooks/`), 스테이지 안에서 찾지
+못하면 fail closed다. 그리고 **인터프리터는 페이로드가 될 수 없다**(`sh|bash|zsh|dash -c …`,
+`node -e/-p`, `python -c`, `perl -e`, `env <interp>`) — 따옴표 안은 훅이 읽을 수 없는 두 번째 명령줄이다.
+이 규칙이 없으면 ci-settings의 접두 allow(`Bash(node .factory/bin/qa-evidence.js *)`)가 쓰기 금지
+역할에게 임의 실행을 그대로 열어 준다(적대적 리뷰가 실측: 직접 `rm -rf src`는 exit 2, 도구로 감싸면 0).
+
+**이 계약이 주장하지 않는 것**: 매니페스트는 진위 경계가 **아니다**. qa는 증거 디렉터리에 쓸 수 있으므로
+매니페스트를 손으로 지어낼 수 있고, 러너는 그 파일을 digest한다 — `qa_manifest=`가 증명하는 것은
+"리뷰 시점에 유효한 매니페스트가 있었고 그 뒤 바뀌지 않았다"이지 "도구가 만들었다"가 아니다. 계약이
+주는 것은 **형태와 가시성**이다. 가장 값싼 철자 하나(`Edit/Write(.factory/out/qa/**/manifest.json)` deny와
+`deny-all-writes.sh`의 `manifest.json` 절)만 닫혀 있고, 합법 경로는 도구의 자식 프로세스라 비용이 0이다.
+
 #### 판정이 물리는 자리 넷
 
 1. **review 스테이지** — 오버레이 직후·`claude -p` 이전에 `probe`. 실패는 review reject가 아니라

@@ -72,13 +72,24 @@ export const QA_EVIDENCE_UNVERIFIED = "qa evidence manifest not verified for thi
 export const QA_EVIDENCE_NOT_BOUND = "qa evidence not bound — the review run recorded no qa_manifest digest for this commit (the roster includes qa, so a valid manifest is required; see `node .factory/bin/qa-evidence.js finish`)";
 function qaEvidenceGate(ctx, { merged = false } = {}) {
   if (restoring(ctx)) return null;
+  /**
+   * 리뷰 라운드 1 SF-5 — **"모르겠다"는 면제가 아니다.** 예전에는 `roster`가 없으면(조회 실패로
+   * `buildCtxExtra`가 비워 둔 경우 포함) 규칙이 조용히 꺼졌다. 실무에서는 `merge-stage`가 그 전에
+   * 자기 로스터 검사로 멈추지만, 이 파일의 나머지가 전부 "확인되지 않은 것은 거부"인데 여기만
+   * 반대 방향이었다. 로스터에 `qa`가 **없다**는 것을 확인했을 때만 면제한다.
+   */
   const roster = Array.isArray(ctx.roster) ? ctx.roster : null;
-  if (!roster || !roster.includes("qa")) return null;
+  if (!roster) return fail("review roster unresolved — whether qa evidence is required is undecidable (fail closed)");
+  if (!roster.includes("qa")) return null;
   const ev = ctx.qaEvidence;
   const recorded = typeof ctx.qaManifestRecorded === "string" && ctx.qaManifestRecorded && ctx.qaManifestRecorded !== "none" ? ctx.qaManifestRecorded : null;
   if (merged) {
     if (!recorded) return fail(QA_EVIDENCE_NOT_BOUND);
     // 파일까지 읽을 수 있는 호출자(로컬 재현·테스트)라면 지문이 그때 그것인지도 본다.
+    // nit 1 — **프로덕션 머지 경로에서는 이 두 줄이 돌지 않는다**: `buildCtxExtra`는 `ctx.qaEvidence`를
+    // `factory:approved`에만 채우고, 머지 잡에는 매니페스트 파일 자체가 없다(gitignore). 여기 남겨 둔
+    // 이유는 같은 규칙을 손으로/테스트로 재현할 때 그 재료가 있으면 더 정확히 거부하기 위해서다 —
+    // 다음 독자가 "머지가 파일을 다시 읽는구나"로 읽지 않도록 명시한다.
     if (ev && ev.ok === false) return fail(`qa evidence manifest invalid: ${ev.reason || "unknown"}`);
     if (ev && ev.ok === true && ev.digest && ev.digest !== recorded) {
       return fail(`qa evidence manifest changed after the review run (record says ${recorded.slice(0, 12)}, the tree says ${String(ev.digest).slice(0, 12)})`);

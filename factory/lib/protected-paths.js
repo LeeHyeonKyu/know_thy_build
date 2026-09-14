@@ -134,6 +134,20 @@ export const hookProtRe = (globs) => (globs.length ? `(${globs.map(globToEre).jo
 /** 글롭 목록 → ci-settings의 `Edit(...)`/`Write(...)` deny 쌍. 순서는 글롭 순서 그대로. */
 export const ciDenyEntries = (globs) => globs.flatMap((g) => [`Edit(${g})`, `Write(${g})`]);
 
+/**
+ * ── ADR-024 / KTB-42(리뷰 라운드 1 SF-1b) — 매니페스트의 **직접 쓰기 철자**만 닫는다 ──────────────
+ * `.factory/out/qa/**`는 qa가 쓸 수 있어야 한다(그것이 이 카브아웃의 존재 이유다). 그런데 그 안의
+ * `manifest.json`은 **도구가 자식 프로세스로** 쓰는 파일이라, `Write`/`Edit` 도구와 셸 리다이렉션으로
+ * 가는 길은 합법 경로에 하나도 쓰이지 않는다. 그 철자만 막으면 정당한 사용은 아무 비용도 치르지 않고,
+ * 손으로 매니페스트를 지어내는 길만 한 겹 시끄러워진다.
+ *
+ * **진위 경계가 아니다**(ADR-024의 정직한 재진술): qa 역할은 여전히 도구를 거쳐 임의의 claim을 남길 수
+ * 있고, 이 deny는 그것을 막지 않는다. 막는 것은 "도구를 한 번도 부르지 않고 매니페스트만 손으로 쓰는"
+ * 가장 값싼 철자뿐이다.
+ */
+export const QA_MANIFEST_GLOB = ".factory/out/qa/**/manifest.json";
+export const qaManifestDeny = () => ciDenyEntries([QA_MANIFEST_GLOB]);
+
 // ── block-dangerous.sh의 생성 블록 ───────────────────────────────────────────────────────────
 // 훅은 셸 스크립트라 `{{VAR}}` 치환으로도 되지만, 그러면 `factory/hooks/block-dangerous.sh` 원본이
 // 그 자체로 실행되지 않는다(테스트도 doctor의 `checkHooks`도 원본을 그대로 돌린다). 그래서 원본은
