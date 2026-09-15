@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-09-14T14:00:58.920Z
+- last retro: 2026-09-15T07:09:55.650Z
 - merges since last retro: 0
 - current N: 1
 
@@ -9,29 +9,30 @@
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
 | 2026-09-14T14:00:58.920Z | 0 | 1 | 1 | 6 |
+| 2026-09-15T07:09:55.650Z | 2 | 1 | 1 | 2 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 1 |
-| review rounds avg | 0 | 3 |
-| needs-human | 0 | 6 |
+| merged | 1 | 2 |
+| review rounds avg | 0 | 1.5 |
+| needs-human | 2 | 8 |
 | rejects by role | 없음 | spec-conformance 2 |
 | reviewer overlap | 없음 | 0.00 (0/2, runs 3) |
 | unique findings by role | 없음 | spec-conformance 2 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 0.00 | 96.07 |
-| tokens | input 0 / output 0 | input 1732420 / output 175679 |
-| retro cost (usd) | 0.00 | 0.90 |
-| retro tokens | input 0 / output 0 | input 2 / output 2419 |
-| full retros | — | 1 |
+| cost (usd) | 28.49 | 124.56 |
+| tokens | input 606292 / output 40282 | input 2338712 / output 215961 |
+| retro cost (usd) | 1.50 | 2.40 |
+| retro tokens | input 2 / output 2352 | input 4 / output 4771 |
+| full retros | — | 2 |
 
 <!-- factory-retro-state:v1 -->
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-09-14T14:00:58.920Z",
+    "last_retro_at": "2026-09-15T07:09:55.650Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -56,6 +57,39 @@
               "text": "**파생 이슈를 읽는 사람의 눈**: 이 이슈가 다른 이슈의 스테이지가 열어준 harness 이슈라면(제목 '— for #N'), 사실관계는 내 `context.json`이 아니라 `docs/factory/runs/N.md`와 그때의 `harness.maturity`에 있다 — 내 컨텍스트만 인용한 결론은 부모 이슈에 대해 아직 증명되지 않았다.",
               "reason": "insufficient-evidence"
             }
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-09-15T07:09:55.650Z",
+      "yield": 2,
+      "needs_human_since": 2,
+      "applied": [
+        {
+          "step": "role:plan-skeptic",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: #20 plan 라운드의 skeptic 반대(`docs/factory/runs/20.md` · plan gha-34880188521) — 제목이 '— for #18'인 파생 harness 이슈. 주장: 이 이슈의 done_when이 요구하는 `docs/factory/CHARTER.md` 편집은 `factory:harness` 이슈에서도 빌더에게 열리지 않으므로, 이대로면 빌더가 끝낼 수 없는 계획이다. 근거: 네 곳을 경로와 줄로 댔고 네 곳 모두 지금 확인된다 — `.factory/ci-settings-harness.js…"
+            },
+            {
+              "section": "## Perspectives",
+              "text": "**쓰기 경계를 먼저 보는 눈**: 이 계획의 `done_when`·`files_expected`가 가리키는 경로가 빌더의 쓰기 경계 안에 있는가 — `.factory/**`·`.claude/**`·`docs/factory/CHARTER.md`는 `factory:harness` 이슈에서도 열리지 않는다(`factory/lib/protected-paths.js`의 `HARNESS_OPENS`는 harness.toml·package.json·package-lock.json·vitest.config.*·playwright.config.…"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 22,
+          "merged": true,
+          "reason": null,
+          "files": [
+            ".claude/agents/plan-skeptic.md"
           ]
         }
       ],
@@ -91,6 +125,15 @@
           7
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The issue body claims the factory:harness label lets the builder write docs/factory/CHARTER.md. It does not, at four places: .factory/ci-settings-harness.json:56-57 lists Edit(docs/factory/CHARTER.md)/Write(docs/factory/CHARTER.md) in the deny array; .claude/hooks/block-dangerous.sh:225-226 keeps docs/factory/CHARTER\\.md inside `prot` on the FACTORY_HARNESS_ISSUE=1 branch; HARNESS_OPENS (factory/lib/protected-paths.js:71-73) is only harness.toml, package.json, package-lock.json, vitest.config.*, playwright.config.*; and .factory/bin/run-stage.js:1664/1685 keeps docs/factory/CHARTER.md in OVERLAY_PATHSPECS even in harness mode, so the stage restores it from its own commit and assertStageBranch → overlayDrift (1616-1619) fails the stage with 'factory config changed during the stage' if it was touched. A plan whose only done_when requires that write is a plan the builder cannot finish, and the likely outcomes are a RED gate that burns the M=3 budget or a harness_needed escalation that harness-request.js:115 routes back onto this very issue.",
+        "runs": [
+          20
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -114,11 +157,21 @@
         "issue": 13,
         "reason": "resolved upstream in KTB (KTB-40)",
         "at": "2026-09-14T12:54:05Z"
+      },
+      {
+        "issue": 20,
+        "reason": "stage artifact missing or invalid: gates RED: failing=unit,new-test-repeat",
+        "at": "2026-09-14T19:02:46Z"
+      },
+      {
+        "issue": 18,
+        "reason": "stage artifact missing or invalid: dissent without done_when: d2, d3",
+        "at": "2026-09-14T17:35:16Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
+    "merged": 1,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
     "review_runs": 0,
@@ -126,23 +179,30 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 2,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0,
+      "cost_usd": 28.494961,
       "tokens": {
-        "input": 0,
-        "output": 0
+        "input": 606292,
+        "output": 40282
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.498863,
+      "tokens": {
+        "input": 2,
+        "output": 2352
       }
     }
   },
   "stats_total": {
-    "merged": 1,
-    "review_rounds_avg": 3,
+    "merged": 2,
+    "review_rounds_avg": 1.5,
     "rejects_by_role": {
       "spec-conformance": 2
     },
@@ -153,22 +213,27 @@
       "spec-conformance": 2
     },
     "overlap_ratio": 0,
-    "needs_human": 6,
+    "needs_human": 8,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 96.068543,
+      "cost_usd": 124.563504,
       "tokens": {
-        "input": 1732420,
-        "output": 175679
+        "input": 2338712,
+        "output": 215961
       }
     },
     "retro_usage": {
-      "cost_usd": 0.900202,
+      "cost_usd": 2.399065,
       "tokens": {
-        "input": 2,
-        "output": 2419
+        "input": 4,
+        "output": 4771
       }
     },
-    "retros": 1
+    "retros": 2
   },
   "deferred_proposals": [],
   "deletion_candidates": []
