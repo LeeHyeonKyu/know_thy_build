@@ -341,7 +341,38 @@ const DRIFT = [
   /the same evidence check(s)? as (an? )?auto[-\s]?merge/i,
   /(only|single) write path/i,
 ];
-const driftHits = (text) => DRIFT.filter((re) => re.test(text)).map((re) => String(re));
+/**
+ * 리뷰 라운드 3 cf1 — **철자 목록은 주장을 막지 못한다.** 위의 여섯 정규식은 이 주장이 지금까지
+ * 쓰여 온 *철자들*이고, 같은 주장은 다른 낱말로도 쓰인다: "`claude/fq-<n>`에 머지된 PR이 있으면
+ * **자동 머지와 같은 증거를 같은 함수로** 확인한 뒤에만 잇는다 … 판정의 엄격함은 그대로다"는 여섯 개
+ * 어디에도 걸리지 않으면서 ADR-024/025가 부정하는 바로 그 말을 한다(docs/factory/DECISIONS.md:2138).
+ *
+ * 그래서 이 탐지기는 **주장 + 한정절의 부재**로 읽는다: "자동 머지와 같은 증거" / "같은 증거를 같은
+ * 함수로" / "판정의 엄격함은 그대로"가 나오면, 그 자리 가까이에 *다시 계산하지 않는 검사가 둘 있다*는
+ * 한정절(또는 그 둘을 닫는 KTB-48)이 함께 있어야 한다. 없으면 그 문단은 거짓을 가르친다.
+ *
+ * 창(窓)으로 읽는 이유는 두 가지다: ① 공백을 먼저 접으므로 줄바꿈으로 끊긴 문장도 잡힌다(arch-s1이
+ * 지적한 CHARTER 가드와의 강도 차이), ② 한정절이 같은 파일 *어딘가에* 있기만 하면 되는 것이 아니라
+ * 그 주장 **옆에** 있어야 한다 — 300자 밖의 해명은 그 문장을 읽는 사람에게 도달하지 않는다.
+ */
+const SAME_EVIDENCE_CLAIM = /자동\s*머지와\s*(?:똑)?같은\s*증거|(?:똑)?같은\s*증거를\s*같은\s*함수로|판정의\s*엄격함은\s*그대로/g;
+const RE_DERIVE_CAVEAT = /다시\s*계산하지\s*않|재계산하지\s*않|다시\s*묻지\s*않|KTB-48/;
+const CLAIM_WINDOW = 300;
+
+function unqualifiedSameEvidenceHits(text) {
+  const flat = String(text).replace(/\s+/g, " ");
+  const hits = [];
+  for (const m of flat.matchAll(SAME_EVIDENCE_CLAIM)) {
+    const window = flat.slice(Math.max(0, m.index - CLAIM_WINDOW), m.index + m[0].length + CLAIM_WINDOW);
+    if (!RE_DERIVE_CAVEAT.test(window)) hits.push(`unqualified same-evidence claim: …${window.slice(0, 80)}…`);
+  }
+  return hits;
+}
+
+const driftHits = (text) => [
+  ...DRIFT.filter((re) => re.test(text)).map((re) => String(re)),
+  ...unqualifiedSameEvidenceHits(text),
+];
 
 /**
  * 어댑터가 읽는 마크다운 **전부**. 예외는 없다 — 특히 보호 경로를 걸러내지 않는다(verifier의 v1):
@@ -573,5 +604,118 @@ test("test_18_readme_warns_the_issue_number_is_not_checked", () => {
     expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of qa4");
   } finally {
     for (const d of [borrowed, bare]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── 리뷰 라운드 3 must_fix cf1 ────────────────────────────────────────────────────────────────
+
+/**
+ * cf1 — **이 저장소의 결정 기록이 어댑터에게 반대말을 가르치고 있었다.**
+ *
+ * README.md:89가 독자를 보내는 그 문서(ADR-020)의 KTB-46 항목은 사람-머지 문(門)이 "자동 머지와 같은
+ * 증거를 같은 함수로" 확인하고 "판정의 엄격함은 그대로"라고 적고 있었다. 코드는 반대다:
+ * `factory/lib/sweeper.js`의 성공 코멘트가 "다만 이 문(門)에서 **다시 계산하지 않는 검사가 둘**
+ * 있습니다"라고 말하고, KTB-48이 그 둘을 닫으려고 열려 있다. dw5의 스캔 집합에 이미 들어 있는 파일이
+ * 초록이었던 것은 탐지기가 철자 여섯 개의 목록이었기 때문이다.
+ *
+ * 그래서 이 테스트는 두 방향이다: ① 탐지기가 **철자가 아니라 주장을** 무는가(양성·음성 통제 한 쌍),
+ * ② 그 기록이 실제로 정정되었는가 — 한정절과 KTB-48, 그리고 다시 계산하지 않는 검사 둘의 이름으로.
+ * ②는 ①이 없으면 문구 검사에 불과하고, ①은 ②가 없으면 아무 문서에도 닿지 않는다.
+ */
+test("test_18_decisions_no_longer_teaches_the_retired_claim", () => {
+  // ① 탐지기 — 한정절 없는 주장은 물고, 한정절이 붙은 같은 문장은 놓아 준다.
+  const unqualified = "`claude/fq-<n>`에 머지된 PR이 있으면 **자동 머지와 같은 증거를 같은 함수로** 확인한 "
+    + "뒤에만 잇는다: head sha의 상태가 success인가, 필수 체크가 전부 GREEN인가, 정족수가 통과인가. "
+    + "게이트 증거의 **출처만** 바뀌고, 판정의 엄격함은 그대로다.";
+  const qualified = unqualified.replace("그대로다.",
+    "그대로다 — 다만 이 문(門)이 **다시 계산하지 않는 검사가 둘** 있다(KTB-48).");
+  expect(driftHits(unqualified), "the detector still reads the retired claim as clean when it is spelled this way")
+    .not.toEqual([]);
+  expect(driftHits(qualified), "the detector bites the corrected sentence too — it cannot tell the claim from its correction")
+    .toEqual([]);
+  // 한정절이 300자 밖에 있으면 그 문장을 읽는 사람에게 도달하지 않는다 — 창 밖의 해명은 해명이 아니다.
+  expect(driftHits(`${unqualified}\n\n${"그 문단과 무관한 산문. ".repeat(40)}\n\n다시 계산하지 않는 검사가 둘 있다(KTB-48).`),
+    "a caveat 300 characters away is accepted as if it sat next to the claim").not.toEqual([]);
+
+  // ② 기록 — ADR-020의 KTB-46 항목이 정정되었는가. 지우는 것이 아니라 한정하는 것이 정정이다.
+  const decisions = readFileSync(join(REPO, "docs/factory/DECISIONS.md"), "utf8");
+  const ktb46 = decisions.split("\n").find((l) => /KTB-46/.test(l) && /sweepHumanMerged/.test(l));
+  expect(ktb46, "ADR-020's KTB-46 entry (the sweepHumanMerged one) is not in DECISIONS.md any more").toBeTruthy();
+
+  expect(driftHits(ktb46), "ADR-020 KTB-46 still teaches that the human-merge door re-derives the same evidence")
+    .toEqual([]);
+  expect(ktb46, "the KTB-46 entry does not say that two checks are not re-derived").toMatch(/다시 계산하지 않/);
+  expect(ktb46, "the KTB-46 entry does not name the task that closes the two").toMatch(/KTB-48/);
+  expect(ktb46, "the KTB-46 entry does not name the records-branch provenance check").toMatch(/records/);
+  expect(ktb46, "the KTB-46 entry does not name the qa_manifest digest check").toMatch(/qa_manifest/);
+
+  // 그리고 그것은 **정정**이지 삭제가 아니다 — 이 항목이 원래 기록하던 사실들은 그대로 있어야 한다.
+  for (const kept of ["verifyFactoryStatuses", "resolveReviewRoster", "sort:updated-desc", "HUMAN_MERGE_REQUIRED"]) {
+    expect(ktb46, `the KTB-46 entry lost the record it was written to keep: ${kept}`).toContain(kept);
+  }
+
+  // ③ 그리고 파일 전체가, 강해진 탐지기 아래에서도 깨끗하다 — README.md도 같이.
+  expect(driftHits(decisions), "docs/factory/DECISIONS.md still carries the claim ADR-024/025 denies").toEqual([]);
+  expect(driftHits(README), "README.md carries the claim ADR-024/025 denies").toEqual([]);
+});
+
+// ── 리뷰 라운드 3 must_fix qa1 ────────────────────────────────────────────────────────────────
+
+/**
+ * qa1 — **보여 주는 조리법의 마지막 줄은, 처음 따라 해 보는 독자에게 거절 배너로 끝난다.**
+ *
+ * 리뷰 중이 아닌 체크아웃(`factory init` 직후, 그냥 `git clone`)에는 `.factory/out/context.qa.json`도
+ * `context.json`도 없다. 그래서 `finish`는 채점할 `done_when` 계약을 찾지 못하고
+ * `coverage: INCOMPLETE — done_when could not be resolved — coverage is undecidable`과
+ * `factory: qa evidence not acceptable …`을 찍고 1로 끝난다 — 같은 절의 두 문단 아래에서
+ * "qa 라운드를 거절시키는 세 가지" 중 2번으로 열거되는 바로 그 문장이다. 도구는 정상 동작 중이고,
+ * 문서는 그것을 말하지 않았다.
+ *
+ * 그래서 여기서도 사실과 산문을 한 테스트에 묶는다: ① 출하된 CLI로 그 결말을 **실측**하고(도구가
+ * 언젠가 이 자리에서 다르게 행동하면 이 테스트가 먼저 빨개진다), ② 그 결말이 예상된 것이고 해롭지
+ * 않다는 말이 조리법 **옆에** 있는지 본다 — 거절 규칙 목록 아래의 각주가 아니라.
+ */
+test("test_18_readme_says_the_demo_ends_undecidable_outside_a_review", () => {
+  const firstTry = realpathSync(mkdtempSync(join(tmpdir(), "readme-firsttry-")));
+  try {
+    // ① 실측 — README가 보여 주는 줄을, 보여 주는 순서대로, 리뷰 계약이 없는 뿌리에서.
+    expect(runShownLineAt(firstTry, "probe").code, "the README's `probe` line did not run").toBe(0);
+    expect(runShownLineAt(firstTry, "record").code, "the README's `record` line did not run").toBe(0);
+    expect(runShownLineAt(firstTry, "na").code, "the README's `na` line did not run").toBe(0);
+
+    const finish = runShownLineAt(firstTry, "finish");
+    const said = `${finish.out}\n${finish.err}`;
+    expect(finish.code, `the README's \`finish\` line no longer exits 1 on a bare checkout — stdout: ${said}`).toBe(1);
+    expect(said, "the bare-checkout outcome is no longer the undecidable one").toMatch(/done_when could not be resolved/);
+    expect(said).toMatch(/coverage is undecidable/);
+    expect(said).toMatch(/qa evidence not acceptable/);
+
+    // ② 산문 — 그 결말이 조리법 옆에서 예고되어 있는가.
+    const qa = section(README, /qa evidence/i);
+    expect(qa, "README.md has no `qa evidence` subsection").not.toBeNull();
+    const flat = qa.replace(/\s+/g, " ");
+
+    expect(flat, "the recipe never says its last line exits 1 for a reader who is not mid-review")
+      .toMatch(/exits? (with )?(code )?1|exit code 1/i);
+    expect(flat, "the recipe never names the outcome (`undecidable`) a first-time reader will actually see")
+      .toMatch(/undecidable/);
+    expect(flat, "nothing says that outcome is expected/harmless outside a live review")
+      .toMatch(/(undecidable|exits? 1)[\s\S]{0,400}(expected|harmless|not a (defect|failure|bug|reject))/i);
+    expect(flat, "the warning never says what is missing — the review context the factory writes")
+      .toMatch(/(no|without|absent)[\s\S]{0,120}\.factory\/out\/context/i);
+
+    // 그리고 그 예고는 조리법 **뒤**, 거절 규칙 목록 **앞**이다 — 독자가 그 줄을 치기 전에 읽는 자리.
+    const recipeAt = qa.indexOf(`node ${CLI_REL}`);
+    const rulesAt = qa.search(/Three things/i);
+    const warnAt = qa.search(/exits? (with )?(code )?1|exit code 1/i);
+    expect(recipeAt, "the qa evidence subsection shows no command at all").toBeGreaterThanOrEqual(0);
+    expect(rulesAt, "the qa evidence subsection lost its rejection-rule list").toBeGreaterThan(0);
+    expect(warnAt, "the exit-1 warning is above the recipe it is about").toBeGreaterThan(recipeAt);
+    expect(warnAt, "the exit-1 warning is buried below the rejection rules instead of next to the recipe").toBeLessThan(rulesAt);
+
+    // 증거함은 이 테스트가 도는 동안에도 그대로다 — 쓰기는 전부 임시 뿌리 아래다.
+    expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of the qa1 rework test");
+  } finally {
+    rmSync(firstTry, { recursive: true, force: true });
   }
 });
