@@ -131,6 +131,17 @@ used. Replace every `42` above with the issue you are reviewing before you run a
 also leaves litter: `record`/`attach`/`na` never clean up, so `.factory/out/qa/<that number>/` stays in the
 repo (only `probe` removes the directory it created).
 
+**Trying the five lines on their own? The last one exits 1 — that is the tool working, not a defect in the
+demo.** Outside a live review there is no `.factory/out/context.qa.json` / `.factory/out/context.json` in
+the checkout (right after `factory init`, or in a plain clone, there is none), so `finish` has no `done_when`
+contract to grade the manifest against and says exactly that: `coverage: INCOMPLETE — done_when could not be
+resolved — coverage is undecidable`, then `factory: qa evidence not acceptable — done_when could not be
+resolved …`, exit code 1. It is rejection rule 2 below, met early and harmlessly — nothing was judged,
+nothing is reported to any issue, and a manifest whose contract cannot be read is not a complete one.
+Inside a review stage (where the factory wrote that context file before the `qa` reviewer started) the same
+line prints the real coverage table and exits 0. The only thing the walkthrough leaves behind is
+`.factory/out/qa/42/`: remove it when you are done.
+
 - **`record`** runs a command for real and stores its stdout, stderr and exit code as one claim (secrets are
   scrubbed before the file is written, and the payload after `--` is judged by the same hooks a direct `Bash`
   call would hit — the tool is not an escape hatch).
