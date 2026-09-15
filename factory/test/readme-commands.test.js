@@ -1,25 +1,30 @@
 import { test, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadHarness } from "../lib/config.js";
-import { matchesAny } from "../lib/glob.js";
 
 /**
  * #18 — README.md의 어댑터 문서가 1.3.0을 말하는가, 그리고 **README가 보여 주는 명령이 진짜인가**.
  *
  * 이 파일은 코드가 아니라 문서를 판정한다. 그래서 단언은 두 종류다:
  *   ① 산문 — 어댑터가 알아야 하는 사실(다섯 하위 명령, 거절 규칙 셋, 사람-머지 흐름)이 거기 있는가.
- *      산문이 *옳은지*는 어떤 단위 테스트도 말할 수 없다(plan의 open_risk 4). 있는지만 센다.
- *   ② 실행 — README가 보여 주는 `node .factory/bin/qa-evidence.js …` 줄을 **그대로 파싱해서**
- *      출하된 CLI에 먹인다. 없는 파일(127)도, `unknown command`도 아니어야 한다.
+ *      산문이 *옳은지*는 어떤 단위 테스트도 말할 수 없다(plan open_risk 2 / dissent s3). 있는지만 센다.
+ *   ② 실행 — README가 보여 주는 `node .factory/bin/qa-evidence.js …` 줄을 **그대로 파싱해서** 출하된
+ *      CLI에 먹인다. 없는 파일(127)도, `unknown command`도, usage error도 아니어야 한다.
  *
- * ②를 증명하는 값은 0이어야 한다(plan s1/dw6): 이 저장소의 `.factory/out/qa/`는 qa 리뷰어의 증거함이고,
- * `runCli`는 `root = cwd`를 못으로 박아 두었다(`.factory/bin/qa-evidence.js` — `--root`는 일부러 없다).
- * 그래서 여기서는 **한 번도 저장소 루트를 cwd로 주지 않는다**. 매번 새 임시 디렉터리다. 마지막 테스트가
- * 그 약속을 관측 가능한 상태로 되돌려 확인한다(파일 목록 + 내용 해시가 파일 시작 시점과 같은가).
+ * ②의 값은 이 저장소에 0이어야 한다(plan dissent s1): `.factory/out/qa/`는 qa 리뷰어의 증거함이고
+ * `runCli`는 `root = cwd`를 못으로 박아 두었다(`--root`는 일부러 없다 — `.factory/bin/qa-evidence.js`의
+ * MF-3 주석). 그래서 여기서는 **한 번도 저장소 루트를 cwd로 주지 않는다**. 매번 새 임시 디렉터리다.
+ *
+ * 그리고 판정은 **부재가 아니라 델타**다(plan dw7 / dissent k1). qa 리뷰어의 정본 경로는
+ * `record --issue 18 --claim <id> … -- <repro cmd>`이고, 그 repro cmd가 곧 이 파일이다 — 두 번째 claim
+ * 부터 `.factory/out/qa/18/manifest.json`은 **있는 상태로** 이 스위트를 만난다. "증거함이 비어 있다"를
+ * 단언하면 이 이슈의 증거를 모으는 그 명령 안에서 스위트가 빨개진다. 그래서 묻는 것은 하나다:
+ * *이 파일이 도는 동안 증거함이 한 바이트라도 달라졌는가*. 그 물음의 답은 상자의 이전 내용과 무관하고,
+ * `test_18_guard_indifferent_to_existing_qa_evidence`가 씨를 뿌린 상자와 빈 상자 둘에 대고 확인한다.
  */
 
 const REPO = new URL("../../", import.meta.url).pathname;
@@ -67,7 +72,7 @@ function shownCommands(md) {
 }
 
 const argvOf = (cmd) => (cmd.match(/"[^"]*"|'[^']*'|\S+/g) || [])
-  .map((t) => (/^".*"$|^'.*'$/.test(t) || /^'.*'$/.test(t) ? t.slice(1, -1) : t));
+  .map((t) => (/^".*"$|^'.*'$/.test(t) ? t.slice(1, -1) : t));
 
 /** `--` 앞의 플래그만 — 뒤는 record의 페이로드다. */
 function flagsOf(argv) {
@@ -79,37 +84,18 @@ function flagsOf(argv) {
   return flags;
 }
 
-// ── 출하된 CLI를 임시 cwd에서 돌린다 ─────────────────────────────────────────────────────────
+const valueOf = (argv, flag) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined);
+const payloadOf = (argv) => (argv.includes("--") ? argv.slice(argv.indexOf("--") + 1) : []);
 
-let cli;
-beforeAll(async () => { cli = await import(pathToFileURL(join(REPO, CLI_REL)).href); });
+// ── 증거함: 스냅샷과 델타 ────────────────────────────────────────────────────────────────────
 
-/** 이 파일이 CLI에 넘긴 모든 cwd — dw6이 "한 번도 저장소 루트가 아니었다"를 관측 가능한 값으로 센다. */
-const CWDS = [];
-
-function runShown(argv) {
-  const logs = [], errs = [];
-  const cwd = mkdtempSync(join(tmpdir(), "readme-cmd-"));   // 저장소 루트가 아니다 — 절대로
-  CWDS.push(cwd);
-  const code = cli.runCli(argv.slice(2), {
-    cwd,
-    env: {},
-    log: (...a) => logs.push(a.join(" ")),
-    err: (...a) => errs.push(a.join(" ")),
-    now: () => "2026-09-14T00:00:00Z",
-    spawn: () => ({ status: 0, stdout: "", stderr: "", signal: null }),   // 페이로드를 실제로 띄우지 않는다
-    gate: () => ({ ok: true }),                                          // 훅 스폰도 하지 않는다(c7ef48d)
-  });
-  // 스냅샷 비교를 마지막 테스트 한 번에만 맡기지 않는다(리뷰 지적 #4): **호출마다** 즉시 되돌아본다.
-  // 그래야 "이 파일이 도는 동안" 전체가 창(window)이 되고, 어느 호출이 범인인지도 그 자리에서 드러난다.
-  expectEvidenceBoxUntouched(`after \`${argv.slice(2).join(" ")}\``);
-  return { code, out: logs.join("\n"), err: errs.join("\n"), cwd };
-}
-
-// ── 증거함 스냅샷 ────────────────────────────────────────────────────────────────────────────
-
-function qaSnapshot() {
-  const dir = join(REPO, ".factory/out/qa");
+/**
+ * `<root>/.factory/out/qa` 전체를 경로 + 내용 해시로 뜬다. 없으면 `{ exists: false }` — 그것도 상태다.
+ * 판정에 쓰이는 값은 **두 스냅샷의 같음**뿐이다. 절대적 부재("이 이슈의 manifest는 없어야 한다")를
+ * 묻지 않는 이유는 dw7이다: 이 스위트를 실행하는 그 명령이 방금 그 파일을 만들었을 수 있다.
+ */
+function qaSnapshot(root) {
+  const dir = join(root, ".factory/out/qa");
   if (!existsSync(dir)) return { exists: false, entries: [] };
   const entries = [];
   const walk = (d) => {
@@ -124,34 +110,84 @@ function qaSnapshot() {
   return { exists: true, entries };
 }
 
-/**
- * 리뷰 지적 #4에 대한 보강 두 가지.
- *
- * ① **창이 더 넓다.** 기준선을 `beforeAll`이 아니라 **모듈 로드 시점**에도 한 번 뜬다 — 이 워커에서
- *    이 파일이 관측할 수 있는 가장 이른 순간이다. 그리고 판정은 스냅샷 *비교*만이 아니라 **부재**다:
- *    갓 체크아웃한 트리에 `.factory/out/qa/`는 아예 없고(`.gitignore:8`이 `.factory/out/`를 무시한다),
- *    `record`/`attach`/`na`가 한 번이라도 저장소 루트에서 돌면 그 디렉터리는 **남는다** — 아무도 다시
- *    지우지 않는다. 그래서 "지금 없다"는 이 워커의 수명만이 아니라 *그 전에 돈 어떤 파일도 거기 쓰지
- *    않았다*를 함께 말한다. 워커 경계를 넘는 순서 보장이 없어도 성립하는 유일한 형태다.
- * ② **공허하지 않다.** dw6은 같은 argv가 임시 뿌리에서는 매니페스트를 *실제로 만든다*는 것을 양성
- *    대조로 보인다 — 그러니 "저장소 쪽에는 아무것도 생기지 않았다"가 관측이 된다.
- */
-const QA_BOX = join(REPO, ".factory/out/qa");
-const QA_AT_IMPORT = qaSnapshot();
+/** 이 저장소의 증거함 기준선을 **모듈 로드 시점**에 뜬다 — 이 워커에서 관측할 수 있는 가장 이른 순간. */
+const QA_AT_IMPORT = qaSnapshot(REPO);
 
-function expectEvidenceBoxUntouched(when) {
-  const now = qaSnapshot();
-  if (!QA_AT_IMPORT.exists) {
-    expect(existsSync(QA_BOX), `.factory/out/qa was absent at import and exists ${when}`).toBe(false);
-  }
-  expect(now, `.factory/out/qa changed ${when}`).toEqual(QA_AT_IMPORT);
+const baselineFor = (root, given) => given ?? (root === REPO ? QA_AT_IMPORT : qaSnapshot(root));
+
+/** 증거함이 그 사이에 달라졌는가. 관측이지 정리가 아니다 — 이 파일은 증거함에 아무것도 쓰지 않는다. */
+function expectBoxUnchanged(root, baseline, when) {
+  expect(qaSnapshot(root), `.factory/out/qa under ${root} changed ${when}`).toEqual(baseline);
 }
 
-let qaBefore;
-beforeAll(() => { qaBefore = qaSnapshot(); });
+// ── 출하된 CLI를 임시 cwd에서 돌린다 ─────────────────────────────────────────────────────────
+
+let cli;
+beforeAll(async () => { cli = await import(pathToFileURL(join(REPO, CLI_REL)).href); });
+
+/** 이 파일이 CLI에 넘긴 모든 cwd — "한 번도 저장소 루트가 아니었다"를 관측 가능한 값으로 센다. */
+const CWDS = [];
+
+function cliOpts(cwd, logs, errs) {
+  return {
+    cwd,
+    env: {},
+    log: (...a) => logs.push(a.join(" ")),
+    err: (...a) => errs.push(a.join(" ")),
+    now: () => "2026-09-14T00:00:00Z",
+    spawn: () => ({ status: 0, stdout: "", stderr: "", signal: null }),   // 페이로드를 실제로 띄우지 않는다
+    gate: () => ({ ok: true }),                                          // 훅 스폰도 하지 않는다(c7ef48d)
+  };
+}
+
+/** argv를 **새 임시 뿌리**에서 돌린다. 호출마다 그 자리에서 증거함 델타를 되돌아본다. */
+function runAt(argv, { boxRoot = REPO, baseline } = {}) {
+  const logs = [], errs = [];
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "readme-cmd-")));   // 저장소 루트가 아니다 — 절대로
+  CWDS.push(cwd);
+  const code = cli.runCli(argv.slice(2), cliOpts(cwd, logs, errs));
+  expectBoxUnchanged(boxRoot, baselineFor(boxRoot, baseline), `after \`${argv.slice(2).join(" ")}\``);
+  return { code, out: logs.join("\n"), err: errs.join("\n"), cwd };
+}
+
+/**
+ * **README에 대한 판정 본체.** 값은 README 텍스트와 출하된 CLI만의 함수다 — `boxRoot`는 판정이 도는
+ * 동안 관측할 증거함이고, 판정값에는 들어가지 않는다. dw7은 정확히 그것을 확인한다: 상자를 바꿔도
+ * `verdict`가 같아야 한다.
+ */
+function judgeReadme({ readme = README, boxRoot = REPO, baseline } = {}) {
+  const before = baselineFor(boxRoot, baseline);
+  const lines = [];
+  for (const cmd of shownCommands(readme)) {
+    const argv = argvOf(cmd);
+    const r = runAt(argv, { boxRoot, baseline: before });
+    const issue = valueOf(argv, "--issue");
+    lines.push({
+      cmd,
+      node: argv[0],
+      cli: argv[1],
+      sub: argv[2],
+      code: r.code,
+      unknown_command: /unknown command/.test(r.err),
+      module_missing: /Cannot find module/.test(r.err),
+      usage_error: /usage: qa-evidence\.js/.test(r.err) || /is required|needs --/.test(r.err),
+      flags: [...flagsOf(argv)].sort(),
+      issue,
+      payload: payloadOf(argv),
+      // 양성 대조가 판정값 안에 있다: 이 줄이 매니페스트를 **실제로** 만들었는가, 그리고 그것이
+      // 저장소가 아니라 임시 뿌리 아래에 떨어졌는가. 이것이 없으면 "증거함이 안 바뀌었다"는
+      // "아무 일도 일어나지 않는 명령을 돌렸다"와 구별되지 않는다.
+      wrote_manifest_in_its_own_root: existsSync(join(r.cwd, ".factory/out/qa", String(issue), "manifest.json")),
+    });
+  }
+  return {
+    verdict: { subs: [...new Set(lines.map((l) => l.sub))].sort(), lines },
+    box: { before, after: qaSnapshot(boxRoot) },
+  };
+}
 
 // 이 파일의 마지막 테스트 *뒤*도 창이다 — teardown까지 같은 약속을 지킨다.
-afterAll(() => expectEvidenceBoxUntouched("after this file's last test"));
+afterAll(() => expectBoxUnchanged(REPO, QA_AT_IMPORT, "after this file's last test"));
 
 // ── dw1 ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -199,41 +235,59 @@ test("test_18_readme_qa_commands_are_real", () => {
   // 어댑터가 복사한 경로가 실제로 거기 있다 — 이것이 "127이 아니다"의 전부다.
   expect(existsSync(join(REPO, CLI_REL)), `${CLI_REL} is not in the repository`).toBe(true);
 
-  const shown = shownCommands(README);
+  const { verdict, box } = judgeReadme();
 
   /**
-   * 리뷰 지적 #3 — **이 단언들이 돌 대상이 있다는 것을 이 테스트가 스스로 세운다.** 아래 루프는
-   * README가 명령을 하나도 보여 주지 않으면 한 번도 돌지 않고, 그러면 "README가 보여 주는 모든 줄이
-   * 진짜다"는 빈 집합 위의 참이 된다(plan dissent s2). 그 경우 이 테스트는 여기서 **빨개져야 한다** —
-   * 형제 단언이 파일을 non-zero로 끌고 가 주기를 기다리지 않고. base의 README는 이 줄에서 멈춘다.
+   * dw3의 앞 절반은 **보여 주는 줄이 있다**에서 시작한다(plan dissent s2): 아래 단언들은 README가
+   * 명령을 하나도 보여 주지 않으면 빈 집합 위의 참이 되고, s1 때문에 "아무것도 보여 주지 않기"가
+   * 가장 싼 통과법이 된다. 그래서 그 바닥을 여기서 먼저 세운다 — base의 README는 이 줄에서 멈춘다.
    */
-  expect(shown.length, "README shows no `node .factory/bin/qa-evidence.js` line at all — dw3 would be vacuous").toBeGreaterThanOrEqual(SUBCOMMANDS.length);
-  const subsShown = new Set(shown.map((c) => argvOf(c)[2]));
-  expect([...subsShown].sort(), "README does not show one runnable line per subcommand").toEqual([...SUBCOMMANDS].sort());
+  expect(verdict.lines.length, "README shows no `node .factory/bin/qa-evidence.js` line at all — dw3 would be vacuous")
+    .toBeGreaterThanOrEqual(SUBCOMMANDS.length);
+  expect(verdict.subs, "README does not show one runnable line per subcommand").toEqual([...SUBCOMMANDS].sort());
 
-  for (const cmd of shown) {
-    const argv = argvOf(cmd);
-    expect(argv[0], cmd).toBe("node");
-    expect(argv[1], cmd).toBe(CLI_REL);
-
-    const r = runShown(argv);
-    expect(r.err, `README shows a subcommand the CLI does not have: ${cmd}`).not.toMatch(/unknown command/);
-    expect(r.err, `${cmd} could not be loaded`).not.toMatch(/Cannot find module/);
-    expect(r.code, cmd).not.toBe(127);
+  for (const l of verdict.lines) {
+    expect(l.node, l.cmd).toBe("node");
+    expect(l.cli, l.cmd).toBe(CLI_REL);
+    expect(l.unknown_command, `README shows a subcommand the CLI does not have: ${l.cmd}`).toBe(false);
+    expect(l.module_missing, `${l.cmd} could not be loaded`).toBe(false);
+    expect(l.code, `${l.cmd} exited 127 — the adopter's copy found no such file`).not.toBe(127);
     // 이슈 본문이 요구한 나머지 절반: **usage error도 아니어야 한다**. CLI는 하위 명령을 모르거나
     // `--issue`가 없거나 필수 플래그가 빠졌을 때 `USAGE` 전문을 찍는다 — 곧 README의 줄이 그 도구의
     // 인자 계약을 만족한다는 뜻이고, 그것이 "복붙해서 쓸 수 있다"의 실행 쪽 절반이다.
-    expect(r.err, `README's line is a usage error, not a command: ${cmd}\n${r.err}`).not.toMatch(/usage: qa-evidence\.js/);
-    expect(r.err, cmd).not.toMatch(/is required|needs --/);
+    expect(l.usage_error, `README's line is a usage error, not a command: ${l.cmd}`).toBe(false);
+
+    // 그리고 **완결된** 줄이다: 그 하위 명령의 필수 플래그가 다 있고, `--issue`는 숫자다.
+    for (const f of REQUIRED_FLAGS[l.sub]) {
+      expect(l.flags, `the README's \`${l.sub}\` line is not copy-pasteable — no --${f}`).toContain(f);
+    }
+    expect(l.issue, `the README's \`${l.sub}\` line has a non-numeric --issue: ${l.issue}`).toMatch(/^\d+$/);
   }
 
-  // 위 단언이 무엇이든 통과시키는 것이 아님을 같은 자리에서 보인다 — 두 방향의 통제.
-  const control = runShown(["node", CLI_REL, "reword", "--issue", "1"]);
-  expect(control.err).toMatch(/unknown command/);
-  expect(control.code).toBe(1);
+  // `record`만의 최소선 — `--` 뒤에 실제로 돌릴 명령이 있어야 그 줄이 증거를 만든다.
+  const rec = verdict.lines.find((l) => l.sub === "record");
+  expect(rec.payload.length, "the README's `record` line has nothing after `--` — it cannot record anything").toBeGreaterThan(0);
+  expect(rec.code, `the README's record line did not run: ${rec.cmd}`).toBe(0);
+  expect(rec.wrote_manifest_in_its_own_root, "the record line wrote no manifest anywhere — evidence-safety would be vacuous").toBe(true);
 
-  // 통제 ② — usage 단언이 진짜로 무는가: 플래그가 빠진 줄은 정확히 그 usage error를 낸다.
-  const halfWritten = runShown(["node", CLI_REL, "record", "--issue", "1", "--", "true"]);
+  // dw3의 뒤 절반 — 이것을 증명하는 값이 이 저장소에 0이다. 창은 모듈 로드부터 여기까지이고,
+  // 판정은 델타다(dw7): 상자에 이미 있던 매니페스트는 그대로, 새로 생긴 것은 없다.
+  expect(box.after, ".factory/out/qa was written to while proving the README's commands").toEqual(box.before);
+  expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of dw3");
+
+  // 그 쓰기는 단 한 번도 이 저장소를 뿌리로 삼지 않았다 — 값으로 센다.
+  expect(CWDS.length, "no command was run at all").toBeGreaterThan(0);
+  for (const c of CWDS) {
+    expect(c.startsWith(realpathSync(tmpdir())), `a shown command ran outside the temp dir: ${c}`).toBe(true);
+    expect(c.startsWith(realpathSync(REPO)), `a shown command ran inside the repository: ${c}`).toBe(false);
+  }
+
+  // 두 방향의 통제 — 위 단언들이 무엇이든 통과시키는 것이 아님을 같은 자리에서 보인다.
+  const unknown = runAt(["node", CLI_REL, "reword", "--issue", "1"]);
+  expect(unknown.err).toMatch(/unknown command/);
+  expect(unknown.code).toBe(1);
+
+  const halfWritten = runAt(["node", CLI_REL, "record", "--issue", "1", "--", "true"]);
   expect(halfWritten.err).toMatch(/usage: qa-evidence\.js/);
   expect(halfWritten.err).toMatch(/needs --claim/);
   expect(halfWritten.code).toBe(1);
@@ -249,9 +303,11 @@ test("test_18_readme_documents_human_merge_flow", () => {
   expect(hm).toMatch(/`?factory:needs-human`?/);
   expect(hm).toMatch(/`?factory:merged`?/);
   expect(hm, "the sweeper is not named").toMatch(/sweeper/i);
-  expect(hm, "the one-sweep bound is not stated").toMatch(/(one sweep|≤ ?30|30 min)/i);
+  expect(hm, "the one-sweep bound is not stated").toMatch(/(one sweep|one sweeper|≤ ?30|30 min)/i);
   expect(hm, "the review handoff / head sha check is not described").toMatch(/review handoff/i);
   expect(hm).toMatch(/head sha|head/);
+  expect(hm, "the review quorum and K are not named").toMatch(/quorum/i);
+  expect(hm).toMatch(/limits\.K|\bK\b/);
   expect(hm, "the factory-posted statuses / required checks are not named").toMatch(/required check/i);
 
   // KTB-48 — 다시 계산하지 않는 검사 둘.
@@ -287,46 +343,40 @@ const DRIFT = [
 ];
 const driftHits = (text) => DRIFT.filter((re) => re.test(text)).map((re) => String(re));
 
-/** 어댑터가 읽는 마크다운 전부. 생성물(node_modules)과 러너 기록(docs/factory/runs)은 문서가 아니다. */
+/**
+ * 어댑터가 읽는 마크다운 **전부**. 예외는 없다 — 특히 보호 경로를 걸러내지 않는다(verifier의 v1):
+ * "이 문장이 남아 있어도 되는 파일"을 목록으로 들고 있으면 그 파일이 정정된 날에도 초록이고, 정정이
+ * 되돌려진 날에도 초록이다. 집합은 `git ls-files`에서 온다 — 곧 이 저장소가 **실제로 배포하는** 문서다.
+ * 그래서 러너가 매 스테이지 덧붙이고 `.gitignore:11`이 무시하는 `docs/factory/runs/**`(스테이지 산문을
+ * 그대로 인용하므로 스스로 이 정규식을 물 수 있다)와 `node_modules`는 자동으로 빠진다.
+ */
 function adopterDocs() {
-  const out = ["README.md"];
-  const walk = (rel) => {
-    for (const e of readdirSync(join(REPO, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      const p = `${rel}/${e.name}`;
-      if (e.isDirectory()) {
-        if (e.name === "node_modules" || p === "docs/factory/runs") continue;
-        walk(p);
-      } else if (e.name.endsWith(".md")) out.push(p);
-    }
-  };
-  walk("docs");
-  walk("templates");
-  return out;
+  const tracked = execFileSync("git", ["-C", REPO, "ls-files", "-z", "--", "README.md", "docs", "templates"], { encoding: "utf8" });
+  return tracked.split("\0").filter((f) => f.endsWith(".md")).sort();
 }
 
 test("test_18_no_contradicting_wording_left", () => {
-  // ① 어댑터가 읽는 자리에 **정정문이 있다**. base의 README에는 이 문장이 없다 — 거기서 이 테스트는 빨갛다.
-  const hm = section(README, /When a person merges/i);
-  expect(hm, "README.md has no `When a person merges` subsection to carry the correction").not.toBeNull();
-  expect(hm, "the README does not say that the human-merge door leaves two checks un-re-derived")
+  // ① 어댑터가 읽는 자리에 **정정문이 있다**. 절의 구조는 dw4가 맡는다 — 여기서 찾는 것은 *주장*이다:
+  //    이 저장소의 README가 "사람이 머지한 PR의 문(門)은 검사 둘을 다시 계산하지 않는다"고 말하는가.
+  //    base의 README는 그 주장을 하지 않는다(그리고 dw5가 금지하는 반대 주장도 하지 않는다) — 이 PR이
+  //    새로 쓰는 산문이 정확히 그 주장이 들어오는 자리이고, 그래서 이 단언에는 이 PR이 깨뜨릴 것이 있다.
+  expect(README, "README.md does not state that the human-merge door leaves two checks un-re-derived")
     .toMatch(/not re-derive/i);
+  expect(README, "the un-re-derived checks are not pinned to the plan task that closes them").toMatch(/KTB-48/);
   expect(driftHits(README), "README.md itself carries the wording ADR-024/025 contradicts").toEqual([]);
 
-  // ② 공장이 쓸 수 있는 어떤 어댑터 문서도 그 주장을 담지 않는다. 아직 남은 인스턴스가 있다면 그것은
-  //    반드시 **보호 경로**여야 한다 — 이 세션이 편집을 거부당하는 파일이고(`.factory/ci-settings.json`의
-  //    `Edit(docs/factory/CHARTER.md)` deny), 그래서 `harness_needed`로 넘긴 파일이다. 보호 목록은
-  //    harness.toml에서 읽는다: 하드코딩한 예외 목록이었다면 그 파일이 고쳐진 날 이 테스트가 깨지고,
-  //    load-bearing 규칙 때문에 아무도 고칠 수 없게 된다. 이 형태는 고쳐져도(집합이 줄어도) 초록이고,
-  //    쓸 수 있는 문서에 한 줄이라도 되살아나면 빨갛다.
-  const prot = loadHarness(REPO).protected || {};
-  const isProtected = (f) => matchesAny(prot.factory || [], f) && !matchesAny(prot.except || [], f);
-  const carriers = adopterDocs()
+  // ② 이 저장소가 배포하는 어떤 문서도 그 주장을 담지 않는다 — 면제 목록 없이, 보호 경로도 포함해서.
+  const docs = adopterDocs();
+  expect(docs.length, "no tracked adopter markdown was found — the scan would be vacuous").toBeGreaterThan(10);
+  expect(docs, "README.md is not in the scanned set").toContain("README.md");
+  expect(docs, "the CHARTER — the file that carried this drift — is not in the scanned set").toContain("docs/factory/CHARTER.md");
+
+  const carriers = docs
     .map((f) => [f, driftHits(readFileSync(join(REPO, f), "utf8"))])
     .filter(([, hits]) => hits.length);
-  const writable = carriers.filter(([f]) => !isProtected(f));
-  expect(writable, `adopter docs the factory can write still claim what ADR-024/025 denies: ${JSON.stringify(writable)}`).toEqual([]);
+  expect(carriers, `adopter docs still claim what ADR-024/025 denies: ${JSON.stringify(carriers)}`).toEqual([]);
 
-  // ③ 그리고 **옳은 문장은 살아 있다** — ADR-020의 "유일한 쓰기 스테이지" 넷(d2). 지우는 diff는 여기서 걸린다.
+  // ③ 그리고 **옳은 문장은 살아 있다** — ADR-020의 "유일한 쓰기 스테이지" 넷(dissent d2). 지우는 diff는 여기서 걸린다.
   const decisions = readFileSync(join(REPO, "docs/factory/DECISIONS.md"), "utf8");
   const design = readFileSync(join(REPO, "docs/superpowers/specs/2026-09-10-factory-design.md"), "utf8");
   expect((decisions.match(/유일한 쓰기 스테이지/g) || []).length).toBeGreaterThanOrEqual(3);
@@ -338,57 +388,81 @@ test("test_18_no_contradicting_wording_left", () => {
   expect(driftHits("the transition passes the same evidence check as an auto merge")).not.toEqual([]);
   expect(driftHits("증거를 남기는 유일한 쓰기 경로다")).not.toEqual([]);
   expect(driftHits("implement는 유일한 쓰기 스테이지이고 이 체크는 애초에 실행되지 않는다")).toEqual([]);
-  expect(driftHits("the sweeper re-asks with the same functions the auto-merge path uses")).toEqual([]);
+  expect(driftHits("자동 머지와 같은 함수로 다시 묻는다 — 다만 다시 계산하지 않는 검사가 둘 있다")).toEqual([]);
 });
 
-// ── dw6 (마지막이어야 한다 — 이 파일이 만든 부수효과를 되돌아본다) ────────────────────────────
+// ── dw7 ──────────────────────────────────────────────────────────────────────────────────────
 
-test("test_18_readme_command_guard_is_non_vacuous_and_evidence_safe", () => {
-  // ① 검사할 것이 실제로 있다: 다섯 하위 명령이 저마다 완결된 한 줄로 보여진다.
-  const shown = shownCommands(README);
-  const bySub = new Map();
-  for (const cmd of shown) {
-    const argv = argvOf(cmd);
-    if (!bySub.has(argv[2])) bySub.set(argv[2], argv);
-  }
-  expect([...bySub.keys()].sort()).toEqual([...SUBCOMMANDS].sort());
+/** qa 리뷰어의 정본 줄 그대로 — `record --issue 18 --claim <id> --summary … -- <repro cmd>`. */
+function recordClaimAt(root, claim) {
+  const logs = [], errs = [];
+  const code = cli.runCli(
+    ["record", "--issue", "18", "--claim", claim, "--summary", `dw${claim} reproduced`,
+      "--", "npx", "vitest", "run", "factory/test/readme-commands.test.js"],
+    cliOpts(root, logs, errs),
+  );
+  return { code, out: logs.join("\n"), err: errs.join("\n") };
+}
 
-  for (const [sub, argv] of bySub) {
-    const flags = flagsOf(argv);
-    for (const f of REQUIRED_FLAGS[sub]) {
-      expect(flags.has(f), `the README's \`${sub}\` line is not copy-pasteable — no --${f}`).toBe(true);
-    }
-    // `--issue`는 숫자여야 한다(CLI가 `--issue <number>`를 요구한다).
-    const n = argv[argv.indexOf("--issue") + 1];
-    expect(n, `the README's \`${sub}\` line has a non-numeric --issue: ${n}`).toMatch(/^\d+$/);
-  }
-  // record만의 최소선 — `--` 뒤에 실제로 돌릴 명령이 있어야 증거가 된다.
-  expect(bySub.get("record")).toContain("--");
-  expect(bySub.get("record").indexOf("--")).toBeLessThan(bySub.get("record").length - 1);
+const manifest18 = (root) => join(root, ".factory/out/qa/18/manifest.json");
+const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 
-  // ② 양성 대조 — 같은 argv는 **실제로 매니페스트를 만든다**. 이것이 없으면 아래 ③은 "아무 일도
-  //    일어나지 않는 명령을 돌렸다"와 구별되지 않는다(리뷰 지적 #4의 공허성). 있으면 ③은 관측이 된다:
-  //    쓰기는 분명히 일어났고, 그 쓰기가 저장소가 아니라 임시 뿌리에 떨어졌다.
-  const rec = runShown(bySub.get("record"));
-  expect(rec.code, `the README's record line did not run: ${rec.err}`).toBe(0);
-  const wrote = join(rec.cwd, ".factory/out/qa", String(bySub.get("record")[bySub.get("record").indexOf("--issue") + 1]), "manifest.json");
-  expect(existsSync(wrote), "the record line wrote no manifest anywhere — the evidence-safety claim would be vacuous").toBe(true);
+/**
+ * dw7 — **이 가드는 상자 안에 이미 있는 증거에 무관심하다.**
+ *
+ * 이 이슈의 qa 라운드는 claim마다 `record --issue 18 … -- <이 파일을 돌리는 명령>`을 친다. 두 번째
+ * claim부터 이 스위트는 `.factory/out/qa/18/manifest.json`이 **있는 상태로**, 그리고 그 파일이 그
+ * 자리에 남아 있어야 하는 상태로 실행된다. 그래서 두 가지를 확인한다:
+ *   ① 판정값이 상자의 내용의 함수가 아니다 — 씨를 뿌린 상자와 빈 상자에서 같은 verdict가 나온다.
+ *   ② 그 매니페스트는 바이트 단위로 그대로다. 그리고 그 뒤에 claim을 더 남기는 것도 여전히 exit 0이다.
+ */
+test("test_18_guard_indifferent_to_existing_qa_evidence", () => {
+  const seeded = realpathSync(mkdtempSync(join(tmpdir(), "readme-seeded-")));
+  const empty = realpathSync(mkdtempSync(join(tmpdir(), "readme-empty-")));
 
-  // ③ 그리고 그 쓰기는 단 한 번도 이 저장소를 뿌리로 삼지 않았다 — 값으로 센다.
-  expect(CWDS.length, "no command was run at all").toBeGreaterThan(0);
-  for (const c of CWDS) {
-    expect(c.startsWith(tmpdir()), `a shown command ran outside the temp dir: ${c}`).toBe(true);
-    expect(realpathSync(c).startsWith(realpathSync(REPO)), `a shown command ran inside the repository: ${c}`).toBe(false);
-  }
+  // 씨: 정본 경로로 claim 하나. README가 보여 주는 이슈 번호(42)로도 하나 — 그 번호의 매니페스트가
+  // 이미 있는 상태가 이 가드에게 가장 위험한 상태다(보여 주는 줄들이 바로 그 번호를 쓴다).
+  expect(recordClaimAt(seeded, "1").code, "the canonical record line did not run at the seeded root").toBe(0);
+  expect(existsSync(manifest18(seeded)), "seeding did not produce a manifest — dw7 would be vacuous").toBe(true);
+  const seededOther = join(seeded, ".factory/out/qa/42/manifest.json");
+  const other = cli.runCli(["na", "--issue", "42", "--claim", "dw9", "--reason", "no UI surface"], cliOpts(seeded, [], []));
+  expect(other, "seeding issue 42 failed").toBe(0);
+  expect(existsSync(seededOther)).toBe(true);
 
-  // ④ 이 저장소의 증거함은 한 바이트도 쓰이지 않았다 — 두 기준선(모듈 로드·beforeAll) 모두에 대해,
-  //    그리고 README가 보여 주는 **모든** 이슈 번호에 대해 매니페스트가 새로 생기지 않았다.
-  expectEvidenceBoxUntouched("at the end of the guard");
-  expect(qaSnapshot()).toEqual(qaBefore);
-  const issues = new Set([...bySub.values()].map((a) => a[a.indexOf("--issue") + 1]).concat(["18"]));
-  for (const n of issues) {
-    const rel = `${n}/manifest.json`;
-    const had = QA_AT_IMPORT.entries.some(([e]) => e === rel);
-    expect(existsSync(join(QA_BOX, rel)), `.factory/out/qa/${rel} ${had ? "changed shape" : "was created by the guard"}`).toBe(had);
-  }
+  const before18 = sha256(manifest18(seeded));
+  const claimsBefore = JSON.parse(readFileSync(manifest18(seeded), "utf8")).claims;
+  expect(claimsBefore.length, "the seeded manifest carries no claims").toBeGreaterThan(0);
+
+  // ① 같은 판정. 상자가 채워져 있든 아예 없든.
+  const withEvidence = judgeReadme({ boxRoot: seeded });
+  const withoutEvidence = judgeReadme({ boxRoot: empty });
+  expect(withEvidence.verdict, "the guard's verdict about the README changed with the contents of .factory/out/qa")
+    .toEqual(withoutEvidence.verdict);
+  // 그리고 그 판정은 공허하지 않다 — base의 README에는 이 다섯 줄이 없으므로 여기서 빨갛다.
+  expect(withEvidence.verdict.subs).toEqual([...SUBCOMMANDS].sort());
+
+  // ② 상자는 양쪽 다 그대로. 채워진 쪽은 **같은 바이트**로, 빈 쪽은 여전히 비어 있는 채로.
+  expect(withEvidence.box.after).toEqual(withEvidence.box.before);
+  expect(withoutEvidence.box.before.exists, "the empty root was not empty").toBe(false);
+  expect(withoutEvidence.box.after).toEqual(withoutEvidence.box.before);
+  expect(sha256(manifest18(seeded)), "the pre-existing manifest for issue 18 was rewritten").toBe(before18);
+  expect(JSON.parse(readFileSync(manifest18(seeded), "utf8")).claims, "the pre-existing claims changed").toEqual(claimsBefore);
+
+  // ③ 그리고 그 상자는 **살아 있다**: 다음 claim을 남기는 것도 여전히 exit 0이고, 앞의 claim은 남는다.
+  expect(recordClaimAt(seeded, "3").code, "recording claim 2..n after the guard ran no longer works").toBe(0);
+  const after = JSON.parse(readFileSync(manifest18(seeded), "utf8"));
+  expect(after.claims.map((c) => c.id)).toEqual([...claimsBefore.map((c) => c.id), "3"]);
+
+  // ④ 통제 — 관측기가 정말로 무는가. 상자에 한 바이트를 쓰면 같은 단언이 실패해야 한다. 이것이 없으면
+  //    ②의 "달라지지 않았다"는 "아무것도 보고 있지 않다"와 구별되지 않는다.
+  const control = realpathSync(mkdtempSync(join(tmpdir(), "readme-control-")));
+  expect(cli.runCli(["na", "--issue", "7", "--claim", "c1", "--reason", "control"], cliOpts(control, [], []))).toBe(0);
+  const base = qaSnapshot(control);
+  writeFileSync(join(control, ".factory/out/qa/7/manifest.json"), "{}\n");
+  expect(() => expectBoxUnchanged(control, base, "in the control")).toThrow();
+  expect(() => expectBoxUnchanged(control, qaSnapshot(control), "in the control")).not.toThrow();
+
+  // ⑤ 이 저장소의 증거함은 이 테스트가 도는 동안에도 한 바이트도 달라지지 않았다.
+  expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of dw7");
+  for (const c of CWDS) expect(c.startsWith(realpathSync(REPO)), `a command ran inside the repository: ${c}`).toBe(false);
 });
