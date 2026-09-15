@@ -139,8 +139,13 @@ resolved — coverage is undecidable`, then `factory: qa evidence not acceptable
 resolved …`, exit code 1. It is rejection rule 2 below, met early and harmlessly — nothing was judged,
 nothing is reported to any issue, and a manifest whose contract cannot be read is not a complete one.
 Inside a review stage (where the factory wrote that context file before the `qa` reviewer started) the same
-line prints the real coverage table and exits 0. The only thing the walkthrough leaves behind is
-`.factory/out/qa/42/`: remove it when you are done.
+line reads that real `done_when` contract and grades the manifest against it. It prints the coverage table and
+exits 0 **only when every `done_when` id is covered** — by a passing `record`/`attach` claim or a justified
+`na`; any id left uncovered makes it exit 1 with `spec-evidence-missing: <ids>` (rejection rule 1), the same
+verdict lines 128-129 show for a mistyped issue. So the five lines above, run as-is, do not finish green: they
+cover at most `dw2`/`dw3`/`dw5`, and a real issue's `done_when` has other ids. `finish` reports what is still
+missing and rejects — that, not a clean exit, is the steady state until the `qa` reviewer has left a claim for
+every id. The only thing the walkthrough leaves behind is `.factory/out/qa/42/`: remove it when you are done.
 
 - **`record`** runs a command for real and stores its stdout, stderr and exit code as one claim (secrets are
   scrubbed before the file is written, and the payload after `--` is judged by the same hooks a direct `Bash`
