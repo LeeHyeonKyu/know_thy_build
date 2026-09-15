@@ -110,8 +110,8 @@ With both actor tokens set, `factory bootstrap` requires **1 approving review fr
 #### qa evidence — the contract, the tool, the probe (ADR-024)
 
 The `qa` reviewer does not describe what it saw; it **leaves the artifacts** and cites them. One issue's
-evidence is one file — `.factory/out/qa/<issue>/manifest.json` (`factory.qa-evidence.v1`) — and the only
-supported way to write it is the shipped CLI (no dependencies, installed by `factory init`). Five subcommands:
+evidence is one file — `.factory/out/qa/<issue>/manifest.json` (`factory.qa-evidence.v1`) — and the canonical
+way to write it is the shipped CLI (no dependencies, installed by `factory init`). Five subcommands:
 
 ```bash
 node .factory/bin/qa-evidence.js probe  --issue 42
@@ -120,6 +120,16 @@ node .factory/bin/qa-evidence.js attach --issue 42 --claim dw3 --kind screenshot
 node .factory/bin/qa-evidence.js na     --issue 42 --claim dw5 --reason "this tier has no UI surface"
 node .factory/bin/qa-evidence.js finish --issue 42
 ```
+
+**The `42` is a placeholder, and the tool will not catch you for leaving it there.** The `--issue` number
+must match the issue the current checkout's `.factory/out/context.qa.json` / `.factory/out/context.json` was
+generated for: that file — not the flag — is where `finish` reads the `done_when` contract it grades the
+manifest against (`stageContext` in `.factory/bin/qa-evidence.js`). It never compares the two issue numbers,
+so in a checkout that is mid-review for issue 18, `finish --issue 42` silently prints **issue 18's** coverage
+table and `spec-evidence-missing:` verdict — no error, and nothing in the output says whose contract it just
+used. Replace every `42` above with the issue you are reviewing before you run anything. A mistyped number
+also leaves litter: `record`/`attach`/`na` never clean up, so `.factory/out/qa/<that number>/` stays in the
+repo (only `probe` removes the directory it created).
 
 - **`record`** runs a command for real and stores its stdout, stderr and exit code as one claim (secrets are
   scrubbed before the file is written, and the payload after `--` is judged by the same hooks a direct `Bash`

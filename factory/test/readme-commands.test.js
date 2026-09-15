@@ -466,3 +466,112 @@ test("test_18_guard_indifferent_to_existing_qa_evidence", () => {
   expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of dw7");
   for (const c of CWDS) expect(c.startsWith(realpathSync(REPO)), `a command ran inside the repository: ${c}`).toBe(false);
 });
+
+// ── 리뷰 라운드 2 must_fix qa4 ────────────────────────────────────────────────────────────────
+
+import { mkdirSync, rmSync } from "node:fs";   // 위 import 줄은 기존 테스트의 것이라 건드리지 않는다
+
+/**
+ * qa4 — **보여 주는 조리법은 자기 이슈 번호를 고르지 않는다.**
+ *
+ * `finish`가 채점에 쓰는 계약(`done_when`)은 `--issue`가 아니라 **cwd의 `.factory/out/context(.qa).json`**
+ * 에서 온다(`stageContext`, `.factory/bin/qa-evidence.js:219-238`). 그 파일의 이슈 번호와 `--issue`를
+ * 비교하는 코드는 없다. 그래서 리뷰 중인 체크아웃에서 README의 다섯 줄을 **그대로** 붙여 넣으면
+ * `finish --issue 42`가 그 세션이 지금 보고 있는 *다른 이슈의* 커버리지 표와 판정을 찍는다 — 오류도,
+ * 경고도, 출력 안에 "누구의 계약인지"를 말해 주는 글자도 없이.
+ *
+ * CLI는 이 이슈의 non_goals가 못 박은 대로 건드리지 않는다(문서 이슈다). 그래서 이 테스트는 두 개를
+ * 한 자리에 묶는다:
+ *   ① **사실을 실측한다** — 낯선 계약을 심은 임시 뿌리에서 README의 `na`/`finish` 줄을 그대로 돌려,
+ *      표에 심어 둔 남의 id가 실제로 나오는지 본다(통제: 계약이 없는 뿌리에서는 나오지 않는다).
+ *   ② **문서가 그 사실을 독자에게 말하는지 본다** — 조리법 바로 옆에서. ①이 언젠가 거짓이 되면
+ *      (도구가 불일치를 이름 붙여 거절하게 되면) 이 테스트가 먼저 빨개지고, 그때 ②의 경고도 같이
+ *      지우면 된다. 사실과 산문이 같은 테스트 안에 있는 이유가 그것이다.
+ */
+
+/** 그 체크아웃이 지금 리뷰 중인 **다른** 이슈의 계약을 임시 뿌리에 심는다. */
+function rootWithAmbientContract(issueOfCheckout, ids) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "readme-ambient-")));
+  mkdirSync(join(root, ".factory/out"), { recursive: true });
+  writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify({
+    issue: { number: issueOfCheckout },
+    harness: { maturity: "M0" },
+    handoffs: {
+      plan: { done_when: ids.map((id) => ({ id, text: `${id} holds`, verify: `test_${id}`, level: "unit" })) },
+      implement: { head_sha: "0".repeat(40) },
+    },
+  }));
+  return root;
+}
+
+/** README가 보여 주는 그 하위 명령의 줄 — 파싱해서 주어진 뿌리에서 돌린다. */
+function runShownLineAt(root, sub) {
+  const cmd = shownCommands(README).map(argvOf).find((argv) => argv[2] === sub);
+  expect(cmd, `README shows no \`${sub}\` line to run`).toBeTruthy();
+  const logs = [], errs = [];
+  const code = cli.runCli(cmd.slice(2), cliOpts(root, logs, errs));
+  return { code, out: logs.join("\n"), err: errs.join("\n"), cmd: cmd.join(" ") };
+}
+
+test("test_18_readme_warns_the_issue_number_is_not_checked", () => {
+  const foreign = ["dw-alpha", "dw-beta"];
+  const borrowed = rootWithAmbientContract(99, foreign);   // 이 체크아웃은 이슈 99를 리뷰 중이다
+  const bare = realpathSync(mkdtempSync(join(tmpdir(), "readme-nocontext-")));
+
+  try {
+    // ① 실측. README의 `na` 줄로 claim 하나를 남기고, README의 `finish` 줄을 그대로 친다.
+    expect(runShownLineAt(borrowed, "na").code, "the README's `na` line did not run").toBe(0);
+    const graded = runShownLineAt(borrowed, "finish");
+
+    // 표에 나온 id가 이 뿌리의 `context.json`에서 온 **남의 계약**이다 — claim을 남긴 이슈의 것이 아니라.
+    const shownIds = foreign.filter((id) => graded.out.includes(id));
+    expect(shownIds, [
+      "`finish --issue 42` no longer grades against the checkout's own context.json.",
+      "If the CLI now refuses on an issue-number mismatch, this is good news — delete this assertion",
+      "and the README caveat it pins together with it.",
+      `stdout was: ${graded.out}`,
+    ].join(" ")).toEqual(foreign);
+
+    // 그리고 그 사실을 알려 주는 것은 출력 어디에도 없다 — 불일치를 이름 붙이는 문장이 없다.
+    expect(`${graded.out}\n${graded.err}`,
+      "the tool now names the issue-number mismatch — re-read the README caveat, it may be stale")
+      .not.toMatch(/mismatch|does not match|belongs to issue|different issue|issue 99/i);
+
+    // 통제 — 표의 id가 정말 그 파일에서 왔는가. 계약이 없는 뿌리에서는 같은 줄이 그 id를 찍지 못한다.
+    expect(runShownLineAt(bare, "na").code).toBe(0);
+    const ungraded = runShownLineAt(bare, "finish");
+    for (const id of foreign) {
+      expect(ungraded.out, `the ids did not come from .factory/out/context.json at all: ${id}`).not.toContain(id);
+    }
+
+    // ② 문서. 조리법 옆에서, 독자가 그 번호를 고르기 전에.
+    const qa = section(README, /qa evidence/i);
+    expect(qa, "README.md has no `qa evidence` subsection").not.toBeNull();
+    const flat = qa.replace(/\s+/g, " ");
+
+    expect(flat, "the recipe never says the `--issue` number must match the checkout's own context")
+      .toMatch(/`?--issue`?[\s\S]{0,160}must match/i);
+    expect(flat, "the caveat does not name the file the contract is read from")
+      .toMatch(/must match[\s\S]{0,200}\.factory\/out\/context/);
+    expect(flat, "the caveat does not say the tool never compares the two")
+      .toMatch(/(never compares|does not compare|never checks|does not check)[\s\S]{0,120}(issue|number)/i);
+    expect(flat, "the caveat does not say a mismatched number is graded silently, with no error")
+      .toMatch(/(silently|no error|without[\s\S]{0,20}error)/i);
+    expect(flat, "the `42` in the shown lines is not marked as a number the reader must replace")
+      .toMatch(/(`?42`?[\s\S]{0,160}(placeholder|stand-in|replace)|(placeholder|stand-in|replace)[\s\S]{0,160}`?42`?)/i);
+
+    // 그리고 그 경고는 조리법 **바로 뒤**에 있다 — 절 끝의 각주가 아니라.
+    const recipeAt = qa.indexOf(`node ${CLI_REL}`);
+    const warnAt = qa.search(/must match/i);
+    const rulesAt = qa.search(/Three things/i);
+    expect(recipeAt, "the qa evidence subsection shows no command at all").toBeGreaterThanOrEqual(0);
+    expect(rulesAt, "the qa evidence subsection lost its rejection-rule list").toBeGreaterThan(0);
+    expect(warnAt, "the caveat is above the recipe it is about").toBeGreaterThan(recipeAt);
+    expect(warnAt, "the caveat is buried below the rejection rules instead of next to the recipe").toBeLessThan(rulesAt);
+
+    // 증거함은 이 테스트가 도는 동안에도 그대로다(dw3/dw7과 같은 약속). 쓰기는 전부 임시 뿌리 아래다.
+    expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of qa4");
+  } finally {
+    for (const d of [borrowed, bare]) rmSync(d, { recursive: true, force: true });
+  }
+});
