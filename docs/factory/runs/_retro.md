@@ -15,17 +15,17 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 2 |
+| merged | 0 | 2 |
 | review rounds avg | 0 | 1.5 |
-| needs-human | 2 | 8 |
+| needs-human | 0 | 8 |
 | rejects by role | 없음 | spec-conformance 2 |
 | reviewer overlap | 없음 | 0.00 (0/2, runs 3) |
 | unique findings by role | 없음 | spec-conformance 2 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 28.49 | 124.56 |
-| tokens | input 606292 / output 40282 | input 2338712 / output 215961 |
-| retro cost (usd) | 1.50 | 2.40 |
-| retro tokens | input 2 / output 2352 | input 4 / output 4771 |
+| cost (usd) | 0.21 | 124.56 |
+| tokens | input 35801 / output 558 | input 2338712 / output 215961 |
+| retro cost (usd) | 0.00 | 2.40 |
+| retro tokens | input 0 / output 0 | input 4 / output 4771 |
 | full retros | — | 2 |
 
 <!-- factory-retro-state:v1 -->
@@ -171,7 +171,7 @@
     ]
   },
   "stats": {
-    "merged": 1,
+    "merged": 0,
     "review_rounds_avg": 0,
     "rejects_by_role": {},
     "review_runs": 0,
@@ -179,24 +179,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 2,
+    "needs_human": 0,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 28.494961,
+      "cost_usd": 0.208514,
       "tokens": {
-        "input": 606292,
-        "output": 40282
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.498863,
-      "tokens": {
-        "input": 2,
-        "output": 2352
+        "input": 35801,
+        "output": 558
       }
     }
   },
