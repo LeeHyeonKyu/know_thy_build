@@ -80,6 +80,7 @@ reason: "object면 무엇이 잘못됐고 무엇이면 accept인지"
   보여준다. 제안: 새로 만들지 말고 `non_goals`에 '세 번째 CSV 경로를 만들지 않는다'를 명시하고, 이번 이슈를
   '기존 두 경로를 하나로 부르는 진입점 추가'로 좁힌다."
 - "위치: 이슈 #207(`factory:flaky`, `test_sync_retry`). 주장: **테스트 문제가 아니라 제품의 경쟁 조건**이다.
+- 위치: #20 plan 라운드의 skeptic 반대(`docs/factory/runs/20.md` · plan gha-34880188521) — 제목이 '— for #18'인 파생 harness 이슈. 주장: 이 이슈의 done_when이 요구하는 `docs/factory/CHARTER.md` 편집은 `factory:harness` 이슈에서도 빌더에게 열리지 않으므로, 이대로면 빌더가 끝낼 수 없는 계획이다. 근거: 네 곳을 경로와 줄로 댔고 네 곳 모두 지금 확인된다 — `.factory/ci-settings-harness.js…
   근거: 실패 로그 3건이 전부 `retry()`가 이전 시도의 응답을 받기 전에 두 번째 요청을 보내는 순간에 발생하며
   (`src/sync/retry.ts:44`에 취소 처리 없음), main에서도 5회 중 1회 재현된다. 테스트를 안정화하는 done_when은
   이 결함을 덮는다 — done_when은 '동시 재시도에서 중복 요청이 0건'이어야 하고 테스트 반복 30회는 그 다음이다."
@@ -95,6 +96,7 @@ reason: "object면 무엇이 잘못됐고 무엇이면 accept인지"
 - **6개월 뒤의 당직자**: 이 기능이 새벽에 깨졌을 때, 지금의 계획이 그 사람에게 남기는 것은 무엇인가.
 - **테스트 회의론자**: 제안된 테스트를 통과시키는 가장 게으른 구현을 상상한다. 그 구현이 사용자를 만족시키는가.
 - **반대 기록자**: 내 반대가 기각되어도 `dissent_log`에 정확히 남았는가 — 미래의 누군가가 읽을 문장인가.
+- **쓰기 경계를 먼저 보는 눈**: 이 계획의 `done_when`·`files_expected`가 가리키는 경로가 빌더의 쓰기 경계 안에 있는가 — `.factory/**`·`.claude/**`·`docs/factory/CHARTER.md`는 `factory:harness` 이슈에서도 열리지 않는다(`factory/lib/protected-paths.js`의 `HARNESS_OPENS`는 harness.toml·package.json·package-lock.json·vitest.config.*·playwright.config.…
 
 ## Lessons
 Before taking a position, read `.factory/lessons/plan-skeptic.md` (path is also given in your prompt)
