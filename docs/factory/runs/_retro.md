@@ -16,17 +16,17 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 1 | 3 |
-| review rounds avg | 3 | 2 |
-| needs-human | 1 | 9 |
-| rejects by role | qa 3, correctness 2 | spec-conformance 2, qa 3, correctness 2 |
-| reviewer overlap | 0.20 (1/5, runs 3) | 0.14 (1/7, runs 6) |
-| unique findings by role | qa 3, correctness 1 | spec-conformance 2, qa 3, correctness 1 |
+| merged | 0 | 3 |
+| review rounds avg | 0 | 2 |
+| needs-human | 0 | 9 |
+| rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
+| reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
+| unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 66.30 | 190.86 |
-| tokens | input 1023451 / output 95876 | input 3362163 / output 311837 |
-| retro cost (usd) | 1.77 | 4.17 |
-| retro tokens | input 2 / output 3844 | input 6 / output 8615 |
+| cost (usd) | 0.00 | 190.86 |
+| tokens | input 0 / output 0 | input 3362163 / output 311837 |
+| retro cost (usd) | 0.00 | 4.17 |
+| retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
 
 <!-- factory-retro-state:v1 -->
@@ -282,38 +282,25 @@
     ]
   },
   "stats": {
-    "merged": 1,
-    "review_rounds_avg": 3,
-    "rejects_by_role": {
-      "qa": 3,
-      "correctness": 2
-    },
-    "review_runs": 3,
-    "findings_total": 5,
-    "overlapping_findings": 1,
-    "unique_findings_by_role": {
-      "qa": 3,
-      "correctness": 1
-    },
-    "overlap_ratio": 0.2,
-    "needs_human": 1,
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "rejects_by_role": {},
+    "review_runs": 0,
+    "findings_total": 0,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 0,
+    "needs_human": 0,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 66.295262,
+      "cost_usd": 0,
       "tokens": {
-        "input": 1023451,
-        "output": 95876
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.773645,
-      "tokens": {
-        "input": 2,
-        "output": 3844
+        "input": 0,
+        "output": 0
       }
     }
   },
