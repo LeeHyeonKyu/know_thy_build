@@ -123,17 +123,43 @@ The reviewer's stance is unchanged; the implementer now meets the reviewer's own
 - **Cost model that justifies B:** a full standard review round ≈ $20 (measured); a self-gate ≈ deterministic gates (≈$0) + one critique agent (≈$2–6). Removing one round pays for the self-gate several times over, before counting the human-merge cascades avoided.
 - **Deterministic before probabilistic, always.** Gates and the self-gate's runnable checks run before any LLM review; a red deterministic check never reaches a reviewer.
 
-## 7. Backlog mapping
+## 7. Risks — could simplification degrade quality?
 
-New:
-- **KTB-53** — E (tier by blast radius + guard-test bump fix) + F (scoped re-review).
-- **KTB-54** — A (acceptance contract) + B (self-gate) + C (house rules) + D/D' (regression pins, mutation check). The core lever.
-- **KTB-55** — G (no re-review while blocked).
+Yes, and unevenly. The eight structures split in two, and only one bucket carries real degradation risk.
+
+- **Additive (A, B, C, D, D', G, H)** add a check *before* review; they do not remove reviewer coverage. Their risk is false confidence / turn budget / gaming — not "catches less."
+- **Coverage-reducing (E, F)** actually remove reviewer coverage. This is where a real defect can ship, and the evidence that it is not hypothetical is in this session:
+  - **E (thin the roster for low-risk diffs):** the `docs` roster is `[correctness, spec-conformance]` — no qa, no architecture. But KTB #18 R1's *only* rejecting reviewer was **qa** (qa4). A docs-tier #18 would have passed that round. README-borne bugs were real this session (own-cal: a client command pointing at the **production API**), so thinning "docs" review risks the very class this session proved exists.
+  - **F (scoped re-review):** the kept safety net is a **correctness-only** full-tree sanity. KTB #18 R3 was a regression the implementer introduced while fixing R2, caught because the *full* panel re-ran; a qa- or architecture-only regression introduced in a middle round could slip past a correctness-only final sanity.
+
+Systemic risks (independent of the buckets):
+- **Contract-as-ceiling (Goodhart).** Once `done_when` is the runnable definition of correct, the out-of-contract space stops being checked — yet this session's worst defects were out of contract (fail-closed guard, production API). Reviewers must treat the contract as a floor, not a scope limiter.
+- **Automation complacency.** A green self-gate invites reviewers and the owner to trust green and review lighter; effective depth drifts down over time.
+- **Metric substitution.** Optimizing rounds/$ rewards speed over correctness unless an escaped-defect / revert metric is watched alongside cost.
+- **Self-gate turn budget.** Adding work to implement can exceed `max_turns` (ADR-020 O25; own-calendar already raised it to 24), creating needs-human hops that did not exist.
+
+**Mitigation — phase and gate (this is how it MUST be built):**
+1. **Phase 1 — additive only (A, B, C, D, D', G, H).** These capture the round-count savings without reducing coverage. Land them first (plan Tasks 1–5, 8, 9).
+2. **Instrument and measure (plan Task 10, lands in Phase 1).** Add escaped-defect rate (defects found after approval / after merge), revert rate, and rounds-per-issue to the retro, compared to this session's baseline (KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds). This measurement is the go/no-go signal for Phase 2.
+3. **Phase 2 — coverage-reducing (E, F), GATED.** Do not thin review until the measurement shows draft quality actually rose (escaped-defect rate did not increase versus baseline). Even then:
+   - **E keeps qa** whenever the diff adds or changes tests or executable/consumed docs (a README with commands, a template, a config-shaped doc). Thinning applies only to genuinely inert prose.
+   - **F runs the full round-1 roster on the final approving round** — scope only the *middle* rounds; the retained sanity is the full roster at the diff's tier, not correctness alone.
+- **Reviewer stance stays a floor.** Round 1 is always a full panel that hunts out-of-contract; the acceptance contract is grading support, never a scope cap. A green self-gate means "eligible for review," never "review may be lighter." Self-gate turns are hard-capped.
+
+**Net:** the additive half is safe and carries most of the savings; the coverage-reducing half is real risk and is gated behind proof that the additive half worked.
+
+## 8. Backlog mapping
+
+New (phase per §7 in brackets):
+- **KTB-54 [Phase 1]** — A (acceptance contract) + B (self-gate) + C (house rules) + D/D' (regression pins, mutation check). The core lever; additive, safe.
+- **KTB-55 [Phase 1]** — G (no re-review while blocked); additive.
+- **KTB-56 [Phase 1]** — the quality instrumentation + Phase-2 gate (plan Task 10).
+- **KTB-53 [Phase 2, gated]** — E (tier by blast radius + guard-test bump fix) + F (scoped re-review). Removes reviewer coverage; starts only after KTB-56's gate passes.
 
 Existing (fold in):
 - **KTB-51** — H (in-run repair). **KTB-47** — K-exhaustion → human-merge trap (Task 11 of the audit plan). **KTB-48** — human-merge door re-derivation (Task 12). **KTB-52** — harness-unpark re-queues from triage. **KTB-45** — adoption presets.
 
-## 8. Open questions (resolve during planning)
+## 9. Open questions (resolve during planning)
 
 1. Where does the acceptance contract's *runnable check* come from for a `done_when` id that has no natural test (a prose/UX criterion)? Options: qa `attach` evidence bound to the id (existing), or the rubric-only path graded by the reviewer (no self-runnable check). Decide the split.
 2. B's self-critique subagent shares the stage's `claude -p` budget/turns. Does it run in-process as a final turn, or as a spawned skeptic? Turn-budget and `max_turns` implications (ADR-020 O25).
