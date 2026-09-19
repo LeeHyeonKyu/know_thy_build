@@ -10,6 +10,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-18-factory-review-efficiency-design.md`
 
+## Phasing & quality gate (spec §7 — read before executing)
+
+Simplification can degrade quality, but only in the two structures that remove reviewer coverage. Build in phases so the savings land safely:
+
+- **Phase 1 — additive, safe to land now (Tasks 1–5, 8, 9, 10).** These add checks *before* review; they never thin review. Task 10 (instrumentation) lands here and defines the gate.
+- **GATE:** Phase 2 starts only after Task 10's metrics show, over a real sample, that draft quality rose — escaped-defect rate (defects found after approval/merge) and revert rate did **not** increase versus the baseline (KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds), while rounds-per-issue fell.
+- **Phase 2 — coverage-reducing, gated (Tasks 6, 7).** E and F remove reviewer coverage; do not start them until the gate passes, and build them with the mitigations named in each task (E keeps qa for executable docs/tests; F runs the full roster on the final approving round).
+
+An executor who reaches Task 6 or 7 without Task 10's gate having passed must stop and report, not proceed.
+
 ## Global Constraints
 
 - **Reviewers are never weakened.** Round-1 review remains a full panel at the diff's tier; adversarial framing, must_fix authority, and depth are unchanged. Only *re-review* is scoped, and a final full-tree correctness sanity is always kept before merge (spec §6).
@@ -100,7 +110,7 @@
 - Test: `factory/test/verify-stage.test.js`, `factory/test/self-gate.test.js`
 
 **Interfaces:**
-- Produces: on `→ rework`, each must_fix becomes a `{ id, guard: { kind, ref } | null, text }` carried in the rework handoff and re-checked by the next self-gate. Guardable findings (a test) are a hard gate; prose findings are advisory checklist lines (spec §8 Q5).
+- Produces: on `→ rework`, each must_fix becomes a `{ id, guard: { kind, ref } | null, text }` carried in the rework handoff and re-checked by the next self-gate. Guardable findings (a test) are a hard gate; prose findings are advisory checklist lines (spec §9 Q5).
 
 - [ ] **Step 1:** Failing test — after a rework carrying must_fix `X` with a test guard, the next implement handoff is blocked by the self-gate if `X`'s guard is red (i.e. it regressed).
 - [ ] **Step 2:** Run; FAIL.
@@ -108,35 +118,43 @@
 - [ ] **Step 4:** Green. **Regression pinned:** KTB #18 R3 (fixing R2 introduced a new false statement under the same ids).
 - [ ] **Step 5:** Mirror; commit.
 
-### Task 6: Tier by blast radius + guard-test bump fix (Structure E)
+### Task 6: Tier by blast radius + guard-test bump fix (Structure E) — PHASE 2, GATED
+
+> **Gate:** do not start until Task 10's metrics show draft quality rose (escaped-defect and revert rate not worse than baseline). This structure removes reviewer coverage (spec §7).
+> **Mitigation (build it this way):** the `docs` roster **keeps qa** whenever the diff adds/changes tests or executable/consumed docs (a README with commands, a template, a config-shaped doc). Thinning applies only to genuinely inert prose — because KTB #18 R1's only rejecting reviewer was qa.
 
 **Files:**
 - Modify: `factory/lib/resolve-tier.js` (or wherever `resolveTier`/`tier_effective` lives), `factory/lib/verify-stage.js` (`impact_paths` must agree), `factory/lib/merge-stage.js` (same resolver), `templates/factory/docs/factory/CHARTER.md` (roster note)
 - Test: `factory/test/resolve-tier.test.js`, `factory/test/merge-stage.test.js`
 
 **Interfaces:**
-- Produces: `tierFromDiff(files, charter) → tier`, one resolver shared by triage, verify-stage, and merge. Rule: files all in `docs/**`/`*.md` **or guard tests that assert only on such files** → `docs`; any `load_bearing` path → force `full`+`deep`; else `standard`. Triage/owner may raise, never lower below the computed floor.
+- Produces: `tierFromDiff(files, charter) → tier`, one resolver shared by triage, verify-stage, and merge. Rule: files all in `docs/**`/`*.md` **or guard tests that assert only on such files** → `docs`; any `load_bearing` path → force `full`+`deep`; else `standard`. Triage/owner may raise, never lower below the computed floor. The `docs` roster is `[correctness, spec-conformance]` **plus qa** when the diff adds/changes tests or executable/consumed docs (mitigation above).
 
-- [ ] **Step 1:** Failing test — a diff of `README.md` + `factory/test/readme-commands.test.js` resolves to `docs`, not `standard`.
+- [ ] **Step 0 (gate):** confirm Task 10's Phase-2 gate has passed; if not, STOP and report. Do not thin review on unproven draft quality.
+- [ ] **Step 1:** Failing test — a diff of `README.md` + `factory/test/readme-commands.test.js` resolves to `docs`, and its roster still includes qa (the diff carries a test) — not the full `standard` panel, not a qa-less docs roster.
 - [ ] **Step 2:** Run; FAIL (today it is `standard` — KTB #18 paid $80 for it).
-- [ ] **Step 3:** Implement `tierFromDiff`; classify a guard test by what it asserts on (its target files), not by its own path.
+- [ ] **Step 3:** Implement `tierFromDiff`; classify a guard test by what it asserts on (its target files), not by its own path; add the executable-docs/tests → keep-qa rule.
 - [ ] **Step 4:** Point triage, verify-stage, and merge at the one resolver; assert byte-identical behaviour on non-docs diffs.
 - [ ] **Step 5:** Green. **Regression pinned:** KTB #18 (docs issue → docs roster); a diff touching a `load_bearing` path still forces full+deep.
 - [ ] **Step 6:** Mirror; commit.
 
-### Task 7: Scoped re-review on rework (Structure F)
+### Task 7: Scoped re-review on rework (Structure F) — PHASE 2, GATED
+
+> **Gate:** do not start until Task 10's Phase-2 gate has passed. This structure removes reviewer coverage (spec §7).
+> **Mitigation (build it this way):** scope only the *middle* rounds; the **final approving round runs the full round-1 roster** at the diff's tier — not a correctness-only sanity — because KTB #18 R3 was a regression a full panel caught.
 
 **Files:**
 - Modify: `factory/lib/review-roster.js` / review roster selection, `factory/bin/run-stage.js` (review path), `factory/lib/verify-stage.js`
 - Test: `factory/test/review-roster.test.js`, `factory/test/run-stage.test.js`
 
 **Interfaces:**
-- Behaviour: round 1 = full panel at the diff's tier on the full diff. Round R>1 = reviewer set `{rejecting roles} ∪ {roles whose lens the fix delta touches}` on the **fix diff only**, at `tier ≤ prior`. A cheap full-tree correctness sanity runs on the final pre-merge pass regardless. File→lens map (coarse, spec §8 Q4): code→correctness, tests→qa, docs→spec-conformance, interfaces/load_bearing→architecture.
+- Behaviour: round 1 = full panel at the diff's tier on the full diff. Middle rounds (1 < R < final) = reviewer set `{rejecting roles} ∪ {roles whose lens the fix delta touches}` on the **fix diff only**, at `tier ≤ prior`. The **final approving round re-runs the full tier roster** on the whole diff (not just correctness). File→lens map (coarse, spec §9 Q4): code→correctness, tests→qa, docs→spec-conformance, interfaces/load_bearing→architecture.
 
-- [ ] **Step 1:** Failing test — a round-2 review where only `qa` rejected runs `qa` (+ the final-pass sanity) on the fix diff, not the 4-role panel on the whole tree.
+- [ ] **Step 0 (gate):** confirm Task 10's Phase-2 gate has passed; if not, STOP and report.
+- [ ] **Step 1:** Failing test — a middle round where only `qa` rejected runs `qa` (+ delta-lens roles) on the fix diff; and the round that would approve re-runs the full roster on the whole diff.
 - [ ] **Step 2:** Run; FAIL.
-- [ ] **Step 3:** Implement scoped selection + the file→lens map + the retained final-pass sanity.
-- [ ] **Step 4:** Green. **Regression pinned:** own-cal R2 (correctness cf1 and architecture arch1 flagged the same line — the delta-lens map still runs architecture only when the delta touches an architecture-lens path); cross-cutting regression still caught by the final sanity.
+- [ ] **Step 3:** Implement scoped middle-round selection + the file→lens map + the full-roster final approving round.
+- [ ] **Step 4:** Green. **Regression pinned:** KTB #18 R3 (a regression introduced while fixing a prior round is caught because the approving round is a full panel, not a correctness-only sanity); own-cal R2 (delta-lens still runs architecture only when the delta touches an architecture-lens path).
 - [ ] **Step 5:** Mirror; commit.
 
 ### Task 8: No re-review while blocked (Structure G)
@@ -169,19 +187,37 @@
 - [ ] **Step 4:** Green. **Regression pinned:** KTB #18 plan R1 (dissent d2/d3 → needs-human → owner retry, all avoidable by one feedback turn).
 - [ ] **Step 5:** Mirror; commit.
 
+### Task 10: Quality instrumentation & the Phase-2 gate (Structure: the gate itself) — PHASE 1
+
+**Files:**
+- Modify: `factory/bin/retro.js` / `factory/lib/retro/*` (aggregate the metrics), `docs/factory/DECISIONS.md` (the gate ADR)
+- Test: `factory/test/retro*.test.js`
+
+**Interfaces:**
+- Produces, per issue and rolled up in the retro: `rounds_per_issue` (plan/implement/review counts), `escaped_defects` (must_fix raised after a prior approval, or a revert/hotfix after merge), and `revert_rate`. Baseline recorded from this session: KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds; and the escaped-defect examples (own-cal R2 production-API, KTB #18 R3 finish() regression) as the "must-not-recur" set.
+
+- [ ] **Step 1:** Failing test — the retro emits `rounds_per_issue` and `escaped_defects` for a fixture run history.
+- [ ] **Step 2:** Run; FAIL.
+- [ ] **Step 3:** Implement the aggregation from the transition/handoff history the retro already reads (no new writes).
+- [ ] **Step 4:** Write the gate rule into an ADR: **Phase 2 (Tasks 6, 7) may start only when, over a sample of ≥5 post-Phase-1 issues, escaped-defect rate and revert rate are ≤ baseline while rounds-per-issue fell.** If escaped defects rose, Phase 2 does not start and the additive structures are revisited instead.
+- [ ] **Step 5:** Green. **Regression pinned:** the whole risk of spec §7 — this task is what makes "could simplification degrade quality?" observable before any coverage is removed.
+- [ ] **Step 6:** Mirror; commit.
+
 ---
 
 ## Execution notes
 
-- **Order:** Task 1 (contract) is the foundation; then 2/4 (inputs to the self-gate), then 3 (self-gate) and 5 (pins); then the review side 6→7→8; then 9. Tasks 1–5 raise draft quality (fewer rounds); 6–8 cut per-round cost; 9 removes an escalation.
+- **Order (phased, spec §7):** **Phase 1** = Task 1 (contract, foundation) → 2/4 (self-gate inputs) → 3 (self-gate) + 5 (pins) → 8 (no-review-while-blocked) + 9 (in-run repair) → **10 (instrumentation + gate)**. Then measure. **Phase 2**, only if the gate passes = 6 (tier) → 7 (scoped re-review). Phase 1 raises draft quality without thinning review; Phase 2 thins review and is gated.
+- **The gate is a hard stop.** An executor reaching Task 6/7 without Task 10's gate having passed stops and reports. Never thin review on unproven draft quality (spec §7).
 - **Build via subagent-driven-development**, worktree per task, task review after each, whole-branch review at the end. Reviewers get the acceptance contract + the named regression as their lens.
-- **Do not bundle with KTB-47/48/52/45** — those are separate audit-plan tasks (11/12) and adoption work; this plan is the review-efficiency slice. Ship as its own minor (1.3.1 or 1.4.0).
-- **Measure the win:** re-run a docs-shaped issue and a code-shaped issue after landing and compare rounds and $ against this session's baseline (KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds). Record in an ADR.
+- **Do not bundle with KTB-47/48/52/45** — those are separate audit-plan tasks (11/12) and adoption work; this plan is the review-efficiency slice. Phase 1 can ship as a minor on its own (1.3.1); Phase 2 follows only after the gate.
+- **Measure the win (Task 10):** compare rounds-per-issue, escaped-defect rate, and $ against this session's baseline (KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds). Record in the gate ADR.
 
 ## Self-review (author checklist, done)
 
-- Spec coverage: every structure A–H maps to a task (A→1, B→3, C→2, D→5, D'→4, E→6, F→7, G→8, H→9). ✓
+- Spec coverage: every structure A–H maps to a task (A→1, B→3, C→2, D→5, D'→4, E→6, F→7, G→8, H→9); the risk gate (spec §7) → Task 10. ✓
 - Each task pins a concrete regression from this session. ✓
-- No task weakens round-1 review or removes the final full-tree sanity (Global Constraints). ✓
+- No task weakens round-1 review; the coverage-reducing tasks (6, 7) are Phase 2, gated on measured draft quality, and each keeps a full-roster safety (E keeps qa for executable docs/tests; F full roster on the final approving round). ✓
 - One tier/blast-radius resolver shared across stages (Task 6), not two. ✓
-- Open questions from spec §8 are surfaced at the tasks that must resolve them (Q1→Task 1, Q2→Task 3, Q3→Task 6, Q4→Task 7, Q5→Task 5). ✓
+- The degradation risk of simplification is made observable (Task 10) before any reviewer coverage is removed (spec §7). ✓
+- Open questions from spec §9 are surfaced at the tasks that must resolve them (Q1→Task 1, Q2→Task 3, Q3→Task 6, Q4→Task 7, Q5→Task 5). ✓
