@@ -1080,6 +1080,23 @@ test("applyMutation is pure and re-appliable — the same mutation on a fresher 
   expect(applyMutation({ n: 4, merges_since: 1, history: [], candidates: emptyCandidates() }, mutation)).toEqual(a);
 });
 
+// ── Feedback loop Task 3 — 라우팅 팔은 **매 머지마다** 돌고, 절대 retro를 죽이지 않는다 ────────
+test("feedback-route: light 회차에서도 돌고, 결과가 기록에 남는다", async () => {
+  const routeFeedback = vi.fn(async () => ({ issues: [11], actions: [{ kind: "upstream-created", step: "feedback-route", repo: "o/up", issue: 3, fingerprint: "abc" }] }));
+  const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+  expect(await runRetro({ deps })).toBe(0);
+  expect(deps.claudeP).not.toHaveBeenCalled();                     // light 회차다
+  expect(routeFeedback).toHaveBeenCalled();
+  expect(recorded.join("\n")).toMatch(/feedback-route: upstream-created/);
+});
+
+test("feedback-route: gh가 던져도 retro는 0으로 끝난다(라우팅이 공장을 멈추지 않는다)", async () => {
+  const routeFeedback = vi.fn(async () => { throw new Error("gh issue list failed (1): HTTP 403 Resource not accessible"); });
+  const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+  expect(await runRetro({ deps })).toBe(0);
+  expect(recorded.join("\n")).toMatch(/feedback-route failed — .*403/);
+});
+
 test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async () => {
   const { ymdOf } = await import("../bin/retro.js");
   expect(ymdOf("2026-09-05T00:00:00Z")).toBe("2026-09-05");

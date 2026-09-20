@@ -293,6 +293,42 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async downloadRunArtifact(runId, name, dir) {
       await gh(["run", "download", String(runId), "-R", repo, "-n", name, "-D", dir]);
     },
+    /**
+     * ── Feedback loop Task 3 — **다른 저장소**의 개선 이슈를 열거나 거기에 증거를 덧붙인다(spec §7) ──
+     *
+     * 이 어댑터 안의 유일한 교차 저장소 쓰기다. 모든 호출에 `-R <repo>`가 붙는다 — 이 함수는
+     * `makeGh`가 묶고 있는 저장소를 **쓰지 않는다**(그 저장소는 발견이 난 곳이고, 이 이슈가 갈 곳은
+     * KTB다). 권한은 러너의 `FACTORY_BOT_TOKEN`이 쥔다(소유자가 상류 저장소에 `issues:write`를 준다).
+     *
+     * **문법은 한 글자도 모른다**: 지문으로 검색만 하고, 맞는 본문을 고르는 일(`match`)·새 이슈의
+     * 제목/본문/라벨을 만드는 일(`render`)·기존 본문에 증거를 덧붙이는 일(`append`)은 전부 호출자가
+     * 넘긴 함수다(`lib/feedback/upstream-issue.js`가 그 문법의 유일한 출처다). 그래야 쓰는 쪽과 읽는
+     * 쪽이 갈라져 같은 원인으로 이슈가 무한히 쌓이는 일이 없다.
+     *
+     * 검색은 `<fingerprint> in:body` + `--state open`이다. 닫힌 이슈는 **다시 열지 않는다**: 사람이
+     * "고쳤다"고 닫은 원인이 다시 나타났다면 그것은 같은 이슈의 재개가 아니라 **회귀**이고, 새 이슈로
+     * 열려야 사람이 그 사실을 본다. `append`가 본문을 바꾸지 않으면(같은 목격이 이미 실려 있으면)
+     * 편집 호출 자체를 보내지 않는다 — 같은 머지를 두 번 돌아도 상류에 아무 일도 일어나지 않는다.
+     */
+    async upstreamIssue({ repo: target, fingerprint, render, append, match, limit = 50 }) {
+      if (!target) throw new Error("gh.upstreamIssue: no upstream repo — [factory].upstream must name owner/repo");
+      const j = JSON.parse(await gh([
+        "issue", "list", "-R", target, "--search", `${fingerprint} in:body`,
+        "--state", "open", "--limit", String(limit), "--json", "number,body",
+      ]));
+      const found = (j || []).find((i) => match(String(i.body ?? "")));
+      if (found) {
+        const before = String(found.body ?? "");
+        const next = append(before);
+        if (next === before) return { issue: found.number, created: false, appended: false };
+        await gh(["issue", "edit", String(found.number), "-R", target, "--body-file", "-"], { input: next });
+        return { issue: found.number, created: false, appended: true };
+      }
+      const { title, body, labels = [] } = render();
+      const out = await gh(["issue", "create", "-R", target, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
+      const m = /\/issues\/(\d+)/.exec(out);
+      return { issue: m ? Number(m[1]) : null, created: true, appended: false };
+    },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;

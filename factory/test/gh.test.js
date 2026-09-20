@@ -464,6 +464,59 @@ test("viewerScopes: a failing call throws with the stderr, so doctor reports WAR
   await expect(makeGh({ run, repo }).viewerScopes()).rejects.toThrow(/Bad credentials/);
 });
 
+// ── Feedback loop Task 3 — 교차 저장소 개선 이슈(열거나 덧붙이거나) ───────────────────────────
+// 이 어댑터는 **문법을 모른다**: 지문으로 검색하고, 맞는 본문을 고르는 일(match)·새 본문을 만드는
+// 일(render)·증거를 덧붙이는 일(append)은 전부 호출자가 넘긴다(`lib/feedback/upstream-issue.js`가
+// 유일한 문법 출처다). 모든 호출에 `-R <upstream>`이 붙는지가 이 테스트의 핵심이다.
+test("upstreamIssue: 같은 지문의 열린 이슈가 없으면 -R upstream 에 새로 연다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+    { match: (c, a) => a[0] === "issue" && a[1] === "create", result: { code: 0, stdout: "https://github.com/o/up/issues/12\n", stderr: "" } },
+  ]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "deadbeef",
+    match: () => false,
+    render: () => ({ title: "factory-improvement: x", body: "BODY", labels: ["factory-improvement", "backlog"] }),
+    append: () => { throw new Error("append must not run when nothing matched"); },
+  });
+  expect(r).toEqual({ issue: 12, created: true, appended: false });
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", "o/up", "--search", "deadbeef in:body", "--state", "open", "--limit", "50", "--json", "number,body"]);
+  expect(run.calls[1].args).toEqual(["issue", "create", "-R", "o/up", "--title", "factory-improvement: x", "--body-file", "-", "--label", "factory-improvement", "--label", "backlog"]);
+  expect(run.calls[1].opts.input).toBe("BODY");
+});
+
+test("upstreamIssue: 맞는 이슈가 있으면 새로 열지 않고 본문을 stdin으로 갈아 끼운다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 7, body: "OLD" }]), stderr: "" } },
+    { match: (c, a) => a[0] === "issue" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "deadbeef",
+    match: (b) => b === "OLD",
+    render: () => { throw new Error("render must not run when an issue matched"); },
+    append: (b) => `${b}\nNEW EVIDENCE`,
+  });
+  expect(r).toEqual({ issue: 7, created: false, appended: true });
+  expect(run.calls[1].args).toEqual(["issue", "edit", "7", "-R", "o/up", "--body-file", "-"]);
+  expect(run.calls[1].opts.input).toBe("OLD\nNEW EVIDENCE");
+});
+
+test("upstreamIssue: append가 본문을 바꾸지 않으면(같은 목격) 편집 호출 자체가 나가지 않는다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 7, body: "OLD" }]), stderr: "" } }]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "f", match: () => true, render: () => ({ title: "t", body: "b" }), append: (b) => b,
+  });
+  expect(r).toEqual({ issue: 7, created: false, appended: false });
+  expect(run.calls).toHaveLength(1);
+});
+
+test("upstreamIssue: upstream 저장소 이름이 없으면 아무 호출도 하지 않고 던진다", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "[]", stderr: "" } }]);
+  await expect(makeGh({ run, repo }).upstreamIssue({ fingerprint: "f", match: () => false, render: () => ({ title: "t", body: "b" }), append: (b) => b }))
+    .rejects.toThrow(/upstream repo/);
+  expect(run.calls).toEqual([]);
+});
+
 test("putEnvironment PUTs the deployment branch policy by stdin — the body never reaches the argv", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "-X", result: { code: 0, stdout: "{}", stderr: "" } }]);
   const body = { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } };

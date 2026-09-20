@@ -80,7 +80,12 @@ function countCitations(handoffs, sinceMs, into) {
   }
 }
 
-function isMerged(issue, comments) {
+/**
+ * 이 이슈가 머지됐는가 — 라벨이 `factory:merged`이거나, 닫힌 이슈에 그 라벨로 간 전이 코멘트가 있다.
+ * 창 통계(`harvest`)와 피드백 루프의 라우팅 팔(Task 3)이 **같은 판정**을 써야 한다: 한쪽이 머지로
+ * 보고 다른 쪽이 아니면 "머지된 이슈의 증거를 라우팅한다"는 계약이 이슈마다 달라진다.
+ */
+export function isMerged(issue, comments) {
   if (hasLabel(issue, MERGED_LABEL)) return true;
   if (issue?.state !== "closed") return false;
   return comments.some((c) => {

@@ -176,6 +176,29 @@ test("(3) gates non-GREEN (RED) → needs-human 'gates RED at merge'; status pos
   expect(d.mergeGates).not.toHaveBeenCalled();
 });
 
+// Feedback loop Task 3 — merge 스테이지의 게이트 RED도 **왜 RED였는지**를 남긴다. 예전에는
+// `merge: gates RED` 한 줄(이름뿐)이라, 머지 직전에 죽은 게이트의 뿌리는 7일짜리 아티팩트에만
+// 있었다 — Task 1이 run-stage에서 닫은 바로 그 구멍이 여기만 열려 있었다. 줄은 자기를 쓴 런을
+// 지목해야 T3의 harvester가 그것을 증거로 센다(묶이지 않은 줄은 무시된다).
+test("(3) gates RED at merge → gates-detail 줄이 런을 지목한 채 런 레코드에 남는다", async () => {
+  const { lines, record } = makeRecord();
+  const gates = {
+    schema: "factory.gates.v1", status: "RED", head_sha: "a".repeat(40),
+    gates: { unit: { status: "RED", reason: "command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)", log: "boom", detail: { gate: "unit", failing: [], snippet: "boom" } } },
+  };
+  const d = baseD({ gates: vi.fn(async () => gates) });
+  const code = await runMergeStage({
+    issue: 7, defaultBranch: "main", headSha: "b".repeat(40), d,
+    record, refusal, postStatus: basePostStatus(), stamp: { runId: "771", runnerId: "gha-771", round: null },
+  });
+  expect(code).toBe(2);
+  const detail = lines.find((l) => l.startsWith("gates-detail: "));
+  expect(detail).toBeTruthy();
+  const parsed = JSON.parse(detail.slice("gates-detail: ".length));
+  expect(parsed).toMatchObject({ gate: "unit", run_id: "771", runner: "gha-771" });
+  expect(parsed.reason).toMatch(/unhandled error outside tests/);
+});
+
 test("(3) gates null (no verdict at all) → needs-human 'gates missing at merge', never merges (F7)", async () => {
   const { lines, record } = makeRecord();
   const postStatus = basePostStatus();

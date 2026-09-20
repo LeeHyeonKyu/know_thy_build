@@ -218,6 +218,30 @@ export function latestSelfGateFindings(comments, head) {
 }
 
 /**
+ * Feedback loop Task 3 — **이슈에 남은 모든 self-gate 차단.** `latestSelfGateFindings`는 재디스패치될
+ * 빌더에게 "지금 이 head에서 무엇을 고쳐야 하나"를 주는 함수라 head 하나만 본다. 회고는 반대 질문을
+ * 한다: "이 이슈가 결국 머지됐는데, 그 사이 self-gate가 무엇을 막았나." 머지된 이슈의 차단은 곧
+ * **공장이 스스로 만든 라운드**이고, 그것이 결정적 게이트의 오차단이면 KTB가 고칠 발견이다
+ * (데모 #39의 qa-manifest 오차단이 정확히 그것이었다). head별 `attempt`를 그대로 실어 둔다 —
+ * 같은 원인이 몇 번 반복됐는지가 증거의 무게다. 깨진 JSON 블록은 조용히 건너뛴다.
+ */
+export function allSelfGateFindings(comments) {
+  const out = [];
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = SELF_GATE_RETRY.exec(body);
+    if (!m) continue;
+    const j = SELF_GATE_FINDINGS_JSON.exec(body);
+    if (!j) continue;
+    let obj;
+    try { obj = JSON.parse(j[1]); } catch { continue; }
+    if (!Array.isArray(obj?.findings)) continue;
+    out.push({ head: m[2], attempt: Number(m[3]), at: c?.createdAt ?? null, findings: obj.findings });
+  }
+  return out;
+}
+
+/**
  * ADR-020 KTB-25 — **마지막 `… to=factory:queue` 전이 코멘트 이후**의 코멘트만 돌려준다(그런 전이가
  * 한 번도 없었으면 이력 전체).
  *

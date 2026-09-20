@@ -401,3 +401,50 @@ test("A-SF6: accumulateStats sums the qa claim counts and re-derives the ratio (
   expect([statsTable({ qa_approvals: 1, qa_claims_total: 1, qa_na_total: 3, qa_na_ratio: 0.75, qa_na_heavy_approvals: 1 }, total)].flat().join("\n"))
     .toMatch(/qa na ratio \| 0\.75 \(3\/4 claims, na-heavy 1\/1 approvals\) \| 0\.50 \(4\/8 claims, na-heavy 1\/2 approvals\)/);
 });
+
+// ── Feedback loop Task 3 — 원시 발견(raw finding) 수확 ─────────────────────────────────────────
+// 수확의 계약 두 가지: ① **런에 묶인 줄만** 증거다(`docs/factory/runs/**`는 에이전트가 쓸 수 있는
+// 경로다) ② 게이트가 이름을 댄 실패는 발견이 아니다(그건 공장이 제 일을 한 것이다 — 라우팅하면
+// 머지마다 이슈가 열린다).
+test("harvestFindings: 소스 네 갈래와 런 바인딩", async () => {
+  const { harvestFindings, knownRunsFor } = await import("../lib/feedback/harvest-findings.js");
+  const RUNNER = "gha-771";
+  const hb = { id: 1, createdAt: "2026-09-20T10:00:00Z", body: `<!-- factory-heartbeat issue=8 -->\nstage: review · runner: ${RUNNER} · started: t · last: t` };
+  expect([...knownRunsFor([hb])].sort()).toEqual(["771", "gha-771"]);
+
+  const line = (o) => `gates-detail: ${JSON.stringify(o)}`;
+  const record = [
+    "# Run · #8",
+    `## implement · 2026-09-20T10:05Z · ${RUNNER}`,
+    // 이름 댄 실패 — 발견이 아니다
+    line({ gate: "unit", run_id: "771", runner: RUNNER, failing: ["math > adds"], snippet: "expected 1 to be 2" }),
+    // 이름 없는 RED + reason — 하네스/엔진 얘기다
+    line({ gate: "lint", run_id: "771", runner: RUNNER, failing: [], reason: "command exited 127 with 0 failing tests — unhandled error outside tests (see gate log)", snippet: "eslint: not found" }),
+    `## review · 2026-09-20T11:00Z · ${RUNNER}`,
+    `context-manifest: ${JSON.stringify({ role: "correctness", cold_read: false, run_id: "771", runner: RUNNER, round: 1, fields: ["diff", "done_when"] })}`,
+    "",
+  ].join("\n");
+
+  const comments = [
+    hb,
+    reviewHandoff(8, { round: 1, at: "2026-09-20T11:05:00Z", verdicts: [
+      { role: "correctness", verdict: "reject", must_fix: [
+        { id: "mf1", where: ".factory/lib/gates.js:12", claim: "the gate swallows a non-zero exit", evidence: "log" },
+        { id: "mf2", where: "the plan's done_when", claim: "done_when 3 is unverifiable", evidence: "-" },
+      ], on_others: [] },
+    ] }),
+  ];
+
+  const found = harvestFindings({ issue: 8, repo: "o/r", record, comments });
+  const kinds = found.map((f) => `${f.kind}:${f.causal_path}`);
+  // 이름 댄 unit 실패는 없다; 이름 없는 lint RED는 하네스 명령을 가리킨다
+  expect(kinds).toContain("gate:.factory/harness.toml [commands].lint");
+  expect(kinds.some((k) => k.startsWith("gate:") && k.includes("unit"))).toBe(false);
+  // 경로를 댄 must_fix만 발견이 된다(산문 `where`는 이미 lesson 후보다)
+  const mf = found.filter((f) => f.kind === "review-must_fix");
+  expect(mf).toHaveLength(1);
+  expect(mf[0].causal_path).toBe(".factory/lib/gates.js:12");
+  expect(mf[0].role).toBe("correctness");
+  // 같은 런의 그 역할 매니페스트가 붙는다(context adequacy 신호, spec §5)
+  expect(mf[0].context_manifest).toEqual(["diff", "done_when"]);
+});

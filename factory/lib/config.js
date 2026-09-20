@@ -25,8 +25,28 @@ export function loadHarness(root) {
   // 최소 턴 수(호출·접수증·완료 알림·출력 + output 파일 읽기 조각)를 감당하지 못했다.
   // merge_check_wait_sec(KTB-19): ready로 뒤집은 뒤 필수 체크가 queued/pending/in_progress에서
   // 벗어날 때까지 기다리는 상한(초). 15초 간격으로 폴링한다(merge-stage.js MERGE_CHECK_POLL_INTERVAL_MS).
+  // upstream(피드백 루프 Task 3): **기본값을 채우지 않는다.** 없는 것과 빈 문자열은 둘 다 "아무도
+  // 고른 적이 없다"이고, 그때 `ktb` 발견은 교차 저장소 호출 없이 원래 이슈의 코멘트로만 남는다(spec §7).
   h.factory = { orchestration: "workflow", required_checks: ["factory/gates", "factory/review", "factory/integrity"], max_turns: 12, merge_check_wait_sec: 600, ...(h.factory || {}) };
   return h;
+}
+
+/**
+ * ── Feedback loop Task 3 — `[factory].upstream`의 **유일한 독자** (spec §7) ──────────────────────
+ *
+ * `ktb` 발견(= KTB가 배포한 파일이 원인인 발견)이 갈 상류 저장소 `owner/repo`. 없으면 `null`이고,
+ * 그때 루프는 **교차 저장소 호출을 한 번도 하지 않는다** — 라우팅은 설정으로 여는 옵트인이다.
+ *
+ * 모양을 여기서 검사하는 이유: 이 값은 그대로 `gh … -R <repo>`의 인자가 된다. 사람이 URL 전체
+ * (`https://github.com/o/r`)나 공백이 섞인 값을 적어 두면 gh 호출이 매 머지마다 실패하고, 그 실패는
+ * fail-safe 때문에 액션 한 줄로만 남아 아무도 보지 않는다. 모양이 아니면 `null` — "설정 안 됨"과
+ * 같은 자리로 떨어뜨려 로컬 코멘트 경로를 타게 한다(조용한 반복 실패보다 낫다).
+ */
+export function upstreamRepoOf(harness) {
+  const v = harness?.factory?.upstream;
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return /^[\w.-]+\/[\w.-]+$/.test(s) ? s : null;
 }
 /**
  * `loadHarness`가 채우는 기본값(특히 `[factory].max_turns: 12`) 없이, harness.toml을 있는 그대로
