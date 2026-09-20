@@ -37,24 +37,26 @@ const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
 
 const io = () => { const o = { out: [], err: [] }; return { io: { out: (s) => o.out.push(s), err: (s) => o.err.push(s) }, o }; };
 
-test("LABELS: unique names, all factory:*-or-backlog, colors are bare 6-hex", () => {
+test("LABELS: unique names, all factory:*-or-backlog-or-factory-improvement, colors are bare 6-hex", () => {
   const names = LABELS.map((l) => l.name);
   expect(new Set(names).size).toBe(names.length);
   for (const l of LABELS) {
-    expect(l.name === "backlog" || l.name.startsWith("factory:")).toBe(true);
+    expect(["backlog", "factory-improvement"].includes(l.name) || l.name.startsWith("factory:")).toBe(true);
     expect(l.color).toMatch(/^[0-9a-f]{6}$/);
     expect(typeof l.description).toBe("string");
     expect(l.description.length).toBeGreaterThan(0);
   }
   // backlog(1) + 12 §3.1 factory:* states + 6 aux (tier-docs/-standard/-load-bearing, retro-proposal, flaky, harness)
+  // + factory-improvement(1, 피드백 루프가 upstream에 여는 이슈 — 상태가 아니라 분류다; 자세한 계약은 label-catalog.test.js)
   expect(names).toContain("backlog");
+  expect(names).toContain("factory-improvement");
   for (const s of ["queue", "ready", "needs-info", "wont-do", "planned", "in-progress", "awaiting-review", "rework", "approved", "merged", "blocked", "needs-human"]) {
     expect(names).toContain(`factory:${s}`);
   }
   for (const a of ["tier-docs", "tier-standard", "tier-load-bearing", "retro-proposal", "flaky", "harness"]) {
     expect(names).toContain(`factory:${a}`);
   }
-  expect(names.length).toBe(19);
+  expect(names.length).toBe(20);
 });
 
 test("bootstrapPlan: always emits every label op (existing is report-only, never filters)", () => {

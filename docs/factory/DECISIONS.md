@@ -3398,3 +3398,71 @@ rounds-per-issue가 줄었을 때에만 시작한다.** escaped 결함이 **늘�
 (승인 뒤 결함이 샌다 / 머지가 되돌려진다)를 각각 잡기 때문에, 계획 §Phasing의 "escaped-defect rate AND
 revert rate did not increase"를 문자 그대로 측정 가능하게 만든다. 지표가 없으면 스펙 §7의 위험은
 관측되지 않은 채 남고, 그때 Phase 2는 근거 없는 단순화가 된다.
+
+---
+
+## ADR-027 팩토리 피드백 루프 — 개선 대상은 둘이고, 원인 파일의 owner가 갈라 보낸다 — 2026-09-21 (피드백 루프 Task 6)
+
+**질문**: 팩토리는 자기가 무엇을 잘못하고 있는지 **사람의 기억으로만** 안다. 이 세션만 해도 네 건이
+그랬다 — own-cal의 `test_one` 따옴표(아무 테스트도 안 돌렸는데 게이트는 GREEN), own-cal의 Flutter
+툴체인 누락, KTB #39의 self-gate qa-manifest 오차단, KTB #39의 `transition refused: plan roles … !=
+roster []`. 넷 다 사람이 코멘트를 읽다가 발견했고, 그중 둘은 원인이 **KTB가 배포한 코드**였는데도
+KTB 백로그에 닿지 못했다. 게다가 근거가 7일 뒤 사라지는 Actions 아티팩트에 있어서, 발견이 늦으면
+원인을 다시 세울 수도 없었다. 물음은 둘이다: *팩토리 판정을 믿을 근거를 어떻게 남기나*(신뢰),
+*그 근거가 어떻게 고침으로 이어지나*(자기 개선).
+
+**결정 ①(두 대상)**: "팩토리를 개선한다"는 말은 owner가 다른 **두 가지**이고 절대 섞지 않는다
+(스펙 §2). **`harness`** = 사용 저장소가 소유한 팩토리 설정(`harness.toml`, `CHARTER.md`, `scripts/*`,
+보호 경로, 성숙도) — 고치는 사람은 그 저장소의 주인. **`ktb`** = KTB가 배포한 것(`.factory/**` 엔진,
+`.claude/agents/*.md` 프롬프트, 템플릿·기본값, 스킬, tier/로스터 정책) — 고치는 쪽은 KTB.
+셋째 `product`(사용 저장소 코드의 진짜 결함)는 팩토리의 **평소 일**이지 이 루프의 대상이 아니다 —
+결과 지표(escaped defects, ADR-026)로만 센다.
+
+**결정 ②(판정 규칙은 결정적이다)**: 분류는 에이전트의 의견이 아니라 **원인 파일의 owner**다. 설치
+매니페스트(`factory/cli/manifest.js`의 `ownerOf(dest)`)가 이미 설치 파일마다 `factory | user`를 달고
+있으므로, `owner: user` → `harness`, `owner: factory` → `ktb`. 행동 소견(고무도장 승인, 죽은 토론,
+토큰 낭비)은 단일 파일이 없지만 그 원인(프롬프트·tier·로스터)이 전부 `owner: factory`라 본성상 `ktb`다.
+**다중 tag를 허용한다** — own-cal `test_one`이 정확히 그 경우다: 따옴표를 쓴 것은 어댑터(`harness`)지만
+"따옴표를 넣지 말라"는 KTB 템플릿의 안내가 그것을 못 막았다(`ktb`). **`ambiguous`는 절대 떨어뜨리지
+않는다**: 원인 파일을 못 고르면 후보를 둘 다 실어 원래 이슈에 남긴다(자동 라우팅하지 않는다).
+
+**결정 ③(라우팅과 설정, 스펙 §7)**: `harness` → 사용 저장소의 `ensureHarnessIssue`(기존 dedupe 그대로).
+`ktb` → `harness.toml`의 `[factory].upstream`이 가리키는 저장소에 **`factory-improvement` + `backlog`**
+이슈. `upstream`이 비어 있으면 원래 이슈의 코멘트로만 남는다 — **저장소 밖으로 나가는 쓰기는 설정이
+있을 때만 일어나는 opt-in**이고, 크로스-레포 권한(`FACTORY_BOT_TOKEN`의 upstream `issues:write`)은
+사람이 등록한다(팩토리는 시크릿을 만들지 않는다). `ambiguous` → 원래 이슈의 노트.
+
+**결정 ④(`backlog`으로 착지한다 — 스펙 §10 Q4)**: upstream 이슈는 `factory:queue`가 아니라 `backlog`으로
+선다. 팩토리가 자기 자신에 대해 **무엇을 먼저 고칠지는 사람이 고른다**. 자동 큐잉은 "팩토리가 제
+소견으로 제 코드를 고치는 회로"를 사람 없이 닫는 것인데, 그 회로의 첫 오판이 곧바로 다음 오판의
+전제가 된다. 라벨 이름에 `factory:` 접두를 **일부러 붙이지 않았다**: 그 접두는 팩토리가 도는 저장소에서
+이미 상태 궤적을 뜻하고, 이 라벨은 KTB 저장소 자신의 백로그 **분류**다(전이 그래프에 없다 —
+`factory:harness`·`factory:flaky`와 같은 계열이다).
+
+**결정 ⑤(중복 대신 증거 누적)**: 소견은 `fingerprint`(tags + 원인 경로 + 숫자·sha·이슈 참조를 지운
+reason)로 식별한다. 같은 fingerprint의 열린 이슈가 있으면 **새 이슈를 열지 않고** 그 본문의
+`## Evidence`에 목격을 하나 더한다(`factory/lib/feedback/upstream-issue.js`의 `appendEvidence` —
+마커는 정확히 하나로 유지되고, 같은 출처를 두 번 넣어도 멱등이다). 본문 첫 줄의 기계 마커
+`<!-- factory-improvement fp=<hash> tags=<a,b> from=<owner/repo>#<n> -->`가 유일한 dedupe 키다 —
+제목도 라벨도 아니다(둘 다 사람이 고쳐도 되는 줄이라, KTB-23에서 이미 한 번 이 실수를 했다).
+같은 본문 문법을 사람도 쓴다: `.github/ISSUE_TEMPLATE/factory-improvement.md`가 같은 필드를 내놓는다.
+
+**결정 ⑥(도그푸드 증거는 두껍게, 외부 전송은 보류)**: owner가 소유한 저장소(KTB, 데모, own-cal)에는
+원인 파일·줄·명령·테스트·스니펫·역할별 컨텍스트 매니페스트·비용까지 **전부** 싣는다. 외부 어댑터용
+전송(내용 없는 집계, 프라이버시 트리밍, 동의 UX)은 **보류한다**(스펙 §9) — 신호가 실제로 쓸모 있음을
+도그푸드로 증명하기 전에 익명화 설계를 하면, 쓸모없는 신호를 위한 파이프라인만 남는다.
+
+**주의(이 루프가 넘지 않는 선)**:
+- **짝지은 지표만.** 짝 없는 신호에서는 행동 소견을 내지 않는다(escaped defect 없는 승인율, 델타 없는
+  토론 길이, 위험 없는 비용). 100% 승인율 하나로는 고무도장인지 좋은 초안인지 판정 불가다.
+- **건강 신호는 리뷰어 커버리지를 줄이지 않는다.** 이 루프는 개선 이슈를 열 뿐이고, 커버리지를 줄여도
+  되는지는 **ADR-026의 게이트가 단독으로** 정한다(escaped_defects·revert_rate 기준선 + ≥5건 표본).
+  이 루프의 지표를 그 게이트의 대체 근거로 쓰지 않는다.
+- **루프는 이슈를 열 뿐, KTB도 하네스도 스스로 고치지 않는다.** 고침은 평소의 SDD/팩토리 경로로
+  간다(사람의 트리아지 → 큐 → 리뷰 → 사람의 머지). 자동 자기 수정은 이 계획의 non-goal이다(스펙 §9).
+- **내구성 먼저.** 루프가 읽는 것은 런 시점에 `factory/records`에 쓰인 것뿐이다. 7일짜리 아티팩트
+  다운로드는 선택적 보강이지 의존이 아니다 — 이 세션의 근거 소실이 그 규칙의 이유다.
+
+**영향 받는 스펙 절**: `docs/superpowers/specs/2026-09-21-factory-feedback-loop-design.md` §2(두 대상),
+§6(증거 payload), §7(라우팅·설정), §9(non-goal), §10 Q4(착지 라벨). CHARTER 템플릿 `## 개선 이슈`,
+라벨 카탈로그 `factory-improvement`(상태 아님), `factory/lib/feedback/upstream-issue.js`(본문 계약).
