@@ -118,24 +118,41 @@ export async function routeFindings({
     if (c.tags.includes("ktb")) counts.ktb += 1;
   }
 
-  // ── harness: 쓰는 저장소의 harness 이슈 하나(여러 발견이면 표의 여러 줄) ───────────────────────
-  const harnessOnes = classified.filter((c) => c.tags.includes("harness"));
-  if (harnessOnes.length) {
-    try {
-      const r = await ensureHarnessIssue({ gh, issue, entries: harnessOnes.map(harnessEntryOf), pr: null, origin: "feedback" });
-      actions.push({ kind: "harness-issue", step: "feedback-route", issue, harness_issue: r.issue, created: r.created, findings: harnessOnes.length });
-    } catch (e) {
-      actions.push(errorAction(issue, `harness issue failed — ${e?.message || e}`, { tags: ["harness"] }));
-    }
-  }
-
-  // 이 이슈가 **이미 처리한 지문**(로컬 노트의 마커든, 상류로 보낸 영수증이든). 같은 머지를 여러 번
+  // 이 이슈가 **이미 처리한 지문**(로컬 노트의 마커든, 어느 팔의 영수증이든). 같은 머지를 여러 번
   // 다시 읽어도(커서는 full 회차에만 전진한다) 두 번 쓰지 않는다 — 대상의 상태와 무관하다(SF-4).
   const seenFingerprints = new Set();
   for (const c of existingComments || []) {
     for (const m of String(c?.body ?? "").matchAll(ANY_FEEDBACK_MARKER)) seenFingerprints.add(m[1]);
   }
   const fpKey = (fingerprint) => String(fingerprint ?? "none").replace(/\s+/g, "");
+
+  // ── harness: 쓰는 저장소의 harness 이슈 하나(여러 발견이면 표의 여러 줄) ───────────────────────
+  // 재리뷰 SF-b — 이 팔에도 출처 쪽 영수증이 필요하다. `ensureHarnessIssue`의 dedupe는 **열린**
+  // `for=<issue>` 이슈만 보므로, 사람이 그 이슈를 닫으면 창 안의 남은 경량 회고가 같은 옛 증거로
+  // 그것을 다시 연다. 이미 영수증이 있는 지문은 아예 entry로 만들지 않는다.
+  const harnessOnes = classified.filter((c) => c.tags.includes("harness"));
+  const harnessFresh = harnessOnes.filter((c) => !seenFingerprints.has(fpKey(c.fingerprint)));
+  if (harnessOnes.length && !harnessFresh.length) {
+    for (const c of harnessOnes) actions.push({ kind: "routed-already", step: "feedback-route", issue, fingerprint: c.fingerprint, arm: "harness" });
+  } else if (harnessFresh.length) {
+    try {
+      const r = await ensureHarnessIssue({ gh, issue, entries: harnessFresh.map(harnessEntryOf), pr: null, origin: "feedback" });
+      actions.push({ kind: "harness-issue", step: "feedback-route", issue, harness_issue: r.issue, created: r.created, appended: r.appended ?? 0, findings: harnessFresh.length });
+      try {
+        await gh.comment(issue, [
+          harnessFresh.map((c) => routedMarker(c.fingerprint)).join("\n"),
+          `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**가 고칠 것입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}${r.created ? "를 열었습니다" : "에 실었습니다"}.`,
+          "",
+          ...harnessFresh.map((c) => `- \`${[c.causal.path, c.causal.locus].filter(Boolean).join(" ")}\` — ${oneLine(c.payload.reason)} (fp \`${c.fingerprint}\`)`),
+        ].join("\n"));
+        for (const c of harnessFresh) seenFingerprints.add(fpKey(c.fingerprint));
+      } catch (e) {
+        actions.push(errorAction(issue, `harness receipt failed — ${e?.message || e}`));
+      }
+    } catch (e) {
+      actions.push(errorAction(issue, `harness issue failed — ${e?.message || e}`, { tags: ["harness"] }));
+    }
+  }
   const note = async (fingerprint, body, kind, extra) => {
     if (seenFingerprints.has(fpKey(fingerprint))) { actions.push({ kind: `${kind}-skipped`, step: "feedback-route", issue, reason: "already noted", ...extra }); return; }
     await gh.comment(issue, body);
@@ -243,7 +260,7 @@ export async function routeFindings({
  */
 export async function routeMergedIssues({
   gh, repo, upstream = null, issues = [], commentsByIssue = new Map(), records = new Map(),
-  since = null, ownerOf, isInstalled, ktbVersion = null, harness = null,
+  since = null, ownerOf, isInstalled, ktbVersion = null, harness = null, factoryLogins = [],
 } = {}) {
   const sinceMs = since == null ? null : Date.parse(since);
   const byIssue = commentsByIssue instanceof Map ? commentsByIssue : new Map(Object.entries(commentsByIssue || {}));
@@ -257,7 +274,7 @@ export async function routeMergedIssues({
     if (!afterSince(issue.closedAt, sinceMs)) continue;
     routed.push(issue.number);
     let findings = [];
-    try { findings = harvestFindings({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments }); }
+    try { findings = harvestFindings({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments, factoryLogins }); }
     catch (e) { actions.push(errorAction(issue.number, `harvest failed — ${e?.message || e}`)); continue; }
     if (!findings.length) continue;
     const r = await routeFindings({

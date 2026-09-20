@@ -162,6 +162,24 @@ export const advisoryFindings = (findings = []) => findings.filter((f) => !f.blo
 /** True iff a blocking finding needs a protected-path / harness change the builder cannot make. */
 export const harnessFinding = (findings = []) => findings.some((f) => f.blocking && f.harness);
 
+/**
+ * ── Feedback loop (T3 re-review NEW-MF-1) — **"not run" is a fact, and it has a reason** ─────────
+ *
+ * `ranChecks` was the only thing the record line carried, so a check's *absence* from a later run
+ * was indistinguishable between two opposite situations:
+ *   · KTB **withdrew** the check (a new version stopped grading it — that is evidence the check
+ *     itself was wrong, and the feedback loop may route the earlier block to KTB), and
+ *   · the check simply **had no input** this round (no added tests ⇒ no mutation check; no rework
+ *     handoff ⇒ no pins; no schema'd gates result ⇒ no gates check).
+ * The second is the cheap adversarial case: a builder blocked by `survivor: test/x.test.js asserts
+ * nothing` **deletes that test**, which empties `addedTests`, which drops `mutation` from the next
+ * line — and the block it escaped would be relabelled a KTB engine defect. So every check that did
+ * not run now says **why**, and the loop treats `no-input` as *not* evidence.
+ */
+export const SKIP_REASONS = Object.freeze({
+  NO_INPUT: "no-input",                 // 이 라운드에 그 검사가 볼 것이 없었다(추가된 테스트 없음 등)
+});
+
 export async function runSelfGate({
   root, harness,
   gates = null, run, changedTests = [], changedSources = [],
@@ -170,10 +188,13 @@ export async function runSelfGate({
 } = {}) {
   const findings = [];
   const ranChecks = [];
+  const skippedChecks = [];
+  const skip = (check, why, reason = SKIP_REASONS.NO_INPUT) => skippedChecks.push({ check, reason, detail: why });
 
   // (1) Gates — reuse the already-computed result. Only a schema'd verdict is decisive; a null
   // (unrun / self-reported) gates result is not a finding here — the stage's own gate handling
   // owns that path, and the self-gate never re-runs gates (the cost note).
+  if (gates == null || gates.schema !== "factory.gates.v1") skip("gates", "no schema'd gates verdict in this run");
   if (gates != null && gates.schema === "factory.gates.v1") {
     ranChecks.push("gates");
     if (gates.status !== "GREEN") {
@@ -191,6 +212,7 @@ export async function runSelfGate({
   // enforced where it belongs: the qa reviewer at review and `qaEvidenceGate` at `factory:approved`.
 
   // (3) New-test mutation check (Task 4). Deterministic, no LLM.
+  if (!(Array.isArray(changedTests) && changedTests.length)) skip("mutation", "this round added no tests to mutate");
   if (Array.isArray(changedTests) && changedTests.length) {
     ranChecks.push("mutation");
     let mut = null;
@@ -227,11 +249,46 @@ export async function runSelfGate({
 
   // (4) Regression pins (Task 5). Guardable pins re-run their guard test; a red guard is a blocking
   // regression naming the pin id. Prose pins are advisory only — no unsatisfiable loop (spec §9 Q5).
+  if (!(Array.isArray(pins) && pins.length)) skip("pins", "no regression pins carried into this round");
   if (Array.isArray(pins) && pins.length) {
     ranChecks.push("pins");
     const { findings: pinFindings } = await evaluatePins({ pins, run, harness, root, changedTests });
     findings.push(...pinFindings);
   }
 
-  return { ok: !findings.some((f) => f.blocking), findings, ranChecks };
+  return { ok: !findings.some((f) => f.blocking), findings, ranChecks, skippedChecks };
+}
+
+/**
+ * ── Feedback loop (T3 re-review NEW-MF-1) — self-gate 관측의 **기계 계약** ────────────────────────
+ *
+ * 사람이 읽는 `self-gate: …` 한 줄은 그대로 두고(그 문구는 사람의 것이다), 그 옆에 한 줄 JSON을
+ * 더 쓴다 — `gates-detail:`/`context-manifest:`와 같은 모양, 같은 이유다:
+ *
+ *   `self-gate-detail: {"run_id":…,"runner":…,"ktb_version":…,"blocked":…,"harness":…,
+ *                       "ran":[…],"skipped":[{"check":…,"reason":"no-input"}]}`
+ *
+ * 세 필드가 피드백 루프의 판정 재료다:
+ *   · `ran` / `skipped` — "돌지 않았다"와 "**왜** 돌지 않았다"를 가른다(위 `SKIP_REASONS`).
+ *   · `ktb_version` — **러너가** 설치 매니페스트(`.factory/install-manifest.json`, 에이전트가 못 쓴다)
+ *     에서 읽은 그 런의 팩토리 버전. 검사가 거둬들여졌다는 유일하게 건전한 신호가 이것이다:
+ *     빌더는 테스트를 지울 수는 있어도 KTB 버전을 올릴 수는 없다.
+ *   · `run_id`/`runner` — 다른 두 줄과 같은 provenance 계약(`docs/factory/runs/**`는 에이전트가
+ *     덧붙일 수 있는 경로다). 묶이지 않은 줄은 증거가 아니다.
+ */
+export const SELF_GATE_DETAIL_PREFIX = "self-gate-detail: ";
+export function selfGateDetailLine(result, { runId = null, runnerId = null, ktbVersion = null, harnessBlock = false } = {}) {
+  try {
+    return SELF_GATE_DETAIL_PREFIX + JSON.stringify({
+      run_id: runId ?? null,
+      runner: runnerId ?? null,
+      ktb_version: ktbVersion ?? null,
+      blocked: result?.ok === false,
+      harness: Boolean(harnessBlock),
+      ran: Array.isArray(result?.ranChecks) ? [...result.ranChecks] : [],
+      skipped: (Array.isArray(result?.skippedChecks) ? result.skippedChecks : []).map((s) => ({ check: s.check, reason: s.reason })),
+    });
+  } catch (e) {
+    return `${SELF_GATE_DETAIL_PREFIX}unavailable — ${e?.message || e}`;
+  }
 }

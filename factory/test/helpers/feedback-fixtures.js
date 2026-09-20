@@ -1,9 +1,13 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runGates, gatesDetailLines } from "../../lib/gates.js";
 import { makeFakeRun } from "../../lib/exec.js";
 import { heartbeatBody } from "../../lib/heartbeat.js";
-import { selfGateRetryComment } from "../../lib/retro/issue-comments.js";
+import { selfGateRetryComment, transitionRefusedComment } from "../../lib/retro/issue-comments.js";
 import { renderHandoff } from "../../lib/handoff.js";
-import { transitionRefusedMarker } from "../../lib/retro/issue-comments.js";
+import { appendRunRecord } from "../../lib/run-record.js";
+import { selfGateDetailLine } from "../../lib/self-gate.js";
 
 /**
  * ── T3 리뷰의 근본 교훈: **픽스처는 진짜 생산자가 만든 것이어야 한다** ───────────────────────────
@@ -19,7 +23,7 @@ export const RUNNER = "gha-99001";
 export const RUN_ID = "99001";
 
 export const heartbeat = (issue, stage, runner = RUNNER, at = "2026-09-20T10:00:00Z") => ({
-  id: issue * 100 + stage.length, createdAt: at,
+  id: issue * 100 + stage.length, createdAt: at, author: "factory-bot",
   body: heartbeatBody({ issue, stage, runnerId: runner, started: at, last: at }),
 });
 
@@ -68,13 +72,19 @@ export const vitestReport = ({ passed = 1, failures = [] } = {}) => JSON.stringi
   }],
 });
 
-/** run 기록 한 장을 `appendRunRecord`와 같은 문법으로 조립한다(섹션 헤더 + 줄들). */
+/**
+ * run 기록 한 장 — **`appendRunRecord`가 실제로 쓴 파일**을 그대로 읽어 온다(임시 디렉터리에 쓰고
+ * 지운다). 섹션 헤더 문법을 손으로 다시 적으면 그것이 곧 "생산자가 낼 수 없는 모양"의 다음 판본이다.
+ */
 export function recordOf(issue, title, sections) {
-  const out = [`# Run · #${issue}${title ? ` ${title}` : ""}`];
-  for (const s of sections) {
-    out.push("", `## ${s.stage} · ${s.at} · ${s.runner ?? RUNNER}`, ...s.lines);
-  }
-  return `${out.join("\n")}\n`;
+  const root = mkdtempSync(join(tmpdir(), "ktb-fixture-"));
+  try {
+    let p = null;
+    for (const s of sections) {
+      p = appendRunRecord({ root, issue, title, stage: s.stage, runnerId: s.runner ?? RUNNER, lines: s.lines, now: s.at });
+    }
+    return p ? readFileSync(p, "utf8") : "";
+  } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
 export const selfGateComment = ({ issue, head, attempt, findings, at }) => ({
@@ -82,15 +92,34 @@ export const selfGateComment = ({ issue, head, attempt, findings, at }) => ({
   body: selfGateRetryComment({ issue, head, attempt, findings }),
 });
 
-/** `transition.js`가 거부를 적는 모양 그대로(마커 두 줄 + 사유 + 라벨 이동 문장). */
+/** `transition.js`가 거부를 적는 코멘트 전문 — 이제 그 생산자가 라이브러리에 있다. */
 export const refusalComment = ({ from, to, reason, at, id = 9001 }) => ({
-  id, createdAt: at,
+  id, createdAt: at, author: "factory-bot",
+  body: transitionRefusedComment({ from, to, reason }),
+});
+
+/**
+ * `self-gate-detail:` 한 줄 — `selfGateDetailLine`이 만든다. `ran`/`skipped`/`ktb_version`을 직접
+ * 주는 짧은 길을 둔다(그 값들을 만드는 `runSelfGate`는 실제 mutation 실행을 요구하므로, 이 테스트가
+ * 고정하려는 것 — **줄의 문법과 그 줄을 읽는 판정** — 에는 과한 비용이다).
+ */
+export const selfGateDetail = ({ ran = [], skipped = [], blocked = false, harness = false, ktbVersion = "1.3.2", runner = RUNNER, runId = RUN_ID }) =>
+  selfGateDetailLine(
+    { ok: !blocked, ranChecks: ran, skippedChecks: skipped.map((s) => (typeof s === "string" ? { check: s, reason: "no-input" } : s)) },
+    { runId, runnerId: runner, ktbVersion, harnessBlock: harness },
+  );
+
+/** `:unstick`이 남기는 결정 코멘트. `cause`는 선택 — 그 필드만이 귀속의 증거다(재리뷰 NEW-MF-2). */
+export const humanDecisionComment = ({ issue, skill = "unstick", decision = "retry", reason, cause = null, ktbFix = null, author = "LeeHyeonKyu", at, id = 7001 }) => ({
+  id, createdAt: at, author,
   body: [
-    `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script reason=refused -->`,
-    transitionRefusedMarker({ from, to }),
-    `**전이 거부** ${from} → ${to}: ${reason}`,
-    "",
-    "라벨을 `factory:needs-human`으로 옮겼습니다. 산출물을 보강한 뒤 `:unstick`으로 재개하세요.",
+    `<!-- human-decision:v1 issue=${issue} skill=${skill} -->`,
+    "```yaml",
+    `decision: ${decision}`,
+    ...(cause ? [`cause: ${cause}`] : []),
+    ...(ktbFix ? [`ktb_fix: "${ktbFix}"`] : []),
+    `reason: ${JSON.stringify(reason)}`,
+    "```",
   ].join("\n"),
 });
 

@@ -3,8 +3,9 @@ import { parseHeartbeat } from "../heartbeat.js";
 import { runIdOfRunner } from "../run-record.js";
 import { GATES_DETAIL_PREFIX } from "../gates.js";
 import { CONTEXT_MANIFEST_PREFIX } from "../context.js";
+import { SELF_GATE_DETAIL_PREFIX } from "../self-gate.js";
 import {
-  ACTUALLY_MOVED_TO_NEEDS_HUMAN, allSelfGateFindings, NEEDS_HUMAN_LABEL,
+  ACTUALLY_MOVED_TO_NEEDS_HUMAN, allSelfGateFindings, HUMAN_DECISION, NEEDS_HUMAN_LABEL,
   REFUSAL_REASON, TRANSITION_REFUSED, TRANSITION_TO,
 } from "../retro/issue-comments.js";
 
@@ -44,11 +45,17 @@ import {
  * | 테스트 게이트 + `parsed:true` + `failing[]` 있음           | 발견 아님 | — (공장이 제 일을 했다) |
  * | `reason`이 unhandled(KTB-35)                               | harness | `.factory/harness.toml [commands].<gate>` |
  * | `reason`이 broken-base                                     | 발견(제품) | 깨진 테스트의 파일 |
- * | `code` 127 · `command not found` · `No such file`          | harness | `harness.toml [runtime].setup` (툴체인이 없다) |
+ * | `code` 127 · `command not found` · `No such file`          | harness | `.factory/harness.toml [runtime].setup` (툴체인이 없다) |
  * | `code` 126 · `unknown option` · `not recognized`           | harness | `.factory/harness.toml [commands].<gate>` (명령 문자열이 틀렸다) |
  * | 진단이 전부 error 미만인데 RED (`info •` 만 있음)          | harness | `.factory/harness.toml [commands].<gate>` (명령이 info를 치명으로 친다) |
- * | 테스트 게이트 + `parsed:false` (리포트를 못 남겼다)        | harness | `.factory/harness.toml [commands].<gate>` |
+ * | 테스트 게이트 + `parsed:false` + `code`가 셸 실패           | harness | `.factory/harness.toml [commands].<gate>` |
+ * | 테스트 게이트 + `parsed:false` + `code` 1 (평범한 실패)    | **ambiguous** | (러너가 제품 코드에서 죽었을 수도 있다 — 단정하지 않는다) |
  * | 그 밖(리포트 없는 lint/typecheck RED 등)                   | **발견 아님** | — (제품 코드에 대한 평범한 판정이다) |
+ *
+ * 끝에서 두 번째 줄이 재리뷰 SF-a다: `parsed:false`의 잔여 경우는 "러너가 리포트를 쓰기 전에
+ * **제품 코드에서** 죽었다"(빌더의 import 오류, 세그폴트)일 수 있다. 그것을 하네스 명령의 결함이라고
+ * **단정**하면 채택자 저장소에 엉뚱한 파일을 지목하는 harness 이슈가 열린다 — 셸 수준 실패(126/127,
+ * 위 두 줄)가 아닌 `parsed:false`는 두 후보를 적은 노트로 올린다(spec §2: 오라우팅보다 미판정이 낫다).
  *
  * 마지막 줄이 T3 리뷰 MF-3(b)가 잡은 자리다. 예전 규칙은 `reason`에만 걸려 있었는데 `reason`은
  * **리포트를 읽은 테스트 게이트**에만 붙는다 — 그래서 채택자의 진짜 하네스 RED(A·C 행)는 경로 없는
@@ -61,17 +68,16 @@ import {
  * 전부 KTB의 개선 이슈로 올라간다. 책임이 정반대로 간다(T3 리뷰 MF-1, Global Constraint 1).
  *
  * 그래서 `ktb`는 **검사 자신이 틀렸다는 증거**가 있을 때만 준다. 증거는 세 종류이고, 각각이 이
- * 이슈의 durable한 기록에서 나온다(`attributionFor`):
- *   (a) `infrastructure` — finding이 인프라급이다(`harness: true`, `misconfigured`, "could not run").
- *       이것은 `ktb`가 아니라 **`harness`**다: 검사가 못 돈 이유는 채택자의 하네스가 단일 테스트를
- *       못 돌리는 것이기 때문이다.
- *   (b) `human-decision` — 이 이슈의 `human-decision:v1` 코멘트가 멈춤을 **공장 탓으로 귀속**했다
- *       (데모 #39의 unstick: "needs-human was caused by two self-gate defects (fixed in 1.3.2)").
- *       사람이 이미 판정했고 그 판정은 코멘트에 남아 있다 — 루프는 그것을 읽을 뿐 다시 추측하지 않는다.
- *   (c) `check-withdrawn` — 같은 이슈의 **나중** self-gate 관측이 그 검사를 아예 돌리지 않았다
- *       (`self-gate: gates+contract → BLOCKED` 뒤에 `self-gate: gates → ok`). 빌더가 결함을 고치면
- *       검사 목록은 그대로다 — 목록에서 **사라지는** 것은 KTB가 그 검사를 거둬들였을 때뿐이므로,
- *       이것이 "검사가 틀렸다"의 결과로 증명된 형태다.
+ * 이슈의 durable한 기록에서 나온다(`attributionFor`에 정확한 조건이 적혀 있다):
+ *   (a) `infrastructure` — finding이 `harness: true`다(검사가 이 하네스에서 못 돌았다). `ktb`가
+ *       아니라 **`harness`**다: 고치는 사람은 채택자다.
+ *   (b) `human-decision` — 이 이슈의 `human-decision:v1` 코멘트가 **`cause: factory-defect`라는
+ *       구조화된 필드**를 달고 있고, 그 코멘트의 **작성자가 팩토리 계정이 아니다**. 산문 정규식은
+ *       쓰지 않고(정직한 `:unstick` 문장이 오발한다), 작성자 검사가 없으면 아무 에이전트나
+ *       그 한 줄을 적어 모든 차단을 상류로 세탁할 수 있다.
+ *   (c) `check-withdrawn` — 그 검사가 막았던 런보다 **KTB 버전이 높은** 나중 런에서 그 검사가
+ *       `ran`에도 없고 `skipped: no-input`에도 없다. 빌더는 테스트를 지울 수는 있어도 KTB 버전을
+ *       올릴 수는 없다. 증거는 **검사 이름으로 묶인다**(`gates` 증거가 `mutation` finding을 올리지 않는다).
  * 셋 중 아무것도 없으면 → 발견의 인과 파일은 finding이 **스스로 지목한 경로**(survivor의 테스트 파일,
  * pin의 guard)이고, 그것은 `[test].test_glob`에 걸려 `product`(disposition `outcome`)로 떨어진다 —
  * 라우팅하지 않는다. 지목한 경로조차 없으면 발견으로 내지 않는다(경로 없는 `ambiguous` 노트를
@@ -89,6 +95,7 @@ import {
 const SECTION = /^##\s+(\S+)\s+·\s+(\S+)\s+·\s+(.+)$/;
 const GATES_DETAIL_RE = new RegExp(`^${GATES_DETAIL_PREFIX}(\\{.*\\})$`);
 const MANIFEST_RE = new RegExp(`^${CONTEXT_MANIFEST_PREFIX}(\\{.*\\})$`);
+const SELF_GATE_DETAIL_RE = new RegExp(`^${SELF_GATE_DETAIL_PREFIX}(\\{.*\\})$`);
 
 /** 게이트가 명령의 비정상 종료를 스스로 적은 문구(`gates.js` `unhandledReason`의 안정된 꼬리). */
 const UNHANDLED_RE = /unhandled error outside tests/;
@@ -103,7 +110,7 @@ const BAD_INVOCATION_RE = /unknown option|unrecognized option|invalid option|Cou
 const DIAGNOSTIC_INFO_RE = /(?:^|\n)\s*(?:info|hint|note)\s+[•·]/i;
 const DIAGNOSTIC_ERROR_RE = /(?:^|\n)\s*(?:error|severe|fatal)\s+[•·]/i;
 /** `[runtime].setup`이 깔아야 할 것이 없다 — 채택자의 하네스에서 이 자리의 이름. */
-export const SETUP_LOCUS = "harness.toml [runtime].setup";
+export const SETUP_LOCUS = ".factory/harness.toml [runtime].setup";
 /** self-gate/전이 거부가 `ktb`로 갈 수 있는 유일한 문. 세 증거 중 하나 — `attributionFor` 참조. */
 export const ATTRIBUTION_KINDS = Object.freeze(["infrastructure", "human-decision", "check-withdrawn"]);
 
@@ -170,81 +177,120 @@ export function parseRecordEvidence(text) {
     if (g) { const o = safeJson(g[1]); if (o) gates.push({ ...o, section }); continue; }
     const m = MANIFEST_RE.exec(line);
     if (m) { const o = safeJson(m[1]); if (o) { manifests.push({ ...o, section }); } continue; }
-    const sg = parseSelfGateLine(line);
-    if (sg) selfGateLines.push({ ...sg, section });
+    const sg = SELF_GATE_DETAIL_RE.exec(line);
+    if (sg) { const o = safeJson(sg[1]); if (o) selfGateLines.push({ ...o, section }); }
   }
   return { gates, manifests, selfGateLines };
-}
-
-/**
- * `run-stage.js`가 implement마다 남기는 `self-gate:` 한 줄. 네 모양이 있고, 여기서 필요한 것은
- * **어떤 검사가 돌았고 막았는가**다:
- *   `self-gate: gates+contract → BLOCKED — attempt 1 → factory:planned — <summary>`
- *   `self-gate: gates → BLOCKED (harness) — <summary>`
- *   `self-gate: gates → ok (2 advisory)`
- *   `self-gate: BLOCKED — <reason>`            (판정 불가 — 검사 목록이 없다)
- * `checks`가 그 런이 실제로 돌린 검사 집합(`sg.ranChecks`)이다. 증거 (c)가 읽는 것이 정확히 이것:
- * 나중 런의 집합에서 사라진 검사는 빌더가 고친 것이 아니라 KTB가 **거둬들인** 것이다.
- */
-const SELF_GATE_LINE = /^self-gate: (?:([A-Za-z0-9_+-]+) → )?(BLOCKED(?: \(harness\))?|ok)(?=\s|$)(.*)$/;
-export function parseSelfGateLine(line) {
-  const m = SELF_GATE_LINE.exec(String(line ?? "").trimEnd());
-  if (!m) return null;
-  const checks = m[1] && m[1] !== "none" ? m[1].split("+").filter(Boolean) : [];
-  return { checks, blocked: m[2].startsWith("BLOCKED"), harness: m[2].includes("(harness)"), rest: (m[3] || "").trim() };
 }
 
 const roundOf = (v) => (Number.isInteger(v) ? v : null);
 
 /**
- * ## `attribution` — self-gate/전이 거부가 `ktb`로 갈 수 있는 **유일한** 문 (T3 리뷰 MF-1)
+ * ## `attribution` — self-gate/전이 거부가 `ktb`로 갈 수 있는 **유일한** 문 (T3 리뷰 MF-1 + 재리뷰)
  *
- * 이슈 하나의 durable한 기록에서 세 증거를 찾는다(`ATTRIBUTION_KINDS`). 셋 다 없으면 이 이슈의
- * self-gate 차단·전이 거부는 **공장이 제 일을 한 것**으로 읽는다 — 결함은 빌더의 코드/테스트이지
- * 판정 엔진이 아니다.
+ * 기본값은 언제나 "공장이 제 일을 했다"다. 세 증거 중 하나가 **그 finding의 그 검사에 대해** 있을
+ * 때에만 주인이 바뀐다. 1차 구현은 이 문이 (b) 산문 정규식 + (c) 부재 추론이었고, 둘 다 뚫렸다 —
+ * 재리뷰가 실제 생산자로 시연했다. 지금 모양은 그 두 구멍을 각각 닫는다:
  *
- * (b) `human-decision:v1` — `:unstick` 스킬이 남기는 코멘트. 사람이 "이 멈춤은 공장 탓"이라고
- *     이미 판정했고 그 문장이 이슈에 남아 있다(데모 #39). 귀속의 근거는 그 사람의 문장이지 우리의
- *     추측이 아니므로, 여기서는 **공장을 지목하는 어휘**가 실제로 있을 때만 받는다.
- * (c) `check-withdrawn` — 나중 self-gate 관측의 검사 **집합**에서 그 검사가 사라졌다. 빌더가 결함을
- *     고치면 검사는 여전히 돌고 통과할 뿐이다 — 목록에서 **사라지는** 것은 KTB가 그 검사를 거둬들인
- *     경우뿐이므로, 그것이 "검사 자신이 틀렸다"의 결과로의 증명이다. 나중에 **통과**한 것은 증거가
- *     아니다(그게 바로 "빌더가 고쳤다"의 모양이고, 그것까지 세면 MF-1이 그대로 돌아온다).
- * (a)는 finding 단위라 여기가 아니라 `selfGateFindings`에서 본다(그리고 `ktb`가 아니라 `harness`다).
+ * ### (a) `infrastructure` → **`harness`** (ktb가 아니다)
+ * finding이 `harness: true`(검사가 못 돌았다 — 하네스가 단일 테스트를 못 돌린다)다. 고치는 사람은
+ * 채택자이고 착지점은 그 저장소의 harness 이슈다. finding 단위라 `selfGateFindings`가 본다.
+ *
+ * ### (b) `human-decision` → 사람이 이미 공장 탓으로 판정했다
+ * 두 조건이 **모두** 필요하다(재리뷰 NEW-MF-2):
+ *   ① **구조화된 필드**: 결정 yaml의 `cause: factory-defect`. 산문 정규식은 쓰지 않는다 —
+ *      "the stall was caused by the self-gate blocking twice"(서술) 같은 정직한 `:unstick` 문장이
+ *      셋 중 셋 트리거됐고, 그것은 `classify.js`가 자기 안내-실패 규칙에서 이미 거부한 실패 방식이다
+ *      ("방아쇠는 증거여야지 어휘여서는 안 된다"). 이제 `:unstick` 스킬이 그 필드를 **쓴다**.
+ *   ② **작성자가 사람이다**: `gh issue comment`는 훅이 일부러 열어 둔 문이라 어떤 스테이지
+ *      에이전트든 `human-decision:v1` + `cause: factory-defect`를 적어 모든 self-gate 차단을
+ *      상류로 세탁할 수 있다(시연됨). 그래서 작성자가 팩토리 계정(`resolveFactoryLogins`)이면
+ *      **무시한다** — 에이전트가 적은 결정은 사람의 결정이 아니다. 작성자를 아예 모르면(옛 코멘트
+ *      스냅샷) 그것도 증거가 아니다: 모르는 것은 통과가 아니다.
+ *
+ * ### (c) `check-withdrawn` → KTB가 그 검사를 거둬들였다
+ * 1차 구현은 "나중 줄의 검사 집합에 없다"였는데, `ranChecks`는 고정 목록이 아니라 **입력이 있었던
+ * 검사**의 목록이다: `mutation`은 추가된 테스트가 있어야, `pins`는 rework 핸드오프가 있어야 돈다.
+ * 곧 `survivor: test/x.test.js asserts nothing`에 막힌 빌더가 **그 테스트를 지우면** 다음 줄에서
+ * `mutation`이 사라지고, 그가 빠져나간 차단이 KTB의 엔진 결함으로 상류에 열렸다(시연됨).
+ * 그래서 이제 세 조건을 **전부** 요구한다:
+ *   ① 나중 관측의 `ran`에 그 검사가 없고,
+ *   ② 그 검사가 `skipped`에 `no-input`으로 적혀 있지 **않으며**(적혀 있으면 "볼 것이 없었다"는
+ *      기록된 사실이다 — 거둬들임이 아니다),
+ *   ③ 나중 관측의 `ktb_version`이 막은 관측의 것보다 **높다**. 빌더는 테스트를 지울 수는 있어도
+ *      KTB 버전을 올릴 수는 없다 — 그 값은 러너가 설치 매니페스트에서 읽어 줄에 싣고, 그 파일은
+ *      에이전트가 쓸 수 없다(`FACTORY_ENUM` deny + 훅).
+ * 그리고 증거는 **검사 이름으로 묶인다**: `gates`가 거둬들여졌다는 사실이 `mutation` finding을
+ * 승격시키지 못한다(1차 구현은 이슈 단위 불리언 하나였다).
  */
-const HUMAN_DECISION = /<!--\s*human-decision:v1\s+issue=(\d+)\s+skill=(\S+)\s*-->/;
-/** 사람의 문장이 **공장**을 지목하는가. 어휘가 아니라 주장이어야 한다(classify.js의 안내-실패 규칙과 같은 원칙). */
-const BLAMES_FACTORY_RE = new RegExp([
-  "self-gate defect", "factory defect", "factory bug", "engine defect",
-  "caused by .{0,40}(?:self-gate|factory|know-thy-build|ktb)",
-  "fixed in (?:know-thy-build |ktb )?\\d+\\.\\d+", "false(?:ly)? block",
-].join("|"), "i");
+const HUMAN_DECISION_CAUSE = /^\s*cause:\s*["']?factory-defect["']?\s*$/m;
+const HUMAN_DECISION_KTB_FIX = /^\s*ktb_fix:\s*["']?([^\s"']+)["']?\s*$/m;
 
-export function attributionFor({ comments = [], selfGateLines = [] } = {}) {
+/** `1.3.10` > `1.3.2` — 점으로 끊어 숫자로 비교한다(문자열 비교는 10을 2보다 작게 읽는다). */
+export function isNewerVersion(a, b) {
+  // `Number("")`는 **0**이다 — 빈 조각을 먼저 버리지 않으면 `null`/`""`이 "0.0.0"이 되어 모든
+  // 실제 버전보다 낮게 읽힌다(= 버전을 모르는 런이 withdrawal 증거를 만든다).
+  const parse = (v) => String(v ?? "").trim().replace(/^v/, "").split(/[.+-]/).filter((p) => p !== "").map((p) => Number(p)).filter((n) => Number.isFinite(n));
+  const x = parse(a);
+  const y = parse(b);
+  if (!x.length || !y.length) return false;                           // 모르면 주장하지 않는다
+  for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+/**
+ * `attributionFor({ comments, selfGateLines, factoryLogins }) → { evidenceFor(check), evidence }`
+ * `selfGateLines`는 **`self-gate-detail:` 한 줄 JSON**이다(`self-gate.js#selfGateDetailLine`) —
+ * 사람이 읽는 `self-gate: …` 줄이 아니다. 그 줄에는 `ran`/`skipped`/`ktb_version`이 없다.
+ */
+export function attributionFor({ comments = [], selfGateLines = [], factoryLogins = [] } = {}) {
   const evidence = [];
-  for (const c of comments) {
+  // `null`은 "팩토리 계정 이름을 확인하지 못했다"이고 `[]`와 **다르다**: 봇 이름을 모르면 사람의
+  // 결정과 에이전트의 결정을 가를 수 없으므로 (b)를 통째로 거부한다(모르는 것은 통과가 아니다).
+  const bots = factoryLogins == null ? null : new Set(factoryLogins.filter(Boolean).map((l) => String(l).toLowerCase()));
+
+  // (b) 구조화된 필드 + 사람 작성자.
+  for (const c of bots == null ? [] : comments) {
     const body = String(c?.body ?? "");
     const hd = HUMAN_DECISION.exec(body);
     if (!hd) continue;
-    const m = BLAMES_FACTORY_RE.exec(body);
-    if (m) evidence.push({ kind: "human-decision", detail: `human-decision:v1 (skill=${hd[2]}) attributes the stall to the factory: "${m[0]}"` });
+    if (!HUMAN_DECISION_CAUSE.test(body)) continue;                   // 산문은 증거가 아니다 — 필드만이 증거다
+    const author = c?.author == null ? null : String(c.author);
+    if (!author) continue;                                            // 작성자를 모르면 통과시키지 않는다
+    if (bots.has(author.toLowerCase())) continue;                     // 에이전트가 적은 "사람의 결정"은 결정이 아니다
+    const fix = HUMAN_DECISION_KTB_FIX.exec(body)?.[1] ?? null;
+    evidence.push({
+      kind: "human-decision", check: null, author,
+      detail: `human-decision:v1 (skill=${hd[2] ?? "unknown"}) by @${author} declares \`cause: factory-defect\`${fix ? ` (ktb_fix: ${fix})` : ""}`,
+    });
   }
-  // (c) 나중 관측에서 사라진 검사. 줄은 시간순이다(run 기록은 append-only).
-  const withdrawn = new Set();
+
+  // (c) 버전이 올라간 뒤 그 검사가 더는 돌지 않는다. 줄은 시간순이다(run 기록은 append-only).
   for (let i = 0; i < selfGateLines.length; i += 1) {
-    if (!selfGateLines[i].blocked) continue;
-    for (const check of selfGateLines[i].checks) {
+    const blockedLine = selfGateLines[i];
+    if (!blockedLine.blocked) continue;
+    for (const check of blockedLine.ran || []) {
       for (let j = i + 1; j < selfGateLines.length; j += 1) {
-        // 그 뒤의 **첫** 관측만 본다: 여전히 돌고 있으면(막았든 통과했든) 거둬들인 것이 아니고,
-        // 목록에 없으면 거둬들인 것이다.
-        if (selfGateLines[j].checks.includes(check)) break;
-        withdrawn.add(check);
+        const later = selfGateLines[j];
+        if ((later.ran || []).includes(check)) break;                 // 여전히 돈다 — 거둬들인 것이 아니다
+        const skipped = (later.skipped || []).find((s) => s?.check === check);
+        if (skipped) break;                                           // "볼 것이 없었다"는 기록된 사실이다 — 증거가 아니다
+        if (!isNewerVersion(later.ktb_version, blockedLine.ktb_version)) break;  // 버전이 안 올랐다 — 빌더가 바꾼 것이다
+        evidence.push({
+          kind: "check-withdrawn", check,
+          detail: `check \`${check}\` ran at ktb ${blockedLine.ktb_version} and is neither run nor skipped at the newer ktb ${later.ktb_version} — the check was withdrawn, not satisfied`,
+        });
         break;
       }
     }
   }
-  for (const check of withdrawn) evidence.push({ kind: "check-withdrawn", check, detail: `a later self-gate run on this issue no longer blocks on \`${check}\` — the check was withdrawn, not satisfied` });
-  return { blamesFactory: evidence.length > 0, evidence, withdrawn };
+
+  /** 이 **검사**에 대한 증거만. 검사를 모르는 증거((b) — 이슈 전체에 대한 사람의 판정)는 언제나 센다. */
+  const evidenceFor = (check) => evidence.filter((e) => e.check == null || e.check === check);
+  return { evidence, evidenceFor };
 }
 
 /** RED 게이트 → 발견(§②의 표). 기본값은 "발견 아님". */
@@ -285,9 +331,12 @@ function gateFindings({ issue, repo, gates }) {
       causalPath = `.factory/harness.toml [commands].${g.gate}`;
       why = `the \`${g.gate}\` command went RED with no error-severity diagnostic — it is configured to fail on info-level findings`;
     } else if (isTestGate && g.parsed === false) {
-      // 테스트 게이트인데 리포트를 못 남겼다 — 명령이 리포트를 쓰기 전에 끝났다는 뜻이다.
-      causalPath = `.factory/harness.toml [commands].${g.gate}`;
-      why = `the \`${g.gate}\` command exited ${code ?? "non-zero"} without writing a test report`;
+      // 테스트 게이트인데 리포트를 못 남겼다. 셸 수준 실패는 위에서 이미 걸렀으므로 남은 것은
+      // "러너가 무언가에 죽었다"이고, 그 무언가는 **제품 코드일 수도 있다**(빌더의 import 오류,
+      // 세그폴트). 하네스 명령의 결함이라고 단정하면 채택자 저장소에 엉뚱한 파일을 지목하는 이슈가
+      // 열린다 — 경로를 비워 `ambiguous`로 올린다(재리뷰 SF-a; spec §2: 오라우팅보다 미판정이 낫다).
+      causalPath = null;
+      why = `the \`${g.gate}\` command exited ${code ?? "non-zero"} without writing a test report — it is not decidable from the record whether the command or the code under test died`;
     } else {
       // 리포트 없는 lint/typecheck RED 등 — 제품 코드에 대한 평범한 판정이다. 발견이 아니다.
       continue;
@@ -299,7 +348,7 @@ function gateFindings({ issue, repo, gates }) {
       stage: g.section?.stage ?? null,
       round: roundOf(g.round),
       causal_path: causalPath,
-      reason: why ?? reason ?? `gate ${g.gate} RED`,
+      reason: why || reason || `gate ${g.gate} RED`,
       extra: { test: failing[0] ?? null, snippet: g.snippet ?? null, chain: [`gate ${g.gate} RED${code == null ? "" : ` (exit ${code})`}`] },
     });
   }
@@ -310,9 +359,6 @@ function gateFindings({ issue, repo, gates }) {
 export const SELF_GATE_PATH = ".factory/lib/self-gate.js";
 /** 전이 거부의 판정을 내리는 엔진(`requirements.js:146`이 `plan roles … != roster …`의 실제 생산자다). */
 export const REQUIREMENTS_PATH = ".factory/lib/requirements.js";
-/** 검사가 못 돌았다는 표현 — 빌더가 고칠 수 없고 KTB의 결함도 아니다(채택자의 하네스가 못 준 것이다). */
-const INFRASTRUCTURE_RE = /misconfigured|could not run|cannot run|not runnable|could not be evaluated/i;
-
 /**
  * self-gate finding이 **스스로 지목한** 경로. `self-gate.js`가 쓰는 두 모양을 읽는다:
  *   `survivor: test/date.test.js asserts nothing under mutation (…)`
@@ -340,13 +386,14 @@ function selfGateFindings({ issue, repo, blocks, attribution }) {
       if (f.check === "gates") continue;                              // 같은 원인이 위 RED 게이트로 이미 들어왔다
       const chain = `self-gate ${b.source ?? "retry"} on ${String(b.head ?? "?").slice(0, 7)}${b.attempt ? ` attempt ${b.attempt}` : ""} — check ${f.check}`;
       // (a) 인프라급 — 검사가 **못 돌았다**. 채택자의 하네스가 단일 테스트를 못 돌리는 것이므로 harness다.
-      if (f.harness === true || INFRASTRUCTURE_RE.test(String(f.detail ?? ""))) {
+      if (f.harness === true) {
         push(f, ".factory/harness.toml", chain, { attribution: "infrastructure" });
         continue;
       }
-      // (b)/(c) — 검사 자신이 틀렸다는 증거가 이 이슈에 있다.
-      if (attribution.blamesFactory) {
-        push(f, SELF_GATE_PATH, chain, { attribution: attribution.evidence.map((e) => e.kind), chain_evidence: attribution.evidence.map((e) => e.detail) });
+      // (b)/(c) — **이 검사에 대해** 검사 자신이 틀렸다는 증거가 이 이슈에 있다(이슈 단위 불리언이 아니다).
+      const mine = attribution.evidenceFor(f.check);
+      if (mine.length) {
+        push(f, SELF_GATE_PATH, chain, { attribution: mine.map((e) => e.kind), chain_evidence: mine.map((e) => e.detail) });
         continue;
       }
       // 증거가 없다 — 검사는 옳았고 결함은 빌더의 산출물이다. finding이 지목한 파일이 주인을 정한다.
@@ -378,7 +425,10 @@ function transitionFindings({ issue, repo, comments, attribution }) {
     // 사유가 파일을 지목하면 그것이 인과다(산출물 결함 — 대개 product). 지목이 없을 때에만,
     // 그리고 이 이슈에 귀속 증거가 있을 때에만, 판정 엔진 자신을 인과로 적는다.
     const named = REASON_PATH.exec(reason)?.[1] ?? null;
-    const causalPath = named ?? (attribution.blamesFactory ? REQUIREMENTS_PATH : null);
+    // 전이 거부는 self-gate의 `check`가 없다 — 이슈 전체에 대한 사람의 판정((b))만이 그것을 엔진의
+    // 결함으로 만든다. 검사 이름이 붙은 (c) withdrawal은 다른 검사에 대한 사실이므로 여기 오지 않는다.
+    const mine = attribution.evidenceFor(null).filter((e) => e.kind === "human-decision");
+    const causalPath = named ?? (mine.length ? REQUIREMENTS_PATH : null);
     if (!causalPath) continue;                                        // 증거 없는 거부는 엔진의 평범한 판정이다
     out.push({
       kind: "transition-refused",
@@ -387,8 +437,8 @@ function transitionFindings({ issue, repo, comments, attribution }) {
       reason,
       extra: {
         chain: [chain],
-        attribution: named ? "none" : attribution.evidence.map((e) => e.kind),
-        ...(named ? {} : { chain_evidence: attribution.evidence.map((e) => e.detail) }),
+        attribution: named ? "none" : mine.map((e) => e.kind),
+        ...(named ? {} : { chain_evidence: mine.map((e) => e.detail) }),
       },
     });
   }
@@ -432,34 +482,34 @@ function reviewFindings({ issue, repo, handoffs, manifests }) {
 }
 
 /**
- * `harvestFindings({ issue, repo, record, comments }) → rawFinding[]`
+ * `harvestFindings({ issue, repo, record, comments, factoryLogins }) → rawFinding[]`
  *
  * `record`는 그 이슈의 run 기록 전문(`docs/factory/runs/<issue>.md`), `comments`는 그 이슈의 코멘트
- * 전부(`{id, body, createdAt}`)다. 둘 다 회고가 이미 손에 들고 있는 것이고, 둘 다 `factory/records`
- * 브랜치와 GitHub에 durable하게 남는다 — 7일짜리 Actions 아티팩트에 의존하는 경로는 없다(spec §3).
+ * 전부(`{id, body, createdAt, author}`)다. 둘 다 회고가 이미 손에 들고 있는 것이고, 둘 다
+ * `factory/records` 브랜치와 GitHub에 durable하게 남는다 — 7일짜리 Actions 아티팩트에 의존하는
+ * 경로는 없다(spec §3). `factoryLogins`는 팩토리 계정 이름들(`resolveFactoryLogins`)이고,
+ * `human-decision:v1`의 작성자가 그중 하나면 그 결정은 **사람의 결정이 아니다**(재리뷰 NEW-MF-2).
  * 절대 던지지 않는다: 한 소스가 깨져도 나머지 소스의 발견은 나온다.
  */
-export function harvestFindings({ issue, repo, record = "", comments = [] } = {}) {
+export function harvestFindings({ issue, repo, record = "", comments = [], factoryLogins = [] } = {}) {
   const out = [];
   const push = (fn) => { try { out.push(...fn()); } catch { /* 한 소스의 실패가 나머지를 막지 않는다 */ } };
   const known = knownRunsFor(comments);
   const { gates, manifests, selfGateLines } = parseRecordEvidence(record);
   const boundGates = gates.filter((g) => isBoundLine(g, known));
   const boundManifests = manifests.filter((m) => isBoundLine(m, known));
-  // `self-gate:` 줄은 자기 런을 지목하지 않는다(`reviewEvidenceLine`이 생기기 전의 평문 줄이다) —
-  // 가진 것은 감싼 섹션 헤더의 러너뿐이므로 그것으로 묶는다. 이 줄이 하는 일은 두 가지이고 둘 다
-  // "사실을 더하는" 방향이라(검사 목록, 하네스급 차단) 헤더 위조로 얻을 수 있는 것은 상류 이슈 한 건이다.
-  const boundSelfGate = selfGateLines.filter((l) => l.section && isBoundLine({ runner: l.section.runner }, known));
-  const attribution = attributionFor({ comments, selfGateLines: boundSelfGate });
+  // `self-gate-detail:`도 다른 두 줄과 같은 provenance 계약을 진다(줄 자신의 `run_id`/`runner`).
+  const boundSelfGate = selfGateLines.filter((l) => isBoundLine(l, known));
+  const attribution = attributionFor({ comments, selfGateLines: boundSelfGate, factoryLogins });
 
   // self-gate 차단의 출처는 둘이다: 재시도 코멘트(빌더가 고칠 수 있는 것)와, **하네스급 차단**의
-  // run 기록 줄. 후자는 `run-stage.js:1055`가 재시도 코멘트를 쓰지 않고 곧장 needs-human으로 가기
-  // 때문에 코멘트에 흔적이 없다(T3 리뷰 SF-1) — 그런데 그것이야말로 전형적인 채택자 하네스 발견이다.
+  // run 기록 줄. 후자는 `run-stage.js`가 재시도 코멘트를 쓰지 않고 곧장 needs-human으로 가기 때문에
+  // 코멘트에 흔적이 없다(T3 리뷰 SF-1) — 그런데 그것이야말로 전형적인 채택자 하네스 발견이다.
   const blocks = [
     ...allSelfGateFindings(comments).map((b) => ({ ...b, source: "retry" })),
     ...boundSelfGate.filter((l) => l.harness).map((l) => ({
       head: null, attempt: null, source: "record",
-      findings: [{ check: l.checks.join("+") || "self-gate", blocking: true, harness: true, detail: l.rest.replace(/^—\s*/, "") || "self-gate blocked: a harness change is needed" }],
+      findings: [{ check: (l.ran || []).join("+") || "self-gate", blocking: true, harness: true, detail: "self-gate blocked: a harness change is needed (the check could not run on this harness)" }],
     })),
   ];
 

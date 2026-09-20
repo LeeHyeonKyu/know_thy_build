@@ -27,7 +27,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
+import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { routeMergedIssues } from "../lib/feedback/route.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
@@ -1107,9 +1107,22 @@ async function main() {
       if (!manifest) {
         return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
       }
+      /**
+       * 재리뷰 NEW-MF-2 — `human-decision:v1`을 **권한**으로 읽으려면 작성자를 알아야 한다.
+       * `gh issue comment`는 훅이 일부러 열어 둔 문이라 어떤 스테이지 에이전트든 그 모양의 코멘트를
+       * 적을 수 있다. 팩토리 계정 이름을 못 얻으면 빈 목록으로 진행한다 — 그때 (b) 증거는 작성자가
+       * 봇인지 알 수 없으니 **통과하지 않는다**(`attributionFor`가 봇 목록과 무관하게 작성자 없는
+       * 코멘트를 거부하고, 봇 이름을 모르면 봇이 쓴 것도 거부되지 않는다는 뜻이 아니다 —
+       * 아래 목록이 비면 (b)는 사실상 사람/봇을 못 가르므로, 그 경우를 기록에 남긴다).
+       */
+      let factoryLogins = [];
+      const who = await resolveFactoryLogins({ gh });
+      if (who.ok) factoryLogins = who.logins;
+      else console.error(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
       return routeMergedIssues({
         gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
         ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
+        factoryLogins: who.ok ? factoryLogins : null,
       });
     },
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */

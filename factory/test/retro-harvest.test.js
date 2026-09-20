@@ -443,7 +443,7 @@ test("harvestFindings: 소스 네 갈래와 런 바인딩", async () => {
   const gates = found.filter((f) => f.kind === "gate");
   // 리포트를 읽은 unit RED는 발견이 아니다; 툴이 없는 lint RED는 `[runtime].setup`을 가리킨다
   expect(gates).toHaveLength(1);
-  expect(gates[0].causal_path).toBe("harness.toml [runtime].setup");
+  expect(gates[0].causal_path).toBe(".factory/harness.toml [runtime].setup");
   // 경로를 댄 must_fix만 발견이 된다(산문 `where`는 이미 lesson 후보다)
   const mf = found.filter((f) => f.kind === "review-must_fix");
   expect(mf).toHaveLength(1);
@@ -470,7 +470,7 @@ test("gate 판정표: own-cal의 진짜 RED 셋은 harness, 평범한 RED 둘은
 
   // A · own-cal: Flutter 툴체인이 러너에 없다(exit 127) → 툴체인을 까는 자리는 `[runtime].setup`이다
   expect(await of({ outcomes: { unit: { code: 127, stderr: "/usr/bin/bash: line 1: flutter: command not found" } } }))
-    .toEqual(["harness.toml [runtime].setup"]);
+    .toEqual([".factory/harness.toml [runtime].setup"]);
   // B · own-cal: `flutter analyze`가 info를 치명으로 친다 — error 급 진단이 하나도 없는데 RED다
   expect(await of({ outcomes: { lint: { code: 1, stdout: "Analyzing own_cal...\n\n   info • Unused import: 'dart:io' • lib/main.dart:3:8 • unused_import\n\n1 issue found. (ran in 3.2s)" } } }))
     .toEqual([".factory/harness.toml [commands].lint"]);
@@ -497,13 +497,14 @@ test("attribution: 증거 없는 self-gate 차단은 product, 세 증거는 각�
   const { classifyFinding } = await import("../lib/feedback/classify.js");
   const { ownerOf, buildManifest } = await import("../cli/manifest.js");
   const { fileURLToPath } = await import("node:url");
-  const { heartbeat, selfGateComment, recordOf } = await import("./helpers/feedback-fixtures.js");
+  const { heartbeat, selfGateComment, recordOf, selfGateDetail, humanDecisionComment } = await import("./helpers/feedback-fixtures.js");
+  const LOGINS = ["factory-bot"];
   const dests = new Set(buildManifest({ pkgRoot: fileURLToPath(new URL("../..", import.meta.url)) }).map((e) => e.dest));
   const harness = { test: { source_glob: ["src/**/*.js"], test_glob: ["test/**/*.test.js"] } };
   const tagsOf = (f) => classifyFinding({ finding: f, ownerOf, isInstalled: dests, ktbVersion: "1.3.2", harness });
 
   const block = (findings, extraComments = [], record = "") => harvestFindings({
-    issue: 9, repo: "o/r", record,
+    issue: 9, repo: "o/r", record, factoryLogins: LOGINS,
     comments: [heartbeat(9, "implement"), selfGateComment({ issue: 9, head: "abc1234", attempt: 1, at: "2026-09-20T10:00:00Z", findings }), ...extraComments],
   }).filter((f) => f.kind === "self-gate");
 
@@ -521,25 +522,26 @@ test("attribution: 증거 없는 self-gate 차단은 product, 세 증거는 각�
   expect(misc[0].causal_path).toBe(".factory/harness.toml");
   expect(tagsOf(misc[0])).toMatchObject({ tags: ["harness"], disposition: "routed" });
 
-  // (b) 사람이 이 멈춤을 공장 탓으로 귀속했다 → ktb
-  const humanDecision = { id: 5, createdAt: "2026-09-20T10:56:00Z", body: "<!-- human-decision:v1 issue=9 skill=unstick -->\n```yaml\ndecision: retry\nreason: \"needs-human was caused by two self-gate defects (fixed in know-thy-build 1.3.2)\"\n```" };
+  // (b) 사람이 **구조화된 필드**로 공장 탓을 선언했다 → ktb (산문은 증거가 아니다 — 재리뷰 NEW-MF-2)
+  const humanDecision = humanDecisionComment({ issue: 9, author: "LeeHyeonKyu", cause: "factory-defect", ktbFix: "1.3.2", reason: "the implement self-gate demanded a qa manifest only review produces", at: "2026-09-20T10:56:00Z" });
   const blamed = block([{ check: "contract", blocking: true, detail: "spec-evidence-missing: no qa evidence manifest" }], [humanDecision]);
   expect(blamed[0].causal_path).toBe(".factory/lib/self-gate.js");
+  expect(blamed[0].extra.attribution).toEqual(["human-decision"]);
   expect(tagsOf(blamed[0])).toMatchObject({ tags: ["ktb"], disposition: "routed" });
 
-  // (c) 나중 런의 검사 집합에서 그 검사가 사라졌다 → 거둬들여진 검사 = 검사가 틀렸다 → ktb
+  // (c) **버전이 오른** 나중 런에서 그 검사가 ran에도 skipped에도 없다 → 거둬들여졌다 → ktb
   const withdrawn = recordOf(9, "x", [
-    { stage: "implement", at: "2026-09-20T10:08Z", lines: ["self-gate: gates+contract → BLOCKED — attempt 1 → factory:planned — contract: spec-evidence-missing"] },
-    { stage: "implement", at: "2026-09-20T11:02Z", lines: ["self-gate: gates → ok"] },
+    { stage: "implement", at: "2026-09-20T10:08Z", lines: [selfGateDetail({ ran: ["gates", "contract"], blocked: true, ktbVersion: "1.3.1" })] },
+    { stage: "implement", at: "2026-09-20T11:02Z", lines: [selfGateDetail({ ran: ["gates"], skipped: ["mutation", "pins"], ktbVersion: "1.3.2" })] },
   ]);
   const later = block([{ check: "contract", blocking: true, detail: "spec-evidence-missing: no qa evidence manifest" }], [], withdrawn);
   expect(later[0].extra.attribution).toEqual(["check-withdrawn"]);
   expect(tagsOf(later[0])).toMatchObject({ tags: ["ktb"], disposition: "routed" });
 
-  // 같은 검사가 나중에도 계속 막으면 거둬들여진 것이 아니다 — 증거가 아니다
+  // 같은 검사가 나중에도 계속 돌면 거둬들여진 것이 아니다 — 증거가 아니다
   const stillBlocking = recordOf(9, "x", [
-    { stage: "implement", at: "2026-09-20T10:08Z", lines: ["self-gate: gates+mutation → BLOCKED — attempt 1 → factory:planned — survivor"] },
-    { stage: "implement", at: "2026-09-20T11:02Z", lines: ["self-gate: gates+mutation → BLOCKED — attempt 2 → factory:needs-human — survivor"] },
+    { stage: "implement", at: "2026-09-20T10:08Z", lines: [selfGateDetail({ ran: ["gates", "mutation"], blocked: true, ktbVersion: "1.3.1" })] },
+    { stage: "implement", at: "2026-09-20T11:02Z", lines: [selfGateDetail({ ran: ["gates", "mutation"], blocked: true, ktbVersion: "1.3.2" })] },
   ]);
   const still = block([{ check: "mutation", blocking: true, detail: "survivor: test/date.test.js asserts nothing under mutation (x)" }], [], stillBlocking);
   expect(tagsOf(still[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
@@ -549,14 +551,15 @@ test("attribution: 증거 없는 self-gate 차단은 product, 세 증거는 각�
 // needs-human으로 간다). 그 경우의 유일한 durable 증거는 run 기록의 `self-gate: … (harness) …` 줄이다.
 test("harness급 self-gate 차단은 run 기록 줄에서 수확된다(코멘트가 없어도)", async () => {
   const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
-  const { heartbeat, recordOf } = await import("./helpers/feedback-fixtures.js");
+  const { heartbeat, recordOf, selfGateDetail } = await import("./helpers/feedback-fixtures.js");
   const record = recordOf(9, "x", [{ stage: "implement", at: "2026-09-20T10:08Z", lines: [
     "verify: ok",
     "self-gate: gates+mutation → BLOCKED (harness) — mutation: mutation check misconfigured — the harness cannot run a single test",
+    selfGateDetail({ ran: ["gates", "mutation"], blocked: true, harness: true, ktbVersion: "1.3.2" }),
   ] }]);
   const found = harvestFindings({ issue: 9, repo: "o/r", record, comments: [heartbeat(9, "implement")] });
   expect(found.filter((f) => f.kind === "self-gate")).toHaveLength(1);
   expect(found[0].causal_path).toBe(".factory/harness.toml");
-  // 섹션 러너가 이 이슈의 런이 아니면 그 줄도 증거가 아니다(바인딩은 여기에도 걸린다)
+  // 줄이 지목한 런이 이 이슈의 런이 아니면 그 줄도 증거가 아니다(바인딩은 여기에도 걸린다)
   expect(harvestFindings({ issue: 9, repo: "o/r", record, comments: [] })).toEqual([]);
 });

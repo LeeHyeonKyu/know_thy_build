@@ -156,10 +156,17 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
       return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
     },
+    /**
+     * `author`(T3 재리뷰 NEW-MF-2): **누가 이 코멘트를 썼는가**. `gh issue comment`는 훅이 일부러
+     * 열어 둔 문이므로(핸드오프가 그리로 나간다) 코멘트 본문만으로는 사람의 `:unstick` 결정과
+     * 에이전트가 적어 둔 같은 모양의 글을 구별할 수 없다. 피드백 루프는 `human-decision:v1`을
+     * **권한**으로 읽으므로(그 한 줄이 상류 저장소 쓰기를 연다) 작성자가 판정의 일부여야 한다.
+     * 필드는 응답에 이미 있었고 이 어댑터가 떨어뜨리고 있었을 뿐이다 — 추가 호출은 없다.
+     */
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
-      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at }));
+      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at, author: c.user?.login ?? null }));
     },
     async comment(n, body) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();

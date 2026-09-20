@@ -29,6 +29,18 @@ export const transitionFailedMarker = ({ from, to }) => `<!-- factory-transition
  * 같은 계약으로 맞춘다: 쓰는 쪽도 읽는 쪽도 이 함수 하나를 부른다.
  */
 export const transitionRefusedMarker = ({ from, to }) => `<!-- factory-transition-refused from=${from} to=${to} -->`;
+
+/**
+ * 요구사항 미달로 **라벨이 실제로 `factory:needs-human`으로 옮겨진** 거부의 코멘트 전문. 마커 두 줄 +
+ * 사유 + 라벨 이동 문장이 한 덩어리이고, 읽는 쪽(`extractNeedsHuman`, 피드백 루프의 수확)이 그 네
+ * 조각을 전부 본다 — `transitionRefusedMarker`와 같은 이유로 생산자를 여기 둔다(쓰는 쪽은
+ * `transition.js` 하나, 읽는 쪽은 여럿, 그리고 테스트는 손으로 베끼면 안 된다).
+ */
+export const transitionRefusedComment = ({ from, to, reason }) =>
+  `<!-- factory-transition:v1 from=${from} to=${NEEDS_HUMAN_LABEL} by=script reason=refused -->\n` +
+  `${transitionRefusedMarker({ from, to })}\n` +
+  `**전이 거부** ${from} → ${to}: ${reason}\n\n` +
+  `라벨을 \`${NEEDS_HUMAN_LABEL}\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`;
 // label 이름 자체가 "factory:x" 형태라 콜론을 품는다 — 진짜 구분자는 "콜론+공백"뿐이다.
 export const REFUSAL_REASON = /\*\*전이 거부\*\*.*?: ([^\n]+)/;
 // 요구사항 미달로 실제 라벨이 needs-human으로 옮겨진 거부만 골라낸다(backtick 인용 — lib/transition.js의
