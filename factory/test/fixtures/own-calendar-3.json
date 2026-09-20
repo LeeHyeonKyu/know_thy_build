@@ -113,6 +113,9 @@
   ],
   "pr": {
     "number": 5,
+    "numbers": [
+      5
+    ],
     "files": [
       "README.md",
       "client/test/test_3_readme_test.dart"

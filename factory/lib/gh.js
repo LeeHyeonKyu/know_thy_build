@@ -138,9 +138,20 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 머지됐을 때 "하네스가 들어왔다"를 말해 주는 유일한 신호다 — builder는 언제나
      * `claude/fq-<issue>`에서 작업하므로(implement 규칙 1) 브랜치 이름이 곧 이슈 번호다.
      */
+    /**
+     * 이 브랜치에서 머지된 PR들 — **머지 시각 내림차순**. `gh pr list`는 *생성* 순으로 주므로
+     * 첫 항목이 가장 나중에 머지된 PR이라는 보장이 없다(Task 4 r3 should_fix 2): 재작업으로 같은
+     * 브랜치에 PR이 두 번 머지되면(먼저 만든 쪽이 나중에 머지될 수 있다) 첫 항목은 옛 머지다.
+     * `mergedAt`은 예전에도 조회하면서 쓰지는 않았다 — 이제 그 값이 순서를 정한다.
+     */
+    async mergedPrsForBranch(branch) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "20", "--json", "number,mergedAt"]));
+      return j
+        .map((p) => ({ number: p.number, mergedAt: p.mergedAt ?? null }))
+        .sort((a, b) => (Date.parse(b.mergedAt) || 0) - (Date.parse(a.mergedAt) || 0));
+    },
     async mergedPrForBranch(branch) {
-      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
-      return j.length ? j[0].number : null;
+      return (await this.mergedPrsForBranch(branch))[0]?.number ?? null;
     },
     /**
      * KTB-46 — **머지된 PR의 머지 사실 그 자체.** `mergedPrForBranch`는 번호만 준다("머지된 PR이

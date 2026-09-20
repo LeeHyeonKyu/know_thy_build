@@ -122,6 +122,17 @@ function evidenceEntry(payload = {}, ref) {
   const lines = [head];
   const reason = prose(payload.reason);
   if (reason) lines.push(`  ${reason}`);
+  /**
+   * `chain`은 **이 관측의 흔들리는 숫자들**이다(Task 4 r3 should_fix 1). 그 숫자는 `reason`에 있으면
+   * 안 된다 — `reason`은 지문의 재료이고, 창마다 움직이는 값이 섞이면 **같은 원인이 주마다 새 상류
+   * 이슈를 연다**. 그래서 원인은 `reason`에, 관측은 여기에 둔다. 지금까지 이 배열은 payload에 실리기만
+   * 하고 증거 항목에는 한 줄도 나오지 않았다 — 덧붙이는 증거가 "언제·무엇이 얼마였나"를 말하지
+   * 못하면 한 이슈에 여러 관측을 모으는 일 자체가 값을 잃는다.
+   */
+  for (const step of Array.isArray(payload.chain) ? payload.chain : []) {
+    const t = oneLine(step);
+    if (t) lines.push(`  - ${t}`);
+  }
   if (c.command) lines.push(`  명령: \`${oneLine(c.command)}\``);
   if (c.snippet) lines.push(snippetBlock(c.snippet));
   return { text: lines.join("\n"), key: `${ref}|${when}` };

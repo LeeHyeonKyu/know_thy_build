@@ -95,6 +95,9 @@
   ],
   "pr": {
     "number": 19,
+    "numbers": [
+      19
+    ],
     "files": [
       "README.md",
       "docs/factory/DECISIONS.md",

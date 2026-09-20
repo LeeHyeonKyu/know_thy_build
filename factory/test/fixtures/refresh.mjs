@@ -30,8 +30,14 @@ function grab({ repo, issue, recordRef, out }) {
    */
   let pr = null;
   try {
-    const found = JSON.parse(gh(["pr", "list", "-R", repo, "--head", `claude/fq-${issue}`, "--state", "merged", "--limit", "5", "--json", "number,files"]));
-    if (found.length) pr = { number: found[0].number, files: found[0].files.map((f) => f.path) };
+    // **머지된 PR 전부**를 머지 시각 내림차순으로. 재작업이 같은 브랜치에 두 번 머지할 수 있고,
+    // 그때 diff의 모양은 둘을 합친 것이다(`gh pr list`는 *생성* 순이라 정렬을 우리가 한다).
+    const found = JSON.parse(gh(["pr", "list", "-R", repo, "--head", `claude/fq-${issue}`, "--state", "merged", "--limit", "20", "--json", "number,mergedAt,files"]))
+      .sort((a, b) => (Date.parse(b.mergedAt) || 0) - (Date.parse(a.mergedAt) || 0));
+    if (found.length) {
+      const union = [...new Set(found.flatMap((p) => p.files.map((f) => f.path)))];
+      pr = { number: found[0].number, numbers: found.map((p) => p.number), files: union };
+    }
   } catch { pr = null; }
 
   const doc = {
