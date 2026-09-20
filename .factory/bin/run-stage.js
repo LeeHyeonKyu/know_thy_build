@@ -32,7 +32,7 @@ import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, selfGateRetryComment } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
@@ -1003,7 +1003,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
            * 리셋한다), attempt 1이면 findings를 실은 마커를 남기고 `factory:planned`로 한 번만 되돌린다
            * (`in-progress → planned`는 그래프 엣지; `planned → in-progress`가 빌더를 다시 띄운다). 같은
            * head에서 attempt ≥ 2면 재시도가 실패한 것이므로 `factory:needs-human`으로 에스컬레이션한다.
-           * K(`countTransitionsTo(…, rework)`)는 `→ planned`를 세지 않으므로 이 마커가 유일한 상한이다.
+           * K(`countTransitionsTo(…, rework)`)는 `→ planned`를 세지 않으므로 이 head별 마커가 1차 상한이다.
+           *
+           * **head-agnostic backstop(SF-A):** head별 상한은 진짜 수정마다 리셋되므로, 매 라운드 새 head를
+           * 뱉으며 계속 RED인 빌더는 attempt를 영원히 1로 유지하며 무한 ping-pong한다. 그래서 head를 무시하고
+           * 이번 재큐 이후 self-gate RED를 전부 세어(`countAllSelfGateRetries`), 총합이 `SELF_GATE_RETRY_BACKSTOP`에
+           * 이르면 "수렴 실패"로 needs-human에 올린다. head별 1회 재시도를 대체하지 않는 바깥 안전망일 뿐이다.
            *
            * ── TASK 9 HOOK ───────────────────────────────────────────────────────────────────────
            * Task 9(one-shot in-run repair, KTB-51)는 여기서 "스테이지 통째 재디스패치" 대신 `sg.findings`를
@@ -1017,15 +1022,21 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
             return t.ok ? 0 : 2;
           }
           const head = v.data.head_sha ?? null;
-          const { attempt } = d.selfGateRetry
+          const { attempt, total } = d.selfGateRetry
             ? await d.selfGateRetry({ head, findings: blocking })
-            : { attempt: 2 };   // 마커 dep이 없으면 재시도를 셀 수 없다 — 무한 루프보다 사람이 낫다(fail closed)
+            : { attempt: 2, total: SELF_GATE_RETRY_BACKSTOP };   // 마커 dep이 없으면 재시도를 셀 수 없다 — 무한 루프보다 사람이 낫다(fail closed)
           await d.writeHandoff({ stage, data: v.data, gates });
-          const bounded = attempt >= 2;
+          // 1차 상한: 같은 head에서 두 번째 RED(attempt ≥ 2). 그 바깥의 backstop: head를 무시하고 이번
+          // 재큐 이후 self-gate RED가 SELF_GATE_RETRY_BACKSTOP회에 이르면(head가 매번 달라도) 수렴 실패다.
+          const perHeadBounded = attempt >= 2;
+          const backstop = Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP;
+          const bounded = perHeadBounded || backstop;
           const to = bounded ? "factory:needs-human" : "factory:planned";
-          const reason = bounded
+          const reason = perHeadBounded
             ? `self-gate findings unresolved after one retry: ${summary}`
-            : `self-gate blocked handoff (retry ${attempt}): ${summary}`;
+            : backstop
+              ? `self-gate: not converging after ${total} retries`
+              : `self-gate blocked handoff (retry ${attempt}): ${summary}`;
           const t = await d.transition({ to, reason });
           record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, ...refusal(t), ...gatesNote, usage]);
           return t.ok ? 0 : 2;
@@ -2335,15 +2346,19 @@ async function main() {
     },
     /**
      * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
-     * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt를
-     * 돌려준다. run-stage가 attempt로 라우팅한다(attempt 1 → planned, ≥2 → needs-human). findings는
-     * 마커 코멘트에 실려 다음 implement 런의 빌더가 읽는다(context.js loadedFor).
+     * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt(head별)와
+     * total(head 무시, 이번 재큐 이후 전부, SF-A backstop용)을 돌려준다. run-stage가 이 둘로 라우팅한다
+     * (head별 attempt 1 → planned, ≥2 → needs-human; total ≥ SELF_GATE_RETRY_BACKSTOP → needs-human).
+     * findings는 마커 코멘트에 실려 다음 implement 런의 빌더가 읽는다(context.js loadedFor).
      */
     selfGateRetry: async ({ head, findings }) => {
       const since = commentsSinceRequeue(await gh.comments(issue));
       const attempt = countSelfGateRetries(since, head) + 1;
+      // head-agnostic backstop(SF-A): 이번 재큐 이후 **모든 head**의 self-gate RED 총합. `since`는 이번
+      // 마커를 남기기 전에 읽었으므로 방금 낼 이번 시도를 +1로 더한다.
+      const total = countAllSelfGateRetries(since) + 1;
       await gh.comment(issue, selfGateRetryComment({ issue, head, attempt, findings }));
-      return { attempt };
+      return { attempt, total };
     },
     /**
      * nit — verifyStage가 self_gate 부착 **전에** `.factory/out/<stage>.json`을 굳혔다. self_gate를

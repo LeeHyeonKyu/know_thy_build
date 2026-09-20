@@ -6,7 +6,7 @@ import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
-import { commentsSinceRequeue, countSelfGateRetries, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
+import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
 import { renderHandoff, parseHandoffs } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -210,6 +210,42 @@ test("implement: a self-gate RED on a NEW head resets to one retry (head-keyed c
   expect(d3.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
   // and the findings for the new head are readable back for the re-dispatched builder.
   expect(latestSelfGateFindings(store.map((b) => ({ body: b })), H2)[0].detail).toContain("survivor");
+});
+
+// SF-A backstop: the per-head bound resets on every new commit, so a builder that emits a NEW head
+// each round keeps attempt===1 forever and the per-head bound NEVER fires. The head-AGNOSTIC backstop
+// counts ALL self-gate REDs since the last requeue and escalates once they reach SELF_GATE_RETRY_BACKSTOP,
+// however much the head churns. Exercised with the REAL counters over a shared comment store.
+test("implement: SELF_GATE_RETRY_BACKSTOP self-gate REDs across DIFFERENT heads escalate to needs-human (head-agnostic backstop)", async () => {
+  const store = [];
+  const gh = { comments: async () => store.map((body) => ({ body })), comment: async (_n, body) => { store.push(body); } };
+  const mk = (head) => selfGateDeps({
+    transition: vi.fn(async ({ to, reason }) => ({ ok: true, to, reason })),
+    verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: head } }),
+    // the production dep: per-head attempt AND the head-agnostic total, both over the shared store.
+    selfGateRetry: async ({ head: h, findings }) => {
+      const since = commentsSinceRequeue(await gh.comments());
+      const attempt = countSelfGateRetries(since, h) + 1;
+      const total = countAllSelfGateRetries(since) + 1;   // +1 for the marker this round is about to post
+      await gh.comment(42, selfGateRetryComment({ issue: 42, head: h, attempt, findings }));
+      return { attempt, total };
+    },
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js" }] }),
+  });
+  // one fresh, DISTINCT head per round — each keeps the per-head attempt at 1, so only the backstop can fire.
+  const heads = Array.from({ length: SELF_GATE_RETRY_BACKSTOP }, (_, i) => String.fromCharCode(97 + i).repeat(40));
+  const last = [];
+  for (const h of heads) {
+    const d = mk(h);
+    await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "r1" });
+    last.push(d.transition.mock.calls.at(-1)[0]);
+  }
+  // the first BACKSTOP-1 rounds each get one bounded retry (→ planned, per-head attempt still 1)…
+  for (let i = 0; i < SELF_GATE_RETRY_BACKSTOP - 1; i++) expect(last[i].to).toBe("factory:planned");
+  // …and the round that reaches the cumulative cap trips the backstop despite the head changing every time.
+  const final = last.at(-1);
+  expect(final.to).toBe("factory:needs-human");
+  expect(final.reason).toContain("not converging");
 });
 
 // Task 5 (should_fix 2): a BLOCKING regression pin composes with a Task-3 self-gate finding in ONE

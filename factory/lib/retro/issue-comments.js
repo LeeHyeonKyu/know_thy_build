@@ -183,6 +183,26 @@ export function countSelfGateRetries(comments, head) {
   return n;
 }
 
+/**
+ * ── 리뷰 효율 Phase-1 finalfix (SF-A) — head-agnostic backstop ─────────────────────────────────
+ *
+ * `countSelfGateRetries`는 **head별** 상한이다(진짜 수정은 새 head라 카운터를 리셋한다) — 그것이
+ * 정상 경로의 1차 상한으로 옳다. 그러나 매 라운드 **새 head**를 뱉으면서도 self-gate를 계속 통과
+ * 못 하는 빌더는 head별 카운터를 영원히 1로 리셋하며 implement↔planned를 무한 ping-pong한다: head별
+ * 상한만으로는 누적 천장이 없다. 이 함수는 head를 무시하고 **이번 재큐 이후** 남은 self-gate-retry
+ * 마커를 전부 센다(호출자가 창을 `commentsSinceRequeue`로 좁힌다). 그 총합이 `SELF_GATE_RETRY_BACKSTOP`에
+ * 이르면 head가 매번 달라도 "빌더가 수렴하지 못한다"는 뜻이므로 needs-human으로 올린다. head별
+ * 1차 상한을 대체하지 않고 그 바깥의 안전망으로만 얹는다.
+ */
+export const SELF_GATE_RETRY_BACKSTOP = 3;
+export function countAllSelfGateRetries(comments) {
+  let n = 0;
+  for (const c of comments || []) {
+    if (SELF_GATE_RETRY.test(String(c?.body ?? ""))) n += 1;
+  }
+  return n;
+}
+
 /** 이 head sha에 대한 **가장 최근** self-gate findings(없으면 null) — 재디스패치된 빌더가 받는다. */
 export function latestSelfGateFindings(comments, head) {
   let found = null;
