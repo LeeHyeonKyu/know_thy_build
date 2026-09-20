@@ -6,10 +6,18 @@ import { makeFakeRun } from "../lib/exec.js";
  * ── Structure B (review-efficiency Task 3) — the pre-handoff self-gate ─────────────────────────
  *
  * COST NOTE (regression the plan pins): a self-gate run is CHEAPER than a review round. It REUSES
- * the `gates` result the stage already computed (never re-runs the gates), reads the qa-evidence
- * manifest the runner already grades for the review stage, and runs the deterministic mutation
- * check on only the NEW tests — no LLM reviewer panel is dispatched. A red deterministic check
- * caught here never spends a full multi-reviewer round (KTB #18 R3 / own-cal R1).
+ * the `gates` result the stage already computed (never re-runs the gates) and runs the deterministic
+ * mutation check on only the NEW tests — no LLM reviewer panel is dispatched. A red deterministic
+ * check caught here never spends a full multi-reviewer round.
+ *
+ * SCOPE (Defect A fix): the self-gate's deterministic half is the BUILDER-satisfiable checks only —
+ * gates (reused), the new-test mutation check (own-cal R1 cf1), and carried regression pins (Task 5).
+ * It does NOT grade qa evidence: the qa manifest is written by the qa REVIEWER at the review stage
+ * (never by the builder at implement time), so at implement it cannot exist and its absence is
+ * expected, not a defect. qa evidence stays enforced where it belongs — the qa reviewer at review and
+ * `qaEvidenceGate` at `factory:approved`. KTB #18 R3 (a regressed finding under the same id) is
+ * caught by REVIEW, and re-guarded here only via a carried Task 5 pin — not by any finish()/manifest
+ * check at implement.
  */
 
 // A vitest run double keyed per test file, returning baseline-then-mutated results in order — the
@@ -79,54 +87,42 @@ test("(b) a red gates result → ok:false", async () => {
   expect(summarizeFindings(res.findings)).toContain("RED");
 });
 
-// (c) a clean, fail-closed impl with complete contract coverage → ok:true.
-test("(c) clean fail-closed impl with complete contract coverage → ok:true", async () => {
+// (c) a clean, fail-closed impl → ok:true. Gates GREEN + the new test IS fail-closed (a kill).
+test("(c) clean fail-closed impl → ok:true", async () => {
   const fs = fakeFs(baseFiles());
   // baseline green, then the mutation goes assertion-red → the test IS fail-closed (a kill, not a survivor).
   const run = makeFakeRun([wtAdd(), wtOther(), npmci(), vitestSeq({ "test/warn.test.js": [ok, assertionRed] })]);
   const res = await runSelfGate({
     root: "/root", harness, run,
-    contract: [{ id: "dw1", check: { kind: "test", ref: "test_warn" }, rubric: "warns on prod" }],
-    roster: ["qa"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" },
+    roster: ["correctness"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" },
     changedTests: [{ file: "test/warn.test.js", target: "src/warn.js" }], changedSources: ["src/warn.js"],
-    // roster has qa → the contract IS graded; a complete manifest → ok.
-    qaEvidence: () => ({ ok: true, missing: [] }),
     mutation: { tmp: "/wt", exists: fs.exists, readFile: fs.readFile, writeFile: fs.writeFile },
   });
   expect(res.ok).toBe(true);
   expect(res.findings.filter((f) => f.blocking)).toEqual([]);
-  expect(res.ranChecks).toEqual(expect.arrayContaining(["gates", "contract", "mutation"]));
+  expect(res.ranChecks).toEqual(expect.arrayContaining(["gates", "mutation"]));
 });
 
-// (d) a contract done_when left uncovered by evidence → ok:false naming the id.
-test("(d) a contract done_when uncovered by evidence → ok:false naming the id", async () => {
+// Defect A: a STANDARD-tier issue (its review roster has qa) with NO qa manifest present at implement
+// time must NOT block. The manifest is written by the qa reviewer at REVIEW, never by the builder here,
+// so its absence is expected — the self-gate never grades qa evidence and never runs a "contract" check.
+test("Defect A: a standard-tier issue (roster has qa) with no manifest does NOT block at implement", async () => {
+  const fs = fakeFs(baseFiles());
+  const run = makeFakeRun([wtAdd(), wtOther(), npmci(), vitestSeq({ "test/warn.test.js": [ok, assertionRed] })]);
   const res = await runSelfGate({
-    root: "/root", harness, run: makeFakeRun([]),
-    contract: [{ id: "dw2", check: { kind: "finish", ref: "manifest" }, rubric: "exports csv" }],
-    roster: ["correctness"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" },
-    changedTests: [], changedSources: [],
-    // contract has a finish-kind check → the manifest IS graded even without qa in the roster.
-    qaEvidence: () => ({ ok: false, missing: ["dw2"], reason: "qa evidence manifest is incomplete — missing claims for dw2" }),
-  });
-  expect(res.ok).toBe(false);
-  expect(res.ranChecks).toContain("contract");
-  const blocking = res.findings.filter((f) => f.blocking);
-  expect(blocking.map((f) => f.detail).join(" ")).toContain("dw2");
-  expect(blocking.map((f) => f.detail).join(" ")).toContain("spec-evidence-missing");
-});
-
-// A rubric-only contract with no qa in the roster is reviewer-judged, not self-runnable — the
-// self-gate does not fabricate a finish/gate check for it (spec §4.B).
-test("a rubric-only contract with no qa roster does not grade evidence", async () => {
-  const res = await runSelfGate({
-    root: "/root", harness, run: makeFakeRun([]),
-    contract: [{ id: "dw3", check: { kind: "rubric", ref: "" }, rubric: "reads well" }],
-    roster: ["correctness"], tier: "docs", gates: { schema: "factory.gates.v1", status: "GREEN" },
-    changedTests: [], changedSources: [],
-    qaEvidence: () => { throw new Error("should not be called"); },
+    root: "/root", harness, run,
+    // roster has qa (a standard-tier review roster) — pre-fix this ran finish() and demanded a manifest.
+    roster: ["correctness", "qa"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" },
+    changedTests: [{ file: "test/warn.test.js", target: "src/warn.js" }], changedSources: ["src/warn.js"],
+    // qaEvidence must never be consulted at implement — the manifest cannot exist yet.
+    qaEvidence: () => { throw new Error("self-gate must not grade qa evidence at implement"); },
+    mutation: { tmp: "/wt", exists: fs.exists, readFile: fs.readFile, writeFile: fs.writeFile },
   });
   expect(res.ok).toBe(true);
+  expect(res.findings.filter((f) => f.blocking)).toEqual([]);
+  // no "contract" check is run — the qa manifest is graded at review, not here.
   expect(res.ranChecks).not.toContain("contract");
+  expect(res.findings.some((f) => f.check === "contract")).toBe(false);
 });
 
 // A misconfigured mutation check (harness cannot run a single test) is a harness-class finding the

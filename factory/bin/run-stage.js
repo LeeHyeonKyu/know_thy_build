@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
@@ -1598,7 +1598,7 @@ export function nextState(stage, data, { maxRounds = null } = {}) {
  * 전이 요구조건에 커밋/PR을 실제로 묶는다. 게이트는 "무엇을 검사했는가"를 알아야만 물린다.
  * gh 호출이 실패하면 sha 없이(undefined) 돌려주고 record()로 흔적을 남긴다 — 런을 죽이지 않는다.
  */
-export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null, qaEvidence = null, qaManifestRecorded = null }) {
+export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {}, reviewRoster = null, maxRounds = null, qaEvidence = null, qaManifestRecorded = null, stage = null }) {
   // K(`charter.limits.K`)는 `factory:approved`로는 오지 않는다(ADR-020 KTB-29 r1 SF1) — 전이 요구조건은
   // approve를 라운드로 막지 않고, K는 `nextState`가 rework 판정에서만 쓴다.
   //
@@ -1607,7 +1607,24 @@ export async function buildCtxExtra({ gh, issue, to, data, ctx, record = () => {
   // 통째로 무음이 된다(규칙은 있는데 잴 자가 없다). 그래서 merge 경로에서는 호출자가 CHARTER에서
   // 직접 읽은 로스터와 K를 넘긴다 — 되돌릴 수 없는 전이가 그 둘을 실제로 묻게.
   const roster = ctx?.roster ?? reviewRoster ?? undefined;
-  const ctxExtra = { issue, roster, expectedRounds: ctx?.rounds, rosterSize: roster?.length };
+  const ctxExtra = { issue };
+  /**
+   * Defect B — the `factory:planned` requirement compares the plan handoff's roles/rounds to
+   * `ctx.roster`/`ctx.expectedRounds`. Those must come from the stage that PRODUCED the plan (the
+   * plan stage's own debate roster matches the handoff). But the self-gate one-retry route transitions
+   * **implement → planned** (run-stage:1034), and the implement stage's `ctxCache.roster` is an EMPTY
+   * array (`[]`, truthy) with no `rounds` — passing them fails the requirement as
+   * `plan roles [...] != roster []`, refusing the retry and dropping the issue to needs-human (demo #39).
+   * For that path — a NON-plan stage targeting `factory:planned` — only `need(plan)` should gate, so we
+   * omit the mismatched roster/expectedRounds. The normal plan→planned (stage === "plan") keeps them,
+   * as do the roster-bearing `approved`/`merged` targets (they are never `factory:planned`).
+   */
+  const selfGateRetryToPlanned = to === "factory:planned" && stage != null && stage !== "plan";
+  if (!selfGateRetryToPlanned) {
+    ctxExtra.roster = roster;
+    ctxExtra.expectedRounds = ctx?.rounds;
+    ctxExtra.rosterSize = roster?.length;
+  }
   if (to === "factory:merged" && Number.isInteger(maxRounds)) ctxExtra.maxRounds = maxRounds;
   try {
     if (to === "factory:awaiting-review") {
@@ -2308,28 +2325,17 @@ async function main() {
     /**
      * ── Structure B (리뷰 효율 Task 3) — implement 핸드오프 직전의 self-gate ──────────────────
      * `verifyStage`가 통과한 뒤, `factory:awaiting-review` 전이 **직전**에 부른다. 리뷰가 결정적으로
-     * 돌릴 검사(이미 계산된 `gates`·계약 대조 qa 증거·새 테스트 mutation check)를 그대로 합성한다 —
-     * 재료는 전부 러너가 이미 들고 있는 것이라 리뷰 라운드보다 싸다(lib/self-gate.js의 cost note).
+     * 돌릴 **빌더가 만족시킬 수 있는** 검사(이미 계산된 `gates`·새 테스트 mutation check·회귀 핀)를
+     * 합성한다 — 재료는 전부 러너가 이미 들고 있는 것이라 리뷰 라운드보다 싸다(lib/self-gate.js cost note).
      *
-     * 두 곳에서 로스터·계약이 갈리지 않게 한다: implement의 `ctxCache.roster`는 비어 있으므로(빌더·
-     * verifier는 CHARTER 로스터가 아니다), 계약이 qa의 채점을 받을지는 **diff가 정한 실효 tier의 review
-     * 로스터**로 판단한다 — 리뷰어가 볼 바로 그 로스터다. qa 증거는 `qaEvidenceSummary`가 아니라
-     * `evidenceFor`를 직접 부른다: 전자는 implement의 빈 로스터를 보고 언제나 skip하기 때문이다.
+     * Defect A — **qa 증거는 여기서 채점하지 않는다.** qa 매니페스트는 review 스테이지의 qa 리뷰어가
+     * 쓴다(implement 시점의 빌더가 아니다) — 그래서 여기서는 존재할 수 없고, 그 부재는 결함이 아니라
+     * 정상이다. qa 증거는 제자리에서 그대로 강제된다: review의 qa 리뷰어와 `factory:approved`의
+     * `qaEvidenceGate`. 여기서 채점하면 로스터에 qa가 있는 모든 standard-tier 이슈가 막혔다.
      */
     selfGate: async ({ gates }) => {
       const base = await mergeBase();
       const diff = await changedFiles({ run, cwd: root, base, harness });
-      const contract = ctxCache?.handoffs?.plan?.done_when ?? [];
-      const tier = ctxCache?.tier_effective ?? ctxCache?.tier ?? charter.tier_default;
-      let roster = [];
-      try { roster = rosterFor(charter, loadRoles(root), "review", tier); } catch { roster = []; }
-      const qaEvidence = () => evidenceFor({
-        root, issue,
-        doneWhen: contract,
-        maturity: ctxCache?.harness?.maturity ?? "M0",
-        touchesData: touchesDataPaths(ctxCache?.handoffs?.triage?.impact_paths ?? []),
-        headSha: ctxCache?.handoffs?.implement?.head_sha ?? null,
-      });
       /**
        * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
        * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
@@ -2338,10 +2344,10 @@ async function main() {
       const review = ctxCache?.handoffs?.review;
       const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
       return runSelfGate({
-        root, harness, contract, roster, tier, gates, run,
+        root, harness, gates, run,
         // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
         // property is violated"; a lightly-edited pre-existing test is not what it judges.
-        changedTests: diff.addedTests, changedSources: diff.sources, qaEvidence, pins,
+        changedTests: diff.addedTests, changedSources: diff.sources, pins,
       });
     },
     /**
@@ -2588,7 +2594,7 @@ async function main() {
         try { const r = await deps.reviewRoster(); if (r?.ok) reviewRoster = r.roles; }
         catch (e) { recordLine(`merge: roster for the ${to} requirement unresolved — ${e?.message || e}`); }
       }
-      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null, qaEvidence: deps.qaEvidence, qaManifestRecorded });
+      const ctxExtra = await buildCtxExtra({ gh, issue, to, data, ctx: ctxCache, record: recordLine, reviewRoster, maxRounds: charter?.limits?.K ?? null, qaEvidence: deps.qaEvidence, qaManifestRecorded, stage });
       // 전이 경로에서만 게이트를 묻는다 — gatesChecked가 그 표식이다(선행 handoff 확인은 세우지 않는다).
       ctxExtra.gatesChecked = true;
       // blocked에서의 hop-back만 `prerequisite`를 세운다(KTB-24 fix) — "직전 스테이지의 산출물이
