@@ -83,7 +83,12 @@ export const TRANSITIONS = new Map([
   ["factory:in-progress", new Set(["factory:awaiting-review", "factory:blocked", "factory:needs-human", "factory:needs-info", "factory:planned"])],   // sweeper 재큐
   // blocked = 환경/자격증명 실패로 sweeper가 needs-human으로 에스컬레이션한다(§3.2) — review·merge
   // 게이트가 BLOCKED로 끝나는 모든 스테이지에서 겪을 수 있으므로 두 상태 모두에서 빠져나가야 한다.
-  ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked"])],
+  // awaiting-review → needs-info(리뷰 효율 Task 8, Structure G): 리뷰 진입 가드가 이 피처를 막는 열린
+  // `factory:harness` 이슈를 발견하면, 이슈 안의 어떤 변경으로도 못 고칠 must_fix를 리뷰어에게 다시
+  // 재보고시키는 대신(KTB #3 spec1×2) 하네스 주차와 같은 문법으로 여기 세운다. KTB-23의
+  // `in-progress → needs-info` 주차와 같은 계열의 엣지이고, 복귀 경로도 같다(`sweepHarnessUnpark`가
+  // 하네스 이슈가 닫히면 `needs-info → queue`로 되돌린다).
+  ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked", "factory:needs-info"])],
   ["factory:rework", new Set(["factory:in-progress", "factory:needs-human"])],
   ["factory:approved", new Set(["factory:merged", "factory:needs-human", "factory:rework", "factory:blocked"])],   // merge-stage: conflict → rework, gates/API failure → blocked
   // blocked → approved(KTB-15): merge 스테이지는 **머지만** 실패해도 blocked로 떨어진다(draft

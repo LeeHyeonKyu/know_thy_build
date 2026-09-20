@@ -331,6 +331,76 @@ test("review stage derives decision from verdicts via aggregateReview", async ()
   expect(incomplete.writeHandoff).not.toHaveBeenCalled();
 });
 
+// ── Task 8 (Structure G) — no re-review while blocked ──────────────────────────────────────────────
+// KTB #3 spec1×2 regression: review round 1 rejected "qa evidence absent" (blocked on KTB-36), round 2
+// re-confirmed the SAME must_fix (blocked on KTB-37) — the full panel re-reported an identical must_fix
+// that no in-issue change could fix, because the block was in the harness/product, not the deliverable.
+// The guard lives at review-stage entry (it catches BOTH the label-event dispatch and the sweeper
+// re-dispatch, since every review run flows through here): if an OPEN factory:harness issue is linked to
+// this feature (an unmet dependency), it parks the feature at factory:needs-info with the harness
+// `waiting for` reason — reusing the existing sweepHarnessUnpark arm to return it to queue once the human
+// merges/closes the harness PR — and never spawns the reviewer panel.
+test("Task 8: a review whose feature is blocked on an open harness issue parks at needs-info without a review round", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    dependencyBlock: async () => 36,                     // open harness issue #36 blocks this feature
+    buildContext: vi.fn(async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: {} })),
+    claudeP, gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    writeHandoff: async () => {}, transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 3, deps })).toBe(0);
+  expect(claudeP).not.toHaveBeenCalled();                // no LLM review round spent
+  expect(deps.buildContext).not.toHaveBeenCalled();      // parked before the panel is even assembled
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-info", reason: "waiting for harness issue #36",
+  }));
+});
+
+// Fail-safe direction + KTB-24 kept intact. dependencyBlock → null means "no unmet harness dependency",
+// so the review runs. A genuinely stalled review (KTB-24: an infra-aborted awaiting-review job the
+// sweeper re-dispatches as factory:blocked, origin awaiting-review) is blocked on TIME, not a harness —
+// it leaves no linked harness issue, so dependencyBlock is null, the blocked→awaiting-review restart hop
+// still fires, and the panel spawns as before.
+test("Task 8: no harness dependency → review runs; the KTB-24 blocked→awaiting-review restart is untouched", async () => {
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    issueLabels: async () => ["factory:blocked"],        // KTB-24 sweeper re-dispatch entry label
+    blockedOrigin: async () => ({ from: "factory:awaiting-review" }),
+    dependencyBlock: async () => null,                   // an infra abort leaves no harness issue
+    buildContext: async () => ({ roster: ["correctness"], orchestration: "workflow", limits: {} }),
+    claudeP, gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    writeHandoff: async () => {}, transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review", prerequisite: true })); // KTB-24 hop
+  expect(claudeP).toHaveBeenCalled();                    // review still runs
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-info" }));
+});
+
+// Fail-safe: if the dependency check itself is unreadable we do NOT suppress (a missed suppression costs
+// one review round; a wrong one strands a reviewable issue). The panel runs, no needs-info park.
+test("Task 8: an unreadable dependency check does not suppress the review", async () => {
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    dependencyBlock: async () => { throw new Error("gh issue list failed"); },
+    buildContext: async () => ({ roster: ["correctness"], orchestration: "workflow", limits: {} }),
+    claudeP, gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    writeHandoff: async () => {}, transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  expect(claudeP).toHaveBeenCalled();
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-info" }));
+});
+
 // Task 5 (Structure D): on → rework the review handoff carries regression pins, guard derived from the
 // acceptance contract (Task 1). A must_fix whose id is a done_when with a test check → a guardable pin;
 // a must_fix with no contract link → an advisory (guard:null) pin. Kills KTB #18 R3.

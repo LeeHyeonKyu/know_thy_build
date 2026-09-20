@@ -17,7 +17,7 @@ import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
-import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
+import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
@@ -368,6 +368,42 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
         entryLabel = t.to;
       } else {
         blockedOriginFrom = origin.from;
+      }
+    }
+    /**
+     * ── 리뷰 효율 Task 8 (Structure G) — 막힌 이슈는 리뷰 라운드를 태우지 않는다 ──────────────────
+     *
+     * 리뷰 패널을 띄우기 **전에**, 이 피처가 미해결 제품/하네스 의존성에 막혀 있으면(이 이슈를 막는
+     * 열린 `factory:harness` 이슈가 있으면) 패널을 돌리지 않고 `factory:needs-info`로 주차한다.
+     * KTB #3 spec1×2가 죽은 방식: 리뷰 라운드 1이 "qa evidence absent"로 reject(KTB-36에 막힘),
+     * 라운드 2가 **같은** must_fix를 재확인(KTB-37에 막힘) — 이슈 안의 어떤 변경으로도 못 고칠
+     * must_fix를 리뷰어 넷이 두 번 재보고했다. 막힌 것은 산출물이 아니라 하네스다.
+     *
+     * **자리가 이유다.** 모든 리뷰 런이 여기로 들어온다 — 라벨 이벤트 dispatch도, sweeper의 stalled
+     * 재dispatch도, KTB-24의 blocked-retry hop(바로 위)도. 그래서 이 한 자리가 두 dispatch 경로를
+     * 모두 잡는다. 그리고 blocked-retry hop **뒤**다: KTB-24의 "잘린 리뷰는 한 번 재시작"과 충돌하지
+     * 않는다 — 인프라 취소/타임아웃은 이 이슈를 막는 하네스 이슈를 남기지 않으므로(막은 것은 시간이다)
+     * `dependencyBlock`이 null을 돌려주고 리뷰가 평소대로 돈다. 억제하는 것은 **하네스/제품 블록**뿐이다.
+     *
+     * 주차는 `awaiting-review → needs-info`(§labels.js — KTB-23의 `in-progress → needs-info` 주차와
+     * 같은 계열의 엣지)로, 사유는 하네스 주차와 **같은 문법**(`waiting for harness issue #<n>`)이다 —
+     * 그래야 기존 `sweepHarnessUnpark` 팔이 그대로 이 이슈를 집어, 사람이 하네스 PR을 머지해 그 이슈가
+     * 닫히면 `needs-info → queue`로 되돌린다(해제 경로를 새로 만들지 않는다).
+     *
+     * **fail-safe**: 판정이 안 읽히면(조회 실패) 억제하지 않는다 — 놓친 억제는 리뷰 한 라운드지만,
+     * 틀린 억제는 리뷰 가능한 이슈를 멈춰 세운다. 배선이 없는 구형 호출자도 조용히 건너뛴다(다른 dep과 같다).
+     */
+    if (stage === "review" && d.dependencyBlock) {
+      let harnessDep = null, depError = null;
+      try { harnessDep = await d.dependencyBlock(); }
+      catch (e) { depError = e?.message || String(e); }
+      if (depError) {
+        record([`review: dependency check unreadable — ${depError} (not suppressing — running review)`]);
+      } else if (harnessDep != null) {
+        const reason = parkedReason(harnessDep);
+        const t = await d.transition({ to: "factory:needs-info", reason });
+        record([`review: blocked on harness issue #${harnessDep} — parking without a review round (${reason})`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
+        return t.ok ? 0 : 2;
       }
     }
     /**
@@ -2108,6 +2144,13 @@ async function main() {
      * 셀 수 없다. 없으면 null(첫 라운드) — `reviewFlips`가 빈 배열로 받는다.
      */
     priorReviewVerdicts: async () => latestHandoff(commentsSinceRequeue(await gh.comments(issue)), "review")?.data?.verdicts ?? null,
+    /**
+     * ── 리뷰 효율 Task 8 (Structure G) — 이 피처를 막는 열린 하네스 이슈 번호(없으면 null). ─────────
+     * review 진입 가드가 리뷰 패널을 띄우기 전에 부른다: 값이 있으면 그 라운드는 이슈 안의 변경으로
+     * 못 고칠 must_fix를 재확인할 뿐이므로 주차한다. `findOpenHarnessIssueFor`가 던지면 그대로 던진다 —
+     * 가드가 잡아 **억제하지 않는 쪽**으로 기운다(fail-safe는 소비처에 있다).
+     */
+    dependencyBlock: async () => findOpenHarnessIssueFor({ gh, issue }),
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
     /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
     ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),

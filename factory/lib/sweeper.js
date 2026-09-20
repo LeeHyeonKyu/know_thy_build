@@ -5,6 +5,7 @@ import { STATES } from "./labels.js";
 import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
 import { allChecksGreen, GH_NO_CHECKS_RE } from "./gh.js";
 import { latestHandoff } from "./handoff.js";
+import { findOpenHarnessIssueFor } from "./harness-request.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -386,6 +387,19 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         if (stage === "implement") {
           const reason = await parked();
           if (reason) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `back-pressure — ${reason}` }); continue; }
+        }
+        // 리뷰 효율 Task 8 (Structure G): 리뷰는 **미해결 하네스 의존성에 막힌** 이슈를 재dispatch하지
+        // 않는다 — 그 라운드는 이슈 안의 변경으로 못 고칠 must_fix를 재확인할 뿐이다(KTB #3 spec1×2).
+        // run-stage의 리뷰 진입 가드가 어차피 주차하지만, 여기서 걸러 워크플로 런 한 번(+재점화 마커)의
+        // 낭비도 없앤다. 판정은 run-stage와 **같은** 단일 진실이다(이 피처를 막는 열린 factory:harness
+        // 이슈). fail-safe: `gh.issueList` 미배선(구형 더블)이거나 조회가 던지면 평소대로 dispatch한다
+        // (놓친 억제는 리뷰 한 라운드, 틀린 억제는 리뷰 가능한 이슈를 멈춰 세운다). 마커/락보다 앞이다 —
+        // 억제할 이슈에는 예산도 락 조작도 쓰지 않는다.
+        if (stage === "review" && typeof gh.issueList === "function") {
+          let harnessDep = null;
+          try { harnessDep = await findOpenHarnessIssueFor({ gh, issue: it.number }); }
+          catch (e) { actions.push({ kind: "error", step: "stalled-restart", issue: it.number, error: `harness-dep check — ${String(e.message || e)}` }); harnessDep = null; }
+          if (harnessDep != null) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `blocked on harness issue #${harnessDep}` }); continue; }
         }
         // KTB-28 (c) + r1 SF4: 락이 **살아 있으면** 이 이슈는 멈춘 것이 아니다 — 마커도 남기지 않고
         // (=예산을 쓰지 않고) 넘어간다. 잔해면 여기서 지운다(dispatch는 락을 보지 않으므로).
