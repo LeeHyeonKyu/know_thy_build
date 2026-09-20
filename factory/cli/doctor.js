@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands, checkSetupDirtiesTree, checkQaEvidenceProbe, runSetupProbe } from "../lib/doctor/harness.js";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity, checkRehearsal } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkProtectedParity, checkRehearsal } from "../lib/doctor/factory.js";
 import { checkRehearsalCurrent } from "../lib/rehearsal.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
@@ -199,6 +199,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
         // `gh api repos//branches/main/protection`처럼 깨진 경로로 호출해 거짓 "보호 없음"을 보고하지 않도록.
         // 해석 자체가 실패하면(로그인 안 됨·git repo 아님) github.* 전체를 건너뛰고 오프라인 허용 WARN 하나로 남긴다.
         let client = gh;
+        let theRepo = null;
         if (!client) {
           let repo;
           try {
@@ -206,10 +207,13 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
           } catch (e) {
             checks.push({ id: "github.unavailable", level: "WARN", detail: `could not resolve repo — ${e.message}` });
           }
-          if (repo) client = makeGh({ run, repo });
+          if (repo) { theRepo = repo; client = makeGh({ run, repo }); }
         }
         if (client) {
           checks.push(...(await checkGitHubFn({ gh: client, harness, labels: LABELS, root, exists, readFile })));
+          // T7 — 피드백 루프의 증거 (b)가 이 저장소에서 **원리상** 작동하는가(`factory.identity`).
+          // `checkGitHub`의 try/catch 밖에 둔다: gh 하나가 실패해도 이 판정은 따로 서야 한다.
+          checks.push(...(await (deps.checkFactoryIdentity || checkFactoryIdentity)({ gh: client, repo: theRepo })));
           // KTB-44 / ADR-025 — 기록된 리허설이 지금의 하네스에 대한 것인가. 이 판정만이 "큐가 열려
           // 있는가"를 doctor에서 말한다(transition.js가 같은 해시로 `→ factory:queue`를 막는다).
           checks.push(...(await checkRehearsalFn({ gh: client, root, readFile, harness })));

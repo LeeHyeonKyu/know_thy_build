@@ -29,7 +29,8 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
+import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
+import { attributionFor } from "../lib/feedback/harvest-findings.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { HEALTH_LABEL } from "../lib/label-catalog.js";
 import { readRecordsDetailed } from "../lib/records-branch.js";
@@ -180,10 +181,31 @@ export function diffShapeOf(files, harness = {}) {
  * 창 하나를 신호로 바꾼다 — 순수 함수다(gh도 fs도 만지지 않는다). 발견을 만드는 규칙과, 그 규칙이
  * 읽는 숫자를 한 자리에 둔다: 보고서가 보여 주는 표와 발견이 선 근거가 **같은 객체**여야 한다.
  */
+/**
+ * 이슈 번호로 조회하는 세 표(`commentsByIssue`·`records`·`prByIssue`)를 **한 가지 모양**으로 만든다.
+ *
+ * 호출자마다 Map을 주기도 하고 평범한 객체를 주기도 하는데, 객체를 `Object.entries`로 접으면 키가
+ * **문자열**이 된다 — 그런데 조회는 `issue.number`(숫자)로 한다. 그대로 두면 객체로 준 창은 모든
+ * 조회가 조용히 빈 값이 되고, 그 침묵은 보고서에서 "리뷰어가 깨끗했다"와 구별되지 않는다(T7 리뷰
+ * should_fix 3: 같은 이유로 공유 신원 판정이 객체 입력에서 통째로 침묵했다). 그래서 숫자로 읽히는
+ * 키는 숫자와 문자열 **양쪽**으로 넣어 둔다 — 어느 형태로 물어도 같은 답이 나온다.
+ */
+export function toIssueMap(v) {
+  const src = v instanceof Map ? v : new Map(Object.entries(v || {}));
+  const out = new Map();
+  for (const [k, val] of src) {
+    out.set(k, val);
+    if (!out.has(String(k))) out.set(String(k), val);
+    const n = Number(k);
+    if (Number.isFinite(n) && !out.has(n)) out.set(n, val);
+  }
+  return out;
+}
+
 export function healthSignals({ issues = [], commentsByIssue = new Map(), records = new Map(), prByIssue = new Map(), harness = {}, N = DEFAULT_N, records_source = "injected" } = {}) {
-  const byIssue = commentsByIssue instanceof Map ? commentsByIssue : new Map(Object.entries(commentsByIssue || {}));
-  const recs = records instanceof Map ? records : new Map(Object.entries(records || {}));
-  const prs = prByIssue instanceof Map ? prByIssue : new Map(Object.entries(prByIssue || {}));
+  const byIssue = toIssueMap(commentsByIssue);
+  const recs = toIssueMap(records);
+  const prs = toIssueMap(prByIssue);
 
   const perIssue = [];
   for (const issue of issues || []) {
@@ -423,11 +445,31 @@ const usd = (v) => (v == null ? "n/a" : `$${v}`);
  * 파생 보고서(spec §7) — 주인이 읽는 "대화"다. 원시 덤프가 아니라 **판정과 그 근거**를 같은 표에
  * 나란히 둔다: 짝의 양쪽이 한 줄에 보이지 않으면 사람도 Goodhart를 피할 수 없다.
  */
-export function renderHealthReport({ signals, findings = [], advisories = [], rehearsal = null, now, repo, upstream = null }) {
+export function renderHealthReport({ signals, findings = [], advisories = [], rehearsal = null, now, repo, upstream = null, identity = null, unverifiable = [], loginNote = null }) {
   const L = [];
   L.push(HEALTH_MARKER);
   L.push(`## factory-health — ${String(now).slice(0, 10)}`);
   L.push("");
+  /**
+   * T7 배너 — 표보다 **먼저** 선다. 이 저장소가 공유 신원이면 아래 어떤 숫자도 "사람이 factory-defect로
+   * 판정했는가"를 담지 못한다(그 통로가 통째로 닫혀 있다). 그 사실을 표 밑에 각주로 달면 아무도 안 읽는다.
+   */
+  if (identity?.personal === true) {
+    L.push(`> ⚠️ **factory identity is a personal account (\`${identity.login}\`)** — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity.`);
+    L.push("> 팩토리 코멘트와 소유자의 코멘트가 **같은 작성자**라 `cause: factory-defect` 결정을 사람의 판정으로 셀 수 없습니다 — 아래 표의 어떤 값도 그 통로가 닫혀 있다는 사실을 보정하지 않습니다.");
+    L.push("");
+  }
+  // 못 알아낸 것도 배너다 — "기각 0건"이 "문제 없음"으로 읽히는 것을 막는 유일한 줄이다.
+  if (loginNote) {
+    L.push(`> ⚠️ **factory logins unresolved** — human-decision attribution cannot be evaluated.`);
+    L.push(`> ${loginNote}`);
+    L.push("");
+  }
+  if (unverifiable.length) {
+    L.push(`> **기각된 human-decision ${unverifiable.length}건**(공유 신원이라 사람과 에이전트를 가를 수 없습니다):`);
+    for (const u of unverifiable) L.push(`> - #${u.issue} — @${u.author}: ${u.reason}`);
+    L.push("");
+  }
   L.push(signals.below_n
     ? `**표본 미달**: 머지된 이슈 ${signals.window.length}/${signals.N}. 행동 발견은 하나도 내지 않습니다 — 승인률도 토론도 비용도 이 표본에서는 판정할 수 없습니다(spec §10 Q3).`
     : `최근 머지 ${signals.window.length}개(${signals.window.map((n) => `#${n}`).join(", ")})를 봤습니다. 아래 표의 **모든 판정은 짝이 있는 신호**에서만 나옵니다(spec §5).`);
@@ -568,10 +610,48 @@ export async function runHealth({
   issues = null, commentsByIssue = null, records = null, prByIssue = null, run: runner = run,
   harness = null, manifest = null, roleFile = new Map(), upstream = null,
   rehearsal = null, route = routeFindings, publish = true,
+  identity = undefined, factoryLogins = undefined, log = console.error,
 } = {}) {
   const actions = [];
-  const loaded = await collect({ gh, run: runner, cwd: root, issues, commentsByIssue, records, prByIssue, since });
+  const loaded = await collect({ gh, run: runner, cwd: root, issues, commentsByIssue, records, prByIssue, since, log });
   const signals = healthSignals({ ...loaded, harness, N });
+
+  /**
+   * ── T7: 공유 신원은 **보고서의 맨 위**에 선다 ─────────────────────────────────────────────
+   * 팩토리가 사람 계정(소유자의 PAT)으로 돌면 `human-decision:v1` 귀속은 원리상 불가능하다 — 그
+   * 저장소의 모든 `cause: factory-defect`가 조용히 기각된다. 주간 보고서는 주인이 실제로 읽는 유일한
+   * 화면이므로, 그 사실과 **이번 창에서 기각된 결정들**이 표보다 먼저 보여야 한다.
+   */
+  // 창의 코멘트를 **한 번** 정규화한다 — 아래 두 조회(전체 평탄화, 이슈별)가 Map이든 객체든 같이 돈다.
+  const byIssue = toIssueMap(loaded.commentsByIssue);
+  let theIdentity = identity;
+  let logins = factoryLogins;
+  let loginNote = null;
+  if (theIdentity === undefined || logins === undefined) {
+    // `values()`는 숫자·문자열 두 키에 같은 배열을 담고 있으므로 중복을 접는다(같은 코멘트를 두 번 세지 않는다).
+    const allComments = [...new Set([...byIssue.values()])].flat();
+    let who = { ok: false, reason: "resolveFactoryLogins was never reached" };
+    try { who = await resolveFactoryLogins({ gh, comments: allComments }); }
+    catch (e) { who = { ok: false, reason: `resolveFactoryLogins threw — ${e?.message || e}` }; }
+    if (theIdentity === undefined) theIdentity = who.identity ?? null;
+    if (logins === undefined) logins = who.ok ? who.logins : null;
+    /**
+     * T7 리뷰 should_fix 4 — **못 알아낸 것도 말한다.** 팩토리 계정 이름을 못 얻으면 `attributionFor`는
+     * (b)를 통째로 거부한다(모르는 것은 통과가 아니다). 그 거부를 안 적으면 보고서는 "기각 0건"으로
+     * 보이고, 그것은 "문제 없음"과 구별되지 않는다 — 이 태스크가 고치는 바로 그 침묵이 한 칸 옆에서
+     * 되살아나는 자리다.
+     */
+    if (!who.ok) {
+      loginNote = `factory logins unresolved (${who.reason}) — human-decision attribution cannot be evaluated, so no \`cause: factory-defect\` decision in this window can reach [ktb]`;
+      log(`factory: health ${loginNote}`);
+    }
+  }
+  const unverifiable = [];
+  for (const n of signals.window) {
+    try {
+      for (const u of attributionFor({ comments: byIssue.get(n) || [], factoryLogins: logins }).unverifiable) unverifiable.push({ issue: n, ...u });
+    } catch { /* 한 이슈의 실패가 보고서를 막지 않는다 */ }
+  }
 
   // 보고서를 실을 **오래 사는** 이슈 하나(본문 마커가 신원, state:all, 닫혀 있으면 다시 연다).
   let reportIssue = null;
@@ -584,7 +664,7 @@ export async function runHealth({
   const { findings, advisories } = behaviouralFindings({ signals, repo, roleFile, anchorIssue: reportIssue });
 
   // 보고서에 이번 회차의 발견까지 실어 다시 렌더한다 — 사람이 한 화면에서 표와 판정을 같이 본다.
-  const body = renderHealthReport({ signals, findings, advisories, rehearsal, now, repo, upstream });
+  const body = renderHealthReport({ signals, findings, advisories, rehearsal, now, repo, upstream, identity: theIdentity, unverifiable, loginNote });
   if (publish) {
     try {
       if (reportIssue == null) {
@@ -640,6 +720,7 @@ export async function runHealth({
   return {
     ok: failures.length === 0, failures,
     below_n: signals.below_n, signals, findings, advisories, classified, actions,
+    identity: theIdentity, unverifiable, login_note: loginNote,
     report: body, report_issue: reportIssue,
   };
 }

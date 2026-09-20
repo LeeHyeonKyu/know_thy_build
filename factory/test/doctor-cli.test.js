@@ -161,6 +161,29 @@ test("(c) --json prints a parseable { checks, summary }", async () => {
   expect(total).toBe(parsed.checks.length);
 });
 
+// T7 — `factory.identity`는 **doctor에 실제로 꽂혀 있어야** 한다. 판정 함수만 초록인 채
+// 배선이 빠지면 사람은 그 WARN을 영영 못 본다(이 태스크가 고치는 것이 정확히 그 종류의 침묵이다).
+test("(c') factory.identity is wired into the CLI: a personal factory account WARNs, a machine user PASSes", async () => {
+  const root = await setupRepo();
+  const run = makeDoctorRun(root);
+  const idGh = (login, type) => ({ ...fakeGh, viewerLogin: async () => login, viewerType: async () => type, collaboratorPermission: async () => "write" });
+
+  const { io: i, o } = io();
+  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run"], io: i, run, gh: idGh("LeeHyeonKyu", "User") });
+  const warn = JSON.parse(o.out.join("")).checks.find((c) => c.id === "factory.identity");
+  expect(warn).toMatchObject({ level: "WARN", detail: expect.stringContaining("@LeeHyeonKyu") });
+  expect(warn.detail).toMatch(/register a machine user or a GitHub App/);
+
+  const { io: i2, o: o2 } = io();
+  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run"], io: i2, run, gh: idGh("ktb-factory[bot]", "Bot") });
+  expect(JSON.parse(o2.out.join("")).checks.find((c) => c.id === "factory.identity")).toMatchObject({ level: "PASS" });
+
+  // `--offline`에서는 gh를 한 번도 부르지 않으므로 이 판정 자체가 없다(없는 판정을 지어내지 않는다).
+  const { io: i3, o: o3 } = io();
+  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run", "--offline"], io: i3, run, gh: idGh("LeeHyeonKyu", "User") });
+  expect(JSON.parse(o3.out.join("")).checks.some((c) => c.id === "factory.identity")).toBe(false);
+});
+
 test("(d) --no-run skips executing commands and smoke: commands.run is WARN, no smoke.* checks", async () => {
   const root = await setupRepo();
   const run = makeDoctorRun(root);

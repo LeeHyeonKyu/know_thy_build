@@ -565,15 +565,21 @@ const heartbeatComment = (author) => ({
   id: 1, createdAt: "2026-09-20T10:00:00Z", author,
   body: heartbeatBody({ issue: 39, stage: "implement", runnerId: "gha-99001", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z" }),
 });
-const viewerGh = (login) => ({ viewerLogin: async () => login });
+// T7 — `viewerType`를 **안 가진** gh도 있다(옛 어댑터·부분 fake). 그때 계정 종류는 "모른다"다.
+const viewerGh = (login, type = undefined) => ({
+  viewerLogin: async () => login,
+  ...(type === undefined ? {} : { viewerType: async () => type }),
+});
 
 test("resolveFactoryLogins: inside Actions the viewer IS the bot — behaviour is unchanged (run-stage's path)", async () => {
+  // 모양을 통째로 고정한다 — `ok`/`logins`는 T7 이전과 같고, 새 키는 `identity` 하나뿐이다.
+  // (`viewerType`이 없는 gh이므로 계정 종류는 "모른다" = `personal: null`이다.)
   const r = await resolveFactoryLogins({ gh: viewerGh("factory-bot"), env: { GITHUB_ACTIONS: "true" } });
-  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
 
   // FACTORY_BOT_LOGIN과 함께 오면 둘 다(중복은 접힌다) — 두 배우 모드 그대로.
   const both = await resolveFactoryLogins({ gh: viewerGh("ktb-agent"), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "factory-bot" } });
-  expect(both).toEqual({ ok: true, logins: ["factory-bot", "ktb-agent"] });
+  expect(both).toEqual({ ok: true, logins: ["factory-bot", "ktb-agent"], identity: { personal: null, login: "ktb-agent" } });
 });
 
 test("resolveFactoryLogins: inside Actions a failing `gh api user` is still fail-closed", async () => {
@@ -588,7 +594,7 @@ test("resolveFactoryLogins: on a laptop the viewer is the OWNER and must never b
   const gh = { viewerLogin: async () => { asked = true; return "LeeHyeonKyu"; } };
   // 하트비트가 봇 이름을 준다 — 하트비트는 러너만 쓰는 산출물이므로 그 작성자는 구성상 팩토리다.
   const r = await resolveFactoryLogins({ gh, env: {}, comments: [heartbeatComment("factory-bot")] });
-  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
   // 소유자는 목록에 없다 — 그것이 MF-1의 전부다.
   expect(r.logins).not.toContain("LeeHyeonKyu");
   // 그리고 Actions 밖에서는 `gh api user`를 아예 부르지 않는다(부를 이유가 없다).
@@ -610,7 +616,7 @@ test("resolveFactoryLogins: nothing resolvable → ok:false (never an empty list
 
 test("resolveFactoryLogins: FACTORY_BOT_LOGIN alone is enough outside Actions", async () => {
   const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" } });
-  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
 });
 
 // ── T5 재리뷰 SF-A: 하트비트를 **인용한** 코멘트는 하트비트가 아니다 ─────────────────────────
@@ -637,14 +643,79 @@ test("resolveFactoryLogins: a human comment QUOTING a heartbeat never makes its 
     body: `pasting the heartbeat for context:\n\n${realHeartbeat.body}\n\nlooks stuck to me.`,
   };
   const r = await resolveFactoryLogins({ gh: viewerGh("LeeHyeonKyu"), env: {}, comments: [realHeartbeat, quoting] });
-  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
   expect(r.logins).not.toContain("LeeHyeonKyu");
+  // 인용한 사람의 `User` 종류가 **공유 신원 판정에도** 새지 않는다 — 그는 팩토리 계정이 아니다.
+  expect(r.identity.personal).not.toBe(true);
 });
 
 test("resolveFactoryLogins: a Bot-type author is a factory login even when its name is unknown", async () => {
   const botComment = { id: 4, createdAt: "2026-09-20T11:40:00Z", author: "some-app[bot]", authorType: "Bot", body: "<!-- human-decision:v1 issue=39 -->\ncause: factory-defect" };
   const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [botComment] });
-  expect(r).toEqual({ ok: true, logins: ["some-app[bot]"] });
+  // 그 계정이 **러너**라는 증거(하트비트·Actions 뷰어)는 없다 — 로그인은 알아도 신원 종류는 모른다.
+  expect(r).toEqual({ ok: true, logins: ["some-app[bot]"], identity: { personal: null, login: "some-app[bot]" } });
+});
+
+// ── T7: `identity.personal` — 공유 신원(팩토리 = 사람 계정)을 **말할 수 있어야** 경보가 뜬다 ────
+//
+// dogfood 저장소는 전부 이 상태다: `FACTORY_BOT_TOKEN`이 소유자의 PAT이라 팩토리 코멘트와 소유자의
+// `human-decision:v1`이 같은 작성자다. 그러면 증거 (b)가 모든 이슈에서 **조용히** 거부된다.
+// 판정은 그대로 두고(공유 신원은 사람의 결정이 아니다) 그 사실만 말하게 하는 것이 이 필드다.
+
+test("identity.personal: inside Actions it comes from `gh api user --jq .type`, asked once", async () => {
+  let asked = 0;
+  const gh = { viewerLogin: async () => "LeeHyeonKyu", viewerType: async () => { asked += 1; return "User"; } };
+  const r = await resolveFactoryLogins({ gh, env: { GITHUB_ACTIONS: "true" } });
+  expect(r.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
+  expect(asked).toBe(1);
+
+  // 머신 유저/앱이면 공유 신원이 아니다 — 경보는 뜨지 않는다.
+  const bot = await resolveFactoryLogins({ gh: viewerGh("ktb-factory[bot]", "Bot"), env: { GITHUB_ACTIONS: "true" } });
+  expect(bot.identity).toEqual({ personal: false, login: "ktb-factory[bot]" });
+});
+
+test("identity.personal: off Actions it comes from the byte-0 heartbeat comments' authorType", async () => {
+  // 노트북에서 `gh api user`는 소유자를 말한다 — 그 값은 여기서 쓰지 않는다(MF-1).
+  const gh = { viewerLogin: async () => { throw new Error("must not be called"); }, viewerType: async () => { throw new Error("must not be called"); } };
+  const shared = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("LeeHyeonKyu"), authorType: "User" }] });
+  expect(shared.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
+
+  const machine = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("factory-bot"), authorType: "Bot" }] });
+  expect(machine.identity).toEqual({ personal: false, login: "factory-bot" });
+});
+
+test("identity.personal: unknown is `null` — never guessed (an unknown type must not read as 'all clear')", async () => {
+  // `authorType`이 없는 옛 코멘트 스냅샷.
+  const old = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [heartbeatComment("factory-bot")] });
+  expect(old.identity).toEqual({ personal: null, login: "factory-bot" });
+
+  // 이름만 주는 FACTORY_BOT_LOGIN — 종류를 말해 주는 것이 아무것도 없다.
+  const named = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(named.identity).toEqual({ personal: null, login: "factory-bot" });
+
+  // Actions 안에서 `gh api user --jq .type`이 실패해도 `ok`/`logins`는 그대로다 — 모르는 것만 null이다.
+  const broke = await resolveFactoryLogins({
+    gh: { viewerLogin: async () => "factory-bot", viewerType: async () => { throw new Error("boom"); } },
+    env: { GITHUB_ACTIONS: "true" },
+  });
+  expect(broke.ok).toBe(true);
+  expect(broke.logins).toEqual(["factory-bot"]);
+  expect(broke.identity).toEqual({ personal: null, login: "factory-bot" });
+});
+
+test("identity.personal: FACTORY_BOT_LOGIN gets its type from that login's own comment authorType", async () => {
+  const own = { id: 9, createdAt: "2026-09-20T12:00:00Z", author: "factory-bot", authorType: "Bot", body: "factory: merged" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" }, comments: [own] });
+  expect(r.identity).toEqual({ personal: false, login: "factory-bot" });
+});
+
+test("viewerType(): reads `gh api user --jq .type` and never touches the token value", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "api" && a[1] === "user", result: { code: 0, stdout: "User\n", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.viewerType()).toBe("User");
+  expect(run.calls.at(-1).args).toEqual(["api", "user", "--jq", ".type"]);
 });
 
 test("resolveFactoryLogins: a User-type author is never added just for commenting", async () => {

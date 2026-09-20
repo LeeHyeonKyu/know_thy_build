@@ -7,7 +7,7 @@ import {
 } from "../bin/health.js";
 import { roleSignalsFor } from "../lib/retro/harvest.js";
 import { reviewEvidenceLine } from "../lib/run-record.js";
-import { heartbeat, recordOf, reviewHandoffComment, planHandoffComment, usageRecordLine } from "./helpers/feedback-fixtures.js";
+import { heartbeat, humanDecisionComment, recordOf, reviewHandoffComment, planHandoffComment, usageRecordLine } from "./helpers/feedback-fixtures.js";
 
 /**
  * ── Task 4 — 주기 건강 잡 ─────────────────────────────────────────────────────────────────────
@@ -801,4 +801,124 @@ test("회귀 — KTB의 실제 창: 6개 머지 중 `review-evidence:`를 가진
   const legacy = roleSignalsFor({ record: "## review · 2026-09-01T00:00Z · gha-1\nverify: ok\n", comments: [heartbeat(9, "review", "gha-1", dayOf(1))] });
   expect(legacy.roles).toEqual({});
   expect(legacy.rounds).toBe(0);
+});
+
+// ── T7: 공유 신원 배너 — 주간 보고서의 **맨 위**에 선다 ───────────────────────────────────────
+//
+// 주인이 실제로 읽는 화면은 이 보고서 하나다. 팩토리가 사람 계정으로 돌면 아래 어떤 표도
+// "사람이 factory-defect로 판정했는가"를 담지 못한다 — 그 통로가 통째로 닫혀 있기 때문이다.
+// 그 사실을 표 밑 각주로 달면 아무도 읽지 않으므로, 배너는 첫 표보다 앞이어야 한다.
+
+const BANNER = /factory identity is a personal account \(`?LeeHyeonKyu`?\)/;
+const identityWindow = () => windowOf([1, 2, 3, 4, 5].map((n) => ({
+  n, day: n, tier: "docs", files: DOCS_FILES, rounds: [[approve("correctness")]],
+})));
+
+test("T7 — `identity.personal === true`이면 보고서 맨 위에 배너가 선다", async () => {
+  const r = await health({ ...identityWindow(), identity: { personal: true, login: "LeeHyeonKyu" }, factoryLogins: ["LeeHyeonKyu"] });
+  expect(r.report).toMatch(BANNER);
+  expect(r.report).toMatch(/register a machine user or GitHub App as the factory identity/);
+  // 맨 위다 — 첫 표(역할)보다 앞선다.
+  expect(r.report.indexOf("factory identity is a personal account")).toBeLessThan(r.report.indexOf("### 역할"));
+  // 마커는 여전히 첫 줄이다(멱등 dedupe가 그 마커로 이 코멘트를 찾는다).
+  expect(r.report.indexOf(HEALTH_MARKER)).toBe(0);
+});
+
+test("T7 — `personal === false`/`null`이면 배너는 없다(모르는 것은 경보가 아니다)", async () => {
+  const w = identityWindow();
+  expect((await health({ ...w, identity: { personal: false, login: "ktb-bot" }, factoryLogins: ["ktb-bot"] })).report).not.toMatch(BANNER);
+  expect((await health({ ...w, identity: { personal: null, login: "ktb-bot" }, factoryLogins: ["ktb-bot"] })).report).not.toMatch(BANNER);
+});
+
+test("T7 — 기각된 `human-decision`은 이슈 번호와 작성자까지 보고서에 적힌다", async () => {
+  const w = identityWindow();
+  // 소유자가 `:unstick`으로 적은 결정 — 진짜 생산자(`humanDecisionComment`)가 만든다.
+  w.commentsByIssue.set(3, [
+    ...w.commentsByIssue.get(3),
+    humanDecisionComment({ issue: 3, at: dayOf(3), author: "LeeHyeonKyu", cause: "factory-defect", ktbFix: "1.4.0", reason: "self-gate blocked on a check the review stage produces" }),
+  ]);
+  const r = await health({ ...w, identity: { personal: true, login: "LeeHyeonKyu" }, factoryLogins: ["LeeHyeonKyu"] });
+  expect(r.unverifiable).toHaveLength(1);
+  expect(r.unverifiable[0]).toMatchObject({ issue: 3, author: "LeeHyeonKyu", status: "unverifiable" });
+  expect(r.report).toMatch(/기각된 human-decision 1건/);
+  expect(r.report).toMatch(/#3 — @LeeHyeonKyu/);
+
+  // 같은 판에서 팩토리 로그인이 다른 계정이면 기각도 배너도 없다(대조군).
+  const clean = await health({ ...w, identity: { personal: false, login: "ktb-bot" }, factoryLogins: ["ktb-bot"] });
+  expect(clean.unverifiable).toEqual([]);
+  expect(clean.report).not.toMatch(/기각된 human-decision/);
+});
+
+/**
+ * 리뷰 should_fix 3 — 창의 표는 Map으로도 **평범한 객체로도** 온다. 객체를 `Object.entries`로 접으면
+ * 키가 문자열이 되는데 조회는 숫자로 하므로, 정규화가 없으면 객체로 준 창은 모든 조회가 조용히 빈
+ * 값이 된다 — 공유 신원 판정도, 그 이전에 신호 자체도.
+ */
+test("T7 — 창을 평범한 객체로 줘도 신호·배너·기각 목록이 똑같이 나온다", async () => {
+  const w = identityWindow();
+  w.commentsByIssue.set(3, [
+    ...w.commentsByIssue.get(3),
+    humanDecisionComment({ issue: 3, at: dayOf(3), author: "LeeHyeonKyu", cause: "factory-defect", reason: "self-gate blocked wrongly" }),
+  ]);
+  const plain = {
+    issues: w.issues,
+    commentsByIssue: Object.fromEntries([...w.commentsByIssue]),
+    records: Object.fromEntries([...w.records]),
+    prByIssue: Object.fromEntries([...w.prByIssue]),
+  };
+  const asMap = await health({ ...w, identity: { personal: true, login: "LeeHyeonKyu" }, factoryLogins: ["LeeHyeonKyu"] });
+  const asObj = await health({ ...plain, identity: { personal: true, login: "LeeHyeonKyu" }, factoryLogins: ["LeeHyeonKyu"] });
+  // 창 자체가 비지 않았다(정규화가 없으면 여기서 0개가 된다).
+  expect(asObj.signals.window).toEqual(asMap.signals.window);
+  expect(asObj.signals.window.length).toBe(DEFAULT_N);
+  expect(asObj.unverifiable).toEqual(asMap.unverifiable);
+  expect(asObj.unverifiable).toHaveLength(1);
+  expect(asObj.report).toMatch(BANNER);
+  expect(asObj.report).toMatch(/#3 — @LeeHyeonKyu/);
+});
+
+/**
+ * 리뷰 should_fix 4 — 팩토리 계정 이름을 **못 얻은** 회차도 조용하면 안 된다. 그때 `attributionFor`는
+ * (b)를 통째로 거부하므로 "기각 0건"이 되는데, 그것은 "문제 없음"과 화면에서 구별되지 않는다.
+ */
+test("T7 — 팩토리 로그인을 못 얻으면 그 사실이 보고서와 stderr에 남는다", async () => {
+  const errs = [];
+  // 작성자가 없는 옛 코멘트 스냅샷 + `viewerLogin`이 없는 gh = 팩토리 계정 이름을 얻을 길이 없다.
+  const w = identityWindow();
+  for (const [n, cs] of [...w.commentsByIssue]) w.commentsByIssue.set(n, cs.map((c) => ({ ...c, author: null })));
+  const r = await health({ ...w, gh: fakeGh(), log: (m) => errs.push(m) });
+  expect(r.login_note).toMatch(/factory logins unresolved/);
+  expect(r.report).toMatch(/factory logins unresolved/);
+  expect(r.report).toMatch(/human-decision attribution cannot be evaluated/);
+  expect(errs.join("\n")).toMatch(/factory logins unresolved/);
+  // 그리고 그 배너도 표보다 앞이다.
+  expect(r.report.indexOf("factory logins unresolved")).toBeLessThan(r.report.indexOf("### 역할"));
+
+  // 로그인을 얻은 회차에는 그 줄이 없다(없는 경보를 만들지 않는다).
+  const ok = await health({ ...identityWindow(), factoryLogins: ["ktb-bot"], identity: { personal: false, login: "ktb-bot" } });
+  expect(ok.login_note).toBeNull();
+  expect(ok.report).not.toMatch(/factory logins unresolved/);
+});
+
+/**
+ * 리뷰 should_fix 5 — `identity`/`factoryLogins`를 **주입하지 않는** 경로(프로덕션의 유일한 경로)가
+ * 실제로 `resolveFactoryLogins`를 타고 배너까지 도달하는지. 주입된 값으로만 초록이면 배선이 빠진
+ * 날에도 테스트는 초록이다.
+ */
+test("T7 — 주입 없이 `runHealth`가 스스로 공유 신원을 알아내고 배너를 세운다", async () => {
+  const w = identityWindow();
+  // 하트비트(러너만 쓰는 산출물)를 **사람 계정**이 썼다 = 공유 신원. 그 사실은 코멘트의 `authorType`에 있다.
+  for (const [n, cs] of [...w.commentsByIssue]) {
+    w.commentsByIssue.set(n, cs.map((c) => ({ ...c, author: "LeeHyeonKyu", authorType: "User" })));
+  }
+  w.commentsByIssue.set(3, [
+    ...w.commentsByIssue.get(3),
+    humanDecisionComment({ issue: 3, at: dayOf(3), author: "LeeHyeonKyu", cause: "factory-defect", reason: "self-gate blocked wrongly" }),
+  ]);
+  const r = await health({ ...w, gh: fakeGh(), log: () => {} });
+  expect(r.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
+  expect(r.login_note).toBeNull();
+  expect(r.report).toMatch(BANNER);
+  expect(r.unverifiable).toHaveLength(1);
+  expect(r.unverifiable[0]).toMatchObject({ issue: 3, author: "LeeHyeonKyu" });
 });

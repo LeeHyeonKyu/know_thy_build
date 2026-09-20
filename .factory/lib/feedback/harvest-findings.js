@@ -248,6 +248,18 @@ export function isNewerVersion(a, b) {
  */
 export function attributionFor({ comments = [], selfGateLines = [], factoryLogins = [] } = {}) {
   const evidence = [];
+  /**
+   * ── T7: 거부는 보이게 한다 ─────────────────────────────────────────────────────────────────
+   * `FACTORY_BOT_TOKEN`이 소유자의 PAT인 저장소(= 지금의 모든 dogfood 저장소)에서는 팩토리 코멘트와
+   * 소유자의 `human-decision:v1`이 **같은 작성자**다. 그러면 위의 `continue` 하나가 (b)를 조용히
+   * 통째로 닫는다 — 사람은 "factory-defect라고 적었는데 아무 일도 안 일어났다"만 본다. 판정은 그대로
+   * 두고(공유 신원은 사람의 결정이 **아니다**) 그 거부를 기록으로 남긴다: `evidenceFor`는 절대 세지
+   * 않고, 표면(retro·analyze·health·doctor)은 그것을 읽어 보여 준다.
+   *
+   * 거부된 항목은 `evidence`에 **같이** 실린다(감사 목록은 하나여야 한다) — 세지 않는 일은 `evidenceFor`
+   * 한 곳에서만 일어나고, `unverifiable`은 그 목록의 파생 뷰다. 두 배열에 따로 담으면 언젠가 한쪽만
+   * 읽는 호출자가 생기고 그 호출자가 곧 이 구멍을 다시 연다.
+   */
   // `null`은 "팩토리 계정 이름을 확인하지 못했다"이고 `[]`와 **다르다**: 봇 이름을 모르면 사람의
   // 결정과 에이전트의 결정을 가를 수 없으므로 (b)를 통째로 거부한다(모르는 것은 통과가 아니다).
   const bots = factoryLogins == null ? null : new Set(factoryLogins.filter(Boolean).map((l) => String(l).toLowerCase()));
@@ -260,12 +272,18 @@ export function attributionFor({ comments = [], selfGateLines = [], factoryLogin
     if (!HUMAN_DECISION_CAUSE.test(body)) continue;                   // 산문은 증거가 아니다 — 필드만이 증거다
     const author = c?.author == null ? null : String(c.author);
     if (!author) continue;                                            // 작성자를 모르면 통과시키지 않는다
-    if (bots.has(author.toLowerCase())) continue;                     // 에이전트가 적은 "사람의 결정"은 결정이 아니다
     const fix = HUMAN_DECISION_KTB_FIX.exec(body)?.[1] ?? null;
-    evidence.push({
-      kind: "human-decision", check: null, author,
-      detail: `human-decision:v1 (skill=${hd[2] ?? "unknown"}) by @${author} declares \`cause: factory-defect\`${fix ? ` (ktb_fix: ${fix})` : ""}`,
-    });
+    const said = `human-decision:v1 (skill=${hd[2] ?? "unknown"}) by @${author} declares \`cause: factory-defect\`${fix ? ` (ktb_fix: ${fix})` : ""}`;
+    // 에이전트가 적은 "사람의 결정"은 결정이 아니다 — 그러나 그 거부는 이제 **줄 하나로 남는다**.
+    if (bots.has(author.toLowerCase())) {
+      evidence.push({
+        kind: "human-decision", status: "unverifiable", check: null, author,
+        reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent",
+        detail: `${said} — REFUSED as evidence: @${author} is also a factory login`,
+      });
+      continue;
+    }
+    evidence.push({ kind: "human-decision", check: null, author, detail: said });
   }
 
   // (c) 버전이 올라간 뒤 그 검사가 더는 돌지 않는다. 줄은 시간순이다(run 기록은 append-only).
@@ -288,9 +306,13 @@ export function attributionFor({ comments = [], selfGateLines = [], factoryLogin
     }
   }
 
-  /** 이 **검사**에 대한 증거만. 검사를 모르는 증거((b) — 이슈 전체에 대한 사람의 판정)는 언제나 센다. */
-  const evidenceFor = (check) => evidence.filter((e) => e.check == null || e.check === check);
-  return { evidence, evidenceFor };
+  /**
+   * 이 **검사**에 대한 증거만. 검사를 모르는 증거((b) — 이슈 전체에 대한 사람의 판정)는 언제나 센다.
+   * `status: "unverifiable"`은 **절대** 세지 않는다 — 보이게 만드는 것과 증거로 세는 것은 다른 일이고,
+   * 후자를 열면 공유 신원 저장소에서 에이전트가 적은 결정 하나가 상류 쓰기를 여는 바로 그 구멍이 된다.
+   */
+  const evidenceFor = (check) => evidence.filter((e) => e.status !== "unverifiable" && (e.check == null || e.check === check));
+  return { evidence, evidenceFor, unverifiable: evidence.filter((e) => e.status === "unverifiable") };
 }
 
 /** RED 게이트 → 발견(§②의 표). 기본값은 "발견 아님". */
@@ -482,7 +504,7 @@ function reviewFindings({ issue, repo, handoffs, manifests }) {
 }
 
 /**
- * `harvestFindings({ issue, repo, record, comments, factoryLogins }) → rawFinding[]`
+ * `harvestIssue({ issue, repo, record, comments, factoryLogins }) → { findings, unverifiable }`
  *
  * `record`는 그 이슈의 run 기록 전문(`docs/factory/runs/<issue>.md`), `comments`는 그 이슈의 코멘트
  * 전부(`{id, body, createdAt, author}`)다. 둘 다 회고가 이미 손에 들고 있는 것이고, 둘 다
@@ -490,8 +512,14 @@ function reviewFindings({ issue, repo, handoffs, manifests }) {
  * 경로는 없다(spec §3). `factoryLogins`는 팩토리 계정 이름들(`resolveFactoryLogins`)이고,
  * `human-decision:v1`의 작성자가 그중 하나면 그 결정은 **사람의 결정이 아니다**(재리뷰 NEW-MF-2).
  * 절대 던지지 않는다: 한 소스가 깨져도 나머지 소스의 발견은 나온다.
+ *
+ * ── T7 리뷰 should_fix 1: **두 값은 평범한 객체의 두 키여야 한다.** ─────────────────────────
+ * 1차 구현은 `unverifiable`을 발견 배열의 **열거 불가 속성**으로 실었다. 그 값은 `spread`·`map`·
+ * `slice`·`concat`·`JSON.stringify` 어디서든 조용히 사라진다 — 곧 "거부를 보이게 한다"는 이 태스크의
+ * 전부가, 중간에 배열을 한 번 베끼는 호출자가 생기는 날 다시 침묵으로 돌아간다. 그래서 진짜 반환값은
+ * 이 함수이고, `harvestFindings`는 발견만 돌려주는 얇은 래퍼로 남긴다(기존 호출자와 핀은 그대로).
  */
-export function harvestFindings({ issue, repo, record = "", comments = [], factoryLogins = [] } = {}) {
+export function harvestIssue({ issue, repo, record = "", comments = [], factoryLogins = [] } = {}) {
   const out = [];
   const push = (fn) => { try { out.push(...fn()); } catch { /* 한 소스의 실패가 나머지를 막지 않는다 */ } };
   const known = knownRunsFor(comments);
@@ -517,5 +545,14 @@ export function harvestFindings({ issue, repo, record = "", comments = [], facto
   push(() => selfGateFindings({ issue, repo, blocks, attribution }));
   push(() => transitionFindings({ issue, repo, comments, attribution }));
   push(() => reviewFindings({ issue, repo, handoffs: parseHandoffs(comments), manifests: boundManifests }));
-  return out;
+  // 거부된 `human-decision`은 **발견이 아니다**(라우팅할 인과가 없다) — 그래서 별도의 키다.
+  return { findings: out, unverifiable: attribution.unverifiable };
+}
+
+/**
+ * `harvestFindings({...}) → rawFinding[]` — 발견만 필요한 호출자를 위한 얇은 래퍼.
+ * 거부된 결정까지 보여 주려면 `harvestIssue`를 쓴다(그쪽이 진짜 반환값이다).
+ */
+export function harvestFindings(args) {
+  return harvestIssue(args).findings;
 }

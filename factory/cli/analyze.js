@@ -15,7 +15,7 @@ import {
   ACTUALLY_MOVED_TO_NEEDS_HUMAN, HUMAN_DECISION, NEEDS_HUMAN_LABEL,
   REFUSAL_REASON, SELF_GATE_RETRY, TRANSITION_REFUSED, TRANSITION_TO,
 } from "../lib/retro/issue-comments.js";
-import { harvestFindings, knownRunsFor, isBoundLine } from "../lib/feedback/harvest-findings.js";
+import { harvestIssue, knownRunsFor, isBoundLine } from "../lib/feedback/harvest-findings.js";
 import { classifyFinding } from "../lib/feedback/classify.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 
@@ -422,9 +422,11 @@ function snippetHead(s, max = 4) {
 /** 바인딩되지 않은 줄에 붙는 꼬리표 — 세 줄 종류 전부에 같은 문구로 붙는다(리뷰 SF-5). */
 const UNBOUND = "UNBOUND — no heartbeat names this run, so harvest ignores this line as evidence";
 
-export function renderTimeline(tl, classified, { factoryLogins = null, recordSource = null, recordTrusted = true, loginNote = null } = {}) {
+export function renderTimeline(tl, classified, { factoryLogins = null, recordSource = null, recordTrusted = true, loginNote = null, identity = null } = {}) {
   const L = [];
   const bots = new Set((factoryLogins || []).map((s) => String(s).toLowerCase()));
+  // T7 — 팩토리가 사람 계정으로 돌면 "봇이 적은 결정"과 "사람이 적은 결정"이 **같은 작성자**다.
+  const shared = identity?.personal === true;
   // `null`(해석 실패)과 배열(해석 성공)은 다르다 — 전자에서는 작성자를 사람이라고 단정할 수 없다.
   const loginsKnown = Array.isArray(factoryLogins);
   L.push(`Run · #${tl.issue}${tl.repo ? ` · ${tl.repo}` : ""}`);
@@ -433,6 +435,7 @@ export function renderTimeline(tl, classified, { factoryLogins = null, recordSou
 
   // 경고는 **읽히는 자리**에 둔다 — 발견 목록 뒤에 붙이면 사람은 이미 "0건"을 결론으로 읽은 뒤다.
   if (loginNote) L.push(`!! ${loginNote}`);
+  if (shared) L.push(`!! factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`);
 
   if (!recordTrusted && recordSource) {
     L.push(`!! UNVERIFIED — the run record came from ${recordSource}, a local scratch copy under docs/factory/runs/.`);
@@ -491,7 +494,7 @@ export function renderTimeline(tl, classified, { factoryLogins = null, recordSou
   if (tl.chronology.length) {
     L.push("");
     L.push("── chronology (each line is placed by its own timestamp; an event is attributed to a run only when it carries that run's id)");
-    for (const line of renderChronology(tl.chronology, bots, loginsKnown)) L.push(line);
+    for (const line of renderChronology(tl.chronology, bots, loginsKnown, shared)) L.push(line);
   }
 
   L.push("");
@@ -500,7 +503,7 @@ export function renderTimeline(tl, classified, { factoryLogins = null, recordSou
   return L;
 }
 
-function renderChronology(chronology, bots, loginsKnown) {
+function renderChronology(chronology, bots, loginsKnown, shared = false) {
   const L = [];
   for (const ev of chronology) {
     const at = (ev.at ?? "?").padEnd(20);
@@ -509,7 +512,7 @@ function renderChronology(chronology, bots, loginsKnown) {
     } else if (ev.kind === "heartbeat") {
       L.push(`   ${at} heartbeat · ${ev.stage ?? "?"} · ${ev.runner}${ev.run_id ? ` (run ${ev.run_id})` : ""}`);
     } else {
-      const lines = renderEvent(ev, bots, loginsKnown);
+      const lines = renderEvent(ev, bots, loginsKnown, shared);
       if (!lines.length) continue;
       L.push(`   ${at} ${lines[0]}`);
       for (const extra of lines.slice(1)) L.push(`   ${extra}`);
@@ -519,7 +522,7 @@ function renderChronology(chronology, bots, loginsKnown) {
 }
 
 /** 이벤트 한 건 → 줄들. 첫 줄만 타임스탬프를 받고 이어지는 줄은 그 아래로 정렬한다. */
-function renderEvent(ev, bots, loginsKnown) {
+function renderEvent(ev, bots, loginsKnown, shared = false) {
   const L = [];
   const cont = " ".repeat(21);
   if (ev.kind === "transition-refused") {
@@ -550,7 +553,10 @@ function renderEvent(ev, bots, loginsKnown) {
     const who = ev.author == null ? "(author unknown — not usable as evidence)"
       // 팩토리 계정 목록을 못 얻었으면 "사람"이라고 말할 수 없다 — 셋째 상태가 필요하다(재리뷰 nit).
       : !loginsKnown ? `@${ev.author} (author unverifiable — factory logins unresolved)`
-        : bots.has(String(ev.author).toLowerCase()) ? `@${ev.author} (factory login — ignored by attribution)`
+        // T7 — 공유 신원에서는 "에이전트가 적었다"가 **아니라** "누가 적었는지 알 수 없다"가 참이다.
+        // 앞의 문구를 그대로 두면 사람이 자기가 적은 결정을 "봇이 적었다"로 읽고 원인을 못 찾는다.
+        : bots.has(String(ev.author).toLowerCase())
+          ? (shared ? `@${ev.author} (shared identity — not attributable)` : `@${ev.author} (factory login — ignored by attribution)`)
           : `@${ev.author} (human)`;
     L.push(`human decision (${ev.skill ?? "?"}) by ${who}: ${ev.decision ?? "?"}${ev.cause ? ` · cause=${ev.cause}` : ""}`);
     if (ev.reason) L.push(`${cont}  ${ev.reason}`);
@@ -685,7 +691,7 @@ export async function analyzeCommand({
   root, argv = [], io, run = realRun,
   gh = null, repo = null, harness = null,
   readRecord = null, loadManifest = loadInstallManifest,
-  factoryLogins = undefined,
+  factoryLogins = undefined, identity = undefined,
   importHealth = () => import("../bin/health.js"),
 } = {}) {
   const json = argv.includes("--json");
@@ -733,22 +739,30 @@ export async function analyzeCommand({
    */
   let logins = factoryLogins;
   let loginNote = null;
+  let theIdentity = identity;
   if (logins === undefined) {
     const who = await resolveFactoryLogins({ gh: ghClient, comments });
     logins = who.ok ? who.logins : null;
+    if (theIdentity === undefined) theIdentity = who.identity ?? null;
     if (!who.ok) loginNote = `factory logins unresolved (${who.reason}) — human-decision evidence cannot be evaluated, so no self-gate or transition-refused finding can reach [ktb] (the retro refuses it the same way)`;
   }
+  if (theIdentity === undefined) theIdentity = null;
   if (loginNote) io.err(`factory analyze: ${loginNote}`);
 
   const tl = buildTimeline({ issue, repo: theRepo, record: rec.text, comments });
   tl.record_source = rec.source;
   tl.record_trusted = rec.trusted !== false;
   tl.factory_logins = logins;
+  tl.factory_identity = theIdentity;
   if (loginNote) tl.factory_logins_note = loginNote;
 
   let raw = [];
-  try { raw = harvestFindings({ issue, repo: theRepo, record: rec.text, comments, factoryLogins: logins }); }
-  catch (e) { io.err(`factory analyze: harvest failed — ${e?.message || e}`); }
+  let unverifiable = [];
+  try {
+    const h = harvestIssue({ issue, repo: theRepo, record: rec.text, comments, factoryLogins: logins });
+    raw = h.findings;
+    unverifiable = h.unverifiable;
+  } catch (e) { io.err(`factory analyze: harvest failed — ${e?.message || e}`); }
 
   const manifest = await loadManifest(root);
   const classified = classifyAll({ findings: raw, manifest, harness: theHarness });
@@ -758,13 +772,15 @@ export async function analyzeCommand({
       schema: "factory.analyze.v1",
       ...tl,
       findings: classified.findings,
+      // T7 — 거부된 결정은 발견이 아니지만 **조용해서는 안 된다**: `--json` 소비자도 그 사실을 본다.
+      ...(unverifiable.length ? { unverifiable: unverifiable.map((u) => ({ issue, ...u })) } : {}),
       ...(classified.skipped ? { findings_skipped: classified.skipped } : {}),
       ktb_version: manifest?.ktb_version ?? manifest?.ktbVersion ?? null,
     }, null, 2));
     return 0;
   }
 
-  const rendered = renderTimeline(tl, classified, { factoryLogins: logins, recordSource: rec.source, recordTrusted: tl.record_trusted, loginNote });
+  const rendered = renderTimeline(tl, classified, { factoryLogins: logins, recordSource: rec.source, recordTrusted: tl.record_trusted, loginNote, identity: theIdentity });
   for (const line of rendered) io.out(line);
   io.out("");
   io.out(`record: ${rec.source}`);

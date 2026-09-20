@@ -609,7 +609,9 @@ export async function runRetro({ deps, force = false, now } = {}) {
     if (d.routeFeedback && harvestRan) {
       const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, since }));
       if (r.ok && r.value) {
-        for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
+        // `author`는 기각된 결정(`unverifiable-decision`)에서만 온다 — **누구의** 결정이 사라졌는지를
+        // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
+        for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.author ? ` by @${a.author}` : ""}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
         if ((r.value.actions || []).length) applied.push({ step: "feedback-route", issues: r.value.issues || [], actions: r.value.actions });
       }
     }
@@ -954,6 +956,66 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
   return args;
 }
 
+/**
+ * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
+ * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
+ *
+ * `main()`의 클로저가 아니라 여기 사는 이유(T7 리뷰 should_fix 5): 이 팔의 **배선**이 판정의 일부다 —
+ * 창의 코멘트를 `resolveFactoryLogins`에 넘기는 것(하트비트 작성자라는 출처가 거기서 열린다),
+ * `identity`를 읽는 것, 경보를 런당 한 번만 다는 것. 클로저 안에 있으면 그 셋 중 무엇이 빠져도
+ * 테스트는 초록이고, 빠진 날 dogfood 저장소는 다시 조용해진다.
+ */
+export async function routeFeedbackArm({
+  gh, repo, root, harness, issues, commentsByIssue, records, since,
+  loadManifest = loadInstallManifest, log = console.error,
+}) {
+  const manifest = await loadManifest(root);
+  if (!manifest) {
+    return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
+  }
+  /**
+   * 재리뷰 NEW-MF-2 — `human-decision:v1`을 **권한**으로 읽으려면 작성자를 알아야 한다.
+   * `gh issue comment`는 훅이 일부러 열어 둔 문이라 어떤 스테이지 에이전트든 그 모양의 코멘트를
+   * 적을 수 있다. 팩토리 계정 이름을 못 얻으면 `null`을 넘긴다 — `[]`("봇이 없다")가 아니다.
+   *
+   * T5 MF-1 — `comments`를 넘기면 **하트비트 작성자**라는 출처가 열린다(러너만 쓰는 산출물이므로
+   * Actions 밖에서도 봇 이름이 정확하다). 회고는 이미 창의 코멘트를 전부 손에 들고 있다 —
+   * 추가 API 왕복은 없다. 그리고 그 코멘트들이 T7의 `identity`에 `authorType`이라는 계정 사실도 준다.
+   */
+  const allComments = [...(commentsByIssue instanceof Map ? commentsByIssue.values() : Object.values(commentsByIssue || {}))].flat();
+  const who = await resolveFactoryLogins({ gh, comments: allComments });
+  if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
+  const routed = await routeMergedIssues({
+    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
+    ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
+    factoryLogins: who.ok ? who.logins : null,
+  });
+  /**
+   * T7 — 팩토리가 **사람 계정**으로 돌면 작성자 기반 귀속은 원리상 불가능하다(팩토리 코멘트와
+   * 소유자의 코멘트가 같은 작성자다). 그 사실을 런마다 **한 번** 크게 적는다: 이슈마다 적으면
+   * 잡음이고, 안 적으면 dogfood 저장소에서 (b)가 영영 조용히 닫힌 채로 남는다.
+   */
+  const warn = who.ok ? sharedIdentityWarning(who.identity) : null;
+  if (warn) routed.actions.unshift(warn);
+  return routed;
+}
+
+/**
+ * T7 — 공유 신원 경보 한 줄(없으면 `null`). **런당 한 번**이다: 이슈마다 적으면 같은 문장이 창의
+ * 이슈 수만큼 쌓여 그 자체가 잡음이 되고, 한 번도 안 적으면 dogfood 저장소에서 증거 (b)가 영영
+ * 조용히 닫힌 채로 남는다(이 태스크가 고치는 것이 바로 그 침묵이다).
+ *
+ * `personal !== true`이면 아무것도 내지 않는다 — `null`(모른다)은 경보의 근거가 아니다. 모르는 것을
+ * 경보로 바꾸면 사람이 경보를 끄는 법부터 배우고, 그러면 진짜일 때도 안 읽는다.
+ */
+export function sharedIdentityWarning(identity) {
+  if (identity?.personal !== true) return null;
+  return {
+    kind: "warning", step: "feedback-route", login: identity.login,
+    reason: `factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`,
+  };
+}
+
 export function roleFileMap(roles) {
   const map = new Map();
   const add = (name, def) => {
@@ -1102,29 +1164,7 @@ async function main() {
      * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
      * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
      */
-    routeFeedback: async ({ issues, commentsByIssue, records, since }) => {
-      const manifest = await loadInstallManifest(root);
-      if (!manifest) {
-        return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
-      }
-      /**
-       * 재리뷰 NEW-MF-2 — `human-decision:v1`을 **권한**으로 읽으려면 작성자를 알아야 한다.
-       * `gh issue comment`는 훅이 일부러 열어 둔 문이라 어떤 스테이지 에이전트든 그 모양의 코멘트를
-       * 적을 수 있다. 팩토리 계정 이름을 못 얻으면 빈 목록으로 진행한다 — 그때 (b) 증거는 작성자가
-       * 봇인지 알 수 없으니 **통과하지 않는다**(`attributionFor`가 봇 목록과 무관하게 작성자 없는
-       * 코멘트를 거부하고, 봇 이름을 모르면 봇이 쓴 것도 거부되지 않는다는 뜻이 아니다 —
-       * 아래 목록이 비면 (b)는 사실상 사람/봇을 못 가르므로, 그 경우를 기록에 남긴다).
-       */
-      let factoryLogins = [];
-      const who = await resolveFactoryLogins({ gh });
-      if (who.ok) factoryLogins = who.logins;
-      else console.error(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
-      return routeMergedIssues({
-        gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
-        ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
-        factoryLogins: who.ok ? factoryLogins : null,
-      });
-    },
+    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness }),
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),

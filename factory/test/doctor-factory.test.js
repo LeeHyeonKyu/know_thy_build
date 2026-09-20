@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
 import { protBlock, ciDenyEntries, qaManifestDeny, writeGlobs } from "../lib/protected-paths.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
@@ -569,6 +569,44 @@ test("checkGitHub: secrets, token date, labels, protection", async () => {
   expect(c["github.token-issued-at"].level).toBe("WARN");
   expect(c["github.labels"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory:queue") });
   expect(c["github.protection"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("factory/integrity") });
+});
+
+// ── T7: `factory.identity` — 팩토리가 **사람 계정**으로 돌면 증거 (b)가 원리상 닫힌다 ─────────
+//
+// dogfood 저장소가 전부 이 상태다(`FACTORY_BOT_TOKEN` = 소유자의 PAT). 그러면 `human-decision:v1`의
+// 작성자가 팩토리 로그인과 같아 그 결정이 모든 이슈에서 조용히 기각된다. 고칠 방법이 있는 상태이므로
+// doctor가 세운다 — `github.labels`와 **같은 모양**의 WARN 한 줄이다.
+
+/** 토큰 값은 한 번도 등장해서는 안 된다 — doctor가 읽는 것은 로그인 이름과 계정 종류뿐이다. */
+const SECRET = "ghp_thisIsNotARealTokenValue000000000000";
+
+test("checkFactoryIdentity: a personal account WARNs and says exactly what breaks and how to fix it", async () => {
+  const gh = { viewerLogin: async () => "LeeHyeonKyu", viewerType: async () => "User" };
+  const c = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know-thy-build-demo" }));
+  expect(c["factory.identity"].level).toBe("WARN");
+  expect(c["factory.identity"].detail).toContain("@LeeHyeonKyu");
+  expect(c["factory.identity"].detail).toMatch(/human-decision:v1` attribution/);
+  expect(c["factory.identity"].detail).toMatch(/register a machine user or a GitHub App/);
+  expect(c["factory.identity"].detail).not.toContain(SECRET);
+});
+
+test("checkFactoryIdentity: the repo owner's own account WARNs even when GitHub calls the type something else", async () => {
+  const gh = { viewerLogin: async () => "acme", viewerType: async () => "Organization" };
+  const c = by(await checkFactoryIdentity({ gh, repo: "acme/widgets" }));
+  expect(c["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("repo owner") });
+});
+
+test("checkFactoryIdentity: a machine user / app identity PASSes, and an unknown type is never read as all-clear", async () => {
+  const bot = { viewerLogin: async () => "ktb-factory[bot]", viewerType: async () => "Bot" };
+  expect(by(await checkFactoryIdentity({ gh: bot, repo: "LeeHyeonKyu/know_thy_build" }))["factory.identity"].level).toBe("PASS");
+
+  // 종류를 못 읽었다 = 모른다. PASS로 적으면 이 경보는 영영 안 뜬다.
+  const unknown = { viewerLogin: async () => "ktb-factory", viewerType: async () => null };
+  expect(by(await checkFactoryIdentity({ gh: unknown, repo: "LeeHyeonKyu/know_thy_build" }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("type unknown") });
+
+  // gh가 죽어도 doctor 전체를 죽이지 않는다(offline-tolerant WARN 하나).
+  const dead = { viewerLogin: async () => { throw new Error("gh api user failed (1): HTTP 401"); }, viewerType: async () => "User" };
+  expect(by(await checkFactoryIdentity({ gh: dead, repo: "o/r" }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("HTTP 401") });
 });
 
 test("checkGitHub: protection is judged against L0_CONTEXTS only — required_checks is reported as L1's job, never as a missing rule", async () => {
