@@ -954,6 +954,22 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
   return args;
 }
 
+/**
+ * T7 — 공유 신원 경보 한 줄(없으면 `null`). **런당 한 번**이다: 이슈마다 적으면 같은 문장이 창의
+ * 이슈 수만큼 쌓여 그 자체가 잡음이 되고, 한 번도 안 적으면 dogfood 저장소에서 증거 (b)가 영영
+ * 조용히 닫힌 채로 남는다(이 태스크가 고치는 것이 바로 그 침묵이다).
+ *
+ * `personal !== true`이면 아무것도 내지 않는다 — `null`(모른다)은 경보의 근거가 아니다. 모르는 것을
+ * 경보로 바꾸면 사람이 경보를 끄는 법부터 배우고, 그러면 진짜일 때도 안 읽는다.
+ */
+export function sharedIdentityWarning(identity) {
+  if (identity?.personal !== true) return null;
+  return {
+    kind: "warning", step: "feedback-route", login: identity.login,
+    reason: `factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`,
+  };
+}
+
 export function roleFileMap(roles) {
   const map = new Map();
   const add = (name, def) => {
@@ -1116,14 +1132,28 @@ async function main() {
        * 아래 목록이 비면 (b)는 사실상 사람/봇을 못 가르므로, 그 경우를 기록에 남긴다).
        */
       let factoryLogins = [];
-      const who = await resolveFactoryLogins({ gh });
+      /**
+       * T5 MF-1 — `comments`를 넘기면 **하트비트 작성자**라는 출처가 열린다(러너만 쓰는 산출물이므로
+       * Actions 밖에서도 봇 이름이 정확하다). 회고는 이미 창의 코멘트를 전부 손에 들고 있다 —
+       * 추가 API 왕복은 없다. 그리고 그 코멘트들이 T7의 `identity`에 `authorType`이라는 계정 사실도 준다.
+       */
+      const allComments = [...(commentsByIssue instanceof Map ? commentsByIssue.values() : Object.values(commentsByIssue || {}))].flat();
+      const who = await resolveFactoryLogins({ gh, comments: allComments });
       if (who.ok) factoryLogins = who.logins;
       else console.error(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
-      return routeMergedIssues({
+      const routed = await routeMergedIssues({
         gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
         ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
         factoryLogins: who.ok ? factoryLogins : null,
       });
+      /**
+       * T7 — 팩토리가 **사람 계정**으로 돌면 작성자 기반 귀속은 원리상 불가능하다(팩토리 코멘트와
+       * 소유자의 코멘트가 같은 작성자다). 그 사실을 런마다 **한 번** 크게 적는다: 이슈마다 적으면
+       * 잡음이고, 안 적으면 dogfood 저장소에서 (b)가 영영 조용히 닫힌 채로 남는다.
+       */
+      const warn = who.ok ? sharedIdentityWarning(who.identity) : null;
+      if (warn) routed.actions.unshift(warn);
+      return routed;
     },
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),

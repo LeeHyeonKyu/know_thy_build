@@ -248,6 +248,18 @@ export function isNewerVersion(a, b) {
  */
 export function attributionFor({ comments = [], selfGateLines = [], factoryLogins = [] } = {}) {
   const evidence = [];
+  /**
+   * ── T7: 거부는 보이게 한다 ─────────────────────────────────────────────────────────────────
+   * `FACTORY_BOT_TOKEN`이 소유자의 PAT인 저장소(= 지금의 모든 dogfood 저장소)에서는 팩토리 코멘트와
+   * 소유자의 `human-decision:v1`이 **같은 작성자**다. 그러면 위의 `continue` 하나가 (b)를 조용히
+   * 통째로 닫는다 — 사람은 "factory-defect라고 적었는데 아무 일도 안 일어났다"만 본다. 판정은 그대로
+   * 두고(공유 신원은 사람의 결정이 **아니다**) 그 거부를 기록으로 남긴다: `evidenceFor`는 절대 세지
+   * 않고, 표면(retro·analyze·health·doctor)은 그것을 읽어 보여 준다.
+   *
+   * 거부된 항목은 `evidence`에 **같이** 실린다(감사 목록은 하나여야 한다) — 세지 않는 일은 `evidenceFor`
+   * 한 곳에서만 일어나고, `unverifiable`은 그 목록의 파생 뷰다. 두 배열에 따로 담으면 언젠가 한쪽만
+   * 읽는 호출자가 생기고 그 호출자가 곧 이 구멍을 다시 연다.
+   */
   // `null`은 "팩토리 계정 이름을 확인하지 못했다"이고 `[]`와 **다르다**: 봇 이름을 모르면 사람의
   // 결정과 에이전트의 결정을 가를 수 없으므로 (b)를 통째로 거부한다(모르는 것은 통과가 아니다).
   const bots = factoryLogins == null ? null : new Set(factoryLogins.filter(Boolean).map((l) => String(l).toLowerCase()));
@@ -260,12 +272,18 @@ export function attributionFor({ comments = [], selfGateLines = [], factoryLogin
     if (!HUMAN_DECISION_CAUSE.test(body)) continue;                   // 산문은 증거가 아니다 — 필드만이 증거다
     const author = c?.author == null ? null : String(c.author);
     if (!author) continue;                                            // 작성자를 모르면 통과시키지 않는다
-    if (bots.has(author.toLowerCase())) continue;                     // 에이전트가 적은 "사람의 결정"은 결정이 아니다
     const fix = HUMAN_DECISION_KTB_FIX.exec(body)?.[1] ?? null;
-    evidence.push({
-      kind: "human-decision", check: null, author,
-      detail: `human-decision:v1 (skill=${hd[2] ?? "unknown"}) by @${author} declares \`cause: factory-defect\`${fix ? ` (ktb_fix: ${fix})` : ""}`,
-    });
+    const said = `human-decision:v1 (skill=${hd[2] ?? "unknown"}) by @${author} declares \`cause: factory-defect\`${fix ? ` (ktb_fix: ${fix})` : ""}`;
+    // 에이전트가 적은 "사람의 결정"은 결정이 아니다 — 그러나 그 거부는 이제 **줄 하나로 남는다**.
+    if (bots.has(author.toLowerCase())) {
+      evidence.push({
+        kind: "human-decision", status: "unverifiable", check: null, author,
+        reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent",
+        detail: `${said} — REFUSED as evidence: @${author} is also a factory login`,
+      });
+      continue;
+    }
+    evidence.push({ kind: "human-decision", check: null, author, detail: said });
   }
 
   // (c) 버전이 올라간 뒤 그 검사가 더는 돌지 않는다. 줄은 시간순이다(run 기록은 append-only).
@@ -288,9 +306,13 @@ export function attributionFor({ comments = [], selfGateLines = [], factoryLogin
     }
   }
 
-  /** 이 **검사**에 대한 증거만. 검사를 모르는 증거((b) — 이슈 전체에 대한 사람의 판정)는 언제나 센다. */
-  const evidenceFor = (check) => evidence.filter((e) => e.check == null || e.check === check);
-  return { evidence, evidenceFor };
+  /**
+   * 이 **검사**에 대한 증거만. 검사를 모르는 증거((b) — 이슈 전체에 대한 사람의 판정)는 언제나 센다.
+   * `status: "unverifiable"`은 **절대** 세지 않는다 — 보이게 만드는 것과 증거로 세는 것은 다른 일이고,
+   * 후자를 열면 공유 신원 저장소에서 에이전트가 적은 결정 하나가 상류 쓰기를 여는 바로 그 구멍이 된다.
+   */
+  const evidenceFor = (check) => evidence.filter((e) => e.status !== "unverifiable" && (e.check == null || e.check === check));
+  return { evidence, evidenceFor, unverifiable: evidence.filter((e) => e.status === "unverifiable") };
 }
 
 /** RED 게이트 → 발견(§②의 표). 기본값은 "발견 아님". */
@@ -517,5 +539,11 @@ export function harvestFindings({ issue, repo, record = "", comments = [], facto
   push(() => selfGateFindings({ issue, repo, blocks, attribution }));
   push(() => transitionFindings({ issue, repo, comments, attribution }));
   push(() => reviewFindings({ issue, repo, handoffs: parseHandoffs(comments), manifests: boundManifests }));
+  /**
+   * T7 — 거부된 `human-decision`은 **발견이 아니다**(라우팅할 인과가 없다). 그래도 회고·analyze·health가
+   * 보여 줄 수 있어야 하므로 반환값에 실어 나른다. 열거 불가 속성인 이유: 이 함수의 반환값은 배열이고,
+   * 호출자와 테스트가 그것을 `toEqual([...])`로 고정한다 — 새 키가 그 계약을 깨서는 안 된다.
+   */
+  Object.defineProperty(out, "unverifiable", { value: attribution.unverifiable, enumerable: false });
   return out;
 }

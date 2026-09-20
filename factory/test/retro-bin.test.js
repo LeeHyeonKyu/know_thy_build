@@ -8,7 +8,7 @@ beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); });
 import {
   accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
-  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
+  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, sharedIdentityWarning, splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
 
@@ -1088,6 +1088,26 @@ test("feedback-route: light 회차에서도 돌고, 결과가 기록에 남는�
   expect(deps.claudeP).not.toHaveBeenCalled();                     // light 회차다
   expect(routeFeedback).toHaveBeenCalled();
   expect(recorded.join("\n")).toMatch(/feedback-route: upstream-created/);
+});
+
+// T7 — 공유 신원 경보는 **회고의 액션 로그에 그대로 찍힌다**(액션 종류를 늘려도 렌더러는 그대로다).
+test("feedback-route: 공유 신원 경보와 기각된 결정이 액션 로그에 남는다 — 경보는 런당 한 번", async () => {
+  const warn = sharedIdentityWarning({ personal: true, login: "LeeHyeonKyu" });
+  const routeFeedback = vi.fn(async () => ({
+    issues: [11, 12],
+    actions: [
+      warn,
+      { kind: "unverifiable-decision", step: "feedback-route", issue: 11, author: "LeeHyeonKyu", reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent" },
+      { kind: "unverifiable-decision", step: "feedback-route", issue: 12, author: "LeeHyeonKyu", reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent" },
+    ],
+  }));
+  const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+  expect(await runRetro({ deps })).toBe(0);
+  const log = recorded.join("\n");
+  expect(log.match(/feedback-route: warning — factory identity is a personal account \(LeeHyeonKyu\)/g)).toHaveLength(1);
+  expect(log).toMatch(/register a machine user or GitHub App as the factory identity/);
+  // 기각된 결정은 **이슈마다** 한 줄이다 — 어느 이슈의 어느 결정이 사라졌는지 사람이 짚을 수 있어야 한다.
+  expect(log.match(/feedback-route: unverifiable-decision #1[12]/g)).toHaveLength(2);
 });
 
 test("feedback-route: gh가 던져도 retro는 0으로 끝난다(라우팅이 공장을 멈추지 않는다)", async () => {

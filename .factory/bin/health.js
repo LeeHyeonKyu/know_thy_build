@@ -29,7 +29,8 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
+import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
+import { attributionFor } from "../lib/feedback/harvest-findings.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { HEALTH_LABEL } from "../lib/label-catalog.js";
 import { readRecordsDetailed } from "../lib/records-branch.js";
@@ -423,11 +424,25 @@ const usd = (v) => (v == null ? "n/a" : `$${v}`);
  * 파생 보고서(spec §7) — 주인이 읽는 "대화"다. 원시 덤프가 아니라 **판정과 그 근거**를 같은 표에
  * 나란히 둔다: 짝의 양쪽이 한 줄에 보이지 않으면 사람도 Goodhart를 피할 수 없다.
  */
-export function renderHealthReport({ signals, findings = [], advisories = [], rehearsal = null, now, repo, upstream = null }) {
+export function renderHealthReport({ signals, findings = [], advisories = [], rehearsal = null, now, repo, upstream = null, identity = null, unverifiable = [] }) {
   const L = [];
   L.push(HEALTH_MARKER);
   L.push(`## factory-health — ${String(now).slice(0, 10)}`);
   L.push("");
+  /**
+   * T7 배너 — 표보다 **먼저** 선다. 이 저장소가 공유 신원이면 아래 어떤 숫자도 "사람이 factory-defect로
+   * 판정했는가"를 담지 못한다(그 통로가 통째로 닫혀 있다). 그 사실을 표 밑에 각주로 달면 아무도 안 읽는다.
+   */
+  if (identity?.personal === true) {
+    L.push(`> ⚠️ **factory identity is a personal account (\`${identity.login}\`)** — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity.`);
+    L.push("> 팩토리 코멘트와 소유자의 코멘트가 **같은 작성자**라 `cause: factory-defect` 결정을 사람의 판정으로 셀 수 없습니다 — 아래 표의 어떤 값도 그 통로가 닫혀 있다는 사실을 보정하지 않습니다.");
+    L.push("");
+  }
+  if (unverifiable.length) {
+    L.push(`> **기각된 human-decision ${unverifiable.length}건**(공유 신원이라 사람과 에이전트를 가를 수 없습니다):`);
+    for (const u of unverifiable) L.push(`> - #${u.issue} — @${u.author}: ${u.reason}`);
+    L.push("");
+  }
   L.push(signals.below_n
     ? `**표본 미달**: 머지된 이슈 ${signals.window.length}/${signals.N}. 행동 발견은 하나도 내지 않습니다 — 승인률도 토론도 비용도 이 표본에서는 판정할 수 없습니다(spec §10 Q3).`
     : `최근 머지 ${signals.window.length}개(${signals.window.map((n) => `#${n}`).join(", ")})를 봤습니다. 아래 표의 **모든 판정은 짝이 있는 신호**에서만 나옵니다(spec §5).`);
@@ -568,10 +583,34 @@ export async function runHealth({
   issues = null, commentsByIssue = null, records = null, prByIssue = null, run: runner = run,
   harness = null, manifest = null, roleFile = new Map(), upstream = null,
   rehearsal = null, route = routeFindings, publish = true,
+  identity = undefined, factoryLogins = undefined,
 } = {}) {
   const actions = [];
   const loaded = await collect({ gh, run: runner, cwd: root, issues, commentsByIssue, records, prByIssue, since });
   const signals = healthSignals({ ...loaded, harness, N });
+
+  /**
+   * ── T7: 공유 신원은 **보고서의 맨 위**에 선다 ─────────────────────────────────────────────
+   * 팩토리가 사람 계정(소유자의 PAT)으로 돌면 `human-decision:v1` 귀속은 원리상 불가능하다 — 그
+   * 저장소의 모든 `cause: factory-defect`가 조용히 기각된다. 주간 보고서는 주인이 실제로 읽는 유일한
+   * 화면이므로, 그 사실과 **이번 창에서 기각된 결정들**이 표보다 먼저 보여야 한다.
+   */
+  let theIdentity = identity;
+  let logins = factoryLogins;
+  if (theIdentity === undefined || logins === undefined) {
+    const allComments = [...(loaded.commentsByIssue?.values?.() ?? [])].flat();
+    let who = { ok: false, reason: "not resolved" };
+    try { who = await resolveFactoryLogins({ gh, comments: allComments }); } catch { /* 보고서를 죽이지 않는다 */ }
+    if (theIdentity === undefined) theIdentity = who.identity ?? null;
+    if (logins === undefined) logins = who.ok ? who.logins : null;
+  }
+  const unverifiable = [];
+  for (const n of signals.window) {
+    const cs = loaded.commentsByIssue?.get?.(n) || [];
+    try {
+      for (const u of attributionFor({ comments: cs, factoryLogins: logins }).unverifiable) unverifiable.push({ issue: n, ...u });
+    } catch { /* 한 이슈의 실패가 보고서를 막지 않는다 */ }
+  }
 
   // 보고서를 실을 **오래 사는** 이슈 하나(본문 마커가 신원, state:all, 닫혀 있으면 다시 연다).
   let reportIssue = null;
@@ -584,7 +623,7 @@ export async function runHealth({
   const { findings, advisories } = behaviouralFindings({ signals, repo, roleFile, anchorIssue: reportIssue });
 
   // 보고서에 이번 회차의 발견까지 실어 다시 렌더한다 — 사람이 한 화면에서 표와 판정을 같이 본다.
-  const body = renderHealthReport({ signals, findings, advisories, rehearsal, now, repo, upstream });
+  const body = renderHealthReport({ signals, findings, advisories, rehearsal, now, repo, upstream, identity: theIdentity, unverifiable });
   if (publish) {
     try {
       if (reportIssue == null) {
@@ -640,6 +679,7 @@ export async function runHealth({
   return {
     ok: failures.length === 0, failures,
     below_n: signals.below_n, signals, findings, advisories, classified, actions,
+    identity: theIdentity, unverifiable,
     report: body, report_issue: reportIssue,
   };
 }

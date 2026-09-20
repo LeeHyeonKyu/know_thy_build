@@ -366,6 +366,40 @@ test("a human decision shows whether its author is a factory login (and is there
   expect(cap2.text()).not.toContain("[ktb]");
 });
 
+// ── T7: 공유 신원은 **네 번째 상태**다 — "봇이 적었다"가 아니라 "누가 적었는지 알 수 없다" ────
+//
+// dogfood 저장소에서는 팩토리와 소유자가 같은 계정이다. 그 줄을 예전 문구("factory login — ignored")로
+// 찍으면 자기가 적은 결정을 "봇이 적었다"로 읽게 되고, 사람은 원인을 영영 못 찾는다.
+test("a human decision under a shared factory/owner identity renders as (shared identity — not attributable)", async () => {
+  const { record, comments } = await demo39();
+  // 공유 신원: 하트비트도 결정도 같은 사람 계정이 썼다(데모 #39의 실물 상태 그대로).
+  const shared = comments.map((c) => ({ ...c, author: OWNER, authorType: "User" }));
+  const cap = capture();
+  await analyzeCommand({
+    ...(await deps()), argv: ["39"], io: cap.io,
+    gh: { comments: async () => shared, viewerLogin: async () => OWNER, viewerType: async () => "User" },
+    readRecord: async () => ({ text: record, source: "records", trusted: true }),
+  });
+  const out = cap.text();
+  expect(out).toContain(`@${OWNER} (shared identity — not attributable)`);
+  expect(out).not.toContain("(factory login — ignored by attribution)");
+  // 그리고 **왜** 그런지를 화면 맨 위에서 말한다 — 발견 목록 뒤의 각주는 이미 늦다.
+  expect(out).toMatch(/factory identity is a personal account \(LeeHyeonKyu\)/);
+  expect(out).toMatch(/register a machine user or GitHub App as the factory identity/);
+  // 판정은 그대로다: 공유 신원의 결정은 여전히 사람의 결정이 아니므로 (b)로 ktb를 열지 못한다.
+  expect(out).not.toContain("[ktb]");
+
+  // 팩토리 계정이 **다른** 계정이면 예전 문구 그대로다(배너도 없다).
+  const cap2 = capture();
+  await analyzeCommand({
+    ...(await deps()), argv: ["39"], io: cap2.io,
+    gh: { comments: async () => comments, viewerLogin: async () => OWNER, viewerType: async () => "User" },
+    readRecord: async () => ({ text: record, source: "records", trusted: true }),
+  });
+  expect(cap2.text()).toContain(`by @${OWNER} (human)`);
+  expect(cap2.text()).not.toMatch(/factory identity is a personal account/);
+});
+
 test("a human decision whose author cannot be verified says so — it is never rendered as (human)", async () => {
   const { record, comments } = await demo39();
   const noHeartbeats = comments.filter((c) => !String(c.body).includes("factory-heartbeat"));

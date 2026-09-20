@@ -1,8 +1,10 @@
 import { test, expect, describe } from "vitest";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { ownerOf, buildManifest } from "../cli/manifest.js";
 import { routeFindings, routeMergedIssues, feedbackNoteMarker } from "../lib/feedback/route.js";
-import { harvestFindings, SETUP_LOCUS, SELF_GATE_PATH } from "../lib/feedback/harvest-findings.js";
+import { attributionFor, harvestFindings, SETUP_LOCUS, SELF_GATE_PATH } from "../lib/feedback/harvest-findings.js";
+import { sharedIdentityWarning } from "../bin/retro.js";
 import { UPSTREAM_LABELS, parseUpstreamIssue, evidenceEntries } from "../lib/feedback/upstream-issue.js";
 import { HARNESS_LABEL } from "../lib/harness-request.js";
 import {
@@ -378,6 +380,94 @@ describe("(g) 회귀 고정 — 데모 #39의 두 결함이 상류 이슈로 간
     expect(findings.filter((f) => f.kind === "self-gate")).toEqual([]);
     // 거부도 마찬가지 — 엔진 주소를 무조건 박지 않는다.
     expect(findings.filter((f) => f.kind === "transition-refused")).toEqual([]);
+  });
+});
+
+// ── T7: 공유 신원 — **거부는 판정을 안 바꾸고, 침묵만 바꾼다** ──────────────────────────────
+//
+// 표본은 데모 #39의 **실제 코멘트 전문**이다(`fixtures/demo-39-comments.json`, `gh api`로 받아 적었다).
+// 그 22개 코멘트의 작성자는 **전부 `LeeHyeonKyu` (type User)**다 — `FACTORY_BOT_TOKEN`이 소유자의
+// PAT이기 때문이다. 곧 하트비트(러너가 쓴다)와 `:unstick`의 결정(사람이 쓴다)이 같은 작성자이고,
+// `attributionFor`는 그 결정을 **증거로 셀 수 없다**. 그 판정은 옳다(에이전트가 적은 결정을 통과시키면
+// 그 한 줄이 상류 쓰기를 연다). 이 라운드가 고치는 것은 그 거부가 **한 줄도 안 남는다**는 사실이다.
+describe("T7 공유 신원 — (b) 거부를 보이게 한다", () => {
+  const REAL_39 = JSON.parse(readFileSync(new URL("./fixtures/demo-39-comments.json", import.meta.url), "utf8"));
+
+  test("픽스처는 실물이다: #39의 모든 코멘트가 한 사람 계정(LeeHyeonKyu/User)에서 나왔다", () => {
+    expect(REAL_39.comments.length).toBeGreaterThan(0);
+    expect([...new Set(REAL_39.comments.map((c) => `${c.author}:${c.authorType}`))]).toEqual(["LeeHyeonKyu:User"]);
+    // GitHub App을 통한 코멘트가 하나도 없다 = 팩토리와 사람을 가를 두 번째 사실도 없다.
+    expect(REAL_39.comments.every((c) => c.viaApp === null)).toBe(true);
+    // 그리고 그 계정이 하트비트(러너만 쓰는 산출물)도 썼다 — 이것이 "공유 신원"의 정의다.
+    expect(REAL_39.comments.some((c) => c.body.indexOf("<!-- factory-heartbeat") === 0)).toBe(true);
+  });
+
+  /**
+   * 오늘의 `:unstick`이 이 멈춤에 대해 쓸 코멘트 — 모양은 스킬 템플릿(`templates/know-thy-build/unstick.md`
+   * "`cause:` — 멈춤의 **책임**을 한 필드로 적는다")이 정하고, 값은 #39의 **실제** 결정에서 왔다
+   * (decision/reason은 실물 코멘트 5749358312 그대로, `cause`/`ktb_fix`는 그 산문이 말하던 것을
+   * 이번 라운드에 생긴 필드로 옮긴 것이다). 작성자는 물론 소유자 — 그래서 팩토리 로그인과 같다.
+   */
+  const realDecision = REAL_39.comments.find((c) => /human-decision:v1/.test(c.body));
+  const unstickToday = humanDecisionComment({
+    issue: 39, id: realDecision.id, at: realDecision.createdAt, author: realDecision.author,
+    cause: "factory-defect", ktbFix: "1.3.2",
+    reason: /^reason: (.*)$/m.exec(realDecision.body)?.[1]?.replace(/^"|"$/g, "") ?? "self-gate defects",
+  });
+  const sharedComments = [...REAL_39.comments.filter((c) => c.id !== realDecision.id), unstickToday];
+
+  test("Pin 1 — factoryLogins=[LeeHyeonKyu]: 결정은 `unverifiable` 한 건이 되고 증거로는 세어지지 않는다", () => {
+    const a = attributionFor({ comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] });
+    expect(a.unverifiable).toHaveLength(1);
+    expect(a.unverifiable[0]).toMatchObject({
+      kind: "human-decision", status: "unverifiable", check: null, author: "LeeHyeonKyu",
+      reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent",
+    });
+    // 세지 않는다 — 보이게 하는 것과 증거로 세는 것은 다른 일이다.
+    expect(a.evidenceFor(null).filter((e) => e.kind === "human-decision")).toEqual([]);
+    expect(a.evidenceFor("contract").filter((e) => e.kind === "human-decision")).toEqual([]);
+  });
+
+  test("Pin 1 — #39의 분류는 그대로다: (c) check-withdrawn **하나만으로** ktb에 도달한다", () => {
+    const found = harvestFindings({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] });
+    const selfGate = found.find((f) => f.kind === "self-gate");
+    expect(selfGate.extra.attribution).toEqual(["check-withdrawn"]);
+    // 거부된 결정은 발견이 아니다 — 그런데 반환값에 실려 나온다(회고·analyze·health가 보여 준다).
+    expect(found.unverifiable).toHaveLength(1);
+    expect(found.some((f) => f.extra?.attribution?.includes?.("human-decision"))).toBe(false);
+  });
+
+  test("Pin 2 — 대조군: factoryLogins=[factory-bot]이면 같은 결정이 증거 (b)로 세어진다", () => {
+    const a = attributionFor({ comments: sharedComments, factoryLogins: ["factory-bot"] });
+    expect(a.unverifiable).toEqual([]);
+    const hd = a.evidenceFor(null).filter((e) => e.kind === "human-decision");
+    expect(hd).toHaveLength(1);
+    expect(hd[0].detail).toMatch(/ktb_fix: 1\.3\.2/);
+  });
+
+  test("Pin 3 — 경보는 `personal === true`일 때만, 런당 한 번", () => {
+    expect(sharedIdentityWarning({ personal: true, login: "LeeHyeonKyu" })).toEqual({
+      kind: "warning", step: "feedback-route", login: "LeeHyeonKyu",
+      reason: "factory identity is a personal account (LeeHyeonKyu) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity",
+    });
+    expect(sharedIdentityWarning({ personal: false, login: "factory-bot" })).toBeNull();
+    // 모르는 것은 경보의 근거가 아니다 — `null`은 "괜찮다"도 "문제다"도 아니다.
+    expect(sharedIdentityWarning({ personal: null, login: "factory-bot" })).toBeNull();
+    expect(sharedIdentityWarning(null)).toBeNull();
+  });
+
+  test("거부는 이슈마다 라우팅 액션 한 줄로 남는다 — 발견이 0건인 이슈에서도", async () => {
+    const gh = fakeGh();
+    const r = await routeMergedIssues({
+      gh, repo: REPO, upstream: UPSTREAM, ownerOf, isInstalled: dests, ktbVersion, harness,
+      issues: [{ number: 39, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" }],
+      commentsByIssue: new Map([[39, sharedComments]]),
+      records: new Map(),                                             // 기록이 없다 = 발견 0건
+      since: "2026-09-19T00:00:00Z", factoryLogins: ["LeeHyeonKyu"],
+    });
+    const notes = r.actions.filter((a) => a.kind === "unverifiable-decision");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ step: "feedback-route", issue: 39, author: "LeeHyeonKyu" });
   });
 });
 

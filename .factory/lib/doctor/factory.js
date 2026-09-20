@@ -591,3 +591,34 @@ export async function checkGitHub({ gh, harness, labels, env = process.env, root
     return [c("github.unavailable", "WARN", `gh unavailable — ${e.message}`)];
   }
 }
+
+/**
+ * T7 — **팩토리가 사람 계정으로 도는가.** dogfood 저장소에서는 `FACTORY_BOT_TOKEN`이 소유자의 PAT이라
+ * 팩토리 코멘트와 소유자의 `human-decision:v1`이 **같은 작성자**다. 그러면 피드백 루프의 증거 (b)는
+ * 모든 이슈에서 거부되고(공유 신원은 사람의 판정이 아니다), 1차 구현은 그 거부를 한 줄도 남기지
+ * 않았다 — 사람은 "factory-defect라고 적었는데 아무 일도 안 일어났다"만 본다. doctor가 그것을
+ * **설정 문제**로 세운다: 고치는 방법이 있는 상태이기 때문이다(머신 유저 또는 GitHub App).
+ *
+ * 읽기는 `gh api user` 하나뿐이고 **토큰 값은 절대 읽지도 찍지도 않는다** — 로그인 이름과 계정 종류만
+ * 본다(`viewerScopes`/`viewerLogin`과 같은 규율). 판정을 못 하면 PASS가 아니라 WARN이다:
+ * "모른다"를 "괜찮다"로 적으면 이 경보는 영영 뜨지 않는다.
+ */
+export async function checkFactoryIdentity({ gh, repo = null }) {
+  let login = null;
+  let type = null;
+  try {
+    login = await gh.viewerLogin();
+    type = await gh.viewerType();
+  } catch (e) {
+    return [c("factory.identity", "WARN", `could not read the factory identity — ${e.message}`)];
+  }
+  const owner = repo ? String(repo).split("/")[0] : null;
+  const isOwner = Boolean(owner && login && owner.toLowerCase() === String(login).toLowerCase());
+  const fix = "register a machine user or a GitHub App as the factory identity (FACTORY_BOT_TOKEN) and set FACTORY_BOT_LOGIN";
+  if (type === "User" || isOwner) {
+    const why = isOwner ? `@${login} is the repo owner${type ? ` (account type ${type})` : ""}` : `@${login} is a personal account (type ${type})`;
+    return [c("factory.identity", "WARN", `${why} — a person and the factory then share one comment author, so \`human-decision:v1\` attribution (feedback-loop evidence (b)) is refused on every issue and no \`cause: factory-defect\` decision can reach [ktb]. To fix: ${fix}`)];
+  }
+  if (!type) return [c("factory.identity", "WARN", `@${login}: account type unknown — cannot tell whether a person and the factory share one comment author, so \`human-decision:v1\` attribution may be silently refused. To be sure: ${fix}`)];
+  return [c("factory.identity", "PASS", `@${login} (${type}) — not a personal account, so human-decision attribution can tell a person from the factory`)];
+}

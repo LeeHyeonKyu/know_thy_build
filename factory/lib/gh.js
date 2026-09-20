@@ -94,6 +94,14 @@ const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 export async function resolveFactoryLogins({ gh, env = process.env, comments = null }) {
   const logins = [];
+  /**
+   * ── T7: **그 팩토리 계정이 사람 계정인가.** ────────────────────────────────────────────────
+   * 후보는 "이 저장소에서 팩토리로 도는 계정"을 러너가 기록한 자리에서만 모은다 — Actions의 뷰어와
+   * 바이트 0 하트비트의 작성자. 둘 다 코멘트 **본문**이 아니라 GitHub이 계정에 붙인 사실(`type`)을
+   * 들고 오므로 에이전트가 고를 수 없다. `FACTORY_BOT_LOGIN`만 있고 그 이름의 코멘트가 없으면
+   * 종류를 모르므로 `null`이다 — **추측하지 않는다**(모르는 것을 `false`로 적으면 경보가 영영 안 뜬다).
+   */
+  const candidates = [];
   const bot = (env.FACTORY_BOT_LOGIN || "").trim();
   if (bot) logins.push(bot);
 
@@ -105,8 +113,17 @@ export async function resolveFactoryLogins({ gh, env = process.env, comments = n
    * 발견 둘이 통째로 사라졌다). 사람을 봇으로 오인하는 것은 fail-closed가 아니라 그냥 틀린 것이다.
    */
   if (env.GITHUB_ACTIONS === "true") {
-    try { logins.push(await gh.viewerLogin()); }
+    let viewer;
+    try { viewer = await gh.viewerLogin(); }
     catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+    logins.push(viewer);
+    /**
+     * Actions 안에서는 뷰어가 곧 팩토리 계정이므로 그 계정의 **종류**가 답이다 — `gh api user --jq .type`
+     * 한 번(런당 한 번 도는 함수다). 이 호출의 실패는 `ok`를 바꾸지 않는다: 로그인 목록은 이미
+     * 손에 있고, 못 읽은 것은 "사람 계정인지 모른다"일 뿐이다(`personal: null`).
+     */
+    try { candidates.push({ login: viewer, type: await gh.viewerType?.() ?? null }); }
+    catch { candidates.push({ login: viewer, type: null }); }
   }
 
   /**
@@ -125,7 +142,10 @@ export async function resolveFactoryLogins({ gh, env = process.env, comments = n
    */
   for (const c of comments || []) {
     if (!c?.author) continue;
-    if (HEARTBEAT_HEAD.exec(String(c.body ?? ""))?.index === 0) logins.push(String(c.author));
+    if (HEARTBEAT_HEAD.exec(String(c.body ?? ""))?.index !== 0) continue;
+    logins.push(String(c.author));
+    // 하트비트를 쓴 계정 = 러너가 쓰는 계정. 그 `authorType`이 곧 "팩토리가 사람 계정으로 도는가"다.
+    candidates.push({ login: String(c.author), type: c.authorType == null ? null : String(c.authorType) });
   }
 
   /**
@@ -146,7 +166,31 @@ export async function resolveFactoryLogins({ gh, env = process.env, comments = n
   if (!out.length) {
     return { ok: false, reason: "no factory login could be resolved — set FACTORY_BOT_LOGIN, or read an issue that has at least one heartbeat comment (outside GitHub Actions the viewer is the owner, not the bot)" };
   }
-  return { ok: true, logins: out };
+  /**
+   * `FACTORY_BOT_LOGIN`은 이름만 주고 종류는 주지 않는다. 그 이름으로 **이 이슈에 코멘트를 쓴 흔적**이
+   * 있으면 GitHub이 그 코멘트에 붙여 둔 `authorType`이 종류를 말해 준다(본문이 아니라 계정 사실이다).
+   */
+  if (bot) {
+    const seen = (comments || []).find((c) => c?.author && String(c.author).toLowerCase() === bot.toLowerCase() && c.authorType != null);
+    if (seen) candidates.push({ login: bot, type: String(seen.authorType) });
+  }
+  return { ok: true, logins: out, identity: identityOf(candidates, out) };
+}
+
+/**
+ * 후보 (로그인, 계정 종류) 목록 → `{ personal, login }`.
+ *   - 하나라도 `User`다  → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상이 그것이다)
+ *   - 종류를 아는 후보가 있고 전부 `User`가 아니다 → `personal: false`
+ *   - 종류를 아는 후보가 없다 → `personal: null` (**모른다**. 추측은 하지 않는다)
+ * `Organization`은 사람 계정이 아니다 — GitHub App 설치 토큰(`<app>[bot]`)과 마찬가지로 공유 신원 문제를
+ * 만들지 않는다(그 계정으로 사람이 코멘트를 적을 수 없다).
+ */
+function identityOf(candidates, logins) {
+  const known = candidates.filter((c) => c.type);
+  const person = known.find((c) => c.type === "User");
+  if (person) return { personal: true, login: person.login };
+  if (known.length) return { personal: false, login: known[0].login };
+  return { personal: null, login: candidates[0]?.login ?? logins[0] ?? null };
 }
 
 export function makeGh({ run, repo, sleep = realSleep }) {
@@ -538,6 +582,15 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      */
     async viewerLogin() {
       return JSON.parse(await gh(["api", "user"])).login;
+    },
+    /**
+     * T7 — **이 토큰이 붙은 계정의 종류**(`User`|`Organization`|`Bot`). 값(토큰)은 절대 읽지도 찍지도
+     * 않는다; 묻는 것은 "팩토리가 사람 계정으로 도는가" 하나다. 사람 계정이면 그 계정이 적은 모든
+     * 코멘트가 팩토리의 코멘트와 구별되지 않아 `human-decision:v1` 귀속이 통째로 불가능해진다.
+     * 빈 응답은 `null`("모른다")이다 — 빈 문자열을 종류로 읽으면 거짓 판정이 된다.
+     */
+    async viewerType() {
+      return (await gh(["api", "user", "--jq", ".type"])).trim() || null;
     },
     /**
      * ADR-021 r1 MF-2 a — **지금 이 토큰이 어떤 스코프를 쥐고 있는가.** classic PAT은 응답 헤더

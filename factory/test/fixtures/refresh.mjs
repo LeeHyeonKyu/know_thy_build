@@ -60,6 +60,39 @@ function grab({ repo, issue, recordRef, out }) {
   console.log(`${out}: ${record.length}B record, ${comments.length} comments, ${ev} review-evidence line(s), labels ${doc.issue.labels.map((l) => l.name).join("+")}, PR ${pr ? `#${pr.number} [${pr.files.join(", ")}]` : "none"}`);
 }
 
+/**
+ * T7 — 공유 신원(shared factory/owner identity)의 회귀 표본. 여기서 필요한 것은 run 기록이 아니라
+ * **작성자 사실**이다: 누가 썼는가(`user.login`), 그 계정이 어떤 종류인가(`user.type`), GitHub App을
+ * 통해 왔는가(`performed_via_github_app`). 셋 다 GitHub이 계정과 요청에 붙이는 값이라 코멘트를 적는
+ * 쪽이 고를 수 없다 — 귀속 판정이 앵커할 수 있는 유일한 종류의 사실이다(플랜 Global Constraints).
+ *
+ * 본문은 **전부 싣는다**(자르지 않는다): `human-decision:v1` 마커도 하트비트의 바이트 0 규칙도
+ * 본문 위에서 판정되므로, 줄이는 순간 그 판정을 더는 실물로 확인할 수 없다.
+ */
+function grabComments({ repo, issue, out }) {
+  const all = JSON.parse(gh(["api", `repos/${repo}/issues/${issue}/comments`, "--paginate", "--slurp"])).flat();
+  const comments = all.map((c) => ({
+    id: c.id,
+    createdAt: c.created_at,
+    author: c.user?.login ?? null,
+    authorType: c.user?.type ?? null,
+    viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
+    body: c.body || "",
+  }));
+  const doc = {
+    _source: `${repo}#${issue} — every issue comment, verbatim, with the author facts GitHub attaches (user.login, user.type, performed_via_github_app)`,
+    _fetched: new Date().toISOString().slice(0, 10),
+    _note: "REAL text, fetched with `gh api … /comments --paginate --slurp`, verbatim and untruncated. Do not hand-edit — regenerate with the script named in _source_script. This is the shared-identity regression sample: FACTORY_BOT_TOKEN on this repo is the owner's PAT, so every comment — the factory's and the owner's alike — carries author LeeHyeonKyu (type User) and no GitHub App.",
+    _source_script: "factory/test/fixtures/refresh.mjs",
+    comments,
+  };
+  mkdirSync(out.replace(/\/[^/]+$/, ""), { recursive: true });
+  writeFileSync(out, JSON.stringify(doc, null, 2) + "\n");
+  const authors = [...new Set(comments.map((c) => `${c.author}:${c.authorType}`))];
+  console.log(`${out}: ${comments.length} comments, authors ${authors.join(", ")}, viaApp ${[...new Set(comments.map((c) => String(c.viaApp)))].join(", ")}`);
+}
+
 const root = process.argv[2];
 grab({ repo: "LeeHyeonKyu/know_thy_build", issue: 18, recordRef: "factory/records", out: `${root}/factory/test/fixtures/ktb-18.json` });
 grab({ repo: "LeeHyeonKyu/own-calendar", issue: 3, recordRef: "factory/records", out: `${root}/factory/test/fixtures/own-calendar-3.json` });
+grabComments({ repo: "LeeHyeonKyu/know-thy-build-demo", issue: 39, out: `${root}/factory/test/fixtures/demo-39-comments.json` });
