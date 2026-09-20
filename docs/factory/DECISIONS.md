@@ -3339,3 +3339,45 @@ RED면 non-zero로 끝난다.
   바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
   정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
   `factory/bin/lint.js`의 `nul-byte` 규칙이 재발을 막는다.
+
+## ADR-026 Phase-2 품질 게이트 — 리뷰어 커버리지를 줄이기 전에 품질 저하를 관측 가능하게 만든다 — 2026-09-20 (리뷰 효율 Task 10)
+
+**질문**: 리뷰 효율 계획(`docs/superpowers/plans/2026-09-18-factory-review-efficiency.md`)은 두 국면이다.
+Phase 1(Tasks 1–5, 8, 9)은 **리뷰 앞에** 검사를 더한다 — self-gate, house-rules, mutation check, 회귀 핀.
+어느 것도 리뷰어를 약화하지 않는다. Phase 2(Tasks 6, 7)는 다르다: **리뷰어 커버리지를 줄인다** —
+tier 얇게 하기(E)와 범위 좁힌 재리뷰(F). 스펙 §7의 위험은 하나다: *단순화가 품질을 떨어뜨릴 수 있는가?*
+그 물음은 커버리지를 실제로 걷어내기 **전에** 관측 가능해야 한다. Task 10이 그 관측 장치를 놓는다.
+
+**관측 장치**(`factory/lib/retro/harvest.js` + `factory/bin/retro.js`, retro가 이미 읽는 전이/핸드오프
+이력에서만 집계 — 보호 경로에 새로 쓰지 않는다). retro가 이슈별·롤업으로 세 지표를 낸다:
+
+- **`rounds_per_issue`** — plan/implement 핸드오프 개수 + review 최대 라운드(기존 `review_rounds_avg`
+  machinery). 롤업은 병합 가중 평균.
+- **`escaped_defects`** — *이전 승인 뒤에* 나온 결함. 정확히: 한 이슈의 리뷰 이력에서 approve 판정
+  (또는 `→ factory:approved` 전이)이 있은 **다음** 라운드의 reject must_fix finding 수. 승인과 **같은**
+  라운드의 must_fix(패널 분열)는 세지 않는다 — 정의는 "승인에 뒤이은 결함"이지 동시의 결함이 아니다.
+  must_fix 핸드오프가 없고 승인 뒤 `→ factory:rework` 전이만 있으면 그 rework 수를 대신 센다(핸드오프
+  데이터가 없는 회차의 대체 신호). 이슈별 상세(`#N×k`)는 창에만 싣고 합계만 누적한다.
+- **`revert_rate`** — 머지된 이슈가 나중에 되돌려진 비율(reverts/merged). 되돌림은 factory 이슈로만
+  관측한다: `revert`/`factory:revert` 라벨 이슈, 또는 `Revert "…"`/`revert:` 제목의 후속 이슈가 `#N`으로
+  그 머지를 가리킴. **우아한 저하**: factory 이슈 밖에서 커밋만 revert한 경우는 관측 불가 — 그래서 이
+  값은 *관측된* 되돌림만의 비율이고, 셀에 분자·분모를 함께 싣는다(`0.50 (1/2)`). 창(또는 누적)에 머지가
+  0이면 revert_rate는 0이 아니라 **null**이다("되돌림 0"과 "잴 머지가 없음"을 가른다).
+
+**기준선(이 세션에서 동결, retro 출력과 여기 둘 다에 기록)**:
+- KTB #18 = **$143 / 12 stage-runs**; own-cal #3 = **4 review rounds**.
+- must-not-recur escaped 결함 집합: **own-cal R2 production-API**(이전 approve 뒤 표면화),
+  **KTB #18 R3 finish() 회귀**. 이 둘은 `factory/test/retro-quality.test.js`에 회귀 핀으로 박혀 —
+  각각이 위 정의에서 escaped 결함으로 등록됨을 테스트가 못 박는다.
+
+**판결(게이트)**: **Phase 2(계획 Tasks 6, 7 — 커버리지를 줄이는 tier 얇게 하기와 범위 좁힌 재리뷰)는,
+Phase 1 이후 이슈 ≥5건 표본에서 escaped-defect 비율 AND revert 비율이 둘 다 기준선 이하이면서
+rounds-per-issue가 줄었을 때에만 시작한다.** escaped 결함이 **늘었으면** Phase 2는 시작하지 않고,
+그 대신 additive 구조(Tasks 1–5, 8, 9)를 다시 손본다. Task 6/7에 도달한 실행자는 이 게이트가 통과됐음을
+확인하지 못하면 멈추고 보고한다(계획 Execution notes, "The gate is a hard stop").
+
+**왜 이 형태인가**: 게이트는 "리뷰를 약화해도 괜찮다는 증거"를 요구하는 것이 아니라, **약화 전에**
+품질 신호가 나빠지지 않았음을 요구한다 — 두 지표(escaped·revert)가 커버리지 제거의 두 실패 모드
+(승인 뒤 결함이 샌다 / 머지가 되돌려진다)를 각각 잡기 때문에, 계획 §Phasing의 "escaped-defect rate AND
+revert rate did not increase"를 문자 그대로 측정 가능하게 만든다. 지표가 없으면 스펙 §7의 위험은
+관측되지 않은 채 남고, 그때 Phase 2는 근거 없는 단순화가 된다.

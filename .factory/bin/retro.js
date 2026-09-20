@@ -190,9 +190,15 @@ export function accumulateStats(total, window) {
   const tMerged = Number(t.merged) || 0;
   const wMerged = Number(w.merged) || 0;
   const merged = tMerged + wMerged;
-  const avg = merged
-    ? ((Number(t.review_rounds_avg) || 0) * tMerged + (Number(w.review_rounds_avg) || 0) * wMerged) / merged
-    : 0;
+  const weightedAvg = (key) => (merged
+    ? ((Number(t[key]) || 0) * tMerged + (Number(w[key]) || 0) * wMerged) / merged
+    : 0);
+  const avg = weightedAvg("review_rounds_avg");
+  // Task 10 (Phase-2 gate) — escaped 결함은 단순 합, revert는 분자·분모를 쌓아 비율을 **다시** 낸다
+  // (비율의 평균은 비율이 아니다 — overlap_ratio·qa_na_ratio와 같은 규약). plan/implement 라운드는
+  // review와 같은 병합 가중 평균으로 롤업한다. revert_rate는 누적 머지가 0이면 null(잴 것이 없음).
+  const escapedDefects = (Number(t.escaped_defects) || 0) + (Number(w.escaped_defects) || 0);
+  const reverts = (Number(t.reverts) || 0) + (Number(w.reverts) || 0);
   const rejects = { ...(t.rejects_by_role || {}) };
   for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
   // P2-13: 겹침은 **비율의 합**이 아니라 분자·분모의 합에서 다시 나온다(비율의 평균은 비율이 아니다).
@@ -213,6 +219,11 @@ export function accumulateStats(total, window) {
   return {
     merged,
     review_rounds_avg: round2(avg),
+    plan_rounds_avg: round2(weightedAvg("plan_rounds_avg")),
+    implement_rounds_avg: round2(weightedAvg("implement_rounds_avg")),
+    escaped_defects: escapedDefects,
+    reverts,
+    revert_rate: merged ? round2(reverts / merged) : null,
     rejects_by_role: rejects,
     review_runs: (Number(t.review_runs) || 0) + (Number(w.review_runs) || 0),
     findings_total: findingsTotal,
@@ -268,6 +279,58 @@ const qaNaCell = (s) => {
 };
 
 /**
+ * Task 10 (Phase-2 gate) — escaped 결함 셀. 창 열은 이슈별 상세(`#N×k`)를 함께 싣고(어느 이슈에서
+ * 결함이 샜는지 사람이 바로 본다), 누적 열은 합계만 싣는다(상세는 누적하지 않는다).
+ */
+const escapedCell = (s) => {
+  const n = Number(s?.escaped_defects) || 0;
+  const detail = Array.isArray(s?.escaped_defects_detail) ? s.escaped_defects_detail : null;
+  return detail && detail.length ? `${n} (${detail.map((d) => `#${d.issue}×${d.count}`).join(", ")})` : String(n);
+};
+/**
+ * Task 10 (Phase-2 gate) — revert 비율 셀. `overlapCell`과 같은 규약: 비율 하나로 끝내지 않고 분자·분모를
+ * 함께 싣는다("0.00"이 "되돌림 0"인지 "잴 머지가 없음"인지 가른다). 창/누적 모두 머지가 0이면 "없음".
+ */
+const revertCell = (s) => {
+  const merged = Number(s?.merged) || 0;
+  if (merged === 0) return "없음";
+  return `${Number(s?.revert_rate ?? 0).toFixed(2)} (${Number(s?.reverts) || 0}/${merged})`;
+};
+
+/**
+ * Phase-2 게이트의 **기준선**(이 세션에서 동결). retro 출력과 ADR-026이 같은 값을 인용한다. 이 표가
+ * 관측 가능하게 만드는 위험은 스펙 §7의 "단순화가 품질을 떨어뜨릴 수 있는가"다 — 리뷰어 커버리지를
+ * 줄이는 Phase 2(Tasks 6,7)는 이 기준선 대비 escaped·revert가 나빠지지 않았음을 먼저 보여야 시작한다.
+ */
+export const QUALITY_BASELINE = Object.freeze({
+  note: "KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds",
+  must_not_recur: Object.freeze([
+    "own-cal R2 production-API (defect surfaced after a prior approve)",
+    "KTB #18 R3 finish() regression",
+  ]),
+});
+
+/** 이슈별 라운드/escaped 상세 표(이번 창) — 롤업 표 밑에 붙는다. 없으면 빈 문자열. */
+function roundsPerIssueTable(window) {
+  const rows = Array.isArray(window?.rounds_per_issue) ? window.rounds_per_issue : [];
+  if (!rows.length) return "";
+  const esc = new Map((Array.isArray(window?.escaped_defects_detail) ? window.escaped_defects_detail : []).map((d) => [d.issue, d.count]));
+  const body = rows.map((r) => `| #${r.issue} | ${r.plan ?? 0} | ${r.implement ?? 0} | ${r.review ?? 0} | ${esc.get(r.issue) ?? 0} |`);
+  return ["### Rounds per issue (this window)", "", "| issue | plan | implement | review | escaped |", "| --- | --- | --- | --- | --- |", ...body].join("\n");
+}
+
+/** Phase-2 게이트 기준선 블록(이 세션에서 동결) — retro 출력에 기준선과 must-not-recur 집합을 남긴다. */
+function baselineNote() {
+  return [
+    "### Phase-2 gate baseline (this session)",
+    "",
+    `- baseline: ${QUALITY_BASELINE.note}`,
+    `- must-not-recur escaped defects: ${QUALITY_BASELINE.must_not_recur.join("; ")}`,
+    "- gate (ADR-026): Phase 2 (plan Tasks 6, 7) starts only when, over ≥5 post-Phase-1 issues, escaped-defect rate AND revert rate are ≤ baseline while rounds-per-issue fell.",
+  ].join("\n");
+}
+
+/**
  * `_retro.md` 위쪽에 사람이 먼저 읽는 통계 표(§8.3 "통계" 절과 같은 수치). 두 열이다: 이번 창(N 자가
  * 조정을 움직이는 값)과 누적(공장의 전체 이력). 창만 보면 "공장이 지금까지 무엇을 했는가"를 알 수 없고,
  * 누적만 보면 "이번에 무엇이 달라졌는가"를 알 수 없다.
@@ -276,11 +339,16 @@ export function statsTable(window, total) {
   const w = window || {};
   const t = total || {};
   const row = (label, a, b) => `| ${label} | ${a} | ${b} |`;
-  return [
+  const roundsCell = (s) => `${s.plan_rounds_avg ?? 0} / ${s.implement_rounds_avg ?? 0} / ${s.review_rounds_avg ?? 0}`;
+  const table = [
     "| metric | this window | cumulative |",
     "| --- | --- | --- |",
     row("merged", w.merged ?? 0, t.merged ?? 0),
     row("review rounds avg", w.review_rounds_avg ?? 0, t.review_rounds_avg ?? 0),
+    // Task 10 (Phase-2 gate) — 게이트가 읽는 세 지표. 이슈별 상세는 이 표 밑의 rounds-per-issue 표에.
+    row("rounds/issue (plan/impl/review)", roundsCell(w), roundsCell(t)),
+    row("escaped defects", escapedCell(w), escapedCell(t)),
+    row("revert rate", revertCell(w), revertCell(t)),
     row("needs-human", w.needs_human ?? 0, t.needs_human ?? 0),
     row("rejects by role", rejectCell(w), rejectCell(t)),
     row("reviewer overlap", overlapCell(w), overlapCell(t)),
@@ -294,6 +362,9 @@ export function statsTable(window, total) {
     row("retro tokens", `input ${w.retro_usage?.tokens?.input || 0} / output ${w.retro_usage?.tokens?.output || 0}`, `input ${t.retro_usage?.tokens?.input || 0} / output ${t.retro_usage?.tokens?.output || 0}`),
     row("full retros", "—", t.retros ?? 0),
   ].join("\n");
+  // 이슈별 상세(창)와 Phase-2 게이트 기준선을 표 밑에 붙인다 — 롤업만으로는 어느 이슈에서 결함이
+  // 샜는지 모르고, 기준선이 없으면 게이트가 무엇 대비 좋아졌는지 판단할 근거가 사라진다(스펙 §7).
+  return [table, roundsPerIssueTable(w), baselineNote()].filter(Boolean).join("\n\n");
 }
 
 /**
