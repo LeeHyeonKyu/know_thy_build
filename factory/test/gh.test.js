@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
-import { makeGh, allChecksGreen, resolveRepo } from "../lib/gh.js";
+import { makeGh, allChecksGreen, resolveRepo, resolveFactoryLogins } from "../lib/gh.js";
+import { heartbeatBody } from "../lib/heartbeat.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const repo = "o/r";
@@ -525,4 +526,63 @@ test("putEnvironment PUTs the deployment branch policy by stdin — the body nev
   await makeGh({ run, repo }).putEnvironment("factory-merge", body);
   expect(run.calls[0].args).toEqual(["api", "-X", "PUT", `repos/${repo}/environments/factory-merge`, "--input", "-"]);
   expect(JSON.parse(run.calls[0].opts.input)).toEqual(body);
+});
+
+// ── T5 리뷰 MF-1: `resolveFactoryLogins`는 **어디서 도는지**에 따라 답이 달라야 한다 ──────────
+//
+// 1차 구현은 `gh api user`를 무조건 팩토리 계정으로 셌다. Actions 안에서는 그 값이 잡 토큰의 주인,
+// 곧 봇이라 옳다 — 그러나 노트북에서는 **소유자**다. 그 결과 `factory analyze`가 소유자의
+// `human-decision:v1`을 "에이전트가 쓴 결정"으로 기각했고, 데모 #39의 `[ktb]` 발견 둘이 사라졌다.
+// 사람을 봇으로 오인하는 것은 fail-closed가 아니라 그냥 틀린 것이다.
+
+const heartbeatComment = (author) => ({
+  id: 1, createdAt: "2026-09-20T10:00:00Z", author,
+  body: heartbeatBody({ issue: 39, stage: "implement", runnerId: "gha-99001", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z" }),
+});
+const viewerGh = (login) => ({ viewerLogin: async () => login });
+
+test("resolveFactoryLogins: inside Actions the viewer IS the bot — behaviour is unchanged (run-stage's path)", async () => {
+  const r = await resolveFactoryLogins({ gh: viewerGh("factory-bot"), env: { GITHUB_ACTIONS: "true" } });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+
+  // FACTORY_BOT_LOGIN과 함께 오면 둘 다(중복은 접힌다) — 두 배우 모드 그대로.
+  const both = await resolveFactoryLogins({ gh: viewerGh("ktb-agent"), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(both).toEqual({ ok: true, logins: ["factory-bot", "ktb-agent"] });
+});
+
+test("resolveFactoryLogins: inside Actions a failing `gh api user` is still fail-closed", async () => {
+  const gh = { viewerLogin: async () => { throw new Error("boom"); } };
+  const r = await resolveFactoryLogins({ gh, env: { GITHUB_ACTIONS: "true" } });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/gh api user failed/);
+});
+
+test("resolveFactoryLogins: on a laptop the viewer is the OWNER and must never be counted as a factory login", async () => {
+  let asked = false;
+  const gh = { viewerLogin: async () => { asked = true; return "LeeHyeonKyu"; } };
+  // 하트비트가 봇 이름을 준다 — 하트비트는 러너만 쓰는 산출물이므로 그 작성자는 구성상 팩토리다.
+  const r = await resolveFactoryLogins({ gh, env: {}, comments: [heartbeatComment("factory-bot")] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+  // 소유자는 목록에 없다 — 그것이 MF-1의 전부다.
+  expect(r.logins).not.toContain("LeeHyeonKyu");
+  // 그리고 Actions 밖에서는 `gh api user`를 아예 부르지 않는다(부를 이유가 없다).
+  expect(asked).toBe(false);
+});
+
+test("resolveFactoryLogins: heartbeat authors come only from heartbeat comments, not from any comment", async () => {
+  const notAHeartbeat = { id: 2, createdAt: "2026-09-20T11:00:00Z", author: "impostor", body: "stage: implement · runner: gha-1" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [heartbeatComment("factory-bot"), notAHeartbeat] });
+  expect(r.logins).toEqual(["factory-bot"]);
+});
+
+test("resolveFactoryLogins: nothing resolvable → ok:false (never an empty list — [] reads as 'there is no bot')", async () => {
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [] });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/FACTORY_BOT_LOGIN|heartbeat/);
+  expect(r.logins).toBeUndefined();
+});
+
+test("resolveFactoryLogins: FACTORY_BOT_LOGIN alone is enough outside Actions", async () => {
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
 });
