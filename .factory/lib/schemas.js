@@ -59,8 +59,24 @@ const SCHEMAS = {
      * 있을 때"만 성립하고, 스키마는 dissent를 세지 않는다. 여기서는 모양만 본다.
      */
     dw.forEach((d, i) => {
-      for (const k of ["id", "text", "verify"]) req(e, d, k, "string", `done_when[${i}]`);
+      for (const k of ["id", "text"]) req(e, d, k, "string", `done_when[${i}]`);
       oneOf(e, d, "level", ["unit", "integration", "e2e"], `done_when[${i}]`);
+      /*
+       * 리뷰 효율 Task 1 (Structure A) — done_when이 실는 **수용 계약**: `check {kind, ref}`(어떻게
+       * 확인되는가)와 `rubric`(리뷰어가 적용할 한 줄 기준). 셋 다 **선택**이다 — 스키마는 모양만 본다.
+       * "둘 다 없으면 미완"이라는 요구는 verify-stage의 plan 검증기가 집행한다(파서가 아니라), 그래서
+       * check/rubric 없이 `verify`만 든 옛 핸드오프도 그대로 파싱된다. `verify`(테스트 id)는 이제
+       * `check {kind:"test"}`의 옛 철자라 **선택**이다 — 있으면 문자열이어야 한다.
+       */
+      if (d?.verify !== undefined && d.verify !== null) req(e, d, "verify", "string", `done_when[${i}]`);
+      if (d?.check !== undefined && d.check !== null) {
+        const c = req(e, d, "check", "object", `done_when[${i}]`);
+        if (c) {
+          oneOf(e, c, "kind", ["test", "gate", "finish", "rubric"], `done_when[${i}].check`);
+          if (c?.ref !== undefined && c.ref !== null) req(e, c, "ref", "string", `done_when[${i}].check`);
+        }
+      }
+      if (d?.rubric !== undefined && d.rubric !== null) req(e, d, "rubric", "string", `done_when[${i}]`);
       if (d?.covers !== undefined && d.covers !== null) {
         const c = req(e, d, "covers", "array", `done_when[${i}]`) || [];
         c.forEach((x, j) => { if (typeof x !== "string") e.push(`done_when[${i}].covers[${j}] must be a string`); });

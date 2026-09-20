@@ -119,6 +119,55 @@ test("plan validator: the other guard heuristics — ordering, regex-over-the-re
   expect(reasonFor("GET /healthz responds 200 with Cache-Control: no-store")).not.toMatch(/guard-shaped/);
 });
 
+/**
+ * 리뷰 효율 Task 1 (Structure A) — 수용 계약(acceptance contract). 모든 done_when은 그것이 **어떻게
+ * 확인되는지**(`check {kind, ref}`)와 리뷰어가 적용할 **한 줄 기준**(`rubric`) 중 적어도 하나를 지녀야
+ * 한다. 둘 다 없는 항목은 계약이 아니라 소망이다 — 구현자는 스스로 확인할 것이 없고(Task 3), 리뷰어는
+ * 공유된 기준이 없다(Task 7). 검증기는 그런 항목을 `acceptance contract incomplete: <id>`로 거절한다.
+ * `verify`(테스트 id)는 `check {kind:"test"}`의 옛 철자이므로, 그 하나만 있는 옛 핸드오프도 계약을 갖춘
+ * 것으로 친다 — 새 요구를 집행하는 것은 파서가 아니라 이 검증기다(옛 핸드오프는 그대로 파싱된다).
+ */
+test("plan validator: a done_when with neither check nor rubric is an incomplete acceptance contract", () => {
+  const bad = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "the export streams to disk", level: "unit" }] }));
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw9/);
+
+  // check 하나만 있어도, rubric 하나만 있어도 통과한다.
+  const withCheck = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "test", ref: "test_7_export" } }] }));
+  expect(withCheck.ok).toBe(true);
+  const withRubric = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "the warning appears before the command block" }] }));
+  expect(withRubric.ok).toBe(true);
+});
+
+test("plan validator: a legacy verify (a test id) counts as the check — old handoffs without check/rubric still pass", () => {
+  // planFix의 기본 done_when은 verify(test_7_create)만 있고 check/rubric은 없다 — 그래도 계약이 완결이다.
+  expect(verifyPlan(planFix()).ok).toBe(true);
+});
+
+test("plan validator: a check.kind:test whose ref is empty or malformed is rejected (Task 3 must be able to run it)", () => {
+  const empty = verifyPlan(planFix({ done_when: [{ id: "dw3", text: "t", level: "unit", check: { kind: "test", ref: "" }, rubric: "graded by the reviewer" }] }));
+  expect(empty.ok).toBe(false);
+  expect(empty.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw3/);
+  const malformed = verifyPlan(planFix({ done_when: [{ id: "dw3", text: "t", level: "unit", check: { kind: "test", ref: "run the export by hand" } }] }));
+  expect(malformed.ok).toBe(false);
+  expect(malformed.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw3/);
+});
+
+/**
+ * 회귀 핀(데모 #2 9라운드의 단일 원인, 감사 Task 9): 수용 계약 규칙을 **덧붙였지** 기존 규칙을 대체하지
+ * 않았다. medium 이상 dissent를 done_when이 짚지 못하면, 그 done_when이 계약을 온전히 갖췄더라도
+ * 여전히 `dissent without done_when`으로 실패한다.
+ */
+test("plan validator regression: a medium+ dissent left uncovered STILL fails with dissent without done_when (rule intact)", () => {
+  const dissent = [{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "unresolved — proceeding" }];
+  const bad = verifyPlan(planFix({
+    dissent_log: dissent,
+    done_when: [{ id: "dw1", text: "the export streams to disk", level: "unit", check: { kind: "test", ref: "test_7_stream" }, rubric: "graded by the reviewer" }],
+  }));
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons.join("; ")).toMatch(/dissent without done_when: d1/);
+});
+
 test("plan validator does not run for other stages", () => {
   const r = verifyStage({ stage: "review", out: out(review), agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" }, planLimits: { max_done_when: 1 } });
   expect(r.ok).toBe(true);

@@ -22,7 +22,8 @@ const block = (heading, lines) => (lines.length ? [heading, ...lines].join("\n")
  * P3-R5: 라운드별 코멘트를 따로 달지 않고 이 하나의 본문으로 합친다.
  */
 function planBody(d) {
-  const doneWhen = arr(d.done_when).map((w, i) => `${i + 1}. ${line(w.id)} · ${line(w.text)} · ${line(w.verify)}@${line(w.level)}`);
+  // Task 1: `verify`는 `check {kind:"test"}`의 옛 철자다. 옛 항목은 verify로, 새 항목은 check.ref로 렌더한다.
+  const doneWhen = arr(d.done_when).map((w, i) => `${i + 1}. ${line(w.id)} · ${line(w.text)} · ${line(w.verify) || line(w.check?.ref)}@${line(w.level)}`);
   const dissent = arr(d.dissent_log).map((x) => `- ${line(x.role)}: ${line(x.objection)} → ${line(x.resolution)}`);
 
   const debate = d.debate || {};

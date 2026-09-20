@@ -11,15 +11,33 @@ test("triage.v1", () => {
   expect(validate("triage.v1", { schema: "factory.triage.v1", issue: 1, disposition: "needs-info", questions: ["q"] }).ok).toBe(true);
 });
 
-test("plan.v1 requires done_when with verify+level, files_expected, dissent_log, roles, rounds", () => {
+test("plan.v1 requires done_when with id/text/level (verify optional), files_expected, dissent_log, roles, rounds", () => {
   const good = { schema: "factory.plan.v1", issue: 1, tier: "standard", roles: ["a", "b"], rounds: 3,
     done_when: [{ id: "dw1", text: "t", verify: "test_1_t", level: "unit" }], files_expected: ["src/x.ts"], dissent_log: [], non_goals: [], open_risks: [] };
   expect(validate("plan.v1", good).ok).toBe(true);
+  // 리뷰 효율 Task 1: `verify`는 `check`로 일반화됐다 — 이제 선택 필드다. 필수는 id/text/level.
   const bad = { ...good, done_when: [{ id: "dw1", text: "t" }] };
   const r = validate("plan.v1", bad);
   expect(r.ok).toBe(false);
-  expect(r.errors.join(" ")).toMatch(/done_when\[0\]\.verify/);
+  expect(r.errors.join(" ")).toMatch(/done_when\[0\]\.level/);
+  // verify 없이 check+rubric만 있어도 파싱된다 — 파서는 계약 완결을 게이트하지 않는다(verify-stage 검증기의 몫).
+  expect(validate("plan.v1", { ...good, done_when: [{ id: "dw1", text: "t", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "graded" }] }).ok).toBe(true);
   expect(validate("plan.v1", { ...good, done_when: [] }).ok).toBe(false);
+});
+
+/**
+ * 리뷰 효율 Task 1 — done_when의 `check {kind, ref}`와 `rubric`은 **선택**이지만 모양은 검사한다:
+ * `check.kind`는 test|gate|finish|rubric enum, `check.ref`·`rubric`은 문자열. 완결 요구는 verify-stage 검증기가 집행한다.
+ */
+test("plan.v1: done_when.check and rubric are optional but shape-checked", () => {
+  const base = { schema: "factory.plan.v1", issue: 1, tier: "standard", roles: ["a", "b"], rounds: 2,
+    files_expected: [], dissent_log: [], non_goals: [], open_risks: [] };
+  const withContract = { ...base, done_when: [{ id: "dw1", text: "t", level: "unit", check: { kind: "test", ref: "test_1_t" }, rubric: "the reviewer confirms X" }] };
+  expect(validate("plan.v1", withContract).ok).toBe(true);
+  const badKind = { ...base, done_when: [{ id: "dw1", text: "t", level: "unit", check: { kind: "smell", ref: "x" } }] };
+  expect(validate("plan.v1", badKind).errors.join(" ")).toMatch(/done_when\[0\]\.check\.kind must be one of/);
+  const badRubric = { ...base, done_when: [{ id: "dw1", text: "t", level: "unit", verify: "test_1_t", rubric: 3 }] };
+  expect(validate("plan.v1", badRubric).errors.join(" ")).toMatch(/done_when\[0\]\.rubric must be string/);
 });
 
 /**

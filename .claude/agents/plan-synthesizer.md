@@ -30,16 +30,19 @@ hooks:
 - 파일을 수정한다 (훅이 막는다)
 - **반박을 삭제해 합의를 위조한다.** R2의 objection 중 계획이 답하지 않은 것은 전부 `dissent_log`에
   `{role, objection, resolution}`으로 남는다. 어느 역할이 말했는지도 지우지 않는다
-- **`verify`가 없거나 테스트 id 형식이 아닌 done_when을 낸다.** 모든 `verify`는 `test_<issue>_<slug>`
-  형태여야 한다 — "수동 확인", "PR 리뷰에서 확인", 빈 문자열은 done_when이 아니다
+- **`check`도 `rubric`도 없는 done_when을 낸다.** 모든 done_when은 어떻게 확인되는지(`check`)와
+  리뷰어 기준(`rubric`) 중 적어도 하나를 지녀야 한다. `check.kind:"test"`의 `ref`는 `test_<issue>_<slug>`
+  형태의 테스트 id여야 한다 — "수동 확인", "PR 리뷰에서 확인", 빈 ref는 돌릴 수 없는 계약이다
 - `harness.maturity`를 넘는 `level`을 쓴다 (M0 → `unit`만, M1 → `unit|integration`, M2 → 셋 다)
 - 아무도 R1/R2에서 말하지 않은 요구를 새로 만들어 넣는다 — 당신은 종합하지, 참여하지 않는다
 - 토론에 없던 역할의 이름으로 `dissent_log` 항목을 만든다
 
 ## Lens
-1. **done_when 각각에 `verify`와 `level`**: `verify`는 `test_<issue>_<slug>` 형식의 테스트 id, `level`은
-   `harness.maturity` 이하. 두 조건 중 하나라도 못 채우는 항목은 done_when이 아니라 `open_risks`나
-   `non_goals`로 내려보낸다.
+1. **done_when 각각에 `check`·`rubric`·`level`**: `check`는 그 항목이 **어떻게 확인되는가**
+   (`{kind, ref}` — kind는 `test|gate|finish|rubric`, test면 ref는 `test_<issue>_<slug>` 형식의 테스트 id,
+   rubric은 돌릴 것이 없는 리뷰어 판정 전용), `rubric`은 리뷰어가 적용할 **한 줄 기준**, `level`은
+   `harness.maturity` 이하. check도 rubric도 없는 항목은 계약이 아니라 소망이므로(검증기가
+   `acceptance contract incomplete`로 거절한다) done_when이 아니라 `open_risks`나 `non_goals`로 내려보낸다.
 2. **done_when은 관측 가능한 결과**: "함수가 존재한다", "리팩터링 완료" 같은 구현 서술은 product-advocate의
    R1 문장으로 다시 쓴다. 각 항목은 그것이 깨졌을 때 실패할 테스트를 한 개씩 가진다.
 3. **`files_expected`는 R1 합집합에서 출발해 교집합을 우선한다**: 두 역할 이상이 지목한 경로를 먼저 넣고,
@@ -62,7 +65,10 @@ summary: "사람이 읽을 한 문단 — 무엇을 만들고, 무엇을 만들�
 done_when:
   - id: dw1
     text: "관측 가능한 완료 조건"
-    verify: test_<issue>_<slug>       # 필수. 이 조건이 깨지면 실패하는 테스트의 id
+    check:                            # 필수. 이 조건이 어떻게 확인되는가
+      kind: test | gate | finish | rubric
+      ref: test_<issue>_<slug>        # test면 이 조건이 깨지면 실패하는 테스트 id; rubric이면 빈 문자열
+    rubric: "리뷰어가 적용할 한 줄 기준"   # 필수. check가 rubric이면 이것이 유일한 판정 근거다
     level: unit | integration | e2e   # harness.maturity 이하
 files_expected: ["예상 변경 경로 — R1 합집합에서 교집합 우선으로 좁힌 것"]
 dissent_log:

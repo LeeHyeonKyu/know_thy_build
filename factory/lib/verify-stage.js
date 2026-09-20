@@ -142,6 +142,32 @@ export const GUARD_SHAPED_PATTERNS = [
 const GUARD_REQUESTED = /\bguard\b|가드|\[guard\]/i;
 
 /**
+ * ── 수용 계약 (리뷰 효율 Task 1, Structure A) ──────────────────────────────────
+ * done_when 각 항목은 **어떻게 확인되는지**(`check {kind, ref}`)와 리뷰어가 적용할 **한 줄 기준**
+ * (`rubric`) 중 적어도 하나를 지녀야 한다. 이 하나의 계약이 세 곳에서 쓰인다: 구현자의 핸드오프 전
+ * 자가 점검(Task 3), 리뷰어의 채점 기준(Task 7), 머지의 증거. `check.kind`는 test|gate|finish|rubric —
+ * `test`는 Task 3가 돌릴 테스트 이름, `gate`는 게이트 이름, `finish`는 qa 매니페스트가 채점, `rubric`은
+ * 돌릴 것이 없는 리뷰어 판정 전용이다. `verify`(테스트 id)는 `check {kind:"test"}`의 옛 철자라, 그 하나만
+ * 든 옛 핸드오프도 계약을 갖춘 것으로 친다 — 새 요구를 집행하는 것은 파서가 아니라 이 검증기다.
+ */
+const CHECK_KINDS = new Set(["test", "gate", "finish", "rubric"]);
+/** `check.kind:"test"`의 ref는 Task 3가 vitest에 넘길 테스트 이름이다: `test_<...>` 형태, 공백 없음. */
+const TEST_REF_RE = /^test_[A-Za-z0-9][\w-]*$/;
+const isRunnableTestRef = (ref) => typeof ref === "string" && TEST_REF_RE.test(ref.trim());
+/**
+ * 스스로 확인 가능한 check을 지녔는가. 명시적 `check`이 있으면 그 kind로 판정하고(rubric kind는 돌릴
+ * 것이 없어 rubric 문자열에 기댄다), 없으면 옛 `verify`(테스트 id)를 check으로 친다.
+ */
+function hasUsableCheck(item, check) {
+  if (check && CHECK_KINDS.has(check.kind)) {
+    if (check.kind === "rubric") return false;                       // 리뷰어 판정 전용 — 돌릴 check이 없다
+    if (check.kind === "test") return isRunnableTestRef(check.ref);
+    return typeof check.ref === "string" && check.ref.trim() !== ""; // gate/finish는 이름 하나면 된다
+  }
+  return typeof item?.verify === "string" && item.verify.trim() !== ""; // 옛 철자
+}
+
+/**
  * `plan.v1` 핸드오프를 CHARTER의 plan 규칙으로 검사한다. 반환은 사유 문자열 배열(빈 배열 = 유효).
  * 스키마 검사와 별개다 — 스키마는 "모양", 이것은 "계약".
  */
@@ -174,6 +200,22 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
       reasons.push(`guard-shaped done_when: ${guardish.join(", ")} — done_when observes user-visible behaviour; say "guard" in the issue if a guard is what you want`);
     }
   }
+
+  // (d) 수용 계약(Task 1) — 위 (a)~(c)를 **덧붙인다**, 대체하지 않는다. 계약을 못 갖춘 done_when은
+  //     dissent를 짚었든 아니든 그 자체로 실패다.
+  doneWhen.forEach((d, i) => {
+    const id = typeof d?.id === "string" && d.id ? d.id : `dw${i + 1}`;
+    const check = d && typeof d.check === "object" && d.check ? d.check : null;
+    // `check.kind:"test"`를 **명시한** 항목의 ref는 Task 3가 실제로 돌릴 수 있어야 한다 — 비었거나
+    // 테스트 이름 모양이 아니면 돌릴 수 없는 계약이므로, rubric이 있든 없든 미완으로 본다.
+    if (check && check.kind === "test" && !isRunnableTestRef(check.ref)) {
+      reasons.push(`acceptance contract incomplete: ${id}`);
+      return;
+    }
+    const hasRubric = typeof d?.rubric === "string" && d.rubric.trim() !== "";
+    if (!hasUsableCheck(d, check) && !hasRubric) reasons.push(`acceptance contract incomplete: ${id}`);
+  });
+
   return reasons;
 }
 
