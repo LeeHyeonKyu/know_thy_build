@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { buildContext, roleContextFor } from "../lib/context.js";
+import { buildContext, roleContextFor, contextManifestsFor, contextManifestLines, CONTEXT_MANIFEST_PREFIX } from "../lib/context.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { validateManifest } from "../lib/qa-evidence.js";
 
@@ -327,6 +327,75 @@ test("H4: spec-conformance (cold_read = false) gets the full file plus the issue
   expect(rc.cold_read).toBe(false);
   expect(rc.handoffs.plan.files_expected).toEqual(["src/export/csv.js"]);
   expect(rc.acceptance).toBe("- CSV에 헤더 줄이 있다");
+});
+
+/**
+ * ── Feedback loop Task 1 — the per-role context manifest (spec §5 context adequacy, §10 Q1) ────
+ *
+ * 컨텍스트 적정성 신호는 "역할이 **보지 못한** 필드와 그 역할이 놓친 결함을 나중에 상관"시킨다.
+ * 그러려면 무엇을 보여줬는지가 런 시점에 durable하게 남아야 한다 — cold-read 투영본은 런이 끝나면
+ * `.factory/out/`과 함께 사라진다. 남기는 것은 **필드 이름뿐**이다(§10 Q1: 값도, 해시도 아니다).
+ */
+test("Task 1: a [correctness, spec-conformance] roster yields two context manifests — names only (§10 Q1)", async () => {
+  const { r, gh, issue } = reviewRoot();
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, spec-conformance]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  const ctx = await buildContext({ root: r, gh, issue, stage: "review" });
+  expect(ctx.roster).toEqual(["correctness", "spec-conformance"]);
+  const manifests = ctx.context_manifests;
+  expect(manifests.map((m) => m.role)).toEqual(["correctness", "spec-conformance"]);
+
+  const cold = manifests[0], full = manifests[1];
+  expect(cold.cold_read).toBe(true);
+  expect(full.cold_read).toBe(false);
+  // 매니페스트는 실제로 쓰인 `context.<role>.json`의 최상위 키와 정확히 같다(+ done_when 하위 필드).
+  const fileKeys = (role) => Object.keys(JSON.parse(readFileSync(join(r, `.factory/out/context.${role}.json`), "utf8"))).sort();
+  expect(cold.fields.filter((f) => !f.startsWith("done_when."))).toEqual(fileKeys("correctness"));
+  expect(full.fields.filter((f) => !f.startsWith("done_when."))).toEqual(fileKeys("spec-conformance"));
+  // cold read가 받은 done_when은 `DONE_WHEN_FIELDS`로 걸러진 것뿐이다 — `rationale`은 못 봤다.
+  expect(cold.fields.filter((f) => f.startsWith("done_when."))).toEqual(["done_when.id", "done_when.level", "done_when.text", "done_when.verify"]);
+  expect(cold.fields).not.toContain("handoffs");
+  // 전체 ctx를 받은 역할은 계획 산문까지 본 것이고, 매니페스트가 그것을 말한다.
+  expect(full.fields).toContain("handoffs");
+  expect(full.fields).toContain("done_when.rationale");
+  // 값은 한 글자도 싣지 않는다(§10 Q1: 이름만).
+  const dumped = JSON.stringify(manifests);
+  expect(dumped).not.toContain("header row");
+  expect(dumped).not.toContain("계획의 산문");
+
+  // 런 레코드가 받는 줄: prefix + 한 줄 JSON(Task 3의 harvester가 정규식으로 읽는다).
+  const lines = contextManifestLines(ctx);
+  expect(lines).toHaveLength(2);
+  expect(lines[0].startsWith(CONTEXT_MANIFEST_PREFIX)).toBe(true);
+  expect(lines[0]).not.toContain("\n");
+  expect(JSON.parse(lines[0].slice(CONTEXT_MANIFEST_PREFIX.length)))
+    .toEqual({ ...cold, run_id: null, runner: null });
+});
+
+/**
+ * 리뷰 provenance — `docs/factory/runs/**`는 에이전트가 덧붙일 수 있고 harvester는 첫 매치를 집는다.
+ * 줄이 자기를 쓴 런을 지목해야 T3가 어느 런에도 묶이지 않는 줄을 무시할 수 있다.
+ */
+test("리뷰 provenance: the manifest line names the run that wrote it (and the round when known)", () => {
+  const ctx = { roles: { correctness: { cold_read: true } }, issue: { number: 7 }, stage: "review", handoffs: {} };
+  const parsed = JSON.parse(contextManifestLines(ctx, { runId: "1234", runnerId: "gha-1234", round: 3 })[0].slice(CONTEXT_MANIFEST_PREFIX.length));
+  expect(parsed).toMatchObject({ role: "correctness", cold_read: true, run_id: "1234", runner: "gha-1234", round: 3 });
+  const bare = JSON.parse(contextManifestLines(ctx)[0].slice(CONTEXT_MANIFEST_PREFIX.length));
+  expect([bare.run_id, bare.runner, "round" in bare]).toEqual([null, null, false]);
+});
+
+test("Task 1: the manifest can be derived from a context alone, and never throws", () => {
+  const ctx = {
+    roles: { correctness: { cold_read: true }, "spec-conformance": { cold_read: false } },
+    issue: { number: 7, body: "" }, stage: "review", roster: ["correctness", "spec-conformance"],
+    handoffs: { plan: { done_when: [{ id: "dw1", text: "t", guard: null }] } },
+  };
+  const derived = contextManifestsFor(ctx);
+  expect(derived.map((m) => m.role)).toEqual(["correctness", "spec-conformance"]);
+  expect(derived[0].fields).toContain("done_when.id");
+  expect(derived[0].fields).not.toContain("done_when.guard");   // cold read는 guard를 못 본다
+  expect(derived[1].fields).toContain("done_when.guard");
+  expect(contextManifestsFor(null)).toEqual([]);
+  expect(contextManifestLines(undefined)).toEqual([]);
 });
 
 test("H4: roleContextFor is a pure function of the context and the role's cold_read flag", async () => {

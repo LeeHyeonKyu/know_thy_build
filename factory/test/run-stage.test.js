@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
+import { runGates } from "../lib/gates.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
 import { renderHandoff, parseHandoffs } from "../lib/handoff.js";
@@ -3297,4 +3298,140 @@ test("A-SF1: at the K limit the same shortfall takes the normal K path, not a st
   expect(call.to).toBe("factory:needs-human");
   expect(call.reason).toMatch(/review rounds/);                     // K의 문장이지 산출물의 문장이 아니다
   expect(lines.join("\n")).not.toMatch(/stage artifact missing or invalid/);
+});
+
+// ── Feedback loop Task 1 — durable run-time evidence reaches the run record ────────────────────
+//
+// 런 레코드가 오늘 남기는 게이트 증거는 `FACTORY_GATES: … failing=unit` 한 줄, 곧 **이름**뿐이다.
+// 어느 테스트가 왜 깨졌는지는 Actions 아티팩트와 `.factory/out/unit.json`에만 있고 7일 뒤 사라진다.
+// 그리고 각 리뷰 역할이 **무엇을 보고** 판정했는지는 아무 데도 남지 않는다. 두 줄이 그것을 고친다.
+
+const FL_HARNESS = {
+  harness: { maturity: "M1" },
+  commands: { unit: "vitest run" },
+  gates: { required: ["unit"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: {} },
+  test: {},
+};
+const FL_VITEST_FAIL = [
+  " ❯ test/export.test.js (2 tests | 1 failed)",
+  "   × csv export > writes a header row 4ms",
+  " FAIL  test/export.test.js > csv export > writes a header row",
+  "AssertionError: expected undefined to be 'id,name'",
+].join("\n");
+const flGates = () => runGates({
+  run: makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "vitest run", result: { code: 1, stdout: FL_VITEST_FAIL, stderr: "" } }]),
+  cwd: "/repo", harness: FL_HARNESS, level: "fast", quarantine: { quarantined: [] }, readFile: () => null,
+});
+const flCtx = () => ({
+  roster: ["correctness", "spec-conformance"], orchestration: "workflow", limits: { K: 3 }, stage: "review",
+  issue: { number: 39, title: "export CSV", body: "" },
+  roles: { correctness: { cold_read: true }, "spec-conformance": { cold_read: false } },
+  handoffs: { plan: { done_when: [{ id: "dw1", text: "header row", level: "unit", rationale: "계획의 산문" }] } },
+});
+
+test("Task 1: a stage run records gates-detail: for the RED gate and context-manifest: for every role", async () => {
+  const gates = await flGates();
+  const lines = [];
+  const deps = baseDeps({
+    gates: async () => gates,
+    buildContext: async () => flCtx(),
+    verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 39, deps })).toBe(0);
+
+  const detail = lines.filter((l) => l.startsWith("gates-detail: "));
+  expect(detail).toHaveLength(1);
+  expect(JSON.parse(detail[0].slice("gates-detail: ".length))).toMatchObject({
+    gate: "unit", failing: ["csv export > writes a header row"],
+  });
+  const manifests = lines.filter((l) => l.startsWith("context-manifest: ")).map((l) => JSON.parse(l.slice("context-manifest: ".length)));
+  expect(manifests.map((m) => m.role)).toEqual(["correctness", "spec-conformance"]);
+  expect(manifests[0].cold_read).toBe(true);
+  expect(manifests[0].fields).toContain("done_when.id");
+  expect(manifests[0].fields).not.toContain("done_when.rationale");   // cold read는 계획 산문을 못 봤다
+  expect(manifests[1].fields).toContain("handoffs");
+  // 옛 줄은 그대로다 — 새 줄은 더해질 뿐 무엇도 대체하지 않는다.
+  expect(lines.some((l) => l.startsWith("FACTORY_GATES: "))).toBe(true);
+});
+
+/**
+ * **Regression pinned (this session's 7-day artifact loss).** Actions 아티팩트가 하나도 없는 상태에서
+ * `factory/records`의 기록만으로 RED의 **뿌리**(깨진 테스트 이름)를 읽을 수 있어야 한다 — 그것이
+ * Task 2~5가 기대는 유일한 durable 소스이기 때문이다(spec §3 "durable before ephemeral").
+ */
+test("Task 1 regression: with NO Actions artifact present, the failing test name is readable from the run record alone", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fl-record-"));
+  const gates = await flGates();
+  const deps = baseDeps({
+    gates: async () => gates,
+    buildContext: async () => flCtx(),
+    verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }),
+    runRecord: (l) => appendRunRecord({ root, issue: 39, stage: "review", runnerId: "gha/1", lines: l }),
+  });
+  expect(await runStage({ stage: "review", issue: 39, deps })).toBe(0);
+  // 아티팩트는 없다 — 그것이 이 테스트의 전제다.
+  expect(existsSync(join(root, ".factory/out"))).toBe(false);
+  const text = readFileSync(join(root, "docs/factory/runs/39.md"), "utf8");
+  expect(text).toContain("csv export > writes a header row");
+  expect(text).toContain("AssertionError: expected undefined to be");
+  // 그리고 기계가 다시 읽을 수 있다(Task 3의 harvester).
+  const m = /^gates-detail: (\{.*\})$/m.exec(text);
+  expect(JSON.parse(m[1]).failing).toEqual(["csv export > writes a header row"]);
+  expect(/^context-manifest: (\{.*\})$/m.test(text)).toBe(true);
+});
+
+test("Task 1: a context with no roles adds no manifest line (nothing to declare, nothing written)", async () => {
+  const lines = [];
+  await runStage({ stage: "plan", issue: 4, deps: baseDeps({ runRecord: (l) => lines.push(...l) }) });
+  expect(lines.some((l) => l.startsWith("context-manifest: "))).toBe(false);
+});
+
+/**
+ * 리뷰 provenance — 두 줄 다 **자기를 쓴 런**(그리고 review면 라운드)을 지목한다. `docs/factory/runs/**`는
+ * no-write 스테이지의 스크래치 경로라 에이전트 세션이 줄을 덧붙일 수 있고, harvester는 정규식의 첫
+ * 매치를 집는다 — `reviewEvidenceLine`이 batch-2 MF-2에서 닫은 그 구멍이다.
+ */
+test("Task 1: both record lines are bound to the run (and the review round) that wrote them", async () => {
+  const gates = await flGates();
+  const lines = [];
+  const deps = baseDeps({
+    gates: async () => gates,
+    buildContext: async () => flCtx(),
+    reviewRounds: async () => 1,                                       // 완료된 rework 1회 → 이번은 round 2
+    verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }),
+    runRecord: (l) => lines.push(...l),
+  });
+  await runStage({ stage: "review", issue: 39, deps, runnerId: "gha-777", runId: "777" });
+  const of = (prefix) => JSON.parse(lines.find((l) => l.startsWith(prefix)).slice(prefix.length));
+  expect(of("gates-detail: ")).toMatchObject({ run_id: "777", runner: "gha-777", round: 2 });
+  expect(of("context-manifest: ")).toMatchObject({ run_id: "777", runner: "gha-777", round: 2 });
+});
+
+/**
+ * 리뷰 SF-5 — KTB-51 리페어 턴은 `context.<role>.json`을 **다시 쓰고** `plan_repair`를 더한다. 그 두
+ * 번째 문맥이 플래너가 실제로 읽은 것이므로, 매니페스트가 없으면 그 런의 context-adequacy 상관이
+ * 틀린 목록 위에서 계산된다.
+ */
+test("Task 1 (리뷰 SF-5): the plan-repair turn's context is manifested too", async () => {
+  const lines = [];
+  const planCtx = (extra = {}) => ({
+    roster: [], orchestration: "workflow", limits: { K: 3 }, stage: "plan",
+    issue: { number: 51, title: "T", body: "" },
+    roles: { architect: { cold_read: false } },
+    handoffs: { plan: { done_when: [{ id: "dw1", text: "t" }] } },
+    ...extra,
+  });
+  let built = 0;
+  const deps = baseDeps({
+    buildContext: async ({ planRepair = null } = {}) => { built += 1; return planCtx(planRepair ? { plan_repair: planRepair } : {}); },
+    claudeP: async () => ({ is_error: false, result: "{}" }),
+    verifyStage: () => ({ ok: false, reasons: ["dissent d2 not covered"], planRepair: ["dissent d2 not covered"], data: {} }),
+    runRecord: (l) => lines.push(...l),
+  });
+  await runStage({ stage: "plan", issue: 51, deps });
+  expect(built).toBe(2);                                                // 첫 문맥 + 리페어 문맥
+  const manifests = lines.filter((l) => l.startsWith("context-manifest: "));
+  expect(manifests).toHaveLength(2);
+  expect(JSON.parse(manifests[1].slice("context-manifest: ".length)).fields).toContain("plan_repair");
 });
