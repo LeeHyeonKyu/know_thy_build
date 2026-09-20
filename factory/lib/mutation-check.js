@@ -1,45 +1,85 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
-import { q } from "./prove-test.js";
+import { q, baseInstallCommand } from "./prove-test.js";
 
 /**
  * **new-test mutation check — the DUAL of prove-test (Structure D', spec §4).**
  *
  * prove-test proves a new test fails WITHOUT the implementation (run it on the base worktree, expect
  * red). This proves a new test fails when the asserted PROPERTY is violated: apply a cheap structural
- * mutation to the SOURCE the test exercises and confirm the test goes red. A test that stays GREEN
- * under mutation is a `survivor` — it asserts nothing / is not fail-closed (own-cal R1 cf1: deleting
- * the safety warning still passed 5/5). Deterministic, no LLM.
+ * mutation to the SOURCE the test exercises and confirm the test goes red *because an assertion failed*.
+ * A test that stays GREEN under a mutation that actually ran is a `survivor` — it asserts nothing / is
+ * not fail-closed (own-cal R1 cf1: deleting the safety warning still passed 5/5). Deterministic, no LLM.
  *
- * **This deliberately UNDER-fires (structural, not semantic).** The mutations are text transforms, not
- * a real mutation engine (no Stryker AST, no coverage-guided operator selection). A test can be a real
- * asserting test and still survive one of these mutations (the mutation didn't touch what it asserts),
- * and a mutation can turn a source uncompilable and make an honest test go red for the wrong reason.
- * Both are acceptable: the check's job is to catch the *blatant* "asserts nothing" case cheaply, before
- * review — never to certify that a test is complete. A found survivor is a real signal; the absence of
- * survivors is not a proof of quality.
+ * **The environment is the whole game (audit M2, the same trap prove-test defends against).** A fresh
+ * `git worktree add --detach` is source-only — no `node_modules` — so `npx vitest …` dies with
+ * `Cannot find module 'vitest'` and EVERY run is red *for the wrong reason*. If we read "red = the test
+ * noticed the mutation," no survivor is ever reported and the check is inert. Two defenses, both
+ * mandatory:
+ *   1. **Provision the worktree** — run `baseInstallCommand(harness)` after the copy, exactly like
+ *      prove-test. Install failure → `misconfigured` for the whole run (not a clear/ok).
+ *   2. **Baseline, then classify.** For each test: run it UNMUTATED first; it MUST be green (loads,
+ *      passes). If it can't run green unmutated → `inconclusive`/skipped for that test — never a kill,
+ *      never a survivor (you cannot judge a test you cannot run). A **kill** = baseline green → mutated
+ *      red where the red is an ASSERTION failure. A red that is a module-resolution / parse / SyntaxError
+ *      / transform error is `inconclusive` for that mutation (the mutation didn't "run") → try the next
+ *      mutator. A **survivor** = baseline green AND at least one mutation ran cleanly (parsed, loaded,
+ *      reached assertions) AND the test stayed green.
+ *
+ * **Operates on the implementer's UNCOMMITTED working changes.** Task 3's self-gate runs BEFORE commit,
+ * so the changed sources and new tests do not exist at `base`. Like prove-test copying added tests, this
+ * copies the caller's changed SOURCE files and new TEST files from the working tree into the base
+ * worktree before installing/running. The caller passes plain paths (`newTests`, `changedSources`).
+ *
+ * **Deliberately UNDER-fires (structural, not semantic).** The mutations are shallow, syntax-preserving
+ * text transforms, NOT a real mutation engine (no AST, no coverage guidance). Only one applicable
+ * mutation, chosen by falling through the ordered set on FRESH source, decides kill-vs-survivor. A found
+ * survivor is a real signal; the absence of survivors is not proof a test is complete.
  */
 
 const defaultRead = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
-const defaultWrite = (p, c) => writeFileSync(p, c);
+const defaultWrite = (p, c) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, c); };
 
 /** A path that looks like a test/spec file — never a mutation target (we mutate the SOURCE under test). */
 const isTestPath = (p) => /\.(test|spec)\./.test(p);
 
 /**
- * The mutation set (ordered, deterministic). Each mutator changes the FIRST eligible occurrence and is
- * applied cumulatively on top of the previous — so a source can carry several small mutations at once,
- * maximising the chance a fail-closed test notices at least one. Every transform is syntax-preserving
- * (a broken parse would turn *every* test red and hide survivors), and all deliberately shallow:
+ * A mutated-source run is red **for the wrong reason** — the mutation broke loading/parsing rather than
+ * violating the asserted property, so the test never reached its assertions. Such a red is NOT a "kill"
+ * (the test did not notice anything); it is `inconclusive` for that mutation and we fall through to the
+ * next. Superset of prove-test's `inconclusiveOnBase` (which is about the base worktree lacking deps):
+ * a structural mutation can itself produce any SyntaxError, an unexpected token, or a vite transform
+ * failure, none of which is evidence the test asserts something.
+ */
+const WRONG_REASON_RED = [
+  /Cannot find module/i,
+  /Cannot find package/i,
+  /ERR_MODULE_NOT_FOUND/,
+  /Cannot use import statement outside a module/i,
+  /SyntaxError/i,
+  /Unexpected (?:token|identifier|end of)/i,
+  /Failed to (?:parse|load|resolve|transform)/i,
+  /Transform failed/i,
+  /Parse (?:error|failure)/i,
+  /does not provide an export named/i,
+];
+export const isWrongReasonRed = (text) => WRONG_REASON_RED.some((re) => re.test(String(text || "")));
+
+/**
+ * The mutation set (ordered, deterministic). Each mutator changes the FIRST eligible occurrence of the
+ * ORIGINAL source (NOT cumulatively — a parse-breaking mutation must never poison a later one or mask a
+ * survivor). Every transform is syntax-preserving where it can be; the caller falls through the list
+ * until one applies AND runs cleanly. Kept in sync with the harness.toml comment:
  *   1. boolean  — first `true`/`false` literal is flipped
  *   2. comparison — first `===`/`!==`/`==`/`!=`/`<=`/`>=` operator is inverted (bare `<`/`>` are left
  *                   alone: they collide with generics/JSX/arrows and would break syntax)
  *   3. string   — first non-import string literal's contents are replaced with the `__MUTATED__`
- *                 sentinel (import/require/from lines are skipped so module resolution still works —
- *                 this is the mutator that kills own-cal R1 cf1: the asserted warning text)
+ *                 sentinel; this is the mutator that kills own-cal R1 cf1 (the asserted warning text).
+ *                 NOTE: it swallows a template literal's `${…}` interpolations (the whole `` `…` `` is
+ *                 replaced) — under-firing and syntactically safe, but it will not surface a bug that
+ *                 lives only inside an interpolation.
  *   4. numeric  — first standalone integer literal is bumped by one
  *   5. logical  — first `&&` becomes `||`
- * Keep this list and its stated limits in sync with the harness.toml comment.
  */
 const MUTATORS = [
   ["boolean", (t) => {
@@ -80,15 +120,14 @@ const MUTATORS = [
   }],
 ];
 
-/** Apply the whole mutation set. Returns `{ mutated, applied }`; `applied` is empty when nothing changed. */
-export function mutateSource(text) {
-  let mutated = text;
-  const applied = [];
+/** Every applicable single mutation of `text`, each applied to the ORIGINAL (not cumulative): `[{ name, mutated }]`. */
+export function structuralMutations(text) {
+  const out = [];
   for (const [name, fn] of MUTATORS) {
-    const next = fn(mutated);
-    if (next != null && next !== mutated) { mutated = next; applied.push(name); }
+    const mutated = fn(text);
+    if (mutated != null && mutated !== text) out.push({ name, mutated });
   }
-  return { mutated, applied };
+  return out;
 }
 
 /**
@@ -114,63 +153,102 @@ export function resolveTargets({ testFile, tmp, exists = existsSync, readFile = 
 }
 
 /**
- * `checkNewTestsFailOnMutation({ root, newTests, run, harness }) → { ok, survivors, skipped }`.
+ * `checkNewTestsFailOnMutation({ root, newTests, changedSources, run, harness, base }) →
+ *   { ok, survivors, skipped, checked, misconfigured?, detail? }`.
  *
- * For each new/changed test, mutate the source it asserts on (in a throwaway worktree, so the real
- * tree is never touched) and run just that test file. Green under mutation → survivor. Restores every
- * mutated source and removes the worktree on every path (try/finally), exactly like prove-test.
+ * `ok` is `survivors.length === 0`. `survivors[]` = tests that stayed green under a cleanly-run mutation.
+ * `skipped[]` = `{ file, reason }` for tests we could not judge (no target, no applicable mutation,
+ * baseline not green, or every mutation only produced wrong-reason red) — never fail-closed. `checked[]`
+ * = tests that produced a decisive result (kill or survivor). `misconfigured` (with `detail`) is a
+ * whole-run harness error: no `test_files` command, or a base dependency install that failed.
  *
  * `newTests` entries are either a test-file path string or `{ file, target? }` (an explicit target
- * skips import resolution). `run` is the injected async command runner (git + the harness test command),
- * so tests can drive it with a double. `ok` is `survivors.length === 0`.
+ * skips import resolution). `changedSources` are the working-tree source paths to copy in so the
+ * baseline runs on the implementer's real (uncommitted) code and the mutation target is that code.
  */
 export async function checkNewTestsFailOnMutation({
-  root, newTests, run, harness,
-  ref = "HEAD",
+  root, newTests, changedSources = [], run, harness,
+  base = "HEAD",
   tmp = join(root, ".factory/out/mutation-wt"),
   exists = existsSync, readFile = defaultRead, writeFile = defaultWrite,
 }) {
   const testFilesCmd = harness?.commands?.test_files;
   // No per-file test command → we cannot run a single test, so we cannot say anything. Like prove-test,
   // that is a harness setup error, not a pass and not a survivor.
-  if (!testFilesCmd) return { ok: false, misconfigured: true, survivors: [], skipped: [], detail: "commands.test_files missing" };
+  if (!testFilesCmd) return { ok: false, misconfigured: true, survivors: [], skipped: [], checked: [], detail: "commands.test_files missing" };
   const entries = (newTests || []).map((e) => (typeof e === "string" ? { file: e } : e));
-  if (!entries.length) return { ok: true, survivors: [], skipped: [], detail: "no new tests" };
+  if (!entries.length) return { ok: true, survivors: [], skipped: [], checked: [], detail: "no new tests" };
 
   const survivors = [], skipped = [], checked = [];
   const g = (args) => run("git", args, { cwd: root });
-  const add = await g(["worktree", "add", "--detach", tmp, ref]);
+  const runTest = (file) => run("bash", ["-lc", testFilesCmd.replaceAll("{files}", q(file))], { cwd: tmp });
+  const skipAll = (reason) => entries.forEach((e) => skipped.push({ file: e.file, reason }));
+
+  // nit 1 — a stale worktree from a crashed prior run would make `add` fail and silently skip every
+  // test. Best-effort remove first (ignore its result: a missing worktree is the normal case).
+  await g(["worktree", "remove", "--force", tmp]).catch(() => {});
+  const add = await g(["worktree", "add", "--detach", tmp, base]);
   // Couldn't build the worktree → couldn't check. Report as skipped; do NOT fail closed (that would
   // block legitimate work on an infra hiccup — spec's "deliberately under-fires" stance).
-  if (add.code !== 0) {
-    for (const e of entries) skipped.push({ file: e.file, reason: `worktree add failed: ${add.stderr || add.code}` });
-    return { ok: true, survivors, skipped };
-  }
+  if (add.code !== 0) { skipAll(`worktree add failed: ${add.stderr || add.code}`); return { ok: true, survivors, skipped, checked }; }
+
   try {
+    // Overlay the implementer's UNCOMMITTED working files (changed sources + new tests) onto the base
+    // worktree — they are not at `base`. prove-test copies added tests for exactly this reason.
+    const copySet = [...new Set([...(changedSources || []), ...entries.map((e) => e.file)])];
+    for (const f of copySet) {
+      const content = readFile(join(root, f));
+      if (content != null) writeFile(join(tmp, f), content);
+    }
+
+    // audit M2 — a source-only worktree has no runner. Install deps before running anything; a failed
+    // install means every run below is meaningless, so the whole check is misconfigured (fail-closed at
+    // the harness level, never a silent clear).
+    const install = baseInstallCommand(harness, tmp, exists);
+    if (install) {
+      const ins = await run("bash", ["-lc", install], { cwd: tmp });
+      if (ins.code !== 0) {
+        skipAll(`base dependency install failed (${install}, exit ${ins.code})`);
+        return { ok: false, misconfigured: true, survivors, skipped, checked, detail: `base dependency install failed (${install}, exit ${ins.code}) — mutation runs cannot be judged: ${String(ins.stderr || ins.stdout || "").trim().slice(0, 200)}` };
+      }
+    }
+
     for (const e of entries) {
       const targets = e.target ? [e.target] : resolveTargets({ testFile: e.file, tmp, exists, readFile });
       if (!targets.length) { skipped.push({ file: e.file, reason: "no resolvable source target for the assertion" }); continue; }
-      const mutations = [];
+
+      // Read the (already-copied) originals and pre-compute their single-mutation variants.
+      const attempts = [];
       for (const tgt of targets) {
         const orig = readFile(join(tmp, tgt));
         if (orig == null) continue;
-        const { mutated, applied } = mutateSource(orig);
-        if (!applied.length) continue;
-        mutations.push({ tgt, orig, mutated, applied });
+        for (const { name, mutated } of structuralMutations(orig)) attempts.push({ tgt, orig, name, mutated });
       }
-      if (!mutations.length) { skipped.push({ file: e.file, reason: "no applicable structural mutation in target(s)" }); continue; }
-      for (const mu of mutations) writeFile(join(tmp, mu.tgt), mu.mutated);
-      let r;
-      try {
-        const cmd = testFilesCmd.replaceAll("{files}", q(e.file));
-        r = await run("bash", ["-lc", cmd], { cwd: tmp });
-      } finally {
-        for (const mu of mutations) writeFile(join(tmp, mu.tgt), mu.orig); // restore the source on every path
+      if (!attempts.length) { skipped.push({ file: e.file, reason: "no applicable structural mutation in target(s)" }); continue; }
+
+      // BASELINE — the unmutated test must be green, or we cannot judge it (can't run / red on its own).
+      const baseRun = await runTest(e.file);
+      if (baseRun.code !== 0) {
+        const why = isWrongReasonRed(`${baseRun.stdout || ""}\n${baseRun.stderr || ""}`) ? "could not load/parse in the worktree" : "red at baseline (fails on its own)";
+        skipped.push({ file: e.file, reason: `inconclusive — the test is not green unmutated (${why})` });
+        continue;
       }
-      checked.push({ file: e.file, targets: mutations.map((mu) => mu.tgt) });
-      if (r.code === 0) {
-        survivors.push({ file: e.file, targets: mutations.map((mu) => mu.tgt), mutations: [...new Set(mutations.flatMap((mu) => mu.applied))] });
+
+      // Fall through the mutations on FRESH source; the first one that RUNS CLEANLY decides.
+      let decided = null; // { verdict: "survivor"|"kill", target, mutation }
+      let inconclusiveMutations = 0;
+      for (const a of attempts) {
+        writeFile(join(tmp, a.tgt), a.mutated);
+        let r;
+        try { r = await runTest(e.file); } finally { writeFile(join(tmp, a.tgt), a.orig); }
+        if (r.code === 0) { decided = { verdict: "survivor", target: a.tgt, mutation: a.name }; break; }
+        if (isWrongReasonRed(`${r.stdout || ""}\n${r.stderr || ""}`)) { inconclusiveMutations++; continue; } // wrong-reason red → not a kill; try next
+        decided = { verdict: "kill", target: a.tgt, mutation: a.name }; break; // assertion red → the test noticed it
       }
+
+      if (!decided) { skipped.push({ file: e.file, reason: `inconclusive — all ${inconclusiveMutations} applicable mutation(s) failed to load/parse, none reached assertions` }); continue; }
+      checked.push({ file: e.file, verdict: decided.verdict, target: decided.target, mutation: decided.mutation });
+      if (decided.verdict === "survivor") survivors.push({ file: e.file, target: decided.target, mutation: decided.mutation });
     }
   } finally {
     await g(["worktree", "remove", "--force", tmp]);
