@@ -5,7 +5,7 @@ title: "factory-improvement: <원인 파일> — <무엇이 잘못됐나>"
 labels: ["factory-improvement", "backlog"]
 ---
 
-<!-- factory-improvement fp=manual tags=ktb from=owner/repo#0 -->
+<!-- factory-improvement fp=manual-<짧은-슬러그> tags=ktb from=owner/repo#0 -->
 
 <!--
   ↑ 첫 줄은 지우지 말 것. 기계가 읽는 유일한 줄이다.

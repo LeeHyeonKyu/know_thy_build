@@ -43,17 +43,40 @@ const oneLine = (v) => String(v ?? "").replace(/\s*\n\s*/g, " ").trim();
 const clip = (v, n) => (v.length > n ? `${v.slice(0, n - 1)}…` : v);
 
 /**
+ * 산문(=백틱으로도 펜스로도 감싸지 않고 본문에 그대로 놓이는 것)의 정규화. 현재 그런 필드는
+ * `reason` 하나이고, 두 자리(사람이 읽는 문단과 증거 항목)에 나온다.
+ *
+ * **HTML 주석 구분자를 무력화한다.** `reason`에 `<!--`가 하나 섞이면 GitHub은 그 아래 전부 —
+ * 원인 파일 목록도, `## Evidence`도, `## Payload`도 — 주석으로 먹어 치운다. 기계 파싱은 첫 줄
+ * 마커만 보므로 **멀쩡히 성공하고**, 루프는 "이슈를 잘 열었다"고 보고하는데 정작 트리아지할
+ * 사람은 잘린 이슈를 본다. 게이트 출력이나 마크다운 템플릿에 관한 소견이면 `<!--`는 충분히
+ * 나올 수 있는 글자다(이 저장소의 이슈 템플릿 자체가 그렇다).
+ */
+const prose = (v) => oneLine(v).replace(/<!--+/g, "<!-").replace(/--+>/g, "->");
+
+/**
  * 본문 **첫 줄**의 기계 마커. `fp`가 Task 3의 dedupe 키다: 같은 fingerprint를 가진 열린 이슈가 있으면
  * 새 이슈를 열지 않고 그 이슈의 `## Evidence`에 덧붙인다. `tags`·`from`은 사람이 이슈 목록에서
  * "이게 하네스 얘기인가 KTB 얘기인가", "어느 저장소의 어느 이슈에서 왔나"를 본문을 열지 않고 알게 한다.
  *
  * 형식(한 글자도 바뀌면 안 된다):
  *   `<!-- factory-improvement fp=<fingerprint> tags=<a,b> from=<owner/repo>#<n> -->`
+ *
+ * fingerprint가 없으면 **빈 칸이 아니라 `none`**을 쓴다(`NO_FINGERPRINT`). 빈 칸으로 두면 사람 눈에도
+ * 기계 눈에도 "값이 있는데 못 읽는 줄"과 구별되지 않고, 무엇보다 dedupe가 영원히 어긋난다 —
+ * 소견마다 새 이슈가 열리는 것이 ADR-027 ⑤가 막으려는 바로 그 실패다. `none`은 사람에게도
+ * "이 소견은 fingerprint를 못 얻었다"고 말한다(얇은 소견도 버리지 않으므로 도달 가능한 상태다).
  */
-export const upstreamMarker = ({ fingerprint, tags = [], from }) =>
-  `<!-- factory-improvement fp=${markerValue(fingerprint)} tags=${markerValue([].concat(tags).join(","))} from=${markerValue(from)} -->`;
+export const NO_FINGERPRINT = "none";
 
-export const UPSTREAM_MARKER_RE = /<!--\s*factory-improvement\s+fp=(\S+)\s+tags=(\S*)\s+from=(\S+?)\s*-->/;
+export const upstreamMarker = ({ fingerprint, tags = [], from }) =>
+  `<!-- factory-improvement fp=${markerValue(fingerprint) || NO_FINGERPRINT} tags=${markerValue([].concat(tags).join(","))} from=${markerValue(from)} -->`;
+
+/**
+ * `fp`도 `tags`처럼 `\S*`다 — 읽는 쪽은 쓰는 쪽보다 관대해야 한다. 사람이 `fp=`를 비운 채 템플릿으로
+ * 연 이슈까지 읽어야 dedupe에 참여시킬 수 있고, 여기서 `null`로 떨어뜨리면 그 이슈는 영영 보이지 않는다.
+ */
+export const UPSTREAM_MARKER_RE = /<!--\s*factory-improvement\s+fp=(\S*)\s+tags=(\S*)\s+from=(\S+?)\s*-->/;
 
 /** `owner/repo#n` — 마커의 `from`이자 증거 항목의 머리. */
 export const sourceRef = (repo, issue) => `${markerValue(repo)}#${markerValue(issue)}`;
@@ -66,7 +89,7 @@ export const sourceRef = (repo, issue) => `${markerValue(repo)}#${markerValue(is
 export function upstreamIssueTitle(payload = {}) {
   const path = oneLine(payload?.causal?.path);
   const why = oneLine(payload?.reason ?? payload?.causal?.test ?? payload?.causal?.command ?? "");
-  const head = [path, why.replace(/#\d+/g, "#N")].filter(Boolean).join(" — ") || `unclassified finding ${markerValue(payload?.fingerprint) || "(no fingerprint)"}`;
+  const head = [path, why.replace(/#\d+/g, "#N")].filter(Boolean).join(" — ") || `unclassified finding ${markerValue(payload?.fingerprint) || NO_FINGERPRINT}`;
   return clip(`factory-improvement: ${head}`, TITLE_MAX);
 }
 
@@ -83,8 +106,13 @@ function snippetBlock(snippet, indent = "  ") {
 }
 
 /**
- * 증거 한 항목. 머리 줄(`- **<ref>** — …`)이 **항목의 정체성**이다: `appendEvidence`가 같은 머리 줄이
- * 이미 있으면 덧붙이지 않는다(retro가 같은 머지를 두 번 돌아도 증거가 두 번 쌓이지 않는다).
+ * 증거 한 항목과 그 **멱등 키**.
+ *
+ * 키는 `출처 + 스테이지 + 라운드`이지 머리 줄 전체가 아니다(리뷰 should_fix 5). 머리 줄에는 원인
+ * 파일의 **줄 번호**가 실리는데, 그것은 같은 원인이라도 무관한 커밋 하나에 밀린다 — 키에 넣으면
+ * "같은 목격"이 줄 번호 하나 때문에 두 항목이 된다. 곧 Task 3이 기대도 되는 것은 *같은 런을 다시
+ * 돌려도 안 쌓인다*이지 *같은 원인이면 절대 안 쌓인다*가 아니다: 같은 이슈의 **다른 라운드**는
+ * 새 목격이 맞다(그게 "몇 번이나 이랬나"라는 증거다).
  */
 function evidenceEntry(payload = {}, ref) {
   const c = payload?.causal ?? {};
@@ -92,11 +120,18 @@ function evidenceEntry(payload = {}, ref) {
   const when = [payload.stage, payload.round == null ? "" : `round ${payload.round}`].filter(Boolean).join(" / ");
   const head = `- **${ref}**${[when, where].filter(Boolean).length ? ` — ${[when, where].filter(Boolean).join(" · ")}` : ""}`;
   const lines = [head];
-  const reason = oneLine(payload.reason);
+  const reason = prose(payload.reason);
   if (reason) lines.push(`  ${reason}`);
   if (c.command) lines.push(`  명령: \`${oneLine(c.command)}\``);
   if (c.snippet) lines.push(snippetBlock(c.snippet));
-  return lines.join("\n");
+  return { text: lines.join("\n"), key: `${ref}|${when}` };
+}
+
+/** 이미 실린 머리 줄에서 같은 키를 되읽는다(`- **<ref>** — <when> · <where>` → `<ref>|<when>`). */
+function headKey(line) {
+  const m = /^- \*\*(.+?)\*\*(?:\s+—\s+(.*))?$/.exec(line);
+  if (!m) return null;
+  return `${m[1]}|${(m[2] ?? "").split(" · ")[0].trim()}`;
 }
 
 /**
@@ -123,13 +158,13 @@ export function renderUpstreamIssue({ fingerprint, tags = [], payload = {}, sour
     "",
     "## 무엇이 일어났나",
     "",
-    oneLine(payload.reason) || "(소견에 reason이 없다 — 아래 증거와 payload가 전부다.)",
+    prose(payload.reason) || "(소견에 reason이 없다 — 아래 증거와 payload가 전부다.)",
     "",
     ...facts,
     "",
     EVIDENCE_HEADING,
     "",
-    evidenceEntry(payload, from),
+    evidenceEntry(payload, from).text,
     "",
     PAYLOAD_HEADING,
     "",
@@ -146,12 +181,34 @@ export function renderUpstreamIssue({ fingerprint, tags = [], payload = {}, sour
   return { title: upstreamIssueTitle({ ...payload, fingerprint: payload?.fingerprint ?? fingerprint }), body, labels: [...UPSTREAM_LABELS] };
 }
 
-/** 본문에서 `## Payload`의 첫 JSON 펜스를 읽는다. 없거나 깨졌으면 null — 파싱 자체는 실패하지 않는다. */
+/**
+ * 절 제목·펜스는 **0열에서만** 읽는다(리뷰 must_fix 1 / should_fix 1). 이 모듈은 제 제목과 payload
+ * 펜스를 언제나 0열에 쓰고, 증거 스니펫은 언제나 두 칸 들여쓴다 — 그래서 "들여쓴 줄은 내용이고
+ * 0열의 줄만 구조다"가 이 본문의 규칙이다. `trim()`으로 비교하면 그 규칙이 무너져, 사람이 붙인 로그
+ * 안의 줄이 절 제목 행세를 한다.
+ */
+const at0 = (re) => (l) => re.test(l);
+const IS_EVIDENCE_HEADING = at0(/^##[ \t]+Evidence[ \t]*$/);
+const IS_PAYLOAD_HEADING = at0(/^##[ \t]+Payload[ \t]*$/);
+const IS_HEADING = at0(/^##[ \t]/);
+const IS_JSON_FENCE = at0(/^```json[ \t]*$/);
+const IS_FENCE = at0(/^```[ \t]*$/);
+
+/**
+ * **`## Payload` 절 아래의** 첫 JSON 펜스를 읽는다. 없거나 깨졌으면 null — 파싱 자체는 실패하지 않는다.
+ *
+ * 제목에 닻을 내리는 것이 핵심이다(리뷰 must_fix 1). 본문 처음부터 아무 ```json이나 주우면, JSON
+ * 리포트를 찍는 게이트의 출력이 증거 스니펫으로 실리는 순간 **그 로그의 JSON이 기계 payload 행세를
+ * 한다** — `parseUpstreamIssue`는 여전히 멀쩡한 객체를 돌려주므로 아무도 오류를 보지 못한 채 T3/T5가
+ * 엉뚱한 것을 읽는다. 증거가 덧붙을수록 그 확률은 올라간다.
+ */
 function parsePayloadBlock(body) {
   const lines = String(body).split("\n");
-  const open = lines.findIndex((l) => l.trim() === "```json");
+  const at = lines.findIndex(IS_PAYLOAD_HEADING);
+  if (at === -1) return null;
+  const open = lines.findIndex((l, i) => i > at && IS_JSON_FENCE(l));
   if (open === -1) return null;
-  const close = lines.findIndex((l, i) => i > open && l.trim() === "```");
+  const close = lines.findIndex((l, i) => i > open && IS_FENCE(l));
   if (close === -1) return null;
   try { return JSON.parse(lines.slice(open + 1, close).join("\n")); } catch { return null; }
 }
@@ -174,10 +231,10 @@ export function parseUpstreamIssue(body) {
 
 /** `## Evidence` 절의 범위 `[start, end)` — start는 제목 줄. 절이 없으면 null. */
 function evidenceRange(lines) {
-  const start = lines.findIndex((l) => l.trim() === EVIDENCE_HEADING);
+  const start = lines.findIndex(IS_EVIDENCE_HEADING);
   if (start === -1) return null;
   let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) if (/^##\s/.test(lines[i])) { end = i; break; }
+  for (let i = start + 1; i < lines.length; i++) if (IS_HEADING(lines[i])) { end = i; break; }
   return [start, end];
 }
 
@@ -194,26 +251,26 @@ export function evidenceEntries(body) {
  * 마커는 건드리지 않는다 — 첫 목격의 `from`이 그대로 남아야 "언제부터 이랬나"가 보인다. 첫 payload
  * 블록도 그대로 둔다(최초 증거는 나중 증거가 덮어쓸 것이 아니다).
  *
- * 같은 머리 줄이 이미 있으면 본문을 **그대로** 돌려준다 — retro가 같은 머지를 두 번 돌아도, 같은
- * 런이 재시도돼도 증거가 두 번 쌓이지 않는다(멱등).
+ * 같은 목격(=같은 `출처|스테이지/라운드`)이 이미 있으면 본문을 **그대로** 돌려준다 — retro가 같은
+ * 머지를 두 번 돌아도, 같은 런이 재시도돼도 증거가 두 번 쌓이지 않는다(멱등). 원인 파일의 줄 번호는
+ * 그 키에 들어가지 않는다(`evidenceEntry` 주석 참고).
  * `## Evidence` 절이 없는 본문(사람이 이슈 템플릿으로 연 이슈)에는 절을 만들어 붙인다.
  */
 export function appendEvidence(existingBody, payload = {}, ref) {
   const body = String(existingBody ?? "");
   const entry = evidenceEntry(payload, markerValue(ref) || sourceRef(payload?.repo, payload?.issue));
-  const head = entry.split("\n")[0];
   const lines = body.split("\n");
   const range = evidenceRange(lines);
 
   if (range) {
-    if (lines.slice(range[0] + 1, range[1]).some((l) => l === head)) return body;
+    if (lines.slice(range[0] + 1, range[1]).some((l) => headKey(l) === entry.key)) return body;
     const before = lines.slice(0, range[1]);
     while (before.length > range[0] + 1 && before[before.length - 1].trim() === "") before.pop();
-    return [...before, "", entry, "", ...lines.slice(range[1])].join("\n");
+    return [...before, "", entry.text, "", ...lines.slice(range[1])].join("\n");
   }
 
-  const payloadAt = lines.findIndex((l) => l.trim() === PAYLOAD_HEADING);
-  const section = [EVIDENCE_HEADING, "", entry, ""];
+  const payloadAt = lines.findIndex(IS_PAYLOAD_HEADING);
+  const section = [EVIDENCE_HEADING, "", entry.text, ""];
   if (payloadAt === -1) {
     const tail = [...lines];
     while (tail.length && tail[tail.length - 1].trim() === "") tail.pop();

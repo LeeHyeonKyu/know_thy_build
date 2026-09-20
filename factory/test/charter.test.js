@@ -327,3 +327,23 @@ test("test_20_human_merge_door_still_skips_the_two_the_charter_names", async () 
   expect(auto.ok, "자동 머지 문이 qa_manifest 다이제스트를 더 이상 요구하지 않는다 — 그러면 CHARTER의 '둘을 뺀 나머지는 자동 머지와 같다'도 뜻이 달라진다").toBe(false);
   expect(auto.reason).toBe(QA_EVIDENCE_NOT_BOUND);
 });
+
+// --- 피드백 루프 T6 — CHARTER의 `## 개선 이슈` 문단(ADR-027) ---
+
+test("템플릿 CHARTER가 두 개선 대상과 그 라우팅을 여전히 말한다 — ADR-027이 적어 둔 문단의 출처다", () => {
+  const tpl = readFileSync(TEMPLATE_CHARTER, "utf8");
+  expect(tpl).toContain("## 개선 이슈");
+  for (const fragment of [
+    "factory:harness",       // harness 소견이 서는 자리(사용 저장소)
+    "factory-improvement",   // ktb 소견이 서는 자리(upstream 저장소)
+    "[factory].upstream",    // 그 저장소를 가리키는 설정 키 — 없으면 코멘트로만 남는다
+    "backlog",               // 착지 라벨(스펙 §10 Q4 — 무엇을 먼저 고칠지는 사람이 고른다)
+    "ambiguous",             // 어느 쪽도 조용히 버리지 않는다
+  ]) {
+    expect(tpl, `templates/factory/docs/factory/CHARTER.md가 더 이상 "${fragment}"을(를) 말하지 않는다 — ADR-027이 기대는 문단이 사라졌다`).toContain(fragment);
+  }
+});
+
+test("KTB 자신의 CHARTER도 그 문단을 갖는다 — 이 저장소가 바로 그 이슈들이 착지하는 곳이다", () => {
+  expect(readFileSync(REPO_CHARTER, "utf8"), "docs/factory/CHARTER.md에 `## 개선 이슈`가 없다 — 루프가 제 저장소에 대해 먼저 보고할 드리프트다").toContain("## 개선 이슈");
+});
