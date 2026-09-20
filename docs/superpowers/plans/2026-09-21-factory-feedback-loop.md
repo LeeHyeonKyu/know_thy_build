@@ -21,6 +21,7 @@
 - **Mirrors regenerated once by the controller; never `factory init --upgrade` inside a task** (it clobbers factory-appended additive sections — KTB-57). Writers copy touched files into `.factory/`.
 - **Three transition locks hold.** No new field reaches `parseTransitionArgs`; producers are stages/retro only.
 - **Every task pins a regression from this session's live runs** (named per task) and adds the guard test.
+- **Fixtures must be produced by the real producer functions** (`selfGateRetryComment`, `transition.js`'s refusal marker, `gates.js` via `runGates` on a fake runner, `appendRunRecord`, `renderHandoff`), never hand-shaped — and a regression fixture for a real issue must use that issue's REAL comment/record text. T3's first round was green on shapes the producers cannot emit while routing was inverted; this constraint exists so T4/T5 cannot repeat it.
 - Commit trailers per the session's current attribution.
 
 ---
