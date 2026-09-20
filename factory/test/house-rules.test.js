@@ -131,6 +131,10 @@ test("NEVER_AUTOMATE globs feed the 'must…' list; a top-level CLAUDE.md is fol
   const s = buildHouseRules({ root, charter: loadCharter(root), harness: loadHarness(root) });
   // a NEVER_AUTOMATE **glob** (a token with / or *; `package.json`/`version` are prose, excluded by neverAutomateGlobs)
   expect(s).toContain(".github/workflows/publish.yml");
+  // pin the exclusion: prose tokens (no / or *) must NOT be surfaced as globs — a regression that
+  // starts treating them as globs would make every PR touching package.json look human-merge-only.
+  expect(s).not.toContain("package.json");
+  expect(s).not.toContain("version");
   expect(s).toContain("Use the dev config, never prod."); // CLAUDE.md content folded in
   expect(s).toContain("CLAUDE.md"); // and pointed at
 });
