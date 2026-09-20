@@ -124,4 +124,22 @@ export async function ensureHarnessIssue({ gh, issue, entries, pr = null }) {
   return { issue: number, created: true, title };
 }
 
+/**
+ * ADR-020 리뷰 효율 Task 8 (Structure G) — 이 피처 이슈를 막고 있는 **열린** `factory:harness` 이슈
+ * 번호(없으면 null). `ensureHarnessIssue`가 dedupe 키로 쓰는 바로 그 마커(`for=<n>`)로 찾는다:
+ * "피처 이슈 하나당 열린 하네스 이슈 하나"라는 그 계약 덕분에 이것이 "미해결 제품/하네스 의존성이
+ * 있는가"의 단일 진실이다. run-stage의 리뷰 진입 가드와 sweeper의 리뷰 재dispatch가 **같은** 판정을
+ * 쓰도록 여기 한 곳에 둔다(두 곳이 갈리면 한쪽만 억제해 회귀가 반만 막힌다).
+ *
+ * 하네스 이슈가 닫히면(사람이 PR을 머지하면) `state:open`이 그것을 더는 돌려주지 않으므로 자연히
+ * null이 된다 — 억제가 스스로 풀린다. **fail-safe는 호출자의 몫이다**: `gh.issueList`가 던지면 이
+ * 함수도 던지고, 억제하는 쪽(run-stage/sweeper)이 그것을 잡아 "억제하지 않음"으로 기운다(놓친 억제는
+ * 리뷰 한 라운드, 틀린 억제는 리뷰 가능한 이슈를 멈춰 세운다).
+ */
+export async function findOpenHarnessIssueFor({ gh, issue }) {
+  const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
+  const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
+  return found ? found.number : null;
+}
+
 export { HARNESS_LABEL };

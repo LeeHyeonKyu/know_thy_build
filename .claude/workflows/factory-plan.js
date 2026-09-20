@@ -10,14 +10,46 @@ export const meta = {
   ],
 };
 
+// The acceptance contract's check (Task 1 / Structure A): how a done_when is verified.
+// kind:"test" → ref is a test name Task 3 runs; "gate" → a gate name; "finish" → graded by the qa
+// manifest; "rubric" → reviewer-judged only, no self-runnable check.
+const CHECK = {
+  type: 'object',
+  required: ['kind', 'ref'],
+  properties: {
+    kind: { type: 'string', enum: ['test', 'gate', 'finish', 'rubric'] },
+    ref: { type: 'string' },
+  },
+};
+
+// R1 proposals stay loose — a role proposes what should be proved; the final contract is the
+// synthesizer's job (CONTRACT_ITEM below). `verify` is the legacy spelling of check{kind:"test"}.
 const DONE_WHEN_ITEM = {
   type: 'object',
-  required: ['id', 'text', 'verify', 'level'],
+  required: ['id', 'text', 'level'],
   properties: {
     id: { type: 'string' },
     text: { type: 'string' },
     verify: { type: 'string' },
+    check: CHECK,
+    rubric: { type: 'string' },
     level: { type: 'string', enum: ['unit', 'integration', 'e2e'] },
+  },
+};
+
+// The final plan's done_when — the acceptance contract, one artifact three stages consume (Task 1).
+// Every item carries how it is checked (`check`) and the one-line bar a reviewer applies (`rubric`).
+const CONTRACT_ITEM = {
+  type: 'object',
+  required: ['id', 'text', 'level', 'check', 'rubric'],
+  properties: {
+    id: { type: 'string' },
+    text: { type: 'string' },
+    verify: { type: 'string' },
+    check: CHECK,
+    rubric: { type: 'string' },
+    level: { type: 'string', enum: ['unit', 'integration', 'e2e'] },
+    covers: { type: 'array', items: { type: 'string' } },
   },
 };
 
@@ -57,7 +89,7 @@ const PLAN_V1 = {
   required: ['summary', 'done_when', 'files_expected', 'dissent_log', 'non_goals', 'open_risks'],
   properties: {
     summary: { type: 'string' },
-    done_when: { type: 'array', items: DONE_WHEN_ITEM },
+    done_when: { type: 'array', items: CONTRACT_ITEM },
     files_expected: { type: 'array', items: { type: 'string' } },
     dissent_log: {
       type: 'array',
@@ -80,20 +112,7 @@ const SKEPTIC_ADD = {
   required: ['risks', 'done_when'],
   properties: {
     risks: { type: 'array', items: { type: 'string' } },
-    done_when: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['id', 'text', 'verify', 'level'],
-        properties: {
-          id: { type: 'string' },
-          text: { type: 'string' },
-          verify: { type: 'string' },
-          level: { type: 'string', enum: ['unit', 'integration', 'e2e'] },
-          covers: { type: 'array', items: { type: 'string' } },
-        },
-      },
-    },
+    done_when: { type: 'array', items: CONTRACT_ITEM },
     dissent: {
       type: 'array',
       items: {
@@ -254,7 +273,23 @@ const planRules =
   `failure this factory has measured — recognition is not a contract.\n` +
   `3. done_when observes user-visible behaviour. It does not prescribe the shape of the test: no ` +
   `whitelists of paths or prefixes, no "must not appear anywhere", no required ordering of sections, ` +
-  `no regex over the repository's files — unless the issue itself asks for a guard.`;
+  `no regex over the repository's files — unless the issue itself asks for a guard.\n` +
+  `4. Every done_when carries how it is checked (\`check: {kind, ref}\` — kind is ` +
+  `test|gate|finish|rubric; for a test, ref is its \`test_${issue}_<slug>\` id; "rubric" means no ` +
+  `self-runnable check, reviewer-judged only) and the one-line bar a reviewer applies (\`rubric\`). ` +
+  `An item with neither a check nor a rubric is rejected as an incomplete acceptance contract.`;
+
+// Task 9 (Structure H, KTB-51) — the one-shot repair turn. When the deterministic validator rejected
+// the previous handoff, run-stage re-dispatches this workflow once with `loaded.plan_repair` set to
+// the exact reasons. The planner fixes precisely those (not a fresh re-plan) — this is the single
+// feedback turn the plan stage gets before a handoff that is still red escalates to a human.
+const planRepair = Array.isArray(loaded.plan_repair) ? loaded.plan_repair.filter((r) => typeof r === 'string' && r.trim()) : [];
+const repairDirective = planRepair.length
+  ? `\n\nREPAIR TURN (KTB-51): your previous plan handoff was rejected by the deterministic validator ` +
+    `for exactly these reasons:\n${planRepair.map((r) => `  - ${r}`).join('\n')}\n` +
+    `Fix precisely these and keep everything the validator did not object to. This is the one repair ` +
+    `turn — a handoff that still breaks a rule goes to a human.`
+  : '';
 
 if (mode === 'single') {
   // One opus planner writes the whole plan; one skeptic gets one pass at it. No cross-examination,
@@ -269,12 +304,13 @@ if (mode === 'single') {
     ? boundToMaturity(await once(() => agent(
         `${reading(planner)}\n\n` +
         `Issue #${issue} (tier ${tier}). Write the plan the builder will work from — the whole plan, ` +
-        `in one pass. done_when is the contract: each item verifiable by a named test of the form ` +
-        `test_${issue}_<slug>. files_expected is the repository paths the change honestly needs and no ` +
+        `in one pass. done_when is the acceptance contract: each item carries a \`check\` (how it is ` +
+        `verified — \`{kind, ref}\`, usually \`{kind:"test", ref:"test_${issue}_<slug>"}\`) and a ` +
+        `\`rubric\` (the one-line bar a reviewer applies). files_expected is the repository paths the change honestly needs and no ` +
         `more. non_goals names what this issue will not do, so review cannot widen it later. ` +
         `open_risks is what you saw and are not gating on; dissent_log is where a risk you are ` +
         `knowingly not resolving goes, each entry with an \`id\`, the \`role\` that would raise it and ` +
-        `a \`severity\`.\n\n${planRules}`,
+        `a \`severity\`.\n\n${planRules}${repairDirective}`,
         { agentType: planner.agentType, model: planner.model, label: `plan:${planner.name}`, schema: PLAN_V1 },
       ))())
     : null;
@@ -290,7 +326,8 @@ if (mode === 'single') {
       `Issue #${issue} (tier ${tier}). The plan, in full:\n${JSON.stringify(plan, null, 2)}\n\n` +
       `Attack it once. You cannot rewrite or delete anything in it — you can only add. Return: ` +
       `risks (what this plan does not see, one line each), done_when (ONLY items that turn a risk you ` +
-      `just named into a gate — give each a fresh id not already in the plan, and \`covers\` naming the ` +
+      `just named into a gate — give each a fresh id not already in the plan, a \`check\` ({kind, ref}) ` +
+      `and a \`rubric\`, and \`covers\` naming the ` +
       `dissent ids it answers), and dissent (risks you could not turn into a gate, each with an id, ` +
       `severity and the reason it stays open). The plan already has ${(plan.done_when || []).length} ` +
       `done_when items and the ceiling is ${maxDoneWhen} — if you have nothing that clears that bar, ` +
@@ -380,8 +417,9 @@ const synthesisReading =
   `then the spec at its \`spec_path\` if one is named, \`docs/TECHNICAL.md\` (if present — it may not ` +
   `exist yet, and that is not a finding), and your lessons file at ` +
   `\`.factory/lessons/plan-synthesizer.md\` (treat every entry as a checklist item). ` +
-  `Cite concrete repository paths. Every done_when needs a \`verify\` test id of the form ` +
-  `test_${issue}_<slug> and a \`level\` within \`harness.maturity\`: M0 → \`unit\` only, ` +
+  `Cite concrete repository paths. Every done_when needs a \`check\` ({kind, ref} — for a test, ` +
+  `ref is a test id of the form test_${issue}_<slug>), a \`rubric\` (the one-line reviewer bar), and a ` +
+  `\`level\` within \`harness.maturity\`: M0 → \`unit\` only, ` +
   `M1 → \`unit\` or \`integration\`, M2 → \`unit\`, \`integration\` or \`e2e\`. ` +
   `Answer with the English field names of your output schema.`;
 
@@ -390,12 +428,13 @@ let plan = r1.length > 0
       `${synthesisReading}\n\n` +
       `Issue #${issue} (tier ${tier}). Round 1 positions:\n${JSON.stringify(r1, null, 2)}\n\n` +
       `Round 2 cross-examination:\n${JSON.stringify(r2, null, 2)}\n\n` +
-      `Produce the single plan the builder will work from. done_when is the contract — each item ` +
-      `verifiable by a named test. files_expected starts from what the positions agree on. non_goals ` +
+      `Produce the single plan the builder will work from. done_when is the acceptance contract — each ` +
+      `item carries a \`check\` ({kind, ref} — how it is verified) and a \`rubric\` (the one-line bar a ` +
+      `reviewer applies). files_expected starts from what the positions agree on. non_goals ` +
       `names what this issue will not do, so review cannot widen it later. Every objection from round 2 ` +
       `that you did not resolve goes into dissent_log verbatim with the role that raised it (with an ` +
       `\`id\` and a \`severity\`) — deleting an objection is forging consensus, not reaching it.\n\n` +
-      `${planRules}`,
+      `${planRules}${repairDirective}`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))())
   : null;

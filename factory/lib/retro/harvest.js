@@ -216,6 +216,88 @@ function qaClaimStats(recs, sinceMs) {
   };
 }
 
+// ── Task 10 (Phase-2 gate instrumentation) ────────────────────────────────────────────────
+// 게이트가 관측 가능하려면(스펙 §7) retro가 세 가지를 이슈별·롤업으로 낼 수 있어야 한다:
+//   - rounds_per_issue: plan/implement 핸드오프 개수 + review 최대 라운드(기존 machinery).
+//   - escaped_defects: **이전 승인 뒤에** 나온 결함 — 이슈 이력에서 approve 판정(또는 `→ approved`
+//     전이)이 있은 **다음** 라운드의 must_fix. 승인과 같은 라운드의 must_fix(패널 분열)는 세지 않는다:
+//     정의는 "승인에 뒤이은 결함"이지 승인과 동시의 결함이 아니다. must_fix 핸드오프가 없고 승인 뒤
+//     `→ rework` 전이만 있으면 그 rework 수를 대신 센다(핸드오프 데이터가 없는 회차의 대체 신호).
+//   - reverts/revert_rate: 머지된 이슈가 나중에 되돌려진 비율. 되돌림은 factory 이슈로만 관측한다
+//     (revert 라벨 이슈, 또는 `Revert "…"`/`revert:` 제목의 후속 이슈가 `#N`으로 그 이슈를 가리킴).
+//     factory 이슈 밖에서 커밋만 revert한 경우는 관측 불가 — 그때 revert_rate는 관측된 것만의 비율이고,
+//     창에 머지가 없으면(나눌 분모가 없으면) 0이 아니라 **null**이다(거짓 0.00과 구별한다).
+
+const isApproveVerdict = (v) => v?.verdict === "approve" || v?.verdict === "approved";
+const rejectMustFixCount = (verdicts) =>
+  (Array.isArray(verdicts) ? verdicts : []).reduce(
+    (n, v) => n + (v?.verdict === "reject" && Array.isArray(v.must_fix) ? v.must_fix.filter((m) => m?.claim || m?.id).length : 0),
+    0,
+  );
+
+/** plan/implement 핸드오프 개수와 review 최대 라운드(기존 review_rounds_avg와 같은 규칙, 라운드 필드가 없으면 핸드오프 수). */
+function roundsFor(handoffs) {
+  const plan = handoffs.filter((h) => h.stage === "plan").length;
+  const implement = handoffs.filter((h) => h.stage === "implement").length;
+  const reviewHs = handoffs.filter((h) => h.stage === "review");
+  const maxRound = reviewHs.reduce((mx, h) => (typeof h.data?.round === "number" ? Math.max(mx, h.data.round) : mx), 0);
+  return { plan, implement, review: maxRound || reviewHs.length };
+}
+
+/**
+ * 이 이슈에서 **이전 승인 뒤에** 나온 결함 수. 리뷰 핸드오프와 `→ approved`/`→ rework` 전이를
+ * 시간순으로 걸어, 첫 승인 신호 이후에 나온 must_fix finding 개수를 센다. must_fix가 없고 승인 뒤
+ * rework 전이만 있으면 그 개수를 대신 쓴다. 순수 함수 — 코멘트/핸드오프만 본다.
+ */
+function escapedDefectsFor(handoffs, comments) {
+  const events = [];
+  for (const h of handoffs) {
+    if (h.stage !== "review") continue;
+    const verdicts = Array.isArray(h.data?.verdicts) ? h.data.verdicts : [];
+    events.push({
+      at: h.createdAt,
+      round: typeof h.data?.round === "number" ? h.data.round : 0,
+      approve: verdicts.some(isApproveVerdict),
+      mustFix: rejectMustFixCount(verdicts),
+      kind: "review",
+    });
+  }
+  for (const c of comments || []) {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (!m) continue;
+    if (m[2] === "factory:approved") events.push({ at: c?.createdAt, round: Infinity, approve: true, mustFix: 0, kind: "approved-tx" });
+    else if (m[2] === "factory:rework") events.push({ at: c?.createdAt, round: Infinity, approve: false, mustFix: 0, rework: true, kind: "rework-tx" });
+  }
+  events.sort((a, b) => {
+    const ta = Date.parse(a.at), tb = Date.parse(b.at);
+    if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta - tb;
+    return (a.round || 0) - (b.round || 0);
+  });
+  let approved = false;
+  let escaped = 0;
+  let reworkAfter = 0;
+  for (const e of events) {
+    if (!approved) { if (e.approve) approved = true; continue; }
+    if (e.approve) continue;                                            // 또 다른 승인 — 문제없다
+    // 같은 결함이 승인 뒤 여러 라운드(R3+R4)에 걸쳐 다시 걸리면 라운드마다 센다 — false-high(안전한
+    // 방향)라 그대로 둔다. 게이트는 "0이었는가"를 보므로 과소가 아니라 과다로 기우는 편이 옳다.
+    if (e.kind === "review" && e.mustFix > 0) escaped += e.mustFix;
+    else if (e.kind === "rework-tx") reworkAfter += 1;
+  }
+  return escaped > 0 ? escaped : reworkAfter;
+}
+
+const REVERT_LABEL = /^(?:factory:)?revert$/i;
+// git 기본 revert 커밋 메시지(`Revert "…"`)와 사람이 쓰는 `revert:`/`revert ` 접두 모두 잡는다.
+const REVERT_TITLE = /^\s*revert\b/i;
+const isRevertIssue = (issue) =>
+  (Array.isArray(issue?.labels) && issue.labels.some((l) => REVERT_LABEL.test(String(labelName(l) ?? "")))) ||
+  REVERT_TITLE.test(String(issue?.title ?? ""));
+// `#N` 참조는 제목과 **본문** 둘 다에서 읽는다 — factory revert 이슈가 되돌린 이슈를 본문에만 적는
+// 경우(git revert 커밋 메시지 본문의 "This reverts commit …, #N")를 놓치지 않는다(`issueList`는 body를 싣는다).
+const referencedIssues = (issue) =>
+  [...`${issue?.title ?? ""}\n${issue?.body ?? ""}`.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+
 /**
  * (role,text) 키로 합치며 `runs`를 유니온한다 — 같은 claim/objection이 다른 이슈에서 또 나오면 누적.
  * 키는 항상 **원문 그대로의 텍스트 일치**다(정규화 없음 — 대소문자·표현을 통일하거나 같은 뜻의 다른
@@ -256,8 +338,15 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
   const citations = {};                                               // 감사 M11 — { role: { lessonId: n } }
   let mergedCount = 0;
   let reviewRoundsSum = 0;
+  let planRoundsSum = 0;
+  let implementRoundsSum = 0;
   const rejectsByRole = {};
   const verdictSets = [];
+  const roundsPerIssue = [];                                            // Task 10 — 이슈별 라운드(창)
+  const escapedDetail = [];                                             // Task 10 — 이슈별 escaped 결함(창)
+  let escapedTotal = 0;
+  const mergedNumbers = new Set();                                      // 창 안 머지(창 revert_rate의 분모)
+  const allMergedNumbers = new Set();                                   // 스냅샷 전체의 머지 — 뒤늦은 revert의 귀속 대상
 
   for (const issue of issues || []) {
     const comments = byIssue.get(issue.number) || [];
@@ -277,11 +366,24 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
     // 쓴다. delta는 이슈 단위다: 한 이슈의 리뷰 라운드는 그 이슈가 병합되는 순간에 전부 세는 것이지
     // retro 사이를 걸쳐 나눠 세지 않는다(같은 라운드가 두 retro에 걸쳐 다시 세어질 일도, 어느 retro
     // 에도 안 세어질 일도 없다 — 이슈가 병합되는 순간은 항상 정확히 한 번이다).
+    // 머지 사실은 창과 무관하게(afterSince 없이) `allMergedNumbers`에 담는다 — 뒤늦게 관측된 revert가
+    // 옛 창의 머지에 귀속되려면 그 머지 번호가 여기 있어야 한다(revert는 지연 지표다).
+    if (isMerged(issue, comments)) allMergedNumbers.add(issue.number);
     if (isMerged(issue, comments) && afterSince(issue.closedAt, sinceMs)) {
       mergedCount += 1;
+      mergedNumbers.add(issue.number);
       const reviewHandoffs = handoffs.filter((h) => h.stage === "review");
       const maxRound = reviewHandoffs.reduce((mx, h) => (typeof h.data?.round === "number" ? Math.max(mx, h.data.round) : mx), 0);
       reviewRoundsSum += maxRound;
+      // Task 10 — 이슈별 라운드와 escaped 결함. review는 위 maxRound와 같은 규칙,
+      // plan/implement는 핸드오프 수. escaped는 승인 뒤 must_fix(위 escapedDefectsFor).
+      const r = roundsFor(handoffs);
+      roundsPerIssue.push({ issue: issue.number, plan: r.plan, implement: r.implement, review: r.review });
+      planRoundsSum += r.plan;
+      implementRoundsSum += r.implement;
+      const esc = escapedDefectsFor(handoffs, comments);
+      if (esc) escapedDetail.push({ issue: issue.number, count: esc });
+      escapedTotal += esc;
       for (const h of reviewHandoffs) {
         for (const v of Array.isArray(h.data?.verdicts) ? h.data.verdicts : []) {
           if (v?.verdict === "reject") rejectsByRole[v.role] = (rejectsByRole[v.role] || 0) + 1;
@@ -296,6 +398,23 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
   const usage = windowUsage(recs, sinceMs);
   const overlap = overlapFrom(verdictSets);
 
+  // Task 10 — revert 판정: revert 이슈(라벨 또는 `Revert "…"` 제목)가 `#N`으로 가리키는 **머지된**
+  // 이슈들. 귀속은 창이 아니라 **스냅샷 전체의 머지**(`allMergedNumbers`)에 대고 한다 — revert는 대개
+  // 그 머지의 창보다 늦게 도착하므로(그 머지의 창에는 revert 이슈가 아직 없고, revert의 창에는 그 머지가
+  // 이미 afterSince 밖이다) 창 안 머지에만 맞추면 둘 중 어느 창에서도 세어지지 않는다(false-low). 그래서
+  // `reverted_issues`(관측된 모든 되돌린 머지)를 창에 실어 누적 상태가 이슈 번호로 유니온하게 하고
+  // (accumulateStats), 그 유니온 크기로 누적 revert_rate를 다시 낸다 — 뒤늦은 revert가 제 머지에 착지한다.
+  // factory 이슈 밖의 커밋 revert는 관측하지 못한다(위 주석 참조).
+  const revertedAll = new Set();
+  for (const issue of issues || []) {
+    if (!isRevertIssue(issue)) continue;
+    for (const ref of referencedIssues(issue)) {
+      if (ref !== issue.number && allMergedNumbers.has(ref)) revertedAll.add(ref);
+    }
+  }
+  // 창 열은 이번 창에 머지된 것 중 되돌린 것만 센다(창 revert_rate의 분자). 누적은 유니온이 맡는다.
+  const revertedInWindow = [...revertedAll].filter((n) => mergedNumbers.has(n));
+
   return {
     candidates: {
       lessons: lessons.map(dropKey),
@@ -309,6 +428,19 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
     stats: {
       merged: mergedCount,
       review_rounds_avg: mergedCount ? round2(reviewRoundsSum / mergedCount) : 0,
+      // Task 10 (Phase-2 gate) — 이슈별 라운드/escaped 결함/revert. plan·implement는 review와 같은
+      // 병합 가중 평균으로 롤업하고(accumulateStats), 이슈별 상세는 창에만 실어 `_retro.md`에 보인다.
+      plan_rounds_avg: mergedCount ? round2(planRoundsSum / mergedCount) : 0,
+      implement_rounds_avg: mergedCount ? round2(implementRoundsSum / mergedCount) : 0,
+      rounds_per_issue: roundsPerIssue,
+      escaped_defects: escapedTotal,
+      escaped_defects_detail: escapedDetail,
+      reverts: revertedInWindow.length,
+      // 관측된 모든 되돌린 머지(창 안이든 옛 창이든) — 누적 상태가 이슈 번호로 유니온해 뒤늦은 revert를
+      // 제 머지에 착지시키는 씨앗이다. 창 `reverts`는 이 중 이번 창 머지에 속한 것만이다.
+      reverted_issues: [...revertedAll].sort((a, b) => a - b),
+      // 나눌 머지가 없으면 0이 아니라 null — "관측된 되돌림 0"과 "잴 것이 없음"을 가른다(우아한 저하).
+      revert_rate: mergedCount ? round2(revertedInWindow.length / mergedCount) : null,
       rejects_by_role: rejectsByRole,
       // P2-13 — reject 수는 "얼마나 막았는가"이고, 이 셋은 "서로 다른 것을 보았는가"다.
       review_runs: overlap.review_runs,

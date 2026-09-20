@@ -97,6 +97,27 @@ test("renderHandoff plan: an empty debate/dissent renders no empty headings and 
   expect(human).not.toContain("**토론**");
 });
 
+/**
+ * 리뷰 효율 Task 1 (Structure A) — done_when이 수용 계약(`check`+`rubric`)을 실으면 기계 블록으로 그대로
+ * 왕복하고, 사람용 줄은 check.ref로 렌더된다. `verify`만 있는 옛 항목은 렌더도 파싱도 바뀌지 않는다
+ * (파서는 새 요구를 게이트하지 않는다 — 게이트는 verify-stage 검증기의 몫이다).
+ */
+test("renderHandoff plan: a done_when carrying check+rubric round-trips, and a legacy verify-only item still renders", () => {
+  const data = {
+    issue: 7, tier: "standard",
+    done_when: [
+      { id: "dw1", text: "warning shows before the command", level: "unit", check: { kind: "test", ref: "test_7_warn" }, rubric: "the warning precedes the command block" },
+      { id: "dw2", text: "CSV has a header row", verify: "test_7_csv", level: "unit" },   // 옛 항목: check/rubric 없음
+    ],
+    files_expected: [], dissent_log: [], non_goals: [], open_risks: [],
+  };
+  const { human, h } = roundTrip("plan", 7, data);
+  expect(h.data).toEqual(data);                                              // 기계 블록은 손대지 않는다 — 옛 항목도 그대로 파싱
+  expect(human).toContain("**done_when**");
+  expect(human).toContain("dw1 · warning shows before the command · test_7_warn@unit");   // check.ref로 렌더
+  expect(human).toContain("dw2 · CSV has a header row · test_7_csv@unit");                // 옛 verify는 그대로
+});
+
 test("renderHandoff implement: PR number, verifier verdict with finding count, tests_added", () => {
   const data = {
     schema: "factory.implement.v1", issue: 42, pr: 31, head_sha: "0123456789abcdef0123456789abcdef01234567",

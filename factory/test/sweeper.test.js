@@ -102,6 +102,47 @@ test("sweep: an issue stuck on factory:ready past staleMinutes is dispatched to 
   expect(second.some((a) => a.kind === "stalled-restart")).toBe(false);
 });
 
+// Task 8 (Structure G) — KTB #3 spec1×2 regression at the sweeper's review re-dispatch. A stalled
+// awaiting-review issue whose feature is blocked on an OPEN factory:harness issue must NOT be
+// re-dispatched to review: that round would just re-confirm the identical must_fix, because the block is
+// in the harness, not the deliverable. (The run-stage review guard would park it anyway; suppressing here
+// saves the wasted workflow run.) Detection is the single source of truth used by run-stage too: an open
+// factory:harness issue whose body marker `for=<feature>` points at this issue.
+test("sweep: a stalled awaiting-review issue blocked on an open harness issue is not re-dispatched to review", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:awaiting-review" ? [{ number: 3 }] : [])),
+    comments: vi.fn(async () => [TRANSITION("factory:awaiting-review", "2026-09-11T00:10:00Z"), ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(),
+    issueList: vi.fn(async ({ labels, state }) => (labels?.[0] === "factory:harness" && state === "open"
+      ? [{ number: 36, body: "<!-- factory-harness-request for=3 -->\nBlocks: #3" }] : [])),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();             // no restart marker spent either
+  expect(actions).toContainEqual({ kind: "stalled-restart-skipped", issue: 3, stage: "review", label: "factory:awaiting-review", reason: "blocked on harness issue #36" });
+});
+
+// The block-clears / fail-safe direction: with no open harness issue for this feature (e.g. the human
+// merged and closed the harness PR) the stalled review is re-dispatched as usual — a missed suppression
+// costs one review round, a wrong one strands a reviewable issue, so we only suppress when we are sure.
+test("sweep: a stalled awaiting-review issue with no open harness dependency is dispatched to review", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:awaiting-review" ? [{ number: 3 }] : [])),
+    comments: vi.fn(async () => [TRANSITION("factory:awaiting-review", "2026-09-11T00:10:00Z"), ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(),
+    issueList: vi.fn(async () => []),                     // harness issue closed → nothing open for #3
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "review", issue: 3 });
+  expect(actions).toContainEqual({ kind: "stalled-restart", issue: 3, stage: "review", label: "factory:awaiting-review" });
+});
+
 test("sweep: a fresh factory:ready transition, and one whose stage is alive (fresh heartbeat), are left alone", async () => {
   const fresh = {
     searchIssues: async (l) => (l === "factory:ready" ? [{ number: 2 }] : []),

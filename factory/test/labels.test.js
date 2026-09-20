@@ -31,6 +31,11 @@ test("graph edges from §3.2", () => {
   expect(canTransition("factory:awaiting-review", "factory:approved")).toBe(true);
   expect(canTransition("factory:awaiting-review", "factory:rework")).toBe(true);
   expect(canTransition("factory:awaiting-review", "factory:blocked")).toBe(true);   // review gates BLOCKED
+  // 리뷰 효율 Task 8 (Structure G): 리뷰 진입 가드가 이 피처를 막는 열린 harness 이슈를 발견하면
+  // 여기 주차한다(KTB-23의 in-progress → needs-info 주차와 같은 계열, sweepHarnessUnpark가 복귀시킨다).
+  // 이 엣지가 없으면 park 전이가 그래프에 거부돼 runStage가 2로 죽는다 — 다른 모든 awaiting-review 엣지가
+  // 여기 열거돼 있으므로 이것도 반드시 핀으로 고정한다.
+  expect(canTransition("factory:awaiting-review", "factory:needs-info")).toBe(true);   // Task 8 harness park
   expect(canTransition("factory:rework", "factory:in-progress")).toBe(true);
   expect(canTransition("factory:rework", "factory:needs-human")).toBe(true);
   expect(canTransition("factory:approved", "factory:merged")).toBe(true);

@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { verifyStage, hitApiError, apiErrorReason } from "../lib/verify-stage.js";
+import { verifyStage, hitApiError, apiErrorReason, deriveReworkPins } from "../lib/verify-stage.js";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -79,6 +79,35 @@ test("plan validator: a medium-or-worse dissent no done_when covers is invalid",
   expect(covered.ok).toBe(true);
 });
 
+/**
+ * Task 9 (Structure H, KTB-51) — the plan validator's machine-checkable reasons ride out on their own
+ * field `planRepair`, so run-stage can tell a repairable plan-contract defect from every other failure
+ * (schema/roster/api). Named regression KTB #18 plan R1: dissents d2/d3 left uncovered.
+ */
+test("plan validator: planRepair carries the machine-checkable reasons (KTB #18 plan R1: d2/d3 uncovered)", () => {
+  const dissent = [
+    { id: "d2", role: "skeptic", severity: "high", objection: "the migration is not idempotent", resolution: "unresolved — proceeding" },
+    { id: "d3", role: "architect", severity: "medium", objection: "no rollback path", resolution: "unresolved — proceeding" },
+  ];
+  const bad = verifyPlan(planFix({ dissent_log: dissent }));
+  expect(bad.ok).toBe(false);
+  expect(bad.planRepair).toEqual(["dissent without done_when: d2, d3"]);
+  // the same strings are also in reasons, and here they are the ONLY reason — so run-stage sees a
+  // purely machine-checkable failure it may repair (v.reasons.length === v.planRepair.length).
+  expect(bad.reasons).toEqual(bad.planRepair);
+
+  // a clean plan carries no planRepair — the field is null, not an empty array.
+  const good = verifyPlan(planFix({
+    dissent_log: dissent,
+    done_when: [
+      { id: "dw1", text: "the migration re-run is a no-op", verify: "test_7_idem", level: "unit", covers: ["d2"] },
+      { id: "dw2", text: "a rollback restores the prior schema", verify: "test_7_rollback", level: "unit", covers: ["d3"] },
+    ],
+  }));
+  expect(good.ok).toBe(true);
+  expect(good.planRepair).toBeNull();
+});
+
 test("plan validator: dissent with no severity still needs a done_when; low severity does not", () => {
   const noSeverity = verifyPlan(planFix({ dissent_log: [{ role: "skeptic", objection: "o", resolution: "unresolved — proceeding" }] }));
   expect(noSeverity.reasons.join("; ")).toMatch(/dissent without done_when: d1/);   // id 없는 항목은 위치로 d<n>
@@ -117,6 +146,120 @@ test("plan validator: the other guard heuristics — ordering, regex-over-the-re
   expect(reasonFor("the test walks every file in the repository and checks the header")).toMatch(/guard-shaped done_when: dw1/);
   // 사용자가 보는 행동을 관측하는 done_when은 걸리지 않는다.
   expect(reasonFor("GET /healthz responds 200 with Cache-Control: no-store")).not.toMatch(/guard-shaped/);
+});
+
+/**
+ * 리뷰 효율 Task 1 (Structure A) — 수용 계약(acceptance contract). 모든 done_when은 그것이 **어떻게
+ * 확인되는지**(`check {kind, ref}`)와 리뷰어가 적용할 **한 줄 기준**(`rubric`) 중 적어도 하나를 지녀야
+ * 한다. 둘 다 없는 항목은 계약이 아니라 소망이다 — 구현자는 스스로 확인할 것이 없고(Task 3), 리뷰어는
+ * 공유된 기준이 없다(Task 7). 검증기는 그런 항목을 `acceptance contract incomplete: <id>`로 거절한다.
+ * `verify`(테스트 id)는 `check {kind:"test"}`의 옛 철자이므로, 그 하나만 있는 옛 핸드오프도 계약을 갖춘
+ * 것으로 친다 — 새 요구를 집행하는 것은 파서가 아니라 이 검증기다(옛 핸드오프는 그대로 파싱된다).
+ */
+test("plan validator: a done_when with neither check nor rubric is an incomplete acceptance contract", () => {
+  const bad = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "the export streams to disk", level: "unit" }] }));
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw9/);
+
+  // 명시적 check을 실은 새 항목은 rubric도 함께 지녀야 완결이다. rubric만으로도(rubric-only 경로) 통과한다.
+  const withCheck = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "test", ref: "test_7_export" }, rubric: "the reviewer confirms the stream is used" }] }));
+  expect(withCheck.ok).toBe(true);
+  const withRubric = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "the warning appears before the command block" }] }));
+  expect(withRubric.ok).toBe(true);
+});
+
+/**
+ * should_fix #1 — 새 항목(명시적 `check`)은 rubric도 반드시 지닌다. 검증기가 모든 핸드오프의 실제
+ * 게이트이므로(재종합·수리 턴·손편집은 emission 스키마를 안 거친다), Task 7 리뷰어가 채점할 기준을
+ * 여기서 보장한다. 옛 `verify`-only 항목은 rubric 없이 그대로 통과한다(back-compat).
+ */
+test("plan validator: a new-style item (explicit check) with an empty/absent rubric is rejected; legacy verify-only stays rubric-free", () => {
+  const absent = verifyPlan(planFix({ done_when: [{ id: "dw5", text: "t", level: "unit", check: { kind: "test", ref: "test_7_x" } }] }));
+  expect(absent.ok).toBe(false);
+  expect(absent.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw5 — check present but rubric missing/);
+
+  const empty = verifyPlan(planFix({ done_when: [{ id: "dw5", text: "t", level: "unit", check: { kind: "gate", ref: "lint" }, rubric: "   " }] }));
+  expect(empty.ok).toBe(false);
+  expect(empty.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw5 — check present but rubric missing/);
+
+  // 옛 핸드오프: verify만, check/rubric 없음 — 그대로 통과한다.
+  expect(verifyPlan(planFix({ done_when: [{ id: "dw5", text: "t", level: "unit", verify: "test_7_x" }] })).ok).toBe(true);
+});
+
+test("plan validator: a legacy verify (a test id) counts as the check — old handoffs without check/rubric still pass", () => {
+  // planFix의 기본 done_when은 verify(test_7_create)만 있고 check/rubric은 없다 — 그래도 계약이 완결이다.
+  expect(verifyPlan(planFix()).ok).toBe(true);
+});
+
+test("plan validator: a check.kind:test whose ref is empty or malformed is rejected (Task 3 must be able to run it)", () => {
+  const empty = verifyPlan(planFix({ done_when: [{ id: "dw3", text: "t", level: "unit", check: { kind: "test", ref: "" }, rubric: "graded by the reviewer" }] }));
+  expect(empty.ok).toBe(false);
+  expect(empty.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw3/);
+  const malformed = verifyPlan(planFix({ done_when: [{ id: "dw3", text: "t", level: "unit", check: { kind: "test", ref: "run the export by hand" } }] }));
+  expect(malformed.ok).toBe(false);
+  expect(malformed.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw3/);
+});
+
+/**
+ * 회귀 핀(데모 #2 9라운드의 단일 원인, 감사 Task 9): 수용 계약 규칙을 **덧붙였지** 기존 규칙을 대체하지
+ * 않았다. medium 이상 dissent를 done_when이 짚지 못하면, 그 done_when이 계약을 온전히 갖췄더라도
+ * 여전히 `dissent without done_when`으로 실패한다.
+ */
+test("plan validator regression: a medium+ dissent left uncovered STILL fails with dissent without done_when (rule intact)", () => {
+  const dissent = [{ id: "d1", role: "skeptic", severity: "high", objection: "npm start never touches pg", resolution: "unresolved — proceeding" }];
+  const bad = verifyPlan(planFix({
+    dissent_log: dissent,
+    done_when: [{ id: "dw1", text: "the export streams to disk", level: "unit", check: { kind: "test", ref: "test_7_stream" }, rubric: "graded by the reviewer" }],
+  }));
+  expect(bad.ok).toBe(false);
+  expect(bad.reasons.join("; ")).toMatch(/dissent without done_when: d1/);
+});
+
+/**
+ * ── 리뷰 효율 Task 5 (Structure D) — 회귀 핀(regression pins) ────────────────────────────────
+ * `→ rework`에서 리뷰어 must_fix 하나가 carried **pin** `{id, guard, text}`이 된다. guard는 **꾸며내지
+ * 않는다**(spec §4.D / §9 Q5): 그 must_fix가 수용 계약(Task 1)의 done_when에 연결되고 그 done_when의
+ * `check`이 **돌릴 수 있는 테스트**일 때만 guard = 그 check. 그 외에는 `guard:null` → advisory 산문 핀.
+ */
+test("Task 5: deriveReworkPins — a must_fix linked to a done_when whose contract check is a test carries that guard; a prose must_fix carries guard:null", () => {
+  const doneWhen = [
+    { id: "dw1", text: "POST /notes returns 201", level: "unit", check: { kind: "test", ref: "test_7_create" }, rubric: "creates a note" },
+    { id: "dw2", text: "the page reads well", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "reads well" },
+  ];
+  const mustFix = [
+    { id: "dw1", where: "src/notes.js", claim: "create returns 500 on empty body", evidence: "", by: "correctness" },
+    { id: "mf-prose", where: "README.md", claim: "the heading is misleading", evidence: "", by: "spec-conformance" },
+  ];
+  const pins = deriveReworkPins({ mustFix, doneWhen });
+  const guarded = pins.find((p) => p.id === "dw1");
+  expect(guarded.guard).toEqual({ kind: "test", ref: "test_7_create" });
+  expect(guarded.text).toContain("create returns 500");
+  // dw2 is rubric-only (reviewer-judged) — a must_fix under it is never a guard.
+  const prose = pins.find((p) => p.id === "mf-prose");
+  expect(prose.guard).toBeNull();
+  expect(prose.text).toContain("heading is misleading");
+});
+
+test("Task 5: a guard links via done_when.covers and via a test name named in must_fix.where; legacy verify counts; rubric-only is never a guard", () => {
+  const doneWhen = [
+    { id: "dw3", text: "x", level: "unit", check: { kind: "test", ref: "test_7_stream" }, rubric: "r", covers: ["risk-1"] },
+    { id: "dw4", text: "y", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "r" },
+    { id: "dw5", text: "z", level: "unit", verify: "test_7_legacy" },   // 옛 철자 — check{kind:test}과 같다
+  ];
+  // (1) covers link: the must_fix id is covered by dw3.
+  expect(deriveReworkPins({ mustFix: [{ id: "risk-1", where: "w", claim: "c" }], doneWhen })[0].guard).toEqual({ kind: "test", ref: "test_7_stream" });
+  // (2) the must_fix.where names the test name of a contract check.
+  expect(deriveReworkPins({ mustFix: [{ id: "mfX", where: "regressed test_7_stream in src/s.js", claim: "c" }], doneWhen })[0].guard).toEqual({ kind: "test", ref: "test_7_stream" });
+  // (3) legacy verify is the old spelling of check{kind:test} — id link picks it up.
+  expect(deriveReworkPins({ mustFix: [{ id: "dw5", where: "w", claim: "c" }], doneWhen })[0].guard).toEqual({ kind: "test", ref: "test_7_legacy" });
+  // (4) a rubric-only contract → no guard even when the id matches (do NOT fabricate a guard).
+  expect(deriveReworkPins({ mustFix: [{ id: "dw4", where: "w", claim: "c" }], doneWhen })[0].guard).toBeNull();
+  // (5) no acceptance contract at all → every pin is advisory (no fabricated guard).
+  expect(deriveReworkPins({ mustFix: [{ id: "dw3", where: "w", claim: "c" }], doneWhen: [] })[0].guard).toBeNull();
+  // (6) nit 1 — the where-names-ref link is a WHOLE-TOKEN match: a `test_7` ref must NOT link to a
+  // `where` that only names the longer `test_7_create` (substring false-link).
+  const prefix = [{ id: "dwP", text: "x", level: "unit", check: { kind: "test", ref: "test_7" }, rubric: "r" }];
+  expect(deriveReworkPins({ mustFix: [{ id: "mfY", where: "broke test_7_create", claim: "c" }], doneWhen: prefix })[0].guard).toBeNull();
 });
 
 test("plan validator does not run for other stages", () => {

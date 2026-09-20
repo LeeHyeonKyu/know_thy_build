@@ -6,7 +6,7 @@ import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
-import { commentsSinceRequeue } from "../lib/retro/issue-comments.js";
+import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
 import { renderHandoff, parseHandoffs } from "../lib/handoff.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -122,6 +122,283 @@ test("implement stage moves to in-progress after the handoff check, then to awai
   expect(transition.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ to: "factory:awaiting-review" }));
 });
 
+/**
+ * ── Structure B (리뷰 효율 Task 3) — the pre-handoff self-gate at the implement stage ──────────
+ *
+ * COST NOTE (regression the plan pins): the self-gate reuses the gates result the stage ALREADY
+ * computed (it is handed `d.selfGate({ gates })`, never re-runs the gate commands) and grades the
+ * qa manifest the runner already reads — so a self-gate run is CHEAPER than a review round, which
+ * would dispatch the full LLM reviewer panel. A red deterministic check caught here never spends a
+ * review round (KTB #18 R3 finish() regression; own-cal R1 cf1 fail-open guard).
+ */
+const selfGateDeps = (over = {}) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+  buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }),
+  resetAgentsLog: async () => {}, claudeP: async () => ({ is_error: false, result: "{}" }),
+  gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
+  verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: "a".repeat(40) } }), writeHandoff: vi.fn(async () => {}),
+  selfGateRetry: async () => ({ attempt: 1 }),   // default: the first retry (a fresh head)
+  syncStageArtifact: () => {},
+  runRecord: () => {}, release: async () => {},
+  ...over,
+});
+
+// KTB #18 R3 + own-cal R1 regression: an ok:false self-gate must NOT reach factory:awaiting-review;
+// the FIRST RED on a head is one bounded retry (→ planned), carrying its findings.
+test("implement: an ok:false self-gate blocks the awaiting-review handoff and records the findings (attempt 1 → planned)", async () => {
+  const lines = [];
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const retried = [];
+  const deps = selfGateDeps({
+    transition, runRecord: (l) => lines.push(...l),
+    selfGateRetry: async ({ head, findings }) => { retried.push({ head, findings }); return { attempt: 1 }; },
+    selfGate: async ({ gates }) => {
+      expect(gates).toEqual(expect.objectContaining({ status: "GREEN" }));   // reuses the computed gates
+      return { ok: false, ranChecks: ["gates", "mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing under mutation (string in src/x.js)" }] };
+    },
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps, runnerId: "r1" })).toBe(0);
+  const targets = transition.mock.calls.map((c) => c[0].to);
+  expect(targets).not.toContain("factory:awaiting-review");                  // the whole point
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:planned");        // one bounded retry
+  // the retry marker was keyed on the head and carries the blocking findings for the next builder.
+  expect(retried).toHaveLength(1);
+  expect(retried[0].head).toBe("a".repeat(40));
+  expect(retried[0].findings[0].detail).toContain("survivor");
+  expect(lines.some((l) => /self-gate: gates\+mutation → BLOCKED — attempt 1 → factory:planned/.test(l))).toBe(true);
+});
+
+// The BOUND: a second RED on the SAME head (attempt ≥ 2) escalates to needs-human, not a third planned.
+test("implement: a second self-gate RED on the same head escalates to needs-human, not another planned", async () => {
+  const lines = [];
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = selfGateDeps({
+    transition, runRecord: (l) => lines.push(...l),
+    selfGateRetry: async () => ({ attempt: 2 }),   // the marker counter already saw one retry for this head
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing" }] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps, runnerId: "r1" })).toBe(0);
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  expect(transition.mock.calls.at(-1)[0].reason).toContain("unresolved after one retry");
+});
+
+// A genuinely new commit advances the head → the marker counter resets → one retry again (proved via
+// the REAL countSelfGateRetries over a shared comment store, so the head-keying is exercised end to end).
+test("implement: a self-gate RED on a NEW head resets to one retry (head-keyed counter)", async () => {
+  const store = [];   // a fake issue-comment store shared across two runs
+  const gh = { comments: async () => store.map((body) => ({ body })), comment: async (_n, body) => { store.push(body); } };
+  const mk = (head) => selfGateDeps({
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: head } }),
+    // the production dep, exercising the real marker counter over the shared store.
+    selfGateRetry: async ({ head: h, findings }) => {
+      const attempt = countSelfGateRetries(commentsSinceRequeue(await gh.comments()), h) + 1;
+      await gh.comment(42, selfGateRetryComment({ issue: 42, head: h, attempt, findings }));
+      return { attempt };
+    },
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js" }] }),
+  });
+  // head H1: two consecutive REDs → planned then needs-human.
+  const H1 = "a".repeat(40), H2 = "b".repeat(40);
+  const d1 = mk(H1); await runStage({ stage: "implement", issue: 42, deps: d1, runnerId: "r1" });
+  expect(d1.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+  const d2 = mk(H1); await runStage({ stage: "implement", issue: 42, deps: d2, runnerId: "r1" });
+  expect(d2.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  // a real fix advances the head → the counter resets → one retry again.
+  const d3 = mk(H2); await runStage({ stage: "implement", issue: 42, deps: d3, runnerId: "r1" });
+  expect(d3.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+  // and the findings for the new head are readable back for the re-dispatched builder.
+  expect(latestSelfGateFindings(store.map((b) => ({ body: b })), H2)[0].detail).toContain("survivor");
+});
+
+// SF-A backstop: the per-head bound resets on every new commit, so a builder that emits a NEW head
+// each round keeps attempt===1 forever and the per-head bound NEVER fires. The head-AGNOSTIC backstop
+// counts ALL self-gate REDs since the last requeue and escalates once they reach SELF_GATE_RETRY_BACKSTOP,
+// however much the head churns. Exercised with the REAL counters over a shared comment store.
+test("implement: SELF_GATE_RETRY_BACKSTOP self-gate REDs across DIFFERENT heads escalate to needs-human (head-agnostic backstop)", async () => {
+  const store = [];
+  const gh = { comments: async () => store.map((body) => ({ body })), comment: async (_n, body) => { store.push(body); } };
+  const mk = (head) => selfGateDeps({
+    transition: vi.fn(async ({ to, reason }) => ({ ok: true, to, reason })),
+    verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: head } }),
+    // the production dep: per-head attempt AND the head-agnostic total, both over the shared store.
+    selfGateRetry: async ({ head: h, findings }) => {
+      const since = commentsSinceRequeue(await gh.comments());
+      const attempt = countSelfGateRetries(since, h) + 1;
+      const total = countAllSelfGateRetries(since) + 1;   // +1 for the marker this round is about to post
+      await gh.comment(42, selfGateRetryComment({ issue: 42, head: h, attempt, findings }));
+      return { attempt, total };
+    },
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js" }] }),
+  });
+  // one fresh, DISTINCT head per round — each keeps the per-head attempt at 1, so only the backstop can fire.
+  const heads = Array.from({ length: SELF_GATE_RETRY_BACKSTOP }, (_, i) => String.fromCharCode(97 + i).repeat(40));
+  const last = [];
+  for (const h of heads) {
+    const d = mk(h);
+    await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "r1" });
+    last.push(d.transition.mock.calls.at(-1)[0]);
+  }
+  // the first BACKSTOP-1 rounds each get one bounded retry (→ planned, per-head attempt still 1)…
+  for (let i = 0; i < SELF_GATE_RETRY_BACKSTOP - 1; i++) expect(last[i].to).toBe("factory:planned");
+  // …and the round that reaches the cumulative cap trips the backstop despite the head changing every time.
+  const final = last.at(-1);
+  expect(final.to).toBe("factory:needs-human");
+  expect(final.reason).toContain("not converging");
+});
+
+// Task 5 (should_fix 2): a BLOCKING regression pin composes with a Task-3 self-gate finding in ONE
+// findings array → ONE selfGateRetry marker (no double-count) → one bounded retry (planned), then a
+// second RED on the same head escalates to needs-human. The pin is not a harnessFinding, so it takes
+// the bounded planned→needs-human route, never straight to needs-human.
+test("implement: a blocking regression pin + a self-gate finding share one retry marker → planned, then needs-human on the same head", async () => {
+  const findings = [
+    { check: "pin", blocking: true, ids: ["dw1"], detail: "regression: pin dw1 guard test_create is red — a prior fix regressed" },
+    { check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing" },
+  ];
+  const retried = [];
+  const first = selfGateDeps({
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    selfGateRetry: async ({ head, findings: f }) => { retried.push({ head, findings: f }); return { attempt: 1 }; },
+    selfGate: async () => ({ ok: false, ranChecks: ["pins", "mutation"], findings }),
+  });
+  expect(await runStage({ stage: "implement", issue: 46, deps: first, runnerId: "r1" })).toBe(0);
+  expect(first.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");   // bounded, not straight to human
+  expect(retried).toHaveLength(1);                                            // ONE marker for BOTH findings
+  expect(retried[0].findings).toHaveLength(2);
+  expect(retried[0].findings.flatMap((f) => f.ids || [])).toContain("dw1");
+
+  const second = selfGateDeps({
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    selfGateRetry: async () => ({ attempt: 2 }),                              // same head already retried once
+    selfGate: async () => ({ ok: false, ranChecks: ["pins"], findings: [findings[0]] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 46, deps: second, runnerId: "r1" })).toBe(0);
+  expect(second.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  expect(second.transition.mock.calls.at(-1)[0].reason).toContain("unresolved after one retry");
+});
+
+// A harness-class finding the builder cannot fix routes to a human, not a builder retry.
+test("implement: a harness-class self-gate finding routes to needs-human, not planned", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = selfGateDeps({
+    transition,
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, harness: true, detail: "mutation check misconfigured — the harness cannot run a single test" }] }),
+  });
+  await runStage({ stage: "implement", issue: 43, deps, runnerId: "r1" });
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
+// The green path proceeds to awaiting-review as today; advisory findings ride along in the handoff.
+test("implement: an ok:true self-gate proceeds to awaiting-review and attaches advisory findings", async () => {
+  const transition = vi.fn(async ({ to, data }) => ({ ok: true, to, data }));
+  const writeHandoff = vi.fn(async () => {});
+  const deps = selfGateDeps({
+    transition, writeHandoff,
+    selfGate: async () => ({ ok: true, ranChecks: ["gates", "mutation"], findings: [{ check: "mutation", blocking: false, detail: "mutation check skipped test/y.test.js: no resolvable source target" }] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 44, deps, runnerId: "r1" })).toBe(0);
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
+  // the advisory finding was attached to the handoff data so the reviewer starts ahead.
+  expect(writeHandoff.mock.calls.at(-1)[0].data.self_gate.advisory[0]).toEqual(expect.objectContaining({ check: "mutation" }));
+});
+
+// Old wiring / other stages inject no d.selfGate — the stage skips the self-gate and behaves as before.
+test("implement: no d.selfGate injected → self-gate is skipped and the stage reaches awaiting-review", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = selfGateDeps({ transition });   // no selfGate key
+  expect(await runStage({ stage: "implement", issue: 45, deps, runnerId: "r1" })).toBe(0);
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
+});
+
+/**
+ * ── Task 9 (Structure H, KTB-51) — plan-stage validator one-shot in-run repair ────────────────────
+ *
+ * A machine-checkable plan defect gets EXACTLY ONE repair turn (the validator reasons fed back to the
+ * planner) before the needs-human escalation. Named regression KTB #18 plan R1: dissents d2/d3 left
+ * uncovered by done_when — today straight to needs-human + owner retry; here one feedback turn fixes it.
+ */
+const R1_REASONS = ["dissent without done_when: d2, d3"];
+const planRepairDeps = (over = {}) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+  buildContext: vi.fn(async () => ({ roster: ["synthesizer"], rounds: 2, orchestration: "workflow", limits: { K: 3 } })),
+  resetAgentsLog: async () => {},
+  claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+  gates: async () => null,                                          // plan is not a gated stage
+  writeHandoff: async () => {},
+  runRecord: () => {}, release: async () => {},
+  ...over,
+});
+
+test("plan: a machine-checkable validator failure (KTB #18 R1) gets ONE repair turn with the reasons fed back → factory:planned, not needs-human", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
+    .mockReturnValueOnce({ ok: true, reasons: [], planRepair: null, data: { rounds: 2 } });
+  const deps = planRepairDeps({ transition, verifyStage });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(0);
+  // the repair turn ran exactly once (two claudeP dispatches total), and it was NOT a blind retry —
+  // the validator reasons were handed to both the context build and the repair invocation.
+  expect(deps.claudeP).toHaveBeenCalledTimes(2);
+  expect(deps.claudeP.mock.calls[1][1]).toEqual(expect.objectContaining({ planRepair: R1_REASONS }));
+  expect(deps.buildContext.mock.calls[1][0]).toEqual(expect.objectContaining({ planRepair: R1_REASONS }));
+  // the repaired handoff validates → proceeds to factory:planned, never touching needs-human.
+  const targets = transition.mock.calls.map((c) => c[0].to);
+  expect(targets).not.toContain("factory:needs-human");
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+});
+
+test("plan: the repair is bounded to one — a second machine-checkable failure escalates to needs-human", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  // both passes fail the same way: the one repair turn did not fix it.
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  const deps = planRepairDeps({ transition, verifyStage });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(deps.claudeP).toHaveBeenCalledTimes(2);            // one repair turn, never a third dispatch
+  expect(verifyStage).toHaveBeenCalledTimes(2);             // verified once before, once after the repair
+  const t = transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  expect(t.reason).toMatch(/stage artifact missing or invalid/);
+  expect(t.reason).toContain("dissent without done_when: d2, d3");
+});
+
+test("plan: a repair turn that cannot run (claudeP throws) escalates to needs-human, unchanged", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  let dispatch = 0;
+  const claudeP = vi.fn(async () => { if (++dispatch === 2) throw new Error("api error 529"); return { is_error: false, result: "{}" }; });
+  const deps = planRepairDeps({ transition, verifyStage, claudeP });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(verifyStage).toHaveBeenCalledTimes(1);            // the repair never produced an artifact to re-verify
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
+test("plan: a failure that is NOT purely the plan validator (e.g. a roster gap alongside it) is never repaired — escalates as today", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  // reasons has an extra non-validator reason → v.reasons.length !== v.planRepair.length → not repairable.
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS, "roster role not completed: skeptic"], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  const deps = planRepairDeps({ transition, verifyStage });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(deps.claudeP).toHaveBeenCalledTimes(1);          // no repair turn — the mixed failure went straight to escalation
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
+test("plan: a repair turn that dirties the worktree still escalates — the no-write re-assertion runs on the repair pass", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  let cw = 0;   // first pass (no-write check) is clean; the repair turn dirties the tree
+  const assertCleanWorktree = vi.fn(async () => (++cw >= 2 ? { ok: false, dirty: ["docs/scratch.md"] } : { ok: true }));
+  const deps = planRepairDeps({ transition, verifyStage, assertCleanWorktree });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(assertCleanWorktree).toHaveBeenCalledTimes(2);   // first pass ok, repair pass caught the dirt
+  expect(verifyStage).toHaveBeenCalledTimes(1);           // a dirty repair never reaches a re-verify
+  const t = transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  expect(t.reason).toMatch(/worktree dirty after plan repair/);
+});
+
 test("a refused transition is recorded, never silent", async () => {
   const lines = [];
   const deps = {
@@ -175,6 +452,104 @@ test("review stage derives decision from verdicts via aggregateReview", async ()
     to: "factory:needs-human", reason: expect.stringMatching(/incomplete/),
   }));
   expect(incomplete.writeHandoff).not.toHaveBeenCalled();
+});
+
+// ── Task 8 (Structure G) — no re-review while blocked ──────────────────────────────────────────────
+// KTB #3 spec1×2 regression: review round 1 rejected "qa evidence absent" (blocked on KTB-36), round 2
+// re-confirmed the SAME must_fix (blocked on KTB-37) — the full panel re-reported an identical must_fix
+// that no in-issue change could fix, because the block was in the harness/product, not the deliverable.
+// The guard lives at review-stage entry (it catches BOTH the label-event dispatch and the sweeper
+// re-dispatch, since every review run flows through here): if an OPEN factory:harness issue is linked to
+// this feature (an unmet dependency), it parks the feature at factory:needs-info with the harness
+// `waiting for` reason — reusing the existing sweepHarnessUnpark arm to return it to queue once the human
+// merges/closes the harness PR — and never spawns the reviewer panel.
+test("Task 8: a review whose feature is blocked on an open harness issue parks at needs-info without a review round", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    dependencyBlock: async () => 36,                     // open harness issue #36 blocks this feature
+    buildContext: vi.fn(async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: {} })),
+    claudeP, gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    writeHandoff: async () => {}, transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 3, deps })).toBe(0);
+  expect(claudeP).not.toHaveBeenCalled();                // no LLM review round spent
+  expect(deps.buildContext).not.toHaveBeenCalled();      // parked before the panel is even assembled
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+    to: "factory:needs-info", reason: "waiting for harness issue #36",
+  }));
+});
+
+// Fail-safe direction + KTB-24 kept intact. dependencyBlock → null means "no unmet harness dependency",
+// so the review runs. A genuinely stalled review (KTB-24: an infra-aborted awaiting-review job the
+// sweeper re-dispatches as factory:blocked, origin awaiting-review) is blocked on TIME, not a harness —
+// it leaves no linked harness issue, so dependencyBlock is null, the blocked→awaiting-review restart hop
+// still fires, and the panel spawns as before.
+test("Task 8: no harness dependency → review runs; the KTB-24 blocked→awaiting-review restart is untouched", async () => {
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    issueLabels: async () => ["factory:blocked"],        // KTB-24 sweeper re-dispatch entry label
+    blockedOrigin: async () => ({ from: "factory:awaiting-review" }),
+    dependencyBlock: async () => null,                   // an infra abort leaves no harness issue
+    buildContext: async () => ({ roster: ["correctness"], orchestration: "workflow", limits: {} }),
+    claudeP, gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    writeHandoff: async () => {}, transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review", prerequisite: true })); // KTB-24 hop
+  expect(claudeP).toHaveBeenCalled();                    // review still runs
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-info" }));
+});
+
+// Fail-safe: if the dependency check itself is unreadable we do NOT suppress (a missed suppression costs
+// one review round; a wrong one strands a reviewable issue). The panel runs, no needs-info park.
+test("Task 8: an unreadable dependency check does not suppress the review", async () => {
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    assertHandoff: async () => ({ ok: true }), heartbeat: async () => ({ stop() {} }),
+    dependencyBlock: async () => { throw new Error("gh issue list failed"); },
+    buildContext: async () => ({ roster: ["correctness"], orchestration: "workflow", limits: {} }),
+    claudeP, gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }),
+    writeHandoff: async () => {}, transition, runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  expect(claudeP).toHaveBeenCalled();
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-info" }));
+});
+
+// Task 5 (Structure D): on → rework the review handoff carries regression pins, guard derived from the
+// acceptance contract (Task 1). A must_fix whose id is a done_when with a test check → a guardable pin;
+// a must_fix with no contract link → an advisory (guard:null) pin. Kills KTB #18 R3.
+test("Task 5: the → rework handoff carries pins with guards derived from the plan's acceptance contract", async () => {
+  const doneWhen = [{ id: "dw1", text: "POST /notes 201", level: "unit", check: { kind: "test", ref: "test_7_create" }, rubric: "creates a note" }];
+  const verdicts = [
+    { role: "correctness", verdict: "reject", confidence: "high", must_fix: [
+      { id: "dw1", where: "a.js:1", claim: "create 500s on empty body", evidence: "test fails" },
+      { id: "mf-prose", where: "README.md", claim: "heading misleads", evidence: "read it" },
+    ], should_fix: [], verified: [] },
+    { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] },
+  ];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: { done_when: doneWhen } } }),
+    heartbeat: async () => ({ stop() {} }), claudeP: async () => ({ is_error: false, result: "{}" }), gates: async () => null,
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, verdicts } }),
+    writeHandoff: vi.fn(async () => {}), transition: vi.fn(async () => ({ ok: true })),
+    runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  const handoff = deps.writeHandoff.mock.calls.at(0)[0];
+  expect(handoff.data.decision).toBe("rework");
+  const pins = handoff.data.pins;
+  expect(pins.find((p) => p.id === "dw1").guard).toEqual({ kind: "test", ref: "test_7_create" });
+  expect(pins.find((p) => p.id === "mf-prose").guard).toBeNull();
 });
 
 // ── 여기부터: 최종 리뷰에서 걸린 것들 ────────────────────────────────────────

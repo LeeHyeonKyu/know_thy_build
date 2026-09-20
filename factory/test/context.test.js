@@ -42,6 +42,27 @@ test("review context: tier from triage handoff, roster from charter, agents/less
 });
 
 /**
+ * Structure D (리뷰 효율 Task 5) — rework 핸드오프가 실은 회귀 핀이 재디스패치된 빌더의 컨텍스트
+ * (loaded.json.rework_pins)로 그대로 전달된다. guard가 붙은 핀은 다음 self-gate의 하드 게이트라
+ * 빌더가 먼저 알아야 하고, 산문 핀은 체크리스트다. rework가 아닌 리뷰 핸드오프는 핀을 나르지 않는다.
+ */
+test("Task 5: a rework review handoff carries regression pins into the re-dispatched builder's loaded context", async () => {
+  const r = root();
+  const review = renderHandoff({ stage: "review", issue: 30, summary: "s", data: {
+    schema: "factory.review.v1", issue: 30, pr: 3, head_sha: "a".repeat(40), round: 1, orchestration: "workflow",
+    decision: "rework", verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: [{ id: "dw1", where: "x", claim: "c", evidence: "e" }], should_fix: [], verified: [] }],
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_30_create" }, text: "create returns 201" }, { id: "mf-prose", guard: null, text: "heading is misleading" }],
+  } });
+  const gh = { issue: vi.fn(async () => ({ number: 30, title: "T", body: "", labels: ["factory:rework"] })), comments: vi.fn(async () => [{ id: 1, body: review, createdAt: "2026-09-11T00:00:00Z" }]) };
+  await buildContext({ root: r, gh, issue: 30, stage: "implement" });
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.rework_pins).toEqual([
+    { id: "dw1", guard: { kind: "test", ref: "test_30_create" }, text: "create returns 201" },
+    { id: "mf-prose", guard: null, text: "heading is misleading" },
+  ]);
+});
+
+/**
  * 감사 Task 9: standard tier의 plan은 **단일 패스**다 — 계획자 1 + skeptic 1. `rounds`는 여전히
  * 숫자 하나로 남고(verify-stage의 expectedRounds가 그 계약이다), 모드와 done_when 상한은
  * 새 `plan` 블록으로 실린다.
@@ -56,6 +77,32 @@ test("plan context (default tier): single mode roster, rounds 2, plan block carr
   expect(ctx.plan).toEqual({ mode: "single", max_done_when: 6 });
   expect(ctx.spec_path).toBe(null);
   expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).plan).toEqual({ mode: "single", max_done_when: 6 });
+});
+
+/**
+ * Task 9 (Structure H, KTB-51) — the repair turn's validator reasons reach the planner the same way
+ * Task 5's pins reach the builder: buildContext({ planRepair }) surfaces them into loaded.json as
+ * `plan_repair` (and onto ctx). Present ONLY on the one repair turn; a normal plan build carries none.
+ */
+test("Task 9: buildContext({ planRepair }) surfaces the validator reasons into loaded.plan_repair and ctx (plan stage only)", async () => {
+  const r = root();
+  const gh = { issue: vi.fn(async () => ({ number: 18, title: "T", body: "", labels: ["factory:ready"] })), comments: vi.fn(async () => []) };
+  const reasons = ["dissent without done_when: d2, d3"];
+  const ctx = await buildContext({ root: r, gh, issue: 18, stage: "plan", planRepair: reasons });
+  expect(ctx.plan_repair).toEqual(reasons);
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.plan_repair).toEqual(reasons);
+
+  // a normal plan build (no planRepair) carries no plan_repair, on ctx or in loaded.json.
+  const clean = root();
+  const ctx2 = await buildContext({ root: clean, gh, issue: 18, stage: "plan" });
+  expect(ctx2.plan_repair).toBeUndefined();
+  expect(JSON.parse(readFileSync(join(clean, ".factory/out/loaded.json"), "utf8")).plan_repair).toBeUndefined();
+
+  // it is a plan-stage fact: a review build ignores planRepair entirely.
+  const rev = root();
+  await buildContext({ root: rev, gh, issue: 18, stage: "review", planRepair: reasons });
+  expect(JSON.parse(readFileSync(join(rev, ".factory/out/loaded.json"), "utf8")).plan_repair).toBeUndefined();
 });
 
 test("plan context (load-bearing tier): the 4-role debate survives — plan_roles + plan_rounds", async () => {
@@ -240,6 +287,37 @@ test("H4: no cold-read reviewer context contains handoffs.implement / the verifi
   }
   expect(JSON.parse(readFileSync(join(r, ".factory/out/context.correctness.json"), "utf8")).lessons)
     .toBe(".factory/lessons/reviewer-correctness.md");
+});
+
+/**
+ * 리뷰 효율 Task 1 (`ui`의 A-MF1과 같은 부류) — 수용 계약(`check`+`rubric`)이 cold-read 투영본을
+ * 살아서 통과해야 Task 3/7이 그것을 읽는다. `DONE_WHEN_FIELDS`에서 빠지면 새 계획은 id/text/level만
+ * 남아(새 계획엔 `verify`도 없다) 리뷰어가 채점할 계약이 닿지 않는다.
+ */
+test("Task 1: the qa/correctness cold-read context keeps check and rubric for a done_when item", async () => {
+  const r = root();
+  const issue = 7;
+  const contractPlan = renderHandoff({
+    stage: "plan", issue, summary: "s",
+    data: {
+      schema: "factory.plan.v1", issue, tier: "standard", summary: "export CSV",
+      done_when: [{ id: "dw1", text: "header row", level: "unit", check: { kind: "test", ref: "test_7_header" }, rubric: "the reviewer confirms a header row is present", rationale: "계획의 산문" }],
+      files_expected: ["src/export/csv.js"], non_goals: [], dissent_log: [],
+    },
+  });
+  const gh = {
+    issue: vi.fn(async () => ({ number: issue, title: "T", body: "n/a" })),
+    comments: vi.fn(async () => [
+      { id: 1, body: renderHandoff({ stage: "triage", issue, summary: "s", data: { schema: "factory.triage.v1", issue, disposition: "ready", tier: "standard" } }), createdAt: "2026-09-11T00:00:00Z" },
+      { id: 2, body: contractPlan, createdAt: "2026-09-12T00:00:00Z" },
+      { id: 3, body: implementHandoff(issue), createdAt: "2026-09-13T00:00:00Z" },
+    ]),
+  };
+  await buildContext({ root: r, gh, issue, stage: "review" });
+  for (const role of ["correctness", "qa"]) {
+    const rc = JSON.parse(readFileSync(join(r, `.factory/out/context.${role}.json`), "utf8"));
+    expect(rc.done_when, role).toEqual([{ id: "dw1", text: "header row", level: "unit", check: { kind: "test", ref: "test_7_header" }, rubric: "the reviewer confirms a header row is present" }]);
+  }
 });
 
 test("H4: spec-conformance (cold_read = false) gets the full file plus the issue's acceptance text", async () => {

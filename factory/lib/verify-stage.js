@@ -142,6 +142,89 @@ export const GUARD_SHAPED_PATTERNS = [
 const GUARD_REQUESTED = /\bguard\b|가드|\[guard\]/i;
 
 /**
+ * ── 수용 계약 (리뷰 효율 Task 1, Structure A) ──────────────────────────────────
+ * done_when 각 항목은 **어떻게 확인되는지**(`check {kind, ref}`)와 리뷰어가 적용할 **한 줄 기준**
+ * (`rubric`) 중 적어도 하나를 지녀야 한다. 이 하나의 계약이 세 곳에서 쓰인다: 구현자의 핸드오프 전
+ * 자가 점검(Task 3), 리뷰어의 채점 기준(Task 7), 머지의 증거. `check.kind`는 test|gate|finish|rubric —
+ * `test`는 Task 3가 돌릴 테스트 이름, `gate`는 게이트 이름, `finish`는 qa 매니페스트가 채점, `rubric`은
+ * 돌릴 것이 없는 리뷰어 판정 전용이다. `verify`(테스트 id)는 `check {kind:"test"}`의 옛 철자라, 그 하나만
+ * 든 옛 핸드오프도 계약을 갖춘 것으로 친다 — 새 요구를 집행하는 것은 파서가 아니라 이 검증기다.
+ */
+const CHECK_KINDS = new Set(["test", "gate", "finish", "rubric"]);
+/** `check.kind:"test"`의 ref는 Task 3가 vitest에 넘길 테스트 이름이다: `test_<...>` 형태, 공백 없음. */
+const TEST_REF_RE = /^test_[A-Za-z0-9][\w-]*$/;
+const isRunnableTestRef = (ref) => typeof ref === "string" && TEST_REF_RE.test(ref.trim());
+/**
+ * 스스로 확인 가능한 check을 지녔는가. 명시적 `check`이 있으면 그 kind로 판정하고(rubric kind는 돌릴
+ * 것이 없어 rubric 문자열에 기댄다), 없으면 옛 `verify`(테스트 id)를 check으로 친다.
+ */
+function hasUsableCheck(item, check) {
+  if (check && CHECK_KINDS.has(check.kind)) {
+    if (check.kind === "rubric") return false;                       // 리뷰어 판정 전용 — 돌릴 check이 없다
+    if (check.kind === "test") return isRunnableTestRef(check.ref);
+    return typeof check.ref === "string" && check.ref.trim() !== ""; // gate/finish는 이름 하나면 된다
+  }
+  return typeof item?.verify === "string" && item.verify.trim() !== ""; // 옛 철자
+}
+
+/**
+ * ── 회귀 핀 (리뷰 효율 Task 5, Structure D / design §4.D) ──────────────────────────────────────
+ * `→ rework`에서 리뷰어 must_fix 하나하나가 carried **pin** `{ id, guard: {kind, ref} | null, text }`이
+ * 된다. 돌릴 수 있는 테스트가 guard로 붙은 핀은 다음 self-gate의 **하드 게이트**이고, guard가 없는
+ * 산문 핀은 advisory 체크리스트 줄일 뿐이다(spec §9 Q5 — 불가능한 루프를 만들지 않는다). KTB #18 R3를
+ * 죽인다: R라운드의 must_fix를 고치다 **같은 id** 아래 새 결함을 낳았을 때, guard 테스트를 self-gate에서
+ * 다시 돌리면 또 한 번의 전면 리뷰 라운드 전에 그 회귀를 잡는다.
+ *
+ * **guard는 꾸며내지 않는다.** 리뷰어 must_fix는 대개 산문이다. guard는 **연결이 있을 때만** 뽑는다:
+ *   (1) must_fix의 `id`가 어떤 done_when의 id와 같거나,
+ *   (2) 어떤 done_when의 `covers`가 그 id를 짚거나,
+ *   (3) must_fix의 `where`가 어떤 done_when 계약 check의 테스트 이름을 그대로 담고 있을 때.
+ * 그 done_when의 수용 계약 `check {kind:"test", ref}`(또는 옛 철자 `verify`)이 **돌릴 수 있는 테스트
+ * 이름**이면 그것이 guard가 된다. 그 외에는 `guard: null` → advisory 산문 핀뿐이다(불가능한 self-gate
+ * 루프를 절대 만들지 않는다).
+ */
+function testGuardOf(dw) {
+  if (!dw || typeof dw !== "object") return null;
+  const c = dw.check;
+  if (c && typeof c === "object" && c.kind === "test" && isRunnableTestRef(c.ref)) return { kind: "test", ref: c.ref.trim() };
+  // 옛 핸드오프: `verify`(테스트 id)는 `check {kind:"test"}`의 옛 철자다(이 파일의 다른 판정과 같은 계약).
+  if (typeof dw.verify === "string" && isRunnableTestRef(dw.verify)) return { kind: "test", ref: dw.verify.trim() };
+  return null;
+}
+const RE_META = /[.*+?^${}()|[\]\\]/g;
+/** `ref` as a whole-token match — a test name is bounded by non-`[\w-]` on both sides, so `test_7`
+ * never links a `where` that only names `test_7_create` (nit 1: substring match false-linked prefixes). */
+const namesTestRef = (where, ref) => new RegExp(`(?<![\\w-])${ref.replace(RE_META, "\\$&")}(?![\\w-])`).test(where);
+export function deriveReworkPins({ mustFix = [], doneWhen = [] } = {}) {
+  const dw = (Array.isArray(doneWhen) ? doneWhen : []).filter((d) => d && typeof d === "object");
+  // First-in-array wins for both maps — done_when ids are meant to be unique, but if two entries collide
+  // (or two `covers` the same dissent id) the earlier one is the deterministic pick (nit 2).
+  const byId = new Map();
+  for (const d of dw) if (typeof d.id === "string" && d.id && !byId.has(d.id)) byId.set(d.id, d);
+  const byCovered = new Map();
+  for (const d of dw) if (Array.isArray(d.covers)) for (const c of d.covers) if (!byCovered.has(String(c))) byCovered.set(String(c), d);
+  const findLinked = (m) => {
+    const id = m?.id != null ? String(m.id) : "";
+    if (id && byId.has(id)) return byId.get(id);
+    if (id && byCovered.has(id)) return byCovered.get(id);
+    const where = typeof m?.where === "string" ? m.where : "";
+    if (where) {
+      for (const d of dw) {
+        const g = testGuardOf(d);
+        if (g && namesTestRef(where, g.ref)) return d;
+      }
+    }
+    return null;
+  };
+  return (Array.isArray(mustFix) ? mustFix : []).filter(Boolean).map((m) => {
+    const id = m.id != null ? String(m.id) : "";
+    const text = typeof m.claim === "string" && m.claim.trim() ? m.claim
+      : typeof m.where === "string" && m.where.trim() ? m.where : id;
+    return { id, guard: testGuardOf(findLinked(m)), text };
+  });
+}
+
+/**
  * `plan.v1` 핸드오프를 CHARTER의 plan 규칙으로 검사한다. 반환은 사유 문자열 배열(빈 배열 = 유효).
  * 스키마 검사와 별개다 — 스키마는 "모양", 이것은 "계약".
  */
@@ -174,6 +257,31 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
       reasons.push(`guard-shaped done_when: ${guardish.join(", ")} — done_when observes user-visible behaviour; say "guard" in the issue if a guard is what you want`);
     }
   }
+
+  // (d) 수용 계약(Task 1) — 위 (a)~(c)를 **덧붙인다**, 대체하지 않는다. 계약을 못 갖춘 done_when은
+  //     dissent를 짚었든 아니든 그 자체로 실패다.
+  doneWhen.forEach((d, i) => {
+    const id = typeof d?.id === "string" && d.id ? d.id : `dw${i + 1}`;
+    const check = d && typeof d.check === "object" && d.check ? d.check : null;
+    const hasRubric = typeof d?.rubric === "string" && d.rubric.trim() !== "";
+    if (check) {
+      // 새 항목(명시적 `check`을 실은 것)은 계약을 온전히 갖춘다 — check과 rubric 둘 다. 이 검증기가
+      // 모든 핸드오프의 실제 게이트이므로(재종합·수리 턴·손편집은 emission 스키마를 통과하지 않는다),
+      // Task 7 리뷰어의 채점 기준(rubric)을 여기서 보장한다.
+      // `check.kind:"test"`의 ref는 Task 3가 실제로 돌릴 수 있어야 한다 — 비었거나 테스트 이름 모양이
+      // 아니면 돌릴 수 없는 계약이라 미완이다.
+      if (check.kind === "test" && !isRunnableTestRef(check.ref)) {
+        reasons.push(`acceptance contract incomplete: ${id}`);
+      } else if (!hasRubric) {
+        reasons.push(`acceptance contract incomplete: ${id} — check present but rubric missing`);
+      }
+      return;
+    }
+    // 옛 항목: 명시적 check이 없다. `verify`(check {kind:"test"}의 옛 철자)나 rubric 중 하나면 계약이
+    // 완결이다 — 옛 핸드오프는 rubric 없이 verify만으로 통과한다(back-compat).
+    if (!hasUsableCheck(d, null) && !hasRubric) reasons.push(`acceptance contract incomplete: ${id}`);
+  });
+
   return reasons;
 }
 
@@ -204,6 +312,13 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   const reasons = [];
   /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
   let qaShortfall = null;
+  /**
+   * Task 9 (Structure H, KTB-51) — the plan validator's **machine-checkable** reasons, carried out
+   * separately so run-stage can tell a deterministic plan-contract defect (repairable in one turn)
+   * apart from every other failure (schema/roster/api/turn/gate — never repaired). Null unless the
+   * plan validator actually found something; the same strings are also pushed to `reasons`.
+   */
+  let planRepair = null;
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
    * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
@@ -279,7 +394,12 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   if (data && orchestration && data.orchestration !== orchestration) reasons.push(`orchestration ${data.orchestration} != configured ${orchestration}`);
   if (stage === "plan" && data && expectedRounds != null && data.rounds !== expectedRounds) reasons.push(`rounds ${data.rounds} != expected ${expectedRounds}`);
   // CHARTER의 plan 규칙(감사 Task 9). 상한이 안 넘어오면 기본 6 — 규칙이 조용히 꺼지지는 않는다.
-  if (stage === "plan" && data) reasons.push(...validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody }));
+  // Task 9(KTB-51): 이 검증기의 사유는 결정적·기계 판정이라 한 번의 수리 턴으로 되먹일 수 있다 —
+  // `planRepair`로 따로 실어 run-stage가 "순수 계획-계약 결함"만 골라 수리하게 한다.
+  if (stage === "plan" && data) {
+    const pr = validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody });
+    if (pr.length) { reasons.push(...pr); planRepair = pr; }
+  }
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
   }
@@ -341,5 +461,5 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
   // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)
   // 지금까지 여기서 버려졌다. run-stage가 이 값을 run 기록 한 줄로 남긴다(§run-stage.js `artifact:`).
-  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall };
+  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall, planRepair };
 }

@@ -147,6 +147,77 @@ export function blockedOrigin(comments) {
 }
 
 /**
+ * ── Structure B (리뷰 효율 Task 3) — self-gate RED 경로의 재시도 마커 ──────────────────────────
+ *
+ * self-gate가 `ok:false`(빌더가 고칠 수 있는 finding)로 handoff를 막을 때, 스테이지는 이 마커를 남기고
+ * `factory:planned`로 되돌려 빌더를 **정확히 한 번** 다시 돌린다. sweeper의 blocked-retry/stalled-restart
+ * 마커와 같은 계열이다: 마커를 **head sha로 키잉**하므로, 진짜 수정(새 커밋 → 새 head)은 카운터를
+ * 리셋하고, 같은 head에서 두 번째 RED면 `factory:needs-human`으로 에스컬레이션한다.
+ *
+ * K(`countTransitionsTo(…, rework)`)는 `→ rework`만 세고, `→ planned`에는 아무 카운터도 없었다 —
+ * 그래서 self-gate의 무한 implement↔planned 루프를 막는 유일한 상한이 이 마커다. Task 9(one-shot
+ * in-run repair)가 "스테이지 통째 재디스패치"를 세션 안 한 턴짜리 루프로 바꾸면, 이 카운터/에스컬레이션은
+ * 그 바깥의 안전망으로 남는다.
+ */
+export const SELF_GATE_RETRY = /<!-- factory-self-gate-retry issue=(\d+) head=(\S+) attempt=(\d+) -->/;
+export const selfGateRetryMarker = ({ issue, head, attempt }) =>
+  `<!-- factory-self-gate-retry issue=${issue} head=${head} attempt=${attempt} -->`;
+const SELF_GATE_FINDINGS_JSON = /```json\s*(\{[\s\S]*?"schema"\s*:\s*"factory\.self-gate-findings\.v1"[\s\S]*?\})\s*```/;
+
+/** 마커 + findings를 담은 코멘트 한 통. 다음 implement 런이 findings를 읽어 빌더에게 되먹인다. */
+export const selfGateRetryComment = ({ issue, head, attempt, findings = [] }) =>
+  `${selfGateRetryMarker({ issue, head, attempt })}\n` +
+  `**self-gate**: 결정적 self-gate가 이 head의 handoff를 막았습니다 (attempt ${attempt}). 리뷰로 보내기 ` +
+  `전에 빌더가 아래를 고쳐야 합니다:\n` +
+  "```json\n" +
+  JSON.stringify({ schema: "factory.self-gate-findings.v1", issue, head, attempt, findings }, null, 2) +
+  "\n```";
+
+/** 이 head sha에 대해 남은 self-gate-retry 마커의 개수(호출자가 창을 `commentsSinceRequeue`로 좁힌다). */
+export function countSelfGateRetries(comments, head) {
+  let n = 0;
+  for (const c of comments || []) {
+    const m = SELF_GATE_RETRY.exec(String(c?.body ?? ""));
+    if (m && m[2] === head) n += 1;
+  }
+  return n;
+}
+
+/**
+ * ── 리뷰 효율 Phase-1 finalfix (SF-A) — head-agnostic backstop ─────────────────────────────────
+ *
+ * `countSelfGateRetries`는 **head별** 상한이다(진짜 수정은 새 head라 카운터를 리셋한다) — 그것이
+ * 정상 경로의 1차 상한으로 옳다. 그러나 매 라운드 **새 head**를 뱉으면서도 self-gate를 계속 통과
+ * 못 하는 빌더는 head별 카운터를 영원히 1로 리셋하며 implement↔planned를 무한 ping-pong한다: head별
+ * 상한만으로는 누적 천장이 없다. 이 함수는 head를 무시하고 **이번 재큐 이후** 남은 self-gate-retry
+ * 마커를 전부 센다(호출자가 창을 `commentsSinceRequeue`로 좁힌다). 그 총합이 `SELF_GATE_RETRY_BACKSTOP`에
+ * 이르면 head가 매번 달라도 "빌더가 수렴하지 못한다"는 뜻이므로 needs-human으로 올린다. head별
+ * 1차 상한을 대체하지 않고 그 바깥의 안전망으로만 얹는다.
+ */
+export const SELF_GATE_RETRY_BACKSTOP = 3;
+export function countAllSelfGateRetries(comments) {
+  let n = 0;
+  for (const c of comments || []) {
+    if (SELF_GATE_RETRY.test(String(c?.body ?? ""))) n += 1;
+  }
+  return n;
+}
+
+/** 이 head sha에 대한 **가장 최근** self-gate findings(없으면 null) — 재디스패치된 빌더가 받는다. */
+export function latestSelfGateFindings(comments, head) {
+  let found = null;
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = SELF_GATE_RETRY.exec(body);
+    if (!m || m[2] !== head) continue;
+    const j = SELF_GATE_FINDINGS_JSON.exec(body);
+    if (!j) continue;
+    try { const obj = JSON.parse(j[1]); if (Array.isArray(obj.findings)) found = obj.findings; } catch { /* 깨진 블록은 건너뛴다 */ }
+  }
+  return found;
+}
+
+/**
  * ADR-020 KTB-25 — **마지막 `… to=factory:queue` 전이 코멘트 이후**의 코멘트만 돌려준다(그런 전이가
  * 한 번도 없었으면 이력 전체).
  *

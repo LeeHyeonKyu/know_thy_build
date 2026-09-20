@@ -5,11 +5,11 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
-import { isGitDiffError } from "../lib/changed-files.js";
+import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
@@ -17,7 +17,7 @@ import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
-import { harnessNeeded, ensureHarnessIssue, parkedReason } from "../lib/harness-request.js";
+import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
@@ -26,13 +26,13 @@ import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable, deriveReworkPins } from "../lib/verify-stage.js";
 import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
 import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
@@ -41,6 +41,7 @@ import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding } from "../lib/self-gate.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -370,6 +371,42 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       }
     }
     /**
+     * ── 리뷰 효율 Task 8 (Structure G) — 막힌 이슈는 리뷰 라운드를 태우지 않는다 ──────────────────
+     *
+     * 리뷰 패널을 띄우기 **전에**, 이 피처가 미해결 제품/하네스 의존성에 막혀 있으면(이 이슈를 막는
+     * 열린 `factory:harness` 이슈가 있으면) 패널을 돌리지 않고 `factory:needs-info`로 주차한다.
+     * KTB #3 spec1×2가 죽은 방식: 리뷰 라운드 1이 "qa evidence absent"로 reject(KTB-36에 막힘),
+     * 라운드 2가 **같은** must_fix를 재확인(KTB-37에 막힘) — 이슈 안의 어떤 변경으로도 못 고칠
+     * must_fix를 리뷰어 넷이 두 번 재보고했다. 막힌 것은 산출물이 아니라 하네스다.
+     *
+     * **자리가 이유다.** 모든 리뷰 런이 여기로 들어온다 — 라벨 이벤트 dispatch도, sweeper의 stalled
+     * 재dispatch도, KTB-24의 blocked-retry hop(바로 위)도. 그래서 이 한 자리가 두 dispatch 경로를
+     * 모두 잡는다. 그리고 blocked-retry hop **뒤**다: KTB-24의 "잘린 리뷰는 한 번 재시작"과 충돌하지
+     * 않는다 — 인프라 취소/타임아웃은 이 이슈를 막는 하네스 이슈를 남기지 않으므로(막은 것은 시간이다)
+     * `dependencyBlock`이 null을 돌려주고 리뷰가 평소대로 돈다. 억제하는 것은 **하네스/제품 블록**뿐이다.
+     *
+     * 주차는 `awaiting-review → needs-info`(§labels.js — KTB-23의 `in-progress → needs-info` 주차와
+     * 같은 계열의 엣지)로, 사유는 하네스 주차와 **같은 문법**(`waiting for harness issue #<n>`)이다 —
+     * 그래야 기존 `sweepHarnessUnpark` 팔이 그대로 이 이슈를 집어, 사람이 하네스 PR을 머지해 그 이슈가
+     * 닫히면 `needs-info → queue`로 되돌린다(해제 경로를 새로 만들지 않는다).
+     *
+     * **fail-safe**: 판정이 안 읽히면(조회 실패) 억제하지 않는다 — 놓친 억제는 리뷰 한 라운드지만,
+     * 틀린 억제는 리뷰 가능한 이슈를 멈춰 세운다. 배선이 없는 구형 호출자도 조용히 건너뛴다(다른 dep과 같다).
+     */
+    if (stage === "review" && d.dependencyBlock) {
+      let harnessDep = null, depError = null;
+      try { harnessDep = await d.dependencyBlock(); }
+      catch (e) { depError = e?.message || String(e); }
+      if (depError) {
+        record([`review: dependency check unreadable — ${depError} (not suppressing — running review)`]);
+      } else if (harnessDep != null) {
+        const reason = parkedReason(harnessDep);
+        const t = await d.transition({ to: "factory:needs-info", reason });
+        record([`review: blocked on harness issue #${harnessDep} — parking without a review round (${reason})`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
+        return t.ok ? 0 : 2;
+      }
+    }
+    /**
      * ADR-020 KTB-39 — **`[runtime].setup`이 이미 더럽힌 트리의 스냅샷.** setup은 run-stage보다 먼저,
      * 같은 잡의 자기 스텝에서 돈다(`.factory/actions/setup` → `bin/setup-env.js`) — `flutter pub get`
      * 류는 그때 추적 파일을 다시 쓴다. 여기가 그 사실을 찍는 유일한 자리다: 스테이지가 트리를 아직
@@ -508,12 +545,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
     const ctx = await d.buildContext({ setupDirty });
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
-    const out = await d.claudeP(ctx, { harnessIssue });
+    let planRepairAttempt = 0;                                        // Task 9 (KTB-51): in-run one-shot cap for the plan validator repair
+    let out = await d.claudeP(ctx, { harnessIssue });
     // 마지막 진행 스냅샷은 claude가 끝난 **직후**에 찍는다 — 그때 트랜스크립트는 완성돼 있고
     // 하트비트는 아직 살아 있다. 실패해도 usage 줄은 그대로 나간다(관측이 기록을 막지 않는다).
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
-    const usage = usageLine(out, finalProgress);
+    let usage = usageLine(out, finalProgress);
     // ADR-023 Task 8b — implement의 구조적 백스톱. 쓰기 스테이지라 클린 체크는 할 수 없지만(빌더가
     // 파일을 쓰는 것이 이 스테이지의 일이다) **두 가지**는 세션 뒤에도 참이어야 한다: HEAD가 아직
     // 스테이지가 체크아웃한 브랜치이고, 팩토리 소유 경로가 아직 스테이지 커밋의 바이트라는 것.
@@ -629,10 +667,78 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
-    const v = d.verifyStage({ stage, out, ctx, gates });
+    let v = d.verifyStage({ stage, out, ctx, gates });
     // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는
     // 사후 감사의 provenance다 — verifyStage가 계산해 둔 것을 그냥 흘려보내지 않고 한 줄 남긴다.
     if (v.source) record([`artifact: ${v.source}`]);
+    /**
+     * ── Task 9 (Structure H, KTB-51) — plan-stage validator one-shot in-run repair ────────────────
+     *
+     * A **machine-checkable** plan defect (`validatePlanHandoff`: a dissent left uncovered by
+     * done_when, an incomplete acceptance contract, a guard-shaped or over-count done_when) gets
+     * EXACTLY ONE repair turn — the validator reasons fed back to the same planner — BEFORE the
+     * needs-human escalation below, never as a replacement for it. Named regression **KTB #18 plan
+     * R1**: the planner emitted a handoff leaving dissents d2/d3 uncovered; today that goes straight
+     * to needs-human and the owner retries by hand. Here the plan stage feeds the reasons back for
+     * one turn; a repaired handoff that validates proceeds to `factory:planned`, one that still fails
+     * escalates unchanged, and a repair that cannot run (agent error) escalates as today.
+     *
+     * BOUNDED TO ONE by `planRepairAttempt` (an in-run counter): a second machine-checkable failure
+     * in this run escalates, never loops. Eligibility is deliberately narrow — repair only when the
+     * plan artifact parsed and the ONLY reasons are the plan validator's (`v.reasons.length ===
+     * v.planRepair.length`). Anything else in the mix — schema/roster failures, a turn/API error, a
+     * gate verdict — is not repairable here and falls straight through to the escalation below.
+     *
+     * The reasons reach the repair turn the same way Task 3 feeds self-gate findings to the builder:
+     * `d.buildContext({ planRepair })` writes them into `loaded.json` (→ `plan_repair`, which
+     * factory-plan.js surfaces to the planner), and they are also handed to `d.claudeP` — so this is
+     * a targeted repair, never a blind retry.
+     */
+    if (!v.ok && stage === "plan" && planRepairAttempt === 0 && d.claudeP
+        && Array.isArray(v.planRepair) && v.planRepair.length > 0
+        && v.reasons.length === v.planRepair.length
+        && !(out?.is_error)) {
+      planRepairAttempt += 1;
+      const repairReasons = v.planRepair;
+      record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
+      let repairOut = null;
+      try {
+        const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
+        repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
+      } catch (e) {
+        // A repair that cannot even run is not a second chance for the planner — escalate as today
+        // (fall through to the needs-human branch below with the original reasons unchanged).
+        record([`plan repair (KTB-51): could not run — ${e?.message || e}`]);
+        repairOut = null;
+      }
+      if (repairOut) {
+        out = repairOut;
+        try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
+        usage = usageLine(out, finalProgress);
+        // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
+        if (isNoWriteStage(stage)) {
+          const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
+          if (!clean.ok) {
+            const dirty = Boolean(clean.dirty?.length);
+            const reason = dirty
+              ? `worktree dirty after ${stage} repair (no-write stage): ${clean.dirty.join(", ")}`
+              : `worktree check failed after ${stage} repair (no-write stage): ${clean.reason || "unknown"}`;
+            const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
+            record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
+            return 2;
+          }
+        }
+        // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
+        gates = null;
+        if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
+          try { gates = await d.gates(ctx); } catch { gates = null; }
+        }
+        v = d.verifyStage({ stage, out, ctx, gates });
+        if (v.source) record([`artifact: ${v.source} (repair)`]);
+        record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
+      }
+    }
     if (!v.ok) {
       // 턴 한도(KTB-16)와 API 쿼터/장애(KTB-22)는 둘 다 설계 오류가 아니라 **재시도로 풀리는 일시
       // 조건**이다 — 사람이 판단할 것이 아직 없으므로 needs-human이 아니라 blocked다(gates BLOCKED·
@@ -748,6 +854,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
       /**
+       * ── 리뷰 효율 Task 5 (Structure D) — 회귀 핀 ──────────────────────────────────────────────
+       * `→ rework`일 때만, 이 라운드의 must_fix를 carried **pin**으로 접는다(`deriveReworkPins`).
+       * guard는 수용 계약(Task 1)의 done_when `check`에서 연결이 있을 때만 뽑는다 — 돌릴 수 있는
+       * 테스트면 다음 self-gate의 하드 게이트, 아니면 advisory 산문 핀뿐이다(spec §9 Q5: 불가능한
+       * 루프 금지). 핀은 rework 핸드오프에 실려, 다음 implement 런의 빌더(context.js loadedFor →
+       * factory-implement.js)와 그 런의 self-gate가 함께 읽는다. KTB #18 R3을 죽인다.
+       */
+      if (agg.decision === "rework") {
+        v.data.pins = deriveReworkPins({ mustFix: agg.must_fix, doneWhen: ctx?.handoffs?.plan?.done_when ?? [] });
+      }
+      /**
        * ── 리뷰 batch-1 MF-2 (H1b-b) — **이 판정에 출처를 남긴다.**
        * handoff 코멘트는 에이전트가 쥔 봇 계정으로 나가고 `gh issue comment`는 훅이 일부러 열어 둔
        * 문이라, 머지 스테이지가 handoff만 읽는 한 그 판정은 위조 가능하다. 이 한 줄은 **러너가**
@@ -836,6 +953,95 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
           ...gatesNote, usage,
         ]);
         return t.ok ? 0 : 2;
+      }
+    }
+    /**
+     * ── Structure B (리뷰 효율 Task 3) — 핸드오프 직전 self-gate ────────────────────────────────
+     *
+     * implement에서만, `verifyStage`가 통과한 뒤 `factory:awaiting-review` 전이 **직전**에 돈다. 리뷰가
+     * 결정적으로 돌릴 검사(이미 계산된 `gates`·계약 대조 qa 증거·새 테스트 mutation check)를 합성해,
+     * 리뷰어의 runnable 검사가 어차피 거부할 diff가 리뷰 라운드를 통째로 태우는 것을 막는다
+     * (KTB #18 R3 finish() 회귀, own-cal R1 cf1 fail-open 가드).
+     *
+     * 하네스 이슈는 제외한다(`!harnessIssue`): 그 빌더는 보호 경로를 일부러 쓰고 PR은 어차피 사람이
+     * 머지하므로 self-gate의 회귀 대상(제품 diff의 리뷰 효율)과 계열이 다르다. 위 harness_needed 분기가
+     * 채워진 하네스 이슈는 이미 return했다 — 여기 오는 하네스 이슈는 요청이 빈 것뿐이다.
+     *
+     * 기존 테스트/오래된 배선은 `d.selfGate`를 주입하지 않을 수 있다 — 그때는 (게이트처럼) 조용히
+     * 건너뛰고 평소대로 awaiting-review로 간다.
+     */
+    if (stage === "implement" && !harnessIssue && d.selfGate) {
+      let sg;
+      try { sg = await d.selfGate({ gates }); }
+      catch (e) {
+        // diff/merge-base를 못 읽으면 "무엇을 검사할지"가 없다 — GREEN도 RED도 아닌 판정 불가이므로
+        // gates BLOCKED과 같은 등급이다. 못 돌린 self-gate 위에서 리뷰로 조용히 넘기지 않는다.
+        if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+        await d.writeHandoff({ stage, data: v.data, gates });
+        const t = await d.transition({ to: "factory:blocked", reason: `self-gate: ${reason}` });
+        record(["verify: ok", `self-gate: BLOCKED — ${reason}`, ...refusal(t), ...gatesNote, usage]);
+        return 2;
+      }
+      if (sg) {
+        // advisory(비차단) findings는 핸드오프에 실어 리뷰어가 앞서 출발하게 한다.
+        const advisory = advisoryFindings(sg.findings);
+        if (advisory.length) { v.data.self_gate = { advisory: advisory.map((f) => ({ check: f.check, detail: f.detail })) }; d.syncStageArtifact?.(v.data); }
+        if (!sg.ok) {
+          const blocking = sg.findings.filter((f) => f.blocking);
+          const summary = summarizeFindings(blocking);
+          /**
+           * ── RED 경로 ──────────────────────────────────────────────────────────────────────────
+           * `factory:awaiting-review`로 절대 전이하지 않는다. self-gate finding은 결정적·재현 가능하므로,
+           * 그대로 통과시키면 리뷰어의 runnable 검사가 어차피 거부할 것에 리뷰 라운드를 통째로 태운다.
+           *
+           * **빌더가 고칠 수 없는 finding**(보호 경로/하네스 변경 — 예: 하네스가 단일 테스트를 못 돌려
+           * mutation check가 `misconfigured`)은 재시도가 의미 없다 → 곧장 `factory:needs-human`.
+           *
+           * **빌더가 고칠 수 있는 finding**은 스펙 §4.B의 "loop the builder once, else declare"를 구현한다:
+           * 이 head sha에 대한 self-gate-retry 마커를 세어(head로 키잉 — 진짜 수정은 새 head라 카운터를
+           * 리셋한다), attempt 1이면 findings를 실은 마커를 남기고 `factory:planned`로 한 번만 되돌린다
+           * (`in-progress → planned`는 그래프 엣지; `planned → in-progress`가 빌더를 다시 띄운다). 같은
+           * head에서 attempt ≥ 2면 재시도가 실패한 것이므로 `factory:needs-human`으로 에스컬레이션한다.
+           * K(`countTransitionsTo(…, rework)`)는 `→ planned`를 세지 않으므로 이 head별 마커가 1차 상한이다.
+           *
+           * **head-agnostic backstop(SF-A):** head별 상한은 진짜 수정마다 리셋되므로, 매 라운드 새 head를
+           * 뱉으며 계속 RED인 빌더는 attempt를 영원히 1로 유지하며 무한 ping-pong한다. 그래서 head를 무시하고
+           * 이번 재큐 이후 self-gate RED를 전부 세어(`countAllSelfGateRetries`), 총합이 `SELF_GATE_RETRY_BACKSTOP`에
+           * 이르면 "수렴 실패"로 needs-human에 올린다. head별 1회 재시도를 대체하지 않는 바깥 안전망일 뿐이다.
+           *
+           * ── TASK 9 HOOK ───────────────────────────────────────────────────────────────────────
+           * Task 9(one-shot in-run repair, KTB-51)는 여기서 "스테이지 통째 재디스패치" 대신 `sg.findings`를
+           * 빌더에게 세션 안에서 정확히 한 번 되먹이는 루프를 넣는다. 그때도 이 head-키 카운터/에스컬레이션은
+           * 그 바깥의 안전망으로 남는다(in-run 루프가 못 고친 finding이 무한 재진입하지 않도록).
+           */
+          if (harnessFinding(sg.findings)) {
+            await d.writeHandoff({ stage, data: v.data, gates });
+            const t = await d.transition({ to: "factory:needs-human", reason: `self-gate blocked handoff (harness change needed): ${summary}` });
+            record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED (harness) — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+            return t.ok ? 0 : 2;
+          }
+          const head = v.data.head_sha ?? null;
+          const { attempt, total } = d.selfGateRetry
+            ? await d.selfGateRetry({ head, findings: blocking })
+            : { attempt: 2, total: SELF_GATE_RETRY_BACKSTOP };   // 마커 dep이 없으면 재시도를 셀 수 없다 — 무한 루프보다 사람이 낫다(fail closed)
+          await d.writeHandoff({ stage, data: v.data, gates });
+          // 1차 상한: 같은 head에서 두 번째 RED(attempt ≥ 2). 그 바깥의 backstop: head를 무시하고 이번
+          // 재큐 이후 self-gate RED가 SELF_GATE_RETRY_BACKSTOP회에 이르면(head가 매번 달라도) 수렴 실패다.
+          const perHeadBounded = attempt >= 2;
+          const backstop = Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP;
+          const bounded = perHeadBounded || backstop;
+          const to = bounded ? "factory:needs-human" : "factory:planned";
+          const reason = perHeadBounded
+            ? `self-gate findings unresolved after one retry: ${summary}`
+            : backstop
+              ? `self-gate: not converging after ${total} retries`
+              : `self-gate blocked handoff (retry ${attempt}): ${summary}`;
+          const t = await d.transition({ to, reason });
+          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+          return t.ok ? 0 : 2;
+        }
+        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`]);
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
@@ -1993,11 +2199,13 @@ async function main() {
      * `gates` dep이 같은 `mergeBase()`로 MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는
      * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
      */
-    buildContext: async ({ setupDirty = null } = {}) => {
+    buildContext: async ({ setupDirty = null, planRepair = null } = {}) => {
       let base = null;
       try { base = await mergeBase(); }
       catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
-      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty }));
+      // Task 9 (KTB-51): on the plan repair turn, the validator reasons ride into `loaded.json` as
+      // `plan_repair` (the same channel Task 3 uses for self-gate findings) so the planner sees them.
+      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty, planRepair }));
     },
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
@@ -2018,6 +2226,13 @@ async function main() {
      * 셀 수 없다. 없으면 null(첫 라운드) — `reviewFlips`가 빈 배열로 받는다.
      */
     priorReviewVerdicts: async () => latestHandoff(commentsSinceRequeue(await gh.comments(issue)), "review")?.data?.verdicts ?? null,
+    /**
+     * ── 리뷰 효율 Task 8 (Structure G) — 이 피처를 막는 열린 하네스 이슈 번호(없으면 null). ─────────
+     * review 진입 가드가 리뷰 패널을 띄우기 전에 부른다: 값이 있으면 그 라운드는 이슈 안의 변경으로
+     * 못 고칠 must_fix를 재확인할 뿐이므로 주차한다. `findOpenHarnessIssueFor`가 던지면 그대로 던진다 —
+     * 가드가 잡아 **억제하지 않는 쪽**으로 기운다(fail-safe는 소비처에 있다).
+     */
+    dependencyBlock: async () => findOpenHarnessIssueFor({ gh, issue }),
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
     /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
     ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),
@@ -2090,6 +2305,66 @@ async function main() {
     },
     /** 매니페스트 요약(§qaEvidenceSummary) — review 스테이지의 기록과 `factory:approved` 요구조건이 함께 읽는다. */
     qaEvidence: async ({ headSha = null } = {}) => qaEvidenceSummary({ headSha }),
+    /**
+     * ── Structure B (리뷰 효율 Task 3) — implement 핸드오프 직전의 self-gate ──────────────────
+     * `verifyStage`가 통과한 뒤, `factory:awaiting-review` 전이 **직전**에 부른다. 리뷰가 결정적으로
+     * 돌릴 검사(이미 계산된 `gates`·계약 대조 qa 증거·새 테스트 mutation check)를 그대로 합성한다 —
+     * 재료는 전부 러너가 이미 들고 있는 것이라 리뷰 라운드보다 싸다(lib/self-gate.js의 cost note).
+     *
+     * 두 곳에서 로스터·계약이 갈리지 않게 한다: implement의 `ctxCache.roster`는 비어 있으므로(빌더·
+     * verifier는 CHARTER 로스터가 아니다), 계약이 qa의 채점을 받을지는 **diff가 정한 실효 tier의 review
+     * 로스터**로 판단한다 — 리뷰어가 볼 바로 그 로스터다. qa 증거는 `qaEvidenceSummary`가 아니라
+     * `evidenceFor`를 직접 부른다: 전자는 implement의 빈 로스터를 보고 언제나 skip하기 때문이다.
+     */
+    selfGate: async ({ gates }) => {
+      const base = await mergeBase();
+      const diff = await changedFiles({ run, cwd: root, base, harness });
+      const contract = ctxCache?.handoffs?.plan?.done_when ?? [];
+      const tier = ctxCache?.tier_effective ?? ctxCache?.tier ?? charter.tier_default;
+      let roster = [];
+      try { roster = rosterFor(charter, loadRoles(root), "review", tier); } catch { roster = []; }
+      const qaEvidence = () => evidenceFor({
+        root, issue,
+        doneWhen: contract,
+        maturity: ctxCache?.harness?.maturity ?? "M0",
+        touchesData: touchesDataPaths(ctxCache?.handoffs?.triage?.impact_paths ?? []),
+        headSha: ctxCache?.handoffs?.implement?.head_sha ?? null,
+      });
+      /**
+       * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
+       * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
+       * re-runs guardable pins (a red guard is a regression) and surfaces prose pins as advisory.
+       */
+      const review = ctxCache?.handoffs?.review;
+      const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
+      return runSelfGate({
+        root, harness, contract, roster, tier, gates, run,
+        // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
+        // property is violated"; a lightly-edited pre-existing test is not what it judges.
+        changedTests: diff.addedTests, changedSources: diff.sources, qaEvidence, pins,
+      });
+    },
+    /**
+     * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
+     * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt(head별)와
+     * total(head 무시, 이번 재큐 이후 전부, SF-A backstop용)을 돌려준다. run-stage가 이 둘로 라우팅한다
+     * (head별 attempt 1 → planned, ≥2 → needs-human; total ≥ SELF_GATE_RETRY_BACKSTOP → needs-human).
+     * findings는 마커 코멘트에 실려 다음 implement 런의 빌더가 읽는다(context.js loadedFor).
+     */
+    selfGateRetry: async ({ head, findings }) => {
+      const since = commentsSinceRequeue(await gh.comments(issue));
+      const attempt = countSelfGateRetries(since, head) + 1;
+      // head-agnostic backstop(SF-A): 이번 재큐 이후 **모든 head**의 self-gate RED 총합. `since`는 이번
+      // 마커를 남기기 전에 읽었으므로 방금 낼 이번 시도를 +1로 더한다.
+      const total = countAllSelfGateRetries(since) + 1;
+      await gh.comment(issue, selfGateRetryComment({ issue, head, attempt, findings }));
+      return { attempt, total };
+    },
+    /**
+     * nit — verifyStage가 self_gate 부착 **전에** `.factory/out/<stage>.json`을 굳혔다. self_gate를
+     * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
+     */
+    syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
     verifyStage: ({ out, gates }) => {
       // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
       // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).

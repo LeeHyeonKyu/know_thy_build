@@ -53,7 +53,31 @@ node  = "22"
 # placeholder that reports "lint GREEN" is worse than no lint gate at all (audit P1-7).
 lint       = "npm run lint"
 unit       = "npx vitest run --reporter=json --outputFile=.factory/out/unit.json"
-test_files = "npx vitest run {files}"            # prove-test / new-test-repeat
+test_files = "npx vitest run {files}"            # prove-test / new-test-repeat / new-test mutation check
+# new-test mutation check (self-gate, Structure D', spec §4): the DUAL of prove-test. prove-test proves
+# a new test fails WITHOUT the impl; this proves it fails when the asserted PROPERTY is violated. It
+# copies the implementer's UNCOMMITTED changed sources + new tests into a throwaway base worktree,
+# installs deps there ([runtime].setup / lockfile — exactly like prove-test; a source-only worktree has
+# no runner, audit M2), then for each new test: runs it UNMUTATED first (baseline MUST be green — a test
+# that can't load or is red on its own is `skipped` as inconclusive, never judged), then mutates the
+# SOURCE it imports and re-runs via `test_files` above. A `survivor` = baseline green AND a mutation ran
+# cleanly (loaded, reached assertions) AND the test STAYED green (asserts nothing / not fail-closed —
+# own-cal R1 cf1: deleting the safety warning still passed 5/5). A `kill` = baseline green → mutated red
+# by an ASSERTION; a red that is a module-resolution/parse/SyntaxError/transform error is inconclusive
+# for that mutation (it never ran) → the next mutator is tried. It tries ALL applicable mutations (each
+# on FRESH source) — a KILL wins as soon as ANY cleanly-run mutation goes assertion-red; a SURVIVOR is
+# declared only after EVERY cleanly-run mutation was survived (never on the first survived one — a target
+# often carries an unrelated token ordered before the asserted value, and stopping there would falsely
+# brand a fail-closed test vacuous). LIMITS — deliberately UNDER-fires: the mutations are shallow,
+# syntax-preserving text transforms, NOT a semantic engine (no AST, no coverage). The ordered set, each
+# applied to the FIRST eligible occurrence:
+# [1] flip the first boolean literal, [2] invert the first ===/!==/==/!=/<=/>= (bare </> left alone —
+# they collide with generics/arrows), [3] replace the first non-import string literal's contents with a
+# `__MUTATED__` sentinel (swallows template-literal ${…} interpolations), [4] bump the first integer by
+# one, [5] first `&&`→`||`. No resolvable source import, no applicable mutation, or every mutation only
+# red-for-the-wrong-reason → `skipped` with a reason, never a survivor: the check never blocks work on
+# "couldn't mutate". A found survivor is a real signal; the absence of survivors is not proof a test is
+# complete.
 test_one   = "npx vitest run {file} -t {name}"   # classify-failure. Scripts quote {file}/{name} — do not add quotes here
 lint_file  = "npx eslint {file}"                 # lint-touched.sh (logging only)
 

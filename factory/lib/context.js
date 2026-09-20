@@ -4,6 +4,8 @@ import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor } from ".
 import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
+import { buildHouseRules } from "./house-rules.js";
+import { commentsSinceRequeue, latestSelfGateFindings } from "./retro/issue-comments.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -55,7 +57,14 @@ export async function resolveTier({ run, cwd, base, harness, tier }) {
  * 도구는 "coverage: complete", 러너는 "missing"을 말한다 — 같은 `done_when`의 두 독자가 갈린다.
  * 필드 하나가 KTB #3 모양(도구와 게이트가 '증거가 충분한가'를 다르게 답하는 것)을 재생산한다.
  */
-const DONE_WHEN_FIELDS = ["id", "text", "verify", "level", "ui"];
+/**
+ * `check`·`rubric`이 이 목록에 있어야 하는 이유(리뷰 효율 Task 1, `ui`의 A-MF1과 같은 부류): 수용 계약은
+ * `check {kind, ref}`(어떻게 확인되는가)와 `rubric`(리뷰어가 적용할 한 줄 기준)으로 산다. cold read 리뷰어
+ * (Task 7)와 qa 도구는 이 투영본의 `done_when`만 읽으므로, 여기서 빠지면 계약이 그들에게 닿지 않는다 —
+ * 새 계획은 `verify`도 없어 id/text/level만 남는다. 계약을 만든 스테이지와 소비하는 스테이지가 갈리지
+ * 않도록 두 필드를 투영에 싣는다.
+ */
+const DONE_WHEN_FIELDS = ["id", "text", "verify", "check", "rubric", "level", "ui"];
 const pick = (o, keys) => {
   const out = {};
   for (const k of keys) if (o != null && o[k] !== undefined) out[k] = o[k];
@@ -85,7 +94,7 @@ export function acceptanceOf(body) {
  * (`roles.toml [review.spec-conformance] cold_read = false`), 계약 전체를 보는 것이 그 임무다.
  *
  * cold read 역할이 받는 것은 **이슈·tier·로스터·자기 lessons·PR 번호/head sha·게이트 요약·계획의
- * `done_when`(id/text/verify/level)** 뿐이다. 받지 않는 것: plan 산문·dissent_log·`files_expected`·
+ * `done_when`(id/text/verify/check/rubric/level/ui — 수용 계약 포함)** 뿐이다. 받지 않는 것: plan 산문·dissent_log·`files_expected`·
  * implement handoff(verifier 판정·tests_added·PR 설명)·다른 리뷰어의 판정. `handoffs` 키 자체가 없다.
  * PR 번호와 head sha는 예외다 — 그것은 builder의 **설명**이 아니라 "무엇을 판정하는가"의 좌표다.
  *
@@ -145,7 +154,7 @@ export function disputedFrom(comments) {
   return (Array.isArray(latest.obj.responses) ? latest.obj.responses : []).filter((r) => r?.status === "disputed");
 }
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null }) {
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -206,8 +215,14 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * `loaded.json`을 타고 간다. 비어 있는 것이 정상이다(대부분의 하네스는 트리를 더럽히지 않는다).
      */
     setup_dirty: [...new Set((setupDirty?.entries || []).map((e) => e.path))],
+    /**
+     * Task 9 (Structure H, KTB-51) — on a plan validator repair turn, the machine-checkable reasons
+     * the last handoff failed on. Present only on the one repair turn (run-stage passes `planRepair`);
+     * the planner reads them from `loaded.plan_repair` and fixes exactly those before re-emitting.
+     */
+    ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length ? { plan_repair: planRepair } : {}),
   };
-  ctx.loaded = await loadedFor({ ctx, roleBlock, gh });
+  ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
   mkdirSync(join(root, ".factory/out"), { recursive: true });
   writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify(ctx, null, 2));
   // 역할별 파일(H4). 오케스트레이터만 `context.json`(전체)을 보고, 역할은 자기 이름이 붙은 파일만 본다.
@@ -216,6 +231,17 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   }
   // 디스패처가 Workflow의 `args.loaded`로 그대로 넘기는 작은 파일(M5) — 로더 에이전트의 대체물.
   writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(ctx.loaded, null, 2));
+  /**
+   * Structure C (리뷰 효율 Task 2/3) — implement 스테이지에서 house-rules 다이제스트를 파일로 떨군다.
+   * 빌더는 워크플로 스크립트가 아니라 **자기 세션**에서 이 파일을 읽는다(프롬프트가 경로로 가리킨다):
+   * 저장소의 build/run/test 레시피·load-bearing 경로·`## Preserve`/NEVER_AUTOMATE 불변식을 한 곳에서
+   * 보게 해, 리뷰어가 이미 쥔 규칙 위에서 첫 초안을 쓰게 한다(own-cal R2 cf1/cf2: 레시피에서 빠진
+   * migrate-류 단계). 절대 throw하지 않으므로 컨텍스트 조립을 죽이지 않는다.
+   */
+  if (stage === "implement") {
+    try { writeFileSync(join(root, ".factory/out/house-rules.md"), buildHouseRules({ root, charter, harness })); }
+    catch { /* house rules는 편의 자료다 — 못 쓰면 그냥 없이 간다 */ }
+  }
   return ctx;
 }
 
@@ -223,13 +249,27 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
  * 로더가 돌려주던 것과 **같은 모양**의 객체를, LLM 없이. triage의 로스터는 context.json에서 비어 있으므로
  * (단일 명명 역할이지 토론 로스터가 아니다) 로더의 특례와 똑같이 `[{name:'triage', …}]`로 채운다.
  */
-async function loadedFor({ ctx, roleBlock, gh }) {
+async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
   const impl = ctx.handoffs?.implement ?? {};
   const pr = typeof impl.pr === "number" ? impl.pr : undefined;
+  /**
+   * Structure B (리뷰 효율 Task 3, should_fix 1) — self-gate가 이 head를 막았으면 그 findings를 빌더에게
+   * 되먹인다. 재디스패치된 빌더가 **왜** 튕겼는지 모르면 blind 재시도라 red를 못 지운다(그게 루프의
+   * 엔진이었다). head sha로 조회하므로 진짜 수정(새 커밋)은 findings가 없는 새 head가 되어 자연히 사라진다.
+   */
+  const selfGateFindings = typeof impl.head_sha === "string"
+    ? latestSelfGateFindings(commentsSinceRequeue(comments), impl.head_sha)
+    : null;
   const review = ctx.handoffs?.review ?? null;
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
     : [];
+  /**
+   * Structure D (리뷰 효율 Task 5) — rework 핸드오프가 실은 **회귀 핀**을 빌더에게 되먹인다. guard가
+   * 붙은 핀은 다음 self-gate의 하드 게이트라 빌더가 그것을 먼저 알아야 하고, 산문 핀은 체크리스트다.
+   * self-gate 자신도 `ctxCache.handoffs.review.pins`를 직접 읽으므로(run-stage), 이 값은 빌더 프롬프트용이다.
+   */
+  const reworkPins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins.filter(Boolean) : [];
   let disputed = [];
   // PR 코멘트 조회가 실패해도 스테이지를 죽이지 않는다 — 분쟁 목록이 비면 그 라운드에 분쟁이 없었던
   // 것과 같은 경로를 타고, 살아남은 must_fix는 아래 `must_fix`가 그대로 들고 간다(fail-safe, not fail-open:
@@ -273,5 +313,14 @@ async function loadedFor({ ctx, roleBlock, gh }) {
     setup_dirty: ctx.setup_dirty ?? [],
     must_fix: mustFix,
     disputed,
+    // Task 5 — regression pins carried from the prior rework round (guardable → hard gate at the
+    // self-gate; prose → advisory checklist). Absent on a first implement.
+    ...(reworkPins.length ? { rework_pins: reworkPins } : {}),
+    // Structure B (Task 3): the self-gate findings that bounced this head, if any — the builder fixes
+    // them before the handoff (factory-implement.js). Absent when the self-gate did not block.
+    ...(Array.isArray(selfGateFindings) && selfGateFindings.length ? { self_gate_findings: selfGateFindings } : {}),
+    // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
+    // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
+    ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
   };
 }
