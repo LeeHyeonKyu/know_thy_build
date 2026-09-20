@@ -99,6 +99,17 @@ plan으로 간다. 감당할 수 있는 이유는 뒤의 층이 남아 있어서
 - every stage transition goes through transition.js
 - tests are load-bearing (no skips)
 
+## 개선 이슈 (improvement issues)
+이 저장소는 팩토리를 **만드는** 곳이자 도그푸드로 **쓰는** 곳이라 두 대상이 한 저장소에서 만난다
+(ADR-027). 소견은 원인 파일의 owner로 갈린다: `owner: user`(이 저장소의 `.factory/harness.toml`,
+이 CHARTER, `scripts/*`)면 **harness**이고 `factory:harness` 이슈로 여기 선다. `owner: factory`
+(`factory/lib/**`·`factory/bin/**`·`templates/**`·`.claude/agents/*.md`)면 **ktb**이고, 여기가 곧
+upstream이므로 `factory-improvement` + `backlog` 이슈로 **역시 여기** 선다 — 라벨이 둘을 가른다.
+한 소견이 두 tag를 함께 달 수 있고, 원인 파일을 고르지 못한 소견은 `ambiguous`로 후보를 둘 다 실어
+원래 이슈에 남는다. 같은 원인이 다시 나오면 새 이슈가 아니라 기존 이슈의 `## Evidence`에 목격이
+하나 더 붙는다(fingerprint dedupe). 둘 다 `backlog`으로 착지한다 — 팩토리가 자기 자신에 대해 무엇을
+먼저 고칠지는 사람이 고르고, 루프는 이슈를 열 뿐 스스로 고치지 않는다.
+
 ## Retro
 every_merges: { initial: 1, min: 1, max: 20 }   # N은 수확량에 따라 자가 조정 (§8.4)
 light_on_merge: true

@@ -130,6 +130,24 @@ FAIL(`charter.merge-human-gate-unset`)이다 — 아무도 고른 적 없는 것
 - (fill in)
 - (fill in)
 
+## 개선 이슈 (improvement issues)
+"팩토리를 개선한다"는 말은 **서로 owner가 다른 두 가지**다. retro가 소견마다 **원인 파일의 owner**로
+갈라 보낸다(설치 매니페스트가 이미 모든 설치 파일을 `factory`/`user`로 표시한다 — 판정은 결정적이다):
+- **harness** — 이 저장소가 소유한 팩토리 설정(`.factory/harness.toml`, 이 CHARTER, `scripts/*`,
+  보호 경로 목록, 성숙도). 고치는 사람은 이 저장소의 주인이고, **여기**에 `factory:harness` 이슈로 선다.
+- **ktb** — know-thy-build가 배포한 것(`.factory/**` 엔진, `.claude/agents/*.md` 프롬프트, 템플릿·기본값,
+  스킬, tier/로스터 정책). 고치는 쪽은 KTB이고, `harness.toml`의 `[factory].upstream`이 가리키는
+  저장소에 **`factory-improvement` 이슈**로 선다. `upstream`을 적지 않으면 그 소견은 원래 이슈에
+  코멘트로만 남는다 — 저장소 밖으로 나가는 쓰기는 **적어 둔 저장소가 있을 때만** 일어난다.
+
+한 소견이 두 tag를 함께 달 수 있고(KTB의 안내가 약해서 하네스 실수를 못 막은 경우), 원인 파일을
+고르지 못한 소견은 `ambiguous`로 **후보를 둘 다 실어** 원래 이슈에 남는다 — 어느 쪽도 조용히
+버리지 않는다. 같은 원인이 여러 이슈에서 다시 나오면 새 이슈가 아니라 기존 이슈의 `## Evidence`에
+목격이 하나 더 붙는다(fingerprint dedupe).
+
+두 경로 모두 이슈는 **`backlog`으로 착지한다** — 팩토리는 증거를 들고 와서 말할 뿐이고, 무엇을 먼저
+고칠지는 사람이 트리아지한다. 루프는 이슈를 열 뿐 하네스도 KTB도 스스로 고치지 않는다.
+
 ## Retro
 every_merges: { initial: 1, min: 1, max: 20 }   # N은 수확량에 따라 자가 조정 (§8.4)
 light_on_merge: true
