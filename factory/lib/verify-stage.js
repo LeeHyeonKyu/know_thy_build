@@ -191,12 +191,18 @@ function testGuardOf(dw) {
   if (typeof dw.verify === "string" && isRunnableTestRef(dw.verify)) return { kind: "test", ref: dw.verify.trim() };
   return null;
 }
+const RE_META = /[.*+?^${}()|[\]\\]/g;
+/** `ref` as a whole-token match — a test name is bounded by non-`[\w-]` on both sides, so `test_7`
+ * never links a `where` that only names `test_7_create` (nit 1: substring match false-linked prefixes). */
+const namesTestRef = (where, ref) => new RegExp(`(?<![\\w-])${ref.replace(RE_META, "\\$&")}(?![\\w-])`).test(where);
 export function deriveReworkPins({ mustFix = [], doneWhen = [] } = {}) {
   const dw = (Array.isArray(doneWhen) ? doneWhen : []).filter((d) => d && typeof d === "object");
+  // First-in-array wins for both maps — done_when ids are meant to be unique, but if two entries collide
+  // (or two `covers` the same dissent id) the earlier one is the deterministic pick (nit 2).
   const byId = new Map();
-  for (const d of dw) if (typeof d.id === "string" && d.id) byId.set(d.id, d);
+  for (const d of dw) if (typeof d.id === "string" && d.id && !byId.has(d.id)) byId.set(d.id, d);
   const byCovered = new Map();
-  for (const d of dw) if (Array.isArray(d.covers)) for (const c of d.covers) byCovered.set(String(c), d);
+  for (const d of dw) if (Array.isArray(d.covers)) for (const c of d.covers) if (!byCovered.has(String(c))) byCovered.set(String(c), d);
   const findLinked = (m) => {
     const id = m?.id != null ? String(m.id) : "";
     if (id && byId.has(id)) return byId.get(id);
@@ -205,7 +211,7 @@ export function deriveReworkPins({ mustFix = [], doneWhen = [] } = {}) {
     if (where) {
       for (const d of dw) {
         const g = testGuardOf(d);
-        if (g && where.includes(g.ref)) return d;
+        if (g && namesTestRef(where, g.ref)) return d;
       }
     }
     return null;

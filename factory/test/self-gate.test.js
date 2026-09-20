@@ -192,6 +192,55 @@ test("Task 5: a guardable pin whose guard cannot run (module/parse error, no tes
   expect(advisoryFindings(res.findings).length).toBeGreaterThan(0);
 });
 
+// Portability (should_fix 1): the guard runs through the harness's OWN named-test contract (test_one),
+// NOT a hardcoded `-t`. A Flutter harness's test_one is `flutter test {file} --plain-name {name}`.
+const flutterHarness = { commands: { test_files: "flutter test {files}", test_one: "flutter test {file} --plain-name {name}" }, test: { test_glob: ["test/**/*_test.dart"] } };
+
+test("Task 5: a Flutter guard runs through the harness's own test_one (--plain-name), a real red → blocking", async () => {
+  const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1].includes("flutter") && a[1].includes("--plain-name"), result: { code: 1, stdout: "", stderr: "Expected: <201>\n  Actual: <500>" } }]);
+  const res = await runSelfGate({
+    ...pinBase, harness: flutterHarness, run, changedTests: [{ file: "test/warn_test.dart" }],
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_create" }, text: "creates a note" }],
+  });
+  expect(res.ok).toBe(false);
+  const blocking = res.findings.filter((f) => f.blocking);
+  expect(blocking.flatMap((f) => f.ids || [])).toContain("dw1");
+  // the command used the harness's flag, never `-t` — proof the runner was addressed portably.
+  expect(run.calls.some((c) => c.args[1].includes("--plain-name") && !c.args[1].includes("-t "))).toBe(true);
+});
+
+test("should_fix 1 / portability: a non-JS harness that cannot express a name filter (no test_one) → guard is ADVISORY, not blocking", async () => {
+  const nonJs = { commands: { test_files: "flutter test {files}" }, test: { test_glob: ["test/**/*_test.dart"] } };
+  const res = await runSelfGate({
+    // run is empty on purpose: an unknown runner must never be invoked with a fabricated `-t`, so the
+    // guard is downgraded to advisory WITHOUT running anything (a run call would throw here).
+    ...pinBase, harness: nonJs, run: makeFakeRun([]), changedTests: [{ file: "test/warn_test.dart" }],
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_create" }, text: "creates a note" }],
+  });
+  expect(res.ok).toBe(true);
+  expect(res.findings.filter((f) => f.blocking)).toEqual([]);
+  expect(advisoryFindings(res.findings).map((f) => f.detail).join(" ")).toContain("dw1");
+});
+
+test("Task 5: a guard whose runner rejects the command (unrecognized option) classifies as can't-run → advisory, never a false regression", async () => {
+  const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1].includes("flutter"), result: { code: 64, stdout: "", stderr: 'Could not find an option named "-t".' } }]);
+  const res = await runSelfGate({
+    ...pinBase, harness: flutterHarness, run, changedTests: [{ file: "test/warn_test.dart" }],
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_create" }, text: "t" }],
+  });
+  expect(res.ok).toBe(true);
+  expect(res.findings.filter((f) => f.blocking)).toEqual([]);
+});
+
+test("Task 5: with no test_one, a recognizably vitest test_files still takes the -t fallback (JS name filter)", async () => {
+  const res = await runSelfGate({
+    ...pinBase, run: vitestRun(assertionRed),   // pinBase.harness is the vitest fixture (test_files only)
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_create" }, text: "t" }],
+  });
+  expect(res.ok).toBe(false);
+  expect(res.findings.filter((f) => f.blocking).flatMap((f) => f.ids || [])).toContain("dw1");
+});
+
 // mutation-check skips (deliberately under-fires) and are advisory, not blocking.
 test("mutation-check skips are advisory, not blocking", async () => {
   const fs = fakeFs({ "/root/test/x.test.js": "// no import", "/wt/x": "x" });

@@ -227,6 +227,10 @@ test("Task 5: a guard links via done_when.covers and via a test name named in mu
   expect(deriveReworkPins({ mustFix: [{ id: "dw4", where: "w", claim: "c" }], doneWhen })[0].guard).toBeNull();
   // (5) no acceptance contract at all → every pin is advisory (no fabricated guard).
   expect(deriveReworkPins({ mustFix: [{ id: "dw3", where: "w", claim: "c" }], doneWhen: [] })[0].guard).toBeNull();
+  // (6) nit 1 — the where-names-ref link is a WHOLE-TOKEN match: a `test_7` ref must NOT link to a
+  // `where` that only names the longer `test_7_create` (substring false-link).
+  const prefix = [{ id: "dwP", text: "x", level: "unit", check: { kind: "test", ref: "test_7" }, rubric: "r" }];
+  expect(deriveReworkPins({ mustFix: [{ id: "mfY", where: "broke test_7_create", claim: "c" }], doneWhen: prefix })[0].guard).toBeNull();
 });
 
 test("plan validator does not run for other stages", () => {

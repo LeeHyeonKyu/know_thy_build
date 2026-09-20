@@ -55,29 +55,63 @@ const CONTRACT_KINDS = new Set(["finish", "gate"]);
  * loop — there is nothing to run, so nothing can stay red forever.
  *
  * **A red guard blocks ONLY when the red is a real assertion failure.** A guard that cannot even run in
- * this tree (module/parse error, or no test matched the name) is `undecidable`, not a regression — it is
- * surfaced as advisory, never blocking. Fail-closing on a guard we cannot run would resurrect the very
- * unsatisfiable loop the prose/guard split is designed to avoid.
+ * this tree (module/parse error, no test matched the name, or a runner that rejected the command) is
+ * `undecidable`, not a regression — it is surfaced as advisory, never blocking. Fail-closing on a guard
+ * we cannot run would resurrect the very unsatisfiable loop the prose/guard split is designed to avoid.
+ *
+ * **The guard runs through the harness's OWN named-test contract (`commands.test_one`), not a hardcoded
+ * flag.** A pin carries a test NAME (the contract `check.ref`), and `test_one`'s `{file}`+`{name}`
+ * placeholders already encode each ecosystem's name-filter (vitest `-t`, Flutter `--plain-name`, pytest
+ * `-k`). `{file}` is resolved from the self-gate's changed-test set (the PR's tests, added vs. merge-base,
+ * so a prior round's guard test is in it) or the harness `[test].test_glob`. Degrade to ADVISORY when
+ * `test_one` is absent, the file can't be resolved, or the command lacks its placeholders. Only when
+ * `test_one` is absent AND `test_files` is a recognizably vitest/jest command do we fall back to `-t`
+ * (a JS name-filter) — never fabricate `-t` on an unknown runner (own-cal Flutter: `flutter test -t …`
+ * → "Could not find an option named -t", which would otherwise mis-score as a real regression).
  */
-const PIN_CANNOT_RUN = /no test(?:s| files)?\s+(?:found|matched)|does not match|passWithNoTests/i;
+const PIN_CANNOT_RUN = /no tests?\s+(?:found|matched|ran|to run)|does not match|passwithnotests|could not find an option|unrecognized (?:option|argument)|unknown option|no such option|invalid option|unexpected argument|^usage:/im;
+/** A `test_files` command whose runner takes a `-t` name pattern (vitest/jest). Only these may take the
+ * `-t` fallback when the portable `test_one` is absent. */
+const JS_NAME_FILTER_RUNNER = /\bvitest\b|\bjest\b/i;
 
-/** The command that re-runs a pin's guard test BY NAME (the acceptance contract's `check.ref`, not a
- * file). We hold the test name, not its file, so we filter by name via the harness's per-file test
- * runner — for vitest/jest that is `-t <name>`. No `test_files` command → we cannot run it (advisory). */
-function pinGuardCommand(harness, name) {
-  const base = harness?.commands?.test_files;
-  if (typeof base !== "string" || !base) return null;
-  return base.replaceAll("{files}", `-t ${q(name)}`);
+/** Quoted `{file}` argument for `test_one`: prefer the PR's changed test files (real paths, added vs.
+ * merge-base — includes prior rounds' guard tests), else the harness `[test].test_glob`. null → the
+ * guard cannot be located and the caller degrades to advisory. */
+function guardFileArg(harness, changedTests) {
+  const files = (Array.isArray(changedTests) ? changedTests : [])
+    .map((e) => (typeof e === "string" ? e : e?.file))
+    .filter((f) => typeof f === "string" && f);
+  if (files.length) return files.map(q).join(" ");
+  const globs = (harness?.test?.test_glob || []).filter((g) => typeof g === "string" && g);
+  if (globs.length) return globs.map(q).join(" ");
+  return null;
+}
+
+/** The command that re-runs a pin's guard test by NAME through the harness's own contract. Returns null
+ * (→ advisory) when no portable path exists — never a fabricated flag on an unknown runner. */
+function pinGuardCommand(harness, name, fileArg) {
+  const one = harness?.commands?.test_one;
+  if (typeof one === "string" && one.includes("{file}") && one.includes("{name}") && fileArg) {
+    return one.replaceAll("{file}", fileArg).replaceAll("{name}", q(name));
+  }
+  // Fall back to `-t` ONLY when there is no test_one AND test_files is a recognizably vitest/jest runner.
+  const files = harness?.commands?.test_files;
+  if (!one && typeof files === "string" && files.includes("{files}") && JS_NAME_FILTER_RUNNER.test(files)) {
+    return files.replaceAll("{files}", `-t ${q(name)}`);
+  }
+  return null;
 }
 
 /**
- * Evaluate carried pins. Guardable pins run their guard test; a real assertion-red is a blocking
- * regression naming the pin id. Prose pins (and un-runnable guards) are advisory only. Returns
- * `{ findings, ran }` — `ran` is true iff at least one guard test was actually executed.
+ * Evaluate carried pins. Guardable pins run their guard test through the harness's named-test contract;
+ * a real assertion-red is a blocking regression naming the pin id. Prose pins, un-locatable guards, and
+ * runners that cannot express a name filter are advisory only (never blocking → no unsatisfiable loop).
+ * Returns `{ findings, ran }` — `ran` is true iff at least one guard test was actually executed.
  */
-export async function evaluatePins({ pins = [], run, harness, root, cwd = root } = {}) {
+export async function evaluatePins({ pins = [], run, harness, root, cwd = root, changedTests = [] } = {}) {
   const findings = [];
   let ran = false;
+  const fileArg = guardFileArg(harness, changedTests);
   for (const p of Array.isArray(pins) ? pins : []) {
     if (!p || typeof p !== "object") continue;
     const id = p.id != null ? String(p.id) : "";
@@ -89,9 +123,11 @@ export async function evaluatePins({ pins = [], run, harness, root, cwd = root }
       continue;
     }
     const ref = guard.ref.trim();
-    const cmd = pinGuardCommand(harness, ref);
+    const cmd = pinGuardCommand(harness, ref, fileArg);
     if (!cmd || typeof run !== "function") {
-      findings.push({ check: "pin", blocking: false, ids: [id], detail: `pin ${id}: guard ${ref} not runnable (no per-file test command) — advisory: ${text}` });
+      // No portable way to run one named test on this harness (no test_one, non-JS test_files, or the
+      // guard file could not be located) → advisory, NEVER a false regression on an unknown runner.
+      findings.push({ check: "pin", blocking: false, ids: [id], detail: `pin ${id}: guard ${ref} not runnable on this harness (no named-test command) — advisory: ${text}` });
       continue;
     }
     ran = true;
@@ -101,7 +137,8 @@ export async function evaluatePins({ pins = [], run, harness, root, cwd = root }
     const out = `${r?.stdout || ""}\n${r?.stderr || ""}`;
     if (r?.code === 0) continue;                                       // green — the pinned property still holds
     if (isWrongReasonRed(out) || PIN_CANNOT_RUN.test(out)) {
-      // red for the WRONG reason (did not load / no test matched) — undecidable, never a regression.
+      // red for the WRONG reason (did not load / no test matched / the runner rejected the command) —
+      // undecidable, never a regression. A malformed/unrecognized runner error lands here, not blocking.
       findings.push({ check: "pin", blocking: false, ids: [id], detail: `pin ${id}: guard ${ref} could not be evaluated (did not run) — advisory: ${text}` });
       continue;
     }
@@ -205,7 +242,7 @@ export async function runSelfGate({
   // regression naming the pin id. Prose pins are advisory only — no unsatisfiable loop (spec §9 Q5).
   if (Array.isArray(pins) && pins.length) {
     ranChecks.push("pins");
-    const { findings: pinFindings } = await evaluatePins({ pins, run, harness, root });
+    const { findings: pinFindings } = await evaluatePins({ pins, run, harness, root, changedTests });
     findings.push(...pinFindings);
   }
 

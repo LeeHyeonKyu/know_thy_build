@@ -212,6 +212,37 @@ test("implement: a self-gate RED on a NEW head resets to one retry (head-keyed c
   expect(latestSelfGateFindings(store.map((b) => ({ body: b })), H2)[0].detail).toContain("survivor");
 });
 
+// Task 5 (should_fix 2): a BLOCKING regression pin composes with a Task-3 self-gate finding in ONE
+// findings array → ONE selfGateRetry marker (no double-count) → one bounded retry (planned), then a
+// second RED on the same head escalates to needs-human. The pin is not a harnessFinding, so it takes
+// the bounded planned→needs-human route, never straight to needs-human.
+test("implement: a blocking regression pin + a self-gate finding share one retry marker → planned, then needs-human on the same head", async () => {
+  const findings = [
+    { check: "pin", blocking: true, ids: ["dw1"], detail: "regression: pin dw1 guard test_create is red — a prior fix regressed" },
+    { check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing" },
+  ];
+  const retried = [];
+  const first = selfGateDeps({
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    selfGateRetry: async ({ head, findings: f }) => { retried.push({ head, findings: f }); return { attempt: 1 }; },
+    selfGate: async () => ({ ok: false, ranChecks: ["pins", "mutation"], findings }),
+  });
+  expect(await runStage({ stage: "implement", issue: 46, deps: first, runnerId: "r1" })).toBe(0);
+  expect(first.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");   // bounded, not straight to human
+  expect(retried).toHaveLength(1);                                            // ONE marker for BOTH findings
+  expect(retried[0].findings).toHaveLength(2);
+  expect(retried[0].findings.flatMap((f) => f.ids || [])).toContain("dw1");
+
+  const second = selfGateDeps({
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+    selfGateRetry: async () => ({ attempt: 2 }),                              // same head already retried once
+    selfGate: async () => ({ ok: false, ranChecks: ["pins"], findings: [findings[0]] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 46, deps: second, runnerId: "r1" })).toBe(0);
+  expect(second.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  expect(second.transition.mock.calls.at(-1)[0].reason).toContain("unresolved after one retry");
+});
+
 // A harness-class finding the builder cannot fix routes to a human, not a builder retry.
 test("implement: a harness-class self-gate finding routes to needs-human, not planned", async () => {
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
