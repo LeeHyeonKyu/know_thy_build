@@ -280,6 +280,37 @@ The reduced static model is deliberate: implementing the same cost sum twice is 
 
 Design and rationale: [`docs/superpowers/specs/2026-09-10-factory-design.md`](docs/superpowers/specs/2026-09-10-factory-design.md) · decisions: [`docs/factory/DECISIONS.md`](docs/factory/DECISIONS.md)
 
+### Watching a run — `factory analyze`
+
+The board answers "where is it now". When a run has already **failed**, the question is "why", and that answer used to live in five to seven places: the `FACTORY_GATES:` line on the records branch, the `gates-detail:` line beside it, the self-gate retry comment, the transition-refused comment, the review handoff, and the `usage:` line. `factory analyze` prints all of it as one timeline.
+
+```bash
+npx know-thy-build factory analyze 39           # that issue's whole run, stage by stage
+npx know-thy-build factory analyze 39 --json    # the same data, for a script
+npx know-thy-build factory analyze --health     # the aggregated behavioural signals
+```
+
+Per stage-run, in record order: the stage, runner and run id, the artifact pointer, the `FACTORY_GATES` summary plus **each failing gate's detail** (the failing test names, the exit code, whether the report parsed, and the head of the output snippet), the self-gate result (ran / skipped / blocked, and the KTB version that judged it), the per-role context manifest (what each reviewer was actually shown — the way a starved role becomes visible), the review verdicts with every `must_fix`, the transitions including refusals and their reasons, and the cost both for the stage and **per agent**.
+
+Then the findings, classified by the very same functions the retro uses on merge (`harvestFindings` + `classifyFinding`) — so a `[ktb]` tag here is a prediction you can trust: it is the issue the retro would open upstream. Each finding carries its tags, causal path and owner, its attribution evidence, and its fingerprint.
+
+```
+── 2. implement · 2026-09-20T10:08Z · gha-99001 (run 99001)
+   FACTORY_GATES: level=fast status=RED passed=1 failed=1 failing=unit …
+   gate unit: RED (exit 1, report parsed)
+     failing: plan roster contract > carries the debate roster
+   self-gate: BLOCKED · ran=gates,contract · ktb 1.3.2
+   cost: $5.45 · 131.0k in / 17.2k out · 42 turns
+     agent builder:impl (subagent/done): $3.51 · 90.0k in / 12.0k out · 30 turns
+   transition REFUSED: factory:in-progress → factory:awaiting-review — plan roles [synthesizer,skeptic] != roster []
+
+Findings · 3 (2 the retro would route)
+   [ktb] transition-refused — plan roles [synthesizer,skeptic] != roster []
+       causal: .factory/lib/requirements.js · owner=factory · high confidence · routed
+```
+
+**It never needs an Actions artifact.** Everything above is read from the `factory/records` branch and the issue's comments, both of which are durable — so a run from three months ago reads exactly like this morning's, long after the 7-day artifacts expired. It also does not need a local clone of the records branch: the default read is a single `gh api …/contents?ref=factory/records` call, so it works from a laptop. Read-only, like `factory status` — it opens no issue, writes no comment and moves no label.
+
 ---
 
 ## Roles
