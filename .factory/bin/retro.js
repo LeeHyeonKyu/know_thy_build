@@ -198,7 +198,14 @@ export function accumulateStats(total, window) {
   // (비율의 평균은 비율이 아니다 — overlap_ratio·qa_na_ratio와 같은 규약). plan/implement 라운드는
   // review와 같은 병합 가중 평균으로 롤업한다. revert_rate는 누적 머지가 0이면 null(잴 것이 없음).
   const escapedDefects = (Number(t.escaped_defects) || 0) + (Number(w.escaped_defects) || 0);
-  const reverts = (Number(t.reverts) || 0) + (Number(w.reverts) || 0);
+  // revert는 **합**이 아니라 되돌린 머지 이슈 번호의 **유니온**으로 센다 — 뒤늦게 관측된 revert(그
+  // 머지의 창보다 늦게 도착한 것)가 제 머지에 착지해야 하고(false-low 방지), 같은 revert가 여러 창에서
+  // 다시 관측돼도 이슈 번호로 중복이 제거돼야 한다. 누적 revert_rate는 그 유니온 크기 ÷ 누적 머지다.
+  const revertedSet = new Set([
+    ...(Array.isArray(t.reverted_issues) ? t.reverted_issues : []),
+    ...(Array.isArray(w.reverted_issues) ? w.reverted_issues : []),
+  ]);
+  const reverts = revertedSet.size;
   const rejects = { ...(t.rejects_by_role || {}) };
   for (const [role, n] of Object.entries(w.rejects_by_role || {})) rejects[role] = (rejects[role] || 0) + (Number(n) || 0);
   // P2-13: 겹침은 **비율의 합**이 아니라 분자·분모의 합에서 다시 나온다(비율의 평균은 비율이 아니다).
@@ -223,6 +230,7 @@ export function accumulateStats(total, window) {
     implement_rounds_avg: round2(weightedAvg("implement_rounds_avg")),
     escaped_defects: escapedDefects,
     reverts,
+    reverted_issues: [...revertedSet].sort((a, b) => a - b),
     revert_rate: merged ? round2(reverts / merged) : null,
     rejects_by_role: rejects,
     review_runs: (Number(t.review_runs) || 0) + (Number(w.review_runs) || 0),
@@ -304,9 +312,15 @@ const revertCell = (s) => {
  */
 export const QUALITY_BASELINE = Object.freeze({
   note: "KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds",
+  // 게이트가 "≤ baseline"으로 비교할 **수치** 문턱(should_fix). $·라운드만으로는 escaped·revert에
+  // 문턱이 없어 실행자가 추론해야 했다 — 이 세션의 관측값으로 동결한다: 둘 다 0.
+  escaped_defects: 0,
+  revert_rate: 0,
+  // rounds_per_issue 예시(단순화가 목표로 낮추려는 값)와 escaped_defects 예시(post-approval find)는
+  // **서로 다른 두 신호**다 — 게이트가 둘 다 읽는다.
+  rounds_exemplar: "own-cal #3 = 4 review rounds (reject-heavy; caught in review, escaped_defects=0)",
   must_not_recur: Object.freeze([
-    "own-cal R2 production-API (defect surfaced after a prior approve)",
-    "KTB #18 R3 finish() regression",
+    "KTB #18 R3 finish() regression (approve→reject flip — a post-approval escaped defect)",
   ]),
 });
 
@@ -325,6 +339,8 @@ function baselineNote() {
     "### Phase-2 gate baseline (this session)",
     "",
     `- baseline: ${QUALITY_BASELINE.note}`,
+    `- frozen thresholds: escaped_defects ≤ ${QUALITY_BASELINE.escaped_defects}, revert_rate ≤ ${QUALITY_BASELINE.revert_rate.toFixed(2)}`,
+    `- rounds-per-issue exemplar: ${QUALITY_BASELINE.rounds_exemplar}`,
     `- must-not-recur escaped defects: ${QUALITY_BASELINE.must_not_recur.join("; ")}`,
     "- gate (ADR-026): Phase 2 (plan Tasks 6, 7) starts only when, over ≥5 post-Phase-1 issues, escaped-defect rate AND revert rate are ≤ baseline while rounds-per-issue fell.",
   ].join("\n");

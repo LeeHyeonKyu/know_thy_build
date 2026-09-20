@@ -3353,22 +3353,39 @@ tier 얇게 하기(E)와 범위 좁힌 재리뷰(F). 스펙 §7의 위험은 하
 
 - **`rounds_per_issue`** — plan/implement 핸드오프 개수 + review 최대 라운드(기존 `review_rounds_avg`
   machinery). 롤업은 병합 가중 평균.
-- **`escaped_defects`** — *이전 승인 뒤에* 나온 결함. 정확히: 한 이슈의 리뷰 이력에서 approve 판정
-  (또는 `→ factory:approved` 전이)이 있은 **다음** 라운드의 reject must_fix finding 수. 승인과 **같은**
-  라운드의 must_fix(패널 분열)는 세지 않는다 — 정의는 "승인에 뒤이은 결함"이지 동시의 결함이 아니다.
-  must_fix 핸드오프가 없고 승인 뒤 `→ factory:rework` 전이만 있으면 그 rework 수를 대신 센다(핸드오프
-  데이터가 없는 회차의 대체 신호). 이슈별 상세(`#N×k`)는 창에만 싣고 합계만 누적한다.
+- **`escaped_defects`** — *승인(또는 머지) 뒤에* 나온 결함, 즉 프로세스가 "됐다"고 한 **다음에**
+  틀린 것으로 드러난 결함. 정확히: 한 이슈의 리뷰 이력에서 approve 판정(또는 `→ factory:approved` 전이)이
+  있은 **다음** 라운드의 reject must_fix finding 수. 승인과 **같은** 라운드의 must_fix(패널 분열)는 세지
+  않는다 — 정의는 "승인에 뒤이은 결함"이지 동시의 결함이 아니다. must_fix 핸드오프가 없고 승인 뒤
+  `→ factory:rework` 전이만 있으면 그 rework 수를 대신 센다(핸드오프 데이터가 없는 회차의 대체 신호).
+  이슈별 상세(`#N×k`)는 창에만 싣고 합계만 누적한다. (같은 결함이 승인 뒤 여러 라운드에 다시 걸리면
+  라운드마다 세는데, 이는 false-high — 게이트가 보는 "0이었는가"에서 안전한 방향이라 그대로 둔다.)
 - **`revert_rate`** — 머지된 이슈가 나중에 되돌려진 비율(reverts/merged). 되돌림은 factory 이슈로만
-  관측한다: `revert`/`factory:revert` 라벨 이슈, 또는 `Revert "…"`/`revert:` 제목의 후속 이슈가 `#N`으로
-  그 머지를 가리킴. **우아한 저하**: factory 이슈 밖에서 커밋만 revert한 경우는 관측 불가 — 그래서 이
-  값은 *관측된* 되돌림만의 비율이고, 셀에 분자·분모를 함께 싣는다(`0.50 (1/2)`). 창(또는 누적)에 머지가
-  0이면 revert_rate는 0이 아니라 **null**이다("되돌림 0"과 "잴 머지가 없음"을 가른다).
+  관측한다: `revert`/`factory:revert` 라벨 이슈, 또는 `Revert "…"`/`revert:` 제목의 후속 이슈가 제목 **또는
+  본문**에서 `#N`으로 그 머지를 가리킴. **지연 지표 처리**: revert는 대개 그 머지의 창보다 늦게 도착하므로,
+  귀속은 창이 아니라 **스냅샷 전체의 머지**에 대고 하고, 관측된 되돌린 머지 번호를 누적 상태에 이슈 번호로
+  **유니온**한다 — 그래서 뒤늦은 revert가 옛 창에서 이미 센 제 머지에 착지하고, 누적 revert_rate는 그
+  유니온 크기 ÷ 누적 머지로 다시 난다(창 안 머지에만 맞추면 어느 창에서도 세어지지 않아 false-low로
+  기운다 — 그 방향이 바로 커버리지 제거를 green-light 하는 위험한 쪽이다). **우아한 저하**: factory 이슈
+  밖에서 커밋만 revert한 경우는 관측 불가 — 이 값은 *관측된* 되돌림만의 비율이고, 셀에 분자·분모를
+  함께 싣는다(`0.50 (1/2)`). 창(또는 누적)에 머지가 0이면 0이 아니라 **null**이다("되돌림 0"과 "잴 머지가 없음"을 가른다).
 
 **기준선(이 세션에서 동결, retro 출력과 여기 둘 다에 기록)**:
 - KTB #18 = **$143 / 12 stage-runs**; own-cal #3 = **4 review rounds**.
-- must-not-recur escaped 결함 집합: **own-cal R2 production-API**(이전 approve 뒤 표면화),
-  **KTB #18 R3 finish() 회귀**. 이 둘은 `factory/test/retro-quality.test.js`에 회귀 핀으로 박혀 —
-  각각이 위 정의에서 escaped 결함으로 등록됨을 테스트가 못 박는다.
+- **동결 수치 문턱**(게이트의 "≤ baseline"이 실제로 비교할 값): 이 세션의 관측값으로
+  **escaped_defects ≤ 0**, **revert_rate ≤ 0.00**.
+- **두 신호는 서로 다른 결함 유형을 잡는다 — 게이트가 둘 다 읽는다**:
+  - **own-cal #3 = rounds_per_issue 예시.** own-cal #3은 reject가 많았다(R1 correctness-reject →
+    R2 correctness+architecture reject[여기서 production-API 결함] → R3 spec-conformance reject →
+    R4 approve). production-API 결함은 **승인 전, 정상 reject 라운드에서** 잡혔다 — 승인 **뒤**가
+    아니다. 그래서 own-cal의 `escaped_defects=0`이 **맞고**, 그 비용은 `rounds_per_issue`(리뷰 4라운드)가
+    잡는다. own-cal류 결함(초안 품질이 낮아 리뷰 라운드가 길어짐)은 rounds_per_issue로, 승인 뒤 결함은
+    escaped_defects로 — 게이트가 두 신호를 다 본다.
+  - **KTB #18 R3 = escaped_defects 예시.** R2에서 qa가 승인했는데 R3에서 full 패널이 finish() 회귀를
+    잡았다(관측 O21의 approve→reject 뒤집힘) — 승인 뒤에 드러난 결함이다.
+- must-not-recur escaped 결함 집합: **KTB #18 R3 finish() 회귀**. `factory/test/retro-quality.test.js`가
+  이를 회귀 핀으로 박는다 — 그 approve→reject 뒤집힘이 escaped 결함으로 등록되고, own-cal의 reject-heavy
+  실제 이력은 `escaped_defects=0`·`rounds_per_issue.review=4`로, 정상 reject→approve는 0으로 잡힘을 못 박는다.
 
 **판결(게이트)**: **Phase 2(계획 Tasks 6, 7 — 커버리지를 줄이는 tier 얇게 하기와 범위 좁힌 재리뷰)는,
 Phase 1 이후 이슈 ≥5건 표본에서 escaped-defect 비율 AND revert 비율이 둘 다 기준선 이하이면서

@@ -279,6 +279,8 @@ function escapedDefectsFor(handoffs, comments) {
   for (const e of events) {
     if (!approved) { if (e.approve) approved = true; continue; }
     if (e.approve) continue;                                            // 또 다른 승인 — 문제없다
+    // 같은 결함이 승인 뒤 여러 라운드(R3+R4)에 걸쳐 다시 걸리면 라운드마다 센다 — false-high(안전한
+    // 방향)라 그대로 둔다. 게이트는 "0이었는가"를 보므로 과소가 아니라 과다로 기우는 편이 옳다.
     if (e.kind === "review" && e.mustFix > 0) escaped += e.mustFix;
     else if (e.kind === "rework-tx") reworkAfter += 1;
   }
@@ -291,7 +293,10 @@ const REVERT_TITLE = /^\s*revert\b/i;
 const isRevertIssue = (issue) =>
   (Array.isArray(issue?.labels) && issue.labels.some((l) => REVERT_LABEL.test(String(labelName(l) ?? "")))) ||
   REVERT_TITLE.test(String(issue?.title ?? ""));
-const referencedIssues = (title) => [...String(title ?? "").matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+// `#N` 참조는 제목과 **본문** 둘 다에서 읽는다 — factory revert 이슈가 되돌린 이슈를 본문에만 적는
+// 경우(git revert 커밋 메시지 본문의 "This reverts commit …, #N")를 놓치지 않는다(`issueList`는 body를 싣는다).
+const referencedIssues = (issue) =>
+  [...`${issue?.title ?? ""}\n${issue?.body ?? ""}`.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
 
 /**
  * (role,text) 키로 합치며 `runs`를 유니온한다 — 같은 claim/objection이 다른 이슈에서 또 나오면 누적.
@@ -340,7 +345,8 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
   const roundsPerIssue = [];                                            // Task 10 — 이슈별 라운드(창)
   const escapedDetail = [];                                             // Task 10 — 이슈별 escaped 결함(창)
   let escapedTotal = 0;
-  const mergedNumbers = new Set();                                      // revert 판정의 분모(창 안 머지)
+  const mergedNumbers = new Set();                                      // 창 안 머지(창 revert_rate의 분모)
+  const allMergedNumbers = new Set();                                   // 스냅샷 전체의 머지 — 뒤늦은 revert의 귀속 대상
 
   for (const issue of issues || []) {
     const comments = byIssue.get(issue.number) || [];
@@ -360,6 +366,9 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
     // 쓴다. delta는 이슈 단위다: 한 이슈의 리뷰 라운드는 그 이슈가 병합되는 순간에 전부 세는 것이지
     // retro 사이를 걸쳐 나눠 세지 않는다(같은 라운드가 두 retro에 걸쳐 다시 세어질 일도, 어느 retro
     // 에도 안 세어질 일도 없다 — 이슈가 병합되는 순간은 항상 정확히 한 번이다).
+    // 머지 사실은 창과 무관하게(afterSince 없이) `allMergedNumbers`에 담는다 — 뒤늦게 관측된 revert가
+    // 옛 창의 머지에 귀속되려면 그 머지 번호가 여기 있어야 한다(revert는 지연 지표다).
+    if (isMerged(issue, comments)) allMergedNumbers.add(issue.number);
     if (isMerged(issue, comments) && afterSince(issue.closedAt, sinceMs)) {
       mergedCount += 1;
       mergedNumbers.add(issue.number);
@@ -389,16 +398,22 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
   const usage = windowUsage(recs, sinceMs);
   const overlap = overlapFrom(verdictSets);
 
-  // Task 10 — revert 판정: 창 안에서 머지된 이슈 중, revert 이슈(라벨 또는 `Revert "…"` 제목)가
-  // `#N`으로 가리키는 것들. factory 이슈 밖의 커밋 revert는 관측하지 못한다(위 주석 참조).
-  const reverted = new Set();
+  // Task 10 — revert 판정: revert 이슈(라벨 또는 `Revert "…"` 제목)가 `#N`으로 가리키는 **머지된**
+  // 이슈들. 귀속은 창이 아니라 **스냅샷 전체의 머지**(`allMergedNumbers`)에 대고 한다 — revert는 대개
+  // 그 머지의 창보다 늦게 도착하므로(그 머지의 창에는 revert 이슈가 아직 없고, revert의 창에는 그 머지가
+  // 이미 afterSince 밖이다) 창 안 머지에만 맞추면 둘 중 어느 창에서도 세어지지 않는다(false-low). 그래서
+  // `reverted_issues`(관측된 모든 되돌린 머지)를 창에 실어 누적 상태가 이슈 번호로 유니온하게 하고
+  // (accumulateStats), 그 유니온 크기로 누적 revert_rate를 다시 낸다 — 뒤늦은 revert가 제 머지에 착지한다.
+  // factory 이슈 밖의 커밋 revert는 관측하지 못한다(위 주석 참조).
+  const revertedAll = new Set();
   for (const issue of issues || []) {
     if (!isRevertIssue(issue)) continue;
-    for (const ref of referencedIssues(issue.title)) {
-      if (ref !== issue.number && mergedNumbers.has(ref)) reverted.add(ref);
+    for (const ref of referencedIssues(issue)) {
+      if (ref !== issue.number && allMergedNumbers.has(ref)) revertedAll.add(ref);
     }
   }
-  const revertCount = reverted.size;
+  // 창 열은 이번 창에 머지된 것 중 되돌린 것만 센다(창 revert_rate의 분자). 누적은 유니온이 맡는다.
+  const revertedInWindow = [...revertedAll].filter((n) => mergedNumbers.has(n));
 
   return {
     candidates: {
@@ -420,9 +435,12 @@ export function harvest({ records, issues, commentsByIssue, since = null } = {})
       rounds_per_issue: roundsPerIssue,
       escaped_defects: escapedTotal,
       escaped_defects_detail: escapedDetail,
-      reverts: revertCount,
+      reverts: revertedInWindow.length,
+      // 관측된 모든 되돌린 머지(창 안이든 옛 창이든) — 누적 상태가 이슈 번호로 유니온해 뒤늦은 revert를
+      // 제 머지에 착지시키는 씨앗이다. 창 `reverts`는 이 중 이번 창 머지에 속한 것만이다.
+      reverted_issues: [...revertedAll].sort((a, b) => a - b),
       // 나눌 머지가 없으면 0이 아니라 null — "관측된 되돌림 0"과 "잴 것이 없음"을 가른다(우아한 저하).
-      revert_rate: mergedCount ? round2(revertCount / mergedCount) : null,
+      revert_rate: mergedCount ? round2(revertedInWindow.length / mergedCount) : null,
       rejects_by_role: rejectsByRole,
       // P2-13 — reject 수는 "얼마나 막았는가"이고, 이 셋은 "서로 다른 것을 보았는가"다.
       review_runs: overlap.review_runs,
