@@ -79,6 +79,32 @@ test("plan context (default tier): single mode roster, rounds 2, plan block carr
   expect(JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8")).plan).toEqual({ mode: "single", max_done_when: 6 });
 });
 
+/**
+ * Task 9 (Structure H, KTB-51) — the repair turn's validator reasons reach the planner the same way
+ * Task 5's pins reach the builder: buildContext({ planRepair }) surfaces them into loaded.json as
+ * `plan_repair` (and onto ctx). Present ONLY on the one repair turn; a normal plan build carries none.
+ */
+test("Task 9: buildContext({ planRepair }) surfaces the validator reasons into loaded.plan_repair and ctx (plan stage only)", async () => {
+  const r = root();
+  const gh = { issue: vi.fn(async () => ({ number: 18, title: "T", body: "", labels: ["factory:ready"] })), comments: vi.fn(async () => []) };
+  const reasons = ["dissent without done_when: d2, d3"];
+  const ctx = await buildContext({ root: r, gh, issue: 18, stage: "plan", planRepair: reasons });
+  expect(ctx.plan_repair).toEqual(reasons);
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.plan_repair).toEqual(reasons);
+
+  // a normal plan build (no planRepair) carries no plan_repair, on ctx or in loaded.json.
+  const clean = root();
+  const ctx2 = await buildContext({ root: clean, gh, issue: 18, stage: "plan" });
+  expect(ctx2.plan_repair).toBeUndefined();
+  expect(JSON.parse(readFileSync(join(clean, ".factory/out/loaded.json"), "utf8")).plan_repair).toBeUndefined();
+
+  // it is a plan-stage fact: a review build ignores planRepair entirely.
+  const rev = root();
+  await buildContext({ root: rev, gh, issue: 18, stage: "review", planRepair: reasons });
+  expect(JSON.parse(readFileSync(join(rev, ".factory/out/loaded.json"), "utf8")).plan_repair).toBeUndefined();
+});
+
 test("plan context (load-bearing tier): the 4-role debate survives — plan_roles + plan_rounds", async () => {
   const r = root();
   const triage = renderHandoff({ stage: "triage", issue: 9, summary: "s", data: { schema: "factory.triage.v1", issue: 9, disposition: "ready", tier: "load-bearing" } });

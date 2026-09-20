@@ -349,6 +349,20 @@ test("plan: a failure that is NOT purely the plan validator (e.g. a roster gap a
   expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
 });
 
+test("plan: a repair turn that dirties the worktree still escalates — the no-write re-assertion runs on the repair pass", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  let cw = 0;   // first pass (no-write check) is clean; the repair turn dirties the tree
+  const assertCleanWorktree = vi.fn(async () => (++cw >= 2 ? { ok: false, dirty: ["docs/scratch.md"] } : { ok: true }));
+  const deps = planRepairDeps({ transition, verifyStage, assertCleanWorktree });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(assertCleanWorktree).toHaveBeenCalledTimes(2);   // first pass ok, repair pass caught the dirt
+  expect(verifyStage).toHaveBeenCalledTimes(1);           // a dirty repair never reaches a re-verify
+  const t = transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  expect(t.reason).toMatch(/worktree dirty after plan repair/);
+});
+
 test("a refused transition is recorded, never silent", async () => {
   const lines = [];
   const deps = {

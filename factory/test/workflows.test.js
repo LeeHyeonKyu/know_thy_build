@@ -354,6 +354,51 @@ test("factory-plan.js: R1 is independent (no other role's position in the prompt
   }
 });
 
+/**
+ * Task 9 (Structure H, KTB-51) — the repair turn's validator reasons reach the planner's PROMPT. When
+ * run-stage re-dispatches the plan stage with `loaded.plan_repair` set, factory-plan.js renders a
+ * `REPAIR TURN` directive naming exactly those reasons into whoever writes the final plan — the debate
+ * synthesizer, and the single-mode planner. Absent when there is nothing to repair.
+ */
+const planStub = () => async (prompt, opts) => {
+  if (opts.agentType === "factory-loader") return planLoaderFix();
+  if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+  if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+  if (opts.agentType === "plan-synthesizer") return planFix();
+  if (opts.label?.startsWith("plan:")) return planFix();          // single-mode planner
+  if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+  return null;
+};
+const R1_REPAIR_REASONS = ["dissent without done_when: d2, d3", "acceptance contract incomplete: dw4"];
+
+test("factory-plan.js: loaded.plan_repair renders a REPAIR TURN directive naming the reasons into the synthesizer prompt (debate)", async () => {
+  const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan_repair: R1_REPAIR_REASONS }) },
+  });
+  const synth = calls.find((c) => c.opts.agentType === "plan-synthesizer");
+  expect(synth.prompt).toContain("REPAIR TURN (KTB-51)");
+  for (const reason of R1_REPAIR_REASONS) expect(synth.prompt).toContain(reason);
+});
+
+test("factory-plan.js: loaded.plan_repair renders the REPAIR TURN directive into the single-mode planner prompt", async () => {
+  const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix({ plan: { mode: "single", max_done_when: 6 }, plan_repair: R1_REPAIR_REASONS }) },
+  });
+  const planner = calls.find((c) => typeof c.opts.label === "string" && c.opts.label.startsWith("plan:"));
+  expect(planner.prompt).toContain("REPAIR TURN (KTB-51)");
+  for (const reason of R1_REPAIR_REASONS) expect(planner.prompt).toContain(reason);
+});
+
+test("factory-plan.js: a normal plan run (no loaded.plan_repair) renders NO REPAIR TURN directive", async () => {
+  const { calls } = await runWorkflow(FACTORY_PLAN_WORKFLOW, {
+    agent: planStub(),
+    args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() },
+  });
+  for (const c of calls) expect(String(c.prompt)).not.toContain("REPAIR TURN");
+});
+
 test("factory-plan.js: one objection at sign-off re-runs the synthesizer once; a clean second vote leaves dissent_log untouched", async () => {
   let signRounds = 0;
   const stub = async (prompt, opts) => {
