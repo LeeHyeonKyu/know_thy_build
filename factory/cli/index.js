@@ -17,6 +17,10 @@ export const HELP = `
     factory run <stage> <issue>         Run a stage locally with the same scripts CI uses (triage|plan|implement|review)
     factory run retro [--force]         Run the retro job locally (--force ignores the merge count N)
     factory status [--json]             Needs You / queue / in progress / recent merges / usage (read-only)
+    factory analyze <issue> [--json]    One issue's whole timeline from the records branch + comments —
+                                        gates and why they failed, self-gate, verdicts, transitions, cost per
+                                        agent — plus the findings classified as the retro classifies them
+    factory analyze --health [--json]   Aggregate the behavioural health signals and print the report
     factory board [--repo owner/name]…  Local viewer: lanes, timeline and live agent progress across repos
                 [--port 4173] [--interval 60] [--once [--json]]
 `;
@@ -46,6 +50,9 @@ export async function main(argv) {
     case "rehearse": return (await import("./rehearse.js")).rehearseCommand({ argv: rest, io, run: realRun });
     case "run": return (await import("./run.js")).runCommand({ root, argv: rest, io });
     case "status": return (await import("./status.js")).statusCommand({ root, argv: rest, io });
+    // analyze는 status처럼 읽기 전용이다 — `run`은 gh 호출(코멘트·records 브랜치 내용)에만 쓰이고,
+    // `--health`는 Task 4의 집계를 **지연 import**한다(그 파일이 없는 설치에서도 이 명령은 산다).
+    case "analyze": return (await import("./analyze.js")).analyzeCommand({ root, argv: rest, io, run: realRun });
     // board는 `pkgRoot`가 필요하다(ADR-022 Task B) — CLI가 내는 페이지와 `factory init`이 설치하는
     // 페이지는 **같은 파일**이어야 하고, 패키지 안의 그 원본은 pkgRoot 아래에만 있다.
     case "board": return (await import("./board.js")).boardCommand({ root, pkgRoot, argv: rest, io });
