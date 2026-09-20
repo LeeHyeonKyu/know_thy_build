@@ -404,6 +404,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/gha.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/glob.js",
       "owner": "factory"
     },

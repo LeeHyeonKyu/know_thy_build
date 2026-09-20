@@ -3,6 +3,9 @@ import { fileURLToPath } from "node:url";
 import { classifyFinding } from "../lib/feedback/classify.js";
 import { fingerprint, normalizeReason } from "../lib/feedback/fingerprint.js";
 import { ownerOf, buildManifest } from "../cli/manifest.js";
+import { readFileSync } from "node:fs";
+import { harvestIssue } from "../lib/feedback/harvest-findings.js";
+import { heartbeat, reviewHandoffComment } from "./helpers/feedback-fixtures.js";
 
 /**
  * 이 파일의 (a)~(d)는 **이번 세션의 실제 발견들**이다(계획 Task 2 "regression pinned"). 각각이
@@ -259,12 +262,123 @@ describe("product / ambiguous", () => {
   });
 
   test("매니페스트에도 globs에도 없는 경로는 ambiguous다(오라우팅하지 않는다)", () => {
+    // 게이트 발견의 인과 경로는 러너가 **추론한** 것이다 — 리뷰어가 diff에서 읽은 파일이 아니다.
     for (const p of ["vendor/thing.rb", "src/harness.toml", "src/scripts/x.sh", "README.md"]) {
       const r = classify(at(p, "boom"));
       expect(r.tags).toEqual(["ambiguous"]);
       expect(r.candidates).toHaveLength(2);
     }
     expect(classify(at("vendor/thing.rb", "boom")).candidates.join(" ")).toMatch(/vendor\/thing\.rb/);
+  });
+});
+
+/**
+ * ── 최종 리뷰 nit 7 — 리뷰어가 **이 저장소의 diff에서 읽은** 파일은 이 저장소의 것이다 ────────
+ *
+ * 데모 #18에서 리뷰어의 must_fix가 `docs/factory/DECISIONS.md`(KTB 자신의 ADR 로그 — 설치되지
+ * **않는다**)를 지목했고, 그 발견은 `ambiguous`로 떨어져 "harness냐 ktb냐"를 묻는 소유자 노트가
+ * 됐다. 둘 다 아니다. 같은 이유로 `[test].source_glob`을 선언하지 않은 채택자에게는 **모든 제품
+ * 코드 발견**이 `ambiguous`였다 — 라우팅하지 않을 것에 매번 노트를 다는 잡음이다.
+ *
+ * 픽스처는 **진짜 생산자**가 만든다: 리뷰 핸드오프를 `renderHandoff`로 렌더하고, `harvestIssue`가
+ * 그것을 읽어 발견을 만들고, 그 발견을 `classifyFinding`에 그대로 넘긴다. 손으로 빚은 발견 객체를
+ * 넣으면 `where` → `causal_path` 변환(`causalFromWhere`)이 검사되지 않아 초록인 채 틀릴 수 있다.
+ */
+/**
+ * ── 최종 리뷰 should_fix 3 — ADR은 **배포된 규칙**을 적어야 한다 ───────────────────────────────
+ *
+ * ADR-027 ⑤는 지문의 재료를 "tags + 원인 경로 + 숫자·sha·이슈 참조를 지운 reason"이라고 적고 있었다.
+ * 배포된 `fingerprint({path, reason})`은 **tags를 받지도 않고**(받으면 같은 원인이 태그 흔들림으로
+ * 상류 이슈 둘로 쪼개진다 — 그 ADR이 막겠다고 한 바로 그것), 위치가 아닌 숫자(exit 코드, HTTP 상태)는
+ * **남긴다**. ADR이 코드와 다르면 다음 사람은 ADR을 읽고 코드를 고친다.
+ *
+ * 이 핀은 문장을 베끼지 않는다 — **거짓이 된 주장**만 금지하고, 참인 규칙이 적혀 있는지만 본다.
+ */
+describe("ADR-027 ⑤는 배포된 fingerprint 규칙을 적는다", () => {
+  const adr = readFileSync(new URL("../../docs/factory/DECISIONS.md", import.meta.url), "utf8");
+  const section = adr.slice(adr.indexOf("**결정 ⑤(중복 대신 증거 누적)**"), adr.indexOf("**결정 ⑥"));
+
+  test("실물: 지문은 tags를 재료로 쓰지 않고, 위치가 아닌 숫자는 남긴다", () => {
+    // `fingerprint`는 tags를 받는 자리 자체가 없다 — 넘겨도 지문이 바뀌지 않는다.
+    const a = fingerprint({ path: "p", reason: "boom", tags: ["harness"] });
+    const b = fingerprint({ path: "p", reason: "boom", tags: ["harness", "ktb"] });
+    expect(a).toBe(b);
+    // 위치(이슈 번호·sha·줄)는 지우고, 원인을 가르는 숫자는 남긴다.
+    expect(normalizeReason("gate unit exit 127 on #42 at deadbeef1234567 (app.js:12)")).toBe("gate unit exit 127 on at (app.js)");
+    expect(fingerprint({ path: "p", reason: "exit 127" })).not.toBe(fingerprint({ path: "p", reason: "exit 1" }));
+  });
+
+  test("ADR은 그 규칙을 적고, 'tags가 재료다'라는 옛 주장은 남아 있지 않다", () => {
+    expect(section).toBeTruthy();
+    expect(section).toMatch(/tags는 넣지 않는다/);
+    expect(section).not.toMatch(/`fingerprint`\(tags \+/);
+    expect(section).not.toMatch(/fingerprint\(tags \+ 원인 경로/);
+    // 남기는 숫자를 구체적으로 든다 — "숫자를 지운다"는 옛 문장의 반례다.
+    expect(section).toMatch(/exit 127/);
+    // spec §6의 원인 불변 규칙이 같은 자리에 선다(주기 잡이 매주 새 지문을 내지 않게 하는 규칙).
+    expect(section).toMatch(/원인 불변|cause-invariant/);
+    expect(section).toMatch(/횟수·비율·달러·기준선·창 크기/);
+  });
+});
+
+describe("review must_fix가 지목한 저장소 파일 — 매니페스트 밖이면 product다(nit 7)", () => {
+  const REPO = "LeeHyeonKyu/know-thy-build";
+  /** 데모 #18이 실제로 낸 모양 — 러너의 하트비트 + reject 판정 하나. */
+  const producedFindings = (where, claim) => harvestIssue({
+    issue: 18, repo: REPO, record: "",
+    comments: [
+      heartbeat(18, "review", "gha-91801", "2026-09-18T10:00:00Z"),
+      reviewHandoffComment(18, {
+        round: 1, at: "2026-09-18T10:10:00Z",
+        verdicts: [{ role: "spec-conformance", verdict: "reject", must_fix: [{ id: "MF-1", where, claim, evidence: "the ADR text and the shipped rule disagree" }] }],
+      }),
+    ],
+    factoryLogins: ["factory-bot"],
+  }).findings;
+
+  test("`docs/factory/DECISIONS.md`는 설치되지 않는다 — 이 테스트가 공허하지 않음을 먼저 보장한다", () => {
+    expect(dests.has("docs/factory/DECISIONS.md")).toBe(false);
+    expect(dests.has("docs/factory/CHARTER.md")).toBe(true);        // 같은 디렉터리의 설치본은 있다
+  });
+
+  test("(nit 7) 리뷰어가 지목한 매니페스트 밖 저장소 파일 → product(라우팅하지 않는다)", () => {
+    const [finding] = producedFindings("`docs/factory/DECISIONS.md`", "ADR-027 ⑤ says the fingerprint includes tags; the shipped rule excludes them");
+    expect(finding.kind).toBe("review-must_fix");
+    expect(finding.causal_path).toBe("docs/factory/DECISIONS.md");  // 생산자가 실제로 만든 값
+
+    const r = classify(finding);
+    expect(r.tags).toEqual(["product"]);
+    expect(r.causal.owner).toBe("product");
+    expect(r.disposition).toBe("outcome");                          // 이슈도, 노트도 쓰지 않는다
+    expect(r.candidates).toBeUndefined();
+    // 선언된 glob의 `high`와 섞지 않는다 — 이것은 표의 약한 추론이다.
+    expect(r.confidence).toBe("medium");
+  });
+
+  test("(nit 7) 같은 규칙이 glob을 선언하지 않은 채택자의 제품 코드에도 적용된다", () => {
+    const noGlobs = { test: {} };
+    const [finding] = producedFindings("`lib/calendar.rb:42`", "null deref when the month has no events");
+    const r = classifyFinding({ finding, ownerOf, isInstalled: dests, ktbVersion, harness: noGlobs });
+    expect(r.tags).toEqual(["product"]);
+    expect(r.causal.path).toBe("lib/calendar.rb");
+    expect(r.causal.line).toBe(42);
+  });
+
+  test("(nit 7) 1~5번이 먼저다: 배포물·증거물·채택자의 팩토리 설정은 이 문을 통과하지 않는다", () => {
+    // 설치된 배포물 → ktb(1번 멤버십)
+    expect(classify(producedFindings("`.claude/agents/reviewer-correctness.md`", "the role never asks for the failing command")[0]).tags).toEqual(["ktb"]);
+    // 실행이 남긴 증거물 → 여전히 ambiguous(2번). 그것을 지목한 리뷰어가 본 것은 파일이 아니라 자국이다.
+    const evidence = classify(producedFindings("`docs/factory/runs/18.md`", "the record contradicts the gates line")[0]);
+    expect(evidence.tags).toEqual(["ambiguous"]);
+    expect(evidence.candidates).toHaveLength(2);
+    // 채택자의 팩토리 설정 → harness(4번)
+    expect(classify(producedFindings("`docs/factory/CHARTER.md`", "the roster is empty for the docs tier")[0]).tags).toEqual(["harness"]);
+  });
+
+  test("(nit 7) 경로가 아예 없는 발견은 여전히 ambiguous다 — 지목된 파일이 없다", () => {
+    const r = classify({ kind: "review-must_fix", issue: 41, repo: REPO, stage: "review", reason: "the agent lacked context and guessed" });
+    expect(r.tags).toEqual(["ambiguous"]);
+    expect(r.candidates).toHaveLength(2);
   });
 });
 

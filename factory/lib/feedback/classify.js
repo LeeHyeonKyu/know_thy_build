@@ -25,7 +25,24 @@ import { fingerprint } from "./fingerprint.js";
  * | 3 | 쓰는 저장소가 **명시한** `[test].source_glob`/`test_glob`     | product  | `product`   | high       |
  * | 4 | 매니페스트에 없지만 채택자 소유가 분명한 경로(아래 `PREFIX_USER`) | user     | `harness`   | medium     |
  * | 5 | KTB 소스 트리의 배포물 `templates/{factory,know-thy-build}/**`  | factory  | `ktb`       | medium     |
- * | 6 | 그 밖 전부                                                   | —        | `ambiguous` | low        |
+ * | 6 | **리뷰어가 이 저장소의 diff를 읽고 지목한 파일**(`review-must_fix`) | product | `product` | medium |
+ * | 7 | 그 밖 전부                                                   | —        | `ambiguous` | low        |
+ *
+ * ## 6번 — `review-must_fix`의 경로는 **출처가 다르다**(최종 리뷰 nit 7)
+ * 1~5번을 다 지나온 경로를 7번이 `ambiguous`로 받는 것은 "이 파일이 무엇인지 해석할 수 없다"는 뜻인데,
+ * `review-must_fix`의 `where`에는 그 말이 성립하지 않는다: 그 값은 리뷰어가 **이 저장소의 PR diff를
+ * 읽으면서** 지목한 파일이다. 팩토리가 설치한 것은 전부 매니페스트에 있고(1번), 채택자의 팩토리 설정은
+ * 4번이 받고, KTB 소스 트리는 5번이 받는다 — 그 셋 중 어느 것도 아닌 저장소 안의 파일은 정의상
+ * **그 저장소 자신의 파일**이다. 실제로 데모 #18에서 리뷰어가 `docs/factory/DECISIONS.md`(KTB 자신의
+ * ADR 로그 — 설치되지 않는다)를 지목했고, 그 발견은 `ambiguous`로 떨어져 "harness냐 ktb냐"를 묻는
+ * 소유자 노트가 됐다. 둘 다 아니다. 그리고 `[test].source_glob`을 선언하지 않은 채택자(대다수)에게는
+ * **모든 제품 코드 발견**이 같은 이유로 `ambiguous`였다 — 라우팅하지 않을 것에 매번 노트를 다는 잡음이다.
+ *
+ * 오라우팅 위험은 없다: `product`의 disposition은 `outcome`이고 **아무 데로도 라우팅하지 않는다**
+ * (`ambiguous`와 달리 노트조차 쓰지 않는다). 그리고 이 줄은 1~5번 **뒤**에 있으므로 설치된 배포물도,
+ * 증거물(`.factory/out/**`·`docs/factory/runs/**` — 2번)도, 채택자의 팩토리 설정도 여기 오지 않는다.
+ * 경로가 아예 없는 발견은 여전히 `ambiguous`다 — 그때는 지목된 파일 자체가 없다.
+ * 게이트 발견의 경로는 러너가 **추론한** 것이라 이 줄을 태우지 않는다(7번 그대로).
  *
  * 1번이 **prefix가 아니라 멤버십**인 것이 이 파일의 핵심이다(리뷰 must_fix 1). `ownerOf`는 전역
  * 함수라 모르는 경로에도 `"factory"`라 답한다 — `.factory/`/`.claude/` prefix만 보고 넘기면
@@ -199,14 +216,26 @@ export function classifyFinding({ finding, ownerOf, isInstalled, ktbVersion = nu
   } else {
     const resolved = resolveOwner(path, ctx);
     owner = resolved.owner;
+    let via = resolved.via;
+    /**
+     * 규칙표 6번 — 리뷰어가 이 저장소의 diff를 읽고 지목한 파일은, 1~5번 중 무엇도 아니라면
+     * **그 저장소 자신의 파일**이다(최종 리뷰 nit 7). 경로가 있어야 하고(경로 없는 발견은 여전히
+     * `ambiguous`다), `via: "evidence"`(생성된 증거물)는 이 문을 통과하지 못한다 — 그것을 지목한
+     * 리뷰어가 본 것은 파일이 아니라 어떤 런이 남긴 자국이고, 원인은 그것을 쓴 쪽이다.
+     */
+    if (!owner && path && via === "none" && finding.kind === "review-must_fix") {
+      owner = "product";
+      via = "repo";
+    }
     if (!owner) {
       tags = ["ambiguous"];
       confidence = "low";
       disposition = "ambiguous";
-      candidates = candidatesFor(finding, path, resolved.via);
+      candidates = candidatesFor(finding, path, via);
     } else {
       tags = [TAG_OF[owner]];
-      confidence = resolved.via === "prefix" ? "medium" : "high";
+      // 선언된 glob(`high`)과 표의 약한 추론(`medium`)을 섞지 않는다 — 6번도 후자다.
+      confidence = via === "prefix" || via === "repo" ? "medium" : "high";
       disposition = owner === "product" ? "outcome" : "routed";
       if (owner === "user") {
         // 다중 태그: KTB가 배포한 안내/기본값이 이 실수를 막지 못했는가? 증거만이 방아쇠다.

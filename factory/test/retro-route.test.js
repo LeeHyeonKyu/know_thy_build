@@ -435,6 +435,35 @@ describe("T7 공유 신원 — (b) 거부를 보이게 한다", () => {
     expect(a.evidenceFor("contract").filter((e) => e.kind === "human-decision")).toEqual([]);
   });
 
+  /**
+   * ── 최종 리뷰 nit 5 ────────────────────────────────────────────────────────────────────────
+   * 거부는 하나지만 **이유는 둘**이고 사람이 할 일이 정반대다. 진짜 봇 신원(`personal === false`)이
+   * 적은 결정은 "공유 신원"이 아니다 — 가를 수 **있었고**, 갈라 보니 에이전트가 적은 것이다.
+   * 그 자리에 "shared identity"를 적으면 주인은 이미 제대로 등록해 둔 봇 신원을 다시 등록하러 가고
+   * (할 일이 없다), 정작 참인 사실은 화면 어디에도 남지 않는다.
+   */
+  test("Pin 1b — 문구는 작성자가 아니라 **신원**에 걸린다: 봇 신원이면 '에이전트가 적은 결정'이다", () => {
+    const botWrote = attributionFor({ comments: sharedComments, factoryLogins: ["LeeHyeonKyu"], identity: { personal: false, login: "ktb-factory[bot]" } });
+    expect(botWrote.unverifiable).toHaveLength(1);
+    expect(botWrote.unverifiable[0].reason).toBe("authored by the factory identity — an agent-written decision is not a human decision");
+    expect(botWrote.unverifiable[0].reason).not.toMatch(/shared identity/);
+    expect(botWrote.unverifiable[0].detail).toMatch(/written by an agent/);
+    // 판정 자체는 바뀌지 않는다 — 문구만 바뀐다(증거로는 여전히 세지 않는다).
+    expect(botWrote.evidenceFor(null).filter((e) => e.kind === "human-decision")).toEqual([]);
+
+    // `personal: true`(사람 계정)와 `null`(모른다)은 **둘 다** 공유 신원 문구다 — 모르는 것을
+    // "봇이었다"로 적지 않는다.
+    for (const identity of [undefined, null, { personal: null, login: "x" }, { personal: true, login: "LeeHyeonKyu" }]) {
+      const a = attributionFor({ comments: sharedComments, factoryLogins: ["LeeHyeonKyu"], identity });
+      expect(a.unverifiable[0].reason).toBe("shared identity — author equals a factory login; cannot distinguish a person from an agent");
+    }
+  });
+
+  test("Pin 1b — `harvestIssue`가 그 신원을 그대로 내려보낸다(문구가 라우팅 화면까지 간다)", () => {
+    const h = harvestIssue({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"], identity: { personal: false, login: "ktb-factory[bot]" } });
+    expect(h.unverifiable[0].reason).toMatch(/^authored by the factory identity/);
+  });
+
   test("Pin 1 — #39의 분류는 그대로다: (c) check-withdrawn **하나만으로** ktb에 도달한다", () => {
     const { findings, unverifiable } = harvestIssue({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] });
     const selfGate = findings.find((f) => f.kind === "self-gate");
