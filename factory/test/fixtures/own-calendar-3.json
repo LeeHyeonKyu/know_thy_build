@@ -1,5 +1,5 @@
 {
-  "_source": "LeeHyeonKyu/own-calendar#3 — issue metadata + docs/factory/runs/3.md on branch factory/records + heartbeat comments",
+  "_source": "LeeHyeonKyu/own-calendar#3 — issue metadata + docs/factory/runs/3.md on branch factory/records + heartbeat comments + the merged PR's file list",
   "_fetched": "2026-09-20",
   "_note": "REAL text, fetched with `gh api`, verbatim and untruncated. Do not hand-edit — regenerate with the script named in _source_script. Review HANDOFF comments are deliberately excluded (see the comment in that script): they are ~350KB/issue and feed only a non-triggering reference column.",
   "_source_script": "factory/test/fixtures/refresh.mjs",
@@ -110,5 +110,12 @@
       "author": "LeeHyeonKyu",
       "body": "<!-- factory-heartbeat issue=3 -->\nstage: merge · runner: gha-34868977829 · started: 2026-09-14T16:31:00.453Z · last: 2026-09-14T16:31:00.453Z\n<!-- factory-progress:v1 {\"stage\":\"merge\",\"issue\":3,\"runner\":\"gha-34868977829\",\"started\":\"2026-09-14T16:30:57.271Z\",\"updated\":\"2026-09-14T16:31:00.454Z\",\"step\":{\"phase\":null,\"label\":null,\"since\":null},\"agents\":[],\"totals\":{\"turns\":0,\"input_tokens\":0,\"output_tokens\":0,\"cache_read_tokens\":0,\"cost_usd\":0},\"files_touched\":[]} -->\nstep: — · tokens 0 in / 0 out · $0.00"
     }
-  ]
+  ],
+  "pr": {
+    "number": 5,
+    "files": [
+      "README.md",
+      "client/test/test_3_readme_test.dart"
+    ]
+  }
 }

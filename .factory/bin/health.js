@@ -33,6 +33,7 @@ import { makeGh } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { HEALTH_LABEL } from "../lib/label-catalog.js";
 import { readRecordsDetailed } from "../lib/records-branch.js";
+import { tierFloor } from "../lib/gates.js";
 import { routeFindings } from "../lib/feedback/route.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { parseHandoffs } from "../lib/handoff.js";
@@ -134,15 +135,40 @@ export function tierOf(issue, signals) {
 }
 
 const ROSTER_PATH = ".factory/lib/review-roster.js";
-const ROLES_PATH = ".factory/roles.toml";
+/** `resolveTier`가 사는 배포물 — tier 오채점 발견의 인과 파일(설치 매니페스트에서 owner: factory). */
+export const TIER_RESOLVER_PATH = ".factory/lib/context.js";
+
+/**
+ * `diffShapeOf(files, harness) → "docs" | "code" | null` — **두 번째 위험 출처**(r2 항목 1).
+ *
+ * tier 라벨은 triage 에이전트의 신고에서 출발하고, 틀리는 방향은 언제나 가벼운 쪽이다. 그런데 그
+ * 라벨 하나에만 앵커하면 규칙은 **정반대 실수**를 영영 볼 수 없다: docs 모양의 diff가 `standard`로
+ * 채점돼 전체 패널을 사 버린 경우다. 라벨을 고친 것이 문제가 아니라 라벨이 유일한 눈이었던 것이
+ * 문제였다. 그래서 GitHub이 diff에서 계산한 **경로 목록**을 나란히 둔다 — 에이전트가 적을 수 없는 사실.
+ *
+ * 판정은 `tierFloor`에 **위임한다**(글롭 목록을 여기 베끼지 않는다). 그 함수가 이미 `DOC_GLOBS`와
+ * `NEVER_DOCS_GLOBS`(CHARTER·리뷰어 프롬프트·워크플로 — "문서처럼 생겼지만 문서가 아닌 것")와
+ * `[protected].factory`를 함께 본다. 목록을 복제하면 두 판정이 갈라지는 날이 오고, 그날 이 규칙은
+ * 리뷰어 프롬프트 변경을 docs라 부른다.
+ *
+ * 경로가 **하나도 없으면 `null`이다** — 빈 목록에 `tierFloor`는 "docs"라 답하지만(어느 경로도 검사에
+ * 걸리지 않으므로) 그것은 "문서다"가 아니라 "읽지 못했다"이다. 모르는 것을 docs로 읽으면 감사 H3이
+ * 지적한 구멍이 정확히 이 규칙 안에서 다시 열린다.
+ */
+export function diffShapeOf(files, harness = {}) {
+  if (!Array.isArray(files) || files.length === 0) return null;
+  try { return tierFloor({ changed: { all: files }, harness: harness || {} }) === "docs" ? "docs" : "code"; }
+  catch { return null; }
+}
 
 /**
  * 창 하나를 신호로 바꾼다 — 순수 함수다(gh도 fs도 만지지 않는다). 발견을 만드는 규칙과, 그 규칙이
  * 읽는 숫자를 한 자리에 둔다: 보고서가 보여 주는 표와 발견이 선 근거가 **같은 객체**여야 한다.
  */
-export function healthSignals({ issues = [], commentsByIssue = new Map(), records = new Map(), N = DEFAULT_N, records_source = "injected" } = {}) {
+export function healthSignals({ issues = [], commentsByIssue = new Map(), records = new Map(), prByIssue = new Map(), harness = {}, N = DEFAULT_N, records_source = "injected" } = {}) {
   const byIssue = commentsByIssue instanceof Map ? commentsByIssue : new Map(Object.entries(commentsByIssue || {}));
   const recs = records instanceof Map ? records : new Map(Object.entries(records || {}));
+  const prs = prByIssue instanceof Map ? prByIssue : new Map(Object.entries(prByIssue || {}));
 
   const perIssue = [];
   for (const issue of issues || []) {
@@ -153,9 +179,15 @@ export function healthSignals({ issues = [], commentsByIssue = new Map(), record
     const debate = planDebateDelta(parseHandoffs(comments));
     const cost = costOfRecord(record);
     const t = tierOf(issue, sig);
+    // 두 번째 위험 출처 — GitHub이 계산한 경로 목록(라벨과 **독립**이다).
+    const prInfo = prs.get(issue.number) ?? prs.get(String(issue.number)) ?? null;
+    const shape = diffShapeOf(prInfo?.files, harness);
     perIssue.push({
       issue: issue.number, closedAt: issue.closedAt,
       tier: t.tier, tier_source: t.source,
+      // r2 항목 1의 모양: 위험을 말하는 두 출처를 한 자리에 나란히 둔다.
+      risk: { tier: { value: t.tier, source: t.source }, diff_shape: shape, pr: prInfo?.pr ?? null },
+      diff_shape: shape, pr: prInfo?.pr ?? null, pr_files: prInfo?.files?.length ?? null,
       panel: sig.panel, rounds: sig.max_round, bound_rounds: sig.rounds,
       cost: cost.total, cost_by_stage: cost.by_stage,
       roles: sig.roles, escaped: sig.escaped_total, debate,
@@ -195,15 +227,29 @@ export function healthSignals({ issues = [], commentsByIssue = new Map(), record
     }
   }
 
-  const priced = window.filter((y) => y.cost != null && y.tier);
+  /**
+   * 한 이슈의 **판정 위험**. 모양을 읽었으면 모양이 이기고, 못 읽었으면 라벨로 물러선다.
+   *
+   * 기준선을 라벨로 고르면 규칙이 제 꼬리를 문다: 오채점된 docs 모양 diff는 라벨이 `standard`라
+   * "나보다 위험한 것"이 load-bearing뿐이 되고, 그 표본이 2건에 못 미쳐 기준선이 영영 서지 않는다 —
+   * 곧 **오채점된 이슈만 정확히 심사를 면한다.** 모양이 docs라면 비교 대상은 "docs보다 위험한 일"
+   * 전부(standard + load-bearing)다.
+   */
+  const riskOfIssue = (x) => (x.diff_shape === "docs" ? RISK_ORDER[0] : x.tier);
+  const priced = window.filter((y) => y.cost != null && (y.tier || y.diff_shape));
+  const pricedRisk = priced.map((y) => ({ tier: riskOfIssue(y), cost: y.cost }));
   const costVsRisk = priced.map((x) => {
-    const b = costBaselineFor(x.tier, priced);
+    const risk = riskOfIssue(x);
+    const b = costBaselineFor(risk, pricedRisk);
     return {
-      issue: x.issue, tier: x.tier, tier_source: x.tier_source, panel: x.panel, cost: x.cost,
+      issue: x.issue, tier: x.tier, tier_source: x.tier_source, diff_shape: x.diff_shape, pr: x.pr,
+      risk_tier: risk, panel: x.panel, cost: x.cost,
       baseline: b.usd, baseline_tiers: b.tiers, baseline_n: b.n,
       threshold: b.usd == null ? null : round2(b.usd * WASTE_MULTIPLE),
     };
   });
+  // 모양을 읽지 못한 이슈 — 모양 기반 규칙은 이들에 대해 **아무 말도 하지 않는다**(라벨로 추측하지 않는다).
+  const shapeUnknown = window.filter((x) => x.diff_shape == null).map((x) => x.issue);
 
   return {
     N,
@@ -213,6 +259,9 @@ export function healthSignals({ issues = [], commentsByIssue = new Map(), record
     // 비용 신호를 **읽을 수 있었는가**. `records-branch`가 아니면 비용 표가 비는 이유가 여기 있다.
     records_source,
     priced: priced.length,
+    // diff 모양을 읽을 수 있었는가(r2 항목 4) — 못 읽은 것은 저하로 **보고**하고 추측하지 않는다.
+    shape_known: window.filter((x) => x.diff_shape != null).length,
+    shape_unknown: shapeUnknown,
     per_issue: window,
     roles,
     full_panel: fullPanel,
@@ -286,9 +335,11 @@ export function behaviouralFindings({ signals, repo, roleFile = new Map(), ancho
     }
   }
 
-  // ── ③ cost vs risk — 가장 낮은 위험의 diff가 **전체 패널**에 올라가 기준선을 확실히 넘겼다 ────
+  // ── ③ cost vs risk — **docs 모양의 diff**가 전체 패널에 올라가 기준선을 확실히 넘겼다 ─────────
+  // 방아쇠는 이제 라벨이 아니라 **diff 모양**이다(r2 항목 2). 라벨에만 걸던 규칙은 정확히 놓쳐야 할
+  // 것을 놓쳤다: triage가 docs 모양을 `standard`로 채점하면 그 순간 규칙의 눈이 감긴다.
   for (const x of signals.cost_vs_risk || []) {
-    if (x.tier !== RISK_ORDER[0]) continue;                        // 규칙은 가장 낮은 위험에만 건다
+    if (x.diff_shape !== "docs") continue;                         // 모양 미상(null)도 여기서 걸러진다
     if (!signals.full_panel || x.panel < signals.full_panel) continue;  // 전체 패널이 아니면 낭비가 아니다
     if (x.baseline == null || x.threshold == null) continue;       // 기준선을 만들 표본이 없다
     if (!(x.cost > x.threshold)) continue;                         // 확실히 넘지 않았다(1.25×)
@@ -297,13 +348,37 @@ export function behaviouralFindings({ signals, repo, roleFile = new Map(), ancho
       signal: "cost-vs-risk", kind: "behavioural", paired: true,
       issue: x.issue, repo, stage: "review",
       causal_path: ROSTER_PATH,
-      reason: `issue #${x.issue} was graded tier \`${x.tier}\` by the runner (${x.tier_source === "label" ? "the `factory:tier-docs` label" : "the run-bound review handoff"}) `
-        + `— the lowest risk the factory grades — yet it ran the FULL ${x.panel}-role review panel and cost $${x.cost}. `
+      reason: `PR #${x.pr} for issue #${x.issue} is a DOCS-SHAPED diff — every path GitHub lists for it matches the docs globs the tier resolver uses — `
+        + `yet it ran the FULL ${x.panel}-role review panel and cost $${x.cost}. `
         + `That is more than ${WASTE_MULTIPLE}× the $${x.baseline} baseline (the median of the ${x.baseline_n} higher-risk issues in this window, from tier ${from}), i.e. above $${x.threshold}. `
-        + `Paired evidence: cost $${x.cost} × risk \`${x.tier}\` — the roster resolved for this tier is the cause, not the reviewers.`,
+        + `The issue carries the label \`factory:tier-${x.tier}\` (source: ${x.tier_source}). `
+        + `Paired evidence: cost $${x.cost} × risk (diff shape \`docs\`) — the roster resolved for this diff is the cause, not the reviewers.`,
       extra: {
         cost: { usd: x.cost, baseline: x.baseline, threshold: x.threshold, baseline_tiers: x.baseline_tiers },
-        chain: [`#${x.issue}: tier ${x.tier} (${x.tier_source}), panel ${x.panel}/${signals.full_panel}, cost $${x.cost} vs threshold $${x.threshold} (baseline $${x.baseline} from ${x.baseline_n} issue(s) at ${x.baseline_tiers.join("+")})`],
+        chain: [`#${x.issue} (PR #${x.pr}): diff_shape docs, label tier ${x.tier} (${x.tier_source}), panel ${x.panel}/${signals.full_panel}, cost $${x.cost} vs threshold $${x.threshold} (baseline $${x.baseline} from ${x.baseline_n} issue(s) at ${x.baseline_tiers.join("+")})`],
+      },
+    });
+  }
+
+  // ── ④ tier 오채점 — docs 모양의 diff에 docs가 아닌 등급이 붙었다(r2 항목 3) ──────────────────
+  // 이것이 낭비의 **원인**이다. ③은 증상(비싼 리뷰)을 말하고 이것은 원인(해석기의 채점)을 말한다.
+  // 그리고 이 원인은 KTB가 배포한 기본값의 결함이다 — 루프가 존재하는 이유가 정확히 이것이다.
+  // 짝: "경로는 전부 docs다"(GitHub의 사실) × "등급은 docs가 아니다"(러너의 라벨). 둘 다 에이전트가
+  // 쓸 수 없는 채널이고, 둘이 어긋났다는 것 자체가 판정이다 — 비용도 패널도 묻지 않는다.
+  for (const x of signals.per_issue || []) {
+    if (x.diff_shape !== "docs") continue;
+    if (!x.tier || x.tier === RISK_ORDER[0]) continue;             // 등급이 docs면 어긋난 것이 없다
+    out.push({
+      signal: "tier-misgrade", kind: "behavioural", paired: true,
+      issue: x.issue, repo, stage: "triage",
+      causal_path: TIER_RESOLVER_PATH,
+      reason: `the tier resolver graded a docs-shaped diff (${x.pr_files} file(s), all matching the docs globs it uses) as \`${x.tier}\` `
+        + `on PR #${x.pr} for issue #${x.issue} (tier source: ${x.tier_source}). `
+        + `A docs-shaped diff graded above \`docs\` buys the heavier roster and the heavier gate level for work that does not need either — `
+        + `and, because the waste rule keys on risk, a label-anchored check can never see it. `
+        + `Paired evidence: the GitHub file list for the merged PR (all docs) × the runner-applied tier (\`${x.tier}\`) — two channels no agent can write.`,
+      extra: {
+        chain: [`#${x.issue} (PR #${x.pr}): ${x.pr_files} file(s), diff_shape docs, graded ${x.tier} via ${x.tier_source}`],
       },
     });
   }
@@ -368,14 +443,19 @@ export function renderHealthReport({ signals, findings = [], advisories = [], re
   L.push("");
   L.push(`역할별(리뷰 스테이지 비용의 **균등 배분** — 측정이 아니라 참고값): ${Object.entries(signals.cost_by_role).map(([t, c]) => `\`${t}\` ${usd(c)}`).join(" · ") || "n/a"}`);
   L.push("");
-  L.push("| issue | tier | tier 출처 | panel | cost | 기준선 | 임계(1.25×) |");
-  L.push("|---|---|---|---:|---:|---:|---:|");
+  L.push("| issue | PR | diff 모양 | tier(라벨) | tier 출처 | panel | cost | 기준선 | 임계(1.25×) |");
+  L.push("|---|---|---|---|---|---:|---:|---:|---:|");
   for (const x of signals.cost_vs_risk || []) {
     const base = x.baseline == null ? `n/a (더 위험한 이슈 ${x.baseline_n}건 — ${MIN_BASELINE_SAMPLE}건 필요)` : `${usd(x.baseline)} (${x.baseline_tiers.join("+")}, n=${x.baseline_n})`;
-    L.push(`| #${x.issue} | \`${x.tier}\` | ${x.tier_source} | ${x.panel}/${signals.full_panel} | ${usd(x.cost)} | ${base} | ${usd(x.threshold)} |`);
+    const shape = x.diff_shape == null ? "**미상**" : `\`${x.diff_shape}\``;
+    L.push(`| #${x.issue} | ${x.pr == null ? "n/a" : `#${x.pr}`} | ${shape} | \`${x.tier}\` | ${x.tier_source} | ${x.panel}/${signals.full_panel} | ${usd(x.cost)} | ${base} | ${usd(x.threshold)} |`);
   }
   L.push("");
-  L.push("> tier의 앵커는 러너가 붙인 `factory:tier-*` 라벨입니다(출처 `label`). 라벨이 없을 때만 런에 바인딩된 핸드오프의 `tier_effective`로 물러섭니다(출처 `handoff`). 에이전트의 자기 신고 `tier`는 읽지 않습니다.");
+  L.push("> 위험을 말하는 출처는 **둘**이고 둘 다 에이전트가 쓸 수 없는 채널입니다. `tier(라벨)`은 러너가 붙인 `factory:tier-*`입니다(라벨이 없을 때만 런에 바인딩된 핸드오프의 `tier_effective`로 물러섭니다 — 에이전트의 자기 신고 `tier`는 읽지 않습니다). `diff 모양`은 머지된 PR에 대해 **GitHub이 계산한 경로 목록**을 tier 해석기와 **같은 글롭**으로 판정한 값입니다. 낭비 판정은 모양에 겁니다 — 라벨 하나에만 걸면 '문서 모양인데 standard로 채점된' 경우를 영영 보지 못합니다.");
+  if (signals.shape_unknown?.length) {
+    L.push("");
+    L.push(`> 모양을 읽지 못한 이슈: ${signals.shape_unknown.map((n) => `#${n}`).join(", ")} (머지된 PR이나 그 파일 목록을 얻지 못했습니다). 이들에 대해 모양 기반 규칙은 **아무 말도 하지 않습니다** — 라벨로 추측하지 않습니다.`);
+  }
   L.push("");
 
   // 리허설은 **저장소 수준의 사실**이지 이슈별 증거가 아니다(T3: 리허설 RED는 per-issue durable 줄이
@@ -453,13 +533,13 @@ const errorAction = (reason, extra = {}) => ({ kind: "error", step: "health", re
  */
 export async function runHealth({
   gh, root = ".", repo = null, since = null, N = DEFAULT_N, now = new Date().toISOString(),
-  issues = null, commentsByIssue = null, records = null, run: runner = run,
+  issues = null, commentsByIssue = null, records = null, prByIssue = null, run: runner = run,
   harness = null, manifest = null, roleFile = new Map(), upstream = null,
   rehearsal = null, route = routeFindings, publish = true,
 } = {}) {
   const actions = [];
-  const loaded = await collect({ gh, run: runner, cwd: root, issues, commentsByIssue, records, since });
-  const signals = healthSignals({ ...loaded, N });
+  const loaded = await collect({ gh, run: runner, cwd: root, issues, commentsByIssue, records, prByIssue, since });
+  const signals = healthSignals({ ...loaded, harness, N });
 
   // 보고서를 실을 **오래 사는** 이슈 하나(본문 마커가 신원, state:all, 닫혀 있으면 다시 연다).
   let reportIssue = null;
@@ -558,8 +638,13 @@ export const sameReport = (a, b) => a != null && b != null
  * 이슈 조회는 `factory:merged`로 좁힌다(nit 9): 창은 "최근 머지된 N개"이고, 머지되지 않은 이슈의
  * 코멘트를 읽는 것은 그냥 API 왕복 낭비다. 라벨이 없는 저장소를 위해 닫힌 이슈로 한 번 더 물러선다.
  */
-async function collect({ gh, run: runner = run, cwd = null, issues, commentsByIssue, records, since, log = console.error }) {
-  if (issues) return { issues, commentsByIssue: commentsByIssue || new Map(), records: records || new Map(), records_source: "injected" };
+async function collect({ gh, run: runner = run, cwd = null, issues, commentsByIssue, records, prByIssue, since, log = console.error }) {
+  if (issues) {
+    return {
+      issues, commentsByIssue: commentsByIssue || new Map(), records: records || new Map(),
+      prByIssue: prByIssue || new Map(), records_source: "injected",
+    };
+  }
 
   const withState = (list) => (list || []).map((i) => ({ ...i, state: i.closedAt ? "closed" : "open" }));
   let all = [];
@@ -572,10 +657,22 @@ async function collect({ gh, run: runner = run, cwd = null, issues, commentsByIs
 
   const sinceMs = since == null ? null : Date.parse(since);
   const by = new Map();
+  const prs = new Map();
   for (const i of all) {
     if (!afterSince(i.closedAt, sinceMs)) continue;
     try { by.set(i.number, await gh.comments(i.number)); }
     catch (e) { log(`factory: health could not read comments on #${i.number} — ${e?.message || e}`); }
+    /**
+     * 머지된 PR과 그 파일 목록 — **diff 모양**의 유일한 출처(r2 항목 1). builder는 언제나
+     * `claude/fq-<issue>`에서 작업하므로 브랜치 이름이 곧 이슈 번호다(implement 규칙 1). 어느
+     * 단계든 실패하면 그 이슈의 모양은 **미상**이고, 미상은 미상으로 보고된다 — 라벨을 보고
+     * "아마 docs였겠지"라고 메우는 순간 이 두 번째 출처의 존재 이유가 사라진다(r2 항목 4).
+     */
+    try {
+      const pr = await gh.mergedPrForBranch(`claude/fq-${i.number}`);
+      if (pr == null) { log(`factory: health found no merged PR on claude/fq-${i.number} — diff shape unknown for #${i.number}`); continue; }
+      prs.set(i.number, { pr, files: await gh.prFiles(pr) });
+    } catch (e) { log(`factory: health could not read the PR file list for #${i.number} — ${e?.message || e}`); }
   }
 
   // run 기록 — 회고와 **같은 읽기**다(`readRecordsDetailed`). 못 읽으면 비용 신호가 없는 것이고,
@@ -592,7 +689,7 @@ async function collect({ gh, run: runner = run, cwd = null, issues, commentsByIs
       for (const f of r.failures || []) log(`factory: health could not read a run record — ${f?.reason ?? f}`);
     } catch (e) { source = "records-branch-unreadable"; log(`factory: health could not hydrate the records branch — ${e?.message || e}`); }
   }
-  return { issues: all, commentsByIssue: by, records: recs, records_source: source };
+  return { issues: all, commentsByIssue: by, records: recs, prByIssue: prs, records_source: source };
 }
 
 /** CLI 진입: 실제 의존성 조립 */

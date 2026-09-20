@@ -152,6 +152,16 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * `mergeSha`·`mergedAt`은 같은 조회로 공짜라 함께 싣는다(run 기록·retro가 쓸 수 있다).
      * 없는 필드는 지어내지 않고 null이다 — 머지되지 않은 PR에 부르면 전부 null로 답한다.
      */
+    /**
+     * 이 PR이 **실제로 건드린 파일 경로들**(피드백 루프 Task 4 r2). 경로는 GitHub이 diff에서 계산한
+     * 사실이지 에이전트가 적은 산문이 아니다 — 그래서 tier 라벨과 **독립한** 두 번째 위험 출처가 된다.
+     * triage가 docs 모양의 diff를 `standard`로 채점해도(KTB #18) 이 목록은 그 사실을 그대로 말한다.
+     * 못 읽으면 던진다 — 호출자가 "모양 미상"으로 저하시킨다(라벨로 **추측하지 않는다**).
+     */
+    async prFiles(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "files"]));
+      return (j.files || []).map((f) => f.path).filter(Boolean);
+    },
     async prMergeInfo(pr) {
       const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
       return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };

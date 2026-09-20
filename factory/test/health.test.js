@@ -1,8 +1,8 @@
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import {
-  DEFAULT_N, HEALTH_MARKER, MIN_BASELINE_SAMPLE, RISK_ORDER, WASTE_MULTIPLE,
-  costBaselineFor, findHealthIssue, healthSignals, runHealth, sameReport, tierOf,
+  DEFAULT_N, HEALTH_MARKER, MIN_BASELINE_SAMPLE, RISK_ORDER, TIER_RESOLVER_PATH, WASTE_MULTIPLE,
+  costBaselineFor, diffShapeOf, findHealthIssue, healthSignals, runHealth, sameReport, tierOf,
 } from "../bin/health.js";
 import { roleSignalsFor } from "../lib/retro/harvest.js";
 import { reviewEvidenceLine } from "../lib/run-record.js";
@@ -40,7 +40,7 @@ const reject = (role) => ({ role, verdict: "reject" });
  * 이슈 하나를 세운다: run 기록(라운드별 evidence 줄 + 비용) + 하트비트(런 바인딩의 앵커) + 선택적
  * plan 핸드오프. `rounds`는 라운드별 verdict 배열이다.
  */
-function issueOf({ n, day, tier, costUsd = 5, rounds = [], plan = null, labels = null }) {
+function issueOf({ n, day, tier, costUsd = 5, rounds = [], plan = null, labels = null, files = null }) {
   const sections = rounds.map((verdicts, i) => ({
     stage: "review", at: dayOf(day + i), runner: runnerOf(n, i + 1),
     lines: ["verify: ok", evidence(n, i + 1, verdicts), usageRecordLine({ costUsd: round2(costUsd / rounds.length) })],
@@ -56,21 +56,28 @@ function issueOf({ n, day, tier, costUsd = 5, rounds = [], plan = null, labels =
     },
     comments,
     record: recordOf(n, `issue ${n}`, sections),
+    // 머지된 PR의 파일 목록 — **GitHub의 사실**이 서는 자리(r2). `files: null`이면 모양 미상이다.
+    pr: files ? { pr: 1000 + n, files } : null,
   };
 }
 const round2 = (x) => Math.round(x * 100) / 100;
+/** 전부 docs 글롭에 맞는 경로 / 코드가 하나라도 섞인 경로 */
+const DOCS_FILES = ["README.md", "docs/guide.md", "docs/factory/notes.md"];
+const CODE_FILES = ["README.md", "src/app.js"];
 
 function windowOf(specs) {
   const issues = [];
   const commentsByIssue = new Map();
   const records = new Map();
+  const prByIssue = new Map();
   for (const s of specs) {
     const b = issueOf(s);
     issues.push(b.issue);
     commentsByIssue.set(s.n, b.comments);
     records.set(String(s.n), b.record);
+    if (b.pr) prByIssue.set(s.n, b.pr);
   }
-  return { issues, commentsByIssue, records };
+  return { issues, commentsByIssue, records, prByIssue };
 }
 
 const manifest = {
@@ -264,14 +271,29 @@ test("costBaselineFor — 더 위험한 이슈가 2건 미만이면 기준선이
   expect(costBaselineFor("load-bearing", per)).toEqual({ usd: null, tiers: [], n: 0 });
 });
 
-test("docs diff를 전체 패널에 태우고 비용이 임계(1.25×)를 넘으면 waste 발견", async () => {
+// ── diff 모양: 두 번째 위험 출처(r2 항목 1) ─────────────────────────────────────────────────
+
+test("diffShapeOf — tier 해석기의 매처에 **위임한다**(글롭 목록을 베끼지 않는다)", () => {
+  expect(diffShapeOf(["README.md", "docs/a.md"], {})).toBe("docs");
+  expect(diffShapeOf(["README.md", "src/app.js"], {})).toBe("code");
+  // "문서처럼 생겼지만 문서가 아닌 것"도 `tierFloor`가 이미 안다 — 여기서 다시 정의하지 않는다.
+  expect(diffShapeOf(["docs/factory/CHARTER.md", ".claude/agents/reviewer-x.md"], {})).toBe("code");
+  expect(diffShapeOf(["factory/test/x.test.js"], {})).toBe("code");
+  expect(diffShapeOf(["CLAUDE.md"], {})).toBe("code");
+  // 경로를 하나도 못 읽으면 **미상**이다 — 빈 목록을 docs로 읽으면 감사 H3의 구멍이 다시 열린다.
+  expect(diffShapeOf([], {})).toBeNull();
+  expect(diffShapeOf(null, {})).toBeNull();
+});
+
+test("docs **모양**의 diff를 전체 패널에 태우고 비용이 임계(1.25×)를 넘으면 waste 발견 — 라벨과 무관하게", async () => {
   const PANEL = ["architecture", "correctness", "qa", "spec-conformance"];
   const specs = [
-    { n: 1, day: 1, tier: "standard", costUsd: 20, rounds: [PANEL.map(approve)] },
-    { n: 2, day: 2, tier: "standard", costUsd: 20, rounds: [PANEL.map(approve)] },
-    { n: 3, day: 3, tier: "load-bearing", costUsd: 24, rounds: [PANEL.map(approve)] },
-    { n: 4, day: 4, tier: "docs", costUsd: 3, rounds: [[approve("correctness")]] },
-    { n: 5, day: 5, tier: "docs", costUsd: 80, rounds: [PANEL.map(approve)] },
+    { n: 1, day: 1, tier: "standard", costUsd: 20, rounds: [PANEL.map(approve)], files: CODE_FILES },
+    { n: 2, day: 2, tier: "standard", costUsd: 20, rounds: [PANEL.map(approve)], files: CODE_FILES },
+    { n: 3, day: 3, tier: "load-bearing", costUsd: 24, rounds: [PANEL.map(approve)], files: CODE_FILES },
+    { n: 4, day: 4, tier: "docs", costUsd: 3, rounds: [[approve("correctness")]], files: DOCS_FILES },
+    // KTB #18이 **그랬어야 했던** 모양: docs 경로뿐인데 `standard`로 채점돼 전체 패널을 샀다.
+    { n: 5, day: 5, tier: "standard", costUsd: 80, rounds: [PANEL.map(approve)], files: DOCS_FILES },
   ];
   const gh = fakeGh();
   const r = await health({ gh, ...windowOf(specs) });
@@ -280,25 +302,74 @@ test("docs diff를 전체 패널에 태우고 비용이 임계(1.25×)를 넘으
   expect(waste).toHaveLength(1);
   expect(waste[0]).toMatchObject({ signal: "cost-vs-risk", kind: "behavioural", paired: true, issue: 5, stage: "review", causal_path: ".factory/lib/review-roster.js" });
   expect(waste[0].extra.cost).toEqual({ usd: 80, baseline: 20, threshold: 25, baseline_tiers: ["standard", "load-bearing"] });
-  expect(r.signals.cost_vs_risk.find((x) => x.issue === 5)).toMatchObject({ tier: "docs", tier_source: "label", panel: 4, cost: 80, baseline: 20, threshold: 25 });
-  // 값싼 docs 이슈(#4)는 같은 tier인데도 발견이 아니다 — 패널도 작고 임계도 넘지 않는다.
-  expect(waste.map((f) => f.issue)).not.toContain(4);
-  // 발견 본문은 **실제로 존재하는** tier만 근거로 든다.
+  expect(r.signals.cost_vs_risk.find((x) => x.issue === 5)).toMatchObject({ diff_shape: "docs", tier: "standard", tier_source: "label", panel: 4, cost: 80, baseline: 20, threshold: 25, pr: 1005 });
+  // 본문이 모양·라벨·패널·비용·기준선 tier를 전부 이름으로 댄다.
+  expect(waste[0].reason).toContain("DOCS-SHAPED");
+  expect(waste[0].reason).toContain("factory:tier-standard");
   expect(waste[0].reason).toContain("`standard`, `load-bearing`");
+  expect(waste[0].reason).toContain("PR #1005");
+  // 값싼 docs 이슈(#4)는 같은 모양인데도 발견이 아니다 — 패널도 작고 임계도 넘지 않는다.
+  expect(waste.map((f) => f.issue)).not.toContain(4);
+});
+
+test("docs 모양 + docs가 아닌 등급 → `[ktb]` tier 오채점 발견(비용도 패널도 묻지 않는다)", async () => {
+  const specs = [
+    { n: 1, day: 1, tier: "standard", costUsd: 5, rounds: [[approve("a")]], files: CODE_FILES },
+    { n: 2, day: 2, tier: "standard", costUsd: 5, rounds: [[approve("a")]], files: CODE_FILES },
+    { n: 3, day: 3, tier: "docs", costUsd: 5, rounds: [[approve("a")]], files: DOCS_FILES },   // 제대로 채점됐다
+    { n: 4, day: 4, tier: "load-bearing", costUsd: 5, rounds: [[approve("a")]], files: DOCS_FILES },
+    { n: 5, day: 5, tier: "standard", costUsd: 5, rounds: [[approve("a")]], files: DOCS_FILES },
+  ];
+  const gh = fakeGh();
+  const r = await health({ gh, ...windowOf(specs) });
+
+  const mis = bySignal(r, "tier-misgrade").sort((a, b) => a.issue - b.issue);
+  expect(mis.map((f) => f.issue)).toEqual([4, 5]);        // #3은 docs 모양에 docs 등급이라 어긋난 것이 없다
+  expect(mis[1]).toMatchObject({
+    signal: "tier-misgrade", kind: "behavioural", paired: true, issue: 5,
+    stage: "triage", repo: "o/r", causal_path: TIER_RESOLVER_PATH,
+  });
+  expect(TIER_RESOLVER_PATH).toBe(".factory/lib/context.js");
+  expect(mis[1].reason).toContain("docs-shaped diff (3 file(s), all matching the docs globs");
+  expect(mis[1].reason).toContain("as `standard`");
+  // 그리고 T3의 팔을 타고 `ktb`로 갔다 — 이것은 KTB가 배포한 기본값의 결함이다.
+  expect(r.classified.filter((c) => c.payload?.kind === "behavioural").every((c) => c.tags.includes("ktb"))).toBe(true);
+  expect(gh.calls.upstream.length).toBe(2);
+});
+
+test("모양을 읽지 못하면(PR 없음/API 실패) 모양 기반 발견은 **하나도** 나지 않고 저하로 보고된다", async () => {
+  const PANEL = ["architecture", "correctness", "qa", "spec-conformance"];
+  const specs = [
+    { n: 1, day: 1, tier: "standard", costUsd: 20, rounds: [PANEL.map(approve)], files: CODE_FILES },
+    { n: 2, day: 2, tier: "standard", costUsd: 20, rounds: [PANEL.map(approve)], files: CODE_FILES },
+    { n: 3, day: 3, tier: "load-bearing", costUsd: 24, rounds: [PANEL.map(approve)], files: CODE_FILES },
+    { n: 4, day: 4, tier: "docs", costUsd: 5, rounds: [[approve("a")]], files: CODE_FILES },
+    // 라벨은 docs이고 비용도 임계를 넘지만 **모양을 모른다** — 라벨로 추측하지 않는다.
+    { n: 5, day: 5, tier: "docs", costUsd: 80, rounds: [PANEL.map(approve)], files: null },
+  ];
+  const gh = fakeGh();
+  const r = await health({ gh, ...windowOf(specs) });
+  expect(bySignal(r, "cost-vs-risk")).toEqual([]);
+  expect(bySignal(r, "tier-misgrade")).toEqual([]);
+  expect(r.signals.shape_unknown).toEqual([5]);
+  expect(r.signals.cost_vs_risk.find((x) => x.issue === 5)).toMatchObject({ diff_shape: null, pr: null });
+  expect(r.report).toContain("모양을 읽지 못한 이슈: #5");
+  expect(gh.calls.upstream).toEqual([]);
 });
 
 test("리뷰어 probe C — standard $6 한 건 + docs $6.50이면 발견이 없다(표본 1건, 1.25× 미만)", async () => {
   const specs = [
-    { n: 1, day: 1, tier: "standard", costUsd: 6, rounds: [[approve("a"), approve("b")]] },
-    { n: 2, day: 2, tier: "docs", costUsd: 6.5, rounds: [[approve("a"), approve("b")]] },
-    { n: 3, day: 3, tier: "docs", costUsd: 1, rounds: [[approve("a"), approve("b")]] },
-    { n: 4, day: 4, tier: "docs", costUsd: 1, rounds: [[approve("a"), approve("b")]] },
-    { n: 5, day: 5, tier: "docs", costUsd: 1, rounds: [[approve("a"), approve("b")]] },
+    { n: 1, day: 1, tier: "standard", costUsd: 6, rounds: [[approve("a"), approve("b")]], files: CODE_FILES },
+    { n: 2, day: 2, tier: "docs", costUsd: 6.5, rounds: [[approve("a"), approve("b")]], files: DOCS_FILES },
+    { n: 3, day: 3, tier: "docs", costUsd: 1, rounds: [[approve("a"), approve("b")]], files: DOCS_FILES },
+    { n: 4, day: 4, tier: "docs", costUsd: 1, rounds: [[approve("a"), approve("b")]], files: DOCS_FILES },
+    { n: 5, day: 5, tier: "docs", costUsd: 1, rounds: [[approve("a"), approve("b")]], files: DOCS_FILES },
   ];
   const r = await health({ ...windowOf(specs) });
   expect(bySignal(r, "cost-vs-risk")).toEqual([]);
+  expect(bySignal(r, "tier-misgrade")).toEqual([]);      // 전부 docs 모양에 docs 등급이다
   const row = r.signals.cost_vs_risk.find((x) => x.issue === 2);
-  expect(row).toMatchObject({ baseline: null, baseline_n: 1, threshold: null });
+  expect(row).toMatchObject({ diff_shape: "docs", baseline: null, baseline_n: 1, threshold: null });
 });
 
 // ── (d) N 미만 ───────────────────────────────────────────────────────────────────────────────
@@ -408,11 +479,12 @@ test("리허설 기록은 **건강 줄**이지 발견이 아니다 — RED여도
 // ── collect(): 주입 없이 gh + records 브랜치에서 읽는다 ─────────────────────────────────────
 
 test("주입 없이 돌면 이슈는 gh에서, 비용은 **records 브랜치**에서 하이드레이트된다", async () => {
-  const b1 = issueOf({ n: 11, day: 1, tier: "docs", costUsd: 90, rounds: [[approve("a"), approve("b"), approve("c"), approve("d")]] });
-  const b2 = issueOf({ n: 12, day: 2, tier: "standard", costUsd: 20, rounds: [[approve("a"), approve("b"), approve("c"), approve("d")]] });
-  const b3 = issueOf({ n: 13, day: 3, tier: "load-bearing", costUsd: 20, rounds: [[approve("a"), approve("b"), approve("c"), approve("d")]] });
-  const b4 = issueOf({ n: 14, day: 4, tier: "standard", costUsd: 20, rounds: [[approve("a"), approve("b"), approve("c"), approve("d")]] });
-  const b5 = issueOf({ n: 15, day: 5, tier: "standard", costUsd: 20, rounds: [[approve("a"), approve("b"), approve("c"), approve("d")]] });
+  const P4 = [approve("a"), approve("b"), approve("c"), approve("d")];
+  const b1 = issueOf({ n: 11, day: 1, tier: "docs", costUsd: 90, rounds: [P4], files: DOCS_FILES });
+  const b2 = issueOf({ n: 12, day: 2, tier: "standard", costUsd: 20, rounds: [P4], files: CODE_FILES });
+  const b3 = issueOf({ n: 13, day: 3, tier: "load-bearing", costUsd: 20, rounds: [P4], files: CODE_FILES });
+  const b4 = issueOf({ n: 14, day: 4, tier: "standard", costUsd: 20, rounds: [P4], files: CODE_FILES });
+  const b5 = issueOf({ n: 15, day: 5, tier: "standard", costUsd: 20, rounds: [P4], files: CODE_FILES });
   const built = [b1, b2, b3, b4, b5];
 
   const listed = [];
@@ -422,6 +494,12 @@ test("주입 없이 돌면 이슈는 gh에서, 비용은 **records 브랜치**�
     async comments(n) { return built.find((b) => b.issue.number === n)?.comments ?? []; },
     async comment() {}, async createIssue() { return 900; }, async reopenIssue() {},
     async upstreamIssue({ render }) { render(); return { issue: 501, created: true }; },
+    // diff 모양의 출처 — 브랜치 이름이 곧 이슈 번호다(`claude/fq-<n>`).
+    async mergedPrForBranch(branch) {
+      const n = Number(/claude\/fq-(\d+)/.exec(branch)?.[1]);
+      return built.find((b) => b.issue.number === n)?.pr?.pr ?? null;
+    },
+    async prFiles(pr) { return built.find((b) => b.pr?.pr === pr)?.pr.files ?? []; },
   };
 
   // `readRecordsDetailed`가 부르는 git을 가짜 run으로 받는다 — records 브랜치를 **실제로 통과**한다.
@@ -473,6 +551,19 @@ test("records 브랜치가 없으면 비용 신호가 비고, 그 사실이 보�
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8"));
 
+/** 픽스처 한 장으로 건강 잡을 돌린다 — 이슈·코멘트·기록·PR 파일 목록 전부 실제 원문이다. */
+async function runReal(f) {
+  const b = { number: f.issue.number, title: f.issue.title, state: f.issue.state, closedAt: f.issue.closedAt, updatedAt: f.issue.updatedAt, labels: f.issue.labels };
+  const gh = fakeGh();
+  const r = await health({
+    gh, issues: [b],
+    commentsByIssue: new Map([[b.number, f.comments]]),
+    records: new Map([[String(b.number), f.record]]),
+    prByIssue: f.pr ? new Map([[b.number, { pr: f.pr.number, files: f.pr.files }]]) : new Map(),
+  });
+  return { ...r, gh };
+}
+
 test("회귀 — own-calendar #3 (실제 기록): 리뷰 4라운드에 리뷰어가 REJECT했다 → rounds 4, rubber-stamp 없음", async () => {
   const f = fixture("own-calendar-3");
   expect(f._source).toContain("own-calendar#3");
@@ -492,26 +583,25 @@ test("회귀 — own-calendar #3 (실제 기록): 리뷰 4라운드에 리뷰어
   expect(s.roles["spec-conformance"]).toMatchObject({ verdicts: 4, rejects: 1 });
 
   // 이 이슈 하나로 돌린 건강 잡: 표본 미달이라 **아무 발견도 없다**.
-  const b = { number: f.issue.number, title: f.issue.title, state: f.issue.state, closedAt: f.issue.closedAt, updatedAt: f.issue.updatedAt, labels: f.issue.labels };
-  const gh = fakeGh();
-  const r = await health({
-    gh, issues: [b], commentsByIssue: new Map([[b.number, f.comments]]), records: new Map([[String(b.number), f.record]]),
-  });
+  const r = await runReal(f);
   expect(r.below_n).toBe(true);
   expect(r.findings).toEqual([]);
-  expect(gh.calls.upstream).toEqual([]);
+  expect(r.gh.calls.upstream).toEqual([]);
   expect(r.signals.rounds_per_issue).toEqual([{ issue: 3, review: 4 }]);
-  // tier 앵커는 러너의 라벨이다.
-  expect(r.signals.per_issue[0]).toMatchObject({ tier: "standard", tier_source: "label" });
+  // tier 앵커는 러너의 라벨이다. 그리고 PR #5의 경로에 Dart 테스트가 있어 모양은 `code`다.
+  expect(f.pr).toMatchObject({ number: 5 });
+  expect(f.pr.files).toEqual(["README.md", "client/test/test_3_readme_test.dart"]);
+  expect(r.signals.per_issue[0]).toMatchObject({ tier: "standard", tier_source: "label", diff_shape: "code", pr: 5 });
+  // 그래서 모양 기반 규칙 **둘 다** 침묵한다.
+  expect(bySignal(r, "cost-vs-risk")).toEqual([]);
+  expect(bySignal(r, "tier-misgrade")).toEqual([]);
   // 거절한 역할은 승인률이 1이 아니므로, 표본이 채워져도 rubber-stamp가 되지 않는다.
   for (const role of ["correctness", "architecture", "spec-conformance"]) expect(r.signals.roles[role].ever_rejects).toBe(true);
 });
 
-test("회귀 — KTB #18 (실제 기록): 러너는 이 이슈를 `standard`로 채점했다 → cost_vs_risk는 침묵한다", async () => {
+test("회귀 — KTB #18 (실제 기록+실제 PR): diff는 `code` 모양이다 → 모양 기반 발견은 **둘 다** 침묵한다", async () => {
   const f = fixture("ktb-18");
   expect(f._source).toContain("know_thy_build#18");
-  // 실제 라벨이 그렇다 — 플랜의 "docs 이슈"는 diff의 **내용**을 가리킨 말이고, 러너의 채점은 standard다.
-  expect(f.issue.labels.map((l) => l.name)).toContain("factory:tier-standard");
 
   const s = roleSignalsFor({ record: f.record, comments: f.comments });
   expect(s.max_round).toBe(3);
@@ -522,19 +612,28 @@ test("회귀 — KTB #18 (실제 기록): 러너는 이 이슈를 `standard`로 
   expect(s.roles.architecture).toMatchObject({ verdicts: 3, approves: 3, rejects: 0, escaped: 2 });
   expect(s.roles["spec-conformance"]).toMatchObject({ verdicts: 3, approves: 3, rejects: 0, escaped: 2 });
 
-  const b = { number: f.issue.number, title: f.issue.title, state: f.issue.state, closedAt: f.issue.closedAt, updatedAt: f.issue.updatedAt, labels: f.issue.labels };
-  const gh = fakeGh();
-  const r = await health({
-    gh, issues: [b], commentsByIssue: new Map([[b.number, f.comments]]), records: new Map([[String(b.number), f.record]]),
-  });
+  /**
+   * **플랜의 전제가 틀렸다.** 플랜은 #18을 "표준 4역할 패널에 올라간 docs 이슈"라고 적었지만, 머지된
+   * PR #19가 실제로 건드린 것은 `README.md` · `docs/factory/DECISIONS.md` **그리고**
+   * `factory/test/readme-commands.test.js`다. 테스트 파일 하나가 diff를 docs 모양이 아니게 만들고
+   * (`factory/**`는 `NEVER_DOCS_GLOBS`에 있다), 그래서 러너의 `factory:tier-standard` 채점은
+   * **방어 가능하다**. 초록을 만들려고 테스트 파일을 특례로 빼지 않는다 — 그러면 "리뷰어 프롬프트만
+   * 고친 PR"도 docs가 되고, 그것이 바로 감사 M12가 막은 구멍이다.
+   */
+  expect(f.pr).toMatchObject({ number: 19 });
+  expect(f.pr.files).toEqual(["README.md", "docs/factory/DECISIONS.md", "factory/test/readme-commands.test.js"]);
+  expect(diffShapeOf(f.pr.files, {})).toBe("code");
+
+  const r = await runReal(f);
   const row = r.signals.cost_vs_risk.find((x) => x.issue === 18);
   // 비용은 진짜로 읽혔다(플랜이 말한 "~$80").
   expect(row.cost).toBeGreaterThan(80);
   expect(row.cost).toBeLessThan(90);
-  // 그러나 tier 앵커가 `standard`이므로 **가장 낮은 위험**에만 거는 waste 규칙은 이 이슈에 걸리지 않는다.
-  expect(row).toMatchObject({ tier: "standard", tier_source: "label" });
+  expect(row).toMatchObject({ tier: "standard", tier_source: "label", diff_shape: "code", pr: 19 });
+  // 모양이 `code`이므로 낭비도, 오채점도 아니다. 두 규칙 모두 조용하다.
   expect(bySignal(r, "cost-vs-risk")).toEqual([]);
-  expect(gh.calls.upstream).toEqual([]);
+  expect(bySignal(r, "tier-misgrade")).toEqual([]);
+  expect(r.gh.calls.upstream).toEqual([]);
 });
 
 test("회귀 — KTB의 실제 창: 6개 머지 중 `review-evidence:`를 가진 것은 2개뿐이라 귀속이 안 된다", () => {
