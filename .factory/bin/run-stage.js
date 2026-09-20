@@ -5,11 +5,11 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, rosterFor } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
-import { isGitDiffError } from "../lib/changed-files.js";
+import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
@@ -41,6 +41,7 @@ import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding } from "../lib/self-gate.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -836,6 +837,68 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
           ...gatesNote, usage,
         ]);
         return t.ok ? 0 : 2;
+      }
+    }
+    /**
+     * ── Structure B (리뷰 효율 Task 3) — 핸드오프 직전 self-gate ────────────────────────────────
+     *
+     * implement에서만, `verifyStage`가 통과한 뒤 `factory:awaiting-review` 전이 **직전**에 돈다. 리뷰가
+     * 결정적으로 돌릴 검사(이미 계산된 `gates`·계약 대조 qa 증거·새 테스트 mutation check)를 합성해,
+     * 리뷰어의 runnable 검사가 어차피 거부할 diff가 리뷰 라운드를 통째로 태우는 것을 막는다
+     * (KTB #18 R3 finish() 회귀, own-cal R1 cf1 fail-open 가드).
+     *
+     * 하네스 이슈는 제외한다(`!harnessIssue`): 그 빌더는 보호 경로를 일부러 쓰고 PR은 어차피 사람이
+     * 머지하므로 self-gate의 회귀 대상(제품 diff의 리뷰 효율)과 계열이 다르다. 위 harness_needed 분기가
+     * 채워진 하네스 이슈는 이미 return했다 — 여기 오는 하네스 이슈는 요청이 빈 것뿐이다.
+     *
+     * 기존 테스트/오래된 배선은 `d.selfGate`를 주입하지 않을 수 있다 — 그때는 (게이트처럼) 조용히
+     * 건너뛰고 평소대로 awaiting-review로 간다.
+     */
+    if (stage === "implement" && !harnessIssue && d.selfGate) {
+      let sg;
+      try { sg = await d.selfGate({ gates }); }
+      catch (e) {
+        // diff/merge-base를 못 읽으면 "무엇을 검사할지"가 없다 — GREEN도 RED도 아닌 판정 불가이므로
+        // gates BLOCKED과 같은 등급이다. 못 돌린 self-gate 위에서 리뷰로 조용히 넘기지 않는다.
+        if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+        await d.writeHandoff({ stage, data: v.data, gates });
+        const t = await d.transition({ to: "factory:blocked", reason: `self-gate: ${reason}` });
+        record(["verify: ok", `self-gate: BLOCKED — ${reason}`, ...refusal(t), ...gatesNote, usage]);
+        return 2;
+      }
+      if (sg) {
+        // advisory(비차단) findings는 핸드오프에 실어 리뷰어가 앞서 출발하게 한다.
+        const advisory = advisoryFindings(sg.findings);
+        if (advisory.length) v.data.self_gate = { advisory: advisory.map((f) => ({ check: f.check, detail: f.detail })) };
+        if (!sg.ok) {
+          await d.writeHandoff({ stage, data: v.data, gates });
+          /**
+           * ── RED 경로 ──────────────────────────────────────────────────────────────────────────
+           * Task 9(one-shot in-run repair, KTB-51)가 **아직 없다** — 그래서 안전한 전방 호환 결과를
+           * 고른다: `factory:awaiting-review`로 절대 전이하지 않는다. self-gate finding은 결정적·재현
+           * 가능하므로, 그대로 통과시키면 리뷰어의 runnable 검사가 어차피 거부할 것에 리뷰 라운드를
+           * 통째로 태운다(이 스트럭처가 없애려는 바로 그 낭비).
+           *
+           * ── TASK 9 HOOK ───────────────────────────────────────────────────────────────────────
+           * 여기가 one-shot in-run repair 루프가 들어갈 자리다: `sg.findings`를 빌더에게 **정확히 한 번**
+           * 되먹여(bounded — 루프 금지) 고치게 하고, `d.selfGate`를 다시 돌린 뒤, 그때 초록이면
+           * awaiting-review로 진행하고 아니면 아래 에스컬레이션으로 떨어진다. 그 루프가 생기기 전까지는
+           * 곧장 에스컬레이션한다.
+           *
+           * 라우팅: 빌더가 고칠 수 없는 finding(보호 경로/하네스 변경 — 예: 하네스가 단일 테스트를 못
+           * 돌려 mutation check가 `misconfigured`)은 사람이 필요하다 → `factory:needs-human`. 그 밖은
+           * 빌더가 고칠 수 있다 → `factory:planned`, implement가 다시 진입하는 자리다
+           * (`in-progress → planned`는 sweeper 재큐 엣지, `planned → in-progress`가 빌더를 다시 띄운다;
+           * `in-progress → rework`는 그래프에 없는 엣지다 — labels.js TRANSITIONS).
+           */
+          const to = harnessFinding(sg.findings) ? "factory:needs-human" : "factory:planned";
+          const summary = summarizeFindings(sg.findings.filter((f) => f.blocking));
+          const t = await d.transition({ to, reason: `self-gate blocked handoff: ${summary}` });
+          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+          return t.ok ? 0 : 2;
+        }
+        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`]);
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
@@ -2090,6 +2153,36 @@ async function main() {
     },
     /** 매니페스트 요약(§qaEvidenceSummary) — review 스테이지의 기록과 `factory:approved` 요구조건이 함께 읽는다. */
     qaEvidence: async ({ headSha = null } = {}) => qaEvidenceSummary({ headSha }),
+    /**
+     * ── Structure B (리뷰 효율 Task 3) — implement 핸드오프 직전의 self-gate ──────────────────
+     * `verifyStage`가 통과한 뒤, `factory:awaiting-review` 전이 **직전**에 부른다. 리뷰가 결정적으로
+     * 돌릴 검사(이미 계산된 `gates`·계약 대조 qa 증거·새 테스트 mutation check)를 그대로 합성한다 —
+     * 재료는 전부 러너가 이미 들고 있는 것이라 리뷰 라운드보다 싸다(lib/self-gate.js의 cost note).
+     *
+     * 두 곳에서 로스터·계약이 갈리지 않게 한다: implement의 `ctxCache.roster`는 비어 있으므로(빌더·
+     * verifier는 CHARTER 로스터가 아니다), 계약이 qa의 채점을 받을지는 **diff가 정한 실효 tier의 review
+     * 로스터**로 판단한다 — 리뷰어가 볼 바로 그 로스터다. qa 증거는 `qaEvidenceSummary`가 아니라
+     * `evidenceFor`를 직접 부른다: 전자는 implement의 빈 로스터를 보고 언제나 skip하기 때문이다.
+     */
+    selfGate: async ({ gates }) => {
+      const base = await mergeBase();
+      const diff = await changedFiles({ run, cwd: root, base, harness });
+      const contract = ctxCache?.handoffs?.plan?.done_when ?? [];
+      const tier = ctxCache?.tier_effective ?? ctxCache?.tier ?? charter.tier_default;
+      let roster = [];
+      try { roster = rosterFor(charter, loadRoles(root), "review", tier); } catch { roster = []; }
+      const qaEvidence = () => evidenceFor({
+        root, issue,
+        doneWhen: contract,
+        maturity: ctxCache?.harness?.maturity ?? "M0",
+        touchesData: touchesDataPaths(ctxCache?.handoffs?.triage?.impact_paths ?? []),
+        headSha: ctxCache?.handoffs?.implement?.head_sha ?? null,
+      });
+      return runSelfGate({
+        root, harness, contract, roster, tier, gates, run,
+        changedTests: diff.tests, changedSources: diff.sources, qaEvidence,
+      });
+    },
     verifyStage: ({ out, gates }) => {
       // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
       // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).

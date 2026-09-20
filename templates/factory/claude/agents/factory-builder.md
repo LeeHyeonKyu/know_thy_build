@@ -12,8 +12,13 @@ plan handoff이 계약으로 정한 `done_when`을 **실제로 동작하는 코�
 `prove-test`로 되돌려 실패시켜 본다.
 
 ## You receive
-- `.factory/out/context.json` — 이슈 원문, `tier`, `spec_path`, `handoffs.plan`(특히 `done_when[]`,
+- `.factory/out/context.json` — 이슈 원문, `tier`, `spec_path`, `handoffs.plan`(특히 `done_when[]` —
+  각 항목의 `check {kind, ref}`와 `rubric`, 즉 리뷰어가 그 항목에 적용할 한 줄 기준까지,
   `files_expected[]`, `non_goals[]`, `open_risks[]`), `harness.maturity`, `harness.commands`
+- `.factory/out/house-rules.md` — 이 저장소의 build/run/test 레시피, load-bearing 경로, CHARTER
+  `## Preserve`/NEVER_AUTOMATE에서 뽑은 "a correct change here must…" 불변식. 리뷰어가 이미 쥔 규칙이다 —
+  레시피의 한 단계를 빠뜨리거나 Preserve/load-bearing 불변식을 깨는 변경은 스타일이 아니라 결함이다
+  (own-calendar #3: 프로덕션 API를 가리킨 README, `prisma migrate`가 빠진 서버 기동).
 - `spec_path`가 가리키는 스펙 파일 (있으면 전문)
 - `docs/QA.md` — 이 프로젝트에서 각 레벨의 테스트를 쓰는 법(fixture, factory 함수, fake 서버, 증거 캡처)
 - `docs/TECHNICAL.md` §Testing Strategy, `[test].smoke`의 세 파일 — 살아 있는 최소 예제
@@ -84,6 +89,24 @@ plan handoff이 계약으로 정한 `done_when`을 **실제로 동작하는 코�
    `--body "…"`로 본문을 명령줄에 박지 않는다 — PreToolUse 훅은 **명령 문자열 전체**를 읽으므로 본문에 `>`로
    시작하는 줄(인용문, "Scope change" 메모)이 하나만 있어도 보호 경로로의 리다이렉션으로 읽혀 명령이 통째로
    차단된다. 본문이 길수록 확률이 올라가는 종류의 실패이고, 파일로 넘기면 아예 생기지 않는다.
+
+## Self-critique before handoff (Structure B — 리뷰 효율 Task 3)
+핸드오프를 쓰기 **전에**, 다시 읽기가 아니라 **적대적 자기비판**을 한 번 한다. 목적은 "이 정도면 됐나?"가
+아니라 **"이게 어디서 리뷰어의 rubric에 걸리는가"**를 스스로 찾는 것이다 — 리뷰어가 라운드를 태워 찾을
+결함을 지금 없앤다(그것이 이 구조의 목적이다).
+1. **결정적 검사를 로컬에서 돌린다**: `[commands].finish`/`[commands].gates`(둘 다 없으면 `lint`+`unit`/full)를
+   직접 돌려 **exit 0**을 확인한다. 빨간 `finish()`를 리뷰에 넘기면 그것이 KTB #18 R3 — 스스로 돌릴 수 있었던
+   검사에 리뷰 라운드 하나를 태운 사고다.
+2. **rubric으로 자기 diff를 공격한다**: `done_when[].rubric`(리뷰어의 한 줄 기준)마다 "내 변경이 여기서 어떻게
+   실패하는가"를 찾는다 — 지키는 동작을 지워도 통과하는 가드 테스트(own-cal R1 cf1), 구현을 베낀 단언,
+   증거를 댈 수 없는 done_when, diff가 건드린 `## Preserve`/load-bearing 불변식. 찾은 것은 **지금** 고친다.
+3. **tier로 규모를 맞춘다**: `docs`/`standard`는 이 세션 안의 마지막 한 턴으로 in-process로 한다. `load-bearing`은
+   스테이지가 verify 전에 **skeptic 서브에이전트**를 하나 띄워 같은 일을 하고, 당신은 그 findings를 이 세션에서
+   답한다(리뷰 라운드로 미루지 않는다) — 턴 예산 안에서 한 번, 루프 없이(ADR-020 O25).
+
+스테이지는 이 세션 뒤에 **결정적 self-gate**(`factory/lib/self-gate.js`)를 한 번 더 돌린다: 위 검사(게이트·
+계약 대조 증거·새 테스트 mutation)를 그대로 재실행해, survivor나 증거 없는 done_when이 리뷰까지 새는 것을
+막는다. 그러니 그 검사들은 핸드오프 **뒤**가 아니라 **앞**에서 답한다.
 
 ## Output — schema `factory.implement.build.v1`
 ```yaml

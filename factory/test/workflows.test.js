@@ -774,6 +774,83 @@ test("factory-implement.js: builder → verifier, Load/Build/Verify/Fix phases, 
   expect(validate("implement.v1", { ...result, gates: { status: "GREEN" } }).ok).toBe(true);
 });
 
+// ── Structure B (review-efficiency Task 3) — the builder self-critique half ─────────────────────
+
+test("factory-implement.js: the build prompt carries the self-critique rule, the finish()/gates local run, and the house-rules digest", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix() },
+  });
+  const build = byType(calls, "factory-builder")[0].prompt;
+  expect(build).toContain(".factory/out/house-rules.md");     // house rules reference (Task 2 digest)
+  expect(build).toContain("self-critique");
+  expect(build).toContain("rubric");                          // framed by the reviewer's rubric
+  expect(build).toMatch(/finish|gates/);                      // run the deterministic checks locally
+  expect(build).toContain("own-cal R1 cf1");                  // the pinned regression it kills
+});
+
+test("factory-implement.js: a docs/standard tier does NOT spawn a skeptic — the sequence stays builder → verifier", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix({ tier: "standard" }) },
+  });
+  expect(calls.filter((c) => c.opts.label === "self-critique")).toHaveLength(0);
+  expect(calls.map((c) => c.opts.agentType)).toEqual(["factory-builder", "factory-verifier"]);
+});
+
+test("factory-implement.js: a load-bearing tier spawns one adversarial skeptic before verify and the builder answers its flaws", async () => {
+  let builds = 0;
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder" && opts.label === "self-critique") {
+      // the skeptic returns one concrete flaw framed by the rubric.
+      return { flaws: [{ where: "test/warn.test.js:5", rubric_failed: "warns on prod", evidence: "deleting the warning still passes" }] };
+    }
+    if (opts.agentType === "factory-builder") { builds += 1; return buildFix(builds === 1 ? {} : { head_sha: SHA_B, commits: [SHA_A, SHA_B] }); }
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { result, calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix({ tier: "load-bearing" }) },
+  });
+  const labels = calls.map((c) => c.opts.label);
+  expect(labels).toContain("self-critique");                          // a skeptic WAS spawned
+  const skepticIdx = labels.indexOf("self-critique");
+  const verifyIdx = calls.findIndex((c) => c.opts.agentType === "factory-verifier");
+  expect(skepticIdx).toBeLessThan(verifyIdx);                         // BEFORE the verifier
+  // the builder got one turn to answer the flaws, and that head_sha is the one handed off.
+  expect(calls.some((c) => c.opts.label === "self-critique:fix")).toBe(true);
+  expect(result.head_sha).toBe(SHA_B);
+  const skepticPrompt = calls[skepticIdx].prompt;
+  expect(skepticPrompt).toContain("FAILS");                           // adversarial framing, not "is this ok"
+  expect(skepticPrompt).toContain("rubric");
+});
+
+test("factory-implement.js: a load-bearing skeptic that finds nothing adds no fix turn", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder" && opts.label === "self-critique") return { flaws: [] };
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix({ tier: "load-bearing" }) },
+  });
+  expect(calls.filter((c) => c.opts.label === "self-critique")).toHaveLength(1);
+  expect(calls.filter((c) => c.opts.label === "self-critique:fix")).toHaveLength(0);
+});
+
 test("factory-implement.js: a rejected verdict buys exactly one fix round — the second head_sha wins and the builder is shown the findings", async () => {
   let builds = 0;
   let verifies = 0;

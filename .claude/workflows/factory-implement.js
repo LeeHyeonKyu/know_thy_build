@@ -75,6 +75,24 @@ const VERDICT = {
   },
 };
 
+// Structure B (Task 3) — the load-bearing self-critique's output. A spawned skeptic hunts the diff
+// for where it FAILS the tier's reviewer rubric and returns concrete flaws; an empty list means it
+// found nothing to fix before the handoff. Only spawned for the load-bearing tier (build rule 10).
+const SKEPTIC = {
+  type: 'object',
+  required: ['flaws'],
+  properties: {
+    flaws: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['where', 'rubric_failed', 'evidence'],
+        properties: { where: { type: 'string' }, rubric_failed: { type: 'string' }, evidence: { type: 'string' } },
+      },
+    },
+  },
+};
+
 // Insurance re-spawn (ADR-003): if an agent dies/skips and returns null/undefined, try exactly once more.
 // A second null is left as null — the role is then dropped (never fabricated) and the missing field
 // makes verify-stage's `implement.v1` check fail the stage into needs-human.
@@ -246,8 +264,12 @@ const PROTECTED_FOR_HARNESS_ISSUE =
 
 const builderReading =
   `Read \`${args.context}\` first (issue, tier, spec_path, handoffs.plan.done_when and files_expected, ` +
-  `harness.maturity, harness.commands), then the spec at its \`spec_path\` if one is named, ` +
-  `\`docs/QA.md\` (how this project writes each test level) **if present**, \`docs/TECHNICAL.md\` ` +
+  `harness.maturity, harness.commands), then \`.factory/out/house-rules.md\` (this repo's build/run/test ` +
+  `recipe, its load-bearing paths, and the "a correct change here must…" invariants mined from CHARTER ` +
+  `\`## Preserve\`/NEVER_AUTOMATE — a change that breaks one of those, or skips a step in the recipe, is a ` +
+  `defect, not a style nit; own-calendar #3 shipped a README pointed at the production API and a bring-up ` +
+  `that dropped \`prisma migrate\` for exactly this reason), then the spec at its \`spec_path\` if one is ` +
+  `named, \`docs/QA.md\` (how this project writes each test level) **if present**, \`docs/TECHNICAL.md\` ` +
   `§Testing Strategy **if present** — neither is guaranteed to exist and their absence is normal, and ` +
   `your lessons file at \`.factory/lessons/factory-builder.md\` (treat every entry as a checklist item). ` +
   `The default branch is \`[project].default_branch\` in \`.factory/harness.toml\` — read it there; the ` +
@@ -308,6 +330,34 @@ const driftRule =
   `again after rule 7. The stage drops such a commit by itself when it touches ONLY those paths, but a ` +
   `commit that mixes them with real work cannot be dropped and stops the round (ADR-020 KTB-43).\n`;
 
+// ── Structure B (review-efficiency Task 3) — the builder's adversarial self-critique ────────────
+// Before it hands off, the builder runs the reviewer's DETERMINISTIC checks locally (finish()/gates)
+// and one ADVERSARIAL self-critique pass framed by the tier's reviewer rubric — "find where this
+// FAILS the rubric", not "is this ok?". Raising first-draft quality here is the whole point of the
+// plan (fewer review rounds). Tier-scaled so it does not blow the stage's `claude -p` turn budget
+// (ADR-020 O25; spec §9 Q2 — resolved here): `docs`/`standard` do it as an in-process final turn in
+// this same session; `load-bearing` additionally gets a spawned skeptic sub-agent (Verify phase)
+// because a hard-to-roll-back change earns the extra scrutiny. The stage ALSO runs a deterministic
+// self-gate after this session (lib/self-gate.js) — this rule is so the builder answers those
+// checks BEFORE the handoff, not after.
+const loadBearing = tier === 'load-bearing';
+const selfCritiqueRule =
+  `10. Before you write the handoff, self-critique — a distinct step, not a re-read. First run ` +
+  `\`[commands].finish\`/\`[commands].gates\` (or, if the harness names neither, \`[commands].lint\` + ` +
+  `\`[commands].unit\`/full) locally and confirm they EXIT 0 — a red \`finish()\` handed to review is ` +
+  `KTB #18 R3, a whole round burned on a check you could have run. Then take the reviewer's rubric for ` +
+  `this tier (each \`handoffs.plan.done_when[].rubric\` is the one-line bar a reviewer applies to that ` +
+  `item) and adversarially hunt for where your change FAILS it — a guard test that still passes when the ` +
+  `behaviour it guards is deleted (own-cal R1 cf1), an assertion that copies the implementation, a ` +
+  `done_when whose evidence you cannot point to, a \`## Preserve\`/load-bearing invariant from ` +
+  `\`.factory/out/house-rules.md\` your diff touches. Fix what you find NOW; the stage's deterministic ` +
+  `self-gate re-runs these same checks and will not let a survivor or an uncovered done_when reach review.` +
+  (loadBearing
+    ? ` This is a LOAD-BEARING change: a skeptic sub-agent also reviews your diff before verify — answer ` +
+      `its findings in this same session rather than deferring them to a review round.`
+    : '') +
+  `\n`;
+
 const buildRules =
   `1. You are ALREADY on the branch \`claude/fq-${issue}\` — the stage checked it out before this session ` +
   `started (ADR-023 Task 8b) and it is the only branch this session may be on. Never run \`git checkout\`, ` +
@@ -342,6 +392,7 @@ const buildRules =
   driftRule +
   `\n` +
   (isHarnessIssue ? harnessProtectedBlock : normalProtectedBlock) +
+  selfCritiqueRule +
   `Never write a credential, token or key into the repository, a test fixture, or a log line.`;
 
 const reworkBlock = mustFix.length > 0
@@ -387,6 +438,46 @@ let built = await build(buildPrompt, 'build');
 built = await completeRework(built, buildPrompt, 'build:rework');
 const buildGaps = reworkGaps(built);
 if (buildGaps.length > 0) return reworkFailure(built, buildGaps);
+
+// ── Structure B (Task 3), load-bearing only — the spawned skeptic self-critique ─────────────────
+// A hard-to-roll-back change earns one adversarial pass BEFORE the verifier: a skeptic reads the diff
+// and hunts for where it fails the rubric, then the builder gets ONE turn to answer. Bounded to one
+// skeptic spawn + one self-fix so it stays inside the stage's max_turns (ADR-020 O25; own-calendar
+// already raised it to 24). docs/standard tiers do the self-critique in-process (build rule 10) and
+// never reach here — which also keeps their agent sequence exactly builder → verifier.
+const skepticPrompt = (b) =>
+  `Adversarial self-critique. You are the skeptic on a LOAD-BEARING change on PR #${b && b.pr !== undefined ? b.pr : '<unknown>'} ` +
+  `(head ${b && b.head_sha ? b.head_sha : '<unknown>'}). Do NOT ask "is this ok" — hunt for where it FAILS. ` +
+  `Read only: \`${args.context}\` (issue, handoffs.plan.done_when — id, text, verify, level, and especially ` +
+  `\`rubric\`, the one-line bar a reviewer applies), \`.factory/out/house-rules.md\` (the repo's ` +
+  `\`## Preserve\`/load-bearing invariants and its build/run/test recipe), the diff ` +
+  `\`git diff origin/<default_branch>...HEAD\` (default branch from \`.factory/harness.toml\` ` +
+  `[project].default_branch), and the test files and implementation files that diff touches. ` +
+  `For EACH done_when, find where the change fails its \`rubric\`: a guard test that still passes when the ` +
+  `behaviour it guards is deleted, an assertion that copies the implementation, a done_when with no ` +
+  `evidence, a Preserve/load-bearing invariant the diff breaks, a recipe step it skips. Return every flaw ` +
+  `as {where (path:line), rubric_failed (the rubric text it fails), evidence}; an empty \`flaws\` means you ` +
+  `found nothing a reviewer would reject. This is a code smell hunt, not approval.`;
+
+if (built && loadBearing) {
+  const skeptic = await once(() => agent(skepticPrompt(built), { agentType: 'factory-builder', model: 'opus', label: 'self-critique', schema: SKEPTIC }))();
+  const flaws = skeptic && Array.isArray(skeptic.flaws) ? skeptic.flaws.filter(Boolean) : [];
+  if (flaws.length > 0) {
+    const answerPrompt =
+      `${builderReading}\n\n` +
+      `Issue #${issue} (tier ${tier}). Your own skeptic self-critique found these flaws in your change on ` +
+      `PR #${built.pr} (head ${built.head_sha}) BEFORE it reaches the reviewers:\n${JSON.stringify(flaws, null, 2)}\n\n` +
+      `Answer every flaw where you are — you are still on \`claude/fq-${issue}\` and must stay there. A flaw ` +
+      `about a test is a flaw about the test: strengthen the assertion or the fixture, do not weaken it. Fix ` +
+      `them now so the reviewers do not have to spend a round on them.\n\n` +
+      `${buildRules}${reworkBlock}`;
+    const answered = await build(answerPrompt, 'self-critique:fix');
+    if (answered) built = { ...built, ...answered, rework_response: answered.rework_response || built.rework_response };
+    built = await completeRework(built, answerPrompt, 'self-critique:fix:rework');
+    const scGaps = reworkGaps(built);
+    if (scGaps.length > 0) return reworkFailure(built, scGaps);
+  }
+}
 
 // Cold read (§7.1 `cold_read = true`): the verifier's prompt carries the head sha and PR number and
 // nothing else the builder wrote — no summary, no branch name, no test list, no commit messages.

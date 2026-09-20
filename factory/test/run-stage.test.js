@@ -122,6 +122,77 @@ test("implement stage moves to in-progress after the handoff check, then to awai
   expect(transition.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ to: "factory:awaiting-review" }));
 });
 
+/**
+ * ── Structure B (리뷰 효율 Task 3) — the pre-handoff self-gate at the implement stage ──────────
+ *
+ * COST NOTE (regression the plan pins): the self-gate reuses the gates result the stage ALREADY
+ * computed (it is handed `d.selfGate({ gates })`, never re-runs the gate commands) and grades the
+ * qa manifest the runner already reads — so a self-gate run is CHEAPER than a review round, which
+ * would dispatch the full LLM reviewer panel. A red deterministic check caught here never spends a
+ * review round (KTB #18 R3 finish() regression; own-cal R1 cf1 fail-open guard).
+ */
+const selfGateDeps = (over = {}) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+  buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }),
+  resetAgentsLog: async () => {}, claudeP: async () => ({ is_error: false, result: "{}" }),
+  gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
+  verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: vi.fn(async () => {}),
+  runRecord: () => {}, release: async () => {},
+  ...over,
+});
+
+// KTB #18 R3 + own-cal R1 regression: an ok:false self-gate must NOT reach factory:awaiting-review.
+test("implement: an ok:false self-gate blocks the awaiting-review handoff and records the findings", async () => {
+  const lines = [];
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = selfGateDeps({
+    transition, runRecord: (l) => lines.push(...l),
+    selfGate: async ({ gates }) => {
+      expect(gates).toEqual(expect.objectContaining({ status: "GREEN" }));   // reuses the computed gates
+      return { ok: false, ranChecks: ["gates", "mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing under mutation (string in src/x.js)" }] };
+    },
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps, runnerId: "r1" })).toBe(0);
+  const targets = transition.mock.calls.map((c) => c[0].to);
+  expect(targets).not.toContain("factory:awaiting-review");                  // the whole point
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:planned");        // a state the builder retries from
+  expect(lines.some((l) => /self-gate: gates\+mutation → BLOCKED — .*survivor/.test(l))).toBe(true);
+});
+
+// A harness-class finding the builder cannot fix routes to a human, not a builder retry.
+test("implement: a harness-class self-gate finding routes to needs-human, not planned", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = selfGateDeps({
+    transition,
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, harness: true, detail: "mutation check misconfigured — the harness cannot run a single test" }] }),
+  });
+  await runStage({ stage: "implement", issue: 43, deps, runnerId: "r1" });
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
+// The green path proceeds to awaiting-review as today; advisory findings ride along in the handoff.
+test("implement: an ok:true self-gate proceeds to awaiting-review and attaches advisory findings", async () => {
+  const transition = vi.fn(async ({ to, data }) => ({ ok: true, to, data }));
+  const writeHandoff = vi.fn(async () => {});
+  const deps = selfGateDeps({
+    transition, writeHandoff,
+    selfGate: async () => ({ ok: true, ranChecks: ["gates", "mutation"], findings: [{ check: "mutation", blocking: false, detail: "mutation check skipped test/y.test.js: no resolvable source target" }] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 44, deps, runnerId: "r1" })).toBe(0);
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
+  // the advisory finding was attached to the handoff data so the reviewer starts ahead.
+  expect(writeHandoff.mock.calls.at(-1)[0].data.self_gate.advisory[0]).toEqual(expect.objectContaining({ check: "mutation" }));
+});
+
+// Old wiring / other stages inject no d.selfGate — the stage skips the self-gate and behaves as before.
+test("implement: no d.selfGate injected → self-gate is skipped and the stage reaches awaiting-review", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const deps = selfGateDeps({ transition });   // no selfGate key
+  expect(await runStage({ stage: "implement", issue: 45, deps, runnerId: "r1" })).toBe(0);
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
+});
+
 test("a refused transition is recorded, never silent", async () => {
   const lines = [];
   const deps = {

@@ -4,6 +4,7 @@ import { loadHarness, loadCharter, loadRoles, rosterFor, planRoundsFor } from ".
 import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
+import { buildHouseRules } from "./house-rules.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -223,6 +224,17 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   }
   // 디스패처가 Workflow의 `args.loaded`로 그대로 넘기는 작은 파일(M5) — 로더 에이전트의 대체물.
   writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(ctx.loaded, null, 2));
+  /**
+   * Structure C (리뷰 효율 Task 2/3) — implement 스테이지에서 house-rules 다이제스트를 파일로 떨군다.
+   * 빌더는 워크플로 스크립트가 아니라 **자기 세션**에서 이 파일을 읽는다(프롬프트가 경로로 가리킨다):
+   * 저장소의 build/run/test 레시피·load-bearing 경로·`## Preserve`/NEVER_AUTOMATE 불변식을 한 곳에서
+   * 보게 해, 리뷰어가 이미 쥔 규칙 위에서 첫 초안을 쓰게 한다(own-cal R2 cf1/cf2: 레시피에서 빠진
+   * migrate-류 단계). 절대 throw하지 않으므로 컨텍스트 조립을 죽이지 않는다.
+   */
+  if (stage === "implement") {
+    try { writeFileSync(join(root, ".factory/out/house-rules.md"), buildHouseRules({ root, charter, harness })); }
+    catch { /* house rules는 편의 자료다 — 못 쓰면 그냥 없이 간다 */ }
+  }
   return ctx;
 }
 
