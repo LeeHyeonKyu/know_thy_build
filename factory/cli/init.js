@@ -35,7 +35,16 @@ export function projectVars(root, pkgRoot = null) {
     try { PROTECTED = parseToml(readFileSync(p, "utf8")).protected; } catch {}
     if (PROTECTED) break;
   }
-  return { PROJECT_NAME: name, PROTECTED };
+  // 피드백 루프(T3 리뷰 MF-2) — `.factory/install-manifest.json`의 생성기가 읽는 두 값. 여기서
+  // 계산하는 이유는 `freshContent`가 `pkgRoot`를 모르기 때문이고, 여기 두면 `init`·`doctor`·자기
+  // 미러 테스트가 **같은 값**을 보게 된다(생성물이 호출자마다 달라지면 staleness 판정이 거짓이 된다).
+  let MANIFEST = null;
+  let KTB_VERSION = null;
+  if (pkgRoot) {
+    try { MANIFEST = buildManifest({ pkgRoot }).map((e) => ({ dest: e.dest, owner: e.owner })); } catch {}
+    try { KTB_VERSION = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8")).version ?? null; } catch {}
+  }
+  return { PROJECT_NAME: name, PROTECTED, MANIFEST, KTB_VERSION };
 }
 
 export async function initCommand({ root, pkgRoot, argv = [], io, run = realRun }) {

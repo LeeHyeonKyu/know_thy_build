@@ -1,4 +1,4 @@
-import { verdictLine } from "./gates.js";
+import { gatesDetailLines, verdictLine } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
@@ -193,7 +193,7 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  * 자체가 맞는 결과이므로 전이를 부르지 않고 기록만 남기되, `factory-blocked-origin` 마커는
  * (transition()을 안 거치므로) 직접 새로 남긴다 — sweeper의 blocked 팔이 여전히 유효한 origin을 본다.
  */
-export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus, retryFromBlocked = false }) {
+export async function runMergeStage({ issue, defaultBranch, headSha, d, record, refusal, postStatus, retryFromBlocked = false, stamp = {} }) {
   const sleep = d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let leftBlocked = !retryFromBlocked;             // 재시도가 아니면 애초에 "여전히 blocked"인 특수 케이스가 없다
   /**
@@ -434,7 +434,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (!gates || gates.status !== "GREEN") {
     const reason = `gates ${gates?.status ?? "missing"} at merge`;
     const t = await d.transition({ to: "factory:needs-human", reason });
-    record([`merge: gates ${gates?.status ?? "missing"}`, ...refusal(t), ...testEnvNote]);
+    // Feedback loop Task 1/3 — 이름뿐인 `merge: gates RED`는 **왜** 빨간지를 말하지 않는다. run-stage가
+    // 이미 닫은 그 구멍(7일짜리 아티팩트에만 남던 뿌리)이 머지 직전의 게이트에서만 열려 있었다.
+    // `stamp`가 이 줄을 이 런에 묶는다 — 묶이지 않은 줄은 Task 3의 harvester가 증거로 세지 않는다.
+    record([`merge: gates ${gates?.status ?? "missing"}`, ...gatesDetailLines(gates, stamp), ...refusal(t), ...testEnvNote]);
     return 2;
   }
   record([`merge: gates ${gates.status}`, ...testEnvNote]);

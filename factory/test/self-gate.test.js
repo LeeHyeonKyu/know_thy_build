@@ -250,3 +250,48 @@ test("mutation-check skips are advisory, not blocking", async () => {
   expect(res.ok).toBe(true);
   expect(advisoryFindings(res.findings).length).toBeGreaterThan(0);
 });
+
+/**
+ * ── 피드백 루프 (T3 재리뷰 NEW-MF-1) — **"안 돌았다"와 "왜 안 돌았다"는 다른 사실이다** ──────────
+ * `ranChecks`의 부재만으로는 "KTB가 검사를 거둬들였다"와 "이번 라운드에 볼 것이 없었다"를 가를 수
+ * 없었고, 그 틈으로 **막힌 테스트를 지운 빌더**가 자기 차단을 KTB의 엔진 결함으로 만들 수 있었다.
+ */
+test("runSelfGate records why each check did not run, and the detail line carries ran/skipped/ktb_version", async () => {
+  const { runSelfGate, selfGateDetailLine, SELF_GATE_DETAIL_PREFIX, SKIP_REASONS } = await import("../lib/self-gate.js");
+  const harness = { commands: {}, test: {} };
+
+  // 입력이 하나도 없는 라운드: 세 검사 모두 `no-input`으로 **기록된다**(조용히 사라지지 않는다)
+  const none = await runSelfGate({ root: "/r", harness, gates: null, run: async () => ({ code: 0, stdout: "", stderr: "" }), changedTests: [], pins: [] });
+  expect(none.ranChecks).toEqual([]);
+  expect(none.skippedChecks.map((s) => s.check).sort()).toEqual(["gates", "mutation", "pins"]);
+  for (const s of none.skippedChecks) expect(s.reason).toBe(SKIP_REASONS.NO_INPUT);
+  expect(none.ok).toBe(true);
+
+  // gates 결과가 있으면 gates는 돌고 skipped에서 빠진다
+  const withGates = await runSelfGate({ root: "/r", harness, gates: { schema: "factory.gates.v1", status: "RED" }, run: async () => ({ code: 0 }), changedTests: [], pins: [] });
+  expect(withGates.ranChecks).toEqual(["gates"]);
+  expect(withGates.skippedChecks.map((s) => s.check).sort()).toEqual(["mutation", "pins"]);
+  expect(withGates.ok).toBe(false);
+
+  // 줄은 한 줄 JSON이고, 자기 런과 그 런의 팩토리 버전을 지목한다
+  const line = selfGateDetailLine(withGates, { runId: "771", runnerId: "gha-771", ktbVersion: "1.3.2" });
+  expect(line.startsWith(SELF_GATE_DETAIL_PREFIX)).toBe(true);
+  const o = JSON.parse(line.slice(SELF_GATE_DETAIL_PREFIX.length));
+  expect(o).toMatchObject({ run_id: "771", runner: "gha-771", ktb_version: "1.3.2", blocked: true, harness: false, ran: ["gates"] });
+  expect(o.skipped).toEqual([{ check: "mutation", reason: "no-input" }, { check: "pins", reason: "no-input" }]);
+  // 모르면 지어내지 않는다 — 버전을 못 읽은 런은 withdrawal 증거를 만들 수 없다
+  expect(JSON.parse(selfGateDetailLine(withGates, {}).slice(SELF_GATE_DETAIL_PREFIX.length)).ktb_version).toBeNull();
+  // 증거 수집이 판정을 막지 않는다
+  expect(selfGateDetailLine(null, {})).toContain(SELF_GATE_DETAIL_PREFIX);
+});
+
+test("isNewerVersion compares numerically, and an unknown version is never 'newer'", async () => {
+  const { isNewerVersion } = await import("../lib/feedback/harvest-findings.js");
+  expect(isNewerVersion("1.3.10", "1.3.2")).toBe(true);      // 문자열 비교였다면 false였다
+  expect(isNewerVersion("1.4.0", "1.3.9")).toBe(true);
+  expect(isNewerVersion("1.3.2", "1.3.2")).toBe(false);
+  expect(isNewerVersion("1.3.1", "1.3.2")).toBe(false);
+  expect(isNewerVersion(null, "1.3.2")).toBe(false);
+  expect(isNewerVersion("1.3.2", null)).toBe(false);
+  expect(isNewerVersion("", "")).toBe(false);
+});

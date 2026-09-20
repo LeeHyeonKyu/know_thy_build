@@ -245,6 +245,27 @@ actions:
   - transition: { issue: 118, to: awaiting-review, via: "--human --retry" }
 ```
 
+### `cause:` — 멈춤의 **책임**을 한 필드로 적는다 (선택, 피드백 루프 spec §2)
+
+멈춘 이유가 **팩토리 자신의 결함**(self-gate가 잘못 막았다, 전이 요구사항이 틀렸다, 엔진 버그)일 때만
+`cause: factory-defect`를 넣는다. 고쳐진 버전을 알면 `ktb_fix:`도 함께 적는다:
+
+```yaml
+decision: retry
+cause: factory-defect
+ktb_fix: "1.3.2"
+reason: "implement self-gate가 review 스테이지만 만드는 qa 매니페스트를 빌더에게 요구했고, 그 한 번의 재시도 경로마저 거부됐다"
+```
+
+이 **필드**(산문이 아니라)가 머지 뒤 회고에게 "이 멈춤은 KTB가 고칠 일"이라고 말하는 유일한 신호이고,
+그때 그 발견은 상류 저장소의 `factory-improvement` 이슈로 간다. 그러므로:
+
+- **제품/하네스 문제에는 쓰지 않는다.** 빌더의 테스트가 아무것도 주장하지 않아서, 하네스가 단일
+  테스트를 못 돌려서, 러너가 429로 죽어서 멈춘 것은 `cause: factory-defect`가 **아니다**(그냥 생략한다).
+- 산문에 "self-gate 때문에"라고 적는 것은 아무것도 열지 않는다 — 서술과 귀속은 다르다.
+- 이 필드는 **사람이 쓴 코멘트에서만** 읽힌다: 회고가 작성자를 확인하고, 팩토리 계정이 쓴
+  `human-decision:v1`은 무시한다(에이전트가 적은 결정은 사람의 결정이 아니다).
+
 전이 코멘트는 `<!-- factory-transition:v1 from=<factory:needs-human|factory:needs-info> to=<X> by=human reason=retry -->`로
 남고, 그 `reason=retry`가 리뷰 라운드 카운터에서 이 전이를 빼 준다(재시도는 재작업 주기가 아니다 —
 K 예산을 태우지 않는다). 재시도 뒤에는 라벨이 그 자리에 앉아 있을 뿐이므로, 스테이지가 자동으로

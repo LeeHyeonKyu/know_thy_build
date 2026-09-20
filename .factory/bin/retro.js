@@ -27,8 +27,11 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
+import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
+import { routeMergedIssues } from "../lib/feedback/route.js";
+import { announceFailure } from "../lib/gha.js";
+import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
 import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
@@ -592,6 +595,46 @@ export async function runRetro({ deps, force = false, now } = {}) {
     const countBits = mergesSince != null ? { mergesSince } : { mergesDelta: force ? 0 : 1 };
     const harvestBits = harvestRan ? { candidates: h.candidates, stats: h.stats } : {};
 
+    /**
+     * ②' 피드백 루프 Task 3 — **분류·라우팅 팔**(spec §4의 "on merge" 가지).
+     *
+     * light 회차에서도 돈다: 이 팔의 단위는 "N번의 머지"가 아니라 **한 번의 머지**이고, 전체 분석을
+     * 기다리는 동안 원인의 증거(게이트 detail·self-gate 차단·전이 거부)는 그대로 남아 있지만 사람은
+     * 그것을 읽지 않는다 — 그게 이 루프가 고치려는 바로 그 상태다. 수확이 돌지 않은 회차
+     * (`light_on_merge: false`)에는 볼 이슈 목록이 없으므로 건너뛴다.
+     *
+     * `step`으로 감싸 **절대 회고를 죽이지 않는다**(spec §7 fail-safe): gh 실패는 `applied`의 한 줄과
+     * run 기록 한 줄로 남고 나머지 단계는 그대로 진행한다. 라우팅 때문에 회고가 죽으면 그 회차의
+     * lessons·통계·커서까지 같이 사라진다.
+     */
+    if (d.routeFeedback && harvestRan) {
+      const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, since }));
+      if (r.ok && r.value) {
+        // `author`는 기각된 결정(`unverifiable-decision`)에서만 온다 — **누구의** 결정이 사라졌는지를
+        // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
+        for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.author ? ` by @${a.author}` : ""}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
+        if ((r.value.actions || []).length) applied.push({ step: "feedback-route", issues: r.value.issues || [], actions: r.value.actions });
+        /**
+         * ── 리뷰 should_fix 2: **라우팅 팔의 실패는 exit 0이되 조용하지 않다** ────────────────
+         * 이 팔은 fail-safe라 상류 403을 `{kind:"error"}` 액션 한 줄로 삼킨다(그 계약은 옳다 —
+         * 라우팅 때문에 회고가 죽으면 그 회차의 lessons·통계·커서까지 사라진다). 그런데 그 한
+         * 줄이 `console.log`와 run 기록에만 남았다: 잡은 초록이고 `::error::`도 스텝 요약도 없다.
+         * 곧 `FACTORY_BOT_TOKEN`에 `[factory].upstream`의 `issues:write`가 없으면 **모든 `[ktb]`
+         * 발견이 머지마다 조용히 죽고**, 주인은 그 사실을 영영 모른다 — 루프가 존재하지 않는 것과
+         * 구별되지 않는 상태다. 종료 코드는 그대로 두고(§7 fail-safe) 러너가 보여 주는 두 채널로
+         * 올린다. 사람이 다음에 무엇을 해야 하는지는 `factory doctor`의 `factory.upstream`이 말한다.
+         */
+        const failures = (r.value.actions || []).filter((a) => a.kind === "error").map((a) => `${a.reason || "feedback routing failed"}${a.issue == null ? "" : ` (#${a.issue})`}`);
+        if (failures.length) {
+          announceFailure({
+            title: "factory-retro",
+            heading: "factory-retro — feedback routing",
+            reasons: [...failures, "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo"],
+          });
+        }
+      }
+    }
+
     // ③ light — 전체 분석 없이 후보만 쌓고 물러난다.
     if (!decision?.full) {
       const finalMerges = mergesSince ?? baseMerges + (force ? 0 : 1);
@@ -932,6 +975,69 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
   return args;
 }
 
+/**
+ * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
+ * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
+ *
+ * `main()`의 클로저가 아니라 여기 사는 이유(T7 리뷰 should_fix 5): 이 팔의 **배선**이 판정의 일부다 —
+ * 창의 코멘트를 `resolveFactoryLogins`에 넘기는 것(하트비트 작성자라는 출처가 거기서 열린다),
+ * `identity`를 읽는 것, 경보를 런당 한 번만 다는 것. 클로저 안에 있으면 그 셋 중 무엇이 빠져도
+ * 테스트는 초록이고, 빠진 날 dogfood 저장소는 다시 조용해진다.
+ */
+export async function routeFeedbackArm({
+  gh, repo, root, harness, issues, commentsByIssue, records, since,
+  loadManifest = loadInstallManifest, log = console.error,
+}) {
+  const manifest = await loadManifest(root);
+  if (!manifest) {
+    return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
+  }
+  /**
+   * 재리뷰 NEW-MF-2 — `human-decision:v1`을 **권한**으로 읽으려면 작성자를 알아야 한다.
+   * `gh issue comment`는 훅이 일부러 열어 둔 문이라 어떤 스테이지 에이전트든 그 모양의 코멘트를
+   * 적을 수 있다. 팩토리 계정 이름을 못 얻으면 `null`을 넘긴다 — `[]`("봇이 없다")가 아니다.
+   *
+   * T5 MF-1 — `comments`를 넘기면 **하트비트 작성자**라는 출처가 열린다(러너만 쓰는 산출물이므로
+   * Actions 밖에서도 봇 이름이 정확하다). 회고는 이미 창의 코멘트를 전부 손에 들고 있다 —
+   * 추가 API 왕복은 없다. 그리고 그 코멘트들이 T7의 `identity`에 `authorType`이라는 계정 사실도 준다.
+   */
+  const allComments = [...(commentsByIssue instanceof Map ? commentsByIssue.values() : Object.values(commentsByIssue || {}))].flat();
+  const who = await resolveFactoryLogins({ gh, comments: allComments });
+  if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
+  const routed = await routeMergedIssues({
+    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
+    ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
+    factoryLogins: who.ok ? who.logins : null,
+    // 최종 리뷰 nit 5 — 거부 사유의 **문구**는 신원에 달려 있다: 진짜 봇 신원이면 "공유 신원"이
+    // 아니라 "에이전트가 적은 결정"이 참이고, 사람이 할 일도 정반대다(등록할 것이 없다).
+    identity: who.ok ? (who.identity ?? null) : null,
+  });
+  /**
+   * T7 — 팩토리가 **사람 계정**으로 돌면 작성자 기반 귀속은 원리상 불가능하다(팩토리 코멘트와
+   * 소유자의 코멘트가 같은 작성자다). 그 사실을 런마다 **한 번** 크게 적는다: 이슈마다 적으면
+   * 잡음이고, 안 적으면 dogfood 저장소에서 (b)가 영영 조용히 닫힌 채로 남는다.
+   */
+  const warn = who.ok ? sharedIdentityWarning(who.identity) : null;
+  if (warn) routed.actions.unshift(warn);
+  return routed;
+}
+
+/**
+ * T7 — 공유 신원 경보 한 줄(없으면 `null`). **런당 한 번**이다: 이슈마다 적으면 같은 문장이 창의
+ * 이슈 수만큼 쌓여 그 자체가 잡음이 되고, 한 번도 안 적으면 dogfood 저장소에서 증거 (b)가 영영
+ * 조용히 닫힌 채로 남는다(이 태스크가 고치는 것이 바로 그 침묵이다).
+ *
+ * `personal !== true`이면 아무것도 내지 않는다 — `null`(모른다)은 경보의 근거가 아니다. 모르는 것을
+ * 경보로 바꾸면 사람이 경보를 끄는 법부터 배우고, 그러면 진짜일 때도 안 읽는다.
+ */
+export function sharedIdentityWarning(identity) {
+  if (identity?.personal !== true) return null;
+  return {
+    kind: "warning", step: "feedback-route", login: identity.login,
+    reason: `factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`,
+  };
+}
+
 export function roleFileMap(roles) {
   const map = new Map();
   const add = (name, def) => {
@@ -1076,6 +1182,11 @@ async function main() {
       return { registered };
     },
     expiredIds: ({ issues, commentsByIssue, since }) => expiredFromComments({ issues, commentsByIssue, since }),
+    /**
+     * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
+     * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
+     */
+    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness }),
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),

@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
-import { makeGh, allChecksGreen, resolveRepo } from "../lib/gh.js";
+import { makeGh, allChecksGreen, resolveRepo, resolveFactoryLogins } from "../lib/gh.js";
+import { heartbeatBody } from "../lib/heartbeat.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const repo = "o/r";
@@ -7,14 +8,16 @@ test("issue() maps gh json; comments() maps id/body/createdAt", async () => {
   const run = makeFakeRun([
     { match: (c, a) => a.includes("view") && a.includes("--json"), result: { code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [{ name: "backlog" }, { name: "bug" }] }), stderr: "" } },
     // --slurp은 페이지마다 하나의 배열을 담은 배열을 낸다
-    { match: (c, a) => a[0] === "api" && a[1].includes("/comments"), result: { code: 0, stdout: JSON.stringify([[{ id: 11, body: "x", created_at: "2026-09-11T00:00:00Z" }], [{ id: 12, body: "y", created_at: "2026-09-11T01:00:00Z" }]]), stderr: "" } },
+    { match: (c, a) => a[0] === "api" && a[1].includes("/comments"), result: { code: 0, stdout: JSON.stringify([[{ id: 11, body: "x", created_at: "2026-09-11T00:00:00Z", user: { login: "LeeHyeonKyu" } }], [{ id: 12, body: "y", created_at: "2026-09-11T01:00:00Z" }]]), stderr: "" } },
   ]);
   const gh = makeGh({ run, repo });
   const issue = await gh.issue(5);
   expect(issue).toEqual({ number: 5, title: "T", body: "B", labels: ["backlog", "bug"] });
+  // `author`(T3 재리뷰 NEW-MF-2): 피드백 루프가 `human-decision:v1`을 **권한**으로 읽으므로
+  // 작성자가 판정의 일부다. 없는 필드는 지어내지 않고 null이다.
   expect(await gh.comments(5)).toEqual([
-    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z" },
-    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z" },
+    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z", author: "LeeHyeonKyu", authorType: null, viaApp: null },
+    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z", author: null, authorType: null, viaApp: null },
   ]);
   const api = run.calls.find((c) => c.args[0] === "api");
   expect(api.args).toEqual(["api", "repos/o/r/issues/5/comments?per_page=100", "--paginate", "--slurp"]);
@@ -432,7 +435,33 @@ test("issueState reads only state/closedAt; mergedPrForBranch finds the merged P
   expect(await gh.issueState(31)).toEqual({ number: 31, state: "CLOSED", closedAt: "2026-09-13T10:00:00Z" });
   expect(run.calls[0].args).toEqual(["issue", "view", "31", "-R", repo, "--json", "number,state,closedAt"]);
   expect(await gh.mergedPrForBranch("claude/fq-31")).toBe(24);
-  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--head", "claude/fq-31", "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]);
+  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--head", "claude/fq-31", "--state", "merged", "--limit", "20", "--json", "number,mergedAt"]);
+});
+
+/**
+ * 피드백 루프 Task 4 r3 — `gh pr list`는 **생성** 순으로 준다. 재작업으로 같은 브랜치에 PR이 두 번
+ * 머지되면(먼저 만든 쪽이 나중에 머지될 수 있다) 첫 항목은 옛 머지다. `mergedAt`은 예전에도 조회하면서
+ * 쓰지 않았다 — 이제 그 값이 순서를 정하고, 건강 잡은 **전부**를 받아 diff 모양을 합집합으로 읽는다.
+ */
+test("mergedPrsForBranch sorts by mergedAt desc, not by the order gh returns (creation order)", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([
+    { number: 24, mergedAt: "2026-09-13T09:00:00Z" },   // 먼저 만들어졌지만 **먼저** 머지됐다
+    { number: 22, mergedAt: "2026-09-14T09:00:00Z" },   // 더 옛 PR인데 나중에 머지됐다
+  ]), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.mergedPrsForBranch("claude/fq-31")).toEqual([
+    { number: 22, mergedAt: "2026-09-14T09:00:00Z" },
+    { number: 24, mergedAt: "2026-09-13T09:00:00Z" },
+  ]);
+  // 그리고 단수형은 그 목록의 머리다 — 둘이 갈리지 않는다.
+  expect(await gh.mergedPrForBranch("claude/fq-31")).toBe(22);
+});
+
+test("prFiles returns the paths GitHub computed for a PR", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ files: [{ path: "README.md" }, { path: "src/a.js" }] }), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.prFiles(19)).toEqual(["README.md", "src/a.js"]);
+  expect(run.calls[0].args).toEqual(["pr", "view", "19", "-R", repo, "--json", "files"]);
 });
 
 test("mergedPrForBranch returns null when nothing was merged from that branch", async () => {
@@ -464,10 +493,233 @@ test("viewerScopes: a failing call throws with the stderr, so doctor reports WAR
   await expect(makeGh({ run, repo }).viewerScopes()).rejects.toThrow(/Bad credentials/);
 });
 
+// ── Feedback loop Task 3 — 교차 저장소 개선 이슈(열거나 덧붙이거나) ───────────────────────────
+// 이 어댑터는 **문법을 모른다**: 지문으로 검색하고, 맞는 본문을 고르는 일(match)·새 본문을 만드는
+// 일(render)·증거를 덧붙이는 일(append)은 전부 호출자가 넘긴다(`lib/feedback/upstream-issue.js`가
+// 유일한 문법 출처다). 모든 호출에 `-R <upstream>`이 붙는지가 이 테스트의 핵심이다.
+test("upstreamIssue: 같은 지문의 열린 이슈가 없으면 -R upstream 에 새로 연다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+    { match: (c, a) => a[0] === "issue" && a[1] === "create", result: { code: 0, stdout: "https://github.com/o/up/issues/12\n", stderr: "" } },
+  ]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "deadbeef",
+    match: () => false,
+    render: () => ({ title: "factory-improvement: x", body: "BODY", labels: ["factory-improvement", "backlog"] }),
+    append: () => { throw new Error("append must not run when nothing matched"); },
+  });
+  expect(r).toEqual({ issue: 12, created: true, appended: false });
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", "o/up", "--search", "deadbeef in:body", "--state", "open", "--limit", "50", "--json", "number,body"]);
+  expect(run.calls[1].args).toEqual(["issue", "create", "-R", "o/up", "--title", "factory-improvement: x", "--body-file", "-", "--label", "factory-improvement", "--label", "backlog"]);
+  expect(run.calls[1].opts.input).toBe("BODY");
+});
+
+test("upstreamIssue: 맞는 이슈가 있으면 새로 열지 않고 본문을 stdin으로 갈아 끼운다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 7, body: "OLD" }]), stderr: "" } },
+    { match: (c, a) => a[0] === "issue" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "deadbeef",
+    match: (b) => b === "OLD",
+    render: () => { throw new Error("render must not run when an issue matched"); },
+    append: (b) => `${b}\nNEW EVIDENCE`,
+  });
+  expect(r).toEqual({ issue: 7, created: false, appended: true });
+  expect(run.calls[1].args).toEqual(["issue", "edit", "7", "-R", "o/up", "--body-file", "-"]);
+  expect(run.calls[1].opts.input).toBe("OLD\nNEW EVIDENCE");
+});
+
+test("upstreamIssue: append가 본문을 바꾸지 않으면(같은 목격) 편집 호출 자체가 나가지 않는다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 7, body: "OLD" }]), stderr: "" } }]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "f", match: () => true, render: () => ({ title: "t", body: "b" }), append: (b) => b,
+  });
+  expect(r).toEqual({ issue: 7, created: false, appended: false });
+  expect(run.calls).toHaveLength(1);
+});
+
+test("upstreamIssue: upstream 저장소 이름이 없으면 아무 호출도 하지 않고 던진다", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "[]", stderr: "" } }]);
+  await expect(makeGh({ run, repo }).upstreamIssue({ fingerprint: "f", match: () => false, render: () => ({ title: "t", body: "b" }), append: (b) => b }))
+    .rejects.toThrow(/upstream repo/);
+  expect(run.calls).toEqual([]);
+});
+
 test("putEnvironment PUTs the deployment branch policy by stdin — the body never reaches the argv", async () => {
   const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1] === "-X", result: { code: 0, stdout: "{}", stderr: "" } }]);
   const body = { deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } };
   await makeGh({ run, repo }).putEnvironment("factory-merge", body);
   expect(run.calls[0].args).toEqual(["api", "-X", "PUT", `repos/${repo}/environments/factory-merge`, "--input", "-"]);
   expect(JSON.parse(run.calls[0].opts.input)).toEqual(body);
+});
+
+// ── T5 리뷰 MF-1: `resolveFactoryLogins`는 **어디서 도는지**에 따라 답이 달라야 한다 ──────────
+//
+// 1차 구현은 `gh api user`를 무조건 팩토리 계정으로 셌다. Actions 안에서는 그 값이 잡 토큰의 주인,
+// 곧 봇이라 옳다 — 그러나 노트북에서는 **소유자**다. 그 결과 `factory analyze`가 소유자의
+// `human-decision:v1`을 "에이전트가 쓴 결정"으로 기각했고, 데모 #39의 `[ktb]` 발견 둘이 사라졌다.
+// 사람을 봇으로 오인하는 것은 fail-closed가 아니라 그냥 틀린 것이다.
+
+const heartbeatComment = (author) => ({
+  id: 1, createdAt: "2026-09-20T10:00:00Z", author,
+  body: heartbeatBody({ issue: 39, stage: "implement", runnerId: "gha-99001", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z" }),
+});
+// T7 — `viewerType`를 **안 가진** gh도 있다(옛 어댑터·부분 fake). 그때 계정 종류는 "모른다"다.
+const viewerGh = (login, type = undefined) => ({
+  viewerLogin: async () => login,
+  ...(type === undefined ? {} : { viewerType: async () => type }),
+});
+
+test("resolveFactoryLogins: inside Actions the viewer IS the bot — behaviour is unchanged (run-stage's path)", async () => {
+  // 모양을 통째로 고정한다 — `ok`/`logins`는 T7 이전과 같고, 새 키는 `identity` 하나뿐이다.
+  // (`viewerType`이 없는 gh이므로 계정 종류는 "모른다" = `personal: null`이다.)
+  const r = await resolveFactoryLogins({ gh: viewerGh("factory-bot"), env: { GITHUB_ACTIONS: "true" } });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
+
+  // FACTORY_BOT_LOGIN과 함께 오면 둘 다(중복은 접힌다) — 두 배우 모드 그대로.
+  const both = await resolveFactoryLogins({ gh: viewerGh("ktb-agent"), env: { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(both).toEqual({ ok: true, logins: ["factory-bot", "ktb-agent"], identity: { personal: null, login: "ktb-agent" } });
+});
+
+test("resolveFactoryLogins: inside Actions a failing `gh api user` is still fail-closed", async () => {
+  const gh = { viewerLogin: async () => { throw new Error("boom"); } };
+  const r = await resolveFactoryLogins({ gh, env: { GITHUB_ACTIONS: "true" } });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/gh api user failed/);
+});
+
+test("resolveFactoryLogins: on a laptop the viewer is the OWNER and must never be counted as a factory login", async () => {
+  let asked = false;
+  const gh = { viewerLogin: async () => { asked = true; return "LeeHyeonKyu"; } };
+  // 하트비트가 봇 이름을 준다 — 하트비트는 러너만 쓰는 산출물이므로 그 작성자는 구성상 팩토리다.
+  const r = await resolveFactoryLogins({ gh, env: {}, comments: [heartbeatComment("factory-bot")] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
+  // 소유자는 목록에 없다 — 그것이 MF-1의 전부다.
+  expect(r.logins).not.toContain("LeeHyeonKyu");
+  // 그리고 Actions 밖에서는 `gh api user`를 아예 부르지 않는다(부를 이유가 없다).
+  expect(asked).toBe(false);
+});
+
+test("resolveFactoryLogins: heartbeat authors come only from heartbeat comments, not from any comment", async () => {
+  const notAHeartbeat = { id: 2, createdAt: "2026-09-20T11:00:00Z", author: "impostor", body: "stage: implement · runner: gha-1" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [heartbeatComment("factory-bot"), notAHeartbeat] });
+  expect(r.logins).toEqual(["factory-bot"]);
+});
+
+test("resolveFactoryLogins: nothing resolvable → ok:false (never an empty list — [] reads as 'there is no bot')", async () => {
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [] });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/FACTORY_BOT_LOGIN|heartbeat/);
+  expect(r.logins).toBeUndefined();
+});
+
+test("resolveFactoryLogins: FACTORY_BOT_LOGIN alone is enough outside Actions", async () => {
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
+});
+
+// ── T5 재리뷰 SF-A: 하트비트를 **인용한** 코멘트는 하트비트가 아니다 ─────────────────────────
+//
+// `HEARTBEAT_HEAD`는 앵커가 없어 본문 어디서나 맞는다. 사람이 "맥락 삼아 붙입니다: <하트비트>"를
+// 적으면 그 코멘트가 하트비트로 읽혀 작성자(소유자)가 팩토리 계정이 되고, 바로 그 사람이 적은
+// `human-decision:v1`이 기각된다 — MF-1과 같은 사고가 다른 문으로 돌아온 것이다.
+
+test("heartbeatBody always puts the head at byte 0 — the producer is what makes the byte-0 rule safe", () => {
+  const plain = heartbeatBody({ issue: 39, stage: "implement", runnerId: "gha-1", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z" });
+  expect(plain.indexOf("<!-- factory-heartbeat")).toBe(0);
+  // progress 표가 붙은 무거운 본문에서도 head는 맨 앞이다.
+  const withProgress = heartbeatBody({
+    issue: 39, stage: "implement", runnerId: "gha-1", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z",
+    progress: { stage: "implement", issue: 39, runner: "gha-1", agents: [{ label: "a", kind: "subagent", status: "done", turns: 1, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cost_usd: 0.1 }], totals: { turns: 1, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cost_usd: 0.1 }, files_touched: [] },
+  });
+  expect(withProgress.indexOf("<!-- factory-heartbeat")).toBe(0);
+});
+
+test("resolveFactoryLogins: a human comment QUOTING a heartbeat never makes its author a factory login", async () => {
+  const realHeartbeat = heartbeatComment("factory-bot");
+  const quoting = {
+    id: 3, createdAt: "2026-09-20T11:30:00Z", author: "LeeHyeonKyu", authorType: "User",
+    body: `pasting the heartbeat for context:\n\n${realHeartbeat.body}\n\nlooks stuck to me.`,
+  };
+  const r = await resolveFactoryLogins({ gh: viewerGh("LeeHyeonKyu"), env: {}, comments: [realHeartbeat, quoting] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"], identity: { personal: null, login: "factory-bot" } });
+  expect(r.logins).not.toContain("LeeHyeonKyu");
+  // 인용한 사람의 `User` 종류가 **공유 신원 판정에도** 새지 않는다 — 그는 팩토리 계정이 아니다.
+  expect(r.identity.personal).not.toBe(true);
+});
+
+test("resolveFactoryLogins: a Bot-type author is a factory login even when its name is unknown", async () => {
+  const botComment = { id: 4, createdAt: "2026-09-20T11:40:00Z", author: "some-app[bot]", authorType: "Bot", body: "<!-- human-decision:v1 issue=39 -->\ncause: factory-defect" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [botComment] });
+  // 그 계정이 **러너**라는 증거(하트비트·Actions 뷰어)는 없다 — 로그인은 알아도 신원 종류는 모른다.
+  expect(r).toEqual({ ok: true, logins: ["some-app[bot]"], identity: { personal: null, login: "some-app[bot]" } });
+});
+
+// ── T7: `identity.personal` — 공유 신원(팩토리 = 사람 계정)을 **말할 수 있어야** 경보가 뜬다 ────
+//
+// dogfood 저장소는 전부 이 상태다: `FACTORY_BOT_TOKEN`이 소유자의 PAT이라 팩토리 코멘트와 소유자의
+// `human-decision:v1`이 같은 작성자다. 그러면 증거 (b)가 모든 이슈에서 **조용히** 거부된다.
+// 판정은 그대로 두고(공유 신원은 사람의 결정이 아니다) 그 사실만 말하게 하는 것이 이 필드다.
+
+test("identity.personal: inside Actions it comes from `gh api user --jq .type`, asked once", async () => {
+  let asked = 0;
+  const gh = { viewerLogin: async () => "LeeHyeonKyu", viewerType: async () => { asked += 1; return "User"; } };
+  const r = await resolveFactoryLogins({ gh, env: { GITHUB_ACTIONS: "true" } });
+  expect(r.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
+  expect(asked).toBe(1);
+
+  // 머신 유저/앱이면 공유 신원이 아니다 — 경보는 뜨지 않는다.
+  const bot = await resolveFactoryLogins({ gh: viewerGh("ktb-factory[bot]", "Bot"), env: { GITHUB_ACTIONS: "true" } });
+  expect(bot.identity).toEqual({ personal: false, login: "ktb-factory[bot]" });
+});
+
+test("identity.personal: off Actions it comes from the byte-0 heartbeat comments' authorType", async () => {
+  // 노트북에서 `gh api user`는 소유자를 말한다 — 그 값은 여기서 쓰지 않는다(MF-1).
+  const gh = { viewerLogin: async () => { throw new Error("must not be called"); }, viewerType: async () => { throw new Error("must not be called"); } };
+  const shared = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("LeeHyeonKyu"), authorType: "User" }] });
+  expect(shared.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
+
+  const machine = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("factory-bot"), authorType: "Bot" }] });
+  expect(machine.identity).toEqual({ personal: false, login: "factory-bot" });
+});
+
+test("identity.personal: unknown is `null` — never guessed (an unknown type must not read as 'all clear')", async () => {
+  // `authorType`이 없는 옛 코멘트 스냅샷.
+  const old = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [heartbeatComment("factory-bot")] });
+  expect(old.identity).toEqual({ personal: null, login: "factory-bot" });
+
+  // 이름만 주는 FACTORY_BOT_LOGIN — 종류를 말해 주는 것이 아무것도 없다.
+  const named = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" } });
+  expect(named.identity).toEqual({ personal: null, login: "factory-bot" });
+
+  // Actions 안에서 `gh api user --jq .type`이 실패해도 `ok`/`logins`는 그대로다 — 모르는 것만 null이다.
+  const broke = await resolveFactoryLogins({
+    gh: { viewerLogin: async () => "factory-bot", viewerType: async () => { throw new Error("boom"); } },
+    env: { GITHUB_ACTIONS: "true" },
+  });
+  expect(broke.ok).toBe(true);
+  expect(broke.logins).toEqual(["factory-bot"]);
+  expect(broke.identity).toEqual({ personal: null, login: "factory-bot" });
+});
+
+test("identity.personal: FACTORY_BOT_LOGIN gets its type from that login's own comment authorType", async () => {
+  const own = { id: 9, createdAt: "2026-09-20T12:00:00Z", author: "factory-bot", authorType: "Bot", body: "factory: merged" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" }, comments: [own] });
+  expect(r.identity).toEqual({ personal: false, login: "factory-bot" });
+});
+
+test("viewerType(): reads `gh api user --jq .type` and never touches the token value", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "api" && a[1] === "user", result: { code: 0, stdout: "User\n", stderr: "" } },
+  ]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.viewerType()).toBe("User");
+  expect(run.calls.at(-1).args).toEqual(["api", "user", "--jq", ".type"]);
+});
+
+test("resolveFactoryLogins: a User-type author is never added just for commenting", async () => {
+  const human = { id: 5, createdAt: "2026-09-20T11:45:00Z", author: "LeeHyeonKyu", authorType: "User", body: "some thoughts" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("LeeHyeonKyu"), env: {}, comments: [human] });
+  expect(r.ok).toBe(false);          // 근거가 하나도 없다 — 빈 목록 대신 fail closed
 });

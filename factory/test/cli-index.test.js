@@ -87,3 +87,32 @@ test("main(['rehearse']) reaches the rehearse command (not the unknown-command b
 test("HELP names rehearse — the adoption order is install → doctor → rehearse → first issue", () => {
   expect(HELP).toMatch(/factory rehearse/);
 });
+
+// ── 피드백 루프 T5: `factory analyze`의 디스패치 줄 ───────────────────────────────────────────
+// `rehearse`와 같은 이유로 여기 있다 — 스위치의 오타는 런타임에만 드러나고, 그 순간은 사람이 실패한
+// 런을 조사하려고 이 명령을 처음 부르는 때다(즉 가장 나쁜 때). 단위 테스트는 `analyzeCommand`를
+// 직접 부르므로 이 배선만 아무도 밟지 않는다.
+test("main(['analyze']) reaches the analyze command (not the unknown-command branch)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb-cli-analyze-"));
+  await realRun("git", ["init", "-q", "-b", "main"], { cwd: root });
+  const cwd = process.cwd();
+  const log = console.log, err = console.error;
+  const lines = [];
+  console.log = (s) => lines.push(String(s)); console.error = (s) => lines.push(String(s));
+  try {
+    process.chdir(root);
+    // 이슈 번호 없이 부르면 analyze는 usage를 내고 1로 끝난다 — 확인하는 것은 "그 명령에 닿았다"이다.
+    const code = await main(["analyze"]);
+    expect(code).toBe(1);
+    expect(lines.join("\n")).not.toMatch(/unknown factory command/);
+    expect(lines.join("\n")).toMatch(/factory analyze <issue>/);
+  } finally {
+    process.chdir(cwd);
+    console.log = log; console.error = err;
+  }
+}, 30000);
+
+test("HELP names analyze — both arms (an issue's timeline, and the health report)", () => {
+  expect(HELP).toMatch(/factory analyze <issue>/);
+  expect(HELP).toMatch(/factory analyze --health/);
+});

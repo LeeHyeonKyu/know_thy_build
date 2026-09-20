@@ -401,3 +401,268 @@ test("A-SF6: accumulateStats sums the qa claim counts and re-derives the ratio (
   expect([statsTable({ qa_approvals: 1, qa_claims_total: 1, qa_na_total: 3, qa_na_ratio: 0.75, qa_na_heavy_approvals: 1 }, total)].flat().join("\n"))
     .toMatch(/qa na ratio \| 0\.75 \(3\/4 claims, na-heavy 1\/1 approvals\) \| 0\.50 \(4\/8 claims, na-heavy 1\/2 approvals\)/);
 });
+
+// ── Feedback loop Task 3 — 원시 발견(raw finding) 수확 ─────────────────────────────────────────
+// **모든 픽스처는 진짜 생산자가 만든다**(T3 리뷰의 근본 교훈): `gates-detail:` 줄은 `runGates` →
+// `gatesDetailLines`가, self-gate 코멘트는 `selfGateRetryComment`가, 전이 거부는 `transition.js`의
+// 문구가, 하트비트는 `heartbeatBody`가 만든다. 손으로 적으면 생산자가 낼 수 없는 조합이 생기고,
+// 그러면 테스트는 초록인 채 라우팅만 틀린다(1차 구현이 정확히 그랬다).
+test("harvestFindings: 소스 네 갈래와 런 바인딩", async () => {
+  const { harvestFindings, knownRunsFor } = await import("../lib/feedback/harvest-findings.js");
+  const { realGatesDetail, recordOf, heartbeat, gatesHarness, vitestReport, RUNNER } = await import("./helpers/feedback-fixtures.js");
+  const hb = heartbeat(8, "review");
+  expect([...knownRunsFor([hb])].sort()).toEqual(["99001", RUNNER]);
+
+  // unit: 리포트를 읽은 진짜 실패(발견 아님) / lint: 툴이 없다(하네스)
+  const { lines } = await realGatesDetail({
+    harness: gatesHarness(),
+    outcomes: {
+      unit: { code: 1, stdout: " ❯ test/a.test.js (1)\n   × math > adds\n\n Test Files  1 failed" },
+      lint: { code: 127, stderr: "bash: line 1: eslint: command not found" },
+    },
+    report: vitestReport({ passed: 2, failures: ["math > adds"] }),
+  });
+  const record = recordOf(8, "x", [
+    { stage: "implement", at: "2026-09-20T10:05Z", lines },
+    { stage: "review", at: "2026-09-20T11:00Z", lines: [
+      `context-manifest: ${JSON.stringify({ role: "correctness", cold_read: false, run_id: "99001", runner: RUNNER, round: 1, fields: ["diff", "done_when"] })}`,
+    ] },
+  ]);
+
+  const comments = [
+    hb,
+    reviewHandoff(8, { round: 1, at: "2026-09-20T11:05:00Z", verdicts: [
+      { role: "correctness", verdict: "reject", must_fix: [
+        { id: "mf1", where: ".factory/lib/gates.js:12", claim: "the gate swallows a non-zero exit", evidence: "log" },
+        { id: "mf2", where: "the plan's done_when", claim: "done_when 3 is unverifiable", evidence: "-" },
+      ], on_others: [] },
+    ] }),
+  ];
+
+  const found = harvestFindings({ issue: 8, repo: "o/r", record, comments });
+  const gates = found.filter((f) => f.kind === "gate");
+  // 리포트를 읽은 unit RED는 발견이 아니다; 툴이 없는 lint RED는 `[runtime].setup`을 가리킨다
+  expect(gates).toHaveLength(1);
+  expect(gates[0].causal_path).toBe(".factory/harness.toml [runtime].setup");
+  // 경로를 댄 must_fix만 발견이 된다(산문 `where`는 이미 lesson 후보다)
+  const mf = found.filter((f) => f.kind === "review-must_fix");
+  expect(mf).toHaveLength(1);
+  expect(mf[0].causal_path).toBe(".factory/lib/gates.js:12");
+  expect(mf[0].role).toBe("correctness");
+  // 같은 런의 그 역할 매니페스트가 붙는다(context adequacy 신호, spec §5)
+  expect(mf[0].context_manifest).toEqual(["diff", "done_when"]);
+});
+
+/**
+ * T3 리뷰 MF-3의 표 — 여섯 행 전부를 **실제 `runGates` 출력**으로 돌린다. 예전 규칙은 `reason`에만
+ * 걸려 있었고 `reason`은 리포트를 읽은 테스트 게이트에만 붙으므로, 채택자의 진짜 하네스 RED(A·B·C)는
+ * 경로 없는 `ambiguous` 노트가 되고 평범한 lint RED(F)는 머지마다 노트가 됐다 — 정확히 거꾸로였다.
+ */
+test("gate 판정표: own-cal의 진짜 RED 셋은 harness, 평범한 RED 둘은 발견이 아니다", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { realGatesDetail, recordOf, heartbeat, gatesHarness, vitestReport } = await import("./helpers/feedback-fixtures.js");
+  const of = async (cfg) => {
+    const { lines } = await realGatesDetail({ harness: gatesHarness(), ...cfg });
+    const record = recordOf(7, "x", [{ stage: "implement", at: "2026-09-20T10:05Z", lines }]);
+    return harvestFindings({ issue: 7, repo: "o/r", record, comments: [heartbeat(7, "implement")] })
+      .filter((f) => f.kind === "gate").map((f) => f.causal_path);
+  };
+
+  // A · own-cal: Flutter 툴체인이 러너에 없다(exit 127) → 툴체인을 까는 자리는 `[runtime].setup`이다
+  expect(await of({ outcomes: { unit: { code: 127, stderr: "/usr/bin/bash: line 1: flutter: command not found" } } }))
+    .toEqual([".factory/harness.toml [runtime].setup"]);
+  // B · own-cal: `flutter analyze`가 info를 치명으로 친다 — error 급 진단이 하나도 없는데 RED다
+  expect(await of({ outcomes: { lint: { code: 1, stdout: "Analyzing own_cal...\n\n   info • Unused import: 'dart:io' • lib/main.dart:3:8 • unused_import\n\n1 issue found. (ran in 3.2s)" } } }))
+    .toEqual([".factory/harness.toml [commands].lint"]);
+  // C · own-cal: `test_one`의 `-t`를 flutter가 모른다 — 명령 문자열이 틀렸다
+  expect(await of({ outcomes: { unit: { code: 64, stderr: 'Could not find an option named "t".\n\nUsage: flutter test [arguments]' } } }))
+    .toEqual([".factory/harness.toml [commands].unit"]);
+  // D · 진짜 테스트 실패(리포트를 읽었다) → 공장이 제 일을 했다
+  expect(await of({ outcomes: { unit: { code: 1, stdout: "   × math > adds" } }, report: vitestReport({ passed: 2, failures: ["math > adds"] }) }))
+    .toEqual([]);
+  // E · KTB-35: 리포트는 읽었는데 실패가 0인데 명령이 죽었다 → 명령 자리(harness)
+  expect(await of({ outcomes: { unit: { code: 1, stderr: "Error: write EPIPE" } }, report: vitestReport({ passed: 5, failures: [] }) }))
+    .toEqual([".factory/harness.toml [commands].unit"]);
+  // F · 제품 코드에 대한 평범한 lint RED(error 급 진단이 있다) → 발견이 아니다
+  expect(await of({ outcomes: { lint: { code: 1, stdout: "/r/src/app.js\n  12:1  error  'x' is never used  no-unused-vars\n\n1 problem" } } }))
+    .toEqual([]);
+});
+
+/**
+ * T3 리뷰 MF-1 — self-gate/전이 거부가 `ktb`가 되려면 **검사 자신이 틀렸다는 증거**가 있어야 한다.
+ * 증거가 없는 차단은 공장이 제 일을 한 것이고, 그 결함은 빌더의 테스트/코드다(`product`, 라우팅 없음).
+ */
+test("attribution: 증거 없는 self-gate 차단은 product, 세 증거는 각각 제 주인으로 간다", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { classifyFinding } = await import("../lib/feedback/classify.js");
+  const { ownerOf, buildManifest } = await import("../cli/manifest.js");
+  const { fileURLToPath } = await import("node:url");
+  const { heartbeat, selfGateComment, recordOf, selfGateDetail, humanDecisionComment } = await import("./helpers/feedback-fixtures.js");
+  const LOGINS = ["factory-bot"];
+  const dests = new Set(buildManifest({ pkgRoot: fileURLToPath(new URL("../..", import.meta.url)) }).map((e) => e.dest));
+  const harness = { test: { source_glob: ["src/**/*.js"], test_glob: ["test/**/*.test.js"] } };
+  const tagsOf = (f) => classifyFinding({ finding: f, ownerOf, isInstalled: dests, ktbVersion: "1.3.2", harness });
+
+  const block = (findings, extraComments = [], record = "") => harvestFindings({
+    issue: 9, repo: "o/r", record, factoryLogins: LOGINS,
+    comments: [heartbeat(9, "implement"), selfGateComment({ issue: 9, head: "abc1234", attempt: 1, at: "2026-09-20T10:00:00Z", findings }), ...extraComments],
+  }).filter((f) => f.kind === "self-gate");
+
+  // 증거 없음 — mutation survivor는 빌더가 아무것도 주장하지 않는 테스트를 쓴 것이다
+  const survivor = block([{ check: "mutation", blocking: true, detail: "survivor: test/date.test.js asserts nothing under mutation (return null in src/date.js)" }]);
+  expect(survivor[0].causal_path).toBe("test/date.test.js");
+  expect(tagsOf(survivor[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
+
+  // 증거 없음 — pin 회귀도 마찬가지(빌더가 고정된 가드를 되돌렸다)
+  const pin = block([{ check: "pin", blocking: true, ids: ["P-3"], detail: "regression: pin P-3 guard test/tz.test.js is red — a prior fix regressed: DST boundary" }]);
+  expect(tagsOf(pin[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
+
+  // (a) 인프라급 — 검사가 **못 돌았다**. 채택자의 하네스가 단일 테스트를 못 돌린다 → harness
+  const misc = block([{ check: "mutation", blocking: true, harness: true, detail: "mutation check misconfigured — the harness cannot run a single test" }]);
+  expect(misc[0].causal_path).toBe(".factory/harness.toml");
+  expect(tagsOf(misc[0])).toMatchObject({ tags: ["harness"], disposition: "routed" });
+
+  // (b) 사람이 **구조화된 필드**로 공장 탓을 선언했다 → ktb (산문은 증거가 아니다 — 재리뷰 NEW-MF-2)
+  const humanDecision = humanDecisionComment({ issue: 9, author: "LeeHyeonKyu", cause: "factory-defect", ktbFix: "1.3.2", reason: "the implement self-gate demanded a qa manifest only review produces", at: "2026-09-20T10:56:00Z" });
+  const blamed = block([{ check: "contract", blocking: true, detail: "spec-evidence-missing: no qa evidence manifest" }], [humanDecision]);
+  expect(blamed[0].causal_path).toBe(".factory/lib/self-gate.js");
+  expect(blamed[0].extra.attribution).toEqual(["human-decision"]);
+  expect(tagsOf(blamed[0])).toMatchObject({ tags: ["ktb"], disposition: "routed" });
+
+  // (c) **버전이 오른** 나중 런에서 그 검사가 ran에도 skipped에도 없다 → 거둬들여졌다 → ktb
+  const withdrawn = recordOf(9, "x", [
+    { stage: "implement", at: "2026-09-20T10:08Z", lines: [selfGateDetail({ ran: ["gates", "contract"], blocked: true, ktbVersion: "1.3.1" })] },
+    { stage: "implement", at: "2026-09-20T11:02Z", lines: [selfGateDetail({ ran: ["gates"], skipped: ["mutation", "pins"], ktbVersion: "1.3.2" })] },
+  ]);
+  const later = block([{ check: "contract", blocking: true, detail: "spec-evidence-missing: no qa evidence manifest" }], [], withdrawn);
+  expect(later[0].extra.attribution).toEqual(["check-withdrawn"]);
+  expect(tagsOf(later[0])).toMatchObject({ tags: ["ktb"], disposition: "routed" });
+
+  // 같은 검사가 나중에도 계속 돌면 거둬들여진 것이 아니다 — 증거가 아니다
+  const stillBlocking = recordOf(9, "x", [
+    { stage: "implement", at: "2026-09-20T10:08Z", lines: [selfGateDetail({ ran: ["gates", "mutation"], blocked: true, ktbVersion: "1.3.1" })] },
+    { stage: "implement", at: "2026-09-20T11:02Z", lines: [selfGateDetail({ ran: ["gates", "mutation"], blocked: true, ktbVersion: "1.3.2" })] },
+  ]);
+  const still = block([{ check: "mutation", blocking: true, detail: "survivor: test/date.test.js asserts nothing under mutation (x)" }], [], stillBlocking);
+  expect(tagsOf(still[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
+});
+
+// SF-1 — 하네스급 self-gate 차단은 재시도 코멘트를 **남기지 않는다**(`run-stage.js`가 곧장
+// needs-human으로 간다). 그 경우의 유일한 durable 증거는 run 기록의 `self-gate: … (harness) …` 줄이다.
+test("harness급 self-gate 차단은 run 기록 줄에서 수확된다(코멘트가 없어도)", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { heartbeat, recordOf, selfGateDetail } = await import("./helpers/feedback-fixtures.js");
+  const record = recordOf(9, "x", [{ stage: "implement", at: "2026-09-20T10:08Z", lines: [
+    "verify: ok",
+    "self-gate: gates+mutation → BLOCKED (harness) — mutation: mutation check misconfigured — the harness cannot run a single test",
+    selfGateDetail({ ran: ["gates", "mutation"], blocked: true, harness: true, ktbVersion: "1.3.2" }),
+  ] }]);
+  const found = harvestFindings({ issue: 9, repo: "o/r", record, comments: [heartbeat(9, "implement")] });
+  expect(found.filter((f) => f.kind === "self-gate")).toHaveLength(1);
+  expect(found[0].causal_path).toBe(".factory/harness.toml");
+  // 줄이 지목한 런이 이 이슈의 런이 아니면 그 줄도 증거가 아니다(바인딩은 여기에도 걸린다)
+  expect(harvestFindings({ issue: 9, repo: "o/r", record, comments: [] })).toEqual([]);
+});
+
+// ── Task 4 — 역할별 행동 신호와 escaped 결함의 **귀속** ────────────────────────────────────────
+// 판정의 출처는 **런이 쓴 `review-evidence:` 줄 하나뿐**이고(r1 must_fix 2), 그 줄조차 하트비트가
+// 아는 런을 지목할 때만 읽는다. 픽스처는 진짜 생산자가 만든다 — `reviewEvidenceLine`·`appendRunRecord`.
+
+const RUNNER_A = "gha-770001";
+/** 라운드별 verdict로 run 기록 한 장 + 그 런의 하트비트를 만든다. */
+async function boundRecord(issue, rounds) {
+  const { reviewEvidenceLine } = await import("../lib/run-record.js");
+  const { recordOf, heartbeat } = await import("./helpers/feedback-fixtures.js");
+  const record = recordOf(issue, `issue ${issue}`, rounds.map((verdicts, i) => ({
+    stage: "review", at: `2026-09-0${i + 1}T00:00:00Z`, runner: RUNNER_A,
+    lines: ["verify: ok", reviewEvidenceLine({
+      headSha: "a".repeat(40), round: i + 1,
+      decision: verdicts.some((v) => v.verdict === "reject") ? "rework" : "approved",
+      verdicts, runId: "770001", runnerId: RUNNER_A,
+    })],
+  })));
+  return { record, comments: [heartbeat(issue, "review", RUNNER_A, "2026-09-01T00:00:00Z")] };
+}
+const ap = (role) => ({ role, verdict: "approve" });
+const rj = (role) => ({ role, verdict: "reject" });
+
+test("escaped는 **그 라운드보다 먼저 승인해 둔** 역할에게만 귀속된다", async () => {
+  const { roleSignalsFor } = await import("../lib/retro/harvest.js");
+  // R1: stamp·guard 모두 승인. R2: guard가 결함을 찾아 reject.
+  const s = roleSignalsFor(await boundRecord(1, [[ap("stamp"), ap("guard")], [ap("stamp"), rj("guard")]]));
+  // stamp는 R1에 승인해 두고 R2의 결함을 놓쳤다.
+  expect(s.roles.stamp).toMatchObject({ verdicts: 2, approves: 2, rejects: 0, escaped: 1, flips: 0 });
+  // guard는 **자기가 찾아낸** 결함으로 벌받지 않는다(그 라운드의 reject 당사자는 blame에서 빠진다).
+  expect(s.roles.guard).toMatchObject({ verdicts: 2, approves: 1, rejects: 1, escaped: 0, flips: 1 });
+  expect(s.escaped_total).toBe(1);
+  expect(s.max_round).toBe(2);
+});
+
+test("같은 라운드의 reject는 아무에게도 귀속되지 않는다 — 정의는 '승인에 뒤이은 결함'이다", async () => {
+  const { roleSignalsFor } = await import("../lib/retro/harvest.js");
+  const s = roleSignalsFor(await boundRecord(2, [[ap("stamp"), rj("guard")]]));
+  expect(s.escaped_total).toBe(0);
+  expect(s.roles.stamp.escaped).toBe(0);
+});
+
+test("reject는 승인을 **철회한다** — 철회한 뒤의 결함은 그 역할에게 귀속되지 않는다", async () => {
+  const { roleSignalsFor } = await import("../lib/retro/harvest.js");
+  const s = roleSignalsFor(await boundRecord(3, [
+    [ap("a"), ap("b")],
+    [rj("a"), ap("b")],
+    [rj("c")],
+  ]));
+  // a는 R1에 승인해 두었지만 R2에서 **스스로 그 결함을 찾아** 뒤집었다 — 규칙 ③. 늦게라도 제 판정을
+  // 고친 리뷰어가 가장 크게 벌받으면 그 규칙은 정확히 반대 행동을 보상한다.
+  expect(s.roles.a).toMatchObject({ escaped: 0, flips: 1 });
+  // 그리고 R2의 reject는 승인을 **철회한다** — R3에서 c가 찾은 결함도 a의 것이 아니다.
+  expect(s.roles.b.escaped).toBe(2);   // b는 R1·R2 모두 승인했다 — R2와 R3의 결함 둘 다 b에게 간다
+  expect(s.escaped_total).toBe(2);
+});
+
+test("parseVerdictPairs — `verdicts=` 문자열을 읽고, 읽을 수 없는 토큰은 버린다", async () => {
+  const { parseVerdictPairs } = await import("../lib/retro/harvest.js");
+  expect(parseVerdictPairs("a=approve,b=reject")).toEqual([{ role: "a", verdict: "approve" }, { role: "b", verdict: "reject" }]);
+  expect(parseVerdictPairs("none")).toEqual([]);
+  expect(parseVerdictPairs("")).toEqual([]);
+  expect(parseVerdictPairs("broken,=x,y=")).toEqual([]);
+});
+
+test("aggregateRoleSignals — approve_rate는 정수 비율로 판정하고(반올림 아님) ever_rejects를 함께 낸다", async () => {
+  const { aggregateRoleSignals } = await import("../lib/retro/harvest.js");
+  const agg = aggregateRoleSignals([
+    { roles: { stamp: { verdicts: 3, approves: 3, rejects: 0, must_fix: 0, flips: 0, escaped: 1 } }, escaped_total: 1 },
+    { roles: { stamp: { verdicts: 2, approves: 2, rejects: 0, must_fix: 0, flips: 0, escaped: 0 } }, escaped_total: 0 },
+  ]);
+  expect(agg.stamp).toMatchObject({ verdicts: 5, approves: 5, approve_rate: 1, ever_rejects: false, escaped_defects: 1, issues: 2 });
+  // 199/200은 반올림하면 1.00이지만 **100% 승인이 아니다** — 규칙은 정수로 판정한다.
+  const near = aggregateRoleSignals([{ roles: { r: { verdicts: 200, approves: 199, rejects: 1, must_fix: 0, flips: 0, escaped: 3 } } }]);
+  expect(near.r.approves).not.toBe(near.r.verdicts);
+  expect(near.r.ever_rejects).toBe(true);
+});
+
+test("planDebateDelta — 해소된 dissent는 변화이고, unresolved/deferred는 변화가 아니다", async () => {
+  const { planDebateDelta } = await import("../lib/retro/harvest.js");
+  const { planHandoffComment } = await import("./helpers/feedback-fixtures.js");
+  const { parseHandoffs } = await import("../lib/handoff.js");
+
+  const dead = parseHandoffs([planHandoffComment(4, { at: "2026-09-01T00:00:00Z",
+    done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }],
+    dissent_log: [{ role: "skeptic", objection: "이 설계는 위험하다", resolution: "unresolved" }] })]);
+  expect(planDebateDelta(dead)).toMatchObject({ changed: false, dissent_resolved: 0 });
+
+  const live = parseHandoffs([planHandoffComment(5, { at: "2026-09-01T00:00:00Z",
+    done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }],
+    dissent_log: [{ role: "skeptic", objection: "done_when이 검증 불가다", resolution: "accepted — done_when dw2를 추가했다" }] })]);
+  expect(planDebateDelta(live)).toMatchObject({ changed: true, dissent_resolved: 1 });
+
+  // 여러 plan 핸드오프(재계획)에서 done_when이 늘어난 것도 변화다.
+  const grew = parseHandoffs([
+    planHandoffComment(6, { round: 1, at: "2026-09-01T00:00:00Z", done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }] }),
+    planHandoffComment(6, { round: 2, at: "2026-09-02T00:00:00Z", done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }, { id: "dw2", text: "y", verify: "u", level: "unit" }] }),
+  ]);
+  expect(planDebateDelta(grew)).toMatchObject({ changed: true, done_when_added: 1 });
+
+  // 토론 자체가 없으면 바꾼 것도 없다.
+  expect(planDebateDelta([])).toMatchObject({ changed: false, plan_handoffs: 0 });
+});

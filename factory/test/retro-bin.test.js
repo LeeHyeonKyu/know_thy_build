@@ -8,9 +8,13 @@ beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); });
 import {
   accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
-  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
+  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, routeFeedbackArm, runRetro, sharedIdentityWarning,
+  splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
@@ -1078,6 +1082,173 @@ test("applyMutation is pure and re-appliable — the same mutation on a fresher 
   expect(b.history.map((x) => x.at)).toEqual(["x", NOW]);
   // 같은 mutation을 두 번 적용해도 base가 같으면 결과가 같다(재시도가 이력을 두 번 쌓지 않는다)
   expect(applyMutation({ n: 4, merges_since: 1, history: [], candidates: emptyCandidates() }, mutation)).toEqual(a);
+});
+
+// ── Feedback loop Task 3 — 라우팅 팔은 **매 머지마다** 돌고, 절대 retro를 죽이지 않는다 ────────
+test("feedback-route: light 회차에서도 돌고, 결과가 기록에 남는다", async () => {
+  const routeFeedback = vi.fn(async () => ({ issues: [11], actions: [{ kind: "upstream-created", step: "feedback-route", repo: "o/up", issue: 3, fingerprint: "abc" }] }));
+  const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+  expect(await runRetro({ deps })).toBe(0);
+  expect(deps.claudeP).not.toHaveBeenCalled();                     // light 회차다
+  expect(routeFeedback).toHaveBeenCalled();
+  expect(recorded.join("\n")).toMatch(/feedback-route: upstream-created/);
+});
+
+/**
+ * ── 최종 리뷰 should_fix 2의 회귀 핀 ───────────────────────────────────────────────────────────
+ *
+ * 크로스-레포 팔의 실패는 **fail-safe로 삼켜지되 조용해서는 안 된다**. 옛 모양은 `error` 액션 한
+ * 줄 + `console.log` 하나였고, 그래서 `FACTORY_BOT_TOKEN`에 `[factory].upstream`의 `issues:write`가
+ * 없으면 모든 `[ktb]` 발견이 머지마다 조용히 죽는 동안 잡은 매번 초록이었다(주석도, 스텝 요약도,
+ * 비-0 종료도 없었다 — 루프가 존재하지 않는 것과 구별되지 않는 상태다).
+ *
+ * 종료 코드는 **여전히 0이다**(spec §7 fail-safe): 라우팅 때문에 회고가 죽으면 그 회차의
+ * lessons·통계·커서까지 같이 사라진다. 바뀌는 것은 소리뿐이다.
+ */
+test("feedback-route: 상류 쓰기 실패는 ::error:: + 스텝 요약으로 나가고, 종료 코드는 그대로 0이다", async () => {
+  const summaryFile = join(mkdtempSync(join(tmpdir(), "ktb-retro-sum-")), "summary.md");
+  writeFileSync(summaryFile, "");
+  const prevSummary = process.env.GITHUB_STEP_SUMMARY;
+  process.env.GITHUB_STEP_SUMMARY = summaryFile;
+  const logged = [];
+  vi.spyOn(console, "log").mockImplementation((...a) => logged.push(a.join(" ")));
+  try {
+    const routeFeedback = vi.fn(async () => ({
+      issues: [11],
+      actions: [{ kind: "error", step: "feedback-route", issue: 11, reason: "upstream issue failed — gh api repos/o/up/issues failed (1): HTTP 403: Resource not accessible by integration" }],
+    }));
+    const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+    expect(await runRetro({ deps })).toBe(0);                        // §7 fail-safe — 회고는 죽지 않는다
+
+    const annotations = logged.filter((l) => l.startsWith("::error title=factory-retro::"));
+    expect(annotations.length).toBeGreaterThanOrEqual(1);
+    expect(annotations[0]).toContain("HTTP 403");
+    // 워크플로 명령은 **한 줄**이어야 한다 — 접지 않으면 둘째 줄부터는 주석에 실리지 않는다.
+    for (const a of annotations) expect(a).not.toMatch(/\r?\n/);
+    // 사람이 다음에 할 일이 같은 화면에 있다.
+    expect(annotations.join("\n")).toMatch(/`issues:write` on the upstream repo/);
+
+    const summary = readFileSync(summaryFile, "utf8");
+    expect(summary).toMatch(/## factory-retro — feedback routing/);
+    expect(summary).toMatch(/\*\*failed:\*\*.*HTTP 403/);
+    // run 기록의 줄은 그대로 남는다(두 채널은 서로를 대체하지 않는다).
+    expect(recorded.join("\n")).toMatch(/feedback-route: error/);
+  } finally {
+    if (prevSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+    else process.env.GITHUB_STEP_SUMMARY = prevSummary;
+  }
+});
+
+test("feedback-route: 실패가 없으면 주석도 요약도 **쓰지 않는다**(잡음을 만들지 않는다)", async () => {
+  const summaryFile = join(mkdtempSync(join(tmpdir(), "ktb-retro-sum-")), "summary.md");
+  writeFileSync(summaryFile, "");
+  const prevSummary = process.env.GITHUB_STEP_SUMMARY;
+  process.env.GITHUB_STEP_SUMMARY = summaryFile;
+  const logged = [];
+  vi.spyOn(console, "log").mockImplementation((...a) => logged.push(a.join(" ")));
+  try {
+    const routeFeedback = vi.fn(async () => ({ issues: [11], actions: [{ kind: "upstream-created", step: "feedback-route", repo: "o/up", issue: 3, fingerprint: "abc" }] }));
+    const { deps } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+    expect(await runRetro({ deps })).toBe(0);
+    expect(logged.filter((l) => l.startsWith("::error"))).toEqual([]);
+    expect(readFileSync(summaryFile, "utf8")).toBe("");
+  } finally {
+    if (prevSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+    else process.env.GITHUB_STEP_SUMMARY = prevSummary;
+  }
+});
+
+/**
+ * T7 리뷰 should_fix 5 — **배선을 진짜로 돌린다.** 위/아래 테스트는 `routeFeedback`을 가짜로 바꾸므로
+ * 창의 코멘트를 `resolveFactoryLogins`에 넘기는 일도, `identity`를 읽는 일도, 경보를 런당 한 번만
+ * 다는 일도 확인하지 못한다 — 그 셋 중 하나가 빠져도 초록이다. 여기서는 진짜 `routeFeedbackArm`에
+ * 데모 #39의 **실제 코멘트**(전부 `LeeHyeonKyu`/`User`)를 먹인다.
+ */
+test("routeFeedbackArm: 공유 신원을 스스로 알아내 경보 1건 + 이슈마다 기각 1건을 낸다", async () => {
+  const real = JSON.parse(readFileSync(new URL("./fixtures/demo-39-comments.json", import.meta.url), "utf8")).comments;
+  // 오늘의 `:unstick`이 남길 결정 — 그 저장소에서는 소유자가 쓰므로 하트비트와 **같은 작성자**다.
+  const decided = [...real, {
+    id: 99, createdAt: "2026-09-20T10:57:00Z", author: "LeeHyeonKyu", authorType: "User",
+    body: "<!-- human-decision:v1 issue=39 skill=unstick -->\n```yaml\ndecision: retry\ncause: factory-defect\nreason: \"self-gate blocked on a check only review produces\"\n```",
+  }];
+  const merged = (n) => ({ number: n, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" });
+  const gh = {
+    // Actions 밖이므로 뷰어는 쓰이지 않는다 — 신원은 하트비트 작성자의 `authorType`에서 온다.
+    viewerLogin: async () => { throw new Error("must not be called outside Actions"); },
+    viewerType: async () => { throw new Error("must not be called outside Actions"); },
+    async issueList() { return []; },
+    async comment() { return "https://x/#issuecomment-1"; },
+    async createIssue() { return 900; },
+    async upstreamIssue() { return { issue: 501, created: true, appended: false }; },
+  };
+  const errs = [];
+  const r = await routeFeedbackArm({
+    gh, repo: "LeeHyeonKyu/know-thy-build-demo", root: "/r", harness: {},
+    issues: [merged(39), merged(40)],
+    commentsByIssue: new Map([[39, decided], [40, decided.map((c) => ({ ...c, id: c.id + 1000 }))]]),
+    records: new Map(), since: "2026-09-19T00:00:00Z",
+    loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
+    log: (m) => errs.push(m),
+  });
+  // 로그인은 하트비트에서 해석됐다 — "못 얻었다"는 줄은 없다.
+  expect(errs).toEqual([]);
+  // 경보는 **런당 하나**다(이슈가 둘이어도 하나).
+  const warns = r.actions.filter((a) => a.kind === "warning");
+  expect(warns).toHaveLength(1);
+  expect(warns[0].reason).toMatch(/factory identity is a personal account \(LeeHyeonKyu\)/);
+  expect(r.actions[0]).toBe(warns[0]);                              // 맨 앞이다 — 읽히는 자리
+  // 기각은 **이슈마다** 하나다.
+  const refused = r.actions.filter((a) => a.kind === "unverifiable-decision");
+  expect(refused.map((a) => a.issue).sort()).toEqual([39, 40]);
+  expect(refused.every((a) => a.author === "LeeHyeonKyu")).toBe(true);
+  // 그리고 그 결정은 증거로 세어지지 않았다 — 상류로 나간 것이 없다.
+  expect(r.actions.some((a) => a.kind === "upstream-created")).toBe(false);
+});
+
+test("routeFeedbackArm: 팩토리 로그인을 못 얻으면 그 사실을 적고, 경보는 달지 않는다(모르는 것은 경보가 아니다)", async () => {
+  const anon = [{ id: 1, createdAt: "2026-09-20T10:00:00Z", author: null, body: "<!-- factory-transition:v1 from=factory:approved to=factory:merged by=script -->" }];
+  const errs = [];
+  const r = await routeFeedbackArm({
+    gh: { async issueList() { return []; }, async comment() { return "x"; } },
+    repo: "o/r", root: "/r", harness: {},
+    issues: [{ number: 39, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" }],
+    commentsByIssue: { 39: anon },                                  // 평범한 객체로도 돈다
+    records: new Map(), since: "2026-09-19T00:00:00Z",
+    loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
+    log: (m) => errs.push(m),
+  });
+  expect(errs.join("\n")).toMatch(/could not resolve the factory logins/);
+  expect(r.actions.filter((a) => a.kind === "warning")).toEqual([]);
+});
+
+// T7 — 공유 신원 경보는 **회고의 액션 로그에 그대로 찍힌다**(액션 종류를 늘려도 렌더러는 그대로다).
+test("feedback-route: 공유 신원 경보와 기각된 결정이 액션 로그에 남는다 — 경보는 런당 한 번", async () => {
+  const warn = sharedIdentityWarning({ personal: true, login: "LeeHyeonKyu" });
+  const routeFeedback = vi.fn(async () => ({
+    issues: [11, 12],
+    actions: [
+      warn,
+      { kind: "unverifiable-decision", step: "feedback-route", issue: 11, author: "LeeHyeonKyu", reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent" },
+      { kind: "unverifiable-decision", step: "feedback-route", issue: 12, author: "LeeHyeonKyu", reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent" },
+    ],
+  }));
+  const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+  expect(await runRetro({ deps })).toBe(0);
+  const log = recorded.join("\n");
+  expect(log.match(/feedback-route: warning — factory identity is a personal account \(LeeHyeonKyu\)/g)).toHaveLength(1);
+  expect(log).toMatch(/register a machine user or GitHub App as the factory identity/);
+  // 기각된 결정은 **이슈마다** 한 줄이고, 그 줄이 **누구의** 결정이었는지까지 적는다 — 이슈 번호만으로는
+  // 코멘트가 수십 개인 이슈에서 자기 결정을 찾아가지 못한다(리뷰 nit 6).
+  expect(log.match(/feedback-route: unverifiable-decision #1[12] by @LeeHyeonKyu — shared identity/g)).toHaveLength(2);
+  // `author`가 없는 액션 종류에는 그 조각이 붙지 않는다(빈 ` by @`를 만들지 않는다).
+  expect(log).not.toMatch(/warning by @/);
+});
+
+test("feedback-route: gh가 던져도 retro는 0으로 끝난다(라우팅이 공장을 멈추지 않는다)", async () => {
+  const routeFeedback = vi.fn(async () => { throw new Error("gh issue list failed (1): HTTP 403 Resource not accessible"); });
+  const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+  expect(await runRetro({ deps })).toBe(0);
+  expect(recorded.join("\n")).toMatch(/feedback-route failed — .*403/);
 });
 
 test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async () => {

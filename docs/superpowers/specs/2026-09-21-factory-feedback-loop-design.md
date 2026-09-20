@@ -34,6 +34,7 @@ A third class, **`product`** (a real defect in the using project's code), is the
 - **Durable before ephemeral.** Anything the loop needs must be written to the records branch at run time; 7-day Actions artifacts are a convenience, never the source of truth.
 - **Paired metrics only** (Goodhart). Approve-rate is interpretable only with escaped defects; debate quality only as an outcome delta; waste only as cost against diff risk. Health signals are **improvement triggers**, never grounds to reduce reviewer coverage (that is ADR-026's separate job).
 - **Ambiguous is surfaced, never mis-routed or dropped.**
+- **Judgments anchor on runner-recorded, agent-unwritable facts.** Ownership, attribution, per-role verdicts, tier and authorship are read from run-bound record lines, runner-applied labels, comment authors against the factory logins, and the install manifest — never from handoff/comment bodies, prose, working-tree scratch, or the viewer identity off-Actions. Every agent-writable channel the loop has trusted so far was laundered within one review round (human-decision prose, handoff verdicts, self-declared tier, viewer-as-bot).
 
 ## 4. The loop
 
@@ -57,14 +58,14 @@ stage run (Actions) ──emit──▶ run record (records branch): gate detail
 | concern | signal | pairing required |
 |---|---|---|
 | agent effectiveness / rubber-stamp | per-role approve/reject rate, must_fix contribution, "ever rejects", verdict flips | **× escaped defects downstream** (100% approve alone is undecidable) |
-| debate quality (plan) | did the skeptic/debate **change** the plan (done_when added, dissent substance) | outcome delta, not length |
+| debate quality (plan) | did the skeptic/debate **change** the plan (done_when added, dissent substance) | outcome delta, not length — **report-only** (advisory) until a runner-recorded anchor exists; its only input today is the agent-written dissent resolution, so it is never routed upstream |
 | context adequacy | a role's misses correlated with fields it was **not shown** (cold-read manifest vs what full-ctx spec-conformance caught) | needs the per-role context manifest [T1] |
 | tier / token waste | cost per issue/role/tier; cost vs diff risk (docs diff on the full panel); rounds | cost × risk, not cost alone |
 | correctness outcome | rounds_per_issue, escaped_defects, revert_rate (Task 10 / ADR-026) | already paired |
 
 ## 6. Evidence payload (per finding)
 
-`{ issue, repo, stage, round, ktb_version, tags: ["harness"|"ktb"|"product"|"ambiguous"], causal: { path, line?, owner, command?, test?, snippet }, role?: { name, context_manifest: [fields] }, chain: [verdict/transition events], cost: { usd, tokens }, fingerprint }`. The `fingerprint` (stable hash of tags + causal path + normalized reason) dedupes: the same cause across issues appends evidence to one upstream issue rather than opening many.
+`{ issue, repo, stage, round, ktb_version, tags: ["harness"|"ktb"|"product"|"ambiguous"], causal: { path, line?, owner, command?, test?, snippet }, role?: { name, context_manifest: [fields] }, chain: [verdict/transition events], cost: { usd, tokens }, fingerprint }`. The `fingerprint` (stable hash of causal path + normalized reason; tags excluded) dedupes: the same cause across issues appends evidence to one upstream issue rather than opening many. **`reason` must be cause-invariant**: role, signal kind and causal path only — never counts, rates, dollar amounts, baselines or window sizes (those live in `extra`/`chain` and in the appended evidence comment). A sliding aggregate inside `reason` re-opens the same upstream issue on every periodic run (found in T4's review: week-1 and week-2 rubber-stamp/cost-vs-risk fingerprints differed).
 
 ## 7. Routing & configuration
 

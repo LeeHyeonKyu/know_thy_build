@@ -91,6 +91,23 @@ export function renderProgressTable(p) {
  * 절반씩 줄여 가며 맞춘다. 마지막까지 안 맞으면 두 줄로 돌아간다 — **본문이 안 들어가느니
  * 진행 표시를 포기한다**(PATCH가 422로 죽으면 sweeper에게는 "하트비트가 멈췄다"로 보인다).
  */
+/**
+ * 하트비트 한 통의 머리 두 줄을 되읽는다 — `{ issue, stage, runner }`(아니면 null).
+ *
+ * 이 두 줄은 **러너가 GitHub에 남기는 유일한 자기 신고**이고, 그래서 피드백 루프(Task 3)가
+ * "이 이슈에 실제로 어떤 런이 돌았는가"를 묻는 자리다: run 기록(`docs/factory/runs/**`)은 에이전트
+ * 세션도 쓸 수 있는 경로라 그 안의 `run_id=`를 그 파일만 보고 믿을 수 없다(batch-2 MF-2). 매 스테이지
+ * 런이 **새 코멘트**를 만들므로(`gh.comment`) 이슈의 코멘트 이력에는 그 이슈의 모든 런이 남는다.
+ *
+ * 형식은 `heartbeatBody`가 쓰는 그대로다 — 쓰는 쪽과 읽는 쪽을 한 파일에 둔다(둘이 갈라지면 읽는
+ * 쪽은 **테스트가 전부 초록인 채로** 아무 런도 찾지 못하고, 그러면 모든 증거가 조용히 버려진다).
+ */
+export const HEARTBEAT_HEAD = /<!--\s*factory-heartbeat issue=(\d+)\s*-->\s*\nstage:\s*(\S+)\s*·\s*runner:\s*(\S+)\s*·/;
+export function parseHeartbeat(body) {
+  const m = HEARTBEAT_HEAD.exec(String(body ?? ""));
+  return m ? { issue: Number(m[1]), stage: m[2], runner: m[3] } : null;
+}
+
 export function heartbeatBody({ issue, stage, runnerId, started, last, progress = null }) {
   const head = `<!-- factory-heartbeat issue=${issue} -->\nstage: ${stage} · runner: ${runnerId} · started: ${started} · last: ${last}`;
   if (!progress || typeof progress !== "object") return head;

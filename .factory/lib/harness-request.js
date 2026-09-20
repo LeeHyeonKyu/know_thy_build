@@ -62,11 +62,23 @@ export function parseHarnessRequestFor(body) {
   return m ? Number(m[1]) : null;
 }
 
-export function harnessIssueBody({ entries, issue, pr = null }) {
+/**
+ * `origin`은 **누가 이 요청을 냈는가**다(기본은 빌더). 두 번째 생산자가 생겼다 — 피드백 루프(Task 3)는
+ * **머지된** 이슈의 증거를 분류해, 원인 파일이 그 저장소 소유(`owner: user`)인 발견을 같은 harness
+ * 이슈로 보낸다. 마커(`for=<n>`)도 제목도 그대로라 dedupe는 한 글자도 바뀌지 않지만, 본문의 두 문장은
+ * 거짓이 된다: 그 요청은 implement handoff의 `harness_needed`가 아니고, 가리키는 이슈는 이미 머지돼
+ * 주차 해제될 것이 없다(`factory:merged`는 막다른 상태라 `Blocks:`는 거부되는 전이만 만든다).
+ * 그래서 origin이 `feedback`이면 머리 문장을 바꾸고 `Blocks:` 줄을 싣지 않는다 — 기본값 경로의
+ * 바이트는 그대로다.
+ */
+export function harnessIssueBody({ entries, issue, pr = null, origin = "implement" }) {
   const rows = entries.map((e) => `| \`${oneLine(e.file)}\` | ${oneLine(e.change)} | ${oneLine(e.why)} |`);
+  const feedback = origin === "feedback";
   return [
     harnessRequestMarker(issue),
-    `#${issue}의 implement가 **보호 경로 변경 없이는 끝낼 수 없다**고 보고했습니다(implement handoff의 \`harness_needed\`).`,
+    feedback
+      ? `머지된 #${issue}의 증거를 회고가 분류한 결과입니다(피드백 루프 Task 3). 아래 파일의 주인은 **이 저장소**입니다 — 설치 매니페스트가 \`owner: user\`로 싣는 파일이므로 KTB가 아니라 여기서 고칩니다(spec §2).`
+      : `#${issue}의 implement가 **보호 경로 변경 없이는 끝낼 수 없다**고 보고했습니다(implement handoff의 \`harness_needed\`).`,
     "",
     "| file | change | why |",
     "| --- | --- | --- |",
@@ -76,9 +88,9 @@ export function harnessIssueBody({ entries, issue, pr = null }) {
     "이 이슈는 평소의 파이프라인(triage → plan → implement → review)을 그대로 타되, `factory:harness`",
     "라벨 덕분에 builder가 테스트 인프라·빌드 설정 파일을 실제로 쓸 수 있고(ADR-020 KTB-20),",
     "**머지는 사람이 합니다** — 보호 경로를 실은 PR의 자동 머지는 L1이 계속 거부합니다.",
-    "이 이슈가 닫히면(사람이 PR을 머지하면) sweeper가 아래 이슈를 `factory:needs-info → factory:queue`로 되돌립니다.",
+    feedback ? "" : "이 이슈가 닫히면(사람이 PR을 머지하면) sweeper가 아래 이슈를 `factory:needs-info → factory:queue`로 되돌립니다.",
     "",
-    blocksLine(issue),
+    feedback ? "" : blocksLine(issue),
   ].filter((l) => l !== "").join("\n");
 }
 
@@ -110,14 +122,45 @@ export function parseBlocks(body) {
  * 새 이슈는 `factory:queue` + `factory:harness`로 태어난다: queue 라벨이 곧 triage 워크플로의 진입
  * 이벤트다(이 함수가 따로 dispatch하지 않는 이유).
  */
-export async function ensureHarnessIssue({ gh, issue, entries, pr = null }) {
+/**
+ * 이미 열려 있는 하네스 이슈의 표에 **빠진 줄만** 덧붙인다(T3 리뷰 SF-2). 예전에는 기존 이슈를
+ * 찾으면 그대로 돌려주고 끝이었다 — 재진입 멱등성을 그 조기 반환으로 샀는데, 그 대가로 **새로**
+ * 나온 요청이 조용히 사라졌다(액션 줄에는 `created:false`만 남는다). 같은 줄인지는 표의 `file` 셀로
+ * 본다: 같은 파일에 대한 요청은 문구가 달라도 한 줄이면 충분하고, 다른 파일은 언제나 새 사실이다.
+ * 덧붙일 것이 없으면 본문을 **건드리지 않는다**(같은 머지를 다시 읽어도 표가 자라지 않는다).
+ */
+export function appendHarnessEntries(body, entries) {
+  const text = String(body ?? "");
+  const have = new Set([...text.matchAll(/^\|\s*`([^`]+)`\s*\|/gm)].map((m) => m[1].trim()));
+  const missing = (entries || []).filter((e) => !have.has(oneLine(e.file)));
+  if (!missing.length) return { body: text, added: [] };
+  const rows = missing.map((e) => `| \`${oneLine(e.file)}\` | ${oneLine(e.change)} | ${oneLine(e.why)} |`);
+  const lines = text.split("\n");
+  // 표의 마지막 줄 뒤에 끼워 넣는다 — 표 아래의 산문(사람이 덧붙인 메모 포함)은 그대로 둔다.
+  let last = -1;
+  lines.forEach((l, i) => { if (/^\|/.test(l)) last = i; });
+  if (last === -1) return { body: `${text}\n${rows.join("\n")}`, added: missing };
+  return { body: [...lines.slice(0, last + 1), ...rows, ...lines.slice(last + 1)].join("\n"), added: missing };
+}
+
+export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin = "implement" }) {
   const title = harnessIssueTitle(entries, issue);
   const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
   const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
-  if (found) return { issue: found.number, created: false, title: found.title ?? title };
+  if (found) {
+    // 덧붙이기는 어댑터가 본문 편집을 줄 때만 한다(그 능력이 없는 호출자의 동작은 한 글자도 안 바뀐다).
+    if (typeof gh.editIssueBody === "function") {
+      const { body, added } = appendHarnessEntries(found.body, entries);
+      if (added.length) {
+        await gh.editIssueBody(found.number, body);
+        return { issue: found.number, created: false, appended: added.length, title: found.title ?? title };
+      }
+    }
+    return { issue: found.number, created: false, appended: 0, title: found.title ?? title };
+  }
   const number = await gh.createIssue({
     title,
-    body: harnessIssueBody({ entries, issue, pr }),
+    body: harnessIssueBody({ entries, issue, pr, origin }),
     labels: ["factory:queue", HARNESS_LABEL],
   });
   if (number == null) throw new Error("gh issue create returned no issue number");

@@ -60,6 +60,10 @@ export const FACTORY_ENUM = Object.freeze([
   ".factory/out/coverage/**", ".factory/out/prove-wt/**", ".factory/out/classify-wt/**",
   ".factory/harness.toml", ".factory/ci-settings*.json", ".factory/roles.toml", ".factory/quarantine.toml",
   ".factory/package.json", ".factory/package-lock.json",
+  // 설치 매니페스트(피드백 루프의 주인 표). 에이전트가 이 표를 고칠 수 있으면 "내 파일의 주인은
+  // 채택자다"라고 다시 써서 KTB 이슈를 피하거나, 반대로 채택자의 파일을 KTB에 떠넘길 수 있다 —
+  // 분류의 근거가 되는 파일이므로 다른 생성물과 같은 대접을 받는다(`factory init`만 쓴다).
+  ".factory/install-manifest.json",
 ]);
 
 /**

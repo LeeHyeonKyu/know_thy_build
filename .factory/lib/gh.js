@@ -1,4 +1,5 @@
 import { STATES, TIER_LABELS } from "./labels.js";
+import { HEARTBEAT_HEAD } from "./heartbeat.js";
 
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
@@ -83,14 +84,113 @@ const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *
  * KTB-46에 `bin/sweep.js`가 두 번째 호출자로 붙으면서 `bin/run-stage.js`의 클로저에서 여기로 옮겼다 —
  * `gh api user` 해석이 두 벌이 되면 그 둘이 갈라지는 날 한쪽만 위조 상태를 통과시킨다.
+ *
+ * ── T5 리뷰 MF-1: **이 함수가 어디서 도는지가 답을 바꾼다.** ──────────────────────────────────
+ * 출처는 세 갈래이고, 각각 다른 자리에서만 참이다:
+ *   ① `FACTORY_BOT_LOGIN` (워크플로가 넘긴다) — 어디서나 참.
+ *   ② `gh api user` — **Actions 안에서만** 참(거기서 뷰어는 잡 토큰의 주인 = 봇).
+ *   ③ 하트비트 코멘트의 작성자 — 어디서나 참(하트비트는 러너만 쓴다). `comments`를 넘기면 쓴다.
+ * 셋 다 비면 `ok:false`다: 빈 목록은 "봇이 없다"로 읽혀 위조된 결정을 통과시킨다.
  */
-export async function resolveFactoryLogins({ gh, env = process.env }) {
+export async function resolveFactoryLogins({ gh, env = process.env, comments = null }) {
   const logins = [];
+  /**
+   * ── T7: **그 팩토리 계정이 사람 계정인가.** ────────────────────────────────────────────────
+   * 후보는 "이 저장소에서 팩토리로 도는 계정"을 러너가 기록한 자리에서만 모은다 — Actions의 뷰어와
+   * 바이트 0 하트비트의 작성자. 둘 다 코멘트 **본문**이 아니라 GitHub이 계정에 붙인 사실(`type`)을
+   * 들고 오므로 에이전트가 고를 수 없다. `FACTORY_BOT_LOGIN`만 있고 그 이름의 코멘트가 없으면
+   * 종류를 모르므로 `null`이다 — **추측하지 않는다**(모르는 것을 `false`로 적으면 경보가 영영 안 뜬다).
+   */
+  const candidates = [];
   const bot = (env.FACTORY_BOT_LOGIN || "").trim();
   if (bot) logins.push(bot);
-  try { logins.push(await gh.viewerLogin()); }
-  catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
-  return { ok: true, logins: [...new Set(logins.filter(Boolean))] };
+
+  /**
+   * ① 뷰어는 **Actions 안에서만** 팩토리 계정이다. 거기서 `gh api user`가 돌려주는 것은 잡 토큰의
+   * 주인, 곧 봇이다. 노트북에서는 같은 호출이 **소유자**를 돌려준다 — 그런데 이 목록의 용도는
+   * "이 코멘트를 에이전트가 썼는가"이므로, 소유자를 팩토리 계정으로 세면 소유자가 직접 적은
+   * `human-decision:v1`이 "봇이 쓴 결정"으로 기각된다(T5 리뷰 MF-1이 재현: 데모 #39의 `[ktb]`
+   * 발견 둘이 통째로 사라졌다). 사람을 봇으로 오인하는 것은 fail-closed가 아니라 그냥 틀린 것이다.
+   */
+  if (env.GITHUB_ACTIONS === "true") {
+    let viewer;
+    try { viewer = await gh.viewerLogin(); }
+    catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
+    logins.push(viewer);
+    /**
+     * Actions 안에서는 뷰어가 곧 팩토리 계정이므로 그 계정의 **종류**가 답이다 — `gh api user --jq .type`
+     * 한 번(런당 한 번 도는 함수다). 이 호출의 실패는 `ok`를 바꾸지 않는다: 로그인 목록은 이미
+     * 손에 있고, 못 읽은 것은 "사람 계정인지 모른다"일 뿐이다(`personal: null`).
+     */
+    try { candidates.push({ login: viewer, type: await gh.viewerType?.() ?? null }); }
+    catch { candidates.push({ login: viewer, type: null }); }
+  }
+
+  /**
+   * ② 하트비트 코멘트의 **작성자**는 구성상 러너다. 하트비트는 러너만 쓰는 산출물이고
+   * (`[protected].runner_only` + 훅이 그 경로를 에이전트에게서 닫는다), 그 코멘트가 존재한다는 것
+   * 자체가 "이 로그인이 이 저장소에서 팩토리로 돈다"는 증거다. 그래서 노트북에서도 — `gh api user`가
+   * 소유자를 주는 바로 그 자리에서도 — 봇 이름을 알 수 있다. env도 Actions도 필요 없다.
+   *
+   * ── T5 재리뷰 SF-A: **하트비트를 인용한 코멘트는 하트비트가 아니다.** ──────────────────────
+   * `HEARTBEAT_HEAD`는 앵커가 없어서 본문 **어디서나** 맞는다. 곧 사람이 "맥락 삼아 붙여 둡니다:
+   * <하트비트 전문>"을 적으면 그 코멘트가 하트비트로 읽히고, 작성자인 **소유자**가 팩토리 계정
+   * 목록에 들어가, 바로 그 사람이 적은 `human-decision:v1`이 기각된다(리뷰어가 재현: 로그인이
+   * `["factory-bot","LeeHyeonKyu"]`가 되며 `[ktb]` 발견 둘이 사라졌다) — MF-1과 정확히 같은 사고가
+   * 다른 문으로 돌아온 것이다. 그래서 **본문 0바이트에서 시작할 때만** 하트비트로 센다:
+   * `heartbeatBody`는 언제나 head를 맨 앞에 놓으므로(진짜 하트비트는 전부 통과) 인용본만 걸린다.
+   */
+  for (const c of comments || []) {
+    if (!c?.author) continue;
+    if (HEARTBEAT_HEAD.exec(String(c.body ?? ""))?.index !== 0) continue;
+    logins.push(String(c.author));
+    // 하트비트를 쓴 계정 = 러너가 쓰는 계정. 그 `authorType`이 곧 "팩토리가 사람 계정으로 도는가"다.
+    candidates.push({ login: String(c.author), type: c.authorType == null ? null : String(c.authorType) });
+  }
+
+  /**
+   * ③ GitHub이 기록한 **작성자 사실**: `user.type === "Bot"`. 로그인 이름과 달리 이 값은 코멘트
+   * 본문이 아니라 GitHub이 계정에 붙인 종류라 에이전트가 고를 수 없다. 봇이 적은 결정은 사람의
+   * 결정이 아니므로 봇은 전부 팩토리 계정으로 센다 — 이름을 몰라도 그 문은 닫힌다.
+   */
+  for (const c of comments || []) {
+    if (c?.author && String(c.authorType ?? "") === "Bot") logins.push(String(c.author));
+  }
+
+  const out = [...new Set(logins.filter(Boolean))];
+  /**
+   * 하나도 못 찾았으면 `ok:false`다 — **`[]`로 돌려주지 않는다**. 빈 목록은 "봇이 없다"로 읽히고,
+   * 그러면 에이전트가 적어 둔 `human-decision:v1`이 사람의 결정으로 통과한다(그 한 줄이 상류
+   * 저장소 쓰기를 연다). 모르는 것은 통과가 아니므로 호출자가 fail closed 하게 만든다.
+   */
+  if (!out.length) {
+    return { ok: false, reason: "no factory login could be resolved — set FACTORY_BOT_LOGIN, or read an issue that has at least one heartbeat comment (outside GitHub Actions the viewer is the owner, not the bot)" };
+  }
+  /**
+   * `FACTORY_BOT_LOGIN`은 이름만 주고 종류는 주지 않는다. 그 이름으로 **이 이슈에 코멘트를 쓴 흔적**이
+   * 있으면 GitHub이 그 코멘트에 붙여 둔 `authorType`이 종류를 말해 준다(본문이 아니라 계정 사실이다).
+   */
+  if (bot) {
+    const seen = (comments || []).find((c) => c?.author && String(c.author).toLowerCase() === bot.toLowerCase() && c.authorType != null);
+    if (seen) candidates.push({ login: bot, type: String(seen.authorType) });
+  }
+  return { ok: true, logins: out, identity: identityOf(candidates, out) };
+}
+
+/**
+ * 후보 (로그인, 계정 종류) 목록 → `{ personal, login }`.
+ *   - 하나라도 `User`다  → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상이 그것이다)
+ *   - 종류를 아는 후보가 있고 전부 `User`가 아니다 → `personal: false`
+ *   - 종류를 아는 후보가 없다 → `personal: null` (**모른다**. 추측은 하지 않는다)
+ * `Organization`은 사람 계정이 아니다 — GitHub App 설치 토큰(`<app>[bot]`)과 마찬가지로 공유 신원 문제를
+ * 만들지 않는다(그 계정으로 사람이 코멘트를 적을 수 없다).
+ */
+function identityOf(candidates, logins) {
+  const known = candidates.filter((c) => c.type);
+  const person = known.find((c) => c.type === "User");
+  if (person) return { personal: true, login: person.login };
+  if (known.length) return { personal: false, login: known[0].login };
+  return { personal: null, login: candidates[0]?.login ?? logins[0] ?? null };
 }
 
 export function makeGh({ run, repo, sleep = realSleep }) {
@@ -138,9 +238,20 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 머지됐을 때 "하네스가 들어왔다"를 말해 주는 유일한 신호다 — builder는 언제나
      * `claude/fq-<issue>`에서 작업하므로(implement 규칙 1) 브랜치 이름이 곧 이슈 번호다.
      */
+    /**
+     * 이 브랜치에서 머지된 PR들 — **머지 시각 내림차순**. `gh pr list`는 *생성* 순으로 주므로
+     * 첫 항목이 가장 나중에 머지된 PR이라는 보장이 없다(Task 4 r3 should_fix 2): 재작업으로 같은
+     * 브랜치에 PR이 두 번 머지되면(먼저 만든 쪽이 나중에 머지될 수 있다) 첫 항목은 옛 머지다.
+     * `mergedAt`은 예전에도 조회하면서 쓰지는 않았다 — 이제 그 값이 순서를 정한다.
+     */
+    async mergedPrsForBranch(branch) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "20", "--json", "number,mergedAt"]));
+      return j
+        .map((p) => ({ number: p.number, mergedAt: p.mergedAt ?? null }))
+        .sort((a, b) => (Date.parse(b.mergedAt) || 0) - (Date.parse(a.mergedAt) || 0));
+    },
     async mergedPrForBranch(branch) {
-      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
-      return j.length ? j[0].number : null;
+      return (await this.mergedPrsForBranch(branch))[0]?.number ?? null;
     },
     /**
      * KTB-46 — **머지된 PR의 머지 사실 그 자체.** `mergedPrForBranch`는 번호만 준다("머지된 PR이
@@ -152,14 +263,42 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * `mergeSha`·`mergedAt`은 같은 조회로 공짜라 함께 싣는다(run 기록·retro가 쓸 수 있다).
      * 없는 필드는 지어내지 않고 null이다 — 머지되지 않은 PR에 부르면 전부 null로 답한다.
      */
+    /**
+     * 이 PR이 **실제로 건드린 파일 경로들**(피드백 루프 Task 4 r2). 경로는 GitHub이 diff에서 계산한
+     * 사실이지 에이전트가 적은 산문이 아니다 — 그래서 tier 라벨과 **독립한** 두 번째 위험 출처가 된다.
+     * triage가 docs 모양의 diff를 `standard`로 채점해도(KTB #18) 이 목록은 그 사실을 그대로 말한다.
+     * 못 읽으면 던진다 — 호출자가 "모양 미상"으로 저하시킨다(라벨로 **추측하지 않는다**).
+     */
+    async prFiles(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "files"]));
+      return (j.files || []).map((f) => f.path).filter(Boolean);
+    },
     async prMergeInfo(pr) {
       const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
       return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
     },
+    /**
+     * `author`(T3 재리뷰 NEW-MF-2): **누가 이 코멘트를 썼는가**. `gh issue comment`는 훅이 일부러
+     * 열어 둔 문이므로(핸드오프가 그리로 나간다) 코멘트 본문만으로는 사람의 `:unstick` 결정과
+     * 에이전트가 적어 둔 같은 모양의 글을 구별할 수 없다. 피드백 루프는 `human-decision:v1`을
+     * **권한**으로 읽으므로(그 한 줄이 상류 저장소 쓰기를 연다) 작성자가 판정의 일부여야 한다.
+     * 필드는 응답에 이미 있었고 이 어댑터가 떨어뜨리고 있었을 뿐이다 — 추가 호출은 없다.
+     */
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
-      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at }));
+      /**
+       * T5 재리뷰 SF-A — `authorType`/`viaApp`은 GitHub이 **계정에** 붙인 사실이지 본문이 아니다.
+       * 로그인 이름은 코멘트를 적는 쪽이 고를 수 없지만 본문은 고를 수 있으므로(하트비트를 인용해
+       * 자기를 러너처럼 보이게 하는 수가 있다), 귀속 판정에는 본문 바깥의 사실이 하나 더 필요하다.
+       * 둘 다 응답에 이미 있던 필드다 — 추가 호출은 없다.
+       */
+      return j.map((c) => ({
+        id: c.id, body: c.body || "", createdAt: c.created_at,
+        author: c.user?.login ?? null,
+        authorType: c.user?.type ?? null,
+        viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
+      }));
     },
     async comment(n, body) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();
@@ -293,10 +432,60 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async downloadRunArtifact(runId, name, dir) {
       await gh(["run", "download", String(runId), "-R", repo, "-n", name, "-D", dir]);
     },
+    /**
+     * ── Feedback loop Task 3 — **다른 저장소**의 개선 이슈를 열거나 거기에 증거를 덧붙인다(spec §7) ──
+     *
+     * 이 어댑터 안의 유일한 교차 저장소 쓰기다. 모든 호출에 `-R <repo>`가 붙는다 — 이 함수는
+     * `makeGh`가 묶고 있는 저장소를 **쓰지 않는다**(그 저장소는 발견이 난 곳이고, 이 이슈가 갈 곳은
+     * KTB다). 권한은 러너의 `FACTORY_BOT_TOKEN`이 쥔다(소유자가 상류 저장소에 `issues:write`를 준다).
+     *
+     * **문법은 한 글자도 모른다**: 지문으로 검색만 하고, 맞는 본문을 고르는 일(`match`)·새 이슈의
+     * 제목/본문/라벨을 만드는 일(`render`)·기존 본문에 증거를 덧붙이는 일(`append`)은 전부 호출자가
+     * 넘긴 함수다(`lib/feedback/upstream-issue.js`가 그 문법의 유일한 출처다). 그래야 쓰는 쪽과 읽는
+     * 쪽이 갈라져 같은 원인으로 이슈가 무한히 쌓이는 일이 없다.
+     *
+     * 검색은 `<fingerprint> in:body` + `--state open`이다. 닫힌 이슈는 **다시 열지 않는다**: 사람이
+     * "고쳤다"고 닫은 원인이 다시 나타났다면 그것은 같은 이슈의 재개가 아니라 **회귀**이고, 새 이슈로
+     * 열려야 사람이 그 사실을 본다. `append`가 본문을 바꾸지 않으면(같은 목격이 이미 실려 있으면)
+     * 편집 호출 자체를 보내지 않는다 — 같은 머지를 두 번 돌아도 상류에 아무 일도 일어나지 않는다.
+     */
+    async upstreamIssue({ repo: target, fingerprint, render, append, match, limit = 50 }) {
+      if (!target) throw new Error("gh.upstreamIssue: no upstream repo — [factory].upstream must name owner/repo");
+      const j = JSON.parse(await gh([
+        "issue", "list", "-R", target, "--search", `${fingerprint} in:body`,
+        "--state", "open", "--limit", String(limit), "--json", "number,body",
+      ]));
+      const found = (j || []).find((i) => match(String(i.body ?? "")));
+      if (found) {
+        const before = String(found.body ?? "");
+        const next = append(before);
+        if (next === before) return { issue: found.number, created: false, appended: false };
+        await gh(["issue", "edit", String(found.number), "-R", target, "--body-file", "-"], { input: next });
+        return { issue: found.number, created: false, appended: true };
+      }
+      const { title, body, labels = [] } = render();
+      const out = await gh(["issue", "create", "-R", target, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
+      const m = /\/issues\/(\d+)/.exec(out);
+      return { issue: m ? Number(m[1]) : null, created: true, appended: false };
+    },
+    /**
+     * **이 저장소** 이슈의 본문을 통째로 갈아 끼운다(stdin — 본문이 argv에 실리지 않는다).
+     * 쓰는 곳은 하나다: 이미 열려 있는 `factory:harness` 이슈의 표에 빠진 줄을 덧붙이는 자리
+     * (`appendHarnessEntries`, T3 리뷰 SF-2). 교차 저장소 판은 따로 있다(`upstreamIssue`).
+     */
+    async editIssueBody(n, body) {
+      await gh(["issue", "edit", String(n), "-R", repo, "--body-file", "-"], { input: body });
+    },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
+    /**
+     * 닫힌 이슈를 다시 연다. 쓰는 곳은 하나다: 건강 잡의 **오래 사는 보고서 이슈**(Task 4). 그 자리가
+     * 닫혀 있다고 새 이슈를 열면 라우팅 영수증 마커가 앵커를 잃고 같은 지문이 매주 상류에 새 이슈를
+     * 연다 — 대화의 자리는 옮기지 않는다.
+     */
+    async reopenIssue(n) { await gh(["issue", "reopen", String(n), "-R", repo]); },
     // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
     async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
 
@@ -395,6 +584,15 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       return JSON.parse(await gh(["api", "user"])).login;
     },
     /**
+     * T7 — **이 토큰이 붙은 계정의 종류**(`User`|`Organization`|`Bot`). 값(토큰)은 절대 읽지도 찍지도
+     * 않는다; 묻는 것은 "팩토리가 사람 계정으로 도는가" 하나다. 사람 계정이면 그 계정이 적은 모든
+     * 코멘트가 팩토리의 코멘트와 구별되지 않아 `human-decision:v1` 귀속이 통째로 불가능해진다.
+     * 빈 응답은 `null`("모른다")이다 — 빈 문자열을 종류로 읽으면 거짓 판정이 된다.
+     */
+    async viewerType() {
+      return (await gh(["api", "user", "--jq", ".type"])).trim() || null;
+    },
+    /**
      * ADR-021 r1 MF-2 a — **지금 이 토큰이 어떤 스코프를 쥐고 있는가.** classic PAT은 응답 헤더
      * `X-OAuth-Scopes`로 자기 스코프를 말한다(`gh api -i`가 헤더를 함께 찍는다). 값 자체는 절대
      * 읽지 않는다 — 묻는 것은 "이 토큰에 `workflow`가 붙어 있는가" 하나다.
@@ -425,6 +623,19 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 두 배우 모드에서 에이전트 배우가 `admin`이면 branch protection의 승인 요건을 **스스로 바꿀 수**
      * 있으므로 두 배우 모드는 이름만 남는다 — doctor가 FAIL로 세운다.
      */
+    /**
+     * **다른** 저장소의 메타데이터 — 크로스-레포 라우팅의 대상(`[factory].upstream`)을 묻는 자리다.
+     * `gh api repos/<owner>/<name>`은 **지금 이 토큰이** 그 저장소에 대해 갖는 권한을 `permissions`로
+     * 함께 답하므로, 이슈를 **열어 보지 않고** "쓸 수 있는가"를 판정할 수 있다(진단이 상류 저장소에
+     * 쓰레기 이슈를 남기면 안 된다). 토큰 값은 읽지도 찍지도 않는다.
+     *
+     * 404는 **없는 저장소**와 **이 토큰에 안 보이는 저장소**를 구별하지 않는다 — GitHub이 일부러
+     * 그렇게 답한다. 그래서 호출자는 두 경우를 한 문장으로 말해야 한다(`repo`는 `owner/name`).
+     */
+    async repoInfo(nameWithOwner) {
+      const j = JSON.parse(await gh(["api", `repos/${nameWithOwner}`]));
+      return { fullName: j.full_name ?? nameWithOwner, private: Boolean(j.private), permissions: j.permissions ?? null };
+    },
     async collaboratorPermission(login) {
       return JSON.parse(await gh(["api", `repos/${repo}/collaborators/${login}/permission`])).permission;
     },

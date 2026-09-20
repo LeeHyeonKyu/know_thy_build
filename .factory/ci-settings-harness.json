@@ -49,6 +49,8 @@
       "Write(.factory/package.json)",
       "Edit(.factory/package-lock.json)",
       "Write(.factory/package-lock.json)",
+      "Edit(.factory/install-manifest.json)",
+      "Write(.factory/install-manifest.json)",
       "Edit(.claude/**)",
       "Write(.claude/**)",
       "Edit(.github/**)",

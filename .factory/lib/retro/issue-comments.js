@@ -29,6 +29,18 @@ export const transitionFailedMarker = ({ from, to }) => `<!-- factory-transition
  * 같은 계약으로 맞춘다: 쓰는 쪽도 읽는 쪽도 이 함수 하나를 부른다.
  */
 export const transitionRefusedMarker = ({ from, to }) => `<!-- factory-transition-refused from=${from} to=${to} -->`;
+
+/**
+ * 요구사항 미달로 **라벨이 실제로 `factory:needs-human`으로 옮겨진** 거부의 코멘트 전문. 마커 두 줄 +
+ * 사유 + 라벨 이동 문장이 한 덩어리이고, 읽는 쪽(`extractNeedsHuman`, 피드백 루프의 수확)이 그 네
+ * 조각을 전부 본다 — `transitionRefusedMarker`와 같은 이유로 생산자를 여기 둔다(쓰는 쪽은
+ * `transition.js` 하나, 읽는 쪽은 여럿, 그리고 테스트는 손으로 베끼면 안 된다).
+ */
+export const transitionRefusedComment = ({ from, to, reason }) =>
+  `<!-- factory-transition:v1 from=${from} to=${NEEDS_HUMAN_LABEL} by=script reason=refused -->\n` +
+  `${transitionRefusedMarker({ from, to })}\n` +
+  `**전이 거부** ${from} → ${to}: ${reason}\n\n` +
+  `라벨을 \`${NEEDS_HUMAN_LABEL}\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`;
 // label 이름 자체가 "factory:x" 형태라 콜론을 품는다 — 진짜 구분자는 "콜론+공백"뿐이다.
 export const REFUSAL_REASON = /\*\*전이 거부\*\*.*?: ([^\n]+)/;
 // 요구사항 미달로 실제 라벨이 needs-human으로 옮겨진 거부만 골라낸다(backtick 인용 — lib/transition.js의
@@ -215,6 +227,30 @@ export function latestSelfGateFindings(comments, head) {
     try { const obj = JSON.parse(j[1]); if (Array.isArray(obj.findings)) found = obj.findings; } catch { /* 깨진 블록은 건너뛴다 */ }
   }
   return found;
+}
+
+/**
+ * Feedback loop Task 3 — **이슈에 남은 모든 self-gate 차단.** `latestSelfGateFindings`는 재디스패치될
+ * 빌더에게 "지금 이 head에서 무엇을 고쳐야 하나"를 주는 함수라 head 하나만 본다. 회고는 반대 질문을
+ * 한다: "이 이슈가 결국 머지됐는데, 그 사이 self-gate가 무엇을 막았나." 머지된 이슈의 차단은 곧
+ * **공장이 스스로 만든 라운드**이고, 그것이 결정적 게이트의 오차단이면 KTB가 고칠 발견이다
+ * (데모 #39의 qa-manifest 오차단이 정확히 그것이었다). head별 `attempt`를 그대로 실어 둔다 —
+ * 같은 원인이 몇 번 반복됐는지가 증거의 무게다. 깨진 JSON 블록은 조용히 건너뛴다.
+ */
+export function allSelfGateFindings(comments) {
+  const out = [];
+  for (const c of comments || []) {
+    const body = String(c?.body ?? "");
+    const m = SELF_GATE_RETRY.exec(body);
+    if (!m) continue;
+    const j = SELF_GATE_FINDINGS_JSON.exec(body);
+    if (!j) continue;
+    let obj;
+    try { obj = JSON.parse(j[1]); } catch { continue; }
+    if (!Array.isArray(obj?.findings)) continue;
+    out.push({ head: m[2], attempt: Number(m[3]), at: c?.createdAt ?? null, findings: obj.findings });
+  }
+  return out;
 }
 
 /**

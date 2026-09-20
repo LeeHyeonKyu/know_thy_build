@@ -1,6 +1,6 @@
 import { canTransition, factoryLabelOf, HUMAN_RETRY_FROM, HUMAN_RETRY_TARGETS } from "./labels.js";
 import { requirementFor } from "./requirements.js";
-import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker, transitionRefusedMarker } from "./retro/issue-comments.js";
+import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker, transitionRefusedComment, transitionRefusedMarker } from "./retro/issue-comments.js";
 
 export const NEEDS_HUMAN = "factory:needs-human";
 export const NEEDS_INFO = "factory:needs-info";
@@ -130,7 +130,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
      * 전이(옛 라벨)라, 방금 세운 에스컬레이션을 조용히 **되돌린다**. 사람은 아무것도 못 보고, 그
      * 스테이지는 같은 자리에서 두 번 더 죽는다(리뷰 finding 3: 리뷰 라운드 ~$10 × 2).
      */
-    await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=factory:needs-human by=script reason=refused -->\n${transitionRefusedMarker({ from, to })}\n**전이 거부** ${from} → ${to}: ${req.reason}\n\n라벨을 \`factory:needs-human\`으로 옮겼습니다. 산출물을 보강한 뒤 \`:unstick\`으로 재개하세요.`);
+    await gh.comment(issue, transitionRefusedComment({ from, to, reason: req.reason }));
     await swapLabel({ gh, issue, from, to: "factory:needs-human" });
     return { ok: false, from, to: "factory:needs-human", reason: req.reason };
   }

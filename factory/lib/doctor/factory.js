@@ -11,7 +11,7 @@ import { L0_CONTEXTS, CODEOWNERS_PATH, RECORDS_BRANCH } from "../bootstrap.js";
 import { checkMergeAuthority, checkHumanGate } from "./merge-authority.js";
 import { GH_FREE_PLAN_PROTECTION_RE } from "../gh.js";
 import { checkRehearsalCurrent, recordedRehearsal, rehearsalHash } from "../rehearsal.js";
-import { TRIAGE_DEFAULT_VALUES } from "../config.js";
+import { TRIAGE_DEFAULT_VALUES, upstreamRepoOf } from "../config.js";
 
 const c = (id, level, detail = "") => ({ id, level, detail });
 
@@ -590,4 +590,82 @@ export async function checkGitHub({ gh, harness, labels, env = process.env, root
   } catch (e) {
     return [c("github.unavailable", "WARN", `gh unavailable — ${e.message}`)];
   }
+}
+
+/**
+ * T7 — **팩토리가 사람 계정으로 도는가.** dogfood 저장소에서는 `FACTORY_BOT_TOKEN`이 소유자의 PAT이라
+ * 팩토리 코멘트와 소유자의 `human-decision:v1`이 **같은 작성자**다. 그러면 피드백 루프의 증거 (b)는
+ * 모든 이슈에서 거부되고(공유 신원은 사람의 판정이 아니다), 1차 구현은 그 거부를 한 줄도 남기지
+ * 않았다 — 사람은 "factory-defect라고 적었는데 아무 일도 안 일어났다"만 본다. doctor가 그것을
+ * **설정 문제**로 세운다: 고치는 방법이 있는 상태이기 때문이다(머신 유저 또는 GitHub App).
+ *
+ * 읽기는 `gh api user` 하나뿐이고 **토큰 값은 절대 읽지도 찍지도 않는다** — 로그인 이름과 계정 종류만
+ * 본다(`viewerScopes`/`viewerLogin`과 같은 규율). 판정을 못 하면 PASS가 아니라 WARN이다:
+ * "모른다"를 "괜찮다"로 적으면 이 경보는 영영 뜨지 않는다.
+ */
+export async function checkFactoryIdentity({ gh, repo = null }) {
+  let login = null;
+  let type = null;
+  try {
+    login = await gh.viewerLogin();
+    type = await gh.viewerType();
+  } catch (e) {
+    return [c("factory.identity", "WARN", `could not read the factory identity — ${e.message}`)];
+  }
+  const owner = repo ? String(repo).split("/")[0] : null;
+  const isOwner = Boolean(owner && login && owner.toLowerCase() === String(login).toLowerCase());
+  const fix = "register a machine user or a GitHub App as the factory identity (FACTORY_BOT_TOKEN) and set FACTORY_BOT_LOGIN";
+  if (type === "User" || isOwner) {
+    const why = isOwner ? `@${login} is the repo owner${type ? ` (account type ${type})` : ""}` : `@${login} is a personal account (type ${type})`;
+    return [c("factory.identity", "WARN", `${why} — a person and the factory then share one comment author, so \`human-decision:v1\` attribution (feedback-loop evidence (b)) is refused on every issue and no \`cause: factory-defect\` decision can reach [ktb]. To fix: ${fix}`)];
+  }
+  if (!type) return [c("factory.identity", "WARN", `@${login}: account type unknown — cannot tell whether a person and the factory share one comment author, so \`human-decision:v1\` attribution may be silently refused. To be sure: ${fix}`)];
+  return [c("factory.identity", "PASS", `@${login} (${type}) — not a personal account, so human-decision attribution can tell a person from the factory`)];
+}
+
+/**
+ * `factory.upstream` — **크로스-레포 라우팅이 실제로 나갈 수 있는가**(최종 리뷰 should_fix 2).
+ *
+ * `[factory].upstream`이 설정돼 있으면 회고의 라우팅 팔은 머지마다 그 저장소에
+ * `factory-improvement` 이슈를 연다. 그런데 그 팔은 **fail-safe**라 403을 액션 한 줄로 삼키고
+ * (그 계약은 옳다 — 라우팅 때문에 회고가 죽으면 그 회차의 lessons·통계·커서까지 사라진다), 그래서
+ * `FACTORY_BOT_TOKEN`에 그 저장소의 `issues:write`가 없으면 **모든 `[ktb]` 발견이 영원히 조용히
+ * 죽는다.** 그 상태는 "고칠 것이 없다"와 화면에서 구별되지 않는다. 진단은 그것을 **설정 문제**로
+ * 세운다: 사람이 토큰에 권한을 주면 끝나는 일이기 때문이다.
+ *
+ * 판정은 `gh api repos/<upstream>` 한 번이다 — **이슈를 열어 보지 않는다**(진단이 상류 저장소에
+ * 쓰레기를 남기면 안 된다). 그 응답의 `permissions`는 지금 이 토큰의 권한이고, 이슈를 열려면
+ * `triage` 또는 `push` 중 하나면 된다(`admin`/`maintain`이면 GitHub이 그 둘도 함께 켜 준다).
+ * 토큰 값은 읽지도 찍지도 않는다 — 로그인 이름조차 여기서는 묻지 않는다.
+ *
+ * 설정이 **없으면 PASS**다: 크로스-레포 쓰기는 opt-in이고(ADR-027 결정 ③), 그때 `[ktb]` 발견은
+ * 원래 이슈의 코멘트로 남는다. 잃는 것이 있다는 사실만 한 줄로 적는다.
+ * 판정을 못 하면 PASS가 아니라 WARN이다 — "모른다"를 "괜찮다"로 적으면 이 경보는 영영 뜨지 않는다.
+ */
+export async function checkFactoryUpstream({ gh, harness }) {
+  const upstream = upstreamRepoOf(harness);
+  const raw = harness?.factory?.upstream;
+  if (!upstream) {
+    if (typeof raw === "string" && raw.trim()) {
+      return [c("factory.upstream", "WARN", `[factory].upstream is "${raw.trim()}", which is not an \`owner/repo\` — cross-repo routing is off and every [ktb] finding stays a comment on its own issue. To fix: set \`[factory] upstream = "owner/repo"\` in harness.toml`)];
+    }
+    return [c("factory.upstream", "PASS", "not configured (ktb findings stay local) — a [ktb] finding is noted on its own issue instead of being routed upstream")];
+  }
+  const fix = `grant the factory token issues:write on ${upstream}`;
+  let info;
+  try { info = await gh.repoInfo(upstream); }
+  catch (e) {
+    const msg = String(e?.message || e);
+    const notFound = /not found|HTTP 404/i.test(msg);
+    return [c("factory.upstream", "WARN", notFound
+      ? `\`${upstream}\` is not visible to the factory token (GitHub answers 404 for both "no such repo" and "no access") — every [ktb] finding the retro routes there will fail silently. To fix: check the name in [factory].upstream, then ${fix}`
+      : `could not read \`${upstream}\` — ${msg}. Until this resolves, cross-repo routing cannot be verified. To be sure: ${fix}`)];
+  }
+  const p = info?.permissions || null;
+  if (!p) return [c("factory.upstream", "WARN", `\`${upstream}\` is readable but GitHub returned no \`permissions\` for this token, so write access cannot be confirmed — a routing failure would be silent. To be sure: ${fix}`)];
+  if (p.triage || p.push) {
+    return [c("factory.upstream", "PASS", `\`${upstream}\` is writable by the factory token (${["admin", "maintain", "push", "triage"].filter((k) => p[k]).join(", ")}) — [ktb] findings can open a factory-improvement issue there`)];
+  }
+  const held = Object.keys(p).filter((k) => p[k]).join(", ") || "read only";
+  return [c("factory.upstream", "WARN", `the factory token can read \`${upstream}\` but cannot open issues there (permissions: ${held}) — the retro's routing arm is fail-safe, so every [ktb] finding dies as one swallowed action while the job stays green. To fix: ${fix}`)];
 }

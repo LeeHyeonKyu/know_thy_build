@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv, commitStatusState } from "../lib/gates.js";
+import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv, commitStatusState, gateDetail, gatesDetailLines, attachGateDetails, parseFailingTests, GATES_DETAIL_PREFIX, DETAIL_MAX_CHARS, DETAIL_TAIL_LINES, DETAIL_MAX_REASON } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -690,4 +690,204 @@ test("review batch-2 MF-3: CLAUDE.md/AGENTS.md/.mcp.json at ANY depth floor at s
   }
   // 그 옆의 평범한 문서는 그대로 docs다 — 바닥을 올리는 규칙이 문서 tier 자체를 없애지는 않는다.
   expect(floorOf("docs/features/012-export.md")).toBe("docs");
+});
+
+// ── Feedback loop Task 1 — durable gate failure detail (spec §1, §3 "durable before ephemeral") ──
+//
+// 오늘 런 레코드가 남기는 것은 `failing=unit,new-test-repeat` — **이름뿐**이다. 어떤 테스트가 왜
+// 깨졌는지는 Actions 아티팩트와 `.factory/out/unit.json`에만 있고 둘 다 7일 뒤 사라진다(이 세션이
+// 실제로 겪은 손실). 그래서 RED 게이트는 판정을 바꾸지 않은 채(additive) **무엇이 깨졌는가**를
+// 스스로 들고 다닌다: 러너 출력에서 알아볼 수 있는 실패 테스트 이름 + 경계가 있고 스크럽된 꼬리.
+
+const VITEST_FAIL = [
+  " RUN  v1.6.0 /repo",
+  "",
+  " ❯ test/math.test.js (2 tests | 1 failed) 5ms",
+  "   × math > adds two numbers 3ms",
+  "     → expected 3 to be 4 // Object.is equality",
+  "",
+  " FAIL  test/math.test.js > math > adds two numbers",
+  "AssertionError: expected 3 to be 4",
+  " ❯ test/math.test.js:4:21",
+  "",
+  " Test Files  1 failed (1)",
+  "      Tests  1 failed | 1 passed (2)",
+].join("\n");
+
+const FLUTTER_FAIL = [
+  "00:00 +0: loading test/widget_test.dart",
+  "00:03 +2 -1: MyWidget shows the title [E]",
+  "  Expected: exactly one matching candidate",
+  "    Actual: _TextFinder:<zero widgets with text \"hi\">",
+  "00:04 +2 -1: Some tests failed.",
+].join("\n");
+
+test("Task 1: a RED unit gate carries a detail with the vitest failing test name and a snippet — verdict unchanged", async () => {
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, { code: 1, stdout: VITEST_FAIL, stderr: "" })]);
+  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(r.status).toBe("RED");
+  expect(r.failing).toEqual(["unit"]);                    // 판정은 그대로다 — detail은 additive 필드다
+  expect(r.gates.unit.detail.gate).toBe("unit");
+  expect(r.gates.unit.detail.failing).toEqual(["math > adds two numbers"]);
+  expect(r.gates.unit.detail.snippet).toContain("AssertionError: expected 3 to be 4");
+  expect(r.gates.lint.detail).toBeUndefined();            // GREEN 게이트는 detail을 달지 않는다
+  // 런 레코드가 받는 줄: prefix + **한 줄 JSON**(Task 3의 harvester가 정규식으로 읽는다)
+  const lines = gatesDetailLines(r);
+  expect(lines).toHaveLength(1);
+  expect(lines[0].startsWith(GATES_DETAIL_PREFIX)).toBe(true);
+  expect(lines[0]).not.toContain("\n");
+  const parsed = JSON.parse(lines[0].slice(GATES_DETAIL_PREFIX.length));
+  expect(parsed).toMatchObject({ gate: "unit", failing: ["math > adds two numbers"] });
+  expect(parsed.snippet).toContain("expected 3 to be 4");
+});
+
+test("Task 1: flutter-shaped output names the failing test; jest·pytest 모양도 읽는다", () => {
+  expect(parseFailingTests(FLUTTER_FAIL)).toEqual(["MyWidget shows the title"]);
+  expect(parseFailingTests("  ● math › adds two numbers\n\n    expect(received).toBe(expected)")).toEqual(["math › adds two numbers"]);
+  expect(parseFailingTests("FAILED tests/test_math.py::test_adds - assert 3 == 4")).toEqual(["tests/test_math.py::test_adds"]);
+});
+
+/**
+ * ── 리뷰 must_fix 1 — **이름도 공개 브랜치로 나간다.** ────────────────────────────────────────
+ * 스니펫은 꼬리 40줄만 남기는데 이름 파서는 출력 전체를 훑는다(의도된 비대칭: 이름이 꼬리 위에 있을
+ * 수 있다). 그래서 **머리에만** 있던 토큰은 스니펫에서는 제대로 빠지고 `failing`으로는 그대로 샜다.
+ * 이 테스트가 그 비대칭을 정확히 재현한다 — 토큰은 첫 줄과 테스트 이름 안에만 있다.
+ */
+test("리뷰 MF-1: a secret in the HEAD of the output (and inside a test name) never reaches the record line", () => {
+  const token = "ghs_" + "h".repeat(40);
+  const stdout = [
+    `::add-mask::${token}`,                                        // 머리 — 꼬리 40줄 창 밖이다
+    ...Array.from({ length: 60 }, (_, i) => `progress ${i}`),
+    `FAILED tests/test_auth.py::test_login[${token}] - boom`,      // 이름 안에 박힌 토큰
+    `   × auth > accepts Bearer ${token} 2ms`,
+  ].join("\n");
+  const d = gateDetail({ gate: "unit", stdout, env: { FACTORY_BOT_TOKEN: token } });
+  expect(d.failing.length).toBeGreaterThan(0);                     // 이름을 버리는 것이 아니라 지운다
+  expect(d.failing.join("|")).not.toContain(token);
+  expect(d.failing.join("|")).toContain("REDACTED");
+  expect(d.snippet).not.toContain(token);                          // (스니펫은 원래도 안전했다)
+  // 줄 전체 — 기록에 닿는 마지막 형태 — 에도 토큰이 없다.
+  const line = gatesDetailLines({ gates: { unit: { status: "RED", detail: d } } })[0];
+  expect(line).not.toContain(token);
+});
+
+test("리뷰 MF-1: the gate `reason` is scrubbed and capped — it was the line's only unbounded piece", () => {
+  const token = "ghs_" + "r".repeat(40);
+  process.env.FACTORY_BOT_TOKEN = token;
+  try {
+    const reason = `main is red on ${token}::t, ` + "x".repeat(4000);
+    const line = gatesDetailLines({ gates: { unit: { status: "RED", reason, log: "boom" } } })[0];
+    const parsed = JSON.parse(line.slice(GATES_DETAIL_PREFIX.length));
+    expect(parsed.reason).not.toContain(token);
+    expect(parsed.reason.length).toBeLessThanOrEqual(DETAIL_MAX_REASON);
+  } finally { delete process.env.FACTORY_BOT_TOKEN; }
+});
+
+/**
+ * ── 리뷰 should_fix 2~4 — **틀린 이름은 없는 이름보다 나쁘다**(T2가 그것으로 지문을 만든다). ────
+ */
+test("리뷰 SF-2: a name ending in a duration survives, and the × form folds into the FAIL form", () => {
+  expect(parseFailingTests("   × retries after 5s")).toEqual(["retries after 5s"]);   // ms가 아니면 안 뗀다
+  // 하나의 실패가 두 이름이 되지 않는다 — 지속시간만큼만 다른 짧은 쪽을 버린다(리뷰의 재현 케이스).
+  expect(parseFailingTests("   × debounce waits 500ms\n FAIL  test/d.test.js > debounce waits 500ms"))
+    .toEqual(["debounce waits 500ms"]);
+  expect(parseFailingTests("   × debounce waits 500ms 3ms\n FAIL  test/d.test.js > debounce waits 500ms"))
+    .toEqual(["debounce waits 500ms"]);
+  /**
+   * 남는 모호성 하나는 **의도적으로** 그대로 둔다: `×` 줄만 있고 FAIL 줄이 없으면 vitest가 이름 뒤에
+   * 공백 하나로 지속시간을 붙이므로 `500ms`가 이름의 일부인지 측정값인지 구분할 방법이 없다. 결과는
+   * 결정적이라(언제나 같은 문자열) T2의 지문은 안정적이다 — 갈리는 쪽이 아니라 한쪽으로 고정된다.
+   */
+  expect(parseFailingTests("   × debounce waits 500ms")).toEqual(["debounce waits"]);
+  expect(parseFailingTests("  ✕ adds two numbers (3 ms)")).toEqual(["adds two numbers"]);
+});
+
+test("리뷰 SF-3: build noise and jest section titles are not test names", () => {
+  expect(parseFailingTests("FAILED build step\nmake: *** Error 1")).toEqual([]);
+  expect(parseFailingTests("  ● Validation Error\n  ● Deprecation Warning\n  ● Cannot find module 'x'")).toEqual([]);
+  expect(parseFailingTests("  ● Console")).toEqual([]);
+  // 진짜 pytest node id와 진짜 jest 제목은 그대로 읽는다.
+  expect(parseFailingTests("FAILED tests/a.py::test_x - boom\n  ● suite › case")).toEqual(["tests/a.py::test_x", "suite › case"]);
+});
+
+test("리뷰 SF-4: a class-based pytest failure is ONE name, not two", () => {
+  expect(parseFailingTests("FAILED tests/test_a.py::TestX::test_adds - assert\n_______ TestX.test_adds _______"))
+    .toEqual(["tests/test_a.py::TestX::test_adds"]);
+});
+
+test("리뷰 provenance: the detail line names the run that wrote it (and the round when known)", () => {
+  const r = { gates: { unit: { status: "RED", detail: { gate: "unit", failing: ["a > b"], snippet: "boom" } } } };
+  const parsed = JSON.parse(gatesDetailLines(r, { runId: "1234", runnerId: "gha-1234", round: 2 })[0].slice(GATES_DETAIL_PREFIX.length));
+  expect(parsed).toMatchObject({ gate: "unit", run_id: "1234", runner: "gha-1234", round: 2 });
+  // 모르면 지어내지 않는다: run_id/runner는 null로 남고 round 키는 아예 없다.
+  const bare = JSON.parse(gatesDetailLines(r)[0].slice(GATES_DETAIL_PREFIX.length));
+  expect(bare.run_id).toBe(null);
+  expect(bare.runner).toBe(null);
+  expect("round" in bare).toBe(false);
+});
+
+/**
+ * T3 리뷰 MF-3 — `parsed`/`code`가 없으면 하류(피드백 루프)가 "왜 빨간지"를 가를 수 없다.
+ * 셋이 전부 `failing: []`로 같아 보이는데 주인이 서로 다르기 때문이다: 리포트를 읽은 RED(제품),
+ * 리포트를 못 남긴 RED(하네스 명령), 애초에 리포트를 쓰지 않는 게이트(제품). **진짜 `runGates`로** 돌린다.
+ */
+test("Task 3 MF-3: gates-detail carries `parsed` (test gates only) and `code`", async () => {
+  const harness = {
+    harness: { maturity: "M2" },
+    commands: { lint: "LINT", unit: "UNIT" },
+    gates: { required: ["lint", "unit"], fast: ["lint", "unit"], thresholds: {} },
+    test: { unit_report: ".factory/out/unit.json" },
+  };
+  const gatesOf = async ({ code, report }) => {
+    const run = async () => ({ code, stdout: "", stderr: "flutter: command not found" });
+    const r = await runGates({ run, cwd: "/r", harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => report, now: "t" });
+    return Object.fromEntries(gatesDetailLines(r).map((l) => { const o = JSON.parse(l.slice(GATES_DETAIL_PREFIX.length)); return [o.gate, o]; }));
+  };
+  // 리포트가 없다 → 테스트 게이트는 `parsed: false`, 비테스트 게이트는 키 자체가 없다("없음"과 "못 읽었다"는 다른 사실이다)
+  const noReport = await gatesOf({ code: 127, report: null });
+  expect(noReport.unit).toMatchObject({ parsed: false, code: 127 });
+  expect("parsed" in noReport.lint).toBe(false);
+  expect(noReport.lint.code).toBe(127);
+  // 리포트를 읽었다 → `parsed: true`
+  const withReport = await gatesOf({ code: 1, report: JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/r/test/a.test.js", assertionResults: [{ fullName: "adds", status: "failed" }] }] }) });
+  expect(withReport.unit).toMatchObject({ parsed: true, code: 1 });
+  // code를 모르는 엔트리(명령을 돌리지 않은 게이트)에는 키를 지어내지 않는다
+  const noCode = JSON.parse(gatesDetailLines({ gates: { x: { status: "RED", code: null, log: "" } } })[0].slice(GATES_DETAIL_PREFIX.length));
+  expect("code" in noCode).toBe(false);
+  expect("parsed" in noCode).toBe(false);
+});
+
+test("Task 1: unrecognizable runner output → failing [] and a snippet that still carries the cause", async () => {
+  const noise = "make: *** [Makefile:12: unit] Error 137\nKilled";
+  const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, { code: 137, stdout: noise, stderr: "" })]);
+  const r = await runGates({ run, cwd: "/repo", harness: fastHarness, level: "fast", quarantine: { quarantined: [] }, readFile: () => null });
+  expect(r.gates.unit.detail.failing).toEqual([]);
+  expect(r.gates.unit.detail.snippet).toContain("Error 137");
+});
+
+test("Task 1: the snippet is bounded (last ~40 lines / 4KB) and scrubbed — no secret reaches the record", () => {
+  const token = "ghs_" + "s".repeat(40);
+  const noisy = Array.from({ length: 500 }, (_, i) => `line ${i} ${"x".repeat(60)}`).join("\n") + `\nAuthorization: Bearer ${token}\nlast line`;
+  const d = gateDetail({ gate: "unit", stdout: noisy, stderr: "", env: { FACTORY_BOT_TOKEN: token } });
+  expect(d.snippet.length).toBeLessThanOrEqual(DETAIL_MAX_CHARS);
+  expect(d.snippet.split("\n").length).toBeLessThanOrEqual(DETAIL_TAIL_LINES);
+  expect(d.snippet).toContain("last line");                     // 꼬리를 남긴다(머리가 아니라)
+  expect(d.snippet).not.toContain(token);
+});
+
+test("Task 1: detail capture never throws — a broken input degrades to a note, the gate line survives", () => {
+  const d = gateDetail({ gate: "unit", stdout: { toString() { throw new Error("boom"); } } });
+  expect(d.gate).toBe("unit");
+  expect(d.failing).toEqual([]);
+  expect(d.note).toMatch(/detail capture failed/);
+  expect(gatesDetailLines({ gates: { unit: { status: "RED", detail: d } } })).toHaveLength(1);
+  expect(gatesDetailLines(null)).toEqual([]);
+});
+
+test("Task 1: the deferred proof gates (new-test-repeat) also carry a detail — `failing=unit,new-test-repeat` is no longer names-only", () => {
+  const r = { gates: { "new-test-repeat": { status: "RED", log: "test/new.test.js::adds flaked on repeat 2/3" } } };
+  attachGateDetails(r);
+  expect(r.gates["new-test-repeat"].detail.snippet).toContain("flaked on repeat 2/3");
+  const line = gatesDetailLines(r)[0];
+  expect(JSON.parse(line.slice(GATES_DETAIL_PREFIX.length)).gate).toBe("new-test-repeat");
 });

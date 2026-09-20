@@ -116,3 +116,25 @@ test("loadHarness fills factory.{orchestration,required_checks,max_turns,merge_c
   expect(loadHarness(root).factory.required_checks).toEqual(["factory/gates"]);
   expect(loadHarness(root).factory.orchestration).toBe("workflow");
 });
+
+// ── Feedback loop Task 3 — `[factory].upstream` (spec §7) ──────────────────────────────────────
+// 기본값이 없는 키다: 없는 것과 빈 것은 둘 다 "아무도 고른 적이 없다"이고, 그때 루프는 교차 저장소
+// 호출을 한 번도 하지 않는다. 모양이 틀린 값은 `null`로 떨어뜨린다 — 그대로 `gh -R`에 실리면 매
+// 머지마다 조용히 실패하고, fail-safe 때문에 그 실패는 액션 한 줄로만 남아 아무도 보지 않는다.
+test("upstreamRepoOf: owner/repo만 통과하고, 없거나 모양이 틀리면 null(= 로컬 코멘트 경로)", async () => {
+  const { upstreamRepoOf, loadHarness: load } = await import("../lib/config.js");
+  expect(upstreamRepoOf({ factory: { upstream: "LeeHyeonKyu/know_thy_build" } })).toBe("LeeHyeonKyu/know_thy_build");
+  expect(upstreamRepoOf({ factory: { upstream: "  o/r  " } })).toBe("o/r");
+  expect(upstreamRepoOf({ factory: {} })).toBeNull();
+  expect(upstreamRepoOf({})).toBeNull();
+  expect(upstreamRepoOf(undefined)).toBeNull();
+  for (const bad of ["", "   ", "https://github.com/o/r", "o/r/x", "just-a-name", "o /r", 42, ["o/r"]]) {
+    expect(upstreamRepoOf({ factory: { upstream: bad } })).toBeNull();
+  }
+  // loadHarness는 이 키에 기본값을 채우지 않는다(있으면 그대로 실려 온다)
+  const root = fixture();
+  expect(load(root).factory.upstream).toBeUndefined();
+  expect(upstreamRepoOf(load(root))).toBeNull();
+  writeFileSync(join(root, ".factory/harness.toml"), readFileSync(join(root, ".factory/harness.toml"), "utf8").replace("[factory]\n", "[factory]\nupstream = \"o/up\"\n"));
+  expect(upstreamRepoOf(load(root))).toBe("o/up");
+});

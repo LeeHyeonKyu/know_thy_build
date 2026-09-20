@@ -8,7 +8,7 @@ import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
-import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
+import { runStageGates, verdictLine, gatesDetailLines, commitStatusState, maxTier } from "../lib/gates.js";
 import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
@@ -21,7 +21,7 @@ import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFo
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -41,7 +41,8 @@ import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
-import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding } from "../lib/self-gate.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
+import { loadInstallManifest } from "../lib/feedback/install-manifest.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -523,7 +524,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
     // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false });
+    // `stamp`: 머지 스테이지가 남기는 `gates-detail:` 줄도 자기 런을 지목해야 한다(Task 1의 계약).
+    // 여기는 아래의 `stamp` 정의보다 앞이지만 `runId`/`runnerId`는 이 함수의 인자라 이미 있다.
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -544,6 +547,28 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     if (harnessIssue) record([`harness issue: builder runs with ${settingsFile} + FACTORY_HARNESS_ISSUE=1 (test-infra files writable; merge still needs a human)`]);
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
     const ctx = await d.buildContext({ setupDirty });
+    /**
+     * Feedback loop Task 1 (리뷰 provenance) — 두 새 줄은 **자기를 쓴 런을 지목한다**. `docs/factory/runs/**`는
+     * 에이전트 세션이 덧붙일 수 있는 경로이고 harvester는 정규식의 첫 매치를 집으므로, 런에 묶이지 않은
+     * 줄은 위조와 구분되지 않는다(`reviewEvidenceLine`의 batch-2 MF-2와 같은 계약). 라운드는 **알 때만**
+     * 싣는다 — review 스테이지의 라운드는 에이전트의 자기 신고가 아니라 이슈에 남은 완료된 rework
+     * 전이 수(`reviewRounds`)이고, 그것을 못 읽으면 지어내지 않고 키를 빼 버린다.
+     */
+    let knownRound = null;
+    if (stage === "review") {
+      try { const prior = await d.reviewRounds?.(); if (typeof prior === "number") knownRound = prior + 1; }
+      catch { /* 라운드를 모르면 줄에 적지 않는다 — 기록이 멈출 이유는 아니다 */ }
+    }
+    const stamp = { runId, runnerId, round: knownRound };
+    /**
+     * Feedback loop Task 1 — 역할별 `context.<role>.json`이 만들어지는 **그 순간** 무엇을 줬는지를
+     * 런 레코드에 남긴다(역할당 한 줄, 필드 **이름만** — spec §10 Q1). 나중에 어떤 역할이 놓친 결함을
+     * "그가 한 번도 보지 못한 필드"와 상관시키려면(§5 context adequacy) 이 목록이 durable해야 한다.
+     * 여기서 바로 적는 이유: 이 뒤의 어느 지점에서 스테이지가 죽어도 "무엇을 보여줬는가"는 남아야 한다.
+     * 로스터가 없는 컨텍스트는 선언할 것이 없으므로 아무 줄도 쓰지 않는다.
+     */
+    const manifestNote = contextManifestLines(ctx, stamp);
+    if (manifestNote.length) record(manifestNote);
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     let planRepairAttempt = 0;                                        // Task 9 (KTB-51): in-run one-shot cap for the plan validator repair
     let out = await d.claudeP(ctx, { harnessIssue });
@@ -637,9 +662,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     const testEnvNote = gates?.test_env_reup?.ran
       ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
       : [];
+    /**
+     * Feedback loop Task 1 — `FACTORY_GATES:` 한 줄 **옆에** RED 게이트마다 `gates-detail:` 한 줄이 선다
+     * (`gatesDetailLines`: 깨진 테스트 이름 + 경계·스크럽된 출력 꼬리, 한 줄 JSON). 이 한 줄이 없으면
+     * 그 RED의 뿌리는 7일짜리 Actions 아티팩트에만 남는다 — 루프가 그것을 읽을 수는 없다(spec §3).
+     * 새 기록자는 만들지 않는다: 같은 `record()`(= `appendRunRecord`)를 타고 같은 줄 묶음으로 나간다.
+     */
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...testEnvNote] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
@@ -704,6 +735,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       let repairOut = null;
       try {
         const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        /**
+         * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
+         * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
+         * 매니페스트만 남기면 §5의 context-adequacy 상관이 바로 그 런에서 틀린 목록을 보게 된다.
+         */
+        const repairManifest = contextManifestLines(repairCtx, stamp);
+        if (repairManifest.length) record(repairManifest);
         await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
         repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
       } catch (e) {
@@ -1018,7 +1056,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
           if (harnessFinding(sg.findings)) {
             await d.writeHandoff({ stage, data: v.data, gates });
             const t = await d.transition({ to: "factory:needs-human", reason: `self-gate blocked handoff (harness change needed): ${summary}` });
-            record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED (harness) — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+            record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED (harness) — ${summary}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null, harnessBlock: true }), ...refusal(t), ...gatesNote, usage]);
             return t.ok ? 0 : 2;
           }
           const head = v.data.head_sha ?? null;
@@ -1038,10 +1076,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
               ? `self-gate: not converging after ${total} retries`
               : `self-gate blocked handoff (retry ${attempt}): ${summary}`;
           const t = await d.transition({ to, reason });
-          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null }), ...refusal(t), ...gatesNote, usage]);
           return t.ok ? 0 : 2;
         }
-        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`]);
+        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
@@ -2617,6 +2655,16 @@ async function main() {
        */
       return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal });
     },
+    /**
+     * Feedback loop (T3 re-review NEW-MF-1) — **이 런이 쓴 팩토리 버전.** `self-gate-detail:` 줄에
+     * 실려, "이 검사는 KTB가 거둬들였다"와 "이번 라운드에 볼 것이 없었다"를 가르는 유일하게 건전한
+     * 신호가 된다. 출처는 설치 매니페스트(`.factory/install-manifest.json`) — 에이전트가 쓸 수 없는
+     * 생성물이므로(`FACTORY_ENUM`의 deny + 훅), 빌더가 버전을 올려 위조할 수 없다. 읽지 못하면
+     * `null`이고, 그때 withdrawal 증거는 성립하지 않는다(모르면 주장하지 않는다).
+     */
+    ktbVersion: await (async () => {
+      try { return (await loadInstallManifest(root))?.ktbVersion ?? null; } catch { return null; }
+    })(),
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
     release: () => release({ run, cwd: root, issue }),
