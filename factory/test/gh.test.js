@@ -7,14 +7,16 @@ test("issue() maps gh json; comments() maps id/body/createdAt", async () => {
   const run = makeFakeRun([
     { match: (c, a) => a.includes("view") && a.includes("--json"), result: { code: 0, stdout: JSON.stringify({ number: 5, title: "T", body: "B", labels: [{ name: "backlog" }, { name: "bug" }] }), stderr: "" } },
     // --slurp은 페이지마다 하나의 배열을 담은 배열을 낸다
-    { match: (c, a) => a[0] === "api" && a[1].includes("/comments"), result: { code: 0, stdout: JSON.stringify([[{ id: 11, body: "x", created_at: "2026-09-11T00:00:00Z" }], [{ id: 12, body: "y", created_at: "2026-09-11T01:00:00Z" }]]), stderr: "" } },
+    { match: (c, a) => a[0] === "api" && a[1].includes("/comments"), result: { code: 0, stdout: JSON.stringify([[{ id: 11, body: "x", created_at: "2026-09-11T00:00:00Z", user: { login: "LeeHyeonKyu" } }], [{ id: 12, body: "y", created_at: "2026-09-11T01:00:00Z" }]]), stderr: "" } },
   ]);
   const gh = makeGh({ run, repo });
   const issue = await gh.issue(5);
   expect(issue).toEqual({ number: 5, title: "T", body: "B", labels: ["backlog", "bug"] });
+  // `author`(T3 재리뷰 NEW-MF-2): 피드백 루프가 `human-decision:v1`을 **권한**으로 읽으므로
+  // 작성자가 판정의 일부다. 없는 필드는 지어내지 않고 null이다.
   expect(await gh.comments(5)).toEqual([
-    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z" },
-    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z" },
+    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z", author: "LeeHyeonKyu" },
+    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z", author: null },
   ]);
   const api = run.calls.find((c) => c.args[0] === "api");
   expect(api.args).toEqual(["api", "repos/o/r/issues/5/comments?per_page=100", "--paginate", "--slurp"]);
@@ -462,6 +464,59 @@ test("viewerScopes: no X-OAuth-Scopes header → null (a fine-grained PAT or an 
 test("viewerScopes: a failing call throws with the stderr, so doctor reports WARN instead of a silent PASS", async () => {
   const run = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "gh: Bad credentials" } }]);
   await expect(makeGh({ run, repo }).viewerScopes()).rejects.toThrow(/Bad credentials/);
+});
+
+// ── Feedback loop Task 3 — 교차 저장소 개선 이슈(열거나 덧붙이거나) ───────────────────────────
+// 이 어댑터는 **문법을 모른다**: 지문으로 검색하고, 맞는 본문을 고르는 일(match)·새 본문을 만드는
+// 일(render)·증거를 덧붙이는 일(append)은 전부 호출자가 넘긴다(`lib/feedback/upstream-issue.js`가
+// 유일한 문법 출처다). 모든 호출에 `-R <upstream>`이 붙는지가 이 테스트의 핵심이다.
+test("upstreamIssue: 같은 지문의 열린 이슈가 없으면 -R upstream 에 새로 연다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: "[]", stderr: "" } },
+    { match: (c, a) => a[0] === "issue" && a[1] === "create", result: { code: 0, stdout: "https://github.com/o/up/issues/12\n", stderr: "" } },
+  ]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "deadbeef",
+    match: () => false,
+    render: () => ({ title: "factory-improvement: x", body: "BODY", labels: ["factory-improvement", "backlog"] }),
+    append: () => { throw new Error("append must not run when nothing matched"); },
+  });
+  expect(r).toEqual({ issue: 12, created: true, appended: false });
+  expect(run.calls[0].args).toEqual(["issue", "list", "-R", "o/up", "--search", "deadbeef in:body", "--state", "open", "--limit", "50", "--json", "number,body"]);
+  expect(run.calls[1].args).toEqual(["issue", "create", "-R", "o/up", "--title", "factory-improvement: x", "--body-file", "-", "--label", "factory-improvement", "--label", "backlog"]);
+  expect(run.calls[1].opts.input).toBe("BODY");
+});
+
+test("upstreamIssue: 맞는 이슈가 있으면 새로 열지 않고 본문을 stdin으로 갈아 끼운다", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 7, body: "OLD" }]), stderr: "" } },
+    { match: (c, a) => a[0] === "issue" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "deadbeef",
+    match: (b) => b === "OLD",
+    render: () => { throw new Error("render must not run when an issue matched"); },
+    append: (b) => `${b}\nNEW EVIDENCE`,
+  });
+  expect(r).toEqual({ issue: 7, created: false, appended: true });
+  expect(run.calls[1].args).toEqual(["issue", "edit", "7", "-R", "o/up", "--body-file", "-"]);
+  expect(run.calls[1].opts.input).toBe("OLD\nNEW EVIDENCE");
+});
+
+test("upstreamIssue: append가 본문을 바꾸지 않으면(같은 목격) 편집 호출 자체가 나가지 않는다", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ number: 7, body: "OLD" }]), stderr: "" } }]);
+  const r = await makeGh({ run, repo }).upstreamIssue({
+    repo: "o/up", fingerprint: "f", match: () => true, render: () => ({ title: "t", body: "b" }), append: (b) => b,
+  });
+  expect(r).toEqual({ issue: 7, created: false, appended: false });
+  expect(run.calls).toHaveLength(1);
+});
+
+test("upstreamIssue: upstream 저장소 이름이 없으면 아무 호출도 하지 않고 던진다", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "[]", stderr: "" } }]);
+  await expect(makeGh({ run, repo }).upstreamIssue({ fingerprint: "f", match: () => false, render: () => ({ title: "t", body: "b" }), append: (b) => b }))
+    .rejects.toThrow(/upstream repo/);
+  expect(run.calls).toEqual([]);
 });
 
 test("putEnvironment PUTs the deployment branch policy by stdin — the body never reaches the argv", async () => {

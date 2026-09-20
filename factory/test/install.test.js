@@ -278,3 +278,78 @@ test("ensureGitignore appends after an existing header without duplicating it", 
   expect(out).toBe("node_modules/\n\n# know-thy-build factory\n.factory/out/\n.factory/new-entry/\n");
   expect(out.match(/# know-thy-build factory/g)).toHaveLength(1);
 });
+
+// ── Feedback loop (T3 리뷰 MF-2) — 설치된 러너가 읽을 **주인 표**를 설치 시점에 떨어뜨린다 ────────
+// `factory/cli/**`는 설치되지 않고 배포는 `npx`라 채택자 저장소에는 `node_modules/know-thy-build`도
+// 없다. 그래서 이 파일이 없으면 피드백 루프는 채택자 저장소에서 영원히 에러 액션 한 줄만 남긴다.
+test("install-manifest: 생성기가 dest→owner 표를 결정적으로 낸다", async () => {
+  const { renderInstallManifest } = await import("../cli/install.js");
+  const template = JSON.stringify({ schema: "factory.install-manifest.v1", note: "n", ktb_version: null, entries: [] }, null, 2) + "\n";
+  const vars = { KTB_VERSION: "1.3.2", MANIFEST: [
+    { dest: ".factory/lib/gates.js", owner: "factory" },
+    { dest: ".factory/harness.toml", owner: "project" },
+    { dest: ".factory/quarantine.toml", owner: "script" },
+  ] };
+  const out = JSON.parse(renderInstallManifest(template, vars));
+  expect(out.ktb_version).toBe("1.3.2");
+  expect(out.entries.map((e) => e.dest)).toEqual([".factory/harness.toml", ".factory/lib/gates.js", ".factory/quarantine.toml"]);  // 정렬 = 결정적
+  expect(out.entries.find((e) => e.dest === ".factory/harness.toml").owner).toBe("project");
+  expect(renderInstallManifest(template, vars)).toBe(renderInstallManifest(template, vars));
+  // 매니페스트를 못 받은 호출자에게는 템플릿 원문 그대로 — 빈 표를 지어내 "설치된 것이 없다"고 굳히지 않는다
+  expect(renderInstallManifest(template, {})).toBe(template);
+});
+
+test("install-manifest: freshContent가 [protected] 없이도 이 생성기를 돌린다", async () => {
+  const { freshContent: fc } = await import("../cli/install.js");
+  const e = { src: "/pkg/templates/factory/factory/install-manifest.json", dest: ".factory/install-manifest.json", owner: "factory", generate: "install-manifest" };
+  const template = JSON.stringify({ schema: "factory.install-manifest.v1", note: "n", ktb_version: null, entries: [] }, null, 2) + "\n";
+  const out = fc(e, { readFile: () => template, vars: { MANIFEST: [{ dest: ".factory/lib/a.js", owner: "factory" }], KTB_VERSION: "9.9.9" } });
+  expect(JSON.parse(out).entries).toEqual([{ dest: ".factory/lib/a.js", owner: "factory" }]);
+});
+
+// 채택자 레이아웃 그대로 — `.factory/**`만 있고 `factory/cli`도 `node_modules`도 없다.
+test("loadInstallManifest: .factory/install-manifest.json 하나로 라우팅이 산다", async () => {
+  const { loadInstallManifest, INSTALL_MANIFEST_PATH } = await import("../lib/feedback/install-manifest.js");
+  const doc = JSON.stringify({
+    schema: "factory.install-manifest.v1", ktb_version: "1.3.2",
+    entries: [
+      { dest: ".factory/lib/self-gate.js", owner: "factory" },
+      { dest: ".factory/harness.toml", owner: "project" },
+    ],
+  });
+  const files = { [`/adopter/${INSTALL_MANIFEST_PATH}`]: doc };
+  const m = await loadInstallManifest("/adopter", {
+    exists: (p) => p in files,
+    read: (p) => files[p],
+    importModule: () => { throw new Error("must not import: the adopter has no factory/cli and no node_modules"); },
+  });
+  expect(m.source).toBe(INSTALL_MANIFEST_PATH);
+  expect(m.ktbVersion).toBe("1.3.2");
+  expect(m.ownerOf(".factory/lib/self-gate.js")).toBe("factory");
+  expect(m.ownerOf(".factory/harness.toml")).toBe("project");
+  expect(m.isInstalled.has(".factory/lib/self-gate.js")).toBe(true);
+  expect(m.isInstalled.has(".claude/settings.local.json")).toBe(false);   // 배포물이 아니다 → 멤버십 밖
+});
+
+test("loadInstallManifest: 표가 없으면 저장소 소스로, 그것도 없으면 null(라우팅하지 않는다)", async () => {
+  const { loadInstallManifest } = await import("../lib/feedback/install-manifest.js");
+  expect(await loadInstallManifest("/nowhere", { exists: () => false, read: () => "", importModule: () => { throw new Error("nope"); } })).toBeNull();
+  // 도그푸드: 저장소 루트에 factory/cli/manifest.js가 있다
+  const m = await loadInstallManifest("/pkg", {
+    exists: (p) => p === "/pkg/factory/cli/manifest.js" || p === "/pkg/package.json",
+    read: () => JSON.stringify({ version: "7.0.0" }),
+    importModule: async () => ({ ownerOf: () => "factory", buildManifest: () => [{ dest: ".factory/lib/x.js" }] }),
+  });
+  expect(m.source).toBe("/pkg/factory/cli/manifest.js");
+  expect(m.ktbVersion).toBe("7.0.0");
+});
+
+test("이 저장소의 .factory/install-manifest.json은 실제 매니페스트와 어긋나지 않는다", async () => {
+  const { buildManifest } = await import("../cli/manifest.js");
+  const { fileURLToPath } = await import("node:url");
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const doc = JSON.parse(readFileSync(`${root}/.factory/install-manifest.json`, "utf8"));
+  const live = buildManifest({ pkgRoot: root }).map((e) => ({ dest: e.dest, owner: e.owner })).sort((a, b) => (a.dest < b.dest ? -1 : 1));
+  expect(doc.entries).toEqual(live);
+  expect(doc.ktb_version).toBe(JSON.parse(readFileSync(`${root}/package.json`, "utf8")).version);
+});

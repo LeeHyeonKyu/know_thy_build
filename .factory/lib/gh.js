@@ -156,10 +156,17 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
       return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
     },
+    /**
+     * `author`(T3 재리뷰 NEW-MF-2): **누가 이 코멘트를 썼는가**. `gh issue comment`는 훅이 일부러
+     * 열어 둔 문이므로(핸드오프가 그리로 나간다) 코멘트 본문만으로는 사람의 `:unstick` 결정과
+     * 에이전트가 적어 둔 같은 모양의 글을 구별할 수 없다. 피드백 루프는 `human-decision:v1`을
+     * **권한**으로 읽으므로(그 한 줄이 상류 저장소 쓰기를 연다) 작성자가 판정의 일부여야 한다.
+     * 필드는 응답에 이미 있었고 이 어댑터가 떨어뜨리고 있었을 뿐이다 — 추가 호출은 없다.
+     */
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
-      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at }));
+      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at, author: c.user?.login ?? null }));
     },
     async comment(n, body) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();
@@ -292,6 +299,50 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     /** 그 런이 올린 판정 표(`rehearsal.json`)를 로컬로 가져온다. */
     async downloadRunArtifact(runId, name, dir) {
       await gh(["run", "download", String(runId), "-R", repo, "-n", name, "-D", dir]);
+    },
+    /**
+     * ── Feedback loop Task 3 — **다른 저장소**의 개선 이슈를 열거나 거기에 증거를 덧붙인다(spec §7) ──
+     *
+     * 이 어댑터 안의 유일한 교차 저장소 쓰기다. 모든 호출에 `-R <repo>`가 붙는다 — 이 함수는
+     * `makeGh`가 묶고 있는 저장소를 **쓰지 않는다**(그 저장소는 발견이 난 곳이고, 이 이슈가 갈 곳은
+     * KTB다). 권한은 러너의 `FACTORY_BOT_TOKEN`이 쥔다(소유자가 상류 저장소에 `issues:write`를 준다).
+     *
+     * **문법은 한 글자도 모른다**: 지문으로 검색만 하고, 맞는 본문을 고르는 일(`match`)·새 이슈의
+     * 제목/본문/라벨을 만드는 일(`render`)·기존 본문에 증거를 덧붙이는 일(`append`)은 전부 호출자가
+     * 넘긴 함수다(`lib/feedback/upstream-issue.js`가 그 문법의 유일한 출처다). 그래야 쓰는 쪽과 읽는
+     * 쪽이 갈라져 같은 원인으로 이슈가 무한히 쌓이는 일이 없다.
+     *
+     * 검색은 `<fingerprint> in:body` + `--state open`이다. 닫힌 이슈는 **다시 열지 않는다**: 사람이
+     * "고쳤다"고 닫은 원인이 다시 나타났다면 그것은 같은 이슈의 재개가 아니라 **회귀**이고, 새 이슈로
+     * 열려야 사람이 그 사실을 본다. `append`가 본문을 바꾸지 않으면(같은 목격이 이미 실려 있으면)
+     * 편집 호출 자체를 보내지 않는다 — 같은 머지를 두 번 돌아도 상류에 아무 일도 일어나지 않는다.
+     */
+    async upstreamIssue({ repo: target, fingerprint, render, append, match, limit = 50 }) {
+      if (!target) throw new Error("gh.upstreamIssue: no upstream repo — [factory].upstream must name owner/repo");
+      const j = JSON.parse(await gh([
+        "issue", "list", "-R", target, "--search", `${fingerprint} in:body`,
+        "--state", "open", "--limit", String(limit), "--json", "number,body",
+      ]));
+      const found = (j || []).find((i) => match(String(i.body ?? "")));
+      if (found) {
+        const before = String(found.body ?? "");
+        const next = append(before);
+        if (next === before) return { issue: found.number, created: false, appended: false };
+        await gh(["issue", "edit", String(found.number), "-R", target, "--body-file", "-"], { input: next });
+        return { issue: found.number, created: false, appended: true };
+      }
+      const { title, body, labels = [] } = render();
+      const out = await gh(["issue", "create", "-R", target, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
+      const m = /\/issues\/(\d+)/.exec(out);
+      return { issue: m ? Number(m[1]) : null, created: true, appended: false };
+    },
+    /**
+     * **이 저장소** 이슈의 본문을 통째로 갈아 끼운다(stdin — 본문이 argv에 실리지 않는다).
+     * 쓰는 곳은 하나다: 이미 열려 있는 `factory:harness` 이슈의 표에 빠진 줄을 덧붙이는 자리
+     * (`appendHarnessEntries`, T3 리뷰 SF-2). 교차 저장소 판은 따로 있다(`upstreamIssue`).
+     */
+    async editIssueBody(n, body) {
+      await gh(["issue", "edit", String(n), "-R", repo, "--body-file", "-"], { input: body });
     },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });

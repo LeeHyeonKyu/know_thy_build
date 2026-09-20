@@ -94,6 +94,21 @@ required_checks = ["factory/gates", "factory/review", "factory/integrity"]
 # has to Read the task output file. 5 cut demo #2's plan at turn 6: 30 min and $12 with no artifact
 # (ADR-020 KTB-16). Raise it per stage below if one stage keeps running out.
 max_turns       = 12
+# upstream (feedback loop, spec §7 — OPTIONAL, empty by default; must be `owner/repo`, nothing else,
+# because it becomes `gh … -R <repo>`): the repo that owns the factory itself, e.g.
+# "LeeHyeonKyu/know_thy_build". On merge, the retro classifies every finding by the INSTALL-MANIFEST
+# OWNER of its causal file and routes the two classes to two different places:
+#   owner: user    (harness.toml, CHARTER.md, scripts/, your own role prompts) → a `factory:harness`
+#                  issue in THIS repo — your problem, you fix it. That arm runs whether or not
+#                  `upstream` is set.
+#   owner: factory (`.factory/**` engine, shipped `.claude/agents/*.md`, templates/defaults) → a
+#                  `factory-improvement` issue in the repo named here. Findings with the same
+#                  fingerprint APPEND evidence to the one open issue instead of opening many.
+# Leave it unset and nothing is ever written to another repo: those findings stay as a comment on the
+# source issue, and no cross-repo call is made at all. Setting it also needs a token that can write
+# issues there — the runner's FACTORY_BOT_TOKEN — which the owner grants; the factory never creates
+# secrets. Keep this key directly under [factory]: put it ABOVE the sub-table below, or it lands in it.
+# upstream = "LeeHyeonKyu/know_thy_build"
 # [factory.max_turns_by_stage]     # per-stage override, wins over max_turns
 # plan = 16
 

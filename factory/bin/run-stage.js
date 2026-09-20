@@ -41,7 +41,8 @@ import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
-import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding } from "../lib/self-gate.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
+import { loadInstallManifest } from "../lib/feedback/install-manifest.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
 export const NEXT_OF = { triage: null /* disposition에 따라 */, plan: "factory:planned", implement: "factory:awaiting-review", review: null /* aggregate에 따라 */, merge: "factory:merged" };
@@ -523,7 +524,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     // merge는 script-only다 — claudeP/buildContext/verifyStage/writeHandoff을 전혀 거치지 않고
     // PR head에서 곧장 머지 여부를 판단한다(§runMergeStage). checkoutSha를 그대로 넘겨 무엇을
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false });
+    // `stamp`: 머지 스테이지가 남기는 `gates-detail:` 줄도 자기 런을 지목해야 한다(Task 1의 계약).
+    // 여기는 아래의 `stamp` 정의보다 앞이지만 `runId`/`runnerId`는 이 함수의 인자라 이미 있다.
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -1053,7 +1056,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
           if (harnessFinding(sg.findings)) {
             await d.writeHandoff({ stage, data: v.data, gates });
             const t = await d.transition({ to: "factory:needs-human", reason: `self-gate blocked handoff (harness change needed): ${summary}` });
-            record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED (harness) — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+            record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED (harness) — ${summary}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null, harnessBlock: true }), ...refusal(t), ...gatesNote, usage]);
             return t.ok ? 0 : 2;
           }
           const head = v.data.head_sha ?? null;
@@ -1073,10 +1076,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
               ? `self-gate: not converging after ${total} retries`
               : `self-gate blocked handoff (retry ${attempt}): ${summary}`;
           const t = await d.transition({ to, reason });
-          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null }), ...refusal(t), ...gatesNote, usage]);
           return t.ok ? 0 : 2;
         }
-        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`]);
+        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
@@ -2652,6 +2655,16 @@ async function main() {
        */
       return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal });
     },
+    /**
+     * Feedback loop (T3 re-review NEW-MF-1) — **이 런이 쓴 팩토리 버전.** `self-gate-detail:` 줄에
+     * 실려, "이 검사는 KTB가 거둬들였다"와 "이번 라운드에 볼 것이 없었다"를 가르는 유일하게 건전한
+     * 신호가 된다. 출처는 설치 매니페스트(`.factory/install-manifest.json`) — 에이전트가 쓸 수 없는
+     * 생성물이므로(`FACTORY_ENUM`의 deny + 훅), 빌더가 버전을 올려 위조할 수 없다. 읽지 못하면
+     * `null`이고, 그때 withdrawal 증거는 성립하지 않는다(모르면 주장하지 않는다).
+     */
+    ktbVersion: await (async () => {
+      try { return (await loadInstallManifest(root))?.ktbVersion ?? null; } catch { return null; }
+    })(),
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
     release: () => release({ run, cwd: root, issue }),
