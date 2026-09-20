@@ -4,43 +4,46 @@ import { q } from "./prove-test.js";
 /**
  * ── Structure B (review-efficiency plan Task 3 / design §4.B) ──────────────────────────────────
  *
- * `runSelfGate({ root, harness, contract, roster, tier, gates, run, changedTests, changedSources,
- *   qaEvidence, mutation }) → { ok, findings, ranChecks }`
+ * `runSelfGate({ root, harness, gates, run, changedTests, changedSources, mutation, pins })
+ *   → { ok, findings, ranChecks }`
  *
- * The implementer's pre-handoff self-gate. It composes **exactly the checks the review will run
- * DETERMINISTICALLY**, BEFORE the stage transitions to `factory:awaiting-review`, so a diff the
- * reviewer's runnable checks would reject never spends a full multi-reviewer round. The bugs it
- * kills are the two this session pinned:
+ * The implementer's pre-handoff self-gate. It composes **the BUILDER-satisfiable checks the review
+ * will run DETERMINISTICALLY**, BEFORE the stage transitions to `factory:awaiting-review`, so a diff
+ * the reviewer's runnable checks would reject never spends a full multi-reviewer round. The bug it
+ * kills at first implement is:
  *   - own-cal R1 cf1 — a new guard test that asserts nothing (deleting the safety warning still
  *     passed 5/5). The mutation check (Task 4) catches it as a `survivor`.
- *   - KTB #18 R3 — a `finish()`/qa-evidence contract left uncovered by the manifest (exit 1),
- *     which the reviewer would reject as `spec-evidence-missing`.
+ * plus, on a rework round, KTB #18 R3 (a fix that regressed a prior finding under the SAME id) —
+ * caught here only via a carried Task 5 regression pin whose guard test is re-run. #18 R3 itself is
+ * caught by REVIEW; the self-gate does not re-derive it.
+ *
+ * **Scope: builder-satisfiable checks only (Defect A).** qa evidence is NOT graded here. The qa
+ * manifest (`.factory/out/qa/<issue>/manifest.json`, `lib/qa-evidence.js`) is written by the qa
+ * REVIEWER during the review stage — never by the builder at implement time — so at implement it
+ * cannot exist and its absence is EXPECTED, not a defect. Grading it here blocked every standard-tier
+ * issue (roster has qa) with `spec-evidence-missing`. qa evidence stays enforced where it belongs:
+ * the qa reviewer at review and `qaEvidenceGate` at `factory:approved` (both unchanged).
  *
  * **Deterministic ONLY in this task.** The adversarial self-critique (the LLM half of Structure B)
  * lives in the builder prompt/workflow, not here — this function never calls an LLM. That is the
- * whole point of the cost note: reusing the already-computed `gates`, the already-graded qa
- * manifest, and a structural mutation on the new tests is far cheaper than a review round.
+ * whole point of the cost note: reusing the already-computed `gates` and a structural mutation on the
+ * new tests is far cheaper than a review round.
  *
  * **Composed checks:**
  *   1. `gates` — the result the stage ALREADY computed for this run (never re-run). A non-GREEN
  *      verdict is exactly what the reviewer's first deterministic pass would see.
- *   2. `finish()` / qa-evidence against the acceptance contract — graded only when the review WOULD
- *      grade it: the tier roster carries `qa`, OR the contract itself declares a `finish`/`gate`
- *      kind check. A rubric-only contract with no qa is reviewer-judged, not self-runnable
- *      (design §4.B), so the self-gate does not fabricate a check for it. A red / spec-evidence-
- *      missing result blocks and NAMES the uncovered done_when ids.
- *   3. `checkNewTestsFailOnMutation` (Task 4) on the new tests — a `survivor` (a test green under a
+ *   2. `checkNewTestsFailOnMutation` (Task 4) on the new tests — a `survivor` (a test green under a
  *      cleanly-run mutation) blocks and names the assertion. `misconfigured` (the harness cannot
  *      run a single test) is a harness-class blocking finding the builder cannot fix; `skipped`
  *      tests are advisory (the check deliberately under-fires — never fail-closed on an unjudgeable
  *      test).
+ *   3. Regression pins (Task 5) — a carried guardable pin whose guard test is re-run; a real red is
+ *      a blocking regression, prose pins are advisory only (no unsatisfiable loop, spec §9 Q5).
  *
  * **Findings** are `{ check, blocking, detail, harness?, ids? }`. `ok` is false iff any finding is
  * blocking. Non-blocking (advisory) findings are attached to the handoff so the reviewer starts
- * ahead. `ranChecks` records which of the three composed checks actually ran (for the run record).
+ * ahead. `ranChecks` records which of the composed checks actually ran (for the run record).
  */
-
-const CONTRACT_KINDS = new Set(["finish", "gate"]);
 
 /**
  * ── Structure D (review-efficiency Task 5) — regression pins carried across rework ──────────────
@@ -160,9 +163,8 @@ export const advisoryFindings = (findings = []) => findings.filter((f) => !f.blo
 export const harnessFinding = (findings = []) => findings.some((f) => f.blocking && f.harness);
 
 export async function runSelfGate({
-  root, harness, contract = [], roster = [], tier = null,
+  root, harness,
   gates = null, run, changedTests = [], changedSources = [],
-  qaEvidence = null,       // function → evidence summary (deferred), or the summary object
   mutation = {},           // fs/tmp passthrough for checkNewTestsFailOnMutation (tests inject doubles)
   pins = [],               // Task 5 — regression pins carried from the prior rework round
 } = {}) {
@@ -182,26 +184,11 @@ export async function runSelfGate({
     }
   }
 
-  // (2) finish()/qa-evidence against the acceptance contract — only when the review would grade it.
-  const rosterHasQa = Array.isArray(roster) && roster.includes("qa");
-  const contractHasFinishGate = Array.isArray(contract)
-    && contract.some((w) => CONTRACT_KINDS.has(w?.check?.kind));
-  if (rosterHasQa || contractHasFinishGate) {
-    ranChecks.push("contract");
-    let ev;
-    try { ev = typeof qaEvidence === "function" ? await qaEvidence() : qaEvidence; }
-    catch (e) { ev = { ok: false, reason: `qa evidence unreadable — ${e?.message || e}`, missing: [] }; }
-    // `skipped` means the roster genuinely required nothing — not a finding. Anything else that is
-    // not ok is the reviewer's `spec-evidence-missing`, named by the uncovered done_when ids.
-    if (ev && !ev.ok && !ev.skipped) {
-      const ids = Array.isArray(ev.missing) ? ev.missing.filter(Boolean) : [];
-      findings.push({
-        check: "contract", blocking: true, ids,
-        detail: `spec-evidence-missing: ${ev.reason || "acceptance contract not covered by evidence"}`
-          + (ids.length ? ` (${ids.join(", ")})` : ""),
-      });
-    }
-  }
+  // (2) qa-evidence against the acceptance contract is NOT graded here (Defect A). The qa manifest is
+  // written by the qa REVIEWER at the review stage — never by the builder at implement time — so at
+  // this point it cannot exist and its absence is expected, not a defect. Enforcing it here blocked
+  // every standard-tier issue (roster has qa) with `spec-evidence-missing`. qa evidence remains
+  // enforced where it belongs: the qa reviewer at review and `qaEvidenceGate` at `factory:approved`.
 
   // (3) New-test mutation check (Task 4). Deterministic, no LLM.
   if (Array.isArray(changedTests) && changedTests.length) {

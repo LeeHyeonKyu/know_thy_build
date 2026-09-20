@@ -8,6 +8,7 @@ import { GitDiffError } from "../lib/changed-files.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
 import { renderHandoff, parseHandoffs } from "../lib/handoff.js";
+import { transition } from "../lib/transition.js";
 import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
 import { makeFakeRun } from "../lib/exec.js";
@@ -126,10 +127,13 @@ test("implement stage moves to in-progress after the handoff check, then to awai
  * ── Structure B (리뷰 효율 Task 3) — the pre-handoff self-gate at the implement stage ──────────
  *
  * COST NOTE (regression the plan pins): the self-gate reuses the gates result the stage ALREADY
- * computed (it is handed `d.selfGate({ gates })`, never re-runs the gate commands) and grades the
- * qa manifest the runner already reads — so a self-gate run is CHEAPER than a review round, which
- * would dispatch the full LLM reviewer panel. A red deterministic check caught here never spends a
- * review round (KTB #18 R3 finish() regression; own-cal R1 cf1 fail-open guard).
+ * computed (it is handed `d.selfGate({ gates })`, never re-runs the gate commands) and runs the
+ * deterministic mutation check on only the NEW tests — so a self-gate run is CHEAPER than a review
+ * round, which would dispatch the full LLM reviewer panel. A red deterministic check caught here
+ * never spends a review round (own-cal R1 cf1 fail-open guard; carried Task 5 regression pins).
+ *
+ * Defect A — the self-gate does NOT grade qa evidence at implement: the qa manifest is written by the
+ * qa reviewer at REVIEW, never by the builder here, so its absence is expected (see self-gate.test.js).
  */
 const selfGateDeps = (over = {}) => ({
   charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
@@ -144,8 +148,10 @@ const selfGateDeps = (over = {}) => ({
   ...over,
 });
 
-// KTB #18 R3 + own-cal R1 regression: an ok:false self-gate must NOT reach factory:awaiting-review;
-// the FIRST RED on a head is one bounded retry (→ planned), carrying its findings.
+// own-cal R1 cf1 regression (a fail-open new test caught as a mutation survivor): an ok:false
+// self-gate must NOT reach factory:awaiting-review; the FIRST RED on a head is one bounded retry
+// (→ planned), carrying its findings. (NOTE: this asserts the red ROUTE with a mocked always-ok
+// transition — see the "Defect B" tests below for the route driven through the REAL transition.)
 test("implement: an ok:false self-gate blocks the awaiting-review handoff and records the findings (attempt 1 → planned)", async () => {
   const lines = [];
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
@@ -210,6 +216,75 @@ test("implement: a self-gate RED on a NEW head resets to one retry (head-keyed c
   expect(d3.transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
   // and the findings for the new head are readable back for the re-dispatched builder.
   expect(latestSelfGateFindings(store.map((b) => ({ body: b })), H2)[0].detail).toContain("survivor");
+});
+
+// ── Defect B — the self-gate retry route must survive the REAL transition + requirements ─────────
+//
+// The one-retry route (in-progress → planned) is legal in the graph, but `requirementFor("factory:
+// planned")` compares the plan handoff's roles/rounds to ctx.roster/expectedRounds. In production
+// those come from `buildCtxExtra(ctx: ctxCache)`, and the IMPLEMENT ctx carries an EMPTY roster ([],
+// truthy) and no rounds — which the requirement rejects as `plan roles [...] != roster []`, so the
+// transition is refused and the issue falls to needs-human (demo #39). Every mocked always-ok
+// transition test above hides this. This test drives the red route through the REAL transition +
+// REAL requirements + REAL buildCtxExtra (mirroring the production transition dep), so a refused
+// retry is caught. The fix: for a self-gate retry (a non-plan stage targeting factory:planned),
+// buildCtxExtra omits the mismatched roster/expectedRounds so only need(plan) applies.
+const planHandoff = { schema: "factory.plan.v1", issue: 42, tier: "standard", roles: ["architect", "skeptic"], rounds: 2, done_when: [{ id: "dw1", text: "x", level: "unit" }], files_expected: ["src/x.js"], dissent_log: [], non_goals: [], open_risks: [] };
+
+// A fake gh backing the REAL transition: the issue starts at `from` (the implement entry label,
+// factory:planned — the stage's first act is the planned→in-progress hop at run-stage:527), carries a
+// valid plan handoff, and its label follows setFactoryLabel so a later read sees each transition.
+function realTransitionGh(from = "factory:planned", extra = []) {
+  let label = from;
+  const comments = [{ body: renderHandoff({ stage: "plan", issue: 42, data: planHandoff }), createdAt: "2026-01-01T00:00:00Z" }, ...extra];
+  return {
+    get label() { return label; },
+    issue: async () => ({ number: 42, title: "t", body: "", labels: [label] }),
+    comments: async () => comments.slice(),
+    comment: async (_n, body) => { comments.push({ body, createdAt: new Date().toISOString() }); },
+    setFactoryLabel: async (_n, to) => { label = to; },
+    branchHeadSha: async () => "a".repeat(40),
+  };
+}
+
+// The production transition dep, replicated (run-stage main() builds it inline): REAL buildCtxExtra
+// with the implement ctxCache (empty roster) + REAL transition, threading `stage: "implement"`.
+const realTransitionDep = (gh, ctxCache) => async ({ to, reason, data, prerequisite = false, cause }) => {
+  const ctxExtra = await buildCtxExtra({ gh, issue: 42, to, data, ctx: ctxCache, stage: "implement" });
+  ctxExtra.gatesChecked = true;
+  if (prerequisite) ctxExtra.prerequisite = true;
+  return transition({ gh, issue: 42, to, ctxExtra, reason, stage: "implement", cause });
+};
+
+test("Defect B: a self-gate block routes through the REAL transition+requirements to factory:planned (attempt 1), not refused → needs-human", async () => {
+  const gh = realTransitionGh();
+  const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+  const deps = selfGateDeps({
+    transition: realTransitionDep(gh, ctxCache),
+    selfGateRetry: async () => ({ attempt: 1 }),
+    selfGate: async () => ({ ok: false, ranChecks: ["gates", "mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing under mutation (string in src/x.js)" }] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps, runnerId: "r1" })).toBe(0);
+  // the REAL transition actually moved the label to planned — not refused to needs-human.
+  expect(gh.label).toBe("factory:planned");
+  // and the issue never carries a "transition refused" marker for the planned hop.
+  const bodies = (await gh.comments()).map((c) => c.body).join("\n");
+  expect(bodies).not.toMatch(/factory-transition-refused/);
+  expect(bodies).toMatch(/factory:in-progress → factory:planned/);
+});
+
+test("Defect B: a SECOND self-gate RED on the same head still escalates to needs-human through the REAL transition (bound preserved)", async () => {
+  const gh = realTransitionGh();
+  const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+  const deps = selfGateDeps({
+    transition: realTransitionDep(gh, ctxCache),
+    selfGateRetry: async () => ({ attempt: 2 }),   // the head already retried once
+    selfGate: async () => ({ ok: false, ranChecks: ["mutation"], findings: [{ check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing" }] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps, runnerId: "r1" })).toBe(0);
+  // in-progress → needs-human is a legal graph edge and need(review) is not required for it, so the
+  // bound escalation lands cleanly.
+  expect(gh.label).toBe("factory:needs-human");
 });
 
 // SF-A backstop: the per-head bound resets on every new commit, so a builder that emits a NEW head
