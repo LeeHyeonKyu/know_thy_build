@@ -148,6 +148,44 @@ test("wrong-reason red is NOT a kill — the check falls through to the next mut
   expect(r.survivors[0]).toMatchObject({ file: "test/f.test.js", mutation: "string" });
 });
 
+// A source with an UNRELATED mutable token (comparison) ordered BEFORE the asserted string — the common
+// case that broke round-2's "break on first survived mutation" logic.
+const multiTok = 'export function isProd(env) { return env === "production"; }\nexport const WARNING = "danger: prod";\n';
+const multiFiles = (testFile) => ({ "/wt/src/warn.js": multiTok, "/root/src/warn.js": multiTok, [`/root/${testFile}`]: "// t" });
+
+test("REGRESSION (reviewer must_fix rr): a fail-closed test on a MULTI-TOKEN source is a KILL, not a false survivor", async () => {
+  // Mutations are emitted in operator order: comparison (env === "production") BEFORE string (WARNING).
+  // The test pins WARNING only, so the comparison mutation is survived (green) — must NOT stop there.
+  // The string mutation is an assertion-red → KILL. Old break-on-first-green wrongly returned survivor.
+  const fs = fakeFs(multiFiles("test/fc.test.js"));
+  const run = makeFakeRun([wtAdd(ok), wtOther(), npmci(),
+    vitestSeq({ "test/fc.test.js": [ok, ok, assertionRed] })]); // baseline green, comparison survives, string kills
+  const r = await checkNewTestsFailOnMutation({
+    root: "/root", tmp: "/wt", harness, run,
+    newTests: [{ file: "test/fc.test.js", target: "src/warn.js" }], changedSources: ["src/warn.js"],
+    exists: fs.exists, readFile: fs.readFile, writeFile: fs.writeFile,
+  });
+  expect(r.ok).toBe(true);                                     // fail-closed → not a survivor
+  expect(r.survivors).toEqual([]);
+  expect(r.checked[0]).toMatchObject({ file: "test/fc.test.js", verdict: "kill", mutation: "string" });
+});
+
+test("REGRESSION (reviewer must_fix rr): a vacuous guard on the SAME multi-token source stays a SURVIVOR", async () => {
+  // Same two-token source; this test asserts nothing real → survives BOTH mutations → survivor only
+  // after every cleanly-run mutation was survived.
+  const fs = fakeFs(multiFiles("test/vac.test.js"));
+  const run = makeFakeRun([wtAdd(ok), wtOther(), npmci(),
+    vitestSeq({ "test/vac.test.js": [ok, ok, ok] })]);          // baseline green, both mutations survived
+  const r = await checkNewTestsFailOnMutation({
+    root: "/root", tmp: "/wt", harness, run,
+    newTests: [{ file: "test/vac.test.js", target: "src/warn.js" }], changedSources: ["src/warn.js"],
+    exists: fs.exists, readFile: fs.readFile, writeFile: fs.writeFile,
+  });
+  expect(r.ok).toBe(false);
+  expect(r.survivors[0]).toMatchObject({ file: "test/vac.test.js" });
+  expect(r.survivors[0].survived).toEqual(["comparison", "string"]); // every cleanly-run mutation survived
+});
+
 test("every applicable mutation is wrong-reason red → inconclusive/skipped, never a kill or survivor", async () => {
   const fs = fakeFs(baseFiles());
   const run = makeFakeRun([wtAdd(ok), wtOther(), npmci(), vitestSeq({ "test/warn.test.js": [ok, moduleRed] })]);

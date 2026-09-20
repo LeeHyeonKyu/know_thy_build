@@ -234,21 +234,34 @@ export async function checkNewTestsFailOnMutation({
         continue;
       }
 
-      // Fall through the mutations on FRESH source; the first one that RUNS CLEANLY decides.
-      let decided = null; // { verdict: "survivor"|"kill", target, mutation }
-      let inconclusiveMutations = 0;
+      // Try ALL applicable mutations on FRESH source. Do NOT break on the first survived mutation:
+      // mutations are emitted in fixed operator order, independent of file position, so a target that
+      // carries an unrelated token (a stray `env === "prod"`) ordered before the value the test pins
+      // would be mutated first, survive correctly, and — if we stopped there — falsely brand a genuinely
+      // fail-closed test a `survivor` before ever trying the mutation that WOULD kill it (a false
+      // positive that blocks legitimate work). The gate's question is "does the test notice ANY
+      // mutation": a KILL wins as soon as one cleanly-run mutation goes assertion-red; a SURVIVOR is
+      // declared only after EVERY cleanly-run mutation was survived (with ≥1 having run cleanly).
+      let kill = null;      // { target, mutation } — first assertion-red seen
+      const survived = [];  // mutations that ran cleanly and the test stayed green
+      let wrongReason = 0;  // mutations whose red was module/parse/transform — they never ran
       for (const a of attempts) {
         writeFile(join(tmp, a.tgt), a.mutated);
         let r;
         try { r = await runTest(e.file); } finally { writeFile(join(tmp, a.tgt), a.orig); }
-        if (r.code === 0) { decided = { verdict: "survivor", target: a.tgt, mutation: a.name }; break; }
-        if (isWrongReasonRed(`${r.stdout || ""}\n${r.stderr || ""}`)) { inconclusiveMutations++; continue; } // wrong-reason red → not a kill; try next
-        decided = { verdict: "kill", target: a.tgt, mutation: a.name }; break; // assertion red → the test noticed it
+        if (r.code === 0) { survived.push({ target: a.tgt, mutation: a.name }); continue; } // test did not notice this one
+        if (isWrongReasonRed(`${r.stdout || ""}\n${r.stderr || ""}`)) { wrongReason++; continue; } // never ran — inconclusive
+        kill = { target: a.tgt, mutation: a.name }; break; // assertion red → the test noticed a violation → fail-closed
       }
 
-      if (!decided) { skipped.push({ file: e.file, reason: `inconclusive — all ${inconclusiveMutations} applicable mutation(s) failed to load/parse, none reached assertions` }); continue; }
-      checked.push({ file: e.file, verdict: decided.verdict, target: decided.target, mutation: decided.mutation });
-      if (decided.verdict === "survivor") survivors.push({ file: e.file, target: decided.target, mutation: decided.mutation });
+      if (kill) { checked.push({ file: e.file, verdict: "kill", target: kill.target, mutation: kill.mutation }); continue; }
+      if (survived.length) {
+        const rep = survived[0], names = survived.map((s) => s.mutation);
+        checked.push({ file: e.file, verdict: "survivor", target: rep.target, mutation: rep.mutation, survived: names });
+        survivors.push({ file: e.file, target: rep.target, mutation: rep.mutation, survived: names });
+        continue;
+      }
+      skipped.push({ file: e.file, reason: `inconclusive — all ${wrongReason} applicable mutation(s) failed to load/parse, none reached assertions` });
     }
   } finally {
     await g(["worktree", "remove", "--force", tmp]);

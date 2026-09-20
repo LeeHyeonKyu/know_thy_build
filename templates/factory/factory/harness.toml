@@ -64,9 +64,13 @@ test_files = "npx vitest run {files}"            # prove-test / new-test-repeat 
 # cleanly (loaded, reached assertions) AND the test STAYED green (asserts nothing / not fail-closed —
 # own-cal R1 cf1: deleting the safety warning still passed 5/5). A `kill` = baseline green → mutated red
 # by an ASSERTION; a red that is a module-resolution/parse/SyntaxError/transform error is inconclusive
-# for that mutation (it never ran) → the next mutator is tried. LIMITS — deliberately UNDER-fires: the
-# mutations are shallow, syntax-preserving text transforms, NOT a semantic engine (no AST, no coverage).
-# One applicable mutation, chosen by falling through the ordered set on FRESH source, decides per test:
+# for that mutation (it never ran) → the next mutator is tried. It tries ALL applicable mutations (each
+# on FRESH source) — a KILL wins as soon as ANY cleanly-run mutation goes assertion-red; a SURVIVOR is
+# declared only after EVERY cleanly-run mutation was survived (never on the first survived one — a target
+# often carries an unrelated token ordered before the asserted value, and stopping there would falsely
+# brand a fail-closed test vacuous). LIMITS — deliberately UNDER-fires: the mutations are shallow,
+# syntax-preserving text transforms, NOT a semantic engine (no AST, no coverage). The ordered set, each
+# applied to the FIRST eligible occurrence:
 # [1] flip the first boolean literal, [2] invert the first ===/!==/==/!=/<=/>= (bare </> left alone —
 # they collide with generics/arrows), [3] replace the first non-import string literal's contents with a
 # `__MUTATED__` sentinel (swallows template-literal ${…} interpolations), [4] bump the first integer by
