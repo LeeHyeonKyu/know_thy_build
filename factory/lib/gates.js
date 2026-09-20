@@ -82,42 +82,76 @@ export const DETAIL_TAIL_LINES = 40;
 export const DETAIL_MAX_CHARS = 4000;
 export const DETAIL_MAX_FAILING = 20;
 export const DETAIL_MAX_NAME = 200;
+/** `reason`(KTB-35 unhandled, broken-base)의 상한 — 그것만이 이 줄의 무한정 자라는 조각이었다(리뷰 MF-1). */
+export const DETAIL_MAX_REASON = 1000;
+/**
+ * 이름 파서가 훑는 줄 수의 상한(리뷰 nit 7). 스니펫은 꼬리 40줄인데 이름은 **출력 전체**에서 찾는다
+ * — 이름이 꼬리 위에 있을 수 있기 때문이다(의도된 비대칭). 그래도 멀티메가 로그에서 비용이 무한정
+ * 늘지 않게 꼬리 쪽 `DETAIL_MAX_SCAN_LINES`줄로 자른다(실패 요약은 언제나 끝에 모인다).
+ */
+export const DETAIL_MAX_SCAN_LINES = 2000;
 /** 런 레코드의 줄 접두사. 뒤는 **한 줄 JSON**이다 — Task 3의 harvester가 `/^gates-detail: (\{.*\})$/`로 읽는다. */
 export const GATES_DETAIL_PREFIX = "gates-detail: ";
 
+/** `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식을 만들지 않는다. */
+const secretsFrom = (env) => SECRET_ENV.map((n) => (env ?? process.env)?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+const scrubOne = (text, secrets, max) => scrubText(String(text ?? ""), { secrets }).text.slice(0, max);
+
 /**
  * 러너 출력에서 **알아볼 수 있는** 실패 테스트 이름. 알아보지 못하면 빈 배열이다 — 추측한 이름은
- * 없는 것보다 나쁘다(Task 2가 그것으로 fingerprint를 만든다). 네 모양을 읽는다:
- *   - vitest/jest 요약 표식: `× math > adds` / `✕ adds (3 ms)` / `● math › adds`
+ * 없는 것보다 나쁘다(Task 2가 그것으로 fingerprint를 만든다: **틀린** 이름은 틀린 지문이 된다).
+ * 네 모양을 읽는다:
+ *   - vitest/jest 요약 표식: `× math > adds` / `✕ adds (3 ms)`
+ *   - jest 절 제목: `● math › adds` — **`suite › test` 모양일 때만**(리뷰 SF-3: `● Validation Error` 같은
+ *     절 제목이 테스트 이름으로 새어 들어왔다)
  *   - vitest FAIL 줄: ` FAIL  test/a.test.js > math > adds` → 파일 경로를 떼고 테스트 이름만
  *   - flutter: `00:03 +2 -1: MyWidget shows the title [E]`
- *   - pytest: `FAILED tests/test_a.py::test_adds - …` / `____ test_adds ____`
+ *   - pytest: `FAILED tests/test_a.py::test_adds - …`(**node id 모양일 때만** — `FAILED build step`은
+ *     테스트가 아니다) / `____ test_adds ____`
  */
+/** vitest `3ms` / jest `(3 ms)` — **끝에 붙은 단독 지속시간 토큰만** 떼어낸다(리뷰 SF-2). */
+const DURATION_SUFFIX = /\s+\(?\d+(?:\.\d+)?\s?ms\)?$/;
 const FAILING_PATTERNS = [
-  /^\s*[×✕✗]\s+(.+?)(?:\s+\d+\s*m?s)?\s*$/,
-  /^\s*●\s+(.+?)\s*$/,
-  /^\s*FAIL\s+\S+\s+>\s+(.+?)\s*$/,
-  /^\s*\d{2}:\d{2}\s+\+\d+(?:\s+~\d+)?\s+-\d+:\s+(.+?)\s+\[E\]\s*$/,
-  /^\s*FAILED\s+(\S+)/,
-  /^\s*_{2,}\s+(\S.*?)\s+_{2,}\s*$/,
+  { re: /^\s*[×✕✗]\s+(\S.*?)\s*$/, strip: true },
+  { re: /^\s*●\s+(\S.*?[›>]\s+\S.*?)\s*$/ },
+  { re: /^\s*FAIL\s+\S+\s+>\s+(\S.*?)\s*$/ },
+  { re: /^\s*\d{2}:\d{2}\s+\+\d+(?:\s+~\d+)?\s+-\d+:\s+(.+?)\s+\[E\]\s*$/ },
+  { re: /^\s*FAILED\s+(\S+::\S+)/ },
+  { re: /^\s*_{2,}\s+(\S.*?)\s+_{2,}\s*$/ },
 ];
-/** jest의 `● Console`·`● Test suite failed to run` 같은 절 제목은 테스트 이름이 아니다. */
-const NOT_A_TEST_NAME = /^(Console|Test suite failed to run|Runtime Error)\b/i;
+/** 러너가 절 제목으로 쓰는 문장들 — 테스트 이름이 아니다(리뷰 SF-3). */
+const NOT_A_TEST_NAME = /^(Console|Test suite failed to run|Runtime Error|Validation Error|Deprecation Warning|Cannot find module|Summary of all failing tests)\b/i;
+/** `::`와 `.`은 같은 계층 구분자다 — pytest는 한 실패를 두 철자로 적는다(리뷰 SF-4). */
+const normId = (s) => s.replace(/::/g, ".");
+/** 잘려 나간 지속시간만큼만 다른 두 이름은 같은 실패다(리뷰 SF-2). */
+const ONLY_A_DURATION = /^\s*\(?\d+(?:\.\d+)?\s?m?s\)?$/;
 
 export function parseFailingTests(text) {
   const names = [];
-  for (const line of String(text ?? "").split("\n")) {
-    for (const re of FAILING_PATTERNS) {
+  const lines = String(text ?? "").split("\n");
+  for (const line of lines.length > DETAIL_MAX_SCAN_LINES ? lines.slice(-DETAIL_MAX_SCAN_LINES) : lines) {
+    for (const { re, strip } of FAILING_PATTERNS) {
       const m = re.exec(line);
       if (!m) continue;
-      const name = m[1].trim().slice(0, DETAIL_MAX_NAME);
+      const name = (strip ? m[1].replace(DURATION_SUFFIX, "") : m[1]).trim().slice(0, DETAIL_MAX_NAME);
       if (name && !NOT_A_TEST_NAME.test(name) && !names.includes(name)) names.push(name);
       break;
     }
     if (names.length >= DETAIL_MAX_FAILING * 2) break;
   }
-  // pytest는 같은 실패를 `tests/a.py::test_x`와 `____ test_x ____` 두 모양으로 적는다 — 긴 쪽만 남긴다.
-  const kept = names.filter((n) => !names.some((o) => o !== n && o.endsWith(`::${n}`)));
+  /**
+   * 같은 실패가 두 철자로 잡힌 경우 **긴 쪽만** 남긴다(짧은 쪽을 버린다). 두 가지가 그렇다:
+   *   ① pytest: `tests/a.py::TestX::test_x`와 절 제목 `TestX.test_x`(또는 `test_x`) — `::`를 `.`으로
+   *      정규화한 뒤 접미사로 비교한다.
+   *   ② vitest: `× debounce waits 500ms`의 지속시간 스트립본("debounce waits")과 FAIL 줄의 원본.
+   */
+  const kept = names.filter((n) => !names.some((o) => {
+    if (o === n) return false;
+    const a = normId(n), b = normId(o);
+    if (b !== a && b.endsWith(`.${a}`)) return true;
+    if (o.startsWith(n) && ONLY_A_DURATION.test(o.slice(n.length))) return true;
+    return false;
+  }));
   return kept.slice(0, DETAIL_MAX_FAILING);
 }
 
@@ -125,15 +159,26 @@ export function parseFailingTests(text) {
 export function gateFailureSnippet(stdout, stderr, { env = process.env } = {}) {
   const text = [String(stdout ?? ""), String(stderr ?? "")].filter((s) => s.trim()).join("\n");
   const tail = text.split("\n").slice(-DETAIL_TAIL_LINES).join("\n");
-  const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
-  return scrubText(tail, { secrets }).text.slice(-DETAIL_MAX_CHARS);
+  return scrubText(tail, { secrets: secretsFrom(env) }).text.slice(-DETAIL_MAX_CHARS);
 }
 
-/** 한 RED 게이트의 detail. **절대 던지지 않는다** — 증거 수집의 실패가 스테이지의 실패가 될 수 없다. */
+/**
+ * 한 RED 게이트의 detail. **절대 던지지 않는다** — 증거 수집의 실패가 스테이지의 실패가 될 수 없다.
+ *
+ * 리뷰 must_fix 1 — **이름도 스크럽한다.** 스니펫은 꼬리 40줄만 남기는데 이름 파서는 출력 전체를
+ * 훑으므로, 머리에만 있던 토큰이 스니펫에서는 제대로 빠지고 `failing`으로는 그대로 새어 나갔다
+ * (파라미터라이즈된 pytest id `test_login[<token>]`가 실제 생산자다). 런 레코드는 만료되지 않는
+ * 공개 브랜치로 나간다 — 스니펫과 **같은 규칙 출처**(`SECRET_ENV` + `scrubText`)로 이름도 지운다.
+ */
 export function gateDetail({ gate, stdout = "", stderr = "", env } = {}) {
   try {
     const text = [String(stdout ?? ""), String(stderr ?? "")].join("\n");
-    return { gate, failing: parseFailingTests(text), snippet: gateFailureSnippet(stdout, stderr, env ? { env } : {}) };
+    const secrets = secretsFrom(env);
+    return {
+      gate,
+      failing: parseFailingTests(text).map((n) => scrubOne(n, secrets, DETAIL_MAX_NAME)),
+      snippet: gateFailureSnippet(stdout, stderr, env ? { env } : {}),
+    };
   } catch (e) {
     return { gate, failing: [], snippet: "", note: `detail capture failed — ${e?.message || e}` };
   }
@@ -156,19 +201,34 @@ export function attachGateDetails(result) {
 
 /**
  * 런 레코드에 실리는 줄들 — RED 게이트마다 한 줄, `gates-detail: {…}` 형태의 **한 줄 JSON**.
- * 사람이 읽을 수 있고(prefix), 기계가 읽을 수 있다(JSON). `reason`(KTB-35 unhandled, broken-base)이
- * 있으면 함께 싣는다 — 그것이 곧 뿌리인 경우가 있다.
+ * 사람이 읽을 수 있고(prefix), 기계가 읽을 수 있다(JSON).
+ *
+ * 키: `gate`, `run_id`, `runner`, `round`(알 때만), `failing[]`, `reason`(게이트가 적었을 때만),
+ * `snippet`, `note`(증거 수집이 실패했을 때만).
+ *
+ * **`run_id`/`runner`가 있는 이유**(리뷰 provenance): `docs/factory/runs/**`는 no-write 스테이지의
+ * 스크래치 경로라 에이전트 세션이 줄을 덧붙일 수 있고, 정규식 harvester는 **첫 번째** 매치를 집는다 —
+ * `reviewEvidenceLine`이 batch-2 MF-2에서 닫은 바로 그 구멍이다. 줄이 자기를 쓴 런을 지목하면 T3는
+ * 그 런에 묶인 줄만 믿고 나머지는 무시할 수 있다. 모르면 `null`이다 — 없는 값을 지어내지 않는다.
+ *
+ * `reason`·`failing`도 여기서 한 번 더 스크럽·상한한다(멱등이다 — `[REDACTED:…]`는 다시 맞지 않는다):
+ * `detail`을 만든 자리가 어디든 이 줄이 마지막 관문이고, `main is red on …`(broken-base)은 파싱된
+ * 테스트 id 목록이라 이 줄에서 유일하게 상한이 없던 조각이었다(리뷰 MF-1).
  */
-export function gatesDetailLines(result) {
+export function gatesDetailLines(result, { runId = null, runnerId = null, round = null } = {}) {
   try {
     const out = [];
+    const secrets = secretsFrom();
     for (const [name, g] of Object.entries(result?.gates || {})) {
       if (!g || g.status !== "RED") continue;
       const d = g.detail || gateDetail({ gate: name, stdout: g.log ?? "" });
       out.push(GATES_DETAIL_PREFIX + JSON.stringify({
         gate: name,
-        failing: Array.isArray(d.failing) ? d.failing : [],
-        ...(g.reason ? { reason: String(g.reason) } : {}),
+        run_id: runId ?? null,
+        runner: runnerId ?? null,
+        ...(Number.isInteger(round) ? { round } : {}),
+        failing: (Array.isArray(d.failing) ? d.failing : []).map((n) => scrubOne(n, secrets, DETAIL_MAX_NAME)),
+        ...(g.reason ? { reason: scrubOne(g.reason, secrets, DETAIL_MAX_REASON) } : {}),
         snippet: String(d.snippet ?? "").slice(-DETAIL_MAX_CHARS),
         ...(d.note ? { note: d.note } : {}),
       }));

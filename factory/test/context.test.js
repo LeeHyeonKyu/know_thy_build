@@ -367,7 +367,20 @@ test("Task 1: a [correctness, spec-conformance] roster yields two context manife
   expect(lines).toHaveLength(2);
   expect(lines[0].startsWith(CONTEXT_MANIFEST_PREFIX)).toBe(true);
   expect(lines[0]).not.toContain("\n");
-  expect(JSON.parse(lines[0].slice(CONTEXT_MANIFEST_PREFIX.length))).toEqual(cold);
+  expect(JSON.parse(lines[0].slice(CONTEXT_MANIFEST_PREFIX.length)))
+    .toEqual({ ...cold, run_id: null, runner: null });
+});
+
+/**
+ * 리뷰 provenance — `docs/factory/runs/**`는 에이전트가 덧붙일 수 있고 harvester는 첫 매치를 집는다.
+ * 줄이 자기를 쓴 런을 지목해야 T3가 어느 런에도 묶이지 않는 줄을 무시할 수 있다.
+ */
+test("리뷰 provenance: the manifest line names the run that wrote it (and the round when known)", () => {
+  const ctx = { roles: { correctness: { cold_read: true } }, issue: { number: 7 }, stage: "review", handoffs: {} };
+  const parsed = JSON.parse(contextManifestLines(ctx, { runId: "1234", runnerId: "gha-1234", round: 3 })[0].slice(CONTEXT_MANIFEST_PREFIX.length));
+  expect(parsed).toMatchObject({ role: "correctness", cold_read: true, run_id: "1234", runner: "gha-1234", round: 3 });
+  const bare = JSON.parse(contextManifestLines(ctx)[0].slice(CONTEXT_MANIFEST_PREFIX.length));
+  expect([bare.run_id, bare.runner, "round" in bare]).toEqual([null, null, false]);
 });
 
 test("Task 1: the manifest can be derived from a context alone, and never throws", () => {

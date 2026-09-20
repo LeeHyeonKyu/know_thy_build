@@ -171,10 +171,27 @@ export function contextManifestsFor(ctx) {
   } catch { return []; }
 }
 
-/** 런 레코드의 줄들 — 역할마다 `context-manifest: {…}`(한 줄 JSON, Task 3의 harvester가 정규식으로 읽는다). */
-export function contextManifestLines(ctx) {
-  try { return contextManifestsFor(ctx).map((m) => CONTEXT_MANIFEST_PREFIX + JSON.stringify(m)); }
-  catch (e) { return [`${CONTEXT_MANIFEST_PREFIX}unavailable — ${e?.message || e}`]; }
+/**
+ * 런 레코드의 줄들 — 역할마다 `context-manifest: {…}`(한 줄 JSON, Task 3의 harvester가 정규식으로 읽는다).
+ *
+ * 키: `role`, `cold_read`, `run_id`, `runner`, `round`(알 때만), `fields[]`.
+ *
+ * `run_id`/`runner`는 `gates-detail:`과 같은 이유로 실린다(리뷰 provenance): `docs/factory/runs/**`는
+ * 에이전트가 덧붙일 수 있는 경로이고 harvester는 첫 매치를 집으므로, 줄이 자기를 쓴 런을 지목해야
+ * T3가 위조된(= 어느 런에도 묶이지 않는) 줄을 무시할 수 있다 — `reviewEvidenceLine`의 batch-2 MF-2와
+ * 같은 계약이다. 모르면 `null`이다.
+ */
+export function contextManifestLines(ctx, { runId = null, runnerId = null, round = null } = {}) {
+  try {
+    return contextManifestsFor(ctx).map((m) => CONTEXT_MANIFEST_PREFIX + JSON.stringify({
+      role: m.role,
+      cold_read: m.cold_read,
+      run_id: runId ?? null,
+      runner: runnerId ?? null,
+      ...(Number.isInteger(round) ? { round } : {}),
+      fields: m.fields,
+    }));
+  } catch (e) { return [`${CONTEXT_MANIFEST_PREFIX}unavailable — ${e?.message || e}`]; }
 }
 
 /**

@@ -3386,3 +3386,52 @@ test("Task 1: a context with no roles adds no manifest line (nothing to declare,
   await runStage({ stage: "plan", issue: 4, deps: baseDeps({ runRecord: (l) => lines.push(...l) }) });
   expect(lines.some((l) => l.startsWith("context-manifest: "))).toBe(false);
 });
+
+/**
+ * 리뷰 provenance — 두 줄 다 **자기를 쓴 런**(그리고 review면 라운드)을 지목한다. `docs/factory/runs/**`는
+ * no-write 스테이지의 스크래치 경로라 에이전트 세션이 줄을 덧붙일 수 있고, harvester는 정규식의 첫
+ * 매치를 집는다 — `reviewEvidenceLine`이 batch-2 MF-2에서 닫은 그 구멍이다.
+ */
+test("Task 1: both record lines are bound to the run (and the review round) that wrote them", async () => {
+  const gates = await flGates();
+  const lines = [];
+  const deps = baseDeps({
+    gates: async () => gates,
+    buildContext: async () => flCtx(),
+    reviewRounds: async () => 1,                                       // 완료된 rework 1회 → 이번은 round 2
+    verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }),
+    runRecord: (l) => lines.push(...l),
+  });
+  await runStage({ stage: "review", issue: 39, deps, runnerId: "gha-777", runId: "777" });
+  const of = (prefix) => JSON.parse(lines.find((l) => l.startsWith(prefix)).slice(prefix.length));
+  expect(of("gates-detail: ")).toMatchObject({ run_id: "777", runner: "gha-777", round: 2 });
+  expect(of("context-manifest: ")).toMatchObject({ run_id: "777", runner: "gha-777", round: 2 });
+});
+
+/**
+ * 리뷰 SF-5 — KTB-51 리페어 턴은 `context.<role>.json`을 **다시 쓰고** `plan_repair`를 더한다. 그 두
+ * 번째 문맥이 플래너가 실제로 읽은 것이므로, 매니페스트가 없으면 그 런의 context-adequacy 상관이
+ * 틀린 목록 위에서 계산된다.
+ */
+test("Task 1 (리뷰 SF-5): the plan-repair turn's context is manifested too", async () => {
+  const lines = [];
+  const planCtx = (extra = {}) => ({
+    roster: [], orchestration: "workflow", limits: { K: 3 }, stage: "plan",
+    issue: { number: 51, title: "T", body: "" },
+    roles: { architect: { cold_read: false } },
+    handoffs: { plan: { done_when: [{ id: "dw1", text: "t" }] } },
+    ...extra,
+  });
+  let built = 0;
+  const deps = baseDeps({
+    buildContext: async ({ planRepair = null } = {}) => { built += 1; return planCtx(planRepair ? { plan_repair: planRepair } : {}); },
+    claudeP: async () => ({ is_error: false, result: "{}" }),
+    verifyStage: () => ({ ok: false, reasons: ["dissent d2 not covered"], planRepair: ["dissent d2 not covered"], data: {} }),
+    runRecord: (l) => lines.push(...l),
+  });
+  await runStage({ stage: "plan", issue: 51, deps });
+  expect(built).toBe(2);                                                // 첫 문맥 + 리페어 문맥
+  const manifests = lines.filter((l) => l.startsWith("context-manifest: "));
+  expect(manifests).toHaveLength(2);
+  expect(JSON.parse(manifests[1].slice("context-manifest: ".length)).fields).toContain("plan_repair");
+});

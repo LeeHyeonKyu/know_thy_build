@@ -545,13 +545,26 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
     const ctx = await d.buildContext({ setupDirty });
     /**
+     * Feedback loop Task 1 (리뷰 provenance) — 두 새 줄은 **자기를 쓴 런을 지목한다**. `docs/factory/runs/**`는
+     * 에이전트 세션이 덧붙일 수 있는 경로이고 harvester는 정규식의 첫 매치를 집으므로, 런에 묶이지 않은
+     * 줄은 위조와 구분되지 않는다(`reviewEvidenceLine`의 batch-2 MF-2와 같은 계약). 라운드는 **알 때만**
+     * 싣는다 — review 스테이지의 라운드는 에이전트의 자기 신고가 아니라 이슈에 남은 완료된 rework
+     * 전이 수(`reviewRounds`)이고, 그것을 못 읽으면 지어내지 않고 키를 빼 버린다.
+     */
+    let knownRound = null;
+    if (stage === "review") {
+      try { const prior = await d.reviewRounds?.(); if (typeof prior === "number") knownRound = prior + 1; }
+      catch { /* 라운드를 모르면 줄에 적지 않는다 — 기록이 멈출 이유는 아니다 */ }
+    }
+    const stamp = { runId, runnerId, round: knownRound };
+    /**
      * Feedback loop Task 1 — 역할별 `context.<role>.json`이 만들어지는 **그 순간** 무엇을 줬는지를
      * 런 레코드에 남긴다(역할당 한 줄, 필드 **이름만** — spec §10 Q1). 나중에 어떤 역할이 놓친 결함을
      * "그가 한 번도 보지 못한 필드"와 상관시키려면(§5 context adequacy) 이 목록이 durable해야 한다.
      * 여기서 바로 적는 이유: 이 뒤의 어느 지점에서 스테이지가 죽어도 "무엇을 보여줬는가"는 남아야 한다.
      * 로스터가 없는 컨텍스트는 선언할 것이 없으므로 아무 줄도 쓰지 않는다.
      */
-    const manifestNote = contextManifestLines(ctx);
+    const manifestNote = contextManifestLines(ctx, stamp);
     if (manifestNote.length) record(manifestNote);
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     let planRepairAttempt = 0;                                        // Task 9 (KTB-51): in-run one-shot cap for the plan validator repair
@@ -654,7 +667,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
      */
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates), ...testEnvNote] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
@@ -719,6 +732,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       let repairOut = null;
       try {
         const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        /**
+         * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
+         * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
+         * 매니페스트만 남기면 §5의 context-adequacy 상관이 바로 그 런에서 틀린 목록을 보게 된다.
+         */
+        const repairManifest = contextManifestLines(repairCtx, stamp);
+        if (repairManifest.length) record(repairManifest);
         await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
         repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
       } catch (e) {
