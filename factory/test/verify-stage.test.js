@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { verifyStage, hitApiError, apiErrorReason } from "../lib/verify-stage.js";
+import { verifyStage, hitApiError, apiErrorReason, deriveReworkPins } from "../lib/verify-stage.js";
 
 const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
   verdicts: [{ role: "correctness", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }, { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] }] };
@@ -184,6 +184,49 @@ test("plan validator regression: a medium+ dissent left uncovered STILL fails wi
   }));
   expect(bad.ok).toBe(false);
   expect(bad.reasons.join("; ")).toMatch(/dissent without done_when: d1/);
+});
+
+/**
+ * ── 리뷰 효율 Task 5 (Structure D) — 회귀 핀(regression pins) ────────────────────────────────
+ * `→ rework`에서 리뷰어 must_fix 하나가 carried **pin** `{id, guard, text}`이 된다. guard는 **꾸며내지
+ * 않는다**(spec §4.D / §9 Q5): 그 must_fix가 수용 계약(Task 1)의 done_when에 연결되고 그 done_when의
+ * `check`이 **돌릴 수 있는 테스트**일 때만 guard = 그 check. 그 외에는 `guard:null` → advisory 산문 핀.
+ */
+test("Task 5: deriveReworkPins — a must_fix linked to a done_when whose contract check is a test carries that guard; a prose must_fix carries guard:null", () => {
+  const doneWhen = [
+    { id: "dw1", text: "POST /notes returns 201", level: "unit", check: { kind: "test", ref: "test_7_create" }, rubric: "creates a note" },
+    { id: "dw2", text: "the page reads well", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "reads well" },
+  ];
+  const mustFix = [
+    { id: "dw1", where: "src/notes.js", claim: "create returns 500 on empty body", evidence: "", by: "correctness" },
+    { id: "mf-prose", where: "README.md", claim: "the heading is misleading", evidence: "", by: "spec-conformance" },
+  ];
+  const pins = deriveReworkPins({ mustFix, doneWhen });
+  const guarded = pins.find((p) => p.id === "dw1");
+  expect(guarded.guard).toEqual({ kind: "test", ref: "test_7_create" });
+  expect(guarded.text).toContain("create returns 500");
+  // dw2 is rubric-only (reviewer-judged) — a must_fix under it is never a guard.
+  const prose = pins.find((p) => p.id === "mf-prose");
+  expect(prose.guard).toBeNull();
+  expect(prose.text).toContain("heading is misleading");
+});
+
+test("Task 5: a guard links via done_when.covers and via a test name named in must_fix.where; legacy verify counts; rubric-only is never a guard", () => {
+  const doneWhen = [
+    { id: "dw3", text: "x", level: "unit", check: { kind: "test", ref: "test_7_stream" }, rubric: "r", covers: ["risk-1"] },
+    { id: "dw4", text: "y", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "r" },
+    { id: "dw5", text: "z", level: "unit", verify: "test_7_legacy" },   // 옛 철자 — check{kind:test}과 같다
+  ];
+  // (1) covers link: the must_fix id is covered by dw3.
+  expect(deriveReworkPins({ mustFix: [{ id: "risk-1", where: "w", claim: "c" }], doneWhen })[0].guard).toEqual({ kind: "test", ref: "test_7_stream" });
+  // (2) the must_fix.where names the test name of a contract check.
+  expect(deriveReworkPins({ mustFix: [{ id: "mfX", where: "regressed test_7_stream in src/s.js", claim: "c" }], doneWhen })[0].guard).toEqual({ kind: "test", ref: "test_7_stream" });
+  // (3) legacy verify is the old spelling of check{kind:test} — id link picks it up.
+  expect(deriveReworkPins({ mustFix: [{ id: "dw5", where: "w", claim: "c" }], doneWhen })[0].guard).toEqual({ kind: "test", ref: "test_7_legacy" });
+  // (4) a rubric-only contract → no guard even when the id matches (do NOT fabricate a guard).
+  expect(deriveReworkPins({ mustFix: [{ id: "dw4", where: "w", claim: "c" }], doneWhen })[0].guard).toBeNull();
+  // (5) no acceptance contract at all → every pin is advisory (no fabricated guard).
+  expect(deriveReworkPins({ mustFix: [{ id: "dw3", where: "w", claim: "c" }], doneWhen: [] })[0].guard).toBeNull();
 });
 
 test("plan validator does not run for other stages", () => {

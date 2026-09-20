@@ -42,6 +42,27 @@ test("review context: tier from triage handoff, roster from charter, agents/less
 });
 
 /**
+ * Structure D (리뷰 효율 Task 5) — rework 핸드오프가 실은 회귀 핀이 재디스패치된 빌더의 컨텍스트
+ * (loaded.json.rework_pins)로 그대로 전달된다. guard가 붙은 핀은 다음 self-gate의 하드 게이트라
+ * 빌더가 먼저 알아야 하고, 산문 핀은 체크리스트다. rework가 아닌 리뷰 핸드오프는 핀을 나르지 않는다.
+ */
+test("Task 5: a rework review handoff carries regression pins into the re-dispatched builder's loaded context", async () => {
+  const r = root();
+  const review = renderHandoff({ stage: "review", issue: 30, summary: "s", data: {
+    schema: "factory.review.v1", issue: 30, pr: 3, head_sha: "a".repeat(40), round: 1, orchestration: "workflow",
+    decision: "rework", verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: [{ id: "dw1", where: "x", claim: "c", evidence: "e" }], should_fix: [], verified: [] }],
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_30_create" }, text: "create returns 201" }, { id: "mf-prose", guard: null, text: "heading is misleading" }],
+  } });
+  const gh = { issue: vi.fn(async () => ({ number: 30, title: "T", body: "", labels: ["factory:rework"] })), comments: vi.fn(async () => [{ id: 1, body: review, createdAt: "2026-09-11T00:00:00Z" }]) };
+  await buildContext({ root: r, gh, issue: 30, stage: "implement" });
+  const loaded = JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  expect(loaded.rework_pins).toEqual([
+    { id: "dw1", guard: { kind: "test", ref: "test_30_create" }, text: "create returns 201" },
+    { id: "mf-prose", guard: null, text: "heading is misleading" },
+  ]);
+});
+
+/**
  * 감사 Task 9: standard tier의 plan은 **단일 패스**다 — 계획자 1 + skeptic 1. `rounds`는 여전히
  * 숫자 하나로 남고(verify-stage의 expectedRounds가 그 계약이다), 모드와 done_when 상한은
  * 새 `plan` 블록으로 실린다.

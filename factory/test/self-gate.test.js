@@ -141,6 +141,57 @@ test("a misconfigured mutation check is a harness-class blocking finding", async
   expect(harnessFinding(res.findings)).toBe(true);
 });
 
+// ── Structure D (review-efficiency Task 5) — regression pins carried across rework ─────────────
+// A carried pin re-runs its guard test at the self-gate BEFORE another review round. A guardable pin
+// (a runnable test) is a HARD gate; a prose pin is advisory only (spec §9 Q5: no unsatisfiable loop).
+const vitestRun = (result) => makeFakeRun([{ match: (c, a) => c === "bash" && a[1].includes("vitest"), result }]);
+const pinBase = { root: "/root", harness, contract: [], roster: ["correctness"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" }, changedTests: [], changedSources: [] };
+
+// KTB #18 R3: fixing round-2's must_fix introduced a new defect under the SAME id. A guardable pin
+// re-run at the self-gate goes red → the handoff is blocked before another full review round.
+test("Task 5 / KTB #18 R3: a carried guardable pin whose guard test is RED → ok:false naming the pin id (handoff blocked)", async () => {
+  const res = await runSelfGate({
+    ...pinBase, run: vitestRun(assertionRed),
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_7_create" }, text: "POST /notes returns 201" }],
+  });
+  expect(res.ok).toBe(false);
+  expect(res.ranChecks).toContain("pins");
+  const blocking = res.findings.filter((f) => f.blocking);
+  expect(blocking.flatMap((f) => f.ids || [])).toContain("dw1");
+  expect(blocking.map((f) => f.detail).join(" ")).toMatch(/regress/i);
+});
+
+test("Task 5: a guardable pin whose guard test is GREEN does not block (the pinned property held)", async () => {
+  const res = await runSelfGate({
+    ...pinBase, run: vitestRun(ok),
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_7_create" }, text: "t" }],
+  });
+  expect(res.ok).toBe(true);
+  expect(res.findings.filter((f) => f.blocking)).toEqual([]);
+  expect(res.ranChecks).toContain("pins");
+});
+
+test("Task 5: an advisory (prose) pin is surfaced but NEVER blocks — no unsatisfiable loop (spec §9 Q5)", async () => {
+  const res = await runSelfGate({
+    ...pinBase, run: makeFakeRun([]),   // a prose pin runs nothing — a fabricated guard would loop forever
+    pins: [{ id: "mf-prose", guard: null, text: "the heading is misleading" }],
+  });
+  expect(res.ok).toBe(true);
+  expect(res.findings.filter((f) => f.blocking)).toEqual([]);
+  expect(advisoryFindings(res.findings).map((f) => f.detail).join(" ")).toContain("mf-prose");
+});
+
+test("Task 5: a guardable pin whose guard cannot run (module/parse error, no test matched) is advisory, not blocking — no unsatisfiable loop", async () => {
+  const cantRun = { code: 1, stdout: "", stderr: "Cannot find module 'vitest'" };
+  const res = await runSelfGate({
+    ...pinBase, run: vitestRun(cantRun),
+    pins: [{ id: "dw1", guard: { kind: "test", ref: "test_7_create" }, text: "t" }],
+  });
+  expect(res.ok).toBe(true);
+  expect(res.findings.filter((f) => f.blocking)).toEqual([]);
+  expect(advisoryFindings(res.findings).length).toBeGreaterThan(0);
+});
+
 // mutation-check skips (deliberately under-fires) and are advisory, not blocking.
 test("mutation-check skips are advisory, not blocking", async () => {
   const fs = fakeFs({ "/root/test/x.test.js": "// no import", "/wt/x": "x" });

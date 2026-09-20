@@ -177,6 +177,10 @@ const disputed = Array.isArray(loaded.disputed) ? loaded.disputed.filter(Boolean
 // findings ride the context so this re-dispatched builder knows WHY — a blind retry cannot clear the
 // self-gate and is what makes the RED route loop. Fed straight into the build prompt (selfGateBlock).
 const selfGateFindings = Array.isArray(loaded.self_gate_findings) ? loaded.self_gate_findings.filter(Boolean) : [];
+// Structure D (Task 5): regression pins carried from the prior rework round. A pin with a `guard`
+// (a runnable test) is a HARD gate the self-gate re-runs before this handoff; a pin with `guard:null`
+// is an advisory checklist line only. The builder must not silently regress a pinned property.
+const reworkPins = Array.isArray(loaded.rework_pins) ? loaded.rework_pins.filter(Boolean) : [];
 const priorPr = typeof loaded.pr === 'number' ? loaded.pr : null;
 
 // Rework completeness (§7.5, P3-R4): every must_fix id must come back as `fixed` with the commit that
@@ -429,10 +433,25 @@ const selfGateBlock = selfGateFindings.length > 0
     `means a done_when has no evidence a reviewer can point to — add the test/manifest entry it names.`
   : '';
 
+// Structure D (Task 5): the regression pins carried from prior rounds. Guardable pins (a test) are
+// re-run by the self-gate and HARD-block the handoff if red — a fix that regresses one never reaches
+// review. Prose pins are advisory checklist lines only (there is nothing to run, so no loop).
+const guardablePins = reworkPins.filter((p) => p && p.guard && p.guard.kind === 'test' && p.guard.ref);
+const advisoryPins = reworkPins.filter((p) => !(p && p.guard && p.guard.kind === 'test' && p.guard.ref));
+const pinsBlock = reworkPins.length > 0
+  ? `\n\nREGRESSION PINS carried from prior rework rounds — do NOT let a fix regress a property a past ` +
+    `round already established.` +
+    (guardablePins.length > 0 ? `\nThese have a runnable GUARD TEST; the stage's self-gate RE-RUNS each ` +
+      `before your handoff and will BLOCK it (escalating rather than looping) if the guard goes red — ` +
+      `keep them green:\n${JSON.stringify(guardablePins, null, 2)}\n` : '') +
+    (advisoryPins.length > 0 ? `These are advisory checklist lines (no runnable guard) — honour them, ` +
+      `but they never block:\n${JSON.stringify(advisoryPins.map((p) => ({ id: p.id, text: p.text })), null, 2)}\n` : '')
+  : '';
+
 const buildPrompt =
   `${builderReading}\n\n` +
   `Issue #${issue} (tier ${tier}). Build the planned change.\n\n` +
-  `${buildRules}${reworkBlock}${selfGateBlock}`;
+  `${buildRules}${reworkBlock}${selfGateBlock}${pinsBlock}`;
 
 const SHA_NOTE =
   `\n\nYour previous answer's head_sha was not a 40-character lowercase hex sha. head_sha must be the ` +
@@ -549,7 +568,7 @@ if (built && verdict && verdict.verdict === 'rejected') {
     `A finding about a test is a finding ` +
     `about the test: strengthen the assertion or the fixture rather than the code that makes it pass. ` +
     `This is your only fix round — the next verdict ends the stage either way.\n\n` +
-    `${buildRules}${reworkBlock}${selfGateBlock}`;
+    `${buildRules}${reworkBlock}${selfGateBlock}${pinsBlock}`;
 
   const fixed = await build(fixPrompt, 'fix');
   if (fixed) built = { ...built, ...fixed, rework_response: fixed.rework_response || built.rework_response };

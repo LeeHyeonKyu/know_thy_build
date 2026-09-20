@@ -300,6 +300,34 @@ test("review stage derives decision from verdicts via aggregateReview", async ()
   expect(incomplete.writeHandoff).not.toHaveBeenCalled();
 });
 
+// Task 5 (Structure D): on → rework the review handoff carries regression pins, guard derived from the
+// acceptance contract (Task 1). A must_fix whose id is a done_when with a test check → a guardable pin;
+// a must_fix with no contract link → an advisory (guard:null) pin. Kills KTB #18 R3.
+test("Task 5: the → rework handoff carries pins with guards derived from the plan's acceptance contract", async () => {
+  const doneWhen = [{ id: "dw1", text: "POST /notes 201", level: "unit", check: { kind: "test", ref: "test_7_create" }, rubric: "creates a note" }];
+  const verdicts = [
+    { role: "correctness", verdict: "reject", confidence: "high", must_fix: [
+      { id: "dw1", where: "a.js:1", claim: "create 500s on empty body", evidence: "test fails" },
+      { id: "mf-prose", where: "README.md", claim: "heading misleads", evidence: "read it" },
+    ], should_fix: [], verified: [] },
+    { role: "qa", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] },
+  ];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ({ roster: ["correctness", "qa"], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: { done_when: doneWhen } } }),
+    heartbeat: async () => ({ stop() {} }), claudeP: async () => ({ is_error: false, result: "{}" }), gates: async () => null,
+    verifyStage: () => ({ ok: true, reasons: [], data: { round: 1, verdicts } }),
+    writeHandoff: vi.fn(async () => {}), transition: vi.fn(async () => ({ ok: true })),
+    runRecord: () => {}, release: async () => {},
+  };
+  expect(await runStage({ stage: "review", issue: 7, deps })).toBe(0);
+  const handoff = deps.writeHandoff.mock.calls.at(0)[0];
+  expect(handoff.data.decision).toBe("rework");
+  const pins = handoff.data.pins;
+  expect(pins.find((p) => p.id === "dw1").guard).toEqual({ kind: "test", ref: "test_7_create" });
+  expect(pins.find((p) => p.id === "mf-prose").guard).toBeNull();
+});
+
 // ── 여기부터: 최종 리뷰에서 걸린 것들 ────────────────────────────────────────
 
 const baseDeps = (over = {}) => ({

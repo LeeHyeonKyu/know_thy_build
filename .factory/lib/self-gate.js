@@ -1,4 +1,5 @@
-import { checkNewTestsFailOnMutation } from "./mutation-check.js";
+import { checkNewTestsFailOnMutation, isWrongReasonRed } from "./mutation-check.js";
+import { q } from "./prove-test.js";
 
 /**
  * ── Structure B (review-efficiency plan Task 3 / design §4.B) ──────────────────────────────────
@@ -41,6 +42,74 @@ import { checkNewTestsFailOnMutation } from "./mutation-check.js";
 
 const CONTRACT_KINDS = new Set(["finish", "gate"]);
 
+/**
+ * ── Structure D (review-efficiency Task 5) — regression pins carried across rework ──────────────
+ *
+ * On `→ rework`, each reviewer must_fix is carried as a **pin** `{ id, guard: {kind,ref}|null, text }`
+ * (derived in verify-stage.js `deriveReworkPins`). Here the next self-gate RE-RUNS each guardable pin's
+ * test BEFORE the handoff, so a fix that silently regressed a prior finding never reaches another full
+ * review round (KTB #18 R3: fixing round R's must_fix reintroduced a defect under the SAME id).
+ *
+ * **A guardable pin (a runnable test) is a HARD gate; a prose pin is advisory only** (spec §9 Q5). The
+ * split is exactly `deriveReworkPins`' guard-vs-null, so a prose finding can NEVER create an unsatisfiable
+ * loop — there is nothing to run, so nothing can stay red forever.
+ *
+ * **A red guard blocks ONLY when the red is a real assertion failure.** A guard that cannot even run in
+ * this tree (module/parse error, or no test matched the name) is `undecidable`, not a regression — it is
+ * surfaced as advisory, never blocking. Fail-closing on a guard we cannot run would resurrect the very
+ * unsatisfiable loop the prose/guard split is designed to avoid.
+ */
+const PIN_CANNOT_RUN = /no test(?:s| files)?\s+(?:found|matched)|does not match|passWithNoTests/i;
+
+/** The command that re-runs a pin's guard test BY NAME (the acceptance contract's `check.ref`, not a
+ * file). We hold the test name, not its file, so we filter by name via the harness's per-file test
+ * runner — for vitest/jest that is `-t <name>`. No `test_files` command → we cannot run it (advisory). */
+function pinGuardCommand(harness, name) {
+  const base = harness?.commands?.test_files;
+  if (typeof base !== "string" || !base) return null;
+  return base.replaceAll("{files}", `-t ${q(name)}`);
+}
+
+/**
+ * Evaluate carried pins. Guardable pins run their guard test; a real assertion-red is a blocking
+ * regression naming the pin id. Prose pins (and un-runnable guards) are advisory only. Returns
+ * `{ findings, ran }` — `ran` is true iff at least one guard test was actually executed.
+ */
+export async function evaluatePins({ pins = [], run, harness, root, cwd = root } = {}) {
+  const findings = [];
+  let ran = false;
+  for (const p of Array.isArray(pins) ? pins : []) {
+    if (!p || typeof p !== "object") continue;
+    const id = p.id != null ? String(p.id) : "";
+    const text = typeof p.text === "string" ? p.text : "";
+    const guard = p.guard && typeof p.guard === "object" ? p.guard : null;
+    if (!(guard && guard.kind === "test" && typeof guard.ref === "string" && guard.ref.trim())) {
+      // Advisory prose pin — surfaced to the builder, never a hard gate (no unsatisfiable loop).
+      findings.push({ check: "pin", blocking: false, ids: [id], detail: `checklist pin ${id}: ${text}` });
+      continue;
+    }
+    const ref = guard.ref.trim();
+    const cmd = pinGuardCommand(harness, ref);
+    if (!cmd || typeof run !== "function") {
+      findings.push({ check: "pin", blocking: false, ids: [id], detail: `pin ${id}: guard ${ref} not runnable (no per-file test command) — advisory: ${text}` });
+      continue;
+    }
+    ran = true;
+    let r;
+    try { r = await run("bash", ["-lc", cmd], { cwd }); }
+    catch (e) { findings.push({ check: "pin", blocking: false, ids: [id], detail: `pin ${id}: guard ${ref} could not run — ${e?.message || e}` }); continue; }
+    const out = `${r?.stdout || ""}\n${r?.stderr || ""}`;
+    if (r?.code === 0) continue;                                       // green — the pinned property still holds
+    if (isWrongReasonRed(out) || PIN_CANNOT_RUN.test(out)) {
+      // red for the WRONG reason (did not load / no test matched) — undecidable, never a regression.
+      findings.push({ check: "pin", blocking: false, ids: [id], detail: `pin ${id}: guard ${ref} could not be evaluated (did not run) — advisory: ${text}` });
+      continue;
+    }
+    findings.push({ check: "pin", blocking: true, ids: [id], detail: `regression: pin ${id} guard ${ref} is red — a prior fix regressed: ${text}` });
+  }
+  return { findings, ran };
+}
+
 /** A compact one-line summary for the run record (`self-gate: <findings>`). */
 export const summarizeFindings = (findings = []) =>
   findings.length
@@ -58,6 +127,7 @@ export async function runSelfGate({
   gates = null, run, changedTests = [], changedSources = [],
   qaEvidence = null,       // function → evidence summary (deferred), or the summary object
   mutation = {},           // fs/tmp passthrough for checkNewTestsFailOnMutation (tests inject doubles)
+  pins = [],               // Task 5 — regression pins carried from the prior rework round
 } = {}) {
   const findings = [];
   const ranChecks = [];
@@ -129,6 +199,14 @@ export async function runSelfGate({
         }
       }
     }
+  }
+
+  // (4) Regression pins (Task 5). Guardable pins re-run their guard test; a red guard is a blocking
+  // regression naming the pin id. Prose pins are advisory only — no unsatisfiable loop (spec §9 Q5).
+  if (Array.isArray(pins) && pins.length) {
+    ranChecks.push("pins");
+    const { findings: pinFindings } = await evaluatePins({ pins, run, harness, root });
+    findings.push(...pinFindings);
   }
 
   return { ok: !findings.some((f) => f.blocking), findings, ranChecks };

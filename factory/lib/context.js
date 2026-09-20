@@ -258,6 +258,12 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
     : [];
+  /**
+   * Structure D (리뷰 효율 Task 5) — rework 핸드오프가 실은 **회귀 핀**을 빌더에게 되먹인다. guard가
+   * 붙은 핀은 다음 self-gate의 하드 게이트라 빌더가 그것을 먼저 알아야 하고, 산문 핀은 체크리스트다.
+   * self-gate 자신도 `ctxCache.handoffs.review.pins`를 직접 읽으므로(run-stage), 이 값은 빌더 프롬프트용이다.
+   */
+  const reworkPins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins.filter(Boolean) : [];
   let disputed = [];
   // PR 코멘트 조회가 실패해도 스테이지를 죽이지 않는다 — 분쟁 목록이 비면 그 라운드에 분쟁이 없었던
   // 것과 같은 경로를 타고, 살아남은 must_fix는 아래 `must_fix`가 그대로 들고 간다(fail-safe, not fail-open:
@@ -301,6 +307,9 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     setup_dirty: ctx.setup_dirty ?? [],
     must_fix: mustFix,
     disputed,
+    // Task 5 — regression pins carried from the prior rework round (guardable → hard gate at the
+    // self-gate; prose → advisory checklist). Absent on a first implement.
+    ...(reworkPins.length ? { rework_pins: reworkPins } : {}),
     // Structure B (Task 3): the self-gate findings that bounced this head, if any — the builder fixes
     // them before the handoff (factory-implement.js). Absent when the self-gate did not block.
     ...(Array.isArray(selfGateFindings) && selfGateFindings.length ? { self_gate_findings: selfGateFindings } : {}),

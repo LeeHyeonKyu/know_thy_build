@@ -168,6 +168,57 @@ function hasUsableCheck(item, check) {
 }
 
 /**
+ * ── 회귀 핀 (리뷰 효율 Task 5, Structure D / design §4.D) ──────────────────────────────────────
+ * `→ rework`에서 리뷰어 must_fix 하나하나가 carried **pin** `{ id, guard: {kind, ref} | null, text }`이
+ * 된다. 돌릴 수 있는 테스트가 guard로 붙은 핀은 다음 self-gate의 **하드 게이트**이고, guard가 없는
+ * 산문 핀은 advisory 체크리스트 줄일 뿐이다(spec §9 Q5 — 불가능한 루프를 만들지 않는다). KTB #18 R3를
+ * 죽인다: R라운드의 must_fix를 고치다 **같은 id** 아래 새 결함을 낳았을 때, guard 테스트를 self-gate에서
+ * 다시 돌리면 또 한 번의 전면 리뷰 라운드 전에 그 회귀를 잡는다.
+ *
+ * **guard는 꾸며내지 않는다.** 리뷰어 must_fix는 대개 산문이다. guard는 **연결이 있을 때만** 뽑는다:
+ *   (1) must_fix의 `id`가 어떤 done_when의 id와 같거나,
+ *   (2) 어떤 done_when의 `covers`가 그 id를 짚거나,
+ *   (3) must_fix의 `where`가 어떤 done_when 계약 check의 테스트 이름을 그대로 담고 있을 때.
+ * 그 done_when의 수용 계약 `check {kind:"test", ref}`(또는 옛 철자 `verify`)이 **돌릴 수 있는 테스트
+ * 이름**이면 그것이 guard가 된다. 그 외에는 `guard: null` → advisory 산문 핀뿐이다(불가능한 self-gate
+ * 루프를 절대 만들지 않는다).
+ */
+function testGuardOf(dw) {
+  if (!dw || typeof dw !== "object") return null;
+  const c = dw.check;
+  if (c && typeof c === "object" && c.kind === "test" && isRunnableTestRef(c.ref)) return { kind: "test", ref: c.ref.trim() };
+  // 옛 핸드오프: `verify`(테스트 id)는 `check {kind:"test"}`의 옛 철자다(이 파일의 다른 판정과 같은 계약).
+  if (typeof dw.verify === "string" && isRunnableTestRef(dw.verify)) return { kind: "test", ref: dw.verify.trim() };
+  return null;
+}
+export function deriveReworkPins({ mustFix = [], doneWhen = [] } = {}) {
+  const dw = (Array.isArray(doneWhen) ? doneWhen : []).filter((d) => d && typeof d === "object");
+  const byId = new Map();
+  for (const d of dw) if (typeof d.id === "string" && d.id) byId.set(d.id, d);
+  const byCovered = new Map();
+  for (const d of dw) if (Array.isArray(d.covers)) for (const c of d.covers) byCovered.set(String(c), d);
+  const findLinked = (m) => {
+    const id = m?.id != null ? String(m.id) : "";
+    if (id && byId.has(id)) return byId.get(id);
+    if (id && byCovered.has(id)) return byCovered.get(id);
+    const where = typeof m?.where === "string" ? m.where : "";
+    if (where) {
+      for (const d of dw) {
+        const g = testGuardOf(d);
+        if (g && where.includes(g.ref)) return d;
+      }
+    }
+    return null;
+  };
+  return (Array.isArray(mustFix) ? mustFix : []).filter(Boolean).map((m) => {
+    const id = m.id != null ? String(m.id) : "";
+    const text = typeof m.claim === "string" && m.claim.trim() ? m.claim
+      : typeof m.where === "string" && m.where.trim() ? m.where : id;
+    return { id, guard: testGuardOf(findLinked(m)), text };
+  });
+}
+
+/**
  * `plan.v1` 핸드오프를 CHARTER의 plan 규칙으로 검사한다. 반환은 사유 문자열 배열(빈 배열 = 유효).
  * 스키마 검사와 별개다 — 스키마는 "모양", 이것은 "계약".
  */

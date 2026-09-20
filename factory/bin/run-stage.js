@@ -26,7 +26,7 @@ import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
 import { readAgentsLog } from "../lib/agents-log.js";
-import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable } from "../lib/verify-stage.js";
+import { verifyStage, hitMaxTurns, hitApiError, isNonTransientApiError, qaEvidenceUnusable, deriveReworkPins } from "../lib/verify-stage.js";
 import { readTranscript, extractStageArtifact } from "../lib/stage-artifact.js";
 import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
@@ -748,6 +748,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       }
       v.data.decision = agg.decision;
       v.data.must_fix = agg.must_fix;
+      /**
+       * ── 리뷰 효율 Task 5 (Structure D) — 회귀 핀 ──────────────────────────────────────────────
+       * `→ rework`일 때만, 이 라운드의 must_fix를 carried **pin**으로 접는다(`deriveReworkPins`).
+       * guard는 수용 계약(Task 1)의 done_when `check`에서 연결이 있을 때만 뽑는다 — 돌릴 수 있는
+       * 테스트면 다음 self-gate의 하드 게이트, 아니면 advisory 산문 핀뿐이다(spec §9 Q5: 불가능한
+       * 루프 금지). 핀은 rework 핸드오프에 실려, 다음 implement 런의 빌더(context.js loadedFor →
+       * factory-implement.js)와 그 런의 self-gate가 함께 읽는다. KTB #18 R3을 죽인다.
+       */
+      if (agg.decision === "rework") {
+        v.data.pins = deriveReworkPins({ mustFix: agg.must_fix, doneWhen: ctx?.handoffs?.plan?.done_when ?? [] });
+      }
       /**
        * ── 리뷰 batch-1 MF-2 (H1b-b) — **이 판정에 출처를 남긴다.**
        * handoff 코멘트는 에이전트가 쥔 봇 계정으로 나가고 `gh issue comment`는 훅이 일부러 열어 둔
@@ -2194,11 +2205,18 @@ async function main() {
         touchesData: touchesDataPaths(ctxCache?.handoffs?.triage?.impact_paths ?? []),
         headSha: ctxCache?.handoffs?.implement?.head_sha ?? null,
       });
+      /**
+       * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
+       * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
+       * re-runs guardable pins (a red guard is a regression) and surfaces prose pins as advisory.
+       */
+      const review = ctxCache?.handoffs?.review;
+      const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
       return runSelfGate({
         root, harness, contract, roster, tier, gates, run,
         // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
         // property is violated"; a lightly-edited pre-existing test is not what it judges.
-        changedTests: diff.addedTests, changedSources: diff.sources, qaEvidence,
+        changedTests: diff.addedTests, changedSources: diff.sources, qaEvidence, pins,
       });
     },
     /**
