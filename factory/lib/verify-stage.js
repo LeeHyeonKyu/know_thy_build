@@ -206,14 +206,23 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
   doneWhen.forEach((d, i) => {
     const id = typeof d?.id === "string" && d.id ? d.id : `dw${i + 1}`;
     const check = d && typeof d.check === "object" && d.check ? d.check : null;
-    // `check.kind:"test"`를 **명시한** 항목의 ref는 Task 3가 실제로 돌릴 수 있어야 한다 — 비었거나
-    // 테스트 이름 모양이 아니면 돌릴 수 없는 계약이므로, rubric이 있든 없든 미완으로 본다.
-    if (check && check.kind === "test" && !isRunnableTestRef(check.ref)) {
-      reasons.push(`acceptance contract incomplete: ${id}`);
+    const hasRubric = typeof d?.rubric === "string" && d.rubric.trim() !== "";
+    if (check) {
+      // 새 항목(명시적 `check`을 실은 것)은 계약을 온전히 갖춘다 — check과 rubric 둘 다. 이 검증기가
+      // 모든 핸드오프의 실제 게이트이므로(재종합·수리 턴·손편집은 emission 스키마를 통과하지 않는다),
+      // Task 7 리뷰어의 채점 기준(rubric)을 여기서 보장한다.
+      // `check.kind:"test"`의 ref는 Task 3가 실제로 돌릴 수 있어야 한다 — 비었거나 테스트 이름 모양이
+      // 아니면 돌릴 수 없는 계약이라 미완이다.
+      if (check.kind === "test" && !isRunnableTestRef(check.ref)) {
+        reasons.push(`acceptance contract incomplete: ${id}`);
+      } else if (!hasRubric) {
+        reasons.push(`acceptance contract incomplete: ${id} — check present but rubric missing`);
+      }
       return;
     }
-    const hasRubric = typeof d?.rubric === "string" && d.rubric.trim() !== "";
-    if (!hasUsableCheck(d, check) && !hasRubric) reasons.push(`acceptance contract incomplete: ${id}`);
+    // 옛 항목: 명시적 check이 없다. `verify`(check {kind:"test"}의 옛 철자)나 rubric 중 하나면 계약이
+    // 완결이다 — 옛 핸드오프는 rubric 없이 verify만으로 통과한다(back-compat).
+    if (!hasUsableCheck(d, null) && !hasRubric) reasons.push(`acceptance contract incomplete: ${id}`);
   });
 
   return reasons;

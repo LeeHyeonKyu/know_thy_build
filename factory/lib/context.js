@@ -55,7 +55,14 @@ export async function resolveTier({ run, cwd, base, harness, tier }) {
  * 도구는 "coverage: complete", 러너는 "missing"을 말한다 — 같은 `done_when`의 두 독자가 갈린다.
  * 필드 하나가 KTB #3 모양(도구와 게이트가 '증거가 충분한가'를 다르게 답하는 것)을 재생산한다.
  */
-const DONE_WHEN_FIELDS = ["id", "text", "verify", "level", "ui"];
+/**
+ * `check`·`rubric`이 이 목록에 있어야 하는 이유(리뷰 효율 Task 1, `ui`의 A-MF1과 같은 부류): 수용 계약은
+ * `check {kind, ref}`(어떻게 확인되는가)와 `rubric`(리뷰어가 적용할 한 줄 기준)으로 산다. cold read 리뷰어
+ * (Task 7)와 qa 도구는 이 투영본의 `done_when`만 읽으므로, 여기서 빠지면 계약이 그들에게 닿지 않는다 —
+ * 새 계획은 `verify`도 없어 id/text/level만 남는다. 계약을 만든 스테이지와 소비하는 스테이지가 갈리지
+ * 않도록 두 필드를 투영에 싣는다.
+ */
+const DONE_WHEN_FIELDS = ["id", "text", "verify", "check", "rubric", "level", "ui"];
 const pick = (o, keys) => {
   const out = {};
   for (const k of keys) if (o != null && o[k] !== undefined) out[k] = o[k];
@@ -85,7 +92,7 @@ export function acceptanceOf(body) {
  * (`roles.toml [review.spec-conformance] cold_read = false`), 계약 전체를 보는 것이 그 임무다.
  *
  * cold read 역할이 받는 것은 **이슈·tier·로스터·자기 lessons·PR 번호/head sha·게이트 요약·계획의
- * `done_when`(id/text/verify/level)** 뿐이다. 받지 않는 것: plan 산문·dissent_log·`files_expected`·
+ * `done_when`(id/text/verify/check/rubric/level/ui — 수용 계약 포함)** 뿐이다. 받지 않는 것: plan 산문·dissent_log·`files_expected`·
  * implement handoff(verifier 판정·tests_added·PR 설명)·다른 리뷰어의 판정. `handoffs` 키 자체가 없다.
  * PR 번호와 head sha는 예외다 — 그것은 builder의 **설명**이 아니라 "무엇을 판정하는가"의 좌표다.
  *

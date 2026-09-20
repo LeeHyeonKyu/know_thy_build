@@ -132,11 +132,29 @@ test("plan validator: a done_when with neither check nor rubric is an incomplete
   expect(bad.ok).toBe(false);
   expect(bad.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw9/);
 
-  // check 하나만 있어도, rubric 하나만 있어도 통과한다.
-  const withCheck = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "test", ref: "test_7_export" } }] }));
+  // 명시적 check을 실은 새 항목은 rubric도 함께 지녀야 완결이다. rubric만으로도(rubric-only 경로) 통과한다.
+  const withCheck = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "test", ref: "test_7_export" }, rubric: "the reviewer confirms the stream is used" }] }));
   expect(withCheck.ok).toBe(true);
   const withRubric = verifyPlan(planFix({ done_when: [{ id: "dw9", text: "t", level: "unit", check: { kind: "rubric", ref: "" }, rubric: "the warning appears before the command block" }] }));
   expect(withRubric.ok).toBe(true);
+});
+
+/**
+ * should_fix #1 — 새 항목(명시적 `check`)은 rubric도 반드시 지닌다. 검증기가 모든 핸드오프의 실제
+ * 게이트이므로(재종합·수리 턴·손편집은 emission 스키마를 안 거친다), Task 7 리뷰어가 채점할 기준을
+ * 여기서 보장한다. 옛 `verify`-only 항목은 rubric 없이 그대로 통과한다(back-compat).
+ */
+test("plan validator: a new-style item (explicit check) with an empty/absent rubric is rejected; legacy verify-only stays rubric-free", () => {
+  const absent = verifyPlan(planFix({ done_when: [{ id: "dw5", text: "t", level: "unit", check: { kind: "test", ref: "test_7_x" } }] }));
+  expect(absent.ok).toBe(false);
+  expect(absent.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw5 — check present but rubric missing/);
+
+  const empty = verifyPlan(planFix({ done_when: [{ id: "dw5", text: "t", level: "unit", check: { kind: "gate", ref: "lint" }, rubric: "   " }] }));
+  expect(empty.ok).toBe(false);
+  expect(empty.reasons.join("; ")).toMatch(/acceptance contract incomplete: dw5 — check present but rubric missing/);
+
+  // 옛 핸드오프: verify만, check/rubric 없음 — 그대로 통과한다.
+  expect(verifyPlan(planFix({ done_when: [{ id: "dw5", text: "t", level: "unit", verify: "test_7_x" }] })).ok).toBe(true);
 });
 
 test("plan validator: a legacy verify (a test id) counts as the check — old handoffs without check/rubric still pass", () => {

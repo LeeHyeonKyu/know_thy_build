@@ -242,6 +242,37 @@ test("H4: no cold-read reviewer context contains handoffs.implement / the verifi
     .toBe(".factory/lessons/reviewer-correctness.md");
 });
 
+/**
+ * 리뷰 효율 Task 1 (`ui`의 A-MF1과 같은 부류) — 수용 계약(`check`+`rubric`)이 cold-read 투영본을
+ * 살아서 통과해야 Task 3/7이 그것을 읽는다. `DONE_WHEN_FIELDS`에서 빠지면 새 계획은 id/text/level만
+ * 남아(새 계획엔 `verify`도 없다) 리뷰어가 채점할 계약이 닿지 않는다.
+ */
+test("Task 1: the qa/correctness cold-read context keeps check and rubric for a done_when item", async () => {
+  const r = root();
+  const issue = 7;
+  const contractPlan = renderHandoff({
+    stage: "plan", issue, summary: "s",
+    data: {
+      schema: "factory.plan.v1", issue, tier: "standard", summary: "export CSV",
+      done_when: [{ id: "dw1", text: "header row", level: "unit", check: { kind: "test", ref: "test_7_header" }, rubric: "the reviewer confirms a header row is present", rationale: "계획의 산문" }],
+      files_expected: ["src/export/csv.js"], non_goals: [], dissent_log: [],
+    },
+  });
+  const gh = {
+    issue: vi.fn(async () => ({ number: issue, title: "T", body: "n/a" })),
+    comments: vi.fn(async () => [
+      { id: 1, body: renderHandoff({ stage: "triage", issue, summary: "s", data: { schema: "factory.triage.v1", issue, disposition: "ready", tier: "standard" } }), createdAt: "2026-09-11T00:00:00Z" },
+      { id: 2, body: contractPlan, createdAt: "2026-09-12T00:00:00Z" },
+      { id: 3, body: implementHandoff(issue), createdAt: "2026-09-13T00:00:00Z" },
+    ]),
+  };
+  await buildContext({ root: r, gh, issue, stage: "review" });
+  for (const role of ["correctness", "qa"]) {
+    const rc = JSON.parse(readFileSync(join(r, `.factory/out/context.${role}.json`), "utf8"));
+    expect(rc.done_when, role).toEqual([{ id: "dw1", text: "header row", level: "unit", check: { kind: "test", ref: "test_7_header" }, rubric: "the reviewer confirms a header row is present" }]);
+  }
+});
+
 test("H4: spec-conformance (cold_read = false) gets the full file plus the issue's acceptance text", async () => {
   const { r, gh, issue } = reviewRoot();
   await buildContext({ root: r, gh, issue, stage: "review" });
