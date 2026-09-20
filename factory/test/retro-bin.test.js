@@ -12,7 +12,9 @@ import {
   splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
@@ -1090,6 +1092,70 @@ test("feedback-route: light 회차에서도 돌고, 결과가 기록에 남는�
   expect(deps.claudeP).not.toHaveBeenCalled();                     // light 회차다
   expect(routeFeedback).toHaveBeenCalled();
   expect(recorded.join("\n")).toMatch(/feedback-route: upstream-created/);
+});
+
+/**
+ * ── 최종 리뷰 should_fix 2의 회귀 핀 ───────────────────────────────────────────────────────────
+ *
+ * 크로스-레포 팔의 실패는 **fail-safe로 삼켜지되 조용해서는 안 된다**. 옛 모양은 `error` 액션 한
+ * 줄 + `console.log` 하나였고, 그래서 `FACTORY_BOT_TOKEN`에 `[factory].upstream`의 `issues:write`가
+ * 없으면 모든 `[ktb]` 발견이 머지마다 조용히 죽는 동안 잡은 매번 초록이었다(주석도, 스텝 요약도,
+ * 비-0 종료도 없었다 — 루프가 존재하지 않는 것과 구별되지 않는 상태다).
+ *
+ * 종료 코드는 **여전히 0이다**(spec §7 fail-safe): 라우팅 때문에 회고가 죽으면 그 회차의
+ * lessons·통계·커서까지 같이 사라진다. 바뀌는 것은 소리뿐이다.
+ */
+test("feedback-route: 상류 쓰기 실패는 ::error:: + 스텝 요약으로 나가고, 종료 코드는 그대로 0이다", async () => {
+  const summaryFile = join(mkdtempSync(join(tmpdir(), "ktb-retro-sum-")), "summary.md");
+  writeFileSync(summaryFile, "");
+  const prevSummary = process.env.GITHUB_STEP_SUMMARY;
+  process.env.GITHUB_STEP_SUMMARY = summaryFile;
+  const logged = [];
+  vi.spyOn(console, "log").mockImplementation((...a) => logged.push(a.join(" ")));
+  try {
+    const routeFeedback = vi.fn(async () => ({
+      issues: [11],
+      actions: [{ kind: "error", step: "feedback-route", issue: 11, reason: "upstream issue failed — gh api repos/o/up/issues failed (1): HTTP 403: Resource not accessible by integration" }],
+    }));
+    const { deps, recorded } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+    expect(await runRetro({ deps })).toBe(0);                        // §7 fail-safe — 회고는 죽지 않는다
+
+    const annotations = logged.filter((l) => l.startsWith("::error title=factory-retro::"));
+    expect(annotations.length).toBeGreaterThanOrEqual(1);
+    expect(annotations[0]).toContain("HTTP 403");
+    // 워크플로 명령은 **한 줄**이어야 한다 — 접지 않으면 둘째 줄부터는 주석에 실리지 않는다.
+    for (const a of annotations) expect(a).not.toMatch(/\r?\n/);
+    // 사람이 다음에 할 일이 같은 화면에 있다.
+    expect(annotations.join("\n")).toMatch(/`issues:write` on the upstream repo/);
+
+    const summary = readFileSync(summaryFile, "utf8");
+    expect(summary).toMatch(/## factory-retro — feedback routing/);
+    expect(summary).toMatch(/\*\*failed:\*\*.*HTTP 403/);
+    // run 기록의 줄은 그대로 남는다(두 채널은 서로를 대체하지 않는다).
+    expect(recorded.join("\n")).toMatch(/feedback-route: error/);
+  } finally {
+    if (prevSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+    else process.env.GITHUB_STEP_SUMMARY = prevSummary;
+  }
+});
+
+test("feedback-route: 실패가 없으면 주석도 요약도 **쓰지 않는다**(잡음을 만들지 않는다)", async () => {
+  const summaryFile = join(mkdtempSync(join(tmpdir(), "ktb-retro-sum-")), "summary.md");
+  writeFileSync(summaryFile, "");
+  const prevSummary = process.env.GITHUB_STEP_SUMMARY;
+  process.env.GITHUB_STEP_SUMMARY = summaryFile;
+  const logged = [];
+  vi.spyOn(console, "log").mockImplementation((...a) => logged.push(a.join(" ")));
+  try {
+    const routeFeedback = vi.fn(async () => ({ issues: [11], actions: [{ kind: "upstream-created", step: "feedback-route", repo: "o/up", issue: 3, fingerprint: "abc" }] }));
+    const { deps } = makeDeps({ state: freshState({ merges_since: 0, n: 5 }), overrides: { routeFeedback } });
+    expect(await runRetro({ deps })).toBe(0);
+    expect(logged.filter((l) => l.startsWith("::error"))).toEqual([]);
+    expect(readFileSync(summaryFile, "utf8")).toBe("");
+  } finally {
+    if (prevSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+    else process.env.GITHUB_STEP_SUMMARY = prevSummary;
+  }
 });
 
 /**

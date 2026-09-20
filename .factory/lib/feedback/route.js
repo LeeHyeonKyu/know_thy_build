@@ -260,7 +260,7 @@ export async function routeFindings({
  */
 export async function routeMergedIssues({
   gh, repo, upstream = null, issues = [], commentsByIssue = new Map(), records = new Map(),
-  since = null, ownerOf, isInstalled, ktbVersion = null, harness = null, factoryLogins = [],
+  since = null, ownerOf, isInstalled, ktbVersion = null, harness = null, factoryLogins = [], identity = null,
 } = {}) {
   const sinceMs = since == null ? null : Date.parse(since);
   const byIssue = commentsByIssue instanceof Map ? commentsByIssue : new Map(Object.entries(commentsByIssue || {}));
@@ -276,7 +276,7 @@ export async function routeMergedIssues({
     let findings = [];
     let unverifiable = [];
     try {
-      const h = harvestIssue({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments, factoryLogins });
+      const h = harvestIssue({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments, factoryLogins, identity });
       findings = h.findings;
       unverifiable = h.unverifiable;
     } catch (e) { actions.push(errorAction(issue.number, `harvest failed — ${e?.message || e}`)); continue; }

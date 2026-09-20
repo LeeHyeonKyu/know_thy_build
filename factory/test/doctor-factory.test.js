@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkFactoryUpstream, checkProtectedParity, checkRecordsProtection } from "../lib/doctor/factory.js";
 import { protBlock, ciDenyEntries, qaManifestDeny, writeGlobs } from "../lib/protected-paths.js";
 import { ALL_SKILLS, DEFINE_SKILLS } from "../lib/skill-md.js";
 import { makeFakeRun, run } from "../lib/exec.js";
@@ -607,6 +607,67 @@ test("checkFactoryIdentity: a machine user / app identity PASSes, and an unknown
   // gh가 죽어도 doctor 전체를 죽이지 않는다(offline-tolerant WARN 하나).
   const dead = { viewerLogin: async () => { throw new Error("gh api user failed (1): HTTP 401"); }, viewerType: async () => "User" };
   expect(by(await checkFactoryIdentity({ gh: dead, repo: "o/r" }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("HTTP 401") });
+});
+
+/**
+ * ── `factory.upstream` — 루프의 **출구**가 열려 있는가(최종 리뷰 should_fix 2) ────────────────
+ *
+ * 라우팅 팔은 fail-safe라 상류 403을 액션 한 줄로 삼킨다. 그래서 토큰에 `issues:write`가 없으면
+ * 모든 `[ktb]` 발견이 머지마다 조용히 죽고, 그 상태는 화면에서 "고칠 것이 없다"와 같아 보인다.
+ * 이 판정만이 그 둘을 가른다 — 그리고 사람이 할 **정확한 한 줄**을 함께 낸다.
+ */
+const upstreamHarness = (v) => ({ factory: { upstream: v } });
+
+test("factory.upstream: 설정이 없으면 PASS — 크로스-레포 쓰기는 opt-in이고, 잃는 것만 한 줄로 말한다", async () => {
+  const gh = { repoInfo: async () => { throw new Error("must not be called when upstream is unset"); } };
+  for (const harness of [{}, { factory: {} }, upstreamHarness(undefined)]) {
+    const c = by(await checkFactoryUpstream({ gh, harness }));
+    expect(c["factory.upstream"].level).toBe("PASS");
+    expect(c["factory.upstream"].detail).toMatch(/not configured \(ktb findings stay local\)/);
+  }
+});
+
+test("factory.upstream: 토큰이 이슈를 열 수 있으면 PASS(triage만 있어도 된다)", async () => {
+  const push = { repoInfo: async () => ({ fullName: "o/up", permissions: { admin: false, push: true, pull: true } }) };
+  expect(by(await checkFactoryUpstream({ gh: push, harness: upstreamHarness("o/up") }))["factory.upstream"].level).toBe("PASS");
+
+  const triage = { repoInfo: async () => ({ fullName: "o/up", permissions: { triage: true, pull: true } }) };
+  const c = by(await checkFactoryUpstream({ gh: triage, harness: upstreamHarness("o/up") }));
+  expect(c["factory.upstream"].level).toBe("PASS");
+  expect(c["factory.upstream"].detail).toContain("o/up");
+  expect(c["factory.upstream"].detail).not.toContain(SECRET);
+});
+
+test("factory.upstream: 읽기만 되는 토큰은 WARN + 사람이 할 정확한 한 줄", async () => {
+  const gh = { repoInfo: async () => ({ fullName: "LeeHyeonKyu/know-thy-build", permissions: { pull: true, push: false, triage: false } }) };
+  const c = by(await checkFactoryUpstream({ gh, harness: upstreamHarness("LeeHyeonKyu/know-thy-build") }));
+  expect(c["factory.upstream"].level).toBe("WARN");
+  expect(c["factory.upstream"].detail).toContain("grant the factory token issues:write on LeeHyeonKyu/know-thy-build");
+  // 왜 이것이 조용한 고장인지를 같은 줄에서 말한다 — 그래야 사람이 WARN을 무시하지 않는다.
+  expect(c["factory.upstream"].detail).toMatch(/fail-safe/);
+  expect(c["factory.upstream"].detail).not.toContain(SECRET);
+});
+
+test("factory.upstream: 404는 '없다'와 '안 보인다'를 한 문장으로 말한다 — 그리고 진단은 상류에 아무것도 쓰지 않는다", async () => {
+  const seen = [];
+  const gh = { repoInfo: async (r) => { seen.push(r); throw new Error("gh api repos failed (1): gh: Not Found (HTTP 404)"); } };
+  const c = by(await checkFactoryUpstream({ gh, harness: upstreamHarness("o/typo") }));
+  expect(c["factory.upstream"].level).toBe("WARN");
+  expect(c["factory.upstream"].detail).toMatch(/not visible to the factory token/);
+  expect(c["factory.upstream"].detail).toMatch(/404/);
+  expect(seen).toEqual(["o/typo"]);                     // 읽기 한 번 — 이슈를 열어 보지 않는다
+});
+
+test("factory.upstream: permissions를 못 받으면 PASS가 아니라 WARN이다(모르는 것은 괜찮음이 아니다)", async () => {
+  const gh = { repoInfo: async () => ({ fullName: "o/up", permissions: null }) };
+  expect(by(await checkFactoryUpstream({ gh, harness: upstreamHarness("o/up") }))["factory.upstream"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("no `permissions`") });
+});
+
+test("factory.upstream: `owner/repo`가 아닌 값은 조용히 무시되지 않는다 — 라우팅이 꺼져 있다고 말한다", async () => {
+  const gh = { repoInfo: async () => { throw new Error("must not be called for a malformed upstream"); } };
+  const c = by(await checkFactoryUpstream({ gh, harness: upstreamHarness("https://github.com/o/up") }));
+  expect(c["factory.upstream"].level).toBe("WARN");
+  expect(c["factory.upstream"].detail).toMatch(/is not an `owner\/repo`/);
 });
 
 test("checkGitHub: protection is judged against L0_CONTEXTS only — required_checks is reported as L1's job, never as a missing rule", async () => {

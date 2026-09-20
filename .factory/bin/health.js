@@ -24,18 +24,20 @@
 //
 // 모든 외부 접촉은 인자로 주입된다 — `runHealth`는 순수 오케스트레이션이고 `main()`이 조립한다.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
 import { attributionFor } from "../lib/feedback/harvest-findings.js";
+import { stepSummary } from "../lib/gha.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { HEALTH_LABEL } from "../lib/label-catalog.js";
 import { readRecordsDetailed } from "../lib/records-branch.js";
 import { tierFloor } from "../lib/gates.js";
 import { routeFindings } from "../lib/feedback/route.js";
+import { classifyFinding } from "../lib/feedback/classify.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { parseHandoffs } from "../lib/handoff.js";
 import { parseRunRecord } from "../lib/usage.js";
@@ -604,6 +606,13 @@ const errorAction = (reason, extra = {}) => ({ kind: "error", step: "health", re
  * `ok: false`는 **설정·권한 문제**다(리뷰 r1 should_fix 7): 보고서를 실을 자리를 못 만들었거나 상류
  * 쓰기가 거부당한 경우다. 그 회차는 조용히 지나가면 안 된다 — 아무도 보지 않는 잡이 매주 초록으로
  * 도는 동안 루프는 한 줄도 나르지 못한다. `main()`이 그것을 `::error::` + 비-0 종료로 옮긴다.
+ *
+ * ── `publish: false`는 **이 실행이 아무것도 쓰지 않는다**는 뜻이다 ───────────────────────────
+ * 최종 리뷰 must_fix 1: `factory analyze --health`의 자리는 노트북이고 README가 "이슈를 열지
+ * 않는다"고 약속한다. 그런데 이 깃발이 보고서 이슈만 막고 **라우팅 팔은 그대로 돌았다** — gh가
+ * 제대로 배선된 순간 읽기 전용이라던 명령이 `factory:health` 이슈와 상류 `factory-improvement`
+ * 이슈를 열었을 것이다. 그래서 이 깃발은 이제 쓰기 표면 **전부**를 닫는다: 발견은 라우팅 팔이
+ * 쓰는 것과 **같은 함수**(`classifyFinding`)로 분류만 하고, gh에는 한 글자도 쓰지 않는다.
  */
 export async function runHealth({
   gh, root = ".", repo = null, since = null, N = DEFAULT_N, now = new Date().toISOString(),
@@ -649,7 +658,7 @@ export async function runHealth({
   const unverifiable = [];
   for (const n of signals.window) {
     try {
-      for (const u of attributionFor({ comments: byIssue.get(n) || [], factoryLogins: logins }).unverifiable) unverifiable.push({ issue: n, ...u });
+      for (const u of attributionFor({ comments: byIssue.get(n) || [], factoryLogins: logins, identity: theIdentity }).unverifiable) unverifiable.push({ issue: n, ...u });
     } catch { /* 한 이슈의 실패가 보고서를 막지 않는다 */ }
   }
 
@@ -691,6 +700,17 @@ export async function runHealth({
   let classified = [];
   if (findings.length && !manifest) {
     actions.push(errorAction(`install manifest not found (${INSTALL_MANIFEST_PATH}) — ${findings.length} behavioural finding(s) cannot be classified or routed`, { fatal: true }));
+  } else if (findings.length && !publish) {
+    /**
+     * 읽기 전용 회차 — 분류는 하되 라우팅 팔은 **부르지 않는다**. 분류기는 `routeFindings`가 쓰는
+     * 바로 그 함수이므로 사람이 화면에서 보는 태그·지문은 워크플로가 실제로 라우팅할 값과 같다.
+     * (다르면 이 명령은 그 순간 신뢰를 잃는다 — `analyze.js`의 `classifyAll`과 같은 규율이다.)
+     */
+    for (const f of findings) {
+      try { classified.push(classifyFinding({ finding: f, ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness })); }
+      catch (e) { actions.push(errorAction(`classify failed — ${e?.message || e}`)); classified.push(null); }
+    }
+    actions.push({ kind: "read-only", step: "health", reason: `publish:false — ${findings.length} finding(s) classified but not routed (no issue opened, no comment written)` });
   } else if (findings.length) {
     // 앵커 이슈는 보고서를 **연 뒤에야** 번호를 얻는다(첫 회차). 창 단위 발견(rubber-stamp)은 그때까지
     // `issue: null`이었으므로 여기서 메운다 — 돌려주는 객체와 라우팅에 넘기는 객체가 달라서는 안 된다.
@@ -809,40 +829,134 @@ async function collect({ gh, run: runner = run, cwd = null, issues, commentsByIs
   return { issues: all, commentsByIssue: by, records: recs, prByIssue: prs, records_source: source };
 }
 
-/** CLI 진입: 실제 의존성 조립 */
-async function main() {
-  const argv = process.argv.slice(2);
-  const nArg = argv.find((a) => a.startsWith("--n="));
-  const sinceArg = argv.find((a) => a.startsWith("--since="));
-  const N = nArg ? Math.max(1, Number(nArg.slice(4)) || DEFAULT_N) : DEFAULT_N;
-  const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
-  const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
-  const gh = makeGh({ run, repo });
+/** `--n=`/`--since=` — 두 호출자(워크플로와 CLI)가 **같은 문법**을 읽는다. */
+export function parseHealthArgv(argv = []) {
+  const nArg = (argv || []).find((a) => a.startsWith("--n="));
+  const sinceArg = (argv || []).find((a) => a.startsWith("--since="));
+  return {
+    N: nArg ? Math.max(1, Number(nArg.slice("--n=".length)) || DEFAULT_N) : DEFAULT_N,
+    since: sinceArg ? sinceArg.slice("--since=".length) || null : null,
+  };
+}
 
-  let charter, harness, roles;
-  try { charter = loadCharter(root); harness = loadHarness(root); }
-  catch (e) { console.error(`factory: health dormant — ${e.message}`); process.exit(0); }
-  if (charter.status !== "ready") { console.error(`factory: CHARTER status is ${charter.status} — health dormant`); process.exit(0); }
-  try { roles = loadRoles(root); } catch { roles = {}; }
+/**
+ * `assembleHealth({...}) → { ok, dormant?, reason?, deps }` — **실제 의존성 조립, 단 한 벌**.
+ *
+ * ── 최종 리뷰 must_fix 1 ────────────────────────────────────────────────────────────────────
+ * `runHealth`는 gh·하네스·설치 매니페스트·역할 파일 맵·리허설 상태를 **전부 주입받는** 순수
+ * 오케스트레이션이다. 그 조립이 `main()` 안에만 있었기 때문에 `factory analyze --health`는
+ * `runHealth({root, argv, io, run})`를 맨손으로 불렀고 — `gh`가 `undefined`라 `collect`의 첫 줄에서
+ * 터진 뒤 `TypeError: Cannot read properties of undefined (reading 'issueList')` 한 줄만 stderr로
+ * 떨어지고 stdout은 0바이트, 종료 코드는 0이었다. 조립이 두 벌이면 언제나 한 벌이 썩는다.
+ * 그래서 조립은 **이 함수 하나**이고 호출자는 둘이다(워크플로의 `main()`과 CLI의 `healthCommand`).
+ *
+ * 어떤 자리도 쓰기를 하지 않는다 — 읽기만으로 조립되므로 노트북에서도 그대로 돈다.
+ */
+export async function assembleHealth({
+  root = null, argv = [], run: runner = run, env = process.env, log = console.error,
+} = {}) {
+  const { N, since } = parseHealthArgv(argv);
+  const theRoot = root || (await runner("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
+  const repo = env?.FACTORY_REPO || JSON.parse((await runner("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
+  const gh = makeGh({ run: runner, repo });
 
-  const manifest = await loadInstallManifest(root);
-  if (!manifest) console.error(`factory: ${INSTALL_MANIFEST_PATH} not found — behavioural findings will not be routed (run \`npx know-thy-build factory init --upgrade\`)`);
+  let charter;
+  let harness;
+  let roles;
+  try { charter = loadCharter(theRoot); harness = loadHarness(theRoot); }
+  catch (e) { return { ok: false, dormant: true, reason: `health dormant — ${e.message}` }; }
+  if (charter.status !== "ready") return { ok: false, dormant: true, reason: `CHARTER status is ${charter.status} — health dormant` };
+  try { roles = loadRoles(theRoot); } catch { roles = {}; }
+
+  const manifest = await loadInstallManifest(theRoot);
+  if (!manifest) log(`factory: ${INSTALL_MANIFEST_PATH} not found — behavioural findings will not be routed (run \`npx know-thy-build factory init --upgrade\`)`);
 
   // 저장소 수준의 리허설 상태 — 건강 줄 하나다(발견이 아니다).
   let rehearsal = null;
   try {
-    const readText = (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null);
+    const readText = (p) => (existsSync(join(theRoot, p)) ? readFileSync(join(theRoot, p), "utf8") : null);
     const harnessText = readText(FINGERPRINT_PATHS[0]);
     const current = harnessText == null ? null : rehearsalHash({ harnessText, charterText: readText(FINGERPRINT_PATHS[1]) || "" });
     const branch = harness.project?.default_branch ?? "main";
     rehearsal = rehearsalGate({ recorded: await recordedRehearsal({ gh, branch, current }), current });
-  } catch (e) { console.error(`factory: health could not read the rehearsal record — ${e?.message || e}`); }
+  } catch (e) { log(`factory: health could not read the rehearsal record — ${e?.message || e}`); }
 
   const roleFile = new Map([...roleFileMap(roles)].map(([k, v]) => [k, v.agent]));
-  const r = await runHealth({
-    gh, root, repo, N, since: sinceArg ? sinceArg.slice(8) : null,
-    harness, manifest, roleFile, upstream: upstreamRepoOf(harness), rehearsal,
-  });
+  return {
+    ok: true,
+    deps: {
+      gh, root: theRoot, repo, N, since, run: runner,
+      harness, manifest, roleFile, upstream: upstreamRepoOf(harness), rehearsal,
+    },
+  };
+}
+
+/**
+ * `factory analyze --health`의 **진짜 진입점**(리뷰 must_fix 1). `analyze.js`는 이 이름 하나만
+ * import한다 — 예전의 세 이름 탐침(`healthCommand ?? runHealth ?? healthReport`)은 "있는 것 중
+ * 아무거나"를 불렀고, 실제로 걸린 것은 시그니처가 전혀 다른 `runHealth`였다.
+ *
+ * 계약 셋:
+ *   ① **`publish: false`를 언제나 넘긴다.** 조건부가 아니다 — 이 명령은 노트북에서 도는 읽기 전용
+ *      보고이고, README가 "이슈를 열지 않는다"고 적어 둔 그 명령이다. `runHealth`에서 그 깃발은
+ *      이슈 생성·코멘트·재오픈과 라우팅 팔 **전부**를 닫는다.
+ *   ② `--json`이면 신호·발견·참고 신호·신원을 기계가 읽는 한 덩어리로 낸다(보고서 마크다운도 함께).
+ *   ③ 보고서는 `io.out`으로, 진단은 `io.err`로. 종료 코드는 CLI의 나머지와 같다 — 보고서를 낸 회차는 0.
+ */
+export async function healthCommand({
+  root = null, argv = [], io, run: runner = run, env = process.env,
+  assemble = assembleHealth, aggregate = runHealth,
+} = {}) {
+  const json = (argv || []).includes("--json");
+  let assembled;
+  try { assembled = await assemble({ root, argv, run: runner, env, log: io.err }); }
+  catch (e) {
+    io.err(`factory analyze --health: could not assemble the health aggregation — ${e?.message || e}`);
+    return 1;
+  }
+  if (!assembled?.ok) {
+    /**
+     * 휴면(CHARTER가 ready가 아니다, 하네스를 못 읽는다)은 **이 명령의 실패가 아니다** — 저장소의
+     * 상태다. 워크플로의 `main()`이 exit 0으로 지나가는 것과 같은 판정을 하되, 조용히 0바이트를
+     * 내는 짓은 하지 않는다: 사람이 읽을 한 줄을 stdout에 낸다(그 침묵이 이 태스크가 고친 버그다).
+     */
+    const reason = assembled?.reason || "health dormant";
+    if (json) io.out(JSON.stringify({ schema: "factory.health.v1", ok: false, dormant: true, reason }, null, 2));
+    else io.out(`factory-health: ${reason}`);
+    return 0;
+  }
+
+  // `publish: false`는 **마지막에** 온다 — 조립이 무엇을 담아 오든 이 자리에서 덮어쓴다.
+  const r = await aggregate({ ...assembled.deps, publish: false, log: io.err });
+
+  if (json) {
+    io.out(JSON.stringify({
+      schema: "factory.health.v1",
+      ok: r.ok, below_n: r.below_n, published: false, report_issue: null,
+      repo: assembled.deps.repo, N: assembled.deps.N, since: assembled.deps.since,
+      signals: r.signals, findings: r.findings, advisories: r.advisories, classified: r.classified,
+      identity: r.identity, unverifiable: r.unverifiable, login_note: r.login_note,
+      actions: r.actions, failures: r.failures,
+      ktb_version: assembled.deps.manifest?.ktbVersion ?? null,
+      report: r.report,
+    }, null, 2));
+    return 0;
+  }
+
+  for (const line of String(r.report ?? "").split("\n")) io.out(line);
+  io.out("");
+  io.out(`read-only: no issue was opened, no comment was written, nothing was routed (window ${r.signals.window.length}/${assembled.deps.N}, records ${r.signals.records_source})`);
+  for (const f of r.failures || []) io.err(`factory analyze --health: ${f.reason}`);
+  return 0;
+}
+
+/** CLI 진입: 워크플로가 부르는 자리 — 조립은 `assembleHealth` 한 벌을 그대로 쓴다(쓰기는 켠다). */
+async function main() {
+  const argv = process.argv.slice(2);
+  const assembled = await assembleHealth({ argv });
+  if (!assembled.ok) { console.error(`factory: ${assembled.reason}`); process.exit(0); }
+  const { root, N } = assembled.deps;
+  const r = await runHealth(assembled.deps);
 
   // 산출물을 **파일로** 떨어뜨린다(nit 10) — 그러지 않으면 워크플로의 scrub·upload 스텝이 빈 디렉터리
   // 위를 도는 no-op이고, 실패한 회차를 사후에 들여다볼 것이 아무것도 남지 않는다.
@@ -853,7 +967,7 @@ async function main() {
     + `; evidence ${r.signals.attributable}/${r.signals.window.length} attributable; records ${r.signals.records_source}`
     + (r.advisories.length ? `; ${r.advisories.length} advisory (not routed)` : "");
   console.log(summary);
-  stepSummary(`## factory-health\n\n${summary}\n\n${r.failures.map((f) => `- **failed:** ${f.reason}`).join("\n")}\n`);
+  stepSummary(`## factory-health\n\n${summary}\n\n${r.failures.map((f) => `- **failed:** ${f.reason}`).join("\n")}\n`, { what: "factory-health" });
 
   /**
    * 설정·권한 실패는 **소리내어 죽는다**(리뷰 r1 should_fix 7). 상류 토큰에 `issues:write`가 없거나
@@ -862,14 +976,6 @@ async function main() {
    */
   for (const f of r.failures) console.log(`::error title=factory-health::${String(f.reason).replace(/\r?\n/g, " ")}`);
   process.exit(r.ok ? 0 : 1);
-}
-
-/** `::error::`/`::notice::`와 잡 요약 — 러너 밖에서는 조용히 아무것도 하지 않는다. */
-function stepSummary(text) {
-  const p = process.env.GITHUB_STEP_SUMMARY;
-  if (!p) return;
-  try { appendFileSync(p, text); }
-  catch (e) { console.error(`factory: health could not write the job summary — ${e?.message || e}`); }
 }
 
 /** 보고서(마크다운)와 신호(JSON)를 `.factory/out/health/`에 남긴다. 실패해도 잡을 죽이지 않는다. */

@@ -652,6 +652,16 @@ export async function readRecordFor({ run, repo, root, issue, branch = RECORDS_B
  * 아직(또는 이 버전에) 없을 수 있다. 그때 이 명령 전체가 죽으면 안 된다: `analyze <issue>`는 T4와
  * 아무 상관이 없다. 그래서 import는 `--health`를 실제로 부를 때에만 일어나고, 실패는 **사람이 다음에
  * 무엇을 할 수 있는지까지 말해 주는 한 줄**로 떨어진다.
+ *
+ * ── 최종 리뷰 must_fix 1: **이름 하나만 import한다** ─────────────────────────────────────────
+ * 예전에는 `mod.healthCommand ?? mod.runHealth ?? mod.healthReport`로 **있는 것 중 아무거나** 골랐다.
+ * `health.js`에는 `healthCommand`가 없었으므로 언제나 `runHealth`가 걸렸는데, 그 함수는 CLI 진입점이
+ * 아니라 gh·하네스·매니페스트를 전부 주입받는 오케스트레이션이다 — `{root, argv, io, run}`으로 부르면
+ * 첫 줄에서 `Cannot read properties of undefined (reading 'issueList')`로 터지고, 그 예외는
+ * stderr 한 줄이 된 뒤 stdout 0바이트 + exit 0으로 끝났다(`--json`은 읽히지도 않았다). 게다가
+ * `runHealth`의 `publish` 기본값은 `true`라, gh가 배선된 순간 이 읽기 전용 명령이 `factory:health`
+ * 이슈를 열었을 것이다. 탐침은 "맞는 것을 고른다"가 아니라 **"틀린 것을 조용히 고른다"**였다.
+ * 이제 계약은 이름 하나다: 없으면 그것은 버전 불일치이고, 그 사실을 그대로 말한다.
  */
 async function healthReport({ root, argv, io, run, importHealth }) {
   let mod;
@@ -662,14 +672,13 @@ async function healthReport({ root, argv, io, run, importHealth }) {
     io.err("  meanwhile `factory analyze <issue>` reconstructs a single issue's timeline and needs nothing from it.");
     return 1;
   }
-  const entry = mod?.healthCommand ?? mod?.runHealth ?? mod?.healthReport ?? null;
-  if (typeof entry !== "function") {
-    io.err("factory analyze --health: factory/bin/health.js is installed but exposes no entry point this version knows (healthCommand / runHealth / healthReport).");
-    io.err("  known-good pairing ships together — upgrade know-thy-build so the CLI and the aggregation match.");
+  if (typeof mod?.healthCommand !== "function") {
+    io.err("factory analyze --health: factory/bin/health.js is installed but exports no `healthCommand` — the CLI and the aggregation are from different versions.");
+    io.err("  known-good pairing ships together — upgrade know-thy-build so the two match.");
     io.err("  `factory analyze <issue>` is unaffected.");
     return 1;
   }
-  const code = await entry({ root, argv: argv.filter((a) => a !== "--health"), io, run });
+  const code = await mod.healthCommand({ root, argv: argv.filter((a) => a !== "--health"), io, run });
   return Number.isInteger(code) ? code : 0;
 }
 
@@ -677,13 +686,16 @@ async function healthReport({ root, argv, io, run, importHealth }) {
 
 export const ANALYZE_USAGE = [
   "usage: factory analyze <issue> [--json]",
-  "       factory analyze --health [--json]",
+  "       factory analyze --health [--n=<N>] [--since=<iso>] [--json]",
   "",
   "  <issue>    print that issue's stage-by-stage timeline from the records branch and its comments:",
   "             artifact, gates + per-gate failure detail, self-gate, role context, review verdicts and",
   "             must_fix, transitions (with refusals), cost per stage and per agent — then the findings",
   "             classified exactly as the retro classifies them on merge. Read-only.",
-  "  --health   run the health aggregation over recent issues and print its report.",
+  "  --health   run the health aggregation over recent issues and print its report. Read-only: it never",
+  "             opens the `factory:health` issue, never comments, and never routes a finding upstream —",
+  "             the scheduled workflow is the only thing that writes. `--n=` sets the window (default 5)",
+  "             and `--since=<iso>` bounds it by merge time.",
   "  --json     emit the same data as machine-readable JSON.",
 ].join("\n");
 
@@ -759,7 +771,7 @@ export async function analyzeCommand({
   let raw = [];
   let unverifiable = [];
   try {
-    const h = harvestIssue({ issue, repo: theRepo, record: rec.text, comments, factoryLogins: logins });
+    const h = harvestIssue({ issue, repo: theRepo, record: rec.text, comments, factoryLogins: logins, identity: theIdentity });
     raw = h.findings;
     unverifiable = h.unverifiable;
   } catch (e) { io.err(`factory analyze: harvest failed — ${e?.message || e}`); }

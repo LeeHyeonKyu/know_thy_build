@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { checkHarness, checkCommands, checkSetupDirtiesTree, checkQaEvidenceProbe, runSetupProbe } from "../lib/doctor/harness.js";
-import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkProtectedParity, checkRehearsal } from "../lib/doctor/factory.js";
+import { checkFiles, checkFilesTracked, checkCharter, checkRoles, checkAgents, checkSkills, checkSettings, checkHooks, checkWorkflows, checkGitHub, checkFactoryIdentity, checkFactoryUpstream, checkProtectedParity, checkRehearsal } from "../lib/doctor/factory.js";
 import { checkRehearsalCurrent } from "../lib/rehearsal.js";
 import { loadHarness, loadHarnessRaw, loadRoles, loadCharter } from "../lib/config.js";
 import { makeGh, resolveRepo } from "../lib/gh.js";
@@ -214,6 +214,10 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
           // T7 — 피드백 루프의 증거 (b)가 이 저장소에서 **원리상** 작동하는가(`factory.identity`).
           // `checkGitHub`의 try/catch 밖에 둔다: gh 하나가 실패해도 이 판정은 따로 서야 한다.
           checks.push(...(await (deps.checkFactoryIdentity || checkFactoryIdentity)({ gh: client, repo: theRepo })));
+          // 최종 리뷰 SF-2 — 피드백 루프의 **출구**가 열려 있는가(`factory.upstream`). 라우팅 팔은
+          // fail-safe라 403을 삼키므로, 이 판정이 없으면 모든 `[ktb]` 발견이 조용히 죽는 상태와
+          // "고칠 것이 없는" 상태가 화면에서 같아 보인다. 이것도 `checkGitHub` 밖에 따로 선다.
+          checks.push(...(await (deps.checkFactoryUpstream || checkFactoryUpstream)({ gh: client, harness })));
           // KTB-44 / ADR-025 — 기록된 리허설이 지금의 하네스에 대한 것인가. 이 판정만이 "큐가 열려
           // 있는가"를 doctor에서 말한다(transition.js가 같은 해시로 `→ factory:queue`를 막는다).
           checks.push(...(await checkRehearsalFn({ gh: client, root, readFile, harness })));

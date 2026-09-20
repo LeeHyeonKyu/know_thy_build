@@ -30,6 +30,7 @@ import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { routeMergedIssues } from "../lib/feedback/route.js";
+import { announceFailure } from "../lib/gha.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
 import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
@@ -613,6 +614,24 @@ export async function runRetro({ deps, force = false, now } = {}) {
         // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
         for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.author ? ` by @${a.author}` : ""}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
         if ((r.value.actions || []).length) applied.push({ step: "feedback-route", issues: r.value.issues || [], actions: r.value.actions });
+        /**
+         * ── 리뷰 should_fix 2: **라우팅 팔의 실패는 exit 0이되 조용하지 않다** ────────────────
+         * 이 팔은 fail-safe라 상류 403을 `{kind:"error"}` 액션 한 줄로 삼킨다(그 계약은 옳다 —
+         * 라우팅 때문에 회고가 죽으면 그 회차의 lessons·통계·커서까지 사라진다). 그런데 그 한
+         * 줄이 `console.log`와 run 기록에만 남았다: 잡은 초록이고 `::error::`도 스텝 요약도 없다.
+         * 곧 `FACTORY_BOT_TOKEN`에 `[factory].upstream`의 `issues:write`가 없으면 **모든 `[ktb]`
+         * 발견이 머지마다 조용히 죽고**, 주인은 그 사실을 영영 모른다 — 루프가 존재하지 않는 것과
+         * 구별되지 않는 상태다. 종료 코드는 그대로 두고(§7 fail-safe) 러너가 보여 주는 두 채널로
+         * 올린다. 사람이 다음에 무엇을 해야 하는지는 `factory doctor`의 `factory.upstream`이 말한다.
+         */
+        const failures = (r.value.actions || []).filter((a) => a.kind === "error").map((a) => `${a.reason || "feedback routing failed"}${a.issue == null ? "" : ` (#${a.issue})`}`);
+        if (failures.length) {
+          announceFailure({
+            title: "factory-retro",
+            heading: "factory-retro — feedback routing",
+            reasons: [...failures, "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo"],
+          });
+        }
       }
     }
 
@@ -989,6 +1008,9 @@ export async function routeFeedbackArm({
     gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
     ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
     factoryLogins: who.ok ? who.logins : null,
+    // 최종 리뷰 nit 5 — 거부 사유의 **문구**는 신원에 달려 있다: 진짜 봇 신원이면 "공유 신원"이
+    // 아니라 "에이전트가 적은 결정"이 참이고, 사람이 할 일도 정반대다(등록할 것이 없다).
+    identity: who.ok ? (who.identity ?? null) : null,
   });
   /**
    * T7 — 팩토리가 **사람 계정**으로 돌면 작성자 기반 귀속은 원리상 불가능하다(팩토리 코멘트와

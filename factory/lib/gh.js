@@ -623,6 +623,19 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 두 배우 모드에서 에이전트 배우가 `admin`이면 branch protection의 승인 요건을 **스스로 바꿀 수**
      * 있으므로 두 배우 모드는 이름만 남는다 — doctor가 FAIL로 세운다.
      */
+    /**
+     * **다른** 저장소의 메타데이터 — 크로스-레포 라우팅의 대상(`[factory].upstream`)을 묻는 자리다.
+     * `gh api repos/<owner>/<name>`은 **지금 이 토큰이** 그 저장소에 대해 갖는 권한을 `permissions`로
+     * 함께 답하므로, 이슈를 **열어 보지 않고** "쓸 수 있는가"를 판정할 수 있다(진단이 상류 저장소에
+     * 쓰레기 이슈를 남기면 안 된다). 토큰 값은 읽지도 찍지도 않는다.
+     *
+     * 404는 **없는 저장소**와 **이 토큰에 안 보이는 저장소**를 구별하지 않는다 — GitHub이 일부러
+     * 그렇게 답한다. 그래서 호출자는 두 경우를 한 문장으로 말해야 한다(`repo`는 `owner/name`).
+     */
+    async repoInfo(nameWithOwner) {
+      const j = JSON.parse(await gh(["api", `repos/${nameWithOwner}`]));
+      return { fullName: j.full_name ?? nameWithOwner, private: Boolean(j.private), permissions: j.permissions ?? null };
+    },
     async collaboratorPermission(login) {
       return JSON.parse(await gh(["api", `repos/${repo}/collaborators/${login}/permission`])).permission;
     },

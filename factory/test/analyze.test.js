@@ -13,6 +13,7 @@ import {
   selfGateComment, selfGateDetail, refusalComment, humanDecisionComment, reviewHandoffComment,
 } from "./helpers/feedback-fixtures.js";
 import { analyzeCommand, buildTimeline, groupRuns, parseSections, readRecordFor } from "../cli/analyze.js";
+import { healthCommand } from "../bin/health.js";
 
 /**
  * ── Task 5 — `factory analyze <issue>`의 회귀 핀 ────────────────────────────────────────────────
@@ -577,21 +578,177 @@ test("analyze --health: degrades with a clear message when the health aggregatio
   expect(out).toMatch(/analyze <issue>/);
 });
 
-test("analyze --health: runs the aggregation when it is present", async () => {
-  const cap = capture();
-  const code = await analyzeCommand({
-    ...(await deps()), argv: ["--health", "--json"], io: cap.io,
-    importHealth: async () => ({ healthCommand: async ({ io }) => { io.out("health report"); return 0; } }),
-  });
+/**
+ * ── 최종 리뷰 must_fix 1의 회귀 핀 ─────────────────────────────────────────────────────────────
+ *
+ * 1차 구현은 **모듈 모양을 주입해서** 초록이었다(`importHealth: async () => ({ healthCommand })`).
+ * 그 모양은 진짜 `health.js`가 낼 수 **없는** 것이었고(그 파일에는 `healthCommand`가 없었다),
+ * 그래서 테스트가 초록인 동안 실제 명령은 `runHealth`를 맨손으로 불러 stdout 0바이트 + exit 0 +
+ * `Cannot read properties of undefined (reading 'issueList')`를 냈다. Global Constraint —
+ * *픽스처는 진짜 생산자가 만든다* — 가 이 자리에서 깨져 있었다.
+ *
+ * 그래서 이 테스트는 **진짜 모듈**을 돌린다: `importHealth`를 주입하지 않아 기본 지연 import가
+ * `../bin/health.js`를 그대로 읽고, 외부 접촉은 gh 하나뿐이라 `run`만 가짜다. 저장소도 진짜
+ * (tmpdir에 harness.toml·CHARTER.md·설치 매니페스트를 **실물 생산자**로 깐다).
+ */
+function healthRepo() {
+  const root = mkdtempSync(join(tmpdir(), "ktb-health-"));
+  mkdirSync(join(root, ".factory"), { recursive: true });
+  mkdirSync(join(root, "docs/factory"), { recursive: true });
+  writeFileSync(join(root, ".factory/harness.toml"), [
+    "[project]", 'name = "own-cal"', 'default_branch = "main"', "",
+    "[test]", 'source_glob = ["src/**/*.js"]', 'test_glob = ["test/**/*.test.js"]', "",
+    "[factory]", 'upstream = "LeeHyeonKyu/know-thy-build"', "",
+  ].join("\n"));
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), [
+    "---", "schema: factory.charter.v1", "status: ready", 'tier_default: "standard"',
+    "roster:", "  standard: [correctness]", "---", "", "# CHARTER", "",
+  ].join("\n"));
+  // 설치 매니페스트는 **진짜 생산자**(`buildManifest`)가 만든 dest 목록이다 — 손으로 빚지 않는다.
+  writeFileSync(join(root, ".factory/install-manifest.json"), JSON.stringify({
+    schema: "factory.install-manifest.v1", note: "test", ktb_version: "1.4.0",
+    entries: buildManifest({ pkgRoot: fileURLToPath(new URL("../..", import.meta.url)) }).map((e) => ({ dest: e.dest, owner: e.owner })),
+  }));
+  return root;
+}
+
+/** 머지된 이슈 둘 — 코멘트는 러너만 쓰는 하트비트다(런 바인딩의 유일한 앵커). */
+const HEALTH_ISSUES = [
+  { number: 18, title: "docs: ADR", body: "", labels: [{ name: "factory:merged" }, { name: "factory:tier-docs" }], updatedAt: "2026-09-18T00:00:00Z", closedAt: "2026-09-18T00:00:00Z" },
+  { number: 20, title: "the roster", body: "", labels: [{ name: "factory:merged" }, { name: "factory:tier-standard" }], updatedAt: "2026-09-19T00:00:00Z", closedAt: "2026-09-19T00:00:00Z" },
+];
+
+/** gh를 부르는 모든 자리를 **서브프로세스 수준에서** 흉내 낸다 — 주입된 모듈 모양은 하나도 없다. */
+function healthRun() {
+  const commentsOf = (n) => [{ id: n * 10, body: heartbeat(n, "review", `gha-9${n}001`, "2026-09-18T00:00:00Z").body, created_at: "2026-09-18T00:00:00Z", user: { login: "factory-bot", type: "Bot" } }];
+  return makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "repo" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ nameWithOwner: REPO }), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 0, stdout: JSON.stringify({ login: OWNER, type: "User" }), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "list", result: { code: 0, stdout: JSON.stringify(HEALTH_ISSUES), stderr: "" } },
+    {
+      match: (c, a) => c === "gh" && a[0] === "api" && /issues\/\d+\/comments/.test(a[1] ?? ""),
+      result: (_c, a) => ({ code: 0, stdout: JSON.stringify([commentsOf(Number(/issues\/(\d+)\//.exec(a[1])[1]))]), stderr: "" }),
+    },
+    // 나머지(머지된 PR 목록, records 브랜치 fetch, 리허설 변수)는 **저하**한다 — 노트북에서 흔한
+    // 상태이고, 보고서는 그 저하를 이름으로 말해야 한다(지어낸 0으로 메우지 않는다).
+    { match: () => true, result: { code: 1, stdout: "", stderr: "not available here" } },
+  ]);
+}
+
+/**
+ * stdout과 stderr를 **가르는** 캡처. `--json`은 stdout이 기계용 한 덩어리여야 하므로, 저하 진단
+ * (stderr)이 그 안에 섞이면 파싱이 깨진다 — 그 분리 자체가 계약이다.
+ */
+function split() {
+  const out = [];
+  const err = [];
+  return { io: { out: (s) => out.push(String(s)), err: (s) => err.push(String(s)) }, out, err, stdout: () => out.join("\n"), stderr: () => err.join("\n") };
+}
+
+/** 이 팩토리 명령이 **쓰기**를 했는가 — gh의 세 쓰기 문 전부를 서브프로세스 인자로 본다. */
+const writeCalls = (run) => run.calls.filter(({ cmd, args }) => cmd === "gh" && (
+  (args[0] === "issue" && ["create", "comment", "reopen", "edit", "close"].includes(args[1]))
+  || (args[0] === "api" && args.includes("-X") && args[args.indexOf("-X") + 1] !== "GET")
+));
+
+test("analyze --health: drives the REAL health.js and prints a non-empty report", async () => {
+  const root = healthRepo();
+  const run = healthRun();
+  const cap = split();
+  const code = await analyzeCommand({ ...(await deps()), root, argv: ["--health"], io: cap.io, run });
+
   expect(code).toBe(0);
-  expect(cap.text()).toContain("health report");
+  const out = cap.stdout();
+  expect(out.length).toBeGreaterThan(400);                 // 0바이트가 아니다 — 그것이 이 버그였다
+  expect(out).toContain("factory-health");                  // 보고서의 제목 줄
+  expect(out).toMatch(/승인률|approve_rate/);               // 역할 표가 실제로 그려졌다
+  expect(out).toMatch(/비용 기록: `.+`/);                    // 비용 출처를 **이름으로** 말한다
+  expect(out).toMatch(/read-only: no issue was opened/);
+  // 옛 증상: gh가 없어 `collect`의 첫 줄에서 터진 뒤 stderr 한 줄만 남았다.
+  expect(out).not.toMatch(/Cannot read properties of undefined/);
 });
 
-test("analyze --health: degrades when the module exists but exposes no entry point this version knows", async () => {
+test("analyze --health: writes NOTHING — no issue is created, commented or reopened", async () => {
+  const root = healthRepo();
+  const run = healthRun();
+  const cap = split();
+  await analyzeCommand({ ...(await deps()), root, argv: ["--health"], io: cap.io, run });
+
+  // 그 저장소에 `factory:health` 이슈를 **찾으러 가지도** 않는다(publish:false가 그 조회부터 닫는다).
+  expect(writeCalls(run)).toEqual([]);
+  expect(run.calls.some(({ cmd, args }) => cmd === "gh" && args[0] === "issue" && args[1] === "create")).toBe(false);
+  expect(run.calls.some(({ cmd, args }) => cmd === "gh" && args[0] === "issue" && args[1] === "comment")).toBe(false);
+  expect(run.calls.some(({ cmd, args }) => cmd === "gh" && args[0] === "issue" && args[1] === "reopen")).toBe(false);
+});
+
+test("analyze --health --json: emits machine data that round-trips", async () => {
+  const root = healthRepo();
+  const run = healthRun();
+  const cap = split();
+  const code = await analyzeCommand({ ...(await deps()), root, argv: ["--health", "--json"], io: cap.io, run });
+
+  expect(code).toBe(0);
+  const data = JSON.parse(cap.stdout());
+  expect(JSON.parse(JSON.stringify(data))).toEqual(data);   // round-trip
+  expect(data.schema).toBe("factory.health.v1");
+  expect(data.published).toBe(false);
+  expect(data.report_issue).toBe(null);
+  expect(data.signals.N).toBe(5);
+  expect(data.signals.window).toEqual([20, 18]);            // 머지 시각 내림차순
+  expect(data.signals.below_n).toBe(true);                  // 2/5 — 행동 발견은 하나도 없다
+  expect(data.findings).toEqual([]);
+  expect(Array.isArray(data.advisories)).toBe(true);
+  expect(data).toHaveProperty("identity");
+  expect(data.report).toContain("factory-health");
+  expect(writeCalls(run)).toEqual([]);
+});
+
+test("analyze --health honours --n= and --since= the same way the workflow does", async () => {
+  const root = healthRepo();
+  const run = healthRun();
+  const cap = split();
+  await analyzeCommand({ ...(await deps()), root, argv: ["--health", "--json", "--n=1", "--since=2026-09-18T12:00:00Z"], io: cap.io, run });
+  const data = JSON.parse(cap.stdout());
+  expect(data.signals.N).toBe(1);
+  expect(data.since).toBe("2026-09-18T12:00:00Z");
+  expect(data.signals.window).toEqual([20]);                 // 창은 최신 N개다
+  // `--since=`는 실제로 gh 왕복을 깎는다 — #18의 코멘트는 읽으러 가지도 않는다.
+  const commentFetches = run.calls.filter(({ cmd, args }) => cmd === "gh" && /issues\/\d+\/comments/.test(args[1] ?? "")).map(({ args }) => args[1]);
+  expect(commentFetches.some((u) => u.includes("/issues/20/"))).toBe(true);
+  expect(commentFetches.some((u) => u.includes("/issues/18/"))).toBe(false);
+});
+
+/**
+ * `publish: true`는 **어느 경로로도** 이 명령에서 나오지 않는다. 위의 쓰기-없음 테스트가 증상을
+ * 보고, 이 테스트는 그 계약을 원인 자리에서 본다 — 조립이 무엇을 담아 오든 덮어쓰는가.
+ */
+test("analyze --health: never passes publish:true to the aggregation", async () => {
+  const seen = [];
+  const cap = capture();
+  const code = await healthCommand({
+    argv: [], io: cap.io,
+    // 조립이 `publish: true`를 담아 와도(있을 수 없는 일이지만) 덮어쓰는지 본다.
+    assemble: async () => ({ ok: true, deps: { repo: REPO, N: 5, since: null, publish: true, manifest: null } }),
+    aggregate: async (args) => { seen.push(args); return { ok: true, below_n: true, signals: { window: [], records_source: "none" }, findings: [], advisories: [], classified: [], actions: [], failures: [], report: "report" }; },
+  });
+  expect(code).toBe(0);
+  expect(seen).toHaveLength(1);
+  expect(seen[0].publish).toBe(false);
+});
+
+test("analyze --health: a dormant repo says so on stdout instead of printing nothing", async () => {
+  const cap = capture();
+  const code = await healthCommand({ argv: [], io: cap.io, assemble: async () => ({ ok: false, dormant: true, reason: "CHARTER status is draft — health dormant" }) });
+  expect(code).toBe(0);
+  expect(cap.text()).toMatch(/CHARTER status is draft/);
+});
+
+test("analyze --health: degrades when the module exists but exports no healthCommand", async () => {
   const cap = capture();
   const code = await analyzeCommand({ ...(await deps()), argv: ["--health"], io: cap.io, importHealth: async () => ({ somethingElse: 1 }) });
   expect(code).toBe(1);
-  expect(cap.text()).toMatch(/entry point|healthCommand/);
+  expect(cap.text()).toMatch(/healthCommand/);
+  expect(cap.text()).toMatch(/different versions/);
 });
 
 test("analyze 39 --health: refused rather than silently dropping the issue (they are two different commands)", async () => {

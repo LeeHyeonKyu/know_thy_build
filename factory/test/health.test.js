@@ -179,6 +179,41 @@ test("tier 앵커는 `factory:tier-*` 라벨이고, 에이전트의 자기 신�
   expect(roleSignalsFor({ record: b.record, comments: [...b.comments, selfReported] }).tier_handoff).toBeNull();
 });
 
+/**
+ * ── 최종 리뷰 must_fix 1 — `publish: false`는 **쓰기 표면 전부**를 닫는다 ─────────────────────
+ *
+ * 그 깃발은 보고서 이슈만 막고 **라우팅 팔은 그대로 돌았다**. 곧 `factory analyze --health`처럼
+ * "읽기 전용"이라 광고된 호출자가 gh를 제대로 받는 순간 `factory:health` 이슈와 상류
+ * `factory-improvement` 이슈를 열었을 것이다. 발견이 나는 창(위 rubber-stamp와 같은 판)으로
+ * 확인한다 — 발견이 0건인 창으로 보면 "쓰기가 없다"가 공허하게 참이다.
+ */
+test("publish:false — 발견이 나는 창에서도 gh에 한 글자도 쓰지 않는다(분류는 그대로 한다)", async () => {
+  const w = windowOf([1, 2, 3, 4, 5].map((n) => ({
+    n, day: n, tier: "standard", costUsd: 10,
+    rounds: [[approve("correctness"), approve("security")], [approve("correctness"), reject("security")]],
+  })));
+  const gh = fakeGh();
+  const r = await health({ gh, ...w, publish: false });
+
+  // 발견은 그대로 난다 — 읽기 전용은 "보지 않는다"가 아니다.
+  expect(bySignal(r, "rubber-stamp")).toHaveLength(1);
+  // 그리고 라우팅 팔이 쓰는 **같은 분류기**를 탔다: 태그도 지문도 워크플로가 낼 값과 같다.
+  expect(r.classified).toHaveLength(r.findings.length);
+  expect(r.classified.every((c) => c.tags.includes("ktb"))).toBe(true);
+  expect(r.findings.every((f) => /^[0-9a-f]{16}$/.test(f.fingerprint))).toBe(true);
+
+  // 쓰기는 **하나도** 없다 — 보고서 이슈도, 코멘트도, 재오픈도, 상류 이슈도.
+  expect(gh.calls.created).toEqual([]);
+  expect(gh.calls.comments).toEqual([]);
+  expect(gh.calls.reopened).toEqual([]);
+  expect(gh.calls.upstream).toEqual([]);
+  expect(r.report_issue).toBeNull();
+  // 그 사실이 액션 한 줄로 남는다 — 조용히 건너뛰면 "라우팅했다"와 구별되지 않는다.
+  expect(r.actions.filter((a) => a.kind === "read-only")).toHaveLength(1);
+  expect(r.actions.find((a) => a.kind === "read-only").reason).toMatch(/not routed/);
+  expect(r.ok).toBe(true);
+});
+
 // ── (a) rubber-stamp — 짝이 있을 때만 ────────────────────────────────────────────────────────
 
 test("100% 승인 + 귀속된 escaped 라운드 ≥1 → `[ktb]` rubber-stamp 발견", async () => {
@@ -921,4 +956,40 @@ test("T7 — 주입 없이 `runHealth`가 스스로 공유 신원을 알아내�
   expect(r.report).toMatch(BANNER);
   expect(r.unverifiable).toHaveLength(1);
   expect(r.unverifiable[0]).toMatchObject({ issue: 3, author: "LeeHyeonKyu" });
+});
+
+/**
+ * ── ADR-028 — 상수는 **자가 조정**이고, 그래서 ADR과 코드가 갈라질 수 있다 ────────────────────
+ *
+ * 네 문턱은 저장소가 스스로 조정하라고 코드 옆에 이름을 달고 서 있다(`health.js`). 그 값이 움직이면
+ * 그것을 근거로 적은 ADR은 그날부터 거짓이 되고, 다음 사람은 ADR을 믿고 엉뚱한 기준선을 계산한다.
+ * 이 핀은 둘을 **한 자리에서** 묶는다: 값이 바뀌면 이 테스트가 먼저 빨개져 ADR도 같이 고치게 한다.
+ */
+test("ADR-028은 배포된 상수를 그대로 적는다(값이 움직이면 이 핀이 먼저 깨진다)", () => {
+  const adr = readFileSync(new URL("../../docs/factory/DECISIONS.md", import.meta.url), "utf8");
+  const section = adr.slice(adr.indexOf("## ADR-028 "));
+  expect(section).toBeTruthy();
+
+  // 실물 값 — ADR이 말하는 바로 그 상수들이다.
+  expect(DEFAULT_N).toBe(5);
+  expect(MIN_BASELINE_SAMPLE).toBe(2);
+  expect(WASTE_MULTIPLE).toBe(1.25);
+  expect(WASTE_MIN_EXCESS_USD).toBe(5);
+
+  expect(section).toContain(`N = ${DEFAULT_N}`);
+  expect(section).toContain(`MIN_BASELINE_SAMPLE = ${MIN_BASELINE_SAMPLE}`);
+  expect(section).toContain(`WASTE_MULTIPLE = ${WASTE_MULTIPLE}`);
+  expect(section).toContain(`WASTE_MIN_EXCESS_USD = ${WASTE_MIN_EXCESS_USD}`);
+
+  // 그리고 ADR-028이 실제로 기록해야 하는 판정들.
+  expect(section).toMatch(/짝의 양쪽/);                       // ① 짝지은 신호만
+  expect(section).toMatch(/저장소가 스스로 조정한다/);          // ② 자가 조정 상수
+  expect(section).toMatch(/dead[- ]debate|죽은 토론/i);
+  expect(section).toMatch(/라우팅하지 않는다/);                 // ③ 앵커 없는 신호는 보고 전용
+  expect(section).toMatch(/tierFloor/);                       // ④ 라벨과 독립인 둘째 위험 출처
+  expect(section).toMatch(/tier-misgrade/);
+  expect(section).toMatch(/publish: false/);                   // ⑤ 수동 경로는 읽기 전용
+  expect(section).toMatch(/factory\.identity/);                // ⑥ 공유 신원
+  expect(section).toMatch(/factory\.upstream/);                // ⑦ 루프의 출구
+  expect(section).toMatch(/KTB #28/);
 });

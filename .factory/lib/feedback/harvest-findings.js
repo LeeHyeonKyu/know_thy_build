@@ -223,6 +223,31 @@ const roundOf = (v) => (Number.isInteger(v) ? v : null);
  * 그리고 증거는 **검사 이름으로 묶인다**: `gates`가 거둬들여졌다는 사실이 `mutation` finding을
  * 승격시키지 못한다(1차 구현은 이슈 단위 불리언 하나였다).
  */
+/**
+ * 기각된 `human-decision:v1`의 **사유 문구** — 최종 리뷰 nit 5.
+ *
+ * 거부는 하나지만 그 **이유는 둘**이고, 사람이 다음에 할 일이 정반대다:
+ *   ① `identity.personal !== false`(사람 계정이거나 종류를 모른다) → *공유 신원*. 팩토리와 사람이
+ *      같은 작성자라 **가를 수 없다**. 고치는 방법: 머신 유저/GitHub App을 팩토리 신원으로 등록한다.
+ *   ② `identity.personal === false`(진짜 봇 신원) → 가를 수 **있었고**, 갈라 보니 그 결정을 적은 것이
+ *      에이전트다. 공유된 것은 아무것도 없다 — "shared identity"라고 적으면 주인은 이미 제대로
+ *      등록해 둔 봇 신원을 다시 등록하러 가고(할 일이 없다), 정작 진짜 사실 — *에이전트가 자기
+ *      결정을 사람의 결정인 척 적었다* — 은 화면 어디에도 남지 않는다.
+ *
+ * 그래서 문구의 열쇠는 **작성자가 아니라 신원**이다. 신원을 모르면 ①로 떨어진다(모르는 것을
+ * "봇이었다"로 적지 않는다 — 이 파일의 다른 모든 판정과 같은 규율).
+ */
+export function refusalWording({ author, identity = null, said = "" }) {
+  const agentWritten = identity?.personal === false;
+  const reason = agentWritten
+    ? "authored by the factory identity — an agent-written decision is not a human decision"
+    : "shared identity — author equals a factory login; cannot distinguish a person from an agent";
+  const detail = agentWritten
+    ? `${said} — REFUSED as evidence: @${author} is the factory identity, so this decision was written by an agent`
+    : `${said} — REFUSED as evidence: @${author} is also a factory login`;
+  return { reason, detail };
+}
+
 const HUMAN_DECISION_CAUSE = /^\s*cause:\s*["']?factory-defect["']?\s*$/m;
 const HUMAN_DECISION_KTB_FIX = /^\s*ktb_fix:\s*["']?([^\s"']+)["']?\s*$/m;
 
@@ -246,7 +271,7 @@ export function isNewerVersion(a, b) {
  * `selfGateLines`는 **`self-gate-detail:` 한 줄 JSON**이다(`self-gate.js#selfGateDetailLine`) —
  * 사람이 읽는 `self-gate: …` 줄이 아니다. 그 줄에는 `ran`/`skipped`/`ktb_version`이 없다.
  */
-export function attributionFor({ comments = [], selfGateLines = [], factoryLogins = [] } = {}) {
+export function attributionFor({ comments = [], selfGateLines = [], factoryLogins = [], identity = null } = {}) {
   const evidence = [];
   /**
    * ── T7: 거부는 보이게 한다 ─────────────────────────────────────────────────────────────────
@@ -278,8 +303,7 @@ export function attributionFor({ comments = [], selfGateLines = [], factoryLogin
     if (bots.has(author.toLowerCase())) {
       evidence.push({
         kind: "human-decision", status: "unverifiable", check: null, author,
-        reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent",
-        detail: `${said} — REFUSED as evidence: @${author} is also a factory login`,
+        ...refusalWording({ author, identity, said }),
       });
       continue;
     }
@@ -519,7 +543,7 @@ function reviewFindings({ issue, repo, handoffs, manifests }) {
  * 전부가, 중간에 배열을 한 번 베끼는 호출자가 생기는 날 다시 침묵으로 돌아간다. 그래서 진짜 반환값은
  * 이 함수이고, `harvestFindings`는 발견만 돌려주는 얇은 래퍼로 남긴다(기존 호출자와 핀은 그대로).
  */
-export function harvestIssue({ issue, repo, record = "", comments = [], factoryLogins = [] } = {}) {
+export function harvestIssue({ issue, repo, record = "", comments = [], factoryLogins = [], identity = null } = {}) {
   const out = [];
   const push = (fn) => { try { out.push(...fn()); } catch { /* 한 소스의 실패가 나머지를 막지 않는다 */ } };
   const known = knownRunsFor(comments);
@@ -528,7 +552,7 @@ export function harvestIssue({ issue, repo, record = "", comments = [], factoryL
   const boundManifests = manifests.filter((m) => isBoundLine(m, known));
   // `self-gate-detail:`도 다른 두 줄과 같은 provenance 계약을 진다(줄 자신의 `run_id`/`runner`).
   const boundSelfGate = selfGateLines.filter((l) => isBoundLine(l, known));
-  const attribution = attributionFor({ comments, selfGateLines: boundSelfGate, factoryLogins });
+  const attribution = attributionFor({ comments, selfGateLines: boundSelfGate, factoryLogins, identity });
 
   // self-gate 차단의 출처는 둘이다: 재시도 코멘트(빌더가 고칠 수 있는 것)와, **하네스급 차단**의
   // run 기록 줄. 후자는 `run-stage.js`가 재시도 코멘트를 쓰지 않고 곧장 needs-human으로 가기 때문에
