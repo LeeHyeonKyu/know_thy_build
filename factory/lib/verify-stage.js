@@ -312,6 +312,13 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   const reasons = [];
   /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
   let qaShortfall = null;
+  /**
+   * Task 9 (Structure H, KTB-51) — the plan validator's **machine-checkable** reasons, carried out
+   * separately so run-stage can tell a deterministic plan-contract defect (repairable in one turn)
+   * apart from every other failure (schema/roster/api/turn/gate — never repaired). Null unless the
+   * plan validator actually found something; the same strings are also pushed to `reasons`.
+   */
+  let planRepair = null;
   /*
    * 산출물은 디스패처의 최종 텍스트 하나만 믿지 않는다(KTB-7). 트랜스크립트의 Workflow 결과 →
    * result의 ```json 펜스 → 맨 JSON 순으로 훑고, **스키마를 통과하는 첫 후보**가 이긴다.
@@ -387,7 +394,12 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   if (data && orchestration && data.orchestration !== orchestration) reasons.push(`orchestration ${data.orchestration} != configured ${orchestration}`);
   if (stage === "plan" && data && expectedRounds != null && data.rounds !== expectedRounds) reasons.push(`rounds ${data.rounds} != expected ${expectedRounds}`);
   // CHARTER의 plan 규칙(감사 Task 9). 상한이 안 넘어오면 기본 6 — 규칙이 조용히 꺼지지는 않는다.
-  if (stage === "plan" && data) reasons.push(...validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody }));
+  // Task 9(KTB-51): 이 검증기의 사유는 결정적·기계 판정이라 한 번의 수리 턴으로 되먹일 수 있다 —
+  // `planRepair`로 따로 실어 run-stage가 "순수 계획-계약 결함"만 골라 수리하게 한다.
+  if (stage === "plan" && data) {
+    const pr = validatePlanHandoff(data, { maxDoneWhen: planLimits?.max_done_when ?? 6, issueBody });
+    if (pr.length) { reasons.push(...pr); planRepair = pr; }
+  }
   for (const role of roster) {
     if (!agentsLog.completed.includes(rolePrefix + role)) reasons.push(`roster role not completed: ${role}`);
   }
@@ -449,5 +461,5 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
   // KTB-15b M1: 어느 후보가 이겼는지(트랜스크립트 파일 읽기냐, task-notification이냐, envelope 펜스냐)는
   // 사후 감사의 provenance다 — `extractStageArtifact`는 이미 계산해 뒀는데(ok일 때만 `source`가 있다)
   // 지금까지 여기서 버려졌다. run-stage가 이 값을 run 기록 한 줄로 남긴다(§run-stage.js `artifact:`).
-  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall };
+  return { ok: reasons.length === 0, reasons, data, source: artifact.source ?? null, qaShortfall, planRepair };
 }

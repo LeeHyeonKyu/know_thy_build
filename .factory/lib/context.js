@@ -154,7 +154,7 @@ export function disputedFrom(comments) {
   return (Array.isArray(latest.obj.responses) ? latest.obj.responses : []).filter((r) => r?.status === "disputed");
 }
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null }) {
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -215,6 +215,12 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * `loaded.json`을 타고 간다. 비어 있는 것이 정상이다(대부분의 하네스는 트리를 더럽히지 않는다).
      */
     setup_dirty: [...new Set((setupDirty?.entries || []).map((e) => e.path))],
+    /**
+     * Task 9 (Structure H, KTB-51) — on a plan validator repair turn, the machine-checkable reasons
+     * the last handoff failed on. Present only on the one repair turn (run-stage passes `planRepair`);
+     * the planner reads them from `loaded.plan_repair` and fixes exactly those before re-emitting.
+     */
+    ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length ? { plan_repair: planRepair } : {}),
   };
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
   mkdirSync(join(root, ".factory/out"), { recursive: true });
@@ -313,5 +319,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Structure B (Task 3): the self-gate findings that bounced this head, if any — the builder fixes
     // them before the handoff (factory-implement.js). Absent when the self-gate did not block.
     ...(Array.isArray(selfGateFindings) && selfGateFindings.length ? { self_gate_findings: selfGateFindings } : {}),
+    // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
+    // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
+    ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
   };
 }

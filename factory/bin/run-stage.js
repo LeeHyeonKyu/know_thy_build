@@ -545,12 +545,13 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
     const ctx = await d.buildContext({ setupDirty });
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
-    const out = await d.claudeP(ctx, { harnessIssue });
+    let planRepairAttempt = 0;                                        // Task 9 (KTB-51): in-run one-shot cap for the plan validator repair
+    let out = await d.claudeP(ctx, { harnessIssue });
     // 마지막 진행 스냅샷은 claude가 끝난 **직후**에 찍는다 — 그때 트랜스크립트는 완성돼 있고
     // 하트비트는 아직 살아 있다. 실패해도 usage 줄은 그대로 나간다(관측이 기록을 막지 않는다).
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
-    const usage = usageLine(out, finalProgress);
+    let usage = usageLine(out, finalProgress);
     // ADR-023 Task 8b — implement의 구조적 백스톱. 쓰기 스테이지라 클린 체크는 할 수 없지만(빌더가
     // 파일을 쓰는 것이 이 스테이지의 일이다) **두 가지**는 세션 뒤에도 참이어야 한다: HEAD가 아직
     // 스테이지가 체크아웃한 브랜치이고, 팩토리 소유 경로가 아직 스테이지 커밋의 바이트라는 것.
@@ -666,10 +667,78 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
     }
-    const v = d.verifyStage({ stage, out, ctx, gates });
+    let v = d.verifyStage({ stage, out, ctx, gates });
     // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는
     // 사후 감사의 provenance다 — verifyStage가 계산해 둔 것을 그냥 흘려보내지 않고 한 줄 남긴다.
     if (v.source) record([`artifact: ${v.source}`]);
+    /**
+     * ── Task 9 (Structure H, KTB-51) — plan-stage validator one-shot in-run repair ────────────────
+     *
+     * A **machine-checkable** plan defect (`validatePlanHandoff`: a dissent left uncovered by
+     * done_when, an incomplete acceptance contract, a guard-shaped or over-count done_when) gets
+     * EXACTLY ONE repair turn — the validator reasons fed back to the same planner — BEFORE the
+     * needs-human escalation below, never as a replacement for it. Named regression **KTB #18 plan
+     * R1**: the planner emitted a handoff leaving dissents d2/d3 uncovered; today that goes straight
+     * to needs-human and the owner retries by hand. Here the plan stage feeds the reasons back for
+     * one turn; a repaired handoff that validates proceeds to `factory:planned`, one that still fails
+     * escalates unchanged, and a repair that cannot run (agent error) escalates as today.
+     *
+     * BOUNDED TO ONE by `planRepairAttempt` (an in-run counter): a second machine-checkable failure
+     * in this run escalates, never loops. Eligibility is deliberately narrow — repair only when the
+     * plan artifact parsed and the ONLY reasons are the plan validator's (`v.reasons.length ===
+     * v.planRepair.length`). Anything else in the mix — schema/roster failures, a turn/API error, a
+     * gate verdict — is not repairable here and falls straight through to the escalation below.
+     *
+     * The reasons reach the repair turn the same way Task 3 feeds self-gate findings to the builder:
+     * `d.buildContext({ planRepair })` writes them into `loaded.json` (→ `plan_repair`, which
+     * factory-plan.js surfaces to the planner), and they are also handed to `d.claudeP` — so this is
+     * a targeted repair, never a blind retry.
+     */
+    if (!v.ok && stage === "plan" && planRepairAttempt === 0 && d.claudeP
+        && Array.isArray(v.planRepair) && v.planRepair.length > 0
+        && v.reasons.length === v.planRepair.length
+        && !(out?.is_error)) {
+      planRepairAttempt += 1;
+      const repairReasons = v.planRepair;
+      record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
+      let repairOut = null;
+      try {
+        const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
+        repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
+      } catch (e) {
+        // A repair that cannot even run is not a second chance for the planner — escalate as today
+        // (fall through to the needs-human branch below with the original reasons unchanged).
+        record([`plan repair (KTB-51): could not run — ${e?.message || e}`]);
+        repairOut = null;
+      }
+      if (repairOut) {
+        out = repairOut;
+        try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
+        usage = usageLine(out, finalProgress);
+        // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
+        if (isNoWriteStage(stage)) {
+          const clean = d.assertCleanWorktree ? await d.assertCleanWorktree(overlaidPaths, setupDirty) : { ok: true };
+          if (!clean.ok) {
+            const dirty = Boolean(clean.dirty?.length);
+            const reason = dirty
+              ? `worktree dirty after ${stage} repair (no-write stage): ${clean.dirty.join(", ")}`
+              : `worktree check failed after ${stage} repair (no-write stage): ${clean.reason || "unknown"}`;
+            const t = await d.transition({ to: dirty ? "factory:needs-human" : "factory:blocked", reason });
+            record([`worktree: FAIL — ${reason}`, ...refusal(t), usage]);
+            return 2;
+          }
+        }
+        // plan has no gates (d.gates returns null for plan) — recompute the verdict on the repaired handoff.
+        gates = null;
+        if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
+          try { gates = await d.gates(ctx); } catch { gates = null; }
+        }
+        v = d.verifyStage({ stage, out, ctx, gates });
+        if (v.source) record([`artifact: ${v.source} (repair)`]);
+        record([`plan repair (KTB-51): ${v.ok ? "resolved → factory:planned" : "still red → escalating unchanged"}`]);
+      }
+    }
     if (!v.ok) {
       // 턴 한도(KTB-16)와 API 쿼터/장애(KTB-22)는 둘 다 설계 오류가 아니라 **재시도로 풀리는 일시
       // 조건**이다 — 사람이 판단할 것이 아직 없으므로 needs-human이 아니라 blocked다(gates BLOCKED·
@@ -2119,11 +2188,13 @@ async function main() {
      * `gates` dep이 같은 `mergeBase()`로 MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는
      * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
      */
-    buildContext: async ({ setupDirty = null } = {}) => {
+    buildContext: async ({ setupDirty = null, planRepair = null } = {}) => {
       let base = null;
       try { base = await mergeBase(); }
       catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
-      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty }));
+      // Task 9 (KTB-51): on the plan repair turn, the validator reasons ride into `loaded.json` as
+      // `plan_repair` (the same channel Task 3 uses for self-gate findings) so the planner sees them.
+      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty, planRepair }));
     },
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },

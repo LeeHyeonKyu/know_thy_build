@@ -279,6 +279,18 @@ const planRules =
   `self-runnable check, reviewer-judged only) and the one-line bar a reviewer applies (\`rubric\`). ` +
   `An item with neither a check nor a rubric is rejected as an incomplete acceptance contract.`;
 
+// Task 9 (Structure H, KTB-51) — the one-shot repair turn. When the deterministic validator rejected
+// the previous handoff, run-stage re-dispatches this workflow once with `loaded.plan_repair` set to
+// the exact reasons. The planner fixes precisely those (not a fresh re-plan) — this is the single
+// feedback turn the plan stage gets before a handoff that is still red escalates to a human.
+const planRepair = Array.isArray(loaded.plan_repair) ? loaded.plan_repair.filter((r) => typeof r === 'string' && r.trim()) : [];
+const repairDirective = planRepair.length
+  ? `\n\nREPAIR TURN (KTB-51): your previous plan handoff was rejected by the deterministic validator ` +
+    `for exactly these reasons:\n${planRepair.map((r) => `  - ${r}`).join('\n')}\n` +
+    `Fix precisely these and keep everything the validator did not object to. This is the one repair ` +
+    `turn — a handoff that still breaks a rule goes to a human.`
+  : '';
+
 if (mode === 'single') {
   // One opus planner writes the whole plan; one skeptic gets one pass at it. No cross-examination,
   // no synthesizer, no sign-off round — the planner's own output, plus whatever the skeptic could
@@ -298,7 +310,7 @@ if (mode === 'single') {
         `more. non_goals names what this issue will not do, so review cannot widen it later. ` +
         `open_risks is what you saw and are not gating on; dissent_log is where a risk you are ` +
         `knowingly not resolving goes, each entry with an \`id\`, the \`role\` that would raise it and ` +
-        `a \`severity\`.\n\n${planRules}`,
+        `a \`severity\`.\n\n${planRules}${repairDirective}`,
         { agentType: planner.agentType, model: planner.model, label: `plan:${planner.name}`, schema: PLAN_V1 },
       ))())
     : null;
@@ -422,7 +434,7 @@ let plan = r1.length > 0
       `names what this issue will not do, so review cannot widen it later. Every objection from round 2 ` +
       `that you did not resolve goes into dissent_log verbatim with the role that raised it (with an ` +
       `\`id\` and a \`severity\`) — deleting an objection is forging consensus, not reaching it.\n\n` +
-      `${planRules}`,
+      `${planRules}${repairDirective}`,
       { agentType: 'plan-synthesizer', model: 'opus', schema: PLAN_V1 },
     ))())
   : null;

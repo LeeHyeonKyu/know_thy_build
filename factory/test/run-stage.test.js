@@ -276,6 +276,79 @@ test("implement: no d.selfGate injected → self-gate is skipped and the stage r
   expect(transition.mock.calls.at(-1)[0].to).toBe("factory:awaiting-review");
 });
 
+/**
+ * ── Task 9 (Structure H, KTB-51) — plan-stage validator one-shot in-run repair ────────────────────
+ *
+ * A machine-checkable plan defect gets EXACTLY ONE repair turn (the validator reasons fed back to the
+ * planner) before the needs-human escalation. Named regression KTB #18 plan R1: dissents d2/d3 left
+ * uncovered by done_when — today straight to needs-human + owner retry; here one feedback turn fixes it.
+ */
+const R1_REASONS = ["dissent without done_when: d2, d3"];
+const planRepairDeps = (over = {}) => ({
+  charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+  heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+  buildContext: vi.fn(async () => ({ roster: ["synthesizer"], rounds: 2, orchestration: "workflow", limits: { K: 3 } })),
+  resetAgentsLog: async () => {},
+  claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+  gates: async () => null,                                          // plan is not a gated stage
+  writeHandoff: async () => {},
+  runRecord: () => {}, release: async () => {},
+  ...over,
+});
+
+test("plan: a machine-checkable validator failure (KTB #18 R1) gets ONE repair turn with the reasons fed back → factory:planned, not needs-human", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
+    .mockReturnValueOnce({ ok: true, reasons: [], planRepair: null, data: { rounds: 2 } });
+  const deps = planRepairDeps({ transition, verifyStage });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(0);
+  // the repair turn ran exactly once (two claudeP dispatches total), and it was NOT a blind retry —
+  // the validator reasons were handed to both the context build and the repair invocation.
+  expect(deps.claudeP).toHaveBeenCalledTimes(2);
+  expect(deps.claudeP.mock.calls[1][1]).toEqual(expect.objectContaining({ planRepair: R1_REASONS }));
+  expect(deps.buildContext.mock.calls[1][0]).toEqual(expect.objectContaining({ planRepair: R1_REASONS }));
+  // the repaired handoff validates → proceeds to factory:planned, never touching needs-human.
+  const targets = transition.mock.calls.map((c) => c[0].to);
+  expect(targets).not.toContain("factory:needs-human");
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:planned");
+});
+
+test("plan: the repair is bounded to one — a second machine-checkable failure escalates to needs-human", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  // both passes fail the same way: the one repair turn did not fix it.
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  const deps = planRepairDeps({ transition, verifyStage });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(deps.claudeP).toHaveBeenCalledTimes(2);            // one repair turn, never a third dispatch
+  expect(verifyStage).toHaveBeenCalledTimes(2);             // verified once before, once after the repair
+  const t = transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  expect(t.reason).toMatch(/stage artifact missing or invalid/);
+  expect(t.reason).toContain("dissent without done_when: d2, d3");
+});
+
+test("plan: a repair turn that cannot run (claudeP throws) escalates to needs-human, unchanged", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  let dispatch = 0;
+  const claudeP = vi.fn(async () => { if (++dispatch === 2) throw new Error("api error 529"); return { is_error: false, result: "{}" }; });
+  const deps = planRepairDeps({ transition, verifyStage, claudeP });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(verifyStage).toHaveBeenCalledTimes(1);            // the repair never produced an artifact to re-verify
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
+test("plan: a failure that is NOT purely the plan validator (e.g. a roster gap alongside it) is never repaired — escalates as today", async () => {
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  // reasons has an extra non-validator reason → v.reasons.length !== v.planRepair.length → not repairable.
+  const verifyStage = vi.fn(() => ({ ok: false, reasons: [...R1_REASONS, "roster role not completed: skeptic"], planRepair: [...R1_REASONS], data: { rounds: 2 } }));
+  const deps = planRepairDeps({ transition, verifyStage });
+  expect(await runStage({ stage: "plan", issue: 18, deps, runnerId: "r1" })).toBe(2);
+  expect(deps.claudeP).toHaveBeenCalledTimes(1);          // no repair turn — the mixed failure went straight to escalation
+  expect(transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
 test("a refused transition is recorded, never silent", async () => {
   const lines = [];
   const deps = {

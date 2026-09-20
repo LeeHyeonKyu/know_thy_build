@@ -79,6 +79,35 @@ test("plan validator: a medium-or-worse dissent no done_when covers is invalid",
   expect(covered.ok).toBe(true);
 });
 
+/**
+ * Task 9 (Structure H, KTB-51) — the plan validator's machine-checkable reasons ride out on their own
+ * field `planRepair`, so run-stage can tell a repairable plan-contract defect from every other failure
+ * (schema/roster/api). Named regression KTB #18 plan R1: dissents d2/d3 left uncovered.
+ */
+test("plan validator: planRepair carries the machine-checkable reasons (KTB #18 plan R1: d2/d3 uncovered)", () => {
+  const dissent = [
+    { id: "d2", role: "skeptic", severity: "high", objection: "the migration is not idempotent", resolution: "unresolved — proceeding" },
+    { id: "d3", role: "architect", severity: "medium", objection: "no rollback path", resolution: "unresolved — proceeding" },
+  ];
+  const bad = verifyPlan(planFix({ dissent_log: dissent }));
+  expect(bad.ok).toBe(false);
+  expect(bad.planRepair).toEqual(["dissent without done_when: d2, d3"]);
+  // the same strings are also in reasons, and here they are the ONLY reason — so run-stage sees a
+  // purely machine-checkable failure it may repair (v.reasons.length === v.planRepair.length).
+  expect(bad.reasons).toEqual(bad.planRepair);
+
+  // a clean plan carries no planRepair — the field is null, not an empty array.
+  const good = verifyPlan(planFix({
+    dissent_log: dissent,
+    done_when: [
+      { id: "dw1", text: "the migration re-run is a no-op", verify: "test_7_idem", level: "unit", covers: ["d2"] },
+      { id: "dw2", text: "a rollback restores the prior schema", verify: "test_7_rollback", level: "unit", covers: ["d3"] },
+    ],
+  }));
+  expect(good.ok).toBe(true);
+  expect(good.planRepair).toBeNull();
+});
+
 test("plan validator: dissent with no severity still needs a done_when; low severity does not", () => {
   const noSeverity = verifyPlan(planFix({ dissent_log: [{ role: "skeptic", objection: "o", resolution: "unresolved — proceeding" }] }));
   expect(noSeverity.reasons.join("; ")).toMatch(/dissent without done_when: d1/);   // id 없는 항목은 위치로 d<n>
