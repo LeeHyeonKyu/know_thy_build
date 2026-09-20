@@ -366,6 +366,36 @@ test("a human decision shows whether its author is a factory login (and is there
   expect(cap2.text()).not.toContain("[ktb]");
 });
 
+test("a human decision whose author cannot be verified says so — it is never rendered as (human)", async () => {
+  const { record, comments } = await demo39();
+  const noHeartbeats = comments.filter((c) => !String(c.body).includes("factory-heartbeat"));
+  const cap = capture();
+  await analyzeCommand({
+    ...(await deps()), argv: ["39"], io: cap.io,
+    gh: { comments: async () => noHeartbeats, viewerLogin: async () => OWNER },
+    readRecord: async () => ({ text: record, source: "records", trusted: true }),
+  });
+  const out = cap.text();
+  expect(out).toContain("(author unverifiable — factory logins unresolved)");
+  expect(out).not.toContain("(human)");
+});
+
+/** 재리뷰 SF-A — 사람이 하트비트를 **인용해도** 그 사람은 팩토리 계정이 되지 않는다. */
+test("analyze: a human comment quoting a heartbeat does not silence that human's own decision", async () => {
+  const { record, comments } = await demo39();
+  const hb = comments.find((c) => String(c.body).includes("factory-heartbeat"));
+  const quoting = { id: 999, createdAt: "2026-09-20T11:30:00Z", author: OWNER, authorType: "User", body: `for context:\n\n${hb.body}\n` };
+  const cap = capture();
+  await analyzeCommand({
+    ...(await deps()), argv: ["39", "--json"], io: cap.io,
+    gh: { comments: async () => [...comments, quoting], viewerLogin: async () => OWNER },
+    readRecord: async () => ({ text: record, source: "records", trusted: true }),
+  });
+  const data = JSON.parse(cap.text());
+  expect(data.factory_logins).toEqual(["factory-bot"]);
+  expect(data.findings.filter((f) => f.tags.includes("ktb"))).toHaveLength(2);
+});
+
 test("a record read from the local working tree is printed with an explicit UNVERIFIED warning", async () => {
   const { record } = await demo39();
   const cap = capture();

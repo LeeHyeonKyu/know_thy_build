@@ -425,6 +425,8 @@ const UNBOUND = "UNBOUND — no heartbeat names this run, so harvest ignores thi
 export function renderTimeline(tl, classified, { factoryLogins = null, recordSource = null, recordTrusted = true, loginNote = null } = {}) {
   const L = [];
   const bots = new Set((factoryLogins || []).map((s) => String(s).toLowerCase()));
+  // `null`(해석 실패)과 배열(해석 성공)은 다르다 — 전자에서는 작성자를 사람이라고 단정할 수 없다.
+  const loginsKnown = Array.isArray(factoryLogins);
   L.push(`Run · #${tl.issue}${tl.repo ? ` · ${tl.repo}` : ""}`);
   const runnerNote = tl.runners.length ? ` · runners: ${tl.runners.join(", ")}` : "";
   L.push(`${tl.runs.length} stage-run${tl.runs.length === 1 ? "" : "s"}${runnerNote} · total ${money(tl.totals.cost_usd)}${tl.totals.cost_unknown ? ` (+${tl.totals.cost_unknown} run(s) with no usage line)` : ""}`);
@@ -489,7 +491,7 @@ export function renderTimeline(tl, classified, { factoryLogins = null, recordSou
   if (tl.chronology.length) {
     L.push("");
     L.push("── chronology (each line is placed by its own timestamp; an event is attributed to a run only when it carries that run's id)");
-    for (const line of renderChronology(tl.chronology, bots)) L.push(line);
+    for (const line of renderChronology(tl.chronology, bots, loginsKnown)) L.push(line);
   }
 
   L.push("");
@@ -498,7 +500,7 @@ export function renderTimeline(tl, classified, { factoryLogins = null, recordSou
   return L;
 }
 
-function renderChronology(chronology, bots) {
+function renderChronology(chronology, bots, loginsKnown) {
   const L = [];
   for (const ev of chronology) {
     const at = (ev.at ?? "?").padEnd(20);
@@ -507,7 +509,7 @@ function renderChronology(chronology, bots) {
     } else if (ev.kind === "heartbeat") {
       L.push(`   ${at} heartbeat · ${ev.stage ?? "?"} · ${ev.runner}${ev.run_id ? ` (run ${ev.run_id})` : ""}`);
     } else {
-      const lines = renderEvent(ev, bots);
+      const lines = renderEvent(ev, bots, loginsKnown);
       if (!lines.length) continue;
       L.push(`   ${at} ${lines[0]}`);
       for (const extra of lines.slice(1)) L.push(`   ${extra}`);
@@ -517,7 +519,7 @@ function renderChronology(chronology, bots) {
 }
 
 /** 이벤트 한 건 → 줄들. 첫 줄만 타임스탬프를 받고 이어지는 줄은 그 아래로 정렬한다. */
-function renderEvent(ev, bots) {
+function renderEvent(ev, bots, loginsKnown) {
   const L = [];
   const cont = " ".repeat(21);
   if (ev.kind === "transition-refused") {
@@ -546,8 +548,10 @@ function renderEvent(ev, bots) {
      * 사람이 "내가 factory-defect라고 적었는데 왜 ktb가 아니지"를 여기서 바로 읽을 수 있어야 한다.
      */
     const who = ev.author == null ? "(author unknown — not usable as evidence)"
-      : bots.has(String(ev.author).toLowerCase()) ? `@${ev.author} (factory login — ignored by attribution)`
-        : `@${ev.author} (human)`;
+      // 팩토리 계정 목록을 못 얻었으면 "사람"이라고 말할 수 없다 — 셋째 상태가 필요하다(재리뷰 nit).
+      : !loginsKnown ? `@${ev.author} (author unverifiable — factory logins unresolved)`
+        : bots.has(String(ev.author).toLowerCase()) ? `@${ev.author} (factory login — ignored by attribution)`
+          : `@${ev.author} (human)`;
     L.push(`human decision (${ev.skill ?? "?"}) by ${who}: ${ev.decision ?? "?"}${ev.cause ? ` · cause=${ev.cause}` : ""}`);
     if (ev.reason) L.push(`${cont}  ${ev.reason}`);
   }

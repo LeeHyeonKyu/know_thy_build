@@ -1,5 +1,5 @@
 import { STATES, TIER_LABELS } from "./labels.js";
-import { parseHeartbeat } from "./heartbeat.js";
+import { HEARTBEAT_HEAD } from "./heartbeat.js";
 
 /**
  * 머지는 되돌릴 수 없다 — 체크가 하나도 없으면 "전부 통과"가 아니라 "확인 못 함"으로 본다(fail closed).
@@ -114,9 +114,27 @@ export async function resolveFactoryLogins({ gh, env = process.env, comments = n
    * (`[protected].runner_only` + 훅이 그 경로를 에이전트에게서 닫는다), 그 코멘트가 존재한다는 것
    * 자체가 "이 로그인이 이 저장소에서 팩토리로 돈다"는 증거다. 그래서 노트북에서도 — `gh api user`가
    * 소유자를 주는 바로 그 자리에서도 — 봇 이름을 알 수 있다. env도 Actions도 필요 없다.
+   *
+   * ── T5 재리뷰 SF-A: **하트비트를 인용한 코멘트는 하트비트가 아니다.** ──────────────────────
+   * `HEARTBEAT_HEAD`는 앵커가 없어서 본문 **어디서나** 맞는다. 곧 사람이 "맥락 삼아 붙여 둡니다:
+   * <하트비트 전문>"을 적으면 그 코멘트가 하트비트로 읽히고, 작성자인 **소유자**가 팩토리 계정
+   * 목록에 들어가, 바로 그 사람이 적은 `human-decision:v1`이 기각된다(리뷰어가 재현: 로그인이
+   * `["factory-bot","LeeHyeonKyu"]`가 되며 `[ktb]` 발견 둘이 사라졌다) — MF-1과 정확히 같은 사고가
+   * 다른 문으로 돌아온 것이다. 그래서 **본문 0바이트에서 시작할 때만** 하트비트로 센다:
+   * `heartbeatBody`는 언제나 head를 맨 앞에 놓으므로(진짜 하트비트는 전부 통과) 인용본만 걸린다.
    */
   for (const c of comments || []) {
-    if (parseHeartbeat(c?.body) && c?.author) logins.push(String(c.author));
+    if (!c?.author) continue;
+    if (HEARTBEAT_HEAD.exec(String(c.body ?? ""))?.index === 0) logins.push(String(c.author));
+  }
+
+  /**
+   * ③ GitHub이 기록한 **작성자 사실**: `user.type === "Bot"`. 로그인 이름과 달리 이 값은 코멘트
+   * 본문이 아니라 GitHub이 계정에 붙인 종류라 에이전트가 고를 수 없다. 봇이 적은 결정은 사람의
+   * 결정이 아니므로 봇은 전부 팩토리 계정으로 센다 — 이름을 몰라도 그 문은 닫힌다.
+   */
+  for (const c of comments || []) {
+    if (c?.author && String(c.authorType ?? "") === "Bot") logins.push(String(c.author));
   }
 
   const out = [...new Set(logins.filter(Boolean))];
@@ -204,7 +222,18 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async comments(n) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
       const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
-      return j.map((c) => ({ id: c.id, body: c.body || "", createdAt: c.created_at, author: c.user?.login ?? null }));
+      /**
+       * T5 재리뷰 SF-A — `authorType`/`viaApp`은 GitHub이 **계정에** 붙인 사실이지 본문이 아니다.
+       * 로그인 이름은 코멘트를 적는 쪽이 고를 수 없지만 본문은 고를 수 있으므로(하트비트를 인용해
+       * 자기를 러너처럼 보이게 하는 수가 있다), 귀속 판정에는 본문 바깥의 사실이 하나 더 필요하다.
+       * 둘 다 응답에 이미 있던 필드다 — 추가 호출은 없다.
+       */
+      return j.map((c) => ({
+        id: c.id, body: c.body || "", createdAt: c.created_at,
+        author: c.user?.login ?? null,
+        authorType: c.user?.type ?? null,
+        viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
+      }));
     },
     async comment(n, body) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();

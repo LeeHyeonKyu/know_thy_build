@@ -16,8 +16,8 @@ test("issue() maps gh json; comments() maps id/body/createdAt", async () => {
   // `author`(T3 재리뷰 NEW-MF-2): 피드백 루프가 `human-decision:v1`을 **권한**으로 읽으므로
   // 작성자가 판정의 일부다. 없는 필드는 지어내지 않고 null이다.
   expect(await gh.comments(5)).toEqual([
-    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z", author: "LeeHyeonKyu" },
-    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z", author: null },
+    { id: 11, body: "x", createdAt: "2026-09-11T00:00:00Z", author: "LeeHyeonKyu", authorType: null, viaApp: null },
+    { id: 12, body: "y", createdAt: "2026-09-11T01:00:00Z", author: null, authorType: null, viaApp: null },
   ]);
   const api = run.calls.find((c) => c.args[0] === "api");
   expect(api.args).toEqual(["api", "repos/o/r/issues/5/comments?per_page=100", "--paginate", "--slurp"]);
@@ -585,4 +585,44 @@ test("resolveFactoryLogins: nothing resolvable → ok:false (never an empty list
 test("resolveFactoryLogins: FACTORY_BOT_LOGIN alone is enough outside Actions", async () => {
   const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: { FACTORY_BOT_LOGIN: "factory-bot" } });
   expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+});
+
+// ── T5 재리뷰 SF-A: 하트비트를 **인용한** 코멘트는 하트비트가 아니다 ─────────────────────────
+//
+// `HEARTBEAT_HEAD`는 앵커가 없어 본문 어디서나 맞는다. 사람이 "맥락 삼아 붙입니다: <하트비트>"를
+// 적으면 그 코멘트가 하트비트로 읽혀 작성자(소유자)가 팩토리 계정이 되고, 바로 그 사람이 적은
+// `human-decision:v1`이 기각된다 — MF-1과 같은 사고가 다른 문으로 돌아온 것이다.
+
+test("heartbeatBody always puts the head at byte 0 — the producer is what makes the byte-0 rule safe", () => {
+  const plain = heartbeatBody({ issue: 39, stage: "implement", runnerId: "gha-1", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z" });
+  expect(plain.indexOf("<!-- factory-heartbeat")).toBe(0);
+  // progress 표가 붙은 무거운 본문에서도 head는 맨 앞이다.
+  const withProgress = heartbeatBody({
+    issue: 39, stage: "implement", runnerId: "gha-1", started: "2026-09-20T10:00:00Z", last: "2026-09-20T10:00:00Z",
+    progress: { stage: "implement", issue: 39, runner: "gha-1", agents: [{ label: "a", kind: "subagent", status: "done", turns: 1, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cost_usd: 0.1 }], totals: { turns: 1, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cost_usd: 0.1 }, files_touched: [] },
+  });
+  expect(withProgress.indexOf("<!-- factory-heartbeat")).toBe(0);
+});
+
+test("resolveFactoryLogins: a human comment QUOTING a heartbeat never makes its author a factory login", async () => {
+  const realHeartbeat = heartbeatComment("factory-bot");
+  const quoting = {
+    id: 3, createdAt: "2026-09-20T11:30:00Z", author: "LeeHyeonKyu", authorType: "User",
+    body: `pasting the heartbeat for context:\n\n${realHeartbeat.body}\n\nlooks stuck to me.`,
+  };
+  const r = await resolveFactoryLogins({ gh: viewerGh("LeeHyeonKyu"), env: {}, comments: [realHeartbeat, quoting] });
+  expect(r).toEqual({ ok: true, logins: ["factory-bot"] });
+  expect(r.logins).not.toContain("LeeHyeonKyu");
+});
+
+test("resolveFactoryLogins: a Bot-type author is a factory login even when its name is unknown", async () => {
+  const botComment = { id: 4, createdAt: "2026-09-20T11:40:00Z", author: "some-app[bot]", authorType: "Bot", body: "<!-- human-decision:v1 issue=39 -->\ncause: factory-defect" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("owner"), env: {}, comments: [botComment] });
+  expect(r).toEqual({ ok: true, logins: ["some-app[bot]"] });
+});
+
+test("resolveFactoryLogins: a User-type author is never added just for commenting", async () => {
+  const human = { id: 5, createdAt: "2026-09-20T11:45:00Z", author: "LeeHyeonKyu", authorType: "User", body: "some thoughts" };
+  const r = await resolveFactoryLogins({ gh: viewerGh("LeeHyeonKyu"), env: {}, comments: [human] });
+  expect(r.ok).toBe(false);          // 근거가 하나도 없다 — 빈 목록 대신 fail closed
 });
