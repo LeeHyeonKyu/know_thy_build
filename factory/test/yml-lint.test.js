@@ -101,10 +101,11 @@ const files = readdirSync(W).filter((f) => f.endsWith(".yml"));
 const STAGE = { "factory-triage.yml": ["triage", 20, '"factory:queue"'], "factory-plan.yml": ["plan", 75, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 90, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 30, '"factory:approved"'] };
 const ISSUE_EXPR = "${{ github.event.issue.number || inputs.issue }}";
 
-test("all nine workflow templates exist and pass lint", () => {
+test("all ten workflow templates exist and pass lint", () => {
   // KTB-44 — 아홉 번째는 `factory-rehearse.yml`(ADR-025): 스테이지가 아니라 **첫 이슈 전에** 하네스를
   // 러너에서 한 번 돌리는 잡이다. 스테이지 규칙(`STAGE` 표)에는 들어가지 않는다 — run-stage를 부르지 않는다.
-  expect(files.sort()).toEqual(["factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-rehearse.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
+  // 피드백 루프 Task 4 — 열 번째는 `factory-health.yml`: 일정으로만 깨어나는 집계 잡이다(역시 스테이지 밖).
+  expect(files.sort()).toEqual(["factory-health.yml", "factory-implement.yml", "factory-integrity.yml", "factory-merge.yml", "factory-plan.yml", "factory-rehearse.yml", "factory-retro.yml", "factory-review.yml", "factory-sweeper.yml", "factory-triage.yml"]);
   // 파일명을 함께 넘긴다 — `merge-token-scope`(ADR-021)의 파일 범위 갈래는 그래야 판정한다(doctor가 그렇게 부른다).
   for (const f of files) expect(lintWorkflow(readFileSync(join(W, f), "utf8"), { file: f }), f).toEqual([]);
 });
@@ -368,6 +369,44 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   // cron이 없다는 것 자체가 §8.4의 결정이다 — 머지가 없으면 배울 것도 없다.
   expect(y).not.toContain("schedule:");
   expect(y).not.toContain("cron:");
+});
+
+// 건강 잡도 스테이지가 아니다(라벨 상태 머신 밖) — 회고와 달리 **일정으로만** 깨어나고, 에이전트를
+// 부르지 않는 결정적 집계 잡이다(피드백 루프 Task 4 / spec §5·§7).
+test("health workflow is scheduled, runner-only, minimal-permission, and never cancelled (Task 4)", () => {
+  const y = readFileSync(join(W, "factory-health.yml"), "utf8");
+  expect(y).toContain("name: factory-health");
+  expect(y).toContain("schedule:");
+  expect(y).toMatch(/cron: '[^']+'/);                    // 주기 잡이다 — 회고와 정반대의 방아쇠
+  expect(y).toContain("workflow_dispatch:");             // 사람이 언제든 한 번 더 돌릴 수 있다
+  expect(y).toContain("group: factory-health");
+  expect(y).toContain("cancel-in-progress: false");
+  expect(y).toContain("fetch-depth: 0");
+  expect(y).toContain("ref: ${{ github.event.repository.default_branch }}");
+  expect(y).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
+  expect(y).toContain("uses: ./.factory/actions/setup");  // 스테이지와 **같은** setup
+  expect(y).toContain("run: node .factory/bin/health.js");
+  // 러너 전용 — 에이전트도 테스트 환경도 띄우지 않는다(보고서는 기록에서 파생된다, 쓰여지지 않는다).
+  expect(y).toContain('claude: "false"');
+  expect(y).toContain('test-env: "false"');
+  // 그리고 **Health 스텝 자신**은 Claude 크리덴셜을 받지 않는다. 스크럽 스텝은 예외다 — 그쪽은 그
+  // 값들을 **리터럴로 지우기 위해** 들고 있고(ADR-020 SF-1), 어디에서도 echo하지 않는다.
+  const healthStep = y.split(/\n(?=      - )/).find((s) => s.includes("run: node .factory/bin/health.js"));
+  expect(healthStep).toBeTruthy();
+  expect(healthStep).not.toContain("CLAUDE_CODE_OAUTH_TOKEN");
+  expect(healthStep).not.toContain("ANTHROPIC_API_KEY");
+  // 최소 권한 — 이 잡의 GITHUB_TOKEN은 아무 스텝도 쓰지 않는다(gh는 FACTORY_BOT_TOKEN으로 나간다).
+  expect(y).toMatch(/permissions:\n {2}contents: read\n/);
+  expect(y).not.toContain("issues: write");
+  expect(y).not.toContain("contents: write");
+  // dispatch 입력이 아예 없다 — 시크릿을 든 스텝의 run:으로 값이 흘러들 경로를 만들지 않는다(MF-2).
+  expect(y).not.toContain("inputs:");
+  // 업로드 전 스크럽 + 7일 보관(SF-1) — 잡마다 같은 규칙이다.
+  expect(y).toContain("id: scrub-artifacts");
+  expect(y).toContain("run: node .factory/bin/scrub-artifacts.js .factory/out");
+  expect(y).toContain("retention-days: 7");
+  expect(y).toContain("include-hidden-files: true");
+  expect(lintWorkflow(y, { file: "factory-health.yml" })).toEqual([]);
 });
 
 test("composite setup action", () => {
