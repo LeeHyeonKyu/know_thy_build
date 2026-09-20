@@ -194,9 +194,20 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 머지됐을 때 "하네스가 들어왔다"를 말해 주는 유일한 신호다 — builder는 언제나
      * `claude/fq-<issue>`에서 작업하므로(implement 규칙 1) 브랜치 이름이 곧 이슈 번호다.
      */
+    /**
+     * 이 브랜치에서 머지된 PR들 — **머지 시각 내림차순**. `gh pr list`는 *생성* 순으로 주므로
+     * 첫 항목이 가장 나중에 머지된 PR이라는 보장이 없다(Task 4 r3 should_fix 2): 재작업으로 같은
+     * 브랜치에 PR이 두 번 머지되면(먼저 만든 쪽이 나중에 머지될 수 있다) 첫 항목은 옛 머지다.
+     * `mergedAt`은 예전에도 조회하면서 쓰지는 않았다 — 이제 그 값이 순서를 정한다.
+     */
+    async mergedPrsForBranch(branch) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "20", "--json", "number,mergedAt"]));
+      return j
+        .map((p) => ({ number: p.number, mergedAt: p.mergedAt ?? null }))
+        .sort((a, b) => (Date.parse(b.mergedAt) || 0) - (Date.parse(a.mergedAt) || 0));
+    },
     async mergedPrForBranch(branch) {
-      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", branch, "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]));
-      return j.length ? j[0].number : null;
+      return (await this.mergedPrsForBranch(branch))[0]?.number ?? null;
     },
     /**
      * KTB-46 — **머지된 PR의 머지 사실 그 자체.** `mergedPrForBranch`는 번호만 준다("머지된 PR이
@@ -208,6 +219,16 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * `mergeSha`·`mergedAt`은 같은 조회로 공짜라 함께 싣는다(run 기록·retro가 쓸 수 있다).
      * 없는 필드는 지어내지 않고 null이다 — 머지되지 않은 PR에 부르면 전부 null로 답한다.
      */
+    /**
+     * 이 PR이 **실제로 건드린 파일 경로들**(피드백 루프 Task 4 r2). 경로는 GitHub이 diff에서 계산한
+     * 사실이지 에이전트가 적은 산문이 아니다 — 그래서 tier 라벨과 **독립한** 두 번째 위험 출처가 된다.
+     * triage가 docs 모양의 diff를 `standard`로 채점해도(KTB #18) 이 목록은 그 사실을 그대로 말한다.
+     * 못 읽으면 던진다 — 호출자가 "모양 미상"으로 저하시킨다(라벨로 **추측하지 않는다**).
+     */
+    async prFiles(pr) {
+      const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "files"]));
+      return (j.files || []).map((f) => f.path).filter(Boolean);
+    },
     async prMergeInfo(pr) {
       const j = JSON.parse(await gh(["pr", "view", String(pr), "-R", repo, "--json", "number,headRefOid,mergeCommit,mergedAt,mergedBy"]));
       return { headSha: j.headRefOid ?? null, mergeSha: j.mergeCommit?.oid ?? null, mergedAt: j.mergedAt ?? null, mergedBy: j.mergedBy?.login ?? null };
@@ -415,6 +436,12 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
+    /**
+     * 닫힌 이슈를 다시 연다. 쓰는 곳은 하나다: 건강 잡의 **오래 사는 보고서 이슈**(Task 4). 그 자리가
+     * 닫혀 있다고 새 이슈를 열면 라우팅 영수증 마커가 앵커를 잃고 같은 지문이 매주 상류에 새 이슈를
+     * 연다 — 대화의 자리는 옮기지 않는다.
+     */
+    async reopenIssue(n) { await gh(["issue", "reopen", String(n), "-R", repo]); },
     // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
     async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
 

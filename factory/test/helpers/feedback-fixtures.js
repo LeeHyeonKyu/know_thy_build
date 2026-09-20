@@ -8,6 +8,7 @@ import { selfGateRetryComment, transitionRefusedComment } from "../../lib/retro/
 import { renderHandoff } from "../../lib/handoff.js";
 import { appendRunRecord } from "../../lib/run-record.js";
 import { selfGateDetailLine } from "../../lib/self-gate.js";
+import { usageLine } from "../../bin/run-stage.js";
 
 /**
  * ── T3 리뷰의 근본 교훈: **픽스처는 진짜 생산자가 만든 것이어야 한다** ───────────────────────────
@@ -123,10 +124,41 @@ export const humanDecisionComment = ({ issue, skill = "unstick", decision = "ret
   ].join("\n"),
 });
 
-export const reviewHandoffComment = (issue, { round = 1, verdicts, at }) => ({
+export const reviewHandoffComment = (issue, { round = 1, verdicts, at, tier = null, headSha = "a".repeat(40) }) => ({
   id: Number(`${issue}7${round}`), createdAt: at,
   body: renderHandoff({
     stage: "review", issue, summary: `round ${round}`,
-    data: { schema: "factory.review.v1", issue, pr: issue, head_sha: "a".repeat(40), round, verdicts, orchestration: "workflow", guarantee: "verified" },
+    data: {
+      schema: "factory.review.v1", issue, pr: issue, head_sha: headSha, round, verdicts,
+      orchestration: "workflow", guarantee: "verified",
+      // 감사 H3 — 러너가 계산한 실효 tier가 핸드오프에 실린다(run-stage.js `writeHandoff`). 건강
+      // 잡의 "위험"은 이것이다: 에이전트의 자기 신고가 아니라 **diff에서 나온 사실**이다.
+      ...(tier ? { tier_effective: tier, tier_source: "promoted-by-diff" } : {}),
+    },
   }),
 });
+
+/**
+ * plan 핸드오프 한 장 — `renderHandoff`가 만든다. `done_when`/`dissent_log`는 `handoff.js`가 실제로
+ * 렌더하는 두 블록이고(§plan), Task 4의 `debate_delta`가 읽는 것이 정확히 그 둘이다.
+ */
+export const planHandoffComment = (issue, { round = 1, done_when = [], dissent_log = [], at }) => ({
+  id: Number(`${issue}8${round}`), createdAt: at,
+  body: renderHandoff({
+    stage: "plan", issue, summary: `plan ${round}`,
+    data: { schema: "factory.plan.v1", issue, tier: "standard", done_when, dissent_log, files_expected: [] },
+  }),
+});
+
+/**
+ * run 기록의 `usage:` 줄 — **`run-stage.js`의 `usageLine`이 만든다**(그 형식을 읽는 정규식이
+ * `usage.js`에 있고, 손으로 적으면 둘이 조용히 어긋난다). `claude -p` 봉투의 모양 그대로 넘긴다.
+ */
+export const usageRecordLine = ({ costUsd, turns = 7, input = 1000, output = 500, model = "claude-opus-4" }) =>
+  usageLine({
+    usage: { input_tokens: input, output_tokens: output },
+    total_cost_usd: costUsd,
+    num_turns: turns,
+    terminal_reason: "end_turn",
+    modelUsage: { [model]: { costUSD: costUsd } },
+  });

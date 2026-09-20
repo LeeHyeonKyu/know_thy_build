@@ -30,6 +30,14 @@ export const HARNESS_LABEL = "factory:harness";
  */
 export const IMPROVEMENT_LABEL = "factory-improvement";
 
+/**
+ * Task 4 — 주기 건강 보고서가 사는 **오래 사는 이슈 하나**의 표식. 상태 라벨이 아니다(전이 그래프는
+ * 이 라벨을 모른다): 이 이슈는 공장이 처리하는 일감이 아니라 주인이 읽는 대화다. 하나뿐이어야 하는
+ * 이유는 멱등이다 — 주간 잡이 매번 새 이슈를 열면 T3의 라우팅 영수증 마커가 앵커를 잃고, 같은 지문이
+ * 매주 상류에 새 이슈를 연다.
+ */
+export const HEALTH_LABEL = "factory:health";
+
 export const LABELS = [
   { name: "backlog", color: "c5def5", description: "스펙은 있으나 착수하지 않음" },
 
@@ -53,4 +61,5 @@ export const LABELS = [
   { name: "factory:flaky", color: "fef2c0", description: "불안정한 테스트로 격리됨" },
   { name: HARNESS_LABEL, color: "c2e0c6", description: "harness 자체에 관한 이슈" },
   { name: IMPROVEMENT_LABEL, color: "d93f0b", description: "팩토리가 제 증거로 올린 KTB 개선 요청 (사람이 트리아지)" },
+  { name: HEALTH_LABEL, color: "bfd4f2", description: "주기 건강 보고서가 사는 이슈 — 공장 자신의 행동 지표" },
 ];

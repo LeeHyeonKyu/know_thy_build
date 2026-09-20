@@ -435,7 +435,33 @@ test("issueState reads only state/closedAt; mergedPrForBranch finds the merged P
   expect(await gh.issueState(31)).toEqual({ number: 31, state: "CLOSED", closedAt: "2026-09-13T10:00:00Z" });
   expect(run.calls[0].args).toEqual(["issue", "view", "31", "-R", repo, "--json", "number,state,closedAt"]);
   expect(await gh.mergedPrForBranch("claude/fq-31")).toBe(24);
-  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--head", "claude/fq-31", "--state", "merged", "--limit", "5", "--json", "number,mergedAt"]);
+  expect(run.calls[1].args).toEqual(["pr", "list", "-R", repo, "--head", "claude/fq-31", "--state", "merged", "--limit", "20", "--json", "number,mergedAt"]);
+});
+
+/**
+ * 피드백 루프 Task 4 r3 — `gh pr list`는 **생성** 순으로 준다. 재작업으로 같은 브랜치에 PR이 두 번
+ * 머지되면(먼저 만든 쪽이 나중에 머지될 수 있다) 첫 항목은 옛 머지다. `mergedAt`은 예전에도 조회하면서
+ * 쓰지 않았다 — 이제 그 값이 순서를 정하고, 건강 잡은 **전부**를 받아 diff 모양을 합집합으로 읽는다.
+ */
+test("mergedPrsForBranch sorts by mergedAt desc, not by the order gh returns (creation order)", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([
+    { number: 24, mergedAt: "2026-09-13T09:00:00Z" },   // 먼저 만들어졌지만 **먼저** 머지됐다
+    { number: 22, mergedAt: "2026-09-14T09:00:00Z" },   // 더 옛 PR인데 나중에 머지됐다
+  ]), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.mergedPrsForBranch("claude/fq-31")).toEqual([
+    { number: 22, mergedAt: "2026-09-14T09:00:00Z" },
+    { number: 24, mergedAt: "2026-09-13T09:00:00Z" },
+  ]);
+  // 그리고 단수형은 그 목록의 머리다 — 둘이 갈리지 않는다.
+  expect(await gh.mergedPrForBranch("claude/fq-31")).toBe(22);
+});
+
+test("prFiles returns the paths GitHub computed for a PR", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ files: [{ path: "README.md" }, { path: "src/a.js" }] }), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.prFiles(19)).toEqual(["README.md", "src/a.js"]);
+  expect(run.calls[0].args).toEqual(["pr", "view", "19", "-R", repo, "--json", "files"]);
 });
 
 test("mergedPrForBranch returns null when nothing was merged from that branch", async () => {

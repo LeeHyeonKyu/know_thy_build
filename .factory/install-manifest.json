@@ -156,6 +156,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/bin/health.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/bin/integrity.js",
       "owner": "factory"
     },
@@ -597,6 +601,10 @@
     },
     {
       "dest": ".factory/roles.toml",
+      "owner": "factory"
+    },
+    {
+      "dest": ".github/workflows/factory-health.yml",
       "owner": "factory"
     },
     {

@@ -7,6 +7,7 @@
 import { parseHandoffs } from "../handoff.js";
 import { parseRunRecord } from "../usage.js";
 import { parseClaimCountsLabel, parseReviewEvidenceAll } from "../run-record.js";
+import { isBoundLine, knownRunsFor } from "../feedback/harvest-findings.js";
 import { citedLessonIds } from "./lessons.js";
 import { afterSince, extractNeedsHuman, flakyIdFromTitle, TRANSITION_TO } from "./issue-comments.js";
 
@@ -290,6 +291,246 @@ function escapedDefectsFor(handoffs, comments) {
     else if (e.kind === "rework-tx") reworkAfter += 1;
   }
   return escaped > 0 ? escaped : reworkAfter;
+}
+
+// ── Task 4 (주기 건강 잡) — 역할별 행동 신호와 escaped 결함의 **귀속** ───────────────────────
+//
+// Task 10의 `escapedDefectsFor`는 이슈 하나의 숫자 하나를 낸다("승인 뒤에 나온 결함이 몇 개인가").
+// 건강 잡이 물어야 하는 것은 한 칸 더 안쪽이다: **누가 그것을 통과시켰는가.** 그 답이 없으면
+// "승인률 100%"는 영영 판정 불가다(spec §5: 승인률만으로는 rubber-stamp인지 쉬운 이슈인지 모른다).
+//
+// ## 출처는 **런이 쓴 줄 하나뿐이다** (리뷰 r1 must_fix 2)
+// 판정의 재료는 핸드오프 **코멘트 본문**이 아니다. 그 본문은 에이전트가 쓰고, `gh issue comment`는
+// 훅이 일부러 열어 둔 문이라 어떤 스테이지 에이전트든 같은 모양을 적을 수 있다 — 리뷰어의 성적표를
+// 리뷰어 자신이 쓸 수 있는 채널에서 읽으면 그 지표는 지표가 아니다. 그래서 역할별 verdict와 라운드는
+// run 기록의 **러너가 쓴** 줄에서만 온다:
+//
+//     review-evidence: run_id=… runner=… head_sha=… round=N decision=… verdicts=role=approve,role=reject …
+//
+// 그리고 그 줄조차 **이 이슈에서 실제로 돈 런**을 지목할 때만 읽는다(`knownRunsFor` — 하트비트가
+// 유일한 앵커 — 와 `isBoundLine`). 바인딩 없는 줄은 기록에 누가 적어 넣었는지 알 수 없는 줄이다.
+//
+// `must_fix` 개수는 **참고 열일 뿐 방아쇠가 아니다**: 그 숫자는 핸드오프 본문에만 있으므로, 바인딩된
+// 라운드와 head_sha가 일치하는 핸드오프에서만 읽어 보고서에 보여 준다. 바인딩되지 않은 핸드오프는
+// 무시하고 **세어서** 보고한다(조용히 버리면 "증거가 원래 없었다"와 "우리가 못 읽었다"가 섞인다).
+//
+// ## 귀속 규칙 — 한 문장
+// 라운드 r의 **reject**는 "이 라운드에서 결함이 발견됐다"는 신호이고, 그 결함은 **r보다 앞선
+// 라운드에서 승인해 두고 r에서 스스로 reject하지 않은** 역할 전원에게 귀속된다. 세 조각 각각에 이유가 있다:
+//   ① "앞선 라운드" — 같은 라운드의 reject는 패널 분열이지 놓친 결함이 아니다(Task 10과 같은 정의).
+//   ② "승인해 두고" — 승인은 "이대로 내보내도 좋다"는 판정이다. 그 뒤에 나온 결함은 그 판정이
+//      틀렸다는 관측이고, 그것이 승인률과 짝이 되는 **유일한** 증거다.
+//   ③ "스스로 reject하지 않은" — 옛 승인을 뒤집어 그 결함을 **찾아낸** 역할까지 벌하면, 늦게라도
+//      제 판정을 고친 리뷰어가 가장 큰 벌을 받는다. 규칙이 정확히 반대 행동을 보상하게 된다.
+// reject는 승인을 **철회한다**: 철회한 다음 라운드의 결함은 더 이상 그 역할의 것이 아니다.
+// 단위는 **라운드**다(must_fix 개수가 아니다 — 그 숫자는 런이 쓰지 않는다).
+//
+// 순수 함수다. `escapedDefectsFor`(이슈 단위 Task 10 지표)는 그대로 두고 건드리지 않는다: 저쪽은
+// "아무나의 첫 승인 뒤"를 핸드오프에서 세고, 이쪽은 "그 역할 자신의 승인 뒤"를 런 기록에서 센다 —
+// 합계가 다를 수 있고 그 차이는 의도된 것이다(하나는 이슈의 결과, 하나는 역할에 대한 귀속).
+
+/** `verdicts=a=approve,b=reject` → `[{role, verdict}]`. 읽을 수 없는 토큰은 버린다(지어내지 않는다). */
+export function parseVerdictPairs(s) {
+  const out = [];
+  for (const part of String(s ?? "").split(",")) {
+    const t = part.trim();
+    if (!t || t === "none") continue;
+    const i = t.lastIndexOf("=");
+    if (i <= 0 || i === t.length - 1) continue;
+    out.push({ role: t.slice(0, i), verdict: t.slice(i + 1) });
+  }
+  return out;
+}
+
+/**
+ * 이 이슈의 **런에 바인딩된** review-evidence 줄들을 라운드 순서로. 같은 `(run_id, round)`가 서로 다른
+ * 내용으로 둘 이상이면 그 라운드는 **판정 불가**로 떨어뜨리고 센다(`parseReviewEvidence`의 신원 규칙과
+ * 같은 이유: 둘 중 하나를 고를 근거가 없다).
+ */
+export function boundReviewEvidence({ record = "", comments = [] } = {}) {
+  const known = knownRunsFor(comments);
+  const byKey = new Map();
+  let unbound = 0;
+  for (const e of parseReviewEvidenceAll(String(record ?? ""))) {
+    if (!isBoundLine({ runner: e.runnerId, run_id: e.runId }, known)) { unbound += 1; continue; }
+    if (e.round == null) { unbound += 1; continue; }
+    const key = `${e.runId}|${e.round}`;
+    const shape = `${e.headSha}|${e.decision}|${e.verdicts}`;
+    const cur = byKey.get(key);
+    if (cur && cur.shape !== shape) { cur.conflict = true; continue; }
+    byKey.set(key, { shape, conflict: cur?.conflict ?? false, e });
+  }
+  const conflicting = [...byKey.values()].filter((x) => x.conflict).length;
+  const rounds = [...byKey.values()]
+    .filter((x) => !x.conflict)
+    .map(({ e }) => ({
+      round: e.round, runId: e.runId, headSha: e.headSha, decision: e.decision,
+      verdicts: parseVerdictPairs(e.verdicts),
+    }))
+    .sort((a, b) => a.round - b.round);
+  return { rounds, unbound_evidence: unbound, conflicting_rounds: conflicting };
+}
+
+/**
+ * `roleSignalsFor({record, comments}) → { roles, escaped_total, rounds, max_round, panel, tier_handoff, … }`
+ * — **이슈 하나**의 역할별 신호. 판정은 전부 위 `boundReviewEvidence`에서 오고, 핸드오프는 참고 열
+ * (`must_fix_ref`)과 `tier_effective` 폴백에만 쓰인다 — 그것도 **바인딩된 라운드와 일치할 때만**.
+ */
+export function roleSignalsFor({ record = "", comments = [] } = {}) {
+  const { rounds, unbound_evidence, conflicting_rounds } = boundReviewEvidence({ record, comments });
+  const roles = {};
+  const seat = (r) => (roles[r] ||= { verdicts: 0, approves: 0, rejects: 0, flips: 0, escaped: 0, must_fix_ref: 0, last: null });
+  const vouched = new Set();          // 지금 "이대로 내보내도 좋다"가 서 있는 역할들
+  const panelRoles = new Set();
+  let escapedTotal = 0;
+
+  for (const r of rounds) {
+    for (const v of r.verdicts) if (v.role) panelRoles.add(v.role);
+    // ① 이 라운드에서 reject한 당사자들 — 그들이 곧 "결함이 발견됐다"는 신호이자 면책 대상이다.
+    const rejectersNow = new Set(r.verdicts.filter((v) => v.verdict === "reject").map((v) => v.role).filter(Boolean));
+    // ② 귀속: 앞선 라운드에서 승인해 둔 역할 중, 이 라운드에 스스로 뒤집지 않은 이들.
+    const blame = [...vouched].filter((role) => !rejectersNow.has(role));
+    if (rejectersNow.size > 0 && blame.length) {
+      escapedTotal += 1;                                   // 단위는 라운드다
+      for (const role of blame) seat(role).escaped += 1;
+    }
+
+    // ③ 그 **다음에** 이 라운드의 판정을 장부에 적는다(같은 라운드의 reject는 자기 책임이 아니다 — ①).
+    for (const v of r.verdicts) {
+      if (!v.role) continue;
+      const s = seat(v.role);
+      s.verdicts += 1;
+      const now = v.verdict === "approve" || v.verdict === "approved" ? "approve" : (v.verdict === "reject" ? "reject" : null);
+      if (now === "approve") { s.approves += 1; vouched.add(v.role); }
+      else if (now === "reject") { s.rejects += 1; vouched.delete(v.role); }
+      if (now) {
+        if (s.last && s.last !== now) s.flips += 1;
+        s.last = now;
+      }
+    }
+  }
+  for (const s of Object.values(roles)) delete s.last;   // 걷는 동안의 상태이지 결과가 아니다
+
+  // 참고 열과 tier 폴백 — **바인딩된 라운드**와 짝이 맞는 핸드오프만 읽는다.
+  const ref = boundHandoffRef({ comments, rounds });
+  for (const [role, n] of Object.entries(ref.must_fix_by_role)) if (roles[role]) roles[role].must_fix_ref = n;
+
+  return {
+    roles,
+    escaped_total: escapedTotal,
+    rounds: rounds.length,
+    max_round: rounds.reduce((mx, r) => Math.max(mx, r.round), 0),
+    panel: panelRoles.size,
+    decisions: rounds.map((r) => ({ round: r.round, decision: r.decision })),
+    tier_handoff: ref.tier_effective,
+    unbound_evidence,
+    conflicting_rounds,
+    unbound_handoffs: ref.unbound_handoffs,
+  };
+}
+
+/**
+ * 바인딩된 라운드와 `(round, head_sha)`가 일치하는 리뷰 핸드오프에서만 must_fix 개수와
+ * `tier_effective`를 읽는다. 일치하지 않는 핸드오프는 **세기만 한다** — 그 존재 자체가 보고서의 한
+ * 줄이다("증거가 원래 없었다"와 "우리가 못 읽었다"는 다른 상태다).
+ */
+function boundHandoffRef({ comments = [], rounds = [] }) {
+  const byRound = new Map(rounds.map((r) => [r.round, r]));
+  const mustFixByRole = {};
+  let tierEffective = null;
+  let unbound = 0;
+  const seen = new Map();                                   // round → 가장 새 핸드오프
+  for (const h of parseHandoffs(comments || [])) {
+    if (h.stage !== "review") continue;
+    const round = typeof h.data?.round === "number" ? h.data.round : null;
+    const bound = round != null && byRound.get(round);
+    // head_sha가 양쪽에 있으면 그것도 맞아야 한다 — 라운드 번호만으로는 다른 커밋의 판정이 섞인다.
+    const shaOk = !bound || !h.data?.head_sha || !bound.headSha || h.data.head_sha === bound.headSha;
+    if (!bound || !shaOk) { unbound += 1; continue; }
+    const prev = seen.get(round);
+    const ta = Date.parse(h.createdAt), tb = prev ? Date.parse(prev.createdAt) : -Infinity;
+    if (!prev || (Number.isFinite(ta) && ta >= tb)) seen.set(round, h);
+  }
+  for (const h of seen.values()) {
+    for (const v of Array.isArray(h.data?.verdicts) ? h.data.verdicts : []) {
+      if (!v?.role) continue;
+      const n = Array.isArray(v.must_fix) ? v.must_fix.filter((m) => m?.claim || m?.id).length : 0;
+      mustFixByRole[v.role] = (mustFixByRole[v.role] || 0) + n;
+    }
+    // 감사 H3 — 러너가 계산한 실효 tier. **자기 신고 `tier`는 읽지 않는다**(리뷰 r1 must_fix 3).
+    if (h.data?.tier_effective) tierEffective = h.data.tier_effective;
+  }
+  return { must_fix_by_role: mustFixByRole, tier_effective: tierEffective, unbound_handoffs: unbound };
+}
+
+/**
+ * `aggregateRoleSignals([roleSignalsFor(...)…]) → { [role]: {..., approve_rate, ever_rejects, issues} }` —
+ * 창 안 이슈들의 역할별 신호를 합친다.
+ *
+ * `approve_rate`는 **보고용 반올림값**이고, "100% 승인"의 판정은 언제나 정수 비교(`approves ===
+ * verdicts`)다: 199/200은 반올림하면 1.00이지만 그 역할은 한 번 reject했고, 그 한 번이 rubber-stamp
+ * 판정을 뒤집는 전부다(Goodhart를 막는 것이 이 지표의 존재 이유인데 반올림이 그것을 되돌린다).
+ */
+export function aggregateRoleSignals(perIssue = []) {
+  const out = {};
+  for (const one of perIssue || []) {
+    for (const [role, s] of Object.entries(one?.roles || {})) {
+      const a = (out[role] ||= { verdicts: 0, approves: 0, rejects: 0, must_fix_ref: 0, flips: 0, escaped_defects: 0, issues: 0 });
+      a.verdicts += s.verdicts || 0;
+      a.approves += s.approves || 0;
+      a.rejects += s.rejects || 0;
+      // 참고 열이다 — 이름이 `_ref`인 것이 계약이다(방아쇠로 쓰지 않는다, 위 §출처 참조).
+      a.must_fix_ref += s.must_fix_ref || 0;
+      a.flips += s.flips || 0;
+      a.escaped_defects += s.escaped || 0;
+      a.issues += 1;
+    }
+  }
+  for (const a of Object.values(out)) {
+    a.approve_rate = a.verdicts ? round2(a.approves / a.verdicts) : null;
+    a.ever_rejects = a.rejects > 0;
+  }
+  return out;
+}
+
+/** 해소된 것으로 보지 않는 resolution — Task 3의 `extractLessonsAndExamples`와 같은 어휘다. */
+const UNRESOLVED_RE = /unresolved|deferred/i;
+/** resolution이 done_when을 **추가했다**고 말하는 모양(한 장짜리 plan에서도 delta가 보이는 유일한 길). */
+const DONE_WHEN_ADDED_RE = /done[_ ]?when/i;
+
+/**
+ * `planDebateDelta(handoffs) → { plan_handoffs, done_when_added, dissent_resolved, changed }` —
+ * **토론이 계획을 바꿨는가**(spec §5: 길이가 아니라 outcome delta).
+ *
+ * 두 가지가 "바꿨다"의 증거다:
+ *   ① `dissent_log[].resolution`이 unresolved/deferred가 **아닌** 것 — 회의론자가 이의를 냈고 그것이
+ *      실제로 처리됐다. 한 장짜리 plan 핸드오프(대부분의 이슈)에서 delta가 보이는 자리는 여기뿐이다.
+ *   ② 재계획으로 plan 핸드오프가 여럿일 때 `done_when`의 **증가** — 토론이 계약 자체를 넓혔다.
+ * 이의가 아예 없는 토론은 `changed: false`다. 그것이 정확히 dead debate의 모양이다: 네 역할이 돌았고
+ * 계획은 처음 쓰인 그대로 나갔다.
+ */
+export function planDebateDelta(handoffs = []) {
+  const plans = (handoffs || [])
+    .filter((h) => h?.stage === "plan")
+    .sort((a, b) => {
+      const ta = Date.parse(a.createdAt), tb = Date.parse(b.createdAt);
+      return Number.isFinite(ta) && Number.isFinite(tb) ? ta - tb : 0;
+    });
+  let added = 0;
+  let resolved = 0;
+  let prev = null;
+  for (const h of plans) {
+    const dw = Array.isArray(h.data?.done_when) ? h.data.done_when : [];
+    if (prev != null && dw.length > prev) added += dw.length - prev;
+    prev = dw.length;
+    for (const d of Array.isArray(h.data?.dissent_log) ? h.data.dissent_log : []) {
+      const res = String(d?.resolution ?? "").trim();
+      if (!res || UNRESOLVED_RE.test(res)) continue;
+      resolved += 1;
+      if (DONE_WHEN_ADDED_RE.test(res)) added += 1;
+    }
+  }
+  return { plan_handoffs: plans.length, done_when_added: added, dissent_resolved: resolved, changed: added > 0 || resolved > 0 };
 }
 
 const REVERT_LABEL = /^(?:factory:)?revert$/i;

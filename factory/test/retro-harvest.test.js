@@ -563,3 +563,106 @@ test("harness급 self-gate 차단은 run 기록 줄에서 수확된다(코멘트
   // 줄이 지목한 런이 이 이슈의 런이 아니면 그 줄도 증거가 아니다(바인딩은 여기에도 걸린다)
   expect(harvestFindings({ issue: 9, repo: "o/r", record, comments: [] })).toEqual([]);
 });
+
+// ── Task 4 — 역할별 행동 신호와 escaped 결함의 **귀속** ────────────────────────────────────────
+// 판정의 출처는 **런이 쓴 `review-evidence:` 줄 하나뿐**이고(r1 must_fix 2), 그 줄조차 하트비트가
+// 아는 런을 지목할 때만 읽는다. 픽스처는 진짜 생산자가 만든다 — `reviewEvidenceLine`·`appendRunRecord`.
+
+const RUNNER_A = "gha-770001";
+/** 라운드별 verdict로 run 기록 한 장 + 그 런의 하트비트를 만든다. */
+async function boundRecord(issue, rounds) {
+  const { reviewEvidenceLine } = await import("../lib/run-record.js");
+  const { recordOf, heartbeat } = await import("./helpers/feedback-fixtures.js");
+  const record = recordOf(issue, `issue ${issue}`, rounds.map((verdicts, i) => ({
+    stage: "review", at: `2026-09-0${i + 1}T00:00:00Z`, runner: RUNNER_A,
+    lines: ["verify: ok", reviewEvidenceLine({
+      headSha: "a".repeat(40), round: i + 1,
+      decision: verdicts.some((v) => v.verdict === "reject") ? "rework" : "approved",
+      verdicts, runId: "770001", runnerId: RUNNER_A,
+    })],
+  })));
+  return { record, comments: [heartbeat(issue, "review", RUNNER_A, "2026-09-01T00:00:00Z")] };
+}
+const ap = (role) => ({ role, verdict: "approve" });
+const rj = (role) => ({ role, verdict: "reject" });
+
+test("escaped는 **그 라운드보다 먼저 승인해 둔** 역할에게만 귀속된다", async () => {
+  const { roleSignalsFor } = await import("../lib/retro/harvest.js");
+  // R1: stamp·guard 모두 승인. R2: guard가 결함을 찾아 reject.
+  const s = roleSignalsFor(await boundRecord(1, [[ap("stamp"), ap("guard")], [ap("stamp"), rj("guard")]]));
+  // stamp는 R1에 승인해 두고 R2의 결함을 놓쳤다.
+  expect(s.roles.stamp).toMatchObject({ verdicts: 2, approves: 2, rejects: 0, escaped: 1, flips: 0 });
+  // guard는 **자기가 찾아낸** 결함으로 벌받지 않는다(그 라운드의 reject 당사자는 blame에서 빠진다).
+  expect(s.roles.guard).toMatchObject({ verdicts: 2, approves: 1, rejects: 1, escaped: 0, flips: 1 });
+  expect(s.escaped_total).toBe(1);
+  expect(s.max_round).toBe(2);
+});
+
+test("같은 라운드의 reject는 아무에게도 귀속되지 않는다 — 정의는 '승인에 뒤이은 결함'이다", async () => {
+  const { roleSignalsFor } = await import("../lib/retro/harvest.js");
+  const s = roleSignalsFor(await boundRecord(2, [[ap("stamp"), rj("guard")]]));
+  expect(s.escaped_total).toBe(0);
+  expect(s.roles.stamp.escaped).toBe(0);
+});
+
+test("reject는 승인을 **철회한다** — 철회한 뒤의 결함은 그 역할에게 귀속되지 않는다", async () => {
+  const { roleSignalsFor } = await import("../lib/retro/harvest.js");
+  const s = roleSignalsFor(await boundRecord(3, [
+    [ap("a"), ap("b")],
+    [rj("a"), ap("b")],
+    [rj("c")],
+  ]));
+  // a는 R1에 승인해 두었지만 R2에서 **스스로 그 결함을 찾아** 뒤집었다 — 규칙 ③. 늦게라도 제 판정을
+  // 고친 리뷰어가 가장 크게 벌받으면 그 규칙은 정확히 반대 행동을 보상한다.
+  expect(s.roles.a).toMatchObject({ escaped: 0, flips: 1 });
+  // 그리고 R2의 reject는 승인을 **철회한다** — R3에서 c가 찾은 결함도 a의 것이 아니다.
+  expect(s.roles.b.escaped).toBe(2);   // b는 R1·R2 모두 승인했다 — R2와 R3의 결함 둘 다 b에게 간다
+  expect(s.escaped_total).toBe(2);
+});
+
+test("parseVerdictPairs — `verdicts=` 문자열을 읽고, 읽을 수 없는 토큰은 버린다", async () => {
+  const { parseVerdictPairs } = await import("../lib/retro/harvest.js");
+  expect(parseVerdictPairs("a=approve,b=reject")).toEqual([{ role: "a", verdict: "approve" }, { role: "b", verdict: "reject" }]);
+  expect(parseVerdictPairs("none")).toEqual([]);
+  expect(parseVerdictPairs("")).toEqual([]);
+  expect(parseVerdictPairs("broken,=x,y=")).toEqual([]);
+});
+
+test("aggregateRoleSignals — approve_rate는 정수 비율로 판정하고(반올림 아님) ever_rejects를 함께 낸다", async () => {
+  const { aggregateRoleSignals } = await import("../lib/retro/harvest.js");
+  const agg = aggregateRoleSignals([
+    { roles: { stamp: { verdicts: 3, approves: 3, rejects: 0, must_fix: 0, flips: 0, escaped: 1 } }, escaped_total: 1 },
+    { roles: { stamp: { verdicts: 2, approves: 2, rejects: 0, must_fix: 0, flips: 0, escaped: 0 } }, escaped_total: 0 },
+  ]);
+  expect(agg.stamp).toMatchObject({ verdicts: 5, approves: 5, approve_rate: 1, ever_rejects: false, escaped_defects: 1, issues: 2 });
+  // 199/200은 반올림하면 1.00이지만 **100% 승인이 아니다** — 규칙은 정수로 판정한다.
+  const near = aggregateRoleSignals([{ roles: { r: { verdicts: 200, approves: 199, rejects: 1, must_fix: 0, flips: 0, escaped: 3 } } }]);
+  expect(near.r.approves).not.toBe(near.r.verdicts);
+  expect(near.r.ever_rejects).toBe(true);
+});
+
+test("planDebateDelta — 해소된 dissent는 변화이고, unresolved/deferred는 변화가 아니다", async () => {
+  const { planDebateDelta } = await import("../lib/retro/harvest.js");
+  const { planHandoffComment } = await import("./helpers/feedback-fixtures.js");
+  const { parseHandoffs } = await import("../lib/handoff.js");
+
+  const dead = parseHandoffs([planHandoffComment(4, { at: "2026-09-01T00:00:00Z",
+    done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }],
+    dissent_log: [{ role: "skeptic", objection: "이 설계는 위험하다", resolution: "unresolved" }] })]);
+  expect(planDebateDelta(dead)).toMatchObject({ changed: false, dissent_resolved: 0 });
+
+  const live = parseHandoffs([planHandoffComment(5, { at: "2026-09-01T00:00:00Z",
+    done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }],
+    dissent_log: [{ role: "skeptic", objection: "done_when이 검증 불가다", resolution: "accepted — done_when dw2를 추가했다" }] })]);
+  expect(planDebateDelta(live)).toMatchObject({ changed: true, dissent_resolved: 1 });
+
+  // 여러 plan 핸드오프(재계획)에서 done_when이 늘어난 것도 변화다.
+  const grew = parseHandoffs([
+    planHandoffComment(6, { round: 1, at: "2026-09-01T00:00:00Z", done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }] }),
+    planHandoffComment(6, { round: 2, at: "2026-09-02T00:00:00Z", done_when: [{ id: "dw1", text: "x", verify: "t", level: "unit" }, { id: "dw2", text: "y", verify: "u", level: "unit" }] }),
+  ]);
+  expect(planDebateDelta(grew)).toMatchObject({ changed: true, done_when_added: 1 });
+
+  // 토론 자체가 없으면 바꾼 것도 없다.
+  expect(planDebateDelta([])).toMatchObject({ changed: false, plan_handoffs: 0 });
+});

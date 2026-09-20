@@ -1,0 +1,73 @@
+name: factory-health
+# 피드백 루프 Task 4 (spec §5/§7) — **일정으로만** 깨어나는 잡이다. 스테이지가 아니고(라벨 상태 머신
+# 밖), 회고도 아니다(머지 이벤트가 아니다): 회고가 "이번 머지가 무엇을 드러냈는가"라면 이 잡은
+# "최근 N개 머지에 걸쳐 공장이 어떻게 **행동했는가**"를 묻는다. 한 이슈의 증거로는 rubber-stamp도
+# dead debate도 비용 낭비도 판정할 수 없어서, 창이 주 단위여야 한다.
+on:
+  schedule:
+    # 주 1회(월요일). 정시를 피하는 이유는 GitHub의 cron이 정각에 가장 혼잡해 지연이 길어지기 때문이다 —
+    # 이 잡은 급하지 않으므로 한산한 분으로 민다.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+# 입력을 두지 않는다. 표본 크기 N은 `health.js`의 기본값(5, spec §10 Q3)이고, 바꿔 돌릴 일은 사람의
+# 셸에서 `node .factory/bin/health.js --n=<N>`으로 한다 — dispatch 입력을 열면 그 값이 시크릿 셋을 든
+# 스텝의 `run:`으로 흘러드는 경로가 하나 더 생긴다(ADR-020 MF-2). 없는 문은 잠글 필요도 없다.
+#
+# 이 잡의 `GITHUB_TOKEN`은 **아무 스텝도 쓰지 않는다**: 체크아웃도 `health.js` 안의 gh도 전부
+# `FACTORY_BOT_TOKEN`으로 나간다(rehearse와 같은 모양). 그래서 쓰지 않는 쓰기 자격증명을 잡에 쥐어
+# 주지 않는다 — 읽기 하나만 남긴다.
+permissions:
+  contents: read
+concurrency:
+  group: factory-health
+  cancel-in-progress: false
+jobs:
+  health:
+    runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # `claude -p`를 띄우지 않는 결정적 잡이다(집계와 렌더링뿐) — 스테이지의 상한이 필요 없다.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 기록은 records 브랜치에 있고 판단의 재료(하네스·CHARTER·설치 매니페스트)는 기본 브랜치의
+          # 현재 상태다 — 회고와 같은 이유로 기본 브랜치를 본다.
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+      - uses: ./.factory/actions/setup
+        with:
+          # 러너 전용 — 에이전트를 부르지 않는다. 보고서는 기록에서 **파생**되는 것이지 쓰여지는 것이
+          # 아니다(spec §7: "주인이 읽는 대화는 구조화된 기록에서 파생된다, 원시 덤프가 아니다").
+          claude: "false"
+          # 게이트를 돌리지 않으므로 테스트 환경도 띄우지 않는다.
+          test-env: "false"
+      - name: Health
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+        run: node .factory/bin/health.js
+      # ADR-020 최종 리뷰 SF-1 — 업로드 전에 크리덴셜을 지운다. 이 잡은 `claude -p`를 띄우지 않아
+      # 트랜스크립트가 없지만 `.factory/out/`은 올린다: 그 안에는 run 기록에서 읽어 온 증거 조각이
+      # 실리고, 거기 무엇이 찍히는지는 저장소의 스테이지들이 정한다. 공개 저장소에서 아티팩트는 레포
+      # read 권한자 누구나 받으므로 규칙은 잡마다 같아야 한다.
+      - name: Scrub credentials from the artifacts
+        # ADR-021 r1 finding 5 — `merge-token-scope`의 면제는 이 `id:`와 실제 scrub 실행이 **둘 다**
+        # 있을 때만 성립한다.
+        id: scrub-artifacts
+        if: always()
+        env:
+          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .factory/bin/scrub-artifacts.js .factory/out
+      - name: Upload the health outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-health-${{ github.run_id }}
+          path: .factory/out/
+          include-hidden-files: true
+          # 기본값은 90일이다 — `yml-lint`의 `artifact-retention`이 명시를 강제한다(14일 이하).
+          retention-days: 7
+          if-no-files-found: ignore
