@@ -132,6 +132,52 @@ export function roleContextFor(ctx, role) {
 }
 
 /**
+ * ── Feedback loop Task 1 — **그 역할이 무엇을 보고 판정했는가** (spec §5 context adequacy, §10 Q1) ──
+ *
+ * cold read는 파일 경계로 강제된다(H4) — 그런데 그 경계가 무엇을 걸러냈는지는 런이 끝나면 `.factory/out/`과
+ * 함께 사라졌다. 컨텍스트 적정성 신호("이 역할이 놓친 결함은, 그가 **한 번도 보지 못한** 필드와 상관
+ * 있는가")는 정확히 그 기록을 요구한다. 그래서 역할별 투영본을 쓰는 바로 그 자리에서 매니페스트를
+ * 만들어 런 레코드로 보낸다 — records 브랜치는 7일 뒤에도 남는다(spec §3).
+ *
+ * **이름만 싣는다**(§10 Q1: 내용 해시는 나중 문제다). 값이 실리면 cold read가 파일 경계로 막아 둔 것을
+ * 런 레코드가 도로 공개하는 셈이 된다 — 매니페스트는 "무엇을 줬는가"의 목록이지 그 사본이 아니다.
+ */
+export const CONTEXT_MANIFEST_PREFIX = "context-manifest: ";
+
+/** 한 역할의 투영본 → `{ role, cold_read, fields }`. fields는 최상위 키 + 그 역할이 받은 done_when의 하위 필드. */
+export function contextManifest(projected) {
+  // `undefined` 값의 키는 JSON.stringify가 떨어뜨린다 — 파일에 없는 것을 "줬다"고 적지 않는다
+  // (ctx는 `rounds: undefined`처럼 존재하지 않는 필드를 own key로 들고 있다).
+  const top = Object.entries(projected ?? {}).filter(([, v]) => v !== undefined).map(([k]) => k).sort();
+  const dw = Array.isArray(projected?.done_when)
+    ? projected.done_when
+    : (Array.isArray(projected?.handoffs?.plan?.done_when) ? projected.handoffs.plan.done_when : []);
+  const dwFields = [...new Set(dw.flatMap((w) => (w && typeof w === "object" ? Object.keys(w) : [])))].sort();
+  return {
+    role: projected?.role ?? null,
+    cold_read: projected?.cold_read === true,
+    fields: [...top, ...dwFields.map((k) => `done_when.${k}`)],
+  };
+}
+
+/**
+ * 이 컨텍스트가 만든(또는 만들) 역할별 매니페스트 전부. `buildContext`가 파일을 쓰며 계산해 둔 것이
+ * 있으면 그것이고(= 실제로 쓰인 바이트의 목록), 없으면 같은 규칙으로 유도한다. 절대 던지지 않는다.
+ */
+export function contextManifestsFor(ctx) {
+  try {
+    if (Array.isArray(ctx?.context_manifests)) return ctx.context_manifests;
+    return Object.keys(ctx?.roles ?? {}).map((name) => contextManifest(roleContextFor(ctx, name)));
+  } catch { return []; }
+}
+
+/** 런 레코드의 줄들 — 역할마다 `context-manifest: {…}`(한 줄 JSON, Task 3의 harvester가 정규식으로 읽는다). */
+export function contextManifestLines(ctx) {
+  try { return contextManifestsFor(ctx).map((m) => CONTEXT_MANIFEST_PREFIX + JSON.stringify(m)); }
+  catch (e) { return [`${CONTEXT_MANIFEST_PREFIX}unavailable — ${e?.message || e}`]; }
+}
+
+/**
  * 감사 M5 — `factory-loader`(sonnet LLM 호출)가 스테이지마다 하던 추출을 Node가 결정적으로 한다.
  * 로더는 `context.json` + `roles.toml`을 읽어 JSON을 JSON으로 옮겨 적었을 뿐인데, 그 한 번의 복사에
  * 스테이지당 LLM 호출 하나가 들었고 그 복사는 틀릴 수 있었다. 여기서 만드는 객체가 그 산출물의
@@ -226,9 +272,14 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   mkdirSync(join(root, ".factory/out"), { recursive: true });
   writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify(ctx, null, 2));
   // 역할별 파일(H4). 오케스트레이터만 `context.json`(전체)을 보고, 역할은 자기 이름이 붙은 파일만 본다.
+  // Task 1: 쓰는 바로 그 객체에서 매니페스트를 뽑는다 — "무엇을 줬는가"의 단일 출처가 파일 자신이 된다.
+  const manifests = [];
   for (const name of Object.keys(roleBlock)) {
-    writeFileSync(join(root, `.factory/out/context.${name}.json`), JSON.stringify(roleContextFor(ctx, name), null, 2));
+    const projected = roleContextFor(ctx, name);
+    writeFileSync(join(root, `.factory/out/context.${name}.json`), JSON.stringify(projected, null, 2));
+    try { manifests.push(contextManifest(projected)); } catch { /* 매니페스트의 실패가 컨텍스트의 실패는 아니다 */ }
   }
+  ctx.context_manifests = manifests;
   // 디스패처가 Workflow의 `args.loaded`로 그대로 넘기는 작은 파일(M5) — 로더 에이전트의 대체물.
   writeFileSync(join(root, ".factory/out/loaded.json"), JSON.stringify(ctx.loaded, null, 2));
   /**

@@ -8,7 +8,7 @@ import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
-import { runStageGates, verdictLine, commitStatusState, maxTier } from "../lib/gates.js";
+import { runStageGates, verdictLine, gatesDetailLines, commitStatusState, maxTier } from "../lib/gates.js";
 import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
 import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
@@ -21,7 +21,7 @@ import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFo
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
-import { buildContext, resolveTier } from "../lib/context.js";
+import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
 import { resolveReviewRoster } from "../lib/review-roster.js";
 import { startHeartbeat } from "../lib/heartbeat.js";
 import { readProgress, progressMarker } from "../lib/progress.js";
@@ -544,6 +544,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     if (harnessIssue) record([`harness issue: builder runs with ${settingsFile} + FACTORY_HARNESS_ISSUE=1 (test-infra files writable; merge still needs a human)`]);
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
     const ctx = await d.buildContext({ setupDirty });
+    /**
+     * Feedback loop Task 1 — 역할별 `context.<role>.json`이 만들어지는 **그 순간** 무엇을 줬는지를
+     * 런 레코드에 남긴다(역할당 한 줄, 필드 **이름만** — spec §10 Q1). 나중에 어떤 역할이 놓친 결함을
+     * "그가 한 번도 보지 못한 필드"와 상관시키려면(§5 context adequacy) 이 목록이 durable해야 한다.
+     * 여기서 바로 적는 이유: 이 뒤의 어느 지점에서 스테이지가 죽어도 "무엇을 보여줬는가"는 남아야 한다.
+     * 로스터가 없는 컨텍스트는 선언할 것이 없으므로 아무 줄도 쓰지 않는다.
+     */
+    const manifestNote = contextManifestLines(ctx);
+    if (manifestNote.length) record(manifestNote);
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     let planRepairAttempt = 0;                                        // Task 9 (KTB-51): in-run one-shot cap for the plan validator repair
     let out = await d.claudeP(ctx, { harnessIssue });
@@ -637,9 +646,15 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     const testEnvNote = gates?.test_env_reup?.ran
       ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
       : [];
+    /**
+     * Feedback loop Task 1 — `FACTORY_GATES:` 한 줄 **옆에** RED 게이트마다 `gates-detail:` 한 줄이 선다
+     * (`gatesDetailLines`: 깨진 테스트 이름 + 경계·스크럽된 출력 꼬리, 한 줄 JSON). 이 한 줄이 없으면
+     * 그 RED의 뿌리는 7일짜리 Actions 아티팩트에만 남는다 — 루프가 그것을 읽을 수는 없다(spec §3).
+     * 새 기록자는 만들지 않는다: 같은 `record()`(= `appendRunRecord`)를 타고 같은 줄 묶음으로 나간다.
+     */
     const gatesNote = gates == null
       ? (GATED_STAGES.has(stage) ? [GATES_SELF_REPORTED] : [])
-      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...testEnvNote] : [];
+      : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });

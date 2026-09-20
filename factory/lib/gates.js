@@ -64,6 +64,121 @@ export function unhandledGateLog(stderr, stdout, { env = process.env } = {}) {
   return scrubText(tail, { secrets }).text.slice(-2000);
 }
 
+/**
+ * ── Feedback loop Task 1 — **왜 RED였는가를 게이트가 스스로 들고 다닌다** (spec §1, §3) ──────────
+ *
+ * 런 레코드가 남기던 게이트 증거는 `FACTORY_GATES: … failing=unit,new-test-repeat` 한 줄, 곧 게이트
+ * **이름**뿐이었다. 어느 테스트가 어떤 문장으로 깨졌는지는 Actions 아티팩트와 `.factory/out/unit.json`
+ * 안에만 있었고 둘 다 7일 뒤 사라진다(이 세션이 실제로 겪은 손실: 원인을 다시 읽을 방법이 없어졌다).
+ * 피드백 루프(Task 2~5)는 그 **뿌리**를 읽어 분류·라우팅하므로, 그것이 records 브랜치에 남지 않으면
+ * 루프 전체가 사라지는 증거 위에 서게 된다 — spec §3 "durable before ephemeral".
+ *
+ * 그래서 RED 게이트마다 additive 필드 `detail`을 단다. **판정은 한 글자도 바뀌지 않는다**: status를
+ * 읽지도 쓰지도 않고, 실패해도(파싱 불가·출력이 이상함) 빈 목록과 메모로 물러난다. 두 가지 경계가
+ * 항상 걸린다 — 꼬리 `DETAIL_TAIL_LINES`줄 / `DETAIL_MAX_CHARS`자, 그리고 스크럽(`scrub-artifacts.js`가
+ * 유일한 규칙 출처다: 런 레코드는 공개 브랜치로 나가므로 크리덴셜이 한 글자도 실리면 안 된다).
+ */
+export const DETAIL_TAIL_LINES = 40;
+export const DETAIL_MAX_CHARS = 4000;
+export const DETAIL_MAX_FAILING = 20;
+export const DETAIL_MAX_NAME = 200;
+/** 런 레코드의 줄 접두사. 뒤는 **한 줄 JSON**이다 — Task 3의 harvester가 `/^gates-detail: (\{.*\})$/`로 읽는다. */
+export const GATES_DETAIL_PREFIX = "gates-detail: ";
+
+/**
+ * 러너 출력에서 **알아볼 수 있는** 실패 테스트 이름. 알아보지 못하면 빈 배열이다 — 추측한 이름은
+ * 없는 것보다 나쁘다(Task 2가 그것으로 fingerprint를 만든다). 네 모양을 읽는다:
+ *   - vitest/jest 요약 표식: `× math > adds` / `✕ adds (3 ms)` / `● math › adds`
+ *   - vitest FAIL 줄: ` FAIL  test/a.test.js > math > adds` → 파일 경로를 떼고 테스트 이름만
+ *   - flutter: `00:03 +2 -1: MyWidget shows the title [E]`
+ *   - pytest: `FAILED tests/test_a.py::test_adds - …` / `____ test_adds ____`
+ */
+const FAILING_PATTERNS = [
+  /^\s*[×✕✗]\s+(.+?)(?:\s+\d+\s*m?s)?\s*$/,
+  /^\s*●\s+(.+?)\s*$/,
+  /^\s*FAIL\s+\S+\s+>\s+(.+?)\s*$/,
+  /^\s*\d{2}:\d{2}\s+\+\d+(?:\s+~\d+)?\s+-\d+:\s+(.+?)\s+\[E\]\s*$/,
+  /^\s*FAILED\s+(\S+)/,
+  /^\s*_{2,}\s+(\S.*?)\s+_{2,}\s*$/,
+];
+/** jest의 `● Console`·`● Test suite failed to run` 같은 절 제목은 테스트 이름이 아니다. */
+const NOT_A_TEST_NAME = /^(Console|Test suite failed to run|Runtime Error)\b/i;
+
+export function parseFailingTests(text) {
+  const names = [];
+  for (const line of String(text ?? "").split("\n")) {
+    for (const re of FAILING_PATTERNS) {
+      const m = re.exec(line);
+      if (!m) continue;
+      const name = m[1].trim().slice(0, DETAIL_MAX_NAME);
+      if (name && !NOT_A_TEST_NAME.test(name) && !names.includes(name)) names.push(name);
+      break;
+    }
+    if (names.length >= DETAIL_MAX_FAILING * 2) break;
+  }
+  // pytest는 같은 실패를 `tests/a.py::test_x`와 `____ test_x ____` 두 모양으로 적는다 — 긴 쪽만 남긴다.
+  const kept = names.filter((n) => !names.some((o) => o !== n && o.endsWith(`::${n}`)));
+  return kept.slice(0, DETAIL_MAX_FAILING);
+}
+
+/** stdout+stderr의 **꼬리**(머리가 아니다 — 원인은 끝에 있다), 경계 안에서, 스크럽해서. */
+export function gateFailureSnippet(stdout, stderr, { env = process.env } = {}) {
+  const text = [String(stdout ?? ""), String(stderr ?? "")].filter((s) => s.trim()).join("\n");
+  const tail = text.split("\n").slice(-DETAIL_TAIL_LINES).join("\n");
+  const secrets = SECRET_ENV.map((n) => env?.[n]).filter((v) => typeof v === "string" && v.length > 0);
+  return scrubText(tail, { secrets }).text.slice(-DETAIL_MAX_CHARS);
+}
+
+/** 한 RED 게이트의 detail. **절대 던지지 않는다** — 증거 수집의 실패가 스테이지의 실패가 될 수 없다. */
+export function gateDetail({ gate, stdout = "", stderr = "", env } = {}) {
+  try {
+    const text = [String(stdout ?? ""), String(stderr ?? "")].join("\n");
+    return { gate, failing: parseFailingTests(text), snippet: gateFailureSnippet(stdout, stderr, env ? { env } : {}) };
+  } catch (e) {
+    return { gate, failing: [], snippet: "", note: `detail capture failed — ${e?.message || e}` };
+  }
+}
+
+/**
+ * 명령을 돌리지 않은 게이트(prove-test·new-test-repeat·diff_coverage·mutation)의 detail은 그 게이트가
+ * 이미 적어 둔 `log`에서 뽑는다. 이 자리가 바로 `failing=unit,new-test-repeat`의 두 번째 이름이 "무엇을
+ * 말하는지"를 잃던 지점이다. 이미 detail이 있으면 덮지 않는다(명령 게이트는 원본 stdout/stderr를 봤다).
+ */
+export function attachGateDetails(result) {
+  try {
+    for (const [name, g] of Object.entries(result?.gates || {})) {
+      if (!g || g.status !== "RED" || g.detail) continue;
+      g.detail = gateDetail({ gate: name, stdout: g.log ?? "" });
+    }
+  } catch { /* 증거 수집은 판정을 막지 않는다 */ }
+  return result;
+}
+
+/**
+ * 런 레코드에 실리는 줄들 — RED 게이트마다 한 줄, `gates-detail: {…}` 형태의 **한 줄 JSON**.
+ * 사람이 읽을 수 있고(prefix), 기계가 읽을 수 있다(JSON). `reason`(KTB-35 unhandled, broken-base)이
+ * 있으면 함께 싣는다 — 그것이 곧 뿌리인 경우가 있다.
+ */
+export function gatesDetailLines(result) {
+  try {
+    const out = [];
+    for (const [name, g] of Object.entries(result?.gates || {})) {
+      if (!g || g.status !== "RED") continue;
+      const d = g.detail || gateDetail({ gate: name, stdout: g.log ?? "" });
+      out.push(GATES_DETAIL_PREFIX + JSON.stringify({
+        gate: name,
+        failing: Array.isArray(d.failing) ? d.failing : [],
+        ...(g.reason ? { reason: String(g.reason) } : {}),
+        snippet: String(d.snippet ?? "").slice(-DETAIL_MAX_CHARS),
+        ...(d.note ? { note: d.note } : {}),
+      }));
+    }
+    return out;
+  } catch (e) {
+    return [`${GATES_DETAIL_PREFIX}unavailable — ${e?.message || e}`];
+  }
+}
+
 export function recomputeStatus(result, harness) {
   const gates = result.gates;
   const failing = [], skipped = [], misconfigured = [];
@@ -168,6 +283,8 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
     };
     if (unhandled) gates[name].reason = unhandledReason(r.code);
     if (TEST_GATES.has(name)) { gates[name].parsed = reportParsed; gates[name].failing_ids = failing_ids || []; }
+    // Task 1 — RED의 뿌리를 게이트 엔트리에 붙인다(판정 뒤, 판정과 무관하게: additive 필드다).
+    if (status === "RED") gates[name].detail = gateDetail({ gate: name, stdout: r.stdout, stderr: r.stderr });
   }
   const result = { schema: "factory.gates.v1", level, requested_level, downgraded_from: level === requested_level ? null : requested_level, status: null, gates, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests, quarantine_applied: quarantineApplied, quarantine_refused: quarantineRefused, ran_at: now };
   return recomputeStatus(result, harness);
@@ -375,7 +492,8 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
     if (result.tests.failing.length === 0) {
       for (const [n, g] of Object.entries(result.gates)) {
         if (g.status !== "RED" || !TEST_GATES.has(n) || g.parsed !== true) continue;
-        if ((g.failing_ids || []).length && g.failing_ids.every((id) => result.tests.excluded.includes(id))) g.status = "GREEN";
+        // Task 1: RED가 아니게 된 게이트는 "왜 RED였는지"도 들고 있지 않는다(낡은 증거는 거짓 증거다).
+        if ((g.failing_ids || []).length && g.failing_ids.every((id) => result.tests.excluded.includes(id))) { g.status = "GREEN"; delete g.detail; }
       }
     }
   }
@@ -411,6 +529,10 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
     result.gates.mutation = { status: mu.misconfigured ? "MISCONFIGURED" : mu.ok ? "GREEN" : "RED", code: null, duration_ms: 0, log: `score=${mu.score} threshold=${mu.threshold} ${mu.detail || ""}` };
   }
   await updateQuarantine({ result, quarantine, stage, saveQuarantine });
+  // Task 1 — 명령 게이트는 자기 stdout/stderr에서 detail을 이미 달았다. 증명 게이트(prove-test·
+  // new-test-repeat·diff_coverage·mutation)는 여기서 자기 `log`로 채운다: `failing=unit,new-test-repeat`의
+  // 두 번째 이름도 records 브랜치만 보고 뜻을 알 수 있어야 한다.
+  attachGateDetails(result);
   return recomputeStatus(result, harness);
 }
 
