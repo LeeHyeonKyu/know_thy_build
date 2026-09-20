@@ -204,7 +204,18 @@ export function attachGateDetails(result) {
  * 사람이 읽을 수 있고(prefix), 기계가 읽을 수 있다(JSON).
  *
  * 키: `gate`, `run_id`, `runner`, `round`(알 때만), `failing[]`, `reason`(게이트가 적었을 때만),
+ * `parsed`(테스트 게이트일 때만 — 리포트를 **실제로 읽었는가**), `code`(명령의 종료 코드, 알 때만),
  * `snippet`, `note`(증거 수집이 실패했을 때만).
+ *
+ * **`parsed`·`code`가 있는 이유**(T3 리뷰 MF-3): `failing`이 비었다는 사실 하나로는 "왜 빨간지"를
+ * 가를 수 없다 — 테스트가 하나도 안 깨졌는데 빨간 것인지, 명령이 리포트를 쓰기도 전에 죽은 것인지,
+ * 애초에 리포트를 쓰지 않는 게이트(lint·typecheck)인지가 전부 같은 모양이다. 그런데 셋의 **주인이
+ * 다르다**: 첫째는 KTB-35(엔진), 둘째는 채택자의 명령·툴체인(harness), 셋째는 제품 코드다.
+ * `reason`으로는 이것을 가를 수 없다 — `reason`은 **리포트를 읽은 테스트 게이트**에만 붙기 때문에
+ * (위 KTB-35 경로), `flutter: command not found`(exit 127)처럼 리포트가 없는 실패에는 영영 붙지 않는다.
+ * 그래서 판정의 재료를 줄에 싣는다: `parsed === false`는 "명령이 리포트를 남기지 못했다", `code`는
+ * 셸 수준의 실패(127 = 명령 없음, 126 = 실행 불가)를 그대로 말해 준다. 둘 다 이미 게이트 엔트리에
+ * 있던 값이고, 판정은 한 글자도 바뀌지 않는다(additive).
  *
  * **`run_id`/`runner`가 있는 이유**(리뷰 provenance): `docs/factory/runs/**`는 no-write 스테이지의
  * 스크래치 경로라 에이전트 세션이 줄을 덧붙일 수 있고, 정규식 harvester는 **첫 번째** 매치를 집는다 —
@@ -229,6 +240,10 @@ export function gatesDetailLines(result, { runId = null, runnerId = null, round 
         ...(Number.isInteger(round) ? { round } : {}),
         failing: (Array.isArray(d.failing) ? d.failing : []).map((n) => scrubOne(n, secrets, DETAIL_MAX_NAME)),
         ...(g.reason ? { reason: scrubOne(g.reason, secrets, DETAIL_MAX_REASON) } : {}),
+        // 테스트 게이트에만 있는 필드다 — 없는 게이트에 `parsed: false`를 지어내면 "리포트를 못 썼다"와
+        // "애초에 리포트를 쓰지 않는 게이트다"가 같은 값이 되어 하류가 정확히 반대로 읽는다.
+        ...(typeof g.parsed === "boolean" ? { parsed: g.parsed } : {}),
+        ...(Number.isInteger(g.code) ? { code: g.code } : {}),
         snippet: String(d.snippet ?? "").slice(-DETAIL_MAX_CHARS),
         ...(d.note ? { note: d.note } : {}),
       }));

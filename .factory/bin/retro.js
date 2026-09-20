@@ -30,6 +30,7 @@ import { run } from "../lib/exec.js";
 import { makeGh } from "../lib/gh.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { routeMergedIssues } from "../lib/feedback/route.js";
+import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
 import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
@@ -969,37 +970,6 @@ export function roleFileMap(roles) {
   return map;
 }
 
-/**
- * ── Feedback loop Task 3 — **설치 매니페스트를 찾는다**(`ownerOf` + dest 멤버십) ────────────────
- *
- * `classifyFinding`은 이 둘을 **필수**로 받는다(classify.js must_fix 4): 빠뜨리면 던지고, 예전
- * 구현처럼 prefix 표로 조용히 떨어지면 채택자가 쓴 `.claude/`·`.factory/` 파일이 전부 KTB 이슈로
- * 올라간다. 그런데 `factory/cli/manifest.js`는 **설치되지 않는다**(`buildManifest`가 싣는 것은
- * `factory/lib`·`factory/bin`·`templates/factory`뿐이다) — 곧 `.factory/bin/retro.js`에서는
- * 정적 import가 존재하지 않는 경로를 가리킨다. 그래서 런타임에 **패키지를 찾아** 동적으로 읽는다:
- *   ① 저장소 루트의 `factory/cli/manifest.js` — KTB 자신을 개발하는 저장소(도그푸드).
- *   ② `node_modules/know-thy-build/factory/cli/manifest.js` — 채택자 저장소.
- * 둘 다 없으면 **null**이고, 라우팅 팔은 돌지 않는다(액션 한 줄만 남는다). 주인을 모르는 채
- * 라우팅하는 것보다 이번 창을 넘기는 편이 낫다 — 잘못 간 이슈는 사람이 손으로 치워야 한다.
- */
-export async function loadInstallManifest(root, { exists = existsSync, read = readFileSync } = {}) {
-  const candidates = [join(root, "factory/cli/manifest.js"), join(root, "node_modules/know-thy-build/factory/cli/manifest.js")];
-  for (const file of candidates) {
-    if (!exists(file)) continue;
-    const pkgRoot = join(file, "..", "..", "..");
-    try {
-      const mod = await import(pathToFileURL(file).href);
-      const dests = new Set(mod.buildManifest({ pkgRoot }).map((e) => e.dest));
-      let version = null;
-      try { version = JSON.parse(read(join(pkgRoot, "package.json"), "utf8")).version ?? null; } catch { version = null; }
-      return { ownerOf: mod.ownerOf, isInstalled: dests, ktbVersion: version, pkgRoot };
-    } catch (e) {
-      console.error(`factory: retro could not read the install manifest at ${file} — ${e?.message || e}`);
-    }
-  }
-  return null;
-}
-
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
   const argv = process.argv.slice(2);
@@ -1135,7 +1105,7 @@ async function main() {
     routeFeedback: async ({ issues, commentsByIssue, records, since }) => {
       const manifest = await loadInstallManifest(root);
       if (!manifest) {
-        return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: "install manifest not found (neither factory/cli/manifest.js nor node_modules/know-thy-build) — refusing to classify without the real owner map" }] };
+        return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
       }
       return routeMergedIssues({
         gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,

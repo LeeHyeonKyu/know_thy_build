@@ -102,11 +102,39 @@ export function freshContent(e, { readFile = (p) => readFileSync(p, "utf8"), var
   const raw = readFile(e.src);
   const text = e.owner === "factory" || e.owner === "project" ? render(raw, vars) : raw;
   if (!e.generate) return text;
+  // 설치 매니페스트는 `[protected]`가 아니라 **매니페스트 자신**에서 나온다 — 아래 PROTECTED 가드보다
+  // 앞에 둔다(그 가드는 훅/ci-settings 생성기만의 전제다).
+  if (e.generate === "install-manifest") return renderInstallManifest(text, vars);
   const prot = vars.PROTECTED;
   if (!prot || !Array.isArray(prot.factory)) throw new Error(`${e.dest}: harness.toml [protected].factory is missing — refusing to install a protected list that was not derived from it`);
   if (e.generate === "hook-protected") return replaceProtBlock(text, prot);
   if (e.generate === "ci-settings" || e.generate === "ci-settings-harness") return renderCiSettings(text, prot, { harnessMode: e.generate === "ci-settings-harness" });
   throw new Error(`${e.dest}: unknown generator ${e.generate}`);
+}
+
+/**
+ * ── 피드백 루프 (spec §2, T3 리뷰 MF-2) — **설치된 러너가 읽을 수 있는 주인 표** ─────────────────
+ *
+ * `.factory/install-manifest.json`은 `buildManifest`가 이 버전에 대해 계산한 `dest → owner` 표
+ * 그대로다. 왜 파일로 떨어뜨리는가: 회고의 라우팅 팔은 `ownerOf`와 dest 멤버십이 **필수**인데
+ * (`classify.js`: 없으면 던진다 — 조용히 prefix 표로 떨어지면 채택자의 파일이 KTB 이슈로 올라간다),
+ * 그 두 함수가 사는 `factory/cli/**`는 설치 매니페스트에 없고 배포는 `npx`라 채택자 저장소에
+ * `node_modules/know-thy-build`도 생기지 않는다. 파일이 없으면 루프는 채택자 저장소에서 **영원히**
+ * 한 줄의 에러 액션만 남긴다.
+ *
+ * `entries`는 정렬한다 — 생성물은 결정적이어야 `--diff`와 doctor의 `files.stale`이 읽힌다.
+ * `vars.MANIFEST`/`vars.KTB_VERSION`이 없으면(오래된 호출자) 템플릿 원문을 그대로 돌려준다:
+ * 빈 표를 지어내면 "설치된 것이 하나도 없다"는 거짓을 파일로 굳힌다.
+ */
+export function renderInstallManifest(templateText, vars = {}) {
+  const entries = Array.isArray(vars.MANIFEST) ? vars.MANIFEST : null;
+  if (!entries) return templateText;
+  const j = JSON.parse(templateText);
+  j.ktb_version = vars.KTB_VERSION ?? null;
+  j.entries = entries
+    .map((e) => ({ dest: e.dest, owner: e.owner }))
+    .sort((a, b) => (a.dest < b.dest ? -1 : a.dest > b.dest ? 1 : 0));
+  return JSON.stringify(j, null, 2) + "\n";
 }
 
 /**

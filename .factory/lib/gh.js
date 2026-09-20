@@ -329,6 +329,14 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const m = /\/issues\/(\d+)/.exec(out);
       return { issue: m ? Number(m[1]) : null, created: true, appended: false };
     },
+    /**
+     * **이 저장소** 이슈의 본문을 통째로 갈아 끼운다(stdin — 본문이 argv에 실리지 않는다).
+     * 쓰는 곳은 하나다: 이미 열려 있는 `factory:harness` 이슈의 표에 빠진 줄을 덧붙이는 자리
+     * (`appendHarnessEntries`, T3 리뷰 SF-2). 교차 저장소 판은 따로 있다(`upstreamIssue`).
+     */
+    async editIssueBody(n, body) {
+      await gh(["issue", "edit", String(n), "-R", repo, "--body-file", "-"], { input: body });
+    },
     async createIssue({ title, body, labels = [] }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;

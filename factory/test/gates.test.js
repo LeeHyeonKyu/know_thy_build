@@ -826,6 +826,37 @@ test("리뷰 provenance: the detail line names the run that wrote it (and the ro
   expect("round" in bare).toBe(false);
 });
 
+/**
+ * T3 리뷰 MF-3 — `parsed`/`code`가 없으면 하류(피드백 루프)가 "왜 빨간지"를 가를 수 없다.
+ * 셋이 전부 `failing: []`로 같아 보이는데 주인이 서로 다르기 때문이다: 리포트를 읽은 RED(제품),
+ * 리포트를 못 남긴 RED(하네스 명령), 애초에 리포트를 쓰지 않는 게이트(제품). **진짜 `runGates`로** 돌린다.
+ */
+test("Task 3 MF-3: gates-detail carries `parsed` (test gates only) and `code`", async () => {
+  const harness = {
+    harness: { maturity: "M2" },
+    commands: { lint: "LINT", unit: "UNIT" },
+    gates: { required: ["lint", "unit"], fast: ["lint", "unit"], thresholds: {} },
+    test: { unit_report: ".factory/out/unit.json" },
+  };
+  const gatesOf = async ({ code, report }) => {
+    const run = async () => ({ code, stdout: "", stderr: "flutter: command not found" });
+    const r = await runGates({ run, cwd: "/r", harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => report, now: "t" });
+    return Object.fromEntries(gatesDetailLines(r).map((l) => { const o = JSON.parse(l.slice(GATES_DETAIL_PREFIX.length)); return [o.gate, o]; }));
+  };
+  // 리포트가 없다 → 테스트 게이트는 `parsed: false`, 비테스트 게이트는 키 자체가 없다("없음"과 "못 읽었다"는 다른 사실이다)
+  const noReport = await gatesOf({ code: 127, report: null });
+  expect(noReport.unit).toMatchObject({ parsed: false, code: 127 });
+  expect("parsed" in noReport.lint).toBe(false);
+  expect(noReport.lint.code).toBe(127);
+  // 리포트를 읽었다 → `parsed: true`
+  const withReport = await gatesOf({ code: 1, report: JSON.stringify({ numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, testResults: [{ name: "/r/test/a.test.js", assertionResults: [{ fullName: "adds", status: "failed" }] }] }) });
+  expect(withReport.unit).toMatchObject({ parsed: true, code: 1 });
+  // code를 모르는 엔트리(명령을 돌리지 않은 게이트)에는 키를 지어내지 않는다
+  const noCode = JSON.parse(gatesDetailLines({ gates: { x: { status: "RED", code: null, log: "" } } })[0].slice(GATES_DETAIL_PREFIX.length));
+  expect("code" in noCode).toBe(false);
+  expect("parsed" in noCode).toBe(false);
+});
+
 test("Task 1: unrecognizable runner output → failing [] and a snippet that still carries the cause", async () => {
   const noise = "make: *** [Makefile:12: unit] Error 137\nKilled";
   const run = makeFakeRun([sh("npm run lint", ok), sh("tsc", ok), sh(harness.commands.unit, { code: 137, stdout: noise, stderr: "" })]);

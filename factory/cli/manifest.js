@@ -42,6 +42,11 @@ export function buildManifest({ pkgRoot, list = readdirRecursive }) {
     const dest = [PREFIX[head], ...rest].join("/");
     const e = { src: p, dest, owner: ownerOf(dest) };
     if (dest === ".claude/settings.json") e.merge = "settings";
+    // 피드백 루프(spec §2): 분류는 **인과 파일의 주인**으로 한다 — 그 주인 표가 바로 이 매니페스트다.
+    // 그런데 `factory/cli/**`는 설치되지 않고(위 세 루프가 싣는 것은 lib·bin·hooks·templates뿐이다)
+    // 배포는 `npx`라 채택자 저장소에는 `node_modules/know-thy-build`도 없다. 그래서 설치 시점에
+    // 이 표를 **파일로 떨어뜨린다** — 설치된 러너가 주인을 읽을 수 있는 유일한 자리다(T3 리뷰 MF-2).
+    if (dest === ".factory/install-manifest.json") e.generate = "install-manifest";
     // 외부 감사 M8 — 경로 deny는 harness.toml `[protected]`에서 생성한다(install.js `freshContent`).
     if (dest === ".factory/ci-settings.json") e.generate = "ci-settings";
     if (dest === ".factory/ci-settings-harness.json") e.generate = "ci-settings-harness";

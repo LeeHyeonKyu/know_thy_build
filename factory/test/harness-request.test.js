@@ -77,7 +77,7 @@ test("ensureHarnessIssue opens ONE issue, labelled queue + harness, and reuses t
   const existing = { number: 31, title: "사람이 고쳐 쓴 제목", body: harnessIssueBody({ entries: [PG], issue: 2 }) };
   const gh2 = { issueList: async () => [existing], createIssue: vi.fn() };
   const reused = await ensureHarnessIssue({ gh: gh2, issue: 2, entries: [{ ...PG, change: "add dependency pg@^8.11" }] });
-  expect(reused).toEqual({ issue: 31, created: false, title: "사람이 고쳐 쓴 제목" });
+  expect(reused).toEqual({ issue: 31, created: false, appended: 0, title: "사람이 고쳐 쓴 제목" });
   expect(gh2.createIssue).not.toHaveBeenCalled();
 
   // 다른 피처의 마커를 단 열린 하네스 이슈는 재사용 대상이 아니다
@@ -104,4 +104,40 @@ test("implement.v1 accepts a handoff without harness_needed, and validates the e
   expect(bad.ok).toBe(false);
   expect(bad.errors.join("; ")).toMatch(/harness_needed\[0\]\.change is required/);
   expect(validate("implement.v1", { ...base, harness_needed: "package.json" }).ok).toBe(false);
+});
+
+// ── T3 리뷰 SF-2 — 재사용은 **덧붙이기**여야 한다 ───────────────────────────────────────────────
+// 조기 반환이 재진입 멱등성을 사 주지만, 그 대가로 **새로** 나온 요청이 조용히 사라졌다.
+test("ensureHarnessIssue: 열린 이슈에 빠진 줄만 덧붙인다(같은 파일은 다시 넣지 않는다)", async () => {
+  const { appendHarnessEntries } = await import("../lib/harness-request.js");
+  const existing = { number: 31, title: "t", body: harnessIssueBody({ entries: [PG], issue: 2 }) };
+  const edits = [];
+  const gh = { issueList: async () => [existing], createIssue: vi.fn(), editIssueBody: async (n, body) => edits.push({ n, body }) };
+
+  // 같은 파일 → 덧붙일 것이 없다. 본문을 건드리지 않는다(같은 머지를 다시 읽어도 표가 자라지 않는다).
+  const same = await ensureHarnessIssue({ gh, issue: 2, entries: [{ ...PG, change: "reworded" }] });
+  expect(same).toMatchObject({ issue: 31, created: false, appended: 0 });
+  expect(edits).toEqual([]);
+
+  // 다른 파일 → 표에 한 줄이 붙는다
+  const more = { file: "docs/factory/CHARTER.md", change: "add a docs tier roster", why: "the docs roster is empty" };
+  const appended = await ensureHarnessIssue({ gh, issue: 2, entries: [PG, more] });
+  expect(appended).toMatchObject({ issue: 31, created: false, appended: 1 });
+  expect(edits).toHaveLength(1);
+  expect(edits[0].body).toContain("docs/factory/CHARTER.md");
+  expect(edits[0].body.match(/^\| `/gm)).toHaveLength(2);
+  // 표 아래의 산문은 그대로다(사람이 덧붙인 메모를 밀어내지 않는다)
+  expect(edits[0].body).toContain("Blocks: #2");
+
+  // 순수 함수도 같은 계약을 지킨다
+  expect(appendHarnessEntries("no table here", [PG]).added).toHaveLength(1);
+  expect(appendHarnessEntries(existing.body, [PG]).body).toBe(existing.body);
+});
+
+test("ensureHarnessIssue: 본문 편집을 못 하는 어댑터에서는 예전 그대로 동작한다", async () => {
+  const existing = { number: 31, title: "t", body: harnessIssueBody({ entries: [PG], issue: 2 }) };
+  const gh = { issueList: async () => [existing], createIssue: vi.fn() };
+  const r = await ensureHarnessIssue({ gh, issue: 2, entries: [{ file: "x.json", change: "c", why: "w" }] });
+  expect(r).toMatchObject({ issue: 31, created: false, appended: 0 });
+  expect(gh.createIssue).not.toHaveBeenCalled();
 });

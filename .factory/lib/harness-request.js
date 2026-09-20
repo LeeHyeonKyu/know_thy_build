@@ -122,11 +122,42 @@ export function parseBlocks(body) {
  * 새 이슈는 `factory:queue` + `factory:harness`로 태어난다: queue 라벨이 곧 triage 워크플로의 진입
  * 이벤트다(이 함수가 따로 dispatch하지 않는 이유).
  */
+/**
+ * 이미 열려 있는 하네스 이슈의 표에 **빠진 줄만** 덧붙인다(T3 리뷰 SF-2). 예전에는 기존 이슈를
+ * 찾으면 그대로 돌려주고 끝이었다 — 재진입 멱등성을 그 조기 반환으로 샀는데, 그 대가로 **새로**
+ * 나온 요청이 조용히 사라졌다(액션 줄에는 `created:false`만 남는다). 같은 줄인지는 표의 `file` 셀로
+ * 본다: 같은 파일에 대한 요청은 문구가 달라도 한 줄이면 충분하고, 다른 파일은 언제나 새 사실이다.
+ * 덧붙일 것이 없으면 본문을 **건드리지 않는다**(같은 머지를 다시 읽어도 표가 자라지 않는다).
+ */
+export function appendHarnessEntries(body, entries) {
+  const text = String(body ?? "");
+  const have = new Set([...text.matchAll(/^\|\s*`([^`]+)`\s*\|/gm)].map((m) => m[1].trim()));
+  const missing = (entries || []).filter((e) => !have.has(oneLine(e.file)));
+  if (!missing.length) return { body: text, added: [] };
+  const rows = missing.map((e) => `| \`${oneLine(e.file)}\` | ${oneLine(e.change)} | ${oneLine(e.why)} |`);
+  const lines = text.split("\n");
+  // 표의 마지막 줄 뒤에 끼워 넣는다 — 표 아래의 산문(사람이 덧붙인 메모 포함)은 그대로 둔다.
+  let last = -1;
+  lines.forEach((l, i) => { if (/^\|/.test(l)) last = i; });
+  if (last === -1) return { body: `${text}\n${rows.join("\n")}`, added: missing };
+  return { body: [...lines.slice(0, last + 1), ...rows, ...lines.slice(last + 1)].join("\n"), added: missing };
+}
+
 export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin = "implement" }) {
   const title = harnessIssueTitle(entries, issue);
   const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
   const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
-  if (found) return { issue: found.number, created: false, title: found.title ?? title };
+  if (found) {
+    // 덧붙이기는 어댑터가 본문 편집을 줄 때만 한다(그 능력이 없는 호출자의 동작은 한 글자도 안 바뀐다).
+    if (typeof gh.editIssueBody === "function") {
+      const { body, added } = appendHarnessEntries(found.body, entries);
+      if (added.length) {
+        await gh.editIssueBody(found.number, body);
+        return { issue: found.number, created: false, appended: added.length, title: found.title ?? title };
+      }
+    }
+    return { issue: found.number, created: false, appended: 0, title: found.title ?? title };
+  }
   const number = await gh.createIssue({
     title,
     body: harnessIssueBody({ entries, issue, pr, origin }),

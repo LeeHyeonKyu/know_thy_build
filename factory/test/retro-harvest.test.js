@@ -403,27 +403,31 @@ test("A-SF6: accumulateStats sums the qa claim counts and re-derives the ratio (
 });
 
 // ── Feedback loop Task 3 — 원시 발견(raw finding) 수확 ─────────────────────────────────────────
-// 수확의 계약 두 가지: ① **런에 묶인 줄만** 증거다(`docs/factory/runs/**`는 에이전트가 쓸 수 있는
-// 경로다) ② 게이트가 이름을 댄 실패는 발견이 아니다(그건 공장이 제 일을 한 것이다 — 라우팅하면
-// 머지마다 이슈가 열린다).
+// **모든 픽스처는 진짜 생산자가 만든다**(T3 리뷰의 근본 교훈): `gates-detail:` 줄은 `runGates` →
+// `gatesDetailLines`가, self-gate 코멘트는 `selfGateRetryComment`가, 전이 거부는 `transition.js`의
+// 문구가, 하트비트는 `heartbeatBody`가 만든다. 손으로 적으면 생산자가 낼 수 없는 조합이 생기고,
+// 그러면 테스트는 초록인 채 라우팅만 틀린다(1차 구현이 정확히 그랬다).
 test("harvestFindings: 소스 네 갈래와 런 바인딩", async () => {
   const { harvestFindings, knownRunsFor } = await import("../lib/feedback/harvest-findings.js");
-  const RUNNER = "gha-771";
-  const hb = { id: 1, createdAt: "2026-09-20T10:00:00Z", body: `<!-- factory-heartbeat issue=8 -->\nstage: review · runner: ${RUNNER} · started: t · last: t` };
-  expect([...knownRunsFor([hb])].sort()).toEqual(["771", "gha-771"]);
+  const { realGatesDetail, recordOf, heartbeat, gatesHarness, vitestReport, RUNNER } = await import("./helpers/feedback-fixtures.js");
+  const hb = heartbeat(8, "review");
+  expect([...knownRunsFor([hb])].sort()).toEqual(["99001", RUNNER]);
 
-  const line = (o) => `gates-detail: ${JSON.stringify(o)}`;
-  const record = [
-    "# Run · #8",
-    `## implement · 2026-09-20T10:05Z · ${RUNNER}`,
-    // 이름 댄 실패 — 발견이 아니다
-    line({ gate: "unit", run_id: "771", runner: RUNNER, failing: ["math > adds"], snippet: "expected 1 to be 2" }),
-    // 이름 없는 RED + reason — 하네스/엔진 얘기다
-    line({ gate: "lint", run_id: "771", runner: RUNNER, failing: [], reason: "command exited 127 with 0 failing tests — unhandled error outside tests (see gate log)", snippet: "eslint: not found" }),
-    `## review · 2026-09-20T11:00Z · ${RUNNER}`,
-    `context-manifest: ${JSON.stringify({ role: "correctness", cold_read: false, run_id: "771", runner: RUNNER, round: 1, fields: ["diff", "done_when"] })}`,
-    "",
-  ].join("\n");
+  // unit: 리포트를 읽은 진짜 실패(발견 아님) / lint: 툴이 없다(하네스)
+  const { lines } = await realGatesDetail({
+    harness: gatesHarness(),
+    outcomes: {
+      unit: { code: 1, stdout: " ❯ test/a.test.js (1)\n   × math > adds\n\n Test Files  1 failed" },
+      lint: { code: 127, stderr: "bash: line 1: eslint: command not found" },
+    },
+    report: vitestReport({ passed: 2, failures: ["math > adds"] }),
+  });
+  const record = recordOf(8, "x", [
+    { stage: "implement", at: "2026-09-20T10:05Z", lines },
+    { stage: "review", at: "2026-09-20T11:00Z", lines: [
+      `context-manifest: ${JSON.stringify({ role: "correctness", cold_read: false, run_id: "99001", runner: RUNNER, round: 1, fields: ["diff", "done_when"] })}`,
+    ] },
+  ]);
 
   const comments = [
     hb,
@@ -436,10 +440,10 @@ test("harvestFindings: 소스 네 갈래와 런 바인딩", async () => {
   ];
 
   const found = harvestFindings({ issue: 8, repo: "o/r", record, comments });
-  const kinds = found.map((f) => `${f.kind}:${f.causal_path}`);
-  // 이름 댄 unit 실패는 없다; 이름 없는 lint RED는 하네스 명령을 가리킨다
-  expect(kinds).toContain("gate:.factory/harness.toml [commands].lint");
-  expect(kinds.some((k) => k.startsWith("gate:") && k.includes("unit"))).toBe(false);
+  const gates = found.filter((f) => f.kind === "gate");
+  // 리포트를 읽은 unit RED는 발견이 아니다; 툴이 없는 lint RED는 `[runtime].setup`을 가리킨다
+  expect(gates).toHaveLength(1);
+  expect(gates[0].causal_path).toBe("harness.toml [runtime].setup");
   // 경로를 댄 must_fix만 발견이 된다(산문 `where`는 이미 lesson 후보다)
   const mf = found.filter((f) => f.kind === "review-must_fix");
   expect(mf).toHaveLength(1);
@@ -447,4 +451,112 @@ test("harvestFindings: 소스 네 갈래와 런 바인딩", async () => {
   expect(mf[0].role).toBe("correctness");
   // 같은 런의 그 역할 매니페스트가 붙는다(context adequacy 신호, spec §5)
   expect(mf[0].context_manifest).toEqual(["diff", "done_when"]);
+});
+
+/**
+ * T3 리뷰 MF-3의 표 — 여섯 행 전부를 **실제 `runGates` 출력**으로 돌린다. 예전 규칙은 `reason`에만
+ * 걸려 있었고 `reason`은 리포트를 읽은 테스트 게이트에만 붙으므로, 채택자의 진짜 하네스 RED(A·B·C)는
+ * 경로 없는 `ambiguous` 노트가 되고 평범한 lint RED(F)는 머지마다 노트가 됐다 — 정확히 거꾸로였다.
+ */
+test("gate 판정표: own-cal의 진짜 RED 셋은 harness, 평범한 RED 둘은 발견이 아니다", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { realGatesDetail, recordOf, heartbeat, gatesHarness, vitestReport } = await import("./helpers/feedback-fixtures.js");
+  const of = async (cfg) => {
+    const { lines } = await realGatesDetail({ harness: gatesHarness(), ...cfg });
+    const record = recordOf(7, "x", [{ stage: "implement", at: "2026-09-20T10:05Z", lines }]);
+    return harvestFindings({ issue: 7, repo: "o/r", record, comments: [heartbeat(7, "implement")] })
+      .filter((f) => f.kind === "gate").map((f) => f.causal_path);
+  };
+
+  // A · own-cal: Flutter 툴체인이 러너에 없다(exit 127) → 툴체인을 까는 자리는 `[runtime].setup`이다
+  expect(await of({ outcomes: { unit: { code: 127, stderr: "/usr/bin/bash: line 1: flutter: command not found" } } }))
+    .toEqual(["harness.toml [runtime].setup"]);
+  // B · own-cal: `flutter analyze`가 info를 치명으로 친다 — error 급 진단이 하나도 없는데 RED다
+  expect(await of({ outcomes: { lint: { code: 1, stdout: "Analyzing own_cal...\n\n   info • Unused import: 'dart:io' • lib/main.dart:3:8 • unused_import\n\n1 issue found. (ran in 3.2s)" } } }))
+    .toEqual([".factory/harness.toml [commands].lint"]);
+  // C · own-cal: `test_one`의 `-t`를 flutter가 모른다 — 명령 문자열이 틀렸다
+  expect(await of({ outcomes: { unit: { code: 64, stderr: 'Could not find an option named "t".\n\nUsage: flutter test [arguments]' } } }))
+    .toEqual([".factory/harness.toml [commands].unit"]);
+  // D · 진짜 테스트 실패(리포트를 읽었다) → 공장이 제 일을 했다
+  expect(await of({ outcomes: { unit: { code: 1, stdout: "   × math > adds" } }, report: vitestReport({ passed: 2, failures: ["math > adds"] }) }))
+    .toEqual([]);
+  // E · KTB-35: 리포트는 읽었는데 실패가 0인데 명령이 죽었다 → 명령 자리(harness)
+  expect(await of({ outcomes: { unit: { code: 1, stderr: "Error: write EPIPE" } }, report: vitestReport({ passed: 5, failures: [] }) }))
+    .toEqual([".factory/harness.toml [commands].unit"]);
+  // F · 제품 코드에 대한 평범한 lint RED(error 급 진단이 있다) → 발견이 아니다
+  expect(await of({ outcomes: { lint: { code: 1, stdout: "/r/src/app.js\n  12:1  error  'x' is never used  no-unused-vars\n\n1 problem" } } }))
+    .toEqual([]);
+});
+
+/**
+ * T3 리뷰 MF-1 — self-gate/전이 거부가 `ktb`가 되려면 **검사 자신이 틀렸다는 증거**가 있어야 한다.
+ * 증거가 없는 차단은 공장이 제 일을 한 것이고, 그 결함은 빌더의 테스트/코드다(`product`, 라우팅 없음).
+ */
+test("attribution: 증거 없는 self-gate 차단은 product, 세 증거는 각각 제 주인으로 간다", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { classifyFinding } = await import("../lib/feedback/classify.js");
+  const { ownerOf, buildManifest } = await import("../cli/manifest.js");
+  const { fileURLToPath } = await import("node:url");
+  const { heartbeat, selfGateComment, recordOf } = await import("./helpers/feedback-fixtures.js");
+  const dests = new Set(buildManifest({ pkgRoot: fileURLToPath(new URL("../..", import.meta.url)) }).map((e) => e.dest));
+  const harness = { test: { source_glob: ["src/**/*.js"], test_glob: ["test/**/*.test.js"] } };
+  const tagsOf = (f) => classifyFinding({ finding: f, ownerOf, isInstalled: dests, ktbVersion: "1.3.2", harness });
+
+  const block = (findings, extraComments = [], record = "") => harvestFindings({
+    issue: 9, repo: "o/r", record,
+    comments: [heartbeat(9, "implement"), selfGateComment({ issue: 9, head: "abc1234", attempt: 1, at: "2026-09-20T10:00:00Z", findings }), ...extraComments],
+  }).filter((f) => f.kind === "self-gate");
+
+  // 증거 없음 — mutation survivor는 빌더가 아무것도 주장하지 않는 테스트를 쓴 것이다
+  const survivor = block([{ check: "mutation", blocking: true, detail: "survivor: test/date.test.js asserts nothing under mutation (return null in src/date.js)" }]);
+  expect(survivor[0].causal_path).toBe("test/date.test.js");
+  expect(tagsOf(survivor[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
+
+  // 증거 없음 — pin 회귀도 마찬가지(빌더가 고정된 가드를 되돌렸다)
+  const pin = block([{ check: "pin", blocking: true, ids: ["P-3"], detail: "regression: pin P-3 guard test/tz.test.js is red — a prior fix regressed: DST boundary" }]);
+  expect(tagsOf(pin[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
+
+  // (a) 인프라급 — 검사가 **못 돌았다**. 채택자의 하네스가 단일 테스트를 못 돌린다 → harness
+  const misc = block([{ check: "mutation", blocking: true, harness: true, detail: "mutation check misconfigured — the harness cannot run a single test" }]);
+  expect(misc[0].causal_path).toBe(".factory/harness.toml");
+  expect(tagsOf(misc[0])).toMatchObject({ tags: ["harness"], disposition: "routed" });
+
+  // (b) 사람이 이 멈춤을 공장 탓으로 귀속했다 → ktb
+  const humanDecision = { id: 5, createdAt: "2026-09-20T10:56:00Z", body: "<!-- human-decision:v1 issue=9 skill=unstick -->\n```yaml\ndecision: retry\nreason: \"needs-human was caused by two self-gate defects (fixed in know-thy-build 1.3.2)\"\n```" };
+  const blamed = block([{ check: "contract", blocking: true, detail: "spec-evidence-missing: no qa evidence manifest" }], [humanDecision]);
+  expect(blamed[0].causal_path).toBe(".factory/lib/self-gate.js");
+  expect(tagsOf(blamed[0])).toMatchObject({ tags: ["ktb"], disposition: "routed" });
+
+  // (c) 나중 런의 검사 집합에서 그 검사가 사라졌다 → 거둬들여진 검사 = 검사가 틀렸다 → ktb
+  const withdrawn = recordOf(9, "x", [
+    { stage: "implement", at: "2026-09-20T10:08Z", lines: ["self-gate: gates+contract → BLOCKED — attempt 1 → factory:planned — contract: spec-evidence-missing"] },
+    { stage: "implement", at: "2026-09-20T11:02Z", lines: ["self-gate: gates → ok"] },
+  ]);
+  const later = block([{ check: "contract", blocking: true, detail: "spec-evidence-missing: no qa evidence manifest" }], [], withdrawn);
+  expect(later[0].extra.attribution).toEqual(["check-withdrawn"]);
+  expect(tagsOf(later[0])).toMatchObject({ tags: ["ktb"], disposition: "routed" });
+
+  // 같은 검사가 나중에도 계속 막으면 거둬들여진 것이 아니다 — 증거가 아니다
+  const stillBlocking = recordOf(9, "x", [
+    { stage: "implement", at: "2026-09-20T10:08Z", lines: ["self-gate: gates+mutation → BLOCKED — attempt 1 → factory:planned — survivor"] },
+    { stage: "implement", at: "2026-09-20T11:02Z", lines: ["self-gate: gates+mutation → BLOCKED — attempt 2 → factory:needs-human — survivor"] },
+  ]);
+  const still = block([{ check: "mutation", blocking: true, detail: "survivor: test/date.test.js asserts nothing under mutation (x)" }], [], stillBlocking);
+  expect(tagsOf(still[0])).toMatchObject({ tags: ["product"], disposition: "outcome" });
+});
+
+// SF-1 — 하네스급 self-gate 차단은 재시도 코멘트를 **남기지 않는다**(`run-stage.js`가 곧장
+// needs-human으로 간다). 그 경우의 유일한 durable 증거는 run 기록의 `self-gate: … (harness) …` 줄이다.
+test("harness급 self-gate 차단은 run 기록 줄에서 수확된다(코멘트가 없어도)", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { heartbeat, recordOf } = await import("./helpers/feedback-fixtures.js");
+  const record = recordOf(9, "x", [{ stage: "implement", at: "2026-09-20T10:08Z", lines: [
+    "verify: ok",
+    "self-gate: gates+mutation → BLOCKED (harness) — mutation: mutation check misconfigured — the harness cannot run a single test",
+  ] }]);
+  const found = harvestFindings({ issue: 9, repo: "o/r", record, comments: [heartbeat(9, "implement")] });
+  expect(found.filter((f) => f.kind === "self-gate")).toHaveLength(1);
+  expect(found[0].causal_path).toBe(".factory/harness.toml");
+  // 섹션 러너가 이 이슈의 런이 아니면 그 줄도 증거가 아니다(바인딩은 여기에도 걸린다)
+  expect(harvestFindings({ issue: 9, repo: "o/r", record, comments: [] })).toEqual([]);
 });

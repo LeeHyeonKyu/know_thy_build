@@ -39,6 +39,18 @@ import {
 /** 로컬 노트(ktb-미설정 / ambiguous)의 dedupe 키. 코멘트 본문 첫 줄에 선다. */
 export const feedbackNoteMarker = (fingerprint) => `<!-- factory-feedback fp=${String(fingerprint ?? "none").replace(/\s+/g, "")} -->`;
 
+/**
+ * **출처 이슈 쪽** 라우팅 영수증(T3 리뷰 SF-4). 상류에 이슈를 열거나 증거를 붙인 뒤 이 마커를 단
+ * 코멘트를 출처 이슈에 남긴다. 두 가지를 동시에 한다:
+ *   ① 사람에게 "이 머지의 이 원인은 저기로 갔다"를 이슈 안에서 보여 준다(링크가 여기 있다).
+ *   ② **같은 머지를 다시 읽어도 두 번 라우팅하지 않는다.** 상류 dedupe는 *대상이 열려 있는 동안*만
+ *      흡수한다 — 사람이 상류 이슈를 닫으면 다음 경량 회고가 같은 옛 증거로 새 이슈를 연다(커서는
+ *      full 회차에만 전진하므로 같은 머지를 N번까지 다시 본다). 출처 쪽 마커는 대상의 상태와 무관하다.
+ */
+export const routedMarker = (fingerprint) => `<!-- factory-feedback routed fp=${String(fingerprint ?? "none").replace(/\s+/g, "")} -->`;
+/** 두 마커를 한 번에 읽는다 — 어느 쪽이 남아 있든 "이 지문은 이 이슈에서 이미 처리했다"는 뜻이다. */
+const ANY_FEEDBACK_MARKER = /<!--\s*factory-feedback (?:routed )?fp=(\S+)\s*-->/g;
+
 const oneLine = (v) => String(v ?? "").replace(/\s*\n\s*/g, " ").trim();
 const clip = (v, n) => (v.length > n ? `${v.slice(0, n - 1)}…` : v);
 
@@ -117,16 +129,17 @@ export async function routeFindings({
     }
   }
 
-  // 이미 남긴(또는 이번 실행에서 남긴) 로컬 노트의 마커 — 같은 원인으로 코멘트를 두 번 달지 않는다.
-  const seenMarkers = new Set();
+  // 이 이슈가 **이미 처리한 지문**(로컬 노트의 마커든, 상류로 보낸 영수증이든). 같은 머지를 여러 번
+  // 다시 읽어도(커서는 full 회차에만 전진한다) 두 번 쓰지 않는다 — 대상의 상태와 무관하다(SF-4).
+  const seenFingerprints = new Set();
   for (const c of existingComments || []) {
-    for (const m of String(c?.body ?? "").matchAll(/<!--\s*factory-feedback fp=(\S+)\s*-->/g)) seenMarkers.add(m[0].replace(/\s+/g, " "));
+    for (const m of String(c?.body ?? "").matchAll(ANY_FEEDBACK_MARKER)) seenFingerprints.add(m[1]);
   }
-  const alreadyNoted = (marker) => seenMarkers.has(marker.replace(/\s+/g, " "));
-  const note = async (marker, body, kind, extra) => {
-    if (alreadyNoted(marker)) { actions.push({ kind: `${kind}-skipped`, step: "feedback-route", issue, reason: "already noted", ...extra }); return; }
+  const fpKey = (fingerprint) => String(fingerprint ?? "none").replace(/\s+/g, "");
+  const note = async (fingerprint, body, kind, extra) => {
+    if (seenFingerprints.has(fpKey(fingerprint))) { actions.push({ kind: `${kind}-skipped`, step: "feedback-route", issue, reason: "already noted", ...extra }); return; }
     await gh.comment(issue, body);
-    seenMarkers.add(marker.replace(/\s+/g, " "));
+    seenFingerprints.add(fpKey(fingerprint));
     actions.push({ kind, step: "feedback-route", issue, ...extra });
   };
 
@@ -138,6 +151,10 @@ export async function routeFindings({
   }
   for (const [fingerprint, c] of byFingerprint) {
     try {
+      if (seenFingerprints.has(fpKey(fingerprint))) {
+        actions.push({ kind: "routed-already", step: "feedback-route", issue, fingerprint });
+        continue;
+      }
       if (upstream) {
         const res = await gh.upstreamIssue({
           repo: upstream,
@@ -150,9 +167,23 @@ export async function routeFindings({
           kind: res.created ? "upstream-created" : (res.appended ? "upstream-appended" : "upstream-unchanged"),
           step: "feedback-route", issue, repo: upstream, upstream_issue: res.issue, fingerprint,
         });
+        // 출처 쪽 영수증(SF-4). 실패해도 라우팅은 이미 일어났다 — 에러 한 줄만 남기고 계속한다.
+        try {
+          await gh.comment(issue, [
+            routedMarker(fingerprint),
+            `**피드백 루프**: 이 이슈의 발견 하나를 상류 저장소로 보냈습니다 — ${upstream}#${res.issue} (${res.created ? "새 이슈" : "기존 이슈에 증거 추가"}).`,
+            "",
+            `- **무엇:** ${oneLine(c.payload.reason)}`,
+            c.causal.path ? `- **원인 파일:** \`${c.causal.path}\` (owner: \`${c.causal.owner}\`)` : "",
+            `- **지문:** \`${fingerprint}\``,
+          ].filter(Boolean).join("\n"));
+          seenFingerprints.add(fpKey(fingerprint));
+        } catch (e) {
+          actions.push(errorAction(issue, `routed receipt failed — ${e?.message || e}`, { fingerprint }));
+        }
       } else {
         const marker = feedbackNoteMarker(fingerprint);
-        await note(marker, noteBody({
+        await note(fingerprint, noteBody({
           marker,
           headline: "이 발견의 주인은 **KTB**(팩토리가 배포한 것)입니다 — `.factory/harness.toml`의 `[factory].upstream`이 비어 있어 상류 저장소에 이슈를 열지 않고 여기 남깁니다(spec §7: 라우팅은 설정으로 여는 옵트인입니다).",
           lines: [
@@ -176,7 +207,7 @@ export async function routeFindings({
     if (c.disposition !== "ambiguous") continue;
     const marker = feedbackNoteMarker(c.fingerprint);
     try {
-      await note(marker, noteBody({
+      await note(c.fingerprint, noteBody({
         marker,
         headline: "인과 파일의 **주인을 확정하지 못했습니다** — 라우팅하지 않고 두 후보를 그대로 올립니다(spec §2: ambiguous는 절대 버리지 않습니다).",
         lines: [
@@ -194,6 +225,9 @@ export async function routeFindings({
     }
   }
 
+  // 미판정은 **세어서 보고한다**(리뷰 nit 2) — 노트는 이슈마다 따로 달리지만, "이번 머지가 판정하지
+  // 못한 발견이 몇 개였나"는 run 기록 한 줄로 보여야 추세가 보인다.
+  if (counts.ambiguous) actions.push({ kind: "ambiguous-summary", step: "feedback-route", issue, count: counts.ambiguous });
   if (counts.withheld) actions.push({ kind: "withheld", step: "feedback-route", issue, count: counts.withheld });
   if (counts.product) actions.push({ kind: "product", step: "feedback-route", issue, count: counts.product });
   return { actions, classified, counts };
