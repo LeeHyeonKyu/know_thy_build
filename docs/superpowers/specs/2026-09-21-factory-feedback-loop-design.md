@@ -65,7 +65,7 @@ stage run (Actions) ──emit──▶ run record (records branch): gate detail
 
 ## 6. Evidence payload (per finding)
 
-`{ issue, repo, stage, round, ktb_version, tags: ["harness"|"ktb"|"product"|"ambiguous"], causal: { path, line?, owner, command?, test?, snippet }, role?: { name, context_manifest: [fields] }, chain: [verdict/transition events], cost: { usd, tokens }, fingerprint }`. The `fingerprint` (stable hash of tags + causal path + normalized reason) dedupes: the same cause across issues appends evidence to one upstream issue rather than opening many.
+`{ issue, repo, stage, round, ktb_version, tags: ["harness"|"ktb"|"product"|"ambiguous"], causal: { path, line?, owner, command?, test?, snippet }, role?: { name, context_manifest: [fields] }, chain: [verdict/transition events], cost: { usd, tokens }, fingerprint }`. The `fingerprint` (stable hash of causal path + normalized reason; tags excluded) dedupes: the same cause across issues appends evidence to one upstream issue rather than opening many. **`reason` must be cause-invariant**: role, signal kind and causal path only — never counts, rates, dollar amounts, baselines or window sizes (those live in `extra`/`chain` and in the appended evidence comment). A sliding aggregate inside `reason` re-opens the same upstream issue on every periodic run (found in T4's review: week-1 and week-2 rubber-stamp/cost-vs-risk fingerprints differed).
 
 ## 7. Routing & configuration
 
