@@ -400,6 +400,33 @@ test("a human decision under a shared factory/owner identity renders as (shared 
   expect(cap2.text()).not.toMatch(/factory identity is a personal account/);
 });
 
+// 리뷰 should_fix 2 — `--json` 소비자(스크립트·다른 도구)도 그 거부를 봐야 한다. 화면에만 적고
+// JSON에서 빠뜨리면 자동화 쪽에서는 이 태스크가 일어나지 않은 것과 같다.
+test("--json carries the refused decisions under `unverifiable`, with the issue and the author", async () => {
+  const { record, comments } = await demo39();
+  const shared = comments.map((c) => ({ ...c, author: OWNER, authorType: "User" }));
+  const cap = capture();
+  await analyzeCommand({
+    ...(await deps()), argv: ["39", "--json"], io: cap.io,
+    gh: { comments: async () => shared, viewerLogin: async () => OWNER, viewerType: async () => "User" },
+    readRecord: async () => ({ text: record, source: "records", trusted: true }),
+  });
+  const data = JSON.parse(cap.text());
+  expect(data.unverifiable).toHaveLength(1);
+  expect(data.unverifiable[0]).toMatchObject({
+    issue: ISSUE, author: OWNER, kind: "human-decision", status: "unverifiable",
+    reason: "shared identity — author equals a factory login; cannot distinguish a person from an agent",
+  });
+  expect(data.factory_identity).toEqual({ personal: true, login: OWNER });
+  // 판정은 그대로다 — 기각된 결정은 발견이 아니므로 `findings`에 섞이지 않는다.
+  expect(data.findings.some((f) => f.tags.includes("ktb"))).toBe(false);
+
+  // 팩토리 계정이 다른 계정이면 그 키는 아예 없다(빈 배열을 지어내지 않는다).
+  const cap2 = capture();
+  await analyzeCommand({ ...(await deps()), argv: ["39", "--json"], io: cap2.io });
+  expect(JSON.parse(cap2.text())).not.toHaveProperty("unverifiable");
+});
+
 test("a human decision whose author cannot be verified says so — it is never rendered as (human)", async () => {
   const { record, comments } = await demo39();
   const noHeartbeats = comments.filter((c) => !String(c.body).includes("factory-heartbeat"));

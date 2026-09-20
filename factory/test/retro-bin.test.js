@@ -8,9 +8,11 @@ beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); });
 import {
   accumulateStats, applyMutation, collectIssues, distinctRuns, earliestRecordAt, emptyCandidates, gapTitle,
-  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, runRetro, sharedIdentityWarning, splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
+  retireCandidates, retroClaudeArgs, retroUsageOf, roleFileMap, routeFeedbackArm, runRetro, sharedIdentityWarning,
+  splitDarkFiles, stampOf, statsTable, todayOf, unknownRuns, ymdOf,
 } from "../bin/retro.js";
 import { validate } from "../lib/schemas.js";
+import { readFileSync } from "node:fs";
 
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
@@ -1090,6 +1092,69 @@ test("feedback-route: light 회차에서도 돌고, 결과가 기록에 남는�
   expect(recorded.join("\n")).toMatch(/feedback-route: upstream-created/);
 });
 
+/**
+ * T7 리뷰 should_fix 5 — **배선을 진짜로 돌린다.** 위/아래 테스트는 `routeFeedback`을 가짜로 바꾸므로
+ * 창의 코멘트를 `resolveFactoryLogins`에 넘기는 일도, `identity`를 읽는 일도, 경보를 런당 한 번만
+ * 다는 일도 확인하지 못한다 — 그 셋 중 하나가 빠져도 초록이다. 여기서는 진짜 `routeFeedbackArm`에
+ * 데모 #39의 **실제 코멘트**(전부 `LeeHyeonKyu`/`User`)를 먹인다.
+ */
+test("routeFeedbackArm: 공유 신원을 스스로 알아내 경보 1건 + 이슈마다 기각 1건을 낸다", async () => {
+  const real = JSON.parse(readFileSync(new URL("./fixtures/demo-39-comments.json", import.meta.url), "utf8")).comments;
+  // 오늘의 `:unstick`이 남길 결정 — 그 저장소에서는 소유자가 쓰므로 하트비트와 **같은 작성자**다.
+  const decided = [...real, {
+    id: 99, createdAt: "2026-09-20T10:57:00Z", author: "LeeHyeonKyu", authorType: "User",
+    body: "<!-- human-decision:v1 issue=39 skill=unstick -->\n```yaml\ndecision: retry\ncause: factory-defect\nreason: \"self-gate blocked on a check only review produces\"\n```",
+  }];
+  const merged = (n) => ({ number: n, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" });
+  const gh = {
+    // Actions 밖이므로 뷰어는 쓰이지 않는다 — 신원은 하트비트 작성자의 `authorType`에서 온다.
+    viewerLogin: async () => { throw new Error("must not be called outside Actions"); },
+    viewerType: async () => { throw new Error("must not be called outside Actions"); },
+    async issueList() { return []; },
+    async comment() { return "https://x/#issuecomment-1"; },
+    async createIssue() { return 900; },
+    async upstreamIssue() { return { issue: 501, created: true, appended: false }; },
+  };
+  const errs = [];
+  const r = await routeFeedbackArm({
+    gh, repo: "LeeHyeonKyu/know-thy-build-demo", root: "/r", harness: {},
+    issues: [merged(39), merged(40)],
+    commentsByIssue: new Map([[39, decided], [40, decided.map((c) => ({ ...c, id: c.id + 1000 }))]]),
+    records: new Map(), since: "2026-09-19T00:00:00Z",
+    loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
+    log: (m) => errs.push(m),
+  });
+  // 로그인은 하트비트에서 해석됐다 — "못 얻었다"는 줄은 없다.
+  expect(errs).toEqual([]);
+  // 경보는 **런당 하나**다(이슈가 둘이어도 하나).
+  const warns = r.actions.filter((a) => a.kind === "warning");
+  expect(warns).toHaveLength(1);
+  expect(warns[0].reason).toMatch(/factory identity is a personal account \(LeeHyeonKyu\)/);
+  expect(r.actions[0]).toBe(warns[0]);                              // 맨 앞이다 — 읽히는 자리
+  // 기각은 **이슈마다** 하나다.
+  const refused = r.actions.filter((a) => a.kind === "unverifiable-decision");
+  expect(refused.map((a) => a.issue).sort()).toEqual([39, 40]);
+  expect(refused.every((a) => a.author === "LeeHyeonKyu")).toBe(true);
+  // 그리고 그 결정은 증거로 세어지지 않았다 — 상류로 나간 것이 없다.
+  expect(r.actions.some((a) => a.kind === "upstream-created")).toBe(false);
+});
+
+test("routeFeedbackArm: 팩토리 로그인을 못 얻으면 그 사실을 적고, 경보는 달지 않는다(모르는 것은 경보가 아니다)", async () => {
+  const anon = [{ id: 1, createdAt: "2026-09-20T10:00:00Z", author: null, body: "<!-- factory-transition:v1 from=factory:approved to=factory:merged by=script -->" }];
+  const errs = [];
+  const r = await routeFeedbackArm({
+    gh: { async issueList() { return []; }, async comment() { return "x"; } },
+    repo: "o/r", root: "/r", harness: {},
+    issues: [{ number: 39, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" }],
+    commentsByIssue: { 39: anon },                                  // 평범한 객체로도 돈다
+    records: new Map(), since: "2026-09-19T00:00:00Z",
+    loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
+    log: (m) => errs.push(m),
+  });
+  expect(errs.join("\n")).toMatch(/could not resolve the factory logins/);
+  expect(r.actions.filter((a) => a.kind === "warning")).toEqual([]);
+});
+
 // T7 — 공유 신원 경보는 **회고의 액션 로그에 그대로 찍힌다**(액션 종류를 늘려도 렌더러는 그대로다).
 test("feedback-route: 공유 신원 경보와 기각된 결정이 액션 로그에 남는다 — 경보는 런당 한 번", async () => {
   const warn = sharedIdentityWarning({ personal: true, login: "LeeHyeonKyu" });
@@ -1106,8 +1171,11 @@ test("feedback-route: 공유 신원 경보와 기각된 결정이 액션 로그�
   const log = recorded.join("\n");
   expect(log.match(/feedback-route: warning — factory identity is a personal account \(LeeHyeonKyu\)/g)).toHaveLength(1);
   expect(log).toMatch(/register a machine user or GitHub App as the factory identity/);
-  // 기각된 결정은 **이슈마다** 한 줄이다 — 어느 이슈의 어느 결정이 사라졌는지 사람이 짚을 수 있어야 한다.
-  expect(log.match(/feedback-route: unverifiable-decision #1[12]/g)).toHaveLength(2);
+  // 기각된 결정은 **이슈마다** 한 줄이고, 그 줄이 **누구의** 결정이었는지까지 적는다 — 이슈 번호만으로는
+  // 코멘트가 수십 개인 이슈에서 자기 결정을 찾아가지 못한다(리뷰 nit 6).
+  expect(log.match(/feedback-route: unverifiable-decision #1[12] by @LeeHyeonKyu — shared identity/g)).toHaveLength(2);
+  // `author`가 없는 액션 종류에는 그 조각이 붙지 않는다(빈 ` by @`를 만들지 않는다).
+  expect(log).not.toMatch(/warning by @/);
 });
 
 test("feedback-route: gh가 던져도 retro는 0으로 끝난다(라우팅이 공장을 멈추지 않는다)", async () => {

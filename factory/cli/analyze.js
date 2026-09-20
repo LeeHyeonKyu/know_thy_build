@@ -15,7 +15,7 @@ import {
   ACTUALLY_MOVED_TO_NEEDS_HUMAN, HUMAN_DECISION, NEEDS_HUMAN_LABEL,
   REFUSAL_REASON, SELF_GATE_RETRY, TRANSITION_REFUSED, TRANSITION_TO,
 } from "../lib/retro/issue-comments.js";
-import { harvestFindings, knownRunsFor, isBoundLine } from "../lib/feedback/harvest-findings.js";
+import { harvestIssue, knownRunsFor, isBoundLine } from "../lib/feedback/harvest-findings.js";
 import { classifyFinding } from "../lib/feedback/classify.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 
@@ -757,8 +757,12 @@ export async function analyzeCommand({
   if (loginNote) tl.factory_logins_note = loginNote;
 
   let raw = [];
-  try { raw = harvestFindings({ issue, repo: theRepo, record: rec.text, comments, factoryLogins: logins }); }
-  catch (e) { io.err(`factory analyze: harvest failed — ${e?.message || e}`); }
+  let unverifiable = [];
+  try {
+    const h = harvestIssue({ issue, repo: theRepo, record: rec.text, comments, factoryLogins: logins });
+    raw = h.findings;
+    unverifiable = h.unverifiable;
+  } catch (e) { io.err(`factory analyze: harvest failed — ${e?.message || e}`); }
 
   const manifest = await loadManifest(root);
   const classified = classifyAll({ findings: raw, manifest, harness: theHarness });
@@ -769,7 +773,7 @@ export async function analyzeCommand({
       ...tl,
       findings: classified.findings,
       // T7 — 거부된 결정은 발견이 아니지만 **조용해서는 안 된다**: `--json` 소비자도 그 사실을 본다.
-      ...(raw.unverifiable?.length ? { unverifiable: raw.unverifiable } : {}),
+      ...(unverifiable.length ? { unverifiable: unverifiable.map((u) => ({ issue, ...u })) } : {}),
       ...(classified.skipped ? { findings_skipped: classified.skipped } : {}),
       ktb_version: manifest?.ktb_version ?? manifest?.ktbVersion ?? null,
     }, null, 2));

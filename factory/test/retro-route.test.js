@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { ownerOf, buildManifest } from "../cli/manifest.js";
 import { routeFindings, routeMergedIssues, feedbackNoteMarker } from "../lib/feedback/route.js";
-import { attributionFor, harvestFindings, SETUP_LOCUS, SELF_GATE_PATH } from "../lib/feedback/harvest-findings.js";
+import { attributionFor, harvestFindings, harvestIssue, SETUP_LOCUS, SELF_GATE_PATH } from "../lib/feedback/harvest-findings.js";
 import { sharedIdentityWarning } from "../bin/retro.js";
 import { UPSTREAM_LABELS, parseUpstreamIssue, evidenceEntries } from "../lib/feedback/upstream-issue.js";
 import { HARNESS_LABEL } from "../lib/harness-request.js";
@@ -409,10 +409,17 @@ describe("T7 공유 신원 — (b) 거부를 보이게 한다", () => {
    * 이번 라운드에 생긴 필드로 옮긴 것이다). 작성자는 물론 소유자 — 그래서 팩토리 로그인과 같다.
    */
   const realDecision = REAL_39.comments.find((c) => /human-decision:v1/.test(c.body));
+  /** 실물 본문에서 그 줄을 그대로 읽어 온다 — 생산자의 기본값에 기대면 표본이 더는 #39가 아니다. */
+  const fieldOf = (name) => {
+    const m = new RegExp(`^${name}: (.*)$`, "m").exec(realDecision.body);
+    expect(m, `#39's real human-decision must carry a \`${name}:\` line`).not.toBeNull();
+    return m[1].trim().replace(/^"|"$/g, "");
+  };
   const unstickToday = humanDecisionComment({
     issue: 39, id: realDecision.id, at: realDecision.createdAt, author: realDecision.author,
+    skill: /skill=(\S+?)\s*-->/.exec(realDecision.body)?.[1] ?? "unstick",
     cause: "factory-defect", ktbFix: "1.3.2",
-    reason: /^reason: (.*)$/m.exec(realDecision.body)?.[1]?.replace(/^"|"$/g, "") ?? "self-gate defects",
+    decision: fieldOf("decision"), reason: fieldOf("reason"),
   });
   const sharedComments = [...REAL_39.comments.filter((c) => c.id !== realDecision.id), unstickToday];
 
@@ -429,12 +436,26 @@ describe("T7 공유 신원 — (b) 거부를 보이게 한다", () => {
   });
 
   test("Pin 1 — #39의 분류는 그대로다: (c) check-withdrawn **하나만으로** ktb에 도달한다", () => {
-    const found = harvestFindings({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] });
-    const selfGate = found.find((f) => f.kind === "self-gate");
+    const { findings, unverifiable } = harvestIssue({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] });
+    const selfGate = findings.find((f) => f.kind === "self-gate");
     expect(selfGate.extra.attribution).toEqual(["check-withdrawn"]);
-    // 거부된 결정은 발견이 아니다 — 그런데 반환값에 실려 나온다(회고·analyze·health가 보여 준다).
-    expect(found.unverifiable).toHaveLength(1);
-    expect(found.some((f) => f.extra?.attribution?.includes?.("human-decision"))).toBe(false);
+    // 거부된 결정은 발견이 아니다 — 그래서 **두 번째 키**로 나온다(회고·analyze·health가 보여 준다).
+    expect(unverifiable).toHaveLength(1);
+    expect(findings.some((f) => f.extra?.attribution?.includes?.("human-decision"))).toBe(false);
+    // 얇은 래퍼는 발견만 돌려준다 — 기존 호출자와 `toEqual([...])` 핀이 그대로 성립한다.
+    expect(harvestFindings({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] })).toEqual(findings);
+  });
+
+  /**
+   * 리뷰 should_fix 1 — 1차 구현은 `unverifiable`을 배열의 **열거 불가 속성**으로 실었다. 그러면
+   * 중간에 배열을 한 번 베끼는 호출자가 생기는 날(`spread`·`map`·`filter`·`JSON`) 이 태스크의 전부가
+   * 조용히 사라진다. 평범한 객체의 두 키는 그 사고를 구조적으로 못 내게 한다.
+   */
+  test("`harvestIssue`의 두 키는 spread·map·JSON을 지나도 살아남는다", () => {
+    const h = harvestIssue({ issue: 39, repo: REPO, record: RECORD_39, comments: sharedComments, factoryLogins: ["LeeHyeonKyu"] });
+    expect({ ...h }.unverifiable).toHaveLength(1);
+    expect(JSON.parse(JSON.stringify(h)).unverifiable).toHaveLength(1);
+    expect(h.unverifiable.map((u) => u.author)).toEqual(["LeeHyeonKyu"]);
   });
 
   test("Pin 2 — 대조군: factoryLogins=[factory-bot]이면 같은 결정이 증거 (b)로 세어진다", () => {

@@ -504,7 +504,7 @@ function reviewFindings({ issue, repo, handoffs, manifests }) {
 }
 
 /**
- * `harvestFindings({ issue, repo, record, comments, factoryLogins }) → rawFinding[]`
+ * `harvestIssue({ issue, repo, record, comments, factoryLogins }) → { findings, unverifiable }`
  *
  * `record`는 그 이슈의 run 기록 전문(`docs/factory/runs/<issue>.md`), `comments`는 그 이슈의 코멘트
  * 전부(`{id, body, createdAt, author}`)다. 둘 다 회고가 이미 손에 들고 있는 것이고, 둘 다
@@ -512,8 +512,14 @@ function reviewFindings({ issue, repo, handoffs, manifests }) {
  * 경로는 없다(spec §3). `factoryLogins`는 팩토리 계정 이름들(`resolveFactoryLogins`)이고,
  * `human-decision:v1`의 작성자가 그중 하나면 그 결정은 **사람의 결정이 아니다**(재리뷰 NEW-MF-2).
  * 절대 던지지 않는다: 한 소스가 깨져도 나머지 소스의 발견은 나온다.
+ *
+ * ── T7 리뷰 should_fix 1: **두 값은 평범한 객체의 두 키여야 한다.** ─────────────────────────
+ * 1차 구현은 `unverifiable`을 발견 배열의 **열거 불가 속성**으로 실었다. 그 값은 `spread`·`map`·
+ * `slice`·`concat`·`JSON.stringify` 어디서든 조용히 사라진다 — 곧 "거부를 보이게 한다"는 이 태스크의
+ * 전부가, 중간에 배열을 한 번 베끼는 호출자가 생기는 날 다시 침묵으로 돌아간다. 그래서 진짜 반환값은
+ * 이 함수이고, `harvestFindings`는 발견만 돌려주는 얇은 래퍼로 남긴다(기존 호출자와 핀은 그대로).
  */
-export function harvestFindings({ issue, repo, record = "", comments = [], factoryLogins = [] } = {}) {
+export function harvestIssue({ issue, repo, record = "", comments = [], factoryLogins = [] } = {}) {
   const out = [];
   const push = (fn) => { try { out.push(...fn()); } catch { /* 한 소스의 실패가 나머지를 막지 않는다 */ } };
   const known = knownRunsFor(comments);
@@ -539,11 +545,14 @@ export function harvestFindings({ issue, repo, record = "", comments = [], facto
   push(() => selfGateFindings({ issue, repo, blocks, attribution }));
   push(() => transitionFindings({ issue, repo, comments, attribution }));
   push(() => reviewFindings({ issue, repo, handoffs: parseHandoffs(comments), manifests: boundManifests }));
-  /**
-   * T7 — 거부된 `human-decision`은 **발견이 아니다**(라우팅할 인과가 없다). 그래도 회고·analyze·health가
-   * 보여 줄 수 있어야 하므로 반환값에 실어 나른다. 열거 불가 속성인 이유: 이 함수의 반환값은 배열이고,
-   * 호출자와 테스트가 그것을 `toEqual([...])`로 고정한다 — 새 키가 그 계약을 깨서는 안 된다.
-   */
-  Object.defineProperty(out, "unverifiable", { value: attribution.unverifiable, enumerable: false });
-  return out;
+  // 거부된 `human-decision`은 **발견이 아니다**(라우팅할 인과가 없다) — 그래서 별도의 키다.
+  return { findings: out, unverifiable: attribution.unverifiable };
+}
+
+/**
+ * `harvestFindings({...}) → rawFinding[]` — 발견만 필요한 호출자를 위한 얇은 래퍼.
+ * 거부된 결정까지 보여 주려면 `harvestIssue`를 쓴다(그쪽이 진짜 반환값이다).
+ */
+export function harvestFindings(args) {
+  return harvestIssue(args).findings;
 }

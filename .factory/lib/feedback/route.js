@@ -2,7 +2,7 @@ import { ensureHarnessIssue } from "../harness-request.js";
 import { isMerged } from "../retro/harvest.js";
 import { afterSince } from "../retro/issue-comments.js";
 import { classifyFinding } from "./classify.js";
-import { harvestFindings } from "./harvest-findings.js";
+import { harvestIssue } from "./harvest-findings.js";
 import {
   appendEvidence, parseUpstreamIssue, renderUpstreamIssue, sourceRef, upstreamIssueTitle,
 } from "./upstream-issue.js";
@@ -274,14 +274,18 @@ export async function routeMergedIssues({
     if (!afterSince(issue.closedAt, sinceMs)) continue;
     routed.push(issue.number);
     let findings = [];
-    try { findings = harvestFindings({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments, factoryLogins }); }
-    catch (e) { actions.push(errorAction(issue.number, `harvest failed — ${e?.message || e}`)); continue; }
+    let unverifiable = [];
+    try {
+      const h = harvestIssue({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments, factoryLogins });
+      findings = h.findings;
+      unverifiable = h.unverifiable;
+    } catch (e) { actions.push(errorAction(issue.number, `harvest failed — ${e?.message || e}`)); continue; }
     /**
      * T7 — **거부는 보이게 한다.** 공유 신원 저장소에서는 `human-decision:v1`이 증거로 세어지지 않는데,
      * 1차 구현은 그것을 한 줄도 남기지 않고 넘어갔다(dogfood 전부가 그 상태였다). 발견이 0건인
      * 이슈에서도 적어야 하므로 아래 `!findings.length` 조기 종료보다 **앞**에 둔다.
      */
-    for (const u of findings.unverifiable || []) {
+    for (const u of unverifiable) {
       actions.push({ kind: "unverifiable-decision", step: "feedback-route", issue: issue.number, author: u.author, reason: u.reason, detail: u.detail });
     }
     if (!findings.length) continue;
