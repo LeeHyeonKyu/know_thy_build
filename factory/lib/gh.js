@@ -348,6 +348,12 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const out = await gh(["issue", "create", "-R", repo, "--title", title, "--body-file", "-", ...labels.flatMap((l) => ["--label", l])], { input: body });
       const m = /\/issues\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
+    /**
+     * 닫힌 이슈를 다시 연다. 쓰는 곳은 하나다: 건강 잡의 **오래 사는 보고서 이슈**(Task 4). 그 자리가
+     * 닫혀 있다고 새 이슈를 열면 라우팅 영수증 마커가 앵커를 잃고 같은 지문이 매주 상류에 새 이슈를
+     * 연다 — 대화의 자리는 옮기지 않는다.
+     */
+    async reopenIssue(n) { await gh(["issue", "reopen", String(n), "-R", repo]); },
     // gh variable get exits non-zero for a missing variable — go through run() directly, not the gh() helper that throws on non-zero.
     async getVariable(name) { const r = await run("gh", ["variable", "get", name, "-R", repo]); return r.code === 0 ? r.stdout.trim() : null; },
 

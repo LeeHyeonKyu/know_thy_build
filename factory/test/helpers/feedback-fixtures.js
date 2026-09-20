@@ -124,12 +124,12 @@ export const humanDecisionComment = ({ issue, skill = "unstick", decision = "ret
   ].join("\n"),
 });
 
-export const reviewHandoffComment = (issue, { round = 1, verdicts, at, tier = null }) => ({
+export const reviewHandoffComment = (issue, { round = 1, verdicts, at, tier = null, headSha = "a".repeat(40) }) => ({
   id: Number(`${issue}7${round}`), createdAt: at,
   body: renderHandoff({
     stage: "review", issue, summary: `round ${round}`,
     data: {
-      schema: "factory.review.v1", issue, pr: issue, head_sha: "a".repeat(40), round, verdicts,
+      schema: "factory.review.v1", issue, pr: issue, head_sha: headSha, round, verdicts,
       orchestration: "workflow", guarantee: "verified",
       // 감사 H3 — 러너가 계산한 실효 tier가 핸드오프에 실린다(run-stage.js `writeHandoff`). 건강
       // 잡의 "위험"은 이것이다: 에이전트의 자기 신고가 아니라 **diff에서 나온 사실**이다.
