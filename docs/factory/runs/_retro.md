@@ -18,6 +18,9 @@
 | --- | --- | --- |
 | merged | 0 | 3 |
 | review rounds avg | 0 | 2 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
+| escaped defects | 0 | 0 |
+| revert rate | 없음 | 0.00 (0/3) |
 | needs-human | 0 | 9 |
 | rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
@@ -28,6 +31,14 @@
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
+
+### Phase-2 gate baseline (this session)
+
+- baseline: KTB #18 = $143 / 12 stage-runs; own-cal #3 = 4 review rounds
+- frozen thresholds: escaped_defects ≤ 0, revert_rate ≤ 0.00
+- rounds-per-issue exemplar: own-cal #3 = 4 review rounds (reject-heavy; caught in review, escaped_defects=0)
+- must-not-recur escaped defects: KTB #18 R3 finish() regression (approve→reject flip — a post-approval escaped defect)
+- gate (ADR-026): Phase 2 (plan Tasks 6, 7) starts only when, over ≥5 post-Phase-1 issues, escaped-defect rate AND revert rate are ≤ baseline while rounds-per-issue fell.
 
 <!-- factory-retro-state:v1 -->
 ```json
@@ -284,6 +295,14 @@
   "stats": {
     "merged": 0,
     "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
+    "escaped_defects": 0,
+    "escaped_defects_detail": [],
+    "reverts": 0,
+    "reverted_issues": [],
+    "revert_rate": null,
     "rejects_by_role": {},
     "review_runs": 0,
     "findings_total": 0,
