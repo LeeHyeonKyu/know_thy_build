@@ -5,6 +5,7 @@ import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
+import { commentsSinceRequeue, latestSelfGateFindings } from "./retro/issue-comments.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -215,7 +216,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      */
     setup_dirty: [...new Set((setupDirty?.entries || []).map((e) => e.path))],
   };
-  ctx.loaded = await loadedFor({ ctx, roleBlock, gh });
+  ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
   mkdirSync(join(root, ".factory/out"), { recursive: true });
   writeFileSync(join(root, ".factory/out/context.json"), JSON.stringify(ctx, null, 2));
   // 역할별 파일(H4). 오케스트레이터만 `context.json`(전체)을 보고, 역할은 자기 이름이 붙은 파일만 본다.
@@ -242,9 +243,17 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
  * 로더가 돌려주던 것과 **같은 모양**의 객체를, LLM 없이. triage의 로스터는 context.json에서 비어 있으므로
  * (단일 명명 역할이지 토론 로스터가 아니다) 로더의 특례와 똑같이 `[{name:'triage', …}]`로 채운다.
  */
-async function loadedFor({ ctx, roleBlock, gh }) {
+async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
   const impl = ctx.handoffs?.implement ?? {};
   const pr = typeof impl.pr === "number" ? impl.pr : undefined;
+  /**
+   * Structure B (리뷰 효율 Task 3, should_fix 1) — self-gate가 이 head를 막았으면 그 findings를 빌더에게
+   * 되먹인다. 재디스패치된 빌더가 **왜** 튕겼는지 모르면 blind 재시도라 red를 못 지운다(그게 루프의
+   * 엔진이었다). head sha로 조회하므로 진짜 수정(새 커밋)은 findings가 없는 새 head가 되어 자연히 사라진다.
+   */
+  const selfGateFindings = typeof impl.head_sha === "string"
+    ? latestSelfGateFindings(commentsSinceRequeue(comments), impl.head_sha)
+    : null;
   const review = ctx.handoffs?.review ?? null;
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
@@ -292,5 +301,8 @@ async function loadedFor({ ctx, roleBlock, gh }) {
     setup_dirty: ctx.setup_dirty ?? [],
     must_fix: mustFix,
     disputed,
+    // Structure B (Task 3): the self-gate findings that bounced this head, if any — the builder fixes
+    // them before the handoff (factory-implement.js). Absent when the self-gate did not block.
+    ...(Array.isArray(selfGateFindings) && selfGateFindings.length ? { self_gate_findings: selfGateFindings } : {}),
   };
 }

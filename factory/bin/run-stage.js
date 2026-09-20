@@ -32,7 +32,7 @@ import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, selfGateRetryComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
@@ -870,32 +870,48 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
       if (sg) {
         // advisory(비차단) findings는 핸드오프에 실어 리뷰어가 앞서 출발하게 한다.
         const advisory = advisoryFindings(sg.findings);
-        if (advisory.length) v.data.self_gate = { advisory: advisory.map((f) => ({ check: f.check, detail: f.detail })) };
+        if (advisory.length) { v.data.self_gate = { advisory: advisory.map((f) => ({ check: f.check, detail: f.detail })) }; d.syncStageArtifact?.(v.data); }
         if (!sg.ok) {
-          await d.writeHandoff({ stage, data: v.data, gates });
+          const blocking = sg.findings.filter((f) => f.blocking);
+          const summary = summarizeFindings(blocking);
           /**
            * ── RED 경로 ──────────────────────────────────────────────────────────────────────────
-           * Task 9(one-shot in-run repair, KTB-51)가 **아직 없다** — 그래서 안전한 전방 호환 결과를
-           * 고른다: `factory:awaiting-review`로 절대 전이하지 않는다. self-gate finding은 결정적·재현
-           * 가능하므로, 그대로 통과시키면 리뷰어의 runnable 검사가 어차피 거부할 것에 리뷰 라운드를
-           * 통째로 태운다(이 스트럭처가 없애려는 바로 그 낭비).
+           * `factory:awaiting-review`로 절대 전이하지 않는다. self-gate finding은 결정적·재현 가능하므로,
+           * 그대로 통과시키면 리뷰어의 runnable 검사가 어차피 거부할 것에 리뷰 라운드를 통째로 태운다.
+           *
+           * **빌더가 고칠 수 없는 finding**(보호 경로/하네스 변경 — 예: 하네스가 단일 테스트를 못 돌려
+           * mutation check가 `misconfigured`)은 재시도가 의미 없다 → 곧장 `factory:needs-human`.
+           *
+           * **빌더가 고칠 수 있는 finding**은 스펙 §4.B의 "loop the builder once, else declare"를 구현한다:
+           * 이 head sha에 대한 self-gate-retry 마커를 세어(head로 키잉 — 진짜 수정은 새 head라 카운터를
+           * 리셋한다), attempt 1이면 findings를 실은 마커를 남기고 `factory:planned`로 한 번만 되돌린다
+           * (`in-progress → planned`는 그래프 엣지; `planned → in-progress`가 빌더를 다시 띄운다). 같은
+           * head에서 attempt ≥ 2면 재시도가 실패한 것이므로 `factory:needs-human`으로 에스컬레이션한다.
+           * K(`countTransitionsTo(…, rework)`)는 `→ planned`를 세지 않으므로 이 마커가 유일한 상한이다.
            *
            * ── TASK 9 HOOK ───────────────────────────────────────────────────────────────────────
-           * 여기가 one-shot in-run repair 루프가 들어갈 자리다: `sg.findings`를 빌더에게 **정확히 한 번**
-           * 되먹여(bounded — 루프 금지) 고치게 하고, `d.selfGate`를 다시 돌린 뒤, 그때 초록이면
-           * awaiting-review로 진행하고 아니면 아래 에스컬레이션으로 떨어진다. 그 루프가 생기기 전까지는
-           * 곧장 에스컬레이션한다.
-           *
-           * 라우팅: 빌더가 고칠 수 없는 finding(보호 경로/하네스 변경 — 예: 하네스가 단일 테스트를 못
-           * 돌려 mutation check가 `misconfigured`)은 사람이 필요하다 → `factory:needs-human`. 그 밖은
-           * 빌더가 고칠 수 있다 → `factory:planned`, implement가 다시 진입하는 자리다
-           * (`in-progress → planned`는 sweeper 재큐 엣지, `planned → in-progress`가 빌더를 다시 띄운다;
-           * `in-progress → rework`는 그래프에 없는 엣지다 — labels.js TRANSITIONS).
+           * Task 9(one-shot in-run repair, KTB-51)는 여기서 "스테이지 통째 재디스패치" 대신 `sg.findings`를
+           * 빌더에게 세션 안에서 정확히 한 번 되먹이는 루프를 넣는다. 그때도 이 head-키 카운터/에스컬레이션은
+           * 그 바깥의 안전망으로 남는다(in-run 루프가 못 고친 finding이 무한 재진입하지 않도록).
            */
-          const to = harnessFinding(sg.findings) ? "factory:needs-human" : "factory:planned";
-          const summary = summarizeFindings(sg.findings.filter((f) => f.blocking));
-          const t = await d.transition({ to, reason: `self-gate blocked handoff: ${summary}` });
-          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+          if (harnessFinding(sg.findings)) {
+            await d.writeHandoff({ stage, data: v.data, gates });
+            const t = await d.transition({ to: "factory:needs-human", reason: `self-gate blocked handoff (harness change needed): ${summary}` });
+            record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED (harness) — ${summary}`, ...refusal(t), ...gatesNote, usage]);
+            return t.ok ? 0 : 2;
+          }
+          const head = v.data.head_sha ?? null;
+          const { attempt } = d.selfGateRetry
+            ? await d.selfGateRetry({ head, findings: blocking })
+            : { attempt: 2 };   // 마커 dep이 없으면 재시도를 셀 수 없다 — 무한 루프보다 사람이 낫다(fail closed)
+          await d.writeHandoff({ stage, data: v.data, gates });
+          const bounded = attempt >= 2;
+          const to = bounded ? "factory:needs-human" : "factory:planned";
+          const reason = bounded
+            ? `self-gate findings unresolved after one retry: ${summary}`
+            : `self-gate blocked handoff (retry ${attempt}): ${summary}`;
+          const t = await d.transition({ to, reason });
+          record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, ...refusal(t), ...gatesNote, usage]);
           return t.ok ? 0 : 2;
         }
         record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`]);
@@ -2180,9 +2196,28 @@ async function main() {
       });
       return runSelfGate({
         root, harness, contract, roster, tier, gates, run,
-        changedTests: diff.tests, changedSources: diff.sources, qaEvidence,
+        // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
+        // property is violated"; a lightly-edited pre-existing test is not what it judges.
+        changedTests: diff.addedTests, changedSources: diff.sources, qaEvidence,
       });
     },
+    /**
+     * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
+     * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt를
+     * 돌려준다. run-stage가 attempt로 라우팅한다(attempt 1 → planned, ≥2 → needs-human). findings는
+     * 마커 코멘트에 실려 다음 implement 런의 빌더가 읽는다(context.js loadedFor).
+     */
+    selfGateRetry: async ({ head, findings }) => {
+      const since = commentsSinceRequeue(await gh.comments(issue));
+      const attempt = countSelfGateRetries(since, head) + 1;
+      await gh.comment(issue, selfGateRetryComment({ issue, head, attempt, findings }));
+      return { attempt };
+    },
+    /**
+     * nit — verifyStage가 self_gate 부착 **전에** `.factory/out/<stage>.json`을 굳혔다. self_gate를
+     * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
+     */
+    syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
     verifyStage: ({ out, gates }) => {
       // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
       // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).

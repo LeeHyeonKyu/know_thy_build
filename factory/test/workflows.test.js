@@ -794,6 +794,36 @@ test("factory-implement.js: the build prompt carries the self-critique rule, the
   expect(build).toContain("own-cal R1 cf1");                  // the pinned regression it kills
 });
 
+test("factory-implement.js: a self-gate retry feeds the builder its self-gate findings (should_fix 1 — no blind retry)", async () => {
+  const findings = [{ check: "mutation", blocking: true, detail: "survivor: test/warn.test.js asserts nothing under mutation (string in src/warn.js)" }];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix({ self_gate_findings: findings }) },
+  });
+  const build = byType(calls, "factory-builder")[0].prompt;
+  expect(build).toContain("SELF-GATE");
+  expect(build).toContain("survivor: test/warn.test.js");   // the exact finding reaches the builder
+  expect(build).toContain("one bounded retry");
+});
+
+test("factory-implement.js: no self_gate_findings → the build prompt carries no self-gate block", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+    agent: stub,
+    args: { issue: "42", context: ".factory/out/context.json", loaded: implLoaderFix() },
+  });
+  expect(byType(calls, "factory-builder")[0].prompt).not.toContain("SELF-GATE blocked your previous handoff");
+});
+
 test("factory-implement.js: a docs/standard tier does NOT spawn a skeptic — the sequence stays builder → verifier", async () => {
   const stub = async (prompt, opts) => {
     if (opts.agentType === "factory-builder") return buildFix();

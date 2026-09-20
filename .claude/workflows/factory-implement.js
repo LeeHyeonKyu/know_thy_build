@@ -173,6 +173,10 @@ const tier = loaded.tier;
 const setupDirty = Array.isArray(loaded.setup_dirty) ? loaded.setup_dirty.filter(Boolean) : [];
 const mustFix = Array.isArray(loaded.must_fix) ? loaded.must_fix.filter(Boolean) : [];
 const disputed = Array.isArray(loaded.disputed) ? loaded.disputed.filter(Boolean) : [];
+// Structure B (Task 3, should_fix 1): if the deterministic self-gate bounced the previous head, its
+// findings ride the context so this re-dispatched builder knows WHY — a blind retry cannot clear the
+// self-gate and is what makes the RED route loop. Fed straight into the build prompt (selfGateBlock).
+const selfGateFindings = Array.isArray(loaded.self_gate_findings) ? loaded.self_gate_findings.filter(Boolean) : [];
 const priorPr = typeof loaded.pr === 'number' ? loaded.pr : null;
 
 // Rework completeness (§7.5, P3-R4): every must_fix id must come back as `fixed` with the commit that
@@ -411,10 +415,24 @@ const reworkBlock = mustFix.length > 0
     `same responses in your output's rework_response.`
   : '';
 
+// Structure B (Task 3): a self-gate retry — the stage bounced the previous head because its own
+// deterministic self-gate blocked (a survivor test, an uncovered done_when, a red gate). This is the
+// one bounded retry (the stage escalates to needs-human on a second RED for the same head), so clear
+// these now: they are exactly what the reviewer's runnable checks would reject.
+const selfGateBlock = selfGateFindings.length > 0
+  ? `\n\nThe stage's deterministic SELF-GATE blocked your previous handoff — these are the findings it ` +
+    `raised (the reviewer's runnable checks would reject the same things). Fix EVERY one before you hand ` +
+    `off; this is your one bounded retry, and an unresolved finding on the same head escalates to a human ` +
+    `rather than looping:\n${JSON.stringify(selfGateFindings, null, 2)}\n` +
+    `A "survivor" means a new test stayed green when the code it guards was mutated — strengthen its ` +
+    `assertion so it fails when the behaviour breaks (never weaken or delete it). A "spec-evidence-missing" ` +
+    `means a done_when has no evidence a reviewer can point to — add the test/manifest entry it names.`
+  : '';
+
 const buildPrompt =
   `${builderReading}\n\n` +
   `Issue #${issue} (tier ${tier}). Build the planned change.\n\n` +
-  `${buildRules}${reworkBlock}`;
+  `${buildRules}${reworkBlock}${selfGateBlock}`;
 
 const SHA_NOTE =
   `\n\nYour previous answer's head_sha was not a 40-character lowercase hex sha. head_sha must be the ` +
@@ -531,7 +549,7 @@ if (built && verdict && verdict.verdict === 'rejected') {
     `A finding about a test is a finding ` +
     `about the test: strengthen the assertion or the fixture rather than the code that makes it pass. ` +
     `This is your only fix round — the next verdict ends the stage either way.\n\n` +
-    `${buildRules}${reworkBlock}`;
+    `${buildRules}${reworkBlock}${selfGateBlock}`;
 
   const fixed = await build(fixPrompt, 'fix');
   if (fixed) built = { ...built, ...fixed, rework_response: fixed.rework_response || built.rework_response };
