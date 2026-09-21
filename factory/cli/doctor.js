@@ -199,7 +199,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
         // `gh api repos//branches/main/protection`처럼 깨진 경로로 호출해 거짓 "보호 없음"을 보고하지 않도록.
         // 해석 자체가 실패하면(로그인 안 됨·git repo 아님) github.* 전체를 건너뛰고 오프라인 허용 WARN 하나로 남긴다.
         let client = gh;
-        let theRepo = null;
+        let theRepo = gh?.repo ?? null;                          // 1.4.2 — 주입된 gh도 자기 repo를 안다(makeGh가 싣는다)
         if (!client) {
           let repo;
           try {
@@ -213,7 +213,7 @@ export async function doctorCommand({ root, pkgRoot, argv = [], io, run, gh, dep
           checks.push(...(await checkGitHubFn({ gh: client, harness, labels: LABELS, root, exists, readFile })));
           // T7 — 피드백 루프의 증거 (b)가 이 저장소에서 **원리상** 작동하는가(`factory.identity`).
           // `checkGitHub`의 try/catch 밖에 둔다: gh 하나가 실패해도 이 판정은 따로 서야 한다.
-          checks.push(...(await (deps.checkFactoryIdentity || checkFactoryIdentity)({ gh: client, repo: theRepo })));
+          checks.push(...(await (deps.checkFactoryIdentity || checkFactoryIdentity)({ gh: client, repo: theRepo, env: deps.env ?? process.env })));
           // 최종 리뷰 SF-2 — 피드백 루프의 **출구**가 열려 있는가(`factory.upstream`). 라우팅 팔은
           // fail-safe라 403을 삼키므로, 이 판정이 없으면 모든 `[ktb]` 발견이 조용히 죽는 상태와
           // "고칠 것이 없는" 상태가 화면에서 같아 보인다. 이것도 `checkGitHub` 밖에 따로 선다.

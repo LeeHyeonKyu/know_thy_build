@@ -580,9 +580,18 @@ test("checkGitHub: secrets, token date, labels, protection", async () => {
 /** 토큰 값은 한 번도 등장해서는 안 된다 — doctor가 읽는 것은 로그인 이름과 계정 종류뿐이다. */
 const SECRET = "ghp_thisIsNotARealTokenValue000000000000";
 
-test("checkFactoryIdentity: a personal account WARNs and says exactly what breaks and how to fix it", async () => {
-  const gh = { viewerLogin: async () => "LeeHyeonKyu", viewerType: async () => "User" };
-  const c = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know-thy-build-demo" }));
+// 1.4.2 (machine user bot-hk 등록 뒤 발견): (1) doctor가 노트북에서 **뷰어**를 팩토리로 읽어 등록이 끝난 뒤에도
+// 경보가 남았다 — 신원은 `FACTORY_BOT_LOGIN`(env → 저장소 변수 → Actions 뷰어)이 말한다. (2) 머신 유저도
+// GitHub `type`은 `User`라 "User = 개인 계정" 규칙은 등록 자체를 거짓 경보로 만든다 — 소유자와 같은가만 본다.
+const identityGh = (types, { variable = null, viewer = "LeeHyeonKyu" } = {}) => ({
+  viewerLogin: async () => viewer, viewerType: async () => types[viewer] ?? null,
+  userType: async (login) => types[login] ?? null,
+  variableGet: async (name) => (name === "FACTORY_BOT_LOGIN" ? variable : null),
+});
+
+test("checkFactoryIdentity: the owner's own account as the factory WARNs and says exactly what breaks and how to fix it", async () => {
+  const gh = identityGh({ LeeHyeonKyu: "User" });
+  const c = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know-thy-build-demo", env: { FACTORY_BOT_LOGIN: "LeeHyeonKyu" } }));
   expect(c["factory.identity"].level).toBe("WARN");
   expect(c["factory.identity"].detail).toContain("@LeeHyeonKyu");
   expect(c["factory.identity"].detail).toMatch(/human-decision:v1` attribution/);
@@ -590,23 +599,40 @@ test("checkFactoryIdentity: a personal account WARNs and says exactly what break
   expect(c["factory.identity"].detail).not.toContain(SECRET);
 });
 
-test("checkFactoryIdentity: the repo owner's own account WARNs even when GitHub calls the type something else", async () => {
-  const gh = { viewerLogin: async () => "acme", viewerType: async () => "Organization" };
-  const c = by(await checkFactoryIdentity({ gh, repo: "acme/widgets" }));
+test("checkFactoryIdentity: the repo owner WARNs even when GitHub calls the type something else", async () => {
+  const gh = identityGh({ acme: "Organization" }, { variable: "acme" });
+  const c = by(await checkFactoryIdentity({ gh, repo: "acme/widgets", env: {} }));
   expect(c["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("repo owner") });
 });
 
-test("checkFactoryIdentity: a machine user / app identity PASSes, and an unknown type is never read as all-clear", async () => {
-  const bot = { viewerLogin: async () => "ktb-factory[bot]", viewerType: async () => "Bot" };
-  expect(by(await checkFactoryIdentity({ gh: bot, repo: "LeeHyeonKyu/know_thy_build" }))["factory.identity"].level).toBe("PASS");
+test("checkFactoryIdentity: a machine user (type User, not the owner) PASSes — from the repo variable, never from the laptop viewer", async () => {
+  // 노트북: 뷰어는 소유자지만 변수가 bot-hk를 가리킨다 → PASS. 예전 규칙은 여기서 거짓 경보를 냈다.
+  const gh = identityGh({ LeeHyeonKyu: "User", "bot-hk": "User" }, { variable: "bot-hk" });
+  const c = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know_thy_build", env: {} }));
+  expect(c["factory.identity"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("@bot-hk (machine user, repo variable FACTORY_BOT_LOGIN)") });
+  // env가 변수보다 먼저다.
+  const e = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know_thy_build", env: { FACTORY_BOT_LOGIN: "bot-hk" } }));
+  expect(e["factory.identity"].detail).toContain("env FACTORY_BOT_LOGIN");
+  // 앱도 PASS.
+  const app = identityGh({ "ktb-factory[bot]": "Bot" }, { variable: "ktb-factory[bot]" });
+  expect(by(await checkFactoryIdentity({ gh: app, repo: "LeeHyeonKyu/know_thy_build", env: {} }))["factory.identity"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("(app,") });
+});
 
-  // 종류를 못 읽었다 = 모른다. PASS로 적으면 이 경보는 영영 안 뜬다.
-  const unknown = { viewerLogin: async () => "ktb-factory", viewerType: async () => null };
-  expect(by(await checkFactoryIdentity({ gh: unknown, repo: "LeeHyeonKyu/know_thy_build" }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("type unknown") });
+test("checkFactoryIdentity: without FACTORY_BOT_LOGIN the laptop viewer is NOT the factory — WARN that it is unset; on Actions the viewer is", async () => {
+  const gh = identityGh({ LeeHyeonKyu: "User" });
+  const off = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know_thy_build", env: {} }));
+  expect(off["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("FACTORY_BOT_LOGIN is not set") });
+  const on = by(await checkFactoryIdentity({ gh, repo: "LeeHyeonKyu/know_thy_build", env: { GITHUB_ACTIONS: "true" } }));
+  expect(on["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("repo owner") });
+  const onBot = by(await checkFactoryIdentity({ gh: identityGh({ "bot-hk": "User" }, { viewer: "bot-hk" }), repo: "LeeHyeonKyu/know_thy_build", env: { GITHUB_ACTIONS: "true" } }));
+  expect(onBot["factory.identity"]).toMatchObject({ level: "PASS", detail: expect.stringContaining("Actions viewer") });
+});
 
-  // gh가 죽어도 doctor 전체를 죽이지 않는다(offline-tolerant WARN 하나).
-  const dead = { viewerLogin: async () => { throw new Error("gh api user failed (1): HTTP 401"); }, viewerType: async () => "User" };
-  expect(by(await checkFactoryIdentity({ gh: dead, repo: "o/r" }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("HTTP 401") });
+test("checkFactoryIdentity: an unknown/missing account is never read as all-clear, and a dead gh is one tolerant WARN", async () => {
+  const unknown = identityGh({}, { variable: "ktb-factory" });
+  expect(by(await checkFactoryIdentity({ gh: unknown, repo: "LeeHyeonKyu/know_thy_build", env: {} }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("type unknown") });
+  const dead = { variableGet: async () => { throw new Error("gh variable get failed (1): HTTP 401"); }, userType: async () => "User" };
+  expect(by(await checkFactoryIdentity({ gh: dead, repo: "o/r", env: {} }))["factory.identity"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("HTTP 401") });
 });
 
 /**

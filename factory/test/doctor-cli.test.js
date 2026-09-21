@@ -166,16 +166,17 @@ test("(c) --json prints a parseable { checks, summary }", async () => {
 test("(c') factory.identity is wired into the CLI: a personal factory account WARNs, a machine user PASSes", async () => {
   const root = await setupRepo();
   const run = makeDoctorRun(root);
-  const idGh = (login, type) => ({ ...fakeGh, viewerLogin: async () => login, viewerType: async () => type, collaboratorPermission: async () => "write" });
+  // 1.4.2 — 신원은 저장소 변수 `FACTORY_BOT_LOGIN`이 말하고, 종류는 그 계정을 조회한다(뷰어가 아니다).
+  const idGh = (login, type) => ({ ...fakeGh, repo: "LeeHyeonKyu/know-thy-build-demo", viewerLogin: async () => "someone-else", viewerType: async () => "User", variableGet: async (n) => (n === "FACTORY_BOT_LOGIN" ? login : null), userType: async (l) => (l === login ? type : null), collaboratorPermission: async () => "write" });
 
   const { io: i, o } = io();
-  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run"], io: i, run, gh: idGh("LeeHyeonKyu", "User") });
+  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run"], io: i, run, gh: idGh("LeeHyeonKyu", "User"), deps: { env: {} } });
   const warn = JSON.parse(o.out.join("")).checks.find((c) => c.id === "factory.identity");
   expect(warn).toMatchObject({ level: "WARN", detail: expect.stringContaining("@LeeHyeonKyu") });
   expect(warn.detail).toMatch(/register a machine user or a GitHub App/);
 
   const { io: i2, o: o2 } = io();
-  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run"], io: i2, run, gh: idGh("ktb-factory[bot]", "Bot") });
+  await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run"], io: i2, run, gh: idGh("ktb-factory[bot]", "Bot"), deps: { env: {} } });
   expect(JSON.parse(o2.out.join("")).checks.find((c) => c.id === "factory.identity")).toMatchObject({ level: "PASS" });
 
   // `--offline`에서는 gh를 한 번도 부르지 않으므로 이 판정 자체가 없다(없는 판정을 지어내지 않는다).

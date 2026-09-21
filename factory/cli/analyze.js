@@ -771,7 +771,7 @@ export async function analyzeCommand({
   let loginNote = null;
   let theIdentity = identity;
   if (logins === undefined) {
-    const who = await resolveFactoryLogins({ gh: ghClient, env, comments });
+    const who = await resolveFactoryLogins({ gh: ghClient, env, comments, repo: repo ?? ghClient?.repo ?? null });
     logins = who.ok ? who.logins : null;
     if (theIdentity === undefined) theIdentity = who.identity ?? null;
     if (!who.ok) loginNote = `factory logins unresolved (${who.reason}) — human-decision evidence cannot be evaluated, so no self-gate or transition-refused finding can reach [ktb] (the retro refuses it the same way)`;

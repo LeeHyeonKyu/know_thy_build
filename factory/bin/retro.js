@@ -1020,7 +1020,7 @@ export async function routeFeedbackArm({
    * 추가 API 왕복은 없다. 그리고 그 코멘트들이 T7의 `identity`에 `authorType`이라는 계정 사실도 준다.
    */
   const allComments = [...(commentsByIssue instanceof Map ? commentsByIssue.values() : Object.values(commentsByIssue || {}))].flat();
-  const who = await resolveFactoryLogins({ gh, env, comments: allComments });
+  const who = await resolveFactoryLogins({ gh, env, comments: allComments, repo: repo ?? gh?.repo ?? null });
   if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
   const routed = await routeMergedIssues({
     gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since, recordsSource,

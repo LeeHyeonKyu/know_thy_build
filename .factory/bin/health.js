@@ -668,7 +668,7 @@ export async function runHealth({
     // `values()`는 숫자·문자열 두 키에 같은 배열을 담고 있으므로 중복을 접는다(같은 코멘트를 두 번 세지 않는다).
     const allComments = [...new Set([...byIssue.values()])].flat();
     let who = { ok: false, reason: "resolveFactoryLogins was never reached" };
-    try { who = await resolveFactoryLogins({ gh, env, comments: allComments }); }
+    try { who = await resolveFactoryLogins({ gh, env, comments: allComments, repo: repo ?? gh?.repo ?? null }); }
     catch (e) { who = { ok: false, reason: `resolveFactoryLogins threw — ${e?.message || e}` }; }
     if (theIdentity === undefined) theIdentity = who.identity ?? null;
     if (logins === undefined) logins = who.ok ? who.logins : null;

@@ -664,7 +664,7 @@ test("resolveFactoryLogins: a Bot-type author is a factory login even when its n
 
 test("identity.personal: inside Actions it comes from `gh api user --jq .type`, asked once", async () => {
   let asked = 0;
-  const gh = { viewerLogin: async () => "LeeHyeonKyu", viewerType: async () => { asked += 1; return "User"; } };
+  const gh = { viewerLogin: async () => "LeeHyeonKyu", viewerType: async () => { asked += 1; return "User"; }, repo: "LeeHyeonKyu/know-thy-build-demo" };
   const r = await resolveFactoryLogins({ gh, env: { GITHUB_ACTIONS: "true" } });
   expect(r.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
   expect(asked).toBe(1);
@@ -672,13 +672,27 @@ test("identity.personal: inside Actions it comes from `gh api user --jq .type`, 
   // 머신 유저/앱이면 공유 신원이 아니다 — 경보는 뜨지 않는다.
   const bot = await resolveFactoryLogins({ gh: viewerGh("ktb-factory[bot]", "Bot"), env: { GITHUB_ACTIONS: "true" } });
   expect(bot.identity).toEqual({ personal: false, login: "ktb-factory[bot]" });
+
+  // 1.4.2 — 머신 유저(bot-hk)도 GitHub `type`은 `User`다. 소유자가 아니면 공유 신원이 **아니다**.
+  const machineUser = await resolveFactoryLogins({ gh: { ...viewerGh("bot-hk", "User"), repo: "LeeHyeonKyu/know-thy-build-demo" }, env: { GITHUB_ACTIONS: "true" } });
+  expect(machineUser.identity).toEqual({ personal: false, login: "bot-hk" });
+
+  // 팩토리 계정이 `human-decision:v1`을 썼다는 것은 공유 신원의 증거가 **아니다** — 그것은 에이전트가 쓴
+  // 결정이고, 귀속은 그 이유로 이미 거부한다(analyze는 "factory login — ignored"로 찍는다).
+  const decision = { id: 9, createdAt: "2026-09-21T00:00:00Z", author: "bot-hk", authorType: "User", body: "<!-- human-decision:v1 issue=1 skill=unstick -->\n```yaml\ndecision: retry\n```" };
+  const agentWrote = await resolveFactoryLogins({ gh: { ...viewerGh("bot-hk", "User"), repo: "LeeHyeonKyu/know-thy-build-demo" }, env: { GITHUB_ACTIONS: "true" }, comments: [decision] });
+  expect(agentWrote.identity).toEqual({ personal: false, login: "bot-hk" });
 });
 
 test("identity.personal: off Actions it comes from the byte-0 heartbeat comments' authorType", async () => {
   // 노트북에서 `gh api user`는 소유자를 말한다 — 그 값은 여기서 쓰지 않는다(MF-1).
-  const gh = { viewerLogin: async () => { throw new Error("must not be called"); }, viewerType: async () => { throw new Error("must not be called"); } };
+  const gh = { viewerLogin: async () => { throw new Error("must not be called"); }, viewerType: async () => { throw new Error("must not be called"); }, repo: "LeeHyeonKyu/know-thy-build-demo" };
   const shared = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("LeeHyeonKyu"), authorType: "User" }] });
   expect(shared.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
+
+  // 1.4.2 — 하트비트 작성자가 머신 유저(type User)인데 소유자가 아니다 → 별개의 신원.
+  const machine2 = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("bot-hk"), authorType: "User" }] });
+  expect(machine2.identity).toEqual({ personal: false, login: "bot-hk" });
 
   const machine = await resolveFactoryLogins({ gh, env: {}, comments: [{ ...heartbeatComment("factory-bot"), authorType: "Bot" }] });
   expect(machine.identity).toEqual({ personal: false, login: "factory-bot" });

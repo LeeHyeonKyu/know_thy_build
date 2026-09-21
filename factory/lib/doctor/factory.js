@@ -603,24 +603,31 @@ export async function checkGitHub({ gh, harness, labels, env = process.env, root
  * 본다(`viewerScopes`/`viewerLogin`과 같은 규율). 판정을 못 하면 PASS가 아니라 WARN이다:
  * "모른다"를 "괜찮다"로 적으면 이 경보는 영영 뜨지 않는다.
  */
-export async function checkFactoryIdentity({ gh, repo = null }) {
-  let login = null;
-  let type = null;
+export async function checkFactoryIdentity({ gh, repo = null, env = {} }) {
+  // 1.4.2 — 팩토리 신원은 **`FACTORY_BOT_LOGIN`**이 말한다(env → 저장소 변수). 뷰어(`gh api user`)는
+  // Actions 위에서만 팩토리다; 노트북에서는 소유자라 그것을 읽으면 항상 거짓 경보가 난다. 그리고
+  // "사람 계정인가"는 `type`으로 알 수 없다(머신 유저도 `User`) — 소유자와 같은 로그인인가만 본다.
+  const fix = "register a machine user or a GitHub App as the factory identity (FACTORY_BOT_TOKEN) and set the repo variable FACTORY_BOT_LOGIN to its login";
+  let login = String(env?.FACTORY_BOT_LOGIN ?? "").trim() || null;
+  let source = login ? "env FACTORY_BOT_LOGIN" : null;
   try {
-    login = await gh.viewerLogin();
-    type = await gh.viewerType();
+    if (!login && typeof gh.variableGet === "function") { login = await gh.variableGet("FACTORY_BOT_LOGIN"); source = login ? "repo variable FACTORY_BOT_LOGIN" : null; }
+    if (!login && env?.GITHUB_ACTIONS === "true") { login = await gh.viewerLogin(); source = "Actions viewer"; }
   } catch (e) {
     return [c("factory.identity", "WARN", `could not read the factory identity — ${e.message}`)];
   }
+  if (!login) return [c("factory.identity", "WARN", `FACTORY_BOT_LOGIN is not set (env or repo variable) and this is not a GitHub Actions run — cannot tell which account the factory writes as, so \`human-decision:v1\` attribution may be silently refused. To fix: ${fix}`)];
+  let type = null;
+  try { type = typeof gh.userType === "function" ? await gh.userType(login) : (source === "Actions viewer" && typeof gh.viewerType === "function" ? await gh.viewerType() : null); }
+  catch (e) { return [c("factory.identity", "WARN", `could not read the account type of @${login} — ${e.message}`)]; }
   const owner = repo ? String(repo).split("/")[0] : null;
-  const isOwner = Boolean(owner && login && owner.toLowerCase() === String(login).toLowerCase());
-  const fix = "register a machine user or a GitHub App as the factory identity (FACTORY_BOT_TOKEN) and set FACTORY_BOT_LOGIN";
-  if (type === "User" || isOwner) {
-    const why = isOwner ? `@${login} is the repo owner${type ? ` (account type ${type})` : ""}` : `@${login} is a personal account (type ${type})`;
-    return [c("factory.identity", "WARN", `${why} — a person and the factory then share one comment author, so \`human-decision:v1\` attribution (feedback-loop evidence (b)) is refused on every issue and no \`cause: factory-defect\` decision can reach [ktb]. To fix: ${fix}`)];
+  const isOwner = Boolean(owner && owner.toLowerCase() === String(login).toLowerCase());
+  if (isOwner) {
+    return [c("factory.identity", "WARN", `@${login} is the repo owner${type ? ` (account type ${type})` : ""} (${source}) — a person and the factory then share one comment author, so \`human-decision:v1\` attribution (feedback-loop evidence (b)) is refused on every issue and no \`cause: factory-defect\` decision can reach [ktb]. To fix: ${fix}`)];
   }
-  if (!type) return [c("factory.identity", "WARN", `@${login}: account type unknown — cannot tell whether a person and the factory share one comment author, so \`human-decision:v1\` attribution may be silently refused. To be sure: ${fix}`)];
-  return [c("factory.identity", "PASS", `@${login} (${type}) — not a personal account, so human-decision attribution can tell a person from the factory`)];
+  if (!type) return [c("factory.identity", "WARN", `@${login} (${source}): account not found or type unknown — cannot confirm the factory identity exists; check the login and that it is a collaborator. To be sure: ${fix}`)];
+  const kind = type === "User" ? "machine user" : type === "Bot" ? "app" : type.toLowerCase();
+  return [c("factory.identity", "PASS", `@${login} (${kind}, ${source}) — not the repo owner, so human-decision attribution can tell a person from the factory`)];
 }
 
 /**

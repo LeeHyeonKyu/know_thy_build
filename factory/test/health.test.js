@@ -962,7 +962,7 @@ test("T7 — 주입 없이 `runHealth`가 스스로 공유 신원을 알아내�
     ...w.commentsByIssue.get(3),
     humanDecisionComment({ issue: 3, at: dayOf(3), author: "LeeHyeonKyu", cause: "factory-defect", reason: "self-gate blocked wrongly" }),
   ]);
-  const r = await health({ ...w, gh: fakeGh(), log: () => {} });
+  const r = await health({ ...w, gh: fakeGh(), repo: "LeeHyeonKyu/know-thy-build-demo", log: () => {} });
   expect(r.identity).toEqual({ personal: true, login: "LeeHyeonKyu" });
   expect(r.login_note).toBeNull();
   expect(r.report).toMatch(BANNER);
