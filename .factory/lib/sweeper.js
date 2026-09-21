@@ -615,17 +615,23 @@ export const graphExternalUnlabelledComment = (issue, labels) => `<!-- factory-s
  * 조건 하나라도 어긋나면 사유와 함께 한 줄을 남기고 넘어간다(조용한 건너뜀은 없다).
  */
 async function sweepGraphExternalStateLabel({ gh, actions }) {
-  if (typeof gh.searchIssues !== "function" || typeof gh.removeLabel !== "function") return;
+  // 1.4.1 dogfood(KTB #31): `searchIssues`는 `--json number,title,updatedAt`만 물어 **labels가 없다** — 그
+  // 결과로는 2번 술어(상태 라벨이 붙어 있다)가 항상 거짓이라 이 팔이 프로덕션에서 조용히 아무것도 안
+  // 했다(유닛 테스트의 가짜 `searchIssues`는 labels를 실어 녹색이었다). labels를 이름으로 돌려주는
+  // 생산자는 `issueList`뿐이므로 그것을 쓴다. 의존성이 없으면 다른 팔과 같이 물러난다(오래된 테스트
+  // 더블 계약) — 프로덕션의 "실제로 돌았는가"는 `test_36_graph_external_seam`이 실제 생산자로 지킨다.
+  if (typeof gh.issueList !== "function" || typeof gh.removeLabel !== "function") return;
   const seen = new Set();
   for (const external of GRAPH_EXTERNAL_LABELS) {
     let issues;
-    try { issues = await gh.searchIssues(external, { state: "open" }); }
+    try { issues = await gh.issueList({ labels: [external], state: "open" }); }
     catch (e) { actions.push({ kind: "error", step: "graph-external-label", label: external, error: String(e.message || e) }); continue; }
     for (const it of issues || []) {
       if (seen.has(it.number)) continue;                        // 두 라벨을 다 든 이슈를 두 번 보지 않는다
       seen.add(it.number);
       try {
         const labels = (it.labels || []).map(String);
+        if (!labels.includes(external)) continue;               // 생산자가 라벨로 걸렀지만, 걸러지지 않은 결과는 믿지 않는다
         const states = labels.filter((l) => STATES.has(l));
         if (!states.length) continue;                           // 고칠 것이 없다 — 조용해도 되는 유일한 경우
         const others = factoryLabelsOf(labels).filter((l) => !isGraphExternal(l) && !STATES.has(l));

@@ -1,4 +1,5 @@
 import { test, expect, vi } from "vitest";
+import { makeGh } from "../lib/gh.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { sweep, restartComment, blockedRetryComment, harnessUnparkedComment, humanMergedComment, humanMergeRefusedComment, HUMAN_MERGE_REFUSED_MARKER, lockOwnerUnknownComment, API_ERROR_MAX_RETRIES, STALL_NO_HEARTBEAT_MIN, BLOCKED_ESCALATION_REASON } from "../lib/sweeper.js";
 import { canTransition } from "../lib/labels.js";
@@ -2265,4 +2266,38 @@ test("test_36_narrowing_preserves_arms: a graph-external issue that DOES carry a
   const gh = repairGh(issues);
   const actions = await sweep(repairArgs({ gh }));
   expect(actions).toContainEqual({ kind: "state-label-restored", issue: 44, to: "factory:awaiting-review" });
+});
+
+// KTB #31 (1.4.1 dogfood): the clearing arm was unit-green on a fake `searchIssues` that carried `labels`,
+// while the real producer answers `--json number,title,updatedAt` — no labels — so predicate 2 was always
+// false and the arm did nothing in production, silently. This drives the REAL gh producer (`makeGh` on a
+// fake `run` answering gh-shaped JSON: labels are `{ name }` objects) through `sweep()`.
+test("test_36_graph_external_seam: the real gh producer feeds the clearing arm — KTB #31 live regression", async () => {
+  const marker = labelSetRepairedComment(["(none)"], "factory:needs-human");
+  const calls = [];
+  const run = async (cmd, args) => {
+    const a = args.map(String);
+    calls.push(a.join(" "));
+    if (a[0] === "issue" && a[1] === "list") {
+      const li = a.indexOf("--label");
+      if (li >= 0 && a[li + 1] === "factory:health") {
+        return { code: 0, stdout: JSON.stringify([{ number: 31, title: "factory-health", body: "<!-- factory-health:v1 -->", labels: [{ name: "factory:needs-human" }, { name: "factory:health" }], updatedAt: RECENT_36, closedAt: null }]), stderr: "" };
+      }
+      return { code: 0, stdout: "[]", stderr: "" };
+    }
+    if (a[0] === "api" && a[1].includes("/issues/31/comments")) {
+      return { code: 0, stdout: JSON.stringify([[{ id: 1, body: `${marker}\n…`, created_at: RECENT_36, user: { login: "LeeHyeonKyu", type: "User" } }]]), stderr: "" };
+    }
+    if (a[0] === "api" && a[1].includes("/comments")) return { code: 0, stdout: "[[]]", stderr: "" };
+    if (a[0] === "api") return { code: 0, stdout: "[]", stderr: "" };
+    if (a[0] === "pr" && a[1] === "list") return { code: 0, stdout: "[]", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const gh = makeGh({ run, repo: "o/r", sleep: async () => {} });
+  const actions = await sweep(repairArgs({ gh }));
+  expect(actions).toContainEqual({ kind: "graph-external-unlabelled", issue: 31, removed: ["factory:needs-human"] });
+  expect(calls.some((c) => c.includes("issue edit") && c.includes("--remove-label factory:needs-human"))).toBe(true);
+  // 반대 방향: the old producer shape (no labels) must not make the arm silently skip — it now reads issueList,
+  // which always carries labels; the `searchIssues` shape is never consulted.
+  expect(calls.some((c) => c.includes("issue list") && c.includes("--label factory:health") && c.includes("labels"))).toBe(true);
 });
