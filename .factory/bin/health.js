@@ -34,7 +34,7 @@ import { attributionFor } from "../lib/feedback/harvest-findings.js";
 import { errorAnnotation, stepSummary } from "../lib/gha.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { HEALTH_LABEL } from "../lib/label-catalog.js";
-import { readRecordsDetailed } from "../lib/records-branch.js";
+import { readRecordsDetailed, recordsSourceOf, recordsWereRead } from "../lib/records-branch.js";
 import { tierFloor } from "../lib/gates.js";
 import { routeFindings } from "../lib/feedback/route.js";
 import { classifyFinding } from "../lib/feedback/classify.js";
@@ -487,9 +487,18 @@ export function renderHealthReport({ signals, findings = [], advisories = [], re
    * 그 사실과 그 흔한 원인(1.4 이전 기록에는 detail 줄이 없다)을 함께 적는다. 기록의 나이를 사실로
    * 단정하지는 않는다 — 여기서 관측되는 것은 부재뿐이다(`factory analyze`의 같은 문장과 같은 규율).
    */
+  /**
+   * r1 리뷰 should_fix 2 — 위 문장의 **전제는 "기록을 읽었다"**이다. `records_source`가
+   * `records-branch-unreadable`/`no-records-branch`/`records-branch-empty`면 이 창의 기록은 한 글자도
+   * 손에 없었고, 그때 "detail 줄이 없습니다"는 관측이 아니라 추측이다 — 그리고 그 추측이 곧바로
+   * "1.4 이전 기록"이라는 두 번째 추측을 낳는다. 사람이 할 일도 정반대다(전자는 아무것도 아니고,
+   * 후자는 브랜치·토큰을 봐야 한다). `lib/feedback/route.js`의 같은 갈림과 같은 술어를 쓴다.
+   */
   if (signals.window.length && !signals.attributable && !signals.unbound_evidence) {
     L.push("");
-    L.push("> 창의 어느 run 기록에도 detail 줄이 없습니다(`review-evidence:`/`gates-detail:`/`context-manifest:`) — 귀속을 판정할 재료 자체가 없습니다. 1.4 이전에 쓰인 기록에는 그 줄이 없습니다(그 창에서는 역할·비용 판정을 하지 않습니다).");
+    L.push(recordsWereRead(signals.records_source)
+      ? "> 창의 어느 run 기록에도 detail 줄이 없습니다(`review-evidence:`/`gates-detail:`/`context-manifest:`) — 귀속을 판정할 재료 자체가 없습니다. 1.4 이전에 쓰인 기록에는 그 줄이 없습니다(그 창에서는 역할·비용 판정을 하지 않습니다)."
+      : `> **이 창의 run 기록을 읽지 못했습니다**(\`${signals.records_source}\`) — 귀속 0은 기록에 detail 줄이 없어서가 아니라 기록이 손에 없어서입니다. 줄의 유무도, 그 기록이 1.4 이전의 것인지도 여기서는 판정할 수 없습니다(먼저 \`factory/records\` 브랜치와 토큰을 확인하세요).`);
   }
   L.push("");
   L.push(`비용 기록: \`${signals.records_source}\` — 비용을 읽은 이슈 ${signals.priced}/${signals.window.length}개.`
@@ -838,10 +847,10 @@ async function collect({ gh, run: runner = run, cwd = null, issues, commentsByIs
   if (!records) {
     try {
       const r = await readRecordsDetailed({ run: runner, cwd: cwd ?? "." });
-      if (r.records instanceof Map && r.records.size) { recs = r.records; source = "records-branch"; }
-      else if (r.exists === false) source = "no-records-branch";
-      else if (!r.fetched) source = "records-branch-unreadable";
-      else source = "records-branch-empty";
+      // 출처 낱말은 라우팅 팔과 **같은 함수**에서 나온다(r1 should_fix 2) — 두 벌이면 같은 창을
+      // 두 도구가 다르게 설명한다.
+      source = recordsSourceOf(r);
+      if (source === "records-branch") recs = r.records;
       for (const f of r.failures || []) log(`factory: health could not read a run record — ${f?.reason ?? f}`);
     } catch (e) { source = "records-branch-unreadable"; log(`factory: health could not hydrate the records branch — ${e?.message || e}`); }
   }

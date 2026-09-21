@@ -64,6 +64,16 @@ export const NO_DETAIL_LINES_REASON =
   "this run record carries no detail lines (`gates-detail:`/`context-manifest:`/`self-gate-detail:`), so attribution is unavailable — records written before 1.4 have none";
 export const hasDetailLines = (record) =>
   String(record ?? "").split("\n").some((line) => DETAIL_LINE_PREFIXES.some((p) => line.startsWith(p)));
+/**
+ * ── r1 리뷰 must_fix 1 — **읽지 않은 기록을 "줄이 없는 기록"이라고 말하지 않는다.** ───────────────
+ *
+ * 위 문장의 전제는 "기록을 손에 들고 있다"이다. 그런데 이 팔의 호출자 중 하나(`bin/sweep.js`의
+ * 사람-머지 경로)는 하이드레이트가 실패하면 **빈 Map**을 넘긴다 — 그러면 `record`가 `""`가 되고
+ * `hasDetailLines("")`는 거짓이라, 13줄짜리 1.4.0 기록을 가진 데모 #45가 "1.4 이전 기록"으로
+ * 보고됐다. 없는 것과 못 읽은 것은 사람이 할 일이 정반대다(전자는 아무것도 아니고, 후자는
+ * 브랜치·토큰을 봐야 한다). 그래서 문장은 `recs.has(...)`로 갈리고, 못 읽었으면 그 사실만 말한다.
+ */
+export const recordNotReadReason = (source) => `record not read — ${source || "unknown"}`;
 /** 두 마커를 한 번에 읽는다 — 어느 쪽이 남아 있든 "이 지문은 이 이슈에서 이미 처리했다"는 뜻이다. */
 const ANY_FEEDBACK_MARKER = /<!--\s*factory-feedback (?:routed )?fp=(\S+)\s*-->/g;
 
@@ -277,6 +287,9 @@ export async function routeFindings({
 export async function routeMergedIssues({
   gh, repo, upstream = null, issues = [], commentsByIssue = new Map(), records = new Map(),
   since = null, ownerOf, isInstalled, ktbVersion = null, harness = null, factoryLogins = [], identity = null,
+  // r1 리뷰 must_fix 1 — `records`가 비어 있는 **이유**(`lib/records-branch.js`의 `recordsSourceOf`).
+  // 배선하지 않은 호출자에게는 `unknown`이고, 그때도 문장은 "못 읽었다"이지 "줄이 없다"가 아니다.
+  recordsSource = null,
 } = {}) {
   const sinceMs = since == null ? null : Date.parse(since);
   const byIssue = commentsByIssue instanceof Map ? commentsByIssue : new Map(Object.entries(commentsByIssue || {}));
@@ -291,6 +304,8 @@ export async function routeMergedIssues({
     routed.push(issue.number);
     let findings = [];
     let unverifiable = [];
+    // "읽었는가"와 "무엇이 있었는가"는 **다른 질문**이다(r1 must_fix 1) — 빈 기록도 읽은 기록이다.
+    const recordRead = recs.has(String(issue.number)) || recs.has(issue.number);
     const record = recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "";
     try {
       const h = harvestIssue({ issue: issue.number, repo, record, comments, factoryLogins, identity });
@@ -306,8 +321,10 @@ export async function routeMergedIssues({
       actions.push({ kind: "unverifiable-decision", step: "feedback-route", issue: issue.number, author: u.author, reason: u.reason, detail: u.detail });
     }
     if (!findings.length) {
-      // #36 item 4 — 0건의 이유가 "읽을 줄이 없어서"이면 그렇게 말한다(쓰기는 하지 않는다 — 보고다).
-      if (!hasDetailLines(record)) actions.push({ kind: "no-detail-lines", step: "feedback-route", issue: issue.number, reason: NO_DETAIL_LINES_REASON });
+      // #36 item 4 — 0건의 이유를 말한다(쓰기는 하지 않는다 — 보고다). 이유는 **두 갈래**이고,
+      // r1 must_fix 1이 고친 것이 그 갈림이다: 기록을 못 읽은 회차는 줄의 유무를 알 수 없다.
+      if (!recordRead) actions.push({ kind: "record-not-read", step: "feedback-route", issue: issue.number, reason: recordNotReadReason(recordsSource) });
+      else if (!hasDetailLines(record)) actions.push({ kind: "no-detail-lines", step: "feedback-route", issue: issue.number, reason: NO_DETAIL_LINES_REASON });
       continue;
     }
     const r = await routeFindings({

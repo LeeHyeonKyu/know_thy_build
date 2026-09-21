@@ -1,12 +1,13 @@
 import { test, expect } from "vitest";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { verdictLine } from "../lib/gates.js";
 import { contextManifestLines } from "../lib/context.js";
-import { usageLine } from "../bin/run-stage.js";
+import { usageLine, runStage } from "../bin/run-stage.js";
 import { makeFakeRun } from "../lib/exec.js";
+import { appendRunRecord, appendRunRecordLine } from "../lib/run-record.js";
 import { resolveFactoryLogins } from "../lib/gh.js";
 import { ownerOf, buildManifest } from "../cli/manifest.js";
 import {
@@ -888,4 +889,47 @@ test("test_36_record_and_annotation_wording: a 1.4+ record with detail lines and
   const out = cap.text();
   expect(out).toMatch(/nothing in this issue crossed the threshold/);
   expect(out).not.toMatch(/no detail lines/);
+});
+
+/**
+ * ── r1 리뷰 nit 6 — **증표는 섹션을 열지 않는다** ────────────────────────────────────────────
+ *
+ * `stage-settled:`(#36 item 2)는 다음 프로세스(`abortStage`)만 읽는 한 줄짜리 증표이지 사람이 읽는
+ * *런의 이야기*가 아니다. 1차 구현은 그것을 `appendRunRecord`로 써서 런마다
+ * `## <stage> · <time> · <runner>` 헤더를 하나 더 세웠고, 그 헤더는 이 파서에게 **팬텀 섹션**이다 —
+ * `factory analyze`가 사람에게 보여 주는 "이 런이 기록에 남긴 섹션 수"가 런마다 한 개씩 틀려졌다.
+ *
+ * 여기서는 스테이지를 **진짜로 한 번 돌려**(`runStage`, 기록 dep은 프로덕션과 같은 배선) 그 기록을
+ * 분석기에 넣는다. 증표는 기록에 **있어야 하고**(정리 스텝이 그것을 읽는다), 섹션과 스테이지 런은
+ * 하나도 늘어나지 않아야 한다.
+ */
+test("test_36_settled_marker_is_not_a_section: the stage-settled marker adds no section and no stage-run (analyze)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb36-analyze-"));
+  const runner = "gha-35548711917";
+  const path = join(root, "docs/factory/runs/45.md");
+  await runStage({
+    stage: "implement", issue: 45, runnerId: runner, runAttempt: "1",
+    deps: {
+      charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+      heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+      buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }),
+      resetAgentsLog: async () => {}, claudeP: async () => ({ is_error: false, result: "{}" }), gates: async () => null,
+      verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+      transition: async () => ({ ok: true, to: "factory:awaiting-review" }), release: async () => true,
+      // `bin/run-stage.js`의 main()과 **같은 두 배선**이다 — 이야기는 섹션으로, 증표는 줄로.
+      runRecord: (lines) => appendRunRecord({ root, issue: 45, title: "t", stage: "implement", runnerId: runner, lines }),
+      settleRecord: (line) => appendRunRecordLine({ root, issue: 45, title: "t", line }),
+    },
+  });
+  const record = readFileSync(path, "utf8");
+
+  // 증표는 기록에 있다 — 정리 스텝이 읽을 것이 사라지면 이 수정은 #36 item 2를 되돌린 것이 된다.
+  expect(record).toContain(`stage-settled: stage=implement runner=${runner} attempt=1`);
+  // 그런데 분석기에게는 아무것도 늘지 않았다: 섹션도, 스테이지 런도.
+  expect(parseSections(record)).toHaveLength(1);
+  const runs = groupRuns(parseSections(record));
+  expect(runs).toHaveLength(1);
+  expect(runs[0].sections).toBe(1);
+  expect(buildTimeline({ issue: 45, record }).chronology.filter((e) => e.kind === "run-start")).toHaveLength(1);
+  rmSync(root, { recursive: true, force: true });
 });

@@ -1067,6 +1067,52 @@ test("test_36_record_and_annotation_wording: a window whose records carry no det
   expect(r.report).toMatch(/1\.4/);
 });
 
+/**
+ * ── r1 리뷰 should_fix 2 — **읽지 못한 창에 "줄이 없다"고 적지 않는다** ────────────────────────
+ *
+ * 위 문장의 전제는 "기록을 읽었다"이다. `records_source`가 `no-records-branch`/
+ * `records-branch-unreadable`이면 이 창의 기록은 한 글자도 손에 없었고, 그때 "detail 줄이 없습니다"는
+ * 관측이 아니라 추측이며 곧바로 "1.4 이전 기록"이라는 두 번째 추측을 낳는다. 두 출처를 **각각** 고정한다:
+ * 읽기는 실제 `readRecordsDetailed`를 통과하고(가짜 `run`이 git의 종료 코드를 준다), 그 차이가
+ * 보고서의 문장을 가른다. 창의 이슈들은 둘 다 `preV14Issue`이므로 귀속은 0/N으로 같다 — 곧 갈리는
+ * 것은 귀속이 아니라 **기록을 읽었는가**뿐이다.
+ */
+const unreadWindow = (run) => {
+  const built = [preV14Issue(1, 1), preV14Issue(2, 2), preV14Issue(3, 3)];
+  const gh = {
+    ...fakeGh(),
+    async issueList(q) { return q.labels?.includes("factory:health") ? [] : built.map((b) => b.issue); },
+    async comments(n) { return built.find((b) => b.issue.number === n)?.comments ?? []; },
+    async comment() {}, async createIssue() { return 900; }, async reopenIssue() {},
+  };
+  return health({ gh, run, N: 3 });
+};
+
+test("test_36_record_and_annotation_wording: a window whose records were NOT READ says exactly that, not 'pre-1.4' (wording)", async () => {
+  // ① 브랜치 자체가 없다 — `ls-remote --exit-code`가 2로 끝나는 것이 그 신호다.
+  const none = await unreadWindow(async (cmd, args) => (args.join(" ").startsWith("ls-remote")
+    ? { code: 2, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "" }));
+  expect(none.signals.records_source).toBe("no-records-branch");
+  expect(none.signals.attributable).toBe(0);
+  expect(none.signals.unbound_evidence).toBe(0);
+  expect(none.report).toMatch(/읽지 못했습니다/);
+  expect(none.report).toContain("no-records-branch");
+  expect(none.report).not.toMatch(/detail 줄이 없습니다/);
+  expect(none.report).not.toMatch(/1\.4 이전에 쓰인 기록/);
+
+  // ② 브랜치는 **있는데** fetch가 실패했다 — 토큰·네트워크의 모양이다. 여기서도 문장은 같다.
+  const broken = await unreadWindow(async (cmd, args) => {
+    const a = args.join(" ");
+    if (a.startsWith("ls-remote")) return { code: 0, stdout: "deadbeef\trefs/heads/factory/records\n", stderr: "" };
+    return { code: 1, stdout: "", stderr: "fatal: could not read from remote" };
+  });
+  expect(broken.signals.records_source).toBe("records-branch-unreadable");
+  expect(broken.signals.attributable).toBe(0);
+  expect(broken.report).toMatch(/읽지 못했습니다/);
+  expect(broken.report).toContain("records-branch-unreadable");
+  expect(broken.report).not.toMatch(/detail 줄이 없습니다/);
+});
+
 test("test_36_record_and_annotation_wording: a window WITH bound evidence says nothing of the kind (wording)", async () => {
   const w = windowOf([
     { n: 1, day: 1, tier: "standard", rounds: [[approve("a"), approve("b")]] },

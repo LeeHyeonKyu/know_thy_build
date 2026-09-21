@@ -12,7 +12,7 @@ import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "..
 import { sweep } from "../lib/sweeper.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { routeFeedbackArm } from "./retro.js";
-import { readRecordsDetailed } from "../lib/records-branch.js";
+import { readRecordsDetailed, recordsSourceOf } from "../lib/records-branch.js";
 
 /**
  * CLI 진입: 실제 의존성 조립.
@@ -121,8 +121,14 @@ export async function main() {
    */
   const routeMerged = async ({ issue: n, comments, mergedAt }) => {
     let records = new Map();
+    /**
+     * r1 리뷰 must_fix 1 — 하이드레이트가 **왜** 빈 Map을 냈는지를 함께 나른다. 이 값이 없으면
+     * 라우팅 팔은 못 읽은 기록을 "detail 줄이 없는 1.4 이전 기록"으로 보고한다(데모 #45가 그랬다).
+     */
+    let recordsSource = "records-branch-unreadable";
     try {
       const r = await readRecordsDetailed({ run, cwd: root });
+      recordsSource = recordsSourceOf(r);
       if (r?.records instanceof Map) records = r.records;
       else console.warn(`factory: sweep could not hydrate run records for #${n} — routing on comments alone`);
     } catch (e) { console.warn(`factory: sweep could not hydrate run records for #${n} — ${e?.message || e}`); }
@@ -132,6 +138,7 @@ export async function main() {
       issues: [{ number: n, state: "closed", closedAt: mergedAt ?? new Date().toISOString(), labels: [{ name: "factory:merged" }] }],
       commentsByIssue: new Map([[n, comments]]),
       records,
+      recordsSource,
       since: null,                                      // 창은 이 이슈 하나다 — 커서로 다시 자르지 않는다
       env: process.env,
     });

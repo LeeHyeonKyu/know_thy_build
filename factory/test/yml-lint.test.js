@@ -294,6 +294,37 @@ test("yml-lint pins FACTORY_RUNNER_ID to the same expression in both steps (M5)"
   expect(noValue.msg).toMatch(/own `env:` block/);
 });
 
+/**
+ * ── #36 r1 리뷰 should_fix 3 — 같은 두 스텝은 **같은 `FACTORY_RUN_ATTEMPT`**도 실어야 한다 ─────
+ *
+ * `FACTORY_RUNNER_ID`가 `gha-${{ github.run_id }}`인데 GHA의 Re-run은 `run_id`를 바꾸지 않는다 —
+ * 러너 식별자만으로는 attempt 1과 attempt 2가 같은 런이다. run 기록은 `factory/records`에 쌓여
+ * attempt 2의 체크아웃으로 따라오므로, 이 값이 없으면 attempt 2의 정리가 attempt 1의
+ * `stage-settled:` 줄을 자기 것으로 읽고 `in-flight → blocked` 전이를 건너뛴다(KTB-24가 고친 침묵).
+ */
+test("yml-lint pins FACTORY_RUN_ATTEMPT to the same expression in both steps (#36)", () => {
+  const ok = readFileSync(join(W, "factory-review.yml"), "utf8");
+  expect(lintWorkflow(ok)).toEqual([]);
+  // 모든 스테이지 워크플로가 실제로 그 값을 싣고, 두 스텝이 같은 식이다.
+  for (const f of Object.keys(STAGE)) {
+    const y = readFileSync(join(W, f), "utf8");
+    expect(y, f).toContain("FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}");
+    const ids = [...y.matchAll(/^\s*FACTORY_RUN_ATTEMPT:\s*(.+?)\s*$/gm)].map((m) => m[1]);
+    expect(ids.length, f).toBeGreaterThanOrEqual(2);
+    expect(new Set(ids).size, f).toBe(1);
+  }
+  // 정리 스텝에서 빠지면 잡는다 — 그 한 줄이 재실행의 판별식이다.
+  const at = ok.indexOf("- name: Aborted cleanup");
+  const missing = ok.slice(0, at) + ok.slice(at).replace("          FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}\n", "");
+  const m = lintWorkflow(missing).filter((f) => f.rule === "run-attempt-consistent");
+  expect(m).toHaveLength(1);
+  expect(m[0].msg).toMatch(/"Aborted cleanup"/);
+  expect(m[0].msg).toMatch(/run_id` constant across re-run attempts/);
+  // 값만 갈려도 잡는다.
+  const drifted = ok.slice(0, at) + ok.slice(at).replace("FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}", "FACTORY_RUN_ATTEMPT: '1'");
+  expect(lintWorkflow(drifted).filter((f) => f.rule === "run-attempt-consistent")[0].msg).toMatch(/DIFFERENT/);
+});
+
 // ADR-020 최종 리뷰 SF-1 — 업로드하는 모든 템플릿은 ① 업로드 **직전에** 스크럽 스텝을 돌리고,
 // ② 보관을 7일로 적는다. `if: always()`인 이유는 업로드 스텝과 같다: 사후 조사가 가장 필요한 런은
 // **실패한 런**이고, 크리덴셜은 그 런의 아티팩트에도 똑같이 들어 있다.

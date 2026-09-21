@@ -33,7 +33,7 @@ import { routeMergedIssues } from "../lib/feedback/route.js";
 import { announceFailure } from "../lib/gha.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
-import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
+import { readRecordsDetailed, recordsSourceOf, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
 import { extractStageArtifact, readTranscript } from "../lib/stage-artifact.js";
 import { harvest as harvestRecords, mergeCandidates } from "../lib/retro/harvest.js";
@@ -608,7 +608,7 @@ export async function runRetro({ deps, force = false, now } = {}) {
      * lessons·통계·커서까지 같이 사라진다.
      */
     if (d.routeFeedback && harvestRan) {
-      const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, since }));
+      const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, recordsSource: hy.recordsSource ?? null, since }));
       if (r.ok && r.value) {
         // `author`는 기각된 결정(`unverifiable-decision`)에서만 온다 — **누구의** 결정이 사라졌는지를
         // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
@@ -995,7 +995,7 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
  * 테스트는 초록이고, 빠진 날 dogfood 저장소는 다시 조용해진다.
  */
 export async function routeFeedbackArm({
-  gh, repo, root, harness, issues, commentsByIssue, records, since, env,
+  gh, repo, root, harness, issues, commentsByIssue, records, since, env, recordsSource = null,
   loadManifest = loadInstallManifest, log = console.error,
 }) {
   /**
@@ -1023,7 +1023,7 @@ export async function routeFeedbackArm({
   const who = await resolveFactoryLogins({ gh, env, comments: allComments });
   if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
   const routed = await routeMergedIssues({
-    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
+    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since, recordsSource,
     ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
     factoryLogins: who.ok ? who.logins : null,
     // 최종 리뷰 nit 5 — 거부 사유의 **문구**는 신원에 달려 있다: 진짜 봇 신원이면 "공유 신원"이
@@ -1123,6 +1123,9 @@ async function main() {
       const stateRel = `docs/factory/runs/${STATE_FILE}`;
       return {
         records: r.records,
+        // r1 리뷰 must_fix 1 — 라우팅 팔이 "0건"의 이유를 말할 때 쓰는 출처 낱말. 회고는 `fetched`가
+        // 참일 때만 여기까지 오지만, 낱말은 같은 함수에서 나와야 health의 문장과 갈리지 않는다.
+        recordsSource: recordsSourceOf(r),
         fetched: r.fetched,
         exists: r.exists,
         stateBlob: r.blobs.get("_retro") ?? null,

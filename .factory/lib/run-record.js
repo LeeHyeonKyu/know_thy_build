@@ -4,10 +4,33 @@ import { join, dirname } from "node:path";
 const short = (iso) => iso.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}):\d{2}(\.\d+)?Z$/, "$1Z"); // 2026-09-08T09:02:00Z → 2026-09-08T09:02Z; already-short values pass through unchanged
 
 export function appendRunRecord({ root, issue, title = "", stage, runnerId, lines = [], now = new Date().toISOString() }) {
+  const p = recordPath({ root, issue, title });
+  appendFileSync(p, `\n## ${stage} · ${short(now)} · ${runnerId}\n${lines.join("\n")}\n`);
+  return p;
+}
+
+function recordPath({ root, issue, title = "" }) {
   const p = join(root, "docs/factory/runs", `${issue}.md`);
   mkdirSync(dirname(p), { recursive: true });
   if (!existsSync(p)) writeFileSync(p, `# Run · #${issue}${title ? " " + title : ""}\n`);
-  appendFileSync(p, `\n## ${stage} · ${short(now)} · ${runnerId}\n${lines.join("\n")}\n`);
+  return p;
+}
+
+/**
+ * ── #36 r1 리뷰 nit 6 — **증표는 섹션을 열지 않는다.** ────────────────────────────────────────
+ *
+ * `stage-settled:`(`bin/run-stage.js`)는 사람이 읽는 *런의 이야기*가 아니라 다음 프로세스만 읽는
+ * 한 줄짜리 증표다. 그것을 `appendRunRecord`로 쓰면 런마다 `## <stage> · <time> · <runner>` 헤더가
+ * 하나 더 서고, 섹션을 세는 쪽(`cli/analyze.js`의 파서)에서 그 헤더는 이 런이 기록에 남긴 섹션 수를
+ * 부풀린다 — 사람이 읽는 화면에서 "이 런이 기록에 N개 섹션을 남겼다"가 한 개씩 틀려진다.
+ *
+ * 그래서 줄만 덧붙인다: 파일의 마지막 섹션(=이 런이 방금 쓴 섹션) 안에 그대로 붙고, 헤더가 없으므로
+ * 파서에는 아무 섹션도 늘어나지 않는다. 줄 자신이 `stage=`·`runner=`·`attempt=`를 싣고 있어 헤더가
+ * 주던 정보는 하나도 잃지 않는다(`stageSettled`는 애초에 줄 전체를 비교한다).
+ */
+export function appendRunRecordLine({ root, issue, title = "", line }) {
+  const p = recordPath({ root, issue, title });
+  appendFileSync(p, `${line}\n`);
   return p;
 }
 

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
-import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier } from "../bin/run-stage.js";
+import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier, runAttemptOf, stageSettled, stageSettledLine } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
 import { runGates } from "../lib/gates.js";
 import { canTransition } from "../lib/labels.js";
@@ -14,7 +14,7 @@ import { verifyStage } from "../lib/verify-stage.js";
 import { requirementFor } from "../lib/requirements.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { parseProgressMarker } from "../lib/progress.js";
-import { appendRunRecord } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine } from "../lib/run-record.js";
 import { parseRunRecord } from "../lib/usage.js";
 
 test("run-stage executes the §4.2.1 skeleton in order and transitions on success", async () => {
@@ -3471,7 +3471,7 @@ test("test_36_abort_line_after_verdict: a run that already recorded its verdict 
     verifyStage: () => ({ ok: false, reasons: ["gates RED: failing=prove-test"], data: {} }),
     transition: async () => ({ ok: true, to: "factory:needs-human" }),
     runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "implement", runnerId: runner, lines }),
-    settleRecord: (line) => appendRunRecord({ root: ws.root, issue: 45, stage: "implement", runnerId: runner, lines: [line] }),
+    settleRecord: (line) => appendRunRecordLine({ root: ws.root, issue: 45, line }),
   });
   expect(await runStage({ stage: "implement", issue: 45, deps: staged, runnerId: runner })).toBe(2);
 
@@ -3508,7 +3508,7 @@ test("test_36_abort_line_after_verdict: a post-verdict cleanup that still holds 
       transition: async () => ({ ok: true, to: "factory:approved" }),
       release: async () => false,                                       // finally의 해제가 실패했다
       runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: runner, lines }),
-      settleRecord: (line) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: runner, lines: [line] }),
+      settleRecord: (line) => appendRunRecordLine({ root: ws.root, issue: 45, line }),
     }),
   });
   const lines = [];
@@ -3535,7 +3535,7 @@ test("test_36_narrowing_preserves_arms: a run killed before its verdict is still
       verifyStage: () => ({ ok: true, reasons: [], data: { decision: "rework", verdicts: [] } }),
       transition: async () => ({ ok: true, to: "factory:rework" }),
       runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: settled, lines }),
-      settleRecord: (line) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: settled, lines: [line] }),
+      settleRecord: (line) => appendRunRecordLine({ root: ws.root, issue: 45, line }),
     }),
   });
   // 라운드 2는 SIGKILL됐다(데모 #15의 모양) — finally가 돌지 않았으므로 이 런의 표식은 없다.
@@ -3561,13 +3561,75 @@ test("test_36_narrowing_preserves_arms: a cleanup that cannot read the record ta
   }
 });
 
+/**
+ * ── r1 리뷰 should_fix 3 — **재실행 시도(run_attempt)도 판별식이다** ───────────────────────────
+ *
+ * 워크플로가 싣는 러너 식별자는 `gha-${{ github.run_id }}`인데 GHA의 Re-run은 `run_id`를 바꾸지
+ * 않는다 — attempt 1과 attempt 2의 `FACTORY_RUNNER_ID`가 **같은 문자열**이다. run 기록은
+ * `factory/records`에 누적돼 attempt 2의 체크아웃으로 그대로 따라오므로, attempt 1이 남긴
+ * `stage-settled:` 줄이 attempt 2의 정리 스텝 앞에 이미 놓여 있다. 그러면 **진짜로** SIGKILL된
+ * attempt 2가 "판정을 낸 런의 사후 정리"로 읽히고 `in-progress → blocked` 전이가 통째로 사라진다 —
+ * 이슈는 in-flight 라벨을 문 채 앉아 있고, 그것이 KTB-24가 고친 바로 그 침묵이다.
+ */
+test("test_36_rerun_attempt: a settled marker written by attempt 1 does not settle attempt 2 (same run_id, same runner id)", async () => {
+  const ws = demo45Workspace();
+  const runner = "gha-35548711917";                                     // 재실행이 바꾸지 않는 값 — 두 시도가 같다
+  // ① attempt 1은 판정을 내고 자기 발로 끝났다.
+  expect(await runStage({
+    stage: "implement", issue: 45, runnerId: runner, runAttempt: "1",
+    deps: baseDeps({
+      verifyStage: () => ({ ok: false, reasons: ["gates RED"], data: {} }),
+      transition: async () => ({ ok: true, to: "factory:needs-human" }),
+      runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "implement", runnerId: runner, lines }),
+      settleRecord: (line) => appendRunRecordLine({ root: ws.root, issue: 45, line }),
+    }),
+  })).toBe(2);
+  expect(ws.read()).toContain(`stage=implement runner=${runner} attempt=1`);
+
+  // ② attempt 2는 같은 러너 식별자로 다시 뜨고, 그 기록을 그대로 물려받은 채 SIGKILL된다.
+  const lines = [];
+  const d = abortDeps({
+    issueLabels: async () => ["factory:in-progress"],
+    lockHolder: async () => ({ present: true, runner, subject: `lock issue=45 stage=implement runner=${runner} at=t`, sha: "a".repeat(40) }),
+    runRecord: (l) => lines.push(...l),
+    readRunRecord: async () => ws.read(),
+  });
+  expect(await abortStage({ stage: "implement", issue: 45, status: "cancelled", runnerId: runner, runAttempt: "2", deps: d })).toBe(0);
+  expect(lines).toContain("aborted: cancelled (job timeout or cancel)");
+  expect(lines).toContain("aborted: factory:in-progress → factory:blocked");
+  expect(d.transition).toHaveBeenCalledWith({ to: "factory:blocked", reason: "job cancelled — retry via sweeper", cause: "cancelled" });
+
+  // ③ 그리고 좁히기가 팔을 부러뜨리지는 않았다: **같은** attempt의 정리는 여전히 조용하다.
+  const quiet = [];
+  const same = abortDeps({
+    issueLabels: async () => ["factory:in-progress"],
+    lockHolder: async () => ({ present: false }),
+    runRecord: (l) => quiet.push(...l),
+    readRunRecord: async () => ws.read(),
+  });
+  expect(await abortStage({ stage: "implement", issue: 45, status: "failure", runnerId: runner, runAttempt: "1", deps: same })).toBe(0);
+  expect(quiet[0]).toMatch(/^post-verdict cleanup: /);
+  expect(same.transition).not.toHaveBeenCalled();
+});
+
+/** 시도 번호는 **주입된 env**에서만 온다(SDD "env injected"): 값이 있으면 그것, 없거나 쓰레기면 1차 시도. */
+test("test_36_rerun_attempt: runAttemptOf reads only the env it is handed, and falls back to attempt 1", () => {
+  expect(runAttemptOf({ FACTORY_RUN_ATTEMPT: "3" })).toBe("3");
+  expect(runAttemptOf({ GITHUB_RUN_ATTEMPT: "2" })).toBe("2");
+  expect(runAttemptOf({ FACTORY_RUN_ATTEMPT: "3", GITHUB_RUN_ATTEMPT: "9" })).toBe("3");   // 팩토리의 값이 이긴다
+  for (const env of [{}, undefined, { FACTORY_RUN_ATTEMPT: "" }, { FACTORY_RUN_ATTEMPT: "two" }]) expect(runAttemptOf(env)).toBe("1");
+  // 쓰는 쪽과 읽는 쪽이 **같은 기본값**을 쓴다 — 배선 이전의 워크플로에서도 표식은 그대로 성립한다.
+  expect(stageSettled(`${stageSettledLine({ stage: "plan", runnerId: "gha-1" })}\n`, { stage: "plan", runnerId: "gha-1" })).toBe(true);
+});
+
 test("test_36_narrowing_preserves_arms: runStage's settled marker names the stage and the runner, and stays out of the run's own lines", async () => {
   const lines = [];
   const settleLines = [];
-  await runStage({ stage: "plan", issue: 7, runnerId: "gha-777", deps: baseDeps({ runRecord: (l) => lines.push(...l), settleRecord: (l) => settleLines.push(l) }) });
+  await runStage({ stage: "plan", issue: 7, runnerId: "gha-777", runAttempt: "4", deps: baseDeps({ runRecord: (l) => lines.push(...l), settleRecord: (l) => settleLines.push(l) }) });
   expect(settleLines).toHaveLength(1);
   expect(settleLines[0]).toContain("stage=plan");
   expect(settleLines[0]).toContain("runner=gha-777");
+  expect(settleLines[0]).toContain("attempt=4");
   expect(lines.some((l) => l.startsWith("stage-settled:"))).toBe(false);
   // 표식을 쓰지 못해도 런은 죽지 않는다 — 잃는 것은 증표뿐이고, 그 손실은 정리를 **크게** 만든다.
   expect(await runStage({ stage: "plan", issue: 7, runnerId: "gha-777", deps: baseDeps({ settleRecord: () => { throw new Error("disk full"); } }) })).toBe(0);

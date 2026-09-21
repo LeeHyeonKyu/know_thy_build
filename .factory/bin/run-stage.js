@@ -34,7 +34,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
@@ -173,7 +173,7 @@ export function usageLine(out, progress = null) {
   return progress ? `${line}\n${progressMarker(progress)}` : line;
 }
 
-export async function runStage({ stage, issue, deps, runnerId = "unknown", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
+export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
   const d = deps;
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
@@ -1128,7 +1128,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
      * 세는 쪽(§4.2.1의 순서 핀, 기록 파서)이 이 증표를 이야기의 일부로 세게 된다. 배선하지 않은
      * 호출자는 증표를 잃을 뿐이고, 그 손실의 방향은 안전하다 — 표식이 없으면 정리는 **크게** 읽는다.
      */
-    try { await d.settleRecord?.(stageSettledLine({ stage, runnerId })); }
+    try { await d.settleRecord?.(stageSettledLine({ stage, runnerId, attempt: runAttempt })); }
     catch (e) { console.error(`factory: settled marker write failed — ${e?.message || e}`); }
     const released = await d.release();
     if (released === false) {                                         // 락이 남으면 다음 런이 통째로 막힌다 — 조용히 지나치지 않는다
@@ -1184,19 +1184,37 @@ export const abortedLine = (status) => `aborted: ${status} (job timeout or cance
  * 그래서 표식은 **스테이지와 러너를 함께 지목한다**: `runStage`의 `finally`가 자기 이름으로 한 줄을
  * 남기고(SIGKILL에서는 `finally`가 돌지 않으므로 그 줄이 없다), `abortStage`는 자기 `stage`+`runnerId`의
  * 줄만 본다. 읽지 못하면 **크게** 읽는다(아래 `stageSettled`) — 모르는 것은 정상 종료가 아니다.
+ *
+ * ── r1 리뷰 should_fix 3 — **재실행 시도(attempt)도 지목한다.** ────────────────────────────────
+ * 워크플로가 싣는 러너 식별자는 `gha-${{ github.run_id }}`인데, GHA의 **Re-run**은 `run_id`를 바꾸지
+ * 않는다(바뀌는 것은 `run_attempt`뿐이다). 그리고 run 기록은 `factory/records`에 누적되므로 attempt 2의
+ * 체크아웃에는 attempt 1이 쓴 `stage-settled:` 줄이 그대로 하이드레이트된다 — 곧 attempt 2가 **진짜로**
+ * SIGKILL돼도 정리 스텝이 그 줄을 보고 "판정을 낸 런의 사후 정리"로 읽고 `in-progress → blocked`
+ * 전이를 통째로 건너뛴다. 그러면 이슈는 in-flight 라벨을 문 채로 앉아 있고, 그것이 KTB-24가 고친
+ * 바로 그 침묵이다. 그래서 줄은 `attempt=`를 싣고, 읽는 쪽도 자기 attempt의 줄만 본다.
  */
 export const STAGE_SETTLED_PREFIX = "stage-settled:";
-export const stageSettledLine = ({ stage, runnerId }) =>
-  `${STAGE_SETTLED_PREFIX} stage=${stage} runner=${runnerId} — this run reached its own cleanup; anything recorded after it is post-verdict cleanup, not an abort`;
 /**
- * 이 기록이 **이 스테이지의 이 러너**가 자기 발로 끝났다고 말하는가. 기본은 `false`(fail loud):
- * 기록을 못 읽었거나, 러너를 지목할 수 없거나(`unknown`·빈 값), 배선이 없으면 모르는 것이고 —
+ * 이 런의 재실행 시도 번호. **env는 주입**이다(1.4.0 핫픽스와 같은 규율) — 라이브러리 한가운데가
+ * 주변 환경을 읽으면 같은 입력이 러너와 노트북에서 다른 답을 낸다. 값이 없거나 숫자가 아니면 `"1"`:
+ * 재실행이 아닌 런이 곧 1차 시도이고, 쓰는 쪽과 읽는 쪽이 **같은 기본값**을 써야 배선 이전의
+ * 워크플로에서도 표식이 그대로 성립한다(그 배선의 부재는 `yml-lint`의 `runner-id-consistent`가 본다).
+ */
+export const runAttemptOf = (env = {}) => {
+  const v = String(env?.FACTORY_RUN_ATTEMPT ?? env?.GITHUB_RUN_ATTEMPT ?? "").trim();
+  return /^\d+$/.test(v) ? v : "1";
+};
+export const stageSettledLine = ({ stage, runnerId, attempt = "1" }) =>
+  `${STAGE_SETTLED_PREFIX} stage=${stage} runner=${runnerId} attempt=${attempt} — this run reached its own cleanup; anything recorded after it is post-verdict cleanup, not an abort`;
+/**
+ * 이 기록이 **이 스테이지의 이 러너의 이 시도**가 자기 발로 끝났다고 말하는가. 기본은 `false`(fail
+ * loud): 기록을 못 읽었거나, 러너를 지목할 수 없거나(`unknown`·빈 값), 배선이 없으면 모르는 것이고 —
  * 모르는 정리 경로는 KTB-24가 존재하는 이유인 그 소리를 그대로 낸다(dw6).
  */
-export function stageSettled(record, { stage, runnerId } = {}) {
+export function stageSettled(record, { stage, runnerId, attempt = "1" } = {}) {
   if (typeof record !== "string" || !record) return false;
   if (!stage || !runnerId || runnerId === "unknown") return false;
-  return record.split("\n").includes(stageSettledLine({ stage, runnerId }));
+  return record.split("\n").includes(stageSettledLine({ stage, runnerId, attempt }));
 }
 /** 판정을 이미 낸 런의 정리 한 줄. `abortedLine`과 **정확히 하나**만 기록에 선다. */
 export const postVerdictCleanupLine = (status) =>
@@ -1227,7 +1245,7 @@ export const ABORT_CAUSE = { cancelled: "cancelled", timed_out: "timeout" };
  * 순서가 요점이다: 전이를 **먼저** 하고 락을 나중에 푼다. 반대로 하면 락이 풀린 직후 sweeper/dispatch가
  * 같은 이슈를 물고 들어와, 이 프로세스가 막 세우려던 blocked 라벨과 경쟁한다.
  */
-export async function abortStage({ stage, issue, status = "cancelled", runnerId = "unknown", deps }) {
+export async function abortStage({ stage, issue, status = "cancelled", runnerId = "unknown", runAttempt = "1", deps }) {
   const d = deps;
   /**
    * #36 item 2 — **이 런이 이미 판정을 냈는가.** 읽기는 best-effort이고, 실패는 곧 "모른다"이며,
@@ -1235,7 +1253,7 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
    * 락 해제도, 기록 한 줄도, 그대로 일어난다(d3 / KTB-24 계약).
    */
   let settled = false;
-  try { settled = stageSettled(await d.readRunRecord?.(), { stage, runnerId }); }
+  try { settled = stageSettled(await d.readRunRecord?.(), { stage, runnerId, attempt: runAttempt }); }
   catch { settled = false; }
   const lines = [settled ? postVerdictCleanupLine(status) : abortedLine(status)];
   /**
@@ -2177,12 +2195,14 @@ async function main() {
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
+  // r1 should_fix 3 — `process.env`는 **이 배선 한 줄**에만 산다(`runAttemptOf`는 env를 받는다).
+  const runAttempt = runAttemptOf(process.env);
   const gh = makeGh({ run, repo });
   // 정리 경로는 CHARTER도 harness도 읽지 않는다 — 읽을 것이 하나라도 깨져 있으면 고아 락이 그대로
   // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
   if (abortedStatus !== null) {
     process.exit(await abortStage({
-      stage, issue, status: abortedStatus, runnerId,
+      stage, issue, status: abortedStatus, runnerId, runAttempt,
       deps: {
         issueLabels: async () => (await gh.issue(issue)).labels,
         transition: ({ to, reason, cause }) => transition({ gh, issue, to, reason, cause, stage }),
@@ -2743,7 +2763,9 @@ async function main() {
     })(),
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
     // #36 item 2 — 정리 스텝이 읽는 증표. 같은 파일에 쓰지만 `runRecord`와 **다른 문**이다(위 주석).
-    settleRecord: (line) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines: [line] }),
+    // r1 nit 6 — 그 문은 섹션 헤더를 세우지 않는다(`appendRunRecordLine`): 증표가 이 런의 섹션 수를
+    // 부풀리면 `factory analyze`가 사람에게 한 개 더 많은 섹션을 보여 준다.
+    settleRecord: (line) => appendRunRecordLine({ root, issue, title: ctxCache?.issue?.title || "", line }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
     release: () => release({ run, cwd: root, issue }),
     syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} (${runnerId})` }),
@@ -2754,7 +2776,7 @@ async function main() {
         : undefined,
     }),
   };
-  process.exit(await runStage({ stage, issue, deps, runnerId }));
+  process.exit(await runStage({ stage, issue, deps, runnerId, runAttempt }));
 }
 export const PREV = { plan: "triage", implement: "plan", review: "implement", merge: "review" };
 export function prevStage(stage) { return PREV[stage] || null; }

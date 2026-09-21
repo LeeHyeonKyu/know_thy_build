@@ -2,7 +2,7 @@ import { test, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { ownerOf, buildManifest } from "../cli/manifest.js";
-import { routeMergedIssues, routedMarker, NO_DETAIL_LINES_REASON } from "../lib/feedback/route.js";
+import { routeMergedIssues, routedMarker, NO_DETAIL_LINES_REASON, recordNotReadReason } from "../lib/feedback/route.js";
 import { selfGateComment } from "./helpers/feedback-fixtures.js";
 
 /**
@@ -46,9 +46,9 @@ function fakeGh() {
   };
 }
 
-const route = (gh, comments, records) => routeMergedIssues({
+const route = (gh, comments, records, recordsSource = "records-branch") => routeMergedIssues({
   gh, repo: REPO, upstream: UPSTREAM, ownerOf, isInstalled: dests, ktbVersion: "1.4.0", harness,
-  issues: [ISSUE_45], commentsByIssue: new Map([[45, comments]]), records,
+  issues: [ISSUE_45], commentsByIssue: new Map([[45, comments]]), records, recordsSource,
   since: "2026-09-20T00:00:00Z", factoryLogins: ["LeeHyeonKyu"],
 });
 
@@ -103,4 +103,42 @@ test("test_36_record_and_annotation_wording: a 1.4+ record with detail lines and
   const clean = "# Run · #45\n\n## implement · 2026-09-20T10:00Z · gha-1\ncontext-manifest: {\"role\":\"builder\",\"cold_read\":false,\"run_id\":\"1\",\"runner\":\"gha-1\",\"fields\":[]}\n";
   const r = await route(gh, [], new Map([["45", clean]]));
   expect(r.actions.some((a) => a.kind === "no-detail-lines")).toBe(false);
+});
+
+/**
+ * ── r1 리뷰 must_fix 1 — **읽지 못한 기록을 "1.4 이전 기록"이라고 부르지 않는다** ─────────────────
+ *
+ * 리뷰어의 프로브 그대로다: 데모 #45의 **실물**(1.4.0 기록, detail 줄 13개)을 가진 이슈를
+ * `records: new Map()`으로 — `bin/sweep.js`의 하이드레이트가 실패했을 때 라우팅 팔이 실제로 받는
+ * 바로 그 값으로 — 나른다. 고치기 전에는 `hasDetailLines("")`가 거짓이라 `no-detail-lines`가 나갔다.
+ * 두 경우를 **같은 픽스처로** 함께 고정한다: 읽었을 때와 읽지 못했을 때 문장이 갈려야 한다.
+ */
+test("test_36_record_and_annotation_wording: an UNREAD record is reported as unread, not as a pre-1.4 record (wording)", async () => {
+  // 이 기록에는 detail 줄이 실제로 있다 — 그러니 "줄이 없다"는 어느 쪽이든 거짓이다.
+  expect((DEMO45.record.match(/^(gates-detail:|context-manifest:|self-gate-detail:)/gm) || []).length).toBeGreaterThan(0);
+  const quiet = DEMO45.comments.filter((c) => !/factory-transition|human-decision/.test(c.body));
+
+  // ① 하이드레이트 실패 — 손에 든 기록이 없다. 사람이 볼 것은 브랜치·토큰이지 기록의 나이가 아니다.
+  const unread = await route(fakeGh(), quiet, new Map(), "records-branch-unreadable");
+  expect(unread.actions).toContainEqual({
+    kind: "record-not-read", step: "feedback-route", issue: 45,
+    reason: recordNotReadReason("records-branch-unreadable"),
+  });
+  expect(recordNotReadReason("records-branch-unreadable")).toBe("record not read — records-branch-unreadable");
+  expect(unread.actions.some((a) => a.kind === "no-detail-lines")).toBe(false);
+
+  // ② 같은 이슈, 같은 코멘트 — 이번엔 기록을 읽었다. 1.4.0 기록이므로 어느 문장도 나가지 않는다.
+  const read = await route(fakeGh(), quiet, new Map([["45", DEMO45.record]]), "records-branch");
+  expect(read.actions.some((a) => a.kind === "record-not-read")).toBe(false);
+  expect(read.actions.some((a) => a.kind === "no-detail-lines")).toBe(false);
+});
+
+/** 배선하지 않은 호출자도 **거짓말은 하지 않는다** — 출처를 모르면 모른다고 적는다. */
+test("test_36_record_and_annotation_wording: an unwired caller still says 'not read', with the source unknown (wording)", async () => {
+  const r = await routeMergedIssues({
+    gh: fakeGh(), repo: REPO, upstream: UPSTREAM, ownerOf, isInstalled: dests, ktbVersion: "1.4.0", harness,
+    issues: [ISSUE_45], commentsByIssue: new Map([[45, []]]), records: new Map(), since: "2026-09-20T00:00:00Z",
+    factoryLogins: ["LeeHyeonKyu"],
+  });
+  expect(r.actions).toContainEqual({ kind: "record-not-read", step: "feedback-route", issue: 45, reason: "record not read — unknown" });
 });

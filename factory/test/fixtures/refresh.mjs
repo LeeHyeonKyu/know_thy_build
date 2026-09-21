@@ -111,6 +111,10 @@ function grabTimeline({ repo, issue, recordRef, out }) {
     createdAt: c.created_at,
     author: c.user?.login ?? null,
     authorType: c.user?.type ?? null,
+    // r1 리뷰 nit 5 — `gh.comments`가 돌려주는 필드를 **하나도 빼지 않는다**(`grabComments`와 같은 모양).
+    // `viaApp`이 빠지면 이 픽스처 위의 신원 판정은 실제 저장소가 주는 것보다 **모르는 상태**에서
+    // 돌게 되고, 그 차이가 초록인 채로 남는다(공유 신원 경보가 바로 이 필드로 갈린다).
+    viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
     body: c.body || "",
   }));
   const doc = {

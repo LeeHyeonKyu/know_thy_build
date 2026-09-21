@@ -351,16 +351,17 @@ function lintStageWorkflow(text, lines, stage) {
   // 그 뒤의 모든 dispatch가 claim에서 죽는다(데모 #15). 값이 무엇인지는 묻지 않는다(러너마다 다를 수
   // 있다) — **같은가**만 묻는다.
   const runStage = steps.findIndex((s) => s.name === "Run stage");
-  const runnerIdOf = (i) => {
+  const envOf = (i, name) => {
     if (i === -1) return null;
     const end = i + 1 < steps.length ? steps[i + 1].line - 1 : lines.length;
     for (let k = steps[i].line - 1; k < end; k++) {
       // YAML의 줄 끝 주석은 **공백 뒤의** `#`다 — 값 안의 `#`(`gha-#1`)를 주석으로 읽어 자르지 않는다.
-      const m = /^\s*FACTORY_RUNNER_ID:\s*(.+?)\s*$/.exec(lines[k].replace(/\s+#.*$/, ""));
+      const m = new RegExp(`^\\s*${name}:\\s*(.+?)\\s*$`).exec(lines[k].replace(/\s+#.*$/, ""));
       if (m) return m[1];
     }
     return null;
   };
+  const runnerIdOf = (i) => envOf(i, "FACTORY_RUNNER_ID");
   const runId = runnerIdOf(runStage);
   const abortId = runnerIdOf(aborted);
   // r1 nit 11: 세 가지 실패를 **세 문장**으로 가른다. 예전에는 스텝 이름이 `Run stage`가 아닐 때도
@@ -374,6 +375,25 @@ function lintStageWorkflow(text, lines, stage) {
     out.push({ line: at, rule: "runner-id-consistent", msg: `FACTORY_RUNNER_ID is not set in the step's own \`env:\` block on: ${noValue.join(", ")} — a job-level \`env:\` is not read by this rule, so set it on both steps. Without it the cleanup cannot prove the lock is its own and leaves it alone, and the orphan lock stalls every later dispatch (KTB-24 fix / KTB-28)` });
   } else if (runId !== abortId) {
     out.push({ line: at, rule: "runner-id-consistent", msg: `the "Run stage" and "Aborted cleanup" steps set DIFFERENT FACTORY_RUNNER_ID expressions (${runId} vs ${abortId}) — the cleanup compares it against the lock's \`runner=\` field, so a drifted value makes every run read its own lock as a stranger's (KTB-24 fix / KTB-28)` });
+  }
+  /**
+   * (3b) 같은 두 스텝은 **같은 `FACTORY_RUN_ATTEMPT`**도 실어야 한다(#36 r1 should_fix 3).
+   *
+   * `FACTORY_RUNNER_ID`가 `gha-${{ github.run_id }}`인데 GHA의 Re-run은 `run_id`를 바꾸지 않는다 —
+   * 러너 식별자만으로는 attempt 1과 attempt 2가 **같은 런**이다. run 기록은 `factory/records`에 쌓여
+   * attempt 2의 체크아웃으로 그대로 따라오므로, 이 값이 없으면 attempt 2의 정리 스텝이 attempt 1의
+   * `stage-settled:` 줄을 자기 것으로 읽고 `in-progress → blocked` 전이를 건너뛴다. 값이 무엇인지는
+   * 묻지 않는다 — **있는가**와 **두 스텝이 같은가**만 묻는다(`runner-id-consistent`와 같은 규율).
+   */
+  if (runStage !== -1 && aborted !== -1) {
+    const a1 = envOf(runStage, "FACTORY_RUN_ATTEMPT");
+    const a2 = envOf(aborted, "FACTORY_RUN_ATTEMPT");
+    const missing = [a1 == null ? '"Run stage"' : null, a2 == null ? '"Aborted cleanup"' : null].filter(Boolean);
+    if (missing.length) {
+      out.push({ line: at, rule: "run-attempt-consistent", msg: `FACTORY_RUN_ATTEMPT is not set in the step's own \`env:\` block on: ${missing.join(", ")} — set \`FACTORY_RUN_ATTEMPT: \${{ github.run_attempt }}\` on both. GitHub keeps \`run_id\` constant across re-run attempts, so without it a re-run reads the previous attempt's \`stage-settled:\` marker as its own and the cleanup skips the in-flight → blocked transition (KTB #36)` });
+    } else if (a1 !== a2) {
+      out.push({ line: at, rule: "run-attempt-consistent", msg: `the "Run stage" and "Aborted cleanup" steps set DIFFERENT FACTORY_RUN_ATTEMPT expressions (${a1} vs ${a2}) — the cleanup looks for the marker this very attempt wrote, so a drifted value makes every run read its own marker as another attempt's (KTB #36)` });
+    }
   }
   return out;
 }
