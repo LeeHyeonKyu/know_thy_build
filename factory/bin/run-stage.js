@@ -2590,7 +2590,8 @@ async function main() {
     prHeadShaLive: (pr) => gh.prHeadSha(pr),
     commitStatuses: (sha) => gh.commitStatuses(sha),
     /** 팩토리 자신의 계정 이름(값이 아니다) — 판정과 해석은 `lib/gh.js`의 `resolveFactoryLogins` 하나다(KTB-46). */
-    factoryLogins: () => resolveFactoryLogins({ gh }),
+    // `process.env`는 **워크플로 진입점인 이 배선 한 줄**에만 산다(1.4.0 핫픽스).
+    factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),
     /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
     approvePr: (pr) => gh.approvePr(pr),
     mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),

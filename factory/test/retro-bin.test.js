@@ -19,6 +19,15 @@ import { join } from "node:path";
 const NOW = "2026-09-12T13:45:30Z";
 const CURSOR = "2026-09-05T00:00:00Z";
 
+/**
+ * ── 1.4.0 핫픽스: `env`는 **명시**한다 ────────────────────────────────────────────────────────
+ * `routeFeedbackArm`의 판정은 "팩토리 계정이 누구인가"에 달려 있고, 그 답은 Actions 안팎에서 다르다.
+ * 그 사실을 `process.env`에서 읽던 동안 이 파일의 공유 신원 테스트는 **러너에서만** 빨갰다(러너의
+ * `GITHUB_ACTIONS=true`가 뷰어 갈래를 열어 경보가 사라졌다). 이제 두 경로 다 인자로 선다.
+ */
+const LAPTOP = Object.freeze({});
+const ACTIONS = Object.freeze({ GITHUB_ACTIONS: "true" });
+
 // ── KTB-15b item 2: retro's --max-turns comes from the harness, not a hardcoded 5 ───────────────
 // bin/retro.js hardcoded `--max-turns 5` (~line 824) — the same problem KTB-16 already fixed for
 // run-stage.js (a short hardcoded turn budget starves a background-Workflow dispatcher's
@@ -1186,7 +1195,7 @@ test("routeFeedbackArm: 공유 신원을 스스로 알아내 경보 1건 + 이�
     gh, repo: "LeeHyeonKyu/know-thy-build-demo", root: "/r", harness: {},
     issues: [merged(39), merged(40)],
     commentsByIssue: new Map([[39, decided], [40, decided.map((c) => ({ ...c, id: c.id + 1000 }))]]),
-    records: new Map(), since: "2026-09-19T00:00:00Z",
+    records: new Map(), since: "2026-09-19T00:00:00Z", env: LAPTOP,
     loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
     log: (m) => errs.push(m),
   });
@@ -1205,6 +1214,50 @@ test("routeFeedbackArm: 공유 신원을 스스로 알아내 경보 1건 + 이�
   expect(r.actions.some((a) => a.kind === "upstream-created")).toBe(false);
 });
 
+/**
+ * ── 1.4.0 핫픽스의 회귀 핀 — 같은 입력, `env`만 다르다 ────────────────────────────────────────
+ *
+ * 위 테스트는 노트북을 잰다(뷰어를 부르면 던지는 gh로 그 사실을 강제한다). Actions 안에서는 뷰어가
+ * **곧 봇**이므로 팩토리 계정 목록에 들어가야 하고, 그 갈래는 지금까지 이 팔에 대해 한 번도
+ * 재지 않았다 — 그래서 러너에서만 갈라지는 행동이 CI가 빨개질 때까지 보이지 않았다.
+ */
+test("routeFeedbackArm: Actions 안에서는 뷰어도 팩토리 계정이다 — 봇 신원이면 공유 신원 경보가 없다", async () => {
+  const merged = (n) => ({ number: n, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" });
+  // 하트비트를 **봇**이 썼고, 그 봇이 곧 잡 토큰의 주인이다(Actions의 정상 상태).
+  const comments = [
+    { id: 1, createdAt: "2026-09-20T10:00:00Z", author: "ktb-factory[bot]", authorType: "Bot", body: "<!-- factory-heartbeat:v1 issue=39 stage=review runner=gha-99001 -->" },
+    {
+      id: 2, createdAt: "2026-09-20T10:57:00Z", author: "LeeHyeonKyu", authorType: "User",
+      body: "<!-- human-decision:v1 issue=39 skill=unstick -->\n```yaml\ndecision: retry\ncause: factory-defect\nreason: \"self-gate blocked on a check only review produces\"\n```",
+    },
+  ];
+  const gh = {
+    viewerLogin: async () => "ktb-factory[bot]",
+    viewerType: async () => "Bot",
+    async issueList() { return []; },
+    async comment() { return "https://x/#issuecomment-1"; },
+    async createIssue() { return 900; },
+    async upstreamIssue() { return { issue: 501, created: true, appended: false }; },
+  };
+  const errs = [];
+  const r = await routeFeedbackArm({
+    gh, repo: "o/r", root: "/r", harness: {}, issues: [merged(39)],
+    commentsByIssue: new Map([[39, comments]]),
+    records: new Map(), since: "2026-09-19T00:00:00Z", env: ACTIONS,
+    loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
+    log: (m) => errs.push(m),
+  });
+  expect(errs).toEqual([]);
+  // 봇 신원이므로 공유 신원 경보도, 기각된 결정도 없다 — 소유자의 결정은 사람의 결정으로 선다.
+  expect(r.actions.filter((a) => a.kind === "warning")).toEqual([]);
+  expect(r.actions.filter((a) => a.kind === "unverifiable-decision")).toEqual([]);
+});
+
+test("routeFeedbackArm은 주변 환경을 읽지 않는다 — env는 필수 주입이다", async () => {
+  await expect(routeFeedbackArm({ gh: {}, repo: "o/r", root: "/r", harness: {}, issues: [], commentsByIssue: new Map(), records: new Map(), since: null }))
+    .rejects.toThrow(/env is required/);
+});
+
 test("routeFeedbackArm: 팩토리 로그인을 못 얻으면 그 사실을 적고, 경보는 달지 않는다(모르는 것은 경보가 아니다)", async () => {
   const anon = [{ id: 1, createdAt: "2026-09-20T10:00:00Z", author: null, body: "<!-- factory-transition:v1 from=factory:approved to=factory:merged by=script -->" }];
   const errs = [];
@@ -1213,7 +1266,7 @@ test("routeFeedbackArm: 팩토리 로그인을 못 얻으면 그 사실을 적�
     repo: "o/r", root: "/r", harness: {},
     issues: [{ number: 39, title: "feat", labels: ["factory:merged"], state: "closed", closedAt: "2026-09-20T12:00:00Z" }],
     commentsByIssue: { 39: anon },                                  // 평범한 객체로도 돈다
-    records: new Map(), since: "2026-09-19T00:00:00Z",
+    records: new Map(), since: "2026-09-19T00:00:00Z", env: LAPTOP,
     loadManifest: async () => ({ ownerOf: () => "factory", isInstalled: new Set(), ktbVersion: "1.3.2" }),
     log: (m) => errs.push(m),
   });

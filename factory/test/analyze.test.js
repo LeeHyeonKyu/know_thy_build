@@ -7,6 +7,7 @@ import { verdictLine } from "../lib/gates.js";
 import { contextManifestLines } from "../lib/context.js";
 import { usageLine } from "../bin/run-stage.js";
 import { makeFakeRun } from "../lib/exec.js";
+import { resolveFactoryLogins } from "../lib/gh.js";
 import { ownerOf, buildManifest } from "../cli/manifest.js";
 import {
   RUNNER, heartbeat, realGatesDetail, vitestReport, recordOf,
@@ -130,11 +131,21 @@ function capture() {
  * **노트북에서 도는 모양 그대로**(MF-1): `factoryLogins`를 주입하지 않는다. `gh api user`는 소유자를
  * 돌려주고(`viewerLogin`), `GITHUB_ACTIONS`는 없다. 봇 이름의 유일한 출처는 하트비트 코멘트의
  * 작성자여야 한다 — 1차 구현은 여기서 소유자를 봇으로 세어 `[ktb]` 둘을 통째로 잃었다.
+ *
+ * ── 1.4.0 핫픽스: `env`는 **명시**한다 ────────────────────────────────────────────────────────
+ * 이 픽스처들은 "노트북"을 세우는데, 그 사실이 `process.env`에 있으면 테스트는 **자기가 어디서
+ * 도는지**에 달린다. publish.yml의 validate 잡이 정확히 그렇게 터졌다: 러너의 `GITHUB_ACTIONS=true`가
+ * `resolveFactoryLogins`의 뷰어 갈래를 열어 가짜 `viewerLogin`이 팩토리 계정이 됐고, 여기 아홉 개가
+ * **러너에서만** 빨개졌다. 그래서 기본값은 `{}`(노트북)이고, Actions를 재는 테스트는 그 사실을
+ * 인자로 적는다 — 두 경로 다 핀이 있고, 어느 쪽도 주변 환경을 읽지 않는다.
  */
+const LAPTOP = Object.freeze({});
+const ACTIONS = Object.freeze({ GITHUB_ACTIONS: "true" });
+
 const deps = async (over = {}) => {
   const { record, comments } = await demo39();
   return {
-    root: "/repo", repo: REPO, harness,
+    root: "/repo", repo: REPO, harness, env: LAPTOP,
     gh: { comments: async () => comments, viewerLogin: async () => OWNER },
     readRecord: async () => ({ text: record, source: "factory/records:docs/factory/runs/39.md (gh api)", trusted: true }),
     loadManifest: async () => manifest,
@@ -182,6 +193,46 @@ test("analyze 39 on a laptop: the viewer is the owner, so the owner's human-deci
   expect(data.factory_logins).toEqual(["factory-bot"]);
   expect(data.factory_logins).not.toContain(OWNER);
   expect(data.findings.filter((f) => f.tags.includes("ktb"))).toHaveLength(2);
+});
+
+/**
+ * ── 1.4.0 핫픽스의 회귀 핀 — **두 경로를 둘 다 고정한다** ─────────────────────────────────────
+ *
+ * 위 테스트는 노트북(`env: {}`)을 잰다. 그 반대편 — Actions 안에서는 뷰어가 **곧 봇**이라 팩토리
+ * 계정 목록에 들어가야 한다 — 은 지금까지 아무 테스트도 재지 않았고, 그래서 러너에서만 갈라지는
+ * 행동이 CI가 빨개질 때까지 보이지 않았다. 여기서는 그 사실을 `env`로 **말해** 세운다:
+ * 뷰어도 `viewerType`도 스텁이고, 프로세스가 어디서 도는지는 답에 영향을 주지 않는다.
+ */
+test("analyze inside Actions: the viewer IS the bot, so it joins the factory logins (env says so — not process.env)", async () => {
+  const { record, comments } = await demo39();
+  const cap = capture();
+  await analyzeCommand({
+    ...(await deps()), argv: ["39", "--json"], io: cap.io, env: ACTIONS,
+    // Actions의 잡 토큰은 봇이다 — 그 종류까지 스텁한다(옛 테스트는 `viewerType`을 두지 않았다).
+    gh: { comments: async () => comments, viewerLogin: async () => "ktb-factory[bot]", viewerType: async () => "Bot" },
+    readRecord: async () => ({ text: record, source: "records", trusted: true }),
+  });
+  const data = JSON.parse(cap.text());
+  expect(data.factory_logins.sort()).toEqual(["factory-bot", "ktb-factory[bot]"]);
+  expect(data.factory_identity).toEqual({ personal: false, login: "ktb-factory[bot]" });
+  // 소유자가 적은 결정은 여전히 사람의 결정이다 — 봇 신원과 겹치지 않는다.
+  expect(data.findings.filter((f) => f.tags.includes("ktb"))).toHaveLength(2);
+});
+
+test("analyze on a laptop: the SAME inputs never count the viewer — the only difference is `env`", async () => {
+  const { record, comments } = await demo39();
+  const gh = { comments: async () => comments, viewerLogin: async () => "ktb-factory[bot]", viewerType: async () => "Bot" };
+  const readRecord = async () => ({ text: record, source: "records", trusted: true });
+  const cap = capture();
+  await analyzeCommand({ ...(await deps()), argv: ["39", "--json"], io: cap.io, env: LAPTOP, gh, readRecord });
+  const data = JSON.parse(cap.text());
+  // 노트북에서 `gh api user`는 **소유자**다(여기서는 봇 이름을 흉내 냈어도 규칙은 같다): 세지 않는다.
+  expect(data.factory_logins).toEqual(["factory-bot"]);
+});
+
+test("resolveFactoryLogins refuses to read the ambient environment — env is a required injection", async () => {
+  await expect(resolveFactoryLogins({ gh: { viewerLogin: async () => "x" } })).rejects.toThrow(/env is required/);
+  await expect(resolveFactoryLogins({ gh: {}, env: null })).rejects.toThrow(/env is required/);
 });
 
 test("analyze: when no factory login can be resolved, it SAYS human-decision evidence cannot be evaluated (never silently [])", async () => {

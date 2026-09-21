@@ -77,7 +77,9 @@ async function main() {
    * 그 상태가 **팩토리 계정의 것인지**를 대조할 기준이 이 이름들이다(외부 감사 H1b). `run-stage.js`의
    * merge deps가 쓰는 바로 그 해석기를 그대로 쓴다 — `gh api user`가 두 벌이 되면 갈라진다.
    */
-  const factoryLogins = () => resolveFactoryLogins({ gh });
+  // `process.env`는 **워크플로 진입점인 이 배선 한 줄**에만 산다(1.4.0 핫픽스 — 라이브러리 한가운데가
+  // 주변 환경을 읽으면 같은 입력이 러너와 노트북에서 다른 답을 낸다).
+  const factoryLogins = () => resolveFactoryLogins({ gh, env: process.env });
   /**
    * KTB-46 r3 must_fix 1 — **정족수를 잴 자.** 이것을 넘기지 않으면 `verifyReviewQuorum`은 로스터
    * 크기·빠진 역할·K를 전부 건너뛰고 "있는 verdict가 전부 approve인가"만 본다 — 4명짜리 로스터의

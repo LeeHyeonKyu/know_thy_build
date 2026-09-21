@@ -91,8 +91,21 @@ const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
  *   ② `gh api user` — **Actions 안에서만** 참(거기서 뷰어는 잡 토큰의 주인 = 봇).
  *   ③ 하트비트 코멘트의 작성자 — 어디서나 참(하트비트는 러너만 쓴다). `comments`를 넘기면 쓴다.
  * 셋 다 비면 `ok:false`다: 빈 목록은 "봇이 없다"로 읽혀 위조된 결정을 통과시킨다.
+ *
+ * ── 1.4.0 핫픽스: **`env`는 주입이지 주변 환경이 아니다** ────────────────────────────────────
+ * `env = process.env`가 기본값이었고, 그래서 이 함수의 답은 호출자가 아무것도 고르지 않아도
+ * **프로세스가 어디서 도는지**에 따라 바뀌었다. 라이브러리 한가운데에서 그런 일이 일어나면 그
+ * 판정은 호출자의 코드만 읽어서는 재구성할 수 없다 — publish.yml의 validate 잡에서 정확히 그렇게
+ * 터졌다: Actions 러너의 `GITHUB_ACTIONS=true`가 ②의 문을 열었고, 가짜 `viewerLogin`이 팩토리 계정
+ * 목록에 들어가 11개 테스트가 **러너에서만** 빨개졌다(노트북에서는 영원히 초록이다).
+ *
+ * 그래서 `env`는 **필수 주입**이다(`classifyFinding`의 `ownerOf`/`isInstalled`와 같은 규율):
+ * 빠뜨리면 던진다. `process.env`라는 기본값은 CLI·워크플로의 **진입점 한 줄**에만 산다.
  */
-export async function resolveFactoryLogins({ gh, env = process.env, comments = null }) {
+export async function resolveFactoryLogins({ gh, env, comments = null }) {
+  if (!env || typeof env !== "object") {
+    throw new TypeError("resolveFactoryLogins: env is required — pass the caller's env explicitly (`process.env` belongs at the CLI/workflow entry point, not here); reading the ambient environment from inside made this function answer differently on a runner than on a laptop");
+  }
   const logins = [];
   /**
    * ── T7: **그 팩토리 계정이 사람 계정인가.** ────────────────────────────────────────────────

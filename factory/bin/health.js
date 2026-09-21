@@ -618,9 +618,18 @@ export async function runHealth({
   gh, root = ".", repo = null, since = null, N = DEFAULT_N, now = new Date().toISOString(),
   issues = null, commentsByIssue = null, records = null, prByIssue = null, run: runner = run,
   harness = null, manifest = null, roleFile = new Map(), upstream = null,
-  rehearsal = null, route = routeFindings, publish = true,
+  rehearsal = null, route = routeFindings, publish = true, env,
   identity = undefined, factoryLogins = undefined, log = console.error,
 } = {}) {
+  /**
+   * 1.4.0 핫픽스 — `env`는 **필수 주입**이다(`process.env`라는 기본값은 `assembleHealth` 한 줄에만
+   * 산다). 이 값 하나가 `resolveFactoryLogins`의 ② 갈래(= Actions의 뷰어가 곧 봇이다)를 열고 닫으므로,
+   * 주변 환경에서 읽으면 같은 입력이 러너와 노트북에서 다른 보고서를 낸다. 늦게 조용히 갈리는 것보다
+   * 여기서 소리 내어 죽는 편이 낫다.
+   */
+  if (!env || typeof env !== "object") {
+    throw new TypeError("runHealth: env is required — pass the caller's env explicitly (assembleHealth supplies it; tests must pass `{}` for a laptop or `{ GITHUB_ACTIONS: \"true\" }` for a runner)");
+  }
   const actions = [];
   const loaded = await collect({ gh, run: runner, cwd: root, issues, commentsByIssue, records, prByIssue, since, log });
   const signals = healthSignals({ ...loaded, harness, N });
@@ -640,7 +649,7 @@ export async function runHealth({
     // `values()`는 숫자·문자열 두 키에 같은 배열을 담고 있으므로 중복을 접는다(같은 코멘트를 두 번 세지 않는다).
     const allComments = [...new Set([...byIssue.values()])].flat();
     let who = { ok: false, reason: "resolveFactoryLogins was never reached" };
-    try { who = await resolveFactoryLogins({ gh, comments: allComments }); }
+    try { who = await resolveFactoryLogins({ gh, env, comments: allComments }); }
     catch (e) { who = { ok: false, reason: `resolveFactoryLogins threw — ${e?.message || e}` }; }
     if (theIdentity === undefined) theIdentity = who.identity ?? null;
     if (logins === undefined) logins = who.ok ? who.logins : null;
@@ -887,6 +896,8 @@ export async function assembleHealth({
     deps: {
       gh, root: theRoot, repo, N, since, run: runner,
       harness, manifest, roleFile, upstream: upstreamRepoOf(harness), rehearsal,
+      // 조립이 본 바로 그 `env`를 싣는다 — `runHealth`가 주변 환경을 다시 읽는 일이 없게(핫픽스).
+      env,
     },
   };
 }
