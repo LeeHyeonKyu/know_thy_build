@@ -2162,6 +2162,24 @@ test("test_36_human_merged_routing: without the routing wiring the arm still rec
   expect(actions.some((a) => a.kind === "human-merged-routed")).toBe(false);
 });
 
+/**
+ * r1 리뷰 cf2 — **빠진 배선은 소리를 낸다.** 위 테스트가 고정하는 것은 "라우팅이 없어도 반영은 끝난다"
+ * 까지다: `bin/sweep.js`에서 `routeMerged` 인자 하나가 리팩터로 떨어져도 액션 목록은 그 사실을 한 줄도
+ * 말하지 않았다 — KTB-23과 이 티켓이 열린 바로 그 모양(조용한 건너뜀)이고, 같은 팔의 dep 검사
+ * (`human-merged-skipped … wiring incomplete: <dep>`)가 이미 그 답을 갖고 있었다.
+ * 여기서는 그 줄이 **반영된 이슈/PR을 지목한다**: 운영자가 로그에서 "이 머지의 증거는 나르지 않았다"를
+ * 읽을 수 있어야 다음 회고가 그것을 다시 볼지 결정할 수 있다.
+ */
+test("test_36_human_merged_routing: dropping the routing wiring is loud — the skip line names the dep and the issue it reconciled (human-merged)", async () => {
+  const actions = await sweep(mergedArgs({ gh: demo45Gh(), now: "2026-09-21T02:00:00Z" }));
+  expect(actions).toContainEqual({
+    kind: "human-merged-skipped", issue: 45, pr: 46,
+    reason: expect.stringContaining("wiring incomplete: routeMerged"),
+  });
+  // 그리고 그 침묵이 판정을 되돌리지는 않는다 — 되돌릴 수 없는 반영은 그대로 일어난다(fail-safe).
+  expect(actions).toContainEqual({ kind: "human-merged", issue: 45, pr: 46, mergedBy: "LeeHyeonKyu", closed: false });
+});
+
 // ── item 3 — 그래프 밖 라벨은 상태 라벨을 받지 않는다 ────────────────────────────────────────
 /** 데모 #45가 실제로 받은 전이 코멘트 하나 — 전이 이력의 재료는 실물에서 가져온다. */
 const REAL_TRANSITION_COMMENT = DEMO45.comments.find((c) => c.body.includes("to=factory:awaiting-review"));

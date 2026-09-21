@@ -1152,6 +1152,16 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
         } catch (e) {
           actions.push({ kind: "error", step: "human-merged-route", issue: it.number, error: String(e.message || e) });
         }
+      } else {
+        /**
+         * r1 리뷰 cf2 — **배선이 없으면 소리를 낸다.** 위 dep 검사(`missingDep`)에 `routeMerged`를
+         * 넣지 않는 이유는 그것이 이 팔의 **판정**에 필요한 조회가 아니기 때문이다: 없어도 반영은
+         * 정확하고, 있어야 할 것은 그 뒤의 운반뿐이다. 그래서 팔을 끄는 대신 반영한 이슈/PR을
+         * 지목해 한 줄 남긴다 — `bin/sweep.js`에서 인자 하나가 떨어지는 리팩터가 조용히 지나가면
+         * 증거는 다음 머지가 있을 때까지(몇 주일 수도 있다) 읽히지 않는다. 그 침묵이 이 티켓이
+         * 열린 이유이고, KTB-23이 남긴 교훈이다.
+         */
+        actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "wiring incomplete: routeMerged — the merge was reconciled but its evidence was not routed this cycle" });
       }
     } catch (e) {
       actions.push({ kind: "error", step: "human-merged", issue: it.number, error: String(e.message || e) });

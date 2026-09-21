@@ -14,8 +14,16 @@ import { backPressure } from "../lib/back-pressure.js";
 import { routeFeedbackArm } from "./retro.js";
 import { readRecordsDetailed } from "../lib/records-branch.js";
 
-/** CLI 진입: 실제 의존성 조립 */
-async function main() {
+/**
+ * CLI 진입: 실제 의존성 조립.
+ *
+ * r1 리뷰 cf2 — **export되는 이유.** 아래 `routeMerged` 조립(레코드 하이드레이트 + `routeFeedbackArm`)과
+ * 그것을 `sweep()`에 넘기는 마지막 한 줄은 이 프로세스에만 산다. `lib/sweeper.js`의 테스트는 그 인자를
+ * `vi.fn()`으로 받으므로 인자가 통째로 떨어져도 전부 초록이었다 — 운영자가 실제로 실행하는 배선에는
+ * 아무 테스트도 닿지 않았다. `factory/test/sweep-bin.test.js`가 협력자들을 모킹하고 이 함수를 **그대로
+ * 실행**해 그 이음매를 고정한다(`bin/retro.js`의 `runRetro`/`routeFeedbackArm`과 같은 패턴).
+ */
+export async function main() {
   // KTB-26 — `--quick`: 스테이지 워크플로의 마지막 스텝이 부르는 모양이다. 상태 복구 팔(in-progress
   // 하트비트 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구)만 돌고, 시간에 묶인 팔
   // (격리 TTL·토큰 만료)은 30분 cron에 그대로 남는다 — 그 둘은 스테이지가 끝난 그 순간에 다시
