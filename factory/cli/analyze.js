@@ -663,7 +663,7 @@ export async function readRecordFor({ run, repo, root, issue, branch = RECORDS_B
  * 이슈를 열었을 것이다. 탐침은 "맞는 것을 고른다"가 아니라 **"틀린 것을 조용히 고른다"**였다.
  * 이제 계약은 이름 하나다: 없으면 그것은 버전 불일치이고, 그 사실을 그대로 말한다.
  */
-async function healthReport({ root, argv, io, run, importHealth }) {
+async function healthReport({ root, argv, io, run, env, importHealth }) {
   let mod;
   try { mod = await importHealth(); }
   catch (e) {
@@ -678,7 +678,7 @@ async function healthReport({ root, argv, io, run, importHealth }) {
     io.err("  `factory analyze <issue>` is unaffected.");
     return 1;
   }
-  const code = await mod.healthCommand({ root, argv: argv.filter((a) => a !== "--health"), io, run });
+  const code = await mod.healthCommand({ root, argv: argv.filter((a) => a !== "--health"), io, run, env });
   return Number.isInteger(code) ? code : 0;
 }
 
@@ -699,8 +699,13 @@ export const ANALYZE_USAGE = [
   "  --json     emit the same data as machine-readable JSON.",
 ].join("\n");
 
+/**
+ * `env`는 **여기가 CLI 진입점이라서** `process.env`를 기본값으로 갖는다(1.4.0 핫픽스). 그 값은
+ * 그대로 `resolveFactoryLogins`로 내려간다 — 그 함수가 주변 환경을 스스로 읽던 시절에는 같은
+ * 입력이 노트북에서와 Actions 러너에서 다른 답을 냈고, 그 차이가 러너에서만 빨간 테스트가 됐다.
+ */
 export async function analyzeCommand({
-  root, argv = [], io, run = realRun,
+  root, argv = [], io, run = realRun, env = process.env,
   gh = null, repo = null, harness = null,
   readRecord = null, loadManifest = loadInstallManifest,
   factoryLogins = undefined, identity = undefined,
@@ -714,7 +719,7 @@ export async function analyzeCommand({
     // 리뷰 nit 9 — `analyze 39 --health`는 두 명령을 한 줄에 적은 것이다. 이슈를 조용히 버리면
     // 사람은 #39의 건강 보고를 받았다고 믿는다(그런 것은 없다). 섞였으면 거절한다.
     if (rest.length) { io.err(`factory analyze: --health takes no issue (got "${rest[0]}") — it aggregates across issues.\n${ANALYZE_USAGE}`); return 1; }
-    return healthReport({ root, argv, io, run, importHealth });
+    return healthReport({ root, argv, io, run, env, importHealth });
   }
 
   if (!rest.length) { io.err(ANALYZE_USAGE); return 1; }
@@ -753,7 +758,7 @@ export async function analyzeCommand({
   let loginNote = null;
   let theIdentity = identity;
   if (logins === undefined) {
-    const who = await resolveFactoryLogins({ gh: ghClient, comments });
+    const who = await resolveFactoryLogins({ gh: ghClient, env, comments });
     logins = who.ok ? who.logins : null;
     if (theIdentity === undefined) theIdentity = who.identity ?? null;
     if (!who.ok) loginNote = `factory logins unresolved (${who.reason}) — human-decision evidence cannot be evaluated, so no self-gate or transition-refused finding can reach [ktb] (the retro refuses it the same way)`;

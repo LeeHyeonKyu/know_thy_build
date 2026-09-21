@@ -112,9 +112,19 @@ function fakeGh({ anchor = null, failUpstream = false } = {}) {
   };
 }
 
+/**
+ * ── 1.4.0 핫픽스: `env`는 **명시**한다 ────────────────────────────────────────────────────────
+ * 이 파일의 판정은 "팩토리 계정이 누구인가"에 달려 있고, 그 답은 Actions 안팎에서 다르다. 그 사실이
+ * `process.env`에 있으면 같은 테스트가 러너에서만 빨개진다(publish.yml validate 잡에서 실제로 그랬다:
+ * 러너의 `GITHUB_ACTIONS=true`가 뷰어 갈래를 열어 T7 배선 테스트의 `identity`가 null이 됐다).
+ * 기본은 노트북(`{}`)이고, Actions를 재는 테스트는 그 사실을 인자로 적는다.
+ */
+const LAPTOP = Object.freeze({});
+const ACTIONS = Object.freeze({ GITHUB_ACTIONS: "true" });
+
 const health = (over = {}) => runHealth({
   gh: over.gh || fakeGh(), root: "/r", repo: "o/r", upstream: "LeeHyeonKyu/know_thy_build",
-  manifest, harness: {}, rehearsal: { ok: true, source: "variable" }, now: dayOf(28),
+  manifest, harness: {}, rehearsal: { ok: true, source: "variable" }, now: dayOf(28), env: LAPTOP,
   ...over,
 });
 const bySignal = (r, s) => r.findings.filter((f) => f.signal === s);
@@ -706,7 +716,7 @@ test("주입 없이 돌면 이슈는 gh에서, 비용은 **records 브랜치**�
     return { code: 0, stdout: "", stderr: "" };
   };
 
-  const r = await runHealth({ gh, run, root: "/r", repo: "o/r", upstream: "u/p", manifest, harness: {}, now: dayOf(28) });
+  const r = await runHealth({ gh, run, root: "/r", repo: "o/r", upstream: "u/p", manifest, harness: {}, now: dayOf(28), env: LAPTOP });
 
   // 이슈 조회는 머지된 것으로 좁혔다(nit 9) — 창은 "최근 머지된 N개"다.
   expect(listed).toContainEqual({ labels: ["factory:merged"], state: "all", limit: 200 });
@@ -728,7 +738,7 @@ test("records 브랜치가 없으면 비용 신호가 비고, 그 사실이 보�
   };
   // `ls-remote --exit-code`는 브랜치가 없으면 **2**로 끝난다 — 그것이 "브랜치 자체가 없다"의 신호다.
   const run = async (cmd, args) => (args.join(" ").startsWith("ls-remote") ? { code: 2, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "" });
-  const r = await runHealth({ gh, run, root: "/r", repo: "o/r", manifest, harness: {}, now: dayOf(28) });
+  const r = await runHealth({ gh, run, root: "/r", repo: "o/r", manifest, harness: {}, now: dayOf(28), env: LAPTOP });
   expect(r.signals.records_source).toBe("no-records-branch");
   expect(r.signals.priced).toBe(0);
   expect(r.signals.cost_vs_risk).toEqual([]);
@@ -956,6 +966,40 @@ test("T7 — 주입 없이 `runHealth`가 스스로 공유 신원을 알아내�
   expect(r.report).toMatch(BANNER);
   expect(r.unverifiable).toHaveLength(1);
   expect(r.unverifiable[0]).toMatchObject({ issue: 3, author: "LeeHyeonKyu" });
+});
+
+/**
+ * ── 1.4.0 핫픽스의 회귀 핀 — 같은 입력, `env`만 다르다 ────────────────────────────────────────
+ *
+ * 위 테스트는 노트북을 잰다: 하트비트 작성자만이 팩토리 계정이고, 그 계정이 사람이라 배너가 선다.
+ * Actions 안에서는 **뷰어도** 팩토리 계정이다 — 그 갈래를 아무 테스트도 재지 않았기 때문에, 러너의
+ * `GITHUB_ACTIONS=true`가 가짜 뷰어를 목록에 넣어 `identity`를 뒤집는 일이 CI가 빨개질 때까지
+ * 보이지 않았다. 이제 두 경로가 둘 다 인자로 서 있고, 어느 쪽도 주변 환경을 읽지 않는다.
+ */
+test("T7/핫픽스 — Actions 안에서는 뷰어도 팩토리 계정이다(그 사실은 `env`가 말한다)", async () => {
+  const w = identityWindow();
+  for (const [n, cs] of [...w.commentsByIssue]) {
+    w.commentsByIssue.set(n, cs.map((c) => ({ ...c, author: "ktb-factory[bot]", authorType: "Bot" })));
+  }
+  const gh = fakeGh();
+  // Actions의 잡 토큰은 봇이다 — 뷰어와 그 **종류**를 둘 다 스텁한다.
+  gh.viewerLogin = async () => "ktb-factory[bot]";
+  gh.viewerType = async () => "Bot";
+
+  const onRunner = await health({ ...w, gh, env: ACTIONS, log: () => {} });
+  expect(onRunner.identity).toEqual({ personal: false, login: "ktb-factory[bot]" });
+  expect(onRunner.login_note).toBeNull();
+  expect(onRunner.report).not.toMatch(BANNER);          // 봇 신원이므로 공유 신원 배너는 없다
+
+  // 같은 입력을 노트북에서: 뷰어는 세지 않는다. 하트비트 작성자만으로도 같은 답에 닿는다.
+  const onLaptop = await health({ ...w, gh, env: LAPTOP, log: () => {} });
+  expect(onLaptop.identity).toEqual({ personal: false, login: "ktb-factory[bot]" });
+  expect(onLaptop.signals.window).toEqual(onRunner.signals.window);
+});
+
+test("runHealth refuses to read the ambient environment — env is a required injection", async () => {
+  await expect(runHealth({ gh: fakeGh(), root: "/r", repo: "o/r", manifest, harness: {} })).rejects.toThrow(/env is required/);
+  await expect(runHealth({ gh: fakeGh(), root: "/r", repo: "o/r", manifest, harness: {}, env: "true" })).rejects.toThrow(/env is required/);
 });
 
 /**

@@ -985,9 +985,17 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
  * 테스트는 초록이고, 빠진 날 dogfood 저장소는 다시 조용해진다.
  */
 export async function routeFeedbackArm({
-  gh, repo, root, harness, issues, commentsByIssue, records, since,
+  gh, repo, root, harness, issues, commentsByIssue, records, since, env,
   loadManifest = loadInstallManifest, log = console.error,
 }) {
+  /**
+   * 1.4.0 핫픽스 — `env`는 **필수 주입**이다(`process.env`라는 기본값은 `main()`의 배선 한 줄에만
+   * 산다). `resolveFactoryLogins`가 주변 환경을 스스로 읽던 시절에는 이 팔의 판정이 프로세스가
+   * 어디서 도는지에 따라 갈렸다 — Actions 러너에서만 빨개지는 테스트가 그 증상이었다.
+   */
+  if (!env || typeof env !== "object") {
+    throw new TypeError("routeFeedbackArm: env is required — pass the caller's env explicitly (retro's main() supplies `process.env`; tests must pass `{}` for a laptop or `{ GITHUB_ACTIONS: \"true\" }` for a runner)");
+  }
   const manifest = await loadManifest(root);
   if (!manifest) {
     return { issues: [], actions: [{ kind: "error", step: "feedback-route", reason: `install manifest not found (no ${INSTALL_MANIFEST_PATH}, no factory/cli/manifest.js) — refusing to classify without the real owner map; run \`npx know-thy-build factory init --upgrade\`` }] };
@@ -1002,7 +1010,7 @@ export async function routeFeedbackArm({
    * 추가 API 왕복은 없다. 그리고 그 코멘트들이 T7의 `identity`에 `authorType`이라는 계정 사실도 준다.
    */
   const allComments = [...(commentsByIssue instanceof Map ? commentsByIssue.values() : Object.values(commentsByIssue || {}))].flat();
-  const who = await resolveFactoryLogins({ gh, comments: allComments });
+  const who = await resolveFactoryLogins({ gh, env, comments: allComments });
   if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
   const routed = await routeMergedIssues({
     gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
@@ -1186,7 +1194,8 @@ async function main() {
      * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
      * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
      */
-    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness }),
+    // `process.env`는 **워크플로 진입점인 여기** 한 줄에만 산다(1.4.0 핫픽스).
+    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness, env: process.env }),
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),
