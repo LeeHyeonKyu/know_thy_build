@@ -575,6 +575,19 @@ function renderFindingsHeader(classified, tl) {
   const n = classified.findings.length;
   const { total = 0, unbound = 0 } = tl?.record_lines || {};
   if (!n) {
+    /**
+     * #36 item 4 — **읽을 줄이 없었던 것을 "깨끗했다"로 보고하지 않는다.** `record_lines.total`은
+     * `gates-detail:`/`context-manifest:`/`self-gate-detail:`만 센다(`:341-346`). 1.4 이전에 쓰인
+     * 기록에는 그 세 줄이 하나도 없어서 total이 0인데, 예전에는 아래 마지막 분기로 떨어져 "이 이슈에서
+     * 문턱을 넘은 것이 없다"고 말했다(#32) — 문턱을 잰 적이 없는데 문턱 얘기를 한 것이다.
+     *
+     * 문장은 **관측된 것**만 단정한다: 줄이 없다는 사실과, 그 흔한 원인. 기록의 나이는 어디에도
+     * 적혀 있지 않으므로 사실로 주장하지 않는다 — 1.4+ 기록도(docs tier, 게이트 전에 끝난 스테이지)
+     * 같은 모양일 수 있고, 그때도 이 문장은 참이다.
+     */
+    if (!total) {
+      return "Findings: none — this run record has no detail lines (`gates-detail:`/`context-manifest:`/`self-gate-detail:`), so attribution is unavailable; records written before 1.4 have none";
+    }
     if (total && unbound === total) {
       return `Findings: none — but all ${total} evidence line(s) in the run record are UNBOUND (no heartbeat comment names their run), so harvest ignored every one of them`;
     }

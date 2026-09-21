@@ -31,7 +31,7 @@ import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
 import { attributionFor } from "../lib/feedback/harvest-findings.js";
-import { stepSummary } from "../lib/gha.js";
+import { errorAnnotation, stepSummary } from "../lib/gha.js";
 import { loadCharter, loadHarness, loadRoles, upstreamRepoOf } from "../lib/config.js";
 import { HEALTH_LABEL } from "../lib/label-catalog.js";
 import { readRecordsDetailed } from "../lib/records-branch.js";
@@ -481,6 +481,16 @@ export function renderHealthReport({ signals, findings = [], advisories = [], re
     + `(역할 규칙은 이 수가 ${signals.N} 이상일 때만 돕니다).`
     + (signals.unbound_handoffs ? ` 바인딩되지 않아 무시한 리뷰 핸드오프 ${signals.unbound_handoffs}개.` : "")
     + (signals.unbound_evidence ? ` 바인딩되지 않아 무시한 evidence 줄 ${signals.unbound_evidence}개.` : ""));
+  /**
+   * #36 item 4 — **0/N의 이유를 말한다.** 귀속이 0인데 바인딩에 실패한 줄도 0이면, 그것은 "리뷰어가
+   * 깨끗했다"도 "하트비트가 어긋났다"도 아니다 — 창의 기록에 읽을 줄이 **아예 없다**는 뜻이다.
+   * 그 사실과 그 흔한 원인(1.4 이전 기록에는 detail 줄이 없다)을 함께 적는다. 기록의 나이를 사실로
+   * 단정하지는 않는다 — 여기서 관측되는 것은 부재뿐이다(`factory analyze`의 같은 문장과 같은 규율).
+   */
+  if (signals.window.length && !signals.attributable && !signals.unbound_evidence) {
+    L.push("");
+    L.push("> 창의 어느 run 기록에도 detail 줄이 없습니다(`review-evidence:`/`gates-detail:`/`context-manifest:`) — 귀속을 판정할 재료 자체가 없습니다. 1.4 이전에 쓰인 기록에는 그 줄이 없습니다(그 창에서는 역할·비용 판정을 하지 않습니다).");
+  }
   L.push("");
   L.push(`비용 기록: \`${signals.records_source}\` — 비용을 읽은 이슈 ${signals.priced}/${signals.window.length}개.`
     + (signals.records_source === "records-branch" ? "" : " 비용 규칙은 run 기록 없이는 아무것도 판정하지 않습니다."));
@@ -865,8 +875,18 @@ export async function assembleHealth({
   root = null, argv = [], run: runner = run, env = process.env, log = console.error,
 } = {}) {
   const { N, since } = parseHealthArgv(argv);
-  const theRoot = root || (await runner("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
-  const repo = env?.FACTORY_REPO || JSON.parse((await runner("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
+  /**
+   * #36 item 5 — **어느 스텝이 실패했는지를 이름으로 말한다.** 예전에는 이 두 줄 중 어느 것이 던져도
+   * 호출자가 `could not assemble the health aggregation — <raw error>` 한 줄만 냈다. `HTTP 401: Bad
+   * credentials`만 보고는 `git rev-parse`인지 `gh repo view`인지, 곧 **작업 트리가 없는 것인지 토큰이
+   * 죽은 것인지** 사람이 가릴 수 없다 — 그 둘은 고치는 자리가 다르다.
+   */
+  const step = async (what, fn) => {
+    try { return await fn(); }
+    catch (e) { throw new Error(`${what} failed — ${e?.message || e}`); }
+  };
+  const theRoot = root || (await step("git rev-parse --show-toplevel", async () => (await runner("git", ["rev-parse", "--show-toplevel"])).stdout.trim()));
+  const repo = env?.FACTORY_REPO || await step("gh repo view --json nameWithOwner", async () => JSON.parse((await runner("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner);
   const gh = makeGh({ run: runner, repo });
 
   let charter;
@@ -985,9 +1005,18 @@ async function main() {
    * `factory:health` 라벨이 없으면 루프는 한 줄도 나르지 못하는데, exit 0 + stdout 한 줄로 끝나면
    * 초록 체크 표시만 주마다 쌓인다 — 아무도 보지 않는 잡의 침묵이 고장의 증상과 똑같아진다.
    */
-  for (const f of r.failures) console.log(`::error title=factory-health::${String(f.reason).replace(/\r?\n/g, " ")}`);
+  healthFailureAnnotations(r.failures);
   process.exit(r.ok ? 0 : 1);
 }
+
+/**
+ * #36 item 5 — 설정·권한 실패의 **주석 한 줄**. 형식은 `errorAnnotation` 한 곳에서만 만든다:
+ * 예전에는 이 호출자가 `::error title=factory-health::…`를 손으로 조립했고, 그러면 그 형식이 바뀌는
+ * 날 여기만 뒤처진다 — 그리고 그 드리프트는 러너에서만 보인다(`HARNESS_LABEL`이 끝낸 그 모양).
+ * 워크플로 명령은 **한 줄**이어야 하므로 개행 접기도 그 함수의 계약이다.
+ */
+export const healthFailureAnnotations = (failures = [], { out } = {}) =>
+  (failures || []).map((f) => errorAnnotation("factory-health", f?.reason ?? f, out ? { out } : {}));
 
 /** 보고서(마크다운)와 신호(JSON)를 `.factory/out/health/`에 남긴다. 실패해도 잡을 죽이지 않는다. */
 export function writeHealthOutputs(root, r, { log = console.error } = {}) {

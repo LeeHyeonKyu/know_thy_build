@@ -6,6 +6,8 @@ import {
   costBaselineFor, diffRiskOf, diffShapeOf, findHealthIssue, healthSignals, runHealth, sameReport, tierOf,
 } from "../bin/health.js";
 import { roleSignalsFor } from "../lib/retro/harvest.js";
+import { healthCommand, healthFailureAnnotations } from "../bin/health.js";   // #36 — 조립 실패 문구/주석의 회귀 핀
+import { errorAnnotation } from "../lib/gha.js";
 import { reviewEvidenceLine } from "../lib/run-record.js";
 import { heartbeat, humanDecisionComment, recordOf, reviewHandoffComment, planHandoffComment, usageRecordLine } from "./helpers/feedback-fixtures.js";
 
@@ -1036,4 +1038,75 @@ test("ADR-028은 배포된 상수를 그대로 적는다(값이 움직이면 이
   expect(section).toMatch(/factory\.identity/);                // ⑥ 공유 신원
   expect(section).toMatch(/factory\.upstream/);                // ⑦ 루프의 출구
   expect(section).toMatch(/KTB #28/);
+});
+
+// ── #36 item 4/5 — 건강 보고서의 두 문장 ──────────────────────────────────────────────────────
+/**
+ * (item 4) 창의 어느 기록에도 `review-evidence:` 줄이 **한 줄도** 없으면 귀속은 0/N이다. 그 0을
+ * "리뷰어가 깨끗했다"로 읽지 않도록, 보고서가 그 이유를 말해야 한다 — 관측된 것(detail 줄이 없다)과
+ * 그 흔한 원인(1.4 이전 기록)을 함께. 바인딩에 실패한 줄이 **있는** 경우와는 다른 문장이다.
+ */
+const preV14Issue = (n, day) => ({
+  issue: { number: n, title: `issue ${n}`, state: "closed", closedAt: dayOf(day), updatedAt: dayOf(day), labels: [{ name: "factory:merged" }, { name: "factory:tier-standard" }] },
+  comments: [heartbeat(n, "review", runnerOf(n, 1), dayOf(day))],
+  // 1.4 이전 기록의 모양: 섹션은 있고 detail 줄은 없다.
+  record: recordOf(n, `issue ${n}`, [{ stage: "review", at: dayOf(day), runner: runnerOf(n, 1), lines: ["verify: ok", "transition: factory:approved"] }]),
+});
+
+test("test_36_record_and_annotation_wording: a window whose records carry no detail lines says attribution is unavailable (wording)", async () => {
+  const built = [preV14Issue(1, 1), preV14Issue(2, 2), preV14Issue(3, 3)];
+  const r = await health({
+    N: 3,
+    issues: built.map((b) => b.issue),
+    commentsByIssue: new Map(built.map((b) => [b.issue.number, b.comments])),
+    records: new Map(built.map((b) => [String(b.issue.number), b.record])),
+  });
+  expect(r.signals.attributable).toBe(0);
+  expect(r.signals.unbound_evidence).toBe(0);
+  expect(r.report).toMatch(/detail 줄이 없습니다/);
+  expect(r.report).toMatch(/1\.4/);
+});
+
+test("test_36_record_and_annotation_wording: a window WITH bound evidence says nothing of the kind (wording)", async () => {
+  const w = windowOf([
+    { n: 1, day: 1, tier: "standard", rounds: [[approve("a"), approve("b")]] },
+    { n: 2, day: 2, tier: "standard", rounds: [[approve("a"), approve("b")]] },
+  ]);
+  const r = await health({ N: 2, ...w });
+  expect(r.signals.attributable).toBe(2);
+  expect(r.report).not.toMatch(/detail 줄이 없습니다/);
+});
+
+/**
+ * (item 5) 건강 잡은 `::error::` 한 줄을 **손으로** 만들고 있었다 — `errorAnnotation`이 있는데도.
+ * 형식이 두 곳에 있으면 한쪽만 고쳐지는 날이 온다(`HARNESS_LABEL`이 끝낸 바로 그 드리프트).
+ * 그리고 조립이 실패하면 **어느 gh 스텝이** 실패했는지를 말해야 한다("could not assemble"만으로는
+ * `git rev-parse`인지 `gh repo view`인지 사람이 알 수 없다).
+ */
+test("test_36_record_and_annotation_wording: the health assemble error names the gh step that failed (wording)", async () => {
+  const errs = [];
+  const io = { out: () => {}, err: (s) => errs.push(String(s)) };
+  const code = await healthCommand({
+    root: null, argv: [], io, env: {},
+    run: async (cmd, args) => {
+      if (cmd === "git") return { code: 0, stdout: "/repo\n", stderr: "" };
+      throw new Error("HTTP 401: Bad credentials");
+    },
+  });
+  expect(code).toBe(1);
+  expect(errs.join("\n")).toMatch(/gh repo view/);
+  expect(errs.join("\n")).toMatch(/401/);
+});
+
+test("test_36_record_and_annotation_wording: the health annotation goes through the shared errorAnnotation helper (wording)", () => {
+  // 개행이 섞인 사유는 **한 줄로 접혀야** 한다 — 접지 않으면 둘째 줄부터 주석에 실리지 않는다.
+  // 손으로 조립한 문자열은 이 계약을 매번 다시 지켜야 하고, 언젠가 지키지 않는다.
+  const out = [];
+  const lines = healthFailureAnnotations([{ reason: "upstream issue failed — HTTP 403\nResource not accessible" }], { out: (l) => out.push(l) });
+  expect(lines).toEqual([errorAnnotation("factory-health", "upstream issue failed — HTTP 403\nResource not accessible", { out: () => {} })]);
+  expect(out).toEqual(lines);
+  expect(lines[0]).not.toMatch(/\r?\n/);
+  expect(lines[0]).toContain("HTTP 403");
+  expect(lines[0]).toContain("Resource not accessible");
+  expect(healthFailureAnnotations([], { out: () => { throw new Error("must not be called"); } })).toEqual([]);
 });

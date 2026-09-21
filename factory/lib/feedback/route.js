@@ -48,6 +48,22 @@ export const feedbackNoteMarker = (fingerprint) => `<!-- factory-feedback fp=${S
  *      full 회차에만 전진하므로 같은 머지를 N번까지 다시 본다). 출처 쪽 마커는 대상의 상태와 무관하다.
  */
 export const routedMarker = (fingerprint) => `<!-- factory-feedback routed fp=${String(fingerprint ?? "none").replace(/\s+/g, "")} -->`;
+
+/**
+ * ── #36 item 4 — **발견 0건의 이유를 말한다** ─────────────────────────────────────────────────
+ *
+ * 라우팅이 읽는 증거는 run 기록의 detail 줄 셋뿐이다(`gates-detail:`·`context-manifest:`·
+ * `self-gate-detail:`). 1.4 이전에 쓰인 기록에는 그 줄이 **하나도 없다** — 그러면 이 팔은 조용히
+ * 0건으로 지나가고, 그 침묵은 "이 머지는 깨끗했다"와 구별되지 않는다(#32).
+ *
+ * 문장은 **관측된 것**을 말한다: 줄이 없다는 사실과, 그 흔한 원인. 기록의 나이를 사실로 단정하지
+ * 않는다 — 여기서 읽을 수 있는 것은 줄의 부재뿐이고, 1.4+ 기록도 스테이지에 따라 그 줄이 없을 수 있다.
+ */
+const DETAIL_LINE_PREFIXES = ["gates-detail:", "context-manifest:", "self-gate-detail:"];
+export const NO_DETAIL_LINES_REASON =
+  "this run record carries no detail lines (`gates-detail:`/`context-manifest:`/`self-gate-detail:`), so attribution is unavailable — records written before 1.4 have none";
+export const hasDetailLines = (record) =>
+  String(record ?? "").split("\n").some((line) => DETAIL_LINE_PREFIXES.some((p) => line.startsWith(p)));
 /** 두 마커를 한 번에 읽는다 — 어느 쪽이 남아 있든 "이 지문은 이 이슈에서 이미 처리했다"는 뜻이다. */
 const ANY_FEEDBACK_MARKER = /<!--\s*factory-feedback (?:routed )?fp=(\S+)\s*-->/g;
 
@@ -275,8 +291,9 @@ export async function routeMergedIssues({
     routed.push(issue.number);
     let findings = [];
     let unverifiable = [];
+    const record = recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "";
     try {
-      const h = harvestIssue({ issue: issue.number, repo, record: recs.get(String(issue.number)) ?? recs.get(issue.number) ?? "", comments, factoryLogins, identity });
+      const h = harvestIssue({ issue: issue.number, repo, record, comments, factoryLogins, identity });
       findings = h.findings;
       unverifiable = h.unverifiable;
     } catch (e) { actions.push(errorAction(issue.number, `harvest failed — ${e?.message || e}`)); continue; }
@@ -288,7 +305,11 @@ export async function routeMergedIssues({
     for (const u of unverifiable) {
       actions.push({ kind: "unverifiable-decision", step: "feedback-route", issue: issue.number, author: u.author, reason: u.reason, detail: u.detail });
     }
-    if (!findings.length) continue;
+    if (!findings.length) {
+      // #36 item 4 — 0건의 이유가 "읽을 줄이 없어서"이면 그렇게 말한다(쓰기는 하지 않는다 — 보고다).
+      if (!hasDetailLines(record)) actions.push({ kind: "no-detail-lines", step: "feedback-route", issue: issue.number, reason: NO_DETAIL_LINES_REASON });
+      continue;
+    }
     const r = await routeFindings({
       gh, repo, issue: issue.number, findings, upstream,
       ownerOf, isInstalled, ktbVersion, harness, existingComments: comments,
