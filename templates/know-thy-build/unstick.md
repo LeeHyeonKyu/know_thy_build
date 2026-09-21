@@ -234,7 +234,18 @@ node .factory/bin/transition.js 118 --human --retry --reason "<왜 인프라성 
 ```
 
 라벨을 명시하고 싶으면 `node .factory/bin/transition.js 118 factory:awaiting-review --human --retry`도
-같다 — 중단 지점과 다르면 **전이 없이 exit 2**이고, 그 사유가 올바른 목적지를 알려 준다.
+같다 — 중단 지점과 다르면 **전이 없이 exit 2**이고, 그 사유가 올바른 목적지를 알려 준다(예:
+`retry target factory:rework is not this issue's resume point — it stopped at factory:in-progress, so the
+only allowed target is factory:planned`). 목적지를 추측하지 말고 그 문장을 읽는다.
+
+**새 클론에서는 팩토리의 의존성을 먼저 깐다.** `transition.js`는 `.factory/lib/config.js`를 통해
+`.factory/package.json`의 패키지(`smol-toml` 등)를 쓰는데, 러너는 `.factory/actions/setup`이 깔아 주지만
+사람의 노트북에는 없다. `Cannot find package 'smol-toml'`이 보이면 아래 한 줄이 답이다(프로젝트의
+`npm ci`로는 깔리지 않는다 — 다른 `package.json`이다):
+
+```bash
+npm install --prefix .factory --no-audit --no-fund
+```
 
 `human-decision:v1` 블록:
 
