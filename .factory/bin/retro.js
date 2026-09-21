@@ -613,6 +613,13 @@ export async function runRetro({ deps, force = false, now } = {}) {
         // `author`는 기각된 결정(`unverifiable-decision`)에서만 온다 — **누구의** 결정이 사라졌는지를
         // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
         for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.author ? ` by @${a.author}` : ""}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
+        /**
+         * #36 item 1 — **0건도 소리를 낸다.** 창에 머지된 이슈가 없으면 이 팔은 run 기록에 한 글자도
+         * 남기지 않았다. 그 침묵은 "나를 것이 없었다"와 "라우팅이 죽었다"를 구별하지 못한다 — 그리고
+         * 1.4.0 도그푸드가 정확히 그 모양이었다: 사람이 머지한 #45가 `isMerged=false`로 보여 창이
+         * 비었는데, 기록에는 그 사실을 말하는 줄이 하나도 없었다(#35).
+         */
+        if (!(r.value.issues || []).length) record("feedback-route: 0 merged issues in window");
         if ((r.value.actions || []).length) applied.push({ step: "feedback-route", issues: r.value.issues || [], actions: r.value.actions });
         /**
          * ── 리뷰 should_fix 2: **라우팅 팔의 실패는 exit 0이되 조용하지 않다** ────────────────
@@ -629,7 +636,10 @@ export async function runRetro({ deps, force = false, now } = {}) {
           announceFailure({
             title: "factory-retro",
             heading: "factory-retro — feedback routing",
-            reasons: [...failures, "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo"],
+            reasons: failures,
+            // #36 item 5 — 이 문장은 **다음에 할 일**이지 고장이 아니다. `reasons`에 넣으면 실패
+            // 하나가 `::error::` 두 줄이 되고 요약에서 `- **failed:**`로 렌더링된다.
+            guidance: "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo",
           });
         }
       }

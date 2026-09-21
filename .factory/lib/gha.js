@@ -41,11 +41,30 @@ export function errorAnnotation(title, reason, { out = console.log } = {}) {
 /**
  * 실패 하나를 **두 채널 모두로** 내보낸다 — 주석 한 줄 + 요약의 불릿 한 줄. `keep-going` 잡(회고처럼
  * fail-safe가 계약인 잡)도 이것만 부르면 exit 코드를 바꾸지 않은 채 소리를 낼 수 있다.
+ *
+ * ── #36 item 5 — **안내는 실패가 아니다**(`guidance`) ────────────────────────────────────────
+ * 1.4.0 도그푸드에서 `bin/retro.js`는 실패 한 줄과 "run `factory doctor` …"라는 **운영 안내**를 같은
+ * `reasons` 배열에 담았다. 그러면 고장 하나가 잡 페이지에 빨간 주석 **둘**로 서고(사람은 고장이 두
+ * 개라고 읽는다), 스텝 요약에는 안내가 `- **failed:**`로 적힌다 — 하지 말라는 것도 아니고 실패한
+ * 것도 아닌 문장이 실패로 렌더링된다.
+ *
+ * 그래서 **주석의 수는 실패의 수**다. 안내는 새 주석을 만들지 않고 **첫 주석에 붙어** 나간다:
+ * 사람이 클릭하는 첫 빨간 줄이 "무엇이 깨졌고 다음에 무엇을 하는가"를 한 번에 말해야 하고, 그것이
+ * 예전 모양이 지키려던 유일한 것이었다(그 줄은 `keep-going` 잡에서 유일하게 눈에 띄는 출력이다).
+ * 스텝 요약에서는 실패와 안내가 **다른 이름**으로 선다 — `- **failed:**` / `- _next:_`.
+ * 안내만 있고 실패가 없으면 아무것도 내지 않는다 — 고장이 없는데 잡 페이지를 빨갛게 만들지 않는다.
  */
-export function announceFailure({ title, reasons = [], heading = null, env = process.env, out = console.log, append = appendFileSync, log = console.error }) {
-  const list = (Array.isArray(reasons) ? reasons : [reasons]).map((r) => String(r ?? "").trim()).filter(Boolean);
+export function announceFailure({ title, reasons = [], guidance = null, heading = null, env = process.env, out = console.log, append = appendFileSync, log = console.error }) {
+  const clean = (v) => (Array.isArray(v) ? v : [v]).map((r) => String(r ?? "").trim()).filter(Boolean);
+  const list = clean(reasons);
   if (!list.length) return 0;
-  for (const r of list) errorAnnotation(title, r, { out });
-  stepSummary(`## ${heading || title}\n\n${list.map((r) => `- **failed:** ${r}`).join("\n")}\n`, { env, append, log, what: title });
+  const next = clean(guidance);
+  const tail = next.length ? ` — next: ${next.join(" · ")}` : "";
+  list.forEach((r, i) => errorAnnotation(title, i === 0 ? `${r}${tail}` : r, { out }));
+  const body = [
+    ...list.map((r) => `- **failed:** ${r}`),
+    ...next.map((g) => `- _next:_ ${g}`),
+  ].join("\n");
+  stepSummary(`## ${heading || title}\n\n${body}\n`, { env, append, log, what: title });
   return list.length;
 }
