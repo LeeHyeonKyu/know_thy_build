@@ -21,13 +21,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 0 | 9 |
+| needs-human | 2 | 9 |
 | rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
 | unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 0.22 | 190.86 |
-| tokens | input 35698 / output 661 | input 3362163 / output 311837 |
+| cost (usd) | 40.64 | 190.86 |
+| tokens | input 216956 / output 20095 | input 3362163 / output 311837 |
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
@@ -256,6 +256,15 @@
           18
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The mirror route (risks 1-2) cannot be turned into a done_when: a done_when cannot grant a write permission, and a guard over `.claude/agents/*.md` or a path whitelist is exactly the test shape rule 3 forbids. It is a precondition, owned by the controller: either the six `.factory/**` paths leave `files_expected` and the mirror commit is made outside the task, or the `factory init --upgrade` non_goal is explicitly lifted with the additive-section clobber accepted and reviewed.",
+        "runs": [
+          36
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -289,6 +298,11 @@
         "issue": 18,
         "reason": "review rounds exhausted (K=3): 2 must_fix remain",
         "at": "2026-09-15T10:25:35Z"
+      },
+      {
+        "issue": 36,
+        "reason": "overlay check refuses any .factory/** change on a self-repo PR (KTB #41); the factory cannot finish this issue — owner reviews PR #39 out of band and merges by hand",
+        "at": "2026-09-21T04:08:48Z"
       }
     ]
   },
@@ -309,17 +323,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 2,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0.224811,
+      "cost_usd": 40.640418,
       "tokens": {
-        "input": 35698,
-        "output": 661
+        "input": 216956,
+        "output": 20095
       }
     }
   },
