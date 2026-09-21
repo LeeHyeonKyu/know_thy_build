@@ -102,7 +102,7 @@ const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * 그래서 `env`는 **필수 주입**이다(`classifyFinding`의 `ownerOf`/`isInstalled`와 같은 규율):
  * 빠뜨리면 던진다. `process.env`라는 기본값은 CLI·워크플로의 **진입점 한 줄**에만 산다.
  */
-export async function resolveFactoryLogins({ gh, env, comments = null }) {
+export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh?.repo ?? null }) {
   if (!env || typeof env !== "object") {
     throw new TypeError("resolveFactoryLogins: env is required — pass the caller's env explicitly (`process.env` belongs at the CLI/workflow entry point, not here); reading the ambient environment from inside made this function answer differently on a runner than on a laptop");
   }
@@ -187,21 +187,30 @@ export async function resolveFactoryLogins({ gh, env, comments = null }) {
     const seen = (comments || []).find((c) => c?.author && String(c.author).toLowerCase() === bot.toLowerCase() && c.authorType != null);
     if (seen) candidates.push({ login: bot, type: String(seen.authorType) });
   }
-  return { ok: true, logins: out, identity: identityOf(candidates, out) };
+  // 1.4.2 (machine user 등록 뒤): "사람 계정인가"는 GitHub의 `type`으로 알 수 없다 — 머신 유저도
+  // `User`다. 러너가 기록한 사실로 말할 수 있는 공유 신원은 하나뿐이다: 팩토리 로그인이 **저장소
+  // 소유자**다. (팩토리 로그인이 `human-decision:v1`을 썼다는 것은 증거가 아니다 — 그것이 곧
+  // 에이전트가 쓴 결정이고, 귀속은 이미 그 이유로 거부한다.)
+  const owner = repo ? String(repo).split("/")[0].toLowerCase() : null;
+  return { ok: true, logins: out, identity: identityOf(candidates, out, { owner }) };
 }
 
 /**
- * 후보 (로그인, 계정 종류) 목록 → `{ personal, login }`.
- *   - 하나라도 `User`다  → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상이 그것이다)
- *   - 종류를 아는 후보가 있고 전부 `User`가 아니다 → `personal: false`
+ * 후보 (로그인, 계정 종류) 목록 + 저장소 소유자 → `{ personal, login }`.
+ *   - 팩토리 로그인 중 하나가 **저장소 소유자**다 → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상)
+ *   - 소유자가 아니고 종류를 아는 후보가 있다 → `personal: false` (머신 유저 `User`든 앱 `Bot`이든 별개 신원)
  *   - 종류를 아는 후보가 없다 → `personal: null` (**모른다**. 추측은 하지 않는다)
- * `Organization`은 사람 계정이 아니다 — GitHub App 설치 토큰(`<app>[bot]`)과 마찬가지로 공유 신원 문제를
- * 만들지 않는다(그 계정으로 사람이 코멘트를 적을 수 없다).
+ * 1.4.2 — 계정 종류 `User`는 "사람 계정"의 증거가 **아니다**: 머신 유저(bot-hk)도 `User`다. 그 규칙은
+ * 등록이 끝난 뒤에도 거짓 경보를 냈다. 러너가 기록한 사실로 말할 수 있는 공유 신원은 "소유자와 같은
+ * 로그인"뿐이다. `Organization`/`<app>[bot]`은 사람이 그 계정으로 코멘트를 적을 수 없다.
  */
-function identityOf(candidates, logins) {
+function identityOf(candidates, logins, { owner = null } = {}) {
+  const all = [...candidates.map((c) => c.login), ...logins].filter(Boolean);
+  // 공유 신원: 팩토리 로그인이 저장소 소유자다(소유자는 사람이고 결정을 쓴다).
+  const shared = owner ? all.find((l) => String(l).toLowerCase() === owner) : null;
+  if (shared) return { personal: true, login: shared };
   const known = candidates.filter((c) => c.type);
-  const person = known.find((c) => c.type === "User");
-  if (person) return { personal: true, login: person.login };
+  // 종류를 아는 후보가 있고 소유자가 아니다 → 머신 유저(`User`)든 앱(`Bot`)이든 별개의 신원이다.
   if (known.length) return { personal: false, login: known[0].login };
   return { personal: null, login: candidates[0]?.login ?? logins[0] ?? null };
 }
@@ -605,6 +614,18 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async viewerType() {
       return (await gh(["api", "user", "--jq", ".type"])).trim() || null;
     },
+    /** 1.4.2 — 임의 계정의 종류(`User`|`Organization`|`Bot`), 없으면 null. doctor가 `FACTORY_BOT_LOGIN`의 계정을 본다. */
+    async userType(login) {
+      try { return (await gh(["api", `users/${login}`, "--jq", ".type"])).trim() || null; }
+      catch { return null; }
+    },
+    /** 1.4.2 — 저장소 변수 하나(없으면 null). 값이 시크릿이 아닌 변수(`FACTORY_BOT_LOGIN`)에만 쓴다. */
+    async variableGet(name) {
+      try { return (await gh(["variable", "get", name, "-R", repo])).trim() || null; }
+      catch { return null; }
+    },
+    /** 이 클라이언트가 가리키는 `owner/repo` — `resolveFactoryLogins`가 소유자를 알아내는 데 쓴다. */
+    repo,
     /**
      * ADR-021 r1 MF-2 a — **지금 이 토큰이 어떤 스코프를 쥐고 있는가.** classic PAT은 응답 헤더
      * `X-OAuth-Scopes`로 자기 스코프를 말한다(`gh api -i`가 헤더를 함께 찍는다). 값 자체는 절대
