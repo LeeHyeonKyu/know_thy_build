@@ -196,12 +196,13 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
 }
 
 /**
- * 후보 (로그인, 계정 종류) 목록 → `{ personal, login }`.
- *   - 하나라도 `User`다  → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상이 그것이다)
- *   - 종류를 아는 후보가 있고 전부 `User`가 아니다 → `personal: false`
+ * 후보 (로그인, 계정 종류) 목록 + 저장소 소유자 → `{ personal, login }`.
+ *   - 팩토리 로그인 중 하나가 **저장소 소유자**다 → `personal: true` (그 로그인을 지목한다 — 사람이 고칠 대상)
+ *   - 소유자가 아니고 종류를 아는 후보가 있다 → `personal: false` (머신 유저 `User`든 앱 `Bot`이든 별개 신원)
  *   - 종류를 아는 후보가 없다 → `personal: null` (**모른다**. 추측은 하지 않는다)
- * `Organization`은 사람 계정이 아니다 — GitHub App 설치 토큰(`<app>[bot]`)과 마찬가지로 공유 신원 문제를
- * 만들지 않는다(그 계정으로 사람이 코멘트를 적을 수 없다).
+ * 1.4.2 — 계정 종류 `User`는 "사람 계정"의 증거가 **아니다**: 머신 유저(bot-hk)도 `User`다. 그 규칙은
+ * 등록이 끝난 뒤에도 거짓 경보를 냈다. 러너가 기록한 사실로 말할 수 있는 공유 신원은 "소유자와 같은
+ * 로그인"뿐이다. `Organization`/`<app>[bot]`은 사람이 그 계정으로 코멘트를 적을 수 없다.
  */
 function identityOf(candidates, logins, { owner = null } = {}) {
   const all = [...candidates.map((c) => c.login), ...logins].filter(Boolean);
