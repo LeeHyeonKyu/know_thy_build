@@ -6,6 +6,10 @@ import { BLOCKED_CAUSES, transitionRefusedMarker } from "../lib/retro/issue-comm
 import { requirementFor } from "../lib/requirements.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { resolveReviewRoster, tierFromReviewHandoff } from "../lib/review-roster.js";
+// #36 — 데모 #45의 실물 타임라인을 읽는 회귀 테스트가 쓰는 것들(기존 import 줄은 건드리지 않는다).
+import { readFileSync } from "node:fs";
+import { latestHandoff } from "../lib/handoff.js";
+import { labelSetRepairedComment } from "../lib/sweeper.js";
 
 const charter = { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } };
 const T = { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 };
@@ -2075,4 +2079,172 @@ test("B-SF6: an unreadable CHARTER limits.K refuses the human-merge reconcile wi
     expect(actions).toContainEqual({ kind: "human-merged-refused", issue: 3, pr: 4, reason: expect.stringContaining("CHARTER limits.K is") });
     expect(gh.comment).toHaveBeenCalledWith(3, expect.stringContaining(humanMergeRefusedComment(3, 4)));
   }
+});
+
+// ══ #36 — 1.4.0 도그푸드가 드러낸 sweeper 결함 셋 ════════════════════════════════════════════
+/**
+ * 회귀 앵커는 데모 #45의 **실제 타임라인**이다(`factory/test/fixtures/demo-45-comments.json`,
+ * `refresh.mjs`가 `gh api`로 받아 적은 원문 — 자르지 않았다). 그 이슈는 `test/smoke.test.js`가
+ * 바뀌어 merge 스테이지가 사람에게 넘겼고(`01:49:54Z`), 사람이 PR #46을 머지했고(`01:52Z`),
+ * sweeper가 `factory:needs-human → factory:merged`를 썼다(`01:53:36Z`).
+ *
+ * 그 사이에 retro는 `pull_request: closed`로 이미 돌아 `isMerged=false`를 봤다 — 그래서 이 이슈의
+ * 23개 코멘트 어디에도 라우팅 영수증(`factory-feedback`)이 없다. 증거는 한 머지 주기를 통째로
+ * 놓쳤고, 다음 머지가 있을 때까지 아무도 그것을 읽지 않는다.
+ */
+const DEMO45 = JSON.parse(readFileSync(new URL("./fixtures/demo-45-comments.json", import.meta.url), "utf8"));
+const MERGED_TRANSITION_45 = "<!-- factory-transition:v1 from=factory:needs-human to=factory:merged";
+/** sweeper가 보기 **직전**의 타임라인 — 사람이 머지했고 sweeper는 아직 한 글자도 쓰지 않았다. */
+const BEFORE_SWEEPER_45 = DEMO45.comments.slice(0, DEMO45.comments.findIndex((c) => c.body.includes(MERGED_TRANSITION_45)));
+const REVIEW_45 = latestHandoff(BEFORE_SWEEPER_45, "review")?.data ?? {};
+
+test("test_36_human_merged_routing: demo #45's real timeline carries no routing receipt — the merge cycle was missed (human-merged)", () => {
+  // 이 이슈가 열린 이유의 실물 증거: 머지됐는데 라우팅 영수증이 하나도 없다.
+  expect(DEMO45.issue.labels.map((l) => l.name)).toContain("factory:merged");
+  expect(DEMO45.comments.some((c) => c.body.includes(MERGED_TRANSITION_45))).toBe(true);
+  expect(DEMO45.comments.some((c) => c.body.includes(humanMergedComment(45, 46)))).toBe(true);
+  expect(DEMO45.comments.some((c) => /<!--\s*factory-feedback/.test(c.body))).toBe(false);
+  // 그리고 sweeper가 판정에 쓰는 재료는 전부 그 원문에서 나온다(손으로 빚지 않았다).
+  expect(REVIEW_45.head_sha).toMatch(/^[0-9a-f]{40}$/);
+  expect(REVIEW_45.tier_effective).toBe("standard");
+});
+
+/** 데모 #45의 실제 코멘트로 세운 gh 더블 — 라벨/PR/상태만 그 저장소가 실제로 갖고 있던 값이다. */
+const demo45Gh = (over = {}) => {
+  const posted = [];
+  return Object.assign({
+    searchIssues: vi.fn(async (l, opts) => (l === "factory:needs-human" && opts?.state === "all"
+      ? [{ number: 45, updatedAt: DEMO45.issue.updatedAt, state: DEMO45.issue.state }] : [])),
+    comments: vi.fn(async () => [...BEFORE_SWEEPER_45, ...posted]),
+    comment: vi.fn(async (_n, body) => { posted.push({ id: 900 + posted.length, body, createdAt: "2026-09-21T01:53:40Z" }); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+    mergedPrForBranch: vi.fn(async () => 46),
+    prMergeInfo: vi.fn(async () => ({ headSha: REVIEW_45.head_sha, mergeSha: "e".repeat(40), mergedAt: "2026-09-21T01:52:01Z", mergedBy: "LeeHyeonKyu" })),
+    commitStatuses: vi.fn(async () => factoryStatuses()),
+    prChecks: vi.fn(async () => greenChecks()),
+    issueState: vi.fn(async () => ({ number: 45, state: "CLOSED", closedAt: DEMO45.issue.closedAt })),
+    closeIssue: vi.fn(async () => {}),
+  }, over);
+};
+
+test("test_36_human_merged_routing: the sweeper routes the evidence in the same cycle it writes factory:merged (human-merged)", async () => {
+  const gh = demo45Gh();
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const routeMerged = vi.fn(async () => ({ issues: [45], actions: [{ kind: "upstream-created", step: "feedback-route", issue: 45, upstream_issue: 61 }] }));
+  const actions = await sweep(mergedArgs({ gh, transition, routeMerged, now: "2026-09-21T02:00:00Z" }));
+
+  expect(actions).toContainEqual({ kind: "human-merged", issue: 45, pr: 46, mergedBy: "LeeHyeonKyu", closed: false });
+  // ① 같은 주기다 — 이 sweep 프로세스가 전이를 쓴 **뒤에**, 다음 `pull_request: closed`를 기다리지 않고 라우팅한다.
+  expect(routeMerged).toHaveBeenCalledTimes(1);
+  expect(routeMerged).toHaveBeenCalledWith(expect.objectContaining({ issue: 45, pr: 46, comments: expect.any(Array) }));
+  expect(actions).toContainEqual({ kind: "human-merged-routed", issue: 45, pr: 46, routed: 1, actions: 1 });
+
+  // ② 같은 머지를 다시 보면 상류에 두 번째 이슈도, 두 번째 코멘트도 없다 — 팔 자체가 no-op이다.
+  const commentsBefore = gh.comment.mock.calls.length;
+  const second = await sweep(mergedArgs({ gh, transition, routeMerged, now: "2026-09-21T02:30:00Z" }));
+  expect(second).toContainEqual({ kind: "human-merged-skipped", issue: 45, pr: 46, reason: "already reconciled" });
+  expect(routeMerged).toHaveBeenCalledTimes(1);
+  expect(transition).toHaveBeenCalledTimes(1);
+  expect(gh.comment.mock.calls.length).toBe(commentsBefore);
+});
+
+test("test_36_human_merged_routing: a routing failure never undoes the reconcile (human-merged)", async () => {
+  const gh = demo45Gh();
+  const routeMerged = vi.fn(async () => { throw new Error("HTTP 403 Resource not accessible by integration"); });
+  const actions = await sweep(mergedArgs({ gh, routeMerged, now: "2026-09-21T02:00:00Z" }));
+  expect(actions).toContainEqual({ kind: "human-merged", issue: 45, pr: 46, mergedBy: "LeeHyeonKyu", closed: false });
+  expect(actions).toContainEqual({ kind: "error", step: "human-merged-route", issue: 45, error: expect.stringContaining("403") });
+});
+
+test("test_36_human_merged_routing: without the routing wiring the arm still reconciles and says nothing was routed (human-merged)", async () => {
+  const actions = await sweep(mergedArgs({ gh: demo45Gh(), now: "2026-09-21T02:00:00Z" }));
+  expect(actions).toContainEqual({ kind: "human-merged", issue: 45, pr: 46, mergedBy: "LeeHyeonKyu", closed: false });
+  expect(actions.some((a) => a.kind === "human-merged-routed")).toBe(false);
+});
+
+// ── item 3 — 그래프 밖 라벨은 상태 라벨을 받지 않는다 ────────────────────────────────────────
+/** 데모 #45가 실제로 받은 전이 코멘트 하나 — 전이 이력의 재료는 실물에서 가져온다. */
+const REAL_TRANSITION_COMMENT = DEMO45.comments.find((c) => c.body.includes("to=factory:awaiting-review"));
+const NOW_36 = "2026-09-21T02:00:00Z";
+const RECENT_36 = "2026-09-21T01:30:00Z";
+const repairArgs = (over = {}) => ({
+  charter, thresholds: T, now: NOW_36, staleMinutes: 30,
+  transition: vi.fn(async ({ to }) => ({ ok: true, to })), release: vi.fn(),
+  quarantine: { quarantined: [] }, saveQuarantine: () => {},
+  ...over,
+});
+const repairGh = (issues, over = {}) => {
+  const writes = [];
+  return Object.assign({
+    writes,
+    searchIssues: vi.fn(async () => []),
+    issueList: vi.fn(async () => issues),
+    comments: vi.fn(async (n) => (issues.find((i) => i.number === n)?.comments ?? [])),
+    comment: vi.fn(async (n, body) => { writes.push({ op: "comment", issue: n, body }); return "u"; }),
+    setFactoryLabel: vi.fn(async (n, l) => { writes.push({ op: "setFactoryLabel", issue: n, label: l }); }),
+    removeLabel: vi.fn(async (n, l) => { writes.push({ op: "removeLabel", issue: n, label: l }); }),
+    patchComment: vi.fn(),
+  }, over);
+};
+
+test("test_36_graph_external_label_repair: a graph-external-only issue gets no state label and no write (graph-external)", async () => {
+  const issues = [
+    // 데모 #44 / KTB #31이 실제로 받은 모양: `factory:health` 하나뿐, 전이 이력 없음.
+    { number: 44, labels: ["factory:health"], updatedAt: RECENT_36, comments: [] },
+    { number: 31, labels: ["factory-improvement"], updatedAt: RECENT_36, comments: [] },
+    // 그리고 **평범한 파이프라인 이슈** — 상태 라벨이 스왑 중간에 날아갔고 전이 이력이 있다.
+    { number: 7, labels: ["factory:tier-standard"], updatedAt: RECENT_36, comments: [REAL_TRANSITION_COMMENT] },
+  ];
+  const gh = repairGh(issues);
+  const actions = await sweep(repairArgs({ gh }));
+
+  // 그래프 밖 이슈에는 라벨도 코멘트도 쓰지 않는다 — 쓰기가 0건이다.
+  expect(gh.writes.filter((w) => w.issue === 44)).toEqual([]);
+  expect(gh.writes.filter((w) => w.issue === 31)).toEqual([]);
+  expect(actions).toContainEqual({ kind: "state-label-restore-skipped", issue: 44, reason: expect.stringContaining("graph-external") });
+  // 평범한 이슈는 그대로 복구된다 — 이 팔이 존재하는 이유를 잃지 않는다.
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(7, "factory:awaiting-review");
+  expect(actions).toContainEqual({ kind: "state-label-restored", issue: 7, to: "factory:awaiting-review" });
+});
+
+test("test_36_graph_external_label_repair: the one-shot repair strips the wrongly-applied state label and leaves everything else alone (graph-external)", async () => {
+  const wrongly = { id: 5, body: `${labelSetRepairedComment(["(none)"], "factory:needs-human")}\n이 이슈에 factory 상태 라벨이 **하나도** 없었습니다`, createdAt: "2026-09-20T00:00:00Z" };
+  const issues = [
+    { number: 44, labels: ["factory:health", "factory:needs-human"], updatedAt: RECENT_36, comments: [wrongly] },
+    // 같은 라벨 쌍이지만 **사람이** 붙인 것(복구 마커가 없다) — 손대지 않는다.
+    { number: 50, labels: ["factory:health", "factory:needs-human"], updatedAt: RECENT_36, comments: [] },
+    // 평범한 파이프라인 이슈 — 상태 라벨을 정당하게 갖고 있다.
+    { number: 7, labels: ["factory:needs-human", "factory:tier-standard"], updatedAt: RECENT_36, comments: [REAL_TRANSITION_COMMENT] },
+  ];
+  const gh = repairGh(issues, { searchIssues: vi.fn(async (l) => issues.filter((i) => i.labels.includes(l))) });
+  const actions = await sweep(repairArgs({ gh }));
+
+  expect(gh.removeLabel).toHaveBeenCalledWith(44, "factory:needs-human");
+  expect(actions).toContainEqual({ kind: "graph-external-unlabelled", issue: 44, removed: ["factory:needs-human"] });
+  expect(gh.removeLabel).not.toHaveBeenCalledWith(50, expect.anything());
+  expect(gh.removeLabel).not.toHaveBeenCalledWith(7, expect.anything());
+  expect(gh.writes.filter((w) => w.issue === 7 && w.op === "removeLabel")).toEqual([]);
+
+  // 멱등: 같은 이슈를 다시 보면(이번에는 라벨이 이미 없다) 두 번째 쓰기가 없다.
+  const cleared = [{ number: 44, labels: ["factory:health"], updatedAt: RECENT_36, comments: [wrongly] }];
+  const gh2 = repairGh(cleared, { searchIssues: vi.fn(async (l) => cleared.filter((i) => i.labels.includes(l))) });
+  await sweep(repairArgs({ gh: gh2 }));
+  expect(gh2.removeLabel).not.toHaveBeenCalled();
+});
+
+test("test_36_narrowing_preserves_arms: a harness issue with a transition history is still repaired (preserves)", async () => {
+  // `factory:harness`는 전이 그래프 밖의 분류이지만 **파이프라인을 실제로 도는** 이슈에 붙는다 —
+  // 면제 목록에 넣으면 라벨 스왑이 끊긴 harness 이슈가 영원히 보이지 않게 된다(s1).
+  const issues = [{ number: 20, labels: ["factory:harness"], updatedAt: RECENT_36, comments: [REAL_TRANSITION_COMMENT] }];
+  const gh = repairGh(issues);
+  const actions = await sweep(repairArgs({ gh }));
+  expect(gh.setFactoryLabel).toHaveBeenCalledWith(20, "factory:awaiting-review");
+  expect(actions).toContainEqual({ kind: "state-label-restored", issue: 20, to: "factory:awaiting-review" });
+});
+
+test("test_36_narrowing_preserves_arms: a graph-external issue that DOES carry a transition history is still repaired (preserves)", async () => {
+  const issues = [{ number: 44, labels: ["factory:health"], updatedAt: RECENT_36, comments: [REAL_TRANSITION_COMMENT] }];
+  const gh = repairGh(issues);
+  const actions = await sweep(repairArgs({ gh }));
+  expect(actions).toContainEqual({ kind: "state-label-restored", issue: 44, to: "factory:awaiting-review" });
 });

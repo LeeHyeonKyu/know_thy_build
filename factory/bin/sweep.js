@@ -11,6 +11,8 @@ import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
 import { sweep } from "../lib/sweeper.js";
 import { backPressure } from "../lib/back-pressure.js";
+import { routeFeedbackArm } from "./retro.js";
+import { readRecordsDetailed } from "../lib/records-branch.js";
 
 /** CLI 진입: 실제 의존성 조립 */
 async function main() {
@@ -97,7 +99,36 @@ async function main() {
   });
   /** KTB-46 r3 must_fix 4 — 머지된 PR의 필수 체크도 확인한다(merge 스테이지와 같은 목록·같은 판정 함수). */
   const requiredChecks = harness?.factory?.required_checks ?? null;
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, quick });
+  /**
+   * KTB #36 item 1 — **사람이 머지한 이슈의 증거를 같은 주기에 나른다**(#35).
+   *
+   * 회고는 `pull_request: closed`에서 뜨는데 그 이벤트는 sweeper가 `factory:merged` 전이를 쓰기
+   * **전에** 도착하므로, 그 회차의 `harvest()`는 이 이슈를 `isMerged=false`로 보고 창에서 뺀다.
+   * 그래서 전이를 쓴 이 프로세스가 곧바로 나른다 — 엔진은 회고와 **같은 것 한 벌**(`routeFeedbackArm`)이고,
+   * 멱등도 그 안의 영수증 마커가 책임진다(회고가 나중에 같은 창을 다시 봐도 두 번 쓰지 않는다).
+   *
+   * 기록 하이드레이트는 **이 팔이 실제로 무언가를 이을 때만** 일어난다(그 일은 드물다): `gates-detail:`
+   * 줄은 run 기록에만 살아서, 코멘트만으로 나르면 게이트 원인이 통째로 빠진 채 영수증만 남는다 —
+   * 그러면 나중에 회고가 그 증거를 다시 볼 길이 영수증 때문에 막힌다.
+   */
+  const routeMerged = async ({ issue: n, comments, mergedAt }) => {
+    let records = new Map();
+    try {
+      const r = await readRecordsDetailed({ run, cwd: root });
+      if (r?.records instanceof Map) records = r.records;
+      else console.warn(`factory: sweep could not hydrate run records for #${n} — routing on comments alone`);
+    } catch (e) { console.warn(`factory: sweep could not hydrate run records for #${n} — ${e?.message || e}`); }
+    return routeFeedbackArm({
+      gh, repo, root, harness,
+      // 이 이슈는 방금 `factory:merged`가 됐다 — `isMerged`가 라벨로 판정하는 바로 그 사실이다.
+      issues: [{ number: n, state: "closed", closedAt: mergedAt ?? new Date().toISOString(), labels: [{ name: "factory:merged" }] }],
+      commentsByIssue: new Map([[n, comments]]),
+      records,
+      since: null,                                      // 창은 이 이슈 하나다 — 커서로 다시 자르지 않는다
+      env: process.env,
+    });
+  };
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, quick });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }
