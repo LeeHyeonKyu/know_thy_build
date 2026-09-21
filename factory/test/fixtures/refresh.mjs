@@ -92,7 +92,59 @@ function grabComments({ repo, issue, out }) {
   console.log(`${out}: ${comments.length} comments, authors ${authors.join(", ")}, viaApp ${[...new Set(comments.map((c) => String(c.viaApp)))].join(", ")}`);
 }
 
+/**
+ * #36 — **사람이 머지한 이슈의 전체 타임라인**. 위의 `grab`은 하트비트만 싣고(건강 잡의 재료가
+ * 그것뿐이라서), `grabComments`는 run 기록을 싣지 않는다. KTB #36 item 1이 고치는 결함은 그 둘
+ * **사이**에 산다: 사람이 PR을 머지한 뒤 sweeper가 `factory:needs-human → factory:merged` 전이를
+ * 쓰기까지의 순서를 봐야 하고(전이 코멘트), 그 순간 라우팅이 읽을 증거는 run 기록에 있다.
+ * 그래서 이슈 메타 + run 기록 + **코멘트 전부**를 원문 그대로 싣는다 — 어느 것도 자르지 않는다.
+ */
+function grabTimeline({ repo, issue, recordRef, out }) {
+  const meta = api(`repos/${repo}/issues/${issue}`);
+  let record = "";
+  try {
+    record = Buffer.from(api(`repos/${repo}/contents/docs/factory/runs/${issue}.md?ref=${recordRef}`).content, "base64").toString("utf8");
+  } catch { record = ""; }
+  const all = JSON.parse(gh(["api", `repos/${repo}/issues/${issue}/comments`, "--paginate", "--slurp"])).flat();
+  const comments = all.map((c) => ({
+    id: c.id,
+    createdAt: c.created_at,
+    author: c.user?.login ?? null,
+    authorType: c.user?.type ?? null,
+    // r1 리뷰 nit 5 — `gh.comments`가 돌려주는 필드를 **하나도 빼지 않는다**(`grabComments`와 같은 모양).
+    // `viaApp`이 빠지면 이 픽스처 위의 신원 판정은 실제 저장소가 주는 것보다 **모르는 상태**에서
+    // 돌게 되고, 그 차이가 초록인 채로 남는다(공유 신원 경보가 바로 이 필드로 갈린다).
+    viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
+    body: c.body || "",
+  }));
+  const doc = {
+    _source: `${repo}#${issue} — issue metadata + docs/factory/runs/${issue}.md on branch ${recordRef} + EVERY issue comment`,
+    _fetched: new Date().toISOString().slice(0, 10),
+    _note: "REAL text, fetched with `gh api`, verbatim and untruncated. Do not hand-edit — regenerate with the script named in _source_script.",
+    _source_script: "factory/test/fixtures/refresh.mjs",
+    issue: {
+      number: meta.number, title: meta.title,
+      state: meta.state, closedAt: meta.closed_at, updatedAt: meta.updated_at,
+      labels: meta.labels.map((l) => ({ name: l.name })),
+    },
+    record,
+    comments,
+  };
+  mkdirSync(out.replace(/\/[^/]+$/, ""), { recursive: true });
+  writeFileSync(out, JSON.stringify(doc, null, 2) + "\n");
+  console.log(`${out}: ${record.length}B record, ${comments.length} comments, labels ${doc.issue.labels.map((l) => l.name).join("+")}`);
+}
+
 const root = process.argv[2];
-grab({ repo: "LeeHyeonKyu/know_thy_build", issue: 18, recordRef: "factory/records", out: `${root}/factory/test/fixtures/ktb-18.json` });
-grab({ repo: "LeeHyeonKyu/own-calendar", issue: 3, recordRef: "factory/records", out: `${root}/factory/test/fixtures/own-calendar-3.json` });
-grabComments({ repo: "LeeHyeonKyu/know-thy-build-demo", issue: 39, out: `${root}/factory/test/fixtures/demo-39-comments.json` });
+/**
+ * `node refresh.mjs <root> [fixture-file-name …]` — 이름을 주면 그 픽스처만 다시 받는다.
+ * 하나를 더할 때 **나머지 픽스처를 통째로 다시 쓰지 않기 위한** 필터다: 다른 저장소의 타임라인이
+ * 그 사이에 움직였으면 무관한 diff가 같은 커밋에 섞이고, 그 diff는 아무도 읽지 않는다.
+ */
+const only = process.argv.slice(3);
+const want = (name) => !only.length || only.includes(name);
+const at = (name) => `${root}/factory/test/fixtures/${name}`;
+if (want("ktb-18.json")) grab({ repo: "LeeHyeonKyu/know_thy_build", issue: 18, recordRef: "factory/records", out: at("ktb-18.json") });
+if (want("own-calendar-3.json")) grab({ repo: "LeeHyeonKyu/own-calendar", issue: 3, recordRef: "factory/records", out: at("own-calendar-3.json") });
+if (want("demo-39-comments.json")) grabComments({ repo: "LeeHyeonKyu/know-thy-build-demo", issue: 39, out: at("demo-39-comments.json") });
+if (want("demo-45-comments.json")) grabTimeline({ repo: "LeeHyeonKyu/know-thy-build-demo", issue: 45, recordRef: "factory/records", out: at("demo-45-comments.json") });

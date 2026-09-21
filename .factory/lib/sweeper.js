@@ -6,6 +6,7 @@ import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
 import { allChecksGreen, GH_NO_CHECKS_RE } from "./gh.js";
 import { latestHandoff } from "./handoff.js";
 import { findOpenHarnessIssueFor } from "./harness-request.js";
+import { HEALTH_LABEL, IMPROVEMENT_LABEL } from "./label-catalog.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -462,6 +463,27 @@ export const MISSING_STATE_SCAN_HOURS = 24;
 const FACTORY_LABEL_PREFIX = "factory:";
 
 /**
+ * ── #36 item 3 — **상태 그래프 밖에 사는 이슈** ──────────────────────────────────────────────
+ *
+ * 데모 #44와 KTB #31은 `<!-- factory-label-set-repaired from=(none) to=factory:needs-human -->`를
+ * 받았다. 둘 다 주간 건강 보고서 이슈(`factory:health`)다 — 파이프라인이 처리하는 일감이 아니라
+ * 사람이 읽는 대화이고, `label-catalog.js`가 "전이 그래프가 모르는 분류"라고 명시한 라벨이다.
+ * 아래 `sweepMissingStateLabel`이 `factory:` 접두 하나만 보고 그것을 "상태 라벨을 잃은 파이프라인
+ * 이슈"로 읽었고, 되살릴 전이가 없으니 `factory:needs-human`으로 올렸다. 주인의 "Needs You" 목록에
+ * 영원히 앉는 이슈가 그렇게 만들어진다.
+ *
+ * **`factory:harness`·`factory:flaky`는 이 목록에 없다** — 이슈 본문의 "graph-external"보다 좁다.
+ * 그 둘도 그래프 밖 분류이지만 **파이프라인을 실제로 도는 이슈**에 상태 라벨과 나란히 붙는다.
+ * 여기서 면제하면, 라벨 스왑이 중간에 끊긴 harness 이슈는 이 팔이 존재하는 이유인 그 보이지 않는
+ * 상태(`:514-520`)에 영원히 남는다. 그래서 면제는 **이름으로 둘**이고, 그마저도 무조건이 아니다:
+ * 전이 이력이 있으면(= 이 이슈가 실제로 그래프를 돈 적이 있으면) 복구는 그대로 일어난다.
+ */
+export const GRAPH_EXTERNAL_LABELS = Object.freeze([HEALTH_LABEL, IMPROVEMENT_LABEL]);
+const isGraphExternal = (label) => GRAPH_EXTERNAL_LABELS.includes(String(label));
+/** 이 이슈가 들고 있는 factory 라벨들(접두가 없는 `factory-improvement`도 factory 라벨이다). */
+const factoryLabelsOf = (labels) => (labels || []).map(String).filter((l) => l.startsWith(FACTORY_LABEL_PREFIX) || isGraphExternal(l));
+
+/**
  * L1 "라벨-셋 복구" 팔(KTB-18): 사람이 손으로 라벨을 API로 직접 붙이면(§12.4의 skip-attempt
  * probe가 재현한 것처럼 `factory:approved`를 `backlog` 위에 얹는 식) `run-stage`는 상태가
  * 모호하다는 이유로 조용히 물러난다(전이 없음 — 어느 라벨이 "진짜"인지 판단할 근거가 없다).
@@ -533,14 +555,28 @@ async function sweepMissingStateLabel({ gh, nowMs, actions }) {
     try {
       const labels = it.labels || [];
       if (labels.some((l) => STATES.has(l))) continue;
-      const hasFactoryLabel = labels.some((l) => String(l).startsWith(FACTORY_LABEL_PREFIX));
+      /**
+       * #36 item 3 — **라벨의 존재가 아니라 그래프 안에 있다는 사실**을 묻는다. 예전 조건은
+       * `factory:` 접두 하나였고, 그래서 `factory:health` 이슈 하나가 "상태 라벨을 잃은 파이프라인
+       * 이슈"로 읽혔다(데모 #44 · KTB #31). 그래프 밖 라벨**만** 들고 있는 이슈는 이 팔의 권한
+       * 밖이므로, 나머지 판정을 전이 이력에 맡긴다 — 이력이 있으면 그 이슈는 실제로 그래프를 돈
+       * 적이 있고, 그때는 아래에서 그대로 복구된다(s1이 지키라고 한 방향).
+       */
+      const factoryLabels = factoryLabelsOf(labels);
+      const inGraph = factoryLabels.length > 0 && !factoryLabels.every(isGraphExternal);
       const updatedMs = Date.parse(it.updatedAt ?? "");
-      // factory 라벨이 하나도 없으면 후보는 "전이 코멘트가 있는 이슈"뿐인데, 그건 코멘트를 읽어야
-      // 알 수 있다 — 그래서 최근 갱신분으로만 좁힌다(위 MISSING_STATE_SCAN_HOURS).
-      if (!hasFactoryLabel && !(Number.isFinite(updatedMs) && nowMs - updatedMs <= MISSING_STATE_SCAN_HOURS * 3600e3)) continue;
+      // 그래프 안에 있다는 라벨 증거가 없으면 후보는 "전이 코멘트가 있는 이슈"뿐인데, 그건 코멘트를
+      // 읽어야 알 수 있다 — 그래서 최근 갱신분으로만 좁힌다(위 MISSING_STATE_SCAN_HOURS).
+      if (!inGraph && !(Number.isFinite(updatedMs) && nowMs - updatedMs <= MISSING_STATE_SCAN_HOURS * 3600e3)) continue;
       const comments = await gh.comments(it.number);
       const last = lastTransition(comments);
-      if (!hasFactoryLabel && !last) continue;                  // factory가 손댄 적 없는 평범한 이슈
+      if (!inGraph && !last) {
+        // 그래프 밖 라벨만 든 이슈는 **소리를 내고** 건너뛴다 — 조용한 건너뜀은 이 파일이 고치려는 병이다.
+        if (factoryLabels.length) {
+          actions.push({ kind: "state-label-restore-skipped", issue: it.number, reason: `graph-external only (${factoryLabels.join(", ")}) — this issue does not live in the state graph` });
+        }
+        continue;                                               // factory가 손댄 적 없는 평범한 이슈
+      }
       const to = last && STATES.has(last.to) ? last.to : LABEL_SET_REPAIR_TARGET;
       const prior = comments.filter((c) => String(c?.body ?? "").includes(NO_STATE_MARKER_PREFIX)).at(-1);
       if (prior && nowMs - Date.parse(prior.createdAt) <= MISSING_STATE_DEDUPE_MS) {
@@ -552,6 +588,70 @@ async function sweepMissingStateLabel({ gh, nowMs, actions }) {
       actions.push({ kind: "state-label-restored", issue: it.number, to });
     } catch (e) {
       actions.push({ kind: "error", step: "missing-state-label", issue: it.number, error: String(e.message || e) });
+    }
+  }
+}
+
+/** #36 item 3 — 잘못 붙은 상태 라벨을 **떼어냈다**는 마커(이 팔 자신의 dedupe). */
+export const graphExternalUnlabelledComment = (issue, labels) => `<!-- factory-sweeper graph-external-unlabelled issue=${issue} removed=${labels.join(",")} -->`;
+
+/**
+ * ── #36 item 3 (후반부) — **이미 붙어 버린 라벨을 떼는 일회성 복구** ─────────────────────────
+ *
+ * 위의 좁히기는 **다음** 사고를 막을 뿐이다. 데모 #44와 KTB #31에는 이미 `factory:needs-human`이
+ * 붙어 있고, 그 이슈들은 주인의 "Needs You" 목록에 앉은 채 아무도 손대지 않으면 영원히 거기 있는다.
+ * 손으로 떼면 기록이 남지 않으므로(그리고 데모 저장소는 여러 개다) 스크립트가 뗀다 — sweep이 곧
+ * 그 스크립트다(`node .factory/bin/sweep.js`).
+ *
+ * 술어는 **일부러 좁다**(d2: 이 팔이 잘못 넓으면 살아 있는 파이프라인 이슈의 상태 라벨을 지운다 —
+ * 정확히 `sweepMissingStateLabel`이 고치려던 사고를 정리 코드가 만드는 것이다). 다섯을 모두 만족해야
+ * 라벨을 뗀다:
+ *   1. 열려 있고 그래프 밖 라벨(`factory:health`/`factory-improvement`)을 들고 있다.
+ *   2. 상태 라벨이 붙어 있다.
+ *   3. 그 둘 말고 **다른 factory 라벨이 없다** — `factory:harness`가 하나라도 있으면 손대지 않는다.
+ *   4. 전이 이력이 **없다** — 이력이 있으면 이 이슈는 실제로 그래프를 돈 적이 있고, 그 라벨은 진짜다.
+ *   5. 그 라벨을 **sweeper의 라벨 복구가 붙였다**는 마커가 이슈에 있다(`from=(none)`). 사람이 손으로
+ *      붙인 라벨은 사람이 뗀다 — 스크립트가 사람의 판단을 지우지 않는다.
+ * 조건 하나라도 어긋나면 사유와 함께 한 줄을 남기고 넘어간다(조용한 건너뜀은 없다).
+ */
+async function sweepGraphExternalStateLabel({ gh, actions }) {
+  if (typeof gh.searchIssues !== "function" || typeof gh.removeLabel !== "function") return;
+  const seen = new Set();
+  for (const external of GRAPH_EXTERNAL_LABELS) {
+    let issues;
+    try { issues = await gh.searchIssues(external, { state: "open" }); }
+    catch (e) { actions.push({ kind: "error", step: "graph-external-label", label: external, error: String(e.message || e) }); continue; }
+    for (const it of issues || []) {
+      if (seen.has(it.number)) continue;                        // 두 라벨을 다 든 이슈를 두 번 보지 않는다
+      seen.add(it.number);
+      try {
+        const labels = (it.labels || []).map(String);
+        const states = labels.filter((l) => STATES.has(l));
+        if (!states.length) continue;                           // 고칠 것이 없다 — 조용해도 되는 유일한 경우
+        const others = factoryLabelsOf(labels).filter((l) => !isGraphExternal(l) && !STATES.has(l));
+        if (others.length) {
+          actions.push({ kind: "graph-external-label-skipped", issue: it.number, reason: `carries other factory labels (${others.join(", ")}) — this issue may really be in the pipeline` });
+          continue;
+        }
+        const comments = await gh.comments(it.number);
+        if (comments.some((c) => String(c?.body ?? "").includes(graphExternalUnlabelledComment(it.number, states)))) {
+          actions.push({ kind: "graph-external-label-skipped", issue: it.number, reason: "already unlabelled" });
+          continue;
+        }
+        if (lastTransition(comments)) {
+          actions.push({ kind: "graph-external-label-skipped", issue: it.number, reason: "carries a transition history — this issue really did run the graph" });
+          continue;
+        }
+        if (!comments.some((c) => String(c?.body ?? "").includes(NO_STATE_MARKER_PREFIX))) {
+          actions.push({ kind: "graph-external-label-skipped", issue: it.number, reason: "the state label was not applied by the sweeper's label repair — a person put it there, a person takes it off" });
+          continue;
+        }
+        for (const l of states) await gh.removeLabel(it.number, l);
+        await gh.comment(it.number, `${graphExternalUnlabelledComment(it.number, states)}\n이 이슈는 전이 그래프 밖의 이슈(\`${external}\`)인데 sweeper의 라벨 복구가 상태 라벨 \`${states.join(", ")}\`을 붙여 두었습니다 — 되살릴 전이가 없어 \`${LABEL_SET_REPAIR_TARGET}\`로 올린 것이고, 그래서 주인의 "Needs You" 목록에 앉아 있었습니다(KTB #36). 그 라벨을 떼었습니다. 이 이슈가 하는 일(보고서/개선 제안)은 그대로입니다.`);
+        actions.push({ kind: "graph-external-unlabelled", issue: it.number, removed: states });
+      } catch (e) {
+        actions.push({ kind: "error", step: "graph-external-label", issue: it.number, error: String(e.message || e) });
+      }
     }
   }
 }
@@ -829,7 +929,7 @@ async function verifyMergedPrEvidence({ gh, factoryLogins, requiredChecks, pr, i
  * 그리고 모든 건너뜀은 **소리를 낸다**(`human-merged-skipped` + 사유) — 조용한 건너뜀이 바로
  * KTB-23과 이 티켓이 열린 이유다.
  */
-async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, requiredChecks, charter, nowMs, actions }) {
+async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, requiredChecks, charter, nowMs, actions, routeMerged = null }) {
   // 구형 배선(테스트 더블 포함)은 조용히 건너뛴다 — 다른 dep들과 같은 계약("안 쓴다"와 "에러났다"를
   // 가른다). 조회 함수가 하나라도 없으면 증거를 **확인할 수 없다**는 뜻이고, 확인할 수 없는 것을
   // 통과로 읽지 않는다: 이 팔은 아예 돌지 않는다.
@@ -1027,6 +1127,42 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
         actions.push({ kind: "error", step: "human-merged-close", issue: it.number, error: String(e.message || e) });
       }
       actions.push({ kind: "human-merged", issue: it.number, pr, mergedBy: info.mergedBy ?? null, closed });
+      /**
+       * ── #36 item 1 — **같은 주기에 증거를 나른다**(#35) ──────────────────────────────────
+       *
+       * 회고는 `pull_request: closed`에서 뜬다. 사람이 보호 경로 PR을 머지하면 그 이벤트는 이 팔이
+       * `factory:merged`를 쓰기 **전에** 도착하므로, 그때의 `harvest()`는 `isMerged=false`를 보고
+       * 이 이슈를 창에서 통째로 뺀다(`lib/retro/harvest.js`의 판정). 데모 #45가 그랬다: 머지된
+       * 이슈인데 라우팅 영수증이 한 줄도 없다. 증거는 다음 머지가 있을 때까지 읽히지 않고, 그
+       * 다음 머지가 몇 주 뒤일 수도 있다.
+       *
+       * 새 트리거를 다는 대신(그 길은 `.github/workflows/**`라 이 저장소의 어떤 이슈 유형도 쓸 수
+       * 없다 — k1) **이 프로세스가 직접 나른다**: 전이가 성공한 바로 그 자리에서, 손에 이미 들고
+       * 있는 코멘트로. 멱등은 라우팅 팔 자신의 것이다(`routedMarker` 영수증) — 회고가 나중에 같은
+       * 창을 다시 봐도 두 번째 상류 이슈도, 두 번째 코멘트도 생기지 않는다.
+       *
+       * **fail-safe다**: 라우팅이 죽어도 이 팔의 판정(되돌릴 수 없는 `factory:merged`)은 이미 일어났고
+       * 되돌리지 않는다. 실패는 error 한 줄로 남고 다음 회고가 같은 증거를 다시 본다.
+       */
+      if (typeof routeMerged === "function") {
+        try {
+          const routed = await routeMerged({ issue: it.number, pr, comments, mergedAt: info.mergedAt ?? null });
+          actions.push({ kind: "human-merged-routed", issue: it.number, pr, routed: (routed?.issues ?? []).length, actions: (routed?.actions ?? []).length });
+          for (const a of routed?.actions ?? []) if (a?.kind === "error") actions.push({ kind: "error", step: "human-merged-route", issue: it.number, error: String(a.reason ?? "feedback routing failed") });
+        } catch (e) {
+          actions.push({ kind: "error", step: "human-merged-route", issue: it.number, error: String(e.message || e) });
+        }
+      } else {
+        /**
+         * r1 리뷰 cf2 — **배선이 없으면 소리를 낸다.** 위 dep 검사(`missingDep`)에 `routeMerged`를
+         * 넣지 않는 이유는 그것이 이 팔의 **판정**에 필요한 조회가 아니기 때문이다: 없어도 반영은
+         * 정확하고, 있어야 할 것은 그 뒤의 운반뿐이다. 그래서 팔을 끄는 대신 반영한 이슈/PR을
+         * 지목해 한 줄 남긴다 — `bin/sweep.js`에서 인자 하나가 떨어지는 리팩터가 조용히 지나가면
+         * 증거는 다음 머지가 있을 때까지(몇 주일 수도 있다) 읽히지 않는다. 그 침묵이 이 티켓이
+         * 열린 이유이고, KTB-23이 남긴 교훈이다.
+         */
+        actions.push({ kind: "human-merged-skipped", issue: it.number, pr, reason: "wiring incomplete: routeMerged — the merge was reconciled but its evidence was not routed this cycle" });
+      }
     } catch (e) {
       actions.push({ kind: "error", step: "human-merged", issue: it.number, error: String(e.message || e) });
     }
@@ -1053,7 +1189,7 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, quick = false }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, quick = false }) {
   const actions = [];
   const nowMs = Date.parse(now);
   const stale = staleMinutes * 60e3;
@@ -1069,6 +1205,11 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
    */
   await sweepMissingStateLabel({ gh, nowMs, actions });
   await sweepLabelSetRepair({ gh, actions });
+  /**
+   * #36 item 3 — 위의 두 팔과 같은 가족(상태 라벨 복구)이라 `--quick`에서도 돈다. 그래야 `quick-sweep`
+   * 줄의 `skipped` 목록이 계속 참이다 — 그 줄이 실제와 다르면 run 기록을 읽는 사람이 오해한다(r5 nit 5).
+   */
+  await sweepGraphExternalStateLabel({ gh, actions });
   for (const it of await gh.searchIssues("factory:in-progress")) {
     try {
       const comments = await gh.comments(it.number);
@@ -1213,7 +1354,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   // KTB-46 (r3 nit 3): 사람이 머지 버튼을 누르는 사건은 스테이지 잡이 끝나는 순간과 무관하다 —
   // cron 주기(≤30분) 안에 반영되면 충분하고, 매 스테이지마다 돌리면 주차된 이슈마다 "아직 머지
   // 안 됨" 줄만 쌓인다. 그래서 격리·토큰 만료와 같은 쪽에 선다.
-  await sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, requiredChecks, charter, nowMs, actions });
+  await sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, requiredChecks, charter, nowMs, actions, routeMerged });
   try {
     const pol = applyPolicy(quarantine, { now, thresholds });
     if (pol.returned.length || pol.expired.length) {

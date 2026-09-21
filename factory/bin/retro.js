@@ -33,7 +33,7 @@ import { routeMergedIssues } from "../lib/feedback/route.js";
 import { announceFailure } from "../lib/gha.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
-import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
+import { readRecordsDetailed, recordsSourceOf, syncRecords } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
 import { extractStageArtifact, readTranscript } from "../lib/stage-artifact.js";
 import { harvest as harvestRecords, mergeCandidates } from "../lib/retro/harvest.js";
@@ -608,11 +608,18 @@ export async function runRetro({ deps, force = false, now } = {}) {
      * lessons·통계·커서까지 같이 사라진다.
      */
     if (d.routeFeedback && harvestRan) {
-      const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, since }));
+      const r = await step("feedback-route", () => d.routeFeedback({ issues: h.issues, commentsByIssue: h.commentsByIssue, records: hy.records, recordsSource: hy.recordsSource ?? null, since }));
       if (r.ok && r.value) {
         // `author`는 기각된 결정(`unverifiable-decision`)에서만 온다 — **누구의** 결정이 사라졌는지를
         // 적지 않으면 사람은 이 줄을 읽고도 자기 코멘트를 찾아가지 못한다.
         for (const a of r.value.actions || []) record(`feedback-route: ${a.kind}${a.issue == null ? "" : ` #${a.issue}`}${a.author ? ` by @${a.author}` : ""}${a.upstream_issue ? ` → ${a.repo}#${a.upstream_issue}` : ""}${a.harness_issue ? ` → harness #${a.harness_issue}` : ""}${a.reason ? ` — ${a.reason}` : ""}`);
+        /**
+         * #36 item 1 — **0건도 소리를 낸다.** 창에 머지된 이슈가 없으면 이 팔은 run 기록에 한 글자도
+         * 남기지 않았다. 그 침묵은 "나를 것이 없었다"와 "라우팅이 죽었다"를 구별하지 못한다 — 그리고
+         * 1.4.0 도그푸드가 정확히 그 모양이었다: 사람이 머지한 #45가 `isMerged=false`로 보여 창이
+         * 비었는데, 기록에는 그 사실을 말하는 줄이 하나도 없었다(#35).
+         */
+        if (!(r.value.issues || []).length) record("feedback-route: 0 merged issues in window");
         if ((r.value.actions || []).length) applied.push({ step: "feedback-route", issues: r.value.issues || [], actions: r.value.actions });
         /**
          * ── 리뷰 should_fix 2: **라우팅 팔의 실패는 exit 0이되 조용하지 않다** ────────────────
@@ -629,7 +636,10 @@ export async function runRetro({ deps, force = false, now } = {}) {
           announceFailure({
             title: "factory-retro",
             heading: "factory-retro — feedback routing",
-            reasons: [...failures, "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo"],
+            reasons: failures,
+            // #36 item 5 — 이 문장은 **다음에 할 일**이지 고장이 아니다. `reasons`에 넣으면 실패
+            // 하나가 `::error::` 두 줄이 되고 요약에서 `- **failed:**`로 렌더링된다.
+            guidance: "the retro itself is unaffected (fail-safe); run `factory doctor` and check `factory.upstream` — the factory token needs `issues:write` on the upstream repo",
           });
         }
       }
@@ -985,7 +995,7 @@ export function retroClaudeArgs({ harness, charter, ciSettingsPath }) {
  * 테스트는 초록이고, 빠진 날 dogfood 저장소는 다시 조용해진다.
  */
 export async function routeFeedbackArm({
-  gh, repo, root, harness, issues, commentsByIssue, records, since, env,
+  gh, repo, root, harness, issues, commentsByIssue, records, since, env, recordsSource = null,
   loadManifest = loadInstallManifest, log = console.error,
 }) {
   /**
@@ -1013,7 +1023,7 @@ export async function routeFeedbackArm({
   const who = await resolveFactoryLogins({ gh, env, comments: allComments });
   if (!who.ok) log(`factory: retro could not resolve the factory logins — ${who.reason}; human-decision attribution will be refused`);
   const routed = await routeMergedIssues({
-    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since,
+    gh, repo, upstream: upstreamRepoOf(harness), issues, commentsByIssue, records, since, recordsSource,
     ownerOf: manifest.ownerOf, isInstalled: manifest.isInstalled, ktbVersion: manifest.ktbVersion, harness,
     factoryLogins: who.ok ? who.logins : null,
     // 최종 리뷰 nit 5 — 거부 사유의 **문구**는 신원에 달려 있다: 진짜 봇 신원이면 "공유 신원"이
@@ -1113,6 +1123,9 @@ async function main() {
       const stateRel = `docs/factory/runs/${STATE_FILE}`;
       return {
         records: r.records,
+        // r1 리뷰 must_fix 1 — 라우팅 팔이 "0건"의 이유를 말할 때 쓰는 출처 낱말. 회고는 `fetched`가
+        // 참일 때만 여기까지 오지만, 낱말은 같은 함수에서 나와야 health의 문장과 갈리지 않는다.
+        recordsSource: recordsSourceOf(r),
         fetched: r.fetched,
         exists: r.exists,
         stateBlob: r.blobs.get("_retro") ?? null,

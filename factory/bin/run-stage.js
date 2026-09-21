@@ -34,7 +34,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { trustWorkspace } from "./trust-workspace.js";
@@ -173,7 +173,7 @@ export function usageLine(out, progress = null) {
   return progress ? `${line}\n${progressMarker(progress)}` : line;
 }
 
-export async function runStage({ stage, issue, deps, runnerId = "unknown", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
+export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
   const d = deps;
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
@@ -1116,6 +1116,20 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runId
     return 1;
   } finally {
     hb?.stop();
+    /**
+     * #36 item 2 — **이 런이 여기까지 왔다는 것을 기록에 남긴다.** SIGKILL(잡 타임아웃·취소)은 이
+     * `finally`를 실행하지 않으므로, 이 줄의 존재 자체가 "판정 단계를 지나 자기 정리까지 왔다"는 뜻이다.
+     * 해제보다 **먼저** 쓴다: `release()`가 던지거나 오래 걸려도 정리 스텝이 읽을 표식은 이미 디스크에
+     * 있어야 한다. 줄은 스테이지와 러너를 지목한다 — 같은 이슈의 다른 라운드가 이 판정을 대신하지
+     * 못하게(`stageSettled`의 주석, k2).
+     *
+     * **`runRecord`와 다른 dep인 이유**: `runRecord`가 받는 것은 사람이 읽는 *이 런의 이야기*이고,
+     * 이 줄은 다음 프로세스(`abortStage`)만 읽는 **증표**다. 둘을 같은 호출로 섞으면 스테이지 줄을
+     * 세는 쪽(§4.2.1의 순서 핀, 기록 파서)이 이 증표를 이야기의 일부로 세게 된다. 배선하지 않은
+     * 호출자는 증표를 잃을 뿐이고, 그 손실의 방향은 안전하다 — 표식이 없으면 정리는 **크게** 읽는다.
+     */
+    try { await d.settleRecord?.(stageSettledLine({ stage, runnerId, attempt: runAttempt })); }
+    catch (e) { console.error(`factory: settled marker write failed — ${e?.message || e}`); }
     const released = await d.release();
     if (released === false) {                                         // 락이 남으면 다음 런이 통째로 막힌다 — 조용히 지나치지 않는다
       console.error(`factory: lock release failed for issue ${issue}`);
@@ -1151,6 +1165,62 @@ export const IN_FLIGHT_LABEL = { triage: "factory:queue", plan: "factory:ready",
 export const abortedLine = (status) => `aborted: ${status} (job timeout or cancel)`;
 
 /**
+ * ── #36 item 2 — **이 런이 자기 발로 끝났다는 표식** ────────────────────────────────────────
+ *
+ * 정리 스텝은 `if: always() && job.status != 'success'`로 돈다(KTB-24 / yml-lint의
+ * `aborted-cleanup-step`). 그 조건에는 **판정을 정상적으로 낸 런**도 들어온다: RED verdict는
+ * `runStage`가 exit 2로 끝내므로 잡이 실패가 되고, 그러면 정리 스텝이 뜬다. 데모 #45가 그 모양을 두
+ * 번 남겼다 — implement 런 `gha-35548711917`이 `verify: FAIL`과 전이를 마친 **뒤에**
+ * `aborted: failure (job timeout or cancel)` + `aborted: there is no lock on this issue …`를 받았고,
+ * merge 런도 사람-머지 판정을 쓴 뒤 같은 두 줄을 받았다. 둘 다 취소된 적도 타임아웃된 적도 없다(#33).
+ *
+ * 스텝을 **끄지는 않는다**(d3): 그 스텝이 없으면 SIGKILL된 잡의 락이 고아로 남는다. 바꾸는 것은
+ * 그 줄이 하는 **주장**뿐이다. 그런데 `abortStage`는 별도의 프로세스라 `runStage`의 결과를 볼 창이
+ * run 기록 하나뿐이고, 그 파일은 이슈 하나에 **모든 스테이지·모든 라운드·모든 러너**의 섹션이 쌓이는
+ * append-only 로그다(`lib/run-record.js`). "이 이슈 기록에 판정이 있는가"로 물으면 한 번이라도 리뷰를
+ * 돈 이슈는 언제나 참이 되고, 그러면 **진짜로** SIGKILL된 2라운드가 1라운드의 판정에 가려 정상 종료로
+ * 기록된다 — 데모 #15의 서명(고아 락 + 조용한 45분)이 그렇게 사라진다.
+ *
+ * 그래서 표식은 **스테이지와 러너를 함께 지목한다**: `runStage`의 `finally`가 자기 이름으로 한 줄을
+ * 남기고(SIGKILL에서는 `finally`가 돌지 않으므로 그 줄이 없다), `abortStage`는 자기 `stage`+`runnerId`의
+ * 줄만 본다. 읽지 못하면 **크게** 읽는다(아래 `stageSettled`) — 모르는 것은 정상 종료가 아니다.
+ *
+ * ── r1 리뷰 should_fix 3 — **재실행 시도(attempt)도 지목한다.** ────────────────────────────────
+ * 워크플로가 싣는 러너 식별자는 `gha-${{ github.run_id }}`인데, GHA의 **Re-run**은 `run_id`를 바꾸지
+ * 않는다(바뀌는 것은 `run_attempt`뿐이다). 그리고 run 기록은 `factory/records`에 누적되므로 attempt 2의
+ * 체크아웃에는 attempt 1이 쓴 `stage-settled:` 줄이 그대로 하이드레이트된다 — 곧 attempt 2가 **진짜로**
+ * SIGKILL돼도 정리 스텝이 그 줄을 보고 "판정을 낸 런의 사후 정리"로 읽고 `in-progress → blocked`
+ * 전이를 통째로 건너뛴다. 그러면 이슈는 in-flight 라벨을 문 채로 앉아 있고, 그것이 KTB-24가 고친
+ * 바로 그 침묵이다. 그래서 줄은 `attempt=`를 싣고, 읽는 쪽도 자기 attempt의 줄만 본다.
+ */
+export const STAGE_SETTLED_PREFIX = "stage-settled:";
+/**
+ * 이 런의 재실행 시도 번호. **env는 주입**이다(1.4.0 핫픽스와 같은 규율) — 라이브러리 한가운데가
+ * 주변 환경을 읽으면 같은 입력이 러너와 노트북에서 다른 답을 낸다. 값이 없거나 숫자가 아니면 `"1"`:
+ * 재실행이 아닌 런이 곧 1차 시도이고, 쓰는 쪽과 읽는 쪽이 **같은 기본값**을 써야 배선 이전의
+ * 워크플로에서도 표식이 그대로 성립한다(그 배선의 부재는 `yml-lint`의 `runner-id-consistent`가 본다).
+ */
+export const runAttemptOf = (env = {}) => {
+  const v = String(env?.FACTORY_RUN_ATTEMPT ?? env?.GITHUB_RUN_ATTEMPT ?? "").trim();
+  return /^\d+$/.test(v) ? v : "1";
+};
+export const stageSettledLine = ({ stage, runnerId, attempt = "1" }) =>
+  `${STAGE_SETTLED_PREFIX} stage=${stage} runner=${runnerId} attempt=${attempt} — this run reached its own cleanup; anything recorded after it is post-verdict cleanup, not an abort`;
+/**
+ * 이 기록이 **이 스테이지의 이 러너의 이 시도**가 자기 발로 끝났다고 말하는가. 기본은 `false`(fail
+ * loud): 기록을 못 읽었거나, 러너를 지목할 수 없거나(`unknown`·빈 값), 배선이 없으면 모르는 것이고 —
+ * 모르는 정리 경로는 KTB-24가 존재하는 이유인 그 소리를 그대로 낸다(dw6).
+ */
+export function stageSettled(record, { stage, runnerId, attempt = "1" } = {}) {
+  if (typeof record !== "string" || !record) return false;
+  if (!stage || !runnerId || runnerId === "unknown") return false;
+  return record.split("\n").includes(stageSettledLine({ stage, runnerId, attempt }));
+}
+/** 판정을 이미 낸 런의 정리 한 줄. `abortedLine`과 **정확히 하나**만 기록에 선다. */
+export const postVerdictCleanupLine = (status) =>
+  `post-verdict cleanup: job ended ${status} after this run recorded its verdict — not an abort (KTB #36)`;
+
+/**
  * r1 nit 8 — run 기록은 `factory/records` 브랜치로 커밋되는 **영구적이고 공유되는** 산출물이다.
  * 원격 명령의 stderr를 그대로 실으면 그 안의 URL(토큰이 박힌 remote URL 포함)과 여러 줄짜리 덤프가
  * 그대로 남는다. 지금 배선(`actions/checkout`의 `http.extraheader`)에서는 토큰이 git 에러 문구에
@@ -1175,9 +1245,17 @@ export const ABORT_CAUSE = { cancelled: "cancelled", timed_out: "timeout" };
  * 순서가 요점이다: 전이를 **먼저** 하고 락을 나중에 푼다. 반대로 하면 락이 풀린 직후 sweeper/dispatch가
  * 같은 이슈를 물고 들어와, 이 프로세스가 막 세우려던 blocked 라벨과 경쟁한다.
  */
-export async function abortStage({ stage, issue, status = "cancelled", runnerId = "unknown", deps }) {
+export async function abortStage({ stage, issue, status = "cancelled", runnerId = "unknown", runAttempt = "1", deps }) {
   const d = deps;
-  const lines = [abortedLine(status)];
+  /**
+   * #36 item 2 — **이 런이 이미 판정을 냈는가.** 읽기는 best-effort이고, 실패는 곧 "모른다"이며,
+   * 모르는 것은 `false`(=크게 읽는다)다. 이 한 줄이 바꾸는 것은 아래 줄들의 **주장**뿐이다 —
+   * 락 해제도, 기록 한 줄도, 그대로 일어난다(d3 / KTB-24 계약).
+   */
+  let settled = false;
+  try { settled = stageSettled(await d.readRunRecord?.(), { stage, runnerId, attempt: runAttempt }); }
+  catch { settled = false; }
+  const lines = [settled ? postVerdictCleanupLine(status) : abortedLine(status)];
   /**
    * 소유자를 **먼저** 묻는다(ADR-020 KTB-28). KTB-28 (b)로 claim 거부가 `exit 2`가 된 뒤, 이 스텝은
    * "락을 못 잡아 물러난 런"에서 **반드시** 돈다(잡이 실패로 끝나므로). 그 런은 이 스테이지를 단 한
@@ -1206,7 +1284,16 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
   const foreign = held?.present === true && Boolean(held.runner) && held.runner !== runnerId;
   const unknown = !owned && !foreign;                               // 조회 실패·present:null·제목 파싱 실패·구형 배선
   const want = IN_FLIGHT_LABEL[stage];
-  if (foreign) {
+  /**
+   * #36 item 2 — 판정을 이미 낸 런은 **전이 판단을 통째로 건너뛴다.** 그 런의 전이는 이미 일어났고
+   * (`runStage`가 `transition: <to>`를 기록했다), 여기서 라벨을 다시 보면 그 자리에서 나오는 문장은
+   * 전부 거짓이다: 락은 이 런이 방금 스스로 풀었으니 "소유를 증명할 수 없다"가 되고, 라벨은 이미
+   * 움직였으니 "스테이지가 이미 떠났다"가 된다. 그래서 정리 경로가 남기는 **판정 줄은 정확히 하나**다.
+   * 락 처리(아래)와 기록 쓰기는 그대로 돈다 — 건너뛰는 것은 주장이지 청소가 아니다.
+   */
+  if (settled) {
+    // 아무 줄도 더하지 않는다: 위의 `postVerdictCleanupLine` 하나가 이 경로의 전부다.
+  } else if (foreign) {
     lines.push(`aborted: lock is held by ${held.runner} — this run never owned the stage, no transition`);
   } else if (held?.present === false) {
     lines.push("aborted: there is no lock on this issue — this run cannot prove it owned the stage, no transition");
@@ -2108,12 +2195,14 @@ async function main() {
   const root = (await run("git", ["rev-parse", "--show-toplevel"])).stdout.trim();
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
+  // r1 should_fix 3 — `process.env`는 **이 배선 한 줄**에만 산다(`runAttemptOf`는 env를 받는다).
+  const runAttempt = runAttemptOf(process.env);
   const gh = makeGh({ run, repo });
   // 정리 경로는 CHARTER도 harness도 읽지 않는다 — 읽을 것이 하나라도 깨져 있으면 고아 락이 그대로
   // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
   if (abortedStatus !== null) {
     process.exit(await abortStage({
-      stage, issue, status: abortedStatus, runnerId,
+      stage, issue, status: abortedStatus, runnerId, runAttempt,
       deps: {
         issueLabels: async () => (await gh.issue(issue)).labels,
         transition: ({ to, reason, cause }) => transition({ gh, issue, to, reason, cause, stage }),
@@ -2121,6 +2210,12 @@ async function main() {
         lockHolder: () => lockHolder({ run, cwd: root, issue }),
         release: () => release({ run, cwd: root, issue }),
         runRecord: (lines) => appendRunRecord({ root, issue, title: "", stage, runnerId, lines }),
+        /**
+         * #36 item 2 — 이 스텝의 유일한 창. `runStage`는 다른 프로세스였고, 그것이 자기 발로 끝났는지를
+         * 말해 주는 것은 같은 워크스페이스의 run 기록뿐이다. 읽기 실패는 던지지 않고 `null`이다 —
+         * `stageSettled`가 그것을 "모른다"로 읽고 크게(aborted) 기록한다.
+         */
+        readRunRecord: () => { try { return readFileSync(join(root, "docs/factory/runs", `${issue}.md`), "utf8"); } catch { return null; } },
         syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})` }),
       },
     }));
@@ -2667,6 +2762,10 @@ async function main() {
       try { return (await loadInstallManifest(root))?.ktbVersion ?? null; } catch { return null; }
     })(),
     runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
+    // #36 item 2 — 정리 스텝이 읽는 증표. 같은 파일에 쓰지만 `runRecord`와 **다른 문**이다(위 주석).
+    // r1 nit 6 — 그 문은 섹션 헤더를 세우지 않는다(`appendRunRecordLine`): 증표가 이 런의 섹션 수를
+    // 부풀리면 `factory analyze`가 사람에게 한 개 더 많은 섹션을 보여 준다.
+    settleRecord: (line) => appendRunRecordLine({ root, issue, title: ctxCache?.issue?.title || "", line }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
     release: () => release({ run, cwd: root, issue }),
     syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} (${runnerId})` }),
@@ -2677,7 +2776,7 @@ async function main() {
         : undefined,
     }),
   };
-  process.exit(await runStage({ stage, issue, deps, runnerId }));
+  process.exit(await runStage({ stage, issue, deps, runnerId, runAttempt }));
 }
 export const PREV = { plan: "triage", implement: "plan", review: "implement", merge: "review" };
 export function prevStage(stage) { return PREV[stage] || null; }

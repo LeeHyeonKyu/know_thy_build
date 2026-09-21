@@ -6,6 +6,8 @@ import {
   costBaselineFor, diffRiskOf, diffShapeOf, findHealthIssue, healthSignals, runHealth, sameReport, tierOf,
 } from "../bin/health.js";
 import { roleSignalsFor } from "../lib/retro/harvest.js";
+import { healthCommand, healthFailureAnnotations } from "../bin/health.js";   // #36 — 조립 실패 문구/주석의 회귀 핀
+import { errorAnnotation } from "../lib/gha.js";
 import { reviewEvidenceLine } from "../lib/run-record.js";
 import { heartbeat, humanDecisionComment, recordOf, reviewHandoffComment, planHandoffComment, usageRecordLine } from "./helpers/feedback-fixtures.js";
 
@@ -1036,4 +1038,121 @@ test("ADR-028은 배포된 상수를 그대로 적는다(값이 움직이면 이
   expect(section).toMatch(/factory\.identity/);                // ⑥ 공유 신원
   expect(section).toMatch(/factory\.upstream/);                // ⑦ 루프의 출구
   expect(section).toMatch(/KTB #28/);
+});
+
+// ── #36 item 4/5 — 건강 보고서의 두 문장 ──────────────────────────────────────────────────────
+/**
+ * (item 4) 창의 어느 기록에도 `review-evidence:` 줄이 **한 줄도** 없으면 귀속은 0/N이다. 그 0을
+ * "리뷰어가 깨끗했다"로 읽지 않도록, 보고서가 그 이유를 말해야 한다 — 관측된 것(detail 줄이 없다)과
+ * 그 흔한 원인(1.4 이전 기록)을 함께. 바인딩에 실패한 줄이 **있는** 경우와는 다른 문장이다.
+ */
+const preV14Issue = (n, day) => ({
+  issue: { number: n, title: `issue ${n}`, state: "closed", closedAt: dayOf(day), updatedAt: dayOf(day), labels: [{ name: "factory:merged" }, { name: "factory:tier-standard" }] },
+  comments: [heartbeat(n, "review", runnerOf(n, 1), dayOf(day))],
+  // 1.4 이전 기록의 모양: 섹션은 있고 detail 줄은 없다.
+  record: recordOf(n, `issue ${n}`, [{ stage: "review", at: dayOf(day), runner: runnerOf(n, 1), lines: ["verify: ok", "transition: factory:approved"] }]),
+});
+
+test("test_36_record_and_annotation_wording: a window whose records carry no detail lines says attribution is unavailable (wording)", async () => {
+  const built = [preV14Issue(1, 1), preV14Issue(2, 2), preV14Issue(3, 3)];
+  const r = await health({
+    N: 3,
+    issues: built.map((b) => b.issue),
+    commentsByIssue: new Map(built.map((b) => [b.issue.number, b.comments])),
+    records: new Map(built.map((b) => [String(b.issue.number), b.record])),
+  });
+  expect(r.signals.attributable).toBe(0);
+  expect(r.signals.unbound_evidence).toBe(0);
+  expect(r.report).toMatch(/detail 줄이 없습니다/);
+  expect(r.report).toMatch(/1\.4/);
+});
+
+/**
+ * ── r1 리뷰 should_fix 2 — **읽지 못한 창에 "줄이 없다"고 적지 않는다** ────────────────────────
+ *
+ * 위 문장의 전제는 "기록을 읽었다"이다. `records_source`가 `no-records-branch`/
+ * `records-branch-unreadable`이면 이 창의 기록은 한 글자도 손에 없었고, 그때 "detail 줄이 없습니다"는
+ * 관측이 아니라 추측이며 곧바로 "1.4 이전 기록"이라는 두 번째 추측을 낳는다. 두 출처를 **각각** 고정한다:
+ * 읽기는 실제 `readRecordsDetailed`를 통과하고(가짜 `run`이 git의 종료 코드를 준다), 그 차이가
+ * 보고서의 문장을 가른다. 창의 이슈들은 둘 다 `preV14Issue`이므로 귀속은 0/N으로 같다 — 곧 갈리는
+ * 것은 귀속이 아니라 **기록을 읽었는가**뿐이다.
+ */
+const unreadWindow = (run) => {
+  const built = [preV14Issue(1, 1), preV14Issue(2, 2), preV14Issue(3, 3)];
+  const gh = {
+    ...fakeGh(),
+    async issueList(q) { return q.labels?.includes("factory:health") ? [] : built.map((b) => b.issue); },
+    async comments(n) { return built.find((b) => b.issue.number === n)?.comments ?? []; },
+    async comment() {}, async createIssue() { return 900; }, async reopenIssue() {},
+  };
+  return health({ gh, run, N: 3 });
+};
+
+test("test_36_record_and_annotation_wording: a window whose records were NOT READ says exactly that, not 'pre-1.4' (wording)", async () => {
+  // ① 브랜치 자체가 없다 — `ls-remote --exit-code`가 2로 끝나는 것이 그 신호다.
+  const none = await unreadWindow(async (cmd, args) => (args.join(" ").startsWith("ls-remote")
+    ? { code: 2, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "" }));
+  expect(none.signals.records_source).toBe("no-records-branch");
+  expect(none.signals.attributable).toBe(0);
+  expect(none.signals.unbound_evidence).toBe(0);
+  expect(none.report).toMatch(/읽지 못했습니다/);
+  expect(none.report).toContain("no-records-branch");
+  expect(none.report).not.toMatch(/detail 줄이 없습니다/);
+  expect(none.report).not.toMatch(/1\.4 이전에 쓰인 기록/);
+
+  // ② 브랜치는 **있는데** fetch가 실패했다 — 토큰·네트워크의 모양이다. 여기서도 문장은 같다.
+  const broken = await unreadWindow(async (cmd, args) => {
+    const a = args.join(" ");
+    if (a.startsWith("ls-remote")) return { code: 0, stdout: "deadbeef\trefs/heads/factory/records\n", stderr: "" };
+    return { code: 1, stdout: "", stderr: "fatal: could not read from remote" };
+  });
+  expect(broken.signals.records_source).toBe("records-branch-unreadable");
+  expect(broken.signals.attributable).toBe(0);
+  expect(broken.report).toMatch(/읽지 못했습니다/);
+  expect(broken.report).toContain("records-branch-unreadable");
+  expect(broken.report).not.toMatch(/detail 줄이 없습니다/);
+});
+
+test("test_36_record_and_annotation_wording: a window WITH bound evidence says nothing of the kind (wording)", async () => {
+  const w = windowOf([
+    { n: 1, day: 1, tier: "standard", rounds: [[approve("a"), approve("b")]] },
+    { n: 2, day: 2, tier: "standard", rounds: [[approve("a"), approve("b")]] },
+  ]);
+  const r = await health({ N: 2, ...w });
+  expect(r.signals.attributable).toBe(2);
+  expect(r.report).not.toMatch(/detail 줄이 없습니다/);
+});
+
+/**
+ * (item 5) 건강 잡은 `::error::` 한 줄을 **손으로** 만들고 있었다 — `errorAnnotation`이 있는데도.
+ * 형식이 두 곳에 있으면 한쪽만 고쳐지는 날이 온다(`HARNESS_LABEL`이 끝낸 바로 그 드리프트).
+ * 그리고 조립이 실패하면 **어느 gh 스텝이** 실패했는지를 말해야 한다("could not assemble"만으로는
+ * `git rev-parse`인지 `gh repo view`인지 사람이 알 수 없다).
+ */
+test("test_36_record_and_annotation_wording: the health assemble error names the gh step that failed (wording)", async () => {
+  const errs = [];
+  const io = { out: () => {}, err: (s) => errs.push(String(s)) };
+  const code = await healthCommand({
+    root: null, argv: [], io, env: {},
+    run: async (cmd, args) => {
+      if (cmd === "git") return { code: 0, stdout: "/repo\n", stderr: "" };
+      throw new Error("HTTP 401: Bad credentials");
+    },
+  });
+  expect(code).toBe(1);
+  expect(errs.join("\n")).toMatch(/gh repo view/);
+  expect(errs.join("\n")).toMatch(/401/);
+});
+
+test("test_36_record_and_annotation_wording: the health annotation goes through the shared errorAnnotation helper (wording)", () => {
+  // 개행이 섞인 사유는 **한 줄로 접혀야** 한다 — 접지 않으면 둘째 줄부터 주석에 실리지 않는다.
+  // 손으로 조립한 문자열은 이 계약을 매번 다시 지켜야 하고, 언젠가 지키지 않는다.
+  const out = [];
+  const lines = healthFailureAnnotations([{ reason: "upstream issue failed — HTTP 403\nResource not accessible" }], { out: (l) => out.push(l) });
+  expect(lines).toEqual([errorAnnotation("factory-health", "upstream issue failed — HTTP 403\nResource not accessible", { out: () => {} })]);
+  expect(out).toEqual(lines);
+  expect(lines[0]).not.toMatch(/\r?\n/);
+  expect(lines[0]).toContain("HTTP 403");
+  expect(lines[0]).toContain("Resource not accessible");
+  expect(healthFailureAnnotations([], { out: () => { throw new Error("must not be called"); } })).toEqual([]);
 });

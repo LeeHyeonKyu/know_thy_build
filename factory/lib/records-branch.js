@@ -294,3 +294,28 @@ export async function readRecordsDetailed({ run, cwd, branch = "factory/records"
 export async function readRecords(args) {
   return (await readRecordsDetailed(args)).records;
 }
+
+/**
+ * ── #36 r1 리뷰 must_fix 1/should_fix 2 — **빈 Map의 이유를 한 낱말로.** ───────────────────────
+ *
+ * `readRecordsDetailed`는 절대 던지지 않으므로 실패한 읽기와 "브랜치에 기록이 없다"가 호출자에게는
+ * **같은 빈 Map**으로 도착한다. 그 둘을 가르지 못하면 보고가 거짓말을 한다: 하이드레이트가 죽은 회차가
+ * "이 기록에는 읽을 줄이 없다(1.4 이전 기록이다)"로 나간다 — 실제로는 13줄짜리 1.4.0 기록이었다.
+ *
+ * 그래서 결과를 **출처 한 낱말**로 접고, 그 낱말을 보고하는 두 자리(`bin/health.js`의 배너,
+ * `lib/feedback/route.js`의 0건 사유)가 같은 함수로 읽는다 — 판정이 두 벌이면 같은 창을 두 도구가
+ * 다르게 설명한다. 모르는 경우는 전부 `records-branch-unreadable`이다(모르는 것은 "없음"이 아니다).
+ */
+export function recordsSourceOf(detailed) {
+  if (!detailed) return "records-branch-unreadable";
+  if (detailed.records instanceof Map && detailed.records.size) return "records-branch";
+  if (detailed.exists === false) return "no-records-branch";
+  if (!detailed.fetched) return "records-branch-unreadable";
+  return "records-branch-empty";
+}
+
+/**
+ * 그 낱말이 **기록을 실제로 읽었다**고 말하는가. `injected`는 호출자가 손에 들고 있던 기록을 그대로
+ * 넘긴 경우다(테스트·`factory analyze`) — 읽기는 이미 끝났다.
+ */
+export const recordsWereRead = (source) => source === "records-branch" || source === "injected";
