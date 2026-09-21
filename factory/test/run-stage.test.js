@@ -3435,3 +3435,140 @@ test("Task 1 (리뷰 SF-5): the plan-repair turn's context is manifested too", a
   expect(manifests).toHaveLength(2);
   expect(JSON.parse(manifests[1].slice("context-manifest: ".length)).fields).toContain("plan_repair");
 });
+
+// ── #36 item 2 — 판정을 이미 낸 런을 "취소됐다"고 적지 않는다 ─────────────────────────────────
+/**
+ * 회귀 앵커는 데모 #45의 **실제 run 기록**이다(`factory/test/fixtures/demo-45-comments.json`,
+ * `refresh.mjs`가 `gh api`로 받아 적은 원문). 그 파일에는 이 이슈가 고치는 두 줄이 두 번 들어 있다:
+ * implement 런 `gha-35548711917`은 `verify: FAIL`을 적고 전이까지 마친 **뒤에**
+ * `aborted: failure (job timeout or cancel)` + `aborted: there is no lock on this issue …`를 받았고,
+ * merge 런 `gha-35552142800`도 `merge: existing tests modified or deleted — human merge required:`
+ * 뒤에 똑같이 받았다. 둘 다 취소된 적도 타임아웃된 적도 없다.
+ *
+ * 그 기록은 **여러 스테이지·여러 러너**의 섹션이 쌓인 append-only 로그이기도 하다 — 그래서 아래
+ * 테스트들은 "이 이슈 기록에 판정이 있는가"가 아니라 "이 **스테이지의 이 러너**가 자기 발로
+ * 끝냈는가"만이 옳은 판별식이라는 것도 함께 고정한다.
+ */
+const DEMO_45 = JSON.parse(readFileSync(new URL("./fixtures/demo-45-comments.json", import.meta.url), "utf8"));
+
+const demo45Workspace = () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb36-run-"));
+  const path = join(root, "docs/factory/runs/45.md");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, DEMO_45.record);              // 원문 그대로 — 손대지 않는다
+  return { root, path, read: () => readFileSync(path, "utf8") };
+};
+
+test("test_36_abort_line_after_verdict: a run that already recorded its verdict is never reported as aborted (demo #45 real record)", async () => {
+  // 데모 #45가 실제로 받은 두 줄 — 이 테스트가 없애는 대상이다.
+  expect(DEMO_45.record).toContain("aborted: failure (job timeout or cancel)");
+  expect(DEMO_45.record).toContain("aborted: there is no lock on this issue — this run cannot prove it owned the stage, no transition");
+
+  const ws = demo45Workspace();
+  const runner = "gha-36-red";
+  // ① 이 런은 정상적으로 판정을 냈다: RED verdict → exit 2 (데모 #45 implement 런이 한 그대로).
+  const staged = baseDeps({
+    verifyStage: () => ({ ok: false, reasons: ["gates RED: failing=prove-test"], data: {} }),
+    transition: async () => ({ ok: true, to: "factory:needs-human" }),
+    runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "implement", runnerId: runner, lines }),
+    settleRecord: (line) => appendRunRecord({ root: ws.root, issue: 45, stage: "implement", runnerId: runner, lines: [line] }),
+  });
+  expect(await runStage({ stage: "implement", issue: 45, deps: staged, runnerId: runner })).toBe(2);
+
+  // ② exit 2 때문에 잡은 `job.status != success`가 되고 정리 스텝이 돈다(`if: always()` — KTB-24).
+  const lines = [];
+  const d = abortDeps({
+    issueLabels: async () => ["factory:in-progress"],
+    lockHolder: async () => ({ present: false }),                       // runStage의 finally가 이미 풀었다
+    runRecord: vi.fn((l) => lines.push(...l)),
+    readRunRecord: async () => ws.read(),
+  });
+  expect(await abortStage({ stage: "implement", issue: 45, status: "failure", runnerId: runner, deps: d })).toBe(0);
+
+  expect(lines.some((l) => l.includes("job timeout or cancel"))).toBe(false);
+  expect(lines.some((l) => l.includes("cannot prove it owned the stage"))).toBe(false);
+  // 정리 경로가 남기는 판정 줄은 **정확히 하나**다.
+  expect(lines.filter((l) => /^(aborted:|post-verdict cleanup:)/.test(l))).toHaveLength(1);
+  expect(lines[0]).toMatch(/^post-verdict cleanup: /);
+  expect(lines[0]).toContain("failure");
+  // KTB-24 계약(d3)은 그대로다: 기록은 언제나 한 번, 락은 언제나 다뤄지고, 전이는 하지 않는다.
+  expect(d.runRecord).toHaveBeenCalledTimes(1);
+  expect(lines.some((l) => l.startsWith("lock:"))).toBe(true);
+  expect(d.transition).not.toHaveBeenCalled();
+  expect(d.syncRecords).toHaveBeenCalled();
+});
+
+test("test_36_abort_line_after_verdict: a post-verdict cleanup that still holds the lock still releases it (aborted claim dropped, not the cleanup)", async () => {
+  const ws = demo45Workspace();
+  const runner = "gha-36-held";
+  await runStage({
+    stage: "review", issue: 45, runnerId: runner,
+    deps: baseDeps({
+      verifyStage: () => ({ ok: true, reasons: [], data: { decision: "approved", verdicts: [] } }),
+      transition: async () => ({ ok: true, to: "factory:approved" }),
+      release: async () => false,                                       // finally의 해제가 실패했다
+      runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: runner, lines }),
+      settleRecord: (line) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: runner, lines: [line] }),
+    }),
+  });
+  const lines = [];
+  const d = abortDeps({
+    issueLabels: async () => ["factory:awaiting-review"],
+    lockHolder: async () => ({ present: true, runner, subject: `lock issue=45 stage=review runner=${runner} at=t`, sha: "a".repeat(40) }),
+    runRecord: (l) => lines.push(...l),
+    readRunRecord: async () => ws.read(),
+  });
+  expect(await abortStage({ stage: "review", issue: 45, status: "failure", runnerId: runner, deps: d })).toBe(0);
+  expect(d.release).toHaveBeenCalled();
+  expect(lines).toContain("lock: released after abort");
+  expect(lines[0]).toMatch(/^post-verdict cleanup: /);
+  expect(d.transition).not.toHaveBeenCalled();                          // 스테이지가 이미 전이를 마쳤다
+});
+
+test("test_36_narrowing_preserves_arms: a run killed before its verdict is still aborted + escalated, even when an earlier round already settled", async () => {
+  const ws = demo45Workspace();
+  const settled = "gha-36-round1";
+  // 라운드 1은 자기 발로 끝났다 — 기록에 자기 이름의 표식을 남긴다.
+  await runStage({
+    stage: "review", issue: 45, runnerId: settled,
+    deps: baseDeps({
+      verifyStage: () => ({ ok: true, reasons: [], data: { decision: "rework", verdicts: [] } }),
+      transition: async () => ({ ok: true, to: "factory:rework" }),
+      runRecord: (lines) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: settled, lines }),
+      settleRecord: (line) => appendRunRecord({ root: ws.root, issue: 45, stage: "review", runnerId: settled, lines: [line] }),
+    }),
+  });
+  // 라운드 2는 SIGKILL됐다(데모 #15의 모양) — finally가 돌지 않았으므로 이 런의 표식은 없다.
+  const lines = [];
+  const d = abortDeps({ issueLabels: async () => ["factory:awaiting-review"], runRecord: (l) => lines.push(...l), readRunRecord: async () => ws.read() });
+  expect(await abort({ stage: "review", issue: 15, status: "cancelled", deps: d })).toBe(0);
+  expect(lines).toContain("aborted: cancelled (job timeout or cancel)");
+  expect(lines).toContain("aborted: factory:awaiting-review → factory:blocked");
+  expect(d.transition).toHaveBeenCalledWith({ to: "factory:blocked", reason: "job cancelled — retry via sweeper", cause: "cancelled" });
+  expect(d.release).toHaveBeenCalled();
+  // 판별식은 스테이지+러너로 묶인다 — 다른 라운드의 판정이 이 런을 조용하게 만들지 않는다(k2).
+  expect(ws.read()).toContain(`runner=${settled}`);
+  expect(ws.read()).not.toContain(`runner=${OUR_RUNNER}`);
+});
+
+test("test_36_narrowing_preserves_arms: a cleanup that cannot read the record takes the loud reading", async () => {
+  for (const readRunRecord of [async () => { throw new Error("records unreadable"); }, async () => null, async () => ""]) {
+    const lines = [];
+    const d = abortDeps({ runRecord: (l) => lines.push(...l), readRunRecord });
+    expect(await abort({ stage: "review", issue: 15, status: "timed_out", deps: d })).toBe(0);
+    expect(lines).toContain("aborted: timed_out (job timeout or cancel)");
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  }
+});
+
+test("test_36_narrowing_preserves_arms: runStage's settled marker names the stage and the runner, and stays out of the run's own lines", async () => {
+  const lines = [];
+  const settleLines = [];
+  await runStage({ stage: "plan", issue: 7, runnerId: "gha-777", deps: baseDeps({ runRecord: (l) => lines.push(...l), settleRecord: (l) => settleLines.push(l) }) });
+  expect(settleLines).toHaveLength(1);
+  expect(settleLines[0]).toContain("stage=plan");
+  expect(settleLines[0]).toContain("runner=gha-777");
+  expect(lines.some((l) => l.startsWith("stage-settled:"))).toBe(false);
+  // 표식을 쓰지 못해도 런은 죽지 않는다 — 잃는 것은 증표뿐이고, 그 손실은 정리를 **크게** 만든다.
+  expect(await runStage({ stage: "plan", issue: 7, runnerId: "gha-777", deps: baseDeps({ settleRecord: () => { throw new Error("disk full"); } }) })).toBe(0);
+});
