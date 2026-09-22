@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { envUp, envDown, composeProjectName } from "../lib/test-env.js";
+import { envUp, envDown, composeProjectName, composeEnv } from "../lib/test-env.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const harness = { test: { env: { compose: "dc.yml", env_file: ".env.test", seed: "npm run seed", app_start: "npm start", app_ready: "http://localhost:3000/healthz", ready_timeout_sec: 2 }, fakes: { gcal: "npm run fake:gcal" } } };
@@ -82,4 +82,12 @@ test("envUp exports COMPOSE_PROJECT_NAME so an adopter's bare `docker compose` c
   } finally {
     if (before === undefined) delete process.env.COMPOSE_PROJECT_NAME; else process.env.COMPOSE_PROJECT_NAME = before;
   }
+});
+
+// 1.4.6 — the name must cross process boundaries: gates and the rehearsal recompute it and pass it as env.
+test("composeEnv: the same project name gates/rehearsal will pass to every command (empty without a compose)", () => {
+  expect(composeEnv({ test: { env: { compose: "dc.yml" } } }, "/r/server")).toEqual({ COMPOSE_PROJECT_NAME: "factory-test-server" });
+  expect(composeEnv({ test: { env: { compose: "dc.yml", project_name: "own-cal-test" } } }, "/r")).toEqual({ COMPOSE_PROJECT_NAME: "own-cal-test" });
+  expect(composeEnv({ test: { env: {} } }, "/r")).toEqual({});
+  expect(composeEnv({}, "/r")).toEqual({});
 });

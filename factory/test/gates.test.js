@@ -891,3 +891,17 @@ test("Task 1: the deferred proof gates (new-test-repeat) also carry a detail —
   const line = gatesDetailLines(r)[0];
   expect(JSON.parse(line.slice(GATES_DETAIL_PREFIX.length)).gate).toBe("new-test-repeat");
 });
+
+// 1.4.6 — gate commands inherit the test-env compose project (adopter tests call `docker compose … exec db` themselves).
+test("runGates passes COMPOSE_PROJECT_NAME to every gate command when [test.env].compose is set, and nothing otherwise", async () => {
+  const { runGates } = await import("../lib/gates.js");
+  const h = (env) => ({ commands: { lint: "npm run lint", unit: "npm test" }, gates: { required: ["lint", "unit"], fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], thresholds: {} }, test: { env } });
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  await runGates({ run, cwd: "/r/server", harness: h({ compose: "docker-compose.test.yml" }), level: "fast", quarantine: { quarantined: [] }, touchedFiles: [], readFile: () => null });
+  const bash = run.calls.filter((c) => c.cmd === "bash");
+  expect(bash.length).toBeGreaterThan(0);
+  for (const c of bash) expect(c.opts.env).toEqual({ COMPOSE_PROJECT_NAME: "factory-test-server" });
+  const run2 = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  await runGates({ run: run2, cwd: "/r/server", harness: h({}), level: "fast", quarantine: { quarantined: [] }, touchedFiles: [], readFile: () => null });
+  for (const c of run2.calls.filter((c) => c.cmd === "bash")) expect(c.opts.env).toEqual({});
+});

@@ -15,6 +15,8 @@ async function main() {
   const pidFile = join(root, PIDS);
   if (mode === "up") {
     const r = await envUp({ run, cwd: root, harness, log: (s) => console.error(s) });
+    // 1.4.6 — 뒤 스텝(게이트·리허설)도 같은 compose 프로젝트를 보게 GITHUB_ENV에 적는다(프로세스 경계).
+    if (process.env.GITHUB_ENV && process.env.COMPOSE_PROJECT_NAME) { try { (await import("node:fs")).appendFileSync(process.env.GITHUB_ENV, `COMPOSE_PROJECT_NAME=${process.env.COMPOSE_PROJECT_NAME}\n`); } catch {} }
     mkdirSync(join(root, ".factory/out"), { recursive: true });
     writeFileSync(pidFile, JSON.stringify(r.pids));
     if (!r.ok) { console.error(`test-env: BLOCKED — ${r.steps.filter((s) => !s.ok).map((s) => `${s.name}: ${s.detail}`).join("; ")}`); process.exit(2); }

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { parseVitestJson } from "./parsers/vitest-json.js";
+import { composeEnv } from "./test-env.js";
 import { isQuarantined, recordResult } from "./quarantine.js";
 import { changedFiles } from "./changed-files.js";
 import { matchesAny } from "./glob.js";
@@ -317,7 +318,8 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
     const cmd = harness.commands[name];
     if (!cmd) { gates[name] = entry("MISCONFIGURED", `commands.${name} missing`); continue; }
     const t0 = Date.now();
-    const r = await run("bash", ["-lc", cmd], { cwd });
+    // 1.4.6 — 게이트 명령은 test-env가 올린 compose 프로젝트를 봐야 한다(채택자 테스트의 맨 `docker compose …`).
+    const r = await run("bash", ["-lc", cmd], { cwd, env: composeEnv(harness, cwd) });
     let status = r.code === 0 ? "GREEN" : "RED";
     // parsed/failing_ids: 이 게이트의 RED가 "어떤 테스트 때문인지" 아는가. 리포트를 못 읽었으면
     // (parsed:false) 그 RED의 이유를 모르는 것이고, 나중에 어떤 근거로도 GREEN으로 뒤집으면 안 된다.

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { matchesAny } from "./glob.js";
+import { composeEnv } from "./test-env.js";
 import { q, baseInstallCommand } from "./prove-test.js";
 
 /**
@@ -170,7 +171,8 @@ export async function runRehearsal({
   const timed = async (name, cmd, opts = {}) => {
     const sec = REHEARSAL_TIMEOUT_SEC[name] ?? 600;
     const t0 = now();
-    const r = await run("bash", ["-lc", timedCommand(cmd, sec)], { cwd, ...opts });
+    // 1.4.6 — 리허설 스텝도 test-env의 compose 프로젝트를 봐야 한다(데모 `docker compose … exec db`).
+    const r = await run("bash", ["-lc", timedCommand(cmd, sec)], { cwd, env: composeEnv(harness, cwd), ...opts });
     const ms = Math.max(0, now() - t0);
     const out = firstLines(`${r.stderr || ""}\n${r.stdout || ""}`.trim() || `exit ${r.code}`);
     // 124는 `timeout`이 SIGTERM으로 끝낸 경우이고, **>128은 시그널로 죽은 경우**다(`timeout -k 10`이
