@@ -21,9 +21,14 @@ export async function envUp({ run, cwd, harness, spawnBg = spawnBackground, fetc
   const fail = (name, detail) => { steps.push({ name, ok: false, detail }); log(`test-env: ${name} FAILED — ${detail}`); return { ok: false, steps, pids }; };
   const ok = (name, detail = "") => { steps.push({ name, ok: true, detail }); log(`test-env: ${name} ok`); };
   if (env.compose) {
+    // 1.4.5 — 채택자의 테스트가 `docker compose -f <same file> exec db …`를 **프로젝트 이름 없이** 직접 부르는 경우
+    // (demo `test/integration/db.test.js`)가 있다. `-p`만 쓰면 그 호출은 디렉터리 기본 프로젝트를 보고
+    // "service db is not running"이 된다(1.4.4 데모 리허설). 그래서 같은 이름을 `COMPOSE_PROJECT_NAME`으로도
+    // 이 프로세스의 환경에 올린다 — 게이트·테스트 명령은 이 프로세스의 자식이라 그대로 물려받는다.
+    process.env.COMPOSE_PROJECT_NAME = composeProjectName(env, cwd);
     const r = await run("docker", [...composeArgs(env, cwd), "up", "-d", "--wait"], { cwd });
     if (r.code !== 0) return fail("compose", `exit ${r.code}: ${(r.stderr || r.stdout).trim()}`);
-    ok("compose");
+    ok("compose", `project ${process.env.COMPOSE_PROJECT_NAME}`);
   }
   if (env.seed) {
     const r = await run("bash", ["-lc", env.seed], { cwd });
