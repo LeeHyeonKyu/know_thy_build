@@ -1,4 +1,8 @@
 import { test, expect, vi } from "vitest";
+import { timedCommand, NO_TIMEOUT_BINARY } from "../lib/rehearsal.js";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -112,7 +116,7 @@ test("runRehearsal: every stage-shaped step runs on the runner, in order, and a 
   expect(cmds).toMatch(/gh label list/);
   expect(cmds).toMatch(/factory\/rehearsal-9001/);
   // 모든 명령에는 상한이 있다 — 러너에서 무한히 도는 게이트는 리허설이 아니라 새 사고다.
-  for (const c of run.calls.filter((x) => x.cmd === "bash")) expect(c.args[1]).toMatch(/^timeout -k \d+ \d+ bash -lc /);
+  for (const c of run.calls.filter((x) => x.cmd === "bash")) expect(c.args[1]).toMatch(/command -v timeout .* -k 10 \d+\} bash -lc /);   // 1.4.4: portable wrapper (timeout → gtimeout → none), command still at the tail
 });
 
 test("runRehearsal: a failing command is RED and carries only the first 3 lines of its output", async () => {
@@ -695,4 +699,27 @@ test("makeRehearsalChecker resolves a lazy branch at call time, not at construct
   await check();
   expect(seen.length).toBeGreaterThan(0);
   expect(seen.every((b) => b === "trunk")).toBe(true);
+});
+
+// own-calendar 1.4.3 (macOS self-hosted runner): every rehearsal step was RED with `bash: timeout: command not found`.
+// The wrapper is exercised through REAL bash: without a timeout binary the command still runs (exit code preserved)
+// and the notice lands on stderr; with one on PATH it is used and nothing is printed.
+test("timedCommand: without coreutils the step still runs and says the cap is not enforced; with `timeout` on PATH it is used", () => {
+  const minimal = "/usr/bin:/bin";                                   // macOS has no `timeout` here; linux runners have it in /usr/bin
+  const hasReal = spawnSync("bash", ["-c", "command -v timeout"], { env: { PATH: minimal }, encoding: "utf8" }).status === 0;
+  if (!hasReal) {
+    const r = spawnSync("bash", ["-c", timedCommand("echo hi; exit 3", 5)], { env: { PATH: minimal }, encoding: "utf8" });
+    expect(r.status).toBe(3);
+    expect(r.stdout).toContain("hi");
+    expect(r.stderr).toContain(NO_TIMEOUT_BINARY);
+  }
+  // A fake `timeout` that records its arguments — the wrapper must call it with `-k 10 <sec>` and never print the notice.
+  const dir = mkdtempSync(join(tmpdir(), "ktb-timeout-"));
+  writeFileSync(join(dir, "timeout"), "#!/bin/sh\necho \"FAKE-TIMEOUT $1 $2 $3\" >&2\nshift 3\nexec \"$@\"\n");
+  chmodSync(join(dir, "timeout"), 0o755);
+  const r2 = spawnSync("bash", ["-c", timedCommand("echo ok", 7)], { env: { PATH: `${dir}:${minimal}` }, encoding: "utf8" });
+  expect(r2.status).toBe(0);
+  expect(r2.stdout).toContain("ok");
+  expect(r2.stderr).toContain("FAKE-TIMEOUT -k 10 7");
+  expect(r2.stderr).not.toContain(NO_TIMEOUT_BINARY);
 });
