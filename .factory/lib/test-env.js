@@ -14,6 +14,13 @@ import { basename, resolve } from "node:path";
 export const composeProjectName = (env, cwd) =>
   String(env?.project_name || `factory-test-${basename(resolve(cwd || "."))}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+/, "") || "factory-test";
 const composeArgs = (env, cwd) => ["compose", "-p", composeProjectName(env, cwd), "-f", env.compose, ...(env.env_file ? ["--env-file", env.env_file] : [])];
+/**
+ * 1.4.6 — 프로젝트 이름은 **프로세스 경계를 넘어** 전달돼야 한다: `test-env up`은 setup 액션의 별도 스텝이고,
+ * 게이트·리허설 명령은 나중에 다른 프로세스가 띄운다(1.4.5는 `process.env`만 올려 그 프로세스와 함께 사라졌다 —
+ * 데모 리허설 "service db is not running" 재발). 그래서 (a) 명령을 띄우는 쪽(gates·rehearsal)이 같은 함수로
+ * 이름을 다시 계산해 `env`로 넣고, (b) CLI `up`은 `GITHUB_ENV`에도 적어 뒤 스텝이 물려받는다.
+ */
+export const composeEnv = (harness, cwd) => (harness?.test?.env?.compose ? { COMPOSE_PROJECT_NAME: composeProjectName(harness.test.env, cwd) } : {});
 
 export async function envUp({ run, cwd, harness, spawnBg = spawnBackground, fetch = globalThis.fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now, log = () => {} }) {
   const env = harness.test?.env || {}, fakes = harness.test?.fakes || {};
