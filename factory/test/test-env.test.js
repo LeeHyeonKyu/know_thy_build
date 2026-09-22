@@ -66,3 +66,20 @@ test("test-env compose always carries an explicit project name (-p) that cannot 
   // never the bare directory name — that is exactly what a production compose in the same directory would use
   for (const l of lines) expect(l).not.toMatch(/compose -p server /);
 });
+
+// 1.4.4 demo rehearsal: the adopter's own `docker compose -f … exec db` (no -p) could not find the service the factory
+// had started under its explicit project. The project name is therefore ALSO exported as COMPOSE_PROJECT_NAME for
+// everything the stage spawns afterwards.
+test("envUp exports COMPOSE_PROJECT_NAME so an adopter's bare `docker compose` calls resolve the same project", async () => {
+  const before = process.env.COMPOSE_PROJECT_NAME;
+  try {
+    delete process.env.COMPOSE_PROJECT_NAME;
+    const run = okRun();
+    const r = await envUp({ run, cwd: "/r/server", harness: { test: { env: { compose: "docker-compose.test.yml" } } }, spawnBg: () => ({ pid: 1 }), fetch: async () => ({ status: 200 }), sleep: async () => {}, now: () => 0 });
+    expect(r.ok).toBe(true);
+    expect(process.env.COMPOSE_PROJECT_NAME).toBe("factory-test-server");
+    expect(r.steps[0]).toEqual({ name: "compose", ok: true, detail: "project factory-test-server" });
+  } finally {
+    if (before === undefined) delete process.env.COMPOSE_PROJECT_NAME; else process.env.COMPOSE_PROJECT_NAME = before;
+  }
+});
