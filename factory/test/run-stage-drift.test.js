@@ -210,3 +210,28 @@ test("review: the drift drop is implement-only — no other stage rewrites a bra
   await runStage({ stage: "review", issue: 3, deps: d });
   expect(dropPostHandoffDrift).not.toHaveBeenCalled();
 });
+
+// KTB #50 — own-calendar #9(harness M2 promotion): charterReady가 읽은 harness는 잡 체크아웃(GITHUB_SHA=main)의 것이라
+// 브랜치가 넓힌 test_glob을 게이트가 못 봤다("no new tests" 두 라운드). harness 이슈에서는 브랜치 체크아웃 뒤와
+// 빌더 뒤에 작업 트리에서 다시 읽고, 무엇을 읽었는지 기록에 남긴다.
+test("KTB #50: a harness issue reloads harness.toml after the branch checkout and after the builder — a plain issue never does", async () => {
+  const lines = [];
+  const reloadHarness = vi.fn(() => ({ test: { test_glob: ["client/test/**/*_test.dart", "server/tests/**/*.test.ts"] } }));
+  const d = deps({
+    issueLabels: async () => ["factory:planned", "factory:harness"],
+    reloadHarness,
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(0);
+  expect(reloadHarness).toHaveBeenCalledTimes(2);
+  expect(lines.filter((l) => l.startsWith("harness: reloaded from the branch after branch checkout")).length).toBe(1);
+  expect(lines.filter((l) => l.startsWith("harness: reloaded from the branch after the builder")).length).toBe(1);
+  expect(lines.find((l) => l.startsWith("harness: reloaded"))).toContain('"server/tests/**/*.test.ts"');
+
+  // 평범한 이슈: overlay가 harness.toml을 base의 것으로 덮으므로 다시 읽을 것이 없다 — 호출도 기록도 없다.
+  const plain = vi.fn(() => ({ test: { test_glob: [] } }));
+  const lines2 = [];
+  expect(await runStage({ stage: "implement", issue: 3, deps: deps({ issueLabels: async () => ["factory:planned"], reloadHarness: plain, runRecord: (l) => lines2.push(...l) }) })).toBe(0);
+  expect(plain).not.toHaveBeenCalled();
+  expect(lines2.some((l) => l.startsWith("harness: reloaded"))).toBe(false);
+});
