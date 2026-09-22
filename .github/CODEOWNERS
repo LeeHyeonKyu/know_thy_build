@@ -1,0 +1,17 @@
+# factory (ADR-021) — the merge actor is the sole code owner of this repository.
+#
+# The base branch requires one approving review AND `require_code_owner_reviews: true`.
+# Together they mean: the one approval must come from an account listed here, for EVERY pull
+# request regardless of who opened it. Counting approvals alone was not enough — a write
+# collaborator (the agent actor) can approve any PR it did not author, and could push its own
+# commits onto that PR's head branch first.
+#
+# NEVER list the agent actor (the account behind FACTORY_BOT_TOKEN) here. If it appears, the
+# agent can approve its own way to a merge again and the whole ADR is void — `factory doctor`
+# FAILs `protection.codeowners` in CI when it finds that login in this file.
+#
+# `.github/**` is in `[protected].factory`, so a pull request that edits this file is never
+# auto-merged: the merge stage refuses and a human merges it (L1).
+#
+# Managed by `npx know-thy-build factory bootstrap`.
+* @LeeHyeonKyu
