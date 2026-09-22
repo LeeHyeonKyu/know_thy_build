@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { envUp, envDown } from "../lib/test-env.js";
+import { envUp, envDown, composeProjectName } from "../lib/test-env.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const harness = { test: { env: { compose: "dc.yml", env_file: ".env.test", seed: "npm run seed", app_start: "npm start", app_ready: "http://localhost:3000/healthz", ready_timeout_sec: 2 }, fakes: { gcal: "npm run fake:gcal" } } };
@@ -11,7 +11,7 @@ test("envUp runs compose → seed → fakes → app and polls readiness; returns
   const fetch = async () => ({ status: polls++ < 2 ? 503 : 200 });
   const r = await envUp({ run, cwd: "/r", harness, spawnBg, fetch, sleep: async () => {}, now: (() => { let t = 0; return () => (t += 200); })() });
   expect(r.ok).toBe(true);
-  expect(run.calls.map((c) => [c.cmd, ...c.args].join(" "))).toEqual(["docker compose -f dc.yml --env-file .env.test up -d --wait", "bash -lc npm run seed"]);
+  expect(run.calls.map((c) => [c.cmd, ...c.args].join(" "))).toEqual(["docker compose -p factory-test-r -f dc.yml --env-file .env.test up -d --wait", "bash -lc npm run seed"]);
   expect(spawned).toEqual(["npm run fake:gcal", "npm start"]);
   expect(r.pids).toEqual([101, 102]);
   expect(r.steps.map((s) => s.name)).toEqual(["compose", "seed", "fake:gcal", "app_start", "app_ready"]);
@@ -45,5 +45,24 @@ test("envDown kills pids and brings compose down; ignores ESRCH", async () => {
   // kill above records the raw pid it was called with (negative for the group-kill attempt),
   // so assert on the absolute values rather than the brief's literal [5, 6].
   expect(killed.map(Math.abs)).toEqual([5, 6]);
-  expect(run.calls.map((c) => [c.cmd, ...c.args].join(" "))).toEqual(["docker compose -f dc.yml --env-file .env.test down -v"]);
+  expect(run.calls.map((c) => [c.cmd, ...c.args].join(" "))).toEqual(["docker compose -p factory-test-r -f dc.yml --env-file .env.test down -v"]);
+});
+
+// INCIDENT 2026-09-22 — the compose project name came from the directory (`server`), the same project the owner's
+// production stack ran under on the self-hosted Mac, and `up` recreated the production postgres as the test container.
+// The project name is now always explicit and never the directory's.
+test("test-env compose always carries an explicit project name (-p) that cannot collide with the directory's own project", async () => {
+  expect(composeProjectName({}, "/Users/x/own-calendar")).toBe("factory-test-own-calendar");
+  expect(composeProjectName({ project_name: "My Test!" }, "/r")).toBe("my-test-");                 // sanitised to compose's charset
+  expect(composeProjectName({}, "/srv/Own Cal.Prod")).toBe("factory-test-own-cal-prod");
+  const run = okRun();
+  await envUp({ run, cwd: "/r/server", harness: { test: { env: { compose: "docker-compose.test.yml" } } }, spawnBg: () => ({ pid: 1 }), fetch: async () => ({ status: 200 }), sleep: async () => {}, now: () => 0 });
+  await envDown({ run, cwd: "/r/server", harness: { test: { env: { compose: "docker-compose.test.yml" } } }, kill: () => {} });
+  const lines = run.calls.filter((c) => c.cmd === "docker").map((c) => c.args.join(" "));
+  expect(lines).toEqual([
+    "compose -p factory-test-server -f docker-compose.test.yml up -d --wait",
+    "compose -p factory-test-server -f docker-compose.test.yml down -v",
+  ]);
+  // never the bare directory name — that is exactly what a production compose in the same directory would use
+  for (const l of lines) expect(l).not.toMatch(/compose -p server /);
 });

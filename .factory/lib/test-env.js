@@ -1,6 +1,19 @@
 import { spawnBackground } from "./exec.js";
 
-const composeArgs = (env) => ["compose", "-f", env.compose, ...(env.env_file ? ["--env-file", env.env_file] : [])];
+import { basename, resolve } from "node:path";
+
+/**
+ * INCIDENT 2026-09-22 (own-calendar #9 on a self-hosted Mac): `docker compose -f server/docker-compose.test.yml up`
+ * took the compose **project name from the directory** (`server`) — the same project the owner's PRODUCTION
+ * stack (`server/docker-compose.yml`: tailscale/postgres/api/web) was running under on that machine — and
+ * **recreated the production `server-postgres-1` as the throwaway test container**. The test env must never be
+ * able to share a project with anything else on the host, so the project name is always explicit:
+ * `[test.env].project_name` if the adopter sets one, else `factory-test-<repo dir>`. Same name for `up`
+ * and `down -v`, so `down` can only remove what `up` created.
+ */
+export const composeProjectName = (env, cwd) =>
+  String(env?.project_name || `factory-test-${basename(resolve(cwd || "."))}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+/, "") || "factory-test";
+const composeArgs = (env, cwd) => ["compose", "-p", composeProjectName(env, cwd), "-f", env.compose, ...(env.env_file ? ["--env-file", env.env_file] : [])];
 
 export async function envUp({ run, cwd, harness, spawnBg = spawnBackground, fetch = globalThis.fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now, log = () => {} }) {
   const env = harness.test?.env || {}, fakes = harness.test?.fakes || {};
@@ -8,7 +21,7 @@ export async function envUp({ run, cwd, harness, spawnBg = spawnBackground, fetc
   const fail = (name, detail) => { steps.push({ name, ok: false, detail }); log(`test-env: ${name} FAILED — ${detail}`); return { ok: false, steps, pids }; };
   const ok = (name, detail = "") => { steps.push({ name, ok: true, detail }); log(`test-env: ${name} ok`); };
   if (env.compose) {
-    const r = await run("docker", [...composeArgs(env), "up", "-d", "--wait"], { cwd });
+    const r = await run("docker", [...composeArgs(env, cwd), "up", "-d", "--wait"], { cwd });
     if (r.code !== 0) return fail("compose", `exit ${r.code}: ${(r.stderr || r.stdout).trim()}`);
     ok("compose");
   }
@@ -41,7 +54,7 @@ export async function envDown({ run, cwd, harness, pids = [], kill = process.kil
   const steps = [];
   for (const pid of pids) { try { kill(-pid, "SIGTERM"); } catch { try { kill(pid, "SIGTERM"); } catch (e) { if (e.code !== "ESRCH") steps.push({ name: `kill:${pid}`, ok: false, detail: e.message }); } } }
   if (env.compose) {
-    const r = await run("docker", [...composeArgs(env), "down", "-v"], { cwd });
+    const r = await run("docker", [...composeArgs(env, cwd), "down", "-v"], { cwd });
     steps.push({ name: "compose-down", ok: r.code === 0, detail: r.code === 0 ? "" : (r.stderr || r.stdout).trim() });
   }
   const ok = steps.every((s) => s.ok);
