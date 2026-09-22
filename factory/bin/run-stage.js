@@ -501,6 +501,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         return 2;
       }
       record([overlayLine(ov)]);
+      // KTB #50 — harness 이슈의 트리는 이제 브랜치의 harness.toml을 들고 있다(overlay가 남겼다). 읽는다.
+      if (stage === "implement" && harnessIssue && d.reloadHarness) record([harnessReloadLine(await d.reloadHarness(), "after branch checkout")]);
     }
     /**
      * ADR-024 / KTB-42 — **증거 디렉터리에 쓸 수 있는지는 리뷰 전에 묻는다.** 자리는 여기다:
@@ -591,6 +593,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         return 2;
       }
     }
+    // KTB #50 — 빌더가 이 라운드에 harness.toml을 고쳤을 수 있다(harness 이슈의 본업). 게이트 전에 다시 읽는다.
+    if (stage === "implement" && harnessIssue && d.reloadHarness) record([harnessReloadLine(await d.reloadHarness(), "after the builder")]);
     /**
      * ADR-020 KTB-43 — **핸드오프 뒤에 붙은 드리프트 커밋은 스테이지가 떨어뜨린다**(§makeDropPostHandoffDrift).
      * 게이트보다 **먼저**다: `gates.json`의 `head_sha`는 게이트가 돈 시점의 HEAD이고 전이 요구조건이
@@ -1943,6 +1947,9 @@ export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "ba
 /** run 기록의 한 줄 — 누가 어디에서 이 브랜치를 세웠는가. */
 export const branchLine = (cb) =>
   `branch: ${cb.branch} checked out by the stage from ${cb.existed ? cb.base : `${String(cb.base).slice(0, 7)} (${cb.source || "base"}, new branch)`} — the builder never runs git checkout/switch`;
+/** KTB #50 — harness 이슈에서 스테이지가 브랜치의 harness.toml을 다시 읽었다는 기록(무엇을 읽었는지 test_glob으로 보인다). */
+export const harnessReloadLine = (h, when) =>
+  `harness: reloaded from the branch ${when} — test_glob=${JSON.stringify(h?.test?.test_glob ?? [])} (harness issue; charterReady read the job checkout's copy)`;
 
 /** KTB-38 — 이 라운드가 어떤 base 위에서 돌았는지. 머지가 실제로 붙은 라운드에만 나온다. */
 export const baseMergedLine = (cb) =>
@@ -2311,6 +2318,13 @@ async function main() {
       const cb = await makeCheckoutBranch({ run, root, issue, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
       return cb;
     },
+    /**
+     * KTB #50 — harness 이슈는 정의상 브랜치의 `harness.toml`을 바꾼다(`test_glob`·`[commands]`·maturity).
+     * `charterReady`가 읽은 harness는 잡 체크아웃(GITHUB_SHA = 기본 브랜치)의 것이라, 브랜치를 체크아웃한
+     * 뒤와 빌더가 돌아온 뒤에 **작업 트리에서 다시 읽어야** 게이트(prove-test의 addedTests·tier floor)가
+     * 그 이슈가 방금 연 테스트 경로를 본다(own-calendar #9: 두 라운드 내내 "no new tests").
+     */
+    reloadHarness: () => { harness = loadHarness(root); return harness; },
     /** 세션 뒤: HEAD가 아직 그 브랜치이고 팩토리 설정이 아직 스테이지 커밋의 것인가(fail closed). */
     assertStageBranch: async (harnessIssue = false) => assertStageBranch({ run, cwd: root, issue, sha: overlaySha, harnessIssue }),
     /**
