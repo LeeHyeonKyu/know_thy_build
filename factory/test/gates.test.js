@@ -905,3 +905,28 @@ test("runGates passes COMPOSE_PROJECT_NAME to every gate command when [test.env]
   await runGates({ run: run2, cwd: "/r/server", harness: h({}), level: "fast", quarantine: { quarantined: [] }, touchedFiles: [], readFile: () => null });
   for (const c of run2.calls.filter((c) => c.cmd === "bash")) expect(c.opts.env).toEqual({});
 });
+
+// 1.4.8 (demo #58): `misconfigured=prove-test` reached the records branch with no reason at all. MISCONFIGURED gates now
+// carry a `detail` like RED ones do.
+test("attachGateDetails: a MISCONFIGURED gate gets a detail from its log, like a RED one; GREEN stays bare", async () => {
+  const { attachGateDetails } = await import("../lib/gates.js");
+  const result = { gates: {
+    "prove-test": { status: "MISCONFIGURED", log: "inconclusive on base abc1234: the new tests did not run there (module resolution / import error)" },
+    unit: { status: "GREEN", log: "ok" },
+  } };
+  attachGateDetails(result);
+  expect(result.gates["prove-test"].detail).toBeTruthy();
+  expect(JSON.stringify(result.gates["prove-test"].detail)).toContain("inconclusive on base");
+  expect(result.gates.unit.detail).toBeUndefined();
+});
+
+// 1.4.8 (demo #57 Dependabot config): a diff with no source_glob/test_glob files has nothing to prove by tests —
+// prove-test is SKIPPED with a reason, not RED "no new tests"; the stage verdict is not held hostage by a YAML file.
+test("implement: a diff outside source_glob/test_glob skips prove-test with a reason instead of failing it", async () => {
+  const run = makeFakeRun([unitOk, diffOf("A\t.github/dependabot.yml\n"), revParse, { match: (c) => c === "git" && true, result: ok }]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: stageArgs.base, readFile: () => null });
+  expect(r.gates["prove-test"].status).toBe("SKIPPED");
+  expect(r.gates["prove-test"].log).toContain("nothing to prove by tests");
+  expect(r.failing).not.toContain("prove-test");
+  expect(run.calls.some((c) => c.cmd === "git" && c.args[0] === "worktree")).toBe(false);   // no base worktree was even created
+});

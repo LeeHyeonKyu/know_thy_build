@@ -158,3 +158,18 @@ test("proveTest: a real failure on base is still proof, with dependencies instal
   expect(r).toMatchObject({ ok: true });
   expect(r.inconclusive).toBeUndefined();
 });
+
+// 1.4.8 (demo #58): a new test that imports a module ADDED by the same change cannot run on base — that is the proof,
+// not an inconclusive run. Without an added module in the error, the old inconclusive verdict stands.
+test("proveTest: an import error naming a module this change adds counts as failing on base; an unrelated import error stays inconclusive", async () => {
+  const importErr = { code: 1, stdout: "", stderr: "Error: Cannot find module '../src/version.js' imported from test/version.test.js" };
+  const run = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
+  const proven = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/version.test.js"], addedFiles: ["src/version.js", "test/version.test.js"], tmp: "/tmp/wt" });
+  expect(proven.ok).toBe(true);
+  expect(proven.misconfigured).toBeFalsy();
+  expect(proven.detail).toContain("src/version.js");
+  const run2 = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
+  const unclear = await proveTest({ run: run2, cwd: "/repo", harness, base: "abc", addedTests: ["test/version.test.js"], addedFiles: ["test/version.test.js"], tmp: "/tmp/wt" });
+  expect(unclear.ok).toBe(false);
+  expect(unclear.misconfigured).toBe(true);
+});

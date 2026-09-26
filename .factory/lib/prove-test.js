@@ -46,7 +46,17 @@ const INCONCLUSIVE_ON_BASE = [
 ];
 export const inconclusiveOnBase = (text) => INCONCLUSIVE_ON_BASE.some((re) => re.test(String(text || "")));
 
-export async function proveTest({ run, cwd, harness, base, addedTests, tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
+/**
+ * 1.4.8 (데모 #58): 새 테스트가 **이 변경에서 새로 생긴 모듈**을 임포트하면 base에는 그 모듈이 없어 임포트 오류로
+ * 죽는다 — 그것은 "판정 불가"가 아니라 base에서 **반드시** 실패한다는 증명이다(모듈이 없으니 통과할 길이 없다).
+ * 임포트 오류 출력에 새로 추가된 비-테스트 파일의 이름이 보이면 증명으로 친다. 이름이 안 보이면 예전처럼 판정 불가다.
+ */
+export const addedModuleNamedIn = (output, addedFiles = []) => {
+  const text = String(output || "");
+  return addedFiles.find((f) => { const b = f.split("/").pop(); return b && text.includes(b); }) || null;
+};
+
+export async function proveTest({ run, cwd, harness, base, addedTests, addedFiles = [], tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
   if (!addedTests?.length) return { ok: false, detail: "no new tests in this change (done_when must be backed by new tests)" };
   const g = (args) => run("git", args, { cwd });
@@ -77,6 +87,8 @@ export async function proveTest({ run, cwd, harness, base, addedTests, tmp = `${
     if (r.code === 0) return { ok: false, detail: `new tests passed on base ${base.slice(0, 7)} — they do not prove the change` };
     const output = `${r.stdout || ""}\n${r.stderr || ""}`;
     if (inconclusiveOnBase(output)) {
+      const added = addedModuleNamedIn(output, addedFiles.filter((f) => !addedTests.includes(f)));
+      if (added) return { ok: true, detail: `new tests fail on base ${base.slice(0, 7)}: they import \`${added}\`, which this change adds — the module under test does not exist on base, so the tests cannot pass there` };
       return { ok: false, misconfigured: true, inconclusive: [...addedTests], detail: `inconclusive on base ${base.slice(0, 7)}: the new tests did not run there (module resolution / import error), so their failure proves nothing${install ? ` — dependencies were installed with \`${install}\`` : " — no dependency install command was found for the base worktree"}` };
     }
     return { ok: true, detail: `new tests fail on base (exit ${r.code})` };
