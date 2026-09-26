@@ -500,6 +500,12 @@ describe("T7 공유 신원 — (b) 거부를 보이게 한다", () => {
       kind: "warning", step: "feedback-route", login: "LeeHyeonKyu",
       reason: "factory identity is a personal account (LeeHyeonKyu) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity",
     });
+    // 1.4.19 (KTB #47): a machine user NOW + a personal window identity → still a warning (those decisions are unverifiable),
+    // but the reason states the fact instead of prescribing a registration that already happened.
+    const now = sharedIdentityWarning({ personal: true, login: "LeeHyeonKyu" }, { login: "bot-hk", personal: false, source: "FACTORY_BOT_LOGIN" });
+    expect(now).toMatchObject({ kind: "warning", step: "feedback-route", login: "LeeHyeonKyu", current: "bot-hk" });
+    expect(now.reason).toMatch(/^current factory identity: bot-hk/);
+    expect(now.reason).not.toMatch(/register a machine user/);
     expect(sharedIdentityWarning({ personal: false, login: "factory-bot" })).toBeNull();
     // 모르는 것은 경보의 근거가 아니다 — `null`은 "괜찮다"도 "문제다"도 아니다.
     expect(sharedIdentityWarning({ personal: null, login: "factory-bot" })).toBeNull();

@@ -24,6 +24,7 @@
 //
 // 모든 외부 접촉은 인자로 주입된다 — `runHealth`는 순수 오케스트레이션이고 `main()`이 조립한다.
 
+import { sharedIdentityText } from "../lib/gh.js";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -447,7 +448,7 @@ const usd = (v) => (v == null ? "n/a" : `$${v}`);
  * 파생 보고서(spec §7) — 주인이 읽는 "대화"다. 원시 덤프가 아니라 **판정과 그 근거**를 같은 표에
  * 나란히 둔다: 짝의 양쪽이 한 줄에 보이지 않으면 사람도 Goodhart를 피할 수 없다.
  */
-export function renderHealthReport({ signals, findings = [], advisories = [], rehearsal = null, now, repo, upstream = null, identity = null, unverifiable = [], loginNote = null }) {
+export function renderHealthReport({ signals, findings = [], advisories = [], rehearsal = null, now, repo, upstream = null, identity = null, current = null, unverifiable = [], loginNote = null }) {
   const L = [];
   L.push(HEALTH_MARKER);
   L.push(`## factory-health — ${String(now).slice(0, 10)}`);
@@ -456,7 +457,12 @@ export function renderHealthReport({ signals, findings = [], advisories = [], re
    * T7 배너 — 표보다 **먼저** 선다. 이 저장소가 공유 신원이면 아래 어떤 숫자도 "사람이 factory-defect로
    * 판정했는가"를 담지 못한다(그 통로가 통째로 닫혀 있다). 그 사실을 표 밑에 각주로 달면 아무도 안 읽는다.
    */
-  if (identity?.personal === true) {
+  if (identity?.personal === true && current?.personal === false) {
+    // 1.4.19 (KTB #47) — 지금은 머신 유저다; 배너는 창 안의 옛 런에 대한 사실만 말한다(처방 없음).
+    L.push(`> ℹ️ **${sharedIdentityText(identity, current)}**`);
+    L.push("> 그 이슈들의 `cause: factory-defect` 결정은 사람의 판정으로 셀 수 없습니다 — 그 이슈들이 창을 벗어나면 이 줄도 사라집니다.");
+    L.push("");
+  } else if (identity?.personal === true) {
     L.push(`> ⚠️ **factory identity is a personal account (\`${identity.login}\`)** — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity.`);
     L.push("> 팩토리 코멘트와 소유자의 코멘트가 **같은 작성자**라 `cause: factory-defect` 결정을 사람의 판정으로 셀 수 없습니다 — 아래 표의 어떤 값도 그 통로가 닫혀 있다는 사실을 보정하지 않습니다.");
     L.push("");
@@ -638,7 +644,7 @@ export async function runHealth({
   issues = null, commentsByIssue = null, records = null, prByIssue = null, run: runner = run,
   harness = null, manifest = null, roleFile = new Map(), upstream = null,
   rehearsal = null, route = routeFindings, publish = true, env,
-  identity = undefined, factoryLogins = undefined, log = console.error,
+  identity = undefined, current = undefined, factoryLogins = undefined, log = console.error,
 } = {}) {
   /**
    * 1.4.0 핫픽스 — `env`는 **필수 주입**이다(`process.env`라는 기본값은 `assembleHealth` 한 줄에만
@@ -662,6 +668,7 @@ export async function runHealth({
   // 창의 코멘트를 **한 번** 정규화한다 — 아래 두 조회(전체 평탄화, 이슈별)가 Map이든 객체든 같이 돈다.
   const byIssue = toIssueMap(loaded.commentsByIssue);
   let theIdentity = identity;
+  let theCurrent = current;
   let logins = factoryLogins;
   let loginNote = null;
   if (theIdentity === undefined || logins === undefined) {
@@ -671,6 +678,7 @@ export async function runHealth({
     try { who = await resolveFactoryLogins({ gh, env, comments: allComments, repo: repo ?? gh?.repo ?? null }); }
     catch (e) { who = { ok: false, reason: `resolveFactoryLogins threw — ${e?.message || e}` }; }
     if (theIdentity === undefined) theIdentity = who.identity ?? null;
+    if (theCurrent === undefined) theCurrent = who.current ?? null;
     if (logins === undefined) logins = who.ok ? who.logins : null;
     /**
      * T7 리뷰 should_fix 4 — **못 알아낸 것도 말한다.** 팩토리 계정 이름을 못 얻으면 `attributionFor`는
@@ -701,7 +709,8 @@ export async function runHealth({
   const { findings, advisories } = behaviouralFindings({ signals, repo, roleFile, anchorIssue: reportIssue });
 
   // 보고서에 이번 회차의 발견까지 실어 다시 렌더한다 — 사람이 한 화면에서 표와 판정을 같이 본다.
-  const body = renderHealthReport({ signals, findings, advisories, rehearsal, now, repo, upstream, identity: theIdentity, unverifiable, loginNote });
+  if (theCurrent === undefined) theCurrent = null;
+  const body = renderHealthReport({ signals, findings, advisories, rehearsal, now, repo, upstream, identity: theIdentity, current: theCurrent, unverifiable, loginNote });
   if (publish) {
     try {
       if (reportIssue == null) {
@@ -768,7 +777,7 @@ export async function runHealth({
   return {
     ok: failures.length === 0, failures,
     below_n: signals.below_n, signals, findings, advisories, classified, actions,
-    identity: theIdentity, unverifiable, login_note: loginNote,
+    identity: theIdentity, current: theCurrent, unverifiable, login_note: loginNote,
     report: body, report_issue: reportIssue,
   };
 }
@@ -975,7 +984,7 @@ export async function healthCommand({
       ok: r.ok, below_n: r.below_n, published: false, report_issue: null,
       repo: assembled.deps.repo, N: assembled.deps.N, since: assembled.deps.since,
       signals: r.signals, findings: r.findings, advisories: r.advisories, classified: r.classified,
-      identity: r.identity, unverifiable: r.unverifiable, login_note: r.login_note,
+      identity: r.identity, current: r.current ?? null, unverifiable: r.unverifiable, login_note: r.login_note,
       actions: r.actions, failures: r.failures,
       ktb_version: assembled.deps.manifest?.ktbVersion ?? null,
       report: r.report,

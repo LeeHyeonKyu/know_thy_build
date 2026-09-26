@@ -22,6 +22,7 @@
 // 모든 외부 접촉(fs·git·gh·claude)은 `deps`로 주입된다 — `runRetro`는 순수 오케스트레이션이고,
 // `main()`이 실제 의존성을 조립한다(bin/run-stage.js와 같은 형태).
 
+import { sharedIdentityText } from "../lib/gh.js";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -1035,7 +1036,7 @@ export async function routeFeedbackArm({
    * 소유자의 코멘트가 같은 작성자다). 그 사실을 런마다 **한 번** 크게 적는다: 이슈마다 적으면
    * 잡음이고, 안 적으면 dogfood 저장소에서 (b)가 영영 조용히 닫힌 채로 남는다.
    */
-  const warn = who.ok ? sharedIdentityWarning(who.identity) : null;
+  const warn = who.ok ? sharedIdentityWarning(who.identity, who.current ?? null) : null;
   if (warn) routed.actions.unshift(warn);
   return routed;
 }
@@ -1048,11 +1049,12 @@ export async function routeFeedbackArm({
  * `personal !== true`이면 아무것도 내지 않는다 — `null`(모른다)은 경보의 근거가 아니다. 모르는 것을
  * 경보로 바꾸면 사람이 경보를 끄는 법부터 배우고, 그러면 진짜일 때도 안 읽는다.
  */
-export function sharedIdentityWarning(identity) {
+export function sharedIdentityWarning(identity, current = null) {
   if (identity?.personal !== true) return null;
   return {
     kind: "warning", step: "feedback-route", login: identity.login,
-    reason: `factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`,
+    ...(current?.personal === false ? { current: current.login } : {}),
+    reason: sharedIdentityText(identity, current),
   };
 }
 

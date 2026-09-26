@@ -192,7 +192,30 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
   // 소유자**다. (팩토리 로그인이 `human-decision:v1`을 썼다는 것은 증거가 아니다 — 그것이 곧
   // 에이전트가 쓴 결정이고, 귀속은 이미 그 이유로 거부한다.)
   const owner = repo ? String(repo).split("/")[0].toLowerCase() : null;
-  return { ok: true, logins: out, identity: identityOf(candidates, out, { owner }) };
+  /**
+   * 1.4.19 (KTB #47) — **지금의 신원과 창 안의 신원은 다른 질문이다.** `identity`는 이 코멘트 창(하트비트 작성자)에서 나온다:
+   * 옛 런이 소유자 PAT으로 돌았으면 소유자가 후보에 남아 `personal: true`다 — 그 이슈들의 사람 결정이 검증 불가라는 판정으로는
+   * 옳지만 "팩토리가 **지금** 사람 계정"이라는 배너로는 틀렸다(bot-hk 전환 뒤에도 배너가 남았다). `current`는 러너가 아는 것만
+   * 본다 — `FACTORY_BOT_LOGIN`, 없으면 Actions 안의 뷰어. 둘 다 없으면 `null`(모른다). 규칙은 같다: 소유자 로그인이면 personal.
+   */
+  const viewerNow = env.GITHUB_ACTIONS === "true" ? (candidates[0]?.login ?? null) : null;   // Actions 안에서는 뷰어가 첫 후보다
+  const nowLogin = bot || viewerNow || null;
+  const current = nowLogin
+    ? { login: nowLogin, personal: owner ? String(nowLogin).toLowerCase() === owner : null, source: bot ? "FACTORY_BOT_LOGIN" : "viewer" }
+    : null;
+  return { ok: true, logins: out, identity: identityOf(candidates, out, { owner }), current };
+}
+
+/**
+ * 1.4.19 (KTB #47) — 배너 문장 하나, 소비자 셋(health·analyze·retro). 지금의 신원(`current`)이 머신 유저인데 창 안의 옛 런이
+ * 소유자 계정으로 돌았으면 "등록하라"는 틀린 처방이다 — 그 이슈들의 결정이 검증 불가라는 사실만 말한다; 옛 이슈가 창을
+ * 벗어나면 배너도 사라진다. `current`를 모르거나 `current`도 소유자면 예전 문장 그대로다.
+ */
+export function sharedIdentityText(identity, current = null) {
+  if (current?.personal === false) {
+    return `current factory identity: ${current.login} (machine user/app, ${current.source}); older runs in this window ran under a shared identity (${identity.login}) — their human decisions are unverifiable, nothing to register`;
+  }
+  return `factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`;
 }
 
 /**

@@ -1,3 +1,4 @@
+import { sharedIdentityText } from "../lib/gh.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { run as realRun } from "../lib/exec.js";
@@ -422,7 +423,7 @@ function snippetHead(s, max = 4) {
 /** 바인딩되지 않은 줄에 붙는 꼬리표 — 세 줄 종류 전부에 같은 문구로 붙는다(리뷰 SF-5). */
 const UNBOUND = "UNBOUND — no heartbeat names this run, so harvest ignores this line as evidence";
 
-export function renderTimeline(tl, classified, { factoryLogins = null, recordSource = null, recordTrusted = true, loginNote = null, identity = null } = {}) {
+export function renderTimeline(tl, classified, { factoryLogins = null, recordSource = null, recordTrusted = true, loginNote = null, identity = null, current = null } = {}) {
   const L = [];
   const bots = new Set((factoryLogins || []).map((s) => String(s).toLowerCase()));
   // T7 — 팩토리가 사람 계정으로 돌면 "봇이 적은 결정"과 "사람이 적은 결정"이 **같은 작성자**다.
@@ -435,7 +436,7 @@ export function renderTimeline(tl, classified, { factoryLogins = null, recordSou
 
   // 경고는 **읽히는 자리**에 둔다 — 발견 목록 뒤에 붙이면 사람은 이미 "0건"을 결론으로 읽은 뒤다.
   if (loginNote) L.push(`!! ${loginNote}`);
-  if (shared) L.push(`!! factory identity is a personal account (${identity.login}) — author-based attribution (human-decision) is disabled; register a machine user or GitHub App as the factory identity`);
+  if (shared) L.push(`!! ${sharedIdentityText(identity, current)}`);
 
   if (!recordTrusted && recordSource) {
     L.push(`!! UNVERIFIED — the run record came from ${recordSource}, a local scratch copy under docs/factory/runs/.`);
@@ -770,10 +771,12 @@ export async function analyzeCommand({
   let logins = factoryLogins;
   let loginNote = null;
   let theIdentity = identity;
+  let theCurrent = null;
   if (logins === undefined) {
     const who = await resolveFactoryLogins({ gh: ghClient, env, comments, repo: repo ?? ghClient?.repo ?? null });
     logins = who.ok ? who.logins : null;
     if (theIdentity === undefined) theIdentity = who.identity ?? null;
+    theCurrent = who.current ?? null;
     if (!who.ok) loginNote = `factory logins unresolved (${who.reason}) — human-decision evidence cannot be evaluated, so no self-gate or transition-refused finding can reach [ktb] (the retro refuses it the same way)`;
   }
   if (theIdentity === undefined) theIdentity = null;
@@ -784,6 +787,7 @@ export async function analyzeCommand({
   tl.record_trusted = rec.trusted !== false;
   tl.factory_logins = logins;
   tl.factory_identity = theIdentity;
+  tl.factory_current = theCurrent;
   if (loginNote) tl.factory_logins_note = loginNote;
 
   let raw = [];
@@ -810,7 +814,7 @@ export async function analyzeCommand({
     return 0;
   }
 
-  const rendered = renderTimeline(tl, classified, { factoryLogins: logins, recordSource: rec.source, recordTrusted: tl.record_trusted, loginNote, identity: theIdentity });
+  const rendered = renderTimeline(tl, classified, { factoryLogins: logins, recordSource: rec.source, recordTrusted: tl.record_trusted, loginNote, identity: theIdentity, current: theCurrent });
   for (const line of rendered) io.out(line);
   io.out("");
   io.out(`record: ${rec.source}`);

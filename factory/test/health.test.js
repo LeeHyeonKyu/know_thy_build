@@ -1156,3 +1156,14 @@ test("test_36_record_and_annotation_wording: the health annotation goes through 
   expect(lines[0]).toContain("Resource not accessible");
   expect(healthFailureAnnotations([], { out: () => { throw new Error("must not be called"); } })).toEqual([]);
 });
+
+
+// 1.4.19 (KTB #47): when the CURRENT identity is a machine user, the window's old owner-run issues do not make the banner say
+// the factory is a personal account now — the report states the fact about those runs, with no "register" prescription.
+test("KTB #47 — current machine user + personal window identity → informational banner, no register prescription", async () => {
+  const r = await health({ ...identityWindow(), identity: { personal: true, login: "LeeHyeonKyu" }, current: { login: "bot-hk", personal: false, source: "FACTORY_BOT_LOGIN" }, factoryLogins: ["LeeHyeonKyu", "bot-hk"] });
+  expect(r.report).not.toMatch(BANNER);
+  expect(r.report).toMatch(/current factory identity: bot-hk .*older runs in this window ran under a shared identity \(LeeHyeonKyu\)/);
+  expect(r.report).not.toMatch(/register a machine user/);
+  expect(r.current).toEqual({ login: "bot-hk", personal: false, source: "FACTORY_BOT_LOGIN" });
+});

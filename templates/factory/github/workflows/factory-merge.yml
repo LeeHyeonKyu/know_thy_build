@@ -74,6 +74,19 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.FACTORY_BOT_TOKEN }}
+      # 1.4.19 (L20, own-calendar #28) — **큐에서 기다린 런은 만들어진 시점의 커밋을 체크아웃한다.** 단일 self-hosted 러너
+      # 뒤에서 50분을 기다린 implement 런이 그 사이 두 번 올라간 엔진(1.4.12 → 1.4.14)을 전혀 보지 못했고, 옛 검증자
+      # 프롬프트로 head를 돌려보냈다. 여기서 origin의 기본 브랜치로 갱신한다 — 런의 headSha는 "어느 main에서 시작하라"가
+      # 아니라 "언제 큐에 들어갔나"일 뿐이다. `${{ }}`는 run 안에 붙이지 않는다(ADR-020 MF-2) — env로 받는다.
+      - name: Refresh to the current default branch (a queued run must not run a stale engine)
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git fetch --quiet origin "$DEFAULT_BRANCH"
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$DEFAULT_BRANCH")" ]; then
+            echo "engine: HEAD $(git rev-parse --short HEAD) is behind origin/$DEFAULT_BRANCH $(git rev-parse --short "origin/$DEFAULT_BRANCH") — refreshing (this run waited in the queue)"
+            git reset --quiet --hard "origin/$DEFAULT_BRANCH"
+          fi
       - uses: ./.factory/actions/setup
         with:
           claude: "false"

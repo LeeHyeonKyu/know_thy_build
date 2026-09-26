@@ -3646,3 +3646,11 @@ health가 "어느 테스트"를 말할 수 없었다. 리포트를 읽었으면(
 루프의 수확기는 `gates-detail:`만 읽으므로 `[test.env]` 오설정(compose 파일·프로젝트 이름·포트)은 분류·지문·집계 어디에도 잡히지
 않았고, 리허설 표에도 `[test.env]`는 없어서 정확히 이런 오설정만이 런까지 닿는다. 이제 `gatesDetailLines`가 같은 한 줄 JSON·같은
 run_id/runner 바인딩으로 `gate: "test-env"`를 싣고, 수확기는 그것을 `.factory/harness.toml [test.env]`(owner: harness)로 보낸다.
+
+**1.4.19 (KTB #47 · L20/KTB #87).** (1) 신원 배너: `resolveFactoryLogins`가 `identity`(코멘트 창의 하트비트 작성자 — 이슈별
+검증 불가 판정의 재료) 옆에 `current`(러너가 지금 아는 것 — `FACTORY_BOT_LOGIN`, 없으면 Actions 뷰어)를 함께 돌려준다.
+머신 유저로 바꾼 뒤에도 창 안의 옛 런이 소유자 계정이라 배너가 "사람 계정이니 등록하라"고 계속 말했다 — 이제 `current`가
+머신 유저면 배너는 옛 런의 사실만 말하고(`sharedIdentityText`, health·analyze·retro가 같은 문장), 옛 이슈가 창을 벗어나면
+사라진다. (2) 큐에서 기다린 런: 단일 러너 뒤에서 50분을 기다린 own-calendar #28 implement 런이 생성 시점 main(1.4.12)을
+체크아웃해 그 사이의 두 릴리스를 못 봤다. 스테이지 워크플로 다섯 개가 checkout 직후 `origin/<default_branch>`로 갱신한다 —
+런의 headSha는 "언제 큐에 들어갔나"이지 "어느 main에서 돌라"가 아니다.
