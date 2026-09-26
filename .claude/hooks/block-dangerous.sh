@@ -383,6 +383,10 @@ DOCKER_TEARDOWN_VERBS='(down|stop|rm|kill|restart)'
 echo "$c" | grep -Eq "${A}(docker[[:space:]]+compose|docker-compose)([[:space:]]+[^;&|]*)?[[:space:]]${DOCKER_TEARDOWN_VERBS}${Z}" && block "docker compose down/stop/rm/kill/restart tears down the test env"
 echo "$c" | grep -Eq "${A}docker[[:space:]]+${DOCKER_TEARDOWN_VERBS}${Z}" && block "docker stop/rm/kill/restart tears down the test env"
 echo "$c" | grep -Eq "${A}docker[[:space:]]+container[[:space:]]+(stop|rm|kill)${Z}" && block "docker container stop/rm/kill tears down the test env"
+# 1.4.7 — 2026-09-27: 에이전트가 `docker run --name factory-test-postgres-21 -p 5433:5432 …`로 호스트 포트를 잡았고 그 컨테이너가
+# 4일을 살아 다음 test-env를 막았다. 호스트 포트는 스테이지(test-env compose 프로젝트)의 것이다 — 세션은 포트를 공개하는
+# 컨테이너를 띄우지 않는다(`--network host`·포트 없는 `docker run`은 그대로 열려 있다).
+echo "$c" | grep -Eq "${A}docker[[:space:]]+run([[:space:]]+[^;&|]*)?[[:space:]](-p|--publish|-P)([[:space:]=]|$)" && block "docker run with a published host port — the stage owns host ports (test-env compose project)"
 }
 
 scan "$c"
