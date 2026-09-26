@@ -3635,3 +3635,9 @@ CLI가 같은 답을 내고, CLI 출력에 `mode`·`mode_note`를 실어 검증�
 그 팔은 영원히 건너뛰었다 — 닫힌 이슈가 `factory:needs-human`을 단 채 남고 1.4.1의 라우팅·집계에도 잡히지 않았다. 이제 **닫힌**
 이슈는 needs-human으로 세워진 적만 있으면 사유를 묻지 않고 판정 2~4(머지된 PR·head 일치·approved 통과·증거)로 넘어간다;
 열린 이슈는 예전 규칙 그대로다(열린 needs-human 이슈마다 PR을 조회하지 않는다).
+
+**1.4.17 (KTB #40).** `gates-detail`의 `failing[]`은 stdout 이름 파서의 답이었다. `vitest --reporter=json --outputFile=…`의 stdout은
+"JSON report written to …" 한 줄뿐이라 실패 2건짜리 리포트 옆에서 `failing: []`이 남았다(KTB #36 run 35555844401) — analyze·retro·
+health가 "어느 테스트"를 말할 수 없었다. 리포트를 읽었으면(`parsed:true`) 그 id(`file::name`, 격리 제외분은 빼고)가 이 게이트의
+실패 이름이고 stdout 파서는 리포트가 없을 때의 대안이다. 픽스처는 실제 `vitest run --reporter=json` 산출물이다
+(`factory/test/fixtures/vitest-json-failing.json`).
