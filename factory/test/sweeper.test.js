@@ -2343,3 +2343,25 @@ test("sweep: restart markers before a human retry transition do not count toward
   expect(dispatchStage).toHaveBeenCalledWith({ stage: "implement", issue: 4 });
   expect(actions).toContainEqual(expect.objectContaining({ kind: "stalled-restart", issue: 4 }));
 });
+
+// 1.4.16 (KTB #43): an issue parked needs-human for ANY reason and then closed by a hand-merged PR on claude/fq-<n>
+// is reconciled like a merge-stage parking; the same open issue stays untouched (KTB-46 (b) still holds).
+test("KTB #43: a CLOSED issue parked by a human transition and merged by hand is reconciled; open stays alone", async () => {
+  const parked = humanMergeParkComment("factory:approved", "overlay check refuses — parked by hand");
+  const posted = [];
+  const closedGh = mergedGh({
+    comments: vi.fn(async () => [approvedComment(), parked, ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    searchIssues: vi.fn(async (l, opts) => (l === "factory:needs-human" && opts?.state === "all" ? [{ number: 3, state: "CLOSED", updatedAt: HUMAN_MERGE_AT }] : [])),
+  });
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(mergedArgs({ gh: closedGh, transition }));
+  expect(closedGh.mergedPrForBranch).toHaveBeenCalledWith("claude/fq-3");
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 3, to: "factory:merged" }));
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "human-merged", issue: 3, pr: 4 }));
+  const openGh = mergedGh({ comments: vi.fn(async () => [approvedComment(), parked]) });
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const open = await sweep(mergedArgs({ gh: openGh, transition: t2 }));
+  expect(openGh.mergedPrForBranch).not.toHaveBeenCalled();
+  expect(open).toContainEqual({ kind: "human-merged-skipped", issue: 3, reason: expect.stringContaining("an open issue parked for another reason") });
+});
