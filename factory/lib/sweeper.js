@@ -1,6 +1,6 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
-import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, lastTransition, transitionRefusedMarker } from "./retro/issue-comments.js";
+import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, lastTransition, transitionRefusedMarker } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
 import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
 import { allChecksGreen, GH_NO_CHECKS_RE } from "./gh.js";
@@ -383,7 +383,7 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         // 이력 전체를 보고 있었다 — 예전 주기에서 두 번 다시 밀렸던 이슈는 고쳐져 재큐된 뒤 **첫**
         // 스톨에서, 이번 주기에 단 한 번도 밀어보지 않은 채 `stalled restart limit (2) reached`로
         // 사람에게 올라갔다(사람은 이번 주기의 재점화를 하나도 볼 수 없다).
-        const cycle = commentsSinceRequeue(comments);
+        const cycle = commentsSinceCycleStart(comments);   // 1.4.12: a human retry/hold-lift starts a new cycle for the restart budget
         const restarts = cycle.filter((c) => String(c?.body ?? "").includes(marker));
         const restarted = restarts.at(-1);
         if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;

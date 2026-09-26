@@ -2323,3 +2323,23 @@ test("sweep: a stage with queued runs of its workflow is not restarted (runner s
   await sweep(stalledArgs({ gh: gh2, dispatchStage }));
   expect(dispatchStage).toHaveBeenCalledWith({ stage: "plan", issue: 2 });
 });
+
+// 1.4.12 (own-calendar #9/#28/#29/#30): restart markers from BEFORE a human retry must not count — the human retry is a
+// new cycle; otherwise two old markers make the first stall after the retry an immediate `stalled restart limit`.
+test("sweep: restart markers before a human retry transition do not count toward the restart limit", async () => {
+  const HUMAN_RETRY = { id: 5, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:planned by=human reason=retry -->\nneeds-human → planned", createdAt: "2026-09-11T00:30:00Z" };
+  const old1 = { id: 3, body: restartComment("implement", 4), createdAt: "2026-09-11T00:05:00Z" };
+  const old2 = { id: 4, body: restartComment("implement", 4), createdAt: "2026-09-11T00:06:00Z" };
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:planned" ? [{ number: 4 }] : [])),
+    comments: vi.fn(async () => [TRANSITION("factory:planned", "2026-09-11T00:00:00Z"), old1, old2, HUMAN_RETRY, ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(), pendingRuns: vi.fn(async () => 0),
+  };
+  const dispatchStage = vi.fn(async () => {}); const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, transition }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "implement", issue: 4 });
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "stalled-restart", issue: 4 }));
+});
