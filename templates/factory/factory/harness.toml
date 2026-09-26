@@ -131,6 +131,10 @@ required = ["lint", "unit"]
 fast     = ["lint", "unit"]
 full     = ["lint", "unit", "prove-test", "new-test-repeat"]
 deep     = ["lint", "unit", "prove-test", "new-test-repeat"]   # + "integration"/"e2e"/"diff_coverage"/"mutation" when configured
+# `new-test-repeat` runs its first repeat ALONGSIDE the full suite to see the new tests under load — except when
+# the commands call a toolchain that holds a project lock (flutter/dart test, gradle, cargo, swift, xcodebuild, sbt,
+# mvn): two such runs in one project both fail, so the suite runs first and the repeats after (1.4.15). Set this
+# to force either behaviour: repeat_alongside_suite = false
 
 [gates.thresholds]               # (protected)
 diff_coverage_pct       = 90

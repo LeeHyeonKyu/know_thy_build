@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { proveTest, repeatNewTests, baseInstallCommand, inconclusiveOnBase } from "../lib/prove-test.js";
@@ -233,4 +233,78 @@ test("proveModeFor: all-test diffs are characterization, anything else is prove;
   expect(r.ok).toBe(false);
   expect(r.runs[0]).toMatchObject({ code: 1, noisy: false, tail: expect.stringContaining("startup lock") });
   expect(r.detail).toMatch(/exit codes 1,0,0 — run 1: Waiting for another flutter command/);
+});
+
+// 1.4.15 (KTB #53, own-calendar #21): a fix of EXISTING red tests proves itself by those tests being red on base and
+// green on head — no new test needed. Passing on base means nothing was fixed; a module error on base is inconclusive.
+test("proveFixedTests: red on base + green on head is GREEN; green on base is RED; missing file is MISCONFIGURED", async () => {
+  const { proveFixedTests } = await import("../lib/prove-test.js");
+  const h = { commands: { test_files: "vitest run {files}" } };
+  const mk = (onBase, onHead) => makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a, o) => c === "bash" && a[1].includes("group.test.ts") && o.cwd === "/tmp/wt", result: onBase },
+    { match: (c, a, o) => c === "bash" && a[1].includes("group.test.ts") && o.cwd === "/repo", result: onHead },
+  ]);
+  const fixed = await proveFixedTests({ run: mk({ code: 1, stdout: "6 failed", stderr: "" }, ok), cwd: "/repo", harness: h, base: "abc1234", tests: ["server/tests/group.test.ts"], tmp: "/tmp/wt", exists: (p) => p.endsWith(".test.ts") });
+  expect(fixed.ok).toBe(true);
+  expect(fixed.detail).toMatch(/fixed 1 existing test file\(s\): server\/tests\/group\.test\.ts — red on base abc1234/);
+  const nothing = await proveFixedTests({ run: mk(ok, ok), cwd: "/repo", harness: h, base: "abc1234", tests: ["server/tests/group.test.ts"], tmp: "/tmp/wt", exists: (p) => p.endsWith(".test.ts") });
+  expect(nothing.ok).toBe(false);
+  expect(nothing.detail).toMatch(/already pass on base/);
+  const stillRed = await proveFixedTests({ run: mk(fail, fail), cwd: "/repo", harness: h, base: "abc1234", tests: ["server/tests/group.test.ts"], tmp: "/tmp/wt", exists: (p) => p.endsWith(".test.ts") });
+  expect(stillRed.ok).toBe(false);
+  expect(stillRed.detail).toMatch(/still red on head/);
+  const inc = await proveFixedTests({ run: mk({ code: 1, stdout: "", stderr: "Cannot find module 'x'" }, ok), cwd: "/repo", harness: h, base: "abc1234", tests: ["server/tests/group.test.ts"], tmp: "/tmp/wt", exists: (p) => p.endsWith(".test.ts") });
+  expect(inc.misconfigured).toBe(true);
+  const missing = await proveFixedTests({ run: mk(ok, ok), cwd: "/repo", harness: h, base: "abc1234", tests: ["server/tests/nope.test.ts"], tmp: "/tmp/wt", exists: (p) => p.endsWith(".test.ts") && !p.endsWith("nope.test.ts") });
+  expect(missing.misconfigured).toBe(true);
+  expect(missing.detail).toMatch(/do not exist on base/);
+});
+
+test("stage gates: a source-only diff with fixes_tests in the issue body proves itself through the existing tests", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "prove-fixed-"));
+  const stageHarness = {
+    harness: { maturity: "M2" },
+    commands: { unit: "vitest --json", test_files: "vitest run {files}", proof: {} },
+    gates: { required: ["unit", "prove-test"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 2, flaky_max: 2, quarantine_max_effective: 3 } },
+    test: { unit_report: ".factory/out/unit.json", test_glob: ["test/**"], source_glob: ["src/**"] },
+  };
+  const TF = "vitest run 'test/group.test.js'";
+  const run = makeFakeRun([
+    { match: (c, a, o) => c === "bash" && a[1] === TF && o.cwd.endsWith("prove-wt"), result: { code: 1, stdout: "FAIL", stderr: "" } },
+    { match: (c, a) => c === "bash" && a[1] === TF, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: ok },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "M\tsrc/group.js\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"h".repeat(40)}\n`, stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
+  const gh = { issue: async () => ({ body: "6 group tests fail on main — make them green\n\nfixes_tests: `test/group.test.js`\n" }) };
+  mkdirSync(join(cwd, ".factory/out/prove-wt/test"), { recursive: true });
+  writeFileSync(join(cwd, ".factory/out/prove-wt/test/group.test.js"), "// exists on base");
+  const r = await runStageGates({ run, cwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 21, readFile: () => null });
+  expect(r.gates["prove-test"].status).toBe("GREEN");
+  expect(r.gates["prove-test"].log).toMatch(/fixed 1 existing test file\(s\)/);
+});
+
+// 1.4.15 (own-calendar #31, L17): two concurrent `flutter test` runs in one project both fail (startup lock /
+// native_assets race) — the repeat gate must not run the first repeat alongside the full suite for such toolchains.
+test("repeatNewTests runs the full suite BEFORE the repeats when the toolchain holds a project lock; harness flag overrides", async () => {
+  const { repeatAlongsideSuite } = await import("../lib/prove-test.js");
+  expect(repeatAlongsideSuite({ commands: { test_files: "vitest run {files}", unit: "vitest run" } })).toBe(true);
+  expect(repeatAlongsideSuite({ commands: { test_files: "cd client && flutter test {files}", unit: "cd client && flutter test" } })).toBe(false);
+  expect(repeatAlongsideSuite({ commands: { test_files: "./gradlew test --tests {files}" } })).toBe(false);
+  expect(repeatAlongsideSuite({ gates: { repeat_alongside_suite: true }, commands: { test_files: "flutter test {files}" } })).toBe(true);
+  const order = [];
+  let inFlight = 0, overlap = false;
+  const mkRun = (label) => async () => { inFlight++; if (inFlight > 1) overlap = true; order.push(label); await new Promise((r) => setTimeout(r, 5)); inFlight--; return ok; };
+  const run = makeFakeRun([
+    { match: (c, a) => c === "bash" && a[1] === "cd client && flutter test", result: mkRun("suite") },
+    { match: (c, a) => c === "bash" && a[1].includes("{f}") === false && a[1].includes("t/a_test.dart"), result: mkRun("repeat") },
+  ]);
+  const h = { commands: { test_files: "cd client && flutter test {files}", unit: "cd client && flutter test" } };
+  const r = await repeatNewTests({ run, cwd: "/repo", harness: h, addedTests: ["t/a_test.dart"], times: 2 });
+  expect(r.ok).toBe(true);
+  expect(order).toEqual(["suite", "repeat", "repeat"]);
+  expect(overlap).toBe(false);
+  expect(r.detail).toMatch(/full suite ran before the repeats/);
 });

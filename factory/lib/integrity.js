@@ -136,14 +136,25 @@ function testsPolicy({ harness, issueBody }) {
  * 글롭으로 매치한다(정확한 경로도 글롭의 특수 케이스다). 경로처럼 보이지 않는 토큰(`/`도 `.`도 없는
  * 낱말)은 버린다 — 산문이 실수로 허가로 읽히지 않게.
  */
-export function testsChangedAllowed(body = "") {
+export function testsChangedAllowed(body = "") { return pathListMarker(body, "tests_changed_allowed"); }
+
+/**
+ * 1.4.15 (KTB #53, own-calendar #21) — `fixes_tests:` 표식. "main에서 빨간 기존 테스트를 녹색으로" 이슈의 증명은 새 테스트가
+ * 아니라 **그 테스트들이 base에서 RED, head에서 GREEN**이라는 사실이다. 어느 테스트인지는 사람이 이슈 본문에 적는다
+ * (`tests_changed_allowed:`와 같은 자리·같은 이유). 게이트가 그 목록을 base 워크트리에서 돌려 RED를 확인한다(§prove-test.js proveFixedTests).
+ */
+export function fixesTests(body = "") { return pathListMarker(body, "fixes_tests"); }
+
+/** 이슈 본문의 `<name>:` 경로 목록 표식 — 한 줄 목록과 그 아래 불릿 목록을 모두 받는다(구현은 `testsChangedAllowed` 주석 참조). */
+export function pathListMarker(body = "", name) {
   const lines = String(body || "").split("\n");
   const out = [];
   // 글롭은 살려 둔다(`test/**/*.test.js`) — 벗기는 것은 마크다운·구두점의 **껍질**뿐이다.
   const clean = (x) => x.replace(/^[`"'(\[*]+/, "").replace(/[`"')\]*,.;:]+$/, "").trim();
   const pathsIn = (s) => String(s).split(/[,\s]+/).map(clean).filter((x) => x && /[/.]/.test(x));
+  const head = new RegExp(`^\\s*(?:[-*]\\s+)?\`?${name}\`?\\s*:\\s*(.*)$`, "i");
   for (let i = 0; i < lines.length; i++) {
-    const m = /^\s*(?:[-*]\s+)?`?tests_changed_allowed`?\s*:\s*(.*)$/i.exec(lines[i]);
+    const m = head.exec(lines[i]);
     if (!m) continue;
     out.push(...pathsIn(m[1]));
     for (let j = i + 1; j < lines.length; j++) {

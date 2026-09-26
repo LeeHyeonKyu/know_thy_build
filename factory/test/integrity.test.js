@@ -627,3 +627,12 @@ test("policyViolations carries must_not violations from the issue body (merge re
   const clean = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "M\tsrc/a.js\n", stderr: "" } }]);
   expect((await policyViolations({ run: clean, cwd: "/repo", base: "b", head: "h", harness: { protected: {}, test: { test_glob: ["test/**"] } }, issueBody: "no contract" })).violations).toEqual([]);
 });
+
+// 1.4.15 (KTB #53): `fixes_tests:` shares the marker grammar with `tests_changed_allowed:`.
+test("fixesTests reads the issue body's fixes_tests: marker (inline and bullet forms), globs kept, prose dropped", async () => {
+  const { fixesTests, testsChangedAllowed } = await import("../lib/integrity.js");
+  expect(fixesTests("fixes_tests: `server/tests/group.test.ts`, server/tests/a.test.ts")).toEqual(["server/tests/group.test.ts", "server/tests/a.test.ts"]);
+  expect(fixesTests("- fixes_tests:\n- `server/tests/**/*.test.ts`\n- words only\n\nnot this: x.ts")).toEqual(["server/tests/**/*.test.ts"]);
+  expect(fixesTests("tests_changed_allowed: test/a.test.js")).toEqual([]);
+  expect(testsChangedAllowed("tests_changed_allowed: test/a.test.js")).toEqual(["test/a.test.js"]);
+});
