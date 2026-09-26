@@ -197,10 +197,12 @@ test("block-dangerous: docker compose/docker teardown verbs are blocked; ps/logs
     "docker compose stop", "docker compose -f x.yml rm -f", "docker compose kill", "docker-compose restart",
     "docker stop db", "docker rm -f db", "docker kill db", "docker restart db",
     "docker container stop db", "docker container rm -f db", "docker container kill db",
+    "docker run -p 5433:5432 postgres:15", "docker run --rm --publish 8080:80 nginx", "docker run -d --name x -P img",
   ];
   const allowed = [
     "docker compose ps -a", "docker compose logs db", "docker compose -f x.yml exec -T db psql -U u -d d -c 'select 1'",
     "docker --version", "docker compose version", "docker compose up -d", "docker compose -f x.yml up",
+    "docker run --rm node:22 node -e 1", "docker run -it --network host img",
   ];
   await Promise.all(blocked.map(async (c) => {
     const r = await bash("block-dangerous.sh", cmd(c));

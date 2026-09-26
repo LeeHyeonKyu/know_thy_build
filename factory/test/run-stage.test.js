@@ -3634,3 +3634,15 @@ test("test_36_narrowing_preserves_arms: runStage's settled marker names the stag
   // 표식을 쓰지 못해도 런은 죽지 않는다 — 잃는 것은 증표뿐이고, 그 손실은 정리를 **크게** 만든다.
   expect(await runStage({ stage: "plan", issue: 7, runnerId: "gha-777", deps: baseDeps({ settleRecord: () => { throw new Error("disk full"); } }) })).toBe(0);
 });
+
+// 1.4.7 — INCIDENT 2026-09-27 (second clobber): the agent session must carry the test-env compose project, or a bare
+// `docker compose` run by the builder in server/ resolves the directory's default project (the host's production stack).
+test("stageClaudeEnv carries COMPOSE_PROJECT_NAME when [test.env].compose is set, and nothing when it is not", async () => {
+  const { stageClaudeEnv } = await import("../bin/run-stage.js");
+  const withCompose = stageClaudeEnv({ root: "/r/own-calendar", stage: "implement", harness: { test: { env: { compose: "server/docker-compose.test.yml" } } } });
+  expect(withCompose.COMPOSE_PROJECT_NAME).toBe("factory-test-own-calendar");
+  expect(withCompose.FACTORY_STAGE).toBe("implement");
+  const without = stageClaudeEnv({ root: "/r/own-calendar", stage: "implement", harness: { test: { env: {} } } });
+  expect(without).not.toHaveProperty("COMPOSE_PROJECT_NAME");
+  expect(stageClaudeEnv({ root: "/r" })).not.toHaveProperty("COMPOSE_PROJECT_NAME");
+});

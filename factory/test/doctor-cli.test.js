@@ -340,7 +340,7 @@ test("harness test env wraps the command gates — envUp precedes [commands], en
   const at = (pred) => run.calls.findIndex(pred);
   const up = at((c) => c.cmd === "docker" && c.args.includes("up"));
   const unit = at((c) => c.cmd === "bash" && c.args[0] === "-lc" && c.args[1].includes("--outputFile=.factory/out/unit.json"));
-  const down = at((c) => c.cmd === "docker" && c.args.includes("down"));
+  const down = run.calls.map((c, i) => [c, i]).filter(([c]) => c.cmd === "docker" && c.args.includes("down")).map(([, i]) => i).at(-1);   // 1.4.7: the first down is the pre-up orphan cleanup; the teardown is the last
   expect(up).toBeGreaterThanOrEqual(0);
   expect(unit).toBeGreaterThan(up);     // 명령은 환경이 올라온 뒤에 판정된다
   expect(down).toBeGreaterThan(unit);   // 환경은 명령과 스모크가 끝난 뒤에 내려간다

@@ -11,7 +11,7 @@ test("envUp runs compose → seed → fakes → app and polls readiness; returns
   const fetch = async () => ({ status: polls++ < 2 ? 503 : 200 });
   const r = await envUp({ run, cwd: "/r", harness, spawnBg, fetch, sleep: async () => {}, now: (() => { let t = 0; return () => (t += 200); })() });
   expect(r.ok).toBe(true);
-  expect(run.calls.map((c) => [c.cmd, ...c.args].join(" "))).toEqual(["docker compose -p factory-test-r -f dc.yml --env-file .env.test up -d --wait", "bash -lc npm run seed"]);
+  expect(run.calls.map((c) => [c.cmd, ...c.args].join(" "))).toEqual(["docker compose -p factory-test-r -f dc.yml --env-file .env.test down -v --remove-orphans", "docker compose -p factory-test-r -f dc.yml --env-file .env.test up -d --wait", "bash -lc npm run seed"]);
   expect(spawned).toEqual(["npm run fake:gcal", "npm start"]);
   expect(r.pids).toEqual([101, 102]);
   expect(r.steps.map((s) => s.name)).toEqual(["compose", "seed", "fake:gcal", "app_start", "app_ready"]);
@@ -60,6 +60,7 @@ test("test-env compose always carries an explicit project name (-p) that cannot 
   await envDown({ run, cwd: "/r/server", harness: { test: { env: { compose: "docker-compose.test.yml" } } }, kill: () => {} });
   const lines = run.calls.filter((c) => c.cmd === "docker").map((c) => c.args.join(" "));
   expect(lines).toEqual([
+    "compose -p factory-test-server -f docker-compose.test.yml down -v --remove-orphans",
     "compose -p factory-test-server -f docker-compose.test.yml up -d --wait",
     "compose -p factory-test-server -f docker-compose.test.yml down -v",
   ]);
@@ -90,4 +91,21 @@ test("composeEnv: the same project name gates/rehearsal will pass to every comma
   expect(composeEnv({ test: { env: { compose: "dc.yml", project_name: "own-cal-test" } } }, "/r")).toEqual({ COMPOSE_PROJECT_NAME: "own-cal-test" });
   expect(composeEnv({ test: { env: {} } }, "/r")).toEqual({});
   expect(composeEnv({}, "/r")).toEqual({});
+});
+
+// 1.4.7 — leftovers of OUR project are removed before `up` (never another project's), and a port held by a foreign
+// container is named in the failure detail (2026-09-27: `factory-test-postgres-21` held :5433 for four days).
+test("envUp cleans its own project first and names the container holding a conflicting port", async () => {
+  const calls = [];
+  const run = async (cmd, args) => {
+    calls.push([cmd, ...args].join(" "));
+    if (cmd === "docker" && args.includes("up")) return { code: 1, stdout: "", stderr: 'Error response from daemon: Bind for 0.0.0.0:5433 failed: port is already allocated' };
+    if (cmd === "docker" && args[0] === "ps") return { code: 0, stdout: "server-postgres-1\t\nfactory-test-postgres-21\t0.0.0.0:5433->5432/tcp\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const r = await envUp({ run, cwd: "/r/server", harness: { test: { env: { compose: "docker-compose.test.yml" } } }, spawnBg: () => ({ pid: 1 }), fetch: async () => ({ status: 200 }), sleep: async () => {}, now: () => 0 });
+  expect(r.ok).toBe(false);
+  expect(calls[0]).toBe("docker compose -p factory-test-server -f docker-compose.test.yml down -v --remove-orphans");
+  expect(calls[1]).toBe("docker compose -p factory-test-server -f docker-compose.test.yml up -d --wait");
+  expect(r.steps[0].detail).toContain("port 5433 is held by container factory-test-postgres-21");
 });

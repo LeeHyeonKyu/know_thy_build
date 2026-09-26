@@ -33,8 +33,21 @@ export async function envUp({ run, cwd, harness, spawnBg = spawnBackground, fetc
     // "service db is not running"이 된다(1.4.4 데모 리허설). 그래서 같은 이름을 `COMPOSE_PROJECT_NAME`으로도
     // 이 프로세스의 환경에 올린다 — 게이트·테스트 명령은 이 프로세스의 자식이라 그대로 물려받는다.
     process.env.COMPOSE_PROJECT_NAME = composeProjectName(env, cwd);
+    // 1.4.7 — 우리 프로젝트의 잔여물(이전 런이 down을 못 한 컨테이너·고아)은 먼저 치운다. 다른 프로젝트는 건드리지 않는다.
+    await run("docker", [...composeArgs(env, cwd), "down", "-v", "--remove-orphans"], { cwd });
     const r = await run("docker", [...composeArgs(env, cwd), "up", "-d", "--wait"], { cwd });
-    if (r.code !== 0) return fail("compose", `exit ${r.code}: ${(r.stderr || r.stdout).trim()}`);
+    if (r.code !== 0) {
+      let detail = `exit ${r.code}: ${(r.stderr || r.stdout).trim()}`;
+      // 포트를 쥔 것이 **누구**인지 이름을 댄다 — 2026-09-27: 4일 된 잔여 컨테이너(`factory-test-postgres-21`)가 :5433을 쥐고 있었고,
+      // "port is already allocated"만으로는 사람이 그것을 찾는 데 한 라운드가 갔다.
+      const port = /Bind for [\d.:]*:(\d+) failed/.exec(detail)?.[1];
+      if (port) {
+        const ps = await run("docker", ["ps", "--format", "{{.Names}}\t{{.Ports}}"], { cwd });
+        const holder = String(ps.stdout || "").split("\n").find((l) => l.includes(`:${port}->`));
+        if (holder) detail += `\nport ${port} is held by container ${holder.split("\t")[0]} (not this project) — remove it or change the compose port`;
+      }
+      return fail("compose", detail);
+    }
     ok("compose", `project ${process.env.COMPOSE_PROJECT_NAME}`);
   }
   if (env.seed) {
