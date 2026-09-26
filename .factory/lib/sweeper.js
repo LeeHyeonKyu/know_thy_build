@@ -175,6 +175,9 @@ const BLOCKED_RETRY_STAGE = {
   // 그러므로 `from=factory:planned`인 blocked-origin 마커는 생길 수 없다. 죽은 항목을 두면 다음 독자가
   // "planned에서도 blocked이 될 수 있구나"로 읽는다 — 표는 실제 가능한 것만 적어야 표다.
   "factory:in-progress": "implement",
+  // 1.4.8 — 이제 planned/rework에서도 blocked이 될 수 있다(데모 #15: 세션 전 체크아웃 충돌/overlay FAIL) — 같은 implement로 다시 민다.
+  "factory:planned": "implement",
+  "factory:rework": "implement",
   // ADR-020 KTB-24 fix: review도 한 번은 다시 밀어본다. KTB-24가 세운 `Aborted cleanup`이
   // 잘린 review 잡의 `awaiting-review`를 blocked으로 바꾸는데, 이 표에 없어서 그 이슈는 **항상**
   // 곧장 needs-human으로 갔다 — 그런데 잘린 원인은 판정이 아니라 시간이다. 다른 팔들과 같은 계약이다:
