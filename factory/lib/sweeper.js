@@ -905,7 +905,8 @@ async function verifyMergedPrEvidence({ gh, factoryLogins, requiredChecks, pr, i
  *
  * 판정은 넷이고, **merge 스테이지가 자동 머지 앞에서 묻는 것과 같은 것들**이다(그래야 사람의 머지를
  * 잇는 문이 팩토리 자신의 문보다 싸지 않다):
- *   1. 마지막 **실제** 전이가 `→ factory:needs-human`이고 그 사유가 `HUMAN_MERGE_REQUIRED`와 맞는가.
+ *   1. 마지막 **실제** 전이가 `→ factory:needs-human`이고 그 사유가 `HUMAN_MERGE_REQUIRED`와 맞는가 —
+ *      또는(1.4.16, KTB #43) 이슈가 **닫혀 있다**(사람이 다른 이유로 세운 뒤 손으로 머지해 닫은 경우; 사실은 2~4가 댄다).
  *      `factory:needs-human`은 이 공장에서 가장 많은 뜻을 겸하는 라벨이다(재점화 한도, 락 소유자
  *      불명, 리뷰 라운드 소진, 게이트 RED…). 사유 한 줄만이 "사람이 머지해 주기를 기다리는 중"을
  *      나머지와 가른다 — 그 문구의 출처는 `merge-stage.js`가 내보내는 정규식 하나뿐이다.
@@ -990,8 +991,19 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
       considered += 1;
       const comments = await gh.comments(it.number);
       const last = lastRealTransition(comments);
-      if (!last || last.to !== "factory:needs-human" || !HUMAN_MERGE_REQUIRED.test(last.reason || "")) {
-        actions.push({ kind: "human-merged-skipped", issue: it.number, reason: `not parked on a human merge — last transition ${last ? `→ ${last.to} (${last.reason || "no reason"})` : "none"}` });
+      /**
+       * 1.4.16 (KTB #43) — **닫힌 이슈는 사유를 묻지 않는다.** 판정 1은 "머지 스테이지가 세운 이슈"만 알아봤다: KTB #36은
+       * 사람이 `transition … --human`으로 세웠고(overlay 거부) 그 뒤 PR #39가 손으로 머지돼 이슈가 닫혔는데, 마지막 전이의
+       * 사유가 `human merge required`가 아니라서 이 팔은 영원히 건너뛰었다 — 닫힌 이슈가 `factory:needs-human`을 단 채로
+       * 남고, 1.4.1의 라우팅·집계도 그 이슈를 보지 못했다. 사실은 GitHub가 기록한다: **이슈가 닫혔고 `claude/fq-<n>`에 머지된
+       * PR이 있다**. 그래서 열린 이슈에는 예전 규칙(사유 일치 — 열린 needs-human 이슈마다 PR을 조회하지 않는다)을, 닫힌
+       * 이슈에는 "needs-human으로 세워진 적이 있다"만 묻는다. 판정 2~4(머지된 PR·head 일치·approved 통과·증거)는 그대로다 —
+       * 사람의 머지를 잇는 문이 팩토리 자신의 문보다 싸지지 않는다.
+       */
+      const parkedNeedsHuman = Boolean(last) && last.to === "factory:needs-human";
+      const parkedForMerge = parkedNeedsHuman && HUMAN_MERGE_REQUIRED.test(last.reason || "");
+      if (!parkedNeedsHuman || (!parkedForMerge && !isClosed)) {
+        actions.push({ kind: "human-merged-skipped", issue: it.number, reason: `not parked on a human merge — last transition ${last ? `→ ${last.to} (${last.reason || "no reason"})` : "none"}${parkedNeedsHuman ? " (an open issue parked for another reason; a closed one would be reconciled by its merged PR)" : ""}` });
         continue;
       }
       let pr;

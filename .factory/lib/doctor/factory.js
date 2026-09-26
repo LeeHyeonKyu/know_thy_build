@@ -130,7 +130,21 @@ export function checkCharter({ root, loadCharter }) {
     ...checkTriageDefault(charter),
     // 1.4.13 (데모 #76) — 어떤 글롭이 실제로 벽인지, 그리고 그 벽에 산문 한정어가 붙어 있는지를 매 실행에서 말한다.
     ...checkNeverAutomate(charter),
+    // 1.4.16 (KTB #44) — 평생 예산은 CHARTER-only 선언이다; 없으면 이슈 하나가 얼마를 태우든 아무것도 멈추지 않는다.
+    ...checkBudgetPerIssue(charter),
   ];
+}
+
+/**
+ * 1.4.16 (KTB #44) — `[budget].usd_per_issue`. `merge.human_gate`와 같은 규칙으로 기본값을 채우지 않는다:
+ *  - 양수 → PASS `charter.budget-per-issue`(캡을 그대로 말한다).
+ *  - 없음/0 → WARN `charter.budget-per-issue-unset`: K·M은 마지막 큐 진입 이후만 세므로 재큐된 이슈의 평생 비용은 아무도 세지
+ *    않는다(데모 #18: README 이슈 하나가 38런·$212). FAIL이 아닌 이유: 예산은 안전 게이트가 아니라 흐름 제어다.
+ */
+export function checkBudgetPerIssue(charter) {
+  const v = Number(charter?.budget?.usd_per_issue);
+  if (Number.isFinite(v) && v > 0) return [c("charter.budget-per-issue", "PASS", `budget.usd_per_issue: $${v} — a stage refuses to start (needs-human) once an issue's lifetime cost, summed from the runner-written usage lines across re-queues, exceeds it (KTB #44)`)];
+  return [c("charter.budget-per-issue-unset", "WARN", "CHARTER declares no `budget.usd_per_issue` — nothing caps what one issue can burn across re-queues and retries (demo #18: 38 runs, $212 for a README issue). Add `budget: { usd_per_issue: 60 }` (or the number you mean) to the CHARTER frontmatter; the check spans re-queues on purpose (KTB #44)")];
 }
 
 /**

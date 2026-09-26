@@ -15,7 +15,10 @@ plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감�
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 merge: { human_gate: false }                # 소유자 결정: 이 저장소는 다크 루프를 증명하는 것이 목적이다 (아래 "머지 권한 — 사람 게이트" 참고)
 triage: { default: ready }                  # 소유자 결정: 같은 이유 — 아래 "triage 기본 판정" 참고 (감사 M1). 채택 저장소의 기본값은 needs-info다
-budget: {}
+# `usd_per_issue` caps what ONE issue may cost over its whole life — every run across re-queues and human
+# retries, summed from the runner-written usage lines. Over the cap a stage refuses to start and parks the
+# issue needs-human (raise it with a `:proposal`, split, or wont-do). `usd_per_stage` caps one `claude -p` call.
+budget: { usd_per_issue: 60 }
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
 

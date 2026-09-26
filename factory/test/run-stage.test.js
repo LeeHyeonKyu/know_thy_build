@@ -3661,3 +3661,36 @@ test("implement: verifier rejected → one retry to planned with findings; a sec
   expect(await runStage({ stage: "implement", issue: 7, deps: d2 })).toBe(0);
   expect(d2.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining("verifier rejected again") }));
 });
+
+
+// 1.4.16 (KTB #44): the lifetime budget is checked right after hydrate and before back-pressure/claim; over the cap the
+// stage parks the issue needs-human, records the line, comments, and exits 2. Under the cap it only records the line.
+test("lifetime budget: over the cap → needs-human + exit 2 before claim; under the cap → one record line, stage runs", async () => {
+  const calls = [];
+  const over = baseDeps({
+    hydrateRecord: async () => { calls.push("hydrate"); return { ok: true, hydrated: true }; },
+    lifetimeBudget: async () => ({ ok: false, cap: 60, usd: 65, runs: 3, reason: "lifetime cost $65.00 over 3 run(s) exceeds [budget].usd_per_issue $60 — a person decides" }),
+    backPressure: async () => { calls.push("back-pressure"); return { ok: true, reasons: [] }; },
+    claim: async () => { calls.push("claim"); return { ok: true }; },
+    transition: vi.fn(async ({ to, reason }) => { calls.push(`transition:${to}`); return { ok: true, to, reason }; }),
+    comment: vi.fn(async () => "url"),
+    runRecord: (l) => calls.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 18, deps: over, runnerId: "r" })).toBe(2);
+  expect(calls).toContain("hydrate");
+  expect(calls).toContain("transition:factory:needs-human");
+  expect(calls).not.toContain("claim");
+  expect(calls).not.toContain("back-pressure");
+  expect(calls.some((l) => l === "budget: lifetime $65.00 / $60 over 3 run(s) — REFUSED")).toBe(true);
+  expect(over.comment).toHaveBeenCalledWith(18, expect.stringContaining("factory-budget:v1 issue=18 usd=65 cap=60"));
+
+  const under = [];
+  const ok = baseDeps({
+    lifetimeBudget: async () => ({ ok: true, cap: 60, usd: 12.5, runs: 2 }),
+    claim: async () => { under.push("claim"); return { ok: true }; },
+    runRecord: (l) => under.push(...l),
+  });
+  expect(await runStage({ stage: "plan", issue: 18, deps: ok, runnerId: "r" })).not.toBe(2);
+  expect(under).toContain("budget: lifetime $12.50 / $60 over 2 run(s)");
+  expect(under).toContain("claim");
+});

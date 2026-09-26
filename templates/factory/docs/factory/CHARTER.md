@@ -27,7 +27,10 @@ merge: { human_gate: true }
 # 그 이슈 하나만 예외로 통과한다(사람이 그 이슈를 봤다는 뜻).
 # **이 줄을 지우면 doctor FAIL이다**(`charter.triage-default-unset`).
 triage: { default: needs-info }
-budget: {}
+# `usd_per_issue` caps what ONE issue may cost over its whole life — every run across re-queues and human
+# retries, summed from the runner-written usage lines. Over the cap a stage refuses to start and parks the
+# issue needs-human (raise it with a `:proposal`, split, or wont-do). `usd_per_stage` caps one `claude -p` call.
+budget: { usd_per_issue: 60 }
 retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 ---
 

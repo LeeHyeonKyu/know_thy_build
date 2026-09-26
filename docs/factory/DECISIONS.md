@@ -3613,3 +3613,25 @@ CLI가 같은 답을 내고, CLI 출력에 `mode`·`mode_note`를 실어 검증�
 1,0,0"은 테스트가 아니라 게이트가 만든 흔들림이었고, 검증자는 그것을 근거로 head를 돌려보냈다. 명령이 프로젝트 락을 잡는
 툴체인(`flutter|dart test`, `gradle(w)`, `cargo test`, `swift test`, `xcodebuild`, `sbt`, `mvn`)을 부르면 전체 스위트를 먼저
 끝내고 반복을 돈다(`repeatAlongsideSuite`); `[gates].repeat_alongside_suite`를 하네스에 적으면 그것이 정본이다.
+
+## ADR-031 이슈의 평생 예산 — K·M은 큐 진입 이후를 세고, 돈은 평생을 센다 — 2026-09-27 (1.4.16, KTB #44)
+
+**맥락.** 데모 #18(README 이슈)은 재큐를 한 번 지나며 38 stage-runs · $212를 태웠다. K(리뷰 라운드)·M(구현 라운드)은 **마지막
+큐 진입 이후**를 세므로 사람이 재큐하면 0에서 다시 시작하고, 아무것도 평생을 세지 않았다. 이번 캠페인에서도 own-calendar
+#9/#28/#29/#30이 사람 리트라이를 여러 번 지났다 — 라운드 예산이 매번 리셋되는 것은 옳지만(리트라이는 사람의 결정이다), 그
+결정이 얼마짜리인지 아무도 합산하지 않는 것은 옳지 않다.
+
+**결정.** CHARTER `[budget].usd_per_issue`(기본값 없음 — `merge.human_gate`와 같은 규칙; doctor WARN `charter.budget-per-issue-unset`).
+스테이지는 hydrate 직후, 락을 잡기 전에 이슈 run 기록의 `usage:` 줄(러너가 적는다 — 에이전트가 쓸 수 없는 채널)을 합해 캡과
+비교한다(`lib/budget.js`). 넘으면 시작하지 않고 `needs-human`으로 세운다 — back-pressure처럼 물러나 다시 시도하는 것이 아니다:
+같은 벽에 또 밀어 봐야 같은 답이고, 예산을 올리든(`:proposal`) 쪼개든 `wont-do`로 닫든 사람의 결정이다. merge는 에이전트를
+부르지 않으므로 보지 않는다. 템플릿과 KTB·도그푸드 저장소의 CHARTER는 $60으로 시작한다.
+
+**하지 않은 것.** `factory analyze`/health의 "재큐 이후 비용 vs 평생 비용" 분리와 평생 라운드 수 신호(#44 제안 2·3)는 이 ADR의
+범위 밖이다 — 보드의 `costOf`는 이미 평생 합이다.
+
+**함께 고친 것(같은 릴리스, KTB #43).** sweeper의 human-merged 팔은 "머지 스테이지가 `human merge required`로 세운 이슈"만
+알아봤다. KTB #36은 사람이 `transition --human`으로 세웠고(overlay 거부) PR #39가 손으로 머지돼 닫혔는데, 사유가 달라서
+그 팔은 영원히 건너뛰었다 — 닫힌 이슈가 `factory:needs-human`을 단 채 남고 1.4.1의 라우팅·집계에도 잡히지 않았다. 이제 **닫힌**
+이슈는 needs-human으로 세워진 적만 있으면 사유를 묻지 않고 판정 2~4(머지된 PR·head 일치·approved 통과·증거)로 넘어간다;
+열린 이슈는 예전 규칙 그대로다(열린 needs-human 이슈마다 PR을 조회하지 않는다).
