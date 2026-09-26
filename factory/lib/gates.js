@@ -369,9 +369,9 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
       // "JSON report written to …" 한 줄뿐이라 이름 파서는 빈 목록을 냈고, 실제 실패 2건이 있는 리포트 옆에서 `gates-detail`은
       // `failing: []`을 남겼다(KTB #36 run 35555844401). 리포트를 읽었으면 그 id(`file::name`)가 이 게이트의 실패 이름이다;
       // 격리로 제외된 것은 실패가 아니므로 남은 것만 싣는다. 리포트가 없을 때만 stdout 파서의 답을 쓴다.
-      if (TEST_GATES.has(name) && reportParsed && Array.isArray(tests?.failing) && tests.failing.length) {
-        const ids = tests.failing.map((f) => f.id);
-        if (ids.length) gates[name].detail.failing = ids;
+      // stdout 파서가 이름을 찾았으면 그대로 둔다(analyze·retro가 그 이름 모양에 기대 있다); 비었을 때만 리포트 id로 채운다.
+      if (TEST_GATES.has(name) && reportParsed && !gates[name].detail.failing?.length && Array.isArray(tests?.failing) && tests.failing.length) {
+        gates[name].detail.failing = tests.failing.map((f) => f.id);
       }
     }
   }
