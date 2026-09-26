@@ -382,6 +382,11 @@ const buildRules =
   `that stops the auto-merge and hands the PR to a human (external audit H5). Adding new tests is always ` +
   `fine. The only exception is an existing test the ISSUE BODY lists under \`tests_changed_allowed:\` — ` +
   `if the change you need is not listed there, stop and write why in the PR body instead.\n` +
+  `3b. Honour the ISSUE BODY's \`must_not:\` contract literally (1.4.14, KTB #73): every backticked path/glob ` +
+  `under it must not appear in your diff, and every backticked token under \`add:\` must not appear in any ` +
+  `added line (commands, dependency names, file paths). The runner checks this mechanically as the ` +
+  `\`must-not\` gate and merge refuses on it — a prohibition in the issue is a contract, not a suggestion; ` +
+  `if the work honestly cannot be done within it, stop and say so in the PR body instead of working around it.\n` +
   `4. Stay inside \`handoffs.plan.files_expected\`. If the work honestly needs a path outside it, record ` +
   `the path and the reason in the PR body under a "Scope change" heading.\n` +
   `5. Run \`[commands].lint\` and \`[commands].unit\` from \`harness.commands\` yourself (plus the full ` +
@@ -535,12 +540,14 @@ const verifyPrompt = (round, priorFindings) =>
     : '') +
   `\nFor each \`done_when\`: does a test whose name is its \`verify\` id actually exist, and would it ` +
   `fail if this change were reverted? Run \`node .factory/bin/prove-test.js\` and read its JSON output ` +
-  `(base, changed_tests, prove_test, new_test_repeat) — set prove_test_read true only if you actually ` +
-  `read it, false if the command could not run.\n` +
+  `(base, mode, mode_note, changed_tests, prove_test, new_test_repeat) — set prove_test_read true only if you actually ` +
+  `read it, false if the command could not run. Read \`mode\` first: in \`characterization\` mode (a test-only ` +
+  `diff) the new tests pin existing behaviour and MUST pass on base — "expected FAIL, observed PASS" is not a ` +
+  `finding there, and asking the builder to make the test fail on base invites self-referential tricks (1.4.14).\n` +
   `Reject if any of these is true: a done_when has no real test (1:1 is the contract); an assertion ` +
   `copies the implementation instead of observing its behaviour; a mock or stub fixes the result so the ` +
   `code under test could be wrong and still pass; an existing test was modified or deleted; a ` +
-  `skip/ignore pragma was added; prove-test expected FAIL and observed PASS; the diff leaves ` +
+  `skip/ignore pragma was added; prove-test (in \`prove\` mode) expected FAIL and observed PASS; the diff leaves ` +
   `\`files_expected\` with no reason given in the diff itself.\n` +
   `verdict: accepted | accepted-with-reservations | rejected. Every finding needs {where (path:line), ` +
   `claim, evidence}; rejected needs at least one. When a finding rests on prove-test, quote its verdict ` +

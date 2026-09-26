@@ -957,3 +957,30 @@ test("implement: a diff with non-test files besides the tests (harness.toml + te
   expect(r.gates["prove-test"].status).toBe("GREEN");
   expect(r.gates["prove-test"].log).not.toContain("characterization");
 });
+
+// 1.4.14 (KTB #73): the implement gate reads the issue body's `must_not:` contract and turns a violation into a RED gate
+// named `must-not`; without a contract there is no such gate at all.
+test("implement: the issue's must_not contract is a gate — a touched forbidden path is RED, no contract means no gate", async () => {
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, required: ["unit"] } };
+  const mk = (body) => ({
+    run: makeFakeRun([
+      { match: (c, a) => c === "bash", result: ok },
+      { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "M\tsrc/a.js\nM\t.factory/lib/gates.js\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: "--- a/src/a.js\n+++ b/src/a.js\n@@ -1,0 +2,1 @@\n+require('smol-toml')\n", stderr: "" } },
+      revParse,
+      { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+      { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
+      { match: (c) => c === "cp", result: ok },
+    ]),
+    gh: { createIssue: vi.fn(), searchIssues: vi.fn(async () => []), issue: vi.fn(async () => ({ body })) },
+  });
+  const red = mk("fix it\n\nmust_not:\n- touch: `.factory/**`\n- add: `smol-toml`\n");
+  const r = await runStageGates({ run: red.run, cwd: stageCwd, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh: red.gh, issue: 7, readFile: readUnit });
+  expect(r.gates["must-not"].status).toBe("RED");
+  expect(r.gates["must-not"].log).toMatch(/\.factory\/lib\/gates\.js: must-not-touch/);
+  expect(r.gates["must-not"].log).toMatch(/src\/a\.js: must-not-add — the issue forbids adding `smol-toml` \(line 2\)/);
+  expect(r.failing).toContain("must-not");
+  const none = mk("fix it, no contract");
+  const r2 = await runStageGates({ run: none.run, cwd: stageCwd, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh: none.gh, issue: 7, readFile: readUnit });
+  expect(r2.gates["must-not"]).toBeUndefined();
+});

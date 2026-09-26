@@ -3566,3 +3566,27 @@ fingerprint를 얻지 못한 소견은 `fp=`를 **비우지 않고 `fp=none`**�
 신호), §6(cause-invariant `reason`), §7(파생 보고서·fail-safe), §10 Q3(표본 크기).
 코드: `factory/bin/health.js`(신호·상수·조립), `factory/cli/analyze.js`(수동 경로),
 `factory/lib/doctor/factory.js`(`factory.identity`·`factory.upstream`), `factory/lib/gha.js`(러너 채널).
+
+## ADR-029 이슈 본문의 `must_not:` 계약 — 금지는 리뷰 산문이 아니라 러너의 판정이다 — 2026-09-27 (1.4.14, KTB #73)
+
+**맥락.** 데모 #15(하네스 M2 승격, 6줄짜리 변경)가 K=3을 세 번 소진했다. 이슈 본문은 "Playwright를 unit 게이트 안에서 돌리지
+말 것, `.factory/**` 내부를 고정하지 말 것, factory 내부를 devDependency로 넣지 말 것"을 명시했는데, 최종 PR은 그 셋을 전부
+어겼다. `done_when`은 plan이 검사로 바꾸지만 "do NOT" 줄은 아무 표현이 없어서 검증자도 자기 게이트도 그 위에서 실패할 수
+없었다 — 금지는 리뷰 2~3라운드의 산문으로만 드러났고, 결국 소유자가 손으로 고쳤다.
+
+**결정.** 이슈 본문의 `must_not:` 표식(`tests_changed_allowed:`와 같은 자리·같은 이유 — 이슈 본문은 사람이 쓰거나 승인하고
+PR diff는 그것을 고칠 수 없다)이 기계가 읽는 금지 목록이다. 백틱 토큰만 계약이고 산문은 읽지 않는다: `touch:` 항목(또는
+경로/글롭 모양의 토큰)에 걸리는 파일이 diff에 있으면 위반, `add:` 항목(또는 그 밖의 토큰)이 diff의 **추가된 줄**에 나타나면
+위반(의존성 추가도 package.json의 추가된 줄이다). 두 자리에서 **같은 함수**(`integrity.js` `mustNotContract`·
+`mustNotViolations`)로 센다 — implement 게이트 `must-not`(RED → 자기 게이트가 handoff를 막는다; 계약이 없으면 게이트도
+없다)과 merge의 `policyViolations`(사람 머지). 빌더 프롬프트(3b)는 이 계약이 기계 판정임을 말하고, 계약 안에서 정직하게
+불가능하면 우회하지 말고 PR 본문에 그렇게 쓰라고 한다.
+
+**하지 않은 것.** plan handoff에 `must_not`을 추가하지 않았다 — plan이 발명한 금지는 plan이 발명한 done_when(ADR-026 (b))과
+같은 결함 표면이 된다. 계약은 사람이 쓴 이슈 본문에서만 온다. 자연어 "do NOT …" 줄은 여전히 에이전트만 읽는다.
+
+**함께 고친 것(같은 릴리스, own-calendar #31 · L16).** 검증자가 읽는 진단 CLI `bin/prove-test.js`는 1.4.9의 특성화 모드를
+몰랐다 — 스테이지 게이트는 test-only diff를 특성화 GREEN으로 판정하는데, CLI는 같은 diff를 "base에서 통과 — 증명 아님"이라
+했고 검증자는 그 출력으로 head를 돌려보냈다(`verifier rejected (retry 1)`). 모드 선택은 `proveModeFor` 한 본체로 옮겨 게이트와
+CLI가 같은 답을 내고, CLI 출력에 `mode`·`mode_note`를 실어 검증자 프롬프트가 그것을 먼저 읽게 했다. `repeatNewTests`의 실패한
+반복은 출력 꼬리를 남긴다 — "exit 1,0,0"만으로는 테스트의 흔들림과 툴체인 락(첫 반복은 전체 스위트와 동시에 돈다)을 가릴 수 없다.

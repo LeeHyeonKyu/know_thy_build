@@ -587,3 +587,43 @@ test("review batch-2 MF-3: nested session config is protected for L1 (docs/CLAUD
   expect(r.ok).toBe(true);
   expect(r.files).toEqual(["docs/CLAUDE.md", "src/AGENTS.md", "CLAUDE.local.md", "pkg/.mcp.local.json"]);
 });
+
+// 1.4.14 (KTB #73, demo #15): the issue body's `must_not:` contract is machine-checked — paths/globs must not be
+// touched, tokens must not appear in added lines. The same functions serve the implement gate and merge policy.
+test("mustNotContract parses touch/add items (explicit prefixes and by shape); mustNotViolations names the broken line", async () => {
+  const { mustNotContract, mustNotViolations, addedLines } = await import("../lib/integrity.js");
+  const body = [
+    "Do the thing.",
+    "must_not:",
+    "- touch: `.factory/**`, `playwright.config.js`",
+    "- add: `npx playwright test`, `smol-toml`",
+    "- `src/routes/**` and `docker/Dockerfile` — no prose is read, only backticks (a bare word like `Dockerfile` needs the touch: prefix)",
+    "",
+    "Unrelated bullet after a blank line:",
+    "- `not/a/contract`",
+  ].join("\n");
+  const c = mustNotContract(body);
+  expect(c).toEqual({ touch: [".factory/**", "playwright.config.js", "src/routes/**", "docker/Dockerfile"], add: ["npx playwright test", "smol-toml", "Dockerfile"] });
+  expect(mustNotContract("no marker here `x/**`")).toEqual({ touch: [], add: [] });
+  const u0 = ["--- a/package.json", "+++ b/package.json", "@@ -1,0 +5,1 @@", '+    "smol-toml": "^1.0.0",', "--- a/src/app.js", "+++ b/src/app.js", "@@ -1,0 +2,1 @@", "+const x = 1;"].join("\n");
+  const v = mustNotViolations({ contract: c, changed: [".factory/lib/gates.js", "package.json", "src/app.js"], added: addedLines(u0) });
+  expect(v).toEqual([
+    { file: ".factory/lib/gates.js", rule: "must-not-touch — the issue forbids changes under `.factory/**`" },
+    { file: "package.json", line: 5, rule: "must-not-add — the issue forbids adding `smol-toml` (line 5)" },
+  ]);
+  expect(mustNotViolations({ contract: c, changed: ["src/app.js"], added: new Map() })).toEqual([]);
+});
+
+test("policyViolations carries must_not violations from the issue body (merge refuses what the gate would have refused)", async () => {
+  const u0 = ["--- a/package.json", "+++ b/package.json", "@@ -1,0 +5,1 @@", '+    "smol-toml": "^1.0.0",'].join("\n");
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "M\tpackage.json\nM\t.factory/lib/gates.js\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: u0, stderr: "" } },
+  ]);
+  const r = await policyViolations({ run, cwd: "/repo", base: "b", head: "h", harness: { protected: {}, test: { test_glob: ["test/**"] } }, issueBody: "must_not:\n- touch: `.factory/**`\n- add: `smol-toml`\n" });
+  expect(r.ok).toBe(true);
+  expect(r.violations.map((v) => v.rule)).toEqual(["must-not-touch — the issue forbids changes under `.factory/**`", "must-not-add — the issue forbids adding `smol-toml` (line 5)"]);
+  expect(r.files.sort()).toEqual([".factory/lib/gates.js", "package.json"]);
+  const clean = makeFakeRun([{ match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "M\tsrc/a.js\n", stderr: "" } }]);
+  expect((await policyViolations({ run: clean, cwd: "/repo", base: "b", head: "h", harness: { protected: {}, test: { test_glob: ["test/**"] } }, issueBody: "no contract" })).violations).toEqual([]);
+});
