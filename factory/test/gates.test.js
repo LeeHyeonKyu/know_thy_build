@@ -984,3 +984,26 @@ test("implement: the issue's must_not contract is a gate — a touched forbidden
   const r2 = await runStageGates({ run: none.run, cwd: stageCwd, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh: none.gh, issue: 7, readFile: readUnit });
   expect(r2.gates["must-not"]).toBeUndefined();
 });
+
+// 1.4.17 (KTB #40): with `--reporter=json --outputFile`, stdout says only "JSON report written to …", so the stdout
+// name parser finds nothing — the durable gates-detail line must carry the ids from the PARSED report instead.
+// Fixture: a real `vitest run --reporter=json` report (2 failed, 1 passed), paths rewritten to /r.
+test("KTB #40: gates-detail failing[] comes from the parsed vitest report when stdout names no test", async () => {
+  const report = readFileSync(new URL("./fixtures/vitest-json-failing.json", import.meta.url), "utf8");
+  const h = {
+    harness: { maturity: "M2" },
+    commands: { unit: "vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+    gates: { required: ["unit"], fast: ["unit"], thresholds: {} },
+    test: { unit_report: ".factory/out/unit.json" },
+  };
+  const run = async () => ({ code: 1, stdout: "JSON report written to /r/.factory/out/unit.json\n", stderr: "" });
+  const r = await runGates({ run, cwd: "/r", harness: h, level: "fast", quarantine: { quarantined: [] }, readFile: () => report, now: "t" });
+  expect(r.gates.unit.status).toBe("RED");
+  expect(r.gates.unit.parsed).toBe(true);
+  expect(r.gates.unit.detail.failing).toEqual(["test/self-mirror.test.js::mirror copy matches", "test/self-mirror.test.js::mirror is tracked"]);
+  const line = JSON.parse(gatesDetailLines(r)[0].slice(GATES_DETAIL_PREFIX.length));
+  expect(line).toMatchObject({ gate: "unit", parsed: true, code: 1, failing: ["test/self-mirror.test.js::mirror copy matches", "test/self-mirror.test.js::mirror is tracked"] });
+  // quarantined failures are excluded from the list — they are not this PR's failures
+  const q = await runGates({ run, cwd: "/r", harness: h, level: "fast", quarantine: { quarantined: [{ id: "test/self-mirror.test.js::mirror is tracked" }] }, readFile: () => report, now: "t" });
+  expect(q.gates.unit.detail.failing).toEqual(["test/self-mirror.test.js::mirror copy matches"]);
+});

@@ -363,7 +363,17 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
     if (unhandled) gates[name].reason = unhandledReason(r.code);
     if (TEST_GATES.has(name)) { gates[name].parsed = reportParsed; gates[name].failing_ids = failing_ids || []; }
     // Task 1 — RED의 뿌리를 게이트 엔트리에 붙인다(판정 뒤, 판정과 무관하게: additive 필드다).
-    if (status === "RED") gates[name].detail = gateDetail({ gate: name, stdout: r.stdout, stderr: r.stderr });
+    if (status === "RED") {
+      gates[name].detail = gateDetail({ gate: name, stdout: r.stdout, stderr: r.stderr });
+      // 1.4.17 (KTB #40) — **파싱한 리포트가 stdout 파서보다 정확하다.** `vitest --reporter=json --outputFile=…`의 stdout은
+      // "JSON report written to …" 한 줄뿐이라 이름 파서는 빈 목록을 냈고, 실제 실패 2건이 있는 리포트 옆에서 `gates-detail`은
+      // `failing: []`을 남겼다(KTB #36 run 35555844401). 리포트를 읽었으면 그 id(`file::name`)가 이 게이트의 실패 이름이다;
+      // 격리로 제외된 것은 실패가 아니므로 남은 것만 싣는다. 리포트가 없을 때만 stdout 파서의 답을 쓴다.
+      // stdout 파서가 이름을 찾았으면 그대로 둔다(analyze·retro가 그 이름 모양에 기대 있다); 비었을 때만 리포트 id로 채운다.
+      if (TEST_GATES.has(name) && reportParsed && !gates[name].detail.failing?.length && Array.isArray(tests?.failing) && tests.failing.length) {
+        gates[name].detail.failing = tests.failing.map((f) => f.id);
+      }
+    }
   }
   const result = { schema: "factory.gates.v1", level, requested_level, downgraded_from: level === requested_level ? null : requested_level, status: null, gates, passed: 0, failed: 0, failing: [], skipped: [], misconfigured: [], tests, quarantine_applied: quarantineApplied, quarantine_refused: quarantineRefused, ran_at: now };
   return recomputeStatus(result, harness);
