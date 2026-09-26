@@ -3590,3 +3590,26 @@ PR diff는 그것을 고칠 수 없다)이 기계가 읽는 금지 목록이다.
 했고 검증자는 그 출력으로 head를 돌려보냈다(`verifier rejected (retry 1)`). 모드 선택은 `proveModeFor` 한 본체로 옮겨 게이트와
 CLI가 같은 답을 내고, CLI 출력에 `mode`·`mode_note`를 실어 검증자 프롬프트가 그것을 먼저 읽게 했다. `repeatNewTests`의 실패한
 반복은 출력 꼬리를 남긴다 — "exit 1,0,0"만으로는 테스트의 흔들림과 툴체인 락(첫 반복은 전체 스위트와 동시에 돈다)을 가릴 수 없다.
+
+## ADR-030 `fixes_tests:` — 기존 빨간 테스트를 고친 변경의 증명은 "base에서 RED, head에서 GREEN"이다 — 2026-09-27 (1.4.15, KTB #53)
+
+**맥락.** own-calendar #21("6 group tests fail on main — make them green")의 빌더는 소스만 고쳤고 테스트를 추가하지 않았다 —
+추가할 것이 없었다. prove-test는 "no new tests in this change"로 RED를 냈고 유일한 출구는 사람 머지였다. 브라운필드의 가장 흔한
+이슈 모양(이미 있는 테스트를 살리는 수정)이 팩토리로는 닫히지 않았다.
+
+**결정.** 이슈 본문의 `fixes_tests:` 표식(`tests_changed_allowed:`·`must_not:`과 같은 자리·같은 이유 — 사람이 쓰고 PR이 고칠
+수 없다)이 "이 변경이 살리는 기존 테스트"를 이름 짓는다. implement 게이트는 그 목록을 base 워크트리에서 돌려 **RED**(판정 불가가
+아니라)를, head에서 **GREEN**을 확인한다(`proveFixedTests`) — 그 둘이 증명이다. base에서 통과하면 "고친 것이 없다"(RED), 모듈
+오류면 판정 불가(MISCONFIGURED), 목록의 파일이 base에 없으면 설정 오류. 새 테스트가 함께 있으면 둘 다 성립해야 GREEN이다.
+검증자 프롬프트는 `fixes_tests:`가 있으면 그 기존 테스트가 done_when의 1:1 테스트로 센다고 말한다.
+
+**하지 않은 것.** "base에서 실패하는 기존 테스트를 자동으로 찾아 증명으로 삼기"는 하지 않았다 — 어느 테스트가 이 이슈의
+것인지는 사람의 선언이어야 한다(우연히 함께 살아난 flaky 테스트가 증명이 되면 안 된다). 두 번째 원인(#53의 "test_glob이 base에서
+좁다")은 하네스 승격(#9)이 답이고 이 ADR의 범위 밖이다.
+
+**함께 고친 것(같은 릴리스, own-calendar #31 · L17).** `repeatNewTests`의 첫 반복은 전체 스위트와 **동시에** 돌았다(부하 아래의
+흔들림을 보려는 설계). 스크래치 클론에서 `flutter test` 둘을 동시에 돌려 보니 **둘 다** exit 1이다 — 하나는 startup lock 대기
+뒤 로딩 실패, 다른 하나는 `build/native_assets` 경쟁(`lipo: can't move temporary file`). #31의 "non-deterministic: exit codes
+1,0,0"은 테스트가 아니라 게이트가 만든 흔들림이었고, 검증자는 그것을 근거로 head를 돌려보냈다. 명령이 프로젝트 락을 잡는
+툴체인(`flutter|dart test`, `gradle(w)`, `cargo test`, `swift test`, `xcodebuild`, `sbt`, `mvn`)을 부르면 전체 스위트를 먼저
+끝내고 반복을 돈다(`repeatAlongsideSuite`); `[gates].repeat_alongside_suite`를 하네스에 적으면 그것이 정본이다.

@@ -151,15 +151,33 @@ export async function proveTest({ run, cwd, harness, base, addedTests, addedFile
   }
 }
 
-export async function repeatNewTests({ run, cwd, harness, addedTests, times, fullSuiteCmd = harness.commands?.unit }) {
+/**
+ * 1.4.15 (own-calendar #31, L17) — **프로젝트 락을 잡는 툴체인은 동시 실행이 곧 실패다.** `flutter test` 둘을 같은 프로젝트에서
+ * 동시에 돌리면(실측: 스크래치 클론) 하나는 "Waiting for another flutter command to release the startup lock"에서, 다른 하나는
+ * `build/native_assets` 경쟁(`lipo: can't move temporary file`)에서 **둘 다** exit 1이다. repeatNewTests의 첫 반복은 전체
+ * 스위트와 **동시에** 도는 것이 설계였고(부하 아래의 흔들림을 보려고), 그것이 #31의 "non-deterministic: exit codes 1,0,0"을
+ * 만들었다 — 테스트가 아니라 게이트가 흔들렸다. 명령이 그런 툴체인을 부르면 전체 스위트를 먼저 끝내고 반복을 돈다.
+ * 하네스가 `[gates].repeat_alongside_suite`를 명시하면 그것이 정본이다(true/false).
+ */
+const PROJECT_LOCK_TOOLCHAINS = /\b(?:flutter|dart)\s+test\b|\bgradlew?\b|\bcargo\s+test\b|\bswift\s+test\b|\bxcodebuild\b|\bsbt\b|\bmvn\b/;
+export function repeatAlongsideSuite(harness) {
+  const v = harness?.gates?.repeat_alongside_suite;
+  if (typeof v === "boolean") return v;
+  const cmds = [harness?.commands?.test_files, harness?.commands?.unit].filter(Boolean).join("\n");
+  return !PROJECT_LOCK_TOOLCHAINS.test(cmds);
+}
+
+export async function repeatNewTests({ run, cwd, harness, addedTests, times, fullSuiteCmd = harness.commands?.unit, alongside = repeatAlongsideSuite(harness) }) {
   // 반복 횟수를 모르면 "흔들리지 않음"을 주장할 수 없다 — 통과가 아니라 설정 오류다.
   if (!(times >= 1)) return { ok: false, misconfigured: true, runs: [], detail: "new_test_repeats missing" };
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES, runs: [] };
   if (!addedTests?.length) return { ok: true, runs: [], detail: "no new tests" };
   const cmd = harness.commands.test_files.replaceAll("{files}", addedTests.map(q).join(" "));
   const runs = [];
+  // 락을 잡는 툴체인: 전체 스위트를 **먼저** 끝낸다(동시 실행이 아니라 순차 — 결과는 여전히 "전체 스위트 뒤의 반복"이다).
+  if (fullSuiteCmd && !alongside) await run("bash", ["-lc", fullSuiteCmd], { cwd });
   for (let i = 0; i < times; i++) {
-    const noisy = i === 0 && fullSuiteCmd ? run("bash", ["-lc", fullSuiteCmd], { cwd }) : null;
+    const noisy = i === 0 && fullSuiteCmd && alongside ? run("bash", ["-lc", fullSuiteCmd], { cwd }) : null;
     const r = await run("bash", ["-lc", cmd], { cwd });
     if (noisy) await noisy;
     // 1.4.14 (own-calendar #31) — 실패한 반복은 **출력 꼬리를 남긴다**. exit 코드만 남으면 "1,0,0"이 테스트의 흔들림인지
@@ -167,7 +185,41 @@ export async function repeatNewTests({ run, cwd, harness, addedTests, times, ful
     runs.push(r.code === 0 ? { code: r.code } : { code: r.code, noisy: Boolean(noisy), tail: String(r.stderr || r.stdout || "").trim().slice(-300) });
   }
   const ok = runs.every((r) => r.code === 0);
-  const quietNote = fullSuiteCmd ? "" : " (quiet: no full-suite command configured)";
+  const quietNote = fullSuiteCmd ? (alongside ? "" : " (full suite ran before the repeats, not alongside — the toolchain holds a project lock)") : " (quiet: no full-suite command configured)";
   const failedTail = ok ? "" : runs.filter((r) => r.code !== 0).map((r, i) => ` — run ${runs.indexOf(r) + 1}${r.noisy ? " (alongside the full suite)" : ""}: ${r.tail || "(no output)"}`).join("");
   return { ok, runs, detail: (ok ? `${times}/${times} passes` : `non-deterministic: exit codes ${runs.map((r) => r.code).join(",")}${failedTail}`) + quietNote };
+}
+
+/**
+ * 1.4.15 (KTB #53, own-calendar #21) — **기존 테스트를 고친 변경의 증명.** "6 group tests fail on main — make them green"
+ * 이슈의 빌더는 소스만 고치고 테스트를 추가하지 않는다(추가할 것이 없다: 테스트는 이미 있다). 예전 prove-test는 그것을
+ * "no new tests"로 RED 처리했고 유일한 출구는 사람 머지였다. 이슈 본문의 `fixes_tests:` 목록(사람이 적는다)을 base 워크트리
+ * 에서 돌려 **RED**(판정 불가 아님)를 확인하고 head에서 **GREEN**을 확인한다 — 그 둘이 이 변경의 증명이다.
+ * 목록의 파일은 base에도 있으므로 복사하지 않는다; base에서 통과하면 "고친 것이 없다"(RED), base에서 모듈 오류면 판정 불가.
+ */
+export async function proveFixedTests({ run, cwd, harness, base, tests, tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
+  if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
+  if (!tests?.length) return { ok: false, detail: "fixes_tests: list is empty" };
+  const g = (args) => run("git", args, { cwd });
+  const add = await g(["worktree", "add", "--detach", tmp, base]);
+  if (add.code !== 0) return { ok: false, detail: `worktree add failed: ${add.stderr}` };
+  try {
+    const missing = tests.filter((f) => !exists(join(tmp, f)));
+    if (missing.length) return { ok: false, misconfigured: true, detail: `fixes_tests names files that do not exist on base ${base.slice(0, 7)}: ${missing.join(", ")} — the marker must list EXISTING tests that are red on base` };
+    const install = baseInstallCommand(harness, tmp, exists);
+    if (install) {
+      const ins = await run("bash", ["-lc", install], { cwd: tmp });
+      if (ins.code !== 0) return { ok: false, misconfigured: true, inconclusive: [...tests], detail: `base dependency install failed (${install}, exit ${ins.code}) — the base run cannot prove anything: ${String(ins.stderr || ins.stdout || "").trim().slice(0, 200)}` };
+    }
+    const cmd = harness.commands.test_files.replaceAll("{files}", tests.map(q).join(" "));
+    const onBase = await run("bash", ["-lc", cmd], { cwd: tmp });
+    if (onBase.code === 0) return { ok: false, detail: `fixes_tests: ${tests.join(", ")} already pass on base ${base.slice(0, 7)} — nothing was fixed (the proof of a fix is red on base, green on head)` };
+    const out = `${onBase.stdout || ""}\n${onBase.stderr || ""}`;
+    if (inconclusiveOnBase(out)) return { ok: false, misconfigured: true, inconclusive: [...tests], detail: `fixes_tests: the listed tests did not run on base ${base.slice(0, 7)} (module resolution / import error) — inconclusive` };
+    const onHead = await run("bash", ["-lc", cmd], { cwd });
+    if (onHead.code !== 0) return { ok: false, detail: `fixes_tests: ${tests.join(", ")} are red on base ${base.slice(0, 7)} (exit ${onBase.code}) but still red on head (exit ${onHead.code}) — not fixed` };
+    return { ok: true, detail: `fixed ${tests.length} existing test file(s): ${tests.join(", ")} — red on base ${base.slice(0, 7)} (exit ${onBase.code}), green on head` };
+  } finally {
+    await g(["worktree", "remove", "--force", tmp]);
+  }
 }

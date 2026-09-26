@@ -543,8 +543,12 @@ const verifyPrompt = (round, priorFindings) =>
   `(base, mode, mode_note, changed_tests, prove_test, new_test_repeat) — set prove_test_read true only if you actually ` +
   `read it, false if the command could not run. Read \`mode\` first: in \`characterization\` mode (a test-only ` +
   `diff) the new tests pin existing behaviour and MUST pass on base — "expected FAIL, observed PASS" is not a ` +
-  `finding there, and asking the builder to make the test fail on base invites self-referential tricks (1.4.14).\n` +
-  `Reject if any of these is true: a done_when has no real test (1:1 is the contract); an assertion ` +
+  `finding there, and asking the builder to make the test fail on base invites self-referential tricks (1.4.14). ` +
+  `If the ISSUE BODY lists \`fixes_tests:\` (existing tests that are red on main), the proof is those tests red on ` +
+  `base and green on head — prove_test.detail then reads "fixed N existing test file(s)"; do not demand new tests ` +
+  `for a done_when those existing tests already cover (1.4.15).\n` +
+  `Reject if any of these is true: a done_when has no real test (1:1 is the contract — an existing test named ` +
+  `under \`fixes_tests:\` counts); an assertion ` +
   `copies the implementation instead of observing its behaviour; a mock or stub fixes the result so the ` +
   `code under test could be wrong and still pass; an existing test was modified or deleted; a ` +
   `skip/ignore pragma was added; prove-test (in \`prove\` mode) expected FAIL and observed PASS; the diff leaves ` +
