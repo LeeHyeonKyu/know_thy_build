@@ -941,3 +941,13 @@ test("implement: test-only diff runs prove-test in characterization mode — new
   expect(r.gates["prove-test"].status).toBe("GREEN");
   expect(r.gates["prove-test"].log).toContain("characterization");
 });
+
+// 1.4.10 (demo #15): a harness issue changes harness.toml AND adds a test asserting the new config — that is a proof
+// diff (the test must fail on base), not a characterization diff, even though no source_glob file changed.
+test("implement: a diff with non-test files besides the tests (harness.toml + test) runs prove-test in prove mode", async () => {
+  const baseFail = { match: (c, a, o) => c === "bash" && a[1].includes("test/new.test.js") && String(o?.cwd || "").includes("prove-wt"), result: bad };
+  const run = makeFakeRun([unitOk, diffOf("M\t.factory/harness.toml\nA\ttest/new.test.js\n"), revParse, baseFail, { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "git" && a[0] === "worktree", result: ok }, { match: () => true, result: ok }]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: stageArgs.base, readFile: () => null });
+  expect(r.gates["prove-test"].status).toBe("GREEN");
+  expect(r.gates["prove-test"].log).not.toContain("characterization");
+});
