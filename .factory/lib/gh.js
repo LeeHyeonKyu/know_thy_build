@@ -430,6 +430,15 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 없으므로, 멈춘 스테이지를 되살리는 경로는 이것뿐이다 — sweeper의 세 번째 팔과
      * `factory run <stage> <issue> --remote`가 같은 호출을 쓴다.
      */
+    /**
+     * 1.4.11 (own-calendar #30) — 이 워크플로의 런 중 **아직 러너를 못 받은** 것의 수(queued/pending/waiting/requested).
+     * 셀프호스트 러너 한 대에서는 dispatch가 곧 실행이 아니다: 앞 이슈가 러너를 쥐고 있으면 런은 큐에 앉고,
+     * 하트비트도 없다. 그 상태는 "멈춤"이 아니라 "차례를 기다림"이다.
+     */
+    async pendingRuns(workflow) {
+      const j = JSON.parse(await gh(["run", "list", "-R", repo, "--workflow", workflow, "--limit", "50", "--json", "status"]));
+      return (Array.isArray(j) ? j : []).filter((r) => ["queued", "pending", "waiting", "requested"].includes(String(r?.status))).length;
+    },
     async dispatchWorkflow(workflow, inputs = {}) {
       await gh(["workflow", "run", workflow, "-R", repo, ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
     },

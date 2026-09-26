@@ -387,6 +387,15 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         const restarts = cycle.filter((c) => String(c?.body ?? "").includes(marker));
         const restarted = restarts.at(-1);
         if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;
+        // 1.4.11 (own-calendar #30, 셀프호스트 러너 1대): 이 스테이지의 런이 **큐에 앉아 러너를 기다리는 중**이면 멈춘
+        // 것이 아니다 — 하트비트가 없는 이유는 아직 시작을 못 해서다. 재점화는 큐에 런을 하나 더 얹을 뿐이고,
+        // 두 번 얹으면 `stalled restart limit`으로 사람을 부른다(라이브: #30이 정확히 그렇게 needs-human이 됐다).
+        // fail-safe: 헬퍼가 없거나 조회가 던지면 예전대로 간다.
+        if (typeof gh.pendingRuns === "function") {
+          let pending = 0;
+          try { pending = await gh.pendingRuns(`factory-${stage}.yml`); } catch { pending = 0; }
+          if (pending > 0) { actions.push({ kind: "stalled-restart-skipped", issue: it.number, stage, label, reason: `runner saturated — ${pending} queued run(s) of factory-${stage}.yml` }); continue; }
+        }
         // 흐름 제어로 세워 둔 `factory:planned`는 멈춘 것이 아니다(M5) — 조용히 넘어간다.
         if (stage === "implement") {
           const reason = await parked();

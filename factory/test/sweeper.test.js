@@ -2301,3 +2301,25 @@ test("test_36_graph_external_seam: the real gh producer feeds the clearing arm �
   // which always carries labels; the `searchIssues` shape is never consulted.
   expect(calls.some((c) => c.includes("issue list") && c.includes("--label factory:health") && c.includes("labels"))).toBe(true);
 });
+
+// 1.4.11 (own-calendar #30, one self-hosted runner): a stage whose run is QUEUED behind the runner has no heartbeat but is
+// not stalled. Restarting only enqueues another run, and two restarts escalate to needs-human for nothing.
+test("sweep: a stage with queued runs of its workflow is not restarted (runner saturated), and the restart budget is untouched", async () => {
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (l) => (l === "factory:ready" ? [{ number: 2 }] : [])),
+    comments: vi.fn(async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z"), ...posted]),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99, body, createdAt: "2026-09-11T01:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(),
+    pendingRuns: vi.fn(async (w) => (w === "factory-plan.yml" ? 2 : 0)),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep(stalledArgs({ gh, dispatchStage }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();                                  // no restart marker → budget untouched
+  expect(actions).toContainEqual({ kind: "stalled-restart-skipped", issue: 2, stage: "plan", label: "factory:ready", reason: "runner saturated — 2 queued run(s) of factory-plan.yml" });
+  // helper throwing → old behaviour (restart)
+  const gh2 = { ...gh, comments: vi.fn(async () => [TRANSITION("factory:ready", "2026-09-11T00:10:00Z")]), comment: vi.fn(async () => "u"), pendingRuns: vi.fn(async () => { throw new Error("gh down"); }) };
+  await sweep(stalledArgs({ gh: gh2, dispatchStage }));
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "plan", issue: 2 });
+});

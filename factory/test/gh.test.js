@@ -737,3 +737,10 @@ test("resolveFactoryLogins: a User-type author is never added just for commentin
   const r = await resolveFactoryLogins({ gh: viewerGh("LeeHyeonKyu"), env: {}, comments: [human] });
   expect(r.ok).toBe(false);          // 근거가 하나도 없다 — 빈 목록 대신 fail closed
 });
+
+test("pendingRuns counts queued/pending/waiting/requested runs of one workflow, not in_progress or completed", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "run" && a[1] === "list", result: { code: 0, stdout: JSON.stringify([{ status: "queued" }, { status: "pending" }, { status: "in_progress" }, { status: "completed" }, { status: "waiting" }]), stderr: "" } }]);
+  const gh = makeGh({ run, repo: "o/r", sleep: async () => {} });
+  expect(await gh.pendingRuns("factory-implement.yml")).toBe(3);
+  expect(run.calls[0].args).toEqual(["run", "list", "-R", "o/r", "--workflow", "factory-implement.yml", "--limit", "50", "--json", "status"]);
+});
