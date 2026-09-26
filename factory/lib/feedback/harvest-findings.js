@@ -99,6 +99,9 @@ const SELF_GATE_DETAIL_RE = new RegExp(`^${SELF_GATE_DETAIL_PREFIX}(\\{.*\\})$`)
 
 /** 게이트가 명령의 비정상 종료를 스스로 적은 문구(`gates.js` `unhandledReason`의 안정된 꼬리). */
 const UNHANDLED_RE = /unhandled error outside tests/;
+/** 1.4.18 (KTB #38) — `gates-detail` `gate: "test-env"`(gates.js gatesDetailLines): 게이트가 돌기 전에 compose env가 죽었다. */
+const TEST_ENV_RE = /^test-env re-up failed/;
+export const TEST_ENV_LOCUS = ".factory/harness.toml [test.env]";
 /** `main is red on …`(`gates.js` broken-base) — 원인은 하네스 설정이 아니라 기본 브랜치의 테스트다. */
 const BROKEN_BASE_RE = /^main is red on /;
 
@@ -351,7 +354,12 @@ function gateFindings({ issue, repo, gates }) {
 
     let causalPath = null;
     let why = null;
-    if (UNHANDLED_RE.test(reason)) {
+    if (g.gate === "test-env" || TEST_ENV_RE.test(reason)) {
+      // KTB #38: 게이트 전에 test env를 못 올렸다 — `[test.env]`(compose 파일·프로젝트 이름·포트)의 오설정이고 채택자의 것이다.
+      // 리허설 표에 `[test.env]`는 없으므로 정확히 이런 오설정만이 런까지 닿는다.
+      causalPath = TEST_ENV_LOCUS;
+      why = `the test environment could not be brought up before the gates ran (\`[test.env].compose\`) — no gate produced a verdict on this run`;
+    } else if (UNHANDLED_RE.test(reason)) {
       // KTB-35: 리포트는 읽었는데 실패가 0이고 명령은 죽었다 — 테스트 밖에서 무언가 터졌다.
       causalPath = `.factory/harness.toml [commands].${g.gate}`;
     } else if (BROKEN_BASE_RE.test(reason)) {
