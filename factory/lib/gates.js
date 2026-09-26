@@ -6,7 +6,7 @@ import { isQuarantined, recordResult } from "./quarantine.js";
 import { changedFiles } from "./changed-files.js";
 import { matchesAny } from "./glob.js";
 import { classifyFailures } from "./classify-failure.js";
-import { proveTest, repeatNewTests, CHARACTERIZATION } from "./prove-test.js";
+import { proveTest, repeatNewTests, CHARACTERIZATION, selfReferentialTests } from "./prove-test.js";
 import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
 import { scrubbedRunner } from "./exec.js";
@@ -589,7 +589,12 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
       // 1.4.10 (데모 #15): 특성화는 **바뀐 파일이 전부 테스트일 때만**이다. harness.toml·설정 같은 비-소스 파일이 함께 바뀌면
       // 그 테스트는 그 변경을 증명하려는 것이고(base에서 실패해야 한다), 특성화로 읽으면 정반대 판정이 난다.
       const mode = ch.tests.length && ch.all.every((f) => ch.tests.includes(f)) ? CHARACTERIZATION : "prove";
-      const pt = await proveTest({ run, cwd, harness, base, addedTests: ch.tests, addedFiles: ch.added, mode });
+      // 1.4.13 (own-calendar #31) — 자기 경로를 단언하는 새 테스트는 prove-test를 돌리기 전에 RED다(§prove-test.js selfReferentialTests):
+      // 그런 테스트가 base에서 실패하는 것은 메커니즘의 부산물이지 이 변경의 증명이 아니다.
+      const selfRef = selfReferentialTests(ch.added.filter((f) => ch.tests.includes(f)), (f) => readFileSync(join(cwd, f), "utf8"));
+      const pt = selfRef.length
+        ? { ok: false, detail: `self-referential test: ${selfRef.map((h) => `${h.file} mentions its own path (\`${h.hit}\`)`).join("; ")} — a test must assert about the product, not about its own file (existence, git tracking, mtime); such assertions fail on the base worktree by construction and prove nothing` }
+        : await proveTest({ run, cwd, harness, base, addedTests: ch.tests, addedFiles: ch.added, mode });
       result.gates["prove-test"] = { status: pt.misconfigured ? "MISCONFIGURED" : pt.ok ? "GREEN" : "RED", code: null, duration_ms: 0, log: pt.detail };
       /*
        * 감사 M2 — **판정 불가는 판정 결과와 따로 기록된다.** base에서 테스트가 아예 돌지 못한 것은

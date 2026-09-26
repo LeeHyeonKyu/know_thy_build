@@ -43,6 +43,14 @@ const INCONCLUSIVE_ON_BASE = [
   /ERR_MODULE_NOT_FOUND/,
   /SyntaxError: (?:Unexpected token '?export'?|Cannot use import statement outside a module)/,
   /(?:^|[\s:])(?:undefined|\(intermediate value\)) is not a function/,
+  // 1.4.13 (own-calendar #31) — node만 알던 목록에 Dart/Flutter·Python을 더한다. 이 패턴이 없으면 base 워크트리에서
+  // 패키지를 못 푼 Dart 테스트의 exit≠0이 "증명"(prove) 또는 "특성화 실패"(characterization)로 읽힌다.
+  /Target of URI doesn't exist/,
+  /Couldn't resolve the package/,
+  /Error: Could not find a file named "pubspec\.yaml"/,
+  /pub get failed/,
+  /ModuleNotFoundError/,
+  /ImportError: cannot import name/,
 ];
 export const inconclusiveOnBase = (text) => INCONCLUSIVE_ON_BASE.some((re) => re.test(String(text || "")));
 
@@ -64,6 +72,26 @@ export const addedModuleNamedIn = (output, addedFiles = []) => {
  */
 export const CHARACTERIZATION = "characterization";
 
+/**
+ * 1.4.13 (own-calendar #31, KTB #75) — **자기 자신을 단언하는 테스트는 증명이 아니다.** 빌더가 "이 테스트 파일이 git에
+ * 추적돼야 한다"(`git ls-files <자기 경로>`)를 단언해 base 워크트리(복사본이라 미추적)에서만 실패하게 만들었다 — prove-test
+ * 메커니즘 자체를 재료로 "base에서 실패"를 제조한 것이다. 새 테스트 파일이 **자기 경로**를 본문에 적으면 그 테스트는 저장소가
+ * 아니라 자기 자신에 대한 것이므로 게이트가 RED로 이름을 붙여 돌려보낸다. 다른 파일의 추적 여부를 묻는 가드 테스트는 막지 않는다.
+ * → `[{file, hit}]` (비어 있으면 통과).
+ */
+export function selfReferentialTests(addedTests = [], readFile) {
+  const hits = [];
+  for (const f of addedTests) {
+    let text;
+    try { text = String(readFile(f)); } catch { continue; }
+    const base = f.split("/").pop();
+    const stem = base.replace(/\.[^.]+$/, "");
+    const needle = [f, base, stem].find((n) => n && text.includes(n));
+    if (needle) hits.push({ file: f, hit: needle });
+  }
+  return hits;
+}
+
 export async function proveTest({ run, cwd, harness, base, addedTests, addedFiles = [], mode = "prove", tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
   if (!addedTests?.length) return { ok: false, detail: "no new tests in this change (done_when must be backed by new tests)" };
@@ -76,6 +104,12 @@ export async function proveTest({ run, cwd, harness, base, addedTests, addedFile
       const cp = await run("cp", [`${cwd}/${f}`, `${tmp}/${f}`]);
       if (cp.code !== 0) return { ok: false, detail: `copy failed for ${f}: ${cp.stderr}` };
     }
+    // 1.4.13 (own-calendar #31) — 복사한 테스트를 base 워크트리의 인덱스에 **의도 추가**한다. `cp`만 하면 그 파일은 미추적이라
+    // `git ls-files`·`git status`를 읽는 테스트(가드 테스트가 흔히 그렇다)가 head와 base에서 다른 세계를 본다. 인덱스에 이름만
+    // 올리면(-N) 내용은 그대로이고 워크트리는 `remove --force`로 지워지므로 base 커밋은 건드리지 않는다. 실패해도 증명 자체를
+    // 막지는 않는다(추적 여부에 무관한 테스트가 대부분이다) — 이유만 남긴다.
+    const ita = await g(["-C", tmp, "add", "--intent-to-add", "--", ...addedTests]);
+    const indexNote = ita.code === 0 ? "" : ` (note: intent-to-add of the copied tests failed in the base worktree: ${String(ita.stderr || "").trim().slice(0, 120)})`;
     // 감사 M2 — 설치가 실패하면 그 base 실행은 무엇을 말하든 믿을 수 없다. fail closed:
     // "실패했으니 증명됐다"가 정확히 이 게이트가 죽었던 방식이다.
     const install = baseInstallCommand(harness, tmp, exists);
@@ -96,7 +130,7 @@ export async function proveTest({ run, cwd, harness, base, addedTests, addedFile
       if (r.code === 0) return { ok: true, mode, detail: `characterization: test-only diff — the new tests pass on base ${base.slice(0, 7)} too (they pin existing behaviour; nothing to prove by failing)` };
       const out = `${r.stdout || ""}\n${r.stderr || ""}`;
       if (inconclusiveOnBase(out)) return { ok: false, misconfigured: true, inconclusive: [...addedTests], mode, detail: `characterization: the new tests did not run on base ${base.slice(0, 7)} (import/module error)` };
-      return { ok: false, mode, detail: `characterization: test-only diff but the new tests FAIL on base ${base.slice(0, 7)} (exit ${r.code}) — they do not pin existing behaviour, or the base worktree differs from head in test setup` };
+      return { ok: false, mode, detail: `characterization: test-only diff but the new tests FAIL on base ${base.slice(0, 7)} (exit ${r.code}) — they do not pin existing behaviour, or the base worktree differs from head in test setup${indexNote}` };
     }
     if (r.code === 0) return { ok: false, detail: `new tests passed on base ${base.slice(0, 7)} — they do not prove the change` };
     const output = `${r.stdout || ""}\n${r.stderr || ""}`;
@@ -105,7 +139,7 @@ export async function proveTest({ run, cwd, harness, base, addedTests, addedFile
       if (added) return { ok: true, detail: `new tests fail on base ${base.slice(0, 7)}: they import \`${added}\`, which this change adds — the module under test does not exist on base, so the tests cannot pass there` };
       return { ok: false, misconfigured: true, inconclusive: [...addedTests], detail: `inconclusive on base ${base.slice(0, 7)}: the new tests did not run there (module resolution / import error), so their failure proves nothing${install ? ` — dependencies were installed with \`${install}\`` : " — no dependency install command was found for the base worktree"}` };
     }
-    return { ok: true, detail: `new tests fail on base (exit ${r.code})` };
+    return { ok: true, detail: `new tests fail on base (exit ${r.code})${indexNote}` };
   } finally {
     await g(["worktree", "remove", "--force", tmp]);
   }

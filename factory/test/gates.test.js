@@ -96,6 +96,7 @@ test("implement: flaky-existing 실패는 제외 + 이슈화되고, prove-test·
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     diffNames, revParse,
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
   const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []), comment: vi.fn(async () => "u") };
@@ -132,6 +133,7 @@ test("이미 열려 있는 flaky 이슈는 다시 만들지 않는다", async ()
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     diffNames, revParse,
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
   const gh = { createIssue: vi.fn(async () => 999), searchIssues: vi.fn(async () => [{ number: 55, title: "flaky: test/a.test.js::flaky one", updatedAt: "2026-09-11T00:00:00Z" }]) };
@@ -152,6 +154,7 @@ test("리포트를 못 읽은 RED 테스트 게이트는 flaky 제외로도 뒤�
     { match: (c, a) => c === "bash" && a[1] === "playwright", result: bad },        // e2e RED, 리포트 없음
     diffNames, revParse,
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
   const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
@@ -536,6 +539,7 @@ test("H2: required가 prove-test/new-test-repeat를 부를 수 있다 — implem
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: ok },
     diffNames, revParse,
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
   const r = await runStageGates({ run, cwd: stageCwd, harness: proofRequiredHarness, stage: "implement", tier: "standard", base: "b".repeat(40), issue: 7, readFile: () => null });
@@ -565,6 +569,7 @@ test("M3: base가 전부 실패하는 테스트는 제외되지 않고 RED로 �
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     diffNames, revParse,
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
   const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
@@ -597,6 +602,7 @@ test("M3: flaky-existing은 PR당 flaky_max까지만 제외된다 — 넘으면 
     { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
     diffOf("M\tsrc/a.js\n"), revParse,
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
   ]);
   const gh = { createIssue: vi.fn(async () => 101), searchIssues: vi.fn(async () => []) };
   const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"], thresholds: { ...stageHarness.gates.thresholds, flaky_max: 2 } } };
