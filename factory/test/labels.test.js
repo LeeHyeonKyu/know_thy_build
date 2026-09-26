@@ -85,7 +85,7 @@ test("BLOCKED_RETRY: each stage's allowed origins and hop-back label", () => {
   expect(BLOCKED_RETRY.plan).toEqual({ origins: ["factory:ready"], hop: "factory:ready" });
   // implement의 hop은 origin이 in-progress여도 planned다 — implement 자신의 무조건적인
   // planned → in-progress 전이가 그 자리를 다시 채운다.
-  expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:in-progress"], hop: "factory:planned" });
+  expect(BLOCKED_RETRY.implement).toEqual({ origins: ["factory:in-progress", "factory:planned", "factory:rework"], hop: "factory:planned" });   // 1.4.8: pre-session failures too
   expect(BLOCKED_RETRY.merge).toEqual({ origins: ["factory:approved"], hop: "factory:approved" });
   // KTB-24 fix: review도 자기 진입 라벨로 되돌아간다. 라운드 카운터는 handoff 개수로 세므로
   // (`reviewRounds` — 완료된 rework 전이) 재작업까지 가지 못하고 잘린 런은 K 예산을 쓰지 않는다.
@@ -103,7 +103,8 @@ test("every BLOCKED_RETRY origin is a label that can actually reach factory:bloc
   for (const [stage, { origins }] of Object.entries(BLOCKED_RETRY)) {
     for (const from of origins) expect(canTransition(from, "factory:blocked"), `${stage}: ${from}`).toBe(true);
   }
-  expect(canTransition("factory:planned", "factory:blocked")).toBe(false);
+  // 1.4.8: planned/rework reach blocked (pre-session implement failures) and are BLOCKED_RETRY origins of implement.
+  expect(BLOCKED_RETRY.implement.origins).toEqual(["factory:in-progress", "factory:planned", "factory:rework"]);
 });
 
 // ── ADR-020 KTB-32: needs-human에서 **중단 지점으로** 되돌아가는 사람 전용 엣지 ────────────────
@@ -186,4 +187,15 @@ test("HARNESS_LABEL has a single source of truth — run-stage.js and retro.js r
   expect(HARNESS_LABEL).toBe("factory:harness");
   expect(HARNESS_LABEL_RUN_STAGE).toBe(HARNESS_LABEL);
   expect(HARNESS_LABEL_RETRO).toBe(HARNESS_LABEL);
+});
+
+// 1.4.8 — demo #15 / KTB #36: implement can die BEFORE the session (branch checkout conflict, overlay FAIL); that is
+// undecidable = blocked, and without these edges the refusal left the issue at planned with no lock while the sweeper
+// re-dispatched implement every minute.
+test("planned and rework can go to blocked (pre-session implement failures); blocked still escalates via the sweeper", async () => {
+  const { canTransition } = await import("../lib/labels.js");
+  expect(canTransition("factory:planned", "factory:blocked")).toBe(true);
+  expect(canTransition("factory:rework", "factory:blocked")).toBe(true);
+  expect(canTransition("factory:blocked", "factory:needs-human")).toBe(true);
+  expect(canTransition("factory:planned", "factory:merged")).toBe(false);
 });

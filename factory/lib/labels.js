@@ -54,7 +54,9 @@ export const BLOCKED_RETRY = {
   // 그래프에 `planned → blocked` 엣지가 없고(아래 TRANSITIONS), `abortStage`는 라벨이 그 스테이지의
   // in-flight 라벨일 때만(`implement` → `in-progress`) blocked으로 민다. hop이 여전히 `planned`인 것은
   // 그대로다 — implement 자신의 무조건적인 `planned → in-progress` 전이가 그 자리를 다시 채운다.
-  implement: { origins: ["factory:in-progress"], hop: "factory:planned" },
+  // 1.4.8 — planned/rework도 origin이다(데모 #15: 세션 전 실패 = 체크아웃 충돌·overlay FAIL). hop은 여전히 planned 하나:
+  // implement는 planned에서든 rework에서든 같은 plan 위에서 다시 시작하고, 첫 전이가 그 자리를 다시 채운다.
+  implement: { origins: ["factory:in-progress", "factory:planned", "factory:rework"], hop: "factory:planned" },
   // review(ADR-020 KTB-24 fix): origin이 `factory:awaiting-review`면 그 blocked은 리뷰가
   // **끝나기 전에** 잘렸다는 뜻이다(잡 타임아웃·취소 → `abortStage`, 또는 게이트 판정 불가).
   // 되돌아갈 자리는 그 스테이지 자신의 진입 라벨이고, 라운드 카운터는 **완료된 rework 전이**로 세므로
@@ -74,7 +76,10 @@ export const TRANSITIONS = new Map([
   ["factory:queue", new Set(["factory:ready", "factory:needs-info", "factory:wont-do", "factory:needs-human", "factory:blocked"])],
   ["factory:needs-info", new Set(["factory:queue"])],
   ["factory:ready", new Set(["factory:planned", "factory:needs-human", "factory:blocked"])],
-  ["factory:planned", new Set(["factory:in-progress", "factory:needs-human"])],
+  // planned/rework → blocked (1.4.8, 데모 #15·KTB #36): implement가 세션 **전**에 죽는 자리(체크아웃 충돌·overlay FAIL)는
+  // 판정 불가 = blocked인데 이 엣지가 없어 전이가 거부됐고, 이슈는 lock 없이 planned에 앉은 채 sweeper가 1분마다
+  // implement를 다시 띄웠다(3분에 3런). blocked는 sweeper가 유예 뒤 needs-human으로 올린다 — 그 경로가 정답이다.
+  ["factory:planned", new Set(["factory:in-progress", "factory:needs-human", "factory:blocked"])],
   // in-progress → needs-info(ADR-020 KTB-23): builder가 보호 경로 변경 없이는 done_when을 끝낼 수
   // 없다고 보고하면(implement handoff의 `harness_needed`) L1이 `factory:harness` 이슈를 하나 열고 이
   // 이슈를 **주차**한다. 그건 "사람이 판단할 것이 있다"(needs-human)도 "판정 불가"(blocked)도 아니다 —
@@ -89,7 +94,7 @@ export const TRANSITIONS = new Map([
   // `in-progress → needs-info` 주차와 같은 계열의 엣지이고, 복귀 경로도 같다(`sweepHarnessUnpark`가
   // 하네스 이슈가 닫히면 `needs-info → queue`로 되돌린다).
   ["factory:awaiting-review", new Set(["factory:approved", "factory:rework", "factory:needs-human", "factory:blocked", "factory:needs-info"])],
-  ["factory:rework", new Set(["factory:in-progress", "factory:needs-human"])],
+  ["factory:rework", new Set(["factory:in-progress", "factory:needs-human", "factory:blocked"])],
   ["factory:approved", new Set(["factory:merged", "factory:needs-human", "factory:rework", "factory:blocked"])],   // merge-stage: conflict → rework, gates/API failure → blocked
   // blocked → approved(KTB-15): merge 스테이지는 **머지만** 실패해도 blocked로 떨어진다(draft
   // 뒤집기 실패, `gh pr merge` API 실패, 게이트 판정 불가). 그 런은 리뷰까지 전부 통과한 이슈이고
