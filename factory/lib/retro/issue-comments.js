@@ -424,3 +424,20 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
   }
   return out;
 }
+
+/**
+ * 1.4.12 (own-calendar #9/#28/#29/#30) — **재점화 예산의 창**: 마지막 재큐(`to=factory:queue`) **또는** 사람의 전이
+ * (`by=human`: retry·hold 해제) 이후. `commentsSinceRequeue`는 리뷰 라운드(K)의 창이라 사람의 retry로 리셋하면
+ * K를 우회하게 되므로 그대로 두고, 이 창은 sweeper의 스톨 재점화 카운터에만 쓴다 — 사람이 되돌린 이슈는 새 주기이고,
+ * 지난 주기의 재점화 마커 2개가 첫 스톨에서 곧장 `stalled restart limit`을 만드는 것은 사람의 결정을 무효로 만든다.
+ */
+export function commentsSinceCycleStart(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let from = 0;
+  list.forEach((c, i) => {
+    const b = String(c?.body ?? "");
+    const m = TRANSITION_TO.exec(b);
+    if (m && (m[2] === "factory:queue" || /\bby=human\b/.test(b))) from = i + 1;
+  });
+  return list.slice(from);
+}
