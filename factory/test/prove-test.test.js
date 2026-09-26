@@ -173,3 +173,17 @@ test("proveTest: an import error naming a module this change adds counts as fail
   expect(unclear.ok).toBe(false);
   expect(unclear.misconfigured).toBe(true);
 });
+
+// 1.4.9 (own-calendar #28/#29): a test-only diff characterizes existing behaviour — the new tests must PASS on base.
+test("proveTest characterization mode: passing on base is GREEN, failing on base is RED, import error is inconclusive", async () => {
+  const { CHARACTERIZATION } = await import("../lib/prove-test.js");
+  const mk = (res) => makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: res }]);
+  const green = await proveTest({ run: mk(ok), cwd: "/repo", harness, base: "abc", addedTests: ["test/rrule.test.js"], mode: CHARACTERIZATION, tmp: "/tmp/wt" });
+  expect(green.ok).toBe(true);
+  expect(green.detail).toContain("characterization");
+  const red = await proveTest({ run: mk(fail), cwd: "/repo", harness, base: "abc", addedTests: ["test/rrule.test.js"], mode: CHARACTERIZATION, tmp: "/tmp/wt" });
+  expect(red.ok).toBe(false);
+  expect(red.misconfigured).toBeFalsy();
+  const inc = await proveTest({ run: mk({ code: 1, stdout: "", stderr: "Cannot find module 'x'" }), cwd: "/repo", harness, base: "abc", addedTests: ["test/rrule.test.js"], mode: CHARACTERIZATION, tmp: "/tmp/wt" });
+  expect(inc.misconfigured).toBe(true);
+});
