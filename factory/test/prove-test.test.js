@@ -220,3 +220,17 @@ test("selfReferentialTests flags a new test that names its own file and leaves g
   expect(hits).toEqual([{ file: "client/test/charter_paths_guard_test.dart", hit: "client/test/charter_paths_guard_test.dart" }]);
   expect(selfReferentialTests(["missing.test.js"], () => { throw new Error("ENOENT"); })).toEqual([]);
 });
+
+// 1.4.14 (own-calendar #31, L16): one mode rule for the stage gate and the diagnostic CLI; failed repeats carry output.
+test("proveModeFor: all-test diffs are characterization, anything else is prove; repeatNewTests keeps the tail of a failed run", async () => {
+  const { proveModeFor, CHARACTERIZATION } = await import("../lib/prove-test.js");
+  expect(proveModeFor({ tests: ["t/a.test.js"], all: ["t/a.test.js"] })).toBe(CHARACTERIZATION);
+  expect(proveModeFor({ tests: ["t/a.test.js"], all: ["t/a.test.js", "src/a.js"] })).toBe("prove");
+  expect(proveModeFor({ tests: [], all: ["src/a.js"] })).toBe("prove");
+  let n = 0;
+  const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1].includes("vitest run") && a[1].includes("t/a.test.js"), result: () => (n++ === 0 ? { code: 1, stdout: "", stderr: "Waiting for another flutter command to release the startup lock" } : ok) }]);
+  const r = await repeatNewTests({ run, cwd: "/repo", harness: { commands: { test_files: "vitest run {files}" } }, addedTests: ["t/a.test.js"], times: 3 });
+  expect(r.ok).toBe(false);
+  expect(r.runs[0]).toMatchObject({ code: 1, noisy: false, tail: expect.stringContaining("startup lock") });
+  expect(r.detail).toMatch(/exit codes 1,0,0 — run 1: Waiting for another flutter command/);
+});

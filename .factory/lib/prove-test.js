@@ -71,6 +71,12 @@ export const addedModuleNamedIn = (output, addedFiles = []) => {
  * 모드는 diff 형태에서 러너가 정한다 — 에이전트가 고를 수 없다.
  */
 export const CHARACTERIZATION = "characterization";
+/**
+ * 1.4.14 (own-calendar #31, L16) — 모드 선택의 **단일 본체**. 스테이지 게이트(gates.js)와 검증자가 읽는 진단 CLI
+ * (bin/prove-test.js)가 같은 diff에 다른 모드를 대면, 게이트는 특성화 GREEN인데 CLI는 "base에서 통과 — 증명 아님"이라
+ * 하고 검증자가 그 CLI 출력으로 거부한다 — #31에서 실제로 일어난 일이다. 1.4.10의 규칙 그대로: 바뀐 파일이 전부 테스트일 때만 특성화.
+ */
+export const proveModeFor = (changed) => (changed?.tests?.length && changed.all.every((f) => changed.tests.includes(f)) ? CHARACTERIZATION : "prove");
 
 /**
  * 1.4.13 (own-calendar #31, KTB #75) — **자기 자신을 단언하는 테스트는 증명이 아니다.** 빌더가 "이 테스트 파일이 git에
@@ -156,9 +162,12 @@ export async function repeatNewTests({ run, cwd, harness, addedTests, times, ful
     const noisy = i === 0 && fullSuiteCmd ? run("bash", ["-lc", fullSuiteCmd], { cwd }) : null;
     const r = await run("bash", ["-lc", cmd], { cwd });
     if (noisy) await noisy;
-    runs.push({ code: r.code });
+    // 1.4.14 (own-calendar #31) — 실패한 반복은 **출력 꼬리를 남긴다**. exit 코드만 남으면 "1,0,0"이 테스트의 흔들림인지
+    // 툴체인 락(flutter·gradle의 startup lock, 첫 반복은 전체 스위트와 동시에 돈다)인지 아무도 가릴 수 없다.
+    runs.push(r.code === 0 ? { code: r.code } : { code: r.code, noisy: Boolean(noisy), tail: String(r.stderr || r.stdout || "").trim().slice(-300) });
   }
   const ok = runs.every((r) => r.code === 0);
   const quietNote = fullSuiteCmd ? "" : " (quiet: no full-suite command configured)";
-  return { ok, runs, detail: (ok ? `${times}/${times} passes` : `non-deterministic: exit codes ${runs.map((r) => r.code).join(",")}`) + quietNote };
+  const failedTail = ok ? "" : runs.filter((r) => r.code !== 0).map((r, i) => ` — run ${runs.indexOf(r) + 1}${r.noisy ? " (alongside the full suite)" : ""}: ${r.tail || "(no output)"}`).join("");
+  return { ok, runs, detail: (ok ? `${times}/${times} passes` : `non-deterministic: exit codes ${runs.map((r) => r.code).join(",")}${failedTail}`) + quietNote };
 }
