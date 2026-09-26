@@ -3646,3 +3646,18 @@ test("stageClaudeEnv carries COMPOSE_PROJECT_NAME when [test.env].compose is set
   expect(without).not.toHaveProperty("COMPOSE_PROJECT_NAME");
   expect(stageClaudeEnv({ root: "/r" })).not.toHaveProperty("COMPOSE_PROJECT_NAME");
 });
+
+// 1.4.9 (own-calendar #28/#29): a verifier rejection used to go straight to needs-human (the awaiting-review requirement
+// refuses it) — the builder never received the verifier's findings. Now: one head-keyed retry to planned with the
+// findings recorded (same counter as the self-gate), then needs-human.
+test("implement: verifier rejected → one retry to planned with findings; a second rejection on the same head → needs-human", async () => {
+  const rejected = { ok: true, reasons: [], data: { head_sha: "c".repeat(40), pr: 7, verifier: { verdict: "rejected", findings: [{ claim: "dw3 violated: production file modified" }] } } };
+  const retried = [];
+  const d1 = baseDeps({ verifyStage: () => rejected, selfGateRetry: async ({ findings }) => { retried.push(findings); return { attempt: 1, total: 1 }; }, transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d1 })).toBe(0);
+  expect(d1.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned", reason: expect.stringContaining("verifier rejected (retry 1)") }));
+  expect(retried[0][0]).toMatchObject({ check: "verifier", blocking: true, detail: expect.stringContaining("dw3 violated") });
+  const d2 = baseDeps({ verifyStage: () => rejected, selfGateRetry: async () => ({ attempt: 2, total: 2 }), transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d2 })).toBe(0);
+  expect(d2.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining("verifier rejected again") }));
+});

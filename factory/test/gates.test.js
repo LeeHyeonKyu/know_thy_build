@@ -930,3 +930,14 @@ test("implement: a diff outside source_glob/test_glob skips prove-test with a re
   expect(r.failing).not.toContain("prove-test");
   expect(run.calls.some((c) => c.cmd === "git" && c.args[0] === "worktree")).toBe(false);   // no base worktree was even created
 });
+
+// 1.4.9 — a diff that adds tests and changes no source_glob file is a characterization diff: prove-test asks the
+// base run to PASS (they pin existing behaviour) instead of demanding a failure the builder can only manufacture by
+// editing production code (own-calendar #28/#29 verifier rejections).
+test("implement: test-only diff runs prove-test in characterization mode — new tests passing on base is GREEN", async () => {
+  const baseRun = { match: (c, a, o) => c === "bash" && a[1].includes("test/new.test.js") && String(o?.cwd || "").includes("prove-wt"), result: ok };
+  const run = makeFakeRun([unitOk, diffOf("A\ttest/new.test.js\n"), revParse, baseRun, { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "git" && a[0] === "worktree", result: ok }, { match: () => true, result: ok }]);
+  const r = await runStageGates({ run, cwd: stageCwd, harness: stageHarness, stage: "implement", tier: "standard", base: stageArgs.base, readFile: () => null });
+  expect(r.gates["prove-test"].status).toBe("GREEN");
+  expect(r.gates["prove-test"].log).toContain("characterization");
+});

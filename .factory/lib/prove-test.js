@@ -56,7 +56,15 @@ export const addedModuleNamedIn = (output, addedFiles = []) => {
   return addedFiles.find((f) => { const b = f.split("/").pop(); return b && text.includes(b); }) || null;
 };
 
-export async function proveTest({ run, cwd, harness, base, addedTests, addedFiles = [], tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
+/**
+ * 1.4.9 (own-calendar #28/#29): **테스트만 바뀐 diff**(source_glob 변경 0)는 기존 동작을 특성화하는 이슈다 — 그 테스트는
+ * base에서도 **통과해야** 한다(base와 head의 소스가 같다). "base에서 실패해야 증명"이라는 기본 규칙을 여기에 적용하면
+ * 빌더는 통과시키려고 프로덕션 코드를 덧붙이고(라이브: `operator ==`·`toString` 추가) 검증자가 계약 위반으로 거부한다.
+ * 모드는 diff 형태에서 러너가 정한다 — 에이전트가 고를 수 없다.
+ */
+export const CHARACTERIZATION = "characterization";
+
+export async function proveTest({ run, cwd, harness, base, addedTests, addedFiles = [], mode = "prove", tmp = `${cwd}/.factory/out/prove-wt`, exists = existsSync }) {
   if (!harness.commands?.test_files) return { ...MISSING_TEST_FILES };
   if (!addedTests?.length) return { ok: false, detail: "no new tests in this change (done_when must be backed by new tests)" };
   const g = (args) => run("git", args, { cwd });
@@ -84,6 +92,12 @@ export async function proveTest({ run, cwd, harness, base, addedTests, addedFile
     // 증명하는 것은 스테이지가 아니다.
     const cmd = harness.commands.test_files.replaceAll("{files}", addedTests.map(q).join(" "));
     const r = await run("bash", ["-lc", cmd], { cwd: tmp });
+    if (mode === CHARACTERIZATION) {
+      if (r.code === 0) return { ok: true, mode, detail: `characterization: test-only diff — the new tests pass on base ${base.slice(0, 7)} too (they pin existing behaviour; nothing to prove by failing)` };
+      const out = `${r.stdout || ""}\n${r.stderr || ""}`;
+      if (inconclusiveOnBase(out)) return { ok: false, misconfigured: true, inconclusive: [...addedTests], mode, detail: `characterization: the new tests did not run on base ${base.slice(0, 7)} (import/module error)` };
+      return { ok: false, mode, detail: `characterization: test-only diff but the new tests FAIL on base ${base.slice(0, 7)} (exit ${r.code}) — they do not pin existing behaviour, or the base worktree differs from head in test setup` };
+    }
     if (r.code === 0) return { ok: false, detail: `new tests passed on base ${base.slice(0, 7)} — they do not prove the change` };
     const output = `${r.stdout || ""}\n${r.stderr || ""}`;
     if (inconclusiveOnBase(output)) {
