@@ -38,6 +38,7 @@ import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
+import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
@@ -204,6 +205,27 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     const h = await d.hydrateRecord?.();
     if (h && !h.ok) record([`hydrate: ${h.reason || "failed"}`]);
   } catch (e) { record([`hydrate: aborted — ${e?.message || e}`]); }
+  /**
+   * 1.4.16 (KTB #44) — **평생 예산.** hydrate 직후, 락을 잡기 전에 본다(§lib/budget.js). back-pressure와 다른 점: 거부가
+   * "물러나 다시 시도"가 아니라 **사람의 결정**이다 — 재큐와 리트라이를 가로질러 이 이슈가 태운 돈이 CHARTER의 캡을 넘었으면
+   * 다음 sweep이 같은 벽에 또 밀어 봐야 같은 답이다. 그래서 needs-human으로 세우고 exit 2다(ADR-020 KTB-28: 거부된 시작은
+   * 시끄럽다). merge는 에이전트를 부르지 않으므로 보지 않는다 — 이미 GREEN인 PR을 돈 때문에 안 닫을 이유는 없다.
+   */
+  if (stage !== "merge" && d.lifetimeBudget) {
+    try {
+      const b = await d.lifetimeBudget();
+      record([budgetLine(b)]);
+      if (!b.ok) {
+        const t = await d.transition({ to: "factory:needs-human", reason: b.reason });
+        record([...refusal(t)]);
+        try { await d.comment?.(issue, `<!-- factory-budget:v1 issue=${issue} usd=${b.usd} cap=${b.cap} runs=${b.runs} -->\n**budget**: ${b.reason}`); } catch { /* 코멘트 실패는 판정을 바꾸지 않는다 */ }
+        return 2;
+      }
+    } catch (e) {
+      // 예산을 못 읽은 것은 흐름 제어의 고장이지 안전 게이트가 아니다 — 흔적을 남기고 진행한다.
+      record([`budget: check failed — ${e?.message || e}`]);
+    }
+  }
   // 공장이 감당할 수 있는 만큼만 물린다. 거부는 실패가 아니다 — 라벨을 건드리지 않고 물러나
   // 다음 sweeper/이벤트에서 다시 시도한다. 그래서 락을 잡기도 전에 본다.
   if (stage === "implement" && d.backPressure) {
@@ -2300,6 +2322,11 @@ async function main() {
       return true;
     },
     backPressure: () => backPressure({ gh, charter, quarantine: loadQuarantine(root), thresholds: harness.gates.thresholds }),
+    // 1.4.16 (KTB #44) — 하이드레이트된 이 이슈의 run 기록(`docs/factory/runs/<n>.md`)이 평생 비용의 출처다.
+    lifetimeBudget: () => {
+      const p = join(root, "docs/factory/runs", `${issue}.md`);
+      return budgetCheck({ charter, recordText: existsSync(p) ? readFileSync(p, "utf8") : null });
+    },
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     // KTB-44 (r2 nf-2): 로컬 진입도 다른 네 생산자와 **같은** 검사기를 지난다.
