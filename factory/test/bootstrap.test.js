@@ -26,7 +26,7 @@ const HARNESS = { project: { default_branch: "main" }, factory: { required_check
 
 const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_status_checks: { strict: false, contexts },
-  enforce_admins: true,
+  enforce_admins: false,
   required_pull_request_reviews: twoActor ? { required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true } : null,
   restrictions: null,
   required_linear_history: true,
@@ -132,14 +132,14 @@ test("bootstrapPlan: missing secrets → note ops that never carry a value; pres
 
 // ── ADR-021 two-actor mode ──────────────────────────────────────────────────
 
-test("bootstrapPlan (ADR-021): FACTORY_MERGE_TOKEN present → two-actor protection (1 approving review, dismiss stale), enforce_admins kept, restrictions null", () => {
+test("bootstrapPlan (ADR-021): FACTORY_MERGE_TOKEN present → two-actor protection (1 approving review, dismiss stale), enforce_admins false (owner can merge own PRs; agent is not admin), restrictions null", () => {
   const existing = { labels: [], variables: { FACTORY_TOKEN_ISSUED_AT: "2026-01-01" }, secrets: ["FACTORY_BOT_TOKEN", "ANTHROPIC_API_KEY", "FACTORY_MERGE_TOKEN"] };
   const ops = bootstrapPlan({ harness: HARNESS, today: "2026-09-12", existing });
   const protection = ops.find((o) => o.kind === "protection");
   expect(protection).toEqual({ kind: "protection", branch: "main", twoActor: true, body: PROTECTION_BODY(["factory/integrity"], { twoActor: true }) });
   // 이 두 줄이 "에이전트 토큰으로는 머지가 불가능하다"의 전부다 — 작성자는 자기 PR을 승인할 수 없다.
   expect(protection.body.required_pull_request_reviews).toEqual({ required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true });
-  expect(protection.body.enforce_admins).toBe(true);
+  expect(protection.body.enforce_admins).toBe(false);
   expect(protection.body.restrictions).toBe(null);          // Free 플랜에는 push 제한이 없다 — 승인 요건이 그 자리를 대신한다
   expect(protection.body.required_status_checks).toEqual({ strict: false, contexts: ["factory/integrity"] });
 });

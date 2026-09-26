@@ -150,7 +150,13 @@ export function codeownersOwners(text = "") {
  */
 const PROTECTION_BODY = (contexts, { twoActor = false } = {}) => ({
   required_status_checks: { strict: false, contexts },
-  enforce_admins: true,
+  /**
+   * ADR-021 보강 (2026-09-27, 소유자 결정): `enforce_admins: false`. 두 배우 모드에서 유일한 코드 오너는
+   * 머지 배우(= 소유자) 하나인데 GitHub는 자기 PR의 승인을 허용하지 않으므로, `true`이면 **소유자 자신의
+   * PR(업그레이드·핫픽스)이 어떤 경로로도 머지되지 않았다**(1.4.x 도그푸드에서 매번 규칙을 풀고 되돌렸다).
+   * 보장은 그대로다: 우회할 수 있는 것은 admin뿐이고 에이전트 배우는 write라 admin이 아니다.
+   */
+  enforce_admins: false,
   required_pull_request_reviews: twoActor
     ? { required_approving_review_count: 1, dismiss_stale_reviews: true, require_code_owner_reviews: true }
     : null,
