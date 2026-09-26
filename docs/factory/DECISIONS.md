@@ -3641,3 +3641,8 @@ CLI가 같은 답을 내고, CLI 출력에 `mode`·`mode_note`를 실어 검증�
 health가 "어느 테스트"를 말할 수 없었다. 리포트를 읽었으면(`parsed:true`) 그 id(`file::name`, 격리 제외분은 빼고)가 이 게이트의
 실패 이름이고 stdout 파서는 리포트가 없을 때의 대안이다. 픽스처는 실제 `vitest run --reporter=json` 산출물이다
 (`factory/test/fixtures/vitest-json-failing.json`).
+
+**1.4.18 (KTB #38).** test-env re-up이 실패하면 게이트는 하나도 돌지 않고(`BLOCKED`, `gates: {}`) run 기록에는 산문 한 줄만 남았다 —
+루프의 수확기는 `gates-detail:`만 읽으므로 `[test.env]` 오설정(compose 파일·프로젝트 이름·포트)은 분류·지문·집계 어디에도 잡히지
+않았고, 리허설 표에도 `[test.env]`는 없어서 정확히 이런 오설정만이 런까지 닿는다. 이제 `gatesDetailLines`가 같은 한 줄 JSON·같은
+run_id/runner 바인딩으로 `gate: "test-env"`를 싣고, 수확기는 그것을 `.factory/harness.toml [test.env]`(owner: harness)로 보낸다.

@@ -233,6 +233,25 @@ export function gatesDetailLines(result, { runId = null, runnerId = null, round 
   try {
     const out = [];
     const secrets = secretsFrom();
+    /**
+     * 1.4.18 (KTB #38) — **test-env re-up 실패도 이 채널로 나간다.** 재-업이 실패하면 게이트는 하나도 돌지 않고
+     * (`status: BLOCKED`, `gates: {}`) run 기록에는 산문 한 줄(`test-env: re-up failed — …`)만 남았다 — 루프의 수확기는
+     * `gates-detail:`만 읽으므로 `[test.env]` 오설정은 분류·지문·집계 어디에도 잡히지 않았다. 같은 한 줄 JSON, 같은
+     * run_id/runner 바인딩으로 `gate: "test-env"`를 싣는다; 수확기는 그것을 `.factory/harness.toml [test.env]`로 보낸다.
+     */
+    const reup = result?.test_env_reup;
+    if (reup?.ran && reup.ok === false) {
+      const detail = String(reup.detail ?? "");
+      out.push(GATES_DETAIL_PREFIX + JSON.stringify({
+        gate: "test-env",
+        run_id: runId ?? null,
+        runner: runnerId ?? null,
+        ...(Number.isInteger(round) ? { round } : {}),
+        failing: [],
+        reason: scrubOne(`test-env re-up failed — ${detail.split("\n")[0]}`, secrets, DETAIL_MAX_REASON),
+        snippet: scrubText(detail.split("\n").slice(-DETAIL_TAIL_LINES).join("\n"), { secrets }).text.slice(-DETAIL_MAX_CHARS),
+      }));
+    }
     for (const [name, g] of Object.entries(result?.gates || {})) {
       if (!g || g.status !== "RED") continue;
       const d = g.detail || gateDetail({ gate: name, stdout: g.log ?? "" });

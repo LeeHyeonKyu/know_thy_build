@@ -666,3 +666,27 @@ test("planDebateDelta — 해소된 dissent는 변화이고, unresolved/deferred
   // 토론 자체가 없으면 바꾼 것도 없다.
   expect(planDebateDelta([])).toMatchObject({ changed: false, plan_handoffs: 0 });
 });
+
+
+// 1.4.18 (KTB #38): a failed test-env re-up (gates BLOCKED, no gate ran) reaches the harvest as an infrastructure finding
+// with causal `.factory/harness.toml [test.env]` — produced by the real gate runner and the real gates-detail writer.
+test("KTB #38: a test-env re-up failure is harvested with causal [test.env], bound to the run like any gates-detail line", async () => {
+  const { harvestFindings, TEST_ENV_LOCUS } = await import("../lib/feedback/harvest-findings.js");
+  const { runStageGates, gatesDetailLines, GATES_DETAIL_PREFIX } = await import("../lib/gates.js");
+  const { recordOf, heartbeat, RUN_ID, RUNNER } = await import("./helpers/feedback-fixtures.js");
+  const harness = { harness: { maturity: "M2" }, commands: { unit: "vitest run" }, gates: { required: ["unit"], fast: ["unit"], full: ["unit"], deep: ["unit"], thresholds: {} }, test: { env: { compose: "docker-compose.test.yml" } } };
+  const run = async (cmd, args) => (cmd === "node" && args[0] === ".factory/bin/test-env.js"
+    ? { code: 1, stdout: "", stderr: "Bind for 0.0.0.0:5433 failed: port is already allocated (held by server-postgres-1)" }
+    : { code: 0, stdout: "", stderr: "" });
+  const result = await runStageGates({ run, cwd: "/r", harness, stage: "implement", tier: "standard", base: "b".repeat(40), readFile: () => null });
+  expect(result.status).toBe("BLOCKED");
+  const lines = gatesDetailLines(result, { runId: RUN_ID, runnerId: RUNNER });
+  expect(lines).toHaveLength(1);
+  const line = JSON.parse(lines[0].slice(GATES_DETAIL_PREFIX.length));
+  expect(line).toMatchObject({ gate: "test-env", run_id: RUN_ID, runner: RUNNER, failing: [] });
+  expect(line.reason).toMatch(/^test-env re-up failed — Bind for 0\.0\.0\.0:5433 failed/);
+  const record = recordOf(7, "x", [{ stage: "implement", at: "2026-09-20T10:05Z", lines }]);
+  const findings = harvestFindings({ issue: 7, repo: "o/r", record, comments: [heartbeat(7, "implement")] }).filter((f) => f.kind === "gate");
+  expect(findings.map((f) => f.causal_path)).toEqual([TEST_ENV_LOCUS]);
+  expect(findings[0].reason).toMatch(/test environment could not be brought up/);
+});
