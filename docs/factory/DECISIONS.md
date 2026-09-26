@@ -3654,3 +3654,8 @@ run_id/runner 바인딩으로 `gate: "test-env"`를 싣고, 수확기는 그것�
 사라진다. (2) 큐에서 기다린 런: 단일 러너 뒤에서 50분을 기다린 own-calendar #28 implement 런이 생성 시점 main(1.4.12)을
 체크아웃해 그 사이의 두 릴리스를 못 봤다. 스테이지 워크플로 다섯 개가 checkout 직후 `origin/<default_branch>`로 갱신한다 —
 런의 headSha는 "언제 큐에 들어갔나"이지 "어느 main에서 돌라"가 아니다.
+
+**1.4.20 (L21).** own-calendar의 단일 self-hosted 러너 큐 20개 중 13개가 `factory-integrity`였고(빌더 push마다 하나), #9의 리뷰
+런은 그 뒤에서 55분을 기다렸다. 같은 PR의 이전 head를 위한 무결성 런은 새 push가 오는 순간 값어치가 0이다(머지 스테이지는
+현재 head의 상태만 본다) — `factory-integrity.yml`이 PR 단위 concurrency 그룹으로 밀려난 런을 취소한다. 스테이지 워크플로의
+그룹(`cancel-in-progress: false`)은 그대로다: 그쪽은 head가 아니라 이슈 단위 직렬화이고, 도는 스테이지를 끊으면 판정을 잃는다.

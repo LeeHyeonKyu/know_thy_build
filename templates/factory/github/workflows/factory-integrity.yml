@@ -7,6 +7,14 @@ on:
     types: [opened, synchronize, reopened]
 permissions:
   contents: read
+# 1.4.20 (L21, own-calendar) — **낡은 head의 무결성 런은 아무것도 증명하지 않는다.** 빌더가 push할 때마다 이 런이 하나씩 서고,
+# 단일 self-hosted 러너 뒤에서는 그것들이 스테이지 런과 같은 줄에 선다(실측: 큐 20개 중 13개가 integrity, #9 리뷰 런은 55분
+# 대기). 머지 스테이지는 언제나 **현재** head의 상태를 확인하므로(`verifyFactoryStatuses`), 같은 PR의 이전 head를 위한 런은 새
+# push가 오는 순간 값어치가 0이다 — PR 단위 그룹으로 묶어 밀려난 런을 취소한다. 스테이지 워크플로의 그룹은 그대로
+# `cancel-in-progress: false`다(그쪽은 head가 아니라 이슈 단위 직렬화이고, 도는 스테이지를 끊는 것은 판정을 잃는 일이다).
+concurrency:
+  group: factory-integrity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   integrity:
     name: factory/integrity
