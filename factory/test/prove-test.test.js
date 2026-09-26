@@ -7,11 +7,12 @@ import { runStageGates } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 const harness = { commands: { test_files: "vitest run {files}", unit: "vitest run" } };
-const wt = (res) => ({ match: (c, a) => c === "git" && a[0] === "worktree", result: res });
+// 1.4.13 — the base worktree `git add --intent-to-add` of the copied tests answers ok in every fixture unless a test asserts on it.
+const wt = (res) => [{ match: (c, a) => c === "git" && a[0] === "worktree", result: res }, { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: { code: 0, stdout: "", stderr: "" } }];
 const ok = { code: 0, stdout: "", stderr: "" }, fail = { code: 1, stdout: "", stderr: "FAIL" };
 
 test("proveTest ok when new tests FAIL on base", async () => {
-  const run = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run") && a[1].includes("test/new.test.js"), result: fail }]);
+  const run = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run") && a[1].includes("test/new.test.js"), result: fail }]);
   const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt" });
   expect(r.ok).toBe(true);
   expect(run.calls.some((c) => c.cmd === "git" && c.args.join(" ") === "worktree add --detach /tmp/wt abc")).toBe(true);
@@ -19,7 +20,7 @@ test("proveTest ok when new tests FAIL on base", async () => {
 });
 
 test("proveTest NOT ok when new tests PASS on base (test proves nothing)", async () => {
-  const run = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c) => c === "bash", result: ok }]);
+  const run = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c) => c === "bash", result: ok }]);
   const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/new.test.js"], tmp: "/tmp/wt" });
   expect(r.ok).toBe(false); expect(r.detail).toMatch(/passed on base/);
 });
@@ -84,7 +85,7 @@ test("inconclusiveOnBase: module-resolution failures are not proof; a missing ex
 
 test("proveTest installs dependencies in the base worktree before running the new tests", async () => {
   const run = makeFakeRun([
-    wt(ok),
+    ...wt(ok),
     { match: (c) => c === "cp", result: ok },
     { match: (c, a) => c === "bash" && a[1] === "npm ci", result: ok },
     { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: fail },
@@ -99,7 +100,7 @@ test("proveTest installs dependencies in the base worktree before running the ne
 
 test("proveTest: a base install that fails is fail-closed — misconfigured, not proof", async () => {
   const run = makeFakeRun([
-    wt(ok),
+    ...wt(ok),
     { match: (c) => c === "cp", result: ok },
     { match: (c, a) => c === "bash" && a[1] === "npm ci", result: { code: 1, stdout: "", stderr: "ENOTFOUND registry" } },
   ]);
@@ -111,7 +112,7 @@ test("proveTest: a base install that fails is fail-closed — misconfigured, not
 
 test("proveTest: a base run that dies on module resolution is INCONCLUSIVE, never proof", async () => {
   const run = makeFakeRun([
-    wt(ok),
+    ...wt(ok),
     { match: (c) => c === "cp", result: ok },
     { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: { code: 1, stdout: "Error: Cannot find module '../lib/thing.js'", stderr: "" } },
   ]);
@@ -138,6 +139,7 @@ test("stage gates: an inconclusive prove-test is MISCONFIGURED and listed in pro
     { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "A\ttest/new.test.js\n", stderr: "" } },
     { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"h".repeat(40)}\n`, stderr: "" } },
     { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
     { match: (c) => c === "cp", result: ok },
   ]);
   const r = await runStageGates({ run, cwd, harness: stageHarness, stage: "implement", tier: "standard", base: "b".repeat(40), readFile: () => null });
@@ -149,7 +151,7 @@ test("stage gates: an inconclusive prove-test is MISCONFIGURED and listed in pro
 
 test("proveTest: a real failure on base is still proof, with dependencies installed", async () => {
   const run = makeFakeRun([
-    wt(ok),
+    ...wt(ok),
     { match: (c) => c === "cp", result: ok },
     { match: (c, a) => c === "bash" && a[1] === "npm ci", result: ok },
     { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: { code: 1, stdout: "AssertionError: expected 3 to be 4", stderr: "" } },
@@ -163,12 +165,12 @@ test("proveTest: a real failure on base is still proof, with dependencies instal
 // not an inconclusive run. Without an added module in the error, the old inconclusive verdict stands.
 test("proveTest: an import error naming a module this change adds counts as failing on base; an unrelated import error stays inconclusive", async () => {
   const importErr = { code: 1, stdout: "", stderr: "Error: Cannot find module '../src/version.js' imported from test/version.test.js" };
-  const run = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
+  const run = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
   const proven = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/version.test.js"], addedFiles: ["src/version.js", "test/version.test.js"], tmp: "/tmp/wt" });
   expect(proven.ok).toBe(true);
   expect(proven.misconfigured).toBeFalsy();
   expect(proven.detail).toContain("src/version.js");
-  const run2 = makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
+  const run2 = makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: importErr }]);
   const unclear = await proveTest({ run: run2, cwd: "/repo", harness, base: "abc", addedTests: ["test/version.test.js"], addedFiles: ["test/version.test.js"], tmp: "/tmp/wt" });
   expect(unclear.ok).toBe(false);
   expect(unclear.misconfigured).toBe(true);
@@ -177,7 +179,7 @@ test("proveTest: an import error naming a module this change adds counts as fail
 // 1.4.9 (own-calendar #28/#29): a test-only diff characterizes existing behaviour — the new tests must PASS on base.
 test("proveTest characterization mode: passing on base is GREEN, failing on base is RED, import error is inconclusive", async () => {
   const { CHARACTERIZATION } = await import("../lib/prove-test.js");
-  const mk = (res) => makeFakeRun([wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: res }]);
+  const mk = (res) => makeFakeRun([...wt(ok), { match: (c) => c === "cp", result: ok }, { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: res }]);
   const green = await proveTest({ run: mk(ok), cwd: "/repo", harness, base: "abc", addedTests: ["test/rrule.test.js"], mode: CHARACTERIZATION, tmp: "/tmp/wt" });
   expect(green.ok).toBe(true);
   expect(green.detail).toContain("characterization");
@@ -186,4 +188,35 @@ test("proveTest characterization mode: passing on base is GREEN, failing on base
   expect(red.misconfigured).toBeFalsy();
   const inc = await proveTest({ run: mk({ code: 1, stdout: "", stderr: "Cannot find module 'x'" }), cwd: "/repo", harness, base: "abc", addedTests: ["test/rrule.test.js"], mode: CHARACTERIZATION, tmp: "/tmp/wt" });
   expect(inc.misconfigured).toBe(true);
+});
+
+// 1.4.13 (own-calendar #31): the copied tests are intent-added to the base worktree's index so tests that read
+// `git ls-files`/`git status` see the same world on base as on head; Dart/Python setup errors are inconclusive.
+test("proveTest intent-adds the copied tests in the base worktree; Dart and Python resolution errors are inconclusive", async () => {
+  const calls = [];
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+    { match: (c) => c === "cp", result: ok },
+    { match: (c, a) => c === "git" && a.includes("--intent-to-add") && (calls.push(a), true), result: ok },
+    { match: (c, a) => c === "bash" && a[1].includes("vitest run"), result: fail },
+  ]);
+  const r = await proveTest({ run, cwd: "/repo", harness, base: "abc", addedTests: ["test/guard.test.js"], tmp: "/tmp/wt" });
+  expect(r.ok).toBe(true);
+  expect(calls).toEqual([["-C", "/tmp/wt", "add", "--intent-to-add", "--", "test/guard.test.js"]]);
+  for (const msg of ["Error: Target of URI doesn't exist: 'package:x/y.dart'", "Couldn't resolve the package 'own_calendar'", "ModuleNotFoundError: No module named 'app'", "ImportError: cannot import name 'x' from 'y'"]) {
+    expect(inconclusiveOnBase(msg)).toBe(true);
+  }
+  expect(inconclusiveOnBase("Expected: <0>  Actual: <1>")).toBe(false);
+});
+
+// 1.4.13 (own-calendar #31, KTB #75): a new test that mentions its own path asserts about itself, not the product.
+test("selfReferentialTests flags a new test that names its own file and leaves guard tests about other files alone", async () => {
+  const { selfReferentialTests } = await import("../lib/prove-test.js");
+  const files = {
+    "client/test/charter_paths_guard_test.dart": "// guard\nexpect(gitLsFiles('client/test/charter_paths_guard_test.dart'), 0);",
+    "client/test/rrule_test.dart": "expect(gitLsFiles('docs/factory/CHARTER.md'), 0);",
+  };
+  const hits = selfReferentialTests(Object.keys(files), (f) => files[f]);
+  expect(hits).toEqual([{ file: "client/test/charter_paths_guard_test.dart", hit: "client/test/charter_paths_guard_test.dart" }]);
+  expect(selfReferentialTests(["missing.test.js"], () => { throw new Error("ENOENT"); })).toEqual([]);
 });

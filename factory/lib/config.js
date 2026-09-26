@@ -88,6 +88,27 @@ export function neverAutomateGlobs(body) {
   return out;
 }
 
+/**
+ * 1.4.13 (데모 #76, KTB L14) — **스크립트는 경로를 읽지 한정어를 읽지 않는다.** "공개 API(`src/routes/**`)의 breaking
+ * change"라고 적으면 사람은 "breaking change만"으로 읽지만 `neverAutomateGlobs`는 `src/routes/**`를 뽑아 그 아래를 **스치는
+ * 모든** 변경을 wont-do로 덮는다(새 route 추가까지). 템플릿의 예시 항목이 정확히 이 모양이었다. 글롭이 든 항목에 한정어
+ * (breaking·호환·파괴적·destructive)가 함께 있으면 그 항목을 돌려준다 — doctor가 WARN으로 소리 내는 자리다.
+ * → `[{glob, text}]`.
+ */
+export function neverAutomateQualified(body) {
+  const m = /^##\s+NEVER_AUTOMATE.*$/m.exec(body || "");
+  if (!m) return [];
+  const section = String(body).slice(m.index + m[0].length).split(/^##\s+/m)[0];
+  const out = [];
+  for (const line of section.split("\n")) {
+    if (!/^\s*[-*]\s/.test(line)) continue;
+    if (!/breaking|호환|파괴적|destructive/i.test(line)) continue;
+    const globs = neverAutomateGlobs(`## NEVER_AUTOMATE\n${line}\n`);
+    for (const glob of globs) out.push({ glob, text: line.replace(/^\s*[-*]\s*/, "").trim() });
+  }
+  return out;
+}
+
 export function loadCharter(root) {
   const { data, body } = parseFrontmatter(readFileSync(join(root, "docs/factory/CHARTER.md"), "utf8"));
   if (data.schema !== "factory.charter.v1") throw new Error("CHARTER.md frontmatter must declare schema: factory.charter.v1");
@@ -118,6 +139,8 @@ export function loadCharter(root) {
     triage: { ...(data.triage || {}) },
     /** 프론트매터가 아니라 **본문**에서 온다 — NEVER_AUTOMATE는 사람이 읽는 목록이 정본이다. */
     never_automate: neverAutomateGlobs(body),
+    /** 1.4.13 — 글롭이 든 항목 중 한정어가 붙은 것(`neverAutomateQualified`). doctor `charter.never-automate-qualified`의 재료. */
+    never_automate_qualified: neverAutomateQualified(body),
     budget: data.budget || {},
     retro: data.retro || { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true },
   };

@@ -113,9 +113,12 @@ FAIL(`charter.merge-human-gate-unset`)이다 — 아무도 고른 적 없는 것
 경로 글롭(`auth/**` 같은)으로 적은 항목은 **스크립트가 다시 센다**: triage handoff의 `impact_paths`가
 그 글롭에 걸리면 에이전트가 무엇이라 판정했든 `wont-do`로 덮어쓰고 `never_automate_hit`으로 기록한다
 (감사 M1). 글롭으로 적을 수 있는 것은 글롭으로 적어라 — 산문은 에이전트만 읽지만 글롭은 둘 다 읽는다.
+**스크립트는 한정어를 읽지 않는다**: 백틱 글롭은 "breaking change만"이 아니라 그 경로를 스치는 **모든** 변경을 막는다.
+한정어가 뜻이면 백틱 없이 적어라(에이전트만 읽는 지침이 된다) — doctor가 `charter.never-automate-qualified`로 짚는다.
 - (fill in)
 - (fill in)
-- 공개 API(`src/api/public/**`)의 breaking change
+- `src/api/public/**` — 공개 API 표면 전체(새 엔드포인트 추가 포함); 스치는 모든 변경이 wont-do다
+- 공개 API의 breaking change(응답 형태·상태코드·경로 변경) — 글롭 없이 산문으로만 적었으므로 triage 에이전트의 판단이다
 - `.env*`, 시크릿, 배포 스크립트(`scripts/deploy.sh`)
 
 ## Definition of Done (모든 tier 공통)

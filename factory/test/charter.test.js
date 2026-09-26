@@ -347,3 +347,22 @@ test("템플릿 CHARTER가 두 개선 대상과 그 라우팅을 여전히 말�
 test("KTB 자신의 CHARTER도 그 문단을 갖는다 — 이 저장소가 바로 그 이슈들이 착지하는 곳이다", () => {
   expect(readFileSync(REPO_CHARTER, "utf8"), "docs/factory/CHARTER.md에 `## 개선 이슈`가 없다 — 루프가 제 저장소에 대해 먼저 보고할 드리프트다").toContain("## 개선 이슈");
 });
+
+// 1.4.13 (demo #76, L14): the script enforces globs, not qualifiers — a bullet like "breaking change of `src/routes/**`"
+// blocks every touch under src/routes/**. loadCharter names such items and doctor warns about them.
+test("neverAutomateQualified names glob items that carry a qualifier the script cannot read; doctor lists enforced globs and warns", async () => {
+  const { neverAutomateQualified } = await import("../lib/config.js");
+  const { checkNeverAutomate } = await import("../lib/doctor/factory.js");
+  const body = ["## NEVER_AUTOMATE", "- 공개 API(`src/routes/**`)의 breaking change", "- `.env*`, 시크릿", "- 인증 도입(산문)", "", "## Done"].join("\n");
+  expect(neverAutomateQualified(body)).toEqual([{ glob: "src/routes/**", text: "공개 API(`src/routes/**`)의 breaking change" }]);
+  const r = charterRoot("", body + "\n");
+  const charter = loadCharter(r);
+  expect(charter.never_automate).toEqual(["src/routes/**", ".env*"]);
+  const checks = checkNeverAutomate(charter);
+  expect(by(checks)["charter.never-automate"].level).toBe("PASS");
+  expect(by(checks)["charter.never-automate"].detail).toContain("src/routes/**");
+  const warn = by(checks)["charter.never-automate-qualified"];
+  expect(warn.level).toBe("WARN");
+  expect(warn.detail).toMatch(/every change touching `src\/routes\/\*\*`/);
+  expect(by(checkNeverAutomate(loadCharter(charterRoot("", "## NEVER_AUTOMATE\n- `billing/**`\n"))))["charter.never-automate-qualified"]).toBeUndefined();
+});
