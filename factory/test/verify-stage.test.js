@@ -436,3 +436,15 @@ test("KTB-22 r1: an error_during_execution envelope that only mentions '429' mid
   expect(r.ok).toBe(false);
   expect(r.reasons).toContain("claude -p reported is_error");
 });
+
+// 1.4.21 (L24, own-calendar #31): dissent ids and done_when.covers are matched case-insensitively — `D1` vs `d1` is not a gap.
+test("validatePlanHandoff: covers match dissent ids regardless of case and whitespace", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const plan = {
+    dissent_log: [{ id: "D1", severity: "medium", objection: "x" }, { id: "D2", severity: "low", objection: "y" }],
+    done_when: [{ id: "dw1", text: "t", rubric: "r", check: { kind: "command", ref: "npm test" }, covers: [" d1 "] }],
+  };
+  expect(validatePlanHandoff(plan).filter((r) => /dissent without done_when/.test(r))).toEqual([]);
+  const gap = { ...plan, done_when: [{ ...plan.done_when[0], covers: ["d9"] }] };
+  expect(validatePlanHandoff(gap)).toContain("dissent without done_when: D1");
+});

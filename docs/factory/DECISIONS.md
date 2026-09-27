@@ -3659,3 +3659,11 @@ run_id/runner 바인딩으로 `gate: "test-env"`를 싣고, 수확기는 그것�
 런은 그 뒤에서 55분을 기다렸다. 같은 PR의 이전 head를 위한 무결성 런은 새 push가 오는 순간 값어치가 0이다(머지 스테이지는
 현재 head의 상태만 본다) — `factory-integrity.yml`이 PR 단위 concurrency 그룹으로 밀려난 런을 취소한다. 스테이지 워크플로의
 그룹(`cancel-in-progress: false`)은 그대로다: 그쪽은 head가 아니라 이슈 단위 직렬화이고, 도는 스테이지를 끊으면 판정을 잃는다.
+
+**1.4.21 (L22 · L23 · L24, own-calendar #9/#28/#31).** (L22) `harnessIssue`는 implement 전용 플래그였고 review는 하네스 라벨을
+몰랐다 — overlay가 브랜치의 `.factory/harness.toml`(리뷰 대상)을 main의 것으로 덮어 "worktree dirty after review"로 세웠다(#9,
+3라운드). 이제 review는 하네스 라벨을 overlay에 알리고(하네스 경로 제외) checkout 뒤 브랜치 하네스를 다시 읽는다; 빌더 전용
+settings/env 변형은 그대로 implement만이다. (L23) `qa-evidence.js`의 뿌리는 cwd였다 — qa 리뷰어가 `cd client`에서 부르자
+`client/.factory/out/qa/28/manifest.json`이 생겨 리뷰가 섰다(훅은 명령줄에 경로가 없어 못 본다). 뿌리는 cwd가 속한 git 최상위다;
+`--root` 탈출구는 여전히 없다. (L24) 플랜 검증기의 dissent id ↔ `covers` 대조가 대소문자를 가렸다(`D1` vs `d1`) — 수리 턴도
+같은 표기로 답해 needs-human이 났다(#31). 표기법은 사람을 부를 이유가 아니다: 대소문자·공백을 무시한다.
