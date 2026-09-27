@@ -3693,3 +3693,9 @@ RED로 세웠다(#31). 주석 줄은 빼고, 자기 경로가 파일·git 상태
 **1.4.26 (L29, own-calendar #46).** 계획 검증기의 수리 턴 되먹임은 "dissent without done_when: d1, d2"뿐이었다 — 계획자는 두 번
 연속 항목의 이름만 바꾸고 계약(id·severity·covers)은 고치지 못했다. 문장이 무엇을 쓰라는지까지 말한다: 모든 dissent 항목에
 id와 severity를, medium/high(또는 severity 없음)에는 그것을 완화하는 done_when의 covers에 id를 넣거나 severity를 low로.
+
+**1.4.27 (L30, own-calendar #45).** self-gate 재시도의 backstop(재큐 이후 모든 head의 RED 총합 ≥ 4)은 `commentsSinceRequeue`로
+창을 잡았다 — 사람이 `--human --retry`로 세 번 되살린 이슈는 옛 주기의 마커(게이트 RED 1회, flaky integration 1회)를 안고
+시작해, 이번 주기의 첫 self-gate 발견(뮤테이션 생존자)이 "not converging after 4 retries"로 escalate됐다(게이트는 GREEN이었다).
+1.4.12가 sweeper의 restart budget에 적용한 규칙 그대로, 창은 마지막 사람 전이부터다(`commentsSinceCycleStart`). head당 1회
+상한은 그대로다.
