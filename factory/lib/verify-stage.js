@@ -245,7 +245,10 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
     .filter(({ severity }) => !(typeof severity === "string" && SEVERITY_RANK[severity] < SEVERITY_RANK.medium))
     .filter(({ id }) => !covered.has(String(id).trim().toLowerCase()))
     .map(({ id }) => id);
-  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")}`);
+  // 1.4.26 (L29, own-calendar #46) — 수리 턴에 되먹이는 문장은 **무엇을 쓰라는지**까지 말한다: 계획이 두 번 연속 같은 이유로
+  // 죽었다(첫 판 `dissent-1`, 수리 판 `d1, d2` — id도 severity도 없는 dissent 항목, 그것을 짚는 done_when 없음). "덮이지 않았다"만
+  // 들은 계획자는 항목을 고쳐 쓰는 대신 이름만 바꿨다.
+  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")} — give every dissent_log entry an "id" and a "severity"; for each medium/high (or severity-less) entry either add its id to the "covers" of the done_when that mitigates it, or set "severity": "low" if it is not a risk worth pinning`);
 
   // (b) 계획이 만드는 결함 표면의 상한.
   if (doneWhen.length > maxDoneWhen) reasons.push(`done_when has ${doneWhen.length} items (max ${maxDoneWhen})`);

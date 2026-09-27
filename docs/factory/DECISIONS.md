@@ -3689,3 +3689,7 @@ RED로 세웠다(#31). 주석 줄은 빼고, 자기 경로가 파일·git 상태
 이름 짓지 못했고, flaky-existing 분류·제외가 돌지 않았다 — 실패한 것은 이 변경과 무관한 기존 테스트(tests/family.test.ts)였다.
 템플릿은 `unit_report`만 적었다. doctor `gates.test-report`가 레벨에 올라 있고 명령도 있는 unit/integration/e2e 게이트에
 `[test].<gate>_report`가 없으면 WARN한다; 템플릿에 integration/e2e 리포트 줄을 문서화했다(own-calendar는 PR #74로 붙였다).
+
+**1.4.26 (L29, own-calendar #46).** 계획 검증기의 수리 턴 되먹임은 "dissent without done_when: d1, d2"뿐이었다 — 계획자는 두 번
+연속 항목의 이름만 바꾸고 계약(id·severity·covers)은 고치지 못했다. 문장이 무엇을 쓰라는지까지 말한다: 모든 dissent 항목에
+id와 severity를, medium/high(또는 severity 없음)에는 그것을 완화하는 done_when의 covers에 id를 넣거나 severity를 low로.
