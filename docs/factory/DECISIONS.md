@@ -3699,3 +3699,9 @@ id와 severity를, medium/high(또는 severity 없음)에는 그것을 완화하
 시작해, 이번 주기의 첫 self-gate 발견(뮤테이션 생존자)이 "not converging after 4 retries"로 escalate됐다(게이트는 GREEN이었다).
 1.4.12가 sweeper의 restart budget에 적용한 규칙 그대로, 창은 마지막 사람 전이부터다(`commentsSinceCycleStart`). head당 1회
 상한은 그대로다.
+
+**1.4.28 (L31, own-calendar #43–#47).** 서버 테스트 이슈 다섯 개가 전부 첫 구현 턴을 self-gate 뮤테이션 검사에 잃었다: 새
+supertest 파일은 `../src/app`을 임포트하므로 구조 뮤테이션은 app.ts의 불리언(cors credentials·rate-limit 플래그)을 뒤집었고,
+라우트 특성화 테스트는 그것을 볼 수 없어 매번 "survivor"였다(턴당 ≈$8·30분). prove-test가 test-only diff를 특성화로 판정하듯
+뮤테이션 검사도 소스 변경이 없으면 볼 것이 없다 — 새 테스트가 지키는 것은 이 변경이 아니라 기존 동작이고, 그 검증은 base에서
+통과한다는 사실로 이미 끝났다. 소스가 함께 바뀐 diff의 뮤테이션 검사는 그대로다.

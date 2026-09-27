@@ -244,11 +244,28 @@ test("mutation-check skips are advisory, not blocking", async () => {
   const res = await runSelfGate({
     root: "/root", harness, run,
     contract: [], roster: ["correctness"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" },
-    changedTests: [{ file: "test/x.test.js" }], changedSources: [],
+    changedTests: [{ file: "test/x.test.js" }], changedSources: ["src/x.js"],
     mutation: { tmp: "/wt", exists: fs.exists, readFile: fs.readFile, writeFile: fs.writeFile },
   });
   expect(res.ok).toBe(true);
   expect(advisoryFindings(res.findings).length).toBeGreaterThan(0);
+});
+
+// 1.4.28 (L31, own-calendar #43–#47): a test-only diff has no change for the new tests to guard — the mutation check is
+// skipped (no-input, recorded), not run against whatever module the test happens to import.
+test("mutation check is skipped for a test-only (characterization) diff and says why", async () => {
+  const { SKIP_REASONS } = await import("../lib/self-gate.js");
+  const run = makeFakeRun([]);   // nothing may be spawned — no worktree, no npm ci
+  const res = await runSelfGate({
+    root: "/root", harness, run,
+    contract: [], roster: ["correctness"], tier: "standard", gates: { schema: "factory.gates.v1", status: "GREEN" },
+    changedTests: [{ file: "server/tests/categories.test.ts" }], changedSources: [],
+  });
+  expect(res.ok).toBe(true);
+  expect(res.ranChecks).not.toContain("mutation");
+  const skip = res.skippedChecks.find((s) => s.check === "mutation");
+  expect(skip).toMatchObject({ reason: SKIP_REASONS.NO_INPUT, detail: expect.stringContaining("test-only diff (characterization)") });
+  expect(run.calls).toHaveLength(0);
 });
 
 /**
