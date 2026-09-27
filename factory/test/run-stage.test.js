@@ -3745,3 +3745,14 @@ test("L26: gates RED after the builder → one bounded retry to planned with the
   expect(await runStage({ stage: "implement", issue: 7, deps: d2, runnerId: "r1" })).toBe(2);
   expect(t2.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:needs-human", reason: expect.stringContaining("stage artifact missing or invalid: gates RED") });
 });
+
+// 1.4.24 (L27, own-calendar #44): tool caches under node_modules/ are not agent output — a no-write stage stays clean
+// when vitest leaves node_modules/.vite/… behind, at the root or in a subproject; real files still count.
+test("L27: the no-write clean check ignores node_modules/ tool caches but not real files", async () => {
+  const { assertNoWriteStageClean } = await import("../bin/run-stage.js");
+  const status = "?? node_modules/.vite/vitest/da39a3ee/results.json\n?? server/node_modules/.cache/x\n";
+  const run = async () => ({ code: 0, stdout: status, stderr: "" });
+  expect(await assertNoWriteStageClean({ run, cwd: "/r" })).toEqual({ ok: true, dirty: [] });
+  const runDirty = async () => ({ code: 0, stdout: status + " M src/app.js\n", stderr: "" });
+  expect(await assertNoWriteStageClean({ run: runDirty, cwd: "/r" })).toEqual({ ok: false, dirty: ["src/app.js"] });
+});
