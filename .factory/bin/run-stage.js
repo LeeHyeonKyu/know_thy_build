@@ -1481,7 +1481,14 @@ export function isNoWriteStage(stage) { return needsDenyAllWritesHook(NO_WRITE_S
 
 /** ADR-020 KTB-14 — 쓰기 금지 스테이지가 워크트리에 남겨도 되는 유일한 두 스크래치 경로. */
 export const NO_WRITE_SCRATCH_PREFIXES = [".factory/out/", "docs/factory/runs/"];
-const isScratchPath = (p) => NO_WRITE_SCRATCH_PREFIXES.some((pre) => p === pre.slice(0, -1) || p.startsWith(pre));
+/**
+ * 1.4.24 (L27, own-calendar #44) — **툴 캐시는 에이전트의 산출물이 아니다.** M2 서버 스위트가 저장소 루트에서 vitest를 돌리자
+ * `node_modules/.vite/vitest/<hash>/results.json`이 생겼고(루트 .gitignore에 node_modules가 없었다) 리뷰가 "worktree dirty"로
+ * 섰다. `node_modules/` 아래는 어느 저장소에서도 제품 경로가 아니고 게이트가 받아들일 diff도 아니므로 클린 검사에서 뺀다 —
+ * 채택자의 .gitignore 실수 하나가 리뷰 라운드 하나를 태우게 두지 않는다.
+ */
+const TOOL_CACHE_RE = /(^|\/)node_modules\//;
+const isScratchPath = (p) => TOOL_CACHE_RE.test(p) || NO_WRITE_SCRATCH_PREFIXES.some((pre) => p === pre.slice(0, -1) || p.startsWith(pre));
 
 /**
  * `git status --porcelain` 한 줄 = "XY PATH" 또는 rename/copy의 "XY OLD -> NEW"다 — 두 경우 모두
