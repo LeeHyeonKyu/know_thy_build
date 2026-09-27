@@ -3673,3 +3673,9 @@ drift 재확인(`assertCleanWorktree` → `overlayDrift`)은 여전히 main과 �
 같은 사유로 한 번 더 섰다. overlay가 돈 모드를 기억해 재확인이 같은 모드를 쓴다. (L25) 자기참조 테스트 검사(1.4.13)는 본문
 어디든 자기 파일명이 보이면 잡았다 — 머리말 주석("the changeset adds exactly one file: …_test.dart")에 걸려 정직한 특성화 테스트를
 RED로 세웠다(#31). 주석 줄은 빼고, 자기 경로가 파일·git 상태를 묻는 호출과 같은 줄에 있을 때만 잡는다.
+
+**1.4.23 (L26, 데모 #7).** 빌더의 커밋 뒤 gates RED(기존 통합 테스트 4개가 깨짐)는 "stage artifact missing or invalid"로
+읽혀 곧장 needs-human으로 갔다 — 검증자 거부(1.4.9)와 self-gate 발견(Structure B)에는 있는 한 번의 유계 재시도가 이 가지에만
+없었다. 빨간 게이트의 실패 테스트 id를 발견으로 실어 같은 마커·같은 상한(head당 1회, 재큐당 backstop)으로 planned로
+돌려보낸다; 두 번째 RED는 예전처럼 사람이다. 빌더가 자기 변경으로 깨뜨린 테스트를 한 번 고칠 기회 없이 사람을 부르는 것은
+공장의 가장 흔한 실패를 가장 비싼 경로로 보내는 일이었다.

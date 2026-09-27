@@ -836,6 +836,27 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const apiError = hitApiError(out);
       const qaPath = qaEvidenceUnusable(v.reasons);
       const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
+      /**
+       * 1.4.23 (L26, 데모 #7) — **빌더의 커밋 뒤 gates RED는 빌더가 고칠 수 있는 가장 흔한 실패다**(기존 테스트를 깨뜨렸다).
+       * 그런데 이 가지는 그것을 "산출물 결함"으로 읽어 곧장 needs-human으로 세웠다 — 검증자 거부(1.4.9)와 self-gate 발견
+       * (Structure B)에는 있는 **한 번의 유계 재시도**가 여기엔 없었다. 같은 마커·같은 상한(head당 1회, 재큐당 backstop)으로
+       * 빨간 게이트의 실패 테스트 id를 발견으로 실어 planned로 돌려보낸다; 두 번째부터는 예전처럼 사람이다.
+       */
+      if (stage === "implement" && gates?.status === "RED" && !blocked && !apiError && d.selfGateRetry) {
+        const findings = Object.entries(gates.gates || {}).filter(([, g]) => g?.status === "RED").map(([name, g]) => {
+          const ids = (Array.isArray(g.failing_ids) && g.failing_ids.length ? g.failing_ids : g.detail?.failing || []).slice(0, 10);
+          return { check: `gate:${name}`, blocking: true, detail: `gate ${name} RED — failing: ${ids.join(", ") || "(no test names; see the gate log)"}${g.reason ? ` — ${g.reason}` : ""}` };
+        });
+        const head = gates.head_sha ?? v.data?.head_sha ?? null;
+        const { attempt, total } = await d.selfGateRetry({ head, findings });
+        const bounded = attempt >= 2 || (Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP);
+        if (!bounded) {
+          const t = await d.transition({ to: "factory:planned", reason: `gates RED (retry ${attempt}): ${v.reasons.join("; ")}` });
+          record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), `gates: RED → attempt ${attempt} → factory:planned (the builder gets one bounded repair turn)`, ...refusal(t), ...gatesNote, usage]);
+          return t.ok ? 0 : 2;
+        }
+        record([`gates: RED again on ${String(head ?? "unknown").slice(0, 7)} (attempt ${attempt}) — escalating`]);
+      }
       const to = blocked ? "factory:blocked" : "factory:needs-human";
       const reasonPrefix = qaPath ? "qa evidence path" : blocked ? "stage did not finish" : apiError ? "api error needs human (credentials/config)" : "stage artifact missing or invalid";
       const t = await d.transition({ to, reason: `${reasonPrefix}: ${v.reasons.join("; ")}`, ...(qaPath ? { cause: "undecidable" } : {}) });

@@ -3723,3 +3723,25 @@ test("L22: review of a factory:harness issue runs the overlay in harness mode an
   expect(plain).toHaveBeenCalledWith(false);
   expect(reload).toHaveBeenCalledTimes(1);
 });
+
+// 1.4.23 (L26, demo #7): a RED gate after the builder's commit gets the same one bounded retry as a self-gate finding —
+// the failing test ids ride the marker as findings; the second RED on the same head escalates as before.
+test("L26: gates RED after the builder → one bounded retry to planned with the failing tests as findings; second time needs-human", async () => {
+  const red = { schema: "factory.gates.v1", status: "RED", head_sha: "c".repeat(40), failing: ["unit"], gates: { unit: { status: "RED", failing_ids: ["test/integration/notes.test.js::lists newest first"], parsed: true, code: 1 } } };
+  const retried = [];
+  const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const d1 = selfGateDeps({
+    gates: async () => red,
+    verifyStage: () => ({ ok: false, reasons: ["gates RED: failing=unit"], data: null }),
+    selfGateRetry: async ({ head, findings }) => { retried.push({ head, findings }); return { attempt: 1, total: 1 }; },
+    transition: t1,
+  });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d1, runnerId: "r1" })).toBe(0);
+  expect(t1.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:planned", reason: expect.stringMatching(/^gates RED \(retry 1\): gates RED: failing=unit/) });
+  expect(retried[0].head).toBe("c".repeat(40));
+  expect(retried[0].findings).toEqual([{ check: "gate:unit", blocking: true, detail: "gate unit RED — failing: test/integration/notes.test.js::lists newest first" }]);
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const d2 = selfGateDeps({ gates: async () => red, verifyStage: () => ({ ok: false, reasons: ["gates RED: failing=unit"], data: null }), selfGateRetry: async () => ({ attempt: 2, total: 2 }), transition: t2 });
+  expect(await runStage({ stage: "implement", issue: 7, deps: d2, runnerId: "r1" })).toBe(2);
+  expect(t2.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:needs-human", reason: expect.stringContaining("stage artifact missing or invalid: gates RED") });
+});
