@@ -491,6 +491,14 @@ function stageStamp(root, issue, spawn) {
   return { headSha: sc.headSha, maturity: sc.maturity };
 }
 
+export function gitToplevel(cwd, spawn = spawnSync) {
+  try {
+    const r = spawn("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" });
+    const top = r && r.status === 0 ? String(r.stdout || "").trim() : "";
+    return top ? realpathSync(top) : null;
+  } catch { return null; }
+}
+
 export function runCli(argv = process.argv.slice(2), {
   cwd = process.cwd(), env = process.env, log = console.log, err = console.error,
   now = () => new Date().toISOString(), spawn = spawnSync,
@@ -507,7 +515,12 @@ export function runCli(argv = process.argv.slice(2), {
    * `<root>/.factory/out/qa/…`를 만들었다. 뿌리는 언제나 프로세스의 cwd다 — 테스트는
    * `runCli(argv, { cwd })`로 그 자리를 바꾼다(프로덕션 호출자는 아무도 이 플래그를 쓰지 않았다).
    */
-  const root = cwd;
+  /**
+   * 1.4.21 (L23, own-calendar #28) — 뿌리는 cwd가 속한 **저장소 최상위**다. qa 리뷰어가 `cd client && node ../.factory/bin/
+   * qa-evidence.js record …`로 부르자 `client/.factory/out/qa/28/manifest.json`이 생겼고(훅은 명령줄에 경로가 없어 못 봤다),
+   * 리뷰는 "worktree dirty"로 섰다. `--root` 탈출구는 여전히 없다 — 최상위는 git이 답하고 사람이 고르지 않는다; git 밖이면 cwd다.
+   */
+  const root = gitToplevel(cwd) ?? cwd;   // 훅 판정용 `spawn` 주입점과는 무관하다 — git은 언제나 실제로 묻는다
   const HANDLERS = { record: cmdRecord, attach: cmdAttach, na: cmdNa, finish: cmdFinish, probe: cmdProbe };
   const handler = HANDLERS[cmd];
   if (!handler) { err(USAGE); err(`factory: unknown command ${JSON.stringify(cmd ?? "")}`); return 1; }

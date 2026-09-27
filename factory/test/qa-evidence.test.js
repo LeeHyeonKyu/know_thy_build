@@ -775,3 +775,17 @@ test("verify-stage: no qa in the roster means the qa evidence rule does not fire
   });
   expect(r.ok).toBe(true);
 });
+
+// 1.4.21 (L23, own-calendar #28): the evidence root is the git toplevel of cwd, so a reviewer who `cd client` still
+// writes under <repo>/.factory/out/qa/ — not client/.factory/out/qa/ (which dirtied the worktree and parked the review).
+test("gitToplevel: resolves the repo root from a subdirectory; null outside a repo", async () => {
+  const { gitToplevel } = await import("../bin/qa-evidence.js");
+  const { spawnSync } = await import("node:child_process");
+  const { realpathSync } = await import("node:fs");
+  const root = tmp();
+  spawnSync("git", ["init", "-q"], { cwd: root });
+  mkdirSync(join(root, "client"), { recursive: true });
+  expect(gitToplevel(join(root, "client"))).toBe(realpathSync(root));
+  const stub = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository" });
+  expect(gitToplevel(root, stub)).toBeNull();
+});

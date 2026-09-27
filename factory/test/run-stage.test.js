@@ -3694,3 +3694,32 @@ test("lifetime budget: over the cap → needs-human + exit 2 before claim; under
   expect(under).toContain("budget: lifetime $12.50 / $60 over 2 run(s)");
   expect(under).toContain("claim");
 });
+
+// 1.4.21 (L22, own-calendar #9): the review of a factory:harness issue tells the overlay it is a harness issue (so the
+// branch's harness.toml is not overwritten by main's and flagged dirty) and reloads the branch harness after checkout.
+test("L22: review of a factory:harness issue runs the overlay in harness mode and reloads the branch harness", async () => {
+  const lines = [];
+  const overlay = vi.fn(async () => ({ ok: true, sha: "a".repeat(40), source: "GITHUB_SHA", paths: [] }));
+  const reload = vi.fn(() => ({ test: { test_glob: ["client/test/**", "server/tests/**"] } }));
+  const d = baseDeps({
+    issueLabels: async () => ["factory:awaiting-review", "factory:harness", "factory:tier-standard"],
+    ciSettingsPresent: vi.fn(async () => true),
+    checkoutHead: async () => ({ ok: true, sha: "b".repeat(40) }),
+    overlayFactoryConfig: overlay, reloadHarness: reload,
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+    transition: async ({ to }) => ({ ok: true, to }),
+    runRecord: (l) => lines.push(...l),
+  });
+  await runStage({ stage: "review", issue: 9, deps: d, runnerId: "r" });
+  expect(overlay).toHaveBeenCalledWith(true);
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(lines.some((l) => /harness: reloaded from the branch after the review checkout/.test(l))).toBe(true);
+  // the builder-only variant is untouched: review still runs with the base settings
+  expect(d.ciSettingsPresent).toHaveBeenCalledWith(false);
+  // a plain issue's review keeps the overlay in normal mode
+  const plain = vi.fn(async () => ({ ok: true, sha: "a".repeat(40), source: "GITHUB_SHA", paths: [] }));
+  const d2 = baseDeps({ issueLabels: async () => ["factory:awaiting-review", "factory:tier-standard"], ciSettingsPresent: async () => true, checkoutHead: async () => ({ ok: true, sha: "b".repeat(40) }), overlayFactoryConfig: plain, reloadHarness: reload, transition: async ({ to }) => ({ ok: true, to }) });
+  await runStage({ stage: "review", issue: 10, deps: d2, runnerId: "r" });
+  expect(plain).toHaveBeenCalledWith(false);
+  expect(reload).toHaveBeenCalledTimes(1);
+});

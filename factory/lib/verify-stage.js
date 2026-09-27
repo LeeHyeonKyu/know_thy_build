@@ -235,13 +235,15 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
   const dissent = Array.isArray(plan.dissent_log) ? plan.dissent_log : [];
 
   // (a) 위험은 risks가 아니라 done_when으로 나온다.
+  // 1.4.21 (L24, own-calendar #31) — id는 대소문자를 가리지 않는다: 계획이 dissent를 `D1`로, covers를 `d1`로 적어 "dissent
+  // without done_when"이 났고 수리 턴도 그 모양을 반복해 needs-human으로 갔다. 검증기가 표기법을 이유로 사람을 부르지 않는다.
   const covered = new Set();
-  for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c));
+  for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c).trim().toLowerCase());
   const uncovered = dissent
     // id가 없는 항목은 위치로 부른다 — 검증기가 id를 발명하는 게 아니라, 사람이 셀 수 있는 이름을 준다.
     .map((d, i) => ({ id: typeof d?.id === "string" && d.id ? d.id : `d${i + 1}`, severity: d?.severity }))
     .filter(({ severity }) => !(typeof severity === "string" && SEVERITY_RANK[severity] < SEVERITY_RANK.medium))
-    .filter(({ id }) => !covered.has(id))
+    .filter(({ id }) => !covered.has(String(id).trim().toLowerCase()))
     .map(({ id }) => id);
   if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")}`);
 
