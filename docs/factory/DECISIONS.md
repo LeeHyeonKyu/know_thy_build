@@ -3667,3 +3667,9 @@ settings/env 변형은 그대로 implement만이다. (L23) `qa-evidence.js`의 �
 `client/.factory/out/qa/28/manifest.json`이 생겨 리뷰가 섰다(훅은 명령줄에 경로가 없어 못 본다). 뿌리는 cwd가 속한 git 최상위다;
 `--root` 탈출구는 여전히 없다. (L24) 플랜 검증기의 dissent id ↔ `covers` 대조가 대소문자를 가렸다(`D1` vs `d1`) — 수리 턴도
 같은 표기로 답해 needs-human이 났다(#31). 표기법은 사람을 부를 이유가 아니다: 대소문자·공백을 무시한다.
+
+**1.4.22 (L22 r2 · L25, own-calendar #9/#31).** (L22 r2) 1.4.21은 리뷰의 overlay에만 하네스 모드를 알렸고, 클린 검사 뒤의
+drift 재확인(`assertCleanWorktree` → `overlayDrift`)은 여전히 main과 비교해 브랜치의 harness.toml을 "변경"으로 읽었다 — #9가
+같은 사유로 한 번 더 섰다. overlay가 돈 모드를 기억해 재확인이 같은 모드를 쓴다. (L25) 자기참조 테스트 검사(1.4.13)는 본문
+어디든 자기 파일명이 보이면 잡았다 — 머리말 주석("the changeset adds exactly one file: …_test.dart")에 걸려 정직한 특성화 테스트를
+RED로 세웠다(#31). 주석 줄은 빼고, 자기 경로가 파일·git 상태를 묻는 호출과 같은 줄에 있을 때만 잡는다.

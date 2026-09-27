@@ -2286,7 +2286,8 @@ async function main() {
   const readJson = (p) => { try { const t = readFile(p); return t ? JSON.parse(t) : null; } catch { return null; } };
   const gatesPath = join(root, ".factory/out/gates.json");
   let baseSha = null;                                                 // 한 런 안에서 base는 하나다 — 두 번 물어보면 두 답이 나올 수 있다
-  let overlaySha = null;                                              // KTB-37 — overlay가 설정을 가져온 커밋(세션 뒤 drift 비교의 기준)
+  let overlaySha = null;
+  let overlayHarness = false;   // 1.4.22 — overlay가 돈 모드(하네스 이슈면 true); drift 재확인이 같은 모드를 쓴다                                              // KTB-37 — overlay가 설정을 가져온 커밋(세션 뒤 drift 비교의 기준)
   const mergeBase = async () => {
     if (baseSha) return baseSha;
     const branch = harness.project?.default_branch ?? "main";
@@ -2401,7 +2402,7 @@ async function main() {
      */
     overlayFactoryConfig: async (harnessIssue = false) => {
       const ov = await makeFactoryOverlay({ run, root, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main", harnessIssue })();
-      if (ov.ok) overlaySha = ov.sha;
+      if (ov.ok) { overlaySha = ov.sha; overlayHarness = harnessIssue; }
       return ov;
     },
     /**
@@ -2412,7 +2413,10 @@ async function main() {
     assertCleanWorktree: async (allow = [], baseline = null) => {
       const clean = await assertNoWriteStageClean({ run, cwd: root, allow, baseline });
       if (!clean.ok || !overlaySha) return clean;
-      const drift = await overlayDrift({ run, cwd: root, sha: overlaySha });
+      // 1.4.22 (L22 r2, own-calendar #9) — drift 재확인도 overlay와 **같은 모드**로 본다. 하네스 이슈의 리뷰에서 overlay는
+      // 브랜치의 harness.toml을 남겨 두는데, 이 재확인이 하네스 모드를 모르면 그 파일을 main과 비교해 "변경됐다"고 읽는다 —
+      // 1.4.21이 overlay만 고치고 이 자리를 놓쳐 #9가 같은 사유로 한 번 더 섰다.
+      const drift = await overlayDrift({ run, cwd: root, sha: overlaySha, harnessIssue: overlayHarness });
       return drift.ok ? clean : { ok: false, dirty: drift.paths, reason: drift.reason || `factory config changed during the stage: ${drift.paths.join(", ")}` };
     },
     /**

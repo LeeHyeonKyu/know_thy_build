@@ -85,6 +85,8 @@ export const proveModeFor = (changed) => (changed?.tests?.length && changed.all.
  * 아니라 자기 자신에 대한 것이므로 게이트가 RED로 이름을 붙여 돌려보낸다. 다른 파일의 추적 여부를 묻는 가드 테스트는 막지 않는다.
  * → `[{file, hit}]` (비어 있으면 통과).
  */
+const COMMENT_LINE = /^\s*(?:\/\/|#|\*|\/\*|\*\/|---|'''|""")/;
+const SELF_ASSERT_CONTEXT = /\bgit|ls[-_ ]?files|exists|\bstat\b|mtime|File\(|Directory\(|readFile|readdir|os\.path|Path\(|fs\./i;
 export function selfReferentialTests(addedTests = [], readFile) {
   const hits = [];
   for (const f of addedTests) {
@@ -92,8 +94,12 @@ export function selfReferentialTests(addedTests = [], readFile) {
     try { text = String(readFile(f)); } catch { continue; }
     const base = f.split("/").pop();
     const stem = base.replace(/\.[^.]+$/, "");
-    const needle = [f, base, stem].find((n) => n && text.includes(n));
-    if (needle) hits.push({ file: f, hit: needle });
+    // 1.4.22 (L25, own-calendar #31) — **주석은 단언이 아니다.** 첫 판은 본문 어디든 자기 파일명이 보이면 잡았고, "the changeset
+    // adds exactly one file: client/test/…_test.dart"라는 머리말 주석에 걸려 정직한 특성화 테스트를 RED로 세웠다. 이제 주석 줄을
+    // 빼고, 자기 경로가 **파일·git 상태를 묻는 호출과 같은 줄**에 있을 때만 잡는다 — #31의 원래 속임수(`git ls-files <자기 경로>`)는
+    // 그대로 걸리고, 이름을 적기만 한 줄은 지나간다.
+    const line = text.split("\n").find((l) => !COMMENT_LINE.test(l) && [f, base, stem].some((n) => n && l.includes(n)) && SELF_ASSERT_CONTEXT.test(l));
+    if (line) hits.push({ file: f, hit: [f, base, stem].find((n) => n && line.includes(n)), line: line.trim().slice(0, 160) });
   }
   return hits;
 }

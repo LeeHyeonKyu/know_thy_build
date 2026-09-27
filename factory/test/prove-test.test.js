@@ -215,9 +215,11 @@ test("selfReferentialTests flags a new test that names its own file and leaves g
   const files = {
     "client/test/charter_paths_guard_test.dart": "// guard\nexpect(gitLsFiles('client/test/charter_paths_guard_test.dart'), 0);",
     "client/test/rrule_test.dart": "expect(gitLsFiles('docs/factory/CHARTER.md'), 0);",
+    // 1.4.22 (L25): a comment naming the file, or a bare mention with no file/git call on the line, is not a self-assertion
+    "client/test/honest_test.dart": "// the changeset adds exactly one file: client/test/honest_test.dart.\nfinal name = 'honest_test';\nexpect(File('docs/factory/CHARTER.md').existsSync(), isTrue);",
   };
   const hits = selfReferentialTests(Object.keys(files), (f) => files[f]);
-  expect(hits).toEqual([{ file: "client/test/charter_paths_guard_test.dart", hit: "client/test/charter_paths_guard_test.dart" }]);
+  expect(hits).toEqual([{ file: "client/test/charter_paths_guard_test.dart", hit: "client/test/charter_paths_guard_test.dart", line: "expect(gitLsFiles('client/test/charter_paths_guard_test.dart'), 0);" }]);
   expect(selfReferentialTests(["missing.test.js"], () => { throw new Error("ENOENT"); })).toEqual([]);
 });
 
