@@ -344,3 +344,13 @@ test("KTB-42/SF-6: a CHARTER with no qa in any roster is not probed; an unknown 
   expect(checkQaEvidenceProbe({ root: "/x", rosterHasQa: true, probe: () => { asked++; return { ok: true }; } }).level).toBe("PASS");
   expect(asked).toBe(2);
 });
+
+
+// 1.4.25 (L28, own-calendar #45): a test gate listed in a level with a command but no [test].<gate>_report is a WARN —
+// its RED runs cannot name failing tests, so flaky classification never runs.
+test("gates.test-report: integration in a level without integration_report → WARN; with it → PASS", () => {
+  const h = tmpl(); h.commands.integration = "scripts/server-test.sh"; h.gates.full = [...h.gates.full, "integration"]; h.gates.deep = [...h.gates.deep, "integration"];
+  expect(by(checkHarness({ harness: h, files }))["gates.test-report"]).toMatchObject({ level: "WARN", detail: expect.stringContaining("integration ([test].integration_report)") });
+  h.test.integration_report = ".factory/out/integration.json";
+  expect(by(checkHarness({ harness: h, files }))["gates.test-report"].level).toBe("PASS");
+});

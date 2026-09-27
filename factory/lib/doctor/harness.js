@@ -107,6 +107,17 @@ export function checkHarness({ harness: h, files = [], raw = h }) {
     ? c("gates.m0-downgrade", "WARN", `maturity M0 caps every run at level fast — ${neverRun.join(", ")} never run until M1/M2 (each run records downgraded_from)`)
     : c("gates.m0-downgrade", "PASS"));
   /**
+   * 1.4.25 (L28, own-calendar #45) — **리포트 없는 테스트 게이트는 실패를 이름 짓지 못한다.** integration 게이트가 세 번
+   * 연속 RED였는데 `parsed:false`라 어느 테스트인지 몰랐고, 그래서 flaky-existing 분류도 제외도 돌지 않았다(정작 실패한 것은
+   * 이 변경과 무관한 기존 테스트였다). 레벨에 올라 있고 명령도 있는 unit/integration/e2e 게이트에 `[test].<gate>_report`가
+   * 없으면 WARN — 러너의 JSON 리포터(vitest `--reporter=json --outputFile=…` 등)를 붙이라고 말한다.
+   */
+  const inLevels = new Set([...fastSet, ...fullSet, ...deepSet]);
+  const noReport = ["unit", "integration", "e2e"].filter((g) => inLevels.has(g) && cmds[g] && !h.test?.[`${g}_report`]);
+  out.push(noReport.length
+    ? c("gates.test-report", "WARN", `test gate(s) without a JSON report path: ${noReport.map((g) => `${g} ([test].${g}_report)`).join(", ")} — a RED run cannot name its failing tests, so flaky-existing classification and exclusion never run (own-calendar #45); point the gate's runner at a JSON reporter and declare the path`)
+    : c("gates.test-report", "PASS"));
+  /**
    * 감사 P1-7 — `lint = "node -e 0"`는 린트가 아니라 **항상 통과하는 게이트**다. required에 이름이
    * 올라 있으니 판정 파일에는 "lint GREEN"이 남고, 사람은 린트가 돌았다고 읽는다. 아무것도 검사하지
    * 않는 명령은 게이트가 아니므로 FAIL이다 — 린터를 붙이거나, 붙일 때까지 required에서 빼라.
