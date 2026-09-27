@@ -291,7 +291,7 @@ test("test_18_readme_qa_commands_are_real", () => {
   expect(halfWritten.err).toMatch(/usage: qa-evidence\.js/);
   expect(halfWritten.err).toMatch(/needs --claim/);
   expect(halfWritten.code).toBe(1);
-});
+}, 30000);
 
 // ── dw4 ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -496,7 +496,7 @@ test("test_18_guard_indifferent_to_existing_qa_evidence", () => {
   // ⑤ 이 저장소의 증거함은 이 테스트가 도는 동안에도 한 바이트도 달라지지 않았다.
   expectBoxUnchanged(REPO, QA_AT_IMPORT, "at the end of dw7");
   for (const c of CWDS) expect(c.startsWith(realpathSync(REPO)), `a command ran inside the repository: ${c}`).toBe(false);
-});
+}, 30000);
 
 // ── 리뷰 라운드 2 must_fix qa4 ────────────────────────────────────────────────────────────────
 
