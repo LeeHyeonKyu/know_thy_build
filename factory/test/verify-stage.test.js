@@ -91,7 +91,8 @@ test("plan validator: planRepair carries the machine-checkable reasons (KTB #18 
   ];
   const bad = verifyPlan(planFix({ dissent_log: dissent }));
   expect(bad.ok).toBe(false);
-  expect(bad.planRepair).toEqual(["dissent without done_when: d2, d3"]);
+  expect(bad.planRepair).toHaveLength(1);
+  expect(bad.planRepair[0]).toMatch(/^dissent without done_when: d2, d3 — give every dissent_log entry an "id" and a "severity"/);
   // the same strings are also in reasons, and here they are the ONLY reason — so run-stage sees a
   // purely machine-checkable failure it may repair (v.reasons.length === v.planRepair.length).
   expect(bad.reasons).toEqual(bad.planRepair);
@@ -446,5 +447,5 @@ test("validatePlanHandoff: covers match dissent ids regardless of case and white
   };
   expect(validatePlanHandoff(plan).filter((r) => /dissent without done_when/.test(r))).toEqual([]);
   const gap = { ...plan, done_when: [{ ...plan.done_when[0], covers: ["d9"] }] };
-  expect(validatePlanHandoff(gap)).toContain("dissent without done_when: D1");
+  expect(validatePlanHandoff(gap).some((r) => r.startsWith("dissent without done_when: D1"))).toBe(true);
 });
