@@ -3684,3 +3684,8 @@ RED로 세웠다(#31). 주석 줄은 빼고, 자기 경로가 파일·git 상태
 생겼고(루트 .gitignore에 node_modules가 없었다) 쓰기 금지 스테이지의 클린 검사가 리뷰를 "worktree dirty"로 세웠다. `node_modules/`
 아래는 어느 저장소에서도 제품 경로가 아니고 게이트가 받아들일 diff도 아니다 — 클린 검사가 툴 캐시를 스크래치로 친다. 채택자의
 .gitignore 실수 하나가 리뷰 라운드를 태우게 두지 않는다.
+
+**1.4.25 (L28, own-calendar #45).** integration 게이트가 세 번 연속 RED였는데 리포트가 없어(`parsed:false`) 어느 테스트인지
+이름 짓지 못했고, flaky-existing 분류·제외가 돌지 않았다 — 실패한 것은 이 변경과 무관한 기존 테스트(tests/family.test.ts)였다.
+템플릿은 `unit_report`만 적었다. doctor `gates.test-report`가 레벨에 올라 있고 명령도 있는 unit/integration/e2e 게이트에
+`[test].<gate>_report`가 없으면 WARN한다; 템플릿에 integration/e2e 리포트 줄을 문서화했다(own-calendar는 PR #74로 붙였다).

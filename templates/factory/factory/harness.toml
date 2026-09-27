@@ -156,6 +156,10 @@ runtime_budget_min = 12
 test_glob   = ["test/**/*.test.js"]
 source_glob = ["src/**/*.js"]
 unit_report = ".factory/out/unit.json"
+# Every test gate you list in a level needs a JSON report path, or a RED run cannot name its failing tests
+# (flaky-existing classification/exclusion then never runs — doctor WARNs `gates.test-report`, 1.4.25):
+# integration_report = ".factory/out/integration.json"   # e.g. `vitest run --reporter=default --reporter=json --outputFile=.factory/out/integration.json`
+# e2e_report         = ".factory/out/e2e.json"
 
 [test.env]
 # compose   = "docker-compose.test.yml"
