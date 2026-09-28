@@ -3724,3 +3724,10 @@ basename(`logger.ts`)만 찾아 "판정 불가"를 냈다. stem도 경로·따�
 id도 severity도 없었다 — 검증기는 그것을 위치 이름(d3, d4)·심각도 미상(= 덮여야 함)으로 읽었고, 어떤 done_when도 워크플로가
 나중에 끼워 넣는 항목을 덮을 수 없으니 수리 턴도 같은 자리에서 죽어 사람에게 갔다(L37의 되먹임이 그 사실을 보여 줬다).
 note는 정보이므로 `id: maturity-<dw>`·`severity: low`를 단다.
+
+**1.4.32 (L40, own-calendar #49).** merge 스테이지가 일시적 GitHub GraphQL 오류로 `gh pr ready`에 실패해 blocked → 사람으로
+갔는데, `--human --retry`는 `factory:approved`를 재개 지점으로 알지 못했다("stopped at factory:approved") — 소유자가 손으로
+머지해야 했다. 사람이 승인을 직접 만들 수는 없으므로(KTB-15b, 그 불변식은 그대로다) 재개 지점은 **blocked**다: 전이가 origin
+마커(from=factory:approved stage=merge cause=human-retry)를 남기고, sweeper의 blocked 팔이 평소 경로대로 승인 요구조건을 다시
+물어 merge를 재점화한다. blocked 팔의 시도 횟수 창도 마지막 사람 전이부터다(1.4.12·1.4.27과 같은 규칙) — 옛 주기의 api-error
+시도 3회가 새 주기를 곧장 escalate시키지 않는다.

@@ -2365,3 +2365,25 @@ test("KTB #43: a CLOSED issue parked by a human transition and merged by hand is
   expect(openGh.mergedPrForBranch).not.toHaveBeenCalled();
   expect(open).toContainEqual({ kind: "human-merged-skipped", issue: 3, reason: expect.stringContaining("an open issue parked for another reason") });
 });
+
+// 1.4.32 (L40, own-calendar #49): after the api-error retries ran out and a human retried the issue, the human transition
+// sends it back to blocked with origin=factory:approved (stage merge, cause human-retry). The blocked arm counts attempts
+// from that human transition, so it re-fires merge instead of escalating on the old markers.
+test("sweep: a human-retry blocked origin (from approved) re-fires merge once, attempts counted since the human transition", async () => {
+  const old = (n) => ({ id: 10 + n, body: blockedRetryComment("merge", 9, n), createdAt: `2026-09-12T1${n}:00:00Z` });
+  const human = { id: 50, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:blocked by=human reason=retry -->\nfactory:needs-human → factory:blocked — retry\n<!-- factory-blocked-origin from=factory:approved stage=merge cause=human-retry -->", createdAt: "2026-09-12T20:00:00Z" };
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
+    comments: vi.fn(async (n) => (n === 9 ? [API_ERROR_ORIGIN("factory:approved", "merge", "2026-09-12T09:00:00Z"), old(1), old(2), old(3), human, ...posted] : [])),
+    comment: vi.fn(async (n, body) => { posted.push({ id: 99 + posted.length, body, createdAt: "2026-09-12T21:00:00Z" }); return "u"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-09-12T21:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage };
+  const actions = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: 9 });
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: 9, stage: "merge", cause: "human-retry" }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
+});

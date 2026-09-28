@@ -1330,7 +1330,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const isApiError = cause === "api-error";
           const isCancelled = cause === "cancelled";
           const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : 1;
-          const lastAttempt = lastBlockedRetryAttempt(comments, retryStage, it.number);
+          // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
+          // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
+          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments), retryStage, it.number);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)

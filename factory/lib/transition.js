@@ -138,7 +138,11 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   // O20: 거기에 **왜**(원인 등급)도 싣는다 — 호출자가 알면 그 값이 이기고(잡 상태를 직접 본
   // `abortStage`), 모르면 사유 문구에서 되짚는다. sweeper의 blocked 팔이 재시도 예산과 에스컬레이션
   // 문구를 이 등급 하나로 가른다.
-  const originMarker = to === "factory:blocked" ? `\n${blockedOriginMarker({ from, stage, cause: cause ?? blockedCause(reason) })}` : "";
+  // 1.4.32 (L40) — 사람의 재시도가 blocked로 돌아가는 경우 origin은 needs-human이 아니라 **멈춘 자리**(approved)다: sweeper의
+  // blocked 팔은 `BLOCKED_RETRY_STAGE[origin.from]`으로 재점화할 스테이지(merge)를 고른다.
+  const originMarker = to === "factory:blocked"
+    ? `\n${blockedOriginMarker(humanRetry && resume?.stoppedAt ? { from: resume.stoppedAt, stage: "merge", cause: "human-retry" } : { from, stage, cause: cause ?? blockedCause(reason) })}`
+    : "";
   /**
    * ADR-020 KTB-30 r1 — **전이 코멘트가 라벨 스왑보다 먼저 나간다.** KTB-30이 라벨 스왑을 add-first로
    * 뒤집고(부분 실패의 모양이 "0개"에서 "2개"로 바뀌었다), sweeper의 두 복구 팔이 그 부분 실패를
