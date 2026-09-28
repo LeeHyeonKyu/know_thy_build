@@ -2110,7 +2110,7 @@ test("factory-plan.js: the filter only ever downgrades — an unrecognized or mi
   // M1: 알려진 레벨 중 한도를 넘는 e2e만 내려가고, 나머지 둘은 그대로다
   const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: planLevelArgs("M1") });
   expect(m1.result.done_when).toEqual([doneWhen[0], doneWhen[1], { ...doneWhen[2], level: "integration" }]);
-  expect(m1.result.dissent_log).toEqual([{ role: "workflow", objection: "done_when dw3 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
+  expect(m1.result.dissent_log).toEqual([{ id: "maturity-dw3", severity: "low", role: "workflow", objection: "done_when dw3 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
 });
 
 test("factory-plan.js: a context payload with no maturity leaves the levels alone — the workflow does not invent a bound", async () => {
@@ -2143,12 +2143,12 @@ test("factory-plan.js: the re-synthesized plan is bound too — an objection rou
   const { result } = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: "c", loaded: planLoaderFix({ maturity: "M0" }) } });
   expect(synthesis).toBe(2);
   expect(result.done_when.map((w) => w.level)).toEqual(["unit"]);
-  expect(result.dissent_log).toContainEqual({ role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" });
+  expect(result.dissent_log).toContainEqual({ id: "maturity-dw1", severity: "low", role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" });
 });
 
 test("factory-plan.js: a workflow downgrade the re-synthesis echoes back is superseded, not duplicated", async () => {
   const overLevel = [{ id: "dw1", text: "a", verify: "test_42_a", level: "e2e" }];
-  const note = { role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" };
+  const note = { id: "maturity-dw1", severity: "low", role: "workflow", objection: "done_when dw1 level e2e exceeds maturity M0", resolution: "downgraded to unit" };
   let synthesis = 0;
   let signOff = 0;
   const stub = async (prompt, opts) => {
