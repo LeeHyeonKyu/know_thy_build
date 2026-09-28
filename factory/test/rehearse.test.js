@@ -659,7 +659,7 @@ test("the factory-rehearse workflow passes yml-lint and is installed next to the
   expect(text).toMatch(/vars\.FACTORY_RUNNER \|\| 'ubuntu-latest'/);
   expect(text).toMatch(/uses: \.\/\.factory\/actions\/setup/);
   expect(text).toMatch(/node \.factory\/bin\/rehearse\.js/);
-  expect(text).toMatch(/retention-days: 7/);
+  expect(text).toMatch(/retention-days: 3/);
   expect(text).toMatch(/workflow_dispatch/);
   expect(text).toMatch(/\.factory\/harness\.toml/);      // push 트리거의 경로 필터
   // 리뷰 must_fix 4 — dispatch는 아무 ref로나 올 수 있다(레포 write면 누구나). 잡 자체가 기본 브랜치로
