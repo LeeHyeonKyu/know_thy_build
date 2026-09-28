@@ -180,6 +180,7 @@ export const HUMAN_RETRY_TARGETS = new Set([
   "factory:planned",            // plan까지 끝났다 → implement부터
   "factory:rework",             // implement까지 끝났고 리뷰 지적이 있었다 → implement(재작업)부터
   "factory:awaiting-review",    // implement가 끝났다 → review만 다시 돈다(#2·KTB #3이 이 자리였다)
+  "factory:approved",           // 1.4.32 (L40): review까지 끝나 승인됐는데 merge가 일시 오류로 멈췄다 → merge만 다시 돈다(요구조건은 전이가 다시 묻는다)
 ]);
 export const HUMAN_ONLY_TRANSITIONS = new Map([
   ["factory:needs-human", HUMAN_RETRY_TARGETS],

@@ -3724,3 +3724,8 @@ basename(`logger.ts`)만 찾아 "판정 불가"를 냈다. stem도 경로·따�
 id도 severity도 없었다 — 검증기는 그것을 위치 이름(d3, d4)·심각도 미상(= 덮여야 함)으로 읽었고, 어떤 done_when도 워크플로가
 나중에 끼워 넣는 항목을 덮을 수 없으니 수리 턴도 같은 자리에서 죽어 사람에게 갔다(L37의 되먹임이 그 사실을 보여 줬다).
 note는 정보이므로 `id: maturity-<dw>`·`severity: low`를 단다.
+
+**1.4.32 (L40, own-calendar #49).** merge 스테이지가 일시적 GitHub GraphQL 오류로 `gh pr ready`에 실패해 blocked → 사람으로
+갔는데, `--human --retry`는 `factory:approved`를 재개 지점으로 알지 못했다("stopped at factory:approved") — 소유자가 손으로
+머지해야 했다. 승인 지점으로의 복귀를 연다: 사람이 승인을 만드는 것이 아니라(KTB-15b) 이미 검증된 승인으로 돌아가는 것이고,
+전이는 승인의 요구조건(리뷰 handoff·게이트 GREEN·qa 증거)을 그대로 다시 묻는다.

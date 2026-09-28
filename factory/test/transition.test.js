@@ -329,6 +329,8 @@ test("KTB-32: resumePoint maps every origin — in-progress splits on whether im
   expect(resumePoint(stop("factory:planned"))).toMatchObject({ target: "factory:planned" });
   expect(resumePoint(stop("factory:rework"))).toMatchObject({ target: "factory:rework" });
   expect(resumePoint(stop("factory:awaiting-review"))).toMatchObject({ target: "factory:awaiting-review" });
+  // 1.4.32 (L40): a merge-stage stop (transient API error at gh pr ready) resumes at approved — merge only.
+  expect(resumePoint(stop("factory:approved"))).toMatchObject({ target: "factory:approved" });
   // in-progress: implement handoff이 (마지막 재큐 이후에) 있으면 구현은 끝났다 → rework로 이어간다.
   expect(resumePoint(stop("factory:in-progress"))).toMatchObject({ target: "factory:planned" });
   expect(resumePoint([{ id: 1, body: implementHandoff(), createdAt: "2026-09-13T09:00:00Z" }, ...stop("factory:in-progress")]))
