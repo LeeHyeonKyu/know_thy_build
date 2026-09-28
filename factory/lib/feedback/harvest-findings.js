@@ -438,6 +438,9 @@ function selfGateFindings({ issue, repo, blocks, attribution }) {
     for (const f of Array.isArray(b.findings) ? b.findings : []) {
       if (f?.blocking !== true) continue;                             // advisory는 라운드를 만들지 않았다
       if (f.check === "gates") continue;                              // 같은 원인이 위 RED 게이트로 이미 들어왔다
+      // 1.4.29 (L33, KTB #102/#103) — `gate:<name>`(1.4.23 L26의 유계 재시도 발견)도 같은 원인이다: 빨간 게이트는 `gates-detail:`
+      // 줄로 이미 제품/하네스로 귀속됐다. 여기서 또 내면 self-gate.js(owner: factory)로 귀속돼 제품 회귀가 KTB 이슈로 올라간다.
+      if (String(f.check ?? "").startsWith("gate:")) continue;
       const chain = `self-gate ${b.source ?? "retry"} on ${String(b.head ?? "?").slice(0, 7)}${b.attempt ? ` attempt ${b.attempt}` : ""} — check ${f.check}`;
       // (a) 인프라급 — 검사가 **못 돌았다**. 채택자의 하네스가 단일 테스트를 못 돌리는 것이므로 harness다.
       if (f.harness === true) {

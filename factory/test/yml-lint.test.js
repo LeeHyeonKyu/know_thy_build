@@ -12,7 +12,7 @@ test("flow mapping with ${{ }} is a violation; block mapping is not", () => {
 
 // SF-1 이후 모든 upload-artifact 스텝은 `retention-days`를 **명시**해야 한다(아래 artifact-retention).
 // 그래서 이 파일의 스니펫들은 자기 규칙만 남기기 위해 그 줄을 함께 싣는다.
-const RETENTION = "      retention-days: 7\n";
+const RETENTION = "      retention-days: 3\n";   // 1.4.29 — 3 days (the account artifact quota filled up at 7)
 
 test("upload-artifact with a dot path needs include-hidden-files", () => {
   const bad = "steps:\n  - uses: actions/upload-artifact@v4\n    with:\n      name: r\n      path: .factory/out/\n" + RETENTION + "  - run: echo\n";
@@ -68,12 +68,12 @@ test("every upload-artifact step needs an explicit retention-days ≤ 14 (artifa
   expect(lintWorkflow(step(""))).toEqual([expect.objectContaining({ rule: "artifact-retention", line: 2 })]);
   expect(lintWorkflow(step("      retention-days: 90\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
   expect(lintWorkflow(step("      retention-days: 0\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
-  expect(lintWorkflow(step("      retention-days: 7\n"))).toEqual([]);
+  expect(lintWorkflow(step("      retention-days: 3\n"))).toEqual([]);
   expect(lintWorkflow(step("      retention-days: 14\n"))).toEqual([]);
   // 표현식은 린트가 값을 읽을 수 없다 — 읽을 수 없는 값은 통과시키지 않는다(`vars.X`가 비면 90일이다)
   expect(lintWorkflow(step("      retention-days: ${{ vars.R }}\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
   // 규칙을 설명하는 **주석**은 규칙을 만족시키지 않는다 — 자기 설명문을 읽는 린트는 린트가 아니다
-  expect(lintWorkflow(step("      # retention-days: 7\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
+  expect(lintWorkflow(step("      # retention-days: 3\n"))).toEqual([expect.objectContaining({ rule: "artifact-retention" })]);
   // upload-artifact 스텝이 아닌 곳은 건드리지 않는다
   expect(lintWorkflow("steps:\n  - uses: actions/download-artifact@v4\n    with:\n      name: r\n")).toEqual([]);
 });
@@ -328,7 +328,7 @@ test("yml-lint pins FACTORY_RUN_ATTEMPT to the same expression in both steps (#3
 // ADR-020 최종 리뷰 SF-1 — 업로드하는 모든 템플릿은 ① 업로드 **직전에** 스크럽 스텝을 돌리고,
 // ② 보관을 7일로 적는다. `if: always()`인 이유는 업로드 스텝과 같다: 사후 조사가 가장 필요한 런은
 // **실패한 런**이고, 크리덴셜은 그 런의 아티팩트에도 똑같이 들어 있다.
-test("every uploading template scrubs credentials immediately before the upload, and keeps artifacts 7 days (SF-1)", () => {
+test("every uploading template scrubs credentials immediately before the upload, and keeps artifacts 3 days (SF-1)", () => {
   const uploading = [...Object.keys(STAGE), "factory-retro.yml"];
   for (const f of uploading) {
     const y = readFileSync(join(W, f), "utf8");
@@ -347,7 +347,7 @@ test("every uploading template scrubs credentials immediately before the upload,
     expect(y.slice(scrub, upload), f).toContain(".factory/out");
     if (f !== "factory-merge.yml") expect(y.slice(scrub, upload), f).toContain('"${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"');
     if (f !== "factory-retro.yml") expect(y.slice(scrub, upload), f).toContain("docs/factory/runs");
-    expect(y, f).toContain("          retention-days: 7\n");
+    expect(y, f).toContain("          retention-days: 3\n");
   }
   // 업로드가 없는 두 템플릿은 스크럽할 것도 없다 — 규칙이 자기 자리를 넘지 않는지 함께 못 박는다.
   for (const f of ["factory-sweeper.yml", "factory-integrity.yml"]) {
@@ -435,7 +435,7 @@ test("health workflow is scheduled, runner-only, minimal-permission, and never c
   // 업로드 전 스크럽 + 7일 보관(SF-1) — 잡마다 같은 규칙이다.
   expect(y).toContain("id: scrub-artifacts");
   expect(y).toContain("run: node .factory/bin/scrub-artifacts.js .factory/out");
-  expect(y).toContain("retention-days: 7");
+  expect(y).toContain("retention-days: 3");
   expect(y).toContain("include-hidden-files: true");
   expect(lintWorkflow(y, { file: "factory-health.yml" })).toEqual([]);
 });

@@ -253,10 +253,13 @@ export function gatesDetailLines(result, { runId = null, runnerId = null, round 
       }));
     }
     for (const [name, g] of Object.entries(result?.gates || {})) {
-      if (!g || g.status !== "RED") continue;
+      // 1.4.29 (L35, own-calendar #51/#52) — MISCONFIGURED도 durable 줄을 남긴다: "판정 불가"의 이유(예: prove-test의 base 설치
+      // 실패·판정 불가 임포트)가 아티팩트에만 있으면 아티팩트 쿼터가 찬 날 그 이유는 어디에도 없다.
+      if (!g || !["RED", "MISCONFIGURED"].includes(g.status)) continue;
       const d = g.detail || gateDetail({ gate: name, stdout: g.log ?? "" });
       out.push(GATES_DETAIL_PREFIX + JSON.stringify({
         gate: name,
+        ...(g.status === "MISCONFIGURED" ? { status: "MISCONFIGURED" } : {}),
         run_id: runId ?? null,
         runner: runnerId ?? null,
         ...(Number.isInteger(round) ? { round } : {}),
@@ -516,7 +519,11 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
   result.head_sha = (await run("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim() || null;
   result.base = base ?? null;
 
-  if (stage === "implement" && result.tests?.failing?.length) {
+  // 1.4.29 (L34, own-calendar #49) — 리뷰 라운드의 게이트도 flaky 기존 테스트를 재분류한다. 리뷰어 5명이 승인한 PR이 리뷰 런의
+  // integration 게이트에서 이 변경과 무관한 간헐 실패(tests/events.test.ts) 하나로 RED가 되고, 승인 전이가 "gates file status is
+  // RED"로 거부돼 needs-human으로 갔다. implement가 하는 것과 같은 분류(격리 실행·base 실행)를 review도 한다 — merge는 에이전트를
+  // 부르지 않으므로 그대로다.
+  if ((stage === "implement" || stage === "review") && result.tests?.failing?.length) {
     const { addedTests } = await changedOnce();
     const cls = await classifyFailures({ run, cwd, harness, failing: result.tests.failing, base, thresholds: harness.gates.thresholds, addedTests });
     result.classification = cls;
