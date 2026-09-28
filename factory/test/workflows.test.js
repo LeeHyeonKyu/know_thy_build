@@ -2076,8 +2076,8 @@ test("factory-plan.js: a done_when level beyond the harness maturity is downgrad
 
   expect(result.done_when.map((w) => [w.id, w.level])).toEqual([["dw1", "unit"], ["dw2", "unit"], ["dw3", "unit"]]);
   expect(result.dissent_log).toEqual([
-    { role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M0", resolution: "downgraded to unit" },
-    { role: "workflow", objection: "done_when dw3 level integration exceeds maturity M0", resolution: "downgraded to unit" },
+    { id: "maturity-dw2", severity: "low", role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M0", resolution: "downgraded to unit" },
+    { id: "maturity-dw3", severity: "low", role: "workflow", objection: "done_when dw3 level integration exceeds maturity M0", resolution: "downgraded to unit" },
   ]);
   expect(validate("plan.v1", result).ok).toBe(true);
 });
@@ -2089,7 +2089,7 @@ test("factory-plan.js: M1 allows integration and downgrades only e2e; M2 leaves 
   ];
   const m1 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M1", doneWhen), args: planLevelArgs("M1") });
   expect(m1.result.done_when.map((w) => w.level)).toEqual(["integration", "integration"]);
-  expect(m1.result.dissent_log).toEqual([{ role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
+  expect(m1.result.dissent_log).toEqual([{ id: "maturity-dw2", severity: "low", role: "workflow", objection: "done_when dw2 level e2e exceeds maturity M1", resolution: "downgraded to integration" }]);
 
   const m2 = await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: planLevelStub("M2", doneWhen), args: planLevelArgs("M2") });
   expect(m2.result.done_when.map((w) => w.level)).toEqual(["integration", "e2e"]);

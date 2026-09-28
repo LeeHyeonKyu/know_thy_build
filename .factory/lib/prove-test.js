@@ -71,7 +71,7 @@ export const addedModuleNamedIn = (output, addedFiles = []) => {
     const stem = b.replace(/\.[^.]+$/, "");
     if (!stem || stem === b) return false;
     const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`[/'"\`]${esc}(?:['"\`]|\\?|$|\s)`).test(text);
+    return new RegExp(`[/'"\`]${esc}(?:['"\`]|\\?|$|\\s)`).test(text);
   }) || null;
 };
 

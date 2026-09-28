@@ -3719,3 +3719,8 @@ factory)로 귀속해 제품 회귀를 KTB 이슈로 올렸다 — 건너뛴다.
 basename(`logger.ts`)만 찾아 "판정 불가"를 냈다. stem도 경로·따옴표 경계에서 찾는다. (L37) 계획 검증기의 되먹임에 검증기가 본
 사실(항목의 id 유무·severity, done_when이 실제로 덮은 id 목록)을 싣는다 — 1.4.26의 처방만으로는 두 번째 수리도 같은 자리에서
 죽었다(id 없는 항목은 위치 이름 `d2`로 불리는데 계획자는 그것을 볼 길이 없었다).
+
+**1.4.31 (L39, own-calendar #90).** 플랜 워크플로가 합성 뒤에 끼워 넣는 성숙도 하향 note(`done_when dwN level X exceeds maturity M`)에
+id도 severity도 없었다 — 검증기는 그것을 위치 이름(d3, d4)·심각도 미상(= 덮여야 함)으로 읽었고, 어떤 done_when도 워크플로가
+나중에 끼워 넣는 항목을 덮을 수 없으니 수리 턴도 같은 자리에서 죽어 사람에게 갔다(L37의 되먹임이 그 사실을 보여 줬다).
+note는 정보이므로 `id: maturity-<dw>`·`severity: low`를 단다.

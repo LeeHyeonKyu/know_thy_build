@@ -183,6 +183,12 @@ function boundToMaturity(p) {
     // 스키마 위반(레벨 누락/오타)은 DONE_WHEN_ITEM의 enum과 verify-stage의 plan.v1 검사가 잡는 몫이다.
     if (at === -1 || at <= ceiling) return w;
     notes.push({
+      // 1.4.31 (L39, own-calendar #90): this note is injected by the WORKFLOW after synthesis. Without an id and a
+      // severity the validator named it by position (d3, d4), treated its severity as unknown (= must be covered),
+      // and no done_when could ever cover it — the repair turn re-injected it and the plan escalated to a human.
+      // It is informational: id it, mark it low.
+      id: `maturity-${w.id}`,
+      severity: 'low',
       role: 'workflow',
       objection: `done_when ${w.id} level ${w.level} exceeds maturity ${maturity}`,
       resolution: `downgraded to ${highest}`,
