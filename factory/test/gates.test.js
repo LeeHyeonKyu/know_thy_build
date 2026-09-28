@@ -180,9 +180,26 @@ test("implement: 판정 불가(blocked) 분류는 BLOCKED로 올라가고 증명
   expect(r.classification[0].verdict).toBe("blocked");
 });
 
-test("review/merge는 실패를 재분류하지 않는다 — RED는 RED", async () => {
+// 1.4.29 (L34, own-calendar #49): review reclassifies flaky existing tests like implement does; merge still does not.
+test("review: flaky-existing 실패는 implement처럼 제외된다 (L34)", async () => {
+  const run = makeFakeRun([
+    baseMixed(),
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    diffNames, revParse,
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
+  const gh = { createIssue: vi.fn(async () => 202), searchIssues: vi.fn(async () => []), comment: vi.fn(async () => "u") };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } }, stage: "review", tier: "standard", base: "b".repeat(40), gh, issue: 49, readFile: readUnit });
+  expect(r.classification).toBeDefined();
+  expect(r.tests.excluded).toEqual(["test/a.test.js::flaky one"]);
+  expect(r.gates.unit.status).toBe("GREEN");
+  expect(gh.createIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one" }));
+});
+
+test("merge는 실패를 재분류하지 않는다 — RED는 RED", async () => {
   const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad }, diffNames, revParse]);
-  const r = await runStageGates({ run, cwd: stageCwd, harness: { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } }, stage: "review", tier: "standard", base: "b".repeat(40), readFile: readUnit });
+  const r = await runStageGates({ run, cwd: stageCwd, harness: { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } }, stage: "merge", tier: "standard", base: "b".repeat(40), readFile: readUnit });
   expect(r.status).toBe("RED");
   expect(r.classification).toBeUndefined();
   expect(r.gates["prove-test"]).toBeUndefined();
@@ -291,14 +308,20 @@ test("F3: 증명 게이트는 implement뿐 아니라 review에서도 돈다", as
 });
 
 test("F7: 격리 항목의 consecutive_passes는 게이트 실행마다 갱신되고 저장된다", async () => {
-  const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad }, diffNames, revParse]);
+  // 1.4.29 (L34): review now reclassifies remaining failures like implement — the isolation/base fakes are needed here too.
+  const run = makeFakeRun([
+    baseMixed(), { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad }, diffNames, revParse,
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
   const saved = [];
   const q = { quarantined: [
     { id: "test/a.test.js::flaky one", since: "2026-09-01T00:00:00Z", consecutive_passes: 4 },
     { id: "test/b.test.js::calm", since: "2026-09-01T00:00:00Z", consecutive_passes: 2 },
   ] };
   const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } };
-  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: stageArgs.base, quarantine: q, readFile: readUnit, saveQuarantine: async (x) => saved.push(x) });
+  const gh = { createIssue: vi.fn(async () => 303), searchIssues: vi.fn(async () => []), comment: vi.fn(async () => "u") };
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: stageArgs.base, quarantine: q, gh, issue: 7, readFile: readUnit, saveQuarantine: async (x) => saved.push(x) });
   expect(r.quarantine_updates).toEqual([
     { id: "test/a.test.js::flaky one", passed: false, consecutive_passes: 0 },   // 이번에도 실패 → 0으로 리셋
     { id: "test/b.test.js::calm", passed: true, consecutive_passes: 3 },         // 계속 통과 → 복귀에 한 걸음
@@ -620,7 +643,7 @@ test("M4: PR diff에 있는 테스트 파일은 격리되어 있어도 뒤집히
   const run = makeFakeRun([{ match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad }, diffNames, revParse]);
   const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } };
   const q = { quarantined: [{ id: "test/a.test.js::flaky one", since: "2026-09-01T00:00:00Z" }] };
-  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: "b".repeat(40), quarantine: q, readFile: readUnit });
+  const r = await runStageGates({ run, cwd: stageCwd, harness: h, stage: "merge", tier: "standard", base: "b".repeat(40), quarantine: q, readFile: readUnit });
   expect(r.gates.unit.status).toBe("RED");
   expect(r.status).toBe("RED");
   expect(r.tests.excluded).toEqual([]);
@@ -1006,4 +1029,15 @@ test("KTB #40: gates-detail failing[] comes from the parsed vitest report when s
   // quarantined failures are excluded from the list — they are not this PR's failures
   const q = await runGates({ run, cwd: "/r", harness: h, level: "fast", quarantine: { quarantined: [{ id: "test/self-mirror.test.js::mirror is tracked" }] }, readFile: () => report, now: "t" });
   expect(q.gates.unit.detail.failing).toEqual(["test/self-mirror.test.js::mirror copy matches"]);
+});
+
+
+// 1.4.29 (L35, own-calendar #51/#52): a MISCONFIGURED gate also gets a durable gates-detail line, tagged with its status.
+test("gatesDetailLines: MISCONFIGURED gates get a line with status and their detail", () => {
+  const r = { gates: { "prove-test": { status: "MISCONFIGURED", code: null, log: "inconclusive on base abc1234: the new tests did not run there" } } };
+  const lines = gatesDetailLines(r, { runId: "1", runnerId: "gha-1" });
+  expect(lines).toHaveLength(1);
+  const o = JSON.parse(lines[0].slice(GATES_DETAIL_PREFIX.length));
+  expect(o).toMatchObject({ gate: "prove-test", status: "MISCONFIGURED", run_id: "1" });
+  expect(o.snippet).toContain("inconclusive on base");
 });

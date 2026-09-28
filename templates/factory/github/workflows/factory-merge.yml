@@ -175,7 +175,7 @@ jobs:
           include-hidden-files: true
           # 기본값은 90일이다 — 이 아티팩트가 공개 저장소에서 석 달 동안 내려받힌다는 뜻이다(SF-1).
           # 값은 `yml-lint`의 `artifact-retention`이 지킨다(명시 필수, 14일 이하).
-          retention-days: 7
+          retention-days: 3
       # KTB-24 — 잡 타임아웃(위 `timeout-minutes`)과 취소는 `run-stage.js`의 `finally`를 **실행하지 않는다**:
       # 락 `refs/heads/factory/lock-<n>`이 고아로 남고, 전이도 코멘트도 run 기록도 없이 이슈가 진입 라벨에
       # 그대로 앉는다(데모 #15: review가 45 m 19 s에 잘렸고 아무 흔적도 남지 않았다). 이 스텝이 그 잔해를

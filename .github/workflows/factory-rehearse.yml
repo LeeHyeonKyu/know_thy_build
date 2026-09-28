@@ -86,5 +86,5 @@ jobs:
           path: .factory/out/rehearsal.json
           include-hidden-files: true
           # 기본값은 90일이다(yml-lint의 `artifact-retention`이 명시를 강제한다).
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: warn

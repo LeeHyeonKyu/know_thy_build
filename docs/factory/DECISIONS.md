@@ -3705,3 +3705,11 @@ supertest 파일은 `../src/app`을 임포트하므로 구조 뮤테이션은 ap
 라우트 특성화 테스트는 그것을 볼 수 없어 매번 "survivor"였다(턴당 ≈$8·30분). prove-test가 test-only diff를 특성화로 판정하듯
 뮤테이션 검사도 소스 변경이 없으면 볼 것이 없다 — 새 테스트가 지키는 것은 이 변경이 아니라 기존 동작이고, 그 검증은 base에서
 통과한다는 사실로 이미 끝났다. 소스가 함께 바뀐 diff의 뮤테이션 검사는 그대로다.
+
+**1.4.29 (소유자 결정 2 · L33 · L34 · L35).** (리텐션) 공장 워크플로 여덟 개의 아티팩트 보존이 7일에서 3일로 — 캠페인 중 계정 쿼터가
+찼고 트랜스크립트·게이트 산출물은 몇 시간 안에 읽힌다. (L33, KTB #102/#103) self-gate 재시도 발견 중 `gate:<name>`(1.4.23의 유계
+재시도)은 빨간 게이트와 같은 원인이라 `gates-detail:` 줄로 이미 제품/하네스에 귀속됐는데, 수확기가 그것을 다시 self-gate.js(owner:
+factory)로 귀속해 제품 회귀를 KTB 이슈로 올렸다 — 건너뛴다. (L34, own-calendar #49) 리뷰어 5명이 승인한 PR이 리뷰 런의 integration
+게이트에서 무관한 간헐 실패 하나로 RED가 되고 승인 전이가 거부됐다 — implement가 하는 flaky-existing 재분류를 review도 한다(merge는
+그대로). (L35, own-calendar #51/#52) MISCONFIGURED 게이트도 `gates-detail:` durable 줄을 남긴다(`status` 키) — 판정 불가의 이유가
+아티팩트에만 있으면 쿼터가 찬 날 그 이유는 어디에도 없다.

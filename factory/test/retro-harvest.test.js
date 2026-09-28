@@ -690,3 +690,23 @@ test("KTB #38: a test-env re-up failure is harvested with causal [test.env], bou
   expect(findings.map((f) => f.causal_path)).toEqual([TEST_ENV_LOCUS]);
   expect(findings[0].reason).toMatch(/test environment could not be brought up/);
 });
+
+
+// 1.4.29 (L33, KTB #102/#103): a self-gate retry finding of kind `gate:<name>` (1.4.23's bounded retry after a RED gate) is
+// the same cause as the RED gate itself and must not be attributed to self-gate.js — that routed a product regression upstream.
+test("L33: gate:* self-gate findings are not harvested as self-gate findings", async () => {
+  const { harvestFindings } = await import("../lib/feedback/harvest-findings.js");
+  const { recordOf, heartbeat, selfGateComment } = await import("./helpers/feedback-fixtures.js");
+  const record = recordOf(7, "x", [{ stage: "implement", at: "2026-09-20T10:05Z", lines: [] }]);
+  const comments = [
+    heartbeat(7, "implement"),
+    selfGateComment({ issue: 7, head: "a".repeat(40), attempt: 1, at: "2026-09-20T10:06:00Z", findings: [
+      { check: "gate:unit", blocking: true, detail: "gate unit RED — failing: test/integration/notes.test.js::lists newest first" },
+      { check: "mutation", blocking: true, detail: "survivor: test/x.test.js asserts nothing under mutation (boolean in src/x.js)" },
+    ] }),
+  ];
+  const findings = harvestFindings({ issue: 7, repo: "o/r", record, comments });
+  const selfGate = findings.filter((f) => f.kind === "self-gate");
+  expect(selfGate.map((f) => f.reason)).toEqual(["survivor: test/x.test.js asserts nothing under mutation (boolean in src/x.js)"]);
+  expect(selfGate.some((f) => /gate unit RED/.test(f.reason))).toBe(false);
+});

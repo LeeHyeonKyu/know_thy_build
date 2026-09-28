@@ -69,5 +69,5 @@ jobs:
           path: .factory/out/
           include-hidden-files: true
           # 기본값은 90일이다 — `yml-lint`의 `artifact-retention`이 명시를 강제한다(14일 이하).
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore

@@ -86,7 +86,7 @@ jobs:
           include-hidden-files: true
           # 기본값은 90일이다 — 이 아티팩트가 공개 저장소에서 석 달 동안 내려받힌다는 뜻이다(SF-1).
           # 값은 `yml-lint`의 `artifact-retention`이 지킨다(명시 필수, 14일 이하).
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: ignore
       # KTB-26 — cron(`factory-sweeper.yml`, 30분)은 믿을 수 없다: 데모에서 몇 시간짜리 공백이 났고,
       # 취소된 sweeper 런이 #15를 30분 넘게 방치했다. 그래서 sweeping은 **이벤트 구동이기도** 하다 —
