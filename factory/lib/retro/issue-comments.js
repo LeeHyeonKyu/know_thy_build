@@ -345,9 +345,9 @@ const RESUME_TARGET = {
   "factory:rework": "factory:rework",
   "factory:awaiting-review": "factory:awaiting-review",
   // 1.4.32 (L40, own-calendar #49) — merge 스테이지에서 멈춘 이슈(일시적 GitHub API 오류로 `gh pr ready` 실패 → blocked → 사람)는
-  // 승인 상태로 되돌아가 merge만 다시 돈다. 승인의 요구조건(리뷰 handoff·게이트 GREEN·qa 증거)은 전이가 그대로 다시 묻는다 —
-  // 사람이 승인을 **만드는** 것이 아니라(KTB-15b가 막은 것) 이미 검증된 승인 지점으로 **돌아가는** 것이다.
-  "factory:approved": "factory:approved",
+  // 사람이 승인을 다시 만들 수 없으므로(KTB-15b) **blocked로 되돌아간다**: 전이가 origin 마커(from=factory:approved stage=merge
+  // cause=human-retry)를 남기고, sweeper의 blocked 팔이 평소 경로대로 승인 요구조건을 다시 물어 merge를 재점화한다.
+  "factory:approved": "factory:blocked",
 };
 const IMPLEMENT_HANDOFF = /<!--\s*factory-handoff:v1\s+stage=implement\s+issue=\d+\s*-->/;
 
