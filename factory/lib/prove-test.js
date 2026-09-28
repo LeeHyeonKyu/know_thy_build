@@ -61,7 +61,18 @@ export const inconclusiveOnBase = (text) => INCONCLUSIVE_ON_BASE.some((re) => re
  */
 export const addedModuleNamedIn = (output, addedFiles = []) => {
   const text = String(output || "");
-  return addedFiles.find((f) => { const b = f.split("/").pop(); return b && text.includes(b); }) || null;
+  // 1.4.30 (L36, own-calendar #51/#52) — 임포트 오류는 대개 **확장자 없이** 모듈을 부른다(vitest: `Failed to resolve import
+  // "../src/lib/logger"`; node ESM: `Cannot find module '.../logger'`). basename(`logger.ts`)만 찾으면 이 변경이 추가한 모듈이
+  // 눈앞에 있어도 "판정 불가"로 읽혀 MISCONFIGURED가 났다 — stem(`logger`)도 경로 구분자·따옴표 경계에서 찾는다.
+  return addedFiles.find((f) => {
+    const b = f.split("/").pop();
+    if (!b) return false;
+    if (text.includes(b)) return true;
+    const stem = b.replace(/\.[^.]+$/, "");
+    if (!stem || stem === b) return false;
+    const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`[/'"\`]${esc}(?:['"\`]|\\?|$|\s)`).test(text);
+  }) || null;
 };
 
 /**

@@ -449,3 +449,16 @@ test("validatePlanHandoff: covers match dissent ids regardless of case and white
   const gap = { ...plan, done_when: [{ ...plan.done_when[0], covers: ["d9"] }] };
   expect(validatePlanHandoff(gap).some((r) => r.startsWith("dissent without done_when: D1"))).toBe(true);
 });
+
+// 1.4.30 (L37, own-calendar #90): the repair feedback shows what the validator saw — ids (or position names), severities,
+// and the covers it found — so the planner can see why its covers did not match.
+test("validatePlanHandoff: the uncovered-dissent reason lists what the validator saw", async () => {
+  const { validatePlanHandoff } = await import("../lib/verify-stage.js");
+  const plan = {
+    dissent_log: [{ severity: "medium", objection: "x" }, { id: "D3", objection: "y" }],
+    done_when: [{ id: "dw1", text: "t", rubric: "r", check: { kind: "command", ref: "npm test" }, covers: ["dissent-1"] }],
+  };
+  const r = validatePlanHandoff(plan).find((x) => x.startsWith("dissent without done_when"));
+  expect(r).toMatch(/uncovered: d1 \(no id — named by position\): severity "medium"; D3: severity missing/);
+  expect(r).toMatch(/done_when\.covers: dissent-1/);
+});
