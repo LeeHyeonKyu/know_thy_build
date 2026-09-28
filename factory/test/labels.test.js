@@ -112,7 +112,7 @@ test("every BLOCKED_RETRY origin is a label that can actually reach factory:bloc
 // 스크립트는 어떤 경로로도 이 엣지를 밟을 수 없다(전이 코멘트의 `by=`가 그 증거다).
 test("KTB-32: needs-human → resume point is a human-only edge (script refused)", () => {
   expect([...HUMAN_RETRY_TARGETS].sort()).toEqual([
-    "factory:awaiting-review", "factory:planned", "factory:ready", "factory:rework",
+    "factory:approved", "factory:awaiting-review", "factory:planned", "factory:ready", "factory:rework",
   ]);
   for (const to of HUMAN_RETRY_TARGETS) {
     expect(canTransition("factory:needs-human", to), `script ${to}`).toBe(false);
