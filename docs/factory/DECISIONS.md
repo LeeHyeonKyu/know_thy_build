@@ -3713,3 +3713,9 @@ factory)로 귀속해 제품 회귀를 KTB 이슈로 올렸다 — 건너뛴다.
 게이트에서 무관한 간헐 실패 하나로 RED가 되고 승인 전이가 거부됐다 — implement가 하는 flaky-existing 재분류를 review도 한다(merge는
 그대로). (L35, own-calendar #51/#52) MISCONFIGURED 게이트도 `gates-detail:` durable 줄을 남긴다(`status` 키) — 판정 불가의 이유가
 아티팩트에만 있으면 쿼터가 찬 날 그 이유는 어디에도 없다.
+
+**1.4.30 (L36 · L37, own-calendar #51/#52/#90).** (L36) 새 테스트가 이 변경이 추가한 모듈을 임포트하면 base에서의 임포트 오류는
+증명이다(1.4.8) — 그런데 오류 문구는 확장자 없이 모듈을 부르고(`Failed to resolve import "../src/lib/logger"`) 판정은
+basename(`logger.ts`)만 찾아 "판정 불가"를 냈다. stem도 경로·따옴표 경계에서 찾는다. (L37) 계획 검증기의 되먹임에 검증기가 본
+사실(항목의 id 유무·severity, done_when이 실제로 덮은 id 목록)을 싣는다 — 1.4.26의 처방만으로는 두 번째 수리도 같은 자리에서
+죽었다(id 없는 항목은 위치 이름 `d2`로 불리는데 계획자는 그것을 볼 길이 없었다).

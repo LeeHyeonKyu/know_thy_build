@@ -239,16 +239,21 @@ export function validatePlanHandoff(plan, { maxDoneWhen = 6, issueBody = "" } = 
   // without done_when"이 났고 수리 턴도 그 모양을 반복해 needs-human으로 갔다. 검증기가 표기법을 이유로 사람을 부르지 않는다.
   const covered = new Set();
   for (const d of doneWhen) if (Array.isArray(d?.covers)) for (const c of d.covers) covered.add(String(c).trim().toLowerCase());
-  const uncovered = dissent
+  const uncoveredEntries = dissent
     // id가 없는 항목은 위치로 부른다 — 검증기가 id를 발명하는 게 아니라, 사람이 셀 수 있는 이름을 준다.
-    .map((d, i) => ({ id: typeof d?.id === "string" && d.id ? d.id : `d${i + 1}`, severity: d?.severity }))
+    .map((d, i) => ({ id: typeof d?.id === "string" && d.id ? d.id : `d${i + 1}`, severity: d?.severity, hasId: typeof d?.id === "string" && !!d.id }))
     .filter(({ severity }) => !(typeof severity === "string" && SEVERITY_RANK[severity] < SEVERITY_RANK.medium))
-    .filter(({ id }) => !covered.has(String(id).trim().toLowerCase()))
-    .map(({ id }) => id);
+    .filter(({ id }) => !covered.has(String(id).trim().toLowerCase()));
+  const uncovered = uncoveredEntries.map(({ id }) => id);
+  // 1.4.30 (L37, own-calendar #90) — 되먹임에 **검증기가 본 사실**을 싣는다: 항목의 id 유무·severity와 done_when이 실제로 덮은 id
+  // 목록. 1.4.26의 처방만으로는 두 번째 수리도 같은 자리에서 죽었다 — 계획자는 자기가 쓴 id와 검증기가 세는 이름이 다르다는 것을
+  // 볼 길이 없었다(id 없는 항목은 위치 이름 `d2`로 불린다).
+  const seen = uncoveredEntries.map((e) => `${e.id}${e.hasId ? "" : " (no id — named by position)"}: severity ${e.severity ? JSON.stringify(e.severity) : "missing"}`).join("; ");
+  const coveredList = covered.size ? [...covered].join(", ") : "none";
   // 1.4.26 (L29, own-calendar #46) — 수리 턴에 되먹이는 문장은 **무엇을 쓰라는지**까지 말한다: 계획이 두 번 연속 같은 이유로
   // 죽었다(첫 판 `dissent-1`, 수리 판 `d1, d2` — id도 severity도 없는 dissent 항목, 그것을 짚는 done_when 없음). "덮이지 않았다"만
   // 들은 계획자는 항목을 고쳐 쓰는 대신 이름만 바꿨다.
-  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")} — give every dissent_log entry an "id" and a "severity"; for each medium/high (or severity-less) entry either add its id to the "covers" of the done_when that mitigates it, or set "severity": "low" if it is not a risk worth pinning`);
+  if (uncovered.length) reasons.push(`dissent without done_when: ${uncovered.join(", ")} — give every dissent_log entry an "id" and a "severity"; for each medium/high (or severity-less) entry either add its id to the "covers" of the done_when that mitigates it, or set "severity": "low" if it is not a risk worth pinning [validator saw — uncovered: ${seen}; done_when.covers: ${coveredList}]`);
 
   // (b) 계획이 만드는 결함 표면의 상한.
   if (doneWhen.length > maxDoneWhen) reasons.push(`done_when has ${doneWhen.length} items (max ${maxDoneWhen})`);

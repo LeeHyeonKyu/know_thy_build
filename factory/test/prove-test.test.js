@@ -310,3 +310,14 @@ test("repeatNewTests runs the full suite BEFORE the repeats when the toolchain h
   expect(overlap).toBe(false);
   expect(r.detail).toMatch(/full suite ran before the repeats/);
 });
+
+// 1.4.30 (L36, own-calendar #51/#52): import errors name the module WITHOUT its extension — an added module must still count.
+test("addedModuleNamedIn matches the added file's stem at a path/quote boundary, not only its basename", async () => {
+  const { addedModuleNamedIn } = await import("../lib/prove-test.js");
+  const added = ["server/src/lib/logger.ts", "server/tests/logger.test.ts"];
+  expect(addedModuleNamedIn('Error: Failed to resolve import "../src/lib/logger" from "tests/logger.test.ts". Does the file exist?', added)).toBe("server/src/lib/logger.ts");
+  expect(addedModuleNamedIn("Cannot find module '/w/server/src/lib/logger' imported from /w/server/tests/logger.test.ts", added)).toBe("server/src/lib/logger.ts");
+  expect(addedModuleNamedIn("Cannot find module '../src/lib/other'", added)).toBeNull();
+  // a stem that is merely a substring of another word does not match
+  expect(addedModuleNamedIn("bloggerX is undefined", ["src/logger.js"])).toBeNull();
+});
