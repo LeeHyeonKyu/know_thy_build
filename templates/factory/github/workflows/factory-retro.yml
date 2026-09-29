@@ -74,6 +74,8 @@ jobs:
           node .factory/bin/scrub-artifacts.js .factory/out --collect-transcripts
       - name: Upload retro outputs
         if: always()
+        # 업로드는 사후 조사용이다 — 실패(계정 쿼터 등)가 판정을 이미 기록한 잡을 failure로 만들면 안 된다(1.4.34, L42).
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: factory-retro-${{ github.run_id }}

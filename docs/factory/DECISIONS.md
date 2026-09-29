@@ -3740,3 +3740,8 @@ common ancestor is /Users/<user> … 1740 files"였다(15개 프로젝트, 864 M
 (`FACTORY_JOB_STARTED`)을 굳히고, 스크럽이 `--collect-transcripts`로 `projects/<작업 공간 슬러그>`에서 그 시각 이후에 쓰인
 파일만 `.factory/out/transcripts/`로 **복사**해 복사본을 스크럽한다. 워크플로는 작업 공간 밖의 경로를 스크럽에도 업로드에도
 넘기지 않는다. 시각을 모르면 아무것도 모으지 않는다 — 모르는 범위를 홈 전체로 읽은 것이 이 사고였다.
+
+**1.4.34 (L42, own-calendar).** 업로드 스텝은 `if: always()`였지만 `continue-on-error`가 아니었다. 계정 아티팩트 쿼터가 차면
+`Failed to CreateArtifact`로 스텝이 실패하고, 판정과 전이를 이미 기록한 잡이 failure로 끝난다 — own-calendar 스테이지 잡 159개가
+전부 그랬고, `job.status != 'success'`에 걸린 정리 스텝이 매번 돌았으며, 러너 화면에서 정상 런과 비정상 런을 가를 수 없었다.
+업로드는 사후 조사용 부가 산출물이므로 그 실패는 잡의 결론을 바꾸지 않는다(모든 업로드 스텝 `continue-on-error: true`).

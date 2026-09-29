@@ -743,3 +743,24 @@ test("lint: a JS source file containing a NUL byte is a violation, and the check
   const clean = lintFile("factory/lib/fake.js", { root: "/repo", exists: () => true, readFile: () => 'export const x = "ab";\n' });
   expect(clean.some((e) => e.rule === NUL_RULE.rule)).toBe(false);
 });
+
+// 1.4.34 (L42, own-calendar) — 업로드는 사후 조사용 부가 산출물이다. 계정 아티팩트 쿼터가 차면
+// `Failed to CreateArtifact`로 스텝이 실패하고, 그 실패가 **판정을 이미 기록한 잡 전체**를 failure로 만든다:
+// own-calendar 스테이지 잡 159개가 전부 그랬고, `job.status != 'success'` 조건의 정리 스텝이 매번 돌았다.
+test("an artifact upload that fails does not fail the job (every upload step is continue-on-error)", () => {
+  const dirs = [W, join(W, "..", "..", "..", "..", ".github", "workflows")];
+  let steps = 0;
+  for (const dir of dirs) {
+    for (const f of readdirSync(dir).filter((n) => /^factory-.*\.yml$/.test(n))) {
+      const lines = readFileSync(join(dir, f), "utf8").split("\n");
+      lines.forEach((l, i) => {
+        if (!/^\s*uses:\s*actions\/upload-artifact@/.test(l)) return;
+        steps++;
+        let a = i; while (a > 0 && !/^ {6}- /.test(lines[a])) a--;
+        let b = i + 1; while (b < lines.length && !/^ {6}- /.test(lines[b]) && !/^ {0,4}\S/.test(lines[b])) b++;
+        expect(lines.slice(a, b).join("\n"), `${dir}/${f}:${i + 1}`).toMatch(/\n {8}continue-on-error: true\n/);
+      });
+    }
+  }
+  expect(steps).toBeGreaterThanOrEqual(16);   // 템플릿 8 + 이 저장소의 설치본 8
+});
