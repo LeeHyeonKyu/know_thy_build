@@ -126,13 +126,14 @@ test("stage workflows follow the §4.1 table and the token/concurrency rules", (
     // KTB-7/O4: 세션 트랜스크립트가 산출물 추출의 1순위 출처다 — 실패했을 때 사후에 볼 수 있어야 한다.
     // merge는 claude를 띄우지 않으므로(script-only) 트랜스크립트가 없다.
     if (stage !== "merge") {
-      // `~`는 upload-artifact가 펼치지 않는다 — 러너의 실제 $HOME을 선행 스텝이 GITHUB_ENV로 굳힌다
-      expect(y, f).toContain('run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"');
-      // env가 비면(resolve 스텝이 돌지 못했으면) 경로가 루트 앵커 glob으로 접힌다 — 폴백은 워크스페이스 안이다(KTB-10 I1)
-      expect(y, f).toContain("${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl");
-      // 그리고 그 resolve 스텝은 **첫 스텝**이고 `if: always()`다 — setup이 실패해도 값이 선다
-      expect(y.indexOf("- name: Resolve the session transcript directory"), f).toBeLessThan(y.indexOf("- uses: actions/checkout@v4"));
-      expect(y, f).toMatch(/- name: Resolve the session transcript directory\n {8}if: always\(\)\n/);
+      // 1.4.33 (L41) — 올리는 것은 **이 잡이 쓴** 트랜스크립트다: 첫 스텝이 잡 시작 시각을 굳히고, 스크럽이 그 뒤에
+      // 쓰인 파일만 `.factory/out/transcripts/`로 복사한다. `$HOME/.claude/projects` 전체는 self-hosted 러너에서 사람의 홈이다.
+      expect(y, f).toContain('run: echo "FACTORY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"');
+      expect(y, f).not.toContain("CLAUDE_TRANSCRIPTS");
+      expect(y, f).not.toContain("/**/*.jsonl");
+      // 그리고 그 스텝은 **첫 스텝**이고 `if: always()`다 — setup이 실패해도 값이 선다
+      expect(y.indexOf("- name: Mark the job start"), f).toBeLessThan(y.indexOf("- uses: actions/checkout@v4"));
+      expect(y, f).toMatch(/- name: Mark the job start\n {8}if: always\(\)\n/);
       expect(y, f).not.toContain("            ~/.claude");
       expect(y, f).toContain("if-no-files-found: ignore");
     }
@@ -345,7 +346,8 @@ test("every uploading template scrubs credentials immediately before the upload,
     expect(y.slice(scrub, upload), f).not.toContain("echo $");
     // 스크럽이 훑는 경로는 업로드가 올리는 경로를 덮어야 한다(트랜스크립트는 merge에만 없다)
     expect(y.slice(scrub, upload), f).toContain(".factory/out");
-    if (f !== "factory-merge.yml") expect(y.slice(scrub, upload), f).toContain('"${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"');
+    if (f !== "factory-merge.yml" && /claude/.test(y.slice(0, scrub)) && y.includes("FACTORY_JOB_STARTED")) expect(y.slice(scrub, upload), f).toContain(" --collect-transcripts");
+    expect(y.slice(scrub, upload), f).not.toMatch(/\$HOME|CLAUDE_TRANSCRIPTS/);
     if (f !== "factory-retro.yml") expect(y.slice(scrub, upload), f).toContain("docs/factory/runs");
     expect(y, f).toContain("          retention-days: 3\n");
   }
@@ -392,10 +394,11 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   expect(y).toContain(".factory/out/");
   expect(y).toContain("include-hidden-files: true");
   // retro도 트랜스크립트를 1순위 출처로 쓴다(KTB-7 재리뷰) — 그러면 사후 조사에도 있어야 한다
-  expect(y).toContain('run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"');
-  expect(y).toContain("${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl");
-  expect(y.indexOf("- name: Resolve the session transcript directory")).toBeLessThan(y.indexOf("- uses: actions/checkout@v4"));
-  expect(y).toMatch(/- name: Resolve the session transcript directory\n {8}if: always\(\)\n/);
+  expect(y).toContain('run: echo "FACTORY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"');
+  expect(y).toContain("node .factory/bin/scrub-artifacts.js .factory/out --collect-transcripts");
+  expect(y).not.toContain("CLAUDE_TRANSCRIPTS");
+  expect(y.indexOf("- name: Mark the job start")).toBeLessThan(y.indexOf("- uses: actions/checkout@v4"));
+  expect(y).toMatch(/- name: Mark the job start\n {8}if: always\(\)\n/);
   expect(y).toContain("if-no-files-found: ignore");
   // cron이 없다는 것 자체가 §8.4의 결정이다 — 머지가 없으면 배울 것도 없다.
   expect(y).not.toContain("schedule:");

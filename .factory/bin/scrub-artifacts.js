@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /**
@@ -148,6 +148,48 @@ export function scrubPaths(paths, { secrets = [] } = {}) {
   return { counts, scanned, changed, skippedBinary, ignored, unreadable };
 }
 
+/** 모은 트랜스크립트가 놓이는 자리(작업 공간 기준). `.factory/out/` 아래라 업로드 경로가 하나 늘지 않는다. */
+export const TRANSCRIPTS_OUT = ".factory/out/transcripts";
+
+/**
+ * 1.4.33 — **이 잡이 쓴 세션 트랜스크립트만** `dest`로 복사한다. 원본은 읽기만 한다.
+ *
+ * 예전 워크플로는 `$HOME/.claude/projects` 전체를 스크럽에 넘기고 `**\/*.jsonl`로 올렸다. hosted 러너의
+ * `$HOME`은 잡마다 새것이라 티가 나지 않았지만 self-hosted 러너의 `$HOME`은 사람의 홈이다: own-calendar의
+ * 실측 로그는 "The least common ancestor is /Users/<user> … 1740 files"였다 — 공장과 무관한 프로젝트의
+ * 세션 기록까지 아티팩트로 나갔고, 스크럽은 그 원본들을 제자리에서 고쳤고, 계정 쿼터가 차서 모든 스테이지
+ * 잡이 failure로 끝났다.
+ *
+ * 범위는 두 겹이다:
+ *   - **어느 디렉토리인가** — `projects/<작업 공간 슬러그>` 하나. 슬러그 규칙은 `transcriptPathFrom`
+ *     (`lib/stage-artifact.js`)의 그것과 같다(영숫자 아닌 문자 → `-`); 이 파일은 의존성 없이 복사되므로
+ *     한 줄을 다시 적고, 테스트가 둘을 맞댄다.
+ *   - **언제 쓰였는가** — mtime이 잡 시작(`sinceSec`, `date +%s`) 이후인 파일만. self-hosted 러너에서는
+ *     그 디렉토리에 앞선 잡들의 세션이 쌓인다(실측 268 MB) — 매 잡이 그것을 통째로 다시 올리면 안 된다.
+ *
+ * 범위를 모르면 **아무것도 모으지 않는다**. 모르는 범위를 홈 전체로 읽은 것이 고치려는 바로 그 사고다.
+ * @returns {{collected: number, reason: string|null}}
+ */
+export function collectTranscripts({ home, workspace, sinceSec, dest } = {}) {
+  const since = Number(sinceSec);
+  if (!Number.isFinite(since) || since <= 0) return { collected: 0, reason: "FACTORY_JOB_STARTED is not set — the job's own transcripts cannot be told apart" };
+  if (!home || !workspace) return { collected: 0, reason: `${home ? "GITHUB_WORKSPACE" : "HOME"} is not set` };
+  const src = join(home, ".claude", "projects", String(workspace).replace(/[^a-zA-Z0-9]/g, "-"));
+  const files = walk(src, []);
+  if (!files.length) return { collected: 0, reason: "no transcript directory for this workspace" };
+  let collected = 0;
+  for (const file of files) {
+    try {
+      if (statSync(file).mtimeMs < since * 1000) continue;
+      const to = join(dest, relative(src, file));
+      mkdirSync(dirname(to), { recursive: true });
+      copyFileSync(file, to);
+      collected++;
+    } catch { /* 세션이 아직 쓰이는 중이거나 사라졌다 — 다음 파일로 */ }
+  }
+  return { collected, reason: null };
+}
+
 /** 요약 한 줄 — **개수만**. 값은 한 글자도 들어가지 않는다. */
 scrubPaths.summary = ({ scanned, changed, skippedBinary, ignored, unreadable = 0, counts }) => {
   const kinds = Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`);
@@ -158,7 +200,11 @@ scrubPaths.summary = ({ scanned, changed, skippedBinary, ignored, unreadable = 0
 };
 
 /**
- * CLI 진입: `node .factory/bin/scrub-artifacts.js <path>…`
+ * CLI 진입: `node .factory/bin/scrub-artifacts.js <path>… [--collect-transcripts]`
+ *
+ * `--collect-transcripts`는 스크럽 **앞에** 이 잡의 세션 트랜스크립트를 `TRANSCRIPTS_OUT`으로 복사한다
+ * (`collectTranscripts`). 복사본은 `.factory/out/` 아래라 `<path>`로 넘어온 그 디렉토리와 함께 스크럽된다 —
+ * 작업 공간 밖의 경로는 이 스크립트에 넘기지 않는다.
  *
  * 시크릿은 **env로만** 들어온다 — 인자는 러너 로그에 그대로 찍히므로 값이 인자에 실리면
  * 스크럽이 유출 경로가 된다. 종료 코드는 **언제나 0이다**: 이 스텝은 업로드 앞에 `if: always()`로
@@ -170,6 +216,10 @@ export function runCli(argv = process.argv.slice(2), env = process.env, log = co
   const paths = argv.filter((a) => !a.startsWith("--"));
   if (!paths.length) { console.error("usage: scrub-artifacts.js <path>…"); return 2; }
   const secrets = SECRET_ENV.map((n) => env[n]).filter((v) => typeof v === "string" && v.length > 0);
+  if (argv.includes("--collect-transcripts")) {
+    const c = collectTranscripts({ home: env.HOME, workspace: env.GITHUB_WORKSPACE, sinceSec: env.FACTORY_JOB_STARTED, dest: join(env.GITHUB_WORKSPACE || ".", TRANSCRIPTS_OUT) });
+    log(`factory: scrub-artifacts transcripts collected=${c.collected}${c.reason ? ` (${c.reason})` : ""}`);
+  }
   const r = scrubPaths(paths, { secrets });
   log(scrubPaths.summary(r));
   return 0;

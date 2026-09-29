@@ -1,8 +1,10 @@
 import { test, expect } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scrubText, scrubPaths, isBinary, REDACTED, SECRET_ENV, runCli } from "../bin/scrub-artifacts.js";
+import { scrubText, scrubPaths, isBinary, REDACTED, SECRET_ENV, runCli, collectTranscripts, TRANSCRIPTS_OUT } from "../bin/scrub-artifacts.js";
+import { transcriptPathFrom } from "../lib/stage-artifact.js";
+import { lintWorkflow } from "../lib/yml-lint.js";
 
 /**
  * ADR-020 최종 리뷰 SF-1 — 업로드되는 아티팩트에서 크리덴셜을 지운다.
@@ -164,4 +166,109 @@ test("a workflow that does not set FACTORY_MERGE_TOKEN scrubs exactly as before 
   const env = { FACTORY_BOT_TOKEN: "ghp_" + "b".repeat(36) };
   const secrets = SECRET_ENV.map((n) => env[n]).filter((v) => typeof v === "string" && v.length > 0);
   expect(secrets).toEqual([env.FACTORY_BOT_TOKEN]);
+});
+
+/**
+ * 1.4.33 (own-calendar, self-hosted 러너) — **업로드와 스크럽의 범위는 이 잡이 쓴 트랜스크립트다.**
+ *
+ * 워크플로는 `$HOME/.claude/projects` 전체를 스크럽에 넘기고 `**\/*.jsonl`로 올렸다. hosted 러너의 `$HOME`은
+ * 잡마다 새것이라 그 트리에 이 잡의 세션만 있었지만, self-hosted 러너의 `$HOME`은 **사람의 홈**이다:
+ * 실측 로그는 "The least common ancestor is /Users/<user> … 1740 files"였고(15개 프로젝트, 864 MB),
+ * 스크럽은 공장과 무관한 세션 기록 3,567개를 **제자리에서** 훑어 고쳤다. 쿼터가 차서 모든 스테이지 잡이
+ * failure로 끝난 것은 그 결과다.
+ */
+const SLUG = (cwd) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+function homeFixture() {
+  const home = mkdtempSync(join(tmpdir(), "ktb-home-"));
+  const workspace = join(home, "actions-runner", "_work", "repo", "repo");
+  mkdirSync(join(workspace, ".factory", "out"), { recursive: true });
+  const projects = join(home, ".claude", "projects");
+  const mine = join(projects, SLUG(workspace));
+  const other = join(projects, SLUG(join(home, "workspace", "someone-elses-project")));
+  mkdirSync(join(mine, "sess-new", "subagents", "workflows", "wf_1"), { recursive: true });
+  mkdirSync(other, { recursive: true });
+  const started = 1_790_000_000;                                   // 초 — `date +%s`의 모양
+  const put = (file, text, atSec) => { writeFileSync(file, text); utimesSync(file, atSec, atSec); };
+  const leak = `git push https://x-access-token:${gh("ghs")}@github.com/o/r\n`;
+  put(join(mine, "sess-old.jsonl"), leak, started - 3600);         // 앞선 잡의 세션(self-hosted에서는 쌓인다)
+  put(join(mine, "sess-new.jsonl"), leak, started + 60);
+  put(join(mine, "sess-new", "subagents", "workflows", "wf_1", "agent-a1.jsonl"), leak, started + 90);
+  put(join(mine, "sess-new", "subagents", "workflows", "wf_1", "agent-a1.meta.json"), `{"agentType":"factory-builder"}`, started + 90);
+  put(join(other, "private.jsonl"), leak, started + 120);          // 같은 시각에 사람이 다른 프로젝트에서 일하고 있었다
+  return { home, workspace, projects, mine, other, started, leak };
+}
+const tree = (dir, base = dir, out = []) => {
+  for (const n of readdirSync(dir, { withFileTypes: true })) n.isDirectory() ? tree(join(dir, n.name), base, out) : out.push(join(dir, n.name).slice(base.length + 1));
+  return out.sort();
+};
+
+test("transcripts are collected from this workspace's project directory only, and only what this job wrote", () => {
+  const f = homeFixture();
+  try {
+    const dest = join(f.workspace, TRANSCRIPTS_OUT);
+    const r = collectTranscripts({ home: f.home, workspace: f.workspace, sinceSec: f.started, dest });
+    expect(r).toEqual({ collected: 3, reason: null });
+    expect(tree(dest)).toEqual(["sess-new.jsonl", "sess-new/subagents/workflows/wf_1/agent-a1.jsonl", "sess-new/subagents/workflows/wf_1/agent-a1.meta.json"]);
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("the slug is the one the engine already uses to find a session transcript", () => {
+  const f = homeFixture();
+  try {
+    expect(transcriptPathFrom({ sessionId: "sess-new", cwd: f.workspace, home: f.home })).toBe(join(f.mine, "sess-new.jsonl"));
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("the CLI scrubs the collected copies and never writes under $HOME/.claude/projects", () => {
+  const f = homeFixture();
+  try {
+    const lines = [];
+    const out = join(f.workspace, ".factory", "out");
+    const code = runCli([out, "--collect-transcripts"], { HOME: f.home, GITHUB_WORKSPACE: f.workspace, FACTORY_JOB_STARTED: String(f.started) }, (l) => lines.push(l));
+    expect(code).toBe(0);
+    expect(readFileSync(join(out, "transcripts", "sess-new.jsonl"), "utf8")).not.toContain(gh("ghs"));
+    // 원본은 한 바이트도 바뀌지 않는다 — 이 잡의 것도, 남의 것도.
+    for (const p of [join(f.mine, "sess-new.jsonl"), join(f.mine, "sess-old.jsonl"), join(f.other, "private.jsonl")]) expect(readFileSync(p, "utf8")).toBe(f.leak);
+    expect(lines.join("\n")).toMatch(/transcripts collected=3\b/);
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("without a job start time nothing is collected — an unknown scope is not the whole home", () => {
+  const f = homeFixture();
+  try {
+    for (const started of [undefined, "", "not-a-number", "0"]) {
+      const lines = [];
+      const out = join(f.workspace, ".factory", "out");
+      expect(runCli([out, "--collect-transcripts"], { HOME: f.home, GITHUB_WORKSPACE: f.workspace, FACTORY_JOB_STARTED: started }, (l) => lines.push(l))).toBe(0);
+      expect(existsSync(join(out, "transcripts"))).toBe(false);
+      expect(lines.join("\n")).toMatch(/transcripts collected=0 \(FACTORY_JOB_STARTED/);
+    }
+    const dest = join(f.workspace, TRANSCRIPTS_OUT);
+    expect(collectTranscripts({ home: f.home, workspace: "", sinceSec: f.started, dest })).toEqual({ collected: 0, reason: expect.stringMatching(/GITHUB_WORKSPACE/) });
+    expect(collectTranscripts({ home: f.home, workspace: join(f.home, "no-such-workspace"), sinceSec: f.started, dest })).toEqual({ collected: 0, reason: expect.stringMatching(/no transcript directory/) });
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test("no workflow hands a path outside the workspace to the scrubber or to upload-artifact", () => {
+  const root = join(import.meta.dirname, "..", "..");
+  for (const dir of [join(root, "templates/factory/github/workflows"), join(root, ".github/workflows")]) {
+    for (const name of readdirSync(dir).filter((n) => /^factory-.*\.yml$/.test(n))) {
+      const text = readFileSync(join(dir, name), "utf8");
+      const code = text.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+      expect(code, `${dir}/${name}`).not.toMatch(/\$HOME|\.claude\/projects|CLAUDE_TRANSCRIPTS/);
+      if (/\/\*\*\/\*\.jsonl/.test(code)) throw new Error(`${name} still uploads a transcript glob`);
+      expect(lintWorkflow(text), `${dir}/${name}`).toEqual([]);
+    }
+  }
+});
+
+test("every workflow that runs a claude session marks the job start first and collects transcripts", () => {
+  const dir = join(import.meta.dirname, "..", "..", "templates/factory/github/workflows");
+  for (const name of ["factory-triage.yml", "factory-plan.yml", "factory-implement.yml", "factory-review.yml", "factory-retro.yml"]) {
+    const text = readFileSync(join(dir, name), "utf8");
+    const steps = text.slice(text.indexOf("    steps:"));
+    const first = steps.split(/\n      - /)[1];
+    expect(first, name).toMatch(/FACTORY_JOB_STARTED=\$\(date \+%s\)" >> "\$GITHUB_ENV"/);
+    expect(text, name).toMatch(/scrub-artifacts\.js .*--collect-transcripts/);
+  }
 });
