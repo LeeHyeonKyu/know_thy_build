@@ -3731,3 +3731,12 @@ note는 정보이므로 `id: maturity-<dw>`·`severity: low`를 단다.
 마커(from=factory:approved stage=merge cause=human-retry)를 남기고, sweeper의 blocked 팔이 평소 경로대로 승인 요구조건을 다시
 물어 merge를 재점화한다. blocked 팔의 시도 횟수 창도 마지막 사람 전이부터다(1.4.12·1.4.27과 같은 규칙) — 옛 주기의 api-error
 시도 3회가 새 주기를 곧장 escalate시키지 않는다.
+
+**1.4.33 (L41, own-calendar).** 스테이지 워크플로는 `$HOME/.claude/projects` 전체를 스크럽에 넘기고 `**/*.jsonl`로 올렸다.
+hosted 러너의 `$HOME`은 잡마다 새것이라 드러나지 않았지만 self-hosted 러너의 `$HOME`은 사람의 홈이다 — 러너 로그는 "The least
+common ancestor is /Users/<user> … 1740 files"였다(15개 프로젝트, 864 MB). 세 가지가 함께 일어났다: 공장과 무관한 프로젝트의
+세션 기록이 아티팩트로 나갔고, 스크럽이 그 원본들을 제자리에서 고쳤고, 계정 쿼터가 차서 업로드 스텝이 실패해 **모든 스테이지
+잡이 failure로 끝났다**(판정은 이미 기록된 뒤라 흐름은 이어졌지만 정리 스텝이 매번 돌았다). 이제 첫 스텝이 잡 시작 시각
+(`FACTORY_JOB_STARTED`)을 굳히고, 스크럽이 `--collect-transcripts`로 `projects/<작업 공간 슬러그>`에서 그 시각 이후에 쓰인
+파일만 `.factory/out/transcripts/`로 **복사**해 복사본을 스크럽한다. 워크플로는 작업 공간 밖의 경로를 스크럽에도 업로드에도
+넘기지 않는다. 시각을 모르면 아무것도 모으지 않는다 — 모르는 범위를 홈 전체로 읽은 것이 이 사고였다.

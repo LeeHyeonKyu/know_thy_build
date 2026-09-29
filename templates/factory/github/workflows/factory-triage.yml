@@ -36,19 +36,16 @@ jobs:
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
-      # **첫 스텝이어야 한다**(KTB-10 I1). setup 뒤에 두면 setup이 실패했을 때 이 env가 비는데,
-      # 업로드 스텝은 `if: always()`라 그때도 돌고 경로가 `/**/*.jsonl` — 러너 **루트**에 앵커된
-      # glob — 으로 접힌다. `if-no-files-found: ignore`까지 붙어 있어 그 사고는 아무 소리도 내지 않는다.
+      # **첫 스텝이어야 한다.** 이 시각이 "이 잡이 쓴 세션 트랜스크립트"의 하한이다: 스크럽 스텝이
+      # `~/.claude/projects/<작업 공간 슬러그>`에서 이 시각 이후에 쓰인 파일만 `.factory/out/transcripts/`로
+      # 복사해 올린다(`scrub-artifacts.js --collect-transcripts`). 예전에는 `$HOME/.claude/projects` 전체를
+      # 올렸다 — self-hosted 러너의 `$HOME`은 사람의 홈이라, 공장과 무관한 프로젝트의 세션 기록까지
+      # 아티팩트로 나갔고 계정 쿼터가 차서 모든 스테이지 잡이 failure로 끝났다(own-calendar, 1.4.33).
+      # 값이 없으면 스크럽은 **아무것도 모으지 않는다** — 모르는 범위를 홈 전체로 읽지 않는다.
       # 체크아웃보다 앞이어도 된다: 레포를 한 줄도 읽지 않는 순수한 `echo … >> $GITHUB_ENV`다.
-      # `if: always()`는 이 값만은 어떤 실패 뒤에도 서게 한다(업로드 경로의 폴백은 아래에 또 있다 —
-      # 방어는 두 겹이다: 여기서 세우고, 거기서 못 섰을 때를 대비한다).
-      - name: Resolve the session transcript directory
+      - name: Mark the job start
         if: always()
-        # `~`는 셸 확장이지 glob이 아니다 — actions/upload-artifact는 경로를 셸에 넘기지 않으므로
-        # `~/.claude/projects/**`는 아무것도 맞히지 못하고, `if-no-files-found: ignore`라 실패조차
-        # 하지 않는다(빈 아티팩트가 조용히 올라간다). 트랜스크립트는 산출물 추출의 **1순위 출처**라서
-        # (KTB-7) 그 침묵이 사후 조사를 통째로 날린다. 러너의 실제 $HOME을 여기서 굳힌다.
-        run: echo "CLAUDE_TRANSCRIPTS=$HOME/.claude/projects" >> "$GITHUB_ENV"
+        run: echo "FACTORY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -114,7 +111,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git checkout ${{ github.sha }} -- .factory || true
-          node .factory/bin/scrub-artifacts.js docs/factory/runs .factory/out "${CLAUDE_TRANSCRIPTS:-$GITHUB_WORKSPACE/.factory/out}"
+          node .factory/bin/scrub-artifacts.js docs/factory/runs .factory/out --collect-transcripts
       - name: Upload run outputs
         if: always()
         uses: actions/upload-artifact@v4
@@ -123,7 +120,6 @@ jobs:
           path: |
             docs/factory/runs/
             .factory/out/
-            ${{ env.CLAUDE_TRANSCRIPTS || format('{0}/.factory/out', github.workspace) }}/**/*.jsonl
           include-hidden-files: true
           # 기본값은 90일이다 — 이 아티팩트가 공개 저장소에서 석 달 동안 내려받힌다는 뜻이다(SF-1).
           # 값은 `yml-lint`의 `artifact-retention`이 지킨다(명시 필수, 14일 이하).
