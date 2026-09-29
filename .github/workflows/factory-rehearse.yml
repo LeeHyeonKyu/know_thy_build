@@ -79,6 +79,8 @@ jobs:
         run: node .factory/bin/scrub-artifacts.js .factory/out
       - name: Upload the rehearsal report
         if: always()
+        # 업로드는 사후 조사용이다 — 실패(계정 쿼터 등)가 판정을 이미 기록한 잡을 failure로 만들면 안 된다(1.4.34, L42).
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           # `factory rehearse`(CLI)가 이 이름으로 내려받는다 — 바꾸면 그 명령이 표를 찾지 못한다.
