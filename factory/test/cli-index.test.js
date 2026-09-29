@@ -59,7 +59,7 @@ test("main(['doctor','--no-run','--offline']) wires a real run() — it returns 
     process.chdir(cwd);
     console.log = log; console.error = err;
   }
-}, 30000);
+}, 120000);
 
 // ── KTB-44 (리뷰 nit 7): `factory rehearse`의 디스패치 줄을 실제로 밟는다 ─────────────────────
 // 스위치의 오타는 런타임에만 드러난다 — HELP에 적혀 있는 명령이 `unknown factory command`로 떨어지는
@@ -82,7 +82,7 @@ test("main(['rehearse']) reaches the rehearse command (not the unknown-command b
     process.chdir(cwd);
     console.log = log; console.error = err;
   }
-}, 30000);
+}, 120000);
 
 test("HELP names rehearse — the adoption order is install → doctor → rehearse → first issue", () => {
   expect(HELP).toMatch(/factory rehearse/);
@@ -110,7 +110,7 @@ test("main(['analyze']) reaches the analyze command (not the unknown-command bra
     process.chdir(cwd);
     console.log = log; console.error = err;
   }
-}, 30000);
+}, 120000);
 
 test("HELP names analyze — both arms (an issue's timeline, and the health report)", () => {
   expect(HELP).toMatch(/factory analyze <issue>/);

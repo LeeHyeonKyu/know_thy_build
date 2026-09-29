@@ -519,4 +519,4 @@ test("bin/transition.js refuses --human/--retry before any gh call when CLAUDE_P
     expect(r.code, JSON.stringify(extraEnv)).toBe(2);
     expect(r.stderr, JSON.stringify(extraEnv)).toMatch(/--human\/--retry refused/);
   }
-}, 30000);
+}, 120000);

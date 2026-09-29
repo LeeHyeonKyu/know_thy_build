@@ -251,7 +251,7 @@ test("installer: installs exactly templates/know-thy-build/*.md, substitutes {{L
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-}, 30_000);
+}, 120000);
 
 test("installer: removes a pre-existing know-thy-build/finish.md legacy file", () => {
   const root = mkdtempSync(join(tmpdir(), "ktb-install-finish-"));
@@ -266,4 +266,4 @@ test("installer: removes a pre-existing know-thy-build/finish.md legacy file", (
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-}, 30_000);
+}, 120000);

@@ -88,6 +88,8 @@ export function emptyFold() {
   return {
     turns: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
     cost_usd: 0, started: null, ended: null, last_tool: null, files_touched: [],
+    // 1.4.35 (L45) — 마지막으로 센 응답과 그때 더한 usage. 같은 응답의 다음 줄(tail 경계를 넘어서도)을 다시 세지 않는다.
+    last_message: null,
   };
 }
 
@@ -115,11 +117,26 @@ export function parseTranscriptLines(lines, prev = emptyFold()) {
       cache_read_tokens: Number(u.cache_read_input_tokens) || 0,
       cache_creation_tokens: Number(u.cache_creation_input_tokens) || 0,
     };
-    f.turns += 1;
-    for (const k of Object.keys(add)) f[k] += add[k];
-    // 비용은 **줄마다** 그 줄의 모델로 계산해 더한다 — 한 세션이 모델을 갈아탈 수 있으므로
+    /**
+     * 1.4.35 (L45) — **응답 하나는 한 번만 센다.** Claude Code는 응답 하나를 content 블록마다 한 줄씩 적고
+     * 줄마다 같은 `message.id`와 usage를 붙인다(출력 토큰만 뒤 줄에서 커진다). 같은 id의 줄은 언제나
+     * 연속이므로(실측: 러너 트랜스크립트 843개에서 비연속 0건) 직전 응답 하나만 기억하면 된다. 같은 응답의
+     * 뒤 줄은 턴을 늘리지 않고, 앞 줄보다 **커진 만큼만** 더한다. id가 없는 줄은 저마다 한 응답이다.
+     */
+    const id = typeof o?.message?.id === "string" && o.message.id ? o.message.id : null;
+    const prevMsg = id !== null && f.last_message?.id === id ? f.last_message.usage : null;
+    const delta = {};
+    for (const k of Object.keys(add)) delta[k] = prevMsg ? Math.max(0, add[k] - (prevMsg[k] || 0)) : add[k];
+    if (!prevMsg) f.turns += 1;
+    for (const k of Object.keys(delta)) f[k] += delta[k];
+    // 비용은 **응답마다** 그 응답의 모델로 계산해 더한다 — 한 세션이 모델을 갈아탈 수 있으므로
     // (서브에이전트 로스터는 역할마다 모델이 다르다) 합산 후 한 번에 곱하면 틀린다.
-    f.cost_usd += costFromUsage({ model: o?.message?.model, ...add });
+    f.cost_usd += costFromUsage({ model: o?.message?.model, ...delta });
+    if (id !== null) {
+      const kept = {};
+      for (const k of Object.keys(add)) kept[k] = prevMsg ? Math.max(add[k], prevMsg[k] || 0) : add[k];
+      f.last_message = { id, usage: kept };
+    } else f.last_message = null;
     const content = o?.message?.content;
     if (!Array.isArray(content)) continue;
     for (const b of content) {
@@ -221,9 +238,14 @@ export function readAgentEvents(agentsLogText) {
  * 로컬에서는 사람이 같은 저장소에서 딴 세션을 돌리고 있으면 그 세션을 볼 수 있다 — 진행 표시가
  * 조금 틀릴 뿐 아무것도 깨뜨리지 않는 종류의 오차라 best-effort로 둔다.
  */
-export function mainTranscriptPath({ root, home = homedir(), agentsLogText = "" } = {}) {
+export function mainTranscriptPath({ root, home = homedir(), agentsLogText = "", since = null } = {}) {
   const fromHook = transcriptPathFrom({ agentsLogText });
   if (fromHook) return fromHook;
+  // 1.4.35 (L46) — self-hosted 러너의 프로젝트 디렉터리에는 **앞선 런들의 세션이 쌓인다**. 이 런의 세션이 첫 줄을
+  // 쓰기 전에는 "가장 최근 파일"이 지난 런의 것이다: own-calendar #105의 첫 하트비트는 하루 전 retro 세션을
+  // 이 런의 오케스트레이터로 실었다(`started: 2026-09-28…`, `last_tool: Workflow factory-retro`, $0.30).
+  // 스테이지 시작 시각을 알면 그 뒤에 쓰인 파일만 후보다. 없으면 아직 아무것도 없는 것이다.
+  const sinceMs = since ? Date.parse(since) : NaN;
   const dir = join(home, ".claude", "projects", String(root).replace(/[^a-zA-Z0-9]/g, "-"));
   let best = null;
   try {
@@ -231,6 +253,7 @@ export function mainTranscriptPath({ root, home = homedir(), agentsLogText = "" 
       if (!name.endsWith(".jsonl")) continue;
       const p = join(dir, name);
       let st; try { st = statSync(p); } catch { continue; }
+      if (Number.isFinite(sinceMs) && st.mtimeMs < sinceMs) continue;
       if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
     }
   } catch { return null; }
@@ -278,7 +301,7 @@ export function readProgress({
   const pairs = [];
   // `mainTranscript`를 준 호출자는 세션 경로를 이미 안다(테스트, 그리고 언젠가 run-stage가
   // session_id를 미리 알게 되는 날). 없으면 훅 기록 → 프로젝트 디렉터리 순으로 찾는다.
-  const main = mainTranscript || mainTranscriptPath({ root, home, agentsLogText });
+  const main = mainTranscript || mainTranscriptPath({ root, home, agentsLogText, since: started });
   const mainFold = main ? tailFold(main, state) : null;
   if (mainFold) pairs.push([agentFrom(stage || "orchestrator", "orchestrator", "running", mainFold), mainFold]);
 

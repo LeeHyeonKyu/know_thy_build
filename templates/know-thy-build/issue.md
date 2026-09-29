@@ -101,6 +101,25 @@ cat docs/QA.md 2>/dev/null | head -60
 
 이 네 가지가 다 모이면 문답은 끝이다 — 더 깊이 파지 않는다. 다만 답변 중 하나가 설계 결정을 필요로 하면(예: "기대 동작"이 여러 갈래로 갈린다) 멈추고 위 "`:feature` 대비 `:issue`" 절의 안내로 전환한다.
 
+## 영향 경로를 NEVER_AUTOMATE에 먼저 대 본다 (1.4.35, L47)
+
+이슈를 만들기 **전에** Impact paths를 `docs/factory/CHARTER.md`의 `## NEVER_AUTOMATE` 목록과 대조한다. 그 목록에서 백틱 안에
+경로나 글롭으로 적힌 항목(`/`나 `*`가 든 것)은 triage 뒤에 **스크립트가 다시 세고**, 하나라도 걸리면 에이전트의 판정과
+무관하게 `wont-do`가 된다 — 한정어("토큰 갱신 로직만")는 스크립트가 읽지 않는다. 사람이 이슈를 쓰고 큐에 넣은 뒤에야
+그 사실을 알게 되면 triage 한 번과 기다린 시간이 버려진다(own-calendar의 로그아웃 버그: 원인이 전부
+`client/lib/services/api_service.dart`에 있었고 그 파일은 NEVER_AUTOMATE였다).
+
+걸리는 경로가 있으면 이슈를 만들기 전에 사람에게 말한다:
+
+> "Impact paths 중 `{{path}}`가 CHARTER의 NEVER_AUTOMATE(`{{matching_line}}`)에 걸립니다 — 이 이슈는 큐에 넣어도 `wont-do`로
+> 끝납니다. 어떻게 할까요?"
+>
+> 1. 걸리지 않는 부분만 떼어 이슈로 만든다 (권장: 떼어 낼 수 있을 때)
+> 2. 사람이 직접 고칠 이슈로 `backlog`에 기록만 한다 (큐에 넣지 않는다)
+> 3. CHARTER의 NEVER_AUTOMATE를 고치는 것부터 한다 (보호 경로 — 사람이 머지한다)
+
+걸리는 경로가 없으면 아무 말 없이 다음으로 간다.
+
 ## 이슈 본문 생성
 
 이슈 번호는 `gh issue create`가 반환하기 전까지 알 수 없다 — 회귀 가드 이름은 우선 `test_NNN_<slug>` placeholder로 쓴다. `<slug>`는 증상을 3~5단어로 요약한 kebab-case.
@@ -150,6 +169,18 @@ cat docs/QA.md 2>/dev/null | head -60
 > "Impact paths가 전부 문서라 회귀 가드 테스트 없이 `done_when`을 썼습니다 — tier는 `docs`로 판정될 것입니다."
 
 문서 **한 줄이라도** 코드·설정 경로가 섞이면(예: `README.md` + `src/cli.js`) 이 예외는 적용되지 않는다 — 평소대로 `test_NNN_<slug>`를 넣는다. 판단은 tier를 "고르는" 것이 아니라 **Impact paths가 무엇인지 말하는 것**이다: tier를 정하는 것은 언제나 triage다.
+
+### 번호를 먼저 알아 두면 보정이 필요 없다 (1.4.35, L49)
+
+이슈와 PR은 번호를 함께 쓴다. 만들기 직전에 마지막 번호를 조회해 다음 번호로 `test_<n>_<slug>`를 처음부터 맞게 적으면
+아래의 본문 보정을 건너뛸 수 있다 — 본문 수정은 팩토리 훅이 막는 동작이라(본문은 `tests_changed_allowed:`·`must_not:`이
+읽히는 자리다) 에이전트 세션에서는 실행되지 않는다.
+
+```bash
+gh api "repos/{owner}/{repo}/issues?state=all&per_page=1&sort=created&direction=desc" --jq '.[0].number'   # +1 이 다음 번호
+```
+
+만든 뒤 반환된 번호가 예상과 다르면(그 사이에 다른 이슈·PR이 생겼다) 그때만 아래 보정 절차로 간다.
 
 ### 이슈 생성
 
@@ -204,6 +235,12 @@ npx know-thy-build factory status --json
 역압이 상한 아래면 곧바로 진행한다.
 
 ### Step 3: 전이
+
+갓 받은 클론이면 팩토리의 런타임 의존성이 없다 — 전이 CLI가 그렇게 말하면 `npm install --prefix .factory --no-audit --no-fund`를
+한 번 실행한 뒤 다시 부른다(러너에서는 setup 액션이 설치한다).
+
+`triage.default: needs-info`인 저장소에서도 본문에 `[ready]`를 적을 필요는 없다: 사람이 이 전이로 큐에 넣은 이슈는 triage가
+사람이 본 이슈로 읽는다(1.4.35).
 
 ```bash
 node .factory/bin/transition.js 47 factory:queue --human --reason "issue --now"

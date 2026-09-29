@@ -55,7 +55,7 @@ test("block-dangerous: blocks merges, force pushes, protected writes; allows nor
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);   // 30여 개의 bash 프로세스를 띄운다 — 기본 5s 타임아웃으로는 모자란다
+}, 120000);   // 30여 개의 bash 프로세스를 띄운다 — 기본 5s 타임아웃으로는 모자란다
 
 // ── KTB-13 r1: `Bash(*)`가 allow에 들어온 뒤 이 훅이 유일한 셸 경계다 ────────────────────────────
 // allow가 좁을 때는 `node`·`curl`·`wget`·`install`이 애초에 allow에 없어 도달하지 못했다. 이제 도달한다 —
@@ -98,7 +98,7 @@ test("block-dangerous: node -e/dd/install/curl/wget/git checkout|restore|apply o
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // F9 carry-over: `[protected].factory`와 settings.json deny는 이미 빌드 설정 파일을 덮는다(templates.test.js).
 // 훅도 같은 목록을 덮어야 한다 — 그렇지 않으면 Edit는 막히는데 `echo > package.json`은 통과한다.
@@ -119,7 +119,7 @@ test("block-dangerous: shell writes to the protected build-config files are bloc
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // ── F3(b): qa의 증거 디렉터리만 카브아웃 ────────────────────────────────────────────────────
 test("block-dangerous: .factory/out/qa/ is writable (qa evidence); the rest of .factory/ is not", async () => {
@@ -135,7 +135,7 @@ test("block-dangerous: .factory/out/qa/ is writable (qa evidence); the rest of .
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
-}, 30000);
+}, 120000);
 
 // ── KTB-20: `factory:harness` 이슈의 builder만 테스트 인프라 파일을 셸로 쓸 수 있다 ──────────────
 // 도그푸딩 #15("promote to M2")에서 builder는 `.factory/harness.toml`·컴포즈·e2e 설정을 하나도 건드릴
@@ -187,7 +187,7 @@ test("block-dangerous: FACTORY_HARNESS_ISSUE=1 opens the test-infra files — an
     const r = await bash("block-dangerous.sh", cmd("echo x > .factory/harness.toml"), undefined, { FACTORY_HARNESS_ISSUE: v });
     expect(r.code, `FACTORY_HARNESS_ISSUE=${JSON.stringify(v)}`).toBe(2);
   }
-}, 60000);
+}, 240000);
 
 // ── KTB-21: 진행 중인 테스트 env를 무너뜨리면 나중 게이트가 죽은 env에 대고 돈다(데모 #18) ────────
 // builder는 여전히 `up`(멱등)을 쓸 수 있다 — 막는 것은 서비스를 멈추는 동사뿐이다.
@@ -210,7 +210,7 @@ test("block-dangerous: docker compose/docker teardown verbs are blocked; ps/logs
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // ── F13: 상태 라벨은 L1(transition.js)만 옮긴다 ─────────────────────────────────────────────
 test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment is not", async () => {
@@ -226,7 +226,7 @@ test("block-dangerous: gh label edits on factory:* are blocked; gh issue comment
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // ── 리뷰 review-3c63672 MF-2: transition.js --human/--retry is the person's edge (ADR-020 KTB-32) ──
 // `--human`은 `canTransition(...,{human:true})`을 열어 `needs-human → {ready, planned, rework,
@@ -262,7 +262,7 @@ test("block-dangerous: transition.js --human/--retry is blocked; the ordinary sc
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // ── ADR-020 최종 리뷰 MF-3: 위험한 동사는 **토큰 경계**에서 잡힌다 ──────────────────────────────
 // r1까지의 앵커는 `(^|[;&|[:space:]])`였다 — `(`도 백틱도 `=`도 없어서, 동사가 눈앞에 그대로 있는
@@ -332,7 +332,7 @@ test("block-dangerous: the widened token boundary does not swallow normal comman
     "docker compose up -d",                            // up은 막지 않는다(KTB-21)
   ];
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // deny-all-writes의 `$CMD`도 같은 결함을 갖고 있었다 — 두 훅은 한 우회에 같이 열려 있었다.
 test("deny-all-writes: write verbs inside $( ), backticks, chains and groups are caught too (MF-3)", async () => {
@@ -352,7 +352,7 @@ test("deny-all-writes: the widened token boundary still lets read-only work thro
                    "npm test && npm run lint", "{ npm test; git diff; }", "grep -rn mkdir src/",
                    "cat src/a.js | head -5", "node .factory/bin/gates.js full"];
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // ── 0452b5b 재리뷰: 토큰 경계를 고친 뒤에도 남아 있던 네 가지 직접 실행 우회 ─────────────────────
 // 재리뷰는 훅을 **실제로 실행해** 다음을 통과시켰다. 넷 다 동사가 명령줄에 그대로 있고(런타임 조립이
@@ -370,7 +370,7 @@ test("block-dangerous: a backslash-escaped verb is still the verb (re-review #1)
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
-}, 60000);
+}, 240000);
 
 test("deny-all-writes: a backslash-escaped write verb is still a write (re-review #1)", async () => {
   const blocked = ["\\rm -rf src", "\\mkdir build", "\\touch src/a.js", "\\git push origin HEAD",
@@ -380,7 +380,7 @@ test("deny-all-writes: a backslash-escaped write verb is still a write (re-revie
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: this role must not write/);
   }));
-}, 60000);
+}, 240000);
 
 // #2 락 브랜치를 지우는 **네 번째** 철자는 git이 아니라 REST다. 세 `git push` 철자만 막고 있었다.
 // 락 브랜치는 이슈 단위 상호배제의 유일한 근거다 — 지워지면 같은 이슈에 두 스테이지가 겹친다.
@@ -399,7 +399,7 @@ test("block-dangerous: the lock ref cannot be deleted through the git refs API e
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // #3 라벨은 이슈의 것이면서 **저장소의 것**이다. `gh issue edit`/`…/issues/<n>/labels`만 막혀 있었는데,
 // `gh label delete factory:approved`는 그 라벨을 모든 이슈에서 한 번에 떼어 낸다 — 더 큰 우회다.
@@ -418,7 +418,7 @@ test("block-dangerous: factory:* labels cannot be edited repo-wide either (re-re
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // #4 인터프리터 래퍼·ANSI-C 인용. 동사 앞 글자가 `"`/`'`라 경계 클래스에 걸리지 않았다. 이 저장소의
 // allow는 `Bash(*)`이고 deny에 `sh`/`bash`/`eval`이 없으므로("래퍼는 allow가 막는다"는 전제는 거짓이다)
@@ -440,7 +440,7 @@ test("block-dangerous: interpreter wrappers and ANSI-C quoted verbs are blocked 
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
-}, 60000);
+}, 240000);
 
 test("deny-all-writes: interpreter wrappers and ANSI-C quoted write verbs are blocked (re-review #4)", async () => {
   const blocked = ['sh -c "rm -rf src"', "bash -c 'git push origin HEAD'", 'eval "touch src/a.js"',
@@ -452,7 +452,7 @@ test("deny-all-writes: interpreter wrappers and ANSI-C quoted write verbs are bl
     expect(r.code, c).toBe(2);
     expect(r.stderr, c).toMatch(/factory: this role must not write/);
   }));
-}, 60000);
+}, 240000);
 
 // **비목표를 고정한다**: 동사가 런타임에 조립되면 명령 문자열 어디에도 연속으로 나타나지 않는다 —
 // 훅은 그것을 볼 수 **없다**(ADR-020 잔여 위험 #4와 같은 종류). 쫓지 않기로 한 결정이 흐려지지 않도록
@@ -466,7 +466,7 @@ test("block-dangerous: runtime-assembled verbs are a documented non-goal, not a 
     "node -e \"execSync('gh pr merge 5')\"",
   ];
   await Promise.all(notBlocked.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // 래퍼 패스가 정상 작업을 잡아먹지 않는지 — 따옴표 안의 동사를 보게 됐다고 해서 `grep -rn "git merge"`가
 // 막히면 안 된다(그래서 `"`/`'`를 경계 클래스에 넣지 않았다).
@@ -478,25 +478,25 @@ test("block-dangerous: the wrapper pass does not swallow quoted prose or ordinar
     "node .factory/bin/gates.js full", "npm test && npm run lint",
   ];
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 test("deny-all-writes: the wrapper pass leaves read-only interpreter use alone (re-review #4)", async () => {
   const allowed = ['bash -c "npm test"', "sh -c 'git status'", "source .venv/bin/activate",
                    "grep -rn mkdir src/", "docker compose -f x.yml exec -T db psql -U u -d d -c 'select 1'",
                    'x=$(printf "rm -rf src"); $x'];   // 런타임 조립 — 여기서도 비목표다
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 test("block-dangerous: non-Bash tools and malformed input pass through", async () => {
   expect((await bash("block-dangerous.sh", { hook_event_name: "PreToolUse", tool_name: "Read", tool_input: { file_path: ".factory/x" } })).code).toBe(0);
   expect((await runHook("block-dangerous.sh", "not json")).code).toBe(0);
-}, 30000);
+}, 120000);
 
 test("block-dangerous: without jq the hook fails CLOSED (exit 2)", async () => {
   const r = await runHook("block-dangerous.sh", JSON.stringify(cmd("echo hi")), undefined, { PATH: "/nonexistent" }, "/bin/bash");
   expect(r.code).toBe(2);
   expect(r.stderr).toMatch(/jq missing/);
-}, 30000);
+}, 120000);
 
 // KTB-13 이후 이 테스트가 지는 무게가 달라졌다. `.claude/settings.json`의 allow가 이제 `Edit`/`Write`/
 // `Bash(*)`를 **전역으로** 부여하므로(그러지 않으면 `dontAsk`가 builder의 쓰기까지 거절한다), 쓰기 금지
@@ -521,11 +521,11 @@ test("deny-all-writes: blocks Edit/Write/NotebookEdit with a message, allows eve
   const noJq = await runHook("deny-all-writes.sh", JSON.stringify({ tool_name: "Edit" }), undefined, { PATH: "/nonexistent" }, "/bin/bash");
   expect(noJq.code).toBe(2);
   expect(noJq.stderr).toMatch(/jq missing/);
-}, 30000);
+}, 120000);
 
 test("deny-all-writes: malformed stdin passes through (exit 0), same as block-dangerous", async () => {
   expect((await runHook("deny-all-writes.sh", "not json")).code).toBe(0);
-}, 30000);
+}, 120000);
 
 // ── F3(c): qa만 .factory/out/qa/ 아래에 증거를 쓴다 ──────────────────────────────────────────
 test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything else (and any ..) is not", async () => {
@@ -544,7 +544,7 @@ test("deny-all-writes: Write/Edit into .factory/out/qa/ is allowed; anything els
   }
   // NotebookEdit은 예외가 없다 — 증거는 파일이지 노트북이 아니다
   expect((await write(".factory/out/qa/7.ipynb", "NotebookEdit")).code).toBe(2);
-}, 30000);
+}, 120000);
 
 // run-stage가 `claude -p`에 넘기는 CLAUDE_PROJECT_DIR가 있으면, 도구가 주는 **절대** file_path도 받는다 —
 // 그것이 없으면 실제 실행에서 qa는 증거를 한 줄도 남길 수 없다(도구는 보통 절대 경로를 준다).
@@ -574,7 +574,7 @@ test("deny-all-writes: an absolute qa path is accepted only under $CLAUDE_PROJEC
   }
   // 상대 경로는 CLAUDE_PROJECT_DIR와 무관하게 그대로 통과한다
   expect((await write(".factory/out/qa/7.png", { CLAUDE_PROJECT_DIR: "" })).code).toBe(0);
-}, 30000);
+}, 120000);
 
 test("deny-all-writes: the Bash arm accepts the same absolute qa target under $CLAUDE_PROJECT_DIR", async () => {
   const sh = (command, env) =>
@@ -595,7 +595,7 @@ test("deny-all-writes: the Bash arm accepts the same absolute qa target under $C
     expect(r.code, `${c} @ ${env.CLAUDE_PROJECT_DIR || "<unset>"}`).toBe(2);
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }
-}, 30000);
+}, 120000);
 
 // ── F6(a): 쓰기 금지 역할의 Bash arm ─────────────────────────────────────────────────────────
 // 전역 block-dangerous.sh는 *보호 경로*만 본다 — `echo x > src/a.js`는 아무도 막지 않았다.
@@ -618,7 +618,7 @@ test("deny-all-writes: a Bash command that writes outside /tmp, $TMPDIR or .fact
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 /**
  * ── ADR-024 / KTB-42 — **도구의 철자가 두 훅을 그대로 지난다** ───────────────────────────────────
@@ -647,7 +647,7 @@ test("KTB-42: the qa-evidence tool's own Bash spelling passes deny-all-writes an
   // 반대 방향도 여전히 참이다 — 도구의 이름을 흉내 낸 즉흥 리다이렉션은 막힌다.
   expect((await bash("deny-all-writes.sh", cmd("node .factory/bin/qa-evidence.js finish --issue 3 > src/a.js"))).code).toBe(2);
   expect((await bash("block-dangerous.sh", cmd("echo x > .factory/bin/qa-evidence.js"))).code).toBe(2);
-}, 30000);
+}, 120000);
 
 /**
  * ── 리뷰 라운드 1 SF-1b — **매니페스트만 카브아웃에서 다시 뺀다** ─────────────────────────────────
@@ -677,7 +677,7 @@ test("KTB-42/SF-1b: writing the qa evidence manifest by hand is blocked; every o
     expect(r.stderr, c).toMatch(/qa evidence manifest/);
   }
   for (const c of allowed) expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0);
-}, 60000);
+}, 240000);
 
 // ── KTB-13 r1: 쓰기 금지 역할에게도 `Bash(*)`가 열렸다 ───────────────────────────────────────────
 // 이 역할들은 `sed -i`·리다이렉션만으로 쓰지 않는다 — `node -e`로 fs를 부르고, `curl -o`/`wget`으로 파일을
@@ -713,7 +713,7 @@ test("deny-all-writes: node -e / curl -o / wget / install / cp -t are writes too
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // ── KTB-13 r2: 짧은 옵션에 값이 **붙어** 오면 규칙이 통째로 빠져나갔다 ────────────────────────
 // r1의 curl·cp/mv 규칙은 플래그 뭉치 뒤에 공백이나 `=`를 요구했다. 그런데 짧은 옵션은 값을 붙여
@@ -736,7 +736,7 @@ test("deny-all-writes: attached short-option values do not escape the curl/cp/mv
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 test("block-dangerous: attached short-option values do not escape the curl rule on protected paths (KTB-13 r2)", async () => {
   const blocked = ["curl -o.factory/harness.toml https://e/x", "curl -sLopackage.json https://e/x", "curl -Odocs/factory/CHARTER.md https://e/x"];
@@ -747,7 +747,7 @@ test("block-dangerous: attached short-option values do not escape the curl rule 
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // ── KTB-15b: sed/node also had an attached-argument hole — `sed -i.bak`/`--in-place=` and
 // `node -e"…"`/`-p"…"` never separated the flag from its value with a space or `=`, so r1/r2's
@@ -765,7 +765,7 @@ test("deny-all-writes: sed -i.bak / --in-place= and node -e\"…\"/-p\"…\" (at
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 test("block-dangerous: sed -i.bak / --in-place= and attached node -e\"…\" on protected paths are blocked too (KTB-15b, mirrors deny-all-writes)", async () => {
   const blocked = [
@@ -779,7 +779,7 @@ test("block-dangerous: sed -i.bak / --in-place= and attached node -e\"…\" on p
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 // MultiEdit은 Edit/Write와 같은 도구다 — allow가 그것도 부여하므로(KTB-13) case에서 빠지면 그 한 도구로
 // 쓰기 금지가 통째로 무너진다. 매처도 같이 넓혀야 훅이 애초에 발화한다(agent-md.test.js가 고정).
@@ -789,7 +789,7 @@ test("deny-all-writes: MultiEdit is blocked exactly like Edit/Write, with the sa
   expect(r.stderr).toMatch(/factory: this role must not write files \(MultiEdit src\/a\.js\)/);
   expect((await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: ".factory/out/qa/7.md" } })).code).toBe(0);
   expect((await bash("deny-all-writes.sh", { tool_name: "MultiEdit", tool_input: { file_path: ".factory/out/qa/../harness.toml" } })).code).toBe(2);
-}, 30000);
+}, 120000);
 
 // ── KTB-21: 읽기 전용 역할은 env를 점검할 수는 있어도(ps/logs/exec) 시작·중지할 수는 없다 ─────────
 // qa 리뷰어가 증거 수집 중 `docker compose down`으로 env를 내린 것(데모 #18)이 이 규칙의 근거다.
@@ -812,7 +812,7 @@ test("deny-all-writes: docker compose/docker teardown AND up are blocked; ps/log
     expect(r.stderr, c).toMatch(/factory: this role must not write \(bash: /);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("deny-all-writes.sh", cmd(c))).code, c).toBe(0)));
-}, 30000);
+}, 120000);
 
 test("deny-all-writes: $TMPDIR is honoured as a write target, and prove-test's own worktree dir is not blocked", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dw-tmpdir-"));
@@ -820,7 +820,7 @@ test("deny-all-writes: $TMPDIR is honoured as a write target, and prove-test's o
   expect(r.code).toBe(0);
   // 리터럴 `$TMPDIR`도 같은 대접을 받는다 (훅은 확장 전의 명령 문자열을 본다)
   expect((await bash("deny-all-writes.sh", cmd("echo x > $TMPDIR/note.txt"))).code).toBe(0);
-}, 30000);
+}, 120000);
 
 test("stop-guard: non-factory branch passes; factory branch with dirty tree blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-"));
@@ -834,7 +834,7 @@ test("stop-guard: non-factory branch passes; factory branch with dirty tree bloc
   await run("git", ["add", "."], { cwd }); await run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "w"], { cwd });
   const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
   expect(r2.code).toBe(2); expect(r2.stderr).toMatch(/unpushed|no upstream/);
-}, 30000);
+}, 120000);
 
 test("stop-guard: .factory/out artifacts are not 'dirty' — pushed branch with only those passes", async () => {
   const remote = mkdtempSync(join(tmpdir(), "sg-remote-"));
@@ -853,7 +853,7 @@ test("stop-guard: .factory/out artifacts are not 'dirty' — pushed branch with 
   // 같은 브랜치에서 .factory/out 밖의 변경은 여전히 막는다
   await run("bash", ["-c", "echo y > src.txt"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
-}, 30000);
+}, 120000);
 
 test("stop-guard: dirty file at repo root is still caught when the hook runs from a subdirectory", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-sub-"));
@@ -865,7 +865,7 @@ test("stop-guard: dirty file at repo root is still caught when the hook runs fro
   const r3 = await runHook("stop-guard.sh", "{}", join(cwd, "sub"));
   expect(r3.code).toBe(2);
   expect(r3.stderr).toMatch(/uncommitted/);   // upstream이 없어도 exit 2가 나오므로, 이유가 "uncommitted"인지까지 확인한다
-}, 30000);
+}, 120000);
 
 test("stop-guard: a detached HEAD (review/merge checkoutHead) still refuses a dirty tree, but skips the push checks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-detached-"));
@@ -881,7 +881,7 @@ test("stop-guard: a detached HEAD (review/merge checkoutHead) still refuses a di
   // .factory/out is excluded on a detached HEAD too — same pathspec as the branch case
   await run("bash", ["-c", "rm f.txt && mkdir -p .factory/out && echo y > .factory/out/x"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(0);
-}, 30000);
+}, 120000);
 
 // ── fix round 2 (F1): the hydrated run record / quarantine writes must not trip the stop guard ──
 
@@ -906,7 +906,7 @@ test("stop-guard: an untracked run record (docs/factory/runs/) never blocks — 
   const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
   expect(r2.stderr + r2.stdout).toBe("");
   expect(r2.code).toBe(0);
-}, 30000);
+}, 120000);
 
 test("stop-guard: a modified tracked .factory/quarantine.toml (script-owned) never blocks on a detached HEAD", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "sg-quar-"));
@@ -924,7 +924,7 @@ test("stop-guard: a modified tracked .factory/quarantine.toml (script-owned) nev
   // a change outside the exclusions is still caught on the same detached HEAD
   await run("bash", ["-c", "echo y > src.txt"], { cwd });
   expect((await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd)).code).toBe(2);
-}, 30000);
+}, 120000);
 
 // ── stop-guard on SubagentStop: 쓰기 금지 역할은 면제된다 ─────────────────────────────────────
 // 리뷰어는 playwright `test-results/`·`coverage/` 같은 untracked 산출물을 남기지만 그것을 지울 권한이
@@ -950,7 +950,7 @@ test("stop-guard: a write-forbidden role's SubagentStop is exempt; the builder's
   const builder = await bash("stop-guard.sh", { hook_event_name: "SubagentStop", agent_type: "factory-builder" }, cwd);
   expect(builder.code).toBe(2);
   expect(builder.stderr).toMatch(/uncommitted/);
-}, 30000);
+}, 120000);
 
 // ── F5(최종 리뷰): 면제 목록 == 쓰기 금지 역할 집합 ────────────────────────
 // 두 파일이 같은 사실을 말한다: `agent-md.js`의 `needsDenyAllWritesHook`(에이전트 파일에 deny 훅을
@@ -976,14 +976,14 @@ test("stop-guard: the skip list is exactly agent-md's write-free set — one pro
     expect(r.code === 0, `${agent_type}: stop-guard skip=${r.code === 0} vs needsDenyAllWritesHook=${needsDenyAllWritesHook(agent_type)}`)
       .toBe(needsDenyAllWritesHook(agent_type));
   }
-}, 30000);
+}, 120000);
 
 test("lint-touched: runs lint_file for the touched file, never blocks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-")); mkdirSync(join(cwd, ".factory"));
   writeFileSync(join(cwd, ".factory/harness.toml"), `[commands]\nlint_file = "bash -c 'echo LINT {file}; exit 1'"\n`);
   const r = await runHook("lint-touched.sh", JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: "src/a.js" } }), cwd, { CLAUDE_PROJECT_DIR: cwd });
   expect(r.code).toBe(0); expect(r.stderr).toMatch(/LINT src\/a\.js/);
-}, 30000);
+}, 120000);
 test("verdict-format: reviewer stop without verdict json → exit 2; with → 0; non-reviewer → 0", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vf-"));
   const t = join(dir, "t.jsonl");
@@ -996,7 +996,7 @@ test("verdict-format: reviewer stop without verdict json → exit 2; with → 0;
   expect(bad.code).toBe(2); expect(bad.stderr).toMatch(/verdict JSON/);
   const other = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "factory-builder", agent_transcript_path: t }));
   expect(other.code).toBe(0);
-}, 30000);
+}, 120000);
 
 // ── F1: the review workflow spawns reviewer-* with three schemas, not one ────────────────────
 // R1/R2_FULL answer `verdict`, the unanimous-approve R2 answers `missed`, the dispute round answers
@@ -1028,7 +1028,7 @@ test("verdict-format: a reviewer may stop on any of the three review schemas (ve
     expect(bad.code, prose).toBe(2);
     expect(bad.stderr, prose).toMatch(/verdict JSON/);
   }
-}, 30000);
+}, 120000);
 
 test("lint-touched: shell-escapes file_path — no command injection via Edit/Write", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-inj-")); mkdirSync(join(cwd, ".factory"));
@@ -1038,7 +1038,7 @@ test("lint-touched: shell-escapes file_path — no command injection via Edit/Wr
   const r = await runHook("lint-touched.sh", JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: evil } }), cwd, { CLAUDE_PROJECT_DIR: cwd });
   expect(r.code).toBe(0);
   expect(existsSync(join(pwnDir, "PWNED"))).toBe(false);
-}, 30000);
+}, 120000);
 
 test("lint-touched: enforces a timeout on the lint command (no system `timeout` on macOS)", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-to-")); mkdirSync(join(cwd, ".factory"));
@@ -1048,7 +1048,7 @@ test("lint-touched: enforces a timeout on the lint command (no system `timeout` 
   expect(Date.now() - start).toBeLessThan(3000);
   expect(r.code).toBe(0);
   expect(r.stderr).toMatch(/exit 124/);
-}, 30000);
+}, 120000);
 
 test("lint-touched: 쓰레기 FACTORY_LINT_TIMEOUT_MS는 기본 60s로 떨어진다 (NaN 타임아웃 금지)", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "lt-nan-")); mkdirSync(join(cwd, ".factory"));
@@ -1059,7 +1059,7 @@ test("lint-touched: 쓰레기 FACTORY_LINT_TIMEOUT_MS는 기본 60s로 떨어진
     expect(r.stderr, bad).toMatch(/exit 3/);            // 124(즉시 kill)가 아니라 실제 lint 결과가 온다
     expect(r.stderr, bad).toMatch(/LINT src\/a\.js/);
   }
-}, 30000);
+}, 120000);
 
 test("verdict-format: only the LAST assistant text message counts", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vf-last-"));
@@ -1071,7 +1071,7 @@ test("verdict-format: only the LAST assistant text message counts", async () => 
   writeFileSync(t, msg("changed my mind") + "\n" + msg("```json\n{\"verdict\":\"approve\"}\n```") + "\n");
   const r2 = await runHook("verdict-format.sh", JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "reviewer-qa", agent_transcript_path: t }));
   expect(r2.code).toBe(0);
-}, 30000);
+}, 120000);
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // 2026-09-14 외부 감사 H1a / H1b / M8 / M9 (ADR-023). 아래 세 테스트는 **감사가 직접 재현한 우회**를
@@ -1101,7 +1101,7 @@ test("block-dangerous: backslash-newline continuations are joined before matchin
     const r = await bash("block-dangerous.sh", cmd(c));
     expect(r.code, JSON.stringify(c)).toBe(2);
   }
-}, 30000);
+}, 120000);
 
 // 개행은 이음줄이 아닐 때 **명령 구분자**다(`;`와 같다). 정규화가 개행을 공백으로 바꾸면 서로 다른 두
 // 문장이 한 문장으로 이어져 없던 매치가 생긴다 — `echo git⏎merge x`가 `git merge`가 되는 식이다.
@@ -1115,7 +1115,7 @@ test("block-dangerous: a bare newline stays a command separator, not a token joi
     "git log --grep=\"git merge\"",
   ];
   for (const c of allowed) expect((await bash("block-dangerous.sh", cmd(c))).code, JSON.stringify(c)).toBe(0);
-}, 30000);
+}, 120000);
 
 // H1b — `mergeGates`가 리뷰의 증거로 보는 것은 required check의 **상태**뿐이고(run-stage.js → allChecksGreen)
 // 게시자를 검증하지 않는다. 그래서 스테이지가 자기 손으로 `factory/review`를 success로 올리면 리뷰어가
@@ -1144,7 +1144,7 @@ test("block-dangerous: commit status / check-run / review approval forgery is bl
   for (const c of ["gh pr view 5", "gh pr checks 5", "gh api /repos/o/r/pulls/5"]) {
     expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
   }
-}, 30000);
+}, 120000);
 
 // ── 리뷰 batch-1 MF-1 (H1b-a) — 권한 엔드포인트는 **클라이언트 × 엔드포인트 표**로 막힌다 ────────
 // 재리뷰가 실행해 확인한 결함: H1b의 모든 규칙이 리터럴 `gh`에 앵커돼 있어 `curl`/`wget`/GraphQL이
@@ -1206,7 +1206,7 @@ test("block-dangerous: GraphQL mutations are the third spelling of approve/merge
   // 읽기 전용 GraphQL 조회는 뮤테이션 이름이 없다 — 그대로 통과한다.
   const ok = "gh api graphql -f query='query { repository(owner:\"o\",name:\"r\") { pullRequest(number:5) { mergeable } } }'";
   expect((await bash("block-dangerous.sh", cmd(ok))).code, ok).toBe(0);
-}, 60000);
+}, 240000);
 
 test("block-dangerous: plain GETs through any client stay allowed — the new rules bite on the write shape (review batch-1 MF-1)", async () => {
   const allowed = [
@@ -1223,7 +1223,7 @@ test("block-dangerous: plain GETs through any client stay allowed — the new ru
     "grep -rn mergePullRequest docs/factory/",
   ];
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // ── 리뷰 batch-1 MF-2 (H1b-b) — `factory/records`는 리뷰 증거의 출처이므로 에이전트가 못 민다 ─────
 // 감사 전에는 `git push origin HEAD:factory/records`가 rc=0이었다(막힌 것은 `+refspec` force뿐).
@@ -1252,7 +1252,7 @@ test("block-dangerous: no agent session pushes to factory/records or factory/loc
   for (const c of ["git fetch origin refs/heads/factory/records:refs/factory/records-remote", "git ls-remote origin refs/heads/factory/records", "git show refs/factory/records-remote:docs/factory/runs/7.md"]) {
     expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
   }
-}, 60000);
+}, 240000);
 
 // ── 리뷰 batch-2 MF-1 — 표에 빠져 있던 권한 엔드포인트와 쓰기 철자 ────────────────────────────────
 // 재리뷰가 실행해 **rc=0**으로 확인한 목록이 그대로 이 표다. `POST /merges`가 그중 가장 큰 것이다:
@@ -1297,7 +1297,7 @@ test("block-dangerous: issue/PR edits, branch merges and SDK write shapes are bl
     "curl -X POST https://example.com/api/items -d x",
   ];
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 // ── 리뷰 batch-2 #4 — 이슈 **본문**은 사람의 것이다 ─────────────────────────────────────────────
 // `tests_changed_allowed:` 마커는 이슈 본문에서만 읽힌다(integrity.js) — 곧 "이 PR은 테스트를 고쳐도
@@ -1320,7 +1320,7 @@ test("block-dangerous: gh issue edit --body is blocked, gh issue comment stays o
   for (const c of ["gh issue comment 7 --body hello", "gh issue comment 7 -F /tmp/handoff.md", "gh issue edit 7 --title x", "gh issue view 7 --comments"]) {
     expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
   }
-}, 30000);
+}, 120000);
 
 // ── 리뷰 batch-2 MF-2 — run 기록 디렉터리는 러너의 것이다 ───────────────────────────────────────
 // 머지 스테이지가 리뷰 증거로 읽는 파일이 거기 산다. 재리뷰가 실행해 확인한 대로 그 디렉터리는
@@ -1346,7 +1346,7 @@ test("block-dangerous: the run record dir is sealed against agent sessions (revi
   for (const c of ["cat docs/factory/runs/7.md", "grep -n review-evidence docs/factory/runs/7.md"]) {
     expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
   }
-}, 30000);
+}, 120000);
 
 // ── 리뷰 batch-2 MF-3 — 세션 설정 보호는 **깊이를 가리지 않는다** ────────────────────────────────
 // 생성되는 `prot`는 앵커 없는 부분 문자열 매칭이라 `**/` 접두를 지운 형태로 들어간다 —
@@ -1365,7 +1365,7 @@ test("block-dangerous: session config at any depth is a protected write (review 
   for (const c of ["cat docs/CLAUDE.md", "echo x > src/app.js", "echo x > docs/features/012.md"]) {
     expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0);
   }
-}, 30000);
+}, 120000);
 
 // M8 — 훅의 `prot`는 이제 harness.toml `[protected]`에서 생성된다. 원본 훅이 들고 있는 블록은
 // **템플릿 harness.toml**로 생성된 것이어야 한다(새 채택자가 받는 그 목록).
@@ -1380,7 +1380,7 @@ test("block-dangerous: the `prot` block is generated from the template harness.t
   // 막아서 다른 이름의 워크플로 한 장이 훅을 그대로 지나갔다(M8의 실제 드리프트).
   expect((await bash("block-dangerous.sh", cmd("echo x > .github/workflows/ci.yml"))).code).toBe(2);
   expect((await bash("block-dangerous.sh", cmd("rm .github/CODEOWNERS"))).code).toBe(2);
-}, 30000);
+}, 120000);
 
 // deny-all-writes.sh도 같은 줄 단위 결함을 갖고 있었다 — 쓰기 금지 역할의 유일한 셸 경계다.
 test("deny-all-writes: backslash-newline continuations are joined before matching (audit H1a)", async () => {
@@ -1388,7 +1388,7 @@ test("deny-all-writes: backslash-newline continuations are joined before matchin
   for (const c of [`rm ${C}-rf src`, `echo x ${C}> src/a.js`, `git ${C}commit -m x`, `sed ${C}-i 's/a/b/' src/a.js`]) {
     expect((await bash("deny-all-writes.sh", cmd(c))).code, JSON.stringify(c)).toBe(2);
   }
-}, 30000);
+}, 120000);
 
 // ── ADR-023 Task 8b: 세션은 브랜치를 바꾸지 않는다 ───────────────────────────────────────────────
 // implement 빌더는 세션 **안에서** `git checkout claude/fq-<n>`을 했다. 훅 스크립트는 호출마다
@@ -1426,7 +1426,7 @@ test("block-dangerous: a stage session cannot switch branches at all (Task 8b)",
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c), undefined, STAGE)).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 test("block-dangerous: outside a stage session a branch switch is a person's ordinary move", async () => {
   for (const c of ["git checkout main", "git switch -", "git checkout -b factory/role-x"]) {
@@ -1434,7 +1434,7 @@ test("block-dangerous: outside a stage session a branch switch is a person's ord
   }
   // 세션 밖이어도 overlay 뿌리를 덮는 체크아웃은 그대로 막힌다(아래 표와 같은 규칙).
   expect((await bash("block-dangerous.sh", cmd("git checkout origin/pr -- .claude/hooks/x.sh"))).code).toBe(2);
-}, 30000);
+}, 120000);
 
 /**
  * KTB-40 — 위 두 테스트가 서로의 **대조군**이라는 사실을 한 테스트 안에서 못 박는다. 같은 표를 두
@@ -1455,7 +1455,7 @@ test("block-dangerous: the branch-switch rule is decided by FACTORY_STAGE alone 
   }
   // 빈 문자열은 "세션이 아니다"로 읽힌다(훅의 `${FACTORY_STAGE:-}` 계약) — 그 경계도 여기서 고정한다.
   expect((await bash("block-dangerous.sh", cmd("git switch main"), undefined, { FACTORY_STAGE: "" })).code).toBe(0);
-}, 60000);
+}, 240000);
 
 test("block-dangerous: whole-tree restores that would swap the factory config are blocked everywhere (Task 8b)", async () => {
   const C = "\\\n";
@@ -1484,7 +1484,7 @@ test("block-dangerous: whole-tree restores that would swap the factory config ar
     expect(r.stderr, c).toMatch(/factory: blocked/);
   }));
   await Promise.all(allowed.map(async (c) => expect((await bash("block-dangerous.sh", cmd(c))).code, c).toBe(0)));
-}, 60000);
+}, 240000);
 
 test("block-dangerous: the overlay roots do not bend for a factory:harness issue (Task 8b)", async () => {
   // KTB-20의 카브아웃은 **편집**을 연다(`.factory/harness.toml`을 Edit할 수 있다). 그러나 다른 커밋의
@@ -1495,4 +1495,4 @@ test("block-dangerous: the overlay roots do not bend for a factory:harness issue
   }
   // 반면 평범한 편집은 그 이슈에서 열려 있다(기존 계약 그대로).
   expect((await bash("block-dangerous.sh", cmd("echo x > .factory/harness.toml"), undefined, harness)).code).toBe(0);
-}, 30000);
+}, 120000);

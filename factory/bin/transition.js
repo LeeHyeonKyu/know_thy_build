@@ -1,11 +1,30 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
-import { parseTransitionArgs, refuseHumanFlag, transition } from "../lib/transition.js";
-import { makeRehearsalChecker } from "../lib/rehearsal.js";
-import { loadHarness } from "../lib/config.js";
+
+/**
+ * 1.4.35 (L44, own-calendar #105) — 이 CLI는 **사람이 자기 셸에서** 부른다. 러너는 setup 액션이 `.factory/`의
+ * 런타임 의존성을 설치하지만 갓 받은 클론에는 없고, 정적 import는 그때 `Cannot find package 'smol-toml'`
+ * 스택만 남기고 죽는다 — 무엇을 하면 되는지는 말하지 않는다. 그래서 라이브러리를 동적으로 읽고, 의존성이
+ * 없을 때만 그 한 줄을 말한다. 다른 오류는 그대로 던진다(삼키지 않는다).
+ */
+let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, makeRehearsalChecker, loadHarness;
+try {
+  ({ run } = await import("../lib/exec.js"));
+  ({ makeGh } = await import("../lib/gh.js"));
+  ({ parseTransitionArgs, refuseHumanFlag, transition } = await import("../lib/transition.js"));
+  ({ makeRehearsalChecker } = await import("../lib/rehearsal.js"));
+  ({ loadHarness } = await import("../lib/config.js"));
+} catch (e) {
+  if (e?.code !== "ERR_MODULE_NOT_FOUND") throw e;
+  console.error(
+    "transition: the factory's runtime dependencies are not installed in this clone.\n" +
+    "  run:  npm install --prefix .factory --no-audit --no-fund\n" +
+    "  then run this command again.\n" +
+    `  (${String(e.message).split("\n")[0]})`
+  );
+  process.exit(1);
+}
 
 const USAGE = [
   "usage: transition <issue> [<to-label>] [--human] [--retry] [--reason <text>]",

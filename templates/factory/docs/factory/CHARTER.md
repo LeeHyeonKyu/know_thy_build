@@ -23,8 +23,9 @@ merge: { human_gate: true }
 # triage가 **판단이 서지 않을 때** 이슈를 어떻게 하는가(외부 감사 2026-09-14 M1). `needs-info`는
 # 멈춘다 — 침묵은 승인이 아니다. `ready`는 통과시킨다(다크 루프 자체가 산출물인 저장소의 선택).
 # NEVER_AUTOMATE에 걸리면 언제나 `wont-do`이고, done_when을 못 쓰면 언제나 `needs-info`다 —
-# 이 필드가 정하는 것은 **그 둘이 아닌 나머지**뿐이다. 이슈 본문에 `[ready]` 표식이 있으면
-# 그 이슈 하나만 예외로 통과한다(사람이 그 이슈를 봤다는 뜻).
+# 이 필드가 정하는 것은 **그 둘이 아닌 나머지**뿐이다. 이슈 본문에 `[ready]` 표식이 있거나
+# **사람이 그 이슈를 큐에 넣었으면**(러너가 전이 코멘트의 계정으로 확인한다, 1.4.35) 그 이슈는 통과한다
+# — 둘 다 사람이 그 이슈를 봤다는 뜻이다.
 # **이 줄을 지우면 doctor FAIL이다**(`charter.triage-default-unset`).
 triage: { default: needs-info }
 # `usd_per_issue` caps what ONE issue may cost over its whole life — every run across re-queues and human
