@@ -1091,10 +1091,21 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           record([`harness: FAIL — ${reason}`, ...refusal(t), ...gatesNote, usage]);
           return 2;
         }
-        const t = await d.transition({ to: "factory:needs-info", reason: parkedReason(created.issue) });
+        /**
+         * #136 (S2b) — 하네스 이슈가 문에 거부돼 `backlog`에 서 있으면(`queued === false`) "하네스 이슈를 기다린다"만으로는
+         * 거짓이 된다: 아무도 그것을 집지 않는다. 주차 사유와 런 기록이 그 사실·이유·필요한 사람의 걸음을 말한다. 사유는 여전히
+         * `parkedReason`으로 **시작한다** — sweeper의 `PARKED_ON_HARNESS`가 그 문구로 주차를 푼다. 재사용 경로도 이슈가 아직
+         * backlog면 `queued:false`를 싣는다(skeptic #136 f3). `queued`를 싣지 않는 반환값(큐에 선 이슈의 재사용·구형 더블)은 예전 그대로다.
+         */
+        const backlogged = created.queued === false;
+        const parkReason = backlogged
+          ? `${parkedReason(created.issue)} — #${created.issue} is in backlog, NOT queued (${created.queue_reason || "unknown"}); a person's :next on #${created.issue} is needed`
+          : parkedReason(created.issue);
+        const t = await d.transition({ to: "factory:needs-info", reason: parkReason });
         record([
           "verify: ok",
           `harness: ${created.created ? "opened" : "reusing"} factory:harness issue #${created.issue} — ${needed.map((h) => h.file).join(", ")}`,
+          ...(backlogged ? [`harness: #${created.issue} ${created.created ? "was opened but NOT queued" : "is reused and still NOT queued"} — stays in backlog: ${created.queue_reason || "unknown"}`] : []),
           ...(t.ok ? [`transition: ${t.to}`] : refusal(t)),
           ...gatesNote, usage,
         ]);
@@ -1963,6 +1974,18 @@ export function completedForHead({ comments, stage, headSha, entryLabels = ENTRY
   return { head: headSha, at: hs[hs.length - 1].createdAt ?? null };
 }
 
+/**
+ * #136 (S2b, 설계 2026-09-30 §8.2) — implement의 `harness_needed` 분기가 부르는 `ensureHarnessIssue` dep.
+ * 하네스 이슈는 `backlog`로 태어나고, 큐로 가는 한 걸음은 **다른 모든 큐 전이와 같은 문**을 지난다: 리허설 **과** 큐 진입
+ * 심사를 실은 `transition()`(flaky 수확의 `transitionIssue`와 같은 모양이다 — 심사가 빠진 `transitionOther`와 다르다).
+ * 문이 옮기는 것은 **새 하네스 이슈**이지 피처 이슈가 아니다(피처는 이 스테이지의 `d.transition`이 주차한다).
+ * 호출 모양 `({ entries, pr })`은 그대로다(run-stage 테스트가 고정한다).
+ */
+export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, transitionFn = transition }) {
+  const transitionIssue = ({ issue: n, to, reason }) => transitionFn({ gh, issue: n, to, reason, stage, rehearsal, admission });
+  return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transitionIssue });
+}
+
 export function makeCheckoutHead({ gh, run, root, issue }) {
   return async () => {
     const handoff = latestHandoff(await gh.comments(issue), "implement");
@@ -2578,7 +2601,8 @@ async function main() {
     dependencyBlock: async () => findOpenHarnessIssueFor({ gh, issue }),
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
     /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
-    ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),
+    /** #136 (S2b): 새 하네스 이슈는 backlog로 태어나 리허설 + 심사를 실은 문으로 큐에 간다(`makeHarnessIssueDep`). */
+    ensureHarnessIssue: makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission }),
     claudeP: async (_ctx, { harnessIssue = false } = {}) => {
       const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
       const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, stage, harnessIssue, harness }) });
