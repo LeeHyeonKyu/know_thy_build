@@ -108,3 +108,41 @@ test("makeQueueAdmission gathers its inputs from gh and never throws — an unre
   expect(r.ok).toBe(false);
   expect(r.reasons.join(" ")).toMatch(/could not be read/);
 });
+
+// ── #136 (S2b) — 하네스 요청은 세대를 하나 더하지 않는다(설계 §8.2 표: "개선→하네스→flaky 사슬을 한 세대로 센다") ──
+// 하네스 이슈가 이 문을 지나게 된 순간, depth_max=1은 **자기생성 피처**(flaky·개선·공장 작성)를 위한 하네스 요청을 전부 영구히
+// 거부한다 — 그 피처를 끝낼 유일한 길이 막힌다. 하네스 요청은 "그 피처를 끝내는 데 필요한 것"이지 새 세대가 아니다.
+test("test_136_harness_request_not_extra_generation", () => {
+  const flakyFeature = { number: 40, author: "LeeHyeonKyu", labels: ["factory:needs-info", "factory:flaky"], body: "Detected while implementing #10. evidence: {}" };
+  const improvementFeature = improvement(20, "LeeHyeonKyu/own-calendar#17");
+  const harnessFor = (n, number = 50) => ({ number, author: "bot-hk", labels: ["backlog", "factory:harness"], body: `<!-- factory-harness-request for=${n} -->\n#${n}의 implement가 …\n\nBlocks: #${n}` });
+  const byNumber = (n) => ({ 10: person, 17: person, 20: improvementFeature, 40: flakyFeature }[n] ?? null);
+
+  // flaky 피처(사람의 #10에서 나왔다 — 1세대)를 위한 하네스 요청: 다른 상한이 안 걸리면 들어간다
+  const r1 = queueAdmission({ issue: harnessFor(40), charter: charter(), ...base, byNumber });
+  expect(r1).toEqual({ ok: true, reasons: [], self_generated: true });
+  // 개선 피처(사람의 #17에서 나왔다 — 1세대)를 위한 하네스 요청도 같다
+  expect(queueAdmission({ issue: harnessFor(20), charter: charter(), ...base, byNumber }).ok).toBe(true);
+  // 사람의 피처를 위한 하네스 요청은 예전처럼 들어간다
+  expect(queueAdmission({ issue: harnessFor(10), charter: charter(), ...base, byNumber }).ok).toBe(true);
+
+  // 하네스 요청이라도 다른 상한은 그대로다(open_max) — 면제는 세대 하나뿐이다
+  const capped = queueAdmission({ issue: harnessFor(40), charter: charter(), ...base, byNumber, openSelfGenerated: [{ number: 18 }, { number: 19 }] });
+  expect(capped.ok).toBe(false);
+  expect(capped.reasons.join(" ")).toMatch(/self-generated open 2 ≥ 2/);
+  expect(capped.reasons.join(" ")).not.toMatch(/generation/);
+
+  // 공장이 만든 이슈에서 공장이 만든 이슈(개선의 개선)는 여전히 2세대로 거부된다
+  const deep = queueAdmission({ issue: improvement(30, "LeeHyeonKyu/own-calendar#20"), charter: charter(), ...base, byNumber });
+  expect(deep.ok).toBe(false);
+  expect(deep.reasons.join(" ")).toMatch(/generation 2 > 1/);
+  // 하네스 요청을 사슬 **가운데** 끼워도 세대가 사라지지 않는다: 개선(#20)을 위한 하네스(#50)에서 나온 개선은 2세대다
+  const viaHarness = (n) => (n === 50 ? harnessFor(20) : byNumber(n));
+  const r2 = queueAdmission({ issue: improvement(60, "LeeHyeonKyu/own-calendar#50"), charter: charter(), ...base, byNumber: viaHarness });
+  expect(r2.ok).toBe(false);
+  expect(r2.reasons.join(" ")).toMatch(/generation 2 > 1/);
+  // 하네스 이슈를 구현하다 수확한 flaky(사람의 #10 → 하네스 #50 → flaky #70)는 한 세대다 — 하네스 조상은 세대를 더하지 않는다
+  const viaHarnessForPerson = (n) => (n === 50 ? harnessFor(10) : byNumber(n));
+  const flakyOfHarness = { number: 70, author: "LeeHyeonKyu", labels: ["backlog", "factory:flaky"], body: "Detected while implementing #50. evidence: {}" };
+  expect(queueAdmission({ issue: flakyOfHarness, charter: charter(), ...base, byNumber: viaHarnessForPerson })).toEqual({ ok: true, reasons: [], self_generated: true });
+});
