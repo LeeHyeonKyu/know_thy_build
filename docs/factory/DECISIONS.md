@@ -3337,6 +3337,8 @@ RED면 non-zero로 끝난다.
   그것이 **설계**다: 리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 통째로 잠긴다.
   반대로 flaky 수확은 `backlog`로 태어나 게이트를 지난다(r1 리뷰 should_fix 3). 이 둘이 게이트를
   지나지 않는 **유일한** 생산자이고, 그 사실은 여기에 적혀 있어야 grep으로 찾을 수 있다.
+  → **대체됨(#136, S2b)**: `ensureHarnessIssue`의 하네스 이슈는 이제 `backlog`로 태어나 문을 지난다. 남은 우회 생산자는
+  retro의 성숙도 격차 이슈(`bin/retro.js`)다 — 아래 "S2b" 항목.
 - 지문 해시의 구분자는 `\u0000` **이스케이프**로 적는다. r1은 리터럴 NUL 바이트를 넣었고, 그 두
   바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
   정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
@@ -3842,3 +3844,27 @@ Bash에는 `CLAUDE_PROJECT_DIR`가 없다 — 그 변수는 훅과 스테이지�
 머지 커밋을 완성한다(`resolveMirrorConflicts`). 소스가 하나라도 충돌했으면 예전처럼 abort하고 사람에게 넘긴다. 채택자 저장소는 그대로다.
 세 번의 실측이 말하는 것: 러너 미러 커밋은 **생성물**이고, 그것을 변경으로 읽는 통제마다 예외가 필요했다(must_not, overlay, base 병합).
 S4 이전에 "생성물은 diff가 아니다"를 한 곳(`inMirrorFamily`)에서 정의하는 것이 이 셋의 공통 근거다.
+
+**S2b (#136, 설계 2026-09-30 §8.2 — DECISIONS "1.4.35 S2"의 남긴 것 첫 항목).** 하네스 이슈는 **문을 지나 큐로 간다.** `ensureHarnessIssue`
+(`lib/harness-request.js`)는 새 이슈를 `["backlog", "factory:harness"]`로 만들고, 큐로 가는 한 걸음은 호출자가 주입한 `transitionIssue`만이
+만든다(lib은 `transition.js`·`admission.js`를 import하지 않는다 — flaky 수확과 같은 모양). ADR-025의 "하네스 이슈는 바로 큐로 태어난다 —
+그것이 설계다" 문장을 이 항목이 대체한다.
+- **배선**: run-stage의 implement `harness_needed` 분기는 `makeHarnessIssueDep` — 리허설 **과** 큐 진입 심사를 실은 `transition()`이 **새
+  하네스 이슈**를 옮긴다(심사가 빠진 `transitionOther`와 다르다).
+- **거부되면**(리허설·심사) 또는 문이 던지면: 이슈는 `backlog`에 남고 `<!-- factory-harness-not-queued issue=<n> -->` 코멘트가 사유를 그대로
+  싣는다. 다음 걸음은 거부의 종류로 가른다 — 리허설이면 `factory rehearse` 뒤 `/know-thy-build:next`, 심사면 발동한 상한을 이름으로 대고
+  "`:next`만으로는 다시 거부된다"와 빠져나가는 길을 적는다. 함수는 던지지 않고 `queued:false`와 `queue_reason`을 돌려준다.
+- **주차된 피처는 그것을 말한다**: 하네스 이슈가 큐에 못 들어갔으면 피처의 `needs-info` 사유가 `waiting for harness issue #N`(sweeper의
+  `PARKED_ON_HARNESS`가 그대로 읽는다) 뒤에 "#N은 backlog, 사유, 사람의 `:next`가 필요"를 덧붙이고, 런 기록에 `harness: #N was opened but NOT
+  queued` 줄이 남는다.
+- **복구는 사람의 `:next`다.** 수용한 위험(ADR-025가 경고한 잠금): 리허설이 낡으면 그것을 고칠 하네스 이슈도 backlog에 서고, 주차된 피처는
+  사람이 `factory rehearse`와 `:next`를 할 때까지 기다린다. 재사용(dedupe) 경로는 다시 문을 두드리지 않는다 — backlog에 남은 하네스 이슈는
+  자동으로 재시도되지 않는다.
+- **피드백 루프**(`lib/feedback/route.js`)는 문을 배선하지 않는다: 그 하네스 이슈도 이제 `backlog`로 태어나고, 액션은 `queued:false`와 사유를,
+  출처 이슈의 영수증은 "#N은 backlog에서 사람의 `:next`를 기다린다"를 적는다(예전처럼 "고칠 것입니다"라고 말하지 않는다).
+- **세대**(`lib/admission.js`): 하네스 요청은 세대를 하나 더하지 않는다(설계 표: "개선→하네스→flaky 사슬을 한 세대로 센다"). 그렇지 않으면
+  depth_max=1이 자기생성 피처(flaky·개선)의 하네스 요청을 영구히 거부한다. 개선의 개선은 사이에 하네스가 끼어도 여전히 2세대로 거부된다.
+  이 규칙은 모든 `→ factory:queue` 전이(사람의 것 포함)가 쓰는 공유 문에 있다.
+- **문은 아직 하나가 아니다**: retro의 성숙도 격차 하네스 이슈(`bin/retro.js`, `[QUEUE_LABEL, HARNESS_LABEL]`로 태어난다 — S2c)와 로컬 진입
+  (`makeLocalEntry`, 리허설만 본다)이 여전히 심사를 우회한다. 그래서 `open_max`는 아직 하드 상한이 아니다. 기존에 열린 하네스 이슈의 라벨은
+  옮기지 않는다.
