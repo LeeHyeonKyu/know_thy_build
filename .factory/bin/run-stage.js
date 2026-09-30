@@ -21,7 +21,7 @@ import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
-import { mirrorStep, mirrorMatchesHead, inMirrorFamily } from "../lib/mirror.js";
+import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
@@ -2001,7 +2001,7 @@ export const stageBranch = (issue) => `claude/fq-${issue}`;
  * **로컬에만 있는 브랜치는 건드리지 않는다**(fail closed): 원격에 없는데 로컬에 있다는 것은 지난
  * 라운드의 push가 실패했거나 사람이 뭔가 하고 있다는 뜻이고, `-B`는 그것을 말없이 지운다.
  */
-export function makeCheckoutBranch({ run, root, issue, env = process.env, defaultBranch = () => "main" }) {
+export function makeCheckoutBranch({ run, root, issue, env = process.env, defaultBranch = () => "main", regenerate = regenerateMirror }) {
   return async () => {
     const branch = stageBranch(issue);
     const s = await resolveStageSha({ run, root, env, defaultBranch: typeof defaultBranch === "function" ? defaultBranch() : defaultBranch });
@@ -2016,9 +2016,9 @@ export function makeCheckoutBranch({ run, root, issue, env = process.env, defaul
       if (f.code !== 0) return { ok: false, reason: `git fetch failed for ${branch}: ${f.stderr?.trim() || `exit ${f.code}`}` };
       const co = await run("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: root });
       if (co.code !== 0) return { ok: false, reason: `git checkout -B ${branch} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
-      const m = await mergeBaseIntoBranch({ run, root, branch, sha: s.sha, source: s.source, env });
+      const m = await mergeBaseIntoBranch({ run, root, branch, sha: s.sha, source: s.source, env, regenerate });
       if (!m.ok) return m;
-      return { ok: true, branch, base: `origin/${branch}`, existed: true, merged: m.merged, source: s.source };
+      return { ok: true, branch, base: `origin/${branch}`, existed: true, merged: m.merged, source: s.source, ...(m.mirrorResolved ? { mirrorResolved: m.mirrorResolved } : {}) };
     }
     const local = await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
     if (local.code === 0) {
@@ -2049,7 +2049,31 @@ export function makeCheckoutBranch({ run, root, issue, env = process.env, defaul
  * (`user.name factory`), 빌더가 뜨기 **전에** push한다: 빌더가 아무것도 바꾸지 않는 라운드에도 PR head는
  * 그 머지를 반영해야 하고(그래야 review·merge가 같은 트리를 본다), 빌더의 push는 빌더의 커밋만 싣는다.
  */
-export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "base", env = process.env }) {
+/**
+ * 설계 2026-09-30 §8.3 (S3, KTB #130 실측) — **생성 파일끼리의 충돌은 다시 생성해서 푼다.** 브랜치에는 러너의 미러 커밋이 있고
+ * 그 사이 base(1.4.36)도 같은 미러 파일을 바꿨다 — 병합은 `.factory/bin/run-stage.js`에서 충돌했고 사람이 리베이스하라는
+ * 답만 남았다. 그 파일들은 `factory/**`에서 결정적으로 생성되므로 충돌의 답은 언제나 "병합된 소스에서 다시 만든 것"이다.
+ * 충돌 경로가 **전부 미러 가족**이고 이 저장소가 KTB 자신일 때만: base 쪽을 임시로 받아 마커를 지우고, 병합된 소스로 재생성해
+ * 머지 커밋을 완성한다. 소스(`factory/**`)가 하나라도 충돌했으면 예전처럼 abort하고 사람에게 넘긴다.
+ */
+async function resolveMirrorConflicts({ run, root, sha, ident, regenerate }) {
+  if (!mirrorApplicable(root)) return { resolved: false, reason: "not the engine repo" };
+  const u = await run("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: root });
+  if (u.code !== 0) return { resolved: false, reason: `conflicted paths unreadable: ${u.stderr?.trim() || `exit ${u.code}`}` };
+  const conflicted = u.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!conflicted.length || !conflicted.every((p) => inMirrorFamily(p))) return { resolved: false, reason: `conflicts outside the mirror families: ${conflicted.filter((p) => !inMirrorFamily(p)).slice(0, 5).join(", ") || "none listed"}` };
+  const take = await run("git", ["checkout", sha, "--", ...conflicted], { cwd: root });
+  if (take.code !== 0) return { resolved: false, reason: `could not take base's copy of the conflicted mirror paths: ${take.stderr?.trim() || `exit ${take.code}`}` };
+  const r = await regenerate({ root });
+  if (!r.ok) return { resolved: false, reason: r.reason };
+  const add = await run("git", ["add", "--", ".factory/lib", ".factory/bin", ".factory/actions", ".claude/hooks"], { cwd: root });
+  if (add.code !== 0) return { resolved: false, reason: `git add after regeneration failed: ${add.stderr?.trim() || `exit ${add.code}`}` };
+  const commit = await run("git", [...ident, "commit", "--no-edit"], { cwd: root });
+  if (commit.code !== 0) return { resolved: false, reason: `merge commit after regeneration failed: ${commit.stderr?.trim() || `exit ${commit.code}`}` };
+  return { resolved: true, conflicted, regenerated: r.changed };
+}
+
+export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "base", env = process.env, regenerate = regenerateMirror }) {
   // "이미 base를 들고 있는가"를 머지의 출력으로 묻지 않는다 — 물어보고 나서 머지하면 빈 머지 커밋도
   // push도 생기지 않는다(라운드마다 의미 없는 커밋이 쌓이는 것은 그 자체로 diff를 읽기 어렵게 한다).
   const anc = await run("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: root });
@@ -2059,7 +2083,12 @@ export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "ba
   const bot = (env?.FACTORY_BOT_LOGIN || "").trim();
   const ident = ["-c", "user.name=factory", "-c", `user.email=${bot ? `${bot}@users.noreply.github.com` : "factory-bot@users.noreply.github.com"}`];
   const mg = await run("git", [...ident, "merge", "--no-edit", "--no-ff", sha], { cwd: root });
+  let mirrorResolved = null;
   if (mg.code !== 0) {
+    const rm = await resolveMirrorConflicts({ run, root, sha, ident, regenerate });
+    if (rm.resolved) mirrorResolved = rm;
+  }
+  if (mg.code !== 0 && !mirrorResolved) {
     const ab = await run("git", ["merge", "--abort"], { cwd: root });
     return {
       ok: false,
@@ -2069,7 +2098,7 @@ export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "ba
   }
   const push = await run("git", ["push", "origin", branch], { cwd: root });
   if (push.code !== 0) return { ok: false, reason: `git push origin ${branch} failed after merging base ${sha.slice(0, 7)} — ${push.stderr?.trim() || `exit ${push.code}`}` };
-  return { ok: true, merged: sha };
+  return { ok: true, merged: sha, ...(mirrorResolved ? { mirrorResolved: { conflicted: mirrorResolved.conflicted, regenerated: mirrorResolved.regenerated } } : {}) };
 }
 
 /** run 기록의 한 줄 — 누가 어디에서 이 브랜치를 세웠는가. */
@@ -2081,7 +2110,8 @@ export const harnessReloadLine = (h, when) =>
 
 /** KTB-38 — 이 라운드가 어떤 base 위에서 돌았는지. 머지가 실제로 붙은 라운드에만 나온다. */
 export const baseMergedLine = (cb) =>
-  `base_merged: ${String(cb.merged).slice(0, 7)} (${cb.source || "base"}) merged into ${cb.branch} by the stage and pushed before the builder — the PR tree carries base's tooling`;
+  `base_merged: ${String(cb.merged).slice(0, 7)} (${cb.source || "base"}) merged into ${cb.branch} by the stage and pushed before the builder — the PR tree carries base's tooling`
+  + (cb.mirrorResolved ? ` (conflicts in ${cb.mirrorResolved.conflicted.length} runner-generated mirror path(s) resolved by regenerating from the merged factory/**: ${cb.mirrorResolved.conflicted.slice(0, 4).join(", ")})` : "");
 
 /**
  * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
