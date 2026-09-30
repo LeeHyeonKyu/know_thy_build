@@ -21,7 +21,7 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 3 | 9 |
+| needs-human | 4 | 9 |
 | rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
 | unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
@@ -306,8 +306,8 @@
       },
       {
         "issue": 130,
-        "reason": "blocked (gates undecided) — needs human",
-        "at": "2026-09-30T05:56:28Z"
+        "reason": "blocked (undecidable) — needs human",
+        "at": "2026-09-30T07:55:33Z"
       }
     ]
   },
@@ -328,7 +328,7 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 3,
+    "needs_human": 4,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
