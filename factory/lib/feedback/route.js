@@ -162,12 +162,18 @@ export async function routeFindings({
     for (const c of harnessOnes) actions.push({ kind: "routed-already", step: "feedback-route", issue, fingerprint: c.fingerprint, arm: "harness" });
   } else if (harnessFresh.length) {
     try {
+      // #136 (S2b) — 이 팔은 문(리허설·심사)을 배선하지 않는다(plan non_goals): 새 하네스 이슈는 `backlog`로 태어나 사람의
+      // `:next`를 기다린다. 영수증을 남기면 지문은 "처리됨"이 되어 다음 회고가 다시 보내지 않으므로, 액션과 영수증이 그 사실을
+      // 말해야 한다 — "고칠 것입니다"라고 쓰면 발견은 사실상 버려진다.
       const r = await ensureHarnessIssue({ gh, issue, entries: harnessFresh.map(harnessEntryOf), pr: null, origin: "feedback" });
-      actions.push({ kind: "harness-issue", step: "feedback-route", issue, harness_issue: r.issue, created: r.created, appended: r.appended ?? 0, findings: harnessFresh.length });
+      const backlogged = r.queued === false;
+      actions.push({ kind: "harness-issue", step: "feedback-route", issue, harness_issue: r.issue, created: r.created, appended: r.appended ?? 0, findings: harnessFresh.length, ...(backlogged ? { queued: false, queue_reason: r.queue_reason } : {}) });
       try {
         await gh.comment(issue, [
           harnessFresh.map((c) => routedMarker(c.fingerprint)).join("\n"),
-          `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**가 고칠 것입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}${r.created ? "를 열었습니다" : "에 실었습니다"}.`,
+          backlogged
+            ? `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**의 몫입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}를 열었지만 **큐에 넣지 않았습니다**: #${r.issue}는 \`backlog\`에서 사람의 \`/know-thy-build:next\`를 기다립니다(${r.queue_reason}).`
+            : `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**가 고칠 것입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}${r.created ? "를 열었습니다" : "에 실었습니다"}.`,
           "",
           ...harnessFresh.map((c) => `- \`${[c.causal.path, c.causal.locus].filter(Boolean).join(" ")}\` — ${oneLine(c.payload.reason)} (fp \`${c.fingerprint}\`)`),
         ].join("\n"));

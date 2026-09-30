@@ -131,7 +131,7 @@ describe("(a) harness 발견은 쓰는 저장소의 harness 이슈 하나로만 
     const gh = fakeGh();
     const r = await route({ gh, issue: 7, upstream: UPSTREAM, findings });
     expect(gh.calls.createIssue).toHaveLength(1);
-    expect(gh.calls.createIssue[0].labels).toEqual(["factory:queue", HARNESS_LABEL]);
+    expect(gh.calls.createIssue[0].labels).toEqual(["backlog", HARNESS_LABEL]);   // #136 (S2b): 큐가 아니라 backlog로 태어난다
     expect(gh.calls.createIssue[0].body).toContain("[runtime].setup");
     expect(gh.calls.upstreamIssue).toEqual([]);
     expect(r.actions.map((a) => a.kind)).toContain("harness-issue");
@@ -650,4 +650,25 @@ describe("attribution의 두 구멍 (재리뷰 NEW-MF-1/2)", () => {
     expect(harvest9("", [note], null)[0].extra.attribution).toBe("none");
     expect(harvest9("", [note], FACTORY_LOGINS)[0].extra.attribution).toEqual(["human-decision"]);
   });
+});
+
+// ── #136 (S2b) — 피드백 루프의 하네스 이슈는 backlog로 태어나고, 그 사실이 조용히 사라지지 않는다 ─────────────
+// 이 팔은 문(리허설·심사)을 배선하지 않는다(범위 밖 — plan non_goals). 그래서 여기서 열린 하네스 이슈는 사람의 `:next`를 기다린다.
+// 그런데 영수증을 남기는 순간 지문은 "처리됨"이 되어(seenFingerprints) 다음 회고가 다시 보내지 않는다 — 영수증이 "고칠 것입니다"라고
+// 말하면 발견은 사실상 버려진다. 액션과 영수증 둘 다 "큐에 들어가지 않았다"를 말해야 한다.
+test("test_136_feedback_route_harness_not_silently_dropped", async () => {
+  const findings = await harnessGateFinding({ outcomes: { unit: FLUTTER_NOT_FOUND } });
+  const gh = fakeGh();
+  const r = await route({ gh, issue: 7, upstream: UPSTREAM, findings });
+  expect(gh.calls.createIssue).toHaveLength(1);
+  expect(gh.calls.createIssue[0].labels).toEqual(["backlog", HARNESS_LABEL]);
+  const n = gh.local[0].number;
+  expect(gh.local[0].labels).toEqual(["backlog", HARNESS_LABEL]);          // 문 배선이 없으니 라벨은 그대로다
+  const action = r.actions.find((a) => a.kind === "harness-issue");
+  expect(action).toMatchObject({ harness_issue: n, created: true, queued: false });
+  expect(action.queue_reason).toMatch(/no transition (is )?wired/);
+  const receipt = gh.calls.comment.find((c) => c.issue === 7 && c.body.includes(`#${n}`));
+  expect(receipt.body).toContain("backlog");
+  expect(receipt.body).toContain(`/know-thy-build:next`);
+  expect(receipt.body).not.toMatch(/고칠 것입니다/);                      // 오고 있다고 말하지 않는다
 });
