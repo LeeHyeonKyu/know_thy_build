@@ -3806,3 +3806,17 @@ CLI와 이슈 본문 수정을 실행하라고 적혀 있지만, 같은 저장�
 남긴 것(S2b): 하네스 이슈는 아직 `factory:queue` 라벨로 태어난다(`harness-request.js`) — 피처당 1건 dedupe가 상한 노릇을 하지만 같은 문을
 지나게 해야 한다; `self_generated.usd_per_week`(자기생성 주간 예산)은 records 브랜치의 usage 합산이 필요해 sweeper 쪽에서 구현한다;
 `per_merge_max`는 retro의 발행 시점에서 센다(아직 미구현).
+
+**1.4.35 S3 (설계 2026-09-30 §8.3, KTB #41).** **설치된 엔진(미러)은 러너가 만든다.** KTB 자기 저장소의 엔진 PR은 `factory/**`(소스)를
+고치지만 설치본 `.factory/{lib,bin,actions}/**`·`.claude/hooks/*.sh`에는 에이전트가 쓸 수 없다(옳다 — 판정에 쓰이는 엔진을 판정 대상이
+고치면 안 된다). 그래서 첫 엔진 이슈(#36)는 self-mirror 테스트에서 멈췄고 사람이 일곱 파일을 손으로 복사했다($37.88의 라운드).
+- `lib/mirror.js`가 그 네 가족만 **설치의 생성 함수 자체**(`buildManifest`+`freshContent`)로 다시 만든다. `init --upgrade`는 쓰지 않는다 —
+  `.claude/agents/*.md`의 additive 섹션(회고가 쌓은 예시·관점)을 덮는 것을 이번 세션에서 실측했다.
+- implement: 드리프트 제거·클린 체크 **뒤**, 게이트 **앞**에 재생성해 러너 이름으로 커밋·push한다. 그 sha가 handoff의 `head_sha`가 되고
+  빌더의 sha는 `builder_head_sha`로 남는다. review·merge: PR head의 설치본이 소스가 만드는 것과 같은지 확인하고, 다르면 판정 불가
+  (`factory:blocked`) — 누군가 설치본을 손으로 만졌다는 뜻이다.
+- 판정은 여전히 **base의 엔진**이 한다(ADR-023 overlay 그대로): 새 엔진은 자기 PR을 리뷰·머지하는 데 쓰이지 않는다.
+- 채택자 저장소에는 `factory/cli/**`가 없어 이 단계가 없다(`applicable: false`, 기록도 없다).
+- 엔진 경로의 머지는 아직 사람이 한다(`merge-stage.js`의 보호 경로 규칙 그대로). 자동 머지(S4)는 비판정 경로에 한해, 거부 시드 카나리와
+  엔진 내부 거부권 타이머가 생긴 뒤다(설계 §8.3).
+실증(KTB 이슈 1건이 자기 공장을 통과)은 이 버전이 KTB의 main에 설치된 뒤에만 가능하다 — 스테이지는 base의 엔진으로 돈다.

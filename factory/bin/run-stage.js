@@ -21,6 +21,7 @@ import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
+import { mirrorStep } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
@@ -565,6 +566,17 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 머지했는지 런 레코드에 남긴다. 여기서 끝낸다.
     // `stamp`: 머지 스테이지가 남기는 `gates-detail:` 줄도 자기 런을 지목해야 한다(Task 1의 계약).
     // 여기는 아래의 `stamp` 정의보다 앞이지만 `runId`/`runnerId`는 이 함수의 인자라 이미 있다.
+    /**
+     * 설계 2026-09-30 §8.3 (S3, KTB #41) — **설치된 엔진은 러너가 만든다.** KTB 자기 저장소의 엔진 PR에서 `.factory/**`·
+     * `.claude/hooks/*.sh`는 `factory/**`에서 생성되는 파일이다. overlay는 그 경로를 base의 것으로 덮었으므로(판정은 base 엔진이
+     * 한다 — 그대로다) 게이트 직전에 PR의 소스로 다시 만들어, PR head가 실은 설치본이 정확히 그 소스가 만드는 것인지 확인한다.
+     * 다르면 판정 불가(blocked): 누군가 설치본을 손으로 만졌다는 뜻이다. 채택자 저장소에는 소스가 없어 이 단계가 없다.
+     */
+    if (stage === "merge" && d.mirror) {
+      const m = await d.mirror("verify", checkoutSha);
+      if (!m.ok) { const t = await d.transition({ to: "factory:blocked", reason: `undecidable — ${m.reason}` }); record([`mirror: FAIL — ${m.reason}`, ...refusal(t)]); return 2; }
+      if (m.applicable) record([mirrorLine(m)]);
+    }
     if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
@@ -686,6 +698,23 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 이미 끝났을 수 있고 산출물은 트랜스크립트 안에 있다 — 모자란 것은 디스패처가 그것을 다시 출력할
     // 턴뿐이었거나, claude -p 자신이 응답 도중 죽었을 뿐이다. 게이트를 건너뛰면 verifyStage가 복구한
     // 산출물을 "gates file missing"으로 되떨어뜨려, 복구가 아무 소용이 없어진다.
+    /**
+     * 설계 2026-09-30 §8.3 (S3, KTB #41) — 게이트 직전의 **미러 단계**(위 merge와 같은 근거). implement는 빌더가 고친 `factory/**`
+     * 에서 설치본을 다시 만들어 **러너 이름으로** 커밋한다(빌더는 그 경로에 쓸 수 없고, 그것은 옳다). 그 커밋이 새 head가 되므로
+     * 아래 handoff의 `head_sha`를 그 sha로 갱신한다(빌더의 sha는 `builder_head_sha`로 남긴다). review는 PR head의 설치본이 소스와
+     * 같은지만 확인한다. 순서: drift 커밋 제거와 클린 체크 **뒤**(그 둘은 세션이 만든 diff를 보는 자리다), 게이트 **앞**.
+     */
+    let mirrorSha = null;
+    if ((stage === "implement" || stage === "review") && d.mirror) {
+      const m = await d.mirror(stage === "implement" ? "commit" : "verify", null);
+      if (!m.ok) {
+        const reason = `undecidable — ${m.reason}`;
+        const t = await d.transition({ to: "factory:blocked", reason });
+        record([`mirror: FAIL — ${m.reason}`, ...refusal(t), usage]);
+        return 2;
+      }
+      if (m.applicable) { record([mirrorLine(m)]); if (stage === "implement" && m.changed.length && m.sha) mirrorSha = m.sha; }
+    }
     let gates = null;
     if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
@@ -740,6 +769,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       return 2;
     }
     let v = d.verifyStage({ stage, out, ctx, gates });
+    // S3 — 러너의 미러 커밋이 새 head다. 빌더가 적은 sha는 감사용으로 남기고, 전이 요구조건이 묶는 `head_sha`는 실제 브랜치 head로.
+    if (mirrorSha && v?.ok && v.data && typeof v.data === "object") {
+      v = { ...v, data: { ...v.data, builder_head_sha: v.data.head_sha ?? null, head_sha: mirrorSha, mirror_sha: mirrorSha } };
+      try { d.syncStageArtifact?.(v.data); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ }
+    }
     // KTB-15b M1: 어느 후보가 산출물로 뽑혔는지(파일 재조립·task-notification·envelope 펜스 …)는
     // 사후 감사의 provenance다 — verifyStage가 계산해 둔 것을 그냥 흘려보내지 않고 한 줄 남긴다.
     if (v.source) record([`artifact: ${v.source}`]);
@@ -2225,6 +2259,11 @@ export async function overlayDrift({ run, cwd, sha, harnessIssue = false }) {
   return paths.length === 0 ? { ok: true, paths: [] } : { ok: false, paths };
 }
 
+/** S3 — 미러 단계의 run 기록 한 줄. */
+export const mirrorLine = (m) => (m.changed?.length
+  ? `mirror: regenerated ${m.changed.length} installed-engine path(s) from factory/** → ${String(m.sha || "").slice(0, 7)} (runner-owned commit): ${m.changed.slice(0, 6).join(", ")}${m.changed.length > 6 ? ", …" : ""}`
+  : "mirror: verified — the installed engine is what factory/** generates");
+
 /** run 기록의 한 줄 — 무엇을, 어느 커밋에서 덮었는지. */
 export const overlayLine = (ov) => {
   // harness 이슈에서는 무엇이 **열려 있었는지**도 같은 줄에 적는다 — 나중에 이 런을 읽는 사람이
@@ -2419,6 +2458,8 @@ async function main() {
     reloadHarness: () => { harness = loadHarness(root); return harness; },
     /** 세션 뒤: HEAD가 아직 그 브랜치이고 팩토리 설정이 아직 스테이지 커밋의 것인가(fail closed). */
     assertStageBranch: async (harnessIssue = false) => assertStageBranch({ run, cwd: root, issue, sha: overlaySha, harnessIssue }),
+    /** S3 — 설치된 엔진의 재생성(`lib/mirror.js`). KTB 자기 저장소에서만 적용된다(소스 `factory/cli/**`가 있을 때). */
+    mirror: (mode, headSha) => mirrorStep({ root, run, mode, headSha }),
     /**
      * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).

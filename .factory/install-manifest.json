@@ -452,6 +452,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/mirror.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/mutation-check.js",
       "owner": "factory"
     },
