@@ -20,6 +20,7 @@ import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, T
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
+import { makeQueueAdmission } from "../lib/admission.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
@@ -2348,6 +2349,10 @@ async function main() {
    * 모양이었다: 네 번째 자리에 아무것도 없었다).
    */
   const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });   // 지연: harness는 charterReady에서 읽힌다
+  // S2 — 큐 진입 심사. charter는 charterReady에서 읽히므로 호출 시점에 늦게 본다; 없으면 심사기가 거부한다(fail closed).
+  const admission = async (args) => (charter
+    ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
+    : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -2512,7 +2517,7 @@ async function main() {
         run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
         saveQuarantine: (q) => writeQuarantine(root, q),
         // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
-        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal }),
+        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal, admission }),
       });
       mkdirSync(join(root, ".factory/out"), { recursive: true });
       writeFileSync(gatesPath, JSON.stringify(result, null, 2));
@@ -2859,7 +2864,7 @@ async function main() {
        * 리허설을 새로 GREEN으로 돌려도 풀리지 않는다(값이 낡은 것이 아니라 인자가 없는 것이다).
        * 다른 목적 라벨에는 비용이 0이다: `transition()`은 `to === "factory:queue"`일 때만 검사기를 부른다.
        */
-      return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal });
+      return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission });
     },
     /**
      * Feedback loop (T3 re-review NEW-MF-1) — **이 런이 쓴 팩토리 버전.** `self-gate-detail:` 줄에

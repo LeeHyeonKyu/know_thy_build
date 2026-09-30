@@ -3203,6 +3203,8 @@ const blockedTriageDeps = ({ gh, rehearsal }) => ({
     gh, issue: 7, to, reason, stage: "triage",
     ctxExtra: { gatesChecked: true, ...(prerequisite ? { prerequisite: true } : {}) },
     ...(rehearsal === undefined ? {} : { rehearsal }),
+    // S2 — 큐 진입 심사도 같은 자리에 실린다. 이 테스트가 보는 것은 리허설이므로 심사는 통과 스텁이다.
+    ...(rehearsal === undefined ? {} : { admission: async () => ({ ok: true, reasons: [] }) }),
   }),
   // hop 이후로는 가지 않는다 — 이 테스트가 보는 것은 hop 하나다.
   assertHandoff: async () => ({ ok: false, reason: "stop here" }),

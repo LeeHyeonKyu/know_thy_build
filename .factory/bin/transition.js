@@ -8,13 +8,15 @@ import { join } from "node:path";
  * 스택만 남기고 죽는다 — 무엇을 하면 되는지는 말하지 않는다. 그래서 라이브러리를 동적으로 읽고, 의존성이
  * 없을 때만 그 한 줄을 말한다. 다른 오류는 그대로 던진다(삼키지 않는다).
  */
-let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, makeRehearsalChecker, loadHarness;
+let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, makeRehearsalChecker, loadHarness, loadCharter, makeQueueAdmission, resolveFactoryLogins;
 try {
   ({ run } = await import("../lib/exec.js"));
   ({ makeGh } = await import("../lib/gh.js"));
   ({ parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv } = await import("../lib/transition.js"));
   ({ makeRehearsalChecker } = await import("../lib/rehearsal.js"));
-  ({ loadHarness } = await import("../lib/config.js"));
+  ({ loadHarness, loadCharter } = await import("../lib/config.js"));
+  ({ makeQueueAdmission } = await import("../lib/admission.js"));
+  ({ resolveFactoryLogins } = await import("../lib/gh.js"));
 } catch (e) {
   if (e?.code !== "ERR_MODULE_NOT_FOUND") throw e;
   console.error(
@@ -76,10 +78,16 @@ const gh = makeGh({ run, repo });
 let defaultBranch = "main";
 try { defaultBranch = loadHarness(root)?.project?.default_branch || "main"; } catch { /* 기본값 그대로 */ }
 const rehearsal = makeRehearsalChecker({ gh, root, branch: defaultBranch });
+// S2 — 큐 진입 심사(job 형식·NEVER_AUTOMATE·큐 길이·자기생성 상한). CHARTER를 못 읽으면 심사기가 거부한다(fail closed).
+let charterForAdmission = null;
+try { charterForAdmission = loadCharter(root); } catch { charterForAdmission = null; }
+const admission = charterForAdmission
+  ? makeQueueAdmission({ gh, charter: charterForAdmission, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })
+  : async () => ({ ok: false, reasons: ["docs/factory/CHARTER.md could not be read — queue admission needs it"] });
 
 // S1 — 제출자 자기 신고(감사 기록). 로그인 조회가 실패해도 전이는 막지 않는다(`unknown`).
 let login = null;
 try { login = await gh.viewerLogin(); } catch { /* 감사 필드만 비운다 */ }
-const r = await transition({ gh, issue, to, human, retry, reason, by: principalFromEnv(process.env, login), ctxExtra, rehearsal });
+const r = await transition({ gh, issue, to, human, retry, reason, by: principalFromEnv(process.env, login), ctxExtra, rehearsal, admission });
 console.log(JSON.stringify(r));
 process.exit(r.ok ? 0 : 2);

@@ -122,6 +122,8 @@ export function loadCharter(root) {
     plan: { ...PLAN_DEFAULTS, ...(data.plan || {}) },
     // quarantine 캡의 단일 출처는 harness [gates.thresholds].quarantine_max다 — 여기엔 두지 않는다.
     back_pressure: { awaiting_review_max: 4, ...(data.back_pressure || {}) },
+    /** 설계 2026-09-30 §8.2 (S2) — 자기생성 이슈의 상한. 기본값은 `lib/admission.js`의 `SELF_GENERATED_DEFAULTS`가 채운다; 사람만 고친다. */
+    self_generated: { ...(data.self_generated || {}) },
     /**
      * 외부 감사 2026-09-14 H6 — `merge.human_gate`. **기본값을 여기서 채우지 않는다**(다른 필드와
      * 다른 점이다): 없는 것과 false는 다른 사실이기 때문이다. false는 "소유자가 다크 머지를 골랐다"는

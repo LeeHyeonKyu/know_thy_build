@@ -292,6 +292,10 @@
       "owner": "project"
     },
     {
+      "dest": ".factory/lib/admission.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/agent-md.js",
       "owner": "factory"
     },

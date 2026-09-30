@@ -49,6 +49,8 @@ async function swapLabel({ gh, issue, from, to }) {
  */
 export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry";
 
+/** 설계 2026-09-30 §8.2 (S2) — 큐 진입 심사가 배선되지 않은 큐 전이의 거부 사유. 리허설과 같은 규칙(fail closed). */
+export const ADMISSION_UNWIRED = "no queue admission is wired into this transition — `→ factory:queue` is refused (fail closed). Pass `admission` (see lib/admission.js makeQueueAdmission; bin/transition.js / sweep.js / run-stage.js) or, in tests only, `skipRehearsal: true`";
 /** 리허설 배선이 아예 없는 큐 전이의 거부 사유 — 그 자체가 배선 지시문이다(리뷰 must_fix 3). */
 export const REHEARSAL_UNWIRED = "no rehearsal checker is wired into this transition — `→ factory:queue` is refused (fail closed). Pass `rehearsal` (see bin/transition.js / sweep.js) or, in tests only, `skipRehearsal: true`";
 
@@ -64,7 +66,7 @@ export function principalFromEnv(env = process.env, login = null) {
   return `person:${who}`;
 }
 
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", by = null, stage, cause, env = process.env, rehearsal = null, skipRehearsal = false }) {
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", by = null, stage, cause, env = process.env, rehearsal = null, admission = null, skipRehearsal = false }) {
   /**
    * ── KTB-44 / ADR-025 — **리허설 없이는 큐가 열리지 않는다.** ───────────────────────────────────
    * own-calendar의 첫 다크 이슈는 하네스 초안의 결함 세 개를 **라운드마다 하나씩** 드러냈다(exit 127의
@@ -86,6 +88,14 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
     const r = typeof rehearsal === "function" ? await rehearsal() : rehearsal;
     if (!r) return { ok: false, from: null, to, reason: REHEARSAL_UNWIRED };
     if (r.ok !== true) return { ok: false, from: null, to, reason: r.reason || "harness changed since the last rehearsal — run `factory rehearse`" };
+    /**
+     * 설계 2026-09-30 §8.2 (S2) — **큐 진입 심사.** 누구나 제출할 수 있으므로(§8.1) 문은 job의 형식과 상한을 본다: done_when의
+     * 존재, NEVER_AUTOMATE, 큐 길이, 자기생성 이슈의 개수·세대. 리허설처럼 배선된 검사기가 없으면 거부한다(fail closed) —
+     * `skipRehearsal`은 테스트 전용이고 둘 다 건너뛴다. 심사기는 절대 throw하지 않는다(읽지 못하면 거부).
+     */
+    if (typeof admission !== "function") return { ok: false, from: null, to, reason: ADMISSION_UNWIRED };
+    const a = await admission({ issue });
+    if (a?.ok !== true) return { ok: false, from: null, to, reason: `queue admission refused — ${(Array.isArray(a?.reasons) && a.reasons.length ? a.reasons : [a?.reason || "unknown"]).join("; ")}` };
   }
   // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
   // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.

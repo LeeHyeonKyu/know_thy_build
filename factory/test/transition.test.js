@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { transition, principalFromEnv, parseTransitionArgs, refuseHumanFlag } from "../lib/transition.js";
+import { transition, principalFromEnv, parseTransitionArgs, refuseHumanFlag, ADMISSION_UNWIRED } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, resumePoint } from "../lib/retro/issue-comments.js";
 
@@ -543,4 +543,33 @@ test("S1: principalFromEnv — runner, agent session, or a person's own shell", 
   expect(principalFromEnv({}, null)).toBe("person:unknown");
   // 마커 문법을 깨는 문자는 들어가지 않는다(공백·`>`)
   expect(principalFromEnv({}, "a b>c")).toBe("person:a-b-c");
+});
+
+/**
+ * 설계 2026-09-30 §8.2 (S2) — 큐 진입 심사는 리허설 다음의 자물쇠이고 같은 규칙을 따른다: 배선이 없으면 거부, 심사가 거부하면
+ * 그 사유를 그대로 돌려준다, 다른 목적 라벨은 묻지 않는다. `skipRehearsal`은 테스트 전용이고 둘 다 건너뛴다.
+ */
+const queueGh = () => ({ issue: vi.fn(async () => ({ labels: ["backlog"] })), comments: vi.fn(async () => []), comment: vi.fn(async () => {}), setFactoryLabel: vi.fn(async () => ({ verify: "ok" })), removeLabel: vi.fn(async () => {}), addLabel: vi.fn(async () => {}) });
+
+test("S2: a queue transition with a rehearsal but NO admission wiring is refused (fail closed)", async () => {
+  const r = await transition({ gh: queueGh(), issue: 7, to: "factory:queue", rehearsal: { ok: true } });
+  expect(r).toEqual({ ok: false, from: null, to: "factory:queue", reason: ADMISSION_UNWIRED });
+});
+
+test("S2: the admission's reasons come back verbatim and the label does not move", async () => {
+  const gh = queueGh();
+  const r = await transition({ gh, issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission: async () => ({ ok: false, reasons: ["queue 8 ≥ 8 (back_pressure.queue_max)", "not an explicit job: the body has no `done_when` section (and no factory marker)"] }) });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toBe("queue admission refused — queue 8 ≥ 8 (back_pressure.queue_max); not an explicit job: the body has no `done_when` section (and no factory marker)");
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();                        // 거부는 이슈를 한 글자도 바꾸지 않는다
+});
+
+test("S2: an admitted job moves; a non-queue target never consults the admission", async () => {
+  const admission = vi.fn(async () => ({ ok: true, reasons: [] }));
+  expect((await transition({ gh: queueGh(), issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission })).ok).toBe(true);
+  expect(admission).toHaveBeenCalledWith({ issue: 7 });
+  const gh2 = { ...queueGh(), issue: vi.fn(async () => ({ labels: ["factory:queue"] })) };
+  expect((await transition({ gh: gh2, issue: 7, to: "factory:wont-do", admission })).ok).toBe(true);
+  expect(admission).toHaveBeenCalledTimes(1);
 });

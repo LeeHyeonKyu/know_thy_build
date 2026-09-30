@@ -3795,3 +3795,14 @@ CLI와 이슈 본문 수정을 실행하라고 적혀 있지만, 같은 저장�
   self-gate backstop 창이 리셋됐다 — 봇 계정이 흉내 낼 수 있는 구멍이었다. 작성자를 모르거나 팩토리 계정이면 리셋하지 않는다.
 - **스킬**(`:issue`, `:next`, 공통 집행 규칙): 큐 진입은 플래그 없는 제출. `--human`은 `needs-human`/`needs-info` 재시도에만 남는다.
 다음 단계(S2 이후)와 사람 전용으로 남는 것은 설계 §8.2–8.4, §5.
+
+**1.4.35 S2 (설계 2026-09-30 §8.2).** 큐 진입은 누구나 할 수 있으므로 문은 하나여야 하고, 그 문은 제출자가 아니라 **job의 형식과
+상한**을 본다(`lib/admission.js`, 리허설과 같은 자리·같은 규칙 — 배선이 없으면 fail closed, 테스트만 `skipRehearsal`로 건너뛴다):
+- **명시적 job인가** — 본문에 `done_when`이 있거나 공장의 마커가 있다.
+- **NEVER_AUTOMATE를 문에서 댄다** — 예전에는 triage 뒤에야 스크립트가 `wont-do`로 덮었다(L47). 로그아웃 버그(#106)가 그 경우다.
+- **큐 길이** `back_pressure.queue_max`(8) — `awaiting_review_max`는 리뷰 대기 수지 큐 길이가 아니다(토론 NEUTRAL).
+- **자기생성 이슈의 상한** `self_generated.open_max`(5)·`depth_max`(1) — 자기생성인지는 러너가 쓴 마커(개선·하네스·flaky)와 작성 계정으로
+  판정한다, `by=` 자기 신고가 아니라. 실측 증식률 0.25/머지에서 루프는 이미 수렴한다 — 이것은 지문 드리프트 같은 결함에 대한 보험이다.
+남긴 것(S2b): 하네스 이슈는 아직 `factory:queue` 라벨로 태어난다(`harness-request.js`) — 피처당 1건 dedupe가 상한 노릇을 하지만 같은 문을
+지나게 해야 한다; `self_generated.usd_per_week`(자기생성 주간 예산)은 records 브랜치의 usage 합산이 필요해 sweeper 쪽에서 구현한다;
+`per_merge_max`는 retro의 발행 시점에서 센다(아직 미구현).
