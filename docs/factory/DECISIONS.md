@@ -3842,3 +3842,8 @@ Bash에는 `CLAUDE_PROJECT_DIR`가 없다 — 그 변수는 훅과 스테이지�
 머지 커밋을 완성한다(`resolveMirrorConflicts`). 소스가 하나라도 충돌했으면 예전처럼 abort하고 사람에게 넘긴다. 채택자 저장소는 그대로다.
 세 번의 실측이 말하는 것: 러너 미러 커밋은 **생성물**이고, 그것을 변경으로 읽는 통제마다 예외가 필요했다(must_not, overlay, base 병합).
 S4 이전에 "생성물은 diff가 아니다"를 한 곳(`inMirrorFamily`)에서 정의하는 것이 이 셋의 공통 근거다.
+
+**1.4.38 (KTB #136 실측, 넷째).** #136은 implement를 끝까지 통과했다(미러 커밋 `33c1889` 5개 파일, `must_not` 통과, 게이트 5/5 GREEN) —
+#41의 절반이 처음으로 실제로 증명된 런이다. 그 다음 review에서 미러 **검증**이 오판했다: overlay의 `git checkout <base> -- …`는 인덱스도
+base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 인덱스는 base라 `git status`가 staged 변경을 보고했고 검증은 "소스와 다르다"고
+읽었다. 리뷰어 5명의 판정을 두 번($8.8) 버렸다. 검증은 워크트리를 HEAD와 직접 비교한다(`git diff --name-only HEAD`).
