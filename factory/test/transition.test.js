@@ -573,3 +573,17 @@ test("S2: an admitted job moves; a non-queue target never consults the admission
   expect((await transition({ gh: gh2, issue: 7, to: "factory:wont-do", admission })).ok).toBe(true);
   expect(admission).toHaveBeenCalledTimes(1);
 });
+
+/**
+ * 1.4.36 — 대화형 Claude Code 세션의 Bash에는 `CLAUDE_PROJECT_DIR`가 없다(훅·스테이지 세션에만 있다). KTB #130을 운영 세션이
+ * 큐에 넣었을 때 마커가 `by=person:`으로 적혔다. 대화형 세션의 변수(`CLAUDECODE` 등)도 "사람의 셸이 아니다"로 읽는다 —
+ * 자기 신고와 `--human` 거절 둘 다.
+ */
+test("1.4.36: an interactive Claude Code session is an agent session — for the self-report and for the --human refusal", () => {
+  for (const env of [{ CLAUDECODE: "1" }, { CLAUDE_CODE_ENTRYPOINT: "cli" }, { CLAUDE_CODE_SESSION_ID: "abc" }, { CLAUDE_PROJECT_DIR: "/x" }]) {
+    expect(principalFromEnv(env, "hk"), JSON.stringify(env)).toBe("agent:hk");
+    expect(refuseHumanFlag(env), JSON.stringify(env)).toBe(true);
+  }
+  expect(principalFromEnv({ SHELL: "/bin/zsh", HOME: "/Users/hk" }, "hk")).toBe("person:hk");
+  expect(refuseHumanFlag({ SHELL: "/bin/zsh" })).toBe(false);
+});

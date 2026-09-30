@@ -3820,3 +3820,9 @@ CLI와 이슈 본문 수정을 실행하라고 적혀 있지만, 같은 저장�
 - 엔진 경로의 머지는 아직 사람이 한다(`merge-stage.js`의 보호 경로 규칙 그대로). 자동 머지(S4)는 비판정 경로에 한해, 거부 시드 카나리와
   엔진 내부 거부권 타이머가 생긴 뒤다(설계 §8.3).
 실증(KTB 이슈 1건이 자기 공장을 통과)은 이 버전이 KTB의 main에 설치된 뒤에만 가능하다 — 스테이지는 base의 엔진으로 돈다.
+
+**1.4.36 (KTB #130 실측).** 운영 세션(대화형 Claude Code)이 #130을 큐에 넣자 마커가 `by=person:LeeHyeonKyu`로 적혔다. 대화형 세션의
+Bash에는 `CLAUDE_PROJECT_DIR`가 없다 — 그 변수는 훅과 스테이지의 `claude -p`에만 있고, 대화형 세션은 `CLAUDECODE`·
+`CLAUDE_CODE_ENTRYPOINT`·`CLAUDE_CODE_SESSION_ID`를 세운다. 같은 구멍으로 `--human`도 CLI의 두 번째 자물쇠(`refuseHumanFlag`)를
+지나칠 수 있었고 훅만이 막고 있었다. 이제 그 셋도 "사람의 셸이 아니다"로 읽는다(`isAgentSession`). 토론 CON 1이 말한 대로 자기 신고는
+감사 기록일 뿐이지만, 감사 기록이 틀리면 안 된다.

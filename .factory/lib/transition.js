@@ -18,7 +18,15 @@ export const NO_RESUME_POINT = "cannot resolve a resume point from this issue's 
  * 네트워크 호출 전에 거절한다(exit 2) — 순수 함수로 뺀 이유는 그 거절을 프로세스를 띄우지 않고도
  * 테스트할 수 있게 하기 위해서다.
  */
-export const refuseHumanFlag = (env = process.env) => Boolean(env?.CLAUDE_PROJECT_DIR || env?.GITHUB_ACTIONS);
+/**
+ * 1.4.36 (KTB #130의 실측) — **대화형 Claude Code 세션은 `CLAUDE_PROJECT_DIR`를 세우지 않는다.** 그 변수는 훅과 스테이지의
+ * `claude -p`에만 있고, 사람이 노트북에서 연 Claude Code 세션의 Bash에는 `CLAUDECODE`·`CLAUDE_CODE_ENTRYPOINT`·
+ * `CLAUDE_CODE_SESSION_ID`만 있다. 그래서 운영 세션의 큐 투입이 `by=person:`으로 적혔고, 같은 구멍으로 `--human`도 CLI의
+ * 두 번째 자물쇠를 지나칠 수 있었다(첫 번째 자물쇠인 훅만이 막았다). 셋 중 하나라도 있으면 사람의 셸이 아니다.
+ */
+export const AGENT_SESSION_ENV = ["CLAUDE_PROJECT_DIR", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"];
+export const isAgentSession = (env = process.env) => AGENT_SESSION_ENV.some((k) => Boolean(env?.[k]));
+export const refuseHumanFlag = (env = process.env) => Boolean(isAgentSession(env) || env?.GITHUB_ACTIONS);
 
 /**
  * ADR-020 r2 (리뷰 (c)) — **전이 코멘트가 스왑보다 먼저 나가는 대가를 여기서 갚는다.** 그 순서는
@@ -62,7 +70,7 @@ export const REHEARSAL_UNWIRED = "no rehearsal checker is wired into this transi
 export function principalFromEnv(env = process.env, login = null) {
   const who = String(login || "unknown").replace(/[\s>]+/g, "-");
   if (env.GITHUB_ACTIONS) return `factory:run-${String(env.GITHUB_RUN_ID || "unknown").replace(/[\s>]+/g, "-")}`;
-  if (env.CLAUDE_PROJECT_DIR) return `agent:${who}`;
+  if (isAgentSession(env)) return `agent:${who}`;
   return `person:${who}`;
 }
 
