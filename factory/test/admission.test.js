@@ -145,4 +145,42 @@ test("test_136_harness_request_not_extra_generation", () => {
   const viaHarnessForPerson = (n) => (n === 50 ? harnessFor(10) : byNumber(n));
   const flakyOfHarness = { number: 70, author: "LeeHyeonKyu", labels: ["backlog", "factory:flaky"], body: "Detected while implementing #50. evidence: {}" };
   expect(queueAdmission({ issue: flakyOfHarness, charter: charter(), ...base, byNumber: viaHarnessForPerson })).toEqual({ ok: true, reasons: [], self_generated: true });
+
+  // 설계 §8.2 표가 **이름으로 부른 사슬**: 사람 #17 → 개선 #20 → 하네스 #50(for=20) → flaky #70("Detected while implementing #50.")은
+  // 한 세대다. 하네스 이슈를 구현하다 수확한 flaky는 그 하네스가 끝내려는 피처(#20)를 끝내는 일의 일부다 — 새 세대가 아니다.
+  // 이것을 2로 세면 자기생성 피처의 하네스 수리 중에 나온 flaky가 영구히 거부된다(skeptic #136 f1).
+  const specChain = (n) => (n === 50 ? harnessFor(20) : byNumber(n));
+  expect(queueAdmission({ issue: flakyOfHarness, charter: charter(), ...base, byNumber: specChain })).toEqual({ ok: true, reasons: [], self_generated: true });
+  // 같은 사슬에서 하네스를 빼면(개선 #20을 구현하다 수확한 flaky) 여전히 2세대다 — 면제는 "하네스 아래의 flaky"뿐이다
+  const flakyOfImprovement = { number: 71, author: "LeeHyeonKyu", labels: ["backlog", "factory:flaky"], body: "Detected while implementing #20. evidence: {}" };
+  const direct = queueAdmission({ issue: flakyOfImprovement, charter: charter(), ...base, byNumber: specChain });
+  expect(direct.ok).toBe(false);
+  expect(direct.reasons.join(" ")).toMatch(/generation 2 > 1/);
+  // 하네스 아래의 flaky에서 공장이 다시 만든 개선은 2세대다 — 접힌 사슬 위에 한 세대가 더해진다
+  const withFlaky = (n) => (n === 70 ? flakyOfHarness : specChain(n));
+  const overFlaky = queueAdmission({ issue: improvement(80, "LeeHyeonKyu/own-calendar#70"), charter: charter(), ...base, byNumber: withFlaky });
+  expect(overFlaky.ok).toBe(false);
+  expect(overFlaky.reasons.join(" ")).toMatch(/generation 2 > 1/);
+  // 하네스 부모를 읽지 못하면(byNumber가 null) 접을 근거가 없다 — flaky는 한 세대로 센다(발명하지 않는다)
+  expect(queueAdmission({ issue: flakyOfHarness, charter: charter(), ...base, byNumber: () => null }).ok).toBe(true);
+});
+
+test("test_136_spec_chain_through_real_gh_admission", async () => {
+  // 같은 사슬을 진짜 makeQueueAdmission(가짜 gh가 기원 사슬을 읽는다)으로: 사람 #17 → 개선 #20 → 하네스 #50 → flaky #70
+  const issues = {
+    17: { ...person, number: 17 },
+    20: improvement(20, "LeeHyeonKyu/own-calendar#17"),
+    50: { number: 50, author: "bot-hk", labels: ["backlog", "factory:harness"], body: "<!-- factory-harness-request for=20 -->\nharness" },
+    70: { number: 70, author: "LeeHyeonKyu", labels: ["backlog", "factory:flaky"], body: "Detected while implementing #50. evidence: {}" },
+    71: { number: 71, author: "LeeHyeonKyu", labels: ["backlog", "factory:flaky"], body: "Detected while implementing #20. evidence: {}" },
+  };
+  const gh = {
+    issue: async (n) => { const it = issues[n]; if (!it) throw new Error("404"); return { ...it, labels: [...it.labels] }; },
+    searchIssues: async () => [],
+  };
+  const admit = makeQueueAdmission({ gh, charter: charter(), factoryLogins: async () => ({ ok: true, logins: ["bot-hk"] }) });
+  expect(await admit({ issue: 70 })).toEqual({ ok: true, reasons: [], self_generated: true });
+  const r = await admit({ issue: 71 });
+  expect(r.ok).toBe(false);
+  expect(r.reasons.join(" ")).toMatch(/generation 2 > 1/);
 });
