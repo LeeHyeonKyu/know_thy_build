@@ -3847,3 +3847,12 @@ S4 이전에 "생성물은 diff가 아니다"를 한 곳(`inMirrorFamily`)에서
 #41의 절반이 처음으로 실제로 증명된 런이다. 그 다음 review에서 미러 **검증**이 오판했다: overlay의 `git checkout <base> -- …`는 인덱스도
 base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 인덱스는 base라 `git status`가 staged 변경을 보고했고 검증은 "소스와 다르다"고
 읽었다. 리뷰어 5명의 판정을 두 번($8.8) 버렸다. 검증은 워크트리를 HEAD와 직접 비교한다(`git diff --name-only HEAD`).
+
+**1.4.39 (KTB #136 실측, 다섯째·여섯째).** review에서 미러 검증은 통과했고 correctness 리뷰어가 빌더 구현의 실제 결함(harness/flaky
+사슬이 0세대로 세어져 `depth_max`가 안 걸림)을 잡아 rework를 냈다 — 핵심 리뷰가 제 몫을 한 첫 엔진 이슈다. 그 옆에서 둘이 또 걸렸다.
+- **설치 매니페스트도 생성물이다.** review의 overlay가 base(1.4.38)의 `.factory/install-manifest.json`을 1.4.37 PR 트리에 올려
+  `install.test.js`가 RED였다. 미러 가족에 넣는다 — implement가 재생성해 커밋하고 review·merge가 대조한다.
+- **추가 전용 파일은 합집합으로 병합한다.** `docs/factory/DECISIONS.md`는 모든 변경이 끝에 덧붙이므로 브랜치와 base가 함께 움직이면
+  반드시 충돌했다(#130·#136 둘 다 "rebase by hand"). base 병합이 그 파일을 `git merge-file --union`으로 풀고, 미러 가족은 재생성으로
+  푼다. 그 밖의 소스가 충돌하면 여전히 사람에게 간다.
+엔진 이슈가 도는 동안 릴리스가 세 번 나갔다. 소스가 실제로 겹치는 충돌(빌더의 리베이스 턴, S3b)은 아직 남아 있다.

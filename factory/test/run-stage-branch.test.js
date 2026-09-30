@@ -353,7 +353,7 @@ test("checkoutBranch: conflicts confined to the mirror families are resolved by 
     expect(regenerate).toHaveBeenCalledWith({ root });
     expect(calls.some((c) => c.includes("merge --abort"))).toBe(false);
     expect(calls.some((c) => c.startsWith(`checkout ${SHA} -- .factory/bin/run-stage.js`))).toBe(true);
-    expect(calls.some((c) => c.startsWith("add -- .factory/lib .factory/bin .factory/actions .claude/hooks"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("add -- .factory/lib .factory/bin .factory/actions .claude/hooks .factory/install-manifest.json"))).toBe(true);
     expect(calls.some((c) => /commit --no-edit/.test(c))).toBe(true);
     expect(calls.some((c) => c.startsWith("push"))).toBe(true);
     expect(baseMergedLine({ ...r, branch: BRANCH })).toMatch(/conflicts in 2 runner-generated mirror path\(s\) resolved by regenerating/);
@@ -381,4 +381,30 @@ test("checkoutBranch: in an adopter repo (no engine sources) a mirror-path confl
   expect(r.ok).toBe(false);
   expect(regenerate).not.toHaveBeenCalled();
   expect(calls.some((c) => c.includes("merge --abort"))).toBe(true);
+});
+
+/**
+ * 1.4.39 (KTB #136 실측) — `docs/factory/DECISIONS.md`는 추가 전용이라 브랜치와 base가 함께 움직이면 반드시 충돌한다. 양쪽을 다 남기는
+ * 합집합 병합이 언제나 옳다(`git merge-file --union`). 미러 가족과 섞여 충돌해도 함께 푼다; 그 밖의 소스가 충돌하면 여전히 abort.
+ */
+test("checkoutBranch: an append-only file (DECISIONS.md) conflicting alongside mirror paths is union-merged, not handed to a person", async () => {
+  const root = selfRepo();
+  try {
+    _mk(_j(root, ".factory/out"), { recursive: true }); _mk(_j(root, "docs/factory"), { recursive: true });
+    _wr(_j(root, "docs/factory/DECISIONS.md"), "<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n");
+    const calls = []; const regenerate = vi.fn(async () => ({ ok: true, applicable: true, changed: [".factory/lib/gates.js"] }));
+    const base = conflictStub({ calls, conflicted: [".factory/lib/gates.js", "docs/factory/DECISIONS.md"] });
+    const run = async (cmd, args, opts) => {
+      if (cmd === "git" && args[0] === "show" && /^:[123]:docs\/factory\/DECISIONS\.md$/.test(args[1])) { calls.push(args.join(" ")); return { code: 0, stdout: ({ "1": "base\n", "2": "base\nours\n", "3": "base\ntheirs\n" })[args[1][1]], stderr: "" }; }
+      if (cmd === "git" && args[0] === "merge-file") { calls.push(args.slice(0, 3).join(" ")); return { code: 0, stdout: "base\nours\ntheirs\n", stderr: "" }; }
+      return base(cmd, args, opts);
+    };
+    const r = await makeCheckoutBranch({ run, root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate })();
+    expect(r.ok).toBe(true);
+    expect(r.mirrorResolved.conflicted).toEqual([".factory/lib/gates.js", "docs/factory/DECISIONS.md"]);
+    expect(calls.some((c) => c.startsWith("merge-file -p --union"))).toBe(true);
+    expect(readFileSync(_j(root, "docs/factory/DECISIONS.md"), "utf8")).toBe("base\nours\ntheirs\n");
+    expect(calls.some((c) => c === "add -- docs/factory/DECISIONS.md")).toBe(true);
+    expect(calls.some((c) => c.includes("merge --abort"))).toBe(false);
+  } finally { _rm(root, { recursive: true, force: true }); }
 });

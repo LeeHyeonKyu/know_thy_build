@@ -16,9 +16,20 @@ import { pathToFileURL } from "node:url";
  * 적용 조건: 소스 트리에 `factory/cli/manifest.js`가 있는 저장소(= KTB 자신). 채택자 저장소에는 `factory/cli/**`가 설치되지
  * 않으므로 이 단계는 `applicable: false`로 조용히 빠진다.
  */
-export const MIRROR_FAMILIES = [".factory/lib/", ".factory/bin/", ".factory/actions/", ".claude/hooks/"];
+export const MIRROR_FAMILIES = [".factory/lib/", ".factory/bin/", ".factory/actions/", ".claude/hooks/", ".factory/install-manifest.json"];
 
-export const inMirrorFamily = (dest) => MIRROR_FAMILIES.some((f) => (f === ".claude/hooks/" ? dest.startsWith(f) && dest.endsWith(".sh") : dest.startsWith(f)));
+/**
+ * 1.4.39 (KTB #136 실측) — `.factory/install-manifest.json`도 생성물이다(`generate: "install-manifest"`, 트리의 항목과 `package.json`
+ * 버전에서 나온다). 가족에 없어서 review의 overlay가 base(1.4.38)의 매니페스트를 1.4.37 PR 트리에 올렸고 `install.test.js`가 RED였다.
+ */
+export const inMirrorFamily = (dest) => MIRROR_FAMILIES.some((f) => (f.endsWith("/") ? (f === ".claude/hooks/" ? dest.startsWith(f) && dest.endsWith(".sh") : dest.startsWith(f)) : dest === f));
+
+/**
+ * 1.4.39 — **추가 전용 파일은 합집합으로 병합한다.** `docs/factory/DECISIONS.md`는 모든 변경이 파일 끝에 덧붙이므로 브랜치와 base가
+ * 함께 움직이면 반드시 충돌한다(#130·#136 둘 다). 양쪽이 덧붙인 것을 모두 남기는 것이 언제나 옳은 답이다(`git merge-file --union`).
+ */
+export const UNION_MERGE_PATHS = ["docs/factory/DECISIONS.md"];
+export const isUnionMergePath = (p) => UNION_MERGE_PATHS.includes(p);
 
 /**
  * 네 가족을 소스에서 다시 만들어 트리에 쓴다. 순수하지 않지만 결정적이다: 같은 소스면 같은 바이트.
