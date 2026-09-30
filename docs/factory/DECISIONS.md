@@ -3820,3 +3820,17 @@ CLI와 이슈 본문 수정을 실행하라고 적혀 있지만, 같은 저장�
 - 엔진 경로의 머지는 아직 사람이 한다(`merge-stage.js`의 보호 경로 규칙 그대로). 자동 머지(S4)는 비판정 경로에 한해, 거부 시드 카나리와
   엔진 내부 거부권 타이머가 생긴 뒤다(설계 §8.3).
 실증(KTB 이슈 1건이 자기 공장을 통과)은 이 버전이 KTB의 main에 설치된 뒤에만 가능하다 — 스테이지는 base의 엔진으로 돈다.
+
+**1.4.36 (KTB #130 실측).** 운영 세션(대화형 Claude Code)이 #130을 큐에 넣자 마커가 `by=person:LeeHyeonKyu`로 적혔다. 대화형 세션의
+Bash에는 `CLAUDE_PROJECT_DIR`가 없다 — 그 변수는 훅과 스테이지의 `claude -p`에만 있고, 대화형 세션은 `CLAUDECODE`·
+`CLAUDE_CODE_ENTRYPOINT`·`CLAUDE_CODE_SESSION_ID`를 세운다. 같은 구멍으로 `--human`도 CLI의 두 번째 자물쇠(`refuseHumanFlag`)를
+지나칠 수 있었고 훅만이 막고 있었다. 이제 그 셋도 "사람의 셸이 아니다"로 읽는다(`isAgentSession`). 토론 CON 1이 말한 대로 자기 신고는
+감사 기록일 뿐이지만, 감사 기록이 틀리면 안 된다.
+
+**1.4.36 — S3 실증(KTB #130)이 잡은 충돌 둘.** 미러 단계는 동작했다(`mirror: regenerated 4 installed-engine path(s) → b7b331b`).
+그 직후 기존 통제 둘이 러너의 생성물을 빌더의 변경으로 읽었다.
+- `must_not: touch .factory/**` 게이트가 러너 미러 커밋에 RED를 냈다 → KTB 자기 저장소(`mirrorApplicable`)에서는 미러 가족을 계약 대조에서
+  뺀다. 그 경로는 빌더가 쓸 수 없는 생성물이고, 계약은 빌더의 손에 대는 것이다. 채택자 저장소는 그대로.
+- 게이트 RED 뒤 수리 턴의 implement 런이 overlay에서 "브랜치가 팩토리 소유 경로를 바꿨다"로 blocked → 덮인 경로가 전부 미러 가족이고
+  브랜치 HEAD의 그 파일들이 브랜치의 `factory/**`에서 생성되는 것과 같으면(`mirrorMatchesHead`, `git show HEAD:` 대조) 거부하지 않는다.
+  세션은 여전히 base의 엔진으로 돈다(되돌린 대로) — 판정자는 바뀌지 않는다. 대조가 틀리면 예전처럼 거부한다.

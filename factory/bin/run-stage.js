@@ -21,7 +21,7 @@ import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
-import { mirrorStep } from "../lib/mirror.js";
+import { mirrorStep, mirrorMatchesHead, inMirrorFamily } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
@@ -533,10 +533,22 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       // 그런 PR은 어차피 사람이 머지한다(`[protected]`) — 그 라운드도 사람에게 넘긴다. 세션을 PR의
       // 설정으로 돌리는 것과 PR의 작업을 말없이 되돌리는 것 중 어느 쪽도 스테이지가 고를 일이 아니다.
       if (stage === "implement" && overlaidPaths.length) {
-        const reason = `the implement tree carries factory-owned paths that differ from the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} path(s): ${overlaidPaths.slice(0, 10).join(", ")}`;
-        const t = await d.transition({ to: "factory:blocked", reason });
-        record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
-        return 2;
+        /**
+         * 설계 2026-09-30 §8.3 (S3, KTB #130 실측) — 예외 하나: 덮인 경로가 **전부 미러 가족**이고 브랜치 HEAD의 그 파일들이 브랜치의
+         * `factory/**`에서 생성되는 것과 같으면, 그것은 빌더의 변경이 아니라 앞 런의 러너 미러 커밋이다. 세션은 그대로 base의 엔진으로
+         * 돌고(overlay가 되돌린 대로), 세션 뒤 미러 단계가 다시 만든다. 대조가 틀리면 예전처럼 거부한다.
+         */
+        const allMirror = overlaidPaths.every((p) => inMirrorFamily(p));
+        const mm = allMirror && d.mirrorMatchesHead ? await d.mirrorMatchesHead() : null;
+        if (mm?.ok && mm.applicable) {
+          record([`overlay: ${overlaidPaths.length} runner-generated mirror path(s) reverted to ${ov.sha.slice(0, 7)} for the session — verified against the branch's factory/**: ${overlaidPaths.slice(0, 6).join(", ")}${overlaidPaths.length > 6 ? ", …" : ""}`]);
+        } else {
+          const why = mm && !mm.ok ? ` — and the branch's installed engine is not what its sources generate (${(mm.mismatched || []).slice(0, 4).join(", ") || mm.reason || "unknown"})` : "";
+          const reason = `the implement tree carries factory-owned paths that differ from the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} path(s): ${overlaidPaths.slice(0, 10).join(", ")}${why}`;
+          const t = await d.transition({ to: "factory:blocked", reason });
+          record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
+          return 2;
+        }
       }
       record([overlayLine(ov)]);
       // KTB #50 — harness 이슈의 트리는 이제 브랜치의 harness.toml을 들고 있다(overlay가 남겼다). 읽는다.
@@ -2460,6 +2472,7 @@ async function main() {
     assertStageBranch: async (harnessIssue = false) => assertStageBranch({ run, cwd: root, issue, sha: overlaySha, harnessIssue }),
     /** S3 — 설치된 엔진의 재생성(`lib/mirror.js`). KTB 자기 저장소에서만 적용된다(소스 `factory/cli/**`가 있을 때). */
     mirror: (mode, headSha) => mirrorStep({ root, run, mode, headSha }),
+    mirrorMatchesHead: () => mirrorMatchesHead({ root, run }),
     /**
      * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).

@@ -532,3 +532,43 @@ test("implement: a plain issue's overlay is asked in plain mode — harness mode
   expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(0);
   expect(sawHarness).toBe(false);
 });
+
+/**
+ * 설계 2026-09-30 §8.3 (S3, KTB #130 실측) — 첫 implement 런의 러너 미러 커밋이 두 번째 런(게이트 RED 뒤의 수리 턴)에서 "브랜치가
+ * 팩토리 소유 경로를 바꿨다"로 거부됐다. 덮인 경로가 전부 미러 가족이고 HEAD의 그 파일들이 브랜치의 소스에서 생성되는 것과 같으면
+ * 빌더의 변경이 아니다: 세션은 base 엔진으로 돌고(되돌린 대로) 거부하지 않는다. 대조가 틀리면 예전처럼 거부한다.
+ */
+test("implement: runner-generated mirror paths on the branch are reverted for the session, not refused — when they match the branch's sources", async () => {
+  const lines = []; const transitions = []; let claude = 0;
+  const d = overlayDeps({
+    overlayFactoryConfig: async () => ({ ok: true, sha: "b".repeat(40), paths: [".factory/lib/gates.js", ".factory/bin/run-stage.js"] }),
+    mirrorMatchesHead: async () => ({ ok: true, applicable: true, mismatched: [] }),
+    claudeP: async () => { claude++; return { is_error: false, result: "{}" }; },
+    transition: async ({ to }) => { transitions.push(to); return { ok: true, to }; },
+    runRecord: (l) => lines.push(...l),
+  });
+  await runStage({ stage: "implement", issue: 3, deps: d });
+  expect(claude).toBe(1);
+  expect(transitions).not.toContain("factory:blocked");
+  expect(lines.some((l) => /^overlay: 2 runner-generated mirror path\(s\) reverted to bbbbbbb for the session — verified against the branch's factory\/\*\*/.test(l))).toBe(true);
+});
+
+test("implement: the same paths are refused when the branch's mirror does not match its sources, or when a non-mirror path is among them", async () => {
+  for (const [paths, mm] of [
+    [[".factory/lib/gates.js"], { ok: false, applicable: true, mismatched: [".factory/lib/gates.js"] }],
+    [[".factory/lib/gates.js", ".claude/agents/reviewer-qa.md"], { ok: true, applicable: true, mismatched: [] }],
+  ]) {
+    const lines = []; const transitions = []; let claude = 0;
+    const d = overlayDeps({
+      overlayFactoryConfig: async () => ({ ok: true, sha: "b".repeat(40), paths }),
+      mirrorMatchesHead: async () => mm,
+      claudeP: async () => { claude++; return { is_error: false, result: "{}" }; },
+      transition: async ({ to }) => { transitions.push(to); return { ok: true, to }; },
+      runRecord: (l) => lines.push(...l),
+    });
+    expect(await runStage({ stage: "implement", issue: 3, deps: d })).toBe(2);
+    expect(claude).toBe(0);
+    expect(transitions).toContain("factory:blocked");
+    expect(lines.some((l) => l.startsWith("overlay: FAIL — the implement tree carries factory-owned paths"))).toBe(true);
+  }
+});

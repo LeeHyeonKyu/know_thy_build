@@ -2,7 +2,7 @@ import { test, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { regenerateMirror, mirrorStep, inMirrorFamily, MIRROR_FAMILIES } from "../lib/mirror.js";
+import { regenerateMirror, mirrorStep, mirrorMatchesHead, inMirrorFamily, MIRROR_FAMILIES } from "../lib/mirror.js";
 
 /**
  * 설계 2026-09-30 §8.3 (S3, KTB #41) — 설치된 엔진(미러)은 러너가 소스에서 다시 만든다. 에이전트는 `.factory/**`에 쓸 수 없고
@@ -101,4 +101,20 @@ test("mirrorStep: not applicable is a no-op for every mode", async () => {
   const run = fakeRun({});
   for (const mode of ["commit", "verify"]) expect(await mirrorStep({ root: "/r", run, mode, regenerate: async () => ({ ok: true, applicable: false, changed: [] }) })).toEqual({ ok: true, applicable: false, changed: [], sha: null });
   expect(run).not.toHaveBeenCalled();
+});
+
+test("mirrorMatchesHead compares the branch HEAD's mirror files with what the branch's sources generate", async () => {
+  const root = stubRoot();
+  try {
+    const head = { ".factory/lib/a.js": "export const a = 2;\n", ".claude/hooks/h.sh": "#!/bin/sh\necho new\n" };
+    const run = vi.fn(async (cmd, args) => (cmd === "git" && args[0] === "show" ? (head[args[1].replace(/^HEAD:/, "")] != null ? { code: 0, stdout: head[args[1].replace(/^HEAD:/, "")], stderr: "" } : { code: 128, stdout: "", stderr: "fatal" }) : { code: 0, stdout: "", stderr: "" }));
+    expect(await mirrorMatchesHead({ root, run, importer })).toEqual({ ok: true, applicable: true, mismatched: [] });
+    head[".factory/lib/a.js"] = "export const a = 999; // edited by hand\n";
+    expect(await mirrorMatchesHead({ root, run, importer })).toEqual({ ok: false, applicable: true, mismatched: [".factory/lib/a.js"] });
+    delete head[".claude/hooks/h.sh"];                                    // HEAD에 없는 파일도 불일치다
+    expect((await mirrorMatchesHead({ root, run, importer })).mismatched).toEqual([".claude/hooks/h.sh", ".factory/lib/a.js"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  const adopter = mkdtempSync(join(tmpdir(), "ktb-adopter-"));
+  try { expect(await mirrorMatchesHead({ root: adopter, run: vi.fn(), importer })).toEqual({ ok: true, applicable: false, mismatched: [] }); }
+  finally { rmSync(adopter, { recursive: true, force: true }); }
 });
