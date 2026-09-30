@@ -94,7 +94,13 @@ export async function mirrorStep({ root, run, mode, headSha = null, regenerate =
   if (!r.applicable) return { ok: true, applicable: false, changed: [], sha: null };
   if (!r.ok) return { ok: false, applicable: true, changed: r.changed, sha: null, reason: r.reason };
   const families = MIRROR_FAMILIES.map((f) => f.replace(/\/$/, ""));
-  const diff = await run("git", ["status", "--porcelain", "--", ...families], { cwd: root });
+  /**
+   * 1.4.38 (KTB #136 실측) — **워크트리를 HEAD와 직접 비교한다, 인덱스가 아니라.** review·merge의 overlay는 `git checkout <base> -- …`로
+   * 미러 경로를 base로 되돌리는데 그 명령은 **인덱스도** base로 바꾼다. 재생성 뒤 워크트리는 PR head와 같아졌지만 인덱스는 base라
+   * `git status`가 "staged" 변경을 보고했고, 검증은 소스와 같은 설치본을 "다르다"고 읽었다 — 리뷰어 5명의 판정을 두 번 버렸다.
+   * `git diff HEAD`는 인덱스를 거치지 않는다.
+   */
+  const diff = await run("git", ["diff", "--name-only", "HEAD", "--", ...families], { cwd: root });
   if (diff.code !== 0) return { ok: false, applicable: true, changed: r.changed, sha: null, reason: `mirror diff could not be read: ${diff.stderr?.trim() || `exit ${diff.code}`}` };
   const dirty = diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   if (mode === "verify") {
