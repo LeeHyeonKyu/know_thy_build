@@ -1079,10 +1079,18 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           record([`harness: FAIL — ${reason}`, ...refusal(t), ...gatesNote, usage]);
           return 2;
         }
-        const t = await d.transition({ to: "factory:needs-info", reason: parkedReason(created.issue) });
+        /**
+         * #130 (S2b) — 하네스 이슈가 큐 진입 심사(또는 리허설)에 거부돼 backlog에 남았어도 피처는 **needs-info**다:
+         * 이슈는 존재하고, 사람이 그것을 `:next`로 올리면 평소대로 풀린다. 다만 그 사실을 사유에 싣는다 — 접두어
+         * (`waiting for harness issue #N`)는 sweeper의 해제 팔(`PARKED_ON_HARNESS`)이 읽으므로 그대로 두고 뒤에 붙인다.
+         */
+        const notQueued = created.queued === false;
+        const parkReason = notQueued ? `${parkedReason(created.issue)} — not queued: ${created.queue_reason}` : parkedReason(created.issue);
+        const t = await d.transition({ to: "factory:needs-info", reason: parkReason });
         record([
           "verify: ok",
           `harness: ${created.created ? "opened" : "reusing"} factory:harness issue #${created.issue} — ${needed.map((h) => h.file).join(", ")}`,
+          ...(notQueued ? [`harness issue #${created.issue} not queued: ${created.queue_reason}`] : []),
           ...(t.ok ? [`transition: ${t.to}`] : refusal(t)),
           ...gatesNote, usage,
         ]);
@@ -2281,6 +2289,17 @@ export const overlayLine = (ov) => {
  * 마커 코멘트를 남긴다 — 락은 이미 이 프로세스가 쥐고 있으므로, 라벨 이벤트로 따라 뜨는 GitHub의
  * triage 잡은 claim에 실패해 exit 0으로 물러난다(의도된 설계, 중복 실행 방지).
  */
+/**
+ * #130 (S2b, 설계 2026-09-30 §8.2) — implement의 `ensureHarnessIssue` dep. 넘기는 전이는 **새 하네스 이슈 번호**(`n`)에
+ * 묶이고, 다른 모든 큐 전이(flaky 수확·`deps.transition`)와 **같은** 리허설 검사기와 큐 진입 심사기를 싣는다 —
+ * `transitionOther`(심사 없음)도, 피처에 묶인 `deps.transition`도 아니다. 이 함수로 뺀 이유는 그 배선을
+ * 실물 `transition()`으로 테스트할 수 있게 하기 위해서다(d-level 목은 어떤 클로저가 배선됐는지 보지 못한다).
+ */
+export function makeEnsureHarnessIssueDep({ gh, issue, stage, rehearsal, admission, transitionFn = transition }) {
+  const queueTransition = ({ issue: n, to, reason }) => transitionFn({ gh, issue: n, to, reason, stage, rehearsal, admission });
+  return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transition: queueTransition });
+}
+
 export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
   return async () => {
     if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
@@ -2534,8 +2553,11 @@ async function main() {
      */
     dependencyBlock: async () => findOpenHarnessIssueFor({ gh, issue }),
     ciSettingsPresent: async (harnessIssue = false) => existsSync(join(root, ciSettingsFile(harnessIssue))),
-    /** KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈. */
-    ensureHarnessIssue: ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr }),
+    /**
+     * KTB-23 implement 전용: `harness_needed`가 차 있을 때 여는(또는 재사용하는) `factory:harness` 이슈.
+     * #130 (S2b) — 새 이슈는 backlog로 태어나고, 큐로 가는 걸음은 다른 큐 전이와 **같은** 리허설·심사를 지난다.
+     */
+    ensureHarnessIssue: makeEnsureHarnessIssueDep({ gh, issue, stage, rehearsal, admission }),
     claudeP: async (_ctx, { harnessIssue = false } = {}) => {
       const args = stageClaudeArgs({ root, stage, issue, harness, charter, harnessIssue });
       const r = await run("claude", args, { cwd: root, env: stageClaudeEnv({ root, stage, harnessIssue, harness }) });

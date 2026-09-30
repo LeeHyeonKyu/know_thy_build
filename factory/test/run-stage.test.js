@@ -3823,3 +3823,70 @@ test("S3: an adopter repo (mirror not applicable) leaves no mirror line and no h
   expect(lines.some((l) => l.startsWith("mirror:"))).toBe(false);
   expect(written.head_sha).toBe("b".repeat(40));
 });
+
+// ── #130 (S2b) — 하네스 이슈가 큐에 못 들어가도 피처는 needs-info에 주차되고, 그 사실이 기록에 남는다 ─────
+import { makeEnsureHarnessIssueDep } from "../bin/run-stage.js";
+import { PARKED_ON_HARNESS } from "../lib/sweeper.js";
+import { STATES as STATE_LABELS } from "../lib/labels.js";
+
+test("test_130_feature_record_names_unqueued_harness_issue", async () => {
+  // (1) 라우팅: queued:false면 사유가 park reason과 런 레코드 양쪽에 그대로 실린다 — 낡은 리허설 사유도 그대로
+  const staleReason = `${REHEARSAL_STALE} — recorded main 0123456789ab, current fedcba987654`;
+  const lines = [];
+  const d = harnessImplDeps({
+    ensureHarnessIssue: vi.fn(async () => ({ issue: 31, created: true, queued: false, queue_reason: staleReason, title: "harness: add dependency pg@^8 — for #2" })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(0);
+  expect(d.ensureHarnessIssue).toHaveBeenCalledWith({ entries: [HARNESS_PG], pr: 17 });
+  const last = d.transition.mock.calls.at(-1)[0];
+  expect(last.to).toBe("factory:needs-info");
+  expect(last.reason).toBe(`waiting for harness issue #31 — not queued: ${staleReason}`);
+  expect(PARKED_ON_HARNESS.exec(last.reason)?.[1]).toBe("31");          // sweeper의 해제 팔이 여전히 읽는다
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(lines).toContain(`harness issue #31 not queued: ${staleReason}`);
+  expect(lines.join("\n")).not.toMatch(/could not be created/);
+
+  // (2) 배선: implement의 dep은 리허설 + 큐 진입 심사를 지나는 전이를 **하네스 이슈 번호**에 묶어 넘긴다
+  const repo = (() => {
+    const issues = new Map([[2, { number: 2, title: "feature", body: "## done_when\n- x", labels: ["factory:in-progress"], comments: [] }]]);
+    let next = 60;
+    return {
+      issues,
+      async issueList({ labels = [] } = {}) { return [...issues.values()].filter((i) => labels.every((l) => i.labels.includes(l))); },
+      async createIssue({ title, body, labels }) { const number = (next += 1); issues.set(number, { number, title, body, labels: [...labels], comments: [] }); return number; },
+      async issue(n) { const it = issues.get(n); return { ...it, labels: [...it.labels] }; },
+      async comments(n) { return [...issues.get(n).comments]; },
+      async comment(n, body) { issues.get(n).comments.push({ body }); },
+      async setFactoryLabel(n, to) { const it = issues.get(n); it.labels = [...it.labels.filter((l) => !STATE_LABELS.has(l)), to]; },
+    };
+  })();
+  const admission = vi.fn(async () => ({ ok: true, reasons: [] }));
+  const dep = makeEnsureHarnessIssueDep({ gh: repo, issue: 2, stage: "implement", rehearsal: async () => ({ ok: true }), admission });
+  const ok = await dep({ entries: [HARNESS_PG], pr: 17 });
+  expect(ok).toMatchObject({ created: true, queued: true });
+  expect(ok.issue).not.toBe(2);
+  expect(admission).toHaveBeenCalledTimes(1);
+  expect(admission).toHaveBeenCalledWith({ issue: ok.issue });
+  expect(repo.issues.get(ok.issue).labels).toEqual(["factory:harness", "factory:queue"]);
+  expect(repo.issues.get(2).labels).toEqual(["factory:in-progress"]);
+
+  // 심사가 거부하면 backlog에 남는다(그 거부를 우회하는 폴백이 없다)
+  repo.issues.delete(ok.issue);
+  const refuse = vi.fn(async () => ({ ok: false, reasons: ["queue 8 ≥ 8 (back_pressure.queue_max)"] }));
+  const dep2 = makeEnsureHarnessIssueDep({ gh: repo, issue: 2, stage: "implement", rehearsal: async () => ({ ok: true }), admission: refuse });
+  const no = await dep2({ entries: [HARNESS_PG], pr: 17 });
+  expect(no).toMatchObject({ created: true, queued: false });
+  expect(no.queue_reason).toMatch(/queue admission refused — queue 8 ≥ 8/);
+  expect(refuse).toHaveBeenCalledWith({ issue: no.issue });
+  expect(repo.issues.get(no.issue).labels).toEqual(["backlog", "factory:harness"]);
+
+  // 리허설이 낡았으면 심사까지 가지도 않고 backlog에 남는다
+  repo.issues.delete(no.issue);
+  const neverAsked = vi.fn(async () => ({ ok: true, reasons: [] }));
+  const dep3 = makeEnsureHarnessIssueDep({ gh: repo, issue: 2, stage: "implement", rehearsal: async () => ({ ok: false, reason: staleReason }), admission: neverAsked });
+  const st = await dep3({ entries: [HARNESS_PG], pr: 17 });
+  expect(st).toMatchObject({ created: true, queued: false, queue_reason: staleReason });
+  expect(neverAsked).not.toHaveBeenCalled();
+  expect(repo.issues.get(st.issue).labels).toEqual(["backlog", "factory:harness"]);
+});
