@@ -148,6 +148,12 @@ export function appendHarnessEntries(body, entries) {
 /** 문이 배선되지 않은 호출자(피드백 루프 등)의 반환 사유. 이슈는 `backlog`에서 사람의 `:next`를 기다린다. */
 export const HARNESS_TRANSITION_UNWIRED = "no transition is wired for this caller — the harness issue stays in backlog until a person runs `/know-thy-build:next` on it";
 
+const labelNames = (it) => (Array.isArray(it?.labels) ? it.labels : []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
+/** 재사용할 열린 하네스 이슈가 아직 `backlog`에 서 있는가(큐 라벨 없음). 라벨을 모르면 false — 발명하지 않는다. */
+const stillInBacklog = (it) => { const ls = labelNames(it); return ls.includes("backlog") && !ls.some((l) => l.startsWith("factory:") && l !== HARNESS_LABEL); };
+/** 재사용 경로의 사유: 이슈는 앞서 큐에 못 들어갔고, 이 경로는 문을 다시 두드리지 않는다. */
+export const stillBacklogReason = (n) => `harness issue #${n} already exists and is still in backlog — it was not queued earlier and reuse does not retry the queue door; a person's \`/know-thy-build:next\` on #${n} is needed`;
+
 /** 하네스 이슈가 큐에 들어가지 못했다는 기계 마커(flaky 수확의 `factory-flaky-not-queued`와 같은 모양). */
 export const notQueuedMarker = (n) => `<!-- factory-harness-not-queued issue=${n} -->`;
 
@@ -198,15 +204,19 @@ export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin
   const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
   const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
   if (found) {
+    // skeptic #136 f2/f3 — 재사용 경로는 문을 다시 두드리지 않는다(plan non_goals). 대신 이슈가 **지금** backlog에 서 있으면
+    // 그 사실을 반환값에 싣는다: 싣지 않으면 호출자(피드백 영수증·주차 사유·런 기록)는 "고쳐지는 중"이라고 말하게 된다.
+    // 라벨을 모르면(라벨 없는 목록) 발명하지 않는다 — 반환값은 예전 그대로다.
+    const still = stillInBacklog(found) ? { queued: false, queue_reason: stillBacklogReason(found.number) } : {};
     // 덧붙이기는 어댑터가 본문 편집을 줄 때만 한다(그 능력이 없는 호출자의 동작은 한 글자도 안 바뀐다).
     if (typeof gh.editIssueBody === "function") {
       const { body, added } = appendHarnessEntries(found.body, entries);
       if (added.length) {
         await gh.editIssueBody(found.number, body);
-        return { issue: found.number, created: false, appended: added.length, title: found.title ?? title };
+        return { issue: found.number, created: false, appended: added.length, title: found.title ?? title, ...still };
       }
     }
-    return { issue: found.number, created: false, appended: 0, title: found.title ?? title };
+    return { issue: found.number, created: false, appended: 0, title: found.title ?? title, ...still };
   }
   const number = await gh.createIssue({
     title,

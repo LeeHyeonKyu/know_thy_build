@@ -1094,8 +1094,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         /**
          * #136 (S2b) — 하네스 이슈가 문에 거부돼 `backlog`에 서 있으면(`queued === false`) "하네스 이슈를 기다린다"만으로는
          * 거짓이 된다: 아무도 그것을 집지 않는다. 주차 사유와 런 기록이 그 사실·이유·필요한 사람의 걸음을 말한다. 사유는 여전히
-         * `parkedReason`으로 **시작한다** — sweeper의 `PARKED_ON_HARNESS`가 그 문구로 주차를 푼다. `queued`를 싣지 않는
-         * 반환값(재사용 경로·구형 더블)은 예전 그대로다.
+         * `parkedReason`으로 **시작한다** — sweeper의 `PARKED_ON_HARNESS`가 그 문구로 주차를 푼다. 재사용 경로도 이슈가 아직
+         * backlog면 `queued:false`를 싣는다(skeptic #136 f3). `queued`를 싣지 않는 반환값(큐에 선 이슈의 재사용·구형 더블)은 예전 그대로다.
          */
         const backlogged = created.queued === false;
         const parkReason = backlogged
@@ -1105,7 +1105,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         record([
           "verify: ok",
           `harness: ${created.created ? "opened" : "reusing"} factory:harness issue #${created.issue} — ${needed.map((h) => h.file).join(", ")}`,
-          ...(backlogged ? [`harness: #${created.issue} was opened but NOT queued — stays in backlog: ${created.queue_reason || "unknown"}`] : []),
+          ...(backlogged ? [`harness: #${created.issue} ${created.created ? "was opened but NOT queued" : "is reused and still NOT queued"} — stays in backlog: ${created.queue_reason || "unknown"}`] : []),
           ...(t.ok ? [`transition: ${t.to}`] : refusal(t)),
           ...gatesNote, usage,
         ]);

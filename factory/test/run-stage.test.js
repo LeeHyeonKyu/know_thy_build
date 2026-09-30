@@ -3893,3 +3893,43 @@ test("test_136_parked_feature_names_backlogged_harness", async () => {
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/ensureHarnessIssue:\s*makeHarnessIssueDep\(\{\s*gh,\s*issue,\s*stage,\s*rehearsal,\s*admission\s*\}\)/);
 });
+
+// skeptic #136 f3 — **재사용** 경로: 첫 라운드에 문이 거부해 backlog에 남은 하네스 이슈를 다음 라운드가 재사용할 때도, 피처의
+// 주차 사유와 런 기록이 "#N은 backlog에 서 있다, 사람의 :next가 필요하다"를 말한다. 진짜 makeHarnessIssueDep + 진짜 문(transition +
+// makeQueueAdmission), 가짜 gh — 판정은 가짜 gh의 라벨과 runStage가 남긴 사유·기록으로 한다.
+test("test_136_parked_feature_reuse_names_backlogged_harness", async () => {
+  const store = new Map();
+  let seq = 30;
+  const put = (i) => store.set(i.number, { state: "open", title: `#${i.number}`, author: "LeeHyeonKyu", comments: [], ...i });
+  put({ number: 2, labels: ["factory:in-progress"], body: "## done_when\n- [ ] x" });
+  for (let k = 0; k < 3; k++) put({ number: 100 + k, labels: ["factory:queue"], body: "## done_when\n- [ ] q" });
+  const gh = {
+    async issueList({ labels = [] } = {}) { return [...store.values()].filter((i) => i.state === "open" && labels.every((l) => i.labels.includes(l))); },
+    async createIssue({ title, body, labels }) { const number = (seq += 1); put({ number, title, body, labels: [...labels], author: "factory-bot" }); return number; },
+    async editIssueBody(n, body) { store.get(Number(n)).body = body; },
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATES.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.state === "open" && i.labels.includes(label)).map((i) => ({ number: i.number })); },
+  };
+  const admission = makeQueueAdmission({ gh, charter: { never_automate: [], back_pressure: { queue_max: 3 } } });
+  const dep = makeHarnessIssueDep({ gh, issue: 2, stage: "implement", rehearsal: async () => ({ ok: true }), admission });
+  // 라운드 1: 큐가 가득 차 거부 → #31 backlog
+  expect(await runStage({ stage: "implement", issue: 2, deps: harnessImplDeps({ ensureHarnessIssue: dep }) })).toBe(0);
+  expect(store.get(31).labels).toEqual(["backlog", "factory:harness"]);
+  // 라운드 2: 같은 피처가 다시 하네스를 요청 → #31을 재사용한다(새 이슈 없음). #31은 여전히 backlog다.
+  const lines = [];
+  const d = harnessImplDeps({ ensureHarnessIssue: dep, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(0);
+  expect(seq).toBe(31);                                                     // 두 번째 이슈는 열리지 않았다
+  expect(store.get(31).labels).toEqual(["backlog", "factory:harness"]);
+  const parked = d.transition.mock.calls.at(-1)[0];
+  expect(parked.to).toBe("factory:needs-info");
+  expect(PARKED_ON_HARNESS.exec(parked.reason)?.[1]).toBe("31");            // sweeper가 여전히 푼다
+  expect(parked.reason).toContain("backlog");
+  expect(parked.reason).toMatch(/:next on #31/);
+  expect(lines).toContain("harness: reusing factory:harness issue #31 — package.json");
+  expect(lines.some((l) => /^harness: #31 .*NOT queued/.test(l) && /backlog/.test(l))).toBe(true);
+  expect(lines.some((l) => l.startsWith("harness: #31 was opened"))).toBe(false); // 재사용이다 — 열었다고 말하지 않는다
+});

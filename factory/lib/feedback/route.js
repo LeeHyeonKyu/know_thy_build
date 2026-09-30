@@ -172,7 +172,7 @@ export async function routeFindings({
         await gh.comment(issue, [
           harnessFresh.map((c) => routedMarker(c.fingerprint)).join("\n"),
           backlogged
-            ? `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**의 몫입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}를 열었지만 **큐에 넣지 않았습니다**: #${r.issue}는 \`backlog\`에서 사람의 \`/know-thy-build:next\`를 기다립니다(${r.queue_reason}).`
+            ? `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**의 몫입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}${r.created ? "를 열었지만" : "에 실었지만"} **#${r.issue}는 큐에 들어가 있지 않습니다**: #${r.issue}는 \`backlog\`에서 사람의 \`/know-thy-build:next\`를 기다립니다(${r.queue_reason}).`
             : `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**가 고칠 것입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}${r.created ? "를 열었습니다" : "에 실었습니다"}.`,
           "",
           ...harnessFresh.map((c) => `- \`${[c.causal.path, c.causal.locus].filter(Boolean).join(" ")}\` — ${oneLine(c.payload.reason)} (fp \`${c.fingerprint}\`)`),

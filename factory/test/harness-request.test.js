@@ -149,7 +149,7 @@ test("ensureHarnessIssue: 본문 편집을 못 하는 어댑터에서는 예전 
 // 문은 **진짜** `transition()` + **진짜** `makeQueueAdmission`을 가짜 gh 위에 합성한 것이다(합성은 이 테스트
 // 파일에만 있다 — lib/harness-request.js는 transition.js도 admission.js도 import하지 않는다). 판정은 mock
 // 호출 횟수가 아니라 가짜 gh의 **최종 라벨 상태**로 한다.
-import { HARNESS_TRANSITION_UNWIRED } from "../lib/harness-request.js";
+import { HARNESS_TRANSITION_UNWIRED, stillBacklogReason } from "../lib/harness-request.js";
 import { transition as realTransition } from "../lib/transition.js";
 import { makeQueueAdmission } from "../lib/admission.js";
 import { STATES } from "../lib/labels.js";
@@ -278,7 +278,8 @@ test("test_136_reuse_does_not_retransition", async () => {
   const spy = { ...gh, createIssue: async (a) => { createCalls += 1; return gh.createIssue(a); } };
   const t = door(gh);
   const r = await ensureHarnessIssue({ gh: spy, issue: 2, entries: [PG, COMPOSE], transitionIssue: async (a) => { doorCalls += 1; return t(a); } });
-  expect(r).toEqual({ issue: 31, created: false, appended: 1, title: "사람이 고쳐 쓴 제목" });
+  // 재사용은 문을 다시 두드리지 않지만, 이슈가 아직 backlog라는 사실은 말한다(skeptic #136 f2/f3)
+  expect(r).toEqual({ issue: 31, created: false, appended: 1, title: "사람이 고쳐 쓴 제목", queued: false, queue_reason: stillBacklogReason(31) });
   expect(createCalls).toBe(0);
   expect(doorCalls).toBe(0);
   expect(gh.store.get(31).labels).toEqual(["backlog", HARNESS_LABEL]);      // 재사용 경로는 다시 문을 두드리지 않는다
@@ -296,3 +297,38 @@ test("test_136_reuse_does_not_retransition", async () => {
 
 /** #136 이전의 `harnessIssueBody({ entries: [PG, COMPOSE], issue: 2, pr: 17 })` — 기본 경로 본문의 바이트 고정값. */
 const PINNED_BODY_SHA = "94b6cd5d1f651ec690ae86d18aa77671bb6986fa441737f551e8fcf4f6ad012f";
+
+// ── #136 skeptic f2/f3 — 재사용 경로도 **backlog에 서 있는** 하네스 이슈를 사실대로 말한다 ─────────────────────
+// 재사용 경로는 문을 다시 두드리지 않는다(plan non_goals). 그런데 첫 라운드에 거부돼 backlog에 남은 이슈를 재사용하면서
+// `queued`를 싣지 않으면, 호출자(피드백 영수증·주차 사유·런 기록)는 "고쳐지는 중"이라는 예전 문구로 떨어진다 — 아무도 그 이슈를
+// 집지 않는데. 재사용 반환값은 이슈의 **현재 라벨**을 보고 backlog면 queued:false와 그 이유를 싣는다.
+test("test_136_reuse_reports_backlogged_harness", async () => {
+  // 첫 라운드: 큐가 가득 차 문이 거부했다 → #31은 backlog에 남는다
+  const gh = doorGh({ queued: 3 });
+  gh.editIssueBody = async (n, body) => { gh.store.get(n).body = body; };
+  const first = await ensureHarnessIssue({ gh, issue: 2, entries: [PG], transitionIssue: door(gh) });
+  expect(first).toMatchObject({ issue: 31, created: true, queued: false });
+  expect(gh.store.get(31).labels).toEqual(["backlog", HARNESS_LABEL]);
+  // 둘째 라운드: 같은 피처의 다른 요청 → 같은 #31을 재사용하고 한 줄을 덧붙인다. 문은 다시 두드리지 않는다.
+  let doorCalls = 0;
+  const t = door(gh);
+  const again = await ensureHarnessIssue({ gh, issue: 2, entries: [PG, COMPOSE], transitionIssue: async (a) => { doorCalls += 1; return t(a); } });
+  expect(doorCalls).toBe(0);
+  expect(again).toMatchObject({ issue: 31, created: false, appended: 1, queued: false });
+  expect(again.queue_reason).toContain("#31");
+  expect(again.queue_reason).toMatch(/backlog/);
+  expect(again.queue_reason).toMatch(/\/know-thy-build:next/);
+  expect(gh.store.get(31).labels).toEqual(["backlog", HARNESS_LABEL]);
+  // 편집 능력이 없는 어댑터(덧붙이기 없음)에서도 같은 사실을 말한다
+  const plain = { ...gh, editIssueBody: undefined };
+  expect(await ensureHarnessIssue({ gh: plain, issue: 2, entries: [PG] })).toMatchObject({ issue: 31, created: false, appended: 0, queued: false });
+
+  // 대조군: 이미 큐(또는 그 뒤)에 선 하네스 이슈를 재사용하면 backlog라고 말하지 않는다
+  gh.store.get(31).labels = [HARNESS_LABEL, "factory:queue"];
+  const queuedReuse = await ensureHarnessIssue({ gh, issue: 2, entries: [PG] });
+  expect(queuedReuse.queued).not.toBe(false);
+  expect(queuedReuse).not.toHaveProperty("queue_reason");
+  // 라벨을 모르면(라벨 없는 목록) 발명하지 않는다 — 예전 반환값 그대로
+  const unknown = await ensureHarnessIssue({ gh: { issueList: async () => [{ number: 31, title: "t", body: gh.store.get(31).body }] }, issue: 2, entries: [PG] });
+  expect(unknown).toEqual({ issue: 31, created: false, appended: 0, title: "t" });
+});

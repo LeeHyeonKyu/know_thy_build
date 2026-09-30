@@ -672,3 +672,29 @@ test("test_136_feedback_route_harness_not_silently_dropped", async () => {
   expect(receipt.body).toContain(`/know-thy-build:next`);
   expect(receipt.body).not.toMatch(/고칠 것입니다/);                      // 오고 있다고 말하지 않는다
 });
+
+// skeptic #136 f2 — **두 번째** 피드백 발견이 backlog에 서 있는 같은 하네스 이슈로 실릴 때(재사용 경로)도 영수증은
+// "고칠 것입니다"라고 말하지 않고, 액션은 queued:false를 싣는다. 영수증이 지문을 "처리됨"으로 만들기 때문에 여기서 거짓말하면
+// 그 발견은 조용히 버려진다.
+test("test_136_feedback_route_reuse_backlogged_not_silently_dropped", async () => {
+  const gh = fakeGh();
+  // 첫 회고: 발견 A가 하네스 이슈를 연다(backlog로 태어난다)
+  const first = await route({ gh, issue: 7, upstream: UPSTREAM, findings: await harnessGateFinding({ outcomes: { unit: FLUTTER_NOT_FOUND } }) });
+  const n = gh.local[0].number;
+  expect(first.actions.find((a) => a.kind === "harness-issue")).toMatchObject({ created: true, queued: false });
+  // 두 번째 회고: 다른 발견 B(다른 locus → 다른 지문)가 같은 열린 하네스 이슈 #n으로 간다 — 이슈는 여전히 backlog다
+  const findingsB = (await harnessGateFinding({ outcomes: { unit: FLUTTER_NOT_FOUND } })).map((f) => ({ ...f, fingerprint: `${f.fingerprint}-b`, causal: { ...f.causal, locus: "second-locus" } }));
+  gh.calls.comment.length = 0;
+  const r = await route({ gh, issue: 7, upstream: UPSTREAM, findings: findingsB });
+  expect(gh.calls.createIssue).toHaveLength(1);                            // 새 이슈는 없다(재사용)
+  expect(gh.local[0].labels).toEqual(["backlog", HARNESS_LABEL]);
+  const action = r.actions.find((a) => a.kind === "harness-issue");
+  expect(action).toMatchObject({ harness_issue: n, created: false, queued: false });
+  expect(action.queue_reason).toMatch(/backlog/);
+  const receipt = gh.calls.comment.find((c) => c.issue === 7 && c.body.includes(`#${n}`));
+  expect(receipt).toBeTruthy();
+  expect(receipt.body).toContain("backlog");
+  expect(receipt.body).toContain("/know-thy-build:next");
+  expect(receipt.body).not.toMatch(/고칠 것입니다/);
+  expect(receipt.body).not.toMatch(/열었지만/);                            // 재사용이다 — 열었다고 말하지 않는다
+});
