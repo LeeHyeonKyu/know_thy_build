@@ -119,8 +119,10 @@ export function parseBlocks(body) {
  * 조회가 실패하면 만들지 않는다(fail closed): 중복 이슈를 여는 것보다 이번 런이 needs-human으로
  * 가는 편이 낫다 — 사람은 어느 쪽이든 보게 되지만, 중복 이슈는 사람이 손으로 치워야 한다.
  *
- * 새 이슈는 `factory:queue` + `factory:harness`로 태어난다: queue 라벨이 곧 triage 워크플로의 진입
- * 이벤트다(이 함수가 따로 dispatch하지 않는 이유).
+ * #136 (S2b, 설계 2026-09-30 §8.2) — 새 이슈는 **`backlog` + `factory:harness`로 태어나고**, 큐로 가는
+ * 한 걸음은 호출자가 주입한 `transitionIssue`(= 문: 리허설 + 큐 진입 심사)만이 만든다. 예전에는
+ * `factory:queue`로 바로 태어났다 — 문을 지나지 않는 유일한 큐 진입 경로였고, 그러면 자기생성 상한은
+ * 상한이 아니다. 아래 `ensureHarnessIssue`와 `notQueuedComment`를 보라.
  */
 /**
  * 이미 열려 있는 하네스 이슈의 표에 **빠진 줄만** 덧붙인다(T3 리뷰 SF-2). 예전에는 기존 이슈를
@@ -143,7 +145,55 @@ export function appendHarnessEntries(body, entries) {
   return { body: [...lines.slice(0, last + 1), ...rows, ...lines.slice(last + 1)].join("\n"), added: missing };
 }
 
-export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin = "implement" }) {
+/** 문이 배선되지 않은 호출자(피드백 루프 등)의 반환 사유. 이슈는 `backlog`에서 사람의 `:next`를 기다린다. */
+export const HARNESS_TRANSITION_UNWIRED = "no transition is wired for this caller — the harness issue stays in backlog until a person runs `/know-thy-build:next` on it";
+
+/** 하네스 이슈가 큐에 들어가지 못했다는 기계 마커(flaky 수확의 `factory-flaky-not-queued`와 같은 모양). */
+export const notQueuedMarker = (n) => `<!-- factory-harness-not-queued issue=${n} -->`;
+
+/** 심사 거부 사유 문구 → 발동한 상한의 이름. `lib/admission.js`가 쓰는 괄호 표기를 그대로 읽는다(import하지 않는다). */
+const CAP_RE = /\((back_pressure\.queue_max|self_generated\.open_max|self_generated\.depth_max)\)/g;
+const CAP_EXIT = {
+  "back_pressure.queue_max": "큐가 상한 아래로 줄어든 뒤(다른 이슈가 triage를 지나간 뒤)",
+  "self_generated.open_max": "진행 중인 자기생성 이슈(개선·하네스·flaky)가 끝나거나 닫혀 상한 아래로 내려간 뒤",
+  "self_generated.depth_max": "사람이 이 작업을 직접 하거나 CHARTER의 상한을 바꾼 뒤(상한 변경은 사람 전용)",
+};
+
+/**
+ * `backlog`에 남은 하네스 이슈에 남기는 코멘트. 사유는 **그대로** 싣고, 다음 걸음은 거부의 종류로 가른다:
+ *   - 심사 거부(`queue admission refused — …`): 발동한 상한을 이름으로 대고, `:next`만으로는 같은 상한에 다시
+ *     거부된다고 말한다 — 상한이 풀릴 때까지 `:next`는 헛걸음이다.
+ *   - 리허설 거부(그리고 알 수 없는 거부): `factory rehearse`를 돌린 뒤 `:next`.
+ *   - 문이 던졌다: 일시적 실패일 수 있다 — 그대로 `:next`로 다시 시도.
+ */
+export function notQueuedComment({ issue, reason, threw = false }) {
+  const why = String(reason ?? "unknown");
+  const head = `${notQueuedMarker(issue)}\n이 하네스 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이${threw ? "가 실패했습니다" : "가 거부됐습니다"}: ${why}`;
+  let next;
+  if (!threw && /^queue admission refused\b/.test(why)) {
+    const caps = [...new Set([...why.matchAll(CAP_RE)].map((m) => m[1]))];
+    const named = caps.length ? caps.map((c) => `\`${c}\``).join(", ") : "심사(사유 참조)";
+    const exit = caps.map((c) => CAP_EXIT[c]).filter(Boolean);
+    next = `발동한 상한: ${named}. \`/know-thy-build:next\` alone will be refused again — 같은 문이 같은 상한으로 다시 거부합니다. ${exit.length ? `${exit.join("; ")} \`/know-thy-build:next\`로 큐에 넣으세요.` : "사유를 고친 뒤 `/know-thy-build:next`로 큐에 넣으세요."}`;
+  } else if (threw) {
+    next = "일시적인 실패일 수 있습니다 — `/know-thy-build:next`로 다시 큐에 넣으세요.";
+  } else {
+    next = "하네스를 러너에서 한 번 돌린 뒤(`factory rehearse`) `/know-thy-build:next`로 큐에 넣으세요(ADR-025).";
+  }
+  return `${head}\n\n${next}\n\n이 이슈를 기다리는 피처는 이 이슈가 큐에 들어가 머지될 때까지 주차돼 있습니다(#136).`;
+}
+
+/**
+ * `transitionIssue`(선택): `({ issue, to, reason }) => { ok, reason }` — 호출자가 리허설과 큐 진입 심사를 실어
+ * 배선한 문(run-stage의 `makeHarnessIssueDep`, gates.js의 flaky 수확과 같은 모양). 이 모듈은 문을 import하지
+ * 않는다(순수 어댑터 — 테스트가 진짜 문을 합성해 붙인다).
+ *
+ * 새 이슈의 반환값은 `queued`를 싣는다: 큐에 들어갔으면 true, 아니면 false와 `queue_reason`. 큐에 못 넣은 경우
+ * (거부·문이 던짐·문 없음) 이슈는 `backlog`에 남고 — 이 함수는 **던지지 않는다**(이슈는 이미 만들어졌고,
+ * 그 번호를 잃으면 주차된 피처가 가리킬 곳이 없다). 거부·던짐이면 이유를 코멘트로 남기고, 그 코멘트
+ * 쓰기의 실패도 삼킨다(반환값이 진실을 말한다). 재사용 경로는 문을 다시 두드리지 않는다(범위 밖 — plan non_goals).
+ */
+export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin = "implement", transitionIssue = null }) {
   const title = harnessIssueTitle(entries, issue);
   const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
   const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
@@ -161,10 +211,18 @@ export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin
   const number = await gh.createIssue({
     title,
     body: harnessIssueBody({ entries, issue, pr, origin }),
-    labels: ["factory:queue", HARNESS_LABEL],
+    labels: ["backlog", HARNESS_LABEL],
   });
   if (number == null) throw new Error("gh issue create returned no issue number");
-  return { issue: number, created: true, title };
+  if (typeof transitionIssue !== "function") return { issue: number, created: true, title, queued: false, queue_reason: HARNESS_TRANSITION_UNWIRED };
+  let t, threw = false;
+  try { t = await transitionIssue({ issue: number, to: "factory:queue", reason: `harness request for #${issue}` }); }
+  catch (e) { threw = true; t = { ok: false, reason: `queue transition threw — ${String(e?.message || e).split("\n")[0]}` }; }
+  if (t?.ok === true) return { issue: number, created: true, title, queued: true };
+  const reason = t?.reason || "unknown";
+  try { await gh.comment(number, notQueuedComment({ issue: number, reason, threw })); }
+  catch { /* 기록의 실패가 이슈 생성의 실패는 아니다 — 반환값이 사유를 싣는다 */ }
+  return { issue: number, created: true, title, queued: false, queue_reason: reason };
 }
 
 /**

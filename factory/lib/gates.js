@@ -582,8 +582,8 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
          * 다른 모든 큐 전이와 같은 게이트를 지난다. 예전에는 `labels: ["factory:queue", …]`로 바로
          * 태어나서, 리허설한 적 없는 하네스 위에서도 triage 런이 시작됐다 — 게이트를 통째로 비켜 가는
          * 유일한 생산 경로였다. 거부되면 이슈는 `backlog`에 남고(사람의 `:next`가 집는다) 그 이유를
-         * 코멘트로 적는다. `harness-request.js`의 하네스 이슈는 여전히 바로 큐로 간다(그건 설계다 —
-         * 리허설이 낡았을 때 그것을 고치는 이슈까지 막으면 저장소가 잠긴다).
+         * 코멘트로 적는다. `harness-request.js`의 하네스 이슈도 #136(S2b)부터 같은 모양이다 — `backlog`로
+         * 태어나 리허설 + 심사를 실은 문을 지나고, 거부되면 `factory-harness-not-queued` 코멘트를 단다.
          */
         try {
           const n = await gh?.createIssue({ title, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"] });
