@@ -3890,3 +3890,33 @@ test("test_130_feature_record_names_unqueued_harness_issue", async () => {
   expect(neverAsked).not.toHaveBeenCalled();
   expect(repo.issues.get(st.issue).labels).toEqual(["backlog", "factory:harness"]);
 });
+
+/**
+ * #130 skeptic f3 — main()이 **실제로** 넘기는 인자를 고정한다. 위 테스트의 (2)는 `makeEnsureHarnessIssueDep`에
+ * 스스로 만든 `rehearsal`/`admission`을 넘기므로, main()의 배선 한 줄이 `admission`을 빠뜨리거나
+ * `transitionFn`·`issue:`를 덮어써도 초록이다. main()은 gh·claude를 띄우므로 불러 볼 수 없다 — 그래서
+ * 소스에서 그 한 줄과, 그 줄이 쓰는 두 지역 변수가 `deps.transition`이 쓰는 **바로 그** 검사기임을 읽는다.
+ */
+test("test_130_main_wires_harness_dep_with_the_shared_rehearsal_and_admission", () => {
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const start = src.indexOf("\nasync function main()");
+  expect(start).toBeGreaterThan(0);
+  const end = src.indexOf("\n}\n", start);
+  const main = src.slice(start, end);
+
+  // 검사기는 main 안에서 한 번씩만 선언되고, 각각 진짜 리허설 검사기·진짜 큐 진입 심사기다
+  const decl = (name) => main.match(new RegExp(`\\bconst ${name}\\s*=\\s*([^\\n]*)`, "g")) ?? [];
+  expect(decl("rehearsal")).toHaveLength(1);
+  expect(decl("rehearsal")[0]).toMatch(/makeRehearsalChecker\(/);
+  expect(decl("admission")).toHaveLength(1);
+  expect(main.slice(main.indexOf("const admission ="), main.indexOf("const deps = {"))).toMatch(/makeQueueAdmission\(/);
+
+  // implement의 dep: 인자는 정확히 { gh, issue, stage, rehearsal, admission } — 전부 단축 속성(덮어쓰기 없음), transitionFn 없음
+  const wire = main.match(/\bensureHarnessIssue:\s*makeEnsureHarnessIssueDep\(\{([^}]*)\}\)/);
+  expect(wire).not.toBeNull();
+  const keys = wire[1].split(",").map((s) => s.trim()).filter(Boolean);
+  expect([...keys].sort()).toEqual(["admission", "gh", "issue", "rehearsal", "stage"]);
+
+  // 같은 두 검사기가 피처의 deps.transition(큐 hop 포함)에도 실린다 — 두 자리가 갈라지지 않는다
+  expect(main).toMatch(/return transition\(\{[^}]*\brehearsal, admission \}\)/);
+});
