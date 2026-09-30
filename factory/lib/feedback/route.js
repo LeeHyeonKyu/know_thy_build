@@ -163,11 +163,14 @@ export async function routeFindings({
   } else if (harnessFresh.length) {
     try {
       const r = await ensureHarnessIssue({ gh, issue, entries: harnessFresh.map(harnessEntryOf), pr: null, origin: "feedback" });
-      actions.push({ kind: "harness-issue", step: "feedback-route", issue, harness_issue: r.issue, created: r.created, appended: r.appended ?? 0, findings: harnessFresh.length });
+      actions.push({ kind: "harness-issue", step: "feedback-route", issue, harness_issue: r.issue, created: r.created, appended: r.appended ?? 0, findings: harnessFresh.length, ...(r.queued === false ? { queued: false, queue_reason: r.queue_reason } : {}) });
       try {
         await gh.comment(issue, [
           harnessFresh.map((c) => routedMarker(c.fingerprint)).join("\n"),
           `**피드백 루프**: 이 이슈의 발견 ${harnessFresh.length}건은 **이 저장소**가 고칠 것입니다(설치 매니페스트 owner: user) — harness 이슈 #${r.issue}${r.created ? "를 열었습니다" : "에 실었습니다"}.`,
+          // #130 — 이 경로는 심사된 큐 전이를 배선하지 않는다: 그 이슈는 backlog에서 사람의 `:next`를 기다린다.
+          // "열었습니다"만 적으면 작업이 시작된 것처럼 읽힌다 — 이 영수증이 사람이 보는 유일한 줄이다.
+          ...(r.queued === false ? [`harness 이슈 #${r.issue}는 \`backlog\`에 있고 **큐에 들어가지 않았습니다**(not queued): ${r.queue_reason}. 스스로 돌지 않습니다 — 사람이 \`/know-thy-build:next\`로 올려야 합니다.`] : []),
           "",
           ...harnessFresh.map((c) => `- \`${[c.causal.path, c.causal.locus].filter(Boolean).join(" ")}\` — ${oneLine(c.payload.reason)} (fp \`${c.fingerprint}\`)`),
         ].join("\n"));

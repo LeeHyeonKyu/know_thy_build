@@ -131,7 +131,7 @@ describe("(a) harness 발견은 쓰는 저장소의 harness 이슈 하나로만 
     const gh = fakeGh();
     const r = await route({ gh, issue: 7, upstream: UPSTREAM, findings });
     expect(gh.calls.createIssue).toHaveLength(1);
-    expect(gh.calls.createIssue[0].labels).toEqual(["factory:queue", HARNESS_LABEL]);
+    expect(gh.calls.createIssue[0].labels).toEqual(["backlog", HARNESS_LABEL]);
     expect(gh.calls.createIssue[0].body).toContain("[runtime].setup");
     expect(gh.calls.upstreamIssue).toEqual([]);
     expect(r.actions.map((a) => a.kind)).toContain("harness-issue");
@@ -650,4 +650,31 @@ describe("attribution의 두 구멍 (재리뷰 NEW-MF-1/2)", () => {
     expect(harvest9("", [note], null)[0].extra.attribution).toBe("none");
     expect(harvest9("", [note], FACTORY_LOGINS)[0].extra.attribution).toEqual(["human-decision"]);
   });
+});
+
+// ── #130 (S2b) — 피드백 루프는 심사된 큐 전이를 배선하지 않는다(non_goal). 그래서 그 하네스 이슈는
+// backlog에 남고, 출처 이슈의 영수증이 **그 사실을** 말해야 한다 — 사람이 보는 것은 그 영수증뿐이다.
+test("test_130_feedback_route_harness_issue_left_in_backlog_and_said_so", async () => {
+  const findings = await harnessGateFinding({ outcomes: { unit: FLUTTER_NOT_FOUND } });
+  const gh = fakeGh();
+  const r = await route({ gh, issue: 7, upstream: UPSTREAM, findings });
+  expect(gh.calls.createIssue).toHaveLength(1);
+  expect(gh.calls.createIssue[0].labels).toEqual(["backlog", HARNESS_LABEL]);
+  expect(gh.calls.createIssue[0].labels).not.toContain("factory:queue");
+  const n = gh.local[0].number;
+  // 하네스 이슈 자신에는 not-queued 마커와 사유
+  const onHarness = gh.calls.comment.filter((c) => c.issue === n).map((c) => c.body);
+  expect(onHarness).toHaveLength(1);
+  expect(onHarness[0]).toContain(`<!-- factory-harness-not-queued issue=${n} -->`);
+  expect(onHarness[0]).toMatch(/no transition wiring supplied/);
+  // 출처 이슈의 영수증: backlog에 있고 큐에 들어가지 않았으며, 사람의 `:next`가 필요하다고 사유와 함께 말한다
+  const receipt = gh.calls.comment.filter((c) => c.issue === 7).map((c) => c.body);
+  expect(receipt).toHaveLength(1);
+  expect(receipt[0]).toContain(`#${n}`);
+  expect(receipt[0]).toContain("backlog");
+  expect(receipt[0]).toMatch(/not queued/);
+  expect(receipt[0]).toMatch(/no transition wiring supplied/);
+  expect(receipt[0]).toContain("/know-thy-build:next");
+  // 액션 줄도 그 사실을 싣는다
+  expect(r.actions.find((a) => a.kind === "harness-issue")).toMatchObject({ harness_issue: n, created: true, queued: false });
 });
