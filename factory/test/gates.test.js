@@ -1,7 +1,7 @@
 import { test, expect, vi } from "vitest";
 import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv, commitStatusState, gateDetail, gatesDetailLines, attachGateDetails, parseFailingTests, GATES_DETAIL_PREFIX, DETAIL_MAX_CHARS, DETAIL_TAIL_LINES, DETAIL_MAX_REASON } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1040,4 +1040,28 @@ test("gatesDetailLines: MISCONFIGURED gates get a line with status and their det
   const o = JSON.parse(lines[0].slice(GATES_DETAIL_PREFIX.length));
   expect(o).toMatchObject({ gate: "prove-test", status: "MISCONFIGURED", run_id: "1" });
   expect(o.snippet).toContain("inconclusive on base");
+});
+
+// 설계 2026-09-30 §8.3 (S3, KTB #130 실측) — KTB 자기 저장소에서 미러 가족은 러너가 생성한 것이라 `must_not: touch .factory/**`의
+// 대상이 아니다. 채택자 저장소(소스 없음)에서는 예전 그대로 RED다(위 테스트).
+test("implement: in KTB's own repo the runner-generated mirror paths are excluded from the must_not contract", async () => {
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, required: ["unit"] } };
+  const self = mkdtempSync(join(tmpdir(), "ktb-self-"));
+  try {
+    mkdirSync(join(self, "factory/cli"), { recursive: true }); mkdirSync(join(self, ".factory"), { recursive: true });
+    for (const f of ["manifest.js", "install.js"]) writeFileSync(join(self, "factory/cli", f), "// stub\n");
+    const run = makeFakeRun([
+      { match: (c) => c === "bash", result: ok },
+      { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status", result: { code: 0, stdout: "M\tfactory/lib/gates.js\nM\t.factory/lib/gates.js\nM\t.claude/hooks/block-dangerous.sh\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("-U0"), result: { code: 0, stdout: "--- a/.factory/lib/gates.js\n+++ b/.factory/lib/gates.js\n@@ -1,0 +2,1 @@\n+require('smol-toml')\n", stderr: "" } },
+      revParse,
+      { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+      { match: (c, a) => c === "git" && a.includes("--intent-to-add"), result: ok },
+      { match: (c) => c === "cp", result: ok },
+    ]);
+    const gh = { createIssue: vi.fn(), searchIssues: vi.fn(async () => []), issue: vi.fn(async () => ({ body: "fix it\n\nmust_not:\n- touch: `.factory/**`, `.claude/**`\n- add: `smol-toml`\n" })) };
+    const r = await runStageGates({ run, cwd: self, harness: h, stage: "implement", tier: "standard", base: "b".repeat(40), gh, issue: 7, readFile: readUnit });
+    expect(r.gates["must-not"].status).toBe("GREEN");
+    expect(r.gates["must-not"].log).toMatch(/runner-generated mirror paths excluded: 2/);
+  } finally { rmSync(self, { recursive: true, force: true }); }
 });

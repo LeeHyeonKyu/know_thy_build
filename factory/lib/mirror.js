@@ -24,30 +24,32 @@ export const inMirrorFamily = (dest) => MIRROR_FAMILIES.some((f) => (f === ".cla
  * 네 가족을 소스에서 다시 만들어 트리에 쓴다. 순수하지 않지만 결정적이다: 같은 소스면 같은 바이트.
  * @returns {{ok:boolean, applicable:boolean, changed:string[], reason?:string}}
  */
-export async function regenerateMirror({ root, write = true, importer = (p) => import(pathToFileURL(p).href) } = {}) {
-  const manifestJs = join(root, "factory/cli/manifest.js");
-  const installJs = join(root, "factory/cli/install.js");
-  const initJs = join(root, "factory/cli/init.js");
-  if (!existsSync(manifestJs) || !existsSync(installJs) || !existsSync(join(root, ".factory"))) return { ok: true, applicable: false, changed: [] };
+/** 이 저장소에서 미러 단계가 성립하는가 — 소스 `factory/cli/**`와 설치본 `.factory/`가 함께 있을 때(= KTB 자신). */
+export const mirrorApplicable = (root) => existsSync(join(root, "factory/cli/manifest.js")) && existsSync(join(root, "factory/cli/install.js")) && existsSync(join(root, ".factory"));
+
+/** 생성기와 가족 항목을 읽는다. 실패는 `{reason}`으로 돌려준다 — 호출자 둘(재생성·HEAD 대조)이 같은 실패 문장을 낸다. */
+async function loadMirrorGenerators({ root, importer }) {
   let buildManifest, freshContent, projectVars;
   try {
-    ({ buildManifest } = await importer(manifestJs));
-    ({ freshContent } = await importer(installJs));
-    ({ projectVars } = await importer(initJs));
-  } catch (e) {
-    return { ok: false, applicable: true, changed: [], reason: `mirror generators could not be loaded — ${e?.message || e}` };
-  }
-  let entries, vars;
+    ({ buildManifest } = await importer(join(root, "factory/cli/manifest.js")));
+    ({ freshContent } = await importer(join(root, "factory/cli/install.js")));
+    ({ projectVars } = await importer(join(root, "factory/cli/init.js")));
+  } catch (e) { return { reason: `mirror generators could not be loaded — ${e?.message || e}` }; }
   try {
-    vars = projectVars(root, root);
-    entries = buildManifest({ pkgRoot: root }).filter((e) => inMirrorFamily(e.dest));
-  } catch (e) {
-    return { ok: false, applicable: true, changed: [], reason: `mirror manifest could not be built — ${e?.message || e}` };
-  }
+    const vars = projectVars(root, root);
+    const entries = buildManifest({ pkgRoot: root }).filter((e) => inMirrorFamily(e.dest));
+    return { entries, fresh: (e) => freshContent(e, { readFile: (p) => readFileSync(p, "utf8"), vars }) };
+  } catch (e) { return { reason: `mirror manifest could not be built — ${e?.message || e}` }; }
+}
+
+export async function regenerateMirror({ root, write = true, importer = (p) => import(pathToFileURL(p).href) } = {}) {
+  if (!mirrorApplicable(root)) return { ok: true, applicable: false, changed: [] };
+  const g = await loadMirrorGenerators({ root, importer });
+  if (g.reason) return { ok: false, applicable: true, changed: [], reason: g.reason };
   const changed = [];
-  for (const e of entries) {
+  for (const e of g.entries) {
     let fresh;
-    try { fresh = freshContent(e, { readFile: (p) => readFileSync(p, "utf8"), vars }); }
+    try { fresh = g.fresh(e); }
     catch (err) { return { ok: false, applicable: true, changed, reason: `${e.dest}: ${err?.message || err}` }; }
     const dest = join(root, ...e.dest.split("/"));
     const current = existsSync(dest) ? readFileSync(dest, "utf8") : null;
@@ -56,6 +58,27 @@ export async function regenerateMirror({ root, write = true, importer = (p) => i
     if (write) { mkdirSync(dirname(dest), { recursive: true }); writeFileSync(dest, fresh); }
   }
   return { ok: true, applicable: true, changed: changed.sort() };
+}
+
+/**
+ * **HEAD(브랜치)의 미러가 그 브랜치의 소스에서 생성되는 것과 같은가.** implement의 재시도 런에서 overlay가 "브랜치가 팩토리 소유
+ * 경로를 바꿨다"고 볼 때, 그 경로가 전부 미러 가족이고 이 대조가 참이면 그것은 빌더의 변경이 아니라 러너의 생성물이다(KTB #130 실측:
+ * 첫 런의 미러 커밋이 두 번째 런에서 거부됐다). 워크트리가 아니라 `git show HEAD:<path>`와 대조한다 — overlay가 워크트리를 이미
+ * base로 되돌린 뒤에도 옳은 답을 내야 한다.
+ * @returns {{ok:boolean, applicable:boolean, mismatched:string[], reason?:string}}
+ */
+export async function mirrorMatchesHead({ root, run, importer = (p) => import(pathToFileURL(p).href) } = {}) {
+  if (!mirrorApplicable(root)) return { ok: true, applicable: false, mismatched: [] };
+  const g = await loadMirrorGenerators({ root, importer });
+  if (g.reason) return { ok: false, applicable: true, mismatched: [], reason: g.reason };
+  const mismatched = [];
+  for (const e of g.entries) {
+    let fresh;
+    try { fresh = g.fresh(e); } catch (err) { return { ok: false, applicable: true, mismatched, reason: `${e.dest}: ${err?.message || err}` }; }
+    const at = await run("git", ["show", `HEAD:${e.dest}`], { cwd: root });
+    if (at.code !== 0 || at.stdout !== fresh) mismatched.push(e.dest);
+  }
+  return { ok: mismatched.length === 0, applicable: true, mismatched: mismatched.sort() };
 }
 
 /**
