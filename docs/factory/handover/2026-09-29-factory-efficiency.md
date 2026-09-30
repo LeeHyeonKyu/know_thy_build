@@ -101,7 +101,8 @@ reviewer-qa $85 > plan-skeptic $69 > reviewer-spec-conformance $57 > plan-archit
 ## 6. 측정 방법 (다음 작업의 전/후 비교)
 
 - 스테이지·이슈별 비용: `factory/records` 브랜치의 `docs/factory/runs/<n>.md` → `parseRunRecord`(`factory/lib/usage.js`).
-  캠페인용 집계 스크립트: `.superpowers/sdd/2026-09-27-own-cal-campaign/{retro.mjs,roles.mjs}`(스크래치 사본; 이 문서의 3.1–3.3).
+  캠페인용 집계 스크립트 `retro.mjs`·`roles.mjs`는 스크래치에만 있었고 남아 있지 않다 — 리뷰어 역할별 판정 집계는
+  `docs/research/review-roster-evidence.md` 부록의 스크립트로 다시 만든다.
 - 역할별: run 기록의 마지막 `factory-progress:v1` 마커 `agents[]`.
 - 실패 표식: 기록의 `gates-detail:`(RED·MISCONFIGURED 모두, 1.4.29부터), `self-gate-detail:`, `verify: FAIL`, `worktree: FAIL`.
 - 러너: `gh run list --json workflowName,createdAt,updatedAt,conclusion`(startedAt은 비어 있음 — job 단위 `gh run view`가 필요).
@@ -147,5 +148,3 @@ reviewer-qa $85 > plan-skeptic $69 > reviewer-spec-conformance $57 > plan-archit
 - 감시: `.superpowers/sdd/2026-09-27-own-cal-campaign/watch-issues.sh <repo> <min> <issues…>`.
 - 정본 기록: `.superpowers/sdd/2026-09-27-own-cal-campaign/progress.md`(시간순 원장), `retro.md`(수치), `docs/factory/DECISIONS.md`
   ADR-029~031 + 1.4.13~1.4.32 노트, 메모리 `campaign-retro-2026-09`, `sdd-cost-policy`, `self-hosted-runner-own-calendar`.
-EOF
-echo written
