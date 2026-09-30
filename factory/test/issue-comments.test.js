@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, transitionFailedMarker } from "../lib/retro/issue-comments.js";
+import { BLOCKED_CAUSES, blockedCause, blockedOrigin, blockedOriginMarker, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, extractNeedsHuman, lastTransition, transitionFailedMarker } from "../lib/retro/issue-comments.js";
 import { renderHandoff } from "../lib/handoff.js";
 
 // ── KTB-15b I2: factory-blocked-origin marker parsing ──────────────────────────────────────────
@@ -145,4 +145,30 @@ test("(c): a rework transition cancelled by a following transition-failed marker
 test("SF3: a refusal carrying the transition marker is harvested once, with its refusal reason", () => {
   const body = "<!-- factory-transition:v1 from=factory:ready to=factory:needs-human by=script reason=refused -->\n<!-- factory-transition-refused from=factory:ready to=factory:planned -->\n**전이 거부** factory:ready → factory:planned: plan handoff missing\n\n라벨을 `factory:needs-human`으로 옮겼습니다. 산출물을 보강한 뒤 `:unstick`으로 재개하세요.";
   expect(extractNeedsHuman(7, [{ body, createdAt: "t1" }])).toEqual([{ issue: 7, reason: "plan handoff missing", at: "t1" }]);
+});
+
+/**
+ * 설계 2026-09-30 §8.1 (S1) — **재시작 창은 사람의 전이에서만 리셋되고, 사람인지는 계정으로 판정한다.**
+ * 예전에는 본문에 `by=human`이 있으면 누가 썼든 창이 리셋됐다. 봇 계정은 이슈에 코멘트를 쓸 수 있으므로(`gh.js`가 인정)
+ * 스테이지의 에이전트가 마커를 흉내 내 sweeper의 `stalled restart limit`과 self-gate의 backstop 창을 되돌릴 수 있었다.
+ * 재큐(`to=factory:queue`)는 누가 했든 새 주기다 — 그것은 라벨 그래프가 이미 통제한다.
+ */
+const tr = (from, to, by, author, i) => ({ id: i, body: `<!-- factory-transition:v1 from=${from} to=${to} by=${by} -->\n${from} → ${to}`, createdAt: `2026-09-30T0${i}:00:00Z`, author, authorType: "User", viaApp: null });
+const note = (i) => ({ id: i, body: `note ${i}`, createdAt: `2026-09-30T0${i}:00:00Z`, author: "bot-hk" });
+
+test("S1: a human marker written by the factory account does not start a new cycle; one written by another account does", () => {
+  const comments = [note(1), tr("factory:needs-human", "factory:rework", "human", "bot-hk", 2), note(3)];
+  expect(commentsSinceCycleStart(comments, { factoryLogin: "bot-hk" }).map((c) => c.id)).toEqual([1, 2, 3]);
+  const real = [note(1), tr("factory:needs-human", "factory:rework", "human", "LeeHyeonKyu", 2), note(3)];
+  expect(commentsSinceCycleStart(real, { factoryLogin: "bot-hk" }).map((c) => c.id)).toEqual([3]);
+});
+
+test("S1: an author-less human marker never resets; a re-queue resets whoever wrote it; the legacy call without factoryLogin resets only on known non-empty authors", () => {
+  const noAuthor = [note(1), { ...tr("factory:needs-human", "factory:rework", "human", null, 2) }, note(3)];
+  expect(commentsSinceCycleStart(noAuthor, { factoryLogin: "bot-hk" }).map((c) => c.id)).toEqual([1, 2, 3]);
+  const requeue = [note(1), tr("backlog", "factory:queue", "agent:hk", "bot-hk", 2), note(3)];
+  expect(commentsSinceCycleStart(requeue, { factoryLogin: "bot-hk" }).map((c) => c.id)).toEqual([3]);
+  const legacy = [note(1), tr("factory:needs-human", "factory:rework", "human", "LeeHyeonKyu", 2), note(3)];
+  expect(commentsSinceCycleStart(legacy).map((c) => c.id)).toEqual([3]);
+  expect(commentsSinceCycleStart(noAuthor).map((c) => c.id)).toEqual([1, 2, 3]);
 });

@@ -5,7 +5,7 @@ import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
-import { commentsSinceRequeue, latestSelfGateFindings } from "./retro/issue-comments.js";
+import { commentsSinceRequeue, latestSelfGateFindings, TRANSITION_TO } from "./retro/issue-comments.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -217,6 +217,24 @@ export function disputedFrom(comments) {
   return (Array.isArray(latest.obj.responses) ? latest.obj.responses : []).filter((r) => r?.status === "disputed");
 }
 
+/**
+ * 1.4.35 (L43) → 설계 2026-09-30 §8.1 (S1) — **이 이슈는 명시적으로 제출됐는가, 누가 제출했는가.**
+ *
+ * 큐 진입은 언제나 전이 CLI를 지나 마커를 남긴다. 그 마커가 있으면 누군가 — 사람, 에이전트 세션, 공장 자신 — 이 이슈를
+ * 명시적으로 큐에 넣은 것이고, `triage.default: needs-info`인 저장소의 triage는 그것을 `[ready]`와 같게 읽는다(#105는 done_when이
+ * 구체적이라고 triage가 스스로 말하면서도 `[ready]`가 없다는 이유로 1분 만에 needs-info로 돌아갔다). 제출자(`by=`)는 자기 신고이고
+ * 감사용으로만 실린다 — 권한의 근거가 아니다(코멘트 작성 계정은 사람과 소유자 계정의 에이전트 세션을 가르지 못한다). 가장 최근의
+ * 큐 진입 마커만 본다. 마커가 없는 이슈(라벨로 태어난 것)는 예전 그대로 `[ready]`가 필요하다.
+ */
+export function explicitSubmission(comments) {
+  let latest = null;
+  for (const c of Array.isArray(comments) ? comments : []) {
+    const m = TRANSITION_TO.exec(String(c?.body ?? ""));
+    if (m && m[2] === "factory:queue") latest = { by: m[3], author: typeof c?.author === "string" ? c.author : null };
+  }
+  return latest ? { explicit_submission: true, submitted_by: latest.by } : { explicit_submission: false, submitted_by: null };
+}
+
 export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
@@ -224,6 +242,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   const handoffs = {};
   for (const s of ["triage", "plan", "implement", "review"]) { const h = latestHandoff(comments, s); if (h) handoffs[s] = h.data; }
   const tier = handoffs.triage?.tier ?? charter.tier_default;
+  const submission = stage === "triage" ? explicitSubmission(comments) : null;
   // 감사 H3 — 로스터·계획은 **신고가 아니라 실효 tier**를 읽는다.
   const { tier_effective, tier_source, tier_floor } = await resolveTier({ run, cwd: root, base, harness, tier });
   const rs = ROSTER_STAGE[stage];
@@ -265,7 +284,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * (`charter.triage.default`)와, 스크립트가 다시 대는 NEVER_AUTOMATE 글롭. 프롬프트는 전자를
      * 읽어 판정하고, `verify-stage`는 후자로 그 판정을 덮어쓴다 — 둘은 같은 CHARTER에서 온다.
      */
-    ...(stage === "triage" ? { triage: { default: charter.triage?.default ?? null, never_automate: charter.never_automate ?? [] } } : {}),
+    ...(stage === "triage" ? { triage: { default: charter.triage?.default ?? null, never_automate: charter.never_automate ?? [], ...submission } } : {}),
     orchestration: harness.factory?.orchestration ?? "workflow",
     spec_path: spec ? spec[0] : null,
     handoffs,

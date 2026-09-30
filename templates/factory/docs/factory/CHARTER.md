@@ -12,7 +12,11 @@ plan_roles:
   default: [product-advocate, architect, skeptic, operator]
 plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (아래 plan.mode)
 plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
-back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
+back_pressure: { awaiting_review_max: 4, queue_max: 8 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결). queue_max는 큐 진입 심사(설계 2026-09-30 §8.2)
+# 설계 2026-09-30 §8.2 — 공장이 스스로 만든 이슈(개선·하네스·flaky)의 상한. 큐 진입 심사가 센다: 진행 중인 자기생성 이슈 수(open_max),
+# 자기생성 이슈가 낳은 자기생성 이슈의 세대(depth_max: 1이면 손자는 큐에 못 들어간다). 실측 증식률은 0.25/머지로 이미 수렴한다 —
+# 이 상한은 보험이다. **판정 대상이 상한을 고치면 상한이 아니다**: 이 줄은 사람만 바꾼다.
+self_generated: { open_max: 5, depth_max: 1, per_merge_max: 2 }
 # 사람이 PR마다 서명하는가(외부 감사 2026-09-14 H6). true면 `factory bootstrap`이 `factory-merge` 환경에
 # required reviewer 1명(소유자)을 걸어 **모든 머지 잡이 사람 앞에서 멈춘다**. false면 다크 머지 —
 # 사람의 서명은 토큰 등록 1회뿐이고, `factory doctor`가 매번 `merge.dark`로 그 사실을 말한다.
@@ -23,8 +27,9 @@ merge: { human_gate: true }
 # triage가 **판단이 서지 않을 때** 이슈를 어떻게 하는가(외부 감사 2026-09-14 M1). `needs-info`는
 # 멈춘다 — 침묵은 승인이 아니다. `ready`는 통과시킨다(다크 루프 자체가 산출물인 저장소의 선택).
 # NEVER_AUTOMATE에 걸리면 언제나 `wont-do`이고, done_when을 못 쓰면 언제나 `needs-info`다 —
-# 이 필드가 정하는 것은 **그 둘이 아닌 나머지**뿐이다. 이슈 본문에 `[ready]` 표식이 있으면
-# 그 이슈 하나만 예외로 통과한다(사람이 그 이슈를 봤다는 뜻).
+# 이 필드가 정하는 것은 **그 둘이 아닌 나머지**뿐이다. 이슈 본문에 `[ready]` 표식이 있거나
+# **사람이 그 이슈를 큐에 넣었으면**(러너가 전이 코멘트의 계정으로 확인한다, 1.4.35) 그 이슈는 통과한다
+# — 둘 다 사람이 그 이슈를 봤다는 뜻이다.
 # **이 줄을 지우면 doctor FAIL이다**(`charter.triage-default-unset`).
 triage: { default: needs-info }
 # `usd_per_issue` caps what ONE issue may cost over its whole life — every run across re-queues and human

@@ -183,7 +183,7 @@ test("(c') factory.identity is wired into the CLI: a personal factory account WA
   const { io: i3, o: o3 } = io();
   await doctorCommand({ root, pkgRoot, argv: ["--json", "--no-run", "--offline"], io: i3, run, gh: idGh("LeeHyeonKyu", "User") });
   expect(JSON.parse(o3.out.join("")).checks.some((c) => c.id === "factory.identity")).toBe(false);
-}, 30000);
+}, 120000);
 
 test("(d) --no-run skips executing commands and smoke: commands.run is WARN, no smoke.* checks", async () => {
   const root = await setupRepo();

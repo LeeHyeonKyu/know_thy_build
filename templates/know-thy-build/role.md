@@ -37,7 +37,7 @@ Technical terms (e.g. frontmatter keys, schema names, tool names, TOML keys) sta
 
 **Guard**: 무엇을 하기 전에 `.factory/bin/run-stage.js`가 있는지 먼저 본다 — 없으면 이 저장소에는 아직 factory가 없다. 그때는 "factory가 아직 없음 — `npx know-thy-build factory init`" 한 줄만 출력하고 즉시 멈춘다(아무것도 읽거나 쓰지 않는다).
 
-라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --human --reason "<why>"`; 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
+라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --reason "<why>"`(큐 진입은 누구나 명시적으로 제출한다 — 제출자는 CLI가 환경으로 자기 신고한다; `needs-human`/`needs-info`에서 되돌리는 재시도만 사람의 셸에서 `--human`); 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
 
 이 스킬은 이슈보다 PR을 더 자주 다룬다(자신이 여는 `factory/role-<short>` PR) — `human-decision:v1`은 그 PR에 남긴다(`gh pr comment <pr> --body-file <tmp>`). 관련 이슈(예: 이 역할 신설을 요청한 `:proposal` 근거 이슈)를 전이해야 할 때만 `transition.js`를 쓴다. 어느 경우든 `gh pr merge` 실행은 금지다 — `.factory/roles.toml`과 `.claude/agents/**`는 protected build-config 경로라 merge 스테이지(L1)가 자동 머지를 거부하고, 머지 버튼은 언제나 사람이 GitHub UI에서 누른다.
 

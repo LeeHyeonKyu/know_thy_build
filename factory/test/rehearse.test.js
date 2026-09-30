@@ -503,7 +503,8 @@ test("transition: the person's own shell is refused too — the rehearsal is abo
 
 test("transition: a current rehearsal lets the queue transition through, and other targets never consult it", async () => {
   const gh = fakeGh(["backlog"]);
-  const ok = await transition({ gh, issue: 7, to: "factory:queue", rehearsal: { ok: true } });
+  const admit = async () => ({ ok: true, reasons: [] });   // S2 — 심사는 리허설 다음 자물쇠; 여기서는 통과 스텁
+  const ok = await transition({ gh, issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission: admit });
   expect(ok.ok).toBe(true);
   expect(gh.setFactoryLabel).toHaveBeenCalled();
 
@@ -543,7 +544,7 @@ test("makeRehearsalChecker: one wiring for every production caller — local fin
 
   // 이 검사기를 그대로 `transition`에 물리면 큐가 열린다 — sweeper·merge·사람의 CLI가 쓰는 그 배선이다.
   const issueGh = fakeGh(["backlog"]);
-  expect((await transition({ gh: issueGh, issue: 7, to: "factory:queue", rehearsal: checker })).ok).toBe(true);
+  expect((await transition({ gh: issueGh, issue: 7, to: "factory:queue", rehearsal: checker, admission: async () => ({ ok: true, reasons: [] }) })).ok).toBe(true);
 
   // 하네스를 읽지 못하면(체크아웃이 없다) 거부다 — 확인 못 한 것은 통과가 아니다.
   const blind = makeRehearsalChecker({ gh, root: "/repo", readFile: () => { throw new Error("ENOENT"); } });

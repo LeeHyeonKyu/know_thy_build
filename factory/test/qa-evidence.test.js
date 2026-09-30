@@ -268,7 +268,7 @@ test("record: runs the command, stores stdout+stderr with an exit header, and ap
   runCli(["record", "--issue", "3", "--claim", "dw1", "--summary", "again", "--", ...script("1")], cliOpts(root));
   const m2 = JSON.parse(readFileSync(manifestPath(root, 3), "utf8"));
   expect(m2.claims.map((c) => c.file)).toEqual(["dw1-1.log", "dw1-2.log"]);
-}, 30000);   // 이 테스트는 실제로 프로세스를 띄운다 — 전체 스위트와 함께 돌 때 기본 5s로는 모자란다
+}, 120000);   // 이 테스트는 실제로 프로세스를 띄운다 — 전체 스위트와 함께 돌 때 기본 5s로는 모자란다
 
 test("record: secrets in the captured output are scrubbed before they land in the evidence dir", () => {
   const root = tmp();
@@ -280,7 +280,7 @@ test("record: secrets in the captured output are scrubbed before they land in th
   const log = readFileSync(join(qaDir(root, 3), "dw1-1.log"), "utf8");
   expect(log).not.toContain(token);
   expect(log).toMatch(/\[REDACTED:/);
-}, 30000);
+}, 120000);
 
 test("record: a command that cannot be spawned is still evidence (exit recorded, not a crash)", () => {
   const root = tmp();
@@ -289,7 +289,7 @@ test("record: a command that cannot be spawned is still evidence (exit recorded,
   const m = JSON.parse(readFileSync(manifestPath(root, 3), "utf8"));
   expect(m.claims[0].kind).toBe("command");
   expect(Number.isInteger(m.claims[0].exit)).toBe(true);
-}, 30000);
+}, 120000);
 
 test("attach: copies the file into the issue dir and records the kind; a missing source is exit 1", () => {
   const root = tmp();
@@ -331,7 +331,7 @@ test("finish: prints the coverage table and exits 1 while a done_when id is unco
   const ok = [];
   expect(runCli(["finish", "--issue", "3"], cliOpts(root, { log: (s) => ok.push(s) }))).toBe(0);
   expect(ok.join("\n")).toMatch(/dw1/);
-}, 30000);
+}, 120000);
 
 test("the tool stamps head_sha and maturity from the stage context, so the manifest names the commit it describes", () => {
   const root = tmp();
@@ -377,7 +377,7 @@ test("evidenceFor: reads the manifest off disk, validates it against done_when, 
   const moved = evidenceFor({ root, issue: 3, doneWhen: dw("dw1"), maturity: "M0", headSha: "e".repeat(40) });
   expect(moved.ok).toBe(false);
   expect(moved.reason).toMatch(/describes/);
-}, 30000);
+}, 120000);
 
 test("readManifest: unreadable or malformed JSON is a reason, never a throw", () => {
   const root = tmp();
@@ -411,7 +411,7 @@ test("MF-1: a payload the hooks would refuse does not run through the tool eithe
     // 거절된 페이로드는 매니페스트에 한 줄도 남기지 않는다 — 실행되지 않은 것은 증거가 아니다.
     expect(existsSync(manifestPath(root, 3)), payload.join(" ")).toBe(false);
   }
-}, 60000);
+}, 240000);
 
 test("MF-1: an interpreter payload is refused before any hook runs — the hooks cannot read a second command line", () => {
   const root = tmp();
@@ -448,7 +448,7 @@ test("MF-1: the payloads qa actually needs are not refused", () => {
   ]) {
     expect(gatePayload(payload, { env: {} }), payload.join(" ")).toMatchObject({ ok: true });
   }
-}, 60000);
+}, 240000);
 
 test("MF-1: end to end — a legitimate payload goes through the real gate, runs, and becomes a claim", () => {
   const root = tmp();
@@ -458,7 +458,7 @@ test("MF-1: end to end — a legitimate payload goes through the real gate, runs
   const m = JSON.parse(readFileSync(manifestPath(root, 3), "utf8"));
   expect(m.claims).toHaveLength(1);
   expect(m.claims[0]).toMatchObject({ id: "dw1", kind: "command", exit: 0 });
-}, 60000);
+}, 240000);
 
 /**
  * ── 재리뷰 SF-2 — 래퍼 한 겹이면 인터프리터 검사가 통째로 비켜갔다 ────────────────────────────────

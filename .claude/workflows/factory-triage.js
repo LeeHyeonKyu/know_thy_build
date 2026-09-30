@@ -94,6 +94,10 @@ const triageDefault = loaded.triage?.default === 'ready' || loaded.triage?.defau
   ? loaded.triage.default
   : 'needs-info';
 
+// 1.4.35 (L43) → 설계 2026-09-30 §8.1 — 명시적으로 제출된 이슈(큐 진입 마커가 있는 이슈)는 누군가가 본 이슈다. 값은 러너가
+// 계산해 싣는다(`explicitSubmission`, context.js) — 에이전트가 본문에서 읽어 내는 것이 아니다. 없으면 false.
+const explicitlySubmitted = loaded.triage?.explicit_submission === true;
+
 let verdict = null;
 if (role) {
   const triagePrompt =
@@ -101,7 +105,10 @@ if (role) {
     `\`docs/factory/CHARTER.md\` (sections NEVER_AUTOMATE and Tiers), the spec named by context.spec_path if present, ` +
     `and \`.factory/harness.toml\` [load_bearing]. Judge whether issue #${issue} is something the factory can build ` +
     `and, if so, its tier — per your Lens (a NEVER_AUTOMATE match -> wont-do; done_when not yet writable concretely ` +
-    `-> needs-info with <=3 questions; a literal [ready] marker in the issue body -> ready; anything else -> this ` +
+    `-> needs-info with <=3 questions, and only questions that cannot be answered by reading the repository; ` +
+    `a literal [ready] marker in the issue body -> ready; ` +
+    (explicitlySubmitted ? `this issue was explicitly submitted to the queue by ${loaded.triage?.submitted_by || "an unnamed principal"} (loaded.triage.explicit_submission is true), which counts exactly like [ready] -> ready; ` : ``) +
+    `anything else -> this ` +
     `repo's charter default, which is \`${triageDefault}\` (CHARTER triage.default) — do NOT invent a \`ready\` of ` +
     `your own; predicted diff paths under docs/** only -> tier docs; touches ` +
     `[load_bearing].paths -> tier load-bearing; otherwise -> tier standard; a bug report with no repro steps -> ` +

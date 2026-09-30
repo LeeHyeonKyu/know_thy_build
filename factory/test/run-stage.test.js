@@ -3203,6 +3203,8 @@ const blockedTriageDeps = ({ gh, rehearsal }) => ({
     gh, issue: 7, to, reason, stage: "triage",
     ctxExtra: { gatesChecked: true, ...(prerequisite ? { prerequisite: true } : {}) },
     ...(rehearsal === undefined ? {} : { rehearsal }),
+    // S2 — 큐 진입 심사도 같은 자리에 실린다. 이 테스트가 보는 것은 리허설이므로 심사는 통과 스텁이다.
+    ...(rehearsal === undefined ? {} : { admission: async () => ({ ok: true, reasons: [] }) }),
   }),
   // hop 이후로는 가지 않는다 — 이 테스트가 보는 것은 hop 하나다.
   assertHandoff: async () => ({ ok: false, reason: "stop here" }),
@@ -3755,4 +3757,69 @@ test("L27: the no-write clean check ignores node_modules/ tool caches but not re
   expect(await assertNoWriteStageClean({ run, cwd: "/r" })).toEqual({ ok: true, dirty: [] });
   const runDirty = async () => ({ code: 0, stdout: status + " M src/app.js\n", stderr: "" });
   expect(await assertNoWriteStageClean({ run: runDirty, cwd: "/r" })).toEqual({ ok: false, dirty: ["src/app.js"] });
+});
+
+/**
+ * 설계 2026-09-30 §8.3 (S3, KTB #41) — **설치된 엔진은 러너가 만든다.** implement는 게이트 직전에 `factory/**`에서 설치본을
+ * 다시 만들어 러너 커밋으로 붙이고, 그 sha가 handoff의 `head_sha`가 된다(빌더의 sha는 `builder_head_sha`). review·merge는
+ * PR head의 설치본이 소스와 같은지만 확인하고, 다르면 판정 불가(blocked)다. 채택자 저장소(`applicable: false`)는 아무 흔적이 없다.
+ */
+test("S3 implement: the runner's mirror commit becomes the handoff head_sha; the builder's sha is kept for the record", async () => {
+  const lines = []; let written = null;
+  const deps = baseDeps({
+    runRecord: (l) => lines.push(...l),
+    mirror: vi.fn(async (mode) => (mode === "commit" ? { ok: true, applicable: true, changed: [".factory/lib/x.js"], sha: "f".repeat(40) } : null)),
+    verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.implement.v1", head_sha: "b".repeat(40), pr: 1 } }),
+    writeHandoff: async ({ data }) => { written = data; },
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  await runStage({ stage: "implement", issue: 4, deps });
+  expect(deps.mirror).toHaveBeenCalledWith("commit", null);
+  expect(lines.some((l) => /^mirror: regenerated 1 installed-engine path\(s\) from factory\/\*\* → fffffff \(runner-owned commit\): \.factory\/lib\/x\.js$/.test(l))).toBe(true);
+  expect(written.head_sha).toBe("f".repeat(40));
+  expect(written.builder_head_sha).toBe("b".repeat(40));
+  expect(written.mirror_sha).toBe("f".repeat(40));
+});
+
+test("S3 implement: nothing to regenerate leaves the handoff untouched and records the verification", async () => {
+  const lines = []; let written = null;
+  const deps = baseDeps({
+    runRecord: (l) => lines.push(...l),
+    mirror: async () => ({ ok: true, applicable: true, changed: [], sha: null }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.implement.v1", head_sha: "b".repeat(40), pr: 1 } }),
+    writeHandoff: async ({ data }) => { written = data; },
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  await runStage({ stage: "implement", issue: 4, deps });
+  expect(lines).toContain("mirror: verified — the installed engine is what factory/** generates");
+  expect(written.head_sha).toBe("b".repeat(40));
+  expect(written.mirror_sha).toBeUndefined();
+});
+
+test("S3 review: an installed engine that its sources do not generate is undecidable → factory:blocked, no gates, no handoff", async () => {
+  const lines = []; const transitions = []; const gates = vi.fn(async () => null); const handoff = vi.fn(async () => {});
+  const deps = baseDeps({
+    runRecord: (l) => lines.push(...l), gates, writeHandoff: handoff,
+    mirror: async (mode) => ({ ok: false, applicable: true, changed: [".factory/bin/run-stage.js"], sha: null, reason: "the installed engine in this PR is not what its sources generate — .factory/bin/run-stage.js (regenerate with the runner's mirror step, never by hand)" }),
+    transition: async ({ to, reason }) => { transitions.push({ to, reason }); return { ok: true, to }; },
+  });
+  expect(await runStage({ stage: "review", issue: 4, deps })).toBe(2);
+  expect(transitions).toEqual([{ to: "factory:blocked", reason: expect.stringMatching(/^undecidable — the installed engine in this PR is not what its sources generate/) }]);
+  expect(lines.some((l) => l.startsWith("mirror: FAIL — the installed engine"))).toBe(true);
+  expect(gates).not.toHaveBeenCalled();
+  expect(handoff).not.toHaveBeenCalled();
+});
+
+test("S3: an adopter repo (mirror not applicable) leaves no mirror line and no head change", async () => {
+  const lines = []; let written = null;
+  const deps = baseDeps({
+    runRecord: (l) => lines.push(...l),
+    mirror: async () => ({ ok: true, applicable: false, changed: [], sha: null }),
+    verifyStage: () => ({ ok: true, reasons: [], data: { schema: "factory.implement.v1", head_sha: "b".repeat(40), pr: 1 } }),
+    writeHandoff: async ({ data }) => { written = data; },
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  await runStage({ stage: "implement", issue: 4, deps });
+  expect(lines.some((l) => l.startsWith("mirror:"))).toBe(false);
+  expect(written.head_sha).toBe("b".repeat(40));
 });

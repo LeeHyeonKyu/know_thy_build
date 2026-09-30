@@ -1,11 +1,32 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { run } from "../lib/exec.js";
-import { makeGh } from "../lib/gh.js";
-import { parseTransitionArgs, refuseHumanFlag, transition } from "../lib/transition.js";
-import { makeRehearsalChecker } from "../lib/rehearsal.js";
-import { loadHarness } from "../lib/config.js";
+
+/**
+ * 1.4.35 (L44, own-calendar #105) — 이 CLI는 **사람이 자기 셸에서** 부른다. 러너는 setup 액션이 `.factory/`의
+ * 런타임 의존성을 설치하지만 갓 받은 클론에는 없고, 정적 import는 그때 `Cannot find package 'smol-toml'`
+ * 스택만 남기고 죽는다 — 무엇을 하면 되는지는 말하지 않는다. 그래서 라이브러리를 동적으로 읽고, 의존성이
+ * 없을 때만 그 한 줄을 말한다. 다른 오류는 그대로 던진다(삼키지 않는다).
+ */
+let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, makeRehearsalChecker, loadHarness, loadCharter, makeQueueAdmission, resolveFactoryLogins;
+try {
+  ({ run } = await import("../lib/exec.js"));
+  ({ makeGh } = await import("../lib/gh.js"));
+  ({ parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv } = await import("../lib/transition.js"));
+  ({ makeRehearsalChecker } = await import("../lib/rehearsal.js"));
+  ({ loadHarness, loadCharter } = await import("../lib/config.js"));
+  ({ makeQueueAdmission } = await import("../lib/admission.js"));
+  ({ resolveFactoryLogins } = await import("../lib/gh.js"));
+} catch (e) {
+  if (e?.code !== "ERR_MODULE_NOT_FOUND") throw e;
+  console.error(
+    "transition: the factory's runtime dependencies are not installed in this clone.\n" +
+    "  run:  npm install --prefix .factory --no-audit --no-fund\n" +
+    "  then run this command again.\n" +
+    `  (${String(e.message).split("\n")[0]})`
+  );
+  process.exit(1);
+}
 
 const USAGE = [
   "usage: transition <issue> [<to-label>] [--human] [--retry] [--reason <text>]",
@@ -57,7 +78,16 @@ const gh = makeGh({ run, repo });
 let defaultBranch = "main";
 try { defaultBranch = loadHarness(root)?.project?.default_branch || "main"; } catch { /* 기본값 그대로 */ }
 const rehearsal = makeRehearsalChecker({ gh, root, branch: defaultBranch });
+// S2 — 큐 진입 심사(job 형식·NEVER_AUTOMATE·큐 길이·자기생성 상한). CHARTER를 못 읽으면 심사기가 거부한다(fail closed).
+let charterForAdmission = null;
+try { charterForAdmission = loadCharter(root); } catch { charterForAdmission = null; }
+const admission = charterForAdmission
+  ? makeQueueAdmission({ gh, charter: charterForAdmission, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })
+  : async () => ({ ok: false, reasons: ["docs/factory/CHARTER.md could not be read — queue admission needs it"] });
 
-const r = await transition({ gh, issue, to, human, retry, reason, ctxExtra, rehearsal });
+// S1 — 제출자 자기 신고(감사 기록). 로그인 조회가 실패해도 전이는 막지 않는다(`unknown`).
+let login = null;
+try { login = await gh.viewerLogin(); } catch { /* 감사 필드만 비운다 */ }
+const r = await transition({ gh, issue, to, human, retry, reason, by: principalFromEnv(process.env, login), ctxExtra, rehearsal, admission });
 console.log(JSON.stringify(r));
 process.exit(r.ok ? 0 : 2);

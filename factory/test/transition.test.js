@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { transition, parseTransitionArgs, refuseHumanFlag } from "../lib/transition.js";
+import { transition, principalFromEnv, parseTransitionArgs, refuseHumanFlag, ADMISSION_UNWIRED } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, resumePoint } from "../lib/retro/issue-comments.js";
 
@@ -519,4 +519,57 @@ test("bin/transition.js refuses --human/--retry before any gh call when CLAUDE_P
     expect(r.code, JSON.stringify(extraEnv)).toBe(2);
     expect(r.stderr, JSON.stringify(extraEnv)).toMatch(/--human\/--retry refused/);
   }
-}, 30000);
+}, 120000);
+
+/**
+ * 설계 2026-09-30 §8.1 (S1) — **제출자는 자기 신고한다.** `by=`는 권한의 근거가 아니라 감사 기록이다(누구나 제출할 수 있으므로
+ * 위조로 얻을 것이 없다). 라이브러리는 `by` 문자열을 그대로 마커에 적고, 없으면 예전처럼 `script`다. 사람의 재시도는
+ * 여전히 `human` 플래그와 그 자물쇠들을 지난다 — 이 필드는 그것을 건드리지 않는다.
+ */
+test("S1: a submission's self-reported principal lands in the transition marker; absent, it is `script`", async () => {
+  const gh = { issue: vi.fn(async () => ({ labels: ["backlog"] })), comments: vi.fn(async () => []), comment: vi.fn(async () => {}), setFactoryLabel: vi.fn(async () => ({ verify: "ok" })), removeLabel: vi.fn(async () => {}), addLabel: vi.fn(async () => {}) };
+  const r = await transition({ gh, issue: 5, to: "factory:queue", by: "agent:hk", reason: "explicit job", skipRehearsal: true });
+  expect(r.ok).toBe(true);
+  expect(gh.comment.mock.calls[0][1]).toMatch(/factory-transition:v1 from=backlog to=factory:queue by=agent:hk -->/);
+  const gh2 = { ...gh, comment: vi.fn(async () => {}) };
+  await transition({ gh: gh2, issue: 5, to: "factory:queue", skipRehearsal: true });
+  expect(gh2.comment.mock.calls[0][1]).toMatch(/by=script -->/);
+});
+
+test("S1: principalFromEnv — runner, agent session, or a person's own shell", () => {
+  expect(principalFromEnv({ GITHUB_ACTIONS: "true", GITHUB_RUN_ID: "123" }, "bot-hk")).toBe("factory:run-123");
+  expect(principalFromEnv({ CLAUDE_PROJECT_DIR: "/x" }, "hk")).toBe("agent:hk");
+  expect(principalFromEnv({}, "hk")).toBe("person:hk");
+  expect(principalFromEnv({}, null)).toBe("person:unknown");
+  // 마커 문법을 깨는 문자는 들어가지 않는다(공백·`>`)
+  expect(principalFromEnv({}, "a b>c")).toBe("person:a-b-c");
+});
+
+/**
+ * 설계 2026-09-30 §8.2 (S2) — 큐 진입 심사는 리허설 다음의 자물쇠이고 같은 규칙을 따른다: 배선이 없으면 거부, 심사가 거부하면
+ * 그 사유를 그대로 돌려준다, 다른 목적 라벨은 묻지 않는다. `skipRehearsal`은 테스트 전용이고 둘 다 건너뛴다.
+ */
+const queueGh = () => ({ issue: vi.fn(async () => ({ labels: ["backlog"] })), comments: vi.fn(async () => []), comment: vi.fn(async () => {}), setFactoryLabel: vi.fn(async () => ({ verify: "ok" })), removeLabel: vi.fn(async () => {}), addLabel: vi.fn(async () => {}) });
+
+test("S2: a queue transition with a rehearsal but NO admission wiring is refused (fail closed)", async () => {
+  const r = await transition({ gh: queueGh(), issue: 7, to: "factory:queue", rehearsal: { ok: true } });
+  expect(r).toEqual({ ok: false, from: null, to: "factory:queue", reason: ADMISSION_UNWIRED });
+});
+
+test("S2: the admission's reasons come back verbatim and the label does not move", async () => {
+  const gh = queueGh();
+  const r = await transition({ gh, issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission: async () => ({ ok: false, reasons: ["queue 8 ≥ 8 (back_pressure.queue_max)", "not an explicit job: the body has no `done_when` section (and no factory marker)"] }) });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toBe("queue admission refused — queue 8 ≥ 8 (back_pressure.queue_max); not an explicit job: the body has no `done_when` section (and no factory marker)");
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  expect(gh.comment).not.toHaveBeenCalled();                        // 거부는 이슈를 한 글자도 바꾸지 않는다
+});
+
+test("S2: an admitted job moves; a non-queue target never consults the admission", async () => {
+  const admission = vi.fn(async () => ({ ok: true, reasons: [] }));
+  expect((await transition({ gh: queueGh(), issue: 7, to: "factory:queue", rehearsal: { ok: true }, admission })).ok).toBe(true);
+  expect(admission).toHaveBeenCalledWith({ issue: 7 });
+  const gh2 = { ...queueGh(), issue: vi.fn(async () => ({ labels: ["factory:queue"] })) };
+  expect((await transition({ gh: gh2, issue: 7, to: "factory:wont-do", admission })).ok).toBe(true);
+  expect(admission).toHaveBeenCalledTimes(1);
+});

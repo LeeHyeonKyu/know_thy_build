@@ -435,13 +435,24 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
  * K를 우회하게 되므로 그대로 두고, 이 창은 sweeper의 스톨 재점화 카운터에만 쓴다 — 사람이 되돌린 이슈는 새 주기이고,
  * 지난 주기의 재점화 마커 2개가 첫 스톨에서 곧장 `stalled restart limit`을 만드는 것은 사람의 결정을 무효로 만든다.
  */
-export function commentsSinceCycleStart(comments) {
+export function commentsSinceCycleStart(comments, { factoryLogin = null } = {}) {
   const list = Array.isArray(comments) ? comments : [];
   let from = 0;
   list.forEach((c, i) => {
     const b = String(c?.body ?? "");
     const m = TRANSITION_TO.exec(b);
-    if (m && (m[2] === "factory:queue" || /\bby=human\b/.test(b))) from = i + 1;
+    if (!m) return;
+    if (m[2] === "factory:queue") { from = i + 1; return; }          // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
+    /**
+     * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 **본문이 아니라 계정**으로 판정한다. 예전 `/\bby=human\b/`는 봇 계정이
+     * 흉내 낸 코멘트에도 창을 리셋했다(sweeper의 stalled restart limit, self-gate backstop). 작성자를 모르는 코멘트는
+     * 리셋하지 않고, 팩토리 계정이 쓴 것도 리셋하지 않는다. `factoryLogin`을 모르는 구형 호출자는 작성자가 있는 것만 인정한다.
+     */
+    if (m[3] !== "human") return;
+    const author = typeof c?.author === "string" ? c.author.trim() : "";
+    if (!author) return;
+    if (typeof factoryLogin === "string" && factoryLogin && author.toLowerCase() === factoryLogin.toLowerCase()) return;
+    from = i + 1;
   });
   return list.slice(from);
 }

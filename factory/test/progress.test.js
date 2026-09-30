@@ -1,5 +1,9 @@
 import { test, expect } from "vitest";
 import { mkdtempSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { utimesSync as _utimes, mkdtempSync as _mkdtemp, mkdirSync as _mkdir, writeFileSync as _write, rmSync as _rm } from "node:fs";
+import { tmpdir as _tmpdir } from "node:os";
+import { join as _join } from "node:path";
+import { mainTranscriptPath as _mainTranscriptPath } from "../lib/progress.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -285,4 +289,68 @@ test("progressMarker sheds files_touched, then agents, to stay under the byte bu
   expect(back.totals).toEqual(p.totals);                                // 합계는 절대 버리지 않는다
   expect(back.files_touched).toEqual([]);
   expect(back.agents.length).toBeLessThan(40);
+});
+
+/**
+ * 1.4.35 (L45) — **응답 하나는 한 번만 센다.** Claude Code는 응답 하나를 content 블록마다 한 줄씩 적고, 그 줄마다
+ * 같은 `message.id`와 usage가 붙는다(출력 토큰만 뒤 줄에서 커진다). 줄마다 더하면 턴과 토큰이 부풀려진다:
+ * own-calendar 러너의 트랜스크립트 843개에서 assistant 줄 27,983개가 응답 11,882개였고(2.36배), 캐시 읽기는
+ * 1,002M으로 집계됐지만 실제는 477M이었다 — 역할별 비용 합($987)이 러너의 usage 합($479)의 두 배였던 이유다.
+ */
+const asstMsg = (id, usage, content = [{ type: "text", text: "x" }]) => JSON.stringify({
+  type: "assistant", timestamp: "2026-09-29T17:00:00Z",
+  message: { id, model: "claude-sonnet-5", usage, content },
+});
+
+test("lines of the same response are counted once; output tokens take the largest value seen", () => {
+  const u = (out) => ({ input_tokens: 2, output_tokens: out, cache_read_input_tokens: 13279, cache_creation_input_tokens: 5263 });
+  const f = parseTranscriptLines([
+    asstMsg("msg_1", u(4), [{ type: "thinking", thinking: "…" }]),
+    asstMsg("msg_1", u(118), [{ type: "tool_use", name: "Read", input: { file_path: "a.js" } }]),
+    asstMsg("msg_1", u(118), [{ type: "tool_use", name: "Edit", input: { file_path: "b.js" } }]),
+    asstMsg("msg_2", u(50)),
+  ]);
+  expect(f.turns).toBe(2);
+  expect(f.cache_read_tokens).toBe(13279 * 2);
+  expect(f.cache_creation_tokens).toBe(5263 * 2);
+  expect(f.input_tokens).toBe(4);
+  expect(f.output_tokens).toBe(118 + 50);
+  // 같은 응답의 뒤 줄에 실린 tool_use는 여전히 읽는다 — 세지 않는 것은 usage뿐이다
+  expect(f.last_tool).toMatch(/^Edit/);
+  expect(f.files_touched).toEqual(["b.js"]);
+});
+
+test("a response split across two tail reads is still counted once", () => {
+  const u = (out) => ({ input_tokens: 2, output_tokens: out, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 });
+  const first = parseTranscriptLines([asstMsg("msg_1", u(4))]);
+  const second = parseTranscriptLines([asstMsg("msg_1", u(90)), asstMsg("msg_2", u(10))], first);
+  expect(second.turns).toBe(2);
+  expect(second.cache_read_tokens).toBe(2000);
+  expect(second.output_tokens).toBe(100);
+  expect(first.turns).toBe(1);                                      // prev는 변형되지 않는다
+});
+
+test("a line without a message id is its own response (older transcripts)", () => {
+  const line = (out) => JSON.stringify({ type: "assistant", timestamp: "t", message: { model: "claude-sonnet-5", usage: { input_tokens: 1, output_tokens: out, cache_read_input_tokens: 10 }, content: [] } });
+  const f = parseTranscriptLines([line(5), line(5)]);
+  expect(f.turns).toBe(2);
+  expect(f.cache_read_tokens).toBe(20);
+});
+
+test("the orchestrator transcript is never a session older than this stage (self-hosted runners keep old sessions)", () => {
+  const home = _mkdtemp(_join(_tmpdir(), "ktb-prog-"));
+  try {
+    const root = "/Users/x/actions-runner/_work/repo/repo";
+    const dir = _join(home, ".claude", "projects", root.replace(/[^a-zA-Z0-9]/g, "-"));
+    _mkdir(dir, { recursive: true });
+    const old = _join(dir, "yesterday-retro.jsonl"), cur = _join(dir, "this-run.jsonl");
+    const started = "2026-09-29T16:59:13.875Z", t0 = Date.parse(started) / 1000;
+    _write(old, "{}\n"); _utimes(old, t0 - 86400, t0 - 86400);
+    // 이 런의 세션이 아직 한 줄도 쓰지 않았다 — 지난 런의 파일을 고르면 안 된다
+    expect(_mainTranscriptPath({ root, home, since: started })).toBe(null);
+    _write(cur, "{}\n"); _utimes(cur, t0 + 5, t0 + 5);
+    expect(_mainTranscriptPath({ root, home, since: started })).toBe(cur);
+    // 시작 시각을 모르는 호출자(구형)는 예전처럼 가장 최근 파일을 받는다
+    expect(_mainTranscriptPath({ root, home })).toBe(cur);
+  } finally { _rm(home, { recursive: true, force: true }); }
 });
