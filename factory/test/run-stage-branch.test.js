@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { runStage, makeCheckoutBranch, assertStageBranch, stageBranch, stageClaudeEnv } from "../bin/run-stage.js";
+import { runStage, makeCheckoutBranch, assertStageBranch, stageBranch, stageClaudeEnv, baseMergedLine } from "../bin/run-stage.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 /**
@@ -313,4 +313,72 @@ test("the builder's prompt and command template no longer tell it to check out a
   const wf = readFileSync(root + "templates/factory/claude/workflows/factory-implement.js", "utf8");
   expect(wf).toMatch(/already on/i);
   expect(wf).toContain("claude/fq-${issue}");
+});
+
+/**
+ * 설계 2026-09-30 §8.3 (S3, KTB #130 실측) — 브랜치의 러너 미러 커밋과 base의 미러 변경이 같은 생성 파일에서 충돌했다. 생성 파일의
+ * 충돌은 사람이 풀 것이 아니라 병합된 소스에서 다시 만드는 것이다. 충돌이 미러 가족에만 있고 이 저장소가 KTB 자신일 때만 그렇게
+ * 풀고, 소스가 충돌했으면 예전처럼 abort한다.
+ */
+import { mkdtempSync as _mkd, mkdirSync as _mk, writeFileSync as _wr, rmSync as _rm } from "node:fs";
+import { tmpdir as _tmp } from "node:os";
+import { join as _j } from "node:path";
+const selfRepo = () => {
+  const root = _mkd(_j(_tmp(), "ktb-self-"));
+  _mk(_j(root, "factory/cli"), { recursive: true }); _mk(_j(root, ".factory"), { recursive: true });
+  for (const f of ["manifest.js", "install.js"]) _wr(_j(root, "factory/cli", f), "// stub\n");
+  return root;
+};
+const conflictStub = ({ calls, conflicted, mergeCode = 1 }) => {
+  const base = branchStub({ calls, mergeCode });
+  return async (cmd, args, opts) => {
+    const key = `${cmd} ${args.join(" ")}`;
+    if (cmd === "git" && args[0] === "diff" && args.includes("--diff-filter=U")) { calls.push(args.join(" ")); return { code: 0, stdout: conflicted.join("\n") + "\n", stderr: "" }; }
+    if (cmd === "git" && args[0] === "checkout" && args[1] === SHA && args[2] === "--") { calls.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; }
+    if (cmd === "git" && args[0] === "add") { calls.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; }
+    if (cmd === "git" && args.includes("commit") && args.includes("--no-edit")) { calls.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; }
+    return base(cmd, args, opts);
+  };
+};
+
+test("checkoutBranch: conflicts confined to the mirror families are resolved by regenerating from the merged sources — no abort, merge commit pushed", async () => {
+  const root = selfRepo();
+  try {
+    const calls = []; const regenerate = vi.fn(async () => ({ ok: true, applicable: true, changed: [".factory/bin/run-stage.js", ".factory/lib/gates.js"] }));
+    const run = conflictStub({ calls, conflicted: [".factory/bin/run-stage.js", ".factory/lib/gates.js"] });
+    const r = await makeCheckoutBranch({ run, root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate })();
+    expect(r.ok).toBe(true);
+    expect(r.merged).toBe(SHA);
+    expect(r.mirrorResolved).toEqual({ conflicted: [".factory/bin/run-stage.js", ".factory/lib/gates.js"], regenerated: [".factory/bin/run-stage.js", ".factory/lib/gates.js"] });
+    expect(regenerate).toHaveBeenCalledWith({ root });
+    expect(calls.some((c) => c.includes("merge --abort"))).toBe(false);
+    expect(calls.some((c) => c.startsWith(`checkout ${SHA} -- .factory/bin/run-stage.js`))).toBe(true);
+    expect(calls.some((c) => c.startsWith("add -- .factory/lib .factory/bin .factory/actions .claude/hooks"))).toBe(true);
+    expect(calls.some((c) => /commit --no-edit/.test(c))).toBe(true);
+    expect(calls.some((c) => c.startsWith("push"))).toBe(true);
+    expect(baseMergedLine({ ...r, branch: BRANCH })).toMatch(/conflicts in 2 runner-generated mirror path\(s\) resolved by regenerating/);
+  } finally { _rm(root, { recursive: true, force: true }); }
+});
+
+test("checkoutBranch: a conflict that touches a source file (or any non-mirror path) is still aborted and undecidable", async () => {
+  const root = selfRepo();
+  try {
+    const calls = []; const regenerate = vi.fn();
+    const run = conflictStub({ calls, conflicted: [".factory/lib/gates.js", "factory/lib/gates.js"] });
+    const r = await makeCheckoutBranch({ run, root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate })();
+    expect(r.ok).toBe(false);
+    expect(r.undecidable).toBe(true);
+    expect(regenerate).not.toHaveBeenCalled();
+    expect(calls.some((c) => c.includes("merge --abort"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("push"))).toBe(false);
+  } finally { _rm(root, { recursive: true, force: true }); }
+});
+
+test("checkoutBranch: in an adopter repo (no engine sources) a mirror-path conflict is aborted as before", async () => {
+  const calls = []; const regenerate = vi.fn();
+  const run = conflictStub({ calls, conflicted: [".factory/lib/gates.js"] });
+  const r = await makeCheckoutBranch({ run, root: "/repo", issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate })();
+  expect(r.ok).toBe(false);
+  expect(regenerate).not.toHaveBeenCalled();
+  expect(calls.some((c) => c.includes("merge --abort"))).toBe(true);
 });
