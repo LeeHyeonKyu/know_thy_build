@@ -119,8 +119,12 @@ export function parseBlocks(body) {
  * 조회가 실패하면 만들지 않는다(fail closed): 중복 이슈를 여는 것보다 이번 런이 needs-human으로
  * 가는 편이 낫다 — 사람은 어느 쪽이든 보게 되지만, 중복 이슈는 사람이 손으로 치워야 한다.
  *
- * 새 이슈는 `factory:queue` + `factory:harness`로 태어난다: queue 라벨이 곧 triage 워크플로의 진입
- * 이벤트다(이 함수가 따로 dispatch하지 않는 이유).
+ * #130 (S2b, 설계 2026-09-30 §8.2) — 새 이슈는 `backlog` + `factory:harness`로 태어나고, 큐로 가는 한
+ * 걸음은 **호출자가 넘긴 `transition`**이 내딛는다(리허설·큐 진입 심사를 지나는 전이 — 이 모듈은
+ * `lib/transition.js`를 import하지 않는다). 예전에는 `factory:queue`로 태어나 그 심사를 통째로 비켜
+ * 가는 큐 진입 경로였다. 전이가 거부되거나·던지거나·아예 없으면 이슈는 `backlog`에 남고 그 사유와
+ * 다음 걸음을 코멘트로 적는다 — flaky 수확(`gates.js`)과 같은 모양이다. 재사용 경로는 다시 전이하지
+ * 않는다: 거부된 하네스 이슈는 사람이 `:next`로 올린다(자동 재시도 없음, DECISIONS #130).
  */
 /**
  * 이미 열려 있는 하네스 이슈의 표에 **빠진 줄만** 덧붙인다(T3 리뷰 SF-2). 예전에는 기존 이슈를
@@ -143,7 +147,39 @@ export function appendHarnessEntries(body, entries) {
   return { body: [...lines.slice(0, last + 1), ...rows, ...lines.slice(last + 1)].join("\n"), added: missing };
 }
 
-export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin = "implement" }) {
+/** #130 — 큐에 들어가지 못한 하네스 이슈에 남기는 기계 마커(한 이슈에 한 번, 생성 직후). */
+export const harnessNotQueuedMarker = (n) => `<!-- factory-harness-not-queued issue=${n} -->`;
+
+/** 전이 배선이 없는 호출자(피드백 루프 등)의 사유 — 기본값이 "큐에 넣기"가 되는 일은 없다. */
+export const NO_TRANSITION_WIRING = "no transition wiring supplied — this caller does not pass an admission-checked transition, so the issue was not queued";
+
+/**
+ * 사유에 맞는 다음 걸음. 순서가 중요하다: 심사 거부 사유 안에 "rehearse"라는 글자가 섞여도(예: 큐 길이)
+ * `factory rehearse`는 그 해법이 아니다 — 그래서 배선 부재 → 심사 → 리허설 순으로 가른다.
+ */
+export function harnessNotQueuedNextStep(reason) {
+  const r = String(reason ?? "");
+  if (r.startsWith(NO_TRANSITION_WIRING) || /no (queue admission|rehearsal checker) is wired/.test(r)) {
+    return "이 경로는 심사된 큐 전이를 배선하지 않습니다. 사람이 이 이슈를 읽고 `/know-thy-build:next`로 큐에 넣으세요(그 전이는 리허설과 큐 진입 심사를 지납니다).";
+  }
+  if (/queue admission/.test(r)) {
+    return "큐 진입 심사(상한·세대·큐 길이 또는 읽기 실패)가 거부했습니다. 위 사유가 풀릴 때까지 `/know-thy-build:next`도 **같은 이유로 거부됩니다** — 상한이 비거나 사유가 해소된 뒤 사람이 `:next`로 올리세요(`:next` will be refused the same way until the cap clears). 자기생성 세대 상한(`self_generated.depth_max`)은 CHARTER이고 사람만 바꿉니다.";
+  }
+  if (/rehears/i.test(r)) {
+    return "하네스를 러너에서 다시 돌린 뒤(`factory rehearse`) `/know-thy-build:next`로 큐에 넣으세요(ADR-025). 리허설이 낡은 것이 아니라 실제로 RED라면 `:next`도 같은 이유로 거부됩니다 — 그때는 팩토리 밖에서 사람의 PR로 하네스를 고칩니다.";
+  }
+  return "사유를 확인한 뒤 사람이 `/know-thy-build:next`로 큐에 넣으세요(그 전이는 리허설과 큐 진입 심사를 지납니다). 자동 재시도는 없습니다.";
+}
+
+/** 거부 코멘트 본문. 사유는 그대로 싣는다(요약하지 않는다 — 사람이 판단할 재료다). */
+export const harnessNotQueuedComment = (n, reason) => [
+  harnessNotQueuedMarker(n),
+  `이 하네스 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이가 이루어지지 않았습니다: ${reason}`,
+  "",
+  harnessNotQueuedNextStep(reason),
+].join("\n");
+
+export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin = "implement", transition = null }) {
   const title = harnessIssueTitle(entries, issue);
   const open = await gh.issueList({ labels: [HARNESS_LABEL], state: "open" });
   const found = (open || []).find((i) => parseHarnessRequestFor(i.body) === Number(issue));
@@ -161,10 +197,24 @@ export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin
   const number = await gh.createIssue({
     title,
     body: harnessIssueBody({ entries, issue, pr, origin }),
-    labels: ["factory:queue", HARNESS_LABEL],
+    labels: ["backlog", HARNESS_LABEL],
   });
   if (number == null) throw new Error("gh issue create returned no issue number");
-  return { issue: number, created: true, title };
+  // 큐로 가는 한 걸음은 심사된 전이만 내딛는다. 없거나·거부되거나·던지면 backlog에 남는다(큐로 폴백하지 않는다).
+  let queueReason = null;
+  if (typeof transition !== "function") queueReason = NO_TRANSITION_WIRING;
+  else {
+    try {
+      const t = await transition({ issue: number, to: "factory:queue", reason: `harness request for #${issue}` });
+      if (t?.ok !== true) queueReason = t?.reason || "queue transition refused (no reason given)";
+    } catch (e) {
+      queueReason = `queue transition threw — ${e?.message || e}`;
+    }
+  }
+  if (queueReason == null) return { issue: number, created: true, queued: true, title };
+  try { await gh.comment(number, harnessNotQueuedComment(number, queueReason)); }
+  catch { /* 기록의 실패가 이슈 생성의 실패는 아니다 — 반환값이 사유를 싣는다 */ }
+  return { issue: number, created: true, queued: false, queue_reason: queueReason, title };
 }
 
 /**
