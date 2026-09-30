@@ -94,8 +94,8 @@ test("triage context carries the charter's triage default and never-automate glo
   writeFileSync(join(r, ".factory/roles.toml"), `[triage]\nagent = ".claude/agents/factory-triage.md"\nmodel = "sonnet"\n[review.correctness]\nagent = ".claude/agents/reviewer-correctness.md"\nmodel = "opus"\n`);
   const gh = { issue: vi.fn(async () => ({ number: 4, title: "T", body: "", labels: ["factory:queue"] })), comments: vi.fn(async () => []) };
   const ctx = await buildContext({ root: r, gh, issue: 4, stage: "triage" });
-  expect(ctx.triage).toEqual({ default: "needs-info", never_automate: ["billing/**"], queued_by_person: false });
-  expect(JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8")).triage).toEqual({ default: "needs-info", never_automate: ["billing/**"], queued_by_person: false });
+  expect(ctx.triage).toEqual({ default: "needs-info", never_automate: ["billing/**"], explicit_submission: false, submitted_by: null });
+  expect(JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8")).triage).toEqual({ default: "needs-info", never_automate: ["billing/**"], explicit_submission: false, submitted_by: null });
 });
 
 // --- 감사 M1 (b): 글롭으로 적을 수 있는 NEVER_AUTOMATE 항목은 스크립트가 다시 센다 ---

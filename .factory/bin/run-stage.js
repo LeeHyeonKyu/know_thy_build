@@ -2598,7 +2598,10 @@ async function main() {
       // 1.4.27 (L30, own-calendar #45) — 창은 **마지막 사람 전이**부터다(1.4.12의 restart budget과 같은 규칙). 재큐만 창을
       // 열면 사람이 `--human --retry`로 세 번 되살린 이슈는 옛 주기의 마커를 그대로 안고 시작해, 이번 주기의 첫 self-gate RED가
       // "not converging after 4 retries"로 escalate된다 — #45가 정확히 그렇게 죽었다(게이트는 GREEN이었다).
-      const since = commentsSinceCycleStart(await gh.comments(issue));
+      // S1 — 사람의 전이인지는 계정으로 판정한다. 계정을 못 구하면 null(작성자가 있는 human 마커만 인정).
+      let factoryLogin = null;
+      try { const lg = await resolveFactoryLogins({ gh, env: process.env }); factoryLogin = Array.isArray(lg?.logins) && lg.logins.length ? String(lg.logins[0]) : null; } catch { factoryLogin = null; }
+      const since = commentsSinceCycleStart(await gh.comments(issue), { factoryLogin });
       const attempt = countSelfGateRetries(since, head) + 1;
       // head-agnostic backstop(SF-A): 이번 재큐 이후 **모든 head**의 self-gate RED 총합. `since`는 이번
       // 마커를 남기기 전에 읽었으므로 방금 낼 이번 시도를 +1로 더한다.

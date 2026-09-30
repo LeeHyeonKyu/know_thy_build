@@ -35,7 +35,7 @@ Technical terms (e.g. CLI, API, stack traces) stay in English. Everything else �
 
 ## 집행 규칙 (공통)
 
-라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --human --reason "<why>"`; 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
+라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --reason "<why>"`(큐 진입은 누구나 명시적으로 제출한다 — 제출자는 CLI가 환경으로 자기 신고한다; `needs-human`/`needs-info`에서 되돌리는 재시도만 사람의 셸에서 `--human`); 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
 
 이 스킬은 라벨 전이가 한 번뿐이다(`backlog → factory:queue`, `--now`일 때만) — 그래도 그 한 번은 위 규칙을 그대로 따른다: 손으로 라벨을 옮기지 않고, 반드시 `transition.js`를 거친다.
 
@@ -239,11 +239,12 @@ npx know-thy-build factory status --json
 갓 받은 클론이면 팩토리의 런타임 의존성이 없다 — 전이 CLI가 그렇게 말하면 `npm install --prefix .factory --no-audit --no-fund`를
 한 번 실행한 뒤 다시 부른다(러너에서는 setup 액션이 설치한다).
 
-`triage.default: needs-info`인 저장소에서도 본문에 `[ready]`를 적을 필요는 없다: 사람이 이 전이로 큐에 넣은 이슈는 triage가
-사람이 본 이슈로 읽는다(1.4.35).
+`triage.default: needs-info`인 저장소에서도 본문에 `[ready]`를 적을 필요는 없다: 이 전이로 큐에 넣은 이슈는 명시적 제출이고,
+triage가 그것을 사람이 본 이슈와 같게 읽는다(1.4.35, 설계 2026-09-30 §8.1). 제출자는 CLI가 환경으로 자기 신고한다 —
+사람의 셸이면 `person:<login>`, Claude 세션이면 `agent:<login>`, 러너면 `factory:run-<id>`.
 
 ```bash
-node .factory/bin/transition.js 47 factory:queue --human --reason "issue --now"
+node .factory/bin/transition.js 47 factory:queue --reason "issue --now"
 ```
 
 전이가 거부되면(`ok: false`) 반환된 사유를 그대로 사람에게 보여주고 멈춘다 — 라벨을 다른 방법으로 옮기지 않는다.

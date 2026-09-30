@@ -347,7 +347,7 @@ async function escalateUnknownLock({ gh, transition, issue, comments, nowMs, sta
     : { kind: "lock-owner-unknown-escalated", issue, step, ...extra, reason });
 }
 
-async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions }) {
+async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions, factoryLogin = null }) {
   if (!dispatchStage) return;
   const stale = staleMinutes * 60e3;
   // KTB-31: 하트비트가 **하나도** 없으면(스테이지가 시작조차 못 했다) 임계는 10분이다. 둘 중 짧은
@@ -383,7 +383,7 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
         // 이력 전체를 보고 있었다 — 예전 주기에서 두 번 다시 밀렸던 이슈는 고쳐져 재큐된 뒤 **첫**
         // 스톨에서, 이번 주기에 단 한 번도 밀어보지 않은 채 `stalled restart limit (2) reached`로
         // 사람에게 올라갔다(사람은 이번 주기의 재점화를 하나도 볼 수 없다).
-        const cycle = commentsSinceCycleStart(comments);   // 1.4.12: a human retry/hold-lift starts a new cycle for the restart budget
+        const cycle = commentsSinceCycleStart(comments, { factoryLogin });   // 1.4.12: a human retry/hold-lift starts a new cycle for the restart budget; S1: judged by the account, not the body
         const restarts = cycle.filter((c) => String(c?.body ?? "").includes(marker));
         const restarted = restarts.at(-1);
         if (restarted && nowMs - Date.parse(restarted.createdAt) <= stale) continue;
@@ -1220,6 +1220,15 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
 export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, quick = false }) {
+  /**
+   * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 계정으로 판정한다(`commentsSinceCycleStart`). 팩토리 계정 이름 하나를
+   * 여기서 한 번만 구한다. 못 구하면 null — 그때 창은 "작성자가 있는 human 마커"에만 리셋된다(닫힌 쪽).
+   */
+  let factoryLogin = null;
+  if (typeof factoryLogins === "function") {
+    try { const lg = await factoryLogins(); factoryLogin = Array.isArray(lg?.logins) && lg.logins.length ? String(lg.logins[0]) : null; }
+    catch { factoryLogin = null; }
+  }
   const actions = [];
   const nowMs = Date.parse(now);
   const stale = staleMinutes * 60e3;
@@ -1332,7 +1341,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
-          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments), retryStage, it.number);
+          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)
@@ -1380,7 +1389,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
-  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions });
+  await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions, factoryLogin });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
   if (quick) return actions;                     // KTB-26 — 아래 팔들은 시간에 묶여 있다(cron의 몫)
   // KTB-46 (r3 nit 3): 사람이 머지 버튼을 누르는 사건은 스테이지 잡이 끝나는 순간과 무관하다 —

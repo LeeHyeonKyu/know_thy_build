@@ -533,56 +533,49 @@ test("A-MF1: the qa cold-read context and the plan handoff yield the same M2 ver
 });
 
 /**
- * 1.4.35 (L43, own-calendar #105) — **사람이 큐에 넣은 이슈는 사람이 본 이슈다.**
+ * 1.4.35 (L43, own-calendar #105) → 설계 2026-09-30 §8.1 (S1) — **명시적으로 제출된 이슈는 이미 누군가가 본 이슈다.**
  *
- * `triage.default: needs-info`인 저장소에서 triage는 본문에 `[ready]`가 없으면 멈췄다. 그런데 큐 진입
- * (`backlog → factory:queue`)은 사람의 전이 CLI로만 열리고 그 CLI는 에이전트 세션·CI에서 거부된다
- * (ADR-020 KTB-32) — 곧 큐에 들어온 이슈는 이미 사람이 고른 이슈다. #105는 done_when이 구체적이라고 triage가
- * 스스로 말하면서도 `[ready]`가 없다는 이유로 1분 만에 needs-info로 돌아갔다: 사람의 결정이 두 번 요구됐다.
- * 판정의 근거는 본문이 아니라 **계정**이다: 마커를 적은 계정이 팩토리 계정(뷰어)이면 사람의 것이 아니다.
+ * `triage.default: needs-info`인 저장소의 triage는 본문에 `[ready]`가 없으면 멈췄다. 그런데 큐 진입은 언제나 전이 CLI를 지나
+ * 마커를 남기고, 그 마커는 "누군가 이 이슈를 명시적으로 큐에 넣었다"는 기록이다 — 사람이든 에이전트든 공장 자신이든.
+ * #105는 done_when이 구체적이라고 triage가 스스로 말하면서도 `[ready]`가 없다는 이유로 1분 만에 needs-info로 돌아갔다.
+ * 제출자 종류는 감사용으로 실리고(`submitted_by`), 판정에는 마커의 존재만 쓴다. 마커가 없는 이슈(라벨로 태어난 것)는 예전 그대로다.
  */
 const queueMarker = (by, author, at = "2026-09-29T16:58:51Z") => ({ id: 1, body: `<!-- factory-transition:v1 from=backlog to=factory:queue by=${by} -->\nbacklog → factory:queue — go`, createdAt: at, author, authorType: "User", viaApp: null });
-const triageCtx = async ({ comments, viewer = "bot-hk", viewerThrows = false }) => {
+const triageCtx = async ({ comments }) => {
   const gh = {
     issue: vi.fn(async () => ({ number: 105, title: "T", body: "## done_when\n- [ ] test_105_x", labels: ["factory:queue"] })),
     comments: vi.fn(async () => comments),
-    viewerLogin: vi.fn(async () => { if (viewerThrows) throw new Error("gh api user failed"); return viewer; }),
   };
   return buildContext({ root: root(), gh, issue: 105, stage: "triage" });
 };
 
-test("triage context says the issue was queued by a person when the queue marker is human and not written by the factory account", async () => {
-  const ctx = await triageCtx({ comments: [queueMarker("human", "LeeHyeonKyu")] });
-  expect(ctx.triage.queued_by_person).toBe(true);
-  expect(ctx.loaded.triage.queued_by_person).toBe(true);
+test("triage context records an explicit submission — by a person, an agent session, or the factory — and who submitted", async () => {
+  for (const [by, author] of [["person:LeeHyeonKyu", "LeeHyeonKyu"], ["agent:LeeHyeonKyu", "LeeHyeonKyu"], ["factory:run-9", "bot-hk"], ["script", "bot-hk"], ["human", "LeeHyeonKyu"]]) {
+    const ctx = await triageCtx({ comments: [queueMarker(by, author)] });
+    expect(ctx.triage.explicit_submission, by).toBe(true);
+    expect(ctx.triage.submitted_by, by).toBe(by);
+    expect(ctx.loaded.triage.explicit_submission, by).toBe(true);
+  }
 });
 
-test("a queue marker written by the factory account, by a script, or missing is not a person's decision", async () => {
-  // 본문은 고를 수 있지만 계정은 고를 수 없다 — 봇이 `by=human`이라고 적어도 사람의 결정이 아니다
-  expect((await triageCtx({ comments: [queueMarker("human", "bot-hk")] })).triage.queued_by_person).toBe(false);
-  expect((await triageCtx({ comments: [queueMarker("script", "LeeHyeonKyu")] })).triage.queued_by_person).toBe(false);
-  expect((await triageCtx({ comments: [] })).triage.queued_by_person).toBe(false);
-  // 뷰어를 알 수 없으면 팩토리 계정과 구분할 수 없다 — 닫힌 쪽으로
-  expect((await triageCtx({ comments: [queueMarker("human", "LeeHyeonKyu")], viewerThrows: true })).triage.queued_by_person).toBe(false);
-  // 작성자를 모르는 코멘트(구형 gh 어댑터)도 마찬가지
-  expect((await triageCtx({ comments: [{ ...queueMarker("human", null) }] })).triage.queued_by_person).toBe(false);
+test("an issue with no queue marker (born with the label) is not an explicit submission", async () => {
+  const ctx = await triageCtx({ comments: [] });
+  expect(ctx.triage.explicit_submission).toBe(false);
+  expect(ctx.triage.submitted_by).toBe(null);
 });
 
-test("only the LATEST queue entry counts — a later script re-queue does not inherit an earlier person's decision", async () => {
-  const comments = [
-    queueMarker("human", "LeeHyeonKyu", "2026-09-29T10:00:00Z"),
-    { ...queueMarker("script", "bot-hk", "2026-09-29T12:00:00Z"), id: 2 },
-  ];
-  expect((await triageCtx({ comments })).triage.queued_by_person).toBe(false);
+test("only the LATEST queue entry counts", async () => {
+  const comments = [queueMarker("person:LeeHyeonKyu", "LeeHyeonKyu", "2026-09-29T10:00:00Z"), { ...queueMarker("factory:run-1", "bot-hk", "2026-09-29T12:00:00Z"), id: 2 }];
+  expect((await triageCtx({ comments })).triage.submitted_by).toBe("factory:run-1");
 });
 
-test("the triage prompt and the agent's decision table both name the person's queue entry next to [ready]", () => {
+test("the triage prompt and the agent's decision table both name the explicit submission next to [ready]", () => {
   const pkg = join(import.meta.dirname, "..", "..");
   const wf = readFileSync(join(pkg, "templates/factory/claude/workflows/factory-triage.js"), "utf8");
   const md = readFileSync(join(pkg, "templates/factory/claude/agents/factory-triage.md"), "utf8");
-  expect(wf).toMatch(/loaded\.triage\?\.queued_by_person === true/);
-  expect(wf).toMatch(/queued by a person/);
-  expect(md).toMatch(/\| .*`loaded\.triage\.queued_by_person` is `true`.*\| → `ready`/);
+  expect(wf).toMatch(/loaded\.triage\?\.explicit_submission === true/);
+  expect(wf).toMatch(/explicitly submitted/);
+  expect(md).toMatch(/\| .*`loaded\.triage\.explicit_submission` is `true`.*\| → `ready`/);
   // 질문은 저장소를 읽어서 답할 수 없는 것만 (#105: 버튼의 위젯 종류를 물었다 — 파일에 적혀 있다)
   expect(md).toMatch(/answer.*by reading the repository/i);
 });

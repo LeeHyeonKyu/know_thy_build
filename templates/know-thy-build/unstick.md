@@ -44,7 +44,7 @@ run 기록 전체(`factory/records` 브랜치), needs-human 사유(`reason` 필�
 
 **Guard**: 무엇을 하기 전에 `.factory/bin/run-stage.js`가 있는지 먼저 본다 — 없으면 이 저장소에는 아직 factory가 없다. 그때는 "factory가 아직 없음 — `npx know-thy-build factory init`" 한 줄만 출력하고 즉시 멈춘다(아무것도 읽거나 쓰지 않는다).
 
-라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --human --reason "<why>"`; 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
+라벨은 손으로 옮기지 않는다(`gh issue edit --add-label/--remove-label` 금지); 전이는 `node .factory/bin/transition.js <issue> <label> --reason "<why>"`(큐 진입은 누구나 명시적으로 제출한다 — 제출자는 CLI가 환경으로 자기 신고한다; `needs-human`/`needs-info`에서 되돌리는 재시도만 사람의 셸에서 `--human`); 거부되면 사유를 사람에게 보여주고 멈춘다; 머지는 `gh pr merge` 금지(GitHub UI 링크만); 결정은 이슈(또는 PR) 코멘트 `<!-- human-decision:v1 issue=<n> skill=<name> -->` + ```yaml 블록(`decision`, `reason`, `actions[]`)으로 `gh issue comment <n> --body-file <tmp>`(본문에 `>` 줄이 있을 수 있으므로 항상 `--body-file`); 모든 요약은 **먼저 읽고**(handoff·run 기록·gates.json·dissent) 한 화면(≤25줄)으로; 질문은 한 번에 하나, 선택지는 2~3개에 권장 표시.
 
 `factory:needs-human`에서 나가는 라벨 전이는 **둘**뿐이다(`factory/lib/labels.js`):
 
@@ -153,7 +153,7 @@ gh issue create --label backlog --title "<NNN> <title>" --body-file <tmp>
 5. 원본 이슈를 다시 큐에 넣는다:
 
 ```bash
-node .factory/bin/transition.js 118 factory:queue --human --reason "<decision>"
+node .factory/bin/transition.js 118 factory:queue --reason "<decision>"
 ```
 
 6. `human-decision:v1` 코멘트를 남긴다(Step 4).
@@ -184,7 +184,7 @@ gh issue close 118 --reason "not planned"
 위 네 가지 중 아무것도 아니고, 그저 사람이 확인 후 "이대로 다시 시도"라고 결정했다면(예: 리뷰어 지적이 오탐이었다고 판단):
 
 ```bash
-node .factory/bin/transition.js 118 factory:queue --human --reason "<decision>"
+node .factory/bin/transition.js 118 factory:queue --reason "<decision>"
 ```
 
 **사유 없는 재큐는 하지 않는다**(Must not) — `--reason`은 항상 사람이 방금 내린 판단을 담는다. "다시 해보자"만으로는 재큐하지 않는다 — 무엇이 바뀌었는지(스펙·범위·이해) 한 문장이 없으면 같은 `needs-human`이 반복될 뿐이다.

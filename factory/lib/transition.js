@@ -52,7 +52,19 @@ export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runn
 /** 리허설 배선이 아예 없는 큐 전이의 거부 사유 — 그 자체가 배선 지시문이다(리뷰 must_fix 3). */
 export const REHEARSAL_UNWIRED = "no rehearsal checker is wired into this transition — `→ factory:queue` is refused (fail closed). Pass `rehearsal` (see bin/transition.js / sweep.js) or, in tests only, `skipRehearsal: true`";
 
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", stage, cause, env = process.env, rehearsal = null, skipRehearsal = false }) {
+/**
+ * 설계 2026-09-30 §8.1 (S1) — 제출자의 **자기 신고**. 환경이 말하는 것을 적는다: Actions 러너면 `factory:run-<id>`, 에이전트 세션이면
+ * `agent:<login>`, 둘 다 아니면 `person:<login>`. 이 값은 권한의 근거가 아니라 감사 기록이다 — 큐 진입은 누구나 할 수 있으므로
+ * 위조로 얻을 것이 없다. 마커 문법을 깨는 문자(공백·`>`)는 `-`로 바꾼다.
+ */
+export function principalFromEnv(env = process.env, login = null) {
+  const who = String(login || "unknown").replace(/[\s>]+/g, "-");
+  if (env.GITHUB_ACTIONS) return `factory:run-${String(env.GITHUB_RUN_ID || "unknown").replace(/[\s>]+/g, "-")}`;
+  if (env.CLAUDE_PROJECT_DIR) return `agent:${who}`;
+  return `person:${who}`;
+}
+
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", by = null, stage, cause, env = process.env, rehearsal = null, skipRehearsal = false }) {
   /**
    * ── KTB-44 / ADR-025 — **리허설 없이는 큐가 열리지 않는다.** ───────────────────────────────────
    * own-calendar의 첫 다크 이슈는 하네스 초안의 결함 세 개를 **라운드마다 하나씩** 드러냈다(exit 127의
@@ -163,7 +175,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   const retryNote = humanRetry
     ? `\n\n중단 지점 \`${resume.stoppedAt}\`으로 되돌립니다(ADR-020 KTB-32) — 인프라가 끊은 자리이고 산출물은 그대로입니다. 근거: ${decision ? `이 이슈의 \`human-decision:v1\` 코멘트(skill=${decision.skill ?? "unknown"}${decision.at ? `, ${decision.at}` : ""})` : "`human-decision:v1` 코멘트를 찾지 못했습니다 — `:unstick`을 거치지 않은 수동 복구입니다"}. 이 전이는 리뷰 라운드로 세지 않습니다(재큐가 아닙니다).`
     : "";
-  await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=${to} by=${human ? "human" : "script"}${humanRetry ? " reason=retry" : ""} -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}${retryNote}${originMarker}`);
+  await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=${to} by=${human ? "human" : (typeof by === "string" && by ? by.replace(/[\s>]+/g, "-") : "script")}${humanRetry ? " reason=retry" : ""} -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}${retryNote}${originMarker}`);
   const set = await swapLabel({ gh, issue, from, to });
   // KTB-30: 라벨을 쓴 뒤 확인에서 되살렸다면 그 사실은 이슈 이력에 남아야 한다 — 조용히 고친 라벨은
   // 다음 사고의 원인을 지운다(`setFactoryLabel`이 없는 구형 더블은 undefined를 돌려준다). 전이 코멘트가

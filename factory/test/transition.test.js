@@ -1,6 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { transition, parseTransitionArgs, refuseHumanFlag } from "../lib/transition.js";
+import { transition, principalFromEnv, parseTransitionArgs, refuseHumanFlag } from "../lib/transition.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { TRANSITION_TO, blockedOrigin, commentsSinceRequeue, countTransitionsTo, extractNeedsHuman, lastTransition, resumePoint } from "../lib/retro/issue-comments.js";
 
@@ -520,3 +520,27 @@ test("bin/transition.js refuses --human/--retry before any gh call when CLAUDE_P
     expect(r.stderr, JSON.stringify(extraEnv)).toMatch(/--human\/--retry refused/);
   }
 }, 120000);
+
+/**
+ * 설계 2026-09-30 §8.1 (S1) — **제출자는 자기 신고한다.** `by=`는 권한의 근거가 아니라 감사 기록이다(누구나 제출할 수 있으므로
+ * 위조로 얻을 것이 없다). 라이브러리는 `by` 문자열을 그대로 마커에 적고, 없으면 예전처럼 `script`다. 사람의 재시도는
+ * 여전히 `human` 플래그와 그 자물쇠들을 지난다 — 이 필드는 그것을 건드리지 않는다.
+ */
+test("S1: a submission's self-reported principal lands in the transition marker; absent, it is `script`", async () => {
+  const gh = { issue: vi.fn(async () => ({ labels: ["backlog"] })), comments: vi.fn(async () => []), comment: vi.fn(async () => {}), setFactoryLabel: vi.fn(async () => ({ verify: "ok" })), removeLabel: vi.fn(async () => {}), addLabel: vi.fn(async () => {}) };
+  const r = await transition({ gh, issue: 5, to: "factory:queue", by: "agent:hk", reason: "explicit job", skipRehearsal: true });
+  expect(r.ok).toBe(true);
+  expect(gh.comment.mock.calls[0][1]).toMatch(/factory-transition:v1 from=backlog to=factory:queue by=agent:hk -->/);
+  const gh2 = { ...gh, comment: vi.fn(async () => {}) };
+  await transition({ gh: gh2, issue: 5, to: "factory:queue", skipRehearsal: true });
+  expect(gh2.comment.mock.calls[0][1]).toMatch(/by=script -->/);
+});
+
+test("S1: principalFromEnv — runner, agent session, or a person's own shell", () => {
+  expect(principalFromEnv({ GITHUB_ACTIONS: "true", GITHUB_RUN_ID: "123" }, "bot-hk")).toBe("factory:run-123");
+  expect(principalFromEnv({ CLAUDE_PROJECT_DIR: "/x" }, "hk")).toBe("agent:hk");
+  expect(principalFromEnv({}, "hk")).toBe("person:hk");
+  expect(principalFromEnv({}, null)).toBe("person:unknown");
+  // 마커 문법을 깨는 문자는 들어가지 않는다(공백·`>`)
+  expect(principalFromEnv({}, "a b>c")).toBe("person:a-b-c");
+});

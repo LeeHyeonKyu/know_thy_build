@@ -218,27 +218,21 @@ export function disputedFrom(comments) {
 }
 
 /**
- * 1.4.35 (L43, own-calendar #105) — **이 이슈를 큐에 넣은 것이 사람인가.**
+ * 1.4.35 (L43) → 설계 2026-09-30 §8.1 (S1) — **이 이슈는 명시적으로 제출됐는가, 누가 제출했는가.**
  *
- * 큐 진입은 사람의 전이 CLI로만 열리고, 그 CLI는 에이전트 세션과 CI에서 거부된다(ADR-020 KTB-32). 그래서 큐에
- * 들어온 이슈는 이미 사람이 고른 이슈인데, `triage.default: needs-info`인 저장소의 triage는 본문의 `[ready]`만
- * 사람의 흔적으로 읽었다 — 사람이 이슈를 쓰고 큐에 넣은 뒤에도 같은 결정을 본문에 한 번 더 적어야 했다.
- *
- * 세 조건이 모두 서야 참이다. 하나라도 알 수 없으면 거짓(닫힌 쪽)이고, 그때는 예전처럼 `[ready]`가 필요하다:
- *   - **가장 최근의** 큐 진입 마커가 `by=human`이다(뒤의 스크립트 재큐가 앞선 사람의 결정을 물려받지 않는다).
- *   - 그 코멘트를 적은 계정을 안다.
- *   - 그 계정이 팩토리 계정(이 런의 뷰어)이 아니다 — 본문은 고를 수 있지만 계정은 고를 수 없다.
+ * 큐 진입은 언제나 전이 CLI를 지나 마커를 남긴다. 그 마커가 있으면 누군가 — 사람, 에이전트 세션, 공장 자신 — 이 이슈를
+ * 명시적으로 큐에 넣은 것이고, `triage.default: needs-info`인 저장소의 triage는 그것을 `[ready]`와 같게 읽는다(#105는 done_when이
+ * 구체적이라고 triage가 스스로 말하면서도 `[ready]`가 없다는 이유로 1분 만에 needs-info로 돌아갔다). 제출자(`by=`)는 자기 신고이고
+ * 감사용으로만 실린다 — 권한의 근거가 아니다(코멘트 작성 계정은 사람과 소유자 계정의 에이전트 세션을 가르지 못한다). 가장 최근의
+ * 큐 진입 마커만 본다. 마커가 없는 이슈(라벨로 태어난 것)는 예전 그대로 `[ready]`가 필요하다.
  */
-export function queuedByPerson(comments, factoryLogin) {
-  if (typeof factoryLogin !== "string" || !factoryLogin) return false;
+export function explicitSubmission(comments) {
   let latest = null;
   for (const c of Array.isArray(comments) ? comments : []) {
     const m = TRANSITION_TO.exec(String(c?.body ?? ""));
-    if (m && m[2] === "factory:queue") latest = { by: m[3], author: c?.author ?? null };
+    if (m && m[2] === "factory:queue") latest = { by: m[3], author: typeof c?.author === "string" ? c.author : null };
   }
-  if (!latest || latest.by !== "human") return false;
-  if (typeof latest.author !== "string" || !latest.author) return false;
-  return latest.author.toLowerCase() !== factoryLogin.toLowerCase();
+  return latest ? { explicit_submission: true, submitted_by: latest.by } : { explicit_submission: false, submitted_by: null };
 }
 
 export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null }) {
@@ -248,12 +242,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   const handoffs = {};
   for (const s of ["triage", "plan", "implement", "review"]) { const h = latestHandoff(comments, s); if (h) handoffs[s] = h.data; }
   const tier = handoffs.triage?.tier ?? charter.tier_default;
-  // 뷰어 조회는 triage에서만 한다(다른 스테이지는 이 값을 읽지 않는다). 실패는 "모른다" = 거짓이다.
-  let queuedBy = false;
-  if (stage === "triage") {
-    try { queuedBy = queuedByPerson(comments, typeof gh.viewerLogin === "function" ? await gh.viewerLogin() : null); }
-    catch { queuedBy = false; }
-  }
+  const submission = stage === "triage" ? explicitSubmission(comments) : null;
   // 감사 H3 — 로스터·계획은 **신고가 아니라 실효 tier**를 읽는다.
   const { tier_effective, tier_source, tier_floor } = await resolveTier({ run, cwd: root, base, harness, tier });
   const rs = ROSTER_STAGE[stage];
@@ -295,7 +284,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * (`charter.triage.default`)와, 스크립트가 다시 대는 NEVER_AUTOMATE 글롭. 프롬프트는 전자를
      * 읽어 판정하고, `verify-stage`는 후자로 그 판정을 덮어쓴다 — 둘은 같은 CHARTER에서 온다.
      */
-    ...(stage === "triage" ? { triage: { default: charter.triage?.default ?? null, never_automate: charter.never_automate ?? [], queued_by_person: queuedBy } } : {}),
+    ...(stage === "triage" ? { triage: { default: charter.triage?.default ?? null, never_automate: charter.never_automate ?? [], ...submission } } : {}),
     orchestration: harness.factory?.orchestration ?? "workflow",
     spec_path: spec ? spec[0] : null,
     handoffs,

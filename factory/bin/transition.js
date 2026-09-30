@@ -8,11 +8,11 @@ import { join } from "node:path";
  * 스택만 남기고 죽는다 — 무엇을 하면 되는지는 말하지 않는다. 그래서 라이브러리를 동적으로 읽고, 의존성이
  * 없을 때만 그 한 줄을 말한다. 다른 오류는 그대로 던진다(삼키지 않는다).
  */
-let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, makeRehearsalChecker, loadHarness;
+let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, makeRehearsalChecker, loadHarness;
 try {
   ({ run } = await import("../lib/exec.js"));
   ({ makeGh } = await import("../lib/gh.js"));
-  ({ parseTransitionArgs, refuseHumanFlag, transition } = await import("../lib/transition.js"));
+  ({ parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv } = await import("../lib/transition.js"));
   ({ makeRehearsalChecker } = await import("../lib/rehearsal.js"));
   ({ loadHarness } = await import("../lib/config.js"));
 } catch (e) {
@@ -77,6 +77,9 @@ let defaultBranch = "main";
 try { defaultBranch = loadHarness(root)?.project?.default_branch || "main"; } catch { /* 기본값 그대로 */ }
 const rehearsal = makeRehearsalChecker({ gh, root, branch: defaultBranch });
 
-const r = await transition({ gh, issue, to, human, retry, reason, ctxExtra, rehearsal });
+// S1 — 제출자 자기 신고(감사 기록). 로그인 조회가 실패해도 전이는 막지 않는다(`unknown`).
+let login = null;
+try { login = await gh.viewerLogin(); } catch { /* 감사 필드만 비운다 */ }
+const r = await transition({ gh, issue, to, human, retry, reason, by: principalFromEnv(process.env, login), ctxExtra, rehearsal });
 console.log(JSON.stringify(r));
 process.exit(r.ok ? 0 : 2);

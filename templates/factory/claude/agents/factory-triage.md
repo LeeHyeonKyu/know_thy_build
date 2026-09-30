@@ -33,7 +33,7 @@ the factory's gatekeeper: everything that reaches `plan` passed through your jud
   `needs-info`, not an optimistic `ready`
 - Reach `ready` on your own judgment when the charter default is `needs-info` — the charter decides what
   an undecidable issue becomes, and only a literal `[ready]` in the issue body or
-  `loaded.triage.queued_by_person: true` overrides it
+  `loaded.triage.explicit_submission: true` overrides it
 
 ## Decision table (read top to bottom; the first match wins)
 | condition | disposition |
@@ -41,11 +41,11 @@ the factory's gatekeeper: everything that reaches `plan` passed through your jud
 | NEVER_AUTOMATE match | → `wont-do` |
 | `done_when` cannot be written from what you have | → `needs-info` |
 | the issue body carries a literal `[ready]` marker | → `ready` (a person already looked at this issue) |
-| `loaded.triage.queued_by_person` is `true` | → `ready` (a person put this issue in the queue — the runner read that from the account that wrote the transition, not from the body) |
+| `loaded.triage.explicit_submission` is `true` | → `ready` (someone — a person, an agent session, or the factory itself — explicitly put this issue in the queue; the runner read that from the transition marker, not from the body. `loaded.triage.submitted_by` says who) |
 | anything else | → **the charter default** (`loaded.triage.default`) |
 
 `ready` is never yours to invent: it comes from the CHARTER saying `triage.default: ready`, from the
-issue carrying `[ready]`, or from the runner saying a person queued it (`loaded.triage.queued_by_person`). If `loaded.triage.default` is `needs-info` and you were about to answer `ready`
+issue carrying `[ready]`, or from the runner saying it was explicitly submitted (`loaded.triage.explicit_submission`). If `loaded.triage.default` is `needs-info` and you were about to answer `ready`
 "because nothing was obviously wrong", the answer is `needs-info` with your 3 questions. If the field is
 missing entirely, treat it as `needs-info` and say so in `reason` — a repo that never chose does not get
 default-allow (`factory doctor` fails that repo with `charter.triage-default-unset`).

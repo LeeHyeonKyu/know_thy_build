@@ -2327,7 +2327,7 @@ test("sweep: a stage with queued runs of its workflow is not restarted (runner s
 // 1.4.12 (own-calendar #9/#28/#29/#30): restart markers from BEFORE a human retry must not count — the human retry is a
 // new cycle; otherwise two old markers make the first stall after the retry an immediate `stalled restart limit`.
 test("sweep: restart markers before a human retry transition do not count toward the restart limit", async () => {
-  const HUMAN_RETRY = { id: 5, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:planned by=human reason=retry -->\nneeds-human → planned", createdAt: "2026-09-11T00:30:00Z" };
+  const HUMAN_RETRY = { id: 5, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:planned by=human reason=retry -->\nneeds-human → planned", createdAt: "2026-09-11T00:30:00Z", author: "LeeHyeonKyu" }   // S1: 사람의 전이는 계정으로 판정한다 — 실제 코멘트에는 언제나 작성자가 있다;
   const old1 = { id: 3, body: restartComment("implement", 4), createdAt: "2026-09-11T00:05:00Z" };
   const old2 = { id: 4, body: restartComment("implement", 4), createdAt: "2026-09-11T00:06:00Z" };
   const posted = [];
@@ -2371,7 +2371,7 @@ test("KTB #43: a CLOSED issue parked by a human transition and merged by hand is
 // from that human transition, so it re-fires merge instead of escalating on the old markers.
 test("sweep: a human-retry blocked origin (from approved) re-fires merge once, attempts counted since the human transition", async () => {
   const old = (n) => ({ id: 10 + n, body: blockedRetryComment("merge", 9, n), createdAt: `2026-09-12T1${n}:00:00Z` });
-  const human = { id: 50, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:blocked by=human reason=retry -->\nfactory:needs-human → factory:blocked — retry\n<!-- factory-blocked-origin from=factory:approved stage=merge cause=human-retry -->", createdAt: "2026-09-12T20:00:00Z" };
+  const human = { id: 50, body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:blocked by=human reason=retry -->\nfactory:needs-human → factory:blocked — retry\n<!-- factory-blocked-origin from=factory:approved stage=merge cause=human-retry -->", createdAt: "2026-09-12T20:00:00Z" , author: "LeeHyeonKyu"};
   const posted = [];
   const gh = {
     searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 9 }] : [])),
