@@ -21,13 +21,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 2 | 9 |
+| needs-human | 3 | 9 |
 | rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
 | unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 40.64 | 190.86 |
-| tokens | input 216956 / output 20095 | input 3362163 / output 311837 |
+| cost (usd) | 48.53 | 190.86 |
+| tokens | input 352742 / output 38719 | input 3362163 / output 311837 |
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
@@ -303,6 +303,11 @@
         "issue": 36,
         "reason": "overlay check refuses any .factory/** change on a self-repo PR (KTB #41); the factory cannot finish this issue — owner reviews PR #39 out of band and merges by hand",
         "at": "2026-09-21T04:08:48Z"
+      },
+      {
+        "issue": 130,
+        "reason": "blocked (gates undecided) — needs human",
+        "at": "2026-09-30T05:56:28Z"
       }
     ]
   },
@@ -323,17 +328,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 2,
+    "needs_human": 3,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 40.640418,
+      "cost_usd": 48.531486,
       "tokens": {
-        "input": 216956,
-        "output": 20095
+        "input": 352742,
+        "output": 38719
       }
     }
   },
