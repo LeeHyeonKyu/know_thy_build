@@ -433,7 +433,7 @@ const git143 = async (cwd, ...args) => {
  * origin(bare) + 작업 사본. main의 시드 → 브랜치 `claude/fq-143`(빌더의 지난 라운드: 소스 + 러너의 미러 커밋 + DECISIONS 항목)
  * → main이 앞으로 간다(엔진 릴리스: 같은 소스·같은 미러·DECISIONS 항목·충돌하지 않는 `.claude/settings.json`).
  */
-async function overlapRepo({ engine = true, conflictSource = true, clean = false, baseTouchesClaude = true, branchEditsAgent = false, conflictUnder = null } = {}) {
+async function overlapRepo({ engine = true, conflictSource = true, clean = false, baseTouchesClaude = true, branchEditsAgent = false, conflictUnder = null, branchMirror = "gen a\ngen branch\ngen c\n" } = {}) {
   const top = _mkd(_j(_tmp(), "ktb-143-"));
   const origin = _j(top, "origin.git"), root = _j(top, "work");
   await git143(top, "init", "-q", "--bare", "-b", "main", origin);
@@ -456,7 +456,7 @@ async function overlapRepo({ engine = true, conflictSource = true, clean = false
   if (clean) w("factory/lib/y.js", "branch only\n");
   else {
     if (conflictSource) w("factory/lib/x.js", "a\nbranch\nc\n");
-    w(".factory/lib/x.js", "gen a\ngen branch\ngen c\n");
+    w(".factory/lib/x.js", branchMirror);
     w("docs/factory/DECISIONS.md", "# D\n\nseed\n\nbranch entry\n");
   }
   if (branchEditsAgent) w(".claude/agents/a.md", "branch edit\n");
@@ -544,6 +544,8 @@ const realImplDeps = ({ fx, claudeP, transition, lines, over = {} }) => {
     overlayFactoryConfig: (h = false) => makeFactoryOverlay({ run, root: fx.root, env: { GITHUB_SHA: fx.baseSha }, defaultBranch: () => "main", harnessIssue: h })(),
     branchOwnFactoryPaths: ({ sha, harnessIssue }) => branchOwnFactoryPaths({ run, cwd: fx.root, sha, harnessIssue }),
     baseMergeComplete: ({ sha, paths }) => assertBaseMergeComplete({ run, cwd: fx.root, sha, paths }),
+    // 브랜치의 미러 커밋은 브랜치 HEAD의 소스와 실제로 대조한다(생성기만 픽스처의 것 — `fakeGenerators`).
+    mirrorMatchesBranchHead: () => mirrorMatchesBranchHead({ root: fx.root, run, importer: fakeGenerators }),
     claudeP, transition, runRecord: (l) => lines.push(...l),
     ...over,
   });
@@ -837,4 +839,54 @@ test("test_143_unreadable_git_state_at_every_step_blocks", async () => {
     expect(t).toEqual(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
     expect(t.reason).toMatch(/builder did not complete the base merge \(git state unreadable/);
   }
+});
+
+/**
+ * #143 (셀프 비판 f3) — dw2: "브랜치가 정말로 팩토리 소유 경로를 고쳤다면 오늘처럼 멈춘다." 오늘 브랜치의 미러 경로는 그 브랜치의
+ * `factory/**`가 생성하는 것과 같을 때만 통과한다(`mirrorMatchesHead`). 병합이 진행 중이어도 그 대조는 그대로다 — 다만 워크트리의
+ * 소스에는 마커가 있으므로, 대조는 **브랜치 HEAD의 소스**로 한다(`mirrorMatchesBranchHead`: HEAD를 임시 워크트리로 꺼낸다).
+ * 생성기는 픽스처의 소스에서 미러를 만드는 작은 함수다: 줄마다 `gen ` 접두. 워크트리(마커)로 만들면 대조가 틀린다 — 그래서 통과
+ * 케이스가 곧 "HEAD의 소스로 대조했다"의 증거다.
+ */
+import { mirrorMatchesBranchHead } from "../bin/run-stage.js";
+const fakeGenerators = (p) => {
+  if (p.endsWith("manifest.js")) return { buildManifest: ({ pkgRoot }) => [{ dest: ".factory/lib/x.js", src: _j(pkgRoot, "factory/lib/x.js") }] };
+  if (p.endsWith("install.js")) return { freshContent: (e, { readFile }) => readFile(e.src).split("\n").map((l) => (l ? `gen ${l}` : l)).join("\n") };
+  if (p.endsWith("init.js")) return { projectVars: () => ({}) };
+  throw new Error(`unexpected import ${p}`);
+};
+test("test_143_branch_edited_mirror_is_still_blocked_during_a_pending_merge", async () => {
+  // 브랜치가 설치본을 손으로 고쳤다(소스가 만드는 것이 아니다) + base 릴리스와 소스 충돌 → 넘김이 아니라 오늘처럼 멈춘다.
+  const hand = await overlapRepo({ branchMirror: "hand edit\n" });
+  try {
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to })); const claudeP = vi.fn();
+    const d = realImplDeps({ fx: hand, claudeP, transition, lines, over: { mirrorMatchesBranchHead: () => mirrorMatchesBranchHead({ root: hand.root, run: realRun, importer: fakeGenerators }) } });
+    expect(await runStage({ stage: "implement", issue: 143, deps: d })).toBe(2);
+    expect(claudeP).not.toHaveBeenCalled();
+    const t = transition.mock.calls.at(-1)[0];
+    expect(t.to).toBe("factory:blocked");
+    expect(t.reason).toContain(".factory/lib/x.js");
+    expect(t.reason).toMatch(/not what its sources generate/);
+    expect(lines.some((l) => /^overlay: FAIL/.test(l))).toBe(true);
+  } finally { hand.done(); }
+  // 같은 브랜치 모양인데 미러가 러너의 생성물(브랜치 소스 `a/branch/c` → `gen a/gen branch/gen c`)이면 넘어간다 — 대조는 마커가 든
+  // 워크트리가 아니라 HEAD의 소스로 했다. 임시 워크트리는 남지 않는다.
+  const gen = await overlapRepo();
+  try {
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to })); const claudeP = resolvingBuilder(gen.root);
+    const d = realImplDeps({ fx: gen, claudeP, transition, lines, over: { mirrorMatchesBranchHead: () => mirrorMatchesBranchHead({ root: gen.root, run: realRun, importer: fakeGenerators }) } });
+    expect(await runStage({ stage: "implement", issue: 143, deps: d })).toBe(0);
+    expect(claudeP).toHaveBeenCalledTimes(1);
+    expect(transition.mock.calls.filter(([a]) => a.to === "factory:blocked")).toEqual([]);
+    expect(lines.some((l) => /runner-generated mirror path\(s\).*verified against the branch's factory\/\*\*: \.factory\/lib\/x\.js/.test(l))).toBe(true);
+    expect(await git143(gen.root, "worktree", "list", "--porcelain")).not.toMatch(/ktb-mirror-head/);
+  } finally { gen.done(); }
+  // 대조 수단이 배선되지 않았으면 오늘처럼 멈춘다(fail closed) — 미러 경로를 말없이 빼지 않는다.
+  const bare = await overlapRepo();
+  try {
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to })); const claudeP = vi.fn();
+    expect(await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx: bare, claudeP, transition, lines, over: { mirrorMatchesBranchHead: undefined } }) })).toBe(2);
+    expect(claudeP).not.toHaveBeenCalled();
+    expect(transition.mock.calls.at(-1)[0].reason).toContain(".factory/lib/x.js");
+  } finally { bare.done(); }
 });

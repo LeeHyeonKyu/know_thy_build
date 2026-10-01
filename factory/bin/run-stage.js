@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
@@ -539,9 +539,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
        * #143 (S3b) — **병합이 진행 중이면 가드는 브랜치 자신의 변경만 센다.** 병합 중인 인덱스에서 `git status`는 base의 변경
        * (엔진 릴리스가 함께 바꾼 `.claude/**`·`.factory/**`)도 HEAD 대비 staged 차이로 보고하고, overlay는 그것을 "덮었다"고 적는다 —
        * 그대로 세면 이 이슈가 풀려던 바로 그 경우가 여기서 막힌다. 브랜치가 merge-base 이후 실제로 바꾼 경로(`branchOwnFactoryPaths`)만
-       * 남긴다. 그중 미러 가족은 세지 않는다: 그 HEAD 바이트를 브랜치 소스와 대조할 수단(`mirrorMatchesHead`)은 워크트리 소스를
-       * 읽는데 지금 그 소스에는 마커가 있고, 세션 뒤 미러 단계가 푼 소스로 어차피 다시 만든다(되돌림이 PR에 실리지 않는다).
-       * 미러가 아닌 팩토리 경로를 브랜치가 고쳤다면 오늘처럼 멈춘다.
+       * 남기고, 그 나머지는 **오늘과 똑같이** 판정한다: 미러가 아닌 팩토리 경로면 멈추고, 전부 미러 가족이면 브랜치 HEAD의 설치본이
+       * 브랜치의 `factory/**`가 생성하는 것과 같을 때만 지나간다. 단 그 대조는 워크트리가 아니라 **브랜치 HEAD의 소스**로 한다
+       * (`mirrorMatchesBranchHead`) — 지금 워크트리의 소스는 base의 변경과 충돌 마커를 들고 있어, 그것으로 만들면 대조가 언제나 틀린다.
        */
       let guardPaths = overlaidPaths;
       if (stage === "implement" && pendingMerge && overlaidPaths.length) {
@@ -555,10 +555,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           return 2;
         }
         const mine = new Set(own.paths);
-        const branchOwned = overlaidPaths.filter((p) => mine.has(p));
-        const mirrorOwned = branchOwned.filter((p) => inMirrorFamily(p));
-        guardPaths = branchOwned.filter((p) => !inMirrorFamily(p));
-        record([`overlay: base merge pending — ${overlaidPaths.length - branchOwned.length} overlaid path(s) are base's staged changes, not the branch's; ${mirrorOwned.length} branch mirror path(s) reverted for the session, regenerated from the resolved factory/** after it${mirrorOwned.length ? `: ${mirrorOwned.slice(0, 6).join(", ")}${mirrorOwned.length > 6 ? ", …" : ""}` : ""}`]);
+        guardPaths = overlaidPaths.filter((p) => mine.has(p));
+        record([`overlay: base merge pending — ${overlaidPaths.length - guardPaths.length} overlaid path(s) are base's staged changes, not the branch's; ${guardPaths.length} the branch changed itself are checked as on any round`]);
       }
       if (stage === "implement" && guardPaths.length) {
         /**
@@ -567,7 +565,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
          * 돌고(overlay가 되돌린 대로), 세션 뒤 미러 단계가 다시 만든다. 대조가 틀리면 예전처럼 거부한다.
          */
         const allMirror = guardPaths.every((p) => inMirrorFamily(p));
-        const mm = allMirror && d.mirrorMatchesHead ? await d.mirrorMatchesHead() : null;
+        // #143 — 병합 중에는 워크트리 소스에 마커가 있다: 같은 대조를 브랜치 HEAD의 소스로 한다(배선되지 않았으면 대조 없음 → 거부).
+        const matcher = pendingMerge ? d.mirrorMatchesBranchHead : d.mirrorMatchesHead;
+        const mm = allMirror && matcher ? await matcher() : null;
         if (mm?.ok && mm.applicable) {
           record([`overlay: ${guardPaths.length} runner-generated mirror path(s) reverted to ${ov.sha.slice(0, 7)} for the session — verified against the branch's factory/**: ${guardPaths.slice(0, 6).join(", ")}${guardPaths.length > 6 ? ", …" : ""}`]);
         } else {
@@ -2308,6 +2308,27 @@ export async function branchOwnFactoryPaths({ run, cwd, sha, harnessIssue = fals
 }
 
 /**
+ * #143 (S3b, 셀프 비판 f3) — `mirrorMatchesHead`와 같은 대조를 **브랜치 HEAD의 소스로** 한다. base 병합이 진행 중인 워크트리의
+ * `factory/**`는 base의 변경과 충돌 마커를 함께 들고 있어서, 그것으로 생성하면 브랜치의 정직한 러너 미러 커밋도 "다르다"가 되고
+ * 그렇다고 대조를 빼면 손으로 고친 설치본이 넘어간다(dw2: "오늘처럼 멈춘다"). 그래서 HEAD를 임시 워크트리로 꺼내 그 안에서
+ * 대조한다 — 그것이 병합이 없을 때 오늘 하는 일과 같은 입력이다. 생성기가 패키지(`smol-toml`)를 읽으므로 저장소의
+ * `node_modules`를 링크한다. 꺼내지 못하면 판정할 수 없다 — `ok:false`(가드는 거부한다). 임시 워크트리는 언제나 치운다.
+ */
+export async function mirrorMatchesBranchHead({ root, run, importer, match = mirrorMatchesHead }) {
+  const dir = mkdtempSync(join(tmpdir(), "ktb-mirror-head-"));
+  try {
+    const add = await run("git", ["worktree", "add", "--detach", "-f", dir, "HEAD"], { cwd: root });
+    if (add.code !== 0) return { ok: false, applicable: true, mismatched: [], reason: `the branch HEAD could not be checked out to compare its installed engine: ${add.stderr?.trim() || `exit ${add.code}`}` };
+    if (existsSync(join(root, "node_modules")) && !existsSync(join(dir, "node_modules"))) symlinkSync(join(root, "node_modules"), join(dir, "node_modules"), "dir");
+    return await match({ root: dir, run, ...(importer ? { importer } : {}) });
+  } finally {
+    await run("git", ["worktree", "remove", "--force", dir], { cwd: root });
+    rmSync(dir, { recursive: true, force: true });
+    await run("git", ["worktree", "prune"], { cwd: root });
+  }
+}
+
+/**
  * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
  * 스테이지 커밋의 것인가. 훅이 브랜치 이동을 막지만 훅이 못 보는 철자는 언제나 남는다(런타임 조립) —
  * 이것은 그 뒤에 서는 구조적 백스톱이다. `git rev-parse --abbrev-ref HEAD` 자체가 실패하거나 HEAD가
@@ -2703,6 +2724,8 @@ async function main() {
     /** S3 — 설치된 엔진의 재생성(`lib/mirror.js`). KTB 자기 저장소에서만 적용된다(소스 `factory/cli/**`가 있을 때). */
     mirror: (mode, headSha) => mirrorStep({ root, run, mode, headSha }),
     mirrorMatchesHead: () => mirrorMatchesHead({ root, run }),
+    /** #143 — 병합이 진행 중일 때의 같은 대조: 브랜치 HEAD의 소스로(워크트리 소스에는 마커가 있다). */
+    mirrorMatchesBranchHead: () => mirrorMatchesBranchHead({ root, run }),
     /**
      * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
