@@ -17,7 +17,7 @@ import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
-import { HARNESS_LABEL } from "../lib/label-catalog.js";
+import { HARNESS_LABEL, VETO_LABEL, catalogLabel } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
@@ -42,7 +42,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage } from "../lib/merge-stage.js";
+import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -2027,6 +2027,130 @@ export function completedForHead({ comments, stage, headSha, entryLabels = ENTRY
  * 문이 옮기는 것은 **새 하네스 이슈**이지 피처 이슈가 아니다(피처는 이 스테이지의 `d.transition`이 주차한다).
  * 호출 모양 `({ entries, pr })`은 그대로다(run-stage 테스트가 고정한다).
  */
+/**
+ * #149 (S4a) — merge 스테이지의 거부권 창 재료(`lib/merge-stage.js` (5b)).
+ *
+ * `vetoWindow`: 이 sha의 `factory/veto-window` 상태 — 목록 API는 최신순이므로 첫 항목이 지금 유효한 것이다.
+ * 게시자는 여기서 판정하지 않는다(`creatorLogin`을 그대로 싣는다): merge-stage가 `factoryLogins`, 곧
+ * `verifyFactoryStatuses`와 같은 로그인 집합으로 대조한다. 실패는 `{ok:false}`로 돌려준다 — 판정 불가다.
+ */
+export function makeVetoWindowDep({ gh }) {
+  return {
+    read: async (sha) => {
+      let list;
+      try { list = await gh.commitStatuses(sha); }
+      catch (e) { return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — ${e?.message || e}` }; }
+      if (!Array.isArray(list)) return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — no list returned` };
+      const s = list.find((x) => x?.context === VETO_WINDOW_CONTEXT);
+      return { ok: true, window: s ? { sha, state: s.state ?? null, description: s.description ?? null, creatorLogin: s.creatorLogin ?? null, createdAt: s.createdAt ?? null } : null };
+    },
+    /** 거부권 라벨을 카탈로그 정의 그대로 만든다(`--force` — 이미 있으면 색·설명만 맞춘다). */
+    ensureLabel: async () => {
+      try { await gh.createLabel(catalogLabel(VETO_LABEL)); return { ok: true }; }
+      catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+    },
+    open: async ({ sha, closesAt }) => {
+      try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description: `closes=${closesAt}` }); return { ok: true }; }
+      catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+    },
+    /**
+     * 창을 끝낸다 — success(거부권 없이 닫힘)·failure(거부권)·error(판정 불가). description은 열 때와 같은 `closes=<iso>`라
+     * 재진입이 같은 시계를 읽는다. pending으로의 "해소"는 해소가 아니라 거절한다.
+     */
+    resolve: async ({ sha, state, closesAt }) => {
+      if (!VETO_WINDOW_FINAL_STATES.has(state)) return { ok: false, reason: `${JSON.stringify(state)} is not a final ${VETO_WINDOW_CONTEXT} state` };
+      try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state, description: `closes=${closesAt}` }); return { ok: true }; }
+      catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+    },
+  };
+}
+const VETO_WINDOW_FINAL_STATES = new Set(["success", "failure", "error"]);
+
+/**
+ * #149 — 러너 시계(opened_at을 잡는다)와 GitHub 시계(라벨 이벤트 시각을 찍는다)의 어긋남 여유. 창이 열린 직후 붙였다
+ * 뗀 거부권의 이벤트가 since보다 조금 앞서 찍혀도 거부권으로 센다 — 여유가 틀리는 방향은 언제나 사람 쪽이다.
+ */
+export const VETO_CLOCK_SKEW_MS = 5 * 60_000;
+
+/**
+ * #149 (S4a) — 이 머지 잡이 **러너에서 시작한 시각**. 거부권 창이 잡의 timeout-minutes 안에 드는지 셀 때, 프로세스 밖에서
+ * 이미 쓴 시간(체크아웃·setup·test-env)과 프로세스 안의 게이트(전체 스위트)를 모두 넣는다. Actions 안에서는 Actions API의
+ * 이 런 시도의 잡 목록에서 `GITHUB_JOB`과 이름이 같은 잡(하나뿐이면 그것)의 `started_at` — 못 읽으면 `{ok:false}`(판정 불가),
+ * 프로세스 시작 시각으로 대신하지 않는다(그건 setup이 쓴 시간을 빼먹는다). Actions 밖(로컬 실행)은 프로세스 시작 시각이다.
+ */
+export function makeJobStartedAt({ gh, env = {}, processStartMs }) {
+  return async () => {
+    if (env.GITHUB_ACTIONS !== "true") return { ok: true, at: processStartMs };
+    const runId = String(env.GITHUB_RUN_ID || "").trim();
+    const attempt = String(env.GITHUB_RUN_ATTEMPT || "1").trim();
+    if (!runId) return { ok: false, reason: "GITHUB_RUN_ID is not set — this job's start time cannot be looked up" };
+    let jobs;
+    try { jobs = await gh.runJobs(runId, attempt); }
+    catch (e) { return { ok: false, reason: `jobs of run ${runId} attempt ${attempt} unreadable — ${e?.message || e}` }; }
+    if (!Array.isArray(jobs)) return { ok: false, reason: `jobs of run ${runId} attempt ${attempt} unreadable — no list returned` };
+    const named = jobs.filter((j) => j?.name && j.name === env.GITHUB_JOB);
+    const job = named.length === 1 ? named[0] : (named.length === 0 && jobs.length === 1 ? jobs[0] : null);
+    if (!job) return { ok: false, reason: `run ${runId} attempt ${attempt} has no single job named ${JSON.stringify(env.GITHUB_JOB ?? null)}` };
+    const at = Date.parse(job.startedAt ?? "");
+    if (!Number.isFinite(at)) return { ok: false, reason: `job ${JSON.stringify(job.name)} of run ${runId} carries no readable started_at` };
+    return { ok: true, at };
+  };
+}
+
+/**
+ * #149 — 거부권 라벨은 **누군가 필요로 하기 전에** 있어야 한다. 스위치가 켜진 엔진 저장소에서는 모든 스테이지 런의 시작에
+ * 카탈로그 정의 그대로 만든다(`--force`, 멱등). 스위치가 꺼졌거나 설정이 틀렸거나 채택자 저장소면 아무것도 하지 않는다.
+ * 실패는 `{ok:false}`로 돌려줄 뿐 런을 멈추지 않는다 — 창을 여는 자리가 알림 전에 한 번 더, 이번에는 필수로 확인한다.
+ */
+export async function ensureVetoLabelWhenOn({ gh, selfChange, engine }) {
+  if (engine !== true || selfChange?.ok !== true || selfChange.auto_merge_non_judge !== true) return { ok: true, ensured: false };
+  try { await gh.createLabel(catalogLabel(VETO_LABEL)); return { ok: true, ensured: true }; }
+  catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+}
+
+/**
+ * #149 (S4a) — 거부권은 **`since` 이후의 `factory:veto` labeled 이벤트**다. 누가 붙였든(거부권은 사람 쪽으로만
+ * 움직인다), 나중에 떼어졌든(떼는 것으로 사람의 거부권을 지울 수 없다). 창이 열리기 전에 붙여 **아직 붙어 있는**
+ * 라벨도 거부권이다 — 그때는 가장 최근에 붙인 사람의 이름을 댄다. 읽지 못한 것·붙인 사람이나 시각을 모르는
+ * 이벤트는 `{ok:false}` — "거부권 없음"으로 읽지 않는다.
+ */
+export function makeVetoLabelDep({ gh, issue, label = VETO_LABEL }) {
+  return async ({ since } = {}) => {
+    const sinceMs = Date.parse(since ?? "");
+    if (!Number.isFinite(sinceMs)) return { ok: false, reason: `veto window start ${JSON.stringify(since)} is not a timestamp` };
+    let events, labels;
+    try { events = await gh.issueLabelEvents(issue); }
+    catch (e) { return { ok: false, reason: `label events for issue #${issue} unreadable — ${e?.message || e}` }; }
+    try { labels = (await gh.issue(issue))?.labels; }
+    catch (e) { return { ok: false, reason: `labels of issue #${issue} unreadable — ${e?.message || e}` }; }
+    if (!Array.isArray(events) || !Array.isArray(labels)) return { ok: false, reason: `labels of issue #${issue} unreadable — no list returned` };
+    const vetoes = events.filter((e) => e?.event === "labeled" && e?.label === label).map((e) => ({ actor: e.actor ?? null, at: Date.parse(e.createdAt ?? "") }));
+    if (vetoes.some((v) => !Number.isFinite(v.at))) return { ok: false, reason: `a ${label} event on issue #${issue} carries no readable time` };
+    const inWindow = vetoes.filter((v) => v.at >= sinceMs - VETO_CLOCK_SKEW_MS).sort((a, b) => a.at - b.at);
+    const pick = inWindow[0] ?? (labels.includes(label) ? [...vetoes].sort((a, b) => b.at - a.at)[0] : null);
+    if (!pick) {
+      if (labels.includes(label)) return { ok: false, reason: `issue #${issue} carries ${label} but no event says who added it` };
+      return { ok: true, vetoedBy: null };
+    }
+    if (!pick.actor) return { ok: false, reason: `a ${label} event on issue #${issue} names no actor` };
+    return { ok: true, vetoedBy: pick.actor };
+  };
+}
+
+/** #149 (S4a) — 설치된 머지 워크플로. */
+export const MERGE_WORKFLOW = ".github/workflows/factory-merge.yml";
+/**
+ * 워크플로 텍스트의 `timeout-minutes` — 여러 개면 가장 작은 값(보수적). 없거나 숫자가 아니면(식 `${{ }}` 포함)
+ * `{ok:false}`: 창이 잡 안에 드는지 알 수 없다.
+ */
+export function parseJobTimeoutMinutes(text) {
+  if (typeof text !== "string") return { ok: false, reason: `${MERGE_WORKFLOW} unreadable` };
+  const values = [...text.matchAll(/^\s*timeout-minutes:\s*(.*?)\s*(?:#.*)?$/gm)].map((m) => m[1]);
+  if (!values.length) return { ok: false, reason: `${MERGE_WORKFLOW} declares no timeout-minutes` };
+  if (values.some((v) => !/^\d+$/.test(v))) return { ok: false, reason: `${MERGE_WORKFLOW} timeout-minutes is not a literal integer (${values.join(", ")})` };
+  return { ok: true, minutes: Math.min(...values.map(Number)) };
+}
+
 export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, transitionFn = transition }) {
   const transitionIssue = ({ issue: n, to, reason }) => transitionFn({ gh, issue: n, to, reason, stage, rehearsal, admission });
   return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transitionIssue });
@@ -2714,6 +2838,10 @@ async function main() {
   const admission = async (args) => (charter
     ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
     : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
+  // #149 (S4a) — 머지 잡의 timeout-minutes는 체크아웃이 PR head로 옮기기 **전**(base)에 읽는다.
+  const mergeWorkflowAtStart = stage === "merge" ? readFile(join(root, MERGE_WORKFLOW)) : null;
+  // 엔진 저장소인가도 base에서 정한다 — PR head의 트리로 물으면 PR이 `factory/cli/*`를 더하거나 지워 답을 바꾼다.
+  const engineAtStart = stage === "merge" ? mirrorApplicable(root) : false;
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -2723,6 +2851,9 @@ async function main() {
       try { harness = loadHarness(root); }
       catch (e) { console.error("factory: .factory/harness.toml unreadable — " + e.message); return false; }
       if (charter.status !== "ready") { console.error(`factory: CHARTER status is ${charter.status} — dormant`); return false; }
+      // #149 — 스위치가 켜진 엔진 저장소면 거부권 라벨을 지금 만든다(필요해지기 전에). 실패는 말하고 넘어간다.
+      const veto = await ensureVetoLabelWhenOn({ gh, selfChange: charter.self_change, engine: mirrorApplicable(root) });
+      if (!veto.ok) console.error(`factory: could not ensure the ${VETO_LABEL} label — ${veto.reason}`);
       return true;
     },
     backPressure: () => backPressure({ gh, charter, quarantine: loadQuarantine(root), thresholds: harness.gates.thresholds }),
@@ -3165,6 +3296,20 @@ async function main() {
     get humanGate() { return charter?.merge?.human_gate; },
     prHeadShaLive: (pr) => gh.prHeadSha(pr),
     commitStatuses: (sha) => gh.commitStatuses(sha),
+    /**
+     * #149 (S4a) — 비판정 경로 자기 머지(기본 꺼짐). `engine`은 엔진 저장소인가(채택자는 언제나 사람 머지 — 시작 시 base에서 판정),
+     * `selfChange`는 **프로세스 시작 시(base 체크아웃) 읽은** CHARTER의 검증 결과 — PR이 자기 CHARTER로 스위치를
+     * 켤 수 없다(CHARTER는 판정자 경로이기도 하다). CHARTER가 없으면 undefined = 꺼짐.
+     * `mergeJobTimeoutMinutes`도 시작 시 읽은 설치본에서 온다(`.github/**`는 판정자라 창까지 오는 PR이 바꿀 수 없다).
+     */
+    get engine() { return engineAtStart; },
+    get selfChange() { return charter?.self_change; },
+    mergeJobTimeoutMinutes: async () => parseJobTimeoutMinutes(mergeWorkflowAtStart),
+    vetoWindow: makeVetoWindowDep({ gh }),
+    vetoLabel: makeVetoLabelDep({ gh, issue }),
+    // `process.env`는 이 배선 한 줄에만 산다. 프로세스 시작 시각은 Actions 밖(로컬)에서만 쓰인다.
+    jobStartedAt: makeJobStartedAt({ gh, env: process.env, processStartMs: Math.round(performance.timeOrigin) }),
+    now: () => Date.now(),
     /** 팩토리 자신의 계정 이름(값이 아니다) — 판정과 해석은 `lib/gh.js`의 `resolveFactoryLogins` 하나다(KTB-46). */
     // `process.env`는 **워크플로 진입점인 이 배선 한 줄**에만 산다(1.4.0 핫픽스).
     factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),

@@ -565,6 +565,27 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       // 해시는 이 필드에 실려 온다(`factory/rehearsal` context).
       return j.map((s) => ({ context: s.context, state: s.state, description: s.description ?? null, creatorLogin: s.creator?.login ?? null, createdAt: s.created_at }));
     },
+    /**
+     * #149 (S4a) — 이슈의 라벨 이벤트(`labeled`/`unlabeled`)를 **누가·언제**와 함께. 거부권(`factory:veto`)은
+     * 지금의 라벨 집합이 아니라 이 이벤트로 읽는다: 집합만 보면 라벨을 떼는 것으로 사람의 거부권이 지워진다.
+     * 다른 이벤트(코멘트·할당…)는 버린다. 없는 필드는 지어내지 않고 null이다. 실패는 삼키지 않는다 — 호출자가
+     * "읽지 못했다"를 판정 불가로 받는다.
+     */
+    async issueLabelEvents(n) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/events?per_page=100`, "--paginate", "--slurp"])).flat();
+      return j
+        .filter((e) => e?.event === "labeled" || e?.event === "unlabeled")
+        .map((e) => ({ event: e.event, label: e.label?.name ?? null, actor: e.actor?.login ?? null, createdAt: e.created_at ?? null }));
+    },
+    /**
+     * #149 (S4a) — 한 런 시도(attempt)의 잡 목록. 머지 스테이지가 **이 잡이 러너에서 시작한 시각**을 읽어, 거부권 창이
+     * 잡의 timeout-minutes 안에 드는지 셀 때 이미 쓴 시간(체크아웃·setup·게이트)을 넣는다. 실패는 삼키지 않는다.
+     */
+    async runJobs(runId, attempt) {
+      const pages = JSON.parse(await gh(["api", `repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`, "--paginate", "--slurp"]));
+      return pages.flatMap((p) => (Array.isArray(p?.jobs) ? p.jobs : []))
+        .map((j) => ({ name: j?.name ?? null, status: j?.status ?? null, startedAt: j?.started_at ?? null }));
+    },
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
     },

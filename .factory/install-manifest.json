@@ -464,6 +464,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/non-judge-paths.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/parsers/istanbul-json.js",
       "owner": "factory"
     },

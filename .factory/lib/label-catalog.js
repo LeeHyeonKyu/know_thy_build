@@ -5,7 +5,8 @@
  * 참고(§3.1 표): 스펙 표는 backlog를 포함해 13행이지만, `factory:` 접두가 붙는 "상태" 라벨은
  * queue/ready/needs-info/wont-do/planned/in-progress/awaiting-review/rework/approved/merged/blocked/needs-human
  * 12개뿐이다(backlog는 "factory 라벨이 아니"라고 스펙이 명시). 이 파일의 소스오브트루스는 아래 12개 색상
- * 쌍(§3.1과 1:1 대응)이며, 총 라벨 수는 backlog(1) + 상태(12) + 보조(7) = 20개다.
+ * 쌍(§3.1과 1:1 대응)이며, 총 라벨 수는 backlog(1) + 상태(12) + 보조(8) = 21개다(tier 3 · retro-proposal · flaky · harness · improvement · health).
+ * `factory:veto`(#149)는 이 배열 밖의 `VETO_LABEL_SPEC`이다 — 아래 설명.
  *
  * **상태 라벨과 분류 라벨은 다른 것이다.** 전이 그래프(`labels.js`의 `STATES`/`TRANSITIONS`)에 있는
  * 것만 상태다. `factory:harness`·`factory:flaky`·`factory-improvement`는 그래프 밖의 분류로, 상태
@@ -37,6 +38,33 @@ export const IMPROVEMENT_LABEL = "factory-improvement";
  * 매주 상류에 새 이슈를 연다.
  */
 export const HEALTH_LABEL = "factory:health";
+
+/**
+ * #149 (S4a) — **소유자의 거부권.** 엔진 저장소가 비판정 경로 PR을 스스로 머지하기 전 여는 창 동안, 추적 이슈에
+ * 이 라벨이 붙으면(이벤트로 읽는다 — 떼어도 취소되지 않는다) 머지는 사람에게 넘어간다(`lib/merge-stage.js`).
+ * 상태 라벨이 아니다: tier 라벨처럼 상태와 공존하고, 전이(`setFactoryLabel`은 `STATES`만 뗀다)가 떼지 않는다.
+ */
+export const VETO_LABEL = "factory:veto";
+/**
+ * 그 라벨의 정의(색·설명). **`LABELS` 배열 밖에 둔다** — `factory/test/bootstrap.test.js`가 bootstrap이 만드는 라벨
+ * 수를 21로 못 박고 있고, #149 이슈는 그 테스트를 `tests_changed_allowed:`에 올리지 않았다(기존 테스트는 고치지
+ * 않는다). 대신 스위치가 켜진 엔진 저장소에서는 **모든 스테이지 런의 시작**(CHARTER가 ready로 읽힌 직후,
+ * `run-stage.js` `ensureVetoLabelWhenOn`)에 이 정의로 라벨을 만든다(`gh label create --force`, 멱등) — PR이 머지
+ * 창에 닿기 전, triage·plan·implement·review 런이 이미 만들어 둔다. 창을 열 때도 알림보다 먼저 한 번 더 확인한다.
+ * 스위치가 꺼진 저장소에는 생기지 않는다.
+ * bootstrap에 합치는 것은 그 테스트가 허가된 후속 이슈의 몫이다.
+ */
+export const VETO_LABEL_SPEC = Object.freeze({ name: VETO_LABEL, color: "000000", description: "소유자의 거부권 — 엔진의 자동 머지를 막고 사람 머지로 돌린다" });
+
+/**
+ * 카탈로그 조회 — `LABELS`(bootstrap이 만드는 21개)와 `VETO_LABEL_SPEC`을 한 곳에서 이름으로 찾는다. 없으면 null.
+ * 거부권 라벨을 쓰는 쪽(`run-stage.js`의 `ensureVetoLabelWhenOn`·`makeVetoWindowDep`)은 이 조회로 정의를 얻는다.
+ */
+export function catalogLabel(name) {
+  if (name === VETO_LABEL) return { ...VETO_LABEL_SPEC };
+  const l = LABELS.find((x) => x.name === name);
+  return l ? { ...l } : null;
+}
 
 export const LABELS = [
   { name: "backlog", color: "c5def5", description: "스펙은 있으나 착수하지 않음" },
