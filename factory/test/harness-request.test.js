@@ -316,6 +316,37 @@ test("test_136_not_queued_next_step_matches_refusal_kind", async () => {
   expect(cc[0].body).toContain("/know-thy-build:next");
 });
 
+test("test_136_rehearsal_refusal_next_step_is_rehearse", async () => {
+  // 리허설 거부의 다음 걸음은 코멘트가 **스스로** 써야 한다 — 실제 리허설 사유(rehearsal.js가 돌려주는 세 모양)는
+  // 이미 "run `factory rehearse`"를 품고 있으니, 사유를 걷어낸 나머지에서 다음 걸음을 찾는다. 그래야 리허설 분기가
+  // 사라져 라벨 분기("리허설이나 상한의 문제가 아닙니다")로 떨어지는 회귀가 여기서 소리를 낸다(#136 verify f1).
+  const reasons = [
+    `${REHEARSAL_STALE} — no GREEN rehearsal is recorded (FACTORY_REHEARSED / factory/rehearsal)`,
+    `${REHEARSAL_STALE} — recorded variable 0123456789ab, current fedcba987654`,
+    `${REHEARSAL_STALE} (the current harness+CHARTER fingerprint could not be computed — .factory/harness.toml unreadable?)`,
+  ];
+  for (const reason of reasons) {
+    const gh = doorGh();
+    const r = await ensureHarnessIssue({ gh, issue: 2, entries: [PG], transitionIssue: door(gh, { rehearsal: async () => ({ ok: false, reason }) }) });
+    expect(r).toMatchObject({ issue: 31, created: true, queued: false });
+    expect(gh.store.get(31).labels).toEqual(["backlog", HARNESS_LABEL]);
+    const c = notQueued(gh, 31);
+    expect(c).toHaveLength(1);
+    expect(c[0].body).toContain(reason);
+    // 사유를 걷어낸 코멘트 본문 = 코멘트가 직접 쓴 안내
+    const advice = c[0].body.split(reason).join("");
+    expect(advice).toContain("factory rehearse");
+    expect(advice).toContain("/know-thy-build:next");
+    // `factory rehearse`가 `:next`보다 먼저 온다 — 순서가 곧 다음 걸음이다
+    expect(advice.indexOf("factory rehearse")).toBeLessThan(advice.lastIndexOf("/know-thy-build:next"));
+    // 다른 종류의 안내로 새지 않는다: 라벨 확인·배선 결함·상한 재거부 안내는 없다
+    expect(advice).not.toMatch(/상태 라벨/);
+    expect(advice).not.toMatch(/리허설이나 상한의 문제가 아닙니다/);
+    expect(advice).not.toMatch(/배선/);
+    expect(advice).not.toMatch(/alone will be refused again/);
+  }
+});
+
 test("test_136_reuse_does_not_retransition", async () => {
   // 같은 for=<n> 마커를 단 열린 하네스 이슈가 있으면: 새 이슈 없음, 문 호출 없음, 표 덧붙이기는 예전 그대로
   const gh = doorGh();
