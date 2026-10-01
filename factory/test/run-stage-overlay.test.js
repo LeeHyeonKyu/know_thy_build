@@ -183,6 +183,37 @@ test("KTB-42: a non-writable evidence dir is factory:blocked/undecidable — nev
   expect(lines.some((l) => /qa evidence probe: FAIL/.test(l))).toBe(true);
 });
 
+// ── 1.4.44 (KTB #149) — 미러 대조는 리뷰어를 띄우기 **전에** 한 번 더, 쓰지 않고 ──────────────────
+// #149의 리뷰 런 둘은 리뷰어 다섯을 다 돌린 뒤에야 세션 뒤 verify에서 "설치본 ≠ 소스"로 멈췄다(~$17). 같은 답을
+// `mirrorMatchesHead`가 쓰지 않고 먼저 낼 수 있다 — overlay 뒤, claude -p 앞.
+test("1.4.44: review checks the PR head's mirror against its sources before claude -p — a mismatch is blocked/undecidable with no reviewer spent", async () => {
+  const calls = [];
+  const transition = vi.fn(async () => ({ ok: true }));
+  const lines = [];
+  const d = overlayDeps({
+    overlayFactoryConfig: async () => { calls.push("overlay"); return { ok: true, sha: "b".repeat(40), paths: [] }; },
+    mirrorMatchesHead: async () => { calls.push("mirror"); return { ok: false, applicable: true, mismatched: [".factory/lib/non-judge-paths.js"] }; },
+    claudeP: async () => { calls.push("claude"); return { is_error: false, result: "{}" }; },
+    transition, runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(2);
+  expect(calls).toEqual(["overlay", "mirror"]);
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable", reason: expect.stringContaining(".factory/lib/non-judge-paths.js") }));
+  expect(lines.some((l) => /^mirror: FAIL \(before the session\)/.test(l))).toBe(true);
+});
+
+test("1.4.44: a matching mirror (or an adopter repo where it does not apply) lets the review proceed to claude -p", async () => {
+  for (const mm of [{ ok: true, applicable: true, mismatched: [] }, { ok: true, applicable: false, mismatched: [] }]) {
+    const calls = [];
+    const d = overlayDeps({
+      mirrorMatchesHead: async () => { calls.push("mirror"); return mm; },
+      claudeP: async () => { calls.push("claude"); return { is_error: false, result: "{}" }; },
+    });
+    expect(await runStage({ stage: "review", issue: 3, deps: d })).toBe(0);
+    expect(calls).toEqual(["mirror", "claude"]);
+  }
+});
+
 // 리뷰 라운드 1 MF-2 — 증거 **경로**의 고장은 `needs-human`이 아니라 blocked/undecidable이다.
 // 그래야 ADR이 약속한 "한 라운드 더 돌면 매니페스트가 생긴다"가 실제로 성립한다.
 test("KTB-42/MF-2: an unusable qa manifest is blocked/undecidable, and the reason names the manifest", async () => {
