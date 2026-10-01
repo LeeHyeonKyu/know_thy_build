@@ -79,11 +79,28 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
     const open = openSelfGenerated.filter((o) => o?.number !== issue?.number);
     if (open.length >= caps.open_max) reasons.push(`self-generated open ${open.length} ≥ ${caps.open_max} (self_generated.open_max)`);
     // 세대: 기원을 따라 올라가며 자기생성인 조상을 센다. 기원을 못 찾으면 거기서 멈춘다(모르는 세대를 발명하지 않는다).
-    let depth = 1, cur = originOf(issue), hops = 0;
+    // #136 (S2b) — **하네스 요청은 세대를 더하지 않는다**(설계 §8.2 표: "개선→하네스→flaky 사슬을 한 세대로 센다"). 하네스 요청은
+    // 새 일이 아니라 그 피처를 끝내는 데 필요한 것이다; 이것을 세면 depth_max=1이 자기생성 피처(flaky·개선)의 하네스 요청을 영구히
+    // 거부한다. 면제는 두 칸뿐이다: (a) 하네스 마커를 단 노드 자신, (b) **하네스 이슈를 구현하다 수확한 flaky**(기원이 flaky
+    // 마커이고 그 부모가 하네스 요청) — 표가 이름으로 부른 "개선→하네스→flaky" 사슬이 한 세대가 되려면 둘 다 접혀야 한다.
+    // 개선의 개선, 개선에서 바로 나온 flaky, 접힌 사슬 위에서 공장이 다시 만든 개선은 여전히 한 세대씩 더한다. 부모를 읽지
+    // 못하면 접을 근거가 없으니 한 세대로 센다(발명하지 않는다).
+    // rework cf1 — **접기는 사슬 하나에 한 번이다.** 접힌 flaky(하네스 아래의 flaky)를 위한 하네스는 접히지 않는다: 그것은 표가 부른
+    // 사슬의 연장이 아니라 그 위에 새로 선 사슬이고, 한 세대를 연다. 그렇지 않으면 flaky→하네스→flaky→하네스→… 가 끝없이 1세대로
+    // 남아 depth_max가 영영 걸리지 않는다. 그 새 하네스 아래의 flaky는 다시 그 하네스의 세대에 접힌다(사슬마다 한 세대).
+    const isHarness = (it) => HARNESS_RE.test(String(it?.body ?? ""));
+    const flakyOnly = (it) => { const b = String(it?.body ?? ""); return FLAKY_RE.test(b) && !IMPROVEMENT_RE.test(b) && !HARNESS_RE.test(b); };
+    const foldedFlaky = (it) => { if (!flakyOnly(it)) return false; const o = originOf(it); return !!o && isHarness(byNumber(o.number)); };
+    const gen = (it) => {
+      if (isHarness(it)) { const o = originOf(it); return o && foldedFlaky(byNumber(o.number)) ? 1 : 0; }
+      if (foldedFlaky(it)) return 0;
+      return 1;
+    };
+    let depth = gen(issue), cur = originOf(issue), hops = 0;
     while (cur && hops++ < 10) {
       const parent = byNumber(cur.number);
       if (!parent || !isSelfGenerated(parent, factoryLogins)) break;
-      depth++;
+      depth += gen(parent);
       cur = originOf(parent);
     }
     if (depth > caps.depth_max) reasons.push(`self-generated generation ${depth} > ${caps.depth_max} (self_generated.depth_max) — an issue the factory made from an issue the factory made`);

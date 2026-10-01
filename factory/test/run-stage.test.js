@@ -3823,3 +3823,113 @@ test("S3: an adopter repo (mirror not applicable) leaves no mirror line and no h
   expect(lines.some((l) => l.startsWith("mirror:"))).toBe(false);
   expect(written.head_sha).toBe("b".repeat(40));
 });
+
+// ── #136 (S2b) — 주차된 피처는 자기 하네스 이슈가 **backlog에 서 있다**는 것을 말한다 ────────────────────
+// 하네스 이슈가 문(리허설 + 큐 진입 심사)을 지나게 되면서 "하네스 이슈 #N을 기다린다"는 주차 사유가 거짓이 될 수 있다: #N이
+// 거부돼 backlog에 서 있으면 아무도 그것을 집지 않는다. 피처 이슈나 런 기록만 보는 사람도 그 사실과 이유, 그리고 사람의 `:next`가
+// 필요하다는 것을 볼 수 있어야 한다. 사유는 여전히 `waiting for harness issue #N`을 담는다(sweeper가 그 문구로 주차를 푼다).
+import { makeHarnessIssueDep } from "../bin/run-stage.js";
+import { makeQueueAdmission } from "../lib/admission.js";
+import { PARKED_ON_HARNESS } from "../lib/sweeper.js";
+import { STATES } from "../lib/labels.js";
+
+test("test_136_parked_feature_names_backlogged_harness", async () => {
+  // (a) runStage: ensureHarnessIssue가 "만들었지만 큐에 못 넣었다"를 돌려주면 주차 사유와 런 기록이 그것을 말한다
+  const refusal = "queue admission refused — queue 8 ≥ 8 (back_pressure.queue_max)";
+  const lines = [];
+  const d = harnessImplDeps({
+    ensureHarnessIssue: vi.fn(async () => ({ issue: 31, created: true, title: "harness: add dependency pg@^8 — for #2", queued: false, queue_reason: refusal })),
+    runRecord: (l) => lines.push(...l),
+  });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(0);
+  expect(d.ensureHarnessIssue).toHaveBeenCalledWith({ entries: [HARNESS_PG], pr: 17 });     // 호출 모양은 그대로다
+  const parked = d.transition.mock.calls.at(-1)[0];
+  expect(parked.to).toBe("factory:needs-info");
+  expect(parked.reason).toContain("waiting for harness issue #31");
+  expect(PARKED_ON_HARNESS.exec(parked.reason)?.[1]).toBe("31");                           // sweeper가 여전히 푼다
+  expect(parked.reason).toContain("backlog");
+  expect(parked.reason).toContain(refusal);
+  expect(parked.reason).toMatch(/:next on #31/);
+  expect(lines).toContain("harness: opened factory:harness issue #31 — package.json");
+  expect(lines.some((l) => l.startsWith("harness: #31 was opened but NOT queued") && l.includes(refusal))).toBe(true);
+
+  // (b) 배선: run-stage가 만드는 ensureHarnessIssue dep은 리허설 **과** 심사를 실은 문으로 **새 하네스 이슈**를 옮긴다.
+  //     진짜 transition() + 진짜 makeQueueAdmission, 가짜 gh — 큐가 가득 차 심사가 거부하면 하네스 이슈는 backlog에 남는다.
+  const store = new Map();
+  let seq = 30;
+  const put = (i) => store.set(i.number, { state: "open", title: `#${i.number}`, author: "LeeHyeonKyu", comments: [], ...i });
+  put({ number: 2, labels: ["factory:in-progress"], body: "## done_when\n- [ ] x" });
+  for (let k = 0; k < 3; k++) put({ number: 100 + k, labels: ["factory:queue"], body: "## done_when\n- [ ] q" });
+  const admitted = [];
+  const gh = {
+    async issueList({ labels = [] } = {}) { return [...store.values()].filter((i) => labels.every((l) => i.labels.includes(l))); },
+    async createIssue({ title, body, labels }) { const number = (seq += 1); put({ number, title, body, labels: [...labels], author: "factory-bot" }); return number; },
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATES.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.labels.includes(label)).map((i) => ({ number: i.number })); },
+  };
+  const realAdmission = makeQueueAdmission({ gh, charter: { never_automate: [], back_pressure: { queue_max: 3 } } });
+  const admission = async (a) => { admitted.push(a.issue); return realAdmission(a); };
+  const dep = makeHarnessIssueDep({ gh, issue: 2, stage: "implement", rehearsal: async () => ({ ok: true }), admission });
+  const lines2 = [];
+  const d2 = harnessImplDeps({ ensureHarnessIssue: dep, runRecord: (l) => lines2.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d2 })).toBe(0);
+  expect(admitted).toEqual([31]);                                         // 문이 심사한 것은 새 하네스 이슈다(피처가 아니다)
+  expect(store.get(31).labels).toEqual(["backlog", "factory:harness"]);   // 거부된 하네스 이슈는 backlog에 남는다
+  expect(store.get(2).labels).toEqual(["factory:in-progress"]);           // 피처 이슈의 라벨은 이 dep이 건드리지 않는다
+  const parked2 = d2.transition.mock.calls.at(-1)[0];
+  expect(parked2.reason).toContain("waiting for harness issue #31");
+  expect(parked2.reason).toContain("queue 3 ≥ 3 (back_pressure.queue_max)");
+
+  // 리허설이 배선되지 않은 문은 fail closed다 — dep이 rehearsal을 실제로 넘기는지 본다(빠지면 REHEARSAL_UNWIRED로 거부)
+  store.delete(31); seq = 30; store.get(100).labels = ["factory:ready"];  // 큐에 여유를 만든다
+  const ok = await makeHarnessIssueDep({ gh, issue: 2, stage: "implement", rehearsal: async () => ({ ok: true }), admission: realAdmission })({ entries: [HARNESS_PG], pr: 17 });
+  expect(ok).toMatchObject({ issue: 31, created: true, queued: true });
+  expect(store.get(31).labels).toEqual(["factory:harness", "factory:queue"]);
+
+  // 프로덕션 배선이 이 dep을 **리허설과 심사를 둘 다** 실어 쓴다
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/ensureHarnessIssue:\s*makeHarnessIssueDep\(\{\s*gh,\s*issue,\s*stage,\s*rehearsal,\s*admission\s*\}\)/);
+});
+
+// skeptic #136 f3 — **재사용** 경로: 첫 라운드에 문이 거부해 backlog에 남은 하네스 이슈를 다음 라운드가 재사용할 때도, 피처의
+// 주차 사유와 런 기록이 "#N은 backlog에 서 있다, 사람의 :next가 필요하다"를 말한다. 진짜 makeHarnessIssueDep + 진짜 문(transition +
+// makeQueueAdmission), 가짜 gh — 판정은 가짜 gh의 라벨과 runStage가 남긴 사유·기록으로 한다.
+test("test_136_parked_feature_reuse_names_backlogged_harness", async () => {
+  const store = new Map();
+  let seq = 30;
+  const put = (i) => store.set(i.number, { state: "open", title: `#${i.number}`, author: "LeeHyeonKyu", comments: [], ...i });
+  put({ number: 2, labels: ["factory:in-progress"], body: "## done_when\n- [ ] x" });
+  for (let k = 0; k < 3; k++) put({ number: 100 + k, labels: ["factory:queue"], body: "## done_when\n- [ ] q" });
+  const gh = {
+    async issueList({ labels = [] } = {}) { return [...store.values()].filter((i) => i.state === "open" && labels.every((l) => i.labels.includes(l))); },
+    async createIssue({ title, body, labels }) { const number = (seq += 1); put({ number, title, body, labels: [...labels], author: "factory-bot" }); return number; },
+    async editIssueBody(n, body) { store.get(Number(n)).body = body; },
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATES.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.state === "open" && i.labels.includes(label)).map((i) => ({ number: i.number })); },
+  };
+  const admission = makeQueueAdmission({ gh, charter: { never_automate: [], back_pressure: { queue_max: 3 } } });
+  const dep = makeHarnessIssueDep({ gh, issue: 2, stage: "implement", rehearsal: async () => ({ ok: true }), admission });
+  // 라운드 1: 큐가 가득 차 거부 → #31 backlog
+  expect(await runStage({ stage: "implement", issue: 2, deps: harnessImplDeps({ ensureHarnessIssue: dep }) })).toBe(0);
+  expect(store.get(31).labels).toEqual(["backlog", "factory:harness"]);
+  // 라운드 2: 같은 피처가 다시 하네스를 요청 → #31을 재사용한다(새 이슈 없음). #31은 여전히 backlog다.
+  const lines = [];
+  const d = harnessImplDeps({ ensureHarnessIssue: dep, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 2, deps: d })).toBe(0);
+  expect(seq).toBe(31);                                                     // 두 번째 이슈는 열리지 않았다
+  expect(store.get(31).labels).toEqual(["backlog", "factory:harness"]);
+  const parked = d.transition.mock.calls.at(-1)[0];
+  expect(parked.to).toBe("factory:needs-info");
+  expect(PARKED_ON_HARNESS.exec(parked.reason)?.[1]).toBe("31");            // sweeper가 여전히 푼다
+  expect(parked.reason).toContain("backlog");
+  expect(parked.reason).toMatch(/:next on #31/);
+  expect(lines).toContain("harness: reusing factory:harness issue #31 — package.json");
+  expect(lines.some((l) => /^harness: #31 .*NOT queued/.test(l) && /backlog/.test(l))).toBe(true);
+  expect(lines.some((l) => l.startsWith("harness: #31 was opened"))).toBe(false); // 재사용이다 — 열었다고 말하지 않는다
+});
