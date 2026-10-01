@@ -2070,7 +2070,7 @@ export const stageBranch = (issue) => `claude/fq-${issue}`;
  * **로컬에만 있는 브랜치는 건드리지 않는다**(fail closed): 원격에 없는데 로컬에 있다는 것은 지난
  * 라운드의 push가 실패했거나 사람이 뭔가 하고 있다는 뜻이고, `-B`는 그것을 말없이 지운다.
  */
-export function makeCheckoutBranch({ run, root, issue, env = process.env, defaultBranch = () => "main", regenerate = regenerateMirror }) {
+export function makeCheckoutBranch({ run, root, issue, env = process.env, defaultBranch = () => "main", regenerate = regenerateMirror, scanMarkers = null }) {
   return async () => {
     const branch = stageBranch(issue);
     const s = await resolveStageSha({ run, root, env, defaultBranch: typeof defaultBranch === "function" ? defaultBranch() : defaultBranch });
@@ -2085,6 +2085,14 @@ export function makeCheckoutBranch({ run, root, issue, env = process.env, defaul
       if (f.code !== 0) return { ok: false, reason: `git fetch failed for ${branch}: ${f.stderr?.trim() || `exit ${f.code}`}` };
       const co = await run("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: root });
       if (co.code !== 0) return { ok: false, reason: `git checkout -B ${branch} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
+      // #143 rework cf1 — 지난 라운드가 마커째 커밋해 push한 병합은 이 라운드에서 다시 병합되지 않는다(base가 이미 조상).
+      // 세션 뒤 검사는 그 라운드에서만 서므로, 브랜치가 들고 온 병합 커밋의 마커를 **세션 전에** 여기서 묻는다.
+      // (`scanMarkers`는 implement의 배선 `implementCheckoutBranch`가 건다 — 순수 체크아웃 계약의 git 호출 순서는 그대로다.)
+      if (scanMarkers) {
+        const mk = await scanMarkers({ run, cwd: root, base: s.sha });
+        if (!mk.ok) return { ok: false, undecidable: true, reason: `undecidable — cannot tell whether ${branch}'s merge commits left conflict markers: ${mk.reason}` };
+        if (mk.paths.length) return { ok: false, undecidable: true, reason: committedMarkersReason({ branch, paths: mk.paths }) };
+      }
       const m = await mergeBaseIntoBranch({ run, root, branch, sha: s.sha, source: s.source, env, regenerate });
       if (!m.ok) return m;
       return { ok: true, branch, base: `origin/${branch}`, existed: true, merged: m.merged, source: s.source, ...(m.mirrorResolved ? { mirrorResolved: m.mirrorResolved } : {}), ...(m.conflicts?.length ? { conflicts: m.conflicts, partial: m.partial } : {}) };
@@ -2291,6 +2299,61 @@ export async function assertBaseMergeComplete({ run, cwd, sha, paths = [] }) {
   if (marked.length) return { ok: false, reason: `conflict markers committed in ${marked.join(", ")}` };
   return { ok: true };
 }
+
+/**
+ * #143 rework cf1 — **브랜치의 병합 커밋이 들여온 충돌 마커**. 세션 뒤 검사(`assertBaseMergeComplete`)는 병합을 넘긴 그 라운드에만
+ * 선다 — 마커째 커밋된 병합이 push되면, 다음 라운드(sweeper의 재시도)는 base가 이미 조상이라 병합하지 않고 그 검사도 없이 게이트로
+ * 간다. 그래서 체크아웃이 브랜치에만 있는 병합 커밋(`HEAD ^base`)마다, 병합이 손으로 풀어야 했던 경로(`diff-tree --cc`: 모든 부모와
+ * 다른 경로)의 **HEAD 바이트**에서 마커 줄을 찾는다 — 어느 부모에도 없던 줄만 센다(픽스처가 담은 마커 모양의 텍스트는 병합이 만든 것이
+ * 아니다). 저장소 전체가 아니라 병합이 풀어야 했던 경로만 본다. 0 밖의 종료 코드는 답이 아니다 — `ok:false`(fail closed).
+ */
+export async function committedMergeMarkers({ run, cwd, base }) {
+  const why = (r) => r.stderr?.trim() || `exit ${r.code}`;
+  const markerLines = (text) => new Set(String(text).split("\n").map((l) => l.replace(/\r$/, "")).filter((l) => CONFLICT_MARKER_RE.test(l)));
+  const blob = async (rev, p) => {
+    const ls = await run("git", ["ls-tree", "--name-only", rev, "--", p], { cwd });
+    if (ls.code !== 0) return { ok: false, reason: `git ls-tree ${rev} ${p}: ${why(ls)}` };
+    if (!ls.stdout.trim()) return { ok: true, text: "" };
+    const show = await run("git", ["show", `${rev}:${p}`], { cwd });
+    if (show.code !== 0) return { ok: false, reason: `git show ${rev}:${p}: ${why(show)}` };
+    return { ok: true, text: show.stdout };
+  };
+  const ml = await run("git", ["rev-list", "--merges", "HEAD", `^${base}`], { cwd });
+  if (ml.code !== 0) return { ok: false, paths: [], reason: `git rev-list --merges HEAD ^${String(base).slice(0, 7)}: ${why(ml)}` };
+  const found = new Set();
+  for (const m of ml.stdout.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const dt = await run("git", ["diff-tree", "--cc", "--no-commit-id", "--name-only", "-r", m], { cwd });
+    if (dt.code !== 0) return { ok: false, paths: [], reason: `git diff-tree --cc ${m.slice(0, 7)}: ${why(dt)}` };
+    const pr = await run("git", ["rev-list", "--parents", "-n", "1", m], { cwd });
+    if (pr.code !== 0) return { ok: false, paths: [], reason: `git rev-list --parents ${m.slice(0, 7)}: ${why(pr)}` };
+    const parents = pr.stdout.trim().split(/\s+/).slice(1);
+    for (const p of dt.stdout.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      if (found.has(p)) continue;
+      const head = await blob("HEAD", p);
+      if (!head.ok) return { ok: false, paths: [], reason: head.reason };
+      const mine = markerLines(head.text);
+      if (!mine.size) continue;
+      const inherited = new Set();
+      for (const par of parents) {
+        const b = await blob(par, p);
+        if (!b.ok) return { ok: false, paths: [], reason: b.reason };
+        for (const l of markerLines(b.text)) inherited.add(l);
+      }
+      if ([...mine].some((l) => !inherited.has(l))) found.add(p);
+    }
+  }
+  return { ok: true, paths: [...found].sort() };
+}
+
+/**
+ * #143 rework cf1 — main()의 implement 체크아웃 배선: 브랜치가 들고 온 병합 커밋의 마커를 세션 전에 묻는 체크아웃.
+ * 테스트가 main()과 같은 배선을 그대로 부를 수 있도록 밖으로 꺼냈다(배선이 스캔을 떨어뜨리면 테스트가 실패한다).
+ */
+export const implementCheckoutBranch = (opts) => makeCheckoutBranch({ ...opts, scanMarkers: committedMergeMarkers });
+
+/** #143 rework cf1 — push된 마커 병합 위의 라운드가 세션 전에 멈출 때의 사유. 사람이 마저 할 일을 적는다(재시도도 같은 자리에서 다시 멈춘다). */
+export const committedMarkersReason = ({ branch, paths }) =>
+  `undecidable — builder did not complete the base merge (conflict markers committed in ${paths.join(", ")} by a merge commit already on ${branch}) — finish merging by hand: resolve ${paths.join(", ")} on ${branch} and push; every implement round stops here before a session until then`;
 
 /** #143 — 세션 뒤 병합이 끝나지 않은 라운드의 blocked 사유. 사람이 마저 할 일(어느 base를, 어느 브랜치로, 어느 경로)을 적는다. */
 export const baseMergeIncompleteReason = ({ pending, branch, detail }) =>
@@ -2703,7 +2766,7 @@ async function main() {
      * charterReady에서 이미 로드됐다 — overlay와 같은 기본 브랜치를 늦게 읽는다.
      */
     checkoutBranch: async () => {
-      const cb = await makeCheckoutBranch({ run, root, issue, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
+      const cb = await implementCheckoutBranch({ run, root, issue, env: process.env, defaultBranch: () => harness?.project?.default_branch ?? "main" })();
       return cb;
     },
     /**

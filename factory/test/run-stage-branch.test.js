@@ -890,3 +890,104 @@ test("test_143_branch_edited_mirror_is_still_blocked_during_a_pending_merge", as
     expect(transition.mock.calls.at(-1)[0].reason).toContain(".factory/lib/x.js");
   } finally { bare.done(); }
 });
+
+/**
+ * #143 rework cf1 — 마커째 커밋된 병합이 **push된 뒤의 라운드**. 첫 라운드는 세션 뒤 검사가 막지만, 마커 커밋은 이미 origin에 있고
+ * sweeper의 공짜 재시도(cause undecidable → maxAttempts 1)가 다음 implement를 그 트리 위에서 돌린다. 그 라운드의 체크아웃은
+ * base가 이미 조상이라 병합을 하지 않고(merged:null, conflicts 없음) 세션 뒤 검사도 서지 않는다 — 그래서 체크아웃 자체가 브랜치의
+ * 병합 커밋이 들여온 마커를 묻고, 있으면 세션 **전에** 판정 불가로 멈춘다.
+ */
+/** main()과 같은 implement 체크아웃 배선(`implementCheckoutBranch`)을 픽스처 위에서 — 이 체크아웃이 마커 스캔을 건다. */
+const implCheckout = (fx) => async () => {
+  const { implementCheckoutBranch } = await import("../bin/run-stage.js");
+  return implementCheckoutBranch({ run: realRun, root: fx.root, issue: 143, env: { GITHUB_SHA: fx.baseSha }, defaultBranch: () => "main", regenerate: vi.fn(async () => ({ ok: true, applicable: true, changed: [] })) })();
+};
+const markerBuilder = (root, { push = true } = {}) => vi.fn(async () => {
+  await git143(root, "add", "-A");
+  await git143(root, "commit", "-q", "--no-edit");
+  if (push) await git143(root, "push", "-q", "origin", BR143);
+  return { is_error: false, result: "{}" };
+});
+
+test("test_143_pushed_marker_merge_blocks_the_retry_round_before_a_session", async () => {
+  const fx = await overlapRepo();
+  try {
+    // 라운드 1: 빌더가 마커째 커밋하고 push한다 — 세션 뒤 검사가 막는다(이미 핀된 동작).
+    const lines1 = []; const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+    expect(await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx, claudeP: markerBuilder(fx.root), transition: t1, lines: lines1, over: { checkoutBranch: implCheckout(fx) } }) })).toBe(2);
+    expect(await git143(fx.root, "show", `origin/${BR143}:factory/lib/x.js`)).toMatch(/^<<<<<<< /m);
+    // 라운드 2(sweeper의 재시도): 같은 픽스처에서 다시 체크아웃한다. base는 이미 조상이다.
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+    const gates = vi.fn(async () => null); const writeHandoff = vi.fn(async () => {}); const mirror = vi.fn(async () => ({ ok: true, changed: [] }));
+    const code = await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx, claudeP, transition, lines, over: { gates, writeHandoff, mirror, checkoutBranch: implCheckout(fx) } }) });
+    expect(code).toBe(2);
+    expect(claudeP).not.toHaveBeenCalled();
+    expect(gates).not.toHaveBeenCalled();
+    expect(writeHandoff).not.toHaveBeenCalled();
+    expect(mirror).not.toHaveBeenCalled();
+    const t = transition.mock.calls.filter(([a]) => a.to === "factory:blocked").at(-1)?.[0];
+    expect(t?.cause).toBe("undecidable");
+    expect(t.reason).toMatch(/conflict marker/);
+    expect(t.reason).toContain("factory/lib/x.js");
+    expect(t.reason).toMatch(/by hand/);
+  } finally { fx.done(); }
+  // 빌더가 제대로 푼 병합을 push한 브랜치의 다음 라운드는 막히지 않는다(오탐 없음) — 게이트와 핸드오프까지 한 번.
+  const good = await overlapRepo();
+  try {
+    const resolve = vi.fn(async () => {
+      _wr(_j(good.root, "factory/lib/x.js"), "a\nbranch+base\nc\n");
+      await git143(good.root, "add", "-A"); await git143(good.root, "commit", "-q", "--no-edit"); await git143(good.root, "push", "-q", "origin", BR143);
+      return { is_error: false, result: "{}" };
+    });
+    expect(await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx: good, claudeP: resolve, transition: vi.fn(async ({ to }) => ({ ok: true, to })), lines: [], over: { checkoutBranch: implCheckout(good) } }) })).toBe(0);
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+    const gates = vi.fn(async () => null); const writeHandoff = vi.fn(async () => {});
+    expect(await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx: good, claudeP, transition, lines, over: { gates, writeHandoff, checkoutBranch: implCheckout(good) } }) })).toBe(0);
+    expect(claudeP).toHaveBeenCalledTimes(1);
+    expect(gates).toHaveBeenCalledTimes(1);
+    expect(writeHandoff).toHaveBeenCalledTimes(1);
+    expect(transition.mock.calls.filter(([a]) => a.to === "factory:blocked")).toEqual([]);
+  } finally { good.done(); }
+});
+
+test("test_143_merge_marker_scan_counts_only_lines_the_merge_introduced", async () => {
+  const { committedMergeMarkers } = await import("../bin/run-stage.js");
+  // 마커째 커밋한 병합 → 그 경로가 나온다. 뒤의 커밋이 마커를 지웠으면 HEAD는 깨끗하다 → 나오지 않는다.
+  const fx = await overlapRepo();
+  try {
+    await checkout143({ run: realRun, root: fx.root, baseSha: fx.baseSha, regenerate: vi.fn() });
+    await git143(fx.root, "add", "-A"); await git143(fx.root, "commit", "-q", "--no-edit");
+    const hit = await committedMergeMarkers({ run: realRun, cwd: fx.root, base: fx.baseSha });
+    expect(hit.ok).toBe(true);
+    expect(hit.paths).toEqual(["factory/lib/x.js"]);
+    _wr(_j(fx.root, "factory/lib/x.js"), "a\nfixed\nc\n");
+    await git143(fx.root, "commit", "-q", "-am", "fix markers");
+    expect(await committedMergeMarkers({ run: realRun, cwd: fx.root, base: fx.baseSha })).toEqual({ ok: true, paths: [] });
+  } finally { fx.done(); }
+  // 양쪽 부모에 이미 있던 마커 모양의 줄(픽스처 텍스트)은 병합이 만든 것이 아니다 — 오탐하지 않는다.
+  const top = _mkd(_j(_tmp(), "ktb-143-lit-"));
+  try {
+    await git143(top, "init", "-q", "-b", "main", ".");
+    for (const [k, v] of [["user.name", "t"], ["user.email", "t@example.invalid"], ["commit.gpgsign", "false"]]) await git143(top, "config", k, v);
+    _wr(_j(top, "t.md"), "<<<<<<< fixture\nmid\n>>>>>>> fixture\nx\n");
+    await git143(top, "add", "-A"); await git143(top, "commit", "-q", "-m", "seed");
+    await git143(top, "checkout", "-q", "-b", "br");
+    _wr(_j(top, "t.md"), "<<<<<<< fixture\nmid\n>>>>>>> fixture\nbranch\n");
+    await git143(top, "commit", "-q", "-am", "br");
+    await git143(top, "checkout", "-q", "main");
+    _wr(_j(top, "t.md"), "<<<<<<< fixture\nmid\n>>>>>>> fixture\nbase\n");
+    await git143(top, "commit", "-q", "-am", "base");
+    const base = await git143(top, "rev-parse", "HEAD");
+    await git143(top, "checkout", "-q", "br");
+    expect((await realRun("git", ["merge", "--no-edit", base], { cwd: top })).code).not.toBe(0);
+    _wr(_j(top, "t.md"), "<<<<<<< fixture\nmid\n>>>>>>> fixture\nbranch+base\n");
+    await git143(top, "add", "-A"); await git143(top, "commit", "-q", "--no-edit");
+    expect(await committedMergeMarkers({ run: realRun, cwd: top, base })).toEqual({ ok: true, paths: [] });
+    // 읽을 수 없는 git은 "마커 없음"이 아니다(fail closed).
+    const broken = await committedMergeMarkers({ run: async () => ({ code: 128, stdout: "", stderr: "boom" }), cwd: top, base });
+    expect(broken.ok).toBe(false);
+    expect(broken.reason).toContain("boom");
+  } finally { _rm(top, { recursive: true, force: true }); }
+});
