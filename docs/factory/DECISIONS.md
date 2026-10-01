@@ -3940,3 +3940,11 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
 - **채택자 저장소에는 새 차단 경로가 없다**: 세션 전 마커 스캔도 넘김의 일부라 엔진 저장소에서만 건다(`implementCheckoutBranch`가
   `mirrorApplicable`일 때만 `committedMergeMarkers`를 단다). 채택자의 implement 체크아웃은 오늘과 같은 git 호출만 한다.
 - 마커 없이 틀린 해결은 이 검사가 잡지 못한다(게이트·리뷰가 본다) — 머지됐다면 되돌리기가 아니라 고쳐 나간다.
+
+**1.4.42 (KTB #143 — S3b 엔진 쪽, 공장이 만들었다).** 위 #143 항은 빌더가 썼다. 운영 세션이 보탤 사실 둘. (1) 1.4.41의 stop-guard 수정 뒤 재시도
+한 번에 approved — rework implement 런은 Stop 거부 없이 끝났고 리뷰 라운드 2는 5 approve / 0 reject, 재시도 비용 $1.57. 보호 경로라 머지는 사람이
+했다(S4 전까지 설계대로). (2) 재시도 자체에서 배운 것: `transition.js` 재시도 플래그(사람 전용)를 라벨 스왑 중간에 끊으면 상태 라벨이 2개가 되고, 이벤트로
+뜬 스테이지는 거부하며 Sweep이 하나로 복구하지만 **복구는 `labeled` 이벤트를 다시 내지 않는다** — 이슈는 `factory:rework`에 앉은 채 런이 없고,
+stalled 팔이 30분 뒤에야 dispatch로 다시 띄운다. 이번엔 `gh workflow run factory-implement.yml -f issue=143`으로 바로 띄웠다. 복구 직후 같은
+스테이지를 dispatch하는 것이 맞는 동작이다(후속 이슈).
+이 릴리스로 S3b가 양쪽 다 채택 저장소에 간다: 엔진(여기)과 빌더 프롬프트(1.4.41).
