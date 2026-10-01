@@ -794,3 +794,47 @@ test("test_143_completed_merge_resets_the_diff_base", async () => {
   expect(stuck.s.gates).not.toHaveBeenCalled();
   expect(d.gates).toHaveBeenCalledTimes(1);
 });
+
+/**
+ * #143 (셀프 비판 f2) — dw4의 "읽을 수 없는 git 상태"는 **모든** 질문에 대해 판정 불가다, 첫 질문만이 아니라. MERGE_HEAD는 깨끗이
+ * 없다고(1) 답했는데 그다음 질문이 고장 나면(128) 그 고장을 "끝났다"나 "마커 없음"으로 읽으면 안 된다. 각 단계를 하나씩 고장 낸다.
+ */
+test("test_143_unreadable_git_state_at_every_step_blocks", async () => {
+  const PATHS = ["factory/lib/x.js"];
+  const step = ({ anc = 0, ls = { code: 0, stdout: "factory/lib/x.js\n" }, show = { code: 0, stdout: "resolved\n" } }) => makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 1, stdout: "", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "merge-base", result: typeof anc === "number" ? { code: anc, stdout: "", stderr: anc > 1 ? "fatal: Not a valid commit name" : "" } : anc },
+    { match: (c, a) => c === "git" && a[0] === "ls-tree", result: { stderr: ls.code ? "fatal: not a tree object" : "", ...ls } },
+    { match: (c, a) => c === "git" && a[0] === "show", result: { stderr: show.code ? "fatal: bad object HEAD" : "", ...show } },
+  ]);
+  const check = (run) => assertBaseMergeComplete({ run, cwd: "/repo", sha: SHA, paths: PATHS });
+  // 통제군: 모든 질문이 깨끗하게 답하면 끝난 병합이다 — 아래의 실패는 각 고장 하나 때문이다.
+  expect(await check(step({}))).toEqual({ ok: true });
+  // 조상 검사가 고장(0/1 밖) → 판정 불가. "조상이 아니다"(1)와도 구분된다.
+  const anc = await check(step({ anc: 128 }));
+  expect(anc.ok).toBe(false);
+  expect(anc.reason).toMatch(/git state unreadable/);
+  expect(anc.reason).toMatch(/merge-base/);
+  expect(anc.reason).toContain("fatal: Not a valid commit name");
+  // ls-tree가 고장 → 판정 불가(경로를 이름으로).
+  const ls = await check(step({ ls: { code: 128, stdout: "" } }));
+  expect(ls.ok).toBe(false);
+  expect(ls.reason).toMatch(/git state unreadable/);
+  expect(ls.reason).toMatch(/ls-tree/);
+  expect(ls.reason).toContain("factory/lib/x.js");
+  // show가 고장 → "마커 없음"이 아니라 판정 불가. stdout이 비어 있어도 그것을 깨끗한 파일로 읽지 않는다.
+  const show = await check(step({ show: { code: 128, stdout: "" } }));
+  expect(show.ok).toBe(false);
+  expect(show.reason).toMatch(/git state unreadable/);
+  expect(show.reason).toMatch(/git show HEAD:factory\/lib\/x\.js/);
+  // 배선: 그 판정은 runStage에서 blocked(undecidable)이고 게이트·핸드오프에 닿지 않는다.
+  for (const run of [step({ anc: 128 }), step({ ls: { code: 128, stdout: "" } }), step({ show: { code: 128, stdout: "" } })]) {
+    const { s, d } = afterSessionSpies({ baseMergeComplete: ({ sha, paths }) => assertBaseMergeComplete({ run, cwd: "/repo", sha, paths }) });
+    expect(await runStage({ stage: "implement", issue: 143, deps: d })).toBe(2);
+    expect(s.gates).not.toHaveBeenCalled();
+    expect(s.writeHandoff).not.toHaveBeenCalled();
+    const t = s.transition.mock.calls.at(-1)[0];
+    expect(t).toEqual(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+    expect(t.reason).toMatch(/builder did not complete the base merge \(git state unreadable/);
+  }
+});
