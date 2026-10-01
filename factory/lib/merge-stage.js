@@ -96,6 +96,11 @@ export function humanGateNote(humanGate) {
 export const VETO_WINDOW_CONTEXT = "factory/veto-window";
 /** 창 안에서 거부권 라벨을 다시 보는 간격. 60분 창이면 12번 자고 13번 본다(마지막은 창이 닫힌 뒤). */
 export const VETO_POLL_INTERVAL_MS = 5 * 60 * 1000;
+/**
+ * 창이 닫힌 뒤 머지까지 남은 일 — 창 상태 해소, prReady, 무결성 재확인, (6b) 읽기, 승인, 머지, 전이 — 의 여유(분).
+ * ready 뒤 체크 대기(`merge_check_wait_sec`)는 따로 센다. 창이 잡에 드는가 = 이미 쓴 시간 + 창 + 체크 대기 + 이 여유 < timeout.
+ */
+export const VETO_POST_WINDOW_ALLOWANCE_MIN = 2;
 /** `closes=` 값은 엄격하게만 읽는다 — 모양이 틀린 창은 "곧 닫힌 창"이 아니라 판정 불가다. */
 const CLOSES_RE = /^closes=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/;
 function parseCloses(description) {
@@ -201,7 +206,10 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *      vetoWindow.read(sha) → { ok, window: null | { sha, state, description, creatorLogin, createdAt } }
  *      vetoWindow.open({ sha, closesAt }) → { ok } — `factory/veto-window` pending, description `closes=<iso>`.
  *      vetoWindow.ensureLabel() → { ok } — `factory:veto` 라벨이 있게 한다(멱등). 창을 열 때 알림보다 먼저.
+ *      vetoWindow.resolve({ sha, state, closesAt }) → { ok } — 같은 context를 success(닫힘)·failure(거부권)·error(판정 불가)로
+ *                         다시 게시한다(description은 그대로 `closes=<iso>` — 재진입이 같은 시계를 읽는다).
  *      vetoLabel({ since }) → { ok, vetoedBy: login | null } — since 이후의 `factory:veto` labeled 이벤트.
+ *      jobStartedAt()   → { ok, at: epoch ms } — 이 머지 잡이 러너에서 시작한 시각(이미 쓴 시간을 timeout에서 뺀다).
  *      now?()           → epoch ms. sleep은 위의 그것을 같이 쓴다.
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
@@ -330,20 +338,40 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * 주기가 창과 겹친다). 반환: null = 창이 거부권 없이 닫혔다(머지 경로를 계속), 숫자 = 이 런의 종료 코드.
    * 어느 재료든 읽지 못하면 "거부권 없음"이 아니라 **판정 불가**(blocked)다 — verifyFactoryStatuses와 같은 fail closed.
    */
-  const vetoWindowGate = async ({ sha, pr: prNo, files }) => {
+  const vetoWindowGate = async ({ sha, pr: prNo, files, beforeOpen = null }) => {
+    // 창이 이 head에 실제로 있는 동안(열었거나 재사용했다)의 판정 불가는 그 상태를 error로 해소한다 — 사람에게
+    // "아직 자동 머지 예정"인 pending을 남기지 않는다. 해소는 best-effort다: 실패해도 판정 불가 자체는 그대로다.
+    let live = null;
+    const settle = async (state) => {
+      if (!live) return { ok: true };
+      let r;
+      try { r = await d.vetoWindow.resolve({ sha: live.sha, state, closesAt: iso(live.closesAt) }); } catch (e) { r = { ok: false, reason: `${e?.message || e}` }; }
+      if (!r?.ok) record([`merge: ${VETO_WINDOW_CONTEXT} could not be resolved to ${state} on ${live.sha.slice(0, 7)} — ${r?.reason || "unknown"}`]);
+      return r ?? { ok: false };
+    };
     const blocked = async (why) => {
+      await settle("error");
       const line = `veto window undecidable — ${why}`;
       const t = await toBlocked(line);
       record([`merge: ${line}`, ...refusal(t)]);
       return 2;
+    };
+    const vetoed = async ({ reason, why }) => {
+      await settle("failure");
+      return await handToHuman({
+        reason,
+        sections: [{ heading: `거부권(\`${VETO_LABEL}\`)`, why: [...why, "", "이 PR의 비판정 보호 경로:"], files }],
+      });
     };
     const now = () => Number(d.now ? d.now() : Date.now());
     const iso = (ms) => new Date(ms).toISOString();
     const minutes = d.selfChange?.veto_minutes;
     if (!Number.isInteger(minutes) || minutes <= 0) return await blocked(`self_change.veto_minutes is ${JSON.stringify(minutes)}, not a positive integer`);
 
-    // 창이 잡 안에 들어가는가 — 창 + ready 뒤 체크 대기가 잡의 timeout-minutes보다 짧아야 한다. 잡이 타임아웃으로
-    // 죽으면 finally가 돌지 않는다(락 고아). 그래서 들어가지 않는 창은 **열지 않고** 사람에게 이유를 댄다.
+    // 창이 잡 안에 들어가는가 — **이 잡이 이미 쓴 시간**(체크아웃·setup·게이트의 전체 스위트·mergeGates) + 창 + ready 뒤
+    // 체크 대기 + 머지까지의 여유가 잡의 timeout-minutes보다 짧아야 한다. 잡이 타임아웃으로 죽으면 run-stage의 finally가
+    // 돌지 않는다(락 고아). 그래서 들어가지 않는 창은 **열지 않고** 사람에게 이유를 댄다. 재진입도 같은 식이다:
+    // 남은 창(closes − now)은 아래에서 veto_minutes 이하로 묶이므로, veto_minutes로 센 이 상한이 그대로 보수적이다.
     const tailMin = Math.ceil((d.mergeCheckWaitSec ?? DEFAULT_MERGE_CHECK_WAIT_SEC) / 60);
     let to;
     try { to = d.mergeJobTimeoutMinutes ? await d.mergeJobTimeoutMinutes() : { ok: false, reason: "mergeJobTimeoutMinutes dep not wired" }; }
@@ -351,11 +379,18 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!to?.ok || !Number.isInteger(to.minutes)) {
       return await blocked(`the merge job's timeout-minutes could not be read (${to?.reason || "no value"}) — veto_minutes=${minutes} cannot be checked against timeout-minutes`);
     }
-    if (minutes + tailMin >= to.minutes) {
-      return await blocked(`veto_minutes=${minutes} (+${tailMin} min post-ready check wait) does not fit the merge job's timeout-minutes=${to.minutes} — raise timeout-minutes in .github/workflows/factory-merge.yml or lower CHARTER self_change.veto_minutes; no window was opened`);
+    let started;
+    try { started = d.jobStartedAt ? await d.jobStartedAt() : { ok: false, reason: "jobStartedAt dep not wired" }; }
+    catch (e) { started = { ok: false, reason: `${e?.message || e}` }; }
+    if (!started?.ok || typeof started.at !== "number" || !Number.isFinite(started.at)) {
+      return await blocked(`the merge job's start time could not be read (${started?.reason || "no value"}) — the time this job already spent is unknown, so veto_minutes=${minutes} cannot be checked against timeout-minutes=${to.minutes}`);
+    }
+    const spentMin = Math.max(0, Math.ceil((now() - started.at) / 60_000));
+    if (spentMin + minutes + tailMin + VETO_POST_WINDOW_ALLOWANCE_MIN >= to.minutes) {
+      return await blocked(`veto_minutes=${minutes} (+${tailMin} min post-ready check wait, +${VETO_POST_WINDOW_ALLOWANCE_MIN} min to merge, +${spentMin} min already spent in this job) does not fit the merge job's timeout-minutes=${to.minutes} — raise timeout-minutes in .github/workflows/factory-merge.yml or lower CHARTER self_change.veto_minutes; no window was opened`);
     }
     if (!sha) return await blocked("the PR head sha is unknown — a window must be bound to a commit");
-    const missing = [["vetoWindow.read", d.vetoWindow?.read], ["vetoWindow.open", d.vetoWindow?.open], ["vetoWindow.ensureLabel", d.vetoWindow?.ensureLabel], ["vetoLabel", d.vetoLabel], ["factoryLogins", d.factoryLogins], ["comment", d.comment]].filter(([, f]) => typeof f !== "function").map(([k]) => k);
+    const missing = [["vetoWindow.read", d.vetoWindow?.read], ["vetoWindow.open", d.vetoWindow?.open], ["vetoWindow.ensureLabel", d.vetoWindow?.ensureLabel], ["vetoWindow.resolve", d.vetoWindow?.resolve], ["vetoLabel", d.vetoLabel], ["factoryLogins", d.factoryLogins], ["comment", d.comment]].filter(([, f]) => typeof f !== "function").map(([k]) => k);
     if (missing.length) return await blocked(`deps not wired (${missing.join(", ")})`);
     const short = sha.slice(0, 7);
 
@@ -379,12 +414,32 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       if (!by || !known.has(by.toLowerCase())) {
         return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} was posted by ${by ? `@${by}` : "an unknown account"}, which is not a factory account — a commit status is writable by anything holding a repo-scoped token`);
       }
+      // 앞선 런이 이 창을 거부권으로 해소했다(failure) — 라벨이 그 뒤에 떼어졌어도 거부권은 남는다. 사람에게.
+      if (win.state === "failure") {
+        record([`merge: ${VETO_WINDOW_CONTEXT} on ${short} was resolved as vetoed by an earlier run — the veto stands`]);
+        return await vetoed({
+          reason: `vetoed on ${short} in an earlier run (${VETO_WINDOW_CONTEXT} is failure) — ${HUMAN_MERGE_REQUIRED_TEXT}`,
+          why: [
+            `앞선 머지 런이 이 커밋(${short})의 거부권 창을 \`${VETO_LABEL}\`로 막았습니다(\`${VETO_WINDOW_CONTEXT}\`가 failure).`,
+            "라벨을 떼어도 이 결정은 되돌아가지 않습니다 — 팩토리는 이 PR을 스스로 머지하지 않고 사람에게 넘깁니다.",
+          ],
+        });
+      }
       closesAt = parseCloses(win.description);
-      openedAt = Date.parse(win.createdAt ?? "");
+      const createdAt = Date.parse(win.createdAt ?? "");
       if (closesAt === null) return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} has a malformed description ${JSON.stringify(win.description)} (expected closes=<ISO 8601 UTC>)`);
-      if (!Number.isFinite(openedAt)) return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} carries no readable creation time — the window's start (opened_at) is unknown`);
+      if (!Number.isFinite(createdAt)) return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} carries no readable creation time — the window's start (opened_at) is unknown`);
+      // opened_at은 첫 런이 **알림 코멘트보다 먼저** 잡은 시각(= closes − veto_minutes)이다. 상태는 코멘트 **뒤**에
+      // 게시되므로 그 createdAt은 늦다 — 그 사이에 붙었다 떼어진 거부권을 지우지 않도록 둘 중 이른 쪽을 쓴다.
+      openedAt = Math.min(createdAt, closesAt - minutes * 60_000);
+      live = { sha, closesAt };
       record([`merge: veto window reused on ${short} — opened ${iso(openedAt)}, closes ${iso(closesAt)}`]);
+      const pre = beforeOpen ? await beforeOpen() : null;
+      if (pre !== null) { await settle("error"); return pre; }
     } else {
+      // 알림보다 먼저 묻는 검사(리뷰 증거) — 그 거부가 약속 뒤에 오지 않게. 창이 아직 없으므로 해소할 상태도 없다.
+      const pre = beforeOpen ? await beforeOpen() : null;
+      if (pre !== null) return pre;
       openedAt = now();
       closesAt = openedAt + minutes * 60_000;
       // 라벨이 먼저 있어야 한다 — 없는 라벨을 붙이라고 말하는 알림은 거부권을 주지 않는다(GitHub UI는 없는 라벨을 고를 수 없다).
@@ -393,6 +448,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       if (!lab?.ok) return await blocked(`the ${VETO_LABEL} label could not be created: ${lab?.reason || "unknown"} — the owner would be told to use a label that does not exist`);
       // 코멘트가 status보다 먼저다: status만 남고 코멘트가 실패하면 다음 런이 그 창을 재사용해 **알림 없이** 머지한다.
       // 반대 순서의 최악은 같은 알림이 두 번 붙는 것이다.
+      // 약속은 **조건부**로 쓴다: 창 뒤에도 도는 검사(ready 뒤 필수 체크 대기, 무결성 재확인, 라이브 head 대조)가 있고,
+      // 그것이 거부하면 머지는 없다. 리뷰 증거((6b))는 창을 열기 전에 이미 확인했다.
       const body = [
         `**자동 머지 예정 — ${iso(closesAt)}** (\`${VETO_WINDOW_CONTEXT}\`)`,
         "",
@@ -400,14 +457,19 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
         "",
         ...files.map((f) => `- \`${f}\``),
         "",
-        `${iso(closesAt)}에 팩토리가 자동 머지합니다 — 막으려면 추적 이슈 #${issue}에 \`${VETO_LABEL}\` 라벨을 붙이세요.`,
+        `막으려면 ${iso(closesAt)} 전에 추적 이슈 #${issue}에 \`${VETO_LABEL}\` 라벨을 붙이세요.`,
         "붙인 뒤 라벨을 떼어도 거부권은 취소되지 않습니다 — 이 PR은 사람이 머지하게 됩니다.",
+        "",
+        `거부권 없이 창이 닫히면 팩토리가 PR을 ready로 바꾸고 필수 체크·무결성을 다시 확인하며, PR head가 이 커밋(${short})인지`,
+        "다시 대조합니다. 모두 통과할 때만 자동 머지합니다 — 하나라도 거부되면 머지하지 않고 추적 이슈를",
+        "`factory:blocked` 또는 `factory:needs-human`으로 옮깁니다. 리뷰 증거(정족수·all-approve·게시자)는 이 알림 전에 이미 확인했습니다.",
       ].join("\n");
       try { await d.comment(prNo, body); }
       catch (e) { return await blocked(`the auto-merge notice could not be posted on PR #${prNo} (${e?.message || e}) — the owner cannot veto what they were never told about`); }
       let o;
       try { o = await d.vetoWindow.open({ sha, closesAt: iso(closesAt) }); } catch (e) { o = { ok: false, reason: `${e?.message || e}` }; }
       if (!o?.ok) return await blocked(`${VETO_WINDOW_CONTEXT} could not be posted on ${short}: ${o?.reason || "unknown"}`);
+      live = { sha, closesAt };
       record([`merge: veto window opened on ${short} — closes ${iso(closesAt)}, veto_minutes=${minutes}, issue #${issue}, label ${VETO_LABEL}`]);
     }
 
@@ -424,17 +486,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       if (!v?.ok) return await blocked(`the ${VETO_LABEL} label could not be read at poll ${polls}: ${v?.reason || "unknown"}`);
       if (v.vetoedBy) {
         record([`merge: veto window vetoed by @${v.vetoedBy} at poll ${polls} (window ${iso(openedAt)} → ${iso(closesAt)})`]);
-        return await handToHuman({
+        return await vetoed({
           reason: `vetoed by @${v.vetoedBy} — ${HUMAN_MERGE_REQUIRED_TEXT}`,
-          sections: [{
-            heading: `거부권(\`${VETO_LABEL}\`)`,
-            why: [
-              `@${v.vetoedBy}님이 추적 이슈 #${issue}에 \`${VETO_LABEL}\` 라벨을 붙였습니다 — 거부권 창(${iso(openedAt)} → ${iso(closesAt)}) 안에서였습니다.`,
-              "팩토리는 이 PR을 스스로 머지하지 않고 사람에게 넘깁니다. 라벨을 떼어도 이 결정은 되돌아가지 않습니다.",
-              "", "이 PR의 비판정 보호 경로:",
-            ],
-            files,
-          }],
+          why: [
+            `@${v.vetoedBy}님이 추적 이슈 #${issue}에 \`${VETO_LABEL}\` 라벨을 붙였습니다 — 거부권 창(${iso(openedAt)} → ${iso(closesAt)}) 안에서였습니다.`,
+            "팩토리는 이 PR을 스스로 머지하지 않고 사람에게 넘깁니다. 라벨을 떼어도 이 결정은 되돌아가지 않습니다.",
+          ],
         });
       }
       const left = closesAt - now();
@@ -442,6 +499,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       if (polls >= maxPolls) return await blocked(`the clock did not reach the close time ${iso(closesAt)} after ${polls} polls`);
       try { await sleep(Math.min(VETO_POLL_INTERVAL_MS, left)); }
       catch (e) { return await blocked(`the wait failed at poll ${polls}: ${e?.message || e}`); }
+    }
+    // 닫힘을 상태로 남긴다(success) — prReady 전이다: 필수 체크 필터가 없는 저장소에서 pending이 체크 대기를 영원히 막지
+    // 않게. 남기지 못하면 머지하지 않는다(재진입이 같은 창을 다시 읽는다).
+    const closed = await settle("success");
+    if (!closed?.ok) {
+      live = null;   // 같은 해소를 error로 한 번 더 시도하지 않는다 — 방금 실패한 쓰기다
+      return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} could not be resolved to success after the window closed: ${closed?.reason || "unknown"}`);
     }
     record([`merge: veto window closed at ${iso(closesAt)} on ${short} — ${polls} poll(s), no ${VETO_LABEL}; continuing to the merge`]);
     return null;
@@ -644,13 +708,125 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record(["merge: mergeGates — checks GREEN, integrity GREEN"]);
 
+  let qaManifestRecorded = null;
+  const reviewRefused = async (reason) => {
+    const line = `review verification failed — ${reason}`;
+    const t = await d.transition({ to: "factory:needs-human", reason: line });
+    record([`merge: ${line}`, ...refusal(t)]);
+    return 2;
+  };
+  /** (6b)의 검사 전체. null = 통과, 숫자 = 이 런의 종료 코드(needs-human). 순수 읽기다 — draft 여부와 무관하다. */
+  const verifyReview = async ({ sha, liveHead = true }) => {
+    const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "reviewRunId", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
+    if (missingDeps.length) {
+      return await reviewRefused(`review-evidence deps not wired (${missingDeps.join(", ")}) — the merge stage cannot prove a review happened, and an unverified review is not a passed review`);
+    }
+
+    // 창을 열기 전의 사전 확인(`liveHead:false`)은 게이트가 본 커밋(`sha`)에 대해 리뷰 증거를 묻는다 — head가 창 동안
+    // 움직였는지는 창 뒤의 이 검사(`liveHead:true`)가 라이브 head로 다시 묻는다.
+    let live = sha;
+    if (liveHead) {
+      try { live = await d.prHeadShaLive(pr); }
+      catch (e) { return await reviewRefused(`PR #${pr} head sha unreadable: ${e?.message || e}`); }
+      if (!live) return await reviewRefused(`PR #${pr} head sha unreadable — no sha returned`);
+      // checkoutHead가 고정한 sha와 지금의 PR head가 다르면, 게이트·리뷰가 본 트리가 아닌 것이 머지된다.
+      if (sha && live !== sha) return await reviewRefused(`PR head moved during this run — gates verified ${sha.slice(0, 7)}, PR head is now ${live.slice(0, 7)}`);
+    }
+
+    let ev;
+    try { ev = await d.reviewEvidence(); }
+    catch (e) { return await reviewRefused(`review handoff unreadable: ${e?.message || e}`); }
+    if (!ev?.ok) return await reviewRefused(ev?.reason || "review handoff missing or invalid");
+
+    let ros;
+    try { ros = await d.reviewRoster(); }
+    catch (e) { return await reviewRefused(`review roster unresolvable: ${e?.message || e}`); }
+    if (!ros?.ok || !Array.isArray(ros.roles) || ros.roles.length === 0) {
+      return await reviewRefused(ros?.reason || "review roster unresolvable — quorum cannot be checked");
+    }
+
+    const q = verifyReviewQuorum({ data: ev.data, rosterSize: ros.roles.length, rosterRoles: ros.roles, maxRounds: d.maxRounds ?? null, prHeadSha: live });
+    if (!q.ok) return await reviewRefused(q.reason);
+    record([`merge: review verified — ${ros.roles.length}/${ros.roles.length} approve on ${live.slice(0, 7)}, round ${ev.data.round}${Number.isInteger(d.maxRounds) ? ` (K=${d.maxRounds})` : ""}, decision recomputed from must_fix`]);
+
+    // (b2) 리뷰 batch-1 MF-2 — **그 handoff는 실제로 돈 review 런의 것인가.** 위 (b)까지가 보는 것은
+    // handoff의 *내용*뿐이고, 그 코멘트는 모든 스테이지가 공유하는 봇 계정으로 나간다(`gh issue comment`는
+    // 훅이 일부러 열어 둔 문이다) — 곧 all-approve handoff를 손으로 지어내면 (b)를 그대로 통과했다.
+    // 그래서 `factory/records`의 run 기록에 **러너가** 남긴 `review-evidence:` 줄과 대조한다: 같은 커밋,
+    // 같은 verdict 집합, 같은 라운드여야 한다. 기록을 못 읽는 것도 통과가 아니다(fail closed).
+    //
+    // 리뷰 batch-2 MF-2 — 그런데 **어느 줄이 그 런의 것인가**를 파일 순서로 정하면("마지막 줄") 그
+    // 기록 파일에 줄을 덧붙일 수 있는 누구든 판정을 대신 쓸 수 있다(재리뷰가 rc=0으로 확인했다).
+    // 그래서 런 id를 먼저, **기록과 다른 채널**에서 읽는다: 이 이슈의 review 하트비트가 싣는
+    // `runner: gha-<run id>`. 그 값을 기대값으로 넘겨 같은 런이 쓴 줄만 고르고, 대조한다.
+    let expected;
+    try { expected = await d.reviewRunId(); }
+    catch (e) { return await reviewRefused(`${NOT_BOUND} — the review run id could not be read from this issue: ${e?.message || e}`); }
+    if (!expected?.ok || !expected.runId) return await reviewRefused(`${NOT_BOUND} — ${expected?.reason || "the review run that produced this handoff could not be named"}`);
+
+    let rec;
+    try { rec = await d.reviewRecord({ runId: expected.runId }); }
+    catch (e) { return await reviewRefused(`${NOT_BOUND} — the records branch could not be read: ${e?.message || e}`); }
+    if (!rec?.ok) return await reviewRefused(`${NOT_BOUND} — ${rec?.reason || "the review run record is unavailable"}`);
+    const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
+    if (!prov.ok) return await reviewRefused(prov.reason);
+    record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
+
+    /**
+     * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────
+     * 매니페스트 파일(`.factory/out/qa/<issue>/manifest.json`)은 커밋되지 않으므로 머지 스테이지의 새
+     * 체크아웃에는 존재하지 않는다. 볼 수 있는 것은 review 런이 run 기록에 남긴 지문 하나뿐이고,
+     * 그 자리는 러너만 쓴다(에이전트 세션의 `factory/records` push는 훅이 막는다).
+     * 로스터에 `qa`가 있는데 그 지문이 없다 = 유효한 증거가 있었다는 증인이 없다 = 판정 불가.
+     * KTB #3의 교훈을 뒤집어 적용한다: "증거가 없다"는 이제 빌더를 가리키지 않고, **되돌릴 수 없는
+     * 단계 앞에서 멈추는 이유**가 된다.
+     */
+    if (ros.roles.includes("qa")) {
+      qaManifestRecorded = rec.record.qaManifest ?? null;
+      if (!qaManifestRecorded) {
+        return await reviewRefused(`${NOT_BOUND} — this tier's roster includes qa, but the review run recorded no qa_manifest digest for ${live.slice(0, 7)}. A valid qa evidence manifest (\`node .factory/bin/qa-evidence.js finish --issue ${issue}\`) is what that digest names, and without it nothing witnesses that the evidence existed`);
+      }
+      record([`merge: qa evidence manifest ${qaManifestRecorded.slice(0, 12)} bound to the review run record`]);
+    }
+
+    // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
+    // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.
+    // 팩토리 자신의 계정(들)을 `gh api user`로 한 번 해석하고 그것과 대조한다. 해석 실패는 통과가
+    // 아니라 **판정 불가**다.
+    let logins;
+    try { logins = await d.factoryLogins(); }
+    catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
+    if (!logins?.ok || !Array.isArray(logins.logins) || logins.logins.length === 0) {
+      return await reviewRefused(`the factory's own account could not be resolved (gh api user) — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}: ${logins?.reason || "unknown"}`);
+    }
+    let statuses;
+    try { statuses = await d.commitStatuses(live); }
+    catch (e) { return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable: ${e?.message || e}`); }
+
+    // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
+    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
+    // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
+    const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
+    if (!posted.ok) return await reviewRefused(posted.reason);
+    record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
+    return null;
+  };
+
   // (5b) #149 (S4a) — 비판정 경로 자기 머지의 **거부권 창**. 자리가 여기인 이유: 정책·게이트·mergeGates가
   // 전부 통과한 뒤라 "자동 머지됩니다" 코멘트가 뒤의 거부로 거짓말이 되지 않고, prReady(6a) 전이라 창이
   // 열려 있는 동안 PR은 draft로 남는다(사람이 실수로 머지하지 못한다). 창 동안 head가 움직이면 (6b)의 라이브
   // head 대조가 그 머지를 거부한다 — 옛 창의 시계로 새 커밋을 머지하지 않는다.
+  //
+  // 리뷰 증거((6b) — handoff·정족수·all-approve·라운드 K·run 기록 출처·게시자)는 순수 읽기라 **창보다 먼저** 묻는다:
+  // 그 거부가 "자동 머지 예정" 알림 뒤에 오면 약속이 깨진다. 창 뒤의 (6b)는 같은 검사를 라이브 head로 한 번 더 한다.
+  // 창 뒤에도 남는 거부(ready 뒤 체크 대기·무결성 재확인·head 이동)는 알림이 조건으로 이름을 댄다.
   if (vetoFiles) {
     const sha = headSha || gates?.head_sha || null;
-    const code = await vetoWindowGate({ sha, pr, files: vetoFiles });
+    const beforeOpen = async () => {
+      record([`merge: review evidence checked on ${sha.slice(0, 7)} before the veto window's notice`]);
+      return await verifyReview({ sha, liveHead: false });
+    };
+    const code = await vetoWindowGate({ sha, pr, files: vetoFiles, beforeOpen });
     if (code !== null) return code;
   }
 
@@ -781,102 +957,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 머지는 되돌릴 수 없으므로 fail closed로 `needs-human`이다.
   // KTB-42 — review 런이 run 기록에 남긴 qa 증거 매니페스트의 지문. 아래 (b2)에서 채워지고
   // `factory:merged` 전이에 그대로 실린다(`lib/requirements.js` qaEvidenceGate가 다시 묻는다).
-  let qaManifestRecorded = null;
-  const reviewRefused = async (reason) => {
-    const line = `review verification failed — ${reason}`;
-    const t = await d.transition({ to: "factory:needs-human", reason: line });
-    record([`merge: ${line}`, ...refusal(t)]);
-    return 2;
-  };
   {
-    const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "reviewRunId", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
-    if (missingDeps.length) {
-      return await reviewRefused(`review-evidence deps not wired (${missingDeps.join(", ")}) — the merge stage cannot prove a review happened, and an unverified review is not a passed review`);
-    }
-
-    let live;
-    try { live = await d.prHeadShaLive(pr); }
-    catch (e) { return await reviewRefused(`PR #${pr} head sha unreadable: ${e?.message || e}`); }
-    if (!live) return await reviewRefused(`PR #${pr} head sha unreadable — no sha returned`);
-    // checkoutHead가 고정한 sha와 지금의 PR head가 다르면, 게이트·리뷰가 본 트리가 아닌 것이 머지된다.
-    if (sha && live !== sha) return await reviewRefused(`PR head moved during this run — gates verified ${sha.slice(0, 7)}, PR head is now ${live.slice(0, 7)}`);
-
-    let ev;
-    try { ev = await d.reviewEvidence(); }
-    catch (e) { return await reviewRefused(`review handoff unreadable: ${e?.message || e}`); }
-    if (!ev?.ok) return await reviewRefused(ev?.reason || "review handoff missing or invalid");
-
-    let ros;
-    try { ros = await d.reviewRoster(); }
-    catch (e) { return await reviewRefused(`review roster unresolvable: ${e?.message || e}`); }
-    if (!ros?.ok || !Array.isArray(ros.roles) || ros.roles.length === 0) {
-      return await reviewRefused(ros?.reason || "review roster unresolvable — quorum cannot be checked");
-    }
-
-    const q = verifyReviewQuorum({ data: ev.data, rosterSize: ros.roles.length, rosterRoles: ros.roles, maxRounds: d.maxRounds ?? null, prHeadSha: live });
-    if (!q.ok) return await reviewRefused(q.reason);
-    record([`merge: review verified — ${ros.roles.length}/${ros.roles.length} approve on ${live.slice(0, 7)}, round ${ev.data.round}${Number.isInteger(d.maxRounds) ? ` (K=${d.maxRounds})` : ""}, decision recomputed from must_fix`]);
-
-    // (b2) 리뷰 batch-1 MF-2 — **그 handoff는 실제로 돈 review 런의 것인가.** 위 (b)까지가 보는 것은
-    // handoff의 *내용*뿐이고, 그 코멘트는 모든 스테이지가 공유하는 봇 계정으로 나간다(`gh issue comment`는
-    // 훅이 일부러 열어 둔 문이다) — 곧 all-approve handoff를 손으로 지어내면 (b)를 그대로 통과했다.
-    // 그래서 `factory/records`의 run 기록에 **러너가** 남긴 `review-evidence:` 줄과 대조한다: 같은 커밋,
-    // 같은 verdict 집합, 같은 라운드여야 한다. 기록을 못 읽는 것도 통과가 아니다(fail closed).
-    //
-    // 리뷰 batch-2 MF-2 — 그런데 **어느 줄이 그 런의 것인가**를 파일 순서로 정하면("마지막 줄") 그
-    // 기록 파일에 줄을 덧붙일 수 있는 누구든 판정을 대신 쓸 수 있다(재리뷰가 rc=0으로 확인했다).
-    // 그래서 런 id를 먼저, **기록과 다른 채널**에서 읽는다: 이 이슈의 review 하트비트가 싣는
-    // `runner: gha-<run id>`. 그 값을 기대값으로 넘겨 같은 런이 쓴 줄만 고르고, 대조한다.
-    let expected;
-    try { expected = await d.reviewRunId(); }
-    catch (e) { return await reviewRefused(`${NOT_BOUND} — the review run id could not be read from this issue: ${e?.message || e}`); }
-    if (!expected?.ok || !expected.runId) return await reviewRefused(`${NOT_BOUND} — ${expected?.reason || "the review run that produced this handoff could not be named"}`);
-
-    let rec;
-    try { rec = await d.reviewRecord({ runId: expected.runId }); }
-    catch (e) { return await reviewRefused(`${NOT_BOUND} — the records branch could not be read: ${e?.message || e}`); }
-    if (!rec?.ok) return await reviewRefused(`${NOT_BOUND} — ${rec?.reason || "the review run record is unavailable"}`);
-    const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
-    if (!prov.ok) return await reviewRefused(prov.reason);
-    record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
-
-    /**
-     * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────
-     * 매니페스트 파일(`.factory/out/qa/<issue>/manifest.json`)은 커밋되지 않으므로 머지 스테이지의 새
-     * 체크아웃에는 존재하지 않는다. 볼 수 있는 것은 review 런이 run 기록에 남긴 지문 하나뿐이고,
-     * 그 자리는 러너만 쓴다(에이전트 세션의 `factory/records` push는 훅이 막는다).
-     * 로스터에 `qa`가 있는데 그 지문이 없다 = 유효한 증거가 있었다는 증인이 없다 = 판정 불가.
-     * KTB #3의 교훈을 뒤집어 적용한다: "증거가 없다"는 이제 빌더를 가리키지 않고, **되돌릴 수 없는
-     * 단계 앞에서 멈추는 이유**가 된다.
-     */
-    if (ros.roles.includes("qa")) {
-      qaManifestRecorded = rec.record.qaManifest ?? null;
-      if (!qaManifestRecorded) {
-        return await reviewRefused(`${NOT_BOUND} — this tier's roster includes qa, but the review run recorded no qa_manifest digest for ${live.slice(0, 7)}. A valid qa evidence manifest (\`node .factory/bin/qa-evidence.js finish --issue ${issue}\`) is what that digest names, and without it nothing witnesses that the evidence existed`);
-      }
-      record([`merge: qa evidence manifest ${qaManifestRecorded.slice(0, 12)} bound to the review run record`]);
-    }
-
-    // (d) 게시자. 에이전트 스테이지가 쥔 토큰으로도 `POST /statuses/<sha>`는 나갈 수 있으므로
-    // (감사 H1b — 훅은 그 위의 한 겹일 뿐이다), "상태가 success다"만으로는 아무것도 증명되지 않는다.
-    // 팩토리 자신의 계정(들)을 `gh api user`로 한 번 해석하고 그것과 대조한다. 해석 실패는 통과가
-    // 아니라 **판정 불가**다.
-    let logins;
-    try { logins = await d.factoryLogins(); }
-    catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
-    if (!logins?.ok || !Array.isArray(logins.logins) || logins.logins.length === 0) {
-      return await reviewRefused(`the factory's own account could not be resolved (gh api user) — there is no way to tell who posted ${REVIEW_EVIDENCE_STATUSES.join(" / ")}: ${logins?.reason || "unknown"}`);
-    }
-    let statuses;
-    try { statuses = await d.commitStatuses(live); }
-    catch (e) { return await reviewRefused(`commit statuses for ${live.slice(0, 7)} unreadable: ${e?.message || e}`); }
-
-    // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
-    // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
-    // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
-    const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
-    if (!posted.ok) return await reviewRefused(posted.reason);
-    record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
+    const code = await verifyReview({ sha });
+    if (code !== null) return code;
   }
 
   // (6c) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는

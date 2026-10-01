@@ -1528,16 +1528,22 @@ const fakeClock = (start = T0) => {
 };
 const windowDeps = (over = {}) => {
   const clock = over.clock ?? fakeClock();
+  // 창 상태의 해소(`resolve`)와 잡 시작 시각(`jobStartedAt`)은 기본으로 배선된다 — 테스트가 `vetoWindow`의 일부만
+  // 덮어써도 `resolve`는 남는다(`vetoWindow: undefined`는 "통째로 미배선"으로 그대로 둔다).
+  const resolve = vi.fn(async () => ({ ok: true }));
+  const vw = { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })), resolve };
+  const startedAt = clock.t;
   return {
     engine: true,
     selfChange: SWITCH_ON,
     protectedPaths: vi.fn(async () => ({ ok: true, files: NJ_FILES })),
     mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 120 })),
-    vetoWindow: { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })) },
+    jobStartedAt: vi.fn(async () => ({ ok: true, at: startedAt })),
     vetoLabel: vi.fn(async () => ({ ok: true, vetoedBy: null })),
     now: clock.now,
     sleep: clock.sleep,
     ...over,
+    vetoWindow: "vetoWindow" in over ? (over.vetoWindow && { resolve, ...over.vetoWindow }) : vw,
   };
 };
 const vetoComments = (d) => d.comment.mock.calls.filter(([, body]) => /factory:veto/.test(body));
@@ -1693,8 +1699,8 @@ test("test_149_veto_window_opens_waits_and_closes — a window that cannot fit t
     expect(d.mergePr).not.toHaveBeenCalled();
     expect(lines.some((l) => /veto window/.test(l))).toBe(true);
   }
-  // 상한 안에 드는 값(60분 창 + 10분 체크 대기 < 71분)이면 연다.
-  const ok = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 71 })) }));
+  // 상한 안에 드는 값(이미 쓴 0분 + 60분 창 + 10분 체크 대기 + 2분 머지 여유 < 73분)이면 연다.
+  const ok = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 73 })) }));
   expect(await run(ok)).toBe(0);
   expect(ok.vetoWindow.open).toHaveBeenCalledTimes(1);
   // 의존성이 아예 없는 것도 판정 불가다.
@@ -1868,4 +1874,183 @@ test("test_149_veto_window_opens_waits_and_closes — edge reads of a reused win
   const longWait = baseD(windowDeps({ mergeCheckWaitSec: 1800, mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 80 })) }));
   expect(await run(longWait)).toBe(2);
   expect(longWait.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/\+30 min/) }));
+});
+
+// ── #149 self-critique: 잡이 이미 쓴 시간, 창 앞으로 당긴 (6b), 창 상태의 해소, 상태 게시보다 앞선 거부권 ─────────
+
+test("test_149_veto_window_opens_waits_and_closes — time the job already spent counts against timeout-minutes", async () => {
+  // 게이트(전체 스위트)가 15분을 쓴 잡: 15 + 60 + 10 + 2 = 87 ≥ 80 → 창을 열면 잡이 창 한가운데서 죽는다 → 열지 않는다.
+  const slow = fakeClock();
+  const gatesSlow = vi.fn(async () => { slow.t += 15 * MIN; return { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } }; });
+  const { lines, record } = makeRecord();
+  const d = baseD(windowDeps({ clock: slow, gates: gatesSlow, mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 80 })) }));
+  expect(await run(d, { record })).toBe(2);
+  const t = d.transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:blocked");
+  expect(t.reason).toMatch(/veto_minutes=60/);
+  expect(t.reason).toMatch(/timeout-minutes=80/);
+  expect(t.reason).toMatch(/15 min already spent/);
+  expect(d.vetoWindow.open).not.toHaveBeenCalled();
+  expect(vetoComments(d)).toHaveLength(0);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(lines.some((l) => /veto window undecidable/.test(l))).toBe(true);
+
+  // 같은 잡이 시간을 쓰지 않았으면(0 + 72 < 80) 같은 timeout에서 연다 — 위의 거부는 경과 시간 때문이다.
+  const fast = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 80 })) }));
+  expect(await run(fast)).toBe(0);
+  expect(fast.vetoWindow.open).toHaveBeenCalledTimes(1);
+
+  // 프로세스 밖에서 쓴 시간(체크아웃·setup)도 잡 시작 시각으로 센다: 20분 전에 시작한 잡, timeout 90 → 92 ≥ 90.
+  const early = baseD(windowDeps({ jobStartedAt: vi.fn(async () => ({ ok: true, at: T0 - 20 * MIN })), mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 90 })) }));
+  expect(await run(early)).toBe(2);
+  expect(early.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/20 min already spent/) }));
+  expect(early.vetoWindow.open).not.toHaveBeenCalled();
+
+  // 경계: 0 + 60 + 10 + 2 = 72 — timeout 72는 거부, 73은 연다.
+  const at72 = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 72 })) }));
+  expect(await run(at72)).toBe(2);
+  expect(at72.vetoWindow.open).not.toHaveBeenCalled();
+  const at73 = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 73 })) }));
+  expect(await run(at73)).toBe(0);
+
+  // 잡 시작 시각을 모르면 "들어간다"가 아니라 판정 불가다.
+  for (const jobStartedAt of [undefined, vi.fn(async () => ({ ok: false, reason: "jobs API 403" })), vi.fn(async () => { throw new Error("gh down"); }), vi.fn(async () => ({ ok: true, at: "yesterday" }))]) {
+    const u = baseD(windowDeps({ jobStartedAt }));
+    expect(await run(u)).toBe(2);
+    expect(u.transition.mock.calls.at(-1)[0].to).toBe("factory:blocked");
+    expect(u.transition.mock.calls.at(-1)[0].reason).toMatch(/timeout-minutes/);
+    expect(u.vetoWindow.open).not.toHaveBeenCalled();
+    expect(vetoComments(u)).toHaveLength(0);
+  }
+});
+
+test("test_149_veto_window_opens_waits_and_closes — a (6b) review refusal is found before the window, so no promise is posted", async () => {
+  const cases = {
+    "review handoff missing": { reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review.v1 handoff" })) },
+    "quorum short": { reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa", "security"] })) },
+    "not all approve": { reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, verdicts: [approve("correctness"), { ...approve("qa"), verdict: "request_changes", must_fix: [{ id: "q1", where: "x", why: "y" }] }] } })) },
+    "record not bound": { reviewRecord: vi.fn(async () => ({ ok: false, reason: "no review-evidence line" })) },
+    "status by a stranger": { commitStatuses: vi.fn(async () => [{ context: "factory/review", state: "success", creatorLogin: "mallory" }, { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" }]) },
+  };
+  for (const [name, over] of Object.entries(cases)) {
+    const d = baseD(windowDeps(over));
+    expect(await run(d), name).toBe(2);
+    const t = d.transition.mock.calls.at(-1)[0];
+    expect(t.to, name).toBe("factory:needs-human");
+    expect(t.reason, name).toMatch(/review verification failed/);
+    expect(vetoComments(d), name).toHaveLength(0);
+    expect(d.vetoWindow.ensureLabel, name).not.toHaveBeenCalled();
+    expect(d.vetoWindow.open, name).not.toHaveBeenCalled();
+    expect(d.vetoLabel, name).not.toHaveBeenCalled();
+    expect(d.sleep, name).not.toHaveBeenCalled();
+    expect(d.prReady, name).not.toHaveBeenCalled();
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+  }
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the notice is conditional on the checks that still run after the window", async () => {
+  const d = baseD(windowDeps());
+  expect(await run(d)).toBe(0);
+  const [, body] = vetoComments(d)[0];
+  // 창 뒤에도 도는 검사(필수 체크 대기·무결성·리뷰 증거의 라이브 head 대조)를 이름으로 대고, 거부되면 머지하지 않는다고 말한다.
+  expect(body).toMatch(/필수 체크/);
+  expect(body).toMatch(/무결성/);
+  expect(body).toMatch(/head/);
+  expect(body).toContain("`factory:blocked`");
+  expect(body).toContain("`factory:needs-human`");
+  // 조건 없는 약속 문장은 없다.
+  expect(body).not.toMatch(/에 팩토리가 자동 머지합니다 —/);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the window status is resolved: success on close, failure on veto, error when undecidable", async () => {
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  // 닫힘: prReady **전에** success로 — 필수 체크 필터가 없는(requiredChecks null) 저장소에서 영원한 pending이 머지를 막지 않는다.
+  const order = [];
+  const closed = baseD(windowDeps({ prReady: vi.fn(async () => { order.push("prReady"); }) }));
+  closed.vetoWindow.resolve.mockImplementation(async () => { order.push("resolve"); return { ok: true }; });
+  expect(await run(closed)).toBe(0);
+  expect(closed.vetoWindow.resolve).toHaveBeenCalledTimes(1);
+  expect(closed.vetoWindow.resolve).toHaveBeenCalledWith({ sha: HEAD, state: "success", closesAt: closes });
+  expect(order).toEqual(["resolve", "prReady"]);
+
+  // 거부권: failure로 — 사람에게 넘긴 PR에 "아직 자동 머지 예정"인 pending이 남지 않는다.
+  const vetoed = baseD(windowDeps({ vetoLabel: vi.fn(async () => ({ ok: true, vetoedBy: "owner-hk" })) }));
+  expect(await run(vetoed)).toBe(2);
+  expect(vetoed.vetoWindow.resolve).toHaveBeenCalledWith({ sha: HEAD, state: "failure", closesAt: closes });
+  expect(vetoed.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^vetoed by @owner-hk/) }));
+  // 해소가 실패해도 거부권은 그대로 사람에게 간다(거부권은 사람 쪽으로만).
+  const vetoedNoResolve = baseD(windowDeps({ vetoLabel: vi.fn(async () => ({ ok: true, vetoedBy: "owner-hk" })) }));
+  vetoedNoResolve.vetoWindow.resolve.mockImplementation(async () => ({ ok: false, reason: "HTTP 403" }));
+  expect(await run(vetoedNoResolve)).toBe(2);
+  expect(vetoedNoResolve.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+
+  // 창이 열린 뒤의 판정 불가: error로.
+  let n = 0;
+  const flaky = baseD(windowDeps({ vetoLabel: vi.fn(async () => (++n === 4 ? { ok: false, reason: "API rate limit" } : { ok: true, vetoedBy: null })) }));
+  expect(await run(flaky)).toBe(2);
+  expect(flaky.vetoWindow.resolve).toHaveBeenCalledWith({ sha: HEAD, state: "error", closesAt: closes });
+  expect(flaky.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+
+  // 창이 열리기 전의 거부(잡에 안 들어간다)는 해소할 상태가 없다.
+  const noFit = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 30 })) }));
+  expect(await run(noFit)).toBe(2);
+  expect(noFit.vetoWindow.resolve).not.toHaveBeenCalled();
+
+  // 닫힘을 기록하지 못하면 머지하지 않는다(fail closed) — ready도 머지도 없다.
+  const cannotClose = baseD(windowDeps());
+  cannotClose.vetoWindow.resolve.mockImplementation(async () => ({ ok: false, reason: "HTTP 500" }));
+  expect(await run(cannotClose)).toBe(2);
+  expect(cannotClose.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/HTTP 500/) }));
+  expect(cannotClose.prReady).not.toHaveBeenCalled();
+  expect(cannotClose.mergePr).not.toHaveBeenCalled();
+
+  // `resolve`가 배선되지 않았으면 창을 열지 않는다(닫을 수 없는 창은 열지 않는다).
+  const unwired = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })), resolve: undefined } }));
+  expect(await run(unwired)).toBe(2);
+  expect(unwired.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/vetoWindow\.resolve/) }));
+  expect(unwired.vetoWindow.open).not.toHaveBeenCalled();
+});
+
+test("test_149_veto_label_hands_to_human — a window an earlier run resolved as vetoed stays vetoed, even with the label gone", async () => {
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  const win = { sha: HEAD, state: "failure", description: `closes=${closes}`, creatorLogin: "ktb-bot", createdAt: new Date(T0 + 61 * MIN).toISOString() };
+  const d = baseD(windowDeps({ clock: fakeClock(T0 + 90 * MIN), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d)).toBe(2);
+  const t = d.transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  expect(t.reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(t.reason).toMatch(/^vetoed/);
+  expect(d.prReady).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.vetoWindow.open).not.toHaveBeenCalled();
+
+  // 같은 창이 success(거부권 없이 닫힘)였다면 재진입은 그 시계를 재사용해 머지 경로로 간다 — 다시 열지 않는다.
+  const ok = baseD(windowDeps({ clock: fakeClock(T0 + 90 * MIN), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: { ...win, state: "success" } })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(ok)).toBe(0);
+  expect(ok.vetoWindow.open).not.toHaveBeenCalled();
+  expect(vetoComments(ok)).toHaveLength(0);
+  expect(ok.mergePr).toHaveBeenCalledTimes(1);
+});
+
+test("test_149_veto_label_hands_to_human — re-entry reads the veto from the window's start, not from the status's later creation time", async () => {
+  // 첫 런: opened_at = T0(알림 코멘트보다 먼저 잡은 시각), 상태는 코멘트 **뒤**에 T0+2분에 게시됐다.
+  // 그 2분 사이에 붙었다 떼어진 거부권이 재진입에서 지워지면 안 된다 → since는 T0여야 한다(createdAt이 아니라).
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  const win = { sha: HEAD, state: "pending", description: `closes=${closes}`, creatorLogin: "ktb-bot", createdAt: new Date(T0 + 2 * MIN).toISOString() };
+  const d = baseD(windowDeps({ clock: fakeClock(T0 + 10 * MIN), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d)).toBe(0);
+  expect(d.vetoLabel.mock.calls.length).toBeGreaterThan(0);
+  for (const [arg] of d.vetoLabel.mock.calls) expect(arg).toEqual({ since: new Date(T0).toISOString() });
+});
+
+test("test_149_veto_window_opens_waits_and_closes — on re-entry a review refusal resolves the open window to error, never waits it out", async () => {
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  const win = { sha: HEAD, state: "pending", description: `closes=${closes}`, creatorLogin: "ktb-bot", createdAt: new Date(T0).toISOString() };
+  const d = baseD(windowDeps({ clock: fakeClock(T0 + 30 * MIN), reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review.v1 handoff" })), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d)).toBe(2);
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/review verification failed/) }));
+  expect(d.vetoWindow.resolve).toHaveBeenCalledWith({ sha: HEAD, state: "error", closesAt: closes });
+  expect(d.vetoLabel).not.toHaveBeenCalled();
+  expect(d.sleep).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
 });
