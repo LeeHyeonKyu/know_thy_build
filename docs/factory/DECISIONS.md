@@ -2274,7 +2274,7 @@ dogfood 라운드 3에서 관측자가 확인한 것 중 **판결의 근거로 �
 
 **결정**:
 
-1. **로컬 CLI가 gh를 프록시한다.** `factory board`가 node `http`만으로(의존성 0) 세 개의 엔드포인트를 낸다 — `GET /`(페이지 파일 그대로), `GET /api/board`(모델 JSON), `GET /api/events`(SSE, **모델이 바뀔 때만** `board` 이벤트). 모든 GitHub 조회는 `gh api`·`gh issue list`·`gh run list`로 나간다: 토큰을 읽는 코드가 없으므로 새어 나갈 자리도 없고, 사람이 볼 수 있는 저장소는 전부 그대로 보인다. 서버��� `127.0.0.1`에만 바인딩한다.
+1. **로컬 CLI가 gh를 프록시한다.** `factory board`가 node `http`만으로(의존성 0) 세 개의 엔드포인트를 낸다 — `GET /`(페이지 파일 그대로), `GET /api/board`(모델 JSON), `GET /api/events`(SSE, **모델이 바뀔 때만** `board` 이벤트). 모든 GitHub 조회는 `gh api`·`gh issue list`·`gh run list`로 나간다: 토큰을 읽는 코드가 없으므로 새어 나갈 자리도 없고, 사람이 볼 수 있는 저장소는 전부 그대로 보인다. 서버는 `127.0.0.1`에만 바인딩한다.
 
 2. **모델을 만드는 코드는 순수 함수 한 파일이다**(`lib/board.js`). gh·fs·시계를 만지지 않으므로(`now`는 인자다) 테스트가 픽스처 코멘트·런 기록·`gh run list` JSON만으로 모델 전체를 고정한다. 조회·캐시·HTTP는 `cli/board.js`에만 있다. **파서를 새로 쓰지 않는 것이 이 파일의 규칙이다** — `PROGRESS_MARKER_RE`·`TRANSITION_TO`·`TRANSITION_FAILED`·`BLOCKED_ORIGIN`·`parseRunRecord`·`parseHandoffs`를 전부 원래 주인에게서 가져다 쓴다. 뷰어가 자기 사본을 들면 "보드가 말하는 사실"과 "공장이 아는 사실"이 조용히 갈라진다.
 
@@ -2834,7 +2834,7 @@ base로 되돌리는 순간 `overlaidPaths`가 비지 않아 빌더가 뜨지 �
 `factory/lib/protected-paths.js`의 `HARNESS_OPENS` 하나다 — L2 deny(`ci-settings-harness.json`)·훅
 `prot`·overlay가 같은 문장을 말한다. 나머지(훅 스크립트·`.claude/settings*`·에이전트 프롬프트·
 ci-settings·CHARTER·`CLAUDE*.md`/`AGENTS*.md`/`.mcp*.json`)는 **여전히 base의 것**이고, 그것들을 고친
-하네스 브랜치는 예전 그대�� blocked이다. 무엇이 남아 지키는가: ① harness.toml 안의 위험한 섹션은
+하네스 브랜치는 예전 그대로 blocked이다. 무엇이 남아 지키는가: ① harness.toml 안의 위험한 섹션은
 L1의 섹션 검사(Task 1 — `[protected]`·`[gates.thresholds]`·`[load_bearing]` 편집 → 사람 머지)가 보고,
 ② 이 런이 자기 판정에 쓰는 harness는 체크아웃 **전에** `charterReady`가 읽어 메모리에 있다(브랜치의
 파일이 이번 런의 임계값·보호 목록을 바꾸지 못한다), ③ 머지는 어차피 사람이다(`[protected]`).
@@ -3041,7 +3041,7 @@ run 34840944244)은 그 계층이 더 관대하게 읽는다는 것을 보여 �
 **KTB-36의 deny 좁히기는 충분하지 않았다**: 그 열거에 남은 `*` 한 글자가 카브아웃을 계속 덮고 있었고,
 우리 매처로는 `qa/x.png`가 통과하니 테스트도 초록이었다(게다가 우리 매처로도 `.factory/out/qa`
 **디렉터리 자신**은 직계 자식이라 이미 걸리고 있었다 — 아무도 그것을 물어보지 않았을 뿐이다).
-KTB-40의 교훈은 규칙이다: **생성물의 판정 테스트는 우리 매처와 "더 관대한" 매�� 두 개로 돌린다.**
+KTB-40의 교훈은 규칙이다: **생성물의 판정 테스트는 우리 매처와 "더 관대한" 매처 두 개로 돌린다.**
 한쪽만으로는 "우리 가정이 이식되지 않는다"를 절대 볼 수 없다.
 
 ### 1.2.0 채택자 영향 (체크리스트)
@@ -3624,7 +3624,7 @@ CLI가 같은 답을 내고, CLI 출력에 `mode`·`mode_note`를 실어 검증�
 결정이 얼마짜리인지 아무도 합산하지 않는 것은 옳지 않다.
 
 **결정.** CHARTER `[budget].usd_per_issue`(기본값 없음 — `merge.human_gate`와 같은 규칙; doctor WARN `charter.budget-per-issue-unset`).
-스테이지는 hydrate 직후, 락�� 잡기 전에 이슈 run 기록의 `usage:` 줄(러너가 적는다 — 에이전트가 쓸 수 없는 채널)을 합해 캡과
+스테이지는 hydrate 직후, 락을 잡기 전에 이슈 run 기록의 `usage:` 줄(러너가 적는다 — 에이전트가 쓸 수 없는 채널)을 합해 캡과
 비교한다(`lib/budget.js`). 넘으면 시작하지 않고 `needs-human`으로 세운다 — back-pressure처럼 물러나 다시 시도하는 것이 아니다:
 같은 벽에 또 밀어 봐야 같은 답이고, 예산을 올리든(`:proposal`) 쪼개든 `wont-do`로 닫든 사람의 결정이다. merge는 에이전트를
 부르지 않으므로 보지 않는다. 템플릿과 KTB·도그푸드 저장소의 CHARTER는 $60으로 시작한다.
