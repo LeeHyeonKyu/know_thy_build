@@ -66,3 +66,17 @@ test("replaceEnv makes opts.env the WHOLE child env — process.env is not layer
   const scrubbed = await runner("node", ["-e", script]);
   expect(JSON.parse(scrubbed.stdout)).toEqual({ tok: null, path: true });
 }, 120000);
+
+/**
+ * 1.4.40 (KTB #136 실측) — 멀티바이트 문자가 stdout 조각 경계에 걸려도 깨지지 않는다. 자식이 한국어가 섞인 큰 출력을 여러 조각으로
+ * 내보내게 해(64 KiB 파이프 버퍼보다 훨씬 크게) 원문과 바이트까지 같은지 본다.
+ */
+test("run: multi-byte characters survive chunk boundaries — the output is decoded once, not per chunk", async () => {
+  const line = "한국어 주석이 섞인 줄 — multibyte: 가나다라마바사아자차카타파하 ✓ ✗ → ∑\n";
+  const script = `const s = ${JSON.stringify(line)}.repeat(20000); process.stdout.write(s);`;
+  const r = await run(process.execPath, ["-e", script]);
+  expect(r.code).toBe(0);
+  expect(r.stdout.length).toBe(line.length * 20000);
+  expect(r.stdout.slice(0, line.length)).toBe(line);
+  expect(r.stdout.includes("\uFFFD")).toBe(false);                 // 대체 문자(깨진 바이트의 흔적)가 하나도 없다
+});
