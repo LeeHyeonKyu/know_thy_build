@@ -557,19 +557,31 @@ async function sweepLabelSetRepair({ gh, actions, dispatchStage = null, backPres
        * 30분 창을 쓰고, 일어나지 않은 런에 그것을 쓰면 stalled 팔이 실제로 필요한 재점화를 못 한다(dw5).
        */
       const stage = backed && dispatchStage ? repairDispatchStage(backed) : null;
-      const refused = stage === "implement" ? await parked() : null;
+      // cf1(#147 rework) — 라벨은 이미 바뀌었다. 흐름 제어 조회가 던져도(검색 5xx·rate limit) 복구를 반쯤 두지
+      // 않는다: 거부와 같은 "띄우지 않음"으로 읽고 코멘트·action은 그대로 남긴 뒤 error 한 줄을 덧붙인다.
+      let refused = null;
+      if (stage === "implement") {
+        try {
+          const reason = await parked();
+          if (reason) refused = `back-pressure — ${reason}`;
+        } catch (e) {
+          const msg = String(e?.message || e);
+          refused = `back-pressure check failed — ${msg}`;
+          actions.push({ kind: "error", step: "label-set-repair", issue: it.number, error: `back-pressure: ${msg}` });
+        }
+      }
       const dispatching = stage && !refused;
       const restartMarker = dispatching ? `\n${restartComment(stage, it.number)}` : "";
       const tail = dispatching
         ? ` 이 라벨이 약속하는 \`factory-${stage}.yml\`을 dispatch로 다시 띄웁니다(#147 — 복구는 \`labeled\` 이벤트를 만들지 않습니다).`
         : refused
-          ? ` 흐름 제어로 지금은 \`factory-${stage}.yml\`을 띄우지 않았습니다(back-pressure — ${refused}). 풀리면 stalled 팔이 이어 받습니다.`
+          ? ` 흐름 제어로 지금은 \`factory-${stage}.yml\`을 띄우지 않았습니다(${refused}). 풀리면 stalled 팔이 이어 받습니다.`
           : "";
       await gh.comment(it.number, backed
         ? `${marker}${restartMarker}\n이 이슈에 factory 상태 라벨이 2개(${found.join(", ")}) 붙어 있었습니다 — 라벨 스왑이 중간에 실패한 흔적입니다(KTB-30). 이슈에 남은 최신 전이가 \`${backed}\`를 말하므로 그 라벨 하나로 정리했습니다(다른 상태 라벨은 제거, tier 라벨은 유지).${tail}`
         : `${marker}\n이 이슈에 factory 상태 라벨이 ${found.length}개(${found.join(", ")}) 붙어 있었습니다 — sweeper가 \`${LABEL_SET_REPAIR_TARGET}\`로 정리했습니다(다른 상태 라벨은 제거, tier 라벨은 유지). 사람이 확인한 뒤 \`:unstick\`으로 재개하세요.`);
       actions.push({ kind: "label-set-repaired", issue: it.number, from: found, ...(backed ? { to: backed } : {}) });
-      if (refused) actions.push({ kind: "label-set-repair-dispatch-skipped", issue: it.number, stage, label: backed, reason: `back-pressure — ${refused}` });
+      if (refused) actions.push({ kind: "label-set-repair-dispatch-skipped", issue: it.number, stage, label: backed, reason: refused });
       // 마커가 먼저다(stalled 팔 M4와 같은 기울기): dispatch가 던지면 복구는 그대로 두고 error 한 줄만 남긴다 —
       // 마커가 이미 있으므로 이 창 안에서는 다시 밀지 않고, 다음 창의 stalled 팔이 재시도한다.
       if (dispatching && await safeDispatch({ dispatchStage, stage, issue: it.number, actions, step: "label-set-repair" })) {
