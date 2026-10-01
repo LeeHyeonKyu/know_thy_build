@@ -21,7 +21,7 @@ import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
-import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable } from "../lib/mirror.js";
+import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 import { buildContext, resolveTier, contextManifestLines } from "../lib/context.js";
@@ -2061,16 +2061,38 @@ async function resolveMirrorConflicts({ run, root, sha, ident, regenerate }) {
   const u = await run("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: root });
   if (u.code !== 0) return { resolved: false, reason: `conflicted paths unreadable: ${u.stderr?.trim() || `exit ${u.code}`}` };
   const conflicted = u.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (!conflicted.length || !conflicted.every((p) => inMirrorFamily(p))) return { resolved: false, reason: `conflicts outside the mirror families: ${conflicted.filter((p) => !inMirrorFamily(p)).slice(0, 5).join(", ") || "none listed"}` };
-  const take = await run("git", ["checkout", sha, "--", ...conflicted], { cwd: root });
-  if (take.code !== 0) return { resolved: false, reason: `could not take base's copy of the conflicted mirror paths: ${take.stderr?.trim() || `exit ${take.code}`}` };
+  const mirror = conflicted.filter((p) => inMirrorFamily(p));
+  const union = conflicted.filter((p) => isUnionMergePath(p));
+  const other = conflicted.filter((p) => !inMirrorFamily(p) && !isUnionMergePath(p));
+  if (!conflicted.length || other.length) return { resolved: false, reason: `conflicts outside the mirror families: ${other.slice(0, 5).join(", ") || "none listed"}` };
+  // 1.4.39 — 추가 전용 파일(DECISIONS.md)은 양쪽을 다 남긴다: base(:1)·ours(:2)·theirs(:3)를 꺼내 `merge-file --union`으로 합친다.
+  for (const p of union) {
+    const stages = {};
+    for (const [n, k] of [["1", "base"], ["2", "ours"], ["3", "theirs"]]) {
+      const s = await run("git", ["show", `:${n}:${p}`], { cwd: root });
+      if (s.code !== 0) return { resolved: false, reason: `union merge of ${p}: stage ${n} unreadable` };
+      stages[k] = s.stdout;
+    }
+    const tmp = {};
+    for (const k of ["base", "ours", "theirs"]) { tmp[k] = join(root, ".factory/out", `union-${k}.tmp`); mkdirSync(dirname(tmp[k]), { recursive: true }); writeFileSync(tmp[k], stages[k]); }
+    const mf = await run("git", ["merge-file", "-p", "--union", tmp.ours, tmp.base, tmp.theirs], { cwd: root });
+    for (const k of Object.keys(tmp)) { try { rmSync(tmp[k]); } catch { /* 임시 파일 */ } }
+    if (mf.code < 0) return { resolved: false, reason: `union merge of ${p} failed: ${mf.stderr?.trim() || `exit ${mf.code}`}` };
+    writeFileSync(join(root, p), mf.stdout);
+    const ua = await run("git", ["add", "--", p], { cwd: root });
+    if (ua.code !== 0) return { resolved: false, reason: `git add ${p} after union merge failed` };
+  }
+  if (mirror.length) {
+    const take = await run("git", ["checkout", sha, "--", ...mirror], { cwd: root });
+    if (take.code !== 0) return { resolved: false, reason: `could not take base's copy of the conflicted mirror paths: ${take.stderr?.trim() || `exit ${take.code}`}` };
+  }
   const r = await regenerate({ root });
   if (!r.ok) return { resolved: false, reason: r.reason };
-  const add = await run("git", ["add", "--", ".factory/lib", ".factory/bin", ".factory/actions", ".claude/hooks"], { cwd: root });
+  const add = await run("git", ["add", "--", ...MIRROR_FAMILIES.map((f) => f.replace(/\/$/, ""))], { cwd: root });
   if (add.code !== 0) return { resolved: false, reason: `git add after regeneration failed: ${add.stderr?.trim() || `exit ${add.code}`}` };
   const commit = await run("git", [...ident, "commit", "--no-edit"], { cwd: root });
   if (commit.code !== 0) return { resolved: false, reason: `merge commit after regeneration failed: ${commit.stderr?.trim() || `exit ${commit.code}`}` };
-  return { resolved: true, conflicted, regenerated: r.changed };
+  return { resolved: true, conflicted, regenerated: r.changed, union };
 }
 
 export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "base", env = process.env, regenerate = regenerateMirror }) {

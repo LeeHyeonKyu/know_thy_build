@@ -29,9 +29,10 @@ const importer = (p) => {
 };
 
 test("inMirrorFamily: exactly the four families self-mirror.test.js checks; agents and settings are not mirrored here", () => {
-  expect(MIRROR_FAMILIES).toEqual([".factory/lib/", ".factory/bin/", ".factory/actions/", ".claude/hooks/"]);
-  for (const d of [".factory/lib/x.js", ".factory/bin/run-stage.js", ".factory/actions/setup/action.yml", ".claude/hooks/block-dangerous.sh"]) expect(inMirrorFamily(d), d).toBe(true);
-  for (const d of [".claude/agents/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/README.md", ".factory/harness.toml", ".factory/install-manifest.json", "docs/factory/CHARTER.md"]) expect(inMirrorFamily(d), d).toBe(false);
+  expect(MIRROR_FAMILIES).toEqual([".factory/lib/", ".factory/bin/", ".factory/actions/", ".claude/hooks/", ".factory/install-manifest.json"]);
+  // 1.4.39 — 설치 매니페스트도 생성물이다(트리의 항목 + package.json 버전). review의 overlay가 base의 것을 올리면 `install.test.js`가 RED다(#136).
+  for (const d of [".factory/lib/x.js", ".factory/bin/run-stage.js", ".factory/actions/setup/action.yml", ".claude/hooks/block-dangerous.sh", ".factory/install-manifest.json"]) expect(inMirrorFamily(d), d).toBe(true);
+  for (const d of [".claude/agents/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/README.md", ".factory/harness.toml", ".factory/install-manifest.json.bak", "docs/factory/CHARTER.md"]) expect(inMirrorFamily(d), d).toBe(false);
 });
 
 test("regenerateMirror rewrites only stale family files from the sources, and reports what changed", async () => {
@@ -75,7 +76,7 @@ test("mirrorStep(commit): a changed mirror is committed and pushed as the runner
   const r = await mirrorStep({ root: "/r", run, mode: "commit", headSha: "old", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/lib/a.js"] }) });
   expect(r).toEqual({ ok: true, applicable: true, changed: [".factory/lib/a.js"], sha: "abc123" });
   const calls = run.mock.calls.map(([c, a]) => `${c} ${a.join(" ")}`);
-  expect(calls.some((c) => c.startsWith("git add -- .factory/lib .factory/bin .factory/actions .claude/hooks"))).toBe(true);
+  expect(calls.some((c) => c.startsWith("git add -- .factory/lib .factory/bin .factory/actions .claude/hooks .factory/install-manifest.json"))).toBe(true);
   expect(calls.some((c) => /git -c user.name=factory-runner .* commit -q -m mirror: regenerate/.test(c))).toBe(true);
   expect(calls.some((c) => c.startsWith("git push -q origin HEAD"))).toBe(true);
 });
