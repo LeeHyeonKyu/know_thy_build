@@ -46,11 +46,17 @@ export function run(cmd, args = [], opts = {}) {
       resolve({ code: 127, stdout: "", stderr: String(e) });
       return;
     }
-    let stdout = "", stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
-    child.stderr.on("data", (d) => (stderr += d));
-    child.on("error", (e) => resolve({ code: 127, stdout, stderr: stderr + String(e) }));
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    /**
+     * 1.4.40 (KTB #136 실측) — **조각을 모아 한 번에 디코드한다.** `stdout += chunk`는 Buffer 조각마다 `toString()`을 부르고, 멀티바이트
+     * 문자(이 저장소의 한국어 주석)가 조각 경계에 걸리면 깨진다. 242 KB짜리 `git show HEAD:.factory/bin/run-stage.js`가 소스와 바이트까지
+     * 같은데도 "다르다"로 읽혔다 — 큰 파일일수록 조각이 많다. 텍스트 판정을 출력에 기대는 모든 호출자(게이트 로그 파싱 포함)에 해당한다.
+     */
+    const out = [], err = [];
+    child.stdout.on("data", (d) => out.push(d));
+    child.stderr.on("data", (d) => err.push(d));
+    const text = (chunks) => Buffer.concat(chunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c))))).toString("utf8");
+    child.on("error", (e) => resolve({ code: 127, stdout: text(out), stderr: text(err) + String(e) }));
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout: text(out), stderr: text(err) }));
     // 자식이 stdin을 읽기 전에 끝나면(예: jq가 없어 즉시 exit 2 하는 훅) 쓰기가 EPIPE로 터진다 — 그 오류는
     // 자식의 종료 코드로 이미 판정되므로 삼킨다. 놓치면 Node의 unhandled 'error'가 되어 러너/vitest가 죽는다
     // (1.3.0 publish validate, Linux에서만 재현: 타이밍이 macOS보다 빠르다).
