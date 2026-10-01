@@ -1495,3 +1495,377 @@ test("B-MF2: the same fix makes the quorum measurable on that hop — a short ro
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/verdict count 2 != roster size 3/);
 });
+
+// ══ #149 (S4a) — 비판정 경로의 자기 머지: 스위치 off면 오늘과 바이트 동일, on이면 잡 안의 거부권 창 ══════
+//
+// MAIN_HAND_TO_HUMAN은 **main(19d412c)의 runMergeStage를 그대로 돌려 얻은 출력**이다(이 브랜치의 코드가
+// 아니라 바뀌기 전의 코드가 만든 문자열 — 새 코드에서 다시 타이핑하지 않았다). 같은 입력에 같은 전이
+// 사유·PR 코멘트·record 줄이 나와야 "스위치 off는 아무것도 바꾸지 않는다"가 증명된다.
+const MAIN_HAND_TO_HUMAN = {
+  nonJudgeOnly: {
+    files: ["factory/lib/board-static.js", ".factory/lib/board-static.js"],
+    lines: ["merge: PR #9 is OPEN", "merge: PR #9 not conflicting (MERGEABLE)", "merge: protected paths changed — human merge required: factory/lib/board-static.js, .factory/lib/board-static.js"],
+    comments: [[9, "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**\n\n이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은\n사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).\n\n변경된 보호 경로:\n\n- `factory/lib/board-static.js`\n- `.factory/lib/board-static.js`\n\ndiff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.\n추적 이슈 #7는 `factory:needs-human`으로 옮겼습니다."]],
+    transitions: [{ to: "factory:needs-human", reason: "protected paths changed — human merge required: factory/lib/board-static.js, .factory/lib/board-static.js (see PR #9)" }],
+  },
+  mixed: {
+    files: ["factory/lib/board-static.js", "factory/lib/merge-stage.js"],
+    lines: ["merge: PR #9 is OPEN", "merge: PR #9 not conflicting (MERGEABLE)", "merge: protected paths changed — human merge required: factory/lib/board-static.js, factory/lib/merge-stage.js"],
+    comments: [[9, "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**\n\n이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은\n사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).\n\n변경된 보호 경로:\n\n- `factory/lib/board-static.js`\n- `factory/lib/merge-stage.js`\n\ndiff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.\n추적 이슈 #7는 `factory:needs-human`으로 옮겼습니다."]],
+    transitions: [{ to: "factory:needs-human", reason: "protected paths changed — human merge required: factory/lib/board-static.js, factory/lib/merge-stage.js (see PR #9)" }],
+  },
+};
+const SWITCH_ON = { ok: true, auto_merge_non_judge: true, veto_minutes: 60 };
+const NJ_FILES = MAIN_HAND_TO_HUMAN.nonJudgeOnly.files;
+const T0 = Date.parse("2026-10-01T09:00:00.000Z");
+const MIN = 60_000;
+/** 주입한 시계: `sleep(ms)`이 시계를 정확히 그만큼 민다 — 실시간으로 기다리지 않는다. */
+const fakeClock = (start = T0) => {
+  const c = { t: start };
+  c.now = vi.fn(() => c.t);
+  c.sleep = vi.fn(async (ms) => { c.t += ms; });
+  return c;
+};
+const windowDeps = (over = {}) => {
+  const clock = over.clock ?? fakeClock();
+  return {
+    engine: true,
+    selfChange: SWITCH_ON,
+    protectedPaths: vi.fn(async () => ({ ok: true, files: NJ_FILES })),
+    mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 120 })),
+    vetoWindow: { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })) },
+    vetoLabel: vi.fn(async () => ({ ok: true, vetoedBy: null })),
+    now: clock.now,
+    sleep: clock.sleep,
+    ...over,
+  };
+};
+const vetoComments = (d) => d.comment.mock.calls.filter(([, body]) => /factory:veto/.test(body));
+
+/** dw3 — 스위치 off(또는 judge 경로 혼입)의 출력이 main과 문자열 단위로 같다. */
+const expectMainOutput = async (fixture, over) => {
+  const { lines, record } = makeRecord();
+  const comments = [], transitions = [];
+  const d = {
+    prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+    protectedPaths: async () => ({ ok: true, files: fixture.files }),
+    comment: async (n, b) => { comments.push([n, b]); },
+    transition: async (t) => { transitions.push(t); return { ok: true, from: "factory:approved", to: t.to }; },
+    vetoWindow: { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })) },
+    vetoLabel: vi.fn(async () => ({ ok: true, vetoedBy: null })),
+    sleep: vi.fn(async () => {}),
+    mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 120 })),
+    ...over,
+  };
+  const code = await run(d, { record });
+  expect(code).toBe(2);
+  expect(transitions).toEqual(fixture.transitions);
+  expect(comments).toEqual(fixture.comments);
+  expect(lines).toEqual(fixture.lines);
+  expect(transitions[0].reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(d.vetoWindow.read).not.toHaveBeenCalled();
+  expect(d.vetoWindow.open).not.toHaveBeenCalled();
+  expect(d.vetoLabel).not.toHaveBeenCalled();
+  expect(d.sleep).not.toHaveBeenCalled();
+  expect(d.mergeJobTimeoutMinutes).not.toHaveBeenCalled();
+};
+
+test("test_149_switch_off_is_byte_identical", async () => {
+  // selfChange 미배선(engine은 참이어도)
+  await expectMainOutput(MAIN_HAND_TO_HUMAN.nonJudgeOnly, { engine: true });
+  // 스위치가 명시적으로 꺼짐
+  await expectMainOutput(MAIN_HAND_TO_HUMAN.nonJudgeOnly, { engine: true, selfChange: { ok: true, auto_merge_non_judge: false, veto_minutes: 60 } });
+  // 스위치 on이지만 judge 파일이 섞임
+  await expectMainOutput(MAIN_HAND_TO_HUMAN.mixed, { engine: true, selfChange: SWITCH_ON });
+  // 스위치 on이지만 엔진 저장소가 아님(채택자) — 전부 judge
+  await expectMainOutput(MAIN_HAND_TO_HUMAN.nonJudgeOnly, { engine: false, selfChange: SWITCH_ON });
+  await expectMainOutput(MAIN_HAND_TO_HUMAN.nonJudgeOnly, { selfChange: SWITCH_ON });
+  // judge가 섞이면 설정 오류여도 오늘처럼 사람에게(판정 불가로 바뀌지 않는다)
+  await expectMainOutput(MAIN_HAND_TO_HUMAN.mixed, { engine: true, selfChange: { ok: false, reason: "self_change.veto_minutes must be a positive integer" } });
+
+  // 대조군: 같은 비판정 입력에 스위치가 **켜지면** 출력이 달라진다 — 위의 동일성은 스위치가 무시돼서가
+  // 아니라 꺼져 있어서 나온다(스위치를 통째로 무시하는 구현은 여기서 RED다).
+  const on = baseD(windowDeps());
+  expect(await run(on)).toBe(0);
+  expect(on.transition.mock.calls.some(([t]) => t.to === "factory:needs-human")).toBe(false);
+  expect(on.vetoWindow.open).toHaveBeenCalledTimes(1);
+});
+
+// ── dw4 ───────────────────────────────────────────────────────────────────────────────────────────
+
+test("test_149_veto_window_opens_waits_and_closes", async () => {
+  const calls = [];
+  const clock = fakeClock();
+  const { lines, record } = makeRecord();
+  const tag = (name, fn) => vi.fn(async (...a) => { calls.push(name); return fn(...a); });
+  const d = baseD(windowDeps({
+    clock,
+    policyViolations: tag("policyViolations", () => ({ ok: true, files: [] })),
+    gates: tag("gates", () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })),
+    mergeGates: tag("mergeGates", () => ({ checksGreen: true, integrityGreen: true })),
+    vetoWindow: { read: tag("vetoWindow.read", () => ({ ok: true, window: null })), open: tag("vetoWindow.open", () => ({ ok: true })), ensureLabel: tag("vetoWindow.ensureLabel", () => ({ ok: true })) },
+    vetoLabel: tag("vetoLabel", () => ({ ok: true, vetoedBy: null })),
+    comment: tag("comment", () => {}),
+    prReady: tag("prReady", () => {}),
+    mergePr: tag("mergePr", () => {}),
+  }));
+  const code = await run(d, { record });
+  expect(code).toBe(0);
+
+  // 창은 정책·게이트·mergeGates가 모두 통과한 뒤, prReady(드래프트 해제) 전에 열린다. 코멘트가 status보다 먼저다.
+  const firstPoll = calls.indexOf("vetoLabel");
+  expect(calls.slice(0, firstPoll)).toEqual(["policyViolations", "gates", "mergeGates", "vetoWindow.read", "vetoWindow.ensureLabel", "comment", "vetoWindow.open"]);
+  expect(calls.indexOf("prReady")).toBeGreaterThan(calls.lastIndexOf("vetoLabel"));
+  expect(calls.indexOf("mergePr")).toBeGreaterThan(calls.indexOf("prReady"));
+
+  // status 1회: 이 head에, closes=<iso>
+  expect(d.vetoWindow.read).toHaveBeenCalledWith(HEAD);
+  expect(d.vetoWindow.open).toHaveBeenCalledTimes(1);
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  expect(d.vetoWindow.open).toHaveBeenCalledWith({ sha: HEAD, closesAt: closes });
+  // PR 코멘트 1회: 닫히는 시각·이슈 번호·라벨 이름
+  expect(vetoComments(d)).toHaveLength(1);
+  const [target, body] = vetoComments(d)[0];
+  expect(target).toBe(9);
+  expect(body).toContain(closes);
+  expect(body).toContain("#7");
+  expect(body).toContain("`factory:veto`");
+  for (const f of NJ_FILES) expect(body).toContain(f);
+
+  // 5분 간격으로 창이 닫힐 때까지 잔다 — 60분 = 12번, 폴링은 매번 + 닫힌 뒤 한 번 더(13).
+  expect(clock.sleep.mock.calls.map(([ms]) => ms)).toEqual(Array(12).fill(5 * MIN));
+  expect(d.vetoLabel).toHaveBeenCalledTimes(13);
+  for (const [arg] of d.vetoLabel.mock.calls) expect(arg).toEqual({ since: new Date(T0).toISOString() });
+  expect(clock.t).toBe(T0 + 60 * MIN);
+  expect(d.mergePr).toHaveBeenCalledTimes(1);
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:merged" }));
+
+  // 온콜이 찾을 줄: 열림(닫히는 시각), 닫힘(폴링 수)
+  expect(lines.some((l) => l.startsWith("merge: veto window opened") && l.includes(closes) && l.includes(HEAD.slice(0, 7)))).toBe(true);
+  expect(lines.some((l) => l.startsWith("merge: veto window closed") && l.includes("13 poll"))).toBe(true);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — a second run reuses opened_at and re-posts nothing", async () => {
+  const opened = T0, closes = new Date(T0 + 60 * MIN).toISOString();
+  const clock = fakeClock(T0 + 30 * MIN);
+  const win = { sha: HEAD, state: "pending", description: `closes=${closes}`, creatorLogin: "ktb-bot", createdAt: new Date(opened).toISOString() };
+  const d = baseD(windowDeps({ clock, vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  const { lines, record } = makeRecord();
+  expect(await run(d, { record })).toBe(0);
+  expect(d.vetoWindow.open).not.toHaveBeenCalled();
+  expect(vetoComments(d)).toHaveLength(0);
+  expect(clock.sleep.mock.calls.map(([ms]) => ms)).toEqual(Array(6).fill(5 * MIN));
+  for (const [arg] of d.vetoLabel.mock.calls) expect(arg).toEqual({ since: new Date(opened).toISOString() });
+  expect(d.mergePr).toHaveBeenCalledTimes(1);
+  expect(lines.some((l) => l.startsWith("merge: veto window reused") && l.includes(closes))).toBe(true);
+
+  // 이미 닫힌 창: 자지 않고, 닫힌 뒤 한 번 확인하고 머지 경로로.
+  const late = fakeClock(T0 + 90 * MIN);
+  const d2 = baseD(windowDeps({ clock: late, vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d2)).toBe(0);
+  expect(late.sleep).not.toHaveBeenCalled();
+  expect(d2.vetoLabel).toHaveBeenCalledTimes(1);
+  expect(d2.vetoWindow.open).not.toHaveBeenCalled();
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the last sleep is clipped to the close time", async () => {
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  const clock = fakeClock(T0 + 52 * MIN);
+  const win = { sha: HEAD, state: "pending", description: `closes=${closes}`, creatorLogin: "ktb-bot", createdAt: new Date(T0).toISOString() };
+  const d = baseD(windowDeps({ clock, vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d)).toBe(0);
+  expect(clock.sleep.mock.calls.map(([ms]) => ms)).toEqual([5 * MIN, 3 * MIN]);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — a window that cannot fit the merge job is refused up front", async () => {
+  for (const timeout of [{ ok: true, minutes: 30 }, { ok: true, minutes: 70 }, { ok: false, reason: "factory-merge.yml has no timeout-minutes" }]) {
+    const { lines, record } = makeRecord();
+    const d = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => timeout) }));
+    expect(await run(d, { record })).toBe(2);
+    const t = d.transition.mock.calls.at(-1)[0];
+    expect(t.to).toBe("factory:blocked");
+    expect(t.reason).toMatch(/veto_minutes/);
+    expect(t.reason).toMatch(/timeout-minutes/);
+    expect(d.vetoWindow.read).not.toHaveBeenCalled();
+    expect(d.vetoWindow.open).not.toHaveBeenCalled();
+    expect(vetoComments(d)).toHaveLength(0);
+    expect(d.prReady).not.toHaveBeenCalled();
+    expect(d.mergePr).not.toHaveBeenCalled();
+    expect(lines.some((l) => /veto window/.test(l))).toBe(true);
+  }
+  // 상한 안에 드는 값(60분 창 + 10분 체크 대기 < 71분)이면 연다.
+  const ok = baseD(windowDeps({ mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 71 })) }));
+  expect(await run(ok)).toBe(0);
+  expect(ok.vetoWindow.open).toHaveBeenCalledTimes(1);
+  // 의존성이 아예 없는 것도 판정 불가다.
+  const unwired = baseD(windowDeps({ mergeJobTimeoutMinutes: undefined }));
+  expect(await run(unwired)).toBe(2);
+  expect(unwired.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(unwired.vetoWindow.open).not.toHaveBeenCalled();
+});
+
+test("test_149_veto_window_opens_waits_and_closes — a PR a later check refuses never gets the 'will auto-merge' comment", async () => {
+  for (const over of [
+    { gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "RED", head_sha: HEAD, failed: 1 })) },
+    { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) },
+    { policyViolations: vi.fn(async () => ({ ok: true, files: [".claude/agents/x.md"], violations: [] })) },
+  ]) {
+    const d = baseD(windowDeps(over));
+    expect(await run(d)).toBe(2);
+    expect(vetoComments(d)).toHaveLength(0);
+    expect(d.vetoWindow.open).not.toHaveBeenCalled();
+    expect(d.vetoLabel).not.toHaveBeenCalled();
+    expect(d.mergePr).not.toHaveBeenCalled();
+  }
+});
+
+test("test_149_veto_window_opens_waits_and_closes — another sha's status is not this head's window; a malformed one is undecidable", async () => {
+  const closes = new Date(T0 + 60 * MIN).toISOString();
+  const other = { sha: "c".repeat(40), state: "pending", description: `closes=${closes}`, creatorLogin: "ktb-bot", createdAt: new Date(T0 - 120 * MIN).toISOString() };
+  const d = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: other })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d)).toBe(0);
+  expect(d.vetoWindow.open).toHaveBeenCalledTimes(1);        // 새 창 — 다른 커밋의 시계를 빌리지 않는다
+  expect(vetoComments(d)).toHaveLength(1);
+
+  for (const description of ["closes=tomorrow", "closes=", "opened", null, `closes=${closes} extra`, "closes=2026-13-45T99:00:00Z", "closes=2026-10-01T24:00:00Z", "closes=2026-09-31T10:00:00.000Z"]) {
+    const bad = { sha: HEAD, state: "pending", description, creatorLogin: "ktb-bot", createdAt: new Date(T0).toISOString() };
+    const d2 = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: bad })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+    expect(await run(d2), String(description)).toBe(2);
+    expect(d2.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/closes=/) }));
+    expect(d2.vetoWindow.open).not.toHaveBeenCalled();
+    expect(d2.mergePr).not.toHaveBeenCalled();
+  }
+});
+
+test("test_149_veto_window_opens_waits_and_closes — a head that moved during the window is not merged on the old clock", async () => {
+  const d = baseD(windowDeps({ prHeadShaLive: vi.fn(async () => "c".repeat(40)) }));
+  expect(await run(d)).toBe(2);
+  expect(d.vetoWindow.open).toHaveBeenCalledWith(expect.objectContaining({ sha: HEAD }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/head moved/) }));
+});
+
+// ── dw5 ───────────────────────────────────────────────────────────────────────────────────────────
+
+test("test_149_veto_label_hands_to_human", async () => {
+  let polls = 0;
+  const { lines, record } = makeRecord();
+  const vetoLabel = vi.fn(async () => (++polls >= 3 ? { ok: true, vetoedBy: "owner-hk" } : { ok: true, vetoedBy: null }));
+  const d = baseD(windowDeps({ vetoLabel }));
+  expect(await run(d, { record })).toBe(2);
+  const t = d.transition.mock.calls.at(-1)[0];
+  expect(t.to).toBe("factory:needs-human");
+  expect(t.reason).toBe("vetoed by @owner-hk — human merge required (see PR #9)");
+  expect(t.reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(vetoLabel).toHaveBeenCalledTimes(3);                 // 찾은 순간 멈춘다
+  expect(d.prReady).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(lines.some((l) => /veto window vetoed by @owner-hk/.test(l))).toBe(true);
+  // PR 코멘트가 사람에게 사유와 파일을 말한다.
+  const last = d.comment.mock.calls.at(-1);
+  expect(last[0]).toBe(9);
+  expect(last[1]).toMatch(/@owner-hk/);
+  expect(last[1]).toMatch(/#7/);
+
+  // 창이 닫힌 뒤의 마지막 확인에서야 보인 거부권도 머지를 막는다.
+  let n = 0;
+  const lateVeto = vi.fn(async () => (++n === 13 ? { ok: true, vetoedBy: "owner-hk" } : { ok: true, vetoedBy: null }));
+  const d2 = baseD(windowDeps({ vetoLabel: lateVeto }));
+  expect(await run(d2)).toBe(2);
+  expect(lateVeto).toHaveBeenCalledTimes(13);
+  expect(d2.mergePr).not.toHaveBeenCalled();
+  expect(d2.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^vetoed by @owner-hk — human merge required/) }));
+});
+
+test("test_149_veto_label_hands_to_human — a window status posted by a non-factory login is blocked", async () => {
+  const win = { sha: HEAD, state: "pending", description: `closes=${new Date(T0 + 60 * MIN).toISOString()}`, creatorLogin: "mallory", createdAt: new Date(T0 - 70 * MIN).toISOString() };
+  const d = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d)).toBe(2);
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/@mallory/) }));
+  expect(d.vetoLabel).not.toHaveBeenCalled();
+  expect(d.mergePr).not.toHaveBeenCalled();
+  // 팩토리 계정을 못 구해도 같은 결과(판정 불가)
+  const d2 = baseD(windowDeps({ factoryLogins: vi.fn(async () => ({ ok: false, reason: "gh api user failed" })), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: { ...win, creatorLogin: "ktb-bot" } })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(d2)).toBe(2);
+  expect(d2.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/could not be resolved.*gh api user failed/) }));
+  expect(d2.mergePr).not.toHaveBeenCalled();
+});
+
+test("test_149_veto_label_hands_to_human — every undecidable read fails closed to blocked, never 'no veto'", async () => {
+  const cases = {
+    "selfChange ok:false": { selfChange: { ok: false, reason: "self_change.veto_minutes must be a positive integer, got -1" } },
+    "vetoWindow.read ok:false": { vetoWindow: { read: vi.fn(async () => ({ ok: false, reason: "statuses unreadable" })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } },
+    "vetoWindow.read throws": { vetoWindow: { read: vi.fn(async () => { throw new Error("gh down"); }), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } },
+    "vetoWindow.open ok:false": { vetoWindow: { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: false, reason: "403" })), ensureLabel: vi.fn(async () => ({ ok: true })) } },
+    "vetoWindow.ensureLabel ok:false": { vetoWindow: { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: false, reason: "HTTP 403" })) } },
+    "vetoWindow unwired": { vetoWindow: undefined },
+    "vetoLabel unwired": { vetoLabel: undefined },
+    "vetoLabel ok:false first": { vetoLabel: vi.fn(async () => ({ ok: false, reason: "events unreadable" })) },
+    "comment fails": { comment: vi.fn(async () => { throw new Error("gh down"); }) },
+  };
+  for (const [name, over] of Object.entries(cases)) {
+    const d = baseD(windowDeps(over));
+    expect(await run(d), name).toBe(2);
+    expect(d.transition.mock.calls.at(-1)[0].to, name).toBe("factory:blocked");
+    if (name.startsWith("vetoWindow.ensureLabel")) {
+      expect(vetoComments(d)).toHaveLength(0);              // 없는 라벨을 붙이라고 말하지 않는다
+      expect(d.vetoWindow.open).not.toHaveBeenCalled();
+      expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/HTTP 403/);
+    }
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+    expect(d.prReady, name).not.toHaveBeenCalled();
+  }
+  // 대기 중간의 폴링 오류 — 조용히 재시도하지 않는다.
+  let n = 0;
+  const flaky = vi.fn(async () => (++n === 4 ? { ok: false, reason: "API rate limit" } : { ok: true, vetoedBy: null }));
+  const d = baseD(windowDeps({ vetoLabel: flaky }));
+  expect(await run(d)).toBe(2);
+  expect(flaky).toHaveBeenCalledTimes(4);
+  expect(d.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/API rate limit/) }));
+  expect(d.mergePr).not.toHaveBeenCalled();
+  // 시계가 움직이지 않으면(멈춘 now) 무한히 돌지 않고 판정 불가로 끝난다.
+  const stuck = baseD(windowDeps({ now: () => T0, sleep: vi.fn(async () => {}) }));
+  expect(await run(stuck)).toBe(2);
+  expect(stuck.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(stuck.vetoLabel.mock.calls.length).toBeLessThan(20);
+  expect(stuck.mergePr).not.toHaveBeenCalled();
+});
+
+test("test_149_veto_window_opens_waits_and_closes — edge reads of a reused window are strict, and fail closed", async () => {
+  const E = { ensureLabel: vi.fn(async () => ({ ok: true })) };
+  const at = (min) => new Date(T0 + min * MIN).toISOString();
+  const win = (over) => ({ sha: HEAD, state: "pending", description: `closes=${at(60)}`, creatorLogin: "KTB-Bot", createdAt: at(0), ...over });
+  // 밀리초 없는 closes=도 받는다, 게시자 대조는 대소문자를 가리지 않는다.
+  const noMs = baseD(windowDeps({ clock: fakeClock(T0 + 55 * MIN), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win({ description: "closes=2026-10-01T10:00:00Z" }) })), open: vi.fn(), ...E } }));
+  expect(await run(noMs)).toBe(0);
+  expect(noMs.sleep.mock.calls.map(([ms]) => ms)).toEqual([5 * MIN]);
+  // 생성 시각이 없으면 opened_at을 모른다 → 판정 불가
+  const noCreated = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win({ createdAt: null }) })), open: vi.fn(), ...E } }));
+  expect(await run(noCreated)).toBe(2);
+  expect(noCreated.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/opened_at/) }));
+  // 지금부터 veto_minutes보다 늦게 닫히는 창(설정이 줄었거나 지어낸 창)은 잡에 들어가지 않는다 → 판정 불가
+  const tooLong = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win({ description: `closes=${at(61)}` }) })), open: vi.fn(), ...E } }));
+  expect(await run(tooLong)).toBe(2);
+  expect(tooLong.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/later than veto_minutes/) }));
+  expect(tooLong.vetoLabel).not.toHaveBeenCalled();
+  const exact = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win({}) })), open: vi.fn(), ...E } }));
+  expect(await run(exact)).toBe(0);                          // 정확히 veto_minutes 남은 창은 들어간다
+  // head sha를 모르면 창을 어디에도 묶을 수 없다
+  const noSha = baseD(windowDeps({ gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: null, passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })) }));
+  expect(await runMergeStage({ issue: 7, defaultBranch: "main", headSha: null, d: noSha, record: () => {}, refusal, postStatus: basePostStatus() })).toBe(2);
+  expect(noSha.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/head sha/) }));
+  expect(noSha.vetoWindow.open).not.toHaveBeenCalled();
+  // 기다리기 자체가 실패하면 판정 불가
+  const sleepFails = baseD(windowDeps({ sleep: vi.fn(async () => { throw new Error("timer died"); }) }));
+  expect(await run(sleepFails)).toBe(2);
+  expect(sleepFails.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/timer died/) }));
+  expect(sleepFails.mergePr).not.toHaveBeenCalled();
+  // veto_minutes가 양의 정수가 아닌 selfChange(ok:true로 위장)도 창을 열지 않는다
+  const badMin = baseD(windowDeps({ selfChange: { ok: true, auto_merge_non_judge: true, veto_minutes: 0 } }));
+  expect(await run(badMin)).toBe(2);
+  expect(badMin.vetoWindow.open).not.toHaveBeenCalled();
+  // ready 뒤 체크 대기 상한이 창과 함께 계산된다(60 + 30 ≥ 80 → 거부)
+  const longWait = baseD(windowDeps({ mergeCheckWaitSec: 1800, mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 80 })) }));
+  expect(await run(longWait)).toBe(2);
+  expect(longWait.transition).toHaveBeenLastCalledWith(expect.objectContaining({ to: "factory:blocked", reason: expect.stringMatching(/\+30 min/) }));
+});

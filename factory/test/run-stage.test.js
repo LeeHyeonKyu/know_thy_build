@@ -3933,3 +3933,81 @@ test("test_136_parked_feature_reuse_names_backlogged_harness", async () => {
   expect(lines.some((l) => /^harness: #31 .*NOT queued/.test(l) && /backlog/.test(l))).toBe(true);
   expect(lines.some((l) => l.startsWith("harness: #31 was opened"))).toBe(false); // 재사용이다 — 열었다고 말하지 않는다
 });
+
+// ══ #149 (S4a) — merge deps 배선: 거부권 창의 status, 거부권 라벨, 머지 잡의 timeout-minutes ══════════
+import { makeVetoWindowDep, makeVetoLabelDep, parseJobTimeoutMinutes } from "../bin/run-stage.js";
+import { VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+
+test("test_149_veto_window_opens_waits_and_closes — vetoWindow dep: reads the latest factory/veto-window status of that sha, opens a pending one", async () => {
+  const sha = "d".repeat(40);
+  const gh = {
+    commitStatuses: vi.fn(async () => [
+      { context: "factory/review", state: "success", description: "x", creatorLogin: "bot", createdAt: "2026-10-01T09:30:00Z" },
+      { context: VETO_WINDOW_CONTEXT, state: "pending", description: "closes=2026-10-01T10:00:00.000Z", creatorLogin: "bot", createdAt: "2026-10-01T09:00:00Z" },
+      { context: VETO_WINDOW_CONTEXT, state: "pending", description: "closes=2026-10-01T08:00:00.000Z", creatorLogin: "bot", createdAt: "2026-10-01T07:00:00Z" },
+    ]),
+    setStatus: vi.fn(async () => {}),
+  };
+  const w = makeVetoWindowDep({ gh });
+  expect(VETO_WINDOW_CONTEXT).toBe("factory/veto-window");
+  expect(await w.read(sha)).toEqual({ ok: true, window: { sha, state: "pending", description: "closes=2026-10-01T10:00:00.000Z", creatorLogin: "bot", createdAt: "2026-10-01T09:00:00Z" } });
+  expect(gh.commitStatuses).toHaveBeenCalledWith(sha);
+  expect(await w.open({ sha, closesAt: "2026-10-01T11:00:00.000Z" })).toEqual({ ok: true });
+  expect(gh.setStatus).toHaveBeenCalledWith({ sha, context: "factory/veto-window", state: "pending", description: "closes=2026-10-01T11:00:00.000Z" });
+
+  const none = makeVetoWindowDep({ gh: { commitStatuses: async () => [{ context: "factory/gates", state: "success" }] } });
+  expect(await none.read(sha)).toEqual({ ok: true, window: null });
+  const broken = makeVetoWindowDep({ gh: { commitStatuses: async () => { throw new Error("HTTP 500"); }, setStatus: async () => { throw new Error("HTTP 403"); } } });
+  expect(await broken.read(sha)).toMatchObject({ ok: false, reason: expect.stringMatching(/HTTP 500/) });
+  expect(await broken.open({ sha, closesAt: "x" })).toMatchObject({ ok: false, reason: expect.stringMatching(/HTTP 403/) });
+  const notList = makeVetoWindowDep({ gh: { commitStatuses: async () => null } });
+  expect((await notList.read(sha)).ok).toBe(false);
+});
+
+test("test_149_veto_label_hands_to_human — vetoLabel dep: a labeled event since opened_at vetoes, whoever added it, even if removed", async () => {
+  const ev = (event, label, actor, createdAt) => ({ event, label, actor, createdAt });
+  const since = "2026-10-01T09:00:00.000Z";
+  const mk = (events, labels = []) => makeVetoLabelDep({ gh: { issueLabelEvents: vi.fn(async () => events), issue: vi.fn(async () => ({ labels })) }, issue: 7 });
+
+  // 창 뒤에 붙었다가 떼어져도 거부권이다(현재 라벨 집합에는 없다).
+  expect(await mk([ev("labeled", "factory:veto", "owner-hk", "2026-10-01T09:10:00Z"), ev("unlabeled", "factory:veto", "factory-bot", "2026-10-01T09:11:00Z")])({ since }))
+    .toEqual({ ok: true, vetoedBy: "owner-hk" });
+  // 누가 붙였든(팩토리 계정이어도) — 거부권은 사람 쪽으로만 움직인다.
+  expect(await mk([ev("labeled", "factory:veto", "factory-bot", "2026-10-01T09:20:00Z")])({ since })).toEqual({ ok: true, vetoedBy: "factory-bot" });
+  // 창 전에 붙었다 떼어진 것은 이 창의 거부권이 아니다. 다른 라벨도 아니다.
+  expect(await mk([ev("labeled", "factory:veto", "owner-hk", "2026-10-01T08:00:00Z"), ev("unlabeled", "factory:veto", "owner-hk", "2026-10-01T08:05:00Z"), ev("labeled", "factory:approved", "bot", "2026-10-01T09:30:00Z")])({ since }))
+    .toEqual({ ok: true, vetoedBy: null });
+  // 창 전에 붙여서 **아직 붙어 있는** 라벨도 거부권이다(마지막으로 붙인 사람).
+  expect(await mk([ev("labeled", "factory:veto", "owner-hk", "2026-10-01T08:00:00Z")], ["factory:approved", "factory:veto"])({ since })).toEqual({ ok: true, vetoedBy: "owner-hk" });
+  // 판정 불가: 조회 실패, 붙인 사람을 모름, 시각을 못 읽음, since가 틀림 — 어느 것도 "거부권 없음"이 아니다.
+  const failing = makeVetoLabelDep({ gh: { issueLabelEvents: async () => { throw new Error("HTTP 502"); }, issue: async () => ({ labels: [] }) }, issue: 7 });
+  expect(await failing({ since })).toMatchObject({ ok: false, reason: expect.stringMatching(/502/) });
+  const noLabels = makeVetoLabelDep({ gh: { issueLabelEvents: async () => [], issue: async () => { throw new Error("HTTP 404"); } }, issue: 7 });
+  expect(await noLabels({ since })).toMatchObject({ ok: false });
+  expect((await mk([ev("labeled", "factory:veto", null, "2026-10-01T09:10:00Z")])({ since })).ok).toBe(false);
+  expect((await mk([ev("labeled", "factory:veto", "owner-hk", "not-a-time")])({ since })).ok).toBe(false);
+  expect((await mk([], ["factory:veto"])({ since })).ok).toBe(false);
+  expect((await mk([])({ since: "garbage" })).ok).toBe(false);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — parseJobTimeoutMinutes reads the installed factory-merge.yml", () => {
+  expect(parseJobTimeoutMinutes("jobs:\n  merge:\n    runs-on: x\n    timeout-minutes: 30\n    steps: []\n")).toEqual({ ok: true, minutes: 30 });
+  expect(parseJobTimeoutMinutes("jobs:\n  a:\n    timeout-minutes: 90 # long\n  b:\n    timeout-minutes: 45\n")).toEqual({ ok: true, minutes: 45 });
+  expect(parseJobTimeoutMinutes("jobs:\n  merge:\n    steps: []\n").ok).toBe(false);
+  expect(parseJobTimeoutMinutes("jobs:\n  merge:\n    timeout-minutes: ${{ vars.T }}\n").ok).toBe(false);
+  expect(parseJobTimeoutMinutes(null).ok).toBe(false);
+  // 실제 설치본에서 읽힌다(오늘 30분 — 기본 60분 창은 들어가지 않는다).
+  const real = readFileSync(join(dirname(new URL(import.meta.url).pathname), "../../.github/workflows/factory-merge.yml"), "utf8");
+  const r = parseJobTimeoutMinutes(real);
+  expect(r.ok).toBe(true);
+  expect(Number.isInteger(r.minutes)).toBe(true);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — vetoWindow.ensureLabel creates factory:veto from the catalog spec (idempotent --force)", async () => {
+  const { VETO_LABEL_SPEC } = await import("../lib/label-catalog.js");
+  const gh = { createLabel: vi.fn(async () => {}) };
+  expect(await makeVetoWindowDep({ gh }).ensureLabel()).toEqual({ ok: true });
+  expect(gh.createLabel).toHaveBeenCalledWith({ name: "factory:veto", color: VETO_LABEL_SPEC.color, description: VETO_LABEL_SPEC.description });
+  const failing = makeVetoWindowDep({ gh: { createLabel: async () => { throw new Error("HTTP 403"); } } });
+  expect(await failing.ensureLabel()).toMatchObject({ ok: false, reason: expect.stringMatching(/403/) });
+});

@@ -17,7 +17,7 @@ import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
-import { HARNESS_LABEL } from "../lib/label-catalog.js";
+import { HARNESS_LABEL, VETO_LABEL, VETO_LABEL_SPEC } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
@@ -42,7 +42,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage } from "../lib/merge-stage.js";
+import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -2027,6 +2027,78 @@ export function completedForHead({ comments, stage, headSha, entryLabels = ENTRY
  * 문이 옮기는 것은 **새 하네스 이슈**이지 피처 이슈가 아니다(피처는 이 스테이지의 `d.transition`이 주차한다).
  * 호출 모양 `({ entries, pr })`은 그대로다(run-stage 테스트가 고정한다).
  */
+/**
+ * #149 (S4a) — merge 스테이지의 거부권 창 재료(`lib/merge-stage.js` (5b)).
+ *
+ * `vetoWindow`: 이 sha의 `factory/veto-window` 상태 — 목록 API는 최신순이므로 첫 항목이 지금 유효한 것이다.
+ * 게시자는 여기서 판정하지 않는다(`creatorLogin`을 그대로 싣는다): merge-stage가 `factoryLogins`, 곧
+ * `verifyFactoryStatuses`와 같은 로그인 집합으로 대조한다. 실패는 `{ok:false}`로 돌려준다 — 판정 불가다.
+ */
+export function makeVetoWindowDep({ gh }) {
+  return {
+    read: async (sha) => {
+      let list;
+      try { list = await gh.commitStatuses(sha); }
+      catch (e) { return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — ${e?.message || e}` }; }
+      if (!Array.isArray(list)) return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — no list returned` };
+      const s = list.find((x) => x?.context === VETO_WINDOW_CONTEXT);
+      return { ok: true, window: s ? { sha, state: s.state ?? null, description: s.description ?? null, creatorLogin: s.creatorLogin ?? null, createdAt: s.createdAt ?? null } : null };
+    },
+    /** 거부권 라벨을 카탈로그 정의 그대로 만든다(`--force` — 이미 있으면 색·설명만 맞춘다). */
+    ensureLabel: async () => {
+      try { await gh.createLabel({ ...VETO_LABEL_SPEC }); return { ok: true }; }
+      catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+    },
+    open: async ({ sha, closesAt }) => {
+      try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description: `closes=${closesAt}` }); return { ok: true }; }
+      catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+    },
+  };
+}
+
+/**
+ * #149 (S4a) — 거부권은 **`since` 이후의 `factory:veto` labeled 이벤트**다. 누가 붙였든(거부권은 사람 쪽으로만
+ * 움직인다), 나중에 떼어졌든(떼는 것으로 사람의 거부권을 지울 수 없다). 창이 열리기 전에 붙여 **아직 붙어 있는**
+ * 라벨도 거부권이다 — 그때는 가장 최근에 붙인 사람의 이름을 댄다. 읽지 못한 것·붙인 사람이나 시각을 모르는
+ * 이벤트는 `{ok:false}` — "거부권 없음"으로 읽지 않는다.
+ */
+export function makeVetoLabelDep({ gh, issue, label = VETO_LABEL }) {
+  return async ({ since } = {}) => {
+    const sinceMs = Date.parse(since ?? "");
+    if (!Number.isFinite(sinceMs)) return { ok: false, reason: `veto window start ${JSON.stringify(since)} is not a timestamp` };
+    let events, labels;
+    try { events = await gh.issueLabelEvents(issue); }
+    catch (e) { return { ok: false, reason: `label events for issue #${issue} unreadable — ${e?.message || e}` }; }
+    try { labels = (await gh.issue(issue))?.labels; }
+    catch (e) { return { ok: false, reason: `labels of issue #${issue} unreadable — ${e?.message || e}` }; }
+    if (!Array.isArray(events) || !Array.isArray(labels)) return { ok: false, reason: `labels of issue #${issue} unreadable — no list returned` };
+    const vetoes = events.filter((e) => e?.event === "labeled" && e?.label === label).map((e) => ({ actor: e.actor ?? null, at: Date.parse(e.createdAt ?? "") }));
+    if (vetoes.some((v) => !Number.isFinite(v.at))) return { ok: false, reason: `a ${label} event on issue #${issue} carries no readable time` };
+    const inWindow = vetoes.filter((v) => v.at >= sinceMs).sort((a, b) => a.at - b.at);
+    const pick = inWindow[0] ?? (labels.includes(label) ? [...vetoes].sort((a, b) => b.at - a.at)[0] : null);
+    if (!pick) {
+      if (labels.includes(label)) return { ok: false, reason: `issue #${issue} carries ${label} but no event says who added it` };
+      return { ok: true, vetoedBy: null };
+    }
+    if (!pick.actor) return { ok: false, reason: `a ${label} event on issue #${issue} names no actor` };
+    return { ok: true, vetoedBy: pick.actor };
+  };
+}
+
+/** #149 (S4a) — 설치된 머지 워크플로. */
+export const MERGE_WORKFLOW = ".github/workflows/factory-merge.yml";
+/**
+ * 워크플로 텍스트의 `timeout-minutes` — 여러 개면 가장 작은 값(보수적). 없거나 숫자가 아니면(식 `${{ }}` 포함)
+ * `{ok:false}`: 창이 잡 안에 드는지 알 수 없다.
+ */
+export function parseJobTimeoutMinutes(text) {
+  if (typeof text !== "string") return { ok: false, reason: `${MERGE_WORKFLOW} unreadable` };
+  const values = [...text.matchAll(/^\s*timeout-minutes:\s*(.*?)\s*(?:#.*)?$/gm)].map((m) => m[1]);
+  if (!values.length) return { ok: false, reason: `${MERGE_WORKFLOW} declares no timeout-minutes` };
+  if (values.some((v) => !/^\d+$/.test(v))) return { ok: false, reason: `${MERGE_WORKFLOW} timeout-minutes is not a literal integer (${values.join(", ")})` };
+  return { ok: true, minutes: Math.min(...values.map(Number)) };
+}
+
 export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, transitionFn = transition }) {
   const transitionIssue = ({ issue: n, to, reason }) => transitionFn({ gh, issue: n, to, reason, stage, rehearsal, admission });
   return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transitionIssue });
@@ -2714,6 +2786,10 @@ async function main() {
   const admission = async (args) => (charter
     ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
     : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
+  // #149 (S4a) — 머지 잡의 timeout-minutes는 체크아웃이 PR head로 옮기기 **전**(base)에 읽는다.
+  const mergeWorkflowAtStart = stage === "merge" ? readFile(join(root, MERGE_WORKFLOW)) : null;
+  // 엔진 저장소인가도 base에서 정한다 — PR head의 트리로 물으면 PR이 `factory/cli/*`를 더하거나 지워 답을 바꾼다.
+  const engineAtStart = stage === "merge" ? mirrorApplicable(root) : false;
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -3165,6 +3241,18 @@ async function main() {
     get humanGate() { return charter?.merge?.human_gate; },
     prHeadShaLive: (pr) => gh.prHeadSha(pr),
     commitStatuses: (sha) => gh.commitStatuses(sha),
+    /**
+     * #149 (S4a) — 비판정 경로 자기 머지(기본 꺼짐). `engine`은 엔진 저장소인가(채택자는 언제나 사람 머지 — 시작 시 base에서 판정),
+     * `selfChange`는 **프로세스 시작 시(base 체크아웃) 읽은** CHARTER의 검증 결과 — PR이 자기 CHARTER로 스위치를
+     * 켤 수 없다(CHARTER는 판정자 경로이기도 하다). CHARTER가 없으면 undefined = 꺼짐.
+     * `mergeJobTimeoutMinutes`도 시작 시 읽은 설치본에서 온다(`.github/**`는 판정자라 창까지 오는 PR이 바꿀 수 없다).
+     */
+    get engine() { return engineAtStart; },
+    get selfChange() { return charter?.self_change; },
+    mergeJobTimeoutMinutes: async () => parseJobTimeoutMinutes(mergeWorkflowAtStart),
+    vetoWindow: makeVetoWindowDep({ gh }),
+    vetoLabel: makeVetoLabelDep({ gh, issue }),
+    now: () => Date.now(),
     /** 팩토리 자신의 계정 이름(값이 아니다) — 판정과 해석은 `lib/gh.js`의 `resolveFactoryLogins` 하나다(KTB-46). */
     // `process.env`는 **워크플로 진입점인 이 배선 한 줄**에만 산다(1.4.0 핫픽스).
     factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),
