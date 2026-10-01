@@ -273,6 +273,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
   let hb = null;                                                      // 락을 잡은 뒤의 모든 실패는 finally를 거쳐야 한다
   let overlaidPaths = [];                                             // KTB-37 — 이 런의 overlay가 덮은 정확한 경로들(쓰기 금지 스테이지의 클린 체크 허용 목록)
   let stageBranchName = null;                                         // Task 8b — implement가 스테이지 스스로 체크아웃한 브랜치(세션 뒤 같은 자리인지 다시 묻는다)
+  let pendingMerge = null;                                            // #143 — 빌더에게 넘긴 base 병합 `{ sha, paths }`(세션 뒤 끝났는지 다시 묻는다)
   let driftRefusal = null;                                            // KTB-43 — 핸드오프 뒤의 커밋이 드리프트 경로 밖이었다(핸드오프를 쓴 뒤에 거부한다)
   let checkoutSha = null;                                             // review/merge가 실제로 게이트를 돌린 PR head — review는 아래에서 런 레코드 마지막 줄에, merge는 runMergeStage로 그대로 넘겨 기록한다
   try {
@@ -506,7 +507,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         return 2;
       }
       stageBranchName = cb.branch;
-      record([branchLine(cb), ...(cb.merged ? [baseMergedLine(cb)] : [])]);
+      // #143 (S3b) — 소스 충돌이 남은 병합은 abort되지 않고 빌더에게 넘어왔다: 커밋도 push도 없었으므로 base_merged 줄을 쓰지 않는다.
+      if (cb.conflicts?.length) pendingMerge = { sha: cb.merged, paths: [...cb.conflicts] };
+      record([branchLine(cb), ...(pendingMerge ? [baseMergeConflictLine(cb)] : cb.merged ? [baseMergedLine(cb)] : [])]);
     }
     // KTB-37 — 체크아웃이 끝난 트리 위에 **팩토리 소유 설정만** 스테이지 자신의 커밋에서 덮는다
     // (§makeFactoryOverlay). review·merge는 방금 detach된 PR head 위에서, implement는 빌더가 돌기
@@ -532,19 +535,44 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       // 팩토리 소유 경로를 고쳐 들고 있는 경우다(예: `.claude/**`를 건드린 PR의 rework 라운드).
       // 그런 PR은 어차피 사람이 머지한다(`[protected]`) — 그 라운드도 사람에게 넘긴다. 세션을 PR의
       // 설정으로 돌리는 것과 PR의 작업을 말없이 되돌리는 것 중 어느 쪽도 스테이지가 고를 일이 아니다.
-      if (stage === "implement" && overlaidPaths.length) {
+      /**
+       * #143 (S3b) — **병합이 진행 중이면 가드는 브랜치 자신의 변경만 센다.** 병합 중인 인덱스에서 `git status`는 base의 변경
+       * (엔진 릴리스가 함께 바꾼 `.claude/**`·`.factory/**`)도 HEAD 대비 staged 차이로 보고하고, overlay는 그것을 "덮었다"고 적는다 —
+       * 그대로 세면 이 이슈가 풀려던 바로 그 경우가 여기서 막힌다. 브랜치가 merge-base 이후 실제로 바꾼 경로(`branchOwnFactoryPaths`)만
+       * 남긴다. 그중 미러 가족은 세지 않는다: 그 HEAD 바이트를 브랜치 소스와 대조할 수단(`mirrorMatchesHead`)은 워크트리 소스를
+       * 읽는데 지금 그 소스에는 마커가 있고, 세션 뒤 미러 단계가 푼 소스로 어차피 다시 만든다(되돌림이 PR에 실리지 않는다).
+       * 미러가 아닌 팩토리 경로를 브랜치가 고쳤다면 오늘처럼 멈춘다.
+       */
+      let guardPaths = overlaidPaths;
+      if (stage === "implement" && pendingMerge && overlaidPaths.length) {
+        const own = d.branchOwnFactoryPaths
+          ? await d.branchOwnFactoryPaths({ sha: pendingMerge.sha, harnessIssue })
+          : { ok: false, reason: "no branch-own factory path check is wired" };
+        if (!own?.ok) {
+          const reason = `the base merge is pending and the branch's own factory-owned changes could not be listed — ${own?.reason || "unknown"}`;
+          const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+          record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
+          return 2;
+        }
+        const mine = new Set(own.paths);
+        const branchOwned = overlaidPaths.filter((p) => mine.has(p));
+        const mirrorOwned = branchOwned.filter((p) => inMirrorFamily(p));
+        guardPaths = branchOwned.filter((p) => !inMirrorFamily(p));
+        record([`overlay: base merge pending — ${overlaidPaths.length - branchOwned.length} overlaid path(s) are base's staged changes, not the branch's; ${mirrorOwned.length} branch mirror path(s) reverted for the session, regenerated from the resolved factory/** after it${mirrorOwned.length ? `: ${mirrorOwned.slice(0, 6).join(", ")}${mirrorOwned.length > 6 ? ", …" : ""}` : ""}`]);
+      }
+      if (stage === "implement" && guardPaths.length) {
         /**
          * 설계 2026-09-30 §8.3 (S3, KTB #130 실측) — 예외 하나: 덮인 경로가 **전부 미러 가족**이고 브랜치 HEAD의 그 파일들이 브랜치의
          * `factory/**`에서 생성되는 것과 같으면, 그것은 빌더의 변경이 아니라 앞 런의 러너 미러 커밋이다. 세션은 그대로 base의 엔진으로
          * 돌고(overlay가 되돌린 대로), 세션 뒤 미러 단계가 다시 만든다. 대조가 틀리면 예전처럼 거부한다.
          */
-        const allMirror = overlaidPaths.every((p) => inMirrorFamily(p));
+        const allMirror = guardPaths.every((p) => inMirrorFamily(p));
         const mm = allMirror && d.mirrorMatchesHead ? await d.mirrorMatchesHead() : null;
         if (mm?.ok && mm.applicable) {
-          record([`overlay: ${overlaidPaths.length} runner-generated mirror path(s) reverted to ${ov.sha.slice(0, 7)} for the session — verified against the branch's factory/**: ${overlaidPaths.slice(0, 6).join(", ")}${overlaidPaths.length > 6 ? ", …" : ""}`]);
+          record([`overlay: ${guardPaths.length} runner-generated mirror path(s) reverted to ${ov.sha.slice(0, 7)} for the session — verified against the branch's factory/**: ${guardPaths.slice(0, 6).join(", ")}${guardPaths.length > 6 ? ", …" : ""}`]);
         } else {
           const why = mm && !mm.ok ? ` — and the branch's installed engine is not what its sources generate (${(mm.mismatched || []).slice(0, 4).join(", ") || mm.reason || "unknown"})` : "";
-          const reason = `the implement tree carries factory-owned paths that differ from the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${overlaidPaths.length} path(s): ${overlaidPaths.slice(0, 10).join(", ")}${why}`;
+          const reason = `the implement tree carries factory-owned paths that differ from the stage's own commit (${ov.sha.slice(0, 7)}) — the overlay would change ${guardPaths.length} path(s): ${guardPaths.slice(0, 10).join(", ")}${why}`;
           const t = await d.transition({ to: "factory:blocked", reason });
           record([`overlay: FAIL — ${reason}`, ...refusal(t)]);
           return 2;
@@ -609,7 +637,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     }
     if (harnessIssue) record([`harness issue: builder runs with ${settingsFile} + FACTORY_HARNESS_ISSUE=1 (test-infra files writable; merge still needs a human)`]);
     // KTB-43 — 기준선(1.5)은 컨텍스트에도 실린다: 빌더 프롬프트의 "커밋하지 말 것" 목록이 그것이다.
-    const ctx = await d.buildContext({ setupDirty });
+    // #143 — 빌더에게 넘긴 충돌 경로는 `loaded.merge_conflicts`로 간다(넘긴 것이 없으면 키도 없다).
+    const ctx = await d.buildContext({ setupDirty, ...(pendingMerge ? { mergeConflicts: pendingMerge.paths } : {}) });
     /**
      * Feedback loop Task 1 (리뷰 provenance) — 두 새 줄은 **자기를 쓴 런을 지목한다**. `docs/factory/runs/**`는
      * 에이전트 세션이 덧붙일 수 있는 경로이고 harvester는 정규식의 첫 매치를 집으므로, 런에 묶이지 않은
@@ -640,6 +669,23 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
     let usage = usageLine(out, finalProgress);
+    /**
+     * #143 (S3b) — **빌더에게 넘긴 병합은 세션 직후에 끝났는지 묻는다.** 브랜치 확인·드리프트 제거·미러 커밋·턴 한도/API 오류의
+     * 게이트 복구 **전**이다: 그 단계들은 전부 끝난 트리를 가정하고, 마커째 커밋된 트리를 미러로 재생성하거나 게이트로 판정하면
+     * 판정이 아니다. 끝나지 않았으면(MERGE_HEAD, abort/reset, 커밋된 마커, 읽을 수 없는 상태) 판정 불가 — 산출물은 받지 않는다.
+     */
+    if (stage === "implement" && pendingMerge) {
+      const bm = d.baseMergeComplete ? await d.baseMergeComplete(pendingMerge) : { ok: false, reason: "no base-merge completion check is wired" };
+      if (!bm?.ok) {
+        const reason = baseMergeIncompleteReason({ pending: pendingMerge, branch: stageBranchName, detail: bm?.reason });
+        const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+        record([`base_merge: FAIL — ${reason}`, ...refusal(t), usage]);
+        return 2;
+      }
+      record([`base_merge: completed by the builder — ${String(pendingMerge.sha).slice(0, 7)} is an ancestor of HEAD, no MERGE_HEAD, no conflict markers in ${pendingMerge.paths.length} path(s)`]);
+      // 컨텍스트가 세션 전에 구한 merge-base는 옛 분기점이다 — 게이트가 그것으로 diff를 보면 base 릴리스 전체가 이 PR의 변경이 된다.
+      d.forgetMergeBase?.();
+    }
     // ADR-023 Task 8b — implement의 구조적 백스톱. 쓰기 스테이지라 클린 체크는 할 수 없지만(빌더가
     // 파일을 쓰는 것이 이 스테이지의 일이다) **두 가지**는 세션 뒤에도 참이어야 한다: HEAD가 아직
     // 스테이지가 체크아웃한 브랜치이고, 팩토리 소유 경로가 아직 스테이지 커밋의 바이트라는 것.
@@ -2041,7 +2087,7 @@ export function makeCheckoutBranch({ run, root, issue, env = process.env, defaul
       if (co.code !== 0) return { ok: false, reason: `git checkout -B ${branch} failed: ${co.stderr?.trim() || `exit ${co.code}`}` };
       const m = await mergeBaseIntoBranch({ run, root, branch, sha: s.sha, source: s.source, env, regenerate });
       if (!m.ok) return m;
-      return { ok: true, branch, base: `origin/${branch}`, existed: true, merged: m.merged, source: s.source, ...(m.mirrorResolved ? { mirrorResolved: m.mirrorResolved } : {}) };
+      return { ok: true, branch, base: `origin/${branch}`, existed: true, merged: m.merged, source: s.source, ...(m.mirrorResolved ? { mirrorResolved: m.mirrorResolved } : {}), ...(m.conflicts?.length ? { conflicts: m.conflicts, partial: m.partial } : {}) };
     }
     const local = await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: root });
     if (local.code === 0) {
@@ -2068,7 +2114,9 @@ export function makeCheckoutBranch({ run, root, issue, env = process.env, defaul
  * 된다. 한 런 안에서 base는 하나다.
  *
  * 충돌은 스테이지가 풀 일이 아니다: `git merge --abort`으로 트리를 되돌리고 **판정 불가**로 멈춘다
- * (`factory:blocked` cause `undecidable`) — 사람이 리베이스한다. 머지 커밋은 팩토리의 것이고
+ * (`factory:blocked` cause `undecidable`) — 사람이 리베이스한다. (#143 S3b가 이것을 **엔진 저장소의 소스 충돌**에 한해 대체한다:
+ * 그 충돌은 abort하지 않고 마커째 빌더에게 넘긴다 — §resolveMirrorConflicts·§assertBaseMergeComplete. 채택자 저장소·overlay 루트
+ * 충돌·나열할 수 없는 실패는 여전히 여기 그대로다.) 머지 커밋은 팩토리의 것이고
  * (`user.name factory`), 빌더가 뜨기 **전에** push한다: 빌더가 아무것도 바꾸지 않는 라운드에도 PR head는
  * 그 머지를 반영해야 하고(그래야 review·merge가 같은 트리를 본다), 빌더의 push는 빌더의 커밋만 싣는다.
  */
@@ -2079,6 +2127,14 @@ export function makeCheckoutBranch({ run, root, issue, env = process.env, defaul
  * 충돌 경로가 **전부 미러 가족**이고 이 저장소가 KTB 자신일 때만: base 쪽을 임시로 받아 마커를 지우고, 병합된 소스로 재생성해
  * 머지 커밋을 완성한다. 소스(`factory/**`)가 하나라도 충돌했으면 예전처럼 abort하고 사람에게 넘긴다.
  */
+/**
+ * #143 (S3b) — **overlay 루트 아래의 충돌은 빌더에게 넘기지 않는다.** `.claude/**`·미러가 아닌 `.factory/**`·CHARTER·세션 설정
+ * (CLAUDE.md/AGENTS.md/.mcp.json)은 빌더가 쓸 수 없고(L2 deny·훅), overlay가 세션 전에 base 것으로 덮는다 — 그 충돌을 남기면
+ * PR 쪽 변경이 말없이 사라진다. 미러 가족은 여기 들지 않는다: base 것을 받고 세션 뒤 미러 단계가 병합된 소스로 다시 만든다.
+ */
+export const isOverlayRootConflict = (p) => !inMirrorFamily(p)
+  && (p.startsWith(".claude/") || p.startsWith(".factory/") || p === "docs/factory/CHARTER.md" || SESSION_CONFIG_RE.test(p));
+
 async function resolveMirrorConflicts({ run, root, sha, ident, regenerate }) {
   if (!mirrorApplicable(root)) return { resolved: false, reason: "not the engine repo" };
   const u = await run("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: root });
@@ -2087,7 +2143,11 @@ async function resolveMirrorConflicts({ run, root, sha, ident, regenerate }) {
   const mirror = conflicted.filter((p) => inMirrorFamily(p));
   const union = conflicted.filter((p) => isUnionMergePath(p));
   const other = conflicted.filter((p) => !inMirrorFamily(p) && !isUnionMergePath(p));
-  if (!conflicted.length || other.length) return { resolved: false, reason: `conflicts outside the mirror families: ${other.slice(0, 5).join(", ") || "none listed"}` };
+  // 병합이 실패했는데 충돌 경로가 하나도 없다 — 충돌이 아니라 다른 고장이다. 빈 목록을 빌더에게 넘기지 않는다.
+  if (!conflicted.length) return { resolved: false, reason: "the merge failed but listed no conflicted paths" };
+  // #143 — 빌더가 쓸 수 없는 경로가 하나라도 충돌했으면 트리를 건드리기 **전에** 멈춘다(예전처럼 abort, 경로를 이름으로).
+  const owned = other.filter((p) => isOverlayRootConflict(p));
+  if (owned.length) return { resolved: false, reason: `conflicts under factory-owned roots the builder cannot write: ${owned.slice(0, 5).join(", ")}${owned.length > 5 ? ", …" : ""}` };
   // 1.4.39 — 추가 전용 파일(DECISIONS.md)은 양쪽을 다 남긴다: base(:1)·ours(:2)·theirs(:3)를 꺼내 `merge-file --union`으로 합친다.
   for (const p of union) {
     const stages = {};
@@ -2109,6 +2169,12 @@ async function resolveMirrorConflicts({ run, root, sha, ident, regenerate }) {
     const take = await run("git", ["checkout", sha, "--", ...mirror], { cwd: root });
     if (take.code !== 0) return { resolved: false, reason: `could not take base's copy of the conflicted mirror paths: ${take.stderr?.trim() || `exit ${take.code}`}` };
   }
+  /**
+   * #143 (S3b) — 소스 충돌이 남았다: **abort하지 않고 빌더에게 넘긴다.** 미러는 다시 만들지 않는다 — 생성기는 워크트리의
+   * `factory/**`를 읽는데 거기에 아직 마커가 있다(재생성은 세션 뒤 `d.mirror("commit")`이 푼 소스로 한다). 커밋도 push도 없다:
+   * 반쯤 병합된 트리는 origin에 닿지 않고, 병합 커밋은 빌더의 것이다(세션 뒤 `assertBaseMergeComplete`가 확인한다).
+   */
+  if (other.length) return { resolved: false, pending: true, conflicts: other, mirror, union };
   const r = await regenerate({ root });
   if (!r.ok) return { resolved: false, reason: r.reason };
   const add = await run("git", ["add", "--", ...MIRROR_FAMILIES.map((f) => f.replace(/\/$/, ""))], { cwd: root });
@@ -2129,16 +2195,19 @@ export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "ba
   const ident = ["-c", "user.name=factory", "-c", `user.email=${bot ? `${bot}@users.noreply.github.com` : "factory-bot@users.noreply.github.com"}`];
   const mg = await run("git", [...ident, "merge", "--no-edit", "--no-ff", sha], { cwd: root });
   let mirrorResolved = null;
+  let rm = null;
   if (mg.code !== 0) {
-    const rm = await resolveMirrorConflicts({ run, root, sha, ident, regenerate });
+    rm = await resolveMirrorConflicts({ run, root, sha, ident, regenerate });
     if (rm.resolved) mirrorResolved = rm;
+    // #143 — 남은 것은 소스 충돌뿐이다: 마커가 든 트리를 그대로 두고 경로 목록을 돌려준다(커밋도 push도 없다).
+    else if (rm.pending) return { ok: true, merged: sha, conflicts: rm.conflicts, partial: { mirror: rm.mirror, union: rm.union } };
   }
   if (mg.code !== 0 && !mirrorResolved) {
     const ab = await run("git", ["merge", "--abort"], { cwd: root });
     return {
       ok: false,
       undecidable: true,
-      reason: `stale PR conflicts with base — rebase by hand (merging ${sha.slice(0, 7)} (${source}) into ${branch} conflicted${ab.code === 0 ? ", merge aborted" : `; git merge --abort also failed: ${ab.stderr?.trim() || `exit ${ab.code}`}`})`,
+      reason: `stale PR conflicts with base — rebase by hand (merging ${sha.slice(0, 7)} (${source}) into ${branch} conflicted${rm?.reason ? `: ${rm.reason}` : ""}${ab.code === 0 ? ", merge aborted" : `; git merge --abort also failed: ${ab.stderr?.trim() || `exit ${ab.code}`}`})`,
     };
   }
   const push = await run("git", ["push", "origin", branch], { cwd: root });
@@ -2157,6 +2226,68 @@ export const harnessReloadLine = (h, when) =>
 export const baseMergedLine = (cb) =>
   `base_merged: ${String(cb.merged).slice(0, 7)} (${cb.source || "base"}) merged into ${cb.branch} by the stage and pushed before the builder — the PR tree carries base's tooling`
   + (cb.mirrorResolved ? ` (conflicts in ${cb.mirrorResolved.conflicted.length} runner-generated mirror path(s) resolved by regenerating from the merged factory/**: ${cb.mirrorResolved.conflicted.slice(0, 4).join(", ")})` : "");
+
+/**
+ * #143 (S3b) — 병합이 빌더에게 넘어간 라운드의 기록. 무엇이 남았는지(경로)·어느 base인지(sha·출처)를 말하고, push했다고 말하지
+ * 않는다 — 이 라운드에는 스테이지의 병합 커밋도 push도 없다.
+ */
+export const baseMergeConflictLine = (cb) => {
+  const paths = cb.conflicts || [];
+  const mirror = cb.partial?.mirror || [], union = cb.partial?.union || [];
+  const extra = [
+    ...(mirror.length ? [`${mirror.length} conflicted mirror path(s) took base's copy, regenerated after the session: ${mirror.slice(0, 4).join(", ")}${mirror.length > 4 ? ", …" : ""}`] : []),
+    ...(union.length ? [`union-merged: ${union.join(", ")}`] : []),
+  ];
+  return `base_merge: ${paths.length} conflicted source path(s) left to the builder: ${paths.slice(0, 10).join(", ")}${paths.length > 10 ? ", …" : ""}`
+    + ` — merging ${String(cb.merged).slice(0, 7)} (${cb.source || "base"}) into ${cb.branch} is pending — no merge commit and no push by the stage; the builder concludes the merge`
+    + (extra.length ? ` (${extra.join("; ")})` : "");
+};
+
+/** 충돌 마커 줄(시작·끝). `=======`은 세지 않는다 — 마크다운의 setext 밑줄과 구분되지 않는다. */
+const CONFLICT_MARKER_RE = /^(<{7}|>{7})(?:[ \r]|$)/m;
+
+/**
+ * #143 (S3b) — **빌더가 병합을 끝냈는가**를 git 상태로만 판정한다(빌더의 말이 아니라). 셋 다 참이어야 끝난 것이다:
+ *   ① `MERGE_HEAD`가 없다(`git rev-parse -q --verify` — `.git`은 워크트리에서 파일일 수 있어 경로로 읽지 않는다),
+ *   ② base sha가 HEAD의 조상이다(빌더가 abort·reset했으면 MERGE_HEAD도 없지만 병합도 없다 — KTB-38이 말없이 돌아온다),
+ *   ③ 기록된 충돌 경로의 HEAD 바이트에 마커 줄이 없다(`git add -A && git commit`으로 마커째 "끝낸" 병합).
+ * 0/1 밖의 종료 코드는 답이 아니라 고장이다 — 판정할 수 없으면 끝났다고 보지 않는다.
+ */
+export async function assertBaseMergeComplete({ run, cwd, sha, paths = [] }) {
+  const why = (r) => r.stderr?.trim() || `exit ${r.code}`;
+  const mh = await run("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd });
+  if (mh.code === 0) return { ok: false, reason: `MERGE_HEAD still present — the merge was never concluded (still conflicted: ${paths.join(", ") || "none listed"})` };
+  if (mh.code !== 1) return { ok: false, reason: `git state unreadable — git rev-parse MERGE_HEAD: ${why(mh)}` };
+  const anc = await run("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd });
+  if (anc.code === 1) return { ok: false, reason: `base ${String(sha).slice(0, 7)} is not an ancestor of HEAD — the merge was aborted or reset, not concluded` };
+  if (anc.code !== 0) return { ok: false, reason: `git state unreadable — git merge-base --is-ancestor: ${why(anc)}` };
+  const marked = [];
+  for (const p of paths) {
+    const ls = await run("git", ["ls-tree", "--name-only", "HEAD", "--", p], { cwd });
+    if (ls.code !== 0) return { ok: false, reason: `git state unreadable — git ls-tree HEAD ${p}: ${why(ls)}` };
+    if (!ls.stdout.trim()) continue;                                  // 삭제도 해결이다 — HEAD에 없는 파일에는 마커가 없다
+    const show = await run("git", ["show", `HEAD:${p}`], { cwd });
+    if (show.code !== 0) return { ok: false, reason: `git state unreadable — git show HEAD:${p}: ${why(show)}` };
+    if (CONFLICT_MARKER_RE.test(show.stdout)) marked.push(p);
+  }
+  if (marked.length) return { ok: false, reason: `conflict markers committed in ${marked.join(", ")}` };
+  return { ok: true };
+}
+
+/** #143 — 세션 뒤 병합이 끝나지 않은 라운드의 blocked 사유. 사람이 마저 할 일(어느 base를, 어느 브랜치로, 어느 경로)을 적는다. */
+export const baseMergeIncompleteReason = ({ pending, branch, detail }) =>
+  `undecidable — builder did not complete the base merge (${detail || "unknown"}) — finish merging ${String(pending.sha).slice(0, 7)} into ${branch} by hand: ${pending.paths.join(", ")}`;
+
+/**
+ * #143 (S3b) — 병합이 진행 중일 때 **브랜치 자신이** 바꾼 팩토리 소유 경로(merge-base..HEAD). 병합 중인 인덱스에서는 base의
+ * 변경도 HEAD 대비 staged 차이로 보이므로(`git status`), overlay 가드가 그것을 브랜치의 변경으로 세면 엔진 릴리스가 `.claude/**`를
+ * 함께 바꾼 바로 그 경우에 넘김이 막힌다. 읽지 못하면 fail closed.
+ */
+export async function branchOwnFactoryPaths({ run, cwd, sha, harnessIssue = false }) {
+  const r = await run("git", ["diff", "--name-only", "--no-renames", `${sha}...HEAD`, "--", ...overlayPathspecs(harnessIssue)], { cwd });
+  if (r.code !== 0) return { ok: false, paths: [], reason: `git diff ${String(sha).slice(0, 7)}...HEAD failed: ${r.stderr?.trim() || `exit ${r.code}`}` };
+  return { ok: true, paths: r.stdout.split("\n").map((l) => l.trim()).filter(Boolean) };
+}
 
 /**
  * ADR-023 Task 8b — 세션이 끝난 뒤에도 **여전히 그 브랜치 위인가**, 그리고 팩토리 설정은 여전히
@@ -2545,6 +2676,12 @@ async function main() {
     reloadHarness: () => { harness = loadHarness(root); return harness; },
     /** 세션 뒤: HEAD가 아직 그 브랜치이고 팩토리 설정이 아직 스테이지 커밋의 것인가(fail closed). */
     assertStageBranch: async (harnessIssue = false) => assertStageBranch({ run, cwd: root, issue, sha: overlaySha, harnessIssue }),
+    /** #143 — 병합이 진행 중일 때 overlay 가드가 세는 경로: 브랜치가 merge-base 이후 실제로 바꾼 팩토리 소유 경로. */
+    branchOwnFactoryPaths: ({ sha, harnessIssue = false }) => branchOwnFactoryPaths({ run, cwd: root, sha, harnessIssue }),
+    /** #143 — 세션 뒤: 빌더가 넘겨받은 base 병합을 정말로 끝냈는가(MERGE_HEAD·조상·마커, fail closed). */
+    baseMergeComplete: ({ sha, paths }) => assertBaseMergeComplete({ run, cwd: root, sha, paths }),
+    /** #143 — 빌더가 병합을 끝낸 뒤: 세션 전에 캐시된 merge-base(옛 분기점)를 버려 게이트가 병합된 HEAD로 다시 구하게 한다. */
+    forgetMergeBase: () => { baseSha = null; },
     /** S3 — 설치된 엔진의 재생성(`lib/mirror.js`). KTB 자기 저장소에서만 적용된다(소스 `factory/cli/**`가 있을 때). */
     mirror: (mode, headSha) => mirrorStep({ root, run, mode, headSha }),
     mirrorMatchesHead: () => mirrorMatchesHead({ root, run }),
@@ -2587,13 +2724,13 @@ async function main() {
      * `gates` dep이 같은 `mergeBase()`로 MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는
      * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
      */
-    buildContext: async ({ setupDirty = null, planRepair = null } = {}) => {
+    buildContext: async ({ setupDirty = null, planRepair = null, mergeConflicts = null } = {}) => {
       let base = null;
       try { base = await mergeBase(); }
       catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
       // Task 9 (KTB-51): on the plan repair turn, the validator reasons ride into `loaded.json` as
       // `plan_repair` (the same channel Task 3 uses for self-gate findings) so the planner sees them.
-      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty, planRepair }));
+      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts }));
     },
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },

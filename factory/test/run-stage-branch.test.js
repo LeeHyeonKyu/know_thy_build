@@ -360,11 +360,13 @@ test("checkoutBranch: conflicts confined to the mirror families are resolved by 
   } finally { _rm(root, { recursive: true, force: true }); }
 });
 
-test("checkoutBranch: a conflict that touches a source file (or any non-mirror path) is still aborted and undecidable", async () => {
+// #143 rescope: a source conflict alone is now left to the builder (test_143_source_conflict_is_left_to_the_builder). What still
+// aborts is a conflict under an overlay root the builder cannot write — here a non-mirror `.factory/**` path next to the source one.
+test("checkoutBranch: a conflict under a factory-owned overlay root (non-mirror .factory/**) is still aborted and undecidable, even next to a source conflict", async () => {
   const root = selfRepo();
   try {
     const calls = []; const regenerate = vi.fn();
-    const run = conflictStub({ calls, conflicted: [".factory/lib/gates.js", "factory/lib/gates.js"] });
+    const run = conflictStub({ calls, conflicted: [".factory/lib/gates.js", ".factory/harness.toml", "factory/lib/gates.js"] });
     const r = await makeCheckoutBranch({ run, root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate })();
     expect(r.ok).toBe(false);
     expect(r.undecidable).toBe(true);
@@ -407,4 +409,388 @@ test("checkoutBranch: an append-only file (DECISIONS.md) conflicting alongside m
     expect(calls.some((c) => c === "add -- docs/factory/DECISIONS.md")).toBe(true);
     expect(calls.some((c) => c.includes("merge --abort"))).toBe(false);
   } finally { _rm(root, { recursive: true, force: true }); }
+});
+
+/**
+ * ── #143 (S3b) — **소스 충돌은 같은 implement 런 안에서 빌더의 일이다.** ──────────────────────────────
+ * 엔진 이슈가 공장에서 도는 동안 엔진 릴리스가 나가면 소스가 겹친다(#130은 세 릴리스와 겹쳐 재시작했다 — $45 중 절반).
+ * 미러 가족은 base 것을 받고(재생성은 세션 뒤 미러 단계가 병합된 소스로 한다), 추가 전용 파일은 합집합으로 풀고, 남은 소스 충돌은
+ * 마커가 든 채로 빌더에게 넘긴다. 세션 뒤 병합이 끝나지 않았으면(MERGE_HEAD, abort, 커밋된 마커) 판정 불가다.
+ * 픽스처는 진짜 두 갈래 git 저장소다(CLAUDE.md SDD 5: 실제 생산자로) — `conflictStub`의 stdout 흉내로는 인덱스 상태를 증명하지 못한다.
+ */
+import { run as realRun } from "../lib/exec.js";
+import { makeFactoryOverlay, branchOwnFactoryPaths, assertBaseMergeComplete, baseMergeConflictLine } from "../bin/run-stage.js";
+import { dirname as _dn } from "node:path";
+import { existsSync as _ex } from "node:fs";
+
+const BR143 = "claude/fq-143";
+const git143 = async (cwd, ...args) => {
+  const r = await realRun("git", args, { cwd });
+  if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+  return r.stdout.trim();
+};
+/**
+ * origin(bare) + 작업 사본. main의 시드 → 브랜치 `claude/fq-143`(빌더의 지난 라운드: 소스 + 러너의 미러 커밋 + DECISIONS 항목)
+ * → main이 앞으로 간다(엔진 릴리스: 같은 소스·같은 미러·DECISIONS 항목·충돌하지 않는 `.claude/settings.json`).
+ */
+async function overlapRepo({ engine = true, conflictSource = true, clean = false, baseTouchesClaude = true, branchEditsAgent = false, conflictUnder = null } = {}) {
+  const top = _mkd(_j(_tmp(), "ktb-143-"));
+  const origin = _j(top, "origin.git"), root = _j(top, "work");
+  await git143(top, "init", "-q", "--bare", "-b", "main", origin);
+  await git143(top, "init", "-q", "-b", "main", root);
+  for (const [k, v] of [["user.name", "t"], ["user.email", "t@example.invalid"], ["commit.gpgsign", "false"], ["core.autocrlf", "false"], ["merge.conflictstyle", "merge"]]) await git143(root, "config", k, v);
+  await git143(root, "remote", "add", "origin", origin);
+  const w = (p, t) => { _mk(_dn(_j(root, p)), { recursive: true }); _wr(_j(root, p), t); };
+  const commit = async (m) => { await git143(root, "add", "-A"); await git143(root, "commit", "-q", "-m", m); };
+  if (engine) { w("factory/cli/manifest.js", "// stub\n"); w("factory/cli/install.js", "// stub\n"); }
+  w("factory/lib/x.js", "a\nb\nc\n");
+  w(".factory/lib/x.js", "gen a\ngen b\ngen c\n");
+  w(".factory/harness.toml", "x = 1\n");
+  w(".claude/settings.json", "{}\n");
+  w(".claude/agents/a.md", "agent\n");
+  w("docs/factory/DECISIONS.md", "# D\n\nseed\n");
+  w("docs/factory/CHARTER.md", "charter\n");
+  await commit("seed");
+  await git143(root, "push", "-q", "origin", "main");
+  await git143(root, "checkout", "-q", "-b", BR143);
+  if (clean) w("factory/lib/y.js", "branch only\n");
+  else {
+    if (conflictSource) w("factory/lib/x.js", "a\nbranch\nc\n");
+    w(".factory/lib/x.js", "gen a\ngen branch\ngen c\n");
+    w("docs/factory/DECISIONS.md", "# D\n\nseed\n\nbranch entry\n");
+  }
+  if (branchEditsAgent) w(".claude/agents/a.md", "branch edit\n");
+  if (conflictUnder) w(conflictUnder, "branch side\n");
+  await commit("branch round 1");
+  await git143(root, "push", "-q", "origin", BR143);
+  await git143(root, "checkout", "-q", "main");
+  if (conflictSource) w("factory/lib/x.js", "a\nbase\nc\n");
+  w(".factory/lib/x.js", "gen a\ngen base\ngen c\n");
+  w("docs/factory/DECISIONS.md", "# D\n\nseed\n\nbase entry\n");
+  if (baseTouchesClaude) w(".claude/settings.json", "{ \"base\": 1 }\n");
+  if (conflictUnder) w(conflictUnder, "base side\n");
+  await commit("engine release");
+  await git143(root, "push", "-q", "origin", "main");
+  const baseSha = await git143(root, "rev-parse", "HEAD");
+  return { top, root, baseSha, done: () => _rm(top, { recursive: true, force: true }) };
+}
+/** 실제 git을 돌리면서 무엇을 불렀는지 남긴다. */
+const spyRun = (calls) => async (cmd, args, opts) => { if (cmd === "git") calls.push(args.join(" ")); return realRun(cmd, args, opts); };
+const committed = (calls) => calls.some((c) => /(^| )commit( |$)/.test(c));
+const pushed = (calls) => calls.some((c) => /^push( |$)/.test(c));
+const aborted = (calls) => calls.some((c) => c.includes("merge --abort"));
+const mergeHead = async (root) => (await realRun("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: root })).code === 0;
+const checkout143 = ({ run, root, baseSha, regenerate }) => makeCheckoutBranch({ run, root, issue: 143, env: { GITHUB_SHA: baseSha }, defaultBranch: () => "main", regenerate })();
+const read = (root, p) => readFileSync(_j(root, p), "utf8");
+
+test("test_143_source_conflict_is_left_to_the_builder", async () => {
+  const fx = await overlapRepo();
+  try {
+    const calls = []; const regenerate = vi.fn(async () => ({ ok: true, applicable: true, changed: [] }));
+    const r = await checkout143({ run: spyRun(calls), root: fx.root, baseSha: fx.baseSha, regenerate });
+    // 소스 충돌은 abort되지 않고 빌더에게 간다 — 그 경로만, 정확히.
+    expect(r.ok).toBe(true);
+    expect(r.merged).toBe(fx.baseSha);
+    expect(r.conflicts).toEqual(["factory/lib/x.js"]);
+    expect(aborted(calls)).toBe(false);
+    // 트리는 병합 중이다: MERGE_HEAD가 있고, 소스에는 마커가 있다.
+    expect(await mergeHead(fx.root)).toBe(true);
+    expect(read(fx.root, "factory/lib/x.js")).toMatch(/^<<<<<<< /m);
+    // 미러 경로는 base의 것을 받았고(재생성은 하지 않는다 — 소스에 아직 마커가 있다), DECISIONS.md는 양쪽을 다 남겼다.
+    expect(read(fx.root, ".factory/lib/x.js")).toBe("gen a\ngen base\ngen c\n");
+    const decisions = read(fx.root, "docs/factory/DECISIONS.md");
+    expect(decisions).toContain("branch entry");
+    expect(decisions).toContain("base entry");
+    expect(decisions).not.toMatch(/^(<{7}|>{7})/m);
+    expect(await git143(fx.root, "diff", "--name-only", "--diff-filter=U")).toBe("factory/lib/x.js");
+    expect(regenerate).toHaveBeenCalledTimes(0);
+    // 반쯤 병합된 것은 커밋도 push도 되지 않는다.
+    expect(committed(calls)).toBe(false);
+    expect(pushed(calls)).toBe(false);
+    expect(await git143(fx.root, "rev-parse", `origin/${BR143}`)).toBe(await git143(fx.root, "rev-parse", "HEAD"));
+    // run 기록: 경로·sha·출처를 말하고, push했다고 주장하지 않는다.
+    const lines = [];
+    const d = implDeps({ checkoutBranch: async () => r, baseMergeComplete: async () => ({ ok: true }), runRecord: (l) => lines.push(...l) });
+    expect(await runStage({ stage: "implement", issue: 143, deps: d })).toBe(0);
+    const line = lines.find((l) => l.startsWith("base_merge:"));
+    expect(line).toMatch(/^base_merge: 1 conflicted source path\(s\) left to the builder: factory\/lib\/x\.js/);
+    expect(line).toContain(fx.baseSha.slice(0, 7));
+    expect(line).toContain("GITHUB_SHA");
+    expect(lines.some((l) => /pushed before the builder/.test(l))).toBe(false);
+    expect(lines.some((l) => l.startsWith("base_merged:"))).toBe(false);
+    expect(line).toBe(baseMergeConflictLine(r));
+  } finally { fx.done(); }
+  // 충돌이 없는 라운드는 오늘의 base_merged 줄 그대로다(병합 커밋이 push된다).
+  const ok = await overlapRepo({ clean: true });
+  try {
+    const calls = [];
+    const r = await checkout143({ run: spyRun(calls), root: ok.root, baseSha: ok.baseSha, regenerate: vi.fn() });
+    expect(r.ok).toBe(true);
+    expect(r.conflicts).toBeUndefined();
+    expect(pushed(calls)).toBe(true);
+    expect(await mergeHead(ok.root)).toBe(false);
+    const lines = [];
+    await runStage({ stage: "implement", issue: 143, deps: implDeps({ checkoutBranch: async () => r, runRecord: (l) => lines.push(...l) }) });
+    expect(lines.find((l) => l.startsWith("base_merged:"))).toBe(`base_merged: ${ok.baseSha.slice(0, 7)} (GITHUB_SHA) merged into ${BR143} by the stage and pushed before the builder — the PR tree carries base's tooling`);
+    expect(lines.some((l) => l.startsWith("base_merge:"))).toBe(false);
+  } finally { ok.done(); }
+});
+
+/** 실제 체크아웃 + 실제 overlay + 실제 브랜치 경로 계산으로 runStage를 돌린다. 빌더(claudeP)는 주입한다. */
+const realImplDeps = ({ fx, claudeP, transition, lines, over = {} }) => {
+  const run = realRun;
+  return implDeps({
+    checkoutBranch: () => checkout143({ run, root: fx.root, baseSha: fx.baseSha, regenerate: vi.fn(async () => ({ ok: true, applicable: true, changed: [] })) }),
+    overlayFactoryConfig: (h = false) => makeFactoryOverlay({ run, root: fx.root, env: { GITHUB_SHA: fx.baseSha }, defaultBranch: () => "main", harnessIssue: h })(),
+    branchOwnFactoryPaths: ({ sha, harnessIssue }) => branchOwnFactoryPaths({ run, cwd: fx.root, sha, harnessIssue }),
+    baseMergeComplete: ({ sha, paths }) => assertBaseMergeComplete({ run, cwd: fx.root, sha, paths }),
+    claudeP, transition, runRecord: (l) => lines.push(...l),
+    ...over,
+  });
+};
+/** 빌더가 병합을 제대로 끝내는 세션. */
+const resolvingBuilder = (root) => vi.fn(async () => {
+  _wr(_j(root, "factory/lib/x.js"), "a\nbranch+base\nc\n");
+  await git143(root, "add", "-A");
+  await git143(root, "commit", "-q", "--no-edit");
+  return { is_error: false, result: "{}" };
+});
+
+test("test_143_pending_merge_does_not_trip_overlay_guard", async () => {
+  // 엔진 릴리스가 `.claude/settings.json`도 바꿨다(충돌 없음) — 병합 중인 인덱스에서는 그것이 HEAD 대비 staged 변경으로 보인다.
+  const fx = await overlapRepo({ baseTouchesClaude: true });
+  try {
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const claudeP = resolvingBuilder(fx.root);
+    const code = await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx, claudeP, transition, lines }) });
+    expect(transition.mock.calls.filter(([a]) => a.to === "factory:blocked")).toEqual([]);
+    expect(claudeP).toHaveBeenCalledTimes(1);
+    expect(code).toBe(0);
+    expect(lines.some((l) => /^overlay: FAIL/.test(l))).toBe(false);
+  } finally { fx.done(); }
+  // 브랜치가 정말로 팩토리 소유 경로(미러가 아닌 `.claude/agents/a.md`)를 고쳤다면 오늘처럼 멈춘다.
+  const own = await overlapRepo({ baseTouchesClaude: true, branchEditsAgent: true });
+  try {
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const claudeP = vi.fn(async () => ({ is_error: false, result: "{}" }));
+    expect(await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx: own, claudeP, transition, lines }) })).toBe(2);
+    expect(claudeP).not.toHaveBeenCalled();
+    const t = transition.mock.calls.at(-1)[0];
+    expect(t.to).toBe("factory:blocked");
+    expect(t.reason).toContain(".claude/agents/a.md");
+    expect(t.reason).not.toContain(".claude/settings.json");
+  } finally { own.done(); }
+  // 브랜치의 경로 목록을 읽지 못하면 판단할 수 없다 — 멈춘다(fail closed).
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to })); const claudeP2 = vi.fn();
+  const d2 = implDeps({
+    checkoutBranch: async () => ({ ok: true, branch: BR143, base: `origin/${BR143}`, existed: true, merged: SHA, source: "GITHUB_SHA", conflicts: ["factory/lib/x.js"] }),
+    overlayFactoryConfig: async () => ({ ok: true, sha: SHA, paths: [".claude/settings.json"] }),
+    branchOwnFactoryPaths: async () => ({ ok: false, reason: "git diff failed: fatal: bad object" }),
+    baseMergeComplete: async () => ({ ok: true }), claudeP: claudeP2, transition: t2,
+  });
+  expect(await runStage({ stage: "implement", issue: 143, deps: d2 })).toBe(2);
+  expect(claudeP2).not.toHaveBeenCalled();
+  expect(t2.mock.calls.at(-1)[0].to).toBe("factory:blocked");
+});
+
+const pendingCb = { ok: true, branch: BR143, base: `origin/${BR143}`, existed: true, merged: SHA, source: "GITHUB_SHA", conflicts: ["factory/lib/x.js", "factory/bin/y.js"] };
+/** 세션 뒤 단계들을 전부 스파이로 둔 implement 배선. */
+const afterSessionSpies = (over = {}) => {
+  const s = {
+    gates: vi.fn(async () => null), verifyStage: vi.fn(() => ({ ok: true, reasons: [], data: {} })), writeHandoff: vi.fn(async () => {}),
+    mirror: vi.fn(async () => ({ ok: true, applicable: false, changed: [], sha: null })),
+    assertStageBranch: vi.fn(async () => ({ ok: true, branch: BR143 })),
+    dropPostHandoffDrift: vi.fn(async () => ({ ok: true, dropped: [] })),
+    transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+  };
+  const lines = [];
+  return { s, lines, d: implDeps({ checkoutBranch: async () => pendingCb, ...s, runRecord: (l) => lines.push(...l), ...over }) };
+};
+
+test("test_143_unfinished_merge_is_undecidable", async () => {
+  // 실제 git: 빌더가 아무것도 하지 않았다 → MERGE_HEAD가 남아 있다.
+  const fx = await overlapRepo();
+  try {
+    const r = await checkout143({ run: realRun, root: fx.root, baseSha: fx.baseSha, regenerate: vi.fn() });
+    expect(r.conflicts).toEqual(["factory/lib/x.js"]);
+    const pending = await assertBaseMergeComplete({ run: realRun, cwd: fx.root, sha: r.merged, paths: r.conflicts });
+    expect(pending.ok).toBe(false);
+    expect(pending.reason).toContain("factory/lib/x.js");
+    expect(pending.reason).toMatch(/MERGE_HEAD/);
+    // 빌더가 병합을 abort했다 → MERGE_HEAD는 사라졌지만 base는 HEAD의 조상이 아니다. KTB-38이 말없이 돌아오면 안 된다.
+    await git143(fx.root, "merge", "--abort");
+    expect(await mergeHead(fx.root)).toBe(false);
+    const abortedMerge = await assertBaseMergeComplete({ run: realRun, cwd: fx.root, sha: r.merged, paths: r.conflicts });
+    expect(abortedMerge.ok).toBe(false);
+    expect(abortedMerge.reason).toMatch(/not an ancestor/);
+  } finally { fx.done(); }
+  // 실제 git: 빌더가 제대로 풀고 커밋했다 → 통과.
+  const good = await overlapRepo();
+  try {
+    const r = await checkout143({ run: realRun, root: good.root, baseSha: good.baseSha, regenerate: vi.fn() });
+    await resolvingBuilder(good.root)();
+    expect(await assertBaseMergeComplete({ run: realRun, cwd: good.root, sha: r.merged, paths: r.conflicts })).toEqual({ ok: true });
+  } finally { good.done(); }
+  // git 상태를 읽지 못하면(0/1 밖의 종료 코드) 판정 불가다.
+  const broken = makeFakeRun([{ match: (c) => c === "git", result: { code: 128, stdout: "", stderr: "fatal: not a git repository" } }]);
+  const b = await assertBaseMergeComplete({ run: broken, cwd: "/repo", sha: SHA, paths: ["factory/lib/x.js"] });
+  expect(b.ok).toBe(false);
+  expect(b.reason).toMatch(/fatal: not a git repository/);
+
+  // 배선: 끝나지 않은 병합은 세션 직후에 막힌다 — 브랜치 확인·드리프트·미러·게이트·verify·핸드오프 어느 것도 부르지 않는다.
+  for (const out of [{ is_error: false, result: "{}" }, { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 6, result: "" }]) {
+    const baseMergeComplete = vi.fn(async () => ({ ok: false, reason: "MERGE_HEAD still present — the merge was never concluded" }));
+    const { s, lines, d } = afterSessionSpies({ baseMergeComplete, claudeP: async () => out });
+    expect(await runStage({ stage: "implement", issue: 143, deps: d })).toBe(2);
+    expect(baseMergeComplete).toHaveBeenCalledWith({ sha: SHA, paths: pendingCb.conflicts });
+    for (const k of ["gates", "verifyStage", "writeHandoff", "mirror", "assertStageBranch", "dropPostHandoffDrift"]) expect(s[k], k).not.toHaveBeenCalled();
+    const t = s.transition.mock.calls.at(-1)[0];
+    expect(t.to).toBe("factory:blocked");
+    expect(t.cause).toBe("undecidable");
+    expect(t.reason).toContain("builder did not complete the base merge");
+    expect(t.reason).toContain("factory/lib/x.js");
+    expect(t.reason).toContain("factory/bin/y.js");
+    expect(lines.some((l) => /builder did not complete the base merge/.test(l))).toBe(true);
+  }
+  // 검사 dep이 배선되지 않았으면 끝났다고 볼 근거가 없다 — 막는다.
+  const unwired = afterSessionSpies();
+  expect(await runStage({ stage: "implement", issue: 143, deps: unwired.d })).toBe(2);
+  expect(unwired.s.gates).not.toHaveBeenCalled();
+  // 끝난 병합은 평소의 라운드다: 게이트·핸드오프가 정확히 한 번.
+  const fine = afterSessionSpies({ baseMergeComplete: async () => ({ ok: true }) });
+  expect(await runStage({ stage: "implement", issue: 143, deps: fine.d })).toBe(0);
+  expect(fine.s.gates).toHaveBeenCalledTimes(1);
+  expect(fine.s.writeHandoff).toHaveBeenCalledTimes(1);
+  expect(fine.s.transition.mock.calls.some(([a]) => a.to === "factory:blocked")).toBe(false);
+  // 충돌이 없던 라운드는 그 검사를 부르지 않는다.
+  const noConflict = vi.fn(async () => ({ ok: false, reason: "should not be asked" }));
+  const plain = afterSessionSpies({ checkoutBranch: async () => ({ ok: true, branch: BR143, base: `origin/${BR143}`, existed: true, merged: SHA, source: "GITHUB_SHA" }), baseMergeComplete: noConflict });
+  expect(await runStage({ stage: "implement", issue: 143, deps: plain.d })).toBe(0);
+  expect(noConflict).not.toHaveBeenCalled();
+});
+
+test("test_143_committed_conflict_markers_are_blocked", async () => {
+  // 빌더가 풀지 않고 `git add -A && git commit`으로 병합을 "끝냈다" — MERGE_HEAD는 사라졌고 base는 조상이지만 마커가 커밋됐다.
+  const fx = await overlapRepo();
+  try {
+    const r = await checkout143({ run: realRun, root: fx.root, baseSha: fx.baseSha, regenerate: vi.fn() });
+    await git143(fx.root, "add", "-A");
+    await git143(fx.root, "commit", "-q", "--no-edit");
+    expect(await mergeHead(fx.root)).toBe(false);
+    const c = await assertBaseMergeComplete({ run: realRun, cwd: fx.root, sha: r.merged, paths: r.conflicts });
+    expect(c.ok).toBe(false);
+    expect(c.reason).toMatch(/conflict marker/);
+    expect(c.reason).toContain("factory/lib/x.js");
+  } finally { fx.done(); }
+  // 같은 일을 runStage 안에서: 빌더 세션이 마커째 커밋하면 게이트도 핸드오프도 없다.
+  const fx2 = await overlapRepo();
+  try {
+    const lines = []; const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+    const gates = vi.fn(async () => null); const writeHandoff = vi.fn(async () => {});
+    const claudeP = vi.fn(async () => { await git143(fx2.root, "add", "-A"); await git143(fx2.root, "commit", "-q", "--no-edit"); return { is_error: false, result: "{}" }; });
+    expect(await runStage({ stage: "implement", issue: 143, deps: realImplDeps({ fx: fx2, claudeP, transition, lines, over: { gates, writeHandoff } }) })).toBe(2);
+    expect(claudeP).toHaveBeenCalledTimes(1);
+    expect(gates).not.toHaveBeenCalled();
+    expect(writeHandoff).not.toHaveBeenCalled();
+    const t = transition.mock.calls.at(-1)[0];
+    expect(t.to).toBe("factory:blocked");
+    expect(t.cause).toBe("undecidable");
+    expect(t.reason).toContain("builder did not complete the base merge");
+    expect(t.reason).toContain("factory/lib/x.js");
+  } finally { fx2.done(); }
+  // 마커가 없는 해결(삭제 포함)은 통과한다 — 경로가 HEAD에 없으면 마커도 없다.
+  const del = await overlapRepo();
+  try {
+    const r = await checkout143({ run: realRun, root: del.root, baseSha: del.baseSha, regenerate: vi.fn() });
+    await git143(del.root, "rm", "-q", "factory/lib/x.js");
+    await git143(del.root, "commit", "-q", "--no-edit");
+    expect(await assertBaseMergeComplete({ run: realRun, cwd: del.root, sha: r.merged, paths: r.conflicts })).toEqual({ ok: true });
+  } finally { del.done(); }
+});
+
+test("test_143_remaining_merge_failures_still_abort_loudly", async () => {
+  // 오버레이 루트 아래의 충돌(빌더가 쓸 수 없는 경로)은 소스 충돌과 함께여도 세션 전에 abort된다 — 경로를 이름으로.
+  for (const p of [".claude/agents/b.md", ".factory/harness.toml", "docs/factory/CHARTER.md"]) {
+    const fx = await overlapRepo({ conflictUnder: p });
+    try {
+      const calls = []; const regenerate = vi.fn();
+      const r = await checkout143({ run: spyRun(calls), root: fx.root, baseSha: fx.baseSha, regenerate });
+      expect(r.ok, p).toBe(false);
+      expect(r.undecidable).toBe(true);
+      expect(r.reason).toMatch(/stale PR conflicts with base — rebase by hand/);
+      expect(r.reason).toContain(p);
+      expect(aborted(calls)).toBe(true);
+      expect(await mergeHead(fx.root)).toBe(false);
+      expect(pushed(calls)).toBe(false);
+      expect(regenerate).not.toHaveBeenCalled();
+      // 배선: 빌더는 뜨지 않고, 판정 불가로 막힌다.
+      const claudeP = vi.fn(); const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+      expect(await runStage({ stage: "implement", issue: 143, deps: implDeps({ checkoutBranch: async () => r, claudeP, transition }) })).toBe(2);
+      expect(claudeP).not.toHaveBeenCalled();
+      expect(transition.mock.calls.at(-1)[0]).toEqual(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
+    } finally { fx.done(); }
+  }
+  // 채택자 저장소(엔진 소스가 없다): 소스 충돌도 예전처럼 abort — 넘김은 엔진 저장소에서만.
+  const adopter = await overlapRepo({ engine: false });
+  try {
+    const calls = [];
+    const r = await checkout143({ run: spyRun(calls), root: adopter.root, baseSha: adopter.baseSha, regenerate: vi.fn() });
+    expect(r.ok).toBe(false);
+    expect(r.undecidable).toBe(true);
+    expect(r.reason).toMatch(/rebase by hand/);
+    expect(aborted(calls)).toBe(true);
+    expect(await mergeHead(adopter.root)).toBe(false);
+  } finally { adopter.done(); }
+  const root = selfRepo();
+  try {
+    // 병합이 실패했는데 충돌 경로가 하나도 없다 → 절대 `ok:true` + 빈 목록이 아니다.
+    const calls = [];
+    const none = await makeCheckoutBranch({ run: conflictStub({ calls, conflicted: [] }), root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate: vi.fn() })();
+    expect(none.ok).toBe(false);
+    expect(none.undecidable).toBe(true);
+    expect(none.reason).toMatch(/rebase by hand/);
+    expect(calls.some((c) => c.includes("merge --abort"))).toBe(true);
+    // 충돌 목록을 읽을 수 없다 → 같은 abort.
+    const calls2 = []; const inner = conflictStub({ calls: calls2, conflicted: ["factory/lib/x.js"] });
+    const unreadable = async (cmd, args, opts) => (cmd === "git" && args[0] === "diff" && args.includes("--diff-filter=U") ? { code: 128, stdout: "", stderr: "fatal: index file corrupt" } : inner(cmd, args, opts));
+    const u = await makeCheckoutBranch({ run: unreadable, root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate: vi.fn() })();
+    expect(u.ok).toBe(false);
+    expect(u.undecidable).toBe(true);
+    expect(calls2.some((c) => c.includes("merge --abort"))).toBe(true);
+    // abort 자체가 실패하면 그것도 사유에 적는다.
+    const calls3 = [];
+    const base3 = branchStub({ calls: calls3, mergeCode: 1, abortCode: 1 });
+    const failingAbort = async (cmd, args, opts) => (cmd === "git" && args[0] === "diff" && args.includes("--diff-filter=U") ? { code: 0, stdout: ".claude/hooks/x.sh.bak\n", stderr: "" } : base3(cmd, args, opts));
+    const fa = await makeCheckoutBranch({ run: failingAbort, root, issue: 3, env: { GITHUB_SHA: SHA }, defaultBranch: () => "main", regenerate: vi.fn() })();
+    expect(fa.ok).toBe(false);
+    expect(fa.undecidable).toBe(true);
+    expect(fa.reason).toMatch(/git merge --abort also failed/);
+  } finally { _rm(root, { recursive: true, force: true }); }
+});
+
+/**
+ * #143 — 병합이 빌더에게 넘어간 라운드에서 컨텍스트(세션 **전**)가 구한 merge-base는 옛 분기점이다(HEAD에 아직 base가 없다).
+ * 그 값을 게이트가 그대로 쓰면 엔진 릴리스 전체가 이 PR의 diff로 읽힌다(must-not·새 테스트·tier 바닥). 병합이 끝났다고 확인된
+ * 직후, 게이트 **전에** 캐시를 버려 게이트가 병합된 HEAD로 다시 구하게 한다.
+ */
+test("test_143_completed_merge_resets_the_diff_base", async () => {
+  const order = [];
+  const { d } = afterSessionSpies({
+    baseMergeComplete: async () => { order.push("complete"); return { ok: true }; },
+    forgetMergeBase: vi.fn(() => { order.push("forget"); }),
+    gates: vi.fn(async () => { order.push("gates"); return null; }),
+  });
+  expect(await runStage({ stage: "implement", issue: 143, deps: d })).toBe(0);
+  expect(d.forgetMergeBase).toHaveBeenCalledTimes(1);
+  expect(order).toEqual(["complete", "forget", "gates"]);
+  // 넘긴 병합이 없던 라운드는 캐시를 건드리지 않는다.
+  const plain = afterSessionSpies({ checkoutBranch: async () => ({ ok: true, branch: BR143, base: `origin/${BR143}`, existed: true, merged: SHA, source: "GITHUB_SHA" }), forgetMergeBase: vi.fn() });
+  expect(await runStage({ stage: "implement", issue: 143, deps: plain.d })).toBe(0);
+  expect(plain.d.forgetMergeBase).not.toHaveBeenCalled();
+  // 끝나지 않은 병합도 건드리지 않는다(게이트까지 가지 않는다).
+  const stuck = afterSessionSpies({ baseMergeComplete: async () => ({ ok: false, reason: "MERGE_HEAD still present" }), forgetMergeBase: vi.fn() });
+  expect(await runStage({ stage: "implement", issue: 143, deps: stuck.d })).toBe(2);
+  expect(stuck.d.forgetMergeBase).not.toHaveBeenCalled();
+  expect(stuck.s.gates).not.toHaveBeenCalled();
+  expect(d.gates).toHaveBeenCalledTimes(1);
 });
