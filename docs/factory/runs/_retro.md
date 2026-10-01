@@ -21,13 +21,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 8 | 9 |
+| needs-human | 9 | 9 |
 | rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
 | unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
-| qa na ratio | 없음 | 없음 |
-| cost (usd) | 70.37 | 190.86 |
-| tokens | input 2664583 / output 207005 | input 3362163 / output 311837 |
+| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 없음 |
+| cost (usd) | 85.32 | 190.86 |
+| tokens | input 4582572 / output 273111 | input 3362163 / output 311837 |
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
@@ -226,6 +226,22 @@
           136
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The diff damages four existing decision entries that have nothing to do with #136. In each one, a Korean character has been replaced with U+FFFD replacement bytes: `서버는` became `서버���`, `그대로` became `그대��`, `매처` became `매��`, and `락을` became `락��`. DECISIONS.md is this repo's architecture record, because docs/TECHNICAL.md only describes the bin/cli.js installer and says nothing about factory/. The record itself says those facts 'must be written here so they can be found with grep', and the damaged text breaks that for these entries, including the ADR-025 neighbour that this PR's S2b entry claims to supersede. A revert of the code would leave the corruption behind.",
+        "runs": [
+          136
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Four existing decision entries unrelated to #136 were changed without a stated reason. In each hunk, a Korean character was replaced with U+FFFD. This is a change to existing content that the plan never approved. It is not a #136 deliverable, so it is out of scope. The file being in files_expected covers the S2b entry, not edits to other entries.",
+        "runs": [
+          136
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -319,8 +335,8 @@
       },
       {
         "issue": 136,
-        "reason": "blocked (gates undecided) — needs human",
-        "at": "2026-10-01T05:51:53Z"
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/admission.js, .factory/lib/feedback/route.js, .factory/lib/gates.js, .factory/lib/harness-request.js, factory/bin/run-stage.js, factory/lib/admission.js, factory/lib/feedback/route.js, factory/lib/gates.js, factory/lib/harness-request.js, factory/test/admission.test.js, factory/test/harness-request.test.js, factory/test/retro-route.test.js, factory/test/run-stage.test.js (see PR #137)",
+        "at": "2026-10-01T07:40:50Z"
       }
     ]
   },
@@ -341,17 +357,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 8,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
+    "needs_human": 9,
+    "qa_approvals": 1,
+    "qa_claims_total": 7,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 70.366645,
+      "cost_usd": 85.320037,
       "tokens": {
-        "input": 2664583,
-        "output": 207005
+        "input": 4582572,
+        "output": 273111
       }
     }
   },
