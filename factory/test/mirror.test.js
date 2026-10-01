@@ -29,9 +29,10 @@ const importer = (p) => {
 };
 
 test("inMirrorFamily: exactly the four families self-mirror.test.js checks; agents and settings are not mirrored here", () => {
-  expect(MIRROR_FAMILIES).toEqual([".factory/lib/", ".factory/bin/", ".factory/actions/", ".claude/hooks/"]);
-  for (const d of [".factory/lib/x.js", ".factory/bin/run-stage.js", ".factory/actions/setup/action.yml", ".claude/hooks/block-dangerous.sh"]) expect(inMirrorFamily(d), d).toBe(true);
-  for (const d of [".claude/agents/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/README.md", ".factory/harness.toml", ".factory/install-manifest.json", "docs/factory/CHARTER.md"]) expect(inMirrorFamily(d), d).toBe(false);
+  expect(MIRROR_FAMILIES).toEqual([".factory/lib/", ".factory/bin/", ".factory/actions/", ".claude/hooks/", ".factory/install-manifest.json"]);
+  // 1.4.39 — 설치 매니페스트도 생성물이다(트리의 항목 + package.json 버전). review의 overlay가 base의 것을 올리면 `install.test.js`가 RED다(#136).
+  for (const d of [".factory/lib/x.js", ".factory/bin/run-stage.js", ".factory/actions/setup/action.yml", ".claude/hooks/block-dangerous.sh", ".factory/install-manifest.json"]) expect(inMirrorFamily(d), d).toBe(true);
+  for (const d of [".claude/agents/reviewer-qa.md", ".claude/settings.json", ".claude/hooks/README.md", ".factory/harness.toml", ".factory/install-manifest.json.bak", "docs/factory/CHARTER.md"]) expect(inMirrorFamily(d), d).toBe(false);
 });
 
 test("regenerateMirror rewrites only stale family files from the sources, and reports what changed", async () => {
@@ -71,11 +72,11 @@ const fakeRun = (script) => vi.fn(async (cmd, args) => {
 });
 
 test("mirrorStep(commit): a changed mirror is committed and pushed as the runner, and the new head is returned", async () => {
-  const run = fakeRun({ "git status": { stdout: " M .factory/lib/a.js\n" }, "git rev-parse": { stdout: "abc123\n" } });
+  const run = fakeRun({ "git diff": { stdout: ".factory/lib/a.js\n" }, "git rev-parse": { stdout: "abc123\n" } });
   const r = await mirrorStep({ root: "/r", run, mode: "commit", headSha: "old", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/lib/a.js"] }) });
   expect(r).toEqual({ ok: true, applicable: true, changed: [".factory/lib/a.js"], sha: "abc123" });
   const calls = run.mock.calls.map(([c, a]) => `${c} ${a.join(" ")}`);
-  expect(calls.some((c) => c.startsWith("git add -- .factory/lib .factory/bin .factory/actions .claude/hooks"))).toBe(true);
+  expect(calls.some((c) => c.startsWith("git add -- .factory/lib .factory/bin .factory/actions .claude/hooks .factory/install-manifest.json"))).toBe(true);
   expect(calls.some((c) => /git -c user.name=factory-runner .* commit -q -m mirror: regenerate/.test(c))).toBe(true);
   expect(calls.some((c) => c.startsWith("git push -q origin HEAD"))).toBe(true);
 });
@@ -90,7 +91,7 @@ test("mirrorStep(commit): nothing to regenerate means no commit, and the head st
 test("mirrorStep(verify): the PR's installed engine must be what its sources generate — otherwise undecidable", async () => {
   const clean = fakeRun({});
   expect(await mirrorStep({ root: "/r", run: clean, mode: "verify", headSha: "h1", regenerate: async () => ({ ok: true, applicable: true, changed: [] }) })).toEqual({ ok: true, applicable: true, changed: [], sha: "h1" });
-  const dirty = fakeRun({ "git status": { stdout: " M .factory/bin/run-stage.js\n" } });
+  const dirty = fakeRun({ "git diff": { stdout: ".factory/bin/run-stage.js\n" } });
   const r = await mirrorStep({ root: "/r", run: dirty, mode: "verify", headSha: "h1", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/bin/run-stage.js"] }) });
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/not what its sources generate — \.factory\/bin\/run-stage\.js/);
@@ -117,4 +118,18 @@ test("mirrorMatchesHead compares the branch HEAD's mirror files with what the br
   const adopter = mkdtempSync(join(tmpdir(), "ktb-adopter-"));
   try { expect(await mirrorMatchesHead({ root: adopter, run: vi.fn(), importer })).toEqual({ ok: true, applicable: false, mismatched: [] }); }
   finally { rmSync(adopter, { recursive: true, force: true }); }
+});
+
+/**
+ * 1.4.38 (KTB #136 실측) — overlay의 `git checkout <base> -- …`는 인덱스도 base로 바꾼다. 재생성 뒤 워크트리가 HEAD와 같아도 인덱스는
+ * base이므로 `git status`는 staged 변경을 보고한다. 검증은 워크트리를 HEAD와 직접 비교해야 한다(`git diff HEAD`).
+ */
+test("mirrorStep(verify): compares the worktree with HEAD, never through the index the overlay staged", async () => {
+  const run = vi.fn(async (cmd, args) => {
+    if (cmd === "git" && args[0] === "status") throw new Error("must not consult the index — the overlay staged base there");
+    if (cmd === "git" && args[0] === "diff") { expect(args.slice(0, 4)).toEqual(["diff", "--name-only", "HEAD", "--"]); return { code: 0, stdout: "", stderr: "" }; }
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const r = await mirrorStep({ root: "/r", run, mode: "verify", headSha: "h1", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/lib/a.js"] }) });
+  expect(r.ok).toBe(true);
 });
