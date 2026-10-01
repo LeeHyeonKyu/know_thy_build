@@ -182,6 +182,10 @@ const selfGateFindings = Array.isArray(loaded.self_gate_findings) ? loaded.self_
 // is an advisory checklist line only. The builder must not silently regress a pinned property.
 const reworkPins = Array.isArray(loaded.rework_pins) ? loaded.rework_pins.filter(Boolean) : [];
 const priorPr = typeof loaded.pr === 'number' ? loaded.pr : null;
+// 1.4.41 (S3b, KTB #143) — the base merge the stage ran before this session may have left SOURCE
+// conflicts for the builder (mirror families and append-only files are resolved by the stage itself).
+// Absent until the engine side of #143 lands; an empty list means "nothing to finish".
+const mergeConflicts = Array.isArray(loaded.merge_conflicts) ? loaded.merge_conflicts.filter(Boolean) : [];
 
 // Rework completeness (§7.5, P3-R4): every must_fix id must come back as `fixed` with the commit that
 // fixed it or `disputed` with a reason. A silent omission is how an unanswered reviewer finding reaches
@@ -453,10 +457,28 @@ const pinsBlock = reworkPins.length > 0
       `but they never block:\n${JSON.stringify(advisoryPins.map((p) => ({ id: p.id, text: p.text })), null, 2)}\n` : '')
   : '';
 
+// S3b (spec 2026-09-30 §8.3; KTB #130 restarted three times over releases that landed while it ran):
+// a source conflict with base is the builder's job, not a person's — the builder knows the plan. The
+// stage merged base into the branch before this session and, when files under `merge_conflicts`
+// conflicted, left the merge IN PROGRESS with the markers in the tree (`.git/MERGE_HEAD` set). The
+// builder cannot and need not run a merge command — it resolves the markers and commits, which
+// concludes the merge. A session that ends with MERGE_HEAD still present is undecidable (blocked).
+const mergeConflictsBlock = mergeConflicts.length > 0
+  ? `\n\nFINISH THE BASE MERGE FIRST. The stage merged the base branch into \`claude/fq-${issue}\` before ` +
+    `this session and these files conflicted — the merge is still in progress and the conflict markers ` +
+    `(\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`) are in the working tree:\n` +
+    `${JSON.stringify(mergeConflicts, null, 2)}\n` +
+    `Before any other work: resolve every marker in those files the way the plan intends (keep base's ` +
+    `change AND this branch's intent — never discard either side wholesale), then \`git add\` those files ` +
+    `and \`git commit\` to conclude the merge. Do NOT run any merge/rebase/abort command — the merge is ` +
+    `already in progress and committing finishes it. Only then continue with the rules above. If the ` +
+    `session ends with the merge unfinished, the stage treats the round as undecidable.`
+  : '';
+
 const buildPrompt =
   `${builderReading}\n\n` +
   `Issue #${issue} (tier ${tier}). Build the planned change.\n\n` +
-  `${buildRules}${reworkBlock}${selfGateBlock}${pinsBlock}`;
+  `${buildRules}${mergeConflictsBlock}${reworkBlock}${selfGateBlock}${pinsBlock}`;
 
 const SHA_NOTE =
   `\n\nYour previous answer's head_sha was not a 40-character lowercase hex sha. head_sha must be the ` +

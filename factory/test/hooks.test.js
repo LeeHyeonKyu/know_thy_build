@@ -1496,3 +1496,32 @@ test("block-dangerous: the overlay roots do not bend for a factory:harness issue
   // 반면 평범한 편집은 그 이슈에서 열려 있다(기존 계약 그대로).
   expect((await bash("block-dangerous.sh", cmd("echo x > .factory/harness.toml"), undefined, harness)).code).toBe(0);
 }, 120000);
+
+/**
+ * 1.4.41 (KTB #143 실측) — overlay가 base로 되돌린 팩토리 소유 경로(`.factory/**`, `.claude/**`, CHARTER)는 인덱스에 staged로 남는다.
+ * 그것은 스테이지가 만든 diff이지 에이전트의 미커밋 작업이 아니다. 오케스트레이터가 Workflow 결과를 기다리려 턴을 끝낼 때 이 가드가
+ * 아홉 번 막아 턴을 다 썼다. 가드는 그 경로를 보지 않는다; 그 밖의 경로는 여전히 본다.
+ */
+test("stop-guard: overlay-staged factory-owned paths are not 'dirty' — a product file still is", async () => {
+  const remote = mkdtempSync(join(tmpdir(), "sg-remote-"));
+  await run("git", ["init", "-q", "--bare", "-b", "main", remote]);
+  const cwd = mkdtempSync(join(tmpdir(), "sg-work-"));
+  const git = (...a) => run("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd });
+  await git("init", "-q", "-b", "main");
+  mkdirSync(join(cwd, ".factory/lib"), { recursive: true }); mkdirSync(join(cwd, ".claude/hooks"), { recursive: true }); mkdirSync(join(cwd, "docs/factory"), { recursive: true });
+  writeFileSync(join(cwd, ".factory/lib/x.js"), "base\n"); writeFileSync(join(cwd, ".claude/hooks/h.sh"), "base\n"); writeFileSync(join(cwd, "docs/factory/CHARTER.md"), "base\n"); writeFileSync(join(cwd, "src.js"), "base\n");
+  await git("add", "."); await git("commit", "-q", "-m", "base");
+  await git("checkout", "-q", "-b", "claude/fq-7");
+  writeFileSync(join(cwd, ".factory/lib/x.js"), "branch\n"); writeFileSync(join(cwd, ".claude/hooks/h.sh"), "branch\n"); writeFileSync(join(cwd, "docs/factory/CHARTER.md"), "branch\n");
+  await git("add", "."); await git("commit", "-q", "-m", "branch mirror");
+  await git("remote", "add", "origin", remote); await git("push", "-q", "-u", "origin", "claude/fq-7");
+  // overlay와 같은 동작: base의 것으로 되돌린다 — 인덱스까지 바뀐다
+  await git("checkout", "main", "--", ".factory/lib/x.js", ".claude/hooks/h.sh", "docs/factory/CHARTER.md");
+  const r = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r.stderr + r.stdout, "overlay-staged factory paths must not block Stop").toBe("");
+  expect(r.code).toBe(0);
+  // 제품 파일의 미커밋 변경은 여전히 막는다
+  writeFileSync(join(cwd, "src.js"), "edited\n");
+  const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
+  expect(r2.code).toBe(2); expect(r2.stderr).toMatch(/uncommitted/);
+}, 120000);

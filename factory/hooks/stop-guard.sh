@@ -7,7 +7,11 @@
 #   docs/factory/runs    — run 기록. hydrateRecord가 스테이지 시작에 복원하고 매 스테이지 append한다.
 #                          실제 저장소는 factory/records 브랜치다(ADR-014) — 작업 브랜치에 커밋되지 않는다.
 #   .factory/quarantine.toml — 게이트가 직접 갱신하는 script 소유 파일
-# 셋 다 "에이전트가 코드를 고쳐놓고 커밋하지 않았다"는 신호가 아니다 — 여기서 걸리면 Stop이 영구히 막힌다.
+#   .factory, .claude, docs/factory/CHARTER.md — 1.4.41 (KTB #143): overlay(ADR-023)가 세션 전에 base의 것으로 되돌리는
+#                          팩토리 소유 경로. `git checkout <sha> -- …`는 인덱스까지 바꾸므로 status가 그것을 "변경"으로
+#                          보고했고, 오케스트레이터는 "커밋하지 않는다"를 아홉 번 반복하다 턴을 다 써 빌더의 결과를 받지
+#                          못했다. 에이전트는 이 경로에 쓸 수 없고(deny), 세션 뒤 overlayDrift가 따로 대조한다.
+# 넷 다 "에이전트가 코드를 고쳐놓고 커밋하지 않았다"는 신호가 아니다 — 여기서 걸리면 Stop이 영구히 막힌다.
 input=$(cat) || true
 
 # SubagentStop에서 **쓰기 금지 역할은 이 가드를 건너뛴다**. 그들은 deny-all-writes.sh가 Edit/Write와
@@ -30,14 +34,14 @@ esac
 
 branch=$(git branch --show-current 2>/dev/null) || exit 0
 if [ -z "$branch" ]; then
-  if [ -n "$(git status --porcelain -- ':(top)' ':(exclude,top).factory/out' ':(exclude,top)docs/factory/runs' ':(exclude,top).factory/quarantine.toml' 2>/dev/null)" ]; then
+  if [ -n "$(git status --porcelain -- ':(top)' ':(exclude,top).factory/out' ':(exclude,top)docs/factory/runs' ':(exclude,top).factory/quarantine.toml' ':(exclude,top).factory' ':(exclude,top).claude' ':(exclude,top)docs/factory/CHARTER.md' 2>/dev/null)" ]; then
     echo "factory: detached HEAD with uncommitted changes — review/merge stages must not modify the tree" >&2; exit 2
   fi
   exit 0
 fi
 case "$branch" in claude/fq-*) ;; *) exit 0 ;; esac
 # 위 주석의 제외 목록과 동일하다 — 브랜치 위에서도 팩토리 자신의 산출물은 더티가 아니다(아니면 Stop이 항상 막힌다).
-if [ -n "$(git status --porcelain -- ':(top)' ':(exclude,top).factory/out' ':(exclude,top)docs/factory/runs' ':(exclude,top).factory/quarantine.toml' 2>/dev/null)" ]; then
+if [ -n "$(git status --porcelain -- ':(top)' ':(exclude,top).factory/out' ':(exclude,top)docs/factory/runs' ':(exclude,top).factory/quarantine.toml' ':(exclude,top).factory' ':(exclude,top).claude' ':(exclude,top)docs/factory/CHARTER.md' 2>/dev/null)" ]; then
   echo "factory: uncommitted changes on $branch — commit and push before stopping" >&2; exit 2
 fi
 if ! git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
