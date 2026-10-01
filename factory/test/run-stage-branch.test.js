@@ -534,7 +534,7 @@ test("test_143_source_conflict_is_left_to_the_builder", async () => {
     expect(lines.find((l) => l.startsWith("base_merged:"))).toBe(`base_merged: ${ok.baseSha.slice(0, 7)} (GITHUB_SHA) merged into ${BR143} by the stage and pushed before the builder — the PR tree carries base's tooling`);
     expect(lines.some((l) => l.startsWith("base_merge:"))).toBe(false);
   } finally { ok.done(); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 /** 실제 체크아웃 + 실제 overlay + 실제 브랜치 경로 계산으로 runStage를 돌린다. 빌더(claudeP)는 주입한다. */
 const realImplDeps = ({ fx, claudeP, transition, lines, over = {} }) => {
@@ -593,7 +593,7 @@ test("test_143_pending_merge_does_not_trip_overlay_guard", async () => {
   expect(await runStage({ stage: "implement", issue: 143, deps: d2 })).toBe(2);
   expect(claudeP2).not.toHaveBeenCalled();
   expect(t2.mock.calls.at(-1)[0].to).toBe("factory:blocked");
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 const pendingCb = { ok: true, branch: BR143, base: `origin/${BR143}`, existed: true, merged: SHA, source: "GITHUB_SHA", conflicts: ["factory/lib/x.js", "factory/bin/y.js"] };
 /** 세션 뒤 단계들을 전부 스파이로 둔 implement 배선. */
@@ -669,7 +669,7 @@ test("test_143_unfinished_merge_is_undecidable", async () => {
   const plain = afterSessionSpies({ checkoutBranch: async () => ({ ok: true, branch: BR143, base: `origin/${BR143}`, existed: true, merged: SHA, source: "GITHUB_SHA" }), baseMergeComplete: noConflict });
   expect(await runStage({ stage: "implement", issue: 143, deps: plain.d })).toBe(0);
   expect(noConflict).not.toHaveBeenCalled();
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 test("test_143_committed_conflict_markers_are_blocked", async () => {
   // 빌더가 풀지 않고 `git add -A && git commit`으로 병합을 "끝냈다" — MERGE_HEAD는 사라졌고 base는 조상이지만 마커가 커밋됐다.
@@ -708,7 +708,7 @@ test("test_143_committed_conflict_markers_are_blocked", async () => {
     await git143(del.root, "commit", "-q", "--no-edit");
     expect(await assertBaseMergeComplete({ run: realRun, cwd: del.root, sha: r.merged, paths: r.conflicts })).toEqual({ ok: true });
   } finally { del.done(); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 test("test_143_remaining_merge_failures_still_abort_loudly", async () => {
   // 오버레이 루트 아래의 충돌(빌더가 쓸 수 없는 경로)은 소스 충돌과 함께여도 세션 전에 abort된다 — 경로를 이름으로.
@@ -768,7 +768,7 @@ test("test_143_remaining_merge_failures_still_abort_loudly", async () => {
     expect(fa.undecidable).toBe(true);
     expect(fa.reason).toMatch(/git merge --abort also failed/);
   } finally { _rm(root, { recursive: true, force: true }); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 /**
  * #143 — 병합이 빌더에게 넘어간 라운드에서 컨텍스트(세션 **전**)가 구한 merge-base는 옛 분기점이다(HEAD에 아직 base가 없다).
@@ -889,7 +889,7 @@ test("test_143_branch_edited_mirror_is_still_blocked_during_a_pending_merge", as
     expect(claudeP).not.toHaveBeenCalled();
     expect(transition.mock.calls.at(-1)[0].reason).toContain(".factory/lib/x.js");
   } finally { bare.done(); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 /**
  * #143 rework cf1 — 마커째 커밋된 병합이 **push된 뒤의 라운드**. 첫 라운드는 세션 뒤 검사가 막지만, 마커 커밋은 이미 origin에 있고
@@ -950,7 +950,7 @@ test("test_143_pushed_marker_merge_blocks_the_retry_round_before_a_session", asy
     expect(writeHandoff).toHaveBeenCalledTimes(1);
     expect(transition.mock.calls.filter(([a]) => a.to === "factory:blocked")).toEqual([]);
   } finally { good.done(); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 test("test_143_merge_marker_scan_counts_only_lines_the_merge_introduced", async () => {
   const { committedMergeMarkers } = await import("../bin/run-stage.js");
@@ -990,7 +990,7 @@ test("test_143_merge_marker_scan_counts_only_lines_the_merge_introduced", async 
     expect(broken.ok).toBe(false);
     expect(broken.reason).toContain("boom");
   } finally { _rm(top, { recursive: true, force: true }); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
 
 /**
  * #143 self-critique — the pre-session marker scan is part of the engine-only hand-off. An adopter repo never gets a conflict
@@ -1039,4 +1039,4 @@ test("test_143_adopter_implement_checkout_does_not_scan_merge_markers", async ()
     expect(real.reason).toMatch(/conflict markers committed in /);
     expect(real.reason).toContain("factory/lib/x.js");
   } finally { engine.done(); }
-});
+}, 120000); // 실제 git 픽스처(bare origin + clone): 이 Mac에서 13–27초, 기본 20초를 넘긴다 (1.4.42)
