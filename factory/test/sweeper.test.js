@@ -2581,3 +2581,31 @@ test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_bu
   await sweep147(gh, minutesAfter(T143, 15), { dispatchStage });
   expect(dispatchStage.mock.calls).toEqual([[{ stage: "implement", issue: 41 }]]);
 });
+
+test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_budget: a throwing backPressure still finishes every implement repair — comment, action, no restart marker — and the stalled arm restarts later", async () => {
+  const gh = statefulGh([
+    { number: 50, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] },
+    { number: 51, labels: ["factory:planned", "factory:needs-human"], comments: [{ id: 3, body: "<!-- factory-transition:v1 from=factory:ready to=factory:planned by=script -->\nx", createdAt: T143 }] },
+  ]);
+  const dispatchStage = vi.fn(async () => {});
+  const backPressure = vi.fn(async () => { throw new Error("search 502"); });
+  const actions = await sweep147(gh, minutesAfter(T143, 2), { dispatchStage, backPressure });
+
+  for (const [n, label] of [[50, "factory:rework"], [51, "factory:planned"]]) {
+    expect(gh.labelsOf(n)).toEqual([label]);
+    const [c] = repairCommentsOn(gh, n);
+    expect(c.body).toContain(labelSetRepairedComment([label, "factory:needs-human"], label));
+    expect(c.body).not.toContain("factory-sweeper restarted");
+    expect(c.body).not.toMatch(REDISPATCH_WORDING);
+    expect(c.body).toContain("search 502");
+    expect(actions).toContainEqual({ kind: "label-set-repaired", issue: n, from: [label, "factory:needs-human"], to: label });
+    expect(actions).toContainEqual({ kind: "label-set-repair-dispatch-skipped", issue: n, stage: "implement", label, reason: "back-pressure check failed — search 502" });
+  }
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", issue: 50, error: expect.stringContaining("search 502") });
+
+  // the failed check spent no restart budget: once back-pressure answers, the stalled arm restarts the rework issue once
+  const later = await sweep147(gh, minutesAfter(T143, 15), { dispatchStage, backPressure: async () => ({ ok: true, reasons: [] }) });
+  expect(dispatchStage.mock.calls.filter(([a]) => a.issue === 50)).toEqual([[{ stage: "implement", issue: 50 }]]);
+  expect(later).toContainEqual({ kind: "stalled-restart", issue: 50, stage: "implement", label: "factory:rework" });
+});
