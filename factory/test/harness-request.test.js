@@ -156,6 +156,7 @@ import { STATES } from "../lib/labels.js";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { readFileSync as readSrc } from "node:fs";
 import { createHash } from "node:crypto";
+import { dirname as pathDirname, resolve as pathResolve, basename as pathBasename } from "node:path";
 
 /** 이슈 저장소를 흉내 내는 가짜 gh — 라벨·코멘트가 실제로 바뀐다(진짜 transition()이 그 위에서 돈다). */
 function doorGh({ queued = 0, feature = { number: 2, author: "LeeHyeonKyu", labels: ["factory:in-progress"], body: "## done_when\n- [ ] x" }, failComment = false } = {}) {
@@ -410,4 +411,33 @@ test("test_136_reuse_reports_backlogged_harness", async () => {
   // 라벨을 모르면(라벨 없는 목록) 발명하지 않는다 — 예전 반환값 그대로
   const unknown = await ensureHarnessIssue({ gh: { issueList: async () => [{ number: 31, title: "t", body: gh.store.get(31).body }] }, issue: 2, entries: [PG] });
   expect(unknown).toEqual({ issue: 31, created: false, appended: 0, title: "t" });
+});
+
+test("test_136_harness_request_import_closure_excludes_door", () => {
+  // #136 self-critique f3: the static-`from` regex above only catches the most obvious regression.
+  // Walk the module's whole relative import closure — static `import … from`, side-effect `import "…"`,
+  // `export … from`, dynamic `import("…")` and `require("…")` — so a wrapper module, a re-export or a
+  // lazy `await import("./transition.js")` that drags the door in is caught too.
+  const [dirname, resolve, basename] = [pathDirname, pathResolve, pathBasename];
+  const SPEC = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["']([^"']+)["']/g;
+  const NON_LITERAL_DYNAMIC = /\bimport\s*\(\s*(?!["'])|\brequire\s*\(\s*(?!["'])/;
+  const root = new URL("../lib/harness-request.js", import.meta.url).pathname;
+  const seen = new Set();
+  const stack = [root];
+  while (stack.length) {
+    const file = stack.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const src = readSrc(file, "utf8");
+    // a computed specifier cannot be followed statically — forbid it anywhere in the closure
+    expect({ file, nonLiteralDynamicImport: NON_LITERAL_DYNAMIC.test(src.replace(/\/\/.*$|\/\*[\s\S]*?\*\//gm, "")) }).toEqual({ file, nonLiteralDynamicImport: false });
+    for (const m of src.matchAll(SPEC)) {
+      if (m[1].startsWith(".")) stack.push(resolve(dirname(file), m[1]));
+    }
+  }
+  const names = [...seen].map((f) => basename(f));
+  expect(names).toContain("harness-request.js");
+  expect(names).toContain("label-catalog.js"); // the walk really follows edges
+  expect(names).not.toContain("transition.js");
+  expect(names).not.toContain("admission.js");
 });
