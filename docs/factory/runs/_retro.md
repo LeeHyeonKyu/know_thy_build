@@ -21,13 +21,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
 | escaped defects | 0 | 0 |
 | revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 6 | 9 |
+| needs-human | 7 | 9 |
 | rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
 | unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
 | qa na ratio | 없음 | 없음 |
-| cost (usd) | 66.96 | 190.86 |
-| tokens | input 2025344 / output 162990 | input 3362163 / output 311837 |
+| cost (usd) | 70.37 | 190.86 |
+| tokens | input 2664583 / output 207005 | input 3362163 / output 311837 |
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
@@ -218,6 +218,14 @@
           18
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The generation fold applies transitively with no limit. A harness node always counts 0, and a flaky whose parent is a harness also counts 0. So the chain can keep alternating flaky→harness→flaky→harness→… and every issue in it has generation ≤ 1. depth_max never fires on this loop. Spec §8.2 line 109 counts one improvement→harness→flaky chain as a single generation; it does not say that repeating harness→flaky segments cost nothing. This is also a regression against main for issues that already pass the door. On main, a flaky harvested while implementing a harness issue opened for a flaky (F40 ← H30 ← F20 ← person #10) is refused as generation 3 > 1, because the gates.js flaky harvest already goes through admission. On this branch it is admitted, and so is every later link. dw6's rubric says 'the existing depth_max guarantee for other self-generated chains still holds', and that does not hold for this chain. open_max bounds only how many are open at once, not how long the chain gets.",
+        "runs": [
+          136
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -312,7 +320,7 @@
       {
         "issue": 136,
         "reason": "blocked (undecidable) — needs human",
-        "at": "2026-09-30T09:09:25Z"
+        "at": "2026-09-30T09:33:17Z"
       }
     ]
   },
@@ -333,17 +341,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 6,
+    "needs_human": 7,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 66.957274,
+      "cost_usd": 70.366645,
       "tokens": {
-        "input": 2025344,
-        "output": 162990
+        "input": 2664583,
+        "output": 207005
       }
     }
   },
