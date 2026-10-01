@@ -4011,3 +4011,65 @@ test("test_149_veto_window_opens_waits_and_closes — vetoWindow.ensureLabel cre
   const failing = makeVetoWindowDep({ gh: { createLabel: async () => { throw new Error("HTTP 403"); } } });
   expect(await failing.ensureLabel()).toMatchObject({ ok: false, reason: expect.stringMatching(/403/) });
 });
+
+// ── #149 self-critique: 창 상태의 해소, 시계 어긋남 여유, 잡 시작 시각, 스위치가 켜진 저장소의 라벨 ─────────────
+import { makeJobStartedAt, ensureVetoLabelWhenOn, VETO_CLOCK_SKEW_MS } from "../bin/run-stage.js";
+
+test("test_149_veto_window_opens_waits_and_closes — vetoWindow.resolve re-posts the same context with the final state and the same closes=", async () => {
+  const sha = "d".repeat(40);
+  const gh = { setStatus: vi.fn(async () => {}) };
+  const w = makeVetoWindowDep({ gh });
+  for (const state of ["success", "failure", "error"]) {
+    expect(await w.resolve({ sha, state, closesAt: "2026-10-01T10:00:00.000Z" })).toEqual({ ok: true });
+    expect(gh.setStatus).toHaveBeenLastCalledWith({ sha, context: "factory/veto-window", state, description: "closes=2026-10-01T10:00:00.000Z" });
+  }
+  // pending으로 "해소"하는 것은 해소가 아니다 — 거절한다.
+  expect((await w.resolve({ sha, state: "pending", closesAt: "2026-10-01T10:00:00.000Z" })).ok).toBe(false);
+  expect(gh.setStatus).toHaveBeenCalledTimes(3);
+  const broken = makeVetoWindowDep({ gh: { setStatus: async () => { throw new Error("HTTP 422"); } } });
+  expect(await broken.resolve({ sha, state: "success", closesAt: "2026-10-01T10:00:00.000Z" })).toMatchObject({ ok: false, reason: expect.stringMatching(/422/) });
+});
+
+test("test_149_veto_label_hands_to_human — vetoLabel dep: a veto a few minutes before since (runner/GitHub clock skew) still counts", async () => {
+  const ev = (event, label, actor, createdAt) => ({ event, label, actor, createdAt });
+  const since = "2026-10-01T09:00:00.000Z";
+  const mk = (events, labels = []) => makeVetoLabelDep({ gh: { issueLabelEvents: vi.fn(async () => events), issue: vi.fn(async () => ({ labels })) }, issue: 7 });
+  expect(VETO_CLOCK_SKEW_MS).toBe(5 * 60_000);
+  // 러너 시계가 GitHub보다 2분 빨랐다: 창이 열린 뒤 붙였다 뗀 거부권의 이벤트 시각이 since보다 앞서 찍힌다 — 그래도 거부권이다.
+  expect(await mk([ev("labeled", "factory:veto", "owner-hk", "2026-10-01T08:58:00Z"), ev("unlabeled", "factory:veto", "owner-hk", "2026-10-01T08:59:00Z")])({ since }))
+    .toEqual({ ok: true, vetoedBy: "owner-hk" });
+  // 여유 밖(10분 전)에 붙었다 떼어진 것은 이 창의 것이 아니다.
+  expect(await mk([ev("labeled", "factory:veto", "owner-hk", "2026-10-01T08:50:00Z"), ev("unlabeled", "factory:veto", "owner-hk", "2026-10-01T08:51:00Z")])({ since }))
+    .toEqual({ ok: true, vetoedBy: null });
+});
+
+test("test_149_veto_window_opens_waits_and_closes — jobStartedAt reads this job's start from the Actions API, or the process start outside Actions", async () => {
+  const env = { GITHUB_ACTIONS: "true", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "2", GITHUB_JOB: "merge" };
+  const gh = { runJobs: vi.fn(async () => [{ name: "other", status: "completed", startedAt: "2026-10-01T08:00:00Z" }, { name: "merge", status: "in_progress", startedAt: "2026-10-01T08:40:00Z" }]) };
+  expect(await makeJobStartedAt({ gh, env, processStartMs: 1 })()).toEqual({ ok: true, at: Date.parse("2026-10-01T08:40:00Z") });
+  expect(gh.runJobs).toHaveBeenCalledWith("123", "2");
+  // 못 읽으면, 이름이 맞는 잡이 없으면, 시작 시각이 없으면 — 판정 불가(ok:false). 프로세스 시작 시각으로 대신하지 않는다.
+  expect((await makeJobStartedAt({ gh: { runJobs: async () => { throw new Error("HTTP 403"); } }, env, processStartMs: 1 })()).ok).toBe(false);
+  expect((await makeJobStartedAt({ gh: { runJobs: async () => [{ name: "a", startedAt: "2026-10-01T08:00:00Z" }, { name: "b", startedAt: "2026-10-01T08:00:00Z" }] }, env, processStartMs: 1 })()).ok).toBe(false);
+  expect((await makeJobStartedAt({ gh: { runJobs: async () => [{ name: "merge", startedAt: null }] }, env, processStartMs: 1 })()).ok).toBe(false);
+  expect((await makeJobStartedAt({ gh, env: { ...env, GITHUB_RUN_ID: "" }, processStartMs: 1 })()).ok).toBe(false);
+  // Actions 밖(로컬 `factory run merge`)은 이 프로세스의 시작 시각이다 — 잡 timeout이 없지만 창이 쓸 시간은 같은 식으로 센다.
+  const local = vi.fn();
+  expect(await makeJobStartedAt({ gh: { runJobs: local }, env: {}, processStartMs: 1234 })()).toEqual({ ok: true, at: 1234 });
+  expect(local).not.toHaveBeenCalled();
+});
+
+test("test_149_self_change_config_defaults_and_validation — a repo with the switch on gets factory:veto at every run, before any window", async () => {
+  const { catalogLabel, VETO_LABEL } = await import("../lib/label-catalog.js");
+  const on = { ok: true, auto_merge_non_judge: true, veto_minutes: 60 };
+  const gh = { createLabel: vi.fn(async () => {}) };
+  expect(await ensureVetoLabelWhenOn({ gh, selfChange: on, engine: true })).toEqual({ ok: true, ensured: true });
+  expect(gh.createLabel).toHaveBeenCalledWith({ ...catalogLabel(VETO_LABEL) });
+  // 스위치가 꺼졌거나, 설정이 틀렸거나, 채택자 저장소면 만들지 않는다(그 저장소엔 거부권 창이 없다).
+  for (const [selfChange, engine] of [[{ ok: true, auto_merge_non_judge: false, veto_minutes: 60 }, true], [{ ok: false, reason: "x" }, true], [undefined, true], [on, false]]) {
+    const g = { createLabel: vi.fn(async () => {}) };
+    expect(await ensureVetoLabelWhenOn({ gh: g, selfChange, engine })).toEqual({ ok: true, ensured: false });
+    expect(g.createLabel).not.toHaveBeenCalled();
+  }
+  expect(await ensureVetoLabelWhenOn({ gh: { createLabel: async () => { throw new Error("HTTP 403"); } }, selfChange: on, engine: true })).toMatchObject({ ok: false, reason: expect.stringMatching(/403/) });
+});

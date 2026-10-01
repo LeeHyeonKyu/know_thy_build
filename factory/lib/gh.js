@@ -577,6 +577,15 @@ export function makeGh({ run, repo, sleep = realSleep }) {
         .filter((e) => e?.event === "labeled" || e?.event === "unlabeled")
         .map((e) => ({ event: e.event, label: e.label?.name ?? null, actor: e.actor?.login ?? null, createdAt: e.created_at ?? null }));
     },
+    /**
+     * #149 (S4a) — 한 런 시도(attempt)의 잡 목록. 머지 스테이지가 **이 잡이 러너에서 시작한 시각**을 읽어, 거부권 창이
+     * 잡의 timeout-minutes 안에 드는지 셀 때 이미 쓴 시간(체크아웃·setup·게이트)을 넣는다. 실패는 삼키지 않는다.
+     */
+    async runJobs(runId, attempt) {
+      const pages = JSON.parse(await gh(["api", `repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`, "--paginate", "--slurp"]));
+      return pages.flatMap((p) => (Array.isArray(p?.jobs) ? p.jobs : []))
+        .map((j) => ({ name: j?.name ?? null, status: j?.status ?? null, startedAt: j?.started_at ?? null }));
+    },
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
     },

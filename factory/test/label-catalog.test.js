@@ -52,10 +52,9 @@ test("test_149_self_change_config_defaults_and_validation — `factory:veto` is 
   expect(TIER_LABELS.has(VETO_LABEL)).toBe(false);
   expect(TRANSITIONS.has(VETO_LABEL)).toBe(false);
   for (const to of TRANSITIONS.values()) expect(to.has(VETO_LABEL)).toBe(false);
-  // bootstrap의 21개(`bootstrap.test.js`가 못 박은 수)는 그대로다 — 라벨은 merge 스테이지가 창을 열기 전에 만든다
-  // (merge-stage.test.js·run-stage.test.js의 test_149_veto_window_opens_waits_and_closes).
-  expect(byName(VETO_LABEL)).toBeUndefined();
-  expect(LABELS).toHaveLength(21);
+  // 카탈로그 조회(`catalogLabel`)가 이 정의를 돌려준다 — 라벨을 만드는 쪽은 모두 그 조회로 정의를 얻는다
+  // (run-stage.test.js의 ensureVetoLabelWhenOn·ensureLabel 테스트).
+  expect((await import("../lib/label-catalog.js")).catalogLabel(VETO_LABEL)).toEqual({ ...l });
 });
 
 test("test_149_self_change_config_defaults_and_validation — a state transition never strips `factory:veto`", async () => {
@@ -73,4 +72,15 @@ test("test_149_self_change_config_defaults_and_validation — a state transition
   const r = await gh.setFactoryLabel(7, "factory:needs-human");
   expect(r.removed).toEqual(["factory:approved"]);
   expect(run.calls.some((c) => c.args.includes("--remove-label") && c.args.includes(VETO_LABEL))).toBe(false);
+});
+
+test("test_149_self_change_config_defaults_and_validation — catalogLabel names factory:veto with a color and a description", async () => {
+  const { catalogLabel, VETO_LABEL } = await import("../lib/label-catalog.js");
+  const v = catalogLabel(VETO_LABEL);
+  expect(v.name).toBe("factory:veto");
+  expect(v.color).toMatch(/^[0-9a-f]{6}$/);
+  expect(v.description.length).toBeGreaterThan(0);
+  // 같은 조회가 bootstrap의 라벨도 돌려준다 — 카탈로그 하나다.
+  expect(catalogLabel("factory:approved")).toEqual(byName("factory:approved"));
+  expect(catalogLabel("factory:nope")).toBeNull();
 });

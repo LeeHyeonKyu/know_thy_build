@@ -3964,6 +3964,15 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
 - **S4a가 강제하지 않는 것**: 설계 §8.3의 canary GREEN과 거부-시드 canary GREEN은 아직 자동 머지의 전제조건이 아니다. 지금 이 경로를 여는 것은 스위치 하나뿐이다.
   스위치를 켜는 사람은 "§8.3대로의 S4"를 켠 것이 아니다. 그 전제조건은 후속 S4 이슈가 정한다.
 - **라벨은 bootstrap 목록(`LABELS`) 밖에 둔다**(`VETO_LABEL_SPEC`). `factory/test/bootstrap.test.js`가 bootstrap 라벨 수를 21로 못 박고 있고, 이슈는 그 테스트를 `tests_changed_allowed:`에
-  올리지 않았다. 대신 merge 스테이지가 창을 열기 전, 알림보다 먼저 라벨을 만든다(`gh label create --force`). bootstrap에 합치는 일은 그 테스트를 허가하는 후속 이슈에서 한다.
+  올리지 않았다. 대신 스위치가 켜진 엔진 저장소에서는 **모든 스테이지 런의 시작**(CHARTER가 ready로 읽힌 직후, `ensureVetoLabelWhenOn`)에 라벨을 만든다(`gh label create --force`, 멱등).
+  PR이 머지 창에 닿기 전에 triage·plan·implement·review 런이 이미 만들어 두므로, 소유자는 리뷰 중에도 미리 붙일 수 있다(창이 열리기 전에 붙여 아직 붙어 있는 라벨도 거부권이다).
+  창을 열 때도 알림보다 먼저 한 번 더, 이번에는 필수로 확인한다. 카탈로그 조회는 `catalogLabel(name)` 하나다. bootstrap에 합치는 일은 그 테스트를 허가하는 후속 이슈에서 한다.
+- **자기비판에서 고친 것(리뷰 전)**:
+  창이 잡에 드는가는 **이 잡이 이미 쓴 시간**까지 센다. 이미 쓴 시간 + `veto_minutes` + ready 뒤 체크 대기 + 머지까지 2분이 `timeout-minutes` 미만이어야 한다. 이미 쓴 시간은 체크아웃·setup·게이트의 전체 스위트를 포함하며,
+  잡 시작 시각은 Actions API의 이 런 시도 잡 목록(`started_at`)에서 읽는다. 못 읽으면 blocked다. 리뷰 증거((6b) 전체 — handoff·정족수·all-approve·K·run 기록 출처·게시자)는 순수 읽기라 **알림 전에** 한 번 묻는다.
+  창 뒤에도 남는 거부(ready 뒤 체크 대기·무결성 재확인·라이브 head 대조)는 알림이 조건으로 이름을 댄다. 그래서 알림은 "모두 통과할 때만 자동 머지하고, 거부되면 blocked/needs-human"이라는 조건부 약속이다.
+  `factory/veto-window` 상태는 끝을 남긴다. 거부권 없이 닫히면 prReady 전에 success로 바꾸고, 바꾸지 못하면 머지하지 않는다. 거부권이면 failure, 창이 열린 뒤 판정 불가면 error다. description은 `closes=<iso>` 그대로라 재진입이 같은 시계를 읽는다.
+  failure로 해소된 창에 재진입하면, 라벨이 그 뒤에 떼어졌어도 다시 사람에게 넘긴다. 재진입의 opened_at은 상태의 createdAt과 `closes − veto_minutes` 중 이른 쪽이다(상태는 알림 **뒤**에 게시되므로 createdAt은 늦다).
+  라벨 이벤트는 러너·GitHub 시계 어긋남 여유 5분을 두고 센다(여유가 틀리는 방향은 사람 쪽이다).
 - **남는 위험**: 창 도중 잡이 *취소*되면(타임아웃은 위에서 막는다) 클레임 락이 `Aborted cleanup`까지 고아로 남는다. 창 동안 러너 하나와 이 이슈의 merge 동시성 슬롯을 잡는다.
   폴링은 대략 시간당 26회 API 호출이다(이벤트와 라벨). 런타임에 구성되는 import(`mirror.js`의 생성기 로드)와 워크플로 프로세스 간선은 닫힘 테스트가 보지 못한다.

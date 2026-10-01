@@ -788,3 +788,16 @@ test("test_149_veto_label_hands_to_human — issueLabelEvents maps the issue's l
   const failing = makeGh({ run: makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 502" } }]), repo });
   await expect(failing.issueLabelEvents(7)).rejects.toThrow(/502/);
 });
+
+test("test_149_veto_window_opens_waits_and_closes — runJobs lists one run attempt's jobs with name, status and start time", async () => {
+  const pages = [{ total_count: 2, jobs: [{ name: "merge", status: "in_progress", started_at: "2026-10-01T08:40:00Z" }] }, { total_count: 2, jobs: [{ name: "sweep", status: "queued" }] }];
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1].includes("/jobs"), result: { code: 0, stdout: JSON.stringify(pages), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.runJobs("123", "2")).toEqual([
+    { name: "merge", status: "in_progress", startedAt: "2026-10-01T08:40:00Z" },
+    { name: "sweep", status: "queued", startedAt: null },
+  ]);
+  expect(run.calls[0].args).toEqual(["api", "repos/o/r/actions/runs/123/attempts/2/jobs?per_page=100", "--paginate", "--slurp"]);
+  const failing = makeGh({ run: makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 403" } }]), repo });
+  await expect(failing.runJobs("123", "1")).rejects.toThrow(/403/);
+});

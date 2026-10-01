@@ -48,11 +48,23 @@ export const VETO_LABEL = "factory:veto";
 /**
  * 그 라벨의 정의(색·설명). **`LABELS` 배열 밖에 둔다** — `factory/test/bootstrap.test.js`가 bootstrap이 만드는 라벨
  * 수를 21로 못 박고 있고, #149 이슈는 그 테스트를 `tests_changed_allowed:`에 올리지 않았다(기존 테스트는 고치지
- * 않는다). 대신 merge 스테이지가 거부권 창을 열기 **전에** 이 정의로 라벨을 만든다(`gh label create --force`,
- * 멱등) — 소유자에게 "이 라벨을 붙이라"고 말하는 순간 라벨은 이미 있다. 스위치가 꺼진 저장소에는 생기지 않는다.
+ * 않는다). 대신 스위치가 켜진 엔진 저장소에서는 **모든 스테이지 런의 시작**(CHARTER가 ready로 읽힌 직후,
+ * `run-stage.js` `ensureVetoLabelWhenOn`)에 이 정의로 라벨을 만든다(`gh label create --force`, 멱등) — PR이 머지
+ * 창에 닿기 전, triage·plan·implement·review 런이 이미 만들어 둔다. 창을 열 때도 알림보다 먼저 한 번 더 확인한다.
+ * 스위치가 꺼진 저장소에는 생기지 않는다.
  * bootstrap에 합치는 것은 그 테스트가 허가된 후속 이슈의 몫이다.
  */
 export const VETO_LABEL_SPEC = Object.freeze({ name: VETO_LABEL, color: "000000", description: "소유자의 거부권 — 엔진의 자동 머지를 막고 사람 머지로 돌린다" });
+
+/**
+ * 카탈로그 조회 — `LABELS`(bootstrap이 만드는 21개)와 `VETO_LABEL_SPEC`을 한 곳에서 이름으로 찾는다. 없으면 null.
+ * 거부권 라벨을 쓰는 쪽(`run-stage.js`의 `ensureVetoLabelWhenOn`·`makeVetoWindowDep`)은 이 조회로 정의를 얻는다.
+ */
+export function catalogLabel(name) {
+  if (name === VETO_LABEL) return { ...VETO_LABEL_SPEC };
+  const l = LABELS.find((x) => x.name === name);
+  return l ? { ...l } : null;
+}
 
 export const LABELS = [
   { name: "backlog", color: "c5def5", description: "스펙은 있으나 착수하지 않음" },
