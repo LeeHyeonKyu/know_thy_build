@@ -3917,3 +3917,14 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
   그때까지 빌더는 지시 없이 `loaded.merge_conflicts`를 받으므로, 소스 충돌 라운드는 대개 **유료 세션 뒤에** blocked로 끝날 것이다 — 오늘의
   세션 전 abort에는 없던 비용이다. 그래서 **"엔진 이슈가 도는 동안 엔진 릴리스를 내지 않는다"는 운영 규칙은 1.4.41이 나갈 때까지 유지한다.**
   마커 없이 틀린 해결은 이 검사가 잡지 못한다(게이트·리뷰가 본다) — 머지됐다면 되돌리기가 아니라 고쳐 나간다.
+**1.4.41 (KTB #143 실측 + S3b 프롬프트 + 보드).** #137(S2b)이 1.4.40 아래 머지되어 채택 저장소에 전해지지 않았다 — 이 릴리스가 싣는다. 그 위에 셋.
+- **stop-guard는 팩토리 소유 경로를 보지 않는다.** #143의 rework implement 런에서 오케스트레이터는 Workflow를 띄운 뒤 "커밋하지 않는다"를
+  아홉 번 반복하다 턴을 다 썼고(스테이지 산출물 없음 → needs-human), 원인은 overlay(ADR-023)가 `.factory/bin/run-stage.js`·`.factory/lib/context.js`를
+  base로 되돌리며 인덱스까지 바꿔 둔 것을 `stop-guard.sh`가 "미커밋 변경"으로 읽은 것이다. 에이전트는 그 경로에 쓸 수 없고(deny) 세션 뒤
+  `overlayDrift`가 따로 대조하므로, 가드의 더티 판정에서 `.factory`·`.claude`·`docs/factory/CHARTER.md`를 뺀다. #136의 결함 일곱과 같은
+  과(科)다 — "러너가 만든 diff를 에이전트의 것으로 오인".
+- **빌더 프롬프트의 병합 완성 지시(S3b의 프롬프트 쪽).** `loaded.merge_conflicts`가 있으면 그 파일의 충돌 마커를 계획의 의도대로 풀고
+  `git add`·`git commit`으로 진행 중인 병합을 끝낸 뒤 본업을 하라고 지시한다. 엔진 쪽(#143: abort하지 않고 목록을 싣기, `MERGE_HEAD`가
+  남으면 판정 불가)은 공장이 만든다 — `templates/factory/**`는 KTB CHARTER의 NEVER_AUTOMATE라 프롬프트는 사람이 넣는다(#142 분할).
+- **보드: 빈 레인 숨김.** 넓은 화면에서 레인은 가로로 늘어서고 앞쪽(backlog·queue…)이 비어 있으면 도는 이슈가 오른쪽 밖으로 밀려 "아무것도
+  없어 보였다"(2026-10-01 실측). 체크 하나로 빈 레인을 접는다(브라우저 localStorage에만 기억). tailnet에서 보려면 `docs/factory/ops/board-proxy.mjs`.

@@ -144,6 +144,7 @@ table.agents td.n { text-align: right; font-variant-numeric: tabular-nums; white
       <button id="tab-timeline" role="tab" aria-selected="false" aria-controls="view-timeline">타임라인 <span class="en">timeline</span></button>
     </div>
     <label class="pill">저장소 <select id="repo-filter"><option value="">전체 (all)</option></select></label>
+    <label class="pill" title="비어 있는 레인을 접는다 — 넓은 화면에서 도는 이슈가 오른쪽 밖으로 밀려 '아무것도 없어 보이는' 일을 막는다"><input type="checkbox" id="hide-empty"> 빈 레인 숨김 <span class="en">hide empty</span></label>
     <div class="spacer"></div>
     <span class="pill" id="totals"></span>
     <span class="pill" id="conn"><span class="dot"></span><span id="conn-text">연결 중…</span></span>
@@ -254,7 +255,9 @@ function usd(n) { return "$" + (Number(n) || 0).toFixed(2); }
 function freshness(last, now) { var m = mins(last, now); if (m == null) return null; return m < FRESH_MIN ? "fresh" : (m < STALE_MIN ? "stale" : "dead"); }
 
 // ── 상태 ────────────────────────────────────────────────────────────────────
-var state = { model: null, view: "lanes", repoFilter: "", selected: null, windowH: 24, mode: null, rate: null };
+var HIDE_EMPTY_KEY = "ktb-board-hide-empty";
+function hideEmptyPref() { try { return localStorage.getItem(HIDE_EMPTY_KEY) === "1"; } catch (e) { return false; } }
+var state = { model: null, view: "lanes", repoFilter: "", selected: null, windowH: 24, mode: null, rate: null, hideEmpty: hideEmptyPref() };
 
 // ══════════════════════════════════════════════════════════════════════════
 // 정적 모드 — api.github.com을 직접 읽어 **축소 모델**을 만든다.
@@ -554,6 +557,7 @@ function renderLanes() {
   all.forEach(function (lane) {
     var cards = lane.issues.map(function (kk) { return byKey[kk]; }).filter(Boolean);
     if (lane.id === "other" && !cards.length) return;
+    if (state.hideEmpty && !cards.length) return;
     var col = el("div", "lane" + (LANES.some(function (l) { return l.id === lane.id; }) ? "" : " side"));
     var h = el("h2");
     h.appendChild(el("span", null, lane.label));
@@ -565,6 +569,7 @@ function renderLanes() {
     cards.forEach(function (c) { col.appendChild(renderCard(c)); });
     root.appendChild(col);
   });
+  if (!root.children.length) root.appendChild(el("div", "empty", visible.length ? "모든 레인이 비어 있습니다." : "이 창에 보여 줄 이슈가 없습니다."));
 }
 
 function renderTimeline() {
@@ -808,6 +813,12 @@ function boot() {
 $("#tab-lanes").addEventListener("click", function () { state.view = "lanes"; $("#tab-lanes").setAttribute("aria-selected", "true"); $("#tab-timeline").setAttribute("aria-selected", "false"); $("#view-lanes").hidden = false; $("#view-timeline").hidden = true; render(); });
 $("#tab-timeline").addEventListener("click", function () { state.view = "timeline"; $("#tab-timeline").setAttribute("aria-selected", "true"); $("#tab-lanes").setAttribute("aria-selected", "false"); $("#view-timeline").hidden = false; $("#view-lanes").hidden = true; render(); });
 $("#repo-filter").addEventListener("change", function (e) { state.repoFilter = e.target.value; render(); });
+$("#hide-empty").checked = state.hideEmpty;
+$("#hide-empty").addEventListener("change", function (e) {
+  state.hideEmpty = e.target.checked;
+  try { localStorage.setItem(HIDE_EMPTY_KEY, state.hideEmpty ? "1" : "0"); } catch (err) {}
+  render();
+});
 $("#reload").addEventListener("click", function () {
   if (state.mode === "server") fetch("/api/board", { cache: "no-store" }).then(function (r) { return r.json(); }).then(setModel);
   else location.reload();

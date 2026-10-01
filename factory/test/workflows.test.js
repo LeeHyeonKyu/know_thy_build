@@ -1073,6 +1073,35 @@ test("factory-implement.js: the builder is told never to commit regenerated file
   expect(clean).toContain("9. If the change genuinely needs one of those files changed");
 });
 
+// 1.4.41 (S3b) — the builder finishes the base merge the stage left in progress for it; a run without
+// conflicts carries no such block (and the field is absent until the engine side of KTB #143 lands).
+test("factory-implement.js: loaded.merge_conflicts → the builder is told to resolve those markers and commit FIRST; no conflicts → no block", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const promptFor = async (loaded) => {
+    const { calls } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, {
+      agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded },
+    });
+    return byType(calls, "factory-builder")[0].prompt;
+  };
+  const conflicted = await promptFor(implLoaderFix({ merge_conflicts: ["factory/bin/run-stage.js", "factory/lib/context.js"] }));
+  expect(conflicted).toContain("FINISH THE BASE MERGE FIRST");
+  expect(conflicted).toContain("factory/bin/run-stage.js");
+  expect(conflicted).toContain("factory/lib/context.js");
+  expect(conflicted).toContain("`git add` those files and `git commit` to conclude the merge");
+  expect(conflicted).toContain("Do NOT run any merge/rebase/abort command");
+  // 본업 규칙은 그대로 앞에 있고, 병합 블록이 그 뒤에 온다 — "먼저"는 순서가 아니라 지시다
+  expect(conflicted.indexOf("1. You are ALREADY on the branch")).toBeLessThan(conflicted.indexOf("FINISH THE BASE MERGE FIRST"));
+
+  for (const loaded of [implLoaderFix(), implLoaderFix({ merge_conflicts: [] })]) {
+    const clean = await promptFor(loaded);
+    expect(clean).not.toContain("FINISH THE BASE MERGE FIRST");
+  }
+});
+
 // KTB-27 — Claude Code does not substitute positional `$1`/`$2` in a command md, only `$ARGUMENTS`
 // (verified live: `claude -p "/argtest 42 true"` filled `$ARGUMENTS` correctly but turned `$1` into
 // "true" and left `$2` as the literal text "$2"). The implement dispatcher now passes the whole
