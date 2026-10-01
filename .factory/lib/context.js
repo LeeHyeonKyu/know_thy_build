@@ -235,7 +235,7 @@ export function explicitSubmission(comments) {
   return latest ? { explicit_submission: true, submitted_by: latest.by } : { explicit_submission: false, submitted_by: null };
 }
 
-export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null }) {
+export async function buildContext({ root, gh, issue, stage, run = null, base = null, setupDirty = null, planRepair = null, mergeConflicts = null }) {
   const harness = loadHarness(root), charter = loadCharter(root), roles = loadRoles(root);
   const it = await gh.issue(issue);
   const comments = await gh.comments(issue);
@@ -303,6 +303,11 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
      * the planner reads them from `loaded.plan_repair` and fixes exactly those before re-emitting.
      */
     ...(stage === "plan" && Array.isArray(planRepair) && planRepair.length ? { plan_repair: planRepair } : {}),
+    /**
+     * #143 (S3b) — 스테이지가 base 병합의 소스 충돌을 abort하지 않고 빌더에게 넘긴 라운드에서, 아직 충돌 중인 경로들
+     * (`run-stage.js`의 `mergeBaseIntoBranch`). 병합을 이어 받는 쓰기 세션은 implement뿐이고, 넘긴 것이 없으면 키 자체가 없다.
+     */
+    ...(stage === "implement" && Array.isArray(mergeConflicts) && mergeConflicts.length ? { merge_conflicts: [...mergeConflicts] } : {}),
   };
   ctx.loaded = await loadedFor({ ctx, roleBlock, gh, comments });
   mkdirSync(join(root, ".factory/out"), { recursive: true });
@@ -409,5 +414,7 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
     // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),
+    // #143 (S3b): the source paths still conflicted in the base merge the stage left to the builder. Absent when no merge is pending.
+    ...(Array.isArray(ctx.merge_conflicts) && ctx.merge_conflicts.length ? { merge_conflicts: ctx.merge_conflicts } : {}),
   };
 }
