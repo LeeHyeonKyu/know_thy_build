@@ -2348,8 +2348,10 @@ export async function committedMergeMarkers({ run, cwd, base }) {
 /**
  * #143 rework cf1 — main()의 implement 체크아웃 배선: 브랜치가 들고 온 병합 커밋의 마커를 세션 전에 묻는 체크아웃.
  * 테스트가 main()과 같은 배선을 그대로 부를 수 있도록 밖으로 꺼냈다(배선이 스캔을 떨어뜨리면 테스트가 실패한다).
+ * 스캔은 엔진 저장소에서만 건다: 충돌을 빌더에게 넘기는 것은 엔진 전용이고(채택자는 예전처럼 abort하고 사람이 리베이스한다),
+ * 채택자의 implement 체크아웃에 세션 전 차단 경로를 새로 들이지 않는다.
  */
-export const implementCheckoutBranch = (opts) => makeCheckoutBranch({ ...opts, scanMarkers: committedMergeMarkers });
+export const implementCheckoutBranch = (opts) => makeCheckoutBranch({ ...opts, scanMarkers: mirrorApplicable(opts.root) ? committedMergeMarkers : null });
 
 /** #143 rework cf1 — push된 마커 병합 위의 라운드가 세션 전에 멈출 때의 사유. 사람이 마저 할 일을 적는다(재시도도 같은 자리에서 다시 멈춘다). */
 export const committedMarkersReason = ({ branch, paths }) =>

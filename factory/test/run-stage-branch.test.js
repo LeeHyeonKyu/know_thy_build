@@ -991,3 +991,52 @@ test("test_143_merge_marker_scan_counts_only_lines_the_merge_introduced", async 
     expect(broken.reason).toContain("boom");
   } finally { _rm(top, { recursive: true, force: true }); }
 });
+
+/**
+ * #143 self-critique — the pre-session marker scan is part of the engine-only hand-off. An adopter repo never gets a conflict
+ * handed to a builder (non_goal: adopters keep today's abort-and-rebase), so its implement checkout must not grow a new
+ * pre-session block path: no merge-commit scan, and a git failure the scan would have hit cannot block the adopter round.
+ */
+test("test_143_adopter_implement_checkout_does_not_scan_merge_markers", async () => {
+  const { implementCheckoutBranch } = await import("../bin/run-stage.js");
+  // A branch whose merge of the release was committed with markers and pushed (by a person, outside the factory).
+  const markerMerged = async (engine) => {
+    const fx = await overlapRepo({ engine });
+    await git143(fx.root, "checkout", "-q", BR143);
+    expect((await realRun("git", ["merge", "--no-edit", fx.baseSha], { cwd: fx.root })).code).not.toBe(0);
+    await git143(fx.root, "add", "-A"); await git143(fx.root, "commit", "-q", "--no-edit");
+    await git143(fx.root, "push", "-q", "origin", BR143);
+    await git143(fx.root, "checkout", "-q", "main");
+    return fx;
+  };
+  const checkout = (fx, run) => implementCheckoutBranch({ run, root: fx.root, issue: 143, env: { GITHUB_SHA: fx.baseSha }, defaultBranch: () => "main", regenerate: vi.fn(async () => ({ ok: true, applicable: false, changed: [] })) })();
+  // A git whose merge-commit listing fails: the engine fails closed on it, an adopter must never reach it.
+  const failMerges = (calls) => async (cmd, args, opts) => {
+    if (cmd === "git") calls.push(args.join(" "));
+    if (cmd === "git" && args[0] === "rev-list" && args.includes("--merges")) return { code: 128, stdout: "", stderr: "rev-list exploded" };
+    return realRun(cmd, args, opts);
+  };
+
+  const adopter = await markerMerged(false);
+  try {
+    const calls = [];
+    const r = await checkout(adopter, failMerges(calls));
+    expect(r.ok).toBe(true);
+    expect(r.undecidable).toBeUndefined();
+    expect(r.merged).toBeNull();
+    expect(calls.filter((c) => c.startsWith("rev-list --merges") || c.startsWith("diff-tree"))).toEqual([]);
+  } finally { adopter.done(); }
+
+  const engine = await markerMerged(true);
+  try {
+    const calls = [];
+    const r = await checkout(engine, failMerges(calls));
+    expect(r.ok).toBe(false);
+    expect(r.undecidable).toBe(true);
+    expect(r.reason).toContain("rev-list exploded");
+    const real = await checkout(engine, realRun);
+    expect(real.ok).toBe(false);
+    expect(real.reason).toMatch(/conflict markers committed in /);
+    expect(real.reason).toContain("factory/lib/x.js");
+  } finally { engine.done(); }
+});
