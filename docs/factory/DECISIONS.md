@@ -3894,3 +3894,26 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
 `.factory/lib/sweeper.js`를 "소스와 다르다"고 읽었는데, 브랜치에서 둘은 바이트까지 같았다. 원인은 `lib/exec.js`의 `run()`이 자식의 출력을
 `stdout += chunk`로 모은 것 — Buffer 조각마다 문자열화하므로 멀티바이트 문자(한국어 주석)가 조각 경계에서 깨진다. 242 KB·117 KB의 두
 파일만 걸린 이유다. 조각을 모아 한 번에 디코드한다. 텍스트 판정을 출력에 기대는 모든 호출자(게이트 로그 파싱 등)에 해당하는 일반 결함이다.
+
+**#143 (S3b, 엔진 부분) — KTB-38의 "사람이 리베이스한다"를 소스 충돌에 한해 대체한다: base 병합의 소스 충돌은 같은 implement 런 안에서 빌더의 일이다.**
+근거는 이슈 #143의 비용 문장 하나다: #130은 엔진 릴리스 세 번과 겹쳐 재시작해야 했고 $45 중 절반이 그 반복이었다. 이슈가 인용한
+`docs/research/simulation-136.md`는 저장소에 없고, 설계 2026-09-30 §8.3은 소스 충돌을 말하지 않는다 — 이 결정은 그 두 문서에 기대지 않는다.
+- **무엇이 바뀌었나**(`factory/bin/run-stage.js` `mergeBaseIntoBranch`): 추가 전용 파일(`DECISIONS.md`)은 합집합으로, 미러 가족은 base 것으로
+  먼저 푼 뒤에도 소스 충돌이 남으면 **abort하지 않는다.** 마커가 든 트리를 그대로 두고(MERGE_HEAD 유지) `{ ok: true, merged, conflicts }`를
+  돌려준다. 미러는 이때 재생성하지 않는다(생성기가 마커 든 소스를 읽게 된다 — 세션 뒤 미러 단계가 푼 소스로 만든다). 스테이지는 병합 커밋도
+  push도 하지 않는다. run 기록은 `base_merge: N conflicted source path(s) left to the builder: …`이고 "pushed before the builder"를 말하지 않는다.
+  경로 목록은 `loaded.merge_conflicts`로 빌더에게 간다(넘긴 것이 없으면 키가 없다).
+- **overlay 가드**: 병합 중인 인덱스에서는 base의 팩토리 경로 변경도 HEAD 대비 staged로 보인다. 가드는 브랜치가 merge-base 이후 실제로 바꾼
+  경로만 센다(`branchOwnFactoryPaths`) — 그렇지 않으면 릴리스가 `.claude/**`를 함께 바꾼 바로 그 경우가 막힌다. 그중 미러 가족은 세지 않는다:
+  HEAD 대조(`mirrorMatchesHead`)가 마커 든 워크트리 소스를 읽게 되고, 세션 뒤 미러 단계가 어차피 다시 만든다. 미러가 아닌 팩토리 경로를
+  브랜치가 고쳤으면 오늘처럼 멈춘다.
+- **세션 뒤**(브랜치 확인·드리프트 제거·미러 커밋·턴 한도 복구 **전**): MERGE_HEAD가 없고, base sha가 HEAD의 조상이고, 기록된 경로의 HEAD
+  바이트에 마커 줄이 없어야 끝난 것이다(`assertBaseMergeComplete`). 아니면 `factory:blocked` cause `undecidable`, 사유
+  `builder did not complete the base merge` + 사람이 마저 할 경로. 게이트·verify·미러·핸드오프는 부르지 않는다.
+- **그대로 abort하는 것**(KTB-38 그대로, 세션 전, 사유 `rebase by hand`): 충돌 경로를 나열할 수 없는 병합 실패, `merge --abort` 실패,
+  overlay 루트(`.claude/**`·미러가 아닌 `.factory/**`·CHARTER·세션 설정) 아래의 충돌(경로를 이름으로), 그리고 **채택자 저장소 전부** —
+  넘김은 엔진 저장소에서만이다.
+- **아직 끝나지 않았다**: 빌더에게 병합을 끝내라고 말하는 프롬프트는 `templates/factory/**`(NEVER_AUTOMATE)라 1.4.41에 사람이 넣는다.
+  그때까지 빌더는 지시 없이 `loaded.merge_conflicts`를 받으므로, 소스 충돌 라운드는 대개 **유료 세션 뒤에** blocked로 끝날 것이다 — 오늘의
+  세션 전 abort에는 없던 비용이다. 그래서 **"엔진 이슈가 도는 동안 엔진 릴리스를 내지 않는다"는 운영 규칙은 1.4.41이 나갈 때까지 유지한다.**
+  마커 없이 틀린 해결은 이 검사가 잡지 못한다(게이트·리뷰가 본다) — 머지됐다면 되돌리기가 아니라 고쳐 나간다.
