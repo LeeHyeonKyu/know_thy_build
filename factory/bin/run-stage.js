@@ -2215,6 +2215,24 @@ export async function mergeBaseIntoBranch({ run, root, branch, sha, source = "ba
   return { ok: true, merged: sha, ...(mirrorResolved ? { mirrorResolved: { conflicted: mirrorResolved.conflicted, regenerated: mirrorResolved.regenerated } } : {}) };
 }
 
+/**
+ * main()의 `buildContext` dep. 감사 H3 — 컨텍스트는 `run`/`base`를 받아야 tier 바닥(diff)을 계산할 수 있다. base를 못 구하는
+ * 것은 판정 불가이지 "바닥 없음"이 아니지만, **여기서** 스테이지를 죽이지는 않는다: 곧이어 도는 `gates` dep이 같은 `mergeBase()`로
+ * MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는 triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을
+ * 런 레코드에 남긴다. Task 9 (KTB-51): plan repair 턴의 validator 사유는 `plan_repair`로 `loaded.json`에 실린다.
+ * #143 (S3b): 빌더에게 넘긴 base 병합의 충돌 경로는 `mergeConflicts`로 실려 `loaded.merge_conflicts`가 된다 — 이 배선을 테스트가
+ * 직접 부를 수 있도록 main() 밖으로 꺼냈다(셀프 비판 f1: 이 고리가 목록을 떨어뜨려도 아무 테스트도 실패하지 않았다).
+ */
+export const makeBuildContextDep = ({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt = () => {}, produce = buildContext }) =>
+  async ({ setupDirty = null, planRepair = null, mergeConflicts = null } = {}) => {
+    let base = null;
+    try { base = await mergeBase(); }
+    catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
+    const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts });
+    onBuilt(ctx);
+    return ctx;
+  };
+
 /** run 기록의 한 줄 — 누가 어디에서 이 브랜치를 세웠는가. */
 export const branchLine = (cb) =>
   `branch: ${cb.branch} checked out by the stage from ${cb.existed ? cb.base : `${String(cb.base).slice(0, 7)} (${cb.source || "base"}, new branch)`} — the builder never runs git checkout/switch`;
@@ -2724,14 +2742,7 @@ async function main() {
      * `gates` dep이 같은 `mergeBase()`로 MergeBaseError를 올려 `factory:blocked`로 보낸다(게이트가 없는
      * triage/plan은 애초에 diff를 판정 재료로 쓰지 않는다). 대신 그 사실을 런 레코드에 남긴다.
      */
-    buildContext: async ({ setupDirty = null, planRepair = null, mergeConflicts = null } = {}) => {
-      let base = null;
-      try { base = await mergeBase(); }
-      catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
-      // Task 9 (KTB-51): on the plan repair turn, the validator reasons ride into `loaded.json` as
-      // `plan_repair` (the same channel Task 3 uses for self-gate findings) so the planner sees them.
-      return (ctxCache = await buildContext({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts }));
-    },
+    buildContext: makeBuildContextDep({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt: (c) => { ctxCache = c; } }),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
     /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
