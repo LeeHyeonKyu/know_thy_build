@@ -230,7 +230,8 @@ test("test_136_harness_issue_stays_backlog_when_refused", async () => {
   expect(c1[0].body).toContain("factory rehearse");
   expect(c1[0].body).toContain("/know-thy-build:next");
 
-  // (2) 심사 거부(세대 상한) — 발동한 상한을 이름으로 대고, `:next`만으로는 다시 거부된다고 말한다
+  // (2) 심사 거부(열린 자기생성 상한 open_max) — 발동한 상한을 이름으로 대고, `:next`만으로는 다시 거부된다고 말한다.
+  //     세대 상한(depth_max)의 코멘트는 test_136_not_queued_next_step_matches_refusal_kind가 고정한다.
   const gh2 = doorGh({ feature: null });
   const tight = doorCharter({ self_generated: { open_max: 0, depth_max: 1 } });
   const r2 = await ensureHarnessIssue({ gh: gh2, issue: 2, entries: [PG], transitionIssue: door(gh2, { charter: tight }) });
@@ -266,6 +267,53 @@ test("test_136_harness_issue_stays_backlog_when_refused", async () => {
   expect(r5.queue_reason).toMatch(/no transition (is )?wired/);
   expect(gh5.store.get(31).labels).toEqual(["backlog", HARNESS_LABEL]);
   expect(gh5.store.get(31).comments.filter((c) => /factory-transition:v1/.test(c.body))).toEqual([]);
+});
+
+test("test_136_not_queued_next_step_matches_refusal_kind", async () => {
+  // (a) 세대 상한(depth_max) — 진짜 심사가 자기생성 사슬의 세대로 거부한다. 다음 걸음은 사람이 직접 하거나 CHARTER를 바꾸는 것이고,
+  //     `:next`만으로는 다시 거부되며, 리허설은 답이 아니다.
+  //     사슬: 사람 #10 ← 개선 #2(공장이 #10에서 만든 개선) ← 개선 #3(#2에서 만든 개선, 하네스가 아님) — #3의 하네스 요청은
+  //     하네스이니 세대를 더하지 않지만, #3 자체가 이미 2세대라 depth_max=1이 걸린다.
+  const gh = doorGh({ feature: { number: 10, author: "LeeHyeonKyu", labels: ["factory:done"], body: "## done_when\n- [ ] p" } });
+  gh.store.set(2, { number: 2, state: "open", title: "#2", author: "factory-bot", comments: [], labels: ["factory:in-progress"], body: "<!-- factory-improvement fp=a1 from=o/r#10 -->\n## done_when\n- [ ] a" });
+  gh.store.set(3, { number: 3, state: "open", title: "#3", author: "factory-bot", comments: [], labels: ["factory:in-progress"], body: "<!-- factory-improvement fp=b2 from=o/r#2 -->\n## done_when\n- [ ] b" });
+  const ra = await ensureHarnessIssue({ gh, issue: 3, entries: [PG], transitionIssue: door(gh) });
+  expect(ra).toMatchObject({ created: true, queued: false });
+  expect(ra.queue_reason).toMatch(/^queue admission refused/);
+  expect(ra.queue_reason).toContain("self_generated.depth_max");
+  expect(gh.store.get(ra.issue).labels).toEqual(["backlog", HARNESS_LABEL]);
+  const ca = notQueued(gh, ra.issue);
+  expect(ca).toHaveLength(1);
+  expect(ca[0].body).toContain(ra.queue_reason);
+  expect(ca[0].body).toContain("`self_generated.depth_max`");
+  expect(ca[0].body).toMatch(/alone will be refused again/);
+  expect(ca[0].body).toContain("CHARTER");
+  expect(ca[0].body).not.toContain("factory rehearse");
+
+  // (b) 문 배선 누락(심사기 없음) — 고칠 것은 공장 배선이다. 리허설도, 상한 해제도 답이 아니다.
+  const gh2 = doorGh();
+  const unwired = ({ issue: n, to, reason }) => realTransition({ gh: gh2, issue: n, to, reason, rehearsal: async () => ({ ok: true }), env: {} });
+  const rb = await ensureHarnessIssue({ gh: gh2, issue: 2, entries: [PG], transitionIssue: unwired });
+  expect(rb).toMatchObject({ created: true, queued: false });
+  expect(rb.queue_reason).toMatch(/no queue admission is wired/);
+  const cb = notQueued(gh2, rb.issue);
+  expect(cb).toHaveLength(1);
+  expect(cb[0].body).toContain(rb.queue_reason);
+  expect(cb[0].body).not.toContain("factory rehearse");
+  expect(cb[0].body).not.toMatch(/alone will be refused again/);
+  expect(cb[0].body).toMatch(/배선/);
+  expect(cb[0].body).toContain("/know-thy-build:next");
+
+  // (c) 상태 그래프·라벨 거부(문이 리허설·심사가 아닌 이유로 거부) — 리허설 권유를 하지 않는다
+  const gh3 = doorGh();
+  const rc = await ensureHarnessIssue({ gh: gh3, issue: 2, entries: [PG], transitionIssue: async () => ({ ok: false, reason: "no factory state label on issue" }) });
+  expect(rc).toMatchObject({ created: true, queued: false, queue_reason: "no factory state label on issue" });
+  const cc = notQueued(gh3, rc.issue);
+  expect(cc).toHaveLength(1);
+  expect(cc[0].body).toContain("no factory state label on issue");
+  expect(cc[0].body).not.toContain("factory rehearse");
+  expect(cc[0].body).toMatch(/라벨/);
+  expect(cc[0].body).toContain("/know-thy-build:next");
 });
 
 test("test_136_reuse_does_not_retransition", async () => {
