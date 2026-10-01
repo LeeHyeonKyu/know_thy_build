@@ -91,12 +91,24 @@ const PLAN_V1 = {
     summary: { type: 'string' },
     done_when: { type: 'array', items: CONTRACT_ITEM },
     files_expected: { type: 'array', items: { type: 'string' } },
+    // 1.4.43 (own-calendar #111): `id` and `severity` were asked for in the prompt and checked by the
+    // validator (verify-stage "dissent without done_when"), but this schema never declared them — the
+    // structured output dropped both, the validator named every entry by position (d1, d2, d3) with
+    // severity unknown, the repair turn could not fix what the schema kept removing, and the plan went
+    // to a human. Same shape as L29 (#46) and L39 (#90): the contract lives in three places and only
+    // two of them agreed. Declared here so the synthesizer's answer can carry what the validator reads.
     dissent_log: {
       type: 'array',
       items: {
         type: 'object',
         required: ['role', 'objection', 'resolution'],
-        properties: { role: { type: 'string' }, objection: { type: 'string' }, resolution: { type: 'string' } },
+        properties: {
+          id: { type: 'string' },
+          role: { type: 'string' },
+          objection: { type: 'string' },
+          resolution: { type: 'string' },
+          severity: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+        },
       },
     },
     non_goals: { type: 'array', items: { type: 'string' } },
@@ -476,7 +488,18 @@ if (plan) {
         ...plan,
         dissent_log: [
           ...superseded,
-          ...objections.map((o) => ({ role: o.role, objection: o.reason, resolution: 'unresolved — proceeding' })),
+          // 1.4.43: a surviving sign-off objection is injected by the WORKFLOW, after synthesis — like the
+          // maturity note (L39) it needs an id and a severity or the validator names it by position and
+          // nothing can ever cover it. It is a real objection, so it is `medium`: the validator requires a
+          // done_when to cover `signoff-<role>` (the repair turn can, because the id is deterministic) or the
+          // plan goes to a human — which is what an un-gated objection from a signing role deserves.
+          ...objections.map((o) => ({
+            id: `signoff-${o.role}`,
+            severity: 'medium',
+            role: o.role,
+            objection: o.reason,
+            resolution: 'unresolved — proceeding',
+          })),
         ],
       };
       break;
