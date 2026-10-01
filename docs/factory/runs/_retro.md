@@ -1,7 +1,7 @@
 # Retro State
 
 - last retro: 2026-09-15T10:31:18.686Z
-- merges since last retro: 0
+- merges since last retro: 1
 - current N: 2
 
 ## History (last 5)
@@ -16,21 +16,27 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 3 |
-| review rounds avg | 0 | 2 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0 / 0 / 2 |
-| escaped defects | 0 | 0 |
-| revert rate | 없음 | 0.00 (0/3) |
-| needs-human | 9 | 9 |
-| rejects by role | 없음 | spec-conformance 2, qa 3, correctness 2 |
-| reviewer overlap | 없음 | 0.14 (1/7, runs 6) |
-| unique findings by role | 없음 | spec-conformance 2, qa 3, correctness 1 |
+| merged | 1 | 3 |
+| review rounds avg | 3 | 2 |
+| rounds/issue (plan/impl/review) | 1 / 3 / 3 | 0 / 0 / 2 |
+| escaped defects | 2 (#136×2) | 0 |
+| revert rate | 0.00 (0/1) | 0.00 (0/3) |
+| needs-human | 10 | 9 |
+| rejects by role | correctness 1, architecture 1, spec-conformance 1 | spec-conformance 2, qa 3, correctness 2 |
+| reviewer overlap | 0.67 (2/3, runs 3) | 0.14 (1/7, runs 6) |
+| unique findings by role | spec-conformance 1 | spec-conformance 2, qa 3, correctness 1 |
 | qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 없음 |
-| cost (usd) | 85.32 | 190.86 |
-| tokens | input 4582572 / output 273111 | input 3362163 / output 311837 |
+| cost (usd) | 101.60 | 190.86 |
+| tokens | input 6057793 / output 316805 | input 3362163 / output 311837 |
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #136 | 1 | 3 | 3 | 2 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -47,7 +53,7 @@
     "last_retro_at": "2026-09-15T10:31:18.686Z",
     "last_record_offsets": {}
   },
-  "merges_since": 0,
+  "merges_since": 1,
   "n": 2,
   "history": [
     {
@@ -242,6 +248,30 @@
           136
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "When the builder commits conflict markers, the post-session check blocks only that one round. The marker commit is already on origin, and the sweeper's automatic retry then runs the next implement round on that tree with no merge check at all. The rule 'a marker-committed merge never reaches gates or handoff' holds for exactly one round.",
+        "runs": [
+          143
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw6 not met: the new DECISIONS entry contradicts the shipped engine. dw6's rubric requires that 'the decision log no longer contradicts the engine'.",
+        "runs": [
+          143
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "dw6 is not met. The new DECISIONS entry says the guard does not count mirror-family paths during a pending merge. The shipped engine does count them: it compares them with mirrorMatchesBranchHead. I missed this in round 1, when I only checked that the entry supersedes KTB-38 and keeps the release-freeze rule. This finding is the same as spec1, and I confirmed it independently.",
+        "runs": [
+          143
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -337,37 +367,60 @@
         "issue": 136,
         "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/admission.js, .factory/lib/feedback/route.js, .factory/lib/gates.js, .factory/lib/harness-request.js, factory/bin/run-stage.js, factory/lib/admission.js, factory/lib/feedback/route.js, factory/lib/gates.js, factory/lib/harness-request.js, factory/test/admission.test.js, factory/test/harness-request.test.js, factory/test/retro-route.test.js, factory/test/run-stage.test.js (see PR #137)",
         "at": "2026-10-01T07:40:50Z"
+      },
+      {
+        "issue": 143,
+        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; verifier is required | transcript file read loaded.json: verifier is required; guarantee is required | transcript tool result #1: verifier is required; guarantee is required",
+        "at": "2026-10-01T08:50:28Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "merged": 1,
+    "review_rounds_avg": 3,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 3,
+    "rounds_per_issue": [
+      {
+        "issue": 136,
+        "plan": 1,
+        "implement": 3,
+        "review": 3
+      }
+    ],
+    "escaped_defects": 2,
+    "escaped_defects_detail": [
+      {
+        "issue": 136,
+        "count": 2
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 9,
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "correctness": 1,
+      "architecture": 1,
+      "spec-conformance": 1
+    },
+    "review_runs": 3,
+    "findings_total": 3,
+    "overlapping_findings": 2,
+    "unique_findings_by_role": {
+      "spec-conformance": 1
+    },
+    "overlap_ratio": 0.67,
+    "needs_human": 10,
     "qa_approvals": 1,
     "qa_claims_total": 7,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 85.320037,
+      "cost_usd": 101.599583,
       "tokens": {
-        "input": 4582572,
-        "output": 273111
+        "input": 6057793,
+        "output": 316805
       }
     }
   },
