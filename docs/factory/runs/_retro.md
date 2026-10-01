@@ -21,13 +21,13 @@
 | rounds/issue (plan/impl/review) | 1 / 3 / 3 | 0 / 0 / 2 |
 | escaped defects | 2 (#136×2) | 0 |
 | revert rate | 0.00 (0/1) | 0.00 (0/3) |
-| needs-human | 10 | 9 |
+| needs-human | 11 | 9 |
 | rejects by role | correctness 1, architecture 1, spec-conformance 1 | spec-conformance 2, qa 3, correctness 2 |
 | reviewer overlap | 0.67 (2/3, runs 3) | 0.14 (1/7, runs 6) |
 | unique findings by role | spec-conformance 1 | spec-conformance 2, qa 3, correctness 1 |
-| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 없음 |
-| cost (usd) | 101.60 | 190.86 |
-| tokens | input 6057793 / output 316805 | input 3362163 / output 311837 |
+| qa na ratio | 0.33 (5/15 claims, na-heavy 1/2 approvals) | 없음 |
+| cost (usd) | 110.55 | 190.86 |
+| tokens | input 6225618 / output 331189 | input 3362163 / output 311837 |
 | retro cost (usd) | 0.00 | 4.17 |
 | retro tokens | input 0 / output 0 | input 6 / output 8615 |
 | full retros | — | 3 |
@@ -370,8 +370,8 @@
       },
       {
         "issue": 143,
-        "reason": "stage artifact missing or invalid: no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | transcript task-notification #1: head_sha is required; pr is required; verifier is required | transcript file read loaded.json: verifier is required; guarantee is required | transcript tool result #1: verifier is required; guarantee is required",
-        "at": "2026-10-01T08:50:28Z"
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/context.js, factory/bin/run-stage.js, factory/lib/context.js, factory/test/context.test.js, factory/test/run-stage-branch.test.js (see PR #144)",
+        "at": "2026-10-01T16:09:04Z"
       }
     ]
   },
@@ -410,17 +410,17 @@
       "spec-conformance": 1
     },
     "overlap_ratio": 0.67,
-    "needs_human": 10,
-    "qa_approvals": 1,
-    "qa_claims_total": 7,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
+    "needs_human": 11,
+    "qa_approvals": 2,
+    "qa_claims_total": 10,
+    "qa_na_total": 5,
+    "qa_na_ratio": 0.33,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 101.599583,
+      "cost_usd": 110.547822,
       "tokens": {
-        "input": 6057793,
-        "output": 316805
+        "input": 6225618,
+        "output": 331189
       }
     }
   },
