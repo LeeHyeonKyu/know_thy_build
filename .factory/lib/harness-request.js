@@ -169,9 +169,13 @@ const CAP_EXIT = {
  * `backlog`에 남은 하네스 이슈에 남기는 코멘트. 사유는 **그대로** 싣고, 다음 걸음은 거부의 종류로 가른다:
  *   - 심사 거부(`queue admission refused — …`): 발동한 상한을 이름으로 대고, `:next`만으로는 같은 상한에 다시
  *     거부된다고 말한다 — 상한이 풀릴 때까지 `:next`는 헛걸음이다.
- *   - 리허설 거부(그리고 알 수 없는 거부): `factory rehearse`를 돌린 뒤 `:next`.
  *   - 문이 던졌다: 일시적 실패일 수 있다 — 그대로 `:next`로 다시 시도.
+ *   - 문 배선 누락(`no … is wired into this transition`): 공장 배선의 결함이다 — 리허설을 권하지 않는다.
+ *   - 리허설 거부(사유에 rehearsal): `factory rehearse`를 돌린 뒤 `:next`.
+ *   - 그 밖(상태 라벨·전이 그래프 거부 등): 라벨을 확인한 뒤 `:next` — 리허설을 권하지 않는다.
  */
+const UNWIRED_RE = /^no (queue admission|rehearsal checker) is wired into this transition\b/;
+const REHEARSAL_RE = /rehears/i;
 export function notQueuedComment({ issue, reason, threw = false }) {
   const why = String(reason ?? "unknown");
   const head = `${notQueuedMarker(issue)}\n이 하네스 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이${threw ? "가 실패했습니다" : "가 거부됐습니다"}: ${why}`;
@@ -183,8 +187,12 @@ export function notQueuedComment({ issue, reason, threw = false }) {
     next = `발동한 상한: ${named}. \`/know-thy-build:next\` alone will be refused again — 같은 문이 같은 상한으로 다시 거부합니다. ${exit.length ? `${exit.join("; ")} \`/know-thy-build:next\`로 큐에 넣으세요.` : "사유를 고친 뒤 `/know-thy-build:next`로 큐에 넣으세요."}`;
   } else if (threw) {
     next = "일시적인 실패일 수 있습니다 — `/know-thy-build:next`로 다시 큐에 넣으세요.";
-  } else {
+  } else if (UNWIRED_RE.test(why)) {
+    next = "이 문을 부른 공장 코드의 배선이 빠졌습니다(리허설이나 상한의 문제가 아닙니다) — 그 배선은 사람이 고칠 일이고, 그동안은 사람이 `/know-thy-build:next`(리허설과 심사를 모두 배선한 문)로 큐에 넣으세요.";
+  } else if (REHEARSAL_RE.test(why)) {
     next = "하네스를 러너에서 한 번 돌린 뒤(`factory rehearse`) `/know-thy-build:next`로 큐에 넣으세요(ADR-025).";
+  } else {
+    next = "이슈의 상태 라벨이 큐로 가는 전이를 허락하지 않습니다(리허설이나 상한의 문제가 아닙니다) — 라벨을 확인해 `backlog`에 세운 뒤 `/know-thy-build:next`로 큐에 넣으세요.";
   }
   return `${head}\n\n${next}\n\n이 이슈를 기다리는 피처는 이 이슈가 큐에 들어가 머지될 때까지 주차돼 있습니다(#136).`;
 }
