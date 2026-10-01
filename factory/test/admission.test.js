@@ -184,3 +184,51 @@ test("test_136_spec_chain_through_real_gh_admission", async () => {
   expect(r.ok).toBe(false);
   expect(r.reasons.join(" ")).toMatch(/generation 2 > 1/);
 });
+
+// ── #136 rework cf1 — 접기는 사슬 하나에 한 번이다: 하네스→flaky가 번갈아 이어지는 사슬은 세대를 쌓는다 ──
+// 설계 표는 "개선→하네스→flaky" **한** 사슬을 한 세대로 센다. 접힌 flaky(하네스 아래의 flaky)를 위한 하네스는 새 세대다 — 그렇지 않으면
+// flaky→하네스→flaky→하네스→… 가 끝없이 1세대로 남아 depth_max가 영영 걸리지 않는다(리뷰 cf1: F20 ← H30 ← F40 ← H50 ← … 이 전부 들어갔다).
+test("test_136_harness_flaky_alternation_is_bounded", async () => {
+  const flaky = (number, of) => ({ number, author: "LeeHyeonKyu", labels: ["backlog", "factory:flaky"], body: `Detected while implementing #${of}. evidence: {}` });
+  const harness = (number, forN) => ({ number, author: "bot-hk", labels: ["backlog", "factory:harness"], body: `<!-- factory-harness-request for=${forN} -->\nharness\n\nBlocks: #${forN}` });
+  // 사람 #10 ← F20 ← H30 ← F40 ← H50 ← F60 ← H70 ← F80
+  const issues = {
+    10: { ...person, number: 10 },
+    20: flaky(20, 10), 30: harness(30, 20), 40: flaky(40, 30), 50: harness(50, 40), 60: flaky(60, 50), 70: harness(70, 60), 80: flaky(80, 70),
+  };
+  const byNumber = (n) => issues[n] ?? null;
+  const admitPure = (n) => queueAdmission({ issue: issues[n], charter: charter(), ...base, byNumber });
+
+  // 첫 사슬(F20 → 하네스 H30 → 그 하네스에서 수확한 F40)은 한 세대다 — 표가 부른 모양 그대로
+  expect(admitPure(20)).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect(admitPure(30)).toEqual({ ok: true, reasons: [], self_generated: true });
+  expect(admitPure(40)).toEqual({ ok: true, reasons: [], self_generated: true });
+  // 접힌 flaky(F40)를 위한 하네스는 새 세대를 연다 — 2세대로 거부된다. 그 아래 고리도 전부 거부된다(세대는 줄지 않는다)
+  for (const [n, g] of [[50, 2], [60, 2], [70, 3], [80, 3]]) {
+    const r = admitPure(n);
+    expect(r.ok, `#${n}`).toBe(false);
+    expect(r.reasons.join(" "), `#${n}`).toMatch(new RegExp(`generation ${g} > 1`));
+  }
+  // depth_max를 올리면 다음 사슬 하나가 그 한 칸만큼 들어간다 — 고리마다가 아니라 사슬마다 한 세대
+  const wide = (n) => queueAdmission({ issue: issues[n], charter: charter({ self_generated: { ...SELF_GENERATED_DEFAULTS, open_max: 2, depth_max: 2 } }), ...base, byNumber });
+  expect(wide(60).ok).toBe(true);
+  expect(wide(70).ok).toBe(false);
+
+  // 사람의 피처에서 시작해도 같다: 사람 #10 ← H11 ← F12 ← H13 ← F14 ← H15 — 사람의 사슬은 0세대, 접힌 F12의 하네스부터 1세대
+  const fromPerson = { 10: issues[10], 11: harness(11, 10), 12: flaky(12, 11), 13: harness(13, 12), 14: flaky(14, 13), 15: harness(15, 14) };
+  const admitP = (n) => queueAdmission({ issue: fromPerson[n], charter: charter(), ...base, byNumber: (k) => fromPerson[k] ?? null });
+  expect(admitP(12).ok).toBe(true);
+  expect(admitP(14).ok).toBe(true);
+  const r15 = admitP(15);
+  expect(r15.ok).toBe(false);
+  expect(r15.reasons.join(" ")).toMatch(/generation 2 > 1/);
+
+  // 진짜 makeQueueAdmission(가짜 gh가 기원 사슬을 읽는다)으로도 같다
+  const gh = {
+    issue: async (n) => { const it = issues[n]; if (!it) throw new Error("404"); return { ...it, labels: [...it.labels] }; },
+    searchIssues: async () => [],
+  };
+  const admit = makeQueueAdmission({ gh, charter: charter(), factoryLogins: async () => ({ ok: true, logins: ["bot-hk"] }) });
+  expect((await admit({ issue: 40 })).ok).toBe(true);
+  for (const n of [50, 60, 70, 80]) expect((await admit({ issue: n })).ok, `#${n}`).toBe(false);
+});
