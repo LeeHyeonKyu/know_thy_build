@@ -764,3 +764,27 @@ test("resolveFactoryLogins: current identity from env/viewer only; window identi
   expect(sharedIdentityText(r.identity, r.current)).toMatch(/^current factory identity: bot-hk .*older runs in this window ran under a shared identity \(LeeHyeonKyu\)/);
   expect(sharedIdentityText(r.identity, null)).toMatch(/^factory identity is a personal account \(LeeHyeonKyu\)/);
 });
+
+// ── #149 (S4a) — 거부권은 **라벨 이벤트**로 읽는다(지금의 라벨 집합이 아니라): 떼어도 지워지지 않는다 ──
+test("test_149_veto_label_hands_to_human — issueLabelEvents maps the issue's labeled/unlabeled events with actor and time", async () => {
+  const page1 = [
+    { event: "labeled", label: { name: "factory:approved" }, actor: { login: "factory-bot" }, created_at: "2026-10-01T08:00:00Z" },
+    { event: "commented", actor: { login: "x" }, created_at: "2026-10-01T08:01:00Z" },
+  ];
+  const page2 = [
+    { event: "labeled", label: { name: "factory:veto" }, actor: { login: "owner-hk" }, created_at: "2026-10-01T09:10:00Z" },
+    { event: "unlabeled", label: { name: "factory:veto" }, actor: { login: "factory-bot" }, created_at: "2026-10-01T09:11:00Z" },
+    { event: "labeled", label: { name: "factory:veto" }, created_at: "2026-10-01T09:12:00Z" },
+  ];
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "api" && a[1].includes("/events"), result: { code: 0, stdout: JSON.stringify([page1, page2]), stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  expect(await gh.issueLabelEvents(7)).toEqual([
+    { event: "labeled", label: "factory:approved", actor: "factory-bot", createdAt: "2026-10-01T08:00:00Z" },
+    { event: "labeled", label: "factory:veto", actor: "owner-hk", createdAt: "2026-10-01T09:10:00Z" },
+    { event: "unlabeled", label: "factory:veto", actor: "factory-bot", createdAt: "2026-10-01T09:11:00Z" },
+    { event: "labeled", label: "factory:veto", actor: null, createdAt: "2026-10-01T09:12:00Z" },
+  ]);
+  expect(run.calls[0].args).toEqual(["api", "repos/o/r/issues/7/events?per_page=100", "--paginate", "--slurp"]);
+  const failing = makeGh({ run: makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 502" } }]), repo });
+  await expect(failing.issueLabelEvents(7)).rejects.toThrow(/502/);
+});

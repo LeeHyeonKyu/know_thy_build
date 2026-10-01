@@ -138,3 +138,41 @@ test("upstreamRepoOf: owner/repo만 통과하고, 없거나 모양이 틀리면 
   writeFileSync(join(root, ".factory/harness.toml"), readFileSync(join(root, ".factory/harness.toml"), "utf8").replace("[factory]\n", "[factory]\nupstream = \"o/up\"\n"));
   expect(upstreamRepoOf(load(root))).toBe("o/up");
 });
+
+// ── #149 (S4a) — CHARTER `self_change`: 없으면 꺼짐, 모양이 틀리면 시끄럽게 ─────────────────────────
+test("test_149_self_change_config_defaults_and_validation", async () => {
+  const { parseSelfChange, SELF_CHANGE_DEFAULTS } = await import("../lib/config.js");
+  // 없는 키 = 기본값(꺼짐, 60분). 기본값이 곧 "오늘과 같은 동작"이다.
+  expect(SELF_CHANGE_DEFAULTS).toEqual({ auto_merge_non_judge: false, veto_minutes: 60 });
+  const root = fixture();
+  expect(loadCharter(root).self_change).toEqual({ ok: true, auto_merge_non_judge: false, veto_minutes: 60 });
+  expect(parseSelfChange(undefined)).toEqual({ ok: true, auto_merge_non_judge: false, veto_minutes: 60 });
+
+  // 프론트매터에서 실제로 읽힌다(블록 맵) — 일부 키만 있으면 나머지는 기본값.
+  const charterPath = join(root, "docs/factory/CHARTER.md");
+  const base = readFileSync(charterPath, "utf8");
+  writeFileSync(charterPath, base.replace("budget: {}\n", "budget: {}\nself_change:\n  auto_merge_non_judge: true\n  veto_minutes: 20\n"));
+  expect(loadCharter(root).self_change).toEqual({ ok: true, auto_merge_non_judge: true, veto_minutes: 20 });
+  writeFileSync(charterPath, base.replace("budget: {}\n", "budget: {}\nself_change: { veto_minutes: 15 }\n"));
+  expect(loadCharter(root).self_change).toEqual({ ok: true, auto_merge_non_judge: false, veto_minutes: 15 });
+
+  // 모양이 틀린 값은 기본값으로 조용히 접히지 않는다 — 설정 오류다(어느 키인지 말한다).
+  for (const [raw, key] of [
+    [{ veto_minutes: -5 }, "veto_minutes"], [{ veto_minutes: 0 }, "veto_minutes"], [{ veto_minutes: 1.5 }, "veto_minutes"],
+    [{ veto_minutes: "60" }, "veto_minutes"], [{ veto_minutes: null }, "veto_minutes"],
+    [{ auto_merge_non_judge: "true" }, "auto_merge_non_judge"], [{ auto_merge_non_judge: 1 }, "auto_merge_non_judge"],
+    [{ auto_merge_non_judge: null }, "auto_merge_non_judge"],
+    [{ veto_minute: 30 }, "veto_minute"], [true, "self_change"], [[1], "self_change"], ["on", "self_change"],
+  ]) {
+    const r = parseSelfChange(raw);
+    expect(r.ok, JSON.stringify(raw)).toBe(false);
+    expect(r.reason, JSON.stringify(raw)).toContain(key);
+    expect(r).not.toHaveProperty("auto_merge_non_judge");
+  }
+  writeFileSync(charterPath, base.replace("budget: {}\n", "budget: {}\nself_change:\n  auto_merge_non_judge: true\n  veto_minutes: -1\n"));
+  const bad = loadCharter(root).self_change;
+  expect(bad.ok).toBe(false);
+  expect(bad.reason).toMatch(/veto_minutes/);
+  // 다른 CHARTER 필드는 이 오류로 무너지지 않는다(다른 스테이지는 계속 돈다).
+  expect(loadCharter(root).limits.K).toBe(3);
+});
