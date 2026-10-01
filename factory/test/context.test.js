@@ -579,3 +579,28 @@ test("the triage prompt and the agent's decision table both name the explicit su
   // 질문은 저장소를 읽어서 답할 수 없는 것만 (#105: 버튼의 위젯 종류를 물었다 — 파일에 적혀 있다)
   expect(md).toMatch(/answer.*by reading the repository/i);
 });
+
+/**
+ * #143 (S3b) — 스테이지가 base 병합의 소스 충돌을 빌더에게 넘긴 라운드에서, 빌더는 그 경로 목록을 `loaded.merge_conflicts`로 받는다
+ * (워크플로 스크립트는 파일을 읽을 수 없다 — `setup_dirty`와 같은 통로). 넘긴 것이 없으면 키 자체가 없다(`[]`가 아니다): 다른
+ * 스테이지와 평소 라운드는 아무것도 달라지지 않는다.
+ */
+test("test_143_builder_context_lists_merge_conflicts", async () => {
+  const loadedOf = (r) => JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  const conflicts = ["factory/lib/x.js", "factory/bin/y.js"];
+  const a = reviewRoot();
+  const ctx = await buildContext({ root: a.r, gh: a.gh, issue: a.issue, stage: "implement", mergeConflicts: conflicts });
+  expect(ctx.loaded.merge_conflicts).toEqual(conflicts);
+  expect(loadedOf(a.r).merge_conflicts).toEqual(conflicts);
+  // 평소 implement 라운드: 키가 없다.
+  const b = reviewRoot();
+  await buildContext({ root: b.r, gh: b.gh, issue: b.issue, stage: "implement" });
+  expect(Object.keys(loadedOf(b.r))).not.toContain("merge_conflicts");
+  const e = reviewRoot();
+  await buildContext({ root: e.r, gh: e.gh, issue: e.issue, stage: "implement", mergeConflicts: [] });
+  expect(Object.keys(loadedOf(e.r))).not.toContain("merge_conflicts");
+  // 다른 스테이지에는 실리지 않는다 — 병합을 이어 받을 쓰기 세션은 implement뿐이다.
+  const c = reviewRoot();
+  await buildContext({ root: c.r, gh: c.gh, issue: c.issue, stage: "review", mergeConflicts: conflicts });
+  expect(Object.keys(loadedOf(c.r))).not.toContain("merge_conflicts");
+});
