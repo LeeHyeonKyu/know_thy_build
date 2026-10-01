@@ -3904,12 +3904,19 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
   push도 하지 않는다. run 기록은 `base_merge: N conflicted source path(s) left to the builder: …`이고 "pushed before the builder"를 말하지 않는다.
   경로 목록은 `loaded.merge_conflicts`로 빌더에게 간다(넘긴 것이 없으면 키가 없다).
 - **overlay 가드**: 병합 중인 인덱스에서는 base의 팩토리 경로 변경도 HEAD 대비 staged로 보인다. 가드는 브랜치가 merge-base 이후 실제로 바꾼
-  경로만 센다(`branchOwnFactoryPaths`) — 그렇지 않으면 릴리스가 `.claude/**`를 함께 바꾼 바로 그 경우가 막힌다. 그중 미러 가족은 세지 않는다:
-  HEAD 대조(`mirrorMatchesHead`)가 마커 든 워크트리 소스를 읽게 되고, 세션 뒤 미러 단계가 어차피 다시 만든다. 미러가 아닌 팩토리 경로를
-  브랜치가 고쳤으면 오늘처럼 멈춘다.
+  경로만 센다(`branchOwnFactoryPaths`) — 그렇지 않으면 릴리스가 `.claude/**`를 함께 바꾼 바로 그 경우가 막힌다. 브랜치가 바꾼 미러 가족
+  경로도 **센다**: 병합이 없을 때처럼, 센 경로가 전부 미러 가족이고 그 바이트가 브랜치의 `factory/**`에서 생성되는 것과 같을 때만(러너의
+  미러 커밋) 통과한다. 다만 대조는 워크트리가 아니라 **브랜치 HEAD의 소스로** 한다(`mirrorMatchesBranchHead`: HEAD를 임시 워크트리로
+  꺼내 그 안에서 생성) — 병합 중인 워크트리 소스에는 base의 변경과 마커가 함께 있어 `mirrorMatchesHead`로는 대조가 언제나 틀린다.
+  손으로 고친 설치본이나 미러가 아닌 팩토리 경로를 브랜치가 바꿨으면, 또는 그 대조를 할 수 없으면 오늘처럼 멈춘다.
 - **세션 뒤**(브랜치 확인·드리프트 제거·미러 커밋·턴 한도 복구 **전**): MERGE_HEAD가 없고, base sha가 HEAD의 조상이고, 기록된 경로의 HEAD
   바이트에 마커 줄이 없어야 끝난 것이다(`assertBaseMergeComplete`). 아니면 `factory:blocked` cause `undecidable`, 사유
   `builder did not complete the base merge` + 사람이 마저 할 경로. 게이트·verify·미러·핸드오프는 부르지 않는다.
+- **다음 라운드도**(rework cf1): 마커째 커밋한 병합을 빌더가 이미 push했다면 sweeper의 공짜 재시도는 base가 이미 조상이라 병합하지 않고,
+  위 검사도 서지 않는다. 그래서 implement 체크아웃(`implementCheckoutBranch`)이 브랜치에만 있는 병합 커밋(`HEAD ^base`)마다 그 병합이
+  풀어야 했던 경로(`diff-tree --cc`)의 HEAD 바이트에서, 어느 부모에도 없던 마커 줄을 찾는다(`committedMergeMarkers`). 있으면 사유
+  `builder did not complete the base merge` + 경로로, 읽을 수 없으면 그 사실을 사유로 **세션 전에** `factory:blocked` cause `undecidable` — 재시도도 그 자리에서 멈추고 sweeper가 사람에게 올린다. 저장소
+  전체가 아니라 병합이 풀어야 했던 경로만 본다.
 - **그대로 abort하는 것**(KTB-38 그대로, 세션 전, 사유 `rebase by hand`): 충돌 경로를 나열할 수 없는 병합 실패, `merge --abort` 실패,
   overlay 루트(`.claude/**`·미러가 아닌 `.factory/**`·CHARTER·세션 설정) 아래의 충돌(경로를 이름으로), 그리고 **채택자 저장소 전부** —
   넘김은 엔진 저장소에서만이다.
