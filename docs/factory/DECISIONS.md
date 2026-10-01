@@ -3940,3 +3940,30 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
 - **채택자 저장소에는 새 차단 경로가 없다**: 세션 전 마커 스캔도 넘김의 일부라 엔진 저장소에서만 건다(`implementCheckoutBranch`가
   `mirrorApplicable`일 때만 `committedMergeMarkers`를 단다). 채택자의 implement 체크아웃은 오늘과 같은 git 호출만 한다.
 - 마커 없이 틀린 해결은 이 검사가 잡지 못한다(게이트·리뷰가 본다) — 머지됐다면 되돌리기가 아니라 고쳐 나간다.
+
+**#149 (S4a) — ADR-020의 "보호 경로 PR은 사람이 머지한다"를 좁힌다: 엔진 저장소에서 비판정 경로만 바꾼 PR은 CHARTER 스위치가 켜졌을 때 거부권 창 뒤에 팩토리가 머지할 수 있다. 스위치는 기본 꺼짐이다.**
+근거는 설계 2026-09-30 §8.3이다. 이슈가 인용한 플랜(`docs/superpowers/plans/2026-10-02-s4-autonomous-engine-merge.md`)과 토론 기록(`docs/research/s4-plan-debate.md`)은
+저장소에 없으므로, 이 결정은 그 두 문서에 기대지 않는다.
+- **꺼져 있으면 오늘과 바이트가 같다.** `self_change`가 없거나(`auto_merge_non_judge: false`, `veto_minutes: 60`), 스위치가 꺼졌거나, 배선되지 않았거나,
+  채택자 저장소이거나(`engine` = `mirrorApplicable`), 판정자 파일이 하나라도 섞였으면 `handToHuman`이 오늘과 같은 사유·PR 코멘트·record 줄을 낸다. 테스트의 기대값은 main(19d412c)의
+  `runMergeStage`를 돌려 얻은 출력이다(`test_149_switch_off_is_byte_identical`). 스위치를 켜는 일(`docs/factory/CHARTER.md`)과 `factory-merge.yml`의
+  `timeout-minutes`는 사람이 한다. 오늘의 30분에 기본 60분 창은 들어가지 않으므로, CHARTER만 켜면 창은 열리지 않고 blocked가 되며 사유에 `veto_minutes`와 `timeout-minutes`가 함께 나온다.
+- **양의 목록이고, 목록 밖은 전부 판정자다**(`factory/lib/non-judge-paths.js`). 판정자 목록을 적지 않는 이유는 그 목록이 새기 때문이다. `gh.js`가 로그인 집합을, `config.js`가 CHARTER 값을 만든다.
+  목록은 import 닫힘 테스트가 지킨다. `JUDGE_MODULES`(이슈의 13개)에서 `./`·`../`·`export … from`·문자열 `import()`를 재귀로 따라간 파일과 그 `.factory/` 미러 중
+  하나라도 목록에 걸리면 RED다. 이슈 초안의 목록은 이 테스트를 main에서 통과하지 못했다. review-quorum→aggregate, gh→heartbeat→progress→usage,
+  gates→bin/scrub-artifacts, run-stage→board/agents-log 때문이다. 남은 것은 `board-static.js`·`status.js`와 그 미러·테스트뿐이다. **#136·#143은 이 목록으로도 사람 머지다.** 보상이 작다는 사실을
+  숨기지 않는다(skeptic d2). `factory/bin/**`는 하나도 넣지 않는다. 워크플로의 `node .factory/bin/*.js`는 import 간선이 아니라서 닫힘이 보지 못한다.
+- **`docs/**`·`templates/factory/docs/**`는 목록에 넣지 않는다**(skeptic d1 채택). 이 분류는 이미 보호된 파일만 받는다. `docs/` 아래의 보호 경로는 CHARTER와 세션 지시문
+  (`**/CLAUDE*.md`·`**/AGENTS*.md`·`**/.mcp*.json`)뿐이고, 그 전부가 판정자다. 그러니 그 글롭이 비판정으로 만들 정당한 파일은 없고, 빼기 목록이 어긋나면 주입 채널만 열린다.
+  `templates/factory/**`는 CHARTER NEVER_AUTOMATE다.
+- **창은 잡 안에서 기다리고, 정책·게이트·mergeGates가 모두 GREEN인 뒤 prReady 전에 열린다.** 순서는 이렇다. 먼저 `factory:veto` 라벨이 있는지 확인한다. 다음으로 PR 코멘트를 1회 단다(닫히는 시각, 이슈 #N, 라벨 이름).
+  마지막으로 head sha에 `factory/veto-window` pending 상태를 `closes=<ISO>`로 단다. 그다음 5분마다 확인하고, 창이 닫힌 뒤에 한 번 더 확인한다. 같은 head의 두 번째 런은 창을 재사용하고 아무것도 다시 게시하지 않는다.
+  다른 sha의 상태는 창이 아니다. `closes=`가 틀렸거나, 생성 시각이 없거나, 게시자가 팩토리 계정이 아니면(`factoryLogins`, `verifyFactoryStatuses`와 같은 집합) blocked다. 창이 도는 동안 head가 움직이면
+  (6b)의 라이브 head 대조가 거부한다. 거부권은 **opened_at 이후의 labeled 이벤트**로 읽는다. 누가 붙였든, 나중에 떼었든 거부권이다. 창이 열리기 전에 붙여서 아직 붙어 있는 라벨도 거부권이다.
+  사유는 `vetoed by @<login> — human merge required`로 `HUMAN_MERGE_REQUIRED`에 걸리므로, sweeper의 사람 머지 팔이 그대로 잇는다. 어떤 읽기든 실패하면 blocked다. "거부권 없음"으로 읽는 경우는 없다.
+- **S4a가 강제하지 않는 것**: 설계 §8.3의 canary GREEN과 거부-시드 canary GREEN은 아직 자동 머지의 전제조건이 아니다. 지금 이 경로를 여는 것은 스위치 하나뿐이다.
+  스위치를 켜는 사람은 "§8.3대로의 S4"를 켠 것이 아니다. 그 전제조건은 후속 S4 이슈가 정한다.
+- **라벨은 bootstrap 목록(`LABELS`) 밖에 둔다**(`VETO_LABEL_SPEC`). `factory/test/bootstrap.test.js`가 bootstrap 라벨 수를 21로 못 박고 있고, 이슈는 그 테스트를 `tests_changed_allowed:`에
+  올리지 않았다. 대신 merge 스테이지가 창을 열기 전, 알림보다 먼저 라벨을 만든다(`gh label create --force`). bootstrap에 합치는 일은 그 테스트를 허가하는 후속 이슈에서 한다.
+- **남는 위험**: 창 도중 잡이 *취소*되면(타임아웃은 위에서 막는다) 클레임 락이 `Aborted cleanup`까지 고아로 남는다. 창 동안 러너 하나와 이 이슈의 merge 동시성 슬롯을 잡는다.
+  폴링은 대략 시간당 26회 API 호출이다(이벤트와 라벨). 런타임에 구성되는 import(`mirror.js`의 생성기 로드)와 워크플로 프로세스 간선은 닫힘 테스트가 보지 못한다.
