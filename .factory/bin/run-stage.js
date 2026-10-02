@@ -591,6 +591,23 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 실패는 리뷰의 reject가 **아니다** — GREEN도 RED도 아닌 판정 불가이고, 이 저장소에서 그 자리는
      * 언제나 `factory:blocked` + cause `undecidable`이다(sweeper의 재시도 등급도 그래야 맞다).
      */
+    /**
+     * 1.4.44 (KTB #149 실측) — **미러 대조는 리뷰어를 띄우기 전에 한 번 더, 쓰지 않고.** 세션 뒤의 `d.mirror("verify")`는 재생성(쓰기)을
+     * 하므로 세션 앞에는 둘 수 없다(세션은 base의 `.factory/**`로 돌아야 한다, ADR-023). 그러나 "PR head의 설치본이 PR의 소스가 만드는
+     * 것과 같은가"는 `mirrorMatchesHead`가 `git show HEAD:` 대 생성물로 쓰지 않고 답한다 — 그 답이 아니오면 리뷰어 다섯의 판정은 어차피
+     * 버려진다(#149는 그렇게 두 번, ~$17를 썼다). 같은 사유·같은 전이(blocked, undecidable)로 먼저 멈춘다. 세션 뒤 검증은 그대로 남는다.
+     */
+    if (stage === "review" && d.mirrorMatchesHead) {
+      const mm = await d.mirrorMatchesHead();
+      if (mm.applicable && !mm.ok) {
+        const what = mm.reason || `${mm.mismatched.slice(0, 8).join(", ")}${mm.mismatched.length > 8 ? ", …" : ""} (regenerate with the runner's mirror step, never by hand)`;
+        const reason = `undecidable — the installed engine in this PR is not what its sources generate — ${what}`;
+        const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+        record([`mirror: FAIL (before the session) — ${what}`, ...refusal(t)]);
+        return 2;
+      }
+      if (mm.applicable) record([`mirror: PR head's installed engine matches its sources (checked before the session)`]);
+    }
     if (stage === "review" && d.qaEvidenceProbe) {
       const p = await d.qaEvidenceProbe();
       if (!p.ok) {

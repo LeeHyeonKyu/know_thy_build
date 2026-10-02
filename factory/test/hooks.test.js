@@ -1525,3 +1525,42 @@ test("stop-guard: overlay-staged factory-owned paths are not 'dirty' — a produ
   const r2 = await bash("stop-guard.sh", { hook_event_name: "Stop" }, cwd);
   expect(r2.code).toBe(2); expect(r2.stderr).toMatch(/uncommitted/);
 }, 120000);
+
+/**
+ * 2026-10-02 (소유자 결정) — 운영 세션은 비판정 경로만 바뀐 PR을 머지할 수 있다. 문은 셋으로 잠긴다: CI 러너가 아니다, 명령이 정확히
+ * `gh pr merge <n> [flags]` 하나뿐이다, `.factory/bin/operator-merge-check.js`가 exit 0이다. 여기서는 그 세 자물쇠를 가짜 체크 스크립트로
+ * 하나씩 돌려 본다 — 진짜 판정(`lib/operator-merge.js`)은 operator-merge.test.js가 본다.
+ */
+test("block-dangerous: the operator may run exactly `gh pr merge <n>` when the installed check says yes — and nothing else", async () => {
+  const root = mkdtempSync(join(tmpdir(), "omc-"));
+  mkdirSync(join(root, ".factory/bin"), { recursive: true });
+  const check = join(root, ".factory/bin/operator-merge-check.js");
+  const yes = () => writeFileSync(check, "process.stdout.write('operator-merge: ok\\n');\n");
+  const no = () => writeFileSync(check, "process.stderr.write('operator-merge: refused — judge path\\n'); process.exit(2);\n");
+  // SDD 고정 문구 3: 환경 분기는 env를 **명시 주입**한다 — CI(`GITHUB_ACTIONS=true`)에서 이 테스트가 돌 때 baseEnv()는 그 변수를 그대로
+  // 물려주므로, 비우지 않으면 "운영 세션"의 허용 경로가 러너에서 막혀 RED가 된다(KTB #157의 게이트가 정확히 그렇게 걸렸다).
+  const env = { CLAUDE_PROJECT_DIR: root, GITHUB_ACTIONS: "" };
+
+  yes();
+  // `--admin`: 브랜치 보호(L0)가 요구하는 factory/gates·review 상태는 공장 PR에만 생긴다 — 운영 세션의 문서 PR은 사람과 똑같이 admin으로 넘는다
+  for (const ok of ["gh pr merge 12", "gh pr merge 12 --squash", "gh pr merge 12 --squash --delete-branch", "gh pr merge 7 -s -d", "gh pr merge 12 --squash --admin"]) {
+    expect((await bash("block-dangerous.sh", cmd(ok), undefined, env)).code, ok).toBe(0);
+  }
+  // 체크가 아니오라고 하면 막힌다 — 사유는 체크의 것
+  no();
+  const r = await bash("block-dangerous.sh", cmd("gh pr merge 12 --squash"), undefined, env);
+  expect(r.code).toBe(2);
+  expect(r.stderr).toMatch(/operator-merge: refused — judge path/);
+  expect(r.stderr).toMatch(/operator-merge-check\.js said no/);
+  // 체크가 예라고 해도: CI 러너면 막힌다(스테이지는 머지 배우가 아니다)
+  yes();
+  expect((await bash("block-dangerous.sh", cmd("gh pr merge 12 --squash"), undefined, { ...env, GITHUB_ACTIONS: "true" })).code).toBe(2);
+  // 체크가 예라고 해도: 정확한 한 문장이 아니면 막힌다 — 복합 명령, --admin, --auto, 번호 없음, 다른 철자
+  for (const bad of ["cd x && gh pr merge 12", "gh pr merge 12 --auto", "gh pr merge", "gh pr merge 12 --squash; git push -f origin main",
+                     "out=$(gh pr merge 12)", "gh api -X PUT repos/o/r/pulls/12/merge"]) {
+    expect((await bash("block-dangerous.sh", cmd(bad), undefined, env)).code, bad).toBe(2);
+  }
+  // 설치본에 체크가 없으면(옛 버전) 예전처럼 전부 막힌다; CLAUDE_PROJECT_DIR가 없어도 막힌다
+  expect((await bash("block-dangerous.sh", cmd("gh pr merge 12"), undefined, { CLAUDE_PROJECT_DIR: mkdtempSync(join(tmpdir(), "omc-empty-")) })).code).toBe(2);
+  expect((await bash("block-dangerous.sh", cmd("gh pr merge 12"), undefined, {})).code).toBe(2);
+}, 120000);
