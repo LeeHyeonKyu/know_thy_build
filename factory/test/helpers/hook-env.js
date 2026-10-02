@@ -13,15 +13,10 @@
  * 동작이다" 같은 테스트가 **환경 때문에** 빨개진다. 판정이 테스트의 진술이 아니라 실행 위치에 달리면
  * 그 테스트는 더 이상 아무것도 고정하지 않는다.
  *
- *  - `GITHUB_ACTIONS`        — 서 있으면 `block-dangerous.sh`가 운영 세션의 `gh pr merge <n>` 문을 닫는다
- *                              (ADR-032, #155). CI 러너는 이 값을 늘 심으므로, 물려받으면 "체크가 예라고
- *                              하면 열린다" 테스트가 러너에서만 빨개진다(#157 self-gate 실측). 그 경로가
- *                              필요한 테스트는 `{ GITHUB_ACTIONS: "true" }`를 명시로 넘긴다.
- *
- * `baseEnv()`는 그 변수들을 지운 `process.env` 사본이다. 호출자가 준 값만 그 위에 얹고, 훅 spawn은
+ * `baseEnv()`는 그 세 변수를 지운 `process.env` 사본이다. 호출자가 준 값만 그 위에 얹고, 훅 spawn은
  * `replaceEnv: true`로 넘긴다 — 그러지 않으면 `run()`이 `process.env`를 다시 얹어 지운 키가 돌아온다.
  */
-export const HOOK_SESSION_ENV = Object.freeze(["FACTORY_STAGE", "FACTORY_HARNESS_ISSUE", "CLAUDE_PROJECT_DIR", "GITHUB_ACTIONS"]);
+export const HOOK_SESSION_ENV = Object.freeze(["FACTORY_STAGE", "FACTORY_HARNESS_ISSUE", "CLAUDE_PROJECT_DIR"]);
 
 export function baseEnv(extra = {}) {
   const out = {};
