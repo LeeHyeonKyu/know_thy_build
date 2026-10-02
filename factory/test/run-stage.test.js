@@ -3990,10 +3990,61 @@ test("test_170_production_verify_path_recovers_from_output_file", async () => {
   expect(v.reasons).toEqual([]);
   expect(v.source).toContain(outputFile);
   expect(v.data.verdicts[0].verified).toHaveLength(160);
+  // main()'s own dep (built by makeVerifyStageDep) is driven for real in the test below.
+});
 
-  // …and main() really routes its `verifyStage` dep through that function (not a second, unwired call).
+// #170 dw6 (skeptic) — the dep main() hands to runStage is built by `makeVerifyStageDep`; drive THAT
+// closure for real (no stub verifyStage, no source grep standing in for behaviour): a verdict that exists
+// only in the receipt's output file is recovered, and the dep writes it as `.factory/out/review.json`.
+// Then pin that main() wires exactly this factory and that nothing in run-stage calls the library
+// verifyStage around it — checked as a positive match that fails loudly, robust to formatting.
+test("test_170_production_verify_path_recovers_from_output_file — main()'s verifyStage dep", async () => {
+  const { makeVerifyStageDep } = await import("../bin/run-stage.js");
+  expect(typeof makeVerifyStageDep).toBe("function");
+  const scratch = mkdtempSync(join(tmpdir(), "ktb170-dep-"));
+  mkdirSync(join(scratch, "tasks"), { recursive: true });
+  const outputFile = join(scratch, "tasks", "wfDEP0001.output");
+  const L = (o) => JSON.stringify(o);
+  const review = {
+    schema: "factory.review.v1", issue: 124, pr: 9, head_sha: "d".repeat(40), round: 2, orchestration: "workflow", guarantee: "verified",
+    verdicts: ["correctness", "qa"].map((role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: Array.from({ length: 160 }, (_, i) => `${role}: line ${i} — ${"evidence ".repeat(12)}`) })),
+  };
+  writeFileSync(outputFile, JSON.stringify({ summary: "Dynamic workflow completed", agentCount: 3, logs: [], result: review }, null, 2));
+  const full = JSON.stringify(review);
+  const root = mkdtempSync(join(tmpdir(), "ktb170-deproot-"));
+  mkdirSync(join(root, ".factory/out"), { recursive: true });
+  const transcriptPath = join(root, "session.jsonl");
+  writeFileSync(transcriptPath, [
+    L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-review" } }] } }),
+    L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wfDEP0001\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
+    L({ type: "user", message: { content: `<task-notification>\n<task-id>wfDEP0001</task-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated)</result>\n</task-notification>` } }),
+    L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
+    L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
+  ].join("\n") + "\n");
+  writeFileSync(join(root, ".factory/out/agents.jsonl"), L({ event: "SubagentStop", agent_type: "reviewer-qa", session_id: "sess-dep", transcript_path: transcriptPath }) + "\n");
+  // ctx and charter are read lazily (main() loads them in charterReady, after the dep is built)
+  let ctx = null, charter = null;
+  const dep = makeVerifyStageDep({ root, stage: "review", getCtx: () => ctx, getCharter: () => charter, qaManifest: () => null, home: root });
+  ctx = { roster: [], orchestration: "workflow" };
+  charter = { never_automate: [] };
+  const maxTurns = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "waiting", session_id: "sess-dep" };
+  const v = dep({ out: maxTurns, gates: { status: "GREEN", level: "full" } });
+  expect(v.reasons).toEqual([]);
+  expect(v.ok).toBe(true);
+  expect(v.source).toContain(outputFile);
+  expect(JSON.parse(readFileSync(join(root, ".factory/out/review.json"), "utf8")).verdicts[1].verified).toHaveLength(160);
+
+  // main() wiring: its `verifyStage` dep IS this factory, given no reader of its own (so the production
+  // readFileOrNull default applies), and the library verifyStage is called from exactly one place.
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
-  const dep = /verifyStage: \(\{ out, gates \}\) => \{([\s\S]*?)\n    \},/.exec(src)?.[1] ?? "";
-  expect(dep).toMatch(/verifyStageForRun\(\{/);
-  expect(dep).not.toMatch(/(?<!ForRun)verifyStage\(\{/);
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const wired = /\bverifyStage\s*:\s*makeVerifyStageDep\s*\(\s*\{([^}]*)\}\s*\)/.exec(mainSrc);
+  expect(wired, "main() must build its verifyStage dep with makeVerifyStageDep({...})").not.toBe(null);
+  expect(wired[1]).not.toMatch(/readFile|home/);
+  expect([...mainSrc.matchAll(/\bverifyStage\s*:/g)]).toHaveLength(1);
+  const libCalls = [...src.matchAll(/(?<![.\w])verifyStage\s*\(/g)].map((m) => m.index);
+  expect(libCalls).toHaveLength(1);
+  const forRun = src.indexOf("export function verifyStageForRun(");
+  expect(libCalls[0]).toBeGreaterThan(forRun);
+  expect(libCalls[0]).toBeLessThan(src.indexOf("\n}\n", forRun));
 });

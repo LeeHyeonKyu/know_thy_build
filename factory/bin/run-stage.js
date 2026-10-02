@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync, statSync } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -135,8 +135,19 @@ export function unhandledGateReason(gates) {
 // lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
 export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
 
-/** 파일이 없으면 null(예외 아님) — `readTranscript`가 기대하는 주입 모양이다. */
-export const readFileOrNull = (p) => { try { return existsSync(p) ? readFileSync(p, "utf8") : null; } catch { return null; } };
+/**
+ * 파일이 없으면 null(예외 아님) — `readTranscript`가 기대하는 주입 모양이다.
+ * #170 — `{ maxBytes }`를 받으면 **읽기 전에** 크기를 본다: 넘으면 내용 대신 `{ bytes }`를 돌려준다
+ * (scratchpad의 수 GB짜리 파일을 통째로 메모리에 올린 뒤에야 "너무 크다"고 말하지 않도록).
+ */
+export const readFileOrNull = (p, opts) => {
+  const maxBytes = opts?.maxBytes;
+  try {
+    if (!existsSync(p)) return null;
+    if (Number.isFinite(maxBytes)) { const bytes = statSync(p).size; if (bytes > maxBytes) return { bytes }; }
+    return readFileSync(p, "utf8");
+  } catch { return null; }
+};
 /** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
 const transcriptTextFor = (root, out, home = homedir(), readFile = readFileOrNull) =>
   readTranscript({ root, home, sessionId: out?.session_id, readFile }) || "";
@@ -159,6 +170,21 @@ export function verifyStageForRun({ root, stage, out, gates, ctx, charter, qaMan
     gates, planLimits: c.plan, issueBody: c.issue?.body, neverAutomate: charter?.never_automate, qaManifest,
     readFile,
   });
+}
+
+/**
+ * #170 dw6 — `main()`이 runStage에 넘기는 `verifyStage` dep **그 자체**. main 안에 클로저로 묻혀 있으면
+ * 테스트가 그것을 돌릴 길이 없어 `readFile` 배선이 빠져도 아무도 모른다 — 그래서 여기서 만들고, 테스트가
+ * 이 클로저를 실제 파일로 돌린다. ctx·charter는 main이 `charterReady`에서 **나중에** 읽으므로 getter로 받는다.
+ * 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이 디스패처의 산문
+ * 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+ */
+export function makeVerifyStageDep({ root, stage, getCtx, getCharter, qaManifest, home = homedir(), readFile = readFileOrNull }) {
+  return ({ out, gates }) => {
+    const v = verifyStageForRun({ root, stage, out, gates, ctx: getCtx(), charter: getCharter(), qaManifest: stage === "review" ? qaManifest() : null, home, readFile });
+    if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    return v;
+  };
 }
 
 /**
@@ -3022,13 +3048,8 @@ async function main() {
      * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
-    verifyStage: ({ out, gates }) => {
-      const v = verifyStageForRun({ root, stage, out, gates, ctx: ctxCache, charter, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
-      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
-      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
-      return v;
-    },
+    // #170 — 검증 호출과 `<stage>.json` 덮어쓰기는 `makeVerifyStageDep`이 한다(테스트가 그 클로저를 직접 돌린다).
+    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, qaManifest: () => qaEvidenceSummary() }),
     /**
      * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
      * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
