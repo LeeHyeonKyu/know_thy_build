@@ -270,7 +270,8 @@ export const WORKFLOW_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
  * 적은 `<output-file>` 경로들(최신 먼저, 중복 제거).
  *
  * **신뢰의 닻은 접수증이다.** 접수증은 `Workflow` tool_use에 대한 tool_result이고, 알림은 사용자 턴의
- * 텍스트 블록으로 러너가 넣는다 — 둘 다 에이전트가 tool 출력으로 흉내 낼 수 있는 자리가 아니다. 그래서
+ * 텍스트 블록으로 러너가 넣는다 — 그래서 알림은 **`type: "user"` 줄에서만** 읽는다(assistant 텍스트에 적힌
+ * 알림은 모델이 쓴 것이다; tool_result 블록 안의 알림 모양 텍스트는 파일 내용이다 — 둘 다 버린다). 그래서
  * ① 접수증에 없는 task id의 알림(백그라운드 Bash 등 다른 작업)은 버리고, ② `Read` file_path나 Bash 명령에만
  * 등장하는 경로는 **아예 보지 않는다**(에이전트가 쓴 파일이 판정이 되면 안 된다), ③ scratchpad 디렉터리를
  * 훑거나 그 배치를 짐작하지 않는다 — 경로는 러너가 적어 준 그대로다.
@@ -288,6 +289,9 @@ export function workflowOutputFilesFromTranscript(text) {
     if (!line.trim() || !line.includes("task-notification")) continue;
     let o;
     try { o = JSON.parse(line); } catch { continue; }
+    // 러너의 알림은 **사용자 턴**으로 온다. assistant 줄의 텍스트는 모델이 쓴 것이다 — 모델이 알림을 흉내 내
+    // `<output-file>`을 자기가 쓴 파일로 돌리면 그 파일이 판정이 된다(자기비판 #170). 작성자로 거른다.
+    if (o?.type !== "user" || (o?.message?.role != null && o.message.role !== "user")) continue;
     const c = o?.message?.content;
     const texts = typeof c === "string" ? [c]
       : Array.isArray(c) ? c.filter((b) => b?.type === "text" || typeof b === "string").map((b) => (typeof b === "string" ? b : b.text ?? ""))
@@ -326,6 +330,28 @@ function lastRecordOf(text) {
     } catch { /* 앞 줄로 */ }
   }
   return null;
+}
+
+/**
+ * #170 — `paths` 중 하나를 `file_path`로 받은 tool_use(`Read`)의 tool_result 텍스트들. 접수증에 묶인 러너
+ * 파일의 쪽 읽기를 알아보는 데만 쓴다 — 경로를 **후보로 만드는** 데는 쓰지 않는다(그것은 접수증·알림뿐이다).
+ */
+function readResultsOfPaths(text, paths) {
+  const out = new Set();
+  if (!paths.size || typeof text !== "string") return out;
+  const ids = new Set();
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const content = o?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b?.type === "tool_use" && b?.id && paths.has(b?.input?.file_path)) ids.add(b.id);
+      if (b?.type === "tool_result" && ids.has(b?.tool_use_id)) { const s = toolResultText(b.content); if (s) out.add(s); }
+    }
+  }
+  return out;
 }
 
 /**
@@ -411,7 +437,11 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   if (optIn && wfFiles.files.length === 0) tried.push(`workflow output file: no runner notification names the output file of task ${wfFiles.taskIds.join(", ")}`);
   for (const { path } of wfFiles.files) {
     let text = null;
-    try { text = readFile(path); } catch { text = null; }
+    // 두 번째 인자는 **읽기 전에** 크기를 보라는 요청이다: 그것을 지키는 리더(run-stage의 `readFileOrNull`)는
+    // 상한을 넘는 파일을 읽지 않고 `{ bytes }`만 돌려준다 — 상한이 판정만이 아니라 메모리 비용도 묶는다.
+    // 지키지 않는 리더가 문자열을 주면 아래에서 같은 상한으로 다시 잰다.
+    try { text = readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES }); } catch { text = null; }
+    if (text && typeof text === "object" && Number.isFinite(text.bytes)) { tried.push(`workflow output file too large: ${path} (${text.bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
     if (typeof text !== "string") { tried.push(`workflow output file missing: ${path}`); continue; }
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > WORKFLOW_OUTPUT_MAX_BYTES) { tried.push(`workflow output file too large: ${path} (${bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
@@ -419,11 +449,8 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
     if (!record) { tried.push(`workflow output file is not valid JSON: ${path} (${bytes} bytes)`); continue; }
     const source = `workflow output file ${path}`;
     const before = candidates.length;
+    // `.result`는 **기존 봉투 규칙 그대로** 한 겹만 벗긴다(표식 `summary`·`agentCount`·`logs`가 있을 때만).
     push(source, record);
-    // 이슈의 JSONL 모양(`{type, result}`)은 봉투 표식이 없다 — 이 파일은 러너가 쓴 것이고 산출물 자체가
-    // 아니므로 `.result` 한 겹은 표식 없이도 후보로 올린다(스키마가 여전히 심판이다).
-    if (record.result && typeof record.result === "object" && !Array.isArray(record.result)
-      && !candidates.slice(before).some((c) => c.obj === record.result)) candidates.push({ source: `${source} (.result)`, obj: record.result });
     const mine = candidates.slice(before);
     if (!mine.some((c) => check(c.obj).ok)) {
       const best = mine[mine.length - 1];
@@ -436,14 +463,28 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   // 읽은(그래서 나중에 다시 쓰였을 수 있는) 파일이 나중에 읽은 파일보다 먼저 후보가 되고, 둘 다
   // 스키마를 통과하면 오래된 쪽이 이긴다(위 (1)·아래 개별 tool_result·Workflow 결과는 전부 **최신이
   // 먼저**다 — 여기만 거꾸로였다, KTB-15b I3). `.reverse()`로 나머지 후보들과 같은 방향으로 맞춘다.
+  /*
+   * #170 — 접수증에 묶인 러너 파일을 **쪽으로** 읽은 조각(`Read` offset/limit). 첫 쪽이 빠진 재조립이나
+   * 가운데 쪽 하나는 선두에 **중첩 객체**(판정 한 항목)가 오므로, 그대로 채점하면 "round is required;
+   * verdicts is required"가 된다 — #124가 사람에게 간 바로 그 문장이다. 그 파일은 (1b)에서 이미 통째로
+   * 읽었으니, 문서로 읽히지 않는 조각은 후보가 아니라 잘린 조각으로 부른다. 옵트인일 때만이다(dw5).
+   */
+  const wfPaths = new Set(wfFiles.files.map((f) => f.path));
+  const isFragment = (text) => lastRecordOf(stripLineNumbers(text)) === null;
   for (const [path, text] of [...fileReadsFromTranscript(transcriptText)].reverse()) {
-    pushFrom(`transcript file read ${path.split("/").pop()}`, text);
+    const source = `transcript file read ${path.split("/").pop()}`;
+    if (optIn && wfPaths.has(path) && isFragment(text)) { truncated.push(`${source} (${text.length} chars)`); continue; }
+    pushFrom(source, text);
   }
   // 그리고 개별 tool_result 하나하나 — 파일 경로를 못 얻은 읽기(Bash `cat` 등)도 여기서 잡힌다.
+  const pages = optIn ? readResultsOfPaths(transcriptText, wfPaths) : new Set();
   const results = toolResultTextsFromTranscript(transcriptText);
   for (let i = results.length - 1; i >= 0; i--) {
     if (isWorkflowReceipt(results[i])) continue;
-    pushFrom(`transcript tool result #${i + 1}`, stripLineNumbers(results[i]));
+    const source = `transcript tool result #${i + 1}`;
+    const text = stripLineNumbers(results[i]);
+    if (pages.has(results[i]) && isFragment(text)) { truncated.push(`${source} (${text.length} chars)`); continue; }
+    pushFrom(source, text);
   }
 
   // (3) `Workflow` tool_result — 접수증이 아닐 때만(전경에서 도는 워크플로는 여기로 반환값을 준다).
