@@ -57,22 +57,33 @@ export const HUMAN_MERGE_REQUIRED = new RegExp(`— ${HUMAN_MERGE_REQUIRED_TEXT}
  * 순수 함수다: 조회(로그인 해석·상태 조회)와 그 실패 처리는 호출자의 몫이고, 여기서는 **이미 읽은
  * 것**만 본다. `logins`가 비면 통과가 아니라 거부다(게시자를 대조할 기준이 없다 = 판정 불가).
  */
-export function verifyFactoryStatuses({ sha, statuses, logins, contexts = REVIEW_EVIDENCE_STATUSES }) {
+export function verifyFactoryStatuses({ sha, statuses, logins }) {
   const short = String(sha || "").slice(0, 7);
-  const resolved = factoryPoster({ logins, login: "", subject: contexts.join(" / ") });
-  if (resolved.undecidable) return { ok: false, undecidable: true, reason: resolved.reason };
-  if (!Array.isArray(statuses)) return { ok: false, undecidable: true, reason: `commit statuses for ${short} unreadable — no list returned` };
-  for (const context of contexts) {
-    // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
-    // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
-    const posted = statuses.filter((s) => s?.context === context);
-    if (!posted.length) return { ok: false, reason: `no ${context} commit status on PR head ${short} — the review stage never posted it for this commit` };
-    const latest = posted[0];
-    if (String(latest.state).toLowerCase() !== "success") return { ok: false, reason: `${context} on ${short} is "${latest.state}", not success` };
-    const poster = factoryPoster({ logins, login: latest.creatorLogin, subject: `${context} on ${short}` });
-    if (!poster.ok) return { ok: false, reason: poster.reason };
+  const resolved = factoryPoster({ logins, login: "", subject: REVIEW_EVIDENCE_STATUSES.join(" / ") });
+  if (resolved.undecidable) return { ok: false, reason: resolved.reason };
+  if (!Array.isArray(statuses)) return { ok: false, reason: `commit statuses for ${short} unreadable — no list returned` };
+  for (const context of REVIEW_EVIDENCE_STATUSES) {
+    const v = factoryStatusVerdict({ statuses, context, short, logins });
+    if (!v.ok) return { ok: false, reason: v.reason };
   }
   return { ok: true };
+}
+
+/**
+ * 한 context의 판정 — 가장 최근 상태가 있고, success이고, 팩토리 계정(`factoryPoster`)이 올렸는가. `verifyFactoryStatuses`의
+ * 루프 본문이고, 비판정 경로의 게이트 증거(`factory/gates` 하나)가 같은 함수를 부른다(#149 arch1). 내보내지 않는다 —
+ * `verifyFactoryStatuses`의 서명과 문장은 main 그대로 둔다(#149 plan non_goal: contexts 파라미터를 더하지 않는다).
+ * `statuses`는 배열, 로그인 기준은 이미 선 것으로 호출자가 확인했다.
+ */
+function factoryStatusVerdict({ statuses, context, short, logins }) {
+  // 같은 context가 여러 번 게시됐으면 **가장 최근 것**이 유효한 상태다 — GitHub의 목록 API가
+  // 최신순이므로 첫 항목을 본다(호출자가 그 순서를 지킨다).
+  const posted = statuses.filter((s) => s?.context === context);
+  if (!posted.length) return { ok: false, reason: `no ${context} commit status on PR head ${short} — the review stage never posted it for this commit` };
+  const latest = posted[0];
+  if (String(latest.state).toLowerCase() !== "success") return { ok: false, reason: `${context} on ${short} is "${latest.state}", not success` };
+  const poster = factoryPoster({ logins, login: latest.creatorLogin, subject: `${context} on ${short}` });
+  return poster.ok ? { ok: true } : { ok: false, reason: poster.reason };
 }
 
 /**
@@ -81,19 +92,23 @@ export function verifyFactoryStatuses({ sha, statuses, logins, contexts = REVIEW
  * 사본은 이미 한 번 갈라졌다(게시자가 빈 상태를 한 곳은 "names no creator", 다른 곳은 "an unknown account"로 읽었다). 누가
  * "팩토리 게시자"를 좁히든(예: 머지 배우만) 이 한 곳을 고치면 모든 자리가 같이 바뀐다.
  *
+ * 문장과 대조는 **main의 `verifyFactoryStatuses` 그대로**다(#149 skeptic flaw 1): 그 사유는 스위치와 무관하게 (6b)와
+ * sweeper의 기록으로 간다. 그래서 로그인 집합은 다듬지 않고(소문자만), 게시자만 trim한다. `forged`는 거부 문장의 마지막
+ * 명사다 — 리뷰 증거는 main의 "review signal"(기본값), 거부권 창은 "veto window"를 넘긴다.
+ *
  * 순수 함수다. `logins`는 이미 해석한 팩토리 로그인 목록, `login`은 게시자, `subject`는 거부 문장의 주어다.
  * 반환: `{ ok: true, by }` | `{ ok: false, undecidable: true, reason }`(대조할 기준이 없다 — 판정 불가) |
  * `{ ok: false, undecidable: false, by, reason }`(게시자가 비었거나 팩토리가 아니다 — 거부). 거부를 어느 등급으로 세울지는
- * 호출자의 몫이지만, **무엇이 팩토리 게시자인가**와 그 문장은 여기 하나다. 대소문자와 앞뒤 공백은 같은 계정으로 본다.
+ * 호출자의 몫이지만, **무엇이 팩토리 게시자인가**와 그 문장은 여기 하나다. 게시자의 대소문자와 앞뒤 공백은 같은 계정으로 본다.
  * 기준(로그인 집합)이 서는지만 물으려면 `undecidable`만 본다 — 그 판정은 게시자보다 먼저 나온다.
  */
-export function factoryPoster({ logins, login, subject }) {
-  const known = new Set((Array.isArray(logins) ? logins : []).filter(Boolean).map((l) => String(l).trim().toLowerCase()));
+export function factoryPoster({ logins, login, subject, forged = "review signal" }) {
+  const known = new Set((logins || []).filter(Boolean).map((l) => String(l).toLowerCase()));
   if (!known.size) return { ok: false, undecidable: true, reason: `the factory's own account could not be resolved — there is no way to tell who posted ${subject}` };
-  const by = String(login ?? "").trim();
+  const by = String(login || "").trim();
   if (!by) return { ok: false, undecidable: false, by, reason: `${subject} names no creator — the poster cannot be identified` };
   if (!known.has(by.toLowerCase())) {
-    return { ok: false, undecidable: false, by, reason: `${subject} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — anything holding a repo-scoped token can post it, so an unrecognised poster is a forged factory signal` };
+    return { ok: false, undecidable: false, by, reason: `${subject} was posted by @${by}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")}) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged ${forged}` };
   }
   return { ok: true, by };
 }
@@ -400,10 +415,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (resolved.undecidable) return await undecided(`${resolved.reason}: ${logins?.reason || "unknown"}`);
     let statuses;
     try { statuses = await d.commitStatuses(sha); } catch (e) { return await undecided(`commit statuses for ${sha.slice(0, 7)} unreadable: ${e?.message || e}`); }
-    // arch1 — 판정은 `verifyFactoryStatuses` 하나다(`factory/gates` 한 context로). `factory/review`는 아래 (6b)가 리뷰 증거 전체와
-    // 함께 같은 함수로 묻는다. 판정 불가(목록 없음)는 blocked, 그 밖의 거부(없음·RED·남의 것·게시자 없음)는 needs-human.
-    const v = verifyFactoryStatuses({ sha, statuses, logins: loginList, contexts: ["factory/gates"] });
-    if (!v.ok) return v.undecidable ? await undecided(v.reason) : await refuse(v.reason);
+    // arch1 — 판정은 `verifyFactoryStatuses`의 루프 본문(`factoryStatusVerdict`)과 그 안의 `factoryPoster` 하나다. `factory/review`는
+    // 아래 (6b)가 리뷰 증거 전체와 함께 `verifyFactoryStatuses`로 묻는다(그 서명은 main 그대로 — plan non_goal).
+    // 판정 불가(목록 없음)는 blocked, 그 밖의 거부(없음·RED·남의 것·게시자 없음)는 needs-human.
+    if (!Array.isArray(statuses)) return await undecided(`commit statuses for ${sha.slice(0, 7)} unreadable — no list returned`);
+    const v = factoryStatusVerdict({ statuses, context: "factory/gates", short: sha.slice(0, 7), logins: loginList });
+    if (!v.ok) return await refuse(v.reason);
     record([`merge: gates not run in this job — PR #${pr} carries only non-judge protected paths, and a protected PR's code never runs beside the merge token; gate evidence is the review run's factory/gates on ${sha.slice(0, 7)} (success, posted by the factory)`]);
     return null;
   };
@@ -485,7 +502,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       let logins;
       try { logins = await d.factoryLogins(); } catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
       const loginList = logins?.ok && Array.isArray(logins.logins) ? logins.logins : [];
-      const poster = (login, subject) => factoryPoster({ logins: loginList, login, subject });
+      const poster = (login, subject) => factoryPoster({ logins: loginList, login, subject, forged: "veto window" });
       const posted = poster(win.creatorLogin, `${VETO_WINDOW_CONTEXT} on ${short}`);
       if (posted.undecidable) return await blocked(`${posted.reason}: ${logins?.reason || "unknown"}`);
       if (!posted.ok) return await blocked(posted.reason);
@@ -644,7 +661,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   if (prot.files.length) {
     const cls = classifyProtected(prot.files, { engine: d.engine === true });
     const sc = d.selfChange;
-    if (!cls.judge.length && sc?.ok === false) return await undecidable("self-change config", sc.reason);
+    // 설정 오류는 스위치를 켜려 한 흔적이 있을 때만 판정 불가다. 스위치 키가 없거나 false인 설정 오류(`switch_off`)는 꺼진
+    // 스위치다 — 출력이 main과 바이트 같다(#149 skeptic flaw 2). 그 오류는 CHARTER를 읽는 매 런에 시끄럽게 나간다(run-stage).
+    if (!cls.judge.length && sc?.ok === false && sc.switch_off !== true) return await undecidable("self-change config", sc.reason);
     if (!cls.judge.length && sc?.ok === true && sc.auto_merge_non_judge === true) {
       vetoFiles = cls.non_judge;
       record([`merge: protected paths are all non-judge (${vetoFiles.join(", ")}) — CHARTER self_change.auto_merge_non_judge is on, so a veto window replaces the human merge`]);
@@ -951,8 +970,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // KTB-46: 판정 자체는 `verifyFactoryStatuses`(위) 하나다 — sweeper의 사람-머지 반영 팔이 같은
     // 함수를 부른다. 여기서 하던 일과 문구는 한 글자도 바뀌지 않았다(r3 nit 5: "목록이 아니다"
     // 검사는 그 함수 안에 한 벌만 남긴다 — 문장이 같으므로 여기서 먼저 접던 줄을 지웠다).
-    // #149 arch1: 게시자 대조는 그 안에서 다시 `factoryPoster` 한 곳으로 모였다 — 남의 게시자를 거부하는 문장의 꼬리가
-    // "forged review signal"에서 "forged factory signal"로 바뀐 것 말고는 그대로다(거부권 창·비판정 게이트 증거도 같은 문장을 쓴다).
+    // #149 arch1: 게시자 대조는 그 안에서 다시 `factoryPoster` 한 곳으로 모였다 — 서명·문장·대조는 main 그대로다
+    // (skeptic flaw 1, test_149_switch_off_is_byte_identical이 main의 문장을 문자열 단위로 핀한다).
     const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
     if (!posted.ok) return await reviewRefused(posted.reason);
     record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);

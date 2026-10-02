@@ -176,3 +176,17 @@ test("test_149_self_change_config_defaults_and_validation", async () => {
   // 다른 CHARTER 필드는 이 오류로 무너지지 않는다(다른 스테이지는 계속 돈다).
   expect(loadCharter(root).limits.K).toBe(3);
 });
+
+test("test_149_self_change_config_defaults_and_validation — a config error says whether the switch itself is off (skeptic flaw 2)", async () => {
+  const { parseSelfChange } = await import("../lib/config.js");
+  // 스위치 키가 없거나 정확히 false면 아무도 켜지 않았다 — 형제 키가 틀렸어도 스위치는 꺼져 있다.
+  for (const raw of [{ auto_merge_non_judge: false, veto_minutes: 0 }, { veto_minute: 30 }, { veto_minutes: -1 }, { auto_merge_non_judge: false, extra: 1 }]) {
+    expect(parseSelfChange(raw), JSON.stringify(raw)).toMatchObject({ ok: false, switch_off: true });
+  }
+  // 켜려 한 흔적이 있으면 꺼졌다고 말하지 않는다.
+  for (const raw of [{ auto_merge_non_judge: true, veto_minutes: 0 }, { auto_merge_non_judge: "true" }, { auto_merge_non_judge: 1 }, { auto_merge_non_judge: null }, { auto_merge_non_judge: true, typo: 1 }, true, "on", [1], null]) {
+    expect(parseSelfChange(raw), JSON.stringify(raw)).toMatchObject({ ok: false, switch_off: false });
+  }
+  // 올바른 설정에는 그 필드가 없다(ok:true가 곧 판정이다).
+  expect(parseSelfChange({ auto_merge_non_judge: false })).toEqual({ ok: true, auto_merge_non_judge: false, veto_minutes: 60 });
+});

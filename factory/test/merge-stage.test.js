@@ -2283,3 +2283,57 @@ test("test_149_veto_label_hands_to_human — 'was this posted by a factory accou
   expect(src.match(/new Set\([^\n]*toLowerCase\(\)\)\)/g) ?? []).toHaveLength(1);
   expect(src.match(/\.has\([^\n]*\b(by|login|creatorLogin|author)\b[^\n]*toLowerCase\(\)/g) ?? []).toHaveLength(1);
 });
+
+// ── #149 skeptic self-critique (flaw 1·2) — 스위치 off의 바이트 동일성은 `verifyFactoryStatuses`와 설정 오류에도 선다 ──────────
+
+/**
+ * MAIN_VERIFY는 **main의 `verifyFactoryStatuses`가 돌려주는 객체 그대로**다(`git show main:factory/lib/merge-stage.js`의
+ * 문장을 옮겼다 — 이 브랜치의 코드에서 다시 타이핑하지 않았다). 이 함수는 (6b)와 sweeper의 사람-머지 팔(`sweeper.js`)이
+ * 부르고, 그 사유가 needs-human 전이와 sweeper의 기록으로 간다 — 스위치와 무관하게 모든 PR에서. 그래서 #149가 이 함수의
+ * 서명(plan non_goal: contexts 파라미터 금지)이나 문장(게시자 거부의 꼬리)이나 로그인 대조(공백 처리)를 바꾸면 스위치가
+ * 꺼진 저장소의 출력이 main과 달라진다.
+ */
+const MAIN_VERIFY = {
+  unresolved: { ok: false, reason: "the factory's own account could not be resolved — there is no way to tell who posted factory/review / factory/gates" },
+  unreadable: { ok: false, reason: "commit statuses for bbbbbbb unreadable — no list returned" },
+  noReview: { ok: false, reason: "no factory/review commit status on PR head bbbbbbb — the review stage never posted it for this commit" },
+  strangerGates: { ok: false, reason: "factory/gates on bbbbbbb was posted by @mallory, which is not a factory account (@ktb-bot) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal" },
+  paddedLogin: { ok: false, reason: "factory/review on bbbbbbb was posted by @ktb-bot, which is not a factory account (@ ktb-bot) — a commit status is writable by anything holding a repo-scoped token, so an unrecognised poster is a forged review signal" },
+  noCreator: { ok: false, reason: "factory/gates on bbbbbbb names no creator — the poster cannot be identified" },
+};
+
+test("test_149_switch_off_is_byte_identical — verifyFactoryStatuses ((6b) and the sweeper's human-merge arm) returns exactly main's verdicts and sentences (skeptic flaw 1)", () => {
+  const ok = (context, creatorLogin = "ktb-bot") => ({ context, state: "success", creatorLogin });
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: [ok("factory/review")], logins: [] })).toEqual(MAIN_VERIFY.unresolved);
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: null, logins: ["ktb-bot"] })).toEqual(MAIN_VERIFY.unreadable);
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: [ok("factory/review"), ok("factory/gates", "mallory")], logins: ["ktb-bot"] })).toEqual(MAIN_VERIFY.strangerGates);
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: [ok("factory/review"), ok("factory/gates", "")], logins: ["ktb-bot"] })).toEqual(MAIN_VERIFY.noCreator);
+  // main은 로그인 집합을 다듬지 않는다(게시자만 trim한다) — 공백 붙은 로그인은 main에서 남이다.
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: [ok("factory/review"), ok("factory/gates")], logins: [" ktb-bot"] })).toEqual(MAIN_VERIFY.paddedLogin);
+  // 서명은 main 그대로다: 묻는 context는 언제나 리뷰 증거 둘 다다 — 호출자가 하나만 묻게 할 수 없다(plan non_goal).
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: [ok("factory/gates")], logins: ["ktb-bot"], contexts: ["factory/gates"] })).toEqual(MAIN_VERIFY.noReview);
+  expect(REVIEW_EVIDENCE_STATUSES).toEqual(["factory/review", "factory/gates"]);
+  // 대조군: 정직한 두 상태는 통과한다.
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: [ok("factory/review"), ok("factory/gates", "KTB-Bot")], logins: ["ktb-bot"] })).toEqual({ ok: true });
+});
+
+test("test_149_switch_off_is_byte_identical — a malformed self_change whose switch is absent or false is still off: main's human merge, not blocked (skeptic flaw 2)", async () => {
+  const { parseSelfChange } = await import("../lib/config.js");
+  // 설정 오류는 실제 생산자(parseSelfChange)가 만든 그대로 넣는다. 스위치 키가 없거나 false면 스위치는 꺼져 있다 —
+  // 형제 키가 틀렸어도(0분, 오타 키) 출력은 main과 문자열 단위로 같다.
+  for (const raw of [{ auto_merge_non_judge: false, veto_minutes: 0 }, { veto_minute: 30 }, { auto_merge_non_judge: false, veto_minutes: "60" }]) {
+    const sc = parseSelfChange(raw);
+    expect(sc.ok, JSON.stringify(raw)).toBe(false);
+    await expectMainOutput(MAIN_HAND_TO_HUMAN.nonJudgeOnly, { engine: true, selfChange: sc });
+  }
+  // 대조군: 스위치를 켜려 한 흔적이 있는(켜짐·불리언이 아님·맵이 아님) 설정 오류는 판정 불가다 — 켰다고 믿는 소유자에게
+  // 사람 머지로 조용히 접히지 않는다. 이 대조군이 없으면 "설정 오류를 통째로 무시하는" 구현도 위를 통과한다.
+  for (const raw of [{ auto_merge_non_judge: true, veto_minutes: 0 }, { auto_merge_non_judge: "true" }, true]) {
+    const sc = parseSelfChange(raw);
+    const d = baseD(windowDeps({ selfChange: sc }));
+    expect(await run(d), JSON.stringify(raw)).toBe(2);
+    expect(d.transition.mock.calls.at(-1)[0], JSON.stringify(raw)).toMatchObject({ to: "factory:blocked", reason: expect.stringContaining(sc.reason) });
+    expect(d.mergePr).not.toHaveBeenCalled();
+    expect(vetoComments(d)).toHaveLength(0);
+  }
+});

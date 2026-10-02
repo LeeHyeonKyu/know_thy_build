@@ -126,18 +126,22 @@ const SELF_CHANGE_KEYS = Object.keys(SELF_CHANGE_DEFAULTS);
 export function parseSelfChange(raw) {
   if (raw === undefined) return { ok: true, ...SELF_CHANGE_DEFAULTS };
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: false, reason: `CHARTER self_change must be a mapping of ${SELF_CHANGE_KEYS.join(", ")} — got ${JSON.stringify(raw)}` };
+    return { ok: false, switch_off: false, reason: `CHARTER self_change must be a mapping of ${SELF_CHANGE_KEYS.join(", ")} — got ${JSON.stringify(raw)}` };
   }
+  // 설정 오류여도 **스위치 자체는 꺼져 있을 수 있다**(#149 skeptic flaw 2): 스위치 키가 없거나 정확히 false면 아무도 켜지
+  // 않았다 — 형제 키(분·오타 키)가 틀렸다고 오늘의 동작(사람 머지)이 판정 불가로 바뀌지 않는다. `switch_off`가 그 사실이다.
+  // 켜려 한 흔적(true·불리언이 아닌 값·맵이 아닌 값)이 있으면 false다 — 그때만 merge-stage가 판정 불가(blocked)로 간다.
+  const switch_off = !("auto_merge_non_judge" in raw) || raw.auto_merge_non_judge === false;
   const unknown = Object.keys(raw).filter((k) => !SELF_CHANGE_KEYS.includes(k));
-  if (unknown.length) return { ok: false, reason: `CHARTER self_change has unknown key(s) ${unknown.join(", ")} (expected ${SELF_CHANGE_KEYS.join(", ")})` };
+  if (unknown.length) return { ok: false, switch_off, reason: `CHARTER self_change has unknown key(s) ${unknown.join(", ")} (expected ${SELF_CHANGE_KEYS.join(", ")})` };
   const out = { ...SELF_CHANGE_DEFAULTS };
   if ("auto_merge_non_judge" in raw) {
-    if (typeof raw.auto_merge_non_judge !== "boolean") return { ok: false, reason: `CHARTER self_change.auto_merge_non_judge must be true or false — got ${JSON.stringify(raw.auto_merge_non_judge)}` };
+    if (typeof raw.auto_merge_non_judge !== "boolean") return { ok: false, switch_off, reason: `CHARTER self_change.auto_merge_non_judge must be true or false — got ${JSON.stringify(raw.auto_merge_non_judge)}` };
     out.auto_merge_non_judge = raw.auto_merge_non_judge;
   }
   if ("veto_minutes" in raw) {
     const v = raw.veto_minutes;
-    if (!Number.isInteger(v) || v <= 0) return { ok: false, reason: `CHARTER self_change.veto_minutes must be a positive integer — got ${JSON.stringify(v)}` };
+    if (!Number.isInteger(v) || v <= 0) return { ok: false, switch_off, reason: `CHARTER self_change.veto_minutes must be a positive integer — got ${JSON.stringify(v)}` };
     out.veto_minutes = v;
   }
   return { ok: true, ...out };
