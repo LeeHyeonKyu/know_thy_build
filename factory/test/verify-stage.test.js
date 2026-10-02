@@ -462,3 +462,248 @@ test("validatePlanHandoff: the uncovered-dissent reason lists what the validator
   expect(r).toMatch(/uncovered: d1 \(no id — named by position\): severity "medium"; D3: severity missing/);
   expect(r).toMatch(/done_when\.covers: dissent-1/);
 });
+
+// ── #170: the Workflow runner's own output file is a recovery candidate ──────────────────────────
+// own-calendar #124 review (gha-37012863112): the reviewers finished, the Workflow wrote its verdicts,
+// and the orchestrator spent 23 turns on `Read <scratchpad>/tasks/wf086hvld.output` and
+// `jq -c '.result' … | head -c 30000` until it hit max turns. Every candidate in the transcript was a
+// cut-off fragment, so verify said needs-human although the verdict already existed in that file.
+// The fixtures below copy that structure: a background receipt with a Task ID, the runner's
+// <task-notification> naming the <output-file> (its <result> cut the way KTB-17 recorded it), polling
+// tool calls whose results are 30 000-char prefixes, a max-turns envelope, and a real file on disk in
+// the KTB-17 shape — a single pretty-printed {summary, agentCount, logs, result} envelope over 30 KB.
+import { mkdtempSync as mkdtemp170, mkdirSync as mkdir170, writeFileSync as write170, existsSync as exists170, readFileSync as read170 } from "node:fs";
+import { tmpdir as tmpdir170 } from "node:os";
+import { join as join170 } from "node:path";
+import * as stageArtifact170 from "../lib/stage-artifact.js";
+
+const TASK_170 = "wf086hvld";
+const readFile170 = (p) => (exists170(p) ? read170(p, "utf8") : null);
+const maxTurns170 = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "Still waiting on the workflow output." };
+const reviewArgs170 = { stage: "review", out: maxTurns170, agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } };
+const implArgs170 = { stage: "implement", out: maxTurns170, agentsLog: log([]), roster: [], orchestration: "workflow", gates: { status: "GREEN", level: "full" } };
+/** A review verdict long enough that `head -c 30000` cuts it (the #124 verdicts were). */
+const longReview170 = (over = {}) => ({
+  ...review,
+  verdicts: review.verdicts.map((v) => ({ ...v, verified: Array.from({ length: 160 }, (_, i) => `${v.role}: checked factory/lib/stage-artifact.js:${i + 1} against the plan rubric and the house rules — ${"evidence ".repeat(12)}`) })),
+  ...over,
+});
+const impl170 = { schema: "factory.implement.v1", issue: 7, head_sha: "b".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted", notes: Array.from({ length: 450 }, (_, i) => `dw${i % 6 + 1}: prove-test reverted the change and the test failed as expected (${i})`).join("\n") }, orchestration: "workflow", guarantee: "verified" };
+/** The runner's file in the KTB-17 shape: one pretty-printed envelope, `logs` making it long. */
+const envelopeFile170 = (result) => JSON.stringify({
+  summary: "Dynamic workflow \"Review panel\" completed",
+  agentCount: 3,
+  logs: Array.from({ length: 400 }, (_, i) => `[agent ${i % 3}] step ${i}: ${"progress ".repeat(10)}`),
+  result,
+}, null, 2);
+function scratch170() {
+  const dir = mkdtemp170(join170(tmpdir170(), "ktb170-"));
+  mkdir170(join170(dir, "tasks"), { recursive: true });
+  return dir;
+}
+const outputPath170 = (dir, id = TASK_170) => join170(dir, "tasks", `${id}.output`);
+const line170 = (o) => JSON.stringify(o);
+const receipt170 = (id = TASK_170, toolId = "toolu_wf") => [
+  line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: toolId, input: { name: "factory-review" } }] } }),
+  line170({ type: "user", message: { content: [{ tool_use_id: toolId, type: "tool_result", content: `Workflow launched in background. Task ID: ${id}\nSummary: Review panel\nTranscript dir: /home/runner/.claude/projects/x/s/subagents/workflows/wf_1\nRun ID: wf_1\n\nYou will be notified when it completes.`, is_error: false }] } }),
+];
+const notification170 = (id, path, resultText, toolId = "toolu_wf") => line170({ type: "user", message: { content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>${toolId}</tool-use-id>\n<output-file>${path}</output-file>\n<status>completed</status>\n<summary>Dynamic workflow "Review panel" completed</summary>\n<result>${resultText.slice(0, 8179)}... (truncated ${Math.max(0, resultText.length - 8179)} chars, full result in ${path})</result>\n</task-notification>` } });
+/** One polling turn: a Bash `jq … | head -c 30000` and its cut-off result. */
+const poll170 = (n, path, fullText) => [
+  line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: `toolu_poll_${n}`, input: { command: `jq -c '.result' ${path} | head -c 30000` } }] } }),
+  line170({ type: "user", message: { content: [{ tool_use_id: `toolu_poll_${n}`, type: "tool_result", content: fullText.slice(0, 30000) }] } }),
+];
+/** The #124 transcript: receipt → notification → `polls` cut-off reads of the file. No handoff anywhere. */
+function incident170({ dir, artifact, id = TASK_170, polls = 3, receipt = true, extra = [] }) {
+  const path = outputPath170(dir, id);
+  const full = JSON.stringify(artifact);
+  const lines = [line170({ type: "user", message: { content: "/factory-review 124" } })];
+  if (receipt) lines.push(...receipt170(id));
+  lines.push(notification170(id, path, full));
+  for (let i = 0; i < polls; i++) lines.push(...poll170(i, path, full));
+  lines.push(...extra);
+  return lines.join("\n") + "\n";
+}
+
+test("test_170_recovery_reads_the_workflow_output_file_untruncated", () => {
+  // review.v1: the long verdict exists only in the file; every transcript copy is cut.
+  const dir = scratch170();
+  const verdict = longReview170();
+  const file = envelopeFile170(verdict);
+  write170(outputPath170(dir), file);
+  expect(Buffer.byteLength(file)).toBeGreaterThan(30 * 1024);
+  expect(JSON.stringify(verdict).length).toBeGreaterThan(30000);           // head -c 30000 really cut it
+  const transcriptText = incident170({ dir, artifact: verdict });
+
+  const before = verifyStage({ ...reviewArgs170, transcriptText });         // no readFile: today's needs-human
+  expect(before.ok).toBe(false);
+  const r = verifyStage({ ...reviewArgs170, transcriptText, readFile: readFile170 });
+  expect(r.ok).toBe(true);
+  expect(r.reasons).toEqual([]);
+  expect(r.data.verdicts.map((v) => v.role)).toEqual(["correctness", "qa"]);
+  expect(r.data.verdicts[0].verified).toHaveLength(160);                   // the whole verdict, not a prefix
+  expect(r.source).toContain(outputPath170(dir));                          // provenance names the file
+
+  // implement.v1: the same polling-out-of-turns on the implement orchestrator.
+  const dirI = scratch170();
+  const fileI = envelopeFile170(impl170);
+  write170(outputPath170(dirI), fileI);
+  expect(Buffer.byteLength(fileI)).toBeGreaterThan(30 * 1024);
+  const ri = verifyStage({ ...implArgs170, transcriptText: incident170({ dir: dirI, artifact: impl170 }), readFile: readFile170 });
+  expect(JSON.stringify(impl170).length).toBeGreaterThan(30000);
+  expect(ri.ok).toBe(true);
+  expect(ri.data.head_sha).toBe("b".repeat(40));
+  expect(ri.source).toContain(outputPath170(dirI));
+
+  // JSONL fallback: the LAST record's `.result` is the verdict — the first record never wins, whether it
+  // fails the schema (a progress record) or is itself an older, schema-valid verdict.
+  const dirJ = scratch170();
+  const jsonl = [
+    JSON.stringify({ type: "result", result: longReview170({ round: 1 }) }),
+    JSON.stringify({ type: "progress", message: "reviewer-qa finished" }),
+    JSON.stringify({ type: "result", result: longReview170({ round: 2 }) }),
+  ].join("\n") + "\n";
+  write170(outputPath170(dirJ), jsonl);
+  expect(Buffer.byteLength(jsonl)).toBeGreaterThan(30 * 1024);
+  const rj = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir: dirJ, artifact: longReview170({ round: 2 }) }), readFile: readFile170 });
+  expect(rj.ok).toBe(true);
+  expect(rj.data.round).toBe(2);
+  expect(rj.source).toContain(outputPath170(dirJ));
+  const dirK = scratch170();
+  write170(outputPath170(dirK), [JSON.stringify({ type: "progress", message: "started" }), JSON.stringify({ type: "result", result: longReview170({ round: 3 }) })].join("\n"));
+  const rk = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir: dirK, artifact: longReview170({ round: 3 }) }), readFile: readFile170 });
+  expect(rk.ok).toBe(true);
+  expect(rk.data.round).toBe(3);
+});
+
+test("test_170_output_file_of_another_task_is_not_a_verdict", () => {
+  const dir = scratch170();
+  const accept = longReview170();
+  // X (this session's receipt) has no file; Y sits right next to it with a schema-valid accept.
+  write170(outputPath170(dir, "wfOTHERyy"), envelopeFile170(accept));
+  // Z is a background Bash task with a runner notification of its own — not a Workflow receipt.
+  write170(outputPath170(dir, "bgZZZZ"), envelopeFile170(accept));
+  const extra = [
+    line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "toolu_r1", input: { file_path: outputPath170(dir, "wfOTHERyy") } }] } }),
+    line170({ type: "user", message: { content: [{ tool_use_id: "toolu_r1", type: "tool_result", content: "File content (412KB) exceeds maximum allowed size." }] } }),
+    line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_b9", input: { command: `cat ${outputPath170(dir, "wfOTHERyy")} | head -c 30000` } }] } }),
+    line170({ type: "user", message: { content: [{ tool_use_id: "toolu_b9", type: "tool_result", content: JSON.stringify(accept).slice(0, 30000) }] } }),
+    notification170("bgZZZZ", outputPath170(dir, "bgZZZZ"), "{\"done\":true}", "toolu_bash_bg"),
+  ];
+  const transcriptText = incident170({ dir, artifact: accept, extra });
+  const asked = [];
+  const readFile = (p) => { asked.push(p); return readFile170(p); };
+  const r = verifyStage({ ...reviewArgs170, transcriptText, readFile });
+  expect(r.ok).toBe(false);
+  expect(r.data).toBe(null);
+  expect(r.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(asked).toEqual([outputPath170(dir)]);                             // only X's file was ever opened
+  expect(r.reasons.join(" ")).toContain(`workflow output file missing: ${outputPath170(dir)}`);
+
+  // The same files with no Workflow receipt at all: nothing is eligible, nothing is read.
+  const asked2 = [];
+  const r2 = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: accept, extra, receipt: false }), readFile: (p) => { asked2.push(p); return readFile170(p); } });
+  expect(r2.ok).toBe(false);
+  expect(asked2).toEqual([]);
+});
+
+test("test_170_truncated_candidate_is_named_as_truncated", () => {
+  const dir = scratch170();
+  const verdict = longReview170();
+  // Eight cut-off polls plus three small schema-failing tool results: far more than six candidate lines.
+  const noise = Array.from({ length: 3 }, (_, i) => [
+    line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: `toolu_n${i}`, input: { command: "gh pr view 9 --json state" } }] } }),
+    line170({ type: "user", message: { content: [{ tool_use_id: `toolu_n${i}`, type: "tool_result", content: JSON.stringify({ state: "OPEN", n: i }) }] } }),
+  ]).flat();
+  const transcriptText = incident170({ dir, artifact: verdict, polls: 8, extra: noise });
+
+  const missing = verifyStage({ ...reviewArgs170, transcriptText, readFile: readFile170 });
+  expect(missing.ok).toBe(false);
+  const reason = missing.reasons.join("\n");
+  expect(reason).toMatch(/truncated JSON candidate/);
+  // the cut-off fragments are named as cut off, not as a schema cascade
+  expect(reason).toMatch(/truncated JSON candidate[^|]*transcript tool result #\d+ \(30000 chars\)/);
+  expect(reason).not.toMatch(/transcript tool result #\d+: round is required/);
+  expect(reason).not.toMatch(/task-notification #\d+: [^|]*verdicts is required/);
+  expect(reason).toContain(`workflow output file missing: ${outputPath170(dir)}`);
+  // the schema-failing noise is there too (more than six candidates) — the truncation note survived the cap
+  expect(reason).toMatch(/transcript tool result #\d+: issue is required/);
+
+  // the untruncated file for the receipt's task wins over every fragment
+  write170(outputPath170(dir), envelopeFile170(verdict));
+  const won = verifyStage({ ...reviewArgs170, transcriptText, readFile: readFile170 });
+  expect(won.ok).toBe(true);
+  expect(won.source).toContain(outputPath170(dir));
+  expect(won.data.verdicts[1].verified).toHaveLength(160);
+});
+
+test("test_170_invalid_or_missing_output_file_is_named_in_the_reason", () => {
+  const CAP = 5 * 1024 * 1024;                                            // the cap the operator asked to be stated (~5 MB)
+  const verdict = longReview170();
+  const run = (fileText) => {
+    const dir = scratch170();
+    if (fileText !== null) write170(outputPath170(dir), fileText);
+    const r = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: verdict }), readFile: readFile170 });
+    return { r, path: outputPath170(dir), text: r.reasons.join("\n") };
+  };
+
+  // present but the record fails the stage schema: the path and the schema errors
+  const bad = run(envelopeFile170({ ...verdict, verdicts: undefined, round: undefined }));
+  expect(bad.r.ok).toBe(false);
+  expect(bad.r.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(bad.text).toMatch(new RegExp(`workflow output file ${bad.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\n|]*: round is required; verdicts is required`));
+
+  // larger than the byte cap — even though its record is schema-valid: the path and the size
+  const big = JSON.stringify({ summary: "s", agentCount: 3, logs: ["x".repeat(CAP)], result: verdict });
+  const over = run(big);
+  expect(over.r.ok).toBe(false);
+  expect(over.r.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(over.text).toContain(`workflow output file too large: ${over.path} (${Buffer.byteLength(big)} bytes > ${CAP})`);
+
+  // not JSON at all: named, not a silent no-op
+  const junk = run("workflow crashed before writing a result\n");
+  expect(junk.r.ok).toBe(false);
+  expect(junk.text).toContain(`workflow output file is not valid JSON: ${junk.path}`);
+
+  // gone from the scratchpad
+  const gone = run(null);
+  expect(gone.r.ok).toBe(false);
+  expect(gone.r.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(gone.text).toContain(`workflow output file missing: ${gone.path}`);
+  expect(stageArtifact170.WORKFLOW_OUTPUT_MAX_BYTES).toBe(CAP);
+
+});
+
+test("test_170_no_output_file_keeps_todays_behaviour", () => {
+  const dir = scratch170();
+  const verdict = longReview170();
+  write170(outputPath170(dir), envelopeFile170(verdict));
+  const transcriptText = incident170({ dir, artifact: verdict, polls: 2 });
+  // Today's needs-human for this transcript, frozen byte for byte (computed on main before #170).
+  const TODAY = [
+    "claude -p hit max turns (23)",
+    "no candidate matched the stage schema — transcript: the Workflow tool result is a background receipt, not a return value (1 call(s)) | no JSON object in result",
+  ];
+  // control: the very same files DO recover once the caller opts in — so the equalities below are not vacuous
+  expect(verifyStage({ ...reviewArgs170, transcriptText, readFile: readFile170 }).ok).toBe(true);
+
+  // (a) no readFile (the retro.js / implementHeadShaOf shape of call): exactly today's outcome
+  const noReader = verifyStage({ ...reviewArgs170, transcriptText });
+  expect(noReader.ok).toBe(false);
+  expect(noReader.reasons).toEqual(TODAY);
+  expect(noReader.source).toBe(null);
+
+  // (b) readFile given, but the transcript holds no Workflow receipt: exactly today's outcome, nothing read
+  const asked = [];
+  const noReceipt = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: verdict, polls: 2, receipt: false }), readFile: (p) => { asked.push(p); return readFile170(p); } });
+  expect(noReceipt.ok).toBe(false);
+  expect(noReceipt.reasons).toEqual(TODAY.map((l) => l.replace("transcript: the Workflow tool result is a background receipt, not a return value (1 call(s))", "transcript: no Workflow tool result found (transcript missing or shape changed)")));
+  expect(noReceipt.reasons).toEqual(verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: verdict, polls: 2, receipt: false }) }).reasons);
+  expect(asked).toEqual([]);
+
+  // (c) a reader that throws does not take the stage down — it is a missing file, named as such
+  const throwing = verifyStage({ ...reviewArgs170, transcriptText, readFile: () => { throw new Error("EACCES"); } });
+  expect(throwing.ok).toBe(false);
+  expect(throwing.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(throwing.reasons.join(" ")).toContain(`workflow output file missing: ${outputPath170(dir)}`);
+});

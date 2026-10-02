@@ -25,6 +25,8 @@
  *
  * 후보 순서:
  *   1. `<task-notification>` 중 `<status>completed</status>`인 마지막 것의 `<result>`.
+ *   1b. (#170, `readFile`를 받았을 때만) 이 세션의 `Workflow` **접수증의 Task ID**에 묶인 러너 알림의
+ *      `<output-file>` — 워크플로 러너가 쓴 원본 결과 파일을 **잘리지 않은 채로** 읽는다.
  *   2. `Read` tool_result를 파일별로 재조립한 내용 → 그리고 개별 tool_result 하나하나
  *      (둘 다 `^\s*\d+\t` 줄 번호 접두를 벗기고, `{summary,agentCount,logs,result}` 봉투면 한 겹 벗긴다).
  *   3. `Workflow` tool_result — **접수증이 아닐 때만**(백그라운드가 아닌 워크플로는 여기로 온다).
@@ -258,6 +260,75 @@ export function transcriptPathFrom({ agentsLogText, sessionId, cwd, home } = {})
 }
 
 /**
+ * #170 — 워크플로 러너의 원본 결과 파일을 읽을 때의 상한(바이트). 이보다 크면 후보로 올리지 않고 그 크기를
+ * 사유에 적는다(운영자 요청 ~5 MB: 리뷰 판정 하나가 이보다 클 일은 없고, 넘는다면 그 파일이 이상한 것이다).
+ */
+export const WORKFLOW_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * #170 — 이 세션이 띄운 백그라운드 `Workflow`의 Task ID들(접수증 순서)과, 그 Task ID에 묶인 러너 알림이
+ * 적은 `<output-file>` 경로들(최신 먼저, 중복 제거).
+ *
+ * **신뢰의 닻은 접수증이다.** 접수증은 `Workflow` tool_use에 대한 tool_result이고, 알림은 사용자 턴의
+ * 텍스트 블록으로 러너가 넣는다 — 둘 다 에이전트가 tool 출력으로 흉내 낼 수 있는 자리가 아니다. 그래서
+ * ① 접수증에 없는 task id의 알림(백그라운드 Bash 등 다른 작업)은 버리고, ② `Read` file_path나 Bash 명령에만
+ * 등장하는 경로는 **아예 보지 않는다**(에이전트가 쓴 파일이 판정이 되면 안 된다), ③ scratchpad 디렉터리를
+ * 훑거나 그 배치를 짐작하지 않는다 — 경로는 러너가 적어 준 그대로다.
+ */
+export function workflowOutputFilesFromTranscript(text) {
+  const taskIds = [];
+  for (const r of workflowResultsFromTranscript(text)) {
+    if (!isWorkflowReceipt(r)) continue;
+    const m = /Task ID:\s*([A-Za-z0-9_-]+)/.exec(r);
+    if (m && !taskIds.includes(m[1])) taskIds.push(m[1]);
+  }
+  const files = [];
+  if (!taskIds.length || typeof text !== "string") return { taskIds, files };
+  for (const line of text.split("\n")) {
+    if (!line.trim() || !line.includes("task-notification")) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const c = o?.message?.content;
+    const texts = typeof c === "string" ? [c]
+      : Array.isArray(c) ? c.filter((b) => b?.type === "text" || typeof b === "string").map((b) => (typeof b === "string" ? b : b.text ?? ""))
+        : [];
+    for (const t of texts) {
+      for (const m of String(t).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+        const taskId = (/<task-id>([\s\S]*?)<\/task-id>/.exec(m[1])?.[1] || "").trim();
+        const path = (/<output-file>([\s\S]*?)<\/output-file>/.exec(m[1])?.[1] || "").trim();
+        if (taskId && path && taskIds.includes(taskId)) files.push({ taskId, path });
+      }
+    }
+  }
+  const seen = new Set();
+  const newestFirst = files.reverse().filter((f) => (seen.has(f.path) ? false : seen.add(f.path)));
+  return { taskIds, files: newestFirst };
+}
+
+/**
+ * #170 — 러너 결과 파일의 텍스트 → 레코드 하나. DECISIONS KTB-17이 본 모양은 pretty-print된 **봉투 하나**
+ * (`{summary, agentCount, logs, result}`, 525줄)이고, 이슈가 적은 모양은 JSONL이다 — 둘 다 받는다:
+ * 전체가 JSON 하나면 그것, 아니면 **마지막으로 파싱되는 줄**(첫 레코드가 아니다: JSONL의 첫 레코드는
+ * 진행 기록이거나 이전 판정이다). 둘 다 아니면 null.
+ */
+function lastRecordOf(text) {
+  try {
+    const whole = JSON.parse(text);
+    if (whole && typeof whole === "object" && !Array.isArray(whole)) return whole;
+  } catch { /* JSONL로 */ }
+  const lines = String(text).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i].trim();
+    if (!l.startsWith("{")) continue;
+    try {
+      const o = JSON.parse(l);
+      if (o && typeof o === "object" && !Array.isArray(o)) return o;
+    } catch { /* 앞 줄로 */ }
+  }
+  return null;
+}
+
+/**
  * 이 런의 세션 트랜스크립트 **전문**. 없으면 null — 산출물 추출은 트랜스크립트 없이도 돌아간다
  * (envelope의 펜스/맨 JSON으로 내려간다). `readFile(path) → string|null`은 호출자가 주입한다:
  * 이 모듈은 `node:fs`를 import하지 않는다(순수 모듈이라 파서 테스트가 파일시스템을 만들지 않는다).
@@ -281,10 +352,19 @@ export function readTranscript({ root, home, sessionId, readFile } = {}) {
  * @param validate 객체 하나를 받아 `{ok, errors}`를 주는 함수. 없으면 "파싱되면 통과"로 취급한다.
  * @returns `{ok:true, data, source}` 또는 `{ok:false, reason, tried}`.
  */
-export function extractStageArtifact({ envelopeResult, transcriptText, validate } = {}) {
+export function extractStageArtifact({ envelopeResult, transcriptText, validate, readFile } = {}) {
   const check = validate || (() => ({ ok: true, errors: [] }));
   const tried = [];
   const candidates = [];
+  /*
+   * #170 — 러너 결과 파일은 **호출자가 `readFile`을 넘기고**(옵트인) 트랜스크립트에 이 세션의 `Workflow`
+   * 접수증이 있을 때만 본다. 둘 중 하나라도 없으면 아래의 새 줄(잘린 후보·결과 파일)은 하나도 생기지 않아
+   * 사유가 #170 이전과 바이트 단위로 같다(retro.js·implementHeadShaOf는 넘기지 않는다).
+   */
+  const wfFiles = typeof readFile === "function" ? workflowOutputFilesFromTranscript(transcriptText) : { taskIds: [], files: [] };
+  const optIn = wfFiles.taskIds.length > 0;
+  /** 선두가 `{`인데 그 짝이 없는 텍스트 — `head -c`나 알림의 잘림이 만든 조각. 스키마 오류로 오진하지 않고 이름으로 부른다. */
+  const truncated = [];
   /**
    * 워크플로 러너가 반환값을 `{summary, agentCount, logs, result}` 봉투에 싸서 파일로 남긴다 —
    * 스테이지 산출물은 그 안의 `result`(또는 `data`)다. 한 겹만 벗긴다: 더 깊이 파면 "파싱은 되는"
@@ -310,7 +390,12 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate 
     // 큰 텍스트(파일 내용·읽기 조각)는 **선두의 객체 하나만** 본다. 전체 균형 스캔은 100 KB짜리
     // tool_result마다 O(n·중괄호수)라 스테이지 검증이 눈에 띄게 느려지고, 산출물 파일은 언제나
     // `{`로 시작한다 — 그 안쪽 중첩 객체는 애초에 후보가 아니다.
-    push(source, leadingObject(text));
+    const lead = leadingObject(text);
+    push(source, lead);
+    if (!lead && !fromFence && optIn && typeof text === "string") {
+      const start = text.indexOf("{");
+      if (start >= 0 && matchBrace(text, start) < 0) truncated.push(`${source} (${text.length} chars)`);
+    }
   };
 
   // (1) 백그라운드 워크플로의 실제 반환값이 도착하는 자리(KTB-17). completed만 본다 —
@@ -318,6 +403,33 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate 
   const notes = taskNotificationsFromTranscript(transcriptText).filter((n) => n.status === "completed");
   for (let i = notes.length - 1; i >= 0; i--) pushFrom(`transcript task-notification #${i + 1}`, notes[i].result);
   if (notes.length === 0) tried.push("transcript: no completed <task-notification> block");
+
+  // (1b) #170 — 접수증의 Task ID에 묶인 러너 결과 파일, **잘리지 않은 원본**. 알림의 `<result>`는 길면
+  // 잘리고(KTB-17), 디스패처가 그 파일을 `head -c`로 읽은 조각도 잘려 있다 — 판정이 이미 있는데 사람에게
+  // 가던 자리(own-calendar #124). 실패는 전부 경로를 부르는 한 줄로 남긴다: 파일이 사라졌는지(scratchpad의
+  // 수명은 미검증이다), 크기를 넘었는지, JSON이 아닌지, 스키마에 어긋났는지가 서로 다른 문장이다.
+  if (optIn && wfFiles.files.length === 0) tried.push(`workflow output file: no runner notification names the output file of task ${wfFiles.taskIds.join(", ")}`);
+  for (const { path } of wfFiles.files) {
+    let text = null;
+    try { text = readFile(path); } catch { text = null; }
+    if (typeof text !== "string") { tried.push(`workflow output file missing: ${path}`); continue; }
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > WORKFLOW_OUTPUT_MAX_BYTES) { tried.push(`workflow output file too large: ${path} (${bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
+    const record = lastRecordOf(text);
+    if (!record) { tried.push(`workflow output file is not valid JSON: ${path} (${bytes} bytes)`); continue; }
+    const source = `workflow output file ${path}`;
+    const before = candidates.length;
+    push(source, record);
+    // 이슈의 JSONL 모양(`{type, result}`)은 봉투 표식이 없다 — 이 파일은 러너가 쓴 것이고 산출물 자체가
+    // 아니므로 `.result` 한 겹은 표식 없이도 후보로 올린다(스키마가 여전히 심판이다).
+    if (record.result && typeof record.result === "object" && !Array.isArray(record.result)
+      && !candidates.slice(before).some((c) => c.obj === record.result)) candidates.push({ source: `${source} (.result)`, obj: record.result });
+    const mine = candidates.slice(before);
+    if (!mine.some((c) => check(c.obj).ok)) {
+      const best = mine[mine.length - 1];
+      tried.push(`${best.source}: ${check(best.obj).errors.join("; ")}`);
+    }
+  }
 
   // (2) 디스패처가 알림의 output-file을 읽은 내용. 조각으로 오므로 파일별로 다시 붙인다.
   // `fileReadsFromTranscript`가 주는 Map은 **경로가 처음 등장한 순서**다 — 그대로 훑으면 세션 초반에
@@ -346,6 +458,10 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate 
   const fenced = fencedObject(envelopeResult);
   if (fenced) push("result ```json fence", fenced);
   for (const obj of balancedObjects(envelopeResult)) push("result bare JSON", obj);
+
+  // 잘린 조각들은 한 줄로 — 그리고 후보 루프 **앞에서** 넣는다: 루프의 줄은 6줄 상한에 걸리지만 이 줄은
+  // 걸리지 않아야 "잘렸다"와 "없다"를 사람이 가를 수 있다(#170 dw3).
+  if (truncated.length) tried.push(`truncated JSON candidate (cut off, not missing fields): ${truncated.slice(0, 8).join(", ")}${truncated.length > 8 ? `, … ${truncated.length - 8} more` : ""}`);
 
   const seen = new Set();
   for (const c of candidates) {
