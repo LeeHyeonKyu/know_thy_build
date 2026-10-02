@@ -1782,6 +1782,32 @@ test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () 
   }
 });
 
+// cf1 (review round 2, correctness + qa, confirmed on code lines): the re-run must not read the FIRST run's report. The stage's
+// own `resetGates` runs before the re-run; a re-run that then writes no report is `parsed:false` — "inconclusive", never "RED twice".
+test("test_157_rerun_without_a_report_is_inconclusive_not_flaky", async () => {
+  const first = await producedGatesOrdered157({ order: ["integration"], integration: [OC_ID] });
+  const unreported = await producedGatesOrdered157({ order: ["integration"], integration: "unparsed" });
+  expect(unreported.gates.integration).toMatchObject({ status: "RED", parsed: false });
+  const resetGates = vi.fn(async () => {});
+  const r = await run157({ seq: [first, unreported], diff: { ok: true, files: CLIENT_ONLY }, over: { resetGates } });
+  expect(r.code).toBe(2);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  // reset happened exactly once, after the first gates() and before the re-run
+  expect(resetGates).toHaveBeenCalledTimes(1);
+  const [g1, g2] = r.d.gates.mock.invocationCallOrder;
+  const [reset] = resetGates.mock.invocationCallOrder;
+  expect(reset).toBeGreaterThan(g1);
+  expect(reset).toBeLessThan(g2);
+  const t = transitionsOf(r.d);
+  expect(t).toHaveLength(1);
+  expect(t[0].to).toBe("factory:needs-human");
+  expect(t[0].reason).toContain("rerun inconclusive");
+  expect(t[0].reason).toContain("wrote no test report");
+  expect(t[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(flakyMarksOf(r.lines)).toEqual([]);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+});
+
 test("test_157_superset_on_rerun_is_not_a_flaky_candidate", async () => {
   // First run fails [A]; the re-run fails [A, B]. Every first-run id is in the re-run set, so an
   // "every id of the first run is in the second" check alone would call this the same set — it is not.

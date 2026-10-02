@@ -604,6 +604,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: gates RED outside the PR diff — rerun 1/1 (${idList(ids)})`, ...gatesDetailLines(gates, stamp), ...testEnvNote]);
     let again;
     try {
+      // cf1 (review round 2, two reviewers): the re-run must not be able to read the FIRST run's test report. `d.gates()` parses
+      // whatever report file the test command left behind; if the re-run's command writes none (crash, runner killed), the stale
+      // report would make the same id set look RED twice and a test that never ran again would be branded a flaky candidate.
+      // `resetGates` is the stage's own "last run's verdict material must not stand in for this run" (run-stage.js) — same
+      // function, called once more here. After it, a re-run that writes no report shows `parsed:false`, which `redTestIds`
+      // already refuses to turn into ids — so it can never equal the first set.
+      await d.resetGates?.();
       again = await d.gates();
     } catch (e) {
       if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
@@ -627,9 +634,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       const ids2 = again?.status === "RED" ? redTestIds(again, await suitesOf(again)) : null;
       const candidate = sameIdSet(ids, ids2);
       const status2 = again?.status ?? "missing";
+      // cf1: a RED re-run whose test gate wrote no report is not "RED twice" — it is a re-run that did not happen. Say so.
+      const unreported = again?.status === "RED" && Object.values(again.gates || {}).some((g) => g?.status === "RED" && g.parsed === false);
       const reason = candidate
         ? `gates RED at merge — ${FLAKY_CANDIDATE_TEXT}: ${idList(ids)}`
-        : `gates ${status2} at merge after one rerun — first run RED on ${idList(ids)} (outside the PR diff), rerun ${status2}${ids2 ? ` on ${idList(ids2)}` : again?.failing?.length ? ` (failing gates: ${again.failing.join(", ")})` : ""}`;
+        : unreported
+          ? `gates rerun inconclusive — the re-run wrote no test report (first run RED on ${idList(ids)}, outside the PR diff); not a flaky candidate`
+          : `gates ${status2} at merge after one rerun — first run RED on ${idList(ids)} (outside the PR diff), rerun ${status2}${ids2 ? ` on ${idList(ids2)}` : again?.failing?.length ? ` (failing gates: ${again.failing.join(", ")})` : ""}`;
       const t = await d.transition({ to: "factory:needs-human", reason });
       record([`merge: gates ${status2} on rerun`, ...gatesDetailLines(again, stamp), ...(candidate ? flakyCandidateLines(ids, "RED", stamp) : []), ...refusal(t), ...againEnvNote]);
       return 2;
