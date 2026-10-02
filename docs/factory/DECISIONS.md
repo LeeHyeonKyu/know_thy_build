@@ -4021,7 +4021,20 @@ review의 overlay는 PR이 새로 추가한 팩토리 소유 파일을 `git rm`�
   (3) 경로 장난 검사(`isPlainRepoPath`)는 오늘의 문자 그대로 대조하는 매처에서는 죽은 코드였다. 매처를 주입할 수 있게 하고, 정규화하는 매처로 그 검사를 직접 친다.
   (4) 엔진 판정·timeout-minutes·CHARTER 스위치를 base에서 한 번 읽는 배선을 `makeMergeSelfChangeDeps` 하나로 모으고 테스트로 묶었다. 구성 뒤 트리가 바뀌어도 값은 그대로이고, `runStage`는 checkoutHead보다 먼저 CHARTER를 읽는다.
 - **남는 위험**: 창 도중 잡이 *취소*되면(타임아웃은 위에서 막는다) 클레임 락이 `Aborted cleanup`까지 고아로 남는다. 창 동안 러너 하나와 이 이슈의 merge 동시성 슬롯을 잡는다.
-  폴링은 대략 시간당 26회 API 호출이다(이벤트와 라벨). 런타임에 구성되는 import(`mirror.js`의 생성기 로드)와 워크플로 프로세스 간선은 닫힘 테스트가 보지 못한다.
+  폴링은 대략 시간당 26회 API 호출이다(이벤트와 라벨). 워크플로 프로세스 간선은 닫힘 테스트가 보지 못한다(런타임에 구성되는 import는 아래 자기비판 3에서 막았다).
+- **리뷰 rework arch1과 자기비판 3에서 고친 것(리뷰 전)**:
+  (arch1) "팩토리 계정이 올렸는가"의 판정은 `factoryPoster` 하나다. 리뷰 증거((6b)·sweeper의 `verifyFactoryStatuses`), 비판정 게이트 증거, 거부권 창의 상태·이력·알림이 모두 이것을 부른다.
+  한 context의 판정(최신·success·게시자)은 `factoryStatusVerdict` 하나이고, `verifyFactoryStatuses`의 루프와 비판정 게이트 증거가 함께 쓴다.
+  (1) 첫 arch1 수정은 `verifyFactoryStatuses`에 `contexts` 파라미터를 더했고(plan non_goal), 게시자 거부 문장의 꼬리를 바꿨고, 로그인 집합을 trim했다. 이 함수의 사유는 스위치와 무관하게
+  (6b)와 sweeper로 가므로, 스위치가 꺼진 저장소의 출력이 main과 달라졌다. 이제 서명·문장·대조가 main 그대로다. 테스트가 main에서 캡처한 문장을 문자열 단위로 대조한다.
+  (2) 설정 오류라도 스위치 키가 없거나 정확히 `false`면 스위치는 꺼져 있다(`parseSelfChange`의 `switch_off`). 그래서 형제 키가 틀려도(`veto_minutes: 0`, 오타 키) 출력은 main과 같은 사람 머지다.
+  켜려 한 흔적(`true`, 불리언이 아닌 값, 맵이 아닌 값)이 있는 설정 오류만 비판정 PR에서 blocked가 된다.
+  (3) 틀린 `self_change`는 이제 CHARTER를 읽는 **모든 스테이지 런**에서 `::error::` 한 줄로 알린다(`reportSelfChangeAtLoad`, 스위치·저장소 종류와 무관). 비판정 PR의 머지 런까지 미루지 않는다.
+  (4) **dw6 문구와 다른 점**: `factory:veto`는 카탈로그(`VETO_LABEL_SPEC`, `catalogLabel`)에는 있지만 bootstrap의 `LABELS` 배열에는 없다. 그래서 스위치가 꺼진 저장소에는 이 라벨이 없다. 이유는 위 라벨 항목에 적었다.
+  "필요해지기 전에 있다"는 이렇게 지킨다. 스위치가 켜진 엔진 저장소의 모든 스테이지 런이 시작할 때 라벨을 만든다. 창을 열 때는 알림을 달기 전에 라벨을 필수로 확인한다.
+  (5) import 닫힘은 계산된 동적 import(식 인자·보간 템플릿)를 더 이상 조용히 버리지 않는다. 버리면 닫힘이 비판정 쪽으로 기운다. 그런 import는 `COMPUTED_IMPORT_LOADERS` 표에 적혀 있어야 세어진다.
+  표에는 그 파일의 계산된 import 수, 로더 이름과 호출 수, 대상 경로를 적는다. 표가 소스와 하나라도 어긋나면 `unresolved`가 되고 테스트가 RED다. 옛 파서가 놓친 간선은 두 개였다.
+  하나는 `mirror.js`에서 cli 생성기 셋으로 가는 간선이고, 다른 하나는 `feedback/install-manifest.js`에서 `cli/manifest.js`로 가는 간선이다. 둘 다 이제 닫힘에 들어오고, 목록과 겹치지 않는다.
 
 ## ADR-032 사람은 서명 기계가 아니다 — 운영 세션의 비판정 머지, 러너 생성 버전 — 2026-10-02 (소유자 결정)
 
