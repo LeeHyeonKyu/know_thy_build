@@ -1101,7 +1101,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           else record([`qa evidence: INVALID — ${qa?.reason || "unknown"}`]);
         } catch (e) { record([`qa evidence: unreadable — ${e?.message || e}`]); }
       }
-      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims })]);
+      // #149 self-critique — 이 런의 게이트 판정도 같은 줄에 싣는다(러너만 쓰는 자리). 비판정 경로의 머지는 이 값을 게이트 증거로 읽는다.
+      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims, gates: reviewGatesField(gates, checkoutSha ?? v.data.head_sha) })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
@@ -2114,8 +2115,60 @@ const VETO_WINDOW_FINAL_STATES = new Set(["success", "failure", "error"]);
  * `gatesFromStatuses: true`를 싣고, 그때 **`factory:merged`에만** requirements.js의 상태 출처 분기를 연다.
  * 다른 목적지·다른 값(문자열 "true" 포함)은 아무것도 열지 않는다.
  */
-export function mergeGateEvidenceCtx({ to, gatesFromStatuses } = {}) {
-  return to === "factory:merged" && gatesFromStatuses === true ? { gatesFromStatuses: true, statusesVerified: true } : {};
+export function mergeGateEvidenceCtx({ to, gatesFromStatuses, record = null, prHeadSha = null } = {}) {
+  if (to !== "factory:merged" || gatesFromStatuses !== true) return {};
+  // self-critique — merge-stage의 표식은 **어디서 증거를 찾을지**만 말하고, 증거 자체가 아니다. `factory/gates` 상태는 에이전트
+  // 배우의 토큰으로도 게시된다(그 로그인은 팩토리 로그인 집합에 있다). 그래서 이 문은 리뷰 런의 **러너가** factory/records에 쓴
+  // review-evidence 줄의 `gates=GREEN`이 지금 머지된 PR head에 묶여 있을 때만 열린다 — merge-stage의 자기 신고와 독립이다.
+  const verified = Boolean(record && record.stage === "review" && record.gates === "GREEN" && prHeadSha && record.headSha === prHeadSha);
+  return { gatesFromStatuses: true, statusesVerified: verified };
+}
+
+/**
+ * `mergeGateEvidenceCtx`의 재료를 **이 프로세스가 직접** 읽는다: 이슈의 review 하트비트가 지목하는 런 id(`reviewRunId`) →
+ * 그 런이 factory/records에 쓴 줄(`reviewRecord`). 읽지 못하면 미확인(`statusesVerified:false`)이다 — 통과로 접지 않는다.
+ * 비판정 경로의 머지 전이가 아니면 아무것도 읽지 않는다.
+ */
+export async function resolveMergeGateEvidence({ to, gatesFromStatuses, prHeadSha, reviewRunId, reviewRecord }) {
+  if (to !== "factory:merged" || gatesFromStatuses !== true) return {};
+  let record = null;
+  try {
+    const id = await reviewRunId();
+    if (id?.ok && id.runId) {
+      const r = await reviewRecord({ runId: id.runId });
+      if (r?.ok) record = r.record ?? null;
+    }
+  } catch { record = null; }
+  return mergeGateEvidenceCtx({ to, gatesFromStatuses, record, prHeadSha });
+}
+
+/**
+ * #149 self-critique — review-evidence 줄의 `gates=` 값. 이 리뷰 런의 게이트 파일이 **체크아웃한 커밋**의 것이고 진단 출력이
+ * 아닐 때만 그 판정(GREEN·RED…)을 그대로 싣는다. 다른 커밋의 파일은 `stale`, 손으로 돌린 진단은 `diagnostic`, 없으면 `none`.
+ */
+export function reviewGatesField(gates, sha) {
+  if (!gates) return "none";
+  if (gates.diagnostic === true) return "diagnostic";
+  if (!sha || gates.head_sha !== sha) return "stale";
+  return String(gates.status || "none");
+}
+
+/**
+ * #149 (S4a) — 머지 잡의 자기 머지 재료 세 가지를 **구성 시점에** 고정한다. main()은 이것을 프로세스 시작 시(워크플로의 기본
+ * 체크아웃 = base) 만들고, checkoutHead가 트리를 PR head로 옮긴 뒤에는 디스크를 다시 읽지 않는다:
+ *  - `engine`: 엔진 저장소인가(`mirrorApplicable`) — PR이 `factory/cli/*`를 더하거나 지워 답을 바꿀 수 없다.
+ *  - `mergeJobTimeoutMinutes`: 설치된 factory-merge.yml의 timeout-minutes — PR이 자기 워크플로로 창을 늘릴 수 없다.
+ *  - `selfChange`: CHARTER `self_change`의 검증 결과 — `charter()`는 charterReady가 checkoutHead **전에** 읽어 둔 객체다.
+ * 머지 외 스테이지는 엔진 판정도 워크플로 읽기도 하지 않는다(engine:false).
+ */
+export function makeMergeSelfChangeDeps({ root, stage, readFile, charter, isEngine = mirrorApplicable }) {
+  const workflowAtStart = stage === "merge" ? readFile(join(root, MERGE_WORKFLOW)) : null;
+  const engineAtStart = stage === "merge" ? isEngine(root) === true : false;
+  return {
+    get engine() { return engineAtStart; },
+    get selfChange() { return charter()?.self_change; },
+    mergeJobTimeoutMinutes: async () => parseJobTimeoutMinutes(workflowAtStart),
+  };
 }
 
 /**
@@ -2890,10 +2943,8 @@ async function main() {
   const admission = async (args) => (charter
     ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
     : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
-  // #149 (S4a) — 머지 잡의 timeout-minutes는 체크아웃이 PR head로 옮기기 **전**(base)에 읽는다.
-  const mergeWorkflowAtStart = stage === "merge" ? readFile(join(root, MERGE_WORKFLOW)) : null;
-  // 엔진 저장소인가도 base에서 정한다 — PR head의 트리로 물으면 PR이 `factory/cli/*`를 더하거나 지워 답을 바꾼다.
-  const engineAtStart = stage === "merge" ? mirrorApplicable(root) : false;
+  // #149 (S4a) — 엔진 판정·머지 잡의 timeout-minutes는 체크아웃이 PR head로 옮기기 **전**(base)에 한 번 읽는다.
+  const selfChangeDeps = makeMergeSelfChangeDeps({ root, stage, readFile, charter: () => charter });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -3354,9 +3405,9 @@ async function main() {
      * 켤 수 없다(CHARTER는 판정자 경로이기도 하다). CHARTER가 없으면 undefined = 꺼짐.
      * `mergeJobTimeoutMinutes`도 시작 시 읽은 설치본에서 온다(`.github/**`는 판정자라 창까지 오는 PR이 바꿀 수 없다).
      */
-    get engine() { return engineAtStart; },
-    get selfChange() { return charter?.self_change; },
-    mergeJobTimeoutMinutes: async () => parseJobTimeoutMinutes(mergeWorkflowAtStart),
+    get engine() { return selfChangeDeps.engine; },
+    get selfChange() { return selfChangeDeps.selfChange; },
+    mergeJobTimeoutMinutes: selfChangeDeps.mergeJobTimeoutMinutes,
     vetoWindow: makeVetoWindowDep({ gh }),
     vetoLabel: makeVetoLabelDep({ gh, issue }),
     // `process.env`는 이 배선 한 줄에만 산다. 프로세스 시작 시각은 Actions 밖(로컬)에서만 쓰인다.
@@ -3415,7 +3466,8 @@ async function main() {
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
       // #149 sec2 — 비판정 경로의 머지 전이: 게이트 증거는 리뷰 런의 상태다(merge-stage가 확인했다). merged에만.
-      Object.assign(ctxExtra, mergeGateEvidenceCtx({ to, gatesFromStatuses }));
+      // self-critique: 그 표식만으로는 열리지 않는다 — 리뷰 런의 러너 기록(`gates=GREEN`, 이 PR head)을 여기서 직접 다시 읽는다.
+      Object.assign(ctxExtra, await resolveMergeGateEvidence({ to, gatesFromStatuses, prHeadSha: ctxExtra.prHeadSha ?? null, reviewRunId: () => deps.reviewRunId(), reviewRecord: (a) => deps.reviewRecord(a) }));
       // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.
       if (to === "factory:merged") Object.assign(ctxExtra, mergeGatesResult ?? await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
       // stage: to===factory:blocked일 때만 lib/transition.js가 origin 마커에 쓴다(KTB-15b I2).

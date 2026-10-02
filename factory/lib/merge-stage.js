@@ -747,9 +747,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     // 돌리고(비판정 목록의 파일은 전부 그 테스트가 실행하거나 import하는 파일이다), 이 프로세스와 그 조상은 env에
     // 머지 토큰(ADR-021)을 쥐고 있다. 자식 env의 스크럽은 `/proc/<조상 pid>/environ`을 지우지 못한다 — 같은 uid의
     // 코드는 그것을 읽는다. 그래서 위 "게이트보다 먼저" 규칙을 이 경로에도 그대로 지킨다: 게이트를 여기서 다시 돌리지
-    // 않고, 게이트 증거는 **리뷰 런이 이 head에 올린 `factory/gates`**(success, 팩토리 계정)로 읽는다 — 사람이 머지한
-    // 보호 경로 PR을 sweeper가 이을 때 쓰는 증거와 같은 것이고(KTB-46), 같은 함수(verifyFactoryStatuses)로 판정한다.
-    // 아래 (6b)는 같은 검사를 창 앞과 뒤(라이브 head)에서 다시 한다. 머지 전이는 `gatesFromStatuses`로 그 출처를 싣는다.
+    // 않는다. 여기서는 **리뷰 런이 이 head에 올린 `factory/gates`**(success, 팩토리 계정)를 먼저 본다 — 싸고 이른 첫 겹일 뿐이다:
+    // 그 상태는 에이전트 배우의 토큰으로도 게시된다. 게이트 증거의 본체는 아래 (6b)가 창 앞과 뒤(라이브 head)에서 묻는, 리뷰 런의
+    // **러너**가 factory/records에 쓴 `gates=GREEN`이다(self-critique). 머지 전이는 `gatesFromStatuses`로 그 출처를 싣고, run-stage가
+    // 그 기록을 직접 다시 읽은 뒤에만 `statusesVerified`를 세운다(`resolveMergeGateEvidence`).
     const code = await nonJudgeGateEvidence();
     if (code !== null) return code;
   } else {
@@ -891,6 +892,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
     if (!prov.ok) return await reviewRefused(prov.reason);
     record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
+
+    // #149 self-critique — 비판정 경로의 **게이트 증거**. 이 잡은 그 PR의 게이트를 돌리지 않는다(sec2). `factory/gates` 상태는
+    // 에이전트 배우의 토큰으로도 게시되므로(그 로그인은 팩토리 로그인 집합에 있다 — 아래 (d) 참고) 그것만으로는 아무것도 증명하지
+    // 않는다. 게이트를 실제로 돌린 리뷰 런의 **러너**가 이 줄에 쓴 `gates=`(run-stage reviewGatesField: 체크아웃한 커밋의 진단 아닌
+    // 게이트 파일)가 GREEN이어야 한다. 위 provenance가 이 줄을 그 런·이 head에 이미 묶었다. 창 앞과 뒤(라이브 head)에서 같이 묻는다.
+    if (vetoFiles && rec.record.gates !== "GREEN") {
+      return await reviewRefused(`the review run ${rec.record.runId} recorded gates=${rec.record.gates ?? "(none)"} for ${live.slice(0, 7)} on factory/records — a non-judge protected-path PR is merged without running its gates in this job, so the gate verdict the review run's runner wrote (not a commit status, which the agent's token can post) must be GREEN`);
+    }
+    if (vetoFiles) record([`merge: gate evidence for the non-judge path — review run ${rec.record.runId} recorded gates=GREEN for ${live.slice(0, 7)} on factory/records`]);
 
     /**
      * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────

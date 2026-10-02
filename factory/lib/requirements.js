@@ -41,6 +41,8 @@ export const HUMAN_MERGE_STATUSES_UNVERIFIED = "human-merge reconcile: factory c
  * 게이트를 다시 돌리지 않는다 — 그래서 이 런에는 gates.json이 **있을 수 없고**, 게이트 증거는 KTB-46과 같이 리뷰 런이 그
  * head에 올린 `factory/gates` 상태다(merge-stage가 창 앞에서, 그리고 (6b)에서 라이브 head로 게시자까지 확인한 뒤에만
  * `gatesFromStatuses`를 싣고, run-stage가 그때만 `statusesVerified`를 세운다).
+ * self-critique — 그 상태는 에이전트 토큰으로도 게시되므로 `statusesVerified`는 merge-stage의 표식으로 서지 않는다: run-stage가
+ * 리뷰 런의 러너가 factory/records에 쓴 `gates=GREEN`(그 런·이 PR head)을 직접 다시 읽어 확인했을 때만 선다(`resolveMergeGateEvidence`).
  */
 export const STATUS_GATES_UNVERIFIED = "non-judge self-merge: the review run's factory/gates status was not verified";
 /**

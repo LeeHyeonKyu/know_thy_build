@@ -90,13 +90,20 @@ export const normalizeVerdicts = (verdicts = []) =>
  * 말해 줄 수 있는 것은 review 런이 여기 남긴 지문 하나뿐이다. 필드는 **선택**이다(뒤에 붙는다):
  * 이 기능 이전의 기록과 로스터에 qa가 없는 tier의 기록은 그 필드 없이 그대로 읽혀야 한다.
  */
-export function reviewEvidenceLine({ headSha, round, decision, verdicts = [], runId, runnerId, qaManifest = null, qaClaims = null }) {
+/**
+ * #149 (S4a self-critique) — `gates=<판정>`: 이 리뷰 런의 게이트 판정(`run-stage.js` reviewGatesField — GREEN·RED·…·
+ * stale·diagnostic·none). **선택이고 맨 뒤에 붙는다**: 넘기지 않으면 줄은 예전과 글자 하나 다르지 않다. 비판정 보호 경로의
+ * 자기 머지는 머지 잡에서 PR 코드를 돌리지 않으므로, 그 경로의 게이트 증거는 commit status(에이전트 토큰으로도 게시된다)가
+ * 아니라 러너만 쓰는 이 줄이다.
+ */
+export function reviewEvidenceLine({ headSha, round, decision, verdicts = [], runId, runnerId, qaManifest = null, qaClaims = null, gates }) {
   const base = `${REVIEW_EVIDENCE_PREFIX} run_id=${runId ?? "none"} runner=${runnerId ?? "none"} head_sha=${headSha ?? "none"} round=${round ?? "none"} decision=${decision ?? "none"} verdicts=${normalizeVerdicts(verdicts) || "none"}`;
-  return `${base} qa_manifest=${qaManifest ?? "none"} qa_claims=${qaClaims ?? "none"}`;
+  const line = `${base} qa_manifest=${qaManifest ?? "none"} qa_claims=${qaClaims ?? "none"}`;
+  return gates === undefined || gates === null ? line : `${line} gates=${String(gates).replace(/\s+/g, "_") || "none"}`;
 }
 
 const SECTION = /^##\s+(\S+)\s+·\s+(\S+)\s+·\s+(.+)$/;
-const EVIDENCE = new RegExp(`^${REVIEW_EVIDENCE_PREFIX} run_id=(\\S+) runner=(\\S+) head_sha=(\\S+) round=(\\S+) decision=(\\S+) verdicts=(\\S*?)( qa_manifest=(\\S+?))?( qa_claims=(\\S+))?$`);
+const EVIDENCE = new RegExp(`^${REVIEW_EVIDENCE_PREFIX} run_id=(\\S+) runner=(\\S+) head_sha=(\\S+) round=(\\S+) decision=(\\S+) verdicts=(\\S*?)( qa_manifest=(\\S+?))?( qa_claims=(\\S+?))?( gates=(\\S+))?$`);
 
 /**
  * run 기록 본문에서 **기대하는 런**(`runId`)이 쓴 review-evidence 줄을 그 섹션 헤더(스테이지·시각·
@@ -145,6 +152,8 @@ export function parseReviewEvidenceAll(text) {
       // SF-3 — 구성(`3c/1na`). 판정에는 쓰이지 않는다: retro가 "전부 na에 가까운 승인"을 **셀 수**
       // 있게 하려고 남기는 관측값이다(계약이 막는 것은 *전부* na인 경우뿐이다).
       qaClaims: e[10] && e[10] !== "none" ? e[10] : null,
+      // #149 — 그 런의 게이트 판정. 필드가 없는 기록(이 기능 이전)은 null — "GREEN이었다"로 읽지 않는다.
+      gates: e[12] && e[12] !== "none" ? e[12] : null,
     });
   }
   return found;
@@ -155,7 +164,7 @@ export function parseReviewEvidence(text, { runId = null } = {}) {
   if (!want || want === "none") return null;
   const found = parseReviewEvidenceAll(text).filter((r) => r.runId === want);
   if (!found.length) return null;
-  const shape = (r) => `${r.stage}|${r.runnerId}|${r.headSha}|${r.round}|${r.decision}|${r.verdicts}|${r.qaManifest ?? "none"}|${r.qaClaims ?? "none"}`;
+  const shape = (r) => `${r.stage}|${r.runnerId}|${r.headSha}|${r.round}|${r.decision}|${r.verdicts}|${r.qaManifest ?? "none"}|${r.qaClaims ?? "none"}|${r.gates ?? "none"}`;
   if (new Set(found.map(shape)).size > 1) return null;
   return found[found.length - 1];
 }

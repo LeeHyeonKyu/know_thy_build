@@ -4115,10 +4115,162 @@ test("test_149_veto_window_opens_waits_and_closes — vetoWindow.history reads e
 });
 
 test("test_149_veto_window_opens_waits_and_closes — the merged transition carries the status gate source only when merge-stage asked for it, and only to factory:merged (sec2)", () => {
-  expect(mergeGateEvidenceCtx({ to: "factory:merged", gatesFromStatuses: true })).toEqual({ gatesFromStatuses: true, statusesVerified: true });
+  // self-critique: merge-stage의 표식만으로는 미확인이다 — 리뷰 런의 러너 기록(gates=GREEN, 이 head)이 있어야 열린다.
+  expect(mergeGateEvidenceCtx({ to: "factory:merged", gatesFromStatuses: true })).toEqual({ gatesFromStatuses: true, statusesVerified: false });
+  const sha = "c".repeat(40);
+  expect(mergeGateEvidenceCtx({ to: "factory:merged", gatesFromStatuses: true, prHeadSha: sha, record: { stage: "review", headSha: sha, gates: "GREEN" } })).toEqual({ gatesFromStatuses: true, statusesVerified: true });
   for (const to of ["factory:approved", "factory:awaiting-review", "factory:needs-human", "factory:blocked"]) {
     expect(mergeGateEvidenceCtx({ to, gatesFromStatuses: true }), to).toEqual({});
   }
   expect(mergeGateEvidenceCtx({ to: "factory:merged" })).toEqual({});
   expect(mergeGateEvidenceCtx({ to: "factory:merged", gatesFromStatuses: "true" })).toEqual({});
+});
+
+// ── #149 self-critique — 프로덕션 배선(스위치·엔진·timeout은 base에서 한 번)과 게이트 증거의 러너 기록 바인딩 ───────────
+import { makeMergeSelfChangeDeps, reviewGatesField, resolveMergeGateEvidence } from "../bin/run-stage.js";
+import { loadCharter } from "../lib/config.js";
+import { reviewEvidenceLine, parseReviewEvidence } from "../lib/run-record.js";
+import { rmSync } from "node:fs";
+
+/** base 체크아웃을 흉내 낸 임시 저장소 — 엔진 저장소 표식(factory/cli + .factory), CHARTER, 머지 워크플로. */
+const selfChangeRepo = ({ engine = true, selfChange = null, timeout = 90 } = {}) => {
+  const r = mkdtempSync(join(tmpdir(), "ktb-149-wiring-"));
+  mkdirSync(join(r, "docs/factory"), { recursive: true });
+  mkdirSync(join(r, ".github/workflows"), { recursive: true });
+  if (engine) {
+    mkdirSync(join(r, "factory/cli"), { recursive: true });
+    mkdirSync(join(r, ".factory"), { recursive: true });
+    writeFileSync(join(r, "factory/cli/manifest.js"), "export {};\n");
+    writeFileSync(join(r, "factory/cli/install.js"), "export {};\n");
+  }
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\n${selfChange ? `self_change:\n${selfChange}` : ""}---\nbody\n`);
+  writeFileSync(join(r, ".github/workflows/factory-merge.yml"), `jobs:\n  merge:\n    timeout-minutes: ${timeout}\n`);
+  return r;
+};
+const readOrNull = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
+
+test("test_149_switch_off_is_byte_identical — production wiring: a CHARTER without self_change is off, and an adopter repo is never an engine", async () => {
+  // 엔진 저장소, CHARTER에 self_change 없음 → 스위치는 꺼져 있다(배선이 켜진 값을 지어내면 RED).
+  const off = selfChangeRepo({ engine: true });
+  let charter = loadCharter(off);
+  const d = makeMergeSelfChangeDeps({ root: off, stage: "merge", readFile: readOrNull, charter: () => charter });
+  expect(d.engine).toBe(true);
+  expect(d.selfChange).toEqual({ ok: true, auto_merge_non_judge: false, veto_minutes: 60 });
+  // 채택자 저장소(factory/cli 없음) → engine은 false — CHARTER가 스위치를 켜도.
+  const adopter = selfChangeRepo({ engine: false, selfChange: "  auto_merge_non_judge: true\n  veto_minutes: 30\n" });
+  const a = makeMergeSelfChangeDeps({ root: adopter, stage: "merge", readFile: readOrNull, charter: () => loadCharter(adopter) });
+  expect(a.engine).toBe(false);
+  // 스위치를 켠 엔진 저장소에서만 켜진 값이 나온다 — 그 값은 CHARTER가 적은 그대로다.
+  const on = selfChangeRepo({ engine: true, selfChange: "  auto_merge_non_judge: true\n  veto_minutes: 30\n" });
+  const o = makeMergeSelfChangeDeps({ root: on, stage: "merge", readFile: readOrNull, charter: () => loadCharter(on) });
+  expect(o.engine).toBe(true);
+  expect(o.selfChange).toEqual({ ok: true, auto_merge_non_judge: true, veto_minutes: 30 });
+  // 머지 외 스테이지는 엔진 판정도 워크플로 읽기도 하지 않는다.
+  const notMerge = makeMergeSelfChangeDeps({ root: off, stage: "review", readFile: readOrNull, charter: () => charter });
+  expect(notMerge.engine).toBe(false);
+  expect((await notMerge.mergeJobTimeoutMinutes()).ok).toBe(false);
+  for (const r of [off, adopter, on]) rmSync(r, { recursive: true, force: true });
+});
+
+test("test_149_veto_window_opens_waits_and_closes — production wiring reads engine, timeout-minutes and the CHARTER switch at base, before the PR head is checked out", async () => {
+  // 구성 시점(= 프로세스 시작, base 체크아웃)의 값이 고정된다. 그 뒤 트리가 PR head로 바뀌어(checkoutHead) 엔진 표식이
+  // 사라지거나, 워크플로의 timeout이 늘거나, CHARTER가 스위치를 켜도 — 이 런의 판정은 바뀌지 않는다.
+  const r = selfChangeRepo({ engine: true, timeout: 90 });
+  let charter = loadCharter(r);
+  const d = makeMergeSelfChangeDeps({ root: r, stage: "merge", readFile: readOrNull, charter: () => charter });
+  rmSync(join(r, "factory/cli"), { recursive: true, force: true });                      // PR head가 엔진 표식을 지운 트리
+  writeFileSync(join(r, ".github/workflows/factory-merge.yml"), "jobs:\n  merge:\n    timeout-minutes: 600\n");
+  writeFileSync(join(r, "docs/factory/CHARTER.md"), "---\nschema: factory.charter.v1\nstatus: ready\nself_change:\n  auto_merge_non_judge: true\n---\n");
+  expect(d.engine).toBe(true);
+  expect(await d.mergeJobTimeoutMinutes()).toEqual({ ok: true, minutes: 90 });
+  expect(d.selfChange).toEqual({ ok: true, auto_merge_non_judge: false, veto_minutes: 60 });   // 디스크를 다시 읽지 않는다
+  // 반대 방향도 같다: base가 채택자면 PR이 엔진 표식을 더해도 엔진이 되지 않는다.
+  const ad = selfChangeRepo({ engine: false });
+  const a = makeMergeSelfChangeDeps({ root: ad, stage: "merge", readFile: readOrNull, charter: () => loadCharter(ad) });
+  mkdirSync(join(ad, "factory/cli"), { recursive: true }); mkdirSync(join(ad, ".factory"), { recursive: true });
+  writeFileSync(join(ad, "factory/cli/manifest.js"), ""); writeFileSync(join(ad, "factory/cli/install.js"), "");
+  expect(a.engine).toBe(false);
+  for (const x of [r, ad]) rmSync(x, { recursive: true, force: true });
+
+  // 그리고 CHARTER(= selfChange의 출처)는 runStage가 checkoutHead보다 **먼저** 읽는다.
+  const calls = [];
+  const deps = baseDeps({
+    charterReady: async () => { calls.push("charter"); return true; },
+    checkoutHead: async () => { calls.push("checkout"); return { ok: false, reason: "stop here" }; },
+    transition: async ({ to }) => ({ ok: true, to }),
+  });
+  expect(await runStage({ stage: "merge", issue: 7, deps })).toBe(2);
+  expect(calls).toEqual(["charter", "checkout"]);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the review run records its own gate verdict on the review-evidence line, bound to the checked-out head", () => {
+  const sha = "c".repeat(40);
+  const green = { status: "GREEN", head_sha: sha };
+  expect(reviewGatesField(green, sha)).toBe("GREEN");
+  expect(reviewGatesField({ status: "RED", head_sha: sha }, sha)).toBe("RED");
+  expect(reviewGatesField({ ...green, diagnostic: true }, sha)).toBe("diagnostic");
+  expect(reviewGatesField({ ...green, head_sha: "d".repeat(40) }, sha)).toBe("stale");
+  expect(reviewGatesField(null, sha)).toBe("none");
+  expect(reviewGatesField(green, null)).toBe("stale");
+  // 줄에 실리고, 같은 런으로 다시 읽힌다. 필드가 없는 예전 줄은 null이다(GREEN으로 읽히지 않는다).
+  const line = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: sha, round: 1, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], gates: "GREEN" });
+  expect(line.endsWith(" gates=GREEN")).toBe(true);
+  expect(parseReviewEvidence(`## review · 2026-10-02T09:00Z · gha-7\n${line}\n`, { runId: "7" })).toMatchObject({ headSha: sha, gates: "GREEN" });
+  const legacy = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: sha, round: 1, decision: "approved", verdicts: [] });
+  expect(legacy).not.toMatch(/gates=/);
+  expect(parseReviewEvidence(`## review · 2026-10-02T09:00Z · gha-7\n${legacy}\n`, { runId: "7" }).gates).toBe(null);
+  // 같은 런을 말하는 두 줄이 게이트 판정만 다르면 그 기록은 증거가 아니다.
+  const red = reviewEvidenceLine({ runId: "7", runnerId: "gha-7", headSha: sha, round: 1, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], gates: "RED" });
+  expect(parseReviewEvidence(`## review · 2026-10-02T09:00Z · gha-7\n${line}\n${red}\n`, { runId: "7" })).toBe(null);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the review stage writes gates=<verdict> on its review-evidence line", async () => {
+  const sha = "c".repeat(40);
+  for (const [status, want] of [["GREEN", "GREEN"], ["RED", "RED"]]) {
+    const lines = [];
+    const deps = baseDeps({
+      checkoutHead: async () => ({ ok: true, sha }),
+      buildContext: async () => ({ roster: ["qa"], orchestration: "workflow", limits: { K: 3 } }),
+      gates: async () => ({ status, head_sha: sha, level: "full" }),
+      verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: sha, verdicts: [{ role: "qa", verdict: "approve", must_fix: [] }] } }),
+      transition: async ({ to }) => ({ ok: true, to }),
+      runRecord: (l) => lines.push(...l),
+    });
+    await runStage({ stage: "review", issue: 7, deps });
+    const ev = lines.find((l) => l.startsWith("review-evidence:"));
+    expect(ev, status).toBeTruthy();
+    expect(ev.endsWith(` gates=${want}`), ev).toBe(true);
+  }
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the merged transition takes non-judge gate evidence only from the review run's own record, never from merge-stage's flag (sec2, self-critique)", async () => {
+  const sha = "c".repeat(40);
+  const rec = { stage: "review", runId: "7", headSha: sha, gates: "GREEN" };
+  const ok = { ok: true, runId: "7" };
+  const resolve = (over = {}) => resolveMergeGateEvidence({ to: "factory:merged", gatesFromStatuses: true, prHeadSha: sha, reviewRunId: async () => ok, reviewRecord: async () => ({ ok: true, record: rec }), ...over });
+  expect(await resolve()).toEqual({ gatesFromStatuses: true, statusesVerified: true });
+  // merge-stage의 표식만으로는 아무것도 열리지 않는다 — 러너 기록이 없거나·RED거나·다른 커밋이거나·다른 런이면 미확인.
+  for (const [name, over] of Object.entries({
+    "no gates field": { reviewRecord: async () => ({ ok: true, record: { ...rec, gates: null } }) },
+    "gates RED": { reviewRecord: async () => ({ ok: true, record: { ...rec, gates: "RED" } }) },
+    "gates stale": { reviewRecord: async () => ({ ok: true, record: { ...rec, gates: "stale" } }) },
+    "other head": { reviewRecord: async () => ({ ok: true, record: { ...rec, headSha: "d".repeat(40) } }) },
+    "other stage": { reviewRecord: async () => ({ ok: true, record: { ...rec, stage: "implement" } }) },
+    "record unreadable": { reviewRecord: async () => ({ ok: false, reason: "fetch failed" }) },
+    "record throws": { reviewRecord: async () => { throw new Error("boom"); } },
+    "run id unknown": { reviewRunId: async () => ({ ok: false, reason: "no heartbeat" }) },
+    "no pr head": { prHeadSha: null },
+  })) {
+    expect(await resolve(over), name).toEqual({ gatesFromStatuses: true, statusesVerified: false });
+  }
+  // 기록은 그 런의 id로 읽는다.
+  const reviewRecord = vi.fn(async () => ({ ok: true, record: rec }));
+  await resolve({ reviewRecord });
+  expect(reviewRecord).toHaveBeenCalledWith({ runId: "7" });
+  // 다른 목적지·표식 없음은 아무것도 열지 않고, 기록을 읽지도 않는다.
+  const untouched = vi.fn();
+  for (const args of [{ to: "factory:approved", gatesFromStatuses: true }, { to: "factory:merged" }, { to: "factory:merged", gatesFromStatuses: "true" }]) {
+    expect(await resolveMergeGateEvidence({ ...args, prHeadSha: sha, reviewRunId: untouched, reviewRecord: untouched }), JSON.stringify(args)).toEqual({});
+  }
+  expect(untouched).not.toHaveBeenCalled();
 });

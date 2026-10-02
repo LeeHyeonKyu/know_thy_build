@@ -1545,6 +1545,8 @@ const windowDeps = (over = {}) => {
   });
   const startedAt = clock.t;
   return {
+    // self-critique — 비판정 경로의 게이트 증거: 리뷰 런의 러너가 factory/records에 쓴 `gates=GREEN`(정직한 리뷰 런의 기록).
+    reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, gates: "GREEN" } })),
     engine: true,
     selfChange: SWITCH_ON,
     protectedPaths: vi.fn(async () => ({ ok: true, files: NJ_FILES })),
@@ -2203,4 +2205,30 @@ test("test_149_veto_window_opens_waits_and_closes — the merge job never runs a
   expect(plain.gates).toHaveBeenCalledTimes(1);
   const merged = plain.transition.mock.calls.find(([t]) => t.to === "factory:merged")[0];
   expect("gatesFromStatuses" in merged).toBe(false);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — a forged factory/gates status is not gate evidence: the review run's own record must say gates=GREEN for this head (self-critique)", async () => {
+  // `factory/gates`는 에이전트 배우의 토큰으로도 게시된다(그 로그인은 팩토리 로그인 집합에 있다). 비판정 경로는 이 잡에서
+  // 게이트를 돌리지 않으므로, 상태 하나가 유일한 증거면 위조한 success 하나로 사람 없이 머지된다. 그래서 러너만 쓰는
+  // factory/records의 review-evidence 줄이 그 head의 게이트 판정을 GREEN으로 말해야 한다.
+  for (const [name, gates] of Object.entries({ "record has no gates field (older review run)": undefined, "review run gates RED": "RED", "review run gates on another commit": "stale", "diagnostic gates": "diagnostic" })) {
+    const record = { ...RECORD_OK, ...(gates === undefined ? {} : { gates }) };
+    const d = baseD(windowDeps({ reviewRecord: vi.fn(async () => ({ ok: true, record })) }));
+    expect(await run(d), name).toBe(2);
+    const last = d.transition.mock.calls.at(-1)[0];
+    expect(last.to, name).toBe("factory:needs-human");
+    expect(last.reason, name).toMatch(/review run .*recorded gates=/);
+    // 알림 전에 거부된다 — 약속도, 창도, 머지도 없다. 게이트는 여전히 이 잡에서 돌지 않는다.
+    expect(vetoComments(d), name).toHaveLength(0);
+    expect(d.vetoWindow.open, name).not.toHaveBeenCalled();
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+    expect(d.gates, name).not.toHaveBeenCalled();
+  }
+  // 대조군: 같은 기록이 gates=GREEN이면 창이 열리고 머지된다.
+  const ok = baseD(windowDeps({ reviewRecord: vi.fn(async () => ({ ok: true, record: { ...RECORD_OK, gates: "GREEN" } })) }));
+  expect(await run(ok)).toBe(0);
+  expect(ok.mergePr).toHaveBeenCalledTimes(1);
+  // 평범한 PR(보호 경로 없음)은 이 잡에서 게이트를 돌리므로 그 필드를 요구하지 않는다 — 예전 기록으로도 머지된다.
+  const plain = baseD({ gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })) });
+  expect(await run(plain)).toBe(0);
 });
