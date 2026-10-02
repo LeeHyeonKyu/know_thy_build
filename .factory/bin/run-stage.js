@@ -2069,7 +2069,6 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
   };
 }
 
-/** implement가 쓰는 브랜치 이름. 이름을 한 군데서만 만든다 — 체크아웃·사후 확인·컨텍스트가 같은 문자열을 봐야 한다. */
 /**
  * The `gates` dep: 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다.
  * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의 자기 신고에서 읽고,
@@ -2124,6 +2123,7 @@ export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, get
   };
 }
 
+/** implement가 쓰는 브랜치 이름. 이름을 한 군데서만 만든다 — 체크아웃·사후 확인·컨텍스트가 같은 문자열을 봐야 한다. */
 export const stageBranch = (issue) => `claude/fq-${issue}`;
 
 /**
