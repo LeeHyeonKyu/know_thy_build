@@ -33,6 +33,10 @@ export function mergeSettings(existing, template) {
  * 있으면 사람의 대화형 세션에서 `:harness`·`:role`·`:technical`이 자기 일을 못 한다(ADR-019).
  */
 export const MOVED_DENIES_ADR_019 = Object.freeze([
+  // ADR-032 (2026-10-02) — 운영 세션의 비판정 머지. 이 L2 deny는 명령이 그 문자열로 **시작할 때만** 맞는 안내판이었고
+  // (`out=$(gh pr …)`도 `x && gh pr …`도 스치지 않는다 — hooks/block-dangerous.sh 상단), 실제 경계는 늘 훅이었다. 훅이 이제
+  // "운영 세션 + 비판정 경로만 + GREEN"을 통과시키므로 안내판은 그 문을 다시 막는 유일한 자리가 된다. 템플릿에서 빼고, 설치본에서도 지운다.
+  "Bash(gh pr merge*)",
   "Edit(.factory/**)", "Write(.factory/**)",
   "Edit(.claude/**)", "Write(.claude/**)",
   "Edit(.github/workflows/factory-*)", "Write(.github/workflows/factory-*)",

@@ -77,7 +77,8 @@ sweep 잡에 records 브랜치 체크아웃이 없어서이고, KTB-48이 둘 �
 PR의 모든 파일이 `factory/lib/operator-merge.js`의 **양의 목록**(docs·리서치·운영 스크립트·보드 페이지 — 엔진
 소스는 하나도 없다) 안이고, 체크가 전부 GREEN이고, draft가 아니고, 기본 브랜치를 향할 때 그 PR을 머지할 수
 있다. 문은 훅(`block-dangerous.sh`)이 `.factory/bin/operator-merge-check.js`에 묻는 방식이고, 정확히
-`gh pr merge <n> [--squash|…]` 한 문장만 통과한다. 목록 밖 경로가 하나라도 섞이면 오늘과 같다 — 사람이 머지한다.
+`gh pr merge <n> [--squash|--admin|…]` 한 문장만 통과한다(`--admin`: 브랜치 보호가 요구하는 `factory/gates`·`factory/review` 상태는
+공장 PR에만 생기므로, 사람이 손으로 머지할 때와 똑같이 소유자 계정의 admin 권한으로 넘는다 — 2026-10-02 #159 실측). 목록 밖 경로가 하나라도 섞이면 오늘과 같다 — 사람이 머지한다.
 이 목록은 S4a(KTB #149)의 비판정 양의 목록과 합쳐질 예정이다.
 
 ## triage 기본 판정 (`triage.default: ready`, 외부 감사 2026-09-14 M1)

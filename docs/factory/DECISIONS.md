@@ -4028,3 +4028,9 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 옛 경로 포함, D 행 포함): `server/`에서 파일을 옮겨 나간 PR은 `server/`를 건드린 PR이다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
 
 **영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`(행마다 `paths`와 반환값에 `touched`를 **추가**만 한다 — 기존 필드 `all`·`added`·`tests`·`sources`·`addedTests`의 값은 그대로라 implement·review의 분류·커버리지 소비자는 바뀌지 않는다), `lib/gates.js` `runStageGates` 주석, 설계 스펙 §5.2.5(“`gates.js`는 절대 재시도로 GREEN을 만들지 않는다”·“review·merge는 RED를 RED로 둔다”에 이 개정을 가리키는 주석).
+**2026-10-02 (KTB #156 실측, 같은 과의 아홉째 — 러너 생성 버전 이후 첫 기록, 버전 번호 없음).** #155가 main에 새 엔진 파일 둘(`operator-merge.js`·
+`operator-merge-check.js`와 그 미러)을 더하는 동안 #156은 그 전의 main에서 갈라져 있었다. review의 overlay가 base의 `.factory/**`를 워크트리와
+인덱스에 올리자 그 두 미러 파일이 "HEAD에 없는데 인덱스에 있는" 상태가 됐고, 1.4.44의 `add -A` + `diff --cached HEAD`가 둘을 "추가됨"으로 보고해
+판정 불가로 멈췄다 — PR의 소스에는 그 파일이 없으니 재생성은 손대지 않는다. 판정 대상을 **HEAD에 있는 미러 경로 ∪ 이 PR의 소스가 만드는
+경로**로 좁힌다(`regenerateMirror`가 `entries`를 돌려준다). 그 밖의 경로는 overlay가 base에서 가져온 것이고 머지 뒤 main에 그대로 있을 파일이다.
+1.4.44의 세션 전 대조는 entries만 보므로 통과했고 세션 뒤 verify에서 걸렸다 — 리뷰어 비용이 한 번 더 들었다. 이제 둘이 같은 기준이다.

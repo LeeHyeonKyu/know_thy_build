@@ -1537,10 +1537,13 @@ test("block-dangerous: the operator may run exactly `gh pr merge <n>` when the i
   const check = join(root, ".factory/bin/operator-merge-check.js");
   const yes = () => writeFileSync(check, "process.stdout.write('operator-merge: ok\\n');\n");
   const no = () => writeFileSync(check, "process.stderr.write('operator-merge: refused — judge path\\n'); process.exit(2);\n");
-  const env = { CLAUDE_PROJECT_DIR: root };
+  // SDD 고정 문구 3: 환경 분기는 env를 **명시 주입**한다 — CI(`GITHUB_ACTIONS=true`)에서 이 테스트가 돌 때 baseEnv()는 그 변수를 그대로
+  // 물려주므로, 비우지 않으면 "운영 세션"의 허용 경로가 러너에서 막혀 RED가 된다(KTB #157의 게이트가 정확히 그렇게 걸렸다).
+  const env = { CLAUDE_PROJECT_DIR: root, GITHUB_ACTIONS: "" };
 
   yes();
-  for (const ok of ["gh pr merge 12", "gh pr merge 12 --squash", "gh pr merge 12 --squash --delete-branch", "gh pr merge 7 -s -d"]) {
+  // `--admin`: 브랜치 보호(L0)가 요구하는 factory/gates·review 상태는 공장 PR에만 생긴다 — 운영 세션의 문서 PR은 사람과 똑같이 admin으로 넘는다
+  for (const ok of ["gh pr merge 12", "gh pr merge 12 --squash", "gh pr merge 12 --squash --delete-branch", "gh pr merge 7 -s -d", "gh pr merge 12 --squash --admin"]) {
     expect((await bash("block-dangerous.sh", cmd(ok), undefined, env)).code, ok).toBe(0);
   }
   // 체크가 아니오라고 하면 막힌다 — 사유는 체크의 것
@@ -1553,7 +1556,7 @@ test("block-dangerous: the operator may run exactly `gh pr merge <n>` when the i
   yes();
   expect((await bash("block-dangerous.sh", cmd("gh pr merge 12 --squash"), undefined, { ...env, GITHUB_ACTIONS: "true" })).code).toBe(2);
   // 체크가 예라고 해도: 정확한 한 문장이 아니면 막힌다 — 복합 명령, --admin, --auto, 번호 없음, 다른 철자
-  for (const bad of ["cd x && gh pr merge 12", "gh pr merge 12 --admin", "gh pr merge 12 --auto", "gh pr merge", "gh pr merge 12 --squash; git push -f origin main",
+  for (const bad of ["cd x && gh pr merge 12", "gh pr merge 12 --auto", "gh pr merge", "gh pr merge 12 --squash; git push -f origin main",
                      "out=$(gh pr merge 12)", "gh api -X PUT repos/o/r/pulls/12/merge"]) {
     expect((await bash("block-dangerous.sh", cmd(bad), undefined, env)).code, bad).toBe(2);
   }
