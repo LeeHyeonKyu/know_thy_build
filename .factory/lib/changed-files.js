@@ -15,10 +15,7 @@ export const isGitDiffError = (e) => e?.code === GIT_DIFF_ERROR_CODE;
 export async function changedFiles({ run, cwd, base, head = "HEAD", harness }) {
   const r = await run("git", ["diff", "--name-status", `${base}...${head}`], { cwd });
   if (r.code !== 0) throw new GitDiffError(r.stderr);
-  const rows = r.stdout.split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status: status[0], file: rest[rest.length - 1], paths: rest }; });
-  // `touched` = every path the diff names, BOTH sides of a rename/copy (R/C rows carry `old\tnew`). `all` keeps
-  // only the new side; "did this PR touch X?" questions (#157 merge re-run) must not lose the source of a move.
-  const touched = [...new Set(rows.flatMap((x) => x.paths))];
+  const rows = r.stdout.split("\n").filter(Boolean).map((l) => { const [status, ...rest] = l.split("\t"); return { status: status[0], file: rest[rest.length - 1] }; });
   const all = rows.map((x) => x.file), added = rows.filter((x) => x.status === "A").map((x) => x.file);
   // 지워진 파일은 "이번 변경에 존재하는 파일"이 아니다 — 돌릴 수도, 커버리지를 잴 수도 없다.
   // 이름이 바뀐 파일(R)은 새 경로로 친다(rest의 마지막 항목이 새 경로다).
@@ -27,7 +24,7 @@ export async function changedFiles({ run, cwd, base, head = "HEAD", harness }) {
   // changedFiles를 부르므로(F2), test 섹션이 없는 하네스에서도 diff 자체는 계산할 수 있어야 한다.
   const tests = present.filter((f) => matchesAny(harness.test?.test_glob ?? [], f));
   const sources = present.filter((f) => matchesAny(harness.test?.source_glob ?? [], f));
-  return { all, touched, added, tests, sources, addedTests: added.filter((f) => tests.includes(f)) };
+  return { all, added, tests, sources, addedTests: added.filter((f) => tests.includes(f)) };
 }
 export async function changedLines({ run, cwd, base, head = "HEAD" }) {
   const r = await run("git", ["diff", "-U0", `${base}...${head}`], { cwd });
