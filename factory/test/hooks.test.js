@@ -1537,7 +1537,9 @@ test("block-dangerous: the operator may run exactly `gh pr merge <n>` when the i
   const check = join(root, ".factory/bin/operator-merge-check.js");
   const yes = () => writeFileSync(check, "process.stdout.write('operator-merge: ok\\n');\n");
   const no = () => writeFileSync(check, "process.stderr.write('operator-merge: refused — judge path\\n'); process.exit(2);\n");
-  const env = { CLAUDE_PROJECT_DIR: root };
+  // SDD 고정 문구 3: 환경 분기는 env를 **명시 주입**한다 — CI(`GITHUB_ACTIONS=true`)에서 이 테스트가 돌 때 baseEnv()는 그 변수를 그대로
+  // 물려주므로, 비우지 않으면 "운영 세션"의 허용 경로가 러너에서 막혀 RED가 된다(KTB #157의 게이트가 정확히 그렇게 걸렸다).
+  const env = { CLAUDE_PROJECT_DIR: root, GITHUB_ACTIONS: "" };
 
   yes();
   for (const ok of ["gh pr merge 12", "gh pr merge 12 --squash", "gh pr merge 12 --squash --delete-branch", "gh pr merge 7 -s -d"]) {
