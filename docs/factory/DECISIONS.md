@@ -18,7 +18,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 | 008 | 신뢰되지 않은 워크스페이스의 allow/deny | PASS (CI 필수 조치 도출) |
 | 009 | 러너/yml 관례 | (스파이크 아님 — 실행 중 발견) |
 | 010 | 게이트 판정의 진실 소스 | 파일(`gates.json`)이 진실 — handoff는 복사본, 불일치는 거부 |
-| 011 | flaky 재분류는 어느 스테이지가 하나 | implement에서만 — review·merge는 재분류 없이 RED |
+| 011 | flaky 재분류는 어느 스테이지가 하나 | implement·review(1.4.29~)에서 분류. merge는 분류하지 않되, ADR-033(#157)부터 RED가 전부 PR diff 밖의 파싱된 테스트 실패면 같은 게이트를 한 번 다시 돌고 그 런 전체가 GREEN일 때만 머지 |
 | 012 | 게이트 판정과 사전 assert의 분리 | `gatesChecked` 표식 — 전이 경로에서만 게이트를 확인 |
 | 013 | 훅 입력 불신 원칙 | `tool_input`을 셸 문자열에 넣기 전 반드시 이스케이프 |
 | 014 | run 기록은 `factory/records` 브랜치 | 보호된 default 브랜치에는 스테이지마다 직접 push할 수 없다 |
@@ -4004,7 +4004,7 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 `runStageGates`, stage `merge`)를 **정확히 한 번** 더 부른다.
 - 결과가 RED(MISCONFIGURED·BLOCKED가 아님)이고, RED인 게이트가 **전부** 리포트를 실제로 읽은(`parsed: true`) 테스트 게이트이며 `failing_ids`가 비어 있지 않다.
   lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다.
-- PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
+- PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`의 `touched`: R/C 행의 양쪽 경로)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
 - diff에 **저장소 루트의 파일이 하나도 없다** — 루트 파일(package.json·lockfile·설정·README까지)은 모든 패키지를 건드린 것으로 본다.
 - 실패 테스트마다 경로가 정규화되고, 루트에 있지 않으며, 그 최상위 디렉터리(`server/` 대 `client/`)에 diff 파일이 하나도 없다.
 
@@ -4023,7 +4023,8 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 
 **남는 위험**: 비율 p로 실패하는 진짜 간헐 회귀(제품 경쟁 조건)는 1-p의 확률로 재실행 GREEN을 받아 머지된다 — 흔적은 run 기록의 마커뿐이다.
 **`factory-flaky-candidate`를 읽는 소비자는 아직 없다**(retro 수확기는 `factory:flaky` 라벨만 읽는다) — 후속 이슈의 몫이다. 최상위 디렉터리
-휴리스틱은 디렉터리를 가로지르는 의존(`shared/`를 import하는 `server/`)과 이름 변경의 옛 경로를 보지 못한다; 결정적 결함은 두 번 실패하므로
-머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
+휴리스틱은 디렉터리를 가로지르는 의존(`shared/`를 import하는 `server/`)을 보지 못한다; 결정적 결함은 두 번 실패하므로
+머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. 이름 변경·복사는 **양쪽 경로**를 모두 diff로 친다(`changedFiles`의 `touched` — R/C 행의
+옛 경로 포함, D 행 포함): `server/`에서 파일을 옮겨 나간 PR은 `server/`를 건드린 PR이다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
 
-**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGatesDep`·`makeMergeDiffFilesDep`, `lib/gates.js` `runStageGates` 주석.
+**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`, `lib/gates.js` `runStageGates` 주석.

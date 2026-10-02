@@ -492,7 +492,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record(["merge: agent role sections within policy"]);
 
-  // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human. base/diff를 못 구한
+  // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human — 단 하나의 예외(#157, ADR-033):
+  // RED가 전부 PR diff 밖의 파싱된 테스트 실패로 **증명**되면(rerunEligibility) 같은 d.gates()를 정확히 한 번 더 돌고,
+  // 그 런 전체가 GREEN일 때만 머지로 간다(같은 id 집합의 두 번째 RED는 flaky 후보 마커와 함께 needs-human). base/diff를 못 구한
   // 것도 판정 불가다(run-stage의 나머지 스테이지와 같은 typed-error 계약). 상태 게시는 부수 효과라
   // 실패해도(또는 diagnostic 결과여도) 머지 판단을 막지 않는다 — postStatus 자체가 best-effort다.
   let gates;
