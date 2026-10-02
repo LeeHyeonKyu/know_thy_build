@@ -2203,6 +2203,21 @@ export function makeJobStartedAt({ gh, env = {}, processStartMs }) {
 }
 
 /**
+ * #149 (skeptic flaw 4) — 틀린 CHARTER `self_change`는 **CHARTER를 읽는 매 스테이지 런에** 말한다. 그러지 않으면 오류가 처음
+ * 드러나는 곳이 비판정 경로만 건드린 첫 PR의 머지 런이다 — 그때까지 소유자는 켰다고 믿는다. 스위치·저장소 종류와 무관하게
+ * 말한다(채택자 저장소의 CHARTER도 같은 파서를 지난다). `::error::`로 시작해 Actions가 런 요약에 주석으로 올린다.
+ * 반환: 무언가 말했는가. 설정이 올바르거나 없으면 아무 말도 하지 않는다.
+ */
+export function reportSelfChangeAtLoad({ selfChange, log }) {
+  if (selfChange?.ok !== false) return false;
+  const effect = selfChange.switch_off === true
+    ? "the switch stays off — protected-path PRs still go to a human, exactly as without self_change"
+    : "a PR that touches only non-judge protected paths will be blocked (undecidable) at merge until this is fixed";
+  log(`::error::factory: CHARTER self_change is malformed — ${selfChange.reason}; ${effect}`);
+  return true;
+}
+
+/**
  * #149 — 거부권 라벨은 **누군가 필요로 하기 전에** 있어야 한다. 스위치가 켜진 엔진 저장소에서는 모든 스테이지 런의 시작에
  * 카탈로그 정의 그대로 만든다(`--force`, 멱등). 스위치가 꺼졌거나 설정이 틀렸거나 채택자 저장소면 아무것도 하지 않는다.
  * 실패는 `{ok:false}`로 돌려줄 뿐 런을 멈추지 않는다 — 창을 여는 자리가 알림 전에 한 번 더, 이번에는 필수로 확인한다.
@@ -2954,6 +2969,8 @@ async function main() {
       try { harness = loadHarness(root); }
       catch (e) { console.error("factory: .factory/harness.toml unreadable — " + e.message); return false; }
       if (charter.status !== "ready") { console.error(`factory: CHARTER status is ${charter.status} — dormant`); return false; }
+      // #149 — 틀린 self_change는 지금 말한다(머지 런까지 미루지 않는다). 런은 멈추지 않는다.
+      reportSelfChangeAtLoad({ selfChange: charter.self_change, log: (l) => console.error(l) });
       // #149 — 스위치가 켜진 엔진 저장소면 거부권 라벨을 지금 만든다(필요해지기 전에). 실패는 말하고 넘어간다.
       const veto = await ensureVetoLabelWhenOn({ gh, selfChange: charter.self_change, engine: mirrorApplicable(root) });
       if (!veto.ok) console.error(`factory: could not ensure the ${VETO_LABEL} label — ${veto.reason}`);
