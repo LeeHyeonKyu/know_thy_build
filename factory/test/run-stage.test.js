@@ -4274,3 +4274,39 @@ test("test_149_veto_window_opens_waits_and_closes — the merged transition take
   }
   expect(untouched).not.toHaveBeenCalled();
 });
+
+// ── #149 skeptic self-critique (flaw 4) — 틀린 self_change는 CHARTER를 읽는 순간 시끄럽다 ─────────────────────────────
+import { reportSelfChangeAtLoad } from "../bin/run-stage.js";
+import { parseSelfChange } from "../lib/config.js";
+
+test("test_149_self_change_config_defaults_and_validation — a malformed self_change is reported every time the CHARTER is loaded, not first at merge (skeptic flaw 4)", async () => {
+  // 실제 생산자(parseSelfChange)가 만든 설정 오류. 스위치를 켜려 한 것("true" 문자열)은 판정 불가가 될 것이라고,
+  // 스위치가 꺼진 채 형제 키가 틀린 것은 꺼진 채로 남는다고 말한다 — 둘 다 어느 키가 왜 틀렸는지 싣는다.
+  const tried = parseSelfChange({ auto_merge_non_judge: "true" });
+  const logs = [];
+  expect(reportSelfChangeAtLoad({ selfChange: tried, log: (l) => logs.push(l) })).toBe(true);
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toMatch(/^::error::factory: CHARTER self_change is malformed — /);
+  expect(logs[0]).toContain(tried.reason);
+  expect(logs[0]).toMatch(/blocked/);
+
+  const offTypo = parseSelfChange({ auto_merge_non_judge: false, veto_minutes: 0 });
+  const offLogs = [];
+  expect(reportSelfChangeAtLoad({ selfChange: offTypo, log: (l) => offLogs.push(l) })).toBe(true);
+  expect(offLogs[0]).toContain(offTypo.reason);
+  expect(offLogs[0]).toMatch(/switch stays off/);
+
+  // 올바른 설정·없는 설정은 아무 말도 하지 않는다(시끄러움이 정상 상태의 소음이 되지 않게).
+  for (const sc of [parseSelfChange(undefined), parseSelfChange({ auto_merge_non_judge: true, veto_minutes: 30 }), undefined]) {
+    const quiet = [];
+    expect(reportSelfChangeAtLoad({ selfChange: sc, log: (l) => quiet.push(l) })).toBe(false);
+    expect(quiet).toEqual([]);
+  }
+
+  // 배선: charterReady가 CHARTER를 읽은 직후, 스위치 여부와 무관하게(라벨 보장보다 먼저) 이것을 부른다.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const ready = src.slice(src.indexOf("charterReady: async () => {"), src.indexOf("backPressure: () =>"));
+  expect(ready).toMatch(/reportSelfChangeAtLoad\(\{ selfChange: charter\.self_change, log: /);
+  expect(ready.indexOf("reportSelfChangeAtLoad(")).toBeLessThan(ready.indexOf("ensureVetoLabelWhenOn("));
+  expect(ready.indexOf("reportSelfChangeAtLoad(")).toBeGreaterThan(ready.indexOf("charter = loadCharter(root)"));
+});
