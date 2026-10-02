@@ -1938,3 +1938,86 @@ test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
   expect(transitionsOf((await run157({ seq: [misconfigured], diff: { ok: true, files: CLIENT_ONLY } })).d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates MISCONFIGURED at merge" })]);
   expect(transitionsOf((await run157({ seq: [blockedGates], diff: { ok: true, files: CLIENT_ONLY } })).d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
 });
+
+/**
+ * A vitest `--reporter=json` report with failing assertions `failingIds` PLUS test files that failed as a whole
+ * (`loadErrors`: a file that did not load, or a suite-level hook that threw). Vitest writes those as a
+ * `testResults` entry with `status:"failed"`, a `message`, and NO failed assertion — counted in
+ * `numFailedTestSuites`, never in `numFailedTests`. Shape taken from vitest's JSON reporter (`JsonTestResult`).
+ */
+function vitestReportWithSuiteErrors157(failingIds, loadErrors, total = 132) {
+  const base = JSON.parse(vitestReport157(failingIds, total));
+  for (const [file, message] of loadErrors) {
+    base.testResults.push({ name: `${GATE_ROOT}/${file}`, status: "failed", message, assertionResults: [] });
+  }
+  base.numFailedTestSuites = new Set([...failingIds.map((id) => id.split("::")[0]), ...loadErrors.map(([f]) => f)]).size;
+  return JSON.stringify(base);
+}
+async function producedGatesWithSuiteErrors157({ failing, loadErrors }) {
+  const harness = HARNESS_157();
+  const fake = makeFakeRun([
+    { match: (_c, a) => a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+    { match: (_c, a) => a[1] === harness.commands.unit, result: { code: 1, stdout: "JSON report written to .factory/out/unit.json", stderr: "" } },
+  ]);
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => vitestReportWithSuiteErrors157(failing, loadErrors), now: "2026-10-02T01:52:00.000Z" });
+  return { ...g, head_sha: "a".repeat(40) };
+}
+
+test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async () => {
+  // Skeptic finding (dw4): `failing_ids` lists failed ASSERTIONS only. A test file that failed to load has none,
+  // so a RED that is partly inside the diff (the client file the PR broke) looked "all outside" and was re-run.
+  const green = await producedGates({ failing: [] });
+  const LOAD_ERR = ["client/tests/Calendar.test.ts", "SyntaxError: Unexpected token (client/src/pages/Calendar.tsx:41:7)"];
+  const DIFF = { ok: true, files: ["client/src/pages/Calendar.tsx"] };
+  // Control: the server assertion RED alone, same diff, IS re-run — so the refusal below is about the load error.
+  const alone = await producedGates({ failing: [OC_ID] });
+  expect((await run157({ seq: [alone, green], diff: DIFF })).d.gates).toHaveBeenCalledTimes(2);
+
+  const cases = [
+    { name: "a client suite load error inside the diff's package beside an outside server RED", failing: [OC_ID], loadErrors: [LOAD_ERR] },
+    // Even outside the diff's packages: a failure with no test id is not a parsed test failure, so nothing proves it a flake.
+    { name: "a suite load error outside the diff beside an outside server RED", failing: [OC_ID], loadErrors: [["shared/tests/date.test.ts", "Error: Cannot find module './tz'"]] },
+    { name: "a suite-level hook error in the failing test's own file", failing: [OC_ID], loadErrors: [["server/tests/feed.test.ts", "Error: afterAll hook timed out"]] },
+  ];
+  for (const c of cases) {
+    const first = await producedGatesWithSuiteErrors157(c);
+    // The producer is real: the unit gate is RED, parsed, and its assertion ids are only the server test.
+    expect(first.status, c.name).toBe("RED");
+    expect(first.gates.unit, c.name).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
+    expect(first.gates.unit.failed_suites, c.name).toEqual(c.loadErrors.map(([f]) => f));
+    const r = await run157({ seq: [first, green], diff: DIFF });
+    const today = await run157({ seq: [first, green] });
+    expect(r.code, c.name).toBe(2);
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(r.lines, c.name).toEqual(today.lines);
+    expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(first));
+    expect(flakyMarksOf(r.lines), c.name).toEqual([]);
+    expect(gateStatusesOf(r.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
+  }
+
+  // A gates object from a producer that does not say whether any suite failed (no `failed_suites` field) is not proof either.
+  const legacy = { ...alone, gates: { ...alone.gates, unit: { ...alone.gates.unit } } };
+  delete legacy.gates.unit.failed_suites;
+  const r = await run157({ seq: [legacy, green], diff: DIFF });
+  expect(r.d.gates).toHaveBeenCalledTimes(1);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+  expect(gateStepLines(r.lines)).toEqual(pre157GateStepLines(legacy));
+
+  // The re-run: the same assertion id fails again but a suite now fails to load too — not the same RED, so no
+  // flaky-candidate wording or marker (the id set alone would call it "the same set").
+  const againWithLoad = await producedGatesWithSuiteErrors157({ failing: [OC_ID], loadErrors: [LOAD_ERR] });
+  expect(againWithLoad.gates.unit.failing_ids).toEqual([OC_ID]);
+  const sameIdsPlusLoad = await run157({ seq: [alone, againWithLoad], diff: DIFF });
+  expect(sameIdsPlusLoad.code).toBe(2);
+  expect(sameIdsPlusLoad.d.gates).toHaveBeenCalledTimes(2);
+  expect(sameIdsPlusLoad.d.mergePr).not.toHaveBeenCalled();
+  const t = transitionsOf(sameIdsPlusLoad.d);
+  expect(t).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(t[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(flakyMarksOf(sameIdsPlusLoad.lines)).toEqual([]);
+  // Control: the same re-run without the load error IS the flaky-candidate case.
+  const sameIds = await run157({ seq: [alone, await producedGates({ failing: [OC_ID] })], diff: DIFF });
+  expect(transitionsOf(sameIds.d)[0].reason).toContain(FLAKY_TEXT_157);
+});

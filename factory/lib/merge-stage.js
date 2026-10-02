@@ -120,7 +120,8 @@ function normRelPath(p) {
  * Pure: may this RED gates result be re-run once at merge? `{ ok:true, ids }` only when ALL of these hold:
  *   - status is RED (not MISCONFIGURED/BLOCKED/missing — RED already implies no MISCONFIGURED gate);
  *   - every RED gate is a test gate whose report was parsed (`parsed === true`) with non-empty `failing_ids`
- *     (a RED lint next to a RED test is not a flake);
+ *     (a RED lint next to a RED test is not a flake) and an empty `failed_suites` (a test file that failed with
+ *     no failed assertion — a load error — has no id, so `failing_ids` would not be the whole RED);
  *   - the diff was read (`ok`, a non-empty list) and every path in it normalises;
  *   - no diff file sits at the repo root (a root file — package.json, a lockfile, a config — touches every package);
  *   - for every failing id `path::name`: the path normalises, is not at the repo root, and no diff file shares its
@@ -138,6 +139,11 @@ export function rerunEligibility(gates, diff) {
   for (const [name, g] of red) {
     if (g.parsed !== true) return no(`${name} is RED without a parsed test report`);
     if (!Array.isArray(g.failing_ids) || !g.failing_ids.length) return no(`${name} is RED with no failing test ids`);
+    // `failing_ids` names failed ASSERTIONS only. A test file that failed with none (did not load, a suite hook
+    // threw) is in `failed_suites` — then the ids are not the whole RED, and the rest has no id to place outside
+    // the diff. A producer that does not say (field absent) has not proven it either.
+    if (!Array.isArray(g.failed_suites)) return no(`${name} does not report suite-level failures`);
+    if (g.failed_suites.length) return no(`${name} has test files that failed without a failing test: ${g.failed_suites.join(", ")}`);
     for (const id of g.failing_ids) if (!ids.includes(id)) ids.push(id);
   }
   if (!diff?.ok || !Array.isArray(diff.files) || !diff.files.length) return no(`PR diff unreadable or empty${diff?.reason ? `: ${diff.reason}` : ""}`);
@@ -160,11 +166,12 @@ export function rerunEligibility(gates, diff) {
   return { ok: true, ids };
 }
 
-/** The failing test ids of a RED result, when every RED gate is a parsed test gate — else null (not comparable). */
+/** The failing test ids of a RED result, when every RED gate is a parsed test gate with no id-less suite failure — else null (not comparable). */
 function redTestIds(gates) {
   if (!gates || gates.status !== "RED") return null;
   const red = Object.values(gates.gates || {}).filter((g) => g?.status === "RED");
-  if (!red.length || red.some((g) => g.parsed !== true || !Array.isArray(g.failing_ids) || !g.failing_ids.length)) return null;
+  if (!red.length || red.some((g) => g.parsed !== true || !Array.isArray(g.failing_ids) || !g.failing_ids.length
+    || !Array.isArray(g.failed_suites) || g.failed_suites.length)) return null;
   return [...new Set(red.flatMap((g) => g.failing_ids))];
 }
 const sameIdSet = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.includes(x));

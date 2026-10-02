@@ -28,3 +28,15 @@ test("stryker mutation.json → score", () => {
 test("markers", () => {
   expect(parseMarkers("noise\nMUTATION_SCORE=72.5\nFOO=bar baz\nlower=no\n")).toEqual({ MUTATION_SCORE: "72.5", FOO: "bar baz" });
 });
+
+test("test_157_vitest_json_names_files_that_failed_without_a_failed_assertion", () => {
+  // A file that did not load: vitest marks the testResults entry failed with a message and no assertion results.
+  const j = { numTotalTests: 2, numPassedTests: 1, numFailedTests: 1, numFailedTestSuites: 2, testResults: [
+    { name: "/repo/server/tests/a.test.ts", status: "failed", assertionResults: [{ fullName: "a edge", status: "failed" }, { fullName: "a ok", status: "passed" }] },
+    { name: "/repo/client/tests/b.test.ts", status: "failed", message: "SyntaxError: Unexpected token", assertionResults: [] },
+    { name: "/repo/client/tests/c.test.ts", status: "passed", assertionResults: [{ fullName: "c", status: "passed" }] } ] };
+  const r = parseVitestJson(JSON.stringify(j), "/repo");
+  expect(r.failing.map((f) => f.id)).toEqual(["server/tests/a.test.ts::a edge"]);
+  // Only the id-less failure is named: a file whose failure already has an assertion id is not repeated.
+  expect(r.failed_suites).toEqual(["client/tests/b.test.ts"]);
+});
