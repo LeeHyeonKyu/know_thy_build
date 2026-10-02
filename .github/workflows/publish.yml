@@ -40,11 +40,14 @@ jobs:
     runs-on: ubuntu-latest
     # npm trusted publishing (OIDC): the registry trusts this repo + workflow directly,
     # so no NPM_TOKEN secret is needed — only the id-token permission.
+    # 2026-10-02 (소유자 결정, ADR-032) — 버전 범프는 러너 생성물이다: 태그와 범프 커밋을 되밀기 위해 contents: write.
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # `before`..`after`의 변경 경로를 읽는다
 
       - uses: actions/setup-node@v4
         with:
@@ -54,19 +57,56 @@ jobs:
       - name: Upgrade npm (trusted publishing needs npm >= 11.5.1)
         run: npm install -g npm@latest && npm --version
 
-      - name: Check if version changed
+      - name: Install (bump-version regenerates the install manifest through factory/cli, which needs the runtime deps)
+        run: npm ci
+
+      # ── 버전 범프는 러너 생성물이다 (2026-10-02 소유자 결정; `factory/cli/bump-version.js`) ──────────────
+      # 1.4.36–1.4.44의 아홉 릴리스는 전부 "결함 수정 → 버전 PR → 사람 머지"였고 사람의 판단이 든 자리는 없었다. 이제 main에
+      # **엔진 내용**(설치되는 것: factory/{lib,bin,hooks,cli}, templates, bin)이 들어오면 다음 patch 버전을 계산해 배포한다.
+      # 문서·테스트·.factory 미러·package.json만 바뀐 푸시는 배포하지 않는다 — 그래서 아래의 범프 커밋 자신은 다시 배포를
+      # 부르지 않는다(메시지의 `[skip ci]`가 둘째 자물쇠). 사람은 minor/major를 올릴 때만 package.json을 손으로 고친다:
+      # package.json이 npm보다 앞서 있으면 그 숫자를 그대로 낸다(첫째 분기), 아니면 max(npm, package.json)+patch(둘째 분기).
+      - name: Next version (runner-generated)
         id: version
         run: |
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            CHANGED="(first push or unknown base — treated as changed)"
+          else
+            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'factory/lib/**' 'factory/bin/**' 'factory/hooks/**' 'factory/cli/**' 'templates/**' 'bin/**' || true)
+          fi
           LOCAL=$(node -p "require('./package.json').version")
           REMOTE=$(npm view know-thy-build version 2>/dev/null || echo "0.0.0")
-          if [ "$LOCAL" != "$REMOTE" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Publishing $LOCAL (remote: $REMOTE)"
+          if [ "$LOCAL" != "$REMOTE" ] && [ "$(printf '%s\n%s\n' "$REMOTE" "$LOCAL" | sort -V | tail -1)" = "$LOCAL" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; echo "version=$LOCAL" >> "$GITHUB_OUTPUT"; echo "bump=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing $LOCAL as written in package.json (remote: $REMOTE)"
+          elif [ -n "$CHANGED" ]; then
+            NEXT=$(node factory/cli/bump-version.js --next)
+            node factory/cli/bump-version.js "$NEXT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"; echo "version=$NEXT" >> "$GITHUB_OUTPUT"; echo "bump=true" >> "$GITHUB_OUTPUT"
+            echo "Engine content changed:"; echo "$CHANGED" | head -20
+            echo "Publishing $NEXT (runner-generated; remote: $REMOTE, package.json: $LOCAL)"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Version $LOCAL already published, skipping"
+            echo "No engine content in this push and version $LOCAL already published — skipping"
           fi
 
       - name: Publish (trusted publishing, provenance attached)
         if: steps.version.outputs.changed == 'true'
         run: npm publish --provenance --access public
+
+      # 배포된 버전을 저장소에도 남긴다: 태그는 언제나, 범프 커밋은 main이 받아 주면(브랜치 보호가 막으면 태그만 남고 package.json은
+      # 바닥으로 남는다 — `--next`가 max(npm, package.json)이라 다음 번호는 그래도 충돌하지 않는다). 둘 다 실패해도 배포는 이미 끝났다.
+      - name: Record the version (tag; bump commit if main accepts it)
+        if: steps.version.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          V="${{ steps.version.outputs.version }}"
+          git config user.name "factory-runner"
+          git config user.email "factory-runner@users.noreply.github.com"
+          if [ "${{ steps.version.outputs.bump }}" = "true" ]; then
+            git add package.json package-lock.json .factory/install-manifest.json
+            git commit -q -m "release: know-thy-build $V (runner-generated version bump) [skip ci]"
+            git push origin HEAD:main || echo "::warning::main did not accept the version bump commit — package.json stays at the floor; npm has $V"
+          fi
+          git tag -a "v$V" -m "know-thy-build $V" && git push origin "v$V" || echo "::warning::tag v$V could not be pushed"

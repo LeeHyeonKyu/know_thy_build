@@ -168,6 +168,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/bin/operator-merge-check.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/bin/prove-test.js",
       "owner": "factory"
     },
@@ -461,6 +465,10 @@
     },
     {
       "dest": ".factory/lib/mutation.js",
+      "owner": "factory"
+    },
+    {
+      "dest": ".factory/lib/operator-merge.js",
       "owner": "factory"
     },
     {

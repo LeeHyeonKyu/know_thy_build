@@ -73,7 +73,25 @@ ZE='([;&|)`}=[:space:]]|$)'
 scan() {
   local c="$1" prot ovl qa p ep API_CLIENT API_WRITE
 
-echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge" && block "gh pr merge"
+# ── 2026-10-02 (소유자 결정, ADR-032) — **운영 세션은 비판정 경로만 바뀐 PR을 머지할 수 있다** ──────
+# 하루 14건의 머지·재시도 요청 중 사람의 판단이 필요했던 것은 0건이었다. 문은 좁다: (1) CI 러너가 아니다(`GITHUB_ACTIONS`
+# 없음 — 스테이지는 머지 배우가 아니다), (2) 명령이 **정확히** `gh pr merge <n> [--squash|--merge|--rebase|--delete-branch]`
+# 하나뿐이다(복합 명령·`--admin`·`--auto`·다른 철자는 아래 규칙들이 그대로 막는다), (3) 판정은 `.factory/bin/operator-merge-check.js`가
+# 한다 — PR의 모든 파일이 양의 목록(`lib/operator-merge.js`: docs·리서치·운영 스크립트·보드) 안이고 체크가 GREEN이고 draft가 아니고
+# 기본 브랜치를 향할 때만 exit 0. 그 파일이 없으면(옛 설치본) 예전처럼 전부 막는다.
+if echo "$c" | grep -Eq "${A}gh[[:space:]]+pr[[:space:]]+merge"; then
+  if [ -z "${GITHUB_ACTIONS:-}" ] && [[ "$c" =~ ^gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+([0-9]+)([[:space:]]+(--squash|--merge|--rebase|--delete-branch|-s|-m|-r|-d))*[[:space:]]*$ ]]; then
+    # 루트는 Claude Code가 훅에 주는 `CLAUDE_PROJECT_DIR`뿐이다 — git toplevel로 더듬지 않는다(테스트가 밖에서 돌 때 실제 `gh`를 부르게 된다).
+    omc_root="${CLAUDE_PROJECT_DIR:-}"
+    if [ -n "$omc_root" ] && [ -f "$omc_root/.factory/bin/operator-merge-check.js" ] && node "$omc_root/.factory/bin/operator-merge-check.js" "${BASH_REMATCH[1]}" >&2; then
+      :   # 운영 세션 + 비판정 경로만 + GREEN — 통과 (operator-merge-check가 사유를 stderr에 적었다)
+    else
+      block "gh pr merge (the operator may merge only a PR whose every file is a non-judge path with green checks — .factory/bin/operator-merge-check.js said no, or is not installed)"
+    fi
+  else
+    block "gh pr merge"
+  fi
+fi
 # REST 머지도 막는다 — gh api ... /pulls/<n>/merge (메서드 불문)
 echo "$c" | grep -Eq "${A}gh[[:space:]]+api[^;&|]*/pulls/[0-9]+/merge" && block "gh api pulls merge"
 # ── 2026-09-14 외부 감사 H1b: 에이전트는 자기 리뷰 판정을 게시할 수 없다 ─────────────────────
