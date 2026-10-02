@@ -342,8 +342,15 @@ export function workflowOutputFilesFromTranscript(text) {
     try { o = JSON.parse(line); } catch { continue; }
     // 러너의 알림은 **사용자 턴**으로 온다. assistant 줄의 텍스트는 모델이 쓴 것이다 — 모델이 알림을 흉내 내
     // `<output-file>`을 자기가 쓴 파일로 돌리면 그 파일이 판정이 된다(자기비판 #170). 작성자로 거른다.
-    if (o?.type !== "user" || (o?.message?.role != null && o.message.role !== "user")) continue;
-    const c = o?.message?.content;
+    // 스킵틱 #170 — 실제 러너(Claude Code 2.1.287)는 세션이 **턴 도중**일 때(디스패처가 Workflow를 폴링하는
+    // 바로 그 자리) 알림을 `attachment` 줄로 남긴다: `{type:"attachment", attachment:{type:"queued_command",
+    // commandMode:"task-notification", prompt:"<task-notification>…"}}`(fixtures/claude-2.1.287-task-notification.json).
+    // 첨부 줄은 하네스가 쓴다 — 모델의 출력은 이 줄이 되지 못한다. 사람이 줄 세운 프롬프트(`commandMode` ≠
+    // task-notification)는 러너의 알림이 아니다.
+    const att = o?.type === "attachment" ? o.attachment : null;
+    const runnerAttachment = att?.type === "queued_command" && att.commandMode === "task-notification" && typeof att.prompt === "string";
+    if (!runnerAttachment && (o?.type !== "user" || (o?.message?.role != null && o.message.role !== "user"))) continue;
+    const c = runnerAttachment ? att.prompt : o?.message?.content;
     const texts = typeof c === "string" ? [c]
       : Array.isArray(c) ? c.filter((b) => b?.type === "text" || typeof b === "string").map((b) => (typeof b === "string" ? b : b.text ?? ""))
         : [];

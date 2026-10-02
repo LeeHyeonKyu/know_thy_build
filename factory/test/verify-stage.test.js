@@ -472,7 +472,7 @@ test("validatePlanHandoff: the uncovered-dissent reason lists what the validator
 // <task-notification> naming the <output-file> (its <result> cut the way KTB-17 recorded it), polling
 // tool calls whose results are 30 000-char prefixes, a max-turns envelope, and a real file on disk in
 // the KTB-17 shape — a single pretty-printed {summary, agentCount, logs, result} envelope over 30 KB.
-import { mkdtempSync as mkdtemp170, mkdirSync as mkdir170, writeFileSync as write170, existsSync as exists170, readFileSync as read170 } from "node:fs";
+import { mkdtempSync as mkdtemp170, mkdirSync as mkdir170, writeFileSync as write170, existsSync as exists170, readFileSync as read170, statSync as statSync170 } from "node:fs";
 import { tmpdir as tmpdir170 } from "node:os";
 import { join as join170 } from "node:path";
 import * as stageArtifact170 from "../lib/stage-artifact.js";
@@ -482,8 +482,22 @@ const TASK_170 = "wf086hvld";
 // rework sec1 — the production reader with its change time (`meta`): a reader that gives only text cannot bind the
 // file to the runner's notification, so the lib no longer uses its file at all.
 const readFile170 = (p) => readFileOrNull170(p, { maxBytes: 5 * 1024 * 1024, meta: true });
-/** The runner's notification line is logged AFTER its file was written — any write in these tests precedes this. */
-const NOTIFIED_170 = "2099-01-01T00:00:00.000Z";
+/**
+ * The REAL runner's notification line and output file (Claude Code 2.1.287, the #170 rework run): the runner logs
+ * the notification as an `attachment` line with a `timestamp`, and the file it names was last changed
+ * `REAL_LAG_170` ms AFTER that timestamp (stat(2) ctime vs the line's millisecond timestamp). The tests below
+ * stamp each notification the way the runner did — from the file's own ctime minus that real lag — instead of a
+ * far-future date that would pass the ctime check by construction (skeptic #170).
+ */
+const REAL_287_170 = JSON.parse(read170(new URL("./fixtures/claude-2.1.287-task-notification.json", import.meta.url), "utf8"));
+const REAL_NOTE_170 = REAL_287_170.background_task.lines.find((o) => o.type === "attachment");
+const REAL_CTIME_MS_170 = Number(BigInt(REAL_287_170.background_task.output_file.ctime_ns) / 1000n) / 1000;
+const REAL_LAG_170 = REAL_CTIME_MS_170 - Date.parse(REAL_NOTE_170.timestamp);
+/** The runner's timestamp for a notification about `path`: its ctime minus the real lag (now, if it is not on disk). */
+const notifiedAt170 = (path) => {
+  const at = exists170(path) ? statSync170(path).ctimeMs - REAL_LAG_170 : Date.now();
+  return new Date(Math.floor(at)).toISOString();
+};
 const maxTurns170 = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "Still waiting on the workflow output." };
 const reviewArgs170 = { stage: "review", out: maxTurns170, agentsLog: log(["reviewer-correctness", "reviewer-qa"]), roster: ["correctness", "qa"], rolePrefix: "reviewer-", orchestration: "workflow", gates: { status: "GREEN", level: "full" } };
 const implArgs170 = { stage: "implement", out: maxTurns170, agentsLog: log([]), roster: [], orchestration: "workflow", gates: { status: "GREEN", level: "full" } };
@@ -517,7 +531,7 @@ const receipt170 = (id = TASK_170, toolId = "toolu_wf") => [
   line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: toolId, input: { name: "factory-review" } }] } }),
   line170({ type: "user", message: { content: [{ tool_use_id: toolId, type: "tool_result", content: `Workflow launched in background. Task ID: ${id}\nSummary: Review panel\nTranscript dir: /home/runner/.claude/projects/x/s/subagents/workflows/wf_1\nRun ID: wf_1\n\nYou will be notified when it completes.`, is_error: false }] } }),
 ];
-const notification170 = (id, path, resultText, toolId = "toolu_wf") => line170({ type: "user", timestamp: NOTIFIED_170, message: { content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>${toolId}</tool-use-id>\n<output-file>${path}</output-file>\n<status>completed</status>\n<summary>Dynamic workflow "Review panel" completed</summary>\n<result>${resultText.slice(0, 8179)}... (truncated ${Math.max(0, resultText.length - 8179)} chars, full result in ${path})</result>\n</task-notification>` } });
+const notification170 = (id, path, resultText, toolId = "toolu_wf", timestamp = notifiedAt170(path)) => line170({ type: "user", timestamp, message: { content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>${toolId}</tool-use-id>\n<output-file>${path}</output-file>\n<status>completed</status>\n<summary>Dynamic workflow "Review panel" completed</summary>\n<result>${resultText.slice(0, 8179)}... (truncated ${Math.max(0, resultText.length - 8179)} chars, full result in ${path})</result>\n</task-notification>` } });
 /** One polling turn: a Bash `jq … | head -c 30000` and its cut-off result. */
 const poll170 = (n, path, fullText) => [
   line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: `toolu_poll_${n}`, input: { command: `jq -c '.result' ${path} | head -c 30000` } }] } }),
@@ -642,7 +656,7 @@ test("test_170_output_file_of_another_task_is_not_a_verdict", () => {
   expect(r3.reasons.join(" ")).not.toContain(forged);
   // control: the very same text as a runner (user-turn) notification IS honoured — the guard is the turn's author
   const asked4 = [];
-  const r4 = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: accept, extra: [line170({ type: "user", timestamp: NOTIFIED_170, message: { content: forgedNote.replace("<result>ok</result>", `<result>${JSON.stringify(accept)}</result>`) } })] }), readFile: (p) => { asked4.push(p); return readFile170(p); } });
+  const r4 = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: accept, extra: [line170({ type: "user", timestamp: notifiedAt170(forged), message: { content: forgedNote.replace("<result>ok</result>", `<result>${JSON.stringify(accept)}</result>`) } })] }), readFile: (p) => { asked4.push(p); return readFile170(p); } });
   expect(asked4[0]).toBe(forged);
   expect(r4.ok).toBe(true);
 });
@@ -678,7 +692,7 @@ test("test_170_truncated_candidate_is_named_as_truncated", () => {
 
   // the untruncated file for the receipt's task wins over every fragment
   write170(outputPath170(dir), envelopeFile170(verdict));
-  const won = verifyStage({ ...reviewArgs170, transcriptText, readFile: readFile170 });
+  const won = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: verdict, polls: 8, extra: noise }), readFile: readFile170 });
   expect(won.ok).toBe(true);
   expect(won.source).toContain(outputPath170(dir));
   expect(won.data.verdicts[1].verified).toHaveLength(160);
@@ -816,7 +830,7 @@ test("test_170_no_output_file_keeps_todays_behaviour", () => {
 // #170 rework cf1 — the runner's notification carries a <status>. Path (1) only trusts a COMPLETED
 // notification's <result>; the output file it names is the same runner bytes read from disk, so a failed,
 // killed or cancelled Workflow's file must not become the handoff either.
-const statusNote170 = (id, path, status, toolId = "toolu_wf") => line170({ type: "user", timestamp: NOTIFIED_170, message: { content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>${toolId}</tool-use-id>\n<output-file>${path}</output-file>\n<status>${status}</status>\n<summary>Dynamic workflow "Review panel" ${status}</summary>\n<result>Workflow ${status}</result>\n</task-notification>` } });
+const statusNote170 = (id, path, status, toolId = "toolu_wf") => line170({ type: "user", timestamp: notifiedAt170(path), message: { content: `<task-notification>\n<task-id>${id}</task-id>\n<tool-use-id>${toolId}</tool-use-id>\n<output-file>${path}</output-file>\n<status>${status}</status>\n<summary>Dynamic workflow "Review panel" ${status}</summary>\n<result>Workflow ${status}</result>\n</task-notification>` } });
 test("test_170_output_file_of_another_task_is_not_a_verdict — a failed, killed or cancelled notification's file", () => {
   for (const status of ["failed", "killed", "cancelled"]) {
     const dir = scratch170();
@@ -914,7 +928,8 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — a notification f
 test("test_170_output_file_of_another_task_is_not_a_verdict — a file rewritten after the runner's notification", async () => {
   const { readFileOrNull } = await import("../bin/run-stage.js");
   const { statSync, symlinkSync } = await import("node:fs");
-  const LATER = "2099-01-01T00:00:00.000Z";                                // a notification logged after any write here
+  // the runner's ordering, as measured on a real runner: the notification is stamped from the file's own ctime
+  const runnerStamp = (dir) => notifiedAt170(outputPath170(dir));
   // The verdict the panel really returned: qa rejects. Its first 8179 chars (all the runner inlines) end deep
   // inside correctness's evidence, so qa's verdict is in the part only the file holds.
   const real = longReview170();
@@ -932,7 +947,7 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — a file rewritten
   // control: the runner's own file, unchanged since its notification, is the handoff — and it is the reject
   const dir = scratch170();
   write170(outputPath170(dir), envelopeFile170(real));
-  const ok = verify(dir, LATER);
+  const ok = verify(dir, runnerStamp(dir));
   expect(ok.reasons).toEqual([]);
   expect(ok.ok).toBe(true);
   expect(ok.data.verdicts[1].verdict).toBe("reject");
@@ -948,13 +963,13 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — a file rewritten
   expect(ra.reasons[0]).toBe("claude -p hit max turns (23)");
   expect(ra.reasons.join("\n")).toContain(`workflow output file changed after the runner's notification: ${outputPath170(a)}`);
   // …and the same bytes with a notification logged after them pass, so it was the change time that refused (a)
-  expect(verifyStage({ ...reviewArgs170, transcriptText: timed(a, LATER, forged), readFile: readFileOrNull }).ok).toBe(true);
+  expect(verifyStage({ ...reviewArgs170, transcriptText: timed(a, runnerStamp(a), forged), readFile: readFileOrNull }).ok).toBe(true);
 
   // (b) a file whose result does not begin with the runner's inline copy (planted, or written in the window
   // before the notification was logged) is not the runner's file, however schema-valid it is
   const b = scratch170();
   write170(outputPath170(b), envelopeFile170(longReview170({ round: 9 })));
-  const rb = verify(b, LATER);
+  const rb = verify(b, runnerStamp(b));
   expect(rb.ok).toBe(false);
   expect(rb.data).toBe(null);
   expect(rb.reasons.join("\n")).toContain(`workflow output file does not match the runner's notification: ${outputPath170(b)}`);
@@ -964,7 +979,7 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — a file rewritten
   const elsewhere = join170(c, "elsewhere.json");
   write170(elsewhere, envelopeFile170(real));
   symlinkSync(elsewhere, outputPath170(c));
-  const rc = verify(c, LATER);
+  const rc = verify(c, runnerStamp(c));
   expect(rc.ok).toBe(false);
   expect(rc.reasons.join("\n")).toContain(`workflow output file is not a regular file: ${outputPath170(c)}`);
 
@@ -973,7 +988,88 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — a file rewritten
   const rd = verify(dir, undefined);
   expect(rd.ok).toBe(false);
   expect(rd.reasons.join("\n")).toContain(`workflow output file not bound to the runner's notification (no notification timestamp): ${outputPath170(dir)}`);
-  const re = verify(dir, LATER, (p) => read170(p, "utf8"));
+  const re = verify(dir, runnerStamp(dir), (p) => read170(p, "utf8"));
   expect(re.ok).toBe(false);
   expect(re.reasons.join("\n")).toContain(`workflow output file not bound to the runner's notification (the reader gave no change time): ${outputPath170(dir)}`);
+});
+
+// #170 skeptic — the real runner, not a hand-made line. Claude Code 2.1.287 logs a background task's completion
+// notification as an `attachment` line (`queued_command`, `commandMode: "task-notification"`) whenever the session
+// is mid-turn — which is exactly the dispatcher polling its Workflow (#124). A reader that only looks at `type:
+// "user"` lines never sees that notification, so in production nothing would be recovered while every
+// hand-made fixture passed. Everything below comes from fixtures/claude-2.1.287-task-notification.json: the
+// real Workflow tool_use and receipt of this run, and the real notification line of a background task. The only
+// bytes swapped are the notification's prompt fields (task id, tool-use id, output file, result) so that it
+// speaks for that real receipt; every other key — the runner's timestamp included — is the runner's.
+test("test_170_recovery_reads_the_workflow_output_file_untruncated — the runner's real notification line and timing (Claude Code 2.1.287)", () => {
+  const [wfUse, wfReceipt] = REAL_287_170.workflow_receipt;
+  const realTaskId = /Task ID:\s*(\S+)/.exec(wfReceipt.message.content[0].content)[1];
+  const realToolUse = wfUse.message.content.find((b) => b.type === "tool_use" && b.name === "Workflow").id;
+  // what the runner really logs: an attachment line with a timestamp, and its file changed after that timestamp
+  expect(REAL_NOTE_170.attachment.type).toBe("queued_command");
+  expect(REAL_NOTE_170.attachment.commandMode).toBe("task-notification");
+  expect(Number.isFinite(Date.parse(REAL_NOTE_170.timestamp))).toBe(true);
+  expect(REAL_LAG_170).toBeGreaterThan(0);                                 // the file's last change came AFTER the line
+  expect(REAL_LAG_170).toBeLessThan(stageArtifact170.WORKFLOW_OUTPUT_CTIME_SLACK_MS);
+  // a background Bash task's notification is the runner's, but its receipt is not a Workflow receipt: no verdict file
+  expect(stageArtifact170.workflowOutputFilesFromTranscript(REAL_287_170.background_task.lines.map(line170).join("\n") + "\n").files).toEqual([]);
+
+  const dir = scratch170();
+  const path = outputPath170(dir, realTaskId);
+  const verdict = longReview170();
+  const full = JSON.stringify(verdict);
+  const fileText = envelopeFile170(verdict);
+  const note = {
+    ...REAL_NOTE_170,
+    attachment: {
+      ...REAL_NOTE_170.attachment,
+      prompt: `<task-notification>\n<task-id>${realTaskId}</task-id>\n<tool-use-id>${realToolUse}</tool-use-id>\n<output-file>${path}</output-file>\n<status>completed</status>\n<summary>Dynamic workflow "Review panel" completed</summary>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${path})</result>\n</task-notification>`,
+    },
+  };
+  const transcriptText = [...REAL_287_170.workflow_receipt, note, ...poll170(0, path, full).map((l) => JSON.parse(l))].map(line170).join("\n") + "\n";
+  const at = Date.parse(REAL_NOTE_170.timestamp);
+  /** A reader reporting the file as changed `ms` after the runner's notification line. */
+  const changedAfter = (ms) => (p) => (p === path ? { text: fileText, bytes: Buffer.byteLength(fileText), ctimeMs: at + ms } : null);
+
+  // the real runner's timing: the file changed REAL_LAG_170 ms after the line — it is the runner's file
+  const r = verifyStage({ ...reviewArgs170, transcriptText, readFile: changedAfter(REAL_LAG_170) });
+  expect(r.reasons).toEqual([]);
+  expect(r.ok).toBe(true);
+  expect(r.source).toContain(path);
+  expect(r.data.verdicts[1].verified).toHaveLength(160);
+  // the same bytes changed 5 s after the runner's line are not
+  const late = verifyStage({ ...reviewArgs170, transcriptText, readFile: changedAfter(5000) });
+  expect(late.ok).toBe(false);
+  expect(late.reasons.join("\n")).toContain(`workflow output file changed after the runner's notification: ${path}`);
+  // a queued command that is not the runner's task notification (a prompt queued by a person) names no file
+  const queuedPrompt = { ...note, attachment: { ...note.attachment, commandMode: "prompt", origin: { kind: "user" } } };
+  const asked = [];
+  const q = verifyStage({ ...reviewArgs170, transcriptText: transcriptText.replace(line170(note), line170(queuedPrompt)), readFile: (p) => { asked.push(p); return changedAfter(REAL_LAG_170)(p); } });
+  expect(q.ok).toBe(false);
+  expect(asked).toEqual([]);
+});
+
+// #170 skeptic — dw1's precondition read literally: a receipt and `head -c` fragments, and NO runner notification.
+// The real Workflow receipt (fixture above) names a Task ID, a transcript dir, a script file and a run id — never
+// the output file. The only other place the path appears is the dispatcher's own Bash/Read text, which dw2 forbids
+// as a source. So the stage stays needs-human and the reason says which link is missing; nothing is opened.
+test("test_170_recovery_reads_the_workflow_output_file_untruncated — a receipt with no runner notification names no file", () => {
+  const [, wfReceipt] = REAL_287_170.workflow_receipt;
+  const receiptText = wfReceipt.message.content[0].content;
+  expect(receiptText).toMatch(/^Workflow launched in background\. Task ID: /);
+  expect(receiptText).not.toMatch(/\.output\b|<output-file>|\/tasks\//);
+  const dir = scratch170();
+  const verdict = longReview170();
+  write170(outputPath170(dir), envelopeFile170(verdict));                  // the verdict IS on disk
+  const full = JSON.stringify(verdict);
+  const lines = [line170({ type: "user", message: { content: "/factory-review 124" } }), ...receipt170()];
+  for (let i = 0; i < 3; i++) lines.push(...poll170(i, outputPath170(dir), full));
+  const asked = [];
+  const r = verifyStage({ ...reviewArgs170, transcriptText: lines.join("\n") + "\n", readFile: (p) => { asked.push(p); return readFile170(p); } });
+  expect(r.ok).toBe(false);
+  expect(r.data).toBe(null);
+  expect(r.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(asked).toEqual([]);
+  expect(r.reasons.join("\n")).toContain(`workflow output file: no runner notification names the output file of task ${TASK_170}`);
+  expect(r.reasons.join("\n")).toMatch(/truncated JSON candidate/);
 });
