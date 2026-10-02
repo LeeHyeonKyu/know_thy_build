@@ -82,7 +82,8 @@ export function classifyProtected(files, { engine = false, match = matchesAny } 
 
 /**
  * 소스 하나가 import하는 **상대 경로** 지정자 전부: `import … from`, `export … from`, 부작용 `import "…"`,
- * 문자열 리터럴 `import("…")`(백틱 포함, 보간 `${}`가 있으면 런타임 구성이라 셀 수 없다 — 제외).
+ * 문자열 리터럴 인자의 동적 import — 백틱 포함. 보간 템플릿·식 인자의 동적 import는 여기서 세지 않는다 — `computedImports`가
+ * 그 자리를 따로 찾고, 닫힘은 셀 수 없는 것을 버리지 않고 `unresolved`로 낸다(#149 skeptic flaw 5).
  * 주석 안의 간선도 센다: 과대 근사는 판정자 쪽으로만 기운다.
  */
 export function relativeSpecifiers(source) {
@@ -99,28 +100,88 @@ export function relativeSpecifiers(source) {
   return [...out];
 }
 
+/** 동적 import 키워드 뒤의 인자가 문자열 리터럴(보간 없는 백틱 포함) 하나인가. */
+const LITERAL_IMPORT_ARG = /^\s*(?:"[^"\n]*"|'[^'\n]*'|`[^`$]*`)\s*\)/;
+const DYNAMIC_IMPORT = /\bimport\s*\(/g;
+
 /**
- * `entries`(저장소 상대 경로)에서 상대 import를 재귀로 따라간 닫힘. `readFile(path)`는 내용 또는 null(없는 파일).
- * @returns {{ files: Set<string>, edges: Array<[string, string]> }}
+ * #149 skeptic flaw 5 — **계산된 동적 import를 하는 판정자 닫힘의 파일**과 그것이 로드하는 대상. 인자가 식이거나 보간
+ * 템플릿인 동적 import는 `relativeSpecifiers`가 셀 수 없다 — 조용히 버리면 닫힘이 작아지고(비판정 쪽으로 기운다) 그 로더가
+ * 무엇을 읽든 목록에 넣을 수 있다(예전 파서가 정확히 그랬다: mirror.js→cli 생성기, install-manifest.js→cli/manifest.js).
+ *
+ * 그래서 그런 파일은 여기 적혀 있어야만 셀 수 있고, 적힌 사실이 **소스와 맞아야** 한다(`importClosure`가 대조한다):
+ *   - `sites`: 그 파일의 계산된 동적 import 개수(주석 안의 것도 센다),
+ *   - `loader`·`calls`: 그 import를 감싼 로더 함수의 이름과 그 이름을 부르는 자리의 개수(정의 자리는 세지 않는다),
+ *   - `targets`: 로더가 읽는 저장소 루트 기준 경로 — 각 경로가 그 파일의 소스에 문자열로 나와야 한다.
+ * 하나라도 어긋나면(새 계산된 import, 로더의 새 호출, 사라진 대상) 그 파일은 `unresolved`다 — 테스트가 RED로 읽는다.
+ * 보간 템플릿은 표로도 셀 수 없다(대상이 그 자리에서 조립된다). 이 표는 판정자 파일이고(목록 밖), 그 변경은 사람이 머지한다.
  */
-export function importClosure({ entries, readFile }) {
+export const COMPUTED_IMPORT_LOADERS = Object.freeze({
+  // 미러 생성기 로더: `importer(join(root, "factory/cli/…"))` 세 번(regenerateMirror·mirrorMatchesHead의 기본 로더가 두 자리).
+  "factory/lib/mirror.js": Object.freeze({ sites: 2, loader: "importer", calls: 3, targets: Object.freeze(["factory/cli/manifest.js", "factory/cli/install.js", "factory/cli/init.js"]) }),
+  // 설치 표가 없을 때의 폴백: 저장소의 `factory/cli/manifest.js`(엔진 저장소) 또는 node_modules의 같은 파일(채택자 — 저장소 밖).
+  "factory/lib/feedback/install-manifest.js": Object.freeze({ sites: 1, loader: "importModule", calls: 1, targets: Object.freeze(["factory/cli/manifest.js"]) }),
+});
+
+/**
+ * 소스 하나의 계산된 동적 import 자리 — `{ computed: 식 인자 자리[], templated: 보간 템플릿 자리[] }`. 문자열 리터럴 인자는
+ * `relativeSpecifiers`의 몫이라 여기 없다.
+ */
+export function computedImports(source) {
+  const text = String(source ?? "");
+  const computed = [], templated = [];
+  for (const m of text.matchAll(DYNAMIC_IMPORT)) {
+    const rest = text.slice(m.index + m[0].length);
+    if (LITERAL_IMPORT_ARG.test(rest)) continue;
+    const site = text.slice(m.index, m.index + m[0].length + 60).split("\n")[0];
+    (/^\s*`[^`]*\$\{/.test(rest) ? templated : computed).push(site);
+  }
+  return { computed, templated };
+}
+
+/** 표의 한 항목이 소스와 맞는가 → 어긋난 사유 목록(빈 배열 = 맞다). */
+function loaderMismatches(src, c, decl) {
+  if (!decl) return c.computed.map((site) => `computed dynamic import not declared in COMPUTED_IMPORT_LOADERS: ${site}`);
+  const out = [];
+  if (c.computed.length !== decl.sites) out.push(`declares ${decl.sites} computed dynamic imports, source has ${c.computed.length}`);
+  const calls = [...src.matchAll(new RegExp(`\\b${decl.loader}\\s*\\(`, "g"))].length;
+  if (calls !== decl.calls) out.push(`declares ${decl.calls} call(s) of loader ${decl.loader}, source has ${calls}`);
+  for (const t of decl.targets) if (!src.includes(`"${t}"`)) out.push(`declared target ${t} does not appear in the source`);
+  return out;
+}
+
+/**
+ * `entries`(저장소 상대 경로)에서 import를 재귀로 따라간 닫힘. `readFile(path)`는 내용 또는 null(없는 파일).
+ * 상대 지정자는 그대로 따라가고, 계산된 동적 import는 `loaders`(기본 `COMPUTED_IMPORT_LOADERS`)에 소스와 맞게 적혀 있으면
+ * 그 대상을 저장소 루트 기준 간선으로 따라간다. 셀 수 없는 것은 버리지 않고 `unresolved`에 `[파일, 사유]`로 싣는다.
+ * @returns {{ files: Set<string>, edges: Array<[string, string]>, unresolved: Array<[string, string]> }}
+ */
+export function importClosure({ entries, readFile, loaders = COMPUTED_IMPORT_LOADERS }) {
   const files = new Set();
   const edges = [];
+  const unresolved = [];
   const queue = [...entries];
+  const follow = (file, target) => {
+    if (target.startsWith("../")) return;
+    edges.push([file, target]);
+    if (!files.has(target)) queue.push(target);
+  };
   while (queue.length) {
     const file = queue.shift();
     if (files.has(file)) continue;
     const src = readFile(file);
     if (src == null) continue;
     files.add(file);
-    for (const spec of relativeSpecifiers(src)) {
-      const target = posix.normalize(posix.join(posix.dirname(file), spec));
-      if (target.startsWith("../")) continue;
-      edges.push([file, target]);
-      if (!files.has(target)) queue.push(target);
-    }
+    for (const spec of relativeSpecifiers(src)) follow(file, posix.normalize(posix.join(posix.dirname(file), spec)));
+    const c = computedImports(src);
+    for (const site of c.templated) unresolved.push([file, `interpolated dynamic import cannot be followed: ${site}`]);
+    const decl = Object.hasOwn(loaders, file) ? loaders[file] : null;
+    if (!c.computed.length && !decl) continue;
+    const bad = loaderMismatches(src, c, decl);
+    if (bad.length) { for (const why of bad) unresolved.push([file, why]); continue; }
+    for (const t of decl.targets) follow(file, posix.normalize(t));
   }
-  return { files, edges };
+  return { files, edges, unresolved };
 }
 
 /** 소스 경로의 설치 미러(`factory/lib/x.js` → `.factory/lib/x.js`) — 미러 가족(`lib/mirror.js`)에 없으면 null. */

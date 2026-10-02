@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, posix } from "node:path";
 const posixNormalize = (p) => posix.normalize(p);
 import { NON_JUDGE_GLOBS, JUDGE_MODULES, classifyProtected, relativeSpecifiers, importClosure, mirrorOf } from "../lib/non-judge-paths.js";
+import { COMPUTED_IMPORT_LOADERS } from "../lib/non-judge-paths.js";
 import { matchesAny } from "../lib/glob.js";
 
 /**
@@ -161,4 +162,62 @@ test("test_149_non_judge_is_a_positive_list — a path trick aimed at a listed f
   }
   // 평범한 경로는 같은 매처로 그대로 비판정이다(매처 주입이 판정을 통째로 끄는 것이 아니다).
   expect(classifyProtected(["factory/lib/board-static.js"], { engine: true, match: normalizing })).toEqual({ non_judge: ["factory/lib/board-static.js"], judge: [] });
+});
+
+// ── #149 skeptic self-critique (flaw 5) — 셀 수 없는 동적 import는 "간선 없음"이 아니라 RED다 ──────────────────────────
+
+test("test_149_judge_import_closure_excludes_non_judge — a computed import() the parser cannot follow fails the closure instead of being dropped (skeptic flaw 5)", () => {
+  // 보간 템플릿·식 인자의 import()는 런타임에 정해진다 — 그 간선을 조용히 버리면 닫힘이 작아지고(비판정 쪽으로 기운다),
+  // 그 파일이 무엇을 로드하든 목록에 넣을 수 있다. 그래서 닫힘은 그런 자리를 `unresolved`로 내고, 테스트는 그것을 RED로 읽는다.
+  const tree = {
+    "factory/lib/judge.js": "const m = await import(`./${name}.js`);\nimport { a } from \"./a.js\";",
+    "factory/lib/a.js": "const load = (p) => import(pathToFileURL(p).href);\nexport const a = 1;",
+    "factory/lib/plain.js": "const n = await import(\"./a.js\");",
+  };
+  const c = importClosure({ entries: ["factory/lib/judge.js", "factory/lib/plain.js"], readFile: (p) => tree[p] ?? null });
+  expect(c.unresolved.map(([f]) => f).sort()).toEqual(["factory/lib/a.js", "factory/lib/judge.js"]);
+  expect(c.unresolved.find(([f]) => f === "factory/lib/judge.js")[1]).toContain("${name}");
+
+  // 계산된 import를 셀 수 있게 하는 유일한 길: 로더 표(`COMPUTED_IMPORT_LOADERS`)에 그 파일의 계산된 import 개수·로더 이름과
+  // 호출 수·대상을 적고, 그 사실이 소스와 맞는 것. 대상은 저장소 루트 기준 간선이 된다.
+  const loaderSrc = [
+    "const importer = (p) => import(pathToFileURL(p).href);",
+    "await importer(join(root, \"factory/cli/tool.js\"));",
+  ].join("\n");
+  const declared = { "factory/lib/loader.js": loaderSrc, "factory/cli/tool.js": "export const t = 1;" };
+  const table = { "factory/lib/loader.js": { sites: 1, loader: "importer", calls: 1, targets: ["factory/cli/tool.js"] } };
+  const d = importClosure({ entries: ["factory/lib/loader.js"], readFile: (p) => declared[p] ?? null, loaders: table });
+  expect(d.unresolved).toEqual([]);
+  expect(d.edges).toContainEqual(["factory/lib/loader.js", "factory/cli/tool.js"]);
+  expect(d.files.has("factory/cli/tool.js")).toBe(true);
+  // 표가 없으면 같은 소스가 셀 수 없다.
+  expect(importClosure({ entries: ["factory/lib/loader.js"], readFile: (p) => declared[p] ?? null, loaders: {} }).unresolved.map(([f]) => f)).toEqual(["factory/lib/loader.js"]);
+  // 표와 소스가 어긋나면(로더를 한 번 더 부른다·계산된 import가 하나 더 생긴다·대상이 소스에서 사라진다) 셀 수 없다.
+  for (const [name, src] of Object.entries({
+    "a new loader call": loaderSrc + "\nawait importer(somePath);",
+    "a new computed import": loaderSrc + "\nawait import(other);",
+    "the target is gone": loaderSrc.replace("factory/cli/tool.js", "factory/cli/other.js"),
+  })) {
+    const c = importClosure({ entries: ["factory/lib/loader.js"], readFile: (p) => (p === "factory/lib/loader.js" ? src : declared[p] ?? null), loaders: table });
+    expect(c.unresolved.length, name).toBeGreaterThan(0);
+    expect(c.unresolved.every(([f]) => f === "factory/lib/loader.js"), name).toBe(true);
+    expect(c.files.has("factory/cli/tool.js"), name).toBe(false);
+  }
+
+  // 실제 저장소: 판정자 닫힘에 셀 수 없는 import가 하나도 없다. mirror.js·feedback/install-manifest.js의 계산된 import는
+  // 표로 세어지고, 그 대상(cli 생성기)과 그것이 import하는 것까지 닫힘에 들어온다 — 그리고 여전히 목록과 겹치지 않는다.
+  const real = importClosure({ entries: JUDGE_MODULES, readFile: readRepo });
+  expect(real.unresolved).toEqual([]);
+  expect(real.files.has("factory/lib/mirror.js")).toBe(true);
+  for (const t of ["factory/cli/manifest.js", "factory/cli/install.js", "factory/cli/init.js"]) {
+    expect(real.edges, t).toContainEqual(["factory/lib/mirror.js", t]);
+    expect(real.files.has(t), t).toBe(true);
+  }
+  expect(real.edges).toContainEqual(["factory/lib/feedback/install-manifest.js", "factory/cli/manifest.js"]);
+  // 표의 모든 항목이 실제로 닫힘에 있는 파일이다(죽은 항목으로 표가 부풀지 않는다).
+  for (const f of Object.keys(COMPUTED_IMPORT_LOADERS)) expect(real.files.has(f), f).toBe(true);
+  const reached = [...real.files].flatMap((f) => [f, mirrorOf(f)]).filter(Boolean);
+  expect(reached.filter((f) => matchesAny(NON_JUDGE_GLOBS, f))).toEqual([]);
+  // 대조군: 계산된 import로만 닿는 파일을 목록에 넣으면 이 닫힘이 그것을 잡는다(예전 파서는 놓쳤다).
+  expect([...real.files].filter((f) => matchesAny([...NON_JUDGE_GLOBS, "factory/cli/install.js"], f))).toEqual(["factory/cli/install.js"]);
 });
