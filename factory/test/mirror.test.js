@@ -45,14 +45,14 @@ test("regenerateMirror rewrites only stale family files from the sources, and re
   const root = stubRoot();
   try {
     const dry = await regenerateMirror({ root, write: false, importer });
-    expect(dry).toEqual({ ok: true, applicable: true, changed: [".claude/hooks/h.sh", ".factory/lib/a.js"] });
+    expect(dry).toEqual({ ok: true, applicable: true, changed: [".claude/hooks/h.sh", ".factory/lib/a.js"], entries: [".factory/lib/a.js", ".claude/hooks/h.sh"] });
     expect(readFileSync(join(root, ".factory/lib/a.js"), "utf8")).toBe("export const a = 1;\n");   // dry run은 쓰지 않는다
     const r = await regenerateMirror({ root, importer });
     expect(r.changed).toEqual([".claude/hooks/h.sh", ".factory/lib/a.js"]);
     expect(readFileSync(join(root, ".factory/lib/a.js"), "utf8")).toBe("export const a = 2;\n");
     expect(readFileSync(join(root, ".claude/hooks/h.sh"), "utf8")).toBe("#!/bin/sh\necho new\n");
     expect(existsSync(join(root, ".claude/agents/agent.md"))).toBe(false);                      // 가족 밖
-    expect(await regenerateMirror({ root, importer })).toEqual({ ok: true, applicable: true, changed: [] });   // 멱등
+    expect(await regenerateMirror({ root, importer })).toEqual({ ok: true, applicable: true, changed: [], entries: [".factory/lib/a.js", ".claude/hooks/h.sh"] });   // 멱등
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -78,9 +78,9 @@ const fakeRun = (script) => vi.fn(async (cmd, args) => {
 });
 
 test("mirrorStep(commit): a changed mirror is committed and pushed as the runner, and the new head is returned", async () => {
-  const run = fakeRun({ "git diff": { stdout: ".factory/lib/a.js\n" }, "git rev-parse": { stdout: "abc123\n" } });
+  const run = fakeRun({ "git diff": { stdout: ".factory/lib/a.js\n" }, "git ls-tree": { stdout: ".factory/lib/a.js\n" }, "git rev-parse": { stdout: "abc123\n" } });
   const root = famRoot();
-  const r = await mirrorStep({ root, run, mode: "commit", headSha: "old", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/lib/a.js"] }) });
+  const r = await mirrorStep({ root, run, mode: "commit", headSha: "old", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/lib/a.js"], entries: [".factory/lib/a.js"] }) });
   rmSync(root, { recursive: true, force: true });
   expect(r).toEqual({ ok: true, applicable: true, changed: [".factory/lib/a.js"], sha: "abc123" });
   const calls = run.mock.calls.map(([c, a]) => `${c} ${a.join(" ")}`);
@@ -99,7 +99,7 @@ test("mirrorStep(commit): nothing to regenerate means no commit, and the head st
 test("mirrorStep(verify): the PR's installed engine must be what its sources generate — otherwise undecidable", async () => {
   const clean = fakeRun({});
   expect(await mirrorStep({ root: "/r", run: clean, mode: "verify", headSha: "h1", regenerate: async () => ({ ok: true, applicable: true, changed: [] }) })).toEqual({ ok: true, applicable: true, changed: [], sha: "h1" });
-  const dirty = fakeRun({ "git diff": { stdout: ".factory/bin/run-stage.js\n" } });
+  const dirty = fakeRun({ "git diff": { stdout: ".factory/bin/run-stage.js\n" }, "git ls-tree": { stdout: ".factory/bin/run-stage.js\n" } });
   const r = await mirrorStep({ root: "/r", run: dirty, mode: "verify", headSha: "h1", regenerate: async () => ({ ok: true, applicable: true, changed: [".factory/bin/run-stage.js"] }) });
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/not what its sources generate — \.factory\/bin\/run-stage\.js/);
@@ -178,5 +178,38 @@ test("mirrorStep(verify): a mirror file the PR ADDED, git-rm'd by the overlay an
     const bad = await mirrorStep({ root, run, mode: "verify", headSha: "h1", regenerate: (o) => regenerateMirror({ ...o, importer }) });
     expect(bad.ok).toBe(false);
     expect(bad.reason).toMatch(/not what its sources generate — \.factory\/lib\/a\.js/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 60000);
+
+/**
+ * 1.4.45 (KTB #156 실측) — base(main)가 그 사이 **새 미러 파일**을 더했고(#155), PR 브랜치는 그 전의 main에서 갈라져 그 파일도 그 소스도 없다.
+ * review의 overlay가 base의 `.factory/**`를 워크트리와 인덱스에 올리면 그 파일은 "HEAD에 없는데 인덱스에 있는" 상태가 된다. 그것은 PR의 설치본이
+ * 소스와 다른 것이 아니라 overlay가 가져온 base의 것이다 — 판정 대상이 아니다. 반대로 PR 자신의 미러가 손으로 고쳐진 것은 여전히 걸린다.
+ */
+test("mirrorStep(verify): a mirror file the BASE added after the branch forked (overlay puts it in the index) is not the PR's mismatch", async () => {
+  const root = stubRoot();
+  const { execFileSync } = await import("node:child_process");
+  const git = (...a) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...a], { cwd: root, encoding: "utf8" });
+  const run = async (cmd, args, { cwd } = {}) => {
+    try { return { code: 0, stdout: execFileSync(cmd, args, { cwd: cwd || root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), stderr: "" }; }
+    catch (e) { return { code: e.status ?? 1, stdout: String(e.stdout || ""), stderr: String(e.stderr || "") }; }
+  };
+  try {
+    writeFileSync(join(root, ".factory/lib/a.js"), "export const a = 2;\n");
+    writeFileSync(join(root, ".factory/harness.toml"), "# keep .factory non-empty\n");
+    mkdirSync(join(root, ".claude/hooks"), { recursive: true });
+    writeFileSync(join(root, ".claude/hooks/h.sh"), "#!/bin/sh\necho new\n");
+    git("init", "-q", "-b", "main"); git("add", "."); git("commit", "-q", "-m", "pr head");
+    // overlay가 하는 일: base에 새로 생긴 미러 파일을 워크트리+인덱스에 올린다 (`git checkout <base> -- .factory` 의 효과)
+    writeFileSync(join(root, ".factory/lib/base-added.js"), "export const fromBase = true;\n");
+    git("add", "--", ".factory/lib/base-added.js");
+    const r = await mirrorStep({ root, run, mode: "verify", headSha: "h1", regenerate: (o) => regenerateMirror({ ...o, importer }) });
+    expect(r).toEqual({ ok: true, applicable: true, changed: [], sha: "h1" });
+    // PR 자신의 미러를 손으로 고친 것은 여전히 걸린다 — 그리고 사유는 그 파일만 적는다
+    writeFileSync(join(root, "factory/lib/a.js"), "export const a = 3;\n");
+    const bad = await mirrorStep({ root, run, mode: "verify", headSha: "h1", regenerate: (o) => regenerateMirror({ ...o, importer }) });
+    expect(bad.ok).toBe(false);
+    expect(bad.reason).toMatch(/— \.factory\/lib\/a\.js \(/);
+    expect(bad.reason).not.toContain("base-added");
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 60000);

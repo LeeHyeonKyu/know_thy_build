@@ -68,7 +68,7 @@ export async function regenerateMirror({ root, write = true, importer = (p) => i
     changed.push(e.dest);
     if (write) { mkdirSync(dirname(dest), { recursive: true }); writeFileSync(dest, fresh); }
   }
-  return { ok: true, applicable: true, changed: changed.sort() };
+  return { ok: true, applicable: true, changed: changed.sort(), entries: g.entries.map((e) => e.dest) };
 }
 
 /**
@@ -104,6 +104,7 @@ export async function mirrorStep({ root, run, mode, headSha = null, regenerate =
   const r = await regenerate({ root });
   if (!r.applicable) return { ok: true, applicable: false, changed: [], sha: null };
   if (!r.ok) return { ok: false, applicable: true, changed: r.changed, sha: null, reason: r.reason };
+  r.entries = Array.isArray(r.entries) ? r.entries : [];     // 옛 regenerate 더블(테스트)은 entries를 주지 않는다 — HEAD의 것만 판정한다
   const families = MIRROR_FAMILIES.map((f) => f.replace(/\/$/, ""));
   /**
    * 1.4.38 (KTB #136 실측) — **워크트리를 HEAD와 직접 비교한다, 인덱스가 아니라.** review·merge의 overlay는 `git checkout <base> -- …`로
@@ -127,7 +128,19 @@ export async function mirrorStep({ root, run, mode, headSha = null, regenerate =
   if (add.code !== 0) return { ok: false, applicable: true, changed: r.changed, sha: null, reason: `mirror add failed: ${add.stderr?.trim() || `exit ${add.code}`}` };
   const diff = await run("git", ["diff", "--cached", "--name-only", "HEAD", "--", ...families], { cwd: root });
   if (diff.code !== 0) return { ok: false, applicable: true, changed: r.changed, sha: null, reason: `mirror diff could not be read: ${diff.stderr?.trim() || `exit ${diff.code}`}` };
-  const dirty = diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  /**
+   * 1.4.45 (KTB #156 실측, 같은 과의 아홉째) — **base가 그 사이 추가한 미러 파일은 이 PR의 것이 아니다.** #155가 main에 새 엔진 파일 둘
+   * (`operator-merge.js`·`operator-merge-check.js`와 그 미러)을 더하는 동안 #156은 그 전의 main에서 갈라져 있었다. review의 overlay는
+   * base의 `.factory/**`를 워크트리와 인덱스에 올리므로 그 두 미러 파일이 "HEAD에 없는데 인덱스에 있는" 상태가 되고, 위의 add -A가
+   * 그 사실을 그대로 둬 `diff --cached HEAD`가 둘을 "추가됨"으로 보고했다 — PR의 소스에는 그 파일이 없으니 재생성은 손대지 않는다.
+   * 판정 대상은 **HEAD에 있는 미러 경로 ∪ 이 PR의 소스가 만드는 경로**뿐이다. 그 밖의 경로는 overlay가 base에서 가져온 것이고,
+   * 머지 뒤 main에 그대로 있을 파일이다. (base가 그 사이 **바꾼** 파일은 HEAD에 있으므로 여전히 대조된다 — 그것은 S3b의 base 병합이
+   * 브랜치에 들여온 뒤 재생성된 것이어야 한다.)
+   */
+  const inHead = await run("git", ["ls-tree", "-r", "--name-only", "HEAD", "--", ...families], { cwd: root });
+  if (inHead.code !== 0) return { ok: false, applicable: true, changed: r.changed, sha: null, reason: `mirror HEAD listing could not be read: ${inHead.stderr?.trim() || `exit ${inHead.code}`}` };
+  const owned = new Set([...inHead.stdout.split("\n").map((l) => l.trim()).filter(Boolean), ...r.entries]);
+  const dirty = diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean).filter((p) => owned.has(p));
   if (mode === "verify") {
     if (dirty.length) return { ok: false, applicable: true, changed: r.changed, sha: headSha, reason: `the installed engine in this PR is not what its sources generate — ${dirty.slice(0, 8).join(", ")}${dirty.length > 8 ? ", …" : ""} (regenerate with the runner's mirror step, never by hand)` };
     return { ok: true, applicable: true, changed: [], sha: headSha };
