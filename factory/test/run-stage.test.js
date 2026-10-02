@@ -4073,3 +4073,52 @@ test("test_149_self_change_config_defaults_and_validation — a repo with the sw
   }
   expect(await ensureVetoLabelWhenOn({ gh: { createLabel: async () => { throw new Error("HTTP 403"); } }, selfChange: on, engine: true })).toMatchObject({ ok: false, reason: expect.stringMatching(/403/) });
 });
+
+// ── #149 rework (sec1·sec2) — 재사용 창의 재료와 머지 전이의 게이트 증거 출처 ───────────────────────────────
+import { mergeGateEvidenceCtx } from "../bin/run-stage.js";
+import { vetoNoticeHeader } from "../lib/merge-stage.js";
+
+test("test_149_veto_window_opens_waits_and_closes — vetoWindow.history reads every window status of that sha with GitHub's time; vetoWindow.notice finds the factory's notice (sec1)", async () => {
+  const sha = "d".repeat(40);
+  const closes = "2026-10-01T10:00:00.000Z";
+  const gh = {
+    commitStatuses: vi.fn(async () => [
+      { context: VETO_WINDOW_CONTEXT, state: "success", description: `closes=${closes}`, creatorLogin: "bot", createdAt: "2026-10-01T10:00:30Z" },
+      { context: "factory/review", state: "success", description: "x", creatorLogin: "bot", createdAt: "2026-10-01T09:30:00Z" },
+      { context: VETO_WINDOW_CONTEXT, state: "pending", description: `closes=${closes}`, creatorLogin: "bot", createdAt: "2026-10-01T09:00:05Z" },
+    ]),
+    comments: vi.fn(async () => [
+      { id: 1, body: "unrelated", createdAt: "2026-10-01T08:00:00Z", author: "someone" },
+      { id: 2, body: `${vetoNoticeHeader(closes)}\n\nbody`, createdAt: "2026-10-01T09:00:02Z", author: "bot" },
+      { id: 3, body: `${vetoNoticeHeader("2026-10-01T11:00:00.000Z")}\n`, createdAt: "2026-10-01T10:00:02Z", author: "bot" },
+      { id: 4, body: `quoting: ${vetoNoticeHeader(closes)}`, createdAt: "2026-10-01T09:10:00Z", author: "bot" },
+    ]),
+  };
+  const w = makeVetoWindowDep({ gh });
+  // 이 context의 상태 **전부**를 최신순 그대로 — 마지막 항목이 창을 연 pending이다. 다른 context는 섞이지 않는다.
+  expect(await w.history(sha)).toEqual({ ok: true, entries: [
+    { state: "success", description: `closes=${closes}`, creatorLogin: "bot", createdAt: "2026-10-01T10:00:30Z" },
+    { state: "pending", description: `closes=${closes}`, creatorLogin: "bot", createdAt: "2026-10-01T09:00:05Z" },
+  ] });
+  expect(gh.commitStatuses).toHaveBeenCalledWith(sha);
+  // 알림은 그 closes를 **머리에 단** 코멘트만 — 다른 창의 알림, 본문 중간의 인용은 알림이 아니다.
+  expect(await w.notice({ pr: 9, closesAt: closes })).toEqual({ ok: true, comments: [{ author: "bot", createdAt: "2026-10-01T09:00:02Z", body: `${vetoNoticeHeader(closes)}\n\nbody` }] });
+  expect(gh.comments).toHaveBeenCalledWith(9);
+
+  // 읽지 못한 것은 판정 불가로 돌려준다(빈 목록으로 접지 않는다).
+  const broken = makeVetoWindowDep({ gh: { commitStatuses: async () => { throw new Error("HTTP 500"); }, comments: async () => { throw new Error("HTTP 502"); } } });
+  expect(await broken.history(sha)).toMatchObject({ ok: false, reason: expect.stringMatching(/HTTP 500/) });
+  expect(await broken.notice({ pr: 9, closesAt: closes })).toMatchObject({ ok: false, reason: expect.stringMatching(/HTTP 502/) });
+  const notList = makeVetoWindowDep({ gh: { commitStatuses: async () => null, comments: async () => null } });
+  expect((await notList.history(sha)).ok).toBe(false);
+  expect((await notList.notice({ pr: 9, closesAt: closes })).ok).toBe(false);
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the merged transition carries the status gate source only when merge-stage asked for it, and only to factory:merged (sec2)", () => {
+  expect(mergeGateEvidenceCtx({ to: "factory:merged", gatesFromStatuses: true })).toEqual({ gatesFromStatuses: true, statusesVerified: true });
+  for (const to of ["factory:approved", "factory:awaiting-review", "factory:needs-human", "factory:blocked"]) {
+    expect(mergeGateEvidenceCtx({ to, gatesFromStatuses: true }), to).toEqual({});
+  }
+  expect(mergeGateEvidenceCtx({ to: "factory:merged" })).toEqual({});
+  expect(mergeGateEvidenceCtx({ to: "factory:merged", gatesFromStatuses: "true" })).toEqual({});
+});

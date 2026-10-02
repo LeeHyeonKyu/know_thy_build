@@ -1501,6 +1501,7 @@ test("B-MF2: the same fix makes the quorum measurable on that hop — a short ro
 // MAIN_HAND_TO_HUMAN은 **main(19d412c)의 runMergeStage를 그대로 돌려 얻은 출력**이다(이 브랜치의 코드가
 // 아니라 바뀌기 전의 코드가 만든 문자열 — 새 코드에서 다시 타이핑하지 않았다). 같은 입력에 같은 전이
 // 사유·PR 코멘트·record 줄이 나와야 "스위치 off는 아무것도 바꾸지 않는다"가 증명된다.
+import { vetoNoticeHeader } from "../lib/merge-stage.js";
 const MAIN_HAND_TO_HUMAN = {
   nonJudgeOnly: {
     files: ["factory/lib/board-static.js", ".factory/lib/board-static.js"],
@@ -1532,6 +1533,16 @@ const windowDeps = (over = {}) => {
   // 덮어써도 `resolve`는 남는다(`vetoWindow: undefined`는 "통째로 미배선"으로 그대로 둔다).
   const resolve = vi.fn(async () => ({ ok: true }));
   const vw = { read: vi.fn(async () => ({ ok: true, window: null })), open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })), resolve };
+  // sec1 — 재사용되는 창의 재료 두 가지(`history`·`notice`)도 기본으로 배선된다. 기본값은 **정직한 첫 런이 남긴 것**이다:
+  // 그 sha의 창 상태는 read()가 돌려주는 그 하나뿐이고(갓 연 창은 pending 한 건), 알림 코멘트는 창이 열린 시각
+  // (closes − veto_minutes)에 팩토리 계정이 남겼다. 위조를 다루는 테스트가 이 둘을 덮어쓴다.
+  const withWindowReads = (o) => Object.assign(o, {
+    history: o.history ?? vi.fn(async (sha) => {
+      const r = await o.read(sha);
+      return { ok: true, entries: r?.window ? [r.window] : [] };
+    }),
+    notice: o.notice ?? vi.fn(async ({ closesAt }) => ({ ok: true, comments: [honestNotice(closesAt)] })),
+  });
   const startedAt = clock.t;
   return {
     engine: true,
@@ -1543,9 +1554,16 @@ const windowDeps = (over = {}) => {
     now: clock.now,
     sleep: clock.sleep,
     ...over,
-    vetoWindow: "vetoWindow" in over ? (over.vetoWindow && { resolve, ...over.vetoWindow }) : vw,
+    vetoWindow: "vetoWindow" in over ? (over.vetoWindow && withWindowReads({ resolve, ...over.vetoWindow })) : withWindowReads(vw),
   };
 };
+/** 첫 런이 창을 열며 남긴 알림 — 팩토리 계정이, 창이 열린 시각에, 그 닫히는 시각을 머리에 달고. */
+const honestNotice = (closesAt, over = {}) => ({
+  author: "ktb-bot",
+  createdAt: new Date(Date.parse(closesAt) - 60 * MIN).toISOString(),
+  body: `${vetoNoticeHeader(closesAt)}\n\n막으려면 ${closesAt} 전에 추적 이슈 #7에 \`factory:veto\` 라벨을 붙이세요.`,
+  ...over,
+});
 const vetoComments = (d) => d.comment.mock.calls.filter(([, body]) => /factory:veto/.test(body));
 
 /** dw3 — 스위치 off(또는 judge 경로 혼입)의 출력이 main과 문자열 단위로 같다. */
@@ -1618,9 +1636,10 @@ test("test_149_veto_window_opens_waits_and_closes", async () => {
   const code = await run(d, { record });
   expect(code).toBe(0);
 
-  // 창은 정책·게이트·mergeGates가 모두 통과한 뒤, prReady(드래프트 해제) 전에 열린다. 코멘트가 status보다 먼저다.
+  // 창은 정책·게이트 증거·mergeGates가 모두 통과한 뒤, prReady(드래프트 해제) 전에 열린다. 코멘트가 status보다 먼저다.
+  // 게이트 증거는 리뷰 런이 올린 `factory/gates` 상태다 — 머지 잡은 이 PR의 코드를 돌리지 않는다(sec2, 아래 테스트).
   const firstPoll = calls.indexOf("vetoLabel");
-  expect(calls.slice(0, firstPoll)).toEqual(["policyViolations", "gates", "mergeGates", "vetoWindow.read", "vetoWindow.ensureLabel", "comment", "vetoWindow.open"]);
+  expect(calls.slice(0, firstPoll)).toEqual(["policyViolations", "mergeGates", "vetoWindow.read", "vetoWindow.ensureLabel", "comment", "vetoWindow.open"]);
   expect(calls.indexOf("prReady")).toBeGreaterThan(calls.lastIndexOf("vetoLabel"));
   expect(calls.indexOf("mergePr")).toBeGreaterThan(calls.indexOf("prReady"));
 
@@ -1712,7 +1731,8 @@ test("test_149_veto_window_opens_waits_and_closes — a window that cannot fit t
 
 test("test_149_veto_window_opens_waits_and_closes — a PR a later check refuses never gets the 'will auto-merge' comment", async () => {
   for (const over of [
-    { gates: vi.fn(async () => ({ schema: "factory.gates.v1", status: "RED", head_sha: HEAD, failed: 1 })) },
+    // 게이트 증거(리뷰 런의 `factory/gates`)가 RED — 머지 잡은 이 PR의 게이트를 다시 돌리지 않으므로 이것이 그 자리다(sec2).
+    { commitStatuses: vi.fn(async () => [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }, { context: "factory/gates", state: "failure", creatorLogin: "ktb-bot" }]) },
     { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) },
     { policyViolations: vi.fn(async () => ({ ok: true, files: [".claude/agents/x.md"], violations: [] })) },
   ]) {
@@ -1879,11 +1899,11 @@ test("test_149_veto_window_opens_waits_and_closes — edge reads of a reused win
 // ── #149 self-critique: 잡이 이미 쓴 시간, 창 앞으로 당긴 (6b), 창 상태의 해소, 상태 게시보다 앞선 거부권 ─────────
 
 test("test_149_veto_window_opens_waits_and_closes — time the job already spent counts against timeout-minutes", async () => {
-  // 게이트(전체 스위트)가 15분을 쓴 잡: 15 + 60 + 10 + 2 = 87 ≥ 80 → 창을 열면 잡이 창 한가운데서 죽는다 → 열지 않는다.
+  // 창 앞의 검사(필수 체크·무결성 조회)가 15분을 쓴 잡: 15 + 60 + 10 + 2 = 87 ≥ 80 → 창을 열면 잡이 창 한가운데서 죽는다 → 열지 않는다.
   const slow = fakeClock();
-  const gatesSlow = vi.fn(async () => { slow.t += 15 * MIN; return { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } }; });
+  const mergeGatesSlow = vi.fn(async () => { slow.t += 15 * MIN; return { checksGreen: true, integrityGreen: true }; });
   const { lines, record } = makeRecord();
-  const d = baseD(windowDeps({ clock: slow, gates: gatesSlow, mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 80 })) }));
+  const d = baseD(windowDeps({ clock: slow, mergeGates: mergeGatesSlow, mergeJobTimeoutMinutes: vi.fn(async () => ({ ok: true, minutes: 80 })) }));
   expect(await run(d, { record })).toBe(2);
   const t = d.transition.mock.calls.at(-1)[0];
   expect(t.to).toBe("factory:blocked");
@@ -2025,7 +2045,10 @@ test("test_149_veto_label_hands_to_human — a window an earlier run resolved as
   expect(d.vetoWindow.open).not.toHaveBeenCalled();
 
   // 같은 창이 success(거부권 없이 닫힘)였다면 재진입은 그 시계를 재사용해 머지 경로로 간다 — 다시 열지 않는다.
-  const ok = baseD(windowDeps({ clock: fakeClock(T0 + 90 * MIN), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: { ...win, state: "success" } })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  // 그 sha의 상태 이력은 둘이다: 앞선 런이 T0에 연 pending, 창이 닫힐 때 같은 context로 다시 올린 success.
+  const resolvedOk = { ...win, state: "success" };
+  const openedPending = { ...win, state: "pending", createdAt: new Date(T0).toISOString() };
+  const ok = baseD(windowDeps({ clock: fakeClock(T0 + 90 * MIN), vetoWindow: { read: vi.fn(async () => ({ ok: true, window: resolvedOk })), history: vi.fn(async () => ({ ok: true, entries: [resolvedOk, openedPending] })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
   expect(await run(ok)).toBe(0);
   expect(ok.vetoWindow.open).not.toHaveBeenCalled();
   expect(vetoComments(ok)).toHaveLength(0);
@@ -2053,4 +2076,131 @@ test("test_149_veto_window_opens_waits_and_closes — on re-entry a review refus
   expect(d.vetoLabel).not.toHaveBeenCalled();
   expect(d.sleep).not.toHaveBeenCalled();
   expect(d.mergePr).not.toHaveBeenCalled();
+});
+
+// ── #149 rework (sec1·sec2) ──────────────────────────────────────────────────────────────────────────
+
+test("test_149_veto_window_opens_waits_and_closes — a reused window counts only if GitHub's clock and the owner's notice say it was a real window (sec1)", async () => {
+  // 공격: 에이전트 배우의 토큰(팩토리 로그인)으로 이 head에 `closes=` 과거 시각의 pending 상태를 올린다. 재사용 분기는
+  // 알림을 올리지 않으므로, 이것이 통하면 주인은 한 번도 듣지 못한 채 머지된다.
+  const at = (min) => new Date(T0 + min * MIN).toISOString();
+  const forgedRuns = {
+    "closes= in the past, posted now": { win: { sha: HEAD, state: "pending", description: "closes=2000-01-01T00:00:00Z", creatorLogin: "ktb-bot", createdAt: at(0) } },
+    "closes= only 1 minute after GitHub stamped the status": { win: { sha: HEAD, state: "pending", description: `closes=${at(1)}`, creatorLogin: "ktb-bot", createdAt: at(0) } },
+    "a forged success with no pending opening": { win: { sha: HEAD, state: "success", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) } },
+    "a real-length window but no notice was ever posted": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      notice: { ok: true, comments: [] },
+    },
+    "the notice was posted by a non-factory account": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      notice: { ok: true, comments: [honestNotice(at(-10), { author: "mallory" })] },
+    },
+    "the notice names another close time": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      notice: { ok: true, comments: [honestNotice(at(-10), { body: `${vetoNoticeHeader(at(50))}\n` })] },
+    },
+    "the notice came long after the status (the owner was told too late)": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      notice: { ok: true, comments: [honestNotice(at(-10), { createdAt: at(-15) })] },
+    },
+    "an earlier status on this sha came from a stranger": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      older: [{ sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "mallory", createdAt: at(-71) }],
+    },
+    "the status history was re-posted with another clock": {
+      // 첫 pending은 다른 closes를 실었다 — 최신 항목의 closes와 첫 게시 시각을 짜 맞춰도 한 창이 아니다.
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-69) },
+      older: [{ sha: HEAD, state: "pending", description: `closes=${at(-130)}`, creatorLogin: "ktb-bot", createdAt: at(-70) }],
+    },
+    "the only notice is a stale one from long before the window opened": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      notice: { ok: true, comments: [honestNotice(at(-10), { createdAt: at(-300) })] },
+    },
+    "the notice could not be read": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      notice: { ok: false, reason: "HTTP 502" },
+    },
+    "the status history could not be read": {
+      win: { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) },
+      history: { ok: false, reason: "HTTP 502" },
+    },
+  };
+  for (const [name, c] of Object.entries(forgedRuns)) {
+    const vetoWindow = {
+      read: vi.fn(async () => ({ ok: true, window: c.win })),
+      history: vi.fn(async () => c.history ?? { ok: true, entries: [c.win, ...(c.older ?? [])] }),
+      open: vi.fn(async () => ({ ok: true })), ensureLabel: vi.fn(async () => ({ ok: true })),
+      ...(c.notice ? { notice: vi.fn(async () => c.notice) } : {}),
+    };
+    const { lines, record } = makeRecord();
+    const d = baseD(windowDeps({ vetoWindow }));
+    expect(await run(d, { record }), name).toBe(2);
+    const t = d.transition.mock.calls.at(-1)[0];
+    expect(t.to, name).toBe("factory:blocked");
+    expect(t.reason, name).toMatch(/veto window undecidable/);
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+    expect(d.prReady, name).not.toHaveBeenCalled();
+    expect(d.vetoLabel, name).not.toHaveBeenCalled();         // 창이 아닌 것을 기다리지도 않는다
+    expect(d.vetoWindow.open, name).not.toHaveBeenCalled();   // 같은 잡이 그 위에 새 창을 덧대지도 않는다
+    expect(lines.some((l) => /veto window reused/.test(l)), name).toBe(false);
+  }
+
+  // 대조군: 같은 모양의 **정직한** 재진입(창이 veto_minutes 길이로 GitHub에 찍혔고, 그 전에 팩토리가 알림을 남겼다)은
+  // 그대로 재사용해 머지한다 — 위의 거부는 재사용을 꺼서가 아니라 묶임이 없어서 나온다.
+  const honest = { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) };
+  const ok = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: honest })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  const { lines, record } = makeRecord();
+  expect(await run(ok, { record })).toBe(0);
+  expect(ok.vetoWindow.notice).toHaveBeenCalledWith({ pr: 9, closesAt: at(-10) });
+  expect(ok.vetoWindow.history).toHaveBeenCalledWith(HEAD);
+  expect(ok.mergePr).toHaveBeenCalledTimes(1);
+  expect(vetoComments(ok)).toHaveLength(0);
+  expect(lines.some((l) => /veto window reused/.test(l))).toBe(true);
+  // 재진입의 거부권은 알림이 나간 시각부터 센다(알림이 주인에게 창을 연 순간이다).
+  for (const [arg] of ok.vetoLabel.mock.calls) expect(arg).toEqual({ since: at(-70) });
+});
+
+test("test_149_veto_window_opens_waits_and_closes — the merge job never runs a non-judge PR's code; its gate evidence is the review run's factory/gates (sec2)", async () => {
+  // 머지 잡의 부모 프로세스는 머지 토큰을 env에 쥐고 있다(/proc/<pid>/environ). `d.gates()`는 PR head의 테스트를 돌린다 —
+  // 곧 PR이 쓴 코드가 그 토큰 옆에서 돈다. 보호 경로 PR은 비판정이어도 그 코드가 한 줄도 돌지 않아야 한다.
+  const posted = [];
+  const postStatus = basePostStatus();
+  postStatus.mockImplementation(async (s) => { posted.push(s.context); });
+  const d = baseD(windowDeps());
+  const { lines, record } = makeRecord();
+  expect(await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus })).toBe(0);
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(posted).not.toContain("factory/gates");             // 이 잡이 돌리지 않은 게이트의 결과를 게시하지도 않는다
+  expect(d.mergePr).toHaveBeenCalledTimes(1);
+  expect(lines.some((l) => /gates not run in this job/.test(l))).toBe(true);
+  // 머지 전이는 게이트 증거의 출처가 상태라는 것을 싣는다 — 이 잡에는 gates.json이 없다.
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:merged", gatesFromStatuses: true }));
+  // 상태 대조는 이 head로 한다.
+  expect(d.commitStatuses).toHaveBeenCalledWith(HEAD);
+
+  // 게이트 증거가 없거나·RED거나·남이 올렸으면 창도 알림도 없이 사람에게 — 그리고 여전히 게이트는 돌지 않는다.
+  for (const [name, statuses] of Object.entries({
+    "no factory/gates": [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }],
+    "factory/gates failure": [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }, { context: "factory/gates", state: "failure", creatorLogin: "ktb-bot" }],
+    "factory/gates by a stranger": [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }, { context: "factory/gates", state: "success", creatorLogin: "mallory" }],
+  })) {
+    const bad = baseD(windowDeps({ commitStatuses: vi.fn(async () => statuses) }));
+    expect(await run(bad), name).toBe(2);
+    expect(bad.gates, name).not.toHaveBeenCalled();
+    expect(bad.transition.mock.calls.at(-1)[0].to, name).toBe("factory:needs-human");
+    // 거부는 이 자리(게이트 증거)에서 나온다 — 뒤의 (6b)가 우연히 같은 상태를 다시 거부해서가 아니다.
+    expect(bad.transition.mock.calls.at(-1)[0].reason, name).toMatch(/^gates not verified for a non-judge protected-path PR — .*factory\/gates/);
+    expect(bad.reviewEvidence, name).not.toHaveBeenCalled();
+    expect(vetoComments(bad), name).toHaveLength(0);
+    expect(bad.vetoWindow.open, name).not.toHaveBeenCalled();
+    expect(bad.mergePr, name).not.toHaveBeenCalled();
+  }
+
+  // 대조군: 보호 경로가 없는 평범한 PR은 지금처럼 이 잡에서 게이트를 돌리고, 머지 전이에 상태 출처 표식이 없다.
+  const plain = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: [] })), gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })) });
+  expect(await run(plain)).toBe(0);
+  expect(plain.gates).toHaveBeenCalledTimes(1);
+  const merged = plain.transition.mock.calls.find(([t]) => t.to === "factory:merged")[0];
+  expect("gatesFromStatuses" in merged).toBe(false);
 });

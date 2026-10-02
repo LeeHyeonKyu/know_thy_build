@@ -42,7 +42,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { runMergeStage, VETO_WINDOW_CONTEXT, vetoNoticeHeader } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -2061,6 +2061,31 @@ export function makeVetoWindowDep({ gh }) {
       const s = list.find((x) => x?.context === VETO_WINDOW_CONTEXT);
       return { ok: true, window: s ? { sha, state: s.state ?? null, description: s.description ?? null, creatorLogin: s.creatorLogin ?? null, createdAt: s.createdAt ?? null } : null };
     },
+    /**
+     * sec1 — 이 sha에 올라간 이 context의 상태 **전부**(최신순). 재사용하는 창은 첫 게시(= 창을 연 pending)가 GitHub이 찍은
+     * `createdAt`부터 veto_minutes 뒤에 닫혀야 하고, 모든 항목이 팩토리 것이어야 한다 — 그 판정은 merge-stage가 한다.
+     */
+    history: async (sha) => {
+      let list;
+      try { list = await gh.commitStatuses(sha); }
+      catch (e) { return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — ${e?.message || e}` }; }
+      if (!Array.isArray(list)) return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — no list returned` };
+      const entries = list.filter((x) => x?.context === VETO_WINDOW_CONTEXT)
+        .map((s) => ({ state: s.state ?? null, description: s.description ?? null, creatorLogin: s.creatorLogin ?? null, createdAt: s.createdAt ?? null }));
+      return { ok: true, entries };
+    },
+    /**
+     * sec1 — 그 창의 자동 머지 알림: PR 코멘트 중 `vetoNoticeHeader(closesAt)`로 **시작하는** 것(인용은 알림이 아니다).
+     * 작성자·시각은 GitHub이 붙인 값 그대로다 — 팩토리 계정인지, 창이 열린 때인지는 merge-stage가 판정한다.
+     */
+    notice: async ({ pr, closesAt }) => {
+      let list;
+      try { list = await gh.comments(pr); }
+      catch (e) { return { ok: false, reason: `comments of PR #${pr} unreadable — ${e?.message || e}` }; }
+      if (!Array.isArray(list)) return { ok: false, reason: `comments of PR #${pr} unreadable — no list returned` };
+      const header = vetoNoticeHeader(closesAt);
+      return { ok: true, comments: list.filter((c) => String(c?.body ?? "").startsWith(header)).map((c) => ({ author: c.author ?? null, createdAt: c.createdAt ?? null, body: c.body })) };
+    },
     /** 거부권 라벨을 카탈로그 정의 그대로 만든다(`--force` — 이미 있으면 색·설명만 맞춘다). */
     ensureLabel: async () => {
       try { await gh.createLabel(catalogLabel(VETO_LABEL)); return { ok: true }; }
@@ -2082,6 +2107,16 @@ export function makeVetoWindowDep({ gh }) {
   };
 }
 const VETO_WINDOW_FINAL_STATES = new Set(["success", "failure", "error"]);
+
+/**
+ * #149 sec2 — 머지 전이의 게이트 증거 출처. merge-stage의 비판정 경로는 이 잡에서 게이트를 돌리지 않으므로(PR 코드가 머지
+ * 토큰 옆에서 돌게 된다) gates.json이 없다. 그 경로가 리뷰 런의 `factory/gates` 상태를 게시자까지 확인한 뒤에만
+ * `gatesFromStatuses: true`를 싣고, 그때 **`factory:merged`에만** requirements.js의 상태 출처 분기를 연다.
+ * 다른 목적지·다른 값(문자열 "true" 포함)은 아무것도 열지 않는다.
+ */
+export function mergeGateEvidenceCtx({ to, gatesFromStatuses } = {}) {
+  return to === "factory:merged" && gatesFromStatuses === true ? { gatesFromStatuses: true, statusesVerified: true } : {};
+}
 
 /**
  * #149 — 러너 시계(opened_at을 잡는다)와 GitHub 시계(라벨 이벤트 시각을 찍는다)의 어긋남 여유. 창이 열린 직후 붙였다
@@ -3352,7 +3387,7 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null }) => {
+    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null, gatesFromStatuses = false }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -3379,6 +3414,8 @@ async function main() {
       if (prerequisite) ctxExtra.prerequisite = true;
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
+      // #149 sec2 — 비판정 경로의 머지 전이: 게이트 증거는 리뷰 런의 상태다(merge-stage가 확인했다). merged에만.
+      Object.assign(ctxExtra, mergeGateEvidenceCtx({ to, gatesFromStatuses }));
       // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.
       if (to === "factory:merged") Object.assign(ctxExtra, mergeGatesResult ?? await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
       // stage: to===factory:blocked일 때만 lib/transition.js가 origin 마커에 쓴다(KTB-15b I2).

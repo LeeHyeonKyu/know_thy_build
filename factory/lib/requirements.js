@@ -37,6 +37,13 @@ const restoring = (ctx) => ctx.prerequisite === true || ctx.humanRetry === true;
 export const GATES_UNVERIFIED = "gates not verified for this transition";
 export const HUMAN_MERGE_STATUSES_UNVERIFIED = "human-merge reconcile: factory commit statuses not verified";
 /**
+ * #149 sec2 — 비판정 보호 경로 PR의 자기 머지(거부권 창). 머지 잡은 그 PR의 코드를 머지 토큰 옆에서 돌리지 않으려고
+ * 게이트를 다시 돌리지 않는다 — 그래서 이 런에는 gates.json이 **있을 수 없고**, 게이트 증거는 KTB-46과 같이 리뷰 런이 그
+ * head에 올린 `factory/gates` 상태다(merge-stage가 창 앞에서, 그리고 (6b)에서 라이브 head로 게시자까지 확인한 뒤에만
+ * `gatesFromStatuses`를 싣고, run-stage가 그때만 `statusesVerified`를 세운다).
+ */
+export const STATUS_GATES_UNVERIFIED = "non-judge self-merge: the review run's factory/gates status was not verified";
+/**
  * `to`: 이 게이트를 부른 목적 상태. KTB-46의 사람-머지 분기 **하나 때문에** 생긴 인자다 —
  * 이 함수는 `awaiting-review`·`approved`·`merged` 셋이 공유하므로, 목적지를 묻지 않으면 그 분기가
  * 세 문을 한꺼번에 연다(사람이 머지한 적도 없는 PR을 `factory:approved`로 올리는 문까지). 나머지
@@ -64,6 +71,9 @@ function gatesGate(ctx, to) {
    * 거치지 않은 PR을 머지하면 이슈는 `needs-human`에 그대로 남는다. 그것이 이 설계의 요점이다.
    */
   if (ctx.humanMerged === true && to === "factory:merged") return ctx.statusesVerified === true ? null : fail(HUMAN_MERGE_STATUSES_UNVERIFIED);
+  // #149 sec2 — 같은 출처 교체를 거부권 창 경로에도. 바뀌는 것은 **게이트 증거의 출처 하나**이고 `factory:merged` 한
+  // 목적지뿐이다: 아래 merged 규칙의 정족수·K·sha 바인딩·qa·필수 체크·무결성은 그대로 문다(humanMerged와 달리 면제가 없다).
+  if (ctx.gatesFromStatuses === true && to === "factory:merged") return ctx.statusesVerified === true ? null : fail(STATUS_GATES_UNVERIFIED);
   if (ctx.gatesChecked !== true) return fail(GATES_UNVERIFIED);
   if (!ctx.gatesFile) return fail("gates file missing");
   if (ctx.gatesFile.diagnostic === true) return fail("gates file is diagnostic output");

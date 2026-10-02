@@ -283,3 +283,29 @@ test("KTB-42/SF-5: an unresolved roster refuses — it does not silently disable
     expect(requirementFor(to)(checked({ ...base, roster: ["correctness"] })).ok, to).toBe(true);
   }
 });
+
+// ── #149 rework sec2 — 비판정 경로 자기 머지의 게이트 증거 출처 ─────────────────────────────────────────────
+import { STATUS_GATES_UNVERIFIED } from "../lib/requirements.js";
+
+test("test_149_veto_window_opens_waits_and_closes — factory:merged takes the review run's verified factory statuses as gate evidence only on the veto path, and nothing else is waived", () => {
+  const v = (role, verdict = "approve") => ({ role, verdict, confidence: "high", must_fix: verdict === "reject" ? [{ id: `${role}1`, where: "w", claim: "c", evidence: "e" }] : [], should_fix: [], verified: [] });
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: sha, round: 2, verdicts: [v("a"), v("b")], orchestration: "workflow", guarantee: "verified" };
+  // merge 스테이지의 비판정 경로가 넘기는 ctx — 이 잡은 게이트를 돌리지 않았으므로 gates.json(gatesFile)이 없다.
+  const ctx = (over = {}) => ({ comments: [c("review", over.review ?? review)], issue: 7, prHeadSha: sha, rosterSize: 2, roster: ["a", "b"], maxRounds: 3, gatesChecked: true, checksGreen: true, integrityGreen: true, gatesFromStatuses: true, statusesVerified: true, ...over });
+  const merged = requirementFor("factory:merged");
+  expect(merged(ctx()).ok).toBe(true);
+  // 표식 하나로는 아무것도 열리지 않는다 — 상태 확인(statusesVerified)이 열쇠다.
+  expect(merged(ctx({ statusesVerified: undefined })).reason).toBe(STATUS_GATES_UNVERIFIED);
+  expect(merged(ctx({ statusesVerified: false })).reason).toBe(STATUS_GATES_UNVERIFIED);
+  // 표식이 없으면 오늘과 같다: 게이트 파일을 요구한다.
+  expect(merged(ctx({ gatesFromStatuses: undefined })).reason).toMatch(/gates file missing/);
+  // 게이트 출처만 바뀐다 — 필수 체크·무결성·리뷰 정족수·K·sha 바인딩은 그대로 문다.
+  expect(merged(ctx({ checksGreen: false })).reason).toMatch(/required checks not verified GREEN/);
+  expect(merged(ctx({ integrityGreen: false })).reason).toMatch(/integrity check not verified GREEN/);
+  expect(merged(ctx({ review: { ...review, verdicts: [v("a")] } })).reason).toMatch(/verdict count 1 != roster size 2/);
+  expect(merged(ctx({ review: { ...review, round: 4 } })).reason).toMatch(/round 4 > K=3/);
+  expect(merged(ctx({ prHeadSha: "e".repeat(40) })).reason).toMatch(/head_sha != PR head/);
+  // 이 문은 `factory:merged` 전용이다 — approved(blocked 재시도 hop)·awaiting-review는 여전히 게이트 파일을 요구한다.
+  expect(requirementFor("factory:approved")(ctx()).reason).toMatch(/gates file missing/);
+  expect(requirementFor("factory:awaiting-review")(ctx()).ok).toBe(false);
+});
