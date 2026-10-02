@@ -4027,4 +4027,4 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. 이름 변경·복사는 **양쪽 경로**를 모두 diff로 친다(`changedFiles`의 `touched` — R/C 행의
 옛 경로 포함, D 행 포함): `server/`에서 파일을 옮겨 나간 PR은 `server/`를 건드린 PR이다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
 
-**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`, `lib/gates.js` `runStageGates` 주석.
+**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`(행마다 `paths`와 반환값에 `touched`를 **추가**만 한다 — 기존 필드 `all`·`added`·`tests`·`sources`·`addedTests`의 값은 그대로라 implement·review의 분류·커버리지 소비자는 바뀌지 않는다), `lib/gates.js` `runStageGates` 주석, 설계 스펙 §5.2.5(“`gates.js`는 절대 재시도로 GREEN을 만들지 않는다”·“review·merge는 RED를 RED로 둔다”에 이 개정을 가리키는 주석).
