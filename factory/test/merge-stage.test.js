@@ -3,6 +3,8 @@ import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVID
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
+import { runGates } from "../lib/gates.js";
+import { makeFakeRun } from "../lib/exec.js";
 
 /** runStage의 record/refusal과 같은 모양 — 실제 계약을 그대로 흉내낸다. */
 const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
@@ -1494,4 +1496,278 @@ test("B-MF2: the same fix makes the quorum measurable on that hop — a short ro
   const r = requirementFor("factory:approved")({ comments: await gh.comments(7), ...ctxExtra });
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/verdict count 2 != roster size 3/);
+});
+
+// ── #157 — a merge-gate RED on a test outside the PR's diff is re-run once before needs-human ──────────
+//
+// own-calendar #111 (2026-10-02 01:52Z): a client-only PR with 3/3 approvals went to needs-human because
+// `server/tests/follows.test.ts::test_49_event_visibility` (131/132 passed) flaked at merge. Every gates
+// fixture below comes out of the real producer (`runGates` / `runStageGates` with a fake runner and a real
+// vitest JSON report) — a hand-typed partial object would let the eligibility rule read fields the producer
+// never writes (dw4).
+const FLAKY_TEXT_157 = "PR 밖의 테스트가 두 번 RED — flaky 후보";
+const OC_ID = "server/tests/follows.test.ts::test_49_event_visibility";
+const GATE_ROOT = "/repo";
+const STAMP_157 = { runId: "18113", runnerId: "gha-18113", round: null };
+const CLIENT_ONLY = ["client/src/pages/Calendar.tsx", "client/src/api/follows.ts"];
+const HARNESS_157 = (omitLint = false) => ({
+  harness: { maturity: "M0" },
+  gates: { fast: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+  commands: { ...(omitLint ? {} : { lint: "node factory/bin/lint.js" }), unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+  test: {},
+});
+/** A vitest `--reporter=json` report whose failing assertions are exactly `failingIds` (`path::name`). */
+function vitestReport157(failingIds, total = 132) {
+  const byFile = new Map();
+  for (const id of failingIds) {
+    const [file, name] = id.split("::");
+    if (!byFile.has(file)) byFile.set(file, []);
+    byFile.get(file).push(name);
+  }
+  return JSON.stringify({
+    numTotalTests: total, numPassedTests: total - failingIds.length, numFailedTests: failingIds.length,
+    testResults: [...byFile].map(([file, names]) => ({ name: `${GATE_ROOT}/${file}`, assertionResults: names.map((n) => ({ status: "failed", fullName: n })) })),
+  });
+}
+/** factory.gates.v1 from the real `runGates` — lint + unit, the unit report read from a real vitest JSON. */
+async function producedGates({ failing = [], lint = "GREEN", report = true, unitExit, omitLint = false, sha = "a".repeat(40) } = {}) {
+  const harness = HARNESS_157(omitLint);
+  const fake = makeFakeRun([
+    { match: (_c, a) => a[1] === harness.commands.lint, result: { code: lint === "RED" ? 1 : 0, stdout: "", stderr: lint === "RED" ? "factory/lib/x.js\n  3:1  error  no-unused-vars" : "" } },
+    { match: (_c, a) => a[1] === harness.commands.unit, result: { code: unitExit ?? (failing.length ? 1 : 0), stdout: "JSON report written to .factory/out/unit.json", stderr: "" } },
+  ]);
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => (report ? vitestReport157(failing) : null), now: "2026-10-02T01:52:00.000Z" });
+  return { ...g, head_sha: sha };
+}
+/** factory.gates.v1 BLOCKED from the real `runStageGates` (test-env re-up failed — the merge-stage BLOCKED producer). */
+async function producedBlockedGates() {
+  const { runStageGates } = await import("../lib/gates.js");
+  const harness = { ...HARNESS_157(), test: { env: { compose: "docker-compose.test.yml" } } };
+  const fake = makeFakeRun([
+    { match: (c, a) => c === "node" && a[1] === "up", result: { code: 1, stdout: "", stderr: "compose: exit 1" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" } },
+  ]);
+  return runStageGates({ run: fake, cwd: GATE_ROOT, harness, stage: "merge", tier: "standard", base: "c".repeat(40), now: "2026-10-02T01:52:00.000Z" });
+}
+/**
+ * Drives runMergeStage with `d.gates` answering `seq` in order (a function entry is called — it may throw).
+ * A call past the end of `seq` answers GREEN, so an implementation that runs the gates a third time is
+ * caught by the call count AND by reaching mergePr, not hidden behind a crash.
+ */
+async function run157({ seq, diff, retryFromBlocked = false, startFrom = "factory:approved", over = {} }) {
+  const { lines, record } = makeRecord();
+  const postStatus = basePostStatus();
+  const extra = await producedGates({ failing: [] });
+  let i = 0;
+  const gates = vi.fn(async () => { const v = i < seq.length ? seq[i] : extra; i++; return typeof v === "function" ? v() : v; });
+  const diffDep = diff === undefined ? {} : { diffFiles: vi.fn(typeof diff === "function" ? diff : async () => diff) };
+  const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, ...over });
+  const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus, retryFromBlocked, stamp: STAMP_157 });
+  return { code, d, lines, postStatus };
+}
+const detailsOf = (lines) => lines.filter((l) => l.startsWith("gates-detail: ")).map((l) => JSON.parse(l.slice("gates-detail: ".length)));
+const flakyMarksOf = (lines) => lines.filter((l) => l.startsWith("factory-flaky-candidate: ")).map((l) => JSON.parse(l.slice("factory-flaky-candidate: ".length)));
+const gateStatusesOf = (postStatus) => postStatus.mock.calls.map((c) => c[0]).filter((s) => s.context === "factory/gates");
+const transitionsOf = (d) => d.transition.mock.calls.map((c) => c[0]);
+
+test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
+  // The real own-calendar #111 shape: client-only diff, one parsed server test RED, whole-GREEN re-run.
+  const first = await producedGates({ failing: [OC_ID] });
+  const second = await producedGates({ failing: [], sha: "a".repeat(40) });
+  expect(first.status).toBe("RED");
+  expect(first.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
+  expect(second.status).toBe("GREEN");
+
+  // No prReady here: with the draft flip wired, (6a-ii) legitimately calls mergeGates a second time.
+  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { prReady: undefined } });
+  expect(r.code).toBe(0);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(r.d.diffFiles).toHaveBeenCalled();
+  // mergeGates runs once, and only after the re-run resolved — it is not the re-run.
+  expect(r.d.mergeGates).toHaveBeenCalledTimes(1);
+  expect(r.d.mergeGates.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[1]);
+  expect(r.d.mergePr).toHaveBeenCalledWith(9);
+  // The commit status follows the final verdict, so the required `factory/gates` check is not left RED.
+  const statuses = gateStatusesOf(r.postStatus);
+  expect(statuses.map((s) => s.state)).toEqual(["failure", "success"]);
+  expect(statuses.at(-1).sha).toBe(second.head_sha);
+  const merged = transitionsOf(r.d).find((t) => t.to === "factory:merged");
+  expect(merged).toBeTruthy();
+  expect(merged.mergeGatesResult).toEqual({ checksGreen: true, integrityGreen: true });
+  // The first RED is not lost: its stamped gates-detail line, a rerun line naming the id, and a stamped marker.
+  const details = detailsOf(r.lines);
+  expect(details).toHaveLength(1);
+  expect(details[0]).toMatchObject({ gate: "unit", run_id: "18113", runner: "gha-18113", failing: [OC_ID], parsed: true });
+  expect(r.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC_ID))).toBe(true);
+  expect(flakyMarksOf(r.lines)).toEqual([expect.objectContaining({ test: OC_ID, outcome: "GREEN", run_id: "18113", runner: "gha-18113" })]);
+  expect(r.lines).toContain("merge: gates GREEN");
+
+  // A blocked→approved retry: the 4b hop happens only after the re-run is GREEN (it sees the re-run, not the RED).
+  const retry = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, retryFromBlocked: "factory:approved", startFrom: "factory:blocked" });
+  expect(retry.code).toBe(0);
+  const approvedIdx = transitionsOf(retry.d).findIndex((t) => t.to === "factory:approved");
+  expect(approvedIdx).toBeGreaterThanOrEqual(0);
+  expect(retry.d.transition.mock.invocationCallOrder[approvedIdx]).toBeGreaterThan(retry.d.gates.mock.invocationCallOrder[1]);
+  expect(transitionsOf(retry.d).map((t) => t.to)).toEqual(["factory:approved", "factory:merged"]);
+  for (const order of retry.d.mergeGates.mock.invocationCallOrder) expect(order).toBeGreaterThan(retry.d.gates.mock.invocationCallOrder[1]);
+  expect(gateStatusesOf(retry.postStatus).map((s) => s.state)).toEqual(["failure", "success"]);
+
+  // A GREEN re-run does not override a later refusal: mergeGates not GREEN still goes to needs-human for that reason.
+  const later = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) } });
+  expect(later.code).toBe(2);
+  expect(later.d.gates).toHaveBeenCalledTimes(2);
+  expect(later.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(later.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "required checks not GREEN" })]);
+});
+
+test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () => {
+  const ids = [OC_ID, "server/tests/follows.test.ts::test_50_follow_feed"];
+  const first = await producedGates({ failing: ids });
+  const again = await producedGates({ failing: [...ids].reverse() });           // same set, other order
+
+  const same = await run157({ seq: [first, again], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(same.code).toBe(2);
+  expect(same.d.gates).toHaveBeenCalledTimes(2);
+  expect(same.d.mergeGates).not.toHaveBeenCalled();
+  expect(same.d.mergePr).not.toHaveBeenCalled();
+  const nh = transitionsOf(same.d);
+  expect(nh).toHaveLength(1);
+  expect(nh[0].to).toBe("factory:needs-human");
+  expect(nh[0].reason).toContain(FLAKY_TEXT_157);
+  for (const id of ids) expect(nh[0].reason).toContain(id);
+  // One marker per id, bound to this run exactly like gates-detail; both runs' gates-detail lines kept.
+  const marks = flakyMarksOf(same.lines);
+  expect(marks.map((m) => m.test).sort()).toEqual([...ids].sort());
+  for (const m of marks) expect(m).toMatchObject({ outcome: "RED", run_id: "18113", runner: "gha-18113" });
+  const details = detailsOf(same.lines);
+  expect(details).toHaveLength(2);
+  for (const dl of details) expect(dl).toMatchObject({ gate: "unit", run_id: "18113", runner: "gha-18113" });
+  expect(gateStatusesOf(same.postStatus).map((s) => s.state)).toEqual(["failure", "failure"]);
+
+  // A different set on the re-run: an ordinary needs-human that names both sets — no flaky wording, no marker.
+  const other = await producedGates({ failing: ["server/tests/auth.test.ts::test_12_login"] });
+  const diffSet = await run157({ seq: [first, other], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(diffSet.code).toBe(2);
+  expect(diffSet.d.gates).toHaveBeenCalledTimes(2);
+  expect(diffSet.d.mergePr).not.toHaveBeenCalled();
+  const dr = transitionsOf(diffSet.d);
+  expect(dr).toHaveLength(1);
+  expect(dr[0].to).toBe("factory:needs-human");
+  expect(dr[0].reason).toContain(OC_ID);
+  expect(dr[0].reason).toContain("server/tests/auth.test.ts::test_12_login");
+  expect(dr[0].reason).not.toContain("flaky");
+  expect(flakyMarksOf(diffSet.lines)).toEqual([]);
+
+  // A subset is not the same set either (one of the two flaked, the other is still RED → no marker).
+  const subset = await run157({ seq: [first, await producedGates({ failing: [OC_ID] })], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(transitionsOf(subset.d)[0].reason).not.toContain("flaky");
+  expect(flakyMarksOf(subset.lines)).toEqual([]);
+
+  // Re-run BLOCKED → factory:blocked; re-run throws a typed base/diff error → factory:blocked; re-run gives no verdict → needs-human.
+  const blockedGates = await producedBlockedGates();
+  expect(blockedGates.status).toBe("BLOCKED");
+  const blocked = await run157({ seq: [first, blockedGates], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(blocked.code).toBe(2);
+  expect(transitionsOf(blocked.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  const thrown = await run157({ seq: [first, () => { throw new MergeBaseError("origin/main: exit 128"); }], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(thrown.code).toBe(2);
+  expect(transitionsOf(thrown.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  const missing = await run157({ seq: [first, null], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(missing.code).toBe(2);
+  expect(transitionsOf(missing.d)).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(transitionsOf(missing.d)[0].reason).not.toContain("flaky");
+  for (const x of [blocked, thrown, missing]) {
+    expect(x.d.gates).toHaveBeenCalledTimes(2);              // never a third run
+    expect(x.d.mergePr).not.toHaveBeenCalled();
+    expect(flakyMarksOf(x.lines)).toEqual([]);
+  }
+});
+
+test("test_157_red_inside_the_diff_is_not_rerun", async () => {
+  // Control: the same RED outside the diff IS re-run — so every "not re-run" below is the rule, not a missing feature.
+  const red = await producedGates({ failing: [OC_ID] });
+  const green = await producedGates({ failing: [] });
+  const control = await run157({ seq: [red, green], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(control.d.gates).toHaveBeenCalledTimes(2);
+
+  const cases = [
+    { name: "the failing test file itself is in the diff", files: ["client/src/App.tsx", "server/tests/follows.test.ts"] },
+    { name: "a diff file shares the test's top-level directory", files: ["server/src/routes/follows.ts"] },
+    { name: "package.json at the repo root", files: [...CLIENT_ONLY, "package.json"] },
+    { name: "package-lock.json at the repo root", files: [...CLIENT_ONLY, "package-lock.json"] },
+    { name: "vitest.config.ts at the repo root", files: [...CLIENT_ONLY, "vitest.config.ts"] },
+    { name: "tsconfig.json at the repo root", files: [...CLIENT_ONLY, "tsconfig.json"] },
+    { name: "a root-level markdown file still counts as touched", files: [...CLIENT_ONLY, "README.md"] },
+    { name: "the failing test file is at the repo root", files: CLIENT_ONLY, failing: ["follows.test.ts::test_49_event_visibility"] },
+  ];
+  for (const c of cases) {
+    const first = await producedGates({ failing: c.failing ?? [OC_ID] });
+    expect(first.gates.unit.parsed, c.name).toBe(true);
+    const withDiff = await run157({ seq: [first, green], diff: { ok: true, files: c.files } });
+    const today = await run157({ seq: [first, green] });                        // no diffFiles dep = the pre-#157 path
+    expect(withDiff.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(withDiff.code, c.name).toBe(2);
+    expect(withDiff.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(transitionsOf(withDiff.d), c.name).toEqual(transitionsOf(today.d));
+    expect(withDiff.lines, c.name).toEqual(today.lines);
+    expect(withDiff.lines, c.name).toContain("merge: gates RED");
+    expect(withDiff.lines.some((l) => /rerun|flaky-candidate/.test(l)), c.name).toBe(false);
+    expect(gateStatusesOf(withDiff.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
+  }
+});
+
+test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
+  const red = await producedGates({ failing: [OC_ID] });
+  const green = await producedGates({ failing: [] });
+  // Control: readable diff + parsed failing list outside it → re-run. Everything below removes one proof.
+  const control = await run157({ seq: [red, green], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(control.d.gates).toHaveBeenCalledTimes(2);
+
+  const parsedFalse = await producedGates({ failing: [OC_ID], report: false });
+  expect(parsedFalse.gates.unit).toMatchObject({ status: "RED", parsed: false, failing_ids: [] });
+  const noIds = await producedGates({ failing: [], unitExit: 1 });              // KTB-35: report read, 0 failing, command failed
+  expect(noIds.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [] });
+  const mixed = await producedGates({ failing: [OC_ID], lint: "RED" });
+  expect(mixed.gates.lint.status).toBe("RED");
+  const misconfigured = await producedGates({ failing: [OC_ID], omitLint: true });
+  expect(misconfigured.status).toBe("MISCONFIGURED");
+  const outside = await producedGates({ failing: ["../elsewhere/follows.test.ts::test_49_event_visibility"] });
+  expect(outside.gates.unit.failing_ids).toEqual(["../elsewhere/follows.test.ts::test_49_event_visibility"]);
+  const blockedGates = await producedBlockedGates();
+  // Derived from a produced RED with only `parsed` flipped: ids that no parsed report vouches for (another
+  // parser's shape) are still not proof — the rule keys on `parsed === true`, not on ids being present.
+  const unvouched = { ...red, gates: { ...red.gates, unit: { ...red.gates.unit, parsed: false } } };
+
+  const cases = [
+    { name: "failing ids with parsed:false", first: unvouched, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "diffFiles ok:false", first: red, diff: { ok: false, files: [], reason: "git diff failed: fatal: bad revision" } },
+    { name: "diffFiles throws GitDiffError", first: red, diff: async () => { throw new GitDiffError("fatal: bad revision"); } },
+    { name: "diffFiles throws MergeBaseError", first: red, diff: async () => { throw new MergeBaseError("origin/main: exit 128"); } },
+    { name: "diffFiles throws a plain Error", first: red, diff: async () => { throw new Error("boom"); } },
+    { name: "diffFiles returns nothing", first: red, diff: async () => undefined },
+    { name: "diffFiles dep absent", first: red, diff: undefined },
+    { name: "empty diff", first: red, diff: { ok: true, files: [] } },
+    { name: "files is not a list", first: red, diff: { ok: true, files: "client/src/App.tsx" } },
+    { name: "a diff path that cannot be normalised", first: red, diff: { ok: true, files: [...CLIENT_ONLY, "../server/x.ts"] } },
+    { name: "RED test gate with parsed:false", first: parsedFalse, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "RED test gate with empty failing_ids", first: noIds, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "lint RED alongside the test RED", first: mixed, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "a MISCONFIGURED gate", first: misconfigured, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "a failing path that cannot be normalised", first: outside, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "gates BLOCKED stays blocked", first: blockedGates, diff: { ok: true, files: CLIENT_ONLY } },
+  ];
+  for (const c of cases) {
+    const r = await run157({ seq: [c.first, green], diff: c.diff });
+    const today = await run157({ seq: [c.first, green] });
+    expect(r.code, c.name).toBe(2);
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), c.name).toEqual(transitionsOf(today.d));
+    expect(r.lines, c.name).toEqual(today.lines);
+    expect(flakyMarksOf(r.lines), c.name).toEqual([]);
+  }
+  // The outcomes are today's: needs-human for RED / MISCONFIGURED, blocked for BLOCKED.
+  expect(transitionsOf((await run157({ seq: [misconfigured], diff: { ok: true, files: CLIENT_ONLY } })).d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates MISCONFIGURED at merge" })]);
+  expect(transitionsOf((await run157({ seq: [blockedGates], diff: { ok: true, files: CLIENT_ONLY } })).d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
 });
