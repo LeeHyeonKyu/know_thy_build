@@ -1,5 +1,4 @@
-import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, DETAIL_MAX_NAME } from "./gates.js";
-import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
+import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, scrubDetailName } from "./gates.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
@@ -175,15 +174,14 @@ function redTestIds(gates) {
   return [...new Set(red.flatMap((g) => g.failing_ids))];
 }
 const sameIdSet = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.includes(x));
-/** Test ids go to public places (run record, issue comment): scrubbed and capped like gates-detail names. */
-const scrubId = (id) => scrubText(String(id ?? ""), { secrets: SECRET_ENV.map((n) => process.env[n]).filter((v) => typeof v === "string" && v.length > 0) }).text.slice(0, DETAIL_MAX_NAME);
+/** Test ids go to public places (run record, issue comment): gates.js's own name rule (`scrubDetailName`), not a copy. */
 const idList = (ids) => {
-  const shown = ids.slice(0, DETAIL_MAX_FAILING).map(scrubId);
+  const shown = ids.slice(0, DETAIL_MAX_FAILING).map((id) => scrubDetailName(id));
   return shown.join(", ") + (ids.length > shown.length ? ` (+${ids.length - shown.length} more)` : "");
 };
-export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = null, round = null } = {}) {
+export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = null, round = null } = {}, { env } = {}) {
   return ids.map((id) => FLAKY_CANDIDATE_PREFIX + JSON.stringify({
-    test: scrubId(id), outcome, run_id: runId ?? null, runner: runnerId ?? null, ...(Number.isInteger(round) ? { round } : {}),
+    test: scrubDetailName(id, { env }), outcome, run_id: runId ?? null, runner: runnerId ?? null, ...(Number.isInteger(round) ? { round } : {}),
   }));
 }
 

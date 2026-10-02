@@ -2021,3 +2021,35 @@ test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async
   const sameIds = await run157({ seq: [alone, await producedGates({ failing: [OC_ID] })], diff: DIFF });
   expect(transitionsOf(sameIds.d)[0].reason).toContain(FLAKY_TEXT_157);
 });
+
+import { flakyCandidateLines, FLAKY_CANDIDATE_PREFIX } from "../lib/merge-stage.js";
+import { DETAIL_MAX_NAME, GATES_DETAIL_PREFIX } from "../lib/gates.js";
+
+test("test_157_flaky_candidate_names_follow_the_gates_detail_scrub_rule", () => {
+  // Review arch1: the marker's test name must come from the SAME scrub-and-cap rule as the gates-detail `failing`
+  // names it sits next to in the run record — and, like gates.js, take an injected env rather than only process.env.
+  const SECRET = "fake-secret-value-for-test-157";
+  const ID = `server/tests/login.test.ts::login[${SECRET}]`;
+  const LONG = `server/tests/long.test.ts::${"n".repeat(DETAIL_MAX_NAME * 2)}`;
+  const markerTests = (lines) => lines.map((l) => { expect(l.startsWith(FLAKY_CANDIDATE_PREFIX)).toBe(true); return JSON.parse(l.slice(FLAKY_CANDIDATE_PREFIX.length)).test; });
+
+  // Injected env: the secret is redacted and the long name is capped exactly as a gates-detail name is.
+  const [scrubbed, capped] = markerTests(flakyCandidateLines([ID, LONG], "RED", { runId: "1", runnerId: "r" }, { env: { GITHUB_TOKEN: SECRET } }));
+  expect(scrubbed).not.toContain(SECRET);
+  expect(scrubbed).toContain("[REDACTED");
+  expect(scrubbed.startsWith("server/tests/login.test.ts::login[")).toBe(true);
+  expect(capped).toBe(LONG.slice(0, DETAIL_MAX_NAME));
+  // The env is the injected one, not process.env: with no secret in it the name passes through untouched.
+  expect(markerTests(flakyCandidateLines([ID], "RED", {}, { env: {} }))).toEqual([ID]);
+
+  // Same rule as gates-detail: with the secret in the process env, both lines carry byte-identical names.
+  vi.stubEnv("GITHUB_TOKEN", SECRET);
+  try {
+    const result = { gates: { unit: { status: "RED", parsed: true, failing_ids: [ID, LONG], detail: { gate: "unit", failing: [ID, LONG], snippet: "" } } } };
+    const detail = gatesDetailLines(result, { runId: "1", runnerId: "r" }).map((l) => JSON.parse(l.slice(GATES_DETAIL_PREFIX.length)));
+    expect(detail[0].failing).not.toContain(ID);
+    expect(markerTests(flakyCandidateLines([ID, LONG], "GREEN", { runId: "1", runnerId: "r" }))).toEqual(detail[0].failing);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

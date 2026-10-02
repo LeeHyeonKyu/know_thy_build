@@ -99,6 +99,12 @@ export const GATES_DETAIL_PREFIX = "gates-detail: ";
 /** `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식을 만들지 않는다. */
 const secretsFrom = (env) => SECRET_ENV.map((n) => (env ?? process.env)?.[n]).filter((v) => typeof v === "string" && v.length > 0);
 const scrubOne = (text, secrets, max) => scrubText(String(text ?? ""), { secrets }).text.slice(0, max);
+/**
+ * #157 (review arch1) — one public test NAME, scrubbed and capped: the rule `gates-detail` applies to its `failing`
+ * names, exported so the merge stage's `factory-flaky-candidate` lines (which sit next to those lines in the same
+ * run record) use this rule instead of a copy. `env` is injectable like every other scrub entry here.
+ */
+export const scrubDetailName = (name, { env } = {}) => scrubOne(name, secretsFrom(env), DETAIL_MAX_NAME);
 
 /**
  * 러너 출력에서 **알아볼 수 있는** 실패 테스트 이름. 알아보지 못하면 빈 배열이다 — 추측한 이름은
