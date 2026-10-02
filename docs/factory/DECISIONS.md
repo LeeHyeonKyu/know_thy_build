@@ -290,6 +290,8 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **영향**: §5.2.5-③, §4.2.1 step 5, §5.2.4.
 
+**개정**: review도 1.4.29(own-calendar #49)부터 같은 분류를 한다(`lib/gates.js` `runStageGates`). merge는 여전히 분류하지 않지만, ADR-033(#157)부터 **PR diff 밖의 테스트만 RED인 경우 같은 게이트를 한 번 다시 돈다** — 아래 ADR-033의 경계 안에서만이고, 재시도가 RED를 GREEN으로 **판정**하지는 않는다(두 번째 런 전체가 GREEN이어야 한다).
+
 ---
 
 ## ADR-012 게이트 판정과 사전 assert의 분리 — `gatesChecked` — 2026-09-12
@@ -3987,3 +3989,41 @@ review의 overlay는 PR이 새로 추가한 팩토리 소유 파일을 `git rm`�
 판정 경로 엔진 PR)이 된다. 그 2건은 §8.3의 규칙(판정 회귀 검출기가 실제 회귀를 잡은 기록이 생길 때까지 판정 경로는 사람)대로 남긴다.
 
 **이 PR 자체가 마지막 수동 릴리스다**: 머지되면 publish가 엔진 내용 변경을 보고 1.4.45를 스스로 낸다. 버전은 더 이상 PR에 적지 않는다.
+
+---
+
+## ADR-033 merge 게이트의 RED가 PR diff 밖의 테스트뿐이면 한 번 다시 돈다 — ADR-011의 merge 쪽 개정 — 2026-10-02 (#157)
+
+**질문**: merge 스테이지의 게이트가 PR이 건드리지 않은 테스트 하나로 RED일 때, 첫 RED를 곧바로 사람에게 넘기는 것이 맞는가.
+
+**관측**: own-calendar #111 — `client/**`만 바꾼 PR(리뷰 3/3 approve)이 merge 게이트에서 `server/tests/follows.test.ts::test_49_event_visibility`
+하나(131/132 통과, 통합 테스트의 DB 타이밍)로 `needs-human`이 됐다(2026-10-02 01:52Z). 사람이 할 수 있는 일은 "다시 돌려 보기"뿐이었다(ADR-032).
+ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손에 남겨 두고 있었다.
+
+**결정** (`lib/merge-stage.js` `rerunEligibility`, `runMergeStage` (4)): merge에서만, 다음이 **전부** 증명될 때 같은 `d.gates()`(run-stage의
+`runStageGates`, stage `merge`)를 **정확히 한 번** 더 부른다.
+- 결과가 RED(MISCONFIGURED·BLOCKED가 아님)이고, RED인 게이트가 **전부** 리포트를 실제로 읽은(`parsed: true`) 테스트 게이트이며 `failing_ids`가 비어 있지 않다.
+  lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다.
+- PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
+- diff에 **저장소 루트의 파일이 하나도 없다** — 루트 파일(package.json·lockfile·설정·README까지)은 모든 패키지를 건드린 것으로 본다.
+- 실패 테스트마다 경로가 정규화되고, 루트에 있지 않으며, 그 최상위 디렉터리(`server/` 대 `client/`)에 diff 파일이 하나도 없다.
+
+하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록) 지금과 **같은 한 번의 판정**이다(fail closed).
+재실행의 결과는 이렇게 읽는다:
+- **전체가 GREEN**이어야만 머지로 이어진다. `factory/gates` 상태를 그 결과로 다시 게시하고(첫 RED의 failure가 required check로 남지 않게),
+  4b·`mergeGates`·`factory:merged` 전이가 모두 재실행 결과를 본다. 첫 RED의 `gates-detail` 줄과 `factory-flaky-candidate`(outcome GREEN) 줄을 run 기록에 남긴다.
+- **같은 id 집합**이 다시 RED면 `needs-human`, 사유에 "PR 밖의 테스트가 두 번 RED — flaky 후보"와 id, id마다 `factory-flaky-candidate`(outcome RED) 줄.
+- **다른 집합**이 RED면 평범한 `needs-human`이고 두 집합을 모두 적는다 — flaky 문구도 마커도 없다. BLOCKED·base/diff 예외는 `factory:blocked`.
+- 세 번째 실행은 없다. 마커 줄은 `factory-flaky-candidate: {test, outcome, run_id, runner, round?}` 한 줄 JSON이고 `gates-detail`과 같은 run 바인딩을 갖는다.
+
+**버린 대안**: merge에서도 `classifyFailures`(격리 실행 `flaky_isolation_runs`·base 실행 `flaky_base_runs`, `factory:flaky` 이슈 생성)를 켜는 것.
+분류기가 더 강하다는 반론(base 실행으로 broken-base를 가른다)은 기록해 둔다. 그래도 단일 재실행을 고른 이유: ① 분류기는 판정 제외와
+이슈 생성이라는 **부수 효과**를 merge의 뜨거운 경로에 들인다 — ADR-011이 분류 창구를 implement/review로 묶은 이유가 그대로 남는다.
+② 단일 재실행은 판정을 바꾸지 않는다: 두 번째 런 **전체**가 GREEN이어야만 머지하고, 아니면 지금과 같은 사람 경로다. ③ 비용이 한 번의 게이트 실행으로 묶인다(base 5회 + 격리 3회가 아니다).
+
+**남는 위험**: 비율 p로 실패하는 진짜 간헐 회귀(제품 경쟁 조건)는 1-p의 확률로 재실행 GREEN을 받아 머지된다 — 흔적은 run 기록의 마커뿐이다.
+**`factory-flaky-candidate`를 읽는 소비자는 아직 없다**(retro 수확기는 `factory:flaky` 라벨만 읽는다) — 후속 이슈의 몫이다. 최상위 디렉터리
+휴리스틱은 디렉터리를 가로지르는 의존(`shared/`를 import하는 `server/`)과 이름 변경의 옛 경로를 보지 못한다; 결정적 결함은 두 번 실패하므로
+머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
+
+**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGatesDep`·`makeMergeDiffFilesDep`, `lib/gates.js` `runStageGates` 주석.
