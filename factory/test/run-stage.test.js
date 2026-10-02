@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier, runAttemptOf, stageSettled, stageSettledLine } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
+import { makeStageGatesDep, makeMergeDiffFilesDep } from "../bin/run-stage.js";
 import { runGates } from "../lib/gates.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
@@ -3932,4 +3933,89 @@ test("test_136_parked_feature_reuse_names_backlogged_harness", async () => {
   expect(lines).toContain("harness: reusing factory:harness issue #31 — package.json");
   expect(lines.some((l) => /^harness: #31 .*NOT queued/.test(l) && /backlog/.test(l))).toBe(true);
   expect(lines.some((l) => l.startsWith("harness: #31 was opened"))).toBe(false); // 재사용이다 — 열었다고 말하지 않는다
+});
+
+// ── #157 — the merge re-run lives in production wiring: run-stage's real `gates` and `diffFiles` deps ──────
+// `makeStageGatesDep` (runStageGates, stage "merge") and `makeMergeDiffFilesDep` (changedFiles over
+// `<base>...HEAD`) are the deps `main()` hands runMergeStage. A fake runner plays git and the gate commands; a
+// real vitest JSON report says which test failed. A wrong diff source (or none) changes the outcome below.
+test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);              // = the sha mergeHappyDeps checks out
+  const OC = "server/tests/follows.test.ts::test_49_event_visibility";
+  const harness = {
+    harness: { maturity: "M0" }, project: { default_branch: "main" },
+    gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+    commands: { lint: "node factory/bin/lint.js", unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+    test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] },
+  };
+  const report = (root, failing) => JSON.stringify({
+    numTotalTests: 132, numPassedTests: 132 - failing.length, numFailedTests: failing.length,
+    testResults: failing.map((id) => ({ name: join(root, id.split("::")[0]), assertionResults: [{ status: "failed", fullName: id.split("::")[1] }] })),
+  });
+  const scenario = async ({ nameStatus, diffFailsFrom = Infinity, baseFailsFrom = Infinity, unitExits = [1, 0] }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb157-"));
+    let unitRuns = 0, diffCalls = 0, baseCalls = 0;
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status",
+        result: () => (++diffCalls >= diffFailsFrom ? { code: 128, stdout: "", stderr: "fatal: bad revision" } : { code: 0, stdout: nameStatus, stderr: "" }) },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => ({ code: unitExits[Math.min(unitRuns++, unitExits.length - 1)], stdout: "", stderr: "" }) },
+    ]);
+    const readFile = () => report(root, unitExits[Math.min(unitRuns - 1, unitExits.length - 1)] ? [OC] : []);
+    const mergeBase = async () => { if (++baseCalls >= baseFailsFrom) throw new MergeBaseError("origin/main: exit 128"); return BASE; };
+    const gates = makeStageGatesDep({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    const diffFiles = makeMergeDiffFilesDep({ run: fake, root, mergeBase, getHarness: () => harness });
+    const lines = [], statuses = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(gates), diffFiles: vi.fn(diffFiles),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async (s) => { statuses.push(s); },
+    });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
+    const unitCalls = fake.calls.filter((c) => c.cmd === "bash" && c.args[1] === harness.commands.unit).length;
+    const diffArgs = fake.calls.filter((c) => c.cmd === "git" && c.args[0] === "diff").map((c) => c.args);
+    return { code, d, lines, statuses, unitCalls, diffArgs, root, fake, mergeBase };
+  };
+
+  // Client-only diff, server test RED then GREEN → the same gates dep runs twice and the PR merges.
+  const ok = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nA\tclient/src/api/follows.ts\n" });
+  expect(ok.code).toBe(0);
+  expect(ok.unitCalls).toBe(2);                                         // runStageGates ran the unit command twice
+  expect(ok.d.gates).toHaveBeenCalledTimes(2);
+  expect(ok.d.diffFiles).toHaveBeenCalledTimes(1);
+  expect(await ok.d.diffFiles.mock.results[0].value).toEqual({ ok: true, files: ["client/src/pages/Calendar.tsx", "client/src/api/follows.ts"] });
+  for (const a of ok.diffArgs) expect(a).toEqual(["diff", "--name-status", `${BASE}...HEAD`]);
+  expect(ok.d.mergePr).toHaveBeenCalled();
+  expect(ok.statuses.filter((s) => s.context === "factory/gates").map((s) => s.state)).toEqual(["failure", "success"]);
+  expect(JSON.parse(readFileSync(join(ok.root, ".factory/out/gates.json"), "utf8")).status).toBe("GREEN");
+  expect(ok.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC))).toBe(true);
+  const mark = ok.lines.find((l) => l.startsWith("factory-flaky-candidate: "));
+  expect(JSON.parse(mark.slice("factory-flaky-candidate: ".length))).toMatchObject({ test: OC, outcome: "GREEN", runner: "gha-157" });
+
+  // The diff touches server/** → the failing server test is not re-run; today's needs-human.
+  const inside = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nM\tserver/src/routes/follows.ts\n" });
+  expect(inside.code).toBe(2);
+  expect(inside.unitCalls).toBe(1);
+  expect(inside.d.mergePr).not.toHaveBeenCalled();
+  expect(inside.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+
+  // changedFiles GitDiffError / MergeBaseError inside diffFiles → ok:false → today's path (one gate run, needs-human).
+  const gitDiffErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", diffFailsFrom: 2 });   // the gates dep's own diff succeeds
+  expect(await gitDiffErr.d.diffFiles.mock.results[0].value).toMatchObject({ ok: false, reason: expect.stringMatching(/git diff failed/) });
+  const baseErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", baseFailsFrom: 2 });
+  expect(await baseErr.d.diffFiles.mock.results[0].value).toMatchObject({ ok: false, reason: expect.stringMatching(/origin\/main/) });
+  for (const x of [gitDiffErr, baseErr]) {
+    expect(x.code).toBe(2);
+    expect(x.unitCalls).toBe(1);
+    expect(x.d.mergePr).not.toHaveBeenCalled();
+    expect(x.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+  }
 });
