@@ -2906,3 +2906,65 @@ test("test_156_release_retry_opens_a_fresh_budget_cycle", async () => {
   // 진짜 마커라도 팩토리 계정을 모르면 리셋하지 않는다(닫힌 쪽).
   expect(cycle156(await w.gh.comments(61), { factoryLogin: null }).filter((c) => c.body.includes(restartComment("implement", 61))).length).toBeGreaterThanOrEqual(2);
 });
+
+// ── #156 rework cf1 — 낡은 설치본을 읽은 sweep은 "릴리스"가 아니다 ─────────────────────────────────────
+// 스테이지 잡 끝의 `sweep.js --quick`은 이벤트 시점의 `.factory`를 다시 체크아웃하고 돈다 — 그 매니페스트는 main보다
+// 뒤처질 수 있다. "다르다"가 아니라 "더 새롭다"(점 단위 숫자 비교)일 때만 재시도하고, 에스컬레이션 기록은 그 이슈에
+// 팩토리가 이미 남긴 버전보다 낮게 찍지 않는다.
+test("test_156_stale_reader_is_not_a_release", async () => {
+  const w = world156();
+  // A(#71): 1.4.44에서 멈췄고 cron이 1.4.45로 한 번 재시도했다 → 1.4.45에서 다시 멈춰 cron이 1.4.45로 올렸다.
+  await implementStoppedUndecidable156(w, 71, "1.4.44");
+  await w.sweep("1.4.45");
+  expect(w.label(71)).toBe("factory:planned");
+  w.issues.get(71).labels = ["factory:in-progress"];
+  expect((await w.transition({ issue: 71, to: "factory:blocked", reason: GIT_DIFF156, stage: "implement" })).ok).toBe(true);
+  w.post(71, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.45");                                                    // 새 주기의 blocked 재시도 1회
+  w.post(71, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.45");
+  expect(w.label(71)).toBe("factory:needs-human");
+  const esc71 = w.bodies(71).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(ENGINE_VERSION156.exec(esc71)?.[1]).toBe("1.4.45");
+
+  // 다른 이슈의 잡이 끝나며 1.4.44(낡은 체크아웃)로 quick sweep을 돈다 → A는 그대로다. 이유는 actions에 남는다.
+  const n71 = w.bodies(71).length;
+  w.dispatchStage.mockClear();
+  const stale = await w.sweep("1.4.44");
+  expect(w.label(71)).toBe("factory:needs-human");
+  expect(w.bodies(71)).toHaveLength(n71);
+  expect(releaseMarkers156(w, 71)).toHaveLength(1);
+  expect(w.dispatchStage).not.toHaveBeenCalled();
+  expect(stale).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: 71 }));
+  expect(stale).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 71, reason: expect.stringMatching(/older than 1\.4\.45/) }));
+  // 같은 버전의 cron도 아무것도 하지 않는다; 진짜 다음 릴리스에서만 한 번 재시도한다.
+  await w.sweep("1.4.45");
+  expect(w.bodies(71)).toHaveLength(n71);
+  await w.sweep("1.4.46");
+  expect(w.label(71)).toBe("factory:planned");
+  expect(releaseMarkers156(w, 71).map((b) => RETRY_ON_RELEASE156.exec(b)[1])).toEqual(["1.4.45", "1.4.46"]);
+
+  // 거울 경우: 1.4.45로 재시도된 B(#72)가 다시 멈췄는데, 그 에스컬레이션을 낡은 quick sweep(1.4.44)이 했다.
+  // 기록은 1.4.44로 내려가지 않는다(이 이슈에 팩토리가 남긴 1.4.45가 있다) → 다음 cron(1.4.45)은 재시도하지 않는다.
+  await implementStoppedUndecidable156(w, 72, "1.4.44");
+  await w.sweep("1.4.45");
+  expect(w.label(72)).toBe("factory:planned");
+  w.issues.get(72).labels = ["factory:in-progress"];
+  expect((await w.transition({ issue: 72, to: "factory:blocked", reason: GIT_DIFF156, stage: "implement" })).ok).toBe(true);
+  w.post(72, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.44");
+  w.post(72, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.44");
+  expect(w.label(72)).toBe("factory:needs-human");
+  const esc72 = w.bodies(72).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(ENGINE_VERSION156.exec(esc72)?.[1]).toBe("1.4.45");
+  const n72 = w.bodies(72).length;
+  await w.sweep("1.4.45");
+  expect(w.label(72)).toBe("factory:needs-human");
+  expect(w.bodies(72)).toHaveLength(n72);
+
+  // "더 새롭다"는 문자열이 아니라 점 단위 숫자 비교다: 1.4.9에서 멈춘 이슈는 1.4.10에서 재시도된다.
+  await implementStoppedUndecidable156(w, 73, "1.4.9");
+  await w.sweep("1.4.10");
+  expect(w.label(73)).toBe("factory:planned");
+});

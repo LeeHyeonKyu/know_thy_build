@@ -162,3 +162,28 @@ test("test_36_human_merged_routing: --quick keeps the same routing seam (the per
   expect(args.quick).toBe(true);
   expect(typeof args.routeMerged).toBe("function");
 });
+
+/**
+ * #156 rework cf1 — **설치본 버전은 체크아웃이 아니라 기본 브랜치의 매니페스트까지 본다.** 스테이지 잡의 Sweep 스텝은
+ * 이벤트 시점의 `.factory`를 다시 체크아웃한다(그 사이 main이 올라갔을 수 있다). 읽은 둘 중 더 새로운 것을 쓴다.
+ */
+test("test_156_installed_version_reads_the_default_branch_manifest", async () => {
+  const manifest = JSON.stringify({ schema: "factory.install-manifest.v1", ktb_version: "1.4.45", entries: [{ dest: ".factory/bin/sweep.js", owner: "factory" }] });
+  run.mockImplementation(async (cmd, args) => {
+    if (cmd === "git" && args?.[0] === "rev-parse") return { stdout: "/repo/root\n", stderr: "", code: 0 };
+    if (cmd === "git" && args?.[0] === "show" && args?.[1] === "origin/main:.factory/install-manifest.json") return { stdout: manifest, stderr: "", code: 0 };
+    return { stdout: "", stderr: "", code: 0 };
+  });
+  const args = await runMain(["--quick"]);
+  expect(await args.installedVersion()).toBe("1.4.45");
+
+  // 기본 브랜치의 매니페스트도 못 읽으면(그리고 체크아웃에도 없으면) 모른다 — null이다.
+  sweep.mockClear();
+  run.mockImplementation(async (cmd, args) => {
+    if (cmd === "git" && args?.[0] === "rev-parse") return { stdout: "/repo/root\n", stderr: "", code: 0 };
+    if (cmd === "git" && args?.[0] === "show") throw new Error("fatal: invalid object name 'origin/main'");
+    return { stdout: "", stderr: "", code: 0 };
+  });
+  const none = await runMain(["--quick"]);
+  expect(await none.installedVersion()).toBe(null);
+});
