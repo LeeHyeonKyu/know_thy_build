@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier, runAttemptOf, stageSettled, stageSettledLine } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
-import { makeStageGatesDep, makeMergeDiffFilesDep } from "../bin/run-stage.js";
+import { makeStageGateDeps } from "../bin/run-stage.js";
 import { runGates } from "../lib/gates.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
@@ -3964,12 +3964,13 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
     ]);
     const readFile = () => report(root, unitExits[Math.min(unitRuns - 1, unitExits.length - 1)] ? [OC] : []);
     const mergeBase = async () => { if (++baseCalls >= baseFailsFrom) throw new MergeBaseError("origin/main: exit 128"); return BASE; };
-    const gates = makeStageGatesDep({
+    // The one assembly main() spreads into its deps object (pinned below) — not two hand-picked factories.
+    const { gates, diffFiles } = makeStageGateDeps({
       stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
       getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase, readFile,
       gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
     });
-    const diffFiles = makeMergeDiffFilesDep({ run: fake, root, mergeBase, getHarness: () => harness });
+    expect(typeof diffFiles).toBe("function");                          // a missing diff source fails here, not silently
     const lines = [], statuses = [];
     const d = mergeHappyDeps({
       gates: vi.fn(gates), diffFiles: vi.fn(diffFiles),
@@ -4006,6 +4007,33 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(inside.unitCalls).toBe(1);
   expect(inside.d.mergePr).not.toHaveBeenCalled();
   expect(inside.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+
+  // A rename OUT of server/** and a deletion under server/** are diffs in server/** — the failing server test
+  // is not re-run (both sides of an R/C row count; D rows count). A diff source that keeps only the rename's new
+  // path, or drops deletions, would re-run here and merge.
+  const renamedOut = await scenario({ nameStatus: "R100\tserver/lib/visibility.ts\tclient/lib/visibility.ts\n" });
+  expect((await renamedOut.d.diffFiles.mock.results[0].value).files).toEqual(expect.arrayContaining(["server/lib/visibility.ts", "client/lib/visibility.ts"]));
+  const copiedOut = await scenario({ nameStatus: "C75\tserver/lib/visibility.ts\tclient/lib/visibility.ts\n" });
+  const deleted = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nD\tserver/src/routes/legacy.ts\n" });
+  expect((await deleted.d.diffFiles.mock.results[0].value).files).toContain("server/src/routes/legacy.ts");
+  for (const x of [renamedOut, copiedOut, deleted]) {
+    expect(x.code).toBe(2);
+    expect(x.unitCalls).toBe(1);
+    expect(x.d.gates).toHaveBeenCalledTimes(1);
+    expect(x.d.mergePr).not.toHaveBeenCalled();
+    expect(x.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+    expect(x.lines.some((l) => l.startsWith("factory-flaky-candidate: "))).toBe(false);
+  }
+
+  // Production wiring: main()'s deps object takes `gates` AND `diffFiles` from this same assembly, and defines
+  // neither key on its own — drop the spread (or re-add a bare `gates:`) and this fails.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainDeps = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainDeps.slice(mainDeps.indexOf("const deps = {"), mainDeps.indexOf("\n  };\n", mainDeps.indexOf("const deps = {")));
+  expect(depsBlock).toMatch(/\n {4}\.\.\.makeStageGateDeps\(\{/);
+  expect(depsBlock).not.toMatch(/\n {4}(gates|diffFiles)\s*:/);
+  const assembly = src.slice(src.indexOf("export function makeStageGateDeps("));
+  expect(assembly.slice(0, assembly.indexOf("\n}\n"))).toMatch(/diffFiles:\s*makeMergeDiffFilesDep\(/);
 
   // changedFiles GitDiffError / MergeBaseError inside diffFiles → ok:false → today's path (one gate run, needs-human).
   const gitDiffErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", diffFailsFrom: 2 });   // the gates dep's own diff succeeds

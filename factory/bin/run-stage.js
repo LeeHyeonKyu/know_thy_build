@@ -2095,7 +2095,7 @@ export function makeStageGatesDep({ stage, run, root, gh, issue, getHarness, get
 
 /**
  * #157 — merge stage 전용: the file names of this PR's `<base>...HEAD` diff, from the same `changedFiles` every
- * other stage uses (no new git call shape). `{ ok:true, files }` or `{ ok:false, files:[], reason }` — a
+ * other stage uses (no new git call shape) — every path it names, both sides of R/C rows. `{ ok:true, files }` or `{ ok:false, files:[], reason }` — a
  * MergeBaseError/GitDiffError (or anything else) is "not readable", never "empty", so the merge stage falls back
  * to today's single-run outcome (fail closed, the same shape as `protectedPaths`).
  */
@@ -2104,10 +2104,23 @@ export function makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }) {
     try {
       const base = await mergeBase();
       const changed = await changedFiles({ run, cwd: root, base, harness: getHarness() });
-      return { ok: true, files: changed.all };
+      // `touched`, not `all`: a rename out of server/** is a diff in server/** (both sides count; D rows count).
+      return { ok: true, files: changed.touched };
     } catch (e) {
       return { ok: false, files: [], reason: `${e?.message || e}` };
     }
+  };
+}
+
+/**
+ * #157 — the gate deps `main()` spreads into its deps object: the `gates` dep every gated stage uses and the
+ * merge-only `diffFiles` dep the re-run rule reads. One assembly, so the merge re-run test goes through exactly the
+ * object production builds (a missing `diffFiles` here is a missing `diffFiles` in production, and vice versa).
+ */
+export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }) {
+  return {
+    gates: makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }),
+    diffFiles: makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }),
   };
 }
 
@@ -2934,13 +2947,13 @@ async function main() {
      * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의
      * 자기 신고에서 읽고, 그마저 없으면 CHARTER의 기본값으로 fail closed 대신 보수적으로 채운다.
      */
-    gates: makeStageGatesDep({
+    // `gates` + (#157, merge stage 전용) `diffFiles`: the PR's `<base>...HEAD` file list for the merge re-run rule
+    // (§makeMergeDiffFilesDep). Both come from the one assembly the run-stage test drives (§makeStageGateDeps).
+    ...makeStageGateDeps({
       stage, run, root, gh, issue, getHarness: () => harness, getCharter: () => charter, mergeBase, readFile, gatesPath,
       // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
       transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal, admission }),
     }),
-    /** #157 merge stage 전용: the PR's `<base>...HEAD` file list for the merge re-run rule (§makeMergeDiffFilesDep). */
-    diffFiles: makeMergeDiffFilesDep({ run, root, mergeBase, getHarness: () => harness }),
     /**
      * ADR-024 / KTB-42 — 리뷰가 시작되기 전에 "증거를 남길 수 있는가"를 **실물로** 확인한다.
      * 도구가 설치돼 있으면 그 도구를 부른다(리뷰어가 부를 바로 그 명령이라, 여기서 통과한 것은
