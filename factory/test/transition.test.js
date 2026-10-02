@@ -587,3 +587,68 @@ test("1.4.36: an interactive Claude Code session is an agent session — for the
   expect(principalFromEnv({ SHELL: "/bin/zsh", HOME: "/Users/hk" }, "hk")).toBe("person:hk");
   expect(refuseHumanFlag({ SHELL: "/bin/zsh" })).toBe(false);
 });
+
+// ── #156 (ADR-032) — 새 엔진이 온 뒤의 **릴리스 재시도** 주체 ────────────────────────────────────
+// `by: "factory:release-<v>"`는 sweeper의 `sweepRetryOnRelease`가 붙이는 자기 신고다. 그것은 `needs-human →
+// 중단 지점` 한 엣지만 연다 — needs-info에서도, 다른 목적지로도 열리지 않고, `--human`/`--retry` 거절은 그대로다.
+import { HUMAN_FLAG_REFUSED } from "../lib/transition.js";
+import { retryOnReleaseMarker as releaseMarker156 } from "../lib/retro/issue-comments.js";
+
+test("test_156_release_principal_is_accepted_and_human_flag_untouched", async () => {
+  const BY = "factory:release-1.4.45";
+  // (a) needs-human → 중단 지점: 열린다. principal은 그대로, reason=retry, 러너의 마커가 같은 코멘트에.
+  const ok = fakeGh(["factory:needs-human"], stoppedInReview());
+  const r = await transition({ gh: ok, issue: 7, to: "factory:awaiting-review", by: BY, reason: "engine 1.4.45 released", env: { GITHUB_ACTIONS: "true" } });
+  expect(r).toMatchObject({ ok: true, from: "factory:needs-human", to: "factory:awaiting-review" });
+  expect(ok.setFactoryLabel).toHaveBeenCalledWith(7, "factory:awaiting-review");
+  const body = ok.comment.mock.calls[0][1];
+  expect(TRANSITION_TO.exec(body)?.slice(1)).toEqual(["factory:needs-human", "factory:awaiting-review", BY, "retry"]);
+  expect(body).toContain(releaseMarker156("1.4.45"));
+  expect(lastTransition([{ body, createdAt: "x" }])).toMatchObject({ by: BY, reason: "engine 1.4.45 released" });
+  // 목적지를 생략하면 중단 지점이 목적지다(사람의 --retry와 같은 해석).
+  const implied = fakeGh(["factory:needs-human"], stoppedInReview());
+  expect(await transition({ gh: implied, issue: 7, by: BY, reason: "x", env: {} })).toMatchObject({ ok: true, to: "factory:awaiting-review" });
+
+  // (b) 다른 목적지는 거부 — 라벨 불변.
+  const other = fakeGh(["factory:needs-human"], stoppedInReview());
+  const o = await transition({ gh: other, issue: 7, to: "factory:planned", by: BY, reason: "x", env: {} });
+  expect(o.ok).toBe(false);
+  expect(o.reason).toMatch(/factory:awaiting-review/);
+  expect(other.setFactoryLabel).not.toHaveBeenCalled();
+  // 중단 지점을 모르면 거부(추측하지 않는다).
+  const unknown = fakeGh(["factory:needs-human"], [tcomment("factory:queue", "factory:needs-human", { reason: "triage artifact invalid" })]);
+  expect((await transition({ gh: unknown, issue: 7, to: "factory:ready", by: BY, env: {} })).ok).toBe(false);
+  expect(unknown.setFactoryLabel).not.toHaveBeenCalled();
+
+  // (c) needs-info에서는 열리지 않는다 — 그 라벨의 재시도는 여전히 사람의 것이다.
+  const info = fakeGh(["factory:needs-info"], parkedOnHarness());
+  const i = await transition({ gh: info, issue: 7, to: "factory:planned", by: BY, reason: "x", env: {} });
+  expect(i.ok).toBe(false);
+  expect(info.setFactoryLabel).not.toHaveBeenCalled();
+  // 형식이 다른 주체(버전 없음)도, 평범한 스크립트도 그 엣지를 밟지 못한다.
+  for (const by of ["factory:release-", "factory:run-123", null]) {
+    const g = fakeGh(["factory:needs-human"], stoppedInReview());
+    expect((await transition({ gh: g, issue: 7, to: "factory:awaiting-review", by, env: {} })).ok, String(by)).toBe(false);
+    expect(g.setFactoryLabel).not.toHaveBeenCalled();
+  }
+
+  // (d) 멈춘 자리가 merge면 blocked으로 — origin은 approved(blocked 팔이 merge를 다시 민다).
+  const merge = fakeGh(["factory:needs-human"], [
+    tcomment("factory:awaiting-review", "factory:approved", { at: "2026-09-13T09:00:00Z" }),
+    tcomment("factory:approved", "factory:blocked", { at: "2026-09-13T09:10:00Z", reason: "cannot compute merge-base (shallow clone?)" }),
+    tcomment("factory:blocked", "factory:needs-human", { at: "2026-09-13T09:40:00Z", reason: "blocked (undecidable) — needs human" }),
+  ]);
+  expect(await transition({ gh: merge, issue: 7, by: BY, reason: "x", env: {} })).toMatchObject({ ok: true, to: "factory:blocked" });
+  expect(blockedOrigin([{ body: merge.comment.mock.calls[0][1] }])).toMatchObject({ from: "factory:approved", stage: "merge" });
+
+  // (e) 사람의 플래그는 그대로: 러너/에이전트 env에서는 release 주체를 함께 실어도 gh 호출 전에 거절된다.
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { CLAUDE_PROJECT_DIR: "/w" }]) {
+    const h = fakeGh(["factory:needs-human"], stoppedInReview());
+    const x = await transition({ gh: h, issue: 7, human: true, retry: true, by: BY, env });
+    expect(x).toMatchObject({ ok: false, reason: HUMAN_FLAG_REFUSED });
+    expect(h.issue).not.toHaveBeenCalled();
+  }
+  expect(refuseHumanFlag({ GITHUB_ACTIONS: "true" })).toBe(true);
+  expect(refuseHumanFlag({})).toBe(false);
+  expect(principalFromEnv({ GITHUB_ACTIONS: "true", GITHUB_RUN_ID: "9" }, "bot")).toBe("factory:run-9");
+});

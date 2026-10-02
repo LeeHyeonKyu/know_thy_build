@@ -430,6 +430,42 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
 }
 
 /**
+ * ── #156 (ADR-032) — **새 엔진이 왔을 때 한 번** ─────────────────────────────────────────────────
+ *
+ * 엔진 결함(`undecidable`)으로 멈춘 `factory:needs-human`은 사람의 판단이 아니라 고친 엔진을 기다린다. sweeper의
+ * `sweepRetryOnRelease`가 설치본 버전(`.factory/install-manifest.json`의 `ktb_version`)이 그 멈춤 당시의 버전과
+ * 다르면 한 번 중단 지점으로 되돌린다. 세 조각의 문법이 여기 한 곳에 산다(쓰는 쪽 `transition.js`, 읽는 쪽 sweeper와
+ * `commentsSinceCycleStart`):
+ *   - `factory:release-<v>` — 그 전이의 `by=` 자기 신고(권한이 아니라 감사 기록 — `transition.js`가 엣지를 좁힌다).
+ *   - `factory-retry-on-release version=<v>` — 그 전이 코멘트에 실리는 **러너의** 마커. 이슈당 릴리스당 1회의 dedupe이고,
+ *     팩토리 계정이 쓴 것만 재시도 예산의 새 주기를 연다(본문의 `by=`만으로는 열지 않는다 — S1).
+ *   - `factory-engine-version version=<v>` — sweeper가 needs-human 에스컬레이션 전이에 싣는 "그때의 엔진 버전".
+ */
+const versionToken = (v) => String(v ?? "").trim().replace(/[\s>]+/g, "-");
+export const RELEASE_PRINCIPAL = /^factory:release-(\S+)$/;
+export const releasePrincipal = (version) => `factory:release-${versionToken(version)}`;
+export const RETRY_ON_RELEASE = /<!-- factory-retry-on-release version=(\S+) -->/;
+export const retryOnReleaseMarker = (version) => `<!-- factory-retry-on-release version=${versionToken(version)} -->`;
+export const ENGINE_VERSION = /<!-- factory-engine-version version=(\S+) -->/;
+export const engineVersionMarker = (version) => `<!-- factory-engine-version version=${versionToken(version)} -->`;
+
+/**
+ * #156 dw6 — 이 코멘트가 **팩토리가 쓴 릴리스 재시도 전이**인가. 셋 다 참이어야 한다: 전이 마커가 `by=factory:release-<v>
+ * reason=retry`이고, 같은 코멘트에 같은 `<v>`의 `factory-retry-on-release` 마커가 있고, 작성자가 팩토리 계정이다.
+ * 팩토리 계정을 모르면 인정하지 않는다(닫힌 쪽) — 본문은 누구나 흉내 낼 수 있다.
+ */
+export function isFactoryReleaseRetry(comment, { factoryLogin = null } = {}) {
+  const b = String(comment?.body ?? "");
+  const m = TRANSITION_TO.exec(b);
+  if (!m || m[4] !== "retry") return false;
+  const p = RELEASE_PRINCIPAL.exec(m[3]);
+  const r = RETRY_ON_RELEASE.exec(b);
+  if (!p || !r || p[1] !== r[1]) return false;
+  const author = typeof comment?.author === "string" ? comment.author.trim() : "";
+  return Boolean(author && typeof factoryLogin === "string" && factoryLogin && author.toLowerCase() === factoryLogin.toLowerCase());
+}
+
+/**
  * 1.4.12 (own-calendar #9/#28/#29/#30) — **재점화 예산의 창**: 마지막 재큐(`to=factory:queue`) **또는** 사람의 전이
  * (`by=human`: retry·hold 해제) 이후. `commentsSinceRequeue`는 리뷰 라운드(K)의 창이라 사람의 retry로 리셋하면
  * K를 우회하게 되므로 그대로 두고, 이 창은 sweeper의 스톨 재점화 카운터에만 쓴다 — 사람이 되돌린 이슈는 새 주기이고,
@@ -443,6 +479,8 @@ export function commentsSinceCycleStart(comments, { factoryLogin = null } = {}) 
     const m = TRANSITION_TO.exec(b);
     if (!m) return;
     if (m[2] === "factory:queue") { from = i + 1; return; }          // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
+    // #156 dw6 — 새 엔진이 온 뒤의 릴리스 재시도도 사람의 `--retry`처럼 새 주기다. 단 러너의 마커 + 팩토리 계정일 때만.
+    if (isFactoryReleaseRetry(c, { factoryLogin })) { from = i + 1; return; }
     /**
      * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 **본문이 아니라 계정**으로 판정한다. 예전 `/\bby=human\b/`는 봇 계정이
      * 흉내 낸 코멘트에도 창을 리셋했다(sweeper의 stalled restart limit, self-gate backstop). 작성자를 모르는 코멘트는
