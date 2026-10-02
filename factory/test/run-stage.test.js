@@ -1,5 +1,5 @@
 import { test, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
@@ -3944,12 +3944,19 @@ test("test_170_production_verify_path_recovers_from_output_file", async () => {
   mkdirSync(join(scratch, "tasks"), { recursive: true });
   const outputFile = join(scratch, "tasks", "wf086hvld.output");
   const L = (o) => JSON.stringify(o);
-  const transcriptFor = (artifact) => {
+  // The runner stamps its notification from when it finished the file: on a real runner (Claude Code 2.1.287,
+  // fixtures/claude-2.1.287-task-notification.json) the file's ctime was REAL_LAG ms after the line's timestamp.
+  // Stamp each notification the same way — not with a far-future date that passes the ctime check by construction.
+  const real287 = JSON.parse(readFileSync(new URL("./fixtures/claude-2.1.287-task-notification.json", import.meta.url), "utf8"));
+  const realNote = real287.background_task.lines.find((o) => o.type === "attachment");
+  const REAL_LAG = Number(BigInt(real287.background_task.output_file.ctime_ns) / 1000n) / 1000 - Date.parse(realNote.timestamp);
+  const runnerStamp = () => new Date(Math.floor(statSync(outputFile).ctimeMs - REAL_LAG)).toISOString();
+  const transcriptFor = (artifact, timestamp = runnerStamp()) => {
     const full = JSON.stringify(artifact);
     return [
       L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-review" } }] } }),
       L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wf086hvld\nSummary: Review panel\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
-      L({ type: "user", timestamp: "2099-01-01T00:00:00.000Z", message: { content: `<task-notification>\n<task-id>wf086hvld</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
+      L({ type: "user", timestamp, message: { content: `<task-notification>\n<task-id>wf086hvld</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
       L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
       L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
     ].join("\n") + "\n";
@@ -3991,6 +3998,22 @@ test("test_170_production_verify_path_recovers_from_output_file", async () => {
   expect(v.source).toContain(outputFile);
   expect(v.data.verdicts[0].verified).toHaveLength(160);
   // main()'s own dep (built by makeVerifyStageDep) is driven for real in the test below.
+
+  // (3) a copied incident: the transcript keeps the runner's REAL past notification time, and the output file was
+  // copied into the temp dir afterwards (so its ctime is now). Neither caller can tell a copy from a rewrite after
+  // the runner's notification, so both refuse — with the same reason, naming the file. The CLI never vouches for
+  // a file that CI would refuse.
+  writeFileSync(outputFile, envelopeOf(review));
+  writeFileSync(transcriptPath, transcriptFor(review, realNote.timestamp));
+  const copiedRun = verifyStageForRun({ root, stage: "review", out: maxTurns, gates: { status: "GREEN", level: "full" }, ctx: { roster: [], orchestration: "workflow" }, charter: { never_automate: [] }, qaManifest: null, home: root });
+  expect(copiedRun.ok).toBe(false);
+  expect(copiedRun.reasons.join("\n")).toContain(`workflow output file changed after the runner's notification: ${outputFile}`);
+  writeFileSync(join(croot, ".factory/out/review.json"), JSON.stringify(maxTurns));
+  writeFileSync(join(croot, ".factory/out/context.json"), JSON.stringify({ roster: [], orchestration: "workflow" }));
+  const copiedCli = verifyStageCli({ root: croot, argv: ["review", "124", "--transcript", transcriptPath], home: croot });
+  expect(copiedCli.ok).toBe(false);
+  // (the CLI is handed no gates file — that one extra line is the CLI's own, not a different verdict)
+  expect(copiedCli.reasons.filter((r) => r !== "gates file missing")).toEqual(copiedRun.reasons);
 });
 
 // #170 dw6 (skeptic) — the dep main() hands to runStage is built by `makeVerifyStageDep`; drive THAT
@@ -4017,7 +4040,7 @@ test("test_170_production_verify_path_recovers_from_output_file — main()'s ver
   writeFileSync(transcriptPath, [
     L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-review" } }] } }),
     L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wfDEP0001\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
-    L({ type: "user", timestamp: "2099-01-01T00:00:00.000Z", message: { content: `<task-notification>\n<task-id>wfDEP0001</task-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated)</result>\n</task-notification>` } }),
+    L({ type: "user", timestamp: new Date(Math.floor(statSync(outputFile).ctimeMs)).toISOString(), message: { content: `<task-notification>\n<task-id>wfDEP0001</task-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated)</result>\n</task-notification>` } }),
     L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
     L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
   ].join("\n") + "\n");
@@ -4047,4 +4070,53 @@ test("test_170_production_verify_path_recovers_from_output_file — main()'s ver
   const forRun = src.indexOf("export function verifyStageForRun(");
   expect(libCalls[0]).toBeGreaterThan(forRun);
   expect(libCalls[0]).toBeLessThan(src.indexOf("\n}\n", forRun));
+});
+
+// #170 skeptic — one session's implement handoff has TWO production readers: verifyStage (through
+// verifyStageForRun) and the KTB-43 drift guard (`handoffHeadSha`, read before the gates). If only the first one
+// reads the receipt's output file, a handoff recovered from that file has a head_sha for verify and none for the
+// guard — which then drops nothing, silently. Both must read the same file and agree.
+test("test_170_production_verify_path_recovers_from_output_file — the KTB-43 drift guard reads the same handoff", async () => {
+  const mod = await import("../bin/run-stage.js");
+  const { verifyStageForRun, implementHeadShaOf, handoffHeadShaForRun } = mod;
+  expect(typeof handoffHeadShaForRun).toBe("function");
+  const scratch = mkdtempSync(join(tmpdir(), "ktb170-drift-"));
+  mkdirSync(join(scratch, "tasks"), { recursive: true });
+  const outputFile = join(scratch, "tasks", "wfIMPL0001.output");
+  const L = (o) => JSON.stringify(o);
+  const sha = "e".repeat(40);
+  const impl = { schema: "factory.implement.v1", issue: 170, head_sha: sha, pr: 171, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted", notes: Array.from({ length: 600 }, (_, i) => `dw${i % 6 + 1}: prove-test reverted the change and the test failed (${i})`).join("\n") }, orchestration: "workflow", guarantee: "verified" };
+  const full = JSON.stringify(impl);
+  expect(full.length).toBeGreaterThan(30000);
+  writeFileSync(outputFile, JSON.stringify({ summary: "Dynamic workflow completed", agentCount: 2, logs: [], result: impl }, null, 2));
+  const root = mkdtempSync(join(tmpdir(), "ktb170-driftroot-"));
+  mkdirSync(join(root, ".factory/out"), { recursive: true });
+  const transcriptPath = join(root, "session.jsonl");
+  writeFileSync(transcriptPath, [
+    L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-implement" } }] } }),
+    L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wfIMPL0001\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
+    L({ type: "user", timestamp: new Date(Math.floor(statSync(outputFile).ctimeMs)).toISOString(), message: { content: `<task-notification>\n<task-id>wfIMPL0001</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
+    L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
+    L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
+  ].join("\n") + "\n");
+  writeFileSync(join(root, ".factory/out/agents.jsonl"), L({ event: "SubagentStop", agent_type: "builder", session_id: "sess-impl", transcript_path: transcriptPath }) + "\n");
+  const maxTurns = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "waiting", session_id: "sess-impl" };
+
+  // verify's reader recovers the handoff from the file …
+  const v = verifyStageForRun({ root, stage: "implement", out: maxTurns, gates: { status: "GREEN", level: "full" }, ctx: { roster: [], orchestration: "workflow" }, charter: { never_automate: [] }, home: root });
+  expect(v.ok).toBe(true);
+  expect(v.data.head_sha).toBe(sha);
+  // … and the drift guard's reader, built the same way, reads the same head_sha
+  expect(handoffHeadShaForRun({ root, stage: "implement", out: maxTurns, home: root })).toBe(sha);
+  // only implement has a head_sha to guard
+  expect(handoffHeadShaForRun({ root, stage: "review", out: maxTurns, home: root })).toBe(null);
+  // dw5: implementHeadShaOf without a reader keeps today's answer (no file is read)
+  expect(implementHeadShaOf({ out: maxTurns, transcriptText: readFileSync(transcriptPath, "utf8") })).toBe(null);
+
+  // main() wiring: its handoffHeadSha dep IS this function, given no reader or home of its own
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const wired = /\bhandoffHeadSha\s*:\s*\(\s*out\s*\)\s*=>\s*handoffHeadShaForRun\s*\(\s*\{([^}]*)\}\s*\)/.exec(mainSrc);
+  expect(wired, "main() must read the drift guard's head_sha with handoffHeadShaForRun({...})").not.toBe(null);
+  expect(wired[1]).not.toMatch(/readFile|home/);
 });

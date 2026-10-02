@@ -1873,15 +1873,29 @@ export const driftDroppedMarker = ({ branch, from, to, dropped = [], files = [] 
  * `implement.v1`의 `gates`는 존재와 `status` 열거만 보므로(§schemas) 후보 선택 결과는 동일하다.
  * 읽지 못하면 `null`이고, 그때는 아무것도 되돌리지 않는다(전이 요구조건이 예전처럼 판단한다).
  */
-export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
+export function implementHeadShaOf({ out, transcriptText = "", readFile } = {}) {
   const placeholder = (o) => (o && !o.gates ? { ...o, gates: { status: "GREEN", level: "unit" } } : o);
+  // #170 — `readFile`은 옵트인이다(없으면 예전 그대로, dw5). 프로덕션 가드(`handoffHeadShaForRun`)는 verify와
+  // 같은 리더를 넘겨, 접수증의 결과 파일에서만 복구된 핸드오프도 같은 sha로 읽는다.
   const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
     validate: (o) => validate("implement.v1", placeholder(o)),
+    readFile,
   });
   const sha = a.ok ? a.data?.head_sha : null;
   return typeof sha === "string" && SHA40.test(sha) ? sha : null;
+}
+
+/**
+ * #170 — KTB-43 드리프트 가드가 읽는 `head_sha`의 **프로덕션 호출**(`main()`의 `handoffHeadSha` dep). 같은 세션의
+ * 핸드오프를 읽는 두 리더(이것과 `verifyStageForRun`)가 같은 트랜스크립트·같은 리더로 읽어야 한다: 한쪽만 접수증의
+ * 결과 파일을 보면, 그 파일에서만 복구된 implement 핸드오프는 verify에는 sha가 있고 가드에는 없어서 가드가 아무것도
+ * 되돌리지 않는다(스킵틱 #170). implement 밖의 스테이지는 지킬 sha가 없다 — null.
+ */
+export function handoffHeadShaForRun({ root, stage, out, home = homedir(), readFile = readFileOrNull }) {
+  if (stage !== "implement") return null;
+  return implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out, home, readFile), readFile });
 }
 
 /**
@@ -2889,7 +2903,7 @@ async function main() {
      * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
      */
-    handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    handoffHeadSha: (out) => handoffHeadShaForRun({ root, stage, out }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,
