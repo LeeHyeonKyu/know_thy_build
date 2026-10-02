@@ -97,6 +97,19 @@ export const stalledRestartLimitReason = `stalled restart limit (${STALLED_RESTA
 export const blockedRetryComment = (stage, issue, attempt) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}${attempt ? ` attempt=${attempt}` : ""} -->`;
 
 /**
+ * #168 rework arch1 — `blockedRetryComment`이 쓰는 문법을 읽는 **유일한** 곳. 예전에는 읽는 쪽 정규식이
+ * 세 군데(`lastBlockedRetryAttempt`, `retriedSinceOrigin`, `blockedRetryPendingRun`)에 손으로 복사돼 있었고
+ * 이미 어긋나 있었다(캡처 vs 비캡처 `attempt=`). 문법을 다시 넓힐 때(KTB-22가 `attempt=`를 넣었듯) 한 곳만
+ * 놓쳐도 그 팔이 마커를 못 보고 조용히 fail-closed로 떨어진다 — 그래서 쓰는 함수 바로 옆에 하나만 둔다.
+ *
+ * 돌려주는 값: 이 이슈+스테이지의 마커가 `body`에 있으면 `{ attempt }`(`attempt` 없는 옛 마커는 1), 없으면 `null`.
+ */
+export function matchBlockedRetryMarker(body, stage, issue) {
+  const m = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))? -->`).exec(String(body ?? ""));
+  return m ? { attempt: m[1] ? Number(m[1]) : 1 } : null;
+}
+
+/**
  * KTB-22 — `factory-blocked-origin` 마커가 실어 온 사유(`blockedOrigin(comments).reason`)가 API
  * 쿼터/장애(`claude -p api error …`)를 말하면, "한 번은 공짜"를 3번으로 넓힌다. 사유가 대개 몇 분~
  * 몇 시간 안에 풀리는 조직 지출/속도 한도라서, sweep 간격(기본 30분)만큼 띄워 세 번 다시 밀어보는
@@ -136,11 +149,10 @@ export const BLOCKED_ESCALATION_REASON = {
 const escalationReason = (cause) => BLOCKED_ESCALATION_REASON[cause] ?? BLOCKED_ESCALATION_REASON.other;
 /** 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). */
 function lastBlockedRetryAttempt(comments, stage, issue) {
-  const re = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))? -->`);
   let last = 0;
   for (const c of comments || []) {
-    const m = re.exec(String(c?.body ?? ""));
-    if (m) last = Math.max(last, m[1] ? Number(m[1]) : 1);
+    const m = matchBlockedRetryMarker(c?.body, stage, issue);
+    if (m) last = Math.max(last, m.attempt);
   }
   return last;
 }
@@ -156,8 +168,7 @@ function retriedSinceOrigin(comments, stage, issue) {
   const list = comments || [];
   let from = 0;
   list.forEach((c, i) => { if (BLOCKED_ORIGIN.test(String(c?.body ?? ""))) from = i + 1; });
-  const re = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))? -->`);
-  return list.slice(from).some((c) => re.test(String(c?.body ?? "")));
+  return list.slice(from).some((c) => matchBlockedRetryMarker(c?.body, stage, issue) !== null);
 }
 
 /**
@@ -1283,10 +1294,9 @@ export const DISPATCHED_RUN_NEVER_STARTED = "dispatched run never started";
  *   5. 그래도 마커로부터 `2 × staleMinutes`를 넘겼으면 → "dispatched run never started"로 에스컬레이션.
  */
 async function blockedRetryPendingRun({ stageRuns, comments, stage, issue, nowMs, stale, actions }) {
-  const re = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=\\d+)? -->`);
   const list = Array.isArray(comments) ? comments : [];
   let markerIdx = -1;
-  list.forEach((c, i) => { if (re.test(String(c?.body ?? ""))) markerIdx = i; });
+  list.forEach((c, i) => { if (matchBlockedRetryMarker(c?.body, stage, issue)) markerIdx = i; });
   if (markerIdx === -1) return { wait: false };
   const markerAt = Date.parse(list[markerIdx]?.createdAt ?? "");
   if (!Number.isFinite(markerAt)) return { wait: false };

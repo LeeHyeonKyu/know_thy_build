@@ -2728,3 +2728,30 @@ test("test_168_reblocked_after_retry_escalates_despite_running_run: a blocked tr
   expect(escalatedToHuman168(waiting.transition)).toBe(false);
   expect(waiting.actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
 });
+
+// #168 rework arch1 — the blocked-retry marker grammar is written by `blockedRetryComment` and read by ONE shared
+// matcher. Three hand-copied reader regexes had already drifted (capturing vs non-capturing `attempt=`); the next
+// widening of the grammar would have silently dropped the waiting arm back to fail-closed escalation.
+test("test_168_blocked_retry_marker_has_one_reader: every marker blockedRetryComment writes is read back by matchBlockedRetryMarker with its attempt, and sweeper.js holds no other reader regex", async () => {
+  // one writer + one reader: the grammar literal appears exactly twice in the module source
+  const src = readFileSync(new URL("../lib/sweeper.js", import.meta.url), "utf8");
+  expect(src.match(/factory-sweeper blocked-retry stage=/g)).toHaveLength(2);
+  const { matchBlockedRetryMarker } = await import("../lib/sweeper.js");
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 111), "merge", 111)).toEqual({ attempt: 1 });
+  for (const n of [1, 2, 3]) {
+    expect(matchBlockedRetryMarker(`prefix\n${blockedRetryComment("implement", 9, n)}\ntail`, "implement", 9)).toEqual({ attempt: n });
+  }
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 111), "review", 111)).toBeNull();
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 111), "merge", 11)).toBeNull();
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 11), "merge", 111)).toBeNull();
+  expect(matchBlockedRetryMarker(restartComment("merge", 111), "merge", 111)).toBeNull();
+  expect(matchBlockedRetryMarker(undefined, "merge", 111)).toBeNull();
+
+});
+
+test("test_168_blocked_retry_marker_has_one_reader: the waiting arm reads an attempt-numbered marker the same way the retry budget does", async () => {
+  const numbered = { ...retryMarker168(), body: `${blockedRetryComment("merge", 111, 1)}\n\`factory-merge.yml\`을 한 번 다시 띄웁니다.` };
+  const { actions, transition } = await sweep168({ comments: [humanRetry168(), numbered], stageRuns: async () => [runRow168("queued")] });
+  expect(escalatedToHuman168(transition)).toBe(false);
+  expect(actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+});
