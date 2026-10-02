@@ -3995,6 +3995,11 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(await ok.d.diffFiles.mock.results[0].value).toEqual({ ok: true, files: ["client/src/pages/Calendar.tsx", "client/src/api/follows.ts"] });
   for (const a of ok.diffArgs) expect(a).toEqual(["diff", "--name-status", `${BASE}...HEAD`]);
   expect(ok.d.mergePr).toHaveBeenCalled();
+  // The re-run is the `gates` dep, not mergeGates: mergeGates runs once (no prReady in this dep set), and only
+  // after the second gates call resolved; mergePr comes after it.
+  expect(ok.d.mergeGates).toHaveBeenCalledTimes(1);
+  expect(ok.d.mergeGates.mock.invocationCallOrder[0]).toBeGreaterThan(ok.d.gates.mock.invocationCallOrder[1]);
+  expect(ok.d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(ok.d.mergeGates.mock.invocationCallOrder[0]);
   expect(ok.statuses.filter((s) => s.context === "factory/gates").map((s) => s.state)).toEqual(["failure", "success"]);
   expect(JSON.parse(readFileSync(join(ok.root, ".factory/out/gates.json"), "utf8")).status).toBe("GREEN");
   expect(ok.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC))).toBe(true);
