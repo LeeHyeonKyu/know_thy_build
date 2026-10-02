@@ -2232,3 +2232,54 @@ test("test_149_veto_window_opens_waits_and_closes — a forged factory/gates sta
   const plain = baseD({ gates: vi.fn(async () => ({ schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: HEAD, passed: 3, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } })) });
   expect(await run(plain)).toBe(0);
 });
+
+// ── #149 rework (arch1) ──────────────────────────────────────────────────────────────────────────────
+
+import { factoryPoster } from "../lib/merge-stage.js";
+import { readFileSync } from "node:fs";
+
+test("test_149_veto_label_hands_to_human — 'was this posted by a factory account' is one predicate, and every caller reads the same fact the same way (arch1)", async () => {
+  // 술어 자체: 기준이 없으면 판정 불가, 게시자가 비었거나 남이면 거부, 대소문자·공백은 같은 계정이다.
+  const unresolved = factoryPoster({ logins: [], login: "ktb-bot", subject: "factory/gates on bbbbbbb" });
+  expect(unresolved.ok).toBe(false);
+  expect(unresolved.undecidable).toBe(true);
+  expect(unresolved.reason).toMatch(/could not be resolved.*factory\/gates on bbbbbbb/);
+  const nobody = factoryPoster({ logins: ["ktb-bot"], login: "  ", subject: "factory/gates on bbbbbbb" });
+  expect(nobody).toMatchObject({ ok: false, undecidable: false });
+  expect(nobody.reason).toMatch(/^factory\/gates on bbbbbbb names no creator/);
+  const stranger = factoryPoster({ logins: ["ktb-bot"], login: "mallory", subject: "factory/gates on bbbbbbb" });
+  expect(stranger).toMatchObject({ ok: false, undecidable: false });
+  expect(stranger.reason).toMatch(/^factory\/gates on bbbbbbb was posted by @mallory, which is not a factory account \(@ktb-bot\)/);
+  expect(factoryPoster({ logins: ["KTB-Bot", null], login: " ktb-BOT ", subject: "x" }).ok).toBe(true);
+  expect(factoryPoster({ logins: undefined, login: "ktb-bot", subject: "x" }).undecidable).toBe(true);
+
+  // 같은 사실(게시자 없음)이 세 자리에서 같은 문장으로 읽힌다 — 리뷰 증거((6b)·sweeper), 비판정 게이트 증거, 재사용 창.
+  const noCreatorGates = [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }, { context: "factory/gates", state: "success", creatorLogin: "" }];
+  expect(verifyFactoryStatuses({ sha: HEAD, statuses: noCreatorGates, logins: ["ktb-bot"] }).reason).toMatch(/factory\/gates on bbbbbbb names no creator/);
+  const gatesD = baseD(windowDeps({ commitStatuses: vi.fn(async () => noCreatorGates) }));
+  expect(await run(gatesD)).toBe(2);
+  expect(gatesD.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:needs-human", reason: expect.stringMatching(/^gates not verified for a non-judge protected-path PR — factory\/gates on bbbbbbb names no creator/) });
+  expect(gatesD.mergePr).not.toHaveBeenCalled();
+
+  const at = (min) => new Date(T0 + min * MIN).toISOString();
+  const honest = { sha: HEAD, state: "pending", description: `closes=${at(-10)}`, creatorLogin: "ktb-bot", createdAt: at(-70) };
+  const reuse = (win, older = []) => baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: win })), history: vi.fn(async () => ({ ok: true, entries: [win, ...older] })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  const anonWindow = reuse({ ...honest, creatorLogin: "" });
+  expect(await run(anonWindow)).toBe(2);
+  expect(anonWindow.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", reason: expect.stringMatching(/factory\/veto-window on bbbbbbb names no creator/) });
+  const anonHistory = reuse(honest, [{ ...honest, creatorLogin: null, createdAt: at(-71) }]);
+  expect(await run(anonHistory)).toBe(2);
+  expect(anonHistory.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", reason: expect.stringMatching(/an earlier factory\/veto-window on bbbbbbb names no creator/) });
+  for (const d of [anonWindow, anonHistory]) expect(d.mergePr).not.toHaveBeenCalled();
+
+  // 대소문자만 다른 팩토리 계정은 세 자리 모두에서 팩토리다 — 창 상태·이력·알림 코멘트 작성자.
+  const shouty = { ...honest, creatorLogin: "KTB-BOT" };
+  const caseD = baseD(windowDeps({ vetoWindow: { read: vi.fn(async () => ({ ok: true, window: shouty })), notice: vi.fn(async ({ closesAt }) => ({ ok: true, comments: [honestNotice(closesAt, { author: "Ktb-Bot" })] })), open: vi.fn(), ensureLabel: vi.fn(async () => ({ ok: true })) } }));
+  expect(await run(caseD)).toBe(0);
+  expect(caseD.mergePr).toHaveBeenCalledTimes(1);
+
+  // 한 벌: 로그인 집합을 만드는 줄과 그 집합을 묻는 줄이 merge-stage.js에 하나씩만 있다(손으로 쓴 사본이 다시 갈라지지 않게).
+  const src = readFileSync(new URL("../lib/merge-stage.js", import.meta.url), "utf8");
+  expect(src.match(/new Set\([^\n]*toLowerCase\(\)\)\)/g) ?? []).toHaveLength(1);
+  expect(src.match(/\.has\([^\n]*\b(by|login|creatorLogin|author)\b[^\n]*toLowerCase\(\)/g) ?? []).toHaveLength(1);
+});
