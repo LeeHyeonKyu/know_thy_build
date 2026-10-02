@@ -4001,6 +4001,9 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(ok.d.mergeGates.mock.invocationCallOrder[0]).toBeGreaterThan(ok.d.gates.mock.invocationCallOrder[1]);
   expect(ok.d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(ok.d.mergeGates.mock.invocationCallOrder[0]);
   expect(ok.statuses.filter((s) => s.context === "factory/gates").map((s) => s.state)).toEqual(["failure", "success"]);
+  // …and both land on the PR head (`git rev-parse HEAD` = HEADSHA, the sha mergeHappyDeps checks out and mergePr merges),
+  // so the required `factory/gates` check read on that head is the re-run's success, not the first run's failure.
+  expect(ok.statuses.filter((s) => s.context === "factory/gates").map((s) => s.sha)).toEqual([HEADSHA, HEADSHA]);
   expect(JSON.parse(readFileSync(join(ok.root, ".factory/out/gates.json"), "utf8")).status).toBe("GREEN");
   expect(ok.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC))).toBe(true);
   const mark = ok.lines.find((l) => l.startsWith("factory-flaky-candidate: "));

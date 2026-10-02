@@ -3,7 +3,7 @@ import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVID
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
-import { runGates } from "../lib/gates.js";
+import { runGates, gatesDetailLines } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 
 /** runStage의 record/refusal과 같은 모양 — 실제 계약을 그대로 흉내낸다. */
@@ -1570,6 +1570,25 @@ const flakyMarksOf = (lines) => lines.filter((l) => l.startsWith("factory-flaky-
 const gateStatusesOf = (postStatus) => postStatus.mock.calls.map((c) => c[0]).filter((s) => s.context === "factory/gates");
 const transitionsOf = (d) => d.transition.mock.calls.map((c) => c[0]);
 /**
+ * "Today's record" as a LITERAL, not as another run of the new code. Comparing against a run without `diffFiles`
+ * only proves the two new-code paths agree — a line the change adds on every RED (e.g. `merge: re-run not proven
+ * — …`) would sit in both and pass. So the gate step's record is pinned to exactly what the pre-#157 step (4)
+ * wrote (main @ 72906cc, merge-stage.js `record([...])` in the BLOCKED and non-GREEN branches): the verdict line,
+ * the stamped gates-detail lines (gates.js `gatesDetailLines`, unchanged by #157), and the test-env note.
+ * `gateStepLines` cuts the record at the last line written before step (4) — nothing after it may differ.
+ */
+const GATE_STEP_START = "merge: agent role sections within policy";
+const gateStepLines = (lines) => {
+  const at = lines.indexOf(GATE_STEP_START);
+  if (at < 0) throw new Error(`run record has no "${GATE_STEP_START}" line — the merge did not reach step (4)`);
+  return lines.slice(at + 1);
+};
+function pre157GateStepLines(g) {
+  const envNote = g?.test_env_reup?.ran ? [`test-env: re-up ${g.test_env_reup.ok ? "ok" : `failed — ${g.test_env_reup.detail}`}`] : [];
+  if (g?.status === "BLOCKED") return [`merge: gates BLOCKED — ${g.blocked_reason || "gates could not be decided"}`, ...envNote];
+  return [`merge: gates ${g?.status ?? "missing"}`, ...gatesDetailLines(g, STAMP_157), ...envNote];
+}
+/**
  * factory.gates.v1 from the real `runGates` with the gate ORDER chosen by the caller and an optional
  * `integration` test gate (`null` = GREEN, an id list = RED with that parsed report, "unparsed" = RED with no
  * report). The order matters: a rule that only looks at the first RED gate passes when the disqualifying gate
@@ -1598,8 +1617,10 @@ async function producedGatesOrdered157({ order, unit = [], integration = null, l
 
 test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   // The real own-calendar #111 shape: client-only diff, one parsed server test RED, whole-GREEN re-run.
-  const first = await producedGates({ failing: [OC_ID] });
-  const second = await producedGates({ failing: [], sha: "a".repeat(40) });
+  // Both runs are on the PR head the merge stage checked out (runStageGates stamps `git rev-parse HEAD`), so the
+  // status assertions below can name the sha mergePr merges — HEAD — rather than restate whatever the fixture says.
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const second = await producedGates({ failing: [], sha: HEAD });
   expect(first.status).toBe("RED");
   expect(first.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
   expect(second.status).toBe("GREEN");
@@ -1616,7 +1637,8 @@ test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   // The commit status follows the final verdict, so the required `factory/gates` check is not left RED.
   const statuses = gateStatusesOf(r.postStatus);
   expect(statuses.map((s) => s.state)).toEqual(["failure", "success"]);
-  expect(statuses.at(-1).sha).toBe(second.head_sha);
+  // The success lands on the PR head itself — the sha runMergeStage was given and the required check is read on.
+  expect(statuses.map((s) => s.sha)).toEqual([HEAD, HEAD]);
   const merged = transitionsOf(r.d).find((t) => t.to === "factory:merged");
   expect(merged).toBeTruthy();
   expect(merged.mergeGatesResult).toEqual({ checksGreen: true, integrityGreen: true });
@@ -1643,7 +1665,7 @@ test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   expect(prod.d.mergePr).toHaveBeenCalledWith(9);
   expect(prod.d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(prod.d.prReady.mock.invocationCallOrder[0]);
   expect(gateStatusesOf(prod.postStatus).map((s) => s.state)).toEqual(["failure", "success"]);
-  expect(gateStatusesOf(prod.postStatus).at(-1).sha).toBe(second.head_sha);
+  expect(gateStatusesOf(prod.postStatus).map((s) => s.sha)).toEqual([HEAD, HEAD]);
   expect(transitionsOf(prod.d).map((t) => t.to)).toEqual(["factory:merged"]);
   expect(transitionsOf(prod.d)[0].mergeGatesResult).toEqual({ checksGreen: true, integrityGreen: true });
   expect(detailsOf(prod.lines)).toEqual([expect.objectContaining({ gate: "unit", run_id: "18113", runner: "gha-18113", failing: [OC_ID] })]);
@@ -1775,6 +1797,7 @@ test("test_157_red_inside_the_diff_is_not_rerun", async () => {
     expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
     expect(transitionsOf(withDiff.d), c.name).toEqual(transitionsOf(today.d));
     expect(withDiff.lines, c.name).toEqual(today.lines);
+    expect(gateStepLines(withDiff.lines), c.name).toEqual(pre157GateStepLines(first));
     expect(withDiff.lines, c.name).toContain("merge: gates RED");
     expect(withDiff.lines.some((l) => /rerun|flaky-candidate/.test(l)), c.name).toBe(false);
     expect(gateStatusesOf(withDiff.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
@@ -1801,6 +1824,7 @@ test("test_157_red_inside_the_diff_is_not_rerun", async () => {
     expect(withDiff.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
     expect(withDiff.lines, c.name).toEqual(today.lines);
+    expect(gateStepLines(withDiff.lines), c.name).toEqual(pre157GateStepLines(first));
     expect(flakyMarksOf(withDiff.lines), c.name).toEqual([]);
   }
 });
@@ -1853,6 +1877,7 @@ test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
     expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(r.d), c.name).toEqual(transitionsOf(today.d));
     expect(r.lines, c.name).toEqual(today.lines);
+    expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(c.first));
     expect(flakyMarksOf(r.lines), c.name).toEqual([]);
   }
   // Several RED gates where the FIRST is an eligible parsed test gate and a later one is not provable
@@ -1881,6 +1906,7 @@ test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
     expect(r.d.mergePr, name).not.toHaveBeenCalled();
     expect(transitionsOf(r.d), name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
     expect(r.lines, name).toEqual(today.lines);
+    expect(gateStepLines(r.lines), name).toEqual(pre157GateStepLines(first));
     expect(flakyMarksOf(r.lines), name).toEqual([]);
   }
 
