@@ -52,7 +52,7 @@ test("init --upgrade replaces factory-owned files only and merges settings", asy
   expect(readFileSync(join(root, ".factory/harness.toml"), "utf8")).toBe("mine");
   expect(readFileSync(join(root, ".factory/lib/gates.js"), "utf8")).toBe(readFileSync(join(pkgRoot, "factory/lib/gates.js"), "utf8"));
   const s = JSON.parse(readFileSync(join(root, ".claude/settings.json"), "utf8"));
-  expect(s.permissions.deny[0]).toBe("Bash(rm -rf /)"); expect(s.permissions.deny).toContain("Bash(gh pr merge*)"); expect(s.hooks.Stop).toHaveLength(1);
+  expect(s.permissions.deny[0]).toBe("Bash(rm -rf /)"); expect(s.permissions.deny).toContain("Bash(git merge*)"); expect(s.permissions.deny).not.toContain("Bash(gh pr merge*)");   // ADR-032: 머지 안내판은 템플릿에서 빠졌고 upgrade가 지운다 expect(s.hooks.Stop).toHaveLength(1);
   expect(o.out.join("\n")).toMatch(/replaced\s+1/);
 });
 

@@ -84,22 +84,25 @@ test("upgrade replaces stale factory-owned files, merges settings, keeps project
 // mergeSettings는 합집합이라 이 줄들은 스스로 사라지지 않는다. 남아 있으면 사람의 대화형 세션에서
 // :harness/:role/:technical이 자기 일을 못 한다 — 설치기가 되돌릴 수 있는 유일한 지점이 여기다.
 
-test("MOVED_DENIES_ADR_019 is exactly the 22 path denies that left settings.json, frozen", () => {
-  expect(MOVED_DENIES_ADR_019.length).toBe(22);
+test("MOVED_DENIES_ADR_019 is the 22 path denies that left settings.json plus the ADR-032 merge sign, frozen", () => {
+  // ADR-032 (2026-10-02): `Bash(gh pr merge*)`는 경로 deny가 아니라 L2 안내판이었다 — 훅이 운영 세션의 비판정 머지를 통과시키는 지금, 그 문을
+  // 다시 막는 유일한 자리라 설치본에서 지운다. 22 + 1.
+  expect(MOVED_DENIES_ADR_019.length).toBe(23);
   expect(Object.isFrozen(MOVED_DENIES_ADR_019)).toBe(true);
-  for (const d of MOVED_DENIES_ADR_019) expect(d, d).toMatch(/^(Edit|Write)\(/);
+  expect(MOVED_DENIES_ADR_019).toContain("Bash(gh pr merge*)");
+  for (const d of MOVED_DENIES_ADR_019.filter((d) => d !== "Bash(gh pr merge*)")) expect(d, d).toMatch(/^(Edit|Write)\(/);
   // CI 전용 항목은 여기 없다 — 그것들은 settings.json에 산 적이 없으므로 제거 대상이 아니다.
   for (const d of ["Bash(gh secret*)", "Read(.env)"]) expect(MOVED_DENIES_ADR_019).not.toContain(d);
 });
 
 test("pruneMovedDenies removes only the moved entries, preserves order, and is idempotent", () => {
-  const settings = { permissions: { deny: ["Bash(gh pr merge*)", "Edit(.factory/**)", "Read(.env)", "Edit(foo/**)", "Write(package.json)"], allow: ["Bash(ls)"] }, other: 1 };
+  const settings = { permissions: { deny: ["Bash(gh pr merge*)", "Edit(.factory/**)", "Read(.env)", "Edit(foo/**)", "Write(package.json)", "Bash(git merge*)"], allow: ["Bash(ls)"] }, other: 1 };
   const once = pruneMovedDenies(settings);
-  expect(once.pruned).toBe(2);
-  expect(once.settings.permissions.deny).toEqual(["Bash(gh pr merge*)", "Read(.env)", "Edit(foo/**)"]);
+  expect(once.pruned).toBe(3);                                         // ADR-032: 머지 안내판도 지운다; `git merge`는 남는다
+  expect(once.settings.permissions.deny).toEqual(["Read(.env)", "Edit(foo/**)", "Bash(git merge*)"]);
   expect(once.settings.permissions.allow).toEqual(["Bash(ls)"]);
   expect(once.settings.other).toBe(1);
-  expect(settings.permissions.deny).toHaveLength(5);                  // 순수 함수 — 입력은 그대로
+  expect(settings.permissions.deny).toHaveLength(6);                  // 순수 함수 — 입력은 그대로
   const twice = pruneMovedDenies(once.settings);
   expect(twice.pruned).toBe(0);
   expect(twice.settings).toEqual(once.settings);
@@ -116,12 +119,12 @@ const staleSettings = () => ({
   hooks: {},
 });
 
-test("upgrade prunes the 22 moved denies and nothing else; a user's own Read(.env)/Edit(foo/**) survive", () => {
+test("upgrade prunes the 23 moved denies and nothing else; a user's own Read(.env)/Edit(foo/**) survive", () => {
   const files = { "/r/.claude/settings.json": JSON.stringify(staleSettings()) };
   const actions = planInstall({ manifest, root: "/r", mode: "upgrade", vars: {}, ...fsOf(files) });
   const a = actions.find((x) => x.dest === ".claude/settings.json");
   expect(a.action).toBe("merge");
-  expect(a.pruned).toBe(22);
+  expect(a.pruned).toBe(23);
   const deny = JSON.parse(a.content).permissions.deny;
   for (const d of MOVED_DENIES_ADR_019) expect(deny, d).not.toContain(d);
   expect(deny).toEqual(["B", "C", "Read(.env)", "Edit(foo/**)", "A"]);   // "A"는 템플릿이 더한 것
@@ -241,7 +244,7 @@ test("M6: upgrade unwires and deletes the dead check-merge-gate.sh hook", () => 
 test("applyInstall reports the pruned count in the summary counts", () => {
   const actions = planInstall({ manifest, root: "/r", mode: "upgrade", vars: {}, ...fsOf({ "/r/.claude/settings.json": JSON.stringify(staleSettings()) }) });
   const r = applyInstall({ actions, root: "/r", writeFile: () => {}, mkdir: () => {}, chmod: () => {} });
-  expect(r.pruned).toBe(22);
+  expect(r.pruned).toBe(23);
 });
 
 test("mergeSettings is idempotent and does not duplicate hook entries", () => {
