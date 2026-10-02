@@ -106,7 +106,9 @@ test("lessons skeletons carry the integrity header", () => {
 
 test("settings.json template has the §6.3 deny list, all four hook events, and record-agents on Subagent*", () => {
   const s = JSON.parse(read("claude/settings.json"));
-  for (const d of ["Bash(gh pr merge*)", "Bash(git push --force*)", "Bash(git merge*)", "Bash(gh api -X PUT /repos/*/branches/*/protection*)"]) expect(s.permissions.deny).toContain(d);
+  // ADR-032 (#160): `Bash(gh pr merge*)`는 템플릿 deny에서 빠졌다 — 그 판정은 훅(operator-merge-check)이 한다. 템플릿에 **없어야** 한다.
+  expect(s.permissions.deny).not.toContain("Bash(gh pr merge*)");
+  for (const d of ["Bash(git push --force*)", "Bash(git merge*)", "Bash(gh api -X PUT /repos/*/branches/*/protection*)"]) expect(s.permissions.deny).toContain(d);
   // ADR-019: 경로 deny는 여기 없다 — deny는 사람의 대화형 세션에도 걸리고 allow로 못 이기므로,
   // 여기 두면 `:harness`·`:role`·`:technical`이 자기 일을 할 수 없다. 전부 ci-settings.json으로 옮겼다.
   for (const d of s.permissions.deny) expect(d, d).toMatch(/^Bash\(/);
@@ -136,7 +138,7 @@ test("settings.json allow grants the tools the factory agents actually need unde
   // 좁은 Bash allow는 남지 않는다 — `Bash(*)`가 그것을 포함하고, 좁은 목록이 곧 차단 목록이었다.
   expect(s.permissions.allow.filter((a) => a.startsWith("Bash("))).toEqual(["Bash(*)"]);
   // 머지는 여전히 builder의 일이 아니다 — allow가 넓어져도 deny가 이긴다.
-  for (const d of ["Bash(gh pr merge*)", "Bash(git push --force*)"]) expect(s.permissions.deny).toContain(d);
+  for (const d of ["Bash(git merge*)", "Bash(git push --force*)"]) expect(s.permissions.deny).toContain(d);
 });
 
 test("ci-settings.json deny covers the build-config files, matching [protected].factory (F9 / ADR-019)", () => {
