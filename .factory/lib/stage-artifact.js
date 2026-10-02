@@ -100,6 +100,11 @@ function fencedObject(text) {
  * 트랜스크립트 형식이 바뀌어도 **조용히 틀리지 않는다** — 찾지 못하면 빈 배열이고, 다음 후보로 내려간다.
  */
 export function workflowResultsFromTranscript(text) {
+  return workflowCallsFromTranscript(text).map((c) => c.text);
+}
+
+/** `workflowResultsFromTranscript`와 같은 훑기 — 각 결과를 낳은 `Workflow` tool_use id와 함께(#170 접수증 묶기). */
+function workflowCallsFromTranscript(text) {
   if (typeof text !== "string" || !text) return [];
   const ids = [];                                                    // Workflow tool_use id, 호출 순서
   const byId = new Map();
@@ -120,7 +125,7 @@ export function workflowResultsFromTranscript(text) {
       }
     }
   }
-  return ids.map((id) => byId.get(id)).filter((s) => typeof s === "string" && s.length > 0);
+  return ids.map((id) => ({ id, text: byId.get(id) })).filter((c) => typeof c.text === "string" && c.text.length > 0);
 }
 
 /**
@@ -274,17 +279,27 @@ export const WORKFLOW_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
  * 알림은 모델이 쓴 것이다; tool_result 블록 안의 알림 모양 텍스트는 파일 내용이다 — 둘 다 버린다). 그래서
  * ① 접수증에 없는 task id의 알림(백그라운드 Bash 등 다른 작업)은 버리고, ② `Read` file_path나 Bash 명령에만
  * 등장하는 경로는 **아예 보지 않는다**(에이전트가 쓴 파일이 판정이 되면 안 된다), ③ scratchpad 디렉터리를
- * 훑거나 그 배치를 짐작하지 않는다 — 경로는 러너가 적어 준 그대로다.
+ * 훑거나 그 배치를 짐작하지 않는다 — 경로는 러너가 적어 준 그대로다. rework(cf1·sec1): ④ 알림의 **머리**만
+ * 읽는다(`runnerNotificationHeader`) — `<result>` 안의 태그는 반환값의 바이트다, ⑤ `<tool-use-id>`가 있으면
+ * 그 task id의 접수증을 낳은 `Workflow` 호출이어야 한다, ⑥ completed가 아닌 알림의 파일은 열지 않고
+ * `rejected`로 돌려 사유에 남긴다.
  */
 export function workflowOutputFilesFromTranscript(text) {
   const taskIds = [];
-  for (const r of workflowResultsFromTranscript(text)) {
+  /** task id → 그 접수증을 낳은 `Workflow` tool_use id들. 알림의 `<tool-use-id>`는 이 중 하나여야 한다. */
+  const callsOf = new Map();
+  for (const { id, text: r } of workflowCallsFromTranscript(text)) {
     if (!isWorkflowReceipt(r)) continue;
     const m = /Task ID:\s*([A-Za-z0-9_-]+)/.exec(r);
-    if (m && !taskIds.includes(m[1])) taskIds.push(m[1]);
+    if (!m) continue;
+    if (!taskIds.includes(m[1])) taskIds.push(m[1]);
+    if (!callsOf.has(m[1])) callsOf.set(m[1], new Set());
+    callsOf.get(m[1]).add(id);
   }
   const files = [];
-  if (!taskIds.length || typeof text !== "string") return { taskIds, files };
+  /** 접수증에 묶인 알림이지만 completed가 아닌 것 — 파일을 열지 않고 사유에 이름만 남긴다(rework cf1). */
+  const rejected = [];
+  if (!taskIds.length || typeof text !== "string") return { taskIds, files, rejected };
   for (const line of text.split("\n")) {
     if (!line.trim() || !line.includes("task-notification")) continue;
     let o;
@@ -297,16 +312,36 @@ export function workflowOutputFilesFromTranscript(text) {
       : Array.isArray(c) ? c.filter((b) => b?.type === "text" || typeof b === "string").map((b) => (typeof b === "string" ? b : b.text ?? ""))
         : [];
     for (const t of texts) {
-      for (const m of String(t).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
-        const taskId = (/<task-id>([\s\S]*?)<\/task-id>/.exec(m[1])?.[1] || "").trim();
-        const path = (/<output-file>([\s\S]*?)<\/output-file>/.exec(m[1])?.[1] || "").trim();
-        if (taskId && path && taskIds.includes(taskId)) files.push({ taskId, path });
-      }
+      const h = runnerNotificationHeader(t);
+      if (!h || !h.taskId || !h.path || !taskIds.includes(h.taskId)) continue;
+      // `<tool-use-id>`를 적은 알림은 그 task id의 접수증을 낳은 `Workflow` 호출의 것이어야 한다.
+      if (h.toolUseId && !callsOf.get(h.taskId).has(h.toolUseId)) continue;
+      // completed만 — (1)이 `<result>`에 적용하는 규칙 그대로다. 같은 러너 바이트가 인라인으로 오면 거절되고
+      // 디스크에서 읽으면 받아들여지는 비대칭을 두지 않는다(rework cf1).
+      if (h.status !== "completed") { rejected.push({ taskId: h.taskId, path: h.path, status: h.status || "(none)" }); continue; }
+      files.push({ taskId: h.taskId, path: h.path });
     }
   }
   const seen = new Set();
   const newestFirst = files.reverse().filter((f) => (seen.has(f.path) ? false : seen.add(f.path)));
-  return { taskIds, files: newestFirst };
+  return { taskIds, files: newestFirst, rejected };
+}
+
+/**
+ * #170 rework sec1 — 러너 알림의 **머리**(`<result>` 앞의 필드들)만 읽는다. `<result>`는 Workflow의 반환값이고
+ * 그 안에는 리뷰어가 쓴 문자열이 그대로 실린다: 리뷰어가 `</task-notification>`으로 블록을 일찍 닫고 가짜
+ * 블록을 열면, 블록 전체를 정규식으로 훑는 파서는 그 가짜 블록의 `<output-file>`을 러너의 말로 읽는다.
+ * 그래서 ① 텍스트 블록은 알림으로 **시작**해야 하고(러너가 넣는 사용자 턴의 모양), ② 그 블록 하나의 머리만
+ * 본다 — `<result>`(없으면 닫는 태그) 이후는 어떤 태그가 있어도 러너가 아니라 반환값의 바이트다.
+ */
+function runnerNotificationHeader(text) {
+  const m = /^\s*<task-notification>/.exec(String(text ?? ""));
+  if (!m) return null;
+  const rest = String(text).slice(m[0].length);
+  const cut = [rest.indexOf("<result>"), rest.indexOf("</task-notification>")].filter((i) => i >= 0);
+  const head = cut.length ? rest.slice(0, Math.min(...cut)) : rest;
+  const field = (tag) => (new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(head)?.[1] || "").trim();
+  return { taskId: field("task-id"), toolUseId: field("tool-use-id"), path: field("output-file"), status: field("status") };
 }
 
 /**
@@ -387,7 +422,7 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
    * 접수증이 있을 때만 본다. 둘 중 하나라도 없으면 아래의 새 줄(잘린 후보·결과 파일)은 하나도 생기지 않아
    * 사유가 #170 이전과 바이트 단위로 같다(retro.js·implementHeadShaOf는 넘기지 않는다).
    */
-  const wfFiles = typeof readFile === "function" ? workflowOutputFilesFromTranscript(transcriptText) : { taskIds: [], files: [] };
+  const wfFiles = typeof readFile === "function" ? workflowOutputFilesFromTranscript(transcriptText) : { taskIds: [], files: [], rejected: [] };
   const optIn = wfFiles.taskIds.length > 0;
   /** 선두가 `{`인데 그 짝이 없는 텍스트 — `head -c`나 알림의 잘림이 만든 조각. 스키마 오류로 오진하지 않고 이름으로 부른다. */
   const truncated = [];
@@ -434,6 +469,7 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   // 잘리고(KTB-17), 디스패처가 그 파일을 `head -c`로 읽은 조각도 잘려 있다 — 판정이 이미 있는데 사람에게
   // 가던 자리(own-calendar #124). 실패는 전부 경로를 부르는 한 줄로 남긴다: 파일이 사라졌는지(scratchpad의
   // 수명은 미검증이다), 크기를 넘었는지, JSON이 아닌지, 스키마에 어긋났는지가 서로 다른 문장이다.
+  for (const { taskId, path, status } of wfFiles.rejected) tried.push(`workflow output file not used: task ${taskId} status ${status} (${path})`);
   if (optIn && wfFiles.files.length === 0) tried.push(`workflow output file: no runner notification names the output file of task ${wfFiles.taskIds.join(", ")}`);
   for (const { path } of wfFiles.files) {
     let text = null;
