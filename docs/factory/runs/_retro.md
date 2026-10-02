@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-10-01T23:09:32.429Z
+- last retro: 2026-10-02T05:21:19.380Z
 - merges since last retro: 0
 - current N: 1
 
@@ -12,26 +12,33 @@
 | 2026-09-15T07:09:55.650Z | 2 | 1 | 1 | 2 |
 | 2026-09-15T10:31:18.686Z | 0 | 1 | 2 | 1 |
 | 2026-10-01T23:09:32.429Z | 0 | 2 | 1 | 13 |
+| 2026-10-02T05:21:19.380Z | 0 | 1 | 1 | 3 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 5 |
-| review rounds avg | 0 | 2.2 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.4 / 1 / 2.2 |
-| escaped defects | 0 | 4 |
-| revert rate | 없음 | 0.00 (0/5) |
-| needs-human | 0 | 22 |
-| rejects by role | 없음 | spec-conformance 4, qa 4, correctness 4, architecture 1 |
-| reviewer overlap | 없음 | 0.38 (5/13, runs 11) |
+| merged | 1 | 6 |
+| review rounds avg | 2 | 2.17 |
+| rounds/issue (plan/impl/review) | 1 / 2 / 2 | 0.5 / 1.17 / 2.17 |
+| escaped defects | 1 (#147×1) | 5 |
+| revert rate | 0.00 (0/1) | 0.00 (0/6) |
+| needs-human | 3 | 25 |
+| rejects by role | correctness 1 | spec-conformance 4, qa 4, correctness 5, architecture 1 |
+| reviewer overlap | 1.00 (1/1, runs 2) | 0.43 (6/14, runs 13) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1 |
 | qa na ratio | 없음 | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
-| cost (usd) | 0.00 | 334.24 |
-| tokens | input 0 / output 0 | input 10336510 / output 706521 |
-| retro cost (usd) | 0.00 | 5.12 |
-| retro tokens | input 0 / output 0 | input 10 / output 10925 |
-| full retros | — | 4 |
+| cost (usd) | 37.77 | 372.00 |
+| tokens | input 790725 / output 71688 | input 11127235 / output 778209 |
+| retro cost (usd) | 1.19 | 6.30 |
+| retro tokens | input 4 / output 2493 | input 14 / output 13418 |
+| full retros | — | 5 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #147 | 1 | 2 | 2 | 1 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -45,7 +52,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-01T23:09:32.429Z",
+    "last_retro_at": "2026-10-02T05:21:19.380Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -227,6 +234,67 @@
       ],
       "n_before": 2,
       "n_after": 1
+    },
+    {
+      "at": "2026-10-02T05:21:19.380Z",
+      "yield": 0,
+      "needs_human_since": 3,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            147
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 147,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-02-01",
+            "L-2026-10-02-02"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:reviewer-qa",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: 이번 diff가 새로 넣은 산문 가운데 엔진 동작을 단언하는 문장. #18에서는 README의 '리뷰 스테이지 안에서는 같은 `finish --issue 42` 줄이 커버리지 표를 찍고 exit 0이다', #143에서는 DECISIONS의 '병합 대기 중에는 가드가 미러 계열 경로를 세지 않는다'였다. 주장: 두 문장 모두 출하된 코드와 반대다. `finish`는 그 자리에서 exit 1로 끝나고, 가드는 `mirrorMatchesBranchHead`로 미러 경로를 비교한다. 근거: #18은 README의 다섯 줄을 적힌 …"
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 164,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#164 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md",
+            ".claude/agents/reviewer-qa.md"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
     }
   ],
   "candidates": {
@@ -342,6 +410,14 @@
           147
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A change to an existing shared test helper sits outside plan files_expected. The Scope change reason in the diff is not tied to issue #157's scope, and the diff does not record it as a scope change.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -396,6 +472,24 @@
         "text": "Keeping `docs/**` (minus CHARTER and NEVER_DOCS_GLOBS) in the positive list adds risk and no benefit. classifyProtected only ever sees files that are already protected. The only protected files under docs/** are docs/factory/CHARTER.md and **/CLAUDE*.md, **/AGENTS*.md and **/.mcp*.json, and every one of them must stay judge. So the docs entry can never mark a single legitimate file non_judge. All it can do is let one of those injection-channel files through if the subtraction drifts. The same reasoning covers `templates/factory/docs/**`: it holds the adopter CHARTER and a board page that must stay a byte copy of board-static.js.",
         "runs": [
           149
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "Listing 'running classifyFailures at merge' as a non-goal throws out the cheapest and strongest alternative without weighing it. The repo already has a runner-only flaky classifier, and review adopted it for exactly this incident class: own-calendar #49, an approved PR that went RED on an unrelated intermittent test. That classifier runs isolation reruns (flaky_isolation_runs=3) and base reruns (flaky_base_runs=5). It is capped by flaky_max=2, and it files a `factory:flaky` issue on the first detection, which the existing harvester reads. Turning it on for merge would deliver both halves of the issue's Why, unblocking the merge and harvesting the flake, without a new directory heuristic, a new marker vocabulary with no reader, a second d.gates() call, or a stale-status problem. The only recorded reason merge was excluded is that merge 'doesn't call agents'. classifyFailures doesn't call agents either, so that reason does not hold. Required change: the plan must either adopt this approach (one condition in gates.js plus a gates test), or record in non_goals/open_risks why one blind rerun is better than 3 isolation runs plus 5 base runs.",
+        "runs": [
+          157
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "dw1 and dw2 lock in the issue's false premise that 'merge는 한 런뿐이라 영원히 모이지 않는다' and that a new marker is how the harvest gets fed. The existing flaky path does not need multiple runs. It opens a `factory:flaky` issue on the first classification. A marker with no reader, which the product-advocate admits is the case, means that six months from now a real DB race in own-calendar (`test_49_event_visibility` is about event visibility, which may be a product race rather than a test bug) gets auto-merged past again and again, and nobody gets a ticket. That is this plan's most expensive failure: a product race condition, hidden by green-after-rerun, with no issue filed. It must go into open_risks, and the green-after-rerun path must produce something a person or the harvester will actually see.",
+        "runs": [
+          157
         ],
         "source": "dissent"
       }
@@ -455,91 +549,122 @@
       {
         "issue": 149,
         "reason": "blocked (undecidable) — needs human",
-        "at": "2026-10-01T18:33:27Z"
+        "at": "2026-10-02T00:59:21Z"
       },
       {
         "issue": 147,
         "reason": "protected paths changed — human merge required: .factory/lib/sweeper.js, factory/lib/sweeper.js, factory/test/sweeper.test.js (see PR #148)",
         "at": "2026-10-01T17:43:33Z"
+      },
+      {
+        "issue": 157,
+        "reason": "stage artifact missing or invalid: gates RED: failing=unit",
+        "at": "2026-10-02T03:54:27Z"
+      },
+      {
+        "issue": 156,
+        "reason": "blocked (undecidable) — needs human",
+        "at": "2026-10-02T02:20:56Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "merged": 1,
+    "review_rounds_avg": 2,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 2,
+    "rounds_per_issue": [
+      {
+        "issue": 147,
+        "plan": 1,
+        "implement": 2,
+        "review": 2
+      }
+    ],
+    "escaped_defects": 1,
+    "escaped_defects_detail": [
+      {
+        "issue": 147,
+        "count": 1
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
-    "overlapping_findings": 0,
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "correctness": 1
+    },
+    "review_runs": 2,
+    "findings_total": 1,
+    "overlapping_findings": 1,
     "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 0,
+    "overlap_ratio": 1,
+    "needs_human": 3,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0,
+      "cost_usd": 37.766042,
       "tokens": {
-        "input": 0,
-        "output": 0
+        "input": 790725,
+        "output": 71688
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.189554,
+      "tokens": {
+        "input": 4,
+        "output": 2493
       }
     }
   },
   "stats_total": {
-    "merged": 5,
-    "review_rounds_avg": 2.2,
-    "plan_rounds_avg": 0.4,
-    "implement_rounds_avg": 1,
-    "escaped_defects": 4,
+    "merged": 6,
+    "review_rounds_avg": 2.17,
+    "plan_rounds_avg": 0.5,
+    "implement_rounds_avg": 1.17,
+    "escaped_defects": 5,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
       "spec-conformance": 4,
       "qa": 4,
-      "correctness": 4,
+      "correctness": 5,
       "architecture": 1
     },
-    "review_runs": 11,
-    "findings_total": 13,
-    "overlapping_findings": 5,
+    "review_runs": 13,
+    "findings_total": 14,
+    "overlapping_findings": 6,
     "unique_findings_by_role": {
       "spec-conformance": 3,
       "qa": 4,
       "correctness": 1
     },
-    "overlap_ratio": 0.38,
-    "needs_human": 22,
+    "overlap_ratio": 0.43,
+    "needs_human": 25,
     "qa_approvals": 3,
     "qa_claims_total": 16,
     "qa_na_total": 5,
     "qa_na_ratio": 0.24,
     "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 334.235435,
+      "cost_usd": 372.001477,
       "tokens": {
-        "input": 10336510,
-        "output": 706521
+        "input": 11127235,
+        "output": 778209
       }
     },
     "retro_usage": {
-      "cost_usd": 5.115177,
+      "cost_usd": 6.304731,
       "tokens": {
-        "input": 10,
-        "output": 10925
+        "input": 14,
+        "output": 13418
       }
     },
-    "retros": 4
+    "retros": 5
   },
   "deferred_proposals": [],
   "deletion_candidates": []
