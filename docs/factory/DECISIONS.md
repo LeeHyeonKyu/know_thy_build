@@ -3941,6 +3941,30 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
   `mirrorApplicable`일 때만 `committedMergeMarkers`를 단다). 채택자의 implement 체크아웃은 오늘과 같은 git 호출만 한다.
 - 마커 없이 틀린 해결은 이 검사가 잡지 못한다(게이트·리뷰가 본다) — 머지됐다면 되돌리기가 아니라 고쳐 나간다.
 
+**1.4.42 (KTB #143 — S3b 엔진 쪽, 공장이 만들었다).** 위 #143 항은 빌더가 썼다. 운영 세션이 보탤 사실 둘. (1) 1.4.41의 stop-guard 수정 뒤 재시도
+한 번에 approved — rework implement 런은 Stop 거부 없이 끝났고 리뷰 라운드 2는 5 approve / 0 reject, 재시도 비용 $1.57. 보호 경로라 머지는 사람이
+했다(S4 전까지 설계대로). (2) 재시도 자체에서 배운 것: `transition.js` 재시도 플래그(사람 전용)를 라벨 스왑 중간에 끊으면 상태 라벨이 2개가 되고, 이벤트로
+뜬 스테이지는 거부하며 Sweep이 하나로 복구하지만 **복구는 `labeled` 이벤트를 다시 내지 않는다** — 이슈는 `factory:rework`에 앉은 채 런이 없고,
+stalled 팔이 30분 뒤에야 dispatch로 다시 띄운다. 이번엔 `gh workflow run factory-implement.yml -f issue=143`으로 바로 띄웠다. 복구 직후 같은
+스테이지를 dispatch하는 것이 맞는 동작이다(후속 이슈).
+이 릴리스로 S3b가 양쪽 다 채택 저장소에 간다: 엔진(여기)과 빌더 프롬프트(1.4.41).
+
+**1.4.43 (L50, own-calendar #111).** 계획 검증기의 "dissent without done_when"이 세 번째로 사람을 불렀다(L29 #46, L39 #90, 이번 #111). 이번 원인은 셋 중
+가장 앞에 있었다: 합성자에게 주는 `PLAN_V1` 스키마의 `dissent_log` 항목이 `id`·`severity`를 **선언하지 않았다** — 프롬프트는 요구하고 검증기는 읽는데
+스키마가 구조화 출력에서 그 둘을 떨어뜨렸다. 검증기는 d1·d2·d3을 위치로 이름 짓고 severity 미상(= 반드시 덮여야 함)으로 보았고, 수리 턴은 스키마가 계속
+지우는 것을 고칠 수 없었다. 스키마에 둘을 선언한다. 같은 모양의 둘째: 사인오프에서 살아남은 반대를 워크플로가 뒤에서 주입할 때도 id·severity가 없었다 —
+`signoff-<role>`, `medium`으로 넣는다(수리 턴이 그 id를 `covers`로 덮을 수 있고, 못 덮으면 사람에게 간다 — 서명 역할의 반대가 받을 대접이다).
+계약이 세 곳(프롬프트·스키마·검증기)에 흩어져 있는 한 이 과(科)는 또 난다 — 셋을 한 모듈에서 생성하는 것이 다음 후보다.
+
+**1.4.44 (KTB #149 실측, 같은 과의 여덟째).** S4a(#149)는 미러 가족에 파일 하나를 **처음으로 추가**했다(`.factory/lib/non-judge-paths.js`).
+review의 overlay는 PR이 새로 추가한 팩토리 소유 파일을 `git rm`으로 지운다(인덱스·워크트리, 리뷰 batch-1 MF-3 — 옳다). 세션 뒤 verify의
+재생성이 그 파일을 워크트리에 다시 썼지만 인덱스에는 삭제가 남아 `git diff HEAD`(1.4.38)가 그 경로를 "삭제됨"으로 보고했고, 사유는 재생성이
+바꾼 일곱 경로(= overlay가 되돌린 것)를 적어 원인을 가렸다. 리뷰어 다섯의 판정을 두 번(~$17) 버렸다. 둘을 고친다:
+(1) `mirrorStep`은 `git add -A -- <families>`로 워크트리의 사실을 인덱스에 올린 뒤 `git diff --cached HEAD`로 대조한다 — overlay가 인덱스에
+남긴 것(base로 되돌림이든 삭제든)을 전부 덮는다; 사유는 실제로 HEAD와 다른 경로를 적는다. (2) review는 `claude -p` **앞에서**
+`mirrorMatchesHead`(쓰지 않는 대조)를 한 번 더 한다 — 답이 아니오면 리뷰어를 띄우지 않고 같은 전이(blocked, undecidable)로 멈춘다.
+#136의 일곱, #143의 stop-guard, 이번 것까지 아홉 결함이 전부 "러너가 만든 diff를 에이전트의 것으로 오인"이다 — 인덱스를 거치는 모든 판정이 후보다.
+
 **#149 (S4a) — ADR-020의 "보호 경로 PR은 사람이 머지한다"를 좁힌다: 엔진 저장소에서 비판정 경로만 바꾼 PR은 CHARTER 스위치가 켜졌을 때 거부권 창 뒤에 팩토리가 머지할 수 있다. 스위치는 기본 꺼짐이다.**
 근거는 설계 2026-09-30 §8.3이다. 이슈가 인용한 플랜(`docs/superpowers/plans/2026-10-02-s4-autonomous-engine-merge.md`)과 토론 기록(`docs/research/s4-plan-debate.md`)은
 저장소에 없으므로, 이 결정은 그 두 문서에 기대지 않는다.
@@ -3951,7 +3975,7 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
 - **양의 목록이고, 목록 밖은 전부 판정자다**(`factory/lib/non-judge-paths.js`). 판정자 목록을 적지 않는 이유는 그 목록이 새기 때문이다. `gh.js`가 로그인 집합을, `config.js`가 CHARTER 값을 만든다.
   목록은 import 닫힘 테스트가 지킨다. `JUDGE_MODULES`(이슈의 13개)에서 `./`·`../`·`export … from`·문자열 `import()`를 재귀로 따라간 파일과 그 `.factory/` 미러 중
   하나라도 목록에 걸리면 RED다. 이슈 초안의 목록은 이 테스트를 main에서 통과하지 못했다. review-quorum→aggregate, gh→heartbeat→progress→usage,
-  gates→bin/scrub-artifacts, run-stage→board/agents-log 때문이다. 남은 것은 `board-static.js`·`status.js`와 그 미러·테스트뿐이다. **#136·#143은 이 목록으로도 사람 머지다.** 보상이 작다는 사실을
+  gates→bin/scrub-artifacts, run-stage→board/agents-log 때문이다. 남은 것은 `board-static.js`·`status.js`와 그 미러뿐이다(테스트 파일은 넣지 않는다 — 아래 자기비판 2). **#136·#143은 이 목록으로도 사람 머지다.** 보상이 작다는 사실을
   숨기지 않는다(skeptic d2). `factory/bin/**`는 하나도 넣지 않는다. 워크플로의 `node .factory/bin/*.js`는 import 간선이 아니라서 닫힘이 보지 못한다.
 - **`docs/**`·`templates/factory/docs/**`는 목록에 넣지 않는다**(skeptic d1 채택). 이 분류는 이미 보호된 파일만 받는다. `docs/` 아래의 보호 경로는 CHARTER와 세션 지시문
   (`**/CLAUDE*.md`·`**/AGENTS*.md`·`**/.mcp*.json`)뿐이고, 그 전부가 판정자다. 그러니 그 글롭이 비판정으로 만들 정당한 파일은 없고, 빼기 목록이 어긋나면 주입 채널만 열린다.
@@ -3987,31 +4011,17 @@ base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 �
   이 런에는 gates.json이 없으므로 머지 전이는 `gatesFromStatuses`를 싣는다. `requirements.js`의 gatesGate는 그때 **`factory:merged`에서만** 게이트 증거의 출처를 상태로 바꾼다
   (`STATUS_GATES_UNVERIFIED`). 정족수·K·sha 바인딩·qa·필수 체크·무결성은 그대로 문다. `factory:approved`로 가는 blocked 재시도 hop은 넓히지 않았다.
   그래서 비판정 경로가 창 도중 blocked로 떨어지면 자동 재시도 대신 사람이 본다.
+- **자기비판 2에서 고친 것(rework 뒤, 리뷰 전)**:
+  (1) sec2의 게이트 증거가 `factory/gates` **상태 하나**였다. 그 상태는 sec1과 같은 이유로 에이전트 배우의 토큰으로도 게시된다. 머지 잡이 게이트를 다시 돌리던 때는 위조한 상태가
+  머지에 닿지 못했지만, 비판정 경로에서는 그것이 유일한 증거가 됐다. KTB-46과의 비유도 틀렸다(거기서는 사람이 머지했다). 이제 리뷰 런의 **러너**가 factory/records의
+  `review-evidence:` 줄 끝에 `gates=<판정>`을 싣는다(`reviewGatesField`: 체크아웃한 커밋의, 진단이 아닌 게이트 파일일 때만 그 판정. 아니면 `stale`·`diagnostic`·`none`).
+  필드는 선택이고 맨 뒤에 붙어서, 넘기지 않은 줄은 예전과 같다. 비판정 경로의 (6b)는 창 앞과 라이브 head에서 그 줄이 `gates=GREEN`이어야 통과시킨다. 예전 리뷰 런의 기록(필드 없음)은 사람에게 간다.
+  `factory:merged` 전이의 `statusesVerified`도 merge-stage의 표식으로 세우지 않는다. run-stage가 하트비트의 런 id로 그 줄을 **직접 다시 읽어**(`resolveMergeGateEvidence`) PR head와 맞을 때만 세운다.
+  (2) `factory/test/status.test.js`·`board-page.test.js`를 목록에서 뺐다. 테스트는 import 닫힘에 보이지 않지만 게이트가 실행하고, 그 단언이 곧 합격선이다. 단언을 지운 PR이 사람 없이 머지되는 문이었다.
+  (3) 경로 장난 검사(`isPlainRepoPath`)는 오늘의 문자 그대로 대조하는 매처에서는 죽은 코드였다. 매처를 주입할 수 있게 하고, 정규화하는 매처로 그 검사를 직접 친다.
+  (4) 엔진 판정·timeout-minutes·CHARTER 스위치를 base에서 한 번 읽는 배선을 `makeMergeSelfChangeDeps` 하나로 모으고 테스트로 묶었다. 구성 뒤 트리가 바뀌어도 값은 그대로이고, `runStage`는 checkoutHead보다 먼저 CHARTER를 읽는다.
 - **남는 위험**: 창 도중 잡이 *취소*되면(타임아웃은 위에서 막는다) 클레임 락이 `Aborted cleanup`까지 고아로 남는다. 창 동안 러너 하나와 이 이슈의 merge 동시성 슬롯을 잡는다.
   폴링은 대략 시간당 26회 API 호출이다(이벤트와 라벨). 런타임에 구성되는 import(`mirror.js`의 생성기 로드)와 워크플로 프로세스 간선은 닫힘 테스트가 보지 못한다.
-**1.4.42 (KTB #143 — S3b 엔진 쪽, 공장이 만들었다).** 위 #143 항은 빌더가 썼다. 운영 세션이 보탤 사실 둘. (1) 1.4.41의 stop-guard 수정 뒤 재시도
-한 번에 approved — rework implement 런은 Stop 거부 없이 끝났고 리뷰 라운드 2는 5 approve / 0 reject, 재시도 비용 $1.57. 보호 경로라 머지는 사람이
-했다(S4 전까지 설계대로). (2) 재시도 자체에서 배운 것: `transition.js` 재시도 플래그(사람 전용)를 라벨 스왑 중간에 끊으면 상태 라벨이 2개가 되고, 이벤트로
-뜬 스테이지는 거부하며 Sweep이 하나로 복구하지만 **복구는 `labeled` 이벤트를 다시 내지 않는다** — 이슈는 `factory:rework`에 앉은 채 런이 없고,
-stalled 팔이 30분 뒤에야 dispatch로 다시 띄운다. 이번엔 `gh workflow run factory-implement.yml -f issue=143`으로 바로 띄웠다. 복구 직후 같은
-스테이지를 dispatch하는 것이 맞는 동작이다(후속 이슈).
-이 릴리스로 S3b가 양쪽 다 채택 저장소에 간다: 엔진(여기)과 빌더 프롬프트(1.4.41).
-
-**1.4.43 (L50, own-calendar #111).** 계획 검증기의 "dissent without done_when"이 세 번째로 사람을 불렀다(L29 #46, L39 #90, 이번 #111). 이번 원인은 셋 중
-가장 앞에 있었다: 합성자에게 주는 `PLAN_V1` 스키마의 `dissent_log` 항목이 `id`·`severity`를 **선언하지 않았다** — 프롬프트는 요구하고 검증기는 읽는데
-스키마가 구조화 출력에서 그 둘을 떨어뜨렸다. 검증기는 d1·d2·d3을 위치로 이름 짓고 severity 미상(= 반드시 덮여야 함)으로 보았고, 수리 턴은 스키마가 계속
-지우는 것을 고칠 수 없었다. 스키마에 둘을 선언한다. 같은 모양의 둘째: 사인오프에서 살아남은 반대를 워크플로가 뒤에서 주입할 때도 id·severity가 없었다 —
-`signoff-<role>`, `medium`으로 넣는다(수리 턴이 그 id를 `covers`로 덮을 수 있고, 못 덮으면 사람에게 간다 — 서명 역할의 반대가 받을 대접이다).
-계약이 세 곳(프롬프트·스키마·검증기)에 흩어져 있는 한 이 과(科)는 또 난다 — 셋을 한 모듈에서 생성하는 것이 다음 후보다.
-
-**1.4.44 (KTB #149 실측, 같은 과의 여덟째).** S4a(#149)는 미러 가족에 파일 하나를 **처음으로 추가**했다(`.factory/lib/non-judge-paths.js`).
-review의 overlay는 PR이 새로 추가한 팩토리 소유 파일을 `git rm`으로 지운다(인덱스·워크트리, 리뷰 batch-1 MF-3 — 옳다). 세션 뒤 verify의
-재생성이 그 파일을 워크트리에 다시 썼지만 인덱스에는 삭제가 남아 `git diff HEAD`(1.4.38)가 그 경로를 "삭제됨"으로 보고했고, 사유는 재생성이
-바꾼 일곱 경로(= overlay가 되돌린 것)를 적어 원인을 가렸다. 리뷰어 다섯의 판정을 두 번(~$17) 버렸다. 둘을 고친다:
-(1) `mirrorStep`은 `git add -A -- <families>`로 워크트리의 사실을 인덱스에 올린 뒤 `git diff --cached HEAD`로 대조한다 — overlay가 인덱스에
-남긴 것(base로 되돌림이든 삭제든)을 전부 덮는다; 사유는 실제로 HEAD와 다른 경로를 적는다. (2) review는 `claude -p` **앞에서**
-`mirrorMatchesHead`(쓰지 않는 대조)를 한 번 더 한다 — 답이 아니오면 리뷰어를 띄우지 않고 같은 전이(blocked, undecidable)로 멈춘다.
-#136의 일곱, #143의 stop-guard, 이번 것까지 아홉 결함이 전부 "러너가 만든 diff를 에이전트의 것으로 오인"이다 — 인덱스를 거치는 모든 판정이 후보다.
 
 ## ADR-032 사람은 서명 기계가 아니다 — 운영 세션의 비판정 머지, 러너 생성 버전 — 2026-10-02 (소유자 결정)
 
