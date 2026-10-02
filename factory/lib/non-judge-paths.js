@@ -33,9 +33,9 @@ export const NON_JUDGE_GLOBS = Object.freeze([
   // `factory status`의 순수 렌더러 — `./labels.js`만 읽는다. cli/status.js만 쓴다(판정자가 아니다).
   "factory/lib/status.js",
   ".factory/lib/status.js",
-  // 위 두 모듈의 테스트.
-  "factory/test/board-page.test.js",
-  "factory/test/status.test.js",
+  // **테스트 파일은 하나도 없다**(#149 self-critique). 테스트는 import 닫힘에 보이지 않지만(아무도 import하지 않는다)
+  // 게이트 러너가 실행하고, 그 단언이 곧 "무엇이 통과인가"다 — 단언을 약하게 하거나 지운 PR이 여기 걸리면 사람 없이
+  // 자동 머지된다(`tests_are_load_bearing`). 그래서 위 모듈을 테스트와 함께 바꾼 PR은 테스트 파일 때문에 사람에게 간다.
 ]);
 
 /**
@@ -58,20 +58,25 @@ export const JUDGE_MODULES = Object.freeze([
   "factory/bin/run-stage.js",
 ]);
 
-/** `..` 세그먼트·절대 경로·선행 `./`가 있는 경로는 목록과 대조하지 않는다(경로 장난으로 목록에 들어올 수 없다). */
+/**
+ * `..`·`.`·빈 세그먼트(`//`, 끝의 `/`)·절대 경로·선행 `./`가 있는 경로는 목록과 대조하지 않는다. 오늘의 매처(`glob.js`)는
+ * 문자 그대로 대조하므로 이런 이름은 어차피 걸리지 않지만, 그 보장을 매처의 구현에 맡기지 않는다 — 매처가 경로를
+ * 정규화하게 바뀌어도 경로 장난으로 목록에 들어올 수 없다(테스트가 정규화하는 매처를 주입해 이 검사를 직접 친다).
+ */
 const isPlainRepoPath = (f) => typeof f === "string" && f.length > 0 && !f.startsWith("/") && !f.startsWith("./")
   && !f.split("/").some((seg) => seg === ".." || seg === "." || seg === "");
 
 /**
  * 보호 경로를 비판정/판정자로 가른다. `engine`이 `true`가 아니면(채택자 저장소 — 그 저장소의 `factory/**`는
- * 엔진이 아니다) 전부 판정자다. 목록 밖은 전부 판정자다.
+ * 엔진이 아니다) 전부 판정자다. 목록 밖은 전부 판정자다. `match`는 목록 대조 함수(기본 `glob.js`의 matchesAny) —
+ * 테스트가 경로 장난 검사를 매처와 떼어 확인하려고 주입한다. 프로덕션 호출자는 넘기지 않는다.
  * @returns {{ non_judge: string[], judge: string[] }}
  */
-export function classifyProtected(files, { engine = false } = {}) {
+export function classifyProtected(files, { engine = false, match = matchesAny } = {}) {
   const list = Array.isArray(files) ? [...files] : [];
   if (engine !== true) return { non_judge: [], judge: list };
   const non_judge = [], judge = [];
-  for (const f of list) (isPlainRepoPath(f) && matchesAny(NON_JUDGE_GLOBS, f) ? non_judge : judge).push(f);
+  for (const f of list) (isPlainRepoPath(f) && match(NON_JUDGE_GLOBS, f) === true ? non_judge : judge).push(f);
   return { non_judge, judge };
 }
 

@@ -1,6 +1,7 @@
 import { test, expect } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
+const posixNormalize = (p) => posix.normalize(p);
 import { NON_JUDGE_GLOBS, JUDGE_MODULES, classifyProtected, relativeSpecifiers, importClosure, mirrorOf } from "../lib/non-judge-paths.js";
 import { matchesAny } from "../lib/glob.js";
 
@@ -126,4 +127,38 @@ test("test_149_judge_import_closure_excludes_non_judge — widening the list wit
   expect([...files].filter((f) => matchesAny(widened, f))).toEqual(["factory/lib/aggregate.js"]);
   // 실제 저장소의 lib 디렉터리가 읽힌다(빈 트리로 공허하게 통과하지 않는다).
   expect(readdirSync(join(ROOT, "factory/lib")).length).toBeGreaterThan(20);
+});
+
+// ── #149 self-critique — 테스트 파일과 경로 장난 ────────────────────────────────────────────────────
+
+test("test_149_non_judge_is_a_positive_list — a test file is never non-judge: the gate runner executes it and its assertions are the verdict", () => {
+  // 테스트 파일은 import 닫힘에 보이지 않는다(아무도 import하지 않는다) — 그러나 게이트 러너가 실행하고, 그 단언이 곧
+  // "무엇이 통과인가"다. 단언을 약하게 하거나 지운 PR이 비판정으로 분류되면 사람 없이 자동 머지된다(tests_are_load_bearing).
+  const testFiles = readdirSync(join(ROOT, "factory/test")).filter((f) => f.endsWith(".test.js")).map((f) => `factory/test/${f}`);
+  expect(testFiles).toContain("factory/test/status.test.js");
+  expect(testFiles).toContain("factory/test/board-page.test.js");
+  expect(testFiles.length).toBeGreaterThan(50);
+  for (const f of testFiles) expect(classifyProtected([f], { engine: true }), f).toEqual({ non_judge: [], judge: [f] });
+  // 목록 자체에 테스트 파일이 없다(미래의 테스트 디렉터리·다른 확장자 포함).
+  for (const g of NON_JUDGE_GLOBS) expect(/(^|\/)test\/|\.test\.|\.spec\./.test(g), g).toBe(false);
+  // 그래도 그 모듈 자신은 비판정이다 — 테스트와 함께 바꾼 PR은 테스트 파일 때문에 사람에게 간다.
+  expect(classifyProtected(["factory/lib/status.js", "factory/test/status.test.js"], { engine: true }))
+    .toEqual({ non_judge: ["factory/lib/status.js"], judge: ["factory/test/status.test.js"] });
+});
+
+test("test_149_non_judge_is_a_positive_list — a path trick aimed at a listed file stays judge, even under a matcher that normalizes paths", () => {
+  const tricks = [
+    "./factory/lib/board-static.js", "factory//lib/board-static.js", "factory/lib/../lib/board-static.js",
+    "factory/lib/./board-static.js", "/factory/lib/board-static.js", "factory/lib/board-static.js/",
+  ];
+  // 오늘의 글롭 매처는 경로를 문자 그대로 대조한다. 목록 대조가 경로 정규화를 하는 매처로 바뀌어도(혹은 누가 그렇게 바꿔도)
+  // 이런 이름은 목록에 들어올 수 없어야 한다 — 그 보장은 매처가 아니라 classifyProtected의 평범한-경로 검사가 진다.
+  const normalizing = (globs, f) => matchesAny(globs, posixNormalize(f).replace(/^\/+|\/+$/g, ""));
+  expect(normalizing(NON_JUDGE_GLOBS, "factory/lib/../lib/board-static.js")).toBe(true);   // 대조군: 이 매처는 실제로 정규화한다
+  for (const f of tricks) {
+    expect(classifyProtected([f], { engine: true }), f).toEqual({ non_judge: [], judge: [f] });
+    expect(classifyProtected([f], { engine: true, match: normalizing }), f).toEqual({ non_judge: [], judge: [f] });
+  }
+  // 평범한 경로는 같은 매처로 그대로 비판정이다(매처 주입이 판정을 통째로 끄는 것이 아니다).
+  expect(classifyProtected(["factory/lib/board-static.js"], { engine: true, match: normalizing })).toEqual({ non_judge: ["factory/lib/board-static.js"], judge: [] });
 });
