@@ -58,6 +58,12 @@ export async function main() {
   // 멈춘 스테이지의 재점화(KTB-8). 워크플로 파일 이름은 템플릿이 설치하는 그 이름이다 —
   // `factory-<stage>.yml`이 없으면 gh가 실패하고, sweeper는 그 이슈만 error로 적고 넘어간다.
   const dispatchStage = ({ stage, issue: n }) => gh.dispatchWorkflow(`factory-${stage}.yml`, { issue: n });
+  /**
+   * #168 — blocked-retry 팔이 "내가 띄운 런이 아직 큐에 있는가"를 묻는 **읽기 전용** 조회. `gh run list`의 행
+   * (`status`·`event`·`createdAt`)을 그대로 넘긴다 — 매칭(dispatch 이벤트, 마커 이후 생성, 끝나지 않은 상태)은
+   * `lib/sweeper.js`가 한다. 50행이면 러너 한 대가 하루에 쌓는 그 스테이지의 런을 넉넉히 덮는다.
+   */
+  const stageRuns = (stage) => gh.workflowRuns(`factory-${stage}.yml`, 50);
   // 흐름 제어로 **일부러** 세워 둔 `factory:planned`를 "멈췄다"로 읽지 않기 위한 것이다(KTB-10 M5) —
   // run-stage의 implement가 보는 바로 그 판정을 같은 헬퍼로 묻는다.
   const backPressureFn = () => backPressure({ gh, charter, quarantine, thresholds });
@@ -146,7 +152,7 @@ export async function main() {
       env: process.env,
     });
   };
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, quick });
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, stageRuns, quick });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }

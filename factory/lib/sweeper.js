@@ -1256,6 +1256,58 @@ async function sweepHumanMerged({ gh, transition, factoryLogins, reviewRoster, r
  * 자기 줄만 남긴다 — 재점화는 다음 sweep이 다시 시도하면 되는 일이다(마커는 이미 남았으므로 그
  * 재시도는 같은 창 안에서는 조용하다).
  */
+/**
+ * #168 — **아직 끝나지 않은 런**의 상태(`gh run list`의 `status`). 러너를 기다리는 넷(queued/pending/requested/waiting)과
+ * 이미 러너를 받은 in_progress다. per-issue concurrency 그룹 뒤에 선 dispatch는 `queued`가 아니라 `pending`으로 보인다(plan D2).
+ */
+export const UNFINISHED_RUN_STATUSES = Object.freeze(["queued", "pending", "requested", "waiting", "in_progress"]);
+export const DISPATCHED_RUN_NEVER_STARTED = "dispatched run never started";
+
+/**
+ * #168 (own-calendar #111) — blocked-retry 팔이 **이미 dispatch한 런이 아직 끝나지 않았으면** 에스컬레이션하지 않는다.
+ *
+ * 러너가 한 대인 저장소에서 dispatch는 곧 실행이 아니다: 09:59에 띄운 merge 런이 앞 이슈 때문에 큐에 서 있는 동안,
+ * 10:00의 다른 sweep(스테이지 끝의 Sweep 스텝)이 "마커가 있는데 아직 blocked"를 보고 needs-human으로 올렸고,
+ * 큐의 런은 라벨이 바뀌어 건너뛰었다 — 사람의 재시도 한 번이 러너 점유 때문에 사라졌다.
+ *
+ * 돌려주는 값: `{ wait: true, action }`(기다린다) 또는 `{ wait: false, reason? }`(에스컬레이션 — `reason`이 있으면 그 문장으로).
+ *
+ * 판정 순서(전부 fail closed — 모르면 오늘처럼 에스컬레이션한다):
+ *   1. 이 스테이지의 blocked-retry 마커가 없거나 시각을 모르면 → 에스컬레이션.
+ *   2. 마커 **뒤에** `→ factory:blocked` 전이가 있으면 → 에스컬레이션(plan D5). 그 런은 이미 돌았고 다시 막혔다 —
+ *      그 런 자신의 `if: always()` Sweep 스텝이 아직 in_progress인 자기 런을 "대기 중"으로 읽으면 안 된다.
+ *   3. 조회가 배선되지 않았으면 → 에스컬레이션(구형 호출자). 조회가 던지면 → error 한 줄 + 에스컬레이션.
+ *   4. 마커 이후에 만들어진 그 스테이지의 `workflow_dispatch` 런 중 끝나지 않은 것이 있으면 → 기다린다.
+ *      런 행에는 이슈 번호가 없다(워크플로에 `run-name`이 없어 displayTitle은 워크플로 이름뿐 — plan D1). 그래서
+ *      다른 이슈의 런을 이 이슈의 것으로 오인할 수 있고, 그 피해는 아래 상한이 묶는다.
+ *   5. 그래도 마커로부터 `2 × staleMinutes`를 넘겼으면 → "dispatched run never started"로 에스컬레이션.
+ */
+async function blockedRetryPendingRun({ stageRuns, comments, stage, issue, nowMs, stale, actions }) {
+  const re = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=\\d+)? -->`);
+  const list = Array.isArray(comments) ? comments : [];
+  let markerIdx = -1;
+  list.forEach((c, i) => { if (re.test(String(c?.body ?? ""))) markerIdx = i; });
+  if (markerIdx === -1) return { wait: false };
+  const markerAt = Date.parse(list[markerIdx]?.createdAt ?? "");
+  if (!Number.isFinite(markerAt)) return { wait: false };
+  const reblocked = list.slice(markerIdx + 1).some((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:blocked");
+  if (reblocked) return { wait: false };
+  if (typeof stageRuns !== "function") return { wait: false };
+  let runs;
+  try { runs = await stageRuns(stage); }
+  catch (e) {
+    actions.push({ kind: "error", step: "blocked-retry-wait", issue, stage, error: `run lookup failed — ${String(e?.message || e)}` });
+    return { wait: false };
+  }
+  const pending = (Array.isArray(runs) ? runs : []).filter((r) =>
+    r?.event === "workflow_dispatch"
+    && UNFINISHED_RUN_STATUSES.includes(String(r?.status))
+    && Date.parse(r?.createdAt ?? "") >= markerAt);
+  if (!pending.length) return { wait: false };
+  if (nowMs - markerAt > 2 * stale) return { wait: false, reason: DISPATCHED_RUN_NEVER_STARTED };
+  return { wait: true, action: { kind: "blocked-retry-waiting", issue, stage, status: String(pending[0].status), since: list[markerIdx].createdAt } };
+}
+
 async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
   try { await dispatchStage({ stage, issue }); return true; }
   catch (e) { actions.push({ kind: "error", step, issue, error: String(e.message || e) }); return false; }
@@ -1268,7 +1320,7 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, quick = false }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false }) {
   /**
    * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 계정으로 판정한다(`commentsSinceCycleStart`). 팩토리 계정 이름 하나를
    * 여기서 한 번만 구한다. 못 구하면 null — 그때 창은 "작성자가 있는 human 마커"에만 리셋된다(닫힌 쪽).
@@ -1428,6 +1480,14 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
             if (await safeDispatch({ dispatchStage, stage: retryStage, issue: it.number, actions, step: "blocked-retry" })) {
               actions.push({ kind: "blocked-retry", issue: it.number, stage: retryStage, cause, ...(numbered ? { attempt } : {}) });
             }
+            continue;
+          }
+          // #168 — 재시도 마커가 있는데 여전히 blocked: 그 마커가 띄운 런이 아직 끝나지 않았으면 기다린다(상한 2 × staleMinutes).
+          const pendingRun = await blockedRetryPendingRun({ stageRuns, comments, stage: retryStage, issue: it.number, nowMs, stale, actions });
+          if (pendingRun.wait) { actions.push({ ...pendingRun.action, cause }); continue; }
+          if (pendingRun.reason) {
+            await transition({ issue: it.number, to: "factory:needs-human", reason: `${escalationReason(cause)} — ${pendingRun.reason}` });
+            actions.push({ kind: "blocked-escalated", issue: it.number, cause, why: pendingRun.reason });
             continue;
           }
         }
