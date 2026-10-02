@@ -3933,3 +3933,67 @@ test("test_136_parked_feature_reuse_names_backlogged_harness", async () => {
   expect(lines.some((l) => /^harness: #31 .*NOT queued/.test(l) && /backlog/.test(l))).toBe(true);
   expect(lines.some((l) => l.startsWith("harness: #31 was opened"))).toBe(false); // 재사용이다 — 열었다고 말하지 않는다
 });
+
+
+// #170 dw6 — the PRODUCTION verify path recovers from the Workflow's output file. Two callers build the
+// verifyStage arguments: run-stage's `verifyStage` dep (through `verifyStageForRun`) and the replay CLI
+// `bin/verify-stage.js`. Both are driven for real here against files on disk — no stub verifyStage —
+// so dropping the readFile wiring from either one turns this test red.
+test("test_170_production_verify_path_recovers_from_output_file", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "ktb170-scratch-"));
+  mkdirSync(join(scratch, "tasks"), { recursive: true });
+  const outputFile = join(scratch, "tasks", "wf086hvld.output");
+  const L = (o) => JSON.stringify(o);
+  const transcriptFor = (artifact) => {
+    const full = JSON.stringify(artifact);
+    return [
+      L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-review" } }] } }),
+      L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wf086hvld\nSummary: Review panel\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
+      L({ type: "user", message: { content: `<task-notification>\n<task-id>wf086hvld</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
+      L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
+      L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
+    ].join("\n") + "\n";
+  };
+  const envelopeOf = (result) => JSON.stringify({ summary: "Dynamic workflow completed", agentCount: 3, logs: Array.from({ length: 400 }, (_, i) => `[agent ${i % 3}] step ${i}: ${"progress ".repeat(10)}`), result }, null, 2);
+  const maxTurns = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "Still waiting on the workflow output.", session_id: "sess-170" };
+
+  // (1) the replay CLI on a temp dir holding a real transcript and a real output file.
+  const { verifyStageCli } = await import("../bin/verify-stage.js");
+  const triage = { schema: "factory.triage.v1", issue: 124, disposition: "ready", tier: "standard", reason: "r".repeat(40000), summary: "replay", orchestration: "workflow", guarantee: "structural" };
+  writeFileSync(outputFile, envelopeOf(triage));
+  const croot = mkdtempSync(join(tmpdir(), "ktb170-cli-"));
+  mkdirSync(join(croot, ".factory/out"), { recursive: true });
+  writeFileSync(join(croot, ".factory/out/context.json"), JSON.stringify({ roster: [], orchestration: "workflow" }));
+  writeFileSync(join(croot, ".factory/out/triage.json"), JSON.stringify(maxTurns));
+  const ctPath = join(croot, "session.jsonl");
+  writeFileSync(ctPath, transcriptFor(triage));
+  const cli = verifyStageCli({ root: croot, argv: ["triage", "124", "--transcript", ctPath], home: croot });
+  expect(cli.reasons).toEqual([]);
+  expect(cli.ok).toBe(true);
+
+  // (2) run-stage's own verify call: a review verdict over 30 KB that exists only in the output file.
+  const { verifyStageForRun } = await import("../bin/run-stage.js");
+  const review = {
+    schema: "factory.review.v1", issue: 124, pr: 9, head_sha: "c".repeat(40), round: 1, orchestration: "workflow", guarantee: "verified",
+    verdicts: ["correctness", "qa"].map((role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: Array.from({ length: 160 }, (_, i) => `${role}: checked line ${i} — ${"evidence ".repeat(12)}`) })),
+  };
+  writeFileSync(outputFile, envelopeOf(review));
+  const root = mkdtempSync(join(tmpdir(), "ktb170-root-"));
+  mkdirSync(join(root, ".factory/out"), { recursive: true });
+  const transcriptPath = join(root, "session.jsonl");
+  writeFileSync(transcriptPath, transcriptFor(review));
+  // the hook-recorded transcript path (agents.jsonl) — the first source readTranscript consults
+  writeFileSync(join(root, ".factory/out/agents.jsonl"), L({ event: "SubagentStop", agent_type: "reviewer-correctness", session_id: "sess-170", transcript_path: transcriptPath }) + "\n");
+  expect(typeof verifyStageForRun).toBe("function");
+  const v = verifyStageForRun({ root, stage: "review", out: maxTurns, gates: { status: "GREEN", level: "full" }, ctx: { roster: [], orchestration: "workflow" }, charter: { never_automate: [] }, qaManifest: null, home: root });
+  expect(v.ok).toBe(true);
+  expect(v.reasons).toEqual([]);
+  expect(v.source).toContain(outputFile);
+  expect(v.data.verdicts[0].verified).toHaveLength(160);
+
+  // …and main() really routes its `verifyStage` dep through that function (not a second, unwired call).
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const dep = /verifyStage: \(\{ out, gates \}\) => \{([\s\S]*?)\n    \},/.exec(src)?.[1] ?? "";
+  expect(dep).toMatch(/verifyStageForRun\(\{/);
+  expect(dep).not.toMatch(/(?<!ForRun)verifyStage\(\{/);
+});

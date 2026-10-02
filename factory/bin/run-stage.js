@@ -138,8 +138,28 @@ export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMer
 /** 파일이 없으면 null(예외 아님) — `readTranscript`가 기대하는 주입 모양이다. */
 export const readFileOrNull = (p) => { try { return existsSync(p) ? readFileSync(p, "utf8") : null; } catch { return null; } };
 /** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
-const transcriptTextFor = (root, out) =>
-  readTranscript({ root, home: homedir(), sessionId: out?.session_id, readFile: readFileOrNull }) || "";
+const transcriptTextFor = (root, out, home = homedir(), readFile = readFileOrNull) =>
+  readTranscript({ root, home, sessionId: out?.session_id, readFile }) || "";
+
+/**
+ * 스테이지 산출물의 **프로덕션 검증 호출** — `main()`의 `verifyStage` dep이 이것 하나를 부른다(#170 dw6:
+ * 인자 조립이 `main()` 안에 묻혀 있으면 `readFile` 배선이 빠져도 아무 테스트도 모른다).
+ *
+ * - 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+ *   이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
+ * - #170 — `readFile`을 넘겨, 이 세션의 Workflow 접수증에 묶인 러너 결과 파일(`<scratchpad>/tasks/<id>.output`)을
+ *   잘리지 않은 채 복구 후보로 본다. 디스패처가 그 파일을 폴링하다 턴을 다 써도 이미 있는 판정이 handoff가 된다.
+ */
+export function verifyStageForRun({ root, stage, out, gates, ctx, charter, qaManifest = null, home = homedir(), readFile = readFileOrNull }) {
+  const c = ctx || {};
+  return verifyStage({
+    stage, out, transcriptText: transcriptTextFor(root, out, home, readFile),
+    agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")),
+    roster: c.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: c.rounds, orchestration: c.orchestration,
+    gates, planLimits: c.plan, issueBody: c.issue?.body, neverAutomate: charter?.never_automate, qaManifest,
+    readFile,
+  });
+}
 
 /**
  * `claude -p --max-turns`의 기본값(KTB-16). 5였고, 그 5가 데모 #2의 plan 재실행을 죽였다 —
@@ -3003,9 +3023,7 @@ async function main() {
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
     verifyStage: ({ out, gates }) => {
-      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
-      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
+      const v = verifyStageForRun({ root, stage, out, gates, ctx: ctxCache, charter, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
       // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
       // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
       if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
