@@ -645,8 +645,11 @@ test("test_170_output_file_of_another_task_is_not_a_verdict", () => {
 test("test_170_truncated_candidate_is_named_as_truncated", () => {
   const dir = scratch170();
   const verdict = longReview170();
-  // Eight cut-off polls plus three small schema-failing tool results: far more than six candidate lines.
-  const noise = Array.from({ length: 3 }, (_, i) => [
+  // Eight cut-off polls plus TEN small schema-failing tool results. The cut-off polls are not candidates (they
+  // go into the truncation note), so it is the ten noise results alone that must overflow the six-line cap —
+  // three would not (skeptic #170: with three, a note pushed AFTER the loop under the same cap still passed).
+  const NOISE = 10;
+  const noise = Array.from({ length: NOISE }, (_, i) => [
     line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: `toolu_n${i}`, input: { command: "gh pr view 9 --json state" } }] } }),
     line170({ type: "user", message: { content: [{ tool_use_id: `toolu_n${i}`, type: "tool_result", content: JSON.stringify({ state: "OPEN", n: i }) }] } }),
   ]).flat();
@@ -661,8 +664,12 @@ test("test_170_truncated_candidate_is_named_as_truncated", () => {
   expect(reason).not.toMatch(/transcript tool result #\d+: round is required/);
   expect(reason).not.toMatch(/task-notification #\d+: [^|]*verdicts is required/);
   expect(reason).toContain(`workflow output file missing: ${outputPath170(dir)}`);
-  // the schema-failing noise is there too (more than six candidates) — the truncation note survived the cap
-  expect(reason).toMatch(/transcript tool result #\d+: issue is required/);
+  // the schema-failing noise is there too, and the cap really fired: fewer noise lines than noise results
+  // reached the reason, yet the truncation note is present and sits BEFORE every capped candidate line.
+  const noiseLines = reason.match(/transcript tool result #\d+: issue is required/g) || [];
+  expect(noiseLines.length).toBeGreaterThan(0);
+  expect(noiseLines.length).toBeLessThan(NOISE);
+  expect(reason.indexOf("truncated JSON candidate")).toBeLessThan(reason.indexOf(noiseLines[0]));
 
   // the untruncated file for the receipt's task wins over every fragment
   write170(outputPath170(dir), envelopeFile170(verdict));
