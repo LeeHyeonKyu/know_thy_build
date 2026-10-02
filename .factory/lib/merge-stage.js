@@ -101,6 +101,16 @@ export const VETO_POLL_INTERVAL_MS = 5 * 60 * 1000;
  * ready 뒤 체크 대기(`merge_check_wait_sec`)는 따로 센다. 창이 잡에 드는가 = 이미 쓴 시간 + 창 + 체크 대기 + 이 여유 < timeout.
  */
 export const VETO_POST_WINDOW_ALLOWANCE_MIN = 2;
+/**
+ * sec1 — 재사용하는 창을 GitHub의 시계에 묶을 때의 여유: 러너 시계(closes를 계산한다)와 GitHub 시계(상태·코멘트의
+ * `created_at`을 찍는다)의 차, 그리고 알림 → 상태 게시 사이의 몇 초. run-stage의 `VETO_CLOCK_SKEW_MS`와 같은 값이다.
+ */
+export const VETO_REUSE_SKEW_MS = 5 * 60 * 1000;
+/**
+ * 자동 머지 알림 코멘트의 첫 줄 — 창을 여는 런이 쓰고, 재진입이 같은 줄로 그 알림을 찾는다(sec1: 알림이 실제로 나간
+ * 창만 창이다). 쓰는 쪽과 찾는 쪽이 같은 함수를 부르므로 두 문구가 조용히 갈라질 수 없다.
+ */
+export const vetoNoticeHeader = (closesIso) => `**자동 머지 예정 — ${closesIso}** (\`${VETO_WINDOW_CONTEXT}\`)`;
 /** `closes=` 값은 엄격하게만 읽는다 — 모양이 틀린 창은 "곧 닫힌 창"이 아니라 판정 불가다. */
 const CLOSES_RE = /^closes=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)$/;
 function parseCloses(description) {
@@ -208,6 +218,10 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *      vetoWindow.ensureLabel() → { ok } — `factory:veto` 라벨이 있게 한다(멱등). 창을 열 때 알림보다 먼저.
  *      vetoWindow.resolve({ sha, state, closesAt }) → { ok } — 같은 context를 success(닫힘)·failure(거부권)·error(판정 불가)로
  *                         다시 게시한다(description은 그대로 `closes=<iso>` — 재진입이 같은 시계를 읽는다).
+ *      vetoWindow.history(sha) → { ok, entries: [{ state, description, creatorLogin, createdAt }] } — 그 sha의 이 context
+ *                         상태 **전부**(최신순, `createdAt`은 GitHub이 찍은 시각). 재사용하는 창의 첫 게시를 GitHub 시계로 잰다(sec1).
+ *      vetoWindow.notice({ pr, closesAt }) → { ok, comments: [{ author, createdAt, body }] } — 그 PR에서 `vetoNoticeHeader(closesAt)`로
+ *                         시작하는 코멘트. 재사용하는 창은 주인이 알림을 받은 창이어야 한다(sec1).
  *      vetoLabel({ since }) → { ok, vetoedBy: login | null } — since 이후의 `factory:veto` labeled 이벤트.
  *      jobStartedAt()   → { ok, at: epoch ms } — 이 머지 잡이 러너에서 시작한 시각(이미 쓴 시간을 timeout에서 뺀다).
  *      now?()           → epoch ms. sleep은 위의 그것을 같이 쓴다.
@@ -334,6 +348,50 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   };
 
   /**
+   * sec2 — 비판정 경로 PR의 게이트 증거. 이 잡에서 게이트를 돌리지 않으므로(PR 코드가 머지 토큰 옆에서 돌게 된다) 리뷰 런이
+   * 이 head에 올린 `factory/gates`·`factory/review`가 success이고 팩토리 계정의 것인지만 읽는다. 반환: null = 통과, 숫자 = 종료 코드.
+   * 증거가 없거나 RED거나 남의 것이면 needs-human(게이트 RED와 같은 등급), head를 모르면 판정 불가다.
+   */
+  const nonJudgeGateEvidence = async () => {
+    const sha = headSha || null;
+    if (!sha) {
+      const line = "veto window undecidable — the PR head sha is unknown — a window must be bound to a commit, and the review run's factory/gates must be read for that commit";
+      const t = await toBlocked(line);
+      record([`merge: ${line}`, ...refusal(t)]);
+      return 2;
+    }
+    const refuse = async (why) => {
+      const reason = `gates not verified for a non-judge protected-path PR — ${why}`;
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: ${reason}`, ...refusal(t)]);
+      return 2;
+    };
+    const undecided = async (why) => {
+      const line = `gates evidence undecidable for a non-judge protected-path PR — ${why}`;
+      const t = await toBlocked(line);
+      record([`merge: ${line}`, ...refusal(t)]);
+      return 2;
+    };
+    if (!d.commitStatuses || !d.factoryLogins) return await undecided("commitStatuses/factoryLogins deps not wired — the review run's factory/gates cannot be read");
+    let logins;
+    try { logins = await d.factoryLogins(); } catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
+    const known = new Set((logins?.ok && Array.isArray(logins.logins) ? logins.logins : []).filter(Boolean).map((l) => String(l).toLowerCase()));
+    if (!known.size) return await undecided(`the factory's own account could not be resolved — there is no way to tell who posted factory/gates: ${logins?.reason || "unknown"}`);
+    let statuses;
+    try { statuses = await d.commitStatuses(sha); } catch (e) { return await undecided(`commit statuses for ${sha.slice(0, 7)} unreadable: ${e?.message || e}`); }
+    if (!Array.isArray(statuses)) return await undecided(`commit statuses for ${sha.slice(0, 7)} unreadable — no list returned`);
+    // `verifyFactoryStatuses`와 같은 판정을 `factory/gates` 하나에 — `factory/review`는 아래 (6b)가 리뷰 증거 전체와 함께 묻는다.
+    // 목록은 최신순이므로 첫 항목이 지금 유효한 상태다.
+    const latest = statuses.find((x) => x?.context === "factory/gates");
+    if (!latest) return await refuse(`no factory/gates commit status on PR head ${sha.slice(0, 7)} — the review run never posted a gate verdict for this commit`);
+    if (String(latest.state).toLowerCase() !== "success") return await refuse(`factory/gates on ${sha.slice(0, 7)} is "${latest.state}", not success`);
+    const by = String(latest.creatorLogin || "").trim();
+    if (!by || !known.has(by.toLowerCase())) return await refuse(`factory/gates on ${sha.slice(0, 7)} was posted by ${by ? `@${by}` : "an unknown account"}, which is not a factory account — a commit status is writable by anything holding a repo-scoped token`);
+    record([`merge: gates not run in this job — PR #${pr} carries only non-judge protected paths, and a protected PR's code never runs beside the merge token; gate evidence is the review run's factory/gates on ${sha.slice(0, 7)} (success, posted by the factory)`]);
+    return null;
+  };
+
+  /**
    * #149 (S4a) — 거부권 창. 잡 **안에서** 기다린다(sweeper의 stalled 팔에 맡기지 않는다: 재시작 한도와 cron
    * 주기가 창과 겹친다). 반환: null = 창이 거부권 없이 닫혔다(머지 경로를 계속), 숫자 = 이 런의 종료 코드.
    * 어느 재료든 읽지 못하면 "거부권 없음"이 아니라 **판정 불가**(blocked)다 — verifyFactoryStatuses와 같은 fail closed.
@@ -390,7 +448,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       return await blocked(`veto_minutes=${minutes} (+${tailMin} min post-ready check wait, +${VETO_POST_WINDOW_ALLOWANCE_MIN} min to merge, +${spentMin} min already spent in this job) does not fit the merge job's timeout-minutes=${to.minutes} — raise timeout-minutes in .github/workflows/factory-merge.yml or lower CHARTER self_change.veto_minutes; no window was opened`);
     }
     if (!sha) return await blocked("the PR head sha is unknown — a window must be bound to a commit");
-    const missing = [["vetoWindow.read", d.vetoWindow?.read], ["vetoWindow.open", d.vetoWindow?.open], ["vetoWindow.ensureLabel", d.vetoWindow?.ensureLabel], ["vetoWindow.resolve", d.vetoWindow?.resolve], ["vetoLabel", d.vetoLabel], ["factoryLogins", d.factoryLogins], ["comment", d.comment]].filter(([, f]) => typeof f !== "function").map(([k]) => k);
+    const missing = [["vetoWindow.read", d.vetoWindow?.read], ["vetoWindow.open", d.vetoWindow?.open], ["vetoWindow.ensureLabel", d.vetoWindow?.ensureLabel], ["vetoWindow.resolve", d.vetoWindow?.resolve], ["vetoWindow.history", d.vetoWindow?.history], ["vetoWindow.notice", d.vetoWindow?.notice], ["vetoLabel", d.vetoLabel], ["factoryLogins", d.factoryLogins], ["comment", d.comment]].filter(([, f]) => typeof f !== "function").map(([k]) => k);
     if (missing.length) return await blocked(`deps not wired (${missing.join(", ")})`);
     const short = sha.slice(0, 7);
 
@@ -426,12 +484,58 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
         });
       }
       closesAt = parseCloses(win.description);
-      const createdAt = Date.parse(win.createdAt ?? "");
       if (closesAt === null) return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} has a malformed description ${JSON.stringify(win.description)} (expected closes=<ISO 8601 UTC>)`);
+
+      // sec1 — **게시자가 팩토리 로그인이라는 것만으로는 이 창이 이 머지 스테이지가 연 창이라는 증거가 아니다.** 그 로그인은
+      // 에이전트 배우의 것이기도 하고(그 토큰은 `POST /statuses`를 할 수 있다 — (6b)의 (d) 참고), `closes=`는 게시자가
+      // 고르는 글자다. 과거 시각을 적은 pending 하나면 알림 없이 한 번 보고 머지됐다. 그래서 재사용하는 창은 게시자가 고를 수
+      // 없는 두 사실에 묶는다:
+      //   ① **GitHub의 시계**: 그 sha에서 이 context의 첫 상태(= 창을 연 pending)가 찍힌 `created_at`부터 `closes`까지가
+      //      veto_minutes여야 한다(러너/GitHub 시계 차 VETO_REUSE_SKEW_MS 안). 창을 연 런은 closes = opened_at + veto_minutes로
+      //      쓰고 몇 초 안에 게시한다 — 과거의 closes, 짧은 창은 여기서 떨어진다. 이력의 모든 항목은 팩토리가 올렸고 같은
+      //      `closes=`를 싣는다(해소는 description을 바꾸지 않는다 — 시계를 바꾼 재게시는 창이 아니다).
+      //   ② **주인이 들었다**: 그 첫 상태보다 먼저(시계 차 안), 창이 열린 시각 이후에 팩토리 계정이 이 PR에 그 closes를
+      //      머리에 단 알림(`vetoNoticeHeader`)을 남겼어야 한다. 알림 없는 창은 거부권을 주지 않는다.
+      // 둘 다 위조할 수 있는 것은 같은 토큰이 코멘트까지 다는 경우뿐인데, 그때는 주인이 실제로 PR에서 알림을 받았고 창의
+      // 길이도 GitHub이 찍은 시각으로 veto_minutes였다 — 이 창이 지키려는 것(알림 + 온전한 창)이 그대로 성립한다.
+      // 거부권은 그 알림 시각부터 센다. 어느 재료든 읽지 못하면 판정 불가다.
+      let h;
+      try { h = await d.vetoWindow.history(sha); } catch (e) { h = { ok: false, reason: `${e?.message || e}` }; }
+      if (!h?.ok || !Array.isArray(h.entries) || !h.entries.length) {
+        return await blocked(`the ${VETO_WINDOW_CONTEXT} history on ${short} could not be read (${h?.reason || "no entries"}) — the window's opening cannot be checked against GitHub's clock`);
+      }
+      const stranger = h.entries.find((e) => !known.has(String(e?.creatorLogin || "").trim().toLowerCase()));
+      if (stranger) {
+        return await blocked(`an earlier ${VETO_WINDOW_CONTEXT} on ${short} was posted by ${stranger.creatorLogin ? `@${stranger.creatorLogin}` : "an unknown account"}, which is not a factory account — a commit status is writable by anything holding a repo-scoped token`);
+      }
+      const reclocked = h.entries.find((e) => e?.description !== win.description);
+      if (reclocked) {
+        return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} was posted with two clocks (${JSON.stringify(reclocked.description)} and ${JSON.stringify(win.description)}) — a window the factory opened keeps one closes= for its whole life`);
+      }
+      const opening = h.entries[h.entries.length - 1];   // 목록은 최신순 — 마지막이 창을 연 상태다
+      const createdAt = Date.parse(opening.createdAt ?? "");
       if (!Number.isFinite(createdAt)) return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} carries no readable creation time — the window's start (opened_at) is unknown`);
-      // opened_at은 첫 런이 **알림 코멘트보다 먼저** 잡은 시각(= closes − veto_minutes)이다. 상태는 코멘트 **뒤**에
-      // 게시되므로 그 createdAt은 늦다 — 그 사이에 붙었다 떼어진 거부권을 지우지 않도록 둘 중 이른 쪽을 쓴다.
-      openedAt = Math.min(createdAt, closesAt - minutes * 60_000);
+      if (String(opening.state) !== "pending") {
+        return await blocked(`the first ${VETO_WINDOW_CONTEXT} on ${short} is "${opening.state}", not pending — the factory opens every window as pending, so this one was not opened by the merge stage`);
+      }
+      const span = closesAt - createdAt;
+      if (Math.abs(span - minutes * 60_000) > VETO_REUSE_SKEW_MS) {
+        return await blocked(`${VETO_WINDOW_CONTEXT} on ${short} was stamped by GitHub at ${iso(createdAt)} but says closes=${iso(closesAt)} (${Math.round(span / 60_000)} min) — a window the merge stage opens closes veto_minutes=${minutes} after it is posted, so this is not one`);
+      }
+      let nr;
+      try { nr = await d.vetoWindow.notice({ pr: prNo, closesAt: iso(closesAt) }); } catch (e) { nr = { ok: false, reason: `${e?.message || e}` }; }
+      if (!nr?.ok || !Array.isArray(nr.comments)) return await blocked(`the auto-merge notice for the window on ${short} could not be read on PR #${prNo}: ${nr?.reason || "no list returned"}`);
+      const header = vetoNoticeHeader(iso(closesAt));
+      const told = nr.comments
+        .filter((c) => String(c?.body ?? "").startsWith(header) && known.has(String(c?.author || "").trim().toLowerCase()))
+        .map((c) => Date.parse(c?.createdAt ?? ""))
+        .filter((t) => Number.isFinite(t) && t >= closesAt - minutes * 60_000 - VETO_REUSE_SKEW_MS && t <= createdAt + VETO_REUSE_SKEW_MS);
+      if (!told.length) {
+        return await blocked(`no auto-merge notice for the window closing ${iso(closesAt)} was posted on PR #${prNo} by a factory account before ${VETO_WINDOW_CONTEXT} on ${short} — the owner was never told, so that status grants no veto window and is not reused`);
+      }
+      // opened_at은 주인이 들은 시각이다(첫 런은 알림 코멘트 **전에** closes − veto_minutes를 잡는다). 상태는 코멘트 **뒤**에
+      // 게시되므로 그 createdAt은 늦다 — 그 사이에 붙었다 떼어진 거부권을 지우지 않도록 이른 쪽을 쓴다.
+      openedAt = Math.min(Math.min(...told), closesAt - minutes * 60_000);
       live = { sha, closesAt };
       record([`merge: veto window reused on ${short} — opened ${iso(openedAt)}, closes ${iso(closesAt)}`]);
       const pre = beforeOpen ? await beforeOpen() : null;
@@ -451,7 +555,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       // 약속은 **조건부**로 쓴다: 창 뒤에도 도는 검사(ready 뒤 필수 체크 대기, 무결성 재확인, 라이브 head 대조)가 있고,
       // 그것이 거부하면 머지는 없다. 리뷰 증거((6b))는 창을 열기 전에 이미 확인했다.
       const body = [
-        `**자동 머지 예정 — ${iso(closesAt)}** (\`${VETO_WINDOW_CONTEXT}\`)`,
+        vetoNoticeHeader(iso(closesAt)),
         "",
         "이 PR이 바꾸는 보호 경로는 전부 비판정 경로입니다(CHARTER `self_change.auto_merge_non_judge: true`, `lib/non-judge-paths.js`):",
         "",
@@ -516,9 +620,11 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // #149 (S4a) — 보호 경로를 비판정/판정자로 가른다(`lib/non-judge-paths.js`, 양의 목록). 자동 머지 후보가
   // 되는 것은 **엔진 저장소에서, 전부 비판정이고, CHARTER 스위치가 켜졌을 때뿐**이다. 그 밖의 모든 경우 —
   // 판정자 파일이 하나라도 있거나, 스위치가 꺼졌거나 배선되지 않았거나, 채택자 저장소이거나 — 는 아래의
-  // handToHuman이 오늘과 바이트 같은 사유·코멘트·record로 사람에게 넘긴다. 위 "게이트보다 먼저" 규칙(판정자
-  // 경로를 실은 PR의 코드는 한 줄도 돌지 않는다)은 그대로이고, 좁혀지는 것은 비판정 + 스위치 on의 경우뿐이다.
-  // 그때도 머지는 여기서 정해지지 않는다: 정책·게이트·mergeGates가 모두 통과한 뒤 거부권 창이 열린다((5b)).
+  // handToHuman이 오늘과 바이트 같은 사유·코멘트·record로 사람에게 넘긴다. 위 "게이트보다 먼저" 규칙(보호 경로를
+  // 실은 PR의 코드는 이 잡에서 한 줄도 돌지 않는다)은 비판정 + 스위치 on의 경우에도 그대로다(sec2): 그 PR은 여기서
+  // 사람에게 가지 않을 뿐, 아래 (4)에서 게이트를 돌리지 않고 리뷰 런의 `factory/gates` 상태를 게이트 증거로 읽는다 —
+  // 비판정 파일은 전부 단위 게이트가 실행하는 코드이고, 이 프로세스는 머지 토큰을 env에 쥐고 있다.
+  // 머지도 여기서 정해지지 않는다: 정책·게이트 증거·mergeGates가 모두 통과한 뒤 거부권 창이 열린다((5b)).
   let vetoFiles = null;
   if (prot.files.length) {
     const cls = classifyProtected(prot.files, { engine: d.engine === true });
@@ -635,51 +741,66 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human. base/diff를 못 구한
   // 것도 판정 불가다(run-stage의 나머지 스테이지와 같은 typed-error 계약). 상태 게시는 부수 효과라
   // 실패해도(또는 diagnostic 결과여도) 머지 판단을 막지 않는다 — postStatus 자체가 best-effort다.
-  let gates;
-  try {
-    gates = await d.gates();
-  } catch (e) {
-    if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
-    const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
-    const t = await toBlocked(reason);
-    record([`merge: gates BLOCKED — ${e.message}`, ...refusal(t)]);
-    return 2;
+  let gates = null;
+  if (vetoFiles) {
+    // sec2 — **비판정이어도 보호 경로 PR의 코드는 이 잡에서 한 줄도 돌지 않는다.** `d.gates()`는 PR head의 테스트를
+    // 돌리고(비판정 목록의 파일은 전부 그 테스트가 실행하거나 import하는 파일이다), 이 프로세스와 그 조상은 env에
+    // 머지 토큰(ADR-021)을 쥐고 있다. 자식 env의 스크럽은 `/proc/<조상 pid>/environ`을 지우지 못한다 — 같은 uid의
+    // 코드는 그것을 읽는다. 그래서 위 "게이트보다 먼저" 규칙을 이 경로에도 그대로 지킨다: 게이트를 여기서 다시 돌리지
+    // 않는다. 여기서는 **리뷰 런이 이 head에 올린 `factory/gates`**(success, 팩토리 계정)를 먼저 본다 — 싸고 이른 첫 겹일 뿐이다:
+    // 그 상태는 에이전트 배우의 토큰으로도 게시된다. 게이트 증거의 본체는 아래 (6b)가 창 앞과 뒤(라이브 head)에서 묻는, 리뷰 런의
+    // **러너**가 factory/records에 쓴 `gates=GREEN`이다(self-critique). 머지 전이는 `gatesFromStatuses`로 그 출처를 싣고, run-stage가
+    // 그 기록을 직접 다시 읽은 뒤에만 `statusesVerified`를 세운다(`resolveMergeGateEvidence`).
+    const code = await nonJudgeGateEvidence();
+    if (code !== null) return code;
+  } else {
+    try {
+      gates = await d.gates();
+    } catch (e) {
+      if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+      const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+      const t = await toBlocked(reason);
+      record([`merge: gates BLOCKED — ${e.message}`, ...refusal(t)]);
+      return 2;
+    }
+    if (gates && gates.diagnostic !== true && postStatus) {
+      await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
+    }
+    // KTB-21 parity with run-stage (implement/review): `[factory.test.env].compose`가 있으면 게이트가
+    // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
+    // 없으면(=이 하네스는 compose를 안 쓴다) 아무 줄도 붙지 않는다. merge에도 같은 dep(gates())이
+    // 붙어 있으므로 결과를 흘려버리지 않는다 — 아래 세 갈래(BLOCKED/비-GREEN/GREEN) 모두에 붙인다.
+    const testEnvNote = gates?.test_env_reup?.ran
+      ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
+      : [];
+    if (gates?.status === "BLOCKED") {
+      const reason = gates.blocked_reason || "gates could not be decided";
+      const t = await toBlocked(reason);
+      record([`merge: gates BLOCKED — ${reason}`, ...refusal(t), ...testEnvNote]);
+      return 2;
+    }
+    // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
+    // 만들어지지 않았거나 이 런에서 게이트가 돌지 않았다는 뜻이고, 머지는 되돌릴 수 없으므로
+    // 확인되지 않은 것을 통과로 읽지 않는다(fail closed, §merge gate와 같은 원칙).
+    if (!gates || gates.status !== "GREEN") {
+      const reason = `gates ${gates?.status ?? "missing"} at merge`;
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      // Feedback loop Task 1/3 — 이름뿐인 `merge: gates RED`는 **왜** 빨간지를 말하지 않는다. run-stage가
+      // 이미 닫은 그 구멍(7일짜리 아티팩트에만 남던 뿌리)이 머지 직전의 게이트에서만 열려 있었다.
+      // `stamp`가 이 줄을 이 런에 묶는다 — 묶이지 않은 줄은 Task 3의 harvester가 증거로 세지 않는다.
+      record([`merge: gates ${gates?.status ?? "missing"}`, ...gatesDetailLines(gates, stamp), ...refusal(t), ...testEnvNote]);
+      return 2;
+    }
+    record([`merge: gates ${gates.status}`, ...testEnvNote]);
   }
-  if (gates && gates.diagnostic !== true && postStatus) {
-    await postStatus({ context: "factory/gates", state: gates.status === "GREEN" ? "success" : "failure", description: verdictLine(gates), sha: gates.head_sha });
-  }
-  // KTB-21 parity with run-stage (implement/review): `[factory.test.env].compose`가 있으면 게이트가
-  // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
-  // 없으면(=이 하네스는 compose를 안 쓴다) 아무 줄도 붙지 않는다. merge에도 같은 dep(gates())이
-  // 붙어 있으므로 결과를 흘려버리지 않는다 — 아래 세 갈래(BLOCKED/비-GREEN/GREEN) 모두에 붙인다.
-  const testEnvNote = gates?.test_env_reup?.ran
-    ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
-    : [];
-  if (gates?.status === "BLOCKED") {
-    const reason = gates.blocked_reason || "gates could not be decided";
-    const t = await toBlocked(reason);
-    record([`merge: gates BLOCKED — ${reason}`, ...refusal(t), ...testEnvNote]);
-    return 2;
-  }
-  // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
-  // 만들어지지 않았거나 이 런에서 게이트가 돌지 않았다는 뜻이고, 머지는 되돌릴 수 없으므로
-  // 확인되지 않은 것을 통과로 읽지 않는다(fail closed, §merge gate와 같은 원칙).
-  if (!gates || gates.status !== "GREEN") {
-    const reason = `gates ${gates?.status ?? "missing"} at merge`;
-    const t = await d.transition({ to: "factory:needs-human", reason });
-    // Feedback loop Task 1/3 — 이름뿐인 `merge: gates RED`는 **왜** 빨간지를 말하지 않는다. run-stage가
-    // 이미 닫은 그 구멍(7일짜리 아티팩트에만 남던 뿌리)이 머지 직전의 게이트에서만 열려 있었다.
-    // `stamp`가 이 줄을 이 런에 묶는다 — 묶이지 않은 줄은 Task 3의 harvester가 증거로 세지 않는다.
-    record([`merge: gates ${gates?.status ?? "missing"}`, ...gatesDetailLines(gates, stamp), ...refusal(t), ...testEnvNote]);
-    return 2;
-  }
-  record([`merge: gates ${gates.status}`, ...testEnvNote]);
 
   // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
   // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는
   // 그대로 이어간다. 이 전이가 거부되면 머지는 아직 일어나지 않았으므로 그대로 멈춘다.
   if (retryFromBlocked) {
-    const t = await d.transition({ to: "factory:approved", reason: "merge retry from blocked — gates re-verified GREEN" });
+    // 비판정 경로(sec2)에는 이 런의 gates.json이 없다 — 그 증거는 리뷰 런의 상태라, `factory:approved`의 게이트 요구조건은
+    // 이 hop을 거부하고 이슈는 blocked에 남는다(사람이 본다). 그 문을 approved까지 넓히지 않는다.
+    const t = await d.transition({ to: "factory:approved", reason: vetoFiles ? "merge retry from blocked — the review run's factory/gates re-verified" : "merge retry from blocked — gates re-verified GREEN" });
     if (!t.ok) { record([...refusal(t)]); return 2; }
     leftBlocked = true;    // KTB-19 review I-2: from here on, a "→ factory:blocked" is a normal approved→blocked edge
     record([`transition: ${t.to}`]);
@@ -771,6 +892,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const prov = verifyReviewProvenance({ handoff: ev.data, record: rec.record, prHeadSha: live, expectedRunId: expected.runId });
     if (!prov.ok) return await reviewRefused(prov.reason);
     record([`merge: review evidence bound to the factory/records run record — review run ${rec.record.runId} (${rec.record.runnerId || "unknown"}) on ${String(rec.record.headSha).slice(0, 7)}, round ${rec.record.round ?? "?"}`]);
+
+    // #149 self-critique — 비판정 경로의 **게이트 증거**. 이 잡은 그 PR의 게이트를 돌리지 않는다(sec2). `factory/gates` 상태는
+    // 에이전트 배우의 토큰으로도 게시되므로(그 로그인은 팩토리 로그인 집합에 있다 — 아래 (d) 참고) 그것만으로는 아무것도 증명하지
+    // 않는다. 게이트를 실제로 돌린 리뷰 런의 **러너**가 이 줄에 쓴 `gates=`(run-stage reviewGatesField: 체크아웃한 커밋의 진단 아닌
+    // 게이트 파일)가 GREEN이어야 한다. 위 provenance가 이 줄을 그 런·이 head에 이미 묶었다. 창 앞과 뒤(라이브 head)에서 같이 묻는다.
+    if (vetoFiles && rec.record.gates !== "GREEN") {
+      return await reviewRefused(`the review run ${rec.record.runId} recorded gates=${rec.record.gates ?? "(none)"} for ${live.slice(0, 7)} on factory/records — a non-judge protected-path PR is merged without running its gates in this job, so the gate verdict the review run's runner wrote (not a commit status, which the agent's token can post) must be GREEN`);
+    }
+    if (vetoFiles) record([`merge: gate evidence for the non-judge path — review run ${rec.record.runId} recorded gates=GREEN for ${live.slice(0, 7)} on factory/records`]);
 
     /**
      * ── ADR-024 / KTB-42 — **qa 증거도 그 줄에서 읽는다.** ──────────────────────────────────────
@@ -1011,7 +1141,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // true이면 이 잡 자체가 `factory-merge` 환경의 required reviewer 앞에서 한 번 멈췄다는 뜻이고
   // (곧 사람이 PR마다 "돌려라"를 눌렀다), false이면 사람의 서명은 토큰 등록 1회뿐이다 — 그것이
   // 다크 루프의 정의이고, 기록에 소리 내어 남아야 한다. 값이 없으면(구형 CHARTER) 그 사실을 적는다.
-  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg, qaManifestRecorded });
+  // sec2 — 비판정 경로는 이 잡에서 게이트를 돌리지 않았다(gates.json이 없다). 그 증거가 리뷰 런의 `factory/gates` 상태였고
+  // (6b)가 라이브 head로 다시 확인했다는 것을 전이에 싣는다 — `requirements.js`의 gatesGate가 그 출처를 받는다.
+  const t = await d.transition({ to: "factory:merged", reason: humanGateNote(d.humanGate), mergeGatesResult: mg, qaManifestRecorded, ...(vetoFiles ? { gatesFromStatuses: true } : {}) });
   record([...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
 
   // (8) 추적 이슈를 닫는다 — 코드는 이미 머지됐다. 이것도 실패해도 머지 자체는 되돌릴 게 없으므로

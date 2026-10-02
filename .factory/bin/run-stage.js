@@ -42,7 +42,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { runMergeStage, VETO_WINDOW_CONTEXT, vetoNoticeHeader } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -1101,7 +1101,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           else record([`qa evidence: INVALID — ${qa?.reason || "unknown"}`]);
         } catch (e) { record([`qa evidence: unreadable — ${e?.message || e}`]); }
       }
-      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims })]);
+      // #149 self-critique — 이 런의 게이트 판정도 같은 줄에 싣는다(러너만 쓰는 자리). 비판정 경로의 머지는 이 값을 게이트 증거로 읽는다.
+      record([reviewEvidenceLine({ runId, runnerId, headSha: checkoutSha ?? v.data.head_sha, round: v.data.round, decision: agg.decision, verdicts: v.data.verdicts, qaManifest: qaDigest, qaClaims, gates: reviewGatesField(gates, checkoutSha ?? v.data.head_sha) })]);
       await postReviewStatus({ state: agg.decision === "approved" ? "success" : "failure", decision: agg.decision });
     }
     /**
@@ -2061,6 +2062,31 @@ export function makeVetoWindowDep({ gh }) {
       const s = list.find((x) => x?.context === VETO_WINDOW_CONTEXT);
       return { ok: true, window: s ? { sha, state: s.state ?? null, description: s.description ?? null, creatorLogin: s.creatorLogin ?? null, createdAt: s.createdAt ?? null } : null };
     },
+    /**
+     * sec1 — 이 sha에 올라간 이 context의 상태 **전부**(최신순). 재사용하는 창은 첫 게시(= 창을 연 pending)가 GitHub이 찍은
+     * `createdAt`부터 veto_minutes 뒤에 닫혀야 하고, 모든 항목이 팩토리 것이어야 한다 — 그 판정은 merge-stage가 한다.
+     */
+    history: async (sha) => {
+      let list;
+      try { list = await gh.commitStatuses(sha); }
+      catch (e) { return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — ${e?.message || e}` }; }
+      if (!Array.isArray(list)) return { ok: false, reason: `commit statuses for ${String(sha).slice(0, 7)} unreadable — no list returned` };
+      const entries = list.filter((x) => x?.context === VETO_WINDOW_CONTEXT)
+        .map((s) => ({ state: s.state ?? null, description: s.description ?? null, creatorLogin: s.creatorLogin ?? null, createdAt: s.createdAt ?? null }));
+      return { ok: true, entries };
+    },
+    /**
+     * sec1 — 그 창의 자동 머지 알림: PR 코멘트 중 `vetoNoticeHeader(closesAt)`로 **시작하는** 것(인용은 알림이 아니다).
+     * 작성자·시각은 GitHub이 붙인 값 그대로다 — 팩토리 계정인지, 창이 열린 때인지는 merge-stage가 판정한다.
+     */
+    notice: async ({ pr, closesAt }) => {
+      let list;
+      try { list = await gh.comments(pr); }
+      catch (e) { return { ok: false, reason: `comments of PR #${pr} unreadable — ${e?.message || e}` }; }
+      if (!Array.isArray(list)) return { ok: false, reason: `comments of PR #${pr} unreadable — no list returned` };
+      const header = vetoNoticeHeader(closesAt);
+      return { ok: true, comments: list.filter((c) => String(c?.body ?? "").startsWith(header)).map((c) => ({ author: c.author ?? null, createdAt: c.createdAt ?? null, body: c.body })) };
+    },
     /** 거부권 라벨을 카탈로그 정의 그대로 만든다(`--force` — 이미 있으면 색·설명만 맞춘다). */
     ensureLabel: async () => {
       try { await gh.createLabel(catalogLabel(VETO_LABEL)); return { ok: true }; }
@@ -2082,6 +2108,68 @@ export function makeVetoWindowDep({ gh }) {
   };
 }
 const VETO_WINDOW_FINAL_STATES = new Set(["success", "failure", "error"]);
+
+/**
+ * #149 sec2 — 머지 전이의 게이트 증거 출처. merge-stage의 비판정 경로는 이 잡에서 게이트를 돌리지 않으므로(PR 코드가 머지
+ * 토큰 옆에서 돌게 된다) gates.json이 없다. 그 경로가 리뷰 런의 `factory/gates` 상태를 게시자까지 확인한 뒤에만
+ * `gatesFromStatuses: true`를 싣고, 그때 **`factory:merged`에만** requirements.js의 상태 출처 분기를 연다.
+ * 다른 목적지·다른 값(문자열 "true" 포함)은 아무것도 열지 않는다.
+ */
+export function mergeGateEvidenceCtx({ to, gatesFromStatuses, record = null, prHeadSha = null } = {}) {
+  if (to !== "factory:merged" || gatesFromStatuses !== true) return {};
+  // self-critique — merge-stage의 표식은 **어디서 증거를 찾을지**만 말하고, 증거 자체가 아니다. `factory/gates` 상태는 에이전트
+  // 배우의 토큰으로도 게시된다(그 로그인은 팩토리 로그인 집합에 있다). 그래서 이 문은 리뷰 런의 **러너가** factory/records에 쓴
+  // review-evidence 줄의 `gates=GREEN`이 지금 머지된 PR head에 묶여 있을 때만 열린다 — merge-stage의 자기 신고와 독립이다.
+  const verified = Boolean(record && record.stage === "review" && record.gates === "GREEN" && prHeadSha && record.headSha === prHeadSha);
+  return { gatesFromStatuses: true, statusesVerified: verified };
+}
+
+/**
+ * `mergeGateEvidenceCtx`의 재료를 **이 프로세스가 직접** 읽는다: 이슈의 review 하트비트가 지목하는 런 id(`reviewRunId`) →
+ * 그 런이 factory/records에 쓴 줄(`reviewRecord`). 읽지 못하면 미확인(`statusesVerified:false`)이다 — 통과로 접지 않는다.
+ * 비판정 경로의 머지 전이가 아니면 아무것도 읽지 않는다.
+ */
+export async function resolveMergeGateEvidence({ to, gatesFromStatuses, prHeadSha, reviewRunId, reviewRecord }) {
+  if (to !== "factory:merged" || gatesFromStatuses !== true) return {};
+  let record = null;
+  try {
+    const id = await reviewRunId();
+    if (id?.ok && id.runId) {
+      const r = await reviewRecord({ runId: id.runId });
+      if (r?.ok) record = r.record ?? null;
+    }
+  } catch { record = null; }
+  return mergeGateEvidenceCtx({ to, gatesFromStatuses, record, prHeadSha });
+}
+
+/**
+ * #149 self-critique — review-evidence 줄의 `gates=` 값. 이 리뷰 런의 게이트 파일이 **체크아웃한 커밋**의 것이고 진단 출력이
+ * 아닐 때만 그 판정(GREEN·RED…)을 그대로 싣는다. 다른 커밋의 파일은 `stale`, 손으로 돌린 진단은 `diagnostic`, 없으면 `none`.
+ */
+export function reviewGatesField(gates, sha) {
+  if (!gates) return "none";
+  if (gates.diagnostic === true) return "diagnostic";
+  if (!sha || gates.head_sha !== sha) return "stale";
+  return String(gates.status || "none");
+}
+
+/**
+ * #149 (S4a) — 머지 잡의 자기 머지 재료 세 가지를 **구성 시점에** 고정한다. main()은 이것을 프로세스 시작 시(워크플로의 기본
+ * 체크아웃 = base) 만들고, checkoutHead가 트리를 PR head로 옮긴 뒤에는 디스크를 다시 읽지 않는다:
+ *  - `engine`: 엔진 저장소인가(`mirrorApplicable`) — PR이 `factory/cli/*`를 더하거나 지워 답을 바꿀 수 없다.
+ *  - `mergeJobTimeoutMinutes`: 설치된 factory-merge.yml의 timeout-minutes — PR이 자기 워크플로로 창을 늘릴 수 없다.
+ *  - `selfChange`: CHARTER `self_change`의 검증 결과 — `charter()`는 charterReady가 checkoutHead **전에** 읽어 둔 객체다.
+ * 머지 외 스테이지는 엔진 판정도 워크플로 읽기도 하지 않는다(engine:false).
+ */
+export function makeMergeSelfChangeDeps({ root, stage, readFile, charter, isEngine = mirrorApplicable }) {
+  const workflowAtStart = stage === "merge" ? readFile(join(root, MERGE_WORKFLOW)) : null;
+  const engineAtStart = stage === "merge" ? isEngine(root) === true : false;
+  return {
+    get engine() { return engineAtStart; },
+    get selfChange() { return charter()?.self_change; },
+    mergeJobTimeoutMinutes: async () => parseJobTimeoutMinutes(workflowAtStart),
+  };
+}
 
 /**
  * #149 — 러너 시계(opened_at을 잡는다)와 GitHub 시계(라벨 이벤트 시각을 찍는다)의 어긋남 여유. 창이 열린 직후 붙였다
@@ -2855,10 +2943,8 @@ async function main() {
   const admission = async (args) => (charter
     ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
     : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
-  // #149 (S4a) — 머지 잡의 timeout-minutes는 체크아웃이 PR head로 옮기기 **전**(base)에 읽는다.
-  const mergeWorkflowAtStart = stage === "merge" ? readFile(join(root, MERGE_WORKFLOW)) : null;
-  // 엔진 저장소인가도 base에서 정한다 — PR head의 트리로 물으면 PR이 `factory/cli/*`를 더하거나 지워 답을 바꾼다.
-  const engineAtStart = stage === "merge" ? mirrorApplicable(root) : false;
+  // #149 (S4a) — 엔진 판정·머지 잡의 timeout-minutes는 체크아웃이 PR head로 옮기기 **전**(base)에 한 번 읽는다.
+  const selfChangeDeps = makeMergeSelfChangeDeps({ root, stage, readFile, charter: () => charter });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
     charterReady: async () => {
@@ -3319,9 +3405,9 @@ async function main() {
      * 켤 수 없다(CHARTER는 판정자 경로이기도 하다). CHARTER가 없으면 undefined = 꺼짐.
      * `mergeJobTimeoutMinutes`도 시작 시 읽은 설치본에서 온다(`.github/**`는 판정자라 창까지 오는 PR이 바꿀 수 없다).
      */
-    get engine() { return engineAtStart; },
-    get selfChange() { return charter?.self_change; },
-    mergeJobTimeoutMinutes: async () => parseJobTimeoutMinutes(mergeWorkflowAtStart),
+    get engine() { return selfChangeDeps.engine; },
+    get selfChange() { return selfChangeDeps.selfChange; },
+    mergeJobTimeoutMinutes: selfChangeDeps.mergeJobTimeoutMinutes,
     vetoWindow: makeVetoWindowDep({ gh }),
     vetoLabel: makeVetoLabelDep({ gh, issue }),
     // `process.env`는 이 배선 한 줄에만 산다. 프로세스 시작 시각은 Actions 밖(로컬)에서만 쓰인다.
@@ -3352,7 +3438,7 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null }) => {
+    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null, gatesFromStatuses = false }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -3379,6 +3465,9 @@ async function main() {
       if (prerequisite) ctxExtra.prerequisite = true;
       const gatesFile = readJson(gatesPath);
       if (gatesFile) ctxExtra.gatesFile = gatesFile;                   // 워크플로의 자기 신고가 아니라 이 파일이 판정이다
+      // #149 sec2 — 비판정 경로의 머지 전이: 게이트 증거는 리뷰 런의 상태다(merge-stage가 확인했다). merged에만.
+      // self-critique: 그 표식만으로는 열리지 않는다 — 리뷰 런의 러너 기록(`gates=GREEN`, 이 PR head)을 여기서 직접 다시 읽는다.
+      Object.assign(ctxExtra, await resolveMergeGateEvidence({ to, gatesFromStatuses, prHeadSha: ctxExtra.prHeadSha ?? null, reviewRunId: () => deps.reviewRunId(), reviewRecord: (a) => deps.reviewRecord(a) }));
       // merge stage는 이미 mergeGates()를 한 번 돌렸다 — 여기서 다시 gh를 두 번 때리지 않고 그 결과를 그대로 쓴다.
       if (to === "factory:merged") Object.assign(ctxExtra, mergeGatesResult ?? await mergeGates({ gh, root, harness, pr: ctxExtra.pr, prHeadSha: ctxExtra.prHeadSha, readFile, record: recordLine, base: await mergeBase(), required: harness?.factory?.required_checks ?? null }));
       // stage: to===factory:blocked일 때만 lib/transition.js가 origin 마커에 쓴다(KTB-15b I2).
