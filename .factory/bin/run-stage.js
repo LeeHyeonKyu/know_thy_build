@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync, statSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -142,12 +142,43 @@ export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMer
  */
 export const readFileOrNull = (p, opts) => {
   const maxBytes = opts?.maxBytes;
+  if (opts?.meta) return readFileWithChangeTime(p, maxBytes);
   try {
     if (!existsSync(p)) return null;
     if (Number.isFinite(maxBytes)) { const bytes = statSync(p).size; if (bytes > maxBytes) return { bytes }; }
     return readFileSync(p, "utf8");
   } catch { return null; }
 };
+/**
+ * #170 rework sec1 — `{ meta: true }`의 읽기. Workflow 러너의 결과 파일은 /tmp에 있고 리뷰어는 /tmp에 쓸 수
+ * 있다: 그 바이트가 **아직 러너의 것인지**를 lib가 판정할 수 있도록, 내용과 함께 커널의 변경 시각(ctime —
+ * 쓰기·rename·link·chmod가 앞으로 밀고, 비특권 프로세스는 되돌릴 수 없다)을 준다.
+ * - 마지막 경로 성분이 심볼릭 링크면 따라가지 않는다(`O_NOFOLLOW` → `{ notRegular: true }`).
+ * - FIFO·장치로 verify를 멈추게 하지 못하게 `O_NONBLOCK`으로 열고, 일반 파일이 아니면 읽지 않는다.
+ * - 같은 fd로 읽기 **전후**에 fstat한다: 둘 중 늦은 ctime을 돌려주므로, 잰 뒤·읽기 전에 끼어든 쓰기도
+ *   그 시각을 앞으로 민다(stat과 read가 다른 inode를 보는 경로 바꿔치기도 fd가 막는다).
+ * 반환: 없으면 null, 상한 초과면 `{ bytes }`, 링크·특수 파일이면 `{ notRegular: true }`, 아니면 `{ text, bytes, ctimeMs }`.
+ */
+function readFileWithChangeTime(p, maxBytes) {
+  let fd;
+  try {
+    fd = openSync(p, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return e?.code === "ELOOP" || e?.code === "EMLINK" ? { notRegular: true } : null;
+  }
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) return { notRegular: true };
+    if (Number.isFinite(maxBytes) && before.size > maxBytes) return { bytes: before.size };
+    const text = readFileSync(fd, "utf8");
+    const after = fstatSync(fd);
+    return { text, bytes: Buffer.byteLength(text, "utf8"), ctimeMs: Math.max(before.ctimeMs, after.ctimeMs) };
+  } catch {
+    return null;
+  } finally {
+    try { closeSync(fd); } catch { /* 닫기 실패는 판정과 무관하다 */ }
+  }
+}
 /** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
 const transcriptTextFor = (root, out, home = homedir(), readFile = readFileOrNull) =>
   readTranscript({ root, home, sessionId: out?.session_id, readFile }) || "";
@@ -1842,15 +1873,29 @@ export const driftDroppedMarker = ({ branch, from, to, dropped = [], files = [] 
  * `implement.v1`의 `gates`는 존재와 `status` 열거만 보므로(§schemas) 후보 선택 결과는 동일하다.
  * 읽지 못하면 `null`이고, 그때는 아무것도 되돌리지 않는다(전이 요구조건이 예전처럼 판단한다).
  */
-export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
+export function implementHeadShaOf({ out, transcriptText = "", readFile } = {}) {
   const placeholder = (o) => (o && !o.gates ? { ...o, gates: { status: "GREEN", level: "unit" } } : o);
+  // #170 — `readFile`은 옵트인이다(없으면 예전 그대로, dw5). 프로덕션 가드(`handoffHeadShaForRun`)는 verify와
+  // 같은 리더를 넘겨, 접수증의 결과 파일에서만 복구된 핸드오프도 같은 sha로 읽는다.
   const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
     validate: (o) => validate("implement.v1", placeholder(o)),
+    readFile,
   });
   const sha = a.ok ? a.data?.head_sha : null;
   return typeof sha === "string" && SHA40.test(sha) ? sha : null;
+}
+
+/**
+ * #170 — KTB-43 드리프트 가드가 읽는 `head_sha`의 **프로덕션 호출**(`main()`의 `handoffHeadSha` dep). 같은 세션의
+ * 핸드오프를 읽는 두 리더(이것과 `verifyStageForRun`)가 같은 트랜스크립트·같은 리더로 읽어야 한다: 한쪽만 접수증의
+ * 결과 파일을 보면, 그 파일에서만 복구된 implement 핸드오프는 verify에는 sha가 있고 가드에는 없어서 가드가 아무것도
+ * 되돌리지 않는다(스킵틱 #170). implement 밖의 스테이지는 지킬 sha가 없다 — null.
+ */
+export function handoffHeadShaForRun({ root, stage, out, home = homedir(), readFile = readFileOrNull }) {
+  if (stage !== "implement") return null;
+  return implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out, home, readFile), readFile });
 }
 
 /**
@@ -2858,7 +2903,7 @@ async function main() {
      * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
      */
-    handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    handoffHeadSha: (out) => handoffHeadShaForRun({ root, stage, out }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,
