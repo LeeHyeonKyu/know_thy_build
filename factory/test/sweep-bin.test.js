@@ -162,3 +162,17 @@ test("test_36_human_merged_routing: --quick keeps the same routing seam (the per
   expect(args.quick).toBe(true);
   expect(typeof args.routeMerged).toBe("function");
 });
+
+// #168 dw5 — 대기 판정은 운영 배선에 실제로 꽂혀야 산다. `sweeper.test.js`는 `stageRuns`를 직접 주입하므로,
+// 이 인자가 `bin/sweep.js`에서 떨어지면 그 파일은 전부 초록인 채 운영에서는 오늘처럼 곧장 에스컬레이션한다.
+test("test_168_sweep_bin_wires_read_only_stage_run_lookup: bin/sweep.js hands sweep() a stageRuns that lists factory-<stage>.yml runs through gh.workflowRuns", async () => {
+  const rows = [{ databaseId: 1, status: "queued", conclusion: "", createdAt: "2026-10-02T09:59:30Z", event: "workflow_dispatch" }];
+  gh.workflowRuns = vi.fn(async () => rows);
+  try {
+    const args = await runMain(["--quick"]);
+    expect(typeof args.stageRuns).toBe("function");
+    await expect(args.stageRuns("merge")).resolves.toBe(rows);
+    expect(gh.workflowRuns).toHaveBeenCalledWith("factory-merge.yml", 50);
+    expect(gh.dispatchWorkflow).not.toHaveBeenCalled();
+  } finally { delete gh.workflowRuns; }
+});
