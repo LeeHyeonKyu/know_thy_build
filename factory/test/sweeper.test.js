@@ -2387,3 +2387,225 @@ test("sweep: a human-retry blocked origin (from approved) re-fires merge once, a
   expect(actions).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: 9, stage: "merge", cause: "human-retry" }));
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ issue: 9, to: "factory:needs-human" }));
 });
+
+// ── #147 — 라벨-셋 복구가 대기 라벨로 이었으면 그 라벨이 약속하는 스테이지를 같은 sweep에서 띄운다 ──────
+// KTB #143 재시도(2026-10-01 15:37Z): 라벨 스왑이 중간에 끊겨 `factory:rework` + `factory:needs-human`이 됐고,
+// sweep이 `factory:rework` 하나로 복구했다 — 그런데 복구는 라벨을 **지우기만** 하므로 `labeled` 이벤트가 없다.
+// 이슈는 런 없이 앉아 있었고 stalled 팔은 그 뒤에야 본다. 아래 더블은 **상태를 가진다**: `setFactoryLabel`이
+// 라벨을 실제로 바꾸고, `comment`가 남긴 코멘트는 그 sweep의 `now`를 `createdAt`으로 달고 다음 조회에 보인다
+// (open risk: `createdAt`이 없거나 고정된 옛 값이면 stalled 팔의 창 검사가 엉뚱한 이유로 통과/실패한다).
+const T143 = "2026-10-01T15:37:00Z";
+const rework143 = (at = T143) => ({ id: 1430, body: `<!-- factory-transition:v1 from=factory:awaiting-review to=factory:rework by=script -->\nfactory:awaiting-review → factory:rework`, createdAt: at });
+const minutesAfter = (iso, m) => new Date(Date.parse(iso) + m * 60e3).toISOString().replace(".000Z", "Z");
+const REDISPATCH_WORDING = /다시 띄/;
+const statefulGh = (seed) => {
+  const issues = new Map(seed.map((s) => [s.number, { labels: [...s.labels], comments: [...(s.comments || [])] }]));
+  const clock = { now: null };
+  const gh = {
+    clock,
+    posted: [],
+    issueList: vi.fn(async () => [...issues].map(([number, s]) => ({ number, title: `issue ${number}`, labels: [...s.labels], updatedAt: clock.now }))),
+    searchIssues: vi.fn(async (label) => [...issues].filter(([, s]) => s.labels.includes(label)).map(([number]) => ({ number }))),
+    comments: vi.fn(async (n) => [...(issues.get(n)?.comments ?? [])]),
+    comment: vi.fn(async (n, body) => {
+      const c = { id: 9000 + gh.posted.length, body, createdAt: clock.now };
+      issues.get(n)?.comments.push(c);
+      gh.posted.push({ issue: n, ...c });
+      return "u";
+    }),
+    setFactoryLabel: vi.fn(async (n, label) => {
+      const s = issues.get(n);
+      s.labels = [...s.labels.filter((l) => !STATE_LABELS_147.has(l)), label];
+      return { verify: "ok" };
+    }),
+    patchComment: vi.fn(),
+    labelsOf: (n) => [...issues.get(n).labels],
+  };
+  return gh;
+};
+const STATE_LABELS_147 = new Set(["backlog", "factory:queue", "factory:ready", "factory:planned", "factory:in-progress", "factory:awaiting-review", "factory:rework", "factory:approved", "factory:merged", "factory:blocked", "factory:needs-human", "factory:needs-info"]);
+const sweep147 = async (gh, now, over = {}) => {
+  gh.clock.now = now;
+  return sweep({ gh, charter, thresholds: T, now, staleMinutes: 30, transition: vi.fn(async ({ to }) => ({ ok: true, to })), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, ...over });
+};
+const repairCommentsOn = (gh, n) => gh.posted.filter((c) => c.issue === n && c.body.includes("<!-- factory-label-set-repaired from="));
+
+test("test_147_repaired_waiting_label_is_dispatched_in_the_same_sweep: the #143 shape (rework + needs-human, latest to=rework) is repaired and implement is dispatched once", async () => {
+  const gh = statefulGh([{ number: 143, labels: ["factory:rework", "factory:needs-human", "factory:tier-standard"], comments: [rework143()] }]);
+  const dispatchStage = vi.fn(async () => {});
+  // the quick sweep at the end of the refused implement run — two minutes after the transition, so the stalled arm
+  // (10-minute no-heartbeat threshold) would NOT have dispatched anything on its own.
+  const actions = await sweep147(gh, minutesAfter(T143, 2), { dispatchStage });
+
+  expect(gh.labelsOf(143)).toEqual(["factory:tier-standard", "factory:rework"]);
+  expect(dispatchStage.mock.calls).toEqual([[{ stage: "implement", issue: 143 }]]);
+  const repaired = repairCommentsOn(gh, 143);
+  expect(repaired).toHaveLength(1);
+  expect(repaired[0].body).toContain(labelSetRepairedComment(["factory:rework", "factory:needs-human"], "factory:rework"));
+  expect(repaired[0].body).toContain(restartComment("implement", 143));
+  expect(repaired[0].body).toMatch(REDISPATCH_WORDING);
+  expect(repaired[0].body).toContain("factory-implement.yml");
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 143, from: ["factory:rework", "factory:needs-human"], to: "factory:rework" });
+  expect(actions).toContainEqual({ kind: "label-set-repair-dispatched", issue: 143, stage: "implement", label: "factory:rework" });
+  expect(actions.some((a) => a.kind === "stalled-restart")).toBe(false);
+});
+
+test("test_147_repaired_waiting_label_is_dispatched_in_the_same_sweep: only the four waiting labels dispatch — queue→triage, planned→implement, approved→merge; ready and awaiting-review do not", async () => {
+  const tr = (from, to) => ({ id: 1, body: `<!-- factory-transition:v1 from=${from} to=${to} by=script -->\n${from} → ${to}`, createdAt: T143 });
+  const gh = statefulGh([
+    { number: 1, labels: ["factory:queue", "factory:needs-info"], comments: [tr("factory:needs-info", "factory:queue")] },
+    { number: 2, labels: ["factory:ready", "factory:planned"], comments: [tr("factory:ready", "factory:planned")] },
+    { number: 3, labels: ["factory:awaiting-review", "factory:approved"], comments: [tr("factory:awaiting-review", "factory:approved")] },
+    { number: 4, labels: ["factory:queue", "factory:ready"], comments: [tr("factory:queue", "factory:ready")] },
+    { number: 5, labels: ["factory:in-progress", "factory:awaiting-review"], comments: [tr("factory:in-progress", "factory:awaiting-review")] },
+  ]);
+  const dispatchStage = vi.fn(async () => {});
+  await sweep147(gh, minutesAfter(T143, 2), { dispatchStage });
+  const calls = dispatchStage.mock.calls.map(([a]) => a).sort((a, b) => a.issue - b.issue);
+  expect(calls).toEqual([{ stage: "triage", issue: 1 }, { stage: "implement", issue: 2 }, { stage: "merge", issue: 3 }]);
+  for (const n of [4, 5]) {
+    expect(gh.labelsOf(n)).toHaveLength(1);
+    const [c] = repairCommentsOn(gh, n);
+    expect(c.body).not.toMatch(REDISPATCH_WORDING);
+    expect(c.body).not.toContain("factory-sweeper restarted");
+  }
+});
+
+test("test_147_repair_to_needs_human_does_not_dispatch: a fold to needs-human dispatches nothing, while a backed waiting-label repair in the same sweep does", async () => {
+  const gh = statefulGh([
+    // no transition backs either label → KTB-18 fold to needs-human
+    { number: 20, labels: ["factory:rework", "factory:approved", "factory:tier-standard"], comments: [] },
+    // control: the dispatch path is live in this very sweep, so the zero-call above is not vacuous
+    { number: 21, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] },
+  ]);
+  const dispatchStage = vi.fn(async () => {});
+  const actions = await sweep147(gh, minutesAfter(T143, 2), { dispatchStage });
+
+  expect(gh.labelsOf(20)).toEqual(["factory:tier-standard", "factory:needs-human"]);
+  expect(dispatchStage.mock.calls.filter(([a]) => a.issue === 20)).toEqual([]);
+  expect(dispatchStage.mock.calls).toEqual([[{ stage: "implement", issue: 21 }]]);
+  const [fold] = repairCommentsOn(gh, 20);
+  expect(fold.body.startsWith(`${labelSetRepairedComment(["factory:rework", "factory:approved"])}\n`)).toBe(true);
+  expect(fold.body).toContain(":unstick");
+  expect(fold.body).not.toMatch(REDISPATCH_WORDING);
+  expect(fold.body).not.toContain("factory-sweeper restarted");
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 20, from: ["factory:rework", "factory:approved"] });
+  expect(actions.some((a) => a.kind === "label-set-repair-dispatched" && a.issue === 20)).toBe(false);
+});
+
+test("test_147_repair_dispatch_honours_back_pressure_and_missing_dep: back-pressure refuses an implement dispatch and the refusal is recorded", async () => {
+  const gh = statefulGh([
+    { number: 30, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] },
+    // back-pressure is an implement-only rule: a merge target is still dispatched under the same refusal
+    { number: 31, labels: ["factory:awaiting-review", "factory:approved"], comments: [{ id: 2, body: "<!-- factory-transition:v1 from=factory:awaiting-review to=factory:approved by=script -->\nx", createdAt: T143 }] },
+  ]);
+  const dispatchStage = vi.fn(async () => {});
+  const backPressure = vi.fn(async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }));
+  const actions = await sweep147(gh, minutesAfter(T143, 2), { dispatchStage, backPressure });
+
+  expect(gh.labelsOf(30)).toEqual(["factory:rework"]);
+  expect(dispatchStage.mock.calls).toEqual([[{ stage: "merge", issue: 31 }]]);
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 30, from: ["factory:rework", "factory:needs-human"], to: "factory:rework" });
+  expect(actions).toContainEqual({ kind: "label-set-repair-dispatch-skipped", issue: 30, stage: "implement", label: "factory:rework", reason: "back-pressure — awaiting-review 4 ≥ 4" });
+});
+
+test("test_147_repair_dispatch_honours_back_pressure_and_missing_dep: without dispatchStage the repair happens silently — no dispatch claim, no error", async () => {
+  const gh = statefulGh([{ number: 32, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] }]);
+  const actions = await sweep147(gh, minutesAfter(T143, 2));
+  expect(gh.labelsOf(32)).toEqual(["factory:rework"]);
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 32, from: ["factory:rework", "factory:needs-human"], to: "factory:rework" });
+  expect(actions.filter((a) => a.kind === "error")).toEqual([]);
+  expect(actions.filter((a) => String(a.kind).startsWith("label-set-repair-dispatch"))).toEqual([]);
+});
+
+test("test_147_repair_dispatch_honours_back_pressure_and_missing_dep: a throwing dispatch keeps the repair, records an error and the sweep moves on", async () => {
+  const gh = statefulGh([
+    { number: 33, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] },
+    { number: 34, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] },
+  ]);
+  const dispatchStage = vi.fn(async ({ issue }) => { if (issue === 33) throw new Error("gh workflow run boom"); });
+  const actions = await sweep147(gh, minutesAfter(T143, 2), { dispatchStage });
+
+  expect(gh.labelsOf(33)).toEqual(["factory:rework"]);
+  expect(actions).toContainEqual({ kind: "label-set-repaired", issue: 33, from: ["factory:rework", "factory:needs-human"], to: "factory:rework" });
+  expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", issue: 33, error: expect.stringContaining("gh workflow run boom") });
+  expect(actions.some((a) => a.kind === "label-set-repair-dispatched" && a.issue === 33)).toBe(false);
+  // the next issue is still repaired and dispatched
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "implement", issue: 34 });
+  expect(actions).toContainEqual({ kind: "label-set-repair-dispatched", issue: 34, stage: "implement", label: "factory:rework" });
+});
+
+test("test_147_stalled_arm_does_not_double_dispatch_after_repair: an old transition the stalled arm would fire on gets one dispatch across two sweeps inside the window", async () => {
+  // the transition is two hours old: on its own the stalled arm would dispatch `factory:rework` → implement.
+  const old = minutesAfter(T143, -120);
+  const gh = statefulGh([{ number: 143, labels: ["factory:rework", "factory:needs-human"], comments: [rework143(old)] }]);
+  const dispatchStage = vi.fn(async () => {});
+  const first = await sweep147(gh, T143, { dispatchStage });
+  const second = await sweep147(gh, minutesAfter(T143, 15), { dispatchStage });
+
+  expect(dispatchStage.mock.calls).toEqual([[{ stage: "implement", issue: 143 }]]);
+  // the one dispatch is the repair's — the stalled arm saw the repair's restart marker and stood down both times
+  expect(first).toContainEqual({ kind: "label-set-repair-dispatched", issue: 143, stage: "implement", label: "factory:rework" });
+  expect([...first, ...second].some((a) => a.kind === "stalled-restart")).toBe(false);
+  expect(gh.posted.filter((c) => c.body.includes(restartComment("implement", 143)))).toHaveLength(1);
+});
+
+test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_budget: back-pressure refusal leaves no restart marker, so the stalled arm still fires once later", async () => {
+  const gh = statefulGh([{ number: 40, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] }]);
+  const dispatchStage = vi.fn(async () => {});
+  await sweep147(gh, minutesAfter(T143, 2), { dispatchStage, backPressure: async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }) });
+
+  const [c] = repairCommentsOn(gh, 40);
+  expect(c.body).toContain(labelSetRepairedComment(["factory:rework", "factory:needs-human"], "factory:rework"));
+  expect(c.body).not.toContain("factory-sweeper restarted");
+  expect(c.body).not.toMatch(REDISPATCH_WORDING);
+  expect(c.body).toContain("back-pressure — awaiting-review 4 ≥ 4");
+  expect(dispatchStage).not.toHaveBeenCalled();
+
+  // 15 minutes after the transition (past the 10-minute no-heartbeat threshold, inside the 30-minute restart window):
+  // back-pressure lifted, the stalled arm dispatches exactly once — a stray restart marker from the repair would block it.
+  const later = await sweep147(gh, minutesAfter(T143, 15), { dispatchStage, backPressure: async () => ({ ok: true, reasons: [] }) });
+  expect(dispatchStage.mock.calls).toEqual([[{ stage: "implement", issue: 40 }]]);
+  expect(later).toContainEqual({ kind: "stalled-restart", issue: 40, stage: "implement", label: "factory:rework" });
+});
+
+test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_budget: an unwired dispatchStage leaves no restart marker and no dispatch wording", async () => {
+  const gh = statefulGh([{ number: 41, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] }]);
+  await sweep147(gh, minutesAfter(T143, 2));
+  const [c] = repairCommentsOn(gh, 41);
+  expect(c.body).toContain(labelSetRepairedComment(["factory:rework", "factory:needs-human"], "factory:rework"));
+  expect(c.body).not.toContain("factory-sweeper restarted");
+  expect(c.body).not.toMatch(REDISPATCH_WORDING);
+  // a later wired sweep inside the restart window still restarts it — nothing spent the budget
+  const dispatchStage = vi.fn(async () => {});
+  await sweep147(gh, minutesAfter(T143, 15), { dispatchStage });
+  expect(dispatchStage.mock.calls).toEqual([[{ stage: "implement", issue: 41 }]]);
+});
+
+test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_budget: a throwing backPressure still finishes every implement repair — comment, action, no restart marker — and the stalled arm restarts later", async () => {
+  const gh = statefulGh([
+    { number: 50, labels: ["factory:rework", "factory:needs-human"], comments: [rework143()] },
+    { number: 51, labels: ["factory:planned", "factory:needs-human"], comments: [{ id: 3, body: "<!-- factory-transition:v1 from=factory:ready to=factory:planned by=script -->\nx", createdAt: T143 }] },
+  ]);
+  const dispatchStage = vi.fn(async () => {});
+  const backPressure = vi.fn(async () => { throw new Error("search 502"); });
+  const actions = await sweep147(gh, minutesAfter(T143, 2), { dispatchStage, backPressure });
+
+  for (const [n, label] of [[50, "factory:rework"], [51, "factory:planned"]]) {
+    expect(gh.labelsOf(n)).toEqual([label]);
+    const [c] = repairCommentsOn(gh, n);
+    expect(c.body).toContain(labelSetRepairedComment([label, "factory:needs-human"], label));
+    expect(c.body).not.toContain("factory-sweeper restarted");
+    expect(c.body).not.toMatch(REDISPATCH_WORDING);
+    expect(c.body).toContain("search 502");
+    expect(actions).toContainEqual({ kind: "label-set-repaired", issue: n, from: [label, "factory:needs-human"], to: label });
+    expect(actions).toContainEqual({ kind: "label-set-repair-dispatch-skipped", issue: n, stage: "implement", label, reason: "back-pressure check failed — search 502" });
+  }
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(actions).toContainEqual({ kind: "error", step: "label-set-repair", issue: 50, error: expect.stringContaining("search 502") });
+
+  // the failed check spent no restart budget: once back-pressure answers, the stalled arm restarts the rework issue once
+  const later = await sweep147(gh, minutesAfter(T143, 15), { dispatchStage, backPressure: async () => ({ ok: true, reasons: [] }) });
+  expect(dispatchStage.mock.calls.filter(([a]) => a.issue === 50)).toEqual([[{ stage: "implement", issue: 50 }]]);
+  expect(later).toContainEqual({ kind: "stalled-restart", issue: 50, stage: "implement", label: "factory:rework" });
+});

@@ -508,8 +508,25 @@ const factoryLabelsOf = (labels) => (labels || []).map(String).filter((l) => l.s
  * `gh.issueList`가 없는 mock(구형 테스트 더블)은 조용히 건너뛴다 — "안 쓴다"와 "에러났다"를
  * 가른다(다른 dep들과 같은 계약, 예: `dispatchStage`/`backPressure`).
  */
-async function sweepLabelSetRepair({ gh, actions }) {
+/**
+ * #147 — 복구가 이은 라벨이 **대기 라벨**이면 그 라벨이 약속하는 스테이지를 같은 sweep에서 띄운다.
+ * 복구는 라벨을 지우기만 하므로 `labeled` 이벤트가 나지 않는다(KTB #143 재시도: `factory:rework`에 런 없이
+ * 앉았고 stalled 팔은 그 뒤에야 봤다). 매핑은 stalled 팔의 표(`STALLED_STAGE`)를 공유하되 이슈가 정한
+ * 네 라벨로 좁힌다 — `factory:ready`·`factory:awaiting-review`는 여기서 띄우지 않는다(#147 non_goals).
+ */
+const REPAIR_DISPATCH_LABELS = Object.freeze(["factory:queue", "factory:planned", "factory:rework", "factory:approved"]);
+const repairDispatchStage = (label) => (REPAIR_DISPATCH_LABELS.includes(label) ? STALLED_STAGE[label] ?? null : null);
+
+async function sweepLabelSetRepair({ gh, actions, dispatchStage = null, backPressure = null }) {
   if (typeof gh.issueList !== "function") return;
+  // stalled 팔과 같은 규칙: 흐름 제어는 implement에만, 한 sweep 안에서 한 번만 묻는다.
+  let bpCache;
+  const parked = async () => {
+    if (!backPressure) return null;
+    bpCache ??= Promise.resolve().then(() => backPressure());
+    const bp = await bpCache;
+    return bp?.ok === false ? (bp.reasons || []).join("; ") : null;
+  };
   let issues;
   try { issues = await gh.issueList({ state: "open" }); }
   catch (e) { actions.push({ kind: "error", step: "label-set-repair", error: String(e.message || e) }); return; }
@@ -534,10 +551,42 @@ async function sweepLabelSetRepair({ gh, actions }) {
         continue;
       }
       await gh.setFactoryLabel(it.number, target);
+      /**
+       * #147 — 띄울지는 코멘트를 쓰기 **전에** 정한다. 띄우지 않을 런(흐름 제어 거부, `dispatchStage` 미배선)에
+       * "다시 띄웠다"는 문장도, stalled 팔의 재점화 마커도 남기지 않는다 — 그 마커는 재점화 예산(2) 한 칸과
+       * 30분 창을 쓰고, 일어나지 않은 런에 그것을 쓰면 stalled 팔이 실제로 필요한 재점화를 못 한다(dw5).
+       */
+      const stage = backed && dispatchStage ? repairDispatchStage(backed) : null;
+      // cf1(#147 rework) — 라벨은 이미 바뀌었다. 흐름 제어 조회가 던져도(검색 5xx·rate limit) 복구를 반쯤 두지
+      // 않는다: 거부와 같은 "띄우지 않음"으로 읽고 코멘트·action은 그대로 남긴 뒤 error 한 줄을 덧붙인다.
+      let refused = null;
+      if (stage === "implement") {
+        try {
+          const reason = await parked();
+          if (reason) refused = `back-pressure — ${reason}`;
+        } catch (e) {
+          const msg = String(e?.message || e);
+          refused = `back-pressure check failed — ${msg}`;
+          actions.push({ kind: "error", step: "label-set-repair", issue: it.number, error: `back-pressure: ${msg}` });
+        }
+      }
+      const dispatching = stage && !refused;
+      const restartMarker = dispatching ? `\n${restartComment(stage, it.number)}` : "";
+      const tail = dispatching
+        ? ` 이 라벨이 약속하는 \`factory-${stage}.yml\`을 dispatch로 다시 띄웁니다(#147 — 복구는 \`labeled\` 이벤트를 만들지 않습니다).`
+        : refused
+          ? ` 흐름 제어로 지금은 \`factory-${stage}.yml\`을 띄우지 않았습니다(${refused}). 풀리면 stalled 팔이 이어 받습니다.`
+          : "";
       await gh.comment(it.number, backed
-        ? `${marker}\n이 이슈에 factory 상태 라벨이 2개(${found.join(", ")}) 붙어 있었습니다 — 라벨 스왑이 중간에 실패한 흔적입니다(KTB-30). 이슈에 남은 최신 전이가 \`${backed}\`를 말하므로 그 라벨 하나로 정리했습니다(다른 상태 라벨은 제거, tier 라벨은 유지).`
+        ? `${marker}${restartMarker}\n이 이슈에 factory 상태 라벨이 2개(${found.join(", ")}) 붙어 있었습니다 — 라벨 스왑이 중간에 실패한 흔적입니다(KTB-30). 이슈에 남은 최신 전이가 \`${backed}\`를 말하므로 그 라벨 하나로 정리했습니다(다른 상태 라벨은 제거, tier 라벨은 유지).${tail}`
         : `${marker}\n이 이슈에 factory 상태 라벨이 ${found.length}개(${found.join(", ")}) 붙어 있었습니다 — sweeper가 \`${LABEL_SET_REPAIR_TARGET}\`로 정리했습니다(다른 상태 라벨은 제거, tier 라벨은 유지). 사람이 확인한 뒤 \`:unstick\`으로 재개하세요.`);
       actions.push({ kind: "label-set-repaired", issue: it.number, from: found, ...(backed ? { to: backed } : {}) });
+      if (refused) actions.push({ kind: "label-set-repair-dispatch-skipped", issue: it.number, stage, label: backed, reason: refused });
+      // 마커가 먼저다(stalled 팔 M4와 같은 기울기): dispatch가 던지면 복구는 그대로 두고 error 한 줄만 남긴다 —
+      // 마커가 이미 있으므로 이 창 안에서는 다시 밀지 않고, 다음 창의 stalled 팔이 재시도한다.
+      if (dispatching && await safeDispatch({ dispatchStage, stage, issue: it.number, actions, step: "label-set-repair" })) {
+        actions.push({ kind: "label-set-repair-dispatched", issue: it.number, stage, label: backed });
+      }
     } catch (e) {
       actions.push({ kind: "error", step: "label-set-repair", issue: it.number, error: String(e.message || e) });
     }
@@ -1243,7 +1292,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
    * 팔들의 **입력**(상태 라벨)을 고치므로, 앞에 두면 같은 sweep 안에서 나머지 팔이 고쳐진 라벨을 본다.
    */
   await sweepMissingStateLabel({ gh, nowMs, actions });
-  await sweepLabelSetRepair({ gh, actions });
+  await sweepLabelSetRepair({ gh, actions, dispatchStage, backPressure });
   /**
    * #36 item 3 — 위의 두 팔과 같은 가족(상태 라벨 복구)이라 `--quick`에서도 돈다. 그래야 `quick-sweep`
    * 줄의 `skipped` 목록이 계속 참이다 — 그 줄이 실제와 다르면 run 기록을 읽는 사람이 오해한다(r5 nit 5).
