@@ -474,7 +474,9 @@ export async function reUpTestEnv({ run, cwd, harness }) {
  * 한 스테이지의 게이트 전체(명령 게이트 + 실패 분류 + prove-test/반복 + 증명 게이트)를 한 번에 돌려
  * `factory.gates.v1` 결과 하나로 합산한다. run-stage의 `d.gates`와 `bin/gates.js`가 공유하는 유일한 본체.
  *
- * - 분류(classifyFailures)는 **implement에서만** 한다. review/merge는 재분류 없이 RED가 RED다.
+ * - 분류(classifyFailures)는 **implement·review에서만** 한다(review는 1.4.29부터). merge는 분류하지 않는다 — 대신
+ *   merge 스테이지가 PR diff 밖의 테스트만 RED인 결과에 한해 이 함수를 **한 번** 더 부른다(ADR-033, #157:
+ *   `lib/merge-stage.js` `rerunEligibility`). 그 재실행 정책은 여기가 아니라 merge-stage에 산다.
  * - `blocked`(base 워크트리를 못 만들어 "PR이 깨뜨렸다"를 판정할 수 없음)가 하나라도 있으면
  *   status를 BLOCKED로 올린다 — GREEN도 RED도 아닌, 사람이 봐야 하는 상태다.
  */
@@ -522,8 +524,9 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
 
   // 1.4.29 (L34, own-calendar #49) — 리뷰 라운드의 게이트도 flaky 기존 테스트를 재분류한다. 리뷰어 5명이 승인한 PR이 리뷰 런의
   // integration 게이트에서 이 변경과 무관한 간헐 실패(tests/events.test.ts) 하나로 RED가 되고, 승인 전이가 "gates file status is
-  // RED"로 거부돼 needs-human으로 갔다. implement가 하는 것과 같은 분류(격리 실행·base 실행)를 review도 한다 — merge는 에이전트를
-  // 부르지 않으므로 그대로다.
+  // RED"로 거부돼 needs-human으로 갔다. implement가 하는 것과 같은 분류(격리 실행·base 실행)를 review도 한다. merge는 분류하지
+  // 않는다(판정 제외·`factory:flaky` 이슈 생성을 머지 경로에 들이지 않는다 — ADR-033이 그 대안을 버린 이유). merge의 대응은 따로다:
+  // RED가 PR diff 밖의 parsed 테스트뿐이면 merge-stage가 이 함수를 한 번 더 부르고, 전체 GREEN일 때만 머지한다(ADR-033, #157).
   if ((stage === "implement" || stage === "review") && result.tests?.failing?.length) {
     const { addedTests } = await changedOnce();
     const cls = await classifyFailures({ run, cwd, harness, failing: result.tests.failing, base, thresholds: harness.gates.thresholds, addedTests });
