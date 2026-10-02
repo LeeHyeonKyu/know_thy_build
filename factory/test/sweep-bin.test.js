@@ -166,6 +166,10 @@ test("test_36_human_merged_routing: --quick keeps the same routing seam (the per
 /**
  * #156 rework cf1 — **설치본 버전은 체크아웃이 아니라 기본 브랜치의 매니페스트까지 본다.** 스테이지 잡의 Sweep 스텝은
  * 이벤트 시점의 `.factory`를 다시 체크아웃한다(그 사이 main이 올라갔을 수 있다). 읽은 둘 중 더 새로운 것을 쓴다.
+ *
+ * Scope change (#156): 이 테스트 파일은 plan의 `files_expected` 밖이다. 리더(`installedVersion`)는 `factory/bin/sweep.js`
+ * (files_expected 안)의 배선이고, 그 bin의 배선을 단언하는 기존 스위트가 이 파일이다 — dw3("릴리스가 없으면 재시도 없음")의
+ * 입력인 설치본 버전이 rework cf1(낡은 체크아웃은 릴리스가 아니다)에서 바뀌었으므로 그 배선을 여기서 핀한다.
  */
 test("test_156_installed_version_reads_the_default_branch_manifest", async () => {
   const manifest = JSON.stringify({ schema: "factory.install-manifest.v1", ktb_version: "1.4.45", entries: [{ dest: ".factory/bin/sweep.js", owner: "factory" }] });

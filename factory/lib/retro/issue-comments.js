@@ -440,6 +440,10 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
  *   - `factory-retry-on-release version=<v>` — 그 전이 코멘트에 실리는 **러너의** 마커. 이슈당 릴리스당 1회의 dedupe이고,
  *     팩토리 계정이 쓴 것만 재시도 예산의 새 주기를 연다(본문의 `by=`만으로는 열지 않는다 — S1).
  *   - `factory-engine-version version=<v>` — sweeper가 needs-human 에스컬레이션 전이에 싣는 "그때의 엔진 버전".
+ *
+ * Scope change (#156): 이 파일은 plan의 `files_expected` 밖이다. dw6(재시도가 예산의 새 주기를 연다)는 plan dissent d8과
+ * open_risks가 지목한 대로 창을 **여기서 한 번** 넓혀야 한다 — `commentsSinceCycleStart`를 blocked 팔·stalled 팔·self-gate
+ * (`factory/bin/run-stage.js`, load-bearing)가 함께 읽으므로, 여기 말고 고치면 run-stage를 건드리거나 세 창 중 하나를 빠뜨린다.
  */
 const versionToken = (v) => String(v ?? "").trim().replace(/[\s>]+/g, "-");
 export const RELEASE_PRINCIPAL = /^factory:release-(\S+)$/;
