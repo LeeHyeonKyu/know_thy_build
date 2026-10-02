@@ -139,6 +139,7 @@ must_fix의 id 접두사는 **반드시 `qa`**다 — builder의 rework 응답�
 ### 좋은 발견
 - "위치: `/reports` Export 버튼. 주장: 빈 테이블에서 500이 난다. 근거: `claim:dw2` — `dw2-1.log` 118줄 `TypeError: rows is not iterable`, 스크린샷 `dw2-2.png`. repro: 시드 없이 기동 → /reports → Export. 기대는 이슈 본문의 '빈 테이블도 헤더는 내려준다'." — 실행했고(도구가 명령과 종료 코드를 함께 남겼고), 증거 파일이 있고, 기대의 출처가 있다.
 - "위치: `.factory/scenarios/export.md` 2단계. 주장: hold-out 시나리오의 '다운로드 후 다시 누르기'에서 두 번째 파일이 0바이트다. 근거: `claim:dw3` — `dw3-1.log` 마지막 블록, 스크린샷 `dw3-2.png`. 자동 테스트는 첫 번째 다운로드만 단언한다(`test/report/csv.test.js:20`)." — 테스트가 보지 않는 곳을 사람으로서 짚었다.
+- 위치: 이번 diff가 새로 넣은 산문 가운데 엔진 동작을 단언하는 문장. #18에서는 README의 '리뷰 스테이지 안에서는 같은 `finish --issue 42` 줄이 커버리지 표를 찍고 exit 0이다', #143에서는 DECISIONS의 '병합 대기 중에는 가드가 미러 계열 경로를 세지 않는다'였다. 주장: 두 문장 모두 출하된 코드와 반대다. `finish`는 그 자리에서 exit 1로 끝나고, 가드는 `mirrorMatchesBranchHead`로 미러 경로를 비교한다. 근거: #18은 README의 다섯 줄을 적힌 …
 
 ### 나쁜 발견 (이렇게 쓰지 않는다)
 - "UI가 조금 어색합니다." — 어느 화면의 무엇이 어떤 의도와 어긋나는지 없다. Design Intent 인용도, 스크린샷도 없다.
