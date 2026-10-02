@@ -2968,3 +2968,29 @@ test("test_156_stale_reader_is_not_a_release", async () => {
   await w.sweep("1.4.10");
   expect(w.label(73)).toBe("factory:planned");
 });
+
+// #156 rework arch1 — 흐름 제어 결과는 모든 재점화 팔이 **같은 한 함수**로 읽는다. 거부(`ok: false`)인데 `reasons`가 없는
+// 결과도 거부다: stalled 팔은 거기서 던졌고(이슈마다 error), 나머지 팔은 빈 문자열을 "열림"으로 읽어 implement를 띄웠다.
+test("test_156_back_pressure_refusal_without_reasons_is_still_a_refusal_in_every_arm", async () => {
+  // stalled 팔: factory:planned에서 멈춘 이슈는 띄우지 않고 back-pressure 건너뜀으로 남는다(error 아님).
+  const gh = {
+    searchIssues: async (l) => (l === "factory:planned" ? [{ number: 3 }] : []),
+    comments: async () => [TRANSITION("factory:planned", "2026-09-11T00:00:00Z")],
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn();
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, backPressure: vi.fn(async () => ({ ok: false })) }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(actions.filter((a) => a.kind === "error")).toEqual([]);
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "stalled-restart-skipped", issue: 3, stage: "implement", reason: expect.stringMatching(/^back-pressure — /) }));
+
+  // release-retry 팔: implement 대상 재시도는 일어나지 않는다 — 전이도 마커도 없다.
+  const w = world156();
+  await implementStoppedUndecidable156(w, 81, "1.4.44");
+  const n81 = w.bodies(81).length;
+  const out = await w.sweep("1.4.45", { backPressure: async () => ({ ok: false }) });
+  expect(w.label(81)).toBe("factory:needs-human");
+  expect(w.bodies(81)).toHaveLength(n81);
+  expect(releaseMarkers156(w, 81)).toHaveLength(0);
+  expect(out).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 81, reason: expect.stringMatching(/^back-pressure — /) }));
+});

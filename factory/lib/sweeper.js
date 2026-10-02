@@ -348,6 +348,24 @@ async function escalateUnknownLock({ gh, transition, issue, comments, nowMs, sta
     : { kind: "lock-owner-unknown-escalated", issue, step, ...extra, reason });
 }
 
+/**
+ * #156 rework arch1 — 재점화 팔(stalled·label-set repair·release retry)이 흐름 제어를 읽는 **유일한** 길이다. 한 팔 안에서는
+ * 한 번만 묻는다(이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다). 반환은 거부 사유 문자열 또는 `null`(열림·미배선).
+ * 거부(`ok: false`)는 `reasons`가 없거나 비어도 거부다 — 빈 사유를 "열림"으로 읽으면 흐름 제어가 막은 implement를 띄운다.
+ * 조회가 던지면 그대로 던진다: 그 실패를 무엇으로 읽을지(건너뜀·error 한 줄)는 각 팔의 계약이다.
+ */
+function backPressureOnce(backPressure) {
+  let cache;
+  return async () => {
+    if (!backPressure) return null;
+    cache ??= Promise.resolve().then(() => backPressure());
+    const bp = await cache;
+    if (bp?.ok !== false) return null;
+    const why = (Array.isArray(bp.reasons) ? bp.reasons : []).map(String).filter(Boolean).join("; ");
+    return why || "refused (no reason given)";
+  };
+}
+
 async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions, factoryLogin = null }) {
   if (!dispatchStage) return;
   const stale = staleMinutes * 60e3;
@@ -355,13 +373,7 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
   // 쪽을 쓴다 — 호출자가 staleMinutes를 10분보다 짧게 주면 그 뜻이 이긴다.
   const noHeartbeatStale = Math.min(stale, STALL_NO_HEARTBEAT_MIN * 60e3);
   // 한 sweep 안에서 흐름 제어는 한 번만 묻는다 — 이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다.
-  let bpCache;
-  const parked = async () => {
-    if (!backPressure) return null;
-    bpCache ??= Promise.resolve().then(() => backPressure());
-    const bp = await bpCache;
-    return bp?.ok === false ? bp.reasons.join("; ") : null;
-  };
+  const parked = backPressureOnce(backPressure);
   for (const [label, stage] of Object.entries(STALLED_STAGE)) {
     let issues;
     try { issues = await gh.searchIssues(label); }
@@ -542,13 +554,7 @@ async function sweepRetryOnRelease({ gh, transition, dispatchStage, installedVer
     })();
     return versionCache;
   };
-  let bpCache;
-  const parked = async () => {
-    if (!backPressure) return null;
-    bpCache ??= Promise.resolve().then(() => backPressure());
-    const bp = await bpCache;
-    return bp?.ok === false ? (bp.reasons || []).join("; ") : null;
-  };
+  const parked = backPressureOnce(backPressure);
   for (const it of issues) {
     try {
       const comments = await gh.comments(it.number);
@@ -661,13 +667,7 @@ const repairDispatchStage = (label) => (REPAIR_DISPATCH_LABELS.includes(label) ?
 async function sweepLabelSetRepair({ gh, actions, dispatchStage = null, backPressure = null }) {
   if (typeof gh.issueList !== "function") return;
   // stalled 팔과 같은 규칙: 흐름 제어는 implement에만, 한 sweep 안에서 한 번만 묻는다.
-  let bpCache;
-  const parked = async () => {
-    if (!backPressure) return null;
-    bpCache ??= Promise.resolve().then(() => backPressure());
-    const bp = await bpCache;
-    return bp?.ok === false ? (bp.reasons || []).join("; ") : null;
-  };
+  const parked = backPressureOnce(backPressure);
   let issues;
   try { issues = await gh.issueList({ state: "open" }); }
   catch (e) { actions.push({ kind: "error", step: "label-set-repair", error: String(e.message || e) }); return; }
