@@ -99,12 +99,6 @@ export const GATES_DETAIL_PREFIX = "gates-detail: ";
 /** `scrub-artifacts.js`가 유일한 규칙 출처다 — 이 파일은 자기 정규식을 만들지 않는다. */
 const secretsFrom = (env) => SECRET_ENV.map((n) => (env ?? process.env)?.[n]).filter((v) => typeof v === "string" && v.length > 0);
 const scrubOne = (text, secrets, max) => scrubText(String(text ?? ""), { secrets }).text.slice(0, max);
-/**
- * #157 (review arch1) — one public test NAME, scrubbed and capped: the rule `gates-detail` applies to its `failing`
- * names, exported so the merge stage's `factory-flaky-candidate` lines (which sit next to those lines in the same
- * run record) use this rule instead of a copy. `env` is injectable like every other scrub entry here.
- */
-export const scrubDetailName = (name, { env } = {}) => scrubOne(name, secretsFrom(env), DETAIL_MAX_NAME);
 
 /**
  * 러너 출력에서 **알아볼 수 있는** 실패 테스트 이름. 알아보지 못하면 빈 배열이다 — 추측한 이름은
@@ -354,7 +348,7 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
     let status = r.code === 0 ? "GREEN" : "RED";
     // parsed/failing_ids: 이 게이트의 RED가 "어떤 테스트 때문인지" 아는가. 리포트를 못 읽었으면
     // (parsed:false) 그 RED의 이유를 모르는 것이고, 나중에 어떤 근거로도 GREEN으로 뒤집으면 안 된다.
-    let reportParsed = false, failing_ids = null, failed_suites = null, unhandled = false;
+    let reportParsed = false, failing_ids = null, unhandled = false;
     if (TEST_GATES.has(name)) {
       const rep = harness.test[`${name}_report`] || `.factory/out/${name}.json`;
       const reportPath = isAbsolute(rep) ? rep : join(cwd, rep);
@@ -363,7 +357,6 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
         const parsed = parseVitestJson(report, cwd);
         reportParsed = !parsed.error;
         failing_ids = parsed.failing.map((f) => f.id);
-        failed_suites = parsed.failed_suites || [];
         const excluded = [];
         for (const f of parsed.failing) {
           if (!isQuarantined(quarantine, f.id)) continue;
@@ -392,9 +385,6 @@ export async function runGates({ run, cwd, harness, level, quarantine, touchedFi
     };
     if (unhandled) gates[name].reason = unhandledReason(r.code);
     if (TEST_GATES.has(name)) { gates[name].parsed = reportParsed; gates[name].failing_ids = failing_ids || []; }
-    // #157 (ADR-033) — test files that failed with no failed assertion (load error, suite hook): `failing_ids`
-    // does not name them, so the merge re-run must see them to know `failing_ids` is not the whole RED. Additive.
-    if (TEST_GATES.has(name) && failed_suites) gates[name].failed_suites = failed_suites;
     // Task 1 — RED의 뿌리를 게이트 엔트리에 붙인다(판정 뒤, 판정과 무관하게: additive 필드다).
     if (status === "RED") {
       gates[name].detail = gateDetail({ gate: name, stdout: r.stdout, stderr: r.stderr });

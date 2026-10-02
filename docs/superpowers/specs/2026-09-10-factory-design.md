@@ -904,7 +904,7 @@ builder와 qa 리뷰어의 "You receive"에 다음이 명시된다. 전부 repo�
 
 #### 5.2.5 Flaky — 예방·탐지·분류·자가 수정·격리
 
-flaky = 같은 코드에서 결과가 달라지는 테스트. 게이트가 "재시도해서 통과하면 GREEN"을 허용하는 순간 에이전트가 만든 비결정성이 통과하고, flaky가 쌓이면 RED가 잡음이 되어 게이트 전체가 무력화된다. 따라서 **`gates.js`는 절대 재시도로 GREEN을 만들지 않는다.** 대신 다섯 단계로 처리한다. (개정, ADR-033 #157: `gates.js`는 여전히 재시도하지 않는다. 단 merge 스테이지(`lib/merge-stage.js`)는 RED가 전부 PR diff 밖의 파싱된 테스트 실패일 때에 한해 **같은 게이트 전체를 정확히 한 번** 다시 돌고, 그 두 번째 런 **전체**가 GREEN일 때만 머지한다 — 실패한 테스트만 골라 재시도해 GREEN으로 판정하는 것이 아니다. 같은 id 집합이 두 번 RED면 `needs-human` + `factory-flaky-candidate` 마커, 다른 결과는 전부 사람/blocked로 간다. 경계와 거부한 대안은 DECISIONS.md ADR-033.)
+flaky = 같은 코드에서 결과가 달라지는 테스트. 게이트가 "재시도해서 통과하면 GREEN"을 허용하는 순간 에이전트가 만든 비결정성이 통과하고, flaky가 쌓이면 RED가 잡음이 되어 게이트 전체가 무력화된다. 따라서 **`gates.js`는 절대 재시도로 GREEN을 만들지 않는다.** 대신 다섯 단계로 처리한다.
 
 **① 예방 — 결정적 테스트를 구조로 강제** (`/qa SETUP`이 세팅, 위반은 lint·verifier가 잡음)
 - 시계 고정(fake timers), 난수 시드 고정, 테스트 프로세스의 **네트워크 차단**(fake 서버만 허용)
@@ -924,7 +924,7 @@ implement 단계에서 `gates.js`가 **이번 PR에서 변경된 테스트 파�
 
 기준은 "재시도하면 통과"가 아니라 **"main에서도 flaky임이 입증됨"** 이다.
 
-이 분류는 **implement에서만** 실행된다 — review·merge는 실패한 기존 테스트를 재분류하지 않고 RED를 RED로 둔다(ADR-011; "재시도로 GREEN을 만들지 않는다"는 원칙의 스테이지 경계 적용). (개정: review도 1.4.29부터 같은 분류를 한다(ADR-011 개정). merge는 여전히 재분류하지 않지만, ADR-033(#157)부터 RED가 전부 PR diff 밖의 테스트뿐이면 같은 게이트를 한 번 다시 돈다 — 위 ①~⑤ 앞머리의 개정 문단과 같은 경계다.) 1의 격리 재실행에 앞서 base 워크트리 준비 자체가 실패하면(예: `git worktree add` 실패) 그 테스트와 아직 처리하지 못한 나머지 테스트는 `introduced`도 `flaky-existing`도 아닌 `blocked`로 분류된다 — base와 비교하지 못했으므로 어느 쪽으로도 단정할 근거가 없고, 그 verdict가 하나라도 있으면 스테이지는 판정 없이 `factory:blocked`로 끝난다(사람이 봐야 하는 상태이지 RED가 아니다).
+이 분류는 **implement에서만** 실행된다 — review·merge는 실패한 기존 테스트를 재분류하지 않고 RED를 RED로 둔다(ADR-011; "재시도로 GREEN을 만들지 않는다"는 원칙의 스테이지 경계 적용). 1의 격리 재실행에 앞서 base 워크트리 준비 자체가 실패하면(예: `git worktree add` 실패) 그 테스트와 아직 처리하지 못한 나머지 테스트는 `introduced`도 `flaky-existing`도 아닌 `blocked`로 분류된다 — base와 비교하지 못했으므로 어느 쪽으로도 단정할 근거가 없고, 그 verdict가 하나라도 있으면 스테이지는 판정 없이 `factory:blocked`로 끝난다(사람이 봐야 하는 상태이지 RED가 아니다).
 
 **④ 자가 수정 — flaky 이슈는 factory가 처리**
 일반 파이프라인을 탄다. 해당 테스트 id에 한해 수정 허용. done_when은 "해당 테스트 30회 연속 통과". plan 단계에서 skeptic의 lens에 "테스트 문제인가 **제품의 경쟁 조건**인가"가 필수 질문으로 들어간다 — flaky는 자주 실제 결함이다.

@@ -42,7 +42,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage } from "../lib/merge-stage.js";
+import { runMergeStage, idlessFailedSuites } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -1576,7 +1576,7 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
  */
 export function gateOutputPaths({ root, harness = {} }) {
   const rel = [".factory/out/gates.json"];
-  for (const name of ["unit", "integration", "e2e"]) rel.push(harness.test?.[`${name}_report`] || `.factory/out/${name}.json`);
+  for (const name of ["unit", "integration", "e2e"]) rel.push(testReportRel(harness, name));
   rel.push(harness.commands?.proof?.coverage_report, harness.commands?.proof?.mutation_report);
   const rootAbs = resolve(root);
   const under = (p) => p === rootAbs || p.startsWith(rootAbs + sep);
@@ -2094,17 +2094,38 @@ export function makeStageGatesDep({ stage, run, root, gh, issue, getHarness, get
 
 /**
  * #157 — merge stage 전용: the file names of this PR's `<base>...HEAD` diff, from the same `changedFiles` every
- * other stage uses (no new git call shape) — every path it names, both sides of R/C rows. `{ ok:true, files }` or `{ ok:false, files:[], reason }` — a
- * MergeBaseError/GitDiffError (or anything else) is "not readable", never "empty", so the merge stage falls back
- * to today's single-run outcome (fail closed, the same shape as `protectedPaths`).
+ * other stage uses. Its git call is asked with `--no-renames` (the flag the must_not gate already uses): plain git
+ * reports a move as ONE `R` row and `changedFiles().all` keeps only its new path, so a PR that moves a file out of
+ * server/** would not look like it touched server/**. With the flag git reports `D old` + `A new`, both in `all`
+ * (D rows are in `all` too). `{ ok:true, files }` or `{ ok:false, files:[], reason }` — a MergeBaseError/GitDiffError
+ * (or anything else) is "not readable", never "empty", so the merge stage falls back to today's single-run outcome.
  */
 export function makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }) {
+  const noRenames = (cmd, args = [], opts) => run(cmd, cmd === "git" && args[0] === "diff" ? ["diff", "--no-renames", ...args.slice(1)] : args, opts);
   return async () => {
     try {
       const base = await mergeBase();
-      const changed = await changedFiles({ run, cwd: root, base, harness: getHarness() });
-      // `touched`, not `all`: a rename out of server/** is a diff in server/** (both sides count; D rows count).
-      return { ok: true, files: changed.touched };
+      const changed = await changedFiles({ run: noRenames, cwd: root, base, harness: getHarness() });
+      return { ok: true, files: changed.all };
+    } catch (e) {
+      return { ok: false, files: [], reason: `${e?.message || e}` };
+    }
+  };
+}
+
+/** Where a test gate's JSON report lives — the rule `runGates` reads it by (`harness.test.<gate>_report`, else `.factory/out/<gate>.json`). */
+export const testReportRel = (harness, gate) => harness?.test?.[`${gate}_report`] || `.factory/out/${gate}.json`;
+
+/**
+ * #157 — merge stage 전용: which test files of a RED gates result failed with no failed assertion (load error,
+ * suite hook), read from the reports that run left in the repo (§idlessFailedSuites in lib/merge-stage.js). The
+ * merge stage calls it right after each gates run, before anything rewrites the reports. Never throws.
+ */
+export function makeMergeSuiteFailuresDep({ root, getHarness, readFile }) {
+  return async (gates) => {
+    try {
+      const harness = getHarness();
+      return idlessFailedSuites({ gates, root, readReport: (gate) => { const rep = testReportRel(harness, gate); return readFile(isAbsolute(rep) ? rep : join(root, rep)); } });
     } catch (e) {
       return { ok: false, files: [], reason: `${e?.message || e}` };
     }
@@ -2113,13 +2134,14 @@ export function makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }) {
 
 /**
  * #157 — the gate deps `main()` spreads into its deps object: the `gates` dep every gated stage uses and the
- * merge-only `diffFiles` dep the re-run rule reads. One assembly, so the merge re-run test goes through exactly the
+ * merge-only `diffFiles` and `suiteFailures` deps the re-run rule reads. One assembly, so the merge re-run test goes through exactly the
  * object production builds (a missing `diffFiles` here is a missing `diffFiles` in production, and vice versa).
  */
 export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }) {
   return {
     gates: makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }),
     diffFiles: makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }),
+    suiteFailures: makeMergeSuiteFailuresDep({ root, getHarness, readFile }),
   };
 }
 
@@ -2948,7 +2970,7 @@ async function main() {
      * 자기 신고에서 읽고, 그마저 없으면 CHARTER의 기본값으로 fail closed 대신 보수적으로 채운다.
      */
     // `gates` + (#157, merge stage 전용) `diffFiles`: the PR's `<base>...HEAD` file list for the merge re-run rule
-    // (§makeMergeDiffFilesDep). Both come from the one assembly the run-stage test drives (§makeStageGateDeps).
+    // (§makeMergeDiffFilesDep), and `suiteFailures`: test files that failed with no assertion (§makeMergeSuiteFailuresDep). Both come from the one assembly the run-stage test drives (§makeStageGateDeps).
     ...makeStageGateDeps({
       stage, run, root, gh, issue, getHarness: () => harness, getCharter: () => charter, mergeBase, readFile, gatesPath,
       // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.

@@ -1,4 +1,6 @@
-import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, scrubDetailName } from "./gates.js";
+import { relative } from "node:path";
+import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, GATES_DETAIL_PREFIX } from "./gates.js";
+import { parseVitestJson } from "./parsers/vitest-json.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
@@ -115,19 +117,54 @@ function normRelPath(p) {
   return s;
 }
 
+const sameIdSet = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.includes(x));
+
+/**
+ * Test FILES that failed with no failed assertion (did not load, a suite-level hook threw), read from the report each
+ * RED test gate of `gates` left behind. Vitest writes such a file as a `testResults` entry with `status:"failed"` and a
+ * `message` but no failed assertion — `failing_ids` (assertions only) never names it, so without this the merge stage
+ * would take `failing_ids` for the whole RED. Read here, not added to factory.gates.v1 (#157 plan non-goal: the schema
+ * and gates.js code stay as they are). `readReport(gateName)` returns the report text or null.
+ * `{ ok:true, files }`, or `{ ok:false, reason }` when it cannot vouch: report missing/unparseable, or the report's
+ * failing assertions are not the gate's `failing_ids` (the file on disk is not the one that gate read).
+ */
+export function idlessFailedSuites({ gates, readReport, root }) {
+  const no = (reason) => ({ ok: false, files: [], reason });
+  const files = [];
+  for (const [name, g] of Object.entries(gates?.gates || {})) {
+    if (g?.status !== "RED" || typeof g.parsed !== "boolean") continue;       // only test gates carry `parsed`
+    const text = readReport(name);
+    if (typeof text !== "string") return no(`${name} report not readable`);
+    let j;
+    try { j = JSON.parse(text); } catch { return no(`${name} report unparseable`); }
+    const parsed = parseVitestJson(text, root);
+    if (parsed.error) return no(`${name} report unparseable`);
+    if (!sameIdSet([...new Set(parsed.failing.map((f) => f.id))], [...new Set(g.failing_ids || [])])) return no(`${name} report on disk is not the one this gate read`);
+    for (const tr of Array.isArray(j?.testResults) ? j.testResults : []) {
+      const failedAssertion = (tr?.assertionResults || []).some((a) => a?.status === "failed");
+      if (tr?.status === "failed" && !failedAssertion) {
+        const f = relative(root, String(tr.name ?? ""));
+        if (!files.includes(f)) files.push(f);
+      }
+    }
+  }
+  return { ok: true, files };
+}
+
 /**
  * Pure: may this RED gates result be re-run once at merge? `{ ok:true, ids }` only when ALL of these hold:
  *   - status is RED (not MISCONFIGURED/BLOCKED/missing — RED already implies no MISCONFIGURED gate);
  *   - every RED gate is a test gate whose report was parsed (`parsed === true`) with non-empty `failing_ids`
- *     (a RED lint next to a RED test is not a flake) and an empty `failed_suites` (a test file that failed with
- *     no failed assertion — a load error — has no id, so `failing_ids` would not be the whole RED);
+ *     (a RED lint next to a RED test is not a flake);
+ *   - `suites` (§idlessFailedSuites) vouches that no test file failed without a failed assertion — such a file has
+ *     no id, so `failing_ids` would not be the whole RED and the rest could not be placed outside the diff;
  *   - the diff was read (`ok`, a non-empty list) and every path in it normalises;
  *   - no diff file sits at the repo root (a root file — package.json, a lockfile, a config — touches every package);
  *   - for every failing id `path::name`: the path normalises, is not at the repo root, and no diff file shares its
  *     top-level directory (which also covers the test file itself being in the diff).
  * Anything else is `{ ok:false, reason }` — "outside the diff" was not proven.
  */
-export function rerunEligibility(gates, diff) {
+export function rerunEligibility(gates, diff, suites) {
   const no = (reason) => ({ ok: false, reason });
   // RED (not MISCONFIGURED) already means no gate is misconfigured and no required gate is missing —
   // `recomputeStatus` (gates.js) ranks MISCONFIGURED above RED — so this one check covers both.
@@ -138,13 +175,10 @@ export function rerunEligibility(gates, diff) {
   for (const [name, g] of red) {
     if (g.parsed !== true) return no(`${name} is RED without a parsed test report`);
     if (!Array.isArray(g.failing_ids) || !g.failing_ids.length) return no(`${name} is RED with no failing test ids`);
-    // `failing_ids` names failed ASSERTIONS only. A test file that failed with none (did not load, a suite hook
-    // threw) is in `failed_suites` — then the ids are not the whole RED, and the rest has no id to place outside
-    // the diff. A producer that does not say (field absent) has not proven it either.
-    if (!Array.isArray(g.failed_suites)) return no(`${name} does not report suite-level failures`);
-    if (g.failed_suites.length) return no(`${name} has test files that failed without a failing test: ${g.failed_suites.join(", ")}`);
     for (const id of g.failing_ids) if (!ids.includes(id)) ids.push(id);
   }
+  if (!suites?.ok || !Array.isArray(suites.files)) return no(`suite-level failures not vouched for${suites?.reason ? `: ${suites.reason}` : ""}`);
+  if (suites.files.length) return no(`test files failed without a failing test: ${suites.files.join(", ")}`);
   if (!diff?.ok || !Array.isArray(diff.files) || !diff.files.length) return no(`PR diff unreadable or empty${diff?.reason ? `: ${diff.reason}` : ""}`);
   const tops = new Set();
   for (const f of diff.files) {
@@ -165,23 +199,36 @@ export function rerunEligibility(gates, diff) {
   return { ok: true, ids };
 }
 
-/** The failing test ids of a RED result, when every RED gate is a parsed test gate with no id-less suite failure — else null (not comparable). */
-function redTestIds(gates) {
+/** The failing test ids of a RED result, when every RED gate is a parsed test gate and `suites` vouches for no id-less suite failure — else null (not comparable). */
+function redTestIds(gates, suites) {
   if (!gates || gates.status !== "RED") return null;
   const red = Object.values(gates.gates || {}).filter((g) => g?.status === "RED");
-  if (!red.length || red.some((g) => g.parsed !== true || !Array.isArray(g.failing_ids) || !g.failing_ids.length
-    || !Array.isArray(g.failed_suites) || g.failed_suites.length)) return null;
+  if (!red.length || red.some((g) => g.parsed !== true || !Array.isArray(g.failing_ids) || !g.failing_ids.length)) return null;
+  if (!suites?.ok || !Array.isArray(suites.files) || suites.files.length) return null;
   return [...new Set(red.flatMap((g) => g.failing_ids))];
 }
-const sameIdSet = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.includes(x));
-/** Test ids go to public places (run record, issue comment): gates.js's own name rule (`scrubDetailName`), not a copy. */
+/**
+ * Test ids go to public places (run record, issue comment). Their names are not scrubbed here: they are the
+ * `failing` names gates.js's own `gates-detail` projection (`gatesDetailLines`) writes — the one rule, run on a
+ * one-gate projection — so a `factory-flaky-candidate` line and the `gates-detail` line beside it always carry the
+ * same name (review arch1). A projection that fails yields a placeholder, never the raw id.
+ */
+function publicTestNames(ids) {
+  const [line] = gatesDetailLines({ gates: { names: { status: "RED", detail: { failing: ids, snippet: "" } } } });
+  try {
+    const failing = JSON.parse(String(line).slice(GATES_DETAIL_PREFIX.length)).failing;
+    if (Array.isArray(failing) && failing.length === ids.length) return failing;
+  } catch { /* fall through */ }
+  return ids.map(() => "[name unavailable]");
+}
 const idList = (ids) => {
-  const shown = ids.slice(0, DETAIL_MAX_FAILING).map((id) => scrubDetailName(id));
+  const shown = publicTestNames(ids.slice(0, DETAIL_MAX_FAILING));
   return shown.join(", ") + (ids.length > shown.length ? ` (+${ids.length - shown.length} more)` : "");
 };
-export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = null, round = null } = {}, { env } = {}) {
-  return ids.map((id) => FLAKY_CANDIDATE_PREFIX + JSON.stringify({
-    test: scrubDetailName(id, { env }), outcome, run_id: runId ?? null, runner: runnerId ?? null, ...(Number.isInteger(round) ? { round } : {}),
+export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = null, round = null } = {}) {
+  const names = publicTestNames(ids);
+  return names.map((test) => FLAKY_CANDIDATE_PREFIX + JSON.stringify({
+    test, outcome, run_id: runId ?? null, runner: runnerId ?? null, ...(Number.isInteger(round) ? { round } : {}),
   }));
 }
 
@@ -534,6 +581,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 확인되지 않은 것을 통과로 읽지 않는다(fail closed, §merge gate와 같은 원칙).
   // #157 — before handing a RED to a human, ask whether it is provably outside this PR's diff (§rerunEligibility).
   // The diff is read only for a RED; an absent/throwing/not-ok `diffFiles` is "not proven" — today's path.
+  // The test reports are read right after the run that wrote them (the re-run overwrites them) — an absent/throwing
+  // `suiteFailures` is "not vouched for", never "none".
+  const suitesOf = async (g) => {
+    if (!d.suiteFailures) return { ok: false, files: [], reason: "suiteFailures dep not wired" };
+    try { return await d.suiteFailures(g); }
+    catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
+  };
   let eligible = { ok: false };
   if (gates?.status === "RED") {
     let diff;
@@ -542,7 +596,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       try { diff = await d.diffFiles(); }
       catch (e) { diff = { ok: false, reason: `${e?.message || e}` }; }
     }
-    eligible = rerunEligibility(gates, diff);
+    eligible = rerunEligibility(gates, diff, await suitesOf(gates));
   }
   if (eligible.ok) {
     const ids = eligible.ids;
@@ -570,7 +624,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       return 2;
     }
     if (!again || again.status !== "GREEN") {
-      const ids2 = redTestIds(again);
+      const ids2 = again?.status === "RED" ? redTestIds(again, await suitesOf(again)) : null;
       const candidate = sameIdSet(ids, ids2);
       const status2 = again?.status ?? "missing";
       const reason = candidate

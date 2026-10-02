@@ -1,5 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVIDENCE_STATUSES } from "../lib/merge-stage.js";
+import { idlessFailedSuites } from "../lib/merge-stage.js";
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
@@ -1529,6 +1530,14 @@ function vitestReport157(failingIds, total = 132) {
     testResults: [...byFile].map(([file, names]) => ({ name: `${GATE_ROOT}/${file}`, assertionResults: names.map((n) => ({ status: "failed", fullName: n })) })),
   });
 }
+/**
+ * "The report on disk" for a produced gates object: the exact text `runGates` parsed for each test gate, keyed by
+ * that gate entry's `failing_ids` array (it survives the shallow `{ ...g }` copies the cases below derive). The
+ * merge stage's `suiteFailures` dep reads the report the gate run left behind — this registry is that file.
+ */
+const REPORTS_157 = new WeakMap();
+const registerReports157 = (g, byGate) => { for (const [name, text] of Object.entries(byGate)) if (g.gates?.[name]?.failing_ids) REPORTS_157.set(g.gates[name].failing_ids, text); return g; };
+const reportOnDisk157 = (g, name) => REPORTS_157.get(g?.gates?.[name]?.failing_ids) ?? null;
 /** factory.gates.v1 from the real `runGates` — lint + unit, the unit report read from a real vitest JSON. */
 async function producedGates({ failing = [], lint = "GREEN", report = true, unitExit, omitLint = false, sha = "a".repeat(40) } = {}) {
   const harness = HARNESS_157(omitLint);
@@ -1536,8 +1545,9 @@ async function producedGates({ failing = [], lint = "GREEN", report = true, unit
     { match: (_c, a) => a[1] === harness.commands.lint, result: { code: lint === "RED" ? 1 : 0, stdout: "", stderr: lint === "RED" ? "factory/lib/x.js\n  3:1  error  no-unused-vars" : "" } },
     { match: (_c, a) => a[1] === harness.commands.unit, result: { code: unitExit ?? (failing.length ? 1 : 0), stdout: "JSON report written to .factory/out/unit.json", stderr: "" } },
   ]);
-  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => (report ? vitestReport157(failing) : null), now: "2026-10-02T01:52:00.000Z" });
-  return { ...g, head_sha: sha };
+  const text = report ? vitestReport157(failing) : null;
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => text, now: "2026-10-02T01:52:00.000Z" });
+  return registerReports157({ ...g, head_sha: sha }, { unit: text });
 }
 /** factory.gates.v1 BLOCKED from the real `runStageGates` (test-env re-up failed — the merge-stage BLOCKED producer). */
 async function producedBlockedGates() {
@@ -1561,7 +1571,9 @@ async function run157({ seq, diff, retryFromBlocked = false, startFrom = "factor
   let i = 0;
   const gates = vi.fn(async () => { const v = i < seq.length ? seq[i] : extra; i++; return typeof v === "function" ? v() : v; });
   const diffDep = diff === undefined ? {} : { diffFiles: vi.fn(typeof diff === "function" ? diff : async () => diff) };
-  const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, ...over });
+  // The suite-failure reader is the real one (`idlessFailedSuites`) over the report the gate run "left on disk".
+  const suiteFailures = vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: (name) => reportOnDisk157(g, name) }));
+  const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, suiteFailures, ...over });
   const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus, retryFromBlocked, stamp: STAMP_157 });
   return { code, d, lines, postStatus };
 }
@@ -1610,9 +1622,10 @@ async function producedGatesOrdered157({ order, unit = [], integration = null, l
     { match: (_c, a) => a[1] === harness.commands.unit, result: { code: unit.length ? 1 : 0, stdout: "", stderr: "" } },
     { match: (_c, a) => a[1] === harness.commands.integration, result: { code: integration === null ? 0 : 1, stdout: "", stderr: integration === "unparsed" ? "Error: Cannot find module 'pg'" : "" } },
   ]);
-  const readFile = (p) => (String(p).endsWith("integration.json") ? (Array.isArray(integration) ? vitestReport157(integration) : null) : vitestReport157(unit));
+  const texts = { unit: vitestReport157(unit), integration: Array.isArray(integration) ? vitestReport157(integration) : null };
+  const readFile = (p) => (String(p).endsWith("integration.json") ? texts.integration : texts.unit);
   const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile, now: "2026-10-02T01:52:00.000Z" });
-  return { ...g, head_sha: "a".repeat(40) };
+  return registerReports157({ ...g, head_sha: "a".repeat(40) }, texts);
 }
 
 test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
@@ -1959,8 +1972,9 @@ async function producedGatesWithSuiteErrors157({ failing, loadErrors }) {
     { match: (_c, a) => a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
     { match: (_c, a) => a[1] === harness.commands.unit, result: { code: 1, stdout: "JSON report written to .factory/out/unit.json", stderr: "" } },
   ]);
-  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => vitestReportWithSuiteErrors157(failing, loadErrors), now: "2026-10-02T01:52:00.000Z" });
-  return { ...g, head_sha: "a".repeat(40) };
+  const text = vitestReportWithSuiteErrors157(failing, loadErrors);
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => text, now: "2026-10-02T01:52:00.000Z" });
+  return registerReports157({ ...g, head_sha: "a".repeat(40) }, { unit: text });
 }
 
 test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async () => {
@@ -1984,7 +1998,9 @@ test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async
     // The producer is real: the unit gate is RED, parsed, and its assertion ids are only the server test.
     expect(first.status, c.name).toBe("RED");
     expect(first.gates.unit, c.name).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
-    expect(first.gates.unit.failed_suites, c.name).toEqual(c.loadErrors.map(([f]) => f));
+    // factory.gates.v1 is unchanged (plan non-goal): the entry carries no suite field — the merge stage reads the report.
+    expect(Object.keys(first.gates.unit).sort(), c.name).toEqual(Object.keys(alone.gates.unit).sort());
+    expect(idlessFailedSuites({ gates: first, root: GATE_ROOT, readReport: (n) => reportOnDisk157(first, n) }), c.name).toEqual({ ok: true, files: c.loadErrors.map(([f]) => f) });
     const r = await run157({ seq: [first, green], diff: DIFF });
     const today = await run157({ seq: [first, green] });
     expect(r.code, c.name).toBe(2);
@@ -1997,13 +2013,27 @@ test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async
     expect(gateStatusesOf(r.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
   }
 
-  // A gates object from a producer that does not say whether any suite failed (no `failed_suites` field) is not proof either.
-  const legacy = { ...alone, gates: { ...alone.gates, unit: { ...alone.gates.unit } } };
-  delete legacy.gates.unit.failed_suites;
-  const r = await run157({ seq: [legacy, green], diff: DIFF });
-  expect(r.d.gates).toHaveBeenCalledTimes(1);
-  expect(r.d.mergePr).not.toHaveBeenCalled();
-  expect(gateStepLines(r.lines)).toEqual(pre157GateStepLines(legacy));
+  // When the report cannot vouch that no suite failed id-less, that is not proof either: the reader is not wired,
+  // throws, or answers ok:false; the report is missing or unparseable; or the report on disk is not the one this gate
+  // read (its failing assertions differ from `failing_ids` — another run overwrote it).
+  const stale = vitestReport157([OC_ID, "server/tests/auth.test.ts::test_12_login"]);
+  const unproven = [
+    { name: "suiteFailures dep absent", over: { suiteFailures: undefined } },
+    { name: "suiteFailures throws", over: { suiteFailures: vi.fn(async () => { throw new Error("EACCES .factory/out/unit.json"); }) } },
+    { name: "suiteFailures ok:false", over: { suiteFailures: vi.fn(async () => ({ ok: false, files: [], reason: "x" })) } },
+    { name: "suiteFailures returns nothing", over: { suiteFailures: vi.fn(async () => undefined) } },
+    { name: "report missing", over: { suiteFailures: vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: () => null })) } },
+    { name: "report unparseable", over: { suiteFailures: vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: () => "{not json" })) } },
+    { name: "report on disk names other failures", over: { suiteFailures: vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: () => stale })) } },
+  ];
+  for (const c of unproven) {
+    const r = await run157({ seq: [alone, green], diff: DIFF, over: c.over });
+    expect(r.code, c.name).toBe(2);
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(alone));
+  }
 
   // The re-run: the same assertion id fails again but a suite now fails to load too — not the same RED, so no
   // flaky-candidate wording or marker (the id set alone would call it "the same set").
@@ -2026,30 +2056,61 @@ import { flakyCandidateLines, FLAKY_CANDIDATE_PREFIX } from "../lib/merge-stage.
 import { DETAIL_MAX_NAME, GATES_DETAIL_PREFIX } from "../lib/gates.js";
 
 test("test_157_flaky_candidate_names_follow_the_gates_detail_scrub_rule", () => {
-  // Review arch1: the marker's test name must come from the SAME scrub-and-cap rule as the gates-detail `failing`
-  // names it sits next to in the run record — and, like gates.js, take an injected env rather than only process.env.
+  // Review arch1: the marker's test name is not scrubbed by a copy of the rule — it IS the `failing` name the
+  // gates-detail projection (`gatesDetailLines`) writes, so the two lines sitting next to each other in one run
+  // record carry byte-identical names whatever the rule becomes. Both env paths are pinned: with the secret in the
+  // process env (redacted in both) and without it (passed through in both).
   const SECRET = "fake-secret-value-for-test-157";
   const ID = `server/tests/login.test.ts::login[${SECRET}]`;
   const LONG = `server/tests/long.test.ts::${"n".repeat(DETAIL_MAX_NAME * 2)}`;
   const markerTests = (lines) => lines.map((l) => { expect(l.startsWith(FLAKY_CANDIDATE_PREFIX)).toBe(true); return JSON.parse(l.slice(FLAKY_CANDIDATE_PREFIX.length)).test; });
+  const detailNames = (ids) => {
+    const result = { gates: { unit: { status: "RED", parsed: true, failing_ids: ids, detail: { gate: "unit", failing: ids, snippet: "" } } } };
+    return JSON.parse(gatesDetailLines(result, { runId: "1", runnerId: "r" })[0].slice(GATES_DETAIL_PREFIX.length)).failing;
+  };
 
-  // Injected env: the secret is redacted and the long name is capped exactly as a gates-detail name is.
-  const [scrubbed, capped] = markerTests(flakyCandidateLines([ID, LONG], "RED", { runId: "1", runnerId: "r" }, { env: { GITHUB_TOKEN: SECRET } }));
-  expect(scrubbed).not.toContain(SECRET);
-  expect(scrubbed).toContain("[REDACTED");
-  expect(scrubbed.startsWith("server/tests/login.test.ts::login[")).toBe(true);
-  expect(capped).toBe(LONG.slice(0, DETAIL_MAX_NAME));
-  // The env is the injected one, not process.env: with no secret in it the name passes through untouched.
-  expect(markerTests(flakyCandidateLines([ID], "RED", {}, { env: {} }))).toEqual([ID]);
-
-  // Same rule as gates-detail: with the secret in the process env, both lines carry byte-identical names.
   vi.stubEnv("GITHUB_TOKEN", SECRET);
   try {
-    const result = { gates: { unit: { status: "RED", parsed: true, failing_ids: [ID, LONG], detail: { gate: "unit", failing: [ID, LONG], snippet: "" } } } };
-    const detail = gatesDetailLines(result, { runId: "1", runnerId: "r" }).map((l) => JSON.parse(l.slice(GATES_DETAIL_PREFIX.length)));
-    expect(detail[0].failing).not.toContain(ID);
-    expect(markerTests(flakyCandidateLines([ID, LONG], "GREEN", { runId: "1", runnerId: "r" }))).toEqual(detail[0].failing);
+    const [scrubbed, capped] = markerTests(flakyCandidateLines([ID, LONG], "RED", { runId: "1", runnerId: "r" }));
+    expect(scrubbed).not.toContain(SECRET);
+    expect(scrubbed).toContain("[REDACTED");
+    expect(scrubbed.startsWith("server/tests/login.test.ts::login[")).toBe(true);
+    expect(capped).toBe(LONG.slice(0, DETAIL_MAX_NAME));
+    expect([scrubbed, capped]).toEqual(detailNames([ID, LONG]));
   } finally {
     vi.unstubAllEnvs();
   }
+
+  vi.stubEnv("GITHUB_TOKEN", "");
+  try {
+    const names = markerTests(flakyCandidateLines([ID, LONG], "GREEN", { runId: "1", runnerId: "r" }));
+    expect(names).toEqual([ID, LONG.slice(0, DETAIL_MAX_NAME)]);
+    expect(names).toEqual(detailNames([ID, LONG]));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+test("test_157_unhandled_error_on_the_rerun_never_merges", async () => {
+  // Residual risk (ADR-033): vitest's JSON report has no trace of an unhandled error (vitest 3.2.7: exit 1, report
+  // `success:true`, nothing on stderr), so a first RED with an outside assertion PLUS an unhandled error looks
+  // eligible. The bound that still holds: the re-run must be WHOLE GREEN. An unhandled error that fires again on the
+  // re-run is a RED with zero failing assertions (KTB-35) — never a merge, never a flaky-candidate marker.
+  const first = await producedGates({ failing: [OC_ID] });
+  const unhandledAgain = await producedGates({ failing: [], unitExit: 1 });
+  expect(unhandledAgain.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [] });
+  expect(unhandledAgain.gates.unit.reason).toMatch(/unhandled error outside tests/);
+  const r = await run157({ seq: [first, unhandledAgain], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(r.code).toBe(2);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+  expect(r.d.mergeGates).not.toHaveBeenCalled();
+  const t = transitionsOf(r.d);
+  expect(t).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(t[0].reason).not.toContain("flaky");
+  expect(t[0].reason).toContain(OC_ID);
+  expect(flakyMarksOf(r.lines)).toEqual([]);
+  expect(gateStatusesOf(r.postStatus).map((s) => s.state)).toEqual(["failure", "failure"]);
+  // The unhandled re-run's own evidence (KTB-35 reason) reaches the run record.
+  expect(detailsOf(r.lines).some((dl) => /unhandled error outside tests/.test(dl.reason ?? ""))).toBe(true);
 });

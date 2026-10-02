@@ -3948,32 +3948,45 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
     commands: { lint: "node factory/bin/lint.js", unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
     test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] },
   };
-  const report = (root, failing) => JSON.stringify({
+  const report = (root, failing, loadErrors = []) => JSON.stringify({
     numTotalTests: 132, numPassedTests: 132 - failing.length, numFailedTests: failing.length,
-    testResults: failing.map((id) => ({ name: join(root, id.split("::")[0]), assertionResults: [{ status: "failed", fullName: id.split("::")[1] }] })),
+    testResults: [
+      ...failing.map((id) => ({ name: join(root, id.split("::")[0]), status: "failed", assertionResults: [{ status: "failed", fullName: id.split("::")[1] }] })),
+      ...loadErrors.map(([file, message]) => ({ name: join(root, file), status: "failed", message, assertionResults: [] })),
+    ],
   });
-  const scenario = async ({ nameStatus, diffFailsFrom = Infinity, baseFailsFrom = Infinity, unitExits = [1, 0] }) => {
+  // git's own answer to `--no-renames`: a rename is reported as D old + A new (a copy as A new). The fake plays that,
+  // so a diff source that drops the flag sees the R row and keeps only the new path.
+  const gitNameStatus = (rows, args) => (!args.includes("--no-renames") ? rows : rows.split("\n").filter(Boolean).map((l) => {
+    const [st, ...p] = l.split("\t");
+    if (st[0] === "R") return `D\t${p[0]}\nA\t${p[1]}`;
+    if (st[0] === "C") return `A\t${p[1]}`;
+    return l;
+  }).join("\n") + "\n");
+  const scenario = async ({ nameStatus, diffFailsFrom = Infinity, baseFailsFrom = Infinity, unitExits = [1, 0], loadErrors = [] }) => {
     const root = mkdtempSync(join(tmpdir(), "ktb157-"));
     let unitRuns = 0, diffCalls = 0, baseCalls = 0;
     const fake = makeFakeRun([
-      { match: (c, a) => c === "git" && a[0] === "diff" && a[1] === "--name-status",
-        result: () => (++diffCalls >= diffFailsFrom ? { code: 128, stdout: "", stderr: "fatal: bad revision" } : { code: 0, stdout: nameStatus, stderr: "" }) },
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"),
+        result: (_c, a) => (++diffCalls >= diffFailsFrom ? { code: 128, stdout: "", stderr: "fatal: bad revision" } : { code: 0, stdout: gitNameStatus(nameStatus, a), stderr: "" }) },
       { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
       { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
       { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => ({ code: unitExits[Math.min(unitRuns++, unitExits.length - 1)], stdout: "", stderr: "" }) },
     ]);
-    const readFile = () => report(root, unitExits[Math.min(unitRuns - 1, unitExits.length - 1)] ? [OC] : []);
+    const readFiles = [];
+    const readFile = (p) => { readFiles.push(p); return report(root, unitExits[Math.min(unitRuns - 1, unitExits.length - 1)] ? [OC] : [], unitRuns === 1 ? loadErrors : []); };
     const mergeBase = async () => { if (++baseCalls >= baseFailsFrom) throw new MergeBaseError("origin/main: exit 128"); return BASE; };
     // The one assembly main() spreads into its deps object (pinned below) — not two hand-picked factories.
-    const { gates, diffFiles } = makeStageGateDeps({
+    const { gates, diffFiles, suiteFailures } = makeStageGateDeps({
       stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
       getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase, readFile,
       gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
     });
     expect(typeof diffFiles).toBe("function");                          // a missing diff source fails here, not silently
+    expect(typeof suiteFailures).toBe("function");
     const lines = [], statuses = [];
     const d = mergeHappyDeps({
-      gates: vi.fn(gates), diffFiles: vi.fn(diffFiles),
+      gates: vi.fn(gates), diffFiles: vi.fn(diffFiles), suiteFailures: vi.fn(suiteFailures),
       mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
       mergePr: vi.fn(async () => {}),
       transition: vi.fn(async ({ to }) => ({ ok: true, to })),
@@ -3983,7 +3996,7 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
     const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
     const unitCalls = fake.calls.filter((c) => c.cmd === "bash" && c.args[1] === harness.commands.unit).length;
     const diffArgs = fake.calls.filter((c) => c.cmd === "git" && c.args[0] === "diff").map((c) => c.args);
-    return { code, d, lines, statuses, unitCalls, diffArgs, root, fake, mergeBase };
+    return { code, d, lines, statuses, unitCalls, diffArgs, root, fake, mergeBase, readFiles };
   };
 
   // Client-only diff, server test RED then GREEN → the same gates dep runs twice and the PR merges.
@@ -3993,7 +4006,14 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(ok.d.gates).toHaveBeenCalledTimes(2);
   expect(ok.d.diffFiles).toHaveBeenCalledTimes(1);
   expect(await ok.d.diffFiles.mock.results[0].value).toEqual({ ok: true, files: ["client/src/pages/Calendar.tsx", "client/src/api/follows.ts"] });
-  for (const a of ok.diffArgs) expect(a).toEqual(["diff", "--name-status", `${BASE}...HEAD`]);
+  // The merge diff source is changedFiles over `<base>...HEAD`, asked with `--no-renames` (the gates dep's own
+  // changedFiles call is unchanged); nothing else asks git for a diff.
+  expect(ok.diffArgs).toContainEqual(["diff", "--no-renames", "--name-status", `${BASE}...HEAD`]);
+  for (const a of ok.diffArgs) expect([["diff", "--name-status", `${BASE}...HEAD`], ["diff", "--no-renames", "--name-status", `${BASE}...HEAD`]]).toContainEqual(a);
+  // The suite reader read the unit report under the repo root — the file runStageGates had just parsed — after each run.
+  expect(ok.d.suiteFailures).toHaveBeenCalledTimes(1);                  // the re-run is GREEN: nothing left to compare
+  expect(await ok.d.suiteFailures.mock.results[0].value).toEqual({ ok: true, files: [] });
+  expect(ok.readFiles).toContain(join(ok.root, ".factory/out/unit.json"));
   expect(ok.d.mergePr).toHaveBeenCalled();
   // The re-run is the `gates` dep, not mergeGates: mergeGates runs once (no prReady in this dep set), and only
   // after the second gates call resolved; mergePr comes after it.
@@ -4017,14 +4037,17 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(inside.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
 
   // A rename OUT of server/** and a deletion under server/** are diffs in server/** — the failing server test
-  // is not re-run (both sides of an R/C row count; D rows count). A diff source that keeps only the rename's new
-  // path, or drops deletions, would re-run here and merge.
+  // is not re-run (`--no-renames` makes the rename D old + A new; D rows count). A diff source that keeps only the
+  // rename's new path, or drops deletions, would re-run here and merge.
   const renamedOut = await scenario({ nameStatus: "R100\tserver/lib/visibility.ts\tclient/lib/visibility.ts\n" });
-  expect((await renamedOut.d.diffFiles.mock.results[0].value).files).toEqual(expect.arrayContaining(["server/lib/visibility.ts", "client/lib/visibility.ts"]));
-  const copiedOut = await scenario({ nameStatus: "C75\tserver/lib/visibility.ts\tclient/lib/visibility.ts\n" });
+  expect((await renamedOut.d.diffFiles.mock.results[0].value).files).toEqual(["server/lib/visibility.ts", "client/lib/visibility.ts"]);
   const deleted = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nD\tserver/src/routes/legacy.ts\n" });
   expect((await deleted.d.diffFiles.mock.results[0].value).files).toContain("server/src/routes/legacy.ts");
-  for (const x of [renamedOut, copiedOut, deleted]) {
+  // A client test file that failed to LOAD (no failed assertion, so not in `failing_ids`) beside the outside server
+  // RED: the production suite reader finds it in the report and the RED is not re-run.
+  const loadErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", loadErrors: [["client/tests/Calendar.test.ts", "SyntaxError: Unexpected token"]] });
+  expect(await loadErr.d.suiteFailures.mock.results[0].value).toEqual({ ok: true, files: ["client/tests/Calendar.test.ts"] });
+  for (const x of [renamedOut, deleted, loadErr]) {
     expect(x.code).toBe(2);
     expect(x.unitCalls).toBe(1);
     expect(x.d.gates).toHaveBeenCalledTimes(1);
@@ -4042,6 +4065,8 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(depsBlock).not.toMatch(/\n {4}(gates|diffFiles)\s*:/);
   const assembly = src.slice(src.indexOf("export function makeStageGateDeps("));
   expect(assembly.slice(0, assembly.indexOf("\n}\n"))).toMatch(/diffFiles:\s*makeMergeDiffFilesDep\(/);
+  expect(assembly.slice(0, assembly.indexOf("\n}\n"))).toMatch(/suiteFailures:\s*makeMergeSuiteFailuresDep\(/);
+  expect(depsBlock).not.toMatch(/\n {4}suiteFailures\s*:/);
 
   // changedFiles GitDiffError / MergeBaseError inside diffFiles → ok:false → today's path (one gate run, needs-human).
   const gitDiffErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", diffFailsFrom: 2 });   // the gates dep's own diff succeeds
@@ -4054,4 +4079,29 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
     expect(x.d.mergePr).not.toHaveBeenCalled();
     expect(x.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
   }
+});
+
+// #157 — the rename rule against REAL git, not a fake's idea of it: a PR that moves a file out of server/** names
+// server/** in the merge diff source (`--no-renames` → D old + A new), so a failing server test is not re-run.
+test("test_157_merge_diff_files_keeps_both_sides_of_a_real_git_rename", async () => {
+  const { run: realRun } = await import("../lib/exec.js");
+  const root = mkdtempSync(join(tmpdir(), "ktb157-git-"));
+  const env = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+  const git = async (...args) => { const r = await realRun("git", args, { cwd: root, env }); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  await git("init", "-q", "-b", "main");
+  mkdirSync(join(root, "server/lib"), { recursive: true });
+  writeFileSync(join(root, "server/lib/visibility.ts"), Array.from({ length: 40 }, (_, i) => `export const v${i} = ${i};`).join("\n") + "\n");
+  await git("add", "-A");
+  await git("commit", "-q", "-m", "base");
+  const base = await git("rev-parse", "HEAD");
+  mkdirSync(join(root, "client/lib"), { recursive: true });
+  await git("mv", "server/lib/visibility.ts", "client/lib/visibility.ts");
+  await git("commit", "-q", "-m", "move");
+  // Plain git reports this as ONE rename row — the shape that loses server/** if only the new path is kept.
+  expect(await git("diff", "--name-status", `${base}...HEAD`)).toMatch(/^R\d+\tserver\/lib\/visibility\.ts\tclient\/lib\/visibility\.ts$/);
+  const harness = { test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] } };
+  const { diffFiles } = makeStageGateDeps({ stage: "merge", run: realRun, root, gh: { comments: async () => [] }, issue: 7, getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => base, readFile: () => null, gatesPath: join(root, "gates.json"), transitionIssue: vi.fn(), log: () => {} });
+  const diff = await diffFiles();
+  expect(diff.ok).toBe(true);
+  expect([...diff.files].sort()).toEqual(["client/lib/visibility.ts", "server/lib/visibility.ts"]);
 });
