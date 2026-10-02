@@ -3949,7 +3949,7 @@ test("test_170_production_verify_path_recovers_from_output_file", async () => {
     return [
       L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-review" } }] } }),
       L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wf086hvld\nSummary: Review panel\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
-      L({ type: "user", message: { content: `<task-notification>\n<task-id>wf086hvld</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
+      L({ type: "user", timestamp: "2099-01-01T00:00:00.000Z", message: { content: `<task-notification>\n<task-id>wf086hvld</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
       L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
       L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
     ].join("\n") + "\n";
@@ -4017,7 +4017,7 @@ test("test_170_production_verify_path_recovers_from_output_file — main()'s ver
   writeFileSync(transcriptPath, [
     L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-review" } }] } }),
     L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wfDEP0001\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
-    L({ type: "user", message: { content: `<task-notification>\n<task-id>wfDEP0001</task-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated)</result>\n</task-notification>` } }),
+    L({ type: "user", timestamp: "2099-01-01T00:00:00.000Z", message: { content: `<task-notification>\n<task-id>wfDEP0001</task-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated)</result>\n</task-notification>` } }),
     L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
     L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
   ].join("\n") + "\n");

@@ -27,6 +27,8 @@
  *   1. `<task-notification>` 중 `<status>completed</status>`인 마지막 것의 `<result>`.
  *   1b. (#170, `readFile`를 받았을 때만) 이 세션의 `Workflow` **접수증의 Task ID**에 묶인 러너 알림의
  *      `<output-file>` — 워크플로 러너가 쓴 원본 결과 파일을 **잘리지 않은 채로** 읽는다.
+ *      그 파일은 /tmp에 있어 에이전트도 쓸 수 있으므로, 커널의 ctime이 알림 줄 시각보다 늦지 않고 결과가
+ *      알림의 인라인 사본으로 시작할 때만 후보가 된다(rework sec1, `runnerBindingFailure`).
  *   2. `Read` tool_result를 파일별로 재조립한 내용 → 그리고 개별 tool_result 하나하나
  *      (둘 다 `^\s*\d+\t` 줄 번호 접두를 벗기고, `{summary,agentCount,logs,result}` 봉투면 한 겹 벗긴다).
  *   3. `Workflow` tool_result — **접수증이 아닐 때만**(백그라운드가 아닌 워크플로는 여기로 온다).
@@ -271,6 +273,40 @@ export function transcriptPathFrom({ agentsLogText, sessionId, cwd, home } = {})
 export const WORKFLOW_OUTPUT_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
+ * #170 rework sec1(3차) — 결과 파일의 ctime이 러너 알림 줄의 시각보다 늦어도 되는 여유(ms). 알림의 시각은
+ * 밀리초로 잘려 기록되고 파일시스템의 시계는 거칠다 — 그 반올림만큼만 둔다. 이보다 늦게 바뀐 파일은
+ * 러너가 "다 썼다"고 알린 **뒤에** 누군가 다시 쓴 것이다.
+ */
+export const WORKFLOW_OUTPUT_CTIME_SLACK_MS = 1000;
+
+/**
+ * #170 rework sec1(3차) — 결과 파일이 **러너가 알린 그 바이트**인가. 경로는 /tmp에 있고 리뷰어는 /tmp에
+ * 쓸 수 있으므로, 접수증·알림이 경로를 묶어도 내용까지 묶지는 못한다(sec1). 그래서 에이전트가 쓸 수 없는
+ * 두 사실에 대 본다:
+ *  ① 커널의 변경 시각 — 파일의 ctime ≤ 알림 줄의 timestamp(+여유). 알림 뒤의 쓰기·rename·link는 ctime을
+ *     앞으로 밀고, 비특권 프로세스는 그것을 되돌리지 못한다(`touch -d`는 mtime만 바꾼다).
+ *  ② 러너 자신의 사본 — 알림의 `<result>`(길면 앞부분 + "... (truncated …)")가 파일의 결과 직렬화의 앞부분과
+ *     같아야 한다(잘리지 않았으면 전체가 같아야 한다). 결과가 나오기 전에 심어 둔 파일은 이것을 맞출 수 없다.
+ * 둘 중 무엇이든 확인할 수 없으면(타임스탬프 없음, 변경 시각을 주지 못하는 리더) **쓰지 않는다** — 묶이지
+ * 않은 파일이 판정이 되는 것보다 사람에게 가는 편이 싸다. 돌려주는 것은 사유(문자열) 또는 null(묶임).
+ */
+function runnerBindingFailure({ path, value, inline, at, ctimeMs }) {
+  const unbound = (why) => `workflow output file not bound to the runner's notification (${why}): ${path}`;
+  if (!Number.isFinite(at)) return unbound("no notification timestamp");
+  if (!Number.isFinite(ctimeMs)) return unbound("the reader gave no change time");
+  if (ctimeMs > at + WORKFLOW_OUTPUT_CTIME_SLACK_MS) {
+    return `workflow output file changed after the runner's notification: ${path} (changed ${new Date(ctimeMs).toISOString()}, notified ${new Date(at).toISOString()})`;
+  }
+  if (typeof inline !== "string") return unbound("the notification carries no <result>");
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const cut = /\n?\.\.\. \(truncated\b[^)]*\)\s*$/.exec(inline);
+  const runnerCopy = cut ? inline.slice(0, cut.index) : inline.trim();
+  const same = cut ? runnerCopy.length > 0 && serialized.startsWith(runnerCopy) : serialized === runnerCopy;
+  if (!same) return `workflow output file does not match the runner's notification: ${path} (its result does not ${cut ? "begin with" : "equal"} the ${runnerCopy.length} chars the runner inlined)`;
+  return null;
+}
+
+/**
  * #170 — 이 세션이 띄운 백그라운드 `Workflow`의 Task ID들(접수증 순서)과, 그 Task ID에 묶인 러너 알림이
  * 적은 `<output-file>` 경로들(최신 먼저, 중복 제거).
  *
@@ -319,7 +355,9 @@ export function workflowOutputFilesFromTranscript(text) {
       // completed만 — (1)이 `<result>`에 적용하는 규칙 그대로다. 같은 러너 바이트가 인라인으로 오면 거절되고
       // 디스크에서 읽으면 받아들여지는 비대칭을 두지 않는다(rework cf1).
       if (h.status !== "completed") { rejected.push({ taskId: h.taskId, path: h.path, status: h.status || "(none)" }); continue; }
-      files.push({ taskId: h.taskId, path: h.path });
+      // rework sec1(3차) — 그 파일이 **아직 러너의 바이트인지** 대 볼 두 사실도 같이 든다: 이 알림 줄을 기록한
+      // 시각(트랜스크립트 줄의 `timestamp`)과 러너가 인라인으로 실은 결과(`<result>`, 길면 앞부분만).
+      files.push({ taskId: h.taskId, path: h.path, inline: h.result, at: Date.parse(o?.timestamp ?? "") });
     }
   }
   const seen = new Set();
@@ -341,7 +379,12 @@ function runnerNotificationHeader(text) {
   const cut = [rest.indexOf("<result>"), rest.indexOf("</task-notification>")].filter((i) => i >= 0);
   const head = cut.length ? rest.slice(0, Math.min(...cut)) : rest;
   const field = (tag) => (new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(head)?.[1] || "").trim();
-  return { taskId: field("task-id"), toolUseId: field("tool-use-id"), path: field("output-file"), status: field("status") };
+  // `<result>`의 내용 — 머리 바로 뒤의 `<result>`부터 블록의 **마지막** `</result>`까지(반환값 안의 문자열이
+  // `</result>`를 품어도 러너가 닫는 것은 마지막 것이다). 이 값은 후보가 아니라 결과 파일을 대 보는 기준이다.
+  const open = rest.indexOf("<result>");
+  const close = rest.lastIndexOf("</result>");
+  const result = open >= 0 && open === Math.min(...cut) && close > open ? rest.slice(open + "<result>".length, close) : null;
+  return { taskId: field("task-id"), toolUseId: field("tool-use-id"), path: field("output-file"), status: field("status"), result };
 }
 
 /**
@@ -471,13 +514,18 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   // 수명은 미검증이다), 크기를 넘었는지, JSON이 아닌지, 스키마에 어긋났는지가 서로 다른 문장이다.
   for (const { taskId, path, status } of wfFiles.rejected) tried.push(`workflow output file not used: task ${taskId} status ${status} (${path})`);
   if (optIn && wfFiles.files.length === 0) tried.push(`workflow output file: no runner notification names the output file of task ${wfFiles.taskIds.join(", ")}`);
-  for (const { path } of wfFiles.files) {
+  for (const { path, inline, at } of wfFiles.files) {
     let text = null;
     // 두 번째 인자는 **읽기 전에** 크기를 보라는 요청이다: 그것을 지키는 리더(run-stage의 `readFileOrNull`)는
     // 상한을 넘는 파일을 읽지 않고 `{ bytes }`만 돌려준다 — 상한이 판정만이 아니라 메모리 비용도 묶는다.
     // 지키지 않는 리더가 문자열을 주면 아래에서 같은 상한으로 다시 잰다.
-    try { text = readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES }); } catch { text = null; }
-    if (text && typeof text === "object" && Number.isFinite(text.bytes)) { tried.push(`workflow output file too large: ${path} (${text.bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
+    // `meta: true` — 내용과 함께 커널의 변경 시각을 달라는 요청(rework sec1). 그것을 주지 못하는 리더(문자열만
+    // 돌려주는 것)의 파일은 아래 묶기에서 거절된다: 판정은 에이전트가 쓸 수 없는 사실에만 앵커한다.
+    let ctimeMs;
+    try { text = readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES, meta: true }); } catch { text = null; }
+    if (text && typeof text === "object" && text.notRegular === true) { tried.push(`workflow output file is not a regular file: ${path} (a symlink or special file is not the runner's file)`); continue; }
+    if (text && typeof text === "object" && typeof text.text !== "string" && Number.isFinite(text.bytes)) { tried.push(`workflow output file too large: ${path} (${text.bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
+    if (text && typeof text === "object" && typeof text.text === "string") { ctimeMs = text.ctimeMs; text = text.text; }
     if (typeof text !== "string") { tried.push(`workflow output file missing: ${path}`); continue; }
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > WORKFLOW_OUTPUT_MAX_BYTES) { tried.push(`workflow output file too large: ${path} (${bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
@@ -488,10 +536,16 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
     // `.result`는 **기존 봉투 규칙 그대로** 한 겹만 벗긴다(표식 `summary`·`agentCount`·`logs`가 있을 때만).
     push(source, record);
     const mine = candidates.slice(before);
-    if (!mine.some((c) => check(c.obj).ok)) {
+    const passing = mine.filter((c) => check(c.obj).ok);
+    if (!passing.length) {
       const best = mine[mine.length - 1];
       tried.push(`${best.source}: ${check(best.obj).errors.join("; ")}`);
+      continue;
     }
+    // 스키마를 통과한 후보만 러너의 알림에 대 본다(통과하지 못한 파일은 위 스키마 사유가 더 정확하다).
+    // 묶이지 않으면 이 파일의 후보를 **전부** 거둬들인다 — 아래 후보 루프가 그것을 고르지 못하도록.
+    const failure = runnerBindingFailure({ path, value: passing[0].obj, inline, at, ctimeMs });
+    if (failure) { candidates.length = before; tried.push(failure); }
   }
 
   // (2) 디스패처가 알림의 output-file을 읽은 내용. 조각으로 오므로 파일별로 다시 붙인다.
