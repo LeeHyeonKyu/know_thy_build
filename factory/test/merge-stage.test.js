@@ -1769,6 +1769,30 @@ test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () 
   }
 });
 
+test("test_157_superset_on_rerun_is_not_a_flaky_candidate", async () => {
+  // First run fails [A]; the re-run fails [A, B]. Every first-run id is in the re-run set, so an
+  // "every id of the first run is in the second" check alone would call this the same set — it is not.
+  const extra = "server/tests/auth.test.ts::test_12_login";
+  const first = await producedGates({ failing: [OC_ID] });
+  const wider = await producedGates({ failing: [OC_ID, extra] });
+  expect(first.gates.unit.failing_ids).toEqual([OC_ID]);
+  expect([...wider.gates.unit.failing_ids].sort()).toEqual([OC_ID, extra].sort());
+
+  const sup = await run157({ seq: [first, wider], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(sup.code).toBe(2);
+  expect(sup.d.gates).toHaveBeenCalledTimes(2);
+  expect(sup.d.mergeGates).not.toHaveBeenCalled();
+  expect(sup.d.mergePr).not.toHaveBeenCalled();
+  const tr = transitionsOf(sup.d);
+  expect(tr).toHaveLength(1);
+  expect(tr[0].to).toBe("factory:needs-human");
+  expect(tr[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(tr[0].reason).not.toContain("flaky");
+  expect(tr[0].reason).toContain(OC_ID);
+  expect(tr[0].reason).toContain(extra);
+  expect(flakyMarksOf(sup.lines)).toEqual([]);
+});
+
 test("test_157_red_inside_the_diff_is_not_rerun", async () => {
   // Control: the same RED outside the diff IS re-run — so every "not re-run" below is the rule, not a missing feature.
   const red = await producedGates({ failing: [OC_ID] });
