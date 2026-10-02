@@ -448,10 +448,32 @@ test("factory-plan.js: an objection that survives the re-synthesis is recorded i
 
   expect(calls.filter((c) => c.opts.agentType === "plan-synthesizer")).toHaveLength(2);
   expect(labelled(calls, "sign:")).toHaveLength(8);
+  // 1.4.43: the injected entry carries a deterministic id and a severity (own-calendar #111 — an entry without
+  // them is named by position by the validator and can never be covered).
   expect(result.dissent_log).toEqual([
-    { role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding" },
+    { id: "signoff-skeptic", severity: "medium", role: "skeptic", objection: "the rollback path is still unspecified", resolution: "unresolved — proceeding" },
   ]);
   expect(validate("plan.v1", result).ok).toBe(true);
+});
+
+// 1.4.43 (own-calendar #111) — the plan schema handed to the synthesizer must declare `id` and `severity` on
+// dissent_log entries: the prompt asks for them and verify-stage reads them; a schema that omits them strips
+// them from the structured answer. This pins the three places to one contract.
+test("factory-plan.js: the synthesizer's PLAN_V1 schema declares id and severity on dissent_log entries", async () => {
+  const seen = [];
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.label?.startsWith("R1:")) return posFix(roleOf(opts));
+    if (opts.label?.startsWith("R2:")) return xexFix(roleOf(opts));
+    if (opts.agentType === "plan-synthesizer") { seen.push(opts.schema); return planFix(); }
+    if (opts.label?.startsWith("sign:")) return { vote: "accept", reason: "ok" };
+    return null;
+  };
+  await runWorkflow(FACTORY_PLAN_WORKFLOW, { agent: stub, args: { issue: 42, context: ".factory/out/context.json", loaded: planLoaderFix() } });
+  expect(seen.length).toBeGreaterThan(0);
+  const item = seen[0].properties.dissent_log.items;
+  expect(item.properties.id).toEqual({ type: "string" });
+  expect(item.properties.severity.enum).toEqual(["low", "medium", "high", "critical"]);
 });
 
 test("factory-plan.js: docs tier (rounds 2, roster 2) skips cross-examination entirely but still declares the phase", async () => {
@@ -570,7 +592,7 @@ test("factory-plan.js: an objection the synthesizer already logged is superseded
   expect(result.dissent_log.filter((d) => d.role === "skeptic" && d.objection === OBJECTION)).toHaveLength(1);
   expect(result.dissent_log).toEqual([
     { role: "architect", objection: "files_expected is too wide", resolution: "narrowed to two paths" },
-    { role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding" },
+    { id: "signoff-skeptic", severity: "medium", role: "skeptic", objection: OBJECTION, resolution: "unresolved — proceeding" },
   ]);
 });
 

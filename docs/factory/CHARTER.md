@@ -71,6 +71,15 @@ run 기록과의 리뷰 provenance 대조(자동 머지의 §(6b)), ② 그 기�
 sweep 잡에 records 브랜치 체크아웃이 없어서이고, KTB-48이 둘 다 덮는다. 그 둘을 뺀 나머지는 자동
 머지와 같다.
 
+**운영 세션의 비판정 머지(2026-10-02, 소유자 결정 — ADR-032).** 2026-10-01 하루에 사람에게 간 머지·재시도
+요청 14건 중 사람의 판단이 필요했던 것은 0건이었다 — 문서·리서치·운영 스크립트 PR까지 훅이 운영 세션의
+`gh pr merge`를 통째로 막아서였다. 그래서 **운영 세션**(사람의 Claude 세션; CI 러너의 스테이지는 해당 없음)은
+PR의 모든 파일이 `factory/lib/operator-merge.js`의 **양의 목록**(docs·리서치·운영 스크립트·보드 페이지 — 엔진
+소스는 하나도 없다) 안이고, 체크가 전부 GREEN이고, draft가 아니고, 기본 브랜치를 향할 때 그 PR을 머지할 수
+있다. 문은 훅(`block-dangerous.sh`)이 `.factory/bin/operator-merge-check.js`에 묻는 방식이고, 정확히
+`gh pr merge <n> [--squash|…]` 한 문장만 통과한다. 목록 밖 경로가 하나라도 섞이면 오늘과 같다 — 사람이 머지한다.
+이 목록은 S4a(KTB #149)의 비판정 양의 목록과 합쳐질 예정이다.
+
 ## triage 기본 판정 (`triage.default: ready`, 외부 감사 2026-09-14 M1)
 `merge.human_gate: false`와 **같은 이유의 같은 선택**이다: 이 저장소에서 재는 것은 "이슈 하나가 사람의
 개입 없이 triage → merge를 통과할 수 있는가"이고, 애매한 이슈마다 `needs-info`로 멈추면 그 측정이
@@ -85,7 +94,10 @@ plan으로 간다. 감당할 수 있는 이유는 뒤의 층이 남아 있어서
 ## NEVER_AUTOMATE (triage가 wont-do로 보냄)
 경로 글롭으로 적은 항목은 `verify-stage`가 triage handoff의 `impact_paths`에 다시 대고, 걸리면
 에이전트의 판정과 무관하게 `wont-do`로 덮어쓴다(`never_automate_hit`, 감사 M1).
-- npm에 publish하는 모든 것(`.github/workflows/publish.yml`의 트리거·`package.json`의 `version` 필드) — 배포는 사람이 태그를 찍고 사람이 승인한다
+- npm 배포 **경로**(`.github/workflows/publish.yml`의 트리거와 publish 스텝) — 어디로, 어떤 자격으로 나가는지는 사람이 정한다.
+  **버전 번호는 2026-10-02부터 러너 생성물이다**(소유자 결정, ADR-032): main에 엔진 내용이 들어오면 publish 워크플로가 다음 patch
+  버전을 계산해 배포하고 태그·범프 커밋을 남긴다(`factory/cli/bump-version.js`) — 미러 커밋(S3)과 같은 지위다. 사람은 minor/major를
+  올릴 때만 `package.json`을 직접 고친다. 에이전트 PR이 `version` 필드를 건드리는 것은 여전히 금지다(러너가 아니면 생성물이 아니다).
 - `harness.toml [protected]` 또는 `harness.toml [gates.thresholds]`를 바꾸는 변경 — 판정 기준 자체를 건드리는 diff는 항상 사람 머지(§5.1)
 - `templates/factory/**`의 게이트 판정 로직(semantics) 변경 — L0/L1/L2가 무엇을 막는지가 바뀌면 이 템플릿을 설치한 모든 채택 저장소의 동작이 함께 바뀐다(항상 사람 리뷰·ADR-020)
 - `.env*`, 시크릿, `.github/workflows/publish.yml`(npm 배포 경로 — 첫 항목과 같은 대상이지만 워크플로 파일 자체를 짚는다)
