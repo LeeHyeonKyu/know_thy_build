@@ -4043,6 +4043,20 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 옛 경로 포함, D 행 포함): `server/`에서 파일을 옮겨 나간 PR은 `server/`를 건드린 PR이다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
 
 **영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`(행마다 `paths`와 반환값에 `touched`를 **추가**만 한다 — 기존 필드 `all`·`added`·`tests`·`sources`·`addedTests`의 값은 그대로라 implement·review의 분류·커버리지 소비자는 바뀌지 않는다), `lib/gates.js` `runStageGates` 주석과 테스트 게이트 엔트리의 `failed_suites`(**추가** 필드 — 기존 필드·판정은 그대로), `lib/parsers/vitest-json.js`의 `failed_suites`(비어 있을 때는 싣지 않는다 — 기존 반환 모양 그대로), 설계 스펙 §5.2.5(“`gates.js`는 절대 재시도로 GREEN을 만들지 않는다”·“review·merge는 RED를 RED로 둔다”에 이 개정을 가리키는 주석).
-**Scope change (#157 plan 밖)**: `lib/parsers/vitest-json.js`는 plan의 `files_expected` 밖이고, plan dw6은 `gates.js`에 코드 변경이 없다고 적었다.
-둘 다 위 `failed_suites` 때문이다 — dw4("밖이라고 증명할 수 없는 경우는 모두 한 번의 판정")가 로드 실패를 덮으려면 생산자가 그 사실을 말해야 하고,
-merge-stage가 받는 게이트 객체에는 그 밖의 신호(`tests.failed`도 assertion 수다)가 없다. `gates.js`의 변경은 그 필드 한 줄이고 판정 로직은 그대로다.
+**Scope change (#157 plan 밖 — 승인 대기)**: plan `files_expected`(merge-stage.js·run-stage.js·merge-stage.test.js·run-stage.test.js·DECISIONS.md·gates.js)
+밖의 경로와, plan이 금한 것을 넘는 변경을 **전부** 적는다. 빌더가 판정하지 않는다 — spec-conformance(또는 사람)의 승인이 필요하다.
+- `lib/gates.js` **코드** — plan dw6("gates.js에 코드 변경 없음")과 non_goal "Changing the factory.gates.v1 schema"에 걸친다. 두 줄이다:
+  ① 테스트 게이트 엔트리의 `failed_suites`(추가 필드 — `schema` 문자열·기존 필드·판정은 그대로; 같은 schema id 아래 `parsed`·`failing_ids`·`detail`·`reason`이
+  추가 필드로 붙어 온 선례와 같은 모양). 이유: dw4의 rubric("밖이라고 증명할 수 없는 것은 재실행하지 않는다")을 로드 실패에 대해 지키려면 생산자가 그 사실을
+  말해야 하고, merge-stage가 받는 게이트 객체에는 그 밖의 신호가 없다(`tests.failed`도 assertion 수다). 재실행 **정책**은 merge-stage에 있다 — gates.js는
+  사실 하나를 보고할 뿐이므로 non_goal "Moving the re-run policy into gates.js"는 넘지 않는다.
+  ② `scrubDetailName` export(리뷰 arch1) — `gates-detail`의 이름 스크럽 규칙을 merge의 `factory-flaky-candidate`가 복사하지 않고 그대로 쓰게 한다.
+  승인되지 않으면 되돌릴 것은 ①이고, 그 대가는 "diff 안의 로드 실패 + diff 밖의 assertion RED"가 한 번 재실행되는 것이다(두 번째 런 전체 GREEN이어야 머지되므로
+  결정적인 로드 실패는 머지되지 않지만, 같은 id 집합이면 "flaky 후보"로 잘못 표시된다).
+- `lib/parsers/vitest-json.js`(+ 그 테스트 `test/parsers.test.js`의 새 케이스 하나) — ①의 `failed_suites`를 만드는 곳. 비어 있을 때는 싣지 않아 기존 반환 모양 그대로다.
+- `lib/changed-files.js` — 행마다 `paths`, 반환값에 `touched`를 **추가**만 한다. 이유: dw3("diff 파일이 그 테스트의 최상위 디렉터리를 공유하면 재실행 없음")은
+  `server/`에서 파일을 옮겨 나간 PR도 `server/`를 건드린 것으로 봐야 하는데, 기존 `all`은 R/C 행의 새 경로만 갖는다. 기존 필드의 값은 그대로라
+  implement·review의 소비자(분류·커버리지)는 바뀌지 않는다.
+- 설계 스펙 `docs/superpowers/specs/2026-09-10-factory-design.md` §5.2.5 — 문장 두 곳에 이 ADR을 가리키는 개정 주석. 이유: "review·merge는 RED를 RED로 둔다"를
+  그대로 두면 dw6 rubric의 "ADR-011·주석·merge-stage.js 사이에 모순이 남지 않는다"가 스펙에서 깨진다. 규범 문장은 지우지 않고 주석만 덧붙였다.
+- `.factory/**` 미러는 러너가 다시 만든다(S3) — 이 PR의 손 편집이 아니다.
