@@ -3990,6 +3990,13 @@ review의 overlay는 PR이 새로 추가한 팩토리 소유 파일을 `git rm`�
 
 **이 PR 자체가 마지막 수동 릴리스다**: 머지되면 publish가 엔진 내용 변경을 보고 1.4.45를 스스로 낸다. 버전은 더 이상 PR에 적지 않는다.
 
+**2026-10-02 (KTB #156 실측, 같은 과의 아홉째 — 러너 생성 버전 이후 첫 기록, 버전 번호 없음).** #155가 main에 새 엔진 파일 둘(`operator-merge.js`·
+`operator-merge-check.js`와 그 미러)을 더하는 동안 #156은 그 전의 main에서 갈라져 있었다. review의 overlay가 base의 `.factory/**`를 워크트리와
+인덱스에 올리자 그 두 미러 파일이 "HEAD에 없는데 인덱스에 있는" 상태가 됐고, 1.4.44의 `add -A` + `diff --cached HEAD`가 둘을 "추가됨"으로 보고해
+판정 불가로 멈췄다 — PR의 소스에는 그 파일이 없으니 재생성은 손대지 않는다. 판정 대상을 **HEAD에 있는 미러 경로 ∪ 이 PR의 소스가 만드는
+경로**로 좁힌다(`regenerateMirror`가 `entries`를 돌려준다). 그 밖의 경로는 overlay가 base에서 가져온 것이고 머지 뒤 main에 그대로 있을 파일이다.
+1.4.44의 세션 전 대조는 entries만 보므로 통과했고 세션 뒤 verify에서 걸렸다 — 리뷰어 비용이 한 번 더 들었다. 이제 둘이 같은 기준이다.
+
 ---
 
 ## ADR-033 merge 게이트의 RED가 PR diff 밖의 테스트뿐이면 한 번 다시 돈다 — ADR-011의 merge 쪽 개정 — 2026-10-02 (#157)
@@ -4003,12 +4010,20 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 **결정** (`lib/merge-stage.js` `rerunEligibility`, `runMergeStage` (4)): merge에서만, 다음이 **전부** 증명될 때 같은 `d.gates()`(run-stage의
 `runStageGates`, stage `merge`)를 **정확히 한 번** 더 부른다.
 - 결과가 RED(MISCONFIGURED·BLOCKED가 아님)이고, RED인 게이트가 **전부** 리포트를 실제로 읽은(`parsed: true`) 테스트 게이트이며 `failing_ids`가 비어 있지 않다.
-  lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다.
+  lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다. 그 게이트의 `failed_suites`(아래)가 **비어 있음이 보고되어** 있다.
 - PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`의 `touched`: R/C 행의 양쪽 경로)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
 - diff에 **저장소 루트의 파일이 하나도 없다** — 루트 파일(package.json·lockfile·설정·README까지)은 모든 패키지를 건드린 것으로 본다.
 - 실패 테스트마다 경로가 정규화되고, 루트에 있지 않으며, 그 최상위 디렉터리(`server/` 대 `client/`)에 diff 파일이 하나도 없다.
 
-하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록) 지금과 **같은 한 번의 판정**이다(fail closed).
+하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록·`failed_suites` 없음 또는 비어 있지 않음) 지금과
+**같은 한 번의 판정**이다(fail closed).
+
+`failing_ids`는 실패한 **assertion**만 센다(`parsers/vitest-json.js`). 로드에 실패한 테스트 파일(또는 suite 훅이 던진 파일)은 vitest JSON에
+`status:"failed"` + `message`, 실패 assertion 0개로 남고 `numFailedTestSuites`에만 잡힌다 — id가 없으니 `failing_ids`에 나타나지 않고,
+그러면 "RED의 전부가 diff 밖"이 거짓으로 증명된다(#157 자기비판: 서버 assertion RED + diff 안의 `client/` 파일 로드 실패가 재실행 대상이 됐다).
+그래서 파서가 그런 파일을 `failed_suites`로 따로 내고, `runGates`가 테스트 게이트 엔트리에 **추가 필드**로 싣는다(리포트를 읽은 경우; 없으면 `[]`).
+재실행 판정은 그 필드가 없거나 비어 있지 않으면 증명 실패로 본다. 같은 이유로 "같은 id 집합" 비교도 `failed_suites`가 있는 재실행 결과를
+비교 불가로 본다(flaky 후보 문구·마커 없음).
 재실행의 결과는 이렇게 읽는다:
 - **전체가 GREEN**이어야만 머지로 이어진다. `factory/gates` 상태를 그 결과로 다시 게시하고(첫 RED의 failure가 required check로 남지 않게),
   4b·`mergeGates`·`factory:merged` 전이가 모두 재실행 결과를 본다. 첫 RED의 `gates-detail` 줄과 `factory-flaky-candidate`(outcome GREEN) 줄을 run 기록에 남긴다.
@@ -4027,10 +4042,7 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. 이름 변경·복사는 **양쪽 경로**를 모두 diff로 친다(`changedFiles`의 `touched` — R/C 행의
 옛 경로 포함, D 행 포함): `server/`에서 파일을 옮겨 나간 PR은 `server/`를 건드린 PR이다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
 
-**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`(행마다 `paths`와 반환값에 `touched`를 **추가**만 한다 — 기존 필드 `all`·`added`·`tests`·`sources`·`addedTests`의 값은 그대로라 implement·review의 분류·커버리지 소비자는 바뀌지 않는다), `lib/gates.js` `runStageGates` 주석, 설계 스펙 §5.2.5(“`gates.js`는 절대 재시도로 GREEN을 만들지 않는다”·“review·merge는 RED를 RED로 둔다”에 이 개정을 가리키는 주석).
-**2026-10-02 (KTB #156 실측, 같은 과의 아홉째 — 러너 생성 버전 이후 첫 기록, 버전 번호 없음).** #155가 main에 새 엔진 파일 둘(`operator-merge.js`·
-`operator-merge-check.js`와 그 미러)을 더하는 동안 #156은 그 전의 main에서 갈라져 있었다. review의 overlay가 base의 `.factory/**`를 워크트리와
-인덱스에 올리자 그 두 미러 파일이 "HEAD에 없는데 인덱스에 있는" 상태가 됐고, 1.4.44의 `add -A` + `diff --cached HEAD`가 둘을 "추가됨"으로 보고해
-판정 불가로 멈췄다 — PR의 소스에는 그 파일이 없으니 재생성은 손대지 않는다. 판정 대상을 **HEAD에 있는 미러 경로 ∪ 이 PR의 소스가 만드는
-경로**로 좁힌다(`regenerateMirror`가 `entries`를 돌려준다). 그 밖의 경로는 overlay가 base에서 가져온 것이고 머지 뒤 main에 그대로 있을 파일이다.
-1.4.44의 세션 전 대조는 entries만 보므로 통과했고 세션 뒤 verify에서 걸렸다 — 리뷰어 비용이 한 번 더 들었다. 이제 둘이 같은 기준이다.
+**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4), `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`, `main()`이 그대로 펼친다), `lib/changed-files.js` `touched`(행마다 `paths`와 반환값에 `touched`를 **추가**만 한다 — 기존 필드 `all`·`added`·`tests`·`sources`·`addedTests`의 값은 그대로라 implement·review의 분류·커버리지 소비자는 바뀌지 않는다), `lib/gates.js` `runStageGates` 주석과 테스트 게이트 엔트리의 `failed_suites`(**추가** 필드 — 기존 필드·판정은 그대로), `lib/parsers/vitest-json.js`의 `failed_suites`(비어 있을 때는 싣지 않는다 — 기존 반환 모양 그대로), 설계 스펙 §5.2.5(“`gates.js`는 절대 재시도로 GREEN을 만들지 않는다”·“review·merge는 RED를 RED로 둔다”에 이 개정을 가리키는 주석).
+**Scope change (#157 plan 밖)**: `lib/parsers/vitest-json.js`는 plan의 `files_expected` 밖이고, plan dw6은 `gates.js`에 코드 변경이 없다고 적었다.
+둘 다 위 `failed_suites` 때문이다 — dw4("밖이라고 증명할 수 없는 경우는 모두 한 번의 판정")가 로드 실패를 덮으려면 생산자가 그 사실을 말해야 하고,
+merge-stage가 받는 게이트 객체에는 그 밖의 신호(`tests.failed`도 assertion 수다)가 없다. `gates.js`의 변경은 그 필드 한 줄이고 판정 로직은 그대로다.
