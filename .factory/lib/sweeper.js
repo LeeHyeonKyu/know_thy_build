@@ -1,5 +1,6 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
+import { isNewerVersion } from "./feedback/harvest-findings.js";
 import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, lastTransition, transitionRefusedMarker, ENGINE_VERSION, RETRY_ON_RELEASE, releasePrincipal, resumePoint } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
 import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
@@ -491,6 +492,33 @@ export function engineCausedNeedsHuman(comments) {
   return { comment, thenVersion: ENGINE_VERSION.exec(body)?.[1] ?? null };
 }
 
+/** 점 단위 숫자 비교로 가장 새로운 버전(비교할 수 없는 값은 버린다). 하나도 없으면 null. */
+export function newestVersion(versions) {
+  let best = null;
+  for (const v of versions) {
+    if (typeof v !== "string" || !v.trim()) continue;
+    if (best === null ? /\d/.test(v) : isNewerVersion(v, best)) best = v.trim();
+  }
+  return best;
+}
+
+/**
+ * rework cf1 — 이 이슈에 **팩토리 계정이** 이미 남긴 엔진 버전들(에스컬레이션의 `factory-engine-version`, 이 팔의
+ * `factory-retry-on-release`). blocked 팔의 에스컬레이션 기록은 이것들보다 낮게 찍지 않는다: 낡은 체크아웃의 quick sweep이
+ * 1.4.45로 재시도된 이슈를 1.4.44로 찍으면 다음 cron(1.4.45)이 그것을 새 릴리스로 읽고 같은 엔진으로 또 돌린다.
+ * 팩토리 계정을 모르면 아무것도 받지 않는다(본문은 누구나 흉내 낸다).
+ */
+function factoryRecordedVersions(comments, factoryLogin) {
+  if (!factoryLogin || !Array.isArray(comments)) return [];
+  const out = [];
+  for (const c of comments) {
+    if (!sameLogin(c?.author, factoryLogin)) continue;
+    const body = String(c?.body ?? "");
+    for (const re of [ENGINE_VERSION, RETRY_ON_RELEASE]) { const v = re.exec(body)?.[1]; if (v) out.push(v); }
+  }
+  return out;
+}
+
 async function sweepRetryOnRelease({ gh, transition, dispatchStage, installedVersion, backPressure, factoryLogin, actions }) {
   /**
    * 재점화 팔(stalled·blocked)과 같은 가족이다 — `dispatchStage`가 배선되지 않은 호출자(구형 더블·dispatch 없는 실행)에서는
@@ -533,7 +561,16 @@ async function sweepRetryOnRelease({ gh, transition, dispatchStage, installedVer
       const { version, why } = await installed();
       if (!version) { skip(why); continue; }
       if (!stop.thenVersion) { skip("no recorded engine version for the needs-human transition — cannot tell whether a release happened since"); continue; }
+      /**
+       * rework cf1 — "릴리스가 있었다"는 **더 새롭다**(점 단위 숫자 비교)이지 "다르다"가 아니다. 스테이지 잡 끝의 quick sweep은
+       * 이벤트 시점의 `.factory`를 다시 체크아웃하고 돈다 — main보다 뒤처진 매니페스트를 읽은 sweep이 그 차이를 릴리스로 읽으면
+       * 방금 실패한 그 엔진으로 같은 이슈를 다시 돌린다. 낮으면 건너뛰고 이유를 남긴다; 같으면 조용히 지나간다.
+       */
       if (stop.thenVersion === version) continue;                              // 그 뒤로 릴리스가 없었다
+      if (!isNewerVersion(version, stop.thenVersion)) {
+        skip(`installed ${version} is not newer than ${stop.thenVersion} recorded at the stop${isNewerVersion(stop.thenVersion, version) ? ` (older than ${stop.thenVersion} — a stale checkout, not a release)` : " (not comparable — not read as a release)"}`);
+        continue;
+      }
       if (comments.some((c) => RETRY_ON_RELEASE.exec(String(c?.body ?? ""))?.[1] === version)) { skip(`already retried once on ${version}`); continue; }
       const resume = resumePoint(comments);
       if (!resume?.target) { skip(`no resume point${resume ? ` (stopped at ${resume.stoppedAt})` : ""}`); continue; }
@@ -1548,7 +1585,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           }
         }
       }
-      const engineVersion = await engineVersionNow();
+      // 설치본 버전을 못 읽었으면 싣지 않는다(이슈의 옛 기록만으로 찍으면 방금 실패한 엔진보다 낮은 값이 될 수 있다 — 모르면 기록하지 않는다).
+      const installedNow = await engineVersionNow();
+      const engineVersion = installedNow ? newestVersion([installedNow, ...factoryRecordedVersions(comments, factoryLogin)]) : null;
       await transition({ issue: it.number, to: "factory:needs-human", reason: escalationReason(cause), ...(engineVersion ? { engineVersion } : {}) });
       actions.push({ kind: "blocked-escalated", issue: it.number, cause });
     } catch (e) {
