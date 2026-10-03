@@ -4035,6 +4035,8 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
   expect(inside.unitCalls).toBe(1);
   expect(inside.d.mergePr).not.toHaveBeenCalled();
   expect(inside.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+  // …and the record says why, bound to this runner (review sec-s1): the refusal names the touched package.
+  expect(inside.lines.filter((l) => l.startsWith("merge: no gates rerun — "))).toEqual([expect.stringMatching(/^merge: no gates rerun — diff touches server\/, where server\/tests\/follows\.test\.ts lives \[run_id=\S+ runner=gha-157\]$/)]);
 
   // A rename OUT of server/** and a deletion under server/** are diffs in server/** — the failing server test
   // is not re-run (`--no-renames` makes the rename D old + A new; D rows count). A diff source that keeps only the
@@ -4078,6 +4080,7 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
     expect(x.unitCalls).toBe(1);
     expect(x.d.mergePr).not.toHaveBeenCalled();
     expect(x.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+    expect(x.lines.filter((l) => l.startsWith("merge: no gates rerun — "))).toEqual([expect.stringMatching(/^merge: no gates rerun — PR diff unreadable or empty: .*(git diff failed|origin\/main)/)]);
   }
 });
 

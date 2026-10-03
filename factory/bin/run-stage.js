@@ -2070,7 +2070,9 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
 }
 
 /**
- * The `gates` dep: 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다.
+ * The `gates` dep: 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이다;
+ * 유일한 예외는 merge다(#157, ADR-034): RED가 PR diff 밖의 파싱된 테스트 실패뿐이면 runMergeStage가 이 dep을 **한 번 더**
+ * 부르고, 그 두 번째 호출이 `gates.json`을 덮어쓴다 — 첫 RED는 재실행 **전에** 쓴 run 기록 줄(`rerun 1/1`·gates-detail)에만 남는다.
  * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의 자기 신고에서 읽고,
  * 그마저 없으면 CHARTER의 기본값으로 채운다. #157: extracted from `main()` unchanged so the merge re-run can be
  * exercised through the dep production uses — runMergeStage calls this same dep a second time for the re-run.
@@ -2965,7 +2967,8 @@ async function main() {
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
     /**
-     * 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다.
+     * 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이고, merge만
+     * PR diff 밖의 RED에 한해 한 번 더 부른다(#157, ADR-034 — 두 번째 호출이 gates.json을 덮어쓴다, §makeStageGatesDep).
      * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의
      * 자기 신고에서 읽고, 그마저 없으면 CHARTER의 기본값으로 fail closed 대신 보수적으로 채운다.
      */

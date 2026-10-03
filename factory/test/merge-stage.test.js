@@ -1565,7 +1565,8 @@ async function producedBlockedGates() {
  * caught by the call count AND by reaching mergePr, not hidden behind a crash.
  */
 async function run157({ seq, diff, retryFromBlocked = false, startFrom = "factory:approved", over = {} }) {
-  const { lines, record } = makeRecord();
+  const { lines, record: push } = makeRecord();
+  const record = vi.fn(push);                                                  // call order is evidence (dw1: rerun line before the 2nd gates run)
   const postStatus = basePostStatus();
   const extra = await producedGates({ failing: [] });
   let i = 0;
@@ -1575,7 +1576,7 @@ async function run157({ seq, diff, retryFromBlocked = false, startFrom = "factor
   const suiteFailures = vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: (name) => reportOnDisk157(g, name) }));
   const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, suiteFailures, ...over });
   const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus, retryFromBlocked, stamp: STAMP_157 });
-  return { code, d, lines, postStatus };
+  return { code, d, lines, postStatus, record };
 }
 const detailsOf = (lines) => lines.filter((l) => l.startsWith("gates-detail: ")).map((l) => JSON.parse(l.slice("gates-detail: ".length)));
 const flakyMarksOf = (lines) => lines.filter((l) => l.startsWith("factory-flaky-candidate: ")).map((l) => JSON.parse(l.slice("factory-flaky-candidate: ".length)));
@@ -1599,6 +1600,29 @@ function pre157GateStepLines(g) {
   const envNote = g?.test_env_reup?.ran ? [`test-env: re-up ${g.test_env_reup.ok ? "ok" : `failed — ${g.test_env_reup.detail}`}`] : [];
   if (g?.status === "BLOCKED") return [`merge: gates BLOCKED — ${g.blocked_reason || "gates could not be decided"}`, ...envNote];
   return [`merge: gates ${g?.status ?? "missing"}`, ...gatesDetailLines(g, STAMP_157), ...envNote];
+}
+/**
+ * Review sec-s1 (plan dw3/dw4): a refused re-run is not silent. The record is the LITERAL pre-#157 gate step plus
+ * EXACTLY one `merge: no gates rerun — <reason>` line, right after the verdict line, bound to this run by the same
+ * run_id/runner stamp the gates-detail lines carry. An on-call reader can then tell "refused, because X" from
+ * "the feature is broken". The prefix and the stamp tag are literals here, not imports from the code under test.
+ */
+const NO_RERUN_157 = "merge: no gates rerun — ";
+/** What the gates-detail projection makes of a reason string (gates.js `gatesDetailLines`, unchanged by #157). */
+const gatesDetailReason157 = (reason) => JSON.parse(gatesDetailLines({ gates: { x: { status: "RED", reason, detail: { failing: [], snippet: "" } } } }, STAMP_157)[0].slice("gates-detail: ".length)).reason;
+const STAMP_TAG_157 = "[run_id=18113 runner=gha-18113]";
+const refusalLinesOf = (lines) => lines.filter((l) => l.startsWith(NO_RERUN_157));
+const withoutRefusal = (lines) => lines.filter((l) => !l.startsWith(NO_RERUN_157));
+function expectRefusedRecord157(lines, g, name, why) {
+  const step = gateStepLines(lines);
+  const pre = pre157GateStepLines(g);
+  const refusals = refusalLinesOf(step);
+  expect(refusals, name).toHaveLength(1);
+  expect(refusals[0].endsWith(` ${STAMP_TAG_157}`), `${name}: ${refusals[0]}`).toBe(true);
+  expect(refusals[0], name).toMatch(why);
+  expect(step, name).toEqual([pre[0], refusals[0], ...pre.slice(1)]);
+  // Nothing else of the re-run path leaks into a refusal: no rerun line, no flaky-candidate marker.
+  expect(withoutRefusal(lines).some((l) => /rerun|flaky-candidate/.test(l)), name).toBe(false);
 }
 /**
  * factory.gates.v1 from the real `runGates` with the gate ORDER chosen by the caller and an optional
@@ -1662,6 +1686,17 @@ test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   expect(r.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC_ID))).toBe(true);
   expect(flakyMarksOf(r.lines)).toEqual([expect.objectContaining({ test: OC_ID, outcome: "GREEN", run_id: "18113", runner: "gha-18113" })]);
   expect(r.lines).toContain("merge: gates GREEN");
+  // dw1: the rerun line is stamped to this run and reached the record BEFORE the second gates run started, together
+  // with the first run's gates-detail line — so a job killed during the re-run (timeout) is told apart from one
+  // killed in the first run, and the first RED's evidence survives the re-run overwriting gates.json.
+  const rerunLine = r.lines.find((l) => l.startsWith("merge: gates RED outside the PR diff — rerun 1/1 ("));
+  expect(rerunLine).toContain(OC_ID);
+  expect(rerunLine.endsWith(` ${STAMP_TAG_157}`)).toBe(true);
+  const recordCallOf = (pred) => r.record.mock.calls.findIndex((c) => c[0].some(pred));
+  const secondGatesRun = r.d.gates.mock.invocationCallOrder[1];
+  expect(r.record.mock.invocationCallOrder[recordCallOf((l) => l === rerunLine)]).toBeLessThan(secondGatesRun);
+  expect(r.record.mock.invocationCallOrder[recordCallOf((l) => l.startsWith("gates-detail: ") && l.includes(OC_ID))]).toBeLessThan(secondGatesRun);
+  expect(refusalLinesOf(r.lines)).toEqual([]);                                 // a re-run that happened is not a refusal
 
   // The production dep shape: prReady wired (run-stage always wires it), so (6a-ii) re-checks mergeGates after
   // the draft flip. Both mergeGates calls and the flip come after the re-run resolved; the PR still merges,
@@ -1771,11 +1806,18 @@ test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () 
   const thrown = await run157({ seq: [first, () => { throw new MergeBaseError("origin/main: exit 128"); }], diff: { ok: true, files: CLIENT_ONLY } });
   expect(thrown.code).toBe(2);
   expect(transitionsOf(thrown.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  const thrownDiff = await run157({ seq: [first, () => { throw new GitDiffError("fatal: bad revision"); }], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(thrownDiff.code).toBe(2);
+  expect(transitionsOf(thrownDiff.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  // A re-run that returns no verdict at all could not decide anything (plan dw2): blocked, never needs-human-as-flaky.
   const missing = await run157({ seq: [first, null], diff: { ok: true, files: CLIENT_ONLY } });
   expect(missing.code).toBe(2);
-  expect(transitionsOf(missing.d)).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(transitionsOf(missing.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
   expect(transitionsOf(missing.d)[0].reason).not.toContain("flaky");
-  for (const x of [blocked, thrown, missing]) {
+  expect(transitionsOf(missing.d)[0].reason).toMatch(/rerun/);
+  for (const x of [blocked, thrown, thrownDiff, missing]) {
+    // Every one leaves a reason line for the re-run's outcome on the record.
+    expect(x.lines.some((l) => /^merge: gates rerun BLOCKED — \S/.test(l)), x.lines.join("\n")).toBe(true);
     expect(x.d.gates).toHaveBeenCalledTimes(2);              // never a third run
     expect(x.d.mergePr).not.toHaveBeenCalled();
     expect(flakyMarksOf(x.lines)).toEqual([]);
@@ -1840,14 +1882,24 @@ test("test_157_red_inside_the_diff_is_not_rerun", async () => {
   expect(control.d.gates).toHaveBeenCalledTimes(2);
 
   const cases = [
-    { name: "the failing test file itself is in the diff", files: ["client/src/App.tsx", "server/tests/follows.test.ts"] },
-    { name: "a diff file shares the test's top-level directory", files: ["server/src/routes/follows.ts"] },
-    { name: "package.json at the repo root", files: [...CLIENT_ONLY, "package.json"] },
-    { name: "package-lock.json at the repo root", files: [...CLIENT_ONLY, "package-lock.json"] },
-    { name: "vitest.config.ts at the repo root", files: [...CLIENT_ONLY, "vitest.config.ts"] },
-    { name: "tsconfig.json at the repo root", files: [...CLIENT_ONLY, "tsconfig.json"] },
-    { name: "a root-level markdown file still counts as touched", files: [...CLIENT_ONLY, "README.md"] },
-    { name: "the failing test file is at the repo root", files: CLIENT_ONLY, failing: ["follows.test.ts::test_49_event_visibility"] },
+    { name: "the failing test file itself is in the diff", files: ["client/src/App.tsx", "server/tests/follows.test.ts"], why: /diff touches server\/, where server\/tests\/follows\.test\.ts lives/ },
+    { name: "a diff file shares the test's top-level directory", files: ["server/src/routes/follows.ts"], why: /diff touches server\// },
+    { name: "package.json at the repo root", files: [...CLIENT_ONLY, "package.json"], why: /repo-root file: package\.json/ },
+    { name: "package-lock.json at the repo root", files: [...CLIENT_ONLY, "package-lock.json"], why: /repo-root file: package-lock\.json/ },
+    { name: "vitest.config.ts at the repo root", files: [...CLIENT_ONLY, "vitest.config.ts"], why: /repo-root file: vitest\.config\.ts/ },
+    { name: "tsconfig.json at the repo root", files: [...CLIENT_ONLY, "tsconfig.json"], why: /repo-root file: tsconfig\.json/ },
+    { name: "a root-level markdown file still counts as touched", files: [...CLIENT_ONLY, "README.md"], why: /repo-root file: README\.md/ },
+    { name: "the failing test file is at the repo root", files: CLIENT_ONLY, failing: ["follows.test.ts::test_49_event_visibility"], why: /failing test at the repo root: follows\.test\.ts/ },
+    // Review cf-s3: a failing test under a CONVENTIONAL TEST ROOT (test, tests, __tests__, spec, e2e as the top-level
+    // directory) counts as touched by any non-empty diff. In a single-package src/** + tests/** layout every tests/**
+    // failure is "outside" every src-only PR, so without this rule the heuristic filters nothing and a deterministic
+    // break the PR caused would be re-run and, on a second RED, labelled "flaky 후보". The list is literal here.
+    { name: "tests/ failure, src/ diff (single-package layout)", files: ["src/calc.ts"], failing: ["tests/calc.test.ts::adds"], why: /tests\/calc\.test\.ts.*test root tests\// },
+    { name: "test/ failure, lib/ diff", files: ["lib/calc.js"], failing: ["test/calc.test.js::adds"], why: /test root test\// },
+    { name: "__tests__/ failure, src/ diff", files: ["src/calc.ts"], failing: ["__tests__/calc.test.ts::adds"], why: /test root __tests__\// },
+    { name: "spec/ failure, app/ diff", files: ["app/models/user.rb"], failing: ["spec/models/user.spec.ts::validates"], why: /test root spec\// },
+    { name: "e2e/ failure, web/ diff", files: ["web/pages/index.tsx"], failing: ["e2e/home.spec.ts::loads"], why: /test root e2e\// },
+    { name: "tests/ failure, docs-only diff (the stated trade-off: still not re-run)", files: ["docs/guide.md"], failing: ["tests/unit/calc.test.ts::adds"], why: /test root tests\// },
   ];
   for (const c of cases) {
     const first = await producedGates({ failing: c.failing ?? [OC_ID] });
@@ -1859,20 +1911,36 @@ test("test_157_red_inside_the_diff_is_not_rerun", async () => {
     expect(withDiff.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
     expect(transitionsOf(withDiff.d), c.name).toEqual(transitionsOf(today.d));
-    expect(withDiff.lines, c.name).toEqual(today.lines);
-    expect(gateStepLines(withDiff.lines), c.name).toEqual(pre157GateStepLines(first));
+    expect(withoutRefusal(withDiff.lines), c.name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(withDiff.lines, first, c.name, c.why);
     expect(withDiff.lines, c.name).toContain("merge: gates RED");
-    expect(withDiff.lines.some((l) => /rerun|flaky-candidate/.test(l)), c.name).toBe(false);
     expect(gateStatusesOf(withDiff.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
   }
+
+  // Positive controls for the test-root rule: only the EXACT top-level names count. A `tests/` segment deeper in the
+  // path (server/tests/…, the #111 shape) and a top-level dir that merely starts with a root name are re-run.
+  for (const c of [
+    { name: "server/tests/ under a client-only diff (#111)", failing: ["server/tests/x.test.ts::t"], files: ["client/a.ts"] },
+    { name: "testkit/ is not tests/", failing: ["testkit/x.test.ts::t"], files: ["client/a.ts"] },
+    { name: "specs/ is not spec/", failing: ["specs/x.test.ts::t"], files: ["client/a.ts"] },
+    { name: "a test root name deeper in the path", failing: ["server/e2e/flow.test.ts::t"], files: ["src/calc.ts"] },
+  ]) {
+    const r = await run157({ seq: [await producedGates({ failing: c.failing }), green], diff: { ok: true, files: c.files } });
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(2);
+    expect(r.d.mergePr, c.name).toHaveBeenCalledWith(9);
+    expect(refusalLinesOf(r.lines), c.name).toEqual([]);
+  }
+  // …and the list is defined once, in merge-stage.js, as exactly these five names.
+  expect([...TEST_ROOT_DIRS].sort()).toEqual(["__tests__", "e2e", "spec", "test", "tests"]);
 
   // Several failing ids: the one inside the diff is NOT the first. Every id must be outside — a rule that
   // checks only the first failing id would re-run these and merge.
   const CLIENT_TEST = "client/tests/Calendar.test.ts::test_9_renders_week";
   const multi = [
-    { name: "second id's package is in the diff", failing: [CLIENT_TEST, OC_ID], files: ["server/src/routes/follows.ts"] },
-    { name: "third id's test file is in the diff", failing: [CLIENT_TEST, "shared/tests/date.test.ts::test_3_dst", OC_ID], files: ["docs/notes/x.md", "server/tests/follows.test.ts"] },
-    { name: "second id is at the repo root", failing: [CLIENT_TEST, "follows.test.ts::test_49_event_visibility"], files: ["docs/notes/x.md"] },
+    { name: "second id's package is in the diff", failing: [CLIENT_TEST, OC_ID], files: ["server/src/routes/follows.ts"], why: /diff touches server\// },
+    { name: "third id's test file is in the diff", failing: [CLIENT_TEST, "shared/tests/date.test.ts::test_3_dst", OC_ID], files: ["docs/notes/x.md", "server/tests/follows.test.ts"], why: /diff touches server\// },
+    { name: "second id is at the repo root", failing: [CLIENT_TEST, "follows.test.ts::test_49_event_visibility"], files: ["docs/notes/x.md"], why: /failing test at the repo root/ },
+    { name: "second id sits under a test root", failing: [CLIENT_TEST, "tests/calc.test.ts::adds"], files: ["docs/notes/x.md"], why: /test root tests\// },
   ];
   for (const c of multi) {
     const first = await producedGates({ failing: c.failing });
@@ -1886,8 +1954,8 @@ test("test_157_red_inside_the_diff_is_not_rerun", async () => {
     expect(withDiff.code, c.name).toBe(2);
     expect(withDiff.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
-    expect(withDiff.lines, c.name).toEqual(today.lines);
-    expect(gateStepLines(withDiff.lines), c.name).toEqual(pre157GateStepLines(first));
+    expect(withoutRefusal(withDiff.lines), c.name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(withDiff.lines, first, c.name, c.why);
     expect(flakyMarksOf(withDiff.lines), c.name).toEqual([]);
   }
 });
@@ -1915,22 +1983,23 @@ test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
   const unvouched = { ...red, gates: { ...red.gates, unit: { ...red.gates.unit, parsed: false } } };
 
   const cases = [
-    { name: "failing ids with parsed:false", first: unvouched, diff: { ok: true, files: CLIENT_ONLY } },
-    { name: "diffFiles ok:false", first: red, diff: { ok: false, files: [], reason: "git diff failed: fatal: bad revision" } },
-    { name: "diffFiles throws GitDiffError", first: red, diff: async () => { throw new GitDiffError("fatal: bad revision"); } },
-    { name: "diffFiles throws MergeBaseError", first: red, diff: async () => { throw new MergeBaseError("origin/main: exit 128"); } },
-    { name: "diffFiles throws a plain Error", first: red, diff: async () => { throw new Error("boom"); } },
-    { name: "diffFiles returns nothing", first: red, diff: async () => undefined },
-    { name: "diffFiles dep absent", first: red, diff: undefined },
-    { name: "empty diff", first: red, diff: { ok: true, files: [] } },
-    { name: "files is not a list", first: red, diff: { ok: true, files: "client/src/App.tsx" } },
-    { name: "a diff path that cannot be normalised", first: red, diff: { ok: true, files: [...CLIENT_ONLY, "../server/x.ts"] } },
-    { name: "RED test gate with parsed:false", first: parsedFalse, diff: { ok: true, files: CLIENT_ONLY } },
-    { name: "RED test gate with empty failing_ids", first: noIds, diff: { ok: true, files: CLIENT_ONLY } },
-    { name: "lint RED alongside the test RED", first: mixed, diff: { ok: true, files: CLIENT_ONLY } },
-    { name: "a MISCONFIGURED gate", first: misconfigured, diff: { ok: true, files: CLIENT_ONLY } },
-    { name: "a failing path that cannot be normalised", first: outside, diff: { ok: true, files: CLIENT_ONLY } },
-    { name: "gates BLOCKED stays blocked", first: blockedGates, diff: { ok: true, files: CLIENT_ONLY } },
+    { name: "failing ids with parsed:false", first: unvouched, diff: { ok: true, files: CLIENT_ONLY }, why: /unit is RED without a parsed test report/ },
+    { name: "diffFiles ok:false", first: red, diff: { ok: false, files: [], reason: "git diff failed: fatal: bad revision" }, why: /PR diff unreadable or empty: git diff failed: fatal: bad revision/ },
+    { name: "diffFiles throws GitDiffError", first: red, diff: async () => { throw new GitDiffError("fatal: bad revision"); }, why: /PR diff unreadable or empty: .*fatal: bad revision/ },
+    { name: "diffFiles throws MergeBaseError", first: red, diff: async () => { throw new MergeBaseError("origin/main: exit 128"); }, why: /PR diff unreadable or empty: .*origin\/main: exit 128/ },
+    { name: "diffFiles throws a plain Error", first: red, diff: async () => { throw new Error("boom"); }, why: /PR diff unreadable or empty: boom/ },
+    { name: "diffFiles returns nothing", first: red, diff: async () => undefined, why: /PR diff unreadable or empty/ },
+    { name: "diffFiles dep absent", first: red, diff: undefined, why: /PR diff unreadable or empty: diffFiles dep not wired/ },
+    { name: "empty diff", first: red, diff: { ok: true, files: [] }, why: /PR diff unreadable or empty/ },
+    { name: "files is not a list", first: red, diff: { ok: true, files: "client/src/App.tsx" }, why: /PR diff unreadable or empty/ },
+    { name: "a diff path that cannot be normalised", first: red, diff: { ok: true, files: [...CLIENT_ONLY, "../server/x.ts"] }, why: /diff path not normalisable: \.\.\/server\/x\.ts/ },
+    { name: "RED test gate with parsed:false", first: parsedFalse, diff: { ok: true, files: CLIENT_ONLY }, why: /unit is RED without a parsed test report/ },
+    { name: "RED test gate with empty failing_ids", first: noIds, diff: { ok: true, files: CLIENT_ONLY }, why: /unit is RED with no failing test ids/ },
+    { name: "lint RED alongside the test RED", first: mixed, diff: { ok: true, files: CLIENT_ONLY }, why: /lint is RED without a parsed test report/ },
+    { name: "a MISCONFIGURED gate", first: misconfigured, diff: { ok: true, files: CLIENT_ONLY }, why: /gates MISCONFIGURED/ },
+    { name: "a failing path that cannot be normalised", first: outside, diff: { ok: true, files: CLIENT_ONLY }, why: /failing test path not normalisable: \.\.\/elsewhere/ },
+    // BLOCKED never reaches the re-run question (it is not a verdict) — its record stays exactly today's, no refusal line.
+    { name: "gates BLOCKED stays blocked", first: blockedGates, diff: { ok: true, files: CLIENT_ONLY }, why: null },
   ];
   for (const c of cases) {
     const r = await run157({ seq: [c.first, green], diff: c.diff });
@@ -1939,8 +2008,9 @@ test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
     expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
     expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(r.d), c.name).toEqual(transitionsOf(today.d));
-    expect(r.lines, c.name).toEqual(today.lines);
-    expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(c.first));
+    expect(withoutRefusal(r.lines), c.name).toEqual(withoutRefusal(today.lines));
+    if (c.why) expectRefusedRecord157(r.lines, c.first, c.name, c.why);
+    else expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(c.first));
     expect(flakyMarksOf(r.lines), c.name).toEqual([]);
   }
   // Several RED gates where the FIRST is an eligible parsed test gate and a later one is not provable
@@ -1961,16 +2031,41 @@ test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
     expect(ctl.status).toBe("RED");
     expect((await run157({ seq: [ctl, green], diff: { ok: true, files: CLIENT_ONLY } })).d.gates).toHaveBeenCalledTimes(2);
   }
-  for (const [name, first] of [["lint RED after an eligible unit RED", unitThenLint], ["integration RED unparsed after an eligible unit RED", unitThenUnparsed]]) {
+  for (const [name, first, why] of [["lint RED after an eligible unit RED", unitThenLint, /lint is RED without a parsed test report/], ["integration RED unparsed after an eligible unit RED", unitThenUnparsed, /integration is RED without a parsed test report/]]) {
     const r = await run157({ seq: [first, green], diff: { ok: true, files: CLIENT_ONLY } });
     const today = await run157({ seq: [first, green] });
     expect(r.code, name).toBe(2);
     expect(r.d.gates, name).toHaveBeenCalledTimes(1);
     expect(r.d.mergePr, name).not.toHaveBeenCalled();
     expect(transitionsOf(r.d), name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
-    expect(r.lines, name).toEqual(today.lines);
-    expect(gateStepLines(r.lines), name).toEqual(pre157GateStepLines(first));
+    expect(withoutRefusal(r.lines), name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(r.lines, first, name, why);
     expect(flakyMarksOf(r.lines), name).toEqual([]);
+  }
+
+  // The refusal reason goes to a public place (the run record), so it goes through the gates-detail projection's scrub
+  // (`gatesDetailLines` — one rule, not a copy). A credential inside an error message (here: a git error echoing a
+  // remote URL) is redacted when it is in the process env, and passes through unchanged when it is not (both env paths pinned).
+  const SECRET = "fake-secret-value-for-test-157-refusal";
+  const leaky = { ok: false, files: [], reason: `git diff failed: fatal: https://x-access-token:${SECRET}@github.com/o/r: bad revision` };
+  vi.stubEnv("GITHUB_TOKEN", SECRET);
+  try {
+    const r = await run157({ seq: [red, green], diff: leaky });
+    const [line] = refusalLinesOf(r.lines);
+    expect(line).toMatch(/^merge: no gates rerun — PR diff unreadable or empty: git diff failed/);
+    expect(line).not.toContain(SECRET);
+    expect(line).toContain("[REDACTED");
+    expect(line).toContain(gatesDetailReason157(`PR diff unreadable or empty: ${leaky.reason}`));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  vi.stubEnv("GITHUB_TOKEN", "");
+  try {
+    const plain = { ok: false, files: [], reason: "git diff failed: fatal: bad revision 'c0ffee'" };
+    const r = await run157({ seq: [red, green], diff: plain });
+    expect(refusalLinesOf(r.lines)).toEqual([`${NO_RERUN_157}PR diff unreadable or empty: ${plain.reason} ${STAMP_TAG_157}`]);
+  } finally {
+    vi.unstubAllEnvs();
   }
 
   // The outcomes are today's: needs-human for RED / MISCONFIGURED, blocked for BLOCKED.
@@ -2033,8 +2128,8 @@ test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async
     expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
     expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(r.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
-    expect(r.lines, c.name).toEqual(today.lines);
-    expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(first));
+    expect(withoutRefusal(r.lines), c.name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(r.lines, first, c.name, new RegExp(`test files failed without a failing test: .*${c.loadErrors[0][0].replace(/[.]/g, "\\.")}`));
     expect(flakyMarksOf(r.lines), c.name).toEqual([]);
     expect(gateStatusesOf(r.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
   }
@@ -2058,7 +2153,7 @@ test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async
     expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
     expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
     expect(transitionsOf(r.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
-    expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(alone));
+    expectRefusedRecord157(r.lines, alone, c.name, /suite-level failures not vouched for/);
   }
 
   // The re-run: the same assertion id fails again but a suite now fails to load too — not the same RED, so no
@@ -2078,7 +2173,7 @@ test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async
   expect(transitionsOf(sameIds.d)[0].reason).toContain(FLAKY_TEXT_157);
 });
 
-import { flakyCandidateLines, FLAKY_CANDIDATE_PREFIX } from "../lib/merge-stage.js";
+import { flakyCandidateLines, FLAKY_CANDIDATE_PREFIX, TEST_ROOT_DIRS } from "../lib/merge-stage.js";
 import { DETAIL_MAX_NAME, GATES_DETAIL_PREFIX } from "../lib/gates.js";
 
 test("test_157_flaky_candidate_names_follow_the_gates_detail_scrub_rule", () => {
@@ -2118,7 +2213,7 @@ test("test_157_flaky_candidate_names_follow_the_gates_detail_scrub_rule", () => 
 });
 
 test("test_157_unhandled_error_on_the_rerun_never_merges", async () => {
-  // Residual risk (ADR-033): vitest's JSON report has no trace of an unhandled error (vitest 3.2.7: exit 1, report
+  // Residual risk (ADR-034): vitest's JSON report has no trace of an unhandled error (vitest 3.2.7: exit 1, report
   // `success:true`, nothing on stderr), so a first RED with an outside assertion PLUS an unhandled error looks
   // eligible. The bound that still holds: the re-run must be WHOLE GREEN. An unhandled error that fires again on the
   // re-run is a RED with zero failing assertions (KTB-35) — never a merge, never a flaky-candidate marker.
