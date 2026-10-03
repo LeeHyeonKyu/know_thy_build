@@ -353,9 +353,10 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * **권한**으로 읽으므로(그 한 줄이 상류 저장소 쓰기를 연다) 작성자가 판정의 일부여야 한다.
      * 필드는 응답에 이미 있었고 이 어댑터가 떨어뜨리고 있었을 뿐이다 — 추가 호출은 없다.
      */
-    async comments(n) {
+    async comments(n, { signal = null } = {}) {
       // --paginate 단독은 페이지 배열을 이어붙여 깨진 JSON을 만든다. --slurp이 [[page],[page]]로 감싸주므로 flat()으로 편다.
-      const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"])).flat();
+      // #195 — `signal` (optional) kills the gh child when the caller's bound fires; absent → exactly the old call.
+      const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/comments?per_page=100`, "--paginate", "--slurp"], signal ? { signal } : {})).flat();
       /**
        * T5 재리뷰 SF-A — `authorType`/`viaApp`은 GitHub이 **계정에** 붙인 사실이지 본문이 아니다.
        * 로그인 이름은 코멘트를 적는 쪽이 고를 수 없지만 본문은 고를 수 있으므로(하트비트를 인용해
@@ -369,8 +370,15 @@ export function makeGh({ run, repo, sleep = realSleep }) {
         viaApp: c.performed_via_github_app ? (c.performed_via_github_app.slug ?? c.performed_via_github_app.name ?? true) : null,
       }));
     },
-    async comment(n, body) {
-      return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body })).trim();
+    async comment(n, body, { signal = null } = {}) {
+      return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body, ...(signal ? { signal } : {}) })).trim();
+    },
+    /**
+     * #195 — replace one issue comment's body (the runner's marked evidence comment on a merge rerun). The body travels as
+     * JSON on stdin (`--input -`), never in argv. No retry; `signal` kills the child when the caller's bound fires.
+     */
+    async editComment(id, body, { signal = null } = {}) {
+      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "--input", "-"], { input: JSON.stringify({ body }), ...(signal ? { signal } : {}) });
     },
     async addLabels(n, labels) {
       if (!labels.length) return;

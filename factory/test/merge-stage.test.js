@@ -3041,7 +3041,7 @@ test("test_179_self_change_merge_pins_the_verified_head", async () => {
 // step must never block, duplicate or reorder the merge or the needs-human transition.
 const evidence195 = (impl = async () => ({ ok: true, markdown: "## Factory evidence\n(md)" })) => ({
   publishPrEvidence: vi.fn(impl),
-  postEvidenceComment: vi.fn(async () => {}),
+  postEvidenceComment: vi.fn(async () => ({ ok: true, posted: true })),
 });
 const failLines195 = (lines) => lines.filter((l) => l.startsWith("evidence: FAIL — "));
 const order195 = (a, b) => expect(a.mock.invocationCallOrder[0]).toBeLessThan(b.mock.invocationCallOrder[0]);
@@ -3059,7 +3059,7 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     order195(d.mergeGates, ev.publishPrEvidence);
     order195(d.prReady, ev.publishPrEvidence);
     order195(ev.publishPrEvidence, d.mergePr);
-    expect(ev.postEvidenceComment.mock.calls).toEqual([["## Factory evidence\n(md)"]]);
+    expect(ev.postEvidenceComment.mock.calls.map((c) => c[0])).toEqual(["## Factory evidence\n(md)"]);
     order195(d.mergePr, ev.postEvidenceComment);
     expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", "evidence: issue comment posted"]);
   }
@@ -3236,4 +3236,67 @@ test("test_195_evidence_timeout_cancels_the_write_before_the_merge_or_hand_off",
   const ok = evidence195();
   await run(baseD(ok));
   expect(ok.publishPrEvidence.mock.calls[0][0].signal.aborted).toBe(false);
+});
+
+// #195 skeptic round 2 — a missing dep is never silent, and the post-merge issue comment is bounded and cancelled like the
+// PR-body step: a hung `gh` there must not stop the factory:merged transition or the issue close. Its record line says what
+// the dep did (posted vs already present), not what was hoped.
+test("test_195_missing_evidence_dep_and_hung_issue_comment_are_recorded_not_silent", async () => {
+  // (1) The publishPrEvidence slot is there but the dep is missing: the merge still happens, the exit code is unchanged, and
+  // exactly one FAIL line says why.
+  {
+    const d = baseD({ publishPrEvidence: undefined });
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(true);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — publishPrEvidence dep not wired — no evidence section was written"]);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toHaveLength(1);
+  }
+  // … and on the hand-off route: one FAIL line before the needs-human transition, exit code 2 as before.
+  {
+    const d = baseD({ publishPrEvidence: null, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(2);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:needs-human"]);
+    expect(failLines195(lines)).toHaveLength(1);
+  }
+  // A wiring that predates the slot (no publishPrEvidence key at all — every pre-#195 test harness) keeps its record
+  // byte-identical, as test_179_switch_off_is_byte_identical pins: no evidence line of any kind.
+  {
+    const d = baseD();
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([]);
+  }
+  // (2) The issue comment hangs: bounded by the same evidence timeout and cancelled through its signal; the merged
+  // transition and the issue close still run, and the record says the comment failed.
+  {
+    const ev = evidence195();
+    let seen = null;
+    ev.postEvidenceComment = vi.fn((_md, opts) => { seen = opts?.signal ?? null; return new Promise(() => {}); });
+    const d = baseD({ ...ev, evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
+    expect(d.closeIssue).toHaveBeenCalledTimes(1);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen.aborted).toBe(true);
+    expect(lines.filter((l) => l.startsWith("evidence: issue comment"))).toEqual(["evidence: issue comment failed — timed out after 5 ms — the issue comment was cancelled"]);
+  }
+  // (3) The record line follows what the dep did: an existing runner comment (a rerun) is not reported as a new post.
+  for (const [answer, line] of [
+    [{ ok: true, posted: true }, "evidence: issue comment posted"],
+    [{ ok: true, posted: false, updated: 1 }, "evidence: issue comment already present — not posted again (1 updated in place)"],
+    [{ ok: true, posted: false, updated: 0 }, "evidence: issue comment already present — not posted again (0 updated in place)"],
+    [undefined, "evidence: issue comment dep returned without saying whether it posted"],
+  ]) {
+    const ev = evidence195();
+    ev.postEvidenceComment = vi.fn(async () => answer);
+    const { lines, record } = makeRecord();
+    expect(await run(baseD(ev), { record })).toBe(0);
+    expect(lines.filter((l) => l.startsWith("evidence: issue comment"))).toEqual([line]);
+  }
 });
