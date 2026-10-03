@@ -318,7 +318,7 @@ export function neverAutomateHits(paths, globs) {
   return hits;
 }
 
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null, readFile }) {
   const reasons = [];
   /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
   let qaShortfall = null;
@@ -346,6 +346,14 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
     envelopeResult: out?.result,
     transcriptText,
     validate: schemaName ? (o) => validate(schemaName, withGates(o)) : null,
+    // #170 — 선택 인자. 넘기면 이 세션의 Workflow 접수증·러너 알림에 묶인 결과 파일을 잘리지 않은 채 후보로 본다
+    // (이 모듈은 여전히 node:fs를 import하지 않는다). 안 넘기면 #170 이전 그대로. 결과 파일에는
+    // `readFile(path, { maxBytes, meta: true })`로 묻고, 리더는 다음 중 하나를 돌려줘야 한다:
+    //   null(없음) | { bytes }(상한 초과, 읽지 않음) | { notRegular: true }(링크·특수 파일) |
+    //   { unreadable: <errno code> }(있지만 읽을 수 없음) | { text, bytes, ctimeMs }(내용과 커널 변경 시각).
+    // 문자열만 돌려주는 리더는 변경 시각이 없어 그 파일이 거절된다("the reader gave no change time").
+    // 던져도 스테이지는 죽지 않는다 — "unreadable"로 적힌다. 계약 전문은 stage-artifact.js의 extractStageArtifact.
+    readFile,
   });
   const data = artifact.ok ? artifact.data : null;
   /*

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync, rmSync, mkdtempSync, symlinkSync, statSync, openSync, fstatSync, closeSync, constants as fsConstants } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -135,11 +135,93 @@ export function unhandledGateReason(gates) {
 // lib/blocked-errors.js (merge-stage.js needs them too) — re-exported here for existing importers.
 export { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON };
 
-/** 파일이 없으면 null(예외 아님) — `readTranscript`가 기대하는 주입 모양이다. */
-export const readFileOrNull = (p) => { try { return existsSync(p) ? readFileSync(p, "utf8") : null; } catch { return null; } };
+/**
+ * 파일이 없으면 null(예외 아님) — `readTranscript`가 기대하는 주입 모양이다.
+ * #170 — `{ maxBytes }`를 받으면 **읽기 전에** 크기를 본다: 넘으면 내용 대신 `{ bytes }`를 돌려준다
+ * (scratchpad의 수 GB짜리 파일을 통째로 메모리에 올린 뒤에야 "너무 크다"고 말하지 않도록).
+ */
+export const readFileOrNull = (p, opts) => {
+  const maxBytes = opts?.maxBytes;
+  if (opts?.meta) return readFileWithChangeTime(p, maxBytes);
+  try {
+    if (!existsSync(p)) return null;
+    if (Number.isFinite(maxBytes)) { const bytes = statSync(p).size; if (bytes > maxBytes) return { bytes }; }
+    return readFileSync(p, "utf8");
+  } catch { return null; }
+};
+/**
+ * #170 rework sec1 — `{ meta: true }`의 읽기. Workflow 러너의 결과 파일은 /tmp에 있고 리뷰어는 /tmp에 쓸 수
+ * 있다: 그 바이트가 **아직 러너의 것인지**를 lib가 판정할 수 있도록, 내용과 함께 커널의 변경 시각(ctime —
+ * 쓰기·rename·link·chmod가 앞으로 밀고, 비특권 프로세스는 되돌릴 수 없다)을 준다.
+ * - 마지막 경로 성분이 심볼릭 링크면 따라가지 않는다(`O_NOFOLLOW` → `{ notRegular: true }`).
+ * - FIFO·장치로 verify를 멈추게 하지 못하게 `O_NONBLOCK`으로 열고, 일반 파일이 아니면 읽지 않는다.
+ * - 같은 fd로 읽기 **전후**에 fstat한다: 둘 중 늦은 ctime을 돌려주므로, 잰 뒤·읽기 전에 끼어든 쓰기도
+ *   그 시각을 앞으로 민다(stat과 read가 다른 inode를 보는 경로 바꿔치기도 fd가 막는다).
+ * 반환: 없으면(ENOENT) null, 상한 초과면 `{ bytes }`, 링크·특수 파일이면 `{ notRegular: true }`, 그 밖에 열기·읽기가
+ * 거절되면 `{ unreadable: <errno code> }`, 아니면 `{ text, bytes, ctimeMs }`.
+ */
+function readFileWithChangeTime(p, maxBytes) {
+  let fd;
+  try {
+    fd = openSync(p, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    if (e?.code === "ELOOP" || e?.code === "EMLINK") return { notRegular: true };
+    // 없는 파일만 null(= "missing")이다. 그 밖의 거절(EACCES·ENOTDIR·EIO …)은 파일이 있을 수 있으므로 code를 실어
+    // 돌려준다 — lib가 "unreadable"로 따로 적는다(#170 dw4: 'file gone'과 '읽을 수 없음'을 사유만으로 가른다).
+    return e?.code === "ENOENT" ? null : { unreadable: String(e?.code || e?.message || "open failed") };
+  }
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) return { notRegular: true };
+    if (Number.isFinite(maxBytes) && before.size > maxBytes) return { bytes: before.size };
+    const text = readFileSync(fd, "utf8");
+    const after = fstatSync(fd);
+    return { text, bytes: Buffer.byteLength(text, "utf8"), ctimeMs: Math.max(before.ctimeMs, after.ctimeMs) };
+  } catch (e) {
+    // 열린 뒤의 실패(fstat·read)는 "없다"가 아니다 — 파일은 거기 있다.
+    return { unreadable: String(e?.code || e?.message || "read failed") };
+  } finally {
+    try { closeSync(fd); } catch { /* 닫기 실패는 판정과 무관하다 */ }
+  }
+}
 /** 이 런의 세션 트랜스크립트 전문. 없으면 빈 문자열 — 읽기 실패가 스테이지를 죽이지 않는다. */
-const transcriptTextFor = (root, out) =>
-  readTranscript({ root, home: homedir(), sessionId: out?.session_id, readFile: readFileOrNull }) || "";
+const transcriptTextFor = (root, out, home = homedir(), readFile = readFileOrNull) =>
+  readTranscript({ root, home, sessionId: out?.session_id, readFile }) || "";
+
+/**
+ * 스테이지 산출물의 **프로덕션 검증 호출** — `main()`의 `verifyStage` dep이 이것 하나를 부른다(#170 dw6:
+ * 인자 조립이 `main()` 안에 묻혀 있으면 `readFile` 배선이 빠져도 아무 테스트도 모른다).
+ *
+ * - 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+ *   이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
+ * - #170 — `readFile`을 넘겨, 이 세션의 Workflow 접수증에 묶인 러너 결과 파일(`<scratchpad>/tasks/<id>.output`)을
+ *   잘리지 않은 채 복구 후보로 본다. 디스패처가 그 파일을 폴링하다 턴을 다 써도 이미 있는 판정이 handoff가 된다.
+ */
+export function verifyStageForRun({ root, stage, out, gates, ctx, charter, qaManifest = null, home = homedir(), readFile = readFileOrNull }) {
+  const c = ctx || {};
+  return verifyStage({
+    stage, out, transcriptText: transcriptTextFor(root, out, home, readFile),
+    agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")),
+    roster: c.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: c.rounds, orchestration: c.orchestration,
+    gates, planLimits: c.plan, issueBody: c.issue?.body, neverAutomate: charter?.never_automate, qaManifest,
+    readFile,
+  });
+}
+
+/**
+ * #170 dw6 — `main()`이 runStage에 넘기는 `verifyStage` dep **그 자체**. main 안에 클로저로 묻혀 있으면
+ * 테스트가 그것을 돌릴 길이 없어 `readFile` 배선이 빠져도 아무도 모른다 — 그래서 여기서 만들고, 테스트가
+ * 이 클로저를 실제 파일로 돌린다. ctx·charter는 main이 `charterReady`에서 **나중에** 읽으므로 getter로 받는다.
+ * 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이 디스패처의 산문
+ * 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+ */
+export function makeVerifyStageDep({ root, stage, getCtx, getCharter, qaManifest, home = homedir(), readFile = readFileOrNull }) {
+  return ({ out, gates }) => {
+    const v = verifyStageForRun({ root, stage, out, gates, ctx: getCtx(), charter: getCharter(), qaManifest: stage === "review" ? qaManifest() : null, home, readFile });
+    if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    return v;
+  };
+}
 
 /**
  * `claude -p --max-turns`의 기본값(KTB-16). 5였고, 그 5가 데모 #2의 plan 재실행을 죽였다 —
@@ -1842,15 +1924,29 @@ export const driftDroppedMarker = ({ branch, from, to, dropped = [], files = [] 
  * `implement.v1`의 `gates`는 존재와 `status` 열거만 보므로(§schemas) 후보 선택 결과는 동일하다.
  * 읽지 못하면 `null`이고, 그때는 아무것도 되돌리지 않는다(전이 요구조건이 예전처럼 판단한다).
  */
-export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
+export function implementHeadShaOf({ out, transcriptText = "", readFile } = {}) {
   const placeholder = (o) => (o && !o.gates ? { ...o, gates: { status: "GREEN", level: "unit" } } : o);
+  // #170 — `readFile`은 옵트인이다(없으면 예전 그대로, dw5). 프로덕션 가드(`handoffHeadShaForRun`)는 verify와
+  // 같은 리더를 넘겨, 접수증의 결과 파일에서만 복구된 핸드오프도 같은 sha로 읽는다.
   const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
     validate: (o) => validate("implement.v1", placeholder(o)),
+    readFile,
   });
   const sha = a.ok ? a.data?.head_sha : null;
   return typeof sha === "string" && SHA40.test(sha) ? sha : null;
+}
+
+/**
+ * #170 — KTB-43 드리프트 가드가 읽는 `head_sha`의 **프로덕션 호출**(`main()`의 `handoffHeadSha` dep). 같은 세션의
+ * 핸드오프를 읽는 두 리더(이것과 `verifyStageForRun`)가 같은 트랜스크립트·같은 리더로 읽어야 한다: 한쪽만 접수증의
+ * 결과 파일을 보면, 그 파일에서만 복구된 implement 핸드오프는 verify에는 sha가 있고 가드에는 없어서 가드가 아무것도
+ * 되돌리지 않는다(스킵틱 #170). implement 밖의 스테이지는 지킬 sha가 없다 — null.
+ */
+export function handoffHeadShaForRun({ root, stage, out, home = homedir(), readFile = readFileOrNull }) {
+  if (stage !== "implement") return null;
+  return implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out, home, readFile), readFile });
 }
 
 /**
@@ -3013,7 +3109,7 @@ async function main() {
      * KTB-43 — 세션 산출물이 적은 `head_sha`. 게이트 **전에** 읽어야 하므로 `verifyStage`를 기다리지
      * 않고 같은 추출기를 한 번 더 돌린다(후보 채점은 동일하다 — §implementHeadShaOf).
      */
-    handoffHeadSha: (out) => (stage === "implement" ? implementHeadShaOf({ out, transcriptText: transcriptTextFor(root, out) }) : null),
+    handoffHeadSha: (out) => handoffHeadShaForRun({ root, stage, out }),
     /** KTB-43 — 핸드오프 뒤에 붙은 드리프트 전용 커밋을 떨어뜨린다(리스 없는 force는 없다). */
     dropPostHandoffDrift: async ({ handoffSha, baseline }) => makeDropPostHandoffDrift({ run, root, issue })({
       handoffSha, baseline,
@@ -3192,15 +3288,8 @@ async function main() {
      * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
-    verifyStage: ({ out, gates }) => {
-      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
-      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
-      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
-      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
-      return v;
-    },
+    // #170 — 검증 호출과 `<stage>.json` 덮어쓰기는 `makeVerifyStageDep`이 한다(테스트가 그 클로저를 직접 돌린다).
+    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, qaManifest: () => qaEvidenceSummary() }),
     /**
      * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
      * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
