@@ -2994,3 +2994,103 @@ test("test_156_back_pressure_refusal_without_reasons_is_still_a_refusal_in_every
   expect(releaseMarkers156(w, 81)).toHaveLength(0);
   expect(out).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 81, reason: expect.stringMatching(/^back-pressure — /) }));
 });
+
+// ── #176 — blocked 팔은 에스컬레이션·재점화 직전에 **실시간 라벨**을 다시 읽는다 ─────────────────────────
+//
+// KTB #168 (2026-10-03 06:52Z): merge 스테이지가 `blocked → rework`로 옮긴 7초 뒤, 같은 런의 sweep이 검색 색인에
+// 남은 `blocked`를 보고 그 이슈를 needs-human으로 올렸다. 검색(`searchIssues`)은 색인이라 늦고, `gh.issue(n)`은
+// 단건 실시간 조회다. 픽스처의 코멘트는 실제 생산자(전이 코멘트 모양·`blockedOriginMarker`)로 만든다.
+const blockedSince176 = (at) => ({ id: 1, body: seedTransition156("factory:in-progress", "factory:blocked", "gates undecidable").body, createdAt: at });
+const retryableOrigin176 = (at) => ({
+  id: 2,
+  body: `${seedTransition156("factory:awaiting-review", "factory:blocked", "job failure").body}\n${originMarker156({ from: "factory:awaiting-review", stage: "review" })}`,
+  createdAt: at,
+});
+/** search는 언제나 `blocked`(늦은 색인)를 주고, `gh.issue`는 `live`가 정한 지금의 라벨을 준다. */
+function staleIndex176({ blocked, live, comments, issue }) {
+  const posted = new Map();
+  return {
+    searchIssues: vi.fn(async (l) => (l === "factory:blocked" ? blocked.map((number) => ({ number })) : [])),
+    comments: vi.fn(async (n) => [...comments(n), ...(posted.get(n) ?? [])]),
+    comment: vi.fn(async (n, body) => { posted.set(n, [...(posted.get(n) ?? []), { id: 99, body, createdAt: "2026-09-11T01:00:00Z" }]); return "u"; }),
+    patchComment: vi.fn(), issueList: async () => [],
+    issue: issue ?? vi.fn(async (n) => ({ number: n, title: `#${n}`, body: "", labels: ["needs-triage", live[n]] })),
+  };
+}
+const forIssue176 = (fn, n) => fn.mock.calls.filter(([a, b]) => (typeof a === "object" ? a?.issue === n : a === n));
+
+test("test_176_blocked_escalation_rereads_the_live_label", async () => {
+  // 15: 색인은 blocked, 실제는 rework(merge 스테이지가 방금 옮겼다). 16: 실제로도 blocked — 대조군.
+  const gh = staleIndex176({ blocked: [15, 16], live: { 15: "factory:rework", 16: "factory:blocked" }, comments: () => [blockedSince176("2026-09-11T00:00:00Z")] });
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const actions = await sweep(stalledArgs({ gh, transition }));
+  expect(forIssue176(transition, 15)).toEqual([]);                                   // rework를 needs-human으로 바꾸지 않는다
+  expect(gh.issue).toHaveBeenCalledWith(15);
+  expect(actions).toContainEqual({ kind: "blocked-escalation-skipped", issue: 15, label: "factory:rework", reason: "label is now factory:rework" });
+  expect(actions.some((a) => a.issue === 15 && a.kind === "blocked-escalated")).toBe(false);
+  // 대조군: 정말 blocked인 이슈는 지금처럼 올라간다
+  expect(transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 16, to: "factory:needs-human" }));
+  expect(actions).toContainEqual({ kind: "blocked-escalated", issue: 16, cause: null });
+});
+
+test("test_176_blocked_retry_rereads_the_live_label", async () => {
+  const gh = staleIndex176({ blocked: [15, 16], live: { 15: "factory:rework", 16: "factory:blocked" }, comments: () => [retryableOrigin176("2026-09-11T00:00:00Z")] });
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const dispatchStage = vi.fn(async () => {});
+  const releaseIfStale = vi.fn(async () => ({ released: false, live: false, state: "none", why: "no lock" }));
+  const actions = await sweep(stalledArgs({ gh, transition, dispatchStage, releaseIfStale }));
+  expect(forIssue176(dispatchStage, 15)).toEqual([]);                                // 다른 라벨이면 dispatch하지 않는다
+  expect(forIssue176(gh.comment, 15)).toEqual([]);                                   // 재점화 마커도 남기지 않는다
+  expect(forIssue176(releaseIfStale, 15)).toEqual([]);                               // rework 이슈의 락은 건드리지 않는다
+  expect(forIssue176(transition, 15)).toEqual([]);
+  expect(actions.some((a) => a.issue === 15 && a.kind === "blocked-retry")).toBe(false);
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "blocked-escalation-skipped", issue: 15, label: "factory:rework" }));
+  // 대조군: 정말 blocked인 이슈는 지금처럼 review를 한 번 다시 민다
+  expect(dispatchStage).toHaveBeenCalledWith({ stage: "review", issue: 16 });
+  expect(gh.comment).toHaveBeenCalledWith(16, expect.stringContaining(blockedRetryComment("review", 16)));
+  expect(actions).toContainEqual({ kind: "blocked-retry", issue: 16, stage: "review", cause: "other" });
+});
+
+test("test_176_unknown_lock_escalation_rereads_the_live_label", async () => {
+  // 재점화 가능한 출처 + 소유자를 모르는 락 + 스톨 임계 경과 = escalateUnknownLock 경로. 15만 실제로는 rework다.
+  const gh = staleIndex176({ blocked: [15, 16], live: { 15: "factory:rework", 16: "factory:blocked" }, comments: () => [retryableOrigin176("2026-09-11T00:00:00Z")] });
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const dispatchStage = vi.fn(async () => {});
+  const releaseIfStale = vi.fn(async () => ({ released: false, live: false, state: "unknown", why: "lock unreadable — fatal: could not read from remote" }));
+  const actions = await sweep(stalledArgs({ gh, transition, dispatchStage, releaseIfStale }));
+  expect(forIssue176(transition, 15)).toEqual([]);
+  expect(forIssue176(gh.comment, 15)).toEqual([]);
+  expect(actions.some((a) => a.issue === 15 && /escalated|lock-owner-unknown/.test(a.kind))).toBe(false);
+  expect(dispatchStage).not.toHaveBeenCalled();
+  // 대조군: 정말 blocked인 16은 지금처럼 lock-owner-unknown으로 사람에게 간다
+  expect(transition).toHaveBeenCalledWith({ issue: 16, to: "factory:needs-human", reason: expect.stringContaining("lock owner unknowable") });
+  expect(gh.comment).toHaveBeenCalledWith(16, expect.stringContaining(lockOwnerUnknownComment(16)));
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "lock-owner-unknown-escalated", issue: 16, step: "blocked-retry" }));
+});
+
+test("test_176_live_lookup_failure_falls_back_to_today", async () => {
+  // 실시간 조회가 던지면: 조용히 멈추지 않는다 — 지금처럼 에스컬레이션/재점화하고, error 한 줄을 남긴다.
+  const boom = vi.fn(async () => { throw new Error("gh issue view 502"); });
+  const esc = staleIndex176({ blocked: [15], live: {}, issue: boom, comments: () => [blockedSince176("2026-09-11T00:00:00Z")] });
+  const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a1 = await sweep(stalledArgs({ gh: esc, transition: t1 }));
+  expect(t1).toHaveBeenCalledWith(expect.objectContaining({ issue: 15, to: "factory:needs-human" }));
+  expect(a1).toContainEqual({ kind: "blocked-escalated", issue: 15, cause: null });
+  expect(a1).toContainEqual({ kind: "error", step: "blocked-live-label", issue: 15, error: expect.stringContaining("gh issue view 502") });
+  expect(boom).toHaveBeenCalledWith(15);
+
+  const retry = staleIndex176({ blocked: [16], live: {}, issue: boom, comments: () => [retryableOrigin176("2026-09-11T00:00:00Z")] });
+  const d2 = vi.fn(async () => {});
+  const a2 = await sweep(stalledArgs({ gh: retry, transition: vi.fn(async ({ to }) => ({ ok: true, to })), dispatchStage: d2 }));
+  expect(d2).toHaveBeenCalledWith({ stage: "review", issue: 16 });
+  expect(a2).toContainEqual({ kind: "blocked-retry", issue: 16, stage: "review", cause: "other" });
+  expect(a2).toContainEqual({ kind: "error", step: "blocked-live-label", issue: 16, error: expect.stringContaining("gh issue view 502") });
+
+  // 구형 더블(`issue` 없음)은 오류가 아니다 — 지금과 같고, error 줄도 없다(sweeper.js의 issueList fail-safe와 같은 규칙).
+  const old = staleIndex176({ blocked: [17], live: {}, comments: () => [blockedSince176("2026-09-11T00:00:00Z")] });
+  delete old.issue;
+  const t3 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const a3 = await sweep(stalledArgs({ gh: old, transition: t3 }));
+  expect(t3).toHaveBeenCalledWith(expect.objectContaining({ issue: 17, to: "factory:needs-human" }));
+  expect(a3.filter((a) => a.kind === "error")).toEqual([]);
+});
