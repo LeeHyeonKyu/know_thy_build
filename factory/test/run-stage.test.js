@@ -5328,3 +5328,42 @@ test("test_196_record_text_cannot_forge_an_engine_crash_section", async () => {
   expect(await runStage({ stage: "implement", issue: 42, deps: d4, runnerId, runId: "196" })).toBe(1);
   expect(lifetimeCostOf196(recordText196(root, 42))).toEqual({ usd: 12, runs: 4, priced: 3, engineUsd: 6, engineRuns: 2 });
 });
+
+// ── #196 rework cf1 — main()의 gh는 `makeStageGh`로만 만들어진다: 그 조립이 의존성 표식을 단다 ─────────────────────────
+// 테스트는 main()이 쓰는 바로 그 조립(`makeStageGh`)을 프로덕션 `makeGh` 위에서 돌린다(#174 makeTransitionDep 선례).
+// 오류 모양 gh 응답(`{"message":"Not Found"}`)이 gh.js 안에서 TypeError를 던져도 engine-crash가 되지 않는다.
+// 그리고 main()이 그 조립을 우회해 `makeGh`를 직접 부르면(래퍼가 빠지면) 배선 핀이 실패한다.
+import { makeStageGh as makeStageGh196, isEngineCrash as isEngineCrash196, isDependencyError as isDependencyError196 } from "../bin/run-stage.js";
+
+test("test_196_main_gh_is_built_through_the_dependency_wrapper", async () => {
+  const fakeRun = (stdout) => async () => ({ code: 0, stdout, stderr: "" });
+  // ① 프로덕션 조립이 만든 gh: gh.js 내부의 TypeError가 표식을 달고 나온다
+  const gh = makeStageGh196({ run: fakeRun('{"message":"Not Found"}'), repo: "o/r" });
+  const err = await gh.branchHeadSha("claude/fq-42").then(() => null, (e) => e);
+  expect(err).toBeInstanceOf(TypeError);
+  expect(isDependencyError196(err)).toBe(true);
+  expect(isEngineCrash196(err)).toBe(false);
+
+  // ② runStage를 통과해도: blocked 전이 없음, engine-crash 섹션 없음, 보통 abort 경로
+  const lines = [];
+  const d = implDeps({ gates: async () => { await gh.branchHeadSha("claude/fq-42"); return null; }, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "gha-196", runId: "196" })).toBe(1);
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+  expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(lines.some((l) => /^error: implement aborted — /.test(l))).toBe(true);
+  expect(lines.some((l) => /^engine-crash:/m.test(l))).toBe(false);
+
+  // ③ 정상 응답은 바뀌지 않고 지나간다(조립이 값을 건드리지 않는다)
+  const ok = makeStageGh196({ run: fakeRun('{"object":{"sha":"abc123"}}'), repo: "o/r" });
+  expect(await ok.branchHeadSha("claude/fq-42")).toBe("abc123");
+
+  // ④ 배선 핀: main()의 gh는 이 조립에서 오고, run-stage.js에서 `makeGh(`를 부르는 자리는 조립 안의 한 곳뿐이다
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  expect(mainSrc).toMatch(/\n {2}const gh = makeStageGh\(\{ run, repo \}\);/);
+  expect(mainSrc).not.toMatch(/\bmakeGh\(/);
+  const assembly = src.slice(src.indexOf("export function makeStageGh("));
+  const assemblyBody = assembly.slice(0, assembly.indexOf("\n}\n"));
+  expect(assemblyBody).toMatch(/dependencyClient\(makeGh\(/);
+  expect(src.match(/\bmakeGh\(/g)).toHaveLength(1);
+});

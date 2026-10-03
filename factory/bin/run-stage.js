@@ -224,6 +224,14 @@ export function dependencyClient(client) {
   });
 }
 
+/**
+ * #196 rework cf1 — main()의 gh 조립. 프로덕션 `makeGh`를 `dependencyClient`로 감싸, gh 출력 장애(gh.js 안의 SyntaxError·TypeError)가
+ * engine-crash로 읽히지 않게 한다. main()은 gh를 **이 함수로만** 만들고, 테스트가 같은 함수를 돈다(#174 `makeTransitionDep` 선례).
+ */
+export function makeStageGh({ run, repo }) {
+  return dependencyClient(makeGh({ run, repo }));
+}
+
 export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
   const d = deps;
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
@@ -3142,7 +3150,7 @@ async function main() {
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   // r1 should_fix 3 — `process.env`는 **이 배선 한 줄**에만 산다(`runAttemptOf`는 env를 받는다).
   const runAttempt = runAttemptOf(process.env);
-  const gh = dependencyClient(makeGh({ run, repo }));          // #196 — gh 장애는 engine-crash가 아니다(표식)
+  const gh = makeStageGh({ run, repo });          // #196 — gh 장애는 engine-crash가 아니다(표식; 조립은 makeStageGh 한 곳)
   // 정리 경로는 CHARTER도 harness도 읽지 않는다 — 읽을 것이 하나라도 깨져 있으면 고아 락이 그대로
   // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
   if (abortedStatus !== null) {
