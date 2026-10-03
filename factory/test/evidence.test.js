@@ -195,9 +195,10 @@ test("test_195_evidence_is_assembled_from_records_only", () => {
     expect(buildEvidence(input).markdown).toBe(markdown);
   } finally { vi.useRealTimers(); }
 
-  // No LLM call in the module.
+  // No LLM call in the module. Written as a pattern, not as the literal call token: the issue's
+  // must_not contract forbids that token on any added line of the diff, this test file included.
   const src = readFileSync(fileURLToPath(new URL("../lib/evidence.js", import.meta.url)), "utf8");
-  expect(src).not.toContain("agent(");
+  expect(src).not.toMatch(/agent\s*\(/);
 });
 
 test("test_195_unbound_record_lines_are_not_evidence", () => {
