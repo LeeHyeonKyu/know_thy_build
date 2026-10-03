@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-10-02T05:21:19.380Z
+- last retro: 2026-10-03T10:55:51.477Z
 - merges since last retro: 0
 - current N: 1
 
@@ -8,31 +8,38 @@
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-14T14:00:58.920Z | 0 | 1 | 1 | 6 |
 | 2026-09-15T07:09:55.650Z | 2 | 1 | 1 | 2 |
 | 2026-09-15T10:31:18.686Z | 0 | 1 | 2 | 1 |
 | 2026-10-01T23:09:32.429Z | 0 | 2 | 1 | 13 |
 | 2026-10-02T05:21:19.380Z | 0 | 1 | 1 | 3 |
+| 2026-10-03T10:55:51.477Z | 1 | 1 | 1 | 16 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 6 |
-| review rounds avg | 0 | 2.17 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.5 / 1.17 / 2.17 |
-| escaped defects | 0 | 5 |
-| revert rate | 없음 | 0.00 (0/6) |
-| needs-human | 14 | 25 |
-| rejects by role | 없음 | spec-conformance 4, qa 4, correctness 5, architecture 1 |
-| reviewer overlap | 없음 | 0.43 (6/14, runs 13) |
-| unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1 |
-| qa na ratio | 0.16 (5/32 claims, na-heavy 0/4 approvals) | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
-| cost (usd) | 150.70 | 372.00 |
-| tokens | input 3112676 / output 287000 | input 11127235 / output 778209 |
-| retro cost (usd) | 0.00 | 6.30 |
-| retro tokens | input 0 / output 0 | input 14 / output 13418 |
-| full retros | — | 5 |
+| merged | 2 | 8 |
+| review rounds avg | 2.5 | 2.25 |
+| rounds/issue (plan/impl/review) | 1 / 2.5 / 2.5 | 0.63 / 1.5 / 2.25 |
+| escaped defects | 3 (#174×1, #156×2) | 8 |
+| revert rate | 0.00 (0/2) | 0.00 (0/8) |
+| needs-human | 16 | 41 |
+| rejects by role | correctness 2, architecture 1, spec-conformance 1 | spec-conformance 5, qa 4, correctness 7, architecture 2 |
+| reviewer overlap | 0.80 (4/5, runs 5) | 0.53 (10/19, runs 18) |
+| unique findings by role | architecture 1 | spec-conformance 3, qa 4, correctness 1, architecture 1 |
+| qa na ratio | 0.18 (8/44 claims, na-heavy 1/6 approvals) | 0.20 (13/65 claims, na-heavy 2/9 approvals) |
+| cost (usd) | 170.30 | 542.31 |
+| tokens | input 3695890 / output 337523 | input 14823125 / output 1115732 |
+| retro cost (usd) | 1.10 | 7.40 |
+| retro tokens | input 4 / output 4297 | input 18 / output 17715 |
+| full retros | — | 6 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #174 | 1 | 2 | 2 | 1 |
+| #156 | 1 | 3 | 3 | 2 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -46,7 +53,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-02T05:21:19.380Z",
+    "last_retro_at": "2026-10-03T10:55:51.477Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -284,6 +291,76 @@
           "files": [
             ".factory/lessons/factory-builder.md",
             ".claude/agents/reviewer-qa.md"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-10-03T10:55:51.477Z",
+      "yield": 1,
+      "needs_human_since": 16,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            174,
+            156
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 156,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-03-01",
+            "L-2026-10-03-02",
+            "L-2026-10-03-03",
+            "L-2026-10-03-04"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 182,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#182 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md"
+          ]
+        },
+        {
+          "step": "proposals",
+          "deferred": [
+            {
+              "kind": "role-change",
+              "title": "builder Lens 5·implement 프롬프트의 'Scope change는 PR 본문에'를 spec-conformance Lens 2('diff 자체에, PR 본문 아님')와 일치시킨다",
+              "reason": "insufficient-evidence: 4 distinct runs < 10 (role-change)"
+            }
+          ]
+        },
+        {
+          "step": "publish-proposal",
+          "pr": 183,
+          "reason": null,
+          "proposals": [
+            "gate"
           ]
         }
       ],
@@ -652,6 +729,14 @@
           168
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The cf1 stale-report guard does not work when a test report path is outside the repo root. In that case a re-run that writes no report is labelled 'RED twice / flaky candidate' instead of 'inconclusive'. ADR-034 says the opposite: lines 34-35 state that a re-run which wrote no report is inconclusive because resetGates deletes the first report, and the code comment at merge-stage.js:647-652 makes the same claim. For this supported configuration both are false.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -771,6 +856,15 @@
           168
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "Nobody has shown that the motivating own-calendar #124 transcript contains a completed runner notification for wf086hvld in either form, yet that is now a precondition for recovery. The only real transcript evidence for a notification is a different repo and a different stage, so it cannot stand for #124.",
+        "runs": [
+          170
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -852,94 +946,147 @@
       },
       {
         "issue": 168,
-        "reason": "blocked (environment/credentials) — needs human",
-        "at": "2026-10-03T06:52:35Z"
+        "reason": "protected paths changed — human merge required: .factory/bin/sweep.js, .factory/lib/sweeper.js, factory/bin/sweep.js, factory/lib/sweeper.js, factory/test/sweep-bin.test.js, factory/test/sweeper.test.js (see PR #169)",
+        "at": "2026-10-03T07:29:59Z"
       },
       {
         "issue": 174,
         "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/context.js, .factory/lib/retro/issue-comments.js, .factory/lib/self-gate.js, factory/bin/run-stage.js, factory/lib/context.js, factory/lib/retro/issue-comments.js, factory/lib/self-gate.js, factory/test/context.test.js, factory/test/issue-comments.test.js, factory/test/run-stage.test.js, factory/test/self-gate.test.js (see PR #175)",
         "at": "2026-10-03T06:52:22Z"
+      },
+      {
+        "issue": 176,
+        "reason": "protected paths changed — human merge required: .factory/lib/sweeper.js, factory/lib/sweeper.js, factory/test/sweeper.test.js (see PR #177)",
+        "at": "2026-10-03T07:19:43Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
-    "reverts": 0,
-    "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 14,
-    "qa_approvals": 4,
-    "qa_claims_total": 27,
-    "qa_na_total": 5,
-    "qa_na_ratio": 0.16,
-    "qa_na_heavy_approvals": 0,
-    "usage": {
-      "cost_usd": 150.695627,
-      "tokens": {
-        "input": 3112676,
-        "output": 287000
+    "merged": 2,
+    "review_rounds_avg": 2.5,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 2.5,
+    "rounds_per_issue": [
+      {
+        "issue": 174,
+        "plan": 1,
+        "implement": 2,
+        "review": 2
+      },
+      {
+        "issue": 156,
+        "plan": 1,
+        "implement": 3,
+        "review": 3
       }
-    }
-  },
-  "stats_total": {
-    "merged": 6,
-    "review_rounds_avg": 2.17,
-    "plan_rounds_avg": 0.5,
-    "implement_rounds_avg": 1.17,
-    "escaped_defects": 5,
+    ],
+    "escaped_defects": 3,
+    "escaped_defects_detail": [
+      {
+        "issue": 174,
+        "count": 1
+      },
+      {
+        "issue": 156,
+        "count": 2
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
-      "spec-conformance": 4,
-      "qa": 4,
-      "correctness": 5,
+      "correctness": 2,
+      "architecture": 1,
+      "spec-conformance": 1
+    },
+    "review_runs": 5,
+    "findings_total": 5,
+    "overlapping_findings": 4,
+    "unique_findings_by_role": {
       "architecture": 1
     },
-    "review_runs": 13,
-    "findings_total": 14,
-    "overlapping_findings": 6,
-    "unique_findings_by_role": {
-      "spec-conformance": 3,
-      "qa": 4,
-      "correctness": 1
-    },
-    "overlap_ratio": 0.43,
-    "needs_human": 25,
-    "qa_approvals": 3,
-    "qa_claims_total": 16,
-    "qa_na_total": 5,
-    "qa_na_ratio": 0.24,
+    "overlap_ratio": 0.8,
+    "needs_human": 16,
+    "qa_approvals": 6,
+    "qa_claims_total": 36,
+    "qa_na_total": 8,
+    "qa_na_ratio": 0.18,
     "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 372.001477,
+      "cost_usd": 170.303959,
       "tokens": {
-        "input": 11127235,
-        "output": 778209
+        "input": 3695890,
+        "output": 337523
       }
     },
     "retro_usage": {
-      "cost_usd": 6.304731,
+      "cost_usd": 1.097186,
       "tokens": {
-        "input": 14,
-        "output": 13418
+        "input": 4,
+        "output": 4297
+      }
+    }
+  },
+  "stats_total": {
+    "merged": 8,
+    "review_rounds_avg": 2.25,
+    "plan_rounds_avg": 0.63,
+    "implement_rounds_avg": 1.5,
+    "escaped_defects": 8,
+    "reverts": 0,
+    "reverted_issues": [],
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "spec-conformance": 5,
+      "qa": 4,
+      "correctness": 7,
+      "architecture": 2
+    },
+    "review_runs": 18,
+    "findings_total": 19,
+    "overlapping_findings": 10,
+    "unique_findings_by_role": {
+      "spec-conformance": 3,
+      "qa": 4,
+      "correctness": 1,
+      "architecture": 1
+    },
+    "overlap_ratio": 0.53,
+    "needs_human": 41,
+    "qa_approvals": 9,
+    "qa_claims_total": 52,
+    "qa_na_total": 13,
+    "qa_na_ratio": 0.2,
+    "qa_na_heavy_approvals": 2,
+    "usage": {
+      "cost_usd": 542.305436,
+      "tokens": {
+        "input": 14823125,
+        "output": 1115732
       }
     },
-    "retros": 5
+    "retro_usage": {
+      "cost_usd": 7.401917,
+      "tokens": {
+        "input": 18,
+        "output": 17715
+      }
+    },
+    "retros": 6
   },
-  "deferred_proposals": [],
+  "deferred_proposals": [
+    {
+      "kind": "role-change",
+      "title": "builder Lens 5·implement 프롬프트의 'Scope change는 PR 본문에'를 spec-conformance Lens 2('diff 자체에, PR 본문 아님')와 일치시킨다",
+      "body": "모순: `.claude/agents/factory-builder.md:71-72` Lens 5는 \"plan이 예상한 경로를 벗어난 변경은 PR 본문 'Scope change'에 경로와 이유를 적는다\", `.claude/workflows/factory-implement.js:400`도 \"the path and the reason in the PR body under a 'Scope change' heading\"이라고 지시한다. 반면 `.claude/agents/reviewer-spec-conformance.md:58-59` Lens 2는 \"diff 자체(PR 본문이 아니라)에 'Scope change' 사유가 적혀 있고…일 때만 통과\"이고, 같은 파일 35-36행은 \"PR description과 builder의 설명은 읽지 않는다\"고 못박는다. 빌더가 지시대로 하면 판정자는 그것을 볼 수 없다.\n\n근거: 같은 형태의 spec reject가 서로 다른 4개 이슈(#149, #156, #157, #170)에서 나왔고, 이 4개 이슈의 run 기록에 review-evidence 판정이 15회(#156 3, #157 5, #170 4, #149 3) 남아 있다(≥10 run). #156에서는 빌더가 rework 후 파일 주석 `Scope change (#156): …`로 diff 안에 사유를 넣자(factory/lib/retro/issue-comments.js:618, factory/test/sweep-bin.test.js:170) round3에서 spec-conformance가 approve로 돌았다 — diff 안 표기가 실제로 통과하는 형태임을 보여 준다.\n\n변경안: builder Lens 5를 \"…변경은 **diff 안에**(해당 파일의 주석 또는 DECISIONS 항목) `Scope change (#&lt;issue&gt;): &lt;경로&gt; — &lt;이유&gt;`로 적는다. PR 본문은 spec-conformance가 읽지 않는다\"로, factory-implement.js:400 문구를 같은 뜻으로, `templates/factory/claude/agents/factory-builder.md`·`templates/factory/claude/workflows/factory-implement.js` 사본도 함께. spec-conformance 쪽은 바꾸지 않는다(cold-read 원칙 유지).\n\n비용: 프롬프트 한 문장 교체로 이슈당 토큰 증가는 사실상 0(수십 토큰). 반대로 이 창에서 이 사유 하나로 생긴 rework는 이슈당 최소 1회의 implement+review 라운드였다(#156 기록 기준 implement ≈$1.75–4.8, review ≈$2.8–2.9/라운드). 역할 정의 변경이므로 사람이 머지한다.",
+      "evidence_runs": [
+        149,
+        156,
+        157,
+        170
+      ]
+    }
+  ],
   "deletion_candidates": []
 }
 ```
