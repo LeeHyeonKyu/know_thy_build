@@ -474,7 +474,7 @@ export function readTranscript({ root, home, sessionId, readFile } = {}) {
  * @param envelopeResult `claude -p --output-format json`의 `result` 문자열.
  * @param transcriptText 세션 트랜스크립트 JSONL 전문(없으면 "" 또는 null — 그냥 후보가 하나 준다).
  * @param validate 객체 하나를 받아 `{ok, errors}`를 주는 함수. 없으면 "파싱되면 통과"로 취급한다.
- * @param readFile (#170, 선택) 러너 결과 파일 리더. 없으면(retro.js·implementHeadShaOf) 결과 파일 경로는
+ * @param readFile (#170, 선택) 러너 결과 파일 리더. 없으면(retro.js, 그리고 리더 없이 불린 implementHeadShaOf) 결과 파일 경로는
  *   아예 생기지 않고 사유는 #170 이전과 바이트 단위로 같다. 있으면 접수증·completed 러너 알림에 묶인 경로마다
  *   `readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES, meta: true })`로 한 번 부르고, 돌려받는 값은:
  *   - `null` — 파일 없음 → "workflow output file missing: <path>"
@@ -492,7 +492,9 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   /*
    * #170 — 러너 결과 파일은 **호출자가 `readFile`을 넘기고**(옵트인) 트랜스크립트에 이 세션의 `Workflow`
    * 접수증이 있을 때만 본다. 둘 중 하나라도 없으면 아래의 새 줄(잘린 후보·결과 파일)은 하나도 생기지 않아
-   * 사유가 #170 이전과 바이트 단위로 같다(retro.js·implementHeadShaOf는 넘기지 않는다).
+   * 사유가 #170 이전과 바이트 단위로 같다. 넘기지 않는 호출자는 retro.js다. implementHeadShaOf는 받은 리더를 그대로
+   * 넘기므로 옵트인 여부가 호출자에게 달려 있다: 프로덕션 KTB-43 가드(run-stage `handoffHeadShaForRun`)와 verify
+   * (`verifyStageForRun`)는 둘 다 `readFileOrNull`을 넘겨 **옵트인한다** — 같은 핸드오프를 같은 파일에서 읽는다.
    */
   const wfFiles = typeof readFile === "function" ? workflowOutputFilesFromTranscript(transcriptText) : { taskIds: [], files: [], rejected: [], dropped: [] };
   const optIn = wfFiles.taskIds.length > 0;
