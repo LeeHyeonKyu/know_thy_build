@@ -4144,3 +4144,70 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 (= `makeStageGatesDep`·`makeMergeDiffFilesDep`·`makeMergeSuiteFailuresDep`, `main()`이 그대로 펼친다), `lib/gates.js` `runStageGates` 주석(코드 변경 없음).
 factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. 설계 스펙 §5.2.5의 "`gates.js`는 절대 재시도로 GREEN을 만들지 않는다"는 그대로
 참이다(재실행은 merge-stage가 하고, 판정을 뒤집지 않는다); 같은 절의 "review·merge는 RED를 RED로 둔다"는 ADR-011 개정과 이 ADR이 대체한다.
+
+---
+
+## ADR-035 자동 머지 회로차단기(S4c) — revert 팔만, 상태는 계산하고 리셋만 저장한다 — 2026-10-03 (#189)
+
+ADR-033의 넷째 조건("차단기 닫힘")의 구현이다. 판정 경로 자동 머지의 마지막 선행이지만 **2차 방어선**이다(1차는 만장일치·GREEN·거부권 창).
+revert 자체가 사람의 행위이므로 차단기가 지키는 것은 "되돌린 사람이 소유자가 아니거나 소유자가 보고 있지 않을 때"뿐이다(#189 plan d7) —
+소유자가 `auto_merge_judge`를 켤 때 이것을 1차 안전판으로 읽지 않는다.
+
+**무엇을 지었나.**
+- `factory/lib/breaker.js` — 순수 판정 `evaluateBreaker({ history, thresholds, closedAt })`: 판정 경로 자동 머지를 머지 시각 순으로 세우고,
+  **연속한** `revert_streak`개(기본 2)가 모두 `closedAt` 뒤에 revert됐으면 열림. 비판정 자동 머지는 줄에 서지 않고(끊지도 잇지도 않는다),
+  revert 없는 판정 자동 머지는 연속을 끊는다(이 읽기는 이슈 문장의 모호함을 architect가 짚어 정한 것이고, 소유자의 확인을 받지 않았다).
+  `since`는 연속을 채운 revert의 시각이다. 시계를 입력으로 받지 않으므로 시간은 차단기를 닫지 못한다.
+- 자동 머지의 증거는 merge 스테이지가 **머지 순간** run 기록에 남기는 한 줄이다: `factory-self-merge:v1 {"issue","pr","kind","sha","at"}`
+  (`selfMergeLine`, `merge: merged …` 바로 뒤, 자기 변경 경로에서만). 판정 비트(`kind`)를 그때 적는다 — 나중에 `classifyProtected`로 다시 재면
+  비판정 목록이 바뀔 때 과거가 바뀐다. 독자는 `## merge ·` 섹션 안의 줄만, `v1`만 읽고 나머지는 무시한다(되돌린 코드가 남긴 줄은 무해하다).
+- revert는 origin 기본 브랜치의 `git log --format=%cI%x09%s`에서 읽는다. `Revert "title (#N)"`와 revert PR이 squash 머지된
+  `Revert "title (#N)" (#M)`의 **따옴표 안 마지막 (#N)**을 센다.
+- 상태 파일은 `factory/records`의 `docs/factory/runs/state/breaker.md`(마커 `<!-- factory-breaker-state:v1 -->` + json 블록
+  `{version, open, since, reason, closed_by, closed_at}`)다. 읽기 `readRecordsDetailed({dir})`, 쓰기 `syncRecords({dir, overwrite, expectBlob})` —
+  records 헬퍼는 바꾸지 않았다. 쓰기는 로컬 파일을 해시용으로 잠깐 쓰고 **반드시 지운다**(`listMarkdownFiles`가 하위 디렉터리까지 걸어서, 남은
+  파일은 다음 스테이지의 기본 동기화가 꼬리 병합해 JSON을 깨뜨린다).
+- merge 스테이지는 자기 변경 경로(판정·비판정 둘 다)에서 `d.breaker()`를 **창 앞에서 한 번, 창 뒤 (6b) 재검증 다음에 한 번** 묻는다. 열림이면
+  `handToHuman`(사유 `breaker open since <iso>: <reason> — human merge required; only a person closes it: \`factory breaker --reset --reason <text>\``,
+  창의 상태·알림 코멘트 없음), ok:false·throw·함수가 아닌 dep·열림도 닫힘도 아닌 답은 blocked다. 그 값은 run-stage의
+  `makeMergeSelfChangeDeps().breaker`가 그때그때 **계산**한다(`readBreaker`: 상태 파일 + 모든 run 기록 + `git fetch`/`git log`).
+- full sweep(`quick=false`)은 같은 `readBreaker`로 계산해, 닫힘→열림일 때만 상태 파일에 워터마크(open/since/reason, 리셋 필드는 보존)를 쓰고
+  연속을 채운 마지막 자동 머지의 이슈와 PR에 `<!-- factory-breaker-open:v1 since=… -->` 코멘트를 한 번씩 남긴다. 기록 → 코멘트 순서이고,
+  코멘트는 마커로 dedupe하므로 코멘트만 실패한 회차는 다음 sweep이 채운다. 닫힘은 쓰지 않는다.
+- `factory breaker --reset --reason <text>`(`factory/cli/breaker.js`, `cli/index.js`에 등록, `bin/cli.js`는 그대로) — `refuseHumanFlag`로
+  에이전트 세션·CI를 네트워크 호출 전에 거부하고, `gh api user`의 로그인을 `closed_by: person:<login>`으로, `closed_at`과 사유를 적는다. 쓰기는
+  `expectBlob`으로 묶여 그 사이 상태가 움직였으면 아무것도 밀지 않고 다시 돌리라고 말한다. 로그인을 모르면 익명으로 닫지 않는다.
+- CHARTER `self_change.breaker: { revert_streak }`(`parseBreakerConfig`·`breakerThresholds`). 블록이 없으면 `parseSelfChange` 결과에 키가 없고
+  임계는 기본값 2다. 다른 키(`window`·`bad_ratio`·`cooldown_hours`)와 모양이 틀린 값은 설정 오류로 던진다.
+
+**문서화된 인터페이스와 다른 점** (이 기록이 없으면 S4b가 낡은 플랜을 따른다):
+- 플랜 `docs/superpowers/plans/2026-10-02-s4-autonomous-engine-merge.md` §3(83–84행)의 `evaluateBreaker({canaryHistory, mergeWindows, now})`·
+  `d.breaker → {ok, open, reason}` 대신 이슈의 `{history, thresholds}` + `closedAt`이고, `d.breaker`는 `since`·`detail`을 더 준다.
+  S4b의 카나리 입력은 `history`의 새 `kind`로 들어온다.
+- 스펙 `docs/superpowers/specs/2026-09-30-explicit-submission-and-self-change.md` 45행(`engine.circuit_breaker`가 **큐 진입**을 거부)·111행
+  (카나리 RED 2회 또는 건강 신호 N=5에 열림)과 다르다: 설정 키는 `self_change.breaker`이고, 거부하는 것은 큐 진입이 아니라 **자기 변경 경로의 머지**다.
+- 이슈 #189 본문과 다른 넷: 상태 파일 이름 `breaker.json` → `state/breaker.md`(헬퍼가 `.md`만 본다), 필드에 `version` 추가; 자동 머지 식별은
+  `by=script` 전이가 아니라 merge 스테이지의 기록 줄(사람-머지 반영 팔도 `by=script`를 쓴다 — `sweeper.js` `sweepHumanMerged`·`transition.js`);
+  revert 파서는 안쪽 `(#N)`; 열림/닫힘은 저장하지 않고 계산한다(리셋이 같은 history에서 다시 열리지 않으려면 `closed_at` 뒤만 봐야 한다).
+
+**짓지 않은 것.**
+- **bad-ratio 팔**(최근 5건 창의 needs-human·rework 비율 ≥ 0.4, 표본 < 3 보류): `factory:merged`에는 나가는 전이가 없어(`lib/labels.js`) 그 신호를
+  만들 생산자가 없다. 테스트가 초록이어도 운영에서는 영영 열리지 않는 팔이다. **S4c는 revert 팔만 싣는다** — revert 없이 품질이 떨어지는
+  것은 이 차단기가 보지 못한다. 후속 이슈는 컨트롤러가 등록하고 그 번호를 장부·릴리스 노트에 남긴다(SDD 정책 3; 이 ADR을 쓴 시점에는 번호가 없다).
+- `cooldown_hours`와 모든 시간 기반 닫힘 — 사람만 닫는다. 훅 패턴(`block-dangerous.sh`에 `factory breaker --reset`)은 사람이 더한다; 그 전까지는
+  환경 변수를 지운 호출이 `refuseHumanFlag`를 지날 수 있다. git log의 커밋 수 상한 — history는 날짜(`closed_at` 뒤)로만 묶는다.
+
+**`d.breaker`가 아예 없는 호출자.** plan dw3은 "배선되지 않음 → blocked"를 요구하지만, #179의 기존 merge-stage 테스트(test_179_*)가 `breaker`
+없는 deps로 S4a-2 경로의 머지를 고정하고 있고 기존 테스트는 고치지 않는다(`tests_are_load_bearing`). 그래서 **키 자체가 없는**(`undefined`) 호출자는
+묻지 않고 `merge: auto-merge breaker not consulted …` 줄을 남긴다; 키는 있는데 함수가 아니면(null 등) blocked다. 프로덕션 배선
+(`makeMergeSelfChangeDeps`, `main()`이 그대로 펼친다)은 언제나 함수를 싣고, 재료(`run`/`root`)가 없으면 그 함수가 ok:false를 낸다 —
+`test_189_merge_stage_checks_breaker_before_and_after_veto_window`가 둘 다 고정한다. test_179의 픽스처에 `breaker`를 더하는 사람의 결정이 있으면
+`undefined`도 blocked로 좁힐 수 있다.
+
+**남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
+push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
+지우면 반대로 "리셋 이력 없음"이 되어 옛 revert가 다시 세어진다. 매 머지 확인마다 records 전부와 git log를 읽으므로 merge 스테이지 지연이 history 크기에 따라 는다.
+
+**되돌리기.** 엔진 커밋 하나를 revert하면 된다. 남는 것: `factory/records`의 `state/breaker.md`와 run 기록의 `factory-self-merge:v1` 줄,
+이슈의 `factory-breaker-open:v1` 코멘트 — 되돌린 엔진에게는 모르는 파일·줄·마커라 아무 일도 하지 않는다. 다시 배포하면 남아 있던 리셋 시각이
+그대로 경계가 된다(계산 모델이라 영향은 작다).
