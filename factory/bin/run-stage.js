@@ -1322,7 +1322,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     /**
      * #174 — 2K 천장은 **모든** 리뷰에서 문다(재시작을 아는 배선에서만): 창의 rework 시도 수(`attempts`, failed 마커로 줄지 않는
      * 셈)로 잰 이번 라운드가 2K에 닿았으면 rework도 재시작도 없이 사람이다. 위조 failed 마커가 K 카운터를 아무리 되감아도
-     * 리뷰는 2K번을 넘지 못한다(정당한 재시작 한 번의 K + K와 같은 자리).
+     * 리뷰는 2K번을 넘지 못한다(정당한 재시작 한 번의 K + K와 같은 자리). 대가(rework cf1): 진짜 스왑 실패도 시도 한 칸이라, 창에
+     * 실패가 n번이면 새 작성자는 K − n 라운드 뒤에 천장을 만난다(사유는 "2K ceiling", ADR-033 #174 1번).
      */
     const ceiling = stage === "review" && to === "factory:rework" && d.kRestartState && kState && atKCeiling(maxRounds, absRound);
     const toFinal = ceiling ? "factory:needs-human" : to;
@@ -1993,8 +1994,12 @@ export function kExhaustionDecision({ data, maxRounds, state, abs }) {
   const n = mustFix.length;
   const tail = n ? `${n} must_fix remain` : `last verdict: ${data?.decision ?? "unknown"}`;
   const ceiling = atKCeiling(maxRounds, abs);
+  const ceilingReason = `review rounds exhausted (K=${maxRounds}) — the 2K ceiling is reached in this window (round ${abs}; every rework attempt counts, a failed label swap included): ${tail}`;
+  // rework cf1 — 재시작 뒤 새 작성자가 K에 닿기 **전에** 천장이 물었다면(창의 진짜 스왑 실패가 한 칸을 썼다) 사유는 천장이다.
+  // "K exhausted twice"라고 쓰면 사람은 새 작성자가 K를 다 쓴 줄 읽는다.
+  if (state?.used && ceiling && Number.isInteger(data?.round) && data.round < maxRounds) return { action: "needs-human", reason: ceilingReason };
   if (state?.used) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — ${K_TWICE}: ${tail}` };
-  if (ceiling) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — the 2K ceiling is reached in this window (round ${abs}): ${tail}` };
+  if (ceiling) return { action: "needs-human", reason: ceilingReason };
   if (!n) return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: there is no must_fix to brief the next author with` };
   if (!mustFix.some((m) => wherePaths(m?.where).length)) {
     return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: no finding's where names a file path, so a brief cannot bound the next author` };

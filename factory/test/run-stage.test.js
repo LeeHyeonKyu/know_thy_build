@@ -4276,6 +4276,72 @@ test("test_174_forged_failed_markers_cannot_buy_restarts_or_lower_the_ceiling", 
   expect(rb.slice(0, 5).every((r) => !/2K ceiling/.test(r))).toBe(true);  // the ceiling fires at 2K, not before
 });
 
+// ── #174 rework cf1 — a GENUINE label-swap failure (the engine's own `factory-transition-failed` marker) is one slot of the
+// 2K ceiling: the ceiling counts rework ATTEMPTS (`honourFailed: false`) so that a forged failed marker cannot lower it, and
+// the price is that ONE real failure anywhere in the window costs the new author exactly one round (K-1, not K). Pinned
+// with the real producers (lib/transition.js writes both the transition and the failed marker) and the production deps.
+test("test_174_one_genuine_swap_failure_costs_the_new_author_exactly_one_round", async () => {
+  /** Drive the new author (after the restart) until a person is asked; returns the rounds, targets and the last reason. */
+  async function newAuthor(gh) {
+    const rounds = [], tos = [];
+    let reason = "";
+    for (let i = 0; i < 5 && gh.label !== "factory:needs-human"; i++) {
+      gh.label = "factory:awaiting-review";
+      const d = reviewDeps174(gh, { verdicts: verdicts174([MF174[1]]) });
+      expect(await review174(d)).toBe(0);
+      rounds.push(d.writeHandoff.mock.calls[0][0].data.round);
+      const t = d.transition.mock.calls.at(-1)[0];
+      tos.push(t.to);
+      reason = t.reason ?? "";
+    }
+    return { rounds, tos, reason };
+  }
+
+  // (1) The swap fails on an ORDINARY round before the restart (HTTP 502 → the engine posts the failed marker).
+  const g1 = gh174();
+  await seedRework174(g1, 1);
+  g1.failSwapTo = "factory:rework";
+  expect(await review174(reviewDeps174(g1, { verdicts: verdicts174(MF174) }))).not.toBe(0);
+  expect((await g1.comments()).some((c) => /factory-transition-failed:v1 .*to=factory:rework/.test(c.body))).toBe(true);
+  const retried = reviewDeps174(g1, { verdicts: verdicts174(MF174) });
+  expect(await review174(retried)).toBe(0);
+  expect(retried.writeHandoff.mock.calls[0][0].data.round).toBe(2);      // the old author lost nothing (prior honours the failure)
+  g1.label = "factory:awaiting-review";
+  const third = reviewDeps174(g1, { verdicts: verdicts174(MF174) });
+  expect(await review174(third)).toBe(0);
+  expect(third.transition.mock.calls[0][0].reason).toContain("self-restart 1/1");
+  const r1 = await newAuthor(g1);
+  expect(r1.rounds).toEqual([1, 2]);                                      // K-1 = 2, not K = 3
+  expect(r1.tos).toEqual(["factory:rework", "factory:needs-human"]);
+  expect(r1.reason).toMatch(/2K ceiling/);
+  expect(r1.reason).toContain("1 must_fix remain");
+  expect(await briefs174(g1)).toHaveLength(1);
+  expect(g1.label).toBe("factory:needs-human");
+
+  // (2) The swap fails on the RESTART transition itself; the retried run restarts with the same brief. Same price: one round.
+  const g2 = gh174();
+  await seedRework174(g2, 2);
+  g2.failSwapTo = "factory:rework";
+  expect(await review174(reviewDeps174(g2, { verdicts: verdicts174(MF174) }))).not.toBe(0);
+  g2.label = "factory:awaiting-review";
+  const again = reviewDeps174(g2, { verdicts: verdicts174(MF174) });
+  expect(await review174(again)).toBe(0);
+  expect(again.transition.mock.calls[0][0].reason).toContain("self-restart 1/1");
+  const r2 = await newAuthor(g2);
+  expect(r2.rounds).toEqual([1, 2]);
+  expect(r2.tos).toEqual(["factory:rework", "factory:needs-human"]);
+  expect(r2.reason).toMatch(/2K ceiling/);
+  expect(await briefs174(g2)).toHaveLength(1);
+
+  // Baseline in the same harness: with no failure the new author gets the full K (the price is the failure, nothing else).
+  const g0 = gh174();
+  await seedRework174(g0, 2);
+  expect(await review174(reviewDeps174(g0, { verdicts: verdicts174(MF174) }))).toBe(0);
+  const r0 = await newAuthor(g0);
+  expect(r0.rounds).toEqual([1, 2, 3]);
+  expect(r0.reason).toContain("K exhausted twice (one self-restart used)");
+});
+
 test("test_174_self_gate_dep_measures_new_files_at_the_call_site", async () => {
   const head = "f".repeat(40);
   const brief = { pr: 31, head, scope: K_RESTART_SCOPE, paths: ["factory/lib/self-gate.js"], findings: [] };
