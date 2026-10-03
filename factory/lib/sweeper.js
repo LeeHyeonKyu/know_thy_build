@@ -1600,8 +1600,11 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
         try { live = await gh.issue(it.number); }
         catch (e) { actions.push({ kind: "error", step: "blocked-live-label", issue: it.number, error: String(e.message || e) }); }
         const labels = Array.isArray(live?.labels) ? live.labels : null;
-        if (labels && !labels.includes("factory:blocked")) {
-          const label = labels.filter((l) => STATES.has(l)).join(", ") || "none";
+        // 상태 라벨이 정확히 `factory:blocked` 하나일 때만 이 팔의 것이다. setFactoryLabel은 새 라벨을 먼저 붙이고
+        // 옛 라벨을 떼므로(gh.js) 스왑 도중에는 ['factory:blocked','factory:rework']가 보인다 — 그것도 건너뛴다.
+        const states = labels ? labels.filter((l) => STATES.has(l)) : null;
+        if (states && !(states.length === 1 && states[0] === "factory:blocked")) {
+          const label = states.join(", ") || "none";
           actions.push({ kind: "blocked-escalation-skipped", issue: it.number, label, reason: `label is now ${label}` });
           continue;
         }

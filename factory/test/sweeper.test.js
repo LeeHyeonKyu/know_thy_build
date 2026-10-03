@@ -3275,3 +3275,35 @@ test("test_168_ceiling_escalation_records_engine_version_for_release_retry", asy
   expect(releaseMarkers156(w, n)).toHaveLength(1);
   expect(w.dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: n });
 });
+
+test("test_176_blocked_arm_skips_a_mid_swap_two_label_issue", async () => {
+  // gh.setFactoryLabel은 새 라벨을 먼저 붙이고 옛 라벨을 뗀다(gh.js:381-384) — blocked → rework 스왑 도중의 실시간 조회는
+  // ['factory:blocked','factory:rework']를 본다. `includes("factory:blocked")`만 보는 가드는 이 이슈를 그대로 올린다.
+  const midSwap = (n) => (n === 15 ? ["needs-triage", "factory:blocked", "factory:rework"] : ["needs-triage", "factory:blocked"]);
+  const liveIssue = () => vi.fn(async (n) => ({ number: n, title: `#${n}`, body: "", labels: midSwap(n) }));
+
+  // 에스컬레이션 경로(재점화 출처 없음)
+  const esc = staleIndex176({ blocked: [15, 16], live: {}, issue: liveIssue(), comments: () => [blockedSince176("2026-09-11T00:00:00Z")] });
+  const t1 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const d1 = vi.fn(async () => {});
+  const a1 = await sweep(stalledArgs({ gh: esc, transition: t1, dispatchStage: d1 }));
+  expect(forIssue176(t1, 15)).toEqual([]);
+  expect(forIssue176(d1, 15)).toEqual([]);
+  expect(forIssue176(esc.comment, 15)).toEqual([]);
+  expect(a1).toContainEqual(expect.objectContaining({ kind: "blocked-escalation-skipped", issue: 15 }));
+  expect(a1.some((a) => a.issue === 15 && a.kind === "blocked-escalated")).toBe(false);
+  // 대조군: 라벨이 blocked 하나뿐인 16은 같은 sweep에서 지금처럼 올라간다
+  expect(t1).toHaveBeenCalledWith(expect.objectContaining({ issue: 16, to: "factory:needs-human" }));
+  expect(a1).toContainEqual({ kind: "blocked-escalated", issue: 16, cause: null });
+
+  // 재점화 경로(재점화 가능한 출처)
+  const retry = staleIndex176({ blocked: [15, 16], live: {}, issue: liveIssue(), comments: () => [retryableOrigin176("2026-09-11T00:00:00Z")] });
+  const t2 = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const d2 = vi.fn(async () => {});
+  const a2 = await sweep(stalledArgs({ gh: retry, transition: t2, dispatchStage: d2 }));
+  expect(forIssue176(t2, 15)).toEqual([]);
+  expect(forIssue176(d2, 15)).toEqual([]);
+  expect(forIssue176(retry.comment, 15)).toEqual([]);
+  expect(a2).toContainEqual(expect.objectContaining({ kind: "blocked-escalation-skipped", issue: 15 }));
+  expect(d2).toHaveBeenCalledWith({ stage: "review", issue: 16 });
+});
