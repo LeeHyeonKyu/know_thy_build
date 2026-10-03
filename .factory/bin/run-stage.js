@@ -2136,39 +2136,64 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
  * #195 — `makePrEvidenceDeps`: merge-stage's `publishPrEvidence` + `postEvidenceComment` (the PR-evidence dep is named apart
  * from feedback's `appendEvidence`). The section is built by `lib/evidence.js` — imported statically at the top of this file,
  * so it is the base-branch engine's copy (loaded when the process started on the base checkout, before checkoutHead): a PR
- * that changes evidence.js does not render its own evidence. Inputs: the local hydrated run record (`readRecord`), the
- * issue's comments, this merge run's live gates result passed in by merge-stage — never the record's FACTORY_GATES line —
- * and this run's budget check (`lifetimeBudget`, the same `budgetCheck` the stage gate uses) — of which evidence.js takes
- * only the cap: the cost itself comes from heartbeat-bound usage lines, never the check's unbound sum or a `budget:` line.
+ * that changes evidence.js does not render its own evidence. Inputs, each named apart: the local hydrated run record
+ * (`readRecord`); the tracking issue's comments (heartbeats, handoffs, transitions); the PR's comments — where the builder
+ * posts its factory.rework-response.v1 (factory-builder.md: `gh pr comment <pr>`; context.js reads them there too); the
+ * factory's logins (`resolveFactoryLogins` with the caller's `env` injected — never `process.env` from in here — and no
+ * comments, so a stranger's heartbeat-shaped comment cannot make its author a factory login); and this merge run's live
+ * gates result passed in by merge-stage — never the record's FACTORY_GATES line. Logins that cannot be resolved do not fail
+ * the publish: the section fails closed (no row from any comment, a note saying why) and the result's `logins` carries the
+ * reason, which merge-stage writes as the record's FAIL line. The logins read and the comment step's viewer read get the
+ * bound's signal like every other gh call here, so a timeout kills them rather than leaving them running.
  * PR-body I/O goes only through gh.js: `prBody` immediately before `editPrBody` (read-modify-write; a human edit landing
  * between the two can still be lost — gh has no compare-and-swap on a PR body), each bounded by `timeoutMs`, no retry; the
- * comment read is bounded the same way. merge-stage's `signal` cancels the step: checked before the write and handed to the
- * `gh pr edit` child, so a timed-out step never writes after the merge or the transition. A body whose author text alone is
- * over GitHub's limit is a failure, not a write. Any failure rejects; merge-stage turns it into the one `evidence: FAIL — …`
- * line. The marked issue comment is posted only after a merge (merge-stage calls `postEvidenceComment` then) and at most
- * once — the runner's existing marked comment is updated in place (see `postEvidenceComment`). Every gh call there is
- * bounded and takes merge-stage's signal too.
+ * comment reads are bounded the same way. merge-stage's `signal` cancels the step: checked before the write and handed to
+ * every gh child, so a timed-out step never writes after the merge or the transition. A body whose author text alone is
+ * over GitHub's limit is a failure, not a write. Any failure rejects with the failing step named (`read: …`, `build: …`,
+ * `edit: …`); merge-stage turns it into the one `evidence: FAIL — …` line. The marked issue comment is posted only after a
+ * merge (merge-stage calls `postEvidenceComment` then) and at most once — the runner's existing marked comment is updated in
+ * place through gh.patchComment (see `postEvidenceComment`). Every gh call there is bounded and takes merge-stage's signal.
  */
-export function makePrEvidenceDeps({ gh, issue, readRecord, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS, lifetimeBudget = null }) {
+export function makePrEvidenceDeps({ gh, issue, readRecord, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
   return {
-    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null } = {}) => {
+    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null, onStep = null } = {}) => {
+      /**
+       * `fn()` inside the named evidence step: the step is reported first (`onStep` — merge-stage names it when its own timeout
+       * fires before this rejection can reach it), and a failure is renamed to it (merge-stage's FAIL line names the step).
+       */
+      const inStep = async (step, fn) => {
+        try { onStep?.(step); } catch { /* a reporting callback never changes the step's outcome */ }
+        try { return await fn(); } catch (e) {
+          const msg = e?.message || String(e);
+          throw new Error(msg.startsWith(`${step}: `) ? msg : `${step}: ${msg}`, { cause: e });
+        }
+      };
       const live = () => { if (signal?.aborted) throw (signal.reason ?? new Error("evidence step aborted")); };
       let recordText = null;
       try { recordText = readRecord(); } catch { recordText = null; }
-      let budget = null;
-      try { budget = typeof lifetimeBudget === "function" ? lifetimeBudget() : null; } catch { budget = null; }
-      const comments = await bounded(() => gh.comments(issue), { ms: timeoutMs, what: "gh issue comments", signal });
-      live();
-      const { markdown, data } = buildEvidence({ recordText, comments, gates, gatesRerun, reason, budget, pr, now: now() });
-      const current = await gh.prBody(pr, { timeoutMs, signal });
-      live();
-      const next = applyEvidenceSection(current, markdown);
-      if (next.overflow) {
-        const outside = String(current ?? "").length;
-        throw new Error(`PR #${pr} body is already ${outside} characters outside the evidence section — over GitHub's ${PR_BODY_MAX_CHARS}-character limit; section not written`);
-      }
-      await gh.editPrBody(pr, next.body, { timeoutMs, signal });
-      return { ok: true, route, markdown, truncated: next.truncated, unbound: data.unbound };
+      const { issueComments, prComments, factoryLogins } = await inStep("read", async () => {
+        const issueComments = await bounded((s) => gh.comments(issue, { signal: s }), { ms: timeoutMs, what: "gh issue comments", signal });
+        live();
+        const prComments = await bounded((s) => gh.comments(pr, { signal: s }), { ms: timeoutMs, what: "gh pr comments", signal });
+        live();
+        let factoryLogins;
+        try { factoryLogins = await bounded((s) => resolveFactoryLogins({ gh, env, signal: s }), { ms: timeoutMs, what: "factory logins", signal }); }
+        catch (e) { live(); factoryLogins = { ok: false, reason: e?.message || String(e) }; }
+        live();
+        return { issueComments, prComments, factoryLogins };
+      });
+      const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pr, now: now() }));
+      return await inStep("edit", async () => {
+        const current = await gh.prBody(pr, { timeoutMs, signal });
+        live();
+        const next = applyEvidenceSection(current, markdown);
+        if (next.overflow) {
+          const outside = String(current ?? "").length;
+          throw new Error(`PR #${pr} body is already ${outside} characters outside the evidence section — over GitHub's ${PR_BODY_MAX_CHARS}-character limit; section not written`);
+        }
+        await gh.editPrBody(pr, next.body, { timeoutMs, signal });
+        return { ok: true, route, markdown, truncated: next.truncated, unbound: data.unbound, logins: data.logins };
+      });
     },
     /**
      * The marked issue comment, at most once. Who wrote an existing marked comment matters: one by another account is that
@@ -2180,7 +2205,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord, now = () => new Date
     postEvidenceComment: async (markdown, { signal = null } = {}) => {
       const step = (what, start) => bounded(start, { ms: timeoutMs, what, signal });
       const target = evidenceComment(markdown);
-      const self = typeof gh.viewerLogin === "function" ? await step("gh api user", () => gh.viewerLogin()) : null;
+      const self = typeof gh.viewerLogin === "function" ? await step("gh api user", (s) => gh.viewerLogin({ signal: s })) : null;
       const comments = await step("gh issue comments", (s) => gh.comments(issue, { signal: s }));
       const marked = (Array.isArray(comments) ? comments : []).filter((c) => hasEvidenceComment([c]));
       const own = self ? marked.filter((c) => c?.author === self) : marked.filter((c) => c?.body === target);
@@ -2191,7 +2216,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord, now = () => new Date
       let updated = 0;
       for (const c of own) {
         if (c.body === target) continue;
-        await step("gh api PATCH issue comment", (s) => gh.editComment(c.id, target, { signal: s }));
+        await step("gh api PATCH issue comment", (s) => gh.patchComment(c.id, target, { signal: s }));
         updated += 1;
       }
       return { ok: true, posted: false, updated };
@@ -3549,7 +3574,7 @@ async function main() {
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
     /** #195 — merge stage: the runner's PR evidence (base-engine evidence.js, the hydrated local record, gh.js body read/edit). */
-    ...makePrEvidenceDeps({ gh, issue, readRecord: () => readFile(join(root, "docs/factory/runs", `${issue}.md`)), lifetimeBudget: () => deps.lifetimeBudget() }),
+    ...makePrEvidenceDeps({ gh, issue, env: process.env, readRecord: () => readFile(join(root, "docs/factory/runs", `${issue}.md`)) }),
     /**
      * ADR-021 — 두 배우 모드의 표식. 워크플로(`factory-merge.yml`)가 `FACTORY_TWO_ACTOR`에
      * `${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — **토큰 값을 한 번 더 복사하지 않고**

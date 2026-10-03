@@ -291,6 +291,8 @@ export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = nul
 const MERGEABILITY_REPOLL_MS = 5000;
 /** #195 — the PR-evidence step's own bound: it may delay the merge or the hand-off by at most this much (no retry). */
 export const EVIDENCE_TIMEOUT_MS = 60 * 1000;
+/** #195 — a reason that already names its evidence step (run-stage's dep renames its rejections to `read: …` / `build: …` / `edit: …`). */
+const EVIDENCE_STEP_PREFIX = /^(read|build|edit|comment|publish): /;
 
 /**
  * KTB-15b I1 / KTB-19 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR
@@ -488,9 +490,11 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * handToHuman before the needs-human transition, and on the self-change path before the veto window is announced (so the
    * owner reads it before deciding) — the flag keeps the window's later mergePr / veto hand-off from publishing again.
    * It never blocks or reorders anything: a throw, a rejection, an `ok:false` or a timeout becomes exactly one
-   * `evidence: FAIL — <reason>` record line and the merge or transition goes on. A MISSING dep — the wiring has the
-   * `publishPrEvidence` slot (run-stage's always does) but no function in it — is that same one FAIL line, never a silent
-   * no-op. A wiring that predates the slot entirely (no `publishPrEvidence` key) is left byte-identical: existing tests pin
+   * `evidence: FAIL — <step>: <reason>` record line naming the failing step (read, build, edit — or comment for the issue
+   * comment after a merge) and the merge or transition goes on. The dep reports the step it is in through `onStep`, so a
+   * timeout that fires here before the dep's own step-named rejection can arrive still names the step; a dep that never
+   * reports one is named `publish`. A MISSING dep — the wiring has the `publishPrEvidence` slot (run-stage's always does)
+   * but no function in it — is that same one FAIL line (step `read`: nothing could be read), never a silent no-op. A wiring that predates the slot entirely (no `publishPrEvidence` key) is left byte-identical: existing tests pin
    * that record exactly (test_179_switch_off_is_byte_identical and its neighbours), and tests are load-bearing.
    *
    * A timeout CANCELS, it does not abandon: the dep gets an AbortSignal and the timer aborts it before this function returns,
@@ -500,8 +504,11 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    */
   let evidenceDone = false, evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false;
   const evidenceMs = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
-  /** `start(signal)` raced against the evidence bound; on timeout the signal is aborted BEFORE this returns (cancel, not abandon). */
-  const boundedEvidence = async (start, what) => {
+  /**
+   * `start(signal)` raced against the evidence bound; on timeout the signal is aborted BEFORE this returns (cancel, not
+   * abandon). `stepNow()` is the step the dep last reported — the timeout's message names it.
+   */
+  const boundedEvidence = async (start, stepNow) => {
     const ac = new AbortController();
     let timer;
     try {
@@ -509,7 +516,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
         Promise.resolve().then(() => start(ac.signal)),
         new Promise((_, reject) => {
           timer = setTimeout(() => {
-            const e = new Error(`timed out after ${evidenceMs} ms — ${what} was cancelled`);
+            const step = stepNow();
+            const e = new Error(`${step}: timed out after ${evidenceMs} ms — the ${step} step was cancelled`);
             ac.abort(e);
             reject(e);
           }, evidenceMs);
@@ -517,21 +525,31 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       ]);
     } finally { clearTimeout(timer); }
   };
+  /** One FAIL line's text: the reason, prefixed with `step` unless it already names an evidence step. */
+  const evidenceFail = (step, e) => {
+    const msg = publicReason(e?.message || e);
+    return `evidence: FAIL — ${EVIDENCE_STEP_PREFIX.test(msg) ? msg : `${step}: ${msg}`}`;
+  };
   const publishEvidence = async ({ route, reason = null }) => {
     if (evidenceDone) return;
     evidenceDone = true;
     if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
     if (typeof d.publishPrEvidence !== "function") {
-      record(["evidence: FAIL — publishPrEvidence dep not wired — no evidence section was written"]);
+      record(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written"]);
       return;
     }
+    let step = "publish";
+    const onStep = (s) => { if (typeof s === "string" && s) step = s; };
     try {
-      const r = await boundedEvidence((signal) => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal }), "the PR-body write");
+      const r = await boundedEvidence((signal) => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal, onStep }), () => step);
       if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
       evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;
       record([`evidence: published to PR #${pr} (${route})`]);
+      // The factory's logins could not be resolved (part of the read step): the section went out failing closed — no row from
+      // any comment, a note saying why; the record says so too, as the one FAIL line for this step — never silently empty.
+      if (r?.logins?.ok === false) record([`evidence: FAIL — read: factory logins not resolved (${publicReason(r.logins.reason || "not resolved")}) — nothing from issue or PR comments was shown`]);
     } catch (e) {
-      record([`evidence: FAIL — ${publicReason(e?.message || e)}`]);
+      record([evidenceFail(step, e)]);
     }
   };
   const handToHuman = async ({ reason, sections }) => {
@@ -1282,12 +1300,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // transition below); a failure is one record line, and the line says what the dep reported doing.
   if (evidenceMarkdown !== null && typeof d.postEvidenceComment === "function") {
     try {
-      const r = await boundedEvidence((signal) => d.postEvidenceComment(evidenceMarkdown, { signal }), "the issue comment");
+      const r = await boundedEvidence((signal) => d.postEvidenceComment(evidenceMarkdown, { signal }), () => "comment");
       if (r?.ok === false) throw new Error(r.reason || "postEvidenceComment answered ok:false");
       record([r?.posted === true ? "evidence: issue comment posted"
         : r?.posted === false ? `evidence: issue comment already present — not posted again (${Number.isInteger(r.updated) ? r.updated : 0} updated in place)`
           : "evidence: issue comment dep returned without saying whether it posted"]);
-    } catch (e) { record([`evidence: issue comment failed — ${publicReason(e?.message || e)}`]); }
+    } catch (e) { record([evidenceFail("comment", e)]); }
   }
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이

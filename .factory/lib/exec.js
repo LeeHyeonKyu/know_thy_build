@@ -42,7 +42,9 @@ export function run(cmd, args = [], opts = {}) {
     try {
       const env = opts.replaceEnv ? { ...(opts.env || {}) } : { ...process.env, ...(opts.env || {}) };
       // #195 — `opts.signal` (an AbortSignal) kills the child when it aborts (Node's spawn option); the 'error' handler below
-      // resolves it like any other failed spawn. Absent → exactly the old call.
+      // resolves it like any other failed spawn. Absent → exactly the old call. Scope (#195 plan files_expected): the merge
+      // stage's evidence step must CANCEL a timed-out gh read/write, not abandon it (done_when dw5/dw6) — without this a
+      // late `gh pr edit` could still rewrite the PR body after the merge or the hand-off; gh.js has no other way to stop it.
       child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], ...(opts.signal ? { signal: opts.signal } : {}) });
     } catch (e) {
       resolve({ code: 127, stdout: "", stderr: String(e) });
