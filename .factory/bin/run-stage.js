@@ -174,6 +174,15 @@ export function stageMaxTurns(harness, stage) {
  * 않는다. 그 분해가 남아야 로스터를 손볼 때 근거가 생긴다. 하트비트 코멘트와 **같은 마커**를
  * 쓰므로 뷰어(Task B)는 살아 있는 런과 끝난 런을 정규식 하나로 읽는다.
  */
+/**
+ * The human-readable line the implement stage writes right before a passing self-gate's `self-gate-detail:` line (same
+ * `record()` call, so the two are adjacent in one section). #195 — `lib/evidence.js` reads its advisory count: the detail
+ * line alone cannot tell a mutation check that passed from one that crashed or skipped a file (both non-blocking).
+ */
+export function selfGateOkLine(sg, advisoryCount = 0) {
+  return `self-gate: ${sg?.ranChecks?.join("+") || "none"} → ok${advisoryCount ? ` (${advisoryCount} advisory)` : ""}`;
+}
+
 export function usageLine(out, progress = null) {
   const models = Object.entries(out?.modelUsage || {})
     .map(([m, u]) => `${m}=$${u?.costUSD ?? "n/a"}`).join(", ");
@@ -1277,7 +1286,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null }), ...refusal(t), ...gatesNote, usage]);
           return t.ok ? 0 : 2;
         }
-        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
+        record([selfGateOkLine(sg, advisory.length), selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
@@ -2129,15 +2138,16 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
  * so it is the base-branch engine's copy (loaded when the process started on the base checkout, before checkoutHead): a PR
  * that changes evidence.js does not render its own evidence. Inputs: the local hydrated run record (`readRecord`), the
  * issue's comments, this merge run's live gates result passed in by merge-stage — never the record's FACTORY_GATES line —
- * and this run's lifetime budget check (`lifetimeBudget`, the same `budgetCheck` the stage gate uses — never a record
- * `budget:` line, which carries no run id).
+ * and this run's budget check (`lifetimeBudget`, the same `budgetCheck` the stage gate uses) — of which evidence.js takes
+ * only the cap: the cost itself comes from heartbeat-bound usage lines, never the check's unbound sum or a `budget:` line.
  * PR-body I/O goes only through gh.js: `prBody` immediately before `editPrBody` (read-modify-write; a human edit landing
  * between the two can still be lost — gh has no compare-and-swap on a PR body), each bounded by `timeoutMs`, no retry; the
  * comment read is bounded the same way. merge-stage's `signal` cancels the step: checked before the write and handed to the
  * `gh pr edit` child, so a timed-out step never writes after the merge or the transition. A body whose author text alone is
  * over GitHub's limit is a failure, not a write. Any failure rejects; merge-stage turns it into the one `evidence: FAIL — …`
  * line. The marked issue comment is posted only after a merge (merge-stage calls `postEvidenceComment` then) and at most
- * once — an existing marked comment is reused.
+ * once — the runner's existing marked comment is updated in place (see `postEvidenceComment`). Every gh call there is
+ * bounded and takes merge-stage's signal too.
  */
 export function makePrEvidenceDeps({ gh, issue, readRecord, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS, lifetimeBudget = null }) {
   return {
@@ -2160,10 +2170,31 @@ export function makePrEvidenceDeps({ gh, issue, readRecord, now = () => new Date
       await gh.editPrBody(pr, next.body, { timeoutMs, signal });
       return { ok: true, route, markdown, truncated: next.truncated, unbound: data.unbound };
     },
-    postEvidenceComment: async (markdown) => {
-      if (hasEvidenceComment(await gh.comments(issue))) return { ok: true, posted: false };
-      await gh.comment(issue, evidenceComment(markdown));
-      return { ok: true, posted: true };
+    /**
+     * The marked issue comment, at most once. Who wrote an existing marked comment matters: one by another account is that
+     * account's text (shown under its name) and does not stop the runner's own; one by the runner's own account — which
+     * agent sessions share — is overwritten with the runner's evidence, so a forged one never stands and no second comment
+     * is posted. Without a viewer login (an older gh adapter) only a byte-identical comment counts as already posted.
+     * Every gh call is bounded by `timeoutMs` and by merge-stage's `signal`, no retry.
+     */
+    postEvidenceComment: async (markdown, { signal = null } = {}) => {
+      const step = (what, start) => bounded(start, { ms: timeoutMs, what, signal });
+      const target = evidenceComment(markdown);
+      const self = typeof gh.viewerLogin === "function" ? await step("gh api user", () => gh.viewerLogin()) : null;
+      const comments = await step("gh issue comments", (s) => gh.comments(issue, { signal: s }));
+      const marked = (Array.isArray(comments) ? comments : []).filter((c) => hasEvidenceComment([c]));
+      const own = self ? marked.filter((c) => c?.author === self) : marked.filter((c) => c?.body === target);
+      if (!own.length) {
+        await step("gh issue comment", (s) => gh.comment(issue, target, { signal: s }));
+        return { ok: true, posted: true, updated: 0 };
+      }
+      let updated = 0;
+      for (const c of own) {
+        if (c.body === target) continue;
+        await step("gh api PATCH issue comment", (s) => gh.editComment(c.id, target, { signal: s }));
+        updated += 1;
+      }
+      return { ok: true, posted: false, updated };
     },
   };
 }

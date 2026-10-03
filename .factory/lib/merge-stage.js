@@ -488,8 +488,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * handToHuman before the needs-human transition, and on the self-change path before the veto window is announced (so the
    * owner reads it before deciding) — the flag keeps the window's later mergePr / veto hand-off from publishing again.
    * It never blocks or reorders anything: a throw, a rejection, an `ok:false` or a timeout becomes exactly one
-   * `evidence: FAIL — <reason>` record line and the merge or transition goes on. An unwired dep (an older wiring) is a no-op —
-   * the record stays byte-identical to before this feature.
+   * `evidence: FAIL — <reason>` record line and the merge or transition goes on. A MISSING dep — the wiring has the
+   * `publishPrEvidence` slot (run-stage's always does) but no function in it — is that same one FAIL line, never a silent
+   * no-op. A wiring that predates the slot entirely (no `publishPrEvidence` key) is left byte-identical: existing tests pin
+   * that record exactly (test_179_switch_off_is_byte_identical and its neighbours), and tests are load-bearing.
    *
    * A timeout CANCELS, it does not abandon: the dep gets an AbortSignal and the timer aborts it before this function returns,
    * i.e. before mergePr / the needs-human transition. The dep checks it before its write and hands it to the `gh pr edit`
@@ -497,29 +499,40 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * transition while the record says FAIL.
    */
   let evidenceDone = false, evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false;
-  const publishEvidence = async ({ route, reason = null }) => {
-    if (evidenceDone || typeof d.publishPrEvidence !== "function") return;
-    evidenceDone = true;
-    const ms = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
+  const evidenceMs = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
+  /** `start(signal)` raced against the evidence bound; on timeout the signal is aborted BEFORE this returns (cancel, not abandon). */
+  const boundedEvidence = async (start, what) => {
     const ac = new AbortController();
     let timer;
     try {
-      const r = await Promise.race([
-        Promise.resolve().then(() => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal: ac.signal })),
+      return await Promise.race([
+        Promise.resolve().then(() => start(ac.signal)),
         new Promise((_, reject) => {
           timer = setTimeout(() => {
-            const e = new Error(`timed out after ${ms} ms — the PR-body write was cancelled`);
+            const e = new Error(`timed out after ${evidenceMs} ms — ${what} was cancelled`);
             ac.abort(e);
             reject(e);
-          }, ms);
+          }, evidenceMs);
         }),
       ]);
+    } finally { clearTimeout(timer); }
+  };
+  const publishEvidence = async ({ route, reason = null }) => {
+    if (evidenceDone) return;
+    evidenceDone = true;
+    if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
+    if (typeof d.publishPrEvidence !== "function") {
+      record(["evidence: FAIL — publishPrEvidence dep not wired — no evidence section was written"]);
+      return;
+    }
+    try {
+      const r = await boundedEvidence((signal) => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal }), "the PR-body write");
       if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
       evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;
       record([`evidence: published to PR #${pr} (${route})`]);
     } catch (e) {
       record([`evidence: FAIL — ${publicReason(e?.message || e)}`]);
-    } finally { clearTimeout(timer); }
+    }
   };
   const handToHuman = async ({ reason, sections }) => {
     await publishEvidence({ route: "hand-off", reason });
@@ -1264,11 +1277,17 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
 
-  // #195 — after a merge, the same evidence once on the tracking issue (the dep skips it when the marked comment exists).
-  // Best-effort: the merge already happened; a failure is one record line.
+  // #195 — after a merge, the same evidence once on the tracking issue (the dep updates the runner's existing marked comment
+  // instead of posting a second one). Best-effort and bounded like the PR-body step (a hung gh here must not hold the
+  // transition below); a failure is one record line, and the line says what the dep reported doing.
   if (evidenceMarkdown !== null && typeof d.postEvidenceComment === "function") {
-    try { await d.postEvidenceComment(evidenceMarkdown); record(["evidence: issue comment posted"]); }
-    catch (e) { record([`evidence: issue comment failed — ${publicReason(e?.message || e)}`]); }
+    try {
+      const r = await boundedEvidence((signal) => d.postEvidenceComment(evidenceMarkdown, { signal }), "the issue comment");
+      if (r?.ok === false) throw new Error(r.reason || "postEvidenceComment answered ok:false");
+      record([r?.posted === true ? "evidence: issue comment posted"
+        : r?.posted === false ? `evidence: issue comment already present — not posted again (${Number.isInteger(r.updated) ? r.updated : 0} updated in place)`
+          : "evidence: issue comment dep returned without saying whether it posted"]);
+    } catch (e) { record([`evidence: issue comment failed — ${publicReason(e?.message || e)}`]); }
   }
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
