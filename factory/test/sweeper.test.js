@@ -3351,3 +3351,74 @@ test("test_196_engine_crash_skips_r_but_is_bounded", async () => {
   // 다른 원인의 예산은 그대로다: api-error는 여전히 3회
   expect(API_ERROR_MAX_RETRIES).toBe(3);
 });
+
+// ── #196 skeptic sc3·sc4·sc5 — 상한은 배선된 값이고, R 팔은 크래시를 보지 않으며, 다른 원인의 예산·문장은 그대로다 ─────────
+// 가짜 gh는 **라벨에 충실하다**: searchIssues(label)는 지금 그 라벨을 단 이슈만 돌려주고, 라벨은 진짜 transition()의 setFactoryLabel이 옮긴다.
+// 그래서 하트비트 팔(R)이 이 이슈를 볼 수 있는 상황이면 실제로 `factory-retry`를 쓴다(대조군이 그것을 보인다).
+import { ENGINE_CRASH_MAX_RETRIES as ENGINE_CRASH_MAX_RETRIES_196b } from "../lib/sweeper.js";
+import { transition as realTransition196b } from "../lib/transition.js";
+
+function labelFaithfulGh196(issue, label0) {
+  let label = label0;
+  const comments = [{ id: 1, body: `<!-- factory-heartbeat issue=${issue} -->\nstage: implement · runner: gha-1 · started: x · last: 2026-10-03T00:00:00Z`, createdAt: "2026-10-03T00:00:00Z", author: "factory-bot" }];
+  const push = (body) => { comments.push({ id: comments.length + 100, body, createdAt: "2026-10-03T00:10:00Z", author: "factory-bot" }); return "u#issuecomment-1"; };
+  return {
+    get label() { return label; },
+    posted: () => comments.map((c) => c.body),
+    searchIssues: vi.fn(async (l) => (l === label ? [{ number: issue }] : [])),
+    issue: async () => ({ number: issue, title: "t", body: "", labels: [label] }),
+    comments: vi.fn(async (n) => (n === issue ? comments.slice() : [])),
+    comment: vi.fn(async (_n, body) => push(body)),
+    patchComment: vi.fn(),
+    setFactoryLabel: async (_n, to) => { label = to; },
+  };
+}
+const sweepArgs196 = (gh, extra = {}) => {
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => { await gh.setFactoryLabel(null, to); return { ok: true, to }; });
+  return { gh, charter, thresholds: T, now: "2026-10-03T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(async () => true), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage, installedVersion: () => "1.4.50", ...extra };
+};
+const seedBlocked196 = (gh, cause, reason) => realTransition196b({ gh, issue: 5, to: "factory:blocked", reason, stage: "implement", cause, env: {} });
+
+test("test_196_engine_crash_cap_is_the_wired_bound_and_r_never_sees_the_crash", async () => {
+  // 대조군: 크래시 전이가 없었다면(라벨이 in-progress에 남으면) 같은 가짜 위에서 하트비트 팔이 R을 쓴다
+  const ctl = labelFaithfulGh196(5, "factory:in-progress");
+  await sweep(sweepArgs196(ctl));
+  expect(ctl.posted().some((b) => /factory-retry issue=5/.test(b))).toBe(true);
+
+  // 크래시 런: 진짜 transition()이 blocked(cause=engine-crash)으로 옮긴다 — 같은 stale 하트비트가 남아 있어도 R은 이 이슈를 보지 않는다
+  const gh = labelFaithfulGh196(5, "factory:in-progress");
+  expect((await seedBlocked196(gh, "engine-crash", "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')")).ok).toBe(true);
+  expect(gh.label).toBe("factory:blocked");
+  // 상한은 배선된 값이다: 3을 주면 정확히 3번 밀고, 그다음에야 사람에게 간다(기본 분기의 1이 아니다)
+  const args = sweepArgs196(gh, { engineCrashMaxRetries: 3 });
+  const all = [];
+  for (let i = 0; i < 6 && gh.label === "factory:blocked"; i++) all.push(...(await sweep(args)));
+  expect(args.dispatchStage).toHaveBeenCalledTimes(3);
+  expect(all.filter((a) => a.kind === "blocked-retry").map((a) => a.attempt)).toEqual([undefined, 2, 3]);
+  expect(all).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+  expect(gh.label).toBe("factory:needs-human");
+  expect(all.some((a) => a.kind === "retries-exhausted" || a.kind === "requeue")).toBe(false);
+  expect(gh.posted().some((b) => /factory-retry issue=/.test(b))).toBe(false);
+  const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+  expect(esc.reason).toMatch(/engine defect/);
+  expect(esc.reason).toContain("node .factory/bin/transition.js 5 factory:queue");
+  // 인자를 주지 않으면 이름 있는 상수가 상한이다
+  expect(ENGINE_CRASH_MAX_RETRIES_196b).toBe(1);
+});
+
+test("test_196_other_blocked_causes_keep_their_budgets_and_sentences", async () => {
+  // 엔진 크래시 상한을 크게 주어도(5) 다른 원인의 시도 횟수와 에스컬레이션 문장은 그대로다 — 엔진 버전이 있어도 문장에 섞이지 않는다
+  const expected = { "api-error": 3, timeout: 1, cancelled: 1, gates: 1, "gates-unhandled": 1, undecidable: 1, other: 1 };
+  expect(Object.keys(expected).sort()).toEqual(BLOCKED_CAUSES.filter((c) => c !== "engine-crash").sort());
+  for (const [cause, tries] of Object.entries(expected)) {
+    const gh = labelFaithfulGh196(5, "factory:in-progress");
+    expect((await seedBlocked196(gh, cause, `stage failed (${cause})`)).ok).toBe(true);
+    const args = sweepArgs196(gh, { engineCrashMaxRetries: 5 });
+    for (let i = 0; i < 8 && gh.label === "factory:blocked"; i++) await sweep(args);
+    expect({ cause, dispatched: args.dispatchStage.mock.calls.length }).toEqual({ cause, dispatched: tries });
+    const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+    expect({ cause, reason: esc?.reason }).toEqual({ cause, reason: BLOCKED_ESCALATION_REASON[cause] });
+    expect(esc.engineVersion).toBe("1.4.50");
+  }
+});

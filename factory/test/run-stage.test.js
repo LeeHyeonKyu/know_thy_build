@@ -5197,7 +5197,7 @@ test("test_196_engine_crash_cause_only_from_runstage_catch", async () => {
   expect(rec).toMatch(/^engine-crash: stage=implement runner=gha-196 run_id=196 error=TypeError — Cannot read properties of undefined \(reading 'test'\)/m);
   expect(parseRunRecord(rec).filter((e) => e.engine_crash)).toHaveLength(1);
 
-  // ReferenceError도 같은 등급이다(닫힌 목록: TypeError·ReferenceError·RangeError·SyntaxError)
+  // ReferenceError도 같은 등급이다(닫힌 목록: 엔진 코드가 던진 TypeError·ReferenceError·RangeError)
   const refT = vi.fn(async ({ to }) => ({ ok: true, to }));
   const refD = implDeps({ transition: refT, gates: async () => { throw new ReferenceError("x is not defined"); } });
   expect(await runStage({ stage: "implement", issue: 7, deps: refD, runnerId: "r" })).toBe(1);
@@ -5236,4 +5236,95 @@ test("test_196_engine_crash_cause_only_from_runstage_catch", async () => {
   // ⑤ 닫힌 집합의 마지막 자리에, 두 표에 같은 자리로
   expect(BLOCKED_CAUSES_196.at(-1)).toBe("engine-crash");
   expect(Object.keys(BLOCKED_ESCALATION_REASON_196).at(-1)).toBe("engine-crash");
+});
+
+// ── #196 skeptic sc1 — 의존성(gh 클라이언트)이 던진 SyntaxError·TypeError는 engine-crash가 아니다 ────────────────────
+// 픽스처는 실제 생산자다: 프로덕션 `makeGh`를 가짜 `run` 위에 세우고, main()이 쓰는 `dependencyClient`로 감싼다.
+// gh.js의 보호되지 않은 `JSON.parse`(빈 출력 → SyntaxError)와 `.object.sha`(오류 모양 응답 → TypeError)가 그 두 자리다.
+import { dependencyClient as dependencyClient196 } from "../bin/run-stage.js";
+import { makeGh as makeGh196 } from "../lib/gh.js";
+import { lifetimeCostOf as lifetimeCostOf196 } from "../lib/budget.js";
+
+test("test_196_dependency_errors_are_never_engine_crash", async () => {
+  const fakeRun = (stdout) => async () => ({ code: 0, stdout, stderr: "" });
+  const cases = [
+    { gh: dependencyClient196(makeGh196({ run: fakeRun(""), repo: "o/r" })), call: (gh) => gh.issue(42), Type: SyntaxError },
+    { gh: dependencyClient196(makeGh196({ run: fakeRun('{"message":"Not Found"}'), repo: "o/r" })), call: (gh) => gh.branchHeadSha("claude/fq-42"), Type: TypeError },
+  ];
+  for (const { gh, call, Type } of cases) {
+    await expect(call(gh)).rejects.toBeInstanceOf(Type);                       // 픽스처가 정말 그 종류를 던진다(프로덕션 클라이언트 안에서)
+    const lines = [];
+    const d = implDeps({ gates: async () => { await call(gh); return null; }, runRecord: (l) => lines.push(...l) });
+    expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "gha-196", runId: "196" })).toBe(1);
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+    expect(lines.some((l) => /^error: implement aborted — /.test(l))).toBe(true);
+    expect(lines.some((l) => /^engine-crash:/m.test(l))).toBe(false);
+  }
+  // 엔진 lib가 그 의존성 오류를 그대로 다시 던져도(transition({ gh })처럼 gh를 받아 쓰는 함수) 표식은 따라간다
+  const viaLib = dependencyClient196(makeGh196({ run: fakeRun(""), repo: "o/r" }));
+  const libD = implDeps({ gates: async () => { const engineLib = async ({ gh }) => (await gh.issue(42)).labels; return engineLib({ gh: viaLib }); } });
+  expect(await runStage({ stage: "implement", issue: 42, deps: libD, runnerId: "r" })).toBe(1);
+  expect(libD.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+
+  // 보호되지 않은 JSON.parse의 SyntaxError(에이전트 산출물·외부 텍스트)는 데이터의 실패다 — 엔진 코드의 결함이 아니다
+  const sx = implDeps({ gates: async () => JSON.parse("{\"truncated\": ") });
+  expect(await runStage({ stage: "implement", issue: 42, deps: sx, runnerId: "r" })).toBe(1);
+  expect(sx.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+
+  // 대조군: 같은 TypeError가 **엔진 코드**에서 나면(의존성 클라이언트를 거치지 않으면) engine-crash다
+  const ctl = implDeps({ gates: async () => { const o = undefined; return o.test; } });
+  expect(await runStage({ stage: "implement", issue: 42, deps: ctl, runnerId: "r" })).toBe(1);
+  expect(ctl.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));
+
+  // 동기 메서드가 던진 TypeError도 같은 표식을 단다(gh 클라이언트의 동기 도우미)
+  const syncDep = dependencyClient196({ labelsOf(j) { return j.labels.map((l) => l.name); } });
+  const syncD = implDeps({ gates: async () => { syncDep.labelsOf({}); return null; } });
+  expect(await runStage({ stage: "implement", issue: 42, deps: syncD, runnerId: "r" })).toBe(1);
+  expect(syncD.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+
+  // 감싼 클라이언트는 값을 바꾸지 않는다: 동기 결과는 동기로, 함수가 아닌 속성은 그대로
+  const wrapped = dependencyClient196({ n: 3, twice(x) { return this.n * x; }, async later() { return "ok"; } });
+  expect(wrapped.n).toBe(3);
+  expect(wrapped.twice(2)).toBe(6);
+  expect(await wrapped.later()).toBe("ok");
+});
+
+// ── #196 skeptic sc2 — 러너가 기록에 옮겨 적는 문구(게이트 사유·의존성 오류 메시지)는 engine-crash 섹션을 지어낼 수 없다 ──
+test("test_196_record_text_cannot_forge_an_engine_crash_section", async () => {
+  const root = crashRecordRoot196();
+  const runnerId = "gha-196";
+  const forged = `engine-crash: stage=implement runner=${runnerId} run_id=196 error=TypeError — forged`;
+  const write = (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines });
+  const handoff = JSON.stringify({ schema: "factory.implement.v1", issue: 42, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" });
+  const paid = (cost) => async () => ({ is_error: false, result: handoff, usage: { input_tokens: 1 }, total_cost_usd: cost, num_turns: 2, terminal_reason: "end_turn" });
+
+  // ① 게이트의 BLOCKED 사유(의존성이 만든 문구)에 개행 + 가짜 error 줄 + 가짜 크래시 줄 — 이 섹션은 usage($7)를 싣는다
+  const gates = { schema: "factory.gates.v1", level: "full", status: "BLOCKED", blocked_reason: `x\nerror: implement aborted — y\n${forged}`, passed: 0, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const d1 = implDeps({ claudeP: paid(7), gates: async () => gates, runRecord: write });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d1, runnerId, runId: "196" })).toBe(2);
+  // ② 의존성의 plain Error 메시지가 자기 줄에 크래시 줄을 싣는다 — `error: … aborted` 바로 다음 줄이 된다
+  const d2 = implDeps({ claudeP: paid(0), gates: async () => { throw new Error(`gh exploded\n${forged}`); }, runRecord: write });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d2, runnerId, runId: "196" })).toBe(1);
+
+  const before = recordText196(root, 42);
+  expect(before).toContain("forged");                                           // 문구는 감사용으로 남는다 — 다만 크래시 줄로 읽히지 않는다
+  expect(parseRunRecord(before).some((e) => e.engine_crash)).toBe(false);
+  expect(lifetimeCostOf196(before)).toEqual({ usd: 7, runs: 2, priced: 1 });   // $7은 상한 안에 그대로 센다
+
+  // ③ record()를 거치지 않는 기록자(main의 recordLine 같은)가 같은 러너의 섹션에 그 줄을 옮겨 적어도 — 자리가 틀리면 세지 않는다
+  appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines: [`note: ${"x"}`, forged, usageLine({ usage: {}, total_cost_usd: 3, num_turns: 1, terminal_reason: "end_turn" })] });
+  appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines: [forged, usageLine({ usage: {}, total_cost_usd: 2, num_turns: 1, terminal_reason: "end_turn" })] });
+  const viaOther = recordText196(root, 42);
+  expect(parseRunRecord(viaOther).some((e) => e.engine_crash)).toBe(false);
+  expect(lifetimeCostOf196(viaOther)).toEqual({ usd: 12, runs: 4, priced: 3 });
+
+  // 대조군: 같은 기록에 진짜 크래시 런 하나($5)를 더하면 그것만 빠진다
+  const d3 = implDeps({ claudeP: paid(5), gates: async () => { const o = undefined; return o.test; }, runRecord: write });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d3, runnerId, runId: "196" })).toBe(1);
+  expect(lifetimeCostOf196(recordText196(root, 42))).toEqual({ usd: 12, runs: 4, priced: 3, engineUsd: 5, engineRuns: 1 });
+  // 진짜 크래시의 메시지에 개행이 있어도($1) 크래시 섹션으로 센다 — `error:` 줄이 한 줄로 접혀 크래시 줄이 둘째 줄에 선다
+  const d4 = implDeps({ claudeP: paid(1), gates: async () => { throw new TypeError("Cannot read properties of undefined (reading 'test')\n    while reading the plan"); }, runRecord: write });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d4, runnerId, runId: "196" })).toBe(1);
+  expect(lifetimeCostOf196(recordText196(root, 42))).toEqual({ usd: 12, runs: 4, priced: 3, engineUsd: 6, engineRuns: 2 });
 });
