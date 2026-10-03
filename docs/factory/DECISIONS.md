@@ -4144,3 +4144,21 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 (= `makeStageGatesDep`·`makeMergeDiffFilesDep`·`makeMergeSuiteFailuresDep`, `main()`이 그대로 펼친다), `lib/gates.js` `runStageGates` 주석(코드 변경 없음).
 factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. 설계 스펙 §5.2.5의 "`gates.js`는 절대 재시도로 GREEN을 만들지 않는다"는 그대로
 참이다(재실행은 merge-stage가 하고, 판정을 뒤집지 않는다); 같은 절의 "review·merge는 RED를 RED로 둔다"는 ADR-011 개정과 이 ADR이 대체한다.
+
+## ADR-034 두 레인 — 공장은 심판이기도 하다 — 2026-10-04 (운영 세션 결정, 소유자 /goal 위임)
+
+소유자(2026-10-04): "여전히 factory 기반으로 작업하는 게 불편하고 사용감이 떨어져 — single agent에 비해 직관적이지 않고, 가시적이지 않고, 더 나은
+개발을 하고 있다는 확신이 안 들어." 3일 전수 집계(`docs/research/factory-friction-2026-10.md`): needs-human 40회 중 사람의 판단이 필요했던 것은
+1회, 엔진 결함 12개가 이슈의 K·R·예산을 먹었고, 공장이 잡은 결함 7건은 PR 어디에도 적히지 않았다. 삼각토론 뒤 결정:
+1. **두 레인.** 상호작용 레인: 사람(또는 단일 에이전트)이 짜고 PR을 연다; 공장은 `factory review --pr <n>`으로 그 PR에 리뷰 로스터·verifier·
+   게이트를 돌리고 `## Factory evidence`를 PR에 적는다(plan 토론은 `factory plan <issue>`로 사전에). 머지는 사람. 다크 레인(기존 큐)은 저위험
+   티어와 자기생성 이슈(flaky·하네스·개선)에 쓴다. 소유자의 비타협(plan 다중 역할·리뷰 다중 역할·verifier·triage 에이전트)은 두 레인 모두 유지.
+2. **증거는 코드가 조립한다.** `## Factory evidence`(done_when↔테스트·prove-test, 리뷰 라운드별 판정과 must_fix의 수정 커밋, 게이트, 가드/돌연변이,
+   거부한 범위 밖 변경, 비용·소요)는 run 기록·핸드오프에서 러너가 결정적으로 만든다 — 에이전트 산문은 들어가지 않는다.
+3. **상태 카드.** 이슈마다 러너가 편집하는 코멘트 하나(단계·이유·사람이 할 일·K/R·비용·최근 이벤트) + `factory status`. 마커 코멘트는 그대로.
+4. **"다시 돌려"는 하나(`factory retry <n>`)**, 그리고 **엔진 결함으로 죽은 런은 K·R·평생 예산에 세지 않는다** — `abortStage`가 자기 코드에서
+   찍는 닫힌 집합(미러 판정 불가·크래시·환경)만.
+5. **rework 라운드 ≥2는 빼는 것만** — 새 파일·새 export·새 done_when은 self-gate RED.
+6. **판정 경로 자동 머지(ADR-033 `auto_merge_judge`)는 켜지 않는다** — 2레인의 증거가 2주 쌓인 뒤 재검토. 비판정 자동 머지는 유지.
+7. **측정에 기준선.** 주간 표에 같은 종류 이슈의 상호작용 레인 vs 다크 레인(시간·비용·리뷰가 잡은 결함 수)을 나란히 둔다.
+연기: 판정 로직의 `tree-truth` 통합(12개 결함이 한 뿌리라는 가정은 과장 — 1.4.43·#172·#187은 다른 과).
