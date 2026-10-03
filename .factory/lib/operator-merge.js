@@ -1,4 +1,4 @@
-import { NON_JUDGE_GLOBS, NON_JUDGE_EXCLUDES, isNonJudgePath } from "./non-judge-paths.js";
+import { NON_JUDGE_GLOBS, NON_JUDGE_EXCLUDES, isNonJudgePathIn } from "./non-judge-paths.js";
 
 /**
  * ── 운영 세션의 비판정 경로 머지 (2026-10-02, 소유자 결정) ──────────────────────────────────────────
@@ -16,19 +16,24 @@ import { NON_JUDGE_GLOBS, NON_JUDGE_EXCLUDES, isNonJudgePath } from "./non-judge
  * (`gh api …/merge`, GraphQL, 복합 명령, `--admin`)를 여전히 막는다.
  */
 export { NON_JUDGE_GLOBS as OPERATOR_MERGE_GLOBS, NON_JUDGE_EXCLUDES as OPERATOR_MERGE_EXCLUDES };
-export const isOperatorMergePath = isNonJudgePath;
+/**
+ * 운영 세션의 문 = 저장소 맥락을 받는 비판정 판정 그대로(`isNonJudgePathIn`). 엔진 저장소(`engine: true`)에서만 판정 닫힘 밖의 엔진
+ * 모듈이 열리고, 채택자 저장소(기본값)에서는 #178 이전과 같이 문서 쪽만 열린다 — 채택자 저장소의 설치된 엔진(.factory 아래)은 사람이
+ * 머지한다(#178 rework cf1·arch1). 맥락은 `bin/operator-merge-check.js`가 `isEngineCheckout`으로 정해 넘긴다.
+ */
+export const isOperatorMergePath = (p, { engine = false } = {}) => isNonJudgePathIn(p, { engine });
 
 const checkState = (c) => String(c?.conclusion ?? c?.state ?? "").toUpperCase();
 
 /**
  * @param {object} pr `gh pr view --json number,isDraft,mergeable,baseRefName,files,statusCheckRollup`의 결과
- * @param {{defaultBranch?: string}} opts
+ * @param {{defaultBranch?: string, engine?: boolean}} opts `engine`은 이 체크아웃이 엔진 저장소일 때만 `true`(기본 `false` — 닫힌 쪽)
  * @returns {{ok: boolean, reasons: string[], judge: string[]}}
  */
-export function operatorMergeVerdict(pr, { defaultBranch = "main" } = {}) {
+export function operatorMergeVerdict(pr, { defaultBranch = "main", engine = false } = {}) {
   const reasons = [];
   const files = Array.isArray(pr?.files) ? pr.files.map((f) => (typeof f === "string" ? f : f?.path)).filter(Boolean) : [];
-  const judge = files.filter((p) => !isOperatorMergePath(p));
+  const judge = files.filter((p) => !isOperatorMergePath(p, { engine }));
   if (!files.length) reasons.push("the PR lists no changed files — nothing to classify, so nothing to allow");
   if (judge.length) reasons.push(`judge path(s) in the PR — a person merges these: ${judge.slice(0, 8).join(", ")}${judge.length > 8 ? ", …" : ""}`);
   if (pr?.isDraft) reasons.push("the PR is a draft");
