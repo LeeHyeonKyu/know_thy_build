@@ -5166,3 +5166,94 @@ test("test_179_engine_is_fixed_at_charter_ready_before_checkout", async () => {
   expect(iReady).toBeGreaterThan(-1);
   expect(iCheckout).toBeGreaterThan(iReady);
 });
+
+// ── #195 — run-stage wires the PR-body evidence through the gh.js adapter ──────────────────────────────────────────────────
+// PR-body I/O is the runner's: `gh.prBody` (`gh pr view --json body`) read immediately before `gh.editPrBody`
+// (`gh pr edit --body-file -`, the body on stdin — never a shell string), each with a timeout and no retry.
+import { makePrEvidenceDeps } from "../bin/run-stage.js";
+import { makeGh as makeGh195 } from "../lib/gh.js";
+import { EVIDENCE_START as EVIDENCE_START_195 } from "../lib/evidence.js";
+import { heartbeatBody as heartbeatBody195 } from "../lib/heartbeat.js";
+import { budgetLine as budgetLine195 } from "../lib/budget.js";
+
+test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
+  const repo = "acme/app";
+  // (1) the adapter: argv shape, the body on stdin, one call each.
+  const run = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ body: "Closes #7\n" }), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh195({ run, repo });
+  expect(await gh.prBody(9)).toBe("Closes #7\n");
+  expect(run.calls[0].args).toEqual(["pr", "view", "9", "-R", repo, "--json", "body"]);
+  const hostile = "line | pipe\n> quote; $(rm -rf /)\n";
+  await gh.editPrBody(9, hostile);
+  expect(run.calls[1].args).toEqual(["pr", "edit", "9", "-R", repo, "--body-file", "-"]);
+  expect(run.calls[1].opts.input).toBe(hostile);
+  expect(run.calls).toHaveLength(2);
+  // A hanging gh times out — one call, no retry.
+  const hang = makeFakeRun([{ match: () => true, result: () => new Promise(() => {}) }]);
+  const slow = makeGh195({ run: hang, repo, sleep: async () => {} });
+  await expect(slow.prBody(9, { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+  expect(hang.calls).toHaveLength(1);
+  await expect(slow.editPrBody(9, "x", { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+  expect(hang.calls).toHaveLength(2);
+  // A failing gh rejects — one call, no retry.
+  const bad = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 502" } }]);
+  await expect(makeGh195({ run: bad, repo, sleep: async () => {} }).editPrBody(9, "x")).rejects.toThrow(/HTTP 502/);
+  expect(bad.calls).toHaveLength(1);
+
+  // (2) the dep: the hydrated local record + this run's live gates → the marked section, read-modify-write on the PR body.
+  const root = mkdtempSync(join(tmpdir(), "rs195-"));
+  appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-501", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 4.5, runs: 6, ok: true })] });
+  const recordPath = join(root, "docs/factory/runs/7.md");
+  const issueComments = [
+    { body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: "2026-10-03T08:00:00Z" },
+    { body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z" },
+  ];
+  const seq = [];
+  let body = "Closes #7\n\nauthor text\n";
+  const fakeGh = {
+    comments: vi.fn(async () => { seq.push("comments"); return [...issueComments]; }),
+    prBody: vi.fn(async () => { seq.push("prBody"); return body; }),
+    editPrBody: vi.fn(async (_pr, b) => { seq.push("editPrBody"); body = b; }),
+    comment: vi.fn(async (_n, b) => { seq.push("comment"); issueComments.push({ body: b, createdAt: "2026-10-03T12:31:00Z" }); }),
+  };
+  const deps = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => readFileSync(recordPath, "utf8"), now: () => "2026-10-03T12:30:00Z", timeoutMs: 1234 });
+  const live = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 4, failed: 0, failing: [] };
+  const r = await deps.publishPrEvidence({ pr: 9, route: "merge", gates: live, gatesRerun: true, reason: null });
+  expect(r.ok).toBe(true);
+  expect(seq).toEqual(["comments", "prBody", "editPrBody"]);
+  expect(fakeGh.prBody).toHaveBeenCalledWith(9, { timeoutMs: 1234 });
+  expect(fakeGh.editPrBody).toHaveBeenCalledWith(9, body, { timeoutMs: 1234 });
+  expect(body.startsWith("Closes #7\n\nauthor text\n")).toBe(true);
+  expect(body.split(EVIDENCE_START_195).length - 1).toBe(1);
+  expect(body).toContain("level=full status=GREEN passed=4");
+  expect(body).toContain("rerun: yes");
+  expect(body).toContain("budget: lifetime $4.50 / $60 over 6 run(s)");
+  expect(body).toContain("queued → now: 4h 30m");
+  expect(body).toContain(r.markdown);
+  // A second publish (a rerun of the merge job) re-reads the body and still leaves exactly one section.
+  await deps.publishPrEvidence({ pr: 9, route: "merge", gates: live, gatesRerun: false, reason: null });
+  expect(body.split(EVIDENCE_START_195).length - 1).toBe(1);
+  expect(body).toContain("rerun: no");
+  // The marked issue comment goes out at most once across reruns.
+  await deps.postEvidenceComment(r.markdown);
+  await deps.postEvidenceComment(r.markdown);
+  expect(fakeGh.comment).toHaveBeenCalledTimes(1);
+  expect(fakeGh.comment.mock.calls[0][0]).toBe(7);
+  expect(fakeGh.comment.mock.calls[0][1].startsWith(EVIDENCE_START_195)).toBe(true);
+  // A gh failure surfaces as a rejection (merge-stage turns it into the one FAIL line).
+  fakeGh.editPrBody.mockRejectedValueOnce(new Error("gh pr edit failed (1): HTTP 502"));
+  await expect(deps.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "x" })).rejects.toThrow(/HTTP 502/);
+  // No record on disk → still a section (rows from comments only), never a throw.
+  const noRec = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z" });
+  expect((await noRec.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "protected paths changed" })).ok).toBe(true);
+
+  // (3) the evidence module is the base-branch engine's: a static top-level import (resolved when the process starts on the
+  // base checkout, before checkoutHead) — never a dynamic import from the PR's tree — and main() wires these deps.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/^import \{[^}]*\bbuildEvidence\b[^}]*\} from "\.\.\/lib\/evidence\.js";$/m);
+  expect(src).not.toMatch(/import\(\s*[^)]*evidence/);
+  expect(src).toMatch(/\.\.\.makePrEvidenceDeps\(\{ gh, issue,/);
+});

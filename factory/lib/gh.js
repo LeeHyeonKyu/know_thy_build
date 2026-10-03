@@ -74,6 +74,17 @@ export async function resolveRepo({ run }) {
 export const LABEL_RETRY_DELAYS_MS = [1000, 3000, 9000];
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** #195 — the PR-body read/edit bound (the merge stage puts its own, larger bound around the whole evidence step). */
+export const PR_BODY_TIMEOUT_MS = 30 * 1000;
+/** Reject when `p` has not settled within `ms`. The timer never outlives the race. */
+function withTimeout(p, ms, what) {
+  let timer;
+  return Promise.race([
+    p,
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 /**
  * 팩토리 자신의 계정 **이름**(값이 아니다) — commit status의 게시자를 대조할 기준(외부 감사 H1b).
  *
@@ -631,6 +642,18 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      */
     async prReady(pr) {
       await gh(["pr", "ready", String(pr), "-R", repo]);
+    },
+    /**
+     * #195 — the PR body, read right before the runner rewrites its evidence section (read-modify-write). Bounded by a
+     * timeout and never retried: the caller sits right before a merge or a hand-off, and a slow GitHub must not hold it.
+     */
+    async prBody(pr, { timeoutMs = PR_BODY_TIMEOUT_MS } = {}) {
+      const out = await withTimeout(gh(["pr", "view", String(pr), "-R", repo, "--json", "body"]), timeoutMs, "gh pr view --json body");
+      return JSON.parse(out).body ?? "";
+    },
+    /** #195 — replace the PR body. The body goes on stdin (`--body-file -`), never into argv. Timeout, no retry. */
+    async editPrBody(pr, body, { timeoutMs = PR_BODY_TIMEOUT_MS } = {}) {
+      await withTimeout(gh(["pr", "edit", String(pr), "-R", repo, "--body-file", "-"], { input: body }), timeoutMs, "gh pr edit --body-file");
     },
     /**
      * ADR-021 — 두 배우 모드의 승인 한 번. **머지 배우의 토큰으로만** 의미가 있다: PR을 연 계정
