@@ -1371,7 +1371,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * `factory:planned`(implement가 다시 뜬다; rework 라운드가 아니라 K를 태우지 않는다), 그 뒤는 needs-human이다.
      */
     if (stage === "implement" && v.data?.verifier?.verdict === "rejected" && d.selfGateRetry) {
-      const findings = (v.data.verifier.findings || []).map((f) => ({ check: "verifier", blocking: true, detail: String(f?.claim ?? f?.detail ?? f).slice(0, 400) }));
+      // #196 rework sec1 — implement.v1은 findings의 타입을 보지 않는다: 배열이 아니면(문자열·객체·숫자) "findings 없음"이다. 예전의 `|| []`는
+      // `"x".map`에서 TypeError를 내 에이전트가 고른 산출물로 engine-crash를 만들 수 있었다(그 런의 비용이 상한에서 빠졌다).
+      const findings = (Array.isArray(v.data.verifier.findings) ? v.data.verifier.findings : []).map((f) => ({ check: "verifier", blocking: true, detail: String(f?.claim ?? f?.detail ?? f).slice(0, 400) }));
       const summary = findings.map((f) => f.detail.slice(0, 120)).join(" | ") || "verifier rejected";
       const { attempt, total } = await d.selfGateRetry({ head: v.data.head_sha ?? null, findings });
       const bounded = attempt >= 2 || (Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP);

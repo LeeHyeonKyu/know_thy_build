@@ -18,12 +18,22 @@ import { parseRunRecord } from "./usage.js";
  * 그대로 본다). 읽는 쪽은 `?? 0`으로 읽는다. 완료됐지만 엔진 결함으로 판정이 틀린 런(미러 verify·#174 라운드)은 빠지지 않는다 —
  * 그것을 가를 코드 경로가 없고, 문구로 가르면 게이밍이 된다.
  */
+/**
+ * #196 rework sec1 — **상한에서 빠지는 크래시 런은 이슈 평생 한 사건분이다.** engine-crash의 판정은 오류의 종류와 출처라서, 엔진이 에이전트
+ * 산출물을 검증 없이 읽다가 낸 TypeError도 engine-crash다 — 즉 에이전트(와 그것을 프롬프트 주입하는 이슈 본문)가 고를 수 있다. 그 런의 비용이
+ * 무한히 상한 밖으로 나가면 평생 예산(1.4.16)이 뚫린다. 그래서 빼 주는 것은 기록 순서로 앞의 이 개수(첫 크래시 + sweeper의
+ * `ENGINE_CRASH_MAX_RETRIES` 재시도 = 한 blocked 사건)뿐이고, 그 뒤의 크래시 섹션은 보통 런으로 센다(기록에는 크래시로 남는다).
+ * 결정적인 엔진 결함은 한 사건 안에서 사람에게 가고, 같은 엔진에 다시 재큐한 런의 비용은 그 재큐를 고른 쪽의 예산이다.
+ * 달러 상한도, CHARTER 값도 아니다(plan non_goals) — 런 개수이고, 값은 sweeper 상수와 묶여 테스트가 핀한다(budget.js가 sweeper를 import하지 않게).
+ */
+export const ENGINE_CRASH_EXCLUDED_RUNS = 2;
+
 export function lifetimeCostOf(recordText) {
   const entries = recordText ? parseRunRecord(String(recordText)) : [];
   let usd = 0, priced = 0, runs = 0, engineUsd = 0, engineRuns = 0;
   for (const e of entries) {
     const cost = e.cost_usd != null && Number.isFinite(Number(e.cost_usd)) ? Number(e.cost_usd) : null;
-    if (e.engine_crash) { engineRuns++; if (cost != null) engineUsd += cost; continue; }
+    if (e.engine_crash && engineRuns < ENGINE_CRASH_EXCLUDED_RUNS) { engineRuns++; if (cost != null) engineUsd += cost; continue; }
     runs++;
     if (cost != null) { usd += cost; priced++; }
   }

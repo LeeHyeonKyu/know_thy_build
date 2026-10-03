@@ -5463,3 +5463,54 @@ test("test_196_crash_after_usage_is_recorded_counts_its_dollars_once", async () 
   expect(entries.filter((e) => e.engine_crash).map((e) => e.cost_usd)).toEqual([null]);   // 크래시 섹션은 비용을 싣지 않는다
   expect(lifetimeCostOf196(rec)).toMatchObject({ usd: 40, engineUsd: 0, engineRuns: 1 });  // $40은 상한 안에 한 번만
 });
+
+// ── #196 rework sec1 — 에이전트 산출물이 고를 수 있는 크래시는 상한 밖으로 **한 사건분**만 옮길 수 있다 ─────────────────────────────
+// (a) 가젯: implement.v1 스키마는 `verifier.findings`의 타입을 보지 않는다 — 진짜 verifyStage를 통과한 `findings: "x"`(또는 객체·숫자)가
+//     검증자 거부 경로의 `.map`에서 TypeError가 되면 그 런은 engine-crash로 읽혀 비용이 상한에서 빠졌다. 이제 배열이 아닌 findings는
+//     "findings 없음"이고 런은 평소의 재작업 재시도로 간다(크래시도, engine-crash 전이도 없다).
+// (b) 부류: 다른 미검증 읽기가 남아 있어도, 상한에서 빠지는 크래시 런은 이슈 평생 `ENGINE_CRASH_EXCLUDED_RUNS`
+//     (= 첫 크래시 + sweeper의 `ENGINE_CRASH_MAX_RETRIES`, 한 사건)까지다 — 그 뒤의 크래시 섹션은 보통 런으로 센다(여전히 크래시로 기록된다).
+import { ENGINE_CRASH_EXCLUDED_RUNS as ENGINE_CRASH_EXCLUDED_RUNS_196 } from "../lib/budget.js";
+import { ENGINE_CRASH_MAX_RETRIES as ENGINE_CRASH_MAX_RETRIES_196 } from "../lib/sweeper.js";
+
+test("test_196_agent_handoff_cannot_move_crash_cost_out_of_the_cap", async () => {
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  for (const findings of ["x", {}, 7]) {
+    const root = crashRecordRoot196();
+    const handoff = JSON.stringify({ schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "rejected", findings }, orchestration: "workflow", guarantee: "verified" });
+    const retried = [];
+    const d = implDeps({
+      claudeP: async () => ({ is_error: false, result: handoff, usage: { input_tokens: 1 }, total_cost_usd: 9, num_turns: 2, terminal_reason: "end_turn" }),
+      gates: async () => gates,
+      selfGateRetry: async ({ findings: f }) => { retried.push(f); return { attempt: 1, total: 1 }; },
+      runRecord: (lines) => appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-7", lines }),
+    });
+    expect({ findings, code: await runStage({ stage: "implement", issue: 7, deps: d, runnerId: "gha-7", runId: "7" }) }).toEqual({ findings, code: 0 });
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned", reason: expect.stringContaining("verifier rejected (retry 1)") }));
+    expect(retried).toEqual([[]]);
+    const life = lifetimeCostOf196(recordText196(root, 7));
+    expect(life).toMatchObject({ usd: 9, priced: 1 });                              // $9은 상한 안에
+    expect(life).not.toHaveProperty("engineRuns");
+  }
+
+  // (b) 부류의 상한: 같은 이슈의 진짜 크래시 런 4개($10씩) — 앞의 한 사건분만 빠지고 나머지는 상한 안으로 센다
+  expect(ENGINE_CRASH_EXCLUDED_RUNS_196).toBe(ENGINE_CRASH_MAX_RETRIES_196 + 1);
+  const root = crashRecordRoot196();
+  const crash = (runnerId) => implDeps({
+    claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 1 }, total_cost_usd: 10, num_turns: 2, terminal_reason: "end_turn" }),
+    gates: async () => { const o = undefined; return o.test; },
+    runRecord: (lines) => appendRunRecord({ root, issue: 8, stage: "implement", runnerId, lines }),
+  });
+  for (let i = 1; i <= 4; i++) {
+    const d = crash(`gha-${i}`);
+    expect(await runStage({ stage: "implement", issue: 8, deps: d, runnerId: `gha-${i}`, runId: String(i) })).toBe(1);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));
+  }
+  const rec = recordText196(root, 8);
+  expect(parseRunRecord(rec).filter((e) => e.engine_crash)).toHaveLength(4);   // 넷 다 크래시로 기록돼 있다
+  const excluded = ENGINE_CRASH_EXCLUDED_RUNS_196;
+  expect(lifetimeCostOf196(rec)).toEqual({ usd: 10 * (4 - excluded), runs: 4 - excluded, priced: 4 - excluded, engineUsd: 10 * excluded, engineRuns: excluded });
+  expect(budgetCheck196({ charter: { budget: { usd_per_issue: 15 } }, recordText: rec }).ok).toBe(false);   // 넘친 크래시 비용이 상한을 다시 연다
+});
+import { budgetCheck as budgetCheck196 } from "../lib/budget.js";

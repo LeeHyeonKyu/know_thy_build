@@ -4223,6 +4223,14 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
    blocked-retry 마커를 남기지 않았다 — 한 장부로 세면 같은 주기의 크래시 재시도가 뒤따른 `other`의 KTB-15b 한 번이나 `api-error`의 세
    번 중 하나를 먹고, 앞선 `other` 재시도가 크래시의 상한을 먹는다. 대기 판정(`blockedRetryPendingRun`)은 "마지막으로 띄운 런"을 보므로
    두 장부를 다 본다.
+   **rework cf1 — 트리아지에서는 그 상한이 브레이크가 아니었다, 고친 모양.** 시도 횟수의 창(`commentsSinceCycleStart`)은 `to=factory:queue`
+   전이를 누가 썼든 새 주기로 연다. 그런데 트리아지 재시도 런은 맨 앞에서 `blocked → queue`로 hop한다(`BLOCKED_RETRY.triage.hop`) — 그
+   전이가 창을 열어 직전의 engine-crash 재시도 마커가 창 밖으로 밀렸고, 다음 크래시는 다시 "시도 0"이었다(무한 루프, 그 비용은 2의 분할로
+   상한에서도 빠졌다). 지금 engine-crash 장부만 `blockedHopOpensCycle: false`로 창을 잰다: `blocked → queue` 전이는 사람 계정의
+   `by=human`일 때만 새 주기다. 그 엣지의 비사람 생산자는 재시도 hop 하나뿐이고, 흉내 낸 코멘트는 리셋을 **줄일** 뿐이다(닫힌 쪽).
+   `needs-human → queue` 재큐와 릴리스 재시도는 그대로 새 주기다. 다른 원인의 창은 바이트 하나 안 바뀐다 — 그 원인들의 트리아지 재시도는
+   예전처럼 평생 예산이 마지막 브레이크다(이 ADR 밖). 핀: `test_196_triage_engine_crash_is_bounded_across_the_runner_hop`(진짜
+   `transition()`으로 hop을 sweep 사이에 재생하고, 재큐 대조군을 둔다), `test_196_runner_hop_keeps_other_triage_causes_as_before`.
 4. **KTB-32는 그대로다 — "다시 돌려"는 안내로 하나가 된다.** `--retry`(--human 없이)는 여전히 거절된다. 바뀐 것은 거절·usage·
    `docs/factory/ops/person-steps.sh`가 모두 두 명령을 그대로 말한다는 것이다: 에이전트·CI는 재큐(`<n> factory:queue`), 사람은 중단 지점 재개
    (`<n> --human --retry`). 호출자에 따라 갈리는 단일 `--retry`는 **미뤘다**: transition.test.js의 KTB-32 고정 두 개를 뒤집어야 하고,
@@ -4240,6 +4248,16 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
 `"engine-crash"`를 더했다. KTB-35가 `gates-unhandled`를 더할 때와 같은 선례이고, CHARTER:110("기존 테스트 미수정")에 대한 **그 한 줄에 한정한**
 예외다. `sweeper.test.js`의 nit 9 순서 핀, run-stage F1, KTB-32 고정들은 바이트 그대로다. 이슈 본문에 `tests_changed_allowed:`가 없으므로 이
 변경은 정책 게이트에 걸려 사람이 머지한다 — 그것이 맞는 경로다.
+
+**rework sec1 — 에이전트가 고를 수 있는 크래시와 예산.** "엔진 코드가 던진 TypeError = 엔진 결함"은 분류로는 맞지만 예산 면제의 근거로는
+부족하다: 엔진이 에이전트 산출물을 검증 없이 읽는 자리(예: 스키마가 타입을 보지 않는 `verifier.findings`를 `.map`하던 검증자 거부 경로)에서는
+에이전트(와 그것을 프롬프트 주입하는 이슈 본문)가 그 TypeError를 고를 수 있고, 그러면 그 런의 비용이 상한 밖으로 나갔다. 두 겹으로 닫는다:
+(a) 그 가젯을 고쳤다 — 배열이 아닌 findings는 "findings 없음"이고 런은 평소의 재작업 재시도로 간다; (b) 부류 전체에 상한을 둔다 —
+`lifetimeCostOf`가 빼 주는 크래시 섹션은 이슈 평생 기록 순서로 앞의 `ENGINE_CRASH_EXCLUDED_RUNS = 2`개(첫 크래시 + `ENGINE_CRASH_MAX_RETRIES`
+재시도 = 한 blocked 사건)뿐이고, 그 뒤의 크래시 섹션은 보통 런으로 센다(기록에는 크래시로 남고, sweeper의 라우팅·문장은 그대로다). 결정적인
+엔진 결함은 한 사건 안에서 사람에게 가고, 같은 엔진으로 다시 재큐한 런의 비용은 그 재큐의 몫이다. 이것은 런 개수이지 `engineUsd` 달러 상한도
+CHARTER 값도 아니다(plan non_goals). 값은 sweeper 상수와 묶여 `test_196_agent_handoff_cannot_move_crash_cost_out_of_the_cap`가 핀한다(그
+테스트는 진짜 verifyStage를 통과한 `findings: "x"`·`{}`·`7`과, 진짜 크래시 런 넷의 기록으로 두 겹을 따로 실패시킨다).
 
 **남은 위험**: "어떤 throw가 engine-crash인가"의 답은 1에 적은 그대로다 — 엔진 코드가 던진 TypeError·ReferenceError·RangeError뿐이다. 그 경계에서
 틀릴 수 있는 방향은 둘이다: plain Error를 던지는 엔진 버그는 engine-crash가 **아니다**(오늘의 경로로 간다 — 안전한 쪽). 그리고 엔진 코드가
