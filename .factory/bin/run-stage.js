@@ -42,7 +42,7 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage } from "../lib/merge-stage.js";
+import { runMergeStage, idlessFailedSuites } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -1622,12 +1622,16 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
  */
 export function gateOutputPaths({ root, harness = {} }) {
   const rel = [".factory/out/gates.json"];
-  for (const name of ["unit", "integration", "e2e"]) rel.push(harness.test?.[`${name}_report`] || `.factory/out/${name}.json`);
+  for (const name of ["unit", "integration", "e2e"]) rel.push(testReportRel(harness, name));
   rel.push(harness.commands?.proof?.coverage_report, harness.commands?.proof?.mutation_report);
   const rootAbs = resolve(root);
-  const under = (p) => p === rootAbs || p.startsWith(rootAbs + sep);
-  const paths = rel.filter(Boolean).map((p) => resolve(isAbsolute(p) ? p : join(rootAbs, p))).filter(under);
+  const paths = rel.filter(Boolean).map((p) => resolve(isAbsolute(p) ? p : join(rootAbs, p))).filter((p) => insideRoot(rootAbs, p));
   return [...new Set(paths)];
+}
+/** Is absolute `p` the repo root or under it — the one rule for "ours to delete" (§gateOutputPaths, §makeMergeSuiteFailuresDep). */
+export function insideRoot(root, p) {
+  const rootAbs = resolve(root);
+  return p === rootAbs || p.startsWith(rootAbs + sep);
 }
 export function resetGateOutputs({ root, harness, rm = (p) => rmSync(p, { force: true }) }) {
   const paths = gateOutputPaths({ root, harness });
@@ -2273,6 +2277,101 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
     const checkout = await run("git", ["checkout", "--detach", head_sha], { cwd: root });
     if (checkout.code !== 0) return { ok: false, reason: `git checkout failed: ${checkout.stderr.trim()}` };
     return { ok: true, sha: head_sha, pr };
+  };
+}
+
+/**
+ * The `gates` dep: 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이다;
+ * 유일한 예외는 merge다(#157, ADR-034): RED가 PR diff 밖의 파싱된 테스트 실패뿐이면 runMergeStage가 이 dep을 **한 번 더**
+ * 부르고, 그 두 번째 호출이 `gates.json`을 덮어쓴다 — 첫 RED는 재실행 **전에** 쓴 run 기록 줄(`rerun 1/1`·gates-detail)에만 남는다.
+ * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의 자기 신고에서 읽고,
+ * 그마저 없으면 CHARTER의 기본값으로 채운다. #157: extracted from `main()` unchanged so the merge re-run can be
+ * exercised through the dep production uses — runMergeStage calls this same dep a second time for the re-run.
+ * `getHarness`/`getCharter` are getters because `main()` (re)loads both after the deps object is built.
+ */
+export function makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log = console.log }) {
+  return async (ctx) => {
+    if (!GATED_STAGES.has(stage)) return null;
+    const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? getCharter().tier_default) : ctx.tier;
+    const result = await runStageGates({
+      run, cwd: root, harness: getHarness(), stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
+      saveQuarantine: (q) => writeQuarantine(root, q),
+      transitionIssue,
+    });
+    mkdirSync(join(root, ".factory/out"), { recursive: true });
+    writeFileSync(gatesPath, JSON.stringify(result, null, 2));
+    log(verdictLine(result));
+    return result;
+  };
+}
+
+/**
+ * #157 — merge stage 전용: the file names of this PR's `<base>...HEAD` diff, from the same `changedFiles` every
+ * other stage uses. Its git call is asked with `--no-renames` (the flag the must_not gate already uses): plain git
+ * reports a move as ONE `R` row and `changedFiles().all` keeps only its new path, so a PR that moves a file out of
+ * server/** would not look like it touched server/**. With the flag git reports `D old` + `A new`, both in `all`
+ * (D rows are in `all` too). `{ ok:true, files }` or `{ ok:false, files:[], reason }` — a MergeBaseError/GitDiffError
+ * (or anything else) is "not readable", never "empty", so the merge stage falls back to today's single-run outcome.
+ */
+export function makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }) {
+  const noRenames = (cmd, args = [], opts) => run(cmd, cmd === "git" && args[0] === "diff" ? ["diff", "--no-renames", ...args.slice(1)] : args, opts);
+  return async () => {
+    try {
+      const base = await mergeBase();
+      const changed = await changedFiles({ run: noRenames, cwd: root, base, harness: getHarness() });
+      return { ok: true, files: changed.all };
+    } catch (e) {
+      return { ok: false, files: [], reason: `${e?.message || e}` };
+    }
+  };
+}
+
+/** Where a test gate's JSON report lives — the rule `runGates` reads it by (`harness.test.<gate>_report`, else `.factory/out/<gate>.json`). */
+export const testReportRel = (harness, gate) => harness?.test?.[`${gate}_report`] || `.factory/out/${gate}.json`;
+
+/**
+ * #157 — merge stage 전용: which test files of a RED gates result failed with no failed assertion (load error,
+ * suite hook), read from the reports that run left in the repo (§idlessFailedSuites in lib/merge-stage.js). The
+ * merge stage calls it right after each gates run, before anything rewrites the reports. Never throws.
+ */
+export function makeMergeSuiteFailuresDep({ root, getHarness, readFile }) {
+  return async (gates) => {
+    try {
+      const harness = getHarness();
+      const reportAt = (gate) => { const rep = testReportRel(harness, gate); return resolve(isAbsolute(rep) ? rep : join(root, rep)); };
+      // #157 cf2: a RED test gate whose report lives outside the repo cannot be vouched for. `resetGates` leaves such a
+      // file alone (§gateOutputPaths — never delete what is not ours), so a re-run that writes no report would read the
+      // first run's back as "RED twice" — a false flaky candidate. Not vouched for = no re-run (§rerunEligibility); the
+      // reason names the gate, never the host path (it reaches the public run record).
+      for (const [name, g] of Object.entries(gates?.gates || {})) {
+        if (g?.status === "RED" && typeof g.parsed === "boolean" && !insideRoot(root, reportAt(name))) {
+          return { ok: false, files: [], reason: `${name} report is outside the repo root — resetGates cannot clear it before a re-run` };
+        }
+      }
+      return idlessFailedSuites({ gates, root, readReport: (gate) => readFile(reportAt(gate)) });
+    } catch (e) {
+      return { ok: false, files: [], reason: `${e?.message || e}` };
+    }
+  };
+}
+
+/**
+ * #157 — the gate deps `main()` spreads into its deps object: the `gates` dep every gated stage uses and the
+ * merge-only `diffFiles` and `suiteFailures` deps the re-run rule reads, plus `resetGates`, which every stage runs first and the merge
+ * re-run runs again before its second gate run. One assembly, so the merge re-run test goes through exactly the
+ * object production builds (a missing `diffFiles` here is a missing `diffFiles` in production, and vice versa).
+ */
+export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }) {
+  return {
+    gates: makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }),
+    diffFiles: makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }),
+    suiteFailures: makeMergeSuiteFailuresDep({ root, getHarness, readFile }),
+    /**
+     * 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)가 이번 런의 전이를 대신하지 못하게 — 스테이지 첫 전이보다
+     * 먼저 지운다. #157 cf1: merge의 재실행 직전에도 같은 함수가 불린다 — 재실행이 리포트를 쓰지 못했는데 첫 런의 리포트가 남아 있으면
+     * 같은 id 집합이 "두 번 RED"로 읽혀 거짓 'flaky 후보'가 된다. 그래서 `gates`와 같은 조립에서 나온다: 재실행 테스트가 실제 배선을 지난다.
+     */
+    resetGates: async () => { resetGateOutputs({ root, harness: getHarness() }); },
   };
 }
 
@@ -3057,8 +3156,7 @@ async function main() {
     buildContext: makeBuildContextDep({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt: (c) => { ctxCache = c; } }),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
-    /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
-    resetGates: async () => { resetGateOutputs({ root, harness }); },
+    // `resetGates`(지난 런의 게이트 판정 파일과 그 재료를 스테이지 첫 전이보다 먼저 지운다)는 아래 makeStageGateDeps 조립에서 온다 — #157 cf1.
     /**
      * **이번 주기에 실제로 끝난 rework 라운드 수**(r1 SF2). 두 가지가 범위를 정한다:
      *   - KTB-25: 마지막 재큐(`… to=factory:queue`) **이후**만 센다 — 재큐는 새 주기의 시작이고, 그 앞의
@@ -3100,24 +3198,18 @@ async function main() {
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
     /**
-     * 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다.
+     * 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이고, merge만
+     * PR diff 밖의 RED에 한해 한 번 더 부른다(#157, ADR-034 — 두 번째 호출이 gates.json을 덮어쓴다, §makeStageGatesDep).
      * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의
      * 자기 신고에서 읽고, 그마저 없으면 CHARTER의 기본값으로 fail closed 대신 보수적으로 채운다.
      */
-    gates: async (ctx) => {
-      if (!GATED_STAGES.has(stage)) return null;
-      const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default) : ctx.tier;
-      const result = await runStageGates({
-        run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
-        saveQuarantine: (q) => writeQuarantine(root, q),
-        // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
-        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal, admission }),
-      });
-      mkdirSync(join(root, ".factory/out"), { recursive: true });
-      writeFileSync(gatesPath, JSON.stringify(result, null, 2));
-      console.log(verdictLine(result));
-      return result;
-    },
+    // `gates` + (#157, merge stage 전용) `diffFiles`: the PR's `<base>...HEAD` file list for the merge re-run rule
+    // (§makeMergeDiffFilesDep), and `suiteFailures`: test files that failed with no assertion (§makeMergeSuiteFailuresDep). Both come from the one assembly the run-stage test drives (§makeStageGateDeps).
+    ...makeStageGateDeps({
+      stage, run, root, gh, issue, getHarness: () => harness, getCharter: () => charter, mergeBase, readFile, gatesPath,
+      // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
+      transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal, admission }),
+    }),
     /**
      * ADR-024 / KTB-42 — 리뷰가 시작되기 전에 "증거를 남길 수 있는가"를 **실물로** 확인한다.
      * 도구가 설치돼 있으면 그 도구를 부른다(리뷰어가 부를 바로 그 명령이라, 여기서 통과한 것은
