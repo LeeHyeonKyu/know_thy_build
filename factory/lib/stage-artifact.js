@@ -288,28 +288,41 @@ export const WORKFLOW_OUTPUT_CTIME_SLACK_MS = 1000;
  *  ② 러너 자신의 사본 — 알림의 `<result>`(길면 앞부분 + "... (truncated …)")가 파일의 결과 직렬화의 앞부분과
  *     같아야 한다(잘리지 않았으면 전체가 같아야 한다). 결과가 나오기 전에 심어 둔 파일은 이것을 맞출 수 없다.
  * 둘 중 무엇이든 확인할 수 없으면(타임스탬프 없음, 변경 시각을 주지 못하는 리더) **쓰지 않는다** — 묶이지
- * 않은 파일이 판정이 되는 것보다 사람에게 가는 편이 싸다. 돌려주는 것은 사유(문자열) 또는 `{ partial }`(묶임 —
+ * 않은 파일이 판정이 되는 것보다 사람에게 가는 편이 싸다. 돌려주는 것은 사유(문자열 — 묶을 수 없다),
+ * `{ refused, tampered: true }`(러너의 바이트가 **아니다** — ①이나 ②가 어긋났다), 또는 `{ partial }`(묶임 —
  * `partial`은 잘린 인라인이라 앞부분만 바이트로 묶였을 때 그 범위를 적은 문장, 전부 묶였으면 null).
  */
 function runnerBindingFailure({ path, value, inline, at, ctimeMs }) {
   const unbound = (why) => `workflow output file not bound to the runner's notification (${why}): ${path}`;
   if (!Number.isFinite(at)) return unbound("no notification timestamp");
   if (!Number.isFinite(ctimeMs)) return unbound("the reader gave no change time");
+  // `tampered` — 파일이 러너의 바이트가 **아니라는** 증거가 있다(묶을 수 없다는 것과 다르다). 그 경우 호출자는 이
+  // 파일의 바이트를 다른 경로(디스패처의 읽기·최종 메시지)로도 받아들이지 않는다(rework cf1, 4차).
   if (ctimeMs > at + WORKFLOW_OUTPUT_CTIME_SLACK_MS) {
-    return `workflow output file changed after the runner's notification: ${path} (changed ${new Date(ctimeMs).toISOString()}, notified ${new Date(at).toISOString()}; lag ${Math.round(ctimeMs - at)} ms > slack ${WORKFLOW_OUTPUT_CTIME_SLACK_MS} ms)`;
+    return { refused: `workflow output file changed after the runner's notification: ${path} (changed ${new Date(ctimeMs).toISOString()}, notified ${new Date(at).toISOString()}; lag ${Math.round(ctimeMs - at)} ms > slack ${WORKFLOW_OUTPUT_CTIME_SLACK_MS} ms)`, tampered: true };
   }
   if (typeof inline !== "string") return unbound("the notification carries no <result>");
   const serialized = typeof value === "string" ? value : JSON.stringify(value);
-  const cut = /\n?\.\.\. \(truncated\b[^)]*\)\s*$/.exec(inline);
-  const runnerCopy = cut ? inline.slice(0, cut.index) : inline.trim();
-  const same = cut ? runnerCopy.length > 0 && serialized.startsWith(runnerCopy) : serialized === runnerCopy;
-  if (!same) return `workflow output file does not match the runner's notification: ${path} (its result does not ${cut ? "begin with" : "equal"} the ${runnerCopy.length} chars the runner inlined)`;
+  const rc = runnerCopyOf(inline);
+  if (!matchesRunnerCopy(serialized, rc)) return { refused: `workflow output file does not match the runner's notification: ${path} (its result does not ${rc.cut ? "begin with" : "equal"} the ${rc.copy.length} chars the runner inlined)`, tampered: true };
+  const { cut, copy: runnerCopy } = rc;
   // 묶이지 **않는** 부분을 숨기지 않는다(스킵틱 #170 4차, plan open_risks sec-sf1). 잘린 인라인은 앞부분만 바이트로
   // 묶고, 나머지는 ② 변경 시각 하나로만 묶인다 — 러너가 쓴 뒤 알림 줄 + 여유 안에 꼬리만 바꾼 파일은 여기서
   // 가려낼 수 없다(러너가 전체의 해시를 싣지 않는 한 어떤 규칙도 그 꼬리를 대 볼 기준이 없다). 그래서 받아들일 때
   // 그 사실을 출처에 적는다: run 로그의 `artifact:` 줄이 "일부만 러너 바이트"인 판정을 그대로 보여 준다.
   return { partial: cut ? `runner-bound: first ${runnerCopy.length} of ${serialized.length} result chars; the rest by change time only` : null };
 }
+
+/**
+ * #170 — 알림의 `<result>` → 러너 자신의 사본 `{ copy, cut }`. 길면 러너가 앞부분 뒤에 `... (truncated …)`를
+ * 붙인다 — 그때 `copy`는 그 앞부분이고 `cut`은 true(결과는 이것으로 **시작**해야 한다), 아니면 전체(같아야 한다).
+ * 그 꼬리의 글자 수는 쓰지 않는다: 실제 런(fixtures/plan-max-turns.jsonl)에서 그 수는 파일 결과의 길이와 맞지 않았다.
+ */
+function runnerCopyOf(inline) {
+  const cut = /\n?\.\.\. \(truncated\b[^)]*\)\s*$/.exec(inline);
+  return cut ? { copy: inline.slice(0, cut.index), cut: true } : { copy: inline.trim(), cut: false };
+}
+const matchesRunnerCopy = (serialized, { copy, cut }) => (cut ? copy.length > 0 && serialized.startsWith(copy) : serialized === copy);
 
 /**
  * #170 — 이 세션이 띄운 백그라운드 `Workflow`의 Task ID들(접수증 순서)과, 그 Task ID에 묶인 러너 알림이
@@ -500,6 +513,8 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   const optIn = wfFiles.taskIds.length > 0;
   /** 선두가 `{`인데 그 짝이 없는 텍스트 — `head -c`나 알림의 잘림이 만든 조각. 스키마 오류로 오진하지 않고 이름으로 부른다. */
   const truncated = [];
+  /** (1b)가 러너의 바이트가 **아니라고** 판정한 파일 `{ taskId, path }` — 그 뒤의 사본은 판정이 되지 못한다(rework cf1). */
+  const tampered = [];
   /**
    * 워크플로 러너가 반환값을 `{summary, agentCount, logs, result}` 봉투에 싸서 파일로 남긴다 —
    * 스테이지 산출물은 그 안의 `result`(또는 `data`)다. 한 겹만 벗긴다: 더 깊이 파면 "파싱은 되는"
@@ -550,7 +565,7 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   for (const taskId of wfFiles.taskIds) {
     if (!wfFiles.files.some((f) => f.taskId === taskId)) tried.push(`workflow output file: no runner notification names the output file of task ${taskId}`);
   }
-  for (const { path, inline, at } of wfFiles.files) {
+  for (const { taskId, path, inline, at } of wfFiles.files) {
     let text = null;
     // 두 번째 인자는 **읽기 전에** 크기를 보라는 요청이다: 그것을 지키는 리더(run-stage의 `readFileOrNull`)는
     // 상한을 넘는 파일을 읽지 않고 `{ bytes }`만 돌려준다 — 상한이 판정만이 아니라 메모리 비용도 묶는다.
@@ -588,8 +603,38 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
     // 묶이지 않으면 이 파일의 후보를 **전부** 거둬들인다 — 아래 후보 루프가 그것을 고르지 못하도록.
     const failure = runnerBindingFailure({ path, value: passing[0].obj, inline, at, ctimeMs });
     if (typeof failure === "string") { candidates.length = before; tried.push(failure); continue; }
+    if (failure.refused) { candidates.length = before; tried.push(failure.refused); tampered.push({ taskId, path }); continue; }
     if (failure.partial) for (const c of mine) c.source = `${c.source} [${failure.partial}]`;
   }
+  /*
+   * rework cf1(4차) — 여기까지가 러너의 바이트다: 완료 알림의 `<result>`(트랜스크립트 — 에이전트가 쓸 수 없다)와
+   * 그 알림에 묶인 결과 파일. 아래의 후보(디스패처의 읽기, Workflow 결과, 최종 메시지)는 전부 에이전트를 거친
+   * 사본이다. 러너의 파일이 **다시 쓰였다는** 증거가 있으면(`tampered`) 그 사본들은 그 다시 쓴 바이트를 실어
+   * 나를 수 있다 — 전체 `Read`, `jq -c .result`, `cat`, 그것을 옮겨 적은 최종 메시지. (1b)의 거절이 그 사본에 의해
+   * 조용히 뒤집히지 않도록, 그때는 이 경계 앞의 후보만 판정이 될 수 있다.
+   */
+  const runnerOwned = candidates.length;
+  /*
+   * rework cf1(4차) — 러너의 파일을 묶지 못했어도(사라졌다 — scratchpad 수명은 미검증이다) 러너의 **인라인 사본**은
+   * 트랜스크립트에 있다. 디스패처가 읽은 텍스트가 스키마를 통과하면, 그 직렬화는 그 사본으로 시작해야(잘리지
+   * 않았으면 같아야) 판정이 된다 — 러너가 돌려준 것이 아닌 객체가 읽기를 통해 판정이 되지 않게. 알림이 없거나
+   * 옵트인하지 않았으면 이 규칙은 아무것도 하지 않는다(dw5).
+   */
+  const runnerCopies = wfFiles.files.filter((f) => typeof f.inline === "string").map((f) => ({ taskId: f.taskId, ...runnerCopyOf(f.inline) }));
+  /** 러너의 사본과 어긋나 거둬들인 읽기 후보 — 조용히 버리지 않고 사유에 한 줄로 남긴다(dw4). */
+  const notRunners = [];
+  const pushRead = (source, text) => {
+    const before = candidates.length;
+    pushFrom(source, text);
+    if (!runnerCopies.length) return;
+    const kept = [];
+    for (const c of candidates.slice(before)) {
+      if (check(c.obj).ok && !runnerCopies.some((rc) => matchesRunnerCopy(JSON.stringify(c.obj), rc))) { if (!notRunners.includes(c.source)) notRunners.push(c.source); continue; }
+      kept.push(c);
+    }
+    candidates.length = before;
+    candidates.push(...kept);
+  };
 
   // (2) 디스패처가 알림의 output-file을 읽은 내용. 조각으로 오므로 파일별로 다시 붙인다.
   // `fileReadsFromTranscript`가 주는 Map은 **경로가 처음 등장한 순서**다 — 그대로 훑으면 세션 초반에
@@ -607,7 +652,7 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   for (const [path, text] of [...fileReadsFromTranscript(transcriptText)].reverse()) {
     const source = `transcript file read ${path.split("/").pop()}`;
     if (optIn && wfPaths.has(path) && isFragment(text)) { truncated.push(`${source} (${text.length} chars)`); continue; }
-    pushFrom(source, text);
+    pushRead(source, text);
   }
   // 그리고 개별 tool_result 하나하나 — 파일 경로를 못 얻은 읽기(Bash `cat` 등)도 여기서 잡힌다.
   const pages = optIn ? readResultsOfPaths(transcriptText, wfPaths) : new Set();
@@ -617,7 +662,7 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
     const source = `transcript tool result #${i + 1}`;
     const text = stripLineNumbers(results[i]);
     if (pages.has(results[i]) && isFragment(text)) { truncated.push(`${source} (${text.length} chars)`); continue; }
-    pushFrom(source, text);
+    pushRead(source, text);
   }
 
   // (3) `Workflow` tool_result — 접수증이 아닐 때만(전경에서 도는 워크플로는 여기로 반환값을 준다).
@@ -635,10 +680,19 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
 
   // 잘린 조각들은 한 줄로 — 그리고 후보 루프 **앞에서** 넣는다: 루프의 줄은 6줄 상한에 걸리지만 이 줄은
   // 걸리지 않아야 "잘렸다"와 "없다"를 사람이 가를 수 있다(#170 dw3).
+  if (notRunners.length) {
+    const tasks = [...new Set(runnerCopies.map((rc) => rc.taskId))].join(", ");
+    tried.push(`transcript read not used as the verdict — it does not begin with the result the runner inlined for task ${tasks}: ${notRunners.slice(0, 8).join(", ")}${notRunners.length > 8 ? `, … ${notRunners.length - 8} more` : ""}`);
+  }
+  if (tampered.length) {
+    tried.push(`workflow output file rewritten after the runner wrote it (${tampered.map((t) => `task ${t.taskId}: ${t.path}`).join("; ")}) — no dispatcher read, Workflow result or final message is used as the verdict, since each may carry the rewritten bytes`);
+  }
+  // 다시 쓰인 러너 파일이 있으면 판정 후보는 러너의 바이트(위 `runnerOwned` 경계 앞)뿐이다.
+  const pool = tampered.length ? candidates.slice(0, runnerOwned) : candidates;
   if (truncated.length) tried.push(`truncated JSON candidate (cut off, not missing fields): ${truncated.slice(0, 8).join(", ")}${truncated.length > 8 ? `, … ${truncated.length - 8} more` : ""}`);
 
   const seen = new Set();
-  for (const c of candidates) {
+  for (const c of pool) {
     const key = `${c.source}::${JSON.stringify(c.obj).slice(0, 200)}`;
     if (seen.has(key)) continue;
     seen.add(key);

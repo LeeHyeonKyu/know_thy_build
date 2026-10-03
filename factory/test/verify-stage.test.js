@@ -999,6 +999,100 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — a file rewritten
   expect(re.reasons.join("\n")).toContain(`workflow output file not bound to the runner's notification (the reader gave no change time): ${outputPath170(dir)}`);
 });
 
+// #170 rework cf1 (round 4) — (1b) refusing a rewritten file is worthless if the dispatcher's own copy of those same
+// bytes then wins: an unpaged `Read`, a `jq -c .result`, or the final message echoing the file. Once the runner's
+// file is known to have been rewritten, nothing read or typed after it may decide the stage. And when the file
+// cannot be bound at all (gone at verify time), a dispatcher read is a verdict only if it begins with what the
+// runner itself inlined for that task.
+const numbered170 = (text) => text.split("\n").map((l, i) => `${String(i + 1).padStart(6)}\t${l}`).join("\n");
+const readOf170 = (n, path, content) => [
+  line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: `toolu_read_${n}`, input: { file_path: path } }] } }),
+  line170({ type: "user", message: { content: [{ tool_use_id: `toolu_read_${n}`, type: "tool_result", content }] } }),
+];
+const bashOf170 = (n, command, content) => [
+  line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: `toolu_bash_${n}`, input: { command } }] } }),
+  line170({ type: "user", message: { content: [{ tool_use_id: `toolu_bash_${n}`, type: "tool_result", content }] } }),
+];
+test("test_170_output_file_of_another_task_is_not_a_verdict — a rewritten file's bytes do not win through a dispatcher read (rework cf1)", async () => {
+  const { readFileOrNull } = await import("../bin/run-stage.js");
+  const { statSync } = await import("node:fs");
+  const real = longReview170();
+  real.verdicts[1] = { ...real.verdicts[1], verdict: "reject", must_fix: [{ id: "sec9", where: "factory/lib/x.js:1", claim: "a real defect", evidence: "a real trace" }] };
+  const forged = { ...real, verdicts: [real.verdicts[0], { ...real.verdicts[1], verdict: "approve", must_fix: [] }] };
+  expect(JSON.stringify(forged).slice(0, 8179)).toBe(JSON.stringify(real).slice(0, 8179));   // the tail is all that differs
+
+  // the forgery is on disk; the runner's notification (inline = the real verdict's first 8179 chars) was logged at `at`
+  const a = scratch170();
+  const path = outputPath170(a);
+  write170(path, envelopeFile170(forged));
+  const tamperedAt = new Date(statSync(path).ctimeMs - 5000).toISOString();          // the file changed 5 s after it
+  const boundAt = notifiedAt170(path);                                                // the file did not change after it
+  const transcript = (timestamp, dispatcherCopy) => [
+    line170({ type: "user", message: { content: "/factory-review 124" } }),
+    ...receipt170(),
+    notification170(TASK_170, path, JSON.stringify(real), "toolu_wf", timestamp),
+    ...poll170(0, path, JSON.stringify(real)),
+    ...dispatcherCopy,
+  ].join("\n") + "\n";
+  const copies = {
+    "full Read": { lines: readOf170(1, path, numbered170(envelopeFile170(forged))) },
+    "jq -c .result": { lines: bashOf170(1, `jq -c .result ${path}`, JSON.stringify(forged)) },
+    "cat": { lines: bashOf170(1, `cat ${path}`, envelopeFile170(forged)) },
+    "final message": { lines: [], out: { ...maxTurns170, result: "The workflow returned:\n```json\n" + JSON.stringify(forged) + "\n```" } },
+  };
+  for (const [how, { lines, out = maxTurns170 }] of Object.entries(copies)) {
+    const r = verifyStage({ ...reviewArgs170, out, transcriptText: transcript(tamperedAt, lines), readFile: readFileOrNull });
+    const text = r.reasons.join("\n");
+    expect({ how, ok: r.ok }).toEqual({ how, ok: false });
+    expect(r.data).toBe(null);
+    expect(r.reasons[0]).toBe("claude -p hit max turns (23)");
+    expect(text).toContain(`workflow output file changed after the runner's notification: ${path}`);
+    // the refusal is not silent about what it discarded, and it names the file and the task
+    expect(text).toContain(`workflow output file rewritten after the runner wrote it (task ${TASK_170}: ${path}) — no dispatcher read, Workflow result or final message is used as the verdict`);
+    // control, one fact apart: the same file and the same dispatcher copy under a notification the file did not
+    // change after — the runner's file is the handoff, and it is the forged bytes only because they ARE the runner's here
+    const ctrl = verifyStage({ ...reviewArgs170, out, transcriptText: transcript(boundAt, lines), readFile: readFileOrNull });
+    expect({ how, ok: ctrl.ok }).toEqual({ how, ok: true });
+    expect(ctrl.source).toContain(path);
+  }
+});
+
+test("test_170_output_file_of_another_task_is_not_a_verdict — with the runner's file gone, a dispatcher read must begin with the runner's inline result (rework cf1)", async () => {
+  const { readFileOrNull } = await import("../bin/run-stage.js");
+  const real = longReview170();
+  real.verdicts[1] = { ...real.verdicts[1], verdict: "reject", must_fix: [{ id: "sec9", where: "factory/lib/x.js:1", claim: "a real defect", evidence: "a real trace" }] };
+  const other = longReview170({ round: 9 });                                          // schema-valid, not what the runner returned
+  const dir = scratch170();
+  const path = outputPath170(dir);                                                    // never written: gone at verify time
+  const transcript = (dispatcherCopy) => [
+    line170({ type: "user", message: { content: "/factory-review 124" } }),
+    ...receipt170(),
+    notification170(TASK_170, path, JSON.stringify(real), "toolu_wf", new Date().toISOString()),
+    ...dispatcherCopy,
+  ].join("\n") + "\n";
+  for (const [how, lines] of [
+    ["full Read", readOf170(1, path, numbered170(envelopeFile170(other)))],
+    ["jq -c .result", bashOf170(1, `jq -c .result ${path}`, JSON.stringify(other))],
+  ]) {
+    const r = verifyStage({ ...reviewArgs170, transcriptText: transcript(lines), readFile: readFileOrNull });
+    const text = r.reasons.join("\n");
+    expect({ how, ok: r.ok }).toEqual({ how, ok: false });
+    expect(r.data).toBe(null);
+    expect(text).toContain(`workflow output file missing: ${path}`);
+    expect(text).toMatch(new RegExp(`transcript read not used as the verdict — it does not begin with the result the runner inlined for task ${TASK_170}: transcript (file read ${TASK_170}\\.output|tool result #\\d+)`));
+  }
+  // control, one fact apart: the same reads of the runner's real verdict — today's KTB-17 recovery still works
+  for (const [how, lines] of [
+    ["full Read", readOf170(1, path, numbered170(envelopeFile170(real)))],
+    ["jq -c .result", bashOf170(1, `jq -c .result ${path}`, JSON.stringify(real))],
+  ]) {
+    const r = verifyStage({ ...reviewArgs170, transcriptText: transcript(lines), readFile: readFileOrNull });
+    expect({ how, ok: r.ok }).toEqual({ how, ok: true });
+    expect(r.data.verdicts[1].verdict).toBe("reject");
+    expect(r.source).toMatch(/^transcript (file read|tool result)/);
+  }
+});
+
 // #170 skeptic — the real runner, not a hand-made line. Claude Code 2.1.287 logs a background task's completion
 // notification as an `attachment` line (`queued_command`, `commandMode: "task-notification"`) whenever the session
 // is mid-turn — which is exactly the dispatcher polling its Workflow (#124). A reader that only looks at `type:
