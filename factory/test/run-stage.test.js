@@ -3945,13 +3945,14 @@ test("test_170_production_verify_path_recovers_from_output_file", async () => {
   mkdirSync(join(scratch, "tasks"), { recursive: true });
   const outputFile = join(scratch, "tasks", "wf086hvld.output");
   const L = (o) => JSON.stringify(o);
-  // The runner stamps its notification from when it finished the file: on a real runner (Claude Code 2.1.287,
-  // fixtures/claude-2.1.287-task-notification.json) the file's ctime was REAL_LAG ms after the line's timestamp.
-  // Stamp each notification the same way — not with a far-future date that passes the ctime check by construction.
+  // Stamp each notification from the file's ctime minus the one runner lag anyone has measured: a background BASH
+  // task's (Claude Code 2.1.287, fixtures/claude-2.1.287-task-notification.json — its file's ctime was BASH_TASK_LAG
+  // ms after its notification line). No Workflow lag is recorded; using the Bash one is an assumption (plan open
+  // risk cf-s1), not a measurement — but it is not a far-future date that passes the ctime check by construction.
   const real287 = JSON.parse(readFileSync(new URL("./fixtures/claude-2.1.287-task-notification.json", import.meta.url), "utf8"));
   const realNote = real287.background_task.lines.find((o) => o.type === "attachment");
-  const REAL_LAG = Number(BigInt(real287.background_task.output_file.ctime_ns) / 1000n) / 1000 - Date.parse(realNote.timestamp);
-  const runnerStamp = () => new Date(Math.floor(statSync(outputFile).ctimeMs - REAL_LAG)).toISOString();
+  const BASH_TASK_LAG = Number(BigInt(real287.background_task.output_file.ctime_ns) / 1000n) / 1000 - Date.parse(realNote.timestamp);
+  const runnerStamp = () => new Date(Math.floor(statSync(outputFile).ctimeMs - BASH_TASK_LAG)).toISOString();
   const transcriptFor = (artifact, timestamp = runnerStamp()) => {
     const full = JSON.stringify(artifact);
     return [
@@ -4120,6 +4121,54 @@ test("test_170_production_verify_path_recovers_from_output_file — the KTB-43 d
   const wired = /\bhandoffHeadSha\s*:\s*\(\s*out\s*\)\s*=>\s*handoffHeadShaForRun\s*\(\s*\{([^}]*)\}\s*\)/.exec(mainSrc);
   expect(wired, "main() must read the drift guard's head_sha with handoffHeadShaForRun({...})").not.toBe(null);
   expect(wired[1]).not.toMatch(/readFile|home/);
+});
+
+// #170 self-critique — the same two production readers (verify and the KTB-43 drift guard) on the runner's REAL
+// notification shape: the 2.1.287 `attachment` line (queued_command / task-notification), carrying an implement.v1
+// handoff. Until now only the hand-built user-turn form reached these readers.
+test("test_170_production_verify_path_recovers_from_output_file — implement.v1 through the attachment-form notification, verify and drift guard agree", async () => {
+  const { verifyStageForRun, handoffHeadShaForRun } = await import("../bin/run-stage.js");
+  const real287 = JSON.parse(readFileSync(new URL("./fixtures/claude-2.1.287-task-notification.json", import.meta.url), "utf8"));
+  const realNote = real287.background_task.lines.find((o) => o.type === "attachment");
+  const scratch = mkdtempSync(join(tmpdir(), "ktb170-att-"));
+  mkdirSync(join(scratch, "tasks"), { recursive: true });
+  const outputFile = join(scratch, "tasks", "wfIMPL0002.output");
+  const L = (o) => JSON.stringify(o);
+  const sha = "f".repeat(40);
+  const impl = { schema: "factory.implement.v1", issue: 170, head_sha: sha, pr: 171, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted", notes: Array.from({ length: 600 }, (_, i) => `dw${i % 6 + 1}: prove-test reverted the change and the test failed (${i})`).join("\n") }, orchestration: "workflow", guarantee: "verified" };
+  const full = JSON.stringify(impl);
+  writeFileSync(outputFile, JSON.stringify({ summary: "Dynamic workflow completed", agentCount: 2, logs: [], result: impl }, null, 2));
+  const note = (commandMode) => L({
+    ...realNote,
+    timestamp: new Date(Math.floor(statSync(outputFile).ctimeMs)).toISOString(),
+    attachment: { ...realNote.attachment, commandMode, prompt: `<task-notification>\n<task-id>wfIMPL0002</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` },
+  });
+  const rootFor = (commandMode) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb170-attroot-"));
+    mkdirSync(join(root, ".factory/out"), { recursive: true });
+    const transcriptPath = join(root, "session.jsonl");
+    writeFileSync(transcriptPath, [
+      L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-implement" } }] } }),
+      L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wfIMPL0002\nRun ID: wf_2\n\nYou will be notified when it completes." }] } }),
+      note(commandMode),
+      L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
+      L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
+    ].join("\n") + "\n");
+    writeFileSync(join(root, ".factory/out/agents.jsonl"), L({ event: "SubagentStop", agent_type: "builder", session_id: "sess-att", transcript_path: transcriptPath }) + "\n");
+    return root;
+  };
+  const maxTurns = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "waiting", session_id: "sess-att" };
+  const root = rootFor("task-notification");
+  const v = verifyStageForRun({ root, stage: "implement", out: maxTurns, gates: { status: "GREEN", level: "full" }, ctx: { roster: [], orchestration: "workflow" }, charter: { never_automate: [] }, home: root });
+  expect(v.reasons).toEqual([]);
+  expect(v.ok).toBe(true);
+  expect(v.data.head_sha).toBe(sha);
+  expect(v.source).toContain(outputFile);
+  expect(handoffHeadShaForRun({ root, stage: "implement", out: maxTurns, home: root })).toBe(sha);
+  // control: the same line as a person's queued prompt is not the runner's — neither reader recovers anything
+  const proot = rootFor("prompt");
+  expect(verifyStageForRun({ root: proot, stage: "implement", out: maxTurns, gates: { status: "GREEN", level: "full" }, ctx: { roster: [], orchestration: "workflow" }, charter: { never_automate: [] }, home: proot }).ok).toBe(false);
+  expect(handoffHeadShaForRun({ root: proot, stage: "implement", out: maxTurns, home: proot })).toBe(null);
 });
 
 // ── #174 (ADR-033 둘째 결정) — K 소진 → 새 작성자 + diff 전용 브리프로 **한 번** 스스로 재시작 ─────────
