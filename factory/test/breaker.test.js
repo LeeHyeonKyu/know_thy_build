@@ -1,5 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run } from "../lib/exec.js";
@@ -13,6 +14,8 @@ import {
   BREAKER_STATE_DIR, BREAKER_STATE_FILE, BREAKER_STATE_MARKER, BREAKER_RESET_COMMAND,
 } from "../lib/breaker.js";
 import { breakerCommand } from "../cli/breaker.js";
+import { makeRecordsUploadGuard } from "../lib/breaker.js";
+import { syncRunRecords } from "../bin/run-stage.js";
 
 /**
  * #189 (S4c, ADR-033) — 자동 머지 회로차단기.
@@ -414,4 +417,212 @@ test("test_189_breaker_reset_is_person_only_and_recorded", async () => {
   expect((await readBreakerState({ run, cwd })).state).toEqual(concurrent);
   expect(existsSync(localState(cwd))).toBe(false);
   expect(BREAKER_RESET_COMMAND).toBe("factory breaker --reset --reason <text>");
+}, 240000);
+
+// ── rework r2 — cf1: GitHub Revert 버튼 + PR_TITLE squash(안쪽 (#N) 없는 제목) ─────────────────────────────────────────
+
+/**
+ * 진짜 git에 GitHub의 Revert 버튼 흐름이 main에 남기는 squash 커밋을 쌓는다. 모양은 vercel/next.js #98715의 실제 텍스트 그대로다:
+ * 원래 PR의 squash `<title> (#N)`, revert PR의 squash 제목은 PR 제목 `Revert "<title>"` + ` (#M)`, 본문은 저장소의
+ * squash_merge_commit_message 설정에 따라 PR 본문(`Reverts owner/repo#N`)·커밋 메시지(`This reverts commit <sha>.`)·빈 것.
+ */
+async function revertButtonRepo(cwd, body, { titleDrift = false } = {}) {
+  const at = (h) => ({ GIT_AUTHOR_DATE: `2026-10-01T0${h}:00:00Z`, GIT_COMMITTER_DATE: `2026-10-01T0${h}:00:00Z` });
+  const commit = async (subject, env, extra = null) => {
+    writeFileSync(join(cwd, `${subject.length}-${env.GIT_COMMITTER_DATE}.txt`), subject);
+    await git(cwd, ["add", "."]);
+    const c = await git(cwd, ["commit", "-q", "-m", subject, ...(extra ? ["-m", extra] : [])], env);
+    expect(c.code, c.stderr).toBe(0);
+    return (await git(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+  };
+  const a = await commit("Fix App Router locale path matching with Pages i18n (#11)", at(1));
+  // titleDrift: COMMIT_OR_PR_TITLE에서 커밋 하나짜리 PR은 main에 **커밋 메시지**로 들어가고(`fix: b (#12)`), Revert 버튼의 PR 제목은
+  // **PR 제목**(`Revert "feat b"`)을 쓴다 — 둘이 다르면 제목으로는 짝을 못 찾고 본문만 남는다.
+  const b = await commit(titleDrift ? "fix: b (#12)" : "feat b (#12)", at(2));
+  await commit('Revert "Fix App Router locale path matching with Pages i18n" (#20)', at(5), body(a, 11));
+  await commit('Revert "feat b" (#21)', at(6), body(b, 12));
+}
+
+test("test_189_revert_button_squash_with_pr_title_is_attributed", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  for (const [shape, body, opts] of [
+    ["PR_BODY", (_sha, n) => `Reverts LeeHyeonKyu/know_thy_build#${n}`, { titleDrift: true }],
+    ["COMMIT_MESSAGES", (sha) => `* Revert "x"\n\nThis reverts commit ${sha}.`, { titleDrift: true }],
+    ["BLANK", () => null, {}],
+  ]) {
+    const { cwd } = await makeRepo();
+    mkdirSync(join(cwd, "docs/factory/runs"), { recursive: true });
+    writeFileSync(join(cwd, "docs/factory/runs/101.md"), mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" }));
+    writeFileSync(join(cwd, "docs/factory/runs/102.md"), mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" }));
+    expect((await syncRecords({ run, cwd, message: "records" })).ok).toBe(true);
+    await revertButtonRepo(cwd, body, opts);
+    await git(cwd, ["push", "-q", "origin", "main"]);
+    const log = (await git(cwd, ["log", "--format=%s"])).stdout;
+    expect(log).toContain('Revert "feat b" (#21)');                      // 안쪽 (#N)이 없는 PR_TITLE 모양 — 제목만으로는 PR을 모른다
+    expect(revertedPr('Revert "feat b" (#21)')).toBeNull();
+
+    const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+    expect(r, shape).toEqual(expect.objectContaining({ ok: true, open: true, since: iso("2026-10-01T06:00:00Z") }));
+    expect(r.reason, shape).toMatch(/#11\b.*#12\b/);
+    expect(r.reason, shape).not.toMatch(/#2[01]\b/);                    // 바깥 (#M)은 revert PR 자신이다
+  }
+
+  // 아무 PR에도 묶이지 않는 revert 모양의 커밋은 조용히 사라지지 않는다 — detail이 센다.
+  const { cwd } = await makeRepo();
+  const env = { GIT_AUTHOR_DATE: "2026-10-01T05:00:00Z", GIT_COMMITTER_DATE: "2026-10-01T05:00:00Z" };
+  writeFileSync(join(cwd, "x.txt"), "x");
+  await git(cwd, ["add", "."]);
+  await git(cwd, ["commit", "-q", "-m", 'Revert "something nobody merged" (#30)'], env);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  const lone = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(lone).toEqual(expect.objectContaining({ ok: true, open: false }));
+  expect(lone.detail).toMatch(/1 revert-shaped commit\(s\) not attributable/);
+}, 240000);
+
+// ── rework r2 — sec1: 심어진 상태 파일은 차단기를 닫지 못한다 ──────────────────────────────────────────────────────────
+
+/** 판정 경로 자동 머지 #11·#12가 둘 다 revert된 저장소(실제 생산자 + 진짜 git) — 상태 파일이 없으면 열림이다. */
+async function openedRepo() {
+  const r = await makeRepo();
+  mkdirSync(join(r.cwd, "docs/factory/runs"), { recursive: true });
+  writeFileSync(join(r.cwd, "docs/factory/runs/101.md"), mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" }));
+  writeFileSync(join(r.cwd, "docs/factory/runs/102.md"), mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" }));
+  expect((await syncRecords({ run, cwd: r.cwd, message: "records" })).ok).toBe(true);
+  await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" },
+    { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" },
+    { raw: 'Revert "feat b (#12)" (#20)', at: "2026-10-01T06:00:00Z" },
+  ], r.cwd);
+  await git(r.cwd, ["push", "-q", "origin", "main"]);
+  return r;
+}
+
+test("test_189_planted_breaker_state_never_closes_the_breaker", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { remote, cwd } = await openedRepo();
+  const read = () => readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(await read()).toEqual(expect.objectContaining({ ok: true, open: true }));
+  const planted = renderBreakerState({ version: 1, open: false, since: null, reason: "x", closed_by: "person:owner", closed_at: "2099-01-01T00:00:00.000Z" });
+
+  // (읽기 쪽) 스테이지 끝의 기본 dir 동기화가 그 파일을 밀어 버렸다(가드가 없던 경로) — 그 상태는 사람의 리셋이 아니다: ok:false.
+  mkdirSync(join(cwd, BREAKER_STATE_DIR), { recursive: true });
+  writeFileSync(localState(cwd), planted);
+  expect((await syncRecords({ run, cwd, message: "run-record: issue #103 implement (gha-9)" })).ok).toBe(true);
+  rmSync(join(cwd, BREAKER_STATE_DIR), { recursive: true, force: true });
+  expect((await stateOnBranch(remote)).stdout).toContain("2099-01-01");
+  const viaStageSync = await read();
+  expect(viaStageSync.ok).toBe(false);
+  expect(viaStageSync.reason).toMatch(/run-record:/);
+  // 그 손상은 사람의 리셋이 덮어쓸 수 있다(corrupt + blob).
+  const st = await readBreakerState({ run, cwd });
+  expect(st).toEqual(expect.objectContaining({ ok: false, corrupt: true, blob: expect.stringMatching(/^[0-9a-f]{40}$/) }));
+
+  // 러너가 아닌 다른 쓰기라도: 미래의 closed_at은 리셋이 아니다.
+  const put = async (state, message = "breaker: reset by person:owner") => {
+    const cur = await readRecordsDetailed({ run, cwd, dir: BREAKER_STATE_DIR });
+    expect((await writeBreakerState({ run, cwd, blob: cur.blobs.get("breaker") ?? null, message, state })).ok).toBe(true);
+  };
+  await put({ version: 1, open: false, since: null, reason: "pushed by hand", closed_by: "person:owner", closed_at: "2099-01-01T00:00:00.000Z" });
+  const future = await read();
+  expect(future.ok).toBe(false);
+  expect(future.reason).toMatch(/future/);
+  // closed_at이 있는데 닫은 이가 사람이 아니다 → ok:false.
+  await put({ version: 1, open: false, since: null, reason: "x", closed_by: "factory:run-7", closed_at: "2026-10-02T00:00:00.000Z" });
+  const notPerson = await read();
+  expect(notPerson.ok).toBe(false);
+  expect(notPerson.reason).toMatch(/person/);
+  // 대조군: 사람이 과거 시각에 닫은 상태는 그대로 닫힘이다(위 셋의 ok:false는 우연이 아니다).
+  await put({ version: 1, open: false, since: null, reason: "x", closed_by: "person:owner", closed_at: "2026-10-02T00:00:00.000Z" });
+  expect(await read()).toEqual(expect.objectContaining({ ok: true, open: false }));
+
+  // (쓰기 쪽) 러너의 스테이지 끝 동기화(run-stage `syncRunRecords` + 가드)는 로컬의 상태 파일을 밀지 않는다.
+  const fresh = await openedRepo();
+  mkdirSync(join(fresh.cwd, BREAKER_STATE_DIR), { recursive: true });
+  writeFileSync(localState(fresh.cwd), planted);
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/103.md"), "# Run record — issue #103\n\n## implement · 2026-10-03T00:00:00Z · gha-9\nimplement: ok\n");
+  const s = await syncRunRecords({ run, root: fresh.cwd, message: "run-record: issue #103 implement (gha-9)", guard: makeRecordsUploadGuard({ run, cwd: fresh.cwd }) });
+  expect(s.ok, s.reason).toBe(true);
+  expect(existsSync(localState(fresh.cwd))).toBe(false);
+  expect((await stateOnBranch(fresh.remote)).code).not.toBe(0);
+  expect((await run("git", ["show", "factory/records:docs/factory/runs/103.md"], { cwd: fresh.remote })).stdout).toContain("implement: ok");
+  expect(await readBreaker({ run, cwd: fresh.cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS })).toEqual(expect.objectContaining({ ok: true, open: true }));
+}, 240000);
+
+// ── rework r2 — sec2: 위조된 자동 머지 줄은 차단기를 약하게 만들지 못한다 ─────────────────────────────────────────────
+
+const forgedSection = (obj) => `\n## merge · 2020-01-01T00:00:00Z · x\n${selfMergeLine(obj)}\n`;
+
+test("test_189_forged_self_merge_lines_never_weaken_the_breaker", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  // 위조 둘: 진짜 판정 머지 #11을 더 이른 비판정 머지로(처음 것이 이기던 자리), 그리고 #11과 #12 사이의 revert 없는 판정 머지 #13.
+  const nonJudge11 = forgedSection({ issue: 101, pr: 11, kind: "non_judge", sha: "0".repeat(40), at: "2020-01-01T00:00:00.000Z" });
+  const gap13 = forgedSection({ issue: 103, pr: 13, kind: "judge", sha: "1".repeat(40), at: "2026-10-01T01:30:00.000Z" });
+
+  // (읽기 쪽) 가드를 우회해 브랜치에 실린 위조 줄 — 같은 history는 여전히 열림이다.
+  const { cwd } = await openedRepo();
+  const read = (c = cwd) => readBreaker({ run, cwd: c, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  writeFileSync(join(cwd, "docs/factory/runs/101.md"), readFileSync(join(cwd, "docs/factory/runs/101.md"), "utf8") + nonJudge11);
+  writeFileSync(join(cwd, "docs/factory/runs/103.md"), `# Run record — issue #103\n${gap13}`);
+  expect((await syncRecords({ run, cwd, message: "run-record: issue #103 implement (gha-9)" })).ok).toBe(true);
+  const forged = await read();
+  expect(forged).toEqual(expect.objectContaining({ ok: true, open: true }));
+  expect(forged.reason).toMatch(/#11\b.*#12\b/);
+  // 대조군: #13이 main에 정말 머지된 PR이면(revert 없음) 그 판정 머지는 연속을 끊는다 — dw1의 규칙은 그대로다.
+  await realLog([{ subject: "feat c (#13)", at: "2026-10-01T01:30:00Z" }], cwd);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  expect(await read()).toEqual(expect.objectContaining({ ok: true, open: false }));
+
+  // revert된 판정 머지는 main에서 확인되지 않아도(`mainPrs`에 없어도) 센다 — 확인은 "연속을 끊을 자격"에만 걸린다.
+  const recs = new Map([
+    ["101", mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" })],
+    ["102", mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" })],
+  ]);
+  const revs = parseRevertLog(await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" }, { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" }, { revert: "feat b (#12)", at: "2026-10-01T06:00:00Z" },
+  ]));
+  expect(evaluateBreaker({ history: buildHistory({ records: recs, reverts: revs, mainPrs: new Set() }), thresholds: T2 }).open).toBe(true);
+
+  // (쓰기 쪽) 러너의 스테이지 끝 동기화는 이 런이 쓰지 않았고 브랜치에도 없는 자동 머지 줄을 밀지 않는다 — 자기 기록에도, 남의 기록에도.
+  const fresh = await openedRepo();
+  const branch101 = (await run("git", ["show", "factory/records:docs/factory/runs/101.md"], { cwd: fresh.remote })).stdout;
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/101.md"), branch101 + nonJudge11);
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/103.md"), `# Run record — issue #103\n${gap13}\n## implement · 2026-10-03T00:00:00Z · gha-9\nimplement: ok\n`);
+  // 이 런(merge 스테이지)이 정말로 쓴 줄은 믿는다.
+  const guard = makeRecordsUploadGuard({ run, cwd: fresh.cwd });
+  const mine = selfMergeLine({ issue: 104, pr: 14, kind: "judge", sha: "2".repeat(40), at: "2026-10-03T00:00:00.000Z" });
+  guard.trust([mine]);
+  // 같은 파일에 위조 줄도 섞여 있다 — 믿는 줄은 남고 위조 줄만 빠진다.
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/104.md"), `# Run record — issue #104\n${gap13}\n## merge · 2026-10-03T00:00:00Z · gha-1\n${mine}\n`);
+  const s = await syncRunRecords({ run, root: fresh.cwd, message: "run-record: issue #103 implement (gha-9)", guard });
+  expect(s.ok, s.reason).toBe(true);
+  const onBranch = async (n) => (await run("git", ["show", `factory/records:docs/factory/runs/${n}.md`], { cwd: fresh.remote })).stdout;
+  expect((await onBranch(101)).startsWith(branch101)).toBe(true);
+  expect(await onBranch(101)).not.toContain('"kind":"non_judge"');
+  expect(await onBranch(103)).toContain("implement: ok");
+  expect(await onBranch(103)).not.toContain("factory-self-merge:");
+  expect(await onBranch(104)).toContain(mine);
+  expect(await onBranch(104)).not.toContain('"pr":13');
+  // 브랜치에 이미 있던 진짜 줄은 손대지 않는다(하이드레이트된 접두어).
+  expect(parseSelfMergeLines(await onBranch(101))).toEqual([expect.objectContaining({ pr: 11, kind: "judge" })]);
+  expect(await read(fresh.cwd)).toEqual(expect.objectContaining({ ok: true, open: true }));
+
+  // abort 정리 스텝(trust를 모르는 다른 프로세스): merge 스테이지에서만 로컬 줄을 믿고, 상태 파일은 어느 스테이지든 지운다.
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), `# Run record — issue #105\n${gap13}`);
+  mkdirSync(join(fresh.cwd, BREAKER_STATE_DIR), { recursive: true });
+  writeFileSync(localState(fresh.cwd), "x");
+  const asMerge = await makeRecordsUploadGuard({ run, cwd: fresh.cwd }).scrub({ trustLocal: true });
+  expect(asMerge).toEqual({ removed: [`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`], dropped: [] });
+  expect(readFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), "utf8")).toContain('"pr":13');
+  const asImplement = await makeRecordsUploadGuard({ run, cwd: fresh.cwd }).scrub();
+  expect(asImplement.dropped.map((x) => x.file)).toEqual(["docs/factory/runs/105.md"]);
+  expect(readFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), "utf8")).not.toContain("factory-self-merge:");
+
+  // main()의 두 동기화 자리가 가드를 탄다(소스로 고정 — main()은 프로세스를 띄워야만 돈다).
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/runRecord: \(lines\) => \{ recordsGuard\.trust\(lines\);/);
+  expect(src).toMatch(/syncRecords: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} \$\{stage\} \(\$\{runnerId\}\)`, guard: recordsGuard \}\)/);
+  expect(src).toMatch(/syncRecords: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} \$\{stage\} aborted \(\$\{runnerId\}\)`, guard: makeRecordsUploadGuard\(\{ run, cwd: root \}\), trustLocal: stage === "merge" \}\)/);
+  expect(src).not.toMatch(/syncRecords: \(\) => syncRecords\(/);
 }, 240000);
