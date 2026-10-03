@@ -3140,3 +3140,38 @@ test("test_156_back_pressure_refusal_without_reasons_is_still_a_refusal_in_every
   expect(releaseMarkers156(w, 81)).toHaveLength(0);
   expect(out).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 81, reason: expect.stringMatching(/^back-pressure — /) }));
 });
+
+// #168 rework cf1 — the ceiling escalation ("dispatched run never started") is an engine-caused needs-human like the
+// default one: it must carry the engine version, or ADR-032's self-retry on the next engine skips it forever.
+test("test_168_ceiling_escalation_records_engine_version_for_release_retry", async () => {
+  const w = world156();
+  const n = 31;
+  w.add(n, "factory:approved", [seedTransition156("factory:awaiting-review", "factory:approved")]);
+  expect((await w.transition({ issue: n, to: "factory:blocked", reason: MERGE_BASE156, stage: "merge" })).ok).toBe(true);
+  await w.sweep("1.5.0");                                                         // blocked 팔: merge를 한 번 dispatch
+  expect(w.dispatchStage).toHaveBeenLastCalledWith({ stage: "merge", issue: n });
+  // the dispatched merge run sits in the queue (real `gh run list` row: no issue number in displayTitle)
+  const queued = { databaseId: 18100000031, status: "queued", conclusion: "", createdAt: w.now(), event: "workflow_dispatch", displayTitle: "factory-merge" };
+  const stageRuns = async () => [queued];
+
+  w.advance(59);                                                                  // under 2 × 30 min: waits
+  const waiting = await w.sweep("1.5.0", { stageRuns });
+  expect(waiting.filter((a) => a.issue === n).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+  expect(w.label(n)).toBe("factory:blocked");
+
+  w.advance(3);                                                                   // over the ceiling: escalates
+  const over = await w.sweep("1.5.0", { stageRuns });
+  expect(w.label(n)).toBe("factory:needs-human");
+  expect(over).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: n, why: expect.stringContaining("dispatched run never started") }));
+  const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(esc).toMatch(/blocked \(undecidable\) — needs human — dispatched run never started/);
+  expect(ENGINE_VERSION156.exec(esc)?.[1]).toBe("1.5.0");
+
+  // a new engine retries it once (ADR-032) instead of skipping it for want of a recorded version
+  w.dispatchStage.mockClear();
+  const after = await w.sweep("1.5.1", { stageRuns: async () => [] });
+  expect(after).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n, version: "1.5.1" }));
+  expect(after).not.toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: n }));
+  expect(releaseMarkers156(w, n)).toHaveLength(1);
+  expect(w.dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: n });
+});

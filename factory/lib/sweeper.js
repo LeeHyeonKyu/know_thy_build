@@ -1595,6 +1595,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       const comments = await gh.comments(it.number);
       const origin = blockedOrigin(comments);
       const cause = origin?.cause ?? null;
+      // #168 cf1 — 상한 에스컬레이션도 아래의 공용 에스컬레이션을 탄다(엔진 버전을 싣는다 — ADR-032 재시도가 이 needs-human을 읽는다).
+      let ceilingWhy = null;
       if (dispatchStage) {
         const retryStage = origin && BLOCKED_RETRY_STAGE[origin.from];
         if (retryStage) {
@@ -1648,18 +1650,15 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           // #168 — 재시도 마커가 있는데 여전히 blocked: 그 마커가 띄운 런이 아직 끝나지 않았으면 기다린다(상한 2 × staleMinutes).
           const pendingRun = await blockedRetryPendingRun({ stageRuns, comments, stage: retryStage, issue: it.number, nowMs, stale, actions });
           if (pendingRun.wait) { actions.push({ ...pendingRun.action, cause }); continue; }
-          if (pendingRun.reason) {
-            await transition({ issue: it.number, to: "factory:needs-human", reason: `${escalationReason(cause)} — ${pendingRun.reason}` });
-            actions.push({ kind: "blocked-escalated", issue: it.number, cause, why: pendingRun.reason });
-            continue;
-          }
+          if (pendingRun.reason) ceilingWhy = pendingRun.reason;
         }
       }
       // 설치본 버전을 못 읽었으면 싣지 않는다(이슈의 옛 기록만으로 찍으면 방금 실패한 엔진보다 낮은 값이 될 수 있다 — 모르면 기록하지 않는다).
       const installedNow = await engineVersionNow();
       const engineVersion = installedNow ? newestVersion([installedNow, ...factoryRecordedVersions(comments, factoryLogin)]) : null;
-      await transition({ issue: it.number, to: "factory:needs-human", reason: escalationReason(cause), ...(engineVersion ? { engineVersion } : {}) });
-      actions.push({ kind: "blocked-escalated", issue: it.number, cause });
+      const reason = ceilingWhy ? `${escalationReason(cause)} — ${ceilingWhy}` : escalationReason(cause);
+      await transition({ issue: it.number, to: "factory:needs-human", reason, ...(engineVersion ? { engineVersion } : {}) });
+      actions.push({ kind: "blocked-escalated", issue: it.number, cause, ...(ceilingWhy ? { why: ceilingWhy } : {}) });
     } catch (e) {
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
