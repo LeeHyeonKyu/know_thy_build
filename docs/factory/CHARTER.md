@@ -14,6 +14,9 @@ plan_rounds: { docs: 2, default: 3 }        # 토론 tier에서만 쓰인다 (�
 plan: { mode: single, debate_tiers: [load-bearing], max_done_when: 6 }   # 감사 Task 9 — 기본은 단일 opus 1패스 + skeptic 1패스
 back_pressure: { awaiting_review_max: 4 }   # quarantine 상한은 두지 않는다 — harness.toml [gates.thresholds].quarantine_max가 유일한 출처(§5.1, Plan 1b 실행 판결)
 merge: { human_gate: false }                # 소유자 결정: 이 저장소는 다크 루프를 증명하는 것이 목적이다 (아래 "머지 권한 — 사람 게이트" 참고)
+# ADR-032/033 — 엔진 자기 변경의 자동 머지. non_judge(문서·보드·관측 모듈)는 켠다(2026-10-03, 소유자 결정): 거부권 창 60분 뒤 공장이 머지.
+# judge는 차단기(S4c, #189)가 들어올 때까지 끈다 — 켜면 만장일치 리뷰 + GREEN + 거부권 창 + 차단기 닫힘이 조건이다.
+self_change: { auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 60 }
 triage: { default: ready }                  # 소유자 결정: 같은 이유 — 아래 "triage 기본 판정" 참고 (감사 M1). 채택 저장소의 기본값은 needs-info다
 # `usd_per_issue` caps what ONE issue may cost over its whole life — every run across re-queues and human
 # retries, summed from the runner-written usage lines. Over the cap a stage refuses to start and parks the
