@@ -396,8 +396,12 @@ const buildRules =
   `added line (commands, dependency names, file paths). The runner checks this mechanically as the ` +
   `\`must-not\` gate and merge refuses on it — a prohibition in the issue is a contract, not a suggestion; ` +
   `if the work honestly cannot be done within it, stop and say so in the PR body instead of working around it.\n` +
-  `4. Stay inside \`handoffs.plan.files_expected\`. If the work honestly needs a path outside it, record ` +
-  `the path and the reason in the PR body under a "Scope change" heading.\n` +
+  `4. Stay inside \`handoffs.plan.files_expected\`. If the work honestly needs a path outside it, write the ` +
+  `reason IN THE DIFF, not in the PR body: a comment line at the top of that file reading ` +
+  `\`Scope change (#${issue}): <why — tied to a done_when, a non_goal or a must_fix>\` (for a deleted file, put ` +
+  `the line, naming the path, in the nearest changed file). The spec-conformance reviewer reads the diff and ` +
+  `never the PR body — a reason that lives only in the PR body was rejected on #149, #156, #157, #170 and ` +
+  `#178, one full review round each (KTB #200 makes the runner's self-gate refuse the round before review).\n` +
   `5. Run \`[commands].lint\` and \`[commands].unit\` from \`harness.commands\` yourself (plus the full ` +
   `level if the harness declares one) before you push. Do not hand a red tree to the verifier.\n` +
   `6. Commit in logical units with real messages, push the branch, and open a draft PR. Write the PR body ` +
@@ -425,6 +429,11 @@ const reworkBlock = mustFix.length > 0
     `Respond to EVERY id above — a silent omission reads as an unaddressed reject. For each item: ` +
     `status "fixed" with the commit sha that fixed it, or status "disputed" with a reason that cites the ` +
     `plan handoff (\`non_goals\`, \`files_expected\`) or a concrete file path. Opinion is not a dispute.\n` +
+    `A rework round SUBTRACTS (ADR-034 §5): fix what the must_fix items name and nothing else. Do not add a ` +
+    `new file, a new export, a second parser or list, a new done_when, or gate evidence for paths the review ` +
+    `did not raise — every K-exhaustion in the 2026-10 census (#149, #157, #170) was a builder that added in ` +
+    `rework and was rightly rejected again. If a finding genuinely needs new code, keep it inside the files the ` +
+    `must_fix \`where\` names (KTB #199 makes the self-gate refuse anything else from round 2 on).\n` +
     `Post the whole response as a comment on PR #${priorPr === null ? '<pr>' : priorPr}: write it to ` +
     `\`/tmp/factory-rework-${issue}.md\` with the Write tool and run ` +
     `\`gh pr comment ${priorPr === null ? '<pr>' : priorPr} --body-file /tmp/factory-rework-${issue}.md\` ` +
