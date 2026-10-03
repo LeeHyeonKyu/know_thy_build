@@ -43,7 +43,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
-import { readBreaker } from "../lib/breaker.js";
+import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
@@ -2198,6 +2198,21 @@ export function makeMergeBreakerDep({ run, root, getCharter, getDefaultBranch = 
 }
 
 /**
+ * #189 rework r2 (sec1·sec2) — 스테이지 끝(과 abort 정리)의 run 기록 동기화. `docs/factory/runs/**`는 에이전트가 쓸 수 있는 스크래치
+ * 경로이고 `syncRecords`는 거기 있는 것을 러너의 이름으로 민다 — 그래서 밀기 전에 차단기의 증거(상태 파일·자동 머지 줄)를
+ * `guard.scrub()`으로 걸러 낸다(`lib/breaker.js` `scrubPlantedBreakerEvidence`). 가드가 던지면 밀지 않는다(걸러지지 않은 것을 밀지 않는다).
+ * retro의 상태 동기화도 이 문을 쓴다(`overwrite`/`expectBlob`을 그대로 넘긴다) — retro도 같은 워크트리에서 에이전트(`claude -p`)를 부른다.
+ */
+export async function syncRunRecords({ run, root, message, guard, vouch = null, overwrite = [], expectBlob = null }) {
+  let g;
+  try { g = await guard.scrub({ vouch }); }
+  catch (e) { return { ok: false, reason: `records upload guard failed — ${e?.message || e}; nothing was pushed` }; }
+  for (const p of g?.removed ?? []) console.error(`factory: records guard — removed ${p} from the worktree before the sync (only the breaker reset/sweep writes it)`);
+  for (const x of g?.dropped ?? []) console.error(`factory: records guard — dropped a self-merge line this run did not write from ${x.file}: ${x.line.slice(0, 160)}`);
+  return syncRecords({ run, cwd: root, message, overwrite, expectBlob });
+}
+
+/**
  * ── #174 (ADR-033 둘째 결정) — K 소진의 재시작 deps(프로덕션 = 테스트가 그대로 쓰는 것) ──────────────────────────
  *
  * 셋 다 같은 창(`commentsSinceRequeue`)을 본다 — 재큐는 K와 재시작 예산을 함께 되돌리고, 사람의 `reason=retry`는 어느 쪽도
@@ -3100,12 +3115,16 @@ async function main() {
          * `stageSettled`가 그것을 "모른다"로 읽고 크게(aborted) 기록한다.
          */
         readRunRecord: () => { try { return readFileSync(join(root, "docs/factory/runs", `${issue}.md`), "utf8"); } catch { return null; } },
-        syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})` }),
+        // 이 프로세스는 merge 프로세스의 trust를 모른다. merge의 워크트리는 PR head 체크아웃(에이전트가 쓴 내용)이라 로컬 줄을 통째로
+        // 믿지 않는다 — merge의 abort만, GitHub이 보증하는 줄(이 이슈 브랜치의 PR이 그 head로 MERGED)을 남긴다(lib/breaker.js).
+        syncRecords: () => syncRunRecords({ run, root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})`, guard: makeRecordsUploadGuard({ run, cwd: root }), vouch: stage === "merge" ? makeMergeAbortVouch({ issue, headBranch: stageBranch(issue), prView: (pr) => gh.prView(pr) }) : null }),
       },
     }));
   }
   // CHARTER는 dormancy 판정과 merge의 자기 변경 경로(`self_change`·NEVER_AUTOMATE)에서 읽는다 — 없거나 깨져도 잠들 뿐 터지지 않는다.
   let charter, harness, ctxCache;
+  // #189 rework r2 — 이 프로세스가 run 기록에 쓴 자동 머지 줄만 믿는 업로드 가드(`runRecord`가 trust, `syncRecords`가 scrub).
+  const recordsGuard = makeRecordsUploadGuard({ run, cwd: root });
   let engineAtBase = false;   // #179 — charterReady가 base 체크아웃에서 정한다(checkoutHead 전)
   const recordLine = (line) => { try { appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines: [line] }); } catch {} };
   const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
@@ -3657,14 +3676,14 @@ async function main() {
     ktbVersion: await (async () => {
       try { return (await loadInstallManifest(root))?.ktbVersion ?? null; } catch { return null; }
     })(),
-    runRecord: (lines) => appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }),
+    runRecord: (lines) => { recordsGuard.trust(lines); return appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines }); },
     // #36 item 2 — 정리 스텝이 읽는 증표. 같은 파일에 쓰지만 `runRecord`와 **다른 문**이다(위 주석).
     // r1 nit 6 — 그 문은 섹션 헤더를 세우지 않는다(`appendRunRecordLine`): 증표가 이 런의 섹션 수를
     // 부풀리면 `factory analyze`가 사람에게 한 개 더 많은 섹션을 보여 준다.
     settleRecord: (line) => appendRunRecordLine({ root, issue, title: ctxCache?.issue?.title || "", line }),
     hydrateRecord: () => hydrateRecord({ run, cwd: root, issue }),
     release: () => release({ run, cwd: root, issue }),
-    syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} (${runnerId})` }),
+    syncRecords: () => syncRunRecords({ run, root, message: `run-record: issue #${issue} ${stage} (${runnerId})`, guard: recordsGuard }),
     reportStatus: (s) => gh.setStatus({
       ...s,
       targetUrl: process.env.GITHUB_SERVER_URL && process.env.GITHUB_REPOSITORY && process.env.GITHUB_RUN_ID

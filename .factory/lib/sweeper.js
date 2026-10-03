@@ -1476,10 +1476,11 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * 알림은 상태 변화 하나에 **정확히 하나**다: 연속을 채운 마지막 자동 머지의 추적 이슈(사람이 라벨·needs-human을 보는 자리)에
  * 달고, 그 이슈 번호를 모를 때만 PR에 단다. 같은 열림을 두 자리에 알리면 "한 번"이 아니다(dw6).
  */
-async function sweepBreaker({ gh, breaker, actions }) {
+async function sweepBreaker({ gh, breaker, actions, now = null }) {
   if (!breaker || typeof breaker.read !== "function") return;
   let ev;
-  try { ev = await breaker.read(); } catch (e) { ev = { ok: false, reason: `${e?.message || e}` }; }
+  // rework r2 sec1 — closed_at이 미래인지 sweep의 시각으로 본다.
+  try { ev = await breaker.read({ now }); } catch (e) { ev = { ok: false, reason: `${e?.message || e}` }; }
   if (!ev?.ok) { actions.push({ kind: "error", step: "breaker", error: `breaker state unknown — ${ev?.reason || "unknown"}` }); return; }
   if (ev.open !== true) { actions.push({ kind: "breaker-closed", detail: ev.detail ?? null }); return; }
   const stored = ev.state ?? null;
@@ -1727,7 +1728,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
   if (quick) return actions;                     // KTB-26 — 아래 팔들은 시간에 묶여 있다(cron의 몫)
   // #189 — 차단기의 평가·기록은 cron(quick=false)의 몫이다. merge 스테이지는 이 기록이 아니라 자기 계산을 믿는다.
-  await sweepBreaker({ gh, breaker, actions });
+  await sweepBreaker({ gh, breaker, actions, now });
   // KTB-46 (r3 nit 3): 사람이 머지 버튼을 누르는 사건은 스테이지 잡이 끝나는 순간과 무관하다 —
   // cron 주기(≤30분) 안에 반영되면 충분하고, 매 스테이지마다 돌리면 주차된 이슈마다 "아직 머지
   // 안 됨" 줄만 쌓인다. 그래서 격리·토큰 만료와 같은 쪽에 선다.
