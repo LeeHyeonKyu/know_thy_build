@@ -526,6 +526,13 @@ const ENGINE_ESCALATION_PREFIX = BLOCKED_ESCALATION_REASON.undecidable.replace(/
 const RELEASE_RETRY_IMPLEMENT_TARGETS = new Set(["factory:planned", "factory:rework"]);
 const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
 
+/**
+ * blocked 사건 중 엔진 원인인 것. #196 self-critique (skeptic f3) — engine-crash(러너의 catch만 쓰는 원인, 에스컬레이션은 "engine defect")는
+ * 이 저장소에서 가장 직접적인 엔진 결함이다: 새 엔진이 오면 한 번 스스로 재시도한다(그 에스컬레이션이 싣는 엔진 버전의 유일한 독자가 이 팔이다).
+ * 루프는 없다 — 릴리스당 1회(`factory-retry-on-release` 마커)이고, 그 재시도가 또 크래시하면 blocked 팔의 상한이 다시 문다.
+ */
+const ENGINE_CAUSED_BLOCKS = new Set(["undecidable", "engine-crash"]);
+
 /** 마지막 전이 코멘트가 엔진 결함으로 인한 needs-human인가. 아니면 null, 맞으면 `{ comment, thenVersion }`. */
 export function engineCausedNeedsHuman(comments) {
   const list = Array.isArray(comments) ? comments : [];
@@ -541,7 +548,7 @@ export function engineCausedNeedsHuman(comments) {
   const t = lastTransition([comment]);
   const reason = t?.reason ?? "";
   const engine = reason.startsWith(ENGINE_ESCALATION_PREFIX)
-    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && blockedOrigin(list.slice(0, idx + 1))?.cause === "undecidable");
+    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && ENGINE_CAUSED_BLOCKS.has(blockedOrigin(list.slice(0, idx + 1))?.cause));
   if (!engine) return null;
   return { comment, thenVersion: ENGINE_VERSION.exec(body)?.[1] ?? null };
 }
@@ -1658,7 +1665,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? engineCrashMaxRetries : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
-          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number, cause);
+          // #196 rework cf1 — engine-crash 장부는 재시도 런 자신의 `blocked → queue` hop(트리아지)으로 창을 열지 않는다: 그 상한이 루프의 유일한 브레이크다.
+          const window = commentsSinceCycleStart(comments, { factoryLogin, blockedHopOpensCycle: !isEngineCrash });
+          const lastAttempt = lastBlockedRetryAttempt(window, retryStage, it.number, cause);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)
