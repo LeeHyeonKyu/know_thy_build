@@ -1567,3 +1567,190 @@ test("test_170_invalid_or_missing_output_file_is_named_in_the_reason — every r
   expect(a.tried).toContain(noNote(Y));
   expect(a.tried).not.toContain(noNote(TASK_170));
 });
+
+// ── #170 skeptic self-critique (round 5) ─────────────────────────────────────────────────────────────────────────────
+
+// dw2 — cases (e) and (f) in the runner's ATTACHMENT form (queued_command / task-notification), each with a
+// same-bytes control that recovers. Until now every "does not match the runner's notification" refusal was built
+// from a user-turn line; the attachment form only had recoveries and a late change.
+test("test_170_output_file_of_another_task_is_not_a_verdict — (e) and (f) in the attachment form, each with a same-bytes control", () => {
+  const transcriptOf = (noteLine) => [line170({ type: "user", message: { content: "/factory-review 124" } }), ...receipt170(), noteLine].join("\n") + "\n";
+  const isAttachment = (t) => JSON.parse(t.split("\n")[3]).type === "attachment";
+
+  // (f) truncated inline: the file holds round 9, the runner inlined the start of a different verdict
+  const dir = scratch170();
+  const path = outputPath170(dir);
+  const planted = longReview170({ round: 9 });
+  const realVerdict = longReview170();
+  expect(JSON.stringify(planted).slice(0, 8179)).not.toBe(JSON.stringify(realVerdict).slice(0, 8179));
+  write170(path, envelopeFile170(planted));
+  const fT = transcriptOf(attachmentNote170(TASK_170, "toolu_wf", path, cutInline170(JSON.stringify(realVerdict), path)));
+  expect(isAttachment(fT)).toBe(true);
+  const f = verifyStage({ ...reviewArgs170, transcriptText: fT, readFile: readFile170 });
+  expect(f.ok).toBe(false);
+  expect(f.data).toBe(null);
+  expect(f.reasons[0]).toBe("claude -p hit max turns (23)");
+  expect(f.reasons.join("\n")).toContain(`workflow output file does not match the runner's notification: ${path} (its result does not begin with the 8179 chars the runner inlined)`);
+  // control: the same file under the attachment that inlines round 9's own start → recovered, and it is round 9
+  const fOk = verifyStage({ ...reviewArgs170, transcriptText: transcriptOf(attachmentNote170(TASK_170, "toolu_wf", path, cutInline170(JSON.stringify(planted), path))), readFile: readFile170 });
+  expect(fOk.reasons).toEqual([]);
+  expect(fOk.ok).toBe(true);
+  expect(fOk.data.round).toBe(9);
+  expect(fOk.source).toContain(path);
+
+  // (f) untruncated inline (no marker, so the runner claims it is the whole result) that is only a prefix of the file
+  const fullText = JSON.stringify(planted);
+  const short = verifyStage({ ...reviewArgs170, transcriptText: transcriptOf(attachmentNote170(TASK_170, "toolu_wf", path, fullText.slice(0, 40))), readFile: readFile170 });
+  expect(short.ok).toBe(false);
+  expect(short.reasons.join("\n")).toContain(`workflow output file does not match the runner's notification: ${path} (its result does not equal the 40 chars the runner inlined)`);
+
+  // (e) the file changed 5 s after the attachment line: refused with the lag; the same bytes stamped by the file's
+  // own change time recover
+  const late = verifyStage({ ...reviewArgs170, transcriptText: transcriptOf(attachmentNote170(TASK_170, "toolu_wf", path, cutInline170(fullText, path), new Date(statSync170(path).ctimeMs - 5000).toISOString())), readFile: readFile170 });
+  expect(late.ok).toBe(false);
+  expect(late.reasons.join("\n")).toMatch(new RegExp(`workflow output file changed after the runner's notification: ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(changed [^;]+; lag \\d+ ms > slack ${stageArtifact170.WORKFLOW_OUTPUT_CTIME_SLACK_MS} ms\\)`));
+  const onTime = verifyStage({ ...reviewArgs170, transcriptText: transcriptOf(attachmentNote170(TASK_170, "toolu_wf", path, cutInline170(fullText, path), new Date(Math.floor(statSync170(path).ctimeMs)).toISOString())), readFile: readFile170 });
+  expect(onTime.reasons).toEqual([]);
+  expect(onTime.ok).toBe(true);
+});
+
+// dw1/dw2 open risk, pinned rather than assumed: the ONE attachment-form notification the runner was recorded writing
+// (fixtures/claude-2.1.287-task-notification.json, a background Bash task) carries no <result>. Every attachment-form
+// recovery above splices a Workflow-style <result> into that line — a shape no fixture records for Workflows. If a
+// real Workflow attachment also has none, the file cannot be byte-bound (case f) and is refused with its own reason.
+// This test makes that branch visible: the recorded prompt, re-pointed only at the Workflow receipt, is refused with
+// "carries no <result>"; adding a <result> and nothing else recovers.
+test("test_170_recovery_reads_the_workflow_output_file_untruncated — the recorded attachment form has no <result>: refused by name, recovered once one is present", () => {
+  expect(REAL_NOTE_170.attachment.prompt).not.toContain("<result>");     // the recorded fact this test is about
+  const dir = scratch170();
+  const path = outputPath170(dir);
+  const verdict = longReview170();
+  write170(path, envelopeFile170(verdict));
+  const realPrompt = REAL_NOTE_170.attachment.prompt;
+  const recordedPath = REAL_287_170.background_task.output_file.path;
+  const recordedTask = /<task-id>([^<]+)<\/task-id>/.exec(realPrompt)[1];
+  const recordedToolUse = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(realPrompt)[1];
+  // only the identifiers are re-pointed; the prompt's layout (and its missing <result>) is the runner's
+  const prompt = realPrompt.split(recordedPath).join(path).split(recordedTask).join(TASK_170).split(recordedToolUse).join("toolu_wf");
+  const noteOf = (p) => line170({ ...REAL_NOTE_170, timestamp: notifiedAt170(path), attachment: { ...REAL_NOTE_170.attachment, prompt: p } });
+  const transcriptOf = (p) => [line170({ type: "user", message: { content: "/factory-review 124" } }), ...receipt170(), noteOf(p)].join("\n") + "\n";
+  const asked = [];
+  const r = verifyStage({ ...reviewArgs170, transcriptText: transcriptOf(prompt), readFile: (p) => { asked.push(p); return readFile170(p); } });
+  expect(asked).toEqual([path]);                                           // the runner named it, so it was opened…
+  expect(r.ok).toBe(false);                                                // …but not bound, so it is not a verdict
+  expect(r.data).toBe(null);
+  expect(r.reasons.join("\n")).toContain(`workflow output file not bound to the runner's notification (the notification carries no <result>): ${path}`);
+  // control: the same prompt with a <result> inserted before the closing tag, nothing else changed
+  const withResult = prompt.replace("</task-notification>", `<result>${cutInline170(JSON.stringify(verdict), path)}</result>\n</task-notification>`);
+  const ok = verifyStage({ ...reviewArgs170, transcriptText: transcriptOf(withResult), readFile: readFile170 });
+  expect(ok.reasons).toEqual([]);
+  expect(ok.ok).toBe(true);
+  expect(ok.source).toContain(path);
+});
+
+// dw4 "not a regular file": a symlink is refused by O_NOFOLLOW at open, before the isFile() check ever runs. A
+// directory and a FIFO reach that check. The FIFO is read in a child process with a deadline: without O_NONBLOCK,
+// opening a FIFO with no writer blocks forever, which is the hazard the production reader exists to prevent.
+test("test_170_invalid_or_missing_output_file_is_named_in_the_reason — a directory or a FIFO at the runner's path is not a regular file, and does not block", async () => {
+  const { spawnSync, execFileSync } = await import("node:child_process");
+  const { rmSync } = await import("node:fs");
+  const verdict = longReview170();
+  const notRegular = (path) => `workflow output file is not a regular file: ${path} (a symlink or special file is not the runner's file)`;
+  // a directory where the file should be
+  const dir = scratch170();
+  const path = outputPath170(dir);
+  mkdir170(path);
+  const d = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: verdict }), readFile: readFile170 });
+  expect(d.ok).toBe(false);
+  expect(d.reasons.join("\n")).toContain(notRegular(path));
+  expect(d.reasons.join("\n")).not.toContain(`workflow output file unreadable: ${path}`);
+  // control: the directory replaced by the runner's file, same transcript shape → recovered
+  rmSync(path, { recursive: true });
+  write170(path, envelopeFile170(verdict));
+  const dOk = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir, artifact: verdict }), readFile: readFile170 });
+  expect(dOk.reasons).toEqual([]);
+  expect(dOk.ok).toBe(true);
+
+  // a FIFO with no writer, read by the production reader in a child process
+  const fdir = scratch170();
+  const fifo = outputPath170(fdir);
+  execFileSync("mkfifo", [fifo]);
+  const reader = new URL("../bin/run-stage.js", import.meta.url).href;
+  const script = `import { readFileOrNull } from ${JSON.stringify(reader)}; process.stdout.write(JSON.stringify(readFileOrNull(${JSON.stringify(fifo)}, { maxBytes: ${5 * 1024 * 1024}, meta: true })));`;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 15000 });
+  expect(child.signal, "the reader blocked on a FIFO (killed at the deadline)").toBe(null);
+  expect(child.status, child.stderr).toBe(0);
+  const got = JSON.parse(child.stdout);
+  expect(got).toEqual({ notRegular: true });
+  // and that answer, given to the lib, is the "not a regular file" line for the FIFO's path
+  const f = verifyStage({ ...reviewArgs170, transcriptText: incident170({ dir: fdir, artifact: verdict }), readFile: (p) => (p === fifo ? got : null) });
+  expect(f.ok).toBe(false);
+  expect(f.reasons.join("\n")).toContain(notRegular(fifo));
+});
+
+// dw4 — the matrix the rubric asks for: ONE recovering control, and each refusal differs from it in exactly one fact.
+// Every refusal leaves its own line naming the path (or the task id), the lines are pairwise distinct once the path
+// and numbers are blanked out (so the rule, not just the path, differs), and the size and lag cases carry their number.
+test("test_170_invalid_or_missing_output_file_is_named_in_the_reason — one recovering control, one fact changed per case, distinct lines", async () => {
+  const { rmSync } = await import("node:fs");
+  const CAP = stageArtifact170.WORKFLOW_OUTPUT_MAX_BYTES;
+  const SLACK = stageArtifact170.WORKFLOW_OUTPUT_CTIME_SLACK_MS;
+  const verdict = longReview170();
+  const broken = { ...verdict, verdicts: undefined, round: undefined };
+  const control = envelopeFile170(verdict);
+  /** Build a scratchpad and a transcript; `mutate` changes one fact. Returns the result and the path. */
+  const run = ({ file = control, inlineOf = verdict, notify = true, lateBy = null, dirAtPath = false } = {}) => {
+    const dir = scratch170();
+    const path = outputPath170(dir);
+    if (dirAtPath) mkdir170(path);
+    else if (file !== null) write170(path, file);
+    const lines = [line170({ type: "user", message: { content: "/factory-review 124" } }), ...receipt170()];
+    let lag = null;
+    if (notify) {
+      const ts = lateBy === null ? notifiedAt170(path) : new Date(Math.floor(statSync170(path).ctimeMs) - SLACK - lateBy).toISOString();
+      if (lateBy !== null) lag = Math.round(statSync170(path).ctimeMs - Date.parse(ts));   // the file's sub-ms ctime decides the rounding
+      lines.push(notification170(TASK_170, path, JSON.stringify(inlineOf), "toolu_wf", ts));
+    }
+    lines.push(...poll170(0, path, JSON.stringify(verdict)));
+    const r = verifyStage({ ...reviewArgs170, transcriptText: lines.join("\n") + "\n", readFile: readFile170 });
+    return { r, path, dir, lag };
+  };
+  // the control recovers
+  const ok = run();
+  expect(ok.r.reasons).toEqual([]);
+  expect(ok.r.ok).toBe(true);
+  expect(ok.r.source).toContain(ok.path);
+
+  const padded = control + " ".repeat(CAP + 1 - Buffer.byteLength(control));   // same JSON, one byte over the cap
+  expect(JSON.parse(padded)).toEqual(JSON.parse(control));
+  const cases = {
+    schema: run({ file: envelopeFile170(broken), inlineOf: broken }),          // the result fails the schema
+    oversize: run({ file: padded }),                                          // the size
+    notJson: run({ file: control.slice(0, -1) }),                             // the last byte
+    missing: run({ file: null }),                                             // the file
+    notRegular: run({ dirAtPath: true }),                                     // the kind of inode
+    tampered: run({ inlineOf: longReview170({ round: 9 }) }),                 // the runner's inline copy
+    late: run({ lateBy: 2345 }),                                              // the notification's timestamp
+    noNotification: run({ notify: false }),                                   // the notification line
+  };
+  const lineOf = {};
+  for (const [name, { r, path }] of Object.entries(cases)) {
+    expect(r.ok, name).toBe(false);
+    expect(r.data, name).toBe(null);
+    expect(r.reasons[0], name).toBe("claude -p hit max turns (23)");
+    const anchor = name === "noNotification" ? `task ${TASK_170}` : path;
+    const own = r.reasons.join("\n").split(/\n| \| /).map((l) => l.replace(/^no candidate matched the stage schema — /, "")).filter((l) => l.includes(anchor) && /workflow output file/.test(l));
+    expect(own.length, `${name} has its own reason line naming ${anchor}`).toBeGreaterThan(0);
+    lineOf[name] = own[0];
+  }
+  expect(lineOf.oversize).toContain(`(${CAP + 1} bytes > ${CAP})`);
+  expect(cases.late.lag).toBeGreaterThanOrEqual(SLACK + 2345);
+  expect(lineOf.late).toContain(`lag ${cases.late.lag} ms > slack ${SLACK} ms`);
+  expect(lineOf.schema).toMatch(/round is required; verdicts is required/);
+  expect(lineOf.missing).toBe(`workflow output file missing: ${cases.missing.path}`);
+  expect(lineOf.noNotification).toBe(`workflow output file: no runner notification names the output file of task ${TASK_170}`);
+  // the rule is what differs, not just the path: blank out each case's path and every number
+  const rule = Object.fromEntries(Object.entries(lineOf).map(([n, l]) => [n, l.split(cases[n].path).join("<path>").replace(/\d+/g, "N")]));
+  expect(new Set(Object.values(rule)).size).toBe(Object.keys(rule).length);
+  rmSync(cases.notRegular.path, { recursive: true });
+});
