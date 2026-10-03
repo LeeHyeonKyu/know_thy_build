@@ -4205,8 +4205,14 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
    진짜 `usage:` 줄이 가짜 크래시 섹션으로 들어가 상한에서 빠졌다. 지금: ① 인용은 네 줄 끝 뒤의 `\s` 전부를 건너뛰고 본다; ①' **헤더는
    `appendRunRecord`의 템플릿만 세운다** — 모든 기록자의 모든 원소에 `neutralizeRecordLine`(lib/usage.js)이 걸려 줄머리 `## `를 인용 표시하고,
    원소 안 개행 뒤의 `engine-crash:`·`usage:`도 인용 표시한다(파서는 섹션의 첫 `usage:`를 센다 — 옮겨 적힌 음수 비용이 진짜 usage를 앞지르던
-   main부터의 구멍도 같이 닫힌다); ② 크래시 판정은 **trim하지 않은** 줄로 한다(러너는 두 줄을 줄 맨 앞부터 쓴다). 각 겹은 따로 핀돼 있다
-   (`test_196_agent_text_cannot_forge_a_crash_section_header_or_whitespace` — 겹 하나를 되돌리면 그 겹의 단언이 실패한다).
+   main부터의 구멍도 같이 닫힌다); ② 크래시 판정은 **trim하지 않은** 줄로 한다(러너는 두 줄을 줄 맨 앞부터 쓴다). 각 겹은 따로 핀돼 있고, 겹 하나를 되돌리면
+   그 겹의 단언이 실패한다(되돌려 확인했다): ① `record()`의 원소 맨 앞 인용은 `test_196_record_quotes_crash_shaped_lines_the_runner_did_not_write`
+   (원소 하나가 통째로 남의 문구일 때 — ①'은 원소 맨 앞을 보지 않으므로 그 자리는 ①만 덮는다); ①' `neutralizeRecordLine`과 ②의 trim 없는
+   읽기는 `test_196_agent_text_cannot_forge_a_crash_section_header_or_whitespace`; ②의 스테이지·러너 대조는
+   `test_196_crash_line_counts_only_for_its_own_stage_and_runner`(자리가 맞는 섹션에서 대조만 다르게). ①'이 모든 기록자에 걸려도 실제 생산자의
+   줄(크래시 줄·usage 줄과 그 progress 마커·review-evidence·budget 줄)은 바이트 그대로 나간다 —
+   `test_196_record_neutralizer_leaves_real_producer_lines_byte_identical`. usage가 이미 앞 섹션에 나간 뒤에 던진 런의 크래시 섹션은 usage를
+   다시 싣지 않는다(같은 돈이 `usd`와 `engineUsd`에 두 번 들지 않는다) — `test_196_crash_after_usage_is_recorded_counts_its_dollars_once`.
 3. **R 면제는 라우팅으로, 상한은 sweeper에.** 크래시 런은 blocked으로 가므로 하트비트 재큐 팔의 `factory-retry`(R)를 쓰지 않는다. 대신 blocked
    팔이 `ENGINE_CRASH_MAX_RETRIES = 1`(코드 상수, `API_ERROR_MAX_RETRIES` 옆 — CHARTER 값이 아니다: 이 이슈의 must_not. `sweep()`의
    `engineCrashMaxRetries` 인자의 기본값이고, 테스트는 다른 값을 주어 그 배선을 핀한다 — 기본 분기의 1과 값이 같아 값만으로는 배선이 안 보인다)만큼 같은 스테이지를

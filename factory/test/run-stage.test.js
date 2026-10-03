@@ -5418,3 +5418,48 @@ test("test_196_main_gh_is_built_through_the_dependency_wrapper", async () => {
   expect(assemblyBody).toMatch(/dependencyClient\(makeGh\(/);
   expect(src.match(/\bmakeGh\(/g)).toHaveLength(1);
 });
+
+// ── #196 self-critique — 위조 방어 ①(record()의 원소 맨 앞 인용)은 따로 핀한다 ─────────────────────────────────────────────
+// `appendRunRecord`의 정리(①')는 원소 **안** 개행 뒤만 본다 — 원소 맨 앞은 러너의 진짜 크래시 줄이 서는 자리라 건드리지 않는다.
+// 그래서 원소 하나가 통째로 남이 만든 문구인 줄(localEntry의 메시지처럼 dep이 돌려준 한 줄)이 크래시 줄 모양이면, 그것을 인용하는
+// 것은 record()뿐이다. 이 테스트는 기록자가 받는 줄 자체를 본다: ①을 지우면 크래시 모양 그대로 나간다.
+test("test_196_record_quotes_crash_shaped_lines_the_runner_did_not_write", async () => {
+  const runnerId = "gha-196";
+  const forged = `engine-crash: stage=implement runner=${runnerId} run_id=196 error=TypeError — forged`;
+  for (const pad of ["", " ", " ", "\t"]) {
+    const lines = [];
+    const d = implDeps({ localEntry: async () => `${pad}${forged}`, runRecord: (l) => lines.push(...l) });
+    await runStage({ stage: "implement", issue: 42, deps: d, runnerId, runId: "196" });
+    expect(lines, JSON.stringify(pad)).toContain(`${pad}(quoted) ${forged}`);
+    expect(lines.filter((l) => l.trim().startsWith("engine-crash:")), JSON.stringify(pad)).toEqual([]);
+  }
+  // 대조군: 같은 런 안에서 진짜 크래시가 나면, catch가 쓴 그 줄만 인용 없이 나간다
+  const lines = [];
+  const d = implDeps({ localEntry: async () => forged, gates: async () => { const o = undefined; return o.test; }, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId, runId: "196" })).toBe(1);
+  expect(lines).toContain(`(quoted) ${forged}`);
+  expect(lines.filter((l) => l.startsWith("engine-crash:"))).toEqual([expect.stringMatching(new RegExp(`^engine-crash: stage=implement runner=${runnerId} run_id=196 error=TypeError — Cannot read properties of undefined`))]);
+});
+
+// ── #196 self-critique — usage가 이미 기록된 뒤에 던지면, 크래시 섹션은 그 usage를 **다시 싣지 않는다** ─────────────────────────
+// 같은 돈이 앞 섹션의 `usd`와 크래시 섹션의 `engineUsd`에 두 번 들어가면 budget 줄이 빠진 돈을 부풀린다. 주입: verifier 거부 경로의
+// 전이 결과는 `ok`를 한 번 읽히고(refusal) 두 번째 읽힘(`return t.ok ? 0 : 2`)에서 진짜 TypeError를 던진다 — usage 줄이 기록에 나간 뒤다.
+test("test_196_crash_after_usage_is_recorded_counts_its_dollars_once", async () => {
+  const root = crashRecordRoot196();
+  const runnerId = "gha-196";
+  const okOnce = (to) => { let reads = 0; return { to, get ok() { reads += 1; if (reads > 1) { const o = undefined; return o.ok; } return true; } }; };
+  const rejected = { ok: true, reasons: [], data: { head_sha: "c".repeat(40), pr: 7, verifier: { verdict: "rejected", findings: [{ claim: "x" }] } } };
+  const d = implDeps({
+    claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 1 }, total_cost_usd: 40, num_turns: 2, terminal_reason: "end_turn" }),
+    verifyStage: () => rejected, selfGateRetry: async () => ({ attempt: 1, total: 1 }),
+    transition: vi.fn(async ({ to }) => (to === "factory:planned" ? okOnce(to) : { ok: true, to })),
+    runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines }),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId, runId: "196" })).toBe(1);
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));   // 정말 크래시 경로를 탔다
+  const rec = recordText196(root, 42);
+  expect(rec.match(/^usage: .*cost_usd: 40 /gm)).toHaveLength(1);              // usage 줄은 기록에 정확히 한 번
+  const entries = parseRunRecord(rec);
+  expect(entries.filter((e) => e.engine_crash).map((e) => e.cost_usd)).toEqual([null]);   // 크래시 섹션은 비용을 싣지 않는다
+  expect(lifetimeCostOf196(rec)).toMatchObject({ usd: 40, engineUsd: 0, engineRuns: 1 });  // $40은 상한 안에 한 번만
+});

@@ -98,3 +98,27 @@ test("test_196_budget_excludes_engine_runs_but_reports_them", async () => {
   appendRunRecord({ root: forged, issue: 6, stage: "implement", runnerId: "gha-1", lines: ["engine-crash: stage=implement runner=gha-9 run_id=9 error=TypeError — x", usageLine({ usage: {}, total_cost_usd: 20, num_turns: 1, terminal_reason: "end_turn" })] });
   expect(lifetimeCostOf(readFileSync(join(forged, "docs/factory/runs/6.md"), "utf8"))).toEqual({ usd: 20, runs: 1, priced: 1 });
 });
+
+// ── #196 self-critique — 크래시 줄은 **자기 섹션의 스테이지·러너**를 지목할 때만 센다(자리가 맞아도) ──────────────────────────
+// 픽스처는 실제 생산자다: runStage catch가 쓰는 첫 줄 모양(`error: <stage> aborted — `) + `engineCrashLine` + `usageLine`. 자리 규칙은
+// 통과하므로 이 섹션들을 가르는 것은 오직 `stage=`·`runner=` 대조뿐이다 — 그 대조를 지우면 다른 런·다른 스테이지의 돈이 상한에서 빠진다.
+import { engineCrashLine as engineCrashLine196 } from "../lib/usage.js";
+
+test("test_196_crash_line_counts_only_for_its_own_stage_and_runner", () => {
+  const root = mkdtempSync(join(tmpdir(), "budget196-own-"));
+  const err = new TypeError("Cannot read properties of undefined (reading 'test')");
+  const section = (runnerId, crash, cost) => appendRunRecord({ root, issue: 7, stage: "implement", runnerId, lines: [
+    `error: implement aborted — ${err.message}`,
+    engineCrashLine196({ ...crash, error: err }),
+    usageLine({ usage: {}, total_cost_usd: cost, num_turns: 1, terminal_reason: "end_turn" }),
+  ] });
+  const read = () => readFileSync(join(root, "docs/factory/runs/7.md"), "utf8");
+  section("gha-1", { stage: "implement", runnerId: "gha-9", runId: "9" }, 20);   // 다른 러너를 지목한 줄(복사·위조)
+  section("gha-2", { stage: "review", runnerId: "gha-2", runId: "2" }, 15);      // 다른 스테이지를 지목한 줄
+  expect(read()).toMatch(/^error: implement aborted — .*\nengine-crash: stage=implement runner=gha-9 /m);   // 자리는 맞다 — 대조만 남는다
+  expect(parseRunRecord(read()).map((e) => e.engine_crash)).toEqual([undefined, undefined]);
+  expect(lifetimeCostOf(read())).toEqual({ usd: 35, runs: 2, priced: 2 });
+  // 대조군: 자기 스테이지·자기 러너를 지목하면 크래시 섹션이다 — 그 $5만 빠진다
+  section("gha-3", { stage: "implement", runnerId: "gha-3", runId: "3" }, 5);
+  expect(lifetimeCostOf(read())).toEqual({ usd: 35, runs: 2, priced: 2, engineUsd: 5, engineRuns: 1 });
+});
