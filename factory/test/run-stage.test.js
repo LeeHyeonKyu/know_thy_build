@@ -4521,3 +4521,59 @@ test("test_174_self_gate_dep_new_files_with_real_git_edits_deletions_and_renames
   expect(closed.ok).toBe(false);
   expect(closed.findings.filter((f) => f.blocking).map((f) => f.detail).join("\n")).toMatch(/restart brief unusable — git diff --no-renames failed — fatal: bad revision/);
 });
+
+// #174 verifier finding 1 — main()'s `transition` dep is the ONE production line that forwards `by=factory:run-<id>` to
+// lib/transition.js. Every other #174 test injects its own transition; this one drives a whole window (seed rounds, the
+// restart, the new author's K rounds) through the extracted dep main() itself uses (`makeTransitionDep`), with the real
+// lib/transition.js underneath. If the forwarding is dropped, the restart is written `by=script`, kRestartState never sees a
+// used restart, and the new author's rounds keep climbing past K instead of restarting at 1.
+import { makeTransitionDep } from "../bin/run-stage.js";
+test("test_174_main_transition_dep_forwards_the_restart_principal", async () => {
+  const gh = gh174();
+  const extras = [];
+  const mainDep = () => vi.fn(makeTransitionDep({
+    gh, issue: 174, stage: "review", rehearsal: null, admission: null,
+    buildExtra: async (a) => { extras.push(a.to); return {}; },
+  }));
+  const viaMain = (verdicts) => reviewDeps174(gh, { verdicts, transition: mainDep() });
+
+  // Rounds 1 and 2: ordinary rejects through main's dep → `by=script` (no principal is forwarded when none is given).
+  for (let i = 0; i < 2; i++) {
+    gh.label = "factory:awaiting-review";
+    expect(await review174(viaMain(verdicts174(MF174)))).toBe(0);
+  }
+  const seeded = (await gh.comments()).filter((c) => toOf174(c) === "factory:rework");
+  expect(seeded.map((c) => TRANSITION_TO_174.exec(c.body)?.[3])).toEqual(["script", "script"]);
+
+  // Round 3 exhausts K → the restart transition, through main's dep, carries this run's principal.
+  gh.label = "factory:awaiting-review";
+  const before = (await gh.comments()).length;
+  const restart = viaMain(verdicts174(MF174));
+  expect(await review174(restart)).toBe(0);
+  const posted = (await gh.comments()).slice(before).map((c) => c.body);
+  expect(posted).toHaveLength(2);
+  expect(K_RESTART.test(posted[0])).toBe(true);
+  expect(TRANSITION_TO_174.exec(posted[1])?.slice(1, 4)).toEqual(["factory:awaiting-review", "factory:rework", "factory:run-9001"]);
+  const state = await makeKRestartDeps({ gh, issue: 174 }).kRestartState();
+  expect(state.used).toBe(true);
+  expect(state.offset).toBe(3);
+
+  // The new author, still through main's dep, gets the full K and then a person: the restart was recognised.
+  const rounds = [], tos = [];
+  let last;
+  for (let i = 0; i < 3; i++) {
+    gh.label = "factory:awaiting-review";
+    const d = viaMain(verdicts174([MF174[1]]));
+    expect(await review174(d)).toBe(0);
+    rounds.push(d.writeHandoff.mock.calls[0][0].data.round);
+    last = d.transition.mock.calls[0][0];
+    tos.push(last.to);
+  }
+  expect(rounds).toEqual([1, 2, 3]);
+  expect(tos).toEqual(["factory:rework", "factory:rework", "factory:needs-human"]);
+  expect(last.reason).toContain("K exhausted twice (one self-restart used)");
+  expect(await briefs174(gh)).toHaveLength(1);
+  expect(gh.label).toBe("factory:needs-human");
+  // Every hop asked main's ctxExtra builder exactly once, for its own target.
+  expect(extras).toEqual(["factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:needs-human"]);
+});

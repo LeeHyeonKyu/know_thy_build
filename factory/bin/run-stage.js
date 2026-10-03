@@ -2236,6 +2236,20 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
   return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transitionIssue });
 }
 
+/**
+ * #174 (verifier finding 1) — main()'s `transition` dep, extracted so tests drive the production call site rather than replace it.
+ * Every stage transition funnels through here. `buildExtra(args)` is main's ctxExtra builder (roster, gates file, merge gates).
+ */
+export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
+  return async (args) => {
+    const { to, reason, cause, by = null } = args;
+    const ctxExtra = await buildExtra(args);
+    // The K restart's transition carries `by=factory:run-<id>` (kRestartState counts a restart as used only with it); every
+    // other caller passes none and is written `by=script`, as before.
+    return transitionFn({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission, ...(by ? { by } : {}) });
+  };
+}
+
 export function makeCheckoutHead({ gh, run, root, issue }) {
   return async () => {
     const handoff = latestHandoff(await gh.comments(issue), "implement");
@@ -3383,7 +3397,9 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null, by = null }) => {
+    // #174 — the call into lib/transition.js (and its `by` forwarding) lives in `makeTransitionDep`, which tests drive; this
+    // closure is only main's ctxExtra builder.
+    transition: makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra: async ({ to, data, mergeGatesResult, prerequisite = false, qaManifestRecorded = null }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -3423,9 +3439,9 @@ async function main() {
        * 리허설을 새로 GREEN으로 돌려도 풀리지 않는다(값이 낡은 것이 아니라 인자가 없는 것이다).
        * 다른 목적 라벨에는 비용이 0이다: `transition()`은 `to === "factory:queue"`일 때만 검사기를 부른다.
        */
-      // #174 — K 재시작의 전이는 `by=factory:run-<id>`를 싣는다(그 밖의 호출자는 넘기지 않는다 — 예전 그대로 `by=script`).
-      return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission, ...(by ? { by } : {}) });
-    },
+      // #174 — K 재시작의 `by=factory:run-<id>` 전달과 lib/transition.js 호출은 `makeTransitionDep`에 있다(테스트가 그 자리를 돈다).
+      return ctxExtra;
+    } }),
     /**
      * Feedback loop (T3 re-review NEW-MF-1) — **이 런이 쓴 팩토리 버전.** `self-gate-detail:` 줄에
      * 실려, "이 검사는 KTB가 거둬들였다"와 "이번 라운드에 볼 것이 없었다"를 가르는 유일하게 건전한
