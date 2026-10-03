@@ -2,7 +2,8 @@ import { parseHandoffs } from "./handoff.js";
 import { parseReviewEvidenceAll, runIdOfRunner } from "./run-record.js";
 import { knownRunsFor, isBoundLine, parseRecordEvidence } from "./feedback/harvest-findings.js";
 import { parseHeartbeat } from "./heartbeat.js";
-import { budgetLine } from "./budget.js";
+import { parseRunRecord } from "./usage.js";
+import { SELF_GATE_DETAIL_PREFIX } from "./self-gate.js";
 import { validate } from "./schemas.js";
 import { TRANSITION_TO } from "./retro/issue-comments.js";
 
@@ -20,8 +21,15 @@ import { TRANSITION_TO } from "./retro/issue-comments.js";
  *     same kind speaks for the same run (two stories for one run → neither). The `## stage · at · runner` header is never
  *     used to bind — anyone can put a header in front of a line. Everything else is counted in `data.unbound`, never shown.
  *   - values the caller passes in: this merge run's own gates result (+ whether it was the one re-run), the hand-off reason,
- *     and this run's lifetime budget check. Record `budget:` / `FACTORY_GATES:` lines carry no run id, so they are never a
- *     source.
+ *     and the budget cap (`[budget].usd_per_issue`, from the caller's budget check — only its `cap`). Record `budget:` /
+ *     `FACTORY_GATES:` lines carry no run id, so they are never a source; every FACTORY_GATES line is counted as not used.
+ *   - the lifetime cost: `usage:` lines carry no run id of their own either, so they are bound by their section's runner —
+ *     the one place the header is used, and said so on the row: the runner must be heartbeat-known, its heartbeat must name
+ *     the section's stage, and one run has one usage story (two different usage lines for one run → neither counts).
+ *   - the new-test proof: the self-gate-detail line says `mutation` ran and nothing blocked, but a crashed check and a
+ *     skipped test file are non-blocking and leave the line identical. So the proof also needs the `self-gate: … → ok` line
+ *     run-stage writes right before it (same `record()` call) to say 0 advisory findings. The proven count is the plan's
+ *     done_when test count (a claim) gated by that record — no per-test result is recorded (#195 non_goals).
  *   - **claim** rows: agent-written handoff comments (plan `done_when`, review `must_fix`, `factory.rework-response.v1`).
  *     They are shown, and labelled as claims — the shared bot account can post them.
  * No prose is generated and nothing is summarised by a model. A source missing from the input drops its row: no empty
@@ -53,28 +61,11 @@ export function escapeCell(v) {
   return s;
 }
 
-const SECTION = /^##\s+(\S+)\s+·\s+(\S+)\s+·\s+(.+)$/;
 const GATES_LINE = /^FACTORY_GATES: /;
 const SHA = /^[0-9a-f]{7,40}$/i;
 /** Which heartbeat stage writes which record line (run-stage: review-evidence in review, self-gate-detail in implement). */
 const PRODUCER_STAGES = { review: new Set(["review"]), self_gate: new Set(["implement"]) };
 const REWORK_JSON = /```json\s*([\s\S]*?)```/g;
-
-/**
- * The record split into lines, each with the runner its `## stage · at · runner` header names (null before any header). Used
- * only to COUNT `FACTORY_GATES:` lines that are not a source anyway; nothing rendered is bound through a header.
- */
-function recordLines(text) {
-  const out = [];
-  let runner = null;
-  for (const raw of String(text ?? "").split("\n")) {
-    const line = raw.trimEnd();
-    const s = SECTION.exec(line);
-    if (s) { runner = s[3].trim(); continue; }
-    out.push({ line, runner });
-  }
-  return out;
-}
 
 /** runner → the set of stages its heartbeats name (the runner's own channel; a stage run makes a new heartbeat comment). */
 function heartbeatStages(comments) {
@@ -140,6 +131,38 @@ const fmtElapsed = (ms) => {
   const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
   return d ? `${d}d ${h}h ${m}m` : `${h}h ${m}m`;
 };
+/** The `self-gate: <ran> → ok[ (N advisory)]` line run-stage writes right before a passing self-gate's detail line. */
+const SELF_GATE_OK = /^self-gate: (\S+) → ok(?: \((\d+) advisory\))?$/;
+
+/**
+ * Advisory-finding count for the bound self-gate-detail line `sg`: read from the line in front of EVERY copy of it in the
+ * record. All copies must be preceded by a matching ok line that agrees — otherwise null (the outcome is not recorded).
+ */
+function selfGateAdvisory(recordText, sg) {
+  const want = JSON.stringify({ ...sg, section: undefined });
+  const lines = String(recordText ?? "").split("\n").map((l) => l.trimEnd());
+  const seen = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith(SELF_GATE_DETAIL_PREFIX)) continue;
+    let o;
+    try { o = JSON.parse(lines[i].slice(SELF_GATE_DETAIL_PREFIX.length)); } catch { continue; }
+    if (JSON.stringify({ ...o, section: undefined }) !== want) continue;
+    const m = i > 0 ? SELF_GATE_OK.exec(lines[i - 1]) : null;
+    if (!m || m[1] !== ((Array.isArray(o.ran) && o.ran.length ? o.ran.join("+") : "none"))) return null;
+    seen.add(m[2] == null ? 0 : Number(m[2]));
+  }
+  return seen.size === 1 ? [...seen][0] : null;
+}
+
+/** The proof's outcome as words (the headline and the contract fact say the same thing). */
+function proofText(p) {
+  if (p.blocked) return `mutation ${p.mutation}, blocked`;
+  if (p.mutation !== "ran") return `mutation ${p.mutation}, not blocked`;
+  if (p.advisory == null) return "mutation ran, outcome line missing — not proven";
+  if (p.advisory > 0) return `mutation ran with ${p.advisory} advisory finding(s) (a crashed check and a skipped test file are non-blocking and land here) — not proven`;
+  return "mutation ran, 0 advisory findings, not blocked";
+}
+
 const list = (a) => (Array.isArray(a) && a.length ? a.join(",") : "none");
 
 /**
@@ -149,7 +172,7 @@ const list = (a) => (Array.isArray(a) && a.length ? a.join(",") : "none");
  *   gates      — this merge run's own `factory.gates.v1` result, or null when the merge stage had none yet;
  *   gatesRerun — true when that result is the one re-run's (#157);
  *   reason     — the hand-off / refusal reason the merge stage is about to transition with, or null;
- *   budget     — this run's lifetime budget check (`budgetCheck`'s `{ ok, cap, usd, runs }`), or null;
+ *   budget     — this run's budget check (`budgetCheck`'s `{ ok, cap, usd, runs }`), or null — only `cap` is used;
  *   pr, now    — the PR number and the current time (ISO string or ms). `now` null → no elapsed row.
  */
 export function buildEvidence({ recordText = null, comments = [], gates = null, gatesRerun = false, reason = null, budget: budgetCheck = null, pr = null, now = null } = {}) {
@@ -158,7 +181,7 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   const stages = heartbeatStages(cs);
   const handoffs = parseHandoffs(cs);
   const issueOf = handoffs.find((h) => Number.isInteger(h.issue))?.issue ?? null;
-  const unbound = { review: 0, gates: 0, self_gate: 0 };
+  const unbound = { review: 0, gates: 0, self_gate: 0, usage: 0 };
 
   // ── Contract (claim): the latest plan handoff's done_when. ──
   const plans = handoffs.filter((h) => h.stage === "plan").sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
@@ -221,10 +244,8 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   }
   const mustFixCount = reviews.length ? mustFix.length : null;
 
-  // ── Gates (this run): the value passed in. Record FACTORY_GATES lines are never rendered; unbound ones are counted. ──
-  for (const { line, runner } of recordLines(recordText)) {
-    if (GATES_LINE.test(line) && !isBoundLine({ runner }, known)) unbound.gates += 1;
-  }
+  // ── Gates (this run): the value passed in. Record FACTORY_GATES lines carry no run id: never rendered, all counted. ──
+  for (const raw of String(recordText ?? "").split("\n")) if (GATES_LINE.test(raw.trimEnd())) unbound.gates += 1;
   const g = gates && typeof gates === "object" ? gates : null;
   const gatesRow = g ? {
     level: g.level ?? null, status: g.status ?? null, passed: g.passed ?? null, failed: g.failed ?? null,
@@ -232,19 +253,36 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   } : null;
 
   // ── Proof (record): the bound self-gate-detail line's `mutation` check — the PR-level "new tests fail when the code they
-  // guard is mutated" check. Ran and nothing blocked → the plan's tests count as proven; skipped / absent / blocked → 0. ──
+  // guard is mutated" check — plus the advisory count on the ok line in front of it. Ran, nothing blocked AND 0 advisory
+  // findings → the plan's done_when tests count as proven (a claim count, gated by this record); anything else → 0. ──
   const mutationSkip = selfGate?.skipped.find((s) => s.check === "mutation") ?? null;
   const proof = selfGate ? {
     run_id: selfGate.run_id,
     mutation: selfGate.ran.includes("mutation") ? "ran" : mutationSkip ? `skipped (${mutationSkip.reason})` : "not run",
     blocked: selfGate.blocked,
+    advisory: selfGateAdvisory(recordText, sg),
   } : null;
-  if (proof) proof.proven = proof.mutation === "ran" && !proof.blocked;
+  if (proof) proof.proven = proof.mutation === "ran" && !proof.blocked && proof.advisory === 0;
   const provenTests = proof && doneWhenTests != null ? (proof.proven ? doneWhenTests : 0) : null;
 
-  // ── Cost & time: this run's budget check (passed in); queue → now from transition comments; runs = heartbeat-known runners. ──
-  const budget = budgetCheck && typeof budgetCheck === "object" && Number.isFinite(Number(budgetCheck.usd)) && Number.isFinite(Number(budgetCheck.runs))
-    ? budgetLine({ ...budgetCheck, usd: Number(budgetCheck.usd), cap: budgetCheck.cap ?? null, ok: budgetCheck.ok !== false }) : null;
+  // ── Cost & time: usage lines bound through their section's heartbeat-known runner (one story per run); the cap from the
+  // passed-in budget check; queue → now from transition comments; runs = heartbeat-known runners. ──
+  const priced = new Map();                                             // runner → Set of cost values its sections claim
+  for (const e of recordText ? parseRunRecord(String(recordText)) : []) {
+    if (e.cost_usd == null || !Number.isFinite(Number(e.cost_usd))) continue;
+    const runner = String(e.runner ?? "").trim();
+    const ok = isBoundLine({ runner, run_id: runIdOfRunner(runner) }, known) && (stages.get(runner)?.has(e.stage) ?? false);
+    if (!ok) { unbound.usage += 1; continue; }
+    if (!priced.has(runner)) priced.set(runner, []);
+    priced.get(runner).push(Number(e.cost_usd));
+  }
+  let usd = 0, pricedRuns = 0;
+  for (const costs of priced.values()) {
+    if (new Set(costs).size > 1) { unbound.usage += costs.length; continue; }   // two different usage stories for one run
+    usd += costs[0]; pricedRuns += 1;
+  }
+  const capRaw = budgetCheck && typeof budgetCheck === "object" ? Number(budgetCheck.cap) : NaN;
+  const cost = pricedRuns ? { usd: Math.round(usd * 100) / 100, runs: pricedRuns, cap: budgetCheck?.cap != null && Number.isFinite(capRaw) ? capRaw : null } : null;
   const queuedAt = cs.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
   const nowMs = now == null ? null : (typeof now === "number" ? now : Date.parse(String(now)));
   const elapsedMs = queuedAt != null && Number.isFinite(nowMs) && nowMs >= queuedAt ? nowMs - queuedAt : null;
@@ -259,7 +297,7 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   const head = [];
   if (mustFixCount != null) head.push(`must_fix raised by review: ${mustFixCount} (claim — review handoffs)`);
   if (doneWhenTests != null) head.push(`done_when tests: ${doneWhenTests} (claim — plan handoff)`);
-  if (provenTests != null) head.push(`proven tests: ${provenTests} of ${doneWhenTests} (record — self-gate run ${escapeCell(proof.run_id ?? "?")}: mutation ${escapeCell(proof.mutation)}, ${proof.blocked ? "blocked" : "not blocked"})`);
+  if (provenTests != null) head.push(`proven tests: ${provenTests} of ${doneWhenTests} (claim count — plan handoff; ${proof.proven ? "counted only because" : "0 because"} self-gate run ${escapeCell(proof.run_id ?? "?")} recorded: ${escapeCell(proofText(proof))} — no per-test result is recorded)`);
   if (head.length) out.push("", `**${head.join(" · ")}**`);
 
   const contractLines = [];
@@ -268,7 +306,7 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
     for (const c of contract) contractLines.push(`| ${escapeCell(c.id)} | ${escapeCell(c.test == null ? "" : c.kind && c.kind !== "test" ? `${c.test} (${c.kind})` : c.test)} | claim |`);
   }
   const contractFacts = [];
-  if (proof) contractFacts.push(`- new-test proof (self-gate run ${escapeCell(proof.run_id ?? "?")}): mutation ${escapeCell(proof.mutation)}, ${proof.blocked ? "blocked" : "not blocked"} — record`);
+  if (proof) contractFacts.push(`- new-test proof (self-gate run ${escapeCell(proof.run_id ?? "?")}): ${escapeCell(proofText(proof))} — record`);
   if (selfGate) {
     const ran = selfGate.ran.length ? `ran ${selfGate.ran.map(escapeCell).join(", ")}` : "ran nothing";
     const skipped = selfGate.skipped.length ? `; skipped ${selfGate.skipped.map((s) => `${escapeCell(s.check)} (${escapeCell(s.reason)})`).join(", ")}` : "";
@@ -292,13 +330,14 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
       `- level=${escapeCell(gatesRow.level)} status=${escapeCell(gatesRow.status)} passed=${escapeCell(gatesRow.passed)} failed=${escapeCell(gatesRow.failed)} failing=${escapeCell(list(gatesRow.failing))} — rerun: ${gatesRow.rerun ? "yes (first run RED outside the PR diff, re-run once)" : "no"} — record`);
   }
   if (rejected) out.push("", "### Rejected / hand-off", "", `- ${escapeCell(rejected)} — record (merge stage)`);
-  const cost = [];
-  if (budget) cost.push(`- ${escapeCell(budget)} — this merge run's budget check`);
-  if (elapsedMs != null) cost.push(`- queued → now: ${fmtElapsed(elapsedMs)} (transition comment timestamps)`);
-  if (runs != null) cost.push(`- runs (heartbeats): ${runs}`);
-  if (cost.length) out.push("", "### Cost & time", "", ...cost);
-  const ignored = unbound.review + unbound.gates + unbound.self_gate;
+  const costRows = [];
+  if (cost) costRows.push(`- lifetime cost: $${cost.usd.toFixed(2)}${cost.cap != null ? ` / $${cost.cap} cap` : ""} over ${cost.runs} run(s) — record: usage: lines in sections of heartbeat-known runs (usage lines carry no run id, so the section's runner binds them; one usage story per run)`);
+  if (elapsedMs != null) costRows.push(`- queued → now: ${fmtElapsed(elapsedMs)} (transition comment timestamps)`);
+  if (runs != null) costRows.push(`- runs (heartbeats): ${runs}`);
+  if (costRows.length) out.push("", "### Cost & time", "", ...costRows);
+  const ignored = unbound.review + unbound.self_gate + unbound.usage;
   if (ignored) out.push("", `_${ignored} run-record line(s) not bound to a heartbeat-known run were ignored._`);
+  if (unbound.gates) out.push("", `_${unbound.gates} gate-verdict line(s) in the run record were not used — they carry no run id; the gates row is this merge run's own result._`);
 
   return {
     markdown: out.join("\n"),
@@ -306,7 +345,7 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
       pr: pr ?? null,
       headline: { must_fix: mustFixCount, done_when_tests: doneWhenTests, proven_tests: provenTests },
       contract, proof, self_gate: selfGate, review, must_fix: mustFix,
-      gates: gatesRow, rejected, budget, elapsed_ms: elapsedMs, runs, unbound,
+      gates: gatesRow, rejected, cost, elapsed_ms: elapsedMs, runs, unbound,
     },
   };
 }
