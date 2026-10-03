@@ -825,3 +825,41 @@ test("test_195_a_response_after_an_invalid_review_handoff_binds_to_no_round", ()
   expect(r.markdown).not.toContain("7777777");
   expect(r.markdown).toContain("must_fix raised by review: 2 (claim — review handoffs; fixed 1, disputed 0, unanswered 1)");
 });
+
+// ── #195 rework r2 (arch1) — a record section header is read by the run-record grammar, not a stricter local copy ─────────
+test("test_195_budget_binds_to_the_section_header_the_run_record_reader_sees", () => {
+  const budget = (usd, runs) => budgetLine({ cap: 60, usd, runs, ok: true });
+  // Base: the fixture, then review run 1003's section again (a byte-identical repeat of its budget line — one story) so the
+  // section just before the odd header below belongs to a heartbeat-known review runner.
+  const base = recordText({ extra: [["review", RUN.review2, "2026-10-03T12:13:00Z", [budget(12.5, 14)]]] });
+  expect(buildEvidence({ recordText: base, ...inputs(), gates: null, pr: 31, now: NOW }).data.cost).toEqual({ usd: 12.5, cap: 60, runs: 14, run_id: "1003" });
+  // A header the run-record readers accept (two spaces after the stage) opens a NEW section for runner gha-666, which no
+  // heartbeat names. Its budget line must be that section's — unbound — and never be pinned on review run 1003 (which would
+  // give 1003 two stories and drop the cost row back to run 1002).
+  const doubleSpace = `${base}\n## review  · 2026-10-03T12:20Z · gha-666\n${budget(0.05, 1)}\n`;
+  const r = buildEvidence({ recordText: doubleSpace, ...inputs(), gates: null, pr: 31, now: NOW });
+  expect(r.data.cost).toEqual({ usd: 12.5, cap: 60, runs: 14, run_id: "1003" });
+  expect(r.markdown).not.toContain("$0.05");
+  expect(r.data.unbound.budget).toBe(1);
+  // Same for a runner id with a space in it (the run-record reader takes the rest of the line as the runner).
+  const spacedRunner = `${base}\n## review · 2026-10-03T12:21Z · gha-666 b\n${budget(0.06, 1)}\n`;
+  const s = buildEvidence({ recordText: spacedRunner, ...inputs(), gates: null, pr: 31, now: NOW });
+  expect(s.data.cost).toEqual({ usd: 12.5, cap: 60, runs: 14, run_id: "1003" });
+  expect(s.data.unbound.budget).toBe(1);
+});
+
+// ── #195 rework r2 (arch1, arch2) — evidence.js owns neither grammar: section headers and heartbeat heads are read through
+// the modules that write them (run-record.js, heartbeat.js), so a format change cannot leave a stale copy here. ─────────────
+test("test_195_evidence_reads_headers_and_heartbeats_through_their_writer_modules", () => {
+  const src = readFileSync(fileURLToPath(new URL("../lib/evidence.js", import.meta.url)), "utf8");
+  expect(src).not.toMatch(/factory-heartbeat issue=/);           // the heartbeat head is parseHeartbeat's (heartbeat.js)
+  expect(src).not.toMatch(/\/\^##\s/);                          // no local `## <stage> · <at> · <runner>` regex
+  expect(src).not.toMatch(/\/\^##\\s/);
+  expect(src).toMatch(/import \{[^}]*\bparseRecordSection\b[^}]*\} from "\.\/run-record\.js"/);
+  // The run count is the heartbeat-named runner set: a heartbeat for a 6th runner adds exactly one run.
+  const base = inputs();
+  const extra = { ...base, issueComments: [...base.issueComments, heartbeat("review", "gha-1005", "2026-10-03T12:05:00Z")] };
+  const cost = (i) => sectionOf(buildEvidence({ recordText: recordText(), ...i, gates: null, pr: 31, now: NOW }).markdown, "Cost & time").join("\n");
+  expect(cost(base)).toMatch(/runs \(heartbeats\): 5/);
+  expect(cost(extra)).toMatch(/runs \(heartbeats\): 6/);
+});
