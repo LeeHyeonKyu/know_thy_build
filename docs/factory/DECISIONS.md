@@ -4172,7 +4172,8 @@ revert 자체가 사람의 행위이므로 차단기가 지키는 것은 "되돌
   창의 상태·알림 코멘트 없음), ok:false·throw·함수가 아닌 dep·열림도 닫힘도 아닌 답은 blocked다. 그 값은 run-stage의
   `makeMergeSelfChangeDeps().breaker`가 그때그때 **계산**한다(`readBreaker`: 상태 파일 + 모든 run 기록 + `git fetch`/`git log`).
 - full sweep(`quick=false`)은 같은 `readBreaker`로 계산해, 닫힘→열림일 때만 상태 파일에 워터마크(open/since/reason, 리셋 필드는 보존)를 쓰고
-  연속을 채운 마지막 자동 머지의 이슈와 PR에 `<!-- factory-breaker-open:v1 since=… -->` 코멘트를 한 번씩 남긴다. 기록 → 코멘트 순서이고,
+  연속을 채운 마지막 자동 머지의 추적 이슈에(이슈 번호를 모를 때만 PR에) `<!-- factory-breaker-open:v1 since=… -->` 코멘트를 **하나** 남긴다 —
+  상태 변화 하나에 알림 하나다. 기록 → 코멘트 순서이고,
   코멘트는 마커로 dedupe하므로 코멘트만 실패한 회차는 다음 sweep이 채운다. 닫힘은 쓰지 않는다.
 - `factory breaker --reset --reason <text>`(`factory/cli/breaker.js`, `cli/index.js`에 등록, `bin/cli.js`는 그대로) — `refuseHumanFlag`로
   에이전트 세션·CI를 네트워크 호출 전에 거부하고, `gh api user`의 로그인을 `closed_by: person:<login>`으로, `closed_at`과 사유를 적는다. 쓰기는
@@ -4197,12 +4198,15 @@ revert 자체가 사람의 행위이므로 차단기가 지키는 것은 "되돌
 - `cooldown_hours`와 모든 시간 기반 닫힘 — 사람만 닫는다. 훅 패턴(`block-dangerous.sh`에 `factory breaker --reset`)은 사람이 더한다; 그 전까지는
   환경 변수를 지운 호출이 `refuseHumanFlag`를 지날 수 있다. git log의 커밋 수 상한 — history는 날짜(`closed_at` 뒤)로만 묶는다.
 
-**`d.breaker`가 아예 없는 호출자.** plan dw3은 "배선되지 않음 → blocked"를 요구하지만, #179의 기존 merge-stage 테스트(test_179_*)가 `breaker`
-없는 deps로 S4a-2 경로의 머지를 고정하고 있고 기존 테스트는 고치지 않는다(`tests_are_load_bearing`). 그래서 **키 자체가 없는**(`undefined`) 호출자는
-묻지 않고 `merge: auto-merge breaker not consulted …` 줄을 남긴다; 키는 있는데 함수가 아니면(null 등) blocked다. 프로덕션 배선
-(`makeMergeSelfChangeDeps`, `main()`이 그대로 펼친다)은 언제나 함수를 싣고, 재료(`run`/`root`)가 없으면 그 함수가 ok:false를 낸다 —
-`test_189_merge_stage_checks_breaker_before_and_after_veto_window`가 둘 다 고정한다. test_179의 픽스처에 `breaker`를 더하는 사람의 결정이 있으면
-`undefined`도 blocked로 좁힐 수 있다.
+**`d.breaker`가 아예 없는 호출자.** dw3의 "배선되지 않음 → blocked"는 키가 없는 경우까지 포함한다: `d.breaker`가 함수가 아니면(키 없음·
+`undefined`·`null` 전부) 자기 변경 경로는 창을 열지 않고 blocked다. 배선을 잊은 호출자가 차단기를 묻지 않고 자동 머지하는 길은 fail-open이기 때문이다.
+그 결과 #179의 기존 merge-stage 테스트(test_179_*)가 쓰는 공용 픽스처 `baseD`에 닫힌 차단기 dep **한 줄을 더했다**(삭제·수정된 줄 없음 — 단언은
+그대로다). 프로덕션 배선(run-stage `main()`의 `breaker: makeMergeBreakerDep(…)`)과 같은 모양이고, 그 함수는 재료(`run`/`root`)가 없으면 ok:false를 낸다.
+
+**dw5의 "gh 읽기 실패".** 차단기의 읽기(`readBreaker`)는 gh를 부르지 않는다 — 상태 파일·run 기록·revert가 전부 git(`factory/records` fetch·
+`git show`, origin 기본 브랜치의 `git log`)에서 온다. 그래서 그 조항이 걸릴 자리가 없고, `test_189_unreadable_breaker_state_is_not_closed`가 읽기 전체에서
+gh 호출이 0건임을 고정한다. 각 git 단계(fetch는 성공하고 log만 실패, 상태 파일의 `git show` 실패, run 기록 하나의 `git show` 실패)는 따로 실패시켜
+ok:false를 확인한다.
 
 **남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
 push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
