@@ -441,8 +441,10 @@ function readResultsOfPaths(text, paths) {
 
 /**
  * 이 런의 세션 트랜스크립트 **전문**. 없으면 null — 산출물 추출은 트랜스크립트 없이도 돌아간다
- * (envelope의 펜스/맨 JSON으로 내려간다). `readFile(path) → string|null`은 호출자가 주입한다:
- * 이 모듈은 `node:fs`를 import하지 않는다(순수 모듈이라 파서 테스트가 파일시스템을 만들지 않는다).
+ * (envelope의 펜스/맨 JSON으로 내려간다). `readFile`은 호출자가 주입한다: 이 모듈은 `node:fs`를 import하지
+ * 않는다(순수 모듈이라 파서 테스트가 파일시스템을 만들지 않는다). **여기서는** 인자 하나로만 부른다 —
+ * `readFile(path) → string|null`. 같은 리더가 `extractStageArtifact`에서는 `{ maxBytes, meta: true }`와 함께
+ * 불려 메타데이터 모양을 돌려준다(그 계약은 아래 `extractStageArtifact`의 @param readFile).
  *
  * `run-stage.js`와 `retro.js`가 같은 경로 계산을 각자 갖고 있으면 한쪽만 고쳐지는 순간
  * "트랜스크립트가 1순위 출처"라는 계약이 스테이지마다 달라진다 — 그래서 여기 한 벌만 둔다.
@@ -461,6 +463,15 @@ export function readTranscript({ root, home, sessionId, readFile } = {}) {
  * @param envelopeResult `claude -p --output-format json`의 `result` 문자열.
  * @param transcriptText 세션 트랜스크립트 JSONL 전문(없으면 "" 또는 null — 그냥 후보가 하나 준다).
  * @param validate 객체 하나를 받아 `{ok, errors}`를 주는 함수. 없으면 "파싱되면 통과"로 취급한다.
+ * @param readFile (#170, 선택) 러너 결과 파일 리더. 없으면(retro.js·implementHeadShaOf) 결과 파일 경로는
+ *   아예 생기지 않고 사유는 #170 이전과 바이트 단위로 같다. 있으면 접수증·completed 러너 알림에 묶인 경로마다
+ *   `readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES, meta: true })`로 한 번 부르고, 돌려받는 값은:
+ *   - `null` — 파일 없음 → "workflow output file missing: <path>"
+ *   - `{ bytes }` — 상한 초과(읽지 않았다) → "too large … (<bytes> bytes > cap)"
+ *   - `{ notRegular: true }` — 심볼릭 링크·특수 파일 → "is not a regular file"
+ *   - `{ unreadable: <code> }` — 있지만 열기·읽기가 거절됨 → "unreadable: <path> (<code>)" (던져도 같은 문장)
+ *   - `{ text, bytes, ctimeMs }` — 내용과 커널 변경 시각(ms). `ctimeMs`가 없으면 묶을 수 없어 거절된다.
+ *   문자열을 돌려주는 리더는 크기 상한만 다시 재고, 변경 시각이 없으므로 그 파일은 판정이 되지 못한다.
  * @returns `{ok:true, data, source}` 또는 `{ok:false, reason, tried}`.
  */
 export function extractStageArtifact({ envelopeResult, transcriptText, validate, readFile } = {}) {
@@ -529,7 +540,13 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
     // `meta: true` — 내용과 함께 커널의 변경 시각을 달라는 요청(rework sec1). 그것을 주지 못하는 리더(문자열만
     // 돌려주는 것)의 파일은 아래 묶기에서 거절된다: 판정은 에이전트가 쓸 수 없는 사실에만 앵커한다.
     let ctimeMs;
-    try { text = readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES, meta: true }); } catch { text = null; }
+    // 리더가 던지면(EACCES·EIO …) 파일은 **있을 수 있다** — "missing"으로 적으면 운영자는 사라진 파일을 찾는다(dw4).
+    // 그래서 던진 오류의 code(없으면 메시지)를 그대로 적는다. `{ unreadable }`로 알려 주는 리더도 같은 문장이다.
+    try { text = readFile(path, { maxBytes: WORKFLOW_OUTPUT_MAX_BYTES, meta: true }); } catch (e) {
+      tried.push(`workflow output file unreadable: ${path} (${e?.code || e?.message || String(e)})`);
+      continue;
+    }
+    if (text && typeof text === "object" && typeof text.unreadable === "string") { tried.push(`workflow output file unreadable: ${path} (${text.unreadable})`); continue; }
     if (text && typeof text === "object" && text.notRegular === true) { tried.push(`workflow output file is not a regular file: ${path} (a symlink or special file is not the runner's file)`); continue; }
     if (text && typeof text === "object" && typeof text.text !== "string" && Number.isFinite(text.bytes)) { tried.push(`workflow output file too large: ${path} (${text.bytes} bytes > ${WORKFLOW_OUTPUT_MAX_BYTES})`); continue; }
     if (text && typeof text === "object" && typeof text.text === "string") { ctimeMs = text.ctimeMs; text = text.text; }

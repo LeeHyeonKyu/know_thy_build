@@ -157,14 +157,18 @@ export const readFileOrNull = (p, opts) => {
  * - FIFO·장치로 verify를 멈추게 하지 못하게 `O_NONBLOCK`으로 열고, 일반 파일이 아니면 읽지 않는다.
  * - 같은 fd로 읽기 **전후**에 fstat한다: 둘 중 늦은 ctime을 돌려주므로, 잰 뒤·읽기 전에 끼어든 쓰기도
  *   그 시각을 앞으로 민다(stat과 read가 다른 inode를 보는 경로 바꿔치기도 fd가 막는다).
- * 반환: 없으면 null, 상한 초과면 `{ bytes }`, 링크·특수 파일이면 `{ notRegular: true }`, 아니면 `{ text, bytes, ctimeMs }`.
+ * 반환: 없으면(ENOENT) null, 상한 초과면 `{ bytes }`, 링크·특수 파일이면 `{ notRegular: true }`, 그 밖에 열기·읽기가
+ * 거절되면 `{ unreadable: <errno code> }`, 아니면 `{ text, bytes, ctimeMs }`.
  */
 function readFileWithChangeTime(p, maxBytes) {
   let fd;
   try {
     fd = openSync(p, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
   } catch (e) {
-    return e?.code === "ELOOP" || e?.code === "EMLINK" ? { notRegular: true } : null;
+    if (e?.code === "ELOOP" || e?.code === "EMLINK") return { notRegular: true };
+    // 없는 파일만 null(= "missing")이다. 그 밖의 거절(EACCES·ENOTDIR·EIO …)은 파일이 있을 수 있으므로 code를 실어
+    // 돌려준다 — lib가 "unreadable"로 따로 적는다(#170 dw4: 'file gone'과 '읽을 수 없음'을 사유만으로 가른다).
+    return e?.code === "ENOENT" ? null : { unreadable: String(e?.code || e?.message || "open failed") };
   }
   try {
     const before = fstatSync(fd);
@@ -173,8 +177,9 @@ function readFileWithChangeTime(p, maxBytes) {
     const text = readFileSync(fd, "utf8");
     const after = fstatSync(fd);
     return { text, bytes: Buffer.byteLength(text, "utf8"), ctimeMs: Math.max(before.ctimeMs, after.ctimeMs) };
-  } catch {
-    return null;
+  } catch (e) {
+    // 열린 뒤의 실패(fstat·read)는 "없다"가 아니다 — 파일은 거기 있다.
+    return { unreadable: String(e?.code || e?.message || "read failed") };
   } finally {
     try { closeSync(fd); } catch { /* 닫기 실패는 판정과 무관하다 */ }
   }
