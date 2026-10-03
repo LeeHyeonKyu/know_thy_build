@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.5 / 1.17 / 2.17 |
 | escaped defects | 0 | 5 |
 | revert rate | 없음 | 0.00 (0/6) |
-| needs-human | 0 | 25 |
+| needs-human | 10 | 25 |
 | rejects by role | 없음 | spec-conformance 4, qa 4, correctness 5, architecture 1 |
 | reviewer overlap | 없음 | 0.43 (6/14, runs 13) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1 |
-| qa na ratio | 없음 | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
-| cost (usd) | 0.00 | 372.00 |
-| tokens | input 0 / output 0 | input 11127235 / output 778209 |
+| qa na ratio | 0.04 (1/23 claims, na-heavy 0/3 approvals) | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
+| cost (usd) | 111.19 | 372.00 |
+| tokens | input 2388897 / output 210544 | input 11127235 / output 778209 |
 | retro cost (usd) | 0.00 | 6.30 |
 | retro tokens | input 0 / output 0 | input 14 / output 13418 |
 | full retros | — | 5 |
@@ -412,6 +412,230 @@
           157
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The new recovery path ignores the runner notification's <status>. A failed, killed or cancelled Workflow's output file can therefore become the stage handoff that decides the merge. That contradicts the rule this same function states and applies to path (1): 'completed만 본다 — failed/cancelled 알림의 <result>는 산출물이 아니다'. The same runner bytes are refused when they arrive inline but accepted when read from disk.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "A reviewer subagent can make an arbitrary file it wrote into the stage verdict. It does this by putting a forged `<\\task-notification>` inside its own output text. That text reaches the runner's genuine user-turn notification through `<result>`. The parser matches the forged block and reads its `<output-file>` path. The only binding is task-id equality. The path is never bound to that task id: nothing requires it to be `<scratchpad>/tasks/<taskId>.output`. Nothing stops a second notification block from being carved out of the `<result>` body of a real one. Before this diff, reviewer-controlled text inside `<result>` could at most break candidate (1). It could never name a file to be trusted. This breaks dw2's own rubric: \"A file the model merely mentions or wrote never decides a merge.\"",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw2 says a file the model merely mentions or wrote never decides a merge, and the implementation does not hold that. The path is bound only to the task id, never to the runner's own scratchpad file for that task. In addition, the notification's status is ignored, which contradicts the 'completed only' rule that path (1) applies at line 429.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "Candidate (1b) treats the bytes at the receipt-bound path as the runner's verdict. That path is under /tmp, and the write-deny hook explicitly lets every reviewer write there. Any reviewer subagent in the review Workflow can therefore replace the whole review.v1 handoff: all roles approve, must_fix empty, overriding the reject that another reviewer actually returned. Before this diff, a reviewer controlled only its own verdict, plus whatever text the model passed on to the dispatcher. The binding work (receipt Task ID, user-turn header, tool-use-id) proves that the runner named the path. It does not prove the file still holds the runner's bytes when verify reads it. That breaks CLAUDE.md SDD rule 5: verdicts must be anchored only to runner records or facts that agents cannot write.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The diff adds a second parser for the same runner `<\\task-notification>` message, and it already disagrees with the first one on both format and trust. The old path was left in place. The new parser reads the real Claude Code 2.1.287 attachment form (`type:\"attachment\"`, `attachment.type:\"queued_command\"`, `commandMode:\"task-notification\"`). It accepts only user/attachment lines and parses only the header, because its own comments say assistant-authored text and forged `<\\/task-notification>` blocks inside `<result>` are not the runner's. The old parser still feeds candidate (1), which runs first and wins whenever it validates. It reads only `o.message.content`, so it never sees an attachment-line notification. It accepts any role and regex-scans whole blocks. So the repo now has two answers to 'what is a runner notification', and the format change has already reached only one of them. That is the 'second copy, one side fixed' future, and it has already started.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The diff adds a file-time freshness check (kernel ctime must not be later than the notification timestamp plus 1000 ms). plan non_goals lists this exact thing.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A file is recoverable only through a runner notification with a timestamp. A receipt alone names no file. This contradicts dw1/dw2, which make the receipt's Task ID the anchor.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A new file outside files_expected was added. The diff has no 'Scope change' reason.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A file outside files_expected was added with no Scope change reason in the diff.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The output file is rejected when its ctime is later than the runner notification timestamp. That is a file-time freshness check, which the plan lists as a non-goal. The correctness reviewer's cf-s1 also shows this check is the only gate on the production path and was not observed for a Workflow task.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A receipt alone no longer makes a file eligible, and dw1's wording requires that it does.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The new `blockedRetryPendingRun` builds a third hand-copied parser regex for the blocked-retry marker. The grammar is written in one place (`blockedRetryComment`, line 97), but it is now read by three separate regex literals that must change together. The role lens treats a third copy as an automatic must_fix.",
+        "runs": [
+          168
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "`scrubId` is another copy of the scrub-and-cap rule for public test names. gates.js already has that rule as the private `secretsFrom` + `scrubOne` (gates.js:100-101). This diff copies it inline instead of exporting the one that exists. The copy also hardcodes `process.env`, while gates.js can take an injected `env`. So the run-record test ids and the gates-detail names now come from two separate implementations of what is supposed to be one rule.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The diff changes gates.js code and adds a new field to the factory.gates.v1 gate entries. Plan non_goals forbid both: 'Changing the factory.gates.v1 schema' and 'Moving the re-run policy into gates.js (gates.js gets comment edits only)'. dw6 also says 'with no code change in gates.js'.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Three paths are outside plan files_expected and are not named in the diff's 'Scope change' sentence: changed-files.js (the new `touched` field and a `paths` field on each row), parsers.test.js, and the design spec §5.2.5 edit.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The re-run reads the first run's stale test report when the re-run's test command does not write one. That stale report then counts as a second RED on the same id set, so the stage writes the 'PR 밖의 테스트가 두 번 RED — flaky 후보' reason and a `factory-flaky-candidate` RED marker for a test that never ran the second time. This breaks dw2's rubric, which allows the wording and marker only when the identical id set fails twice. It also puts false evidence into the durable run record.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "The re-run reads the first run's stale test report. If the re-run's test command writes no report, the stale report is parsed again, the same id set looks RED twice, and the stage writes the flaky-candidate wording and marker for a test that did not run the second time. This is the same defect as cf1. I re-checked the code in round 2 and it holds.",
+        "runs": [
+          157
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The arm decides whether \"a release happened since\" by checking that two versions are unequal. Both versions come from whatever checkout ran the sweep, and the quick sweeps at the end of stage jobs read an out-of-date `.factory/install-manifest.json`. A stale reader is treated as a new release. The arm then retries an issue on the same engine that just failed it, which is the waste this issue exists to stop. dw3 only rules out treating an *unknown* version as different. A stale version (older than main) gets through.",
+        "runs": [
+          156
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The new `sweepRetryOnRelease` adds a third copy of the per-sweep back-pressure cache helper (`let bpCache; const parked = async () => { ... bpCache ??= ...backPressure() ... }`). The copies have already drifted apart, so the next fix to one copy will miss the others. The role rule says a third copy is an automatic must_fix.",
+        "runs": [
+          156
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A file outside files_expected changed with no 'Scope change' rationale in the diff.",
+        "runs": [
+          156
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A test file outside files_expected was changed, with no Scope change rationale.",
+        "runs": [
+          156
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The agent actor can forge the `factory/veto-window` status for its own head sha. If it sets `closes=` to a time in the past, the merge stage takes the 'reuse' branch: it never posts the auto-merge notice, polls once, and merges. The owner is never told and gets no window to veto in. This breaks the security premise of dw4/dw5 ('the owner is told when and how to stop the merge').",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "With the switch on, the engine repo's merge job runs PR-authored code (the non-judge test files and the modules they import) for the first time, and it does so while the parent process holds GH_TOKEN=FACTORY_MERGE_TOKEN. That hands the merge actor's credential (ADR-021) to code the agent wrote.",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The diff adds a second and third copy of the check \"is this commit status posted by a factory login\", and the copies already disagree. The repo's own rule for that check, written into verifyFactoryStatuses, is that it must live in one function. Under this lens a third copy is an automatic must_fix.",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "This diff adds a second positive list of 'non-judge' paths. The merge-base already has one (`OPERATOR_MERGE_GLOBS` in lib/operator-merge.js), and the diff neither merges the two nor records why they stay apart. The two lists already disagree about the same files. The base code and ADR-032 both promise that the lists become one when #149 lands, so after this merge that promise is false and the repo has two contradicting answers to 'is this path judge?'.",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Files outside plan files_expected were changed with no 'Scope change' notice in the diff. requirements.js gains a new gate-evidence branch (STATUS_GATES_UNVERIFIED, gatesFromStatuses) that changes how factory:merged is decided. The only explanation is a prose paragraph in DECISIONS.md, which is not labelled as a scope change.",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The review-evidence record format and its parser were changed (new optional gates= field, parseReviewEvidenceAll and shape comparison). This is outside files_expected, outside the issue and outside every done_when. It extends a shared record contract that other stages parse.",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Tests for the unplanned gate-evidence mechanism are filed under done_when verify ids. test_149_veto_window_opens_waits_and_closes (dw4) is made to cover a requirements.js gate rule, review-line gates= recording and forged-status handling. dw4's text does not mention any of these. This stretches the 1:1 id-to-assertion mapping so that out-of-scope behaviour looks like it belongs to dw4.",
+        "runs": [
+          149
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -542,8 +766,8 @@
       },
       {
         "issue": 149,
-        "reason": "blocked (undecidable) — needs human",
-        "at": "2026-10-02T00:59:21Z"
+        "reason": "lifetime cost $63.40 over 101 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-03T04:17:29Z"
       },
       {
         "issue": 147,
@@ -552,13 +776,23 @@
       },
       {
         "issue": 157,
-        "reason": "stage artifact missing or invalid: gates RED: failing=unit",
-        "at": "2026-10-02T03:54:27Z"
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/gates.js, .factory/lib/merge-stage.js, factory/bin/run-stage.js, factory/lib/gates.js, factory/lib/merge-stage.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #161)",
+        "at": "2026-10-02T16:04:05Z"
       },
       {
         "issue": 156,
-        "reason": "blocked (undecidable) — needs human",
-        "at": "2026-10-02T02:20:56Z"
+        "reason": "protected paths changed — human merge required: .factory/bin/sweep.js, .factory/lib/retro/issue-comments.js, .factory/lib/sweeper.js, .factory/lib/transition.js, factory/bin/sweep.js, factory/lib/retro/issue-comments.js, factory/lib/sweeper.js, factory/lib/transition.js, factory/test/sweep-bin.test.js, factory/test/sweeper.test.js, factory/test/transition.test.js (see PR #158)",
+        "at": "2026-10-02T10:23:52Z"
+      },
+      {
+        "issue": 170,
+        "reason": "review rounds exhausted (K=3): 3 must_fix remain",
+        "at": "2026-10-03T04:27:33Z"
+      },
+      {
+        "issue": 168,
+        "reason": "protected paths changed — human merge required: .factory/bin/sweep.js, .factory/lib/sweeper.js, factory/bin/sweep.js, factory/lib/sweeper.js, factory/test/sweep-bin.test.js, factory/test/sweeper.test.js (see PR #169)",
+        "at": "2026-10-02T10:36:25Z"
       }
     ]
   },
@@ -579,17 +813,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
+    "needs_human": 10,
+    "qa_approvals": 3,
+    "qa_claims_total": 22,
+    "qa_na_total": 1,
+    "qa_na_ratio": 0.04,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0,
+      "cost_usd": 111.192884,
       "tokens": {
-        "input": 0,
-        "output": 0
+        "input": 2388897,
+        "output": 210544
       }
     }
   },
