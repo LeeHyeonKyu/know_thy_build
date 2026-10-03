@@ -3035,3 +3035,128 @@ test("test_179_self_change_merge_pins_the_verified_head", async () => {
   expect((await run179(j)).code).toBe(0);
   expect(j.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
 });
+
+// ── #189 (S4c, ADR-033) — 회로차단기: 거부권 창 앞과 뒤, 두 경로 모두 ─────────────────────────────────────────────────
+import { parseSelfMergeLines, BREAKER_RESET_COMMAND } from "../lib/breaker.js";
+import { importClosure as importClosure189, isNonJudgePath as isNonJudgePath189, JUDGE_MODULES as JUDGE_MODULES189 } from "../lib/non-judge-paths.js";
+import { existsSync as existsSync189, readFileSync as readFileSync189 } from "node:fs";
+
+test("test_189_merge_stage_checks_breaker_before_and_after_veto_window", async () => {
+  const SINCE = "2026-10-02T06:00:00.000Z";
+  const WHY = "revert streak: judge-path auto-merges PR #11, PR #12 were reverted in a row (self_change.breaker.revert_streak: 2)";
+  const OPEN = { ok: true, open: true, since: SINCE, reason: WHY };
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "2 self-merge record(s), 0 revert(s) on origin/main" };
+  const routes = {
+    non_judge: (over = {}) => selfD179(over),
+    judge: (over = {}) => selfD179({
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      ...over,
+    }),
+  };
+  const announced = (d) => d.comment.mock.calls.some(([, body]) => /거부권 창/.test(String(body)));
+
+  for (const [route, mk] of Object.entries(routes)) {
+    // (1) 창 앞에서 열려 있다 → handToHuman: 사유는 since·reason·리셋 명령을 말하고, 창의 상태·알림 코멘트는 없다.
+    const a = mk({ breaker: vi.fn(async () => OPEN) });
+    const ra = await run179(a);
+    expect(ra.code, route).toBe(2);
+    const ta = a.transition.mock.calls.map((x) => x[0]);
+    expect(ta.map((t) => t.to), route).toEqual(["factory:needs-human"]);
+    expect(ta[0].reason, route).toContain(`breaker open since ${SINCE}: ${WHY}`);
+    expect(ta[0].reason, route).toContain(BREAKER_RESET_COMMAND);
+    expect(ta[0].reason, route).toMatch(HUMAN_MERGE_REQUIRED);
+    expect(a.vetoWindow.open, route).not.toHaveBeenCalled();
+    expect(announced(a), route).toBe(false);
+    expect(a.sleep, route).not.toHaveBeenCalled();
+    expect(a.mergePr, route).not.toHaveBeenCalled();
+    expect(a.breaker, route).toHaveBeenCalledTimes(1);
+
+    // (2) 창 앞에서는 닫혀 있었는데 창 뒤에 열렸다 → 머지하지 않고 사람에게.
+    let n = 0;
+    const b = mk({ breaker: vi.fn(async () => (++n === 1 ? CLOSED : OPEN)) });
+    const rb = await run179(b);
+    expect(rb.code, route).toBe(2);
+    expect(b.vetoWindow.open, route).toHaveBeenCalledTimes(1);
+    expect(b.sleep, route).toHaveBeenCalled();
+    expect(b.mergePr, route).not.toHaveBeenCalled();
+    const tb = b.transition.mock.calls.at(-1)[0];
+    expect(tb.to, route).toBe("factory:needs-human");
+    expect(tb.reason, route).toContain(`breaker open since ${SINCE}: ${WHY}`);
+    expect(tb.reason, route).toContain(BREAKER_RESET_COMMAND);
+    // 두 번째 확인은 창이 닫힌 뒤(마지막 라벨 폴링 뒤)다.
+    expect(b.breaker.mock.invocationCallOrder[1], route).toBeGreaterThan(b.vetoLabel.mock.invocationCallOrder.at(-1));
+
+    // (3) 모르는 상태 — ok:false, throw, 배선이 함수가 아님 — 는 어느 시점에서든 blocked이고 머지는 없다.
+    const unknowns = [
+      ["ok:false", () => vi.fn(async () => ({ ok: false, reason: "factory/records could not be fetched" })), /could not be fetched/],
+      ["throws", () => vi.fn(async () => { throw new Error("git log exited 128"); }), /git log exited 128/],
+      ["not a function", () => null, /not wired/],
+    ];
+    for (const [label, make, why] of unknowns) {
+      const c = mk({ breaker: make() });
+      const rc = await run179(c);
+      expect(rc.code, `${route} ${label}`).toBe(2);
+      const tc = c.transition.mock.calls.at(-1)[0];
+      expect(tc.to, `${route} ${label}`).toBe("factory:blocked");
+      expect(tc.reason, `${route} ${label}`).toMatch(why);
+      expect(c.vetoWindow.open, `${route} ${label}`).not.toHaveBeenCalled();
+      expect(c.mergePr, `${route} ${label}`).not.toHaveBeenCalled();
+      // 창 뒤의 두 번째 확인에서 같은 일이 생겨도 같다.
+      const inner = make();
+      if (inner === null) continue;                                  // 배선이 없으면 첫 확인에서 이미 멈춘다
+      let m = 0;
+      const late = mk({ breaker: vi.fn(async () => (++m === 1 ? CLOSED : inner())) });
+      const rl = await run179(late);
+      expect(rl.code, `${route} late ${label}`).toBe(2);
+      expect(late.vetoWindow.open, `${route} late ${label}`).toHaveBeenCalledTimes(1);
+      expect(late.transition.mock.calls.at(-1)[0].to, `${route} late ${label}`).toBe("factory:blocked");
+      expect(late.mergePr, `${route} late ${label}`).not.toHaveBeenCalled();
+    }
+
+    // (4) 두 번 다 닫혀 있다 → S4a-2 경로 그대로 머지. 두 번 묻고, 센 수가 기록에 남고, 머지의 사실을 기록 줄로 남긴다.
+    const ok = mk({ breaker: vi.fn(async () => CLOSED) });
+    const rok = await run179(ok);
+    expect(rok.code, route).toBe(0);
+    expect(ok.breaker, route).toHaveBeenCalledTimes(2);
+    expect(ok.breaker.mock.invocationCallOrder[0], route).toBeLessThan(ok.vetoWindow.open.mock.invocationCallOrder[0]);
+    expect(ok.breaker.mock.invocationCallOrder[1], route).toBeLessThan(ok.mergePr.mock.invocationCallOrder[0]);
+    expect(ok.mergePr.mock.calls, route).toEqual([[9, { matchHeadCommit: HEAD }]]);
+    expect(ok.transition.mock.calls.map((x) => x[0].to), route).toEqual(["factory:merged"]);
+    expect(rok.lines.filter((l) => l.includes(CLOSED.detail)).length, route).toBe(2);
+    const marks = parseSelfMergeLines(`## merge · 2026-10-03T11:13Z · gha-1\n${rok.lines.join("\n")}\n`);
+    expect(marks, route).toEqual([expect.objectContaining({ issue: 7, pr: 9, sha: HEAD, judge: route === "judge" })]);
+  }
+
+  // 자기 변경 경로가 아닌 머지는 차단기를 묻지도, 자동 머지 기록 줄을 남기지도 않는다.
+  const plain = baseD({ breaker: vi.fn(async () => OPEN) });
+  const { lines, record } = makeRecord();
+  expect(await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d: plain, record, refusal, postStatus: basePostStatus() })).toBe(0);
+  expect(plain.breaker).not.toHaveBeenCalled();
+  expect(parseSelfMergeLines(`## merge · x · y\n${lines.join("\n")}\n`)).toEqual([]);
+
+  // merge-stage가 breaker.js를 import해도 판정 import 닫힘은 비판정 목록에 닿지 않는다(test_178과 같은 규칙).
+  const ROOT189 = new URL("../../", import.meta.url).pathname;
+  const readRepo189 = (p) => (existsSync189(ROOT189 + p) ? readFileSync189(ROOT189 + p, "utf8") : null);
+  const { files } = importClosure189({ entries: JUDGE_MODULES189, readFile: readRepo189 });
+  expect(files.has("factory/lib/breaker.js")).toBe(true);
+  expect([...files].flatMap((f) => (f.startsWith("factory/") ? [f, `.${f}`] : [f])).filter((f) => isNonJudgePath189(f))).toEqual([]);
+
+  // 프로덕션 배선(run-stage `makeMergeBreakerDep` — main()의 deps 리터럴이 `breaker:`로 싣는다)은 언제나 함수다. 읽기 재료가 없으면 ok:false(닫힘이 아니다).
+  const unwired = makeMergeBreakerDep189({ getCharter: () => ({ self_change: { auto_merge_judge: true } }) });
+  expect(typeof unwired).toBe("function");
+  expect(await unwired()).toEqual({ ok: false, reason: expect.stringMatching(/not wired/) });
+  // CHARTER의 breaker 블록이 틀렸으면(검증을 우회한 값) 그것도 ok:false다.
+  const badCfg = makeMergeBreakerDep189({ run: vi.fn(), root: "/nowhere", getCharter: () => ({ self_change: { breaker: { revert_streak: 0 } } }) });
+  expect(await badCfg()).toEqual({ ok: false, reason: expect.stringMatching(/revert_streak/) });
+  // 실제 읽기를 탄다: records 브랜치를 가져오지 못하는 저장소에서는 ok:false.
+  const gitRun = vi.fn(async () => ({ code: 128, stdout: "", stderr: "fatal: could not read from remote" }));
+  const wired = makeMergeBreakerDep189({ run: gitRun, root: "/repo", getCharter: () => ({ self_change: {} }), getDefaultBranch: () => "trunk" });
+  expect((await wired()).ok).toBe(false);
+  expect(gitRun).toHaveBeenCalledWith("git", expect.arrayContaining(["fetch"]), expect.objectContaining({ cwd: "/repo" }));
+  // main()의 deps 리터럴이 그 함수를 싣는다(소스로 고정 — main()은 프로세스를 띄워야만 돈다).
+  const mainSrc189 = readFileSync189(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(mainSrc189).toMatch(/\n\s*breaker: makeMergeBreakerDep\(\{ run, root, getCharter: \(\) => charter, getDefaultBranch: \(\) => harness\?\.project\?\.default_branch \?\? "main" \}\),/);
+});
+import { makeMergeBreakerDep as makeMergeBreakerDep189 } from "../bin/run-stage.js";

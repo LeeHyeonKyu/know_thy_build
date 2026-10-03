@@ -10,6 +10,13 @@ import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-
 import { classifyProtected } from "./non-judge-paths.js";
 import { matchesAny } from "./glob.js";
 import { VETO_LABEL } from "./label-catalog.js";
+import { selfMergeLine, BREAKER_RESET_COMMAND } from "./breaker.js";
+
+/**
+ * #189 (S4c) — 자기 변경 경로로 머지한 사실의 run 기록 줄. 생산자는 이것 하나이고(`lib/breaker.js`가 같은 모듈에서 읽는다),
+ * merge 스테이지가 **머지 순간에** 판정 비트와 함께 쓴다. 테스트 픽스처는 이 함수로 만든다.
+ */
+export { selfMergeLine };
 
 /**
  * ── #179 (S4a-2, ADR-033) — 자기 변경 경로의 거부권 창 ──────────────────────────────────────────────────────
@@ -1160,11 +1167,55 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: veto window closed — no ${VETO_LABEL} on #${issue} by ${closesAt}`]);
     return null;
   };
+  /**
+   * (6b'') #189 (S4c, ADR-033) — **자동 머지 회로차단기.** 자기 변경 경로(판정·비판정 둘 다)는 창을 열기 **전에** 한 번, 창이 닫혀
+   * (6b)를 다시 돈 **뒤에** 한 번 더 묻는다(창 60분 사이에 두 번째 revert가 들어올 수 있다). 열려 있으면 창을 열지 않고(상태·알림
+   * 코멘트 없음) 사람에게 넘기며, 사유는 언제부터·왜·어느 명령이 닫는지를 말한다. 모르는 상태(ok:false·throw·함수가 아닌 dep·
+   * 열림도 닫힘도 아닌 답)는 닫힘이 아니라 판정 불가(blocked)다. 값은 저장된 워터마크가 아니라 `d.breaker()`가 그때그때 계산한다.
+   *
+   * `d.breaker`가 **아예 없는** 호출자(#189 이전의 배선 모양 — run-stage는 언제나 싣는다, `makeMergeSelfChangeDeps`)는 묻지 않고
+   * 그 사실을 기록에 남긴다: #179의 기존 테스트가 그 모양으로 S4a-2 경로를 고정하고 있고, 기존 테스트는 고치지 않는다
+   * (`tests_are_load_bearing`). 배선은 됐는데 함수가 아닌 값(null 등)은 위의 판정 불가다.
+   */
+  const breakerGate = async (when) => {
+    const what = `auto-merge breaker (${when})`;
+    if (d.breaker === undefined) {
+      record([`merge: auto-merge breaker not consulted ${when} — this caller wires no breaker dep (pre-#189 shape; run-stage always wires it)`]);
+      return null;
+    }
+    if (typeof d.breaker !== "function") return await undecidable(what, "the breaker dep is not wired (not a function) — an unknown breaker is not a closed breaker");
+    let b;
+    try { b = await d.breaker(); } catch (e) { return await undecidable(what, `${e?.message || e}`); }
+    if (!b?.ok) return await undecidable(what, b?.reason || "the breaker state could not be read");
+    if (b.open === true) {
+      return await handToHuman({
+        reason: `breaker open since ${b.since}: ${b.reason} — ${HUMAN_MERGE_REQUIRED_TEXT}; only a person closes it: \`${BREAKER_RESET_COMMAND}\``,
+        sections: [{
+          heading: "자동 머지 차단기 열림",
+          why: [
+            `팩토리가 자동 머지한 판정 경로 PR이 main에서 연속으로 revert되어 차단기가 열려 있습니다(ADR-033, since ${b.since}).`,
+            `사유: ${b.reason}`,
+            "",
+            `차단기는 시간이 지나도 닫히지 않습니다 — 사람만 닫습니다: \`${BREAKER_RESET_COMMAND}\`.`,
+            "", "바뀐 보호 경로:",
+          ],
+          files: prot.files,
+        }],
+      });
+    }
+    if (b.open !== false) return await undecidable(what, `the breaker answered neither open nor closed (${JSON.stringify(b.open ?? null)})`);
+    record([`merge: auto-merge breaker closed ${when} — ${b.detail || "no detail"}`]);
+    return null;
+  };
   if (selfPath) {
+    const shut = await breakerGate("before the veto window");
+    if (shut !== null) return shut;
     const stopped = await vetoWindow({ selfPath, files: prot.files });
     if (stopped !== null) return stopped;
     const refused = await verifyReview();
     if (refused !== null) return refused;
+    const shutAfter = await breakerGate("after the veto window");
+    if (shutAfter !== null) return shutAfter;
   }
 
   // (6c) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는
@@ -1215,6 +1266,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
+  // #189 — 자기 변경 경로의 머지만 차단기의 증거가 된다. 판정 비트는 지금(`selfPath`) 적는다 — 나중에 다시 계산하지 않는다.
+  if (selfPath) {
+    let at;
+    try { at = new Date(Number(d.now())).toISOString(); } catch { at = new Date().toISOString(); }
+    record([selfMergeLine({ issue, pr, kind: selfPath, sha, at })]);
+  }
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).
