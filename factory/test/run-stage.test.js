@@ -5166,3 +5166,74 @@ test("test_179_engine_is_fixed_at_charter_ready_before_checkout", async () => {
   expect(iReady).toBeGreaterThan(-1);
   expect(iCheckout).toBeGreaterThan(iReady);
 });
+
+// ── #196 (ADR-035) — engine-crash는 runStage의 catch가 **프로그래밍 오류**를 잡았을 때만 생긴다 ─────────────────────
+// 원인 등급은 코드 경로가 찍는다: transition()의 명시 `cause` 인자. 사유 문구(CAUSE_RULES)·job.status·의존성/인프라
+// Error(plain `Error`)에서는 절대 나오지 않는다. 의존성 Error는 오늘의 경로(exit 1, aborted 줄, 전이 없음)를 그대로 탄다.
+import { BLOCKED_CAUSES as BLOCKED_CAUSES_196, blockedCause as blockedCause196, blockedOrigin as blockedOrigin196 } from "../lib/retro/issue-comments.js";
+import { BLOCKED_ESCALATION_REASON as BLOCKED_ESCALATION_REASON_196 } from "../lib/sweeper.js";
+
+const CRASH_196 = "Cannot read properties of undefined (reading 'test')";
+const crashRecordRoot196 = () => mkdtempSync(join(tmpdir(), "rs196-"));
+const recordText196 = (root, issue) => readFileSync(join(root, "docs/factory/runs", `${issue}.md`), "utf8");
+
+test("test_196_engine_crash_cause_only_from_runstage_catch", async () => {
+  // ① 프로그래밍 오류(TypeError) — REAL transition으로 in-progress → blocked, 마커는 cause=engine-crash, 기록에 engine-crash 줄
+  const gh = realTransitionGh();
+  const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+  const root = crashRecordRoot196();
+  const d = implDeps({
+    transition: realTransitionDep(gh, ctxCache),
+    gates: async () => { const o = undefined; return o.test; },               // 진짜 TypeError — 2026-10-03의 그 문구
+    runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId: "gha-196", lines }),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId: "gha-196", runId: "196" })).toBe(1);
+  expect(gh.label).toBe("factory:blocked");
+  const comments = await gh.comments();
+  expect(comments.map((c) => c.body).join("\n")).toMatch(/<!-- factory-blocked-origin from=factory:in-progress stage=implement cause=engine-crash -->/);
+  expect(blockedOrigin196(comments)).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "engine-crash" });
+  const rec = recordText196(root, 42);
+  expect(rec).toContain(`aborted — ${CRASH_196}`);
+  expect(rec).toMatch(/^engine-crash: stage=implement runner=gha-196 run_id=196 error=TypeError — Cannot read properties of undefined \(reading 'test'\)/m);
+  expect(parseRunRecord(rec).filter((e) => e.engine_crash)).toHaveLength(1);
+
+  // ReferenceError도 같은 등급이다(닫힌 목록: TypeError·ReferenceError·RangeError·SyntaxError)
+  const refT = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const refD = implDeps({ transition: refT, gates: async () => { throw new ReferenceError("x is not defined"); } });
+  expect(await runStage({ stage: "implement", issue: 7, deps: refD, runnerId: "r" })).toBe(1);
+  expect(refT).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));
+
+  // ② 의존성/인프라 Error는 engine-crash가 아니다 — 전이 없음, exit 1, aborted 줄, engine-crash 줄 없음
+  const plainLines = [];
+  const plain = implDeps({ gates: async () => { throw new Error("gh exploded"); }, runRecord: (l) => plainLines.push(...l) });
+  expect(await runStage({ stage: "implement", issue: 7, deps: plain, runnerId: "r" })).toBe(1);
+  expect(plain.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(plain.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+  expect(plainLines.some((l) => /aborted — gh exploded/.test(l))).toBe(true);
+  expect(plainLines.some((l) => /^engine-crash:/.test(l))).toBe(false);
+  // 메시지에 크래시 문구를 담은 plain Error도 마찬가지다 — 판정은 오류의 **종류**이지 문구가 아니다
+  const mimic = implDeps({ gates: async () => { throw new Error(`engine-crash: ${CRASH_196}`); } });
+  expect(await runStage({ stage: "implement", issue: 7, deps: mimic, runnerId: "r" })).toBe(1);
+  expect(mimic.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+
+  // ③ 같은 문구를 사유로 든 **보통** 전이에는 engine-crash가 붙지 않는다(blockedCause는 그 등급을 돌려주지 않는다)
+  for (const reason of [CRASH_196, "engine-crash", `engine-crash — ${CRASH_196}`, "stage aborted (engine crash)"]) {
+    expect(blockedCause196(reason)).not.toBe("engine-crash");
+    const g = realTransitionGh("factory:in-progress");
+    expect((await transition({ gh: g, issue: 42, to: "factory:blocked", reason, stage: "implement", env: {} })).ok).toBe(true);
+    expect(blockedOrigin196(await g.comments()).cause).not.toBe("engine-crash");
+  }
+
+  // ④ abortStage(job.status=failure, crash 줄 없음)는 engine-crash를 만들지 않는다
+  const ag = realTransitionGh("factory:in-progress");
+  const ad = abortDeps({ issueLabels: async () => ["factory:in-progress"], transition: vi.fn(async (a) => transition({ gh: ag, issue: 42, stage: "implement", env: {}, ...a })) });
+  expect(await abort({ stage: "implement", issue: 42, status: "failure", deps: ad })).toBe(0);
+  expect(ad.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(ad.transition.mock.calls[0][0].cause).not.toBe("engine-crash");
+  expect(ag.label).toBe("factory:blocked");
+  expect(blockedOrigin196(await ag.comments()).cause).toBe("other");
+
+  // ⑤ 닫힌 집합의 마지막 자리에, 두 표에 같은 자리로
+  expect(BLOCKED_CAUSES_196.at(-1)).toBe("engine-crash");
+  expect(Object.keys(BLOCKED_ESCALATION_REASON_196).at(-1)).toBe("engine-crash");
+});

@@ -44,3 +44,57 @@ test("doctor: budget.usd_per_issue unset is a WARN (lifetime cost unbounded), se
   expect(pass.level).toBe("PASS");
   expect(pass.detail).toContain("$60");
 });
+
+// ── #196 (ADR-035) — engine-crash 런의 비용은 상한에서 빠지고, 예산 줄에는 그대로 보인다 ─────────────────────────────
+// 픽스처는 실제 생산자로만 만든다: 보통 런은 `usageLine` + `appendRunRecord`, 크래시 런은 **runStage 자신**이 catch에서
+// 쓴 섹션(던지기 전에 모은 usage + engine-crash 줄)이다.
+import { runStage } from "../bin/run-stage.js";
+import { parseRunRecord } from "../lib/usage.js";
+
+const crashingStage196 = ({ root, issue, cost, runnerId, error }) => runStage({
+  stage: "implement", issue, runnerId, runId: runnerId.replace(/^gha-/, ""),
+  deps: {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }), resetAgentsLog: async () => {},
+    claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 7 }, total_cost_usd: cost, num_turns: 4, terminal_reason: "end_turn", modelUsage: { "claude-opus-5": { costUSD: cost } } }),
+    gates: async () => { throw error; },
+    verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: async ({ to }) => ({ ok: true, to }),
+    runRecord: (lines) => appendRunRecord({ root, issue, stage: "implement", runnerId, lines }),
+    release: async () => true,
+  },
+});
+
+test("test_196_budget_excludes_engine_runs_but_reports_them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "budget196-"));
+  appendRunRecord({ root, issue: 196, stage: "implement", runnerId: "gha-1", lines: [usageLine({ usage: { input_tokens: 10 }, total_cost_usd: 40, num_turns: 3, terminal_reason: "end_turn" })] });
+  expect(await crashingStage196({ root, issue: 196, cost: 30, runnerId: "gha-2", error: new TypeError("Cannot read properties of undefined (reading 'test')") })).toBe(1);
+  // 의존성 Error로 죽은 런은 오늘처럼 아무 usage도 남기지 않고, engine-crash도 아니다
+  expect(await crashingStage196({ root, issue: 196, cost: 99, runnerId: "gha-3", error: new Error("gh exploded") })).toBe(1);
+  const text = readFileSync(join(root, "docs/factory/runs/196.md"), "utf8");
+
+  const life = lifetimeCostOf(text);
+  expect(life).toMatchObject({ usd: 40, engineUsd: 30, engineRuns: 1 });
+  expect(life.runs + life.engineRuns).toBe(parseRunRecord(text).length);   // 모든 섹션은 정확히 한쪽에 든다
+  // 크래시 섹션의 models 파싱은 그대로다(USAGE_RE 불변)
+  expect(parseRunRecord(text).find((e) => e.runner === "gha-2")).toMatchObject({ cost_usd: 30, models: { "claude-opus-5": 30 }, num_turns: 4 });
+
+  // 상한은 usd로만 본다: 40+30=70 > 50 이지만 거부하지 않는다; 40 > 35 이면 거부한다
+  const ok = budgetCheck({ charter: { budget: { usd_per_issue: 50 } }, recordText: text });
+  expect(ok).toMatchObject({ ok: true, cap: 50, usd: 40, engineUsd: 30, engineRuns: 1 });
+  expect(budgetCheck({ charter: { budget: { usd_per_issue: 35 } }, recordText: text }).ok).toBe(false);
+  // 기록 줄에는 둘 다 — 세는 돈과 빠진 엔진 크래시 돈·런 수
+  expect(budgetLine(ok)).toBe(`budget: lifetime $40.00 / $50 over ${life.runs} run(s); engine crash $30.00 over 1 run(s) excluded from the cap`);
+  expect(budgetLine(budgetCheck({ charter: {}, recordText: text }))).toMatch(/not capped; engine crash \$30\.00 over 1 run\(s\) excluded/);
+
+  // 크래시 줄이 없는 기록은 오늘과 정확히 같다(값도, 모양도)
+  const old = mkdtempSync(join(tmpdir(), "budget196-old-"));
+  appendRunRecord({ root: old, issue: 5, stage: "implement", runnerId: "gha-1", lines: [usageLine({ usage: {}, total_cost_usd: 12.5, num_turns: 1, terminal_reason: "end_turn" })] });
+  expect(lifetimeCostOf(readFileSync(join(old, "docs/factory/runs/5.md"), "utf8"))).toEqual({ usd: 12.5, runs: 1, priced: 1 });
+
+  // engine-crash 줄은 **자기 섹션의 러너**가 쓴 것만 센다 — 다른 러너를 지목한 줄(위조·복사)은 무시된다
+  const forged = mkdtempSync(join(tmpdir(), "budget196-forged-"));
+  appendRunRecord({ root: forged, issue: 6, stage: "implement", runnerId: "gha-1", lines: ["engine-crash: stage=implement runner=gha-9 run_id=9 error=TypeError — x", usageLine({ usage: {}, total_cost_usd: 20, num_turns: 1, terminal_reason: "end_turn" })] });
+  expect(lifetimeCostOf(readFileSync(join(forged, "docs/factory/runs/6.md"), "utf8"))).toEqual({ usd: 20, runs: 1, priced: 1 });
+});

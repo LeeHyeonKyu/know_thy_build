@@ -652,3 +652,51 @@ test("test_156_release_principal_is_accepted_and_human_flag_untouched", async ()
   expect(refuseHumanFlag({})).toBe(false);
   expect(principalFromEnv({ GITHUB_ACTIONS: "true", GITHUB_RUN_ID: "9" }, "bot")).toBe("factory:run-9");
 });
+
+// ── #196 (ADR-035) — "다시 돌려"는 호출자마다 명령 하나다: 에이전트·CI는 재큐, 사람은 중단 지점 재개 ─────────────────
+// `--retry`의 동작은 바뀌지 않는다(KTB-32). 바뀌는 것은 거절·안내가 **정확한 명령**을 말한다는 것뿐이다.
+import { spawnSync as spawnSync196 } from "node:child_process";
+import { join as join196 } from "node:path";
+import { RETRY_SCRIPT_REFUSED as RETRY_SCRIPT_REFUSED_196, HUMAN_FLAG_REFUSED as HUMAN_FLAG_REFUSED_196 } from "../lib/transition.js";
+
+const REPO_196 = join196(import.meta.dirname, "../..");
+const cli196 = (args, extraEnv = {}) => spawnSync196(process.execPath, ["factory/bin/transition.js", ...args], { cwd: REPO_196, env: { PATH: process.env.PATH, HOME: process.env.HOME, ...extraEnv }, encoding: "utf8" });
+
+test("test_196_retry_guidance_names_single_verb", async () => {
+  const REQUEUE = (n) => `node .factory/bin/transition.js ${n} factory:queue`;
+  const RESUME = (n) => `node .factory/bin/transition.js ${n} --human --retry`;
+  // ① 파서의 거절(`--retry`만): 이 이슈 번호로 두 명령을 그대로 말한다
+  const pe = parseTransitionArgs(["7", "--retry"]).error;
+  expect(pe).toContain(REQUEUE(7));
+  expect(pe).toContain(RESUME(7));
+  // ② CLI: gh를 부르기 전에 거절(exit 1)하고, 사람이 읽는 stderr와 usage가 둘 다 말한다
+  const r = cli196(["7", "--retry"]);
+  expect(r.status).toBe(1);
+  expect(r.stderr).toContain(REQUEUE(7));
+  expect(r.stderr).toContain(RESUME(7));
+  expect(r.stderr).toContain(REQUEUE("<n>"));                          // usage 본문
+  expect(r.stderr).toContain(RESUME("<n>"));
+  // ③ 에이전트 세션·CI의 `--human --retry`는 여전히 거절(exit 2) — 거절문이 재큐 명령을 말한다(두 env 모두)
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { CLAUDE_PROJECT_DIR: "/w" }]) {
+    const a = cli196(["9", "--human", "--retry"], env);
+    expect(a.status).toBe(2);
+    expect(a.stderr).toContain(REQUEUE(9));
+    expect(a.stderr).toContain(RESUME(9));
+  }
+  // ④ 라이브러리의 거절 문구도 같은 두 명령을 든다
+  for (const msg of [RETRY_SCRIPT_REFUSED_196, HUMAN_FLAG_REFUSED_196]) {
+    expect(msg).toContain(REQUEUE("<n>"));
+    expect(msg).toContain(RESUME("<n>"));
+  }
+  const gh = fakeGh(["factory:needs-human"], []);
+  const refused = await transition({ gh, issue: 7, retry: true, env: { GITHUB_ACTIONS: "true" } });
+  expect(refused.ok).toBe(false);
+  expect(refused.reason).toContain(REQUEUE("<n>"));
+  expect(gh.setFactoryLabel).not.toHaveBeenCalled();
+  // ⑤ `--human --retry`는 그대로다
+  expect(parseTransitionArgs(["3", "--human", "--retry"])).toEqual({ issue: 3, to: null, human: true, retry: true, reason: "" });
+  // ⑥ 사람의 운영 스크립트도 같은 두 줄을 싣는다
+  const steps = readFileSync(join196(REPO_196, "docs/factory/ops/person-steps.sh"), "utf8");
+  expect(steps).toContain(REQUEUE("<n>"));
+  expect(steps).toContain(RESUME("<n>"));
+});

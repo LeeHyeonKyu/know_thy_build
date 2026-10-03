@@ -3307,3 +3307,47 @@ test("test_176_blocked_arm_skips_a_mid_swap_two_label_issue", async () => {
   expect(a2).toContainEqual(expect.objectContaining({ kind: "blocked-escalation-skipped", issue: 15 }));
   expect(d2).toHaveBeenCalledWith({ stage: "review", issue: 16 });
 });
+
+// ── #196 (ADR-035) — engine-crash blocked은 R(하트비트 재큐)를 쓰지 않고, 이름 붙은 상한까지만 다시 민다 ─────────────────
+import { ENGINE_CRASH_MAX_RETRIES } from "../lib/sweeper.js";
+import { transition as realTransition196 } from "../lib/transition.js";
+
+test("test_196_engine_crash_skips_r_but_is_bounded", async () => {
+  expect(ENGINE_CRASH_MAX_RETRIES).toBe(1);                              // 상한은 이름 있는 상수이고, 이 값으로 핀한다
+  // 크래시 런이 남긴 blocked — 전이 코멘트는 REAL transition()이 명시 cause로 만든다(문구 매칭이 아니다)
+  const seed = [];
+  const seedGh = { comments: async () => seed.slice(), comment: async (_n, body) => { seed.push({ id: 1, body, createdAt: "2026-10-03T00:00:00Z", author: "factory-bot" }); }, setFactoryLabel: async () => {}, issue: async () => ({ labels: ["factory:in-progress"] }) };
+  expect((await realTransition196({ gh: seedGh, issue: 5, to: "factory:blocked", reason: "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')", stage: "implement", cause: "engine-crash", env: {} })).ok).toBe(true);
+
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 5 }] : [])),
+    comments: vi.fn(async (n) => (n === 5 ? [...seed, ...posted] : [])),
+    comment: vi.fn(async (_n, body) => { posted.push({ id: 99, body, createdAt: "2026-10-03T01:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-10-03T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage, installedVersion: () => "1.4.50" };
+
+  // 1차: 같은 스테이지를 한 번 다시 민다 — R 마커(factory-retry)는 쓰지 않는다
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "implement", cause: "engine-crash" });
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  // 2차: 상한을 넘었다 — 사람에게, 엔진 결함이라는 문장과 엔진 버전과 재큐 명령으로
+  const second = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(ENGINE_CRASH_MAX_RETRIES);
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+  const esc = transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+  expect(esc).toMatchObject({ issue: 5, engineVersion: "1.4.50" });
+  expect(esc.reason).toMatch(/engine defect/);
+  expect(esc.reason).toContain("1.4.50");
+  expect(esc.reason).toContain("node .factory/bin/transition.js 5 factory:queue");
+  expect(esc.reason).not.toMatch(/budget|retries exhausted|environment\/credentials/);
+  // 3차: 더는 밀지 않는다(루프 없음)
+  await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(ENGINE_CRASH_MAX_RETRIES);
+  expect([...posted].some((c) => /factory-retry issue=/.test(c.body))).toBe(false);
+
+  // 다른 원인의 예산은 그대로다: api-error는 여전히 3회
+  expect(API_ERROR_MAX_RETRIES).toBe(3);
+});
