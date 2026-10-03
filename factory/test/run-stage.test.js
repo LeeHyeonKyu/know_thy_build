@@ -4836,3 +4836,81 @@ test("test_174_main_transition_dep_forwards_the_restart_principal", async () => 
   // Every hop asked main's ctxExtra builder exactly once, for its own target.
   expect(extras).toEqual(["factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:needs-human"]);
 });
+
+// #157 cf2 (review round 3): the stale-report guard above holds only for a report `resetGates` can delete. A
+// `harness.test.unit_report` outside the repo root is deliberately left alone by gateOutputPaths (never delete a file
+// that is not ours), so a re-run that writes nothing would read the first run's report back — same ids, "RED twice",
+// a false flaky candidate. Such a RED is therefore not re-run at all: the stage keeps today's single-run outcome and
+// records one refusal line. The control is the SAME absolute-path harness pointing inside the root: it re-runs, and its
+// silent re-run is "inconclusive" — so the refusal below is caused by where the report lives, nothing else.
+test("test_157_out_of_root_report_is_no_rerun", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);
+  const scenario = async ({ outside }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb157-root-"));
+    const elsewhere = mkdtempSync(join(tmpdir(), "ktb157-elsewhere-"));
+    const unitPath = outside ? join(elsewhere, "unit.json") : join(root, ".factory/out/unit.json");
+    const harness = {
+      harness: { maturity: "M0" }, project: { default_branch: "main" },
+      gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+      commands: { lint: "node factory/bin/lint.js", unit: `npx vitest run --reporter=json --outputFile=${unitPath}` },
+      test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"], unit_report: unitPath },
+    };
+    const writeRed = () => {
+      mkdirSync(dirname(unitPath), { recursive: true });
+      writeFileSync(unitPath, JSON.stringify({
+        numTotalTests: 132, numPassedTests: 131, numFailedTests: 1,
+        testResults: [{ name: join(root, "server/tests/a.test.ts"), status: "failed", assertionResults: [{ status: "failed", fullName: "t" }] }],
+      }));
+    };
+    let unitRuns = 0;
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "M\tclient/x.ts\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      // Run 1 writes a RED report; run 2 (if any) is killed: exit 1, no report.
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => { unitRuns++; if (unitRuns === 1) writeRed(); return { code: 1, stdout: "", stderr: "" }; } },
+    ]);
+    const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);      // = main()'s reader
+    const assembled = makeStageGateDeps({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => BASE, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    const lines = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(assembled.gates), diffFiles: vi.fn(assembled.diffFiles), suiteFailures: vi.fn(assembled.suiteFailures),
+      resetGates: vi.fn(assembled.resetGates),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async () => {},
+    });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
+    const human = d.transition.mock.calls.map(([a]) => a).find((a) => a.to === "factory:needs-human");
+    return { code, d, lines, unitRuns, unitPath, human };
+  };
+
+  // Out of root: resetGates cannot clear the report, so the RED is never re-run — today's outcome plus one refusal line.
+  const out = await scenario({ outside: true });
+  expect(out.code).toBe(2);
+  expect(out.unitRuns).toBe(1);
+  expect(out.d.gates).toHaveBeenCalledTimes(1);
+  expect(out.d.mergePr).not.toHaveBeenCalled();
+  expect(out.human?.reason).toBe("gates RED at merge");
+  expect(out.lines.some((l) => /rerun 1\/1/.test(l))).toBe(false);
+  const refusals = out.lines.filter((l) => l.startsWith("merge: no gates rerun — "));
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]).toMatch(/unit report is outside the repo root/);
+  expect(refusals[0]).not.toContain(out.unitPath);                    // the absolute host path stays off the public record
+  expect(out.lines.some((l) => l.startsWith("factory-flaky-candidate: "))).toBe(false);
+  expect(existsSync(out.unitPath)).toBe(true);                         // and the foreign file was still not deleted
+
+  // Control — same absolute-path harness, report inside the root: it re-runs, and the silent re-run is inconclusive.
+  const inside = await scenario({ outside: false });
+  expect(inside.code).toBe(2);
+  expect(inside.unitRuns).toBe(2);
+  expect(inside.d.gates).toHaveBeenCalledTimes(2);
+  expect(inside.human?.reason).toMatch(/^gates rerun inconclusive — the re-run wrote no test report/);
+  expect(inside.lines.some((l) => l.startsWith("merge: no gates rerun — "))).toBe(false);
+});

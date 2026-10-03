@@ -4024,13 +4024,15 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
   비어 있지 않다. **파싱된 테스트 실패만** 자격이 있다 — lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다.
 - 그 게이트들이 남긴 리포트를 읽어(run-stage `suiteFailures` dep → `idlessFailedSuites`) **실패 assertion 없이 실패한 테스트 파일이 하나도 없음**이 확인된다.
   로드에 실패한 파일은 id가 없어 `failing_ids`에 나타나지 않으므로, 그것을 모르면 "RED의 전부가 diff 밖"이 거짓으로 증명된다.
+  그 리포트가 **저장소 루트 밖**(`harness.test.<gate>_report`가 절대 경로로 루트 밖을 가리킴)에 있으면 보증하지 않는다 — `resetGates`는 남의 파일을
+  지우지 않으므로(`gateOutputPaths`) 재실행 전에 첫 리포트를 치울 수 없고, 리포트를 쓰지 못한 재실행이 그것을 다시 읽어 "두 번 RED"가 된다(#157 cf2).
 - PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`의 `all`, git 호출에 `--no-renames`)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
   이름 변경은 양쪽 경로를 모두 친다(`server/`에서 옮겨 나간 PR은 `server/`를 건드린 PR이다).
 - diff에 **저장소 루트의 파일이 하나도 없다** — 루트 파일(package.json·lockfile·vitest/tsconfig·README까지)은 모든 패키지를 건드린 것으로 본다.
 - 실패 테스트마다 경로가 정규화되고, 루트에 있지 않으며, 최상위 디렉터리가 **관례적 테스트 루트**(`test`·`tests`·`__tests__`·`spec`·`e2e`,
   `TEST_ROOT_DIRS` — 목록은 merge-stage.js 한 곳에만 있다)가 아니고, 그 최상위 디렉터리(`server/` 대 `client/`)에 diff 파일이 하나도 없다.
 
-하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록·리포트를 못 읽음·실패 assertion 없는 실패 파일·테스트 루트)
+하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록·리포트를 못 읽음·루트 밖 리포트·실패 assertion 없는 실패 파일·테스트 루트)
 지금과 **같은 한 번의 판정**(같은 전이, 같은 사유)이다(fail closed). 거절은 조용하지 않다: run 기록에 지금의 줄들에 더해 **정확히 한 줄**
 `merge: no gates rerun — <사유> [run_id=… runner=…]`이 판정 줄 바로 뒤에 붙는다. 사유는 `gatesDetailLines` 투영의 스크럽을 거친다(경로·dep 오류 문구가
 공개 기록으로 나가므로 — 규칙을 복사하지 않는다). 그래야 당번이 "이유 X로 거절됨"과 "기능이 고장남"을 구별한다.
@@ -4043,7 +4045,7 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
 - **같은 id 집합**이 다시 RED면 `needs-human`, 사유에 "PR 밖의 테스트가 두 번 RED — flaky 후보"와 id, id마다 `factory-flaky-candidate`(outcome RED) 줄.
   이것은 **후보**이지 flaky 판정이 아니다 — 이 저장소는 그것이 테스트 문제인지 제품 경쟁 조건인지 가를 수 없다.
 - **다른 집합**(부분집합·상위집합 포함)이 RED면 평범한 `needs-human`이고 두 집합을 모두 적는다 — flaky 문구도 마커도 없다. 리포트를 쓰지 않은
-  재실행은 "inconclusive"이지 두 번째 RED가 아니다(재실행 전에 `resetGates`로 첫 리포트를 지운다).
+  재실행은 "inconclusive"이지 두 번째 RED가 아니다(재실행 전에 `resetGates`로 첫 리포트를 지운다 — 지울 수 없는 루트 밖 리포트면 애초에 재실행하지 않는다).
 - 재실행이 BLOCKED이거나, 판정을 아예 내지 않았거나(null), base/diff typed error를 던지면 `factory:blocked`와 사유 줄이다 — 재실행이 아무것도 가르지 못했다.
 - 세 번째 실행은 없다. **재실행은 `runMergeStage` 호출 하나당 최대 한 번**이다 — 이슈당이 아니다: sweeper의 blocked→merge 재시도
   (`lib/sweeper.js`의 재시도 표 `"factory:approved": "merge"`, 한 번뿐)가 같은 이슈에 merge를 한 번 더 돌리면 그 호출도 자기 한 번을 갖는다.

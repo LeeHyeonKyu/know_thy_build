@@ -649,7 +649,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       // report would make the same id set look RED twice and a test that never ran again would be branded a flaky candidate.
       // `resetGates` is the stage's own "last run's verdict material must not stand in for this run" (run-stage.js) — same
       // function, called once more here. After it, a re-run that writes no report shows `parsed:false`, which `redTestIds`
-      // already refuses to turn into ids — so it can never equal the first set.
+      // already refuses to turn into ids — so it can never equal the first set. That holds only for a report resetGates may
+      // delete: one outside the repo root is left alone, so run-stage's `suiteFailures` refuses to vouch for it and such a
+      // RED never reaches this re-run (#157 cf2).
       await d.resetGates?.();
       again = await d.gates();
     } catch (e) {

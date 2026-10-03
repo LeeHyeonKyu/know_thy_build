@@ -1625,9 +1625,13 @@ export function gateOutputPaths({ root, harness = {} }) {
   for (const name of ["unit", "integration", "e2e"]) rel.push(testReportRel(harness, name));
   rel.push(harness.commands?.proof?.coverage_report, harness.commands?.proof?.mutation_report);
   const rootAbs = resolve(root);
-  const under = (p) => p === rootAbs || p.startsWith(rootAbs + sep);
-  const paths = rel.filter(Boolean).map((p) => resolve(isAbsolute(p) ? p : join(rootAbs, p))).filter(under);
+  const paths = rel.filter(Boolean).map((p) => resolve(isAbsolute(p) ? p : join(rootAbs, p))).filter((p) => insideRoot(rootAbs, p));
   return [...new Set(paths)];
+}
+/** Is absolute `p` the repo root or under it — the one rule for "ours to delete" (§gateOutputPaths, §makeMergeSuiteFailuresDep). */
+export function insideRoot(root, p) {
+  const rootAbs = resolve(root);
+  return p === rootAbs || p.startsWith(rootAbs + sep);
 }
 export function resetGateOutputs({ root, harness, rm = (p) => rmSync(p, { force: true }) }) {
   const paths = gateOutputPaths({ root, harness });
@@ -2328,7 +2332,17 @@ export function makeMergeSuiteFailuresDep({ root, getHarness, readFile }) {
   return async (gates) => {
     try {
       const harness = getHarness();
-      return idlessFailedSuites({ gates, root, readReport: (gate) => { const rep = testReportRel(harness, gate); return readFile(isAbsolute(rep) ? rep : join(root, rep)); } });
+      const reportAt = (gate) => { const rep = testReportRel(harness, gate); return resolve(isAbsolute(rep) ? rep : join(root, rep)); };
+      // #157 cf2: a RED test gate whose report lives outside the repo cannot be vouched for. `resetGates` leaves such a
+      // file alone (§gateOutputPaths — never delete what is not ours), so a re-run that writes no report would read the
+      // first run's back as "RED twice" — a false flaky candidate. Not vouched for = no re-run (§rerunEligibility); the
+      // reason names the gate, never the host path (it reaches the public run record).
+      for (const [name, g] of Object.entries(gates?.gates || {})) {
+        if (g?.status === "RED" && typeof g.parsed === "boolean" && !insideRoot(root, reportAt(name))) {
+          return { ok: false, files: [], reason: `${name} report is outside the repo root — resetGates cannot clear it before a re-run` };
+        }
+      }
+      return idlessFailedSuites({ gates, root, readReport: (gate) => readFile(reportAt(gate)) });
     } catch (e) {
       return { ok: false, files: [], reason: `${e?.message || e}` };
     }
