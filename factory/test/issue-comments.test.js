@@ -70,7 +70,7 @@ test("blockedCause classifies the reason text into the six classes", () => {
   // ADR-020 KTB-35 — 일곱 번째 등급: 테스트 명령이 exit≠0인데 리포트의 실패 테스트는 0개.
   // `gates` 규칙(`/gates?\b/`)보다 **먼저** 물려야 한다 — 사유 문구에 "gate log"가 들어 있다.
   expect(blockedCause("command exited 1 with 0 failing tests — unhandled error outside tests (see gate log)")).toBe("gates-unhandled");
-  expect(new Set(BLOCKED_CAUSES)).toEqual(new Set(["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other"]));
+  expect(new Set(BLOCKED_CAUSES)).toEqual(new Set(["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other", "engine-crash"]));
 });
 
 test("extractNeedsHuman is unaffected by the presence of a blocked-origin marker on an unrelated comment", () => {
@@ -228,4 +228,20 @@ test("test_174_where_directories_and_prose_never_widen_the_brief", () => {
   expect(wherePaths("factory/")).toEqual([]);
   expect(wherePaths("docs/ and/or factory/test")).toEqual([]);
   expect(wherePaths("factory/lib/self-gate.js:278 and/or factory/lib/")).toEqual(["factory/lib/self-gate.js"]);
+});
+
+// ── #196 self-critique f1 — 닫힌 원인 목록 옆의 engine-crash 설명이 "어느 throw가 드는가"에 코드와 같은 답을 한다 ─────────────
+// 그 주석은 BLOCKED_CAUSES를 읽는 사람이 가장 먼저 보는 정의다. 코드의 닫힌 목록(ENGINE_CRASH_ERRORS)과 어긋나면 — 예: SyntaxError를
+// 들면 — 그것을 믿은 사람이 ADR-035 (c)가 일부러 뺀 종류를 되돌린다.
+import { ENGINE_CRASH_ERRORS as ENGINE_CRASH_ERRORS_196 } from "../bin/run-stage.js";
+import { readFileSync as readFileSync196 } from "node:fs";
+
+test("test_196_blocked_causes_doc_names_exactly_the_engine_crash_error_list", () => {
+  const src = readFileSync196(new URL("../lib/retro/issue-comments.js", import.meta.url), "utf8");
+  const start = src.indexOf("`engine-crash` — #196");
+  expect(start).toBeGreaterThan(-1);
+  const entry = src.slice(start, src.indexOf("*/", start));
+  const named = [...new Set(entry.match(/\b[A-Z][A-Za-z]*Error\b/g) || [])].filter((n) => n !== "Error").sort();
+  expect(named).toEqual(ENGINE_CRASH_ERRORS_196.map((C) => C.name).sort());
+  expect(entry).not.toMatch(/SyntaxError/);
 });

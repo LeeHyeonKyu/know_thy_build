@@ -3307,3 +3307,236 @@ test("test_176_blocked_arm_skips_a_mid_swap_two_label_issue", async () => {
   expect(a2).toContainEqual(expect.objectContaining({ kind: "blocked-escalation-skipped", issue: 15 }));
   expect(d2).toHaveBeenCalledWith({ stage: "review", issue: 16 });
 });
+
+// ── #196 (ADR-035) — engine-crash blocked은 R(하트비트 재큐)를 쓰지 않고, 이름 붙은 상한까지만 다시 민다 ─────────────────
+import { ENGINE_CRASH_MAX_RETRIES } from "../lib/sweeper.js";
+import { transition as realTransition196 } from "../lib/transition.js";
+
+test("test_196_engine_crash_skips_r_but_is_bounded", async () => {
+  expect(ENGINE_CRASH_MAX_RETRIES).toBe(1);                              // 상한은 이름 있는 상수이고, 이 값으로 핀한다
+  // 크래시 런이 남긴 blocked — 전이 코멘트는 REAL transition()이 명시 cause로 만든다(문구 매칭이 아니다)
+  const seed = [];
+  const seedGh = { comments: async () => seed.slice(), comment: async (_n, body) => { seed.push({ id: 1, body, createdAt: "2026-10-03T00:00:00Z", author: "factory-bot" }); }, setFactoryLabel: async () => {}, issue: async () => ({ labels: ["factory:in-progress"] }) };
+  expect((await realTransition196({ gh: seedGh, issue: 5, to: "factory:blocked", reason: "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')", stage: "implement", cause: "engine-crash", env: {} })).ok).toBe(true);
+
+  const posted = [];
+  const gh = {
+    searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 5 }] : [])),
+    comments: vi.fn(async (n) => (n === 5 ? [...seed, ...posted] : [])),
+    comment: vi.fn(async (_n, body) => { posted.push({ id: 99, body, createdAt: "2026-10-03T01:00:00Z" }); return "u#issuecomment-1"; }),
+    patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now: "2026-10-03T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage, installedVersion: () => "1.4.50" };
+
+  // 1차: 같은 스테이지를 한 번 다시 민다 — R 마커(factory-retry)는 쓰지 않는다
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "implement", cause: "engine-crash" });
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  // 2차: 상한을 넘었다 — 사람에게, 엔진 결함이라는 문장과 엔진 버전과 재큐 명령으로
+  const second = await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(ENGINE_CRASH_MAX_RETRIES);
+  expect(second).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+  const esc = transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+  expect(esc).toMatchObject({ issue: 5, engineVersion: "1.4.50" });
+  expect(esc.reason).toMatch(/engine defect/);
+  expect(esc.reason).toContain("1.4.50");
+  expect(esc.reason).toContain("node .factory/bin/transition.js 5 factory:queue");
+  expect(esc.reason).not.toMatch(/^lifetime cost|^retries exhausted|environment\/credentials/);   // 예산·R 소진·"환경" 문장이 아니다
+  // 3차: 더는 밀지 않는다(루프 없음)
+  await sweep(args);
+  expect(dispatchStage).toHaveBeenCalledTimes(ENGINE_CRASH_MAX_RETRIES);
+  expect([...posted].some((c) => /factory-retry issue=/.test(c.body))).toBe(false);
+
+  // 다른 원인의 예산은 그대로다: api-error는 여전히 3회
+  expect(API_ERROR_MAX_RETRIES).toBe(3);
+});
+
+// ── #196 skeptic sc3·sc4·sc5 — 상한은 배선된 값이고, R 팔은 크래시를 보지 않으며, 다른 원인의 예산·문장은 그대로다 ─────────
+// 가짜 gh는 **라벨에 충실하다**: searchIssues(label)는 지금 그 라벨을 단 이슈만 돌려주고, 라벨은 진짜 transition()의 setFactoryLabel이 옮긴다.
+// 그래서 하트비트 팔(R)이 이 이슈를 볼 수 있는 상황이면 실제로 `factory-retry`를 쓴다(대조군이 그것을 보인다).
+import { ENGINE_CRASH_MAX_RETRIES as ENGINE_CRASH_MAX_RETRIES_196b } from "../lib/sweeper.js";
+import { transition as realTransition196b } from "../lib/transition.js";
+
+function labelFaithfulGh196(issue, label0) {
+  let label = label0;
+  const comments = [{ id: 1, body: `<!-- factory-heartbeat issue=${issue} -->\nstage: implement · runner: gha-1 · started: x · last: 2026-10-03T00:00:00Z`, createdAt: "2026-10-03T00:00:00Z", author: "factory-bot" }];
+  const push = (body) => { comments.push({ id: comments.length + 100, body, createdAt: "2026-10-03T00:10:00Z", author: "factory-bot" }); return "u#issuecomment-1"; };
+  return {
+    get label() { return label; },
+    posted: () => comments.map((c) => c.body),
+    searchIssues: vi.fn(async (l) => (l === label ? [{ number: issue }] : [])),
+    issue: async () => ({ number: issue, title: "t", body: "", labels: [label] }),
+    comments: vi.fn(async (n) => (n === issue ? comments.slice() : [])),
+    comment: vi.fn(async (_n, body) => push(body)),
+    patchComment: vi.fn(),
+    setFactoryLabel: async (_n, to) => { label = to; },
+  };
+}
+const sweepArgs196 = (gh, extra = {}) => {
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => { await gh.setFactoryLabel(null, to); return { ok: true, to }; });
+  return { gh, charter, thresholds: T, now: "2026-10-03T01:00:00Z", staleMinutes: 30, transition, release: vi.fn(async () => true), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage, installedVersion: () => "1.4.50", ...extra };
+};
+const seedBlocked196 = (gh, cause, reason) => realTransition196b({ gh, issue: 5, to: "factory:blocked", reason, stage: "implement", cause, env: {} });
+
+test("test_196_engine_crash_cap_is_the_wired_bound_and_r_never_sees_the_crash", async () => {
+  // 대조군: 크래시 전이가 없었다면(라벨이 in-progress에 남으면) 같은 가짜 위에서 하트비트 팔이 R을 쓴다
+  const ctl = labelFaithfulGh196(5, "factory:in-progress");
+  await sweep(sweepArgs196(ctl));
+  expect(ctl.posted().some((b) => /factory-retry issue=5/.test(b))).toBe(true);
+
+  // 크래시 런: 진짜 transition()이 blocked(cause=engine-crash)으로 옮긴다 — 같은 stale 하트비트가 남아 있어도 R은 이 이슈를 보지 않는다
+  const gh = labelFaithfulGh196(5, "factory:in-progress");
+  expect((await seedBlocked196(gh, "engine-crash", "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')")).ok).toBe(true);
+  expect(gh.label).toBe("factory:blocked");
+  // 상한은 배선된 값이다: 3을 주면 정확히 3번 밀고, 그다음에야 사람에게 간다(기본 분기의 1이 아니다)
+  const args = sweepArgs196(gh, { engineCrashMaxRetries: 3 });
+  const all = [];
+  for (let i = 0; i < 6 && gh.label === "factory:blocked"; i++) all.push(...(await sweep(args)));
+  expect(args.dispatchStage).toHaveBeenCalledTimes(3);
+  expect(all.filter((a) => a.kind === "blocked-retry").map((a) => a.attempt)).toEqual([undefined, 2, 3]);
+  expect(all).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+  expect(gh.label).toBe("factory:needs-human");
+  expect(all.some((a) => a.kind === "retries-exhausted" || a.kind === "requeue")).toBe(false);
+  expect(gh.posted().some((b) => /factory-retry issue=/.test(b))).toBe(false);
+  const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+  expect(esc.reason).toMatch(/engine defect/);
+  expect(esc.reason).toContain("node .factory/bin/transition.js 5 factory:queue");
+  // 인자를 주지 않으면 이름 있는 상수가 상한이다
+  expect(ENGINE_CRASH_MAX_RETRIES_196b).toBe(1);
+});
+
+test("test_196_other_blocked_causes_keep_their_budgets_and_sentences", async () => {
+  // 엔진 크래시 상한을 크게 주어도(5) 다른 원인의 시도 횟수와 에스컬레이션 문장은 그대로다 — 엔진 버전이 있어도 문장에 섞이지 않는다
+  const expected = { "api-error": 3, timeout: 1, cancelled: 1, gates: 1, "gates-unhandled": 1, undecidable: 1, other: 1 };
+  expect(Object.keys(expected).sort()).toEqual(BLOCKED_CAUSES.filter((c) => c !== "engine-crash").sort());
+  for (const [cause, tries] of Object.entries(expected)) {
+    const gh = labelFaithfulGh196(5, "factory:in-progress");
+    expect((await seedBlocked196(gh, cause, `stage failed (${cause})`)).ok).toBe(true);
+    const args = sweepArgs196(gh, { engineCrashMaxRetries: 5 });
+    for (let i = 0; i < 8 && gh.label === "factory:blocked"; i++) await sweep(args);
+    expect({ cause, dispatched: args.dispatchStage.mock.calls.length }).toEqual({ cause, dispatched: tries });
+    const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+    expect({ cause, reason: esc?.reason }).toEqual({ cause, reason: BLOCKED_ESCALATION_REASON[cause] });
+    expect(esc.engineVersion).toBe("1.4.50");
+  }
+});
+
+// ── #196 self-critique f3 — 시도 횟수는 **원인별로** 센다: engine-crash 재시도 마커가 다른 원인의 KTB-15b·KTB-22 예산을 먹지 않고,
+// 앞선 다른 원인의 재시도가 engine-crash의 상한을 먹지 않는다(같은 주기·같은 스테이지의 섞인 사건). 이 변경 전에는 크래시가 R을 탔고
+// blocked-retry 마커를 남기지 않았다 — 그래서 "다른 원인은 그대로"는 섞인 사건에서도 같은 시도 횟수여야 한다.
+const reblock196 = async (gh, cause, reason) => { await gh.setFactoryLabel(null, "factory:in-progress"); return seedBlocked196(gh, cause, reason); };
+const CRASH196 = "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')";
+
+test("test_196_engine_crash_attempts_are_counted_apart_from_other_causes", async () => {
+  // (a) 크래시 재시도 1회 뒤 같은 스테이지가 다른 원인으로 blocked — 그 원인의 원래 예산을 그대로 받는다
+  for (const [cause, tries] of [["other", 1], ["gates", 1], ["undecidable", 1], ["api-error", 3]]) {
+    const gh = labelFaithfulGh196(5, "factory:in-progress");
+    expect((await seedBlocked196(gh, "engine-crash", CRASH196)).ok).toBe(true);
+    const args = sweepArgs196(gh);
+    expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "implement", cause: "engine-crash" });
+    expect((await reblock196(gh, cause, `stage failed (${cause})`)).ok).toBe(true);
+    const after = [];
+    for (let i = 0; i < 8 && gh.label === "factory:blocked"; i++) after.push(...(await sweep(args)));
+    expect({ cause, retried: after.filter((a) => a.kind === "blocked-retry").length }).toEqual({ cause, retried: tries });
+    expect(after).toContainEqual({ kind: "blocked-escalated", issue: 5, cause });
+    const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+    expect({ cause, reason: esc.reason }).toEqual({ cause, reason: BLOCKED_ESCALATION_REASON[cause] });
+  }
+  // (b) 다른 원인의 재시도 1회 뒤 같은 스테이지가 엔진 크래시로 blocked — 크래시는 자기 상한만큼 다시 밀린 뒤에야 엔진 결함으로 간다
+  for (const cap of [1, 2]) {
+    const gh = labelFaithfulGh196(5, "factory:in-progress");
+    expect((await seedBlocked196(gh, "other", "stage failed (other)")).ok).toBe(true);
+    const args = sweepArgs196(gh, { engineCrashMaxRetries: cap });
+    expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "implement", cause: "other" });
+    expect((await reblock196(gh, "engine-crash", CRASH196)).ok).toBe(true);
+    const after = [];
+    for (let i = 0; i < 8 && gh.label === "factory:blocked"; i++) after.push(...(await sweep(args)));
+    expect({ cap, retried: after.filter((a) => a.kind === "blocked-retry" && a.cause === "engine-crash").length }).toEqual({ cap, retried: cap });
+    expect(after).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+    const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+    expect(esc.reason).toMatch(/engine defect/);
+  }
+});
+
+// ── #196 rework cf1 — 트리아지 크래시도 상한에서 끝난다: 재시도 런 자신의 hop(`blocked → queue`, `retry from blocked`)은 새 주기가 아니다 ─────
+// 트리아지의 blocked-retry hop은 `to=factory:queue` 전이를 남기고, 그 전이가 재시도 예산의 창(`commentsSinceCycleStart`)을 열면 직전의
+// engine-crash 재시도 마커가 창 밖으로 밀려 다음 크래시가 다시 "시도 0"으로 읽힌다 — 상한 없는 루프다. 여기서는 run-stage가 실제로 하는
+// hop을 **진짜 transition()**으로 sweep 사이에 재생한다(프로덕션의 배선된 리허설 자리에 skipRehearsal). 대조군: 사람이(또는 에스컬레이션
+// 문장이 가리키는 명령으로) needs-human에서 재큐하면 그것은 새 주기다 — 크래시는 다시 자기 상한만큼 밀린다.
+const triageHop196 = (gh) => realTransition196b({ gh, issue: 5, to: "factory:queue", reason: "retry from blocked — origin factory:queue confirmed", prerequisite: true, skipRehearsal: true, env: {} });
+const triageCrash196 = (gh) => realTransition196b({ gh, issue: 5, to: "factory:blocked", reason: "engine crash — triage threw TypeError: Cannot read properties of undefined (reading 'test')", stage: "triage", cause: "engine-crash", env: {} });
+
+test("test_196_triage_engine_crash_is_bounded_across_the_runner_hop", async () => {
+  for (const cap of [1, 2]) {
+    const gh = labelFaithfulGh196(5, "factory:queue");
+    expect((await triageCrash196(gh)).ok).toBe(true);
+    const args = sweepArgs196(gh, { engineCrashMaxRetries: cap });
+    const all = [];
+    for (let i = 0; i < 6 && gh.label === "factory:blocked"; i++) {
+      const acts = await sweep(args);
+      all.push(...acts);
+      if (acts.some((a) => a.kind === "blocked-retry")) {                    // 띄운 트리아지 런: hop으로 queue에 돌아온 뒤 같은 자리에서 또 죽는다
+        expect((await triageHop196(gh)).ok).toBe(true);
+        expect(gh.label).toBe("factory:queue");
+        expect((await triageCrash196(gh)).ok).toBe(true);
+      }
+    }
+    expect({ cap, dispatched: args.dispatchStage.mock.calls.length }).toEqual({ cap, dispatched: cap });
+    expect(all.filter((a) => a.kind === "blocked-retry").every((a) => a.stage === "triage" && a.cause === "engine-crash")).toBe(true);
+    expect(all).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+    expect(gh.label).toBe("factory:needs-human");
+
+    // 대조군: needs-human → queue 재큐(에스컬레이션 문장의 명령)는 새 주기다 — 다음 크래시는 다시 상한만큼 밀린다
+    expect((await realTransition196b({ gh, issue: 5, to: "factory:queue", reason: "engine fixed — requeue", skipRehearsal: true, env: {} })).ok).toBe(true);
+    expect((await triageCrash196(gh)).ok).toBe(true);
+    const again = await sweep(args);
+    expect(again).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "engine-crash" });
+    expect(args.dispatchStage.mock.calls.length).toBe(cap + 1);
+  }
+});
+
+test("test_196_runner_hop_keeps_other_triage_causes_as_before", async () => {
+  // 다른 원인의 창은 바뀌지 않는다: `other`의 트리아지 blocked은 hop 뒤에도 예전처럼 한 번 더 밀린다(이 변경 전과 같은 동작)
+  const gh = labelFaithfulGh196(5, "factory:queue");
+  const blockOther = () => realTransition196b({ gh, issue: 5, to: "factory:blocked", reason: "stage failed (other)", stage: "triage", cause: "other", env: {} });
+  expect((await blockOther()).ok).toBe(true);
+  const args = sweepArgs196(gh);
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "other" });
+  expect((await triageHop196(gh)).ok).toBe(true);
+  expect((await blockOther()).ok).toBe(true);
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "other" });
+});
+
+// ── #196 self-critique (skeptic f3) — engine-crash의 needs-human은 엔진 결함이다: 새 엔진이 오면 ADR-032의 릴리스 재시도가 한 번 받는다 ──
+// 픽스처는 진짜 생산자다: 크래시 런의 blocked 전이(명시 cause=engine-crash)는 진짜 transition()이, 재시도·에스컬레이션(엔진 버전을 싣는다)은
+// 진짜 sweep()이 쓴다. 에스컬레이션이 버전을 실어도, 그것을 읽는 유일한 팔이 engine-crash를 엔진 원인으로 보지 않으면 버전은 죽은 기록이다.
+import { engineCausedNeedsHuman as engineCausedNeedsHuman196 } from "../lib/sweeper.js";
+
+test("test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine", async () => {
+  const w = world156();
+  const n = 96;
+  w.add(n, "factory:in-progress", [planHandoff156(n), seedTransition156("factory:ready", "factory:planned"), seedTransition156("factory:planned", "factory:in-progress")]);
+  const crash = () => w.transition({ issue: n, to: "factory:blocked", reason: "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')", stage: "implement", cause: "engine-crash" });
+  expect((await crash()).ok).toBe(true);
+  expect(await w.sweep("1.4.50")).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: n, stage: "implement", cause: "engine-crash" }));
+  expect(await w.sweep("1.4.50")).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: n, cause: "engine-crash" }));
+  expect(w.label(n)).toBe("factory:needs-human");
+  const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(esc).toMatch(/engine defect/);
+  expect(ENGINE_VERSION156.exec(esc)?.[1]).toBe("1.4.50");
+  expect(engineCausedNeedsHuman196(await w.gh.comments(n))).toMatchObject({ thenVersion: "1.4.50" });
+
+  // 같은 엔진: 아무것도 하지 않는다
+  w.dispatchStage.mockClear();
+  const same = await w.sweep("1.4.50");
+  expect(same).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n }));
+  expect(w.label(n)).toBe("factory:needs-human");
+
+  // 새 엔진: 중단 지점(implement 전 → planned)으로 한 번, 릴리스 주체로
+  const after = await w.sweep("1.4.51");
+  expect(after).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n, version: "1.4.51", from: "1.4.50", to: "factory:planned" }));
+  expect(w.label(n)).toBe("factory:planned");
+  expect(releaseMarkers156(w, n)).toHaveLength(1);
+});
