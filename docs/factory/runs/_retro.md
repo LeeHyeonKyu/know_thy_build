@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-10-03T10:55:51.477Z
+- last retro: 2026-10-03T14:31:31.999Z
 - merges since last retro: 0
 - current N: 1
 
@@ -8,31 +8,40 @@
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-15T07:09:55.650Z | 2 | 1 | 1 | 2 |
 | 2026-09-15T10:31:18.686Z | 0 | 1 | 2 | 1 |
 | 2026-10-01T23:09:32.429Z | 0 | 2 | 1 | 13 |
 | 2026-10-02T05:21:19.380Z | 0 | 1 | 1 | 3 |
 | 2026-10-03T10:55:51.477Z | 1 | 1 | 1 | 16 |
+| 2026-10-03T14:31:31.999Z | 1 | 1 | 1 | 10 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 8 |
-| review rounds avg | 0 | 2.25 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.63 / 1.5 / 2.25 |
-| escaped defects | 0 | 8 |
-| revert rate | 없음 | 0.00 (0/8) |
-| needs-human | 9 | 41 |
-| rejects by role | 없음 | spec-conformance 5, qa 4, correctness 7, architecture 2 |
-| reviewer overlap | 없음 | 0.53 (10/19, runs 18) |
-| unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1, architecture 1 |
-| qa na ratio | 0.26 (6/23 claims, na-heavy 1/3 approvals) | 0.20 (13/65 claims, na-heavy 2/9 approvals) |
-| cost (usd) | 65.38 | 542.31 |
-| tokens | input 2031613 / output 167287 | input 14823125 / output 1115732 |
-| retro cost (usd) | 0.00 | 7.40 |
-| retro tokens | input 0 / output 0 | input 18 / output 17715 |
-| full retros | — | 6 |
+| merged | 4 | 12 |
+| review rounds avg | 1.75 | 2.08 |
+| rounds/issue (plan/impl/review) | 1.75 / 3.25 / 1.75 | 1 / 2.08 / 2.08 |
+| escaped defects | 8 (#178×5, #168×3) | 16 |
+| revert rate | 0.00 (0/4) | 0.00 (0/12) |
+| needs-human | 10 | 51 |
+| rejects by role | correctness 3, architecture 4, spec-conformance 2 | spec-conformance 7, qa 4, correctness 10, architecture 6 |
+| reviewer overlap | 0.55 (6/11, runs 13) | 0.53 (16/30, runs 31) |
+| unique findings by role | correctness 3, architecture 2 | spec-conformance 3, qa 4, correctness 4, architecture 3 |
+| qa na ratio | 0.22 (7/32 claims, na-heavy 1/4 approvals) | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
+| cost (usd) | 82.62 | 624.92 |
+| tokens | input 2380306 / output 197172 | input 17203431 / output 1312904 |
+| retro cost (usd) | 1.05 | 8.45 |
+| retro tokens | input 4 / output 3534 | input 22 / output 21249 |
+| full retros | — | 7 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #184 | 1 | 1 | 1 | 0 |
+| #178 | 2 | 6 | 3 | 5 |
+| #176 | 2 | 2 | 1 | 0 |
+| #168 | 2 | 4 | 2 | 3 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -46,7 +55,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-03T10:55:51.477Z",
+    "last_retro_at": "2026-10-03T14:31:31.999Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -351,6 +360,85 @@
         {
           "step": "publish-proposal",
           "pr": 183,
+          "reason": null,
+          "proposals": [
+            "gate"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-10-03T14:31:31.999Z",
+      "yield": 1,
+      "needs_human_since": 10,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            184,
+            178,
+            176,
+            168
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 178,
+              "count": 8
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 168,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-03-01",
+            "L-2026-10-03-02",
+            "L-2026-10-03-03"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:reviewer-correctness",
+          "added": [
+            {
+              "section": "## Perspectives",
+              "text": "**기록을 코드처럼 읽는 눈**: diff가 DECISIONS/ADR/README/주석에 엔진 동작을 단언하는 문장을 넣었다면 그 문장을 단언문으로 다룬다 — 그 동작을 지키는 테스트 id를 찾고, 없으면 문장이 말하는 경로(설정 분기·실패 1회·파일 부재)를 코드에서 직접 따라가 문장과 대조한다. 거짓인 결정 기록은 다음 이슈의 plan이 근거로 인용한다."
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 190,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#190 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md",
+            ".claude/agents/reviewer-correctness.md"
+          ]
+        },
+        {
+          "step": "publish-proposal",
+          "pr": 191,
           "reason": null,
           "proposals": [
             "gate"
@@ -973,6 +1061,33 @@
           170
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The judge-path switch ships with no circuit breaker, and making an in-code refusal a non-goal turns ADR-033's precondition into prose only. Once this merges, judge-path auto-merge with no breaker is one CHARTER edit away, and those merges cannot be undone. That is the most expensive failure of this plan, and it is not in any role's open_risks as something to be closed in code. My alternative: in this issue, `auto_merge_judge: true` hands to a human with the reason 'judge auto-merge requires the circuit breaker (S4c) — human merge required' while no breaker dep is wired. Or narrow the issue to non_judge only and move the judge branch to S4c.",
+        "runs": [
+          179
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "Recording the job-budget gap only as a DECISIONS.md note leaves the switched-on path in a permanent blocked/re-dispatch loop. The default veto_minutes is 60 and the merge job has a 30-minute timeout, so every run blocks. Blocked-retry will then re-dispatch it indefinitely. A note is not a stop. The block must be a distinct, terminal reason that names `timeout-minutes: 30` and `veto_minutes`, and a test must show the blocked-retry arm does not re-dispatch on this specific reason. (Also to product-advocate: dw6 'missing dependency → blocked' recreates the loop and needs a no-redispatch condition.)",
+        "runs": [
+          179
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "The fix for single-actor forgery (count a window as open only if the merge runner recorded it in factory/records) must not require editing factory/lib/run-record.js, which is must_not. It must also pin that a forged or stale status costs the owner at most one extra window, not a duplicate announcement on every run. If each restarted run reopens and recomments, the owner gets repeated 'closes at' comments with different times, and operator's resume path (dw2) contradicts skeptic's dw2.",
+        "runs": [
+          179
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1076,100 +1191,141 @@
         "issue": 184,
         "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/gates.js, .factory/lib/merge-stage.js, factory/bin/run-stage.js, factory/lib/gates.js, factory/lib/merge-stage.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #185)",
         "at": "2026-10-03T12:05:05Z"
+      },
+      {
+        "issue": 179,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/gh.js, .factory/lib/merge-stage.js, factory/bin/run-stage.js, factory/lib/gh.js, factory/lib/merge-stage.js, factory/test/gh.test.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #188)",
+        "at": "2026-10-03T14:00:03Z"
       }
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
-    "reverts": 0,
-    "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 9,
-    "qa_approvals": 3,
-    "qa_claims_total": 17,
-    "qa_na_total": 6,
-    "qa_na_ratio": 0.26,
-    "qa_na_heavy_approvals": 1,
-    "usage": {
-      "cost_usd": 65.380028,
-      "tokens": {
-        "input": 2031613,
-        "output": 167287
+    "merged": 4,
+    "review_rounds_avg": 1.75,
+    "plan_rounds_avg": 1.75,
+    "implement_rounds_avg": 3.25,
+    "rounds_per_issue": [
+      {
+        "issue": 184,
+        "plan": 1,
+        "implement": 1,
+        "review": 1
+      },
+      {
+        "issue": 178,
+        "plan": 2,
+        "implement": 6,
+        "review": 3
+      },
+      {
+        "issue": 176,
+        "plan": 2,
+        "implement": 2,
+        "review": 1
+      },
+      {
+        "issue": 168,
+        "plan": 2,
+        "implement": 4,
+        "review": 2
       }
-    }
-  },
-  "stats_total": {
-    "merged": 8,
-    "review_rounds_avg": 2.25,
-    "plan_rounds_avg": 0.63,
-    "implement_rounds_avg": 1.5,
+    ],
     "escaped_defects": 8,
+    "escaped_defects_detail": [
+      {
+        "issue": 178,
+        "count": 5
+      },
+      {
+        "issue": 168,
+        "count": 3
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
-      "spec-conformance": 5,
-      "qa": 4,
-      "correctness": 7,
+      "correctness": 3,
+      "architecture": 4,
+      "spec-conformance": 2
+    },
+    "review_runs": 13,
+    "findings_total": 11,
+    "overlapping_findings": 6,
+    "unique_findings_by_role": {
+      "correctness": 3,
       "architecture": 2
     },
-    "review_runs": 18,
-    "findings_total": 19,
-    "overlapping_findings": 10,
-    "unique_findings_by_role": {
-      "spec-conformance": 3,
-      "qa": 4,
-      "correctness": 1,
-      "architecture": 1
-    },
-    "overlap_ratio": 0.53,
-    "needs_human": 41,
-    "qa_approvals": 9,
-    "qa_claims_total": 52,
-    "qa_na_total": 13,
-    "qa_na_ratio": 0.2,
-    "qa_na_heavy_approvals": 2,
+    "overlap_ratio": 0.55,
+    "needs_human": 10,
+    "qa_approvals": 4,
+    "qa_claims_total": 25,
+    "qa_na_total": 7,
+    "qa_na_ratio": 0.22,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 542.305436,
+      "cost_usd": 82.617503,
       "tokens": {
-        "input": 14823125,
-        "output": 1115732
+        "input": 2380306,
+        "output": 197172
       }
     },
     "retro_usage": {
-      "cost_usd": 7.401917,
+      "cost_usd": 1.050323,
       "tokens": {
-        "input": 18,
-        "output": 17715
+        "input": 4,
+        "output": 3534
+      }
+    }
+  },
+  "stats_total": {
+    "merged": 12,
+    "review_rounds_avg": 2.08,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 2.08,
+    "escaped_defects": 16,
+    "reverts": 0,
+    "reverted_issues": [],
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "spec-conformance": 7,
+      "qa": 4,
+      "correctness": 10,
+      "architecture": 6
+    },
+    "review_runs": 31,
+    "findings_total": 30,
+    "overlapping_findings": 16,
+    "unique_findings_by_role": {
+      "spec-conformance": 3,
+      "qa": 4,
+      "correctness": 4,
+      "architecture": 3
+    },
+    "overlap_ratio": 0.53,
+    "needs_human": 51,
+    "qa_approvals": 13,
+    "qa_claims_total": 77,
+    "qa_na_total": 20,
+    "qa_na_ratio": 0.21,
+    "qa_na_heavy_approvals": 3,
+    "usage": {
+      "cost_usd": 624.922939,
+      "tokens": {
+        "input": 17203431,
+        "output": 1312904
       }
     },
-    "retros": 6
+    "retro_usage": {
+      "cost_usd": 8.45224,
+      "tokens": {
+        "input": 22,
+        "output": 21249
+      }
+    },
+    "retros": 7
   },
-  "deferred_proposals": [
-    {
-      "kind": "role-change",
-      "title": "builder Lens 5·implement 프롬프트의 'Scope change는 PR 본문에'를 spec-conformance Lens 2('diff 자체에, PR 본문 아님')와 일치시킨다",
-      "body": "모순: `.claude/agents/factory-builder.md:71-72` Lens 5는 \"plan이 예상한 경로를 벗어난 변경은 PR 본문 'Scope change'에 경로와 이유를 적는다\", `.claude/workflows/factory-implement.js:400`도 \"the path and the reason in the PR body under a 'Scope change' heading\"이라고 지시한다. 반면 `.claude/agents/reviewer-spec-conformance.md:58-59` Lens 2는 \"diff 자체(PR 본문이 아니라)에 'Scope change' 사유가 적혀 있고…일 때만 통과\"이고, 같은 파일 35-36행은 \"PR description과 builder의 설명은 읽지 않는다\"고 못박는다. 빌더가 지시대로 하면 판정자는 그것을 볼 수 없다.\n\n근거: 같은 형태의 spec reject가 서로 다른 4개 이슈(#149, #156, #157, #170)에서 나왔고, 이 4개 이슈의 run 기록에 review-evidence 판정이 15회(#156 3, #157 5, #170 4, #149 3) 남아 있다(≥10 run). #156에서는 빌더가 rework 후 파일 주석 `Scope change (#156): …`로 diff 안에 사유를 넣자(factory/lib/retro/issue-comments.js:618, factory/test/sweep-bin.test.js:170) round3에서 spec-conformance가 approve로 돌았다 — diff 안 표기가 실제로 통과하는 형태임을 보여 준다.\n\n변경안: builder Lens 5를 \"…변경은 **diff 안에**(해당 파일의 주석 또는 DECISIONS 항목) `Scope change (#&lt;issue&gt;): &lt;경로&gt; — &lt;이유&gt;`로 적는다. PR 본문은 spec-conformance가 읽지 않는다\"로, factory-implement.js:400 문구를 같은 뜻으로, `templates/factory/claude/agents/factory-builder.md`·`templates/factory/claude/workflows/factory-implement.js` 사본도 함께. spec-conformance 쪽은 바꾸지 않는다(cold-read 원칙 유지).\n\n비용: 프롬프트 한 문장 교체로 이슈당 토큰 증가는 사실상 0(수십 토큰). 반대로 이 창에서 이 사유 하나로 생긴 rework는 이슈당 최소 1회의 implement+review 라운드였다(#156 기록 기준 implement ≈$1.75–4.8, review ≈$2.8–2.9/라운드). 역할 정의 변경이므로 사람이 머지한다.",
-      "evidence_runs": [
-        149,
-        156,
-        157,
-        170
-      ]
-    }
-  ],
+  "deferred_proposals": [],
   "deletion_candidates": []
 }
 ```
