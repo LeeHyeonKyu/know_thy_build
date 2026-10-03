@@ -95,7 +95,7 @@ export const stalledRestartLimitReason = `stalled restart limit (${STALLED_RESTA
  * 평생 한 번, `origins`가 그 스테이지 자신의 정상 진입 라벨일 때)는 바이트 하나 안 바뀐다. `attempt`를
  * 주면 그 시도 번호가 마커에 실려, 같은 이슈+스테이지에 여러 번 재시도(최대 3회)할 수 있게 된다.
  */
-export const blockedRetryComment = (stage, issue, attempt) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}${attempt ? ` attempt=${attempt}` : ""} -->`;
+export const blockedRetryComment = (stage, issue, attempt, cause = null) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}${attempt ? ` attempt=${attempt}` : ""}${cause ? ` cause=${cause}` : ""} -->`;
 
 /**
  * #168 rework arch1 — `blockedRetryComment`이 쓰는 문법을 읽는 **유일한** 곳. 예전에는 읽는 쪽 정규식이
@@ -103,12 +103,22 @@ export const blockedRetryComment = (stage, issue, attempt) => `<!-- factory-swee
  * 이미 어긋나 있었다(캡처 vs 비캡처 `attempt=`). 문법을 다시 넓힐 때(KTB-22가 `attempt=`를 넣었듯) 한 곳만
  * 놓쳐도 그 팔이 마커를 못 보고 조용히 fail-closed로 떨어진다 — 그래서 쓰는 함수 바로 옆에 하나만 둔다.
  *
- * 돌려주는 값: 이 이슈+스테이지의 마커가 `body`에 있으면 `{ attempt }`(`attempt` 없는 옛 마커는 1), 없으면 `null`.
+ * 돌려주는 값: 이 이슈+스테이지의 마커가 `body`에 있으면 `{ attempt }`(`attempt` 없는 옛 마커는 1; `cause=` 태그가 있으면
+ * `{ attempt, cause }`), 없으면 `null`.
+ *
+ * #196 self-critique f3 — `cause=`는 **engine-crash 재시도만** 싣는다(다른 원인의 마커는 바이트 하나 안 바뀐다). 시도 횟수는 원인별로
+ * 센다(`lastBlockedRetryAttempt`): 이 변경 전에는 크래시가 R을 탔고 blocked-retry 마커를 남기지 않았으므로, 크래시 재시도 마커가
+ * 같은 주기의 다른 원인(KTB-15b의 한 번, KTB-22의 세 번) 예산을 먹으면 "다른 원인은 그대로"가 섞인 사건에서 거짓이 된다 — 그 반대
+ * 방향(앞선 `other` 재시도가 engine-crash 상한을 먹는 것)도 같다.
  */
 export function matchBlockedRetryMarker(body, stage, issue) {
-  const m = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))? -->`).exec(String(body ?? ""));
-  return m ? { attempt: m[1] ? Number(m[1]) : 1 } : null;
+  const m = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))?(?: cause=(\\S+))? -->`).exec(String(body ?? ""));
+  if (!m) return null;
+  const attempt = m[1] ? Number(m[1]) : 1;
+  return m[2] ? { attempt, cause: m[2] } : { attempt };          // 태그 없는 마커의 모양은 예전 그대로(`{ attempt }`)
 }
+/** #196 f3 — 시도 횟수의 장부: engine-crash 마커는 engine-crash끼리, 나머지(태그 없는 옛 문법)는 나머지끼리 센다. */
+const retryLedger = (cause) => (cause === "engine-crash" ? "engine-crash" : null);
 
 /**
  * KTB-22 — `factory-blocked-origin` 마커가 실어 온 사유(`blockedOrigin(comments).reason`)가 API
@@ -165,12 +175,16 @@ const escalationReason = (cause, { issue = null, engineVersion = null } = {}) =>
   if (cause !== "engine-crash") return text;
   return text.replace("<n>", issue != null ? String(issue) : "<n>").replace("<engine>", engineVersion ? `v${engineVersion}` : "(version unknown)");
 };
-/** 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). */
-function lastBlockedRetryAttempt(comments, stage, issue) {
+/**
+ * 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). #196 f3 — `cause`의 장부
+ * (`retryLedger`)에 속한 마커만 센다: engine-crash는 engine-crash 마커만, 다른 원인은 태그 없는 마커만.
+ */
+function lastBlockedRetryAttempt(comments, stage, issue, cause = null) {
+  const ledger = retryLedger(cause);
   let last = 0;
   for (const c of comments || []) {
     const m = matchBlockedRetryMarker(c?.body, stage, issue);
-    if (m) last = Math.max(last, m.attempt);
+    if (m && (m.cause ?? null) === ledger) last = Math.max(last, m.attempt);
   }
   return last;
 }
@@ -186,7 +200,7 @@ function retriedSinceOrigin(comments, stage, issue) {
   const list = comments || [];
   let from = 0;
   list.forEach((c, i) => { if (BLOCKED_ORIGIN.test(String(c?.body ?? ""))) from = i + 1; });
-  return list.slice(from).some((c) => matchBlockedRetryMarker(c?.body, stage, issue) !== null);
+  return list.slice(from).some((c) => { const m = matchBlockedRetryMarker(c?.body, stage, issue); return m !== null && (m.cause ?? null) === null; });   // #196 f3 — 태그 없는(취소 쪽) 장부만
 }
 
 /**
@@ -1644,7 +1658,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? engineCrashMaxRetries : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
-          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number);
+          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number, cause);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)
@@ -1671,7 +1685,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
             // dedupe·테스트는 이 경로에서 아무것도 안 바뀐 것처럼 본다. API 에러거나 2번째 이상이면
             // 시도 번호를 싣는다.
             const numbered = isApiError || attempt > 1;
-            const marker = numbered ? blockedRetryComment(retryStage, it.number, attempt) : blockedRetryComment(retryStage, it.number);
+            // #196 f3 — engine-crash 재시도만 `cause=` 태그를 단다(원인별 장부). 다른 원인의 마커는 예전 그대로다.
+            const tag = retryLedger(cause);
+            const marker = numbered ? blockedRetryComment(retryStage, it.number, attempt, tag) : blockedRetryComment(retryStage, it.number, undefined, tag);
             const note = isApiError
               ? `\`factory:blocked\`이 API 쿼터/장애(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — \`factory-${retryStage}.yml\`을 다시 띄웁니다(시도 ${attempt}/${maxAttempts}, KTB-22). 여전히 blocked이면 ${attempt < maxAttempts ? "다음 sweep에서 다시 시도합니다" : "다음 sweep에서 사람에게 넘어갑니다"}.`
               : isEngineCrash

@@ -13,7 +13,15 @@ export const NEEDS_INFO = "factory:needs-info";
 export const requeueCommand = (n = "<n>") => `node .factory/bin/transition.js ${n} factory:queue`;
 export const resumeCommand = (n = "<n>") => `node .factory/bin/transition.js ${n} --human --retry`;
 export const retryGuidance = (n = "<n>") => `agents and CI requeue with \`${requeueCommand(n)}\`; a person resumes from the stop point with \`${resumeCommand(n)}\``;
-export const RETRY_SCRIPT_REFUSED = `retry from factory:needs-human/needs-info is human-only (transition.js --human) — ${retryGuidance()}`;
+export const retryScriptRefused = (n = "<n>") => `retry from factory:needs-human/needs-info is human-only (transition.js --human) — ${retryGuidance(n)}`;
+export const RETRY_SCRIPT_REFUSED = retryScriptRefused();
+/**
+ * #196 self-critique f2 — 라이브러리의 두 재시도 거절은 **이 이슈 번호로 채운** 두 명령을 거절 객체에 싣는다(`requeue`·`resume`).
+ * 템플릿 `<n>`을 읽은 에이전트는 명령을 그대로 칠 수 없다. RETRY_SCRIPT 거절은 사유 문장도 이 번호로 채운다. HUMAN_FLAG 거절의
+ * `reason`은 상수 그대로다 — 기존 KTB 테스트(transition.test.js `(e)`)가 그 문자열을 정확히 핀하고(tests_are_load_bearing), 그
+ * 경로의 사람이 읽는 출력(bin/transition.js stderr)은 이미 번호를 채운다. bin/transition.js는 거절 객체 전체를 JSON으로 찍는다.
+ */
+const retryCommands = (issue) => (issue == null ? {} : { requeue: requeueCommand(issue), resume: resumeCommand(issue) });
 export const NO_RESUME_POINT = "cannot resolve a resume point from this issue's history — no transition into factory:blocked/needs-human names a label the factory can resume from";
 
 /**
@@ -117,7 +125,7 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   // 리뷰 aab3db8 — 세 번째 자물쇠. 훅(셸 경계)과 `bin/transition.js`(CLI 래퍼)를 둘 다 지나치는 길이
   // 하나 남아 있었다: `node -e "import('…/lib/transition.js').then(m => m.transition({human:true,…}))"`.
   // 그래서 판정을 라이브러리 함수 자신에 둔다 — 어느 입구로 들어오든 여기서 같은 답을 받는다.
-  if ((human || retry) && refuseHumanFlag(env)) return { ok: false, from: null, to, reason: HUMAN_FLAG_REFUSED };
+  if ((human || retry) && refuseHumanFlag(env)) return { ok: false, from: null, to, reason: HUMAN_FLAG_REFUSED, ...retryCommands(issue) };
   const it = await gh.issue(issue);
   const from = factoryLabelOf(it.labels);
   if (!from) return { ok: false, from, to, reason: "no factory state label on issue" };
@@ -162,7 +170,9 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   // 스크립트가 이 엣지를 시도하면 아래 `canTransition`이 평소의 그래프 거부로 떨어뜨린다 — 라벨은
   // 그대로이고 거부 코멘트가 남는다(사람이 볼 수 있게). 목적 라벨조차 없는 `--retry`만 여기서
   // 끊는다: 거부 코멘트에 적을 `to`가 없고, 그 요청은 애초에 사람 전용 문법이다.
-  if (to == null) return { ok: false, from, to, reason: retry ? RETRY_SCRIPT_REFUSED : "no target label (use `--retry` only from factory:needs-human or factory:needs-info)" };
+  if (to == null) return retry
+    ? { ok: false, from, to, reason: retryScriptRefused(issue ?? "<n>"), ...retryCommands(issue) }
+    : { ok: false, from, to, reason: "no target label (use `--retry` only from factory:needs-human or factory:needs-info)" };
   if (!canTransition(from, to, { human: restoring })) {
     const graphReason = `transition ${from} → ${to} not allowed`;
     // 그래프에 없는 전이는 라벨을 건드리지 않는다(어느 쪽으로도 안전한 기본값이 없다 — 예: merged/wont-do는
