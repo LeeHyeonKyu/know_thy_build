@@ -2247,9 +2247,16 @@ test("test_184_green_rerun_merge_record_names_the_retried_test", async () => {
   const first = await producedGates({ failing: [OC_ID], sha: HEAD });
   const second = await producedGates({ failing: [], sha: HEAD });
 
-  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY } });
+  const resetGates = vi.fn(async () => {});
+  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { resetGates } });
   expect(r.code).toBe(0);
   expect(r.d.gates).toHaveBeenCalledTimes(2);
+  // dw1 on the merging path: the stale first-run report is cleared between the two gate runs, and the last
+  // factory/gates status on the merged head is the re-run's success.
+  expect(resetGates).toHaveBeenCalledTimes(1);
+  expect(resetGates.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[0]);
+  expect(resetGates.mock.invocationCallOrder[0]).toBeLessThan(r.d.gates.mock.invocationCallOrder[1]);
+  expect(gateStatusesOf(r.postStatus).at(-1)).toMatchObject({ state: "success", sha: HEAD });
   expect(r.d.mergePr).toHaveBeenCalledWith(9);
   const marked = r.lines.filter((l) => l.includes(MERGED_ON_RERUN_184));
   expect(marked).toHaveLength(1);
