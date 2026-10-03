@@ -321,7 +321,7 @@ test("isNewerVersion compares numerically, and an unknown version is never 'newe
 import { restartBriefInput } from "../bin/run-stage.js";
 test("test_174_self_gate_new_files_measured_from_restart_head", async () => {
   const head = "f".repeat(40);
-  const brief = { pr: 31, head, scope: "s", paths: ["factory/lib/self-gate.js", "factory/test/"], findings: [] };
+  const brief = { pr: 31, head, scope: "s", paths: ["factory/lib/self-gate.js", "factory/test/new-guard.test.js"], findings: [] };
   // restart head의 트리: 옛 PR이 이미 더한 파일(round1.js)이 거기 있다.
   const treeAt = (sha) => ({
     match: (c, a) => c === "git" && a[0] === "ls-tree" && a.includes(sha),
@@ -337,7 +337,7 @@ test("test_174_self_gate_new_files_measured_from_restart_head", async () => {
   expect(red.ok).toBe(false);
   expect(red.ranChecks).toContain("restart-brief");
   const blocking = red.findings.filter((f) => f.blocking);
-  expect(blocking).toHaveLength(1);                                     // round1.js(옛 PR)·new-guard(브리프 디렉터리)는 통과
+  expect(blocking).toHaveLength(1);                                     // round1.js(옛 PR)·new-guard(브리프가 이름 댄 파일)는 통과
   expect(blocking[0].detail).toBe("new file outside the restart brief: factory/lib/extra-parser.js");
 
   // 기존 파일 수정·삭제만 있는 라운드(새 파일 없음)는 통과한다.
@@ -361,4 +361,16 @@ test("test_174_self_gate_new_files_measured_from_restart_head", async () => {
   const withNull = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: null });
   expect(withNull).toEqual(today);
   expect(JSON.stringify(withNull)).toBe(JSON.stringify(today));
+});
+
+test("test_174_restart_brief_allows_named_files_only_never_a_directory_prefix", async () => {
+  const gates = { schema: "factory.gates.v1", status: "GREEN" };
+  // Even if a directory reached the allow-list, it must not admit every file under it: only exact paths pass.
+  const restartBrief = { paths: ["factory/test/", "factory/lib", "factory/lib/self-gate.js"], newFiles: ["factory/test/new-guard.test.js", "factory/lib/extra.js", "factory/lib/self-gate.js"] };
+  const r = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief });
+  expect(r.ok).toBe(false);
+  expect(r.findings.filter((f) => f.blocking).map((f) => f.detail)).toEqual([
+    "new file outside the restart brief: factory/test/new-guard.test.js",
+    "new file outside the restart brief: factory/lib/extra.js",
+  ]);
 });

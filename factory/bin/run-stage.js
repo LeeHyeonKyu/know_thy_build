@@ -35,7 +35,7 @@ import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, wherePaths } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
@@ -1319,7 +1319,14 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     }
     const maxRounds = ctx?.limits?.K;
     const to = nextState(stage, v.data, { maxRounds });
-    const exhausted = stage === "review" && to === "factory:needs-human";
+    /**
+     * #174 — 2K 천장은 **모든** 리뷰에서 문다(재시작을 아는 배선에서만): 창의 rework 시도 수(`attempts`, failed 마커로 줄지 않는
+     * 셈)로 잰 이번 라운드가 2K에 닿았으면 rework도 재시작도 없이 사람이다. 위조 failed 마커가 K 카운터를 아무리 되감아도
+     * 리뷰는 2K번을 넘지 못한다(정당한 재시작 한 번의 K + K와 같은 자리).
+     */
+    const ceiling = stage === "review" && to === "factory:rework" && d.kRestartState && kState && atKCeiling(maxRounds, absRound);
+    const toFinal = ceiling ? "factory:needs-human" : to;
+    const exhausted = stage === "review" && toFinal === "factory:needs-human";
     let exhaustedReason = exhausted ? reviewExhaustedReason(v.data, maxRounds) : null;
     /**
      * ── #174 (ADR-033 둘째 결정) — K 소진은 **한 번** 새 작성자 + diff 전용 브리프로 스스로 재시작한다 ─────────────────
@@ -1344,7 +1351,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       exhaustedReason = dec.reason;
     }
-    const t = await d.transition({ to, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
+    const t = await d.transition({ to: toFinal, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
     record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
     return t.ok ? 0 : 2;
   } catch (e) {
@@ -1964,9 +1971,15 @@ export const K_TWICE = "K exhausted twice (one self-restart used)";
  */
 export function reviewRoundOf(prior, state) {
   if (typeof prior !== "number") return { round: undefined, abs: undefined };
-  const abs = prior + 1;
+  // 천장의 셈은 failed 마커로 줄지 않는 `attempts`다(`prior`는 그것으로 되감길 수 있다) — 둘 중 큰 쪽.
+  const abs = Math.max(prior, Number.isInteger(state?.attempts) ? state.attempts : 0) + 1;
   const offset = state?.used && Number.isInteger(state.offset) ? state.offset : 0;
-  return { round: Math.max(1, abs - offset), abs };
+  return { round: Math.max(1, prior + 1 - offset), abs };
+}
+
+/** 창 전체의 라운드(`abs`, 시도 기준)가 2K에 닿았는가 — 정당한 재시작 한 번이 허락하는 리뷰 수(K + K)의 끝. */
+export function atKCeiling(maxRounds, abs) {
+  return Number.isInteger(maxRounds) && maxRounds > 0 && Number.isInteger(abs) && abs >= 2 * maxRounds;
 }
 
 /**
@@ -1979,7 +1992,7 @@ export function kExhaustionDecision({ data, maxRounds, state, abs }) {
   const mustFix = Array.isArray(data?.must_fix) ? data.must_fix.filter(Boolean) : [];
   const n = mustFix.length;
   const tail = n ? `${n} must_fix remain` : `last verdict: ${data?.decision ?? "unknown"}`;
-  const ceiling = Number.isInteger(maxRounds) && Number.isInteger(abs) && abs >= 2 * maxRounds;
+  const ceiling = atKCeiling(maxRounds, abs);
   if (state?.used) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — ${K_TWICE}: ${tail}` };
   if (ceiling) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — the 2K ceiling is reached in this window (round ${abs}): ${tail}` };
   if (!n) return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: there is no must_fix to brief the next author with` };
@@ -2013,14 +2026,44 @@ export async function restartBriefInput({ run, cwd, brief, added = [] }) {
 }
 
 /**
+ * The implement self-gate dep (production = what the test drives). Inputs are what main() already holds; `getCtx` returns
+ * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
+ */
+export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
+  return async ({ gates }) => {
+    const base = await mergeBase();
+    const diff = await changedFiles({ run, cwd: root, base, harness });
+    const ctx = getCtx?.() ?? null;
+    /**
+     * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
+     * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
+     * re-runs guardable pins (a red guard is a regression) and surfaces prose pins as advisory.
+     */
+    const review = ctx?.handoffs?.review;
+    const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
+    // #174 — a K self-restart round: the new-file list is measured HERE (git), from the restart head; self-gate only judges it.
+    // `added` (status A vs. merge-base), not `all`: an edit or a deletion is never a new file.
+    const brief = ctx?.loaded?.k_restart_brief ?? null;
+    const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, added: diff.added }) : null;
+    return runSelfGate({
+      root, harness, gates, run,
+      // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
+      // property is violated"; a lightly-edited pre-existing test is not what it judges.
+      changedTests: diff.addedTests, changedSources: diff.sources, pins,
+      ...(restartBrief ? { restartBrief } : {}),
+    });
+  };
+}
+
+/**
  * ── #174 (ADR-033 둘째 결정) — K 소진의 재시작 deps(프로덕션 = 테스트가 그대로 쓰는 것) ──────────────────────────
  *
  * 셋 다 같은 창(`commentsSinceRequeue`)을 본다 — 재큐는 K와 재시작 예산을 함께 되돌리고, 사람의 `reason=retry`는 어느 쪽도
  * 되돌리지 않는다(`countTransitionsTo`가 retry를 세지 않고, 창도 재큐에서만 열린다).
  *   - `reviewRounds` — 이번 창의 완료된 rework 전이 수(예전 그대로, 절대값).
  *   - `kRestartState` — 이번 창의 재시작 상태(`lib/retro/issue-comments.js` `kRestartState`).
- *   - `postKRestartBrief` — 브리프 코멘트를 게시한다. 같은 head의 **쓰이지 않은** 마커가 이미 있으면(브리프는 나갔는데 전이에서
- *     죽은 런의 재시도) 다시 쓰지 않는다. 게시 실패는 그대로 던진다 — 호출자가 전이 없이 크게 끝낸다.
+ *   - `postKRestartBrief` — 브리프 코멘트를 게시한다. 창의 마지막 마커가 **쓰이지 않았고 지금 쓸 브리프와 같은 내용**이면(브리프는
+ *     나갔는데 전이에서 죽은 런의 재시도) 다시 쓰지 않는다. 게시 실패는 그대로 던진다 — 호출자가 전이 없이 크게 끝낸다.
  */
 export function makeKRestartDeps({ gh, issue }) {
   const window = async () => commentsSinceRequeue(await gh.comments(issue));
@@ -2029,8 +2072,11 @@ export function makeKRestartDeps({ gh, issue }) {
     kRestartState: async () => kRestartState(await window()),
     postKRestartBrief: async ({ pr, head, findings }) => {
       const s = kRestartState(await window());
-      if (!s.used && s.pending && s.pending.head === String(head ?? "unknown")) return { posted: false, reused: true };
-      await gh.comment(issue, kRestartComment({ issue, pr, head, findings }));
+      const body = kRestartComment({ issue, pr, head, findings });
+      // 다시 쓰지 않는 것은 창의 **마지막** 마커가 지금 쓸 브리프와 **같은 내용**일 때뿐이다(전이에서 죽은 런의 재시도).
+      // head만 같은 다른 마커(위조)는 엔진의 브리프를 대신하지 못한다 — 쓰인 브리프는 재시작 전이 직전의 마지막 마커다.
+      if (!s.used && sameKRestartBrief(s.pending?.brief, kRestartBriefOf(body))) return { posted: false, reused: true };
+      await gh.comment(issue, body);
       return { posted: true, reused: false };
     },
   };
@@ -3082,27 +3128,8 @@ async function main() {
      * 정상이다. qa 증거는 제자리에서 그대로 강제된다: review의 qa 리뷰어와 `factory:approved`의
      * `qaEvidenceGate`. 여기서 채점하면 로스터에 qa가 있는 모든 standard-tier 이슈가 막혔다.
      */
-    selfGate: async ({ gates }) => {
-      const base = await mergeBase();
-      const diff = await changedFiles({ run, cwd: root, base, harness });
-      /**
-       * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
-       * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
-       * re-runs guardable pins (a red guard is a regression) and surfaces prose pins as advisory.
-       */
-      const review = ctxCache?.handoffs?.review;
-      const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
-      // #174 — a K self-restart round: the new-file list is measured HERE (git), from the restart head; self-gate only judges it.
-      const brief = ctxCache?.loaded?.k_restart_brief ?? null;
-      const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, added: diff.added }) : null;
-      return runSelfGate({
-        root, harness, gates, run,
-        // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
-        // property is violated"; a lightly-edited pre-existing test is not what it judges.
-        changedTests: diff.addedTests, changedSources: diff.sources, pins,
-        ...(restartBrief ? { restartBrief } : {}),
-      });
-    },
+    // #174 — the production wiring lives in `makeSelfGateDep` so the test drives this exact call site.
+    selfGate: makeSelfGateDep({ root, harness, run, mergeBase, getCtx: () => ctxCache }),
     /**
      * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
      * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt(head별)와

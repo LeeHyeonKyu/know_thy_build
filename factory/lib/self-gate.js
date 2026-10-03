@@ -275,7 +275,8 @@ export async function runSelfGate({
       findings.push({ check: "restart-brief", blocking: true, detail: `restart brief unusable — ${restartBrief.error} (fail closed: new files cannot be checked against it)` });
     } else {
       const allowed = (Array.isArray(restartBrief.paths) ? restartBrief.paths : []).filter((p) => typeof p === "string" && p);
-      const inBrief = (f) => allowed.some((p) => f === p || f.startsWith(`${p.replace(/\/+$/, "")}/`));
+      // exact paths only — a directory or a prose token in the allow-list must never admit every file under it
+      const inBrief = (f) => allowed.includes(f);
       for (const f of Array.isArray(restartBrief.newFiles) ? restartBrief.newFiles : []) {
         if (!inBrief(f)) findings.push({ check: "restart-brief", blocking: true, detail: `new file outside the restart brief: ${f}` });
       }

@@ -711,3 +711,35 @@ test("test_174_builder_context_carries_the_brief", async () => {
   await buildContext({ root: r2, gh: { issue: async () => ({ number: 174, title: "T", body: "", labels: [] }), comments: async () => (await h.gh.comments()).slice(0, 4) }, issue: 174, stage: "review" });
   expect(Object.keys(JSON.parse(readFileSync(join(r2, ".factory/out/loaded.json"), "utf8")))).not.toContain("k_restart_brief");
 });
+
+test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition", async () => {
+  const H = "d".repeat(40);
+  const implement = renderHandoff({ stage: "implement", issue: 174, summary: "s", data: { schema: "factory.implement.v1", issue: 174, pr: 31, head_sha: H } });
+  const real = [{ id: "cf1", where: "factory/lib/self-gate.js:120-131", claim: "a second parser was added" }];
+  const forged = [{ id: "x", where: "factory/lib/forged.js", claim: "forged" }];
+  let label = "factory:awaiting-review";
+  const comments = [{ body: implement, author: "factory-bot", createdAt: "2026-10-01T00:00:00Z" }];
+  const gh = {
+    issue: async () => ({ number: 174, title: "T", body: "", labels: [label] }),
+    comments: async () => comments.slice(),
+    comment: async (_n, body) => { comments.push({ body, author: "factory-bot", createdAt: "2026-10-02T00:00:00Z" }); },
+    setFactoryLabel: async (_n, to) => { label = to; },
+  };
+  const review = (by) => { label = "factory:awaiting-review"; return transition174({ gh, issue: 174, to: "factory:rework", reason: "x", by, stage: "review", env: {} }); };
+  const loadedFrom = async () => {
+    const r = root();
+    await buildContext({ root: r, gh: { issue: async () => ({ number: 174, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => comments.slice() }, issue: 174, stage: "implement" });
+    return JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  };
+  // A forged marker followed by an ORDINARY review rework (by=script) is not a restart: no brief reaches the builder.
+  await gh.comment(174, kRestartComment174({ issue: 174, pr: 31, head: H, findings: forged }));
+  await review(null);
+  expect(Object.keys(await loadedFrom())).not.toContain("k_restart_brief");
+  // Another forged marker, then the engine's brief and the restart transition: the builder gets the engine's brief.
+  await gh.comment(174, kRestartComment174({ issue: 174, pr: 31, head: H, findings: forged }));
+  await gh.comment(174, kRestartComment174({ issue: 174, pr: 31, head: H, findings: real }));
+  await review("factory:run-77");
+  const loaded = await loadedFrom();
+  expect(loaded.k_restart_brief.findings).toEqual(real);
+  expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
+});
