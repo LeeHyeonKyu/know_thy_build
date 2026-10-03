@@ -9,19 +9,21 @@ import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
 import { selfMergeLine, runMergeStage } from "../lib/merge-stage.js";
 import { breakerThresholds, parseSelfChange } from "../lib/config.js";
 import {
-  evaluateBreaker, buildHistory, parseRevertLog, revertedPr, parseSelfMergeLines,
+  evaluateBreaker, buildHistory, parseRevertCommits, REVERT_LOG_FORMAT, revertedPr, parseSelfMergeLines,
   readBreaker, readBreakerState, writeBreakerState, renderBreakerState,
   BREAKER_STATE_DIR, BREAKER_STATE_FILE, BREAKER_STATE_MARKER, BREAKER_RESET_COMMAND,
 } from "../lib/breaker.js";
 import { breakerCommand } from "../cli/breaker.js";
-import { makeRecordsUploadGuard } from "../lib/breaker.js";
-import { syncRunRecords } from "../bin/run-stage.js";
+import { makeRecordsUploadGuard, makeMergeAbortVouch } from "../lib/breaker.js";
+import { syncRunRecords, stageBranch } from "../bin/run-stage.js";
+import { retroRecordsSync } from "../bin/retro.js";
 
 /**
  * #189 (S4c, ADR-033) — 자동 머지 회로차단기.
  *
  * 픽스처는 **실제 생산자**로 만든다: 자동 머지의 기록은 merge 스테이지가 run 기록에 남기는 줄(`selfMergeLine` →
- * `appendRunRecord`)이고, revert는 진짜 git이 만든 `git log --format=%cI%x09%s` 출력이다(`git revert`의 `Revert "…"`와
+ * `appendRunRecord`)이고, revert는 진짜 git이 만든 `git log --format=${REVERT_LOG_FORMAT}` 출력을 **프로덕션 파서**
+ * (`parseRevertCommits` — `readBreaker`가 부르는 그것)로 읽은 것이다(`git revert`의 `Revert "…"`와
  * GitHub이 revert PR을 squash 머지한 `Revert "… (#N)" (#M)` 두 모양). 손으로 쓴 history 배열은 쓰지 않는다.
  */
 
@@ -83,8 +85,12 @@ async function realLog(steps, cwd = null) {
       shas[subject] = (await git(dir, ["rev-parse", "HEAD"])).stdout.trim();
     }
   }
-  return (await git(dir, ["log", "--format=%cI%x09%s"])).stdout;
+  return (await git(dir, ["log", `--format=${REVERT_LOG_FORMAT}`])).stdout;
 }
+/** 프로덕션 읽기(`readBreaker`)와 같은 파서로 revert를 뽑는다 — 테스트 전용 파서는 없다(self-critique f1). */
+const revertsOf = (log) => parseRevertCommits(log).reverts;
+/** git log 레코드 중 정규식에 맞는 것만(제목 기준) — "리셋 직후의 같은 history" 같은 부분 history용. */
+const pickRecords = (log, re) => String(log).split("\x1e").filter((r) => r.trim() && re.test(r.split("\x1f")[0])).map((r) => `\x1e${r}`).join("");
 
 const T2 = breakerThresholds(parseSelfChange(undefined));          // CHARTER에 키가 없을 때의 실제 값
 const iso = (s) => new Date(s).toISOString();
@@ -106,8 +112,11 @@ test("test_189_breaker_opens_on_two_consecutive_reverts_of_judge_automerges", as
   expect(revertedPr('Revert "feat b (#12)" (#20)')).toBe(12);
   expect(revertedPr("feat b (#12)")).toBeNull();
   expect(revertedPr('Revert "no pr number here"')).toBeNull();
-  const reverts = parseRevertLog(log);
+  const reverts = revertsOf(log);
   expect(reverts.map((r) => r.pr).sort()).toEqual([11, 12]);
+  // 본문이 없는 squash 모양(`Revert "feat b (#12)" (#20)`)은 제목 말고는 단서가 없다 — 제목 귀속이 꺼지면 여기서 사라진다.
+  expect(parseRevertCommits(pickRecords(log, /Revert "feat b/)).reverts).toEqual([expect.objectContaining({ pr: 12, at: iso("2026-10-01T06:00:00Z") })]);
+  expect(parseRevertCommits(pickRecords(log, /Revert "feat b/)).unattributed).toEqual([]);
 
   const records = new Map([
     ["101", mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" })],
@@ -158,7 +167,7 @@ test("test_189_breaker_opens_on_two_consecutive_reverts_of_judge_automerges", as
     { raw: 'Revert "feat c (#13)" (#21)', at: "2026-10-01T07:00:00Z" },
   ]);
   const three = new Map([...records, ["103", mergeRecordText({ issue: 103, pr: 13, kind: "judge", at: "2026-10-01T03:00:00.000Z" })]]);
-  const r3 = evaluateBreaker({ history: buildHistory({ records: three, reverts: parseRevertLog(log3) }), thresholds: T3 });
+  const r3 = evaluateBreaker({ history: buildHistory({ records: three, reverts: revertsOf(log3) }), thresholds: T3 });
   expect(r3.open).toBe(true);
   expect(r3.since).toBe(iso("2026-10-01T07:00:00Z"));
 
@@ -182,9 +191,9 @@ test("test_189_reset_scopes_evaluation_to_events_after_closed_at", async () => {
     { raw: 'Revert "feat c (#13)" (#30)', at: "2026-10-02T05:00:00Z" },
     { revert: "feat d (#14)", at: "2026-10-02T06:00:00Z" },
   ]);
-  const lines = log.trim().split("\n");
   // 리셋 직후: 브레이커를 연 두 revert만 있는 같은 history.
-  const beforeReset = parseRevertLog(lines.filter((l) => /#11|#12/.test(l)).join("\n"));
+  const beforeReset = revertsOf(pickRecords(log, /#11|#12/));
+  expect(beforeReset.map((r) => r.pr).sort()).toEqual([11, 12]);
   const ab = new Map([
     ["101", mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" })],
     ["102", mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" })],
@@ -193,13 +202,14 @@ test("test_189_reset_scopes_evaluation_to_events_after_closed_at", async () => {
   expect(evaluateBreaker({ history: buildHistory({ records: ab, reverts: beforeReset }), thresholds: T2, closedAt: T }).open).toBe(false);
 
   // T 뒤의 판정 자동 머지 revert 하나는 혼자서 다시 열지 못한다 — 연속은 T에서 다시 시작한다.
-  const oneAfter = parseRevertLog(lines.filter((l) => /#11|#12|#13/.test(l)).join("\n"));
+  const oneAfter = revertsOf(pickRecords(log, /#11|#12|#13/));
+  expect(oneAfter.map((r) => r.pr).sort()).toEqual([11, 12, 13]);
   const abc = new Map([...ab, ["103", mergeRecordText({ issue: 103, pr: 13, kind: "judge", at: "2026-10-02T01:00:00.000Z" })]]);
   expect(evaluateBreaker({ history: buildHistory({ records: abc, reverts: oneAfter }), thresholds: T2, closedAt: T }).open).toBe(false);
 
   // 두 번째가 다시 연다 — 사유는 T 뒤의 두 PR을 말한다.
   const abcd = new Map([...abc, ["104", mergeRecordText({ issue: 104, pr: 14, kind: "judge", at: "2026-10-02T02:00:00.000Z" })]]);
-  const reopened = evaluateBreaker({ history: buildHistory({ records: abcd, reverts: parseRevertLog(log) }), thresholds: T2, closedAt: T });
+  const reopened = evaluateBreaker({ history: buildHistory({ records: abcd, reverts: revertsOf(log) }), thresholds: T2, closedAt: T });
   expect(reopened.open).toBe(true);
   expect(reopened.reason).toMatch(/#13\b/);
   expect(reopened.reason).toMatch(/#14\b/);
@@ -578,7 +588,7 @@ test("test_189_forged_self_merge_lines_never_weaken_the_breaker", async () => {
     ["101", mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" })],
     ["102", mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" })],
   ]);
-  const revs = parseRevertLog(await realLog([
+  const revs = revertsOf(await realLog([
     { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" }, { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
     { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" }, { revert: "feat b (#12)", at: "2026-10-01T06:00:00Z" },
   ]));
@@ -608,13 +618,17 @@ test("test_189_forged_self_merge_lines_never_weaken_the_breaker", async () => {
   expect(parseSelfMergeLines(await onBranch(101))).toEqual([expect.objectContaining({ pr: 11, kind: "judge" })]);
   expect(await read(fresh.cwd)).toEqual(expect.objectContaining({ ok: true, open: true }));
 
-  // abort 정리 스텝(trust를 모르는 다른 프로세스): merge 스테이지에서만 로컬 줄을 믿고, 상태 파일은 어느 스테이지든 지운다.
+  // abort 정리 스텝(trust를 모르는 다른 프로세스): 상태 파일은 어느 스테이지든 지우고, 로컬 자동 머지 줄은 **어느 스테이지에서도**
+  // 그냥 믿지 않는다 — merge의 워크트리는 PR head 체크아웃(에이전트가 쓴 내용)이다. merge의 abort는 GitHub이 보증하는 줄만 남긴다.
   writeFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), `# Run record — issue #105\n${gap13}`);
   mkdirSync(join(fresh.cwd, BREAKER_STATE_DIR), { recursive: true });
   writeFileSync(localState(fresh.cwd), "x");
-  const asMerge = await makeRecordsUploadGuard({ run, cwd: fresh.cwd }).scrub({ trustLocal: true });
-  expect(asMerge).toEqual({ removed: [`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`], dropped: [] });
-  expect(readFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), "utf8")).toContain('"pr":13');
+  const prView = vi.fn(async (pr) => ({ number: pr, state: "MERGED", headRefName: stageBranch(103), headRefOid: "1".repeat(40) }));
+  const asMerge = await makeRecordsUploadGuard({ run, cwd: fresh.cwd }).scrub({ vouch: makeMergeAbortVouch({ issue: 105, headBranch: stageBranch(105), prView }) });
+  expect(asMerge.removed).toEqual([`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`]);
+  expect(asMerge.dropped.map((x) => x.file)).toEqual(["docs/factory/runs/105.md"]);
+  expect(readFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), "utf8")).not.toContain("factory-self-merge:");
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), `# Run record — issue #105\n${gap13}`);
   const asImplement = await makeRecordsUploadGuard({ run, cwd: fresh.cwd }).scrub();
   expect(asImplement.dropped.map((x) => x.file)).toEqual(["docs/factory/runs/105.md"]);
   expect(readFileSync(join(fresh.cwd, "docs/factory/runs/105.md"), "utf8")).not.toContain("factory-self-merge:");
@@ -623,6 +637,103 @@ test("test_189_forged_self_merge_lines_never_weaken_the_breaker", async () => {
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/runRecord: \(lines\) => \{ recordsGuard\.trust\(lines\);/);
   expect(src).toMatch(/syncRecords: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} \$\{stage\} \(\$\{runnerId\}\)`, guard: recordsGuard \}\)/);
-  expect(src).toMatch(/syncRecords: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} \$\{stage\} aborted \(\$\{runnerId\}\)`, guard: makeRecordsUploadGuard\(\{ run, cwd: root \}\), trustLocal: stage === "merge" \}\)/);
+  expect(src).toMatch(/syncRecords: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} \$\{stage\} aborted \(\$\{runnerId\}\)`, guard: makeRecordsUploadGuard\(\{ run, cwd: root \}\), vouch: stage === "merge" \? makeMergeAbortVouch\(\{ issue, headBranch: stageBranch\(issue\), prView: \(pr\) => gh\.prView\(pr\) \}\) : null \}\)/);
   expect(src).not.toMatch(/syncRecords: \(\) => syncRecords\(/);
+  expect(src).not.toMatch(/trustLocal/);
+}, 240000);
+
+// ── self-critique f3 — merge abort의 로컬 줄은 GitHub이 보증할 때만 믿는다(PR head 체크아웃은 에이전트가 쓴 내용이다) ────────
+
+test("test_189_merge_abort_sync_keeps_only_self_merge_lines_github_vouches_for", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const fresh = await openedRepo();
+  const HEAD55 = "5".repeat(40);
+  // merge 프로세스가 머지 직후 쓰고(실제 생산자 selfMergeLine + appendRunRecord) 동기화 전에 죽었다 — abort가 이 줄을 살려야 한다.
+  const real = selfMergeLine({ issue: 105, pr: 55, kind: "judge", sha: HEAD55, at: "2026-10-03T00:00:00.000Z" });
+  // PR head가 실어 온(gitignore를 뚫고 force-add한) 위조 줄들 — 각각 보증의 한 조건만 어긴다.
+  const otherPr = selfMergeLine({ issue: 105, pr: 13, kind: "judge", sha: "1".repeat(40), at: "2026-10-01T01:30:00.000Z" });   // 다른 이슈 브랜치의 PR
+  const wrongSha = selfMergeLine({ issue: 105, pr: 55, kind: "non_judge", sha: "6".repeat(40), at: "2026-10-01T01:30:00.000Z" }); // head가 아니다
+  const otherIssue = selfMergeLine({ issue: 104, pr: 55, kind: "judge", sha: HEAD55, at: "2026-10-01T01:30:00.000Z" });           // 이 이슈가 아니다
+  const rec105 = readFileSync(appendRunRecord({ root: fresh.cwd, issue: 105, title: "x", stage: "merge", runnerId: "gha-1", now: "2026-10-03T00:00:00.000Z", lines: ["merge: merged 5555555 via PR #55", real, otherPr, wrongSha, otherIssue] }), "utf8");
+  expect(rec105).toContain(real);
+  // 남의 기록 파일에 실린 같은 줄(issue·pr·sha가 다 맞아도) — 이 abort의 기록이 아니다.
+  writeFileSync(join(fresh.cwd, "docs/factory/runs/106.md"), `# Run record — issue #106\n\n## merge · 2026-10-03T00:00:00Z · gha-1\n${real}\n`);
+  const facts = new Map([
+    [55, { number: 55, state: "MERGED", headRefName: stageBranch(105), headRefOid: HEAD55 }],
+    [13, { number: 13, state: "MERGED", headRefName: stageBranch(103), headRefOid: "1".repeat(40) }],
+  ]);
+  const prView = vi.fn(async (pr) => { if (!facts.has(pr)) throw new Error(`no PR ${pr}`); return facts.get(pr); });
+  const vouch = makeMergeAbortVouch({ issue: 105, headBranch: stageBranch(105), prView });
+  const s = await syncRunRecords({ run, root: fresh.cwd, message: "run-record: issue #105 merge aborted (gha-1)", guard: makeRecordsUploadGuard({ run, cwd: fresh.cwd }), vouch });
+  expect(s.ok, s.reason).toBe(true);
+  const onBranch = async (n) => (await run("git", ["show", `factory/records:docs/factory/runs/${n}.md`], { cwd: fresh.remote })).stdout;
+  expect(parseSelfMergeLines(await onBranch(105))).toEqual([expect.objectContaining({ issue: 105, pr: 55, kind: "judge", sha: HEAD55 })]);
+  expect(await onBranch(105)).toContain("merge: merged 5555555 via PR #55");
+  expect(await onBranch(106)).not.toContain("factory-self-merge:");
+
+  // GitHub이 "머지되지 않았다"고 하거나 읽히지 않으면 그 줄은 보증되지 않는다(던지지 않고 빠진다).
+  for (const fact of [{ ...facts.get(55), state: "OPEN" }, { ...facts.get(55), headRefName: "feature/x" }, null]) {
+    const r = await openedRepo();
+    writeFileSync(join(r.cwd, "docs/factory/runs/105.md"), `# Run record — issue #105\n\n## merge · 2026-10-03T00:00:00Z · gha-1\n${real}\n`);
+    const v = makeMergeAbortVouch({ issue: 105, headBranch: stageBranch(105), prView: async () => { if (!fact) throw new Error("gh: HTTP 502"); return fact; } });
+    const g = await makeRecordsUploadGuard({ run, cwd: r.cwd }).scrub({ vouch: v });
+    expect(g.dropped.map((x) => x.line), JSON.stringify(fact)).toEqual([real]);
+  }
+  // 보증 함수 자신이 던져도 보증이 아니다 — 줄은 빠지고 가드는 끝까지 돈다.
+  const thrower = await openedRepo();
+  writeFileSync(join(thrower.cwd, "docs/factory/runs/105.md"), `# Run record — issue #105\n\n## merge · 2026-10-03T00:00:00Z · gha-1\n${real}\n`);
+  const tg = await makeRecordsUploadGuard({ run, cwd: thrower.cwd }).scrub({ vouch: async () => { throw new Error("boom"); } });
+  expect(tg.dropped.map((x) => x.line)).toEqual([real]);
+
+  // 끝에서 끝까지: abort가 살린 진짜 판정 머지 #55(revert 없음, main에 있음)는 #11·#12의 연속을 끊지 않는다(#12 뒤의 머지다) — 열림 그대로.
+  expect(await readBreaker({ run, cwd: fresh.cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS })).toEqual(expect.objectContaining({ ok: true, open: true }));
+}, 240000);
+
+// ── self-critique f2 — 기본 dir 동기화는 전부 가드를 탄다(retro 포함: retro도 같은 워크트리에서 `claude -p`를 부른다) ───────────
+
+test("test_189_retro_records_sync_never_uploads_planted_breaker_evidence", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { remote, cwd } = await openedRepo();
+  const nonJudge11 = forgedSection({ issue: 101, pr: 11, kind: "non_judge", sha: "0".repeat(40), at: "2020-01-01T00:00:00.000Z" });
+  const gap13 = forgedSection({ issue: 103, pr: 13, kind: "judge", sha: "1".repeat(40), at: "2026-10-01T01:30:00.000Z" });
+  // retro 세션(에이전트)이 워크트리에 남긴 것들: 심은 상태 파일, 남의 기록에 덧붙인 위조 줄, 새 기록 파일의 위조 줄.
+  const branch101 = (await run("git", ["show", "factory/records:docs/factory/runs/101.md"], { cwd: remote })).stdout;
+  writeFileSync(join(cwd, "docs/factory/runs/101.md"), branch101 + nonJudge11);
+  writeFileSync(join(cwd, "docs/factory/runs/103.md"), `# Run record — issue #103\n${gap13}`);
+  mkdirSync(join(cwd, BREAKER_STATE_DIR), { recursive: true });
+  writeFileSync(localState(cwd), renderBreakerState({ version: 1, open: false, since: null, reason: "x", closed_by: "person:owner", closed_at: "2026-10-02T00:00:00.000Z" }));
+  // retro 자신의 상태 파일(이 동기화의 본래 목적)은 그대로 올라간다.
+  writeFileSync(join(cwd, "docs/factory/runs/_retro.md"), "# Retro state\n\nn: 1\n");
+  // #13이 main에 정말 머지된 PR이다 — 가드가 없으면 위조 gap13 줄이 연속을 끊는다(dw1 forged 테스트의 대조군과 같은 자리).
+  await realLog([{ subject: "feat c (#13)", at: "2026-10-01T01:30:00Z" }], cwd);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+
+  const r = await retroRecordsSync({ run, root: cwd, runnerId: "gha-r", expectBlob: { "_retro.md": null } });
+  expect(r.ok, r.reason).toBe(true);
+  const onBranch = async (n) => run("git", ["show", `factory/records:docs/factory/runs/${n}`], { cwd: remote });
+  expect((await onBranch("_retro.md")).stdout).toContain("n: 1");
+  expect((await stateOnBranch(remote)).code).not.toBe(0);
+  expect((await onBranch("101.md")).stdout.startsWith(branch101)).toBe(true);
+  expect(parseSelfMergeLines((await onBranch("101.md")).stdout)).toEqual([expect.objectContaining({ pr: 11, kind: "judge" })]);
+  expect((await onBranch("103.md")).stdout).not.toContain("factory-self-merge:");
+  expect(existsSync(localState(cwd))).toBe(false);
+  expect(await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS })).toEqual(expect.objectContaining({ ok: true, open: true }));
+
+  // 엔진의 모든 기본 dir `syncRecords` 호출은 가드를 거친다 — 남은 직접 호출은 가드 자신(syncRunRecords)과 상태 파일 전용(dir 지정)뿐.
+  const { readdirSync } = await import("node:fs");
+  const calls = [];
+  for (const sub of ["bin", "lib", "cli"]) {
+    const base = new URL(`../${sub}/`, import.meta.url);
+    for (const e of readdirSync(base, { recursive: true, withFileTypes: true })) {
+      if (!e.isFile() || !e.name.endsWith(".js")) continue;
+      const rel = join(e.parentPath ?? e.path, e.name);
+      for (const line of readFileSync(rel, "utf8").split("\n")) {
+        if (/\bsyncRecords\(\{/.test(line) && !/^\s*export async function syncRecords/.test(line)) calls.push(`${rel.split("/factory/").at(-1)}: ${line.trim()}`);
+      }
+    }
+  }
+  expect(calls).toEqual([
+    expect.stringMatching(/^bin\/run-stage\.js: return syncRecords\(\{ run, cwd: root, message, overwrite, expectBlob \}\);$/),
+    expect.stringMatching(/^lib\/breaker\.js: return await syncRecords\(\{ run, cwd, branch, dir: BREAKER_STATE_DIR, /),
+  ]);
 }, 240000);

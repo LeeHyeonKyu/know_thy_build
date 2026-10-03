@@ -74,24 +74,6 @@ export function revertedPr(subject) {
 }
 
 /**
- * `git log --format=%cI%x09%s` 출력 → revert 커밋 `[{ at, pr, subject }]`. 날짜를 읽을 수 없는 줄은 **던진다**: 그 줄이 리셋 앞인지
- * 뒤인지 모르면 조용히 버릴 수도(차단기가 열리지 않는다) 셀 수도 없다 — 호출자가 ok:false로 접는다.
- */
-export function parseRevertLog(stdout) {
-  const out = [];
-  for (const line of String(stdout ?? "").split("\n")) {
-    if (!line.trim()) continue;
-    const tab = line.indexOf("\t");
-    const when = tab > 0 ? line.slice(0, tab).trim() : "";
-    if (!isIso(when)) throw new Error(`git log line without a commit date: ${JSON.stringify(line.slice(0, 120))}`);
-    const subject = line.slice(tab + 1);
-    const pr = revertedPr(subject);
-    if (pr !== null) out.push({ at: new Date(when).toISOString(), pr, subject });
-  }
-  return out;
-}
-
-/**
  * rework r2 cf1 — **GitHub의 Revert 버튼 흐름은 제목만으로 PR을 말하지 않는다.** revert PR의 squash 커밋이 PR 제목을 쓰면(저장소의
  * `squash_merge_commit_title`이 PR_TITLE이거나, COMMIT_OR_PR_TITLE에서 revert PR의 커밋이 둘 이상) main에 남는 것은
  * `Revert "<원래 PR 제목>" (#M)` — 안쪽 (#N)이 없다(vercel/next.js #98715의 실제 모양). 그래서 차단기의 읽기는 제목 말고도 본문과
@@ -109,7 +91,7 @@ const trailingPrRef = (s) => { const m = /\(#(\d+)\)\s*$/.exec(String(s ?? ""));
 /**
  * `git log --format=${REVERT_LOG_FORMAT}` 출력 → `{ reverts: [{ at, pr, subject, via }], unattributed: [subject], mainPrs: Set<pr> }`.
  * `mainPrs`는 main의 squash 커밋 제목 끝 `(#N)`이 말하는 머지된 PR들이다(자동 머지 줄의 확인에 쓴다 — `buildHistory`). 날짜를 읽을
- * 수 없는 레코드는 `parseRevertLog`처럼 던진다.
+ * 수 없는 레코드는 **던진다**: 그 커밋이 리셋 앞인지 뒤인지 모르면 조용히 버릴 수도 셀 수도 없다 — 호출자가 ok:false로 접는다.
  */
 export function parseRevertCommits(stdout) {
   const commits = [];
@@ -405,17 +387,18 @@ export function makeBreakerDeps({ run, cwd, defaultBranch = "main", thresholds, 
  *     스테이지 끝에 워크트리에 있는 상태 파일은 정의상 러너가 쓴 것이 아니다.
  *   - 기록 파일(`docs/factory/runs/*.md`, 자기 것이든 남의 것이든)의 자동 머지 줄은 **이 프로세스가 쓴 줄**(`trust` — merge 스테이지의
  *     `record()`가 지나가는 문)이거나 **이미 브랜치의 그 파일에 있는 줄**(하이드레이트된 접두어)만 남긴다. 나머지는 지운다.
- * `trustLocal`은 abort 정리 스텝(다른 프로세스라 `trust`를 모른다)이 merge 스테이지에서만 켠다 — merge는 에이전트를 부르지 않는다.
+ * `vouch`(선택)는 abort 정리 스텝(다른 프로세스라 `trust`를 모른다)이 merge 스테이지에서만 준다 — 로컬 줄을 통째로 믿지 않고,
+ * GitHub이 보증하는 줄만 남긴다(`makeMergeAbortVouch`). merge의 워크트리도 PR head 체크아웃이라 에이전트가 쓴 내용이다.
  * → `{ removed: [path], dropped: [{ file, line }] }`. 브랜치를 읽지 못하면 브랜치에서 온 줄도 확인할 수 없으므로 믿지 않는다(닫히는 쪽이
  * 아니라 막히는 쪽으로 틀린다).
  */
-export async function scrubPlantedBreakerEvidence({ run, cwd, branch = "factory/records", trusted = new Set(), trustLocal = false }) {
+export async function scrubPlantedBreakerEvidence({ run, cwd, branch = "factory/records", trusted = new Set(), vouch = null }) {
   const runsDir = join(cwd, "docs/factory/runs");
   const removed = [];
   const dropped = [];
   const statePath = join(cwd, BREAKER_STATE_DIR, BREAKER_STATE_FILE);
   if (existsSync(statePath)) { rmSync(statePath, { force: true }); removed.push(`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`); }
-  if (trustLocal || !existsSync(runsDir)) return { removed, dropped };
+  if (!existsSync(runsDir)) return { removed, dropped };
   let fetched = null;
   const branchText = async (name) => {
     if (fetched === null) {
@@ -434,24 +417,54 @@ export async function scrubPlantedBreakerEvidence({ run, cwd, branch = "factory/
     const suspect = lines.filter((l) => isSelfMerge(l) && !trusted.has(l.replace(/\r$/, "")));
     if (!suspect.length) continue;
     const known = new Set((await branchText(e.name)).split("\n").map((l) => l.replace(/\r$/, "")).filter(isSelfMerge));
-    const keep = lines.filter((l) => {
+    const keep = [];
+    for (const l of lines) {
       const bare = l.replace(/\r$/, "");
-      if (!isSelfMerge(l) || trusted.has(bare) || known.has(bare)) return true;
+      if (!isSelfMerge(l) || trusted.has(bare) || known.has(bare)) { keep.push(l); continue; }
+      let ok = false;
+      if (typeof vouch === "function") { try { ok = (await vouch({ file: e.name, line: bare })) === true; } catch { ok = false; } }
+      if (ok) { keep.push(l); continue; }
       dropped.push({ file: `docs/factory/runs/${e.name}`, line: bare });
-      return false;
-    });
+    }
     if (keep.length !== lines.length) writeFileSync(file, keep.join("\n"));
   }
   return { removed, dropped };
 }
 const GUARD_REF = "refs/factory/breaker-guard";
 
+/**
+ * self-critique f3 — **merge 스테이지의 abort 정리**가 로컬 자동 머지 줄을 믿는 유일한 조건. merge 프로세스가 머지한 뒤 동기화 전에
+ * 죽으면 그 줄은 워크트리에만 있고, abort 스텝(다른 프로세스)은 `trust`를 모른다. 그러나 merge의 워크트리는 **PR head 체크아웃**이다 —
+ * PR이 gitignore를 뚫고 `docs/factory/runs/` 아래 파일을 실어 오면 그 줄도 거기 있다. 그래서 "merge는 에이전트를 부르지 않는다"는 근거가
+ * 되지 못하고, 줄 하나하나를 GitHub의 사실로 보증한다(넷 다 맞아야 한다):
+ *   1. 줄이 이 이슈 자신의 기록 파일(`<issue>.md`)에 있고, 줄의 `issue`가 이 이슈다.
+ *   2. GitHub에서 그 PR이 MERGED다.
+ *   3. 그 PR의 head 브랜치가 이 이슈의 스테이지 브랜치(`claude/fq-<issue>`)다 — 남의 PR을 이 이슈의 머지로 둔갑시킬 수 없다.
+ *   4. 그 PR의 head sha가 줄의 `sha`다(merge 스테이지는 `--match-head-commit`에 박은 head를 적는다). PR head의 파일은 자기를 담은
+ *      커밋의 sha를 미리 적을 수 없다.
+ * GitHub을 읽지 못하면 보증하지 않는다(그 줄은 빠진다 — 지어낸 줄을 올리는 쪽이 아니라 진짜 줄 하나를 잃는 쪽으로 틀린다).
+ * `prView(pr)` → `{ state, headRefName, headRefOid }`(gh.prView 모양).
+ */
+export function makeMergeAbortVouch({ issue, headBranch, prView }) {
+  const n = Number(issue);
+  const cache = new Map();
+  return async ({ file, line }) => {
+    if (!posInt(n) || typeof headBranch !== "string" || !headBranch || typeof prView !== "function") return false;
+    if (file !== `${n}.md`) return false;
+    const [p] = parseSelfMergeLines(`## merge\n${line}`);
+    if (!p || p.issue !== n || !p.sha) return false;
+    if (!cache.has(p.pr)) cache.set(p.pr, Promise.resolve().then(() => prView(p.pr)).catch(() => null));
+    const v = await cache.get(p.pr);
+    return !!v && v.state === "MERGED" && v.headRefName === headBranch && typeof v.headRefOid === "string" && v.headRefOid === p.sha;
+  };
+}
+
 /** 한 스테이지 프로세스의 가드: `trust(lines)`는 이 프로세스가 run 기록에 쓴 줄을 받아 두고, `scrub()`이 그것을 믿는다. */
 export function makeRecordsUploadGuard({ run, cwd, branch = "factory/records" }) {
   const trusted = new Set();
   return {
     trust(lines) { for (const l of Array.isArray(lines) ? lines : [lines]) { const s = String(l ?? ""); if (s.startsWith(SELF_MERGE_PREFIX)) trusted.add(s); } },
-    scrub: ({ trustLocal = false } = {}) => scrubPlantedBreakerEvidence({ run, cwd, branch, trusted, trustLocal }),
+    scrub: ({ vouch = null } = {}) => scrubPlantedBreakerEvidence({ run, cwd, branch, trusted, vouch }),
   };
 }
 

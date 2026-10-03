@@ -3179,7 +3179,7 @@ import { makeMergeBreakerDep as makeMergeBreakerDep189 } from "../bin/run-stage.
 
 // ── #189 dw1 — 사람 머지·일반 자동 머지의 run 기록은 연속에 들지 않는다(실제 생산자 = runMergeStage 자신이 쓴 기록 줄) ──────────
 import { appendRunRecord as appendRunRecord189b } from "../lib/run-record.js";
-import { buildHistory as buildHistory189b, evaluateBreaker as evaluateBreaker189b, parseRevertLog as parseRevertLog189b } from "../lib/breaker.js";
+import { buildHistory as buildHistory189b, evaluateBreaker as evaluateBreaker189b, parseRevertCommits as parseRevertCommits189b, REVERT_LOG_FORMAT as REVERT_LOG_FORMAT189b } from "../lib/breaker.js";
 import { mkdtempSync as mkdtempSync189b, writeFileSync as writeFileSync189b } from "node:fs";
 import { tmpdir as tmpdir189b } from "node:os";
 import { join as join189b } from "node:path";
@@ -3239,19 +3239,23 @@ test("test_189_human_and_plain_merge_records_never_count_toward_the_streak", asy
   writeFileSync189b(join189b(dir, "r13.txt"), "r");
   await g(dir, ["add", "."]);
   await g(dir, ["commit", "-q", "-m", 'Revert "feat c (#13)" (#40)'], { GIT_AUTHOR_DATE: "2026-10-03T14:20:00Z", GIT_COMMITTER_DATE: "2026-10-03T14:20:00Z" });
-  const reverts = parseRevertLog189b((await g(dir, ["log", "--format=%cI%x09%s"])).stdout);
+  // 프로덕션 읽기(readBreaker)와 같은 git log 모양·같은 파서 — main의 머지 확인(mainPrs)까지 그대로 넘긴다.
+  const parsed = parseRevertCommits189b((await g(dir, ["log", `--format=${REVERT_LOG_FORMAT189b}`])).stdout);
+  const reverts = parsed.reverts;
   expect(reverts.map((r) => r.pr).sort()).toEqual([11, 12, 13]);
+  expect(parsed.unattributed).toEqual([]);
+  const mainPrs = parsed.mainPrs;
 
   const T = { revert_streak: 2 };
   const records = new Map([["101", j11.text], ["102", h12.text], ["103", p13.text]]);
-  const ev = evaluateBreaker189b({ history: buildHistory189b({ records, reverts }), thresholds: T });
+  const ev = evaluateBreaker189b({ history: buildHistory189b({ records, reverts, mainPrs }), thresholds: T });
   expect(ev.open).toBe(false);
   expect(ev.counts).toEqual(expect.objectContaining({ merges: 1, judge: 1, reverts: 3 }));
 
   // 대조군: #12가 사람이 아니라 판정 경로로 자동 머지됐다면(같은 생산자) 같은 revert 두 건이 차단기를 연다 — 위의 닫힘은 픽스처의 우연이 아니다.
   const j12 = await stageRecord({ issue: 102, pr: 12, d: judgeD() });
   expect(j12.code).toBe(0);
-  const opened = evaluateBreaker189b({ history: buildHistory189b({ records: new Map([...records, ["102", j12.text]]), reverts }), thresholds: T });
+  const opened = evaluateBreaker189b({ history: buildHistory189b({ records: new Map([...records, ["102", j12.text]]), reverts, mainPrs }), thresholds: T });
   expect(opened.open).toBe(true);
   expect(opened.reason).toMatch(/PR #11, PR #12/);
 }, 120000);

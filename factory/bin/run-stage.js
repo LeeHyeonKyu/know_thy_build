@@ -43,7 +43,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
-import { readBreaker, makeRecordsUploadGuard } from "../lib/breaker.js";
+import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
@@ -2201,14 +2201,15 @@ export function makeMergeBreakerDep({ run, root, getCharter, getDefaultBranch = 
  * #189 rework r2 (sec1·sec2) — 스테이지 끝(과 abort 정리)의 run 기록 동기화. `docs/factory/runs/**`는 에이전트가 쓸 수 있는 스크래치
  * 경로이고 `syncRecords`는 거기 있는 것을 러너의 이름으로 민다 — 그래서 밀기 전에 차단기의 증거(상태 파일·자동 머지 줄)를
  * `guard.scrub()`으로 걸러 낸다(`lib/breaker.js` `scrubPlantedBreakerEvidence`). 가드가 던지면 밀지 않는다(걸러지지 않은 것을 밀지 않는다).
+ * retro의 상태 동기화도 이 문을 쓴다(`overwrite`/`expectBlob`을 그대로 넘긴다) — retro도 같은 워크트리에서 에이전트(`claude -p`)를 부른다.
  */
-export async function syncRunRecords({ run, root, message, guard, trustLocal = false }) {
+export async function syncRunRecords({ run, root, message, guard, vouch = null, overwrite = [], expectBlob = null }) {
   let g;
-  try { g = await guard.scrub({ trustLocal }); }
+  try { g = await guard.scrub({ vouch }); }
   catch (e) { return { ok: false, reason: `records upload guard failed — ${e?.message || e}; nothing was pushed` }; }
   for (const p of g?.removed ?? []) console.error(`factory: records guard — removed ${p} from the worktree before the sync (only the breaker reset/sweep writes it)`);
   for (const x of g?.dropped ?? []) console.error(`factory: records guard — dropped a self-merge line this run did not write from ${x.file}: ${x.line.slice(0, 160)}`);
-  return syncRecords({ run, cwd: root, message });
+  return syncRecords({ run, cwd: root, message, overwrite, expectBlob });
 }
 
 /**
@@ -3114,8 +3115,9 @@ async function main() {
          * `stageSettled`가 그것을 "모른다"로 읽고 크게(aborted) 기록한다.
          */
         readRunRecord: () => { try { return readFileSync(join(root, "docs/factory/runs", `${issue}.md`), "utf8"); } catch { return null; } },
-        // merge는 에이전트를 부르지 않는다 — 그 abort만 로컬의 자동 머지 줄을 믿는다(이 프로세스는 merge 프로세스의 trust를 모른다).
-        syncRecords: () => syncRunRecords({ run, root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})`, guard: makeRecordsUploadGuard({ run, cwd: root }), trustLocal: stage === "merge" }),
+        // 이 프로세스는 merge 프로세스의 trust를 모른다. merge의 워크트리는 PR head 체크아웃(에이전트가 쓴 내용)이라 로컬 줄을 통째로
+        // 믿지 않는다 — merge의 abort만, GitHub이 보증하는 줄(이 이슈 브랜치의 PR이 그 head로 MERGED)을 남긴다(lib/breaker.js).
+        syncRecords: () => syncRunRecords({ run, root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})`, guard: makeRecordsUploadGuard({ run, cwd: root }), vouch: stage === "merge" ? makeMergeAbortVouch({ issue, headBranch: stageBranch(issue), prView: (pr) => gh.prView(pr) }) : null }),
       },
     }));
   }
