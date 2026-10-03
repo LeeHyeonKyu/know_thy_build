@@ -39,10 +39,20 @@ const isIso = (v) => typeof v === "string" && Number.isFinite(Date.parse(v));
 const posInt = (v) => Number.isInteger(v) && v > 0;
 
 /**
- * run 기록 본문에서 자동 머지 줄을 뽑는다. **merge 섹션(`## merge · …`) 안의 줄만** 센다 — 다른 스테이지의 줄(사유 문구에 실린
- * 임의의 텍스트 포함)이 자동 머지를 지어낼 수 없다. 모르는 버전·깨진 JSON·모양이 틀린 줄은 무시한다(되돌린 코드가 남긴 줄은 무해).
+ * #189 skeptic (r5) f1 — **무효 줄.** 자동 머지 줄은 머지 **전에** 브랜치에 오른다(rework r5 cf1). 그 뒤 머지가 일어나지 않으면(`persist`
+ * 실패로 머지를 거부했거나, `mergePr`가 실패했고 GitHub이 PR이 MERGED가 아니라고 답했다) 그 줄은 일어나지 않은 판정 자동 머지를 가리킨다 —
+ * 사람이 나중에 그 PR을 손으로 머지하면 main의 squash 커밋이 그 줄을 "확인"해 사람의 머지가 판정 머지로 세어진다. 그래서 merge 스테이지는
+ * 같은 문(`record` + `persistSelfMerge`)으로 이 줄을 남긴다. 같은 접두어·같은 버전(`kind:"void"`)이라 업로드 가드가 자동 머지 줄과 똑같이
+ * 거른다(이 프로세스가 쓴 줄·이미 브랜치에 있는 줄만) — 에이전트가 심은 무효 줄은 올라가지 못한다. 무효는 **정확히 한 줄**만 지운다:
+ * 같은 issue·pr·sha이고 `voids`가 그 줄의 `at`인 것. blocked 뒤의 재시도가 쓴 새 줄(새 `at`)은 지우지 못한다.
+ * 무효 줄을 잃으면(두 번의 push가 다 실패) 줄이 남는다 — 틀려도 차단기가 일찍 여는 쪽이다(사람이 리셋한다), 판정 머지를 놓치는 쪽이 아니다.
  */
-export function parseSelfMergeLines(text) {
+export function selfMergeVoidLine({ issue, pr, sha = null, at, voids }) {
+  return `${SELF_MERGE_PREFIX}v${SELF_MERGE_VERSION} ${JSON.stringify({ issue: Number(issue), pr: Number(pr), kind: "void", sha: sha ?? null, at, voids })}`;
+}
+
+/** merge 섹션의 자동 머지 줄과 무효 줄을 함께 뽑는다(내부). 무효 줄은 `{ void:true, …, voids }`. */
+function parseSelfMergeEntries(text) {
   const out = [];
   let inMerge = false;
   for (const raw of String(text ?? "").split("\n")) {
@@ -53,11 +63,33 @@ export function parseSelfMergeLines(text) {
     if (!m || Number(m[1]) !== SELF_MERGE_VERSION) continue;
     let j;
     try { j = JSON.parse(m[2]); } catch { continue; }
-    if (!posInt(j?.issue) || !posInt(j?.pr) || (j.kind !== "judge" && j.kind !== "non_judge") || !isIso(j.at)) continue;
-    out.push({ issue: j.issue, pr: j.pr, kind: j.kind, judge: j.kind === "judge", sha: typeof j.sha === "string" ? j.sha : null, at: new Date(j.at).toISOString() });
+    if (!posInt(j?.issue) || !posInt(j?.pr) || !isIso(j.at)) continue;
+    const sha = typeof j.sha === "string" ? j.sha : null;
+    if (j.kind === "void") {
+      if (!isIso(j.voids)) continue;
+      out.push({ void: true, issue: j.issue, pr: j.pr, kind: "void", sha, at: new Date(j.at).toISOString(), voids: new Date(j.voids).toISOString() });
+      continue;
+    }
+    if (j.kind !== "judge" && j.kind !== "non_judge") continue;
+    out.push({ issue: j.issue, pr: j.pr, kind: j.kind, judge: j.kind === "judge", sha, at: new Date(j.at).toISOString() });
   }
   return out;
 }
+
+/**
+ * run 기록 본문에서 자동 머지 줄을 뽑는다. **merge 섹션(`## merge · …`) 안의 줄만** 센다 — 다른 스테이지의 줄(사유 문구에 실린
+ * 임의의 텍스트 포함)이 자동 머지를 지어낼 수 없다. 모르는 버전·깨진 JSON·모양이 틀린 줄은 무시한다(되돌린 코드가 남긴 줄은 무해).
+ * 무효 줄(`selfMergeVoidLine`)은 자동 머지가 아니므로 내놓지 않는다.
+ */
+export function parseSelfMergeLines(text) {
+  return parseSelfMergeEntries(text).filter((e) => !e.void);
+}
+
+/** 무효 줄만(merge 섹션 안). */
+export function parseSelfMergeVoids(text) {
+  return parseSelfMergeEntries(text).filter((e) => e.void);
+}
+const voidKey = (e) => `${e.issue}|${e.pr}|${e.sha ?? ""}|${e.voids ?? e.at}`;
 
 // ── revert 커밋 ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -200,8 +232,11 @@ export async function attributeByDiff({ run, cwd, untrusted, candidates }) {
 export function buildHistory({ records, reverts = [], mainPrs = null }) {
   const map = records instanceof Map ? records : new Map(Object.entries(records || {}));
   const merges = new Map();
+  const voided = new Set();
+  for (const text of map.values()) for (const v of parseSelfMergeVoids(text)) voided.add(voidKey(v));
   for (const text of map.values()) {
     for (const m of parseSelfMergeLines(text)) {
+      if (voided.has(voidKey(m))) continue;                         // 머지가 일어나지 않은 줄(skeptic r5 f1)
       const prev = merges.get(m.pr);
       const better = !prev
         || (m.judge && !prev.judge)
@@ -400,6 +435,12 @@ export async function readBreaker({ run, cwd, defaultBranch = "main", thresholds
   const ref = `refs/remotes/origin/${b}`;
   const f = await run("git", ["fetch", "--quiet", "origin", `+refs/heads/${b}:${ref}`], { cwd });
   if (f?.code !== 0) return fail(`git fetch origin ${b} failed — the reverts on ${b} are unknown: ${String(f?.stderr || "").trim().split("\n")[0]}`);
+  // skeptic r5 f2 — 얕은 클론에서 fetch는 얕은 경계에서 멈추고 log는 오류 없이 오래된 revert·squash 커밋을 빠뜨린다(잘린 history =
+  // "revert 없음" = 닫힘). 그래서 얕지 않다는 것을 확인한 뒤에만 log를 history로 읽는다. 확인하지 못하면 그것도 모르는 것이다.
+  const sh = await run("git", ["rev-parse", "--is-shallow-repository"], { cwd });
+  if (sh?.code !== 0) return fail(`could not tell whether the checkout is a shallow clone — the reverts on ${b} are unknown: ${String(sh?.stderr || "").trim().split("\n")[0]}`);
+  const shallow = String(sh?.stdout ?? "").trim();
+  if (shallow !== "false") return fail(`the checkout is a shallow clone (git rev-parse --is-shallow-repository: ${JSON.stringify(shallow)}) — git log origin/${b} is truncated history, so the reverts on ${b} are unknown (check out with fetch-depth: 0)`);
   const log = await run("git", ["log", `--format=${REVERT_LOG_FORMAT}`, ref], { cwd });
   if (log?.code !== 0) return fail(`git log origin/${b} failed — the reverts on ${b} are unknown: ${String(log?.stderr || "").trim().split("\n")[0]}`);
   let ev, unattributed;
@@ -519,6 +560,36 @@ export function makeMergeAbortVouch({ issue, headBranch, prView }) {
     const v = await cache.get(p.pr);
     return !!v && v.state === "MERGED" && v.headRefName === headBranch && typeof v.headRefOid === "string" && v.headRefOid === p.sha;
   };
+}
+
+/**
+ * rework r5 cf1 — **자동 머지의 증거는 머지 전에 브랜치에 있어야 한다.** 차단기가 판정 자동 머지를 아는 길은 `factory/records`의
+ * 자동 머지 줄 하나뿐이다. 그 줄이 스테이지 끝의 동기화(최선 노력 — 실패는 로그로만 남고, 일회용 러너와 함께 로컬 기록이 사라진다)에만
+ * 실려 가면, 그 동기화를 잃은 머지는 나중에 revert돼도 차단기가 세지 못한다(모르는 머지 = 없던 머지 — fail-open). 그래서 merge
+ * 스테이지는 `mergePr` **전에** 이것을 부르고, ok가 아니면 머지하지 않는다.
+ *   - `sync()`: 그 줄이 이미 적힌 run 기록을 미는 가드된 동기화(run-stage `syncRunRecords` + 이 프로세스의 `recordsGuard`).
+ *   - 그리고 동기화의 말이 아니라 **브랜치를 다시 읽어** 이 이슈의 기록(`<issue>.md`)의 merge 섹션에 그 줄이 있는지 확인한다 —
+ *     차단기(`readBreaker`)가 읽는 것과 같은 읽기·같은 파서다.
+ * 던지지 않는다. → `{ ok:true }` | `{ ok:false, reason }`.
+ */
+export async function persistSelfMergeEvidence({ run, cwd, issue, line, sync, branch = "factory/records" }) {
+  const fail = (reason) => ({ ok: false, reason });
+  const [want] = parseSelfMergeEntries(`## merge\n${String(line ?? "")}`);
+  if (!want) return fail(`not a self-merge line: ${JSON.stringify(String(line ?? "").slice(0, 120))}`);
+  if (want.issue !== Number(issue)) return fail(`the self-merge line names issue #${want.issue}, not #${issue}`);
+  if (typeof sync !== "function" || typeof run !== "function" || !cwd) return fail("the self-merge evidence writer is not wired (sync/run/cwd missing)");
+  let s;
+  try { s = await sync(); } catch (e) { return fail(`the ${branch} sync threw — ${e?.message || e}`); }
+  if (!s?.ok) return fail(`the ${branch} sync failed — ${s?.reason || "no answer"}`);
+  let det;
+  try { det = await readRecordsDetailed({ run, cwd, branch }); } catch (e) { return fail(`${branch} could not be read back — ${e?.message || e}`); }
+  if (!det?.fetched) return fail(`${branch} could not be read back after the sync — the self-merge evidence is unconfirmed`);
+  const text = det.records.get(String(issue));
+  const same = (m) => m.issue === want.issue && m.pr === want.pr && m.kind === want.kind && m.sha === want.sha && m.at === want.at && m.voids === want.voids;
+  if (text === undefined || !parseSelfMergeEntries(text).some(same)) {
+    return fail(`${branch} does not carry the self-merge line for PR #${want.pr} in docs/factory/runs/${issue}.md after the sync`);
+  }
+  return { ok: true };
 }
 
 /** 한 스테이지 프로세스의 가드: `trust(lines)`는 이 프로세스가 run 기록에 쓴 줄을 받아 두고, `scrub()`이 그것을 믿는다. */
