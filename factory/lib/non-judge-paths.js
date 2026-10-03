@@ -42,7 +42,8 @@ export const ANY_REPO_NON_JUDGE_GLOBS = Object.freeze(["docs/**", "templates/fac
 /**
  * 위 글롭 안에서도 판정 경로인 것. CHARTER는 규칙이고, runs는 러너가 쓰는 증거이며(`[protected].runner_only`), 템플릿
  * CHARTER는 모든 채택자의 규칙이 찍혀 나오는 원본이다(#178 d1). 세션 지시문(`CLAUDE*.md`·`AGENTS*.md`·`.mcp*.json`)은
- * 어디에 있든 에이전트 세션의 주입 채널이다(`[protected].factory`와 같은 글롭).
+ * 어디에 있든 에이전트 세션의 주입 채널이다 — 원본은 `factory/bin/run-stage.js`의 `SESSION_CONFIG_GLOBS`이고(이 lib는 그 bin을
+ * import할 수 없다), `test_178_non_judge_excludes_pin_session_config_globs`가 원본의 모든 항목이 여기 있는지 지킨다.
  */
 export const NON_JUDGE_EXCLUDES = Object.freeze([
   "docs/factory/CHARTER.md",
