@@ -4162,3 +4162,56 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
 6. **판정 경로 자동 머지(ADR-033 `auto_merge_judge`)는 켜지 않는다** — 2레인의 증거가 2주 쌓인 뒤 재검토. 비판정 자동 머지는 유지.
 7. **측정에 기준선.** 주간 표에 같은 종류 이슈의 상호작용 레인 vs 다크 레인(시간·비용·리뷰가 잡은 결함 수)을 나란히 둔다.
 연기: 판정 로직의 `tree-truth` 통합(12개 결함이 한 뿌리라는 가정은 과장 — 1.4.43·#172·#187은 다른 과).
+
+## ADR-035 엔진 크래시는 이슈의 R·예산을 먹지 않는다 — 생산자는 runStage의 catch 하나, 상한은 sweeper에 — 2026-10-03 (#196)
+
+**질문**: 엔진 결함으로 죽은 런이 이슈의 재시도 예산(R)과 평생 예산(ADR-031, 1.4.16)을 먹는 것을 어떻게 멈추되, 게이밍과 무한 루프를 열지 않는가.
+그리고 "다시 돌려"를 사람·에이전트가 각각 무엇으로 치는가.
+
+**출처**: 이슈 #196이 인용한 "ADR-034 §4"는 이 파일의 **두 번째** ADR-034("두 레인", #194)의 4번 항목이다 — 같은 번호의 첫 ADR-034(#157 merge
+재실행)와는 다르다(번호 하나에 제목이 둘이다; 이 ADR은 그 충돌을 고치지 않고 적어 둔다). plan 토론 당시에는 그 항목이 main에 없어 "인용된 ADR이
+없다"고 적혔지만, #194가 먼저 들어오면서 출처가 생겼다. 그 4번은 `factory retry <n>` 하나와 "`abortStage`가 자기 코드에서 찍는 닫힌 집합"을 말한다.
+이 ADR은 그것을 **좁혀서** 실현한다 — 아래 "좁힌 것"이 그 차이다. plan 토론(#196, 네 역할 2라운드)의 결론을 그대로 따른다.
+
+**결정**
+1. **원인 등급 `engine-crash`, 생산자는 하나.** `runStage`(`bin/run-stage.js`)의 catch가 잡은 예외가 `TypeError`·`ReferenceError`·`RangeError`·
+   `SyntaxError`(`ENGINE_CRASH_ERRORS`, 오류의 **종류**로 판정 — 메시지 문구가 아니다)이면, 그 런은 락을 쥔 채로 이슈를 `factory:blocked`으로
+   옮기고 원인을 transition()의 명시 `cause: "engine-crash"`로 찍는다. 같은 섹션에 러너가 쓴 `engine-crash: stage=… runner=… run_id=… error=…` 줄
+   (`lib/usage.js` `engineCrashLine`)과 던지기 전에 모은 `usage:` 줄을 남긴다(이미 기록됐으면 다시 쓰지 않는다). exit는 그대로 1이다.
+   - `engine-crash`는 `BLOCKED_CAUSES`와 `BLOCKED_ESCALATION_REASON`의 **마지막 자리**에 같이 붙는다(nit 9의 순서 핀). `CAUSE_RULES`에는
+     **없다** — 사유 문구로는 이 등급이 절대 나오지 않는다(`blockedCause`는 그것을 돌려주지 않는다).
+   - **의존성·인프라의 plain `Error`는 engine-crash가 아니다**(`gh exploded`, EACCES, SIGKILL된 워커): 오늘의 경로 그대로 exit 1, `error: … aborted`
+     줄, 전이 없음(F1 고정이 바이트 그대로 지킨다). 그것까지 엔진 결함으로 부르면 일시 장애가 "엔진 결함"으로 사람에게 가고 비용이 예산에서 빠진다.
+   - `abortStage`·`undecidable()`·`toBlocked()`는 이 등급을 찍지 않는다. `abortStage`(job.status=failure)는 크래시를 볼 창이 없고(runStage의
+     `finally`가 `stage-settled:`를 이미 남겨 그 경로는 전이를 건너뛴다), 판정 불가 경로에는 이미 `undecidable` 등급이 있다.
+2. **평생 예산(1.4.16 계약)의 개정.** `lifetimeCostOf`는 engine-crash 섹션의 비용을 `usd`·`runs`에서 빼 `engineUsd`·`engineRuns`로 돌려준다 — 두
+   키는 크래시 섹션이 있을 때만 선다(크래시 줄 없는 기록은 값도 모양도 예전과 같다). `budgetCheck`는 `usd`로만 판정하고, `budget:` 줄은
+   `; engine crash $Y over M run(s) excluded from the cap`을 덧붙여 빠진 돈을 보인다. 크래시 줄은 **그 섹션의 러너**를 지목할 때만 센다(다른
+   러너를 지목한 줄은 무시하고 그 섹션은 보통 런으로 센다 — 모르면 세는 쪽).
+3. **R 면제는 라우팅으로, 상한은 sweeper에.** 크래시 런은 blocked으로 가므로 하트비트 재큐 팔의 `factory-retry`(R)를 쓰지 않는다. 대신 blocked
+   팔이 `ENGINE_CRASH_MAX_RETRIES = 1`(코드 상수, `API_ERROR_MAX_RETRIES` 옆 — CHARTER 값이 아니다: 이 이슈의 must_not)만큼 같은 스테이지를
+   다시 밀고, 그다음은 `BLOCKED_ESCALATION_REASON["engine-crash"]`로 needs-human이다. 그 문장은 "engine defect"라고 말하고, 설치본 버전과
+   재큐 명령(`node .factory/bin/transition.js <n> factory:queue`, 이슈 번호로 채운다)을 싣는다. 다른 원인의 예산은 그대로다.
+4. **KTB-32는 그대로다 — "다시 돌려"는 안내로 하나가 된다.** `--retry`(--human 없이)는 여전히 거절된다. 바뀐 것은 거절·usage·
+   `docs/factory/ops/person-steps.sh`가 모두 두 명령을 그대로 말한다는 것이다: 에이전트·CI는 재큐(`<n> factory:queue`), 사람은 중단 지점 재개
+   (`<n> --human --retry`). 호출자에 따라 갈리는 단일 `--retry`는 **미뤘다**: transition.test.js의 KTB-32 고정 두 개를 뒤집어야 하고,
+   `factory/hooks/block-dangerous.sh`(이 이슈의 must_not)가 에이전트 세션에서 그 동사를 막으므로 바로 그 세션에서는 어차피 쓸 수 없다. 사람이
+   소유하는 별도 이슈의 몫이다.
+
+**좁힌 것(이슈 초안 대비)**: K 면제 없음(크래시는 `→ rework` 전이를 만들지 않는다 — 셀 것이 없다); 전이 마커에 `engine=true`·`retry-kind=` 필드
+없음(`TRANSITION_TO` 불변 — 옛 엔진이 새 코멘트를 못 읽는 일이 없다); `usage:` 줄 형식·`USAGE_RE` 불변; `engineUsd` 상한 없음; 완료됐지만 엔진
+결함으로 판정이 틀린 런(미러 verify·#174 라운드 — 이슈의 #149 $63·#157 $60·#170 $61)은 **환급되지 않는다**. 그 돈은 크래시가 아니라 끝난 런이고,
+그것을 가를 코드 경로가 없다. 그 이슈들에는 여전히 `:proposal` 상한 인상이 답이다.
+
+**기존 테스트 한 줄의 변경(선언된 예외)**: `factory/test/issue-comments.test.js:73`의 닫힌 집합 고정(`new Set(BLOCKED_CAUSES)`)에
+`"engine-crash"`를 더했다. KTB-35가 `gates-unhandled`를 더할 때와 같은 선례이고, CHARTER:110("기존 테스트 미수정")에 대한 **그 한 줄에 한정한**
+예외다. `sweeper.test.js`의 nit 9 순서 핀, run-stage F1, KTB-32 고정들은 바이트 그대로다. 이슈 본문에 `tests_changed_allowed:`가 없으므로 이
+변경은 정책 게이트에 걸려 사람이 머지한다 — 그것이 맞는 경로다.
+
+**남은 위험**: 오류 종류의 경계는 휴리스틱이다(의존성 래퍼 안의 TypeError는 engine-crash가 되고, plain Error를 던지는 엔진 버그는 아니다).
+에이전트가 만든 형식이 어긋난 산출물이 보호되지 않은 파서에서 TypeError를 내거나, 보호되지 않은 `JSON.parse`가 SyntaxError를 내면 engine-crash가
+된다 — 그것을 묶는 것은 3의 상한뿐이다. `ENGINE_CRASH_MAX_RETRIES = 1`은 blocked 팔의 기본 재시도 횟수와 같은 값이다 — 상수는 그 값을 이름 붙여
+고정할 뿐 새 동작을 더하지 않는다(그 값을 바꾸면 엔진 크래시만 따로 움직인다). 상한
+에스컬레이션은 ADR-032의 릴리스 재시도(`engineCausedNeedsHuman`, `undecidable`만 고른다)에 들지 않는다 — 이 ADR은 그 팔을 바꾸지 않았다.
+예산 검사의 실패는 여전히 삼켜진다(`budget: check failed`, fail-open) — 이 분할의 버그도 그렇게 샌다. 되돌리면 이미 찍힌 `cause=engine-crash`
+마커와 크래시 줄이 남는다: 옛 코드는 모르는 등급을 `other` 문장으로 읽고, 크래시 섹션을 보통 런으로 센다(안전한 쪽).
