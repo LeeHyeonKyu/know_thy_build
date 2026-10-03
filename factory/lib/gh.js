@@ -565,6 +565,17 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       // 해시는 이 필드에 실려 온다(`factory/rehearsal` context).
       return j.map((s) => ({ context: s.context, state: s.state, description: s.description ?? null, creatorLogin: s.creator?.login ?? null, createdAt: s.created_at }));
     },
+    /**
+     * #179 (ADR-033) — 이슈에 `label`이 **붙은** 이벤트 전부(`[{login, at}]`, 오래된 순). 라벨 목록은 누가 붙였는지도, 붙였다
+     * 뗀 일도 말하지 않는다 — 거부권 창은 둘 다 알아야 한다(붙였다 뗀 거부권도 거부권이다). 행위자가 없는 이벤트는 login null.
+     * 실패는 삼키지 않는다: 호출자가 "거부권 없음"이 아니라 판정 불가로 받는다.
+     */
+    async labelEvents(n, label) {
+      const j = JSON.parse(await gh(["api", `repos/${repo}/issues/${n}/events?per_page=100`, "--paginate", "--slurp"])).flat();
+      return j
+        .filter((e) => e?.event === "labeled" && e?.label?.name === label)
+        .map((e) => ({ login: e.actor?.login ?? null, at: e.created_at ?? null }));
+    },
     async listSecrets() {
       return JSON.parse(await gh(["secret", "list", "-R", repo, "--json", "name"])).map((s) => s.name);
     },
