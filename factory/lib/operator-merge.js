@@ -26,16 +26,36 @@ export const isOperatorMergePath = (p, { engine = false } = {}) => isNonJudgePat
 const checkState = (c) => String(c?.conclusion ?? c?.state ?? "").toUpperCase();
 
 /**
- * @param {object} pr `gh pr view --json number,isDraft,mergeable,baseRefName,files,statusCheckRollup`의 결과
+ * 경로 하나로 온전히 분류되는 변경 종류(GitHub `PatchStatus`). RENAMED·COPIED는 `PullRequestChangedFile`이 **새 경로만** 주므로
+ * 원래 경로(판정 경로일 수 있다 — CHARTER를 문서 이름으로 옮기면 CHARTER가 사라진다)를 볼 수 없다. 없거나 모르는 값도 같은 이유로 닫힌다
+ * (#178 rework cf3).
+ */
+const SINGLE_PATH_CHANGE_TYPES = ["ADDED", "MODIFIED", "DELETED", "CHANGED"];
+
+const listed = (items, n = 8) => `${items.slice(0, n).join(", ")}${items.length > n ? ", …" : ""}`;
+
+/**
+ * @param {object} pr `gh pr view --json number,isDraft,mergeable,baseRefName,changedFiles,files,statusCheckRollup`의 결과
  * @param {{defaultBranch?: string, engine?: boolean}} opts `engine`은 이 체크아웃이 엔진 저장소일 때만 `true`(기본 `false` — 닫힌 쪽)
  * @returns {{ok: boolean, reasons: string[], judge: string[]}}
  */
 export function operatorMergeVerdict(pr, { defaultBranch = "main", engine = false } = {}) {
   const reasons = [];
-  const files = Array.isArray(pr?.files) ? pr.files.map((f) => (typeof f === "string" ? f : f?.path)).filter(Boolean) : [];
+  const entries = Array.isArray(pr?.files) ? pr.files : [];
+  const files = entries.map((f) => (typeof f === "string" ? f : f?.path)).filter(Boolean);
   const judge = files.filter((p) => !isOperatorMergePath(p, { engine }));
   if (!files.length) reasons.push("the PR lists no changed files — nothing to classify, so nothing to allow");
-  if (judge.length) reasons.push(`judge path(s) in the PR — a person merges these: ${judge.slice(0, 8).join(", ")}${judge.length > 8 ? ", …" : ""}`);
+  // cf2: gh는 `files(first: 100)`만 읽고 페이지를 넘기지 않는다 — 목록이 PR의 changedFiles와 같을 때만 안 본 파일이 없다.
+  const total = pr?.changedFiles;
+  if (!Number.isInteger(total) || total < 0) reasons.push(`the PR's changedFiles count is missing or invalid (${JSON.stringify(total)}) — cannot tell whether the file list is complete`);
+  else if (total !== entries.length) reasons.push(`gh lists ${entries.length} of ${total} changed files — files beyond the list were never classified, so a person merges this`);
+  // cf3: 원래 경로가 보이지 않는 변경(이름 바꾸기·복사)이나 종류를 모르는 변경은 분류할 수 없다.
+  const unseen = entries.filter((f) => !SINGLE_PATH_CHANGE_TYPES.includes(String(typeof f === "string" ? "" : f?.changeType ?? "").toUpperCase()));
+  if (unseen.length) {
+    const label = (f) => `${typeof f === "string" || f?.changeType == null ? "UNKNOWN" : String(f.changeType).toUpperCase()} ${typeof f === "string" ? f : f?.path}`;
+    reasons.push(`file change type hides or omits the source path (only ${SINGLE_PATH_CHANGE_TYPES.join("/")} can be classified) — a person merges these: ${listed(unseen.map(label))}`);
+  }
+  if (judge.length) reasons.push(`judge path(s) in the PR — a person merges these: ${listed(judge)}`);
   if (pr?.isDraft) reasons.push("the PR is a draft");
   if (String(pr?.mergeable ?? "").toUpperCase() !== "MERGEABLE") reasons.push(`the PR is not mergeable (${pr?.mergeable ?? "unknown"})`);
   if (pr?.baseRefName && pr.baseRefName !== defaultBranch) reasons.push(`the PR targets ${pr.baseRefName}, not ${defaultBranch} — stacked bases are how #150/#152 missed main`);

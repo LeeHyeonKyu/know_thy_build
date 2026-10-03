@@ -9,12 +9,16 @@ import { NON_JUDGE_GLOBS, NON_JUDGE_EXCLUDES, ANY_REPO_NON_JUDGE_GLOBS, classify
 import { matchesAny } from "../lib/glob.js";
 
 /** 2026-10-02 — 운영 세션의 비판정 머지 판정. 양의 목록이고, 목록 밖은 전부 판정 경로다. */
-const pr = (over = {}) => ({
-  number: 12, isDraft: false, mergeable: "MERGEABLE", baseRefName: "main",
-  files: [{ path: "docs/research/x.md" }, { path: "docs/factory/ops/watch-issue.sh" }],
-  statusCheckRollup: [{ name: "factory/integrity", conclusion: "SUCCESS" }],
-  ...over,
-});
+// #178 rework cf2·cf3: 픽스처는 실제 `gh pr view --json …,changedFiles,files`의 모양이다 — 파일마다 changeType, PR에 changedFiles.
+const pr = (over = {}) => {
+  const out = {
+    number: 12, isDraft: false, mergeable: "MERGEABLE", baseRefName: "main",
+    files: [{ path: "docs/research/x.md" }, { path: "docs/factory/ops/watch-issue.sh" }],
+    statusCheckRollup: [{ name: "factory/integrity", conclusion: "SUCCESS" }],
+    ...over,
+  };
+  return { changedFiles: out.files.length, ...out, files: out.files.map((f) => ({ changeType: "MODIFIED", ...f })) };
+};
 
 test("non-judge paths are a positive list: docs, research, ops scripts, the board page, engine modules outside the judge closure — nothing under .claude/, .github/", () => {
   for (const p of ["docs/research/x.md", "docs/factory/ops/board-proxy.mjs", "docs/superpowers/plans/p.md", "docs/factory/board/index.html", "templates/factory/docs/factory/board/index.html", "docs/factory/DECISIONS.md"]) {
@@ -217,4 +221,90 @@ test("test_178_operator_merge_check_one_root_for_every_read", () => {
   r = run(engine, adopter);
   expect(ghCwd()).toBe(engine);
   expect(r.status, r.stderr).toBe(2);
+}, 60000);
+
+test("test_178_operator_merge_refuses_truncated_file_list", () => {
+  // #178 rework cf2: gh는 `files(first: 100)`만 읽고 페이지를 넘기지 않는다. 목록이 PR의 changedFiles보다 짧으면 안 본 파일이 있다 — 문은 닫힌다.
+  const docs = Array.from({ length: 100 }, (_, i) => ({ path: `docs/a${String(i).padStart(3, "0")}.md` }));
+  for (const engine of [false, true]) {
+    // 101번째 factory/lib/gates.js는 gh 목록에 없다 — changedFiles만이 그것을 안다
+    const cut = operatorMergeVerdict(pr({ files: docs, changedFiles: 101 }), { engine });
+    expect(cut.ok, `engine=${engine}`).toBe(false);
+    expect(cut.reasons.join("; ")).toMatch(/lists 100 of 101 changed files/);
+    // changedFiles가 없거나 음이 아닌 정수가 아니면 목록이 완전한지 알 수 없다 — 거부
+    for (const changedFiles of [undefined, null, "100", 100.5, -1]) {
+      const v = operatorMergeVerdict({ ...pr({ files: docs }), changedFiles }, { engine });
+      expect(v.ok, `changedFiles=${JSON.stringify(changedFiles)}`).toBe(false);
+      expect(v.reasons.join("; ")).toMatch(/changedFiles/);
+    }
+    // 목록이 changedFiles보다 길어도(중복·다른 PR의 데이터) 거부
+    expect(operatorMergeVerdict(pr({ files: docs.slice(0, 3), changedFiles: 2 }), { engine }).ok).toBe(false);
+    // 완전한 목록(100 = 100)은 그대로 열린다 — 문은 큰 문서 PR을 이유 없이 막지 않는다
+    expect(operatorMergeVerdict(pr({ files: docs, changedFiles: 100 }), { engine })).toEqual({ ok: true, reasons: [], judge: [] });
+  }
+});
+
+test("test_178_operator_merge_refuses_renames_and_copies", () => {
+  // #178 rework cf3: GitHub의 PullRequestChangedFile은 새 path만 준다 — RENAMED/COPIED의 원래 경로는 보이지 않는다.
+  // CHARTER를 문서 이름으로 옮긴 PR이 도착지만으로 분류되면 CHARTER가 사람 없이 사라진다.
+  for (const engine of [false, true]) {
+    for (const changeType of ["RENAMED", "COPIED", "renamed"]) {
+      for (const path of ["docs/factory/CHARTER-old.md", "docs/x.js", "docs/research/x.md"]) {
+        const v = operatorMergeVerdict(pr({ files: [{ path, changeType }] }), { engine });
+        expect(v.ok, `${changeType} ${path} engine=${engine}`).toBe(false);
+        expect(v.reasons.join("; ")).toMatch(new RegExp(`${changeType.toUpperCase()}.*${path.replace(/[.]/g, "\\.")}`));
+      }
+    }
+    // changeType이 없거나 모르는 값이거나 경로 문자열뿐이면 원래 경로를 알 수 없다 — 닫힌 쪽
+    for (const files of [[{ path: "docs/research/x.md" }], [{ path: "docs/research/x.md", changeType: "WEIRD" }], ["docs/research/x.md"]]) {
+      const v = operatorMergeVerdict({ ...pr(), files, changedFiles: 1 }, { engine });
+      expect(v.ok, JSON.stringify(files)).toBe(false);
+      expect(v.reasons.join("; ")).toMatch(/change type/);
+    }
+    // 경로가 하나뿐인 변경(추가·수정·삭제·타입 변경)은 그 경로로 분류된다
+    for (const changeType of ["ADDED", "MODIFIED", "DELETED", "CHANGED"]) {
+      expect(operatorMergeVerdict(pr({ files: [{ path: "docs/research/x.md", changeType }] }), { engine }).ok, changeType).toBe(true);
+    }
+    // 판정 경로의 삭제는 여전히 판정 경로다
+    const del = operatorMergeVerdict(pr({ files: [{ path: "docs/factory/CHARTER.md", changeType: "DELETED" }] }), { engine });
+    expect(del.ok).toBe(false);
+    expect(del.judge).toEqual(["docs/factory/CHARTER.md"]);
+  }
+});
+
+test("test_178_operator_merge_check_bin_reads_changed_files_and_change_type", () => {
+  // bin이 gh에 changedFiles를 요청하는가 — 가짜 gh는 진짜처럼 `--json`으로 요청된 필드만 내보낸다.
+  const repo = new URL("../../", import.meta.url).pathname;
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "omc-cf2-")));
+  for (const d of [".factory/bin", ".factory/lib", "fakebin"]) mkdirSync(join(root, d), { recursive: true });
+  copyFileSync(join(repo, "factory/bin/operator-merge-check.js"), join(root, ".factory/bin/operator-merge-check.js"));
+  for (const f of ["operator-merge.js", "non-judge-paths.js", "glob.js"]) copyFileSync(join(repo, "factory/lib", f), join(root, ".factory/lib", f));
+  writeFileSync(join(root, ".factory/harness.toml"), '[project]\nname           = "my-app"\ndefault_branch = "main"\n');
+  const fakeGh = [
+    `#!${process.execPath}`,
+    `const fs = require("fs"), path = require("path");`,
+    `const a = process.argv.slice(2), want = a[a.indexOf("--json") + 1].split(",");`,
+    `const all = JSON.parse(fs.readFileSync(path.join(__dirname, "pr.json"), "utf8"));`,
+    `process.stdout.write(JSON.stringify(Object.fromEntries(want.filter((k) => k in all).map((k) => [k, all[k]]))));`,
+  ].join("\n");
+  writeFileSync(join(root, "fakebin/gh"), fakeGh);
+  chmodSync(join(root, "fakebin/gh"), 0o755);
+  const run = (data) => {
+    writeFileSync(join(root, "fakebin/pr.json"), JSON.stringify(data));
+    return spawnSync(process.execPath, [join(root, ".factory/bin/operator-merge-check.js"), "12"], {
+      cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(root, "fakebin")}:${process.env.PATH}`, GITHUB_ACTIONS: "" },
+    });
+  };
+  // 완전한 문서 PR — bin이 changedFiles를 요청해야만 열린다
+  let r = run(pr());
+  expect(r.status, r.stderr).toBe(0);
+  // gh가 100개에서 끊은 PR(실제 101개) — 거부
+  const docs = Array.from({ length: 100 }, (_, i) => ({ path: `docs/a${i}.md` }));
+  r = run(pr({ files: docs, changedFiles: 101 }));
+  expect(r.status, r.stderr).toBe(2);
+  expect(r.stderr).toMatch(/lists 100 of 101 changed files/);
+  // CHARTER를 문서 이름으로 옮긴 PR — 거부
+  r = run(pr({ files: [{ path: "docs/factory/CHARTER-old.md", changeType: "RENAMED" }] }));
+  expect(r.status, r.stderr).toBe(2);
+  expect(r.stderr).toMatch(/RENAMED/);
 }, 60000);
