@@ -12,6 +12,8 @@ import { readBreakerState, writeBreakerState, BREAKER_RESET_COMMAND, BREAKER_STA
  * 쓰기는 상태 파일 하나의 교체이고 `expectBlob`으로 묶인다: 읽은 뒤 그 사이에 sweep이나 다른 사람이 상태를 바꿨으면 아무것도
  * 밀지 않고 다시 돌리라고 말한다(조용히 덮어쓰지 않는다). 로컬 체크아웃에는 상태 파일을 남기지 않는다(`writeBreakerState`).
  *
+ * `writeState`는 기본값이 `writeBreakerState`이고, 테스트가 "읽은 그 blob으로 묶어 썼는가"를 직접 보려고 바꿔 끼울 수 있다.
+ *
  * `env`·`run`·`now`는 주입받는다 — 이 함수는 `process.env`를 직접 읽지 않는다(호출자 `cli/index.js`가 넘긴다).
  */
 export const BREAKER_USAGE = `usage: ${BREAKER_RESET_COMMAND}\n  Closes the auto-merge breaker (person-only; refused in agent sessions and CI). The reason is recorded with your GitHub login.`;
@@ -28,7 +30,7 @@ export function parseBreakerArgs(argv = []) {
   return { reset, reason: r ? r : null };
 }
 
-export async function breakerCommand({ root, argv = [], io, run, env = process.env, now = () => Date.now(), branch = "factory/records" }) {
+export async function breakerCommand({ root, argv = [], io, run, env = process.env, now = () => Date.now(), branch = "factory/records", writeState = writeBreakerState }) {
   const { reset, reason } = parseBreakerArgs(argv);
   if (!reset) { io.err(BREAKER_USAGE); return 1; }
   if (refuseHumanFlag(env)) {
@@ -54,7 +56,7 @@ export async function breakerCommand({ root, argv = [], io, run, env = process.e
 
   const closedBy = principalFromEnv(env, login);
   const state = { version: BREAKER_STATE_VERSION, open: false, since: null, reason, closed_by: closedBy, closed_at: new Date(now()).toISOString() };
-  const w = await writeBreakerState({ run, cwd: root, branch, state, blob: cur.blob ?? null, message: `breaker: reset by ${closedBy}` });
+  const w = await writeState({ run, cwd: root, branch, state, blob: cur.blob ?? null, message: `breaker: reset by ${closedBy}` });
   if (w?.moved) {
     io.err(`the breaker state on ${branch} changed while you were resetting it — nothing was pushed; re-run \`${BREAKER_RESET_COMMAND}\` to reset the current state.`);
     return 1;

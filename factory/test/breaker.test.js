@@ -5,8 +5,7 @@ import { join } from "node:path";
 import { run } from "../lib/exec.js";
 import { appendRunRecord } from "../lib/run-record.js";
 import { readRecordsDetailed, syncRecords } from "../lib/records-branch.js";
-import { selfMergeLine } from "../lib/merge-stage.js";
-import { TRANSITION_TO } from "../lib/retro/issue-comments.js";
+import { selfMergeLine, runMergeStage } from "../lib/merge-stage.js";
 import { breakerThresholds, parseSelfChange } from "../lib/config.js";
 import {
   evaluateBreaker, buildHistory, parseRevertLog, revertedPr, parseSelfMergeLines,
@@ -33,6 +32,28 @@ function mergeRecordText({ issue, pr, kind, at, sha = "a".repeat(40) }) {
     lines: [`merge: merged ${sha.slice(0, 7)} via PR #${pr}`, selfMergeLine({ issue, pr, kind, sha, at })],
   });
   return readFileSync(p, "utf8");
+}
+
+/**
+ * 보호 경로 PR을 머지 스테이지가 사람에게 넘길 때 남기는 run 기록(실제 생산자: `runMergeStage`의 handToHuman → `appendRunRecord`).
+ * 보호 경로 판정은 게이트보다 먼저라 그 앞의 dep(prInfo·protectedPaths·comment·transition)만 있으면 된다.
+ */
+async function humanHandedRecord({ issue, pr }) {
+  const lines = [];
+  const d = {
+    prInfo: vi.fn(async () => ({ number: pr, state: "OPEN", mergeable: "MERGEABLE" })),
+    protectedPaths: vi.fn(async () => ({ ok: true, files: ["factory/lib/merge-stage.js"] })),
+    comment: vi.fn(async () => {}),
+    transition: vi.fn(async ({ to }) => ({ ok: true, from: "factory:approved", to })),
+    mergePr: vi.fn(async () => {}),
+    sleep: vi.fn(async () => {}),
+  };
+  const code = await runMergeStage({ issue, defaultBranch: "main", headSha: "b".repeat(40), d, record: (ls) => lines.push(...ls), refusal: (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]), postStatus: vi.fn(async () => {}) });
+  expect(code).toBe(2);
+  expect(d.mergePr).not.toHaveBeenCalled();
+  expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  const root = mkdtempSync(join(tmpdir(), "ktb-189-human-"));
+  return readFileSync(appendRunRecord({ root, issue, title: "x", stage: "merge", runnerId: "gha-1", now: "2026-10-01T02:00:00.000Z", lines }), "utf8");
 }
 
 /**
@@ -102,11 +123,17 @@ test("test_189_breaker_opens_on_two_consecutive_reverts_of_judge_automerges", as
   ]);
   expect(evaluateBreaker({ history: buildHistory({ records: nonJudge, reverts }), thresholds: T2 }).open).toBe(false);
 
-  // 사람 머지(기록은 by=script인 merged 전이 하나뿐)는 자동 머지가 아니다 — 그 PR이 revert되어도 닫힘.
-  const humanMerged = "<!-- factory-transition:v1 from=factory:needs-human to=factory:merged by=script -->\n**전이** factory:needs-human → factory:merged\n";
-  expect(TRANSITION_TO.test(humanMerged)).toBe(true);
-  const human = new Map([["101", records.get("101")], ["102", `# Run · #102\n${humanMerged}`]]);
+  // 사람 머지는 자동 머지가 아니다 — 그 PR이 revert되어도 닫힘. 기록은 실제 생산자로 만든다: 머지 스테이지가 보호 경로 PR을 사람에게
+  // 넘기며(handToHuman) 쓴 `## merge` 섹션(runMergeStage → appendRunRecord). 사람이 머지한 뒤 sweeper의 반영(by=script 전이)은
+  // 이슈 코멘트이고 run 기록에는 아무것도 더하지 않는다. (일반 자동 머지·사람 머지 둘 다의 끝에서 끝까지는 merge-stage.test.js
+  // `test_189_human_and_plain_merge_records_never_count_toward_the_streak`.)
+  const handed = await humanHandedRecord({ issue: 102, pr: 12 });
+  expect(handed).toMatch(/^## merge/m);
+  expect(handed).toMatch(/protected paths changed/);
+  const human = new Map([["101", records.get("101")], ["102", handed]]);
   expect(evaluateBreaker({ history: buildHistory({ records: human, reverts }), thresholds: T2 }).open).toBe(false);
+  // 대조군: 같은 자리에 판정 경로 자동 머지 기록이면 열린다.
+  expect(evaluateBreaker({ history: buildHistory({ records: new Map([["101", records.get("101")], ["102", records.get("102")]]), reverts }), thresholds: T2 }).open).toBe(true);
 
   // 두 revert 사이에 revert 없는 판정 자동 머지(#14)가 끼면 연속이 아니다.
   const gap = new Map([...records, ["104", mergeRecordText({ issue: 104, pr: 14, kind: "judge", at: "2026-10-01T01:30:00.000Z" })]]);
@@ -264,6 +291,27 @@ test("test_189_unreadable_breaker_state_is_not_closed", async () => {
   // git log 실패(기본 브랜치가 원격에 없다) → ok:false.
   expect((await read({ defaultBranch: "no-such-branch" })).ok).toBe(false);
 
+  // 한 단계만 실패시키는 run 래퍼 — 나머지는 진짜 git이다. 대조군: 래퍼가 아무것도 실패시키지 않으면 ok:true(위와 같은 상태).
+  const calls = [];
+  const failOn = (pred) => vi.fn(async (cmd, args, opts) => {
+    calls.push([cmd, ...args]);
+    return cmd === "git" && pred(args) ? { code: 128, stdout: "", stderr: "fatal: simulated failure" } : run(cmd, args, opts);
+  });
+  expect(await read({ run: failOn(() => false) })).toEqual(expect.objectContaining({ ok: true, open: true }));
+  // 차단기의 읽기는 gh를 부르지 않는다(상태·기록·revert 모두 git) — 그래서 dw5의 "gh 읽기 실패"는 이 읽기에 생길 자리가 없다.
+  expect(calls.filter(([cmd]) => cmd !== "git")).toEqual([]);
+  // fetch는 성공하고 git log만 실패한다 → ok:false(빈 stdout을 "revert 없음 = 닫힘"으로 읽지 않는다).
+  const logRun = failOn((a) => a[0] === "log");
+  const logFails = await read({ run: logRun });
+  expect(logFails).toEqual({ ok: false, reason: expect.stringMatching(/^git log origin\/main failed/) });
+  expect(logRun).toHaveBeenCalledWith("git", expect.arrayContaining(["fetch", "+refs/heads/main:refs/remotes/origin/main"]), expect.anything());
+  // 브랜치의 상태 파일이 읽히지 않는다(git show 실패 — readRecordsDetailed의 failures) → ok:false.
+  const stateUnreadable = await read({ run: failOn((a) => a[0] === "show" && String(a[1]).endsWith(`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`)) });
+  expect(stateUnreadable).toEqual({ ok: false, reason: expect.stringMatching(/unreadable state file/) });
+  // run 기록 하나가 읽히지 않는다 → ok:false(그 기록이 연속의 한 칸일 수 있다).
+  const recordUnreadable = await read({ run: failOn((a) => a[0] === "show" && String(a[1]).endsWith("docs/factory/runs/102.md")) });
+  expect(recordUnreadable).toEqual({ ok: false, reason: expect.stringMatching(/unreadable run records: .*102\.md/) });
+
   // records 브랜치를 가져오지 못했다(fetched:false) → ok:false.
   const lost = mkdtempSync(join(tmpdir(), "ktb-189-lost-"));
   await git(lost, ["init", "-q", "-b", "main"]);
@@ -316,11 +364,31 @@ test("test_189_breaker_reset_is_person_only_and_recorded", async () => {
   expect(anon.err.join("\n")).toMatch(/login/);
   expect(await branchExists()).toBe(false);
 
-  // 열려 있던 상태(스윕이 쓴 워터마크)를 사람이 닫는다.
+  // 열려 있던 상태(스윕이 쓴 워터마크)를 사람이 닫는다. 브랜치에는 run 기록(실제 생산자)도 있다 — 리셋은 그것들을 건드리지 않는다.
+  mkdirSync(join(cwd, "docs/factory/runs"), { recursive: true });
+  writeFileSync(join(cwd, "docs/factory/runs/101.md"), mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" }));
+  writeFileSync(join(cwd, "docs/factory/runs/102.md"), mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" }));
+  expect((await syncRecords({ run, cwd, message: "records" })).ok).toBe(true);
   const opened = { version: 1, open: true, since: "2026-10-02T06:00:00.000Z", reason: "revert streak: PR #11, PR #12", closed_by: null, closed_at: null };
   expect((await writeBreakerState({ run, cwd, blob: null, message: "open", state: opened })).ok).toBe(true);
+  const tree = async () => new Map((await run("git", ["ls-tree", "-r", "factory/records"], { cwd: remote })).stdout.trim().split("\n").map((l) => { const [meta, path] = l.split("\t"); return [path, meta.split(" ")[2]]; }));
+  const tipOf = async () => (await run("git", ["rev-parse", "refs/heads/factory/records"], { cwd: remote })).stdout.trim();
+  const treeBefore = await tree();
+  const tipBefore = await tipOf();
+  const read0 = await readBreakerState({ run, cwd });
+  expect(read0.blob).toMatch(/^[0-9a-f]{40}$/);
+  const writeState = vi.fn(writeBreakerState);
   const ok = io();
-  expect(await breakerCommand({ root: cwd, argv, io: ok.io, run: personRun(), env: {}, now: NOW })).toBe(0);
+  expect(await breakerCommand({ root: cwd, argv, io: ok.io, run: personRun(), env: {}, now: NOW, writeState })).toBe(0);
+  // 쓰기는 상태 파일 하나의 교체이고, 읽은 그 blob에 묶인다(expectBlob = 읽은 blob sha).
+  expect(writeState).toHaveBeenCalledTimes(1);
+  expect(writeState.mock.calls[0][0]).toEqual(expect.objectContaining({ blob: read0.blob, cwd }));
+  const treeAfter = await tree();
+  expect([...treeAfter.keys()].sort()).toEqual([...treeBefore.keys()].sort());
+  const changed = [...treeAfter.keys()].filter((k) => treeAfter.get(k) !== treeBefore.get(k));
+  expect(changed).toEqual([`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`]);
+  expect((await run("git", ["diff", "--name-only", tipBefore, await tipOf()], { cwd: remote })).stdout.trim().split("\n")).toEqual([`${BREAKER_STATE_DIR}/${BREAKER_STATE_FILE}`]);
+  for (const f of ["101", "102"]) expect((await run("git", ["show", `factory/records:docs/factory/runs/${f}.md`], { cwd: remote })).stdout).toBe(readFileSync(join(cwd, `docs/factory/runs/${f}.md`), "utf8"));
   const after = await readBreakerState({ run, cwd });
   expect(after.ok).toBe(true);
   expect(after.state).toEqual(expect.objectContaining({ open: false, closed_by: "person:LeeHyeonKyu", closed_at: "2026-10-03T12:00:00.000Z", reason: "reverted twice by mistake — checked" }));
