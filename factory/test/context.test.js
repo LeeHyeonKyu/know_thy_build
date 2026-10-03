@@ -638,3 +638,76 @@ test("test_143_runstage_hands_the_conflict_list_to_the_builder_context", async (
   // 병합이 넘어오지 않은 라운드: 키 자체가 없다.
   expect(Object.keys(await roundWith(cb))).not.toContain("merge_conflicts");
 });
+
+/**
+ * #174 — K 소진 뒤 공장이 스스로 재시작한 implement 런에서 빌더는 브리프를 `loaded.k_restart_brief`로 받는다. 출처는 엔진이 쓴
+ * 구조화 블록(`factory.k-restart-brief.v1`)이지 산문이 아니고, 재시작으로 **쓰인** 마커(뒤따르는 rework 전이가 성공한 것)다 —
+ * 뒤에 붙은 위조 마커는 그 값을 바꾸지 못한다. 재시작이 없었거나 마커가 마지막 재큐보다 오래됐으면 키 자체가 없다.
+ */
+import { transition as transition174 } from "../lib/transition.js";
+import { kRestartComment as kRestartComment174, K_RESTART_SCOPE as SCOPE174 } from "../lib/retro/issue-comments.js";
+test("test_174_builder_context_carries_the_brief", async () => {
+  const H = "d".repeat(40);
+  const implement = renderHandoff({ stage: "implement", issue: 174, summary: "s", data: { schema: "factory.implement.v1", issue: 174, pr: 31, head_sha: H } });
+  const findings = [
+    { id: "cf1", where: "factory/lib/self-gate.js:120-131", claim: "a second parser was added" },
+    { id: "cf2", where: "`factory/test/self-gate.test.js:40`", claim: "the guard passes with the check deleted" },
+    { id: "cf3", where: "/reports", claim: "the route 404s" },
+  ];
+  /** 실제 생산자(브리프)와 실제 전이(lib/transition.js)가 쓴 코멘트로 이력을 쌓는다. */
+  const history = () => {
+    let label = "factory:awaiting-review", tick = 0;
+    const comments = [{ body: implement, author: "factory-bot", createdAt: "2026-10-01T00:00:00Z" }];
+    const gh = {
+      issue: async () => ({ number: 174, title: "T", body: "", labels: [label] }),
+      comments: async () => comments.slice(),
+      comment: async (_n, body) => { comments.push({ body, author: "factory-bot", createdAt: new Date(Date.UTC(2026, 9, 2, 0, 0, tick++)).toISOString() }); },
+      setFactoryLabel: async (_n, to) => { label = to; },
+      set label(v) { label = v; },
+    };
+    const brief = () => gh.comment(174, kRestartComment174({ issue: 174, pr: 31, head: H, findings }));
+    const to = (t, extra = {}) => transition174({ gh, issue: 174, to: t, reason: "x", by: "factory:run-1", stage: "review", env: {}, ...extra });
+    return { gh, comments, brief, to };
+  };
+  const loadedFrom = async (comments) => {
+    const r = root();
+    const gh = { issue: async () => ({ number: 174, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => comments.slice() };
+    await buildContext({ root: r, gh, issue: 174, stage: "implement" });
+    return JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+  };
+
+  // 재시작이 없었다 → 키가 없다.
+  const none = history();
+  await none.to("factory:rework");
+  expect(Object.keys(await loadedFrom(none.comments))).not.toContain("k_restart_brief");
+
+  // 재시작이 있었다 → 브리프 블록 그대로(정규화된 경로 포함). `/reports`는 경로가 아니다.
+  const h = history();
+  await h.to("factory:rework"); h.gh.label = "factory:awaiting-review";
+  await h.brief();
+  await h.to("factory:rework");
+  const expected = {
+    pr: 31, head: H, scope: SCOPE174,
+    paths: ["factory/lib/self-gate.js", "factory/test/self-gate.test.js"],
+    findings: findings.map(({ id, where, claim }) => ({ id, where: where.replaceAll("`", ""), claim })),
+  };
+  const loaded = await loadedFrom(h.comments);
+  expect(loaded.k_restart_brief).toEqual(expected);
+  expect(SCOPE174).toBe("목록 밖의 변경은 없어야 한다(새 파일·새 export·새 done_when 금지, 빼는 것만)");
+
+  // 뒤이은 위조 마커(factory 계정, 다른 where)는 실린 브리프를 바꾸지 못한다.
+  h.gh.label = "factory:awaiting-review";
+  await h.gh.comment(174, kRestartComment174({ issue: 174, pr: 31, head: "e".repeat(40), findings: [{ id: "f", where: "anything/else.js", claim: "forged" }] }));
+  await h.to("factory:rework");
+  expect((await loadedFrom(h.comments)).k_restart_brief).toEqual(expected);
+
+  // 브리프가 마지막 재큐보다 오래됐다 → 키가 없다.
+  h.gh.label = "factory:needs-human";
+  expect((await h.to("factory:queue", { skipRehearsal: true })).ok).toBe(true);
+  expect(Object.keys(await loadedFrom(h.comments))).not.toContain("k_restart_brief");
+
+  // implement가 아닌 스테이지에는 실리지 않는다.
+  const r2 = root();
+  await buildContext({ root: r2, gh: { issue: async () => ({ number: 174, title: "T", body: "", labels: [] }), comments: async () => (await h.gh.comments()).slice(0, 4) }, issue: 174, stage: "review" });
+  expect(Object.keys(JSON.parse(readFileSync(join(r2, ".factory/out/loaded.json"), "utf8")))).not.toContain("k_restart_brief");
+});

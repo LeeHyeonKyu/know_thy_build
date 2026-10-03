@@ -312,3 +312,53 @@ test("isNewerVersion compares numerically, and an unknown version is never 'newe
   expect(isNewerVersion("1.3.2", null)).toBe(false);
   expect(isNewerVersion("", "")).toBe(false);
 });
+
+/**
+ * #174 — 재시작 브리프가 실린 라운드의 self-gate는 브리프 `where` 밖의 **새 파일**을 RED로 막는다. "새 파일"의 기준점은 merge-base가
+ * 아니라 **재시작 head**다: 옛 작성자가 1라운드에 더한 파일은 이미 PR의 diff이고, 새 작성자는 그 diff에서 출발한다. 목록 계산(git)은
+ * run-stage(`restartBriefInput`)가 하고, self-gate.js는 그 목록을 판정만 하는 순수 평가기로 남는다.
+ */
+import { restartBriefInput } from "../bin/run-stage.js";
+test("test_174_self_gate_new_files_measured_from_restart_head", async () => {
+  const head = "f".repeat(40);
+  const brief = { pr: 31, head, scope: "s", paths: ["factory/lib/self-gate.js", "factory/test/"], findings: [] };
+  // restart head의 트리: 옛 PR이 이미 더한 파일(round1.js)이 거기 있다.
+  const treeAt = (sha) => ({
+    match: (c, a) => c === "git" && a[0] === "ls-tree" && a.includes(sha),
+    result: { code: 0, stdout: ["README.md", "factory/lib/self-gate.js", "factory/lib/round1.js"].join("\0") + "\0", stderr: "" },
+  });
+  // merge-base 대비 추가된 파일들(changedFiles().added가 내는 바로 그 목록).
+  const added = ["factory/lib/round1.js", "factory/lib/extra-parser.js", "factory/test/new-guard.test.js", "factory/lib/self-gate.js"];
+  const input = await restartBriefInput({ run: makeFakeRun([treeAt(head)]), cwd: "/root", brief, added });
+  expect(input).toEqual({ paths: brief.paths, newFiles: ["factory/lib/extra-parser.js", "factory/test/new-guard.test.js"] });
+
+  const gates = { schema: "factory.gates.v1", status: "GREEN" };
+  const red = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: input });
+  expect(red.ok).toBe(false);
+  expect(red.ranChecks).toContain("restart-brief");
+  const blocking = red.findings.filter((f) => f.blocking);
+  expect(blocking).toHaveLength(1);                                     // round1.js(옛 PR)·new-guard(브리프 디렉터리)는 통과
+  expect(blocking[0].detail).toBe("new file outside the restart brief: factory/lib/extra-parser.js");
+
+  // 기존 파일 수정·삭제만 있는 라운드(새 파일 없음)는 통과한다.
+  const editsOnly = await restartBriefInput({ run: makeFakeRun([treeAt(head)]), cwd: "/root", brief, added: ["factory/lib/round1.js"] });
+  const pass = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: editsOnly });
+  expect(pass.ok).toBe(true);
+  expect(pass.ranChecks).toContain("restart-brief");
+
+  // 재시작 head를 못 읽거나 브리프 블록이 깨졌으면 fail closed — "전부 허용"이 아니다.
+  const unreadable = await restartBriefInput({ run: makeFakeRun([{ match: (c) => c === "git", result: { code: 128, stdout: "", stderr: "fatal: not a tree object" } }]), cwd: "/root", brief, added });
+  const r1 = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: unreadable });
+  expect(r1.ok).toBe(false);
+  expect(summarizeFindings(r1.findings)).toMatch(/restart head .* cannot be read/);
+  const broken = await restartBriefInput({ run: makeFakeRun([treeAt(head)]), cwd: "/root", brief: { pr: 31, head, error: "the factory.k-restart-brief.v1 block is missing or unparsable" }, added });
+  const r2 = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: broken });
+  expect(r2.ok).toBe(false);
+  expect(summarizeFindings(r2.findings)).toMatch(/unparsable/);
+
+  // 브리프가 없으면 결과는 오늘과 같다(바이트 하나 다르지 않다).
+  const today = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [] });
+  const withNull = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: null });
+  expect(withNull).toEqual(today);
+  expect(JSON.stringify(withNull)).toBe(JSON.stringify(today));
+});
