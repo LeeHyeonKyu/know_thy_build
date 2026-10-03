@@ -1322,7 +1322,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     /**
      * #174 — 2K 천장은 **모든** 리뷰에서 문다(재시작을 아는 배선에서만): 창의 rework 시도 수(`attempts`, failed 마커로 줄지 않는
      * 셈)로 잰 이번 라운드가 2K에 닿았으면 rework도 재시작도 없이 사람이다. 위조 failed 마커가 K 카운터를 아무리 되감아도
-     * 리뷰는 2K번을 넘지 못한다(정당한 재시작 한 번의 K + K와 같은 자리).
+     * 리뷰는 2K번을 넘지 못한다(정당한 재시작 한 번의 K + K와 같은 자리). 대가(rework cf1): 진짜 스왑 실패도 시도 한 칸이라, 창에
+     * 실패가 n번이면 새 작성자는 K − n 라운드 뒤에 천장을 만난다(사유는 "2K ceiling", ADR-033 #174 1번).
      */
     const ceiling = stage === "review" && to === "factory:rework" && d.kRestartState && kState && atKCeiling(maxRounds, absRound);
     const toFinal = ceiling ? "factory:needs-human" : to;
@@ -1993,8 +1994,12 @@ export function kExhaustionDecision({ data, maxRounds, state, abs }) {
   const n = mustFix.length;
   const tail = n ? `${n} must_fix remain` : `last verdict: ${data?.decision ?? "unknown"}`;
   const ceiling = atKCeiling(maxRounds, abs);
+  const ceilingReason = `review rounds exhausted (K=${maxRounds}) — the 2K ceiling is reached in this window (round ${abs}; every rework attempt counts, a failed label swap included): ${tail}`;
+  // rework cf1 — 재시작 뒤 새 작성자가 K에 닿기 **전에** 천장이 물었다면(창의 진짜 스왑 실패가 한 칸을 썼다) 사유는 천장이다.
+  // "K exhausted twice"라고 쓰면 사람은 새 작성자가 K를 다 쓴 줄 읽는다.
+  if (state?.used && ceiling && Number.isInteger(data?.round) && data.round < maxRounds) return { action: "needs-human", reason: ceilingReason };
   if (state?.used) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — ${K_TWICE}: ${tail}` };
-  if (ceiling) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — the 2K ceiling is reached in this window (round ${abs}): ${tail}` };
+  if (ceiling) return { action: "needs-human", reason: ceilingReason };
   if (!n) return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: there is no must_fix to brief the next author with` };
   if (!mustFix.some((m) => wherePaths(m?.where).length)) {
     return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: no finding's where names a file path, so a brief cannot bound the next author` };
@@ -2012,9 +2017,10 @@ export function kExhaustionDecision({ data, maxRounds, state, abs }) {
  * base를 병합하므로(#143) main에 새로 생긴 파일이 거짓 RED가 된다. git은 여기서만 돈다 — `runSelfGate`는 판정만 한다.
  * 재시작 head를 못 읽거나 브리프가 깨졌으면 `error`를 싣는다(self-gate가 fail closed 한다).
  */
-export async function restartBriefInput({ run, cwd, brief, added = [] }) {
+export async function restartBriefInput({ run, cwd, brief, added = [], error = null }) {
   const paths = Array.isArray(brief?.paths) ? brief.paths : [];
   if (brief?.error) return { paths, newFiles: [], error: brief.error };
+  if (error) return { paths, newFiles: [], error };
   const head = typeof brief?.head === "string" && /^[0-9a-f]{7,40}$/i.test(brief.head) ? brief.head : null;
   if (!head) return { paths, newFiles: [], error: `the restart brief names no readable head (${brief?.head ?? "none"})` };
   let r;
@@ -2023,6 +2029,22 @@ export async function restartBriefInput({ run, cwd, brief, added = [] }) {
   if (r?.code !== 0) return { paths, newFiles: [], error: `restart head ${head.slice(0, 7)} cannot be read — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
   const tree = new Set(String(r.stdout || "").split("\0").filter(Boolean));
   return { paths, newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)) };
+}
+
+/**
+ * #174 (self-critique) — the paths ADDED vs. merge-base, with rename detection OFF. `changedFiles().added` keeps only status `A`
+ * rows of a diff that detects renames by default (`diff.renames`), so a file moved to a new path arrives as `R<score>` and never
+ * reaches it: a "new parser" could enter as a rename plus an edit. With `--no-renames` a move is `D old` + `A new`, so the new path
+ * is an added file like any other (an edit is `M`, a deletion `D` — neither is a new file). A git failure is returned as `error`
+ * so the restart check fails closed instead of allowing everything.
+ */
+export async function addedPathsNoRenames({ run, cwd, base }) {
+  let r;
+  try { r = await run("git", ["diff", "--name-status", "--no-renames", `${base}...HEAD`], { cwd }); }
+  catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
+  if (r?.code !== 0) return { error: `git diff --no-renames failed — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+  const added = String(r.stdout || "").split("\n").filter(Boolean).map((l) => l.split("\t")).filter((x) => x[0] === "A" && x[1]).map((x) => x[1]);
+  return { added };
 }
 
 /**
@@ -2042,9 +2064,8 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
     const review = ctx?.handoffs?.review;
     const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
     // #174 — a K self-restart round: the new-file list is measured HERE (git), from the restart head; self-gate only judges it.
-    // `added` (status A vs. merge-base), not `all`: an edit or a deletion is never a new file.
     const brief = ctx?.loaded?.k_restart_brief ?? null;
-    const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, added: diff.added }) : null;
+    const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
     return runSelfGate({
       root, harness, gates, run,
       // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
@@ -2213,6 +2234,20 @@ export function completedForHead({ comments, stage, headSha, entryLabels = ENTRY
 export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, transitionFn = transition }) {
   const transitionIssue = ({ issue: n, to, reason }) => transitionFn({ gh, issue: n, to, reason, stage, rehearsal, admission });
   return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transitionIssue });
+}
+
+/**
+ * #174 (verifier finding 1) — main()'s `transition` dep, extracted so tests drive the production call site rather than replace it.
+ * Every stage transition funnels through here. `buildExtra(args)` is main's ctxExtra builder (roster, gates file, merge gates).
+ */
+export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
+  return async (args) => {
+    const { to, reason, cause, by = null } = args;
+    const ctxExtra = await buildExtra(args);
+    // The K restart's transition carries `by=factory:run-<id>` (kRestartState counts a restart as used only with it); every
+    // other caller passes none and is written `by=script`, as before.
+    return transitionFn({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission, ...(by ? { by } : {}) });
+  };
 }
 
 export function makeCheckoutHead({ gh, run, root, issue }) {
@@ -3362,7 +3397,9 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null, by = null }) => {
+    // #174 — the call into lib/transition.js (and its `by` forwarding) lives in `makeTransitionDep`, which tests drive; this
+    // closure is only main's ctxExtra builder.
+    transition: makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra: async ({ to, data, mergeGatesResult, prerequisite = false, qaManifestRecorded = null }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -3402,9 +3439,9 @@ async function main() {
        * 리허설을 새로 GREEN으로 돌려도 풀리지 않는다(값이 낡은 것이 아니라 인자가 없는 것이다).
        * 다른 목적 라벨에는 비용이 0이다: `transition()`은 `to === "factory:queue"`일 때만 검사기를 부른다.
        */
-      // #174 — K 재시작의 전이는 `by=factory:run-<id>`를 싣는다(그 밖의 호출자는 넘기지 않는다 — 예전 그대로 `by=script`).
-      return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission, ...(by ? { by } : {}) });
-    },
+      // #174 — K 재시작의 `by=factory:run-<id>` 전달과 lib/transition.js 호출은 `makeTransitionDep`에 있다(테스트가 그 자리를 돈다).
+      return ctxExtra;
+    } }),
     /**
      * Feedback loop (T3 re-review NEW-MF-1) — **이 런이 쓴 팩토리 버전.** `self-gate-detail:` 줄에
      * 실려, "이 검사는 KTB가 거둬들였다"와 "이번 라운드에 볼 것이 없었다"를 가르는 유일하게 건전한
