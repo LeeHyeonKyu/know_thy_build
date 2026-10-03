@@ -1797,7 +1797,7 @@ test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () 
   expect(sr[0].reason).toContain("server/tests/auth.test.ts::test_12_login");
   expect(flakyMarksOf(sizeOnly.lines)).toEqual([]);
 
-  // Re-run BLOCKED → factory:blocked; re-run throws a typed base/diff error → factory:blocked; re-run gives no verdict → needs-human.
+  // Re-run BLOCKED → factory:blocked; re-run throws a typed base/diff error → factory:blocked; re-run gives no verdict (null) → factory:blocked.
   const blockedGates = await producedBlockedGates();
   expect(blockedGates.status).toBe("BLOCKED");
   const blocked = await run157({ seq: [first, blockedGates], diff: { ok: true, files: CLIENT_ONLY } });
