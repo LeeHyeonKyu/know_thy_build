@@ -2177,7 +2177,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, 
     readRecord = () => (p && existsSync(p) ? readFileSync(p, "utf8") : null);
   }
   return {
-    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null, onStep = null } = {}) => {
+    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, pending = null, signal = null, onStep = null } = {}) => {
       /**
        * `fn()` inside the named evidence step: the step is reported first (`onStep` — merge-stage names it when its own timeout
        * fires before this rejection can reach it), and a failure is renamed to it (merge-stage's FAIL line names the step).
@@ -2205,7 +2205,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, 
         live();
         return { recordText, issueComments, prComments, factoryLogins };
       });
-      const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pr, now: now() }));
+      const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pending, pr, now: now() }));
       return await inStep("edit", async () => {
         const current = await gh.prBody(pr, { timeoutMs, signal });
         live();

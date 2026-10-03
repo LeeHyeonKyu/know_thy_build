@@ -3045,6 +3045,8 @@ const evidence195 = (impl = async () => ({ ok: true, markdown: "## Factory evide
 });
 const failLines195 = (lines) => lines.filter((l) => l.startsWith("evidence: FAIL — "));
 const order195 = (a, b) => expect(a.mock.invocationCallOrder[0]).toBeLessThan(b.mock.invocationCallOrder[0]);
+/** What the self-change path's one publish says about its window (selfD179's clock opens it at 10:02 for 60 min on HEAD). */
+const PENDING_195 = `self-change veto window open until 2026-10-03T11:02:00.000Z (UTC) — a factory:veto label on issue #7 hands this PR to a human; otherwise head bbbbbbb is squash-merged`;
 const needsHumanCall195 = (d) => d.transition.mock.invocationCallOrder[d.transition.mock.calls.findIndex((c) => c[0].to === "factory:needs-human")];
 
 test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", async () => {
@@ -3121,7 +3123,7 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
     expect((await run179(d)).code).toBe(2);
     expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
-    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "veto-window", reason: null });
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "veto-window", reason: null, pending: PENDING_195 });
     expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
     expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^vetoed by @owner/);
     expect(ev.postEvidenceComment).not.toHaveBeenCalled();
@@ -3141,12 +3143,13 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
   // (f3) a veto with a failing dep: the window publish fails, the hand-off does not try again, and the record gets exactly ONE
   // FAIL line. The transition and exit code do not change.
   {
-    const ev = evidence195(async () => { throw new Error("gh pr view failed (1): HTTP 502"); });
+    // The fake reports its steps the way run-stage's dep does (read → build → edit, where `gh pr view` is the edit step's read).
+    const ev = evidence195(async ({ onStep }) => { onStep("read"); onStep("build"); onStep("edit"); throw new Error("gh pr view failed (1): HTTP 502"); });
     const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
     const { code, lines } = await run179(d);
     expect(code).toBe(2);
     expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
-    expect(failLines195(lines)).toEqual(["evidence: FAIL — publish: gh pr view failed (1): HTTP 502"]);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — edit: gh pr view failed (1): HTTP 502"]);
     expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
   }
   // (f4) plan non_goals[0]: needs-human routes that bypass handToHuman — the mergeGates refusal (required checks / integrity
@@ -3451,5 +3454,45 @@ test("test_195_evidence_fail_line_names_the_failing_step", async () => {
     expect(await run(d, { record })).toBe(0);
     expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", line]);
     expect(d.closeIssue).toHaveBeenCalledTimes(1);
+  }
+});
+
+// ── #195 skeptic round 4 (flaw 3) — the self-change path's one publish (before the announcement) says the PR is in a veto window
+// and what a veto does; through the real run-stage dep that row is in the PR body a vetoed PR is handed over with. ─────────
+test("test_195_veto_window_publish_names_the_window_in_the_section", async () => {
+  let body = "Closes #7\n";
+  const gh = { comments: vi.fn(async () => []), prBody: vi.fn(async () => body), editPrBody: vi.fn(async (_p, b) => { body = b; }), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot") };
+  const real = makePrEvidenceDeps195({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+  const d = selfD179({ ...real, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+  const { code, lines } = await run179(d);
+  expect(code).toBe(2);
+  expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^vetoed by @owner/);
+  expect(gh.editPrBody).toHaveBeenCalledTimes(1);
+  expect(body).toContain(`### Veto window\n\n- ${PENDING_195} — live (this merge run's veto window; a veto or a later refusal hands the PR to a human without publishing this section again)`);
+  expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (veto-window)"]);
+  // The auto-merge and handToHuman routes carry no window.
+  const ev = evidence195();
+  await run(baseD(ev));
+  expect(ev.publishPrEvidence.mock.calls[0][0].pending ?? null).toBeNull();
+});
+
+// ── #195 skeptic round 4 (flaw 4) — the FAIL line names one of the four steps (read, build, edit, comment), never anything
+// else: a dep that reports no step failed in the step it was handed first (read), and a dep message that starts with some
+// other word is not mistaken for a step name. ──────────────────────────────────────────────────────────────────────────────
+test("test_195_fail_line_step_is_one_of_read_build_edit_comment", async () => {
+  const cases = [
+    ["no step reported, throws", () => { throw new Error("boom"); }, "evidence: FAIL — read: boom"],
+    ["no step reported, rejects", async () => { throw new Error("gh api failed (1): HTTP 502"); }, "evidence: FAIL — read: gh api failed (1): HTTP 502"],
+    ["no step reported, ok:false", async () => ({ ok: false, reason: "body unreadable" }), "evidence: FAIL — read: body unreadable"],
+    ["no step reported, hangs", () => new Promise(() => {}), "evidence: FAIL — read: timed out after 5 ms — the read step was cancelled"],
+    ["foreign prefix", async () => { throw new Error("publish: nope"); }, "evidence: FAIL — read: publish: nope"],
+    ["reported build", async ({ onStep }) => { onStep("read"); onStep("build"); throw new Error("bad input"); }, "evidence: FAIL — build: bad input"],
+  ];
+  for (const [name, impl, line] of cases) {
+    const ev = evidence195(impl);
+    const { lines, record } = makeRecord();
+    expect(await run(baseD({ ...ev, evidenceTimeoutMs: 5 }), { record }), name).toBe(0);
+    expect(failLines195(lines), name).toEqual([line]);
+    expect(failLines195(lines)[0], name).toMatch(/^evidence: FAIL — (read|build|edit|comment): /);
   }
 });

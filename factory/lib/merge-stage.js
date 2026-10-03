@@ -292,7 +292,7 @@ const MERGEABILITY_REPOLL_MS = 5000;
 /** #195 — the PR-evidence step's own bound: it may delay the merge or the hand-off by at most this much (no retry). */
 export const EVIDENCE_TIMEOUT_MS = 60 * 1000;
 /** #195 — a reason that already names its evidence step (run-stage's dep renames its rejections to `read: …` / `build: …` / `edit: …`). */
-const EVIDENCE_STEP_PREFIX = /^(read|build|edit|comment|publish): /;
+const EVIDENCE_STEP_PREFIX = /^(read|build|edit|comment): /;
 
 /**
  * KTB-15b I1 / KTB-19 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR
@@ -493,7 +493,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * `evidence: FAIL — <step>: <reason>` record line naming the failing step (read, build, edit — or comment for the issue
    * comment after a merge) and the merge or transition goes on. The dep reports the step it is in through `onStep`, so a
    * timeout that fires here before the dep's own step-named rejection can arrive still names the step; a dep that never
-   * reports one is named `publish`. A MISSING dep — the wiring has the `publishPrEvidence` slot (run-stage's always does)
+   * reports one failed in the step it was handed first, `read` — the FAIL line names one of read, build, edit or comment, never
+   * anything else. A MISSING dep — the wiring has the `publishPrEvidence` slot (run-stage's always does)
    * but no function in it — is that same one FAIL line (step `read`: nothing could be read), never a silent no-op. A wiring that predates the slot entirely (no `publishPrEvidence` key) is left byte-identical: existing tests pin
    * that record exactly (test_179_switch_off_is_byte_identical and its neighbours), and tests are load-bearing.
    *
@@ -539,7 +540,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     return `evidence: FAIL — ${EVIDENCE_STEP_PREFIX.test(msg) ? msg : `${step}: ${msg}`}`;
   };
   const failOnce = (line) => { if (evidenceFailed) return; evidenceFailed = true; record([line]); };
-  const publishEvidence = async ({ route, reason = null }) => {
+  const publishEvidence = async ({ route, reason = null, pending = null }) => {
     if (published) return;                                             // dw5: once per merge run, whatever the route
     published = true;
     if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
@@ -547,10 +548,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       failOnce("evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written");
       return;
     }
-    let step = "publish";
-    const onStep = (s) => { if (typeof s === "string" && s) step = s; };
+    let step = "read";
+    const onStep = (s) => { if (typeof s === "string" && EVIDENCE_STEP_PREFIX.test(`${s}: `)) step = s; };
     try {
-      const r = await boundedEvidence((signal) => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal, onStep }), () => step);
+      const r = await boundedEvidence((signal) => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, ...(pending ? { pending } : {}), signal, onStep }), () => step);
       if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
       evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;
       record([`evidence: published to PR #${pr} (${route})`]);
@@ -1213,8 +1214,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       ...files.map((f) => `- \`${f}\``),
     ].join("\n");
     if (!d.comment) return await undecidable(what, "comment dep not wired — the owner could not be told how to veto");
-    // #195 — the evidence is on the PR body before the owner is told the window is open (and is not published again after it).
-    await publishEvidence({ route: "veto-window" });
+    // #195 — the evidence is on the PR body before the owner is told the window is open (and is not published again after it —
+    // once per merge run). It names the window and what a veto does, so a vetoed PR's section is not silent on the route.
+    await publishEvidence({ route: "veto-window", pending: `self-change veto window open until ${closesAt} (UTC) — a ${VETO_LABEL} label on issue #${issue} hands this PR to a human; otherwise head ${String(sha).slice(0, 7)} is squash-merged` });
     try { await d.comment(pr, body); }
     catch (e) { return await undecidable(what, `the veto-window announcement could not be posted on PR #${pr}: ${e?.message || e}`); }
     record([`merge: veto window opened — ${description} (${vetoMinutes} min, ${kind === "judge" ? "judge" : "non-judge"} path) on ${String(sha).slice(0, 7)}`]);
