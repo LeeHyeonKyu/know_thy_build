@@ -655,14 +655,23 @@ export function isFactoryReleaseRetry(comment, { factoryLogin = null } = {}) {
  * K를 우회하게 되므로 그대로 두고, 이 창은 sweeper의 스톨 재점화 카운터에만 쓴다 — 사람이 되돌린 이슈는 새 주기이고,
  * 지난 주기의 재점화 마커 2개가 첫 스톨에서 곧장 `stalled restart limit`을 만드는 것은 사람의 결정을 무효로 만든다.
  */
-export function commentsSinceCycleStart(comments, { factoryLogin = null } = {}) {
+/**
+ * #196 rework cf1 — `blockedHopOpensCycle: false`면 **`blocked → queue` 전이는 재큐로 치지 않는다**(사람 계정의 `by=human`만 연다 — 아래 S1
+ * 규칙 그대로). 그 엣지의 비사람 생산자는 트리아지 재시도 런 자신의 hop(`run-stage.js`, `BLOCKED_RETRY.triage.hop`, "retry from blocked")
+ * 하나다 — 그것은 같은 blocked 사건 안의 재시도이지 새 주기가 아니다. 기본값(`true`)은 예전과 바이트 하나 안 다르게 동작하고, engine-crash
+ * 장부(sweeper의 blocked 팔)만 `false`로 부른다: 그 상한이 크래시 루프의 유일한 브레이크라(ADR-035 §3), hop이 창을 열면 직전 재시도 마커가
+ * 창 밖으로 밀려 트리아지 크래시가 영원히 "시도 0"으로 읽혔다. 위조 방향은 닫힌 쪽이다 — 흉내 낸 `blocked → queue` 코멘트는 리셋을
+ * **줄일** 뿐이다. 사람의 재큐(`needs-human → queue`)와 릴리스 재시도는 출발 라벨이 blocked이 아니므로 여전히 새 주기다.
+ */
+export function commentsSinceCycleStart(comments, { factoryLogin = null, blockedHopOpensCycle = true } = {}) {
   const list = Array.isArray(comments) ? comments : [];
   let from = 0;
   list.forEach((c, i) => {
     const b = String(c?.body ?? "");
     const m = TRANSITION_TO.exec(b);
     if (!m) return;
-    if (m[2] === "factory:queue") { from = i + 1; return; }          // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
+    const runnerHop = !blockedHopOpensCycle && m[1] === "factory:blocked";
+    if (m[2] === "factory:queue" && !runnerHop) { from = i + 1; return; }   // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
     // #156 dw6 — 새 엔진이 온 뒤의 릴리스 재시도도 사람의 `--retry`처럼 새 주기다. 단 러너의 마커 + 팩토리 계정일 때만.
     if (isFactoryReleaseRetry(c, { factoryLogin })) { from = i + 1; return; }
     /**

@@ -1658,7 +1658,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? engineCrashMaxRetries : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
-          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number, cause);
+          // #196 rework cf1 — engine-crash 장부는 재시도 런 자신의 `blocked → queue` hop(트리아지)으로 창을 열지 않는다: 그 상한이 루프의 유일한 브레이크다.
+          const window = commentsSinceCycleStart(comments, { factoryLogin, blockedHopOpensCycle: !isEngineCrash });
+          const lastAttempt = lastBlockedRetryAttempt(window, retryStage, it.number, cause);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)

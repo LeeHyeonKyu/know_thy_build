@@ -3459,3 +3459,52 @@ test("test_196_engine_crash_attempts_are_counted_apart_from_other_causes", async
     expect(esc.reason).toMatch(/engine defect/);
   }
 });
+
+// ── #196 rework cf1 — 트리아지 크래시도 상한에서 끝난다: 재시도 런 자신의 hop(`blocked → queue`, `retry from blocked`)은 새 주기가 아니다 ─────
+// 트리아지의 blocked-retry hop은 `to=factory:queue` 전이를 남기고, 그 전이가 재시도 예산의 창(`commentsSinceCycleStart`)을 열면 직전의
+// engine-crash 재시도 마커가 창 밖으로 밀려 다음 크래시가 다시 "시도 0"으로 읽힌다 — 상한 없는 루프다. 여기서는 run-stage가 실제로 하는
+// hop을 **진짜 transition()**으로 sweep 사이에 재생한다(프로덕션의 배선된 리허설 자리에 skipRehearsal). 대조군: 사람이(또는 에스컬레이션
+// 문장이 가리키는 명령으로) needs-human에서 재큐하면 그것은 새 주기다 — 크래시는 다시 자기 상한만큼 밀린다.
+const triageHop196 = (gh) => realTransition196b({ gh, issue: 5, to: "factory:queue", reason: "retry from blocked — origin factory:queue confirmed", prerequisite: true, skipRehearsal: true, env: {} });
+const triageCrash196 = (gh) => realTransition196b({ gh, issue: 5, to: "factory:blocked", reason: "engine crash — triage threw TypeError: Cannot read properties of undefined (reading 'test')", stage: "triage", cause: "engine-crash", env: {} });
+
+test("test_196_triage_engine_crash_is_bounded_across_the_runner_hop", async () => {
+  for (const cap of [1, 2]) {
+    const gh = labelFaithfulGh196(5, "factory:queue");
+    expect((await triageCrash196(gh)).ok).toBe(true);
+    const args = sweepArgs196(gh, { engineCrashMaxRetries: cap });
+    const all = [];
+    for (let i = 0; i < 6 && gh.label === "factory:blocked"; i++) {
+      const acts = await sweep(args);
+      all.push(...acts);
+      if (acts.some((a) => a.kind === "blocked-retry")) {                    // 띄운 트리아지 런: hop으로 queue에 돌아온 뒤 같은 자리에서 또 죽는다
+        expect((await triageHop196(gh)).ok).toBe(true);
+        expect(gh.label).toBe("factory:queue");
+        expect((await triageCrash196(gh)).ok).toBe(true);
+      }
+    }
+    expect({ cap, dispatched: args.dispatchStage.mock.calls.length }).toEqual({ cap, dispatched: cap });
+    expect(all.filter((a) => a.kind === "blocked-retry").every((a) => a.stage === "triage" && a.cause === "engine-crash")).toBe(true);
+    expect(all).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+    expect(gh.label).toBe("factory:needs-human");
+
+    // 대조군: needs-human → queue 재큐(에스컬레이션 문장의 명령)는 새 주기다 — 다음 크래시는 다시 상한만큼 밀린다
+    expect((await realTransition196b({ gh, issue: 5, to: "factory:queue", reason: "engine fixed — requeue", skipRehearsal: true, env: {} })).ok).toBe(true);
+    expect((await triageCrash196(gh)).ok).toBe(true);
+    const again = await sweep(args);
+    expect(again).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "engine-crash" });
+    expect(args.dispatchStage.mock.calls.length).toBe(cap + 1);
+  }
+});
+
+test("test_196_runner_hop_keeps_other_triage_causes_as_before", async () => {
+  // 다른 원인의 창은 바뀌지 않는다: `other`의 트리아지 blocked은 hop 뒤에도 예전처럼 한 번 더 밀린다(이 변경 전과 같은 동작)
+  const gh = labelFaithfulGh196(5, "factory:queue");
+  const blockOther = () => realTransition196b({ gh, issue: 5, to: "factory:blocked", reason: "stage failed (other)", stage: "triage", cause: "other", env: {} });
+  expect((await blockOther()).ok).toBe(true);
+  const args = sweepArgs196(gh);
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "other" });
+  expect((await triageHop196(gh)).ok).toBe(true);
+  expect((await blockOther()).ok).toBe(true);
+  expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "other" });
+});
