@@ -788,3 +788,18 @@ test("test_179_gh_label_events_names_actor_and_time", async () => {
   const bad = makeGh({ run: makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 502" } }]), repo });
   await expect(bad.labelEvents(7, "factory:veto")).rejects.toThrow(/HTTP 502/);
 });
+
+// #179 self-critique — 자기 변경 경로의 머지는 창 뒤에 검증한 head에만 닿는다: `--match-head-commit <sha>`.
+// 그 사이 head가 움직였으면 GitHub이 머지를 거부한다. sha를 넘기지 않는 호출은 오늘의 인자 그대로다.
+test("test_179_gh_merge_pr_pins_the_head_commit", async () => {
+  const run = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  const sha = "b".repeat(40);
+  await gh.mergePr(9, { method: "squash", deleteBranch: true, matchHeadCommit: sha });
+  expect(run.calls[0].args).toEqual(["pr", "merge", "9", "-R", repo, "--squash", "--delete-branch", "--match-head-commit", sha]);
+  await gh.mergePr(9, { method: "squash", deleteBranch: true, matchHeadCommit: undefined });
+  expect(run.calls[1].args).toEqual(["pr", "merge", "9", "-R", repo, "--squash", "--delete-branch"]);
+  // sha 모양이 아닌 값은 플래그로 흘려보내지 않고 던진다 — 고정하지 못한 머지를 고정한 척하지 않는다.
+  await expect(gh.mergePr(9, { matchHeadCommit: "--admin" })).rejects.toThrow(/matchHeadCommit/);
+  expect(run.calls).toHaveLength(2);
+});

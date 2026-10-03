@@ -716,9 +716,17 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async collaboratorPermission(login) {
       return JSON.parse(await gh(["api", `repos/${repo}/collaborators/${login}/permission`])).permission;
     },
-    async mergePr(pr, { method = "squash", deleteBranch = true } = {}) {
+    /**
+     * `matchHeadCommit`(#179): 주면 `--match-head-commit <sha>` — 그 사이 PR head가 움직였으면 GitHub이 머지를 거부한다.
+     * sha 모양(7–40자 hex)이 아니면 던진다: 고정하지 못한 머지를 고정한 척 내보내지 않는다.
+     */
+    async mergePr(pr, { method = "squash", deleteBranch = true, matchHeadCommit } = {}) {
+      if (matchHeadCommit !== undefined && !/^[0-9a-f]{7,40}$/.test(String(matchHeadCommit))) {
+        throw new Error(`mergePr: matchHeadCommit must be a commit sha — got ${JSON.stringify(matchHeadCommit)}`);
+      }
       const args = ["pr", "merge", String(pr), "-R", repo, `--${method}`];
       if (deleteBranch) args.push("--delete-branch");
+      if (matchHeadCommit !== undefined) args.push("--match-head-commit", String(matchHeadCommit));
       await gh(args);
     },
     async closeIssue(n, comment) {
