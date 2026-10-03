@@ -5090,3 +5090,79 @@ test("test_179_run_stage_wires_merge_self_change_deps", async () => {
   expect(d.gates).not.toHaveBeenCalled();
   expect(d.sleep).not.toHaveBeenCalled();
 });
+
+// #179 self-critique — 엔진 판정은 charterReady 안에서, base 체크아웃에서 **한 번** 굳는다(PR이 표지 파일을 추가하거나 지워도
+// 바뀌지 않는다). main()은 그 charterReady와 makeMergeSelfChangeDeps를 실제로 배선하고, runStage는 checkoutHead보다 먼저
+// charterReady를 부른다. 그리고 merge 쪽 deps는 NEVER_AUTOMATE 글롭과 head를 못 박는 mergePr를 실어 나른다.
+import { makeCharterReady } from "../bin/run-stage.js";
+import { loadCharter as loadCharter179 } from "../lib/config.js";
+
+test("test_179_engine_is_fixed_at_charter_ready_before_checkout", async () => {
+  const MARKERS = ["factory/lib/non-judge-paths.js", "templates/factory/factory/harness.toml"];
+  const touch = (root, f) => { mkdirSync(dirname(join(root, f)), { recursive: true }); writeFileSync(join(root, f), ""); };
+  const engineHarness = { project: { name: "know-thy-build" } };
+  const ready = (root, { status = "ready" } = {}) => {
+    const state = {};
+    const fn = makeCharterReady({
+      root,
+      loadCharter: () => ({ status, self_change: { auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 60 }, never_automate: ["templates/factory/**"] }),
+      loadHarness: () => engineHarness,
+      set: (patch) => Object.assign(state, patch),
+      log: () => {},
+    });
+    return { fn, state };
+  };
+
+  // base에 표지 파일이 없다 → 엔진 아님. 그 뒤에 PR head가 표지 파일을 더해도(checkoutHead) 판정은 그대로다.
+  const plain = mkdtempSync(join(tmpdir(), "ktb-179-base-"));
+  const a = ready(plain);
+  expect(await a.fn()).toBe(true);
+  expect(a.state.engine).toBe(false);
+  for (const m of MARKERS) touch(plain, m);
+  const wiredA = makeMergeSelfChangeDeps({ gh: {}, issue: 7, getCharter: () => a.state.charter, getEngine: () => a.state.engine, env: {} });
+  expect(wiredA.engine).toBe(false);
+
+  // base에 표지 파일이 있다 → 엔진. charterReady가 계산해야만 참이 된다(지우면 false로 남는다).
+  const engineRoot = mkdtempSync(join(tmpdir(), "ktb-179-engine-"));
+  for (const m of MARKERS) touch(engineRoot, m);
+  const b = ready(engineRoot);
+  expect(await b.fn()).toBe(true);
+  expect(b.state.engine).toBe(true);
+  expect(b.state.harness).toBe(engineHarness);
+  const wiredB = makeMergeSelfChangeDeps({ gh: {}, issue: 7, getCharter: () => b.state.charter, getEngine: () => b.state.engine, env: {} });
+  expect(wiredB.engine).toBe(true);
+  expect(wiredB.selfChange).toEqual({ auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 60 });
+  expect(wiredB.neverAutomate).toEqual(["templates/factory/**"]);
+
+  // 잠드는 CHARTER(draft)는 false — 읽기 실패도 false이고 엔진 판정은 닫힌 쪽(false)이다.
+  expect(await ready(engineRoot, { status: "draft" }).fn()).toBe(false);
+  const broken = {};
+  const brokenFn = makeCharterReady({ root: engineRoot, loadCharter: () => { throw new Error("bad yaml"); }, loadHarness: () => engineHarness, set: (p) => Object.assign(broken, p), log: () => {} });
+  expect(await brokenFn()).toBe(false);
+  expect(broken.engine).not.toBe(true);
+
+  // 실제 CHARTER의 NEVER_AUTOMATE 글롭이 그대로 merge deps에 실린다.
+  const repoRoot = join(dirname(new URL(import.meta.url).pathname), "../..");
+  const real = loadCharter179(repoRoot);
+  expect(makeMergeSelfChangeDeps({ gh: {}, issue: 7, getCharter: () => real, getEngine: () => false, env: {} }).neverAutomate).toEqual(real.never_automate);
+
+  // mergePr: 오늘의 호출은 오늘의 인자 그대로, 자기 변경 경로의 호출은 head를 gh.js까지 실어 나른다.
+  const gh = { mergePr: vi.fn(async () => {}) };
+  const m = makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => real, getEngine: () => true, env: {} });
+  await m.mergePr(9);
+  await m.mergePr(9, { matchHeadCommit: "b".repeat(40) });
+  expect(gh.mergePr.mock.calls).toEqual([[9, { method: "squash", deleteBranch: true }], [9, { method: "squash", deleteBranch: true, matchHeadCommit: "b".repeat(40) }]]);
+
+  // 프로덕션 배선: main()의 deps가 이 charterReady와 merge deps를 쓰고, mergePr를 따로 정의하지 않는다.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainSrc.slice(mainSrc.indexOf("const deps = {"), mainSrc.indexOf("\n  };\n", mainSrc.indexOf("const deps = {")));
+  expect(depsBlock).toMatch(/\n {4}charterReady: makeCharterReady\(\{ root, set: \(s\) => \{[^}]*engineAtBase = s\.engine/);
+  expect(depsBlock).not.toMatch(/\n {4}mergePr\s*:/);
+  expect(mainSrc).toMatch(/Object\.defineProperties\(deps, Object\.getOwnPropertyDescriptors\(makeMergeSelfChangeDeps\(\{\s*gh, issue, getCharter: \(\) => charter, getEngine: \(\) => engineAtBase, env: process\.env,?\s*\}\)\)\);\n\s*process\.exit\(await runStage\(/);
+  // runStage는 charterReady를 checkoutHead보다 먼저 부른다(엔진 판정이 base 트리에서 일어나는 근거).
+  const runStageSrc = src.slice(src.indexOf("export async function runStage("));
+  const iReady = runStageSrc.indexOf("await d.charterReady()"), iCheckout = runStageSrc.indexOf("await d.checkoutHead()");
+  expect(iReady).toBeGreaterThan(-1);
+  expect(iCheckout).toBeGreaterThan(iReady);
+});
