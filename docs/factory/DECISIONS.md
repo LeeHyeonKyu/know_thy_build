@@ -18,7 +18,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 | 008 | 신뢰되지 않은 워크스페이스의 allow/deny | PASS (CI 필수 조치 도출) |
 | 009 | 러너/yml 관례 | (스파이크 아님 — 실행 중 발견) |
 | 010 | 게이트 판정의 진실 소스 | 파일(`gates.json`)이 진실 — handoff는 복사본, 불일치는 거부 |
-| 011 | flaky 재분류는 어느 스테이지가 하나 | implement·review(1.4.29~)에서 분류. merge는 분류하지 않되, ADR-033(#157)부터 RED가 전부 PR diff 밖의 파싱된 테스트 실패면 같은 게이트를 한 번 다시 돌고 그 런 전체가 GREEN일 때만 머지 |
+| 011 | flaky 재분류는 어느 스테이지가 하나 | implement·review(1.4.29~)에서 분류. merge는 분류하지 않되, ADR-034(#157)부터 RED가 전부 PR diff 밖의 파싱된 테스트 실패면 같은 게이트를 한 번 다시 돌고 그 런 전체가 GREEN일 때만 머지 |
 | 012 | 게이트 판정과 사전 assert의 분리 | `gatesChecked` 표식 — 전이 경로에서만 게이트를 확인 |
 | 013 | 훅 입력 불신 원칙 | `tool_input`을 셸 문자열에 넣기 전 반드시 이스케이프 |
 | 014 | run 기록은 `factory/records` 브랜치 | 보호된 default 브랜치에는 스테이지마다 직접 push할 수 없다 |
@@ -290,7 +290,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 
 **영향**: §5.2.5-③, §4.2.1 step 5, §5.2.4.
 
-**개정**: review도 1.4.29(own-calendar #49)부터 같은 분류를 한다(`lib/gates.js` `runStageGates`). merge는 여전히 분류하지 않지만, ADR-033(#157)부터 **PR diff 밖의 테스트만 RED인 경우 같은 게이트를 한 번 다시 돈다** — 아래 ADR-033의 경계 안에서만이고, 재시도가 RED를 GREEN으로 **판정**하지는 않는다(두 번째 런 전체가 GREEN이어야 한다).
+**개정**: review도 1.4.29(own-calendar #49)부터 같은 분류를 한다(`lib/gates.js` `runStageGates`). merge는 여전히 분류하지 않지만, ADR-034(#157)부터 **PR diff 밖의 테스트만 RED인 경우 같은 게이트를 한 번 다시 돈다** — 아래 ADR-034의 경계 안에서만이고, 재시도가 RED를 GREEN으로 **판정**하지는 않는다(두 번째 런 전체가 GREEN이어야 한다).
 
 ---
 
@@ -3997,63 +3997,6 @@ review의 overlay는 PR이 새로 추가한 팩토리 소유 파일을 `git rm`�
 경로**로 좁힌다(`regenerateMirror`가 `entries`를 돌려준다). 그 밖의 경로는 overlay가 base에서 가져온 것이고 머지 뒤 main에 그대로 있을 파일이다.
 1.4.44의 세션 전 대조는 entries만 보므로 통과했고 세션 뒤 verify에서 걸렸다 — 리뷰어 비용이 한 번 더 들었다. 이제 둘이 같은 기준이다.
 
----
-
-## ADR-033 merge 게이트의 RED가 PR diff 밖의 테스트뿐이면 한 번 다시 돈다 — ADR-011의 merge 쪽 개정 — 2026-10-02 (#157)
-
-**질문**: merge 스테이지의 게이트가 PR이 건드리지 않은 테스트 하나로 RED일 때, 첫 RED를 곧바로 사람에게 넘기는 것이 맞는가.
-
-**관측**: own-calendar #111 — `client/**`만 바꾼 PR(리뷰 3/3 approve)이 merge 게이트에서 `server/tests/follows.test.ts::test_49_event_visibility`
-하나(131/132 통과, 통합 테스트의 DB 타이밍)로 `needs-human`이 됐다(2026-10-02 01:52Z). 사람이 할 수 있는 일은 "다시 돌려 보기"뿐이었다(ADR-032).
-ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손에 남겨 두고 있었다.
-
-**결정** (`lib/merge-stage.js` `rerunEligibility`, `runMergeStage` (4)): merge에서만, 다음이 **전부** 증명될 때 같은 `d.gates()`(run-stage의
-`runStageGates`, stage `merge`)를 **정확히 한 번** 더 부른다.
-- 결과가 RED(MISCONFIGURED·BLOCKED가 아님)이고, RED인 게이트가 **전부** 리포트를 실제로 읽은(`parsed: true`) 테스트 게이트이며 `failing_ids`가 비어 있지 않다.
-  lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다.
-- 그 게이트들이 남긴 리포트를 읽어(run-stage `suiteFailures` dep → `idlessFailedSuites`) **실패 assertion 없이 실패한 테스트 파일이 하나도 없음**이 확인된다(아래).
-- PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`의 `all`, git 호출에 `--no-renames`)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
-- diff에 **저장소 루트의 파일이 하나도 없다** — 루트 파일(package.json·lockfile·설정·README까지)은 모든 패키지를 건드린 것으로 본다.
-- 실패 테스트마다 경로가 정규화되고, 루트에 있지 않으며, 그 최상위 디렉터리(`server/` 대 `client/`)에 diff 파일이 하나도 없다.
-
-하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록·리포트를 못 읽음·실패 assertion 없는 실패 파일) 지금과
-**같은 한 번의 판정**이다(fail closed).
-
-`failing_ids`는 실패한 **assertion**만 센다(`parsers/vitest-json.js`). 로드에 실패한 테스트 파일(또는 suite 훅이 던진 파일)은 vitest JSON에
-`status:"failed"` + `message`, 실패 assertion 0개로 남고 `numFailedTestSuites`에만 잡힌다 — id가 없으니 `failing_ids`에 나타나지 않고,
-그러면 "RED의 전부가 diff 밖"이 거짓으로 증명된다(#157 자기비판: 서버 assertion RED + diff 안의 `client/` 파일 로드 실패가 재실행 대상이 됐다).
-그래서 merge 스테이지가 **게이트 런 직후** 그 런이 남긴 리포트(`harness.test.<gate>_report`, 기본 `.factory/out/<gate>.json`)를 직접 읽는다
-(`lib/merge-stage.js` `idlessFailedSuites`, run-stage `makeMergeSuiteFailuresDep`). factory.gates.v1과 gates.js 코드는 바꾸지 않는다(plan non-goal).
-리포트가 없거나 읽히지 않거나, 리포트의 실패 assertion이 게이트의 `failing_ids`와 다르면(디스크의 파일이 그 게이트가 읽은 것이 아니다) 증명 실패다.
-같은 이유로 "같은 id 집합" 비교도 재실행 리포트에 그런 파일이 있거나 읽히지 않으면 비교 불가로 본다(flaky 후보 문구·마커 없음).
-재실행의 결과는 이렇게 읽는다:
-- **전체가 GREEN**이어야만 머지로 이어진다. `factory/gates` 상태를 그 결과로 다시 게시하고(첫 RED의 failure가 required check로 남지 않게),
-  4b·`mergeGates`·`factory:merged` 전이가 모두 재실행 결과를 본다. 첫 RED의 `gates-detail` 줄과 `factory-flaky-candidate`(outcome GREEN) 줄을 run 기록에 남긴다.
-- **같은 id 집합**이 다시 RED면 `needs-human`, 사유에 "PR 밖의 테스트가 두 번 RED — flaky 후보"와 id, id마다 `factory-flaky-candidate`(outcome RED) 줄.
-- **다른 집합**이 RED면 평범한 `needs-human`이고 두 집합을 모두 적는다 — flaky 문구도 마커도 없다. BLOCKED·base/diff 예외는 `factory:blocked`.
-- 세 번째 실행은 없다. 마커 줄은 `factory-flaky-candidate: {test, outcome, run_id, runner, round?}` 한 줄 JSON이고 `gates-detail`과 같은 run 바인딩을 갖는다.
-
-**버린 대안**: merge에서도 `classifyFailures`(격리 실행 `flaky_isolation_runs`·base 실행 `flaky_base_runs`, `factory:flaky` 이슈 생성)를 켜는 것.
-분류기가 더 강하다는 반론(base 실행으로 broken-base를 가른다)은 기록해 둔다. 그래도 단일 재실행을 고른 이유: ① 분류기는 판정 제외와
-이슈 생성이라는 **부수 효과**를 merge의 뜨거운 경로에 들인다 — ADR-011이 분류 창구를 implement/review로 묶은 이유가 그대로 남는다.
-② 단일 재실행은 판정을 바꾸지 않는다: 두 번째 런 **전체**가 GREEN이어야만 머지하고, 아니면 지금과 같은 사람 경로다. ③ 비용이 한 번의 게이트 실행으로 묶인다(base 5회 + 격리 3회가 아니다).
-
-**남는 위험**: 비율 p로 실패하는 진짜 간헐 회귀(제품 경쟁 조건)는 1-p의 확률로 재실행 GREEN을 받아 머지된다 — 흔적은 run 기록의 마커뿐이다.
-**`factory-flaky-candidate`를 읽는 소비자는 아직 없다**(retro 수확기는 `factory:flaky` 라벨만 읽는다) — 후속 이슈의 몫이다. 최상위 디렉터리
-휴리스틱은 디렉터리를 가로지르는 의존(`shared/`를 import하는 `server/`)을 보지 못한다; 결정적 결함은 두 번 실패하므로
-머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. 이름 변경은 **양쪽 경로**를 모두 diff로 친다(`--no-renames`로 git이 `D 옛 경로` + `A 새 경로`를
-낸다; D 행도 `all`에 있다): `server/`에서 파일을 옮겨 나간 PR은 `server/`를 건드린 PR이다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
-**unhandled error는 증명할 수 없다**: vitest(3.2.7 실측, `--reporter=json`)는 테스트 밖의 unhandled rejection·늦게 던진 오류를 리포트에도
-stderr에도 남기지 않고 종료 코드 1로만 말한다(unhandled만 있으면 리포트는 `success:true`). 그러니 "diff 밖 assertion RED + diff 안 코드의
-unhandled error"는 assertion RED만 있는 런과 구별되지 않고 재실행 대상이 된다. 남는 경계: 재실행 **전체**가 GREEN이어야 머지하므로 그 오류가
-다시 나면(결정적이면) 머지되지 않는다(`test_157_unhandled_error_on_the_rerun_never_merges` — assertion 0개 RED는 KTB-35 RED이고 flaky 마커도 없다).
-간헐적인 unhandled error는 위의 간헐 회귀와 같은 1-p 노출이고, 결정적인 것이 같은 서버 id의 두 번째 RED와 겹치면 "flaky 후보"로 잘못 적힌다(그래도 needs-human).
-
-**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4)·`rerunEligibility`·`idlessFailedSuites`, `bin/run-stage.js` `makeStageGateDeps`(= `makeStageGatesDep`·`makeMergeDiffFilesDep`·
-`makeMergeSuiteFailuresDep`, `main()`이 그대로 펼친다), `lib/gates.js` `runStageGates` 주석(코드 변경 없음). `factory-flaky-candidate`의 테스트 이름은
-`gates-detail` 투영(`gatesDetailLines`)이 쓰는 `failing` 이름 그대로다 — 스크럽 규칙을 복사하지 않는다(리뷰 arch1). factory.gates.v1·`changedFiles`·
-파서는 바뀌지 않는다. 설계 스펙 §5.2.5의 "`gates.js`는 절대 재시도로 GREEN을 만들지 않는다"는 그대로 참이다(재실행은 merge-stage가 하고, 판정을
-뒤집지 않는다); 같은 절의 "review·merge는 RED를 RED로 둔다"는 ADR-011 개정과 이 ADR이 대체한다(스펙 본문은 이 이슈의 범위 밖이라 고치지 않았다).
 ## ADR-033 판정 경로도 공장이 머지한다 — 만장일치 + GREEN + 거부권 창 + 차단기 — 2026-10-03 (소유자 결정)
 
 ADR-032 뒤 하루의 실측: 사람에게 간 머지 요청은 전부 판정 경로 엔진 PR(#158·#169·#172·#161)이었고, 그 PR들이 바로 "사람 요청을 없애는 수정"을
@@ -4063,3 +4006,78 @@ ADR-032 뒤 하루의 실측: 사람에게 간 머지 요청은 전부 판정 �
 연속 2회에 열리고 사람만 닫는다; 차단기(S4c)가 없는 동안은 판정 스위치(`self_change.auto_merge_judge`)를 켜지 않는다. 대가: 판정 코드의
 회귀를 사후에 revert로 잡는다(모든 머지가 squash). 스펙 §8.5·플랜 §7에 적었고, S4a(#149)의 브리프를 그에 맞춰 고쳤다.
 같은 날 둘째 결정(공장이 만든다): K 소진 뒤 "새 작성자 + 운영 브리프" 재시작을 공장이 스스로 한다(#149·#157·#170에서 사람이 손으로 한 것).
+
+---
+
+## ADR-034 merge 게이트의 RED가 PR diff 밖의 테스트뿐이면 한 번 다시 돈다 — ADR-011의 merge 쪽 개정 — 2026-10-03 (#157)
+
+**질문**: merge 스테이지의 게이트가 PR이 건드리지 않은 테스트 하나로 RED일 때, 첫 RED를 곧바로 사람에게 넘기는 것이 맞는가.
+
+**관측**: own-calendar #111 — `client/**`만 바꾼 PR(리뷰 3/3 approve)이 merge 게이트에서 `server/tests/follows.test.ts::test_49_event_visibility`
+하나(131/132 통과, 통합 테스트의 DB 타이밍)로 `needs-human`이 됐다(2026-10-02 01:52Z). 사람이 할 수 있는 일은 "다시 돌려 보기"뿐이었다(ADR-032).
+ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손에 남겨 두고 있었다. (이 결정은 처음에 ADR-033으로 적혔으나, 그 번호는 main에서
+판정 경로 자동 머지 결정이 먼저 가져갔다 — 번호 하나에 제목 하나다.)
+
+**결정** (`lib/merge-stage.js` `rerunEligibility`, `runMergeStage` (4)): merge에서만, 다음이 **전부** 증명될 때 같은 `d.gates()`(run-stage의
+`runStageGates`, stage `merge` — `mergeGates`가 아니다)를 **정확히 한 번** 더 부른다.
+- 결과가 RED(MISCONFIGURED·BLOCKED가 아님)이고, RED인 게이트가 **전부** 리포트를 실제로 읽은(`parsed: true`) 테스트 게이트이며 `failing_ids`가
+  비어 있지 않다. **파싱된 테스트 실패만** 자격이 있다 — lint 같은 비-테스트 게이트가 함께 RED면 재실행하지 않는다.
+- 그 게이트들이 남긴 리포트를 읽어(run-stage `suiteFailures` dep → `idlessFailedSuites`) **실패 assertion 없이 실패한 테스트 파일이 하나도 없음**이 확인된다.
+  로드에 실패한 파일은 id가 없어 `failing_ids`에 나타나지 않으므로, 그것을 모르면 "RED의 전부가 diff 밖"이 거짓으로 증명된다.
+- PR diff(`<base>...HEAD`, run-stage `diffFiles` dep — 기존 `changedFiles`의 `all`, git 호출에 `--no-renames`)를 읽었고 비어 있지 않으며 모든 경로가 정규화된다.
+  이름 변경은 양쪽 경로를 모두 친다(`server/`에서 옮겨 나간 PR은 `server/`를 건드린 PR이다).
+- diff에 **저장소 루트의 파일이 하나도 없다** — 루트 파일(package.json·lockfile·vitest/tsconfig·README까지)은 모든 패키지를 건드린 것으로 본다.
+- 실패 테스트마다 경로가 정규화되고, 루트에 있지 않으며, 최상위 디렉터리가 **관례적 테스트 루트**(`test`·`tests`·`__tests__`·`spec`·`e2e`,
+  `TEST_ROOT_DIRS` — 목록은 merge-stage.js 한 곳에만 있다)가 아니고, 그 최상위 디렉터리(`server/` 대 `client/`)에 diff 파일이 하나도 없다.
+
+하나라도 증명되지 않으면(dep 없음·예외·`ok:false`·빈 diff·`parsed:false`·빈 id 목록·리포트를 못 읽음·실패 assertion 없는 실패 파일·테스트 루트)
+지금과 **같은 한 번의 판정**(같은 전이, 같은 사유)이다(fail closed). 거절은 조용하지 않다: run 기록에 지금의 줄들에 더해 **정확히 한 줄**
+`merge: no gates rerun — <사유> [run_id=… runner=…]`이 판정 줄 바로 뒤에 붙는다. 사유는 `gatesDetailLines` 투영의 스크럽을 거친다(경로·dep 오류 문구가
+공개 기록으로 나가므로 — 규칙을 복사하지 않는다). 그래야 당번이 "이유 X로 거절됨"과 "기능이 고장남"을 구별한다.
+
+재실행의 결과는 이렇게 읽는다:
+- **재실행 전체가 GREEN**일 때만 머지로 이어진다. `factory/gates` 상태를 그 결과로 다시 게시하고(첫 RED의 failure가 required check로 남지 않게),
+  4b·`mergeGates`·`factory:merged` 전이가 모두 재실행 결과를 본다. 두 번째 호출은 `gates.json`을 덮어쓰므로, 첫 RED의 `gates-detail` 줄과
+  `merge: gates RED outside the PR diff — rerun 1/1 (<ids>) [run_id=… runner=…]` 줄은 **재실행이 시작되기 전에** run 기록에 들어간다 — merge 잡이
+  재실행 도중 시간 초과로 죽어도 어느 런에서 죽었는지 구별된다. 머지 뒤에도 `factory-flaky-candidate`(outcome GREEN) 줄이 남는다.
+- **같은 id 집합**이 다시 RED면 `needs-human`, 사유에 "PR 밖의 테스트가 두 번 RED — flaky 후보"와 id, id마다 `factory-flaky-candidate`(outcome RED) 줄.
+  이것은 **후보**이지 flaky 판정이 아니다 — 이 저장소는 그것이 테스트 문제인지 제품 경쟁 조건인지 가를 수 없다.
+- **다른 집합**(부분집합·상위집합 포함)이 RED면 평범한 `needs-human`이고 두 집합을 모두 적는다 — flaky 문구도 마커도 없다. 리포트를 쓰지 않은
+  재실행은 "inconclusive"이지 두 번째 RED가 아니다(재실행 전에 `resetGates`로 첫 리포트를 지운다).
+- 재실행이 BLOCKED이거나, 판정을 아예 내지 않았거나(null), base/diff typed error를 던지면 `factory:blocked`와 사유 줄이다 — 재실행이 아무것도 가르지 못했다.
+- 세 번째 실행은 없다. **재실행은 `runMergeStage` 호출 하나당 최대 한 번**이다 — 이슈당이 아니다: sweeper의 blocked→merge 재시도
+  (`lib/sweeper.js`의 재시도 표 `"factory:approved": "merge"`, 한 번뿐)가 같은 이슈에 merge를 한 번 더 돌리면 그 호출도 자기 한 번을 갖는다.
+  이슈 단위의 상한은 두지 않았다(범위 밖) — 최악은 merge 호출 두 번에 게이트 네 번이다.
+
+**ADR-033(판정 경로 자동 머지)과의 관계**: 재실행 뒤의 전체 GREEN은 ADR-033의 "게이트 GREEN"을 **충족한다** — 두 번째 런의 결과가 `factory/gates`
+상태로 게시되고 머지 경로는 그것만 본다. 즉 판정 경로 엔진 PR도, 그 RED가 이 규칙을 통과하면 재실행 GREEN으로 자동 머지될 수 있다.
+이 저장소에서 `factory/**`를 건드린 엔진 PR은 `factory/lib`와 `factory/test`가 같은 최상위 디렉터리라 `factory/test`의 RED가 재실행되지 않는다;
+남는 경로는 엔진 테스트를 건드리지 않은 PR(예: `docs/**`만 바꾼 PR)에서 `factory/test`가 간헐 RED인 경우다. 그때의 안전판은 ADR-033의 차단기
+(판정 경로 자동 머지 뒤 연속 revert 2회)뿐이다. 판정 경로 PR의 재실행을 거부하는 것은 이 이슈에 없는 새 동작이라 짓지 않았다(#157 plan non-goal) —
+필요하면 별도 이슈다.
+
+**버린 대안**: merge에서도 `classifyFailures`(격리 실행 `flaky_isolation_runs`·base 실행 `flaky_base_runs`, `factory:flaky` 이슈 생성)를 켜는 것.
+분류기가 더 강하다는 반론(base 실행으로 broken-base를 가른다)은 기록해 둔다. 그래도 단일 재실행을 고른 이유: ① 분류기는 판정 제외와
+이슈 생성이라는 **부수 효과**를 merge의 뜨거운 경로에 들인다 — ADR-011이 분류 창구를 implement/review로 묶은 이유가 그대로 남는다.
+② 단일 재실행은 판정을 바꾸지 않는다: 두 번째 런 **전체**가 GREEN이어야만 머지하고, 아니면 지금과 같은 사람 경로다. ③ 비용이 한 번의 게이트
+실행으로 묶인다(base 5회 + 격리 3회가 아니다).
+
+**대가와 남는 위험**:
+- **테스트 루트 규칙의 대가**: 루트 파일과 관례적 테스트 루트를 "건드림"으로 보므로, **단일 패키지 `src/` + `tests/` 채택 저장소는 재실행을 받지
+  못한다** — `docs/**`만 바꾼 PR의 `tests/**` RED도 첫 RED에 사람에게 간다. 클라이언트만 바꾸면서 lockfile을 올린 PR도 같다. 되돌릴 수 없는
+  머지에서는 보수적인 쪽이 이긴다; #111의 `client/` 대 `server/` 모양은 여전히 재실행된다.
+- **최상위 디렉터리 휴리스틱은 디렉터리를 가로지르는 import를 보지 못한다**(`server/`가 import하는 `shared/`). 결정적 결함은 두 번 실패하므로
+  머지되지 않지만, 간헐적인 것은 빠져나갈 수 있다. merge는 base 실행을 하지 않으므로 빨간 main도 "flaky 후보"로 보고된다.
+- 비율 p로 실패하는 진짜 간헐 회귀(제품 경쟁 조건)는 1-p의 확률로 재실행 GREEN을 받아 **되돌릴 수 없이** 머지된다 — 흔적은 run 기록의 마커뿐이다.
+- **`factory-flaky-candidate`를 읽는 소비자는 아직 없다**(retro 수확기 `lib/retro/harvest.js`는 `factory:flaky` 라벨만 읽는다) — 후속 이슈의 몫이다.
+  마커는 `factory-flaky-candidate: {test, outcome, run_id, runner, round?}` 한 줄 JSON이고 `gates-detail`과 같은 run 바인딩을 갖는다.
+- **unhandled error는 증명할 수 없다**: vitest(3.2.7 실측, `--reporter=json`)는 테스트 밖의 unhandled rejection을 리포트에도 stderr에도 남기지 않고
+  종료 코드 1로만 말한다. 그러니 "diff 밖 assertion RED + diff 안 코드의 unhandled error"는 재실행 대상이 된다. 남는 경계: 재실행 **전체**가
+  GREEN이어야 머지하므로 결정적인 오류는 머지되지 않는다(`test_157_unhandled_error_on_the_rerun_never_merges`).
+- 게이트 두 번 + required check 대기가 merge 잡의 30분 한도를 넘을 수 있다(`.github/**`는 이 이슈의 범위 밖). 그때 이슈는 시간 초과로 blocked에
+  가고, 재실행 전에 쓴 `rerun 1/1` 줄이 그것을 표시한다.
+
+**영향**: ADR-011(merge 쪽), `lib/merge-stage.js` (4)·`rerunEligibility`·`TEST_ROOT_DIRS`·`idlessFailedSuites`, `bin/run-stage.js` `makeStageGateDeps`
+(= `makeStageGatesDep`·`makeMergeDiffFilesDep`·`makeMergeSuiteFailuresDep`, `main()`이 그대로 펼친다), `lib/gates.js` `runStageGates` 주석(코드 변경 없음).
+factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. 설계 스펙 §5.2.5의 "`gates.js`는 절대 재시도로 GREEN을 만들지 않는다"는 그대로
+참이다(재실행은 merge-stage가 하고, 판정을 뒤집지 않는다); 같은 절의 "review·merge는 RED를 RED로 둔다"는 ADR-011 개정과 이 ADR이 대체한다.
