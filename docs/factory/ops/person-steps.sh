@@ -3,6 +3,10 @@
 # usage: bash person-steps.sh <KTB_PR> <own-calendar 이슈 번호...>
 #   예: bash person-steps.sh 129 107
 # 하는 일: KTB PR 머지 → npm 배포 대기 → own-calendar 업그레이드 PR 생성·머지 → 이슈를 큐에 투입
+#
+# 다시 돌리기(#196, ADR-035) — 호출자마다 명령 하나:
+#   에이전트 세션·CI·누구나 (재큐, 처음부터):   node .factory/bin/transition.js <n> factory:queue
+#   사람의 셸만 (중단 지점 재개):                node .factory/bin/transition.js <n> --human --retry
 set -euo pipefail
 KTB_PR="$1"; shift
 KTB=LeeHyeonKyu/know_thy_build; OC=LeeHyeonKyu/own-calendar

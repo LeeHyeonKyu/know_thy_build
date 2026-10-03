@@ -11,12 +11,24 @@ import { parseRunRecord } from "./usage.js";
  * `[budget].usd_per_issue`(CHARTER 프론트매터)를 넘으면 스테이지는 시작하지 않고 `needs-human`으로 세운다 — 예산을 올리든
  * (`:proposal`), 쪼개든, `wont-do`로 닫든 사람의 결정이다. 값이 없으면 검사하지 않는다(doctor가 `charter.budget-per-issue-unset`
  * WARN으로 그 침묵을 말한다 — `merge.human_gate`와 같은 규칙: 기본값을 채우지 않는다, 없는 것과 고른 것은 다른 사실이다).
+ *
+ * #196 (ADR-035) — **엔진 크래시 런은 상한에서 빠지고, 따로 보인다.** `runStage`의 catch가 프로그래밍 오류를 잡은 런의 섹션
+ * (`engine_crash`, `lib/usage.js`의 `engineCrashLine` — 러너만 쓴다)은 `usd`·`runs`에 넣지 않고 `engineUsd`·`engineRuns`로 돌려준다.
+ * 그 두 키는 크래시 섹션이 **하나라도 있을 때만** 선다 — 크래시 줄이 없는 기록은 값도 모양도 오늘과 같다(1.4.16 계약의 옛 고정이
+ * 그대로 본다). 읽는 쪽은 `?? 0`으로 읽는다. 완료됐지만 엔진 결함으로 판정이 틀린 런(미러 verify·#174 라운드)은 빠지지 않는다 —
+ * 그것을 가를 코드 경로가 없고, 문구로 가르면 게이밍이 된다.
  */
 export function lifetimeCostOf(recordText) {
   const entries = recordText ? parseRunRecord(String(recordText)) : [];
-  let usd = 0, priced = 0;
-  for (const e of entries) if (e.cost_usd != null && Number.isFinite(Number(e.cost_usd))) { usd += Number(e.cost_usd); priced++; }
-  return { usd: Math.round(usd * 100) / 100, runs: entries.length, priced };
+  let usd = 0, priced = 0, runs = 0, engineUsd = 0, engineRuns = 0;
+  for (const e of entries) {
+    const cost = e.cost_usd != null && Number.isFinite(Number(e.cost_usd)) ? Number(e.cost_usd) : null;
+    if (e.engine_crash) { engineRuns++; if (cost != null) engineUsd += cost; continue; }
+    runs++;
+    if (cost != null) { usd += cost; priced++; }
+  }
+  const round2 = (n) => Math.round(n * 100) / 100;
+  return { usd: round2(usd), runs, priced, ...(engineRuns ? { engineUsd: round2(engineUsd), engineRuns } : {}) };
 }
 
 /** `[budget].usd_per_issue` — 양수일 때만 켜진다. 그 밖(없음·0·문자열)은 "검사 없음"이다. */
@@ -32,16 +44,18 @@ export function budgetPerIssue(charter) {
  */
 export function budgetCheck({ charter, recordText }) {
   const cap = budgetPerIssue(charter);
-  const { usd, runs, priced } = lifetimeCostOf(recordText);
-  if (cap == null) return { ok: true, cap: null, usd, runs, priced };
-  if (usd <= cap) return { ok: true, cap, usd, runs, priced };
+  const { usd, runs, priced, ...engine } = lifetimeCostOf(recordText);    // engine = { engineUsd, engineRuns } | {} — 판정은 usd로만
+  if (cap == null) return { ok: true, cap: null, usd, runs, priced, ...engine };
+  if (usd <= cap) return { ok: true, cap, usd, runs, priced, ...engine };
   return {
-    ok: false, cap, usd, runs, priced,
+    ok: false, cap, usd, runs, priced, ...engine,
     reason: `lifetime cost $${usd.toFixed(2)} over ${runs} run(s) exceeds [budget].usd_per_issue $${cap} — a person raises the budget (\`:proposal\`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose`,
   };
 }
 
 /** run 기록 한 줄 — 검사가 돌았다는 사실과 그 숫자(사람이 이슈 기록만 보고도 예산 대비 위치를 안다). */
+/** #196 — 크래시 런이 있으면 빠진 돈과 런 수를 같은 줄에 덧붙인다("engine"만 쓰지 않는다 — #179의 self-change와 헷갈린다). */
+const engineCrashNote = (b) => (b.engineRuns ? `; engine crash $${Number(b.engineUsd ?? 0).toFixed(2)} over ${b.engineRuns} run(s) excluded from the cap` : "");
 export const budgetLine = (b) => b.cap == null
-  ? `budget: no [budget].usd_per_issue in CHARTER — lifetime cost $${b.usd.toFixed(2)} over ${b.runs} run(s) is not capped`
-  : `budget: lifetime $${b.usd.toFixed(2)} / $${b.cap} over ${b.runs} run(s)${b.ok ? "" : " — REFUSED"}`;
+  ? `budget: no [budget].usd_per_issue in CHARTER — lifetime cost $${b.usd.toFixed(2)} over ${b.runs} run(s) is not capped${engineCrashNote(b)}`
+  : `budget: lifetime $${b.usd.toFixed(2)} / $${b.cap} over ${b.runs} run(s)${engineCrashNote(b)}${b.ok ? "" : " — REFUSED"}`;

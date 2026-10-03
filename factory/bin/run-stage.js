@@ -38,6 +38,7 @@ import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { engineCrashLine } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
@@ -182,12 +183,32 @@ export function usageLine(out, progress = null) {
   return progress ? `${line}\n${progressMarker(progress)}` : line;
 }
 
+/**
+ * #196 (ADR-035) — **엔진 크래시의 닫힌 목록.** `runStage`의 catch가 잡은 예외 중 이 네 종류만 "엔진의 프로그래밍 오류"로 본다
+ * (2026-10-03의 `Cannot read properties of undefined (reading 'test')`가 TypeError였다). 의존성·인프라가 던지는 plain `Error`
+ * (`gh exploded`, EACCES, SIGKILL된 워커)는 여기에 들지 않는다 — 그것까지 엔진 결함으로 부르면 일시 장애가 "엔진 결함"으로
+ * 사람에게 가고 그 비용이 예산에서 빠진다. 판정은 오류의 **종류**이지 메시지 문구가 아니다(문구는 누구나 흉내 낸다).
+ * 경계는 휴리스틱이다: 의존성 래퍼 안의 TypeError도 여기에 들고, plain Error를 던지는 엔진 버그는 들지 않는다(ADR-035).
+ */
+export const ENGINE_CRASH_ERRORS = [TypeError, ReferenceError, RangeError, SyntaxError];
+export const isEngineCrash = (e) => ENGINE_CRASH_ERRORS.some((C) => e instanceof C);
+
 export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
   const d = deps;
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
   const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
-  const record = (lines) => { try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); } };
+  /**
+   * #196 — 이 런의 `usage:` 줄(claude가 끝난 뒤에 생긴다)과, 그것이 이미 기록에 나갔는지. catch가 크래시 섹션에 **던지기 전에 모은
+   * usage**를 싣기 위해 try 밖에 둔다 — 이미 나갔으면 다시 쓰지 않는다(같은 돈을 두 섹션에서 세지 않게; 그때는 앞 섹션이 보통 런으로
+   * 세어지고, 그 방향이 안전하다).
+   */
+  let usage = null;
+  let usageRecorded = false;
+  const record = (lines) => {
+    if (usage && lines.includes(usage)) usageRecorded = true;
+    try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+  };
   /**
    * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
    * 없으므로(어느 커밋 얘기인지 모름) 건너뛰고 흔적만 남긴다.
@@ -690,7 +711,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 하트비트는 아직 살아 있다. 실패해도 usage 줄은 그대로 나간다(관측이 기록을 막지 않는다).
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
-    let usage = usageLine(out, finalProgress);
+    usage = usageLine(out, finalProgress);
     /**
      * #143 (S3b) — **빌더에게 넘긴 병합은 세션 직후에 끝났는지 묻는다.** 브랜치 확인·드리프트 제거·미러 커밋·턴 한도/API 오류의
      * 게이트 복구 **전**이다: 그 단계들은 전부 끝난 트리를 가정하고, 마커째 커밋된 트리를 미러로 재생성하거나 게이트로 판정하면
@@ -1358,7 +1379,28 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
-    record([`error: ${stage} aborted — ${e?.message || e}`]);
+    if (!isEngineCrash(e)) {
+      // 의존성·인프라 Error — 오늘의 경로 그대로(F1): 전이 없음, exit 1. 라벨은 in-flight에 남고 sweeper의 하트비트 팔이 받는다.
+      record([`error: ${stage} aborted — ${e?.message || e}`]);
+      return 1;
+    }
+    /**
+     * #196 (ADR-035) — **엔진 크래시는 이 자리가 유일한 생산자다.** 이 런은 락을 쥐고 있다(claim 뒤의 try). 이슈를 `factory:blocked`으로
+     * 옮기며 원인을 transition()의 명시 `cause`로 찍는다 — 사유 문구에서 되짚지 않는다(`CAUSE_RULES`에는 이 등급이 없다). 그러면
+     * 이 런은 하트비트 재큐(R, `factory-retry`)를 타지 않고 sweeper의 blocked 팔이 `ENGINE_CRASH_MAX_RETRIES`까지만 다시 민다.
+     * 같은 섹션에 러너가 쓴 engine-crash 줄과 던지기 전에 모은 usage를 남긴다 — `lib/budget.js`가 그 돈을 상한에서 빼 따로 보인다.
+     * 전이가 거부되거나 던져도 기록은 남고 exit 1이다(라벨이 in-flight에 남으면 오늘의 경로가 받는다).
+     */
+    const name = e?.name || e?.constructor?.name || "Error";
+    const lines = [`error: ${stage} aborted — ${e?.message || e}`, engineCrashLine({ stage, runnerId, runId, error: e })];
+    if (usage && !usageRecorded) lines.push(usage);
+    try {
+      const t = await d.transition({ to: "factory:blocked", reason: `engine crash — ${stage} threw ${name}: ${truncateReason(e?.message || e)}`, cause: "engine-crash" });
+      lines.push(...(t?.ok ? [`transition: ${t.to ?? "factory:blocked"} (cause=engine-crash)`] : refusal(t ?? { ok: false, reason: "no result" })));
+    } catch (te) {
+      lines.push(`transition failed: → factory:blocked (cause=engine-crash) — ${truncateReason(te?.message || te)}`);
+    }
+    record(lines);
     return 1;
   } finally {
     hb?.stop();

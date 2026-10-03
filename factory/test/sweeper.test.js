@@ -3342,7 +3342,7 @@ test("test_196_engine_crash_skips_r_but_is_bounded", async () => {
   expect(esc.reason).toMatch(/engine defect/);
   expect(esc.reason).toContain("1.4.50");
   expect(esc.reason).toContain("node .factory/bin/transition.js 5 factory:queue");
-  expect(esc.reason).not.toMatch(/budget|retries exhausted|environment\/credentials/);
+  expect(esc.reason).not.toMatch(/^lifetime cost|^retries exhausted|environment\/credentials/);   // 예산·R 소진·"환경" 문장이 아니다
   // 3차: 더는 밀지 않는다(루프 없음)
   await sweep(args);
   expect(dispatchStage).toHaveBeenCalledTimes(ENGINE_CRASH_MAX_RETRIES);

@@ -130,6 +130,15 @@ export const API_ERROR_MAX_RETRIES = 3;
 export const CANCELLED_MAX_RETRIES = 3;
 
 /**
+ * #196 (ADR-035) — **엔진 크래시는 R을 쓰지 않지만, 상한은 있다.** `runStage`의 catch가 프로그래밍 오류를 잡으면 이슈를
+ * `factory:blocked`(cause=engine-crash)으로 옮긴다 — 그래서 하트비트 재큐 팔(`factory-retry`, R)은 그 런을 보지 않는다. 대신 이
+ * blocked 팔이 같은 스테이지를 이 횟수만큼 다시 밀고, 그다음 크래시는 "엔진 결함" 문장으로 사람에게 간다. 결정적인 크래시는 같은
+ * 엔진에서 같은 자리에서 또 죽으므로 한 번이면 충분하다(일시적인 것은 한 번에 풀린다). 상한이 없으면 K·R·예산 어느 것도 이 루프를
+ * 세지 않는다 — 이 상수가 그 유일한 브레이크다.
+ */
+export const ENGINE_CRASH_MAX_RETRIES = 1;
+
+/**
  * ADR-020 O20 — 에스컬레이션 문구는 **원인을 말한다**. 예전에는 무엇이 죽였든 "환경/크리덴셜"
  * 하나였다 — 사람이 취소한 잡도, 90분 타임아웃도 그렇게 보고됐고, 그 문장을 믿은 사람은 틀린 곳
  * (자격증명)을 먼저 본다. 사유는 `factory:needs-human` 전이 코멘트에 그대로 실리고 retro의 수확
@@ -146,8 +155,15 @@ export const BLOCKED_ESCALATION_REASON = {
   "gates-unhandled": "blocked (test command exited non-zero with 0 failing tests — unhandled error outside tests, see the gate log) — needs human",
   undecidable: "blocked (undecidable) — needs human",
   other: "blocked (environment/credentials) — needs human",
+  // #196 (ADR-035) — 마지막 자리(`BLOCKED_CAUSES`와 같은 자리, nit 9). 이슈의 예산·재시도가 아니라 **엔진**이 원인이라고 말하고,
+  // 고친 뒤 무엇을 치면 되는지 말한다. `<n>`·`<engine>`은 에스컬레이션 순간에 이 이슈 번호와 설치본 버전으로 채운다.
+  "engine-crash": "blocked (engine defect — the stage crashed with a programming error in the factory engine <engine>, not in this issue's work, budget or retries; after the engine fix, requeue with `node .factory/bin/transition.js <n> factory:queue`) — needs human",
 };
-const escalationReason = (cause) => BLOCKED_ESCALATION_REASON[cause] ?? BLOCKED_ESCALATION_REASON.other;
+const escalationReason = (cause, { issue = null, engineVersion = null } = {}) => {
+  const text = BLOCKED_ESCALATION_REASON[cause] ?? BLOCKED_ESCALATION_REASON.other;
+  if (cause !== "engine-crash") return text;
+  return text.replace("<n>", issue != null ? String(issue) : "<n>").replace("<engine>", engineVersion ? `v${engineVersion}` : "(version unknown)");
+};
 /** 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). */
 function lastBlockedRetryAttempt(comments, stage, issue) {
   let last = 0;
@@ -1623,7 +1639,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           // 다르다 — 평생 횟수가 아니라 **취소 사건마다** 한 번이다(그래서 R 예산을 쓰지 않는다).
           const isApiError = cause === "api-error";
           const isCancelled = cause === "cancelled";
-          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : 1;
+          const isEngineCrash = cause === "engine-crash";             // #196 — R이 아니라 이 팔의 이름 있는 상한
+          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? ENGINE_CRASH_MAX_RETRIES : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
           const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number);
@@ -1656,6 +1673,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
             const marker = numbered ? blockedRetryComment(retryStage, it.number, attempt) : blockedRetryComment(retryStage, it.number);
             const note = isApiError
               ? `\`factory:blocked\`이 API 쿼터/장애(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — \`factory-${retryStage}.yml\`을 다시 띄웁니다(시도 ${attempt}/${maxAttempts}, KTB-22). 여전히 blocked이면 ${attempt < maxAttempts ? "다음 sweep에서 다시 시도합니다" : "다음 sweep에서 사람에게 넘어갑니다"}.`
+              : isEngineCrash
+                ? `\`factory:blocked\`이 **엔진 크래시**(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — 이슈의 실패가 아니므로 재시도 예산(R)을 쓰지 않고 \`factory-${retryStage}.yml\`을 다시 띄웁니다(시도 ${attempt}/${maxAttempts}, #196). 같은 자리에서 또 죽으면 엔진 결함으로 사람에게 넘어갑니다.`
               : isCancelled
                 ? `\`factory:blocked\`이 **잡 취소**(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — 취소는 이 이슈의 실패가 아니므로 재시도 예산(R)을 쓰지 않고 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(O20). 이 취소 건에 대해서는 이번 한 번뿐입니다.`
                 : `\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`;
@@ -1675,7 +1694,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       // 설치본 버전을 못 읽었으면 싣지 않는다(이슈의 옛 기록만으로 찍으면 방금 실패한 엔진보다 낮은 값이 될 수 있다 — 모르면 기록하지 않는다).
       const installedNow = await engineVersionNow();
       const engineVersion = installedNow ? newestVersion([installedNow, ...factoryRecordedVersions(comments, factoryLogin)]) : null;
-      const reason = ceilingWhy ? `${escalationReason(cause)} — ${ceilingWhy}` : escalationReason(cause);
+      const why = escalationReason(cause, { issue: it.number, engineVersion });
+      const reason = ceilingWhy ? `${why} — ${ceilingWhy}` : why;
       await transition({ issue: it.number, to: "factory:needs-human", reason, ...(engineVersion ? { engineVersion } : {}) });
       actions.push({ kind: "blocked-escalated", issue: it.number, cause, ...(ceilingWhy ? { why: ceilingWhy } : {}) });
     } catch (e) {
