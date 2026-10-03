@@ -1,8 +1,11 @@
 import { test, expect, vi } from "vitest";
 import { runMergeStage, HUMAN_MERGE_REQUIRED, verifyFactoryStatuses, REVIEW_EVIDENCE_STATUSES } from "../lib/merge-stage.js";
+import { idlessFailedSuites } from "../lib/merge-stage.js";
 import { canTransition } from "../lib/labels.js";
 import { MergeBaseError } from "../lib/blocked-errors.js";
 import { GitDiffError } from "../lib/changed-files.js";
+import { runGates, gatesDetailLines } from "../lib/gates.js";
+import { makeFakeRun } from "../lib/exec.js";
 
 /** runStage의 record/refusal과 같은 모양 — 실제 계약을 그대로 흉내낸다. */
 const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
@@ -1494,4 +1497,863 @@ test("B-MF2: the same fix makes the quorum measurable on that hop — a short ro
   const r = requirementFor("factory:approved")({ comments: await gh.comments(7), ...ctxExtra });
   expect(r.ok).toBe(false);
   expect(r.reason).toMatch(/verdict count 2 != roster size 3/);
+});
+
+// ── #157 — a merge-gate RED on a test outside the PR's diff is re-run once before needs-human ──────────
+//
+// own-calendar #111 (2026-10-02 01:52Z): a client-only PR with 3/3 approvals went to needs-human because
+// `server/tests/follows.test.ts::test_49_event_visibility` (131/132 passed) flaked at merge. Every gates
+// fixture below comes out of the real producer (`runGates` / `runStageGates` with a fake runner and a real
+// vitest JSON report) — a hand-typed partial object would let the eligibility rule read fields the producer
+// never writes (dw4).
+const FLAKY_TEXT_157 = "PR 밖의 테스트가 두 번 RED — flaky 후보";
+const OC_ID = "server/tests/follows.test.ts::test_49_event_visibility";
+const GATE_ROOT = "/repo";
+const STAMP_157 = { runId: "18113", runnerId: "gha-18113", round: null };
+const CLIENT_ONLY = ["client/src/pages/Calendar.tsx", "client/src/api/follows.ts"];
+const HARNESS_157 = (omitLint = false) => ({
+  harness: { maturity: "M0" },
+  gates: { fast: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+  commands: { ...(omitLint ? {} : { lint: "node factory/bin/lint.js" }), unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+  test: {},
+});
+/** A vitest `--reporter=json` report whose failing assertions are exactly `failingIds` (`path::name`). */
+function vitestReport157(failingIds, total = 132) {
+  const byFile = new Map();
+  for (const id of failingIds) {
+    const [file, name] = id.split("::");
+    if (!byFile.has(file)) byFile.set(file, []);
+    byFile.get(file).push(name);
+  }
+  return JSON.stringify({
+    numTotalTests: total, numPassedTests: total - failingIds.length, numFailedTests: failingIds.length,
+    testResults: [...byFile].map(([file, names]) => ({ name: `${GATE_ROOT}/${file}`, assertionResults: names.map((n) => ({ status: "failed", fullName: n })) })),
+  });
+}
+/**
+ * "The report on disk" for a produced gates object: the exact text `runGates` parsed for each test gate, keyed by
+ * that gate entry's `failing_ids` array (it survives the shallow `{ ...g }` copies the cases below derive). The
+ * merge stage's `suiteFailures` dep reads the report the gate run left behind — this registry is that file.
+ */
+const REPORTS_157 = new WeakMap();
+const registerReports157 = (g, byGate) => { for (const [name, text] of Object.entries(byGate)) if (g.gates?.[name]?.failing_ids) REPORTS_157.set(g.gates[name].failing_ids, text); return g; };
+const reportOnDisk157 = (g, name) => REPORTS_157.get(g?.gates?.[name]?.failing_ids) ?? null;
+/** factory.gates.v1 from the real `runGates` — lint + unit, the unit report read from a real vitest JSON. */
+async function producedGates({ failing = [], lint = "GREEN", report = true, unitExit, omitLint = false, sha = "a".repeat(40) } = {}) {
+  const harness = HARNESS_157(omitLint);
+  const fake = makeFakeRun([
+    { match: (_c, a) => a[1] === harness.commands.lint, result: { code: lint === "RED" ? 1 : 0, stdout: "", stderr: lint === "RED" ? "factory/lib/x.js\n  3:1  error  no-unused-vars" : "" } },
+    { match: (_c, a) => a[1] === harness.commands.unit, result: { code: unitExit ?? (failing.length ? 1 : 0), stdout: "JSON report written to .factory/out/unit.json", stderr: "" } },
+  ]);
+  const text = report ? vitestReport157(failing) : null;
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => text, now: "2026-10-02T01:52:00.000Z" });
+  return registerReports157({ ...g, head_sha: sha }, { unit: text });
+}
+/** factory.gates.v1 BLOCKED from the real `runStageGates` (test-env re-up failed — the merge-stage BLOCKED producer). */
+async function producedBlockedGates() {
+  const { runStageGates } = await import("../lib/gates.js");
+  const harness = { ...HARNESS_157(), test: { env: { compose: "docker-compose.test.yml" } } };
+  const fake = makeFakeRun([
+    { match: (c, a) => c === "node" && a[1] === "up", result: { code: 1, stdout: "", stderr: "compose: exit 1" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" } },
+  ]);
+  return runStageGates({ run: fake, cwd: GATE_ROOT, harness, stage: "merge", tier: "standard", base: "c".repeat(40), now: "2026-10-02T01:52:00.000Z" });
+}
+/**
+ * Drives runMergeStage with `d.gates` answering `seq` in order (a function entry is called — it may throw).
+ * A call past the end of `seq` answers GREEN, so an implementation that runs the gates a third time is
+ * caught by the call count AND by reaching mergePr, not hidden behind a crash.
+ */
+async function run157({ seq, diff, retryFromBlocked = false, startFrom = "factory:approved", over = {} }) {
+  const { lines, record: push } = makeRecord();
+  const record = vi.fn(push);                                                  // call order is evidence (dw1: rerun line before the 2nd gates run)
+  const postStatus = basePostStatus();
+  const extra = await producedGates({ failing: [] });
+  let i = 0;
+  const gates = vi.fn(async () => { const v = i < seq.length ? seq[i] : extra; i++; return typeof v === "function" ? v() : v; });
+  const diffDep = diff === undefined ? {} : { diffFiles: vi.fn(typeof diff === "function" ? diff : async () => diff) };
+  // The suite-failure reader is the real one (`idlessFailedSuites`) over the report the gate run "left on disk".
+  const suiteFailures = vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: (name) => reportOnDisk157(g, name) }));
+  const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, suiteFailures, ...over });
+  const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus, retryFromBlocked, stamp: STAMP_157 });
+  return { code, d, lines, postStatus, record };
+}
+const detailsOf = (lines) => lines.filter((l) => l.startsWith("gates-detail: ")).map((l) => JSON.parse(l.slice("gates-detail: ".length)));
+const flakyMarksOf = (lines) => lines.filter((l) => l.startsWith("factory-flaky-candidate: ")).map((l) => JSON.parse(l.slice("factory-flaky-candidate: ".length)));
+const gateStatusesOf = (postStatus) => postStatus.mock.calls.map((c) => c[0]).filter((s) => s.context === "factory/gates");
+const transitionsOf = (d) => d.transition.mock.calls.map((c) => c[0]);
+/**
+ * "Today's record" as a LITERAL, not as another run of the new code. Comparing against a run without `diffFiles`
+ * only proves the two new-code paths agree — a line the change adds on every RED (e.g. `merge: re-run not proven
+ * — …`) would sit in both and pass. So the gate step's record is pinned to exactly what the pre-#157 step (4)
+ * wrote (main @ 72906cc, merge-stage.js `record([...])` in the BLOCKED and non-GREEN branches): the verdict line,
+ * the stamped gates-detail lines (gates.js `gatesDetailLines`, unchanged by #157), and the test-env note.
+ * `gateStepLines` cuts the record at the last line written before step (4) — nothing after it may differ.
+ */
+const GATE_STEP_START = "merge: agent role sections within policy";
+const gateStepLines = (lines) => {
+  const at = lines.indexOf(GATE_STEP_START);
+  if (at < 0) throw new Error(`run record has no "${GATE_STEP_START}" line — the merge did not reach step (4)`);
+  return lines.slice(at + 1);
+};
+function pre157GateStepLines(g) {
+  const envNote = g?.test_env_reup?.ran ? [`test-env: re-up ${g.test_env_reup.ok ? "ok" : `failed — ${g.test_env_reup.detail}`}`] : [];
+  if (g?.status === "BLOCKED") return [`merge: gates BLOCKED — ${g.blocked_reason || "gates could not be decided"}`, ...envNote];
+  return [`merge: gates ${g?.status ?? "missing"}`, ...gatesDetailLines(g, STAMP_157), ...envNote];
+}
+/**
+ * Review sec-s1 (plan dw3/dw4): a refused re-run is not silent. The record is the LITERAL pre-#157 gate step plus
+ * EXACTLY one `merge: no gates rerun — <reason>` line, right after the verdict line, bound to this run by the same
+ * run_id/runner stamp the gates-detail lines carry. An on-call reader can then tell "refused, because X" from
+ * "the feature is broken". The prefix and the stamp tag are literals here, not imports from the code under test.
+ */
+const NO_RERUN_157 = "merge: no gates rerun — ";
+/** What the gates-detail projection makes of a reason string (gates.js `gatesDetailLines`, unchanged by #157). */
+const gatesDetailReason157 = (reason) => JSON.parse(gatesDetailLines({ gates: { x: { status: "RED", reason, detail: { failing: [], snippet: "" } } } }, STAMP_157)[0].slice("gates-detail: ".length)).reason;
+const STAMP_TAG_157 = "[run_id=18113 runner=gha-18113]";
+const refusalLinesOf = (lines) => lines.filter((l) => l.startsWith(NO_RERUN_157));
+const withoutRefusal = (lines) => lines.filter((l) => !l.startsWith(NO_RERUN_157));
+function expectRefusedRecord157(lines, g, name, why) {
+  const step = gateStepLines(lines);
+  const pre = pre157GateStepLines(g);
+  const refusals = refusalLinesOf(step);
+  expect(refusals, name).toHaveLength(1);
+  expect(refusals[0].endsWith(` ${STAMP_TAG_157}`), `${name}: ${refusals[0]}`).toBe(true);
+  expect(refusals[0], name).toMatch(why);
+  expect(step, name).toEqual([pre[0], refusals[0], ...pre.slice(1)]);
+  // Nothing else of the re-run path leaks into a refusal: no rerun line, no flaky-candidate marker.
+  expect(withoutRefusal(lines).some((l) => /rerun|flaky-candidate/.test(l)), name).toBe(false);
+}
+/**
+ * factory.gates.v1 from the real `runGates` with the gate ORDER chosen by the caller and an optional
+ * `integration` test gate (`null` = GREEN, an id list = RED with that parsed report, "unparsed" = RED with no
+ * report). The order matters: a rule that only looks at the first RED gate passes when the disqualifying gate
+ * happens to come first, so these fixtures put an eligible test gate first and the disqualifier after it.
+ */
+async function producedGatesOrdered157({ order, unit = [], integration = null, lint = "GREEN" }) {
+  const harness = {
+    harness: { maturity: "M0" },
+    gates: { fast: order, required: order, thresholds: {} },
+    commands: {
+      lint: "node factory/bin/lint.js",
+      unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json",
+      integration: "npx vitest run --config vitest.integration.config.ts --reporter=json --outputFile=.factory/out/integration.json",
+    },
+    test: {},
+  };
+  const fake = makeFakeRun([
+    { match: (_c, a) => a[1] === harness.commands.lint, result: { code: lint === "RED" ? 1 : 0, stdout: "", stderr: lint === "RED" ? "factory/lib/x.js\n  3:1  error  no-unused-vars" : "" } },
+    { match: (_c, a) => a[1] === harness.commands.unit, result: { code: unit.length ? 1 : 0, stdout: "", stderr: "" } },
+    { match: (_c, a) => a[1] === harness.commands.integration, result: { code: integration === null ? 0 : 1, stdout: "", stderr: integration === "unparsed" ? "Error: Cannot find module 'pg'" : "" } },
+  ]);
+  const texts = { unit: vitestReport157(unit), integration: Array.isArray(integration) ? vitestReport157(integration) : null };
+  const readFile = (p) => (String(p).endsWith("integration.json") ? texts.integration : texts.unit);
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile, now: "2026-10-02T01:52:00.000Z" });
+  return registerReports157({ ...g, head_sha: "a".repeat(40) }, texts);
+}
+
+test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
+  // The real own-calendar #111 shape: client-only diff, one parsed server test RED, whole-GREEN re-run.
+  // Both runs are on the PR head the merge stage checked out (runStageGates stamps `git rev-parse HEAD`), so the
+  // status assertions below can name the sha mergePr merges — HEAD — rather than restate whatever the fixture says.
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const second = await producedGates({ failing: [], sha: HEAD });
+  expect(first.status).toBe("RED");
+  expect(first.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
+  expect(second.status).toBe("GREEN");
+
+  // No prReady here: with the draft flip wired, (6a-ii) legitimately calls mergeGates a second time.
+  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { prReady: undefined } });
+  expect(r.code).toBe(0);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(r.d.diffFiles).toHaveBeenCalled();
+  // mergeGates runs once, and only after the re-run resolved — it is not the re-run.
+  expect(r.d.mergeGates).toHaveBeenCalledTimes(1);
+  expect(r.d.mergeGates.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[1]);
+  expect(r.d.mergePr).toHaveBeenCalledWith(9);
+  // The commit status follows the final verdict, so the required `factory/gates` check is not left RED.
+  const statuses = gateStatusesOf(r.postStatus);
+  expect(statuses.map((s) => s.state)).toEqual(["failure", "success"]);
+  // The success lands on the PR head itself — the sha runMergeStage was given and the required check is read on.
+  expect(statuses.map((s) => s.sha)).toEqual([HEAD, HEAD]);
+  const merged = transitionsOf(r.d).find((t) => t.to === "factory:merged");
+  expect(merged).toBeTruthy();
+  expect(merged.mergeGatesResult).toEqual({ checksGreen: true, integrityGreen: true });
+  // The first RED is not lost: its stamped gates-detail line, a rerun line naming the id, and a stamped marker.
+  const details = detailsOf(r.lines);
+  expect(details).toHaveLength(1);
+  expect(details[0]).toMatchObject({ gate: "unit", run_id: "18113", runner: "gha-18113", failing: [OC_ID], parsed: true });
+  expect(r.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC_ID))).toBe(true);
+  expect(flakyMarksOf(r.lines)).toEqual([expect.objectContaining({ test: OC_ID, outcome: "GREEN", run_id: "18113", runner: "gha-18113" })]);
+  expect(r.lines).toContain("merge: gates GREEN");
+  // dw1: the rerun line is stamped to this run and reached the record BEFORE the second gates run started, together
+  // with the first run's gates-detail line — so a job killed during the re-run (timeout) is told apart from one
+  // killed in the first run, and the first RED's evidence survives the re-run overwriting gates.json.
+  const rerunLine = r.lines.find((l) => l.startsWith("merge: gates RED outside the PR diff — rerun 1/1 ("));
+  expect(rerunLine).toContain(OC_ID);
+  expect(rerunLine.endsWith(` ${STAMP_TAG_157}`)).toBe(true);
+  const recordCallOf = (pred) => r.record.mock.calls.findIndex((c) => c[0].some(pred));
+  const secondGatesRun = r.d.gates.mock.invocationCallOrder[1];
+  expect(r.record.mock.invocationCallOrder[recordCallOf((l) => l === rerunLine)]).toBeLessThan(secondGatesRun);
+  expect(r.record.mock.invocationCallOrder[recordCallOf((l) => l.startsWith("gates-detail: ") && l.includes(OC_ID))]).toBeLessThan(secondGatesRun);
+  expect(refusalLinesOf(r.lines)).toEqual([]);                                 // a re-run that happened is not a refusal
+
+  // The production dep shape: prReady wired (run-stage always wires it), so (6a-ii) re-checks mergeGates after
+  // the draft flip. Both mergeGates calls and the flip come after the re-run resolved; the PR still merges,
+  // the factory/gates status ends `success`, and the first RED's trace is kept.
+  const prod = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(typeof prod.d.prReady).toBe("function");
+  expect(prod.code).toBe(0);
+  expect(prod.d.gates).toHaveBeenCalledTimes(2);
+  expect(prod.d.mergeGates).toHaveBeenCalledTimes(2);
+  const rerunAt = prod.d.gates.mock.invocationCallOrder[1];
+  for (const order of prod.d.mergeGates.mock.invocationCallOrder) expect(order).toBeGreaterThan(rerunAt);
+  expect(prod.d.prReady).toHaveBeenCalledTimes(1);
+  expect(prod.d.prReady.mock.invocationCallOrder[0]).toBeGreaterThan(rerunAt);
+  expect(prod.d.mergePr).toHaveBeenCalledWith(9);
+  expect(prod.d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(prod.d.prReady.mock.invocationCallOrder[0]);
+  expect(gateStatusesOf(prod.postStatus).map((s) => s.state)).toEqual(["failure", "success"]);
+  expect(gateStatusesOf(prod.postStatus).map((s) => s.sha)).toEqual([HEAD, HEAD]);
+  expect(transitionsOf(prod.d).map((t) => t.to)).toEqual(["factory:merged"]);
+  expect(transitionsOf(prod.d)[0].mergeGatesResult).toEqual({ checksGreen: true, integrityGreen: true });
+  expect(detailsOf(prod.lines)).toEqual([expect.objectContaining({ gate: "unit", run_id: "18113", runner: "gha-18113", failing: [OC_ID] })]);
+  expect(prod.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC_ID))).toBe(true);
+  expect(flakyMarksOf(prod.lines)).toEqual([expect.objectContaining({ test: OC_ID, outcome: "GREEN", run_id: "18113", runner: "gha-18113" })]);
+
+  // A blocked→approved retry: the 4b hop happens only after the re-run is GREEN (it sees the re-run, not the RED).
+  const retry = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, retryFromBlocked: "factory:approved", startFrom: "factory:blocked" });
+  expect(retry.code).toBe(0);
+  const approvedIdx = transitionsOf(retry.d).findIndex((t) => t.to === "factory:approved");
+  expect(approvedIdx).toBeGreaterThanOrEqual(0);
+  expect(retry.d.transition.mock.invocationCallOrder[approvedIdx]).toBeGreaterThan(retry.d.gates.mock.invocationCallOrder[1]);
+  expect(transitionsOf(retry.d).map((t) => t.to)).toEqual(["factory:approved", "factory:merged"]);
+  for (const order of retry.d.mergeGates.mock.invocationCallOrder) expect(order).toBeGreaterThan(retry.d.gates.mock.invocationCallOrder[1]);
+  expect(gateStatusesOf(retry.postStatus).map((s) => s.state)).toEqual(["failure", "success"]);
+
+  // A GREEN re-run does not override a later refusal: mergeGates not GREEN still goes to needs-human for that reason.
+  const later = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) } });
+  expect(later.code).toBe(2);
+  expect(later.d.gates).toHaveBeenCalledTimes(2);
+  expect(later.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(later.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "required checks not GREEN" })]);
+});
+
+test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () => {
+  const ids = [OC_ID, "server/tests/follows.test.ts::test_50_follow_feed"];
+  const first = await producedGates({ failing: ids });
+  const again = await producedGates({ failing: [...ids].reverse() });           // same set, other order
+
+  const same = await run157({ seq: [first, again], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(same.code).toBe(2);
+  expect(same.d.gates).toHaveBeenCalledTimes(2);
+  expect(same.d.mergeGates).not.toHaveBeenCalled();
+  expect(same.d.mergePr).not.toHaveBeenCalled();
+  const nh = transitionsOf(same.d);
+  expect(nh).toHaveLength(1);
+  expect(nh[0].to).toBe("factory:needs-human");
+  expect(nh[0].reason).toContain(FLAKY_TEXT_157);
+  for (const id of ids) expect(nh[0].reason).toContain(id);
+  // One marker per id, bound to this run exactly like gates-detail; both runs' gates-detail lines kept.
+  const marks = flakyMarksOf(same.lines);
+  expect(marks.map((m) => m.test).sort()).toEqual([...ids].sort());
+  for (const m of marks) expect(m).toMatchObject({ outcome: "RED", run_id: "18113", runner: "gha-18113" });
+  const details = detailsOf(same.lines);
+  expect(details).toHaveLength(2);
+  for (const dl of details) expect(dl).toMatchObject({ gate: "unit", run_id: "18113", runner: "gha-18113" });
+  expect(gateStatusesOf(same.postStatus).map((s) => s.state)).toEqual(["failure", "failure"]);
+
+  // A different set on the re-run: an ordinary needs-human that names both sets — no flaky wording, no marker.
+  const other = await producedGates({ failing: ["server/tests/auth.test.ts::test_12_login"] });
+  const diffSet = await run157({ seq: [first, other], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(diffSet.code).toBe(2);
+  expect(diffSet.d.gates).toHaveBeenCalledTimes(2);
+  expect(diffSet.d.mergePr).not.toHaveBeenCalled();
+  const dr = transitionsOf(diffSet.d);
+  expect(dr).toHaveLength(1);
+  expect(dr[0].to).toBe("factory:needs-human");
+  expect(dr[0].reason).toContain(OC_ID);
+  expect(dr[0].reason).toContain("server/tests/auth.test.ts::test_12_login");
+  expect(dr[0].reason).not.toContain("flaky");
+  expect(flakyMarksOf(diffSet.lines)).toEqual([]);
+
+  // A subset is not the same set either (one of the two flaked, the other is still RED → no marker).
+  const subset = await run157({ seq: [first, await producedGates({ failing: [OC_ID] })], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(transitionsOf(subset.d)[0].reason).not.toContain("flaky");
+  expect(flakyMarksOf(subset.lines)).toEqual([]);
+
+  // Same SIZE, different ids ([A,B] then [A,C]): not the same set — a size-only comparison would mark it flaky.
+  const swapped = [OC_ID, "server/tests/auth.test.ts::test_12_login"];
+  const sameSize = await producedGates({ failing: swapped });
+  expect(sameSize.gates.unit.failing_ids).toHaveLength(first.gates.unit.failing_ids.length);
+  const sizeOnly = await run157({ seq: [first, sameSize], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(sizeOnly.code).toBe(2);
+  expect(sizeOnly.d.gates).toHaveBeenCalledTimes(2);
+  expect(sizeOnly.d.mergePr).not.toHaveBeenCalled();
+  const sr = transitionsOf(sizeOnly.d);
+  expect(sr).toHaveLength(1);
+  expect(sr[0].to).toBe("factory:needs-human");
+  expect(sr[0].reason).not.toContain("flaky");
+  expect(sr[0].reason).toContain("server/tests/follows.test.ts::test_50_follow_feed");
+  expect(sr[0].reason).toContain("server/tests/auth.test.ts::test_12_login");
+  expect(flakyMarksOf(sizeOnly.lines)).toEqual([]);
+
+  // Re-run BLOCKED → factory:blocked; re-run throws a typed base/diff error → factory:blocked; re-run gives no verdict (null) → factory:blocked.
+  const blockedGates = await producedBlockedGates();
+  expect(blockedGates.status).toBe("BLOCKED");
+  const blocked = await run157({ seq: [first, blockedGates], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(blocked.code).toBe(2);
+  expect(transitionsOf(blocked.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  const thrown = await run157({ seq: [first, () => { throw new MergeBaseError("origin/main: exit 128"); }], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(thrown.code).toBe(2);
+  expect(transitionsOf(thrown.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  const thrownDiff = await run157({ seq: [first, () => { throw new GitDiffError("fatal: bad revision"); }], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(thrownDiff.code).toBe(2);
+  expect(transitionsOf(thrownDiff.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  // A re-run that returns no verdict at all could not decide anything (plan dw2): blocked, never needs-human-as-flaky.
+  const missing = await run157({ seq: [first, null], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(missing.code).toBe(2);
+  expect(transitionsOf(missing.d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+  expect(transitionsOf(missing.d)[0].reason).not.toContain("flaky");
+  expect(transitionsOf(missing.d)[0].reason).toMatch(/rerun/);
+  for (const x of [blocked, thrown, thrownDiff, missing]) {
+    // Every one leaves a reason line for the re-run's outcome on the record.
+    expect(x.lines.some((l) => /^merge: gates rerun BLOCKED — \S/.test(l)), x.lines.join("\n")).toBe(true);
+    expect(x.d.gates).toHaveBeenCalledTimes(2);              // never a third run
+    expect(x.d.mergePr).not.toHaveBeenCalled();
+    expect(flakyMarksOf(x.lines)).toEqual([]);
+  }
+});
+
+// cf1 (review round 2, correctness + qa, confirmed on code lines): the re-run must not read the FIRST run's report. The stage's
+// own `resetGates` runs before the re-run; a re-run that then writes no report is `parsed:false` — "inconclusive", never "RED twice".
+test("test_157_rerun_without_a_report_is_inconclusive_not_flaky", async () => {
+  const first = await producedGatesOrdered157({ order: ["integration"], integration: [OC_ID] });
+  const unreported = await producedGatesOrdered157({ order: ["integration"], integration: "unparsed" });
+  expect(unreported.gates.integration).toMatchObject({ status: "RED", parsed: false });
+  const resetGates = vi.fn(async () => {});
+  const r = await run157({ seq: [first, unreported], diff: { ok: true, files: CLIENT_ONLY }, over: { resetGates } });
+  expect(r.code).toBe(2);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  // reset happened exactly once, after the first gates() and before the re-run
+  expect(resetGates).toHaveBeenCalledTimes(1);
+  const [g1, g2] = r.d.gates.mock.invocationCallOrder;
+  const [reset] = resetGates.mock.invocationCallOrder;
+  expect(reset).toBeGreaterThan(g1);
+  expect(reset).toBeLessThan(g2);
+  const t = transitionsOf(r.d);
+  expect(t).toHaveLength(1);
+  expect(t[0].to).toBe("factory:needs-human");
+  expect(t[0].reason).toContain("rerun inconclusive");
+  expect(t[0].reason).toContain("wrote no test report");
+  expect(t[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(flakyMarksOf(r.lines)).toEqual([]);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+});
+
+test("test_157_superset_on_rerun_is_not_a_flaky_candidate", async () => {
+  // First run fails [A]; the re-run fails [A, B]. Every first-run id is in the re-run set, so an
+  // "every id of the first run is in the second" check alone would call this the same set — it is not.
+  const extra = "server/tests/auth.test.ts::test_12_login";
+  const first = await producedGates({ failing: [OC_ID] });
+  const wider = await producedGates({ failing: [OC_ID, extra] });
+  expect(first.gates.unit.failing_ids).toEqual([OC_ID]);
+  expect([...wider.gates.unit.failing_ids].sort()).toEqual([OC_ID, extra].sort());
+
+  const sup = await run157({ seq: [first, wider], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(sup.code).toBe(2);
+  expect(sup.d.gates).toHaveBeenCalledTimes(2);
+  expect(sup.d.mergeGates).not.toHaveBeenCalled();
+  expect(sup.d.mergePr).not.toHaveBeenCalled();
+  const tr = transitionsOf(sup.d);
+  expect(tr).toHaveLength(1);
+  expect(tr[0].to).toBe("factory:needs-human");
+  expect(tr[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(tr[0].reason).not.toContain("flaky");
+  expect(tr[0].reason).toContain(OC_ID);
+  expect(tr[0].reason).toContain(extra);
+  expect(flakyMarksOf(sup.lines)).toEqual([]);
+});
+
+test("test_157_red_inside_the_diff_is_not_rerun", async () => {
+  // Control: the same RED outside the diff IS re-run — so every "not re-run" below is the rule, not a missing feature.
+  const red = await producedGates({ failing: [OC_ID] });
+  const green = await producedGates({ failing: [] });
+  const control = await run157({ seq: [red, green], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(control.d.gates).toHaveBeenCalledTimes(2);
+
+  const cases = [
+    { name: "the failing test file itself is in the diff", files: ["client/src/App.tsx", "server/tests/follows.test.ts"], why: /diff touches server\/, where server\/tests\/follows\.test\.ts lives/ },
+    { name: "a diff file shares the test's top-level directory", files: ["server/src/routes/follows.ts"], why: /diff touches server\// },
+    { name: "package.json at the repo root", files: [...CLIENT_ONLY, "package.json"], why: /repo-root file: package\.json/ },
+    { name: "package-lock.json at the repo root", files: [...CLIENT_ONLY, "package-lock.json"], why: /repo-root file: package-lock\.json/ },
+    { name: "vitest.config.ts at the repo root", files: [...CLIENT_ONLY, "vitest.config.ts"], why: /repo-root file: vitest\.config\.ts/ },
+    { name: "tsconfig.json at the repo root", files: [...CLIENT_ONLY, "tsconfig.json"], why: /repo-root file: tsconfig\.json/ },
+    { name: "a root-level markdown file still counts as touched", files: [...CLIENT_ONLY, "README.md"], why: /repo-root file: README\.md/ },
+    { name: "the failing test file is at the repo root", files: CLIENT_ONLY, failing: ["follows.test.ts::test_49_event_visibility"], why: /failing test at the repo root: follows\.test\.ts/ },
+    // Review cf-s3: a failing test under a CONVENTIONAL TEST ROOT (test, tests, __tests__, spec, e2e as the top-level
+    // directory) counts as touched by any non-empty diff. In a single-package src/** + tests/** layout every tests/**
+    // failure is "outside" every src-only PR, so without this rule the heuristic filters nothing and a deterministic
+    // break the PR caused would be re-run and, on a second RED, labelled "flaky 후보". The list is literal here.
+    { name: "tests/ failure, src/ diff (single-package layout)", files: ["src/calc.ts"], failing: ["tests/calc.test.ts::adds"], why: /tests\/calc\.test\.ts.*test root tests\// },
+    { name: "test/ failure, lib/ diff", files: ["lib/calc.js"], failing: ["test/calc.test.js::adds"], why: /test root test\// },
+    { name: "__tests__/ failure, src/ diff", files: ["src/calc.ts"], failing: ["__tests__/calc.test.ts::adds"], why: /test root __tests__\// },
+    { name: "spec/ failure, app/ diff", files: ["app/models/user.rb"], failing: ["spec/models/user.spec.ts::validates"], why: /test root spec\// },
+    { name: "e2e/ failure, web/ diff", files: ["web/pages/index.tsx"], failing: ["e2e/home.spec.ts::loads"], why: /test root e2e\// },
+    { name: "tests/ failure, docs-only diff (the stated trade-off: still not re-run)", files: ["docs/guide.md"], failing: ["tests/unit/calc.test.ts::adds"], why: /test root tests\// },
+  ];
+  for (const c of cases) {
+    const first = await producedGates({ failing: c.failing ?? [OC_ID] });
+    expect(first.gates.unit.parsed, c.name).toBe(true);
+    const withDiff = await run157({ seq: [first, green], diff: { ok: true, files: c.files } });
+    const today = await run157({ seq: [first, green] });                        // no diffFiles dep = the pre-#157 path
+    expect(withDiff.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(withDiff.code, c.name).toBe(2);
+    expect(withDiff.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(transitionsOf(withDiff.d), c.name).toEqual(transitionsOf(today.d));
+    expect(withoutRefusal(withDiff.lines), c.name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(withDiff.lines, first, c.name, c.why);
+    expect(withDiff.lines, c.name).toContain("merge: gates RED");
+    expect(gateStatusesOf(withDiff.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
+  }
+
+  // Positive controls for the test-root rule: only the EXACT top-level names count. A `tests/` segment deeper in the
+  // path (server/tests/…, the #111 shape) and a top-level dir that merely starts with a root name are re-run.
+  for (const c of [
+    { name: "server/tests/ under a client-only diff (#111)", failing: ["server/tests/x.test.ts::t"], files: ["client/a.ts"] },
+    { name: "testkit/ is not tests/", failing: ["testkit/x.test.ts::t"], files: ["client/a.ts"] },
+    { name: "specs/ is not spec/", failing: ["specs/x.test.ts::t"], files: ["client/a.ts"] },
+    { name: "a test root name deeper in the path", failing: ["server/e2e/flow.test.ts::t"], files: ["src/calc.ts"] },
+  ]) {
+    const r = await run157({ seq: [await producedGates({ failing: c.failing }), green], diff: { ok: true, files: c.files } });
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(2);
+    expect(r.d.mergePr, c.name).toHaveBeenCalledWith(9);
+    expect(refusalLinesOf(r.lines), c.name).toEqual([]);
+  }
+  // …and the list is defined once, in merge-stage.js, as exactly these five names.
+  expect([...TEST_ROOT_DIRS].sort()).toEqual(["__tests__", "e2e", "spec", "test", "tests"]);
+
+  // Several failing ids: the one inside the diff is NOT the first. Every id must be outside — a rule that
+  // checks only the first failing id would re-run these and merge.
+  const CLIENT_TEST = "client/tests/Calendar.test.ts::test_9_renders_week";
+  const multi = [
+    { name: "second id's package is in the diff", failing: [CLIENT_TEST, OC_ID], files: ["server/src/routes/follows.ts"], why: /diff touches server\// },
+    { name: "third id's test file is in the diff", failing: [CLIENT_TEST, "shared/tests/date.test.ts::test_3_dst", OC_ID], files: ["docs/notes/x.md", "server/tests/follows.test.ts"], why: /diff touches server\// },
+    { name: "second id is at the repo root", failing: [CLIENT_TEST, "follows.test.ts::test_49_event_visibility"], files: ["docs/notes/x.md"], why: /failing test at the repo root/ },
+    { name: "second id sits under a test root", failing: [CLIENT_TEST, "tests/calc.test.ts::adds"], files: ["docs/notes/x.md"], why: /test root tests\// },
+  ];
+  for (const c of multi) {
+    const first = await producedGates({ failing: c.failing });
+    expect(first.gates.unit.failing_ids, c.name).toEqual(c.failing);           // the eligible id really is first
+    // Control: the same RED with only the first id is re-run under this diff — so the refusal below is about the later id.
+    const firstOnly = await producedGates({ failing: [c.failing[0]] });
+    expect((await run157({ seq: [firstOnly, green], diff: { ok: true, files: c.files } })).d.gates, c.name).toHaveBeenCalledTimes(2);
+    const withDiff = await run157({ seq: [first, green], diff: { ok: true, files: c.files } });
+    const today = await run157({ seq: [first, green] });
+    expect(withDiff.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(withDiff.code, c.name).toBe(2);
+    expect(withDiff.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(withDiff.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(withoutRefusal(withDiff.lines), c.name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(withDiff.lines, first, c.name, c.why);
+    expect(flakyMarksOf(withDiff.lines), c.name).toEqual([]);
+  }
+});
+
+test("test_157_unreadable_diff_or_failing_list_is_no_rerun", async () => {
+  const red = await producedGates({ failing: [OC_ID] });
+  const green = await producedGates({ failing: [] });
+  // Control: readable diff + parsed failing list outside it → re-run. Everything below removes one proof.
+  const control = await run157({ seq: [red, green], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(control.d.gates).toHaveBeenCalledTimes(2);
+
+  const parsedFalse = await producedGates({ failing: [OC_ID], report: false });
+  expect(parsedFalse.gates.unit).toMatchObject({ status: "RED", parsed: false, failing_ids: [] });
+  const noIds = await producedGates({ failing: [], unitExit: 1 });              // KTB-35: report read, 0 failing, command failed
+  expect(noIds.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [] });
+  const mixed = await producedGates({ failing: [OC_ID], lint: "RED" });
+  expect(mixed.gates.lint.status).toBe("RED");
+  const misconfigured = await producedGates({ failing: [OC_ID], omitLint: true });
+  expect(misconfigured.status).toBe("MISCONFIGURED");
+  const outside = await producedGates({ failing: ["../elsewhere/follows.test.ts::test_49_event_visibility"] });
+  expect(outside.gates.unit.failing_ids).toEqual(["../elsewhere/follows.test.ts::test_49_event_visibility"]);
+  const blockedGates = await producedBlockedGates();
+  // Derived from a produced RED with only `parsed` flipped: ids that no parsed report vouches for (another
+  // parser's shape) are still not proof — the rule keys on `parsed === true`, not on ids being present.
+  const unvouched = { ...red, gates: { ...red.gates, unit: { ...red.gates.unit, parsed: false } } };
+
+  const cases = [
+    { name: "failing ids with parsed:false", first: unvouched, diff: { ok: true, files: CLIENT_ONLY }, why: /unit is RED without a parsed test report/ },
+    { name: "diffFiles ok:false", first: red, diff: { ok: false, files: [], reason: "git diff failed: fatal: bad revision" }, why: /PR diff unreadable or empty: git diff failed: fatal: bad revision/ },
+    { name: "diffFiles throws GitDiffError", first: red, diff: async () => { throw new GitDiffError("fatal: bad revision"); }, why: /PR diff unreadable or empty: .*fatal: bad revision/ },
+    { name: "diffFiles throws MergeBaseError", first: red, diff: async () => { throw new MergeBaseError("origin/main: exit 128"); }, why: /PR diff unreadable or empty: .*origin\/main: exit 128/ },
+    { name: "diffFiles throws a plain Error", first: red, diff: async () => { throw new Error("boom"); }, why: /PR diff unreadable or empty: boom/ },
+    { name: "diffFiles returns nothing", first: red, diff: async () => undefined, why: /PR diff unreadable or empty/ },
+    { name: "diffFiles dep absent", first: red, diff: undefined, why: /PR diff unreadable or empty: diffFiles dep not wired/ },
+    { name: "empty diff", first: red, diff: { ok: true, files: [] }, why: /PR diff unreadable or empty/ },
+    { name: "files is not a list", first: red, diff: { ok: true, files: "client/src/App.tsx" }, why: /PR diff unreadable or empty/ },
+    { name: "a diff path that cannot be normalised", first: red, diff: { ok: true, files: [...CLIENT_ONLY, "../server/x.ts"] }, why: /diff path not normalisable: \.\.\/server\/x\.ts/ },
+    { name: "RED test gate with parsed:false", first: parsedFalse, diff: { ok: true, files: CLIENT_ONLY }, why: /unit is RED without a parsed test report/ },
+    { name: "RED test gate with empty failing_ids", first: noIds, diff: { ok: true, files: CLIENT_ONLY }, why: /unit is RED with no failing test ids/ },
+    { name: "lint RED alongside the test RED", first: mixed, diff: { ok: true, files: CLIENT_ONLY }, why: /lint is RED without a parsed test report/ },
+    { name: "a MISCONFIGURED gate", first: misconfigured, diff: { ok: true, files: CLIENT_ONLY }, why: /gates MISCONFIGURED/ },
+    { name: "a failing path that cannot be normalised", first: outside, diff: { ok: true, files: CLIENT_ONLY }, why: /failing test path not normalisable: \.\.\/elsewhere/ },
+    // BLOCKED never reaches the re-run question (it is not a verdict) — its record stays exactly today's, no refusal line.
+    { name: "gates BLOCKED stays blocked", first: blockedGates, diff: { ok: true, files: CLIENT_ONLY }, why: null },
+  ];
+  for (const c of cases) {
+    const r = await run157({ seq: [c.first, green], diff: c.diff });
+    const today = await run157({ seq: [c.first, green] });
+    expect(r.code, c.name).toBe(2);
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), c.name).toEqual(transitionsOf(today.d));
+    expect(withoutRefusal(r.lines), c.name).toEqual(withoutRefusal(today.lines));
+    if (c.why) expectRefusedRecord157(r.lines, c.first, c.name, c.why);
+    else expect(gateStepLines(r.lines), c.name).toEqual(pre157GateStepLines(c.first));
+    expect(flakyMarksOf(r.lines), c.name).toEqual([]);
+  }
+  // Several RED gates where the FIRST is an eligible parsed test gate and a later one is not provable
+  // (a non-test gate, or a test gate without a parsed report). A rule that only looks at the first RED gate
+  // would re-run these and merge.
+  const unitThenLint = await producedGatesOrdered157({ order: ["unit", "lint"], unit: [OC_ID], lint: "RED" });
+  expect(Object.keys(unitThenLint.gates)).toEqual(["unit", "lint"]);
+  expect(unitThenLint.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
+  expect(unitThenLint.gates.lint.status).toBe("RED");
+  const unitThenUnparsed = await producedGatesOrdered157({ order: ["lint", "unit", "integration"], unit: [OC_ID], integration: "unparsed" });
+  expect(unitThenUnparsed.gates.integration).toMatchObject({ status: "RED", parsed: false });
+  expect(unitThenUnparsed.status).toBe("RED");
+  // Control: the same ordered fixtures with the later gate GREEN are re-run — the order alone is not a refusal.
+  for (const ctl of [
+    await producedGatesOrdered157({ order: ["unit", "lint"], unit: [OC_ID] }),
+    await producedGatesOrdered157({ order: ["lint", "unit", "integration"], unit: [OC_ID] }),
+  ]) {
+    expect(ctl.status).toBe("RED");
+    expect((await run157({ seq: [ctl, green], diff: { ok: true, files: CLIENT_ONLY } })).d.gates).toHaveBeenCalledTimes(2);
+  }
+  for (const [name, first, why] of [["lint RED after an eligible unit RED", unitThenLint, /lint is RED without a parsed test report/], ["integration RED unparsed after an eligible unit RED", unitThenUnparsed, /integration is RED without a parsed test report/]]) {
+    const r = await run157({ seq: [first, green], diff: { ok: true, files: CLIENT_ONLY } });
+    const today = await run157({ seq: [first, green] });
+    expect(r.code, name).toBe(2);
+    expect(r.d.gates, name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(withoutRefusal(r.lines), name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(r.lines, first, name, why);
+    expect(flakyMarksOf(r.lines), name).toEqual([]);
+  }
+
+  // The refusal reason goes to a public place (the run record), so it goes through the gates-detail projection's scrub
+  // (`gatesDetailLines` — one rule, not a copy). A credential inside an error message (here: a git error echoing a
+  // remote URL) is redacted when it is in the process env, and passes through unchanged when it is not (both env paths pinned).
+  const SECRET = "fake-secret-value-for-test-157-refusal";
+  const leaky = { ok: false, files: [], reason: `git diff failed: fatal: https://x-access-token:${SECRET}@github.com/o/r: bad revision` };
+  vi.stubEnv("GITHUB_TOKEN", SECRET);
+  try {
+    const r = await run157({ seq: [red, green], diff: leaky });
+    const [line] = refusalLinesOf(r.lines);
+    expect(line).toMatch(/^merge: no gates rerun — PR diff unreadable or empty: git diff failed/);
+    expect(line).not.toContain(SECRET);
+    expect(line).toContain("[REDACTED");
+    expect(line).toContain(gatesDetailReason157(`PR diff unreadable or empty: ${leaky.reason}`));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+  vi.stubEnv("GITHUB_TOKEN", "");
+  try {
+    const plain = { ok: false, files: [], reason: "git diff failed: fatal: bad revision 'c0ffee'" };
+    const r = await run157({ seq: [red, green], diff: plain });
+    expect(refusalLinesOf(r.lines)).toEqual([`${NO_RERUN_157}PR diff unreadable or empty: ${plain.reason} ${STAMP_TAG_157}`]);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+
+  // The outcomes are today's: needs-human for RED / MISCONFIGURED, blocked for BLOCKED.
+  expect(transitionsOf((await run157({ seq: [misconfigured], diff: { ok: true, files: CLIENT_ONLY } })).d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates MISCONFIGURED at merge" })]);
+  expect(transitionsOf((await run157({ seq: [blockedGates], diff: { ok: true, files: CLIENT_ONLY } })).d)).toEqual([expect.objectContaining({ to: "factory:blocked" })]);
+});
+
+/**
+ * A vitest `--reporter=json` report with failing assertions `failingIds` PLUS test files that failed as a whole
+ * (`loadErrors`: a file that did not load, or a suite-level hook that threw). Vitest writes those as a
+ * `testResults` entry with `status:"failed"`, a `message`, and NO failed assertion — counted in
+ * `numFailedTestSuites`, never in `numFailedTests`. Shape taken from vitest's JSON reporter (`JsonTestResult`).
+ */
+function vitestReportWithSuiteErrors157(failingIds, loadErrors, total = 132) {
+  const base = JSON.parse(vitestReport157(failingIds, total));
+  for (const [file, message] of loadErrors) {
+    base.testResults.push({ name: `${GATE_ROOT}/${file}`, status: "failed", message, assertionResults: [] });
+  }
+  base.numFailedTestSuites = new Set([...failingIds.map((id) => id.split("::")[0]), ...loadErrors.map(([f]) => f)]).size;
+  return JSON.stringify(base);
+}
+async function producedGatesWithSuiteErrors157({ failing, loadErrors }) {
+  const harness = HARNESS_157();
+  const fake = makeFakeRun([
+    { match: (_c, a) => a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+    { match: (_c, a) => a[1] === harness.commands.unit, result: { code: 1, stdout: "JSON report written to .factory/out/unit.json", stderr: "" } },
+  ]);
+  const text = vitestReportWithSuiteErrors157(failing, loadErrors);
+  const g = await runGates({ run: fake, cwd: GATE_ROOT, harness, level: "fast", quarantine: { quarantined: [] }, readFile: () => text, now: "2026-10-02T01:52:00.000Z" });
+  return registerReports157({ ...g, head_sha: "a".repeat(40) }, { unit: text });
+}
+
+test("test_157_suite_that_failed_without_a_failing_assertion_is_no_rerun", async () => {
+  // Skeptic finding (dw4): `failing_ids` lists failed ASSERTIONS only. A test file that failed to load has none,
+  // so a RED that is partly inside the diff (the client file the PR broke) looked "all outside" and was re-run.
+  const green = await producedGates({ failing: [] });
+  const LOAD_ERR = ["client/tests/Calendar.test.ts", "SyntaxError: Unexpected token (client/src/pages/Calendar.tsx:41:7)"];
+  const DIFF = { ok: true, files: ["client/src/pages/Calendar.tsx"] };
+  // Control: the server assertion RED alone, same diff, IS re-run — so the refusal below is about the load error.
+  const alone = await producedGates({ failing: [OC_ID] });
+  expect((await run157({ seq: [alone, green], diff: DIFF })).d.gates).toHaveBeenCalledTimes(2);
+
+  const cases = [
+    { name: "a client suite load error inside the diff's package beside an outside server RED", failing: [OC_ID], loadErrors: [LOAD_ERR] },
+    // Even outside the diff's packages: a failure with no test id is not a parsed test failure, so nothing proves it a flake.
+    { name: "a suite load error outside the diff beside an outside server RED", failing: [OC_ID], loadErrors: [["shared/tests/date.test.ts", "Error: Cannot find module './tz'"]] },
+    { name: "a suite-level hook error in the failing test's own file", failing: [OC_ID], loadErrors: [["server/tests/feed.test.ts", "Error: afterAll hook timed out"]] },
+  ];
+  for (const c of cases) {
+    const first = await producedGatesWithSuiteErrors157(c);
+    // The producer is real: the unit gate is RED, parsed, and its assertion ids are only the server test.
+    expect(first.status, c.name).toBe("RED");
+    expect(first.gates.unit, c.name).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
+    // factory.gates.v1 is unchanged (plan non-goal): the entry carries no suite field — the merge stage reads the report.
+    expect(Object.keys(first.gates.unit).sort(), c.name).toEqual(Object.keys(alone.gates.unit).sort());
+    expect(idlessFailedSuites({ gates: first, root: GATE_ROOT, readReport: (n) => reportOnDisk157(first, n) }), c.name).toEqual({ ok: true, files: c.loadErrors.map(([f]) => f) });
+    const r = await run157({ seq: [first, green], diff: DIFF });
+    const today = await run157({ seq: [first, green] });
+    expect(r.code, c.name).toBe(2);
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expect(withoutRefusal(r.lines), c.name).toEqual(withoutRefusal(today.lines));
+    expectRefusedRecord157(r.lines, first, c.name, new RegExp(`test files failed without a failing test: .*${c.loadErrors[0][0].replace(/[.]/g, "\\.")}`));
+    expect(flakyMarksOf(r.lines), c.name).toEqual([]);
+    expect(gateStatusesOf(r.postStatus).map((s) => s.state), c.name).toEqual(["failure"]);
+  }
+
+  // When the report cannot vouch that no suite failed id-less, that is not proof either: the reader is not wired,
+  // throws, or answers ok:false; the report is missing or unparseable; or the report on disk is not the one this gate
+  // read (its failing assertions differ from `failing_ids` — another run overwrote it).
+  const stale = vitestReport157([OC_ID, "server/tests/auth.test.ts::test_12_login"]);
+  const unproven = [
+    { name: "suiteFailures dep absent", over: { suiteFailures: undefined } },
+    { name: "suiteFailures throws", over: { suiteFailures: vi.fn(async () => { throw new Error("EACCES .factory/out/unit.json"); }) } },
+    { name: "suiteFailures ok:false", over: { suiteFailures: vi.fn(async () => ({ ok: false, files: [], reason: "x" })) } },
+    { name: "suiteFailures returns nothing", over: { suiteFailures: vi.fn(async () => undefined) } },
+    { name: "report missing", over: { suiteFailures: vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: () => null })) } },
+    { name: "report unparseable", over: { suiteFailures: vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: () => "{not json" })) } },
+    { name: "report on disk names other failures", over: { suiteFailures: vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: () => stale })) } },
+  ];
+  for (const c of unproven) {
+    const r = await run157({ seq: [alone, green], diff: DIFF, over: c.over });
+    expect(r.code, c.name).toBe(2);
+    expect(r.d.gates, c.name).toHaveBeenCalledTimes(1);
+    expect(r.d.mergePr, c.name).not.toHaveBeenCalled();
+    expect(transitionsOf(r.d), c.name).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+    expectRefusedRecord157(r.lines, alone, c.name, /suite-level failures not vouched for/);
+  }
+
+  // The re-run: the same assertion id fails again but a suite now fails to load too — not the same RED, so no
+  // flaky-candidate wording or marker (the id set alone would call it "the same set").
+  const againWithLoad = await producedGatesWithSuiteErrors157({ failing: [OC_ID], loadErrors: [LOAD_ERR] });
+  expect(againWithLoad.gates.unit.failing_ids).toEqual([OC_ID]);
+  const sameIdsPlusLoad = await run157({ seq: [alone, againWithLoad], diff: DIFF });
+  expect(sameIdsPlusLoad.code).toBe(2);
+  expect(sameIdsPlusLoad.d.gates).toHaveBeenCalledTimes(2);
+  expect(sameIdsPlusLoad.d.mergePr).not.toHaveBeenCalled();
+  const t = transitionsOf(sameIdsPlusLoad.d);
+  expect(t).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(t[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(flakyMarksOf(sameIdsPlusLoad.lines)).toEqual([]);
+  // Control: the same re-run without the load error IS the flaky-candidate case.
+  const sameIds = await run157({ seq: [alone, await producedGates({ failing: [OC_ID] })], diff: DIFF });
+  expect(transitionsOf(sameIds.d)[0].reason).toContain(FLAKY_TEXT_157);
+});
+
+import { flakyCandidateLines, FLAKY_CANDIDATE_PREFIX, TEST_ROOT_DIRS } from "../lib/merge-stage.js";
+import { DETAIL_MAX_NAME, GATES_DETAIL_PREFIX } from "../lib/gates.js";
+
+test("test_157_flaky_candidate_names_follow_the_gates_detail_scrub_rule", () => {
+  // Review arch1: the marker's test name is not scrubbed by a copy of the rule — it IS the `failing` name the
+  // gates-detail projection (`gatesDetailLines`) writes, so the two lines sitting next to each other in one run
+  // record carry byte-identical names whatever the rule becomes. Both env paths are pinned: with the secret in the
+  // process env (redacted in both) and without it (passed through in both).
+  const SECRET = "fake-secret-value-for-test-157";
+  const ID = `server/tests/login.test.ts::login[${SECRET}]`;
+  const LONG = `server/tests/long.test.ts::${"n".repeat(DETAIL_MAX_NAME * 2)}`;
+  const markerTests = (lines) => lines.map((l) => { expect(l.startsWith(FLAKY_CANDIDATE_PREFIX)).toBe(true); return JSON.parse(l.slice(FLAKY_CANDIDATE_PREFIX.length)).test; });
+  const detailNames = (ids) => {
+    const result = { gates: { unit: { status: "RED", parsed: true, failing_ids: ids, detail: { gate: "unit", failing: ids, snippet: "" } } } };
+    return JSON.parse(gatesDetailLines(result, { runId: "1", runnerId: "r" })[0].slice(GATES_DETAIL_PREFIX.length)).failing;
+  };
+
+  vi.stubEnv("GITHUB_TOKEN", SECRET);
+  try {
+    const [scrubbed, capped] = markerTests(flakyCandidateLines([ID, LONG], "RED", { runId: "1", runnerId: "r" }));
+    expect(scrubbed).not.toContain(SECRET);
+    expect(scrubbed).toContain("[REDACTED");
+    expect(scrubbed.startsWith("server/tests/login.test.ts::login[")).toBe(true);
+    expect(capped).toBe(LONG.slice(0, DETAIL_MAX_NAME));
+    expect([scrubbed, capped]).toEqual(detailNames([ID, LONG]));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+
+  vi.stubEnv("GITHUB_TOKEN", "");
+  try {
+    const names = markerTests(flakyCandidateLines([ID, LONG], "GREEN", { runId: "1", runnerId: "r" }));
+    expect(names).toEqual([ID, LONG.slice(0, DETAIL_MAX_NAME)]);
+    expect(names).toEqual(detailNames([ID, LONG]));
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+test("test_157_unhandled_error_on_the_rerun_never_merges", async () => {
+  // Residual risk (ADR-034): vitest's JSON report has no trace of an unhandled error (vitest 3.2.7: exit 1, report
+  // `success:true`, nothing on stderr), so a first RED with an outside assertion PLUS an unhandled error looks
+  // eligible. The bound that still holds: the re-run must be WHOLE GREEN. An unhandled error that fires again on the
+  // re-run is a RED with zero failing assertions (KTB-35) — never a merge, never a flaky-candidate marker.
+  const first = await producedGates({ failing: [OC_ID] });
+  const unhandledAgain = await producedGates({ failing: [], unitExit: 1 });
+  expect(unhandledAgain.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [] });
+  expect(unhandledAgain.gates.unit.reason).toMatch(/unhandled error outside tests/);
+  const r = await run157({ seq: [first, unhandledAgain], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(r.code).toBe(2);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+  expect(r.d.mergeGates).not.toHaveBeenCalled();
+  const t = transitionsOf(r.d);
+  expect(t).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(t[0].reason).not.toContain("flaky");
+  expect(t[0].reason).toContain(OC_ID);
+  expect(flakyMarksOf(r.lines)).toEqual([]);
+  expect(gateStatusesOf(r.postStatus).map((s) => s.state)).toEqual(["failure", "failure"]);
+  // The unhandled re-run's own evidence (KTB-35 reason) reaches the run record.
+  expect(detailsOf(r.lines).some((dl) => /unhandled error outside tests/.test(dl.reason ?? ""))).toBe(true);
+});
+
+// ── #184 — the #157 re-land's own pins (plan dw6, and the dw2/dw4/dw5 rubric points the #161 tests above leave implicit) ──
+
+// dw6 (plan d1/d2/d3): a merge that happened only because the re-run was GREEN must be findable later. The run record's
+// `merge: merged …` line — the one line written only after mergePr returned — names the test that failed and then passed
+// and marks the merge as merged on re-run. A merge with no re-run, or a GREEN re-run that did not end in a merge, carries no
+// such mark: the mark is a statement about the merge, not about the re-run.
+const MERGED_ON_RERUN_184 = "merged on rerun";
+test("test_184_green_rerun_merge_record_names_the_retried_test", async () => {
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const second = await producedGates({ failing: [], sha: HEAD });
+
+  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(r.code).toBe(0);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(r.d.mergePr).toHaveBeenCalledWith(9);
+  const marked = r.lines.filter((l) => l.includes(MERGED_ON_RERUN_184));
+  expect(marked).toHaveLength(1);
+  expect(marked[0].startsWith(`merge: merged ${HEAD.slice(0, 7)} via PR #9`)).toBe(true);
+  expect(marked[0]).toContain(OC_ID);
+  // Written after the merge happened, not when the re-run came back GREEN.
+  const markedCall = r.record.mock.calls.findIndex((c) => c[0].includes(marked[0]));
+  expect(r.record.mock.invocationCallOrder[markedCall]).toBeGreaterThan(r.d.mergePr.mock.invocationCallOrder[0]);
+
+  // Two retried ids: both are named on the one line.
+  const two = [OC_ID, "server/tests/follows.test.ts::test_50_follow_feed"];
+  const r2 = await run157({ seq: [await producedGates({ failing: two, sha: HEAD }), second], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(r2.code).toBe(0);
+  const marked2 = r2.lines.filter((l) => l.includes(MERGED_ON_RERUN_184));
+  expect(marked2).toHaveLength(1);
+  for (const id of two) expect(marked2[0]).toContain(id);
+
+  // Control: a first-run GREEN merge has no re-run and no mark — the mark is not on every merge line.
+  const plain = await run157({ seq: [second], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(plain.code).toBe(0);
+  expect(plain.d.gates).toHaveBeenCalledTimes(1);
+  expect(plain.lines.some((l) => l.startsWith(`merge: merged ${HEAD.slice(0, 7)} via PR #9`))).toBe(true);
+  expect(plain.lines.some((l) => l.includes(MERGED_ON_RERUN_184))).toBe(false);
+
+  // Control: a GREEN re-run whose merge call then fails did not merge — no mark.
+  const failed = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { mergePr: vi.fn(async () => { throw new Error("405 not mergeable"); }) } });
+  expect(failed.code).toBe(2);
+  expect(failed.lines.some((l) => l.includes(MERGED_ON_RERUN_184))).toBe(false);
+});
+
+// dw4 rubric: the issue fixes the inconclusive reason verbatim — pin the exact phrase, not two halves of it.
+test("test_184_inconclusive_rerun_reason_carries_the_issue_phrase_verbatim", async () => {
+  const first = await producedGatesOrdered157({ order: ["integration"], integration: [OC_ID] });
+  const unreported = await producedGatesOrdered157({ order: ["integration"], integration: "unparsed" });
+  const resetGates = vi.fn(async () => {});
+  const r = await run157({ seq: [first, unreported], diff: { ok: true, files: CLIENT_ONLY }, over: { resetGates } });
+  expect(r.code).toBe(2);
+  expect(resetGates).toHaveBeenCalledTimes(1);
+  expect(resetGates.mock.invocationCallOrder[0]).toBeLessThan(r.d.gates.mock.invocationCallOrder[1]);
+  const t = transitionsOf(r.d);
+  expect(t).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(t[0].reason).toContain("rerun inconclusive — the re-run wrote no test report");
+  expect(t[0].reason).not.toContain(FLAKY_TEXT_157);
+  expect(flakyMarksOf(r.lines)).toEqual([]);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+});
+
+// dw2 rubric (plan d4): the flaky-candidate marker is reason/record text only. Merge asks no dep for a factory:flaky label,
+// issue, quarantine entry or flaky verdict — every dep call the stage makes on a second RED is checked for that surface.
+test("test_184_second_red_creates_nothing_on_the_factory_flaky_surface", async () => {
+  const first = await producedGates({ failing: [OC_ID] });
+  const again = await producedGates({ failing: [OC_ID] });
+  const saveQuarantine = vi.fn(async () => {});
+  const createIssue = vi.fn(async () => 1);
+  const addLabel = vi.fn(async () => {});
+  const r = await run157({ seq: [first, again], diff: { ok: true, files: CLIENT_ONLY }, over: { saveQuarantine, createIssue, addLabel } });
+  expect(r.code).toBe(2);
+  const t = transitionsOf(r.d);
+  expect(t).toEqual([expect.objectContaining({ to: "factory:needs-human" })]);
+  expect(t[0].reason).toContain(FLAKY_TEXT_157);
+  expect(t[0].reason).toContain(OC_ID);
+  expect(flakyMarksOf(r.lines)).toEqual([expect.objectContaining({ test: OC_ID, outcome: "RED" })]);
+  expect(saveQuarantine).not.toHaveBeenCalled();
+  expect(createIssue).not.toHaveBeenCalled();
+  expect(addLabel).not.toHaveBeenCalled();
+  // Nothing any dep was handed names the factory:flaky label or a flaky-existing verdict.
+  for (const [name, fn] of Object.entries(r.d)) {
+    if (!vi.isMockFunction(fn)) continue;
+    for (const call of fn.mock.calls) expect(JSON.stringify(call ?? null), name).not.toMatch(/factory:flaky|flaky-existing/);
+  }
+  expect(r.lines.some((l) => /factory:flaky|flaky-existing/.test(l))).toBe(false);
+});
+
+// dw5 (plan d5): ANY throw between the first RED and mergePr never merges — the re-run's gate call, resetGates, the changed-files
+// lookup and the suite-failure reader — and the outcome is visible (the stage rejects with the cause, or needs-human with it).
+test("test_184_any_throw_between_first_red_and_merge_never_merges", async () => {
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const green = await producedGates({ failing: [], sha: HEAD });
+
+  // resetGates throws: the re-run never starts, nothing merges, the stage fails loudly with the cause.
+  const mergePr1 = vi.fn(async () => {});
+  await expect(run157({ seq: [first, green], diff: { ok: true, files: CLIENT_ONLY }, over: { mergePr: mergePr1, resetGates: vi.fn(async () => { throw new Error("EACCES: reset .factory/out/unit.json"); }) } }))
+    .rejects.toThrow(/EACCES: reset/);
+  expect(mergePr1).not.toHaveBeenCalled();
+
+  // The re-run's gate call throws a plain (untyped) error: no merge, the cause propagates.
+  const mergePr2 = vi.fn(async () => {});
+  await expect(run157({ seq: [first, () => { throw new Error("vitest crashed: SIGKILL"); }], diff: { ok: true, files: CLIENT_ONLY }, over: { mergePr: mergePr2 } }))
+    .rejects.toThrow(/SIGKILL/);
+  expect(mergePr2).not.toHaveBeenCalled();
+
+  // The changed-files lookup throws: "outside the diff" is not proven — no re-run, today's needs-human, the cause on the record.
+  const viaDiff = await run157({ seq: [first, green], diff: async () => { throw new Error("git diff exploded"); } });
+  expect(viaDiff.code).toBe(2);
+  expect(viaDiff.d.gates).toHaveBeenCalledTimes(1);
+  expect(viaDiff.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(viaDiff.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+  expect(refusalLinesOf(viaDiff.lines)).toEqual([expect.stringContaining("git diff exploded")]);
+
+  // The suite-failure reader throws: not vouched for — same outcome.
+  const viaSuites = await run157({ seq: [first, green], diff: { ok: true, files: CLIENT_ONLY }, over: { suiteFailures: vi.fn(async () => { throw new Error("report read failed"); }) } });
+  expect(viaSuites.code).toBe(2);
+  expect(viaSuites.d.gates).toHaveBeenCalledTimes(1);
+  expect(viaSuites.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(viaSuites.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+  expect(refusalLinesOf(viaSuites.lines)).toEqual([expect.stringContaining("report read failed")]);
 });
