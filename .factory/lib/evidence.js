@@ -1,5 +1,5 @@
 import { parseHandoffs } from "./handoff.js";
-import { parseReviewEvidenceAll, runIdOfRunner } from "./run-record.js";
+import { parseReviewEvidenceAll, parseRecordSection, runIdOfRunner } from "./run-record.js";
 import { knownRunsFor, isBoundLine, parseRecordEvidence } from "./feedback/harvest-findings.js";
 import { parseHeartbeat } from "./heartbeat.js";
 import { SELF_GATE_DETAIL_PREFIX } from "./self-gate.js";
@@ -150,7 +150,6 @@ function loginsOf(factoryLogins) {
 }
 
 const BUDGET_LIFETIME = /^budget: lifetime \$(\d+(?:\.\d+)?) \/ \$(\d+(?:\.\d+)?) over (\d+) run\(s\)(?: — REFUSED)?$/;
-const RECORD_SECTION = /^## (\S+) · (.+?) · (\S+)$/;
 /** Stages whose run-stage run writes a `budget:` line (run-stage skips the budget check in merge). */
 const BUDGET_STAGES = new Set(["triage", "plan", "implement", "review"]);
 
@@ -163,8 +162,8 @@ function boundBudget(recordText, { known, stages }) {
   let section = null;
   for (const raw of String(recordText ?? "").split("\n")) {
     const l = raw.trimEnd();
-    const h = RECORD_SECTION.exec(l);
-    if (h) { section = { stage: h[1], runner: h[3] }; continue; }
+    const h = parseRecordSection(l);                                   // the writer's own grammar (run-record.js)
+    if (h) { section = { stage: h.stage, runner: h.runnerId }; continue; }
     if (section && l.startsWith("budget:")) lines.push({ ...section, line: l });
   }
   let rejected = 0;
@@ -356,9 +355,8 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const queuedAt = cs.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
   const nowMs = now == null ? null : (typeof now === "number" ? now : Date.parse(String(now)));
   const elapsedMs = queuedAt != null && Number.isFinite(nowMs) && nowMs >= queuedAt ? nowMs - queuedAt : null;
-  const runners = new Set();
-  for (const c of cs) { const m = /<!--\s*factory-heartbeat issue=\d+\s*-->\s*\nstage:\s*\S+\s*·\s*runner:\s*(\S+)\s*·/.exec(String(c?.body ?? "")); if (m) runners.add(m[1]); }
-  const runs = runners.size ? runners.size : null;
+  // runs = the heartbeat-named runners, read through parseHeartbeat (heartbeatStages) — the same parser that binds every record row.
+  const runs = stages.size ? stages.size : null;
 
   const rejected = typeof reason === "string" && reason.trim() ? reason.trim() : null;
 

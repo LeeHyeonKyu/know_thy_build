@@ -96,6 +96,17 @@ export function reviewEvidenceLine({ headSha, round, decision, verdicts = [], ru
 }
 
 const SECTION = /^##\s+(\S+)\s+·\s+(\S+)\s+·\s+(.+)$/;
+
+/**
+ * One run-record line → its section header `{ stage, at, runnerId }` (what `appendRunRecord` above writes:
+ * `## <stage> · <at> · <runner>`), or null when the line is not a header. The writer and this reader share one file so a
+ * reader elsewhere (`evidence.js`) cannot drift into a stricter copy that misses a header and binds the lines after it to
+ * the previous section (#195 rework arch1).
+ */
+export function parseRecordSection(line) {
+  const m = SECTION.exec(String(line ?? ""));
+  return m ? { stage: m[1], at: m[2], runnerId: m[3].trim() } : null;
+}
 const EVIDENCE = new RegExp(`^${REVIEW_EVIDENCE_PREFIX} run_id=(\\S+) runner=(\\S+) head_sha=(\\S+) round=(\\S+) decision=(\\S+) verdicts=(\\S*?)( qa_manifest=(\\S+?))?( qa_claims=(\\S+))?$`);
 
 /**
