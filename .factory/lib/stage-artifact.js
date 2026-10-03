@@ -288,7 +288,8 @@ export const WORKFLOW_OUTPUT_CTIME_SLACK_MS = 1000;
  *  ② 러너 자신의 사본 — 알림의 `<result>`(길면 앞부분 + "... (truncated …)")가 파일의 결과 직렬화의 앞부분과
  *     같아야 한다(잘리지 않았으면 전체가 같아야 한다). 결과가 나오기 전에 심어 둔 파일은 이것을 맞출 수 없다.
  * 둘 중 무엇이든 확인할 수 없으면(타임스탬프 없음, 변경 시각을 주지 못하는 리더) **쓰지 않는다** — 묶이지
- * 않은 파일이 판정이 되는 것보다 사람에게 가는 편이 싸다. 돌려주는 것은 사유(문자열) 또는 null(묶임).
+ * 않은 파일이 판정이 되는 것보다 사람에게 가는 편이 싸다. 돌려주는 것은 사유(문자열) 또는 `{ partial }`(묶임 —
+ * `partial`은 잘린 인라인이라 앞부분만 바이트로 묶였을 때 그 범위를 적은 문장, 전부 묶였으면 null).
  */
 function runnerBindingFailure({ path, value, inline, at, ctimeMs }) {
   const unbound = (why) => `workflow output file not bound to the runner's notification (${why}): ${path}`;
@@ -303,7 +304,11 @@ function runnerBindingFailure({ path, value, inline, at, ctimeMs }) {
   const runnerCopy = cut ? inline.slice(0, cut.index) : inline.trim();
   const same = cut ? runnerCopy.length > 0 && serialized.startsWith(runnerCopy) : serialized === runnerCopy;
   if (!same) return `workflow output file does not match the runner's notification: ${path} (its result does not ${cut ? "begin with" : "equal"} the ${runnerCopy.length} chars the runner inlined)`;
-  return null;
+  // 묶이지 **않는** 부분을 숨기지 않는다(스킵틱 #170 4차, plan open_risks sec-sf1). 잘린 인라인은 앞부분만 바이트로
+  // 묶고, 나머지는 ② 변경 시각 하나로만 묶인다 — 러너가 쓴 뒤 알림 줄 + 여유 안에 꼬리만 바꾼 파일은 여기서
+  // 가려낼 수 없다(러너가 전체의 해시를 싣지 않는 한 어떤 규칙도 그 꼬리를 대 볼 기준이 없다). 그래서 받아들일 때
+  // 그 사실을 출처에 적는다: run 로그의 `artifact:` 줄이 "일부만 러너 바이트"인 판정을 그대로 보여 준다.
+  return { partial: cut ? `runner-bound: first ${runnerCopy.length} of ${serialized.length} result chars; the rest by change time only` : null };
 }
 
 /**
@@ -335,7 +340,12 @@ export function workflowOutputFilesFromTranscript(text) {
   const files = [];
   /** 접수증에 묶인 알림이지만 completed가 아닌 것 — 파일을 열지 않고 사유에 이름만 남긴다(rework cf1). */
   const rejected = [];
-  if (!taskIds.length || typeof text !== "string") return { taskIds, files, rejected };
+  /**
+   * 접수증의 task id를 적었지만 버린 알림 — `<tool-use-id>`가 그 task를 띄운 호출이 아니거나 `<output-file>`이
+   * 비었다. 파일은 열지 않되 **조용히 버리지 않는다**(스킵틱 #170 4차, dw4): `{ taskId, why, path }`.
+   */
+  const dropped = [];
+  if (!taskIds.length || typeof text !== "string") return { taskIds, files, rejected, dropped };
   for (const line of text.split("\n")) {
     if (!line.trim() || !line.includes("task-notification")) continue;
     let o;
@@ -356,9 +366,10 @@ export function workflowOutputFilesFromTranscript(text) {
         : [];
     for (const t of texts) {
       const h = runnerNotificationHeader(t);
-      if (!h || !h.taskId || !h.path || !taskIds.includes(h.taskId)) continue;
+      if (!h || !h.taskId || !taskIds.includes(h.taskId)) continue;
+      if (!h.path) { dropped.push({ taskId: h.taskId, why: "notification names no <output-file>", path: null }); continue; }
       // `<tool-use-id>`를 적은 알림은 그 task id의 접수증을 낳은 `Workflow` 호출의 것이어야 한다.
-      if (h.toolUseId && !callsOf.get(h.taskId).has(h.toolUseId)) continue;
+      if (h.toolUseId && !callsOf.get(h.taskId).has(h.toolUseId)) { dropped.push({ taskId: h.taskId, why: `notification's <tool-use-id> ${h.toolUseId} did not launch it`, path: h.path }); continue; }
       // completed만 — (1)이 `<result>`에 적용하는 규칙 그대로다. 같은 러너 바이트가 인라인으로 오면 거절되고
       // 디스크에서 읽으면 받아들여지는 비대칭을 두지 않는다(rework cf1).
       if (h.status !== "completed") { rejected.push({ taskId: h.taskId, path: h.path, status: h.status || "(none)" }); continue; }
@@ -369,7 +380,7 @@ export function workflowOutputFilesFromTranscript(text) {
   }
   const seen = new Set();
   const newestFirst = files.reverse().filter((f) => (seen.has(f.path) ? false : seen.add(f.path)));
-  return { taskIds, files: newestFirst, rejected };
+  return { taskIds, files: newestFirst, rejected, dropped };
 }
 
 /**
@@ -483,7 +494,7 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
    * 접수증이 있을 때만 본다. 둘 중 하나라도 없으면 아래의 새 줄(잘린 후보·결과 파일)은 하나도 생기지 않아
    * 사유가 #170 이전과 바이트 단위로 같다(retro.js·implementHeadShaOf는 넘기지 않는다).
    */
-  const wfFiles = typeof readFile === "function" ? workflowOutputFilesFromTranscript(transcriptText) : { taskIds: [], files: [], rejected: [] };
+  const wfFiles = typeof readFile === "function" ? workflowOutputFilesFromTranscript(transcriptText) : { taskIds: [], files: [], rejected: [], dropped: [] };
   const optIn = wfFiles.taskIds.length > 0;
   /** 선두가 `{`인데 그 짝이 없는 텍스트 — `head -c`나 알림의 잘림이 만든 조각. 스키마 오류로 오진하지 않고 이름으로 부른다. */
   const truncated = [];
@@ -531,7 +542,12 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   // 가던 자리(own-calendar #124). 실패는 전부 경로를 부르는 한 줄로 남긴다: 파일이 사라졌는지(scratchpad의
   // 수명은 미검증이다), 크기를 넘었는지, JSON이 아닌지, 스키마에 어긋났는지가 서로 다른 문장이다.
   for (const { taskId, path, status } of wfFiles.rejected) tried.push(`workflow output file not used: task ${taskId} status ${status} (${path})`);
-  if (optIn && wfFiles.files.length === 0) tried.push(`workflow output file: no runner notification names the output file of task ${wfFiles.taskIds.join(", ")}`);
+  for (const { taskId, why, path } of wfFiles.dropped) tried.push(`workflow output file not used: task ${taskId} ${why}${path ? ` (${path})` : ""}`);
+  // 접수증의 task **마다** 한 줄(스킵틱 #170 4차): 다시 띄운 리뷰처럼 접수증이 둘이면, 한 task의 파일을 찾았다고
+  // 다른 task의 빠진 고리가 사유에서 사라지면 안 된다. 접수증이 하나면 이 줄은 이전과 바이트 단위로 같다.
+  for (const taskId of wfFiles.taskIds) {
+    if (!wfFiles.files.some((f) => f.taskId === taskId)) tried.push(`workflow output file: no runner notification names the output file of task ${taskId}`);
+  }
   for (const { path, inline, at } of wfFiles.files) {
     let text = null;
     // 두 번째 인자는 **읽기 전에** 크기를 보라는 요청이다: 그것을 지키는 리더(run-stage의 `readFileOrNull`)는
@@ -569,7 +585,8 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
     // 스키마를 통과한 후보만 러너의 알림에 대 본다(통과하지 못한 파일은 위 스키마 사유가 더 정확하다).
     // 묶이지 않으면 이 파일의 후보를 **전부** 거둬들인다 — 아래 후보 루프가 그것을 고르지 못하도록.
     const failure = runnerBindingFailure({ path, value: passing[0].obj, inline, at, ctimeMs });
-    if (failure) { candidates.length = before; tried.push(failure); }
+    if (typeof failure === "string") { candidates.length = before; tried.push(failure); continue; }
+    if (failure.partial) for (const c of mine) c.source = `${c.source} [${failure.partial}]`;
   }
 
   // (2) 디스패처가 알림의 output-file을 읽은 내용. 조각으로 오므로 파일별로 다시 붙인다.
