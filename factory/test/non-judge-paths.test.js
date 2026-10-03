@@ -164,3 +164,29 @@ test("test_178_judge_import_closure_excludes_non_judge — every engine glob in 
   for (const g of NON_JUDGE_GLOBS) expect(/^(\.claude|\.github)\/|^bin\/|^package/.test(g), g).toBe(false);
   expect(NON_JUDGE_EXCLUDES).toEqual(expect.arrayContaining(["docs/factory/CHARTER.md", "docs/factory/runs/**", "templates/factory/docs/factory/CHARTER.md"]));
 });
+
+// ── #178 rework arch1 (round 4): 세션 지시문 빼기는 원본(run-stage.js의 SESSION_CONFIG_GLOBS)에 묶인다 ─────────────────
+
+test("test_178_non_judge_excludes_pin_session_config_globs", async () => {
+  // 원본 집합이 하나 늘면(예: "**/GEMINI*.md") 이 테스트가 RED가 된다 — 사본이 조용히 갈라질 수 없다.
+  const { SESSION_CONFIG_GLOBS } = await import("../bin/run-stage.js");
+  const { isOperatorMergePath } = await import("../lib/operator-merge.js");
+  const { matchesAny } = await import("../lib/glob.js");
+  expect(SESSION_CONFIG_GLOBS.length).toBeGreaterThan(0);
+  for (const g of SESSION_CONFIG_GLOBS) {
+    expect(NON_JUDGE_EXCLUDES, g).toContain(g);
+    // 그 이름의 파일을 목록 안 자리(docs·템플릿 docs, 어느 깊이든)에 두어도 비판정이 아니다 — 운영 세션의 문도 닫힌다.
+    const leaf = g.replace(/^\*\*\//, "");
+    for (const dir of ["docs/", "docs/sub/", "templates/factory/docs/"]) {
+      for (const fill of ["", ".local"]) {
+        const p = dir + leaf.replace(/\*/g, fill);
+        // 표본은 정말 목록 안 자리다(빼기가 없었다면 비판정이었을 경로) — 공허한 단언이 아니다.
+        expect(matchesAny(NON_JUDGE_GLOBS, p), p).toBe(true);
+        expect(isNonJudgePath(p), p).toBe(false);
+        expect(classifyProtected([p], E), p).toEqual({ non_judge: [], judge: [p] });
+        expect(isOperatorMergePath(p, E), p).toBe(false);
+        expect(isOperatorMergePath(p), p).toBe(false);
+      }
+    }
+  }
+}, 60000);
