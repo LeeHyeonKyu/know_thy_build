@@ -490,17 +490,29 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * It never blocks or reorders anything: a throw, a rejection, an `ok:false` or a timeout becomes exactly one
    * `evidence: FAIL — <reason>` record line and the merge or transition goes on. An unwired dep (an older wiring) is a no-op —
    * the record stays byte-identical to before this feature.
+   *
+   * A timeout CANCELS, it does not abandon: the dep gets an AbortSignal and the timer aborts it before this function returns,
+   * i.e. before mergePr / the needs-human transition. The dep checks it before its write and hands it to the `gh pr edit`
+   * child (lib/exec.js kills an aborted child), so a late-settling dep cannot rewrite the PR body after the merge or the
+   * transition while the record says FAIL.
    */
   let evidenceDone = false, evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false;
   const publishEvidence = async ({ route, reason = null }) => {
     if (evidenceDone || typeof d.publishPrEvidence !== "function") return;
     evidenceDone = true;
     const ms = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
+    const ac = new AbortController();
     let timer;
     try {
       const r = await Promise.race([
-        Promise.resolve().then(() => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason })),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms); }),
+        Promise.resolve().then(() => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal: ac.signal })),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const e = new Error(`timed out after ${ms} ms — the PR-body write was cancelled`);
+            ac.abort(e);
+            reject(e);
+          }, ms);
+        }),
       ]);
       if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
       evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;

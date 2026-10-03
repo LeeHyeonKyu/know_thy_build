@@ -5219,18 +5219,20 @@ test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
     editPrBody: vi.fn(async (_pr, b) => { seq.push("editPrBody"); body = b; }),
     comment: vi.fn(async (_n, b) => { seq.push("comment"); issueComments.push({ body: b, createdAt: "2026-10-03T12:31:00Z" }); }),
   };
-  const deps = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => readFileSync(recordPath, "utf8"), now: () => "2026-10-03T12:30:00Z", timeoutMs: 1234 });
+  // The budget row is this run's budget check (run-stage's `lifetimeBudget`), not the record's `budget:` line ($4.50 above).
+  const deps = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => readFileSync(recordPath, "utf8"), now: () => "2026-10-03T12:30:00Z", timeoutMs: 1234, lifetimeBudget: () => ({ ok: true, cap: 60, usd: 5.25, runs: 7, priced: 7 }) });
   const live = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 4, failed: 0, failing: [] };
   const r = await deps.publishPrEvidence({ pr: 9, route: "merge", gates: live, gatesRerun: true, reason: null });
   expect(r.ok).toBe(true);
   expect(seq).toEqual(["comments", "prBody", "editPrBody"]);
-  expect(fakeGh.prBody).toHaveBeenCalledWith(9, { timeoutMs: 1234 });
-  expect(fakeGh.editPrBody).toHaveBeenCalledWith(9, body, { timeoutMs: 1234 });
+  expect(fakeGh.prBody).toHaveBeenCalledWith(9, { timeoutMs: 1234, signal: null });
+  expect(fakeGh.editPrBody).toHaveBeenCalledWith(9, body, { timeoutMs: 1234, signal: null });
   expect(body.startsWith("Closes #7\n\nauthor text\n")).toBe(true);
   expect(body.split(EVIDENCE_START_195).length - 1).toBe(1);
   expect(body).toContain("level=full status=GREEN passed=4");
   expect(body).toContain("rerun: yes");
-  expect(body).toContain("budget: lifetime $4.50 / $60 over 6 run(s)");
+  expect(body).toContain("budget: lifetime $5.25 / $60 over 7 run(s) — this merge run's budget check");
+  expect(body).not.toContain("$4.50");
   expect(body).toContain("queued → now: 4h 30m");
   expect(body).toContain(r.markdown);
   // A second publish (a rerun of the merge job) re-reads the body and still leaves exactly one section.
@@ -5256,4 +5258,148 @@ test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
   expect(src).toMatch(/^import \{[^}]*\bbuildEvidence\b[^}]*\} from "\.\.\/lib\/evidence\.js";$/m);
   expect(src).not.toMatch(/import\(\s*[^)]*evidence/);
   expect(src).toMatch(/\.\.\.makePrEvidenceDeps\(\{ gh, issue,/);
+});
+
+// ── #195 self-critique — a cancelled publish never writes, every gh call in the dep is bounded, and an over-limit body is a
+// failure (not a "truncated" success) ───────────────────────────────────────────────────────────────────────────────────────
+import { run as realRun195 } from "../lib/exec.js";
+import { PR_BODY_MAX_CHARS as PR_BODY_MAX_CHARS_195 } from "../lib/evidence.js";
+
+test("test_195_aborted_publish_never_writes_the_pr_body", async () => {
+  const beats = [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z" }];
+  const mkGh = (over = {}) => ({
+    comments: vi.fn(async () => beats),
+    prBody: vi.fn(async () => "Closes #7\n"),
+    editPrBody: vi.fn(async () => {}),
+    comment: vi.fn(async () => {}),
+    ...over,
+  });
+  const mk = (gh, extra = {}) => makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000, ...extra });
+
+  // (1) aborted while reading the comments → rejects with the abort reason; nothing is read or written after it.
+  {
+    let release; const held = new Promise((r) => { release = r; });
+    const gh = mkGh({ comments: vi.fn(async () => { await held; return beats; }) });
+    const ac = new AbortController();
+    const p = mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null, signal: ac.signal });
+    ac.abort(new Error("timed out after 5 ms — the PR-body write was cancelled"));
+    await expect(p).rejects.toThrow(/write was cancelled/);
+    release();
+    await new Promise((r) => setImmediate(r));
+    expect(gh.prBody).not.toHaveBeenCalled();
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (2) aborted between the read and the write → no write.
+  {
+    const ac = new AbortController();
+    const gh = mkGh({ prBody: vi.fn(async () => { ac.abort(new Error("cancelled")); return "Closes #7\n"; }) });
+    await expect(mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null, signal: ac.signal })).rejects.toThrow(/cancelled/);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (3) the write itself is handed the signal (so the gh child is killed on abort) together with its bound.
+  {
+    const gh = mkGh();
+    const ac = new AbortController();
+    expect((await mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null, signal: ac.signal })).ok).toBe(true);
+    expect(gh.editPrBody).toHaveBeenCalledTimes(1);
+    expect(gh.editPrBody.mock.calls[0][2]).toEqual({ timeoutMs: 1000, signal: ac.signal });
+    expect(gh.prBody.mock.calls[0][1]).toEqual({ timeoutMs: 1000, signal: ac.signal });
+  }
+  // (4) gh.comments is bounded too: a hanging comment read rejects within the dep's timeout, one call, no write.
+  {
+    const gh = mkGh({ comments: vi.fn(() => new Promise(() => {})) });
+    await expect(mk(gh, { timeoutMs: 5 }).publishPrEvidence({ pr: 9, route: "merge", gates: null })).rejects.toThrow(/gh issue comments timed out after 5 ms/);
+    expect(gh.comments).toHaveBeenCalledTimes(1);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (5) author text already over GitHub's limit → a rejection naming it (merge-stage's FAIL line), and no write.
+  {
+    const gh = mkGh({ prBody: vi.fn(async () => "z".repeat(PR_BODY_MAX_CHARS_195 + 1)) });
+    await expect(mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null })).rejects.toThrow(/PR #9 body is already 65537 characters outside the evidence section — over GitHub's 65536-character limit; section not written/);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (6) a budget check that throws drops the budget row; it does not fail the publish.
+  {
+    const gh = mkGh();
+    const r = await mk(gh, { lifetimeBudget: () => { throw new Error("charter unreadable"); } }).publishPrEvidence({ pr: 9, route: "merge", gates: null });
+    expect(r.ok).toBe(true);
+    expect(r.markdown).not.toMatch(/budget:/);
+  }
+
+  // (7) the adapter: the caller's signal and the adapter's own timeout both reach the gh child as an aborted signal.
+  {
+    const seen = [];
+    const hang = makeFakeRun([{ match: () => true, result: (_c, _a, opts) => { seen.push(opts.signal); return new Promise(() => {}); } }]);
+    const gh = makeGh195({ run: hang, repo: "acme/app", sleep: async () => {} });
+    const ac = new AbortController();
+    const p = gh.editPrBody(9, "x", { timeoutMs: 60_000, signal: ac.signal });
+    ac.abort(new Error("merge-stage timeout"));
+    await expect(p).rejects.toThrow(/merge-stage timeout/);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[0].aborted).toBe(true);
+    await expect(gh.editPrBody(9, "x", { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    expect(seen[1].aborted).toBe(true);
+    await expect(gh.prBody(9, { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    expect(seen[2].aborted).toBe(true);
+    expect(hang.calls).toHaveLength(3);
+  }
+  // (8) lib/exec.js kills an aborted child: a 30 s process ends as soon as the signal aborts.
+  {
+    const ac = new AbortController();
+    const p = realRun195(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { signal: ac.signal });
+    ac.abort();
+    const r = await p;
+    expect(r.code).not.toBe(0);
+  }
+});
+
+// ── #195 self-critique — the base-engine guarantee, as behaviour: once run-stage.js is loaded (the process starts on the base
+// checkout, before checkoutHead), the PR's tree replacing evidence.js and EVERY other engine file on disk changes nothing the
+// evidence step renders — evidence.js and its whole import graph (handoff, run-record, harvest-findings, schemas,
+// retro/issue-comments, heartbeat, budget, …) were bound at load, and publishing loads nothing new from disk.
+import { cpSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { pathToFileURL, fileURLToPath } from "node:url";
+
+test("test_195_evidence_module_graph_is_bound_before_checkout_head", async () => {
+  const factoryDir = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = dirname(factoryDir.replace(/\/$/, ""));
+  const tmp = mkdtempSync(join(tmpdir(), "rs195-engine-"));
+  cpSync(factoryDir, join(tmp, "factory"), { recursive: true, filter: (src) => !src.includes(`${"/factory/test"}`) });
+  symlinkSync(join(repoRoot, "node_modules"), join(tmp, "node_modules"), "dir");
+  // "Process start on the base checkout": load the engine copy.
+  const engine = await import(pathToFileURL(join(tmp, "factory/bin/run-stage.js")).href);
+  // "checkoutHead": the PR's tree replaces every engine module on disk — evidence.js renders a forged section, and every
+  // other module throws on load. Anything loaded from disk after this point would show up as PWNED or as a throw.
+  const files = [];
+  const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else if (p.endsWith(".js")) files.push(p); } };
+  walk(join(tmp, "factory"));
+  expect(files).toContain(join(tmp, "factory/lib/evidence.js"));
+  for (const f of files) writeFileSync(f, 'throw new Error("loaded from the PR head checkout");\n');
+  writeFileSync(join(tmp, "factory/lib/evidence.js"), [
+    'export const EVIDENCE_START = "<!-- factory-evidence:v1 -->"; export const EVIDENCE_END = "<!-- /factory-evidence:v1 -->";',
+    'export const buildEvidence = () => ({ markdown: "PWNED: all reviewers approved", data: { unbound: {} } });',
+    'export const applyEvidenceSection = () => ({ body: "PWNED", truncated: false });',
+    'export const evidenceComment = () => "PWNED"; export const hasEvidenceComment = () => false;',
+  ].join("\n"));
+
+  let body = "Closes #7\n";
+  const posted = [];
+  const gh = {
+    comments: vi.fn(async () => [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z" }]),
+    prBody: vi.fn(async () => body),
+    editPrBody: vi.fn(async (_pr, b) => { body = b; }),
+    comment: vi.fn(async (_n, b) => { posted.push(b); }),
+  };
+  const deps = engine.makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z", lifetimeBudget: () => ({ ok: true, cap: 60, usd: 1, runs: 1 }) });
+  const r = await deps.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "protected paths changed — human merge required: factory/lib/evidence.js" });
+  expect(r.ok).toBe(true);
+  expect(body.startsWith("Closes #7\n")).toBe(true);
+  expect(body).toContain(EVIDENCE_START_195);
+  expect(body).toContain("protected paths changed — human merge required: factory/lib/evidence.js");
+  expect(body).toContain("budget: lifetime $1.00 / $60 over 1 run(s)");
+  expect(body).not.toContain("PWNED");
+  await deps.postEvidenceComment(r.markdown);
+  expect(posted).toHaveLength(1);
+  expect(posted[0]).not.toContain("PWNED");
+  expect(posted[0].startsWith(EVIDENCE_START_195)).toBe(true);
 });

@@ -41,7 +41,9 @@ export function run(cmd, args = [], opts = {}) {
     let child;
     try {
       const env = opts.replaceEnv ? { ...(opts.env || {}) } : { ...process.env, ...(opts.env || {}) };
-      child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+      // #195 — `opts.signal` (an AbortSignal) kills the child when it aborts (Node's spawn option); the 'error' handler below
+      // resolves it like any other failed spawn. Absent → exactly the old call.
+      child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], ...(opts.signal ? { signal: opts.signal } : {}) });
     } catch (e) {
       resolve({ code: 127, stdout: "", stderr: String(e) });
       return;

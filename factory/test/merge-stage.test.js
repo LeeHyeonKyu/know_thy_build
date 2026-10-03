@@ -3168,3 +3168,72 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     expect(d.mergePr).toHaveBeenCalledTimes(1);
   }
 });
+
+// #195 self-critique — the rerun fact is a value merge-stage hands to the evidence dep; it is guarded at the wiring layer on
+// the real #157 rerun route (runGates-produced RED, then GREEN), not only by calling buildEvidence with gatesRerun:true.
+test("test_195_rerun_fact_reaches_the_evidence_dep_on_the_157_rerun_route", async () => {
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const second = await producedGates({ failing: [], sha: HEAD });
+  const ev = evidence195();
+  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { prReady: undefined, ...ev } });
+  expect(r.code).toBe(0);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+  const args = ev.publishPrEvidence.mock.calls[0][0];
+  expect(args.route).toBe("merge");
+  expect(args.gatesRerun).toBe(true);
+  // The gates row is the re-run's GREEN verdict, not the first run's RED.
+  expect(args.gates.status).toBe("GREEN");
+  expect(args.gates.gates.unit.failing_ids).toEqual([]);
+  expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[1]);
+  expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(r.d.mergePr.mock.invocationCallOrder[0]);
+
+  // Same harness, first run GREEN: no re-run, and the dep is told so.
+  const ev2 = evidence195();
+  const plain = await run157({ seq: [second], diff: { ok: true, files: CLIENT_ONLY }, over: { prReady: undefined, ...ev2 } });
+  expect(plain.code).toBe(0);
+  expect(plain.d.gates).toHaveBeenCalledTimes(1);
+  expect(ev2.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "merge", gatesRerun: false, gates: { status: "GREEN" } });
+});
+
+// #195 self-critique — a timed-out evidence step is CANCELLED, not abandoned: merge-stage aborts the signal it handed the dep
+// before it moves on, so a dep that settles late cannot write the PR body after the merge or the needs-human transition.
+test("test_195_evidence_timeout_cancels_the_write_before_the_merge_or_hand_off", async () => {
+  for (const route of ["merge", "hand-off"]) {
+    let release;
+    const held = new Promise((res) => { release = res; });
+    const events = [];
+    const ev = evidence195(async ({ signal }) => {
+      events.push("publish:start");
+      await held;                                                        // gh is slow: settles only after the timeout fired
+      if (signal?.aborted) { events.push("publish:cancelled"); throw signal.reason ?? new Error("aborted"); }
+      events.push("publish:write");
+      return { ok: true, markdown: "late" };
+    });
+    const signalNow = () => ev.publishPrEvidence.mock.calls[0]?.[0]?.signal;
+    const over = route === "hand-off" ? { protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) } : {};
+    const d = baseD({ ...ev, evidenceTimeoutMs: 5, ...over });
+    const mergePr = d.mergePr;
+    d.mergePr = vi.fn(async (...a) => { events.push(`mergePr:aborted=${signalNow()?.aborted}`); return mergePr(...a); });
+    const transition = d.transition;
+    d.transition = vi.fn(async (t) => { if (t.to === "factory:needs-human") events.push(`needs-human:aborted=${signalNow()?.aborted}`); return transition(t); });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record }), route).toBe(route === "merge" ? 0 : 2);
+    expect(signalNow(), route).toBeInstanceOf(AbortSignal);
+    // The signal was aborted BEFORE the irreversible step ran.
+    expect(events, route).toContain(route === "merge" ? "mergePr:aborted=true" : "needs-human:aborted=true");
+    expect(failLines195(lines), route).toHaveLength(1);
+    expect(failLines195(lines)[0], route).toMatch(/^evidence: FAIL — timed out after 5 ms — the PR-body write was cancelled/);
+    // The late dep now settles: it sees the abort and never writes.
+    release();
+    await held;
+    await new Promise((res) => setImmediate(res));
+    expect(events, route).toContain("publish:cancelled");
+    expect(events, route).not.toContain("publish:write");
+    expect(ev.postEvidenceComment, route).not.toHaveBeenCalled();
+  }
+  // A dep that finishes in time is handed a signal that was never aborted.
+  const ok = evidence195();
+  await run(baseD(ok));
+  expect(ok.publishPrEvidence.mock.calls[0][0].signal.aborted).toBe(false);
+});
