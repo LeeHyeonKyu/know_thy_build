@@ -241,7 +241,7 @@ const list = (a) => (Array.isArray(a) && a.length ? a.join(",") : "none");
  *   reason     — the hand-off / refusal reason the merge stage is about to transition with, or null;
  *   pr, now    — the PR number and the current time (ISO string or ms). `now` null → no elapsed row.
  */
-export function buildEvidence({ recordText = null, issueComments = [], prComments = [], factoryLogins = null, gates = null, gatesRerun = false, reason = null, pr = null, now = null } = {}) {
+export function buildEvidence({ recordText = null, issueComments = [], prComments = [], factoryLogins = null, gates = null, gatesRerun = false, reason = null, pending = null, pr = null, now = null } = {}) {
   const issueAll = Array.isArray(issueComments) ? issueComments : [];
   const logins = loginsOf(factoryLogins);
   const byFactory = (c) => logins.set.has(String(c?.author ?? "").trim().toLowerCase());
@@ -297,13 +297,17 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   // ── Must fix (claim): every must_fix of every valid review handoff. A rework response (PR comment) answers only the review
   // round it follows — the latest review handoff created before it, VALID OR NOT — because reviewers renumber ids (cf1,
   // cf2…) every round; within that round the first response naming the id answers it. A response whose round's handoff
-  // fails validation answers nothing: binding it to the round before would put a later round's sha on an earlier row. ──
+  // fails validation answers nothing: binding it to the round before would put a later round's sha on an earlier row. A
+  // review handoff whose time cannot be read cannot be placed among the rounds — it could sit between any response and the
+  // round before it — so then no response binds to any round, and the section says why (fail closed, never a guess). ──
   const allReviews = handoffs.filter((h) => h.stage === "review")
     .map((h) => ({ h, since: Date.parse(h.createdAt ?? ""), valid: validate("review.v1", h.data).ok }))
-    .sort((a, b) => (Number.isFinite(a.since) ? a.since : 0) - (Number.isFinite(b.since) ? b.since : 0));
+    // An untimed round is listed after the timed ones (stable among themselves); it binds no response either way (below).
+    .sort((a, b) => (Number.isFinite(a.since) ? a.since : Infinity) - (Number.isFinite(b.since) ? b.since : Infinity) || 0);
   const reviews = allReviews.filter((r) => r.valid);
   const answersFor = new Map(reviews.map((r) => [r, []]));
-  for (const resp of logins.ok ? reworkResponses(prFactory, issueOf) : []) {
+  const untimedReviews = allReviews.filter((r) => !Number.isFinite(r.since)).length;
+  for (const resp of logins.ok && !untimedReviews ? reworkResponses(prFactory, issueOf) : []) {
     if (resp.at == null) continue;
     const own = allReviews.filter((r) => Number.isFinite(r.since) && r.since < resp.at).at(-1);
     if (own?.valid) answersFor.get(own).push(resp);
@@ -333,7 +337,11 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const g = gates && typeof gates === "object" ? gates : null;
   const gatesRow = g ? {
     level: g.level ?? null, status: g.status ?? null, passed: g.passed ?? null, failed: g.failed ?? null,
-    failing: Array.isArray(g.failing) ? g.failing.map(String) : [], rerun: gatesRerun === true,
+    failing: Array.isArray(g.failing) ? g.failing.map(String) : [],
+    // The run's own skipped / misconfigured gates (runGates' lists): "prove-test did not run on this merge run" is a fact here.
+    skipped: Array.isArray(g.skipped) ? g.skipped.map(String) : [],
+    misconfigured: Array.isArray(g.misconfigured) ? g.misconfigured.map(String) : [],
+    rerun: gatesRerun === true,
   } : null;
 
   // ── Proof (record): the bound self-gate-detail line's `mutation` check — the PR-level "new tests fail when the code they
@@ -367,6 +375,8 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const runs = stages.size ? stages.size : null;
 
   const rejected = typeof reason === "string" && reason.trim() ? reason.trim() : null;
+  // The self-change path's one publish happens before its veto window is announced (merge-stage): the window, as a live row.
+  const pendingWindow = typeof pending === "string" && pending.trim() ? pending.trim() : null;
 
   // ── Render. ──
   const out = [EVIDENCE_HEADING, "", "_Assembled by the factory runner from run records, handoff comments and this merge run's own gate result — no agent prose. **record** = a runner-written line bound to a heartbeat-known run; **live** = a value this merge run computed itself and passed in (its gate result, its hand-off reason); **claim** = taken from an agent-written handoff comment._"];
@@ -400,14 +410,16 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
       const resp = m.status === "fixed" ? (m.commit ? `fixed in \`${m.commit}\`` : "fixed (no commit sha)") : m.status;
       out.push(`| ${escapeCell(m.id)} | ${m.round} · ${escapeCell(m.role)} | ${resp} | claim |`);
     }
+    if (logins.ok && untimedReviews) out.push("", `_Rework responses were not matched to any review round: ${untimedReviews} review handoff${untimedReviews === 1 ? " has" : "s have"} no readable time, so the round a response follows cannot be told._`);
   }
   if (!logins.ok) {
     out.push("", `_Nothing from issue or PR comments is shown — no handoff, heartbeat, rework response or transition, and so no run-record line bound through a heartbeat: the factory's logins could not be resolved (${escapeCell(logins.reason, { max: 400 })}), so no comment can be attributed to the factory._`);
   }
   if (gatesRow) {
     out.push("", "### Gates (this merge run)", "",
-      `- level=${escapeCell(gatesRow.level)} status=${escapeCell(gatesRow.status)} passed=${escapeCell(gatesRow.passed)} failed=${escapeCell(gatesRow.failed)} failing=${escapeCell(list(gatesRow.failing))} — rerun: ${gatesRow.rerun ? "yes (first run RED outside the PR diff, re-run once)" : "no"} — live (this merge run's gate result)`);
+      `- level=${escapeCell(gatesRow.level)} status=${escapeCell(gatesRow.status)} passed=${escapeCell(gatesRow.passed)} failed=${escapeCell(gatesRow.failed)} failing=${escapeCell(list(gatesRow.failing))} skipped=${escapeCell(list(gatesRow.skipped))} misconfigured=${escapeCell(list(gatesRow.misconfigured))} — rerun: ${gatesRow.rerun ? "yes (first run RED outside the PR diff, re-run once)" : "no"} — live (this merge run's gate result)`);
   }
+  if (pendingWindow) out.push("", "### Veto window", "", `- ${escapeCell(pendingWindow, { max: 400 })} — live (this merge run's veto window; a veto or a later refusal hands the PR to a human without publishing this section again)`);
   if (rejected) out.push("", "### Rejected / hand-off", "", `- ${escapeCell(rejected)} — live (this merge run's hand-off reason)`);
   const costRows = [];
   if (cost) costRows.push(`- lifetime cost: $${cost.usd.toFixed(2)} / $${cost.cap} cap over ${cost.runs} run(s) — record: budget: line of run ${escapeCell(cost.run_id)} (${escapeCell(cost.stage)}), bound by its section's heartbeat-known runner (one budget story per run)`);
@@ -426,7 +438,7 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
       must_fix_split: split,
       logins: logins.ok ? { ok: true } : { ok: false, reason: logins.reason },
       contract, proof, self_gate: selfGate, review, must_fix: mustFix,
-      gates: gatesRow, rejected, cost: cost ? { usd: cost.usd, cap: cost.cap, runs: cost.runs, run_id: cost.run_id } : null, elapsed_ms: elapsedMs, runs, unbound,
+      gates: gatesRow, rejected, pending: pendingWindow, cost: cost ? { usd: cost.usd, cap: cost.cap, runs: cost.runs, run_id: cost.run_id } : null, elapsed_ms: elapsedMs, runs, unbound,
     },
   };
 }
