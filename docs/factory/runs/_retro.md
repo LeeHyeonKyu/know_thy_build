@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.63 / 1.5 / 2.25 |
 | escaped defects | 0 | 8 |
 | revert rate | 없음 | 0.00 (0/8) |
-| needs-human | 4 | 41 |
+| needs-human | 9 | 41 |
 | rejects by role | 없음 | spec-conformance 5, qa 4, correctness 7, architecture 2 |
 | reviewer overlap | 없음 | 0.53 (10/19, runs 18) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1, architecture 1 |
-| qa na ratio | 없음 | 0.20 (13/65 claims, na-heavy 2/9 approvals) |
-| cost (usd) | 0.15 | 542.31 |
-| tokens | input 24096 / output 267 | input 14823125 / output 1115732 |
+| qa na ratio | 0.26 (6/23 claims, na-heavy 1/3 approvals) | 0.20 (13/65 claims, na-heavy 2/9 approvals) |
+| cost (usd) | 65.38 | 542.31 |
+| tokens | input 2031613 / output 167287 | input 14823125 / output 1115732 |
 | retro cost (usd) | 0.00 | 7.40 |
 | retro tokens | input 0 / output 0 | input 18 / output 17715 |
 | full retros | — | 6 |
@@ -730,6 +730,94 @@
           157
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The operator-merge door drops the engine distinction, so in every adopter repo it now allows operator-session merges of the adopter's protected installed engine files with no human. isNonJudgePath takes no engine argument, and operator-merge-check passes none. An adopter's operator session can therefore merge a PR touching .factory/lib/status.js or .factory/lib/board-static.js, and the adopter's own factory/lib/status.js and factory/lib/board-static.js, when checks are green. The same module's classifyProtected says these are judge in a non-engine repo (engine !== true makes everything judge, because in an adopter 'factory/** is not the engine'). Before this diff, the adopter door allowed only docs/** and templates/factory/docs/**. This contradicts the issue's statement 'this issue changes no repository's merge behaviour' and the adopter L1 rule that a PR touching a protected path is merged by a person.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The diff defines two classifiers for one list, and they give different answers. `classifyProtected(files, {engine})` applies the module's own rule: unless engine is true (an adopter repo), every path is judge. `isNonJudgePath` has no engine gate. The one live consumer, `operatorMergeVerdict`, which `.factory/bin/operator-merge-check.js` calls from the `gh pr merge` hook, uses the ungated one. This PR widened the list to include installed engine files. As a result, in every adopter repo a PR that edits `.factory/lib/status.js` or `.factory/lib/board-static.js` now passes the operator-merge door with no person merging it. That contradicts `.factory/**` being in `[protected].factory`, the human-merge boundary. In this repo, the same path lets a hand-edited runner-owned mirror through. 'The list is one' holds for the globs, but the semantics have split.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "One run of the door now gets repository identity from two places. `gh pr view` (line 21, no `cwd` option) and the harness default_branch read (line 28, relative path `.factory/harness.toml`) both follow the process cwd. The new engine decision (lines 35-38) follows the bin's own location, `root = new URL(\"../../\", import.meta.url)`. So the engine/adopter switch can be computed for a different repository than the one whose PR is being classified. In the direction that matters, it widens. With the bin in the engine checkout (the hook runs `$CLAUDE_PROJECT_DIR/.factory/bin/...`) and the session cwd inside an adopter clone, the adopter's PR is judged with engine=true. Its `.factory/lib/status.js` or `.factory/lib/board-static.js` changes (the adopter's installed engine, which is `[protected].factory` and merged by a person) then classify as non-judge and the operator is allowed to merge them.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The door fails open on PRs with more than 100 changed files. gh 2.101.0 fetches `files(first: 100)` and asks for no pageInfo, so it never paginates. Any judge path after the 100th entry is never classified, and the bin reports 'all non-judge paths' and exits 0. This breaks the guarantee the door exists for, in both adopter and engine mode, and this PR rewrites that bin and its stated contract.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Renames hide the source path from the door. GitHub's PullRequestChangedFile gives only the new `path`, with changeType RENAMED and no previous path. A rename that moves a judge file to a non-judge name is classified only by its destination. So the door lets an operator session remove docs/factory/CHARTER.md, or a judge module such as factory/lib/gates.js, without a person.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "`NON_JUDGE_EXCLUDES` holds a third hand-copied, unpinned list of the session-instruction globs (`**/CLAUDE*.md`, `**/AGENTS*.md`, `**/.mcp*.json`). This list now decides whether the operator-merge door lets a session-injection file through. If a new instruction-file name is added to the canonical set and not to this copy, `docs/<NewName>.md` becomes operator-mergeable without anything going RED.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A file outside files_expected was changed with no Scope change reason in the diff, and the change alters the operator-merge door's behaviour, which the issue and non_goals forbid.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The operator-merge verdict gained new refusal rules and an engine-context split that no done_when or files_expected entry promises. isOperatorMergePath is no longer the same answer as the list.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The bin is outside plan files_expected and the diff carries no Scope change reason for it. The prior ruling was uphold and is still open.",
+        "runs": [
+          178
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The new tamper refusal in (1b) is silently overridden. When the runner's inline <result> is truncated and the output file was rewritten after the notification, (1b) rejects the file as 'changed after the runner's notification' and removes only its own candidates. If the dispatcher then reads the same tampered file in full (an unpaged `Read`, or `jq -c .result <path>` / `cat`), path (2) or the tool-result loop pushes those exact bytes. They are skipped only when `isFragment(text)` is true, and the final loop returns them with ok:true and empty reasons. A forged verdict therefore wins, and the refusal line is thrown away. This breaks the PR's own rework-sec1 property (stage-artifact.js:283 and run-stage.js:153: the bytes must still be the runner's). It also breaks dw4's rubric 'No refusal falls back silently'. On main the same full read was accepted too, so this is not a regression against main. But this PR is what claims the file is now bound, and it already holds the runner's inline prefix that contradicts the forged candidate.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "In the case this change exists to recover (a review.v1 result too long for the runner's inline <result>, so the inline copy is truncated), everything after the inlined prefix becomes the stage verdict. That tail is checked only by ctime <= notification timestamp + 1000 ms. The file lives in /tmp/claude-<uid>/<cwd-slug>/<session>/tasks/<id>.output. Every reviewer agent runs as the same uid, has Bash, and deny-all-writes.sh explicitly lets Bash write anywhere under /tmp. So a reviewer (for example one prompt-injected by the PR diff it is reviewing) can start a background shell loop. The loop waits for the .output file to appear, keeps the prefix, and rewrites the tail, for example turning a later reviewer's \"verdict\":\"reject\" into \"approve\". It finishes within the window, which passes both checks. This is new. On main, the review dispatcher cannot read that file at all (.claude/commands/factory-review.md allowed-tools: `Workflow(factory-review), Read(.factory/out/loaded.json)`), so a truncated review result always failed closed to needs-human. I said otherwise in round 1, and that was wrong for the review stage. The diff turns that fail-closed case into an accepted verdict whose decisive bytes a reviewed agent can write.",
+        "runs": [
+          170
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -858,6 +946,33 @@
           170
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "This position and the other two leave out the most expensive failure. 'Outside the diff' is decided by where the test file lives. It does not tell you whether the PR caused the failure. Suppose a PR changes only src/ and that change plants a race condition in a test file the PR never touched. The race fails some of the time, the single re-run passes by luck, and the PR merges. A merge cannot be undone. The re-run turns 'the PR introduced nondeterminism' into an automatic merge.",
+        "runs": [
+          184
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The re-read narrows the race but does not close it. There are two remaining gaps. gh.setFactoryLabel adds the new label before it removes the old one (gh.js:381-384), so a read taken during the swap can see both labels. Also, comments(), releaseIfStale and engineVersionNow all run between the read and transition(), and transition.js:112 re-reads labels but has no expected-from check.",
+        "runs": [
+          176
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "You list the unproven #124 notification as a risk but offer no step to close it, so dissent d-sk-124-notification stays 'unresolved — proceeding' a third time. The fix may ship and never fire for the incident that motivated it, and nobody owns finding out. A clearer needs-human reason is not the outcome the issue asked for ('판정이 이미 있는데 사람에게 가는 경우를 없앤다'). Smaller step I propose: the release notes and the ledger state that recovery is unproven for own-calendar #124. The controller must also either pull the #124 orchestrator transcript and check it for a completed wf086hvld notification before release, or record that the first live max-turns run's dw4 reason line will be read by a person. If neither happens, the issue should not be closed as fixed.",
+        "runs": [
+          170
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -924,8 +1039,8 @@
       },
       {
         "issue": 157,
-        "reason": "retries exhausted (3/2)",
-        "at": "2026-10-03T10:57:54Z"
+        "reason": "lifetime cost $60.01 over 172 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-03T11:11:33Z"
       },
       {
         "issue": 156,
@@ -934,8 +1049,8 @@
       },
       {
         "issue": 170,
-        "reason": "retries exhausted (2/2)",
-        "at": "2026-10-03T10:57:46Z"
+        "reason": "lifetime cost $60.99 over 154 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-03T12:17:39Z"
       },
       {
         "issue": 168,
@@ -950,12 +1065,17 @@
       {
         "issue": 176,
         "reason": "protected paths changed — human merge required: .factory/lib/sweeper.js, factory/lib/sweeper.js, factory/test/sweeper.test.js (see PR #177)",
-        "at": "2026-10-03T07:19:43Z"
+        "at": "2026-10-03T11:14:50Z"
       },
       {
         "issue": 178,
-        "reason": "retries exhausted (3/2)",
-        "at": "2026-10-03T10:57:45Z"
+        "reason": "protected paths changed — human merge required: .factory/bin/operator-merge-check.js, .factory/install-manifest.json, .factory/lib/config.js, .factory/lib/label-catalog.js, .factory/lib/non-judge-paths.js, .factory/lib/operator-merge.js, factory/bin/operator-merge-check.js, factory/lib/config.js, factory/lib/label-catalog.js, factory/lib/non-judge-paths.js, factory/lib/operator-merge.js, factory/test/config.test.js, factory/test/label-catalog.test.js, factory/test/non-judge-paths.test.js, factory/test/operator-merge.test.js (see PR #180)",
+        "at": "2026-10-03T13:00:14Z"
+      },
+      {
+        "issue": 184,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/gates.js, .factory/lib/merge-stage.js, factory/bin/run-stage.js, factory/lib/gates.js, factory/lib/merge-stage.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #185)",
+        "at": "2026-10-03T12:05:05Z"
       }
     ]
   },
@@ -976,17 +1096,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 4,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
+    "needs_human": 9,
+    "qa_approvals": 3,
+    "qa_claims_total": 17,
+    "qa_na_total": 6,
+    "qa_na_ratio": 0.26,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 0.154982,
+      "cost_usd": 65.380028,
       "tokens": {
-        "input": 24096,
-        "output": 267
+        "input": 2031613,
+        "output": 167287
       }
     }
   },
