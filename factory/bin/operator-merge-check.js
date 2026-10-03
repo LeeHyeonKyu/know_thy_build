@@ -5,6 +5,11 @@
  * exit 0 = 허용(모든 파일이 `OPERATOR_MERGE_GLOBS` 안, 체크 GREEN, draft 아님, 기본 브랜치 대상), exit 2 = 거부(사유를 stderr에).
  * 읽기만 한다(`gh pr view`). 판정은 `lib/operator-merge.js`(순수). CI 러너(`GITHUB_ACTIONS`)에서는 언제나 거부 — 스테이지는 머지 배우가 아니다.
  * 의존성 없음(`smol-toml` 불필요) — 갓 받은 클론에서도 돈다.
+ *
+ * Scope change (#178): this bin is outside the plan's files_expected. It changed because of plan non_goal 2,
+ * "No change to merge behaviour in any repository". After #178 the operator-merge list is the whole non-judge list,
+ * which includes engine files. If this caller did not pass the `engine` bit, an adopter's installed `.factory/**`
+ * files would become operator-mergeable. With the bit, an adopter gets the same answer as before #178.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
