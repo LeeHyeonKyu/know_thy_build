@@ -1590,6 +1590,25 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   // 밀지 않고 곧장 에스컬레이션한다.
   for (const it of await gh.searchIssues("factory:blocked")) {
     try {
+      // #176 — 검색은 색인이라 늦는다(KTB #168: merge 스테이지가 blocked → rework로 옮긴 7초 뒤 이 팔이 색인의
+      // `blocked`를 보고 needs-human으로 올렸다). 그래서 **어떤 부수효과보다 먼저**(락 회수·재점화 마커·dispatch·
+      // unknown-lock 에스컬레이션·기본 에스컬레이션) 단건 실시간 조회로 라벨을 다시 읽는다. 이미 다른 라벨이면 이 이슈는
+      // 이 팔의 것이 아니다 — 아무것도 쓰지 않고 건너뛴다. 조회가 던지면 지금처럼 하되 error 한 줄을 남긴다(조용히
+      // 멈추지 않는다). `gh.issue`가 없는 구형 더블은 지금과 같다(위 `gh.issueList` fail-safe와 같은 규칙).
+      if (typeof gh.issue === "function") {
+        let live = null;
+        try { live = await gh.issue(it.number); }
+        catch (e) { actions.push({ kind: "error", step: "blocked-live-label", issue: it.number, error: String(e.message || e) }); }
+        const labels = Array.isArray(live?.labels) ? live.labels : null;
+        // 상태 라벨이 정확히 `factory:blocked` 하나일 때만 이 팔의 것이다. setFactoryLabel은 새 라벨을 먼저 붙이고
+        // 옛 라벨을 떼므로(gh.js) 스왑 도중에는 ['factory:blocked','factory:rework']가 보인다 — 그것도 건너뛴다.
+        const states = labels ? labels.filter((l) => STATES.has(l)) : null;
+        if (states && !(states.length === 1 && states[0] === "factory:blocked")) {
+          const label = states.join(", ") || "none";
+          actions.push({ kind: "blocked-escalation-skipped", issue: it.number, label, reason: `label is now ${label}` });
+          continue;
+        }
+      }
       // 원인 등급은 dispatch 배선과 무관하게 필요하다 — 재시도를 안 하는 경로에서도 **에스컬레이션
       // 문구**가 이 등급으로 갈린다(O20).
       const comments = await gh.comments(it.number);
