@@ -5739,3 +5739,50 @@ test("test_195_main_reads_the_record_the_writer_wrote_for_this_issue", async () 
   const calls = src.match(/\.\.\.makePrEvidenceDeps\(\{[^}]*\}\)/g) ?? [];
   expect(calls).toEqual(["...makePrEvidenceDeps({ gh, issue, env: process.env, root })"]);
 });
+
+// ── #195 skeptic round 4 — the merge stage always gets the evidence slot from runStage. If a wiring drops the
+// `publishPrEvidence` key (for example a refactor of main()'s spread of makePrEvidenceDeps), nothing is published on any
+// route. That must be visible as one FAIL line, never a silent no-op.
+test("test_195_run_stage_hands_merge_an_evidence_slot_even_when_the_dep_is_dropped", async () => {
+  const v = { role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] };
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, verdicts: [v], orchestration: "workflow", guarantee: "verified" };
+  const comments = [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: review }) }];
+  const mk = (over = {}) => {
+    const lines = [];
+    const d = baseDeps({
+      assertHandoff: vi.fn(async () => requirementFor("factory:approved")({ issue: 7, comments, prerequisite: true })),
+      resetGates: async () => {}, runRecord: (l) => lines.push(...l),
+      defaultBranch: "main",
+      prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+      gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
+      mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+      protectedPaths: async () => ({ ok: true, files: [] }),
+      policyViolations: async () => ({ ok: true, files: [] }),
+      ...mergeReviewDepsFor("a".repeat(40)),
+      mergePr: vi.fn(async () => {}), closeIssue: async () => {},
+      ...over,
+    });
+    return { d, lines };
+  };
+  // (1) the deps carry no publishPrEvidence key at all: the merge still happens, exit 0, and exactly one FAIL line says why.
+  {
+    const { d, lines } = mk();
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written"]);
+  }
+  // (2) a wired dep is used as is (the slot never replaces it), and the deps object the caller built is not mutated.
+  {
+    const publishPrEvidence = vi.fn(async () => ({ ok: true, markdown: "md" }));
+    const { d, lines } = mk({ publishPrEvidence, postEvidenceComment: vi.fn(async () => ({ ok: true, posted: true })) });
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+    expect(publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", "evidence: issue comment posted"]);
+  }
+  {
+    const { d } = mk();
+    await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" });
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
+  }
+});

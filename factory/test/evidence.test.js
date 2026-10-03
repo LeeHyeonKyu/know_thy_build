@@ -16,6 +16,9 @@ import { makeFakeRun } from "../lib/exec.js";
 import { heartbeatBody } from "../lib/heartbeat.js";
 import { renderHandoff } from "../lib/handoff.js";
 import { resolveFactoryLogins, makeGh } from "../lib/gh.js";
+import { transition as realTransition } from "../lib/transition.js";
+import { makePrEvidenceDeps } from "../bin/run-stage.js";
+import { runMergeStage } from "../lib/merge-stage.js";
 
 /**
  * #195 — the "Factory evidence" section is assembled by code from runner records and handoff comments. The fixture follows
@@ -86,7 +89,26 @@ const handoff = (stage, data, at, summary = `### ${stage}`) => ({ body: renderHa
 const reworkResponse = (responses, at, issue = ISSUE) => ({ body: `rework response\n\n\`\`\`json\n${JSON.stringify({ schema: "factory.rework-response.v1", issue, responses })}\n\`\`\`\n`, createdAt: at, author: "ktb-bot" });
 // A transition comment is posted by the runner's account (lib/transition.js `gh.comment(issue, "<!-- factory-transition:v1 …")`)
 // even when a human moved the label (`by=human` is the marker's field, not the comment's author).
-const queued = (at, author = "ktb-bot") => ({ body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: at, author });
+// The body is the REAL producer's (lib/transition.js `transition()` over a fake gh), not a hand-written marker.
+/**
+ * The comments lib/transition.js posts for one `from → to` move over a fake gh: the transition comment, and — when the label
+ * swap fails — the `factory-transition-failed:v1` comment that cancels it. Bodies only, in posting order.
+ */
+async function producedTransition({ from = "backlog", to = "factory:queue", swapFails = false } = {}) {
+  const posted = [];
+  const gh = {
+    issue: async () => ({ number: ISSUE, labels: [from], body: "" }),
+    comments: async () => [],
+    comment: async (_n, body) => { posted.push(body); },
+    setFactoryLabel: async () => { if (swapFails) throw new Error("gh issue edit failed (1): HTTP 502"); return {}; },
+  };
+  try { await realTransition({ gh, issue: ISSUE, to, by: "script", env: {}, skipRehearsal: true }); } catch { /* the failed swap rethrows after its marker */ }
+  return posted;
+}
+const [QUEUED_BODY] = await producedTransition();
+/** A queue transition whose label swap failed: the producer's transition comment, then its `factory-transition-failed:v1`. */
+const FAILED_QUEUE = await producedTransition({ swapFails: true });
+const queued = (at, author = "ktb-bot") => ({ body: QUEUED_BODY, createdAt: at, author });
 
 const PLAN = {
   summary: "plan", done_when: [
@@ -202,6 +224,29 @@ test("test_195_evidence_is_assembled_from_records_only", () => {
   expect(cost).toMatch(/runs \(heartbeats\): 5/);
   expect(data.elapsed_ms).toBe(4.5 * 3600 * 1000);
   expect(data.runs).toBe(5);
+
+  // The gates row and the hand-off row are values THIS merge run passed in, and they are labelled that way. They are never
+  // labelled "record", because the legend defines record as a runner-written line bound to a heartbeat-known run, and
+  // neither row is one.
+  expect(markdown).toContain("**live** = a value this merge run computed itself and passed in (its gate result, its hand-off reason)");
+  expect(gates).toMatch(/— rerun: yes \(first run RED outside the PR diff, re-run once\) — live \(this merge run's gate result\)$/m);
+  const handOff = sectionOf(markdown, "Rejected / hand-off");
+  expect(handOff.join("\n")).toMatch(/^- protected paths changed — human merge required: factory\/lib\/merge-stage\.js — live \(this merge run's hand-off reason\)$/m);
+  for (const l of [...sectionOf(markdown, "Gates (this merge run)"), ...handOff]) expect(l).not.toMatch(/— record/);
+
+  // Queue time comes from the transition comments that lib/transition.js actually posts. If a queue transition's label swap
+  // FAILED, the producer follows it with `factory-transition-failed:v1`. That transition never happened, so it does not start
+  // the clock. The later real one does (08:00 → 12:30 = 4h 30m, not 06:00 → 6h 30m).
+  expect(FAILED_QUEUE).toHaveLength(2);
+  expect(FAILED_QUEUE[0]).toBe(QUEUED_BODY);
+  const failedAt = (i) => `2026-10-03T06:00:0${i}Z`;
+  const withFailed = buildEvidence({ ...input, issueComments: [...FAILED_QUEUE.map((body, i) => ({ body, createdAt: failedAt(i), author: "ktb-bot" })), ...input.issueComments] });
+  expect(sectionOf(withFailed.markdown, "Cost & time")).toContain("- queued → now: 4h 30m (transition comment timestamps)");
+  expect(withFailed.data.elapsed_ms).toBe(4.5 * 3600 * 1000);
+  // A failed queue transition with no real one after it gives no queue time at all (the row is dropped, not guessed).
+  const onlyFailed = buildEvidence({ ...input, issueComments: [...FAILED_QUEUE.map((body, i) => ({ body, createdAt: failedAt(i), author: "ktb-bot" })), ...input.issueComments.filter((c) => c.body !== QUEUED_BODY)] });
+  expect(onlyFailed.data.elapsed_ms).toBeNull();
+  expect(onlyFailed.markdown).not.toMatch(/queued → now/);
 
   // Without the rerun fact the gates row says so.
   expect(buildEvidence({ ...input, gatesRerun: false }).markdown).toMatch(/rerun: no/);
@@ -418,6 +463,79 @@ test("test_195_evidence_section_is_marker_anchored_and_idempotent", async () => 
   } finally {
     vi.doUnmock("node:child_process");
     vi.resetModules();
+  }
+
+  // ── The dep that does the writing: run-stage's makePrEvidenceDeps over a stateful fake gh, so reruns are real reruns. ──
+  {
+    const author = "Closes #184\n\nAuthor | text, kept as is.\n";
+    let prBody = author;
+    const issueCs = commentsFixture().map((c, i) => ({ ...c, id: 100 + i }));
+    let nextId = 500;
+    const signals = [];
+    const seen = (o) => { signals.push(o?.signal); };
+    const fakeGh = {
+      comments: vi.fn(async (n, o) => { seen(o); return n === ISSUE ? issueCs.map((c) => ({ ...c })) : inputs().prComments; }),
+      prBody: vi.fn(async () => prBody),
+      editPrBody: vi.fn(async (_n, b) => { prBody = b; }),
+      viewerLogin: vi.fn(async (o) => { seen(o); return "ktb-bot"; }),
+      comment: vi.fn(async (_n, b, o) => { seen(o); issueCs.push({ id: nextId++, body: b, author: "ktb-bot", createdAt: "2026-10-03T12:31:00Z" }); }),
+      patchComment: vi.fn(async (id, b, o) => { seen(o); issueCs.find((c) => c.id === id).body = b; }),
+    };
+    const deps = makePrEvidenceDeps({ gh: fakeGh, issue: ISSUE, readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs: 1000 });
+    // (a) The merge job runs twice: exactly one section, byte-identical, and the author's text outside it is untouched.
+    const r1 = await deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES, gatesRerun: false });
+    const after1 = prBody;
+    expect(after1.slice(0, author.length)).toBe(author);
+    expect(count(after1, EVIDENCE_START)).toBe(1);
+    await deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES, gatesRerun: false });
+    expect(prBody).toBe(after1);
+    // A human edits after the section, then a rerun with new content replaces the section in place and keeps both texts.
+    prBody = `${prBody}\nHuman trailer.\n`;
+    const r3 = await deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES, gatesRerun: true });
+    expect(prBody.slice(0, author.length)).toBe(author);
+    expect(prBody.endsWith(`${EVIDENCE_END}\nHuman trailer.\n`)).toBe(true);
+    expect(count(prBody, EVIDENCE_START)).toBe(1);
+    expect(prBody).toContain("rerun: yes");
+    expect(fakeGh.editPrBody).toHaveBeenCalledTimes(3);
+    // (b) The marked issue comment exists at most once across reruns. A rerun with the same evidence changes nothing, and a
+    // rerun with new evidence updates the runner's comment in place through gh.patchComment. It never posts a second one.
+    const marked = () => issueCs.filter((c) => hasEvidenceComment([c]));
+    expect(await deps.postEvidenceComment(r1.markdown)).toEqual({ ok: true, posted: true, updated: 0 });
+    expect(await deps.postEvidenceComment(r1.markdown)).toEqual({ ok: true, posted: false, updated: 0 });
+    expect(fakeGh.comment).toHaveBeenCalledTimes(1);
+    expect(fakeGh.patchComment).not.toHaveBeenCalled();
+    expect(await deps.postEvidenceComment(r3.markdown)).toEqual({ ok: true, posted: false, updated: 1 });
+    expect(fakeGh.comment).toHaveBeenCalledTimes(1);
+    expect(fakeGh.patchComment.mock.calls.map((c) => [c[0], c[1]])).toEqual([[500, evidenceComment(r3.markdown)]]);
+    expect(marked()).toHaveLength(1);
+    expect(marked()[0].body).toBe(evidenceComment(r3.markdown));
+    // Every gh read and write in the comment path and the read path went out with a signal, so a bound can cancel it.
+    expect(signals.length).toBeGreaterThan(0);
+    for (const s of signals) expect(s).toBeInstanceOf(AbortSignal);
+  }
+  // (c) A timeout leaves the PR body unwritten. This goes through the real gh.js adapter, so the bound is the adapter's own:
+  // `gh pr view` hangs, it is killed through its spawn signal, it is never retried, `gh pr edit` never runs, and the rejection
+  // names the edit step. On the merge stage that rejection is the one FAIL line, and the merge still happens.
+  {
+    const childSignals = [];
+    const run = makeFakeRun([
+      { match: (_c, a) => a[0] === "pr" && a[1] === "view", result: (_c, _a, o) => { childSignals.push(o?.signal); return new Promise(() => {}); } },
+      { match: (_c, a) => a[0] === "pr" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+    ]);
+    const adapter = makeGh({ run, repo: "acme/app", sleep: async () => {} });
+    const gh = { comments: async () => commentsFixture(), prBody: adapter.prBody, editPrBody: adapter.editPrBody, viewerLogin: async () => "ktb-bot", comment: async () => {} };
+    const deps = makePrEvidenceDeps({ gh, issue: ISSUE, readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs: 5 });
+    await expect(deps.publishPrEvidence({ pr: 31, route: "merge", gates: LIVE_GATES })).rejects.toThrow(/^edit: .*timed out after 5 ms/);
+    expect(run.calls.map((c) => c.args.slice(0, 2).join(" "))).toEqual(["pr view"]);
+    expect(childSignals[0]).toBeInstanceOf(AbortSignal);
+    expect(childSignals[0].aborted).toBe(true);
+    const lines = [];
+    const moved = [];
+    const code = await runMergeStage({ issue: ISSUE, defaultBranch: "main", headSha: H2, d: { ...deps, ...mergeD195({ moved }) }, record: (ls) => lines.push(...ls), refusal: (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]), postStatus: async () => {}, retryFromBlocked: false });
+    expect(code).toBe(0);
+    expect(moved).toEqual(["factory:merged"]);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([expect.stringMatching(/^evidence: FAIL — edit: .*timed out after 5 ms/)]);
+    expect(run.calls.filter((c) => c.args[1] === "edit")).toEqual([]);
   }
 });
 
@@ -715,7 +833,58 @@ test("test_195_unattributed_comments_and_unbound_lines_are_not_evidence", async 
   // The viewer path (inside GitHub Actions, env injected explicitly) resolves too, and attributes the same way.
   const viaViewer = await resolveFactoryLogins({ gh: { viewerLogin: async () => "ktb-bot", viewerType: async () => "Bot" }, env: { GITHUB_ACTIONS: "true" } });
   expect(cf2Row(buildEvidence({ ...base, ...inputs({ responses: null }), prComments: [reworkResponse(fixedCf2, "2026-10-03T10:30:00Z")], factoryLogins: viaViewer }))).toBe("| cf2 | 1 · correctness | fixed in `abc1234` | claim |");
+
+  // (6) The record half of "visible in both the section and the record". The same unresolved logins go through the real
+  // wiring: run-stage's evidence dep (env injected with no login) handed to runMergeStage. The PR body gets the note, and the
+  // record gets exactly one FAIL line naming the read step. This is checked on a hand-off route and on the merge route.
+  for (const route of ["hand-off", "merge"]) {
+    let body = "Closes #184\n";
+    const gh = { comments: async () => commentsFixture(), prBody: async () => body, editPrBody: async (_p, b) => { body = b; }, comment: async () => {}, viewerLogin: async () => "ktb-bot" };
+    const lines = [];
+    const moved = [];
+    const d = {
+      ...makePrEvidenceDeps({ gh, issue: ISSUE, readRecord: () => recordText(), env: {}, now: () => NOW, timeoutMs: 1000 }),
+      ...mergeD195({ handOff: route === "hand-off", moved }),
+    };
+    const code = await runMergeStage({ issue: ISSUE, defaultBranch: "main", headSha: H2, d, record: (ls) => lines.push(...ls), refusal: (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]), postStatus: async () => {}, retryFromBlocked: false });
+    expect(code, route).toBe(route === "merge" ? 0 : 2);
+    expect(moved, route).toEqual([route === "merge" ? "factory:merged" : "factory:needs-human"]);
+    expect(body, route).toContain(`the factory's logins could not be resolved (${unresolved.reason})`);
+    expect(body, route).not.toMatch(/fixed in|\| cf1 \|/);
+    expect(lines.filter((l) => l.startsWith("evidence: FAIL — ")), route).toEqual([`evidence: FAIL — read: factory logins not resolved (${unresolved.reason}) — nothing from issue or PR comments was shown`]);
+  }
 });
+
+/**
+ * The smallest merge-stage wiring for a run of `runMergeStage` with real evidence deps. `handOff` → the protected-path hand-off
+ * (needs-human before the gates); otherwise the plain auto-merge route, with a passing review verification. `moved` collects
+ * the transition targets.
+ */
+function mergeD195({ handOff = false, moved = [] } = {}) {
+  const approve = (role) => ({ role, verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] });
+  return {
+    prInfo: async () => ({ number: 31, state: "OPEN", mergeable: "MERGEABLE" }),
+    protectedPaths: async () => ({ ok: true, files: handOff ? [".github/workflows/x.yml"] : [] }),
+    policyViolations: async () => ({ ok: true, files: [] }),
+    gates: async () => ({ ...LIVE_GATES, head_sha: H2 }),
+    mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+    prChecks: async () => [{ name: "factory/integrity", state: "SUCCESS", bucket: "pass" }],
+    prReady: async () => {},
+    mergePr: async () => {},
+    closeIssue: async () => {},
+    sleep: async () => {},
+    comment: async () => {},
+    transition: async (t) => { moved.push(t.to); return { ok: true, from: null, to: t.to }; },
+    reviewEvidence: async () => ({ ok: true, data: { schema: "factory.review.v1", issue: ISSUE, pr: 31, head_sha: H2, round: 1, decision: "approved", verdicts: [approve("correctness")], orchestration: "workflow", guarantee: "verified" } }),
+    reviewRunId: async () => ({ ok: true, runId: "1003", runnerId: RUN.review2 }),
+    reviewRecord: async () => ({ ok: true, record: { stage: "review", at: "2026-10-03T11:00Z", runId: "1003", runnerId: RUN.review2, headSha: H2, round: 1, decision: "approved", verdicts: "correctness=approve" } }),
+    reviewRoster: async () => ({ ok: true, roles: ["correctness"] }),
+    maxRounds: 3,
+    prHeadShaLive: async () => H2,
+    factoryLogins: async () => ({ ok: true, logins: ["ktb-bot"] }),
+    commitStatuses: async () => [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }, { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" }],
+  };
+}
 
 test("test_195_must_fix_responses_bind_to_their_own_review_round", () => {
   const A = "a".repeat(40), X = "7".repeat(40), B = "b".repeat(40);

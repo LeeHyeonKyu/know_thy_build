@@ -502,7 +502,14 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * child (lib/exec.js kills an aborted child), so a late-settling dep cannot rewrite the PR body after the merge or the
    * transition while the record says FAIL.
    */
-  let evidenceDone = false, evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false;
+  /**
+   * Which publishes this run has made. The veto window publishes before its announcement (`windowPublished`); a merge after
+   * the window does not publish again, but a hand-off that ends the window publishes once more, with its reason, at its own
+   * stated point (so a vetoed PR's body names the veto). Any other route publishes once (`finalPublished`). A run records at
+   * most ONE FAIL line for the PR-body step (`evidenceFailed`), however many of its publishes fail.
+   */
+  let windowPublished = false, finalPublished = false, evidenceFailed = false;
+  let evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false, evidenceLoginsUnresolved = false;
   const evidenceMs = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
   /**
    * `start(signal)` raced against the evidence bound; on timeout the signal is aborted BEFORE this returns (cancel, not
@@ -530,12 +537,19 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const msg = publicReason(e?.message || e);
     return `evidence: FAIL — ${EVIDENCE_STEP_PREFIX.test(msg) ? msg : `${step}: ${msg}`}`;
   };
+  const failOnce = (line) => { if (evidenceFailed) return; evidenceFailed = true; record([line]); };
   const publishEvidence = async ({ route, reason = null }) => {
-    if (evidenceDone) return;
-    evidenceDone = true;
+    if (finalPublished) return;
+    if (route === "veto-window") {
+      if (windowPublished) return;
+      windowPublished = true;
+    } else {
+      if (route === "merge" && windowPublished) return;                // the window's section is what the owner read
+      finalPublished = true;
+    }
     if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
     if (typeof d.publishPrEvidence !== "function") {
-      record(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written"]);
+      failOnce("evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written");
       return;
     }
     let step = "publish";
@@ -547,9 +561,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       record([`evidence: published to PR #${pr} (${route})`]);
       // The factory's logins could not be resolved (part of the read step): the section went out failing closed — no row from
       // any comment, a note saying why; the record says so too, as the one FAIL line for this step — never silently empty.
-      if (r?.logins?.ok === false) record([`evidence: FAIL — read: factory logins not resolved (${publicReason(r.logins.reason || "not resolved")}) — nothing from issue or PR comments was shown`]);
+      evidenceLoginsUnresolved = r?.logins?.ok === false;
+      if (evidenceLoginsUnresolved) failOnce(`evidence: FAIL — read: factory logins not resolved (${publicReason(r.logins.reason || "not resolved")}) — nothing from issue or PR comments was shown`);
     } catch (e) {
-      record([evidenceFail(step, e)]);
+      failOnce(evidenceFail(step, e));
     }
   };
   const handToHuman = async ({ reason, sections }) => {
@@ -902,6 +917,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!mg?.checksGreen) reasons.push("required checks not GREEN");
     if (!mg?.integrityGreen) reasons.push("integrity not GREEN");
     const reason = reasons.join("; ");
+    await publishEvidence({ route: "hand-off", reason });     // #195 — a needs-human route outside handToHuman publishes too
     const t = await d.transition({ to: "factory:needs-human", reason });
     record([`merge: mergeGates — ${reason}`, ...refusal(t)]);
     return 2;
@@ -1038,6 +1054,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   let qaManifestRecorded = null;
   const reviewRefused = async (reason) => {
     const line = `review verification failed — ${reason}`;
+    await publishEvidence({ route: "hand-off", reason: line });  // #195 — before the needs-human transition, like handToHuman
     const t = await d.transition({ to: "factory:needs-human", reason: line });
     record([`merge: ${line}`, ...refusal(t)]);
     return 2;
@@ -1298,7 +1315,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // #195 — after a merge, the same evidence once on the tracking issue (the dep updates the runner's existing marked comment
   // instead of posting a second one). Best-effort and bounded like the PR-body step (a hung gh here must not hold the
   // transition below); a failure is one record line, and the line says what the dep reported doing.
-  if (evidenceMarkdown !== null && typeof d.postEvidenceComment === "function") {
+  // Logins that could not be resolved already gave the run its one FAIL line, and the comment step would fail closed on the
+  // same cause: it is not attempted, and the record says so plainly.
+  if (evidenceMarkdown !== null && evidenceLoginsUnresolved) record(["evidence: issue comment not posted — factory logins not resolved (see the FAIL line)"]);
+  else if (evidenceMarkdown !== null && typeof d.postEvidenceComment === "function") {
     try {
       const r = await boundedEvidence((signal) => d.postEvidenceComment(evidenceMarkdown, { signal }), () => "comment");
       if (r?.ok === false) throw new Error(r.reason || "postEvidenceComment answered ok:false");

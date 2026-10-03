@@ -4,7 +4,7 @@ import { knownRunsFor, isBoundLine, parseRecordEvidence } from "./feedback/harve
 import { parseHeartbeat } from "./heartbeat.js";
 import { SELF_GATE_DETAIL_PREFIX } from "./self-gate.js";
 import { validate } from "./schemas.js";
-import { TRANSITION_TO } from "./retro/issue-comments.js";
+import { countedTransitionIndices } from "./retro/issue-comments.js";
 
 /**
  * ── #195 — the "Factory evidence" section of a PR body, assembled by code ─────────────────────────────────────────────
@@ -19,8 +19,10 @@ import { TRANSITION_TO } from "./retro/issue-comments.js";
  *     produces this kind of line (review-evidence ← review, self-gate-detail ← implement); and no other, different line of the
  *     same kind speaks for the same run (two stories for one run → neither). The `## stage · at · runner` header is never
  *     used to bind — anyone can put a header in front of a line. Everything else is counted in `data.unbound`, never shown.
- *   - values the caller passes in: this merge run's own gates result (+ whether it was the one re-run's) and the hand-off
- *     reason. Record `FACTORY_GATES:` lines carry no run id, so they are never a source; every one is counted as not used.
+ *   - **live** rows, values the caller passes in: this merge run's own gates result (+ whether it was the one re-run's) and the
+ *     hand-off reason. Neither is a record line (the hand-off reason reaches the record only after the transition), so they
+ *     are labelled `live`, never `record`. Record `FACTORY_GATES:` lines carry no run id, so they are never a source; every
+ *     one is counted as not used.
  *   - the lifetime cost: the run-bound `budget: lifetime $X / $CAP over N run(s)` line (lib/budget.js `budgetLine`, written by
  *     run-stage first thing in every non-merge stage run). It carries no run id of its own, so its section's runner binds it
  *     — the one place the header is used, and said so on the row: the runner must be heartbeat-known, its heartbeat must name
@@ -352,7 +354,13 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const budgetBound = boundBudget(recordText, { known, stages });
   unbound.budget = budgetBound.rejected;
   const cost = budgetBound.cost;
-  const queuedAt = cs.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
+  // Queue time: the earliest `→ factory:queue` transition that HAPPENED. lib/transition.js posts its transition comment before
+  // the label swap and cancels it with a `factory-transition-failed:v1` comment when the swap fails, and
+  // `countedTransitionIndices` is the engine's one reader of that rule (round counting uses it too). Comments are taken in
+  // time order, because the failed marker cancels the transition right before it.
+  const timed = cs.map((c, i) => ({ c, i, t: at(c) })).filter((x) => x.t != null).sort((a, b) => a.t - b.t || a.i - b.i).map((x) => x.c);
+  const queuedIdx = countedTransitionIndices(timed, "factory:queue", { honourFailed: true })[0];
+  const queuedAt = queuedIdx == null ? null : at(timed[queuedIdx]);
   const nowMs = now == null ? null : (typeof now === "number" ? now : Date.parse(String(now)));
   const elapsedMs = queuedAt != null && Number.isFinite(nowMs) && nowMs >= queuedAt ? nowMs - queuedAt : null;
   // runs = the heartbeat-named runners, read through parseHeartbeat (heartbeatStages) — the same parser that binds every record row.
@@ -361,7 +369,7 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const rejected = typeof reason === "string" && reason.trim() ? reason.trim() : null;
 
   // ── Render. ──
-  const out = [EVIDENCE_HEADING, "", "_Assembled by the factory runner from run records, handoff comments and this merge run's own gate result — no agent prose. **record** = a runner-written line bound to a heartbeat-known run; **claim** = taken from an agent-written handoff comment._"];
+  const out = [EVIDENCE_HEADING, "", "_Assembled by the factory runner from run records, handoff comments and this merge run's own gate result — no agent prose. **record** = a runner-written line bound to a heartbeat-known run; **live** = a value this merge run computed itself and passed in (its gate result, its hand-off reason); **claim** = taken from an agent-written handoff comment._"];
   const head = [];
   if (mustFixCount != null) head.push(`must_fix raised by review: ${mustFixCount} (claim — review handoffs${split ? `; fixed ${split.fixed}, disputed ${split.disputed}, unanswered ${split.unanswered}` : ""})`);
   if (doneWhenTests != null) head.push(`done_when tests: ${doneWhenTests} (claim — plan handoff)`);
@@ -398,9 +406,9 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   }
   if (gatesRow) {
     out.push("", "### Gates (this merge run)", "",
-      `- level=${escapeCell(gatesRow.level)} status=${escapeCell(gatesRow.status)} passed=${escapeCell(gatesRow.passed)} failed=${escapeCell(gatesRow.failed)} failing=${escapeCell(list(gatesRow.failing))} — rerun: ${gatesRow.rerun ? "yes (first run RED outside the PR diff, re-run once)" : "no"} — record`);
+      `- level=${escapeCell(gatesRow.level)} status=${escapeCell(gatesRow.status)} passed=${escapeCell(gatesRow.passed)} failed=${escapeCell(gatesRow.failed)} failing=${escapeCell(list(gatesRow.failing))} — rerun: ${gatesRow.rerun ? "yes (first run RED outside the PR diff, re-run once)" : "no"} — live (this merge run's gate result)`);
   }
-  if (rejected) out.push("", "### Rejected / hand-off", "", `- ${escapeCell(rejected)} — record (merge stage)`);
+  if (rejected) out.push("", "### Rejected / hand-off", "", `- ${escapeCell(rejected)} — live (this merge run's hand-off reason)`);
   const costRows = [];
   if (cost) costRows.push(`- lifetime cost: $${cost.usd.toFixed(2)} / $${cost.cap} cap over ${cost.runs} run(s) — record: budget: line of run ${escapeCell(cost.run_id)} (${escapeCell(cost.stage)}), bound by its section's heartbeat-known runner (one budget story per run)`);
   if (elapsedMs != null) costRows.push(`- queued → now: ${fmtElapsed(elapsedMs)} (transition comment timestamps)`);

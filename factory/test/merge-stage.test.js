@@ -3114,15 +3114,88 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     order195(ev.publishPrEvidence, d.mergePr);
     expect(ev.postEvidenceComment).toHaveBeenCalledTimes(1);
   }
-  // (f) a veto: the window's evidence stands; the hand-off that ends the window does not publish a second time.
+  // (f) a veto: the window's evidence went out before the announcement, and the hand-off that ends the window publishes once
+  // at its own stated point (inside handToHuman, before the needs-human transition) with the veto reason. Poll ticks never
+  // publish.
   {
     const ev = evidence195();
     const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
     expect((await run179(d)).code).toBe(2);
-    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
-    expect(ev.publishPrEvidence.mock.calls[0][0].route).toBe("veto-window");
+    expect(ev.publishPrEvidence.mock.calls.map((c) => c[0].route)).toEqual(["veto-window", "hand-off"]);
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toBeNull();
+    expect(ev.publishPrEvidence.mock.calls[1][0].reason).toMatch(/^vetoed by @owner/);
+    expect(d.transition.mock.calls.at(-1)[0].reason.startsWith(ev.publishPrEvidence.mock.calls[1][0].reason)).toBe(true);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[1]).toBeLessThan(needsHumanCall195(d));
     expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^vetoed by @owner/);
     expect(ev.postEvidenceComment).not.toHaveBeenCalled();
+  }
+  // (f2) the same veto through the REAL run-stage dep and a stateful PR body: the body the owner ends up reading names the
+  // veto, in one section.
+  {
+    let body = "Closes #7\n";
+    const gh = { comments: vi.fn(async () => []), prBody: vi.fn(async () => body), editPrBody: vi.fn(async (_p, b) => { body = b; }), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot") };
+    const real = makePrEvidenceDeps195({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+    const d = selfD179({ ...real, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+    const { code, lines } = await run179(d);
+    expect(code).toBe(2);
+    expect(body.split("<!-- factory-evidence:v1 -->").length - 1).toBe(1);
+    expect(body).toMatch(/### Rejected \/ hand-off\n\n- vetoed by @owner/);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (veto-window)", "evidence: published to PR #9 (hand-off)"]);
+  }
+  // (f3) a veto with a failing dep: the window publish and the hand-off publish both fail, and the record still gets exactly
+  // ONE FAIL line. The transition and exit code do not change.
+  {
+    const ev = evidence195(async () => { throw new Error("gh pr view failed (1): HTTP 502"); });
+    const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+    const { code, lines } = await run179(d);
+    expect(code).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(2);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — publish: gh pr view failed (1): HTTP 502"]);
+    expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  }
+  // (f4) the needs-human routes that do not pass through handToHuman also publish once, before their transition, with their
+  // reason: the mergeGates refusal (required checks / integrity not GREEN) and the pre-merge review-verification refusal.
+  for (const [name, over, re] of [
+    ["checks", { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) }, /^required checks not GREEN$/],
+    ["integrity", { mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: false })) }, /^integrity not GREEN$/],
+    ["review", { reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review handoff on this issue" })) }, /^review verification failed — no review handoff on this issue$/],
+  ]) {
+    const ev = evidence195();
+    const d = baseD({ ...ev, ...over });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record }), name).toBe(2);
+    expect(ev.publishPrEvidence, name).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0], name).toMatchObject({ pr: 9, route: "hand-off" });
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason, name).toMatch(re);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0], name).toBeLessThan(needsHumanCall195(d));
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+    expect(lines.filter((l) => l.startsWith("evidence: ")), name).toEqual(["evidence: published to PR #9 (hand-off)"]);
+  }
+  // (f5) the post-window review re-verification refusal on the self-change path: the window publish, then once more with
+  // the refusal reason before needs-human.
+  {
+    const ev = evidence195();
+    let n = 0;
+    const d = selfD179({ ...ev, prHeadShaLive: vi.fn(async () => (++n === 1 ? HEAD : "c".repeat(40))) });
+    expect((await run179(d)).code).toBe(2);
+    expect(ev.publishPrEvidence.mock.calls.map((c) => c[0].route)).toEqual(["veto-window", "hand-off"]);
+    expect(ev.publishPrEvidence.mock.calls[1][0].reason).toMatch(/^review verification failed — PR head moved during this run/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[1]).toBeLessThan(needsHumanCall195(d));
+    expect(d.mergePr).not.toHaveBeenCalled();
+  }
+  // (f6) run-stage's dep with a run record that exists but cannot be read (EACCES): the read step fails, so nothing is
+  // written and there is no "published" line. The record gets one FAIL line naming the read step, and the merge still
+  // happens.
+  {
+    const gh = { comments: vi.fn(async () => []), prBody: vi.fn(async () => "Closes #7\n"), editPrBody: vi.fn(async () => {}), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot") };
+    const eacces = Object.assign(new Error("EACCES: permission denied, open 'docs/factory/runs/7.md'"), { code: "EACCES" });
+    const real = makePrEvidenceDeps195({ gh, issue: 7, readRecord: () => { throw eacces; }, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+    const d = baseD(real);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: FAIL — read: run record unreadable — EACCES: permission denied, open 'docs/factory/runs/7.md'"]);
   }
   // (g) the dep throws, rejects, times out or answers ok:false → the merge / the transition still happens, the exit code is
   // unchanged, and the record gets exactly one `evidence: FAIL — <reason>` line.
@@ -3317,8 +3390,9 @@ test("test_195_unresolved_logins_reach_the_record_as_a_fail_line", async () => {
     expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([
       "evidence: published to PR #9 (merge)",
       `evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown`,
-      "evidence: issue comment posted",
+      "evidence: issue comment not posted — factory logins not resolved (see the FAIL line)",
     ]);
+    expect(ev.postEvidenceComment).not.toHaveBeenCalled();
   }
   // Hand-off route: same line, the transition and exit code 2 unchanged.
   {
