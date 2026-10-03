@@ -1054,3 +1054,125 @@ test("test_195_one_patch_path_across_the_engine", async () => {
   }
   expect(sites).toEqual(['factory/lib/gh.js:"PATCH"']);
 });
+
+// ── #195 skeptic round 4 (flaw 1) — the gates row carries the merge run's own skipped and misconfigured gates, so a reader can
+// tell that prove-test did not run on this run. The input is the REAL producer's (runGates, M1, level full): it skips the proof
+// gates itself. ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+test("test_195_gates_row_shows_the_merge_run_skipped_gates", () => {
+  // The producer's own fact, checked first: on this harness prove-test and new-test-repeat were skipped, nothing misconfigured.
+  expect(LIVE_GATES.skipped).toEqual(["prove-test", "new-test-repeat"]);
+  expect(LIVE_GATES.misconfigured).toEqual([]);
+  const green = buildEvidence({ recordText: recordText(), ...inputs(), gates: LIVE_GATES, gatesRerun: false, reason: null, pr: 31, now: NOW });
+  expect(sectionOf(green.markdown, "Gates (this merge run)")).toContain(
+    "- level=full status=GREEN passed=2 failed=0 failing=none skipped=prove-test,new-test-repeat misconfigured=none — rerun: no — live (this merge run's gate result)");
+  expect(green.data.gates).toMatchObject({ skipped: ["prove-test", "new-test-repeat"], misconfigured: [] });
+  const red = buildEvidence({ recordText: recordText(), ...inputs(), gates: LIVE_GATES_RED, gatesRerun: true, reason: null, pr: 31, now: NOW });
+  expect(sectionOf(red.markdown, "Gates (this merge run)")).toContain(
+    "- level=full status=RED passed=1 failed=1 failing=unit skipped=prove-test,new-test-repeat misconfigured=none — rerun: yes (first run RED outside the PR diff, re-run once) — live (this merge run's gate result)");
+  // A run that skipped nothing says so (never an empty value), and gate names are escaped like any other string.
+  const ranAll = buildEvidence({ ...inputs(), recordText: "", gates: { ...LIVE_GATES, skipped: [], misconfigured: ["mutation|x"] }, pr: 31, now: NOW });
+  expect(sectionOf(ranAll.markdown, "Gates (this merge run)").join("\n")).toMatch(/failing=none skipped=none misconfigured=mutation\\\|x — rerun: no/);
+});
+
+// ── #195 skeptic round 4 (flaw 2) — no code renders a rework response: the builder AGENT is its producer, told by the implement
+// workflow's prompt to post "a ```json fenced block holding a factory.rework-response.v1 object" on the PR. So the fixture here is
+// a comment the builder actually posted (PR #202, comment 5972203760, verbatim), and the producer contract it follows is pinned
+// in the prompt that tells the agent to post it. context.js's existing reader (disputedFrom) reads the same body. ─────────────
+import { disputedFrom } from "../lib/context.js";
+
+const POSTED_REWORK_RESPONSE_202 = [
+  "Rework response, round 2.",
+  "",
+  "```json",
+  "{",
+  '  "schema": "factory.rework-response.v1",',
+  '  "issue": 195,',
+  '  "responses": [',
+  '    {"id": "arch1", "status": "fixed", "commit": "fcd24c83160568c1a73c934e4df90b9450e34d8e"},',
+  '    {"id": "arch2", "status": "fixed", "commit": "fcd24c83160568c1a73c934e4df90b9450e34d8e"}',
+  "  ]",
+  "}",
+  "```",
+  "",
+  "- arch1: `RECORD_SECTION` is gone. `factory/lib/run-record.js` now exports `parseRecordSection(line)`, which sits in the same file as the writer (`appendRunRecord`) and uses its existing `SECTION` grammar. `boundBudget` reads headers through it. Regression test: `test_195_budget_binds_to_the_section_header_the_run_record_reader_sees`. It was RED before the fix: a `## review  · … · gha-666` header (two spaces) bound the stray budget line to run 1003, so the cost fell back to run 1002 ($7.10 instead of $12.50).",
+  "- arch2: the inline heartbeat regex is gone. `runs (heartbeats)` is now `stages.size`, the runner set from `heartbeatStages`, which reads through `parseHeartbeat`. Guard test: `test_195_evidence_reads_headers_and_heartbeats_through_their_writer_modules`. It checks that `evidence.js` has no local copy of either format and that one more heartbeat runner adds exactly one run.",
+  "",
+].join("\n");
+
+test("test_195_a_rework_response_in_the_builder_posted_format_answers_its_round", () => {
+  // The producer contract: the implement workflow's prompt (installed from templates/) tells the builder exactly this shape.
+  const prompt = readFileSync(fileURLToPath(new URL("../../templates/factory/claude/workflows/factory-implement.js", import.meta.url)), "utf8");
+  expect(prompt).toContain("as a \\`\\`\\`json fenced block holding a factory.rework-response.v1 object");
+  expect(prompt).toMatch(/gh pr comment \$\{[^}]*\} --body-file/);
+  // The existing reader of the same comments (context.js) reads this body too — one format, two readers that agree.
+  expect(disputedFrom([{ body: POSTED_REWORK_RESPONSE_202, createdAt: "2026-10-03T18:31:57Z" }])).toEqual([]);
+
+  const ISSUE_202 = 195;
+  const review = { schema: "factory.review.v1", issue: ISSUE_202, pr: 202, head_sha: H1, round: 2, decision: "rework", orchestration: "workflow", guarantee: "verified",
+    verdicts: [verdict("architect", "reject", [mf("arch1", "section grammar copy"), mf("arch2", "heartbeat regex copy")]), verdict("correctness", "reject", [mf("cf9", "unrelated")])] };
+  const issueComments = [{ body: renderHandoff({ stage: "review", issue: ISSUE_202, summary: "### review", data: review }), createdAt: "2026-10-03T18:10:00Z", author: "ktb-bot" }];
+  const prComments = [{ body: POSTED_REWORK_RESPONSE_202, createdAt: "2026-10-03T18:31:57Z", author: "ktb-bot" }];
+  const r = buildEvidence({ recordText: "", issueComments, prComments, factoryLogins: LOGINS, gates: null, pr: 202, now: NOW });
+  expect(rowsOf(sectionOf(r.markdown, "Must fix"))).toEqual([
+    "| arch1 | 2 · architect | fixed in `fcd24c8` | claim |",
+    "| arch2 | 2 · architect | fixed in `fcd24c8` | claim |",
+    "| cf9 | 2 · correctness | unanswered | claim |",
+  ]);
+  expect(r.markdown).toContain("must_fix raised by review: 3 (claim — review handoffs; fixed 2, disputed 0, unanswered 1)");
+  // The same posted body from an account that is not a factory login answers nothing.
+  const stranger = buildEvidence({ recordText: "", issueComments, prComments: [{ ...prComments[0], author: "mallory" }], factoryLogins: LOGINS, gates: null, pr: 202, now: NOW });
+  expect(stranger.markdown).not.toContain("fcd24c8");
+});
+
+// ── #195 skeptic round 4 (flaw 5) — a review handoff whose time cannot be read cannot be placed among the rounds, so it could
+// sit between any response and the round before it: no response binds to any round, and the section says why. ─────────────
+test("test_195_a_review_round_with_no_readable_time_binds_no_response", () => {
+  const X = "7".repeat(40), A = "a".repeat(40);
+  const r1 = reviewData(1, H1, [verdict("correctness", "reject", [mf("cf1", "round-1 cf1"), mf("cf2", "round-1 cf2")])]);
+  const r2 = { ...reviewData(2, H2, [verdict("correctness", "reject", [mf("cf2", "round-2 cf2")])]), decision: "rework" };
+  expect(validate("review.v1", r2).ok).toBe(true);
+  const prComments = [
+    reworkResponse([{ id: "cf1", status: "fixed", commit: A }], "2026-10-03T10:30:00Z"),
+    reworkResponse([{ id: "cf2", status: "fixed", commit: X }], "2026-10-03T11:30:00Z"),     // answers round 2, whose time is unknown
+  ];
+  for (const createdAt of [undefined, "", "not a time"]) {
+    const issueComments = [
+      handoff("review", r1, "2026-10-03T09:40:00Z"),
+      { ...handoff("review", r2, "2026-10-03T11:10:00Z"), createdAt },
+    ];
+    const r = buildEvidence({ recordText: "", issueComments, prComments, factoryLogins: LOGINS, gates: null, pr: 31, now: NOW });
+    const at = String(createdAt);
+    expect(rowsOf(sectionOf(r.markdown, "Must fix")), at).toEqual([
+      "| cf1 | 1 · correctness | unanswered | claim |",
+      "| cf2 | 1 · correctness | unanswered | claim |",
+      "| cf2 | 2 · correctness | unanswered | claim |",
+    ]);
+    expect(r.markdown, at).not.toContain("7777777");
+    expect(r.markdown, at).not.toContain("aaaaaaa");
+    expect(r.markdown, at).toContain("must_fix raised by review: 3 (claim — review handoffs; fixed 0, disputed 0, unanswered 3)");
+    expect(r.markdown, at).toContain("_Rework responses were not matched to any review round: 1 review handoff has no readable time, so the round a response follows cannot be told._");
+  }
+  // Positive control: with both times readable, each response answers its own round.
+  const timed = buildEvidence({ recordText: "", issueComments: [handoff("review", r1, "2026-10-03T09:40:00Z"), handoff("review", r2, "2026-10-03T11:10:00Z")], prComments, factoryLogins: LOGINS, gates: null, pr: 31, now: NOW });
+  expect(rowsOf(sectionOf(timed.markdown, "Must fix"))).toEqual([
+    "| cf1 | 1 · correctness | fixed in `aaaaaaa` | claim |",
+    "| cf2 | 1 · correctness | unanswered | claim |",
+    "| cf2 | 2 · correctness | fixed in `7777777` | claim |",
+  ]);
+  expect(timed.markdown).not.toMatch(/not matched to any review round/);
+});
+
+// ── #195 skeptic round 4 (flaw 3) — the self-change path publishes once, before the veto window is announced. The section then
+// says that the PR is in a veto window and what a veto does, as a live row, so a vetoed PR's section is not silent on why it
+// went to a human (the veto hand-off itself does not publish again — once per merge run). ─────────────────────────────────
+test("test_195_veto_window_section_states_the_pending_window", () => {
+  const pending = "self-change veto window open until 2026-10-03T13:30:00.000Z (UTC) — a factory:veto label on issue #184 hands this PR to a human; otherwise head 2222222 is squash-merged";
+  const r = buildEvidence({ recordText: "", ...inputs(), gates: LIVE_GATES, pending, pr: 31, now: NOW });
+  expect(sectionOf(r.markdown, "Veto window")).toEqual(["", `- ${pending} — live (this merge run's veto window; a veto or a later refusal hands the PR to a human without publishing this section again)`, ""]);
+  expect(r.data.pending).toBe(pending);
+  expect(sectionOf(r.markdown, "Rejected / hand-off")).toBeNull();
+  // Agent-free but still a string from outside evidence.js: escaped like every other cell.
+  expect(buildEvidence({ ...inputs(), recordText: "", pending: "x | <!-- y -->", pr: 31, now: NOW }).markdown).toContain("- x \\| &lt;!-- y --&gt; — live");
+  // No pending window → no row.
+  expect(sectionOf(buildEvidence({ ...inputs(), recordText: "", pr: 31, now: NOW }).markdown, "Veto window")).toBeNull();
+});
