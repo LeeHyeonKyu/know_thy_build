@@ -1124,6 +1124,27 @@ test("factory-implement.js: loaded.merge_conflicts → the builder is told to re
   }
 });
 
+// 2026-10-02 (KTB #170 실측) — 디스패처가 Workflow의 args를 JSON **문자열**로 넘긴 적이 있다. 네 워크플로 모두 문자열이면 파싱한다 —
+// 그러지 않으면 `loaded`가 없어 "context payload missing"으로 14초 만에 끝나고 빌더는 뜨지 않는다.
+test("all four workflows accept args (and args.loaded) passed as a JSON string, not only as an object", async () => {
+  const stub = async (prompt, opts) => {
+    if (opts.agentType === "factory-loader") return planLoaderFix();
+    if (opts.agentType === "factory-builder") return buildFix();
+    if (opts.agentType === "factory-verifier") return verdictFix();
+    return null;
+  };
+  const asString = JSON.stringify({ raw: "42 false", context: ".factory/out/context.json", loaded: implLoaderFix() });
+  const { result } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: asString });
+  expect(result.error).toBeUndefined();
+  expect(result.issue).toBe(42);
+  // loaded만 문자열로 온 경우도 같다
+  const { result: r2 } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: { raw: "42 false", context: ".factory/out/context.json", loaded: JSON.stringify(implLoaderFix()) } });
+  expect(r2.error).toBeUndefined();
+  // 파싱이 안 되는 문자열은 지금처럼 이름 있는 에러다
+  const { result: r3 } = await runWorkflow(FACTORY_IMPLEMENT_WORKFLOW, { agent: stub, args: "not json" });
+  expect(r3.error).toBe("context payload missing");
+});
+
 // KTB-27 — Claude Code does not substitute positional `$1`/`$2` in a command md, only `$ARGUMENTS`
 // (verified live: `claude -p "/argtest 42 true"` filled `$ARGUMENTS` correctly but turned `$1` into
 // "true" and left `$2` as the literal text "$2"). The implement dispatcher now passes the whole
@@ -2066,7 +2087,8 @@ const blockOf = (src, re, what) => {
  */
 test("the four workflows take the context payload from args.loaded — one shared line, no loader agent anywhere", () => {
   const srcs = WORKFLOW_FILES.map((f) => readFileSync(f, "utf8"));
-  const loads = srcs.map((s) => blockOf(s, /phase\('Load'\);\n\n\/\/ 감사 M5[\s\S]*?\nconst loaded = args\.loaded \?\? null;\n/, "Load"));
+  // 2026-10-02 (#170): 블록의 끝은 이제 문자열 args 파싱을 포함한 `const loaded = parseIfString(args.loaded) ?? null;`이다 — 네 파일이 같은 블록을 든다.
+  const loads = srcs.map((s) => blockOf(s, /phase\('Load'\);\n\n\/\/ 감사 M5[\s\S]*?\nconst loaded = parseIfString\(args\.loaded\) \?\? null;\n/, "Load"));
   const onces = srcs.map((s) => blockOf(s, /function once\(fn\) \{[\s\S]*?\n\}/, "once"));
 
   for (const [what, set] of [["Load", loads], ["once", onces]]) {
