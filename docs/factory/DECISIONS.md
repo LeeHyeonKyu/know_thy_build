@@ -4208,6 +4208,28 @@ revert 자체가 사람의 행위이므로 차단기가 지키는 것은 "되돌
 gh 호출이 0건임을 고정한다. 각 git 단계(fetch는 성공하고 log만 실패, 상태 파일의 `git show` 실패, run 기록 하나의 `git show` 실패)는 따로 실패시켜
 ok:false를 확인한다.
 
+**rework r2 — GitHub Revert 버튼, 심어진 상태 파일, 위조된 자동 머지 줄** (리뷰 cf1·sec1·sec2).
+- *Revert 버튼 + PR 제목 squash (cf1).* revert PR의 squash 커밋이 PR 제목을 쓰면(`squash_merge_commit_title` = PR_TITLE, 또는
+  COMMIT_OR_PR_TITLE에서 커밋이 둘 이상) main에는 `Revert "<원래 PR 제목>" (#M)`만 남고 안쪽 `(#N)`이 없다(vercel/next.js #98715의 실제 모양).
+  설치된 저장소의 설정에 따라 차단기가 조용히 열리지 않는 것은 fail-open이므로, 읽기는 이제 `git log --format=%x1e%H%x09%cI%x09%s%x1f%b`
+  (`REVERT_LOG_FORMAT`)를 읽고 순서대로 묶는다: 제목 안쪽 `(#N)` → 본문 `This reverts commit <sha>`(main의 그 커밋 제목의 `(#N)`) → 본문
+  `Reverts <owner>/<repo>#N` → 제목 `Revert "<T>"`와 main에서 앞선 `<T> (#N)` 커밋. 어디에도 묶이지 않는 revert 모양의 커밋은 `detail`에 수와
+  제목으로 남는다(조용히 버리지 않는다).
+- *쓰기 쪽 (sec1·sec2).* `docs/factory/runs/**`는 에이전트가 쓸 수 있는 스크래치 경로이고 스테이지 끝의 기본 dir `syncRecords`는 그것을 러너의
+  이름으로 민다. 그래서 run-stage의 두 동기화 자리(스테이지 끝·abort)는 `syncRunRecords`를 거친다: 밀기 직전에 `scrubPlantedBreakerEvidence`가
+  로컬 `state/breaker.md`를 지우고(그 파일의 문은 `writeBreakerState` 하나이고, 그것은 쓴 뒤 로컬 파일을 지운다), 모든 기록 파일에서 **이 프로세스가
+  쓴**(`runRecord`가 `trust`한) 줄도 **이미 브랜치에 있는** 줄도 아닌 `factory-self-merge:` 줄을 지운다. abort 정리 스텝은 다른 프로세스라
+  `trust`를 모르므로 merge 스테이지에서만 로컬 줄을 믿는다(merge는 에이전트를 부르지 않는다). records 헬퍼는 바꾸지 않았다.
+- *읽기 쪽 — 쓰기 경계만 믿지 않는다 (sec1).* 상태 파일을 마지막으로 바꾼 커밋이 기본 dir 동기화(`run-record:`·`retro:`)이면 ok:false(손상과 같게
+  — 사람의 리셋이 `expectBlob`으로 덮어쓴다). `closed_at`이 있는데 `closed_by`가 `person:<login>`이 아니면 ok:false. `closed_at`이 지금보다
+  10분 넘게 미래면 ok:false(sweep은 자기 시각을 넘긴다). 
+- *읽기 쪽 (sec2).* 같은 PR에 판정 줄이 하나라도 있으면 그 PR은 판정 머지다(더 이른 비판정 줄이 판정 머지를 연속에서 빼지 못한다). revert 없는
+  판정 머지는 main에 그 PR의 squash 커밋(`… (#N)`)이 있을 때만 연속을 끊는다 — 확인은 "끊을 자격"에만 걸리고, revert된 머지는 확인 없이 센다
+  (위조가 할 수 있는 최악은 막는 쪽이다). 자동 머지 줄의 `sha`는 PR head라 main에 없다 — 그래서 sha가 아니라 PR 번호로 확인한다.
+- *그래도 남는 것.* 줄을 런 id에 묶지는 않았다(`readBreaker`는 gh를 부르지 않는다 — dw5가 그것을 고정한다). 가드를 우회해 브랜치에 실린 위조
+  판정 줄이 **진짜 머지된** (사람이 머지한) PR 번호를 대면 연속을 끊을 수 있다. 그 길은 이제 러너의 동기화를 지나지 않으므로, `factory/records`에
+  직접 push할 자격증명(아래 첫 위험과 같은 경계)이 필요하다.
+
 **남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
 push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
 지우면 반대로 "리셋 이력 없음"이 되어 옛 revert가 다시 세어진다. 매 머지 확인마다 records 전부와 git log를 읽으므로 merge 스테이지 지연이 history 크기에 따라 는다.
