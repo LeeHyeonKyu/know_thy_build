@@ -290,18 +290,148 @@ export function commentsSinceRequeue(comments) {
  * 남는다. K=3에서 그런 장애 두 번이면 멀쩡한 이슈가 라운드를 다 쓴다 — 그 창을 이 마커가 닫는다.
  */
 export function countTransitionsTo(comments, to) {
-  let n = 0;
-  for (const c of comments || []) {
+  return countedTransitionIndices(comments, to).length;
+}
+
+/**
+ * #174 — `countTransitionsTo`가 세는 **바로 그 전이들의 위치**(코멘트 배열의 인덱스, 오름차순). 규칙은 여기 하나다:
+ * `countTransitionsTo`는 이것의 길이이고, K 재시작의 "쓰였는가"(`kRestartState`)도 이것을 읽는다 — 같은 TRANSITION_FAILED·
+ * `reason=retry` 규칙을 두 벌 두지 않는다.
+ */
+export function countedTransitionIndices(comments, to) {
+  const out = [];
+  (Array.isArray(comments) ? comments : []).forEach((c, i) => {
     const body = String(c?.body ?? "");
     const f = TRANSITION_FAILED.exec(body);
-    if (f) { if (f[2] === to && n > 0) n -= 1; continue; }
+    if (f) { if (f[2] === to && out.length > 0) out.pop(); return; }
     const m = TRANSITION_TO.exec(body);
     // ADR-020 KTB-32 — **사람의 재시도는 라운드가 아니다.** `reason=retry` 전이는 인프라가 끊은
     // 자리로 **이미 얻었던 라벨을 되돌리는** 것이지 새 재작업 주기가 아니다. 세면 `rework`로
     // 되돌아가는 재시도 한 번이 K 예산을 한 칸 태운다 — 재시도의 값어치가 그만큼 줄어든다.
-    if (m && m[2] === to && m[4] !== "retry") n += 1;
+    if (m && m[2] === to && m[4] !== "retry") out.push(i);
+  });
+  return out;
+}
+
+/**
+ * ── #174 (ADR-033 둘째 결정) — K 소진 → **한 번**, 새 작성자 + diff 전용 브리프로 스스로 재시작 ─────────────────
+ *
+ * 리뷰 라운드 K를 다 쓴 이슈는 예전에는 곧장 `factory:needs-human`이었고, 운영 세션(사람)이 미결 findings를 diff 전용
+ * 브리프로 적은 뒤 `--retry`로 K를 리셋했다(#149·#157·#170 — 하루 재시도 요청의 절반). 이제 공장이 그 일을 한 번 한다:
+ * 브리프 코멘트(이 생산자)를 남기고 `factory:rework`로 보낸다. 두 번째 소진은 예전처럼 사람이다.
+ *
+ * **창은 바꾸지 않는다.** K의 창은 그대로 `commentsSinceRequeue`이고, 마커는 그 창을 자르지 않는다 — 에이전트도 factory
+ * 계정으로 코멘트를 쓰므로(`gh.js`의 열린 `gh issue comment`) 작성자로는 엔진 마커와 위조를 가를 수 없고, 본문이 창을 자르면
+ * K에 천장이 없어진다. 대신 예산이 고정이다: 한 창에 재시작은 **최대 한 번**. 마커가 몇 개든 "쓰인 재시작"은 하나(창 안에서
+ * 처음으로 rework 전이가 뒤따른 마커)이고, 그것이 쓰였으면 다음 소진은 무조건 사람이다. 첫 소진 전의 위조 마커는 그 한 번을
+ * 미리 써 버려 멈춤을 **앞당길** 뿐이다(fail safe).
+ *
+ * **쓰였다** = 마커 + 그 뒤에 살아남은(`TRANSITION_FAILED`로 취소되지 않은) `→ factory:rework` 전이. 마커만 있고 전이가
+ * 실패했으면 예산은 그대로이고, 다음 소진은 같은 head의 대기 마커를 다시 쓴다(브리프를 또 게시하지 않는다).
+ */
+export const K_RESTART = /<!-- factory-k-restart:v1 issue=(\d+) pr=(\S+) head=(\S+) -->/;
+export const kRestartMarker = ({ issue, pr, head }) => `<!-- factory-k-restart:v1 issue=${issue} pr=${pr ?? "unknown"} head=${head ?? "unknown"} -->`;
+/** 다음 작성자에게 실리는 범위 문장 — 브리프 코멘트와 `loaded.k_restart_brief`가 **이 문자열 그대로** 싣는다. */
+export const K_RESTART_SCOPE = "목록 밖의 변경은 없어야 한다(새 파일·새 export·새 done_when 금지, 빼는 것만)";
+/** 코멘트 한도(GitHub 65536자) 안에 머무는 상한: findings 40개 × (where 200 + claim 400). 넘치면 "N more omitted". */
+export const K_RESTART_MAX_FINDINGS = 40;
+const K_RESTART_WHERE_MAX = 200;
+const K_RESTART_CLAIM_MAX = 400;
+const K_RESTART_BRIEF_JSON = /```json\s*(\{[\s\S]*?"schema"\s*:\s*"factory\.k-restart-brief\.v1"[\s\S]*?\})\s*```/;
+
+/**
+ * finding의 글 한 조각을 코멘트에 실어도 안전하게 만든다: 한 줄로 접고, `<!--`(마커의 시작 — 브리프 안의 claim이 전이 마커로
+ * 읽히면 K 카운터가 속는다)와 세 개 이상의 백틱(구조화 블록의 울타리)을 무력화하고, 길이를 자른다.
+ */
+function inert(text, max) {
+  const s = String(text ?? "").replace(/<!--/g, "&lt;!--").replace(/`{3,}/g, "`").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * finding의 `where`에서 저장소 경로만 뽑는다(`path[:line]` 모양만). `:12`·`:3-9`·`:3:9`·`#L4` 꼬리는 떼고, 백틱·따옴표·괄호는
+ * 벗긴다. 경로가 아닌 것(`/reports` 같은 라우트, URL, 산문)은 아무 경로도 내지 않는다 — 추측으로 허용 목록을 넓히지 않는다.
+ */
+export function wherePaths(where) {
+  const out = [];
+  for (const raw of String(where ?? "").split(/[\s,;()[\]{}"'`<>]+/)) {
+    if (!raw || /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) continue;
+    let tok = raw.replace(/[.,;:!?]+$/, "").replace(/#L\d+(?:-L?\d+)?$/i, "").replace(/(?::\d+(?:[-–:]\d+)*)+$/, "").replace(/^\.\//, "");
+    if (!tok || tok.startsWith("/") || tok.split("/").includes("..")) continue;
+    if (!/^[\w@.+-]+(?:\/[\w@.+-]+)*\/?$/.test(tok)) continue;
+    if (!(tok.includes("/") || /\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(tok))) continue;
+    if (/^(?:e\.g|i\.e|etc)$/i.test(tok)) continue;
+    if (!out.includes(tok)) out.push(tok);
   }
-  return n;
+  return out;
+}
+
+/**
+ * 브리프 코멘트 한 통(생산자). 마커 + 사람이 읽는 문장(PR·미결 개수·범위 문장·각 finding의 where/claim) + 같은 findings를 담은
+ * 구조화 블록(`factory.k-restart-brief.v1`). 읽는 쪽(`kRestartState` → `loaded.k_restart_brief`, self-gate)은 산문이 아니라 블록을 본다.
+ */
+export function kRestartComment({ issue, pr, head, findings = [] }) {
+  const all = (Array.isArray(findings) ? findings : []).filter((f) => f && typeof f === "object");
+  const kept = all.slice(0, K_RESTART_MAX_FINDINGS).map((f) => ({
+    ...(f.id != null ? { id: inert(f.id, 80) } : {}),
+    where: inert(f.where, K_RESTART_WHERE_MAX).replace(/`/g, ""),
+    claim: inert(f.claim, K_RESTART_CLAIM_MAX),
+  }));
+  const omitted = all.length - kept.length;
+  const lines = kept.map((f, i) => `${i + 1}. \`${f.where || "(no where)"}\`${f.id ? ` (${f.id})` : ""} — ${f.claim}`);
+  return [
+    kRestartMarker({ issue, pr, head }),
+    `**K 소진 — 새 작성자로 한 번 재시작합니다 (self-restart 1/1, ADR-033).** 미결 findings ${all.length}건 — 다음 작성자는 PR #${pr ?? "unknown"}의 diff를 출발점으로 이것만 고친다:`,
+    "",
+    `> ${K_RESTART_SCOPE}`,
+    "",
+    ...lines,
+    ...(omitted > 0 ? [`- … ${omitted} more omitted (the review handoff carries the full list)`] : []),
+    "",
+    "```json",
+    JSON.stringify({ schema: "factory.k-restart-brief.v1", issue, pr: pr ?? null, head: head ?? null, scope: K_RESTART_SCOPE, findings: kept, omitted }, null, 2),
+    "```",
+  ].join("\n");
+}
+
+/** 마커가 달린 코멘트 본문 → 빌더가 받는 브리프. 블록이 없거나 깨졌으면 `error`를 싣는다(읽는 쪽이 fail closed 한다). */
+function briefOf(body, m) {
+  const pr = /^\d+$/.test(m[2]) ? Number(m[2]) : null;
+  const head = m[3] === "unknown" ? null : m[3];
+  const j = K_RESTART_BRIEF_JSON.exec(body);
+  let obj = null;
+  try { obj = j ? JSON.parse(j[1]) : null; } catch { obj = null; }
+  if (!obj || !Array.isArray(obj.findings)) return { pr, head, scope: K_RESTART_SCOPE, paths: [], findings: [], error: "the factory.k-restart-brief.v1 block is missing or unparsable" };
+  const findings = obj.findings.filter((f) => f && typeof f === "object").map((f) => ({
+    ...(f.id != null ? { id: String(f.id) } : {}),
+    where: String(f.where ?? ""),
+    claim: String(f.claim ?? ""),
+  }));
+  const paths = [...new Set(findings.flatMap((f) => wherePaths(f.where)))];
+  return { pr, head, scope: K_RESTART_SCOPE, paths, findings };
+}
+
+/**
+ * 창(호출자가 `commentsSinceRequeue`로 좁힌다) 안의 재시작 상태.
+ *   - `used` — 재시작이 쓰였는가. 쓰인 마커는 **처음으로** 살아남은 rework 전이가 뒤따른 그 전이 직전의 마지막 마커다.
+ *   - `offset` — 그 재시작 전이까지(포함) 센 rework 수. 리뷰 라운드는 재시작 뒤 `prior + 1 - offset`부터 다시 1이다.
+ *   - `brief` — 쓰인 마커의 브리프(`briefOf`). 쓰이지 않았으면 null.
+ *   - `pending` — 쓰이지 않은 가장 최근 마커 `{ head, pr }`(재시도된 런이 브리프를 또 쓰지 않게).
+ */
+export function kRestartState(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  const markers = [];
+  list.forEach((c, i) => { const body = String(c?.body ?? ""); const m = K_RESTART.exec(body); if (m) markers.push({ i, m, body }); });
+  if (!markers.length) return { used: false, offset: 0, brief: null, pending: null };
+  const reworks = countedTransitionIndices(list, "factory:rework");
+  const k = reworks.findIndex((j) => j > markers[0].i);
+  if (k === -1) {
+    const last = markers[markers.length - 1];
+    return { used: false, offset: 0, brief: null, pending: { head: last.m[3], pr: last.m[2] } };
+  }
+  const j = reworks[k];
+  const restart = markers.filter((x) => x.i < j).pop();
+  return { used: true, offset: k + 1, brief: briefOf(restart.body, restart.m), pending: null };
 }
 
 /**
