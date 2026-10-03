@@ -17,7 +17,7 @@ import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
 import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, TIERS, tierLabel } from "../lib/labels.js";
-import { HARNESS_LABEL } from "../lib/label-catalog.js";
+import { HARNESS_LABEL, VETO_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
@@ -42,7 +42,8 @@ import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage, idlessFailedSuites } from "../lib/merge-stage.js";
+import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -2087,6 +2088,99 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
 }
 
 /**
+ * ── #179 (S4a-2, ADR-033) — merge 스테이지의 자기 변경 경로 재료 ──────────────────────────────────────────────────
+ *
+ * `mergeEngineAtBase`: 이 체크아웃이 엔진인가 — operator-merge와 **같은 술어**(`isEngineCheckout`: 하네스 `[project].name` +
+ * 표지 파일 전부)다. `mirrorApplicable`은 쓰지 않는다(그것은 "미러를 재생성할 소스가 있는가"이지 "엔진인가"가 아니다). 호출자는
+ * `charterReady` 안에서, 곧 checkoutHead가 트리를 PR head로 옮기기 **전** base 체크아웃에서 부른다 — PR이 표지 파일을 스스로
+ * 추가해 엔진이 될 수 없다.
+ */
+export function mergeEngineAtBase({ harness, root, exists = existsSync }) {
+  return isEngineCheckout({ projectName: harness?.project?.name, exists: (rel) => exists(join(root, rel)) });
+}
+
+/**
+ * `makeCharterReady`: main()의 `charterReady` — CHARTER와 harness를 읽고, **그 자리에서** 엔진 판정(`mergeEngineAtBase`)을 굳힌다.
+ * runStage는 이것을 `checkoutHead`보다 먼저 부르므로 판정은 base 트리의 것이다(PR이 표지 파일을 더하거나 지워도 바뀌지 않는다).
+ * 읽은 값은 `set({ charter } | { harness } | { engine })`로 호출자에게 넘긴다 — main()의 지연 게터들이 그 값을 본다.
+ * 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
+ */
+export function makeCharterReady({ root, set, loadCharter: readCharter = loadCharter, loadHarness: readHarness = loadHarness, engineAt = mergeEngineAtBase, log = (m) => console.error(m) }) {
+  return async () => {
+    let charter, harness;
+    try { charter = readCharter(root); set({ charter }); }
+    catch (e) { log("factory: CHARTER.md unreadable — " + e.message); return false; }
+    // 게이트가 하네스 없이 돌 수는 없다 — 판정할 수 없으면 진행하지 않고 잠든다.
+    try { harness = readHarness(root); set({ harness }); }
+    catch (e) { log("factory: .factory/harness.toml unreadable — " + e.message); return false; }
+    // #179 — 엔진 판정은 지금, base 체크아웃에서 한 번. 모르면 false(닫힌 쪽).
+    let engine = false;
+    try { engine = engineAt({ harness, root }) === true; } catch { engine = false; }
+    set({ engine });
+    if (charter.status !== "ready") { log(`factory: CHARTER status is ${charter.status} — dormant`); return false; }
+    return true;
+  };
+}
+
+/**
+ * `makeMergeSelfChangeDeps`: merge-stage의 `selfChange`·`engine`·`neverAutomate`·`mergePr`·`vetoWindow`·`vetoLabel`·`now`·`jobStartedAt`·`jobTimeoutMinutes`.
+ * `selfChange`·`engine`은 **게터**다(CHARTER와 base 판정은 charterReady에서 생긴다) — 조립하는 쪽은 펼치지(`...`) 말고
+ * `Object.getOwnPropertyDescriptors`로 옮긴다. GitHub 호출은 전부 gh.js를 지난다: 창은 `setStatus`/`commitStatuses`, 거부권은
+ * `labelEvents`(+ 지금 붙어 있는 라벨). 어느 것도 best-effort가 아니다 — 실패는 `{ ok:false, reason }`로 올라가 merge-stage가
+ * 판정 불가(blocked)로 접는다.
+ * `jobStartedAt`은 워크플로가 싣는 `FACTORY_JOB_STARTED`(epoch 초 — 다른 스테이지와 같은 값), `jobTimeoutMinutes`는
+ * `FACTORY_JOB_TIMEOUT_MINUTES`(잡의 `timeout-minutes`를 워크플로가 그대로 옮겨 싣는다). 없거나 모양이 틀리면 null이고, merge-stage는
+ * 그것을 "남은 시간을 모른다"로 읽어 창을 열지 않는다.
+ */
+export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env = {}, now = () => Date.now() }) {
+  const started = String(env.FACTORY_JOB_STARTED ?? "").trim();
+  const timeout = String(env.FACTORY_JOB_TIMEOUT_MINUTES ?? "").trim();
+  return {
+    get selfChange() { return getCharter()?.self_change; },
+    get engine() { return getEngine() === true; },
+    /** CHARTER NEVER_AUTOMATE 글롭 — 자기 변경 경로에서도 이 목록에 걸린 보호 경로는 사람이 머지한다. */
+    get neverAutomate() { return getCharter()?.never_automate; },
+    /** 오늘의 호출(`mergePr(pr)`)은 오늘의 인자 그대로, 자기 변경 경로는 재검증한 head를 `--match-head-commit`으로 못 박는다. */
+    mergePr: (pr, { matchHeadCommit } = {}) => gh.mergePr(pr, { method: "squash", deleteBranch: true, ...(matchHeadCommit !== undefined ? { matchHeadCommit } : {}) }),
+    now,
+    jobStartedAt: /^[0-9]+$/.test(started) && Number(started) > 0 ? Number(started) * 1000 : null,
+    jobTimeoutMinutes: /^[0-9]+$/.test(timeout) && Number(timeout) > 0 ? Number(timeout) : null,
+    vetoWindow: {
+      open: async ({ sha, description }) => {
+        try { await gh.setStatus({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description }); return { ok: true }; }
+        catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+      },
+      read: async ({ sha }) => {
+        try {
+          const list = await gh.commitStatuses(sha);
+          if (!Array.isArray(list)) return { ok: false, reason: "no status list returned" };
+          return { ok: true, status: list.find((s) => s?.context === VETO_WINDOW_CONTEXT) ?? null };   // 최신순 — 첫 항목이 유효한 상태
+        } catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+      },
+    },
+    vetoLabel: async ({ since }) => {
+      const sinceMs = Date.parse(since);
+      if (!Number.isFinite(sinceMs)) return { ok: false, reason: `the window start is not a time (${JSON.stringify(since)})` };
+      try {
+        const events = await gh.labelEvents(issue, VETO_LABEL);
+        if (!Array.isArray(events)) return { ok: false, reason: "no label event list returned" };
+        // 시각을 읽을 수 없는 이벤트는 창 안의 것으로 친다 — 의심은 사람 쪽으로 기운다.
+        const vetoes = events.filter((e) => { const t = Date.parse(e?.at); return !Number.isFinite(t) || t >= sinceMs; });
+        if (vetoes.length) return { ok: true, vetoes };
+        // 창이 열리기 전부터 붙어 있던 라벨도 거부권이다(그 이벤트는 창 밖이라 위에 걸리지 않는다).
+        const labels = (await gh.issue(issue))?.labels;
+        if (!Array.isArray(labels)) return { ok: false, reason: `the labels of #${issue} could not be read` };
+        if (labels.includes(VETO_LABEL)) {
+          const last = events.at(-1);
+          return { ok: true, vetoes: [{ login: last?.login ?? null, at: last?.at ?? null }] };
+        }
+        return { ok: true, vetoes: [] };
+      } catch (e) { return { ok: false, reason: `${e?.message || e}` }; }
+    },
+  };
+}
+
+/**
  * ── #174 (ADR-033 둘째 결정) — K 소진의 재시작 deps(프로덕션 = 테스트가 그대로 쓰는 것) ──────────────────────────
  *
  * 셋 다 같은 창(`commentsSinceRequeue`)을 본다 — 재큐는 K와 재시작 예산을 함께 되돌리고, 사람의 `reason=retry`는 어느 쪽도
@@ -2993,7 +3087,9 @@ async function main() {
       },
     }));
   }
-  let charter, harness, ctxCache;                                     // CHARTER는 dormancy 판정에서만 읽는다 — 없거나 깨져도 잠들 뿐 터지지 않는다
+  // CHARTER는 dormancy 판정과 merge의 자기 변경 경로(`self_change`·NEVER_AUTOMATE)에서 읽는다 — 없거나 깨져도 잠들 뿐 터지지 않는다.
+  let charter, harness, ctxCache;
+  let engineAtBase = false;   // #179 — charterReady가 base 체크아웃에서 정한다(checkoutHead 전)
   const recordLine = (line) => { try { appendRunRecord({ root, issue, title: ctxCache?.issue?.title || "", stage, runnerId, lines: [line] }); } catch {} };
   const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
   const readJson = (p) => { try { const t = readFile(p); return t ? JSON.parse(t) : null; } catch { return null; } };
@@ -3038,16 +3134,8 @@ async function main() {
     ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
     : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
   const deps = {
-    // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다 — 조용한 dormancy가 가장 오래 걸리는 버그다.
-    charterReady: async () => {
-      try { charter = loadCharter(root); }
-      catch (e) { console.error("factory: CHARTER.md unreadable — " + e.message); return false; }
-      // 게이트가 하네스 없이 돌 수는 없다 — 판정할 수 없으면 진행하지 않고 잠든다.
-      try { harness = loadHarness(root); }
-      catch (e) { console.error("factory: .factory/harness.toml unreadable — " + e.message); return false; }
-      if (charter.status !== "ready") { console.error(`factory: CHARTER status is ${charter.status} — dormant`); return false; }
-      return true;
-    },
+    // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다(`makeCharterReady`). #179 — 엔진 판정도 거기서, base에서 굳는다.
+    charterReady: makeCharterReady({ root, set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; if ("engine" in s) engineAtBase = s.engine; } }),
     backPressure: () => backPressure({ gh, charter, quarantine: loadQuarantine(root), thresholds: harness.gates.thresholds }),
     // 1.4.16 (KTB #44) — 하이드레이트된 이 이슈의 run 기록(`docs/factory/runs/<n>.md`)이 평생 비용의 출처다.
     lifetimeBudget: () => {
@@ -3475,7 +3563,7 @@ async function main() {
     factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }),
     /** ADR-021 — 머지 배우의 승인 한 번(두 배우 모드에서만, 머지 직전). `GH_TOKEN`이 머지 토큰이다. */
     approvePr: (pr) => gh.approvePr(pr),
-    mergePr: (pr) => gh.mergePr(pr, { method: "squash", deleteBranch: true }),
+    // mergePr는 아래 `makeMergeSelfChangeDeps`가 싣는다(#179 — 자기 변경 경로는 재검증한 head를 못 박는다).
     closeIssue: (pr) => gh.closeIssue(issue, `merged via PR #${pr}`),
     /** merge 전용(KTB-23): 이 이슈의 본문 — `Blocks: #<n>`이 있으면 하네스 이슈였다는 뜻이다. */
     issueBody: async () => (await gh.issue(issue)).body,
@@ -3565,6 +3653,10 @@ async function main() {
         : undefined,
     }),
   };
+  // #179 (ADR-033) — merge의 자기 변경 deps. 게터(selfChange·engine)를 살리려고 펼치지 않고 속성 서술자로 옮긴다.
+  Object.defineProperties(deps, Object.getOwnPropertyDescriptors(makeMergeSelfChangeDeps({
+    gh, issue, getCharter: () => charter, getEngine: () => engineAtBase, env: process.env,
+  })));
   process.exit(await runStage({ stage, issue, deps, runnerId, runAttempt }));
 }
 export const PREV = { plan: "triage", implement: "plan", review: "implement", merge: "review" };
