@@ -340,7 +340,9 @@ test("test_174_self_gate_new_files_measured_from_restart_head", async () => {
   expect(blocking).toHaveLength(1);                                     // round1.js(옛 PR)·new-guard(브리프가 이름 댄 파일)는 통과
   expect(blocking[0].detail).toBe("new file outside the restart brief: factory/lib/extra-parser.js");
 
-  // 기존 파일 수정·삭제만 있는 라운드(새 파일 없음)는 통과한다.
+  // added에 옛 PR이 재시작 전에 더한 파일만 있는 라운드는 통과한다. 수정(M)·삭제(D)·이름 바꾸기(R)가 added에 들어오는지 아닌지는
+  // 이 순수 평가기가 아니라 호출 자리(run-stage)가 정한다 — 실제 git 저장소로 핀한 것은 run-stage.test.js의
+  // test_174_self_gate_dep_new_files_with_real_git_edits_deletions_and_renames다.
   const editsOnly = await restartBriefInput({ run: makeFakeRun([treeAt(head)]), cwd: "/root", brief, added: ["factory/lib/round1.js"] });
   const pass = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates, changedTests: [], changedSources: [], restartBrief: editsOnly });
   expect(pass.ok).toBe(true);

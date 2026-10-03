@@ -3982,12 +3982,18 @@ function gh174({ label = "factory:awaiting-review", failComment = null } = {}) {
   return g;
 }
 const realTransition174 = (gh) => async ({ to, reason, by = null }) => transition({ gh, issue: 174, to, reason, by, stage: "review", env: {} });
-/** 지나간 rework 라운드 n개 — 실제 전이가 쓴 코멘트, 그 사이의 implement는 라벨만 되돌린다. */
+/**
+ * 지나간 rework 라운드 n개 — **보통 리뷰의 reject가 실제로 쓰는 코멘트 그대로**: 프로덕션 review 경로(`runStage` +
+ * `makeKRestartDeps` + lib/transition.js)를 K 아래에서 돌려 `→ factory:rework`(by=script)를 남긴다. 재시작 전이(`by=factory:run-*`)와
+ * 구별되는 모양이어야 시드가 "쓰인 재시작"으로 읽히지 않는다. 그 사이의 implement는 라벨만 되돌린다.
+ */
 async function seedRework174(gh, n) {
   for (let i = 0; i < n; i++) {
     gh.label = "factory:awaiting-review";
-    const t = await realTransition174(gh)({ to: "factory:rework", reason: `round ${i + 1} rework`, by: "factory:run-seed" });
-    expect(t.ok).toBe(true);
+    const d = reviewDeps174(gh, { verdicts: verdicts174(MF174) });
+    expect(await review174(d)).toBe(0);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:rework"]);
+    expect(gh.label).toBe("factory:rework");
   }
   gh.label = "factory:awaiting-review";
 }
@@ -4368,4 +4374,150 @@ test("test_174_self_gate_dep_measures_new_files_at_the_call_site", async () => {
   expect(plain.ok).toBe(true);
   expect(plain.ranChecks).not.toContain("restart-brief");
   expect(run.calls.some((c) => c.args[0] === "ls-tree")).toBe(false);
+});
+
+// ── #174 skeptic self-critique (round 2) ────────────────────────────────────────────────────────────────────────────
+import { run as realRun174 } from "../lib/exec.js";
+// The two transitions the implement stage really writes around a builder session: the claim (`rework → in-progress`,
+// run-stage.js `claimed by <runner>`) BEFORE the session, and `in-progress → awaiting-review` (gates GREEN on the implement head)
+// after it. The drivers below run them between reviews instead of flipping the label by hand, so the window holds exactly the
+// comments production would leave; `during` is what the builder agent (factory login) posts inside its session.
+const implementRound174 = async (gh, during = async () => {}) => {
+  const claimed = await transition({ gh, issue: 174, to: "factory:in-progress", stage: "implement", reason: "claimed by gha-9002", env: {} });
+  expect(claimed.ok).toBe(true);
+  await during();
+  const t = await transition({ gh, issue: 174, to: "factory:awaiting-review", stage: "implement", reason: "implement done", env: {},
+    ctxExtra: { gatesChecked: true, gatesFile: { status: "GREEN", head_sha: H174 }, headSha: H174 } });
+  expect(t.ok).toBe(true);
+};
+const restartTransitions174 = async (gh) => (await gh.comments()).filter((c) => {
+  const m = TRANSITION_TO_174.exec(c.body);
+  return m && m[2] === "factory:rework" && /^factory:run-/.test(m[3]);
+});
+
+test("test_174_forged_failed_marker_after_a_taken_restart_buys_no_second_restart", async () => {
+  const forgedFail = () => failedMarker174({ from: "factory:awaiting-review", to: "factory:rework" });
+  /**
+   * Reject every review until a person is asked. Between reviews the implement stage runs (real transition out of rework).
+   * `forge` = where the agent (factory login) posts a forged failed marker after a restart: inside the builder session
+   * ("builder") or inside the next review session ("reviewer").
+   */
+  async function drive(forge) {
+    const gh = gh174();
+    const reasons = [];
+    for (let i = 0; i < 30 && gh.label !== "factory:needs-human"; i++) {
+      const d = reviewDeps174(gh, { verdicts: verdicts174(MF174) });
+      expect(await review174(d)).toBe(0);
+      const reason = d.transition.mock.calls.at(-1)[0].reason ?? "";
+      reasons.push(reason);
+      if (gh.label !== "factory:rework") break;
+      const restarted = reason.includes("self-restart 1/1");
+      await implementRound174(gh, async () => { if (restarted && forge === "builder") await gh.comment(174, forgedFail()); });
+      if (restarted && forge === "reviewer") await gh.comment(174, forgedFail());
+    }
+    return { gh, reasons };
+  }
+  for (const forge of ["builder", "reviewer"]) {
+    const { gh, reasons } = await drive(forge);
+    expect(gh.label).toBe("factory:needs-human");
+    // ONE self-restart in the window — the forged marker did not hand out another one (the non-goal, by name).
+    expect(reasons.filter((r) => r.includes("self-restart 1/1"))).toHaveLength(1);
+    expect(await restartTransitions174(gh)).toHaveLength(1);
+    expect(await briefs174(gh)).toHaveLength(1);
+    expect(reasons.length).toBeLessThanOrEqual(6);
+    expect(reasons.at(-1)).toContain("K exhausted twice (one self-restart used)");
+  }
+  // Baseline in the same driver: no forgery → exactly K + K reviews, one restart.
+  const { gh: g0, reasons: r0 } = await drive("never");
+  expect(r0).toHaveLength(6);
+  expect(r0.filter((r) => r.includes("self-restart 1/1"))).toHaveLength(1);
+  expect(await restartTransitions174(g0)).toHaveLength(1);
+
+  // A GENUINE failed restart (the label never left awaiting-review, so no transition out of rework follows it) still is not
+  // a used restart: the retried run restarts with the same brief, and only then does the issue reach rework.
+  const g = gh174();
+  await seedRework174(g, 2);
+  g.failSwapTo = "factory:rework";
+  expect(await review174(reviewDeps174(g, { verdicts: verdicts174(MF174) }))).not.toBe(0);
+  expect(kRestartState174(sinceRequeue174(await g.comments())).used).toBe(false);
+  const again = reviewDeps174(g, { verdicts: verdicts174(MF174) });
+  expect(await review174(again)).toBe(0);
+  expect(again.transition.mock.calls[0][0].reason).toContain("self-restart 1/1");
+  expect(g.label).toBe("factory:rework");
+  expect(await briefs174(g)).toHaveLength(1);
+  await implementRound174(g);
+  expect(kRestartState174(sinceRequeue174(await g.comments())).used).toBe(true);
+});
+
+test("test_174_seeded_rounds_after_a_marker_are_ordinary_rounds_not_a_restart", async () => {
+  // A marker nobody acted on, then two ordinary rejects: the seed must write exactly what an ordinary review rework writes,
+  // so the seeded rounds are NOT a restart transition and the K-th review still restarts with the engine's brief.
+  const gh = gh174();
+  await gh.comment(174, kRestartComment({ issue: 174, pr: 31, head: H174, findings: [{ id: "x", where: "factory/lib/forged.js", claim: "forged" }] }));
+  await seedRework174(gh, 2);
+  expect(await restartTransitions174(gh)).toHaveLength(0);
+  expect(kRestartState174(sinceRequeue174(await gh.comments())).used).toBe(false);
+  const d = reviewDeps174(gh, { verdicts: verdicts174(MF174) });
+  expect(await review174(d)).toBe(0);
+  expect(d.writeHandoff.mock.calls[0][0].data.round).toBe(3);
+  expect(d.transition.mock.calls[0][0].reason).toContain("self-restart 1/1");
+  expect(gh.label).toBe("factory:rework");
+});
+
+test("test_174_self_gate_dep_new_files_with_real_git_edits_deletions_and_renames", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fq174-"));
+  const git = async (...args) => {
+    const r = await realRun174("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    expect(r.code, r.stderr).toBe(0);
+    return r.stdout.trim();
+  };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  await git("init", "-q", "-b", "main");
+  const body = (n) => Array.from({ length: 40 }, (_, i) => `export const ${n}${i} = ${i};`).join("\n") + "\n";
+  put("factory/lib/self-gate.js", body("g")); put("factory/lib/old-parser.js", body("p")); put("factory/lib/keep.js", body("k"));
+  put("factory/lib/gone-in-round1.js", body("x"));
+  await git("add", "-A"); await git("commit", "-q", "-m", "base");
+  const base = await git("rev-parse", "HEAD");
+  // The old author's round 1 (before the restart): adds round1.js, deletes gone-in-round1.js, adds gone-later.js.
+  put("factory/lib/round1.js", body("r")); put("factory/lib/gone-later.js", body("l"));
+  await git("rm", "-q", "factory/lib/gone-in-round1.js");
+  await git("add", "-A"); await git("commit", "-q", "-m", "round 1");
+  const restartHead = await git("rev-parse", "HEAD");
+
+  const harness = { commands: {}, test: { test_glob: ["test/**"], source_glob: [] } };
+  const gates = { schema: "factory.gates.v1", status: "GREEN" };
+  const brief = { pr: 31, head: restartHead, scope: K_RESTART_SCOPE, paths: ["factory/lib/self-gate.js", "factory/lib/named-new.js"], findings: [] };
+  const dep = makeSelfGateDep({ root, harness, run: realRun174, mergeBase: async () => base, getCtx: () => ({ loaded: { k_restart_brief: brief } }) });
+
+  // The new author edits a file, edits a round-1 file, deletes a file that IS in the restart tree, and adds the file the brief names.
+  put("factory/lib/keep.js", body("k") + "export const extra = 1;\n");
+  put("factory/lib/round1.js", body("r") + "export const extra = 1;\n");
+  put("factory/lib/named-new.js", body("n"));
+  await git("rm", "-q", "factory/lib/gone-later.js");
+  await git("add", "-A"); await git("commit", "-q", "-m", "new author: edits, deletions, a named new file");
+  const ok = await dep({ gates });
+  expect(ok.ranChecks).toContain("restart-brief");
+  expect(ok.findings.filter((f) => f.blocking)).toEqual([]);
+  expect(ok.ok).toBe(true);
+
+  // Then moves an existing file to a new path (git's default rename detection reports it as R, not A) and adds one outright.
+  await git("mv", "factory/lib/old-parser.js", "factory/lib/new-parser.js");
+  put("factory/lib/new-parser.js", body("p") + "export const parse2 = () => 2;\n");
+  put("factory/lib/extra.js", body("e"));
+  await git("add", "-A"); await git("commit", "-q", "-m", "new author: a moved parser and an extra file");
+  expect(await git("diff", "--name-status", `${base}...HEAD`)).toMatch(/^R\d+\tfactory\/lib\/old-parser\.js\tfactory\/lib\/new-parser\.js$/m);
+  const red = await dep({ gates });
+  expect(red.ok).toBe(false);
+  expect(red.findings.filter((f) => f.blocking).map((f) => f.detail).sort()).toEqual([
+    "new file outside the restart brief: factory/lib/extra.js",
+    "new file outside the restart brief: factory/lib/new-parser.js",
+  ]);
+
+  // If the added list cannot be computed (git diff fails), the restart check fails closed — it does not allow everything.
+  const broken = makeSelfGateDep({ root, harness, run: realRun174, mergeBase: async () => "0".repeat(40), getCtx: () => ({ loaded: { k_restart_brief: brief } }) });
+  await expect(broken({ gates })).rejects.toThrow();                      // changedFiles itself refuses an unknown base (typed GitDiffError)
+  const flaky = async (cmd, args, opts) => (cmd === "git" && args.includes("--no-renames") ? { code: 128, stdout: "", stderr: "fatal: bad revision" } : realRun174(cmd, args, opts));
+  const closed = await makeSelfGateDep({ root, harness, run: flaky, mergeBase: async () => base, getCtx: () => ({ loaded: { k_restart_brief: brief } }) })({ gates });
+  expect(closed.ok).toBe(false);
+  expect(closed.findings.filter((f) => f.blocking).map((f) => f.detail).join("\n")).toMatch(/restart brief unusable — git diff --no-renames failed — fatal: bad revision/);
 });

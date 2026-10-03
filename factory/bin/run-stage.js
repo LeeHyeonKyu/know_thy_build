@@ -2017,9 +2017,10 @@ export function kExhaustionDecision({ data, maxRounds, state, abs }) {
  * base를 병합하므로(#143) main에 새로 생긴 파일이 거짓 RED가 된다. git은 여기서만 돈다 — `runSelfGate`는 판정만 한다.
  * 재시작 head를 못 읽거나 브리프가 깨졌으면 `error`를 싣는다(self-gate가 fail closed 한다).
  */
-export async function restartBriefInput({ run, cwd, brief, added = [] }) {
+export async function restartBriefInput({ run, cwd, brief, added = [], error = null }) {
   const paths = Array.isArray(brief?.paths) ? brief.paths : [];
   if (brief?.error) return { paths, newFiles: [], error: brief.error };
+  if (error) return { paths, newFiles: [], error };
   const head = typeof brief?.head === "string" && /^[0-9a-f]{7,40}$/i.test(brief.head) ? brief.head : null;
   if (!head) return { paths, newFiles: [], error: `the restart brief names no readable head (${brief?.head ?? "none"})` };
   let r;
@@ -2028,6 +2029,22 @@ export async function restartBriefInput({ run, cwd, brief, added = [] }) {
   if (r?.code !== 0) return { paths, newFiles: [], error: `restart head ${head.slice(0, 7)} cannot be read — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
   const tree = new Set(String(r.stdout || "").split("\0").filter(Boolean));
   return { paths, newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)) };
+}
+
+/**
+ * #174 (self-critique) — the paths ADDED vs. merge-base, with rename detection OFF. `changedFiles().added` keeps only status `A`
+ * rows of a diff that detects renames by default (`diff.renames`), so a file moved to a new path arrives as `R<score>` and never
+ * reaches it: a "new parser" could enter as a rename plus an edit. With `--no-renames` a move is `D old` + `A new`, so the new path
+ * is an added file like any other (an edit is `M`, a deletion `D` — neither is a new file). A git failure is returned as `error`
+ * so the restart check fails closed instead of allowing everything.
+ */
+export async function addedPathsNoRenames({ run, cwd, base }) {
+  let r;
+  try { r = await run("git", ["diff", "--name-status", "--no-renames", `${base}...HEAD`], { cwd }); }
+  catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
+  if (r?.code !== 0) return { error: `git diff --no-renames failed — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+  const added = String(r.stdout || "").split("\n").filter(Boolean).map((l) => l.split("\t")).filter((x) => x[0] === "A" && x[1]).map((x) => x[1]);
+  return { added };
 }
 
 /**
@@ -2047,9 +2064,8 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
     const review = ctx?.handoffs?.review;
     const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
     // #174 — a K self-restart round: the new-file list is measured HERE (git), from the restart head; self-gate only judges it.
-    // `added` (status A vs. merge-base), not `all`: an edit or a deletion is never a new file.
     const brief = ctx?.loaded?.k_restart_brief ?? null;
-    const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, added: diff.added }) : null;
+    const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
     return runSelfGate({
       root, harness, gates, run,
       // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its

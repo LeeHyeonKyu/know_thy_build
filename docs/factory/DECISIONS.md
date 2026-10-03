@@ -4018,6 +4018,12 @@ ADR-032 뒤 하루의 실측: 사람에게 간 머지 요청은 전부 판정 �
    같은 규칙으로 판정한다(`countedTransitionIndices`, `TRANSITION_FAILED`·`reason=retry`). 재시작이 쓰였으면 다음 소진은 무조건
    needs-human이고 사유는 "K exhausted twice (one self-restart used)"이다. 재시작 전이가 뒤따르지 않은 마커(첫 소진 전의 위조 포함)는
    아무 일도 하지 않는다 — 예산을 쓰지도, 빌더에게 브리프로 가지도 않는다.
+   **failed 마커로 취소된 재시작 전이도, 그 뒤에 `from=factory:rework` 전이가 있으면 쓰인 것이다**(skeptic self-critique). 취소를 따르는
+   셈만으로는 위조 failed 마커 하나가 이미 일어난 재시작을 되감아 한 창에 재시작이 셋까지 났다(2K 천장만 멈췄다). 라벨이 실제로 rework에
+   닿았다는 엔진의 기록 — implement의 claim `rework → in-progress`, 빌더 세션보다 **먼저** 나간다 — 이 failed 마커보다 강하다: 진짜 스왑
+   실패라면 라벨이 rework에 닿지 않았으므로 그런 전이가 뒤따를 수 없고(그래서 dw3의 "실패한 재시작은 다음 소진이 다시 재시작한다"는
+   그대로다), 위조는 빌더나 다음 리뷰 세션 안에서만 쓸 수 있으니 언제나 claim 뒤다. 위조 전이 코멘트를 더해도 "쓰였다"를 앞당길 뿐이다
+   (`test_174_forged_failed_marker_after_a_taken_restart_buys_no_second_restart` — 한 창에 "self-restart 1/1"은 정확히 하나).
    **천장은 코멘트로 줄지 않는 셈 위에 있다.** failed 마커도 factory 계정의 코멘트라 위조할 수 있고, 그것으로 K 카운터와 "쓰였는가"를
    되감을 수 있다. 그래서 2K 천장은 같은 함수의 취소 없는 셈(`honourFailed: false`, 창의 rework **시도** 수)으로 재고, 재시작을 아는
    배선에서는 소진 때만이 아니라 **모든 리뷰**에서 문다: 그 셈으로 2K번째 리뷰는 rework도 재시작도 없이 사람이다. 코멘트를 더하는
@@ -4047,6 +4053,9 @@ ADR-032 뒤 하루의 실측: 사람에게 간 머지 요청은 전부 판정 �
    "new file outside the restart brief: <file>"이다. 허용은 **파일 경로의 정확한 일치**뿐이다: where에서 경로로 뽑히는 것은 확장자가
    있는 파일뿐이고(디렉터리 `factory/`·`factory/lib`나 산문 `and/or`는 아무것도 허용하지 않는다), self-gate도 접두사로 넓히지 않는다.
    재시작 head를 읽지 못하거나 블록이 깨졌으면 RED다. 브리프가 없으면 결과는 이전과 같다. 배선은 `makeSelfGateDep`(main()이 그대로 쓴다).
+   "추가됐다"는 이름 바꾸기 감지를 끈 diff(`addedPathsNoRenames`, `git diff --no-renames`)로 잰다 — git의 기본 rename 감지에서 옮긴 파일은
+   `R`로 와서 `A`만 담는 `changedFiles().added`에 들어가지 않았고, 기존 파일을 새 경로로 옮기며 고치는 것으로 새 파일 규칙을 비켜 갈 수
+   있었다. 그 diff가 실패하면 RED다(실제 git 저장소로 핀: `test_174_self_gate_dep_new_files_with_real_git_edits_deletions_and_renames`).
 남은 것. 기존 파일 안에서 범위를 더하는 경우(#149·#157의 모양)는 기계로 막지 못한다. 빌더에게 브리프를 지키라는 문장은 implement 프롬프트
 (`templates/factory/**`, NEVER_AUTOMATE)에 사람이 넣어야 한다. 그 전까지 엔진은 브리프를 싣기만 한다. 되돌릴 때는 엔진 커밋 하나를
 revert하면 된다. 이미 게시된 `factory-k-restart:v1` 코멘트는 되돌린 엔진에게 모르는 마커이므로 아무 일도 하지 않는다.

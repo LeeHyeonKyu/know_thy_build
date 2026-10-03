@@ -330,7 +330,8 @@ export function countedTransitionIndices(comments, to, { honourFailed = true } =
  * **시도** 수, `attempts`)이 2K에 있다.
  *
  * **쓰였다** = 마커 + 그 뒤에 살아남은(`TRANSITION_FAILED`로 취소되지 않은) **재시작 전이** — `by=factory:run-<id>`인
- * `→ factory:rework`(review의 보통 rework는 `by=script`다). 재시작 전이가 따르지 않은 마커(위조든, 전이에서 죽은 런의 것이든)는
+ * `→ factory:rework`(review의 보통 rework는 `by=script`다). 취소된 재시작 전이도 그 뒤에 `from=factory:rework` 전이(implement의
+ * claim)가 따르면 쓰인 것이다 — 라벨이 rework에 닿았다는 기록이 failed 마커(위조일 수 있다)보다 강하다(#174 self-critique). 재시작 전이가 따르지 않은 마커(위조든, 전이에서 죽은 런의 것이든)는
  * 쓰인 재시작이 아니고 빌더에게 브리프로 가지도 않는다. 쓰인 브리프는 그 재시작 전이 **직전의 마지막 마커**다 — 엔진은 마커를
  * 게시하고 곧바로 전이하므로, 그 사이에 끼는 위조는 경쟁뿐이다. 그래서 `postKRestartBrief`는 창의 마지막 마커가 **지금 쓸
  * 브리프와 내용이 같을 때만** 다시 쓰지 않는다(전이에서 죽은 런의 재시도) — 다른 내용의 마커가 엔진의 브리프를 대신하지 못한다.
@@ -444,15 +445,24 @@ export function kRestartState(comments) {
   list.forEach((c, i) => { const body = String(c?.body ?? ""); const m = K_RESTART.exec(body); if (m) markers.push({ i, m, body }); });
   if (!markers.length) return { used: false, offset: 0, brief: null, pending: null, attempts };
   const reworks = countedTransitionIndices(list, "factory:rework");
-  const isRestart = (j) => /^factory:run-/.test(TRANSITION_TO.exec(String(list[j]?.body ?? ""))?.[3] ?? "");
-  const k = reworks.findIndex((j) => j > markers[0].i && isRestart(j));
-  if (k === -1) {
+  const tried = countedTransitionIndices(list, "factory:rework", { honourFailed: false });
+  const transitionAt = (j) => TRANSITION_TO.exec(String(list[j]?.body ?? ""));
+  const isRestart = (j) => /^factory:run-/.test(transitionAt(j)?.[3] ?? "");
+  // 재시작 전이 **시도**들(마커 뒤, by=factory:run-*). 시도 하나가 쓰인 재시작인 것은 (a) 그것이 failed 마커에 취소되지 않고 살아남았거나
+  // (b) 취소됐어도 그 뒤(다음 재시작 시도 전)에 `from=factory:rework` 전이가 있을 때다. (b)는 라벨이 실제로 rework에 닿았다는 엔진의 기록
+  // (implement의 claim `rework → in-progress`)이다 — 진짜 스왑 실패는 라벨이 rework에 닿지 않았으므로 그런 전이가 뒤따를 수 없다. 그래서
+  // 에이전트가 쓴 위조 failed 마커(factory 계정의 코멘트)는 이미 일어난 재시작을 되감지 못한다: 위조는 빌더나 다음 리뷰 세션 안에서만
+  // 쓸 수 있고, 둘 다 그 claim 전이보다 뒤다. 위조 전이 코멘트를 더해도 (b)를 더 쉽게 참으로 만들 뿐이다 — 멈춤을 앞당길 뿐 늦추지 못한다.
+  const restarts = tried.filter((j) => j > markers[0].i && isRestart(j));
+  const leftRework = (from, to) => list.some((_, x) => x > from && x < to && transitionAt(x)?.[1] === "factory:rework");
+  const j = restarts.find((r, n) => reworks.includes(r) || leftRework(r, restarts[n + 1] ?? Infinity));
+  if (j === undefined) {
     const last = markers[markers.length - 1];
     return { used: false, offset: 0, brief: null, pending: { head: last.m[3], pr: last.m[2], brief: briefOf(last.body, last.m) }, attempts };
   }
-  const j = reworks[k];
   const restart = markers.filter((x) => x.i < j).pop();
-  return { used: true, offset: k + 1, brief: briefOf(restart.body, restart.m), pending: null, attempts };
+  // offset = 재시작 전이까지(포함) 센 rework 수 — `prior`(=`reworks.length`)와 같은 셈이라 새 작성자의 라운드가 1부터 시작한다.
+  return { used: true, offset: reworks.filter((x) => x <= j).length, brief: briefOf(restart.body, restart.m), pending: null, attempts };
 }
 
 /** 두 브리프가 같은 재시작인가(pr·head·findings) — `postKRestartBrief`의 "다시 쓰지 않는다" 판정. 산문은 보지 않는다. */
