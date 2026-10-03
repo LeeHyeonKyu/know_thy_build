@@ -1,6 +1,7 @@
 import { applyPolicy } from "./quarantine.js";
 import { quarantineComment } from "./retro/quarantine-ops.js";
-import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, lastTransition, transitionRefusedMarker } from "./retro/issue-comments.js";
+import { isNewerVersion } from "./feedback/harvest-findings.js";
+import { BLOCKED_ORIGIN, TRANSITION_TO, blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, lastTransition, transitionRefusedMarker, ENGINE_VERSION, RETRY_ON_RELEASE, releasePrincipal, resumePoint } from "./retro/issue-comments.js";
 import { STATES } from "./labels.js";
 import { HUMAN_MERGE_REQUIRED, verifyFactoryStatuses } from "./merge-stage.js";
 import { allChecksGreen, GH_NO_CHECKS_RE } from "./gh.js";
@@ -347,6 +348,24 @@ async function escalateUnknownLock({ gh, transition, issue, comments, nowMs, sta
     : { kind: "lock-owner-unknown-escalated", issue, step, ...extra, reason });
 }
 
+/**
+ * #156 rework arch1 — 재점화 팔(stalled·label-set repair·release retry)이 흐름 제어를 읽는 **유일한** 길이다. 한 팔 안에서는
+ * 한 번만 묻는다(이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다). 반환은 거부 사유 문자열 또는 `null`(열림·미배선).
+ * 거부(`ok: false`)는 `reasons`가 없거나 비어도 거부다 — 빈 사유를 "열림"으로 읽으면 흐름 제어가 막은 implement를 띄운다.
+ * 조회가 던지면 그대로 던진다: 그 실패를 무엇으로 읽을지(건너뜀·error 한 줄)는 각 팔의 계약이다.
+ */
+function backPressureOnce(backPressure) {
+  let cache;
+  return async () => {
+    if (!backPressure) return null;
+    cache ??= Promise.resolve().then(() => backPressure());
+    const bp = await cache;
+    if (bp?.ok !== false) return null;
+    const why = (Array.isArray(bp.reasons) ? bp.reasons : []).map(String).filter(Boolean).join("; ");
+    return why || "refused (no reason given)";
+  };
+}
+
 async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions, factoryLogin = null }) {
   if (!dispatchStage) return;
   const stale = staleMinutes * 60e3;
@@ -354,13 +373,7 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
   // 쪽을 쓴다 — 호출자가 staleMinutes를 10분보다 짧게 주면 그 뜻이 이긴다.
   const noHeartbeatStale = Math.min(stale, STALL_NO_HEARTBEAT_MIN * 60e3);
   // 한 sweep 안에서 흐름 제어는 한 번만 묻는다 — 이슈마다 물으면 `factory:awaiting-review` 검색이 N번 나간다.
-  let bpCache;
-  const parked = async () => {
-    if (!backPressure) return null;
-    bpCache ??= Promise.resolve().then(() => backPressure());
-    const bp = await bpCache;
-    return bp?.ok === false ? bp.reasons.join("; ") : null;
-  };
+  const parked = backPressureOnce(backPressure);
   for (const [label, stage] of Object.entries(STALLED_STAGE)) {
     let issues;
     try { issues = await gh.searchIssues(label); }
@@ -449,6 +462,140 @@ async function sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressu
   }
 }
 
+/**
+ * ── #156 (ADR-032) — **엔진 결함으로 멈춘 needs-human은 새 엔진이 오면 한 번 스스로 재시도한다** ─────────────────
+ *
+ * 2026-10-01 하루에 사람에게 간 `--human --retry` 3건은 전부 "엔진 결함을 고친 뒤 다시"였지 사람의 판단이 아니었다.
+ * 그런 이슈만 고른다: 마지막 전이가 팩토리 계정이 쓴 `→ factory:needs-human`이고, 그 사유가 엔진 쪽이다 — blocked 팔의
+ * `BLOCKED_ESCALATION_REASON.undecidable`(판정 재료를 못 구했다)로 시작하거나, `blocked`에서 올라온 에스컬레이션이고
+ * 그 blocked의 origin 마커가 `cause=undecidable`이다(`blockedOrigin`의 분류 그대로 — 두 번째 분류기를 만들지 않는다).
+ * 리뷰 라운드 소진·`— human merge required`·예산·요구사항 거부(`reason=refused`)·needs-info는 고르지 않는다.
+ *
+ * "새 엔진"은 설치본 버전이다: 그 에스컬레이션 전이에 실린 `factory-engine-version`(blocked 팔이 싣는다)과 지금의
+ * `ktb_version`이 **다를 때만** 한 번. 어느 쪽이든 모르면 "다르다"로 읽지 않고 건너뛰며 그 이유를 actions에 남긴다
+ * (배선이 빠진 프로덕션 sweep이 조용히 아무것도 안 하는 대신 출력에서 보인다 — plan d6). 같은 버전의
+ * `factory-retry-on-release` 마커가 이미 있으면 다시 하지 않는다(이슈당 릴리스당 1회).
+ *
+ * 재시도는 `transition({ to: 중단 지점, by: "factory:release-<v>" })`다 — 사람 플래그(`--human --retry`)를 쓰지 않는다.
+ * implement로 가는 재시도는 stalled 팔과 같은 규칙으로 `backPressure()`를 묻고, 거부면 마커 없이 물러난다(같은 릴리스로
+ * 다음 sweep이 다시 본다). 전이 뒤의 스테이지는 라벨 이벤트로 뜬다; 이벤트가 사라지면 stalled 팔이 받는다(plan d7).
+ */
+const ENGINE_ESCALATION_PREFIX = BLOCKED_ESCALATION_REASON.undecidable.replace(/ — needs human$/, "");
+const RELEASE_RETRY_IMPLEMENT_TARGETS = new Set(["factory:planned", "factory:rework"]);
+const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** 마지막 전이 코멘트가 엔진 결함으로 인한 needs-human인가. 아니면 null, 맞으면 `{ comment, thenVersion }`. */
+export function engineCausedNeedsHuman(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  let idx = -1;
+  list.forEach((c, i) => { if (TRANSITION_TO.test(String(c?.body ?? ""))) idx = i; });
+  if (idx === -1) return null;
+  const comment = list[idx];
+  const body = String(comment?.body ?? "");
+  const m = TRANSITION_TO.exec(body);
+  if (m[2] !== "factory:needs-human") return null;
+  // 요구사항 거부(`reason=refused`)의 사유는 `— ` 뒤가 아니라 "**전이 거부** …: " 뒤에 있다 — `lastTransition`은 그 코멘트에서
+  // 빈 사유를 읽으므로 아래 두 규칙 어느 쪽에도 걸리지 않는다(거부는 산출물의 문제이고 사람의 판단이다).
+  const t = lastTransition([comment]);
+  const reason = t?.reason ?? "";
+  const engine = reason.startsWith(ENGINE_ESCALATION_PREFIX)
+    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && blockedOrigin(list.slice(0, idx + 1))?.cause === "undecidable");
+  if (!engine) return null;
+  return { comment, thenVersion: ENGINE_VERSION.exec(body)?.[1] ?? null };
+}
+
+/** 점 단위 숫자 비교로 가장 새로운 버전(비교할 수 없는 값은 버린다). 하나도 없으면 null. */
+export function newestVersion(versions) {
+  let best = null;
+  for (const v of versions) {
+    if (typeof v !== "string" || !v.trim()) continue;
+    if (best === null ? /\d/.test(v) : isNewerVersion(v, best)) best = v.trim();
+  }
+  return best;
+}
+
+/**
+ * rework cf1 — 이 이슈에 **팩토리 계정이** 이미 남긴 엔진 버전들(에스컬레이션의 `factory-engine-version`, 이 팔의
+ * `factory-retry-on-release`). blocked 팔의 에스컬레이션 기록은 이것들보다 낮게 찍지 않는다: 낡은 체크아웃의 quick sweep이
+ * 1.4.45로 재시도된 이슈를 1.4.44로 찍으면 다음 cron(1.4.45)이 그것을 새 릴리스로 읽고 같은 엔진으로 또 돌린다.
+ * 팩토리 계정을 모르면 아무것도 받지 않는다(본문은 누구나 흉내 낸다).
+ */
+function factoryRecordedVersions(comments, factoryLogin) {
+  if (!factoryLogin || !Array.isArray(comments)) return [];
+  const out = [];
+  for (const c of comments) {
+    if (!sameLogin(c?.author, factoryLogin)) continue;
+    const body = String(c?.body ?? "");
+    for (const re of [ENGINE_VERSION, RETRY_ON_RELEASE]) { const v = re.exec(body)?.[1]; if (v) out.push(v); }
+  }
+  return out;
+}
+
+async function sweepRetryOnRelease({ gh, transition, dispatchStage, installedVersion, backPressure, factoryLogin, actions }) {
+  /**
+   * 재점화 팔(stalled·blocked)과 같은 가족이다 — `dispatchStage`가 배선되지 않은 호출자(구형 더블·dispatch 없는 실행)에서는
+   * 돌지 않는다. 이유가 있다: merge에서 멈춘 이슈의 재개는 blocked 팔의 merge 재점화로 끝나는데, dispatch가 없으면 그 팔은
+   * 곧장 에스컬레이션하고 이 릴리스의 한 번뿐인 재시도가 아무것도 돌리지 않은 채 소진된다.
+   */
+  if (typeof transition !== "function" || typeof dispatchStage !== "function") return;
+  let issues;
+  try { issues = await gh.searchIssues("factory:needs-human"); }
+  catch (e) { actions.push({ kind: "error", step: "release-retry", error: String(e.message || e) }); return; }
+  if (!Array.isArray(issues) || !issues.length) return;
+  // 버전은 sweep당 한 번만 읽는다(필요할 때만 — 후보가 없으면 읽지 않는다).
+  let versionCache;
+  const installed = async () => {
+    versionCache ??= (async () => {
+      if (typeof installedVersion !== "function") return { version: null, why: "installed version reader not wired" };
+      try {
+        const v = await installedVersion();
+        return typeof v === "string" && v.trim() ? { version: v.trim() } : { version: null, why: "installed version unreadable (no .factory/install-manifest.json ktb_version)" };
+      } catch (e) { return { version: null, why: `installed version unreadable — ${String(e?.message || e)}` }; }
+    })();
+    return versionCache;
+  };
+  const parked = backPressureOnce(backPressure);
+  for (const it of issues) {
+    try {
+      const comments = await gh.comments(it.number);
+      const stop = engineCausedNeedsHuman(comments);
+      if (!stop) continue;                                                     // 사람의 판단을 기다리는 needs-human
+      const skip = (reason) => actions.push({ kind: "release-retry-skipped", issue: it.number, reason });
+      // 그 에스컬레이션은 러너가 쓴 것이어야 한다(본문은 누구나 흉내 낸다).
+      if (!factoryLogin) { skip("factory login unknown — cannot tell whether the needs-human transition was written by the factory"); continue; }
+      if (!sameLogin(stop.comment?.author, factoryLogin)) { skip("the needs-human transition was not written by the factory account"); continue; }
+      const { version, why } = await installed();
+      if (!version) { skip(why); continue; }
+      if (!stop.thenVersion) { skip("no recorded engine version for the needs-human transition — cannot tell whether a release happened since"); continue; }
+      /**
+       * rework cf1 — "릴리스가 있었다"는 **더 새롭다**(점 단위 숫자 비교)이지 "다르다"가 아니다. 스테이지 잡 끝의 quick sweep은
+       * 이벤트 시점의 `.factory`를 다시 체크아웃하고 돈다 — main보다 뒤처진 매니페스트를 읽은 sweep이 그 차이를 릴리스로 읽으면
+       * 방금 실패한 그 엔진으로 같은 이슈를 다시 돌린다. 낮으면 건너뛰고 이유를 남긴다; 같으면 조용히 지나간다.
+       */
+      if (stop.thenVersion === version) continue;                              // 그 뒤로 릴리스가 없었다
+      if (!isNewerVersion(version, stop.thenVersion)) {
+        skip(`installed ${version} is not newer than ${stop.thenVersion} recorded at the stop${isNewerVersion(stop.thenVersion, version) ? ` (older than ${stop.thenVersion} — a stale checkout, not a release)` : " (not comparable — not read as a release)"}`);
+        continue;
+      }
+      if (comments.some((c) => RETRY_ON_RELEASE.exec(String(c?.body ?? ""))?.[1] === version)) { skip(`already retried once on ${version}`); continue; }
+      const resume = resumePoint(comments);
+      if (!resume?.target) { skip(`no resume point${resume ? ` (stopped at ${resume.stoppedAt})` : ""}`); continue; }
+      if (RELEASE_RETRY_IMPLEMENT_TARGETS.has(resume.target)) {
+        let refused = null;
+        try { refused = await parked(); }
+        catch (e) { refused = `check failed — ${String(e?.message || e)}`; }
+        if (refused) { skip(`back-pressure — ${refused}`); continue; }
+      }
+      const t = await transition({ issue: it.number, to: resume.target, by: releasePrincipal(version), reason: `engine ${version} installed (stopped on ${stop.thenVersion}) — one retry of the engine-caused stop` });
+      actions.push(t && t.ok === false
+        ? { kind: "release-retry-refused", issue: it.number, version, to: resume.target, reason: t.reason ?? "unknown" }
+        : { kind: "release-retry", issue: it.number, version, from: stop.thenVersion, to: resume.target });
+    } catch (e) {
+      actions.push({ kind: "error", step: "release-retry", issue: it.number, error: String(e.message || e) });
+    }
+  }
+}
+
 const LABEL_SET_REPAIR_TARGET = "factory:needs-human";
 /**
  * 라벨-셋 복구 마커 — 이 조합을 이미 알렸는지의 유일한 근거(dedupe). `to`는 KTB-30에서 붙었다:
@@ -520,13 +667,7 @@ const repairDispatchStage = (label) => (REPAIR_DISPATCH_LABELS.includes(label) ?
 async function sweepLabelSetRepair({ gh, actions, dispatchStage = null, backPressure = null }) {
   if (typeof gh.issueList !== "function") return;
   // stalled 팔과 같은 규칙: 흐름 제어는 implement에만, 한 sweep 안에서 한 번만 묻는다.
-  let bpCache;
-  const parked = async () => {
-    if (!backPressure) return null;
-    bpCache ??= Promise.resolve().then(() => backPressure());
-    const bp = await bpCache;
-    return bp?.ok === false ? (bp.reasons || []).join("; ") : null;
-  };
+  const parked = backPressureOnce(backPressure);
   let issues;
   try { issues = await gh.issueList({ state: "open" }); }
   catch (e) { actions.push({ kind: "error", step: "label-set-repair", error: String(e.message || e) }); return; }
@@ -1268,7 +1409,7 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, quick = false }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, quick = false, installedVersion = null }) {
   /**
    * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 계정으로 판정한다(`commentsSinceCycleStart`). 팩토리 계정 이름 하나를
    * 여기서 한 번만 구한다. 못 구하면 null — 그때 창은 "작성자가 있는 human 마커"에만 리셋된다(닫힌 쪽).
@@ -1359,6 +1500,18 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });
     }
   }
+  /**
+   * #156 — 릴리스 재시도 팔은 blocked 팔 **앞**에 돈다: merge에서 멈춘 이슈는 blocked(origin=approved)로 돌아가고,
+   * 같은 sweep의 blocked 팔이 그것을 보고 merge를 다시 민다. `--quick`에서도 돈다(skipped 목록이 계속 참이게).
+   */
+  await sweepRetryOnRelease({ gh, transition, dispatchStage, installedVersion, backPressure, factoryLogin, actions });
+  // #156 — blocked 팔의 에스컬레이션은 그 순간의 설치본 버전을 싣는다(릴리스 재시도의 "그때의 엔진"). 읽지 못하면 싣지 않는다.
+  let engineVersionCache;
+  const engineVersionNow = async () => {
+    if (typeof installedVersion !== "function") return null;
+    engineVersionCache ??= Promise.resolve().then(() => installedVersion()).then((v) => (typeof v === "string" && v.trim() ? v.trim() : null), () => null);
+    return engineVersionCache;
+  };
   // blocked 팔은 기본적으로 **에스컬레이션만** 한다 — 유예 시간(이 잡의 실행 주기)이 지나면
   // needs-human이다. blocked는 대개 "판정에 필요한 재료를 못 구했다"(게이트 계산 불가, 자격증명)이고,
   // 그 원인은 공장 밖에 있어 같은 런을 다시 돌려도 같은 자리에서 죽는다 — 되살리는 것은 사람의 판단이다.
@@ -1432,7 +1585,10 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           }
         }
       }
-      await transition({ issue: it.number, to: "factory:needs-human", reason: escalationReason(cause) });
+      // 설치본 버전을 못 읽었으면 싣지 않는다(이슈의 옛 기록만으로 찍으면 방금 실패한 엔진보다 낮은 값이 될 수 있다 — 모르면 기록하지 않는다).
+      const installedNow = await engineVersionNow();
+      const engineVersion = installedNow ? newestVersion([installedNow, ...factoryRecordedVersions(comments, factoryLogin)]) : null;
+      await transition({ issue: it.number, to: "factory:needs-human", reason: escalationReason(cause), ...(engineVersion ? { engineVersion } : {}) });
       actions.push({ kind: "blocked-escalated", issue: it.number, cause });
     } catch (e) {
       actions.push({ kind: "error", issue: it.number, error: String(e.message || e) });

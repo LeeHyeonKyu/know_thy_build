@@ -2609,3 +2609,388 @@ test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_bu
   expect(dispatchStage.mock.calls.filter(([a]) => a.issue === 50)).toEqual([[{ stage: "implement", issue: 50 }]]);
   expect(later).toContainEqual({ kind: "stalled-restart", issue: 50, stage: "implement", label: "factory:rework" });
 });
+
+// ── #156 (ADR-032) — 엔진 결함으로 멈춘 needs-human은 새 엔진이 오면 한 번 스스로 재시도한다 ─────────────
+//
+// 픽스처는 실제 생산자로 만든다: 전이 코멘트는 진짜 `transition()`이 fake gh 위에서 쓰고, blocked 팔의 재시도·
+// 에스컬레이션은 진짜 `sweep()`이 쓰고, 재점화·self-gate 마커는 각자의 생성자가 쓴다. 코멘트 작성자는 팩토리 계정이다
+// (팩토리가 쓰는 코멘트이므로) — 위조 케이스만 다른 계정이다.
+import { transition as realTransition156 } from "../lib/transition.js";
+import { STATES as STATES156 } from "../lib/labels.js";
+import { blockedOrigin, countTransitionsTo as countTransitionsTo156, blockedOriginMarker as originMarker156, selfGateRetryComment as selfGateComment156, commentsSinceCycleStart as cycle156, countSelfGateRetries as sgRetries156, countAllSelfGateRetries as sgAll156, RETRY_ON_RELEASE as RETRY_ON_RELEASE156, ENGINE_VERSION as ENGINE_VERSION156, transitionRefusedComment as refusedComment156 } from "../lib/retro/issue-comments.js";
+import { MERGE_BASE_BLOCKED_REASON as MERGE_BASE156, GIT_DIFF_BLOCKED_REASON as GIT_DIFF156 } from "../lib/blocked-errors.js";
+import { reviewExhaustedReason as reviewExhausted156 } from "../bin/run-stage.js";
+import { HUMAN_MERGE_REQUIRED as HUMAN_MERGE_REQUIRED156 } from "../lib/merge-stage.js";
+import { renderHandoff as renderHandoff156 } from "../lib/handoff.js";
+
+const BOT156 = "ktb-bot";
+/** 라벨·코멘트·시계를 가진 작은 GitHub. 모든 쓰기는 진짜 생산자를 거친다. */
+function world156() {
+  const issues = new Map();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let id = 0;
+  const at = () => new Date(clock += 1000).toISOString();
+  const gh = {
+    issue: async (n) => ({ number: n, title: `#${n}`, body: "", labels: [...issues.get(n).labels] }),
+    comments: async (n) => issues.get(n).comments.map((c) => ({ ...c })),
+    comment: async (n, body) => { issues.get(n).comments.push({ id: ++id, body, createdAt: at(), author: BOT156 }); return "u"; },
+    setFactoryLabel: async (n, to) => { const s = issues.get(n); s.labels = [...s.labels.filter((l) => !STATES156.has(l)), to]; },
+    searchIssues: async (label) => [...issues].filter(([, s]) => s.labels.includes(label)).map(([number]) => ({ number })),
+    issueList: async () => [],
+    patchComment: async () => {},
+  };
+  const transition = (args) => realTransition156({ gh, env: {}, skipRehearsal: true, ...args });
+  const dispatchStage = vi.fn(async () => {});
+  return {
+    gh, transition, dispatchStage, issues,
+    add: (n, label, comments = []) => issues.set(n, { labels: [label], comments: comments.map((c) => ({ id: ++id, createdAt: at(), author: BOT156, ...c })) }),
+    post: (n, body, author = BOT156) => issues.get(n).comments.push({ id: ++id, body, createdAt: at(), author }),
+    advance: (min) => { clock += min * 60e3; },
+    now: () => new Date(clock).toISOString(),
+    label: (n) => issues.get(n).labels.find((l) => STATES156.has(l)),
+    bodies: (n) => issues.get(n).comments.map((c) => c.body),
+    sweep: (version, over = {}) => sweep({
+      gh, charter, thresholds: T, now: new Date(clock).toISOString(), staleMinutes: 30, transition, release: vi.fn(),
+      quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage,
+      factoryLogins: async () => ({ ok: true, logins: [BOT156] }),
+      installedVersion: async () => version,
+      ...over,
+    }),
+  };
+}
+const seedTransition156 = (from, to, reason = "") => ({ body: `<!-- factory-transition:v1 from=${from} to=${to} by=script -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}` });
+const planHandoff156 = (issue) => ({ body: renderHandoff156({
+  stage: "plan", issue, summary: "plan",
+  data: { schema: "factory.plan.v1", issue, tier: "standard", roles: ["synthesizer", "skeptic"], rounds: 2,
+    done_when: [{ id: "dw1", text: "x", verify: `test_${issue}_x`, level: "unit" }], files_expected: ["src/a.js"], dissent_log: [], non_goals: [], open_risks: [] },
+}) });
+const releaseMarkers156 = (w, n) => w.bodies(n).filter((b) => RETRY_ON_RELEASE156.test(b));
+
+/**
+ * merge 중단(approved → blocked, merge-base 판정 불가)을 진짜 경로로 needs-human까지 몬다:
+ * blocked 팔의 한 번뿐인 재시도 → 같은 자리에서 또 blocked(merge-stage의 마커 재게시) → 에스컬레이션.
+ */
+async function mergeStoppedUndecidable156(w, n, version) {
+  w.add(n, "factory:approved", [seedTransition156("factory:awaiting-review", "factory:approved")]);
+  expect((await w.transition({ issue: n, to: "factory:blocked", reason: MERGE_BASE156, stage: "merge" })).ok).toBe(true);
+  await w.sweep(version);                                                       // blocked 팔: merge를 한 번 다시 민다
+  expect(w.dispatchStage).toHaveBeenLastCalledWith({ stage: "merge", issue: n });
+  w.post(n, `${originMarker156({ from: "factory:approved", stage: "merge", cause: "undecidable" })}\nmerge: ${MERGE_BASE156}`);
+  await w.sweep(version);                                                       // 같은 자리 → 사람에게(버전이 찍힌다)
+  expect(w.label(n)).toBe("factory:needs-human");
+}
+
+/** implement 중단(in-progress → blocked, diff 판정 불가) — 이전 주기의 재점화 2회·self-gate 3회를 다 쓴 채로. */
+async function implementStoppedUndecidable156(w, n, version) {
+  w.add(n, "factory:in-progress", [
+    planHandoff156(n),
+    seedTransition156("factory:ready", "factory:planned"),
+    { body: `${restartComment("implement", n)}\nrestarted` },
+    { body: `${restartComment("implement", n)}\nrestarted` },
+    seedTransition156("factory:planned", "factory:in-progress"),
+    { body: selfGateComment156({ issue: n, head: "a".repeat(40), attempt: 1, findings: [] }) },
+    { body: selfGateComment156({ issue: n, head: "b".repeat(40), attempt: 1, findings: [] }) },
+    { body: selfGateComment156({ issue: n, head: "b".repeat(40), attempt: 2, findings: [] }) },
+  ]);
+  expect((await w.transition({ issue: n, to: "factory:blocked", reason: GIT_DIFF156, stage: "implement" })).ok).toBe(true);
+  await w.sweep(version);
+  w.post(n, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep(version);
+  expect(w.label(n)).toBe("factory:needs-human");
+}
+
+test("test_156_engine_caused_needs_human_is_retried_once_per_release", async () => {
+  const w = world156();
+  await mergeStoppedUndecidable156(w, 21, "1.4.44");
+  await implementStoppedUndecidable156(w, 22, "1.4.44");
+  // 에스컬레이션 전이가 그때의 엔진 버전을 싣는다.
+  for (const n of [21, 22]) {
+    const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+    expect(esc).toMatch(/blocked \(undecidable\) — needs human/);
+    expect(ENGINE_VERSION156.exec(esc)?.[1]).toBe("1.4.44");
+  }
+
+  // 새 버전의 첫 sweep: 둘 다 중단 지점으로, by=factory:release-1.4.45 reason=retry + 마커.
+  w.dispatchStage.mockClear();
+  const actions = await w.sweep("1.4.45");
+  expect(w.label(22)).toBe("factory:planned");
+  const t22 = w.bodies(22).filter((b) => /from=factory:needs-human/.test(b));
+  expect(t22).toHaveLength(1);
+  expect(t22[0]).toMatch(/<!-- factory-transition:v1 from=factory:needs-human to=factory:planned by=factory:release-1\.4\.45 reason=retry -->/);
+  expect(RETRY_ON_RELEASE156.exec(t22[0])?.[1]).toBe("1.4.45");
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: 22, version: "1.4.45", to: "factory:planned" }));
+  // 리뷰 라운드로 세지 않는다 — 라운드 카운터가 보는 planned 진입은 처음의 하나뿐이다.
+  expect(countTransitionsTo156(await w.gh.comments(22), "factory:planned")).toBe(1);
+  // merge 중단은 blocked(origin=approved)로 돌아가고, 같은 sweep의 blocked 팔이 merge를 다시 민다.
+  const t21 = w.bodies(21).filter((b) => /from=factory:needs-human/.test(b));
+  expect(t21).toHaveLength(1);
+  expect(t21[0]).toMatch(/to=factory:blocked by=factory:release-1\.4\.45 reason=retry/);
+  expect(blockedOrigin([{ body: t21[0] }])).toMatchObject({ from: "factory:approved", stage: "merge" });
+  expect(w.dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: 21 });
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: 21, stage: "merge" }));
+  expect(actions).not.toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: 21 }));
+
+  // 같은 버전의 두 번째 sweep: planned로 간 #22에는 아무 일도 없다(라벨·코멘트 그대로).
+  const before22 = w.bodies(22).length;
+  await w.sweep("1.4.45");
+  expect(w.label(22)).toBe("factory:planned");
+  expect(w.bodies(22)).toHaveLength(before22);
+  // #21은 merge가 또 실패해 blocked 팔이 사람에게 올렸다(이번 주기의 시도 1회) — 그때의 버전은 이미 1.4.45다.
+  expect(w.label(21)).toBe("factory:needs-human");
+  // 같은 버전에서는 몇 번을 돌아도 다시 재시도하지 않는다.
+  const before21 = w.bodies(21).length;
+  await w.sweep("1.4.45");
+  await w.sweep("1.4.45");
+  expect(w.label(21)).toBe("factory:needs-human");
+  expect(w.bodies(21)).toHaveLength(before21);
+  expect(releaseMarkers156(w, 21)).toHaveLength(1);
+  expect(releaseMarkers156(w, 22)).toHaveLength(1);
+
+  // 이슈당 릴리스당 1회는 마커가 지킨다: 재시도 뒤의 에스컬레이션이 (다른 러너의 낡은 설치본 때문에) 옛 버전으로
+  // 찍혀도, 1.4.45의 재시도 마커가 이미 있으면 다시 하지 않는다.
+  w.issues.get(22).labels = ["factory:in-progress"];
+  expect((await w.transition({ issue: 22, to: "factory:blocked", reason: GIT_DIFF156, stage: "implement" })).ok).toBe(true);
+  w.issues.get(22).labels = ["factory:blocked"];
+  expect((await w.transition({ issue: 22, to: "factory:needs-human", reason: BLOCKED_ESCALATION_REASON.undecidable, engineVersion: "1.4.44" })).ok).toBe(true);
+  const stale = await w.sweep("1.4.45");
+  expect(w.label(22)).toBe("factory:needs-human");
+  expect(releaseMarkers156(w, 22)).toHaveLength(1);
+  expect(stale).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 22, reason: expect.stringMatching(/already retried once on 1\.4\.45/) }));
+});
+
+test("test_156_human_judgement_needs_human_is_never_auto_retried", async () => {
+  const w = world156();
+  // 각 이슈는 이력 앞쪽에 **undecidable blocked**를 한 번 겪었다(blocked 팔의 재시도로 풀렸다) — 그래도 마지막 전이의
+  // 사유가 사람의 판단이면 고르지 않는다. 버전도 찍혀 있다: 버전·작성자 말고 **사유**만이 이 이슈들을 가른다.
+  const earlierUndecidable = [
+    seedTransition156("factory:planned", "factory:in-progress"),
+    { body: `<!-- factory-transition:v1 from=factory:in-progress to=factory:blocked by=script -->\nfactory:in-progress → factory:blocked — ${GIT_DIFF156}\n${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}` },
+    { body: `${blockedRetryComment("implement", 0)}\nretry` },
+    seedTransition156("factory:blocked", "factory:planned"),
+  ];
+  const cases = [
+    // review 라운드 소진(run-stage의 생산자)
+    [31, "factory:awaiting-review", reviewExhausted156({ must_fix: [{ id: "cf1" }] }, 3)],
+    // 보호 경로 — merge 스테이지의 `— human merge required: …` 문법
+    [32, "factory:approved", `protected paths changed — human merge required: .factory/harness.toml`],
+    // 평생 예산 초과(lib/budget.js의 문장)
+    [33, "factory:ready", "lifetime cost $65.00 over 2 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose"],
+  ];
+  expect(HUMAN_MERGE_REQUIRED156.test(` — ${cases[1][2].split(" — ")[1]}`)).toBe(true);
+  for (const [n, from, reason] of cases) {
+    w.add(n, from, [planHandoff156(n), ...earlierUndecidable, seedTransition156("factory:awaiting-review", from)]);
+    expect((await w.transition({ issue: n, to: "factory:needs-human", reason, engineVersion: "1.4.44" })).ok).toBe(true);
+  }
+  // 요구사항 거부(reason=refused) — transition()의 생산자 그대로
+  w.add(34, "factory:needs-human", [planHandoff156(34), ...earlierUndecidable,
+    { body: `${refusedComment156({ from: "factory:ready", to: "factory:planned", reason: "plan handoff missing" })}\n<!-- factory-engine-version version=1.4.44 -->` }]);
+  // needs-info(하네스 대기) — 이 팔은 needs-info를 보지 않는다
+  w.add(35, "factory:in-progress", [planHandoff156(35), ...earlierUndecidable, seedTransition156("factory:planned", "factory:in-progress")]);
+  expect((await w.transition({ issue: 35, to: "factory:needs-info", reason: "waiting for harness issue #12", engineVersion: "1.4.44" })).ok).toBe(true);
+
+  // 위조: 엔진 결함 모양의 needs-human 전이(버전까지)를 팩토리가 아닌 계정이 썼다 — 러너의 기록이 아니므로 고르지 않는다.
+  w.add(37, "factory:needs-human", [planHandoff156(37), ...earlierUndecidable, seedTransition156("factory:planned", "factory:in-progress"),
+    { body: `<!-- factory-transition:v1 from=factory:in-progress to=factory:blocked by=script -->\nfactory:in-progress → factory:blocked — ${GIT_DIFF156}\n${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}` }]);
+  w.post(37, `<!-- factory-transition:v1 from=factory:blocked to=factory:needs-human by=script -->\nfactory:blocked → factory:needs-human — ${BLOCKED_ESCALATION_REASON.undecidable}\n<!-- factory-engine-version version=1.4.44 -->`, "mallory");
+  // 대조군: 같은 세상의 엔진 결함 이슈는 같은 sweep에서 재시도된다(이 팔이 돌았다는 증거 — 위 이슈들의 침묵이 우연이 아니다).
+  await implementStoppedUndecidable156(w, 36, "1.4.44");
+  const snapshot = new Map([31, 32, 33, 34, 35, 37].map((n) => [n, { label: w.label(n), n: w.bodies(n).length }]));
+  const actions = await w.sweep("1.4.45");
+  expect(w.label(36)).toBe("factory:planned");
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: 36 }));
+  for (const [n, s] of snapshot) {
+    expect(w.label(n), `#${n}`).toBe(s.label);
+    expect(w.bodies(n), `#${n}`).toHaveLength(s.n);
+    expect(actions, `#${n}`).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n }));
+  }
+  expect([31, 32, 33, 34].map((n) => w.label(n))).toEqual(Array(4).fill("factory:needs-human"));
+  expect(w.label(35)).toBe("factory:needs-info");
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 37, reason: expect.stringMatching(/not written by the factory/) }));
+});
+
+test("test_156_no_release_no_retry", async () => {
+  const w = world156();
+  await implementStoppedUndecidable156(w, 41, "1.4.44");
+  const n0 = w.bodies(41).length;
+  // 같은 버전: 아무것도 하지 않는다(전이도 코멘트도 없다).
+  const same = await w.sweep("1.4.44");
+  expect(w.label(41)).toBe("factory:needs-human");
+  expect(w.bodies(41)).toHaveLength(n0);
+  expect(same).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: 41 }));
+  // 설치본 버전을 못 읽었다(매니페스트 없음) → "다르다"로 읽지 않는다. 건너뛰고 actions에 이유를 남긴다.
+  const unread = await w.sweep(null);
+  expect(w.label(41)).toBe("factory:needs-human");
+  expect(w.bodies(41)).toHaveLength(n0);
+  expect(unread).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 41, reason: expect.stringMatching(/installed version/) }));
+  // 버전 읽기가 아예 배선되지 않았다 → 같은 처리.
+  const unwired = await w.sweep(undefined, { installedVersion: undefined });
+  expect(w.bodies(41)).toHaveLength(n0);
+  expect(unwired).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 41, reason: expect.stringMatching(/not wired/) }));
+  // 버전 읽기가 던진다 → 같은 처리(조용히 다르다고 치지 않는다).
+  const threw = await w.sweep(undefined, { installedVersion: async () => { throw new Error("ENOENT .factory/install-manifest.json"); } });
+  expect(w.bodies(41)).toHaveLength(n0);
+  expect(threw).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 41, reason: expect.stringMatching(/installed version/) }));
+
+  // 멈춤 당시의 버전 기록이 없다(1.4.45 이전의 에스컬레이션 — 버전 없이 올라갔다) → 새 버전이어도 건너뛴다.
+  w.add(42, "factory:blocked", [planHandoff156(42), seedTransition156("factory:planned", "factory:in-progress"),
+    { body: `<!-- factory-transition:v1 from=factory:in-progress to=factory:blocked by=script -->\nfactory:in-progress → factory:blocked — ${GIT_DIFF156}\n${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}` }]);
+  expect((await w.transition({ issue: 42, to: "factory:needs-human", reason: BLOCKED_ESCALATION_REASON.undecidable })).ok).toBe(true);
+  const n42 = w.bodies(42).length;
+  const noStamp = await w.sweep("1.4.45");
+  expect(w.label(42)).toBe("factory:needs-human");
+  expect(w.bodies(42)).toHaveLength(n42);
+  expect(noStamp).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 42, reason: expect.stringMatching(/no recorded engine version/) }));
+  // 같은 sweep에서 #41은 새 버전이라 재시도됐다(위의 건너뜀들이 그 이슈를 태우지 않았다).
+  expect(w.label(41)).toBe("factory:planned");
+});
+
+test("test_156_retry_honours_back_pressure", async () => {
+  const w = world156();
+  await implementStoppedUndecidable156(w, 51, "1.4.44");
+  await mergeStoppedUndecidable156(w, 52, "1.4.44");
+  const n51 = w.bodies(51).length;
+  const bp = vi.fn(async () => ({ ok: false, reasons: ["awaiting-review 4 ≥ 4"] }));
+  w.dispatchStage.mockClear();
+  const actions = await w.sweep("1.4.45", { backPressure: bp });
+  // implement 대상: 전이도 마커도 없다 — 다음 sweep이 같은 릴리스로 다시 시도할 수 있다.
+  expect(w.label(51)).toBe("factory:needs-human");
+  expect(w.bodies(51)).toHaveLength(n51);
+  expect(releaseMarkers156(w, 51)).toHaveLength(0);
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 51, reason: expect.stringMatching(/back-pressure — awaiting-review 4 ≥ 4/) }));
+  // merge 대상은 흐름 제어와 무관하다.
+  expect(releaseMarkers156(w, 52)).toHaveLength(1);
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: 52, to: "factory:blocked" }));
+  // 흐름 제어가 풀린 다음 sweep: 같은 릴리스로 재시도된다.
+  await w.sweep("1.4.45", { backPressure: async () => ({ ok: true, reasons: [] }) });
+  expect(w.label(51)).toBe("factory:planned");
+  expect(releaseMarkers156(w, 51)).toHaveLength(1);
+});
+
+test("test_156_release_retry_opens_a_fresh_budget_cycle", async () => {
+  const w = world156();
+  await implementStoppedUndecidable156(w, 61, "1.4.44");
+  // 이전 주기: 재점화 2회(한도), self-gate 3회(backstop) — 그대로 두면 첫 스톨·첫 RED가 곧장 사람에게 간다.
+  const old = await w.gh.comments(61);
+  expect(cycle156(old, { factoryLogin: BOT156 }).filter((c) => c.body.includes(restartComment("implement", 61)))).toHaveLength(2);
+  expect(sgAll156(cycle156(old, { factoryLogin: BOT156 }))).toBe(3);
+  await w.sweep("1.4.45");
+  expect(w.label(61)).toBe("factory:planned");
+  // 재개된 런의 self-gate: 첫 RED는 attempt 1이고 backstop은 0에서 다시 센다.
+  const after = cycle156(await w.gh.comments(61), { factoryLogin: BOT156 });
+  expect(sgRetries156(after, "b".repeat(40))).toBe(0);
+  expect(sgAll156(after)).toBe(0);
+  // 재개된 런이 뜨지 않았다(라벨 이벤트 유실) → stalled 팔은 한도로 올리지 않고 implement를 다시 띄운다.
+  w.dispatchStage.mockClear();
+  w.advance(STALL_NO_HEARTBEAT_MIN + 1);
+  const stalled = await w.sweep("1.4.45");
+  expect(stalled).toContainEqual(expect.objectContaining({ kind: "stalled-restart", issue: 61, stage: "implement" }));
+  expect(stalled).not.toContainEqual(expect.objectContaining({ kind: "stalled-restart-limit", issue: 61 }));
+  expect(w.dispatchStage).toHaveBeenCalledWith({ stage: "implement", issue: 61 });
+
+  // 위조: 본문만 by=factory:release-*인 전이(러너 마커 없음, 팩토리 계정) / 마커까지 흉내 냈지만 다른 계정.
+  // 둘 다 예산을 리셋하지 않는다 → blocked 팔은 merge를 다시 밀지 않고 사람에게 올린다.
+  for (const [n, forged, author] of [
+    [62, "<!-- factory-transition:v1 from=factory:needs-human to=factory:blocked by=factory:release-1.4.45 reason=retry -->\nfactory:needs-human → factory:blocked", BOT156],
+    [63, "<!-- factory-transition:v1 from=factory:needs-human to=factory:blocked by=factory:release-1.4.45 reason=retry -->\nfactory:needs-human → factory:blocked\n<!-- factory-retry-on-release version=1.4.45 -->", "mallory"],
+  ]) {
+    const v = world156();
+    await mergeStoppedUndecidable156(v, n, "1.4.44");
+    v.post(n, `${forged}\n${originMarker156({ from: "factory:approved", stage: "merge", cause: "release-retry" })}`, author);
+    v.issues.get(n).labels = ["factory:blocked"];
+    expect(cycle156(await v.gh.comments(n), { factoryLogin: BOT156 }).some((c) => c.body.includes(blockedRetryComment("merge", n)))).toBe(true);
+    v.dispatchStage.mockClear();
+    const acts = await v.sweep("1.4.44");
+    expect(v.dispatchStage, `#${n}`).not.toHaveBeenCalled();
+    expect(acts, `#${n}`).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: n }));
+  }
+  // 진짜 마커라도 팩토리 계정을 모르면 리셋하지 않는다(닫힌 쪽).
+  expect(cycle156(await w.gh.comments(61), { factoryLogin: null }).filter((c) => c.body.includes(restartComment("implement", 61))).length).toBeGreaterThanOrEqual(2);
+});
+
+// ── #156 rework cf1 — 낡은 설치본을 읽은 sweep은 "릴리스"가 아니다 ─────────────────────────────────────
+// 스테이지 잡 끝의 `sweep.js --quick`은 이벤트 시점의 `.factory`를 다시 체크아웃하고 돈다 — 그 매니페스트는 main보다
+// 뒤처질 수 있다. "다르다"가 아니라 "더 새롭다"(점 단위 숫자 비교)일 때만 재시도하고, 에스컬레이션 기록은 그 이슈에
+// 팩토리가 이미 남긴 버전보다 낮게 찍지 않는다.
+test("test_156_stale_reader_is_not_a_release", async () => {
+  const w = world156();
+  // A(#71): 1.4.44에서 멈췄고 cron이 1.4.45로 한 번 재시도했다 → 1.4.45에서 다시 멈춰 cron이 1.4.45로 올렸다.
+  await implementStoppedUndecidable156(w, 71, "1.4.44");
+  await w.sweep("1.4.45");
+  expect(w.label(71)).toBe("factory:planned");
+  w.issues.get(71).labels = ["factory:in-progress"];
+  expect((await w.transition({ issue: 71, to: "factory:blocked", reason: GIT_DIFF156, stage: "implement" })).ok).toBe(true);
+  w.post(71, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.45");                                                    // 새 주기의 blocked 재시도 1회
+  w.post(71, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.45");
+  expect(w.label(71)).toBe("factory:needs-human");
+  const esc71 = w.bodies(71).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(ENGINE_VERSION156.exec(esc71)?.[1]).toBe("1.4.45");
+
+  // 다른 이슈의 잡이 끝나며 1.4.44(낡은 체크아웃)로 quick sweep을 돈다 → A는 그대로다. 이유는 actions에 남는다.
+  const n71 = w.bodies(71).length;
+  w.dispatchStage.mockClear();
+  const stale = await w.sweep("1.4.44");
+  expect(w.label(71)).toBe("factory:needs-human");
+  expect(w.bodies(71)).toHaveLength(n71);
+  expect(releaseMarkers156(w, 71)).toHaveLength(1);
+  expect(w.dispatchStage).not.toHaveBeenCalled();
+  expect(stale).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: 71 }));
+  expect(stale).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 71, reason: expect.stringMatching(/older than 1\.4\.45/) }));
+  // 같은 버전의 cron도 아무것도 하지 않는다; 진짜 다음 릴리스에서만 한 번 재시도한다.
+  await w.sweep("1.4.45");
+  expect(w.bodies(71)).toHaveLength(n71);
+  await w.sweep("1.4.46");
+  expect(w.label(71)).toBe("factory:planned");
+  expect(releaseMarkers156(w, 71).map((b) => RETRY_ON_RELEASE156.exec(b)[1])).toEqual(["1.4.45", "1.4.46"]);
+
+  // 거울 경우: 1.4.45로 재시도된 B(#72)가 다시 멈췄는데, 그 에스컬레이션을 낡은 quick sweep(1.4.44)이 했다.
+  // 기록은 1.4.44로 내려가지 않는다(이 이슈에 팩토리가 남긴 1.4.45가 있다) → 다음 cron(1.4.45)은 재시도하지 않는다.
+  await implementStoppedUndecidable156(w, 72, "1.4.44");
+  await w.sweep("1.4.45");
+  expect(w.label(72)).toBe("factory:planned");
+  w.issues.get(72).labels = ["factory:in-progress"];
+  expect((await w.transition({ issue: 72, to: "factory:blocked", reason: GIT_DIFF156, stage: "implement" })).ok).toBe(true);
+  w.post(72, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.44");
+  w.post(72, `${originMarker156({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: ${GIT_DIFF156}`);
+  await w.sweep("1.4.44");
+  expect(w.label(72)).toBe("factory:needs-human");
+  const esc72 = w.bodies(72).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(ENGINE_VERSION156.exec(esc72)?.[1]).toBe("1.4.45");
+  const n72 = w.bodies(72).length;
+  await w.sweep("1.4.45");
+  expect(w.label(72)).toBe("factory:needs-human");
+  expect(w.bodies(72)).toHaveLength(n72);
+
+  // "더 새롭다"는 문자열이 아니라 점 단위 숫자 비교다: 1.4.9에서 멈춘 이슈는 1.4.10에서 재시도된다.
+  await implementStoppedUndecidable156(w, 73, "1.4.9");
+  await w.sweep("1.4.10");
+  expect(w.label(73)).toBe("factory:planned");
+});
+
+// #156 rework arch1 — 흐름 제어 결과는 모든 재점화 팔이 **같은 한 함수**로 읽는다. 거부(`ok: false`)인데 `reasons`가 없는
+// 결과도 거부다: stalled 팔은 거기서 던졌고(이슈마다 error), 나머지 팔은 빈 문자열을 "열림"으로 읽어 implement를 띄웠다.
+test("test_156_back_pressure_refusal_without_reasons_is_still_a_refusal_in_every_arm", async () => {
+  // stalled 팔: factory:planned에서 멈춘 이슈는 띄우지 않고 back-pressure 건너뜀으로 남는다(error 아님).
+  const gh = {
+    searchIssues: async (l) => (l === "factory:planned" ? [{ number: 3 }] : []),
+    comments: async () => [TRANSITION("factory:planned", "2026-09-11T00:00:00Z")],
+    comment: vi.fn(), patchComment: vi.fn(),
+  };
+  const dispatchStage = vi.fn();
+  const actions = await sweep(stalledArgs({ gh, dispatchStage, backPressure: vi.fn(async () => ({ ok: false })) }));
+  expect(dispatchStage).not.toHaveBeenCalled();
+  expect(actions.filter((a) => a.kind === "error")).toEqual([]);
+  expect(actions).toContainEqual(expect.objectContaining({ kind: "stalled-restart-skipped", issue: 3, stage: "implement", reason: expect.stringMatching(/^back-pressure — /) }));
+
+  // release-retry 팔: implement 대상 재시도는 일어나지 않는다 — 전이도 마커도 없다.
+  const w = world156();
+  await implementStoppedUndecidable156(w, 81, "1.4.44");
+  const n81 = w.bodies(81).length;
+  const out = await w.sweep("1.4.45", { backPressure: async () => ({ ok: false }) });
+  expect(w.label(81)).toBe("factory:needs-human");
+  expect(w.bodies(81)).toHaveLength(n81);
+  expect(releaseMarkers156(w, 81)).toHaveLength(0);
+  expect(out).toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: 81, reason: expect.stringMatching(/^back-pressure — /) }));
+});

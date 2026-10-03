@@ -126,7 +126,12 @@ phase('Load');
 // 디스패처가 그것을 그대로 Workflow의 `args.loaded`로 넘긴다(워크플로 스크립트는 파일을 읽을 수 없다,
 // §4.2.3). 역할 에이전트가 **스스로** 읽는 경로는 그대로 남는다 — 바뀐 것은 스크립트가 제 제어 흐름을
 // 위해 쓰던 재료의 출처뿐이다.
-const loaded = args.loaded ?? null;
+// 2026-10-02 (KTB #170 실측) — 디스패처(LLM)가 args를 **JSON 문자열**로 넘긴 적이 있다(`"args": "{\"raw\":…}"`): 그러면 `args.loaded`가
+// undefined라 "context payload missing"으로 14초 만에 끝났고, 빌더는 뜨지도 않았다. 문자열이면 파싱한다 — 문자열로 온 `loaded`도 같다.
+// 파싱이 안 되면 그대로 두어 아래 fail-closed가 이름 있는 에러를 낸다.
+const parseIfString = (v) => { if (typeof v !== 'string') return v; try { return JSON.parse(v); } catch { return v; } };
+args = parseIfString(args) ?? {};
+const loaded = parseIfString(args.loaded) ?? null;
 
 // KTB-27: Claude Code does not substitute positional `$1`/`$2` in a command md — only `$ARGUMENTS`
 // is filled in, as one string (verified live: `claude -p "/argtest 42 true"` turned `$ARGUMENTS`

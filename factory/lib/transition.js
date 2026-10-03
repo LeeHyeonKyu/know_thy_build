@@ -1,6 +1,6 @@
 import { canTransition, factoryLabelOf, HUMAN_RETRY_FROM, HUMAN_RETRY_TARGETS } from "./labels.js";
 import { requirementFor } from "./requirements.js";
-import { blockedCause, blockedOriginMarker, lastHumanDecision, resumePoint, transitionFailedMarker, transitionRefusedComment, transitionRefusedMarker } from "./retro/issue-comments.js";
+import { blockedCause, blockedOriginMarker, engineVersionMarker, lastHumanDecision, RELEASE_PRINCIPAL, resumePoint, retryOnReleaseMarker, transitionFailedMarker, transitionRefusedComment, transitionRefusedMarker } from "./retro/issue-comments.js";
 
 export const NEEDS_HUMAN = "factory:needs-human";
 export const NEEDS_INFO = "factory:needs-info";
@@ -74,7 +74,7 @@ export function principalFromEnv(env = process.env, login = null) {
   return `person:${who}`;
 }
 
-export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", by = null, stage, cause, env = process.env, rehearsal = null, admission = null, skipRehearsal = false }) {
+export async function transition({ gh, issue, to, ctxExtra = {}, human = false, retry = false, reason = "", by = null, stage, cause, env = process.env, rehearsal = null, admission = null, skipRehearsal = false, engineVersion = null }) {
   /**
    * ── KTB-44 / ADR-025 — **리허설 없이는 큐가 열리지 않는다.** ───────────────────────────────────
    * own-calendar의 첫 다크 이슈는 하네스 초안의 결함 세 개를 **라운드마다 하나씩** 드러냈다(exit 127의
@@ -131,11 +131,30 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
     else if (to !== resume.target) return { ok: false, from, to, reason: `retry target ${to} is not this issue's resume point — it stopped at ${resume.stoppedAt}, so the only allowed target is ${resume.target}` };
     humanRetry = true;
   }
+  /**
+   * #156 (ADR-032) — **새 엔진이 온 뒤의 릴리스 재시도.** sweeper의 `sweepRetryOnRelease`가 `by: "factory:release-<v>"`를
+   * 명시적으로 붙여 부른다(`principalFromEnv`가 만드는 값이 아니다). 그것이 여는 엣지는 **하나**다: `factory:needs-human` →
+   * 이 이슈의 중단 지점(`resumePoint`). `needs-info`에서는 열리지 않고(그 재시도는 사람의 판단이다), 다른 목적지로도 열리지
+   * 않는다. `by`는 자기 신고라 위조할 수 있다 — 그래서 엣지를 이만큼 좁힌다(plan d2). 사람 플래그(`human`/`retry`)와는
+   * 섞이지 않는다: 그 둘은 위의 세 번째 자물쇠가 그대로 판정한다.
+   */
+  let releaseRetry = null;
+  const releaseBy = !human && typeof by === "string" ? RELEASE_PRINCIPAL.exec(by.trim()) : null;
+  if (releaseBy && from === NEEDS_HUMAN) {
+    comments = await gh.comments(issue);
+    resume = resumePoint(comments);
+    if (!resume?.target) return { ok: false, from, to, reason: `${NO_RESUME_POINT}${resume ? ` (stopped at ${resume.stoppedAt})` : ""}` };
+    if (to == null) to = resume.target;
+    else if (to !== resume.target) return { ok: false, from, to, reason: `release retry target ${to} is not this issue's resume point — it stopped at ${resume.stoppedAt}, so the only allowed target is ${resume.target}` };
+    releaseRetry = releaseBy[1];
+  }
+  // 사람의 재시도와 릴리스 재시도는 같은 종류의 **복구**다(중단 지점으로 이미 얻었던 라벨을 되돌린다).
+  const restoring = humanRetry || releaseRetry != null;
   // 스크립트가 이 엣지를 시도하면 아래 `canTransition`이 평소의 그래프 거부로 떨어뜨린다 — 라벨은
   // 그대로이고 거부 코멘트가 남는다(사람이 볼 수 있게). 목적 라벨조차 없는 `--retry`만 여기서
   // 끊는다: 거부 코멘트에 적을 `to`가 없고, 그 요청은 애초에 사람 전용 문법이다.
   if (to == null) return { ok: false, from, to, reason: retry ? RETRY_SCRIPT_REFUSED : "no target label (use `--retry` only from factory:needs-human or factory:needs-info)" };
-  if (!canTransition(from, to, { human: humanRetry })) {
+  if (!canTransition(from, to, { human: restoring })) {
     const graphReason = `transition ${from} → ${to} not allowed`;
     // 그래프에 없는 전이는 라벨을 건드리지 않는다(어느 쪽으로도 안전한 기본값이 없다 — 예: merged/wont-do는
     // needs-human으로도 못 나간다) — 하지만 조용히 실패하지는 않는다. 사람이 볼 수 있게 코멘트는 남긴다.
@@ -146,9 +165,10 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   // KTB-32: `humanRetry`는 `prerequisite`와 같은 것만 면제한다(이번 런의 게이트 파일·sha 바인딩 —
   // 사람의 노트북에는 존재할 수 없고, 그 판정은 스테이지가 다시 돌며 만든다). handoff의 존재와
   // 유효성은 그대로 물린다: 그것이 "구현이 온전하다"의 증거다. ctxExtra가 이 값을 덮지 못한다.
-  const req = requirementFor(to)({ comments, ...ctxExtra, ...(humanRetry ? { humanRetry: true } : {}) });
+  const req = requirementFor(to)({ comments, ...ctxExtra, ...(restoring ? { humanRetry: true } : {}) });
   if (!req.ok) {
-    if (human) return { ok: false, from, to, reason: req.reason };
+    // #156: 릴리스 재시도도 사람의 재시도처럼 이미 needs-human에 있다 — 거부는 라벨을 옮기지 않고 사유만 돌려준다.
+    if (human || releaseRetry != null) return { ok: false, from, to, reason: req.reason };
     /**
      * ADR-020 r2 SF3 — **이 거부도 완료된 전이다**(`… → factory:needs-human`), 그래서 성공 경로와
      * 정확히 같은 두 가지를 한다: 코멘트가 스왑보다 **먼저** 나가고, 그 코멘트가 `factory-transition:v1`
@@ -171,7 +191,10 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   // 1.4.32 (L40) — 사람의 재시도가 blocked로 돌아가는 경우 origin은 needs-human이 아니라 **멈춘 자리**(approved)다: sweeper의
   // blocked 팔은 `BLOCKED_RETRY_STAGE[origin.from]`으로 재점화할 스테이지(merge)를 고른다.
   const originMarker = to === "factory:blocked"
-    ? `\n${blockedOriginMarker(humanRetry && resume?.stoppedAt ? { from: resume.stoppedAt, stage: "merge", cause: "human-retry" } : { from, stage, cause: cause ?? blockedCause(reason) })}`
+    ? `\n${blockedOriginMarker(humanRetry && resume?.stoppedAt ? { from: resume.stoppedAt, stage: "merge", cause: "human-retry" }
+      // #156: 릴리스 재시도도 origin은 멈춘 자리다 — 그래야 blocked 팔의 `BLOCKED_RETRY_STAGE`가 merge를 고른다(plan d4).
+      : releaseRetry != null && resume?.stoppedAt ? { from: resume.stoppedAt, stage: "merge", cause: "release-retry" }
+      : { from, stage, cause: cause ?? blockedCause(reason) })}`
     : "";
   /**
    * ADR-020 KTB-30 r1 — **전이 코멘트가 라벨 스왑보다 먼저 나간다.** KTB-30이 라벨 스왑을 add-first로
@@ -192,8 +215,12 @@ export async function transition({ gh, issue, to, ctxExtra = {}, human = false, 
   const decision = humanRetry ? lastHumanDecision(comments) : null;
   const retryNote = humanRetry
     ? `\n\n중단 지점 \`${resume.stoppedAt}\`으로 되돌립니다(ADR-020 KTB-32) — 인프라가 끊은 자리이고 산출물은 그대로입니다. 근거: ${decision ? `이 이슈의 \`human-decision:v1\` 코멘트(skill=${decision.skill ?? "unknown"}${decision.at ? `, ${decision.at}` : ""})` : "`human-decision:v1` 코멘트를 찾지 못했습니다 — `:unstick`을 거치지 않은 수동 복구입니다"}. 이 전이는 리뷰 라운드로 세지 않습니다(재큐가 아닙니다).`
-    : "";
-  await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=${to} by=${human ? "human" : (typeof by === "string" && by ? by.replace(/[\s>]+/g, "-") : "script")}${humanRetry ? " reason=retry" : ""} -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}${retryNote}${originMarker}`);
+    : releaseRetry != null
+      ? `\n\n새 엔진(${releaseRetry})이 설치돼 중단 지점 \`${resume.stoppedAt}\`으로 한 번 되돌립니다(#156, ADR-032) — 엔진 결함(undecidable)으로 멈춘 자리이고 사람의 판단을 기다리던 것이 아닙니다. 이 전이는 리뷰 라운드로 세지 않습니다(재큐가 아닙니다). 같은 버전으로는 다시 하지 않습니다.\n${retryOnReleaseMarker(releaseRetry)}`
+      : "";
+  // #156 — sweeper가 needs-human으로 올릴 때 그 순간의 설치본 버전을 싣는다(릴리스 재시도 팔의 "그때의 엔진" 기록).
+  const engineNote = typeof engineVersion === "string" && engineVersion.trim() ? `\n${engineVersionMarker(engineVersion)}` : "";
+  await gh.comment(issue, `<!-- factory-transition:v1 from=${from} to=${to} by=${human ? "human" : (typeof by === "string" && by ? by.replace(/[\s>]+/g, "-") : "script")}${restoring ? " reason=retry" : ""} -->\n${from} → ${to}${reason ? ` — ${reason}` : ""}${retryNote}${originMarker}${engineNote}`);
   const set = await swapLabel({ gh, issue, from, to });
   // KTB-30: 라벨을 쓴 뒤 확인에서 되살렸다면 그 사실은 이슈 이력에 남아야 한다 — 조용히 고친 라벨은
   // 다음 사고의 원인을 지운다(`setFactoryLabel`이 없는 구형 더블은 undefined를 돌려준다). 전이 코멘트가
