@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { REHEARSAL_STALE } from "../lib/rehearsal.js";
 import { runStage, completedForHead, abortStage, nextState, reviewFlips, reviewExhaustedReason, IN_FLIGHT_LABEL, buildCtxExtra, mergeGates, usageLine, makeCheckoutHead, makeLocalEntry, GATES_SELF_REPORTED, MergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON, gateOutputPaths, resetGateOutputs, isNoWriteStage, assertNoWriteStageClean, stageMaxTurns, DEFAULT_MAX_TURNS, stageClaudeArgs, stageClaudeEnv, stagePrompt, ciSettingsFile, CI_SETTINGS, CI_SETTINGS_HARNESS, unhandledGateReason, reviewTier, runAttemptOf, stageSettled, stageSettledLine } from "../bin/run-stage.js";
 import { GitDiffError } from "../lib/changed-files.js";
+import { makeStageGateDeps } from "../bin/run-stage.js";
 import { runGates } from "../lib/gates.js";
 import { canTransition } from "../lib/labels.js";
 import { commentsSinceRequeue, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, latestSelfGateFindings } from "../lib/retro/issue-comments.js";
@@ -3934,6 +3935,264 @@ test("test_136_parked_feature_reuse_names_backlogged_harness", async () => {
   expect(lines.some((l) => l.startsWith("harness: #31 was opened"))).toBe(false); // 재사용이다 — 열었다고 말하지 않는다
 });
 
+// ── #157 — the merge re-run lives in production wiring: run-stage's real `gates` and `diffFiles` deps ──────
+// `makeStageGatesDep` (runStageGates, stage "merge") and `makeMergeDiffFilesDep` (changedFiles over
+// `<base>...HEAD`) are the deps `main()` hands runMergeStage. A fake runner plays git and the gate commands; a
+// real vitest JSON report says which test failed. A wrong diff source (or none) changes the outcome below.
+test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);              // = the sha mergeHappyDeps checks out
+  const OC = "server/tests/follows.test.ts::test_49_event_visibility";
+  const harness = {
+    harness: { maturity: "M0" }, project: { default_branch: "main" },
+    gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+    commands: { lint: "node factory/bin/lint.js", unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+    test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] },
+  };
+  const report = (root, failing, loadErrors = []) => JSON.stringify({
+    numTotalTests: 132, numPassedTests: 132 - failing.length, numFailedTests: failing.length,
+    testResults: [
+      ...failing.map((id) => ({ name: join(root, id.split("::")[0]), status: "failed", assertionResults: [{ status: "failed", fullName: id.split("::")[1] }] })),
+      ...loadErrors.map(([file, message]) => ({ name: join(root, file), status: "failed", message, assertionResults: [] })),
+    ],
+  });
+  // git's own answer to `--no-renames`: a rename is reported as D old + A new (a copy as A new). The fake plays that,
+  // so a diff source that drops the flag sees the R row and keeps only the new path.
+  const gitNameStatus = (rows, args) => (!args.includes("--no-renames") ? rows : rows.split("\n").filter(Boolean).map((l) => {
+    const [st, ...p] = l.split("\t");
+    if (st[0] === "R") return `D\t${p[0]}\nA\t${p[1]}`;
+    if (st[0] === "C") return `A\t${p[1]}`;
+    return l;
+  }).join("\n") + "\n");
+  const scenario = async ({ nameStatus, diffFailsFrom = Infinity, baseFailsFrom = Infinity, unitExits = [1, 0], loadErrors = [] }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb157-"));
+    let unitRuns = 0, diffCalls = 0, baseCalls = 0;
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"),
+        result: (_c, a) => (++diffCalls >= diffFailsFrom ? { code: 128, stdout: "", stderr: "fatal: bad revision" } : { code: 0, stdout: gitNameStatus(nameStatus, a), stderr: "" }) },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => ({ code: unitExits[Math.min(unitRuns++, unitExits.length - 1)], stdout: "", stderr: "" }) },
+    ]);
+    const readFiles = [];
+    const readFile = (p) => { readFiles.push(p); return report(root, unitExits[Math.min(unitRuns - 1, unitExits.length - 1)] ? [OC] : [], unitRuns === 1 ? loadErrors : []); };
+    const mergeBase = async () => { if (++baseCalls >= baseFailsFrom) throw new MergeBaseError("origin/main: exit 128"); return BASE; };
+    // The one assembly main() spreads into its deps object (pinned below) — not two hand-picked factories.
+    const { gates, diffFiles, suiteFailures } = makeStageGateDeps({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    expect(typeof diffFiles).toBe("function");                          // a missing diff source fails here, not silently
+    expect(typeof suiteFailures).toBe("function");
+    const lines = [], statuses = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(gates), diffFiles: vi.fn(diffFiles), suiteFailures: vi.fn(suiteFailures),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async (s) => { statuses.push(s); },
+    });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
+    const unitCalls = fake.calls.filter((c) => c.cmd === "bash" && c.args[1] === harness.commands.unit).length;
+    const diffArgs = fake.calls.filter((c) => c.cmd === "git" && c.args[0] === "diff").map((c) => c.args);
+    return { code, d, lines, statuses, unitCalls, diffArgs, root, fake, mergeBase, readFiles };
+  };
+
+  // Client-only diff, server test RED then GREEN → the same gates dep runs twice and the PR merges.
+  const ok = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nA\tclient/src/api/follows.ts\n" });
+  expect(ok.code).toBe(0);
+  expect(ok.unitCalls).toBe(2);                                         // runStageGates ran the unit command twice
+  expect(ok.d.gates).toHaveBeenCalledTimes(2);
+  expect(ok.d.diffFiles).toHaveBeenCalledTimes(1);
+  expect(await ok.d.diffFiles.mock.results[0].value).toEqual({ ok: true, files: ["client/src/pages/Calendar.tsx", "client/src/api/follows.ts"] });
+  // The merge diff source is changedFiles over `<base>...HEAD`, asked with `--no-renames` (the gates dep's own
+  // changedFiles call is unchanged); nothing else asks git for a diff.
+  expect(ok.diffArgs).toContainEqual(["diff", "--no-renames", "--name-status", `${BASE}...HEAD`]);
+  for (const a of ok.diffArgs) expect([["diff", "--name-status", `${BASE}...HEAD`], ["diff", "--no-renames", "--name-status", `${BASE}...HEAD`]]).toContainEqual(a);
+  // The suite reader read the unit report under the repo root — the file runStageGates had just parsed — after each run.
+  expect(ok.d.suiteFailures).toHaveBeenCalledTimes(1);                  // the re-run is GREEN: nothing left to compare
+  expect(await ok.d.suiteFailures.mock.results[0].value).toEqual({ ok: true, files: [] });
+  expect(ok.readFiles).toContain(join(ok.root, ".factory/out/unit.json"));
+  expect(ok.d.mergePr).toHaveBeenCalled();
+  // The re-run is the `gates` dep, not mergeGates: mergeGates runs once (no prReady in this dep set), and only
+  // after the second gates call resolved; mergePr comes after it.
+  expect(ok.d.mergeGates).toHaveBeenCalledTimes(1);
+  expect(ok.d.mergeGates.mock.invocationCallOrder[0]).toBeGreaterThan(ok.d.gates.mock.invocationCallOrder[1]);
+  expect(ok.d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(ok.d.mergeGates.mock.invocationCallOrder[0]);
+  expect(ok.statuses.filter((s) => s.context === "factory/gates").map((s) => s.state)).toEqual(["failure", "success"]);
+  // …and both land on the PR head (`git rev-parse HEAD` = HEADSHA, the sha mergeHappyDeps checks out and mergePr merges),
+  // so the required `factory/gates` check read on that head is the re-run's success, not the first run's failure.
+  expect(ok.statuses.filter((s) => s.context === "factory/gates").map((s) => s.sha)).toEqual([HEADSHA, HEADSHA]);
+  expect(JSON.parse(readFileSync(join(ok.root, ".factory/out/gates.json"), "utf8")).status).toBe("GREEN");
+  expect(ok.lines.some((l) => /^merge: .*rerun/.test(l) && l.includes(OC))).toBe(true);
+  const mark = ok.lines.find((l) => l.startsWith("factory-flaky-candidate: "));
+  expect(JSON.parse(mark.slice("factory-flaky-candidate: ".length))).toMatchObject({ test: OC, outcome: "GREEN", runner: "gha-157" });
+
+  // The diff touches server/** → the failing server test is not re-run; today's needs-human.
+  const inside = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nM\tserver/src/routes/follows.ts\n" });
+  expect(inside.code).toBe(2);
+  expect(inside.unitCalls).toBe(1);
+  expect(inside.d.mergePr).not.toHaveBeenCalled();
+  expect(inside.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+  // …and the record says why, bound to this runner (review sec-s1): the refusal names the touched package.
+  expect(inside.lines.filter((l) => l.startsWith("merge: no gates rerun — "))).toEqual([expect.stringMatching(/^merge: no gates rerun — diff touches server\/, where server\/tests\/follows\.test\.ts lives \[run_id=\S+ runner=gha-157\]$/)]);
+
+  // A rename OUT of server/** and a deletion under server/** are diffs in server/** — the failing server test
+  // is not re-run (`--no-renames` makes the rename D old + A new; D rows count). A diff source that keeps only the
+  // rename's new path, or drops deletions, would re-run here and merge.
+  const renamedOut = await scenario({ nameStatus: "R100\tserver/lib/visibility.ts\tclient/lib/visibility.ts\n" });
+  expect((await renamedOut.d.diffFiles.mock.results[0].value).files).toEqual(["server/lib/visibility.ts", "client/lib/visibility.ts"]);
+  const deleted = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\nD\tserver/src/routes/legacy.ts\n" });
+  expect((await deleted.d.diffFiles.mock.results[0].value).files).toContain("server/src/routes/legacy.ts");
+  // A client test file that failed to LOAD (no failed assertion, so not in `failing_ids`) beside the outside server
+  // RED: the production suite reader finds it in the report and the RED is not re-run.
+  const loadErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", loadErrors: [["client/tests/Calendar.test.ts", "SyntaxError: Unexpected token"]] });
+  expect(await loadErr.d.suiteFailures.mock.results[0].value).toEqual({ ok: true, files: ["client/tests/Calendar.test.ts"] });
+  for (const x of [renamedOut, deleted, loadErr]) {
+    expect(x.code).toBe(2);
+    expect(x.unitCalls).toBe(1);
+    expect(x.d.gates).toHaveBeenCalledTimes(1);
+    expect(x.d.mergePr).not.toHaveBeenCalled();
+    expect(x.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+    expect(x.lines.some((l) => l.startsWith("factory-flaky-candidate: "))).toBe(false);
+  }
+
+  // Production wiring: main()'s deps object takes `gates` AND `diffFiles` from this same assembly, and defines
+  // neither key on its own — drop the spread (or re-add a bare `gates:`) and this fails.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainDeps = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainDeps.slice(mainDeps.indexOf("const deps = {"), mainDeps.indexOf("\n  };\n", mainDeps.indexOf("const deps = {")));
+  expect(depsBlock).toMatch(/\n {4}\.\.\.makeStageGateDeps\(\{/);
+  expect(depsBlock).not.toMatch(/\n {4}(gates|diffFiles)\s*:/);
+  const assembly = src.slice(src.indexOf("export function makeStageGateDeps("));
+  expect(assembly.slice(0, assembly.indexOf("\n}\n"))).toMatch(/diffFiles:\s*makeMergeDiffFilesDep\(/);
+  expect(assembly.slice(0, assembly.indexOf("\n}\n"))).toMatch(/suiteFailures:\s*makeMergeSuiteFailuresDep\(/);
+  expect(depsBlock).not.toMatch(/\n {4}suiteFailures\s*:/);
+
+  // changedFiles GitDiffError / MergeBaseError inside diffFiles → ok:false → today's path (one gate run, needs-human).
+  const gitDiffErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", diffFailsFrom: 2 });   // the gates dep's own diff succeeds
+  expect(await gitDiffErr.d.diffFiles.mock.results[0].value).toMatchObject({ ok: false, reason: expect.stringMatching(/git diff failed/) });
+  const baseErr = await scenario({ nameStatus: "M\tclient/src/pages/Calendar.tsx\n", baseFailsFrom: 2 });
+  expect(await baseErr.d.diffFiles.mock.results[0].value).toMatchObject({ ok: false, reason: expect.stringMatching(/origin\/main/) });
+  for (const x of [gitDiffErr, baseErr]) {
+    expect(x.code).toBe(2);
+    expect(x.unitCalls).toBe(1);
+    expect(x.d.mergePr).not.toHaveBeenCalled();
+    expect(x.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" }));
+    expect(x.lines.filter((l) => l.startsWith("merge: no gates rerun — "))).toEqual([expect.stringMatching(/^merge: no gates rerun — PR diff unreadable or empty: .*(git diff failed|origin\/main)/)]);
+  }
+});
+
+// #157 — the rename rule against REAL git, not a fake's idea of it: a PR that moves a file out of server/** names
+// server/** in the merge diff source (`--no-renames` → D old + A new), so a failing server test is not re-run.
+test("test_157_merge_diff_files_keeps_both_sides_of_a_real_git_rename", async () => {
+  const { run: realRun } = await import("../lib/exec.js");
+  const root = mkdtempSync(join(tmpdir(), "ktb157-git-"));
+  const env = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+  const git = async (...args) => { const r = await realRun("git", args, { cwd: root, env }); expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0); return r.stdout.trim(); };
+  await git("init", "-q", "-b", "main");
+  mkdirSync(join(root, "server/lib"), { recursive: true });
+  writeFileSync(join(root, "server/lib/visibility.ts"), Array.from({ length: 40 }, (_, i) => `export const v${i} = ${i};`).join("\n") + "\n");
+  await git("add", "-A");
+  await git("commit", "-q", "-m", "base");
+  const base = await git("rev-parse", "HEAD");
+  mkdirSync(join(root, "client/lib"), { recursive: true });
+  await git("mv", "server/lib/visibility.ts", "client/lib/visibility.ts");
+  await git("commit", "-q", "-m", "move");
+  // Plain git reports this as ONE rename row — the shape that loses server/** if only the new path is kept.
+  expect(await git("diff", "--name-status", `${base}...HEAD`)).toMatch(/^R\d+\tserver\/lib\/visibility\.ts\tclient\/lib\/visibility\.ts$/);
+  const harness = { test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] } };
+  const { diffFiles } = makeStageGateDeps({ stage: "merge", run: realRun, root, gh: { comments: async () => [] }, issue: 7, getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => base, readFile: () => null, gatesPath: join(root, "gates.json"), transitionIssue: vi.fn(), log: () => {} });
+  const diff = await diffFiles();
+  expect(diff.ok).toBe(true);
+  expect([...diff.files].sort()).toEqual(["client/lib/visibility.ts", "server/lib/visibility.ts"]);
+});
+
+// #157 cf1 through production wiring (skeptic finding 2): the re-run must not read the FIRST run's report. The only
+// thing that guarantees it is the production `resetGates` reaching runMergeStage. Here the report lives on DISK, the
+// reader is main()'s own `existsSync ? readFileSync : null`, and resetGates comes from the same assembly main() spreads —
+// so dropping it from the wiring, or a resetGateOutputs that stops deleting the unit report, makes the stale first
+// report read RED twice and brands a test that never ran again a flaky candidate. A control re-run that DOES write a
+// same-set RED report shows the fixture can produce a candidate, so its absence below is evidence.
+test("test_157_rerun_cannot_read_the_first_report_through_production_reset", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);
+  const OC = "server/tests/follows.test.ts::test_49_event_visibility";
+  const harness = {
+    harness: { maturity: "M0" }, project: { default_branch: "main" },
+    gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+    commands: { lint: "node factory/bin/lint.js", unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+    test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] },
+  };
+  const scenario = async ({ secondRunWritesReport }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb157-reset-"));
+    const unitPath = join(root, ".factory/out/unit.json");
+    const writeRed = () => {
+      mkdirSync(dirname(unitPath), { recursive: true });
+      writeFileSync(unitPath, JSON.stringify({
+        numTotalTests: 132, numPassedTests: 131, numFailedTests: 1,
+        testResults: [{ name: join(root, "server/tests/follows.test.ts"), status: "failed", assertionResults: [{ status: "failed", fullName: "test_49_event_visibility" }] }],
+      }));
+    };
+    let unitRuns = 0;
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "M\tclient/src/pages/Calendar.tsx\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      // Run 1 writes a RED report; run 2 exits 1 and writes nothing unless the control asks it to (a crashed/killed re-run).
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => { unitRuns++; if (unitRuns === 1 || secondRunWritesReport) writeRed(); return { code: 1, stdout: "", stderr: "" }; } },
+    ]);
+    const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);      // = main()'s reader
+    const assembled = makeStageGateDeps({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => BASE, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    const lines = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(assembled.gates), diffFiles: vi.fn(assembled.diffFiles), suiteFailures: vi.fn(assembled.suiteFailures),
+      ...(assembled.resetGates ? { resetGates: vi.fn(assembled.resetGates) } : {}),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async () => {},
+    });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
+    return { code, d, lines, unitRuns, unitPath, assembled };
+  };
+
+  // The re-run wrote no report → inconclusive, never "RED twice", never a flaky-candidate marker.
+  const silent = await scenario({ secondRunWritesReport: false });
+  expect(silent.code).toBe(2);
+  expect(silent.unitRuns).toBe(2);
+  expect(silent.d.gates).toHaveBeenCalledTimes(2);
+  expect(silent.d.mergePr).not.toHaveBeenCalled();
+  const reason = silent.d.transition.mock.calls.map(([a]) => a).find((a) => a.to === "factory:needs-human")?.reason;
+  expect(reason).toMatch(/^gates rerun inconclusive — the re-run wrote no test report/);
+  expect(reason).not.toMatch(/flaky 후보/);
+  expect(silent.lines.some((l) => l.startsWith("factory-flaky-candidate: "))).toBe(false);
+  expect(existsSync(silent.unitPath)).toBe(false);                     // the production reset deleted the first report
+  // The production resetGates ran between the two gate runs (runStage also calls it once at stage start).
+  const resets = silent.d.resetGates.mock.invocationCallOrder;
+  const [g1, g2] = silent.d.gates.mock.invocationCallOrder;
+  expect(resets.some((o) => o > g1 && o < g2)).toBe(true);
+
+  // Control: the re-run writes the same RED → the same fixture DOES produce the candidate, so its absence above is real.
+  const twice = await scenario({ secondRunWritesReport: true });
+  expect(twice.code).toBe(2);
+  expect(twice.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining(`PR 밖의 테스트가 두 번 RED — flaky 후보`) }));
+  expect(twice.lines.filter((l) => l.startsWith("factory-flaky-candidate: ")).map((l) => JSON.parse(l.slice("factory-flaky-candidate: ".length)))).toEqual([expect.objectContaining({ test: OC, outcome: "RED" })]);
+
+  // Production wiring: main()'s deps object takes resetGates from the same assembly and defines no resetGates of its own.
+  expect(typeof silent.assembled.resetGates).toBe("function");
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainDeps = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainDeps.slice(mainDeps.indexOf("const deps = {"), mainDeps.indexOf("\n  };\n", mainDeps.indexOf("const deps = {")));
+  expect(depsBlock).not.toMatch(/\n {4}resetGates\s*:/);
+  expect(depsBlock).toMatch(/\n {4}\.\.\.makeStageGateDeps\(\{/);
+});
+
 // ── #174 (ADR-033 둘째 결정) — K 소진 → 새 작성자 + diff 전용 브리프로 **한 번** 스스로 재시작 ─────────
 // 브리프 코멘트·전이 코멘트는 전부 실제 생산자(`kRestartComment`·`lib/transition.js`)가 쓰고, 다음 결정은 그
 // 코멘트들을 실제 독자(`makeKRestartDeps` = 프로덕션 deps)가 다시 읽어 내린다 — 손으로 베낀 마커 문자열은 없다.
@@ -4593,4 +4852,82 @@ test("test_174_main_transition_dep_forwards_the_restart_principal", async () => 
   expect(gh.label).toBe("factory:needs-human");
   // Every hop asked main's ctxExtra builder exactly once, for its own target.
   expect(extras).toEqual(["factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:needs-human"]);
+});
+
+// #157 cf2 (review round 3): the stale-report guard above holds only for a report `resetGates` can delete. A
+// `harness.test.unit_report` outside the repo root is deliberately left alone by gateOutputPaths (never delete a file
+// that is not ours), so a re-run that writes nothing would read the first run's report back — same ids, "RED twice",
+// a false flaky candidate. Such a RED is therefore not re-run at all: the stage keeps today's single-run outcome and
+// records one refusal line. The control is the SAME absolute-path harness pointing inside the root: it re-runs, and its
+// silent re-run is "inconclusive" — so the refusal below is caused by where the report lives, nothing else.
+test("test_157_out_of_root_report_is_no_rerun", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);
+  const scenario = async ({ outside }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb157-root-"));
+    const elsewhere = mkdtempSync(join(tmpdir(), "ktb157-elsewhere-"));
+    const unitPath = outside ? join(elsewhere, "unit.json") : join(root, ".factory/out/unit.json");
+    const harness = {
+      harness: { maturity: "M0" }, project: { default_branch: "main" },
+      gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+      commands: { lint: "node factory/bin/lint.js", unit: `npx vitest run --reporter=json --outputFile=${unitPath}` },
+      test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"], unit_report: unitPath },
+    };
+    const writeRed = () => {
+      mkdirSync(dirname(unitPath), { recursive: true });
+      writeFileSync(unitPath, JSON.stringify({
+        numTotalTests: 132, numPassedTests: 131, numFailedTests: 1,
+        testResults: [{ name: join(root, "server/tests/a.test.ts"), status: "failed", assertionResults: [{ status: "failed", fullName: "t" }] }],
+      }));
+    };
+    let unitRuns = 0;
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "M\tclient/x.ts\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      // Run 1 writes a RED report; run 2 (if any) is killed: exit 1, no report.
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => { unitRuns++; if (unitRuns === 1) writeRed(); return { code: 1, stdout: "", stderr: "" }; } },
+    ]);
+    const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);      // = main()'s reader
+    const assembled = makeStageGateDeps({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => BASE, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    const lines = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(assembled.gates), diffFiles: vi.fn(assembled.diffFiles), suiteFailures: vi.fn(assembled.suiteFailures),
+      resetGates: vi.fn(assembled.resetGates),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async () => {},
+    });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
+    const human = d.transition.mock.calls.map(([a]) => a).find((a) => a.to === "factory:needs-human");
+    return { code, d, lines, unitRuns, unitPath, human };
+  };
+
+  // Out of root: resetGates cannot clear the report, so the RED is never re-run — today's outcome plus one refusal line.
+  const out = await scenario({ outside: true });
+  expect(out.code).toBe(2);
+  expect(out.unitRuns).toBe(1);
+  expect(out.d.gates).toHaveBeenCalledTimes(1);
+  expect(out.d.mergePr).not.toHaveBeenCalled();
+  expect(out.human?.reason).toBe("gates RED at merge");
+  expect(out.lines.some((l) => /rerun 1\/1/.test(l))).toBe(false);
+  const refusals = out.lines.filter((l) => l.startsWith("merge: no gates rerun — "));
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]).toMatch(/unit report is outside the repo root/);
+  expect(refusals[0]).not.toContain(out.unitPath);                    // the absolute host path stays off the public record
+  expect(out.lines.some((l) => l.startsWith("factory-flaky-candidate: "))).toBe(false);
+  expect(existsSync(out.unitPath)).toBe(true);                         // and the foreign file was still not deleted
+
+  // Control — same absolute-path harness, report inside the root: it re-runs, and the silent re-run is inconclusive.
+  const inside = await scenario({ outside: false });
+  expect(inside.code).toBe(2);
+  expect(inside.unitRuns).toBe(2);
+  expect(inside.d.gates).toHaveBeenCalledTimes(2);
+  expect(inside.human?.reason).toMatch(/^gates rerun inconclusive — the re-run wrote no test report/);
+  expect(inside.lines.some((l) => l.startsWith("merge: no gates rerun — "))).toBe(false);
 });
