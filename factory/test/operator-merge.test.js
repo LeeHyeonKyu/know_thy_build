@@ -1,5 +1,6 @@
 import { test, expect } from "vitest";
 import { readFileSync, existsSync, mkdtempSync, mkdirSync, copyFileSync, writeFileSync, chmodSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -160,4 +161,60 @@ test("test_178_operator_merge_check_bin_refuses_engine_files_in_an_adopter", () 
   r = run();
   expect(r.status, r.stderr).toBe(0);
   expect(r.stdout).toMatch(/the operator may merge/);
+}, 60000);
+
+test("test_178_operator_merge_check_one_root_for_every_read", () => {
+  // #178 rework arch1: gh pr view, default_branch, 엔진 판정 — 셋 다 bin이 놓인 체크아웃 하나에서 읽는다.
+  // 세션 cwd가 다른 저장소(채택자 클론)여도 PR 조회·기본 브랜치·엔진 여부가 서로 다른 저장소에서 섞이지 않는다.
+  const repo = new URL("../../", import.meta.url).pathname;
+  const mk = (tag) => {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), `omc-${tag}-`)));
+    mkdirSync(join(d, ".factory/bin"), { recursive: true });
+    mkdirSync(join(d, ".factory/lib"), { recursive: true });
+    return d;
+  };
+  const install = (d) => {
+    copyFileSync(join(repo, "factory/bin/operator-merge-check.js"), join(d, ".factory/bin/operator-merge-check.js"));
+    for (const f of ["operator-merge.js", "non-judge-paths.js", "glob.js"]) copyFileSync(join(repo, "factory/lib", f), join(d, ".factory/lib", f));
+  };
+  const asEngine = (d, branch) => {
+    writeFileSync(join(d, ".factory/harness.toml"), `[project]\nname           = "know-thy-build"\ndefault_branch = "${branch}"\n`);
+    for (const m of ENGINE_MARKERS) { mkdirSync(dirname(join(d, m)), { recursive: true }); writeFileSync(join(d, m), ""); }
+  };
+  const asAdopter = (d, branch) => writeFileSync(join(d, ".factory/harness.toml"), `[project]\nname           = "my-app"\ndefault_branch = "${branch}"\n`);
+  // 가짜 gh: 자기가 돈 cwd를 기록하고, 그 cwd 저장소의 pr.json으로 답한다(없으면 실패) — PR은 cwd가 가리키는 저장소의 것이다.
+  const fakebin = realpathSync(mkdtempSync(join(tmpdir(), "omc-fakebin-")));
+  writeFileSync(join(fakebin, "gh"), `#!/bin/sh\npwd > "${fakebin}/gh-cwd"\ncat "$PWD/pr.json"\n`);
+  chmodSync(join(fakebin, "gh"), 0o755);
+  const run = (binRoot, cwd) => spawnSync(process.execPath, [join(binRoot, ".factory/bin/operator-merge-check.js"), "12"], {
+    cwd, encoding: "utf8", env: { ...process.env, PATH: `${fakebin}:${process.env.PATH}`, GITHUB_ACTIONS: "" },
+  });
+  const ghCwd = () => readFileSync(join(fakebin, "gh-cwd"), "utf8").trim();
+
+  // (a) bin = 엔진 체크아웃(기본 브랜치 main), 세션 cwd = 채택자 클론(기본 브랜치 trunk, PR 데이터 없음).
+  //     PR은 엔진 저장소에서 조회되고, 기본 브랜치도 엔진의 main이다 → 엔진 모듈 PR이 허용된다.
+  const engine = mk("engine"); install(engine); asEngine(engine, "main");
+  const adopter = mk("adopter"); asAdopter(adopter, "trunk");
+  writeFileSync(join(engine, "pr.json"), JSON.stringify(pr({ baseRefName: "main", files: [{ path: ".factory/lib/status.js" }] })));
+  let r = run(engine, adopter);
+  expect(ghCwd()).toBe(engine);
+  expect(r.status, r.stderr).toBe(0);
+  expect(r.stdout).toMatch(/the operator may merge/);
+
+  // (b) bin = 채택자 체크아웃, 세션 cwd = 엔진처럼 보이는 디렉터리(이름 + 표지 + 엔진 파일만 바꾼 PR 데이터).
+  //     PR은 채택자 저장소에서 조회되고, 판정도 채택자다 → 채택자의 .factory/lib/status.js 변경은 판정 경로라 거부.
+  const adopter2 = mk("adopter2"); install(adopter2); asAdopter(adopter2, "main");
+  const engineCwd = mk("enginecwd"); asEngine(engineCwd, "main");
+  writeFileSync(join(engineCwd, "pr.json"), JSON.stringify(pr({ files: [{ path: "docs/research/x.md" }] })));
+  writeFileSync(join(adopter2, "pr.json"), JSON.stringify(pr({ files: [{ path: ".factory/lib/status.js" }] })));
+  r = run(adopter2, engineCwd);
+  expect(ghCwd()).toBe(adopter2);
+  expect(r.status, r.stderr).toBe(2);
+  expect(r.stderr).toMatch(/judge path\(s\) in the PR — a person merges these: \.factory\/lib\/status\.js/);
+
+  // (c) 기본 브랜치는 bin 쪽 harness에서: 엔진 bin의 default_branch가 trunk면, cwd 쪽이 main이어도 main 대상 PR은 거부.
+  asEngine(engine, "trunk"); asAdopter(adopter, "main");
+  r = run(engine, adopter);
+  expect(ghCwd()).toBe(engine);
+  expect(r.status, r.stderr).toBe(2);
 }, 60000);
