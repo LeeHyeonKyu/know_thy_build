@@ -38,3 +38,23 @@ test("전이 그래프는 이 작업으로 바뀌지 않았다 — 상태 13개,
   expect(STATES.size).toBe(13);
   expect([...TRANSITIONS.keys()].length).toBe(13);
 });
+
+// ── #178 (S4a-1) — 거부권 라벨: 카탈로그에 있고, 상태 라벨이 아니다 ─────────────────────────────────────
+test("test_178_veto_label_in_catalog", async () => {
+  const { VETO_LABEL, catalogLabel } = await import("../lib/label-catalog.js");
+  expect(VETO_LABEL).toBe("factory:veto");
+  const l = catalogLabel("factory:veto");
+  expect(l).toBeTruthy();
+  expect(l.name).toBe("factory:veto");
+  expect(l.color).toMatch(/^[0-9a-f]{6}$/);
+  expect(typeof l.description).toBe("string");
+  expect(l.description.length).toBeGreaterThan(0);
+  // 상태 라벨이 아니다 — 전이 그래프가 모르고, tier 라벨도 아니다.
+  expect(STATES.has("factory:veto")).toBe(false);
+  expect(TIER_LABELS.has("factory:veto")).toBe(false);
+  expect(TRANSITIONS.has("factory:veto")).toBe(false);
+  for (const to of TRANSITIONS.values()) expect(to.has("factory:veto")).toBe(false);
+  // 같은 조회가 bootstrap의 라벨도 돌려준다 — 카탈로그는 하나다. 없는 이름은 null.
+  expect(catalogLabel("factory:approved")).toEqual(byName("factory:approved"));
+  expect(catalogLabel("factory:nope")).toBeNull();
+});

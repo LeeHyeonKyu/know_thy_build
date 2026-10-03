@@ -38,6 +38,26 @@ export const IMPROVEMENT_LABEL = "factory-improvement";
  */
 export const HEALTH_LABEL = "factory:health";
 
+/**
+ * #178 (S4a-1, ADR-033) — **소유자의 거부권.** 엔진 저장소가 판정 경로 PR을 스스로 머지하기 전 여는 창 동안 이 라벨이
+ * 붙으면 머지는 사람에게 넘어간다 — 그 창과 읽는 쪽은 S4a-2다. 지금은 카탈로그에 정의만 있고 아무도 붙이거나 읽지 않는다.
+ * 상태 라벨이 아니다: tier 라벨처럼 상태와 공존하고, 전이 그래프(`labels.js`의 `STATES`/`TRANSITIONS`)는 이 라벨을 모른다.
+ */
+export const VETO_LABEL = "factory:veto";
+/**
+ * 그 라벨의 정의(색·설명). **`LABELS` 배열 밖에 둔다** — `bootstrap.test.js`가 bootstrap이 만드는 라벨 수를 21로 못 박고
+ * 있고, #178은 그 테스트를 `tests_changed_allowed:`에 올리지 않았다. bootstrap에 합치는 것은 후속 이슈의 몫이다.
+ * 정의를 얻는 쪽은 `catalogLabel`로 이름을 찾는다.
+ */
+export const VETO_LABEL_SPEC = Object.freeze({ name: VETO_LABEL, color: "000000", description: "소유자의 거부권 — 엔진의 자동 머지를 막고 사람 머지로 돌린다" });
+
+/** 카탈로그 조회 — `LABELS`(bootstrap이 만드는 21개)와 `VETO_LABEL_SPEC`을 이름으로 한 곳에서 찾는다. 없으면 null. */
+export function catalogLabel(name) {
+  if (name === VETO_LABEL) return { ...VETO_LABEL_SPEC };
+  const l = LABELS.find((x) => x.name === name);
+  return l ? { ...l } : null;
+}
+
 export const LABELS = [
   { name: "backlog", color: "c5def5", description: "스펙은 있으나 착수하지 않음" },
 
