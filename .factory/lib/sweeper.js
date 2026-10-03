@@ -8,6 +8,7 @@ import { allChecksGreen, GH_NO_CHECKS_RE } from "./gh.js";
 import { latestHandoff } from "./handoff.js";
 import { findOpenHarnessIssueFor } from "./harness-request.js";
 import { HEALTH_LABEL, IMPROVEMENT_LABEL } from "./label-catalog.js";
+import { breakerOpenComment, breakerOpenMarker, BREAKER_STATE_VERSION } from "./breaker.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -1465,13 +1466,53 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
 }
 
 /**
+ * ── #189 (S4c, ADR-033) — 차단기의 열림을 **바뀔 때 한 번** 기록하고 알린다(cron 전용) ────────────────────────────────────
+ *
+ * `breaker.read()`가 그 순간의 차단기를 계산한다(merge 스테이지와 같은 함수 — `lib/breaker.js` `readBreaker`). 이 팔이 쓰는 것은
+ * 판정이 아니라 **알림의 워터마크**다: 저장된 상태가 이미 "같은 since로 열림"이면 쓰지 않는다. 순서는 기록 → 코멘트이고, 코멘트는
+ * `since`를 실은 마커로 dedupe한다 — 기록은 됐는데 코멘트가 실패했으면 다음 sweep이 마커를 찾아 빠진 것만 채운다.
+ * 닫힘은 쓰지 않는다: 시간은 차단기를 닫지 않고(입력에 시계가 없다), 닫는 것은 사람의 `factory breaker --reset`뿐이다. 그래서
+ * 계산이 닫힘이면 아무것도 쓰지 않는다. 못 읽으면(ok:false) 아무것도 쓰지도 알리지도 않고 error 한 줄을 남긴다.
+ * 알림은 상태 변화 하나에 **정확히 하나**다: 연속을 채운 마지막 자동 머지의 추적 이슈(사람이 라벨·needs-human을 보는 자리)에
+ * 달고, 그 이슈 번호를 모를 때만 PR에 단다. 같은 열림을 두 자리에 알리면 "한 번"이 아니다(dw6).
+ */
+async function sweepBreaker({ gh, breaker, actions }) {
+  if (!breaker || typeof breaker.read !== "function") return;
+  let ev;
+  try { ev = await breaker.read(); } catch (e) { ev = { ok: false, reason: `${e?.message || e}` }; }
+  if (!ev?.ok) { actions.push({ kind: "error", step: "breaker", error: `breaker state unknown — ${ev?.reason || "unknown"}` }); return; }
+  if (ev.open !== true) { actions.push({ kind: "breaker-closed", detail: ev.detail ?? null }); return; }
+  const stored = ev.state ?? null;
+  if (!(stored?.open === true && stored.since === ev.since)) {
+    const state = { version: BREAKER_STATE_VERSION, open: true, since: ev.since, reason: ev.reason, closed_by: stored?.closed_by ?? null, closed_at: stored?.closed_at ?? null };
+    let w;
+    try { w = await breaker.write({ state, blob: ev.blob ?? null }); } catch (e) { w = { ok: false, reason: `${e?.message || e}` }; }
+    if (!w?.ok) { actions.push({ kind: "error", step: "breaker", error: `breaker state write failed${w?.moved ? " (state moved — next sweep re-reads)" : ""} — ${w?.reason || "unknown"}` }); return; }
+    actions.push({ kind: "breaker-opened", since: ev.since, reason: ev.reason, issue: ev.latest?.issue ?? null, pr: ev.latest?.pr ?? null });
+  }
+  const marker = breakerOpenMarker(ev.since);
+  const target = [ev.latest?.issue, ev.latest?.pr].find((n) => Number.isInteger(n) && n > 0);
+  if (target === undefined) actions.push({ kind: "error", step: "breaker", error: `breaker open since ${ev.since} but no issue or PR to announce it on — ${ev.reason}` });
+  for (const n of target === undefined ? [] : [target]) {
+    try {
+      const comments = await gh.comments(n);
+      if ((Array.isArray(comments) ? comments : []).some((c) => String(c?.body ?? "").includes(marker))) continue;
+      await gh.comment(n, breakerOpenComment({ since: ev.since, reason: ev.reason }));
+      actions.push({ kind: "breaker-announced", issue: n, since: ev.since });
+    } catch (e) {
+      actions.push({ kind: "error", step: "breaker", issue: n, error: `breaker-open comment failed — ${e?.message || e}` });
+    }
+  }
+}
+
+/**
  * `quick`(KTB-26): 스테이지 워크플로의 마지막 스텝이 쓰는 모양(`sweep.js --quick`). 시간에 묶인 두 팔
  * (격리 정책 적용과 토큰 만료 이슈 생성)을 건너뛰고 **상태 복구 팔만** 돌린다 — in-progress 하트비트
  * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false, installedVersion = null }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false, installedVersion = null, breaker = null }) {
   /**
    * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 계정으로 판정한다(`commentsSinceCycleStart`). 팩토리 계정 이름 하나를
    * 여기서 한 번만 구한다. 못 구하면 null — 그때 창은 "작성자가 있는 human 마커"에만 리셋된다(닫힌 쪽).
@@ -1685,6 +1726,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions, factoryLogin });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
   if (quick) return actions;                     // KTB-26 — 아래 팔들은 시간에 묶여 있다(cron의 몫)
+  // #189 — 차단기의 평가·기록은 cron(quick=false)의 몫이다. merge 스테이지는 이 기록이 아니라 자기 계산을 믿는다.
+  await sweepBreaker({ gh, breaker, actions });
   // KTB-46 (r3 nit 3): 사람이 머지 버튼을 누르는 사건은 스테이지 잡이 끝나는 순간과 무관하다 —
   // cron 주기(≤30분) 안에 반영되면 충분하고, 매 스테이지마다 돌리면 주차된 이슈마다 "아직 머지
   // 안 됨" 줄만 쌓인다. 그래서 격리·토큰 만료와 같은 쪽에 선다.

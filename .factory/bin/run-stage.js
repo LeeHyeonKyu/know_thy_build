@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, breakerThresholds } from "../lib/config.js";
 import { composeEnv } from "../lib/test-env.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
 import { backPressure } from "../lib/back-pressure.js";
@@ -43,6 +43,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { readBreaker } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
@@ -2181,6 +2182,22 @@ export function makeMergeSelfChangeDeps({ gh, issue, getCharter, getEngine, env 
 }
 
 /**
+ * #189 (S4c, ADR-033) — merge-stage의 `d.breaker`: 자동 머지 회로차단기. 자기 변경 경로에서 창 앞·뒤로 한 번씩 불린다. 매번 **새로
+ * 계산한다**: `factory/records`의 상태 파일(사람의 리셋 시각) + run 기록의 자동 머지 줄 + origin 기본 브랜치의 revert(`lib/breaker.js`
+ * `readBreaker`). 임계는 CHARTER `self_change.breaker`(없으면 기본값)에서 **늦게** 읽는다(CHARTER는 charterReady에서 생긴다).
+ * `run`/`root`가 없으면(배선 누락) ok:false — 닫힘이 아니다. `main()`이 deps 리터럴에 그대로 싣는다.
+ */
+export function makeMergeBreakerDep({ run, root, getCharter, getDefaultBranch = () => "main" }) {
+  return async () => {
+    if (typeof run !== "function" || !root) return { ok: false, reason: "the breaker reader is not wired (run/root missing)" };
+    let thresholds;
+    try { thresholds = breakerThresholds(getCharter?.()?.self_change); }
+    catch (e) { return { ok: false, reason: `CHARTER self_change.breaker is invalid — ${e?.message || e}` }; }
+    return readBreaker({ run, cwd: root, defaultBranch: getDefaultBranch?.() || "main", thresholds });
+  };
+}
+
+/**
  * ── #174 (ADR-033 둘째 결정) — K 소진의 재시작 deps(프로덕션 = 테스트가 그대로 쓰는 것) ──────────────────────────
  *
  * 셋 다 같은 창(`commentsSinceRequeue`)을 본다 — 재큐는 K와 재시작 예산을 함께 되돌리고, 사람의 `reason=retry`는 어느 쪽도
@@ -3576,6 +3593,8 @@ async function main() {
      */
     transitionOther: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal }),
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
+    /** #189 (S4c) — 자동 머지 회로차단기(merge 전용, 자기 변경 경로에서만 불린다). 언제나 함수다 — 재료가 없으면 ok:false를 낸다. */
+    breaker: makeMergeBreakerDep({ run, root, getCharter: () => charter, getDefaultBranch: () => harness?.project?.default_branch ?? "main" }),
     /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
      * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */
     prChecks: (pr) => gh.prChecks(pr),
