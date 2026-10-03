@@ -28,8 +28,8 @@
 | reviewer overlap | 없음 | 0.43 (6/14, runs 13) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1 |
 | qa na ratio | 0.04 (1/23 claims, na-heavy 0/3 approvals) | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
-| cost (usd) | 111.19 | 372.00 |
-| tokens | input 2388897 / output 210544 | input 11127235 / output 778209 |
+| cost (usd) | 135.69 | 372.00 |
+| tokens | input 2623912 / output 240042 | input 11127235 / output 778209 |
 | retro cost (usd) | 0.00 | 6.30 |
 | retro tokens | input 0 / output 0 | input 14 / output 13418 |
 | full retros | — | 5 |
@@ -636,6 +636,14 @@
           149
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "dw3 says that after a successful restart the new author gets a full K review rounds. That breaks after a single genuine label-swap failure anywhere in the requeue window. The failure path is not forged; it is the `factory-transition-failed` case that dw3 itself pins. The 2K ceiling counts attempts with `honourFailed:false`, so the failed transition counts as a used slot, and the new author is stopped at round K-1 with reason '2K ceiling'. The ADR text says the new author loses a round only with 'two or more' failures in a window ('한 창에 둘 이상이면 새 작성자가 라운드를 잃는다'). That is wrong: one failure is enough. So both the spec claim (dw3) and the recorded decision are false on a path the tests cover.",
+        "runs": [
+          174
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -708,6 +716,24 @@
         "text": "dw1 and dw2 lock in the issue's false premise that 'merge는 한 런뿐이라 영원히 모이지 않는다' and that a new marker is how the harvest gets fed. The existing flaky path does not need multiple runs. It opens a `factory:flaky` issue on the first classification. A marker with no reader, which the product-advocate admits is the case, means that six months from now a real DB race in own-calendar (`test_49_event_visibility` is about event visibility, which may be a product race rather than a test bug) gets auto-merged past again and again, and nobody gets a ticket. That is this plan's most expensive failure: a product race condition, hidden by green-after-rerun, with no issue filed. It must go into open_risks, and the green-after-rerun path must produce something a person or the harvester will actually see.",
         "runs": [
           157
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "Having the 'has this cycle used its restart' check accept a marker from any author is not purely fail-safe once a mistaken needs-human costs a human request. And the cycle boundary 'since last requeue' alone ignores a human --retry. The operator's --retry produces a by=human transition without a requeue, so the restart budget would not come back and the factory would go straight to needs-human right after the human acted. Product-advocate's dw4 (budget restored after a human retry) is needed and the architect's boundary is missing it.",
+        "runs": [
+          174
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "dw4 ('a human --retry restores the self-restart') — product-advocate's R1 position that the restart budget belongs to a cycle reset by a human --retry or requeue; architect and skeptic objected in R2 and product-advocate did not concede it.",
+        "runs": [
+          174
         ],
         "source": "dissent"
       }
@@ -820,10 +846,10 @@
     "qa_na_ratio": 0.04,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 111.192884,
+      "cost_usd": 135.690482,
       "tokens": {
-        "input": 2388897,
-        "output": 210544
+        "input": 2623912,
+        "output": 240042
       }
     }
   },
