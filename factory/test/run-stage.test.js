@@ -5786,3 +5786,25 @@ test("test_195_run_stage_hands_merge_an_evidence_slot_even_when_the_dep_is_dropp
     expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
   }
 });
+
+// ── #195 rework arch1 — the run-record path has ONE owner: run-record.js's `runRecordPath`. The writer (`appendRunRecord`)
+// and every reader in run-stage (the evidence dep, readRunRecord, lifetimeBudget) take the path from it; no copy of the
+// `docs/factory/runs/<issue>.md` rule is rebuilt from a literal anywhere in run-stage.js.
+import * as runRecord195 from "../lib/run-record.js";
+
+test("test_195_run_record_path_has_one_owner", async () => {
+  expect(typeof runRecord195.runRecordPath).toBe("function");
+  const root = mkdtempSync(join(tmpdir(), "rs195-path-"));
+  // Pure: asking for the path creates nothing.
+  expect(runRecord195.runRecordPath({ root, issue: 7 })).toBe(join(root, "docs/factory/runs/7.md"));
+  expect(existsSync(join(root, "docs"))).toBe(false);
+  // The writer writes exactly there.
+  const written = appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-1", now: "2026-10-03T09:00:00Z", lines: ["x"] });
+  expect(written).toBe(runRecord195.runRecordPath({ root, issue: 7 }));
+  expect(runRecord195.runRecordPath({ root, issue: 12 })).toBe(join(root, "docs/factory/runs/12.md"));
+  // run-stage rebuilds the rule nowhere: no `join(root, "docs/factory/runs", …)` literal, and it imports the owner's function.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src.match(/join\(\s*root\s*,\s*["'`]docs\/factory\/runs/g)).toBeNull();
+  expect(src).toMatch(/^import \{[^}]*\brunRecordPath\b[^}]*\} from "\.\.\/lib\/run-record\.js";$/m);
+  expect((src.match(/runRecordPath\(\{ root, issue \}\)/g) ?? []).length).toBe(3);
+});

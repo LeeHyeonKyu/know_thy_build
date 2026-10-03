@@ -9,8 +9,17 @@ export function appendRunRecord({ root, issue, title = "", stage, runnerId, line
   return p;
 }
 
+/**
+ * #195 rework arch1 — the ONE owner of the run-record path rule (`<root>/docs/factory/runs/<issue>.md`). Pure: it creates
+ * nothing. The writer below and every reader (run-stage's evidence dep, readRunRecord, lifetimeBudget) take the path from
+ * here, so a reader cannot drift from the file `appendRunRecord` writes.
+ */
+export function runRecordPath({ root, issue }) {
+  return join(root, "docs/factory/runs", `${issue}.md`);
+}
+
 function recordPath({ root, issue, title = "" }) {
-  const p = join(root, "docs/factory/runs", `${issue}.md`);
+  const p = runRecordPath({ root, issue });
   mkdirSync(dirname(p), { recursive: true });
   if (!existsSync(p)) writeFileSync(p, `# Run · #${issue}${title ? " " + title : ""}\n`);
   return p;

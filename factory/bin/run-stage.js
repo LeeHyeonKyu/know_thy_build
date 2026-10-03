@@ -38,7 +38,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
@@ -2171,9 +2171,9 @@ export function withEvidenceSlot(d) {
  */
 export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
   // Without a reader of its own, the dep reads the record `appendRunRecord` writes for this issue under `root` (main() passes
-  // only its checkout root, so the path is the writer's — `docs/factory/runs/<issue>.md` — and cannot drift to another one).
+  // only its checkout root). The path comes from run-record.js's `runRecordPath` — the same function the writer uses.
   if (typeof readRecord !== "function") {
-    const p = root ? join(root, "docs/factory/runs", `${issue}.md`) : null;
+    const p = root ? runRecordPath({ root, issue }) : null;
     readRecord = () => (p && existsSync(p) ? readFileSync(p, "utf8") : null);
   }
   return {
@@ -3219,7 +3219,7 @@ async function main() {
          * 말해 주는 것은 같은 워크스페이스의 run 기록뿐이다. 읽기 실패는 던지지 않고 `null`이다 —
          * `stageSettled`가 그것을 "모른다"로 읽고 크게(aborted) 기록한다.
          */
-        readRunRecord: () => { try { return readFileSync(join(root, "docs/factory/runs", `${issue}.md`), "utf8"); } catch { return null; } },
+        readRunRecord: () => { try { return readFileSync(runRecordPath({ root, issue }), "utf8"); } catch { return null; } },
         syncRecords: () => syncRecords({ run, cwd: root, message: `run-record: issue #${issue} ${stage} aborted (${runnerId})` }),
       },
     }));
@@ -3276,7 +3276,7 @@ async function main() {
     backPressure: () => backPressure({ gh, charter, quarantine: loadQuarantine(root), thresholds: harness.gates.thresholds }),
     // 1.4.16 (KTB #44) — 하이드레이트된 이 이슈의 run 기록(`docs/factory/runs/<n>.md`)이 평생 비용의 출처다.
     lifetimeBudget: () => {
-      const p = join(root, "docs/factory/runs", `${issue}.md`);
+      const p = runRecordPath({ root, issue });
       return budgetCheck({ charter, recordText: existsSync(p) ? readFileSync(p, "utf8") : null });
     },
     trustWorkspace: () => trustWorkspace({ root }),
