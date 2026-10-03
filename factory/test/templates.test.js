@@ -324,6 +324,10 @@ test("dispatcher commands exist for the four LLM stages plus retro, and each nam
     // review만은 `context.json` 경로를 args에 아예 싣지 않는다 — 리뷰어는 역할별 파일만 본다(H4).
     expect(t).toContain(".factory/out/loaded.json");
     if (s !== "review") expect(t).toContain(".factory/out/context.json");
+    // 2026-10-03 (own-calendar #124, KTB #170): Workflow는 백그라운드다 — 결과는 task-notification으로 온다. 디스패처는 그것을
+    // **기다려야** 하고 출력 파일을 읽거나 폴링하면 안 된다. 네 디스패처가 같은 문장을 든다.
+    expect(t).toContain("Wait for that message");
+    expect(t).toContain("Do not read the task's output file");
   }
   // retro는 스테이지가 아니다(라벨 상태 머신 밖의 잡) — context.json이 아니라 L1이 써 둔 후보 파일을 받는다.
   const retro = read("claude/commands/factory-retro.md");

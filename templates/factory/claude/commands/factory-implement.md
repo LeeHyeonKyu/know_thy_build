@@ -34,5 +34,14 @@ the value is parsed by a machine and validated against a schema, so an abridged
 copy is not a smaller answer — it is a wrong one. Length is never a reason to
 shorten it; if it is long, emit all of it anyway.
 
+The Workflow tool runs the workflow in the **background**: its immediate result is only a
+receipt ("launched … Task ID …"), not the return value. The return value arrives later, by
+itself, as a `<task-notification>` message in this conversation. **Wait for that message.**
+Do not read the task's output file, do not run `cat`/`jq`/`tail` on it, do not poll, do not
+ask for status — every turn spent that way is a turn this stage cannot get back (own-calendar
+#124: three finished verdicts were lost because the dispatcher read the output file until its
+turns ran out). When the notification arrives, the JSON it carries is the return value: emit
+it as raw JSON, complete and verbatim.
+
 Do not read any other file, run any command, or edit anything. If the workflow fails, return
 its error verbatim.
