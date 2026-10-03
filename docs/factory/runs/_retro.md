@@ -28,8 +28,8 @@
 | reviewer overlap | 없음 | 0.53 (16/30, runs 31) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 4, architecture 3 |
 | qa na ratio | 없음 | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
-| cost (usd) | 22.05 | 624.92 |
-| tokens | input 329918 / output 33942 | input 17203431 / output 1312904 |
+| cost (usd) | 30.06 | 624.92 |
+| tokens | input 418854 / output 37775 | input 17203431 / output 1312904 |
 | retro cost (usd) | 0.00 | 8.45 |
 | retro tokens | input 0 / output 0 | input 22 / output 21249 |
 | full retros | — | 7 |
@@ -1238,10 +1238,10 @@
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 22.04786,
+      "cost_usd": 30.056969,
       "tokens": {
-        "input": 329918,
-        "output": 33942
+        "input": 418854,
+        "output": 37775
       }
     }
   },
