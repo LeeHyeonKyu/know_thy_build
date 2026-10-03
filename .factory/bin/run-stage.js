@@ -4,7 +4,8 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
+import { makeGh, allChecksGreen, resolveFactoryLogins, PR_BODY_TIMEOUT_MS, bounded } from "../lib/gh.js";
+import { buildEvidence, applyEvidenceSection, evidenceComment, hasEvidenceComment, PR_BODY_MAX_CHARS } from "../lib/evidence.js";
 import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
 import { composeEnv } from "../lib/test-env.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
@@ -2123,6 +2124,51 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
 }
 
 /**
+ * #195 — `makePrEvidenceDeps`: merge-stage's `publishPrEvidence` + `postEvidenceComment` (the PR-evidence dep is named apart
+ * from feedback's `appendEvidence`). The section is built by `lib/evidence.js` — imported statically at the top of this file,
+ * so it is the base-branch engine's copy (loaded when the process started on the base checkout, before checkoutHead): a PR
+ * that changes evidence.js does not render its own evidence. Inputs: the local hydrated run record (`readRecord`), the
+ * issue's comments, this merge run's live gates result passed in by merge-stage — never the record's FACTORY_GATES line —
+ * and this run's lifetime budget check (`lifetimeBudget`, the same `budgetCheck` the stage gate uses — never a record
+ * `budget:` line, which carries no run id).
+ * PR-body I/O goes only through gh.js: `prBody` immediately before `editPrBody` (read-modify-write; a human edit landing
+ * between the two can still be lost — gh has no compare-and-swap on a PR body), each bounded by `timeoutMs`, no retry; the
+ * comment read is bounded the same way. merge-stage's `signal` cancels the step: checked before the write and handed to the
+ * `gh pr edit` child, so a timed-out step never writes after the merge or the transition. A body whose author text alone is
+ * over GitHub's limit is a failure, not a write. Any failure rejects; merge-stage turns it into the one `evidence: FAIL — …`
+ * line. The marked issue comment is posted only after a merge (merge-stage calls `postEvidenceComment` then) and at most
+ * once — an existing marked comment is reused.
+ */
+export function makePrEvidenceDeps({ gh, issue, readRecord, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS, lifetimeBudget = null }) {
+  return {
+    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null } = {}) => {
+      const live = () => { if (signal?.aborted) throw (signal.reason ?? new Error("evidence step aborted")); };
+      let recordText = null;
+      try { recordText = readRecord(); } catch { recordText = null; }
+      let budget = null;
+      try { budget = typeof lifetimeBudget === "function" ? lifetimeBudget() : null; } catch { budget = null; }
+      const comments = await bounded(() => gh.comments(issue), { ms: timeoutMs, what: "gh issue comments", signal });
+      live();
+      const { markdown, data } = buildEvidence({ recordText, comments, gates, gatesRerun, reason, budget, pr, now: now() });
+      const current = await gh.prBody(pr, { timeoutMs, signal });
+      live();
+      const next = applyEvidenceSection(current, markdown);
+      if (next.overflow) {
+        const outside = String(current ?? "").length;
+        throw new Error(`PR #${pr} body is already ${outside} characters outside the evidence section — over GitHub's ${PR_BODY_MAX_CHARS}-character limit; section not written`);
+      }
+      await gh.editPrBody(pr, next.body, { timeoutMs, signal });
+      return { ok: true, route, markdown, truncated: next.truncated, unbound: data.unbound };
+    },
+    postEvidenceComment: async (markdown) => {
+      if (hasEvidenceComment(await gh.comments(issue))) return { ok: true, posted: false };
+      await gh.comment(issue, evidenceComment(markdown));
+      return { ok: true, posted: true };
+    },
+  };
+}
+
+/**
  * `makeMergeSelfChangeDeps`: merge-stage의 `selfChange`·`engine`·`neverAutomate`·`mergePr`·`vetoWindow`·`vetoLabel`·`now`·`jobStartedAt`·`jobTimeoutMinutes`.
  * `selfChange`·`engine`은 **게터**다(CHARTER와 base 판정은 charterReady에서 생긴다) — 조립하는 쪽은 펼치지(`...`) 말고
  * `Object.getOwnPropertyDescriptors`로 옮긴다. GitHub 호출은 전부 gh.js를 지난다: 창은 `setStatus`/`commitStatuses`, 거부권은
@@ -3471,6 +3517,8 @@ async function main() {
     comment: (number, body) => gh.comment(number, body),
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
+    /** #195 — merge stage: the runner's PR evidence (base-engine evidence.js, the hydrated local record, gh.js body read/edit). */
+    ...makePrEvidenceDeps({ gh, issue, readRecord: () => readFile(join(root, "docs/factory/runs", `${issue}.md`)), lifetimeBudget: () => deps.lifetimeBudget() }),
     /**
      * ADR-021 — 두 배우 모드의 표식. 워크플로(`factory-merge.yml`)가 `FACTORY_TWO_ACTOR`에
      * `${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — **토큰 값을 한 번 더 복사하지 않고**

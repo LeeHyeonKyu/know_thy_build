@@ -74,6 +74,30 @@ export async function resolveRepo({ run }) {
 export const LABEL_RETRY_DELAYS_MS = [1000, 3000, 9000];
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** #195 — the PR-body read/edit bound (the merge stage puts its own, larger bound around the whole evidence step). */
+export const PR_BODY_TIMEOUT_MS = 30 * 1000;
+/**
+ * `start(signal)` bounded by `ms` and by the caller's `signal`: whichever fires first rejects AND aborts the signal handed to
+ * `start` — `run()` kills an aborted child (lib/exec.js), so a timed-out `gh` is ended, not left running to land later. The
+ * timer and the listener never outlive the call.
+ */
+export function bounded(start, { ms, what, signal = null }) {
+  const ac = new AbortController();
+  let timer, onAbort;
+  const stop = new Promise((_, reject) => {
+    const fire = (e) => { ac.abort(e); reject(e); };
+    timer = setTimeout(() => fire(new Error(`${what} timed out after ${ms} ms`)), ms);
+    if (signal) {
+      onAbort = () => fire(signal.reason ?? new Error(`${what} aborted`));
+      if (signal.aborted) onAbort(); else signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+  return Promise.race([Promise.resolve().then(() => start(ac.signal)), stop]).finally(() => {
+    clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  });
+}
+
 /**
  * 팩토리 자신의 계정 **이름**(값이 아니다) — commit status의 게시자를 대조할 기준(외부 감사 H1b).
  *
@@ -631,6 +655,21 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      */
     async prReady(pr) {
       await gh(["pr", "ready", String(pr), "-R", repo]);
+    },
+    /**
+     * #195 — the PR body, read right before the runner rewrites its evidence section (read-modify-write). Bounded by a
+     * timeout and never retried: the caller sits right before a merge or a hand-off, and a slow GitHub must not hold it.
+     */
+    async prBody(pr, { timeoutMs = PR_BODY_TIMEOUT_MS, signal = null } = {}) {
+      const out = await bounded((s) => gh(["pr", "view", String(pr), "-R", repo, "--json", "body"], { signal: s }), { ms: timeoutMs, what: "gh pr view --json body", signal });
+      return JSON.parse(out).body ?? "";
+    },
+    /**
+     * #195 — replace the PR body. The body goes on stdin (`--body-file -`), never into argv. Timeout, no retry. A timeout or
+     * the caller's abort kills the `gh` child (so the edit cannot land after the caller moved on).
+     */
+    async editPrBody(pr, body, { timeoutMs = PR_BODY_TIMEOUT_MS, signal = null } = {}) {
+      await bounded((s) => gh(["pr", "edit", String(pr), "-R", repo, "--body-file", "-"], { input: body, signal: s }), { ms: timeoutMs, what: "gh pr edit --body-file", signal });
     },
     /**
      * ADR-021 — 두 배우 모드의 승인 한 번. **머지 배우의 토큰으로만** 의미가 있다: PR을 연 계정

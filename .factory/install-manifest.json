@@ -376,6 +376,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/evidence.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/exec.js",
       "owner": "factory"
     },
