@@ -4269,6 +4269,18 @@ ok:false를 확인한다.
 - *되돌리기.* retro.js의 변경은 `syncRecords` 직접 호출 한 줄로 되돌리면 원래대로다(가드 없는 동작). 소유자가 가드를 별도 이슈로 원하면
   retro.js 한 줄과 run-stage의 두 동기화 자리를 되돌리고 위 넷 테스트를 그 이슈로 옮긴다 — 다만 그 사이 dw4가 지키는 경계는 열려 있다.
 
+**rework r5 cf1 — 자동 머지의 증거는 머지 전에 브랜치에 있다.** 이전에는 자동 머지 줄이 `mergePr` **뒤에** 로컬 run 기록에만 적혔고, 스테이지 끝의
+동기화(내부 재시도 한 번, 실패는 로그뿐)만이 그것을 `factory/records`로 날랐다. 그 동기화를 잃으면 일회용 러너와 함께 줄이 사라지고, 나중의 revert는
+PR에 귀속되고도 세어지지 않았다 — 두 연속 revert에도 `{ok:true, open:false}`(fail-open). 이제 merge 스테이지는 줄을 run 기록에 쓴 뒤
+`d.persistSelfMerge`(run-stage: `persistSelfMergeEvidence` — 같은 `recordsGuard`로 동기화한 다음 브랜치를 **다시 읽어** `<issue>.md`의 merge 섹션에서
+그 줄을 확인)를 부르고, ok일 때만 머지한다. ok:false·던짐·배선 누락은 blocked이고 PR은 머지되지 않는다. 그러면 abort 경로의 GitHub 보증(prView)도
+더는 그 머지의 유일한 생명줄이 아니다 — 줄은 이미 브랜치에 있어 가드의 "브랜치에 있던 줄"로 남는다.
+- *대가.* 줄의 `at`은 머지 직전 시각이다. 이 뒤에 `mergePr`가 실패하면 줄은 main에 없는 PR을 가리키고, 차단기는 main에서 확인되지 않은 revert 없는
+  판정 머지로 연속을 끊지 않으므로(sec2) 해가 없다. 그 PR이 나중에 **사람의** 손으로 머지되고 revert되면 판정 자동 머지로 세어진다 — 넘치게 세는 쪽
+  (사람의 리셋으로 끝난다)이고, 받아들인다. merge 스테이지마다 `factory/records` push 하나와 읽기 하나가 는다(자기 변경 경로에서만).
+- *증거.* `test_189_self_merge_evidence_is_durable_on_factory_records_before_the_merge`(merge-stage.test.js — 두 경로, 실패 넷),
+  `test_189_lost_stage_end_sync_never_hides_a_judge_automerge_from_the_breaker`(breaker.test.js — 리뷰어의 재현: 스테이지 끝 push 실패 + 러너 소멸 뒤에도 열림).
+
 **남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
 push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
 지우면 반대로 "리셋 이력 없음"이 되어 옛 revert가 다시 세어진다. 매 머지 확인마다 records 전부와 git log를 읽으므로 merge 스테이지 지연이 history 크기에 따라 는다.

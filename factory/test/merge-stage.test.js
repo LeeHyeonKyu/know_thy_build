@@ -75,6 +75,7 @@ const baseD = (over = {}) => ({
   closeIssue: vi.fn(async () => {}),
   sleep: vi.fn(async () => {}),
   breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "0 self-merge record(s) (0 judge), 0 revert(s) of PRs on origin/main" })), // #189: run-stage always wires a breaker; a closed one keeps the S4a-2 path as it was
+  persistSelfMerge: vi.fn(async () => ({ ok: true })), // #189 rework r5 cf1: run-stage always wires the pre-merge evidence writer; a confirmed write keeps the S4a-2 path as it was
   ...over,
 });
 const basePostStatus = (over = {}) => Object.assign(vi.fn(async () => {}), over);
@@ -3304,4 +3305,60 @@ test("test_189_breaker_answer_without_boolean_open_never_merges", async () => {
       expect(late.mergePr, `${route} late ${label}`).not.toHaveBeenCalled();
     }
   }
+}, 120000);
+
+// ── #189 rework r5 cf1 — 자동 머지의 증거는 머지 **전에** factory/records에 있어야 한다(스테이지 끝 동기화는 최선 노력이다) ─────────
+test("test_189_self_merge_evidence_is_durable_on_factory_records_before_the_merge", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "0 revert(s)" };
+  const routes = {
+    non_judge: (over = {}) => selfD179({ breaker: vi.fn(async () => CLOSED), ...over }),
+    judge: (over = {}) => selfD179({
+      breaker: vi.fn(async () => CLOSED),
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      ...over,
+    }),
+  };
+  for (const [route, mk] of Object.entries(routes)) {
+    // (1) 증거가 브랜치에 닿았다 → 그 다음에야 머지한다. 넘긴 줄은 실제 생산자의 줄이고, 그 줄은 이미 run 기록에 적혀 있다(밀 것이 있다).
+    const { lines, record } = makeRecord();
+    let recordedFirst = null;
+    const ok = mk({ persistSelfMerge: vi.fn(async ({ line }) => { recordedFirst = lines.includes(line); return { ok: true }; }) });
+    const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d: ok, record, refusal, postStatus: basePostStatus() });
+    expect(code, route).toBe(0);
+    expect(ok.persistSelfMerge, route).toHaveBeenCalledTimes(1);
+    const sent = ok.persistSelfMerge.mock.calls[0][0].line;
+    expect(parseSelfMergeLines(`## merge · x · y\n${sent}\n`), route).toEqual([expect.objectContaining({ issue: 7, pr: 9, sha: HEAD, judge: route === "judge" })]);
+    expect(recordedFirst, route).toBe(true);
+    expect(ok.persistSelfMerge.mock.invocationCallOrder[0], route).toBeLessThan(ok.mergePr.mock.invocationCallOrder[0]);
+    expect(ok.persistSelfMerge.mock.invocationCallOrder[0], route).toBeGreaterThan(ok.breaker.mock.invocationCallOrder.at(-1));
+    expect(ok.transition.mock.calls.map((x) => x[0].to), route).toEqual(["factory:merged"]);
+
+    // (2) 증거를 브랜치에 올리지 못하면(ok:false·던짐·배선 누락) 머지하지 않는다 — blocked, 사유가 factory/records와 원인을 말한다.
+    const failures = [
+      ["ok:false", { persistSelfMerge: vi.fn(async () => ({ ok: false, reason: "git push factory/records rejected: HTTP 503" })) }, /HTTP 503/],
+      ["throws", { persistSelfMerge: vi.fn(async () => { throw new Error("socket hang up"); }) }, /socket hang up/],
+      ["not wired", { persistSelfMerge: undefined }, /not wired/],
+      ["no answer", { persistSelfMerge: vi.fn(async () => undefined) }, /factory\/records/],
+    ];
+    for (const [label, over, why] of failures) {
+      const d = mk(over);
+      if (over.persistSelfMerge === undefined) delete d.persistSelfMerge;
+      const r = await run179(d);
+      expect(r.code, `${route} ${label}`).toBe(2);
+      expect(d.mergePr, `${route} ${label}`).not.toHaveBeenCalled();
+      const ts = d.transition.mock.calls.map((x) => x[0]);
+      expect(ts.map((t) => t.to), `${route} ${label}`).toEqual(["factory:blocked"]);
+      expect(ts[0].reason, `${route} ${label}`).toMatch(/factory\/records/);
+      expect(ts[0].reason, `${route} ${label}`).toMatch(why);
+      expect(d.closeIssue, `${route} ${label}`).not.toHaveBeenCalled();
+    }
+  }
+
+  // 자기 변경 경로가 아닌 머지는 자동 머지 증거를 쓰지 않는다(차단기는 그 머지를 세지 않는다).
+  const plain = baseD({ persistSelfMerge: vi.fn(async () => ({ ok: true })) });
+  expect(await run(plain)).toBe(0);
+  expect(plain.persistSelfMerge).not.toHaveBeenCalled();
+  expect(plain.mergePr).toHaveBeenCalledTimes(1);
 }, 120000);

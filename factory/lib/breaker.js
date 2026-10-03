@@ -521,6 +521,36 @@ export function makeMergeAbortVouch({ issue, headBranch, prView }) {
   };
 }
 
+/**
+ * rework r5 cf1 — **자동 머지의 증거는 머지 전에 브랜치에 있어야 한다.** 차단기가 판정 자동 머지를 아는 길은 `factory/records`의
+ * 자동 머지 줄 하나뿐이다. 그 줄이 스테이지 끝의 동기화(최선 노력 — 실패는 로그로만 남고, 일회용 러너와 함께 로컬 기록이 사라진다)에만
+ * 실려 가면, 그 동기화를 잃은 머지는 나중에 revert돼도 차단기가 세지 못한다(모르는 머지 = 없던 머지 — fail-open). 그래서 merge
+ * 스테이지는 `mergePr` **전에** 이것을 부르고, ok가 아니면 머지하지 않는다.
+ *   - `sync()`: 그 줄이 이미 적힌 run 기록을 미는 가드된 동기화(run-stage `syncRunRecords` + 이 프로세스의 `recordsGuard`).
+ *   - 그리고 동기화의 말이 아니라 **브랜치를 다시 읽어** 이 이슈의 기록(`<issue>.md`)의 merge 섹션에 그 줄이 있는지 확인한다 —
+ *     차단기(`readBreaker`)가 읽는 것과 같은 읽기·같은 파서다.
+ * 던지지 않는다. → `{ ok:true }` | `{ ok:false, reason }`.
+ */
+export async function persistSelfMergeEvidence({ run, cwd, issue, line, sync, branch = "factory/records" }) {
+  const fail = (reason) => ({ ok: false, reason });
+  const [want] = parseSelfMergeLines(`## merge\n${String(line ?? "")}`);
+  if (!want) return fail(`not a self-merge line: ${JSON.stringify(String(line ?? "").slice(0, 120))}`);
+  if (want.issue !== Number(issue)) return fail(`the self-merge line names issue #${want.issue}, not #${issue}`);
+  if (typeof sync !== "function" || typeof run !== "function" || !cwd) return fail("the self-merge evidence writer is not wired (sync/run/cwd missing)");
+  let s;
+  try { s = await sync(); } catch (e) { return fail(`the ${branch} sync threw — ${e?.message || e}`); }
+  if (!s?.ok) return fail(`the ${branch} sync failed — ${s?.reason || "no answer"}`);
+  let det;
+  try { det = await readRecordsDetailed({ run, cwd, branch }); } catch (e) { return fail(`${branch} could not be read back — ${e?.message || e}`); }
+  if (!det?.fetched) return fail(`${branch} could not be read back after the sync — the self-merge evidence is unconfirmed`);
+  const text = det.records.get(String(issue));
+  const same = (m) => m.issue === want.issue && m.pr === want.pr && m.kind === want.kind && m.sha === want.sha && m.at === want.at;
+  if (text === undefined || !parseSelfMergeLines(text).some(same)) {
+    return fail(`${branch} does not carry the self-merge line for PR #${want.pr} in docs/factory/runs/${issue}.md after the sync`);
+  }
+  return { ok: true };
+}
+
 /** 한 스테이지 프로세스의 가드: `trust(lines)`는 이 프로세스가 run 기록에 쓴 줄을 받아 두고, `scrub()`이 그것을 믿는다. */
 export function makeRecordsUploadGuard({ run, cwd, branch = "factory/records" }) {
   const trusted = new Set();

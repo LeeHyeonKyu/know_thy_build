@@ -43,7 +43,7 @@ import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
 import { runMergeStage, idlessFailedSuites, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
-import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch } from "../lib/breaker.js";
+import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMergeEvidence } from "../lib/breaker.js";
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
@@ -3614,6 +3614,11 @@ async function main() {
     get defaultBranch() { return harness?.project?.default_branch ?? "main"; },
     /** #189 (S4c) — 자동 머지 회로차단기(merge 전용, 자기 변경 경로에서만 불린다). 언제나 함수다 — 재료가 없으면 ok:false를 낸다. */
     breaker: makeMergeBreakerDep({ run, root, getCharter: () => charter, getDefaultBranch: () => harness?.project?.default_branch ?? "main" }),
+    /**
+     * #189 rework r5 cf1 — merge 전용: 자동 머지 줄을 **머지 전에** factory/records에 올리고 다시 읽어 확인한다(ok가 아니면 merge-stage는
+     * 머지하지 않는다). 스테이지 끝과 같은 가드(`recordsGuard` — 이 프로세스가 `runRecord`로 쓴 줄만 믿는다)를 탄다.
+     */
+    persistSelfMerge: ({ line }) => persistSelfMergeEvidence({ run, cwd: root, issue, line, sync: () => syncRunRecords({ run, root, message: `run-record: issue #${issue} merge self-merge evidence (${runnerId})`, guard: recordsGuard }) }),
     /** merge stage 전용(KTB-19): ready 플립 뒤 필수 체크가 더 이상 진행 중이 아닐 때까지 기다리는
      * 재료 — 원시 체크 목록, 대상 이름 필터, 상한(초). `config.js`가 기본값 600을 채운다. */
     prChecks: (pr) => gh.prChecks(pr),

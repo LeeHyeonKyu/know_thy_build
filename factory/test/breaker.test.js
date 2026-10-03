@@ -1146,3 +1146,80 @@ test("test_189_self_merge_line_outside_merge_section_is_not_an_automerge", async
   expect(forged.open).toBe(true);
   expect(forged.reason).toMatch(/#11\b.*#12\b/);
 }, 120000);
+
+// ── rework r5 cf1 — 스테이지 끝 동기화를 잃어도 판정 자동 머지는 차단기의 증거에서 사라지지 않는다 ─────────────────────────────
+import { persistSelfMergeEvidence } from "../lib/breaker.js";
+
+test("test_189_lost_stage_end_sync_never_hides_a_judge_automerge_from_the_breaker", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { remote, cwd } = await makeRepo();
+  const runsDir = join(cwd, "docs/factory/runs");
+  const failPush = async (cmd, args, o) => (cmd === "git" && args.includes("push") ? { code: 1, stdout: "", stderr: "fatal: unable to access 'https://github.com/x/y/': The requested URL returned error: 503" } : run(cmd, args, o));
+  const onBranch = async (n) => (await run("git", ["show", `factory/records:docs/factory/runs/${n}.md`], { cwd: remote }));
+
+  // 두 merge 런(#11, #12). 각 런은 merge 스테이지가 하듯 줄을 run 기록에 쓰고(실제 생산자 selfMergeLine + appendRunRecord, 가드가 trust),
+  // 머지 **전에** 프로덕션 persist로 factory/records에 올린다. #12의 런은 그 뒤 스테이지 끝 동기화가 실패하고, 러너가 사라진다(로컬 기록도 함께).
+  for (const { issue, pr, at, stageEndFails } of [
+    { issue: 101, pr: 11, at: "2026-10-01T01:00:00.000Z", stageEndFails: false },
+    { issue: 102, pr: 12, at: "2026-10-01T02:00:00.000Z", stageEndFails: true },
+  ]) {
+    const guard = makeRecordsUploadGuard({ run, cwd });
+    const line = selfMergeLine({ issue, pr, kind: "judge", sha: String(pr % 10).repeat(40), at });
+    guard.trust([line]);
+    appendRunRecord({ root: cwd, issue, title: "x", stage: "merge", runnerId: `gha-${pr}`, now: at, lines: [line] });
+    const p = await persistSelfMergeEvidence({ run, cwd, issue, line, sync: () => syncRunRecords({ run, root: cwd, message: `run-record: issue #${issue} merge self-merge evidence (gha-${pr})`, guard }) });
+    expect(p, `#${pr}`).toEqual(expect.objectContaining({ ok: true }));
+    appendRunRecord({ root: cwd, issue, title: "x", stage: "merge", runnerId: `gha-${pr}`, now: at, lines: [`merge: merged via PR #${pr}`] });
+    const end = await syncRunRecords({ run: stageEndFails ? failPush : run, root: cwd, message: `run-record: issue #${issue} merge (gha-${pr})`, guard });
+    expect(end.ok, `#${pr} stage-end sync`).toBe(!stageEndFails);
+    rmSync(runsDir, { recursive: true, force: true });             // 일회용 러너 — 올라가지 못한 것은 사라진다
+  }
+  // 스테이지 끝의 줄(#12의 "merged via")은 잃었지만, 자동 머지의 증거는 머지 전에 이미 브랜치에 있었다.
+  expect((await onBranch(102)).stdout).not.toContain("merge: merged via PR #12");
+  expect(parseSelfMergeLines((await onBranch(102)).stdout)).toEqual([expect.objectContaining({ issue: 102, pr: 12, judge: true })]);
+  expect(parseSelfMergeLines((await onBranch(101)).stdout)).toEqual([expect.objectContaining({ issue: 101, pr: 11, judge: true })]);
+
+  // 그 두 판정 머지가 main에서 연속으로 revert된다 → 열린다(리뷰어의 재현: 이전에는 {ok:true, open:false}였다).
+  await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" },
+    { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" },
+    { revert: "feat b (#12)", at: "2026-10-01T06:00:00Z" },
+  ], cwd);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  const b = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(b).toEqual(expect.objectContaining({ ok: true, open: true }));
+  expect(b.reason).toMatch(/PR #11, PR #12/);
+
+  // persist가 증거를 브랜치에 올리지 못하면 ok:false다 — 그때 merge 스테이지는 머지하지 않는다(merge-stage.test.js의 같은 id 계열).
+  const fresh = await makeRepo();
+  const line13 = selfMergeLine({ issue: 103, pr: 13, kind: "judge", sha: "3".repeat(40), at: "2026-10-01T03:00:00.000Z" });
+  const g13 = makeRecordsUploadGuard({ run, cwd: fresh.cwd });
+  g13.trust([line13]);
+  appendRunRecord({ root: fresh.cwd, issue: 103, title: "x", stage: "merge", runnerId: "gha-13", now: "2026-10-01T03:00:00.000Z", lines: [line13] });
+  // (a) push 실패(syncRecords의 재시도까지 실패).
+  const pushFailed = await persistSelfMergeEvidence({ run, cwd: fresh.cwd, issue: 103, line: line13, sync: () => syncRunRecords({ run: failPush, root: fresh.cwd, message: "run-record: issue #103 merge self-merge evidence (gha-13)", guard: g13 }) });
+  expect(pushFailed.ok).toBe(false);
+  expect(pushFailed.reason).toMatch(/503/);
+  // (b) 동기화가 ok라고 말했지만 브랜치에 그 줄이 없다 — 말이 아니라 브랜치를 믿는다.
+  const lied = await persistSelfMergeEvidence({ run, cwd: fresh.cwd, issue: 103, line: line13, sync: async () => ({ ok: true }) });
+  expect(lied.ok).toBe(false);
+  expect(lied.reason).toMatch(/factory\/records/);
+  // (c) 동기화가 던진다.
+  const threw = await persistSelfMergeEvidence({ run, cwd: fresh.cwd, issue: 103, line: line13, sync: async () => { throw new Error("guard exploded"); } });
+  expect(threw).toEqual(expect.objectContaining({ ok: false, reason: expect.stringMatching(/guard exploded/) }));
+  // (d) 브랜치를 다시 읽지 못한다(올린 뒤의 확인이 실패) — 확인되지 않은 증거는 증거가 아니다.
+  const failRead = async (cmd, args, o) => (cmd === "git" && args[0] === "fetch" ? { code: 1, stdout: "", stderr: "fatal: HTTP 502" } : (cmd === "git" && args[0] === "ls-remote" ? { code: 2, stdout: "", stderr: "fatal: HTTP 502" } : run(cmd, args, o)));
+  const unread = await persistSelfMergeEvidence({ run: failRead, cwd: fresh.cwd, issue: 103, line: line13, sync: async () => ({ ok: true }) });
+  expect(unread.ok).toBe(false);
+  // 대조군: 같은 줄이 정말 올라가면 ok다 — 위의 실패는 픽스처 탓이 아니다.
+  const good = await persistSelfMergeEvidence({ run, cwd: fresh.cwd, issue: 103, line: line13, sync: () => syncRunRecords({ run, root: fresh.cwd, message: "run-record: issue #103 merge self-merge evidence (gha-13)", guard: g13 }) });
+  expect(good.ok, good.reason).toBe(true);
+  // 다른 이슈의 기록에 같은 줄이 있어도 이 이슈의 증거가 아니다.
+  const elsewhere = await persistSelfMergeEvidence({ run, cwd: fresh.cwd, issue: 104, line: line13, sync: async () => ({ ok: true }) });
+  expect(elsewhere.ok).toBe(false);
+
+  // main()은 merge 스테이지의 persistSelfMerge를 이 가드(같은 trust) 위의 persist로 싣는다(소스로 고정 — main()은 프로세스를 띄워야만 돈다).
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/persistSelfMerge: \(\{ line \}\) => persistSelfMergeEvidence\(\{ run, cwd: root, issue, line, sync: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} merge self-merge evidence \(\$\{runnerId\}\)`, guard: recordsGuard \}\) \}\),/);
+}, 240000);

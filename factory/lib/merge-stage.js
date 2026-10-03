@@ -385,6 +385,8 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
  * 여기서 다시 구현하지 않고 그대로 주입받는다.
+ * persistSelfMerge({line,issue,pr,sha}) — #189 rework r5 cf1: 자기 변경 경로의 자동 머지 줄을 mergePr **전에** factory/records에 올려
+ *    확인한다(→ {ok}|{ok:false,reason}). ok가 아니거나 없으면 머지하지 않고 blocked.
  * record(lines): run-record 한 줄(들)을 남긴다. refusal(t): 거부된 전이를 record 줄로 바꾼다(runStage와 동일 계약).
  * retryFromBlocked(KTB-15b, KTB-19 review I-2): run-stage가 이미 "이 blocked이 approved에서 왔다"를
  * 이슈 코멘트로 확인했을 때, 그 origin 라벨(`"factory:approved"`) 그대로 넘긴다 — falsy(`false`)면
@@ -1246,6 +1248,29 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     }
   }
 
+  // #189 rework r5 cf1 — **자동 머지의 증거를 머지 전에 굳힌다.** 차단기가 판정 자동 머지를 아는 길은 `factory/records`의 이 줄
+  // 하나뿐이다. 스테이지 끝 동기화(최선 노력)에만 맡기면, 그 동기화를 잃은 머지는 나중에 revert돼도 세어지지 않는다(fail-open).
+  // 그래서 줄을 run 기록에 쓰고(`record` — 가드가 이 줄을 trust한다) `d.persistSelfMerge`로 브랜치에 올려 **다시 읽어 확인한** 뒤에만
+  // 머지한다. 못 올리면(ok:false·던짐·배선 누락) 머지하지 않는다 — blocked(재시도는 sweeper가 민다). 판정 비트는 지금(`selfPath`) 적는다.
+  // 머지가 이 뒤에 실패하면 줄은 main에 없는 PR을 가리킨다 — 차단기는 main에서 확인되지 않는 revert 없는 머지로 연속을 끊지 않는다.
+  if (selfPath) {
+    let at;
+    try { at = new Date(Number(d.now())).toISOString(); } catch { at = new Date().toISOString(); }
+    const line = selfMergeLine({ issue, pr, kind: selfPath, sha, at });
+    record([line]);
+    const refuse = async (why) => {
+      const reason = `self-merge evidence could not be made durable on factory/records before the merge — ${why}; PR #${pr} was not merged (a revert of a merge the breaker cannot see would never count)`;
+      const t = await toBlocked(reason);
+      record([`merge: ${reason}`, ...refusal(t)]);
+      return 2;
+    };
+    if (typeof d.persistSelfMerge !== "function") return await refuse("the persistSelfMerge dep is not wired");
+    let p;
+    try { p = await d.persistSelfMerge({ line, issue, pr, sha }); } catch (e) { return await refuse(`${e?.message || e}`); }
+    if (!p?.ok) return await refuse(p?.reason || "the writer gave no answer");
+    record([`merge: self-merge evidence for PR #${pr} confirmed on factory/records before the merge`]);
+  }
+
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
     // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
@@ -1262,12 +1287,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
-  // #189 — 자기 변경 경로의 머지만 차단기의 증거가 된다. 판정 비트는 지금(`selfPath`) 적는다 — 나중에 다시 계산하지 않는다.
-  if (selfPath) {
-    let at;
-    try { at = new Date(Number(d.now())).toISOString(); } catch { at = new Date().toISOString(); }
-    record([selfMergeLine({ issue, pr, kind: selfPath, sha, at })]);
-  }
+  // #189 — 자기 변경 경로의 머지만 차단기의 증거가 된다. 그 줄은 위에서(머지 전에) 이미 적고 브랜치에서 확인했다(rework r5 cf1).
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).
