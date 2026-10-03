@@ -1173,16 +1173,12 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * 코멘트 없음) 사람에게 넘기며, 사유는 언제부터·왜·어느 명령이 닫는지를 말한다. 모르는 상태(ok:false·throw·함수가 아닌 dep·
    * 열림도 닫힘도 아닌 답)는 닫힘이 아니라 판정 불가(blocked)다. 값은 저장된 워터마크가 아니라 `d.breaker()`가 그때그때 계산한다.
    *
-   * `d.breaker`가 **아예 없는** 호출자(#189 이전의 배선 모양 — run-stage는 언제나 싣는다, `makeMergeSelfChangeDeps`)는 묻지 않고
-   * 그 사실을 기록에 남긴다: #179의 기존 테스트가 그 모양으로 S4a-2 경로를 고정하고 있고, 기존 테스트는 고치지 않는다
-   * (`tests_are_load_bearing`). 배선은 됐는데 함수가 아닌 값(null 등)은 위의 판정 불가다.
+   * `d.breaker`가 **아예 없는** 호출자도 예외가 아니다(키가 없음·undefined·null 모두): 배선을 잊은 호출자가 차단기를 묻지 않고
+   * 자동 머지하는 길은 없다 — 그것이 곧 fail-open이다. 프로덕션 배선(run-stage `main()`의 `breaker: makeMergeBreakerDep(…)`)은
+   * 언제나 함수를 싣는다.
    */
   const breakerGate = async (when) => {
     const what = `auto-merge breaker (${when})`;
-    if (d.breaker === undefined) {
-      record([`merge: auto-merge breaker not consulted ${when} — this caller wires no breaker dep (pre-#189 shape; run-stage always wires it)`]);
-      return null;
-    }
     if (typeof d.breaker !== "function") return await undecidable(what, "the breaker dep is not wired (not a function) — an unknown breaker is not a closed breaker");
     let b;
     try { b = await d.breaker(); } catch (e) { return await undecidable(what, `${e?.message || e}`); }
