@@ -468,6 +468,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/non-judge-paths.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/operator-merge.js",
       "owner": "factory"
     },
