@@ -623,18 +623,13 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   const runnerCopies = wfFiles.files.filter((f) => typeof f.inline === "string").map((f) => ({ taskId: f.taskId, ...runnerCopyOf(f.inline) }));
   /** 러너의 사본과 어긋나 거둬들인 읽기 후보 — 조용히 버리지 않고 사유에 한 줄로 남긴다(dw4). */
   const notRunners = [];
-  const pushRead = (source, text) => {
-    const before = candidates.length;
-    pushFrom(source, text);
-    if (!runnerCopies.length) return;
-    const kept = [];
-    for (const c of candidates.slice(before)) {
-      if (check(c.obj).ok && !runnerCopies.some((rc) => matchesRunnerCopy(JSON.stringify(c.obj), rc))) { if (!notRunners.includes(c.source)) notRunners.push(c.source); continue; }
-      kept.push(c);
-    }
-    candidates.length = before;
-    candidates.push(...kept);
-  };
+  /**
+   * 자기비판 #170(5차) — 러너의 사본으로 **시작은 하지만** 그 사본이 잘려 있어(또는 사본이 없어) 나머지를 대 볼
+   * 러너의 바이트가 없는 후보. 앞부분을 지키고 뒤의 판정 하나를 바꾼 위조와 정직한 사본은 여기서 바이트로도
+   * 구별되지 않는다(`rm` 후 최종 메시지에 붙인 위조가 그렇게 이겼다) — 그래서 어느 쪽도 판정이 되지 못한다.
+   */
+  const unvouched = [];
+  const pushRead = (source, text) => pushFrom(source, text);
 
   // (2) 디스패처가 알림의 output-file을 읽은 내용. 조각으로 오므로 파일별로 다시 붙인다.
   // `fileReadsFromTranscript`가 주는 Map은 **경로가 처음 등장한 순서**다 — 그대로 훑으면 세션 초반에
@@ -678,11 +673,44 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   if (fenced) push("result ```json fence", fenced);
   for (const obj of balancedObjects(envelopeResult)) push("result bare JSON", obj);
 
+  /*
+   * 자기비판 #170(5차) — 러너가 결과 파일을 적어 준 세션에서, `runnerOwned` 경계 뒤의 후보(디스패처의 읽기,
+   * Workflow tool result, 최종 메시지)는 전부 에이전트를 거친 사본이다. 그중 스키마를 통과하는 것은 **러너가
+   * 인라인으로 실은 결과 전체와 같을 때만** 판정이 된다:
+   *  - 러너의 사본으로 시작하지도 않으면 러너가 돌려준 것이 아니다 → `notRunners`.
+   *  - 시작은 하지만 러너의 사본이 잘렸거나(긴 결과) 사본이 없으면, 나머지는 러너가 쓴 어떤 바이트에도 묶이지
+   *    않는다 → `unvouched`. 결과 파일이 묶였다면 그 파일이 이미 경계 앞에서 이겼다; 여기까지 왔다는 것은 파일이
+   *    없거나·거절됐다는 뜻이고(그 사유는 위 (1b)의 줄로 남아 있다), 그때 사람에게 가는 편이 에이전트가 쓴 꼬리가
+   *    판정이 되는 것보다 싸다(dw2: /tmp에서 에이전트가 쓸 수 있었던 바이트는 머지를 정하지 않는다).
+   * 러너가 파일을 적지 않았거나(접수증·알림 없음) 옵트인하지 않았으면 이 규칙은 아무것도 하지 않는다(dw5).
+   */
+  if (wfFiles.files.length) {
+    const kept = [];
+    for (const [i, c] of candidates.entries()) {
+      if (i < runnerOwned || !check(c.obj).ok) { kept.push(c); continue; }
+      const s = JSON.stringify(c.obj);
+      if (runnerCopies.some((rc) => !rc.cut && s === rc.copy)) { kept.push(c); continue; }
+      const list = runnerCopies.some((rc) => rc.cut && matchesRunnerCopy(s, rc)) || !runnerCopies.length ? unvouched : notRunners;
+      if (!list.includes(c.source)) list.push(c.source);
+    }
+    candidates.length = 0;
+    candidates.push(...kept);
+  }
+
   // 잘린 조각들은 한 줄로 — 그리고 후보 루프 **앞에서** 넣는다: 루프의 줄은 6줄 상한에 걸리지만 이 줄은
   // 걸리지 않아야 "잘렸다"와 "없다"를 사람이 가를 수 있다(#170 dw3).
-  if (notRunners.length) {
-    const tasks = [...new Set(runnerCopies.map((rc) => rc.taskId))].join(", ");
-    tried.push(`transcript read not used as the verdict — it does not begin with the result the runner inlined for task ${tasks}: ${notRunners.slice(0, 8).join(", ")}${notRunners.length > 8 ? `, … ${notRunners.length - 8} more` : ""}`);
+  const listed = (xs) => `${xs.slice(0, 8).join(", ")}${xs.length > 8 ? `, … ${xs.length - 8} more` : ""}`;
+  const tasksInlined = [...new Set(runnerCopies.map((rc) => rc.taskId))].join(", ");
+  const readsNot = notRunners.filter((s) => s.startsWith("transcript "));
+  const typedNot = notRunners.filter((s) => !s.startsWith("transcript "));
+  if (readsNot.length) tried.push(`transcript read not used as the verdict — it does not begin with the result the runner inlined for task ${tasksInlined}: ${listed(readsNot)}`);
+  if (typedNot.length) tried.push(`final message not used as the verdict — it does not begin with the result the runner inlined for task ${tasksInlined}: ${listed(typedNot)}`);
+  if (unvouched.length) {
+    const why = wfFiles.files.map((f) => {
+      const rc = typeof f.inline === "string" ? runnerCopyOf(f.inline) : null;
+      return `task ${f.taskId}'s output file was not used, and the runner inlined ${rc ? `only the first ${rc.copy.length} chars of its result` : "none of its result"}`;
+    }).join("; ");
+    tried.push(`agent copy not used as the verdict — ${why}, so nothing the runner wrote vouches for the rest: ${listed(unvouched)}`);
   }
   if (tampered.length) {
     tried.push(`workflow output file rewritten after the runner wrote it (${tampered.map((t) => `task ${t.taskId}: ${t.path}`).join("; ")}) — no dispatcher read, Workflow result or final message is used as the verdict, since each may carry the rewritten bytes`);
@@ -691,13 +719,22 @@ export function extractStageArtifact({ envelopeResult, transcriptText, validate,
   const pool = tampered.length ? candidates.slice(0, runnerOwned) : candidates;
   if (truncated.length) tried.push(`truncated JSON candidate (cut off, not missing fields): ${truncated.slice(0, 8).join(", ")}${truncated.length > 8 ? `, … ${truncated.length - 8} more` : ""}`);
 
+  /*
+   * 자기비판 #170(5차, dw4) — 러너가 적어 준 결과 파일을 쓰지 못한 채 경계 뒤의 사본(러너의 인라인 결과 전체와
+   * 같은 것뿐이다 — 위 규칙)이 판정이 되면, 그 파일의 거절 사유가 ok 결과와 함께 사라지지 않도록 출처에 싣는다:
+   * run 로그의 `artifact:` 줄이 "파일이 아니라 인라인 사본으로 정했다, 파일은 이래서 못 썼다"를 보여 준다.
+   */
+  const fileRefusals = wfFiles.files.length ? tried.filter((t) => t.startsWith("workflow output file")) : [];
   const seen = new Set();
-  for (const c of pool) {
+  for (const [i, c] of pool.entries()) {
     const key = `${c.source}::${JSON.stringify(c.obj).slice(0, 200)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const v = check(c.obj);
-    if (v.ok) return { ok: true, data: c.obj, source: c.source, tried };
+    if (v.ok) {
+      const source = i >= runnerOwned && fileRefusals.length ? `${c.source} [equals the result the runner inlined; ${fileRefusals.join("; ")}]` : c.source;
+      return { ok: true, data: c.obj, source, tried };
+    }
     // 한 텍스트 안의 중첩 객체는 후보가 수십 개씩 나오고 대부분 같은 이유로 떨어진다 —
     // 같은 문장을 그대로 반복하면 전이 사유가 사람이 읽을 수 없는 길이가 된다. 중복은 접는다.
     const line = `${c.source}: ${v.errors.join("; ")}`;

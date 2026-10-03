@@ -1081,16 +1081,116 @@ test("test_170_output_file_of_another_task_is_not_a_verdict — with the runner'
     expect(text).toContain(`workflow output file missing: ${path}`);
     expect(text).toMatch(new RegExp(`transcript read not used as the verdict — it does not begin with the result the runner inlined for task ${TASK_170}: transcript (file read ${TASK_170}\\.output|tool result #\\d+)`));
   }
-  // control, one fact apart: the same reads of the runner's real verdict — today's KTB-17 recovery still works
+  // one fact apart: the same reads of the runner's real verdict DO begin with its inline result, so they are told
+  // apart from `other` by name — yet with the file gone their tail past that 8179-char prefix is bound to nothing
+  // the runner wrote (a forged tail is indistinguishable; see "no agent copy decides, however it begins"), so they
+  // are not the verdict either. Beginning with the runner's copy is necessary, not sufficient (self-critique, round 5).
   for (const [how, lines] of [
     ["full Read", readOf170(1, path, numbered170(envelopeFile170(real)))],
     ["jq -c .result", bashOf170(1, `jq -c .result ${path}`, JSON.stringify(real))],
   ]) {
     const r = verifyStage({ ...reviewArgs170, transcriptText: transcript(lines), readFile: readFileOrNull });
-    expect({ how, ok: r.ok }).toEqual({ how, ok: true });
-    expect(r.data.verdicts[1].verdict).toBe("reject");
-    expect(r.source).toMatch(/^transcript (file read|tool result)/);
+    const text = r.reasons.join("\n");
+    expect({ how, ok: r.ok }).toEqual({ how, ok: false });
+    expect(text).toContain(`workflow output file missing: ${path}`);
+    expect(text).not.toContain("transcript read not used as the verdict — it does not begin with");
+    expect(text).toMatch(new RegExp(`agent copy not used as the verdict — task ${TASK_170}'s output file was not used, and the runner inlined only the first 8179 chars of its result, so nothing the runner wrote vouches for the rest: transcript (file read ${TASK_170}\\.output|tool result #\\d+)`));
   }
+});
+
+// #170 self-critique (rework round 5) — the runner inlines only the first 8179 chars of a long result. With its
+// output file gone (`rm`, or a scratchpad cleaned before verify), every other copy of the result — a dispatcher
+// Read/jq/cat, a Workflow tool result, the dispatcher's final message — is text an agent produced or could have
+// shaped, and the part after that prefix is bound to nothing the runner wrote. A forgery that keeps the prefix and
+// flips a later verdict is byte-for-byte indistinguishable from an honest copy there, so no such copy may decide.
+const fgWorkflow170 = (n, content) => [
+  line170({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: `toolu_wf_fg_${n}`, input: { name: "factory-review" } }] } }),
+  line170({ type: "user", message: { content: [{ tool_use_id: `toolu_wf_fg_${n}`, type: "tool_result", content }] } }),
+];
+test("test_170_output_file_of_another_task_is_not_a_verdict — with the runner's file gone, no agent copy decides, however it begins (rm + forged tail)", async () => {
+  const { readFileOrNull } = await import("../bin/run-stage.js");
+  const { unlinkSync } = await import("node:fs");
+  const real = longReview170();
+  real.verdicts[1] = { ...real.verdicts[1], verdict: "reject", must_fix: [{ id: "sec9", where: "factory/lib/x.js:1", claim: "a real defect", evidence: "a real trace" }] };
+  const forged = { ...real, verdicts: [real.verdicts[0], { ...real.verdicts[1], verdict: "approve", must_fix: [] }] };
+  expect(JSON.stringify(forged).slice(0, 8179)).toBe(JSON.stringify(real).slice(0, 8179));   // only the unbound tail differs
+  expect(JSON.stringify(forged)).not.toBe(JSON.stringify(real));
+
+  const dir = scratch170();
+  const path = outputPath170(dir);
+  write170(path, envelopeFile170(real));
+  const at = notifiedAt170(path);                                                       // bound while the file is there
+  const transcript = (lines) => [
+    line170({ type: "user", message: { content: "/factory-review 124" } }),
+    ...receipt170(),
+    notification170(TASK_170, path, JSON.stringify(real), "toolu_wf", at),
+    ...poll170(0, path, JSON.stringify(real)),
+    ...lines,
+  ].join("\n") + "\n";
+  const copiesOf = (v) => ({
+    "full Read": { lines: readOf170(1, path, numbered170(envelopeFile170(v))) },
+    "jq -c .result": { lines: bashOf170(1, `jq -c .result ${path}`, JSON.stringify(v)) },
+    "cat": { lines: bashOf170(1, `cat ${path}`, envelopeFile170(v)) },
+    "Workflow result": { lines: fgWorkflow170(1, JSON.stringify(v)) },
+    "final message fence": { lines: [], out: { ...maxTurns170, result: "The workflow returned:\n```json\n" + JSON.stringify(v) + "\n```" } },
+    "final message bare JSON": { lines: [], out: { ...maxTurns170, result: JSON.stringify(v) } },
+  });
+  const run = (v, how) => {
+    const { lines, out = maxTurns170 } = copiesOf(v)[how];
+    return verifyStage({ ...reviewArgs170, out, transcriptText: transcript(lines), readFile: readFileOrNull });
+  };
+  const hows = Object.keys(copiesOf(forged));
+
+  // control, one fact apart (the file is on disk): the runner's file is the handoff, and it is the reject —
+  // whatever the dispatcher copied or typed afterwards
+  for (const how of hows) {
+    const c = run(forged, how);
+    expect({ how, ok: c.ok, reasons: c.reasons }).toEqual({ how, ok: true, reasons: [] });
+    expect(c.source).toContain(path);
+    expect({ how, verdict: c.data.verdicts[1].verdict }).toEqual({ how, verdict: "reject" });
+  }
+
+  unlinkSync(path);                                                                     // the one fact: the file is gone
+  for (const how of hows) {
+    const r = run(forged, how);
+    const text = r.reasons.join("\n");
+    expect({ how, ok: r.ok }).toEqual({ how, ok: false });
+    expect(r.data).toBe(null);
+    expect(r.reasons[0]).toBe("claude -p hit max turns (23)");
+    // the file-gone refusal is not lost behind a fallback (dw4), and the copy's refusal says why, naming the task
+    expect(text).toContain(`workflow output file missing: ${path}`);
+    expect(text).toContain(`agent copy not used as the verdict — task ${TASK_170}'s output file was not used, and the runner inlined only the first 8179 chars of its result, so nothing the runner wrote vouches for the rest:`);
+    // the honest copy of the runner's real verdict is refused with exactly the same reasons: nothing tells them apart
+    const honest = run(real, how);
+    expect({ how, ok: honest.ok, reasons: honest.reasons }).toEqual({ how, ok: false, reasons: r.reasons });
+  }
+});
+
+// dw4 "no refusal falls back silently" — a short result is inlined WHOLE, so a final message equal to it is the
+// runner's bytes and may decide even with the file gone (in the attachment form only the second reader sees that
+// inline). But then the file-gone refusal must travel with the ok result, in its source; and a final message that
+// is not the runner's inline result is refused by its own line, not dropped without a word.
+test("test_170_invalid_or_missing_output_file_is_named_in_the_reason — a fallback past the runner's unusable file carries that file's refusal", () => {
+  const dir = scratch170();
+  const path = outputPath170(dir);                                                      // never written: gone
+  const full = JSON.stringify(review);
+  const transcriptText = [
+    line170({ type: "user", message: { content: "/factory-review 124" } }),
+    ...receipt170(),
+    attachmentNote170(TASK_170, "toolu_wf", path, full, new Date().toISOString()),
+  ].join("\n") + "\n";
+  const said = (v) => ({ ...maxTurns170, result: "```json\n" + JSON.stringify(v) + "\n```" });
+  const ok = verifyStage({ ...reviewArgs170, out: said(review), transcriptText, readFile: readFile170 });
+  expect(ok.reasons).toEqual([]);
+  expect(ok.ok).toBe(true);
+  expect(ok.source).toBe(`result \`\`\`json fence [equals the result the runner inlined; workflow output file missing: ${path}]`);
+
+  const other = { ...review, round: 2 };                                                // schema-valid, not what the runner returned
+  expect(JSON.stringify(other)).not.toBe(full);
+  const no = verifyStage({ ...reviewArgs170, out: said(other), transcriptText, readFile: readFile170 });
+  expect(no.ok).toBe(false);
+  expect(no.reasons.join("\n")).toContain(`workflow output file missing: ${path}`);
+  expect(no.reasons.join("\n")).toContain(`final message not used as the verdict — it does not begin with the result the runner inlined for task ${TASK_170}: result \`\`\`json fence`);
 });
 
 // #170 skeptic — the real runner, not a hand-made line. Claude Code 2.1.287 logs a background task's completion
