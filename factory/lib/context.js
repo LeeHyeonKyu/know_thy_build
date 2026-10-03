@@ -5,7 +5,7 @@ import { latestHandoff } from "./handoff.js";
 import { tierFloor, maxTier, normalizeTier } from "./gates.js";
 import { changedFiles } from "./changed-files.js";
 import { buildHouseRules } from "./house-rules.js";
-import { commentsSinceRequeue, latestSelfGateFindings, TRANSITION_TO } from "./retro/issue-comments.js";
+import { commentsSinceRequeue, latestSelfGateFindings, kRestartState, TRANSITION_TO } from "./retro/issue-comments.js";
 
 const ROSTER_STAGE = { plan: "plan", review: "review" };
 
@@ -352,6 +352,13 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
   const selfGateFindings = typeof impl.head_sha === "string"
     ? latestSelfGateFindings(commentsSinceRequeue(comments), impl.head_sha)
     : null;
+  /**
+   * #174 (ADR-033 둘째 결정) — K 소진 뒤 공장이 스스로 재시작한 implement 런이면, 그 재시작의 브리프(pr·재시작 head·범위 문장·
+   * 정규화된 where 경로·얼린 findings)를 빌더에게 싣는다. 출처는 엔진이 쓴 `factory.k-restart-brief.v1` 블록이고, 고르는 규칙은
+   * K 카운터와 같은 창(`commentsSinceRequeue`)의 **쓰인** 재시작 하나(`kRestartState`)다 — 뒤에 붙은 마커가 바꾸지 못한다.
+   * `loaded.must_fix`는 재시작 뒤 첫 리뷰부터 그 라운드의 것이 되므로 얼린 목록은 여기 따로 간다. 재시작이 없으면 키가 없다.
+   */
+  const kRestartBrief = ctx.stage === "implement" ? kRestartState(commentsSinceRequeue(comments)).brief : null;
   const review = ctx.handoffs?.review ?? null;
   const mustFix = review?.decision === "rework"
     ? (Array.isArray(review.verdicts) ? review.verdicts : []).flatMap((v) => (Array.isArray(v?.must_fix) ? v.must_fix.filter(Boolean) : []))
@@ -411,6 +418,8 @@ async function loadedFor({ ctx, roleBlock, gh, comments = [] }) {
     // Structure B (Task 3): the self-gate findings that bounced this head, if any — the builder fixes
     // them before the handoff (factory-implement.js). Absent when the self-gate did not block.
     ...(Array.isArray(selfGateFindings) && selfGateFindings.length ? { self_gate_findings: selfGateFindings } : {}),
+    // #174: the diff-only brief of this window's one K self-restart. Absent when there was no restart.
+    ...(kRestartBrief ? { k_restart_brief: kRestartBrief } : {}),
     // Task 9 (KTB-51): the plan validator reasons this repair turn must fix (factory-plan.js reads
     // them and hands them to the planner). Absent on a normal plan pass; present on the one repair turn.
     ...(Array.isArray(ctx.plan_repair) && ctx.plan_repair.length ? { plan_repair: ctx.plan_repair } : {}),

@@ -35,14 +35,14 @@ import { matchesAny } from "../lib/glob.js";
 import { aggregateReview } from "../lib/aggregate.js";
 import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
-import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment } from "../lib/retro/issue-comments.js";
+import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
 import { trustWorkspace } from "./trust-workspace.js";
-import { runMergeStage, idlessFailedSuites } from "../lib/merge-stage.js";
+import { runMergeStage } from "../lib/merge-stage.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
@@ -665,7 +665,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     let knownRound = null;
     if (stage === "review") {
-      try { const prior = await d.reviewRounds?.(); if (typeof prior === "number") knownRound = prior + 1; }
+      try {
+        const prior = await d.reviewRounds?.();
+        // #174 — 재시작 뒤에는 새 작성자의 라운드다(`reviewRoundOf`, 아래 handoff의 `round`와 같은 값).
+        if (typeof prior === "number") knownRound = reviewRoundOf(prior, await d.kRestartState?.()).round;
+      }
       catch { /* 라운드를 모르면 줄에 적지 않는다 — 기록이 멈출 이유는 아니다 */ }
     }
     const stamp = { runId, runnerId, round: knownRound };
@@ -1002,9 +1006,19 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 사람에게 올라간다. rework 전이는 **실제로 일어난 재작업 주기**이고, 그것이 스펙 §3.2가 K로
      * 세는 바로 그 단위다(`rework --> needs_human: round > K`). 창은 그대로 마지막 재큐 이후다(KTB-25).
      */
+    /**
+     * #174 — K 재시작이 이 창에서 쓰였으면 라운드는 새 작성자의 것(재시작 전이 다음이 1)이다. `kRestartState` dep이 없는
+     * 배선은 예전 그대로(`prior + 1`)이고, 재시작 결정도 아래에서 돌지 않는다.
+     */
+    let kState = null, absRound;
     if (stage === "review" && v.data) {
       const prior = await d.reviewRounds?.();
-      if (typeof prior === "number") v.data.round = prior + 1;
+      if (typeof prior === "number") {
+        kState = d.kRestartState ? await d.kRestartState() : null;
+        const r = reviewRoundOf(prior, kState);
+        v.data.round = r.round;
+        absRound = r.abs;
+      }
     }
     // review handoff(review.v1)는 verdicts만 싣는다 — 집계 결정은 여기서 만들어 handoff·전이에 함께 실는다.
     // A-SF1 — `v.qaShortfall`이 있으면 산출물이 스스로 적은 decision이 있더라도 집계를 다시 돈다:
@@ -1305,8 +1319,40 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     }
     const maxRounds = ctx?.limits?.K;
     const to = nextState(stage, v.data, { maxRounds });
-    const exhausted = stage === "review" && to === "factory:needs-human";
-    const t = await d.transition({ to, data: v.data, ...(exhausted ? { reason: reviewExhaustedReason(v.data, maxRounds) } : {}) });
+    /**
+     * #174 — 2K 천장은 **모든** 리뷰에서 문다(재시작을 아는 배선에서만): 창의 rework 시도 수(`attempts`, failed 마커로 줄지 않는
+     * 셈)로 잰 이번 라운드가 2K에 닿았으면 rework도 재시작도 없이 사람이다. 위조 failed 마커가 K 카운터를 아무리 되감아도
+     * 리뷰는 2K번을 넘지 못한다(정당한 재시작 한 번의 K + K와 같은 자리). 대가(rework cf1): 진짜 스왑 실패도 시도 한 칸이라, 창에
+     * 실패가 n번이면 새 작성자는 K − n 라운드 뒤에 천장을 만난다(사유는 "2K ceiling", ADR-033 #174 1번).
+     */
+    const ceiling = stage === "review" && to === "factory:rework" && d.kRestartState && kState && atKCeiling(maxRounds, absRound);
+    const toFinal = ceiling ? "factory:needs-human" : to;
+    const exhausted = stage === "review" && toFinal === "factory:needs-human";
+    let exhaustedReason = exhausted ? reviewExhaustedReason(v.data, maxRounds) : null;
+    /**
+     * ── #174 (ADR-033 둘째 결정) — K 소진은 **한 번** 새 작성자 + diff 전용 브리프로 스스로 재시작한다 ─────────────────
+     * 순서가 계약이다: 브리프가 먼저 나가고, 그 뒤에 `→ factory:rework`(by=factory:run-<id>). 브리프를 못 쓰면 전이 없이 크게
+     * 끝난다 — 브리프 없는 재시작이 이 이슈가 막으려는 바로 그 범위-더하기 rework이다. 재시작이 이미 쓰였으면(또는 천장) 사람이고,
+     * 그 판정은 `kExhaustionDecision` 한 곳이다. 두 dep(`kRestartState`·`postKRestartBrief`)이 없는 배선은 예전 그대로 needs-human이다.
+     */
+    if (exhausted && d.postKRestartBrief && d.kRestartState) {
+      const dec = kExhaustionDecision({ data: v.data, maxRounds, state: kState, abs: absRound });
+      if (dec.action === "restart") {
+        const head = checkoutSha ?? v.data.head_sha ?? null;
+        const pr = v.data.pr ?? ctx?.handoffs?.implement?.pr ?? null;
+        let posted;
+        try { posted = await d.postKRestartBrief({ pr, head, findings: dec.findings }); }
+        catch (e) {
+          record(["verify: ok", `k-restart: FAIL — the brief comment could not be posted (${e?.message || e}); no transition — a restart never happens without its brief`, ...gatesNote, usage]);
+          return 2;
+        }
+        const t = await d.transition({ to: "factory:rework", data: v.data, reason: dec.reason, by: `factory:run-${runId}` });
+        record(["verify: ok", `k-restart: ${posted?.reused ? "reused the brief already posted for" : "posted the brief for"} ${String(head ?? "unknown").slice(0, 7)} (${dec.findings.length} finding(s)) — self-restart 1/1`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
+        return t.ok ? 0 : 2;
+      }
+      exhaustedReason = dec.reason;
+    }
+    const t = await d.transition({ to: toFinal, data: v.data, ...(exhausted ? { reason: exhaustedReason } : {}) });
     record(["verify: ok", ...(t.ok ? [`transition: ${t.to}`] : refusal(t)), ...(checkoutSha ? [`checkout: ${checkoutSha.slice(0, 7)}`] : []), ...gatesNote, usage]);
     return t.ok ? 0 : 2;
   } catch (e) {
@@ -1576,7 +1622,7 @@ export async function abortStage({ stage, issue, status = "cancelled", runnerId 
  */
 export function gateOutputPaths({ root, harness = {} }) {
   const rel = [".factory/out/gates.json"];
-  for (const name of ["unit", "integration", "e2e"]) rel.push(testReportRel(harness, name));
+  for (const name of ["unit", "integration", "e2e"]) rel.push(harness.test?.[`${name}_report`] || `.factory/out/${name}.json`);
   rel.push(harness.commands?.proof?.coverage_report, harness.commands?.proof?.mutation_report);
   const rootAbs = resolve(root);
   const under = (p) => p === rootAbs || p.startsWith(rootAbs + sep);
@@ -1916,6 +1962,147 @@ export function reviewFlips(prev, now) {
     .map((v) => `${v.role} ${before.get(v.role)}→${v.verdict}`);
 }
 
+export const K_TWICE = "K exhausted twice (one self-restart used)";
+
+/**
+ * 이번 리뷰의 라운드 번호. `prior`는 창의 완료된 rework 수(`reviewRounds`)이고, 재시작이 쓰였으면 그 재시작 전이까지의 수
+ * (`offset`)를 빼서 **새 작성자의 라운드**를 1부터 센다 — 재시작 전이 자신은 새 작성자의 예산을 한 칸도 쓰지 않는다. `abs`는
+ * 창 전체의 라운드(천장 2K를 재는 값)다. `data.round`의 뜻(이 작성자의 K 예산 안에서 몇 번째 리뷰인가)은 그대로이고, 그래서
+ * merge의 `round > K` 검사(`verifyReviewQuorum`)도 재시작 뒤의 만장일치 통과를 거부하지 않는다.
+ */
+export function reviewRoundOf(prior, state) {
+  if (typeof prior !== "number") return { round: undefined, abs: undefined };
+  // 천장의 셈은 failed 마커로 줄지 않는 `attempts`다(`prior`는 그것으로 되감길 수 있다) — 둘 중 큰 쪽.
+  const abs = Math.max(prior, Number.isInteger(state?.attempts) ? state.attempts : 0) + 1;
+  const offset = state?.used && Number.isInteger(state.offset) ? state.offset : 0;
+  return { round: Math.max(1, prior + 1 - offset), abs };
+}
+
+/** 창 전체의 라운드(`abs`, 시도 기준)가 2K에 닿았는가 — 정당한 재시작 한 번이 허락하는 리뷰 수(K + K)의 끝. */
+export function atKCeiling(maxRounds, abs) {
+  return Number.isInteger(maxRounds) && maxRounds > 0 && Number.isInteger(abs) && abs >= 2 * maxRounds;
+}
+
+/**
+ * K 소진(`nextState`가 review에서 needs-human을 냈다) 뒤의 결정 — 순수 함수, `nextState`와 그 핀은 그대로다.
+ *   - 재시작이 이미 쓰였거나 창 전체가 천장(2K)에 닿았다 → needs-human, 사유에 "K exhausted twice".
+ *   - must_fix가 비었다 / 어느 where에서도 경로가 안 나온다 → 브리프 없이 needs-human(브리프 없는 재시작은 없다).
+ *   - 그 밖 → 재시작(`findings`는 집계된 `data.must_fix` 그대로 — `reviewExhaustedReason`이 세는 바로 그 목록).
+ */
+export function kExhaustionDecision({ data, maxRounds, state, abs }) {
+  const mustFix = Array.isArray(data?.must_fix) ? data.must_fix.filter(Boolean) : [];
+  const n = mustFix.length;
+  const tail = n ? `${n} must_fix remain` : `last verdict: ${data?.decision ?? "unknown"}`;
+  const ceiling = atKCeiling(maxRounds, abs);
+  const ceilingReason = `review rounds exhausted (K=${maxRounds}) — the 2K ceiling is reached in this window (round ${abs}; every rework attempt counts, a failed label swap included): ${tail}`;
+  // rework cf1 — 재시작 뒤 새 작성자가 K에 닿기 **전에** 천장이 물었다면(창의 진짜 스왑 실패가 한 칸을 썼다) 사유는 천장이다.
+  // "K exhausted twice"라고 쓰면 사람은 새 작성자가 K를 다 쓴 줄 읽는다.
+  if (state?.used && ceiling && Number.isInteger(data?.round) && data.round < maxRounds) return { action: "needs-human", reason: ceilingReason };
+  if (state?.used) return { action: "needs-human", reason: `review rounds exhausted (K=${maxRounds}) — ${K_TWICE}: ${tail}` };
+  if (ceiling) return { action: "needs-human", reason: ceilingReason };
+  if (!n) return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: there is no must_fix to brief the next author with` };
+  if (!mustFix.some((m) => wherePaths(m?.where).length)) {
+    return { action: "needs-human", reason: `${reviewExhaustedReason(data, maxRounds)} — no self-restart: no finding's where names a file path, so a brief cannot bound the next author` };
+  }
+  return {
+    action: "restart",
+    findings: mustFix.map((m) => ({ id: m.id ?? null, where: m.where ?? "", claim: m.claim ?? "" })),
+    reason: `review rounds exhausted (K=${maxRounds}) — self-restart 1/1: a new author fixes only the ${n} open finding(s) in the brief`,
+  };
+}
+
+/**
+ * self-gate의 재시작 브리프 입력(#174 dw6). "새 파일" = merge-base 대비 추가됐고(`added`) **재시작 head의 트리에 없는** 파일 —
+ * 옛 작성자가 재시작 전에 더한 파일은 새 작성자가 출발한 diff의 일부다. 재시작 head 대 HEAD의 diff는 쓰지 않는다: implement는
+ * base를 병합하므로(#143) main에 새로 생긴 파일이 거짓 RED가 된다. git은 여기서만 돈다 — `runSelfGate`는 판정만 한다.
+ * 재시작 head를 못 읽거나 브리프가 깨졌으면 `error`를 싣는다(self-gate가 fail closed 한다).
+ */
+export async function restartBriefInput({ run, cwd, brief, added = [], error = null }) {
+  const paths = Array.isArray(brief?.paths) ? brief.paths : [];
+  if (brief?.error) return { paths, newFiles: [], error: brief.error };
+  if (error) return { paths, newFiles: [], error };
+  const head = typeof brief?.head === "string" && /^[0-9a-f]{7,40}$/i.test(brief.head) ? brief.head : null;
+  if (!head) return { paths, newFiles: [], error: `the restart brief names no readable head (${brief?.head ?? "none"})` };
+  let r;
+  try { r = await run("git", ["ls-tree", "-r", "-z", "--name-only", head], { cwd }); }
+  catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
+  if (r?.code !== 0) return { paths, newFiles: [], error: `restart head ${head.slice(0, 7)} cannot be read — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+  const tree = new Set(String(r.stdout || "").split("\0").filter(Boolean));
+  return { paths, newFiles: (Array.isArray(added) ? added : []).filter((f) => !tree.has(f)) };
+}
+
+/**
+ * #174 (self-critique) — the paths ADDED vs. merge-base, with rename detection OFF. `changedFiles().added` keeps only status `A`
+ * rows of a diff that detects renames by default (`diff.renames`), so a file moved to a new path arrives as `R<score>` and never
+ * reaches it: a "new parser" could enter as a rename plus an edit. With `--no-renames` a move is `D old` + `A new`, so the new path
+ * is an added file like any other (an edit is `M`, a deletion `D` — neither is a new file). A git failure is returned as `error`
+ * so the restart check fails closed instead of allowing everything.
+ */
+export async function addedPathsNoRenames({ run, cwd, base }) {
+  let r;
+  try { r = await run("git", ["diff", "--name-status", "--no-renames", `${base}...HEAD`], { cwd }); }
+  catch (e) { r = { code: 1, stderr: e?.message || String(e) }; }
+  if (r?.code !== 0) return { error: `git diff --no-renames failed — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+  const added = String(r.stdout || "").split("\n").filter(Boolean).map((l) => l.split("\t")).filter((x) => x[0] === "A" && x[1]).map((x) => x[1]);
+  return { added };
+}
+
+/**
+ * The implement self-gate dep (production = what the test drives). Inputs are what main() already holds; `getCtx` returns
+ * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
+ */
+export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
+  return async ({ gates }) => {
+    const base = await mergeBase();
+    const diff = await changedFiles({ run, cwd: root, base, harness });
+    const ctx = getCtx?.() ?? null;
+    /**
+     * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
+     * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
+     * re-runs guardable pins (a red guard is a regression) and surfaces prose pins as advisory.
+     */
+    const review = ctx?.handoffs?.review;
+    const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
+    // #174 — a K self-restart round: the new-file list is measured HERE (git), from the restart head; self-gate only judges it.
+    const brief = ctx?.loaded?.k_restart_brief ?? null;
+    const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
+    return runSelfGate({
+      root, harness, gates, run,
+      // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
+      // property is violated"; a lightly-edited pre-existing test is not what it judges.
+      changedTests: diff.addedTests, changedSources: diff.sources, pins,
+      ...(restartBrief ? { restartBrief } : {}),
+    });
+  };
+}
+
+/**
+ * ── #174 (ADR-033 둘째 결정) — K 소진의 재시작 deps(프로덕션 = 테스트가 그대로 쓰는 것) ──────────────────────────
+ *
+ * 셋 다 같은 창(`commentsSinceRequeue`)을 본다 — 재큐는 K와 재시작 예산을 함께 되돌리고, 사람의 `reason=retry`는 어느 쪽도
+ * 되돌리지 않는다(`countTransitionsTo`가 retry를 세지 않고, 창도 재큐에서만 열린다).
+ *   - `reviewRounds` — 이번 창의 완료된 rework 전이 수(예전 그대로, 절대값).
+ *   - `kRestartState` — 이번 창의 재시작 상태(`lib/retro/issue-comments.js` `kRestartState`).
+ *   - `postKRestartBrief` — 브리프 코멘트를 게시한다. 창의 마지막 마커가 **쓰이지 않았고 지금 쓸 브리프와 같은 내용**이면(브리프는
+ *     나갔는데 전이에서 죽은 런의 재시도) 다시 쓰지 않는다. 게시 실패는 그대로 던진다 — 호출자가 전이 없이 크게 끝낸다.
+ */
+export function makeKRestartDeps({ gh, issue }) {
+  const window = async () => commentsSinceRequeue(await gh.comments(issue));
+  return {
+    reviewRounds: async () => countTransitionsTo(await window(), "factory:rework"),
+    kRestartState: async () => kRestartState(await window()),
+    postKRestartBrief: async ({ pr, head, findings }) => {
+      const s = kRestartState(await window());
+      const body = kRestartComment({ issue, pr, head, findings });
+      // 다시 쓰지 않는 것은 창의 **마지막** 마커가 지금 쓸 브리프와 **같은 내용**일 때뿐이다(전이에서 죽은 런의 재시도).
+      // head만 같은 다른 마커(위조)는 엔진의 브리프를 대신하지 못한다 — 쓰인 브리프는 재시작 전이 직전의 마지막 마커다.
+      if (!s.used && sameKRestartBrief(s.pending?.brief, kRestartBriefOf(body))) return { posted: false, reused: true };
+      await gh.comment(issue, body);
+      return { posted: true, reused: false };
+    },
+  };
+}
+
 export function nextState(stage, data, { maxRounds = null } = {}) {
   if (stage === "triage") return { ready: "factory:ready", "needs-info": "factory:needs-info", "wont-do": "factory:wont-do" }[data.disposition];
   if (stage === "review") {
@@ -2049,6 +2236,20 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
   return ({ entries, pr }) => ensureHarnessIssue({ gh, issue, entries, pr, transitionIssue });
 }
 
+/**
+ * #174 (verifier finding 1) — main()'s `transition` dep, extracted so tests drive the production call site rather than replace it.
+ * Every stage transition funnels through here. `buildExtra(args)` is main's ctxExtra builder (roster, gates file, merge gates).
+ */
+export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
+  return async (args) => {
+    const { to, reason, cause, by = null } = args;
+    const ctxExtra = await buildExtra(args);
+    // The K restart's transition carries `by=factory:run-<id>` (kRestartState counts a restart as used only with it); every
+    // other caller passes none and is written `by=script`, as before.
+    return transitionFn({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission, ...(by ? { by } : {}) });
+  };
+}
+
 export function makeCheckoutHead({ gh, run, root, issue }) {
   return async () => {
     const handoff = latestHandoff(await gh.comments(issue), "implement");
@@ -2066,91 +2267,6 @@ export function makeCheckoutHead({ gh, run, root, issue }) {
     const checkout = await run("git", ["checkout", "--detach", head_sha], { cwd: root });
     if (checkout.code !== 0) return { ok: false, reason: `git checkout failed: ${checkout.stderr.trim()}` };
     return { ok: true, sha: head_sha, pr };
-  };
-}
-
-/**
- * The `gates` dep: 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이다;
- * 유일한 예외는 merge다(#157, ADR-034): RED가 PR diff 밖의 파싱된 테스트 실패뿐이면 runMergeStage가 이 dep을 **한 번 더**
- * 부르고, 그 두 번째 호출이 `gates.json`을 덮어쓴다 — 첫 RED는 재실행 **전에** 쓴 run 기록 줄(`rerun 1/1`·gates-detail)에만 남는다.
- * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의 자기 신고에서 읽고,
- * 그마저 없으면 CHARTER의 기본값으로 채운다. #157: extracted from `main()` unchanged so the merge re-run can be
- * exercised through the dep production uses — runMergeStage calls this same dep a second time for the re-run.
- * `getHarness`/`getCharter` are getters because `main()` (re)loads both after the deps object is built.
- */
-export function makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log = console.log }) {
-  return async (ctx) => {
-    if (!GATED_STAGES.has(stage)) return null;
-    const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? getCharter().tier_default) : ctx.tier;
-    const result = await runStageGates({
-      run, cwd: root, harness: getHarness(), stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
-      saveQuarantine: (q) => writeQuarantine(root, q),
-      transitionIssue,
-    });
-    mkdirSync(join(root, ".factory/out"), { recursive: true });
-    writeFileSync(gatesPath, JSON.stringify(result, null, 2));
-    log(verdictLine(result));
-    return result;
-  };
-}
-
-/**
- * #157 — merge stage 전용: the file names of this PR's `<base>...HEAD` diff, from the same `changedFiles` every
- * other stage uses. Its git call is asked with `--no-renames` (the flag the must_not gate already uses): plain git
- * reports a move as ONE `R` row and `changedFiles().all` keeps only its new path, so a PR that moves a file out of
- * server/** would not look like it touched server/**. With the flag git reports `D old` + `A new`, both in `all`
- * (D rows are in `all` too). `{ ok:true, files }` or `{ ok:false, files:[], reason }` — a MergeBaseError/GitDiffError
- * (or anything else) is "not readable", never "empty", so the merge stage falls back to today's single-run outcome.
- */
-export function makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }) {
-  const noRenames = (cmd, args = [], opts) => run(cmd, cmd === "git" && args[0] === "diff" ? ["diff", "--no-renames", ...args.slice(1)] : args, opts);
-  return async () => {
-    try {
-      const base = await mergeBase();
-      const changed = await changedFiles({ run: noRenames, cwd: root, base, harness: getHarness() });
-      return { ok: true, files: changed.all };
-    } catch (e) {
-      return { ok: false, files: [], reason: `${e?.message || e}` };
-    }
-  };
-}
-
-/** Where a test gate's JSON report lives — the rule `runGates` reads it by (`harness.test.<gate>_report`, else `.factory/out/<gate>.json`). */
-export const testReportRel = (harness, gate) => harness?.test?.[`${gate}_report`] || `.factory/out/${gate}.json`;
-
-/**
- * #157 — merge stage 전용: which test files of a RED gates result failed with no failed assertion (load error,
- * suite hook), read from the reports that run left in the repo (§idlessFailedSuites in lib/merge-stage.js). The
- * merge stage calls it right after each gates run, before anything rewrites the reports. Never throws.
- */
-export function makeMergeSuiteFailuresDep({ root, getHarness, readFile }) {
-  return async (gates) => {
-    try {
-      const harness = getHarness();
-      return idlessFailedSuites({ gates, root, readReport: (gate) => { const rep = testReportRel(harness, gate); return readFile(isAbsolute(rep) ? rep : join(root, rep)); } });
-    } catch (e) {
-      return { ok: false, files: [], reason: `${e?.message || e}` };
-    }
-  };
-}
-
-/**
- * #157 — the gate deps `main()` spreads into its deps object: the `gates` dep every gated stage uses and the
- * merge-only `diffFiles` and `suiteFailures` deps the re-run rule reads, plus `resetGates`, which every stage runs first and the merge
- * re-run runs again before its second gate run. One assembly, so the merge re-run test goes through exactly the
- * object production builds (a missing `diffFiles` here is a missing `diffFiles` in production, and vice versa).
- */
-export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }) {
-  return {
-    gates: makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }),
-    diffFiles: makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }),
-    suiteFailures: makeMergeSuiteFailuresDep({ root, getHarness, readFile }),
-    /**
-     * 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)가 이번 런의 전이를 대신하지 못하게 — 스테이지 첫 전이보다
-     * 먼저 지운다. #157 cf1: merge의 재실행 직전에도 같은 함수가 불린다 — 재실행이 리포트를 쓰지 못했는데 첫 런의 리포트가 남아 있으면
-     * 같은 id 집합이 "두 번 RED"로 읽혀 거짓 'flaky 후보'가 된다. 그래서 `gates`와 같은 조립에서 나온다: 재실행 테스트가 실제 배선을 지난다.
-     */
-    resetGates: async () => { resetGateOutputs({ root, harness: getHarness() }); },
   };
 }
 
@@ -2935,7 +3051,8 @@ async function main() {
     buildContext: makeBuildContextDep({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt: (c) => { ctxCache = c; } }),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
-    // `resetGates`(지난 런의 게이트 판정 파일과 그 재료를 스테이지 첫 전이보다 먼저 지운다)는 아래 makeStageGateDeps 조립에서 온다 — #157 cf1.
+    /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
+    resetGates: async () => { resetGateOutputs({ root, harness }); },
     /**
      * **이번 주기에 실제로 끝난 rework 라운드 수**(r1 SF2). 두 가지가 범위를 정한다:
      *   - KTB-25: 마지막 재큐(`… to=factory:queue`) **이후**만 센다 — 재큐는 새 주기의 시작이고, 그 앞의
@@ -2944,7 +3061,11 @@ async function main() {
      *   - r1 SF2: 세는 것은 **완료된 `→ factory:rework` 전이**다(handoff가 아니다). handoff는 전이보다
      *     먼저 나가므로, 전이가 실패한 런은 재작업을 한 적이 없는데도 예산을 쓰고 있었다.
      */
-    reviewRounds: async () => countTransitionsTo(commentsSinceRequeue(await gh.comments(issue)), "factory:rework"),
+    /**
+     * #174 — `reviewRounds`(위 설명 그대로, 같은 창·같은 식)와 K 재시작의 두 dep(`kRestartState`·`postKRestartBrief`)은
+     * 한 생산자에서 온다(`makeKRestartDeps`) — 테스트가 그 생산자를 그대로 써서 실제 코멘트를 결정에 되먹인다.
+     */
+    ...makeKRestartDeps({ gh, issue }),
     /**
      * KTB-29 / 관측 O21: 이번 주기(마지막 재큐 이후)의 **직전** review handoff가 실은 역할별 verdict.
      * `reviewRounds`와 같은 창을 본다 — 재큐 이전 라운드는 다른 코드에 대한 판정이라 "뒤집혔다"고
@@ -2973,18 +3094,24 @@ async function main() {
       try { return JSON.parse(r.stdout); } catch { return { is_error: true, result: r.stdout + r.stderr }; }
     },
     /**
-     * 게이트 판정은 여기서 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다. 스테이지당 한 번이고, merge만
-     * PR diff 밖의 RED에 한해 한 번 더 부른다(#157, ADR-034 — 두 번째 호출이 gates.json을 덮어쓴다, §makeStageGatesDep).
+     * 게이트 판정은 여기서 딱 한 번 만들어 파일로 굳힌다 — handoff·전이·사람이 모두 같은 파일을 본다.
      * merge는 buildContext를 거치지 않으므로(script-only) ctx가 없다 — tier는 triage handoff의
      * 자기 신고에서 읽고, 그마저 없으면 CHARTER의 기본값으로 fail closed 대신 보수적으로 채운다.
      */
-    // `gates` + (#157, merge stage 전용) `diffFiles`: the PR's `<base>...HEAD` file list for the merge re-run rule
-    // (§makeMergeDiffFilesDep), and `suiteFailures`: test files that failed with no assertion (§makeMergeSuiteFailuresDep). Both come from the one assembly the run-stage test drives (§makeStageGateDeps).
-    ...makeStageGateDeps({
-      stage, run, root, gh, issue, getHarness: () => harness, getCharter: () => charter, mergeBase, readFile, gatesPath,
-      // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
-      transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal, admission }),
-    }),
+    gates: async (ctx) => {
+      if (!GATED_STAGES.has(stage)) return null;
+      const tier = stage === "merge" ? (latestHandoff(await gh.comments(issue), "triage")?.data?.tier ?? charter.tier_default) : ctx.tier;
+      const result = await runStageGates({
+        run, cwd: root, harness, stage, tier, base: await mergeBase(), quarantine: loadQuarantine(root), gh, issue, readFile,
+        saveQuarantine: (q) => writeQuarantine(root, q),
+        // KTB-44 / ADR-025 — 수확된 flaky 이슈는 `backlog`로 태어나 **게이트를 지나** 큐로 간다.
+        transitionIssue: ({ issue: n, to, reason }) => transition({ gh, issue: n, to, reason, stage, rehearsal, admission }),
+      });
+      mkdirSync(join(root, ".factory/out"), { recursive: true });
+      writeFileSync(gatesPath, JSON.stringify(result, null, 2));
+      console.log(verdictLine(result));
+      return result;
+    },
     /**
      * ADR-024 / KTB-42 — 리뷰가 시작되기 전에 "증거를 남길 수 있는가"를 **실물로** 확인한다.
      * 도구가 설치돼 있으면 그 도구를 부른다(리뷰어가 부를 바로 그 명령이라, 여기서 통과한 것은
@@ -3036,23 +3163,8 @@ async function main() {
      * 정상이다. qa 증거는 제자리에서 그대로 강제된다: review의 qa 리뷰어와 `factory:approved`의
      * `qaEvidenceGate`. 여기서 채점하면 로스터에 qa가 있는 모든 standard-tier 이슈가 막혔다.
      */
-    selfGate: async ({ gates }) => {
-      const base = await mergeBase();
-      const diff = await changedFiles({ run, cwd: root, base, harness });
-      /**
-       * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
-       * Only a `rework` review handoff carries them; on a first implement they are absent. The self-gate
-       * re-runs guardable pins (a red guard is a regression) and surfaces prose pins as advisory.
-       */
-      const review = ctxCache?.handoffs?.review;
-      const pins = review?.decision === "rework" && Array.isArray(review.pins) ? review.pins : [];
-      return runSelfGate({
-        root, harness, gates, run,
-        // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
-        // property is violated"; a lightly-edited pre-existing test is not what it judges.
-        changedTests: diff.addedTests, changedSources: diff.sources, pins,
-      });
-    },
+    // #174 — the production wiring lives in `makeSelfGateDep` so the test drives this exact call site.
+    selfGate: makeSelfGateDep({ root, harness, run, mergeBase, getCtx: () => ctxCache }),
     /**
      * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
      * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt(head별)와
@@ -3285,7 +3397,9 @@ async function main() {
     get mergeCheckWaitSec() { return harness?.factory?.merge_check_wait_sec; },
     /** merge stage 전용: mergeability UNKNOWN 재확인 전 대기. */
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    transition: async ({ to, reason, data, mergeGatesResult, prerequisite = false, cause, qaManifestRecorded = null }) => {
+    // #174 — the call into lib/transition.js (and its `by` forwarding) lives in `makeTransitionDep`, which tests drive; this
+    // closure is only main's ctxExtra builder.
+    transition: makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra: async ({ to, data, mergeGatesResult, prerequisite = false, qaManifestRecorded = null }) => {
       // 감사 H1c — merge 경로에는 ctx가 없다(script-only). `factory:merged` 규칙이 정족수·K를 실제로
       // 물 수 있도록 CHARTER에서 읽은 로스터와 K를 여기서 채운다(조회 실패는 fail closed로 남긴다:
       // roster가 없으면 규칙이 "roster size" 대신 개수 검사만 건너뛰는 것이 아니라, 아래
@@ -3325,8 +3439,9 @@ async function main() {
        * 리허설을 새로 GREEN으로 돌려도 풀리지 않는다(값이 낡은 것이 아니라 인자가 없는 것이다).
        * 다른 목적 라벨에는 비용이 0이다: `transition()`은 `to === "factory:queue"`일 때만 검사기를 부른다.
        */
-      return transition({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission });
-    },
+      // #174 — K 재시작의 `by=factory:run-<id>` 전달과 lib/transition.js 호출은 `makeTransitionDep`에 있다(테스트가 그 자리를 돈다).
+      return ctxExtra;
+    } }),
     /**
      * Feedback loop (T3 re-review NEW-MF-1) — **이 런이 쓴 팩토리 버전.** `self-gate-detail:` 줄에
      * 실려, "이 검사는 KTB가 거둬들였다"와 "이번 라운드에 볼 것이 없었다"를 가르는 유일하게 건전한
