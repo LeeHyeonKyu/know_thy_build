@@ -3035,3 +3035,136 @@ test("test_179_self_change_merge_pins_the_verified_head", async () => {
   expect((await run179(j)).code).toBe(0);
   expect(j.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
 });
+
+// ── #195 — the runner's PR evidence is published exactly once per merge run, before the merge or the hand-off ─────────────
+// The dep is `publishPrEvidence` (not feedback's `appendEvidence`). Order is checked on the recorded dep calls; the evidence
+// step must never block, duplicate or reorder the merge or the needs-human transition.
+const evidence195 = (impl = async () => ({ ok: true, markdown: "## Factory evidence\n(md)" })) => ({
+  publishPrEvidence: vi.fn(impl),
+  postEvidenceComment: vi.fn(async () => {}),
+});
+const failLines195 = (lines) => lines.filter((l) => l.startsWith("evidence: FAIL — "));
+const order195 = (a, b) => expect(a.mock.invocationCallOrder[0]).toBeLessThan(b.mock.invocationCallOrder[0]);
+const needsHumanCall195 = (d) => d.transition.mock.invocationCallOrder[d.transition.mock.calls.findIndex((c) => c[0].to === "factory:needs-human")];
+
+test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", async () => {
+  // (a) auto-merge: once, after every gate and check, before mergePr; the issue comment follows the merge.
+  {
+    const ev = evidence195();
+    const d = baseD(ev);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ pr: 9, route: "merge", gatesRerun: false, reason: null, gates: { status: "GREEN", level: "full" } });
+    order195(d.mergeGates, ev.publishPrEvidence);
+    order195(d.prReady, ev.publishPrEvidence);
+    order195(ev.publishPrEvidence, d.mergePr);
+    expect(ev.postEvidenceComment.mock.calls).toEqual([["## Factory evidence\n(md)"]]);
+    order195(d.mergePr, ev.postEvidenceComment);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", "evidence: issue comment posted"]);
+  }
+  // (b) protected-path hand-off (before d.gates()): once, before the needs-human transition, with no gates and the hand-off reason.
+  {
+    const ev = evidence195();
+    const d = baseD({ ...ev, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    expect(await run(d)).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    const args = ev.publishPrEvidence.mock.calls[0][0];
+    expect(args).toMatchObject({ pr: 9, route: "hand-off", gates: null });
+    expect(args.reason).toMatch(/^protected paths changed — human merge required: \.github\/workflows\/x\.yml/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+    expect(d.gates).not.toHaveBeenCalled();
+    expect(ev.postEvidenceComment).not.toHaveBeenCalled();
+  }
+  // (c) policy hand-off.
+  {
+    const ev = evidence195();
+    const v = { file: "factory/test/merge-stage.test.js", rule: "tests-modified — an existing test assertion changed" };
+    const d = baseD({ ...ev, policyViolations: vi.fn(async () => ({ ok: true, files: [v.file], violations: [v] })) });
+    expect(await run(d)).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toMatch(/existing tests modified or deleted/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+  }
+  // (d) judge-path refusal hand-off.
+  {
+    const ev = evidence195();
+    const d = selfD179({ ...ev,
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "standard" })) });
+    expect((await run179(d)).code).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "hand-off", gates: null });
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toMatch(/^judge path needs a unanimous review/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+  }
+  // (e) self-change path: once, before the veto-window announcement — not again at mergePr.
+  {
+    const ev = evidence195();
+    const d = selfD179(ev);
+    const r = await run179(d);
+    expect(r.code).toBe(0);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "veto-window", gates: { status: "GREEN" } });
+    const announce = d.comment.mock.calls.findIndex((c) => /거부권 창/.test(c[1]));
+    expect(announce).toBeGreaterThanOrEqual(0);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(d.comment.mock.invocationCallOrder[announce]);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(d.sleep.mock.invocationCallOrder[0]);
+    order195(ev.publishPrEvidence, d.mergePr);
+    expect(ev.postEvidenceComment).toHaveBeenCalledTimes(1);
+  }
+  // (f) a veto: the window's evidence stands; the hand-off that ends the window does not publish a second time.
+  {
+    const ev = evidence195();
+    const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+    expect((await run179(d)).code).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0].route).toBe("veto-window");
+    expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^vetoed by @owner/);
+    expect(ev.postEvidenceComment).not.toHaveBeenCalled();
+  }
+  // (g) the dep throws, rejects, times out or answers ok:false → the merge / the transition still happens, the exit code is
+  // unchanged, and the record gets exactly one `evidence: FAIL — <reason>` line.
+  const failing = {
+    throws: () => { throw new Error("gh pr edit exploded"); },
+    rejects: async () => { throw new Error("gh pr view failed (1): HTTP 502"); },
+    "times out": () => new Promise(() => {}),
+    "ok:false": async () => ({ ok: false, reason: "body unreadable" }),
+  };
+  for (const [kind, impl] of Object.entries(failing)) {
+    const ev = evidence195(impl);
+    const d = baseD({ ...ev, evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record }), kind).toBe(0);
+    expect(d.mergePr, kind).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to), kind).toEqual(["factory:merged"]);
+    expect(failLines195(lines), kind).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("evidence: ")), kind).toHaveLength(1);
+    expect(ev.postEvidenceComment, kind).not.toHaveBeenCalled();
+
+    const ev2 = evidence195(impl);
+    const h = baseD({ ...ev2, evidenceTimeoutMs: 5, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    const rec2 = makeRecord();
+    expect(await run(h, { record: rec2.record }), kind).toBe(2);
+    expect(h.transition.mock.calls.map((c) => c[0].to), kind).toEqual(["factory:needs-human"]);
+    expect(failLines195(rec2.lines), kind).toHaveLength(1);
+  }
+  expect(failLines195((await (async () => { const ev = evidence195(failing.rejects); const { lines, record } = makeRecord(); await run(baseD(ev), { record }); return lines; })()))[0]).toMatch(/HTTP 502/);
+  // A failing issue comment after the merge is recorded and never undoes anything.
+  {
+    const ev = evidence195();
+    ev.postEvidenceComment = vi.fn(async () => { throw new Error("comment 500"); });
+    const d = baseD(ev);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.closeIssue).toHaveBeenCalledTimes(1);
+    expect(lines.some((l) => /^evidence: issue comment failed — comment 500/.test(l))).toBe(true);
+  }
+  // An older wiring without the dep merges exactly as before.
+  {
+    const d = baseD();
+    expect(await run(d)).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+  }
+});

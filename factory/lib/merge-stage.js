@@ -289,6 +289,8 @@ export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = nul
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
 const MERGEABILITY_REPOLL_MS = 5000;
+/** #195 — the PR-evidence step's own bound: it may delay the merge or the hand-off by at most this much (no retry). */
+export const EVIDENCE_TIMEOUT_MS = 60 * 1000;
 
 /**
  * KTB-15b I1 / KTB-19 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR
@@ -480,7 +482,35 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   //
   // `sections`는 **규칙별로** 하나씩이다(KTB-10 I3): 한 PR이 두 규칙을 동시에 어길 수 있고(역할 파일
   // 편집 + lessons 삭제), 그때 한 제목으로 뭉치면 사람이 목록의 절반을 엉뚱한 설명으로 읽는다.
+  /**
+   * #195 — the runner's "Factory evidence" section on the PR body (`d.publishPrEvidence`, run-stage's gh.js wiring; named
+   * apart from feedback's `appendEvidence`). **Exactly once per merge run**: before mergePr on the auto-merge path, inside
+   * handToHuman before the needs-human transition, and on the self-change path before the veto window is announced (so the
+   * owner reads it before deciding) — the flag keeps the window's later mergePr / veto hand-off from publishing again.
+   * It never blocks or reorders anything: a throw, a rejection, an `ok:false` or a timeout becomes exactly one
+   * `evidence: FAIL — <reason>` record line and the merge or transition goes on. An unwired dep (an older wiring) is a no-op —
+   * the record stays byte-identical to before this feature.
+   */
+  let evidenceDone = false, evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false;
+  const publishEvidence = async ({ route, reason = null }) => {
+    if (evidenceDone || typeof d.publishPrEvidence !== "function") return;
+    evidenceDone = true;
+    const ms = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
+    let timer;
+    try {
+      const r = await Promise.race([
+        Promise.resolve().then(() => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason })),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms); }),
+      ]);
+      if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
+      evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;
+      record([`evidence: published to PR #${pr} (${route})`]);
+    } catch (e) {
+      record([`evidence: FAIL — ${publicReason(e?.message || e)}`]);
+    } finally { clearTimeout(timer); }
+  };
   const handToHuman = async ({ reason, sections }) => {
+    await publishEvidence({ route: "hand-off", reason });
     try {
       await d.comment?.(pr, [
         ...sections.flatMap(({ heading, why, files }) => [
@@ -799,6 +829,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     return 2;
   }
   record([`merge: gates ${gates.status}`, ...testEnvNote]);
+  evidenceGates = gates;                     // #195 — this run's own verdict (the re-run's, when it ran) is the gates row
+  evidenceRerun = mergedOnRerunIds !== null;
 
   // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
   // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는
@@ -1128,6 +1160,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       ...files.map((f) => `- \`${f}\``),
     ].join("\n");
     if (!d.comment) return await undecidable(what, "comment dep not wired — the owner could not be told how to veto");
+    // #195 — the evidence is on the PR body before the owner is told the window is open (and is not published again after it).
+    await publishEvidence({ route: "veto-window" });
     try { await d.comment(pr, body); }
     catch (e) { return await undecidable(what, `the veto-window announcement could not be posted on PR #${pr}: ${e?.message || e}`); }
     record([`merge: veto window opened — ${description} (${vetoMinutes} min, ${kind === "judge" ? "judge" : "non-judge"} path) on ${String(sha).slice(0, 7)}`]);
@@ -1199,6 +1233,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     }
   }
 
+  // #195 — the evidence lands on the PR body right before the squash (a no-op when the veto window already published it).
+  await publishEvidence({ route: "merge" });
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
     // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
@@ -1215,6 +1251,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
+
+  // #195 — after a merge, the same evidence once on the tracking issue (the dep skips it when the marked comment exists).
+  // Best-effort: the merge already happened; a failure is one record line.
+  if (evidenceMarkdown !== null && typeof d.postEvidenceComment === "function") {
+    try { await d.postEvidenceComment(evidenceMarkdown); record(["evidence: issue comment posted"]); }
+    catch (e) { record([`evidence: issue comment failed — ${publicReason(e?.message || e)}`]); }
+  }
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).
