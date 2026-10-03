@@ -1,4 +1,6 @@
-import { gatesDetailLines, verdictLine } from "./gates.js";
+import { relative } from "node:path";
+import { gatesDetailLines, verdictLine, DETAIL_MAX_FAILING, GATES_DETAIL_PREFIX } from "./gates.js";
+import { parseVitestJson } from "./parsers/vitest-json.js";
 import { isMergeBaseError, MERGE_BASE_BLOCKED_REASON, GIT_DIFF_BLOCKED_REASON } from "./blocked-errors.js";
 import { isGitDiffError } from "./changed-files.js";
 import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as HARNESS_SECTION_RULE_RE, TESTS_MODIFIED_POLICY_RULE as TESTS_RULE_RE } from "./integrity.js";
@@ -85,6 +87,187 @@ export function humanGateNote(humanGate) {
   if (humanGate === true) return "merged after the factory-merge environment's required reviewer approved this job (CHARTER merge.human_gate=true)";
   if (humanGate === false) return "dark merge — no per-PR human signature (CHARTER merge.human_gate=false)";
   return "dark merge — CHARTER declares no merge.human_gate, so no per-PR human signature was required (run `factory doctor`: charter.merge-human-gate-unset)";
+}
+
+/**
+ * ── #157 — a merge-gate RED on a test **outside the PR's diff** is re-run once (ADR-034, amends ADR-011) ─────
+ *
+ * own-calendar #111: a client-only PR with 3/3 approvals went to needs-human because one server integration
+ * test flaked at merge. The only thing a human could do was re-run it. So, at merge only, when the RED can be
+ * **proven** to come from tests this PR did not touch, the same `d.gates()` runs exactly once more:
+ *   - whole-GREEN re-run → merge continues on the re-run's result (status re-posted from it);
+ *   - the same failing id set RED again → needs-human with `FLAKY_CANDIDATE_TEXT` + a stamped marker per id;
+ *   - a different set / unreported RED → needs-human naming both runs; BLOCKED, a typed base/diff error, or no
+ *     verdict at all → factory:blocked (the re-run could not decide anything).
+ * Everything that cannot be proven "outside" is today's single-run transition and reason (fail closed); the record
+ * gets exactly one extra, stamped `merge: no gates rerun — <reason>` line so a refusal is never silent (review sec-s1).
+ * At most one re-run per `runMergeStage` invocation — no loop, no third run.
+ */
+export const FLAKY_CANDIDATE_TEXT = "PR 밖의 테스트가 두 번 RED — flaky 후보";
+/** Run-record line prefix; the rest is one-line JSON (`test`, `outcome`, `run_id`, `runner`, `round?`) — the
+ * same stamp binding as `gates-detail:` so a later reader can trust only lines bound to their run. No reader
+ * exists yet (#157 non-goal). */
+export const FLAKY_CANDIDATE_PREFIX = "factory-flaky-candidate: ";
+/** Run-record line prefix for a RED (or other non-GREEN verdict) the stage did NOT re-run; the rest is the reason + stamp tag. */
+export const NO_RERUN_PREFIX = "merge: no gates rerun — ";
+/** #184 dw6 — the mark on the `merge: merged …` record line when the merge happened only because the one re-run was GREEN. */
+export const MERGED_ON_RERUN_TEXT = "merged on rerun";
+/**
+ * Conventional test roots (review cf-s3). A failing test whose TOP-LEVEL directory is one of these counts as touched by
+ * any non-empty diff: in a single-package `src/** + tests/**` layout every tests/** failure would otherwise sit
+ * "outside" every src-only PR, the heuristic would filter nothing, and a deterministic break the PR caused would be
+ * re-run (and, on a second RED, called a flaky candidate). Trade-off, accepted for an irreversible merge: such
+ * single-package repos get no re-run (ADR-034). Defined here only — nothing else in the engine carries this list.
+ */
+export const TEST_ROOT_DIRS = Object.freeze(["test", "tests", "__tests__", "spec", "e2e"]);
+
+/** A repo-relative path in canonical form, or null when it cannot be compared safely (absolute, `..`, `\`, empty segment). */
+function normRelPath(p) {
+  if (typeof p !== "string") return null;
+  let s = p.trim();
+  while (s.startsWith("./")) s = s.slice(2);
+  if (!s || s.startsWith("/") || s.includes("\\")) return null;
+  const segs = s.split("/");
+  if (segs.some((x) => x === "" || x === "." || x === "..")) return null;
+  return s;
+}
+
+const sameIdSet = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.includes(x));
+
+/**
+ * Test FILES that failed with no failed assertion (did not load, a suite-level hook threw), read from the report each
+ * RED test gate of `gates` left behind. Vitest writes such a file as a `testResults` entry with `status:"failed"` and a
+ * `message` but no failed assertion — `failing_ids` (assertions only) never names it, so without this the merge stage
+ * would take `failing_ids` for the whole RED. Read here, not added to factory.gates.v1 (#157 plan non-goal: the schema
+ * and gates.js code stay as they are). `readReport(gateName)` returns the report text or null.
+ * `{ ok:true, files }`, or `{ ok:false, reason }` when it cannot vouch: report missing/unparseable, or the report's
+ * failing assertions are not the gate's `failing_ids` (the file on disk is not the one that gate read).
+ */
+export function idlessFailedSuites({ gates, readReport, root }) {
+  const no = (reason) => ({ ok: false, files: [], reason });
+  const files = [];
+  for (const [name, g] of Object.entries(gates?.gates || {})) {
+    if (g?.status !== "RED" || typeof g.parsed !== "boolean") continue;       // only test gates carry `parsed`
+    const text = readReport(name);
+    if (typeof text !== "string") return no(`${name} report not readable`);
+    let j;
+    try { j = JSON.parse(text); } catch { return no(`${name} report unparseable`); }
+    const parsed = parseVitestJson(text, root);
+    if (parsed.error) return no(`${name} report unparseable`);
+    if (!sameIdSet([...new Set(parsed.failing.map((f) => f.id))], [...new Set(g.failing_ids || [])])) return no(`${name} report on disk is not the one this gate read`);
+    for (const tr of Array.isArray(j?.testResults) ? j.testResults : []) {
+      const failedAssertion = (tr?.assertionResults || []).some((a) => a?.status === "failed");
+      if (tr?.status === "failed" && !failedAssertion) {
+        const f = relative(root, String(tr.name ?? ""));
+        if (!files.includes(f)) files.push(f);
+      }
+    }
+  }
+  return { ok: true, files };
+}
+
+/**
+ * Pure: may this RED gates result be re-run once at merge? `{ ok:true, ids }` only when ALL of these hold:
+ *   - status is RED (not MISCONFIGURED/BLOCKED/missing — RED already implies no MISCONFIGURED gate);
+ *   - every RED gate is a test gate whose report was parsed (`parsed === true`) with non-empty `failing_ids`
+ *     (a RED lint next to a RED test is not a flake);
+ *   - `suites` (§idlessFailedSuites) vouches that no test file failed without a failed assertion — such a file has
+ *     no id, so `failing_ids` would not be the whole RED and the rest could not be placed outside the diff;
+ *   - the diff was read (`ok`, a non-empty list) and every path in it normalises;
+ *   - no diff file sits at the repo root (a root file — package.json, a lockfile, a config — touches every package);
+ *   - for every failing id `path::name`: the path normalises, is not at the repo root, its top-level directory is
+ *     not a conventional test root (§TEST_ROOT_DIRS), and no diff file shares its top-level directory (which also
+ *     covers the test file itself being in the diff).
+ * Anything else is `{ ok:false, reason }` — "outside the diff" was not proven.
+ */
+export function rerunEligibility(gates, diff, suites) {
+  const no = (reason) => ({ ok: false, reason });
+  // RED (not MISCONFIGURED) already means no gate is misconfigured and no required gate is missing —
+  // `recomputeStatus` (gates.js) ranks MISCONFIGURED above RED — so this one check covers both.
+  if (!gates || gates.status !== "RED") return no(`gates ${gates?.status ?? "missing"}`);
+  const red = Object.entries(gates.gates || {}).filter(([, g]) => g?.status === "RED");
+  if (!red.length) return no("no RED gate entry");
+  const ids = [];
+  for (const [name, g] of red) {
+    if (g.parsed !== true) return no(`${name} is RED without a parsed test report`);
+    if (!Array.isArray(g.failing_ids) || !g.failing_ids.length) return no(`${name} is RED with no failing test ids`);
+    for (const id of g.failing_ids) if (!ids.includes(id)) ids.push(id);
+  }
+  if (!suites?.ok || !Array.isArray(suites.files)) return no(`suite-level failures not vouched for${suites?.reason ? `: ${suites.reason}` : ""}`);
+  if (suites.files.length) return no(`test files failed without a failing test: ${suites.files.join(", ")}`);
+  if (!diff?.ok || !Array.isArray(diff.files) || !diff.files.length) return no(`PR diff unreadable or empty${diff?.reason ? `: ${diff.reason}` : ""}`);
+  const tops = new Set();
+  for (const f of diff.files) {
+    const n = normRelPath(f);
+    if (!n) return no(`diff path not normalisable: ${f}`);
+    const segs = n.split("/");
+    if (segs.length === 1) return no(`diff touches a repo-root file: ${n}`);
+    tops.add(segs[0]);
+  }
+  for (const id of ids) {
+    const at = typeof id === "string" ? id.indexOf("::") : -1;
+    const path = at > 0 ? normRelPath(id.slice(0, at)) : null;
+    if (!path) return no(`failing test path not normalisable: ${id}`);
+    const segs = path.split("/");
+    if (segs.length === 1) return no(`failing test at the repo root: ${path}`);
+    if (TEST_ROOT_DIRS.includes(segs[0])) return no(`failing test ${path} sits under the test root ${segs[0]}/ and the diff is non-empty`);
+    if (tops.has(segs[0])) return no(`diff touches ${segs[0]}/, where ${path} lives`);
+  }
+  return { ok: true, ids };
+}
+
+/** The failing test ids of a RED result, when every RED gate is a parsed test gate and `suites` vouches for no id-less suite failure — else null (not comparable). */
+function redTestIds(gates, suites) {
+  if (!gates || gates.status !== "RED") return null;
+  const red = Object.values(gates.gates || {}).filter((g) => g?.status === "RED");
+  if (!red.length || red.some((g) => g.parsed !== true || !Array.isArray(g.failing_ids) || !g.failing_ids.length)) return null;
+  if (!suites?.ok || !Array.isArray(suites.files) || suites.files.length) return null;
+  return [...new Set(red.flatMap((g) => g.failing_ids))];
+}
+/**
+ * Test ids go to public places (run record, issue comment). Their names are not scrubbed here: they are the
+ * `failing` names gates.js's own `gates-detail` projection (`gatesDetailLines`) writes — the one rule, run on a
+ * one-gate projection — so a `factory-flaky-candidate` line and the `gates-detail` line beside it always carry the
+ * same name (review arch1). A projection that fails yields a placeholder, never the raw id.
+ */
+function publicTestNames(ids) {
+  const [line] = gatesDetailLines({ gates: { names: { status: "RED", detail: { failing: ids, snippet: "" } } } });
+  try {
+    const failing = JSON.parse(String(line).slice(GATES_DETAIL_PREFIX.length)).failing;
+    if (Array.isArray(failing) && failing.length === ids.length) return failing;
+  } catch { /* fall through */ }
+  return ids.map(() => "[name unavailable]");
+}
+const idList = (ids) => {
+  const shown = publicTestNames(ids.slice(0, DETAIL_MAX_FAILING));
+  return shown.join(", ") + (ids.length > shown.length ? ` (+${ids.length - shown.length} more)` : "");
+};
+/** `[run_id=<id> runner=<r>( round=<n>)]` — binds a plain-text record line to its run, the way gates-detail's JSON fields do. */
+export function stampTag({ runId = null, runnerId = null, round = null } = {}) {
+  return `[run_id=${runId ?? null} runner=${runnerId ?? null}${Number.isInteger(round) ? ` round=${round}` : ""}]`;
+}
+/**
+ * A refusal reason carries paths, test ids and dep error text (a git error can echo a remote URL) into the public run
+ * record, so it goes through the gates-detail projection's own scrub (`gatesDetailLines` — the one rule, run on a
+ * one-gate projection; never a copy of it). A projection that fails yields a placeholder, never the raw text.
+ */
+function publicReason(reason) {
+  const [line] = gatesDetailLines({ gates: { reason: { status: "RED", reason: String(reason ?? ""), detail: { failing: [], snippet: "" } } } });
+  try {
+    const r = JSON.parse(String(line).slice(GATES_DETAIL_PREFIX.length)).reason;
+    if (typeof r === "string") return r;
+  } catch { /* fall through */ }
+  return "[reason unavailable]";
+}
+/** The one stamped line a refused re-run leaves (review sec-s1): an on-call reader can tell "refused, because X" from "broken". */
+export function noRerunLine(reason, stamp) {
+  return `${NO_RERUN_PREFIX}${publicReason(reason)} ${stampTag(stamp)}`;
+}
+export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = null, round = null } = {}) {
+  const names = publicTestNames(ids);
+  return names.map((test) => FLAKY_CANDIDATE_PREFIX + JSON.stringify({
+    test, outcome, run_id: runId ?? null, runner: runnerId ?? null, ...(Number.isInteger(round) ? { round } : {}),
+  }));
 }
 
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
@@ -399,7 +582,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
   record(["merge: agent role sections within policy"]);
 
-  // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human. base/diff를 못 구한
+  // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human — 단 하나의 예외(#157, ADR-034):
+  // RED가 전부 PR diff 밖의 파싱된 테스트 실패로 **증명**되면(rerunEligibility) 같은 d.gates()를 정확히 한 번 더 돌고,
+  // 그 런 전체가 GREEN일 때만 머지로 간다(같은 id 집합의 두 번째 RED는 flaky 후보 마커와 함께 needs-human). base/diff를 못 구한
   // 것도 판정 불가다(run-stage의 나머지 스테이지와 같은 typed-error 계약). 상태 게시는 부수 효과라
   // 실패해도(또는 diagnostic 결과여도) 머지 판단을 막지 않는다 — postStatus 자체가 best-effort다.
   let gates;
@@ -419,9 +604,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 명령을 돌리기 전에 env를 한 번 더 re-up했다(멱등) — 성공/실패 둘 다 run 기록에 남긴다. `ran`이
   // 없으면(=이 하네스는 compose를 안 쓴다) 아무 줄도 붙지 않는다. merge에도 같은 dep(gates())이
   // 붙어 있으므로 결과를 흘려버리지 않는다 — 아래 세 갈래(BLOCKED/비-GREEN/GREEN) 모두에 붙인다.
-  const testEnvNote = gates?.test_env_reup?.ran
-    ? [`test-env: re-up ${gates.test_env_reup.ok ? "ok" : `failed — ${gates.test_env_reup.detail}`}`]
-    : [];
+  const envNoteOf = (g) => (g?.test_env_reup?.ran
+    ? [`test-env: re-up ${g.test_env_reup.ok ? "ok" : `failed — ${g.test_env_reup.detail}`}`]
+    : []);
+  let testEnvNote = envNoteOf(gates);
   if (gates?.status === "BLOCKED") {
     const reason = gates.blocked_reason || "gates could not be decided";
     const t = await toBlocked(reason);
@@ -431,13 +617,102 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // gates가 아예 없는 것(null/undefined)은 "통과"가 아니라 **판정 없음**이다 — 게이트 파일이
   // 만들어지지 않았거나 이 런에서 게이트가 돌지 않았다는 뜻이고, 머지는 되돌릴 수 없으므로
   // 확인되지 않은 것을 통과로 읽지 않는다(fail closed, §merge gate와 같은 원칙).
+  // #157 — before handing a RED to a human, ask whether it is provably outside this PR's diff (§rerunEligibility).
+  // The diff is read only for a RED; an absent/throwing/not-ok `diffFiles` is "not proven" — today's path.
+  // The test reports are read right after the run that wrote them (the re-run overwrites them) — an absent/throwing
+  // `suiteFailures` is "not vouched for", never "none".
+  const suitesOf = async (g) => {
+    if (!d.suiteFailures) return { ok: false, files: [], reason: "suiteFailures dep not wired" };
+    try { return await d.suiteFailures(g); }
+    catch (e) { return { ok: false, files: [], reason: `${e?.message || e}` }; }
+  };
+  // Every non-GREEN verdict that reaches here gets an eligibility answer — a RED is examined in full; any other status
+  // (MISCONFIGURED, missing) is refused by `rerunEligibility` itself — so the refusal line below always has a reason.
+  let eligible;
+  // #184 dw6: the ids a GREEN re-run let through — set only on that path, read only by the `merge: merged …` line (§(6)).
+  let mergedOnRerunIds = null;
+  if (gates?.status !== "RED") eligible = rerunEligibility(gates);
+  else {
+    let diff;
+    if (!d.diffFiles) diff = { ok: false, reason: "diffFiles dep not wired" };
+    else {
+      try { diff = await d.diffFiles(); }
+      catch (e) { diff = { ok: false, reason: `${e?.message || e}` }; }
+    }
+    eligible = rerunEligibility(gates, diff, await suitesOf(gates));
+    // #184 (cf1, fail closed): without resetGates the re-run could parse the FIRST run's report and brand a test that never
+    // ran again a flaky candidate. An unwired resetGates is "the re-run cannot be trusted" — refused like an unwired diffFiles.
+    if (eligible.ok && typeof d.resetGates !== "function") {
+      eligible = { ok: false, reason: "resetGates dep not wired — a re-run could read the first run's test report" };
+    }
+  }
+  if (eligible.ok) {
+    const ids = eligible.ids;
+    // The first run's evidence survives only here — the re-run overwrites `.factory/out/gates.json`. Written BEFORE the second gates run starts: a job killed during the re-run (merge job timeout) is told apart from
+    // one killed in the first run by this line, and the first RED's gates-detail lines survive the re-run's overwrite.
+    record([`merge: gates RED outside the PR diff — rerun 1/1 (${idList(ids)}) ${stampTag(stamp)}`, ...gatesDetailLines(gates, stamp), ...testEnvNote]);
+    let again;
+    try {
+      // cf1 (review round 2, two reviewers): the re-run must not be able to read the FIRST run's test report. `d.gates()` parses
+      // whatever report file the test command left behind; if the re-run's command writes none (crash, runner killed), the stale
+      // report would make the same id set look RED twice and a test that never ran again would be branded a flaky candidate.
+      // `resetGates` is the stage's own "last run's verdict material must not stand in for this run" (run-stage.js) — same
+      // function, called once more here. After it, a re-run that writes no report shows `parsed:false`, which `redTestIds`
+      // already refuses to turn into ids — so it can never equal the first set. That holds only for a report resetGates may
+      // delete: one outside the repo root is left alone, so run-stage's `suiteFailures` refuses to vouch for it and such a
+      // RED never reaches this re-run (#157 cf2).
+      await d.resetGates();
+      again = await d.gates();
+    } catch (e) {
+      if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+      const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
+      const t = await toBlocked(reason);
+      record([`merge: gates rerun BLOCKED — ${e.message}`, ...refusal(t)]);
+      return 2;
+    }
+    // The required `factory/gates` status must follow the final verdict — a stale failure would refuse a GREEN re-run at (5).
+    if (again && again.diagnostic !== true && postStatus) {
+      await postStatus({ context: "factory/gates", state: again.status === "GREEN" ? "success" : "failure", description: verdictLine(again), sha: again.head_sha });
+    }
+    const againEnvNote = envNoteOf(again);
+    // BLOCKED, or no verdict at all: the re-run could not decide anything — blocked (plan dw2), never a merge, never a
+    // third run. A missing verdict on the FIRST run stays needs-human (F7); here the first run already said RED and the
+    // re-run is what failed to happen, which is the "could not decide" case blocked exists for.
+    if (!again || again.status === "BLOCKED") {
+      const reason = again ? (again.blocked_reason || "gates could not be decided") : `gates rerun gave no verdict (first run RED on ${idList(ids)}, outside the PR diff)`;
+      const t = await toBlocked(reason);
+      record([`merge: gates rerun BLOCKED — ${reason}`, ...refusal(t), ...againEnvNote]);
+      return 2;
+    }
+    if (again.status !== "GREEN") {
+      const ids2 = again.status === "RED" ? redTestIds(again, await suitesOf(again)) : null;
+      const candidate = sameIdSet(ids, ids2);
+      const status2 = again.status;
+      // cf1: a RED re-run whose test gate wrote no report is not "RED twice" — it is a re-run that did not happen. Say so.
+      const unreported = again.status === "RED" && Object.values(again.gates || {}).some((g) => g?.status === "RED" && g.parsed === false);
+      const reason = candidate
+        ? `gates RED at merge — ${FLAKY_CANDIDATE_TEXT}: ${idList(ids)}`
+        : unreported
+          ? `gates rerun inconclusive — the re-run wrote no test report (first run RED on ${idList(ids)}, outside the PR diff); not a flaky candidate`
+          : `gates ${status2} at merge after one rerun — first run RED on ${idList(ids)} (outside the PR diff), rerun ${status2}${ids2 ? ` on ${idList(ids2)}` : again.failing?.length ? ` (failing gates: ${again.failing.join(", ")})` : ""}`;
+      const t = await d.transition({ to: "factory:needs-human", reason });
+      record([`merge: gates ${status2} on rerun`, ...gatesDetailLines(again, stamp), ...(candidate ? flakyCandidateLines(ids, "RED", stamp) : []), ...refusal(t), ...againEnvNote]);
+      return 2;
+    }
+    record([`merge: gates GREEN on rerun — first run RED on ${idList(ids)}, outside the PR diff`, ...flakyCandidateLines(ids, "GREEN", stamp)]);
+    gates = again;
+    mergedOnRerunIds = ids;
+    testEnvNote = againEnvNote;
+  }
   if (!gates || gates.status !== "GREEN") {
     const reason = `gates ${gates?.status ?? "missing"} at merge`;
     const t = await d.transition({ to: "factory:needs-human", reason });
     // Feedback loop Task 1/3 — 이름뿐인 `merge: gates RED`는 **왜** 빨간지를 말하지 않는다. run-stage가
     // 이미 닫은 그 구멍(7일짜리 아티팩트에만 남던 뿌리)이 머지 직전의 게이트에서만 열려 있었다.
     // `stamp`가 이 줄을 이 런에 묶는다 — 묶이지 않은 줄은 Task 3의 harvester가 증거로 세지 않는다.
-    record([`merge: gates ${gates?.status ?? "missing"}`, ...gatesDetailLines(gates, stamp), ...refusal(t), ...testEnvNote]);
+    // #157 review sec-s1: the one line a refused re-run adds, right after the verdict line — the rest is today's record.
+    const noRerun = eligible.ok ? [] : [noRerunLine(eligible.reason, stamp)];
+    record([`merge: gates ${gates?.status ?? "missing"}`, ...noRerun, ...gatesDetailLines(gates, stamp), ...refusal(t), ...testEnvNote]);
     return 2;
   }
   record([`merge: gates ${gates.status}`, ...testEnvNote]);
@@ -740,7 +1015,11 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: mergePr FAIL — ${reason}`, ...refusal(t)]);
     return 2;
   }
-  record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}`]);
+  // #184 dw6 (plan d1): a merge that went through only because the one re-run was GREEN says so on its own merged line, naming
+  // the retried tests (the same scrubbed names as the rerun/flaky-candidate lines) — the one trace left of "this test failed,
+  // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
+  const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
+  record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).
