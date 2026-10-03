@@ -4218,8 +4218,16 @@ ok:false를 확인한다.
 - *쓰기 쪽 (sec1·sec2).* `docs/factory/runs/**`는 에이전트가 쓸 수 있는 스크래치 경로이고 스테이지 끝의 기본 dir `syncRecords`는 그것을 러너의
   이름으로 민다. 그래서 run-stage의 두 동기화 자리(스테이지 끝·abort)는 `syncRunRecords`를 거친다: 밀기 직전에 `scrubPlantedBreakerEvidence`가
   로컬 `state/breaker.md`를 지우고(그 파일의 문은 `writeBreakerState` 하나이고, 그것은 쓴 뒤 로컬 파일을 지운다), 모든 기록 파일에서 **이 프로세스가
-  쓴**(`runRecord`가 `trust`한) 줄도 **이미 브랜치에 있는** 줄도 아닌 `factory-self-merge:` 줄을 지운다. abort 정리 스텝은 다른 프로세스라
-  `trust`를 모르므로 merge 스테이지에서만 로컬 줄을 믿는다(merge는 에이전트를 부르지 않는다). records 헬퍼는 바꾸지 않았다.
+  쓴**(`runRecord`가 `trust`한) 줄도 **이미 브랜치에 있는** 줄도 아닌 `factory-self-merge:` 줄을 지운다. records 헬퍼는 바꾸지 않았다.
+- *self-critique (load-bearing 스켑틱) — 가드의 빈틈 셋.* (f1) dw1·dw2 테스트가 테스트 전용 파서(`parseRevertLog`, `%cI%x09%s`)를 거쳐
+  프로덕션 파서(`parseRevertCommits`)의 제목 귀속을 지키지 못했다 → `parseRevertLog`를 지우고 두 테스트와 merge-stage의 끝에서 끝까지
+  테스트가 `REVERT_LOG_FORMAT` + `parseRevertCommits`(+ `mainPrs`)를 그대로 쓴다. (f2) retro도 같은 워크트리에서 `claude -p`를 부르고 기본 dir을
+  밀었는데 가드가 없었다 → `bin/retro.js`의 동기화가 `retroRecordsSync` = `syncRunRecords`(가드 + `overwrite`/`expectBlob` 전달)를 탄다. 엔진의
+  모든 `syncRecords({` 호출 자리를 테스트가 소스로 센다(가드 자신과 상태 파일 전용 쓰기뿐). (f3) abort 정리 스텝이 merge에서 로컬 줄을 통째로
+  믿었는데(`trustLocal`), merge의 워크트리는 PR head 체크아웃이라 PR이 force-add한 기록 파일을 실어 올 수 있다 → `trustLocal`을 없애고, merge의
+  abort는 `makeMergeAbortVouch`가 GitHub의 사실로 보증한 줄만 남긴다: 이 이슈의 기록 파일에 있고, `issue`가 이 이슈이고, 그 PR이 MERGED이고,
+  head 브랜치가 `claude/fq-<issue>`이고, head sha가 줄의 `sha`다(PR head의 파일은 자기를 담은 커밋의 sha를 미리 적을 수 없다). gh를 읽지
+  못하면 보증하지 않는다 — 그때는 진짜 줄 하나를 잃는다(머지와 동기화 사이에 프로세스가 죽고 gh까지 실패한 경우에 한한다).
 - *읽기 쪽 — 쓰기 경계만 믿지 않는다 (sec1).* 상태 파일을 마지막으로 바꾼 커밋이 기본 dir 동기화(`run-record:`·`retro:`)이면 ok:false(손상과 같게
   — 사람의 리셋이 `expectBlob`으로 덮어쓴다). `closed_at`이 있는데 `closed_by`가 `person:<login>`이 아니면 ok:false. `closed_at`이 지금보다
   10분 넘게 미래면 ok:false(sweep은 자기 시각을 넘긴다). 
