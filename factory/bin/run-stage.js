@@ -2142,8 +2142,9 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
  * factory's logins (`resolveFactoryLogins` with the caller's `env` injected — never `process.env` from in here — and no
  * comments, so a stranger's heartbeat-shaped comment cannot make its author a factory login); and this merge run's live
  * gates result passed in by merge-stage — never the record's FACTORY_GATES line. Logins that cannot be resolved do not fail
- * the publish: the section shows a note instead of the response column and the result's `logins` carries the reason, which
- * merge-stage writes as the record's FAIL line.
+ * the publish: the section fails closed (no row from any comment, a note saying why) and the result's `logins` carries the
+ * reason, which merge-stage writes as the record's FAIL line. The logins read and the comment step's viewer read get the
+ * bound's signal like every other gh call here, so a timeout kills them rather than leaving them running.
  * PR-body I/O goes only through gh.js: `prBody` immediately before `editPrBody` (read-modify-write; a human edit landing
  * between the two can still be lost — gh has no compare-and-swap on a PR body), each bounded by `timeoutMs`, no retry; the
  * comment reads are bounded the same way. merge-stage's `signal` cancels the step: checked before the write and handed to
@@ -2154,15 +2155,19 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
  * place through gh.patchComment (see `postEvidenceComment`). Every gh call there is bounded and takes merge-stage's signal.
  */
 export function makePrEvidenceDeps({ gh, issue, readRecord, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
-  /** `fn()` with its failure renamed to the evidence step it belongs to (merge-stage's FAIL line names the step). */
-  const inStep = async (step, fn) => {
-    try { return await fn(); } catch (e) {
-      const msg = e?.message || String(e);
-      throw new Error(msg.startsWith(`${step}: `) ? msg : `${step}: ${msg}`, { cause: e });
-    }
-  };
   return {
-    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null } = {}) => {
+    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null, onStep = null } = {}) => {
+      /**
+       * `fn()` inside the named evidence step: the step is reported first (`onStep` — merge-stage names it when its own timeout
+       * fires before this rejection can reach it), and a failure is renamed to it (merge-stage's FAIL line names the step).
+       */
+      const inStep = async (step, fn) => {
+        try { onStep?.(step); } catch { /* a reporting callback never changes the step's outcome */ }
+        try { return await fn(); } catch (e) {
+          const msg = e?.message || String(e);
+          throw new Error(msg.startsWith(`${step}: `) ? msg : `${step}: ${msg}`, { cause: e });
+        }
+      };
       const live = () => { if (signal?.aborted) throw (signal.reason ?? new Error("evidence step aborted")); };
       let recordText = null;
       try { recordText = readRecord(); } catch { recordText = null; }
@@ -2172,7 +2177,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord, env = null, now = ()
         const prComments = await bounded((s) => gh.comments(pr, { signal: s }), { ms: timeoutMs, what: "gh pr comments", signal });
         live();
         let factoryLogins;
-        try { factoryLogins = await bounded(() => resolveFactoryLogins({ gh, env }), { ms: timeoutMs, what: "factory logins", signal }); }
+        try { factoryLogins = await bounded((s) => resolveFactoryLogins({ gh, env, signal: s }), { ms: timeoutMs, what: "factory logins", signal }); }
         catch (e) { live(); factoryLogins = { ok: false, reason: e?.message || String(e) }; }
         live();
         return { issueComments, prComments, factoryLogins };
@@ -2200,7 +2205,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord, env = null, now = ()
     postEvidenceComment: async (markdown, { signal = null } = {}) => {
       const step = (what, start) => bounded(start, { ms: timeoutMs, what, signal });
       const target = evidenceComment(markdown);
-      const self = typeof gh.viewerLogin === "function" ? await step("gh api user", () => gh.viewerLogin()) : null;
+      const self = typeof gh.viewerLogin === "function" ? await step("gh api user", (s) => gh.viewerLogin({ signal: s })) : null;
       const comments = await step("gh issue comments", (s) => gh.comments(issue, { signal: s }));
       const marked = (Array.isArray(comments) ? comments : []).filter((c) => hasEvidenceComment([c]));
       const own = self ? marked.filter((c) => c?.author === self) : marked.filter((c) => c?.body === target);

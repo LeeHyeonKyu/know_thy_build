@@ -84,7 +84,9 @@ const reviewData = (round, head, verdicts) => ({ schema: "factory.review.v1", is
 const heartbeat = (stage, runnerId, at) => ({ body: heartbeatBody({ issue: ISSUE, stage, runnerId, started: at, last: at }), createdAt: at, author: "ktb-bot" });
 const handoff = (stage, data, at, summary = `### ${stage}`) => ({ body: renderHandoff({ stage, issue: ISSUE, summary, data }), createdAt: at, author: "ktb-bot" });
 const reworkResponse = (responses, at, issue = ISSUE) => ({ body: `rework response\n\n\`\`\`json\n${JSON.stringify({ schema: "factory.rework-response.v1", issue, responses })}\n\`\`\`\n`, createdAt: at, author: "ktb-bot" });
-const queued = (at) => ({ body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: at, author: "owner" });
+// A transition comment is posted by the runner's account (lib/transition.js `gh.comment(issue, "<!-- factory-transition:v1 …")`)
+// even when a human moved the label (`by=human` is the marker's field, not the comment's author).
+const queued = (at, author = "ktb-bot") => ({ body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: at, author });
 
 const PLAN = {
   summary: "plan", done_when: [
@@ -694,19 +696,18 @@ test("test_195_unattributed_comments_and_unbound_lines_are_not_evidence", async 
   expect(genuine.markdown).toContain("must_fix raised by review: 3 (claim — review handoffs; fixed 1, disputed 0, unanswered 2)");
   expect(genuine.markdown).not.toMatch(/FACTORY_GATES|level=fast/);
 
-  // (5) Logins that cannot be resolved (the real resolver, nothing to go on) → no response column and a visible note naming
-  // why — never a silently empty or all-"unanswered" column. A factory response on the PR changes nothing then.
+  // (5) Logins that cannot be resolved (the real resolver, nothing to go on) → fail closed: nobody can be told apart, so no
+  // comment is a source — no must_fix table (so no response column), no contract row, no run count — and a visible note
+  // names why. Never a silently empty or all-"unanswered" column. A factory response on the PR changes nothing then.
   const unresolved = await resolveFactoryLogins({ gh: {}, env: {} });
   expect(unresolved.ok).toBe(false);
   const u = buildEvidence({ ...base, ...inputs(), factoryLogins: unresolved });
-  const must = sectionOf(u.markdown, "Must fix");
-  expect(must).toContain("| must_fix | round · role | source |");
-  expect(rowsOf(must)).toEqual(["| cf1 | 1 · correctness | claim |", "| cf2 | 1 · correctness | claim |", "| arch1 | 1 · architect | claim |"]);
-  expect(u.markdown).not.toMatch(/fixed in|unanswered|disputed/);
-  expect(u.markdown).toContain("_must_fix responses are not shown: the factory's logins could not be resolved (no factory login could be resolved — set FACTORY_BOT_LOGIN, or read an issue that has at least one heartbeat comment (outside GitHub Actions the viewer is the owner, not the bot)), so no response can be attributed to the factory._");
-  expect(u.markdown).toContain("must_fix raised by review: 3 (claim — review handoffs)");
+  expect(sectionOf(u.markdown, "Must fix")).toBeNull();
+  expect(u.markdown).not.toMatch(/fixed in|unanswered|disputed|\| cf1 \|/);
+  expect(u.markdown).toContain("_Nothing from issue or PR comments is shown — no handoff, heartbeat, rework response or transition, and so no run-record line bound through a heartbeat: the factory's logins could not be resolved (no factory login could be resolved — set FACTORY_BOT_LOGIN, or read an issue that has at least one heartbeat comment (outside GitHub Actions the viewer is the owner, not the bot)), so no comment can be attributed to the factory._");
+  expect(u.markdown).not.toMatch(/must_fix raised/);
   expect(u.data.logins).toEqual({ ok: false, reason: unresolved.reason });
-  expect(u.data.must_fix.map((m) => m.status)).toEqual([null, null, null]);
+  expect(u.data.must_fix).toEqual([]);
   // No logins passed at all is the same unresolved state (fail closed), with its own reason.
   const none = buildEvidence({ ...base, ...inputs(), factoryLogins: undefined });
   expect(none.data.logins).toEqual({ ok: false, reason: "factory logins were not resolved" });
@@ -749,4 +750,78 @@ test("test_195_must_fix_responses_bind_to_their_own_review_round", () => {
   expect(r.markdown).toContain("must_fix raised by review: 5 (claim — review handoffs; fixed 2, disputed 1, unanswered 2)");
   expect(r.data.headline.must_fix).toBe(5);
   expect(r.data.must_fix_split).toEqual({ fixed: 2, disputed: 1, unanswered: 2 });
+});
+
+// ── #195 skeptic round 3 — unresolved logins fail closed on EVERY comment-sourced row, and a stranger's transition comment
+// cannot set the queue time ─────────────────────────────────────────────────────────────────────────────────────────────────
+test("test_195_unresolved_logins_fail_closed_and_stranger_transitions_set_no_time", async () => {
+  const unresolved = await resolveFactoryLogins({ gh: {}, env: {} });
+  expect(unresolved.ok).toBe(false);
+  // Every issue comment is a stranger's: a plan handoff, a review handoff, a heartbeat and a queue transition.
+  const strangers = [
+    queued("2026-10-01T08:30:00Z", "mallory"),
+    by(heartbeat("implement", RUN.implement, "2026-10-03T09:00:00Z"), "mallory"),
+    by(handoff("plan", { summary: "p", done_when: [{ id: "dwX", text: "x", level: "unit", check: { kind: "test", ref: "test_forged" } }] }, "2026-10-03T08:30:00Z"), "mallory"),
+    by(handoff("review", ROUND1, "2026-10-03T09:40:00Z"), "mallory"),
+  ];
+  const forgedRecord = recordText();
+  for (const factoryLogins of [unresolved, undefined, { ok: false }, { ok: true, logins: [] }]) {
+    const r = buildEvidence({ recordText: forgedRecord, issueComments: strangers, prComments: [], factoryLogins, gates: null, pr: 31, now: NOW });
+    expect(r.data.contract).toEqual([]);
+    expect(r.data.must_fix).toEqual([]);
+    expect(r.data.runs).toBeNull();
+    expect(r.data.elapsed_ms).toBeNull();
+    expect(r.data.review).toEqual([]);
+    expect(r.data.self_gate).toBeNull();
+    expect(r.data.cost).toBeNull();
+    expect(r.data.headline).toEqual({ must_fix: null, done_when_tests: null, proven_tests: null });
+    expect(r.markdown).not.toMatch(/test_forged|dwX|runs \(heartbeats\)|queued → now|\| cf1 \|/);
+    expect(r.markdown).toMatch(/_Nothing from issue or PR comments is shown — .* so no comment can be attributed to the factory\._/);
+  }
+  // The same comments by the factory login (positive control): the rows come back — so the emptiness above is the filter.
+  const own = strangers.map((c) => by(c, "ktb-bot"));
+  const ok = buildEvidence({ recordText: forgedRecord, issueComments: own, prComments: [], factoryLogins: LOGINS, gates: null, pr: 31, now: NOW });
+  expect(ok.data.contract).toEqual([{ id: "dwX", test: "test_forged", kind: "test", source: "claim" }]);
+  expect(ok.data.runs).toBe(1);
+  expect(ok.data.elapsed_ms).toBe(2 * 86400000 + 4 * 3600000);
+  expect(ok.markdown).toContain("- queued → now: 2d 4h 0m (transition comment timestamps)");
+
+  // Resolved logins, and only the queue transition is a stranger's: no queued → now row, no elapsed.
+  const mixed = buildEvidence({ ...inputs(), issueComments: [queued("2026-10-01T08:30:00Z", "mallory"), ...commentsFixture().slice(1)], recordText: forgedRecord, gates: null, pr: 31, now: NOW });
+  expect(mixed.data.elapsed_ms).toBeNull();
+  expect(mixed.markdown).not.toMatch(/queued → now/);
+  // … while the factory's own transition is the source (and a stranger's earlier one does not move it).
+  const both = buildEvidence({ ...inputs(), issueComments: [queued("2026-10-01T08:30:00Z", "mallory"), ...commentsFixture()], recordText: forgedRecord, gates: null, pr: 31, now: NOW });
+  expect(both.data.elapsed_ms).toBe(4.5 * 3600 * 1000);
+  expect(both.markdown).toContain("- queued → now: 4h 30m (transition comment timestamps)");
+});
+
+// ── #195 skeptic round 3 — a response answers the latest review handoff before it, valid or not: a later round whose handoff
+// failed validation does not hand its answer to an earlier round ──────────────────────────────────────────────────────────
+import { validate } from "../lib/schemas.js";
+
+test("test_195_a_response_after_an_invalid_review_handoff_binds_to_no_round", () => {
+  const X = "7".repeat(40), A = "a".repeat(40);
+  const r1 = reviewData(1, H1, [verdict("correctness", "reject", [mf("cf1", "round-1 cf1"), mf("cf2", "round-1 cf2")])]);
+  // Round 2 raises cf2 too, but its handoff fails validation (a confidence value the schema does not allow).
+  const r2bad = { ...reviewData(2, H2, [{ ...verdict("correctness", "reject", [mf("cf2", "round-2 cf2")]), confidence: "sure" }]), decision: "rework" };
+  expect(validate("review.v1", r1).ok).toBe(true);
+  expect(validate("review.v1", r2bad).ok).toBe(false);
+  const issueComments = [
+    heartbeat("review", RUN.review1, "2026-10-03T09:30:00Z"),
+    handoff("review", r1, "2026-10-03T09:40:00Z"),
+    handoff("review", r2bad, "2026-10-03T11:10:00Z"),
+  ];
+  const prComments = [
+    reworkResponse([{ id: "cf1", status: "fixed", commit: A }], "2026-10-03T10:30:00Z"),     // round 1's own answer
+    reworkResponse([{ id: "cf2", status: "fixed", commit: X }], "2026-10-03T11:30:00Z"),     // answers the invalid round 2
+  ];
+  const r = buildEvidence({ recordText: "", issueComments, prComments, factoryLogins: LOGINS, gates: null, pr: 31, now: NOW });
+  expect(rowsOf(sectionOf(r.markdown, "Must fix"))).toEqual([
+    "| cf1 | 1 · correctness | fixed in `aaaaaaa` | claim |",
+    "| cf2 | 1 · correctness | unanswered | claim |",
+  ]);
+  expect(r.data.must_fix.find((m) => m.id === "cf2")).toMatchObject({ round: 1, status: "unanswered", commit: null });
+  expect(r.markdown).not.toContain("7777777");
+  expect(r.markdown).toContain("must_fix raised by review: 2 (claim — review handoffs; fixed 1, disputed 0, unanswered 1)");
 });

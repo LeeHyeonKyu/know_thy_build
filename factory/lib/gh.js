@@ -126,7 +126,9 @@ export function bounded(start, { ms, what, signal = null }) {
  * 그래서 `env`는 **필수 주입**이다(`classifyFinding`의 `ownerOf`/`isInstalled`와 같은 규율):
  * 빠뜨리면 던진다. `process.env`라는 기본값은 CLI·워크플로의 **진입점 한 줄**에만 산다.
  */
-export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh?.repo ?? null }) {
+export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh?.repo ?? null, signal = null }) {
+  // #195 — `signal` (optional) reaches the two `gh api user` reads so a caller's bound kills them; absent → the old calls.
+  const viewerOpts = signal ? [{ signal }] : [];
   if (!env || typeof env !== "object") {
     throw new TypeError("resolveFactoryLogins: env is required — pass the caller's env explicitly (`process.env` belongs at the CLI/workflow entry point, not here); reading the ambient environment from inside made this function answer differently on a runner than on a laptop");
   }
@@ -151,7 +153,7 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
    */
   if (env.GITHUB_ACTIONS === "true") {
     let viewer;
-    try { viewer = await gh.viewerLogin(); }
+    try { viewer = await gh.viewerLogin(...viewerOpts); }
     catch (e) { return { ok: false, reason: `gh api user failed — ${e?.message || e}` }; }
     logins.push(viewer);
     /**
@@ -159,7 +161,7 @@ export async function resolveFactoryLogins({ gh, env, comments = null, repo = gh
      * 한 번(런당 한 번 도는 함수다). 이 호출의 실패는 `ok`를 바꾸지 않는다: 로그인 목록은 이미
      * 손에 있고, 못 읽은 것은 "사람 계정인지 모른다"일 뿐이다(`personal: null`).
      */
-    try { candidates.push({ login: viewer, type: await gh.viewerType?.() ?? null }); }
+    try { candidates.push({ login: viewer, type: await gh.viewerType?.(...viewerOpts) ?? null }); }
     catch { candidates.push({ login: viewer, type: null }); }
   }
 
@@ -689,8 +691,9 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * ADR-021 doctor — **지금 이 토큰이 누구인가**. 값은 절대 찍지 않고 로그인 이름만 돌려준다.
      * `gh api user`는 PAT이 붙은 계정을 그대로 말한다(GitHub App 설치 토큰이면 `<app>[bot]`).
      */
-    async viewerLogin() {
-      return JSON.parse(await gh(["api", "user"])).login;
+    async viewerLogin({ signal = null } = {}) {
+      // #195 — `signal` (optional) kills the gh child when the caller's bound fires; absent → exactly the old call.
+      return JSON.parse(await gh(["api", "user"], signal ? { signal } : {})).login;
     },
     /**
      * T7 — **이 토큰이 붙은 계정의 종류**(`User`|`Organization`|`Bot`). 값(토큰)은 절대 읽지도 찍지도
@@ -698,8 +701,8 @@ export function makeGh({ run, repo, sleep = realSleep }) {
      * 코멘트가 팩토리의 코멘트와 구별되지 않아 `human-decision:v1` 귀속이 통째로 불가능해진다.
      * 빈 응답은 `null`("모른다")이다 — 빈 문자열을 종류로 읽으면 거짓 판정이 된다.
      */
-    async viewerType() {
-      return (await gh(["api", "user", "--jq", ".type"])).trim() || null;
+    async viewerType({ signal = null } = {}) {
+      return (await gh(["api", "user", "--jq", ".type"], signal ? { signal } : {})).trim() || null;
     },
     /** 1.4.2 — 임의 계정의 종류(`User`|`Organization`|`Bot`), 없으면 null. doctor가 `FACTORY_BOT_LOGIN`의 계정을 본다. */
     async userType(login) {

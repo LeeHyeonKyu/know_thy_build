@@ -35,11 +35,13 @@ import { TRANSITION_TO } from "./retro/issue-comments.js";
  *     builder's `factory.rework-response.v1` on the PR (factory-builder.md has it posted with `gh pr comment <pr>`; the
  *     engine's other reader, context.js, reads it from the PR too). They are shown, and labelled as claims — the shared bot
  *     account can post them.
- *   - **who may supply a row**: heartbeat, handoff and rework-response comments count only when their author is one of the
- *     factory's logins (`resolveFactoryLogins`, passed in as `factoryLogins`). A comment by anyone else adds no row, status,
- *     sha or run. When the logins could not be resolved, the must_fix response column is left out and a visible note says
- *     why (the caller also writes the record's FAIL line) — a response that cannot be attributed is not reported either way.
- *     Transition comments (the queue time) are not filtered: they carry a timestamp only.
+ *   - **who may supply a row**: heartbeat, handoff, rework-response and transition comments count only when their author is
+ *     one of the factory's logins (`resolveFactoryLogins`, passed in as `factoryLogins`). A comment by anyone else adds no
+ *     row, status, sha, run or queue time (transition comments are the runner's own: lib/transition.js posts them with the
+ *     runner's token, `by=human` included). When the logins could not be resolved, nobody can be told apart, so this fails
+ *     CLOSED: no comment is a source at all — no handoff row, no heartbeat (and so no heartbeat-bound record line), no rework
+ *     response, no queue time — and a visible note says why (the caller also writes the record's FAIL line). Only the values
+ *     the caller passes in (this run's gates, the hand-off reason) are shown then.
  * No prose is generated and nothing is summarised by a model. A source missing from the input drops its row: no empty
  * cell, no placeholder. `now` is injected — the same inputs give byte-identical output.
  *
@@ -242,9 +244,9 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const issueAll = Array.isArray(issueComments) ? issueComments : [];
   const logins = loginsOf(factoryLogins);
   const byFactory = (c) => logins.set.has(String(c?.author ?? "").trim().toLowerCase());
-  // Heartbeats and handoffs: only the factory's own comments. Without resolved logins nobody can be told apart, so the issue's
-  // comments are read as before and the must_fix responses (the PR's comments) are not read at all — see the module doc.
-  const cs = logins.ok ? issueAll.filter(byFactory) : issueAll;
+  // Heartbeats, handoffs and transitions: only the factory's own comments. Without resolved logins nobody can be told apart,
+  // so no comment is read at all (fail closed, never "everyone") — see the module doc.
+  const cs = logins.ok ? issueAll.filter(byFactory) : [];
   const prFactory = logins.ok ? (Array.isArray(prComments) ? prComments : []).filter(byFactory) : [];
   const known = knownRunsFor(cs);
   const stages = heartbeatStages(cs);
@@ -292,16 +294,18 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   }
 
   // ── Must fix (claim): every must_fix of every valid review handoff. A rework response (PR comment) answers only the review
-  // round it follows — the latest valid review handoff created before it — because reviewers renumber ids (cf1, cf2…) every
-  // round; within that round the first response naming the id answers it. ──
-  const reviews = handoffs.filter((h) => h.stage === "review" && validate("review.v1", h.data).ok)
-    .map((h) => ({ h, since: Date.parse(h.createdAt ?? "") }))
+  // round it follows — the latest review handoff created before it, VALID OR NOT — because reviewers renumber ids (cf1,
+  // cf2…) every round; within that round the first response naming the id answers it. A response whose round's handoff
+  // fails validation answers nothing: binding it to the round before would put a later round's sha on an earlier row. ──
+  const allReviews = handoffs.filter((h) => h.stage === "review")
+    .map((h) => ({ h, since: Date.parse(h.createdAt ?? ""), valid: validate("review.v1", h.data).ok }))
     .sort((a, b) => (Number.isFinite(a.since) ? a.since : 0) - (Number.isFinite(b.since) ? b.since : 0));
+  const reviews = allReviews.filter((r) => r.valid);
   const answersFor = new Map(reviews.map((r) => [r, []]));
   for (const resp of logins.ok ? reworkResponses(prFactory, issueOf) : []) {
     if (resp.at == null) continue;
-    const own = reviews.filter((r) => Number.isFinite(r.since) && r.since < resp.at).at(-1);
-    if (own) answersFor.get(own).push(resp);
+    const own = allReviews.filter((r) => Number.isFinite(r.since) && r.since < resp.at).at(-1);
+    if (own?.valid) answersFor.get(own).push(resp);
   }
   const mustFix = [];
   for (const r of reviews) {
@@ -349,7 +353,7 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
   const budgetBound = boundBudget(recordText, { known, stages });
   unbound.budget = budgetBound.rejected;
   const cost = budgetBound.cost;
-  const queuedAt = issueAll.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
+  const queuedAt = cs.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
   const nowMs = now == null ? null : (typeof now === "number" ? now : Date.parse(String(now)));
   const elapsedMs = queuedAt != null && Number.isFinite(nowMs) && nowMs >= queuedAt ? nowMs - queuedAt : null;
   const runners = new Set();
@@ -384,16 +388,15 @@ export function buildEvidence({ recordText = null, issueComments = [], prComment
     out.push("", "### Review", "", "| round | decision | verdicts | run | source |", "| --- | --- | --- | --- | --- |");
     for (const r of review) out.push(`| ${r.round ?? "?"} | ${escapeCell(r.decision)} | ${r.verdicts.map(escapeCell).join(", ")} | ${escapeCell(r.run_id)} | record |`);
   }
-  if (mustFix.length && logins.ok) {
+  if (mustFix.length) {
     out.push("", "### Must fix", "", "| must_fix | round · role | response | source |", "| --- | --- | --- | --- |");
     for (const m of mustFix) {
       const resp = m.status === "fixed" ? (m.commit ? `fixed in \`${m.commit}\`` : "fixed (no commit sha)") : m.status;
       out.push(`| ${escapeCell(m.id)} | ${m.round} · ${escapeCell(m.role)} | ${resp} | claim |`);
     }
-  } else if (mustFix.length) {
-    out.push("", "### Must fix", "", "| must_fix | round · role | source |", "| --- | --- | --- |");
-    for (const m of mustFix) out.push(`| ${escapeCell(m.id)} | ${m.round} · ${escapeCell(m.role)} | claim |`);
-    out.push("", `_must_fix responses are not shown: the factory's logins could not be resolved (${escapeCell(logins.reason, { max: 400 })}), so no response can be attributed to the factory._`);
+  }
+  if (!logins.ok) {
+    out.push("", `_Nothing from issue or PR comments is shown — no handoff, heartbeat, rework response or transition, and so no run-record line bound through a heartbeat: the factory's logins could not be resolved (${escapeCell(logins.reason, { max: 400 })}), so no comment can be attributed to the factory._`);
   }
   if (gatesRow) {
     out.push("", "### Gates (this merge run)", "",

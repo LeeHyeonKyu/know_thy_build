@@ -3159,7 +3159,7 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     const { lines, record } = makeRecord();
     expect(await run(d, { record })).toBe(0);
     expect(d.closeIssue).toHaveBeenCalledTimes(1);
-    expect(lines.some((l) => /^evidence: issue comment failed — comment 500/.test(l))).toBe(true);
+    expect(lines.filter((l) => l.startsWith("evidence: FAIL — "))).toEqual(["evidence: FAIL — comment: comment 500"]);
   }
   // An older wiring without the dep merges exactly as before.
   {
@@ -3203,7 +3203,8 @@ test("test_195_evidence_timeout_cancels_the_write_before_the_merge_or_hand_off",
     let release;
     const held = new Promise((res) => { release = res; });
     const events = [];
-    const ev = evidence195(async ({ signal }) => {
+    const ev = evidence195(async ({ signal, onStep }) => {
+      onStep?.("edit");                                                  // the dep says which step it is in (run-stage's does)
       events.push("publish:start");
       await held;                                                        // gh is slow: settles only after the timeout fired
       if (signal?.aborted) { events.push("publish:cancelled"); throw signal.reason ?? new Error("aborted"); }
@@ -3223,7 +3224,7 @@ test("test_195_evidence_timeout_cancels_the_write_before_the_merge_or_hand_off",
     // The signal was aborted BEFORE the irreversible step ran.
     expect(events, route).toContain(route === "merge" ? "mergePr:aborted=true" : "needs-human:aborted=true");
     expect(failLines195(lines), route).toHaveLength(1);
-    expect(failLines195(lines)[0], route).toMatch(/^evidence: FAIL — timed out after 5 ms — the PR-body write was cancelled/);
+    expect(failLines195(lines), route).toEqual(["evidence: FAIL — edit: timed out after 5 ms — the edit step was cancelled"]);
     // The late dep now settles: it sees the abort and never writes.
     release();
     await held;
@@ -3251,7 +3252,7 @@ test("test_195_missing_evidence_dep_and_hung_issue_comment_are_recorded_not_sile
     expect(await run(d, { record })).toBe(0);
     expect(d.mergePr).toHaveBeenCalledTimes(1);
     expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
-    expect(failLines195(lines)).toEqual(["evidence: FAIL — publishPrEvidence dep not wired — no evidence section was written"]);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written"]);
     expect(lines.filter((l) => l.startsWith("evidence: "))).toHaveLength(1);
   }
   // … and on the hand-off route: one FAIL line before the needs-human transition, exit code 2 as before.
@@ -3284,7 +3285,7 @@ test("test_195_missing_evidence_dep_and_hung_issue_comment_are_recorded_not_sile
     expect(d.closeIssue).toHaveBeenCalledTimes(1);
     expect(seen).toBeInstanceOf(AbortSignal);
     expect(seen.aborted).toBe(true);
-    expect(lines.filter((l) => l.startsWith("evidence: issue comment"))).toEqual(["evidence: issue comment failed — timed out after 5 ms — the issue comment was cancelled"]);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — comment: timed out after 5 ms — the comment step was cancelled"]);
   }
   // (3) The record line follows what the dep did: an existing runner comment (a rerun) is not reported as a new post.
   for (const [answer, line] of [
@@ -3312,10 +3313,10 @@ test("test_195_unresolved_logins_reach_the_record_as_a_fail_line", async () => {
     const { lines, record } = makeRecord();
     expect(await run(d, { record })).toBe(0);
     expect(d.mergePr).toHaveBeenCalledTimes(1);
-    expect(failLines195(lines)).toEqual([`evidence: FAIL — logins: ${reason} — the must_fix response column was omitted`]);
+    expect(failLines195(lines)).toEqual([`evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown`]);
     expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([
       "evidence: published to PR #9 (merge)",
-      `evidence: FAIL — logins: ${reason} — the must_fix response column was omitted`,
+      `evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown`,
       "evidence: issue comment posted",
     ]);
   }
@@ -3326,7 +3327,7 @@ test("test_195_unresolved_logins_reach_the_record_as_a_fail_line", async () => {
     const { lines, record } = makeRecord();
     expect(await run(d, { record })).toBe(2);
     expect(needsHumanCall195(d)).toBeGreaterThan(ev.publishPrEvidence.mock.invocationCallOrder[0]);
-    expect(failLines195(lines)).toEqual([`evidence: FAIL — logins: ${reason} — the must_fix response column was omitted`]);
+    expect(failLines195(lines)).toEqual([`evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown`]);
   }
   // Resolved logins → no FAIL line.
   {
@@ -3334,5 +3335,55 @@ test("test_195_unresolved_logins_reach_the_record_as_a_fail_line", async () => {
     const { lines, record } = makeRecord();
     expect(await run(baseD(ev), { record })).toBe(0);
     expect(failLines195(lines)).toEqual([]);
+  }
+});
+
+// ── #195 skeptic round 3 — the FAIL line names the failing step (read, build, edit or comment) on the real wiring, including
+// when merge-stage's own timeout fires first: run-stage's dep reports the step it is in ──────────────────────────────────────
+import { makePrEvidenceDeps as makePrEvidenceDeps195 } from "../bin/run-stage.js";
+import { heartbeatBody as heartbeatBody195m } from "../lib/heartbeat.js";
+
+test("test_195_evidence_fail_line_names_the_failing_step", async () => {
+  const hang = () => new Promise(() => {});
+  const beats = [{ body: heartbeatBody195m({ issue: 42, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" }];
+  /** The real run-stage evidence deps over a fake gh; the dep's own bounds are long, so merge-stage's 5 ms bound fires first. */
+  const realDeps = (over = {}) => makePrEvidenceDeps195({
+    gh: { comments: vi.fn(async () => beats), prBody: vi.fn(async () => "Closes #42\n"), editPrBody: vi.fn(async () => {}), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot"), ...over },
+    issue: 42, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 60_000,
+  });
+  const cases = [
+    ["read hangs", { comments: vi.fn(hang) }, "evidence: FAIL — read: timed out after 5 ms — the read step was cancelled"],
+    ["read fails", { comments: vi.fn(async () => { throw new Error("gh api failed (1): HTTP 502"); }) }, "evidence: FAIL — read: gh api failed (1): HTTP 502"],
+    ["edit read hangs", { prBody: vi.fn(hang) }, "evidence: FAIL — edit: timed out after 5 ms — the edit step was cancelled"],
+    ["edit write hangs", { editPrBody: vi.fn(hang) }, "evidence: FAIL — edit: timed out after 5 ms — the edit step was cancelled"],
+    ["edit write fails", { editPrBody: vi.fn(async () => { throw new Error("gh pr edit failed (1): HTTP 502"); }) }, "evidence: FAIL — edit: gh pr edit failed (1): HTTP 502"],
+  ];
+  for (const [name, over, line] of cases) {
+    for (const route of ["merge", "hand-off"]) {
+      const extra = route === "hand-off" ? { protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) } : {};
+      const d = baseD({ ...realDeps(over), evidenceTimeoutMs: 5, ...extra });
+      const { lines, record } = makeRecord();
+      expect(await run(d, { record }), `${name} ${route}`).toBe(route === "merge" ? 0 : 2);
+      expect(failLines195(lines), `${name} ${route}`).toEqual([line]);
+      expect(d.transition.mock.calls.map((c) => c[0].to), `${name} ${route}`).toEqual([route === "merge" ? "factory:merged" : "factory:needs-human"]);
+    }
+  }
+  // build: the dep reports the step, so a build-time hang is named "build" too (a dep that never settles in build).
+  {
+    const d = baseD({ publishPrEvidence: vi.fn(({ onStep }) => { onStep("read"); onStep("build"); return hang(); }), evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — build: timed out after 5 ms — the build step was cancelled"]);
+  }
+  // comment (after the merge, real dep): the viewer read hangs, or the post fails → the comment step is named.
+  for (const [over, line] of [
+    [{ viewerLogin: vi.fn(hang) }, "evidence: FAIL — comment: timed out after 5 ms — the comment step was cancelled"],
+    [{ comment: vi.fn(async () => { throw new Error("gh issue failed (1): HTTP 500"); }) }, "evidence: FAIL — comment: gh issue failed (1): HTTP 500"],
+  ]) {
+    const d = baseD({ ...realDeps(over), evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", line]);
+    expect(d.closeIssue).toHaveBeenCalledTimes(1);
   }
 });

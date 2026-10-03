@@ -5208,7 +5208,8 @@ test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
   appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-501", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 4.5, runs: 6, ok: true }), usageLine({ usage: { input_tokens: 1 }, total_cost_usd: 2.75, num_turns: 4, terminal_reason: "completed", modelUsage: {} })] });
   const recordPath = join(root, "docs/factory/runs/7.md");
   const issueComments = [
-    { body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: "2026-10-03T08:00:00Z" },
+    // lib/transition.js posts the transition comment with the runner's token: its author is the factory login.
+    { body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: "2026-10-03T08:00:00Z", author: "ktb-bot" },
     { body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" },
   ];
   const seq = [];
@@ -5534,17 +5535,133 @@ test("test_195_rework_responses_posted_on_the_pr_reach_the_evidence_rows", async
   expect((await publish(stranger)).row).toBe("| cf1 | 1 · correctness | unanswered | claim |");
 
   // (4) Logins that cannot be resolved (env injected, nothing in it; outside Actions) → the publish still succeeds, the
-  // result says why (merge-stage writes the FAIL line), and the section shows the note instead of a response column.
+  // result says why (merge-stage writes the FAIL line), and the section fails closed: no row from any comment, a note why.
   const blind = mkGh({ onIssue: issueComments, onPr: [responseComment] });
   const b = await publish(blind, { env: {} });
   expect(b.r.ok).toBe(true);
   expect(b.r.logins).toMatchObject({ ok: false });
-  expect(b.row).toBe("| cf1 | 1 · correctness | claim |");
-  expect(blind.body()).toContain("_must_fix responses are not shown: the factory's logins could not be resolved (");
+  expect(b.row).toBeUndefined();
+  expect(blind.body()).not.toMatch(/fixed in|test_7_alpha/);
+  expect(blind.body()).toContain("so no comment can be attributed to the factory._");
   // No env at all is never read from process.env: the resolver refuses, and that refusal is the unresolved reason.
   const noEnv = mkGh({ onIssue: issueComments, onPr: [responseComment] });
   const c = await publish(noEnv, { env: null });
   expect(c.r.logins.ok).toBe(false);
   expect(c.r.logins.reason).toMatch(/env is required/);
-  expect(c.row).toBe("| cf1 | 1 · correctness | claim |");
+  expect(c.row).toBeUndefined();
+});
+
+// ── #195 skeptic round 3 — every rejection of the publish dep names its step (read / build / edit), and the dep reports the
+// step it is in, so merge-stage can name it even when its own timeout fires first ────────────────────────────────────────────
+test("test_195_publish_rejections_name_their_step", async () => {
+  const beats = [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" }];
+  const mkGh = (over = {}) => ({
+    comments: vi.fn(async () => beats),
+    prBody: vi.fn(async () => "Closes #7\n"),
+    editPrBody: vi.fn(async () => {}),
+    ...over,
+  });
+  const publish = async (gh, { timeoutMs = 1000, gates = null, signal = null } = {}) => {
+    const steps = [];
+    const p = makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs })
+      .publishPrEvidence({ pr: 9, route: "merge", gates, signal, onStep: (s) => steps.push(s) });
+    let error = null, result = null;
+    try { result = await p; } catch (e) { error = e; }
+    return { error, result, steps };
+  };
+
+  // A clean run reports read → build → edit, in that order.
+  const ok = await publish(mkGh());
+  expect(ok.error).toBeNull();
+  expect(ok.steps).toEqual(["read", "build", "edit"]);
+
+  // read: a failing comment read, a hanging one, and merge-stage's abort while reading.
+  const r1 = await publish(mkGh({ comments: vi.fn(async () => { throw new Error("gh api failed (1): HTTP 502"); }) }));
+  expect(r1.error.message).toBe("read: gh api failed (1): HTTP 502");
+  expect(r1.steps).toEqual(["read"]);
+  const r2 = await publish(mkGh({ comments: vi.fn(() => new Promise(() => {})) }), { timeoutMs: 5 });
+  expect(r2.error.message).toBe("read: gh issue comments timed out after 5 ms");
+  const r3 = await publish(mkGh({ comments: vi.fn(async (n) => { if (n === 9) throw new Error("PR comments 404"); return beats; }) }));
+  expect(r3.error.message).toBe("read: PR comments 404");
+  const ac = new AbortController(); ac.abort(new Error("cancelled by merge-stage"));
+  const r4 = await publish(mkGh(), { signal: ac.signal });
+  expect(r4.error.message).toBe("read: cancelled by merge-stage");
+
+  // build: the section cannot be assembled (a gates value that throws when read).
+  const r5 = await publish(mkGh(), { gates: { get level() { throw new Error("gates unreadable"); } } });
+  expect(r5.error.message).toBe("build: gates unreadable");
+  expect(r5.steps).toEqual(["read", "build"]);
+
+  // edit: the PR-body read, the write, and an over-limit body.
+  const r6 = await publish(mkGh({ prBody: vi.fn(async () => { throw new Error("gh pr view failed (1): HTTP 502"); }) }));
+  expect(r6.error.message).toBe("edit: gh pr view failed (1): HTTP 502");
+  const r7 = await publish(mkGh({ editPrBody: vi.fn(async () => { throw new Error("gh pr edit failed (1): HTTP 502"); }) }));
+  expect(r7.error.message).toBe("edit: gh pr edit failed (1): HTTP 502");
+  expect(r7.steps).toEqual(["read", "build", "edit"]);
+  const r8 = await publish(mkGh({ prBody: vi.fn(async () => "z".repeat(PR_BODY_MAX_CHARS_195 + 1)) }));
+  expect(r8.error.message).toBe("edit: PR #9 body is already 65537 characters outside the evidence section — over GitHub's 65536-character limit; section not written");
+});
+
+// ── #195 skeptic round 3 — the two `gh api user` reads on the evidence path (factory logins, the comment step's viewer) are
+// handed the bound's signal, so a timeout kills them instead of abandoning them; without a signal the calls are the old ones ──
+import { resolveFactoryLogins as resolveFactoryLogins195 } from "../lib/gh.js";
+
+test("test_195_login_and_viewer_reads_are_cancelled_through_the_signal", async () => {
+  // (1) the adapter: viewerLogin / viewerType take an optional signal down to the gh child; absent → exactly the old call.
+  {
+    const run = makeFakeRun([
+      { match: (c, a) => c === "gh" && a.includes("--jq"), result: { code: 0, stdout: "Bot\n", stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 0, stdout: JSON.stringify({ login: "ktb-bot" }), stderr: "" } },
+    ]);
+    const gh = makeGh195({ run, repo: "acme/app" });
+    const ac = new AbortController();
+    expect(await gh.viewerLogin({ signal: ac.signal })).toBe("ktb-bot");
+    expect(await gh.viewerType({ signal: ac.signal })).toBe("Bot");
+    expect(await gh.viewerLogin()).toBe("ktb-bot");
+    expect(await gh.viewerType()).toBe("Bot");
+    expect(run.calls.map((c) => c.args)).toEqual([["api", "user"], ["api", "user", "--jq", ".type"], ["api", "user"], ["api", "user", "--jq", ".type"]]);
+    expect(run.calls.map((c) => c.opts)).toEqual([{ signal: ac.signal }, { signal: ac.signal }, {}, {}]);
+  }
+  // (2) resolveFactoryLogins hands its signal to both viewer reads; without one it calls them exactly as before (no argument).
+  {
+    const ac = new AbortController();
+    const gh = { viewerLogin: vi.fn(async () => "ktb-bot"), viewerType: vi.fn(async () => "Bot") };
+    expect((await resolveFactoryLogins195({ gh, env: { GITHUB_ACTIONS: "true" }, signal: ac.signal })).logins).toEqual(["ktb-bot"]);
+    expect(gh.viewerLogin.mock.calls).toEqual([[{ signal: ac.signal }]]);
+    expect(gh.viewerType.mock.calls).toEqual([[{ signal: ac.signal }]]);
+    const plain = { viewerLogin: vi.fn(async () => "ktb-bot"), viewerType: vi.fn(async () => "Bot") };
+    await resolveFactoryLogins195({ gh: plain, env: { GITHUB_ACTIONS: "true" } });
+    expect(plain.viewerLogin.mock.calls).toEqual([[]]);
+    expect(plain.viewerType.mock.calls).toEqual([[]]);
+  }
+  // (3) publish: the factory-logins read hangs (inside Actions, env injected) → it is bounded, its signal is ABORTED (the gh
+  // child would be killed), and the publish goes on with unresolved logins.
+  {
+    let seen = null;
+    const gh = {
+      comments: vi.fn(async () => []),
+      viewerLogin: vi.fn((opts) => { seen = opts?.signal ?? null; return new Promise(() => {}); }),
+      prBody: vi.fn(async () => "Closes #7\n"),
+      editPrBody: vi.fn(async () => {}),
+    };
+    const r = await makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env: { GITHUB_ACTIONS: "true" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 5 })
+      .publishPrEvidence({ pr: 9, route: "merge", gates: null });
+    expect(r.ok).toBe(true);
+    expect(r.logins).toEqual({ ok: false, reason: "factory logins timed out after 5 ms" });
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen.aborted).toBe(true);
+  }
+  // (4) the comment step: the viewer read hangs → bounded, and its signal is aborted.
+  {
+    let seen = null;
+    const gh = {
+      viewerLogin: vi.fn((opts) => { seen = opts?.signal ?? null; return new Promise(() => {}); }),
+      comments: vi.fn(async () => []),
+      comment: vi.fn(async () => {}),
+    };
+    await expect(makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "x", timeoutMs: 5 }).postEvidenceComment("md")).rejects.toThrow(/^gh api user timed out after 5 ms$/);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen.aborted).toBe(true);
+    expect(gh.comment).not.toHaveBeenCalled();
+  }
 });
