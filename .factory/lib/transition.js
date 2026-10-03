@@ -4,7 +4,16 @@ import { blockedCause, blockedOriginMarker, engineVersionMarker, lastHumanDecisi
 
 export const NEEDS_HUMAN = "factory:needs-human";
 export const NEEDS_INFO = "factory:needs-info";
-export const RETRY_SCRIPT_REFUSED = "retry from factory:needs-human/needs-info is human-only (transition.js --human)";
+/**
+ * #196 (ADR-035) — **"다시 돌려"는 호출자마다 명령 하나다.** 거절·안내는 언제나 그 두 명령을 그대로 말한다: 에이전트 세션·CI는
+ * 재큐(그래프의 보통 엣지 `needs-human → queue`, 플래그 없음), 사람은 중단 지점 재개(`--human --retry`, KTB-32). `--retry`의
+ * 동작 자체는 바뀌지 않는다 — 호출자에 따라 갈리는 `--retry`는 훅(`block-dangerous.sh`)이 에이전트 세션에서 그 동사를 막는 한
+ * 쓸 수 없는 경로라 미뤘다(ADR-035). `n`을 모르면 `<n>`으로 둔다.
+ */
+export const requeueCommand = (n = "<n>") => `node .factory/bin/transition.js ${n} factory:queue`;
+export const resumeCommand = (n = "<n>") => `node .factory/bin/transition.js ${n} --human --retry`;
+export const retryGuidance = (n = "<n>") => `agents and CI requeue with \`${requeueCommand(n)}\`; a person resumes from the stop point with \`${resumeCommand(n)}\``;
+export const RETRY_SCRIPT_REFUSED = `retry from factory:needs-human/needs-info is human-only (transition.js --human) — ${retryGuidance()}`;
 export const NO_RESUME_POINT = "cannot resolve a resume point from this issue's history — no transition into factory:blocked/needs-human names a label the factory can resume from";
 
 /**
@@ -55,7 +64,7 @@ async function swapLabel({ gh, issue, from, to }) {
  * 왔는가"를 다시 코멘트 이력을 파싱해 추측하지 않도록(KTB-15b I2), 그 사실을 전이가 일어나는
  * **바로 이 순간** 마커로 남긴다 — 이 함수가 유일한 출처다.
  */
-export const HUMAN_FLAG_REFUSED = "human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry";
+export const HUMAN_FLAG_REFUSED = `human retry refused — this is an agent/runner session (CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set); only a person's shell may pass --human/--retry — ${retryGuidance()}`;
 
 /** 설계 2026-09-30 §8.2 (S2) — 큐 진입 심사가 배선되지 않은 큐 전이의 거부 사유. 리허설과 같은 규칙(fail closed). */
 export const ADMISSION_UNWIRED = "no queue admission is wired into this transition — `→ factory:queue` is refused (fail closed). Pass `admission` (see lib/admission.js makeQueueAdmission; bin/transition.js / sweep.js / run-stage.js) or, in tests only, `skipRehearsal: true`";
@@ -253,6 +262,6 @@ export function parseTransitionArgs(argv = []) {
   const [issue, to = null] = positional;
   if (!issue || !Number(issue)) return { error: "usage: issue number is required" };
   if (!to && !retry) return { error: "usage: a target label is required (or `--human --retry` to resume from the stop point)" };
-  if (retry && !human) return { error: "--retry is human-only: add --human (the retry edge exists only for a person's decision, ADR-020 KTB-32)" };
+  if (retry && !human) return { error: `--retry is human-only: add --human (the retry edge exists only for a person's decision, ADR-020 KTB-32) — ${retryGuidance(Number(issue))}` };
   return { issue: Number(issue), to, human, retry, reason };
 }

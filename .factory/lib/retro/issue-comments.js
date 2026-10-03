@@ -97,8 +97,12 @@ export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+
  *     테스트가 없으므로 "제품이 틀렸다"가 아니고, 대개 테스트 **밖**의 일시적 인프라다(포크된
  *     워커의 stderr `write EPIPE`가 실측 원인이었다) → 같은 스테이지를 한 번 다시 돌린다.
  *   - `other` — 나머지(환경·크리덴셜). 예전의 유일한 문구가 이것이었다.
+ *   - `engine-crash` — #196(ADR-035): `runStage`의 catch가 **프로그래밍 오류**(TypeError·ReferenceError·RangeError·
+ *     SyntaxError)를 잡았다 — 이슈가 아니라 엔진의 결함이다. 생산자는 그 catch 하나뿐이고 transition()의 명시 `cause`
+ *     인자로만 찍힌다: 아래 `CAUSE_RULES`에는 **일부러 없다** — 사유 문구가 이 등급을 만들 수 있으면 누구든 문장 하나로
+ *     예산·R을 피해 간다. 의존성/인프라의 plain `Error`는 이 등급이 아니다(오늘처럼 exit 1, 전이 없음).
  */
-export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other"];
+export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other", "engine-crash"];
 const CAUSE_RULES = [
   ["api-error", /api error|rate ?limit|quota|overloaded|\b429\b|HTTP [45]\d\d|something went wrong/i],
   ["cancelled", /cancell?ed/i],
