@@ -11,7 +11,8 @@ import {
 import { appendRunRecord, reviewEvidenceLine } from "../lib/run-record.js";
 import { budgetLine } from "../lib/budget.js";
 import { selfGateDetailLine } from "../lib/self-gate.js";
-import { verdictLine } from "../lib/gates.js";
+import { verdictLine, runGates } from "../lib/gates.js";
+import { makeFakeRun } from "../lib/exec.js";
 import { heartbeatBody } from "../lib/heartbeat.js";
 import { renderHandoff } from "../lib/handoff.js";
 
@@ -29,11 +30,28 @@ const FIX_SHA = "abc1234def5678abc1234def5678abc1234def56";
 const RUN = { triage: "gha-1000", implement: "gha-1001", review1: "gha-1002", review2: "gha-1003", merge: "gha-1004" };
 
 const GATES_IMPL = { schema: "factory.gates.v1", level: "fast", status: "GREEN", head_sha: H1, passed: 2, failed: 0, failing: [], skipped: [], misconfigured: [], tests: { excluded: [] } };
-/** This merge run's own gate result — what merge-stage passes in. */
-const LIVE_GATES = {
-  schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: H2, passed: 4, failed: 0, failing: [], skipped: [], misconfigured: [], tests: { excluded: [] },
-  gates: { lint: { status: "GREEN" }, unit: { status: "GREEN" }, "prove-test": { status: "GREEN" }, "new-test-repeat": { status: "GREEN" } },
-};
+/**
+ * This merge run's own gate result — what merge-stage passes in — from the REAL producer (`runGates`, the command half of
+ * `runStageGates`), not a hand-written object. M1 harness, level full: lint + unit run (fake exit codes), the proof gates
+ * are SKIPPED by the producer itself. `unitExit: 1` gives a RED run.
+ */
+async function liveGates({ unitExit = 0 } = {}) {
+  const harness = {
+    harness: { maturity: "M1" },
+    gates: { full: ["lint", "unit", "prove-test", "new-test-repeat"], required: ["lint", "unit"], thresholds: {} },
+    commands: { lint: "LINT_195", unit: "UNIT_195" },
+    test: {},
+  };
+  const run = makeFakeRun([
+    { match: (_c, a) => a[1] === "LINT_195", result: { code: 0, stdout: "", stderr: "" } },
+    { match: (_c, a) => a[1] === "UNIT_195", result: { code: unitExit, stdout: "", stderr: unitExit ? "1 failed" : "" } },
+  ]);
+  return { ...(await runGates({ run, cwd: "/nonexistent-195", harness, level: "full", quarantine: { quarantined: [] }, readFile: () => null, now: "2026-10-03T12:00:00.000Z" })), head_sha: H2 };
+}
+const LIVE_GATES = await liveGates();
+const LIVE_GATES_RED = await liveGates({ unitExit: 1 });
+/** This merge run's own budget check (`budgetCheck`'s shape) — what run-stage passes in. */
+const LIVE_BUDGET = { ok: true, cap: 60, usd: 13.75, runs: 15, priced: 15 };
 
 function recordText({ extra = [] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "ev195-"));
@@ -107,22 +125,26 @@ function sectionOf(md, title) {
 const rowsOf = (lines) => (lines || []).filter((l) => l.startsWith("| ") && !/^\| ---/.test(l)).slice(1);
 
 test("test_195_evidence_is_assembled_from_records_only", () => {
-  const input = { recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, gatesRerun: true, reason: REASON, pr: 31, now: NOW };
+  const input = { recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, gatesRerun: true, reason: REASON, budget: LIVE_BUDGET, pr: 31, now: NOW };
   const { markdown, data } = buildEvidence(input);
 
-  // Headline: counts only, and they are the fixture's known counts (3 must_fix across round 1; 2 done_when with a test check).
-  expect(data.headline).toEqual({ must_fix: 3, done_when_tests: 2 });
+  // Headline: counts only, and they are the fixture's known counts (3 must_fix across round 1; 2 done_when with a test check,
+  // both proven at PR level because the bound self-gate-detail line of run 1001 says `mutation` ran and nothing blocked).
+  expect(data.headline).toEqual({ must_fix: 3, done_when_tests: 2, proven_tests: 2 });
   expect(markdown).toMatch(/must_fix raised by review: 3/);
   expect(markdown).toMatch(/done_when tests: 2/);
+  expect(markdown).toMatch(/proven tests: 2 of 2 \(record — self-gate run 1001: mutation ran, not blocked\)/);
   expect(markdown).not.toMatch(/단일 에이전트|would not have been visible|그냥 머지/);
 
-  // Contract: one row per done_when with its check.ref, then the PR-level prove-test fact from this run's gates and self-gate-detail.
+  // Contract: one row per done_when with its check.ref, then the PR-level proof fact — from the self-gate-detail line only.
   const contract = rowsOf(sectionOf(markdown, "Contract"));
   expect(contract).toHaveLength(3);
   expect(contract[0]).toMatch(/^\| dw1 \| test_184_alpha \|/);
   expect(contract[1]).toMatch(/^\| dw2 \| test_184_beta \|/);
   expect(contract[2]).toMatch(/^\| dw3 \| docs\/runbook.md \(manual\) \|/);
-  expect(sectionOf(markdown, "Contract").join("\n")).toMatch(/prove-test \(this merge run\): GREEN/);
+  expect(sectionOf(markdown, "Contract").join("\n")).toMatch(/^- new-test proof \(self-gate run 1001\): mutation ran, not blocked — record$/m);
+  expect(data.proof).toEqual({ run_id: "1001", mutation: "ran", blocked: false, proven: true });
+  expect(markdown).not.toMatch(/prove-test \(this merge run\)/);
   expect(data.self_gate).toEqual({ run_id: "1001", ran: ["gates", "mutation"], skipped: [{ check: "pins", reason: "no-input" }], blocked: false });
   expect(markdown).toMatch(/self-gate \(run 1001\): ran gates, mutation; skipped pins \(no-input\); not blocked/);
 
@@ -133,14 +155,16 @@ test("test_195_evidence_is_assembled_from_records_only", () => {
 
   // Gates: from the passed-in result — including the rerun fact — never from the record's FACTORY_GATES line (level=fast there).
   const gates = sectionOf(markdown, "Gates (this merge run)").join("\n");
-  expect(gates).toMatch(/level=full status=GREEN passed=4 failed=0 failing=none/);
+  expect(gates).toMatch(/level=full status=GREEN passed=2 failed=0 failing=none/);
   expect(gates).toMatch(/rerun: yes/);
   expect(gates).not.toMatch(/level=fast/);
   // Rejected / hand-off reason: the value merge-stage passed in.
   expect(sectionOf(markdown, "Rejected / hand-off").join("\n")).toContain("protected paths changed — human merge required: factory/lib/merge-stage.js");
-  // Cost & time: last bound budget line, queue→now from transition-comment timestamps (4h 30m), run count from heartbeats (5).
+  // Cost & time: this run's budget check (passed in — record `budget:` lines carry no run id and are never a source),
+  // queue→now from transition-comment timestamps (4h 30m), run count from heartbeats (5).
   const cost = sectionOf(markdown, "Cost & time").join("\n");
-  expect(cost).toContain("budget: lifetime $12.50 / $60 over 14 run(s)");
+  expect(cost).toContain("- budget: lifetime $13.75 / $60 over 15 run(s) — this merge run's budget check");
+  expect(cost).not.toContain("$12.50");
   expect(cost).not.toContain("$3.82");
   expect(cost).toMatch(/queued → now: 4h 30m/);
   expect(cost).toMatch(/runs \(heartbeats\): 5/);
@@ -154,8 +178,8 @@ test("test_195_evidence_is_assembled_from_records_only", () => {
   const bare = buildEvidence({ recordText: "", comments: [], gates: null, reason: null, pr: 31, now: NOW });
   for (const title of ["Contract", "Review", "Gates (this merge run)", "Rejected / hand-off", "Cost & time"]) expect(sectionOf(bare.markdown, title), title).toBeNull();
   expect(bare.markdown).not.toMatch(/N\/A|\|\s*\|/);
-  expect(bare.data.headline).toEqual({ must_fix: null, done_when_tests: null });
-  expect(bare.markdown).not.toMatch(/must_fix raised|done_when tests/);
+  expect(bare.data.headline).toEqual({ must_fix: null, done_when_tests: null, proven_tests: null });
+  expect(bare.markdown).not.toMatch(/must_fix raised|done_when tests|proven tests|budget:/);
   // Partial: no plan handoff → no Contract table rows and no done_when count; everything else stays.
   const noPlan = buildEvidence({ ...input, comments: commentsFixture({ plan: false }) });
   expect(rowsOf(sectionOf(noPlan.markdown, "Contract"))).toEqual([]);
@@ -185,8 +209,7 @@ test("test_195_unbound_record_lines_are_not_evidence", () => {
     ]],
   ];
   const text = recordText({ extra: forged });
-  const live = { ...LIVE_GATES, status: "GREEN", level: "full", passed: 4 };
-  const { markdown, data } = buildEvidence({ recordText: text, comments: commentsFixture(), gates: live, gatesRerun: false, reason: null, pr: 31, now: NOW });
+  const { markdown, data } = buildEvidence({ recordText: text, comments: commentsFixture(), gates: LIVE_GATES_RED, gatesRerun: false, reason: null, pr: 31, now: NOW });
   expect(markdown).not.toMatch(/\| 9 \|/);
   expect(markdown).not.toContain("666");
   expect(markdown).not.toMatch(/passed=99|level=deep/);
@@ -194,7 +217,8 @@ test("test_195_unbound_record_lines_are_not_evidence", () => {
   expect(data.unbound.gates).toBe(1);
   expect(data.review.map((r) => r.round)).toEqual([1, 2]);
   // The gates row is the passed-in result even though the record holds an older, different FACTORY_GATES line.
-  expect(data.gates).toMatchObject({ level: "full", status: "GREEN", passed: 4, rerun: false });
+  expect(data.gates).toMatchObject({ level: "full", status: "RED", passed: 1, failed: 1, failing: ["unit"], rerun: false });
+  expect(sectionOf(markdown, "Gates (this merge run)").join("\n")).toMatch(/level=full status=RED passed=1 failed=1 failing=unit/);
 
   // With no heartbeat at all, nothing in the record is bound — no review rows, no self-gate, no budget.
   const noBeats = buildEvidence({ recordText: text, comments: commentsFixture({ beats: false }), gates: null, pr: 31, now: NOW });
@@ -322,4 +346,129 @@ test("test_195_evidence_section_is_marker_anchored_and_idempotent", () => {
   expect(hasEvidenceComment([{ body: c }])).toBe(true);
   expect(hasEvidenceComment([{ body: "## Factory evidence\nfake" }])).toBe(false);
   expect(hasEvidenceComment([])).toBe(false);
+});
+
+// ── #195 self-critique — forgeries under a heartbeat-KNOWN run (runner ids are public in heartbeat comments) ─────────────────
+const GENUINE_SELF_GATE = { ok: true, ranChecks: ["gates", "mutation"], skippedChecks: [{ check: "pins", reason: "no-input" }] };
+
+test("test_195_header_bound_budget_line_is_not_evidence", () => {
+  // The skeptic's probe: a `budget:` line has no run id of its own; a `## implement · … · gha-1004` header in front of it names
+  // a heartbeat-known runner — but a header is not authority (anyone can write one). It must not reach the PR as a record row.
+  const probe = "## implement · 2026-10-03T13:00Z · gha-1004\nbudget: lifetime $0.01 / $60 over 1 run(s)";
+  const comments = [heartbeat("implement", "gha-1004", "2026-10-03T13:00:00Z")];
+  const { markdown, data } = buildEvidence({ recordText: probe, comments, gates: null, pr: 31, now: NOW });
+  expect(markdown).not.toContain("$0.01");
+  expect(markdown).not.toMatch(/budget:/);
+  expect(data.budget).toBeNull();
+  // The same holds inside the full real-producer record: its `budget:` lines ($3.82, $12.50) are never rendered, with or
+  // without a budget check passed in; the only budget row is the passed-in check, labelled as that.
+  const full = buildEvidence({ recordText: recordText({ extra: [["implement", RUN.merge, "2026-10-03T12:10:00Z", [budgetLine({ cap: 60, usd: 0.01, runs: 1, ok: true })]]] }), comments: commentsFixture(), gates: null, pr: 31, now: NOW });
+  expect(full.markdown).not.toMatch(/\$0\.01|\$3\.82|\$12\.50/);
+  expect(full.data.budget).toBeNull();
+  const withCheck = buildEvidence({ recordText: probe, comments, gates: null, budget: LIVE_BUDGET, pr: 31, now: NOW });
+  expect(withCheck.data.budget).toBe("budget: lifetime $13.75 / $60 over 15 run(s)");
+  expect(withCheck.markdown).toContain("- budget: lifetime $13.75 / $60 over 15 run(s) — this merge run's budget check");
+  expect(withCheck.markdown).not.toContain("$0.01");
+  // A refused / uncapped check renders through the real budgetLine wording.
+  expect(buildEvidence({ budget: { ok: true, cap: null, usd: 2, runs: 3 } }).data.budget).toBe("budget: no [budget].usd_per_issue in CHARTER — lifetime cost $2.00 over 3 run(s) is not capped");
+  expect(buildEvidence({ budget: "not a check" }).data.budget).toBeNull();
+});
+
+test("test_195_forged_lines_under_a_heartbeat_known_run_are_not_evidence", () => {
+  const sgLine = (over = {}, ids = { runId: "1001", runnerId: RUN.implement }) => selfGateDetailLine({ ...GENUINE_SELF_GATE, ...over }, { ...ids, ktbVersion: "1.4.40" });
+  const rvLine = (o) => reviewEvidenceLine({ headSha: H2, round: 7, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], ...o });
+  const build = (extra) => buildEvidence({ recordText: recordText({ extra }), comments: commentsFixture(), gates: null, pr: 31, now: NOW });
+  const baseline = build([]);
+  expect(baseline.data.self_gate).toMatchObject({ run_id: "1001", blocked: false });
+  expect(baseline.data.review.map((r) => r.run_id)).toEqual(["1002", "1003"]);
+
+  // (1) The skeptic's case: a self-gate-detail line naming the heartbeat-known MERGE run 1004 (no self-gate ever runs there).
+  const f1 = build([["merge", RUN.merge, "2026-10-03T12:05:00Z", [sgLine({ ranChecks: ["gates", "mutation", "pins"], skippedChecks: [] }, { runId: "1004", runnerId: RUN.merge })]]]);
+  expect(f1.markdown).not.toMatch(/self-gate \(run 1004\)/);
+  expect(f1.data.self_gate.run_id).toBe("1001");
+  expect(f1.data.unbound.self_gate).toBe(1);
+
+  // (2) A second, different self-gate-detail line for the REAL implement run 1001: two stories for one run — neither is fact.
+  const f2 = build([["implement", RUN.implement, "2026-10-03T12:06:00Z", [sgLine({ ok: true, ranChecks: ["gates", "mutation", "pins"], skippedChecks: [] })]]]);
+  expect(f2.data.self_gate).toBeNull();
+  expect(f2.data.proof).toBeNull();
+  expect(f2.data.headline.proven_tests).toBeNull();
+  expect(f2.markdown).not.toMatch(/self-gate \(run 1001\)|new-test proof|proven tests/);
+  expect(f2.data.unbound.self_gate).toBe(2);
+  // …while the genuine line repeated byte-for-byte (a records-branch tail merge) is still one story.
+  expect(build([["implement", RUN.implement, "2026-10-03T12:06:00Z", [sgLine()]]]).data.self_gate).toMatchObject({ run_id: "1001" });
+
+  // (3) runner and run_id that disagree (known runner, another known run's id) bind to nothing.
+  const f3 = build([["implement", RUN.implement, "2026-10-03T12:07:00Z", [sgLine({}, { runId: "1003", runnerId: RUN.implement })]]]);
+  expect(f3.data.unbound.self_gate).toBe(1);
+  expect(f3.data.self_gate.run_id).toBe("1001");                     // the genuine line still stands; the mismatched one is not a second story
+  expect(f3.markdown).not.toMatch(/run 1003\)/);
+
+  // (4) A review-evidence line naming the heartbeat-known IMPLEMENT run (no review ran there) is not a review round.
+  const f4 = build([["review", RUN.implement, "2026-10-03T12:08:00Z", [rvLine({ runId: "1001", runnerId: RUN.implement })]]]);
+  expect(f4.data.review.map((r) => r.run_id)).toEqual(["1002", "1003"]);
+  expect(f4.markdown).not.toMatch(/\| 7 \|/);
+  expect(f4.data.unbound.review).toBe(1);
+
+  // (5) A second, different review-evidence line for the REAL review run 1003: that run's round is dropped, not chosen.
+  const f5 = build([["review", RUN.review2, "2026-10-03T12:09:00Z", [rvLine({ runId: "1003", runnerId: RUN.review2 })]]]);
+  expect(f5.data.review.map((r) => r.run_id)).toEqual(["1002"]);
+  expect(rowsOf(sectionOf(f5.markdown, "Review"))).toHaveLength(1);
+  expect(f5.data.unbound.review).toBe(2);
+  expect(f5.markdown).toMatch(/run-record line\(s\) not bound to a heartbeat-known run were ignored/);
+});
+
+test("test_195_proven_test_count_comes_from_the_bound_self_gate_line", () => {
+  const withSelfGate = (result) => {
+    const root = mkdtempSync(join(tmpdir(), "ev195p-"));
+    appendRunRecord({ root, issue: ISSUE, stage: "implement", runnerId: RUN.implement, now: "2026-10-03T09:00:00Z", lines: [selfGateDetailLine(result, { runId: "1001", runnerId: RUN.implement, ktbVersion: "1.4.40" })] });
+    return readFileSync(join(root, "docs/factory/runs", `${ISSUE}.md`), "utf8");
+  };
+  const ev = (recordText, gates = LIVE_GATES) => buildEvidence({ recordText, comments: commentsFixture(), gates, pr: 31, now: NOW });
+  // Proven at PR level: mutation ran and nothing blocked → the 2 planned tests count as proven.
+  const proven = ev(withSelfGate(GENUINE_SELF_GATE));
+  expect(proven.data.headline).toEqual({ must_fix: 3, done_when_tests: 2, proven_tests: 2 });
+  // Mutation skipped (e.g. a test-only diff) → nothing was proven to fail first: 0 of 2, and the contract fact says why.
+  const skipped = ev(withSelfGate({ ok: true, ranChecks: ["gates"], skippedChecks: [{ check: "mutation", reason: "no-input" }] }));
+  expect(skipped.data.headline.proven_tests).toBe(0);
+  expect(skipped.markdown).toMatch(/proven tests: 0 of 2 \(record — self-gate run 1001: mutation skipped \(no-input\), not blocked\)/);
+  expect(skipped.markdown).toMatch(/^- new-test proof \(self-gate run 1001\): mutation skipped \(no-input\), not blocked — record$/m);
+  // Mutation ran but the gate blocked (a survivor) → 0.
+  const blocked = ev(withSelfGate({ ok: false, ranChecks: ["gates", "mutation"], skippedChecks: [] }));
+  expect(blocked.data.headline.proven_tests).toBe(0);
+  expect(blocked.markdown).toMatch(/mutation ran, blocked/);
+  // Mutation neither ran nor was recorded as skipped → 0 (absence is not proof).
+  expect(ev(withSelfGate({ ok: true, ranChecks: ["gates"], skippedChecks: [] })).data.headline.proven_tests).toBe(0);
+  // The live gates do not decide it: a RED merge-run gates result leaves the self-gate's proof as recorded.
+  expect(ev(withSelfGate(GENUINE_SELF_GATE), LIVE_GATES_RED).data.headline.proven_tests).toBe(2);
+  // No bound self-gate line → no proven count at all (not 0, not N/A): the source is missing.
+  const none = ev("");
+  expect(none.data.headline.proven_tests).toBeNull();
+  expect(none.markdown).not.toMatch(/proven tests/);
+  // No plan → nothing planned to count, so no proven count either, even with a proof line.
+  expect(buildEvidence({ recordText: withSelfGate(GENUINE_SELF_GATE), comments: commentsFixture({ plan: false }), pr: 31, now: NOW }).data.headline.proven_tests).toBeNull();
+});
+
+test("test_195_author_text_over_the_limit_is_refused_not_reported_truncated", () => {
+  const md = buildEvidence({ recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, reason: REASON, pr: 31, now: NOW }).markdown;
+  // The skeptic's probe: the author's text alone is over the limit — no in-limit body exists, so none is claimed.
+  const over = applyEvidenceSection("x".repeat(PR_BODY_MAX_CHARS + 10), md);
+  expect(over).toEqual({ body: null, truncated: false, overflow: true });
+  // Every author length around the edge either yields a body within the limit or an explicit overflow — never an
+  // over-limit body labelled "truncated". Small limits make the edge cheap to sweep.
+  for (const max of [200, 300, 1000]) {
+    let sawTruncated = false, sawOverflow = false;
+    for (let n = 0; n <= max + 2; n++) {
+      const r = applyEvidenceSection("y".repeat(n), md, { max });
+      if (r.overflow) { sawOverflow = true; expect(r.body, `max=${max} n=${n}`).toBeNull(); continue; }
+      expect(r.body.length, `max=${max} n=${n}`).toBeLessThanOrEqual(max);
+      expect(r.body.startsWith("y".repeat(n)), `max=${max} n=${n}`).toBe(true);
+      expect(r.body.endsWith(EVIDENCE_END), `max=${max} n=${n}`).toBe(true);
+      if (r.truncated) { sawTruncated = true; expect(r.body).toMatch(/Factory evidence truncated: showing \d+ of \d+ characters/); }
+    }
+    expect(sawTruncated, `max=${max}`).toBe(true);
+    expect(sawOverflow, `max=${max}`).toBe(true);
+  }
+  // The issue comment can never overflow: it has no author text.
+  expect(evidenceComment(md, { max: 200 }).length).toBeLessThanOrEqual(200);
 });
