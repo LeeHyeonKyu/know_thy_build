@@ -11,9 +11,11 @@ import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
 import { release as releaseLock, releaseIfStale as releaseIfStaleLock } from "../lib/claim.js";
 import { sweep } from "../lib/sweeper.js";
+import { isNewerVersion } from "../lib/feedback/harvest-findings.js";
 import { backPressure } from "../lib/back-pressure.js";
 import { routeFeedbackArm } from "./retro.js";
 import { readRecordsDetailed, recordsSourceOf } from "../lib/records-branch.js";
+import { INSTALL_MANIFEST_PATH, INSTALL_MANIFEST_SCHEMA, fromEntries, loadInstallManifest } from "../lib/feedback/install-manifest.js";
 
 /**
  * CLI 진입: 실제 의존성 조립.
@@ -50,7 +52,9 @@ export async function main() {
   // review handoff를 그 커밋에 묶게 한다 — 여기서 떨어뜨리면 그 검사는 묶을 대상을 잃는다.
   // S2 — 큐 진입 심사(리허설과 같은 자리). `factoryLogins`는 아래에서 정의되지만 호출 시점에는 있다(함수 안에서 늦게 읽는다).
   const admission = makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) });
-  const transition = ({ issue, to, reason, ctxExtra }) => transitionIssue({ gh, issue, to, reason, ctxExtra, rehearsal, admission });
+  // #156 — `by`(릴리스 재시도 팔의 `factory:release-<v>`)와 `engineVersion`(blocked 팔의 에스컬레이션 버전 기록)도 흘려보낸다.
+  // 여기서 떨어뜨리면 그 팔은 단위 테스트가 전부 초록인 채로 프로덕션에서 사람 전용 엣지에 거부당한다.
+  const transition = ({ issue, to, reason, ctxExtra, by, engineVersion }) => transitionIssue({ gh, issue, to, reason, ctxExtra, rehearsal, admission, ...(by ? { by } : {}), ...(engineVersion ? { engineVersion } : {}) });
   const release = (issue) => releaseLock({ run, cwd: root, issue });
   // quick sweep은 토큰 만료 팔을 돌지 않으므로 그 조회도 하지 않는다(스테이지마다 gh를 한 번 덜 때린다).
   const tokenIssuedAt = quick ? null : await gh.getVariable("FACTORY_TOKEN_ISSUED_AT");
@@ -146,7 +150,30 @@ export async function main() {
       env: process.env,
     });
   };
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, quick });
+  /**
+   * #156 — **설치본의 엔진 버전.** 출처는 러너가 쓴 `.factory/install-manifest.json`의 `ktb_version` 하나다(에이전트가 쓸 수
+   * 없는 생성물). `loadInstallManifest`의 패키지 소스 폴백(도그푸드의 `package.json`)은 "설치된 엔진"이 아니므로 받지 않는다 —
+   * 못 읽으면 null이고, 릴리스 재시도 팔은 그것을 "다르다"로 읽지 않고 건너뛴다.
+   */
+  /*
+   * rework cf1 — **체크아웃만 믿지 않는다.** 스테이지 잡의 Sweep 스텝은 `git checkout ${{ github.sha }} -- .factory`로 이벤트
+   * 시점의 `.factory`를 되돌린 뒤 돈다(그 사이 main이 올라갔을 수 있다 — L20). 기본 브랜치(`origin/<default_branch>`)의
+   * 매니페스트도 읽어 둘 중 **더 새로운** 것을 설치본으로 본다. 둘 다 못 읽으면 null이다(모르면 "다르다"로 읽지 않는다).
+   */
+  const defaultBranch = harness.project?.default_branch || "main";
+  const installedVersion = async () => {
+    const m = await loadInstallManifest(root);
+    const local = m?.source === INSTALL_MANIFEST_PATH ? m.ktbVersion ?? null : null;
+    let remote = null;
+    try {
+      const out = await run("git", ["show", `origin/${defaultBranch}:${INSTALL_MANIFEST_PATH}`], { cwd: root });
+      const doc = out?.code === 0 ? JSON.parse(String(out?.stdout ?? "")) : null;
+      remote = doc?.schema === INSTALL_MANIFEST_SCHEMA ? fromEntries(doc)?.ktbVersion ?? null : null;
+    } catch { remote = null; }
+    if (local && remote) return isNewerVersion(remote, local) ? remote : local;
+    return local ?? remote ?? null;
+  };
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, quick, installedVersion });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }

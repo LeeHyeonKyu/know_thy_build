@@ -290,18 +290,192 @@ export function commentsSinceRequeue(comments) {
  * 남는다. K=3에서 그런 장애 두 번이면 멀쩡한 이슈가 라운드를 다 쓴다 — 그 창을 이 마커가 닫는다.
  */
 export function countTransitionsTo(comments, to) {
-  let n = 0;
-  for (const c of comments || []) {
+  return countedTransitionIndices(comments, to).length;
+}
+
+/**
+ * #174 — `countTransitionsTo`가 세는 **바로 그 전이들의 위치**(코멘트 배열의 인덱스, 오름차순). 규칙은 여기 하나다:
+ * `countTransitionsTo`는 이것의 길이이고, K 재시작의 "쓰였는가"(`kRestartState`)도 이것을 읽는다 — 같은 TRANSITION_FAILED·
+ * `reason=retry` 규칙을 두 벌 두지 않는다.
+ *
+ * `honourFailed: false`는 같은 규칙에서 **취소만 뺀** 셈이다(K 재시작의 천장, `kRestartState().attempts`). failed 마커도
+ * factory 계정의 코멘트 본문이라 에이전트가 쓸 수 있다 — 취소를 따르는 셈은 코멘트 하나로 **줄어든다**. 천장은 코멘트가
+ * 더해질수록 늘기만 하는 셈 위에 있어야 위조가 멈춤을 앞당길 뿐 늦추지 못한다. 대가: 진짜 라벨 스왑 실패도 천장의 한 칸을 쓴다.
+ */
+export function countedTransitionIndices(comments, to, { honourFailed = true } = {}) {
+  const out = [];
+  (Array.isArray(comments) ? comments : []).forEach((c, i) => {
     const body = String(c?.body ?? "");
     const f = TRANSITION_FAILED.exec(body);
-    if (f) { if (f[2] === to && n > 0) n -= 1; continue; }
+    if (f) { if (honourFailed && f[2] === to && out.length > 0) out.pop(); return; }
     const m = TRANSITION_TO.exec(body);
     // ADR-020 KTB-32 — **사람의 재시도는 라운드가 아니다.** `reason=retry` 전이는 인프라가 끊은
     // 자리로 **이미 얻었던 라벨을 되돌리는** 것이지 새 재작업 주기가 아니다. 세면 `rework`로
     // 되돌아가는 재시도 한 번이 K 예산을 한 칸 태운다 — 재시도의 값어치가 그만큼 줄어든다.
-    if (m && m[2] === to && m[4] !== "retry") n += 1;
+    if (m && m[2] === to && m[4] !== "retry") out.push(i);
+  });
+  return out;
+}
+
+/**
+ * ── #174 (ADR-033 둘째 결정) — K 소진 → **한 번**, 새 작성자 + diff 전용 브리프로 스스로 재시작 ─────────────────
+ *
+ * 리뷰 라운드 K를 다 쓴 이슈는 예전에는 곧장 `factory:needs-human`이었고, 운영 세션(사람)이 미결 findings를 diff 전용
+ * 브리프로 적은 뒤 `--retry`로 K를 리셋했다(#149·#157·#170 — 하루 재시도 요청의 절반). 이제 공장이 그 일을 한 번 한다:
+ * 브리프 코멘트(이 생산자)를 남기고 `factory:rework`로 보낸다. 두 번째 소진은 예전처럼 사람이다.
+ *
+ * **창은 바꾸지 않는다.** K의 창은 그대로 `commentsSinceRequeue`이고, 마커는 그 창을 자르지 않는다 — 에이전트도 factory
+ * 계정으로 코멘트를 쓰므로(`gh.js`의 열린 `gh issue comment`) 작성자로는 엔진 마커와 위조를 가를 수 없고, 본문이 창을 자르면
+ * K에 천장이 없어진다. 대신 예산이 고정이다: 한 창에 재시작은 **최대 한 번**이고, 그 위에 코멘트로 줄일 수 없는 천장(창의 rework
+ * **시도** 수, `attempts`)이 2K에 있다.
+ *
+ * **쓰였다** = 마커 + 그 뒤에 살아남은(`TRANSITION_FAILED`로 취소되지 않은) **재시작 전이** — `by=factory:run-<id>`인
+ * `→ factory:rework`(review의 보통 rework는 `by=script`다). 취소된 재시작 전이도 그 뒤에 `from=factory:rework` 전이(implement의
+ * claim)가 따르면 쓰인 것이다 — 라벨이 rework에 닿았다는 기록이 failed 마커(위조일 수 있다)보다 강하다(#174 self-critique). 재시작 전이가 따르지 않은 마커(위조든, 전이에서 죽은 런의 것이든)는
+ * 쓰인 재시작이 아니고 빌더에게 브리프로 가지도 않는다. 쓰인 브리프는 그 재시작 전이 **직전의 마지막 마커**다 — 엔진은 마커를
+ * 게시하고 곧바로 전이하므로, 그 사이에 끼는 위조는 경쟁뿐이다. 그래서 `postKRestartBrief`는 창의 마지막 마커가 **지금 쓸
+ * 브리프와 내용이 같을 때만** 다시 쓰지 않는다(전이에서 죽은 런의 재시도) — 다른 내용의 마커가 엔진의 브리프를 대신하지 못한다.
+ */
+export const K_RESTART = /<!-- factory-k-restart:v1 issue=(\d+) pr=(\S+) head=(\S+) -->/;
+export const kRestartMarker = ({ issue, pr, head }) => `<!-- factory-k-restart:v1 issue=${issue} pr=${pr ?? "unknown"} head=${head ?? "unknown"} -->`;
+/** 다음 작성자에게 실리는 범위 문장 — 브리프 코멘트와 `loaded.k_restart_brief`가 **이 문자열 그대로** 싣는다. */
+export const K_RESTART_SCOPE = "목록 밖의 변경은 없어야 한다(새 파일·새 export·새 done_when 금지, 빼는 것만)";
+/** 코멘트 한도(GitHub 65536자) 안에 머무는 상한: findings 40개 × (where 200 + claim 400). 넘치면 "N more omitted". */
+export const K_RESTART_MAX_FINDINGS = 40;
+/** 최종 본문(이스케이프·두 번 싣기 뒤)의 상한 — 넘치면 뒤쪽 findings를 "omitted"로 돌린다. GitHub 한도 65536보다 여유를 둔다. */
+export const K_RESTART_MAX_CHARS = 60000;
+const K_RESTART_WHERE_MAX = 200;
+const K_RESTART_CLAIM_MAX = 400;
+const K_RESTART_BRIEF_JSON = /```json\s*(\{[\s\S]*?"schema"\s*:\s*"factory\.k-restart-brief\.v1"[\s\S]*?\})\s*```/;
+
+/**
+ * finding의 글 한 조각을 코멘트에 실어도 안전하게 만든다: 한 줄로 접고, `<!--`(마커의 시작 — 브리프 안의 claim이 전이 마커로
+ * 읽히면 K 카운터가 속는다)와 세 개 이상의 백틱(구조화 블록의 울타리)을 무력화하고, 길이를 자른다.
+ */
+function inert(text, max) {
+  // control characters become spaces — JSON escapes each one to six characters, which would blow the size cap
+  const s = String(text ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/<!--/g, "&lt;!--").replace(/`{3,}/g, "`").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * finding의 `where`에서 저장소 경로만 뽑는다(`path[:line]` 모양만). `:12`·`:3-9`·`:3:9`·`#L4` 꼬리는 떼고, 백틱·따옴표·괄호는
+ * 벗긴다. 경로가 아닌 것(`/reports` 같은 라우트, URL, 산문)은 아무 경로도 내지 않는다 — 추측으로 허용 목록을 넓히지 않는다.
+ */
+export function wherePaths(where) {
+  const out = [];
+  for (const raw of String(where ?? "").split(/[\s,;()[\]{}"'`<>]+/)) {
+    if (!raw || /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) continue;
+    let tok = raw.replace(/[.,;:!?]+$/, "").replace(/#L\d+(?:-L?\d+)?$/i, "").replace(/(?::\d+(?:[-–:]\d+)*)+$/, "").replace(/^\.\//, "");
+    if (!tok || tok.startsWith("/") || tok.split("/").includes("..")) continue;
+    if (!/^[\w@.+-]+(?:\/[\w@.+-]+)*\/?$/.test(tok)) continue;
+    // 파일만 — 마지막 조각에 확장자가 있어야 한다. 디렉터리(`factory/`, `factory/lib`)나 산문(`and/or`)은 허용 목록을 넓히지 않는다.
+    if (tok.endsWith("/") || !/\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(tok)) continue;
+    if (/^(?:e\.g|i\.e|etc)$/i.test(tok)) continue;
+    if (!out.includes(tok)) out.push(tok);
   }
-  return n;
+  return out;
+}
+
+/**
+ * 브리프 코멘트 한 통(생산자). 마커 + 사람이 읽는 문장(PR·미결 개수·범위 문장·각 finding의 where/claim) + 같은 findings를 담은
+ * 구조화 블록(`factory.k-restart-brief.v1`). 읽는 쪽(`kRestartState` → `loaded.k_restart_brief`, self-gate)은 산문이 아니라 블록을 본다.
+ */
+export function kRestartComment({ issue, pr, head, findings = [] }) {
+  const all = (Array.isArray(findings) ? findings : []).filter((f) => f && typeof f === "object");
+  const norm = all.slice(0, K_RESTART_MAX_FINDINGS).map((f) => ({
+    ...(f.id != null ? { id: inert(f.id, 80) } : {}),
+    where: inert(f.where, K_RESTART_WHERE_MAX).replace(/`/g, ""),
+    claim: inert(f.claim, K_RESTART_CLAIM_MAX),
+  }));
+  // 상한은 **최종 본문**에서 잰다: 각 finding은 산문과 JSON 블록에 두 번 실리고, JSON은 `"`·`\`를 두 배로 늘린다.
+  for (let n = norm.length; ; n--) {
+    const body = renderKRestart({ issue, pr, head, total: all.length, kept: norm.slice(0, n) });
+    if (body.length <= K_RESTART_MAX_CHARS || n === 0) return body;
+  }
+}
+
+function renderKRestart({ issue, pr, head, total, kept }) {
+  const omitted = total - kept.length;
+  const lines = kept.map((f, i) => `${i + 1}. \`${f.where || "(no where)"}\`${f.id ? ` (${f.id})` : ""} — ${f.claim}`);
+  return [
+    kRestartMarker({ issue, pr, head }),
+    `**K 소진 — 새 작성자로 한 번 재시작합니다 (self-restart 1/1, ADR-033).** 미결 findings ${total}건 — 다음 작성자는 PR #${pr ?? "unknown"}의 diff를 출발점으로 이것만 고친다:`,
+    "",
+    `> ${K_RESTART_SCOPE}`,
+    "",
+    ...lines,
+    ...(omitted > 0 ? [`- … ${omitted} more omitted (the review handoff carries the full list)`] : []),
+    "",
+    "```json",
+    JSON.stringify({ schema: "factory.k-restart-brief.v1", issue, pr: pr ?? null, head: head ?? null, scope: K_RESTART_SCOPE, findings: kept, omitted }, null, 2),
+    "```",
+  ].join("\n");
+}
+
+/** 마커가 달린 코멘트 본문 → 빌더가 받는 브리프. 블록이 없거나 깨졌으면 `error`를 싣는다(읽는 쪽이 fail closed 한다). */
+function briefOf(body, m) {
+  const pr = /^\d+$/.test(m[2]) ? Number(m[2]) : null;
+  const head = m[3] === "unknown" ? null : m[3];
+  const j = K_RESTART_BRIEF_JSON.exec(body);
+  let obj = null;
+  try { obj = j ? JSON.parse(j[1]) : null; } catch { obj = null; }
+  if (!obj || !Array.isArray(obj.findings)) return { pr, head, scope: K_RESTART_SCOPE, paths: [], findings: [], error: "the factory.k-restart-brief.v1 block is missing or unparsable" };
+  const findings = obj.findings.filter((f) => f && typeof f === "object").map((f) => ({
+    ...(f.id != null ? { id: String(f.id) } : {}),
+    where: String(f.where ?? ""),
+    claim: String(f.claim ?? ""),
+  }));
+  const paths = [...new Set(findings.flatMap((f) => wherePaths(f.where)))];
+  return { pr, head, scope: K_RESTART_SCOPE, paths, findings };
+}
+
+/**
+ * 창(호출자가 `commentsSinceRequeue`로 좁힌다) 안의 재시작 상태.
+ *   - `used` — 재시작이 쓰였는가. 쓰인 마커는 마커 뒤에 **처음으로** 살아남은 재시작 전이(`by=factory:run-*` rework) 직전의 마지막 마커다.
+ *   - `offset` — 그 재시작 전이까지(포함) 센 rework 수. 리뷰 라운드는 재시작 뒤 `prior + 1 - offset`부터 다시 1이다.
+ *   - `brief` — 쓰인 마커의 브리프(`briefOf`). 쓰이지 않았으면 null.
+ *   - `pending` — 쓰이지 않은 가장 최근 마커 `{ head, pr, brief }`(재시도된 런이 같은 브리프를 또 쓰지 않게).
+ *   - `attempts` — 창의 rework **시도** 수(failed 마커로 취소되지 않는 셈) — 2K 천장이 재는 값.
+ */
+export function kRestartState(comments) {
+  const list = Array.isArray(comments) ? comments : [];
+  const attempts = countedTransitionIndices(list, "factory:rework", { honourFailed: false }).length;
+  const markers = [];
+  list.forEach((c, i) => { const body = String(c?.body ?? ""); const m = K_RESTART.exec(body); if (m) markers.push({ i, m, body }); });
+  if (!markers.length) return { used: false, offset: 0, brief: null, pending: null, attempts };
+  const reworks = countedTransitionIndices(list, "factory:rework");
+  const tried = countedTransitionIndices(list, "factory:rework", { honourFailed: false });
+  const transitionAt = (j) => TRANSITION_TO.exec(String(list[j]?.body ?? ""));
+  const isRestart = (j) => /^factory:run-/.test(transitionAt(j)?.[3] ?? "");
+  // 재시작 전이 **시도**들(마커 뒤, by=factory:run-*). 시도 하나가 쓰인 재시작인 것은 (a) 그것이 failed 마커에 취소되지 않고 살아남았거나
+  // (b) 취소됐어도 그 뒤(다음 재시작 시도 전)에 `from=factory:rework` 전이가 있을 때다. (b)는 라벨이 실제로 rework에 닿았다는 엔진의 기록
+  // (implement의 claim `rework → in-progress`)이다 — 진짜 스왑 실패는 라벨이 rework에 닿지 않았으므로 그런 전이가 뒤따를 수 없다. 그래서
+  // 에이전트가 쓴 위조 failed 마커(factory 계정의 코멘트)는 이미 일어난 재시작을 되감지 못한다: 위조는 빌더나 다음 리뷰 세션 안에서만
+  // 쓸 수 있고, 둘 다 그 claim 전이보다 뒤다. 위조 전이 코멘트를 더해도 (b)를 더 쉽게 참으로 만들 뿐이다 — 멈춤을 앞당길 뿐 늦추지 못한다.
+  const restarts = tried.filter((j) => j > markers[0].i && isRestart(j));
+  const leftRework = (from, to) => list.some((_, x) => x > from && x < to && transitionAt(x)?.[1] === "factory:rework");
+  const j = restarts.find((r, n) => reworks.includes(r) || leftRework(r, restarts[n + 1] ?? Infinity));
+  if (j === undefined) {
+    const last = markers[markers.length - 1];
+    return { used: false, offset: 0, brief: null, pending: { head: last.m[3], pr: last.m[2], brief: briefOf(last.body, last.m) }, attempts };
+  }
+  const restart = markers.filter((x) => x.i < j).pop();
+  // offset = 재시작 전이까지(포함) 센 rework 수 — `prior`(=`reworks.length`)와 같은 셈이라 새 작성자의 라운드가 1부터 시작한다.
+  return { used: true, offset: reworks.filter((x) => x <= j).length, brief: briefOf(restart.body, restart.m), pending: null, attempts };
+}
+
+/** 두 브리프가 같은 재시작인가(pr·head·findings) — `postKRestartBrief`의 "다시 쓰지 않는다" 판정. 산문은 보지 않는다. */
+export function sameKRestartBrief(a, b) {
+  if (!a || !b || a.error || b.error) return false;
+  const key = (x) => JSON.stringify({ pr: x.pr ?? null, head: x.head ?? null, findings: x.findings ?? [] });
+  return key(a) === key(b);
+}
+
+/** 생산자가 쓸 본문을 독자가 읽은 모양 — 같은 두 함수(`kRestartComment`·`briefOf`)를 지나므로 비교가 문자열 복사에 기대지 않는다. */
+export function kRestartBriefOf(body) {
+  const m = K_RESTART.exec(String(body ?? ""));
+  return m ? briefOf(String(body), m) : null;
 }
 
 /**
@@ -430,6 +604,46 @@ export function extractNeedsHuman(issueNumber, comments, sinceMs = null) {
 }
 
 /**
+ * ── #156 (ADR-032) — **새 엔진이 왔을 때 한 번** ─────────────────────────────────────────────────
+ *
+ * 엔진 결함(`undecidable`)으로 멈춘 `factory:needs-human`은 사람의 판단이 아니라 고친 엔진을 기다린다. sweeper의
+ * `sweepRetryOnRelease`가 설치본 버전(`.factory/install-manifest.json`의 `ktb_version`)이 그 멈춤 당시의 버전과
+ * 다르면 한 번 중단 지점으로 되돌린다. 세 조각의 문법이 여기 한 곳에 산다(쓰는 쪽 `transition.js`, 읽는 쪽 sweeper와
+ * `commentsSinceCycleStart`):
+ *   - `factory:release-<v>` — 그 전이의 `by=` 자기 신고(권한이 아니라 감사 기록 — `transition.js`가 엣지를 좁힌다).
+ *   - `factory-retry-on-release version=<v>` — 그 전이 코멘트에 실리는 **러너의** 마커. 이슈당 릴리스당 1회의 dedupe이고,
+ *     팩토리 계정이 쓴 것만 재시도 예산의 새 주기를 연다(본문의 `by=`만으로는 열지 않는다 — S1).
+ *   - `factory-engine-version version=<v>` — sweeper가 needs-human 에스컬레이션 전이에 싣는 "그때의 엔진 버전".
+ *
+ * Scope change (#156): 이 파일은 plan의 `files_expected` 밖이다. dw6(재시도가 예산의 새 주기를 연다)는 plan dissent d8과
+ * open_risks가 지목한 대로 창을 **여기서 한 번** 넓혀야 한다 — `commentsSinceCycleStart`를 blocked 팔·stalled 팔·self-gate
+ * (`factory/bin/run-stage.js`, load-bearing)가 함께 읽으므로, 여기 말고 고치면 run-stage를 건드리거나 세 창 중 하나를 빠뜨린다.
+ */
+const versionToken = (v) => String(v ?? "").trim().replace(/[\s>]+/g, "-");
+export const RELEASE_PRINCIPAL = /^factory:release-(\S+)$/;
+export const releasePrincipal = (version) => `factory:release-${versionToken(version)}`;
+export const RETRY_ON_RELEASE = /<!-- factory-retry-on-release version=(\S+) -->/;
+export const retryOnReleaseMarker = (version) => `<!-- factory-retry-on-release version=${versionToken(version)} -->`;
+export const ENGINE_VERSION = /<!-- factory-engine-version version=(\S+) -->/;
+export const engineVersionMarker = (version) => `<!-- factory-engine-version version=${versionToken(version)} -->`;
+
+/**
+ * #156 dw6 — 이 코멘트가 **팩토리가 쓴 릴리스 재시도 전이**인가. 셋 다 참이어야 한다: 전이 마커가 `by=factory:release-<v>
+ * reason=retry`이고, 같은 코멘트에 같은 `<v>`의 `factory-retry-on-release` 마커가 있고, 작성자가 팩토리 계정이다.
+ * 팩토리 계정을 모르면 인정하지 않는다(닫힌 쪽) — 본문은 누구나 흉내 낼 수 있다.
+ */
+export function isFactoryReleaseRetry(comment, { factoryLogin = null } = {}) {
+  const b = String(comment?.body ?? "");
+  const m = TRANSITION_TO.exec(b);
+  if (!m || m[4] !== "retry") return false;
+  const p = RELEASE_PRINCIPAL.exec(m[3]);
+  const r = RETRY_ON_RELEASE.exec(b);
+  if (!p || !r || p[1] !== r[1]) return false;
+  const author = typeof comment?.author === "string" ? comment.author.trim() : "";
+  return Boolean(author && typeof factoryLogin === "string" && factoryLogin && author.toLowerCase() === factoryLogin.toLowerCase());
+}
+
+/**
  * 1.4.12 (own-calendar #9/#28/#29/#30) — **재점화 예산의 창**: 마지막 재큐(`to=factory:queue`) **또는** 사람의 전이
  * (`by=human`: retry·hold 해제) 이후. `commentsSinceRequeue`는 리뷰 라운드(K)의 창이라 사람의 retry로 리셋하면
  * K를 우회하게 되므로 그대로 두고, 이 창은 sweeper의 스톨 재점화 카운터에만 쓴다 — 사람이 되돌린 이슈는 새 주기이고,
@@ -443,6 +657,8 @@ export function commentsSinceCycleStart(comments, { factoryLogin = null } = {}) 
     const m = TRANSITION_TO.exec(b);
     if (!m) return;
     if (m[2] === "factory:queue") { from = i + 1; return; }          // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
+    // #156 dw6 — 새 엔진이 온 뒤의 릴리스 재시도도 사람의 `--retry`처럼 새 주기다. 단 러너의 마커 + 팩토리 계정일 때만.
+    if (isFactoryReleaseRetry(c, { factoryLogin })) { from = i + 1; return; }
     /**
      * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 **본문이 아니라 계정**으로 판정한다. 예전 `/\bby=human\b/`는 봇 계정이
      * 흉내 낸 코멘트에도 창을 리셋했다(sweeper의 stalled restart limit, self-gate backstop). 작성자를 모르는 코멘트는

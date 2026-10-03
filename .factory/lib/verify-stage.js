@@ -318,7 +318,7 @@ export function neverAutomateHits(paths, globs) {
   return hits;
 }
 
-export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null, readFile }) {
+export function verifyStage({ stage, out, transcriptText, agentsLog, roster = [], rolePrefix = "", expectedRounds, orchestration, gates, planLimits, issueBody, neverAutomate = [], qaManifest = null }) {
   const reasons = [];
   /** A-SF1 — qa 리뷰어 자신의 증거 부족. 스테이지 실패가 아니라 **이 라운드의 판정 재료**로 나간다. */
   let qaShortfall = null;
@@ -346,9 +346,6 @@ export function verifyStage({ stage, out, transcriptText, agentsLog, roster = []
     envelopeResult: out?.result,
     transcriptText,
     validate: schemaName ? (o) => validate(schemaName, withGates(o)) : null,
-    // #170 — 선택 인자. 넘기면 이 세션의 Workflow 접수증에 묶인 러너 결과 파일을 잘리지 않은 채 후보로 본다
-    // (`readFile(path) → string|null`, 이 모듈은 여전히 node:fs를 import하지 않는다). 안 넘기면 #170 이전 그대로.
-    readFile,
   });
   const data = artifact.ok ? artifact.data : null;
   /*

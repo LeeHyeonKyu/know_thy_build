@@ -64,8 +64,6 @@ export function verifyStageCli({ root, argv = [], home = homedir(), readFile = r
     expectedRounds: ctx.rounds, orchestration: ctx.orchestration,
     // plan 검증기(감사 Task 9)의 두 입력은 CHARTER의 상한과 이슈 본문(가드 면제)이다 — 둘 다 context.json에 있다.
     planLimits: ctx.plan, issueBody: ctx.issue?.body,
-    // #170 — run-stage와 같은 계산: 접수증에 묶인 Workflow 러너 결과 파일을 잘리지 않은 채로 후보로 본다.
-    readFile,
   });
   return { ok: r.ok, reasons: r.reasons, transcript: from };
 }
