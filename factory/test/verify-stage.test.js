@@ -1073,3 +1073,38 @@ test("test_170_recovery_reads_the_workflow_output_file_untruncated — a receipt
   expect(r.reasons.join("\n")).toContain(`workflow output file: no runner notification names the output file of task ${TASK_170}`);
   expect(r.reasons.join("\n")).toMatch(/truncated JSON candidate/);
 });
+
+// #170 dw4 — "slack too tight" must be readable from the reason alone: the ctime refusal carries the measured
+// lag in ms and the slack constant it was held to, so a live Workflow capture (open risk cf-s1) can be diagnosed
+// without re-running anything.
+test("test_170_invalid_or_missing_output_file_is_named_in_the_reason — the late-change reason carries the lag and the slack", () => {
+  const [wfUse, wfReceipt] = REAL_287_170.workflow_receipt;
+  const realTaskId = /Task ID:\s*(\S+)/.exec(wfReceipt.message.content[0].content)[1];
+  const realToolUse = wfUse.message.content.find((b) => b.type === "tool_use" && b.name === "Workflow").id;
+  const dir = scratch170();
+  const path = outputPath170(dir, realTaskId);
+  const verdict = longReview170();
+  const full = JSON.stringify(verdict);
+  const fileText = envelopeFile170(verdict);
+  const note = {
+    ...REAL_NOTE_170,
+    attachment: {
+      ...REAL_NOTE_170.attachment,
+      prompt: `<task-notification>\n<task-id>${realTaskId}</task-id>\n<tool-use-id>${realToolUse}</tool-use-id>\n<output-file>${path}</output-file>\n<status>completed</status>\n<summary>Dynamic workflow "Review panel" completed</summary>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${path})</result>\n</task-notification>`,
+    },
+  };
+  const transcriptText = [...REAL_287_170.workflow_receipt, note].map(line170).join("\n") + "\n";
+  const at = Date.parse(REAL_NOTE_170.timestamp);
+  const changedAfter = (ms) => (p) => (p === path ? { text: fileText, bytes: Buffer.byteLength(fileText), ctimeMs: at + ms } : null);
+  const slack = stageArtifact170.WORKFLOW_OUTPUT_CTIME_SLACK_MS;
+  const late = verifyStage({ ...reviewArgs170, transcriptText, readFile: changedAfter(slack + 2345) });
+  expect(late.ok).toBe(false);
+  const line = late.reasons.find((l) => l.includes(path) && /after the runner's notification/.test(l));
+  expect(line).toBeDefined();
+  expect(line).toContain(`lag ${slack + 2345} ms`);
+  expect(line).toContain(`slack ${slack} ms`);
+  // positive control: the same bytes inside the slack recover
+  const onTime = verifyStage({ ...reviewArgs170, transcriptText, readFile: changedAfter(slack) });
+  expect(onTime.reasons).toEqual([]);
+  expect(onTime.ok).toBe(true);
+});

@@ -295,7 +295,7 @@ function runnerBindingFailure({ path, value, inline, at, ctimeMs }) {
   if (!Number.isFinite(at)) return unbound("no notification timestamp");
   if (!Number.isFinite(ctimeMs)) return unbound("the reader gave no change time");
   if (ctimeMs > at + WORKFLOW_OUTPUT_CTIME_SLACK_MS) {
-    return `workflow output file changed after the runner's notification: ${path} (changed ${new Date(ctimeMs).toISOString()}, notified ${new Date(at).toISOString()})`;
+    return `workflow output file changed after the runner's notification: ${path} (changed ${new Date(ctimeMs).toISOString()}, notified ${new Date(at).toISOString()}; lag ${Math.round(ctimeMs - at)} ms > slack ${WORKFLOW_OUTPUT_CTIME_SLACK_MS} ms)`;
   }
   if (typeof inline !== "string") return unbound("the notification carries no <result>");
   const serialized = typeof value === "string" ? value : JSON.stringify(value);
