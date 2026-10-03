@@ -4253,6 +4253,22 @@ ok:false를 확인한다.
 - *설치된 엔진.* `.factory/**`는 보호 경로라 이 PR의 커밋은 `factory/**`만 바꾼다; `.factory/` 미러는 러너의 `mirror: regenerate` 커밋이 만든다
   (S3, 이 브랜치의 7b7b2b3·635f593과 같은 경로).
 
+**Scope change — 기록 업로드 가드와 `factory/bin/retro.js` (rework r4 spec1).** plan의 `files_expected`(13개)에 없는 경로 하나와, done_when
+문장이 이름으로 부르지 않는 작업 하나를 이 PR이 싣는다. 리뷰 라운드의 지적(r2 sec1·sec2, self-critique f2·f3)으로 들어왔고, 여기서 범위로 명시한다.
+- *무엇.* `makeRecordsUploadGuard`·`makeMergeAbortVouch`(`factory/lib/breaker.js`), `syncRunRecords`(`factory/bin/run-stage.js` — 스테이지 끝·abort
+  동기화를 그것으로 갈아 끼움), `retroRecordsSync`(`factory/bin/retro.js` — **files_expected 밖**: import 두 줄과 sync 배선 한 줄, export 하나).
+- *왜 이 이슈 안인가.* 이 PR이 `docs/factory/runs/**`에 처음으로 **판정 입력**을 둔다: 상태 파일 `state/breaker.md`(리셋 `closed_by`/`closed_at`)와
+  `factory-self-merge:v1` 줄. 그 경로는 에이전트가 쓸 수 있는 워크트리이고 기본 dir 동기화(run-stage·retro 둘 다)가 러너의 이름으로 민다. 가드가
+  없으면 에이전트가 `closed_by`를 심어 차단기를 닫을 수 있다 — dw4 rubric("Only a person … can close the breaker")이 거짓이 되고, 위조된 판정 줄이
+  연속을 끊으면 dw1 rubric("builds its history only from the real marker producer")이 운영에서 거짓이 된다. 즉 가드는 새 기능이 아니라 이 PR이
+  만든 입력의 쓰기 경계이고, 떼어 내면 이 PR이 열고 다른 이슈가 닫는 구멍이 생긴다(SDD 정책 3의 "스펙의 주장이 거짓이 되는" 경우).
+  retro는 같은 워크트리에서 `claude -p`를 부르고 같은 기본 dir을 밀므로, run-stage만 막으면 같은 구멍이 retro 쪽에 남는다 — 그래서 retro.js다.
+- *증거.* `test_189_planted_breaker_state_never_closes_the_breaker`, `test_189_forged_self_merge_lines_never_weaken_the_breaker`,
+  `test_189_merge_abort_sync_keeps_only_self_merge_lines_github_vouches_for`, `test_189_retro_records_sync_never_uploads_planted_breaker_evidence`
+  (전부 `factory/test/breaker.test.js`), 그리고 엔진의 모든 기본 dir `syncRecords({` 호출 자리를 세는 소스 스캔.
+- *되돌리기.* retro.js의 변경은 `syncRecords` 직접 호출 한 줄로 되돌리면 원래대로다(가드 없는 동작). 소유자가 가드를 별도 이슈로 원하면
+  retro.js 한 줄과 run-stage의 두 동기화 자리를 되돌리고 위 넷 테스트를 그 이슈로 옮긴다 — 다만 그 사이 dw4가 지키는 경계는 열려 있다.
+
 **남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
 push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
 지우면 반대로 "리셋 이력 없음"이 되어 옛 revert가 다시 세어진다. 매 머지 확인마다 records 전부와 git log를 읽으므로 merge 스테이지 지연이 history 크기에 따라 는다.
