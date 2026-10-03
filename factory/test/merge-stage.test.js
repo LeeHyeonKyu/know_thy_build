@@ -3259,3 +3259,49 @@ test("test_189_human_and_plain_merge_records_never_count_toward_the_streak", asy
   expect(opened.open).toBe(true);
   expect(opened.reason).toMatch(/PR #11, PR #12/);
 }, 120000);
+
+// ── #189 skeptic f1 — ok:true인데 open이 불리언이 아닌 답은 닫힘이 아니다(두 경로, 두 확인 시점) ──────────────────────────
+test("test_189_breaker_answer_without_boolean_open_never_merges", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "0 revert(s)" };
+  const routes = {
+    non_judge: (over = {}) => selfD179(over),
+    judge: (over = {}) => selfD179({
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      ...over,
+    }),
+  };
+  const odd = [
+    ["open missing", { ok: true }],
+    ["open is a string", { ok: true, open: "yes" }],
+    ["open is null", { ok: true, open: null }],
+    ["open is 0", { ok: true, open: 0 }],
+  ];
+  for (const [route, mk] of Object.entries(routes)) {
+    // 대조군: 두 번 다 닫힘이면 머지된다 — 아래의 blocked는 픽스처가 원래 머지를 못 하는 탓이 아니다.
+    const ctl = mk({ breaker: vi.fn(async () => CLOSED) });
+    expect((await run179(ctl)).code, `${route} control`).toBe(0);
+    expect(ctl.mergePr, `${route} control`).toHaveBeenCalledTimes(1);
+
+    for (const [label, answer] of odd) {
+      const early = mk({ breaker: vi.fn(async () => answer) });
+      const re = await run179(early);
+      expect(re.code, `${route} ${label}`).toBe(2);
+      expect(early.transition.mock.calls.map((x) => x[0].to), `${route} ${label}`).toEqual(["factory:blocked"]);
+      expect(early.transition.mock.calls[0][0].reason, `${route} ${label}`).toMatch(/neither open nor closed/);
+      expect(early.vetoWindow.open, `${route} ${label}`).not.toHaveBeenCalled();
+      expect(early.mergePr, `${route} ${label}`).not.toHaveBeenCalled();
+
+      let n = 0;
+      const late = mk({ breaker: vi.fn(async () => (++n === 1 ? CLOSED : answer)) });
+      const rl = await run179(late);
+      expect(rl.code, `${route} late ${label}`).toBe(2);
+      expect(late.vetoWindow.open, `${route} late ${label}`).toHaveBeenCalledTimes(1);
+      expect(late.breaker, `${route} late ${label}`).toHaveBeenCalledTimes(2);
+      expect(late.transition.mock.calls.at(-1)[0].to, `${route} late ${label}`).toBe("factory:blocked");
+      expect(late.transition.mock.calls.at(-1)[0].reason, `${route} late ${label}`).toMatch(/neither open nor closed/);
+      expect(late.mergePr, `${route} late ${label}`).not.toHaveBeenCalled();
+    }
+  }
+}, 120000);

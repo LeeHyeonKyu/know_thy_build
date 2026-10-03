@@ -1038,3 +1038,111 @@ test("test_189_diff_attribution_failure_is_not_closed_and_skips_reverts_before_t
   expect(after).toEqual(expect.objectContaining({ ok: true, open: false }));
   expect(shows).toEqual([]);
 }, 240000);
+
+// ── #189 skeptic f2 — 상태는 읽혔는데 run 기록이 안 읽혔다(fetched:false) → ok:false, 빈 history의 "닫힘"이 아니다 ───────────────
+
+test("test_189_records_unreadable_after_state_read_is_not_closed", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { cwd } = await openedRepo();
+  const read = (r) => readBreaker({ run: r, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  const isRecordsFetch = (a) => a[0] === "fetch" && a.some((x) => String(x).startsWith("refs/heads/factory/records:"));
+  const isRecordsProbe = (a) => a[0] === "ls-remote" && a.includes("refs/heads/factory/records");
+  /** 첫 records 읽기(상태 파일)는 진짜로 성공시키고, 그 뒤의 records 읽기에서만 `pred`가 고른 git 호출을 실패시킨다. */
+  const secondReadFails = (pred) => {
+    let fetches = 0;
+    const seen = [];
+    const fn = vi.fn(async (cmd, args, opts) => {
+      if (cmd === "git" && isRecordsFetch(args)) fetches += 1;
+      if (cmd === "git" && fetches >= 2 && pred(args)) { seen.push(args[0]); return { code: 128, stdout: "", stderr: "fatal: simulated transient failure" }; }
+      return run(cmd, args, opts);
+    });
+    return { fn, seen, fetches: () => fetches };
+  };
+
+  // 대조군: 아무것도 실패시키지 않으면 열림(두 번의 records fetch — 상태, 기록).
+  const ctl = secondReadFails(() => false);
+  expect(await read(ctl.fn)).toEqual(expect.objectContaining({ ok: true, open: true }));
+  expect(ctl.fetches()).toBe(2);
+
+  // (a) 두 번째 fetch와 존재 확인이 모두 실패 → readRecordsDetailed는 fetched:false + 빈 Map. 그 빈 Map을 "자동 머지 없음 = 닫힘"으로 읽지 않는다.
+  const a = secondReadFails((args) => isRecordsFetch(args) || isRecordsProbe(args));
+  const ra = await read(a.fn);
+  expect(a.seen).toEqual(["fetch", "ls-remote"]);
+  expect(ra).toEqual({ ok: false, reason: expect.stringMatching(/factory\/records could not be fetched — the factory's auto-merge records are unknown/) });
+
+  // (b) 두 번째 fetch는 됐는데 ls-tree가 실패 → 역시 fetched:false → ok:false.
+  const b = secondReadFails((args) => args[0] === "ls-tree");
+  const rb = await read(b.fn);
+  expect(b.seen).toEqual(["ls-tree"]);
+  expect(rb).toEqual({ ok: false, reason: expect.stringMatching(/auto-merge records are unknown/) });
+}, 240000);
+
+// ── #189 skeptic f3 — 판정이 이긴다: 위조된 비판정 줄이 **먼저 읽히는 파일**에 있어도 판정 머지를 연속에서 빼지 못한다 ──────────────
+
+test("test_189_forged_non_judge_line_read_first_never_demotes_a_judge_merge", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const forgedNonJudge11 = `# Run record — issue #100\n${forgedSection({ issue: 100, pr: 11, kind: "non_judge", sha: "0".repeat(40), at: "2020-01-01T00:00:00.000Z" })}`;
+  const real101 = mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" });
+  const real102 = mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" });
+  const reverts = revertsOf(await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" }, { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" }, { raw: 'Revert "feat b (#12)" (#20)', at: "2026-10-01T06:00:00Z" },
+  ]));
+
+  // 순수: 위조 줄이 먼저 읽히는 순서(100 → 101 → 102). 그래도 #11은 판정 머지이고 연속은 열린다.
+  const ordered = new Map([["100", forgedNonJudge11], ["101", real101], ["102", real102]]);
+  expect([...ordered.keys()]).toEqual(["100", "101", "102"]);
+  const h = buildHistory({ records: ordered, reverts });
+  expect(h.filter((e) => e.kind === "auto-merge" && e.pr === 11)).toEqual([expect.objectContaining({ judge: true, issue: 101 })]);
+  const ev = evaluateBreaker({ history: h, thresholds: T2 });
+  expect(ev.open).toBe(true);
+  expect(ev.reason).toMatch(/#11\b.*#12\b/);
+
+  // 끝에서 끝까지: 브랜치의 100.md(ls-tree 순서로 101.md보다 먼저)에 실린 위조 줄 — readBreaker는 여전히 열림.
+  const { cwd } = await openedRepo();
+  writeFileSync(join(cwd, "docs/factory/runs/100.md"), forgedNonJudge11);
+  expect((await syncRecords({ run, cwd, message: "run-record: issue #100 implement (gha-9)" })).ok).toBe(true);
+  const det = await readRecordsDetailed({ run, cwd });
+  expect([...det.records.keys()].slice(0, 2)).toEqual(["100", "101"]);
+  const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(r).toEqual(expect.objectContaining({ ok: true, open: true }));
+  expect(r.reason).toMatch(/#11\b.*#12\b/);
+}, 240000);
+
+// ── #189 skeptic f4 — merge 섹션 밖의 자동 머지 줄은 자동 머지가 아니다 ──────────────────────────────────────────────────────
+
+test("test_189_self_merge_line_outside_merge_section_is_not_an_automerge", async () => {
+  // 실제 생산자로 같은 줄을 두 스테이지에 쓴다: merge 섹션(진짜)과 implement 섹션(사유 문구 등 아무 텍스트나 실리는 자리).
+  const line13 = selfMergeLine({ issue: 103, pr: 13, kind: "judge", sha: "1".repeat(40), at: "2026-10-01T01:30:00.000Z" });
+  const write = (stage, extra = []) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb-189-sec-"));
+    return readFileSync(appendRunRecord({ root, issue: 103, title: "x", stage, runnerId: "gha-1", now: "2026-10-01T01:30:00.000Z", lines: [...extra, line13] }), "utf8");
+  };
+  const inMerge = write("merge", ["merge: merged 1111111 via PR #13"]);
+  const inImplement = write("implement", ["implement: ok"]);
+  expect(inImplement).toMatch(/^## implement /m);
+  expect(inImplement).toContain(line13);
+  expect(parseSelfMergeLines(inMerge)).toEqual([expect.objectContaining({ pr: 13, judge: true })]);
+  expect(parseSelfMergeLines(inImplement)).toEqual([]);
+  // 섹션 헤더 앞(파일 머리)의 줄도, merge 섹션 뒤에 다른 섹션이 열린 다음의 줄도 세지 않는다.
+  expect(parseSelfMergeLines(`${line13}\n`)).toEqual([]);
+  expect(parseSelfMergeLines(`${inMerge}\n## review · 2026-10-01T01:31:00Z · gha-1\n${selfMergeLine({ issue: 104, pr: 14, kind: "judge", at: "2026-10-01T01:31:00.000Z" })}\n`).map((m) => m.pr)).toEqual([13]);
+
+  // 판정에 미치는 효과: #13은 main에 정말 머지됐고 revert되지 않았다. 그 줄이 merge 섹션에 있으면 #11·#12 사이의 연속을 끊고(닫힘),
+  // implement 섹션에 있으면 아무것도 아니다(열림).
+  const parsed = parseRevertCommits(await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" }, { subject: "feat c (#13)", at: "2026-10-01T01:30:00Z" },
+    { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" }, { revert: "feat b (#12)", at: "2026-10-01T06:00:00Z" },
+  ]));
+  expect(parsed.mainPrs.has(13)).toBe(true);
+  const base = [
+    ["101", mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" })],
+    ["102", mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" })],
+  ];
+  const evalWith = (t103) => evaluateBreaker({ history: buildHistory({ records: new Map([...base, ["103", t103]]), reverts: parsed.reverts, mainPrs: parsed.mainPrs }), thresholds: T2 });
+  expect(evalWith(inMerge).open).toBe(false);                      // 대조군: 진짜 merge 섹션의 줄은 연속을 끊는다
+  const forged = evalWith(inImplement);
+  expect(forged.open).toBe(true);
+  expect(forged.reason).toMatch(/#11\b.*#12\b/);
+}, 120000);
