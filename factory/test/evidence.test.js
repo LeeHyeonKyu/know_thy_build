@@ -863,3 +863,25 @@ test("test_195_evidence_reads_headers_and_heartbeats_through_their_writer_module
   expect(cost(base)).toMatch(/runs \(heartbeats\): 5/);
   expect(cost(extra)).toMatch(/runs \(heartbeats\): 6/);
 });
+
+// ── #195 skeptic round 3 — "gh.js exports no editComment" holds for the module, not just one makeGh() instance, and the engine
+// has exactly one PATCH call site, the one on issues/comments inside gh.js (patchComment). ─────────────────────────────────
+test("test_195_one_patch_path_across_the_engine", async () => {
+  const mod = await import("../lib/gh.js");
+  expect(Object.keys(mod).filter((k) => /comment/i.test(k))).toEqual([]);
+  const inst = makeGh({ run: makeFakeRun([]), repo: "acme/app" });
+  expect(Object.keys(inst).filter((k) => /comment/i.test(k) && /edit|patch|update/i.test(k))).toEqual(["patchComment"]);
+  const { readdirSync, statSync } = await import("node:fs");
+  const walk = (dir) => readdirSync(dir).flatMap((n) => {
+    const p = join(dir, n);
+    return statSync(p).isDirectory() ? walk(p) : p.endsWith(".js") ? [p] : [];
+  });
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const files = [...walk(join(here, "../lib")), ...walk(join(here, "../bin"))];
+  const sites = [];
+  for (const f of files) {
+    const code = readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+    for (const m of code.matchAll(/(["'`])PATCH\1|-X\s*PATCH|--method[ =]["'`]?PATCH/gi)) sites.push(`${f.slice(f.lastIndexOf("factory/"))}:${m[0]}`);
+  }
+  expect(sites).toEqual(['factory/lib/gh.js:"PATCH"']);
+});

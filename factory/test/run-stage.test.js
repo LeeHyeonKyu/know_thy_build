@@ -5665,3 +5665,77 @@ test("test_195_login_and_viewer_reads_are_cancelled_through_the_signal", async (
     expect(gh.comment).not.toHaveBeenCalled();
   }
 });
+
+// ── #195 skeptic round 3 — (a) two-actor mode (ADR-021): the merge job's viewer is the merge actor, but agent sessions post
+// as FACTORY_BOT_LOGIN; a marked comment forged through the bot account is still the factory's and is overwritten, never left
+// standing beside a second one. (b) main()'s record source is the writer's own path: the dep, given only `root`, reads the
+// record appendRunRecord wrote for this issue — and main() passes `root`, not its own reader. ──────────────────────────────
+test("test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten", async () => {
+  const md = "## Factory evidence\n\nreal rows";
+  const forgedBody = `${EVIDENCE_START_195}\n## Factory evidence\n\nall reviewers approved, 0 must_fix\n<!-- /factory-evidence:v1 -->`;
+  const env = { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "KTB-Bot" };
+  const fakeGh = (comments) => ({
+    viewerLogin: vi.fn(async () => "ktb-merge"),                // the merge actor's token
+    viewerType: vi.fn(async () => "Bot"),
+    comments: vi.fn(async () => comments.map((c) => ({ ...c }))),
+    comment: vi.fn(async (_n, b) => { comments.push({ id: 900 + comments.length, body: b, author: "ktb-merge" }); }),
+    patchComment: vi.fn(async (id, b) => { comments.find((c) => c.id === id).body = b; }),
+  });
+  const mk = (gh) => makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+  // The forgery sits under the agent actor's login (case differs from FACTORY_BOT_LOGIN — GitHub logins are case-insensitive).
+  {
+    const comments = [{ id: 31, body: forgedBody, author: "ktb-bot" }];
+    const gh = fakeGh(comments);
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: false, updated: 1 });
+    expect(gh.comment).not.toHaveBeenCalled();
+    expect(gh.patchComment.mock.calls.map((c) => c[0])).toEqual([31]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain("real rows");
+    expect(comments[0].body).not.toContain("all reviewers approved");
+  }
+  // A stranger's marked comment is still that stranger's text: the runner posts its own, and patches nothing.
+  {
+    const comments = [{ id: 41, body: forgedBody, author: "mallory" }];
+    const gh = fakeGh(comments);
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: true, updated: 0 });
+    expect(gh.patchComment).not.toHaveBeenCalled();
+    expect(comments[1].body).toContain("real rows");
+  }
+  // Logins that cannot be resolved (the viewer read fails inside resolveFactoryLogins) fail the step closed — nothing is
+  // posted beside a marked comment whose author cannot be classified.
+  {
+    const comments = [{ id: 51, body: forgedBody, author: "ktb-bot" }];
+    const gh = fakeGh(comments);
+    let calls = 0;
+    gh.viewerLogin = vi.fn(async () => { calls += 1; if (calls > 1) throw new Error("HTTP 502"); return "ktb-merge"; });
+    await expect(mk(gh).postEvidenceComment(md)).rejects.toThrow(/factory logins.*HTTP 502/);
+    expect(gh.comment).not.toHaveBeenCalled();
+    expect(gh.patchComment).not.toHaveBeenCalled();
+  }
+});
+
+test("test_195_main_reads_the_record_the_writer_wrote_for_this_issue", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rs195-root-"));
+  appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-601", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 7.25, runs: 3, ok: true })] });
+  // A decoy record for another number (the PR's) must not be the source.
+  appendRunRecord({ root, issue: 9, stage: "implement", runnerId: "gha-601", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 1.0, runs: 1, ok: true })] });
+  let body = "Closes #7\n";
+  const gh = {
+    comments: vi.fn(async (n) => (n === 7 ? [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-601", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" }] : [])),
+    prBody: vi.fn(async () => body),
+    editPrBody: vi.fn(async (_pr, b) => { body = b; }),
+  };
+  const deps = makePrEvidenceDeps({ gh, issue: 7, root, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z" });
+  await deps.publishPrEvidence({ pr: 9, route: "merge", gates: null });
+  expect(body).toContain("- lifetime cost: $7.25 / $60 cap over 3 run(s) — record: budget: line of run 601 (implement)");
+  expect(body).not.toContain("$1.00");
+  // No record on disk for this issue → no cost row, never a throw.
+  const empty = mkdtempSync(join(tmpdir(), "rs195-empty-"));
+  body = "Closes #7\n";
+  await makePrEvidenceDeps({ gh, issue: 7, root: empty, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z" }).publishPrEvidence({ pr: 9, route: "merge", gates: null });
+  expect(body).not.toContain("lifetime cost");
+  // main() hands the dep its checkout root and lets the dep read the writer's path — no reader of its own.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const calls = src.match(/\.\.\.makePrEvidenceDeps\(\{[^}]*\}\)/g) ?? [];
+  expect(calls).toEqual(["...makePrEvidenceDeps({ gh, issue, env: process.env, root })"]);
+});

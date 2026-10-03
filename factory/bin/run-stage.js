@@ -2154,7 +2154,13 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
  * merge (merge-stage calls `postEvidenceComment` then) and at most once — the runner's existing marked comment is updated in
  * place through gh.patchComment (see `postEvidenceComment`). Every gh call there is bounded and takes merge-stage's signal.
  */
-export function makePrEvidenceDeps({ gh, issue, readRecord, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
+export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
+  // Without a reader of its own, the dep reads the record `appendRunRecord` writes for this issue under `root` (main() passes
+  // only its checkout root, so the path is the writer's — `docs/factory/runs/<issue>.md` — and cannot drift to another one).
+  if (typeof readRecord !== "function") {
+    const p = root ? join(root, "docs/factory/runs", `${issue}.md`) : null;
+    readRecord = () => (p && existsSync(p) ? readFileSync(p, "utf8") : null);
+  }
   return {
     publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null, onStep = null } = {}) => {
       /**
@@ -2197,18 +2203,30 @@ export function makePrEvidenceDeps({ gh, issue, readRecord, env = null, now = ()
     },
     /**
      * The marked issue comment, at most once. Who wrote an existing marked comment matters: one by another account is that
-     * account's text (shown under its name) and does not stop the runner's own; one by the runner's own account — which
-     * agent sessions share — is overwritten with the runner's evidence, so a forged one never stands and no second comment
-     * is posted. Without a viewer login (an older gh adapter) only a byte-identical comment counts as already posted.
+     * account's text (shown under its name) and does not stop the runner's own; one by ANY factory login — the job's viewer
+     * plus every login `resolveFactoryLogins` returns for the injected `env` (the same set buildEvidence attributes by; in
+     * two-actor mode, ADR-021, the viewer is the merge actor while agent sessions post as FACTORY_BOT_LOGIN) — is the
+     * factory's and is overwritten with the runner's evidence, so a forged one never stands and no second comment is posted.
+     * Logins that cannot be resolved fail the step closed (nothing is posted beside a comment nobody can classify). A
+     * byte-identical marked comment always counts as already posted (it is unchanged, so nothing forged stands).
      * Every gh call is bounded by `timeoutMs` and by merge-stage's `signal`, no retry.
      */
     postEvidenceComment: async (markdown, { signal = null } = {}) => {
       const step = (what, start) => bounded(start, { ms: timeoutMs, what, signal });
       const target = evidenceComment(markdown);
       const self = typeof gh.viewerLogin === "function" ? await step("gh api user", (s) => gh.viewerLogin({ signal: s })) : null;
+      const mine = new Set();
+      if (self) mine.add(String(self).trim().toLowerCase());
+      if (env) {
+        const r = await step("factory logins", (s) => resolveFactoryLogins({ gh, env, signal: s }));
+        if (r?.ok !== true || !Array.isArray(r.logins)) throw new Error(`factory logins: ${r?.reason || "not resolved"}`);
+        for (const l of r.logins) { const k = String(l ?? "").trim().toLowerCase(); if (k) mine.add(k); }
+      }
       const comments = await step("gh issue comments", (s) => gh.comments(issue, { signal: s }));
       const marked = (Array.isArray(comments) ? comments : []).filter((c) => hasEvidenceComment([c]));
-      const own = self ? marked.filter((c) => c?.author === self) : marked.filter((c) => c?.body === target);
+      // A byte-identical comment already says exactly what the runner would post, whoever it is attributed to (an adapter
+      // without authors included) — it counts as posted and is left as is.
+      const own = marked.filter((c) => c?.body === target || mine.has(String(c?.author ?? "").trim().toLowerCase()));
       if (!own.length) {
         await step("gh issue comment", (s) => gh.comment(issue, target, { signal: s }));
         return { ok: true, posted: true, updated: 0 };
@@ -3574,7 +3592,7 @@ async function main() {
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
     /** #195 — merge stage: the runner's PR evidence (base-engine evidence.js, the hydrated local record, gh.js body read/edit). */
-    ...makePrEvidenceDeps({ gh, issue, env: process.env, readRecord: () => readFile(join(root, "docs/factory/runs", `${issue}.md`)) }),
+    ...makePrEvidenceDeps({ gh, issue, env: process.env, root }),
     /**
      * ADR-021 — 두 배우 모드의 표식. 워크플로(`factory-merge.yml`)가 `FACTORY_TWO_ACTOR`에
      * `${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — **토큰 값을 한 번 더 복사하지 않고**
