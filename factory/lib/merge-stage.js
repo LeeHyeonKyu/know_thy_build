@@ -8,6 +8,7 @@ import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
 import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
 import { classifyProtected } from "./non-judge-paths.js";
+import { matchesAny } from "./glob.js";
 import { VETO_LABEL } from "./label-catalog.js";
 
 /**
@@ -19,6 +20,8 @@ import { VETO_LABEL } from "./label-catalog.js";
  */
 export const VETO_WINDOW_CONTEXT = "factory/veto-window";
 export const VETO_POLL_MS = 5 * 60 * 1000;
+/** #179 — 창이 닫힌 뒤 리뷰 재검증·승인·머지·전이에 남겨 둘 잡 시간. 이만큼이 창 위에 더 남아야 창을 연다. */
+export const VETO_POST_WINDOW_MARGIN_MS = 10 * 60 * 1000;
 export const vetoWindowDescription = (closesAtIso) => `closes=${closesAtIso}`;
 
 /**
@@ -368,6 +371,9 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *      commitStatuses(sha) → [{ context, state, creatorLogin }] — **최신순**
  *      factoryLogins()  → { ok, logins: string[], reason? }  팩토리 자신의 계정 이름(값이 아니라 이름)
  *    humanGate?       → CHARTER `merge.human_gate`(boolean|undefined) — 머지 전이 텍스트에만 쓴다.
+ *    #179 자기 변경 경로(ADR-033): selfChange?(CHARTER `self_change`), engine?(base에서 계산), neverAutomate?(CHARTER
+ *    NEVER_AUTOMATE 글롭 — 경로를 탈 때 필수, 없으면 blocked), vetoWindow·vetoLabel·now·sleep?·jobStartedAt·jobTimeoutMinutes.
+ *    그 경로의 머지는 `mergePr(pr, { matchHeadCommit })`로 창 뒤에 재검증한 head를 못 박는다.
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
@@ -502,8 +508,25 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   let selfPath = null;
   if (prot.files.length && d.engine === true && d.selfChange) {
     const cls = classifyProtected(prot.files, { engine: true });
-    if (!cls.judge.length && d.selfChange.auto_merge_non_judge === true) selfPath = "non_judge";
-    else if (cls.judge.length && d.selfChange.auto_merge_judge === true) selfPath = "judge";
+    const nonJudgeOn = d.selfChange.auto_merge_non_judge === true, judgeOn = d.selfChange.auto_merge_judge === true;
+    if (!cls.judge.length && nonJudgeOn) selfPath = "non_judge";
+    else if (cls.judge.length && judgeOn) {
+      // 섞인 PR의 비판정 파일은 판정 경로의 스위치를 빌리지 않는다 — 파일마다 자기 스위치가 켜져 있어야 한다.
+      if (cls.non_judge.length && !nonJudgeOn) {
+        record([`merge: self-change path not taken — the PR also changes non-judge protected paths (${cls.non_judge.join(", ")}) and CHARTER self_change.auto_merge_non_judge is false`]);
+      } else selfPath = "judge";
+    }
+  }
+  // CHARTER NEVER_AUTOMATE는 자기 변경 경로 안에서도 이긴다: 비판정 목록(예: `templates/factory/docs/**`)과 겹치는 글롭
+  // (`templates/factory/**`)에 걸린 PR은 오늘처럼 사람이 머지한다. 목록을 모르면 "걸린 것 없음"이 아니라 판정 불가다.
+  if (selfPath) {
+    if (!Array.isArray(d.neverAutomate)) return await undecidable("NEVER_AUTOMATE check", `the CHARTER NEVER_AUTOMATE globs are not wired (${JSON.stringify(d.neverAutomate ?? null)}) — the self-change path cannot prove this PR is automatable`);
+    const globs = d.neverAutomate.filter((g) => typeof g === "string" && g);
+    const hits = prot.files.flatMap((f) => { const g = globs.find((x) => matchesAny([x], f)); return g ? [`${f} (${g})`] : []; });
+    if (hits.length) {
+      record([`merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${hits.join(", ")}; a NEVER_AUTOMATE path is always human-merged`]);
+      selfPath = null;
+    }
   }
   if (prot.files.length && !selfPath) {
     return await handToHuman({
@@ -1061,8 +1084,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!Number.isFinite(openedAt)) return await undecidable(what, "clock returned no time");
     const windowMs = vetoMinutes * 60 * 1000;
     const remainingMs = started + timeout * 60 * 1000 - openedAt;
-    if (remainingMs < windowMs) {
-      const reason = `veto window does not fit in this merge job — timeout-minutes: ${timeout} leaves ${Math.max(0, Math.floor(remainingMs / 60000))} min, CHARTER self_change.veto_minutes: ${vetoMinutes}; raise timeout-minutes in .github/workflows/factory-merge.yml above ${vetoMinutes} (plus the gate time) or lower veto_minutes — no window was opened`;
+    // 창 뒤의 일(리뷰 재검증·승인·머지·전이)도 같은 잡 안에서 끝나야 한다 — 잡이 창 끝에서 죽으면 finally가 돌지 않는다(KTB-24).
+    if (remainingMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
+      const marginMin = VETO_POST_WINDOW_MARGIN_MS / 60000;
+      const reason = `veto window does not fit in this merge job — timeout-minutes: ${timeout} leaves ${Math.max(0, Math.floor(remainingMs / 60000))} min, CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify and merge; raise timeout-minutes in .github/workflows/factory-merge.yml above ${vetoMinutes + marginMin} (plus the gate time) or lower veto_minutes — no window was opened`;
       const t = await toBlocked(reason);
       record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
       return 2;
@@ -1129,7 +1154,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       try { now = Number(d.now()); } catch (e) { return await undecidable(what, `clock unreadable: ${e?.message || e}`); }
       if (!Number.isFinite(now)) return await undecidable(what, "clock returned no time");
       if (now >= deadline) break;
-      await sleep(Math.min(VETO_POLL_MS, deadline - now));
+      try { await sleep(Math.min(VETO_POLL_MS, deadline - now)); }
+      catch (e) { return await undecidable(what, `the wait failed: ${e?.message || e}`); }
     }
     record([`merge: veto window closed — no ${VETO_LABEL} on #${issue} by ${closesAt}`]);
     return null;
@@ -1174,7 +1200,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
 
   try {
-    await d.mergePr(pr);
+    // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
+    // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
+    if (selfPath) await d.mergePr(pr, { matchHeadCommit: sha });
+    else await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;
     const t = await toBlocked(reason);
