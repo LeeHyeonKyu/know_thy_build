@@ -98,3 +98,11 @@ merge 스테이지 새 경로의 판정 순서는 §1 표의 위에서 아래이
 ## 6. 결정 (2026-10-02, /333 1라운드)
 1. 재진입: merge 잡 안에서 대기(sweeper 불의존). 2. 차단기: 전이 비율, 표본 하한 3, 2차 방어선. 3. 시드: 저장소 안 + NEVER_AUTOMATE + 프롬프트 미게재(dissent: 별도 비공개 저장소, S7과 재검토).
 4. 분할 유지 — 합성 공격면은 양의 목록 + import-closure 테스트로 기계적으로 닫는다. 섀도 머지 대안은 기각(스테이지는 base 엔진으로 돈다, ADR-023).
+
+## 7. v3 — 판정 경로도 자동 머지 (2026-10-03, 소유자 결정 ADR-033, 스펙 §8.5)
+§1 표의 첫 가지("판정자 경로 포함 → needs-human")가 바뀐다: 판정 경로는 **만장일치 + GREEN + 거부권 창 + 차단기 닫힘**이면 공장이 머지한다.
+- S4a(#149)에 더하는 것: CHARTER `self_change.auto_merge_judge`(기본 false) 파싱; `classifyProtected`가 `judge`를 돌려주면 리뷰 만장일치
+  (`review handoff`의 verdicts 전원 approve, 로스터 수 = verdicts 수)를 요구하고, 스위치가 꺼져 있으면 오늘과 같이 `handToHuman`.
+  나머지(거부권 창·status·veto 라벨)는 두 경로가 공유한다.
+- S4c(차단기)의 입력에 "판정 경로 자동 머지 뒤 revert"를 더한다 — main에서 `Revert "…(#N)"` 커밋이 공장 머지 PR을 가리키면 1회로 센다. 연속 2회면 열림.
+- 켜는 순서: S4a 머지 → `auto_merge_non_judge: true`(소유자) → S4c 머지 → `auto_merge_judge: true`(소유자). S4b(시드)는 차단기 입력으로 병행.
