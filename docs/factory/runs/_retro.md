@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.5 / 1.17 / 2.17 |
 | escaped defects | 0 | 5 |
 | revert rate | 없음 | 0.00 (0/6) |
-| needs-human | 10 | 25 |
+| needs-human | 14 | 25 |
 | rejects by role | 없음 | spec-conformance 4, qa 4, correctness 5, architecture 1 |
 | reviewer overlap | 없음 | 0.43 (6/14, runs 13) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 1 |
-| qa na ratio | 0.04 (1/23 claims, na-heavy 0/3 approvals) | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
-| cost (usd) | 135.69 | 372.00 |
-| tokens | input 2623912 / output 240042 | input 11127235 / output 778209 |
+| qa na ratio | 0.16 (5/32 claims, na-heavy 0/4 approvals) | 0.24 (5/21 claims, na-heavy 1/3 approvals) |
+| cost (usd) | 150.70 | 372.00 |
+| tokens | input 3112676 / output 287000 | input 11127235 / output 778209 |
 | retro cost (usd) | 0.00 | 6.30 |
 | retro tokens | input 0 / output 0 | input 14 / output 13418 |
 | full retros | — | 5 |
@@ -644,6 +644,14 @@
           174
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The new escalation for 'dispatched run never started' calls transition() without `engineVersion`. The default escalation path just below (lines 1659-1661, added by #156 and kept by merge a6f9c79) attaches it. For an issue with cause=undecidable, engineCausedNeedsHuman() still treats this needs-human as engine-caused, because the reason starts with 'blocked (' and the origin cause is undecidable. But it reads thenVersion=null. sweepRetryOnRelease then skips it every time with 'no recorded engine version for the needs-human transition'. So the ADR-032 self-retry on a new engine never happens for any blocked issue that reaches needs-human through the ceiling.",
+        "runs": [
+          168
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -736,6 +744,33 @@
           174
         ],
         "source": "dissent"
+      },
+      {
+        "role": "synthesizer",
+        "kind": "good",
+        "text": "The re-read narrows the race but does not close it. A label change between `gh.issue(n)` and `transition()` (milliseconds instead of the index's 7+ seconds) can still escalate a rework issue.",
+        "runs": [
+          176
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The ceiling's reason text says 'dispatched run never started'. A run that did start (in_progress) and is still going past 2 x staleMinutes would be escalated with a false reason.",
+        "runs": [
+          168
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "The retry-and-dispatch branch (sweeper.js:1548-1585) does not get the wait. For api-error (up to API_ERROR_MAX_RETRIES), a sweep that runs while attempt N is queued dispatches attempt N+1. That spends retry budget on runner occupancy and can displace the pending run in the per-issue concurrency group. On that path the #111 race moves but does not go away.",
+        "runs": [
+          168
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -792,8 +827,8 @@
       },
       {
         "issue": 149,
-        "reason": "lifetime cost $63.40 over 101 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
-        "at": "2026-10-03T04:17:29Z"
+        "reason": "lifetime cost $63.40 over 104 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-03T07:19:11Z"
       },
       {
         "issue": 147,
@@ -802,8 +837,8 @@
       },
       {
         "issue": 157,
-        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/gates.js, .factory/lib/merge-stage.js, factory/bin/run-stage.js, factory/lib/gates.js, factory/lib/merge-stage.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #161)",
-        "at": "2026-10-02T16:04:05Z"
+        "reason": "PR head moved since implement handoff (8d932e3 → cf98a12)",
+        "at": "2026-10-03T06:52:33Z"
       },
       {
         "issue": 156,
@@ -817,8 +852,13 @@
       },
       {
         "issue": 168,
-        "reason": "protected paths changed — human merge required: .factory/bin/sweep.js, .factory/lib/sweeper.js, factory/bin/sweep.js, factory/lib/sweeper.js, factory/test/sweep-bin.test.js, factory/test/sweeper.test.js (see PR #169)",
-        "at": "2026-10-02T10:36:25Z"
+        "reason": "blocked (environment/credentials) — needs human",
+        "at": "2026-10-03T06:52:35Z"
+      },
+      {
+        "issue": 174,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/context.js, .factory/lib/retro/issue-comments.js, .factory/lib/self-gate.js, factory/bin/run-stage.js, factory/lib/context.js, factory/lib/retro/issue-comments.js, factory/lib/self-gate.js, factory/test/context.test.js, factory/test/issue-comments.test.js, factory/test/run-stage.test.js, factory/test/self-gate.test.js (see PR #175)",
+        "at": "2026-10-03T06:52:22Z"
       }
     ]
   },
@@ -839,17 +879,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 10,
-    "qa_approvals": 3,
-    "qa_claims_total": 22,
-    "qa_na_total": 1,
-    "qa_na_ratio": 0.04,
+    "needs_human": 14,
+    "qa_approvals": 4,
+    "qa_claims_total": 27,
+    "qa_na_total": 5,
+    "qa_na_ratio": 0.16,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 135.690482,
+      "cost_usd": 150.695627,
       "tokens": {
-        "input": 2623912,
-        "output": 240042
+        "input": 3112676,
+        "output": 287000
       }
     }
   },
