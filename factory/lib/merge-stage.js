@@ -640,6 +640,11 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       catch (e) { diff = { ok: false, reason: `${e?.message || e}` }; }
     }
     eligible = rerunEligibility(gates, diff, await suitesOf(gates));
+    // #184 (cf1, fail closed): without resetGates the re-run could parse the FIRST run's report and brand a test that never
+    // ran again a flaky candidate. An unwired resetGates is "the re-run cannot be trusted" — refused like an unwired diffFiles.
+    if (eligible.ok && typeof d.resetGates !== "function") {
+      eligible = { ok: false, reason: "resetGates dep not wired — a re-run could read the first run's test report" };
+    }
   }
   if (eligible.ok) {
     const ids = eligible.ids;
@@ -656,7 +661,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       // already refuses to turn into ids — so it can never equal the first set. That holds only for a report resetGates may
       // delete: one outside the repo root is left alone, so run-stage's `suiteFailures` refuses to vouch for it and such a
       // RED never reaches this re-run (#157 cf2).
-      await d.resetGates?.();
+      await d.resetGates();
       again = await d.gates();
     } catch (e) {
       if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;

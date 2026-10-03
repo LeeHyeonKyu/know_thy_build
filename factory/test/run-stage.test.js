@@ -3977,16 +3977,17 @@ test("test_157_run_stage_wires_diff_files_and_gate_rerun_into_merge", async () =
     const readFile = (p) => { readFiles.push(p); return report(root, unitExits[Math.min(unitRuns - 1, unitExits.length - 1)] ? [OC] : [], unitRuns === 1 ? loadErrors : []); };
     const mergeBase = async () => { if (++baseCalls >= baseFailsFrom) throw new MergeBaseError("origin/main: exit 128"); return BASE; };
     // The one assembly main() spreads into its deps object (pinned below) — not two hand-picked factories.
-    const { gates, diffFiles, suiteFailures } = makeStageGateDeps({
+    const { gates, diffFiles, suiteFailures, resetGates } = makeStageGateDeps({
       stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
       getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase, readFile,
       gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
     });
     expect(typeof diffFiles).toBe("function");                          // a missing diff source fails here, not silently
     expect(typeof suiteFailures).toBe("function");
+    expect(typeof resetGates).toBe("function");                         // #184: the re-run refuses without it
     const lines = [], statuses = [];
     const d = mergeHappyDeps({
-      gates: vi.fn(gates), diffFiles: vi.fn(diffFiles), suiteFailures: vi.fn(suiteFailures),
+      gates: vi.fn(gates), diffFiles: vi.fn(diffFiles), suiteFailures: vi.fn(suiteFailures), resetGates: vi.fn(resetGates),
       mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
       mergePr: vi.fn(async () => {}),
       transition: vi.fn(async ({ to }) => ({ ok: true, to })),
@@ -4191,6 +4192,75 @@ test("test_157_rerun_cannot_read_the_first_report_through_production_reset", asy
   const depsBlock = mainDeps.slice(mainDeps.indexOf("const deps = {"), mainDeps.indexOf("\n  };\n", mainDeps.indexOf("const deps = {")));
   expect(depsBlock).not.toMatch(/\n {4}resetGates\s*:/);
   expect(depsBlock).toMatch(/\n {4}\.\.\.makeStageGateDeps\(\{/);
+});
+
+// #184 dw5 through runStage: a throw on the merge re-run path (the re-run's gate call, or resetGates right before it) is not
+// swallowed. runMergeStage rejects, and runStage turns that into exit 1 with `error: merge aborted — <cause>` on the run record
+// — a visible failure, never a merge. The first run is the production assembly's real RED (outside the diff), so the throw
+// happens on the re-run path and nowhere earlier.
+test("test_184_merge_rerun_throw_is_exit_1_with_the_cause_on_the_record", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);
+  const harness = {
+    harness: { maturity: "M0" }, project: { default_branch: "main" },
+    gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+    commands: { lint: "node factory/bin/lint.js", unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+    test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] },
+  };
+  const scenario = async ({ rerunGateThrows = null, resetThrowsOnCall = null }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb184-throw-"));
+    const unitPath = join(root, ".factory/out/unit.json");
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "M\tclient/src/pages/Calendar.tsx\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => {
+        mkdirSync(dirname(unitPath), { recursive: true });
+        writeFileSync(unitPath, JSON.stringify({ numTotalTests: 132, numPassedTests: 131, numFailedTests: 1, testResults: [{ name: join(root, "server/tests/follows.test.ts"), status: "failed", assertionResults: [{ status: "failed", fullName: "test_49_event_visibility" }] }] }));
+        return { code: 1, stdout: "", stderr: "" };
+      } },
+    ]);
+    const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);
+    const assembled = makeStageGateDeps({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => BASE, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    let gateCalls = 0, resetCalls = 0;
+    const lines = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(async () => { gateCalls++; if (gateCalls === 2 && rerunGateThrows) throw new Error(rerunGateThrows); return assembled.gates(); }),
+      diffFiles: vi.fn(assembled.diffFiles), suiteFailures: vi.fn(assembled.suiteFailures),
+      resetGates: vi.fn(async () => { resetCalls++; if (resetCalls === resetThrowsOnCall) throw new Error("EACCES: unlink .factory/out/unit.json"); return assembled.resetGates(); }),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async () => {},
+    });
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-184" });
+      return { code, d, lines, gateCalls };
+    } finally { err.mockRestore(); }
+  };
+
+  // The re-run's own gate call throws.
+  const viaGate = await scenario({ rerunGateThrows: "vitest worker crashed: SIGKILL" });
+  expect(viaGate.code).toBe(1);
+  expect(viaGate.gateCalls).toBe(2);
+  expect(viaGate.lines.some((l) => l.startsWith("merge: gates RED outside the PR diff — rerun 1/1 ("))).toBe(true);   // it was on the re-run path
+  expect(viaGate.lines).toContain("error: merge aborted — vitest worker crashed: SIGKILL");
+  expect(viaGate.d.mergePr).not.toHaveBeenCalled();
+  expect(viaGate.d.transition.mock.calls.map(([a]) => a.to)).not.toContain("factory:merged");
+
+  // resetGates throws right before the re-run (its 2nd call — runStage's own stage-start reset is the 1st).
+  const viaReset = await scenario({ resetThrowsOnCall: 2 });
+  expect(viaReset.code).toBe(1);
+  expect(viaReset.gateCalls).toBe(1);
+  expect(viaReset.lines.some((l) => l.startsWith("merge: gates RED outside the PR diff — rerun 1/1 ("))).toBe(true);
+  expect(viaReset.lines).toContain("error: merge aborted — EACCES: unlink .factory/out/unit.json");
+  expect(viaReset.d.mergePr).not.toHaveBeenCalled();
+  expect(viaReset.d.transition.mock.calls.map(([a]) => a.to)).not.toContain("factory:merged");
 });
 
 // ── #174 (ADR-033 둘째 결정) — K 소진 → 새 작성자 + diff 전용 브리프로 **한 번** 스스로 재시작 ─────────

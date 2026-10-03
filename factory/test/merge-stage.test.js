@@ -1574,7 +1574,9 @@ async function run157({ seq, diff, retryFromBlocked = false, startFrom = "factor
   const diffDep = diff === undefined ? {} : { diffFiles: vi.fn(typeof diff === "function" ? diff : async () => diff) };
   // The suite-failure reader is the real one (`idlessFailedSuites`) over the report the gate run "left on disk".
   const suiteFailures = vi.fn(async (g) => idlessFailedSuites({ gates: g, root: GATE_ROOT, readReport: (name) => reportOnDisk157(g, name) }));
-  const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, suiteFailures, ...over });
+  // run-stage always wires resetGates (makeStageGateDeps); a case that needs it absent passes `over: { resetGates: undefined }`.
+  const resetGates = vi.fn(async () => {});
+  const d = baseD({ gates, transition: graphTransition(startFrom), ...diffDep, suiteFailures, resetGates, ...over });
   const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus, retryFromBlocked, stamp: STAMP_157 });
   return { code, d, lines, postStatus, record };
 }
@@ -1671,6 +1673,11 @@ test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   expect(r.d.mergeGates).toHaveBeenCalledTimes(1);
   expect(r.d.mergeGates.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[1]);
   expect(r.d.mergePr).toHaveBeenCalledWith(9);
+  // #184 dw1: the first run's report is cleared exactly once, strictly between the two gate runs (cf1).
+  expect(r.d.resetGates).toHaveBeenCalledTimes(1);
+  expect(r.d.resetGates.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[0]);
+  expect(r.d.resetGates.mock.invocationCallOrder[0]).toBeLessThan(r.d.gates.mock.invocationCallOrder[1]);
+  expect(r.d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[1]);
   // The commit status follows the final verdict, so the required `factory/gates` check is not left RED.
   const statuses = gateStatusesOf(r.postStatus);
   expect(statuses.map((s) => s.state)).toEqual(["failure", "success"]);
@@ -1707,6 +1714,10 @@ test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   expect(prod.d.gates).toHaveBeenCalledTimes(2);
   expect(prod.d.mergeGates).toHaveBeenCalledTimes(2);
   const rerunAt = prod.d.gates.mock.invocationCallOrder[1];
+  expect(prod.d.resetGates).toHaveBeenCalledTimes(1);
+  expect(prod.d.resetGates.mock.invocationCallOrder[0]).toBeGreaterThan(prod.d.gates.mock.invocationCallOrder[0]);
+  expect(prod.d.resetGates.mock.invocationCallOrder[0]).toBeLessThan(rerunAt);
+  expect(gateStatusesOf(prod.postStatus).at(-1)).toMatchObject({ state: "success", sha: HEAD });
   for (const order of prod.d.mergeGates.mock.invocationCallOrder) expect(order).toBeGreaterThan(rerunAt);
   expect(prod.d.prReady).toHaveBeenCalledTimes(1);
   expect(prod.d.prReady.mock.invocationCallOrder[0]).toBeGreaterThan(rerunAt);
@@ -1738,6 +1749,36 @@ test("test_157_merge_gate_red_outside_the_diff_reruns_once", async () => {
   expect(transitionsOf(later.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "required checks not GREEN" })]);
 });
 
+/**
+ * #184 dw2 — factory.gates.v1 from the MERGE stage's real producer (`runStageGates({ stage: "merge" })`, the function
+ * run-stage's merge `d.gates` calls), with every flaky-harvest dep it accepts (`gh`, `saveQuarantine`, `transitionIssue`)
+ * handed in as a spy. A command the gate step does not own (isolation/base runs, a classify worktree) is answered ok and
+ * logged, so a merge-stage classifier would produce a verdict here instead of crashing on an unknown command.
+ */
+async function mergeStageGates184({ failing, sha = HEAD }) {
+  const { runStageGates } = await import("../lib/gates.js");
+  const harness = {
+    ...HARNESS_157(),
+    gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: { new_test_repeats: 1, flaky_isolation_runs: 1, flaky_base_runs: 2, flaky_max: 2, quarantine_max_effective: 3 } },
+    commands: { ...HARNESS_157().commands, test_files: "npx vitest run {files}", test_one: "npx vitest run {file} -t {name}" },
+    test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts", "**/*.tsx"] },
+  };
+  const ok0 = { code: 0, stdout: "", stderr: "" };
+  const fake = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: CLIENT_ONLY.map((f) => `M\t${f}`).join("\n") + "\n", stderr: "" } },
+    { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${sha}\n`, stderr: "" } },
+    { match: (_c, a) => a[1] === harness.commands.lint, result: ok0 },
+    { match: (_c, a) => a[1] === harness.commands.unit, result: { code: failing.length ? 1 : 0, stdout: "", stderr: "" } },
+    { match: () => true, result: ok0 },                                         // anything else: logged, answered ok
+  ]);
+  const text = vitestReport157(failing);
+  const gh = { searchIssues: vi.fn(async () => []), createIssue: vi.fn(async () => 99), comment: vi.fn(async () => {}), addLabel: vi.fn(async () => {}), issue: vi.fn(async () => ({ body: "" })) };
+  const saveQuarantine = vi.fn(async () => {});
+  const transitionIssue = vi.fn(async () => ({ ok: true }));
+  const g = await runStageGates({ run: fake, cwd: GATE_ROOT, harness, stage: "merge", tier: "standard", base: "c".repeat(40), quarantine: { quarantined: [] }, gh, issue: 7, readFile: () => text, now: "2026-10-02T01:52:00.000Z", saveQuarantine, transitionIssue });
+  return { g: registerReports157(g, { unit: text }), fake, gh, saveQuarantine, transitionIssue, harness };
+}
+
 test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () => {
   const ids = [OC_ID, "server/tests/follows.test.ts::test_50_follow_feed"];
   const first = await producedGates({ failing: ids });
@@ -1761,6 +1802,34 @@ test("test_157_second_red_is_needs_human_with_flaky_candidate_marker", async () 
   expect(details).toHaveLength(2);
   for (const dl of details) expect(dl).toMatchObject({ gate: "unit", run_id: "18113", runner: "gha-18113" });
   expect(gateStatusesOf(same.postStatus).map((s) => s.state)).toEqual(["failure", "failure"]);
+  // #184 dw2: the full marker text, naming each test, and nothing on the factory:flaky / harvest surface in the record.
+  expect(nh[0].reason).toContain(`gates RED at merge — ${FLAKY_TEXT_157}: `);
+  expect(same.lines.some((l) => /factory:flaky|flaky-existing|quarantin/.test(l))).toBe(false);
+
+  // #184 dw2, through the merge stage's REAL gate producer: both RED runs come from `runStageGates({ stage: "merge" })`
+  // with every harvest dep it accepts spied. Merge produces no classification verdict, runs no isolation/base command,
+  // opens no factory:flaky issue, writes no quarantine entry and transitions no issue — only the needs-human with the marker.
+  const p1 = await mergeStageGates184({ failing: [OC_ID] });
+  const p2 = await mergeStageGates184({ failing: [OC_ID] });
+  for (const p of [p1, p2]) {
+    expect(p.g).toMatchObject({ status: "RED", head_sha: HEAD });
+    expect(p.g.gates.unit).toMatchObject({ status: "RED", parsed: true, failing_ids: [OC_ID] });
+    expect(p.g.classification).toBeUndefined();
+    expect(p.g.quarantine_applied).toEqual([]);
+    // Exactly one run of each gate command and nothing else but git: no isolation re-run, no base run, no worktree.
+    const nonGit = p.fake.calls.filter((c) => c.cmd !== "git").map((c) => c.args[1]);
+    expect(nonGit.sort()).toEqual([p.harness.commands.lint, p.harness.commands.unit].sort());
+    expect(p.fake.calls.filter((c) => c.cmd === "git" && c.args[0] === "worktree")).toEqual([]);
+    expect(p.saveQuarantine).not.toHaveBeenCalled();
+    expect(p.transitionIssue).not.toHaveBeenCalled();
+    for (const fn of Object.values(p.gh)) expect(fn).not.toHaveBeenCalled();
+  }
+  const real = await run157({ seq: [p1.g, p2.g], diff: { ok: true, files: CLIENT_ONLY } });
+  expect(real.code).toBe(2);
+  expect(real.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(real.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining(`${FLAKY_TEXT_157}: ${OC_ID}`) })]);
+  expect(flakyMarksOf(real.lines)).toEqual([expect.objectContaining({ test: OC_ID, outcome: "RED", run_id: "18113", runner: "gha-18113" })]);
+  expect(real.lines.some((l) => /factory:flaky|flaky-existing|quarantin/.test(l))).toBe(false);
 
   // A different set on the re-run: an ordinary needs-human that names both sets — no flaky wording, no marker.
   const other = await producedGates({ failing: ["server/tests/auth.test.ts::test_12_login"] });
@@ -1845,9 +1914,12 @@ test("test_157_rerun_without_a_report_is_inconclusive_not_flaky", async () => {
   expect(t[0].to).toBe("factory:needs-human");
   expect(t[0].reason).toContain("rerun inconclusive");
   expect(t[0].reason).toContain("wrote no test report");
+  // #184 dw4: the issue's phrase verbatim, not two halves that a changed join would still satisfy.
+  expect(t[0].reason).toContain("rerun inconclusive — the re-run wrote no test report");
   expect(t[0].reason).not.toContain(FLAKY_TEXT_157);
   expect(flakyMarksOf(r.lines)).toEqual([]);
   expect(r.d.mergePr).not.toHaveBeenCalled();
+  expect(r.d.mergeGates).not.toHaveBeenCalled();
 });
 
 test("test_157_superset_on_rerun_is_not_a_flaky_candidate", async () => {
@@ -2234,6 +2306,46 @@ test("test_157_unhandled_error_on_the_rerun_never_merges", async () => {
   expect(gateStatusesOf(r.postStatus).map((s) => s.state)).toEqual(["failure", "failure"]);
   // The unhandled re-run's own evidence (KTB-35 reason) reaches the run record.
   expect(detailsOf(r.lines).some((dl) => /unhandled error outside tests/.test(dl.reason ?? ""))).toBe(true);
+
+  // #184 dw5 — the throw paths themselves. A GREEN is queued after each throw, so an implementation that swallowed the
+  // throw and carried on would reach mergePr; none may. Each outcome is visible: the stage rejects with the cause (run-stage
+  // turns that into exit 1 + `error: merge aborted — <cause>`, pinned in run-stage.test.js), or needs-human with the cause.
+  const green = await producedGates({ failing: [] });
+  // (a) the re-run's gate call throws an untyped error.
+  const viaGate = vi.fn(async () => {});
+  await expect(run157({ seq: [first, () => { throw new Error("vitest worker crashed: SIGKILL"); }, green], diff: { ok: true, files: CLIENT_ONLY }, over: { mergePr: viaGate } }))
+    .rejects.toThrow("vitest worker crashed: SIGKILL");
+  expect(viaGate).not.toHaveBeenCalled();
+  // (b) d.resetGates() throws: the re-run never starts, nothing merges.
+  const viaReset = vi.fn(async () => {});
+  const gatesSeen = [];
+  await expect(run157({ seq: [first, green], diff: { ok: true, files: CLIENT_ONLY }, over: { mergePr: viaReset, resetGates: vi.fn(async () => { gatesSeen.push("reset"); throw new Error("EACCES: unlink .factory/out/unit.json"); }) } }))
+    .rejects.toThrow("EACCES: unlink .factory/out/unit.json");
+  expect(gatesSeen).toEqual(["reset"]);
+  expect(viaReset).not.toHaveBeenCalled();
+  // (c) the changed-files lookup throws: "outside the diff" is unproven — one gate run, needs-human, the cause on the record.
+  const viaDiff = await run157({ seq: [first, green], diff: async () => { throw new Error("git diff exploded: exit 128"); } });
+  expect(viaDiff.code).toBe(2);
+  expect(viaDiff.d.gates).toHaveBeenCalledTimes(1);
+  expect(viaDiff.d.resetGates).not.toHaveBeenCalled();
+  expect(viaDiff.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(viaDiff.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+  expect(refusalLinesOf(viaDiff.lines)).toEqual([expect.stringContaining("git diff exploded: exit 128")]);
+});
+
+// #184 dw4/cf1 — resetGates is not optional for the re-run. Without it the re-run could read the first run's report and
+// call a test that never ran again a flaky candidate; so an unwired resetGates refuses the re-run (today's single-run
+// needs-human plus one stamped refusal line), exactly like an unwired diffFiles/suiteFailures.
+test("test_184_unwired_reset_gates_refuses_the_rerun", async () => {
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const green = await producedGates({ failing: [], sha: HEAD });
+  const r = await run157({ seq: [first, green], diff: { ok: true, files: CLIENT_ONLY }, over: { resetGates: undefined } });
+  expect(r.code).toBe(2);
+  expect(r.d.gates).toHaveBeenCalledTimes(1);
+  expect(r.d.mergePr).not.toHaveBeenCalled();
+  expect(transitionsOf(r.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
+  expectRefusedRecord157(r.lines, first, "resetGates unwired", /resetGates dep not wired/);
+  expect(gateStatusesOf(r.postStatus).map((s) => s.state)).toEqual(["failure"]);
 });
 
 // ── #184 — the #157 re-land's own pins (plan dw6, and the dw2/dw4/dw5 rubric points the #161 tests above leave implicit) ──

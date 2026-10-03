@@ -4104,6 +4104,9 @@ ADR-011의 "merge는 RED가 RED다"는 그 다시 돌려 보기를 사람의 손
   이것은 **후보**이지 flaky 판정이 아니다 — 이 저장소는 그것이 테스트 문제인지 제품 경쟁 조건인지 가를 수 없다.
 - **다른 집합**(부분집합·상위집합 포함)이 RED면 평범한 `needs-human`이고 두 집합을 모두 적는다 — flaky 문구도 마커도 없다. 리포트를 쓰지 않은
   재실행은 "inconclusive"이지 두 번째 RED가 아니다(재실행 전에 `resetGates`로 첫 리포트를 지운다 — 지울 수 없는 루트 밖 리포트면 애초에 재실행하지 않는다).
+  `resetGates`는 선택 dep가 아니다(#184): 연결돼 있지 않으면 재실행을 거부한다(`merge: no gates rerun — resetGates dep not wired …`,
+  오늘의 단일 런 `needs-human`) — 첫 리포트를 지우지 못한 재실행은 돌지 않은 테스트를 flaky 후보로 부를 수 있기 때문이다.
+  재실행 경로의 예외(재실행 게이트 호출·`resetGates`)는 삼키지 않는다 — `runStage`가 exit 1과 `error: merge aborted — <원인>`으로 남긴다.
 - 재실행이 BLOCKED이거나, 판정을 아예 내지 않았거나(null), base/diff typed error를 던지면 `factory:blocked`와 사유 줄이다 — 재실행이 아무것도 가르지 못했다.
 - 세 번째 실행은 없다. **재실행은 `runMergeStage` 호출 하나당 최대 한 번**이다 — 이슈당이 아니다: sweeper의 blocked→merge 재시도
   (`lib/sweeper.js`의 재시도 표 `"factory:approved": "merge"`, 한 번뿐)가 같은 이슈에 merge를 한 번 더 돌리면 그 호출도 자기 한 번을 갖는다.
