@@ -645,7 +645,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       if (!m.ok) { const t = await d.transition({ to: "factory:blocked", reason: `undecidable — ${m.reason}` }); record([`mirror: FAIL — ${m.reason}`, ...refusal(t)]); return 2; }
       if (m.applicable) record([mirrorLine(m)]);
     }
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d: withEvidenceSlot(d), record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -2133,6 +2133,21 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
 }
 
 /**
+ * #195 — the deps runStage hands the merge stage always carry the `publishPrEvidence` slot. merge-stage keeps a wiring with
+ * no slot at all byte-identical (pre-#195 harnesses that call runMergeStage directly), so if the slot were left to main()'s
+ * spread of `makePrEvidenceDeps`, a refactor that dropped the spread would publish nothing on any route and record nothing.
+ * Here a missing key becomes a `null` slot, which merge-stage turns into its one FAIL line. A wired dep is used as is. The
+ * caller's object is not mutated, and its getters (`selfChange`, `engine`) are carried over as getters, not evaluated.
+ */
+export function withEvidenceSlot(d) {
+  if (Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return d;
+  return Object.defineProperties(Object.create(Object.getPrototypeOf(d)), {
+    ...Object.getOwnPropertyDescriptors(d),
+    publishPrEvidence: { value: null, enumerable: true, writable: true, configurable: true },
+  });
+}
+
+/**
  * #195 — `makePrEvidenceDeps`: merge-stage's `publishPrEvidence` + `postEvidenceComment` (the PR-evidence dep is named apart
  * from feedback's `appendEvidence`). The section is built by `lib/evidence.js` — imported statically at the top of this file,
  * so it is the base-branch engine's copy (loaded when the process started on the base checkout, before checkoutHead): a PR
@@ -2175,9 +2190,11 @@ export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, 
         }
       };
       const live = () => { if (signal?.aborted) throw (signal.reason ?? new Error("evidence step aborted")); };
-      let recordText = null;
-      try { recordText = readRecord(); } catch { recordText = null; }
-      const { issueComments, prComments, factoryLogins } = await inStep("read", async () => {
+      // A record that does not exist is no source (null, no row); a record that exists but cannot be read is a failed read
+      // step — never a section published as if the record rows simply were not there.
+      const { recordText, issueComments, prComments, factoryLogins } = await inStep("read", async () => {
+        let recordText;
+        try { recordText = readRecord(); } catch (e) { throw new Error(`run record unreadable — ${e?.message || e}`, { cause: e }); }
         const issueComments = await bounded((s) => gh.comments(issue, { signal: s }), { ms: timeoutMs, what: "gh issue comments", signal });
         live();
         const prComments = await bounded((s) => gh.comments(pr, { signal: s }), { ms: timeoutMs, what: "gh pr comments", signal });
@@ -2186,7 +2203,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, 
         try { factoryLogins = await bounded((s) => resolveFactoryLogins({ gh, env, signal: s }), { ms: timeoutMs, what: "factory logins", signal }); }
         catch (e) { live(); factoryLogins = { ok: false, reason: e?.message || String(e) }; }
         live();
-        return { issueComments, prComments, factoryLogins };
+        return { recordText, issueComments, prComments, factoryLogins };
       });
       const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pr, now: now() }));
       return await inStep("edit", async () => {
