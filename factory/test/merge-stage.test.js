@@ -74,6 +74,8 @@ const baseD = (over = {}) => ({
   transition: graphTransition(),
   closeIssue: vi.fn(async () => {}),
   sleep: vi.fn(async () => {}),
+  breaker: vi.fn(async () => ({ ok: true, open: false, since: null, reason: null, detail: "0 self-merge record(s) (0 judge), 0 revert(s) of PRs on origin/main" })), // #189: run-stage always wires a breaker; a closed one keeps the S4a-2 path as it was
+  persistSelfMerge: vi.fn(async () => ({ ok: true })), // #189 rework r5 cf1: run-stage always wires the pre-merge evidence writer; a confirmed write keeps the S4a-2 path as it was
   ...over,
 });
 const basePostStatus = (over = {}) => Object.assign(vi.fn(async () => {}), over);
@@ -3035,3 +3037,435 @@ test("test_179_self_change_merge_pins_the_verified_head", async () => {
   expect((await run179(j)).code).toBe(0);
   expect(j.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
 });
+
+// ── #189 (S4c, ADR-033) — 회로차단기: 거부권 창 앞과 뒤, 두 경로 모두 ─────────────────────────────────────────────────
+import { parseSelfMergeLines, BREAKER_RESET_COMMAND } from "../lib/breaker.js";
+import { importClosure as importClosure189, isNonJudgePath as isNonJudgePath189, JUDGE_MODULES as JUDGE_MODULES189 } from "../lib/non-judge-paths.js";
+import { existsSync as existsSync189, readFileSync as readFileSync189 } from "node:fs";
+
+test("test_189_merge_stage_checks_breaker_before_and_after_veto_window", async () => {
+  const SINCE = "2026-10-02T06:00:00.000Z";
+  const WHY = "revert streak: judge-path auto-merges PR #11, PR #12 were reverted in a row (self_change.breaker.revert_streak: 2)";
+  const OPEN = { ok: true, open: true, since: SINCE, reason: WHY };
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "2 self-merge record(s), 0 revert(s) on origin/main" };
+  const routes = {
+    non_judge: (over = {}) => selfD179(over),
+    judge: (over = {}) => selfD179({
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      ...over,
+    }),
+  };
+  const announced = (d) => d.comment.mock.calls.some(([, body]) => /거부권 창/.test(String(body)));
+
+  for (const [route, mk] of Object.entries(routes)) {
+    // (1) 창 앞에서 열려 있다 → handToHuman: 사유는 since·reason·리셋 명령을 말하고, 창의 상태·알림 코멘트는 없다.
+    const a = mk({ breaker: vi.fn(async () => OPEN) });
+    const ra = await run179(a);
+    expect(ra.code, route).toBe(2);
+    const ta = a.transition.mock.calls.map((x) => x[0]);
+    expect(ta.map((t) => t.to), route).toEqual(["factory:needs-human"]);
+    expect(ta[0].reason, route).toContain(`breaker open since ${SINCE}: ${WHY}`);
+    expect(ta[0].reason, route).toContain(BREAKER_RESET_COMMAND);
+    expect(ta[0].reason, route).toMatch(HUMAN_MERGE_REQUIRED);
+    expect(a.vetoWindow.open, route).not.toHaveBeenCalled();
+    expect(announced(a), route).toBe(false);
+    expect(a.sleep, route).not.toHaveBeenCalled();
+    expect(a.mergePr, route).not.toHaveBeenCalled();
+    expect(a.breaker, route).toHaveBeenCalledTimes(1);
+
+    // (2) 창 앞에서는 닫혀 있었는데 창 뒤에 열렸다 → 머지하지 않고 사람에게.
+    let n = 0;
+    const b = mk({ breaker: vi.fn(async () => (++n === 1 ? CLOSED : OPEN)) });
+    const rb = await run179(b);
+    expect(rb.code, route).toBe(2);
+    expect(b.vetoWindow.open, route).toHaveBeenCalledTimes(1);
+    expect(b.sleep, route).toHaveBeenCalled();
+    expect(b.mergePr, route).not.toHaveBeenCalled();
+    const tb = b.transition.mock.calls.at(-1)[0];
+    expect(tb.to, route).toBe("factory:needs-human");
+    expect(tb.reason, route).toContain(`breaker open since ${SINCE}: ${WHY}`);
+    expect(tb.reason, route).toContain(BREAKER_RESET_COMMAND);
+    // 두 번째 확인은 창이 닫힌 뒤(마지막 라벨 폴링 뒤)다.
+    expect(b.breaker.mock.invocationCallOrder[1], route).toBeGreaterThan(b.vetoLabel.mock.invocationCallOrder.at(-1));
+
+    // (3) 모르는 상태 — ok:false, throw, 배선이 함수가 아님 — 는 어느 시점에서든 blocked이고 머지는 없다.
+    const unknowns = [
+      ["ok:false", () => vi.fn(async () => ({ ok: false, reason: "factory/records could not be fetched" })), /could not be fetched/],
+      ["throws", () => vi.fn(async () => { throw new Error("git log exited 128"); }), /git log exited 128/],
+      ["not a function", () => null, /not wired/],
+      ["undefined (dep key present, no value)", () => undefined, /not wired/],
+    ];
+    for (const [label, make, why] of unknowns) {
+      const c = mk({ breaker: make() });
+      const rc = await run179(c);
+      expect(rc.code, `${route} ${label}`).toBe(2);
+      const tc = c.transition.mock.calls.at(-1)[0];
+      expect(tc.to, `${route} ${label}`).toBe("factory:blocked");
+      expect(tc.reason, `${route} ${label}`).toMatch(why);
+      expect(c.vetoWindow.open, `${route} ${label}`).not.toHaveBeenCalled();
+      expect(c.mergePr, `${route} ${label}`).not.toHaveBeenCalled();
+      // 창 뒤의 두 번째 확인에서 같은 일이 생겨도 같다.
+      const inner = make();
+      if (typeof inner !== "function") continue;                     // 배선이 없으면 첫 확인에서 이미 멈춘다
+      let m = 0;
+      const late = mk({ breaker: vi.fn(async () => (++m === 1 ? CLOSED : inner())) });
+      const rl = await run179(late);
+      expect(rl.code, `${route} late ${label}`).toBe(2);
+      expect(late.vetoWindow.open, `${route} late ${label}`).toHaveBeenCalledTimes(1);
+      expect(late.transition.mock.calls.at(-1)[0].to, `${route} late ${label}`).toBe("factory:blocked");
+      expect(late.mergePr, `${route} late ${label}`).not.toHaveBeenCalled();
+    }
+
+    // (3b) dep 키 자체가 없는 호출자(배선을 잊은 미래의 호출자, run-stage가 `breaker:`를 잃은 경우)도 묻지 않고 머지하지 않는다 —
+    // "배선 안 됨"은 닫힘이 아니라 blocked다(dw3).
+    const absent = mk();
+    delete absent.breaker;
+    expect("breaker" in absent, route).toBe(false);
+    const rabs = await run179(absent);
+    expect(rabs.code, `${route} absent`).toBe(2);
+    expect(absent.transition.mock.calls.map((x) => x[0].to), `${route} absent`).toEqual(["factory:blocked"]);
+    expect(absent.transition.mock.calls[0][0].reason, `${route} absent`).toMatch(/breaker[\s\S]*not wired/);
+    expect(absent.vetoWindow.open, `${route} absent`).not.toHaveBeenCalled();
+    expect(announced(absent), `${route} absent`).toBe(false);
+    expect(absent.mergePr, `${route} absent`).not.toHaveBeenCalled();
+    expect(rabs.lines.some((l) => /not consulted/.test(l)), `${route} absent`).toBe(false);
+
+    // (4) 두 번 다 닫혀 있다 → S4a-2 경로 그대로 머지. 두 번 묻고, 센 수가 기록에 남고, 머지의 사실을 기록 줄로 남긴다.
+    const ok = mk({ breaker: vi.fn(async () => CLOSED) });
+    const rok = await run179(ok);
+    expect(rok.code, route).toBe(0);
+    expect(ok.breaker, route).toHaveBeenCalledTimes(2);
+    expect(ok.breaker.mock.invocationCallOrder[0], route).toBeLessThan(ok.vetoWindow.open.mock.invocationCallOrder[0]);
+    expect(ok.breaker.mock.invocationCallOrder[1], route).toBeLessThan(ok.mergePr.mock.invocationCallOrder[0]);
+    expect(ok.mergePr.mock.calls, route).toEqual([[9, { matchHeadCommit: HEAD }]]);
+    expect(ok.transition.mock.calls.map((x) => x[0].to), route).toEqual(["factory:merged"]);
+    expect(rok.lines.filter((l) => l.includes(CLOSED.detail)).length, route).toBe(2);
+    const marks = parseSelfMergeLines(`## merge · 2026-10-03T11:13Z · gha-1\n${rok.lines.join("\n")}\n`);
+    expect(marks, route).toEqual([expect.objectContaining({ issue: 7, pr: 9, sha: HEAD, judge: route === "judge" })]);
+  }
+
+  // 자기 변경 경로가 아닌 머지는 차단기를 묻지도, 자동 머지 기록 줄을 남기지도 않는다.
+  const plain = baseD({ breaker: vi.fn(async () => OPEN) });
+  const { lines, record } = makeRecord();
+  expect(await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d: plain, record, refusal, postStatus: basePostStatus() })).toBe(0);
+  expect(plain.breaker).not.toHaveBeenCalled();
+  expect(parseSelfMergeLines(`## merge · x · y\n${lines.join("\n")}\n`)).toEqual([]);
+
+  // merge-stage가 breaker.js를 import해도 판정 import 닫힘은 비판정 목록에 닿지 않는다(test_178과 같은 규칙).
+  const ROOT189 = new URL("../../", import.meta.url).pathname;
+  const readRepo189 = (p) => (existsSync189(ROOT189 + p) ? readFileSync189(ROOT189 + p, "utf8") : null);
+  const { files } = importClosure189({ entries: JUDGE_MODULES189, readFile: readRepo189 });
+  expect(files.has("factory/lib/breaker.js")).toBe(true);
+  expect([...files].flatMap((f) => (f.startsWith("factory/") ? [f, `.${f}`] : [f])).filter((f) => isNonJudgePath189(f))).toEqual([]);
+
+  // 프로덕션 배선(run-stage `makeMergeBreakerDep` — main()의 deps 리터럴이 `breaker:`로 싣는다)은 언제나 함수다. 읽기 재료가 없으면 ok:false(닫힘이 아니다).
+  const unwired = makeMergeBreakerDep189({ getCharter: () => ({ self_change: { auto_merge_judge: true } }) });
+  expect(typeof unwired).toBe("function");
+  expect(await unwired()).toEqual({ ok: false, reason: expect.stringMatching(/not wired/) });
+  // CHARTER의 breaker 블록이 틀렸으면(검증을 우회한 값) 그것도 ok:false다.
+  const badCfg = makeMergeBreakerDep189({ run: vi.fn(), root: "/nowhere", getCharter: () => ({ self_change: { breaker: { revert_streak: 0 } } }) });
+  expect(await badCfg()).toEqual({ ok: false, reason: expect.stringMatching(/revert_streak/) });
+  // 실제 읽기를 탄다: records 브랜치를 가져오지 못하는 저장소에서는 ok:false.
+  const gitRun = vi.fn(async () => ({ code: 128, stdout: "", stderr: "fatal: could not read from remote" }));
+  const wired = makeMergeBreakerDep189({ run: gitRun, root: "/repo", getCharter: () => ({ self_change: {} }), getDefaultBranch: () => "trunk" });
+  expect((await wired()).ok).toBe(false);
+  expect(gitRun).toHaveBeenCalledWith("git", expect.arrayContaining(["fetch"]), expect.objectContaining({ cwd: "/repo" }));
+  // main()의 deps 리터럴이 그 함수를 싣는다(소스로 고정 — main()은 프로세스를 띄워야만 돈다).
+  const mainSrc189 = readFileSync189(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(mainSrc189).toMatch(/\n\s*breaker: makeMergeBreakerDep\(\{ run, root, getCharter: \(\) => charter, getDefaultBranch: \(\) => harness\?\.project\?\.default_branch \?\? "main" \}\),/);
+});
+import { makeMergeBreakerDep as makeMergeBreakerDep189 } from "../bin/run-stage.js";
+
+// ── #189 dw1 — 사람 머지·일반 자동 머지의 run 기록은 연속에 들지 않는다(실제 생산자 = runMergeStage 자신이 쓴 기록 줄) ──────────
+import { appendRunRecord as appendRunRecord189b } from "../lib/run-record.js";
+import { buildHistory as buildHistory189b, evaluateBreaker as evaluateBreaker189b, parseRevertCommits as parseRevertCommits189b, REVERT_LOG_FORMAT as REVERT_LOG_FORMAT189b } from "../lib/breaker.js";
+import { mkdtempSync as mkdtempSync189b, writeFileSync as writeFileSync189b } from "node:fs";
+import { tmpdir as tmpdir189b } from "node:os";
+import { join as join189b } from "node:path";
+import { run as execRun189b } from "../lib/exec.js";
+
+test("test_189_human_and_plain_merge_records_never_count_toward_the_streak", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "closed" };
+  /** 머지 스테이지를 진짜로 돌리고, 그 기록 줄을 run 기록의 실제 생산자(appendRunRecord)로 파일에 쓴다. */
+  const stageRecord = async ({ issue, pr, d }) => {
+    Object.assign(d, {
+      prInfo: vi.fn(async () => ({ number: pr, state: "OPEN", mergeable: "MERGEABLE" })),
+      reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, issue, pr } })),
+    });
+    const { lines, record } = makeRecord();
+    const code = await runMergeStage({ issue, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus: basePostStatus() });
+    const root = mkdtempSync189b(join189b(tmpdir189b(), "ktb-189-msrec-"));
+    const p = appendRunRecord189b({ root, issue, title: "x", stage: "merge", runnerId: "gha-1", now: "2026-10-03T12:00:00.000Z", lines });
+    return { code, d, lines, text: readFileSync189(p, "utf8") };
+  };
+  const judgeD = () => selfD179({
+    protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+    selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+    reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+    breaker: vi.fn(async () => CLOSED),
+  });
+
+  // #11 — 판정 경로 자동 머지(자기 변경 경로, 진짜로 머지됐다).
+  const j11 = await stageRecord({ issue: 101, pr: 11, d: judgeD() });
+  expect(j11.code).toBe(0);
+  expect(j11.d.mergePr).toHaveBeenCalledTimes(1);
+  // #12 — 보호 경로라 스위치가 꺼진 채로 사람에게 넘어갔다(handToHuman). 사람이 나중에 머지했다(sweeper의 반영은 이슈 코멘트다 —
+  // run 기록에는 아무것도 더하지 않는다). 기록에 있는 것은 이 스테이지가 쓴 needs-human 섹션뿐이다.
+  const h12 = await stageRecord({ issue: 102, pr: 12, d: baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })) }) });
+  expect(h12.code).toBe(2);
+  expect(h12.d.mergePr).not.toHaveBeenCalled();
+  expect(h12.d.transition.mock.calls.map((x) => x[0].to)).toEqual(["factory:needs-human"]);
+  expect(h12.text).toMatch(/^## merge/m);
+  // #13 — 보호 경로가 없는 일반 자동 머지: 기록에 `merge: merged … via PR #13` 줄이 있다. 그래도 자기 변경 머지가 아니다.
+  const p13 = await stageRecord({ issue: 103, pr: 13, d: baseD() });
+  expect(p13.code).toBe(0);
+  expect(p13.text).toMatch(/merge: merged \w+ via PR #13/);
+  expect(p13.d.breaker).not.toHaveBeenCalled();
+
+  // 진짜 git: 세 PR이 전부 revert됐다(`git revert` 모양 둘 + revert PR의 squash 모양 하나).
+  const g = (cwd, args, env = {}) => execRun189b("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env });
+  const dir = mkdtempSync189b(join189b(tmpdir189b(), "ktb-189-mslog-"));
+  await g(dir, ["init", "-q", "-b", "main"]);
+  const shas = {};
+  for (const [s, at] of [["feat a (#11)", "2026-10-03T13:00:00Z"], ["feat b (#12)", "2026-10-03T13:10:00Z"], ["feat c (#13)", "2026-10-03T13:20:00Z"]]) {
+    writeFileSync189b(join189b(dir, `${at}.txt`), s);
+    await g(dir, ["add", "."]);
+    expect((await g(dir, ["commit", "-q", "-m", s], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at })).code).toBe(0);
+    shas[s] = (await g(dir, ["rev-parse", "HEAD"])).stdout.trim();
+  }
+  expect((await g(dir, ["revert", "--no-edit", shas["feat a (#11)"]], { GIT_AUTHOR_DATE: "2026-10-03T14:00:00Z", GIT_COMMITTER_DATE: "2026-10-03T14:00:00Z" })).code).toBe(0);
+  expect((await g(dir, ["revert", "--no-edit", shas["feat b (#12)"]], { GIT_AUTHOR_DATE: "2026-10-03T14:10:00Z", GIT_COMMITTER_DATE: "2026-10-03T14:10:00Z" })).code).toBe(0);
+  writeFileSync189b(join189b(dir, "r13.txt"), "r");
+  await g(dir, ["add", "."]);
+  await g(dir, ["commit", "-q", "-m", 'Revert "feat c (#13)" (#40)'], { GIT_AUTHOR_DATE: "2026-10-03T14:20:00Z", GIT_COMMITTER_DATE: "2026-10-03T14:20:00Z" });
+  // 프로덕션 읽기(readBreaker)와 같은 git log 모양·같은 파서 — main의 머지 확인(mainPrs)까지 그대로 넘긴다.
+  const parsed = parseRevertCommits189b((await g(dir, ["log", `--format=${REVERT_LOG_FORMAT189b}`])).stdout);
+  const reverts = parsed.reverts;
+  expect(reverts.map((r) => r.pr).sort()).toEqual([11, 12, 13]);
+  expect(parsed.unattributed).toEqual([]);
+  const mainPrs = parsed.mainPrs;
+
+  const T = { revert_streak: 2 };
+  const records = new Map([["101", j11.text], ["102", h12.text], ["103", p13.text]]);
+  const ev = evaluateBreaker189b({ history: buildHistory189b({ records, reverts, mainPrs }), thresholds: T });
+  expect(ev.open).toBe(false);
+  expect(ev.counts).toEqual(expect.objectContaining({ merges: 1, judge: 1, reverts: 3 }));
+
+  // 대조군: #12가 사람이 아니라 판정 경로로 자동 머지됐다면(같은 생산자) 같은 revert 두 건이 차단기를 연다 — 위의 닫힘은 픽스처의 우연이 아니다.
+  const j12 = await stageRecord({ issue: 102, pr: 12, d: judgeD() });
+  expect(j12.code).toBe(0);
+  const opened = evaluateBreaker189b({ history: buildHistory189b({ records: new Map([...records, ["102", j12.text]]), reverts, mainPrs }), thresholds: T });
+  expect(opened.open).toBe(true);
+  expect(opened.reason).toMatch(/PR #11, PR #12/);
+}, 120000);
+
+// ── #189 skeptic f1 — ok:true인데 open이 불리언이 아닌 답은 닫힘이 아니다(두 경로, 두 확인 시점) ──────────────────────────
+test("test_189_breaker_answer_without_boolean_open_never_merges", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "0 revert(s)" };
+  const routes = {
+    non_judge: (over = {}) => selfD179(over),
+    judge: (over = {}) => selfD179({
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      ...over,
+    }),
+  };
+  const odd = [
+    ["open missing", { ok: true }],
+    ["open is a string", { ok: true, open: "yes" }],
+    ["open is null", { ok: true, open: null }],
+    ["open is 0", { ok: true, open: 0 }],
+  ];
+  for (const [route, mk] of Object.entries(routes)) {
+    // 대조군: 두 번 다 닫힘이면 머지된다 — 아래의 blocked는 픽스처가 원래 머지를 못 하는 탓이 아니다.
+    const ctl = mk({ breaker: vi.fn(async () => CLOSED) });
+    expect((await run179(ctl)).code, `${route} control`).toBe(0);
+    expect(ctl.mergePr, `${route} control`).toHaveBeenCalledTimes(1);
+
+    for (const [label, answer] of odd) {
+      const early = mk({ breaker: vi.fn(async () => answer) });
+      const re = await run179(early);
+      expect(re.code, `${route} ${label}`).toBe(2);
+      expect(early.transition.mock.calls.map((x) => x[0].to), `${route} ${label}`).toEqual(["factory:blocked"]);
+      expect(early.transition.mock.calls[0][0].reason, `${route} ${label}`).toMatch(/neither open nor closed/);
+      expect(early.vetoWindow.open, `${route} ${label}`).not.toHaveBeenCalled();
+      expect(early.mergePr, `${route} ${label}`).not.toHaveBeenCalled();
+
+      let n = 0;
+      const late = mk({ breaker: vi.fn(async () => (++n === 1 ? CLOSED : answer)) });
+      const rl = await run179(late);
+      expect(rl.code, `${route} late ${label}`).toBe(2);
+      expect(late.vetoWindow.open, `${route} late ${label}`).toHaveBeenCalledTimes(1);
+      expect(late.breaker, `${route} late ${label}`).toHaveBeenCalledTimes(2);
+      expect(late.transition.mock.calls.at(-1)[0].to, `${route} late ${label}`).toBe("factory:blocked");
+      expect(late.transition.mock.calls.at(-1)[0].reason, `${route} late ${label}`).toMatch(/neither open nor closed/);
+      expect(late.mergePr, `${route} late ${label}`).not.toHaveBeenCalled();
+    }
+  }
+}, 120000);
+
+// ── #189 rework r5 cf1 — 자동 머지의 증거는 머지 **전에** factory/records에 있어야 한다(스테이지 끝 동기화는 최선 노력이다) ─────────
+test("test_189_self_merge_evidence_is_durable_on_factory_records_before_the_merge", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "0 revert(s)" };
+  const routes = {
+    non_judge: (over = {}) => selfD179({ breaker: vi.fn(async () => CLOSED), ...over }),
+    judge: (over = {}) => selfD179({
+      breaker: vi.fn(async () => CLOSED),
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      ...over,
+    }),
+  };
+  for (const [route, mk] of Object.entries(routes)) {
+    // (1) 증거가 브랜치에 닿았다 → 그 다음에야 머지한다. 넘긴 줄은 실제 생산자의 줄이고, 그 줄은 이미 run 기록에 적혀 있다(밀 것이 있다).
+    const { lines, record } = makeRecord();
+    let recordedFirst = null;
+    const ok = mk({ persistSelfMerge: vi.fn(async ({ line }) => { recordedFirst = lines.includes(line); return { ok: true }; }) });
+    const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d: ok, record, refusal, postStatus: basePostStatus() });
+    expect(code, route).toBe(0);
+    expect(ok.persistSelfMerge, route).toHaveBeenCalledTimes(1);
+    const sent = ok.persistSelfMerge.mock.calls[0][0].line;
+    expect(parseSelfMergeLines(`## merge · x · y\n${sent}\n`), route).toEqual([expect.objectContaining({ issue: 7, pr: 9, sha: HEAD, judge: route === "judge" })]);
+    expect(recordedFirst, route).toBe(true);
+    expect(ok.persistSelfMerge.mock.invocationCallOrder[0], route).toBeLessThan(ok.mergePr.mock.invocationCallOrder[0]);
+    expect(ok.persistSelfMerge.mock.invocationCallOrder[0], route).toBeGreaterThan(ok.breaker.mock.invocationCallOrder.at(-1));
+    expect(ok.transition.mock.calls.map((x) => x[0].to), route).toEqual(["factory:merged"]);
+
+    // (2) 증거를 브랜치에 올리지 못하면(ok:false·던짐·배선 누락) 머지하지 않는다 — blocked, 사유가 factory/records와 원인을 말한다.
+    const failures = [
+      ["ok:false", { persistSelfMerge: vi.fn(async () => ({ ok: false, reason: "git push factory/records rejected: HTTP 503" })) }, /HTTP 503/],
+      ["throws", { persistSelfMerge: vi.fn(async () => { throw new Error("socket hang up"); }) }, /socket hang up/],
+      ["not wired", { persistSelfMerge: undefined }, /not wired/],
+      ["no answer", { persistSelfMerge: vi.fn(async () => undefined) }, /factory\/records/],
+    ];
+    for (const [label, over, why] of failures) {
+      const d = mk(over);
+      if (over.persistSelfMerge === undefined) delete d.persistSelfMerge;
+      const r = await run179(d);
+      expect(r.code, `${route} ${label}`).toBe(2);
+      expect(d.mergePr, `${route} ${label}`).not.toHaveBeenCalled();
+      const ts = d.transition.mock.calls.map((x) => x[0]);
+      expect(ts.map((t) => t.to), `${route} ${label}`).toEqual(["factory:blocked"]);
+      expect(ts[0].reason, `${route} ${label}`).toMatch(/factory\/records/);
+      expect(ts[0].reason, `${route} ${label}`).toMatch(why);
+      expect(d.closeIssue, `${route} ${label}`).not.toHaveBeenCalled();
+    }
+  }
+
+  // 자기 변경 경로가 아닌 머지는 자동 머지 증거를 쓰지 않는다(차단기는 그 머지를 세지 않는다).
+  const plain = baseD({ persistSelfMerge: vi.fn(async () => ({ ok: true })) });
+  expect(await run(plain)).toBe(0);
+  expect(plain.persistSelfMerge).not.toHaveBeenCalled();
+  expect(plain.mergePr).toHaveBeenCalledTimes(1);
+}, 120000);
+
+// ── #189 skeptic (r5) f1 — 머지 전에 굳힌 증거가 실패한 머지를 판정 자동 머지로 남기지 않는다 ───────────────────────────────
+// 시나리오(스켑틱의 재현): #11은 판정 경로로 진짜 자동 머지됐다. #12의 줄은 머지 전에 factory/records에 올라갔는데 그 뒤 mergePr가
+// 실패(또는 persist가 실패)했고, 사람이 나중에 #12를 손으로 머지했다. 둘 다 main에서 revert된다. 사람의 머지는 차단기를 열지 않는다.
+import { readBreaker as readBreaker189c, parseSelfMergeLines as parseSelfMergeLines189c, makeRecordsUploadGuard as makeRecordsUploadGuard189c, persistSelfMergeEvidence as persistSelfMergeEvidence189c } from "../lib/breaker.js";
+import { syncRunRecords as syncRunRecords189c } from "../bin/run-stage.js";
+import { rmSync as rmSync189c, readFileSync as readFileSync189c } from "node:fs";
+
+test("test_189_failed_judge_merge_then_person_merge_never_counts_as_judge_automerge", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "0 revert(s)" };
+  const NOW_MS = Date.parse("2026-10-03T23:00:00.000Z");
+  const g = (cwd, args, env = {}) => execRun189b("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env });
+  const T = { revert_streak: 2 };
+
+  /** 진짜 원격 + 클론. run 기록 디렉터리는 gitignore(러너의 레이아웃). */
+  const makeRepo = async () => {
+    const remote = mkdtempSync189b(join189b(tmpdir189b(), "ktb-189-msf1-remote-"));
+    await execRun189b("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    const cwd = mkdtempSync189b(join189b(tmpdir189b(), "ktb-189-msf1-clone-"));
+    await g(cwd, ["init", "-q", "-b", "main"]);
+    writeFileSync189b(join189b(cwd, ".gitignore"), "docs/factory/runs/\n");
+    await g(cwd, ["add", ".gitignore"]);
+    await g(cwd, ["commit", "-q", "-m", "init"], { GIT_AUTHOR_DATE: "2026-09-30T00:00:00Z", GIT_COMMITTER_DATE: "2026-09-30T00:00:00Z" });
+    await g(cwd, ["remote", "add", "origin", remote]);
+    await g(cwd, ["push", "-q", "origin", "main"]);
+    return { remote, cwd };
+  };
+  /**
+   * merge 스테이지 한 번 — 프로덕션 배선 그대로: record는 가드가 trust한 뒤 run 기록에 쓰고(run-stage `runRecord`), persistSelfMerge는
+   * 같은 가드 위의 persistSelfMergeEvidence, 스테이지 끝에 같은 가드로 syncRunRecords, 그리고 일회용 러너가 사라진다.
+   */
+  const stage = async ({ cwd, issue, pr, mergePr, prAfter = () => "OPEN", pushDown = { v: false } }) => {
+    const guard = makeRecordsUploadGuard189c({ run: execRun189b, cwd });
+    const flaky = async (cmd, args, o) => (pushDown.v && cmd === "git" && args.includes("push") ? { code: 1, stdout: "", stderr: "fatal: HTTP 503" } : execRun189b(cmd, args, o));
+    let mergeCalled = false;
+    const d = selfD179({
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      breaker: vi.fn(async () => CLOSED),
+      prInfo: vi.fn(async () => ({ number: pr, state: mergeCalled ? prAfter() : "OPEN", mergeable: "MERGEABLE" })),
+      reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, issue, pr } })),
+      mergePr: vi.fn(async (...a) => { mergeCalled = true; return mergePr(...a); }),
+      persistSelfMerge: ({ line }) => persistSelfMergeEvidence189c({ run: flaky, cwd, issue, line, sync: () => syncRunRecords189c({ run: flaky, root: cwd, message: `run-record: issue #${issue} merge self-merge evidence`, guard }) }),
+    });
+    const record = (lines) => { guard.trust(lines); appendRunRecord189b({ root: cwd, issue, title: "x", stage: "merge", runnerId: `gha-${pr}`, now: "2026-10-03T12:00:00.000Z", lines }); };
+    const code = await runMergeStage({ issue, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus: basePostStatus() });
+    pushDown.v = false;
+    const end = await syncRunRecords189c({ run: execRun189b, root: cwd, message: `run-record: issue #${issue} merge`, guard });
+    expect(end.ok, `#${pr} stage-end sync: ${end.reason}`).toBe(true);
+    rmSync189c(join189b(cwd, "docs/factory/runs"), { recursive: true, force: true });
+    return { code, d };
+  };
+  /** main: #11과 #12의 squash 커밋(#12는 사람이 머지했다), 그리고 둘의 revert. */
+  const mainWithReverts = async (cwd) => {
+    const shas = {};
+    for (const [subject, at] of [["feat a (#11)", "2026-10-03T13:00:00Z"], ["feat b (#12)", "2026-10-03T15:00:00Z"]]) {
+      writeFileSync189b(join189b(cwd, `${at}.txt`), subject);
+      await g(cwd, ["add", "."]);
+      await g(cwd, ["commit", "-q", "-m", subject], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
+      shas[subject] = (await g(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+    }
+    for (const [subject, at] of [["feat a (#11)", "2026-10-03T17:00:00Z"], ["feat b (#12)", "2026-10-03T18:00:00Z"]]) {
+      const r = await g(cwd, ["revert", "--no-edit", shas[subject]], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
+      expect(r.code, r.stderr).toBe(0);
+    }
+    await g(cwd, ["push", "-q", "origin", "main"]);
+  };
+  const read = (cwd) => readBreaker189c({ run: execRun189b, cwd, defaultBranch: "main", thresholds: T, now: () => NOW_MS });
+  const onBranch = async (remote, issue) => String((await execRun189b("git", ["show", `factory/records:docs/factory/runs/${issue}.md`], { cwd: remote })).stdout);
+  const scenario = async (twelve) => {
+    const { remote, cwd } = await makeRepo();
+    const s11 = await stage({ cwd, issue: 101, pr: 11, mergePr: async () => {} });
+    expect(s11.code).toBe(0);
+    const s12 = await stage({ cwd, issue: 102, pr: 12, ...twelve });
+    await mainWithReverts(cwd);
+    return { remote, cwd, s12, b: await read(cwd), text102: await onBranch(remote, 102) };
+  };
+
+  // (A) 줄은 머지 전에 올라갔고, mergePr가 실패했다(GitHub은 PR이 여전히 OPEN이라고 답한다). 사람이 나중에 #12를 머지 → 열리지 않는다.
+  const a = await scenario({ mergePr: async () => { throw new Error("GraphQL: Head branch was modified. Review and try the merge again."); } });
+  expect(a.s12.code).toBe(2);
+  expect(a.s12.d.transition.mock.calls.map((x) => x[0].to)).toEqual(["factory:blocked"]);
+  expect(parseSelfMergeLines189c(a.text102)).toEqual([expect.objectContaining({ issue: 102, pr: 12, judge: true })]); // 줄은 브랜치에 남아 있다
+  expect(a.b).toEqual(expect.objectContaining({ ok: true, open: false }));
+
+  // (B) persist가 실패해 머지하지 않았다(push 다운). 스테이지 끝 동기화는 살아나서 그 줄을 올린다(가드가 trust한 줄). 사람이 나중에 머지 → 열리지 않는다.
+  const b = await scenario({ pushDown: { v: true }, mergePr: async () => {} });
+  expect(b.s12.code).toBe(2);
+  expect(b.s12.d.mergePr).not.toHaveBeenCalled();
+  expect(parseSelfMergeLines189c(b.text102)).toEqual([expect.objectContaining({ issue: 102, pr: 12, judge: true })]);
+  expect(b.b).toEqual(expect.objectContaining({ ok: true, open: false }));
+
+  // 대조군 (C): mergePr는 던졌지만 GitHub은 PR이 MERGED라고 답한다(응답만 잃은 머지) — 그것은 판정 자동 머지다 → 같은 revert 두 건이 연다.
+  // (A)·(B)의 닫힘이 픽스처의 우연이 아니라 "머지가 일어나지 않았다"는 기록 덕이라는 증거다.
+  const c = await scenario({ mergePr: async () => { throw new Error("HTTP 502 after the merge"); }, prAfter: () => "MERGED" });
+  expect(c.s12.code).toBe(2);
+  expect(c.b).toEqual(expect.objectContaining({ ok: true, open: true }));
+  expect(c.b.reason).toMatch(/PR #11, PR #12/);
+  // 대조군 (D): GitHub이 머지 여부를 말하지 못하면 증거를 지우지 않는다 — 모르는 것을 "머지 안 됨"으로 읽지 않는다(틀려도 여는 쪽).
+  const dd = await scenario({ mergePr: async () => { throw new Error("socket hang up"); }, prAfter: () => { throw new Error("gh: HTTP 502"); } });
+  expect(dd.b).toEqual(expect.objectContaining({ ok: true, open: true }));
+  // 대조군 (E): #12도 진짜로 자동 머지됐다 → 연다.
+  const e = await scenario({ mergePr: async () => {} });
+  expect(e.s12.code).toBe(0);
+  expect(e.b).toEqual(expect.objectContaining({ ok: true, open: true }));
+}, 240000);

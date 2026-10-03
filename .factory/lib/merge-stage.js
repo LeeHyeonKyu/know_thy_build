@@ -10,6 +10,13 @@ import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-
 import { classifyProtected } from "./non-judge-paths.js";
 import { matchesAny } from "./glob.js";
 import { VETO_LABEL } from "./label-catalog.js";
+import { selfMergeLine, selfMergeVoidLine, BREAKER_RESET_COMMAND } from "./breaker.js";
+
+/**
+ * #189 (S4c) — 자기 변경 경로로 머지한 사실의 run 기록 줄. 생산자는 이것 하나이고(`lib/breaker.js`가 같은 모듈에서 읽는다),
+ * merge 스테이지가 **머지 순간에** 판정 비트와 함께 쓴다. 테스트 픽스처는 이 함수로 만든다.
+ */
+export { selfMergeLine };
 
 /**
  * ── #179 (S4a-2, ADR-033) — 자기 변경 경로의 거부권 창 ──────────────────────────────────────────────────────
@@ -378,6 +385,8 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
  * 여기서 다시 구현하지 않고 그대로 주입받는다.
+ * persistSelfMerge({line,issue,pr,sha}) — #189 rework r5 cf1: 자기 변경 경로의 자동 머지 줄을 mergePr **전에** factory/records에 올려
+ *    확인한다(→ {ok}|{ok:false,reason}). ok가 아니거나 없으면 머지하지 않고 blocked.
  * record(lines): run-record 한 줄(들)을 남긴다. refusal(t): 거부된 전이를 record 줄로 바꾼다(runStage와 동일 계약).
  * retryFromBlocked(KTB-15b, KTB-19 review I-2): run-stage가 이미 "이 blocked이 approved에서 왔다"를
  * 이슈 코멘트로 확인했을 때, 그 origin 라벨(`"factory:approved"`) 그대로 넘긴다 — falsy(`false`)면
@@ -1160,11 +1169,51 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: veto window closed — no ${VETO_LABEL} on #${issue} by ${closesAt}`]);
     return null;
   };
+  /**
+   * (6b'') #189 (S4c, ADR-033) — **자동 머지 회로차단기.** 자기 변경 경로(판정·비판정 둘 다)는 창을 열기 **전에** 한 번, 창이 닫혀
+   * (6b)를 다시 돈 **뒤에** 한 번 더 묻는다(창 60분 사이에 두 번째 revert가 들어올 수 있다). 열려 있으면 창을 열지 않고(상태·알림
+   * 코멘트 없음) 사람에게 넘기며, 사유는 언제부터·왜·어느 명령이 닫는지를 말한다. 모르는 상태(ok:false·throw·함수가 아닌 dep·
+   * 열림도 닫힘도 아닌 답)는 닫힘이 아니라 판정 불가(blocked)다. 값은 저장된 워터마크가 아니라 `d.breaker()`가 그때그때 계산한다.
+   *
+   * `d.breaker`가 **아예 없는** 호출자도 예외가 아니다(키가 없음·undefined·null 모두): 배선을 잊은 호출자가 차단기를 묻지 않고
+   * 자동 머지하는 길은 없다 — 그것이 곧 fail-open이다. 프로덕션 배선(run-stage `main()`의 `breaker: makeMergeBreakerDep(…)`)은
+   * 언제나 함수를 싣는다.
+   */
+  const breakerGate = async (when) => {
+    const what = `auto-merge breaker (${when})`;
+    if (typeof d.breaker !== "function") return await undecidable(what, "the breaker dep is not wired (not a function) — an unknown breaker is not a closed breaker");
+    let b;
+    try { b = await d.breaker(); } catch (e) { return await undecidable(what, `${e?.message || e}`); }
+    if (!b?.ok) return await undecidable(what, b?.reason || "the breaker state could not be read");
+    if (b.open === true) {
+      return await handToHuman({
+        reason: `breaker open since ${b.since}: ${b.reason} — ${HUMAN_MERGE_REQUIRED_TEXT}; only a person closes it: \`${BREAKER_RESET_COMMAND}\``,
+        sections: [{
+          heading: "자동 머지 차단기 열림",
+          why: [
+            `팩토리가 자동 머지한 판정 경로 PR이 main에서 연속으로 revert되어 차단기가 열려 있습니다(ADR-033, since ${b.since}).`,
+            `사유: ${b.reason}`,
+            "",
+            `차단기는 시간이 지나도 닫히지 않습니다 — 사람만 닫습니다: \`${BREAKER_RESET_COMMAND}\`.`,
+            "", "바뀐 보호 경로:",
+          ],
+          files: prot.files,
+        }],
+      });
+    }
+    if (b.open !== false) return await undecidable(what, `the breaker answered neither open nor closed (${JSON.stringify(b.open ?? null)})`);
+    record([`merge: auto-merge breaker closed ${when} — ${b.detail || "no detail"}`]);
+    return null;
+  };
   if (selfPath) {
+    const shut = await breakerGate("before the veto window");
+    if (shut !== null) return shut;
     const stopped = await vetoWindow({ selfPath, files: prot.files });
     if (stopped !== null) return stopped;
     const refused = await verifyReview();
     if (refused !== null) return refused;
+    const shutAfter = await breakerGate("after the veto window");
+    if (shutAfter !== null) return shutAfter;
   }
 
   // (6c) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는
@@ -1199,6 +1248,42 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     }
   }
 
+  // #189 rework r5 cf1 — **자동 머지의 증거를 머지 전에 굳힌다.** 차단기가 판정 자동 머지를 아는 길은 `factory/records`의 이 줄
+  // 하나뿐이다. 스테이지 끝 동기화(최선 노력)에만 맡기면, 그 동기화를 잃은 머지는 나중에 revert돼도 세어지지 않는다(fail-open).
+  // 그래서 줄을 run 기록에 쓰고(`record` — 가드가 이 줄을 trust한다) `d.persistSelfMerge`로 브랜치에 올려 **다시 읽어 확인한** 뒤에만
+  // 머지한다. 못 올리면(ok:false·던짐·배선 누락) 머지하지 않는다 — blocked(재시도는 sweeper가 민다). 판정 비트는 지금(`selfPath`) 적는다.
+  // skeptic r5 f1 — 머지가 일어나지 않았으면(거부·실패) 그 줄을 **무효 줄**로 지운다(`voidSelfMerge`): 그러지 않으면 사람이 나중에 그 PR을
+  // 손으로 머지했을 때 main의 squash 커밋이 그 줄을 "확인"해, 사람의 머지가 판정 자동 머지로 세어진다.
+  let voidSelfMerge = null;
+  if (selfPath) {
+    const nowIso = () => { try { return new Date(Number(d.now())).toISOString(); } catch { return new Date().toISOString(); } };
+    const at = nowIso();
+    const line = selfMergeLine({ issue, pr, kind: selfPath, sha, at });
+    record([line]);
+    voidSelfMerge = async (why) => {
+      const v = selfMergeVoidLine({ issue, pr, sha, at: nowIso(), voids: at });
+      record([v]);                                                    // 가드가 trust한다 — 스테이지 끝 동기화도 이 줄을 싣는다
+      let q;
+      if (typeof d.persistSelfMerge !== "function") q = { ok: false, reason: "the persistSelfMerge dep is not wired" };
+      else { try { q = await d.persistSelfMerge({ line: v, issue, pr, sha }); } catch (e) { q = { ok: false, reason: `${e?.message || e}` }; } }
+      record([q?.ok
+        ? `merge: self-merge evidence for PR #${pr} voided on factory/records — ${why}`
+        : `merge: self-merge void for PR #${pr} NOT confirmed on factory/records (${q?.reason || "no answer"}) — ${why}; it rides the stage-end sync, and if that is lost too a later person-merge of PR #${pr} counts as a judge-path auto-merge (the breaker can open early, never miss one)`]);
+    };
+    const refuse = async (why) => {
+      const reason = `self-merge evidence could not be made durable on factory/records before the merge — ${why}; PR #${pr} was not merged (a revert of a merge the breaker cannot see would never count)`;
+      await voidSelfMerge(`PR #${pr} was not merged (the evidence was refused before the merge)`);
+      const t = await toBlocked(reason);
+      record([`merge: ${reason}`, ...refusal(t)]);
+      return 2;
+    };
+    if (typeof d.persistSelfMerge !== "function") return await refuse("the persistSelfMerge dep is not wired");
+    let p;
+    try { p = await d.persistSelfMerge({ line, issue, pr, sha }); } catch (e) { return await refuse(`${e?.message || e}`); }
+    if (!p?.ok) return await refuse(p?.reason || "the writer gave no answer");
+    record([`merge: self-merge evidence for PR #${pr} confirmed on factory/records before the merge`]);
+  }
+
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
     // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
@@ -1206,6 +1291,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     else await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;
+    // skeptic r5 f1 — 머지 호출이 실패했다. 머지가 정말 일어나지 않았는지는 GitHub에 묻는다: OPEN/CLOSED라고 답하면 그 줄을 무효로
+    // 지운다. MERGED(응답만 잃은 머지)이거나 답을 못 얻으면 지우지 않는다 — 모르는 것을 "머지 안 됨"으로 읽지 않는다(틀려도 여는 쪽).
+    if (voidSelfMerge) {
+      let after = null;
+      try { after = await d.prInfo(); } catch { after = null; }
+      const state = after && Number(after.number) === Number(pr) && typeof after.state === "string" ? after.state : null;
+      if (state && state !== "MERGED") await voidSelfMerge(`mergePr failed and GitHub reports PR #${pr} ${state}`);
+      else record([`merge: self-merge evidence for PR #${pr} kept — ${state === "MERGED" ? "GitHub reports the PR MERGED despite the failed call" : "GitHub could not say whether the PR merged"}`]);
+    }
     const t = await toBlocked(reason);
     record([`merge: mergePr FAIL — ${reason}`, ...refusal(t)]);
     return 2;
@@ -1215,6 +1309,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
+  // #189 — 자기 변경 경로의 머지만 차단기의 증거가 된다. 그 줄은 위에서(머지 전에) 이미 적고 브랜치에서 확인했다(rework r5 cf1).
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
   // 남기므로 여기서는 record만 하고 계속 진행한다(이슈는 그래도 닫는다).

@@ -332,6 +332,10 @@
       "owner": "factory"
     },
     {
+      "dest": ".factory/lib/breaker.js",
+      "owner": "factory"
+    },
+    {
       "dest": ".factory/lib/budget.js",
       "owner": "factory"
     },
