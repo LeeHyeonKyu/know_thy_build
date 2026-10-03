@@ -32,6 +32,14 @@ export const NON_JUDGE_GLOBS = Object.freeze([
 ]);
 
 /**
+ * 위 목록 중 **어느 저장소에서나** 비판정인 부분 — 문서·리서치·운영 스크립트·보드 페이지(#178 이전의 운영 세션 목록 그대로).
+ * 나머지 항목(엔진 모듈과 그 `.factory/` 미러·테스트)은 **엔진 저장소에서만** 비판정이다: 채택자 저장소에서 `.factory/**`는 설치된
+ * 엔진이고 `[protected].factory`(사람이 머지하는 경계)이며, 그 저장소의 `factory/**`는 엔진이 아니다(#178 rework cf1·arch1).
+ * 이 글롭들은 `NON_JUDGE_GLOBS`의 부분집합이다 — 목록은 여전히 하나이고, 이것은 그 목록의 엔진 밖 단면이다.
+ */
+export const ANY_REPO_NON_JUDGE_GLOBS = Object.freeze(["docs/**", "templates/factory/docs/**"]);
+
+/**
  * 위 글롭 안에서도 판정 경로인 것. CHARTER는 규칙이고, runs는 러너가 쓰는 증거이며(`[protected].runner_only`), 템플릿
  * CHARTER는 모든 채택자의 규칙이 찍혀 나오는 원본이다(#178 d1). 세션 지시문(`CLAUDE*.md`·`AGENTS*.md`·`.mcp*.json`)은
  * 어디에 있든 에이전트 세션의 주입 채널이다(`[protected].factory`와 같은 글롭).
@@ -72,8 +80,30 @@ export const JUDGE_MODULES = Object.freeze([
 const isPlainRepoPath = (f) => typeof f === "string" && f.length > 0 && !f.startsWith("/")
   && !f.split("/").some((seg) => seg === ".." || seg === "." || seg === "");
 
-/** 경로 하나가 비판정인가 — 평범한 저장소 경로이고, 목록에 걸리고, 빼기 목록에 걸리지 않는다. */
+/**
+ * 경로 하나가 **엔진 저장소에서** 비판정인가 — 평범한 저장소 경로이고, 목록에 걸리고, 빼기 목록에 걸리지 않는다. 목록 소속만 보는
+ * 술어다(import 닫힘 테스트가 쓴다). 저장소 맥락이 필요한 판정은 이것을 직접 쓰지 않고 `isNonJudgePathIn`·`classifyProtected`를 쓴다.
+ */
 export const isNonJudgePath = (p) => isPlainRepoPath(p) && matchesAny(NON_JUDGE_GLOBS, p) && !matchesAny(NON_JUDGE_EXCLUDES, p);
+
+/**
+ * 저장소 맥락을 받는 비판정 판정. `engine`이 정확히 `true`일 때만 목록 전체이고, 그 밖(채택자 저장소 — 기본값)에서는
+ * `ANY_REPO_NON_JUDGE_GLOBS`에 드는 것만 비판정이다. 닫힌 쪽이 기본이다: 맥락을 모르면 엔진 파일은 판정 경로다.
+ */
+export const isNonJudgePathIn = (p, { engine = false } = {}) =>
+  isNonJudgePath(p) && (engine === true || matchesAny(ANY_REPO_NON_JUDGE_GLOBS, p));
+
+/**
+ * 이 체크아웃이 엔진(know-thy-build 자신)인가. 하네스의 `[project].name`이 엔진의 이름이고, 엔진에만 있는 표지 파일이 **모두**
+ * 있어야 한다 — 채택자의 `factory/**`는 엔진이 아니고, 이름 하나(채택자가 고를 수 있다)로는 엔진이 되지 않는다. 판단이 서지
+ * 않으면 `false`(닫힌 쪽). `exists(path)`는 저장소 상대 경로를 받는다.
+ */
+export const ENGINE_PROJECT_NAME = "know-thy-build";
+export const ENGINE_MARKERS = Object.freeze(["factory/lib/non-judge-paths.js", "templates/factory/factory/harness.toml"]);
+export function isEngineCheckout({ projectName, exists } = {}) {
+  if (projectName !== ENGINE_PROJECT_NAME || typeof exists !== "function") return false;
+  return ENGINE_MARKERS.every((m) => exists(m) === true);
+}
 
 /**
  * 보호 경로를 비판정/판정으로 가른다. `engine`이 `true`가 아니면(채택자 저장소 — 그 저장소의 `factory/**`는 엔진이 아니다)

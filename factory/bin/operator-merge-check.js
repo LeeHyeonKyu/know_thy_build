@@ -8,7 +8,10 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { operatorMergeVerdict } from "../lib/operator-merge.js";
+import { isEngineCheckout } from "../lib/non-judge-paths.js";
 
 const refuse = (why) => { process.stderr.write(`operator-merge: refused — ${why}\n`); process.exit(2); };
 if (process.env.GITHUB_ACTIONS) refuse("a CI runner is a stage, not the operator — stages never merge through this door");
@@ -28,6 +31,13 @@ for (const p of [".factory/harness.toml"]) {
   if (m) defaultBranch = m[1];
 }
 
-const v = operatorMergeVerdict(pr, { defaultBranch });
+// 엔진 저장소인가(#178 rework cf1): 이 bin이 놓인 체크아웃(`<root>/.factory/bin` 또는 `<root>/factory/bin`)의 하네스 이름과 엔진
+// 표지로 정한다. 아니면(채택자 저장소, 또는 판단 불가) 엔진 파일은 판정 경로다 — 채택자의 `.factory/**`는 사람이 머지한다.
+const root = fileURLToPath(new URL("../../", import.meta.url));
+const harnessAt = join(root, ".factory", "harness.toml");
+const projectName = existsSync(harnessAt) ? /^\s*name\s*=\s*"([^"]+)"/m.exec(readFileSync(harnessAt, "utf8"))?.[1] : undefined;
+const engine = isEngineCheckout({ projectName, exists: (rel) => existsSync(join(root, rel)) });
+
+const v = operatorMergeVerdict(pr, { defaultBranch, engine });
 if (!v.ok) refuse(`PR #${n}: ${v.reasons.join("; ")}`);
 process.stdout.write(`operator-merge: PR #${n} — ${pr.files.length} file(s), all non-judge paths, checks green — the operator may merge\n`);
