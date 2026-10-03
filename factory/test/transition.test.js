@@ -700,3 +700,30 @@ test("test_196_retry_guidance_names_single_verb", async () => {
   expect(steps).toContain(REQUEUE("<n>"));
   expect(steps).toContain(RESUME("<n>"));
 });
+
+// ── #196 self-critique f2 — 라이브러리 경로의 거절도 **이 이슈 번호로** 명령을 든다(템플릿 `<n>`이 아니라) ─────────────────────
+// HUMAN_FLAG 경로의 `reason`은 기존 KTB 테스트(위 (e), `reason: HUMAN_FLAG_REFUSED`)가 정확히 핀한다 — 그래서 그 경로는 같은 거절
+// 객체에 `requeue`·`resume` 필드로 이 이슈의 정확한 명령을 싣고(bin/transition.js는 객체 전체를 JSON으로 찍는다), RETRY_SCRIPT 경로는
+// 사유 문장 자체가 이 이슈 번호를 말한다.
+test("test_196_library_retry_refusals_name_this_issue_not_a_template", async () => {
+  const REQUEUE = (n) => `node .factory/bin/transition.js ${n} factory:queue`;
+  const RESUME = (n) => `node .factory/bin/transition.js ${n} --human --retry`;
+  // ① 스크립트의 `--retry`(사람 플래그 없이, 러너 env 아님): 사유 문장이 42번의 두 명령을 그대로 말한다
+  const s = fakeGh(["factory:needs-human"]);
+  const scriptRetry = await transition({ gh: s, issue: 42, retry: true, env: {} });
+  expect(scriptRetry.ok).toBe(false);
+  expect(scriptRetry.reason).toMatch(/human-only/);
+  expect(scriptRetry.reason).toContain(REQUEUE(42));
+  expect(scriptRetry.reason).toContain(RESUME(42));
+  expect(scriptRetry.reason).not.toContain("<n>");
+  expect(scriptRetry).toMatchObject({ requeue: REQUEUE(42), resume: RESUME(42) });
+  expect(s.setFactoryLabel).not.toHaveBeenCalled();
+  // ② 러너·에이전트 env의 `--human --retry`: gh 호출 전 거절, 같은 객체가 42번의 정확한 명령을 싣는다
+  for (const env of [{ GITHUB_ACTIONS: "true" }, { CLAUDE_PROJECT_DIR: "/w" }]) {
+    const h = fakeGh(["factory:needs-human"]);
+    const r = await transition({ gh: h, issue: 42, human: true, retry: true, env });
+    expect(r.ok).toBe(false);
+    expect(r).toMatchObject({ requeue: REQUEUE(42), resume: RESUME(42) });
+    expect(h.issue).not.toHaveBeenCalled();
+  }
+});

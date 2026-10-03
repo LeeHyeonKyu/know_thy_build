@@ -3422,3 +3422,40 @@ test("test_196_other_blocked_causes_keep_their_budgets_and_sentences", async () 
     expect(esc.engineVersion).toBe("1.4.50");
   }
 });
+
+// ── #196 self-critique f3 — 시도 횟수는 **원인별로** 센다: engine-crash 재시도 마커가 다른 원인의 KTB-15b·KTB-22 예산을 먹지 않고,
+// 앞선 다른 원인의 재시도가 engine-crash의 상한을 먹지 않는다(같은 주기·같은 스테이지의 섞인 사건). 이 변경 전에는 크래시가 R을 탔고
+// blocked-retry 마커를 남기지 않았다 — 그래서 "다른 원인은 그대로"는 섞인 사건에서도 같은 시도 횟수여야 한다.
+const reblock196 = async (gh, cause, reason) => { await gh.setFactoryLabel(null, "factory:in-progress"); return seedBlocked196(gh, cause, reason); };
+const CRASH196 = "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')";
+
+test("test_196_engine_crash_attempts_are_counted_apart_from_other_causes", async () => {
+  // (a) 크래시 재시도 1회 뒤 같은 스테이지가 다른 원인으로 blocked — 그 원인의 원래 예산을 그대로 받는다
+  for (const [cause, tries] of [["other", 1], ["gates", 1], ["undecidable", 1], ["api-error", 3]]) {
+    const gh = labelFaithfulGh196(5, "factory:in-progress");
+    expect((await seedBlocked196(gh, "engine-crash", CRASH196)).ok).toBe(true);
+    const args = sweepArgs196(gh);
+    expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "implement", cause: "engine-crash" });
+    expect((await reblock196(gh, cause, `stage failed (${cause})`)).ok).toBe(true);
+    const after = [];
+    for (let i = 0; i < 8 && gh.label === "factory:blocked"; i++) after.push(...(await sweep(args)));
+    expect({ cause, retried: after.filter((a) => a.kind === "blocked-retry").length }).toEqual({ cause, retried: tries });
+    expect(after).toContainEqual({ kind: "blocked-escalated", issue: 5, cause });
+    const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+    expect({ cause, reason: esc.reason }).toEqual({ cause, reason: BLOCKED_ESCALATION_REASON[cause] });
+  }
+  // (b) 다른 원인의 재시도 1회 뒤 같은 스테이지가 엔진 크래시로 blocked — 크래시는 자기 상한만큼 다시 밀린 뒤에야 엔진 결함으로 간다
+  for (const cap of [1, 2]) {
+    const gh = labelFaithfulGh196(5, "factory:in-progress");
+    expect((await seedBlocked196(gh, "other", "stage failed (other)")).ok).toBe(true);
+    const args = sweepArgs196(gh, { engineCrashMaxRetries: cap });
+    expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "implement", cause: "other" });
+    expect((await reblock196(gh, "engine-crash", CRASH196)).ok).toBe(true);
+    const after = [];
+    for (let i = 0; i < 8 && gh.label === "factory:blocked"; i++) after.push(...(await sweep(args)));
+    expect({ cap, retried: after.filter((a) => a.kind === "blocked-retry" && a.cause === "engine-crash").length }).toEqual({ cap, retried: cap });
+    expect(after).toContainEqual({ kind: "blocked-escalated", issue: 5, cause: "engine-crash" });
+    const esc = args.transition.mock.calls.map((c) => c[0]).find((a) => a.to === "factory:needs-human");
+    expect(esc.reason).toMatch(/engine defect/);
+  }
+});

@@ -4203,12 +4203,19 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
    팔이 `ENGINE_CRASH_MAX_RETRIES = 1`(코드 상수, `API_ERROR_MAX_RETRIES` 옆 — CHARTER 값이 아니다: 이 이슈의 must_not. `sweep()`의
    `engineCrashMaxRetries` 인자의 기본값이고, 테스트는 다른 값을 주어 그 배선을 핀한다 — 기본 분기의 1과 값이 같아 값만으로는 배선이 안 보인다)만큼 같은 스테이지를
    다시 밀고, 그다음은 `BLOCKED_ESCALATION_REASON["engine-crash"]`로 needs-human이다. 그 문장은 "engine defect"라고 말하고, 설치본 버전과
-   재큐 명령(`node .factory/bin/transition.js <n> factory:queue`, 이슈 번호로 채운다)을 싣는다. 다른 원인의 예산은 그대로다.
+   재큐 명령(`node .factory/bin/transition.js <n> factory:queue`, 이슈 번호로 채운다)을 싣는다. 다른 원인의 예산은 그대로다 — **섞인
+   사건에서도**: 시도 횟수는 원인별 장부로 센다. engine-crash 재시도의 blocked-retry 마커만 `cause=engine-crash` 태그를 달고(다른 원인의
+   마커는 바이트 하나 안 바뀐다), engine-crash는 그 태그 마커만, 다른 원인은 태그 없는 마커만 센다. 이 변경 전에는 크래시가 R을 타서
+   blocked-retry 마커를 남기지 않았다 — 한 장부로 세면 같은 주기의 크래시 재시도가 뒤따른 `other`의 KTB-15b 한 번이나 `api-error`의 세
+   번 중 하나를 먹고, 앞선 `other` 재시도가 크래시의 상한을 먹는다. 대기 판정(`blockedRetryPendingRun`)은 "마지막으로 띄운 런"을 보므로
+   두 장부를 다 본다.
 4. **KTB-32는 그대로다 — "다시 돌려"는 안내로 하나가 된다.** `--retry`(--human 없이)는 여전히 거절된다. 바뀐 것은 거절·usage·
    `docs/factory/ops/person-steps.sh`가 모두 두 명령을 그대로 말한다는 것이다: 에이전트·CI는 재큐(`<n> factory:queue`), 사람은 중단 지점 재개
    (`<n> --human --retry`). 호출자에 따라 갈리는 단일 `--retry`는 **미뤘다**: transition.test.js의 KTB-32 고정 두 개를 뒤집어야 하고,
    `factory/hooks/block-dangerous.sh`(이 이슈의 must_not)가 에이전트 세션에서 그 동사를 막으므로 바로 그 세션에서는 어차피 쓸 수 없다. 사람이
-   소유하는 별도 이슈의 몫이다.
+   소유하는 별도 이슈의 몫이다. 템플릿 `<n>`은 이슈 번호를 모를 때(usage 본문·상수)뿐이다: 라이브러리 `transition()`의 두 재시도 거절은
+   거절 객체에 그 이슈의 두 명령(`requeue`·`resume`)을 싣고, 스크립트 `--retry` 거절은 사유 문장도 그 번호로 채운다. 사람 플래그 거절의
+   `reason`은 상수 그대로다 — 기존 KTB 테스트가 그 문자열을 정확히 핀한다.
 
 **좁힌 것(이슈 초안 대비)**: K 면제 없음(크래시는 `→ rework` 전이를 만들지 않는다 — 셀 것이 없다); 전이 마커에 `engine=true`·`retry-kind=` 필드
 없음(`TRANSITION_TO` 불변 — 옛 엔진이 새 코멘트를 못 읽는 일이 없다); `usage:` 줄 형식·`USAGE_RE` 불변; `engineUsd` 상한 없음; 완료됐지만 엔진
