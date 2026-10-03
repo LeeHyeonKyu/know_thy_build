@@ -2476,3 +2476,562 @@ test("test_184_any_throw_between_first_red_and_merge_never_merges", async () => 
   expect(transitionsOf(viaSuites.d)).toEqual([expect.objectContaining({ to: "factory:needs-human", reason: "gates RED at merge" })]);
   expect(refusalLinesOf(viaSuites.lines)).toEqual([expect.stringContaining("report read failed")]);
 });
+
+// ── #179 (S4a-2, ADR-033) — 자기 변경 경로: 스위치 · 거부권 창 · 판정 경로 만장일치 ─────────────────────────────
+// 보호 경로 PR은 오늘 전부 사람이 머지한다. CHARTER `self_change` 스위치가 켜지고(기본 off) 이 체크아웃이 엔진이면,
+// 비판정 경로 PR(그리고 자기 스위치 + 만장일치 load-bearing 리뷰가 있는 판정 경로 PR)은 잡 안의 거부권 창을 지난 뒤
+// 팩토리가 머지한다. 스위치가 꺼져 있으면 출력은 오늘과 바이트 단위로 같아야 한다.
+import { VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { loadCharter as loadCharter179 } from "../lib/config.js";
+import { classifyProtected as classifyProtected179 } from "../lib/non-judge-paths.js";
+import { fileURLToPath as fileURLToPath179 } from "node:url";
+
+/**
+ * dw1의 기대값 — **base 커밋(3e21223)의 `runMergeStage`가 실제로 낸 출력을 그대로 옮긴 것**이다. 새 헬퍼로 다시 만들지
+ * 않는다: 이 문자열이 바뀌면 그것은 스위치가 꺼진 소유자에게 보이는 변화다.
+ */
+const BASE_FIXTURES_179 = {
+  judge: {
+    files: [".factory/harness.toml", "factory/lib/merge-stage.js"],
+    reason: "protected paths changed — human merge required: .factory/harness.toml, factory/lib/merge-stage.js (see PR #9)",
+    comment: "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**\n\n이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은\n사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).\n\n변경된 보호 경로:\n\n- `.factory/harness.toml`\n- `factory/lib/merge-stage.js`\n\ndiff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.\n추적 이슈 #7는 `factory:needs-human`으로 옮겼습니다.",
+    lines: [
+      "merge: PR #9 is OPEN",
+      "merge: PR #9 not conflicting (MERGEABLE)",
+      "merge: protected paths changed — human merge required: .factory/harness.toml, factory/lib/merge-stage.js",
+    ],
+  },
+  non_judge: {
+    files: ["factory/lib/status.js", "docs/factory/ops/runbook.md"],
+    reason: "protected paths changed — human merge required: factory/lib/status.js, docs/factory/ops/runbook.md (see PR #9)",
+    comment: "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**\n\n이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은\n사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).\n\n변경된 보호 경로:\n\n- `factory/lib/status.js`\n- `docs/factory/ops/runbook.md`\n\ndiff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.\n추적 이슈 #7는 `factory:needs-human`으로 옮겼습니다.",
+    lines: [
+      "merge: PR #9 is OPEN",
+      "merge: PR #9 not conflicting (MERGEABLE)",
+      "merge: protected paths changed — human merge required: factory/lib/status.js, docs/factory/ops/runbook.md",
+    ],
+  },
+  both: {
+    files: ["factory/lib/status.js", "factory/lib/gates.js"],
+    reason: "protected paths changed — human merge required: factory/lib/status.js, factory/lib/gates.js (see PR #9)",
+    comment: "**보호 경로 변경 — 팩토리가 자동 머지하지 않습니다.**\n\n이 PR은 `[protected].factory` 경로를 바꿉니다. 게이트 정의·워크플로·CHARTER의 변경은\n사람의 판단이 곧 판결이라, 팩토리가 스스로 머지하지 않고 사람에게 넘깁니다(ADR-020).\n\n변경된 보호 경로:\n\n- `factory/lib/status.js`\n- `factory/lib/gates.js`\n\ndiff를 확인한 뒤 사람이 직접 머지해 주세요 — `factory/integrity` 체크는 변조만 보므로 GREEN일 수 있습니다.\n추적 이슈 #7는 `factory:needs-human`으로 옮겼습니다.",
+    lines: [
+      "merge: PR #9 is OPEN",
+      "merge: PR #9 not conflicting (MERGEABLE)",
+      "merge: protected paths changed — human merge required: factory/lib/status.js, factory/lib/gates.js",
+    ],
+  },
+};
+
+const MIN_179 = 60 * 1000;
+const JOB_START_179 = Date.parse("2026-10-03T10:00:00.000Z");
+/** 주입한 시계: `sleep(ms)`가 시간을 그만큼 민다 — 실제로는 한 순간도 잠들지 않는다. */
+const clock179 = (startMs = JOB_START_179 + 2 * MIN_179) => {
+  let t = startMs;
+  return { now: vi.fn(() => t), sleep: vi.fn(async (ms) => { t += ms; }) };
+};
+/**
+ * 실제 생산자(run-stage)의 모양: GitHub이 그 커밋에 들고 있는 상태 목록(최신순)을 흉내낸다. open은 맨 앞에 하나를 올리고,
+ * read는 그 context의 최신 항목을 돌려준다. `existing`은 이 런이 열기 전부터 붙어 있던 상태들이다.
+ */
+const vetoWindow179 = ({ creator = "ktb-bot", openResult = { ok: true }, existing = [] } = {}) => {
+  const statuses = [...existing];
+  return {
+    statuses,
+    open: vi.fn(async ({ sha, description }) => {
+      if (openResult.ok) statuses.unshift({ context: VETO_WINDOW_CONTEXT, state: "pending", description, creatorLogin: creator, sha });
+      return openResult;
+    }),
+    read: vi.fn(async () => ({ ok: true, status: statuses.find((x) => x.context === VETO_WINDOW_CONTEXT) ?? null })),
+  };
+};
+const SELF_ON_179 = { auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 60 };
+/** 이 저장소의 실제 CHARTER가 내는 NEVER_AUTOMATE 글롭 — 실제 생산자(`loadCharter`)에서 읽는다. */
+const NEVER_AUTOMATE_179 = loadCharter179(fileURLToPath179(new URL("../..", import.meta.url))).never_automate;
+const selfD179 = (over = {}) => {
+  const c = clock179();
+  return baseD({
+    protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.non_judge.files })),
+    engine: true,
+    selfChange: SELF_ON_179,
+    neverAutomate: NEVER_AUTOMATE_179,
+    now: c.now,
+    sleep: c.sleep,
+    jobStartedAt: JOB_START_179,
+    jobTimeoutMinutes: 90,
+    vetoWindow: vetoWindow179(),
+    vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [] })),
+    ...over,
+  });
+};
+const run179 = async (d, over = {}) => {
+  const { lines, record } = makeRecord();
+  const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus: basePostStatus(), retryFromBlocked: over.retryFromBlocked ?? false });
+  return { code, lines };
+};
+
+test("test_179_switch_off_is_byte_identical", async () => {
+  const off = { auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 };
+  const variants = [
+    ["selfChange unwired", { engine: true }],
+    ["both switches false", { engine: true, selfChange: off }],
+    ["switches on, engine false", { engine: false, selfChange: { ...off, auto_merge_non_judge: true, auto_merge_judge: true } }],
+    ["switches on, engine unwired", { selfChange: { ...off, auto_merge_non_judge: true, auto_merge_judge: true } }],
+  ];
+  for (const [kind, fx] of Object.entries(BASE_FIXTURES_179)) {
+    for (const [label, wiring] of variants) {
+      const c = clock179();
+      const window = vetoWindow179();
+      const vetoLabel = vi.fn(async () => ({ ok: true, vetoes: [] }));
+      const d = baseD({ protectedPaths: vi.fn(async () => ({ ok: true, files: fx.files })), now: c.now, sleep: c.sleep, vetoWindow: window, vetoLabel, jobStartedAt: JOB_START_179, jobTimeoutMinutes: 90, ...wiring });
+      const { code, lines } = await run179(d);
+      const at = `${kind} / ${label}`;
+      expect(code, at).toBe(2);
+      expect(d.transition.mock.calls.map((x) => x[0]), at).toEqual([{ to: "factory:needs-human", reason: fx.reason }]);
+      expect(d.comment.mock.calls, at).toEqual([[9, fx.comment]]);
+      expect(lines, at).toEqual(fx.lines);
+      for (const dep of [window.open, window.read, vetoLabel, c.sleep, c.now, d.gates, d.mergePr]) expect(dep, at).not.toHaveBeenCalled();
+    }
+  }
+  // 판정 경로 PR은 비판정 스위치만 켜져 있으면 오늘 그대로다(판정 경로에는 자기 스위치가 있다).
+  for (const kind of ["judge", "both"]) {
+    const fx = BASE_FIXTURES_179[kind];
+    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files: fx.files })) });
+    const { lines } = await run179(d);
+    expect(d.transition.mock.calls.map((x) => x[0]), kind).toEqual([{ to: "factory:needs-human", reason: fx.reason }]);
+    expect(d.comment.mock.calls, kind).toEqual([[9, fx.comment]]);
+    expect(lines, kind).toEqual(fx.lines);
+    expect(d.vetoWindow.open, kind).not.toHaveBeenCalled();
+  }
+});
+
+test("test_179_veto_window_opens_waits_and_closes", async () => {
+  const d = selfD179();
+  const { code, lines } = await run179(d);
+  expect(code).toBe(0);
+  const openedAt = JOB_START_179 + 2 * MIN_179;
+  const closes = new Date(openedAt + 60 * MIN_179).toISOString();
+  expect(closes).toBe("2026-10-03T11:02:00.000Z");
+
+  // 상태 한 번, 코멘트 한 번 — 둘 다 첫 sleep보다 먼저.
+  expect(d.vetoWindow.open).toHaveBeenCalledTimes(1);
+  expect(d.vetoWindow.open).toHaveBeenCalledWith(expect.objectContaining({ sha: HEAD, description: `closes=${closes}` }));
+  expect(d.comment).toHaveBeenCalledTimes(1);
+  const [target, body] = d.comment.mock.calls[0];
+  expect(target).toBe(9);
+  expect(body).toContain("`factory:veto`");
+  expect(body).toContain("#7");                                    // 라벨을 붙일 곳: 추적 이슈(vetoLabel이 읽는 곳)
+  expect(body).toContain(closes);
+  const firstSleep = d.sleep.mock.invocationCallOrder[0];
+  expect(d.vetoWindow.open.mock.invocationCallOrder[0]).toBeLessThan(firstSleep);
+  expect(d.comment.mock.invocationCallOrder[0]).toBeLessThan(firstSleep);
+
+  // 5분 간격 폴링, 창이 닫힐 때까지(60분 = 12번 잠들고, 열 때와 매 깸마다 한 번씩 = 13번 읽는다).
+  expect(d.sleep.mock.calls.map((x) => x[0])).toEqual(Array(12).fill(5 * MIN_179));
+  expect(d.vetoLabel).toHaveBeenCalledTimes(13);
+  expect(d.vetoLabel).toHaveBeenCalledWith({ since: new Date(openedAt).toISOString() });
+  // 마지막 폴링은 창이 닫히는 순간 이후다 — 그 전에 머지하지 않는다.
+  expect(d.mergePr).toHaveBeenCalledTimes(1);
+  expect(d.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(d.vetoLabel.mock.invocationCallOrder.at(-1));
+  expect(d.now()).toBeGreaterThanOrEqual(openedAt + 60 * MIN_179);
+  expect(d.transition.mock.calls.map((x) => x[0].to)).toEqual(["factory:merged"]);
+  expect(lines.some((l) => l.includes(`veto window opened — closes=${closes}`))).toBe(true);
+  expect(lines.some((l) => /veto window closed/.test(l))).toBe(true);
+
+  // 정책 hand-off는 언제나 새 경로를 이긴다 — 창은 열리지 않고, 오늘의 사유 그대로 needs-human.
+  const policies = [
+    [{ file: "factory/test/merge-stage.test.js", rule: "tests-modified — an existing test assertion changed" }, "existing tests modified or deleted — human merge required: factory/test/merge-stage.test.js (see PR #9)"],
+    [{ file: ".claude/agents/x.md", rule: "additive-only sections (## Examples) — removals or edits outside allowed sections" }, "agent role sections edited outside Examples/Perspectives — human merge required: .claude/agents/x.md (see PR #9)"],
+    [LESSONS_GONE, "lessons files deleted or moved away — human merge required: .factory/lessons/reviewer-qa.md (see PR #9)"],
+    [{ file: ".factory/harness.toml", rule: "harness.toml [gates.thresholds] edited — human merge required" }, "harness.toml frozen sections edited — human merge required: [gates.thresholds] (see PR #9)"],
+  ];
+  for (const [v, reason] of policies) {
+    const p = selfD179({ policyViolations: vi.fn(async () => ({ ok: true, files: [v.file], violations: [v] })) });
+    expect(await run179(p).then((r) => r.code), reason).toBe(2);
+    expect(p.transition.mock.calls.map((x) => x[0]), reason).toEqual([{ to: "factory:needs-human", reason }]);
+    expect(p.vetoWindow.open, reason).not.toHaveBeenCalled();
+    expect(p.vetoLabel, reason).not.toHaveBeenCalled();
+    expect(p.sleep, reason).not.toHaveBeenCalled();
+    expect(p.mergePr, reason).not.toHaveBeenCalled();
+  }
+});
+
+test("test_179_veto_cannot_be_bypassed", async () => {
+  const openedAt = JOB_START_179 + 2 * MIN_179;
+  // (a) 창 안의 `labeled factory:veto` — 다음 폴링에서 라벨이 사라졌어도(dep은 창이 열린 뒤의 이벤트를 돌려준다) 거부권이다.
+  let polls = 0;
+  const a = selfD179({ vetoLabel: vi.fn(async () => (++polls === 3 ? { ok: true, vetoes: [{ login: "LeeHyeonKyu", at: new Date(openedAt + 7 * MIN_179).toISOString() }] } : { ok: true, vetoes: [] })) });
+  const ra = await run179(a);
+  expect(ra.code).toBe(2);
+  const reasonA = a.transition.mock.calls.at(-1)[0];
+  expect(reasonA.to).toBe("factory:needs-human");
+  expect(reasonA.reason).toContain("vetoed by @LeeHyeonKyu — human merge required");
+  expect(reasonA.reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(a.mergePr).not.toHaveBeenCalled();
+  expect(a.vetoLabel).toHaveBeenCalledTimes(3);                       // 거부권을 본 순간 멈춘다
+  // 그 이벤트가 다음 폴링에서 사라지는 모양: 한 번만 보인 거부권도 거부권이다.
+  let seen = 0;
+  const a2 = selfD179({ vetoLabel: vi.fn(async () => (++seen === 2 ? { ok: true, vetoes: [{ login: "ktb-bot", at: new Date(openedAt + 5 * MIN_179).toISOString() }] } : { ok: true, vetoes: [] })) });
+  expect((await run179(a2)).code).toBe(2);
+  expect(a2.transition.mock.calls.at(-1)[0].reason).toContain("vetoed by @ktb-bot — human merge required");
+  expect(a2.mergePr).not.toHaveBeenCalled();
+  // 행위자를 모르면 거부권은 그대로 서고, 사유가 그렇다고 말한다.
+  const a3 = selfD179({ vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: null, at: null }] })) });
+  expect((await run179(a3)).code).toBe(2);
+  const reasonA3 = a3.transition.mock.calls.at(-1)[0];
+  expect(reasonA3.to).toBe("factory:needs-human");
+  expect(reasonA3.reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(reasonA3.reason).toMatch(/vetoed by an unidentified account/);
+  expect(a3.mergePr).not.toHaveBeenCalled();
+
+  // (b) 이미 있는 `factory/veto-window` 상태(지난 closes=, 팩토리 계정이 올렸든 아니든)는 기다림을 줄이지 못한다.
+  for (const creator of ["ktb-bot", "mallory"]) {
+    const stale = { context: VETO_WINDOW_CONTEXT, state: "pending", description: "closes=2026-10-01T00:00:00.000Z", creatorLogin: creator };
+    const window = vetoWindow179({ existing: [stale] });                   // 열기 전에 물으면 이것이 최신이다
+    const b = selfD179({ vetoWindow: window, commitStatuses: vi.fn(async () => [
+      { context: VETO_WINDOW_CONTEXT, state: "pending", description: stale.description, creatorLogin: creator },
+      { context: "factory/review", state: "success", creatorLogin: "ktb-bot" },
+      { context: "factory/gates", state: "success", creatorLogin: "ktb-bot" },
+    ]) });
+    const rb = await run179(b);
+    // 위조 상태를 먼저 읽고 믿었다면 기다림 없이 머지했거나 blocked였을 것이다. 정답: 자기 창을 열고 끝까지 기다린 뒤 머지.
+    expect(rb.code, creator).toBe(0);
+    expect(b.vetoWindow.open, creator).toHaveBeenCalledTimes(1);
+    expect(b.sleep.mock.calls.reduce((s, x) => s + x[0], 0), creator).toBe(60 * MIN_179);
+    expect(b.mergePr, creator).toHaveBeenCalledTimes(1);
+  }
+
+  // (c) 기다린 뒤 라이브 head가 고정한 sha와 다르면, 또는 정족수가 그 head에 대해 더 이상 서지 않으면 mergePr는 없다.
+  let headReads = 0;
+  const c1 = selfD179({ prHeadShaLive: vi.fn(async () => (++headReads === 1 ? HEAD : "c".repeat(40))) });
+  expect((await run179(c1)).code).toBe(2);
+  expect(c1.sleep).toHaveBeenCalled();                                    // 창은 실제로 열렸다
+  expect(c1.mergePr).not.toHaveBeenCalled();
+  expect(c1.transition.mock.calls.at(-1)[0].reason).toMatch(/PR head moved/);
+  let evReads = 0;
+  const c2 = selfD179({ reviewEvidence: vi.fn(async () => (++evReads === 1
+    ? { ok: true, data: REVIEW_OK }
+    : { ok: true, data: { ...REVIEW_OK, verdicts: [approve("correctness"), { ...approve("qa"), verdict: "request_changes", must_fix: [{ id: "qa1", text: "x" }] }] } })) });
+  expect((await run179(c2)).code).toBe(2);
+  expect(c2.sleep).toHaveBeenCalled();
+  expect(c2.mergePr).not.toHaveBeenCalled();
+  expect(c2.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+});
+
+test("test_179_window_deps_and_job_budget_fail_closed", async () => {
+  const blockedOnly = (d, at) => {
+    const ts = d.transition.mock.calls.map((x) => x[0]);
+    expect(ts.at(-1).to, at).toBe("factory:blocked");
+    expect(d.mergePr, at).not.toHaveBeenCalled();
+    return ts.at(-1).reason;
+  };
+  const undecidableLine = (lines, at) => expect(lines.some((l) => /^merge: veto window could not be computed: /.test(l)), at).toBe(true);
+
+  // 상태 게시 실패 — postStatus처럼 best-effort가 아니다.
+  const w1 = vetoWindow179({ openResult: { ok: false, reason: "HTTP 403" } });
+  const d1 = selfD179({ vetoWindow: w1 });
+  const r1 = await run179(d1);
+  expect(r1.code).toBe(2);
+  expect(blockedOnly(d1, "open ok:false")).toMatch(/HTTP 403/);
+  undecidableLine(r1.lines, "open ok:false");
+  expect(d1.sleep).not.toHaveBeenCalled();
+  const d1b = selfD179({ vetoWindow: { open: vi.fn(async () => { throw new Error("gh api exited 1"); }), read: vi.fn() } });
+  const r1b = await run179(d1b);
+  expect(blockedOnly(d1b, "open throws")).toMatch(/gh api exited 1/);
+  undecidableLine(r1b.lines, "open throws");
+
+  // 폴링 하나라도 실패하면(ok:false든 throw든) "거부권 없음"이 아니라 blocked.
+  let n = 0;
+  const d2 = selfD179({ vetoLabel: vi.fn(async () => (++n === 4 ? { ok: false, reason: "label events unreadable" } : { ok: true, vetoes: [] })) });
+  const r2 = await run179(d2);
+  expect(blockedOnly(d2, "poll ok:false")).toMatch(/label events unreadable/);
+  undecidableLine(r2.lines, "poll ok:false");
+  expect(d2.vetoLabel).toHaveBeenCalledTimes(4);
+  const d2b = selfD179({ vetoLabel: vi.fn(async () => { throw new Error("socket hang up"); }) });
+  const r2b = await run179(d2b);
+  expect(blockedOnly(d2b, "poll throws")).toMatch(/socket hang up/);
+  undecidableLine(r2b.lines, "poll throws");
+
+  // 팩토리 계정을 모르면 상태 게시자를 대조할 수 없다 → blocked. 게시자가 팩토리 계정이 아니어도 blocked.
+  const d3 = selfD179({ factoryLogins: vi.fn(async () => ({ ok: true, logins: ["ktb-bot"] })) });
+  d3.factoryLogins.mockImplementationOnce(async () => ({ ok: true, logins: ["ktb-bot"] }));   // (6b)의 첫 조회는 통과
+  d3.factoryLogins.mockImplementationOnce(async () => ({ ok: false, reason: "gh api user: 401" }));
+  const r3 = await run179(d3);
+  expect(blockedOnly(d3, "logins")).toMatch(/401/);
+  undecidableLine(r3.lines, "logins");
+  const d3b = selfD179({ vetoWindow: vetoWindow179({ creator: "mallory" }) });
+  const r3b = await run179(d3b);
+  expect(blockedOnly(d3b, "foreign poster")).toMatch(/@mallory/);
+  undecidableLine(r3b.lines, "foreign poster");
+  expect(d3b.sleep).not.toHaveBeenCalled();
+
+  // 잡 시작 시각·잡 제한 시간을 모르면 blocked — 상태도 코멘트도 없다.
+  for (const [label, over] of [["no FACTORY_JOB_STARTED", { jobStartedAt: null }], ["no job timeout", { jobTimeoutMinutes: null }], ["vetoWindow unwired", { vetoWindow: undefined }], ["vetoLabel unwired", { vetoLabel: undefined }], ["clock unwired", { now: undefined }]]) {
+    const d = selfD179(over);
+    const r = await run179(d);
+    expect(r.code, label).toBe(2);
+    blockedOnly(d, label);
+    undecidableLine(r.lines, label);
+    expect(d.comment, label).not.toHaveBeenCalled();
+    if (d.vetoWindow) expect(d.vetoWindow.open, label).not.toHaveBeenCalled();
+  }
+
+  // 남은 잡 시간이 창보다 짧으면 창을 열지 않는다: 상태·코멘트 없음, 두 숫자를 다 대는 별도의 사유.
+  const d5 = selfD179({ jobTimeoutMinutes: 30 });
+  const r5 = await run179(d5);
+  expect(r5.code).toBe(2);
+  const why = blockedOnly(d5, "budget");
+  expect(why).toMatch(/timeout-minutes: 30/);
+  expect(why).toMatch(/veto_minutes: 60/);
+  expect(d5.vetoWindow.open).not.toHaveBeenCalled();
+  expect(d5.comment).not.toHaveBeenCalled();
+  expect(d5.sleep).not.toHaveBeenCalled();
+  expect(r5.lines.some((l) => /^merge: veto window not started — /.test(l))).toBe(true);
+  expect(r5.lines.some((l) => /could not be computed/.test(l))).toBe(false);   // 판정 불가가 아니라 소유자가 고칠 숫자다
+});
+
+test("test_179_judge_path_unanimity_is_provenance_bound", async () => {
+  const JUDGE = BASE_FIXTURES_179.judge;
+  const LB_ROSTER = vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" }));
+  const judgeD = (over = {}) => selfD179({
+    protectedPaths: vi.fn(async () => ({ ok: true, files: JUDGE.files })),
+    selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+    reviewRoster: LB_ROSTER,
+    ...over,
+  });
+
+  // auto_merge_judge:false → 오늘과 같다.
+  const off = judgeD({ selfChange: { auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 60 } });
+  const roff = await run179(off);
+  expect(off.transition.mock.calls.map((x) => x[0])).toEqual([{ to: "factory:needs-human", reason: JUDGE.reason }]);
+  expect(off.comment.mock.calls).toEqual([[9, JUDGE.comment]]);
+  expect(roff.lines).toEqual(JUDGE.lines);
+
+  // true + 만장일치(load-bearing 로스터, 러너 기록에 묶임) + GREEN → 거부권 창을 지나 머지.
+  const ok = judgeD();
+  expect((await run179(ok)).code).toBe(0);
+  expect(ok.vetoWindow.open).toHaveBeenCalledTimes(1);
+  expect(ok.sleep.mock.calls.reduce((s, x) => s + x[0], 0)).toBe(60 * MIN_179);
+  expect(ok.mergePr).toHaveBeenCalledTimes(1);
+  expect(ok.mergePr.mock.invocationCallOrder[0]).toBeGreaterThan(ok.sleep.mock.invocationCallOrder.at(-1));
+
+  // all-approve handoff인데 factory/records에 맞는 줄이 없다 → mergePr에 닿지 않는다(창도 열리지 않는다).
+  const forged = judgeD({ reviewRecord: vi.fn(async () => ({ ok: false, reason: "factory/records carries no run record for issue #7" })) });
+  expect((await run179(forged)).code).toBe(2);
+  expect(forged.mergePr).not.toHaveBeenCalled();
+  expect(forged.vetoWindow.open).not.toHaveBeenCalled();
+
+  // 거부 하나 → needs-human, 사유에 역할과 판정, 표식이 있고, 창은 없다. 게이트도 돌지 않는다.
+  const rejectQa = { ...approve("qa"), verdict: "request_changes", must_fix: [{ id: "qa1", text: "missing test" }] };
+  const one = judgeD({ reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, decision: "approved", verdicts: [approve("correctness"), rejectQa] } })) });
+  expect((await run179(one)).code).toBe(2);
+  const r1 = one.transition.mock.calls.at(-1)[0];
+  expect(r1.to).toBe("factory:needs-human");
+  expect(r1.reason).toMatch(/^judge path needs a unanimous review — human merge required: /);
+  expect(r1.reason).toContain("qa: request_changes");
+  expect(r1.reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(one.vetoWindow.open).not.toHaveBeenCalled();
+  expect(one.gates).not.toHaveBeenCalled();
+  expect(one.mergePr).not.toHaveBeenCalled();
+
+  // 판정 수가 로스터 크기와 다르다 → 같은 거부.
+  const short = judgeD({ reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa", "security"], tier: "load-bearing" })) });
+  expect((await run179(short)).code).toBe(2);
+  const r2 = short.transition.mock.calls.at(-1)[0];
+  expect(r2.to).toBe("factory:needs-human");
+  expect(r2.reason).toMatch(/^judge path needs a unanimous review — human merge required: /);
+  expect(r2.reason).toMatch(/verdict count 2 != roster size 3/);
+  expect(short.vetoWindow.open).not.toHaveBeenCalled();
+  expect(short.mergePr).not.toHaveBeenCalled();
+
+  // 로스터 tier가 load-bearing이 아니면 만장일치여도 판정 경로는 자동 머지하지 않는다.
+  const std = judgeD({ reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "standard" })) });
+  expect((await run179(std)).code).toBe(2);
+  const r3 = std.transition.mock.calls.at(-1)[0];
+  expect(r3.to).toBe("factory:needs-human");
+  expect(r3.reason).toMatch(HUMAN_MERGE_REQUIRED);
+  expect(r3.reason).toMatch(/standard/);
+  expect(std.vetoWindow.open).not.toHaveBeenCalled();
+  expect(std.mergePr).not.toHaveBeenCalled();
+});
+
+// ── #179 self-critique — NEVER_AUTOMATE은 자기 변경 경로 안에서도 사람 머지다 ─────────────────────────────────────
+// `templates/factory/docs/**`는 비판정 목록에 있지만 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도 걸린다. 스위치가 켜져도
+// 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. 글롭은 실제 CHARTER에서 읽는다.
+test("test_179_never_automate_beats_self_change", async () => {
+  const QA_DOC = "templates/factory/docs/QA.md";
+  expect(NEVER_AUTOMATE_179).toContain("templates/factory/**");                 // 실제 CHARTER의 항목이다
+  expect(classifyProtected179([QA_DOC], { engine: true })).toEqual({ non_judge: [QA_DOC], judge: [] });   // 구멍의 전제: 비판정이다
+
+  const cases = [
+    ["non-judge only", [QA_DOC], SELF_ON_179],
+    ["non-judge + other non-judge", ["docs/factory/ops/runbook.md", QA_DOC], SELF_ON_179],
+    ["judge path with both switches on", ["factory/lib/gates.js", QA_DOC], { auto_merge_non_judge: true, auto_merge_judge: true, veto_minutes: 60 }],
+  ];
+  for (const [label, files, selfChange] of cases) {
+    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
+    const { code, lines } = await run179(d);
+    const reason = `protected paths changed — human merge required: ${files.join(", ")}`;
+    expect(code, label).toBe(2);
+    expect(d.transition.mock.calls.map((x) => x[0]), label).toEqual([{ to: "factory:needs-human", reason: `${reason} (see PR #9)` }]);
+    expect(d.comment, label).toHaveBeenCalledTimes(1);
+    expect(d.comment.mock.calls[0][1], label).toContain(`- \`${QA_DOC}\``);
+    expect(lines, label).toEqual([
+      "merge: PR #9 is OPEN",
+      "merge: PR #9 not conflicting (MERGEABLE)",
+      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/**); a NEVER_AUTOMATE path is always human-merged`,
+      `merge: ${reason}`,
+    ]);
+    for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep, d.gates, d.mergePr]) expect(dep, label).not.toHaveBeenCalled();
+  }
+
+  // NEVER_AUTOMATE 목록을 모르면(배선 안 됨) 자기 변경 경로는 판정 불가 — "걸린 것 없음"으로 읽지 않는다.
+  for (const neverAutomate of [undefined, null, "templates/factory/**"]) {
+    const d = selfD179({ neverAutomate });
+    const { code, lines } = await run179(d);
+    const at = JSON.stringify(neverAutomate);
+    expect(code, at).toBe(2);
+    expect(d.transition.mock.calls.at(-1)[0].to, at).toBe("factory:blocked");
+    expect(d.transition.mock.calls.at(-1)[0].reason, at).toMatch(/NEVER_AUTOMATE check could not be computed/);
+    expect(lines.some((l) => l.startsWith("merge: NEVER_AUTOMATE check could not be computed: ")), at).toBe(true);
+    for (const dep of [d.vetoWindow.open, d.gates, d.mergePr]) expect(dep, at).not.toHaveBeenCalled();
+  }
+  // 스위치가 꺼져 있으면 그 dep은 묻지 않는다(오늘 그대로) — 배선이 없어도 오늘의 hand-off다.
+  const off = selfD179({ neverAutomate: undefined, selfChange: { ...SELF_ON_179, auto_merge_non_judge: false } });
+  await run179(off);
+  expect(off.transition.mock.calls.map((x) => x[0])).toEqual([{ to: "factory:needs-human", reason: BASE_FIXTURES_179.non_judge.reason }]);
+
+  // 대조군: NEVER_AUTOMATE에 걸리지 않는 비판정 PR은 그대로 창을 지나 머지된다.
+  const ctl = selfD179();
+  expect((await run179(ctl)).code).toBe(0);
+  expect(ctl.mergePr).toHaveBeenCalledTimes(1);
+});
+
+// 판정 경로와 비판정 경로가 섞인 PR은 **두 스위치가 다 켜져야** 자기 변경 경로를 탄다 — 비판정 파일은 자기 스위치가 꺼져 있으면
+// 판정 경로의 스위치를 빌려 자동 머지되지 않는다. 오늘의 hand-off 그대로이고, 왜 그 경로를 타지 않았는지 기록에 한 줄 남긴다.
+test("test_179_mixed_pr_needs_both_switches", async () => {
+  const BOTH = BASE_FIXTURES_179.both;
+  expect(classifyProtected179(BOTH.files, { engine: true })).toEqual({ non_judge: ["factory/lib/status.js"], judge: ["factory/lib/gates.js"] });
+  const LB = vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" }));
+  const mixed = (selfChange) => selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files: BOTH.files })), selfChange, reviewRoster: LB });
+
+  const judgeOnly = mixed({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 });
+  const r = await run179(judgeOnly);
+  expect(r.code).toBe(2);
+  expect(judgeOnly.transition.mock.calls.map((x) => x[0])).toEqual([{ to: "factory:needs-human", reason: BOTH.reason }]);
+  expect(judgeOnly.comment.mock.calls).toEqual([[9, BOTH.comment]]);
+  expect(r.lines).toEqual([
+    ...BOTH.lines.slice(0, 2),
+    "merge: self-change path not taken — the PR also changes non-judge protected paths (factory/lib/status.js) and CHARTER self_change.auto_merge_non_judge is false",
+    ...BOTH.lines.slice(2),
+  ]);
+  for (const dep of [judgeOnly.vetoWindow.open, judgeOnly.vetoLabel, judgeOnly.sleep, judgeOnly.gates, judgeOnly.mergePr]) expect(dep).not.toHaveBeenCalled();
+
+  // 둘 다 켜지면 판정 경로(만장일치 load-bearing 리뷰)로 창을 지나 머지된다.
+  const both = mixed({ auto_merge_non_judge: true, auto_merge_judge: true, veto_minutes: 60 });
+  expect((await run179(both)).code).toBe(0);
+  expect(both.vetoWindow.open).toHaveBeenCalledTimes(1);
+  expect(both.comment.mock.calls[0][1]).toContain("판정 경로 · 만장일치 리뷰");
+  expect(both.mergePr).toHaveBeenCalledTimes(1);
+});
+
+// 창 열기 뒤의 의존성들 — 알림 코멘트, 상태 되읽기, 시계, 잠 — 중 어느 하나라도 실패하면 blocked다. 특히 알림 코멘트는
+// best-effort가 아니다: 소유자에게 거부 방법을 알리지 못한 창은 기다리지도 머지하지도 않는다.
+test("test_179_window_announcement_readback_and_clock_fail_closed", async () => {
+  const expectBlocked = (d, lines, at, re) => {
+    const last = d.transition.mock.calls.at(-1)[0];
+    expect(last.to, at).toBe("factory:blocked");
+    expect(last.reason, at).toMatch(re);
+    expect(lines.some((l) => /^merge: veto window could not be computed: /.test(l)), at).toBe(true);
+    expect(lines.some((l) => /veto window closed/.test(l)), at).toBe(false);
+    expect(d.mergePr, at).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.some((x) => x[0].to === "factory:merged"), at).toBe(false);
+  };
+
+  // 알림 코멘트가 던진다 → 기다림(폴링·잠) 없이 blocked.
+  const c = selfD179({ comment: vi.fn(async () => { throw new Error("HTTP 502 on comment"); }) });
+  const rc = await run179(c);
+  expect(rc.code).toBe(2);
+  expectBlocked(c, rc.lines, "comment throws", /announcement could not be posted.*HTTP 502 on comment/);
+  expect(c.vetoLabel).not.toHaveBeenCalled();
+  expect(c.sleep).not.toHaveBeenCalled();
+  expect(rc.lines.some((l) => /veto window opened/.test(l))).toBe(false);
+  // 코멘트 dep이 없어도 같다.
+  const c0 = selfD179({ comment: undefined });
+  const rc0 = await run179(c0);
+  expectBlocked(c0, rc0.lines, "comment unwired", /owner could not be told how to veto/);
+  expect(c0.sleep).not.toHaveBeenCalled();
+
+  // 상태 되읽기 실패(ok:false·throw) → blocked, 코멘트·잠 없음.
+  const w1 = vetoWindow179(); w1.read = vi.fn(async () => ({ ok: false, reason: "HTTP 500 statuses" }));
+  const r1d = selfD179({ vetoWindow: w1 });
+  const r1 = await run179(r1d);
+  expectBlocked(r1d, r1.lines, "read ok:false", /could not be read back: HTTP 500 statuses/);
+  expect(r1d.comment).not.toHaveBeenCalled();
+  expect(r1d.sleep).not.toHaveBeenCalled();
+  const w2 = vetoWindow179(); w2.read = vi.fn(async () => { throw new Error("ECONNRESET"); });
+  const r2d = selfD179({ vetoWindow: w2 });
+  const r2 = await run179(r2d);
+  expectBlocked(r2d, r2.lines, "read throws", /could not be read back: ECONNRESET/);
+  expect(r2d.comment).not.toHaveBeenCalled();
+
+  // 시계가 창 도중에 던진다 → blocked(창이 닫혔다고 읽지 않는다).
+  let ticks = 0;
+  const base = clock179();
+  const nowThrows = vi.fn(() => { if (++ticks === 4) throw new Error("clock gone"); return base.now(); });
+  const t = selfD179({ now: nowThrows, sleep: base.sleep });
+  const rt = await run179(t);
+  expectBlocked(t, rt.lines, "now throws mid-loop", /clock unreadable: clock gone/);
+  expect(t.sleep).toHaveBeenCalled();                                   // 창은 실제로 열려 있었다
+  // 시계가 숫자가 아닌 값을 돌려준다 → blocked.
+  let ticks2 = 0;
+  const base2 = clock179();
+  const nan = selfD179({ now: vi.fn(() => (++ticks2 >= 3 ? undefined : base2.now())), sleep: base2.sleep });
+  const rn = await run179(nan);
+  expectBlocked(nan, rn.lines, "now returns nothing", /clock returned no time/);
+
+  // 잠이 던진다 → 판정 불가(blocked), 런이 터져 기록 없이 끝나지 않는다.
+  const s = selfD179({ sleep: vi.fn(async () => { throw new Error("timer cancelled"); }) });
+  const rs = await run179(s);
+  expect(rs.code).toBe(2);
+  expectBlocked(s, rs.lines, "sleep throws", /wait failed: timer cancelled/);
+});
+
+// 잡 예산은 창만이 아니라 창 **뒤**의 일(리뷰 재검증·승인·머지·전이)도 담아야 한다 — 창이 닫히는 순간 잡이 죽으면 run-stage의
+// finally가 돌지 않아 이슈가 blocked도 merged도 아닌 채로 남는다(KTB-24). 그래서 창 + 10분 여유가 남아야 창을 연다.
+test("test_179_job_budget_keeps_a_post_window_margin", async () => {
+  // 잡 시작 2분 뒤에 창을 연다(clock179 기본값). timeout-minutes 62 → 남은 60분 = 창 60분: 여유가 없으니 열지 않는다.
+  for (const [timeout, left] of [[62, 60], [71, 69]]) {
+    const d = selfD179({ jobTimeoutMinutes: timeout });
+    const r = await run179(d);
+    const at = `timeout ${timeout}`;
+    expect(r.code, at).toBe(2);
+    const last = d.transition.mock.calls.at(-1)[0];
+    expect(last.to, at).toBe("factory:blocked");
+    expect(last.reason, at).toMatch(new RegExp(`timeout-minutes: ${timeout} leaves ${left} min`));
+    expect(last.reason, at).toMatch(/veto_minutes: 60/);
+    expect(last.reason, at).toMatch(/10 min margin/);
+    for (const dep of [d.vetoWindow.open, d.comment, d.sleep, d.mergePr]) expect(dep, at).not.toHaveBeenCalled();
+    expect(r.lines.some((l) => /^merge: veto window not started — /.test(l)), at).toBe(true);
+  }
+  // 남은 70분 = 창 60 + 여유 10 → 연다(경계는 포함).
+  const fits = selfD179({ jobTimeoutMinutes: 72 });
+  expect((await run179(fits)).code).toBe(0);
+  expect(fits.vetoWindow.open).toHaveBeenCalledTimes(1);
+  expect(fits.mergePr).toHaveBeenCalledTimes(1);
+});
+
+// 창 뒤에 검증한 head가 곧 머지되는 head다 — 자기 변경 경로는 `mergePr`에 그 sha를 넘겨(`--match-head-commit`) 재검증과
+// 머지 사이의 push가 검증 없이 머지되지 못하게 한다.
+test("test_179_self_change_merge_pins_the_verified_head", async () => {
+  const d = selfD179();
+  expect((await run179(d)).code).toBe(0);
+  expect(d.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
+  const j = selfD179({
+    protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+    selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+    reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+  });
+  expect((await run179(j)).code).toBe(0);
+  expect(j.mergePr.mock.calls).toEqual([[9, { matchHeadCommit: HEAD }]]);
+});

@@ -7,6 +7,22 @@ import { LESSONS_POLICY_RULE as LESSONS_RULE_RE, HARNESS_SECTION_POLICY_RULE as 
 import { blockedOriginMarker } from "./retro/issue-comments.js";
 import { parseBlocks } from "./harness-request.js";
 import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-quorum.js";
+import { classifyProtected } from "./non-judge-paths.js";
+import { matchesAny } from "./glob.js";
+import { VETO_LABEL } from "./label-catalog.js";
+
+/**
+ * ── #179 (S4a-2, ADR-033) — 자기 변경 경로의 거부권 창 ──────────────────────────────────────────────────────
+ * 창은 PR head에 붙는 commit status 하나(`factory/veto-window`, pending, description `closes=<iso>`)와 PR 코멘트 하나로
+ * 소유자에게 보인다. 창의 시각은 **이 런이 연 순간**(`d.now()`)에서만 온다 — 이미 붙어 있는 상태는 공유 봇 계정으로도
+ * 쓸 수 있으므로(감사 H1b) 그 `closes=`를 믿으면 위조가 기다림을 줄인다. 그래서 런은 언제나 자기 창을 열고 끝까지 기다린다.
+ * 폴링 간격은 5분, 창은 잡 안에서 기다린다(sweeper 불의존).
+ */
+export const VETO_WINDOW_CONTEXT = "factory/veto-window";
+export const VETO_POLL_MS = 5 * 60 * 1000;
+/** #179 — 창이 닫힌 뒤 리뷰 재검증·승인·머지·전이에 남겨 둘 잡 시간. 이만큼이 창 위에 더 남아야 창을 연다. */
+export const VETO_POST_WINDOW_MARGIN_MS = 10 * 60 * 1000;
+export const vetoWindowDescription = (closesAtIso) => `closes=${closesAtIso}`;
 
 /**
  * 외부 감사 2026-09-14 H1b — 머지 직전에 **게시자까지** 확인하는 두 상태. `factory/integrity`는 빠져
@@ -355,6 +371,9 @@ async function waitForChecksSettled({ prChecks, pr, required, sleep, waitSec = D
  *      commitStatuses(sha) → [{ context, state, creatorLogin }] — **최신순**
  *      factoryLogins()  → { ok, logins: string[], reason? }  팩토리 자신의 계정 이름(값이 아니라 이름)
  *    humanGate?       → CHARTER `merge.human_gate`(boolean|undefined) — 머지 전이 텍스트에만 쓴다.
+ *    #179 자기 변경 경로(ADR-033): selfChange?(CHARTER `self_change`), engine?(base에서 계산), neverAutomate?(CHARTER
+ *    NEVER_AUTOMATE 글롭 — 경로를 탈 때 필수, 없으면 blocked), vetoWindow·vetoLabel·now·sleep?·jobStartedAt·jobTimeoutMinutes.
+ *    그 경로의 머지는 `mergePr(pr, { matchHeadCommit })`로 창 뒤에 재검증한 head를 못 박는다.
  * headSha: review·merge가 checkoutHead로 고정한 PR head — 없으면 gates().head_sha로 대신한다(둘 다
  * 없으면 "unknown"으로 남긴다. 아무것도 지어내지 않는다).
  * postStatus({context,state,description,sha}): run-stage의 상태 게시 헬퍼(no-sha skip + best-effort 포함) —
@@ -433,9 +452,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 사람은 할 수 있다"는 구분을 여기, 자동 머지 경로 안에 둔다.
   //
   // **게이트보다 먼저다**(fix round 1). `d.gates()`는 `harness.commands`를 bash로 실행한다 — 곧 PR이
-  // 쓴 코드를 머지 잡 안에서 돌린다. 보호 경로를 실은 PR은 애초에 자동 머지 후보가 아니므로, 그
+  // 쓴 코드를 머지 잡 안에서 돌린다. 스위치가 꺼진 보호 경로 PR은 자동 머지 후보가 아니므로, 그
   // 코드를 **한 줄도 실행하기 전에** 거른다. (게이트가 돌 때도 자격증명은 자식 env에서 빠진다 —
   // `lib/exec.js`의 `scrubEnv`, `lib/gates.js`가 감싼다.)
+  //
+  // #179 (ADR-033) — 예외 하나: CHARTER `self_change` 스위치가 켜졌고 이 체크아웃이 엔진(`d.engine`, base에서 계산)이면
+  // 보호 경로를 `classifyProtected`로 가른다. 판정 경로가 없고 `auto_merge_non_judge`가 켜졌거나, 판정 경로가 있고
+  // `auto_merge_judge`가 켜졌으면(그리고 load-bearing 로스터의 만장일치 리뷰가 있으면) 그 PR은 사람에게 가지 않고 **자기
+  // 변경 경로**를 탄다 — 곧 그 PR의 코드가 아래 `d.gates()`로 머지 잡 안에서 돈다(같은 env scrub 아래). 그 경로는 정책 검사·
+  // 게이트·(6b) 리뷰 검증을 전부 지난 뒤 머지 직전에 거부권 창을 연다. 스위치가 꺼져 있으면 여기는 오늘과 바이트 단위로 같다.
   //
   // 이 판정은 **base 브랜치의 코드**로 계산된다: 이 프로세스의 모듈은 checkoutHead보다 먼저,
   // 워크플로의 기본 체크아웃(base) 상태에서 로드됐고 harness도 그때 읽혔다(run-stage.js의
@@ -479,7 +504,31 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
 
   const prot = d.protectedPaths ? await d.protectedPaths() : { ok: false, files: [], reason: "protectedPaths dep not wired" };
   if (!prot?.ok) return await undecidable("protected-path check", prot?.reason);
-  if (prot.files.length) {
+  // #179 — 자기 변경 경로("non_judge" | "judge" | null). null이면 아래는 오늘의 코드 그대로다.
+  let selfPath = null;
+  if (prot.files.length && d.engine === true && d.selfChange) {
+    const cls = classifyProtected(prot.files, { engine: true });
+    const nonJudgeOn = d.selfChange.auto_merge_non_judge === true, judgeOn = d.selfChange.auto_merge_judge === true;
+    if (!cls.judge.length && nonJudgeOn) selfPath = "non_judge";
+    else if (cls.judge.length && judgeOn) {
+      // 섞인 PR의 비판정 파일은 판정 경로의 스위치를 빌리지 않는다 — 파일마다 자기 스위치가 켜져 있어야 한다.
+      if (cls.non_judge.length && !nonJudgeOn) {
+        record([`merge: self-change path not taken — the PR also changes non-judge protected paths (${cls.non_judge.join(", ")}) and CHARTER self_change.auto_merge_non_judge is false`]);
+      } else selfPath = "judge";
+    }
+  }
+  // CHARTER NEVER_AUTOMATE는 자기 변경 경로 안에서도 이긴다: 비판정 목록(예: `templates/factory/docs/**`)과 겹치는 글롭
+  // (`templates/factory/**`)에 걸린 PR은 오늘처럼 사람이 머지한다. 목록을 모르면 "걸린 것 없음"이 아니라 판정 불가다.
+  if (selfPath) {
+    if (!Array.isArray(d.neverAutomate)) return await undecidable("NEVER_AUTOMATE check", `the CHARTER NEVER_AUTOMATE globs are not wired (${JSON.stringify(d.neverAutomate ?? null)}) — the self-change path cannot prove this PR is automatable`);
+    const globs = d.neverAutomate.filter((g) => typeof g === "string" && g);
+    const hits = prot.files.flatMap((f) => { const g = globs.find((x) => matchesAny([x], f)); return g ? [`${f} (${g})`] : []; });
+    if (hits.length) {
+      record([`merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${hits.join(", ")}; a NEVER_AUTOMATE path is always human-merged`]);
+      selfPath = null;
+    }
+  }
+  if (prot.files.length && !selfPath) {
     return await handToHuman({
       reason: `protected paths changed — ${HUMAN_MERGE_REQUIRED_TEXT}: ${prot.files.join(", ")}`,
       sections: [{
@@ -493,7 +542,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       }],
     });
   }
-  record(["merge: no protected paths in the PR range"]);
+  if (selfPath) record([`merge: protected paths (${selfPath === "judge" ? "judge path" : "non-judge only"}) — self-change path, CHARTER self_change.auto_merge_${selfPath}=true: ${prot.files.join(", ")}`]);
+  else record(["merge: no protected paths in the PR range"]);
 
   // 역할 파일의 섹션 규칙(KTB-6). `[protected].additive_only`는 "`.claude/agents/*.md`는 `## Examples`·
   // `## Perspectives`에 **추가만**"이라는 정책이다 — retro의 다크 추가(§8.1)가 통과하는 좁은 문이고,
@@ -581,6 +631,39 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     return await handToHuman({ reason: reasons.join("; "), sections });
   }
   record(["merge: agent role sections within policy"]);
+
+  // #179 (dw5) — 판정 경로의 자기 변경은 **load-bearing 로스터의 만장일치 리뷰**가 있을 때만이다. 판정은 새로 정의하지 않는다:
+  // (6b)와 같은 `verifyReviewQuorum`을 같은 deps(reviewEvidence/reviewRoster)로 미리 한 번 돌려, 거부될 PR의 코드를
+  // 게이트로 돌리기 전에 사람에게 넘긴다. 출처 증명(러너 기록과의 대조)은 아래 (6b)가 그대로 하고, 창은 그 뒤에야 열린다.
+  if (selfPath === "judge") {
+    const files = prot.files;
+    const judgeRefused = (detail) => handToHuman({
+      reason: `judge path needs a unanimous review — ${HUMAN_MERGE_REQUIRED_TEXT}: ${detail}`,
+      sections: [{
+        heading: "판정 경로 변경 — 만장일치 리뷰 없음",
+        why: [
+          "이 PR은 판정 경로(머지·게이트·전이를 판정하는 코드)를 바꿉니다. CHARTER `self_change.auto_merge_judge`가",
+          "켜져 있어도 판정 경로는 load-bearing 로스터 **전원의 approve**가 있을 때만 팩토리가 스스로 머지합니다(ADR-033).",
+          "", `사유: ${detail}`, "", "변경된 보호 경로:",
+        ],
+        files,
+      }],
+    });
+    if (!d.reviewEvidence || !d.reviewRoster) return await judgeRefused("review-evidence deps not wired (reviewEvidence, reviewRoster)");
+    let ev, ros;
+    try { ev = await d.reviewEvidence(); } catch (e) { return await judgeRefused(`review handoff unreadable: ${e?.message || e}`); }
+    if (!ev?.ok) return await judgeRefused(ev?.reason || "review handoff missing or invalid");
+    try { ros = await d.reviewRoster(); } catch (e) { return await judgeRefused(`review roster unresolvable: ${e?.message || e}`); }
+    if (!ros?.ok || !Array.isArray(ros.roles) || !ros.roles.length) return await judgeRefused(ros?.reason || "review roster unresolvable — quorum cannot be checked");
+    if (ros.tier !== "load-bearing") return await judgeRefused(`the review roster tier is ${ros.tier ?? "unknown"}, not load-bearing`);
+    const q = verifyReviewQuorum({ data: ev.data, rosterSize: ros.roles.length, rosterRoles: ros.roles, maxRounds: d.maxRounds ?? null, prHeadSha: headSha || null });
+    if (!q.ok) {
+      const dissent = (Array.isArray(ev.data?.verdicts) ? ev.data.verdicts : [])
+        .filter((v) => v?.verdict !== "approve").map((v) => `${v?.role ?? "?"}: ${v?.verdict ?? "none"}`);
+      return await judgeRefused(dissent.length ? `${dissent.join(", ")} (${q.reason})` : q.reason);
+    }
+    record([`merge: judge path — ${ros.roles.length}/${ros.roles.length} approve on the load-bearing roster (pre-check; provenance is verified at (6b))`]);
+  }
 
   // (4) 게이트: BLOCKED은 판정 불가(사람이 본다), 그 외 GREEN이 아니면 needs-human — 단 하나의 예외(#157, ADR-034):
   // RED가 전부 PR diff 밖의 파싱된 테스트 실패로 **증명**되면(rerunEligibility) 같은 d.gates()를 정확히 한 번 더 돌고,
@@ -884,7 +967,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: ${line}`, ...refusal(t)]);
     return 2;
   };
-  {
+  // #179 — 같은 검증을 거부권 창 뒤에 한 번 더 돌린다(라이브 head·정족수·출처·게시자). 그래서 함수다; 실패면 종료 코드, 통과면 null.
+  const verifyReview = async () => {
     const missingDeps = ["reviewEvidence", "reviewRoster", "reviewRecord", "reviewRunId", "prHeadShaLive", "commitStatuses", "factoryLogins"].filter((k) => !d[k]);
     if (missingDeps.length) {
       return await reviewRefused(`review-evidence deps not wired (${missingDeps.join(", ")}) — the merge stage cannot prove a review happened, and an unverified review is not a passed review`);
@@ -973,6 +1057,114 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     const posted = verifyFactoryStatuses({ sha: live, statuses, logins: logins.logins });
     if (!posted.ok) return await reviewRefused(posted.reason);
     record([`merge: ${REVIEW_EVIDENCE_STATUSES.join(" + ")} on ${live.slice(0, 7)} posted by the factory`]);
+    return null;
+  };
+  {
+    const refused = await verifyReview();
+    if (refused !== null) return refused;
+  }
+
+  // (6b') #179 (ADR-033) — 자기 변경 경로의 거부권 창. 보호 경로·정책·게이트·필수 체크·(6b) 리뷰 검증이 **전부** 통과한 뒤,
+  // 승인·머지 직전이다: 앞에 두면 어차피 사람에게 갈 PR이 60분을 기다리고 "곧 머지합니다"를 알린다. 창이 닫힌 뒤 (6b)를
+  // 다시 돌려 그사이 head가 움직였거나 정족수가 무너졌으면 머지하지 않는다(게이트 재실행 대신 — 같은 head면 같은 트리다).
+  //
+  // 모든 미지(dep 미배선·ok:false·throw·로그인 미해결·잡 시각 미상)는 "거부권 없음"이나 "창 닫힘"이 아니라 판정 불가(blocked)다.
+  // 남은 잡 시간이 창보다 짧으면 창을 아예 열지 않는다(상태·코멘트 없음) — 그 사유는 소유자가 고칠 두 숫자를 댄다.
+  const vetoWindow = async ({ selfPath: kind, files }) => {
+    const what = "veto window";
+    const missing = ["vetoWindow", "vetoLabel", "now", "factoryLogins"].filter((k) => !d[k]);
+    if (missing.length) return await undecidable(what, `deps not wired (${missing.join(", ")})`);
+    const vetoMinutes = d.selfChange?.veto_minutes;
+    if (!Number.isInteger(vetoMinutes) || vetoMinutes <= 0) return await undecidable(what, `CHARTER self_change.veto_minutes is not a positive integer (${JSON.stringify(vetoMinutes)})`);
+    const started = d.jobStartedAt, timeout = d.jobTimeoutMinutes;
+    if (!Number.isFinite(started) || started <= 0) return await undecidable(what, "the job start time is unknown (FACTORY_JOB_STARTED is not set) — the remaining job time cannot be checked against the window");
+    if (!Number.isFinite(timeout) || timeout <= 0) return await undecidable(what, "the job's timeout-minutes is unknown (FACTORY_JOB_TIMEOUT_MINUTES is not set) — the remaining job time cannot be checked against the window");
+    let openedAt;
+    try { openedAt = Number(d.now()); } catch (e) { return await undecidable(what, `clock unreadable: ${e?.message || e}`); }
+    if (!Number.isFinite(openedAt)) return await undecidable(what, "clock returned no time");
+    const windowMs = vetoMinutes * 60 * 1000;
+    const remainingMs = started + timeout * 60 * 1000 - openedAt;
+    // 창 뒤의 일(리뷰 재검증·승인·머지·전이)도 같은 잡 안에서 끝나야 한다 — 잡이 창 끝에서 죽으면 finally가 돌지 않는다(KTB-24).
+    if (remainingMs < windowMs + VETO_POST_WINDOW_MARGIN_MS) {
+      const marginMin = VETO_POST_WINDOW_MARGIN_MS / 60000;
+      const reason = `veto window does not fit in this merge job — timeout-minutes: ${timeout} leaves ${Math.max(0, Math.floor(remainingMs / 60000))} min, CHARTER self_change.veto_minutes: ${vetoMinutes} plus a ${marginMin} min margin for the post-window re-verify and merge; raise timeout-minutes in .github/workflows/factory-merge.yml above ${vetoMinutes + marginMin} (plus the gate time) or lower veto_minutes — no window was opened`;
+      const t = await toBlocked(reason);
+      record([`merge: veto window not started — ${reason}`, ...refusal(t)]);
+      return 2;
+    }
+    const closesAt = new Date(openedAt + windowMs).toISOString();
+    const description = vetoWindowDescription(closesAt);
+
+    // 상태는 best-effort가 아니다(postStatus와 다르다): 게시되지 않은 창은 소유자에게 보이지 않는 창이다.
+    let w;
+    try { w = await d.vetoWindow.open({ sha, description }); }
+    catch (e) { return await undecidable(what, `the ${VETO_WINDOW_CONTEXT} status could not be posted: ${e?.message || e}`); }
+    if (!w?.ok) return await undecidable(what, `the ${VETO_WINDOW_CONTEXT} status could not be posted: ${w?.reason || "unknown"}`);
+    // 올라간 것이 **이 런의 창**이고 팩토리 계정이 올렸는가 — `verifyFactoryStatuses`와 같은 로그인 집합으로 대조한다.
+    let logins, posted;
+    try { logins = await d.factoryLogins(); } catch (e) { logins = { ok: false, reason: `${e?.message || e}` }; }
+    if (!logins?.ok || !Array.isArray(logins.logins) || !logins.logins.length) return await undecidable(what, `the factory's own account could not be resolved — there is no way to tell who posted ${VETO_WINDOW_CONTEXT}: ${logins?.reason || "unknown"}`);
+    try { posted = await d.vetoWindow.read({ sha }); } catch (e) { posted = { ok: false, reason: `${e?.message || e}` }; }
+    if (!posted?.ok) return await undecidable(what, `the ${VETO_WINDOW_CONTEXT} status could not be read back: ${posted?.reason || "unknown"}`);
+    const st = posted.status;
+    const known = new Set(logins.logins.filter(Boolean).map((l) => String(l).toLowerCase()));
+    if (!st || st.description !== description || String(st.state).toLowerCase() !== "pending") {
+      return await undecidable(what, `the latest ${VETO_WINDOW_CONTEXT} status on ${String(sha).slice(0, 7)} is not the window this run opened (${st ? `"${st.state}" ${st.description}` : "none"})`);
+    }
+    if (!known.has(String(st.creatorLogin || "").toLowerCase())) {
+      return await undecidable(what, `${VETO_WINDOW_CONTEXT} on ${String(sha).slice(0, 7)} was posted by @${st.creatorLogin || "unknown"}, which is not a factory account (${[...known].map((l) => `@${l}`).join(", ")})`);
+    }
+
+    // 코멘트도 best-effort가 아니다: 소유자가 찾을 수 없는 창은 창이 아니다.
+    const body = [
+      `**거부권 창 — 팩토리가 이 PR을 자동 머지합니다(ADR-033, ${kind === "judge" ? "판정 경로 · 만장일치 리뷰" : "비판정 경로"}).**`,
+      "",
+      `멈추려면 **${closesAt}**(UTC)까지 추적 이슈 #${issue}에 \`${VETO_LABEL}\` 라벨을 붙이세요 — 이 PR이 아니라 이슈 #${issue}입니다(팩토리는 그 이슈의 라벨 이벤트를 읽습니다).`,
+      "붙였다가 떼어도 거부권은 남습니다. 거부하면 팩토리는 머지하지 않고 사람에게 넘깁니다.",
+      `창이 닫힐 때까지 거부가 없으면 head \`${String(sha).slice(0, 7)}\`를 squash 머지합니다(CHARTER \`self_change.auto_merge_${kind}\`, \`veto_minutes: ${vetoMinutes}\`).`,
+      "",
+      "바뀐 보호 경로:",
+      "",
+      ...files.map((f) => `- \`${f}\``),
+    ].join("\n");
+    if (!d.comment) return await undecidable(what, "comment dep not wired — the owner could not be told how to veto");
+    try { await d.comment(pr, body); }
+    catch (e) { return await undecidable(what, `the veto-window announcement could not be posted on PR #${pr}: ${e?.message || e}`); }
+    record([`merge: veto window opened — ${description} (${vetoMinutes} min, ${kind === "judge" ? "judge" : "non-judge"} path) on ${String(sha).slice(0, 7)}`]);
+
+    const since = new Date(openedAt).toISOString();
+    const deadline = openedAt + windowMs;
+    for (;;) {
+      let lab;
+      try { lab = await d.vetoLabel({ since }); } catch (e) { lab = { ok: false, reason: `${e?.message || e}` }; }
+      if (!lab?.ok || !Array.isArray(lab.vetoes)) return await undecidable(what, `${VETO_LABEL} label poll failed: ${lab?.reason || "no event list returned"}`);
+      if (lab.vetoes.length) {
+        const by = lab.vetoes.map((v) => String(v?.login || "").trim()).find(Boolean);
+        const who = by ? `@${by}` : `an unidentified account (the ${VETO_LABEL} label event names no actor)`;
+        return await handToHuman({
+          reason: `vetoed by ${who} — ${HUMAN_MERGE_REQUIRED_TEXT}`,
+          sections: [{
+            heading: "거부권 행사",
+            why: [`거부권 창 안에서 ${who}가 추적 이슈 #${issue}에 \`${VETO_LABEL}\`를 붙였습니다. 팩토리는 이 PR을 머지하지 않습니다.`, "", "바뀐 보호 경로:"],
+            files,
+          }],
+        });
+      }
+      let now;
+      try { now = Number(d.now()); } catch (e) { return await undecidable(what, `clock unreadable: ${e?.message || e}`); }
+      if (!Number.isFinite(now)) return await undecidable(what, "clock returned no time");
+      if (now >= deadline) break;
+      try { await sleep(Math.min(VETO_POLL_MS, deadline - now)); }
+      catch (e) { return await undecidable(what, `the wait failed: ${e?.message || e}`); }
+    }
+    record([`merge: veto window closed — no ${VETO_LABEL} on #${issue} by ${closesAt}`]);
+    return null;
+  };
+  if (selfPath) {
+    const stopped = await vetoWindow({ selfPath, files: prot.files });
+    if (stopped !== null) return stopped;
+    const refused = await verifyReview();
+    if (refused !== null) return refused;
   }
 
   // (6c) ADR-021 — **두 배우 모드에서는 승인이 머지보다 먼저다.** 두 배우 모드의 base 브랜치는
@@ -1008,7 +1200,10 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   }
 
   try {
-    await d.mergePr(pr);
+    // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
+    // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
+    if (selfPath) await d.mergePr(pr, { matchHeadCommit: sha });
+    else await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;
     const t = await toBlocked(reason);
