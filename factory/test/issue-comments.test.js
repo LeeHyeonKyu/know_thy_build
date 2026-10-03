@@ -172,3 +172,60 @@ test("S1: an author-less human marker never resets; a re-queue resets whoever wr
   expect(commentsSinceCycleStart(legacy).map((c) => c.id)).toEqual([3]);
   expect(commentsSinceCycleStart(noAuthor).map((c) => c.id)).toEqual([1, 2, 3]);
 });
+
+// ── #174 — K 재시작 브리프의 생산자/독자 한 쌍 ─────────────────────────────────────────────────
+import { kRestartComment, kRestartState, wherePaths, K_RESTART, countedTransitionIndices } from "../lib/retro/issue-comments.js";
+test("test_174_where_paths_and_restart_state_share_one_rule", () => {
+  expect(wherePaths("factory/bin/run-stage.js:1306-1311")).toEqual(["factory/bin/run-stage.js"]);
+  expect(wherePaths("`a.js:1`, README.md and factory/lib/x.js:3:9")).toEqual(["a.js", "README.md", "factory/lib/x.js"]);
+  expect(wherePaths("/reports")).toEqual([]);
+  expect(wherePaths("the summary heading")).toEqual([]);
+  expect(wherePaths("https://example.com/a.js")).toEqual([]);
+  expect(wherePaths(undefined)).toEqual([]);
+
+  const rw = (by = "factory:run-1") => ({ body: `<!-- factory-transition:v1 from=factory:awaiting-review to=factory:rework by=${by} -->\nx` });
+  const fail = { body: transitionFailedMarker({ from: "factory:awaiting-review", to: "factory:rework" }) };
+  const brief = (head) => ({ body: kRestartComment({ issue: 9, pr: 3, head, findings: [{ id: "a", where: "src/a.js:1", claim: "c" }] }) });
+  // countTransitionsTo와 같은 규칙: failed 마커가 앞의 전이 하나를 지운다.
+  const list = [rw(), brief("h1"), rw(), fail, rw()];
+  expect(countedTransitionIndices(list, "factory:rework")).toEqual([0, 4]);
+  expect(countedTransitionIndices(list, "factory:rework")).toHaveLength(countTransitionsTo(list, "factory:rework"));
+  // 쓰인 재시작: 마커 뒤에 살아남은 rework 전이가 있다 → offset은 그 전이까지 센 rework 수.
+  const s = kRestartState(list);
+  expect(s.used).toBe(true);
+  expect(s.offset).toBe(2);
+  expect(s.brief).toMatchObject({ pr: 3, head: "h1", paths: ["src/a.js"] });
+  // 마커만 있고 전이가 실패했다 → 쓰이지 않았다, 대기 중인 마커는 있다.
+  const p = kRestartState([rw(), brief("h1"), rw(), fail]);
+  expect(p.used).toBe(false);
+  expect(p.pending).toMatchObject({ head: "h1" });
+  expect(K_RESTART.test(brief("h1").body)).toBe(true);
+});
+
+// ── #174 self-critique — the brief's size is measured AFTER escaping, and a `where` widens the brief only by a file ──
+test("test_174_brief_stays_under_the_comment_limit_after_escaping", () => {
+  // Claims full of `"`, `\` and control characters: JSON.stringify doubles (or sextuples) each one, and every finding is
+  // printed twice (prose + block). The cap must hold on the FINAL body, not on the pre-escape lengths.
+  const nasty = '"\\'.repeat(200);
+  const findings = Array.from({ length: 40 }, (_, i) => ({ id: `n${i}`, where: `factory/lib/f${i}.js:1 ${'"'.repeat(180)}`, claim: nasty }));
+  const body = kRestartComment({ issue: 174, pr: 31, head: "c".repeat(40), findings });
+  expect(body.length).toBeLessThanOrEqual(65536);
+  const omitted = Number(/(\d+) more omitted/.exec(body)?.[1]);
+  expect(omitted).toBeGreaterThan(0);
+  const block = JSON.parse(/```json\s*([\s\S]*?)\s*```/.exec(body)[1]);
+  expect(block.omitted).toBe(omitted);
+  expect(block.findings.length + block.omitted).toBe(40);
+  expect(block.findings.map((f) => f.id)).toEqual(findings.slice(0, block.findings.length).map((f) => f.id));
+  // the reader still parses it into a usable brief
+  const s = kRestartState([{ body }, { body: "<!-- factory-transition:v1 from=factory:awaiting-review to=factory:rework by=factory:run-7 -->\nx" }]);
+  expect(s.used).toBe(true);
+  expect(s.brief.error).toBeUndefined();
+  expect(s.brief.findings).toHaveLength(block.findings.length);
+});
+
+test("test_174_where_directories_and_prose_never_widen_the_brief", () => {
+  expect(wherePaths("factory/lib (aggregate)")).toEqual([]);
+  expect(wherePaths("factory/")).toEqual([]);
+  expect(wherePaths("docs/ and/or factory/test")).toEqual([]);
+  expect(wherePaths("factory/lib/self-gate.js:278 and/or factory/lib/")).toEqual(["factory/lib/self-gate.js"]);
+});
