@@ -4004,3 +4004,33 @@ ADR-032 뒤 하루의 실측: 사람에게 간 머지 요청은 전부 판정 �
 연속 2회에 열리고 사람만 닫는다; 차단기(S4c)가 없는 동안은 판정 스위치(`self_change.auto_merge_judge`)를 켜지 않는다. 대가: 판정 코드의
 회귀를 사후에 revert로 잡는다(모든 머지가 squash). 스펙 §8.5·플랜 §7에 적었고, S4a(#149)의 브리프를 그에 맞춰 고쳤다.
 같은 날 둘째 결정(공장이 만든다): K 소진 뒤 "새 작성자 + 운영 브리프" 재시작을 공장이 스스로 한다(#149·#157·#170에서 사람이 손으로 한 것).
+
+**ADR-033 둘째 결정의 구현(#174, 2026-10-03).** review에서 K가 소진되면(`nextState`가 needs-human을 냈다) 호출 자리의 순수 함수
+`kExhaustionDecision`이 재시작과 사람 중 하나를 고른다. `nextState`와 그 핀은 바뀌지 않았다. 재시작은 두 걸음이고 순서가 정해져 있다.
+먼저 브리프 코멘트가 나간다(`<!-- factory-k-restart:v1 issue pr head -->`, 미결 findings 전부의 where·claim, 범위 문장
+"목록 밖의 변경은 없어야 한다(새 파일·새 export·새 done_when 금지, 빼는 것만)", 같은 findings를 담은 `factory.k-restart-brief.v1` 블록).
+그다음 `→ factory:rework`가 `by=factory:run-<id>`와 "self-restart 1/1"을 싣고 나간다. 생산자와 독자는 `lib/retro/issue-comments.js`에
+한 쌍으로 있다. 아래 여섯 가지를 정했다.
+1. **K의 창은 마커로 자르지 않는다.** 창은 그대로 `commentsSinceRequeue`이고 예산이 고정이다. 한 창에서 재시작은 최대 한 번이다.
+   에이전트도 factory 계정으로 코멘트를 쓰기 때문에(`gh.js`) 작성자로는 엔진이 쓴 마커와 위조를 가를 수 없다. 코멘트 본문이 창을
+   자르게 하면 K에 천장이 없어진다. "쓰인 재시작"은 창 안에서 처음으로 살아남은 rework 전이가 뒤따른 마커 하나뿐이다. 살아남았는지는
+   `countTransitionsTo`와 같은 규칙으로 판정한다(`countedTransitionIndices`, `TRANSITION_FAILED`·`reason=retry`). 재시작이 쓰였으면
+   다음 소진은 무조건 needs-human이고 사유는 "K exhausted twice (one self-restart used)"이다. 그와 별도로 창 전체의 라운드가 2K에 닿으면
+   역시 사람이다. 첫 소진 전의 위조 마커는 멈춤을 앞당길 뿐이다.
+2. **새 작성자의 라운드는 1부터다**(`reviewRoundOf`: `prior + 1 − offset`). offset은 재시작 전이까지 센 rework 수다. 그래서 재시작
+   전이 자신은 새 작성자의 예산을 쓰지 않고, 새 작성자는 K를 온전히 받는다. 플랜(#174)은 "data.round는 계속 오른다"로 읽혔지만 그
+   길은 막혀 있었다. merge의 `verifyReviewQuorum`이 `round > K`를 거부하기 때문에(requirements `factory:merged`, merge-stage, sweeper)
+   재시작 뒤의 만장일치 통과가 머지되지 못한다. `data.round`의 뜻은 바뀌지 않았다. 여전히 이 작성자의 K 예산 안에서 몇 번째 리뷰인가이다.
+   그래서 세 곳의 K 검사는 손대지 않았다. 대가로 재시작을 넘나들면 라운드 번호가 반복된다(retro의 라운드 키잉, open risk).
+3. **재큐는 두 예산을 함께 되돌리고, 사람의 `--retry`는 어느 쪽도 되돌리지 않는다.** K 창과 같은 규칙이다. 재시작을 다시 받으려면 재큐한다.
+4. **실패는 닫힌 쪽으로 간다.** must_fix가 비었거나, 어느 where에서도 경로가 나오지 않으면 브리프 없이 needs-human으로 간다. 브리프
+   게시가 실패하면 전이 없이 exit 2로 끝난다. 브리프는 나갔는데 전이가 실패한 경우(`factory-transition-failed`)는 재시작을 쓴 것으로
+   치지 않는다. 그다음 소진은 같은 head의 그 마커를 다시 쓰고, 브리프를 또 게시하지 않는다.
+5. **빌더 컨텍스트**는 implement에서만 `loaded.k_restart_brief`를 받는다(pr·head·범위 문장·정규화된 where 경로·얼린 findings).
+   출처는 쓰인 마커의 구조화 블록이고 산문은 읽지 않는다. 재시작이 없으면 키가 없다.
+6. **self-gate의 새 파일 규칙은 기준점이 재시작 head다.** run-stage(`restartBriefInput`)가 목록을 만든다. 대상은 merge-base 대비
+   추가됐고 재시작 head의 트리(`git ls-tree`)에 없는 파일이다. 그 목록에서 브리프 where 밖의 파일은 RED가 되고 사유는
+   "new file outside the restart brief: <file>"이다. 재시작 head를 읽지 못하거나 블록이 깨졌으면 RED다. 브리프가 없으면 결과는 이전과 같다.
+남은 것. 기존 파일 안에서 범위를 더하는 경우(#149·#157의 모양)는 기계로 막지 못한다. 빌더에게 브리프를 지키라는 문장은 implement 프롬프트
+(`templates/factory/**`, NEVER_AUTOMATE)에 사람이 넣어야 한다. 그 전까지 엔진은 브리프를 싣기만 한다. 되돌릴 때는 엔진 커밋 하나를
+revert하면 된다. 이미 게시된 `factory-k-restart:v1` 코멘트는 되돌린 엔진에게 모르는 마커이므로 아무 일도 하지 않는다.
