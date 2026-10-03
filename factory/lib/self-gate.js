@@ -185,6 +185,7 @@ export async function runSelfGate({
   gates = null, run, changedTests = [], changedSources = [],
   mutation = {},           // fs/tmp passthrough for checkNewTestsFailOnMutation (tests inject doubles)
   pins = [],               // Task 5 — regression pins carried from the prior rework round
+  restartBrief = null,     // #174 — { paths, newFiles, error? } computed by run-stage (`restartBriefInput`); null = no restart
 } = {}) {
   const findings = [];
   const ranChecks = [];
@@ -261,6 +262,25 @@ export async function runSelfGate({
     ranChecks.push("pins");
     const { findings: pinFindings } = await evaluatePins({ pins, run, harness, root, changedTests });
     findings.push(...pinFindings);
+  }
+
+  // (5) #174 — the K self-restart brief. Runs ONLY when a brief is loaded (no brief → nothing here changes, not even a skip
+  // entry: the result is the same object as before this check existed). A new file — added vs. merge-base AND absent from the
+  // restart head's tree, as run-stage measured it — outside the brief's `where` paths is RED and named. Edits, deletions,
+  // files the PR had already added before the restart, and new files the brief names pass. An unreadable restart head or an
+  // unparsable brief fails CLOSED (blocking), never "everything allowed".
+  if (restartBrief != null) {
+    ranChecks.push("restart-brief");
+    if (restartBrief.error) {
+      findings.push({ check: "restart-brief", blocking: true, detail: `restart brief unusable — ${restartBrief.error} (fail closed: new files cannot be checked against it)` });
+    } else {
+      const allowed = (Array.isArray(restartBrief.paths) ? restartBrief.paths : []).filter((p) => typeof p === "string" && p);
+      // exact paths only — a directory or a prose token in the allow-list must never admit every file under it
+      const inBrief = (f) => allowed.includes(f);
+      for (const f of Array.isArray(restartBrief.newFiles) ? restartBrief.newFiles : []) {
+        if (!inBrief(f)) findings.push({ check: "restart-brief", blocking: true, detail: `new file outside the restart brief: ${f}` });
+      }
+    }
   }
 
   return { ok: !findings.some((f) => f.blocking), findings, ranChecks, skippedChecks };

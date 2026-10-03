@@ -2610,6 +2610,152 @@ test("test_147_undispatched_repair_neither_claims_dispatch_nor_spends_restart_bu
   expect(later).toContainEqual({ kind: "stalled-restart", issue: 50, stage: "implement", label: "factory:rework" });
 });
 
+// ── #168 — blocked-retry 팔은 자기가 dispatch한 런이 아직 큐에 있으면 에스컬레이션하지 않는다 ─────────────
+// own-calendar #111 실측(2026-10-02): 09:38 사람이 merge 실패를 --retry(→ blocked, origin approved), 09:59 blocked-retry
+// 팔이 factory-merge.yml을 dispatch — 러너 1대가 바빠 런은 queued. 10:00 다른 sweep이 "마커가 있는데 아직 blocked"로
+// needs-human에 올렸고, 큐에 선 merge 런은 라벨이 바뀌어 건너뛰었다. 아래 픽스처는 그 시각표를 그대로 쓴다.
+// 런 행은 `gh run list --json databaseId,status,conclusion,createdAt,event,displayTitle`의 실제 모양이다: run-name이
+// 없는 워크플로의 dispatch 런은 displayTitle이 워크플로 이름일 뿐 **이슈 번호가 없다**(plan D1).
+const T168 = {
+  blocked: "2026-10-02T09:38:00Z",
+  marker: "2026-10-02T09:59:00Z",
+  run: "2026-10-02T09:59:30Z",
+  sweep: "2026-10-02T10:00:00Z",
+};
+const humanRetry168 = (at = T168.blocked) => ({
+  id: 1681,
+  author: "LeeHyeonKyu",
+  body: "<!-- factory-transition:v1 from=factory:needs-human to=factory:blocked by=human reason=retry -->\nfactory:needs-human → factory:blocked — retry\n<!-- factory-blocked-origin from=factory:approved stage=merge cause=human-retry -->",
+  createdAt: at,
+});
+const retryMarker168 = (at = T168.marker) => ({ id: 1682, body: `${blockedRetryComment("merge", 111)}\n\`factory-merge.yml\`을 한 번 다시 띄웁니다(KTB-15b).`, createdAt: at });
+const reblocked168 = (at) => ({
+  id: 1683,
+  body: "<!-- factory-transition:v1 from=factory:approved to=factory:blocked by=script -->\nfactory:approved → factory:blocked — gates undecided\n<!-- factory-blocked-origin from=factory:approved stage=merge cause=gates -->",
+  createdAt: at,
+});
+const runRow168 = (status, createdAt = T168.run, over = {}) => ({
+  databaseId: 18100000001, status, conclusion: status === "completed" ? "failure" : "", createdAt, event: "workflow_dispatch", displayTitle: "factory-merge", ...over,
+});
+const blockedGh168 = (comments) => ({
+  searchIssues: vi.fn(async (label) => (label === "factory:blocked" ? [{ number: 111 }] : [])),
+  comments: vi.fn(async (n) => (n === 111 ? comments : [])),
+  comment: vi.fn(async () => "u"),
+  patchComment: vi.fn(),
+});
+const sweep168 = async ({ comments, stageRuns, now = T168.sweep, staleMinutes = 30, omitLookup = false }) => {
+  const gh = blockedGh168(comments);
+  const dispatchStage = vi.fn(async () => {});
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const args = { gh, charter, thresholds: T, now, staleMinutes, transition, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage, quick: true };
+  if (!omitLookup) args.stageRuns = stageRuns;
+  const actions = await sweep(args);
+  return { actions, transition, dispatchStage, gh };
+};
+const escalatedToHuman168 = (transition) => transition.mock.calls.some(([a]) => a.issue === 111 && a.to === "factory:needs-human");
+
+test("test_168_blocked_retry_waits_for_a_queued_run: a queued workflow_dispatch merge run created after the retry marker keeps the issue blocked — one blocked-retry-waiting action, no transition", async () => {
+  const stageRuns = vi.fn(async () => [runRow168("queued")]);
+  const { actions, transition, dispatchStage } = await sweep168({ comments: [humanRetry168(), retryMarker168()], stageRuns });
+  expect(stageRuns).toHaveBeenCalledWith("merge");
+  expect(transition).not.toHaveBeenCalled();
+  expect(dispatchStage).not.toHaveBeenCalled();
+  const mine = actions.filter((a) => a.issue === 111);
+  expect(mine.map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+  expect(mine[0]).toMatchObject({ kind: "blocked-retry-waiting", issue: 111, stage: "merge" });
+});
+
+test.each(["pending", "requested", "waiting", "in_progress"])("test_168_blocked_retry_waits_for_a_queued_run: a %s dispatch run counts as not finished (plan D2)", async (status) => {
+  const { actions, transition } = await sweep168({ comments: [humanRetry168(), retryMarker168()], stageRuns: async () => [runRow168("completed", "2026-10-02T09:00:00Z"), runRow168(status)] });
+  expect(escalatedToHuman168(transition)).toBe(false);
+  expect(actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+});
+
+test.each([
+  ["no runs at all", []],
+  ["only completed runs after the marker", [runRow168("completed")]],
+  ["a queued run created BEFORE the retry marker", [runRow168("queued", "2026-10-02T09:40:00Z")]],
+  ["a queued run that is not a workflow_dispatch", [runRow168("queued", T168.run, { event: "issues" })]],
+])("test_168_blocked_retry_escalates_when_no_run_is_pending: %s — escalated to needs-human exactly as today", async (_label, rows) => {
+  const { actions, transition } = await sweep168({ comments: [humanRetry168(), retryMarker168()], stageRuns: async () => rows });
+  // the reason and action are what the arm wrote before #168 (no lookup wired), byte for byte
+  const baseline = await sweep168({ comments: [humanRetry168(), retryMarker168()], omitLookup: true });
+  expect(transition.mock.calls).toEqual(baseline.transition.mock.calls);
+  expect(transition).toHaveBeenCalledWith({ issue: 111, to: "factory:needs-human", reason: "blocked (environment/credentials) — needs human" });
+  expect(actions.filter((a) => a.issue === 111)).toEqual([{ kind: "blocked-escalated", issue: 111, cause: "human-retry" }]);
+});
+
+test("test_168_blocked_retry_wait_has_a_ceiling: with staleMinutes=20 the arm waits at 39 minutes after the marker and escalates at 41 with 'dispatched run never started'", async () => {
+  const comments = [humanRetry168(), retryMarker168()];
+  const stageRuns = async () => [runRow168("queued")];
+  const at = (m) => new Date(Date.parse(T168.marker) + m * 60e3).toISOString();
+
+  const under = await sweep168({ comments, stageRuns, now: at(39), staleMinutes: 20 });
+  expect(escalatedToHuman168(under.transition)).toBe(false);
+  expect(under.actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+
+  const over = await sweep168({ comments, stageRuns, now: at(41), staleMinutes: 20 });
+  const call = over.transition.mock.calls.find(([a]) => a.issue === 111 && a.to === "factory:needs-human");
+  expect(call).toBeTruthy();
+  expect(call[0].reason).toContain("dispatched run never started");
+  expect(over.actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-escalated"]);
+  expect(over.actions).not.toContainEqual(expect.objectContaining({ kind: "blocked-retry-waiting" }));
+});
+
+test("test_168_run_lookup_failure_escalates: a throwing lookup escalates as today and records an error naming the lookup; a missing lookup escalates too", async () => {
+  const comments = [humanRetry168(), retryMarker168()];
+  const thrown = await sweep168({ comments, stageRuns: async () => { throw new Error("HTTP 502 from actions/runs"); } });
+  expect(thrown.transition).toHaveBeenCalledWith({ issue: 111, to: "factory:needs-human", reason: "blocked (environment/credentials) — needs human" });
+  expect(thrown.actions).toContainEqual({ kind: "blocked-escalated", issue: 111, cause: "human-retry" });
+  expect(thrown.actions).toContainEqual(expect.objectContaining({ kind: "error", issue: 111, error: expect.stringMatching(/run lookup.*HTTP 502 from actions\/runs/) }));
+  expect(thrown.actions).not.toContainEqual(expect.objectContaining({ kind: "blocked-retry-waiting" }));
+
+  const missing = await sweep168({ comments, omitLookup: true });
+  expect(escalatedToHuman168(missing.transition)).toBe(true);
+  expect(missing.actions).toContainEqual({ kind: "blocked-escalated", issue: 111, cause: "human-retry" });
+  expect(missing.actions).not.toContainEqual(expect.objectContaining({ kind: "blocked-retry-waiting" }));
+});
+
+test("test_168_reblocked_after_retry_escalates_despite_running_run: a blocked transition after the retry marker means the dispatched run already ran — escalate even though that run is still in_progress", async () => {
+  const stageRuns = vi.fn(async () => [runRow168("in_progress")]);
+  const reblocked = await sweep168({ comments: [humanRetry168(), retryMarker168(), reblocked168("2026-10-02T10:20:00Z")], stageRuns, now: "2026-10-02T10:21:00Z" });
+  expect(reblocked.transition).toHaveBeenCalledWith(expect.objectContaining({ issue: 111, to: "factory:needs-human" }));
+  expect(reblocked.actions).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: 111 }));
+  expect(reblocked.actions).not.toContainEqual(expect.objectContaining({ kind: "blocked-retry-waiting" }));
+
+  // the same fixture without the 10:20 re-block still waits — the discriminator is the re-block, not the run
+  const waiting = await sweep168({ comments: [humanRetry168(), retryMarker168()], stageRuns, now: "2026-10-02T10:21:00Z" });
+  expect(escalatedToHuman168(waiting.transition)).toBe(false);
+  expect(waiting.actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+});
+
+// #168 rework arch1 — the blocked-retry marker grammar is written by `blockedRetryComment` and read by ONE shared
+// matcher. Three hand-copied reader regexes had already drifted (capturing vs non-capturing `attempt=`); the next
+// widening of the grammar would have silently dropped the waiting arm back to fail-closed escalation.
+test("test_168_blocked_retry_marker_has_one_reader: every marker blockedRetryComment writes is read back by matchBlockedRetryMarker with its attempt, and sweeper.js holds no other reader regex", async () => {
+  // one writer + one reader: the grammar literal appears exactly twice in the module source
+  const src = readFileSync(new URL("../lib/sweeper.js", import.meta.url), "utf8");
+  expect(src.match(/factory-sweeper blocked-retry stage=/g)).toHaveLength(2);
+  const { matchBlockedRetryMarker } = await import("../lib/sweeper.js");
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 111), "merge", 111)).toEqual({ attempt: 1 });
+  for (const n of [1, 2, 3]) {
+    expect(matchBlockedRetryMarker(`prefix\n${blockedRetryComment("implement", 9, n)}\ntail`, "implement", 9)).toEqual({ attempt: n });
+  }
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 111), "review", 111)).toBeNull();
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 111), "merge", 11)).toBeNull();
+  expect(matchBlockedRetryMarker(blockedRetryComment("merge", 11), "merge", 111)).toBeNull();
+  expect(matchBlockedRetryMarker(restartComment("merge", 111), "merge", 111)).toBeNull();
+  expect(matchBlockedRetryMarker(undefined, "merge", 111)).toBeNull();
+
+});
+
+test("test_168_blocked_retry_marker_has_one_reader: the waiting arm reads an attempt-numbered marker the same way the retry budget does", async () => {
+  const numbered = { ...retryMarker168(), body: `${blockedRetryComment("merge", 111, 1)}\n\`factory-merge.yml\`을 한 번 다시 띄웁니다.` };
+  const { actions, transition } = await sweep168({ comments: [humanRetry168(), numbered], stageRuns: async () => [runRow168("queued")] });
+  expect(escalatedToHuman168(transition)).toBe(false);
+  expect(actions.filter((a) => a.issue === 111).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+});
+
 // ── #156 (ADR-032) — 엔진 결함으로 멈춘 needs-human은 새 엔진이 오면 한 번 스스로 재시도한다 ─────────────
 //
 // 픽스처는 실제 생산자로 만든다: 전이 코멘트는 진짜 `transition()`이 fake gh 위에서 쓰고, blocked 팔의 재시도·
@@ -3093,4 +3239,39 @@ test("test_176_live_lookup_failure_falls_back_to_today", async () => {
   const a3 = await sweep(stalledArgs({ gh: old, transition: t3 }));
   expect(t3).toHaveBeenCalledWith(expect.objectContaining({ issue: 17, to: "factory:needs-human" }));
   expect(a3.filter((a) => a.kind === "error")).toEqual([]);
+});
+
+// #168 rework cf1 — the ceiling escalation ("dispatched run never started") is an engine-caused needs-human like the
+// default one: it must carry the engine version, or ADR-032's self-retry on the next engine skips it forever.
+test("test_168_ceiling_escalation_records_engine_version_for_release_retry", async () => {
+  const w = world156();
+  const n = 31;
+  w.add(n, "factory:approved", [seedTransition156("factory:awaiting-review", "factory:approved")]);
+  expect((await w.transition({ issue: n, to: "factory:blocked", reason: MERGE_BASE156, stage: "merge" })).ok).toBe(true);
+  await w.sweep("1.5.0");                                                         // blocked 팔: merge를 한 번 dispatch
+  expect(w.dispatchStage).toHaveBeenLastCalledWith({ stage: "merge", issue: n });
+  // the dispatched merge run sits in the queue (real `gh run list` row: no issue number in displayTitle)
+  const queued = { databaseId: 18100000031, status: "queued", conclusion: "", createdAt: w.now(), event: "workflow_dispatch", displayTitle: "factory-merge" };
+  const stageRuns = async () => [queued];
+
+  w.advance(59);                                                                  // under 2 × 30 min: waits
+  const waiting = await w.sweep("1.5.0", { stageRuns });
+  expect(waiting.filter((a) => a.issue === n).map((a) => a.kind)).toEqual(["blocked-retry-waiting"]);
+  expect(w.label(n)).toBe("factory:blocked");
+
+  w.advance(3);                                                                   // over the ceiling: escalates
+  const over = await w.sweep("1.5.0", { stageRuns });
+  expect(w.label(n)).toBe("factory:needs-human");
+  expect(over).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: n, why: expect.stringContaining("dispatched run never started") }));
+  const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(esc).toMatch(/blocked \(undecidable\) — needs human — dispatched run never started/);
+  expect(ENGINE_VERSION156.exec(esc)?.[1]).toBe("1.5.0");
+
+  // a new engine retries it once (ADR-032) instead of skipping it for want of a recorded version
+  w.dispatchStage.mockClear();
+  const after = await w.sweep("1.5.1", { stageRuns: async () => [] });
+  expect(after).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n, version: "1.5.1" }));
+  expect(after).not.toContainEqual(expect.objectContaining({ kind: "release-retry-skipped", issue: n }));
+  expect(releaseMarkers156(w, n)).toHaveLength(1);
+  expect(w.dispatchStage).toHaveBeenCalledWith({ stage: "merge", issue: n });
 });
