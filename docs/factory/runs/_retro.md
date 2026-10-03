@@ -18,30 +18,21 @@
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 4 | 12 |
-| review rounds avg | 1.75 | 2.08 |
-| rounds/issue (plan/impl/review) | 1.75 / 3.25 / 1.75 | 1 / 2.08 / 2.08 |
-| escaped defects | 8 (#178×5, #168×3) | 16 |
-| revert rate | 0.00 (0/4) | 0.00 (0/12) |
-| needs-human | 10 | 51 |
-| rejects by role | correctness 3, architecture 4, spec-conformance 2 | spec-conformance 7, qa 4, correctness 10, architecture 6 |
-| reviewer overlap | 0.55 (6/11, runs 13) | 0.53 (16/30, runs 31) |
-| unique findings by role | correctness 3, architecture 2 | spec-conformance 3, qa 4, correctness 4, architecture 3 |
-| qa na ratio | 0.22 (7/32 claims, na-heavy 1/4 approvals) | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
-| cost (usd) | 82.62 | 624.92 |
-| tokens | input 2380306 / output 197172 | input 17203431 / output 1312904 |
-| retro cost (usd) | 1.05 | 8.45 |
-| retro tokens | input 4 / output 3534 | input 22 / output 21249 |
+| merged | 0 | 12 |
+| review rounds avg | 0 | 2.08 |
+| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1 / 2.08 / 2.08 |
+| escaped defects | 0 | 16 |
+| revert rate | 없음 | 0.00 (0/12) |
+| needs-human | 0 | 51 |
+| rejects by role | 없음 | spec-conformance 7, qa 4, correctness 10, architecture 6 |
+| reviewer overlap | 없음 | 0.53 (16/30, runs 31) |
+| unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 4, architecture 3 |
+| qa na ratio | 없음 | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
+| cost (usd) | 22.05 | 624.92 |
+| tokens | input 329918 / output 33942 | input 17203431 / output 1312904 |
+| retro cost (usd) | 0.00 | 8.45 |
+| retro tokens | input 0 / output 0 | input 22 / output 21249 |
 | full retros | — | 7 |
-
-### Rounds per issue (this window)
-
-| issue | plan | implement | review | escaped |
-| --- | --- | --- | --- | --- |
-| #184 | 1 | 1 | 1 | 0 |
-| #178 | 2 | 6 | 3 | 5 |
-| #176 | 2 | 2 | 1 | 0 |
-| #168 | 2 | 4 | 2 | 3 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -906,6 +897,30 @@
           170
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "A revert made with GitHub's own Revert button is skipped without any message whenever the revert PR's squash commit takes the PR title. In that case the breaker never opens, which is the fail-open this issue is meant to prevent. The squash commit takes the PR title when the repo's squash_merge_commit_title is PR_TITLE, or when it is COMMIT_OR_PR_TITLE and the revert PR has more than one commit. The engine ships to other repos through install-manifest, so the result depends on a repo setting the code never checks. The ADR's 'remaining risk' covers hand-written and edited titles. This case is neither: it is GitHub's default Revert flow, unedited.",
+        "runs": [
+          189
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The breaker state file can be planted by an agent session and is then pushed by the runner. A planted state with a future closed_at keeps the breaker closed for good, so dw3/dw4's claim that only a person closes it is false. Two gaps combine. (a) Write side: syncRecords at the end of every stage uses the default dir docs/factory/runs and walks it recursively. Any docs/factory/runs/state/breaker.md in the runner's worktree is uploaded with the run records. If the branch has no such file yet, the file is hashed verbatim (attempt() tail-merges only when the parent already has the path). The branch has no such file until the first sweep-open or the first reset. The only barrier is the runner_only hook/L2 deny. The hook prot regex matches the literal substring `docs/factory/runs/` and has no cd handling. (b) Read side: closed_at is checked only with isIso (Date.parse finite). Nothing compares it to the current time or to the newest revert. Every revert with t <= closed_at is dropped, and readBreaker returns ok:true, open:false with no error. The project already reproduced this exact channel for review evidence and judged the write boundary alone insufficient: an implement agent planted a fake run-record section and syncRecords pushed it (review-quorum.js:31-37). The fix there was to bind the line to the run id. The breaker state has no equivalent binding.",
+        "runs": [
+          189
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "This upgrades my round-1 sec-s1 from should_fix. In round 1 I said I found no reachable channel to forge a self-merge line. That was wrong: I traced only the merge-stage record() calls and missed the agent-planted local file. The same sec1 channel lets an agent append a forged `## merge · …` section with `factory-self-merge:v1` lines to any issue record. Its own record is hydrated locally at stage start. Another issue's record gets tail-merged after the common prefix. The parser accepts the line from any `## merge` header, with no run id, runner or stage-run binding. buildHistory keeps the earliest line per PR, so a forged line `{pr:<real judge PR>, kind:\"non_judge\", at:<earlier than the real merge>}` takes that PR out of the judge streak. A forged unreverted judge merge dated between two reverted ones breaks the streak. Either way the breaker fails open. review-evidence lines are bound to run_id for exactly this reason (review-quorum.js:31-37), and self-merge lines are not.",
+        "runs": [
+          189
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1200,81 +1215,33 @@
     ]
   },
   "stats": {
-    "merged": 4,
-    "review_rounds_avg": 1.75,
-    "plan_rounds_avg": 1.75,
-    "implement_rounds_avg": 3.25,
-    "rounds_per_issue": [
-      {
-        "issue": 184,
-        "plan": 1,
-        "implement": 1,
-        "review": 1
-      },
-      {
-        "issue": 178,
-        "plan": 2,
-        "implement": 6,
-        "review": 3
-      },
-      {
-        "issue": 176,
-        "plan": 2,
-        "implement": 2,
-        "review": 1
-      },
-      {
-        "issue": 168,
-        "plan": 2,
-        "implement": 4,
-        "review": 2
-      }
-    ],
-    "escaped_defects": 8,
-    "escaped_defects_detail": [
-      {
-        "issue": 178,
-        "count": 5
-      },
-      {
-        "issue": 168,
-        "count": 3
-      }
-    ],
+    "merged": 0,
+    "review_rounds_avg": 0,
+    "plan_rounds_avg": 0,
+    "implement_rounds_avg": 0,
+    "rounds_per_issue": [],
+    "escaped_defects": 0,
+    "escaped_defects_detail": [],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": 0,
-    "rejects_by_role": {
-      "correctness": 3,
-      "architecture": 4,
-      "spec-conformance": 2
-    },
-    "review_runs": 13,
-    "findings_total": 11,
-    "overlapping_findings": 6,
-    "unique_findings_by_role": {
-      "correctness": 3,
-      "architecture": 2
-    },
-    "overlap_ratio": 0.55,
-    "needs_human": 10,
-    "qa_approvals": 4,
-    "qa_claims_total": 25,
-    "qa_na_total": 7,
-    "qa_na_ratio": 0.22,
-    "qa_na_heavy_approvals": 1,
+    "revert_rate": null,
+    "rejects_by_role": {},
+    "review_runs": 0,
+    "findings_total": 0,
+    "overlapping_findings": 0,
+    "unique_findings_by_role": {},
+    "overlap_ratio": 0,
+    "needs_human": 0,
+    "qa_approvals": 0,
+    "qa_claims_total": 0,
+    "qa_na_total": 0,
+    "qa_na_ratio": 0,
+    "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 82.617503,
+      "cost_usd": 22.04786,
       "tokens": {
-        "input": 2380306,
-        "output": 197172
-      }
-    },
-    "retro_usage": {
-      "cost_usd": 1.050323,
-      "tokens": {
-        "input": 4,
-        "output": 3534
+        "input": 329918,
+        "output": 33942
       }
     }
   },
