@@ -4199,6 +4199,14 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
    모든 줄에서 줄머리의 `engine-crash:`를 인용 표시한다(`quoteEngineCrashLines` — 문구는 감사용으로 남는다); ② 읽는 쪽은 **자리**까지 본다 —
    섹션 본문의 첫 줄이 `error: <stage> aborted — `(메시지는 한 줄로 접힌다)이고 바로 다음 줄이 그 스테이지·그 러너의 크래시 줄일 때만 센다.
    ②는 `record()`를 거치지 않는 기록자(main의 `recordLine`)도 덮는다.
+   **rework sec1 — 두 겹 다 뚫렸었다, 고친 모양.** ①은 `[ \t]`만 건너뛰었는데 파서는 `.trim()`(JS `\s` 전부: NBSP·\v·\f·\r·U+2028·BOM…)을
+   하므로 NBSP 한 글자로 인용을 피했고, ②의 기준인 섹션 헤더 자체가 같은 문구로 위조됐다(`HEADER_RE`의 `^`/m은 \n·\r·U+2028·U+2029 뒤에 선다)
+   — 검증자 finding(에이전트가 쓴다)에 개행 + 가짜 `## implement · a · <runner>` 헤더 + `error:` 줄 + 크래시 줄을 실으면, 같은 `record()` 호출의
+   진짜 `usage:` 줄이 가짜 크래시 섹션으로 들어가 상한에서 빠졌다. 지금: ① 인용은 네 줄 끝 뒤의 `\s` 전부를 건너뛰고 본다; ①' **헤더는
+   `appendRunRecord`의 템플릿만 세운다** — 모든 기록자의 모든 원소에 `neutralizeRecordLine`(lib/usage.js)이 걸려 줄머리 `## `를 인용 표시하고,
+   원소 안 개행 뒤의 `engine-crash:`·`usage:`도 인용 표시한다(파서는 섹션의 첫 `usage:`를 센다 — 옮겨 적힌 음수 비용이 진짜 usage를 앞지르던
+   main부터의 구멍도 같이 닫힌다); ② 크래시 판정은 **trim하지 않은** 줄로 한다(러너는 두 줄을 줄 맨 앞부터 쓴다). 각 겹은 따로 핀돼 있다
+   (`test_196_agent_text_cannot_forge_a_crash_section_header_or_whitespace` — 겹 하나를 되돌리면 그 겹의 단언이 실패한다).
 3. **R 면제는 라우팅으로, 상한은 sweeper에.** 크래시 런은 blocked으로 가므로 하트비트 재큐 팔의 `factory-retry`(R)를 쓰지 않는다. 대신 blocked
    팔이 `ENGINE_CRASH_MAX_RETRIES = 1`(코드 상수, `API_ERROR_MAX_RETRIES` 옆 — CHARTER 값이 아니다: 이 이슈의 must_not. `sweep()`의
    `engineCrashMaxRetries` 인자의 기본값이고, 테스트는 다른 값을 주어 그 배선을 핀한다 — 기본 분기의 1과 값이 같아 값만으로는 배선이 안 보인다)만큼 같은 스테이지를
