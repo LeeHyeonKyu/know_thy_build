@@ -10,7 +10,7 @@ import { verifyReviewQuorum, verifyReviewProvenance, NOT_BOUND } from "./review-
 import { classifyProtected } from "./non-judge-paths.js";
 import { matchesAny } from "./glob.js";
 import { VETO_LABEL } from "./label-catalog.js";
-import { selfMergeLine, BREAKER_RESET_COMMAND } from "./breaker.js";
+import { selfMergeLine, selfMergeVoidLine, BREAKER_RESET_COMMAND } from "./breaker.js";
 
 /**
  * #189 (S4c) — 자기 변경 경로로 머지한 사실의 run 기록 줄. 생산자는 이것 하나이고(`lib/breaker.js`가 같은 모듈에서 읽는다),
@@ -1252,14 +1252,27 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // 하나뿐이다. 스테이지 끝 동기화(최선 노력)에만 맡기면, 그 동기화를 잃은 머지는 나중에 revert돼도 세어지지 않는다(fail-open).
   // 그래서 줄을 run 기록에 쓰고(`record` — 가드가 이 줄을 trust한다) `d.persistSelfMerge`로 브랜치에 올려 **다시 읽어 확인한** 뒤에만
   // 머지한다. 못 올리면(ok:false·던짐·배선 누락) 머지하지 않는다 — blocked(재시도는 sweeper가 민다). 판정 비트는 지금(`selfPath`) 적는다.
-  // 머지가 이 뒤에 실패하면 줄은 main에 없는 PR을 가리킨다 — 차단기는 main에서 확인되지 않는 revert 없는 머지로 연속을 끊지 않는다.
+  // skeptic r5 f1 — 머지가 일어나지 않았으면(거부·실패) 그 줄을 **무효 줄**로 지운다(`voidSelfMerge`): 그러지 않으면 사람이 나중에 그 PR을
+  // 손으로 머지했을 때 main의 squash 커밋이 그 줄을 "확인"해, 사람의 머지가 판정 자동 머지로 세어진다.
+  let voidSelfMerge = null;
   if (selfPath) {
-    let at;
-    try { at = new Date(Number(d.now())).toISOString(); } catch { at = new Date().toISOString(); }
+    const nowIso = () => { try { return new Date(Number(d.now())).toISOString(); } catch { return new Date().toISOString(); } };
+    const at = nowIso();
     const line = selfMergeLine({ issue, pr, kind: selfPath, sha, at });
     record([line]);
+    voidSelfMerge = async (why) => {
+      const v = selfMergeVoidLine({ issue, pr, sha, at: nowIso(), voids: at });
+      record([v]);                                                    // 가드가 trust한다 — 스테이지 끝 동기화도 이 줄을 싣는다
+      let q;
+      if (typeof d.persistSelfMerge !== "function") q = { ok: false, reason: "the persistSelfMerge dep is not wired" };
+      else { try { q = await d.persistSelfMerge({ line: v, issue, pr, sha }); } catch (e) { q = { ok: false, reason: `${e?.message || e}` }; } }
+      record([q?.ok
+        ? `merge: self-merge evidence for PR #${pr} voided on factory/records — ${why}`
+        : `merge: self-merge void for PR #${pr} NOT confirmed on factory/records (${q?.reason || "no answer"}) — ${why}; it rides the stage-end sync, and if that is lost too a later person-merge of PR #${pr} counts as a judge-path auto-merge (the breaker can open early, never miss one)`]);
+    };
     const refuse = async (why) => {
       const reason = `self-merge evidence could not be made durable on factory/records before the merge — ${why}; PR #${pr} was not merged (a revert of a merge the breaker cannot see would never count)`;
+      await voidSelfMerge(`PR #${pr} was not merged (the evidence was refused before the merge)`);
       const t = await toBlocked(reason);
       record([`merge: ${reason}`, ...refusal(t)]);
       return 2;
@@ -1278,6 +1291,15 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     else await d.mergePr(pr);
   } catch (e) {
     const reason = `merge API failed: ${e?.message || e}`;
+    // skeptic r5 f1 — 머지 호출이 실패했다. 머지가 정말 일어나지 않았는지는 GitHub에 묻는다: OPEN/CLOSED라고 답하면 그 줄을 무효로
+    // 지운다. MERGED(응답만 잃은 머지)이거나 답을 못 얻으면 지우지 않는다 — 모르는 것을 "머지 안 됨"으로 읽지 않는다(틀려도 여는 쪽).
+    if (voidSelfMerge) {
+      let after = null;
+      try { after = await d.prInfo(); } catch { after = null; }
+      const state = after && Number(after.number) === Number(pr) && typeof after.state === "string" ? after.state : null;
+      if (state && state !== "MERGED") await voidSelfMerge(`mergePr failed and GitHub reports PR #${pr} ${state}`);
+      else record([`merge: self-merge evidence for PR #${pr} kept — ${state === "MERGED" ? "GitHub reports the PR MERGED despite the failed call" : "GitHub could not say whether the PR merged"}`]);
+    }
     const t = await toBlocked(reason);
     record([`merge: mergePr FAIL — ${reason}`, ...refusal(t)]);
     return 2;

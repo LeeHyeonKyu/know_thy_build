@@ -4281,6 +4281,18 @@ PR에 귀속되고도 세어지지 않았다 — 두 연속 revert에도 `{ok:tr
 - *증거.* `test_189_self_merge_evidence_is_durable_on_factory_records_before_the_merge`(merge-stage.test.js — 두 경로, 실패 넷),
   `test_189_lost_stage_end_sync_never_hides_a_judge_automerge_from_the_breaker`(breaker.test.js — 리뷰어의 재현: 스테이지 끝 push 실패 + 러너 소멸 뒤에도 열림).
 
+**skeptic r5 f1·f2 — 일어나지 않은 머지의 줄은 무효로 지우고, 얕은 클론은 모르는 것이다.** 위 *대가*의 "사람의 머지가 판정 머지로 세어진다"는
+dw1("사람의 머지는 차단기를 열지 않는다")에 어긋난다. 이제 머지가 일어나지 않으면 merge 스테이지가 같은 문(`record` + `persistSelfMerge`)으로
+**무효 줄**(`factory-self-merge:v1 {"kind":"void", …, "voids": <그 줄의 at>}`)을 남긴다: persist 거부로 머지하지 않았을 때는 늘, `mergePr`가
+실패했을 때는 GitHub(`prInfo`)이 PR이 MERGED가 아니라고 답할 때만. MERGED이거나 답이 없으면 지우지 않는다(모르는 것을 "머지 안 됨"으로 읽지 않는다).
+`buildHistory`는 같은 issue·pr·sha·`at`인 줄 하나만 지운다 — blocked 뒤 재시도의 새 줄은 지우지 못한다. 같은 접두어라 업로드 가드가 그대로 거르고
+(에이전트가 심은 무효 줄은 올라가지 못한다), abort 보증은 무효 줄을 보증하지 않는다. 무효 줄까지 잃으면 줄이 남아 여는 쪽으로 틀린다(사람이 리셋).
+`readBreaker`는 git log 전에 `git rev-parse --is-shallow-repository`가 `false`인지 확인한다 — 얕은 클론의 log는 오류 없이 잘린 history라 "revert 없음 =
+닫힘"이 되기 때문이다. 오늘 워크플로는 `fetch-depth: 0`이지만, 그 보장을 바깥 설정에 기대지 않는다.
+- *증거.* `test_189_failed_judge_merge_then_person_merge_never_counts_as_judge_automerge`(merge-stage.test.js — 프로덕션 배선, 진짜 git: 실패한 머지 뒤
+  사람의 머지 → 닫힘, 대조군 MERGED·답 없음·진짜 자동 머지 → 열림), `test_189_self_merge_void_cancels_only_the_line_it_names`,
+  `test_189_shallow_clone_history_is_not_closed`(breaker.test.js).
+
 **남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
 push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
 지우면 반대로 "리셋 이력 없음"이 되어 옛 revert가 다시 세어진다. 매 머지 확인마다 records 전부와 git log를 읽으므로 merge 스테이지 지연이 history 크기에 따라 는다.

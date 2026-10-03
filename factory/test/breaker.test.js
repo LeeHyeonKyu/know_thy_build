@@ -1223,3 +1223,101 @@ test("test_189_lost_stage_end_sync_never_hides_a_judge_automerge_from_the_breake
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/persistSelfMerge: \(\{ line \}\) => persistSelfMergeEvidence\(\{ run, cwd: root, issue, line, sync: \(\) => syncRunRecords\(\{ run, root, message: `run-record: issue #\$\{issue\} merge self-merge evidence \(\$\{runnerId\}\)`, guard: recordsGuard \}\) \}\),/);
 }, 240000);
+
+import { selfMergeVoidLine } from "../lib/breaker.js";
+
+// ── #189 skeptic (r5) f2 — 얕은 클론의 git log는 잘린 history다: 닫힘이 아니라 ok:false ──────────────────────────────────
+test("test_189_shallow_clone_history_is_not_closed", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { remote, cwd } = await makeRepo();
+  // 기록 두 건(실제 생산자) + main의 두 판정 머지와 그 revert(진짜 git) → 완전한 클론에서는 열린다.
+  mkdirSync(join(cwd, "docs/factory/runs"), { recursive: true });
+  writeFileSync(join(cwd, "docs/factory/runs/101.md"), mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: "2026-10-01T01:00:00.000Z" }));
+  writeFileSync(join(cwd, "docs/factory/runs/102.md"), mergeRecordText({ issue: 102, pr: 12, kind: "judge", at: "2026-10-01T02:00:00.000Z" }));
+  expect((await syncRecords({ run, cwd, message: "rec" })).ok).toBe(true);
+  await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" },
+    { subject: "feat b (#12)", at: "2026-10-01T02:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" },
+    { revert: "feat b (#12)", at: "2026-10-01T06:00:00Z" },
+    { subject: "later work", at: "2026-10-01T07:00:00Z" },
+  ], cwd);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  const full = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(full).toEqual(expect.objectContaining({ ok: true, open: true }));
+
+  // actions/checkout의 기본값(fetch-depth: 1) 같은 얕은 클론: fetch는 얕은 경계에서 멈추고 log는 오류 없이 revert를 빠뜨린다.
+  const shallow = mkdtempSync(join(tmpdir(), "ktb-189-shallow-"));
+  const cl = await run("git", ["clone", "-q", "--depth", "1", `file://${remote}`, shallow]);
+  expect(cl.code, cl.stderr).toBe(0);
+  expect((await git(shallow, ["rev-parse", "--is-shallow-repository"])).stdout.trim()).toBe("true");
+  const r = await readBreaker({ run, cwd: shallow, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(r.ok).toBe(false);
+  expect(r.reason).toMatch(/shallow/);
+  // 얕음을 확인하지 못하면(rev-parse 실패) 그것도 모르는 것이다 — 닫힘이 아니다.
+  const noProbe = async (cmd, args, o) => (cmd === "git" && args.includes("--is-shallow-repository") ? { code: 128, stdout: "", stderr: "fatal: simulated" } : run(cmd, args, o));
+  expect((await readBreaker({ run: noProbe, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS })).ok).toBe(false);
+  // 얕은 클론을 완전하게 만들면 다시 읽힌다(위의 ok:false가 클론의 다른 탓이 아니다).
+  expect((await git(shallow, ["fetch", "-q", "--unshallow", "origin"])).code).toBe(0);
+  expect(await readBreaker({ run, cwd: shallow, defaultBranch: "main", thresholds: T2, now: () => NOW_MS })).toEqual(expect.objectContaining({ ok: true, open: true }));
+}, 240000);
+
+// ── #189 skeptic (r5) f1 — 무효 줄은 자기가 가리킨 그 자동 머지 줄 하나만 지운다(위조·재시도에 대해) ─────────────────────────
+test("test_189_self_merge_void_cancels_only_the_line_it_names", async () => {
+  const at11 = "2026-10-01T01:00:00.000Z", at12 = "2026-10-01T02:00:00.000Z", retry12 = "2026-10-01T03:00:00.000Z";
+  const sha = "c".repeat(40);
+  const reverts = revertsOf(await realLog([
+    { subject: "feat a (#11)", at: "2026-10-01T01:00:00Z" },
+    { subject: "feat b (#12)", at: "2026-10-01T03:00:00Z" },
+    { revert: "feat a (#11)", at: "2026-10-01T05:00:00Z" },
+    { revert: "feat b (#12)", at: "2026-10-01T06:00:00Z" },
+  ]));
+  const sec = (issue, lines, at = at12) => readFileSync(appendRunRecord({ root: mkdtempSync(join(tmpdir(), "ktb-189-void-")), issue, title: "x", stage: "merge", runnerId: "gha-1", now: at, lines }), "utf8");
+  const line12 = selfMergeLine({ issue: 102, pr: 12, kind: "judge", sha, at: at12 });
+  const void12 = selfMergeVoidLine({ issue: 102, pr: 12, sha, at: "2026-10-01T02:05:00.000Z", voids: at12 });
+  const r11 = mergeRecordText({ issue: 101, pr: 11, kind: "judge", at: at11 });
+  const ev = (records) => evaluateBreaker({ history: buildHistory({ records: new Map(records), reverts }), thresholds: T2 });
+
+  // 대조군: 무효 줄 없이는 열린다.
+  expect(ev([["101", r11], ["102", sec(102, [line12])]]).open).toBe(true);
+  // 무효 줄이 그 줄을 지운다 → 닫힘. 무효 줄 자체는 자동 머지가 아니다(파서가 내놓지 않는다).
+  expect(ev([["101", r11], ["102", sec(102, [line12, void12])]]).open).toBe(false);
+  expect(parseSelfMergeLines(sec(102, [line12, void12]))).toHaveLength(1);
+  // blocked 뒤의 재시도가 진짜로 머지했다(새 at의 새 줄) — 앞선 런의 무효 줄은 그 줄을 지우지 못한다 → 열린다.
+  const line12b = selfMergeLine({ issue: 102, pr: 12, kind: "judge", sha, at: retry12 });
+  expect(ev([["101", r11], ["102", sec(102, [line12, void12, line12b])]]).open).toBe(true);
+  // 다른 이슈·다른 PR·다른 sha의 무효 줄은 아무것도 지우지 못한다.
+  for (const other of [
+    selfMergeVoidLine({ issue: 999, pr: 12, sha, at: at12, voids: at12 }),
+    selfMergeVoidLine({ issue: 102, pr: 13, sha, at: at12, voids: at12 }),
+    selfMergeVoidLine({ issue: 102, pr: 12, sha: "d".repeat(40), at: at12, voids: at12 }),
+  ]) expect(ev([["101", r11], ["102", sec(102, [line12])], ["999", sec(999, [other])], ["103", sec(103, [other])]]).open, other).toBe(true);
+  // merge 섹션 밖의 무효 줄은 무효 줄이 아니다.
+  const outside = `## implement · x · y\n${void12}\n`;
+  expect(ev([["101", r11], ["102", `${sec(102, [line12])}\n${outside}`]]).open).toBe(true);
+
+  // 업로드 가드: 이 프로세스가 쓰지 않은 무효 줄(에이전트가 run 기록에 심은 것)은 올라가지 않는다 — 진짜 판정 머지를 지울 수 없다.
+  const { cwd, remote } = await makeRepo();
+  const runs = join(cwd, "docs/factory/runs");
+  mkdirSync(runs, { recursive: true });
+  writeFileSync(join(runs, "102.md"), sec(102, [line12]));
+  const g1 = makeRecordsUploadGuard({ run, cwd });
+  g1.trust([line12]);
+  expect((await syncRunRecords({ run, root: cwd, message: "rec 102", guard: g1 })).ok).toBe(true);
+  writeFileSync(join(runs, "102.md"), `${readFileSync(join(runs, "102.md"), "utf8")}\n${sec(102, [void12]).split("\n").filter((l) => !l.startsWith("# ")).join("\n")}`);
+  expect((await syncRunRecords({ run, root: cwd, message: "planted", guard: makeRecordsUploadGuard({ run, cwd }) })).ok).toBe(true);
+  const onBranch = String((await run("git", ["show", "factory/records:docs/factory/runs/102.md"], { cwd: remote })).stdout);
+  expect(onBranch).toContain(line12);
+  expect(onBranch).not.toContain(void12);
+  // merge abort 정리의 보증도 무효 줄은 보증하지 않는다(GitHub의 MERGED는 무효의 근거가 아니다).
+  const vouch = makeMergeAbortVouch({ issue: 102, headBranch: stageBranch(102), prView: async () => ({ state: "OPEN", headRefName: stageBranch(102), headRefOid: sha }) });
+  expect(await vouch({ file: "102.md", line: void12 })).toBe(false);
+  // persist는 무효 줄도 브랜치에서 다시 읽어 확인한다(같은 파서) — 올라가지 않았으면 ok:false.
+  expect((await persistSelfMergeEvidence({ run, cwd, issue: 102, line: void12, sync: async () => ({ ok: true }) })).ok).toBe(false);
+  const g2 = makeRecordsUploadGuard({ run, cwd });
+  rmSync(runs, { recursive: true, force: true });
+  appendRunRecord({ root: cwd, issue: 102, title: "x", stage: "merge", runnerId: "gha-2", now: at12, lines: [void12] });
+  g2.trust([void12]);
+  const okVoid = await persistSelfMergeEvidence({ run, cwd, issue: 102, line: void12, sync: () => syncRunRecords({ run, root: cwd, message: "void", guard: g2 }) });
+  expect(okVoid.ok, okVoid.reason).toBe(true);
+}, 240000);

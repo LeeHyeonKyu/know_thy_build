@@ -3362,3 +3362,110 @@ test("test_189_self_merge_evidence_is_durable_on_factory_records_before_the_merg
   expect(plain.persistSelfMerge).not.toHaveBeenCalled();
   expect(plain.mergePr).toHaveBeenCalledTimes(1);
 }, 120000);
+
+// ── #189 skeptic (r5) f1 — 머지 전에 굳힌 증거가 실패한 머지를 판정 자동 머지로 남기지 않는다 ───────────────────────────────
+// 시나리오(스켑틱의 재현): #11은 판정 경로로 진짜 자동 머지됐다. #12의 줄은 머지 전에 factory/records에 올라갔는데 그 뒤 mergePr가
+// 실패(또는 persist가 실패)했고, 사람이 나중에 #12를 손으로 머지했다. 둘 다 main에서 revert된다. 사람의 머지는 차단기를 열지 않는다.
+import { readBreaker as readBreaker189c, parseSelfMergeLines as parseSelfMergeLines189c, makeRecordsUploadGuard as makeRecordsUploadGuard189c, persistSelfMergeEvidence as persistSelfMergeEvidence189c } from "../lib/breaker.js";
+import { syncRunRecords as syncRunRecords189c } from "../bin/run-stage.js";
+import { rmSync as rmSync189c, readFileSync as readFileSync189c } from "node:fs";
+
+test("test_189_failed_judge_merge_then_person_merge_never_counts_as_judge_automerge", async () => {
+  const CLOSED = { ok: true, open: false, since: null, reason: null, detail: "0 revert(s)" };
+  const NOW_MS = Date.parse("2026-10-03T23:00:00.000Z");
+  const g = (cwd, args, env = {}) => execRun189b("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env });
+  const T = { revert_streak: 2 };
+
+  /** 진짜 원격 + 클론. run 기록 디렉터리는 gitignore(러너의 레이아웃). */
+  const makeRepo = async () => {
+    const remote = mkdtempSync189b(join189b(tmpdir189b(), "ktb-189-msf1-remote-"));
+    await execRun189b("git", ["init", "-q", "--bare", "-b", "main", remote]);
+    const cwd = mkdtempSync189b(join189b(tmpdir189b(), "ktb-189-msf1-clone-"));
+    await g(cwd, ["init", "-q", "-b", "main"]);
+    writeFileSync189b(join189b(cwd, ".gitignore"), "docs/factory/runs/\n");
+    await g(cwd, ["add", ".gitignore"]);
+    await g(cwd, ["commit", "-q", "-m", "init"], { GIT_AUTHOR_DATE: "2026-09-30T00:00:00Z", GIT_COMMITTER_DATE: "2026-09-30T00:00:00Z" });
+    await g(cwd, ["remote", "add", "origin", remote]);
+    await g(cwd, ["push", "-q", "origin", "main"]);
+    return { remote, cwd };
+  };
+  /**
+   * merge 스테이지 한 번 — 프로덕션 배선 그대로: record는 가드가 trust한 뒤 run 기록에 쓰고(run-stage `runRecord`), persistSelfMerge는
+   * 같은 가드 위의 persistSelfMergeEvidence, 스테이지 끝에 같은 가드로 syncRunRecords, 그리고 일회용 러너가 사라진다.
+   */
+  const stage = async ({ cwd, issue, pr, mergePr, prAfter = () => "OPEN", pushDown = { v: false } }) => {
+    const guard = makeRecordsUploadGuard189c({ run: execRun189b, cwd });
+    const flaky = async (cmd, args, o) => (pushDown.v && cmd === "git" && args.includes("push") ? { code: 1, stdout: "", stderr: "fatal: HTTP 503" } : execRun189b(cmd, args, o));
+    let mergeCalled = false;
+    const d = selfD179({
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })),
+      breaker: vi.fn(async () => CLOSED),
+      prInfo: vi.fn(async () => ({ number: pr, state: mergeCalled ? prAfter() : "OPEN", mergeable: "MERGEABLE" })),
+      reviewEvidence: vi.fn(async () => ({ ok: true, data: { ...REVIEW_OK, issue, pr } })),
+      mergePr: vi.fn(async (...a) => { mergeCalled = true; return mergePr(...a); }),
+      persistSelfMerge: ({ line }) => persistSelfMergeEvidence189c({ run: flaky, cwd, issue, line, sync: () => syncRunRecords189c({ run: flaky, root: cwd, message: `run-record: issue #${issue} merge self-merge evidence`, guard }) }),
+    });
+    const record = (lines) => { guard.trust(lines); appendRunRecord189b({ root: cwd, issue, title: "x", stage: "merge", runnerId: `gha-${pr}`, now: "2026-10-03T12:00:00.000Z", lines }); };
+    const code = await runMergeStage({ issue, defaultBranch: "main", headSha: HEAD, d, record, refusal, postStatus: basePostStatus() });
+    pushDown.v = false;
+    const end = await syncRunRecords189c({ run: execRun189b, root: cwd, message: `run-record: issue #${issue} merge`, guard });
+    expect(end.ok, `#${pr} stage-end sync: ${end.reason}`).toBe(true);
+    rmSync189c(join189b(cwd, "docs/factory/runs"), { recursive: true, force: true });
+    return { code, d };
+  };
+  /** main: #11과 #12의 squash 커밋(#12는 사람이 머지했다), 그리고 둘의 revert. */
+  const mainWithReverts = async (cwd) => {
+    const shas = {};
+    for (const [subject, at] of [["feat a (#11)", "2026-10-03T13:00:00Z"], ["feat b (#12)", "2026-10-03T15:00:00Z"]]) {
+      writeFileSync189b(join189b(cwd, `${at}.txt`), subject);
+      await g(cwd, ["add", "."]);
+      await g(cwd, ["commit", "-q", "-m", subject], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
+      shas[subject] = (await g(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+    }
+    for (const [subject, at] of [["feat a (#11)", "2026-10-03T17:00:00Z"], ["feat b (#12)", "2026-10-03T18:00:00Z"]]) {
+      const r = await g(cwd, ["revert", "--no-edit", shas[subject]], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
+      expect(r.code, r.stderr).toBe(0);
+    }
+    await g(cwd, ["push", "-q", "origin", "main"]);
+  };
+  const read = (cwd) => readBreaker189c({ run: execRun189b, cwd, defaultBranch: "main", thresholds: T, now: () => NOW_MS });
+  const onBranch = async (remote, issue) => String((await execRun189b("git", ["show", `factory/records:docs/factory/runs/${issue}.md`], { cwd: remote })).stdout);
+  const scenario = async (twelve) => {
+    const { remote, cwd } = await makeRepo();
+    const s11 = await stage({ cwd, issue: 101, pr: 11, mergePr: async () => {} });
+    expect(s11.code).toBe(0);
+    const s12 = await stage({ cwd, issue: 102, pr: 12, ...twelve });
+    await mainWithReverts(cwd);
+    return { remote, cwd, s12, b: await read(cwd), text102: await onBranch(remote, 102) };
+  };
+
+  // (A) 줄은 머지 전에 올라갔고, mergePr가 실패했다(GitHub은 PR이 여전히 OPEN이라고 답한다). 사람이 나중에 #12를 머지 → 열리지 않는다.
+  const a = await scenario({ mergePr: async () => { throw new Error("GraphQL: Head branch was modified. Review and try the merge again."); } });
+  expect(a.s12.code).toBe(2);
+  expect(a.s12.d.transition.mock.calls.map((x) => x[0].to)).toEqual(["factory:blocked"]);
+  expect(parseSelfMergeLines189c(a.text102)).toEqual([expect.objectContaining({ issue: 102, pr: 12, judge: true })]); // 줄은 브랜치에 남아 있다
+  expect(a.b).toEqual(expect.objectContaining({ ok: true, open: false }));
+
+  // (B) persist가 실패해 머지하지 않았다(push 다운). 스테이지 끝 동기화는 살아나서 그 줄을 올린다(가드가 trust한 줄). 사람이 나중에 머지 → 열리지 않는다.
+  const b = await scenario({ pushDown: { v: true }, mergePr: async () => {} });
+  expect(b.s12.code).toBe(2);
+  expect(b.s12.d.mergePr).not.toHaveBeenCalled();
+  expect(parseSelfMergeLines189c(b.text102)).toEqual([expect.objectContaining({ issue: 102, pr: 12, judge: true })]);
+  expect(b.b).toEqual(expect.objectContaining({ ok: true, open: false }));
+
+  // 대조군 (C): mergePr는 던졌지만 GitHub은 PR이 MERGED라고 답한다(응답만 잃은 머지) — 그것은 판정 자동 머지다 → 같은 revert 두 건이 연다.
+  // (A)·(B)의 닫힘이 픽스처의 우연이 아니라 "머지가 일어나지 않았다"는 기록 덕이라는 증거다.
+  const c = await scenario({ mergePr: async () => { throw new Error("HTTP 502 after the merge"); }, prAfter: () => "MERGED" });
+  expect(c.s12.code).toBe(2);
+  expect(c.b).toEqual(expect.objectContaining({ ok: true, open: true }));
+  expect(c.b.reason).toMatch(/PR #11, PR #12/);
+  // 대조군 (D): GitHub이 머지 여부를 말하지 못하면 증거를 지우지 않는다 — 모르는 것을 "머지 안 됨"으로 읽지 않는다(틀려도 여는 쪽).
+  const dd = await scenario({ mergePr: async () => { throw new Error("socket hang up"); }, prAfter: () => { throw new Error("gh: HTTP 502"); } });
+  expect(dd.b).toEqual(expect.objectContaining({ ok: true, open: true }));
+  // 대조군 (E): #12도 진짜로 자동 머지됐다 → 연다.
+  const e = await scenario({ mergePr: async () => {} });
+  expect(e.s12.code).toBe(0);
+  expect(e.b).toEqual(expect.objectContaining({ ok: true, open: true }));
+}, 240000);
