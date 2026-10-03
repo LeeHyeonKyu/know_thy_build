@@ -2149,8 +2149,14 @@ export async function addedPathsNoRenames({ run, cwd, base }) {
  */
 export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
   return async ({ gates }) => {
+    // 2026-10-03 실측(#157·#170·#178 implement 세 런이 게이트 GREEN 직후 "Cannot read properties of undefined (reading 'test')"로 죽음):
+    // #174가 이 dep을 팩토리 함수로 빼면서 `harness`를 **값으로** 받았는데, main()의 `harness`는 deps 객체가 만들어진 뒤 `charterReady`에서야
+    // 로드된다 — 그래서 여기 들어온 값은 undefined였다. 예전 인라인 dep은 호출 시점에 변수를 읽었다. 게터를 받아 호출 시점에 푼다
+    // (값을 넘기는 옛 호출·테스트도 그대로 동작한다). 그래도 없으면 자기 이름으로 던진다 — 'test'를 읽다 죽는 것보다 낫다.
+    const h = typeof harness === "function" ? harness() : harness;
+    if (!h) throw new Error("self-gate: harness is not loaded yet — makeSelfGateDep must receive a getter that resolves after charterReady");
     const base = await mergeBase();
-    const diff = await changedFiles({ run, cwd: root, base, harness });
+    const diff = await changedFiles({ run, cwd: root, base, harness: h });
     const ctx = getCtx?.() ?? null;
     /**
      * Task 5 — the regression pins carried by the review handoff that sent this issue to rework.
@@ -2163,7 +2169,7 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
     const brief = ctx?.loaded?.k_restart_brief ?? null;
     const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
     return runSelfGate({
-      root, harness, gates, run,
+      root, harness: h, gates, run,
       // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
       // property is violated"; a lightly-edited pre-existing test is not what it judges.
       changedTests: diff.addedTests, changedSources: diff.sources, pins,
@@ -3260,7 +3266,7 @@ async function main() {
      * `qaEvidenceGate`. 여기서 채점하면 로스터에 qa가 있는 모든 standard-tier 이슈가 막혔다.
      */
     // #174 — the production wiring lives in `makeSelfGateDep` so the test drives this exact call site.
-    selfGate: makeSelfGateDep({ root, harness, run, mergeBase, getCtx: () => ctxCache }),
+    selfGate: makeSelfGateDep({ root, harness: () => harness, run, mergeBase, getCtx: () => ctxCache }),   // 게터 — harness는 charterReady 뒤에 생긴다
     /**
      * self-gate RED(빌더가 고칠 수 있는 finding)의 재시도 카운터/에스컬레이션. 이 head sha에 대해
      * 이번 재큐 이후 남은 재시도 마커를 세고, **이번 시도**의 마커(+findings)를 남긴 뒤 attempt(head별)와

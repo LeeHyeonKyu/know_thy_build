@@ -4613,6 +4613,23 @@ test("test_174_self_gate_dep_measures_new_files_at_the_call_site", async () => {
   expect(run.calls.some((c) => c.args[0] === "ls-tree")).toBe(false);
 });
 
+// 2026-10-03 — `makeSelfGateDep` captured `harness` BY VALUE while main() loads it later in `charterReady`: every implement run on
+// main died after gates GREEN with "Cannot read properties of undefined (reading 'test')" (#157·#170·#178). The dep must resolve the
+// harness at CALL time: a getter that is null when the deps object is built and set before the first call must work; a harness that
+// is still missing at call time must fail with its own name, not inside changedFiles.
+test("makeSelfGateDep resolves the harness lazily — a getter set after wiring works, a missing harness names itself", async () => {
+  const run = makeFakeRun([
+    { match: (c, a) => c === "git" && a[0] === "diff", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  let harness = null;                                                                  // not loaded yet when the deps are wired
+  const dep = makeSelfGateDep({ root: "/r", harness: () => harness, run, mergeBase: async () => "b".repeat(40), getCtx: () => ({ loaded: {} }) });
+  await expect(dep({ gates: { schema: "factory.gates.v1", status: "GREEN" } })).rejects.toThrow(/harness is not loaded yet/);
+  harness = { commands: {}, test: { test_glob: ["factory/test/**"], source_glob: ["factory/**"] } };   // charterReady ran
+  const r = await dep({ gates: { schema: "factory.gates.v1", status: "GREEN" } });
+  expect(r).toHaveProperty("ok");
+  expect(r.findings.filter((f) => /reading 'test'/.test(f.detail))).toEqual([]);
+});
+
 // ── #174 skeptic self-critique (round 2) ────────────────────────────────────────────────────────────────────────────
 import { run as realRun174 } from "../lib/exec.js";
 // The two transitions the implement stage really writes around a builder session: the claim (`rework → in-progress`,
