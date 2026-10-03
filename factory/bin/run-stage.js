@@ -38,7 +38,7 @@ import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
-import { engineCrashLine } from "../lib/usage.js";
+import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
@@ -184,14 +184,45 @@ export function usageLine(out, progress = null) {
 }
 
 /**
- * #196 (ADR-035) — **엔진 크래시의 닫힌 목록.** `runStage`의 catch가 잡은 예외 중 이 네 종류만 "엔진의 프로그래밍 오류"로 본다
- * (2026-10-03의 `Cannot read properties of undefined (reading 'test')`가 TypeError였다). 의존성·인프라가 던지는 plain `Error`
- * (`gh exploded`, EACCES, SIGKILL된 워커)는 여기에 들지 않는다 — 그것까지 엔진 결함으로 부르면 일시 장애가 "엔진 결함"으로
- * 사람에게 가고 그 비용이 예산에서 빠진다. 판정은 오류의 **종류**이지 메시지 문구가 아니다(문구는 누구나 흉내 낸다).
- * 경계는 휴리스틱이다: 의존성 래퍼 안의 TypeError도 여기에 들고, plain Error를 던지는 엔진 버그는 들지 않는다(ADR-035).
+ * #196 (ADR-035) — **엔진 크래시의 닫힌 목록.** `runStage`의 catch가 잡은 예외 중 **엔진 코드가 던진** `TypeError`·`ReferenceError`·
+ * `RangeError`만 "엔진의 프로그래밍 오류"로 본다(2026-10-03의 `Cannot read properties of undefined (reading 'test')`가 TypeError였다).
+ * 들지 않는 것:
+ *   - 의존성·인프라가 던지는 plain `Error`(`gh exploded`, EACCES, SIGKILL된 워커).
+ *   - **의존성 클라이언트 안에서** 난 어떤 종류의 오류든 — `dependencyClient`로 감싼 gh 클라이언트가 던진 것은 표식을 달고 나온다.
+ *     gh.js는 gh 출력을 보호 없이 `JSON.parse`하고(빈·잘린 출력 → SyntaxError) 필드를 바로 읽는다(오류 모양 응답 → TypeError) —
+ *     그것은 엔진 결함이 아니라 의존성 장애이고, `resolveRepo`가 같은 SyntaxError를 plain Error로 다시 싸는 것과 같은 판단이다.
+ *   - `SyntaxError` 전부 — 런타임의 SyntaxError는 엔진 코드가 아니라 **데이터**(gh 출력·에이전트 산출물·설정 정규식)의 실패다.
+ * 판정은 오류의 **종류와 출처**이지 메시지 문구가 아니다(문구는 누구나 흉내 낸다). plain Error를 던지는 엔진 버그는 들지 않는다 —
+ * 모르면 오늘의 경로(exit 1, 전이 없음)로 간다(ADR-035).
  */
-export const ENGINE_CRASH_ERRORS = [TypeError, ReferenceError, RangeError, SyntaxError];
-export const isEngineCrash = (e) => ENGINE_CRASH_ERRORS.some((C) => e instanceof C);
+export const ENGINE_CRASH_ERRORS = [TypeError, ReferenceError, RangeError];
+const DEPENDENCY_ERROR = Symbol.for("factory.dependency-error");
+const markDependencyError = (e) => {
+  if (e && (typeof e === "object" || typeof e === "function")) {
+    try { Object.defineProperty(e, DEPENDENCY_ERROR, { value: true, configurable: true }); } catch { /* 얼린 오류 — 표식 없이 간다 */ }
+  }
+  return e;
+};
+export const isDependencyError = (e) => Boolean(e && e[DEPENDENCY_ERROR]);
+export const isEngineCrash = (e) => !isDependencyError(e) && ENGINE_CRASH_ERRORS.some((C) => e instanceof C);
+/**
+ * #196 — 의존성 클라이언트(gh)를 감싼다: 메서드가 던지거나 거부하면 그 오류에 "의존성에서 왔다" 표식을 단다. 값은 바꾸지 않는다
+ * (동기 결과는 동기로, 함수가 아닌 속성은 그대로). 표식은 오류 객체에 붙으므로 그것을 그대로 다시 던지는 엔진 lib(`transition({ gh })`)를
+ * 지나도 따라간다. main()의 gh가 이것을 거친다 — 이 래퍼를 빼면 gh 출력 장애가 "엔진 결함"으로 사람에게 간다.
+ */
+export function dependencyClient(client) {
+  return new Proxy(client, {
+    get(target, key, receiver) {
+      const v = Reflect.get(target, key, receiver);
+      if (typeof v !== "function") return v;
+      return function dependencyCall(...args) {
+        let out;
+        try { out = v.apply(target, args); } catch (e) { throw markDependencyError(e); }
+        return out && typeof out.then === "function" ? out.then(undefined, (e) => { throw markDependencyError(e); }) : out;
+      };
+    },
+  });
+}
 
 export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
   const d = deps;
@@ -205,9 +236,12 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
    */
   let usage = null;
   let usageRecorded = false;
+  /** #196 sc2 — 이 런의 진짜 크래시 줄(catch만 정한다). 그 밖의 줄은 줄머리 `engine-crash:`가 인용 표시돼 나간다(위조 방어 ①). */
+  let crashLine = null;
   const record = (lines) => {
     if (usage && lines.includes(usage)) usageRecorded = true;
-    try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+    const safe = lines.map((l) => (crashLine !== null && l === crashLine ? l : quoteEngineCrashLines(l)));
+    try { d.runRecord(safe); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
   };
   /**
    * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
@@ -1392,7 +1426,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 전이가 거부되거나 던져도 기록은 남고 exit 1이다(라벨이 in-flight에 남으면 오늘의 경로가 받는다).
      */
     const name = e?.name || e?.constructor?.name || "Error";
-    const lines = [`error: ${stage} aborted — ${e?.message || e}`, engineCrashLine({ stage, runnerId, runId, error: e })];
+    // 첫 두 줄의 모양과 순서가 곧 계약이다(`lib/usage.js` ②): `error:` 줄은 메시지를 한 줄로 접어 둘째 줄이 크래시 줄이 되게 한다.
+    crashLine = engineCrashLine({ stage, runnerId, runId, error: e });
+    const lines = [`error: ${stage} aborted — ${String(e?.message || e).replace(/\s+/g, " ").trim()}`, crashLine];
     if (usage && !usageRecorded) lines.push(usage);
     try {
       const t = await d.transition({ to: "factory:blocked", reason: `engine crash — ${stage} threw ${name}: ${truncateReason(e?.message || e)}`, cause: "engine-crash" });
@@ -3106,7 +3142,7 @@ async function main() {
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   // r1 should_fix 3 — `process.env`는 **이 배선 한 줄**에만 산다(`runAttemptOf`는 env를 받는다).
   const runAttempt = runAttemptOf(process.env);
-  const gh = makeGh({ run, repo });
+  const gh = dependencyClient(makeGh({ run, repo }));          // #196 — gh 장애는 engine-crash가 아니다(표식)
   // 정리 경로는 CHARTER도 harness도 읽지 않는다 — 읽을 것이 하나라도 깨져 있으면 고아 락이 그대로
   // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
   if (abortedStatus !== null) {

@@ -134,7 +134,8 @@ export const CANCELLED_MAX_RETRIES = 3;
  * `factory:blocked`(cause=engine-crash)으로 옮긴다 — 그래서 하트비트 재큐 팔(`factory-retry`, R)은 그 런을 보지 않는다. 대신 이
  * blocked 팔이 같은 스테이지를 이 횟수만큼 다시 밀고, 그다음 크래시는 "엔진 결함" 문장으로 사람에게 간다. 결정적인 크래시는 같은
  * 엔진에서 같은 자리에서 또 죽으므로 한 번이면 충분하다(일시적인 것은 한 번에 풀린다). 상한이 없으면 K·R·예산 어느 것도 이 루프를
- * 세지 않는다 — 이 상수가 그 유일한 브레이크다.
+ * 세지 않는다 — 이 상수가 그 유일한 브레이크다. `sweep({ engineCrashMaxRetries })`가 이 값을 기본으로 받아 blocked 팔에 그대로 건다 —
+ * 기본 분기의 1과 값이 같아도 배선은 따로다(테스트가 다른 값을 주어 그 배선을 핀한다, skeptic sc3).
  */
 export const ENGINE_CRASH_MAX_RETRIES = 1;
 
@@ -1487,7 +1488,7 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false, installedVersion = null }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false, installedVersion = null, engineCrashMaxRetries = ENGINE_CRASH_MAX_RETRIES }) {
   /**
    * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 계정으로 판정한다(`commentsSinceCycleStart`). 팩토리 계정 이름 하나를
    * 여기서 한 번만 구한다. 못 구하면 null — 그때 창은 "작성자가 있는 human 마커"에만 리셋된다(닫힌 쪽).
@@ -1640,7 +1641,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           const isApiError = cause === "api-error";
           const isCancelled = cause === "cancelled";
           const isEngineCrash = cause === "engine-crash";             // #196 — R이 아니라 이 팔의 이름 있는 상한
-          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? ENGINE_CRASH_MAX_RETRIES : 1;
+          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? engineCrashMaxRetries : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
           const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number);

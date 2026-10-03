@@ -27,6 +27,13 @@ const USAGE_RE = /^usage: (\{.*\}) cost_usd: (\S+) num_turns: (\S+) terminal_rea
  * 줄은 **자기 런을 지목한다**(`runner=`): 섹션 헤더의 러너와 같은 줄만 센다. 다른 러너를 지목한 줄(복사·위조)은 무시하고, 그
  * 섹션은 보통 런으로 센다 — 모르는 것은 세는 쪽으로 기운다(엔진 런을 세면 사람이 조금 일찍 볼 뿐이고, 보통 런을 빼면 상한이 샌다).
  * 메시지는 한 줄로 접는다(개행이 들어간 오류 문구가 다음 줄을 흉내 내지 못하게).
+ *
+ * **위조 방어는 두 겹이다**(skeptic sc2 — 러너는 게이트 사유·의존성 오류 메시지처럼 남이 만든 문구를 기록에 옮겨 적고, 그 문구의
+ * 개행은 기록에서 제 줄이 된다):
+ *   ① 쓰는 쪽 — `runStage`의 `record()`는 진짜 크래시 줄이 아닌 모든 줄에서 줄머리의 `engine-crash:`를 `quoteEngineCrashLines`로
+ *      인용 표시한다(문구는 감사용으로 남고, 크래시 줄로는 읽히지 않는다).
+ *   ② 읽는 쪽 — 크래시 줄은 **자리**까지 맞아야 센다: 섹션 본문의 첫 줄이 `error: <섹션 스테이지> aborted — `이고 바로 다음 줄이
+ *      그 스테이지·그 러너의 크래시 줄일 때만이다(`runStage` catch가 쓰는 모양 그대로). 다른 자리의 크래시 줄은 세지 않는다.
  */
 export const ENGINE_CRASH_PREFIX = "engine-crash:";
 const ENGINE_CRASH_RE = /^engine-crash: stage=(\S+) runner=(\S+) run_id=(\S+) error=(\w+) —/;
@@ -35,13 +42,14 @@ export const engineCrashLine = ({ stage, runnerId, runId = null, error }) => {
   const msg = String(error?.message ?? error ?? "").replace(/https?:\/\/\S+/g, "<url>").replace(/\s+/g, " ").trim().slice(0, 200);
   return `${ENGINE_CRASH_PREFIX} stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} error=${name} — ${msg}`;
 };
-/** 섹션 본문에 **그 섹션의 러너**가 쓴 engine-crash 줄이 있는가. */
-function sectionEngineCrash(lines, runner) {
-  for (const l of lines) {
-    const m = ENGINE_CRASH_RE.exec(l);
-    if (m && m[2] === runner) return true;
-  }
-  return false;
+/** 진짜 크래시 줄이 아닌 텍스트에서, 어느 줄이든 줄머리의 `engine-crash:`를 인용 표시한다(①). */
+export const quoteEngineCrashLines = (text) => String(text).replace(/(^|\n)([ \t]*)engine-crash:/g, "$1$2(quoted) engine-crash:");
+/** 섹션이 `runStage` catch가 쓴 크래시 섹션인가(②): 첫 줄 `error: <stage> aborted — `, 둘째 줄 그 스테이지·그 러너의 크래시 줄. */
+function sectionEngineCrash(lines, stage, runner) {
+  const body = lines.filter((l) => l !== "");
+  if (body.length < 2 || !body[0].startsWith(`error: ${stage} aborted — `)) return false;
+  const m = ENGINE_CRASH_RE.exec(body[1]);
+  return Boolean(m && m[1] === stage && m[2] === runner);
 }
 
 /** "YYYY-MM-DDTHH:MMZ"(초 없는 short form)도, 일반 ISO도 받는다. 파싱 불가면 null. */
@@ -96,7 +104,7 @@ export function parseRunRecord(text) {
     const usageLineText = bodyLines.find((l) => l.startsWith("usage:"));
     const parsed = usageLineText ? parseUsageLine(usageLineText) : null;
     // #196 — 키는 크래시 섹션에만 선다: 크래시 줄이 없는 기록의 항목은 바이트 하나 안 바뀐다(옛 소비자·고정이 그대로 본다).
-    const engineCrash = sectionEngineCrash(bodyLines, m[3].trim());
+    const engineCrash = sectionEngineCrash(bodyLines, m[1], m[3].trim());
     out.push({
       stage: m[1],
       at: m[2],
