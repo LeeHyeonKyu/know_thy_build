@@ -503,12 +503,13 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    * transition while the record says FAIL.
    */
   /**
-   * Which publishes this run has made. The veto window publishes before its announcement (`windowPublished`); a merge after
-   * the window does not publish again, but a hand-off that ends the window publishes once more, with its reason, at its own
-   * stated point (so a vetoed PR's body names the veto). Any other route publishes once (`finalPublished`). A run records at
-   * most ONE FAIL line for the PR-body step (`evidenceFailed`), however many of its publishes fail.
+   * dw5 — a merge run publishes EXACTLY ONCE (`published`), at the first stated point it reaches: before the veto-window
+   * announcement on the self-change path (a merge, a veto hand-off or a review refusal after the window does not publish
+   * again), inside handToHuman before the needs-human transition, or before mergePr. A failed publish is not retried later
+   * in the run. Needs-human routes that bypass handToHuman (mergeGates, review verification, two-actor) do not publish —
+   * plan non_goals[0]. A run records at most ONE FAIL line for the PR-body step (`evidenceFailed`).
    */
-  let windowPublished = false, finalPublished = false, evidenceFailed = false;
+  let published = false, evidenceFailed = false;
   let evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false, evidenceLoginsUnresolved = false;
   const evidenceMs = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
   /**
@@ -539,14 +540,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   };
   const failOnce = (line) => { if (evidenceFailed) return; evidenceFailed = true; record([line]); };
   const publishEvidence = async ({ route, reason = null }) => {
-    if (finalPublished) return;
-    if (route === "veto-window") {
-      if (windowPublished) return;
-      windowPublished = true;
-    } else {
-      if (route === "merge" && windowPublished) return;                // the window's section is what the owner read
-      finalPublished = true;
-    }
+    if (published) return;                                             // dw5: once per merge run, whatever the route
+    published = true;
     if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
     if (typeof d.publishPrEvidence !== "function") {
       failOnce("evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written");
@@ -917,7 +912,6 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     if (!mg?.checksGreen) reasons.push("required checks not GREEN");
     if (!mg?.integrityGreen) reasons.push("integrity not GREEN");
     const reason = reasons.join("; ");
-    await publishEvidence({ route: "hand-off", reason });     // #195 — a needs-human route outside handToHuman publishes too
     const t = await d.transition({ to: "factory:needs-human", reason });
     record([`merge: mergeGates — ${reason}`, ...refusal(t)]);
     return 2;
@@ -1054,7 +1048,6 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   let qaManifestRecorded = null;
   const reviewRefused = async (reason) => {
     const line = `review verification failed — ${reason}`;
-    await publishEvidence({ route: "hand-off", reason: line });  // #195 — before the needs-human transition, like handToHuman
     const t = await d.transition({ to: "factory:needs-human", reason: line });
     record([`merge: ${line}`, ...refusal(t)]);
     return 2;
@@ -1293,7 +1286,7 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     }
   }
 
-  // #195 — the evidence lands on the PR body right before the squash (a no-op when the veto window already published it).
+  // #195 — the evidence lands on the PR body right before the squash (a no-op when the veto window already published — once per run).
   await publishEvidence({ route: "merge" });
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의

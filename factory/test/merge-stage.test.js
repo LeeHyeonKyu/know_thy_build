@@ -3114,23 +3114,19 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     order195(ev.publishPrEvidence, d.mergePr);
     expect(ev.postEvidenceComment).toHaveBeenCalledTimes(1);
   }
-  // (f) a veto: the window's evidence went out before the announcement, and the hand-off that ends the window publishes once
-  // at its own stated point (inside handToHuman, before the needs-human transition) with the veto reason. Poll ticks never
-  // publish.
+  // (f) a veto: the window's evidence went out before the announcement, and that is the run's ONE publish — the hand-off that
+  // ends the window (handToHuman, before the needs-human transition) does not publish again, and poll ticks never publish.
   {
     const ev = evidence195();
     const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
     expect((await run179(d)).code).toBe(2);
-    expect(ev.publishPrEvidence.mock.calls.map((c) => c[0].route)).toEqual(["veto-window", "hand-off"]);
-    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toBeNull();
-    expect(ev.publishPrEvidence.mock.calls[1][0].reason).toMatch(/^vetoed by @owner/);
-    expect(d.transition.mock.calls.at(-1)[0].reason.startsWith(ev.publishPrEvidence.mock.calls[1][0].reason)).toBe(true);
-    expect(ev.publishPrEvidence.mock.invocationCallOrder[1]).toBeLessThan(needsHumanCall195(d));
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "veto-window", reason: null });
+    expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
     expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^vetoed by @owner/);
     expect(ev.postEvidenceComment).not.toHaveBeenCalled();
   }
-  // (f2) the same veto through the REAL run-stage dep and a stateful PR body: the body the owner ends up reading names the
-  // veto, in one section.
+  // (f2) the same veto through the REAL run-stage dep and a stateful PR body: one section, written once, one record line.
   {
     let body = "Closes #7\n";
     const gh = { comments: vi.fn(async () => []), prBody: vi.fn(async () => body), editPrBody: vi.fn(async (_p, b) => { body = b; }), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot") };
@@ -3138,49 +3134,45 @@ test("test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off", a
     const d = selfD179({ ...real, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
     const { code, lines } = await run179(d);
     expect(code).toBe(2);
+    expect(gh.editPrBody).toHaveBeenCalledTimes(1);
     expect(body.split("<!-- factory-evidence:v1 -->").length - 1).toBe(1);
-    expect(body).toMatch(/### Rejected \/ hand-off\n\n- vetoed by @owner/);
-    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (veto-window)", "evidence: published to PR #9 (hand-off)"]);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (veto-window)"]);
   }
-  // (f3) a veto with a failing dep: the window publish and the hand-off publish both fail, and the record still gets exactly
-  // ONE FAIL line. The transition and exit code do not change.
+  // (f3) a veto with a failing dep: the window publish fails, the hand-off does not try again, and the record gets exactly ONE
+  // FAIL line. The transition and exit code do not change.
   {
     const ev = evidence195(async () => { throw new Error("gh pr view failed (1): HTTP 502"); });
     const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
     const { code, lines } = await run179(d);
     expect(code).toBe(2);
-    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
     expect(failLines195(lines)).toEqual(["evidence: FAIL — publish: gh pr view failed (1): HTTP 502"]);
     expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
   }
-  // (f4) the needs-human routes that do not pass through handToHuman also publish once, before their transition, with their
-  // reason: the mergeGates refusal (required checks / integrity not GREEN) and the pre-merge review-verification refusal.
-  for (const [name, over, re] of [
-    ["checks", { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) }, /^required checks not GREEN$/],
-    ["integrity", { mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: false })) }, /^integrity not GREEN$/],
-    ["review", { reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review handoff on this issue" })) }, /^review verification failed — no review handoff on this issue$/],
+  // (f4) plan non_goals[0]: needs-human routes that bypass handToHuman — the mergeGates refusal (required checks / integrity
+  // not GREEN) and the review-verification refusal — publish NOTHING. The transition and exit code are as before.
+  for (const [name, over] of [
+    ["checks", { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) }],
+    ["integrity", { mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: false })) }],
+    ["review", { reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review handoff on this issue" })) }],
   ]) {
     const ev = evidence195();
     const d = baseD({ ...ev, ...over });
     const { lines, record } = makeRecord();
     expect(await run(d, { record }), name).toBe(2);
-    expect(ev.publishPrEvidence, name).toHaveBeenCalledTimes(1);
-    expect(ev.publishPrEvidence.mock.calls[0][0], name).toMatchObject({ pr: 9, route: "hand-off" });
-    expect(ev.publishPrEvidence.mock.calls[0][0].reason, name).toMatch(re);
-    expect(ev.publishPrEvidence.mock.invocationCallOrder[0], name).toBeLessThan(needsHumanCall195(d));
+    expect(d.transition.mock.calls.map((c) => c[0].to), name).toEqual(["factory:needs-human"]);
+    expect(ev.publishPrEvidence, name).not.toHaveBeenCalled();
     expect(d.mergePr, name).not.toHaveBeenCalled();
-    expect(lines.filter((l) => l.startsWith("evidence: ")), name).toEqual(["evidence: published to PR #9 (hand-off)"]);
+    expect(lines.filter((l) => l.startsWith("evidence: ")), name).toEqual([]);
   }
-  // (f5) the post-window review re-verification refusal on the self-change path: the window publish, then once more with
-  // the refusal reason before needs-human.
+  // (f5) the post-window review re-verification refusal on the self-change path: the window's publish is the only one.
   {
     const ev = evidence195();
     let n = 0;
     const d = selfD179({ ...ev, prHeadShaLive: vi.fn(async () => (++n === 1 ? HEAD : "c".repeat(40))) });
     expect((await run179(d)).code).toBe(2);
-    expect(ev.publishPrEvidence.mock.calls.map((c) => c[0].route)).toEqual(["veto-window", "hand-off"]);
-    expect(ev.publishPrEvidence.mock.calls[1][0].reason).toMatch(/^review verification failed — PR head moved during this run/);
-    expect(ev.publishPrEvidence.mock.invocationCallOrder[1]).toBeLessThan(needsHumanCall195(d));
+    expect(ev.publishPrEvidence.mock.calls.map((c) => c[0].route)).toEqual(["veto-window"]);
+    expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^review verification failed — PR head moved during this run/);
     expect(d.mergePr).not.toHaveBeenCalled();
   }
   // (f6) run-stage's dep with a run record that exists but cannot be read (EACCES): the read step fails, so nothing is
