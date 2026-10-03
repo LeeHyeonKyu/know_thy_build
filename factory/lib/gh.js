@@ -373,13 +373,6 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     async comment(n, body, { signal = null } = {}) {
       return (await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], { input: body, ...(signal ? { signal } : {}) })).trim();
     },
-    /**
-     * #195 — replace one issue comment's body (the runner's marked evidence comment on a merge rerun). The body travels as
-     * JSON on stdin (`--input -`), never in argv. No retry; `signal` kills the child when the caller's bound fires.
-     */
-    async editComment(id, body, { signal = null } = {}) {
-      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "--input", "-"], { input: JSON.stringify({ body }), ...(signal ? { signal } : {}) });
-    },
     async addLabels(n, labels) {
       if (!labels.length) return;
       await labelMutation({
@@ -451,9 +444,13 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const out = await gh(args, { input: body });
       const m = /\/pull\/(\d+)/.exec(out); return m ? Number(m[1]) : null;
     },
-    async patchComment(commentId, body) {
+    /**
+     * The one PATCH path for an issue comment (heartbeat edits; #195's marked evidence comment on a merge rerun). #195 — an
+     * optional `signal` kills the gh child when the caller's bound fires; absent → exactly the old call. No retry.
+     */
+    async patchComment(commentId, body, { signal = null } = {}) {
       // --input stdin JSON avoids -f treating a leading "@" in body as a file reference
-      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }) });
+      await gh(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${commentId}`, "--input", "-"], { input: JSON.stringify({ body }), ...(signal ? { signal } : {}) });
     },
     /**
      * 이 라벨이 붙은 이슈들. 기본은 **열린 것만** — sweeper의 모든 팔과 back-pressure가 묻는 것은

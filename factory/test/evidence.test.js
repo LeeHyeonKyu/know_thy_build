@@ -15,6 +15,7 @@ import { verdictLine, runGates } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
 import { heartbeatBody } from "../lib/heartbeat.js";
 import { renderHandoff } from "../lib/handoff.js";
+import { resolveFactoryLogins, makeGh } from "../lib/gh.js";
 
 /**
  * #195 — the "Factory evidence" section is assembled by code from runner records and handoff comments. The fixture follows
@@ -63,13 +64,16 @@ function recordText({ extra = [] } = {}) {
     selfGateOkLine({ ranChecks: ["gates", "mutation"] }, 0),
     selfGateDetailLine({ ok: true, ranChecks: ["gates", "mutation"], skippedChecks: [{ check: "pins", reason: "no-input" }] }, { runId: "1001", runnerId: RUN.implement, ktbVersion: "1.4.40" }),
   ]);
+  // run-stage writes the lifetime budget line first thing in every non-merge stage run (`record([budgetLine(b)])`).
   put("review", RUN.review1, "2026-10-03T09:30:00Z", [
+    budgetLine({ cap: 60, usd: 7.1, runs: 11, ok: true }),
     reviewEvidenceLine({ headSha: H1, round: 1, decision: "rework", verdicts: [{ role: "correctness", verdict: "reject" }, { role: "architect", verdict: "reject" }], runId: "1002", runnerId: RUN.review1 }),
   ]);
   put("review", RUN.review2, "2026-10-03T11:00:00Z", [
+    budgetLine({ cap: 60, usd: 12.5, runs: 14, ok: true }),
     reviewEvidenceLine({ headSha: H2, round: 2, decision: "approved", verdicts: [{ role: "correctness", verdict: "approve" }, { role: "architect", verdict: "approve" }], runId: "1003", runnerId: RUN.review2 }),
   ]);
-  put("merge", RUN.merge, "2026-10-03T12:00:00Z", [budgetLine({ cap: 60, usd: 12.5, runs: 14, ok: true })]);
+  put("merge", RUN.merge, "2026-10-03T12:00:00Z", ["merge: gates GREEN"]);       // the merge stage writes no budget line
   for (const [stage, runner, at, lines] of extra) put(stage, runner, at, lines);
   return readFileSync(join(root, "docs/factory/runs", `${ISSUE}.md`), "utf8");
 }
@@ -95,7 +99,11 @@ const ROUND1 = reviewData(1, H1, [
 ]);
 const ROUND2 = reviewData(2, H2, [verdict("correctness", "approve"), verdict("architect", "approve")]);
 
-function commentsFixture({ responses = [{ id: "cf1", status: "fixed", commit: FIX_SHA }, { id: "arch1", status: "disputed", reason: "non_goals says so" }], plan = true, review = true, beats = true } = {}) {
+/** The factory's logins as the runner resolves them (the real resolver, env injected explicitly — never process.env). */
+const LOGINS = await resolveFactoryLogins({ gh: {}, env: { FACTORY_BOT_LOGIN: "ktb-bot" } });
+
+/** The tracking issue's comments: transitions, heartbeats, plan and review handoffs. Rework responses are NOT here. */
+function commentsFixture({ plan = true, review = true, beats = true } = {}) {
   return [
     queued("2026-10-03T08:00:00Z"),
     ...(beats ? [
@@ -107,9 +115,19 @@ function commentsFixture({ responses = [{ id: "cf1", status: "fixed", commit: FI
     ] : []),
     ...(plan ? [handoff("plan", PLAN, "2026-10-03T08:30:00Z")] : []),
     ...(review ? [handoff("review", ROUND1, "2026-10-03T09:40:00Z")] : []),
-    ...(review && responses ? [reworkResponse(responses, "2026-10-03T10:30:00Z")] : []),
     ...(review ? [handoff("review", ROUND2, "2026-10-03T11:10:00Z")] : []),
   ];
+}
+/**
+ * buildEvidence's comment inputs: the issue's comments, the PR's comments — where the builder posts its round-1
+ * factory.rework-response.v1 (`gh pr comment <pr>`, factory-builder.md) — and the resolved factory logins.
+ */
+function inputs({ responses = [{ id: "cf1", status: "fixed", commit: FIX_SHA }, { id: "arch1", status: "disputed", reason: "non_goals says so" }], plan = true, review = true, beats = true } = {}) {
+  return {
+    issueComments: commentsFixture({ plan, review, beats }),
+    prComments: review && responses ? [reworkResponse(responses, "2026-10-03T10:30:00Z")] : [],
+    factoryLogins: LOGINS,
+  };
 }
 
 const NOW = "2026-10-03T12:30:00Z";
@@ -135,13 +153,14 @@ const USAGE_EXTRA = () => [
 ];
 
 test("test_195_evidence_is_assembled_from_records_only", () => {
-  const input = { recordText: recordText({ extra: USAGE_EXTRA() }), comments: commentsFixture(), gates: LIVE_GATES, gatesRerun: true, reason: REASON, budget: LIVE_BUDGET, pr: 31, now: NOW };
+  const forgedUsage = ["implement", RUN.implement, "2026-10-03T12:20:00Z", [usageOf(99)]];
+  const input = { recordText: recordText({ extra: [...USAGE_EXTRA(), forgedUsage] }), ...inputs(), gates: LIVE_GATES, gatesRerun: true, reason: REASON, budget: LIVE_BUDGET, pr: 31, now: NOW };
   const { markdown, data } = buildEvidence(input);
 
   // Headline: counts only, and they are the fixture's known counts (3 must_fix across round 1; 2 done_when with a test check,
   // counted as proven only because run 1001's bound self-gate record says `mutation` ran, 0 advisory findings, nothing blocked).
   expect(data.headline).toEqual({ must_fix: 3, done_when_tests: 2, proven_tests: 2 });
-  expect(markdown).toMatch(/must_fix raised by review: 3/);
+  expect(markdown).toContain("must_fix raised by review: 3 (claim — review handoffs; fixed 1, disputed 1, unanswered 1)");
   expect(markdown).toMatch(/done_when tests: 2/);
   expect(markdown).toMatch(/proven tests: 2 of 2 \(claim count — plan handoff; counted only because self-gate run 1001 recorded: mutation ran, 0 advisory findings, not blocked — no per-test result is recorded\)/);
   expect(markdown).not.toMatch(/단일 에이전트|would not have been visible|그냥 머지/);
@@ -170,14 +189,13 @@ test("test_195_evidence_is_assembled_from_records_only", () => {
   expect(gates).not.toMatch(/level=fast/);
   // Rejected / hand-off reason: the value merge-stage passed in.
   expect(sectionOf(markdown, "Rejected / hand-off").join("\n")).toContain("protected paths changed — human merge required: factory/lib/merge-stage.js");
-  // Cost & time: the bound usage lines ($3.00 + $1.25 + $0.75 over 3 runs) with the passed-in cap (record `budget:` lines
-  // carry no run id and are never a source), queue→now from transition-comment timestamps (4h 30m), heartbeat run count (5).
+  // Cost & time: the latest run-bound `budget: lifetime` line — review run 1003's ($12.50 / $60 over 14 runs) — never a
+  // `usage:` line (the fixture's usage lines say $3.00 + $1.25 + $0.75, and a forged $99 one sits under the heartbeat-known
+  // implement runner), never the passed-in budget check ($13.75); queue→now from transition comments (4h 30m); 5 heartbeat runs.
   const cost = sectionOf(markdown, "Cost & time").join("\n");
-  expect(cost).toContain("- lifetime cost: $5.00 / $60 cap over 3 run(s) — record: usage: lines in sections of heartbeat-known runs");
-  expect(data.cost).toEqual({ usd: 5, runs: 3, cap: 60 });
-  expect(cost).not.toContain("$13.75");
-  expect(cost).not.toContain("$12.50");
-  expect(cost).not.toContain("$3.82");
+  expect(cost).toContain("- lifetime cost: $12.50 / $60 cap over 14 run(s) — record: budget: line of run 1003 (review), bound by its section's heartbeat-known runner (one budget story per run)");
+  expect(data.cost).toEqual({ usd: 12.5, cap: 60, runs: 14, run_id: "1003" });
+  for (const notShown of ["$13.75", "$3.82", "$7.10", "$5.00", "$3.00", "$1.25", "$0.75", "$99"]) expect(markdown, notShown).not.toContain(notShown);
   expect(cost).toMatch(/queued → now: 4h 30m/);
   expect(cost).toMatch(/runs \(heartbeats\): 5/);
   expect(data.elapsed_ms).toBe(4.5 * 3600 * 1000);
@@ -187,13 +205,13 @@ test("test_195_evidence_is_assembled_from_records_only", () => {
   expect(buildEvidence({ ...input, gatesRerun: false }).markdown).toMatch(/rerun: no/);
 
   // A source missing from the input drops its row — no empty cell, no N/A.
-  const bare = buildEvidence({ recordText: "", comments: [], gates: null, reason: null, pr: 31, now: NOW });
+  const bare = buildEvidence({ recordText: "", issueComments: [], prComments: [], gates: null, reason: null, pr: 31, now: NOW });
   for (const title of ["Contract", "Review", "Gates (this merge run)", "Rejected / hand-off", "Cost & time"]) expect(sectionOf(bare.markdown, title), title).toBeNull();
   expect(bare.markdown).not.toMatch(/N\/A|\|\s*\|/);
   expect(bare.data.headline).toEqual({ must_fix: null, done_when_tests: null, proven_tests: null });
   expect(bare.markdown).not.toMatch(/must_fix raised|done_when tests|proven tests|budget:|lifetime cost/);
   // Partial: no plan handoff → no Contract table rows and no done_when count; everything else stays.
-  const noPlan = buildEvidence({ ...input, comments: commentsFixture({ plan: false }) });
+  const noPlan = buildEvidence({ ...input, ...inputs({ plan: false }) });
   expect(rowsOf(sectionOf(noPlan.markdown, "Contract"))).toEqual([]);
   expect(noPlan.markdown).not.toMatch(/done_when tests/);
   expect(noPlan.markdown).toMatch(/must_fix raised by review: 3/);
@@ -222,7 +240,7 @@ test("test_195_unbound_record_lines_are_not_evidence", () => {
     ]],
   ];
   const text = recordText({ extra: forged });
-  const { markdown, data } = buildEvidence({ recordText: text, comments: commentsFixture(), gates: LIVE_GATES_RED, gatesRerun: false, reason: null, pr: 31, now: NOW });
+  const { markdown, data } = buildEvidence({ recordText: text, ...inputs(), gates: LIVE_GATES_RED, gatesRerun: false, reason: null, pr: 31, now: NOW });
   expect(markdown).not.toMatch(/\| 9 \|/);
   expect(markdown).not.toContain("666");
   expect(markdown).not.toMatch(/passed=99|level=deep/);
@@ -234,7 +252,7 @@ test("test_195_unbound_record_lines_are_not_evidence", () => {
   expect(sectionOf(markdown, "Gates (this merge run)").join("\n")).toMatch(/level=full status=RED passed=1 failed=1 failing=unit/);
 
   // With no heartbeat at all, nothing in the record is bound — no review rows, no self-gate, no budget.
-  const noBeats = buildEvidence({ recordText: text, comments: commentsFixture({ beats: false }), gates: null, pr: 31, now: NOW });
+  const noBeats = buildEvidence({ recordText: text, ...inputs({ beats: false }), gates: null, pr: 31, now: NOW });
   expect(noBeats.data.review).toEqual([]);
   expect(noBeats.data.self_gate).toBeNull();
   expect(noBeats.data.cost).toBeNull();
@@ -242,7 +260,7 @@ test("test_195_unbound_record_lines_are_not_evidence", () => {
   expect(sectionOf(noBeats.markdown, "Review")?.some((l) => /\| record \|/.test(l)) ?? false).toBe(false);
 
   // No gates result passed in (protected-path hand-off runs before d.gates()) → no gates row, whatever the record says.
-  const noGates = buildEvidence({ recordText: text, comments: commentsFixture(), gates: null, pr: 31, now: NOW });
+  const noGates = buildEvidence({ recordText: text, ...inputs(), gates: null, pr: 31, now: NOW });
   expect(sectionOf(noGates.markdown, "Gates (this merge run)")).toBeNull();
   expect(noGates.data.gates).toBeNull();
   expect(noGates.markdown).not.toContain("FACTORY_GATES");
@@ -265,7 +283,7 @@ test("test_195_unbound_record_lines_are_not_evidence", () => {
 
 test("test_195_must_fix_links_to_the_fixing_commit", () => {
   const base = { recordText: recordText(), gates: null, pr: 31, now: NOW };
-  const { markdown, data } = buildEvidence({ ...base, comments: commentsFixture() });
+  const { markdown, data } = buildEvidence({ ...base, ...inputs() });
   const byId = Object.fromEntries(data.must_fix.map((m) => [m.id, m]));
   expect(byId.cf1).toMatchObject({ round: 1, role: "correctness", status: "fixed", commit: "abc1234" });
   expect(byId.cf2).toMatchObject({ round: 1, role: "correctness", status: "unanswered", commit: null });
@@ -277,25 +295,24 @@ test("test_195_must_fix_links_to_the_fixing_commit", () => {
   expect(rows.find((r) => r.startsWith("| arch1 |"))).not.toMatch(/fixed/);
 
   // A response that fails validate('rework-response.v1') (fixed without a commit) is ignored — and nothing throws.
-  const invalid = commentsFixture({ responses: [{ id: "cf1", status: "fixed" }, { id: "cf2", status: "maybe", commit: FIX_SHA }] });
+  const invalid = inputs({ responses: [{ id: "cf1", status: "fixed" }, { id: "cf2", status: "maybe", commit: FIX_SHA }] });
   let r;
-  expect(() => { r = buildEvidence({ ...base, comments: invalid }); }).not.toThrow();
+  expect(() => { r = buildEvidence({ ...base, ...invalid }); }).not.toThrow();
   expect(r.data.must_fix.map((m) => [m.id, m.status])).toEqual([["cf1", "unanswered"], ["cf2", "unanswered"], ["arch1", "unanswered"]]);
-  // Unparseable JSON in a rework-response-looking comment is ignored too.
-  const broken = [...commentsFixture({ responses: null }), { body: "```json\n{\"schema\":\"factory.rework-response.v1\", nope\n```", createdAt: "2026-10-03T10:40:00Z" }];
-  expect(buildEvidence({ ...base, comments: broken }).data.must_fix.every((m) => m.status === "unanswered")).toBe(true);
+  // Unparseable JSON in a rework-response-looking PR comment is ignored too.
+  const broken = { ...inputs({ responses: null }), prComments: [{ body: "```json\n{\"schema\":\"factory.rework-response.v1\", nope\n```", createdAt: "2026-10-03T10:40:00Z", author: "ktb-bot" }] };
+  expect(buildEvidence({ ...base, ...broken }).data.must_fix.every((m) => m.status === "unanswered")).toBe(true);
   // No response at all → every row unanswered; a response for another issue does not count.
-  const other = [...commentsFixture({ responses: null }), reworkResponse([{ id: "cf2", status: "fixed", commit: FIX_SHA }], "2026-10-03T10:30:00Z", 999)];
-  expect(buildEvidence({ ...base, comments: other }).data.must_fix.find((m) => m.id === "cf2").status).toBe("unanswered");
+  const other = { ...inputs({ responses: null }), prComments: [reworkResponse([{ id: "cf2", status: "fixed", commit: FIX_SHA }], "2026-10-03T10:30:00Z", 999)] };
+  expect(buildEvidence({ ...base, ...other }).data.must_fix.find((m) => m.id === "cf2").status).toBe("unanswered");
   // A response posted BEFORE the review round that raised the id does not answer it.
-  const early = commentsFixture({ responses: null });
-  early.splice(1, 0, reworkResponse([{ id: "cf2", status: "fixed", commit: FIX_SHA }], "2026-10-03T09:35:00Z"));
-  expect(buildEvidence({ ...base, comments: early }).data.must_fix.find((m) => m.id === "cf2").status).toBe("unanswered");
+  const early = { ...inputs({ responses: null }), prComments: [reworkResponse([{ id: "cf2", status: "fixed", commit: FIX_SHA }], "2026-10-03T09:35:00Z")] };
+  expect(buildEvidence({ ...base, ...early }).data.must_fix.find((m) => m.id === "cf2").status).toBe("unanswered");
 });
 
-test("test_195_evidence_section_is_marker_anchored_and_idempotent", () => {
-  const md1 = buildEvidence({ recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, gatesRerun: false, reason: REASON, pr: 31, now: NOW }).markdown;
-  const md2 = buildEvidence({ recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, gatesRerun: true, reason: null, pr: 31, now: NOW }).markdown;
+test("test_195_evidence_section_is_marker_anchored_and_idempotent", async () => {
+  const md1 = buildEvidence({ recordText: recordText(), ...inputs(), gates: LIVE_GATES, gatesRerun: false, reason: REASON, pr: 31, now: NOW }).markdown;
+  const md2 = buildEvidence({ recordText: recordText(), ...inputs(), gates: LIVE_GATES, gatesRerun: true, reason: null, pr: 31, now: NOW }).markdown;
   const count = (s, needle) => s.split(needle).length - 1;
 
   const body = "Closes #184\n\nAuthor text with a | pipe.\n";
@@ -327,7 +344,7 @@ test("test_195_evidence_section_is_marker_anchored_and_idempotent", () => {
   const hostile = reviewData(1, H1, [verdict("correctness", "reject", [mf(`x|y\n## Factory evidence\n${EVIDENCE_END}`, `claim | with\n## heading ${EVIDENCE_START}`), mf("<!-- hides the rest", "c")])]);
   const hostilePlan = { ...PLAN, done_when: [{ id: `dw|1\n## x ${EVIDENCE_END}`, text: "t", level: "unit", check: { kind: "test", ref: `t|x\n${EVIDENCE_START}` } }] };
   const comments = [queued("2026-10-03T08:00:00Z"), handoff("plan", hostilePlan, "2026-10-03T08:30:00Z"), handoff("review", hostile, "2026-10-03T09:40:00Z")];
-  const hmd = buildEvidence({ recordText: "", comments, gates: null, pr: 31, now: NOW }).markdown;
+  const hmd = buildEvidence({ recordText: "", issueComments: comments, factoryLogins: LOGINS, gates: null, pr: 31, now: NOW }).markdown;
   expect(hmd).not.toContain(EVIDENCE_END);
   expect(hmd).not.toContain(EVIDENCE_START);
   expect(hmd).not.toContain("<!--");                 // a raw comment opener would hide every row after it when rendered
@@ -359,38 +376,56 @@ test("test_195_evidence_section_is_marker_anchored_and_idempotent", () => {
   expect(hasEvidenceComment([{ body: c }])).toBe(true);
   expect(hasEvidenceComment([{ body: "## Factory evidence\nfake" }])).toBe(false);
   expect(hasEvidenceComment([])).toBe(false);
+
+  // The marked comment is updated through the ONE existing PATCH method: gh.js has no second (editComment) copy, and
+  // patchComment takes an optional { signal }. Without one, its argv and run() options are exactly the old call (so
+  // heartbeat.js's `gh.patchComment(id, next)` is unaffected); with one, the signal reaches run() and nothing else changes.
+  const fake = makeFakeRun([{ match: () => true, result: { code: 0, stdout: "{}", stderr: "" } }]);
+  const gh = makeGh({ run: fake, repo: "acme/app" });
+  expect(gh.editComment).toBeUndefined();
+  await gh.patchComment(77, "@user | body\n");
+  expect(fake.calls[0].cmd).toBe("gh");
+  expect(fake.calls[0].args).toEqual(["api", "-X", "PATCH", "repos/acme/app/issues/comments/77", "--input", "-"]);
+  expect(fake.calls[0].opts).toEqual({ input: JSON.stringify({ body: "@user | body\n" }) });
+  const ac = new AbortController();
+  await gh.patchComment(77, "next", { signal: ac.signal });
+  expect(fake.calls[1].args).toEqual(["api", "-X", "PATCH", "repos/acme/app/issues/comments/77", "--input", "-"]);
+  expect(fake.calls[1].opts).toEqual({ input: JSON.stringify({ body: "next" }), signal: ac.signal });
+  expect(fake.calls).toHaveLength(2);
+
+  // lib/exec.js: without a signal the spawn call is exactly the old one (no `signal` key at all); with one, it is passed on.
+  const spawned = [];
+  const { EventEmitter } = await import("node:events");
+  vi.resetModules();
+  vi.doMock("node:child_process", () => ({
+    spawn: (cmd, args, o) => {
+      spawned.push({ cmd, args, o });
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.stdin = { on() {}, write() {}, end() { setImmediate(() => child.emit("close", 0)); } };
+      return child;
+    },
+  }));
+  try {
+    const { run: mockedRun } = await import("../lib/exec.js");
+    expect(await mockedRun("gh", ["api", "x"], { cwd: "/w", env: { A: "1" }, replaceEnv: true })).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(spawned[0]).toEqual({ cmd: "gh", args: ["api", "x"], o: { cwd: "/w", env: { A: "1" }, stdio: ["pipe", "pipe", "pipe"] } });
+    const ac2 = new AbortController();
+    await mockedRun("gh", ["api", "y"], { cwd: "/w", env: { A: "1" }, replaceEnv: true, signal: ac2.signal });
+    expect(spawned[1].o).toEqual({ cwd: "/w", env: { A: "1" }, stdio: ["pipe", "pipe", "pipe"], signal: ac2.signal });
+  } finally {
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  }
 });
 
 // ── #195 self-critique — forgeries under a heartbeat-KNOWN run (runner ids are public in heartbeat comments) ─────────────────
 const GENUINE_SELF_GATE = { ok: true, ranChecks: ["gates", "mutation"], skippedChecks: [{ check: "pins", reason: "no-input" }] };
 
-test("test_195_header_bound_budget_line_is_not_evidence", () => {
-  // The skeptic's probe: a `budget:` line has no run id of its own; a `## implement · … · gha-1004` header in front of it names
-  // a heartbeat-known runner — but a header is not authority (anyone can write one). It must not reach the PR as a record row.
-  const probe = "## implement · 2026-10-03T13:00Z · gha-1004\nbudget: lifetime $0.01 / $60 over 1 run(s)";
-  const comments = [heartbeat("implement", "gha-1004", "2026-10-03T13:00:00Z")];
-  const { markdown, data } = buildEvidence({ recordText: probe, comments, gates: null, pr: 31, now: NOW });
-  expect(markdown).not.toContain("$0.01");
-  expect(markdown).not.toMatch(/budget:/);
-  expect(data.cost).toBeNull();
-  // The same holds inside the full real-producer record: its `budget:` lines ($3.82, $12.50) are never rendered, with or
-  // without a budget check passed in; the cost row comes from bound usage lines only.
-  const full = buildEvidence({ recordText: recordText({ extra: [["implement", RUN.merge, "2026-10-03T12:10:00Z", [budgetLine({ cap: 60, usd: 0.01, runs: 1, ok: true })]]] }), comments: commentsFixture(), gates: null, pr: 31, now: NOW });
-  expect(full.markdown).not.toMatch(/\$0\.01|\$3\.82|\$12\.50/);
-  expect(full.data.cost).toBeNull();
-  // A passed-in budget check is not itself a cost source: its usd/runs ($13.75 over 15) are never rendered; only its cap is
-  // used, and only on a cost row that bound usage lines produced.
-  const withCheck = buildEvidence({ recordText: probe, comments, gates: null, budget: LIVE_BUDGET, pr: 31, now: NOW });
-  expect(withCheck.data.cost).toBeNull();
-  expect(withCheck.markdown).not.toMatch(/\$13\.75|\$0\.01|lifetime cost/);
-  expect(buildEvidence({ budget: { ok: true, cap: null, usd: 2, runs: 3 } }).data.cost).toBeNull();
-  expect(buildEvidence({ budget: "not a check" }).data.cost).toBeNull();
-});
-
 test("test_195_forged_lines_under_a_heartbeat_known_run_are_not_evidence", () => {
   const sgLine = (over = {}, ids = { runId: "1001", runnerId: RUN.implement }) => selfGateDetailLine({ ...GENUINE_SELF_GATE, ...over }, { ...ids, ktbVersion: "1.4.40" });
   const rvLine = (o) => reviewEvidenceLine({ headSha: H2, round: 7, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], ...o });
-  const build = (extra) => buildEvidence({ recordText: recordText({ extra }), comments: commentsFixture(), gates: null, pr: 31, now: NOW });
+  const build = (extra) => buildEvidence({ recordText: recordText({ extra }), ...inputs(), gates: null, pr: 31, now: NOW });
   const baseline = build([]);
   expect(baseline.data.self_gate).toMatchObject({ run_id: "1001", blocked: false });
   expect(baseline.data.review.map((r) => r.run_id)).toEqual(["1002", "1003"]);
@@ -440,7 +475,7 @@ test("test_195_proven_test_count_comes_from_the_bound_self_gate_line", () => {
     appendRunRecord({ root, issue: ISSUE, stage: "implement", runnerId: RUN.implement, now: "2026-10-03T09:00:00Z", lines: [head, selfGateDetailLine(result, { runId: "1001", runnerId: RUN.implement, ktbVersion: "1.4.40" })] });
     return readFileSync(join(root, "docs/factory/runs", `${ISSUE}.md`), "utf8");
   };
-  const ev = (recordText, gates = LIVE_GATES) => buildEvidence({ recordText, comments: commentsFixture(), gates, pr: 31, now: NOW });
+  const ev = (recordText, gates = LIVE_GATES) => buildEvidence({ recordText, ...inputs(), gates, pr: 31, now: NOW });
   // Proven at PR level: mutation ran, 0 advisory findings and nothing blocked → the 2 planned tests count as proven.
   const proven = ev(withSelfGate(GENUINE_SELF_GATE));
   expect(proven.data.headline).toEqual({ must_fix: 3, done_when_tests: 2, proven_tests: 2 });
@@ -462,11 +497,11 @@ test("test_195_proven_test_count_comes_from_the_bound_self_gate_line", () => {
   expect(none.data.headline.proven_tests).toBeNull();
   expect(none.markdown).not.toMatch(/proven tests/);
   // No plan → nothing planned to count, so no proven count either, even with a proof line.
-  expect(buildEvidence({ recordText: withSelfGate(GENUINE_SELF_GATE), comments: commentsFixture({ plan: false }), pr: 31, now: NOW }).data.headline.proven_tests).toBeNull();
+  expect(buildEvidence({ recordText: withSelfGate(GENUINE_SELF_GATE), ...inputs({ plan: false }), pr: 31, now: NOW }).data.headline.proven_tests).toBeNull();
 });
 
 test("test_195_author_text_over_the_limit_is_refused_not_reported_truncated", () => {
-  const md = buildEvidence({ recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, reason: REASON, pr: 31, now: NOW }).markdown;
+  const md = buildEvidence({ recordText: recordText(), ...inputs(), gates: LIVE_GATES, reason: REASON, pr: 31, now: NOW }).markdown;
   // The skeptic's probe: the author's text alone is over the limit — no in-limit body exists, so none is claimed.
   const over = applyEvidenceSection("x".repeat(PR_BODY_MAX_CHARS + 10), md);
   expect(over).toEqual({ body: null, truncated: false, overflow: true });
@@ -514,7 +549,7 @@ test("test_195_mutation_crash_or_skipped_file_is_not_proof", async () => {
   const crashed = await realSelfGate(async (_c, a) => { if (a[0] === "worktree" && a[1] === "add") throw new Error("ENOSPC"); return { code: 0, stdout: "", stderr: "" }; });
   expect(crashed.ok).toBe(true);
   expect(crashed.ranChecks).toContain("mutation");
-  const c = buildEvidence({ recordText: selfGateRecord(crashed), comments: commentsFixture(), pr: 31, now: NOW });
+  const c = buildEvidence({ recordText: selfGateRecord(crashed), ...inputs(), pr: 31, now: NOW });
   expect(c.data.headline.proven_tests).toBe(0);
   expect(c.data.proof).toMatchObject({ mutation: "ran", blocked: false, advisory: 1, proven: false });
   expect(c.markdown).toMatch(/proven tests: 0 of 2 /);
@@ -525,14 +560,14 @@ test("test_195_mutation_crash_or_skipped_file_is_not_proof", async () => {
   const skipped = await realSelfGate(async (_c, a) => (a[0] === "worktree" && a[1] === "add" ? { code: 128, stdout: "", stderr: "fatal" } : { code: 0, stdout: "", stderr: "" }));
   expect(skipped.ok).toBe(true);
   expect(skipped.ranChecks).toContain("mutation");
-  const s = buildEvidence({ recordText: selfGateRecord(skipped), comments: commentsFixture(), pr: 31, now: NOW });
+  const s = buildEvidence({ recordText: selfGateRecord(skipped), ...inputs(), pr: 31, now: NOW });
   expect(s.data.headline.proven_tests).toBe(0);
   expect(s.data.proof.advisory).toBe(1);
 
   // (3) A clean pass (mutation ran, no finding at all) is the only outcome that counts the plan's tests as proven — and the
   // headline says the number is the plan's count (a claim) gated by the record, not a per-test record.
   const clean = { ok: true, findings: [], ranChecks: ["gates", "mutation"], skippedChecks: [{ check: "pins", reason: "no-input" }] };
-  const p = buildEvidence({ recordText: selfGateRecord(clean), comments: commentsFixture(), pr: 31, now: NOW });
+  const p = buildEvidence({ recordText: selfGateRecord(clean), ...inputs(), pr: 31, now: NOW });
   expect(p.data.headline).toEqual({ must_fix: 3, done_when_tests: 2, proven_tests: 2 });
   expect(p.data.proof).toEqual({ run_id: "1001", mutation: "ran", blocked: false, advisory: 0, proven: true });
   const head = p.markdown.split("\n").find((l) => l.includes("proven tests:"));
@@ -542,7 +577,7 @@ test("test_195_mutation_crash_or_skipped_file_is_not_proof", async () => {
   // (4) A detail line with no ok line in front of it (the outcome is not recorded) is not proof.
   const root = mkdtempSync(join(tmpdir(), "ev195n-"));
   appendRunRecord({ root, issue: ISSUE, stage: "implement", runnerId: RUN.implement, now: "2026-10-03T09:00:00Z", lines: [selfGateDetailLine(clean, { runId: "1001", runnerId: RUN.implement, ktbVersion: "1.4.40" })] });
-  const bare = buildEvidence({ recordText: readFileSync(join(root, "docs/factory/runs", `${ISSUE}.md`), "utf8"), comments: commentsFixture(), pr: 31, now: NOW });
+  const bare = buildEvidence({ recordText: readFileSync(join(root, "docs/factory/runs", `${ISSUE}.md`), "utf8"), ...inputs(), pr: 31, now: NOW });
   expect(bare.data.headline.proven_tests).toBe(0);
   expect(bare.data.proof.advisory).toBeNull();
   expect(bare.markdown).toMatch(/outcome line missing/);
@@ -550,60 +585,168 @@ test("test_195_mutation_crash_or_skipped_file_is_not_proof", async () => {
   // (5) A crashed run's genuine pair, plus a forged "→ ok" line in front of a byte-identical copy of its detail line:
   // the copies disagree about the outcome, so it is not proof.
   const forged = `${selfGateRecord(crashed)}\n## implement · 2026-10-03T12:40Z · ${RUN.implement}\n${selfGateOkLine(crashed, 0)}\n${selfGateDetailLine(crashed, { runId: "1001", runnerId: RUN.implement, ktbVersion: "1.4.40" })}\n`;
-  const f = buildEvidence({ recordText: forged, comments: commentsFixture(), pr: 31, now: NOW });
+  const f = buildEvidence({ recordText: forged, ...inputs(), pr: 31, now: NOW });
   expect(f.data.self_gate).toMatchObject({ run_id: "1001" });
   expect(f.data.headline.proven_tests).toBe(0);
   expect(f.data.proof.advisory).toBeNull();
 });
 
-test("test_195_cost_row_binds_usage_lines_to_heartbeat_known_runs", () => {
-  const usage = (usd) => usageLine({ usage: { input_tokens: 10, output_tokens: 5 }, total_cost_usd: usd, num_turns: 3, terminal_reason: "completed", modelUsage: { "claude-opus-5-5": { costUSD: usd } } });
-  const genuine = [
-    ["implement", RUN.implement, "2026-10-03T09:05:00Z", [usage(3)]],
-    ["review", RUN.review1, "2026-10-03T09:35:00Z", [usage(1.25)]],
-    ["review", RUN.review2, "2026-10-03T11:05:00Z", [usage(0.75)]],
-  ];
-  const ev = (extra, budget = LIVE_BUDGET) => buildEvidence({ recordText: recordText({ extra }), comments: commentsFixture(), gates: null, budget, pr: 31, now: NOW });
-  // Bound: three heartbeat-known runs, each section's stage one its runner's heartbeat names → $5.00 over 3 run(s), cap from
-  // the passed-in budget check. Labelled with how it is bound — not as "this merge run's budget check".
-  const ok = ev(genuine);
-  expect(ok.data.cost).toEqual({ usd: 5, runs: 3, cap: 60 });
-  const cost = sectionOf(ok.markdown, "Cost & time").join("\n");
-  expect(cost).toContain("- lifetime cost: $5.00 / $60 cap over 3 run(s) — record: usage: lines in sections of heartbeat-known runs");
-  expect(cost).not.toMatch(/this merge run's budget check|\$13\.75/);
-  expect(ok.data.unbound.usage).toBe(0);
+test("test_195_cost_row_is_the_run_bound_budget_line", () => {
+  const budget = (usd, runs) => budgetLine({ cap: 60, usd, runs, ok: true });
+  const ev = (extra, over = {}) => buildEvidence({ recordText: recordText({ extra }), ...inputs(), gates: null, pr: 31, now: NOW, ...over });
+  const costOf = (r) => sectionOf(r.markdown, "Cost & time").join("\n");
+  // Baseline: the latest bound budget line is review run 1003's — $12.50 / $60 over 14 runs.
+  const ok = ev([]);
+  expect(ok.data.cost).toEqual({ usd: 12.5, cap: 60, runs: 14, run_id: "1003" });
+  expect(ok.data.unbound.budget).toBe(0);
 
   // A section from a runner no heartbeat names → ignored and counted.
-  const unknown = ev([...genuine, ["implement", "gha-666", "2026-10-03T12:10:00Z", [usage(100)]]]);
-  expect(unknown.data.cost).toEqual({ usd: 5, runs: 3, cap: 60 });
-  expect(unknown.markdown).not.toContain("$105");
-  expect(unknown.data.unbound.usage).toBe(1);
-  // A section under a known runner but a stage its heartbeat never named (the implement runner writing "review") → ignored.
-  const wrongStage = ev([...genuine, ["review", RUN.implement, "2026-10-03T12:11:00Z", [usage(50)]]]);
-  expect(wrongStage.data.cost).toEqual({ usd: 5, runs: 3, cap: 60 });
-  expect(wrongStage.data.unbound.usage).toBe(1);
-  // A second, different usage line for a known run: two stories for one run — neither counts.
-  const twice = ev([...genuine, ["implement", RUN.implement, "2026-10-03T12:12:00Z", [usage(40)]]]);
-  expect(twice.data.cost).toEqual({ usd: 2, runs: 2, cap: 60 });
-  expect(twice.data.unbound.usage).toBe(2);
+  const unknown = ev([["review", "gha-666", "2026-10-03T12:10:00Z", [budget(0.01, 1)]]]);
+  expect(unknown.data.cost).toEqual({ usd: 12.5, cap: 60, runs: 14, run_id: "1003" });
+  expect(unknown.markdown).not.toContain("$0.01");
+  expect(unknown.data.unbound.budget).toBe(1);
+  // The heartbeat-known MERGE runner: the merge stage never writes a budget line, so one there is not a record.
+  const merge = ev([["merge", RUN.merge, "2026-10-03T12:11:00Z", [budget(0.02, 1)]]]);
+  expect(merge.data.cost.run_id).toBe("1003");
+  expect(merge.markdown).not.toContain("$0.02");
+  expect(merge.data.unbound.budget).toBe(1);
+  // A known runner under a stage its heartbeat never named (the implement runner writing "review") → ignored.
+  const wrongStage = ev([["review", RUN.implement, "2026-10-03T12:12:00Z", [budget(0.03, 1)]]]);
+  expect(wrongStage.data.cost.run_id).toBe("1003");
+  expect(wrongStage.markdown).not.toContain("$0.03");
+  // A second, different budget line for review run 1003: two stories for one run — neither counts; the latest run that has
+  // one story (review run 1002, $7.10 over 11) is shown, and says which run it is.
+  const twice = ev([["review", RUN.review2, "2026-10-03T12:13:00Z", [budget(0.04, 1)]]]);
+  expect(twice.data.cost).toEqual({ usd: 7.1, cap: 60, runs: 11, run_id: "1002" });
+  expect(costOf(twice)).toContain("- lifetime cost: $7.10 / $60 cap over 11 run(s) — record: budget: line of run 1002 (review)");
+  expect(twice.markdown).not.toMatch(/\$0\.04|\$12\.50/);
+  expect(twice.data.unbound.budget).toBe(2);
   expect(twice.markdown).toMatch(/run-record line\(s\) not bound to a heartbeat-known run were ignored/);
   // The same line repeated byte-for-byte (a records-branch tail merge) is one story.
-  expect(ev([...genuine, ["implement", RUN.implement, "2026-10-03T12:12:00Z", [usage(3)]]]).data.cost).toEqual({ usd: 5, runs: 3, cap: 60 });
-  // No budget check passed in → the cost row stands without a cap; no bound usage line → no cost row at all.
-  expect(ev(genuine, null).data.cost).toEqual({ usd: 5, runs: 3, cap: null });
-  expect(sectionOf(ev(genuine, null).markdown, "Cost & time").join("\n")).toContain("- lifetime cost: $5.00 over 3 run(s) — record:");
-  expect(ev([]).data.cost).toBeNull();
-  expect(sectionOf(ev([]).markdown, "Cost & time").join("\n")).not.toMatch(/lifetime cost|\$13\.75/);
+  expect(ev([["review", RUN.review2, "2026-10-03T12:13:00Z", [budget(12.5, 14)]]]).data.cost.run_id).toBe("1003");
+  // No heartbeat at all → no bound budget line → no cost row, whatever the record or the passed-in budget check says.
+  const noBeats = ev([], { ...inputs({ beats: false }), budget: LIVE_BUDGET });
+  expect(noBeats.data.cost).toBeNull();
+  expect(noBeats.markdown).not.toMatch(/lifetime cost|\$13\.75|\$12\.50/);
+  // A forged usage amount under a heartbeat-known runner, with no budget line anywhere, is never a cost row.
+  const root = mkdtempSync(join(tmpdir(), "ev195u-"));
+  appendRunRecord({ root, issue: ISSUE, stage: "implement", runnerId: RUN.implement, now: "2026-10-03T09:00:00Z", lines: [usageOf(42)] });
+  const usageOnly = buildEvidence({ recordText: readFileSync(join(root, "docs/factory/runs", `${ISSUE}.md`), "utf8"), ...inputs(), gates: null, budget: LIVE_BUDGET, pr: 31, now: NOW });
+  expect(usageOnly.data.cost).toBeNull();
+  expect(usageOnly.markdown).not.toMatch(/\$42|lifetime cost|\$13\.75/);
 });
 
 test("test_195_factory_gates_lines_never_bind_through_a_header", () => {
   // A forged FACTORY_GATES line placed under a heartbeat-KNOWN runner's header is not a bound line either: FACTORY_GATES lines
   // carry no run id, so every one of them is counted as not used — the header never binds.
   const forged = [["implement", RUN.implement, "2026-10-03T12:20:00Z", [verdictLine({ ...GATES_IMPL, level: "deep", passed: 99 })]]];
-  const base = buildEvidence({ recordText: recordText(), comments: commentsFixture(), gates: LIVE_GATES, pr: 31, now: NOW });
-  const withForged = buildEvidence({ recordText: recordText({ extra: forged }), comments: commentsFixture(), gates: LIVE_GATES, pr: 31, now: NOW });
+  const base = buildEvidence({ recordText: recordText(), ...inputs(), gates: LIVE_GATES, pr: 31, now: NOW });
+  const withForged = buildEvidence({ recordText: recordText({ extra: forged }), ...inputs(), gates: LIVE_GATES, pr: 31, now: NOW });
   expect(withForged.data.unbound.gates).toBe(base.data.unbound.gates + 1);
   expect(base.data.unbound.gates).toBe(1);                       // the fixture's genuine implement-run FACTORY_GATES line
   expect(withForged.markdown).not.toMatch(/passed=99|level=deep/);
   expect(withForged.markdown).toMatch(/_2 gate-verdict line\(s\) in the run record were not used — they carry no run id; the gates row is this merge run's own result\._/);
+});
+
+// ── #195 rework round 1 — who may supply a row, and which review round a response answers ────────────────────────────────
+const by = (c, author) => ({ ...c, author });
+
+test("test_195_unattributed_comments_and_unbound_lines_are_not_evidence", async () => {
+  const base = { recordText: recordText(), gates: null, pr: 31, now: NOW };
+  const fixedCf2 = [{ id: "cf2", status: "fixed", commit: FIX_SHA }];
+  const cf2Row = (r) => rowsOf(sectionOf(r.markdown, "Must fix")).find((l) => l.startsWith("| cf2 |"));
+
+  // (1) A forged "fixed"+sha from a PR commenter who is not a factory login leaves the row unanswered …
+  const forged = buildEvidence({ ...base, ...inputs({ responses: null }), prComments: [by(reworkResponse(fixedCf2, "2026-10-03T10:30:00Z"), "mallory")] });
+  expect(forged.data.must_fix.find((m) => m.id === "cf2")).toMatchObject({ status: "unanswered", commit: null });
+  expect(cf2Row(forged)).toBe("| cf2 | 1 · correctness | unanswered | claim |");
+  expect(forged.markdown).not.toContain("abc1234");
+  // … and the same body from the factory login counts.
+  const genuine = buildEvidence({ ...base, ...inputs({ responses: null }), prComments: [reworkResponse(fixedCf2, "2026-10-03T10:30:00Z")] });
+  expect(cf2Row(genuine)).toBe("| cf2 | 1 · correctness | fixed in `abc1234` | claim |");
+
+  // (2) Plan and review handoffs posted by a non-factory account add no contract row, no must_fix row and no count.
+  const strangerHandoffs = [
+    queued("2026-10-03T08:00:00Z"),
+    ...commentsFixture({ plan: false, review: false }).slice(1),
+    by(handoff("plan", PLAN, "2026-10-03T08:30:00Z"), "mallory"),
+    by(handoff("review", ROUND1, "2026-10-03T09:40:00Z"), "mallory"),
+  ];
+  const s2 = buildEvidence({ ...base, issueComments: strangerHandoffs, prComments: [reworkResponse(fixedCf2, "2026-10-03T10:30:00Z")], factoryLogins: LOGINS });
+  expect(s2.data.contract).toEqual([]);
+  expect(s2.data.must_fix).toEqual([]);
+  expect(s2.data.headline).toMatchObject({ must_fix: null, done_when_tests: null });
+  expect(sectionOf(s2.markdown, "Must fix")).toBeNull();
+  expect(s2.markdown).not.toMatch(/must_fix raised|done_when tests|test_184_alpha/);
+
+  // (3) A heartbeat posted by a non-factory account binds nothing and is not a run: its runner's forged review line stays out.
+  const forgedRound = [["review", "gha-666", "2026-10-03T11:30:00Z", [reviewEvidenceLine({ headSha: H2, round: 9, decision: "approved", verdicts: [{ role: "qa", verdict: "approve" }], runId: "666", runnerId: "gha-666" })]]];
+  const s3 = buildEvidence({ ...base, recordText: recordText({ extra: forgedRound }), ...inputs(), issueComments: [...commentsFixture(), by(heartbeat("review", "gha-666", "2026-10-03T11:30:00Z"), "mallory")] });
+  expect(s3.data.review.map((r) => r.run_id)).toEqual(["1002", "1003"]);
+  expect(s3.data.runs).toBe(5);
+  expect(s3.data.unbound.review).toBe(1);
+  expect(s3.markdown).not.toContain("666");
+  expect(s3.markdown).toContain("- runs (heartbeats): 5");
+
+  // (4) Rows and counts from agent-written handoffs and responses carry the claim label; FACTORY_GATES lines never render.
+  for (const r of rowsOf(sectionOf(genuine.markdown, "Must fix"))) expect(r).toMatch(/\| claim \|$/);
+  for (const r of rowsOf(sectionOf(genuine.markdown, "Contract"))) expect(r).toMatch(/\| claim \|$/);
+  expect(genuine.markdown).toContain("must_fix raised by review: 3 (claim — review handoffs; fixed 1, disputed 0, unanswered 2)");
+  expect(genuine.markdown).not.toMatch(/FACTORY_GATES|level=fast/);
+
+  // (5) Logins that cannot be resolved (the real resolver, nothing to go on) → no response column and a visible note naming
+  // why — never a silently empty or all-"unanswered" column. A factory response on the PR changes nothing then.
+  const unresolved = await resolveFactoryLogins({ gh: {}, env: {} });
+  expect(unresolved.ok).toBe(false);
+  const u = buildEvidence({ ...base, ...inputs(), factoryLogins: unresolved });
+  const must = sectionOf(u.markdown, "Must fix");
+  expect(must).toContain("| must_fix | round · role | source |");
+  expect(rowsOf(must)).toEqual(["| cf1 | 1 · correctness | claim |", "| cf2 | 1 · correctness | claim |", "| arch1 | 1 · architect | claim |"]);
+  expect(u.markdown).not.toMatch(/fixed in|unanswered|disputed/);
+  expect(u.markdown).toContain("_must_fix responses are not shown: the factory's logins could not be resolved (no factory login could be resolved — set FACTORY_BOT_LOGIN, or read an issue that has at least one heartbeat comment (outside GitHub Actions the viewer is the owner, not the bot)), so no response can be attributed to the factory._");
+  expect(u.markdown).toContain("must_fix raised by review: 3 (claim — review handoffs)");
+  expect(u.data.logins).toEqual({ ok: false, reason: unresolved.reason });
+  expect(u.data.must_fix.map((m) => m.status)).toEqual([null, null, null]);
+  // No logins passed at all is the same unresolved state (fail closed), with its own reason.
+  const none = buildEvidence({ ...base, ...inputs(), factoryLogins: undefined });
+  expect(none.data.logins).toEqual({ ok: false, reason: "factory logins were not resolved" });
+  expect(none.markdown).not.toMatch(/fixed in/);
+  // The viewer path (inside GitHub Actions, env injected explicitly) resolves too, and attributes the same way.
+  const viaViewer = await resolveFactoryLogins({ gh: { viewerLogin: async () => "ktb-bot", viewerType: async () => "Bot" }, env: { GITHUB_ACTIONS: "true" } });
+  expect(cf2Row(buildEvidence({ ...base, ...inputs({ responses: null }), prComments: [reworkResponse(fixedCf2, "2026-10-03T10:30:00Z")], factoryLogins: viaViewer }))).toBe("| cf2 | 1 · correctness | fixed in `abc1234` | claim |");
+});
+
+test("test_195_must_fix_responses_bind_to_their_own_review_round", () => {
+  const A = "a".repeat(40), X = "7".repeat(40), B = "b".repeat(40);
+  const r1 = reviewData(1, H1, [verdict("correctness", "reject", [mf("cf1", "round-1 cf1"), mf("cf2", "round-1 cf2")])]);
+  const r2 = { ...reviewData(2, H2, [verdict("correctness", "reject", [mf("cf2", "round-2 cf2"), mf("cf3", "round-2 cf3")]), verdict("architect", "reject", [mf("arch1", "split")])]), decision: "rework" };
+  const issueComments = [
+    queued("2026-10-03T08:00:00Z"),
+    heartbeat("review", RUN.review1, "2026-10-03T09:30:00Z"),
+    handoff("plan", PLAN, "2026-10-03T08:30:00Z"),
+    handoff("review", r1, "2026-10-03T09:40:00Z"),
+    handoff("review", r2, "2026-10-03T11:10:00Z"),
+  ];
+  const prComments = [
+    // Round 1's answer: cf1 fixed in A — and a "cf3" id round 1 never raised (it must not answer round 2's cf3).
+    reworkResponse([{ id: "cf1", status: "fixed", commit: A }, { id: "cf3", status: "fixed", commit: B }], "2026-10-03T10:30:00Z"),
+    // Round 2's answer: only round 2's cf2 is fixed (in X); arch1 disputed.
+    reworkResponse([{ id: "cf2", status: "fixed", commit: X }, { id: "arch1", status: "disputed", reason: "non_goals" }], "2026-10-03T11:30:00Z"),
+    // An invalid response (fixed without a commit) is ignored.
+    reworkResponse([{ id: "cf3", status: "fixed" }], "2026-10-03T11:40:00Z"),
+  ];
+  let r;
+  expect(() => { r = buildEvidence({ recordText: "", issueComments, prComments, factoryLogins: LOGINS, gates: null, pr: 31, now: NOW }); }).not.toThrow();
+  expect(rowsOf(sectionOf(r.markdown, "Must fix"))).toEqual([
+    "| cf1 | 1 · correctness | fixed in `aaaaaaa` | claim |",
+    "| cf2 | 1 · correctness | unanswered | claim |",
+    "| cf2 | 2 · correctness | fixed in `7777777` | claim |",
+    "| cf3 | 2 · correctness | unanswered | claim |",
+    "| arch1 | 2 · architect | disputed | claim |",
+  ]);
+  expect(r.markdown).not.toContain("bbbbbbb");
+  // The headline's total and split equal the rendered rows (counted by hand above: 2 fixed, 1 disputed, 2 unanswered).
+  expect(r.markdown).toContain("must_fix raised by review: 5 (claim — review handoffs; fixed 2, disputed 1, unanswered 2)");
+  expect(r.data.headline.must_fix).toBe(5);
+  expect(r.data.must_fix_split).toEqual({ fixed: 2, disputed: 1, unanswered: 2 });
 });

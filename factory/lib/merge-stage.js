@@ -530,6 +530,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
       if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
       evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;
       record([`evidence: published to PR #${pr} (${route})`]);
+      // The factory's logins could not be resolved: the section went out without the must_fix response column (it says why);
+      // the record says so too, as the one FAIL line for this step — never a silently empty column.
+      if (r?.logins?.ok === false) record([`evidence: FAIL — logins: ${publicReason(r.logins.reason || "not resolved")} — the must_fix response column was omitted`]);
     } catch (e) {
       record([`evidence: FAIL — ${publicReason(e?.message || e)}`]);
     }

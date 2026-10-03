@@ -5209,32 +5209,31 @@ test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
   const recordPath = join(root, "docs/factory/runs/7.md");
   const issueComments = [
     { body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: "2026-10-03T08:00:00Z" },
-    { body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z" },
+    { body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" },
   ];
   const seq = [];
   let body = "Closes #7\n\nauthor text\n";
   const fakeGh = {
-    comments: vi.fn(async () => { seq.push("comments"); return [...issueComments]; }),
+    comments: vi.fn(async (n) => { seq.push(`comments ${n}`); return n === 7 ? [...issueComments] : []; }),
     prBody: vi.fn(async () => { seq.push("prBody"); return body; }),
     editPrBody: vi.fn(async (_pr, b) => { seq.push("editPrBody"); body = b; }),
     comment: vi.fn(async (_n, b) => { seq.push("comment"); issueComments.push({ body: b, createdAt: "2026-10-03T12:31:00Z" }); }),
   };
-  // The cost row is the record's bound usage line ($2.75 for heartbeat-known gha-501) with the cap from this run's budget
-  // check — neither the record's `budget:` line ($4.50) nor the budget check's own sum ($5.25) is a source.
-  const deps = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => readFileSync(recordPath, "utf8"), now: () => "2026-10-03T12:30:00Z", timeoutMs: 1234, lifetimeBudget: () => ({ ok: true, cap: 60, usd: 5.25, runs: 7, priced: 7 }) });
+  // The cost row is the record's run-bound `budget: lifetime` line ($4.50 / $60 over 6 runs, heartbeat-known gha-501) — the
+  // usage line's $2.75 is never a source.
+  const deps = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => readFileSync(recordPath, "utf8"), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1234 });
   const live = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 4, failed: 0, failing: [] };
   const r = await deps.publishPrEvidence({ pr: 9, route: "merge", gates: live, gatesRerun: true, reason: null });
   expect(r.ok).toBe(true);
-  expect(seq).toEqual(["comments", "prBody", "editPrBody"]);
+  expect(seq).toEqual(["comments 7", "comments 9", "prBody", "editPrBody"]);
   expect(fakeGh.prBody).toHaveBeenCalledWith(9, { timeoutMs: 1234, signal: null });
   expect(fakeGh.editPrBody).toHaveBeenCalledWith(9, body, { timeoutMs: 1234, signal: null });
   expect(body.startsWith("Closes #7\n\nauthor text\n")).toBe(true);
   expect(body.split(EVIDENCE_START_195).length - 1).toBe(1);
   expect(body).toContain("level=full status=GREEN passed=4");
   expect(body).toContain("rerun: yes");
-  expect(body).toContain("- lifetime cost: $2.75 / $60 cap over 1 run(s) — record: usage: lines in sections of heartbeat-known runs");
-  expect(body).not.toContain("$4.50");
-  expect(body).not.toContain("$5.25");
+  expect(body).toContain("- lifetime cost: $4.50 / $60 cap over 6 run(s) — record: budget: line of run 501 (implement)");
+  expect(body).not.toContain("$2.75");
   expect(body).toContain("queued → now: 4h 30m");
   expect(body).toContain(r.markdown);
   // A second publish (a rerun of the merge job) re-reads the body and still leaves exactly one section.
@@ -5259,7 +5258,7 @@ test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/^import \{[^}]*\bbuildEvidence\b[^}]*\} from "\.\.\/lib\/evidence\.js";$/m);
   expect(src).not.toMatch(/import\(\s*[^)]*evidence/);
-  expect(src).toMatch(/\.\.\.makePrEvidenceDeps\(\{ gh, issue,/);
+  expect(src).toMatch(/\.\.\.makePrEvidenceDeps\(\{ gh, issue, env: process\.env,/);
 });
 
 // ── #195 self-critique — a cancelled publish never writes, every gh call in the dep is bounded, and an over-limit body is a
@@ -5320,14 +5319,6 @@ test("test_195_aborted_publish_never_writes_the_pr_body", async () => {
     await expect(mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null })).rejects.toThrow(/PR #9 body is already 65537 characters outside the evidence section — over GitHub's 65536-character limit; section not written/);
     expect(gh.editPrBody).not.toHaveBeenCalled();
   }
-  // (6) a budget check that throws drops the budget row; it does not fail the publish.
-  {
-    const gh = mkGh();
-    const r = await mk(gh, { lifetimeBudget: () => { throw new Error("charter unreadable"); } }).publishPrEvidence({ pr: 9, route: "merge", gates: null });
-    expect(r.ok).toBe(true);
-    expect(r.markdown).not.toMatch(/budget:/);
-  }
-
   // (7) the adapter: the caller's signal and the adapter's own timeout both reach the gh child as an aborted signal.
   {
     const seen = [];
@@ -5392,7 +5383,7 @@ test("test_195_evidence_module_graph_is_bound_before_checkout_head", async () =>
     editPrBody: vi.fn(async (_pr, b) => { body = b; }),
     comment: vi.fn(async (_n, b) => { posted.push(b); }),
   };
-  const deps = engine.makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z", lifetimeBudget: () => ({ ok: true, cap: 60, usd: 1, runs: 1 }) });
+  const deps = engine.makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z" });
   const r = await deps.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "protected paths changed — human merge required: factory/lib/evidence.js" });
   expect(r.ok).toBe(true);
   expect(body.startsWith("Closes #7\n")).toBe(true);
@@ -5410,7 +5401,7 @@ test("test_195_evidence_module_graph_is_bound_before_checkout_head", async () =>
 // (by another account, or through the shared bot account) never stands in for the runner's evidence ──────────────────────
 test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", async () => {
   const repo = "acme/app";
-  // (1) the adapter: issue-comment list/post/edit take the caller's signal; editComment PATCHes the body via stdin JSON.
+  // (1) the adapter: issue-comment list/post/patch take the caller's signal; patchComment PATCHes the body via stdin JSON.
   {
     const run = makeFakeRun([
       { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "-X" && a[2] === "PATCH", result: { code: 0, stdout: "{}", stderr: "" } },
@@ -5421,7 +5412,7 @@ test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", as
     const ac = new AbortController();
     await gh.comments(7, { signal: ac.signal });
     await gh.comment(7, "body | $(x)", { signal: ac.signal });
-    await gh.editComment(77, "new | body\n", { signal: ac.signal });
+    await gh.patchComment(77, "new | body\n", { signal: ac.signal });
     expect(run.calls.map((c) => c.opts?.signal)).toEqual([ac.signal, ac.signal, ac.signal]);
     expect(run.calls[2].args).toEqual(["api", "-X", "PATCH", `repos/${repo}/issues/comments/77`, "--input", "-"]);
     expect(JSON.parse(run.calls[2].opts.input)).toEqual({ body: "new | body\n" });
@@ -5437,7 +5428,7 @@ test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", as
     viewerLogin: vi.fn(async () => "ktb-bot"),
     comments: vi.fn(async () => comments.map((c) => ({ ...c }))),
     comment: vi.fn(async (_n, b) => { comments.push({ id: 900 + comments.length, body: b, author: "ktb-bot" }); }),
-    editComment: vi.fn(async (id, b) => { comments.find((c) => c.id === id).body = b; }),
+    patchComment: vi.fn(async (id, b) => { comments.find((c) => c.id === id).body = b; }),
   });
 
   // (2) A marked comment planted by another account does not stop the runner's own comment.
@@ -5447,7 +5438,7 @@ test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", as
     expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: true, updated: 0 });
     expect(gh.comment).toHaveBeenCalledTimes(1);
     expect(gh.comment.mock.calls[0][1]).toContain("real rows");
-    expect(gh.editComment).not.toHaveBeenCalled();
+    expect(gh.patchComment).not.toHaveBeenCalled();
   }
   // (3) A marked comment planted through the runner's own (shared) account is overwritten with the runner's evidence — no
   // forged text stands, and no second comment is posted. A rerun with the same evidence then changes nothing.
@@ -5456,16 +5447,16 @@ test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", as
     const gh = fakeGh(comments);
     expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: false, updated: 1 });
     expect(gh.comment).not.toHaveBeenCalled();
-    expect(gh.editComment.mock.calls.map((c) => c[0])).toEqual([22]);
+    expect(gh.patchComment.mock.calls.map((c) => c[0])).toEqual([22]);
     expect(comments[0].body).toContain("real rows");
     expect(comments[0].body).not.toContain("all reviewers approved");
     expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: false, updated: 0 });
-    expect(gh.editComment).toHaveBeenCalledTimes(1);
+    expect(gh.patchComment).toHaveBeenCalledTimes(1);
     expect(gh.comment).not.toHaveBeenCalled();
   }
   // (4) Every gh call in the comment step is bounded: a hang in any of them rejects within the dep's timeout, once, no retry.
-  for (const which of ["viewerLogin", "comments", "comment", "editComment"]) {
-    const comments = which === "editComment" ? [{ id: 22, body: forgedBody, author: "ktb-bot" }] : [];
+  for (const which of ["viewerLogin", "comments", "comment", "patchComment"]) {
+    const comments = which === "patchComment" ? [{ id: 22, body: forgedBody, author: "ktb-bot" }] : [];
     const gh = fakeGh(comments);
     gh[which] = vi.fn(() => new Promise(() => {}));
     await expect(mk(gh, 5).postEvidenceComment(md), which).rejects.toThrow(/timed out after 5 ms/);
@@ -5479,4 +5470,81 @@ test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", as
     await expect(mk(gh).postEvidenceComment(md, { signal: ac.signal })).rejects.toThrow(/cancelled by merge-stage/);
     expect(gh.comment).not.toHaveBeenCalled();
   }
+});
+
+// ── #195 rework round 1 — the builder's rework responses live on the PR (factory-builder.md: `gh pr comment <pr>`), and that is
+// where the evidence step reads them; a standalone response on the issue, or one from a non-factory account, marks nothing ──
+import { renderHandoff as renderHandoff195 } from "../lib/handoff.js";
+import { validate as validate195 } from "../lib/schemas.js";
+
+test("test_195_rework_responses_posted_on_the_pr_reach_the_evidence_rows", async () => {
+  const SHA = `86b194f${"0".repeat(33)}`;
+  const review = {
+    schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "1".repeat(40), round: 1, decision: "rework", orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "x.js:1", claim: "off by one", evidence: "ran it" }], should_fix: [], verified: [] }],
+  };
+  const plan = { summary: "plan", done_when: [{ id: "dw1", text: "t", level: "unit", check: { kind: "test", ref: "test_7_alpha" } }] };
+  // The tracking issue: the runner's heartbeat and the plan / review handoffs (real producers), all by the factory login.
+  const issueComments = [
+    { body: heartbeatBody195({ issue: 7, stage: "review", runnerId: "gha-502", started: "x", last: "x" }), createdAt: "2026-10-03T09:30:00Z", author: "ktb-bot" },
+    { body: renderHandoff195({ stage: "plan", issue: 7, summary: "### plan", data: plan }), createdAt: "2026-10-03T08:30:00Z", author: "ktb-bot" },
+    { body: renderHandoff195({ stage: "review", issue: 7, summary: "### review", data: review }), createdAt: "2026-10-03T09:40:00Z", author: "ktb-bot" },
+  ];
+  // The builder's answer exactly as factory-builder.md / factory-implement.js have it posted: a ```json fenced
+  // factory.rework-response.v1 object in a comment on the PR, by the factory login.
+  const response = { schema: "factory.rework-response.v1", issue: 7, responses: [{ id: "cf1", status: "fixed", commit: SHA }] };
+  expect(validate195("rework-response.v1", response).ok).toBe(true);
+  const responseComment = { body: `## Rework response\n\n\`\`\`json\n${JSON.stringify(response, null, 2)}\n\`\`\`\n`, createdAt: "2026-10-03T10:30:00Z", author: "ktb-bot" };
+
+  const mkGh = ({ onIssue, onPr }) => {
+    let body = "Closes #7\n";
+    return {
+      comments: vi.fn(async (n) => {
+        if (n === 7) return onIssue.map((c) => ({ ...c }));
+        if (n === 9) return onPr.map((c) => ({ ...c }));
+        throw new Error(`unexpected gh.comments(${n})`);
+      }),
+      prBody: vi.fn(async () => body),
+      editPrBody: vi.fn(async (_pr, b) => { body = b; }),
+      body: () => body,
+    };
+  };
+  const publish = async (gh, { env = { FACTORY_BOT_LOGIN: "ktb-bot" } } = {}) => {
+    const r = await makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 }).publishPrEvidence({ pr: 9, route: "merge", gates: null });
+    return { r, row: gh.body().split("\n").find((l) => l.startsWith("| cf1 |")) };
+  };
+
+  // (1) The response lives only on the PR → the PR body passed to gh.editPrBody says "fixed in <short sha>" on cf1's row.
+  const onPr = mkGh({ onIssue: issueComments, onPr: [responseComment] });
+  const a = await publish(onPr);
+  expect(a.r.ok).toBe(true);
+  expect(onPr.comments.mock.calls.map((c) => c[0]).sort()).toEqual([7, 9]);
+  expect(onPr.editPrBody).toHaveBeenCalledTimes(1);
+  expect(onPr.editPrBody.mock.calls[0][1]).toContain("| cf1 | 1 · correctness | fixed in `86b194f` | claim |");
+  expect(a.row).toBe("| cf1 | 1 · correctness | fixed in `86b194f` | claim |");
+  expect(onPr.body()).not.toMatch(/\| unanswered \|/);
+  expect(onPr.body()).toContain("must_fix raised by review: 1 (claim — review handoffs; fixed 1, disputed 0, unanswered 0)");
+
+  // (2) The opposite fixture: the same standalone response only on the ISSUE → the row is not marked fixed.
+  const onIssue = mkGh({ onIssue: [...issueComments, responseComment], onPr: [] });
+  expect((await publish(onIssue)).row).toBe("| cf1 | 1 · correctness | unanswered | claim |");
+
+  // (3) The same body on the PR from a non-factory account → unanswered.
+  const stranger = mkGh({ onIssue: issueComments, onPr: [{ ...responseComment, author: "mallory" }] });
+  expect((await publish(stranger)).row).toBe("| cf1 | 1 · correctness | unanswered | claim |");
+
+  // (4) Logins that cannot be resolved (env injected, nothing in it; outside Actions) → the publish still succeeds, the
+  // result says why (merge-stage writes the FAIL line), and the section shows the note instead of a response column.
+  const blind = mkGh({ onIssue: issueComments, onPr: [responseComment] });
+  const b = await publish(blind, { env: {} });
+  expect(b.r.ok).toBe(true);
+  expect(b.r.logins).toMatchObject({ ok: false });
+  expect(b.row).toBe("| cf1 | 1 · correctness | claim |");
+  expect(blind.body()).toContain("_must_fix responses are not shown: the factory's logins could not be resolved (");
+  // No env at all is never read from process.env: the resolver refuses, and that refusal is the unresolved reason.
+  const noEnv = mkGh({ onIssue: issueComments, onPr: [responseComment] });
+  const c = await publish(noEnv, { env: null });
+  expect(c.r.logins.ok).toBe(false);
+  expect(c.r.logins.reason).toMatch(/env is required/);
+  expect(c.row).toBe("| cf1 | 1 · correctness | claim |");
 });

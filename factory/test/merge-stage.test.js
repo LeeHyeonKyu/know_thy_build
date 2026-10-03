@@ -3300,3 +3300,39 @@ test("test_195_missing_evidence_dep_and_hung_issue_comment_are_recorded_not_sile
     expect(lines.filter((l) => l.startsWith("evidence: issue comment"))).toEqual([line]);
   }
 });
+
+// ── #195 rework round 1 — logins that cannot be resolved reach the record as a FAIL line (the section says so too) ──────────
+test("test_195_unresolved_logins_reach_the_record_as_a_fail_line", async () => {
+  const reason = "no factory login could be resolved — set FACTORY_BOT_LOGIN";
+  // Auto-merge route: the section is still published (with its visible note), the merge happens, exit code 0 — and the record
+  // gets exactly one FAIL line naming the logins step.
+  {
+    const ev = evidence195(async () => ({ ok: true, markdown: "## Factory evidence\n(md)", logins: { ok: false, reason } }));
+    const d = baseD(ev);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(failLines195(lines)).toEqual([`evidence: FAIL — logins: ${reason} — the must_fix response column was omitted`]);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([
+      "evidence: published to PR #9 (merge)",
+      `evidence: FAIL — logins: ${reason} — the must_fix response column was omitted`,
+      "evidence: issue comment posted",
+    ]);
+  }
+  // Hand-off route: same line, the transition and exit code 2 unchanged.
+  {
+    const ev = evidence195(async () => ({ ok: true, markdown: "md", logins: { ok: false, reason } }));
+    const d = baseD({ ...ev, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(2);
+    expect(needsHumanCall195(d)).toBeGreaterThan(ev.publishPrEvidence.mock.invocationCallOrder[0]);
+    expect(failLines195(lines)).toEqual([`evidence: FAIL — logins: ${reason} — the must_fix response column was omitted`]);
+  }
+  // Resolved logins → no FAIL line.
+  {
+    const ev = evidence195(async () => ({ ok: true, markdown: "md", logins: { ok: true, logins: ["ktb-bot"] } }));
+    const { lines, record } = makeRecord();
+    expect(await run(baseD(ev), { record })).toBe(0);
+    expect(failLines195(lines)).toEqual([]);
+  }
+});

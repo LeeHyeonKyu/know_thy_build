@@ -2,7 +2,6 @@ import { parseHandoffs } from "./handoff.js";
 import { parseReviewEvidenceAll, runIdOfRunner } from "./run-record.js";
 import { knownRunsFor, isBoundLine, parseRecordEvidence } from "./feedback/harvest-findings.js";
 import { parseHeartbeat } from "./heartbeat.js";
-import { parseRunRecord } from "./usage.js";
 import { SELF_GATE_DETAIL_PREFIX } from "./self-gate.js";
 import { validate } from "./schemas.js";
 import { TRANSITION_TO } from "./retro/issue-comments.js";
@@ -20,18 +19,27 @@ import { TRANSITION_TO } from "./retro/issue-comments.js";
  *     produces this kind of line (review-evidence ← review, self-gate-detail ← implement); and no other, different line of the
  *     same kind speaks for the same run (two stories for one run → neither). The `## stage · at · runner` header is never
  *     used to bind — anyone can put a header in front of a line. Everything else is counted in `data.unbound`, never shown.
- *   - values the caller passes in: this merge run's own gates result (+ whether it was the one re-run), the hand-off reason,
- *     and the budget cap (`[budget].usd_per_issue`, from the caller's budget check — only its `cap`). Record `budget:` /
- *     `FACTORY_GATES:` lines carry no run id, so they are never a source; every FACTORY_GATES line is counted as not used.
- *   - the lifetime cost: `usage:` lines carry no run id of their own either, so they are bound by their section's runner —
- *     the one place the header is used, and said so on the row: the runner must be heartbeat-known, its heartbeat must name
- *     the section's stage, and one run has one usage story (two different usage lines for one run → neither counts).
+ *   - values the caller passes in: this merge run's own gates result (+ whether it was the one re-run's) and the hand-off
+ *     reason. Record `FACTORY_GATES:` lines carry no run id, so they are never a source; every one is counted as not used.
+ *   - the lifetime cost: the run-bound `budget: lifetime $X / $CAP over N run(s)` line (lib/budget.js `budgetLine`, written by
+ *     run-stage first thing in every non-merge stage run). It carries no run id of its own, so its section's runner binds it
+ *     — the one place the header is used, and said so on the row: the runner must be heartbeat-known, its heartbeat must name
+ *     the section's stage, the stage must be one that writes the line (never merge), and one run has one `budget:` story (two
+ *     different `budget:` lines for one run → neither counts). The latest bound line is shown, with the run it came from.
+ *     `usage:` lines are never a cost source, and neither is the caller's budget check.
  *   - the new-test proof: the self-gate-detail line says `mutation` ran and nothing blocked, but a crashed check and a
  *     skipped test file are non-blocking and leave the line identical. So the proof also needs the `self-gate: … → ok` line
  *     run-stage writes right before it (same `record()` call) to say 0 advisory findings. The proven count is the plan's
  *     done_when test count (a claim) gated by that record — no per-test result is recorded (#195 non_goals).
- *   - **claim** rows: agent-written handoff comments (plan `done_when`, review `must_fix`, `factory.rework-response.v1`).
- *     They are shown, and labelled as claims — the shared bot account can post them.
+ *   - **claim** rows: agent-written handoff comments (plan `done_when`, review `must_fix`) on the tracking issue, and the
+ *     builder's `factory.rework-response.v1` on the PR (factory-builder.md has it posted with `gh pr comment <pr>`; the
+ *     engine's other reader, context.js, reads it from the PR too). They are shown, and labelled as claims — the shared bot
+ *     account can post them.
+ *   - **who may supply a row**: heartbeat, handoff and rework-response comments count only when their author is one of the
+ *     factory's logins (`resolveFactoryLogins`, passed in as `factoryLogins`). A comment by anyone else adds no row, status,
+ *     sha or run. When the logins could not be resolved, the must_fix response column is left out and a visible note says
+ *     why (the caller also writes the record's FAIL line) — a response that cannot be attributed is not reported either way.
+ *     Transition comments (the queue time) are not filtered: they carry a timestamp only.
  * No prose is generated and nothing is summarised by a model. A source missing from the input drops its row: no empty
  * cell, no placeholder. `now` is injected — the same inputs give byte-identical output.
  *
@@ -50,14 +58,14 @@ const CELL_MAX = 160;
  * An agent string as inline table text: one line, no table separator, no HTML (so it can never spell either marker or
  * open a comment), no backtick fences. `## ` mid-line is plain text once the newlines are gone.
  */
-export function escapeCell(v) {
+export function escapeCell(v, { max = CELL_MAX } = {}) {
   let s = String(v ?? "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/`/g, "'")
     .replace(/\s*[\r\n]+\s*/g, " ")
     .replace(/\|/g, "\\|")
     .trim();
-  if (s.length > CELL_MAX) s = `${s.slice(0, CELL_MAX - 1).replace(/\\$/, "")}…`;
+  if (s.length > max) s = `${s.slice(0, max - 1).replace(/\\$/, "")}…`;
   return s;
 }
 
@@ -126,6 +134,59 @@ function reworkResponses(comments, issue) {
   return out.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
 }
 
+/**
+ * `factoryLogins` (what `resolveFactoryLogins` returned) → `{ ok, logins: Set<lowercased login> }` or `{ ok:false, reason }`.
+ * Anything that is not a resolved, non-empty login list is "not resolved" — fail closed, never "everyone".
+ */
+function loginsOf(factoryLogins) {
+  if (factoryLogins?.ok === true && Array.isArray(factoryLogins.logins)) {
+    const set = new Set(factoryLogins.logins.map((l) => String(l ?? "").trim().toLowerCase()).filter(Boolean));
+    if (set.size) return { ok: true, set };
+  }
+  const reason = typeof factoryLogins?.reason === "string" && factoryLogins.reason.trim() ? factoryLogins.reason.trim() : "factory logins were not resolved";
+  return { ok: false, reason };
+}
+
+const BUDGET_LIFETIME = /^budget: lifetime \$(\d+(?:\.\d+)?) \/ \$(\d+(?:\.\d+)?) over (\d+) run\(s\)(?: — REFUSED)?$/;
+const RECORD_SECTION = /^## (\S+) · (.+?) · (\S+)$/;
+/** Stages whose run-stage run writes a `budget:` line (run-stage skips the budget check in merge). */
+const BUDGET_STAGES = new Set(["triage", "plan", "implement", "review"]);
+
+/**
+ * The latest run-bound `budget: lifetime` line → `{ usd, cap, runs, run_id, stage }` or null, plus how many `budget:` lines
+ * were not bound. See the module doc for the binding rule.
+ */
+function boundBudget(recordText, { known, stages }) {
+  const lines = [];                                                     // { runner, stage, line } in record order
+  let section = null;
+  for (const raw of String(recordText ?? "").split("\n")) {
+    const l = raw.trimEnd();
+    const h = RECORD_SECTION.exec(l);
+    if (h) { section = { stage: h[1], runner: h[3] }; continue; }
+    if (section && l.startsWith("budget:")) lines.push({ ...section, line: l });
+  }
+  let rejected = 0;
+  const byRunner = new Map();
+  for (const e of lines) {
+    const ok = BUDGET_STAGES.has(e.stage)
+      && isBoundLine({ runner: e.runner, run_id: runIdOfRunner(e.runner) }, known)
+      && (stages.get(e.runner)?.has(e.stage) ?? false);
+    if (!ok) { rejected += 1; continue; }
+    if (!byRunner.has(e.runner)) byRunner.set(e.runner, []);
+    byRunner.get(e.runner).push(e);
+  }
+  let latest = null;
+  for (const e of lines) {
+    const mine = byRunner.get(e.runner);
+    if (!mine || !mine.includes(e)) continue;
+    if (new Set(mine.map((x) => x.line)).size > 1) continue;           // two different budget stories for one run: neither
+    const m = BUDGET_LIFETIME.exec(e.line);
+    if (m) latest = { usd: Number(m[1]), cap: Number(m[2]), runs: Number(m[3]), run_id: String(runIdOfRunner(e.runner) ?? e.runner), stage: e.stage };
+  }
+  for (const mine of byRunner.values()) if (new Set(mine.map((x) => x.line)).size > 1) rejected += mine.length;
+  return { cost: latest, rejected };
+}
+
 const fmtElapsed = (ms) => {
   const min = Math.floor(ms / 60000);
   const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
@@ -168,20 +229,28 @@ const list = (a) => (Array.isArray(a) && a.length ? a.join(",") : "none");
 /**
  * → `{ markdown, data }`. Inputs:
  *   recordText — the hydrated run record (`docs/factory/runs/<n>.md`), or null/"" when there is none;
- *   comments   — the issue's comments (`gh.comments`: `{ body, createdAt, author? }`);
+ *   issueComments — the tracking issue's comments (`gh.comments(issue)`: `{ body, createdAt, author }`): heartbeats,
+ *                   handoffs, transitions;
+ *   prComments    — the PR's comments (`gh.comments(pr)`): where the builder posts its rework responses;
+ *   factoryLogins — what `resolveFactoryLogins` returned (`{ ok:true, logins }` or `{ ok:false, reason }`), or null;
  *   gates      — this merge run's own `factory.gates.v1` result, or null when the merge stage had none yet;
  *   gatesRerun — true when that result is the one re-run's (#157);
  *   reason     — the hand-off / refusal reason the merge stage is about to transition with, or null;
- *   budget     — this run's budget check (`budgetCheck`'s `{ ok, cap, usd, runs }`), or null — only `cap` is used;
  *   pr, now    — the PR number and the current time (ISO string or ms). `now` null → no elapsed row.
  */
-export function buildEvidence({ recordText = null, comments = [], gates = null, gatesRerun = false, reason = null, budget: budgetCheck = null, pr = null, now = null } = {}) {
-  const cs = Array.isArray(comments) ? comments : [];
+export function buildEvidence({ recordText = null, issueComments = [], prComments = [], factoryLogins = null, gates = null, gatesRerun = false, reason = null, pr = null, now = null } = {}) {
+  const issueAll = Array.isArray(issueComments) ? issueComments : [];
+  const logins = loginsOf(factoryLogins);
+  const byFactory = (c) => logins.set.has(String(c?.author ?? "").trim().toLowerCase());
+  // Heartbeats and handoffs: only the factory's own comments. Without resolved logins nobody can be told apart, so the issue's
+  // comments are read as before and the must_fix responses (the PR's comments) are not read at all — see the module doc.
+  const cs = logins.ok ? issueAll.filter(byFactory) : issueAll;
+  const prFactory = logins.ok ? (Array.isArray(prComments) ? prComments : []).filter(byFactory) : [];
   const known = knownRunsFor(cs);
   const stages = heartbeatStages(cs);
   const handoffs = parseHandoffs(cs);
   const issueOf = handoffs.find((h) => Number.isInteger(h.issue))?.issue ?? null;
-  const unbound = { review: 0, gates: 0, self_gate: 0, usage: 0 };
+  const unbound = { review: 0, gates: 0, self_gate: 0, budget: 0 };
 
   // ── Contract (claim): the latest plan handoff's done_when. ──
   const plans = handoffs.filter((h) => h.stage === "plan").sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
@@ -222,27 +291,37 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
     review.push({ round: r.round, decision: r.decision, verdicts: r.verdicts ? r.verdicts.split(",") : [], run_id: r.runId, head: String(r.headSha).slice(0, 7), source: "record" });
   }
 
-  // ── Must fix (claim): every must_fix of every valid review handoff, answered by the first valid rework-response after it. ──
+  // ── Must fix (claim): every must_fix of every valid review handoff. A rework response (PR comment) answers only the review
+  // round it follows — the latest valid review handoff created before it — because reviewers renumber ids (cf1, cf2…) every
+  // round; within that round the first response naming the id answers it. ──
   const reviews = handoffs.filter((h) => h.stage === "review" && validate("review.v1", h.data).ok)
-    .sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
-  const responses = reworkResponses(cs, issueOf);
+    .map((h) => ({ h, since: Date.parse(h.createdAt ?? "") }))
+    .sort((a, b) => (Number.isFinite(a.since) ? a.since : 0) - (Number.isFinite(b.since) ? b.since : 0));
+  const answersFor = new Map(reviews.map((r) => [r, []]));
+  for (const resp of logins.ok ? reworkResponses(prFactory, issueOf) : []) {
+    if (resp.at == null) continue;
+    const own = reviews.filter((r) => Number.isFinite(r.since) && r.since < resp.at).at(-1);
+    if (own) answersFor.get(own).push(resp);
+  }
   const mustFix = [];
-  for (const h of reviews) {
-    const since = Date.parse(h.createdAt ?? "");
-    for (const v of h.data.verdicts) {
+  for (const r of reviews) {
+    for (const v of r.h.data.verdicts) {
       for (const m of Array.isArray(v.must_fix) ? v.must_fix : []) {
-        const answer = responses
-          .filter((r) => Number.isFinite(since) && r.at != null && r.at > since)
-          .map((r) => r.responses.find((x) => x?.id === m.id))
-          .find(Boolean);
-        let status = "unanswered", commit = null;
-        if (answer?.status === "fixed") { status = "fixed"; commit = SHA.test(answer.commit) ? answer.commit.slice(0, 7).toLowerCase() : null; }
-        else if (answer?.status === "disputed") status = "disputed";
-        mustFix.push({ id: String(m.id), round: h.data.round, role: String(v.role), claim: String(m.claim ?? ""), status, commit, source: "claim" });
+        let status = null, commit = null;
+        if (logins.ok) {
+          const answer = answersFor.get(r).map((x) => x.responses.find((y) => y?.id === m.id)).find(Boolean);
+          status = "unanswered";
+          if (answer?.status === "fixed") { status = "fixed"; commit = SHA.test(answer.commit) ? answer.commit.slice(0, 7).toLowerCase() : null; }
+          else if (answer?.status === "disputed") status = "disputed";
+        }
+        mustFix.push({ id: String(m.id), round: r.h.data.round, role: String(v.role), claim: String(m.claim ?? ""), status, commit, source: "claim" });
       }
     }
   }
   const mustFixCount = reviews.length ? mustFix.length : null;
+  const split = logins.ok && mustFixCount != null
+    ? { fixed: mustFix.filter((m) => m.status === "fixed").length, disputed: mustFix.filter((m) => m.status === "disputed").length, unanswered: mustFix.filter((m) => m.status === "unanswered").length }
+    : null;
 
   // ── Gates (this run): the value passed in. Record FACTORY_GATES lines carry no run id: never rendered, all counted. ──
   for (const raw of String(recordText ?? "").split("\n")) if (GATES_LINE.test(raw.trimEnd())) unbound.gates += 1;
@@ -265,25 +344,12 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   if (proof) proof.proven = proof.mutation === "ran" && !proof.blocked && proof.advisory === 0;
   const provenTests = proof && doneWhenTests != null ? (proof.proven ? doneWhenTests : 0) : null;
 
-  // ── Cost & time: usage lines bound through their section's heartbeat-known runner (one story per run); the cap from the
-  // passed-in budget check; queue → now from transition comments; runs = heartbeat-known runners. ──
-  const priced = new Map();                                             // runner → Set of cost values its sections claim
-  for (const e of recordText ? parseRunRecord(String(recordText)) : []) {
-    if (e.cost_usd == null || !Number.isFinite(Number(e.cost_usd))) continue;
-    const runner = String(e.runner ?? "").trim();
-    const ok = isBoundLine({ runner, run_id: runIdOfRunner(runner) }, known) && (stages.get(runner)?.has(e.stage) ?? false);
-    if (!ok) { unbound.usage += 1; continue; }
-    if (!priced.has(runner)) priced.set(runner, []);
-    priced.get(runner).push(Number(e.cost_usd));
-  }
-  let usd = 0, pricedRuns = 0;
-  for (const costs of priced.values()) {
-    if (new Set(costs).size > 1) { unbound.usage += costs.length; continue; }   // two different usage stories for one run
-    usd += costs[0]; pricedRuns += 1;
-  }
-  const capRaw = budgetCheck && typeof budgetCheck === "object" ? Number(budgetCheck.cap) : NaN;
-  const cost = pricedRuns ? { usd: Math.round(usd * 100) / 100, runs: pricedRuns, cap: budgetCheck?.cap != null && Number.isFinite(capRaw) ? capRaw : null } : null;
-  const queuedAt = cs.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
+  // ── Cost & time: the latest run-bound `budget: lifetime` line; queue → now from transition comments; runs = heartbeat-known
+  // runners. ──
+  const budgetBound = boundBudget(recordText, { known, stages });
+  unbound.budget = budgetBound.rejected;
+  const cost = budgetBound.cost;
+  const queuedAt = issueAll.filter((c) => TRANSITION_TO.exec(String(c?.body ?? ""))?.[2] === "factory:queue").map(at).filter((t) => t != null).sort((a, b) => a - b)[0] ?? null;
   const nowMs = now == null ? null : (typeof now === "number" ? now : Date.parse(String(now)));
   const elapsedMs = queuedAt != null && Number.isFinite(nowMs) && nowMs >= queuedAt ? nowMs - queuedAt : null;
   const runners = new Set();
@@ -295,7 +361,7 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   // ── Render. ──
   const out = [EVIDENCE_HEADING, "", "_Assembled by the factory runner from run records, handoff comments and this merge run's own gate result — no agent prose. **record** = a runner-written line bound to a heartbeat-known run; **claim** = taken from an agent-written handoff comment._"];
   const head = [];
-  if (mustFixCount != null) head.push(`must_fix raised by review: ${mustFixCount} (claim — review handoffs)`);
+  if (mustFixCount != null) head.push(`must_fix raised by review: ${mustFixCount} (claim — review handoffs${split ? `; fixed ${split.fixed}, disputed ${split.disputed}, unanswered ${split.unanswered}` : ""})`);
   if (doneWhenTests != null) head.push(`done_when tests: ${doneWhenTests} (claim — plan handoff)`);
   if (provenTests != null) head.push(`proven tests: ${provenTests} of ${doneWhenTests} (claim count — plan handoff; ${proof.proven ? "counted only because" : "0 because"} self-gate run ${escapeCell(proof.run_id ?? "?")} recorded: ${escapeCell(proofText(proof))} — no per-test result is recorded)`);
   if (head.length) out.push("", `**${head.join(" · ")}**`);
@@ -318,12 +384,16 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
     out.push("", "### Review", "", "| round | decision | verdicts | run | source |", "| --- | --- | --- | --- | --- |");
     for (const r of review) out.push(`| ${r.round ?? "?"} | ${escapeCell(r.decision)} | ${r.verdicts.map(escapeCell).join(", ")} | ${escapeCell(r.run_id)} | record |`);
   }
-  if (mustFix.length) {
+  if (mustFix.length && logins.ok) {
     out.push("", "### Must fix", "", "| must_fix | round · role | response | source |", "| --- | --- | --- | --- |");
     for (const m of mustFix) {
       const resp = m.status === "fixed" ? (m.commit ? `fixed in \`${m.commit}\`` : "fixed (no commit sha)") : m.status;
       out.push(`| ${escapeCell(m.id)} | ${m.round} · ${escapeCell(m.role)} | ${resp} | claim |`);
     }
+  } else if (mustFix.length) {
+    out.push("", "### Must fix", "", "| must_fix | round · role | source |", "| --- | --- | --- |");
+    for (const m of mustFix) out.push(`| ${escapeCell(m.id)} | ${m.round} · ${escapeCell(m.role)} | claim |`);
+    out.push("", `_must_fix responses are not shown: the factory's logins could not be resolved (${escapeCell(logins.reason, { max: 400 })}), so no response can be attributed to the factory._`);
   }
   if (gatesRow) {
     out.push("", "### Gates (this merge run)", "",
@@ -331,11 +401,11 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
   }
   if (rejected) out.push("", "### Rejected / hand-off", "", `- ${escapeCell(rejected)} — record (merge stage)`);
   const costRows = [];
-  if (cost) costRows.push(`- lifetime cost: $${cost.usd.toFixed(2)}${cost.cap != null ? ` / $${cost.cap} cap` : ""} over ${cost.runs} run(s) — record: usage: lines in sections of heartbeat-known runs (usage lines carry no run id, so the section's runner binds them; one usage story per run)`);
+  if (cost) costRows.push(`- lifetime cost: $${cost.usd.toFixed(2)} / $${cost.cap} cap over ${cost.runs} run(s) — record: budget: line of run ${escapeCell(cost.run_id)} (${escapeCell(cost.stage)}), bound by its section's heartbeat-known runner (one budget story per run)`);
   if (elapsedMs != null) costRows.push(`- queued → now: ${fmtElapsed(elapsedMs)} (transition comment timestamps)`);
   if (runs != null) costRows.push(`- runs (heartbeats): ${runs}`);
   if (costRows.length) out.push("", "### Cost & time", "", ...costRows);
-  const ignored = unbound.review + unbound.self_gate + unbound.usage;
+  const ignored = unbound.review + unbound.self_gate + unbound.budget;
   if (ignored) out.push("", `_${ignored} run-record line(s) not bound to a heartbeat-known run were ignored._`);
   if (unbound.gates) out.push("", `_${unbound.gates} gate-verdict line(s) in the run record were not used — they carry no run id; the gates row is this merge run's own result._`);
 
@@ -344,8 +414,10 @@ export function buildEvidence({ recordText = null, comments = [], gates = null, 
     data: {
       pr: pr ?? null,
       headline: { must_fix: mustFixCount, done_when_tests: doneWhenTests, proven_tests: provenTests },
+      must_fix_split: split,
+      logins: logins.ok ? { ok: true } : { ok: false, reason: logins.reason },
       contract, proof, self_gate: selfGate, review, must_fix: mustFix,
-      gates: gatesRow, rejected, cost, elapsed_ms: elapsedMs, runs, unbound,
+      gates: gatesRow, rejected, cost: cost ? { usd: cost.usd, cap: cost.cap, runs: cost.runs, run_id: cost.run_id } : null, elapsed_ms: elapsedMs, runs, unbound,
     },
   };
 }
