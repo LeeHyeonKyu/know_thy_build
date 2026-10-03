@@ -737,3 +737,53 @@ test("test_189_retro_records_sync_never_uploads_planted_breaker_evidence", async
     expect.stringMatching(/^lib\/breaker\.js: return await syncRecords\(\{ run, cwd, branch, dir: BREAKER_STATE_DIR, /),
   ]);
 }, 240000);
+
+// ── rework r3 — sec1: 작성자가 쓴 PR 제목 안의 (#K)는 GitHub이 쓴 본문 증거를 이기지 못한다 ──────────────────────────────────
+
+/**
+ * 리뷰 sec1의 재현 그대로: 판정 자동 머지 #303이 `git revert`로 되돌려지고, 작성자가 다음 PR 제목을 `#301: tidy merge gate (#150)`로
+ * 써서 main에 `#301: tidy merge gate (#150) (#302)`로 들어간 뒤 사람이 Revert 버튼을 누른다. revert PR의 squash 제목(PR_TITLE)은
+ * `Revert "#301: tidy merge gate (#150)" (#304)` — 따옴표 안은 작성자가 쓴 글이다. 본문은 squash_merge_commit_message 설정에 따라
+ * `Reverts o/r#302`(PR_BODY)·`This reverts commit <302의 sha>.`(COMMIT_MESSAGES)·빈 것(BLANK, main의 `<T> (#302)`만 남는다).
+ * 어느 모양이든 그 revert는 #302의 것이고 차단기는 열려야 한다.
+ */
+test("test_189_builder_written_pr_ref_in_title_never_misattributes_a_revert", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const TITLE = "#301: tidy merge gate (#150)";                           // 작성자가 고른 PR 제목 — 안에 (#150)이 있다
+  for (const [shape, body] of [
+    ["PR_BODY", () => "Reverts LeeHyeonKyu/know_thy_build#302"],
+    ["COMMIT_MESSAGES", (sha) => `* Revert "${TITLE}"\n\nThis reverts commit ${sha}.`],
+    ["BLANK", () => null],
+  ]) {
+    const { cwd } = await makeRepo();
+    mkdirSync(join(cwd, "docs/factory/runs"), { recursive: true });
+    writeFileSync(join(cwd, "docs/factory/runs/300.md"), mergeRecordText({ issue: 300, pr: 303, kind: "judge", at: "2026-10-01T01:00:00.000Z" }));
+    writeFileSync(join(cwd, "docs/factory/runs/301.md"), mergeRecordText({ issue: 301, pr: 302, kind: "judge", at: "2026-10-01T02:00:00.000Z" }));
+    expect((await syncRecords({ run, cwd, message: "records" })).ok).toBe(true);
+    const at = (h) => ({ GIT_AUTHOR_DATE: `2026-10-01T0${h}:00:00Z`, GIT_COMMITTER_DATE: `2026-10-01T0${h}:00:00Z` });
+    const commit = async (subject, env, extra = null) => {
+      writeFileSync(join(cwd, `c-${env.GIT_COMMITTER_DATE}.txt`), subject);
+      await git(cwd, ["add", "."]);
+      const c = await git(cwd, ["commit", "-q", "-m", subject, ...(extra ? ["-m", extra] : [])], env);
+      expect(c.code, c.stderr).toBe(0);
+      return (await git(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+    };
+    const a = await commit("#300: harden x (#303)", at(1));
+    const b = await commit(`${TITLE} (#302)`, at(2));
+    const rv = await git(cwd, ["revert", "--no-edit", a], at(5));
+    expect(rv.code, rv.stderr).toBe(0);
+    await commit(`Revert "${TITLE}" (#304)`, at(6), body(b));
+    await git(cwd, ["push", "-q", "origin", "main"]);
+
+    const log = (await git(cwd, ["log", `--format=${REVERT_LOG_FORMAT}`])).stdout;
+    const parsed = parseRevertCommits(log);
+    expect(parsed.reverts.map((r) => r.pr).sort(), shape).toEqual([302, 303]);
+    expect(parsed.reverts.map((r) => r.pr), shape).not.toContain(150);   // 작성자가 쓴 (#150)은 PR 증거가 아니다
+
+    const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+    expect(r, shape).toEqual(expect.objectContaining({ ok: true, open: true, since: iso("2026-10-01T06:00:00Z") }));
+    expect(r.reason, shape).toMatch(/#302\b/);
+    expect(r.reason, shape).toMatch(/#303\b/);
+    expect(r.reason, shape).not.toMatch(/#150\b/);
+  }
+}, 240000);

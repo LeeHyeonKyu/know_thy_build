@@ -77,15 +77,17 @@ export function revertedPr(subject) {
  * rework r2 cf1 — **GitHub의 Revert 버튼 흐름은 제목만으로 PR을 말하지 않는다.** revert PR의 squash 커밋이 PR 제목을 쓰면(저장소의
  * `squash_merge_commit_title`이 PR_TITLE이거나, COMMIT_OR_PR_TITLE에서 revert PR의 커밋이 둘 이상) main에 남는 것은
  * `Revert "<원래 PR 제목>" (#M)` — 안쪽 (#N)이 없다(vercel/next.js #98715의 실제 모양). 그래서 차단기의 읽기는 제목 말고도 본문과
- * main 자신의 커밋을 본다. 순서대로 처음 맞는 것이 그 revert의 PR이다:
- *   1. 제목 안쪽의 마지막 (#N) — `git revert`와 COMMIT_OR_PR_TITLE 단일 커밋(`revertedPr`, 그대로).
- *   2. 본문의 `This reverts commit <sha>` — main에서 그 커밋의 제목이 싣는 (#N)(squash 메시지가 COMMIT_MESSAGES일 때).
- *   3. 본문의 `Reverts <owner>/<repo>#N` — GitHub이 revert PR 본문에 쓰는 문장(squash 메시지가 PR_BODY일 때).
- *   4. 제목 `Revert "<T>"` — main에서 그보다 앞선 `<T> (#N)` 커밋(squash 메시지가 BLANK여도 남는 유일한 단서).
+ * main 자신의 커밋을 본다. 순서대로 처음 맞는 것이 그 revert의 PR이다 — rework r3 sec1: **따옴표 안의 글은 작성자가 쓴 PR 제목일
+ * 수 있으므로**(PR_TITLE squash) 그 안의 (#N)은 마지막 수단이다. `#301: x (#150)`이라는 제목 하나가 revert를 엉뚱한 #150에 붙여
+ * 차단기를 닫힌 채로 두면 안 된다. git·GitHub이 쓴 증거가 먼저다:
+ *   1. 본문의 `This reverts commit <sha>` — main에서 그 커밋의 제목이 싣는 (#N)(`git revert`, squash 메시지가 COMMIT_MESSAGES일 때).
+ *   2. 본문의 `Reverts <owner>/<repo>#N` — GitHub이 revert PR 본문에 쓰는 문장(squash 메시지가 PR_BODY일 때).
+ *   3. 제목 `Revert "<T>"` — main에서 그보다 앞선 커밋: 제목이 정확히 `<T>`인 것의 끝 (#N)(`git revert` 모양), 없으면
+ *      `<T> (#N)`인 것(squash 메시지가 BLANK여도 남는 단서).
+ *   4. 제목 안쪽의 마지막 (#N) — 위 어느 것도 없을 때만(`revertedPr`: main 기록 창 밖의 커밋을 되돌린 revert 등).
  * 이 넷 어디에도 묶이지 않는 revert 모양의 커밋은 버리지 않고 센다(`unattributed`) — readBreaker의 detail이 사람에게 말한다.
  */
 export const REVERT_LOG_FORMAT = "%x1e%H%x09%cI%x09%s%x1f%b";
-const lastPrRef = (s) => { const n = [...String(s ?? "").matchAll(/\(#(\d+)\)/g)]; return n.length ? Number(n.at(-1)[1]) : null; };
 const trailingPrRef = (s) => { const m = /\(#(\d+)\)\s*$/.exec(String(s ?? "")); return m ? Number(m[1]) : null; };
 
 /**
@@ -108,29 +110,29 @@ export function parseRevertCommits(stdout) {
   const mainPrs = new Set(commits.map((c) => trailingPrRef(c.subject)).filter((n) => n !== null));
   const reverts = [];
   const unattributed = [];
-  // git log은 새것부터다 — 제목으로 찾는 4번은 "그 revert보다 앞선" 커밋만 봐야 하므로 오래된 것부터 걷는다.
+  // git log은 새것부터다 — 제목으로 찾는 3번은 "그 revert보다 앞선" 커밋만 봐야 하므로 오래된 것부터 걷는다.
   const titleToPr = new Map();
+  const subjectToPr = new Map();
   for (const c of [...commits].reverse()) {
     const shaped = /^Revert "(.*)"(?:\s+\(#\d+\))?\s*$/.exec(c.subject.trim());
     let pr = null, via = null;
     if (shaped) {
-      pr = revertedPr(c.subject); via = pr !== null ? "subject" : null;
+      const m = /This reverts commit ([0-9a-f]{7,40})/.exec(c.body);
+      const target = m ? (bySha.get(m[1]) ?? commits.find((x) => x.sha.startsWith(m[1]))) : null;
+      const n = target ? trailingPrRef(target.subject) : null;   // squash 제목 **끝**의 (#N)만 — 제목 중간의 (#K)는 작성자의 글
+      if (n !== null) { pr = n; via = "body-sha"; }
       if (pr === null) {
-        const m = /This reverts commit ([0-9a-f]{7,40})/.exec(c.body);
-        const target = m ? (bySha.get(m[1]) ?? commits.find((x) => x.sha.startsWith(m[1]))) : null;
-        const n = target ? lastPrRef(target.subject) : null;
-        if (n !== null) { pr = n; via = "body-sha"; }
+        const ref = /^Reverts [\w.-]+\/[\w.-]+#(\d+)\s*$/m.exec(c.body);
+        if (ref) { pr = Number(ref[1]); via = "body-ref"; }
       }
-      if (pr === null) {
-        const m = /^Reverts [\w.-]+\/[\w.-]+#(\d+)\s*$/m.exec(c.body);
-        if (m) { pr = Number(m[1]); via = "body-ref"; }
-      }
+      if (pr === null && subjectToPr.has(shaped[1])) { pr = subjectToPr.get(shaped[1]); via = "title"; }
       if (pr === null && titleToPr.has(shaped[1])) { pr = titleToPr.get(shaped[1]); via = "title"; }
+      if (pr === null) { pr = revertedPr(c.subject); via = pr !== null ? "subject" : null; }
       if (pr !== null) reverts.push({ at: c.at, pr, subject: c.subject, via });
       else unattributed.push(c.subject);
     }
     const t = /^(.*\S)\s+\(#(\d+)\)\s*$/.exec(c.subject);
-    if (t) titleToPr.set(t[1], Number(t[2]));
+    if (t) { titleToPr.set(t[1], Number(t[2])); subjectToPr.set(c.subject.trim(), Number(t[2])); }
   }
   return { reverts, unattributed, mainPrs };
 }
