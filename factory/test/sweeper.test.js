@@ -3381,11 +3381,14 @@ test("test_189_sweep_records_breaker_state_once_per_change", async () => {
   expect(s1).toContainEqual(expect.objectContaining({ kind: "breaker-opened", since: SINCE }));
   expect(s1).toContainEqual(expect.objectContaining({ kind: "error", step: "breaker" }));
 
-  // 2) 같은 상태의 다음 sweep: 쓰지 않고, 빠진 코멘트만 마커로 찾아 채운다 — 이슈 #102와 PR #12에 한 번씩.
-  await once("2026-10-02T00:30:00Z");
+  // 2) 같은 상태의 다음 sweep: 쓰지 않고, 빠진 코멘트만 마커로 찾아 채운다 — 상태 변화 하나에 알림은 정확히 하나,
+  //    연속을 채운 마지막 자동 머지의 추적 이슈(#102)에(사람이 needs-human·라벨을 보는 자리). PR #12에는 따로 달지 않는다.
+  const s2 = await once("2026-10-02T00:30:00Z");
   expect(breaker.write).toHaveBeenCalledTimes(1);
   expect(await tip()).toBe(t1);
-  expect(posted().sort((x, y) => x - y)).toEqual([12, 102]);
+  expect(posted()).toEqual([102]);
+  expect(gh.comment.mock.calls.filter(([, b]) => String(b).includes(breakerOpenMarker(SINCE))).map(([n]) => n)).toEqual([102, 102]); // 실패한 첫 시도 + 채운 한 번
+  expect(s2.filter((x) => x.kind === "breaker-announced")).toEqual([expect.objectContaining({ issue: 102, since: SINCE })]);
   const body = store.get(102)[0].body;
   expect(body).toContain(SINCE);
   expect(body).toMatch(/#11\b.*#12\b/);
@@ -3397,7 +3400,7 @@ test("test_189_sweep_records_breaker_state_once_per_change", async () => {
   expect(breaker.write).toHaveBeenCalledTimes(1);
   expect(await tip()).toBe(t1);
   expect(gh.comment.mock.calls.length).toBe(commentsBefore);
-  expect(posted().sort((x, y) => x - y)).toEqual([12, 102]);
+  expect(posted()).toEqual([102]);
   expect((await readBreakerState189({ run: run189, cwd })).state.open).toBe(true);
   expect(s3.some((x) => x.kind === "breaker-opened")).toBe(false);
 

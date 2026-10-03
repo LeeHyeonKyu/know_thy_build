@@ -1473,7 +1473,8 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
  * `since`를 실은 마커로 dedupe한다 — 기록은 됐는데 코멘트가 실패했으면 다음 sweep이 마커를 찾아 빠진 것만 채운다.
  * 닫힘은 쓰지 않는다: 시간은 차단기를 닫지 않고(입력에 시계가 없다), 닫는 것은 사람의 `factory breaker --reset`뿐이다. 그래서
  * 계산이 닫힘이면 아무것도 쓰지 않는다. 못 읽으면(ok:false) 아무것도 쓰지도 알리지도 않고 error 한 줄을 남긴다.
- * 알림은 연속을 채운 마지막 자동 머지의 **이슈와 PR** 둘에 한 번씩이다.
+ * 알림은 상태 변화 하나에 **정확히 하나**다: 연속을 채운 마지막 자동 머지의 추적 이슈(사람이 라벨·needs-human을 보는 자리)에
+ * 달고, 그 이슈 번호를 모를 때만 PR에 단다. 같은 열림을 두 자리에 알리면 "한 번"이 아니다(dw6).
  */
 async function sweepBreaker({ gh, breaker, actions }) {
   if (!breaker || typeof breaker.read !== "function") return;
@@ -1490,8 +1491,9 @@ async function sweepBreaker({ gh, breaker, actions }) {
     actions.push({ kind: "breaker-opened", since: ev.since, reason: ev.reason, issue: ev.latest?.issue ?? null, pr: ev.latest?.pr ?? null });
   }
   const marker = breakerOpenMarker(ev.since);
-  const targets = [...new Set([ev.latest?.issue, ev.latest?.pr].filter((n) => Number.isInteger(n) && n > 0))];
-  for (const n of targets) {
+  const target = [ev.latest?.issue, ev.latest?.pr].find((n) => Number.isInteger(n) && n > 0);
+  if (target === undefined) actions.push({ kind: "error", step: "breaker", error: `breaker open since ${ev.since} but no issue or PR to announce it on — ${ev.reason}` });
+  for (const n of target === undefined ? [] : [target]) {
     try {
       const comments = await gh.comments(n);
       if ((Array.isArray(comments) ? comments : []).some((c) => String(c?.body ?? "").includes(marker))) continue;
