@@ -5001,3 +5001,92 @@ test("test_157_out_of_root_report_is_no_rerun", async () => {
   expect(inside.human?.reason).toMatch(/^gates rerun inconclusive — the re-run wrote no test report/);
   expect(inside.lines.some((l) => l.startsWith("merge: no gates rerun — "))).toBe(false);
 });
+
+// ── #179 (S4a-2, ADR-033) — merge 스테이지의 자기 변경 deps는 실제 생산자에서 온다 ─────────────────────────────
+import { makeMergeSelfChangeDeps, mergeEngineAtBase } from "../bin/run-stage.js";
+import { runMergeStage, VETO_WINDOW_CONTEXT } from "../lib/merge-stage.js";
+import { mirrorApplicable } from "../lib/mirror.js";
+import { parseSelfChange } from "../lib/config.js";
+
+test("test_179_run_stage_wires_merge_self_change_deps", async () => {
+  // (1) engine — `isEngineCheckout`(이름 + 표지 파일 전부), base 체크아웃에서. mirrorApplicable이 참이어도 엔진이 아니면 false.
+  const mk = (files) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb-179-"));
+    for (const f of files) { mkdirSync(dirname(join(root, f)), { recursive: true }); writeFileSync(join(root, f), ""); }
+    return root;
+  };
+  const mirrorish = mk(["factory/cli/manifest.js", "factory/cli/install.js", ".factory/harness.toml"]);
+  expect(mirrorApplicable(mirrorish)).toBe(true);
+  expect(mergeEngineAtBase({ harness: { project: { name: "own-calendar" } }, root: mirrorish })).toBe(false);
+  expect(mergeEngineAtBase({ harness: { project: { name: "know-thy-build" } }, root: mirrorish })).toBe(false);   // 표지 파일이 없다
+  const engineRoot = mk(["factory/lib/non-judge-paths.js", "templates/factory/factory/harness.toml"]);
+  expect(mergeEngineAtBase({ harness: { project: { name: "know-thy-build" } }, root: engineRoot })).toBe(true);
+  expect(mergeEngineAtBase({ harness: { project: { name: "own-calendar" } }, root: engineRoot })).toBe(false);
+  expect(mergeEngineAtBase({ harness: null, root: engineRoot })).toBe(false);
+
+  // (2) gh 어댑터를 통한 호출만 — 상태 쓰기·읽기, 라벨 이벤트.
+  const calls = [];
+  const statuses = [{ context: "factory/review", state: "success", creatorLogin: "ktb-bot" }];
+  let events = [];
+  let labels = ["factory:approved"];
+  const gh = {
+    setStatus: vi.fn(async (s) => { calls.push(["setStatus", s]); statuses.unshift({ context: s.context, state: s.state, description: s.description, creatorLogin: "ktb-bot", createdAt: "2026-10-03T10:02:00Z" }); }),
+    commitStatuses: vi.fn(async (sha) => { calls.push(["commitStatuses", sha]); return statuses; }),
+    labelEvents: vi.fn(async (n, label) => { calls.push(["labelEvents", n, label]); return events; }),
+    issue: vi.fn(async (n) => ({ number: n, title: "", body: "", labels })),
+  };
+  let charter;
+  const deps = makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => true, env: { FACTORY_JOB_STARTED: "1790000000", FACTORY_JOB_TIMEOUT_MINUTES: "90" }, now: () => 42 });
+  expect(deps.selfChange).toBeUndefined();                              // CHARTER를 아직 읽지 않았다 — 늦게 본다
+  charter = { self_change: { auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 60 } };
+  expect(deps.selfChange).toEqual(charter.self_change);
+  expect(deps.engine).toBe(true);
+  expect(deps.jobStartedAt).toBe(1790000000 * 1000);
+  expect(deps.jobTimeoutMinutes).toBe(90);
+  expect(deps.now()).toBe(42);
+  const noEnv = makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: {} });
+  expect(noEnv.jobStartedAt).toBeNull();
+  expect(noEnv.jobTimeoutMinutes).toBeNull();
+  expect(makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => charter, getEngine: () => false, env: { FACTORY_JOB_STARTED: "soon", FACTORY_JOB_TIMEOUT_MINUTES: "-5" } }).jobTimeoutMinutes).toBeNull();
+
+  const sha = "b".repeat(40);
+  expect(await deps.vetoWindow.open({ sha, description: "closes=2026-10-03T11:02:00.000Z" })).toEqual({ ok: true });
+  expect(calls[0]).toEqual(["setStatus", expect.objectContaining({ sha, context: VETO_WINDOW_CONTEXT, state: "pending", description: "closes=2026-10-03T11:02:00.000Z" })]);
+  expect(await deps.vetoWindow.read({ sha })).toEqual({ ok: true, status: expect.objectContaining({ context: VETO_WINDOW_CONTEXT, state: "pending", description: "closes=2026-10-03T11:02:00.000Z", creatorLogin: "ktb-bot" }) });
+  // 쓰기 실패는 best-effort로 삼키지 않고 ok:false로 올린다.
+  gh.setStatus.mockImplementationOnce(async () => { throw new Error("HTTP 403"); });
+  expect(await deps.vetoWindow.open({ sha, description: "x" })).toEqual({ ok: false, reason: expect.stringContaining("HTTP 403") });
+  gh.commitStatuses.mockImplementationOnce(async () => { throw new Error("HTTP 500"); });
+  expect(await deps.vetoWindow.read({ sha })).toEqual({ ok: false, reason: expect.stringContaining("HTTP 500") });
+
+  // 거부권: 창이 열린 뒤의 `labeled factory:veto` 이벤트(이미 떼어졌어도), 그리고 지금 붙어 있는 라벨.
+  const since = "2026-10-03T10:02:00.000Z";
+  events = [{ login: "old-veto", at: "2026-10-01T00:00:00Z" }];
+  expect(await deps.vetoLabel({ since })).toEqual({ ok: true, vetoes: [] });
+  expect(calls.some((c) => c[0] === "labelEvents" && c[1] === 7 && c[2] === "factory:veto")).toBe(true);
+  events = [{ login: "old-veto", at: "2026-10-01T00:00:00Z" }, { login: "LeeHyeonKyu", at: "2026-10-03T10:07:00Z" }];
+  expect(await deps.vetoLabel({ since })).toEqual({ ok: true, vetoes: [{ login: "LeeHyeonKyu", at: "2026-10-03T10:07:00Z" }] });
+  events = [{ login: "old-veto", at: "2026-10-01T00:00:00Z" }];
+  labels = ["factory:approved", "factory:veto"];                       // 창 전에 붙어 있던 라벨도 거부권이다
+  expect(await deps.vetoLabel({ since })).toEqual({ ok: true, vetoes: [{ login: "old-veto", at: "2026-10-01T00:00:00Z" }] });
+  labels = ["factory:approved"];
+  gh.labelEvents.mockImplementationOnce(async () => { throw new Error("HTTP 502"); });
+  expect(await deps.vetoLabel({ since })).toEqual({ ok: false, reason: expect.stringContaining("HTTP 502") });
+
+  // (3) CHARTER 기본값(parseSelfChange(undefined))으로 배선된 merge 스테이지는 오늘과 같다 — 비판정 보호 경로 PR도 사람에게.
+  const wired = makeMergeSelfChangeDeps({ gh, issue: 7, getCharter: () => ({ self_change: parseSelfChange(undefined) }), getEngine: () => true, env: { FACTORY_JOB_STARTED: "1790000000", FACTORY_JOB_TIMEOUT_MINUTES: "90" } });
+  const d = Object.defineProperties({
+    prInfo: vi.fn(async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" })),
+    protectedPaths: vi.fn(async () => ({ ok: true, files: ["docs/factory/ops/runbook.md"] })),
+    comment: vi.fn(async () => {}),
+    transition: vi.fn(async ({ to }) => ({ ok: true, from: "factory:approved", to })),
+    gates: vi.fn(), mergePr: vi.fn(), sleep: vi.fn(),
+  }, Object.getOwnPropertyDescriptors(wired));
+  const lines = [];
+  const code = await runMergeStage({ issue: 7, defaultBranch: "main", headSha: sha, d, record: (l) => lines.push(...l), refusal: (t) => (t.ok ? [] : [t.reason]), postStatus: vi.fn() });
+  expect(code).toBe(2);
+  expect(d.transition.mock.calls.map((x) => x[0])).toEqual([{ to: "factory:needs-human", reason: "protected paths changed — human merge required: docs/factory/ops/runbook.md (see PR #9)" }]);
+  expect(lines).toEqual(["merge: PR #9 is OPEN", "merge: PR #9 not conflicting (MERGEABLE)", "merge: protected paths changed — human merge required: docs/factory/ops/runbook.md"]);
+  expect(d.gates).not.toHaveBeenCalled();
+  expect(d.sleep).not.toHaveBeenCalled();
+});
