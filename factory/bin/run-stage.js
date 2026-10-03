@@ -2136,7 +2136,8 @@ export function makeMergeSuiteFailuresDep({ root, getHarness, readFile }) {
 
 /**
  * #157 — the gate deps `main()` spreads into its deps object: the `gates` dep every gated stage uses and the
- * merge-only `diffFiles` and `suiteFailures` deps the re-run rule reads. One assembly, so the merge re-run test goes through exactly the
+ * merge-only `diffFiles` and `suiteFailures` deps the re-run rule reads, plus `resetGates`, which every stage runs first and the merge
+ * re-run runs again before its second gate run. One assembly, so the merge re-run test goes through exactly the
  * object production builds (a missing `diffFiles` here is a missing `diffFiles` in production, and vice versa).
  */
 export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }) {
@@ -2144,6 +2145,12 @@ export function makeStageGateDeps({ stage, run, root, gh, issue, getHarness, get
     gates: makeStageGatesDep({ stage, run, root, gh, issue, getHarness, getCharter, mergeBase, readFile, gatesPath, transitionIssue, log }),
     diffFiles: makeMergeDiffFilesDep({ run, root, mergeBase, getHarness }),
     suiteFailures: makeMergeSuiteFailuresDep({ root, getHarness, readFile }),
+    /**
+     * 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)가 이번 런의 전이를 대신하지 못하게 — 스테이지 첫 전이보다
+     * 먼저 지운다. #157 cf1: merge의 재실행 직전에도 같은 함수가 불린다 — 재실행이 리포트를 쓰지 못했는데 첫 런의 리포트가 남아 있으면
+     * 같은 id 집합이 "두 번 RED"로 읽혀 거짓 'flaky 후보'가 된다. 그래서 `gates`와 같은 조립에서 나온다: 재실행 테스트가 실제 배선을 지난다.
+     */
+    resetGates: async () => { resetGateOutputs({ root, harness: getHarness() }); },
   };
 }
 
@@ -2928,8 +2935,7 @@ async function main() {
     buildContext: makeBuildContextDep({ root, gh, issue, stage, run, mergeBase, recordLine, onBuilt: (c) => { ctxCache = c; } }),
     /** 지난 런의 SubagentStart/Stop 기록이 이번 런의 로스터 체크를 대신 만족시키면 안 된다. */
     resetAgentsLog: async () => { rmSync(join(root, ".factory/out/agents.jsonl"), { force: true }); },
-    /** 지난 런의 게이트 판정 파일과 그 재료(테스트·커버리지·mutation 리포트)도 마찬가지다 — 스테이지 첫 전이보다 먼저 지운다. */
-    resetGates: async () => { resetGateOutputs({ root, harness }); },
+    // `resetGates`(지난 런의 게이트 판정 파일과 그 재료를 스테이지 첫 전이보다 먼저 지운다)는 아래 makeStageGateDeps 조립에서 온다 — #157 cf1.
     /**
      * **이번 주기에 실제로 끝난 rework 라운드 수**(r1 SF2). 두 가지가 범위를 정한다:
      *   - KTB-25: 마지막 재큐(`… to=factory:queue`) **이후**만 센다 — 재큐는 새 주기의 시작이고, 그 앞의

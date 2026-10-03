@@ -4108,3 +4108,87 @@ test("test_157_merge_diff_files_keeps_both_sides_of_a_real_git_rename", async ()
   expect(diff.ok).toBe(true);
   expect([...diff.files].sort()).toEqual(["client/lib/visibility.ts", "server/lib/visibility.ts"]);
 });
+
+// #157 cf1 through production wiring (skeptic finding 2): the re-run must not read the FIRST run's report. The only
+// thing that guarantees it is the production `resetGates` reaching runMergeStage. Here the report lives on DISK, the
+// reader is main()'s own `existsSync ? readFileSync : null`, and resetGates comes from the same assembly main() spreads —
+// so dropping it from the wiring, or a resetGateOutputs that stops deleting the unit report, makes the stale first
+// report read RED twice and brands a test that never ran again a flaky candidate. A control re-run that DOES write a
+// same-set RED report shows the fixture can produce a candidate, so its absence below is evidence.
+test("test_157_rerun_cannot_read_the_first_report_through_production_reset", async () => {
+  const BASE = "c".repeat(40), HEADSHA = "b".repeat(40);
+  const OC = "server/tests/follows.test.ts::test_49_event_visibility";
+  const harness = {
+    harness: { maturity: "M0" }, project: { default_branch: "main" },
+    gates: { fast: ["lint", "unit"], full: ["lint", "unit"], deep: ["lint", "unit"], required: ["lint", "unit"], thresholds: {} },
+    commands: { lint: "node factory/bin/lint.js", unit: "npx vitest run --reporter=json --outputFile=.factory/out/unit.json" },
+    test: { test_glob: ["**/*.test.ts"], source_glob: ["**/*.ts"] },
+  };
+  const scenario = async ({ secondRunWritesReport }) => {
+    const root = mkdtempSync(join(tmpdir(), "ktb157-reset-"));
+    const unitPath = join(root, ".factory/out/unit.json");
+    const writeRed = () => {
+      mkdirSync(dirname(unitPath), { recursive: true });
+      writeFileSync(unitPath, JSON.stringify({
+        numTotalTests: 132, numPassedTests: 131, numFailedTests: 1,
+        testResults: [{ name: join(root, "server/tests/follows.test.ts"), status: "failed", assertionResults: [{ status: "failed", fullName: "test_49_event_visibility" }] }],
+      }));
+    };
+    let unitRuns = 0;
+    const fake = makeFakeRun([
+      { match: (c, a) => c === "git" && a[0] === "diff" && a.includes("--name-status"), result: { code: 0, stdout: "M\tclient/src/pages/Calendar.tsx\n", stderr: "" } },
+      { match: (c, a) => c === "git" && a[0] === "rev-parse", result: { code: 0, stdout: `${HEADSHA}\n`, stderr: "" } },
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.lint, result: { code: 0, stdout: "", stderr: "" } },
+      // Run 1 writes a RED report; run 2 exits 1 and writes nothing unless the control asks it to (a crashed/killed re-run).
+      { match: (c, a) => c === "bash" && a[1] === harness.commands.unit, result: () => { unitRuns++; if (unitRuns === 1 || secondRunWritesReport) writeRed(); return { code: 1, stdout: "", stderr: "" }; } },
+    ]);
+    const readFile = (p) => (existsSync(p) ? readFileSync(p, "utf8") : null);      // = main()'s reader
+    const assembled = makeStageGateDeps({
+      stage: "merge", run: fake, root, gh: { comments: async () => [] }, issue: 7,
+      getHarness: () => harness, getCharter: () => ({ tier_default: "standard" }), mergeBase: async () => BASE, readFile,
+      gatesPath: join(root, ".factory/out/gates.json"), transitionIssue: vi.fn(), log: () => {},
+    });
+    const lines = [];
+    const d = mergeHappyDeps({
+      gates: vi.fn(assembled.gates), diffFiles: vi.fn(assembled.diffFiles), suiteFailures: vi.fn(assembled.suiteFailures),
+      ...(assembled.resetGates ? { resetGates: vi.fn(assembled.resetGates) } : {}),
+      mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: true })),
+      mergePr: vi.fn(async () => {}),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })),
+      runRecord: (l) => lines.push(...l),
+      reportStatus: async () => {},
+    });
+    const code = await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "gha-157" });
+    return { code, d, lines, unitRuns, unitPath, assembled };
+  };
+
+  // The re-run wrote no report → inconclusive, never "RED twice", never a flaky-candidate marker.
+  const silent = await scenario({ secondRunWritesReport: false });
+  expect(silent.code).toBe(2);
+  expect(silent.unitRuns).toBe(2);
+  expect(silent.d.gates).toHaveBeenCalledTimes(2);
+  expect(silent.d.mergePr).not.toHaveBeenCalled();
+  const reason = silent.d.transition.mock.calls.map(([a]) => a).find((a) => a.to === "factory:needs-human")?.reason;
+  expect(reason).toMatch(/^gates rerun inconclusive — the re-run wrote no test report/);
+  expect(reason).not.toMatch(/flaky 후보/);
+  expect(silent.lines.some((l) => l.startsWith("factory-flaky-candidate: "))).toBe(false);
+  expect(existsSync(silent.unitPath)).toBe(false);                     // the production reset deleted the first report
+  // The production resetGates ran between the two gate runs (runStage also calls it once at stage start).
+  const resets = silent.d.resetGates.mock.invocationCallOrder;
+  const [g1, g2] = silent.d.gates.mock.invocationCallOrder;
+  expect(resets.some((o) => o > g1 && o < g2)).toBe(true);
+
+  // Control: the re-run writes the same RED → the same fixture DOES produce the candidate, so its absence above is real.
+  const twice = await scenario({ secondRunWritesReport: true });
+  expect(twice.code).toBe(2);
+  expect(twice.d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringContaining(`PR 밖의 테스트가 두 번 RED — flaky 후보`) }));
+  expect(twice.lines.filter((l) => l.startsWith("factory-flaky-candidate: ")).map((l) => JSON.parse(l.slice("factory-flaky-candidate: ".length)))).toEqual([expect.objectContaining({ test: OC, outcome: "RED" })]);
+
+  // Production wiring: main()'s deps object takes resetGates from the same assembly and defines no resetGates of its own.
+  expect(typeof silent.assembled.resetGates).toBe("function");
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainDeps = src.slice(src.indexOf("async function main()"));
+  const depsBlock = mainDeps.slice(mainDeps.indexOf("const deps = {"), mainDeps.indexOf("\n  };\n", mainDeps.indexOf("const deps = {")));
+  expect(depsBlock).not.toMatch(/\n {4}resetGates\s*:/);
+  expect(depsBlock).toMatch(/\n {4}\.\.\.makeStageGateDeps\(\{/);
+});
