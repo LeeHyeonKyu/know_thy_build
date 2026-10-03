@@ -787,3 +787,254 @@ test("test_189_builder_written_pr_ref_in_title_never_misattributes_a_revert", as
     expect(r.reason, shape).not.toMatch(/#150\b/);
   }
 }, 240000);
+
+// ── rework r3 self-critique — 작성자가 쓴 글만 남은 revert는 한 PR을 조용히 고르지 않는다 ─────────────────────────────────
+
+/**
+ * 진짜 git 저장소에 main 히스토리를 쌓는 작은 도우미. `file`에 `content`를 써서 커밋하므로 revert가 실제로 그 변경을 되돌린다
+ * (Revert 버튼의 squash가 main에 남기는 트리 그대로). `revertOf`를 주면 그 커밋을 `git revert --no-commit`으로 되돌린 트리를
+ * 주어진 제목·본문으로 커밋한다 — GitHub이 revert PR을 squash 머지할 때의 모양이다.
+ */
+async function mainHistory(cwd) {
+  const at = (h) => ({ GIT_AUTHOR_DATE: `2026-10-01T${String(h).padStart(2, "0")}:00:00Z`, GIT_COMMITTER_DATE: `2026-10-01T${String(h).padStart(2, "0")}:00:00Z` });
+  const sha = async () => (await git(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+  return {
+    commit: async (subject, h, { file, content }) => {
+      writeFileSync(join(cwd, file), content);
+      await git(cwd, ["add", "."]);
+      const c = await git(cwd, ["commit", "-q", "-m", subject], at(h));
+      expect(c.code, c.stderr).toBe(0);
+      return sha();
+    },
+    revertAs: async (target, subject, h, body = null) => {
+      const r = await git(cwd, ["revert", "--no-commit", target], at(h));
+      expect(r.code, r.stderr).toBe(0);
+      const c = await git(cwd, ["commit", "-q", "-m", subject, ...(body ? ["-m", body] : [])], at(h));
+      expect(c.code, c.stderr).toBe(0);
+      return sha();
+    },
+    gitRevert: async (target, h) => {
+      const r = await git(cwd, ["revert", "--no-edit", target], at(h));
+      expect(r.code, r.stderr).toBe(0);
+      return sha();
+    },
+  };
+}
+
+async function judgeRecords(cwd, merges) {
+  mkdirSync(join(cwd, "docs/factory/runs"), { recursive: true });
+  for (const { issue, pr, at, kind = "judge" } of merges) {
+    writeFileSync(join(cwd, `docs/factory/runs/${issue}.md`), mergeRecordText({ issue, pr, kind, at }));
+  }
+  expect((await syncRecords({ run, cwd, message: "records" })).ok).toBe(true);
+}
+
+/**
+ * skeptic 1 — 작성자가 main에 이미 있는 제목을 PR 제목으로 다시 쓰면(`#301: tidy merge gate (#150)`이 옛 커밋의 제목 그대로),
+ * BLANK squash의 Revert 버튼 revert는 정확히-같은-제목 조회로 옛 #150에 붙어 #302의 revert가 사라졌다.
+ * skeptic 2a — 나중 PR이 앞선 판정 PR의 제목을 다시 쓰면 last-wins 제목 맵이 앞선 PR의 revert를 나중 PR에 붙였다.
+ * 둘 다 작성자의 글만으로 PR을 고른 것이다 — 그런 revert는 **후보 모두**에 센다(넘치게 세는 쪽은 사람이 리셋하면 되지만,
+ * 덜 세는 쪽은 차단기를 닫힌 채로 둔다 — plan open_risks: "miscounted (it blocks without need)"는 받아들인 위험이다).
+ */
+test("test_189_title_collision_revert_counts_every_candidate_pr", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const TITLE = "#301: tidy merge gate (#150)";
+
+  // (1) 정확히-같은-제목 충돌: 옛 커밋의 제목이 작성자의 PR 제목과 똑같다.
+  {
+    const { cwd } = await makeRepo();
+    await judgeRecords(cwd, [
+      { issue: 300, pr: 303, at: "2026-10-01T02:00:00.000Z" },
+      { issue: 301, pr: 302, at: "2026-10-01T03:00:00.000Z" },
+    ]);
+    const h = await mainHistory(cwd);
+    await h.commit(TITLE, 1, { file: "old.txt", content: "old\n" });            // 옛 #150의 `git revert` 모양 제목 그대로
+    const a = await h.commit("#300: harden x (#303)", 2, { file: "a.txt", content: "a\n" });
+    const b = await h.commit(`${TITLE} (#302)`, 3, { file: "b.txt", content: "b\n" });
+    await h.gitRevert(a, 5);
+    await h.revertAs(b, `Revert "${TITLE}" (#304)`, 6);                         // BLANK — 본문이 없다
+    await git(cwd, ["push", "-q", "origin", "main"]);
+
+    const parsed = parseRevertCommits((await git(cwd, ["log", `--format=${REVERT_LOG_FORMAT}`])).stdout);
+    expect(parsed.reverts.map((r) => r.pr)).toContain(302);
+    expect(parsed.reverts.map((r) => r.pr)).toContain(303);
+    const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+    expect(r).toEqual(expect.objectContaining({ ok: true, open: true, since: iso("2026-10-01T06:00:00Z") }));
+    expect(r.reason).toMatch(/#303\b.*#302\b|#302\b.*#303\b/);
+  }
+
+  // (2) 중복 PR 제목: 나중 PR #405가 앞선 판정 PR #402의 제목을 다시 쓴다. #402의 BLANK revert는 #402에도 센다.
+  {
+    const { cwd } = await makeRepo();
+    await judgeRecords(cwd, [
+      { issue: 400, pr: 401, at: "2026-10-01T01:00:00.000Z" },
+      { issue: 402, pr: 402, at: "2026-10-01T02:00:00.000Z" },
+      { issue: 405, pr: 405, at: "2026-10-01T03:00:00.000Z", kind: "non_judge" },
+    ]);
+    const h = await mainHistory(cwd);
+    const a = await h.commit("feat: first (#401)", 1, { file: "a.txt", content: "a\n" });
+    const b = await h.commit("feat: shared title (#402)", 2, { file: "b.txt", content: "b\n" });
+    await h.commit("feat: shared title (#405)", 3, { file: "c.txt", content: "c\n" });
+    await h.gitRevert(a, 5);
+    await h.revertAs(b, 'Revert "feat: shared title" (#406)', 6);
+    await git(cwd, ["push", "-q", "origin", "main"]);
+
+    const parsed = parseRevertCommits((await git(cwd, ["log", `--format=${REVERT_LOG_FORMAT}`])).stdout);
+    expect(parsed.reverts.map((r) => r.pr)).toContain(402);
+    const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+    expect(r).toEqual(expect.objectContaining({ ok: true, open: true, since: iso("2026-10-01T06:00:00Z") }));
+    expect(r.reason).toMatch(/#401\b.*#402\b/);
+  }
+}, 240000);
+
+/**
+ * skeptic 2b — COMMIT_OR_PR_TITLE의 커밋 하나짜리 PR은 main에 **커밋 메시지**(`fix: tidy gate (#302)`)로 들어가고, Revert 버튼은
+ * **PR 제목**(`#301: x (#150)`)을 따옴표 안에 쓴다. 본문이 BLANK면 main 제목과도 짝이 없고 남는 것은 작성자의 (#150)뿐이다.
+ * 그때 차단기는 git이 쓴 증거를 본다: 그 revert의 diff가 main의 어느 판정 자동 머지 squash 커밋을 정확히 되돌리는가.
+ * 반대쪽도 못 박는다: diff가 어느 판정 머지와도 맞지 않는 revert(무관한 파일을 되돌린 것)는 판정 머지에 붙지 않는다.
+ */
+test("test_189_title_drift_blank_revert_is_attributed_by_the_reverted_diff", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  for (const [shape, subject] of [
+    ["inner ref in the builder's title", 'Revert "#301: x (#150)" (#304)'],
+    ["no ref at all (r2 titleDrift + BLANK)", 'Revert "#301: tidy the gate" (#304)'],
+  ]) {
+    const { cwd } = await makeRepo();
+    await judgeRecords(cwd, [
+      { issue: 300, pr: 303, at: "2026-10-01T02:00:00.000Z" },
+      { issue: 301, pr: 302, at: "2026-10-01T03:00:00.000Z" },
+    ]);
+    const h = await mainHistory(cwd);
+    await h.commit("chore: unrelated (#150)", 1, { file: "old.txt", content: "old\n" });
+    const a = await h.commit("#300: harden x (#303)", 2, { file: "a.txt", content: "a\n" });
+    const b = await h.commit("fix: tidy gate (#302)", 3, { file: "b.txt", content: "b\nmore\n" });
+    await h.gitRevert(a, 5);
+    await h.revertAs(b, subject, 6);
+    await git(cwd, ["push", "-q", "origin", "main"]);
+
+    const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+    expect(r, shape).toEqual(expect.objectContaining({ ok: true, open: true, since: iso("2026-10-01T06:00:00Z") }));
+    expect(r.reason, shape).toMatch(/#303\b.*#302\b|#302\b.*#303\b/);
+    expect(r.detail, shape).not.toMatch(/not attributable/);              // diff로 묶인 revert는 "못 묶음"으로 보고되지 않는다
+  }
+
+  // 반대쪽: 작성자의 글만 있고 diff가 판정 머지 어느 것과도 맞지 않는 revert는 판정 머지를 지어내지 않는다.
+  const { cwd } = await makeRepo();
+  await judgeRecords(cwd, [
+    { issue: 300, pr: 303, at: "2026-10-01T02:00:00.000Z" },
+    { issue: 301, pr: 302, at: "2026-10-01T03:00:00.000Z" },
+  ]);
+  const h = await mainHistory(cwd);
+  const o = await h.commit("chore: unrelated (#150)", 1, { file: "old.txt", content: "old\n" });
+  const a = await h.commit("#300: harden x (#303)", 2, { file: "a.txt", content: "a\n" });
+  await h.commit("fix: tidy gate (#302)", 3, { file: "b.txt", content: "b\nmore\n" });
+  await h.gitRevert(a, 5);
+  await h.revertAs(o, 'Revert "#301: x" (#304)', 6);                           // #150의 파일을 되돌렸다 — #302가 아니다
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(r).toEqual(expect.objectContaining({ ok: true, open: false }));
+}, 240000);
+
+/**
+ * skeptic 2b의 반대쪽 경계 — diff 짝은 **그 revert보다 앞서 머지된** 판정 머지만 본다. revert 뒤에 같은 변경을 다시 올린 판정 PR(#305,
+ * 재상륙)은 그 revert의 대상이 아니다: #302(revert) · #305(revert 없음) · #306(revert)이면 #305가 연속을 끊어 차단기는 닫혀 있다.
+ */
+test("test_189_diff_attribution_never_credits_a_merge_landed_after_the_revert", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { cwd } = await makeRepo();
+  await judgeRecords(cwd, [
+    { issue: 301, pr: 302, at: "2026-10-01T03:00:00.000Z" },
+    { issue: 304, pr: 305, at: "2026-10-01T07:00:00.000Z" },
+    { issue: 306, pr: 306, at: "2026-10-01T08:00:00.000Z" },
+  ]);
+  const h = await mainHistory(cwd);
+  const b = await h.commit("fix: tidy gate (#302)", 3, { file: "b.txt", content: "b\nmore\n" });
+  await h.revertAs(b, 'Revert "#301: tidy the gate" (#303)', 6);                // BLANK, 제목 짝 없음 — diff로만 #302에 묶인다
+  await h.commit("fix: tidy gate again (#305)", 7, { file: "b.txt", content: "b\nmore\n" });  // 같은 변경의 재상륙
+  const d = await h.commit("feat: d (#306)", 8, { file: "d.txt", content: "d\n" });
+  await h.gitRevert(d, 9);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(r).toEqual(expect.objectContaining({ ok: true, open: false }));
+  expect(r.detail).toMatch(/3 self-merge record\(s\) \(3 judge\), 2 revert\(s\)/);
+}, 240000);
+
+/**
+ * diff 짝의 정규화 경계 — revert와 대상 사이에 같은 파일의 다른 곳을 바꾼 커밋이 있으면 blob sha(`index` 줄)와 hunk 줄 번호가
+ * 달라진다. 그래도 같은 변경이므로 짝이다. 그리고 빈 diff끼리는 짝이 아니다(빈 revert가 빈 판정 머지를 지어내지 않는다).
+ */
+test("test_189_diff_attribution_survives_intervening_edits_and_ignores_empty_diffs", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+  const { cwd } = await makeRepo();
+  await judgeRecords(cwd, [
+    { issue: 300, pr: 303, at: "2026-10-01T02:00:00.000Z" },
+    { issue: 301, pr: 302, at: "2026-10-01T03:00:00.000Z" },
+  ]);
+  const h = await mainHistory(cwd);
+  await h.commit("chore: seed (#100)", 1, { file: "shared.txt", content: `${lines.join("\n")}\n` });
+  const a = await h.commit("#300: harden x (#303)", 2, { file: "a.txt", content: "a\n" });
+  const changed = lines.map((l, i) => (i === 24 ? "line 25 tidied" : l));
+  const b = await h.commit("fix: tidy gate (#302)", 3, { file: "shared.txt", content: `${changed.join("\n")}\n` });
+  const shifted = [...changed.slice(0, 5), "inserted 1", "inserted 2", "inserted 3", ...changed.slice(5)];
+  await h.commit("docs: unrelated edit (#160)", 4, { file: "shared.txt", content: `${shifted.join("\n")}\n` });
+  await h.gitRevert(a, 5);
+  await h.revertAs(b, 'Revert "#301: x (#150)" (#304)', 6);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+  const r = await readBreaker({ run, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(r).toEqual(expect.objectContaining({ ok: true, open: true, since: iso("2026-10-01T06:00:00Z") }));
+  expect(r.reason).toMatch(/#303\b.*#302\b/);
+
+  // 빈 diff: 판정 머지 #312가 빈 squash 커밋이고, 작성자의 글만 있는 빈 revert가 뒤따른다 — 짝이 아니다.
+  const e = await makeRepo();
+  await judgeRecords(e.cwd, [
+    { issue: 310, pr: 311, at: "2026-10-01T02:00:00.000Z" },
+    { issue: 312, pr: 312, at: "2026-10-01T03:00:00.000Z" },
+  ]);
+  const he = await mainHistory(e.cwd);
+  const ea = await he.commit("feat: e (#311)", 2, { file: "e.txt", content: "e\n" });
+  const empty = (subject, hh) => git(e.cwd, ["commit", "-q", "--allow-empty", "-m", subject], { GIT_AUTHOR_DATE: `2026-10-01T0${hh}:00:00Z`, GIT_COMMITTER_DATE: `2026-10-01T0${hh}:00:00Z` });
+  expect((await empty("chore: empty (#312)", 3)).code).toBe(0);
+  await he.gitRevert(ea, 5);
+  expect((await empty('Revert "#312: nothing" (#313)', 6)).code).toBe(0);
+  await git(e.cwd, ["push", "-q", "origin", "main"]);
+  const re = await readBreaker({ run, cwd: e.cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(re).toEqual(expect.objectContaining({ ok: true, open: false }));
+}, 240000);
+
+/**
+ * diff 짝의 어댑터 경계 — (1) `git show`가 실패하면 그 revert의 대상은 모르는 것이고, 모르는 것은 닫힘이 아니다(ok:false).
+ * (2) 사람의 리셋(closed_at) 앞의 revert는 어차피 세지 않으므로 diff를 읽지도 않는다(merge 스테이지가 체크마다 부르는 읽기의 비용 경계).
+ */
+test("test_189_diff_attribution_failure_is_not_closed_and_skips_reverts_before_the_reset", async () => {
+  const NOW_MS = Date.parse("2026-10-03T12:00:00.000Z");
+  const { cwd } = await makeRepo();
+  await judgeRecords(cwd, [
+    { issue: 300, pr: 303, at: "2026-10-01T02:00:00.000Z" },
+    { issue: 301, pr: 302, at: "2026-10-01T03:00:00.000Z" },
+  ]);
+  const h = await mainHistory(cwd);
+  const a = await h.commit("#300: harden x (#303)", 2, { file: "a.txt", content: "a\n" });
+  const b = await h.commit("fix: tidy gate (#302)", 3, { file: "b.txt", content: "b\n" });
+  await h.gitRevert(a, 5);
+  await h.revertAs(b, 'Revert "#301: x (#150)" (#304)', 6);
+  await git(cwd, ["push", "-q", "origin", "main"]);
+
+  const shows = [];
+  const failingShow = async (cmd, args, opts) => {
+    if (cmd === "git" && args[0] === "show" && args.includes("--no-prefix")) { shows.push(args.at(-1)); return { code: 128, stdout: "", stderr: "fatal: bad object" }; }
+    return run(cmd, args, opts);
+  };
+  const broken = await readBreaker({ run: failingShow, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(broken.ok).toBe(false);
+  expect(broken.reason).toMatch(/git show .* failed/);
+  expect(shows.length).toBeGreaterThan(0);
+
+  // 리셋이 두 revert 뒤에 있다 → 닫힘이고, diff는 한 번도 읽지 않는다(실패하는 git show가 있어도 ok:true).
+  const st = await readBreakerState({ run, cwd });
+  expect((await writeBreakerState({ run, cwd, blob: st.blob, message: "reset", state: { version: 1, open: false, since: null, reason: "checked", closed_by: "person:a", closed_at: "2026-10-02T00:00:00.000Z" } })).ok).toBe(true);
+  shows.length = 0;
+  const after = await readBreaker({ run: failingShow, cwd, defaultBranch: "main", thresholds: T2, now: () => NOW_MS });
+  expect(after).toEqual(expect.objectContaining({ ok: true, open: false }));
+  expect(shows).toEqual([]);
+}, 240000);

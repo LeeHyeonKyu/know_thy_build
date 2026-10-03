@@ -82,16 +82,18 @@ export function revertedPr(subject) {
  * 차단기를 닫힌 채로 두면 안 된다. git·GitHub이 쓴 증거가 먼저다:
  *   1. 본문의 `This reverts commit <sha>` — main에서 그 커밋의 제목이 싣는 (#N)(`git revert`, squash 메시지가 COMMIT_MESSAGES일 때).
  *   2. 본문의 `Reverts <owner>/<repo>#N` — GitHub이 revert PR 본문에 쓰는 문장(squash 메시지가 PR_BODY일 때).
- *   3. 제목 `Revert "<T>"` — main에서 그보다 앞선 커밋: 제목이 정확히 `<T>`인 것의 끝 (#N)(`git revert` 모양), 없으면
- *      `<T> (#N)`인 것(squash 메시지가 BLANK여도 남는 단서).
- *   4. 제목 안쪽의 마지막 (#N) — 위 어느 것도 없을 때만(`revertedPr`: main 기록 창 밖의 커밋을 되돌린 revert 등).
- * 이 넷 어디에도 묶이지 않는 revert 모양의 커밋은 버리지 않고 센다(`unattributed`) — readBreaker의 detail이 사람에게 말한다.
+ *   3. 제목 `Revert "<T>"` — main에서 그보다 앞선 `<T> (#N)` 커밋 **전부**(squash 메시지가 BLANK여도 남는 단서). 3·4는 작성자가
+ *      쓴 글이므로 PR 하나를 고르지 않는다(rework r3 self-critique): 같은 제목이 여럿이면 revert를 그 모두에 센다.
+ *   4. 제목 안쪽의 마지막 (#N) — 위 어느 것도 없을 때만(`revertedPr`). 이 revert는 `untrusted`로도 내보내고, 어댑터
+ *      (`readBreaker` → `attributeByDiff`)가 git이 쓴 diff로 진짜 대상을 **더한다**(COMMIT_OR_PR_TITLE의 제목 어긋남 + BLANK).
+ * 이 넷 어디에도 묶이지 않는 revert 모양의 커밋은 버리지 않고 센다(`unattributed`, 역시 `untrusted`) — readBreaker의 detail이 말한다.
  */
 export const REVERT_LOG_FORMAT = "%x1e%H%x09%cI%x09%s%x1f%b";
 const trailingPrRef = (s) => { const m = /\(#(\d+)\)\s*$/.exec(String(s ?? "")); return m ? Number(m[1]) : null; };
 
 /**
- * `git log --format=${REVERT_LOG_FORMAT}` 출력 → `{ reverts: [{ at, pr, subject, via }], unattributed: [subject], mainPrs: Set<pr> }`.
+ * `git log --format=${REVERT_LOG_FORMAT}` 출력 → `{ reverts: [{ at, pr, subject, via }], unattributed: [subject], mainPrs: Set<pr>,
+ * untrusted: [{ sha, at, subject }], prCommits: Map<pr, { sha, at }> }`.
  * `mainPrs`는 main의 squash 커밋 제목 끝 `(#N)`이 말하는 머지된 PR들이다(자동 머지 줄의 확인에 쓴다 — `buildHistory`). 날짜를 읽을
  * 수 없는 레코드는 **던진다**: 그 커밋이 리셋 앞인지 뒤인지 모르면 조용히 버릴 수도 셀 수도 없다 — 호출자가 ok:false로 접는다.
  */
@@ -110,31 +112,80 @@ export function parseRevertCommits(stdout) {
   const mainPrs = new Set(commits.map((c) => trailingPrRef(c.subject)).filter((n) => n !== null));
   const reverts = [];
   const unattributed = [];
+  const untrusted = [];
+  const prCommits = new Map();                                        // pr → { sha, at } — 그 PR의 squash 커밋(revert가 아닌 것)
   // git log은 새것부터다 — 제목으로 찾는 3번은 "그 revert보다 앞선" 커밋만 봐야 하므로 오래된 것부터 걷는다.
-  const titleToPr = new Map();
-  const subjectToPr = new Map();
+  // 제목 → PR은 **여러 값**이다(skeptic 2a): 같은 제목을 다시 쓴 PR이 앞선 PR의 자리를 덮어쓰면(last-wins) revert가 엉뚱한 PR로 간다.
+  const titleToPrs = new Map();
+  const add = (m, k, n) => { if (!m.has(k)) m.set(k, new Set()); m.get(k).add(n); };
   for (const c of [...commits].reverse()) {
     const shaped = /^Revert "(.*)"(?:\s+\(#\d+\))?\s*$/.exec(c.subject.trim());
-    let pr = null, via = null;
     if (shaped) {
+      let prs = [], via = null;
       const m = /This reverts commit ([0-9a-f]{7,40})/.exec(c.body);
       const target = m ? (bySha.get(m[1]) ?? commits.find((x) => x.sha.startsWith(m[1]))) : null;
       const n = target ? trailingPrRef(target.subject) : null;   // squash 제목 **끝**의 (#N)만 — 제목 중간의 (#K)는 작성자의 글
-      if (n !== null) { pr = n; via = "body-sha"; }
-      if (pr === null) {
+      if (n !== null) { prs = [n]; via = "body-sha"; }
+      if (!prs.length) {
         const ref = /^Reverts [\w.-]+\/[\w.-]+#(\d+)\s*$/m.exec(c.body);
-        if (ref) { pr = Number(ref[1]); via = "body-ref"; }
+        if (ref) { prs = [Number(ref[1])]; via = "body-ref"; }
       }
-      if (pr === null && subjectToPr.has(shaped[1])) { pr = subjectToPr.get(shaped[1]); via = "title"; }
-      if (pr === null && titleToPr.has(shaped[1])) { pr = titleToPr.get(shaped[1]); via = "title"; }
-      if (pr === null) { pr = revertedPr(c.subject); via = pr !== null ? "subject" : null; }
-      if (pr !== null) reverts.push({ at: c.at, pr, subject: c.subject, via });
-      else unattributed.push(c.subject);
+      if (!prs.length) {
+        // 3. 작성자의 글(따옴표 안)만 남았다 — `<T> (#N)`인 main 커밋 **모두**에 센다. 하나를 고르면 작성자가 고른다(skeptic 1:
+        //    옛 커밋의 제목을 다시 쓴 PR 제목, 2a: 앞선 PR의 제목을 다시 쓴 나중 PR). 넘치게 세는 것은 사람이 리셋하면 끝나지만 덜 세는
+        //    것은 차단기를 닫힌 채로 둔다(plan open_risks: "miscounted (it blocks without need)"는 받아들인 쪽이다).
+        const cands = titleToPrs.get(shaped[1]);
+        if (cands?.size) { prs = [...cands].sort((x, y) => x - y); via = "title"; }
+      }
+      if (!prs.length) {
+        // 4. 안쪽의 마지막 (#N) — 작성자의 글뿐이다. 세되, 어댑터가 diff로 진짜 대상을 더 찾도록 표시한다(skeptic 2b).
+        const k = revertedPr(c.subject);
+        if (k !== null) { prs = [k]; via = "subject"; }
+        untrusted.push({ sha: c.sha, at: c.at, subject: c.subject });
+      }
+      for (const pr of prs) reverts.push({ at: c.at, pr, subject: c.subject, via });
+      if (!prs.length) unattributed.push(c.subject);
+      continue;
     }
     const t = /^(.*\S)\s+\(#(\d+)\)\s*$/.exec(c.subject);
-    if (t) { titleToPr.set(t[1], Number(t[2])); subjectToPr.set(c.subject.trim(), Number(t[2])); }
+    if (t) {
+      const n = Number(t[2]);
+      add(titleToPrs, t[1], n);
+      if (!prCommits.has(n)) prCommits.set(n, { sha: c.sha, at: c.at });
+    }
   }
-  return { reverts, unattributed, mainPrs };
+  return { reverts, unattributed, mainPrs, untrusted, prCommits };
+}
+
+/**
+ * skeptic 2b — **작성자의 글만 남은 revert는 git이 쓴 diff로 대상을 찾는다.** revert 커밋의 diff를 뒤집은 것이 main의 어느 판정
+ * 자동 머지 squash 커밋의 diff와 같으면(blob sha·hunk 줄 번호는 지운다 — 사이의 커밋이 줄을 밀어도 같은 변경이다) 그 PR의 revert다.
+ * 빈 diff는 아무것과도 맞지 않는다. git이 실패하면 던진다 — 호출자가 ok:false로 접는다(모르는 것은 닫힘이 아니다).
+ * → `[{ at, pr, subject, via:"diff" }]`
+ */
+const normDiff = (out) => String(out ?? "").split("\n")
+  .filter((l) => !l.startsWith("index "))
+  .map((l) => (l.startsWith("@@") ? l.replace(/^@@ [^@]* @@/, "@@") : l))
+  .join("\n").trim();
+export async function attributeByDiff({ run, cwd, untrusted, candidates }) {
+  if (!untrusted?.length || !candidates?.length) return [];
+  const show = async (sha, reverse) => {
+    const r = await run("git", ["show", "--format=", "--no-color", "--no-ext-diff", "--no-renames", "--no-prefix", ...(reverse ? ["-R"] : []), sha], { cwd });
+    if (r?.code !== 0) throw new Error(`git show ${sha.slice(0, 12)} failed: ${String(r?.stderr || "").trim().split("\n")[0]}`);
+    return normDiff(r.stdout);
+  };
+  const cache = new Map();
+  const out = [];
+  for (const u of untrusted) {
+    const undone = await show(u.sha, true);
+    if (!undone) continue;
+    for (const c of candidates) {
+      if (!(Date.parse(c.at) < Date.parse(u.at))) continue;
+      if (!cache.has(c.sha)) cache.set(c.sha, await show(c.sha, false));
+      if (cache.get(c.sha) === undone) out.push({ at: u.at, pr: c.pr, subject: u.subject, via: "diff" });
+    }
+  }
+  return out;
 }
 
 /**
@@ -354,8 +405,17 @@ export async function readBreaker({ run, cwd, defaultBranch = "main", thresholds
   let ev, unattributed;
   try {
     const parsed = parseRevertCommits(log.stdout);
-    unattributed = parsed.unattributed;
-    ev = evaluateBreaker({ history: buildHistory({ records: det.records, reverts: parsed.reverts, mainPrs: parsed.mainPrs }), thresholds, closedAt: st.state?.closed_at ?? null });
+    // skeptic 2b — 작성자의 글로만 묶인(또는 못 묶인) revert는 main의 판정 자동 머지 squash 커밋과 diff로 맞춰 본다. 리셋 앞의 revert는
+    // 어차피 세지 않으므로 보지 않는다(git show 호출을 리셋 뒤로 묶는다).
+    const resetMs = st.state?.closed_at ? Date.parse(st.state.closed_at) : null;
+    const pending = parsed.untrusted.filter((u) => resetMs === null || Date.parse(u.at) > resetMs);
+    const judgeOnMain = buildHistory({ records: det.records })
+      .filter((e) => e.kind === "auto-merge" && e.judge && parsed.prCommits.has(e.pr))
+      .map((e) => ({ pr: e.pr, ...parsed.prCommits.get(e.pr) }));
+    const byDiff = await attributeByDiff({ run, cwd, untrusted: pending, candidates: judgeOnMain });
+    const matched = new Set(byDiff.map((r) => r.subject));
+    unattributed = parsed.unattributed.filter((s) => !matched.has(s));
+    ev = evaluateBreaker({ history: buildHistory({ records: det.records, reverts: [...parsed.reverts, ...byDiff], mainPrs: parsed.mainPrs }), thresholds, closedAt: st.state?.closed_at ?? null });
   } catch (e) { return fail(`the breaker could not be evaluated — ${e?.message || e}`); }
   const closedAt = st.state?.closed_at ?? null;
   const c = ev.counts;

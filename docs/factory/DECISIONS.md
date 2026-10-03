@@ -4238,6 +4238,21 @@ ok:false를 확인한다.
   판정 줄이 **진짜 머지된** (사람이 머지한) PR 번호를 대면 연속을 끊을 수 있다. 그 길은 이제 러너의 동기화를 지나지 않으므로, `factory/records`에
   직접 push할 자격증명(아래 첫 위험과 같은 경계)이 필요하다.
 
+**rework r3 — 작성자가 쓴 글은 revert의 PR을 고르지 못한다** (리뷰 sec1 + load-bearing 스켑틱 셋). Revert 버튼의 PR_TITLE squash에서
+따옴표 안은 작성자가 쓴 PR 제목이다. 그래서 귀속 순서는 git·GitHub이 쓴 증거가 먼저다: 본문 `This reverts commit <sha>`(그 커밋 제목 **끝**의
+`(#N)`) → 본문 `Reverts <owner>/<repo>#N` → 제목 `Revert "<T>"`와 main에서 앞선 `<T> (#N)` 커밋 **전부** → 안쪽의 마지막 `(#K)`.
+- *하나를 고르지 않는다.* 3·4는 작성자의 글이므로 후보가 여럿이면(옛 커밋의 제목을 다시 쓴 PR 제목, 앞선 판정 PR의 제목을 다시 쓴 나중 PR —
+  last-wins 맵이 그 자리를 덮었다) revert를 **그 모두**에 센다. 넘치게 세면 사람이 리셋하면 끝나지만(plan open_risks: "miscounted (it blocks
+  without need)"), 덜 세면 차단기가 닫힌 채로 판정 경로 자동 머지가 계속된다. r3 첫 수정의 "정확히-같은-제목" 조회는 지웠다 — 충돌이 없을 때는
+  4와 같은 답이고, 충돌할 때만 작성자가 고른 옛 PR을 골랐다.
+- *diff가 말한다 (`attributeByDiff`).* COMMIT_OR_PR_TITLE의 커밋 하나짜리 PR은 main에 커밋 메시지로 들어가고 Revert 버튼은 PR 제목을 쓴다;
+  본문이 BLANK면 main 제목과도 짝이 없다. 4까지 내려온(또는 못 묶인) revert는 `readBreaker`가 그 diff를 뒤집어 main의 **판정 자동 머지 squash
+  커밋 중 그 revert보다 앞선 것**의 diff와 맞춘다(`index` 줄과 hunk 줄 번호는 지운다 — 사이의 커밋이 같은 파일을 바꿔도 같은 변경이다; 빈 diff는
+  짝이 없다). 맞으면 그 PR에도 센다. `git show`가 실패하면 ok:false이고, 리셋 앞의 revert는 읽지 않는다(체크마다의 비용을 리셋 뒤로 묶는다).
+  남는 것: 충돌을 손으로 푼 revert는 diff가 달라 짝을 못 찾는다(open_risks의 "놓칠 수 있다").
+- *설치된 엔진.* `.factory/**`는 보호 경로라 이 PR의 커밋은 `factory/**`만 바꾼다; `.factory/` 미러는 러너의 `mirror: regenerate` 커밋이 만든다
+  (S3, 이 브랜치의 7b7b2b3·635f593과 같은 경로).
+
 **남는 위험.** revert 제목이 인식 모양이 아니면(손으로 쓴 메시지, `Revert "Revert …"` 사슬, 편집된 제목) 놓치거나 잘못 센다. `factory/records`에
 push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단기를 닫을 수 있다(리셋이 사람의 것이라는 표시는 파일 안의 `closed_by`뿐이다); 파일을
 지우면 반대로 "리셋 이력 없음"이 되어 옛 revert가 다시 세어진다. 매 머지 확인마다 records 전부와 git log를 읽으므로 merge 스테이지 지연이 history 크기에 따라 는다.
