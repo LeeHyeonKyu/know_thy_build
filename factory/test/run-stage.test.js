@@ -5443,16 +5443,18 @@ test("test_196_record_quotes_crash_shaped_lines_the_runner_did_not_write", async
 
 // ── #196 self-critique — usage가 이미 기록된 뒤에 던지면, 크래시 섹션은 그 usage를 **다시 싣지 않는다** ─────────────────────────
 // 같은 돈이 앞 섹션의 `usd`와 크래시 섹션의 `engineUsd`에 두 번 들어가면 budget 줄이 빠진 돈을 부풀린다. 주입: verifier 거부 경로의
-// 전이 결과는 `ok`를 한 번 읽히고(refusal) 두 번째 읽힘(`return t.ok ? 0 : 2`)에서 진짜 TypeError를 던진다 — usage 줄이 기록에 나간 뒤다.
+// 전이는 **거부된다**(hand-off가 없다 — 라벨은 in-flight에 남는다). 그 결과의 `ok`는 usage 줄이 기록에 나가기 전에는 false로 읽히고,
+// 나간 뒤의 읽힘(`return t.ok ? 0 : 2`)에서 진짜 TypeError를 던진다 — 읽힌 횟수가 아니라 기록의 상태에 묶인다.
 test("test_196_crash_after_usage_is_recorded_counts_its_dollars_once", async () => {
   const root = crashRecordRoot196();
   const runnerId = "gha-196";
-  const okOnce = (to) => { let reads = 0; return { to, get ok() { reads += 1; if (reads > 1) { const o = undefined; return o.ok; } return true; } }; };
+  const usageOut = () => existsSync(join(root, "docs/factory/runs/42.md")) && /^usage: /m.test(recordText196(root, 42));
+  const refusedThenCrash = (to) => ({ to, reason: "refused", get ok() { if (usageOut()) { const o = undefined; return o.ok; } return false; } });
   const rejected = { ok: true, reasons: [], data: { head_sha: "c".repeat(40), pr: 7, verifier: { verdict: "rejected", findings: [{ claim: "x" }] } } };
   const d = implDeps({
     claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 1 }, total_cost_usd: 40, num_turns: 2, terminal_reason: "end_turn" }),
     verifyStage: () => rejected, selfGateRetry: async () => ({ attempt: 1, total: 1 }),
-    transition: vi.fn(async ({ to }) => (to === "factory:planned" ? okOnce(to) : { ok: true, to })),
+    transition: vi.fn(async ({ to }) => (to === "factory:planned" ? refusedThenCrash(to) : { ok: true, to })),
     runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines }),
   });
   expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId, runId: "196" })).toBe(1);
@@ -5462,6 +5464,53 @@ test("test_196_crash_after_usage_is_recorded_counts_its_dollars_once", async () 
   const entries = parseRunRecord(rec);
   expect(entries.filter((e) => e.engine_crash).map((e) => e.cost_usd)).toEqual([null]);   // 크래시 섹션은 비용을 싣지 않는다
   expect(lifetimeCostOf196(rec)).toMatchObject({ usd: 40, engineUsd: 0, engineRuns: 1 });  // $40은 상한 안에 한 번만
+});
+
+// ── #196 self-critique (skeptic f1) — 이 런이 이미 hand-off를 했으면, 그 뒤의 크래시는 그 라벨을 덮지 않는다 ───────────────────
+// hand-off(→ planned·awaiting-review 등)는 다음 스테이지를 이미 깨웠다. 그 뒤의 TypeError가 라벨을 blocked으로 뒤집으면 도는 다음
+// 스테이지의 발밑이 바뀐다. 그때는 오늘의 경로다: 전이 없음, engine-crash 줄 없음, exit 1 — 그리고 아직 기록되지 않은 usage는 그 섹션에
+// **상한 안으로** 실린다. 대조군: hand-off가 아닌 claim(→ in-progress) 뒤의 크래시는 여전히 engine-crash다.
+test("test_196_crash_after_a_handoff_keeps_the_handoff", async () => {
+  const runnerId = "gha-196";
+  const claude = (cost) => async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" }), usage: { input_tokens: 1 }, total_cost_usd: cost, num_turns: 2, terminal_reason: "end_turn" });
+  const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+  const handOff = (label) => ({ ok: true, get to() { const o = undefined; return o.to; }, label });   // hand-off는 성공했고, 그 결과를 읽다 던진다
+
+  // (a) 성공한 hand-off(→ awaiting-review)의 결과를 기록하다 던진다 — usage는 아직 기록되지 않았다
+  {
+    const root = crashRecordRoot196();
+    const d = implDeps({
+      claudeP: claude(12), gates: async () => gates,
+      transition: vi.fn(async ({ to }) => (to === "factory:awaiting-review" ? handOff(to) : { ok: true, to })),
+      runRecord: (lines) => appendRunRecord({ root, issue: 7, stage: "implement", runnerId, lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId, runId: "196" })).toBe(1);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));   // 정말 hand-off 뒤였다
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+    const rec = recordText196(root, 7);
+    expect(rec).toMatch(/^error: implement aborted — Cannot read properties of undefined/m);
+    expect(rec).toMatch(/after the hand-off to factory:awaiting-review/);
+    const entries = parseRunRecord(rec);
+    expect(entries.some((e) => e.engine_crash)).toBe(false);
+    expect(rec.match(/^usage: .*cost_usd: 12 /gm)).toHaveLength(1);                 // usage는 한 번, 상한 안으로
+    const life = lifetimeCostOf196(rec);
+    expect(life).toMatchObject({ usd: 12, priced: 1 });                            // $12는 한 번, 상한 안에
+    expect(life).not.toHaveProperty("engineRuns");
+  }
+
+  // (b) 대조군: claim(→ in-progress)은 hand-off가 아니다 — 그 뒤 게이트에서 던지면 engine-crash 그대로
+  {
+    const root = crashRecordRoot196();
+    const d = implDeps({
+      claudeP: claude(5), gates: async () => { const o = undefined; return o.test; },
+      runRecord: (lines) => appendRunRecord({ root, issue: 7, stage: "implement", runnerId, lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId, runId: "196" })).toBe(1);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:in-progress" }));
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));
+    expect(lifetimeCostOf196(recordText196(root, 7))).toMatchObject({ usd: 0, engineUsd: 5, engineRuns: 1 });
+  }
 });
 
 // ── #196 rework sec1 — 에이전트 산출물이 고를 수 있는 크래시는 상한 밖으로 **한 사건분**만 옮길 수 있다 ─────────────────────────────
@@ -5510,7 +5559,7 @@ test("test_196_agent_handoff_cannot_move_crash_cost_out_of_the_cap", async () =>
   const rec = recordText196(root, 8);
   expect(parseRunRecord(rec).filter((e) => e.engine_crash)).toHaveLength(4);   // 넷 다 크래시로 기록돼 있다
   const excluded = ENGINE_CRASH_EXCLUDED_RUNS_196;
-  expect(lifetimeCostOf196(rec)).toEqual({ usd: 10 * (4 - excluded), runs: 4 - excluded, priced: 4 - excluded, engineUsd: 10 * excluded, engineRuns: excluded });
+  expect(lifetimeCostOf196(rec)).toEqual({ usd: 10 * (4 - excluded), runs: 4 - excluded, priced: 4 - excluded, engineUsd: 10 * excluded, engineRuns: excluded, crashCountedUsd: 10 * (4 - excluded), crashCountedRuns: 4 - excluded });   // 넘친 크래시는 상한 안에, 크래시로 이름이 남는다
   expect(budgetCheck196({ charter: { budget: { usd_per_issue: 15 } }, recordText: rec }).ok).toBe(false);   // 넘친 크래시 비용이 상한을 다시 연다
 });
 import { budgetCheck as budgetCheck196 } from "../lib/budget.js";

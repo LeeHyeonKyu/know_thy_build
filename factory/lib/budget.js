@@ -30,15 +30,21 @@ export const ENGINE_CRASH_EXCLUDED_RUNS = 2;
 
 export function lifetimeCostOf(recordText) {
   const entries = recordText ? parseRunRecord(String(recordText)) : [];
-  let usd = 0, priced = 0, runs = 0, engineUsd = 0, engineRuns = 0;
+  let usd = 0, priced = 0, runs = 0, engineUsd = 0, engineRuns = 0, crashCountedUsd = 0, crashCountedRuns = 0;
   for (const e of entries) {
     const cost = e.cost_usd != null && Number.isFinite(Number(e.cost_usd)) ? Number(e.cost_usd) : null;
     if (e.engine_crash && engineRuns < ENGINE_CRASH_EXCLUDED_RUNS) { engineRuns++; if (cost != null) engineUsd += cost; continue; }
     runs++;
     if (cost != null) { usd += cost; priced++; }
+    // skeptic f2 — 한 사건분을 넘은 크래시 런: usd에 들어가지만, 크래시였다는 사실은 줄에 남는다(따로 센다)
+    if (e.engine_crash) { crashCountedRuns++; if (cost != null) crashCountedUsd += cost; }
   }
   const round2 = (n) => Math.round(n * 100) / 100;
-  return { usd: round2(usd), runs, priced, ...(engineRuns ? { engineUsd: round2(engineUsd), engineRuns } : {}) };
+  return {
+    usd: round2(usd), runs, priced,
+    ...(engineRuns ? { engineUsd: round2(engineUsd), engineRuns } : {}),
+    ...(crashCountedRuns ? { crashCountedUsd: round2(crashCountedUsd), crashCountedRuns } : {}),
+  };
 }
 
 /** `[budget].usd_per_issue` — 양수일 때만 켜진다. 그 밖(없음·0·문자열)은 "검사 없음"이다. */
@@ -54,7 +60,7 @@ export function budgetPerIssue(charter) {
  */
 export function budgetCheck({ charter, recordText }) {
   const cap = budgetPerIssue(charter);
-  const { usd, runs, priced, ...engine } = lifetimeCostOf(recordText);    // engine = { engineUsd, engineRuns } | {} — 판정은 usd로만
+  const { usd, runs, priced, ...engine } = lifetimeCostOf(recordText);    // engine = { engineUsd, engineRuns, crashCounted* } | {} — 판정은 usd로만
   if (cap == null) return { ok: true, cap: null, usd, runs, priced, ...engine };
   if (usd <= cap) return { ok: true, cap, usd, runs, priced, ...engine };
   return {
@@ -65,7 +71,9 @@ export function budgetCheck({ charter, recordText }) {
 
 /** run 기록 한 줄 — 검사가 돌았다는 사실과 그 숫자(사람이 이슈 기록만 보고도 예산 대비 위치를 안다). */
 /** #196 — 크래시 런이 있으면 빠진 돈과 런 수를 같은 줄에 덧붙인다("engine"만 쓰지 않는다 — #179의 self-change와 헷갈린다). */
-const engineCrashNote = (b) => (b.engineRuns ? `; engine crash $${Number(b.engineUsd ?? 0).toFixed(2)} over ${b.engineRuns} run(s) excluded from the cap` : "");
+/** skeptic f2 — 한 사건분을 넘어 상한 안으로 센 크래시 런도 줄에 이름을 남긴다(크래시였다는 사실이 숫자 속에 숨지 않게). */
+const engineCrashNote = (b) => (b.engineRuns ? `; engine crash $${Number(b.engineUsd ?? 0).toFixed(2)} over ${b.engineRuns} run(s) excluded from the cap` : "")
+  + (b.crashCountedRuns ? `; ${b.crashCountedRuns} further engine crash run(s) $${Number(b.crashCountedUsd ?? 0).toFixed(2)} counted in the cap (past the one-episode exclusion)` : "");
 export const budgetLine = (b) => b.cap == null
   ? `budget: no [budget].usd_per_issue in CHARTER — lifetime cost $${b.usd.toFixed(2)} over ${b.runs} run(s) is not capped${engineCrashNote(b)}`
   : `budget: lifetime $${b.usd.toFixed(2)} / $${b.cap} over ${b.runs} run(s)${engineCrashNote(b)}${b.ok ? "" : " — REFUSED"}`;

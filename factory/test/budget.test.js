@@ -122,3 +122,31 @@ test("test_196_crash_line_counts_only_for_its_own_stage_and_runner", () => {
   section("gha-3", { stage: "implement", runnerId: "gha-3", runId: "3" }, 5);
   expect(lifetimeCostOf(read())).toEqual({ usd: 35, runs: 2, priced: 2, engineUsd: 5, engineRuns: 1 });
 });
+
+// ── #196 self-critique (skeptic f2) — 한 사건분을 넘은 크래시 런은 상한 안으로 세지만, budget 줄에서 **크래시로 보인다** ─────────────
+// 픽스처는 실제 생산자(runStage catch)다: 같은 이슈의 크래시 런 넷($10씩). 앞의 `ENGINE_CRASH_EXCLUDED_RUNS`개만 빠지고, 나머지는
+// usd에 들어가면서 그 개수와 돈이 줄에 따로 적힌다 — 줄만 보는 사람이 "왜 크래시가 상한을 먹었나"를 알 수 있어야 한다.
+import { ENGINE_CRASH_EXCLUDED_RUNS as EXCLUDED196 } from "../lib/budget.js";
+
+test("test_196_crash_runs_past_the_exclusion_are_named_on_the_budget_line", async () => {
+  const root = mkdtempSync(join(tmpdir(), "budget196-past-"));
+  appendRunRecord({ root, issue: 197, stage: "implement", runnerId: "gha-0", lines: [usageLine({ usage: { input_tokens: 10 }, total_cost_usd: 3, num_turns: 3, terminal_reason: "end_turn" })] });
+  for (let i = 1; i <= 4; i++) {
+    expect(await crashingStage196({ root, issue: 197, cost: 10, runnerId: `gha-${i}`, error: new TypeError("Cannot read properties of undefined (reading 'test')") })).toBe(1);
+  }
+  const text = readFileSync(join(root, "docs/factory/runs/197.md"), "utf8");
+  expect(parseRunRecord(text).filter((e) => e.engine_crash)).toHaveLength(4);
+  const counted = 4 - EXCLUDED196;
+  const life = lifetimeCostOf(text);
+  expect(life).toMatchObject({ usd: 3 + 10 * counted, engineUsd: 10 * EXCLUDED196, engineRuns: EXCLUDED196, crashCountedUsd: 10 * counted, crashCountedRuns: counted });
+  const b = budgetCheck({ charter: { budget: { usd_per_issue: 100 } }, recordText: text });
+  expect(budgetLine(b)).toBe(`budget: lifetime $${(3 + 10 * counted).toFixed(2)} / $100 over ${life.runs} run(s); engine crash $${(10 * EXCLUDED196).toFixed(2)} over ${EXCLUDED196} run(s) excluded from the cap; ${counted} further engine crash run(s) $${(10 * counted).toFixed(2)} counted in the cap (past the one-episode exclusion)`);
+  expect(budgetLine(budgetCheck({ charter: {}, recordText: text }))).toMatch(new RegExp(`not capped; engine crash .* excluded from the cap; ${counted} further engine crash run\\(s\\) \\$${10 * counted}\\.00 counted in the cap`));
+
+  // 대조군: 한 사건 안의 크래시(≤ EXCLUDED)만 있는 기록에는 그 꼬리가 없고, 키도 서지 않는다
+  const one = mkdtempSync(join(tmpdir(), "budget196-one-"));
+  expect(await crashingStage196({ root: one, issue: 198, cost: 10, runnerId: "gha-1", error: new TypeError("x is not a function") })).toBe(1);
+  const oneText = readFileSync(join(one, "docs/factory/runs/198.md"), "utf8");
+  expect(lifetimeCostOf(oneText)).not.toHaveProperty("crashCountedRuns");
+  expect(budgetLine(budgetCheck({ charter: { budget: { usd_per_issue: 100 } }, recordText: oneText }))).not.toMatch(/further engine crash/);
+});

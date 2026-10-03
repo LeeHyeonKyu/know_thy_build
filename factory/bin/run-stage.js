@@ -233,7 +233,21 @@ export function makeStageGh({ run, repo }) {
 }
 
 export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
-  const d = deps;
+  /**
+   * #196 self-critique (skeptic f1) — 이 런이 **hand-off**를 했는가(성공한 전이 중 claim(→ in-progress)과 blocked-retry hop
+   * (`prerequisite: true`, 이미 얻었던 in-flight 라벨의 복구)이 아닌 것). hand-off는 다음 스테이지를 이미 깨웠다 — 그 뒤의 크래시가
+   * 라벨을 blocked으로 뒤집으면 도는 다음 스테이지의 발밑이 바뀐다. catch는 이 값이 있으면 engine-crash 전이를 하지 않는다.
+   * deps를 펼치지 않고 Proxy로 transition 하나만 감싼다(프로덕션 deps의 게터 — merge의 selfChange·engine — 를 그대로 살린다).
+   */
+  let handedOffTo = null;
+  const trackedTransition = typeof deps.transition === "function"
+    ? async (args) => {
+      const t = await deps.transition(args);
+      if (t?.ok === true && args?.prerequisite !== true && args?.to !== "factory:in-progress") handedOffTo = args?.to ?? "unknown";
+      return t;
+    }
+    : deps.transition;
+  const d = new Proxy(deps, { get: (target, key) => (key === "transition" ? trackedTransition : Reflect.get(target, key)) });
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
   const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
@@ -1426,6 +1440,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     if (!isEngineCrash(e)) {
       // 의존성·인프라 Error — 오늘의 경로 그대로(F1): 전이 없음, exit 1. 라벨은 in-flight에 남고 sweeper의 하트비트 팔이 받는다.
       record([`error: ${stage} aborted — ${e?.message || e}`]);
+      return 1;
+    }
+    if (handedOffTo !== null) {
+      // skeptic f1 — hand-off 뒤의 크래시: 그 라벨이 서 있고 다음 스테이지가 이미 깨어났다. 오늘의 경로(전이 없음, exit 1)이고 크래시 줄을
+      // 쓰지 않는다 — 그러니 아직 기록되지 않은 usage는 이 섹션에 실려 **상한 안으로** 센다(빠지는 쪽이 아니라 세는 쪽이 안전하다).
+      record([
+        `error: ${stage} aborted — ${String(e?.message || e).replace(/\s+/g, " ").trim()}`,
+        `crash: after the hand-off to ${handedOffTo} — no transition (the hand-off stands; this run is not an engine-crash block)`,
+        ...(usage && !usageRecorded ? [usage] : []),
+      ]);
       return 1;
     }
     /**

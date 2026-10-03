@@ -4259,11 +4259,28 @@ factory.gates.v1·`mergeGates`·`changedFiles`·파서는 바뀌지 않는다. �
 CHARTER 값도 아니다(plan non_goals). 값은 sweeper 상수와 묶여 `test_196_agent_handoff_cannot_move_crash_cost_out_of_the_cap`가 핀한다(그
 테스트는 진짜 verifyStage를 통과한 `findings: "x"`·`{}`·`7`과, 진짜 크래시 런 넷의 기록으로 두 겹을 따로 실패시킨다).
 
+**self-critique (skeptic, 리뷰 전) — 세 군데를 더 닫았다.**
+1. **hand-off 뒤의 크래시는 그 라벨을 덮지 않는다.** catch는 이 런이 이미 hand-off를 했으면(성공한 전이 중 claim `→ in-progress`과 blocked-retry
+   hop `prerequisite: true`가 아닌 것 — `runStage`가 deps를 펼치지 않고 Proxy로 `transition` 하나만 감싸 기록한다) engine-crash 전이를 하지
+   않는다: 그 hand-off(→ planned·awaiting-review·approved…)는 다음 스테이지를 이미 깨웠고, 그 라벨들은 모두 `→ factory:blocked` 엣지를 가져
+   뒤집기가 성공해 버린다. 그때는 오늘의 경로(전이 없음, exit 1)이고 크래시 줄을 쓰지 않으며, 아직 기록되지 않은 usage는 그 섹션에 실려
+   **상한 안으로** 센다. 핀: `test_196_crash_after_a_handoff_keeps_the_handoff`(claim 뒤의 크래시가 여전히 engine-crash인 대조군 포함).
+   `test_196_crash_after_usage_is_recorded_counts_its_dollars_once`의 주입은 hand-off가 아니라 **거부된** 전이로 바꿨다(이 PR이 더한 테스트 —
+   main의 테스트가 아니다): 성공한 hand-off 뒤 크래시를 engine-crash로 고정하던 모양이 바로 이 결함이었다.
+2. **한 사건분을 넘은 크래시 런도 budget 줄에 보인다.** `lifetimeCostOf`는 상한 안으로 센 크래시 섹션을 `crashCountedUsd`·`crashCountedRuns`로
+   따로 돌려주고(있을 때만 선다), `budget:` 줄은 `; N further engine crash run(s) $X counted in the cap (past the one-episode exclusion)`을 덧붙인다
+   — "크래시 런은 빠지되 보인다"(dw2)의 '보인다'는 상한 안으로 센 크래시에도 선다. 핀: `test_196_crash_runs_past_the_exclusion_are_named_on_the_budget_line`.
+   plan의 "crash runs excluded"를 "한 사건분의 크래시 런 excluded"로 좁힌 것은 rework sec1의 결정 그대로이고, spec-conformance가 볼 계약 변경이다.
+3. **engine-crash의 needs-human은 새 엔진이 오면 한 번 스스로 재시도한다.** `engineCausedNeedsHuman`이 엔진 원인으로 보는 blocked 원인은
+   `undecidable`과 `engine-crash`다(`ENGINE_CAUSED_BLOCKS`). 에스컬레이션이 싣는 엔진 버전의 유일한 독자가 그 팔이므로, 빠져 있으면 그 버전은 죽은
+   기록이었다. 릴리스당 1회 마커 그대로이고, 그 재시도가 또 크래시하면 blocked 팔의 상한이 다시 문다(루프 없음). 핀:
+   `test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine`.
+
 **남은 위험**: "어떤 throw가 engine-crash인가"의 답은 1에 적은 그대로다 — 엔진 코드가 던진 TypeError·ReferenceError·RangeError뿐이다. 그 경계에서
 틀릴 수 있는 방향은 둘이다: plain Error를 던지는 엔진 버그는 engine-crash가 **아니다**(오늘의 경로로 간다 — 안전한 쪽). 그리고 엔진 코드가
 에이전트 산출물을 검증 없이 읽다가 낸 TypeError는 engine-crash다 — 그것은 산출물의 잘못이 아니라 검증하지 않은 엔진의 결함으로 본다. 의존성
 표식은 `dependencyClient`로 감싼 gh 클라이언트에만 붙는다: 다른 의존성(`run`으로 부르는 git·claude)은 결과 객체를 돌려주고 던지지 않거나 plain
 Error를 던진다. 새 의존성 클라이언트가 그 래퍼 없이 배선되면 그 안의 TypeError는 engine-crash로 읽힌다 — 그것을 묶는 것은 3의 상한이다. 상한
-에스컬레이션은 ADR-032의 릴리스 재시도(`engineCausedNeedsHuman`, `undecidable`만 고른다)에 들지 않는다 — 이 ADR은 그 팔을 바꾸지 않았다.
+에스컬레이션은 ADR-032의 릴리스 재시도(`engineCausedNeedsHuman`)에 **든다** — 아래 "self-critique" 3.
 예산 검사의 실패는 여전히 삼켜진다(`budget: check failed`, fail-open) — 이 분할의 버그도 그렇게 샌다. 되돌리면 이미 찍힌 `cause=engine-crash`
 마커와 크래시 줄이 남는다: 옛 코드는 모르는 등급을 `other` 문장으로 읽고, 크래시 섹션을 보통 런으로 센다(안전한 쪽).

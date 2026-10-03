@@ -526,6 +526,13 @@ const ENGINE_ESCALATION_PREFIX = BLOCKED_ESCALATION_REASON.undecidable.replace(/
 const RELEASE_RETRY_IMPLEMENT_TARGETS = new Set(["factory:planned", "factory:rework"]);
 const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
 
+/**
+ * blocked 사건 중 엔진 원인인 것. #196 self-critique (skeptic f3) — engine-crash(러너의 catch만 쓰는 원인, 에스컬레이션은 "engine defect")는
+ * 이 저장소에서 가장 직접적인 엔진 결함이다: 새 엔진이 오면 한 번 스스로 재시도한다(그 에스컬레이션이 싣는 엔진 버전의 유일한 독자가 이 팔이다).
+ * 루프는 없다 — 릴리스당 1회(`factory-retry-on-release` 마커)이고, 그 재시도가 또 크래시하면 blocked 팔의 상한이 다시 문다.
+ */
+const ENGINE_CAUSED_BLOCKS = new Set(["undecidable", "engine-crash"]);
+
 /** 마지막 전이 코멘트가 엔진 결함으로 인한 needs-human인가. 아니면 null, 맞으면 `{ comment, thenVersion }`. */
 export function engineCausedNeedsHuman(comments) {
   const list = Array.isArray(comments) ? comments : [];
@@ -541,7 +548,7 @@ export function engineCausedNeedsHuman(comments) {
   const t = lastTransition([comment]);
   const reason = t?.reason ?? "";
   const engine = reason.startsWith(ENGINE_ESCALATION_PREFIX)
-    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && blockedOrigin(list.slice(0, idx + 1))?.cause === "undecidable");
+    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && ENGINE_CAUSED_BLOCKS.has(blockedOrigin(list.slice(0, idx + 1))?.cause));
   if (!engine) return null;
   return { comment, thenVersion: ENGINE_VERSION.exec(body)?.[1] ?? null };
 }

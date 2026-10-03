@@ -3508,3 +3508,35 @@ test("test_196_runner_hop_keeps_other_triage_causes_as_before", async () => {
   expect((await blockOther()).ok).toBe(true);
   expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "other" });
 });
+
+// ── #196 self-critique (skeptic f3) — engine-crash의 needs-human은 엔진 결함이다: 새 엔진이 오면 ADR-032의 릴리스 재시도가 한 번 받는다 ──
+// 픽스처는 진짜 생산자다: 크래시 런의 blocked 전이(명시 cause=engine-crash)는 진짜 transition()이, 재시도·에스컬레이션(엔진 버전을 싣는다)은
+// 진짜 sweep()이 쓴다. 에스컬레이션이 버전을 실어도, 그것을 읽는 유일한 팔이 engine-crash를 엔진 원인으로 보지 않으면 버전은 죽은 기록이다.
+import { engineCausedNeedsHuman as engineCausedNeedsHuman196 } from "../lib/sweeper.js";
+
+test("test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine", async () => {
+  const w = world156();
+  const n = 96;
+  w.add(n, "factory:in-progress", [planHandoff156(n), seedTransition156("factory:ready", "factory:planned"), seedTransition156("factory:planned", "factory:in-progress")]);
+  const crash = () => w.transition({ issue: n, to: "factory:blocked", reason: "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')", stage: "implement", cause: "engine-crash" });
+  expect((await crash()).ok).toBe(true);
+  expect(await w.sweep("1.4.50")).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: n, stage: "implement", cause: "engine-crash" }));
+  expect(await w.sweep("1.4.50")).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: n, cause: "engine-crash" }));
+  expect(w.label(n)).toBe("factory:needs-human");
+  const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(esc).toMatch(/engine defect/);
+  expect(ENGINE_VERSION156.exec(esc)?.[1]).toBe("1.4.50");
+  expect(engineCausedNeedsHuman196(await w.gh.comments(n))).toMatchObject({ thenVersion: "1.4.50" });
+
+  // 같은 엔진: 아무것도 하지 않는다
+  w.dispatchStage.mockClear();
+  const same = await w.sweep("1.4.50");
+  expect(same).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n }));
+  expect(w.label(n)).toBe("factory:needs-human");
+
+  // 새 엔진: 중단 지점(implement 전 → planned)으로 한 번, 릴리스 주체로
+  const after = await w.sweep("1.4.51");
+  expect(after).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n, version: "1.4.51", from: "1.4.50", to: "factory:planned" }));
+  expect(w.label(n)).toBe("factory:planned");
+  expect(releaseMarkers156(w, n)).toHaveLength(1);
+});
