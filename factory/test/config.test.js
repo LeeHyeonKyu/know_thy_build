@@ -138,3 +138,54 @@ test("upstreamRepoOf: owner/repo만 통과하고, 없거나 모양이 틀리면 
   writeFileSync(join(root, ".factory/harness.toml"), readFileSync(join(root, ".factory/harness.toml"), "utf8").replace("[factory]\n", "[factory]\nupstream = \"o/up\"\n"));
   expect(upstreamRepoOf(load(root))).toBe("o/up");
 });
+
+// ── #178 (S4a-1) — CHARTER `self_change`: 없으면 꺼짐(오늘의 동작), 모양이 틀리면 설정 오류 ─────────────────
+test("test_178_self_change_config_defaults_and_validation", async () => {
+  const { SELF_CHANGE_DEFAULTS } = await import("../lib/config.js");
+  const root = fixture();
+  const charterPath = join(root, "docs/factory/CHARTER.md");
+  const base = readFileSync(charterPath, "utf8");
+  const withBlock = (block) => writeFileSync(charterPath, base.replace("budget: {}\n", `budget: {}\n${block}`));
+
+  // 없음 → 기본값 { false, false, 60 }. 실제 CHARTER 경로로 읽힌다.
+  expect(SELF_CHANGE_DEFAULTS).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
+  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
+
+  // 올바른 덮어쓰기(블록 맵) — 쓴 키만 바뀌고 나머지는 기본값.
+  withBlock("self_change:\n  auto_merge_non_judge: true\n  veto_minutes: 20\n");
+  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: true, auto_merge_judge: false, veto_minutes: 20 });
+  withBlock("self_change: { auto_merge_judge: true }\n");
+  expect(loadCharter(root).self_change).toEqual({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 });
+
+  // 불리언이 아닌 스위치 → 설정 오류(어느 키인지 말한다). 기본값으로 조용히 접지 않는다.
+  withBlock("self_change:\n  auto_merge_non_judge: yes-please\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.auto_merge_non_judge/);
+  withBlock("self_change:\n  auto_merge_judge: 1\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.auto_merge_judge/);
+  // veto_minutes: 음수
+  withBlock("self_change:\n  veto_minutes: -5\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.veto_minutes/);
+  // veto_minutes: 0
+  withBlock("self_change:\n  veto_minutes: 0\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.veto_minutes/);
+  // veto_minutes: 정수가 아님
+  withBlock("self_change:\n  veto_minutes: 1.5\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.veto_minutes/);
+  withBlock("self_change:\n  veto_minutes: soon\n");
+  expect(() => loadCharter(root)).toThrow(/self_change\.veto_minutes/);
+});
+
+test("test_178_self_change_config_defaults_and_validation — parseSelfChange rejects every malformed shape", async () => {
+  const { parseSelfChange } = await import("../lib/config.js");
+  expect(parseSelfChange(undefined)).toEqual({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
+  expect(parseSelfChange({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 1 })).toEqual({ auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 1 });
+  for (const [raw, key] of [
+    [{ auto_merge_non_judge: "true" }, "auto_merge_non_judge"], [{ auto_merge_non_judge: null }, "auto_merge_non_judge"],
+    [{ auto_merge_judge: 0 }, "auto_merge_judge"],
+    [{ veto_minutes: -1 }, "veto_minutes"], [{ veto_minutes: 0 }, "veto_minutes"], [{ veto_minutes: 2.5 }, "veto_minutes"],
+    [{ veto_minutes: "60" }, "veto_minutes"], [{ veto_minutes: null }, "veto_minutes"],
+    [{ veto_minute: 30 }, "veto_minute"], [true, "self_change"], [[1], "self_change"], [null, "self_change"], ["on", "self_change"],
+  ]) {
+    expect(() => parseSelfChange(raw), JSON.stringify(raw)).toThrow(new RegExp(key.replace(/[.]/g, "\\.")));
+  }
+});
