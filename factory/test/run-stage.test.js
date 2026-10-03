@@ -4831,3 +4831,94 @@ test("test_174_main_transition_dep_forwards_the_restart_principal", async () => 
   // Every hop asked main's ctxExtra builder exactly once, for its own target.
   expect(extras).toEqual(["factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:rework", "factory:needs-human"]);
 });
+
+// #170 skeptic (round 5) — dw6 says the closures main() installs must actually RUN with the real reader; a regex over
+// the source only shows they exist. So this test lifts the two dep expressions out of main() VERBATIM (`verifyStage:
+// …` and `handoffHeadSha: …`) and evaluates them in a scope shaped like main()'s: `ctxCache` and `charter` are
+// null when the deps object is built and set afterwards (charterReady), exactly the e15ede4/#181 capture-timing
+// hazard. The library functions they call are the real ones (makeVerifyStageDep is only wrapped to record what it
+// was given). A changed getter (`charter?.x`), a wrong `stage`, a dropped or nulled reader, or a value captured
+// before charterReady turns this red.
+test("test_170_production_verify_path_recovers_from_output_file — the dep expressions main() installs, run verbatim on real files", async () => {
+  const { makeVerifyStageDep, handoffHeadShaForRun } = await import("../bin/run-stage.js");
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("async function main()"));
+  /** The expression after `<prop>:` in main()'s deps object, up to the comma that closes it at bracket depth 0. */
+  const depExpr = (prop) => {
+    const m = new RegExp(`\\n\\s*${prop}\\s*:\\s*`).exec(mainSrc);
+    expect(m, `main() installs a ${prop} dep`).not.toBe(null);
+    let depth = 0;
+    for (let i = m.index + m[0].length; i < mainSrc.length; i++) {
+      const ch = mainSrc[i];
+      if ("({[".includes(ch)) depth++;
+      else if (")}]".includes(ch)) { if (depth === 0) return mainSrc.slice(m.index + m[0].length, i).trim(); depth--; }
+      else if (ch === "," && depth === 0) return mainSrc.slice(m.index + m[0].length, i).trim();
+    }
+    throw new Error(`unterminated ${prop} dep`);
+  };
+  const verifyExpr = depExpr("verifyStage");
+  const headExpr = depExpr("handoffHeadSha");
+  expect(verifyExpr).toMatch(/^makeVerifyStageDep\(/);
+  expect(headExpr).toMatch(/handoffHeadShaForRun\(/);
+  // main()'s scope, reduced to the names those two expressions may use
+  const wire = new Function("root", "stage", "makeVerifyStageDep", "handoffHeadShaForRun", "qaEvidenceSummary",
+    `let charter, harness, ctxCache;\nconst deps = { verifyStage: ${verifyExpr}, handoffHeadSha: ${headExpr} };\nreturn { deps, charterReady(c, ch) { ctxCache = c; charter = ch; } };`);
+
+  // a real transcript and a real runner output file in a temp root (implement.v1, > 30 KB, cut everywhere else)
+  const scratch = mkdtempSync(join(tmpdir(), "ktb170-main-"));
+  mkdirSync(join(scratch, "tasks"), { recursive: true });
+  const outputFile = join(scratch, "tasks", "wfMAIN0001.output");
+  const L = (o) => JSON.stringify(o);
+  const sha = "c".repeat(40);
+  const impl = { schema: "factory.implement.v1", issue: 170, head_sha: sha, pr: 171, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted", notes: Array.from({ length: 600 }, (_, i) => `dw${i % 6 + 1}: prove-test reverted the change and the test failed (${i})`).join("\n") }, orchestration: "workflow", guarantee: "verified" };
+  const full = JSON.stringify(impl);
+  expect(full.length).toBeGreaterThan(30000);
+  writeFileSync(outputFile, JSON.stringify({ summary: "Dynamic workflow completed", agentCount: 2, logs: [], result: impl }, null, 2));
+  const root = mkdtempSync(join(tmpdir(), "ktb170-mainroot-"));
+  mkdirSync(join(root, ".factory/out"), { recursive: true });
+  const transcriptPath = join(root, "session.jsonl");
+  writeFileSync(transcriptPath, [
+    L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "toolu_wf", input: { name: "factory-implement" } }] } }),
+    L({ type: "user", message: { content: [{ tool_use_id: "toolu_wf", type: "tool_result", content: "Workflow launched in background. Task ID: wfMAIN0001\nRun ID: wf_1\n\nYou will be notified when it completes." }] } }),
+    L({ type: "user", timestamp: new Date(Math.floor(statSync(outputFile).ctimeMs)).toISOString(), message: { content: `<task-notification>\n<task-id>wfMAIN0001</task-id>\n<tool-use-id>toolu_wf</tool-use-id>\n<output-file>${outputFile}</output-file>\n<status>completed</status>\n<result>${full.slice(0, 8179)}... (truncated ${full.length - 8179} chars, full result in ${outputFile})</result>\n</task-notification>` } }),
+    L({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "toolu_p1", input: { command: `jq -c '.result' ${outputFile} | head -c 30000` } }] } }),
+    L({ type: "user", message: { content: [{ tool_use_id: "toolu_p1", type: "tool_result", content: full.slice(0, 30000) }] } }),
+  ].join("\n") + "\n");
+  writeFileSync(join(root, ".factory/out/agents.jsonl"), L({ event: "SubagentStop", agent_type: "builder", session_id: "sess-main", transcript_path: transcriptPath }) + "\n");
+  const maxTurns = { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 23, result: "waiting", session_id: "sess-main" };
+
+  // build the deps BEFORE charterReady, as main() does; then load ctx and charter
+  const given = [];
+  const recordingMake = (opts) => { given.push(opts); return makeVerifyStageDep(opts); };
+  let qaCalls = 0;
+  const w = wire(root, "implement", recordingMake, handoffHeadShaForRun, () => { qaCalls++; return null; });
+  const ctx = { roster: [], orchestration: "workflow", rounds: undefined };
+  const charter = { never_automate: ["docs/factory/CHARTER.md"] };
+  w.charterReady(ctx, charter);
+
+  // the drift guard's closure reads the head_sha from the runner's file …
+  expect(w.deps.handoffHeadSha(maxTurns)).toBe(sha);
+  // … and the verify closure recovers the same handoff and writes it as implement.json
+  const v = w.deps.verifyStage({ out: maxTurns, gates: { status: "GREEN", level: "full" } });
+  expect(v.reasons).toEqual([]);
+  expect(v.ok).toBe(true);
+  expect(v.data.head_sha).toBe(sha);
+  expect(v.source).toContain(outputFile);
+  expect(JSON.parse(readFileSync(join(root, ".factory/out/implement.json"), "utf8")).verifier.notes).toBe(impl.verifier.notes);
+  // the getters main() hands over resolve at CALL time to the very objects charterReady loaded
+  expect(given).toHaveLength(1);
+  expect(given[0].stage).toBe("implement");
+  expect(given[0].root).toBe(root);
+  expect(given[0].getCtx()).toBe(ctx);
+  expect(given[0].getCharter()).toBe(charter);
+  expect(qaCalls).toBe(0);                                                   // the qa manifest is a review-stage read
+  // main() gives neither closure a reader of its own: the production readFileOrNull default is what ran above
+  expect("readFile" in given[0]).toBe(false);
+
+  // the same expressions in a review-stage scope: no head_sha to guard, and the qa manifest getter is consulted
+  const wr = wire(root, "review", recordingMake, handoffHeadShaForRun, () => { qaCalls++; return null; });
+  wr.charterReady({ roster: [], orchestration: "workflow" }, charter);
+  expect(wr.deps.handoffHeadSha(maxTurns)).toBe(null);
+  expect(wr.deps.verifyStage({ out: maxTurns, gates: { status: "GREEN", level: "full" } }).ok).toBe(false);   // an implement.v1 is not a review
+  expect(qaCalls).toBe(1);
+});
