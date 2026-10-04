@@ -1240,3 +1240,44 @@ test("test_208_evidence_reads_the_record_the_writer_wrote", async () => {
   expect(sectionOf(none.body, "Review")).toBeNull();
   expect(none.body).not.toMatch(/lifetime cost/);
 });
+
+// ── #208 skeptic (dw2) — "with a link to the commit that fixed it": a short sha inside a code span is not a link (GitHub does
+// not autolink inside backticks). Given the repo, a fixed must_fix row carries a real commit URL built from the FULL sha the
+// rework response named; an unanswered or disputed row carries none. A repo string that is not `owner/name` gives no link
+// (it would otherwise be spliced into a markdown link target). The dep publishes the link with the repo main() hands it.
+test("test_208_fixed_must_fix_renders_a_commit_link", async () => {
+  const URL_ = `https://github.com/acme/app/commit/${FIX_SHA}`;
+  const base = { recordText: recordText(), gates: null, pr: 31, now: NOW, ...inputs() };
+  const linked = buildEvidence({ ...base, repo: "acme/app" });
+  const rows = rowsOf(sectionOf(linked.markdown, "Must fix"));
+  expect(rows.find((r) => r.startsWith("| cf1 |"))).toBe(`| cf1 | 1 · correctness | fixed in \`abc1234\` ([commit](${URL_})) | claim |`);
+  expect(rows.find((r) => r.startsWith("| cf2 |"))).toBe("| cf2 | 1 · correctness | unanswered | claim |");
+  expect(rows.find((r) => r.startsWith("| arch1 |"))).toBe("| arch1 | 1 · architect | disputed | claim |");
+  expect(linked.markdown.split("/commit/").length - 1).toBe(1);
+  expect(linked.data.must_fix.find((m) => m.id === "cf1").commit_url).toBe(URL_);
+  // An upper-case sha in the response is the same commit: the URL uses its lower-case full form.
+  const upper = buildEvidence({ ...base, ...inputs({ responses: [{ id: "cf1", status: "fixed", commit: FIX_SHA.toUpperCase() }] }), repo: "acme/app" });
+  expect(upper.markdown).toContain(`([commit](${URL_}))`);
+  // Not an owner/name repo → no link target is built from it (no markdown injection), the row stays the plain sha.
+  for (const repo of ["acme/app) [x](https://evil", "acme", "../x/y", "acme/app/extra", ""]) {
+    const r = buildEvidence({ ...base, repo });
+    expect(r.markdown, repo).not.toContain("/commit/");
+    expect(rowsOf(sectionOf(r.markdown, "Must fix")).find((x) => x.startsWith("| cf1 |")), repo).toBe("| cf1 | 1 · correctness | fixed in `abc1234` | claim |");
+  }
+  // Through the dep main() wires: the repo it is given reaches the PR body as the commit link.
+  let body = "Closes #184\n";
+  const gh = {
+    comments: vi.fn(async (n) => (n === ISSUE ? commentsFixture() : inputs().prComments)),
+    prBody: vi.fn(async () => body),
+    editPrBody: vi.fn(async (_n, b) => { body = b; }),
+  };
+  await makePrEvidenceDeps({ gh, issue: ISSUE, repo: "acme/app", readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs: 1000 })
+    .publishPrEvidence({ pr: 31, route: "merge", gates: null });
+  expect(body).toContain(`| cf1 | 1 · correctness | fixed in \`abc1234\` ([commit](${URL_})) | claim |`);
+  // main() passes no repo of its own: the dep takes the one its gh client targets — the real client says which repo that is.
+  expect(makeGh({ run: makeFakeRun([]), repo: "acme/app" }).repo).toBe("acme/app");
+  body = "Closes #184\n";
+  await makePrEvidenceDeps({ gh: { ...gh, repo: "acme/app" }, issue: ISSUE, readRecord: () => recordText(), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => NOW, timeoutMs: 1000 })
+    .publishPrEvidence({ pr: 31, route: "merge", gates: null });
+  expect(body).toContain(`([commit](${URL_}))`);
+});

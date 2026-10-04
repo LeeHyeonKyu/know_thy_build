@@ -80,6 +80,8 @@ export function escapeCell(v, { max = CELL_MAX } = {}) {
 
 const GATES_LINE = /^FACTORY_GATES: /;
 const SHA = /^[0-9a-f]{7,40}$/i;
+/** #208 dw2 — an `owner/name` GitHub repo, the only shape a commit link target is built from (anything else: no link). */
+const REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/(?!\.\.?$)[A-Za-z0-9._-]+$/;
 /** Which heartbeat stage writes which record line (run-stage: review-evidence in review, self-gate-detail in implement). */
 const PRODUCER_STAGES = { review: new Set(["review"]), self_gate: new Set(["implement"]) };
 const REWORK_JSON = /```json\s*([\s\S]*?)```/g;
@@ -275,8 +277,11 @@ const list = (a) => (Array.isArray(a) && a.length ? a.join(",") : "none");
  *   gatesRerun — true when that result is the one re-run's (#157);
  *   reason     — the hand-off / refusal reason the merge stage is about to transition with, or null;
  *   pr, now    — the PR number and the current time (ISO string or ms). `now` null → no elapsed row.
+ *   repo       — `owner/name` of the PR's repository, or null. With it a fixed must_fix links its fixing commit
+ *                (`https://github.com/<repo>/commit/<sha>`, #208 dw2) — a sha inside a code span is not autolinked.
  */
-export function buildEvidence({ recordText = null, recordMissing = null, issueComments = [], prComments = [], factoryLogins = null, gates = null, gatesRerun = false, reason = null, pr = null, now = null } = {}) {
+export function buildEvidence({ recordText = null, recordMissing = null, issueComments = [], prComments = [], factoryLogins = null, gates = null, gatesRerun = false, reason = null, pr = null, now = null, repo = null } = {}) {
+  const repoName = typeof repo === "string" && REPO.test(repo) ? repo : null;
   const issueAll = Array.isArray(issueComments) ? issueComments : [];
   const logins = loginsOf(factoryLogins);
   const byFactory = (c) => logins.set.has(String(c?.author ?? "").trim().toLowerCase());
@@ -351,14 +356,18 @@ export function buildEvidence({ recordText = null, recordMissing = null, issueCo
   for (const r of reviews) {
     for (const v of r.h.data.verdicts) {
       for (const m of Array.isArray(v.must_fix) ? v.must_fix : []) {
-        let status = null, commit = null;
+        let status = null, commit = null, commitUrl = null;
         if (logins.ok) {
           const answer = answersFor.get(r).map((x) => x.responses.find((y) => y?.id === m.id)).find(Boolean);
           status = "unanswered";
-          if (answer?.status === "fixed") { status = "fixed"; commit = SHA.test(answer.commit) ? answer.commit.slice(0, 7).toLowerCase() : null; }
+          if (answer?.status === "fixed") {
+            status = "fixed";
+            commit = SHA.test(answer.commit) ? answer.commit.slice(0, 7).toLowerCase() : null;
+            commitUrl = commit && repoName ? `https://github.com/${repoName}/commit/${answer.commit.toLowerCase()}` : null;
+          }
           else if (answer?.status === "disputed") status = "disputed";
         }
-        mustFix.push({ id: String(m.id), round: r.h.data.round, role: String(v.role), claim: String(m.claim ?? ""), status, commit, source: "claim" });
+        mustFix.push({ id: String(m.id), round: r.h.data.round, role: String(v.role), claim: String(m.claim ?? ""), status, commit, commit_url: commitUrl, source: "claim" });
       }
     }
   }
@@ -442,7 +451,7 @@ export function buildEvidence({ recordText = null, recordMissing = null, issueCo
   if (mustFix.length) {
     out.push("", "### Must fix", "", "| must_fix | round · role | response | source |", "| --- | --- | --- | --- |");
     for (const m of mustFix) {
-      const resp = m.status === "fixed" ? (m.commit ? `fixed in \`${m.commit}\`` : "fixed (no commit sha)") : m.status;
+      const resp = m.status === "fixed" ? (m.commit ? `fixed in \`${m.commit}\`${m.commit_url ? ` ([commit](${m.commit_url}))` : ""}` : "fixed (no commit sha)") : m.status;
       out.push(`| ${escapeCell(m.id)} | ${m.round} · ${escapeCell(m.role)} | ${resp} | claim |`);
     }
     if (logins.ok && untimedReviews) out.push("", `_Rework responses were not matched to any review round: ${untimedReviews} review handoff${untimedReviews === 1 ? " has" : "s have"} no readable time, so the round a response follows cannot be told._`);

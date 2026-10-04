@@ -291,6 +291,8 @@ export function makeGh({ run, repo, sleep = realSleep }) {
     }
   }
   return {
+    /** #208 dw2 — the `owner/name` every call here targets; the PR evidence builds its fixing-commit links from it. */
+    repo,
     async issue(n) {
       const j = JSON.parse(await gh(["issue", "view", String(n), "-R", repo, "--json", "number,title,body,labels"]));
       return { number: j.number, title: j.title, body: j.body || "", labels: (j.labels || []).map((l) => l.name) };

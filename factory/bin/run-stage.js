@@ -2320,7 +2320,10 @@ export function withEvidenceSlot(d) {
  * merge (merge-stage calls `postEvidenceComment` then) and at most once — the runner's existing marked comment is updated in
  * place through gh.patchComment (see `postEvidenceComment`). Every gh call there is bounded and takes merge-stage's signal.
  */
-export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
+export function makePrEvidenceDeps({ gh, issue, repo = null, readRecord = null, root = null, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
+  // #208 dw2 — the repo a fixed must_fix's commit link points into: the caller's, else the one the gh client targets
+  // (gh.js client field `repo`, the same `owner/name` main() resolved for every gh call). buildEvidence validates it.
+  if (repo == null && typeof gh?.repo === "string") repo = gh.repo;
   // Without a reader of its own, the dep reads the record `appendRunRecord` writes for this issue under `root` (main() passes
   // only its checkout root). The path comes from run-record.js's `runRecordPath` — the same function the writer uses.
   if (typeof readRecord !== "function") {
@@ -2358,7 +2361,7 @@ export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, 
       });
       // #208 dw6 — no record file for this issue is said in the section (never an empty-looking one); the read created nothing.
       const recordMissing = recordText == null ? Number(issue) : null;
-      const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, recordMissing, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pr, now: now() }));
+      const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, recordMissing, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pr, now: now(), repo }));
       return await inStep("edit", async () => {
         const current = await gh.prBody(pr, { timeoutMs, signal });
         live();
