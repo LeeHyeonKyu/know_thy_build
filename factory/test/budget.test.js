@@ -45,7 +45,7 @@ test("doctor: budget.usd_per_issue unset is a WARN (lifetime cost unbounded), se
   expect(pass.detail).toContain("$60");
 });
 
-// ── #196 (ADR-035) — engine-crash 런의 비용은 상한에서 빠지고, 예산 줄에는 그대로 보인다 ─────────────────────────────
+// ── #196 (ADR-036) — engine-crash 런의 비용은 상한에서 빠지고, 예산 줄에는 그대로 보인다 ─────────────────────────────
 // 픽스처는 실제 생산자로만 만든다: 보통 런은 `usageLine` + `appendRunRecord`, 크래시 런은 **runStage 자신**이 catch에서
 // 쓴 섹션(던지기 전에 모은 usage + engine-crash 줄)이다.
 import { runStage } from "../bin/run-stage.js";
@@ -149,4 +149,44 @@ test("test_196_crash_runs_past_the_exclusion_are_named_on_the_budget_line", asyn
   const oneText = readFileSync(join(one, "docs/factory/runs/198.md"), "utf8");
   expect(lifetimeCostOf(oneText)).not.toHaveProperty("crashCountedRuns");
   expect(budgetLine(budgetCheck({ charter: { budget: { usd_per_issue: 100 } }, recordText: oneText }))).not.toMatch(/further engine crash/);
+});
+
+// ── #196 dw2 — 분할이 던지면 **시끄럽게** 남고, 그 런은 센다(조용한 면제는 없다) ─────────────────────────────────────────────
+// 픽스처는 진짜 경로다: main()과 같은 모양의 `lifetimeBudget`(진짜 budgetCheck → lifetimeCostOf)에 읽을 수 없는 기록을 준다 — 분할 안에서
+// TypeError가 난다. 그 TypeError는 예산 검사의 catch가 받는다(engine-crash가 아니다 — 그랬다면 이 런의 돈이 상한 밖으로 나갔다).
+// 런은 진행하고, 그 usage는 보통 섹션으로 기록되어 다음 검사에서 usd로 센다.
+test("test_196_budget_split_failure_is_loud_and_counts_the_run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "budget196-loud-"));
+  const unreadable = { toString() { throw new TypeError("record unreadable"); } };
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const claudeP = vi.fn(async () => ({ is_error: false, result: "{}", usage: { input_tokens: 7 }, total_cost_usd: 21, num_turns: 4, terminal_reason: "end_turn" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  try {
+    await runStage({
+      stage: "implement", issue: 199, runnerId: "gha-1", runId: "1",
+      deps: {
+        charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+        heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+        buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }), resetAgentsLog: async () => {},
+        lifetimeBudget: () => budgetCheck({ charter: { budget: { usd_per_issue: 50 } }, recordText: unreadable }),
+        claudeP, gates: async () => null,
+        verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+        transition,
+        runRecord: (lines) => appendRunRecord({ root, issue: 199, stage: "implement", runnerId: "gha-1", lines }),
+        release: async () => true,
+      },
+    });
+    expect(errors.mock.calls.map((c) => String(c[0]))).toContainEqual(expect.stringMatching(/budget: check failed — record unreadable/));   // 시끄럽다
+  } finally {
+    errors.mockRestore();
+  }
+  const text = readFileSync(join(root, "docs/factory/runs/199.md"), "utf8");
+  expect(text).toMatch(/^budget: check failed — record unreadable/m);          // 원인이 기록에
+  expect(claudeP).toHaveBeenCalledTimes(1);                                     // 런은 진행했고
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  expect(parseRunRecord(text).some((e) => e.engine_crash)).toBe(false);
+  const life = lifetimeCostOf(text);
+  expect(life).toMatchObject({ usd: 21, priced: 1 });                            // 그 돈은 상한 안에서 센다
+  expect(life).not.toHaveProperty("engineRuns");
 });

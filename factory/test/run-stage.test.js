@@ -5167,7 +5167,7 @@ test("test_179_engine_is_fixed_at_charter_ready_before_checkout", async () => {
   expect(iCheckout).toBeGreaterThan(iReady);
 });
 
-// ── #196 (ADR-035) — engine-crash는 runStage의 catch가 **프로그래밍 오류**를 잡았을 때만 생긴다 ─────────────────────
+// ── #196 (ADR-036) — engine-crash는 runStage의 catch가 **프로그래밍 오류**를 잡았을 때만 생긴다 ─────────────────────
 // 원인 등급은 코드 경로가 찍는다: transition()의 명시 `cause` 인자. 사유 문구(CAUSE_RULES)·job.status·의존성/인프라
 // Error(plain `Error`)에서는 절대 나오지 않는다. 의존성 Error는 오늘의 경로(exit 1, aborted 줄, 전이 없음)를 그대로 탄다.
 import { BLOCKED_CAUSES as BLOCKED_CAUSES_196, blockedCause as blockedCause196, blockedOrigin as blockedOrigin196 } from "../lib/retro/issue-comments.js";
@@ -5563,3 +5563,128 @@ test("test_196_agent_handoff_cannot_move_crash_cost_out_of_the_cap", async () =>
   expect(budgetCheck196({ charter: { budget: { usd_per_issue: 15 } }, recordText: rec }).ok).toBe(false);   // 넘친 크래시 비용이 상한을 다시 연다
 });
 import { budgetCheck as budgetCheck196 } from "../lib/budget.js";
+
+// ── #196 dw3 — engine-crash 블록이 **실제로 서지 않은** 크래시, 또는 hand-off(머지 포함) **뒤의** 크래시는 크래시로 보이지 않는다 ──────────
+// 그 런의 돈은 usd 안에서 세고, 크래시 줄은 없고, 누구에게도 `factory:queue`를 치라고 하지 않는다. 다섯 자리:
+//   (a) blocked(engine-crash) 전이가 거부된다 — 라벨이 이미 needs-human (진짜 transition, needs-human → blocked 엣지 없음)
+//   (b) blocked(engine-crash) 전이가 거부된다 — 라벨이 이미 blocked (진짜 transition, blocked → blocked 엣지 없음)
+//   (c) blocked(engine-crash) 전이 자체가 던진다
+//   (d) 이 런이 이미 hand-off를 했다(→ awaiting-review)
+//   (e) merge: `d.mergePr`가 끝난 뒤, → merged 전이 전에 dep이 던진다(두 모양: humanGate 게터, merged 전이 dep)
+// 대조군은 `test_196_engine_crash_cause_only_from_runstage_catch`·`test_196_crash_after_a_handoff_keeps_the_handoff` (b)다.
+const noCrashBlock196 = (rec, { usd }) => {
+  expect(parseRunRecord(rec).some((e) => e.engine_crash)).toBe(false);
+  expect(rec).not.toMatch(/^engine-crash:/m);
+  expect(rec).not.toMatch(/factory:queue/);
+  const life = lifetimeCostOf196(rec);
+  expect(life).toMatchObject({ usd });
+  expect(life).not.toHaveProperty("engineRuns");
+  expect(life).not.toHaveProperty("engineUsd");
+};
+
+test("test_196_crash_after_handoff_never_tells_owner_to_requeue", async () => {
+  const runnerId = "gha-196";
+  const paid = (cost) => async () => ({ is_error: false, result: "{}", usage: { input_tokens: 1 }, total_cost_usd: cost, num_turns: 2, terminal_reason: "end_turn" });
+
+  // (a)·(b) 진짜 transition이 blocked(engine-crash)를 거부한다 — 다른 행위자가 라벨을 먼저 옮겼다
+  for (const [label, cost] of [["factory:needs-human", 11], ["factory:blocked", 12]]) {
+    const gh = realTransitionGh();
+    const ctxCache = { roster: [], orchestration: "workflow", limits: { K: 3 }, handoffs: { plan: planHandoff } };
+    const root = crashRecordRoot196();
+    const d = implDeps({
+      claudeP: paid(cost),
+      transition: vi.fn(realTransitionDep(gh, ctxCache)),
+      gates: async () => { await gh.setFactoryLabel(42, label); const o = undefined; return o.test; },
+      runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId, runId: "196" })).toBe(1);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));   // 정말 시도했다
+    const t = await d.transition.mock.results.at(-1).value;
+    expect(t.ok).toBe(false);                                                          // 그리고 정말 거부됐다
+    expect(gh.label).toBe(label);
+    const bodies = (await gh.comments()).map((c) => c.body).join("\n");
+    expect(bodies).not.toMatch(/cause=engine-crash/);
+    expect(bodies).not.toMatch(/factory:queue/);
+    const rec = recordText196(root, 42);
+    expect(rec).toMatch(/^error: implement aborted — Cannot read properties of undefined/m);
+    expect(rec).toMatch(/^crash: the engine-crash block was refused — /m);
+    noCrashBlock196(rec, { usd: cost });
+  }
+
+  // (c) blocked(engine-crash) 전이가 던진다
+  {
+    const root = crashRecordRoot196();
+    const d = implDeps({
+      claudeP: paid(13),
+      transition: vi.fn(async ({ to }) => { if (to === "factory:blocked") throw new Error("gh label write failed"); return { ok: true, to }; }),
+      gates: async () => { const o = undefined; return o.test; },
+      runRecord: (lines) => appendRunRecord({ root, issue: 42, stage: "implement", runnerId, lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 42, deps: d, runnerId, runId: "196" })).toBe(1);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "engine-crash" }));
+    const rec = recordText196(root, 42);
+    expect(rec).toMatch(/^crash: the engine-crash block failed — gh label write failed/m);
+    noCrashBlock196(rec, { usd: 13 });
+  }
+
+  // (d) 이 런이 이미 hand-off를 했다 — engine-crash 전이를 시도조차 하지 않는다
+  {
+    const root = crashRecordRoot196();
+    const handoff = JSON.stringify({ schema: "factory.implement.v1", issue: 7, head_sha: "a".repeat(40), pr: 9, gates: { status: "GREEN", level: "full" }, verifier: { verdict: "accepted" }, orchestration: "workflow", guarantee: "verified" });
+    const gates = { schema: "factory.gates.v1", level: "full", status: "GREEN", head_sha: "a".repeat(40), passed: 1, failed: 0, skipped: [], misconfigured: [], tests: { excluded: [] } };
+    const d = implDeps({
+      claudeP: async () => ({ is_error: false, result: handoff, usage: { input_tokens: 1 }, total_cost_usd: 14, num_turns: 2, terminal_reason: "end_turn" }),
+      gates: async () => gates,
+      transition: vi.fn(async ({ to }) => (to === "factory:awaiting-review" ? { ok: true, get to() { const o = undefined; return o.to; } } : { ok: true, to })),
+      runRecord: (lines) => appendRunRecord({ root, issue: 7, stage: "implement", runnerId, lines }),
+    });
+    expect(await runStage({ stage: "implement", issue: 7, deps: d, runnerId, runId: "196" })).toBe(1);
+    expect(d.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:awaiting-review" }));
+    expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+    noCrashBlock196(recordText196(root, 7), { usd: 14 });
+  }
+
+  // (e) merge — PR이 이미 머지됐다. 그 뒤의 크래시는 이슈를 blocked(engine-crash)로 옮기지 않는다(재큐하면 main의 코드로 파이프라인을 처음부터 돈다)
+  const mergeCase = (over) => {
+    const lines = [];
+    const order = [];
+    const d = baseDeps({
+      resetGates: async () => {}, runRecord: (l) => lines.push(...l),
+      defaultBranch: "main",
+      prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+      gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
+      mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+      protectedPaths: async () => ({ ok: true, files: [] }),
+      policyViolations: async () => ({ ok: true, files: [] }),
+      ...mergeReviewDepsFor("a".repeat(40)),
+      mergePr: vi.fn(async () => { order.push("mergePr"); }), closeIssue: async () => {},
+    });
+    Object.defineProperties(d, Object.getOwnPropertyDescriptors(over(order)));   // 게터는 게터 그대로(펼치면 값으로 굳는다)
+    return { d, lines, order };
+  };
+  const shapes = {
+    humanGate: (order) => ({
+      transition: vi.fn(async ({ to }) => { order.push(to); return { ok: true, to }; }),
+      get humanGate() { if (order.includes("mergePr")) { const o = undefined; return o.gate; } return undefined; },
+    }),
+    mergedTransition: (order) => ({
+      transition: vi.fn(async ({ to }) => { order.push(to); if (to === "factory:merged") { const o = undefined; return o.ok; } return { ok: true, to }; }),
+    }),
+  };
+  for (const [name, over] of Object.entries(shapes)) {
+    // 대조: 같은 배선이 던지지 않으면 merged까지 간다(픽스처가 정말 머지 경로를 탄다)
+    const ok = mergeCase((order) => ({ transition: vi.fn(async ({ to }) => { order.push(to); return { ok: true, to }; }) }));
+    expect(await runStage({ stage: "merge", issue: 7, deps: ok.d, runnerId: "r" }), name).toBe(0);
+    expect(ok.order, name).toEqual(["mergePr", "factory:merged"]);
+
+    const { d, lines, order } = mergeCase(over);
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" }), name).toBe(1);
+    expect(d.mergePr, name).toHaveBeenCalledTimes(1);
+    expect(order[0], name).toBe("mergePr");
+    expect(order, name).not.toContain("factory:blocked");
+    expect(d.transition, name).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "engine-crash" }));
+    expect(lines.some((l) => /^engine-crash:/m.test(l)), name).toBe(false);
+    expect(lines.join("\n"), name).not.toMatch(/factory:queue/);
+    expect(lines.some((l) => /^crash: after the hand-off to the merge of PR/.test(l)), name).toBe(true);
+  }
+});

@@ -185,7 +185,7 @@ export function usageLine(out, progress = null) {
 }
 
 /**
- * #196 (ADR-035) — **엔진 크래시의 닫힌 목록.** `runStage`의 catch가 잡은 예외 중 **엔진 코드가 던진** `TypeError`·`ReferenceError`·
+ * #196 (ADR-036) — **엔진 크래시의 닫힌 목록.** `runStage`의 catch가 잡은 예외 중 **엔진 코드가 던진** `TypeError`·`ReferenceError`·
  * `RangeError`만 "엔진의 프로그래밍 오류"로 본다(2026-10-03의 `Cannot read properties of undefined (reading 'test')`가 TypeError였다).
  * 들지 않는 것:
  *   - 의존성·인프라가 던지는 plain `Error`(`gh exploded`, EACCES, SIGKILL된 워커).
@@ -194,7 +194,7 @@ export function usageLine(out, progress = null) {
  *     그것은 엔진 결함이 아니라 의존성 장애이고, `resolveRepo`가 같은 SyntaxError를 plain Error로 다시 싸는 것과 같은 판단이다.
  *   - `SyntaxError` 전부 — 런타임의 SyntaxError는 엔진 코드가 아니라 **데이터**(gh 출력·에이전트 산출물·설정 정규식)의 실패다.
  * 판정은 오류의 **종류와 출처**이지 메시지 문구가 아니다(문구는 누구나 흉내 낸다). plain Error를 던지는 엔진 버그는 들지 않는다 —
- * 모르면 오늘의 경로(exit 1, 전이 없음)로 간다(ADR-035).
+ * 모르면 오늘의 경로(exit 1, 전이 없음)로 간다(ADR-036).
  */
 export const ENGINE_CRASH_ERRORS = [TypeError, ReferenceError, RangeError];
 const DEPENDENCY_ERROR = Symbol.for("factory.dependency-error");
@@ -248,7 +248,22 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       return t;
     }
     : deps.transition;
-  const d = new Proxy(deps, { get: (target, key) => (key === "transition" ? trackedTransition : Reflect.get(target, key)) });
+  /**
+   * #196 dw3 — merge의 hand-off는 전이가 아니라 `mergePr`다: 그것이 끝난 순간 PR은 main에 있고 되돌릴 수 없다. 그 뒤(→ merged 전이 전)의
+   * 크래시가 이슈를 blocked(engine-crash)로 옮기면 sweeper가 이미 머지된 PR로 merge를 다시 밀고, 에스컬레이션이 사람에게
+   * `factory:queue`를 치라고 한다 — main의 코드로 파이프라인을 처음부터 다시 돈다. 그래서 `mergePr`가 끝나면 그것을 hand-off로 센다.
+   * merge-stage.js는 건드리지 않는다: 이 Proxy가 프로덕션 deps(`makeMergeSelfChangeDeps`의 mergePr 포함)와 테스트 deps를 똑같이 감싼다.
+   */
+  const trackedMergePr = typeof deps.mergePr === "function"
+    ? async (pr, ...rest) => {
+      const r = await deps.mergePr(pr, ...rest);
+      handedOffTo = `the merge of PR #${pr} (mergePr returned)`;
+      return r;
+    }
+    : deps.mergePr;
+  const d = new Proxy(deps, {
+    get: (target, key) => (key === "transition" ? trackedTransition : key === "mergePr" ? trackedMergePr : Reflect.get(target, key)),
+  });
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
   const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
@@ -304,6 +319,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
     } catch (e) {
       // 예산을 못 읽은 것은 흐름 제어의 고장이지 안전 게이트가 아니다 — 흔적을 남기고 진행한다.
+      // #196 dw2 — 그 흔적은 **시끄럽다**(잡 로그에도): engine-crash 분할의 버그가 조용히 새지 않게. 이 런은 보통 섹션으로 기록되어 센다.
+      console.error(`factory: budget: check failed — ${e?.message || e}`);
       record([`budget: check failed — ${e?.message || e}`]);
     }
   }
@@ -1454,24 +1471,38 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       return 1;
     }
     /**
-     * #196 (ADR-035) — **엔진 크래시는 이 자리가 유일한 생산자다.** 이 런은 락을 쥐고 있다(claim 뒤의 try). 이슈를 `factory:blocked`으로
+     * #196 (ADR-036) — **엔진 크래시는 이 자리가 유일한 생산자다.** 이 런은 락을 쥐고 있다(claim 뒤의 try). 이슈를 `factory:blocked`으로
      * 옮기며 원인을 transition()의 명시 `cause`로 찍는다 — 사유 문구에서 되짚지 않는다(`CAUSE_RULES`에는 이 등급이 없다). 그러면
      * 이 런은 하트비트 재큐(R, `factory-retry`)를 타지 않고 sweeper의 blocked 팔이 `ENGINE_CRASH_MAX_RETRIES`까지만 다시 민다.
      * 같은 섹션에 러너가 쓴 engine-crash 줄과 던지기 전에 모은 usage를 남긴다 — `lib/budget.js`가 그 돈을 상한에서 빼 따로 보인다.
-     * 전이가 거부되거나 던져도 기록은 남고 exit 1이다(라벨이 in-flight에 남으면 오늘의 경로가 받는다).
+     * dw3 — **크래시 줄은 블록이 실제로 섰을 때만 쓴다.** 전이가 거부되거나(라벨이 이미 needs-human·blocked) 던지면 engine-crash 블록은
+     * 없다: 그때 크래시 줄을 쓰면 블록 없이 돈만 상한에서 빠진다. 그래서 그 경우는 오늘의 경로(크래시 줄 없음, usage는 상한 안으로,
+     * exit 1)이고, 왜 블록이 없는지를 `crash:` 줄 하나로 남긴다. 그래서 전이를 **먼저** 하고 기록을 그 결과로 고른다.
      */
     const name = e?.name || e?.constructor?.name || "Error";
     // 첫 두 줄의 모양과 순서가 곧 계약이다(`lib/usage.js` ②): `error:` 줄은 메시지를 한 줄로 접어 둘째 줄이 크래시 줄이 되게 한다.
-    crashLine = engineCrashLine({ stage, runnerId, runId, error: e });
-    const lines = [`error: ${stage} aborted — ${String(e?.message || e).replace(/\s+/g, " ").trim()}`, crashLine];
-    if (usage && !usageRecorded) lines.push(usage);
+    const errorLine = `error: ${stage} aborted — ${String(e?.message || e).replace(/\s+/g, " ").trim()}`;
+    const unrecorded = usage && !usageRecorded ? [usage] : [];
+    let t = null;
+    let thrown = null;
     try {
-      const t = await d.transition({ to: "factory:blocked", reason: `engine crash — ${stage} threw ${name}: ${truncateReason(e?.message || e)}`, cause: "engine-crash" });
-      lines.push(...(t?.ok ? [`transition: ${t.to ?? "factory:blocked"} (cause=engine-crash)`] : refusal(t ?? { ok: false, reason: "no result" })));
+      t = await d.transition({ to: "factory:blocked", reason: `engine crash — ${stage} threw ${name}: ${truncateReason(e?.message || e)}`, cause: "engine-crash" });
     } catch (te) {
-      lines.push(`transition failed: → factory:blocked (cause=engine-crash) — ${truncateReason(te?.message || te)}`);
+      thrown = te ?? new Error("transition threw");
     }
-    record(lines);
+    if (!thrown && t?.ok === true) {
+      crashLine = engineCrashLine({ stage, runnerId, runId, error: e });
+      record([errorLine, crashLine, ...unrecorded, `transition: ${t.to ?? "factory:blocked"} (cause=engine-crash)`]);
+      return 1;
+    }
+    record([
+      errorLine,
+      thrown
+        ? `crash: the engine-crash block failed — ${truncateReason(thrown?.message || thrown)} — no transition; this run counts in the cap`
+        : `crash: the engine-crash block was refused — ${truncateReason(t?.reason || "no result")} — this run counts in the cap`,
+      ...unrecorded,
+      ...(thrown ? [`transition failed: → factory:blocked (cause=engine-crash) — ${truncateReason(thrown?.message || thrown)}`] : refusal(t ?? { ok: false, reason: "no result" })),
+    ]);
     return 1;
   } finally {
     hb?.stop();
