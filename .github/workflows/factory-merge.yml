@@ -43,7 +43,10 @@ jobs:
     # 환경이 없거나 이 플랜이 지원하지 않으면 이 줄은 아무 것도 깨뜨리지 않는다 — 환경이 자동 생성되고
     # 시크릿은 저장소 레벨에서 해석된다(그때의 위험은 bootstrap의 note와 doctor가 말한다).
     environment: factory-merge
-    timeout-minutes: 30
+    # #179 (ADR-033) — 거부권 창(CHARTER `self_change.veto_minutes`, 기본 60)을 **잡 안에서** 기다린다. 30분이던 잡은 창을 시작도
+    # 못 하고 blocked이 된다(merge-stage는 "남은 시간 < 창 + 게이트 재실행 + 2분"이면 창을 열지 않는다). 아래 env의
+    # `FACTORY_JOB_TIMEOUT_MINUTES`가 이 값을 그대로 run-stage에 전한다 — 둘은 같이 바뀌어야 한다.
+    timeout-minutes: 90
     steps:
       # 외부 감사 2026-09-14 M7 — **두 배우 모드는 조용히 강등되지 않는다.** 아래 `Run stage`의
       # `GH_TOKEN`은 `secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN`이다. 그 폴백은 단일
@@ -70,6 +73,11 @@ jobs:
             exit 1
           fi
           echo "factory: merge-token check ok (two-actor declared: ${TWO_ACTOR_DECLARED:-unset}, merge token present: $MERGE_TOKEN_PRESENT)"
+      # 거부권 창의 시계: 이 잡이 쓴 시간(FACTORY_JOB_STARTED, 다른 스테이지와 같은 값)과 잡의 한도를 run-stage가 읽는다.
+      - name: Mark the job start
+        run: |
+          echo "FACTORY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          echo "FACTORY_JOB_TIMEOUT_MINUTES=90" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
