@@ -19,7 +19,7 @@ const HEADER_RE = /^## (triage|plan|implement|review|merge|retro|sweep) · (.+?)
 const USAGE_RE = /^usage: (\{.*\}) cost_usd: (\S+) num_turns: (\S+) terminal_reason: (\S+) models: (.*)$/;
 
 /**
- * #196 (ADR-035) — **engine-crash 줄.** `runStage`의 catch가 프로그래밍 오류(TypeError 등)를 잡았을 때만 러너가 쓴다
+ * #196 (ADR-036) — **engine-crash 줄.** `runStage`의 catch가 프로그래밍 오류(TypeError 등)를 잡았을 때만 러너가 쓴다
  * (`bin/run-stage.js`) — 그 섹션은 이 런이 던지기 전에 모은 `usage:` 줄을 함께 싣고, `lib/budget.js`가 그 비용을 평생 상한에서
  * 빼 따로 보고한다. 생성자와 정규식이 이 파일 한 곳에 있는 이유는 `usageLine`/`USAGE_RE`와 같다: 쓰는 쪽과 읽는 쪽이 어긋나면
  * 테스트가 전부 초록인 채로 아무것도 세지 않는다.
@@ -28,7 +28,7 @@ const USAGE_RE = /^usage: (\{.*\}) cost_usd: (\S+) num_turns: (\S+) terminal_rea
  * 섹션은 보통 런으로 센다 — 모르는 것은 세는 쪽으로 기운다(엔진 런을 세면 사람이 조금 일찍 볼 뿐이고, 보통 런을 빼면 상한이 샌다).
  * 메시지는 한 줄로 접는다(개행이 들어간 오류 문구가 다음 줄을 흉내 내지 못하게).
  *
- * **위조 방어는 겹으로 건다**(①·①'·② — ADR-035 2. skeptic sc2 — 러너는 게이트 사유·의존성 오류 메시지처럼 남이 만든 문구를 기록에 옮겨 적고, 그 문구의
+ * **위조 방어는 겹으로 건다**(①·①'·② — ADR-036 2. skeptic sc2 — 러너는 게이트 사유·의존성 오류 메시지처럼 남이 만든 문구를 기록에 옮겨 적고, 그 문구의
  * 개행은 기록에서 제 줄이 된다):
  *   ① 쓰는 쪽 — `runStage`의 `record()`는 진짜 크래시 줄이 아닌 모든 줄에서 줄머리의 `engine-crash:`를 `quoteEngineCrashLines`로
  *      인용 표시한다(문구는 감사용으로 남고, 크래시 줄로는 읽히지 않는다).

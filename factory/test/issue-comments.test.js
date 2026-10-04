@@ -232,7 +232,7 @@ test("test_174_where_directories_and_prose_never_widen_the_brief", () => {
 
 // ── #196 self-critique f1 — 닫힌 원인 목록 옆의 engine-crash 설명이 "어느 throw가 드는가"에 코드와 같은 답을 한다 ─────────────
 // 그 주석은 BLOCKED_CAUSES를 읽는 사람이 가장 먼저 보는 정의다. 코드의 닫힌 목록(ENGINE_CRASH_ERRORS)과 어긋나면 — 예: SyntaxError를
-// 들면 — 그것을 믿은 사람이 ADR-035 (c)가 일부러 뺀 종류를 되돌린다.
+// 들면 — 그것을 믿은 사람이 ADR-036 (c)가 일부러 뺀 종류를 되돌린다.
 import { ENGINE_CRASH_ERRORS as ENGINE_CRASH_ERRORS_196 } from "../bin/run-stage.js";
 import { readFileSync as readFileSync196 } from "node:fs";
 

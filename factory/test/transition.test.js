@@ -653,7 +653,7 @@ test("test_156_release_principal_is_accepted_and_human_flag_untouched", async ()
   expect(principalFromEnv({ GITHUB_ACTIONS: "true", GITHUB_RUN_ID: "9" }, "bot")).toBe("factory:run-9");
 });
 
-// ── #196 (ADR-035) — "다시 돌려"는 호출자마다 명령 하나다: 에이전트·CI는 재큐, 사람은 중단 지점 재개 ─────────────────
+// ── #196 (ADR-036) — "다시 돌려"는 호출자마다 명령 하나다: 에이전트·CI는 재큐, 사람은 중단 지점 재개 ─────────────────
 // `--retry`의 동작은 바뀌지 않는다(KTB-32). 바뀌는 것은 거절·안내가 **정확한 명령**을 말한다는 것뿐이다.
 import { spawnSync as spawnSync196 } from "node:child_process";
 import { join as join196 } from "node:path";
@@ -699,6 +699,44 @@ test("test_196_retry_guidance_names_single_verb", async () => {
   const steps = readFileSync(join196(REPO_196, "docs/factory/ops/person-steps.sh"), "utf8");
   expect(steps).toContain(REQUEUE("<n>"));
   expect(steps).toContain(RESUME("<n>"));
+
+  // ⑦ ADR-036 — §4를 번호가 아니라 제목과 줄로 인용하고, 그 인용이 **참이다**(인용한 커밋의 그 줄이 그 제목·그 항목이다),
+  //    §4와 다른 점·미룬 것·남는 것을 빠짐없이 적고 후속 이슈 번호를 단다. 번호는 하나뿐이다(ADR-035는 #189의 것).
+  const decisions = readFileSync(join196(REPO_196, "docs/factory/DECISIONS.md"), "utf8");
+  const headings = decisions.split("\n").filter((l) => /^## ADR-03[56] /.test(l));
+  expect(headings.filter((l) => l.startsWith("## ADR-035 "))).toEqual([expect.stringContaining("(#189)")]);
+  expect(headings.filter((l) => l.startsWith("## ADR-036 "))).toEqual([expect.stringContaining("(#196)")]);
+  const from = decisions.indexOf("\n## ADR-036 ");
+  const next = decisions.indexOf("\n## ADR-", from + 1);
+  const adr = decisions.slice(from, next === -1 ? undefined : next);
+  const CITED = "d6648d4";
+  expect(adr).toContain(`ADR-034 "두 레인" §4 (\`docs/factory/DECISIONS.md:4303\`/\`:4314\`, main ${CITED})`);
+  const atCited = spawnSync196("git", ["show", `${CITED}:docs/factory/DECISIONS.md`], { cwd: REPO_196, encoding: "utf8", maxBuffer: 64 << 20 });
+  expect(atCited.status).toBe(0);
+  const citedLines = atCited.stdout.split("\n");
+  expect(citedLines[4303 - 1]).toMatch(/^## ADR-034 두 레인 /);
+  expect(citedLines[4314 - 1]).toMatch(/^4\. \*\*"다시 돌려"는 하나\(`factory retry <n>`\)\*\*/);
+  expect(adr).not.toMatch(/§4"?는 존재하지 않는다|어느 절도 가리키지 않는다/);       // 지난 판의 거짓 주장은 사라졌다
+  // §4에서 벗어난 것 — 넷 다 "departure"로 적혀 있다
+  const departures = adr.slice(adr.indexOf("**§4와 다른 점"), adr.indexOf("**미룬 것"));
+  for (const d of [/생산자는 `abortStage`가 아니라 `runStage`의 catch/, /K 면제는 없다/, /`factory retry <n>` 동사는 없다/, /미러 판정 불가.*환경.*빼지 않는다/]) expect(departures).toMatch(d);
+  // 미룬 것과 그 후속 이슈 — 단일 동사, 미러 판정 불가·환경 제외(트리 진실·:proposal), 중복 ADR-034 제목
+  const deferred = adr.slice(adr.indexOf("**미룬 것"), adr.indexOf("**남는 것"));
+  expect(deferred).toMatch(/단일 동사.*#209/s);
+  expect(deferred).toMatch(/미러 판정 불가·환경.*#210/s);
+  expect(deferred).toMatch(/중복 ADR-034.*#211/s);
+  // 환급되지 않는 돈과 그 처방, 위조 마커의 노출과 그것을 묶는 두 상수, 되돌리기의 잔여
+  expect(adr).toMatch(/#149.*#157.*#170.*환급되지 않는다/s);
+  expect(adr).toMatch(/tree-truth/);
+  expect(adr).toMatch(/`:proposal`/);
+  expect(adr).toMatch(/위조.*`ENGINE_CRASH_MAX_RETRIES`.*`ENGINE_CRASH_EXCLUDED_RUNS`/s);
+  expect(adr).toMatch(/이슈당 한 번 더/);
+  // 코드의 #196 인용은 모두 ADR-036이다(ADR-035는 #189의 번호다)
+  for (const f of ["factory/bin/run-stage.js", "factory/bin/transition.js", "factory/lib/transition.js", "factory/lib/sweeper.js", "factory/lib/budget.js", "factory/lib/usage.js", "factory/lib/retro/issue-comments.js", "docs/factory/ops/person-steps.sh"]) {
+    const src = readFileSync(join196(REPO_196, f), "utf8");
+    expect(src.split("\n").filter((l) => /#196/.test(l) && /ADR-035/.test(l)), f).toEqual([]);
+    expect(src, f).toMatch(/ADR-036/);
+  }
 });
 
 // ── #196 self-critique f2 — 라이브러리 경로의 거절도 **이 이슈 번호로** 명령을 든다(템플릿 `<n>`이 아니라) ─────────────────────

@@ -39,7 +39,7 @@ const USAGE = [
   "            출발 라벨(awaiting-review면 review만 다시 돈다). 라벨을 명시해도 같은 검사를 지난다:",
   "            중단 지점이 아닌 자리로는 전이하지 않는다(exit 2, 라벨 불변).",
   "",
-  "  다시 돌리기(#196, ADR-035) — 호출자마다 명령 하나:",
+  "  다시 돌리기(#196, ADR-036) — 호출자마다 명령 하나:",
   "    에이전트 세션·CI·누구나:  node .factory/bin/transition.js <n> factory:queue        (재큐 — 처음부터 다시)",
   "    사람의 셸만:              node .factory/bin/transition.js <n> --human --retry    (중단 지점 재개)",
 ].join("\n");

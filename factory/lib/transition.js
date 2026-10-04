@@ -5,10 +5,10 @@ import { blockedCause, blockedOriginMarker, engineVersionMarker, lastHumanDecisi
 export const NEEDS_HUMAN = "factory:needs-human";
 export const NEEDS_INFO = "factory:needs-info";
 /**
- * #196 (ADR-035) — **"다시 돌려"는 호출자마다 명령 하나다.** 거절·안내는 언제나 그 두 명령을 그대로 말한다: 에이전트 세션·CI는
+ * #196 (ADR-036) — **"다시 돌려"는 호출자마다 명령 하나다.** 거절·안내는 언제나 그 두 명령을 그대로 말한다: 에이전트 세션·CI는
  * 재큐(그래프의 보통 엣지 `needs-human → queue`, 플래그 없음), 사람은 중단 지점 재개(`--human --retry`, KTB-32). `--retry`의
  * 동작 자체는 바뀌지 않는다 — 호출자에 따라 갈리는 `--retry`는 훅(`block-dangerous.sh`)이 에이전트 세션에서 그 동사를 막는 한
- * 쓸 수 없는 경로라 미뤘다(ADR-035). `n`을 모르면 `<n>`으로 둔다.
+ * 쓸 수 없는 경로라 미뤘다(ADR-036). `n`을 모르면 `<n>`으로 둔다.
  */
 export const requeueCommand = (n = "<n>") => `node .factory/bin/transition.js ${n} factory:queue`;
 export const resumeCommand = (n = "<n>") => `node .factory/bin/transition.js ${n} --human --retry`;

@@ -12,7 +12,7 @@ import { parseRunRecord } from "./usage.js";
  * (`:proposal`), 쪼개든, `wont-do`로 닫든 사람의 결정이다. 값이 없으면 검사하지 않는다(doctor가 `charter.budget-per-issue-unset`
  * WARN으로 그 침묵을 말한다 — `merge.human_gate`와 같은 규칙: 기본값을 채우지 않는다, 없는 것과 고른 것은 다른 사실이다).
  *
- * #196 (ADR-035) — **엔진 크래시 런은 상한에서 빠지고, 따로 보인다.** `runStage`의 catch가 프로그래밍 오류를 잡은 런의 섹션
+ * #196 (ADR-036) — **엔진 크래시 런은 상한에서 빠지고, 따로 보인다.** `runStage`의 catch가 프로그래밍 오류를 잡은 런의 섹션
  * (`engine_crash`, `lib/usage.js`의 `engineCrashLine` — 러너만 쓴다)은 `usd`·`runs`에 넣지 않고 `engineUsd`·`engineRuns`로 돌려준다.
  * 그 두 키는 크래시 섹션이 **하나라도 있을 때만** 선다 — 크래시 줄이 없는 기록은 값도 모양도 오늘과 같다(1.4.16 계약의 옛 고정이
  * 그대로 본다). 읽는 쪽은 `?? 0`으로 읽는다. 완료됐지만 엔진 결함으로 판정이 틀린 런(미러 verify·#174 라운드)은 빠지지 않는다 —

@@ -4318,17 +4318,17 @@ push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단�
 7. **측정에 기준선.** 주간 표에 같은 종류 이슈의 상호작용 레인 vs 다크 레인(시간·비용·리뷰가 잡은 결함 수)을 나란히 둔다.
 연기: 판정 로직의 `tree-truth` 통합(12개 결함이 한 뿌리라는 가정은 과장 — 1.4.43·#172·#187은 다른 과).
 
-## ADR-035 엔진 크래시는 이슈의 R·예산을 먹지 않는다 — 생산자는 runStage의 catch 하나, 상한은 sweeper에 — 2026-10-03 (#196)
+## ADR-036 엔진 크래시는 이슈의 R·예산을 먹지 않는다 — 생산자는 runStage의 catch 하나, 상한은 sweeper에 — 2026-10-04 (#196)
 
 **질문**: 엔진 결함으로 죽은 런이 이슈의 재시도 예산(R)과 평생 예산(ADR-031, 1.4.16)을 먹는 것을 어떻게 멈추되, 게이밍과 무한 루프를 열지 않는가.
 그리고 "다시 돌려"를 사람·에이전트가 각각 무엇으로 치는가.
 
-**출처**: **이슈 #196이 인용한 "ADR-034 §4"는 존재하지 않는다.** plan 토론(#196, 네 역할 2라운드) 당시 main에는 ADR-034가 하나(#157 merge
-재실행)뿐이었고 그 ADR에 §4는 없다 — plan 계약은 이 사실을 여기 적으라고 했다. 이 ADR의 근거는 그 인용이 아니라 plan 토론의 결론이다.
-기록 삼아 덧붙이면: 이 PR이 열린 뒤 #194가 **같은 번호의 두 번째** ADR-034("두 레인")를 main에 넣었고, 그 4번 항목(`factory retry <n>` 하나와
-"`abortStage`가 자기 코드에서 찍는 닫힌 집합")이 이슈 초안과 같은 생각을 담고 있다. 그래도 "§4"라는 주소는 여전히 어느 절도 가리키지 않는다
-(두 ADR-034 모두 절 번호가 없고, 번호 하나에 제목이 둘이다 — 이 ADR은 그 충돌을 고치지 않고 적어 둔다). 아래 "좁힌 것"은 이슈 초안과
-그 4번 항목 둘 다에 대한 차이다.
+**출처**: ADR-034 "두 레인" §4 (`docs/factory/DECISIONS.md:4303`/`:4314`, main d6648d4) — "**\"다시 돌려\"는 하나(`factory retry <n>`)**, 그리고
+**엔진 결함으로 죽은 런은 K·R·평생 예산에 세지 않는다** — `abortStage`가 자기 코드에서 찍는 닫힌 집합(미러 판정 불가·크래시·환경)만". 번호만으로
+인용하지 않는다: `ADR-034`라는 제목은 이 파일에 둘이다(:4067 #157 merge 재실행, :4303 두 레인 — 고치는 것은 #211). 이 ADR은 그 §4의 **크래시**
+부분을 짓고, 아래 "§4와 다른 점"이 어디서 벗어났는지, "미룬 것"이 무엇을 어느 이슈로 넘겼는지 적는다. 번호는 036이다 — 이 PR이 처음 쓴 035는
+그사이 #189의 회로차단기(:4150)가 가져갔다. 이슈 #196의 Why(3일 집계, `docs/research/factory-friction-2026-10.md`)와 plan 토론(네 역할 3라운드)이
+나머지 근거다.
 
 **결정**
 1. **원인 등급 `engine-crash`, 생산자는 하나.** `runStage`(`bin/run-stage.js`)의 catch가 잡은 예외가 **엔진 코드가 던진** `TypeError`·
@@ -4390,14 +4390,36 @@ push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단�
    `docs/factory/ops/person-steps.sh`가 모두 두 명령을 그대로 말한다는 것이다: 에이전트·CI는 재큐(`<n> factory:queue`), 사람은 중단 지점 재개
    (`<n> --human --retry`). 호출자에 따라 갈리는 단일 `--retry`는 **미뤘다**: transition.test.js의 KTB-32 고정 두 개를 뒤집어야 하고,
    `factory/hooks/block-dangerous.sh`(이 이슈의 must_not)가 에이전트 세션에서 그 동사를 막으므로 바로 그 세션에서는 어차피 쓸 수 없다. 사람이
-   소유하는 별도 이슈의 몫이다. 템플릿 `<n>`은 이슈 번호를 모를 때(usage 본문·상수)뿐이다: 라이브러리 `transition()`의 두 재시도 거절은
+   소유하는 별도 이슈의 몫이다(#209). 템플릿 `<n>`은 이슈 번호를 모를 때(usage 본문·상수)뿐이다: 라이브러리 `transition()`의 두 재시도 거절은
    거절 객체에 그 이슈의 두 명령(`requeue`·`resume`)을 싣고, 스크립트 `--retry` 거절은 사유 문장도 그 번호로 채운다. 사람 플래그 거절의
    `reason`은 상수 그대로다 — 기존 KTB 테스트가 그 문자열을 정확히 핀한다.
 
-**좁힌 것(이슈 초안 대비)**: K 면제 없음(크래시는 `→ rework` 전이를 만들지 않는다 — 셀 것이 없다); 전이 마커에 `engine=true`·`retry-kind=` 필드
-없음(`TRANSITION_TO` 불변 — 옛 엔진이 새 코멘트를 못 읽는 일이 없다); `usage:` 줄 형식·`USAGE_RE` 불변; `engineUsd` 상한 없음; 완료됐지만 엔진
-결함으로 판정이 틀린 런(미러 verify·#174 라운드 — 이슈의 #149 $63·#157 $60·#170 $61)은 **환급되지 않는다**. 그 돈은 크래시가 아니라 끝난 런이고,
-그것을 가를 코드 경로가 없다. 그 이슈들에는 여전히 `:proposal` 상한 인상이 답이다.
+**§4와 다른 점** (departures — 위 출처의 §4 문장 대비):
+- 생산자는 `abortStage`가 아니라 `runStage`의 catch다. `abortStage`(job.status=failure)는 크래시를 볼 창이 없다 — runStage의 `finally`가
+  `stage-settled:`를 이미 남겨 그 경로는 전이를 건너뛴다(결정 1).
+- K 면제는 없다. 크래시는 `→ rework` 전이를 만들지 않으므로 셀 것이 없다. R은 라우팅으로 비켜 간다(결정 3).
+- `factory retry <n>` 동사는 없다. 안내만 하나가 됐다: 에이전트·CI는 재큐, 사람은 `--human --retry`(결정 4). 동사는 #209.
+- §4의 닫힌 집합 중 미러 판정 불가·환경의 런은 빼지 않는다 — 크래시만 뺀다. 각각 코드 경로의 생산자가 따로 필요하고, 사유 문구로 가르면
+  게이밍이 된다.
+- 빼는 크래시 런에도 상한이 있다: 이슈 평생 `ENGINE_CRASH_EXCLUDED_RUNS = 2`개(rework sec1). §4는 "세지 않는다"고만 했다.
+- 전이 마커에 `engine=true`·`retry-kind=` 필드가 없고 `usage:` 줄 형식·`USAGE_RE`도 그대로다(이슈 초안 대비; `TRANSITION_TO` 불변 — 옛 엔진이
+  새 코멘트를 못 읽는 일이 없다). `engineUsd` 달러 상한도 없다.
+
+**미룬 것** (deferrals, 후속 이슈):
+- 단일 동사(`factory retry <n>` 또는 호출자에 따라 갈리는 `--retry`) — KTB-32 개정과 훅 변경이 필요하다: #209.
+- 미러 판정 불가·환경 런의 제외, 그리고 완료됐지만 틀린 런의 처방(tree-truth, 아래), 그리고 engine-crash를 ADR-032의 릴리스 재시도 팔에
+  넣을지(dissent d-same-version-cap의 후보): #210.
+- 중복 ADR-034 제목(:4067 vs :4303): #211.
+
+**남는 것** (accepted, 숨기지 않는다):
+- **환급은 거의 없다.** 완료됐지만 엔진 결함으로 판정이 틀린 런(미러 verify·#174 라운드 — 이슈의 #149 $63·#157 $60·#170 $61)은 이 변경으로
+  환급되지 않는다. 그 돈은 크래시가 아니라 끝난 런이고, 그것을 가를 코드 경로가 없다. 처방은 ADR-034가 미룬 판정 로직의 tree-truth 통합(#210)이거나
+  사람이 `:proposal`로 상한을 올리는 것이다. 이 변경이 그 세 이슈의 예산 초과를 되돌려 준다고 읽으면 틀린다.
+- **위조 마커의 노출은 받아들였다**(dissent d-forged-marker). `blockedOrigin`은 코멘트 작성자를 보지 않으므로 `cause=engine-crash` 마커를 흉내 낸
+  코멘트는 재시도 한 번을 살 수 있다. 그 노출은 `ENGINE_CRASH_MAX_RETRIES`(1)와 `ENGINE_CRASH_EXCLUDED_RUNS`(2) 두 상수가 묶는다 — 막는 것이 아니라
+  묶는 것이다. 작성자 검사는 범위 밖이다.
+- **되돌리기의 잔여**: 옛 엔진은 새 sweeper가 쓴 태그 달린 재시도 마커(`… cause=engine-crash -->`)를 읽지 못하므로, 되돌린 직후 blocked(engine-crash)인
+  이슈를 이슈당 한 번 더 민다(그다음은 `other` 문장으로 사람에게). 핀: `test_196_unknown_engine_crash_fields_fail_toward_counting`.
 
 **기존 테스트 한 줄의 변경(선언된 예외)**: `factory/test/issue-comments.test.js:73`의 닫힌 집합 고정(`new Set(BLOCKED_CAUSES)`)에
 `"engine-crash"`를 더했다. KTB-35가 `gates-unhandled`를 더할 때와 같은 선례이고, CHARTER:110("기존 테스트 미수정")에 대한 **그 한 줄에 한정한**
@@ -4414,7 +4436,7 @@ push할 수 있는 누구든 상태 파일에 `closed_at`을 써 넣어 차단�
 CHARTER 값도 아니다(plan non_goals). 값은 sweeper 상수와 묶여 `test_196_agent_handoff_cannot_move_crash_cost_out_of_the_cap`가 핀한다(그
 테스트는 진짜 verifyStage를 통과한 `findings: "x"`·`{}`·`7`과, 진짜 크래시 런 넷의 기록으로 두 겹을 따로 실패시킨다).
 
-**self-critique (skeptic, 리뷰 전) — 세 군데를 더 닫았다.**
+**self-critique (skeptic, 리뷰 전) — 두 군데를 더 닫았고, 하나(3)는 되돌렸다.**
 1. **hand-off 뒤의 크래시는 그 라벨을 덮지 않는다.** catch는 이 런이 이미 hand-off를 했으면(성공한 전이 중 claim `→ in-progress`과 blocked-retry
    hop `prerequisite: true`가 아닌 것 — `runStage`가 deps를 펼치지 않고 Proxy로 `transition` 하나만 감싸 기록한다) engine-crash 전이를 하지
    않는다: 그 hand-off(→ planned·awaiting-review·approved…)는 다음 스테이지를 이미 깨웠고, 그 라벨들은 모두 `→ factory:blocked` 엣지를 가져
@@ -4426,16 +4448,33 @@ CHARTER 값도 아니다(plan non_goals). 값은 sweeper 상수와 묶여 `test_
    따로 돌려주고(있을 때만 선다), `budget:` 줄은 `; N further engine crash run(s) $X counted in the cap (past the one-episode exclusion)`을 덧붙인다
    — "크래시 런은 빠지되 보인다"(dw2)의 '보인다'는 상한 안으로 센 크래시에도 선다. 핀: `test_196_crash_runs_past_the_exclusion_are_named_on_the_budget_line`.
    plan의 "crash runs excluded"를 "한 사건분의 크래시 런 excluded"로 좁힌 것은 rework sec1의 결정 그대로이고, spec-conformance가 볼 계약 변경이다.
-3. **engine-crash의 needs-human은 새 엔진이 오면 한 번 스스로 재시도한다.** `engineCausedNeedsHuman`이 엔진 원인으로 보는 blocked 원인은
-   `undecidable`과 `engine-crash`다(`ENGINE_CAUSED_BLOCKS`). 에스컬레이션이 싣는 엔진 버전의 유일한 독자가 그 팔이므로, 빠져 있으면 그 버전은 죽은
-   기록이었다. 릴리스당 1회 마커 그대로이고, 그 재시도가 또 크래시하면 blocked 팔의 상한이 다시 문다(루프 없음). 핀:
-   `test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine`.
+3. (지난 판의 3은 되돌렸다) engine-crash를 `engineCausedNeedsHuman`(ADR-032의 릴리스 재시도)에 넣었던 것은 plan의 non_goals("Wiring
+   engine-crash into engineCausedNeedsHuman/sweepRetryOnRelease")를 거스르는 범위 확장이었다 — 릴리스마다 유료 세션을 하나 더 산다. 지금
+   그 팔은 `undecidable`만 받고, "engine defect" needs-human이 끝 상태다(사람이 그 문장의 재큐 명령으로 민다). 핀:
+   `test_196_engine_crash_needs_human_stays_out_of_the_release_retry_arm`(undecidable 대조군 포함). 넣을지는 #210에서 정한다.
+
+**self-critique 2 (skeptic, 리뷰 전) — 블록 없는 면제와 머지 뒤의 크래시를 닫았다(dw3).**
+1. **크래시 줄은 engine-crash 블록이 실제로 섰을 때만 쓴다.** catch는 이제 전이를 **먼저** 하고 그 결과로 기록을 고른다. 전이가 거부되거나
+   (라벨이 이미 needs-human·blocked — 그 두 라벨에는 `→ blocked` 엣지가 없다) 던지면 크래시 줄을 쓰지 않는다: `crash: the engine-crash block was
+   refused|failed — …` 한 줄과 usage를 남기고 그 돈은 상한 안에서 센다. 예전에는 크래시 줄을 먼저 만들어 블록 없이 돈만 빠졌다.
+2. **merge의 hand-off는 `mergePr`다.** `runStage`의 deps Proxy가 `transition`과 함께 `mergePr`를 감싸, 그것이 끝나면 hand-off로 센다.
+   그 뒤(→ merged 전이 전)의 크래시는 이슈를 blocked(engine-crash)로 옮기지 않는다 — 옮겼다면 sweeper가 이미 머지된 PR로 merge를 다시 밀고,
+   에스컬레이션이 사람에게 `factory:queue`를 치라고 했다(main의 코드로 파이프라인을 처음부터). merge-stage.js는 건드리지 않는다(plan non_goals):
+   Proxy가 프로덕션 deps(`makeMergeSelfChangeDeps`의 mergePr)와 테스트 deps를 똑같이 감싼다.
+   핀(1·2와 hand-off 뒤 크래시까지 다섯 자리): `test_196_crash_after_handoff_never_tells_owner_to_requeue`.
+3. **예산 분할의 실패는 시끄럽고, 그 런은 센다.** 예산 검사의 catch는 `budget: check failed — <원인>`을 기록과 잡 로그(console.error) 둘 다에
+   남기고 진행한다 — 분할 안의 TypeError는 그 catch가 받으므로 engine-crash가 되지 않고, 그 런의 usage는 보통 섹션으로 기록되어 다음 검사에서
+   센다. 검사 자체를 건너뛰는(fail-open) 것은 1.4.16의 결정 그대로다(돈을 못 읽은 것은 흐름 제어의 고장이지 안전 게이트가 아니다). 핀:
+   `test_196_budget_split_failure_is_loud_and_counts_the_run`.
 
 **남은 위험**: "어떤 throw가 engine-crash인가"의 답은 1에 적은 그대로다 — 엔진 코드가 던진 TypeError·ReferenceError·RangeError뿐이다. 그 경계에서
 틀릴 수 있는 방향은 둘이다: plain Error를 던지는 엔진 버그는 engine-crash가 **아니다**(오늘의 경로로 간다 — 안전한 쪽). 그리고 엔진 코드가
 에이전트 산출물을 검증 없이 읽다가 낸 TypeError는 engine-crash다 — 그것은 산출물의 잘못이 아니라 검증하지 않은 엔진의 결함으로 본다. 의존성
 표식은 `dependencyClient`로 감싼 gh 클라이언트에만 붙는다: 다른 의존성(`run`으로 부르는 git·claude)은 결과 객체를 돌려주고 던지지 않거나 plain
 Error를 던진다. 새 의존성 클라이언트가 그 래퍼 없이 배선되면 그 안의 TypeError는 engine-crash로 읽힌다 — 그것을 묶는 것은 3의 상한이다. 상한
-에스컬레이션은 ADR-032의 릴리스 재시도(`engineCausedNeedsHuman`)에 **든다** — 아래 "self-critique" 3.
-예산 검사의 실패는 여전히 삼켜진다(`budget: check failed`, fail-open) — 이 분할의 버그도 그렇게 샌다. 되돌리면 이미 찍힌 `cause=engine-crash`
-마커와 크래시 줄이 남는다: 옛 코드는 모르는 등급을 `other` 문장으로 읽고, 크래시 섹션을 보통 런으로 센다(안전한 쪽).
+에스컬레이션은 ADR-032의 릴리스 재시도(`engineCausedNeedsHuman`)에 **들지 않는다** — 위 "self-critique" 3.
+예산 검사의 실패는 검사를 건너뛰게 한다(1.4.16의 fail-open 그대로) — 다만 이제 시끄럽고(`budget: check failed — <원인>`이 기록과 잡 로그에)
+그 런은 센다(self-critique 2의 3). **되돌리기**: 엔진 커밋 하나를 revert한다. 남는 것은 이미 찍힌 `cause=engine-crash` 마커, 태그 달린
+blocked-retry 마커, 크래시 줄이다. 옛 코드는 모르는 등급을 `other`로 다루고(같은 상한 1, "environment/credentials" 문장), 크래시 섹션을 보통 런으로
+센다(세는 쪽 — 던지지도, 총합이 깨지지도 않는다). 잔여는 위 "남는 것"의 이슈당 한 번 더의 재시도다. 핀(옛 엔진을 커밋으로 고정해 실제로 돌린다):
+`test_196_unknown_engine_crash_fields_fail_toward_counting`.
