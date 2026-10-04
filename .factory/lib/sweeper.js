@@ -8,6 +8,7 @@ import { allChecksGreen, GH_NO_CHECKS_RE } from "./gh.js";
 import { latestHandoff } from "./handoff.js";
 import { findOpenHarnessIssueFor } from "./harness-request.js";
 import { HEALTH_LABEL, IMPROVEMENT_LABEL } from "./label-catalog.js";
+import { breakerOpenComment, breakerOpenMarker, BREAKER_STATE_VERSION } from "./breaker.js";
 const HB = /<!--\s*factory-heartbeat issue=(\d+)\s*-->[\s\S]*?last:\s*(\S+)/;
 const RETRY = /<!--\s*factory-retry issue=(\d+) count=(\d+)\s*-->/;
 
@@ -95,7 +96,7 @@ export const stalledRestartLimitReason = `stalled restart limit (${STALLED_RESTA
  * 평생 한 번, `origins`가 그 스테이지 자신의 정상 진입 라벨일 때)는 바이트 하나 안 바뀐다. `attempt`를
  * 주면 그 시도 번호가 마커에 실려, 같은 이슈+스테이지에 여러 번 재시도(최대 3회)할 수 있게 된다.
  */
-export const blockedRetryComment = (stage, issue, attempt, cause = null) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}${attempt ? ` attempt=${attempt}` : ""}${cause ? ` cause=${cause}` : ""} -->`;
+export const blockedRetryComment = (stage, issue, attempt) => `<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}${attempt ? ` attempt=${attempt}` : ""} -->`;
 
 /**
  * #168 rework arch1 — `blockedRetryComment`이 쓰는 문법을 읽는 **유일한** 곳. 예전에는 읽는 쪽 정규식이
@@ -103,22 +104,12 @@ export const blockedRetryComment = (stage, issue, attempt, cause = null) => `<!-
  * 이미 어긋나 있었다(캡처 vs 비캡처 `attempt=`). 문법을 다시 넓힐 때(KTB-22가 `attempt=`를 넣었듯) 한 곳만
  * 놓쳐도 그 팔이 마커를 못 보고 조용히 fail-closed로 떨어진다 — 그래서 쓰는 함수 바로 옆에 하나만 둔다.
  *
- * 돌려주는 값: 이 이슈+스테이지의 마커가 `body`에 있으면 `{ attempt }`(`attempt` 없는 옛 마커는 1; `cause=` 태그가 있으면
- * `{ attempt, cause }`), 없으면 `null`.
- *
- * #196 self-critique f3 — `cause=`는 **engine-crash 재시도만** 싣는다(다른 원인의 마커는 바이트 하나 안 바뀐다). 시도 횟수는 원인별로
- * 센다(`lastBlockedRetryAttempt`): 이 변경 전에는 크래시가 R을 탔고 blocked-retry 마커를 남기지 않았으므로, 크래시 재시도 마커가
- * 같은 주기의 다른 원인(KTB-15b의 한 번, KTB-22의 세 번) 예산을 먹으면 "다른 원인은 그대로"가 섞인 사건에서 거짓이 된다 — 그 반대
- * 방향(앞선 `other` 재시도가 engine-crash 상한을 먹는 것)도 같다.
+ * 돌려주는 값: 이 이슈+스테이지의 마커가 `body`에 있으면 `{ attempt }`(`attempt` 없는 옛 마커는 1), 없으면 `null`.
  */
 export function matchBlockedRetryMarker(body, stage, issue) {
-  const m = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))?(?: cause=(\\S+))? -->`).exec(String(body ?? ""));
-  if (!m) return null;
-  const attempt = m[1] ? Number(m[1]) : 1;
-  return m[2] ? { attempt, cause: m[2] } : { attempt };          // 태그 없는 마커의 모양은 예전 그대로(`{ attempt }`)
+  const m = new RegExp(`<!-- factory-sweeper blocked-retry stage=${stage} issue=${issue}(?: attempt=(\\d+))? -->`).exec(String(body ?? ""));
+  return m ? { attempt: m[1] ? Number(m[1]) : 1 } : null;
 }
-/** #196 f3 — 시도 횟수의 장부: engine-crash 마커는 engine-crash끼리, 나머지(태그 없는 옛 문법)는 나머지끼리 센다. */
-const retryLedger = (cause) => (cause === "engine-crash" ? "engine-crash" : null);
 
 /**
  * KTB-22 — `factory-blocked-origin` 마커가 실어 온 사유(`blockedOrigin(comments).reason`)가 API
@@ -140,16 +131,6 @@ export const API_ERROR_MAX_RETRIES = 3;
 export const CANCELLED_MAX_RETRIES = 3;
 
 /**
- * #196 (ADR-035) — **엔진 크래시는 R을 쓰지 않지만, 상한은 있다.** `runStage`의 catch가 프로그래밍 오류를 잡으면 이슈를
- * `factory:blocked`(cause=engine-crash)으로 옮긴다 — 그래서 하트비트 재큐 팔(`factory-retry`, R)은 그 런을 보지 않는다. 대신 이
- * blocked 팔이 같은 스테이지를 이 횟수만큼 다시 밀고, 그다음 크래시는 "엔진 결함" 문장으로 사람에게 간다. 결정적인 크래시는 같은
- * 엔진에서 같은 자리에서 또 죽으므로 한 번이면 충분하다(일시적인 것은 한 번에 풀린다). 상한이 없으면 K·R·예산 어느 것도 이 루프를
- * 세지 않는다 — 이 상수가 그 유일한 브레이크다. `sweep({ engineCrashMaxRetries })`가 이 값을 기본으로 받아 blocked 팔에 그대로 건다 —
- * 기본 분기의 1과 값이 같아도 배선은 따로다(테스트가 다른 값을 주어 그 배선을 핀한다, skeptic sc3).
- */
-export const ENGINE_CRASH_MAX_RETRIES = 1;
-
-/**
  * ADR-020 O20 — 에스컬레이션 문구는 **원인을 말한다**. 예전에는 무엇이 죽였든 "환경/크리덴셜"
  * 하나였다 — 사람이 취소한 잡도, 90분 타임아웃도 그렇게 보고됐고, 그 문장을 믿은 사람은 틀린 곳
  * (자격증명)을 먼저 본다. 사유는 `factory:needs-human` 전이 코멘트에 그대로 실리고 retro의 수확
@@ -166,25 +147,14 @@ export const BLOCKED_ESCALATION_REASON = {
   "gates-unhandled": "blocked (test command exited non-zero with 0 failing tests — unhandled error outside tests, see the gate log) — needs human",
   undecidable: "blocked (undecidable) — needs human",
   other: "blocked (environment/credentials) — needs human",
-  // #196 (ADR-035) — 마지막 자리(`BLOCKED_CAUSES`와 같은 자리, nit 9). 이슈의 예산·재시도가 아니라 **엔진**이 원인이라고 말하고,
-  // 고친 뒤 무엇을 치면 되는지 말한다. `<n>`·`<engine>`은 에스컬레이션 순간에 이 이슈 번호와 설치본 버전으로 채운다.
-  "engine-crash": "blocked (engine defect — the stage crashed with a programming error in the factory engine <engine>, not in this issue's work, budget or retries; after the engine fix, requeue with `node .factory/bin/transition.js <n> factory:queue`) — needs human",
 };
-const escalationReason = (cause, { issue = null, engineVersion = null } = {}) => {
-  const text = BLOCKED_ESCALATION_REASON[cause] ?? BLOCKED_ESCALATION_REASON.other;
-  if (cause !== "engine-crash") return text;
-  return text.replace("<n>", issue != null ? String(issue) : "<n>").replace("<engine>", engineVersion ? `v${engineVersion}` : "(version unknown)");
-};
-/**
- * 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). #196 f3 — `cause`의 장부
- * (`retryLedger`)에 속한 마커만 센다: engine-crash는 engine-crash 마커만, 다른 원인은 태그 없는 마커만.
- */
-function lastBlockedRetryAttempt(comments, stage, issue, cause = null) {
-  const ledger = retryLedger(cause);
+const escalationReason = (cause) => BLOCKED_ESCALATION_REASON[cause] ?? BLOCKED_ESCALATION_REASON.other;
+/** 이 이슈+스테이지의 blocked-retry 마커 중 가장 큰 시도 번호(마커가 없으면 0, `attempt` 없는 옛 마커는 1). */
+function lastBlockedRetryAttempt(comments, stage, issue) {
   let last = 0;
   for (const c of comments || []) {
     const m = matchBlockedRetryMarker(c?.body, stage, issue);
-    if (m && (m.cause ?? null) === ledger) last = Math.max(last, m.attempt);
+    if (m) last = Math.max(last, m.attempt);
   }
   return last;
 }
@@ -200,7 +170,7 @@ function retriedSinceOrigin(comments, stage, issue) {
   const list = comments || [];
   let from = 0;
   list.forEach((c, i) => { if (BLOCKED_ORIGIN.test(String(c?.body ?? ""))) from = i + 1; });
-  return list.slice(from).some((c) => { const m = matchBlockedRetryMarker(c?.body, stage, issue); return m !== null && (m.cause ?? null) === null; });   // #196 f3 — 태그 없는(취소 쪽) 장부만
+  return list.slice(from).some((c) => matchBlockedRetryMarker(c?.body, stage, issue) !== null);
 }
 
 /**
@@ -526,13 +496,6 @@ const ENGINE_ESCALATION_PREFIX = BLOCKED_ESCALATION_REASON.undecidable.replace(/
 const RELEASE_RETRY_IMPLEMENT_TARGETS = new Set(["factory:planned", "factory:rework"]);
 const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
 
-/**
- * blocked 사건 중 엔진 원인인 것. #196 self-critique (skeptic f3) — engine-crash(러너의 catch만 쓰는 원인, 에스컬레이션은 "engine defect")는
- * 이 저장소에서 가장 직접적인 엔진 결함이다: 새 엔진이 오면 한 번 스스로 재시도한다(그 에스컬레이션이 싣는 엔진 버전의 유일한 독자가 이 팔이다).
- * 루프는 없다 — 릴리스당 1회(`factory-retry-on-release` 마커)이고, 그 재시도가 또 크래시하면 blocked 팔의 상한이 다시 문다.
- */
-const ENGINE_CAUSED_BLOCKS = new Set(["undecidable", "engine-crash"]);
-
 /** 마지막 전이 코멘트가 엔진 결함으로 인한 needs-human인가. 아니면 null, 맞으면 `{ comment, thenVersion }`. */
 export function engineCausedNeedsHuman(comments) {
   const list = Array.isArray(comments) ? comments : [];
@@ -548,7 +511,7 @@ export function engineCausedNeedsHuman(comments) {
   const t = lastTransition([comment]);
   const reason = t?.reason ?? "";
   const engine = reason.startsWith(ENGINE_ESCALATION_PREFIX)
-    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && ENGINE_CAUSED_BLOCKS.has(blockedOrigin(list.slice(0, idx + 1))?.cause));
+    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && blockedOrigin(list.slice(0, idx + 1))?.cause === "undecidable");
   if (!engine) return null;
   return { comment, thenVersion: ENGINE_VERSION.exec(body)?.[1] ?? null };
 }
@@ -1503,13 +1466,54 @@ async function safeDispatch({ dispatchStage, stage, issue, actions, step }) {
 }
 
 /**
+ * ── #189 (S4c, ADR-033) — 차단기의 열림을 **바뀔 때 한 번** 기록하고 알린다(cron 전용) ────────────────────────────────────
+ *
+ * `breaker.read()`가 그 순간의 차단기를 계산한다(merge 스테이지와 같은 함수 — `lib/breaker.js` `readBreaker`). 이 팔이 쓰는 것은
+ * 판정이 아니라 **알림의 워터마크**다: 저장된 상태가 이미 "같은 since로 열림"이면 쓰지 않는다. 순서는 기록 → 코멘트이고, 코멘트는
+ * `since`를 실은 마커로 dedupe한다 — 기록은 됐는데 코멘트가 실패했으면 다음 sweep이 마커를 찾아 빠진 것만 채운다.
+ * 닫힘은 쓰지 않는다: 시간은 차단기를 닫지 않고(입력에 시계가 없다), 닫는 것은 사람의 `factory breaker --reset`뿐이다. 그래서
+ * 계산이 닫힘이면 아무것도 쓰지 않는다. 못 읽으면(ok:false) 아무것도 쓰지도 알리지도 않고 error 한 줄을 남긴다.
+ * 알림은 상태 변화 하나에 **정확히 하나**다: 연속을 채운 마지막 자동 머지의 추적 이슈(사람이 라벨·needs-human을 보는 자리)에
+ * 달고, 그 이슈 번호를 모를 때만 PR에 단다. 같은 열림을 두 자리에 알리면 "한 번"이 아니다(dw6).
+ */
+async function sweepBreaker({ gh, breaker, actions, now = null }) {
+  if (!breaker || typeof breaker.read !== "function") return;
+  let ev;
+  // rework r2 sec1 — closed_at이 미래인지 sweep의 시각으로 본다.
+  try { ev = await breaker.read({ now }); } catch (e) { ev = { ok: false, reason: `${e?.message || e}` }; }
+  if (!ev?.ok) { actions.push({ kind: "error", step: "breaker", error: `breaker state unknown — ${ev?.reason || "unknown"}` }); return; }
+  if (ev.open !== true) { actions.push({ kind: "breaker-closed", detail: ev.detail ?? null }); return; }
+  const stored = ev.state ?? null;
+  if (!(stored?.open === true && stored.since === ev.since)) {
+    const state = { version: BREAKER_STATE_VERSION, open: true, since: ev.since, reason: ev.reason, closed_by: stored?.closed_by ?? null, closed_at: stored?.closed_at ?? null };
+    let w;
+    try { w = await breaker.write({ state, blob: ev.blob ?? null }); } catch (e) { w = { ok: false, reason: `${e?.message || e}` }; }
+    if (!w?.ok) { actions.push({ kind: "error", step: "breaker", error: `breaker state write failed${w?.moved ? " (state moved — next sweep re-reads)" : ""} — ${w?.reason || "unknown"}` }); return; }
+    actions.push({ kind: "breaker-opened", since: ev.since, reason: ev.reason, issue: ev.latest?.issue ?? null, pr: ev.latest?.pr ?? null });
+  }
+  const marker = breakerOpenMarker(ev.since);
+  const target = [ev.latest?.issue, ev.latest?.pr].find((n) => Number.isInteger(n) && n > 0);
+  if (target === undefined) actions.push({ kind: "error", step: "breaker", error: `breaker open since ${ev.since} but no issue or PR to announce it on — ${ev.reason}` });
+  for (const n of target === undefined ? [] : [target]) {
+    try {
+      const comments = await gh.comments(n);
+      if ((Array.isArray(comments) ? comments : []).some((c) => String(c?.body ?? "").includes(marker))) continue;
+      await gh.comment(n, breakerOpenComment({ since: ev.since, reason: ev.reason }));
+      actions.push({ kind: "breaker-announced", issue: n, since: ev.since });
+    } catch (e) {
+      actions.push({ kind: "error", step: "breaker", issue: n, error: `breaker-open comment failed — ${e?.message || e}` });
+    }
+  }
+}
+
+/**
  * `quick`(KTB-26): 스테이지 워크플로의 마지막 스텝이 쓰는 모양(`sweep.js --quick`). 시간에 묶인 두 팔
  * (격리 정책 적용과 토큰 만료 이슈 생성)을 건너뛰고 **상태 복구 팔만** 돌린다 — in-progress 하트비트
  * 재큐 · blocked 처리 · 멈춘 스테이지 재점화 · 하네스 주차 해제 · 라벨-셋 복구. 그 둘을 뺀 이유는 비용이 아니라 의미다:
  * 격리 TTL은 "몇 시간이 지났는가"의 판정이라 스테이지가 끝난 그 순간에 다시 물어볼 이유가 없고,
  * `quarantine.toml`을 스테이지마다 쓰면 커밋 경쟁만 늘어난다. cron sweep은 그대로 네 팔을 다 돈다.
  */
-export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false, installedVersion = null, engineCrashMaxRetries = ENGINE_CRASH_MAX_RETRIES }) {
+export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, transition, release, quarantine, saveQuarantine, tokenIssuedAt = null, dispatchStage = null, backPressure = null, harnessSettled = null, factoryLogins = null, reviewRoster = null, requiredChecks = null, releaseIfStale = null, routeMerged = null, stageRuns = null, quick = false, installedVersion = null, breaker = null }) {
   /**
    * 설계 2026-09-30 §8.1 (S1) — 사람의 전이인지는 계정으로 판정한다(`commentsSinceCycleStart`). 팩토리 계정 이름 하나를
    * 여기서 한 번만 구한다. 못 구하면 null — 그때 창은 "작성자가 있는 human 마커"에만 리셋된다(닫힌 쪽).
@@ -1661,13 +1665,10 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
           // 다르다 — 평생 횟수가 아니라 **취소 사건마다** 한 번이다(그래서 R 예산을 쓰지 않는다).
           const isApiError = cause === "api-error";
           const isCancelled = cause === "cancelled";
-          const isEngineCrash = cause === "engine-crash";             // #196 — R이 아니라 이 팔의 이름 있는 상한
-          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : isEngineCrash ? engineCrashMaxRetries : 1;
+          const maxAttempts = isApiError ? API_ERROR_MAX_RETRIES : isCancelled ? CANCELLED_MAX_RETRIES : 1;
           // 1.4.32 (L40) — 시도 횟수의 창은 **마지막 사람 전이**부터다(1.4.12·1.4.27과 같은 규칙): 사람이 `--human --retry`로
           // blocked(origin=approved)로 되돌린 이슈가 옛 주기의 api-error 시도 3회를 안고 시작하면 재점화 없이 곧장 escalate된다.
-          // #196 rework cf1 — engine-crash 장부는 재시도 런 자신의 `blocked → queue` hop(트리아지)으로 창을 열지 않는다: 그 상한이 루프의 유일한 브레이크다.
-          const window = commentsSinceCycleStart(comments, { factoryLogin, blockedHopOpensCycle: !isEngineCrash });
-          const lastAttempt = lastBlockedRetryAttempt(window, retryStage, it.number, cause);
+          const lastAttempt = lastBlockedRetryAttempt(commentsSinceCycleStart(comments, { factoryLogin }), retryStage, it.number);
           const episodeOpen = !isCancelled || !retriedSinceOrigin(comments, retryStage, it.number);
           if (lastAttempt < maxAttempts && episodeOpen) {
             // KTB-28 (c) + r1 SF4: stalled 팔과 같은 판정을 같은 순서로 한다 — 잔해 락은 (리스를 걸고)
@@ -1694,13 +1695,9 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
             // dedupe·테스트는 이 경로에서 아무것도 안 바뀐 것처럼 본다. API 에러거나 2번째 이상이면
             // 시도 번호를 싣는다.
             const numbered = isApiError || attempt > 1;
-            // #196 f3 — engine-crash 재시도만 `cause=` 태그를 단다(원인별 장부). 다른 원인의 마커는 예전 그대로다.
-            const tag = retryLedger(cause);
-            const marker = numbered ? blockedRetryComment(retryStage, it.number, attempt, tag) : blockedRetryComment(retryStage, it.number, undefined, tag);
+            const marker = numbered ? blockedRetryComment(retryStage, it.number, attempt) : blockedRetryComment(retryStage, it.number);
             const note = isApiError
               ? `\`factory:blocked\`이 API 쿼터/장애(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — \`factory-${retryStage}.yml\`을 다시 띄웁니다(시도 ${attempt}/${maxAttempts}, KTB-22). 여전히 blocked이면 ${attempt < maxAttempts ? "다음 sweep에서 다시 시도합니다" : "다음 sweep에서 사람에게 넘어갑니다"}.`
-              : isEngineCrash
-                ? `\`factory:blocked\`이 **엔진 크래시**(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — 이슈의 실패가 아니므로 재시도 예산(R)을 쓰지 않고 \`factory-${retryStage}.yml\`을 다시 띄웁니다(시도 ${attempt}/${maxAttempts}, #196). 같은 자리에서 또 죽으면 엔진 결함으로 사람에게 넘어갑니다.`
               : isCancelled
                 ? `\`factory:blocked\`이 **잡 취소**(\`${origin.reason}\`)로 \`${origin.from}\`에서 왔습니다 — 취소는 이 이슈의 실패가 아니므로 재시도 예산(R)을 쓰지 않고 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(O20). 이 취소 건에 대해서는 이번 한 번뿐입니다.`
                 : `\`factory:blocked\`이 \`${origin.from}\`에서 왔습니다 — 그 마지막 한 걸음만 실패했을 수 있어 \`factory-${retryStage}.yml\`을 한 번 다시 띄웁니다(KTB-15b). 여전히 blocked이면 다음 sweep에서 사람에게 넘어갑니다.`;
@@ -1720,8 +1717,7 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
       // 설치본 버전을 못 읽었으면 싣지 않는다(이슈의 옛 기록만으로 찍으면 방금 실패한 엔진보다 낮은 값이 될 수 있다 — 모르면 기록하지 않는다).
       const installedNow = await engineVersionNow();
       const engineVersion = installedNow ? newestVersion([installedNow, ...factoryRecordedVersions(comments, factoryLogin)]) : null;
-      const why = escalationReason(cause, { issue: it.number, engineVersion });
-      const reason = ceilingWhy ? `${why} — ${ceilingWhy}` : why;
+      const reason = ceilingWhy ? `${escalationReason(cause)} — ${ceilingWhy}` : escalationReason(cause);
       await transition({ issue: it.number, to: "factory:needs-human", reason, ...(engineVersion ? { engineVersion } : {}) });
       actions.push({ kind: "blocked-escalated", issue: it.number, cause, ...(ceilingWhy ? { why: ceilingWhy } : {}) });
     } catch (e) {
@@ -1731,6 +1727,8 @@ export async function sweep({ gh, charter, thresholds, now, staleMinutes = 30, t
   await sweepStalled({ gh, nowMs, staleMinutes, dispatchStage, backPressure, transition, releaseIfStale, actions, factoryLogin });
   await sweepHarnessUnpark({ gh, transition, harnessSettled, actions });
   if (quick) return actions;                     // KTB-26 — 아래 팔들은 시간에 묶여 있다(cron의 몫)
+  // #189 — 차단기의 평가·기록은 cron(quick=false)의 몫이다. merge 스테이지는 이 기록이 아니라 자기 계산을 믿는다.
+  await sweepBreaker({ gh, breaker, actions, now });
   // KTB-46 (r3 nit 3): 사람이 머지 버튼을 누르는 사건은 스테이지 잡이 끝나는 순간과 무관하다 —
   // cron 주기(≤30분) 안에 반영되면 충분하고, 매 스테이지마다 돌리면 주차된 이슈마다 "아직 머지
   // 안 됨" 줄만 쌓인다. 그래서 격리·토큰 만료와 같은 쪽에 선다.

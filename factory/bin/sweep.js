@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
 import { makeGh, resolveFactoryLogins } from "../lib/gh.js";
-import { loadCharter, loadHarness, loadRoles } from "../lib/config.js";
+import { loadCharter, loadHarness, loadRoles, breakerThresholds } from "../lib/config.js";
 import { resolveReviewRoster, tierFromReviewHandoff } from "../lib/review-roster.js";
 import { loadQuarantine, saveQuarantine as saveQuarantineTo } from "../lib/quarantine.js";
 import { transition as transitionIssue } from "../lib/transition.js";
@@ -16,6 +16,7 @@ import { backPressure } from "../lib/back-pressure.js";
 import { routeFeedbackArm } from "./retro.js";
 import { readRecordsDetailed, recordsSourceOf } from "../lib/records-branch.js";
 import { INSTALL_MANIFEST_PATH, INSTALL_MANIFEST_SCHEMA, fromEntries, loadInstallManifest } from "../lib/feedback/install-manifest.js";
+import { makeBreakerDeps } from "../lib/breaker.js";
 
 /**
  * CLI 진입: 실제 의존성 조립.
@@ -179,7 +180,12 @@ export async function main() {
     if (local && remote) return isNewerVersion(remote, local) ? remote : local;
     return local ?? remote ?? null;
   };
-  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, stageRuns, quick, installedVersion });
+  /**
+   * #189 (S4c) — 차단기의 읽기·쓰기(merge 스테이지의 `d.breaker`와 같은 `readBreaker`). 임계는 CHARTER `self_change.breaker`에서
+   * **늦게** 읽는다(게터) — 모양이 틀리면 그 sweep의 차단기 팔만 ok:false로 접히고 나머지 팔은 돈다.
+   */
+  const breaker = makeBreakerDeps({ run, cwd: root, defaultBranch, thresholds: () => breakerThresholds(charter.self_change) });
+  const actions = await sweep({ gh, charter, thresholds, now: new Date().toISOString(), transition, release, quarantine, saveQuarantine, tokenIssuedAt, dispatchStage, backPressure: backPressureFn, harnessSettled, factoryLogins, reviewRoster, requiredChecks, releaseIfStale, routeMerged, stageRuns, quick, installedVersion, breaker });
   console.log(JSON.stringify(actions, null, 2));
   process.exit(0);
 }

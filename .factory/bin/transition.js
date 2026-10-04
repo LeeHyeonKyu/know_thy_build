@@ -8,11 +8,11 @@ import { join } from "node:path";
  * 스택만 남기고 죽는다 — 무엇을 하면 되는지는 말하지 않는다. 그래서 라이브러리를 동적으로 읽고, 의존성이
  * 없을 때만 그 한 줄을 말한다. 다른 오류는 그대로 던진다(삼키지 않는다).
  */
-let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, requeueCommand, resumeCommand, makeRehearsalChecker, loadHarness, loadCharter, makeQueueAdmission, resolveFactoryLogins;
+let run, makeGh, parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, makeRehearsalChecker, loadHarness, loadCharter, makeQueueAdmission, resolveFactoryLogins;
 try {
   ({ run } = await import("../lib/exec.js"));
   ({ makeGh } = await import("../lib/gh.js"));
-  ({ parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv, requeueCommand, resumeCommand } = await import("../lib/transition.js"));
+  ({ parseTransitionArgs, refuseHumanFlag, transition, principalFromEnv } = await import("../lib/transition.js"));
   ({ makeRehearsalChecker } = await import("../lib/rehearsal.js"));
   ({ loadHarness, loadCharter } = await import("../lib/config.js"));
   ({ makeQueueAdmission } = await import("../lib/admission.js"));
@@ -38,10 +38,6 @@ const USAGE = [
   "            목적 라벨은 이슈에 남은 기록이 정한다 — 마지막으로 blocked/needs-human으로 간 전이의",
   "            출발 라벨(awaiting-review면 review만 다시 돈다). 라벨을 명시해도 같은 검사를 지난다:",
   "            중단 지점이 아닌 자리로는 전이하지 않는다(exit 2, 라벨 불변).",
-  "",
-  "  다시 돌리기(#196, ADR-035) — 호출자마다 명령 하나:",
-  "    에이전트 세션·CI·누구나:  node .factory/bin/transition.js <n> factory:queue        (재큐 — 처음부터 다시)",
-  "    사람의 셸만:              node .factory/bin/transition.js <n> --human --retry    (중단 지점 재개)",
 ].join("\n");
 
 const args = parseTransitionArgs(process.argv.slice(2));
@@ -55,9 +51,7 @@ if ((human || retry) && refuseHumanFlag(process.env)) {
   console.error(
     "transition: --human/--retry refused — this looks like an agent session or CI runner " +
     "(CLAUDE_PROJECT_DIR or GITHUB_ACTIONS is set), not a person's own shell. " +
-    "--human/--retry is the person's edge (ADR-020 KTB-32, review 3c63672 MF-2) — stages transition in-process.\n" +
-    `  to run it again from here, requeue:  ${requeueCommand(issue)}\n` +
-    `  a person resumes from the stop point: ${resumeCommand(issue)}`
+    "--human/--retry is the person's edge (ADR-020 KTB-32, review 3c63672 MF-2) — stages transition in-process."
   );
   process.exit(2);
 }

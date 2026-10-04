@@ -3540,3 +3540,110 @@ test("test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine", async 
   expect(w.label(n)).toBe("factory:planned");
   expect(releaseMarkers156(w, n)).toHaveLength(1);
 });
+
+// ── #189 (S4c, ADR-033) — 차단기의 열림은 상태가 바뀔 때 한 번만 기록·알린다(진짜 git, 실제 생산자) ──────────────────
+import { mkdtempSync as mkdtempSync189, writeFileSync as writeFileSync189, existsSync as existsSync189 } from "node:fs";
+import { tmpdir as tmpdir189 } from "node:os";
+import { join as join189 } from "node:path";
+import { run as run189 } from "../lib/exec.js";
+import { syncRecords as syncRecords189 } from "../lib/records-branch.js";
+import { appendRunRecord as appendRunRecord189 } from "../lib/run-record.js";
+import { selfMergeLine as selfMergeLine189 } from "../lib/merge-stage.js";
+import { makeBreakerDeps, readBreakerState as readBreakerState189, writeBreakerState as writeBreakerState189, breakerOpenMarker, BREAKER_STATE_DIR as BREAKER_STATE_DIR189, BREAKER_RESET_COMMAND as BREAKER_RESET_COMMAND189 } from "../lib/breaker.js";
+
+test("test_189_sweep_records_breaker_state_once_per_change", async () => {
+  const g = (cwd, args, env = {}) => run189("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, env });
+  const remote = mkdtempSync189(join189(tmpdir189(), "ktb-189-sw-remote-"));
+  await run189("git", ["init", "-q", "--bare", "-b", "main", remote]);
+  const cwd = mkdtempSync189(join189(tmpdir189(), "ktb-189-sw-clone-"));
+  await g(cwd, ["init", "-q", "-b", "main"]);
+  writeFileSync189(join189(cwd, ".gitignore"), "docs/factory/runs/\n");
+  await g(cwd, ["add", "."]);
+  await g(cwd, ["remote", "add", "origin", remote]);
+  const commit = async (subject, at, revertOf = null) => {
+    const env = { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at };
+    if (revertOf) return g(cwd, ["revert", "--no-edit", revertOf], env);
+    writeFileSync189(join189(cwd, `${subject.length}-${at}.txt`), subject);
+    await g(cwd, ["add", "."]);
+    await g(cwd, ["commit", "-q", "-m", subject], env);
+    return (await g(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+  };
+  const a = await commit("feat a (#11)", "2026-10-01T01:00:00Z");
+  await commit("feat b (#12)", "2026-10-01T02:00:00Z");
+  await commit(null, "2026-10-01T05:00:00Z", a);
+  await commit('Revert "feat b (#12)" (#20)', "2026-10-01T06:00:00Z");
+  await g(cwd, ["push", "-q", "origin", "main"]);
+  // merge 스테이지의 실제 생산자로 쓴 run 기록 두 개(판정 경로 자동 머지 #11·#12).
+  for (const [issue, pr, at] of [[101, 11, "2026-10-01T01:00:00.000Z"], [102, 12, "2026-10-01T02:00:00.000Z"]]) {
+    appendRunRecord189({ root: cwd, issue, stage: "merge", runnerId: "gha-1", now: at, lines: [`merge: merged via PR #${pr}`, selfMergeLine189({ issue, pr, kind: "judge", sha: "c".repeat(40), at })] });
+  }
+  expect((await syncRecords189({ run: run189, cwd, message: "records" })).ok).toBe(true);
+
+  const tip = async () => (await run189("git", ["rev-parse", "refs/heads/factory/records"], { cwd: remote })).stdout.trim();
+  const SINCE = "2026-10-01T06:00:00.000Z";
+  const store = new Map();
+  let failComment = 1;                                                // 첫 코멘트 하나가 실패한다(부분 실패)
+  const gh = {
+    searchIssues: async () => [], issueList: async () => [], patchComment: vi.fn(),
+    comments: vi.fn(async (n) => [...(store.get(n) || [])]),
+    comment: vi.fn(async (n, body) => {
+      if (failComment-- > 0) throw new Error("HTTP 502");
+      store.set(n, [...(store.get(n) || []), { id: Math.random(), body, createdAt: "x" }]);
+      return "u#issuecomment-1";
+    }),
+  };
+  const deps = makeBreakerDeps({ run: run189, cwd, defaultBranch: "main", thresholds: { revert_streak: 2 } });
+  const breaker = { read: vi.fn(deps.read), write: vi.fn(deps.write) };
+  const once = (now, quick = false) => sweep({ gh, charter, thresholds: T, now, staleMinutes: 30, transition: vi.fn(), release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {}, breaker, quick });
+  const posted = () => [...store.entries()].flatMap(([n, cs]) => cs.filter((c) => c.body.includes(breakerOpenMarker(SINCE))).map(() => n));
+
+  // quick sweep은 차단기를 평가하지 않는다.
+  await once("2026-10-02T00:00:00Z", true);
+  expect(breaker.read).not.toHaveBeenCalled();
+
+  // 1) 닫힘 → 열림: 상태를 한 번 쓰고(로컬 파일은 남기지 않는다), 코멘트는 실패했다.
+  const before = await tip();
+  const s1 = await once("2026-10-02T00:00:00Z");
+  expect(breaker.write).toHaveBeenCalledTimes(1);
+  const t1 = await tip();
+  expect(t1).not.toBe(before);
+  const st1 = await readBreakerState189({ run: run189, cwd });
+  expect(st1.state).toEqual(expect.objectContaining({ open: true, since: SINCE }));
+  expect(st1.state.reason).toMatch(/#11\b.*#12\b/);
+  expect(existsSync189(join189(cwd, BREAKER_STATE_DIR189, "breaker.md"))).toBe(false);
+  expect(s1).toContainEqual(expect.objectContaining({ kind: "breaker-opened", since: SINCE }));
+  expect(s1).toContainEqual(expect.objectContaining({ kind: "error", step: "breaker" }));
+
+  // 2) 같은 상태의 다음 sweep: 쓰지 않고, 빠진 코멘트만 마커로 찾아 채운다 — 상태 변화 하나에 알림은 정확히 하나,
+  //    연속을 채운 마지막 자동 머지의 추적 이슈(#102)에(사람이 needs-human·라벨을 보는 자리). PR #12에는 따로 달지 않는다.
+  const s2 = await once("2026-10-02T00:30:00Z");
+  expect(breaker.write).toHaveBeenCalledTimes(1);
+  expect(await tip()).toBe(t1);
+  expect(posted()).toEqual([102]);
+  expect(gh.comment.mock.calls.filter(([, b]) => String(b).includes(breakerOpenMarker(SINCE))).map(([n]) => n)).toEqual([102, 102]); // 실패한 첫 시도 + 채운 한 번
+  expect(s2.filter((x) => x.kind === "breaker-announced")).toEqual([expect.objectContaining({ issue: 102, since: SINCE })]);
+  const body = store.get(102)[0].body;
+  expect(body).toContain(SINCE);
+  expect(body).toMatch(/#11\b.*#12\b/);
+  expect(body).toContain(BREAKER_RESET_COMMAND189);
+
+  // 3) 같은 상태, 하루 뒤: 아무것도 쓰지 않고 아무것도 다시 게시하지 않는다(시간이 지나도 닫히지 않는다).
+  const commentsBefore = gh.comment.mock.calls.length;
+  const s3 = await once("2026-10-09T00:00:00Z");
+  expect(breaker.write).toHaveBeenCalledTimes(1);
+  expect(await tip()).toBe(t1);
+  expect(gh.comment.mock.calls.length).toBe(commentsBefore);
+  expect(posted()).toEqual([102]);
+  expect((await readBreakerState189({ run: run189, cwd })).state.open).toBe(true);
+  expect(s3.some((x) => x.kind === "breaker-opened")).toBe(false);
+
+  // 4) 사람이 닫은 뒤(closed_at 뒤에 새 증거 없음): 스윕은 다시 열지도, 쓰지도, 알리지도 않는다.
+  const cur = await readBreakerState189({ run: run189, cwd });
+  expect((await writeBreakerState189({ run: run189, cwd, blob: cur.blob, message: "reset", state: { version: 1, open: false, since: null, reason: "checked", closed_by: "person:LeeHyeonKyu", closed_at: "2026-10-09T01:00:00.000Z" } })).ok).toBe(true);
+  const t4 = await tip();
+  await once("2026-10-09T02:00:00Z");
+  expect(breaker.write).toHaveBeenCalledTimes(1);
+  expect(await tip()).toBe(t4);
+  expect(gh.comment.mock.calls.length).toBe(commentsBefore);
+  expect(existsSync189(join189(cwd, BREAKER_STATE_DIR189, "breaker.md"))).toBe(false);
+}, 240000);

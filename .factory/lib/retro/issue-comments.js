@@ -97,14 +97,8 @@ export const BLOCKED_ORIGIN = /<!-- factory-blocked-origin from=(\S+) stage=(\S+
  *     테스트가 없으므로 "제품이 틀렸다"가 아니고, 대개 테스트 **밖**의 일시적 인프라다(포크된
  *     워커의 stderr `write EPIPE`가 실측 원인이었다) → 같은 스테이지를 한 번 다시 돌린다.
  *   - `other` — 나머지(환경·크리덴셜). 예전의 유일한 문구가 이것이었다.
- *   - `engine-crash` — #196(ADR-035): `runStage`의 catch가 **엔진 코드가 던진 프로그래밍 오류**(TypeError·ReferenceError·
- *     RangeError — 닫힌 목록은 `bin/run-stage.js`의 `ENGINE_CRASH_ERRORS`)를 잡았다 — 이슈가 아니라 엔진의 결함이다. 문법 오류
- *     종류는 일부러 빠져 있다(ADR-035 (c): 런타임의 그것은 데이터 — gh 출력·산출물·설정 — 의 실패다). 의존성 클라이언트(gh) 안에서
- *     난 오류는 종류와 무관하게 이 등급이 아니다(`dependencyClient` 표식). 생산자는 그 catch 하나뿐이고 transition()의 명시
- *     `cause` 인자로만 찍힌다: 아래 `CAUSE_RULES`에는 **일부러 없다** — 사유 문구가 이 등급을 만들 수 있으면 누구든 문장 하나로
- *     예산·R을 피해 간다. 의존성/인프라의 plain `Error`는 이 등급이 아니다(오늘처럼 exit 1, 전이 없음).
  */
-export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other", "engine-crash"];
+export const BLOCKED_CAUSES = ["api-error", "timeout", "cancelled", "gates", "gates-unhandled", "undecidable", "other"];
 const CAUSE_RULES = [
   ["api-error", /api error|rate ?limit|quota|overloaded|\b429\b|HTTP [45]\d\d|something went wrong/i],
   ["cancelled", /cancell?ed/i],
@@ -655,23 +649,14 @@ export function isFactoryReleaseRetry(comment, { factoryLogin = null } = {}) {
  * K를 우회하게 되므로 그대로 두고, 이 창은 sweeper의 스톨 재점화 카운터에만 쓴다 — 사람이 되돌린 이슈는 새 주기이고,
  * 지난 주기의 재점화 마커 2개가 첫 스톨에서 곧장 `stalled restart limit`을 만드는 것은 사람의 결정을 무효로 만든다.
  */
-/**
- * #196 rework cf1 — `blockedHopOpensCycle: false`면 **`blocked → queue` 전이는 재큐로 치지 않는다**(사람 계정의 `by=human`만 연다 — 아래 S1
- * 규칙 그대로). 그 엣지의 비사람 생산자는 트리아지 재시도 런 자신의 hop(`run-stage.js`, `BLOCKED_RETRY.triage.hop`, "retry from blocked")
- * 하나다 — 그것은 같은 blocked 사건 안의 재시도이지 새 주기가 아니다. 기본값(`true`)은 예전과 바이트 하나 안 다르게 동작하고, engine-crash
- * 장부(sweeper의 blocked 팔)만 `false`로 부른다: 그 상한이 크래시 루프의 유일한 브레이크라(ADR-035 §3), hop이 창을 열면 직전 재시도 마커가
- * 창 밖으로 밀려 트리아지 크래시가 영원히 "시도 0"으로 읽혔다. 위조 방향은 닫힌 쪽이다 — 흉내 낸 `blocked → queue` 코멘트는 리셋을
- * **줄일** 뿐이다. 사람의 재큐(`needs-human → queue`)와 릴리스 재시도는 출발 라벨이 blocked이 아니므로 여전히 새 주기다.
- */
-export function commentsSinceCycleStart(comments, { factoryLogin = null, blockedHopOpensCycle = true } = {}) {
+export function commentsSinceCycleStart(comments, { factoryLogin = null } = {}) {
   const list = Array.isArray(comments) ? comments : [];
   let from = 0;
   list.forEach((c, i) => {
     const b = String(c?.body ?? "");
     const m = TRANSITION_TO.exec(b);
     if (!m) return;
-    const runnerHop = !blockedHopOpensCycle && m[1] === "factory:blocked";
-    if (m[2] === "factory:queue" && !runnerHop) { from = i + 1; return; }   // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
+    if (m[2] === "factory:queue") { from = i + 1; return; }          // 재큐는 누가 했든 새 주기다 — 라벨 그래프가 통제한다
     // #156 dw6 — 새 엔진이 온 뒤의 릴리스 재시도도 사람의 `--retry`처럼 새 주기다. 단 러너의 마커 + 팩토리 계정일 때만.
     if (isFactoryReleaseRetry(c, { factoryLogin })) { from = i + 1; return; }
     /**
