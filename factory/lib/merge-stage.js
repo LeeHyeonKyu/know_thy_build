@@ -514,14 +514,16 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
    */
   /**
    * #208 dw5 — a merge run publishes EXACTLY ONCE: the two points are on exits that exclude each other (handToHuman returns
-   * the run's exit code; mergePr is reached only when no hand-off happened), and `published` makes that structural — a later
-   * call in the same run is a no-op, so a failed publish is not retried either. The veto window publishes nothing itself: a
+   * the run's exit code; mergePr is reached only when no hand-off happened). That layout is the whole rule — there is no
+   * "already published" flag, because no run reaches both points and a flag nothing can trip would only hide a refactor that
+   * adds a second publish site on one route: test_208_evidence_publish_count_across_merge_exits pins the count per exit
+   * instead, so such a site fails there. A failed publish is not retried. The veto window publishes nothing itself: a
    * veto, or an open breaker after the window, hands off through handToHuman (one publish there); a clean window goes on to
    * the publish before mergePr. Needs-human / blocked routes that bypass handToHuman (mergeGates, the re-check after ready,
    * review verification, two-actor refusals, the self-merge evidence refusal, undecidable) do not publish. A run records at
    * most ONE FAIL line for the PR-body step (`evidenceFailed`).
    */
-  let published = false, evidenceFailed = false;
+  let evidenceFailed = false;
   let evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false, evidenceLoginsUnresolved = false;
   const evidenceMs = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
   /**
@@ -554,8 +556,6 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   };
   const failOnce = (line) => { if (evidenceFailed) return; evidenceFailed = true; record([line]); };
   const publishEvidence = async ({ route, reason = null }) => {
-    if (published) return;                                             // dw5: once per merge run, whatever the route
-    published = true;
     if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
     if (typeof d.publishPrEvidence !== "function") {
       failOnce(failLine("read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written"));
