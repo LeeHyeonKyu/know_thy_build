@@ -1,3 +1,5 @@
+// Scope change (#208): run() passes an optional `opts.signal` to spawn (additive; absent → the old call) — the #202 re-land's
+// evidence timeout must kill a timed-out `gh pr edit` before mergePr / the needs-human transition (done_when dw3, dw5).
 import { spawn } from "node:child_process";
 
 /**
@@ -41,7 +43,11 @@ export function run(cmd, args = [], opts = {}) {
     let child;
     try {
       const env = opts.replaceEnv ? { ...(opts.env || {}) } : { ...process.env, ...(opts.env || {}) };
-      child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+      // #195 — `opts.signal` (an AbortSignal) kills the child when it aborts (Node's spawn option); the 'error' handler below
+      // resolves it like any other failed spawn. Absent → exactly the old call. The merge stage's evidence step must CANCEL a
+      // timed-out gh read/write, not abandon it — without this a late `gh pr edit` could still rewrite the PR body after the
+      // merge or the hand-off; gh.js has no other way to stop it.
+      child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], ...(opts.signal ? { signal: opts.signal } : {}) });
     } catch (e) {
       resolve({ code: 127, stdout: "", stderr: String(e) });
       return;
