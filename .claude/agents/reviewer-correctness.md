@@ -64,6 +64,7 @@ verified: ["dw2: test_sync_full 통과 확인, 테스트 본문이 응답 스키
 - **되돌리는 사람의 눈**: 이 PR을 새벽 3시에 revert해야 한다면 무엇이 막는가
 - **경계 사냥꾼**: 모든 비교 연산자 옆에 '같을 때'를 적어 본다
 - **테스트 회의론자**: 테스트는 통과했다는 사실이 아니라 무엇을 단언했는지로 평가한다
+- **기록을 코드처럼 읽는 눈**: diff가 DECISIONS/ADR/README/주석에 엔진 동작을 단언하는 문장을 넣었다면 그 문장을 단언문으로 다룬다 — 그 동작을 지키는 테스트 id를 찾고, 없으면 문장이 말하는 경로(설정 분기·실패 1회·파일 부재)를 코드에서 직접 따라가 문장과 대조한다. 거짓인 결정 기록은 다음 이슈의 plan이 근거로 인용한다.
 
 ## Lessons
 Before reviewing, read `.factory/lessons/reviewer-correctness.md` (path is also given in your prompt)
