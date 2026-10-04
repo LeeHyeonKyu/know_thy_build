@@ -5688,3 +5688,644 @@ test("test_196_crash_after_handoff_never_tells_owner_to_requeue", async () => {
     expect(lines.some((l) => /^crash: after the hand-off to the merge of PR/.test(l)), name).toBe(true);
   }
 });
+
+// ── #195 — run-stage wires the PR-body evidence through the gh.js adapter ──────────────────────────────────────────────────
+// PR-body I/O is the runner's: `gh.prBody` (`gh pr view --json body`) read immediately before `gh.editPrBody`
+// (`gh pr edit --body-file -`, the body on stdin — never a shell string), each with a timeout and no retry.
+import { makePrEvidenceDeps } from "../bin/run-stage.js";
+import { makeGh as makeGh195 } from "../lib/gh.js";
+import { EVIDENCE_START as EVIDENCE_START_195 } from "../lib/evidence.js";
+import { heartbeatBody as heartbeatBody195 } from "../lib/heartbeat.js";
+import { budgetLine as budgetLine195 } from "../lib/budget.js";
+
+test("test_195_run_stage_wires_pr_body_edit_through_gh_adapter", async () => {
+  const repo = "acme/app";
+  // (1) the adapter: argv shape, the body on stdin, one call each.
+  const run = makeFakeRun([
+    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "view", result: { code: 0, stdout: JSON.stringify({ body: "Closes #7\n" }), stderr: "" } },
+    { match: (c, a) => c === "gh" && a[0] === "pr" && a[1] === "edit", result: { code: 0, stdout: "", stderr: "" } },
+  ]);
+  const gh = makeGh195({ run, repo });
+  expect(await gh.prBody(9)).toBe("Closes #7\n");
+  expect(run.calls[0].args).toEqual(["pr", "view", "9", "-R", repo, "--json", "body"]);
+  const hostile = "line | pipe\n> quote; $(rm -rf /)\n";
+  await gh.editPrBody(9, hostile);
+  expect(run.calls[1].args).toEqual(["pr", "edit", "9", "-R", repo, "--body-file", "-"]);
+  expect(run.calls[1].opts.input).toBe(hostile);
+  expect(run.calls).toHaveLength(2);
+  // A hanging gh times out — one call, no retry.
+  const hang = makeFakeRun([{ match: () => true, result: () => new Promise(() => {}) }]);
+  const slow = makeGh195({ run: hang, repo, sleep: async () => {} });
+  await expect(slow.prBody(9, { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+  expect(hang.calls).toHaveLength(1);
+  await expect(slow.editPrBody(9, "x", { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+  expect(hang.calls).toHaveLength(2);
+  // A failing gh rejects — one call, no retry.
+  const bad = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 502" } }]);
+  await expect(makeGh195({ run: bad, repo, sleep: async () => {} }).editPrBody(9, "x")).rejects.toThrow(/HTTP 502/);
+  expect(bad.calls).toHaveLength(1);
+
+  // (2) the dep: the hydrated local record + this run's live gates → the marked section, read-modify-write on the PR body.
+  const root = mkdtempSync(join(tmpdir(), "rs195-"));
+  appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-501", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 4.5, runs: 6, ok: true }), usageLine({ usage: { input_tokens: 1 }, total_cost_usd: 2.75, num_turns: 4, terminal_reason: "completed", modelUsage: {} })] });
+  const recordPath = join(root, "docs/factory/runs/7.md");
+  const issueComments = [
+    // lib/transition.js posts the transition comment with the runner's token: its author is the factory login.
+    { body: "<!-- factory-transition:v1 from=factory:backlog to=factory:queue by=human -->\nfactory:backlog → factory:queue", createdAt: "2026-10-03T08:00:00Z", author: "ktb-bot" },
+    { body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" },
+  ];
+  const seq = [];
+  let body = "Closes #7\n\nauthor text\n";
+  const fakeGh = {
+    comments: vi.fn(async (n) => { seq.push(`comments ${n}`); return n === 7 ? [...issueComments] : []; }),
+    prBody: vi.fn(async () => { seq.push("prBody"); return body; }),
+    editPrBody: vi.fn(async (_pr, b) => { seq.push("editPrBody"); body = b; }),
+    comment: vi.fn(async (_n, b) => { seq.push("comment"); issueComments.push({ body: b, createdAt: "2026-10-03T12:31:00Z" }); }),
+  };
+  // The cost row is the record's run-bound `budget: lifetime` line ($4.50 / $60 over 6 runs, heartbeat-known gha-501) — the
+  // usage line's $2.75 is never a source.
+  const deps = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => readFileSync(recordPath, "utf8"), env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1234 });
+  const live = { schema: "factory.gates.v1", level: "full", status: "GREEN", passed: 4, failed: 0, failing: [] };
+  const r = await deps.publishPrEvidence({ pr: 9, route: "merge", gates: live, gatesRerun: true, reason: null });
+  expect(r.ok).toBe(true);
+  expect(seq).toEqual(["comments 7", "comments 9", "prBody", "editPrBody"]);
+  expect(fakeGh.prBody).toHaveBeenCalledWith(9, { timeoutMs: 1234, signal: null });
+  expect(fakeGh.editPrBody).toHaveBeenCalledWith(9, body, { timeoutMs: 1234, signal: null });
+  expect(body.startsWith("Closes #7\n\nauthor text\n")).toBe(true);
+  expect(body.split(EVIDENCE_START_195).length - 1).toBe(1);
+  expect(body).toContain("level=full status=GREEN passed=4");
+  expect(body).toContain("rerun: yes");
+  expect(body).toContain("- lifetime cost: $4.50 / $60 cap over 6 run(s) — record: budget: line of run 501 (implement)");
+  expect(body).not.toContain("$2.75");
+  expect(body).toContain("queued → now: 4h 30m");
+  expect(body).toContain(r.markdown);
+  // A second publish (a rerun of the merge job) re-reads the body and still leaves exactly one section.
+  await deps.publishPrEvidence({ pr: 9, route: "merge", gates: live, gatesRerun: false, reason: null });
+  expect(body.split(EVIDENCE_START_195).length - 1).toBe(1);
+  expect(body).toContain("rerun: no");
+  // The marked issue comment goes out at most once across reruns.
+  await deps.postEvidenceComment(r.markdown);
+  await deps.postEvidenceComment(r.markdown);
+  expect(fakeGh.comment).toHaveBeenCalledTimes(1);
+  expect(fakeGh.comment.mock.calls[0][0]).toBe(7);
+  expect(fakeGh.comment.mock.calls[0][1].startsWith(EVIDENCE_START_195)).toBe(true);
+  // A gh failure surfaces as a rejection (merge-stage turns it into the one FAIL line).
+  fakeGh.editPrBody.mockRejectedValueOnce(new Error("gh pr edit failed (1): HTTP 502"));
+  await expect(deps.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "x" })).rejects.toThrow(/HTTP 502/);
+  // No record on disk → still a section (rows from comments only), never a throw.
+  const noRec = makePrEvidenceDeps({ gh: fakeGh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z" });
+  expect((await noRec.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "protected paths changed" })).ok).toBe(true);
+
+  // (3) the evidence module is the base-branch engine's: a static top-level import (resolved when the process starts on the
+  // base checkout, before checkoutHead) — never a dynamic import from the PR's tree — and main() wires these deps.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/^import \{[^}]*\bbuildEvidence\b[^}]*\} from "\.\.\/lib\/evidence\.js";$/m);
+  expect(src).not.toMatch(/import\(\s*[^)]*evidence/);
+  expect(src).toMatch(/\.\.\.makePrEvidenceDeps\(\{ gh, issue, env: process\.env,/);
+});
+
+// ── #195 self-critique — a cancelled publish never writes, every gh call in the dep is bounded, and an over-limit body is a
+// failure (not a "truncated" success) ───────────────────────────────────────────────────────────────────────────────────────
+import { run as realRun195 } from "../lib/exec.js";
+import { PR_BODY_MAX_CHARS as PR_BODY_MAX_CHARS_195 } from "../lib/evidence.js";
+
+test("test_195_aborted_publish_never_writes_the_pr_body", async () => {
+  const beats = [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z" }];
+  const mkGh = (over = {}) => ({
+    comments: vi.fn(async () => beats),
+    prBody: vi.fn(async () => "Closes #7\n"),
+    editPrBody: vi.fn(async () => {}),
+    comment: vi.fn(async () => {}),
+    ...over,
+  });
+  const mk = (gh, extra = {}) => makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000, ...extra });
+
+  // (1) aborted while reading the comments → rejects with the abort reason; nothing is read or written after it.
+  {
+    let release; const held = new Promise((r) => { release = r; });
+    const gh = mkGh({ comments: vi.fn(async () => { await held; return beats; }) });
+    const ac = new AbortController();
+    const p = mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null, signal: ac.signal });
+    ac.abort(new Error("timed out after 5 ms — the PR-body write was cancelled"));
+    await expect(p).rejects.toThrow(/write was cancelled/);
+    release();
+    await new Promise((r) => setImmediate(r));
+    expect(gh.prBody).not.toHaveBeenCalled();
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (2) aborted between the read and the write → no write.
+  {
+    const ac = new AbortController();
+    const gh = mkGh({ prBody: vi.fn(async () => { ac.abort(new Error("cancelled")); return "Closes #7\n"; }) });
+    await expect(mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null, signal: ac.signal })).rejects.toThrow(/cancelled/);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (3) the write itself is handed the signal (so the gh child is killed on abort) together with its bound.
+  {
+    const gh = mkGh();
+    const ac = new AbortController();
+    expect((await mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null, signal: ac.signal })).ok).toBe(true);
+    expect(gh.editPrBody).toHaveBeenCalledTimes(1);
+    expect(gh.editPrBody.mock.calls[0][2]).toEqual({ timeoutMs: 1000, signal: ac.signal });
+    expect(gh.prBody.mock.calls[0][1]).toEqual({ timeoutMs: 1000, signal: ac.signal });
+  }
+  // (4) gh.comments is bounded too: a hanging comment read rejects within the dep's timeout, one call, no write.
+  {
+    const gh = mkGh({ comments: vi.fn(() => new Promise(() => {})) });
+    await expect(mk(gh, { timeoutMs: 5 }).publishPrEvidence({ pr: 9, route: "merge", gates: null })).rejects.toThrow(/gh issue comments timed out after 5 ms/);
+    expect(gh.comments).toHaveBeenCalledTimes(1);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (5) author text already over GitHub's limit → a rejection naming it (merge-stage's FAIL line), and no write.
+  {
+    const gh = mkGh({ prBody: vi.fn(async () => "z".repeat(PR_BODY_MAX_CHARS_195 + 1)) });
+    await expect(mk(gh).publishPrEvidence({ pr: 9, route: "merge", gates: null })).rejects.toThrow(/PR #9 body is already 65537 characters outside the evidence section — over GitHub's 65536-character limit; section not written/);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+  }
+  // (7) the adapter: the caller's signal and the adapter's own timeout both reach the gh child as an aborted signal.
+  {
+    const seen = [];
+    const hang = makeFakeRun([{ match: () => true, result: (_c, _a, opts) => { seen.push(opts.signal); return new Promise(() => {}); } }]);
+    const gh = makeGh195({ run: hang, repo: "acme/app", sleep: async () => {} });
+    const ac = new AbortController();
+    const p = gh.editPrBody(9, "x", { timeoutMs: 60_000, signal: ac.signal });
+    ac.abort(new Error("merge-stage timeout"));
+    await expect(p).rejects.toThrow(/merge-stage timeout/);
+    expect(seen[0]).toBeInstanceOf(AbortSignal);
+    expect(seen[0].aborted).toBe(true);
+    await expect(gh.editPrBody(9, "x", { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    expect(seen[1].aborted).toBe(true);
+    await expect(gh.prBody(9, { timeoutMs: 5 })).rejects.toThrow(/timed out after 5 ms/);
+    expect(seen[2].aborted).toBe(true);
+    expect(hang.calls).toHaveLength(3);
+  }
+  // (8) lib/exec.js kills an aborted child: a 30 s process ends as soon as the signal aborts.
+  {
+    const ac = new AbortController();
+    const p = realRun195(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { signal: ac.signal });
+    ac.abort();
+    const r = await p;
+    expect(r.code).not.toBe(0);
+  }
+});
+
+// ── #195 self-critique — the base-engine guarantee, as behaviour: once run-stage.js is loaded (the process starts on the base
+// checkout, before checkoutHead), the PR's tree replacing evidence.js and EVERY other engine file on disk changes nothing the
+// evidence step renders — evidence.js and its whole import graph (handoff, run-record, harvest-findings, schemas,
+// retro/issue-comments, heartbeat, budget, …) were bound at load, and publishing loads nothing new from disk.
+import { cpSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { pathToFileURL, fileURLToPath } from "node:url";
+
+test("test_195_evidence_module_graph_is_bound_before_checkout_head", async () => {
+  const factoryDir = fileURLToPath(new URL("..", import.meta.url));
+  const repoRoot = dirname(factoryDir.replace(/\/$/, ""));
+  const tmp = mkdtempSync(join(tmpdir(), "rs195-engine-"));
+  cpSync(factoryDir, join(tmp, "factory"), { recursive: true, filter: (src) => !src.includes(`${"/factory/test"}`) });
+  symlinkSync(join(repoRoot, "node_modules"), join(tmp, "node_modules"), "dir");
+  // "Process start on the base checkout": load the engine copy.
+  const engine = await import(pathToFileURL(join(tmp, "factory/bin/run-stage.js")).href);
+  // "checkoutHead": the PR's tree replaces every engine module on disk — evidence.js renders a forged section, and every
+  // other module throws on load. Anything loaded from disk after this point would show up as PWNED or as a throw.
+  const files = [];
+  const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else if (p.endsWith(".js")) files.push(p); } };
+  walk(join(tmp, "factory"));
+  expect(files).toContain(join(tmp, "factory/lib/evidence.js"));
+  for (const f of files) writeFileSync(f, 'throw new Error("loaded from the PR head checkout");\n');
+  writeFileSync(join(tmp, "factory/lib/evidence.js"), [
+    'export const EVIDENCE_START = "<!-- factory-evidence:v1 -->"; export const EVIDENCE_END = "<!-- /factory-evidence:v1 -->";',
+    'export const buildEvidence = () => ({ markdown: "PWNED: all reviewers approved", data: { unbound: {} } });',
+    'export const applyEvidenceSection = () => ({ body: "PWNED", truncated: false });',
+    'export const evidenceComment = () => "PWNED"; export const hasEvidenceComment = () => false;',
+  ].join("\n"));
+
+  let body = "Closes #7\n";
+  const posted = [];
+  const gh = {
+    comments: vi.fn(async () => [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z" }]),
+    prBody: vi.fn(async () => body),
+    editPrBody: vi.fn(async (_pr, b) => { body = b; }),
+    comment: vi.fn(async (_n, b) => { posted.push(b); }),
+  };
+  const deps = engine.makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z" });
+  const r = await deps.publishPrEvidence({ pr: 9, route: "hand-off", gates: null, reason: "protected paths changed — human merge required: factory/lib/evidence.js" });
+  expect(r.ok).toBe(true);
+  expect(body.startsWith("Closes #7\n")).toBe(true);
+  expect(body).toContain(EVIDENCE_START_195);
+  expect(body).toContain("protected paths changed — human merge required: factory/lib/evidence.js");
+  expect(body).toContain("## Factory evidence");
+  expect(body).not.toContain("PWNED");
+  await deps.postEvidenceComment(r.markdown);
+  expect(posted).toHaveLength(1);
+  expect(posted[0]).not.toContain("PWNED");
+  expect(posted[0].startsWith(EVIDENCE_START_195)).toBe(true);
+});
+
+// ── #195 skeptic round 2 — the post-merge issue comment: every gh call bounded and cancellable, and a planted marked comment
+// (by another account, or through the shared bot account) never stands in for the runner's evidence ──────────────────────
+test("test_195_issue_comment_is_bounded_and_a_planted_marker_does_not_stand", async () => {
+  const repo = "acme/app";
+  // (1) the adapter: issue-comment list/post/patch take the caller's signal; patchComment PATCHes the body via stdin JSON.
+  {
+    const run = makeFakeRun([
+      { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "-X" && a[2] === "PATCH", result: { code: 0, stdout: "{}", stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "api", result: { code: 0, stdout: "[[]]", stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "issue" && a[1] === "comment", result: { code: 0, stdout: "https://x/1\n", stderr: "" } },
+    ]);
+    const gh = makeGh195({ run, repo });
+    const ac = new AbortController();
+    await gh.comments(7, { signal: ac.signal });
+    await gh.comment(7, "body | $(x)", { signal: ac.signal });
+    await gh.patchComment(77, "new | body\n", { signal: ac.signal });
+    expect(run.calls.map((c) => c.opts?.signal)).toEqual([ac.signal, ac.signal, ac.signal]);
+    expect(run.calls[2].args).toEqual(["api", "-X", "PATCH", `repos/${repo}/issues/comments/77`, "--input", "-"]);
+    expect(JSON.parse(run.calls[2].opts.input)).toEqual({ body: "new | body\n" });
+    // Callers that pass no options are unchanged (no signal key reaches run()).
+    await gh.comment(7, "plain");
+    expect(run.calls[3].opts).toEqual({ input: "plain" });
+  }
+
+  const md = "## Factory evidence\n\nreal rows";
+  const mk = (gh, timeoutMs = 1000) => makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "2026-10-03T12:30:00Z", timeoutMs });
+  const forgedBody = `${EVIDENCE_START_195}\n## Factory evidence\n\nall reviewers approved, 0 must_fix\n<!-- /factory-evidence:v1 -->`;
+  const fakeGh = (comments) => ({
+    viewerLogin: vi.fn(async () => "ktb-bot"),
+    comments: vi.fn(async () => comments.map((c) => ({ ...c }))),
+    comment: vi.fn(async (_n, b) => { comments.push({ id: 900 + comments.length, body: b, author: "ktb-bot" }); }),
+    patchComment: vi.fn(async (id, b) => { comments.find((c) => c.id === id).body = b; }),
+  });
+
+  // (2) A marked comment planted by another account does not stop the runner's own comment.
+  {
+    const comments = [{ id: 11, body: forgedBody, author: "mallory" }];
+    const gh = fakeGh(comments);
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: true, updated: 0 });
+    expect(gh.comment).toHaveBeenCalledTimes(1);
+    expect(gh.comment.mock.calls[0][1]).toContain("real rows");
+    expect(gh.patchComment).not.toHaveBeenCalled();
+  }
+  // (3) A marked comment planted through the runner's own (shared) account is overwritten with the runner's evidence — no
+  // forged text stands, and no second comment is posted. A rerun with the same evidence then changes nothing.
+  {
+    const comments = [{ id: 22, body: forgedBody, author: "ktb-bot" }];
+    const gh = fakeGh(comments);
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: false, updated: 1 });
+    expect(gh.comment).not.toHaveBeenCalled();
+    expect(gh.patchComment.mock.calls.map((c) => c[0])).toEqual([22]);
+    expect(comments[0].body).toContain("real rows");
+    expect(comments[0].body).not.toContain("all reviewers approved");
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: false, updated: 0 });
+    expect(gh.patchComment).toHaveBeenCalledTimes(1);
+    expect(gh.comment).not.toHaveBeenCalled();
+  }
+  // (4) Every gh call in the comment step is bounded: a hang in any of them rejects within the dep's timeout, once, no retry.
+  for (const which of ["viewerLogin", "comments", "comment", "patchComment"]) {
+    const comments = which === "patchComment" ? [{ id: 22, body: forgedBody, author: "ktb-bot" }] : [];
+    const gh = fakeGh(comments);
+    gh[which] = vi.fn(() => new Promise(() => {}));
+    await expect(mk(gh, 5).postEvidenceComment(md), which).rejects.toThrow(/timed out after 5 ms/);
+    expect(gh[which], which).toHaveBeenCalledTimes(1);
+  }
+  // (5) merge-stage's signal reaches the gh calls, and an aborted step posts nothing.
+  {
+    const gh = fakeGh([]);
+    const ac = new AbortController();
+    ac.abort(new Error("cancelled by merge-stage"));
+    await expect(mk(gh).postEvidenceComment(md, { signal: ac.signal })).rejects.toThrow(/cancelled by merge-stage/);
+    expect(gh.comment).not.toHaveBeenCalled();
+  }
+});
+
+// ── #195 rework round 1 — the builder's rework responses live on the PR (factory-builder.md: `gh pr comment <pr>`), and that is
+// where the evidence step reads them; a standalone response on the issue, or one from a non-factory account, marks nothing ──
+import { renderHandoff as renderHandoff195 } from "../lib/handoff.js";
+import { validate as validate195 } from "../lib/schemas.js";
+
+test("test_195_rework_responses_posted_on_the_pr_reach_the_evidence_rows", async () => {
+  const SHA = `86b194f${"0".repeat(33)}`;
+  const review = {
+    schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "1".repeat(40), round: 1, decision: "rework", orchestration: "workflow", guarantee: "verified",
+    verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: [{ id: "cf1", where: "x.js:1", claim: "off by one", evidence: "ran it" }], should_fix: [], verified: [] }],
+  };
+  const plan = { summary: "plan", done_when: [{ id: "dw1", text: "t", level: "unit", check: { kind: "test", ref: "test_7_alpha" } }] };
+  // The tracking issue: the runner's heartbeat and the plan / review handoffs (real producers), all by the factory login.
+  const issueComments = [
+    { body: heartbeatBody195({ issue: 7, stage: "review", runnerId: "gha-502", started: "x", last: "x" }), createdAt: "2026-10-03T09:30:00Z", author: "ktb-bot" },
+    { body: renderHandoff195({ stage: "plan", issue: 7, summary: "### plan", data: plan }), createdAt: "2026-10-03T08:30:00Z", author: "ktb-bot" },
+    { body: renderHandoff195({ stage: "review", issue: 7, summary: "### review", data: review }), createdAt: "2026-10-03T09:40:00Z", author: "ktb-bot" },
+  ];
+  // The builder's answer exactly as factory-builder.md / factory-implement.js have it posted: a ```json fenced
+  // factory.rework-response.v1 object in a comment on the PR, by the factory login.
+  const response = { schema: "factory.rework-response.v1", issue: 7, responses: [{ id: "cf1", status: "fixed", commit: SHA }] };
+  expect(validate195("rework-response.v1", response).ok).toBe(true);
+  const responseComment = { body: `## Rework response\n\n\`\`\`json\n${JSON.stringify(response, null, 2)}\n\`\`\`\n`, createdAt: "2026-10-03T10:30:00Z", author: "ktb-bot" };
+
+  const mkGh = ({ onIssue, onPr }) => {
+    let body = "Closes #7\n";
+    return {
+      comments: vi.fn(async (n) => {
+        if (n === 7) return onIssue.map((c) => ({ ...c }));
+        if (n === 9) return onPr.map((c) => ({ ...c }));
+        throw new Error(`unexpected gh.comments(${n})`);
+      }),
+      prBody: vi.fn(async () => body),
+      editPrBody: vi.fn(async (_pr, b) => { body = b; }),
+      body: () => body,
+    };
+  };
+  const publish = async (gh, { env = { FACTORY_BOT_LOGIN: "ktb-bot" } } = {}) => {
+    const r = await makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 }).publishPrEvidence({ pr: 9, route: "merge", gates: null });
+    return { r, row: gh.body().split("\n").find((l) => l.startsWith("| cf1 |")) };
+  };
+
+  // (1) The response lives only on the PR → the PR body passed to gh.editPrBody says "fixed in <short sha>" on cf1's row.
+  const onPr = mkGh({ onIssue: issueComments, onPr: [responseComment] });
+  const a = await publish(onPr);
+  expect(a.r.ok).toBe(true);
+  expect(onPr.comments.mock.calls.map((c) => c[0]).sort()).toEqual([7, 9]);
+  expect(onPr.editPrBody).toHaveBeenCalledTimes(1);
+  expect(onPr.editPrBody.mock.calls[0][1]).toContain("| cf1 | 1 · correctness | fixed in `86b194f` | claim |");
+  expect(a.row).toBe("| cf1 | 1 · correctness | fixed in `86b194f` | claim |");
+  expect(onPr.body()).not.toMatch(/\| unanswered \|/);
+  expect(onPr.body()).toContain("must_fix raised by review: 1 (claim — review handoffs; fixed 1, disputed 0, unanswered 0)");
+
+  // (2) The opposite fixture: the same standalone response only on the ISSUE → the row is not marked fixed.
+  const onIssue = mkGh({ onIssue: [...issueComments, responseComment], onPr: [] });
+  expect((await publish(onIssue)).row).toBe("| cf1 | 1 · correctness | unanswered | claim |");
+
+  // (3) The same body on the PR from a non-factory account → unanswered.
+  const stranger = mkGh({ onIssue: issueComments, onPr: [{ ...responseComment, author: "mallory" }] });
+  expect((await publish(stranger)).row).toBe("| cf1 | 1 · correctness | unanswered | claim |");
+
+  // (4) Logins that cannot be resolved (env injected, nothing in it; outside Actions) → the publish still succeeds, the
+  // result says why (merge-stage writes the FAIL line), and the section fails closed: no row from any comment, a note why.
+  const blind = mkGh({ onIssue: issueComments, onPr: [responseComment] });
+  const b = await publish(blind, { env: {} });
+  expect(b.r.ok).toBe(true);
+  expect(b.r.logins).toMatchObject({ ok: false });
+  expect(b.row).toBeUndefined();
+  expect(blind.body()).not.toMatch(/fixed in|test_7_alpha/);
+  expect(blind.body()).toContain("so no comment can be attributed to the factory._");
+  // No env at all is never read from process.env: the resolver refuses, and that refusal is the unresolved reason.
+  const noEnv = mkGh({ onIssue: issueComments, onPr: [responseComment] });
+  const c = await publish(noEnv, { env: null });
+  expect(c.r.logins.ok).toBe(false);
+  expect(c.r.logins.reason).toMatch(/env is required/);
+  expect(c.row).toBeUndefined();
+});
+
+// ── #195 skeptic round 3 — every rejection of the publish dep names its step (read / build / edit), and the dep reports the
+// step it is in, so merge-stage can name it even when its own timeout fires first ────────────────────────────────────────────
+test("test_195_publish_rejections_name_their_step", async () => {
+  const beats = [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" }];
+  const mkGh = (over = {}) => ({
+    comments: vi.fn(async () => beats),
+    prBody: vi.fn(async () => "Closes #7\n"),
+    editPrBody: vi.fn(async () => {}),
+    ...over,
+  });
+  const publish = async (gh, { timeoutMs = 1000, gates = null, signal = null } = {}) => {
+    const steps = [];
+    const p = makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs })
+      .publishPrEvidence({ pr: 9, route: "merge", gates, signal, onStep: (s) => steps.push(s) });
+    let error = null, result = null;
+    try { result = await p; } catch (e) { error = e; }
+    return { error, result, steps };
+  };
+
+  // A clean run reports read → build → edit, in that order.
+  const ok = await publish(mkGh());
+  expect(ok.error).toBeNull();
+  expect(ok.steps).toEqual(["read", "build", "edit"]);
+
+  // read: a failing comment read, a hanging one, and merge-stage's abort while reading.
+  const r1 = await publish(mkGh({ comments: vi.fn(async () => { throw new Error("gh api failed (1): HTTP 502"); }) }));
+  expect(r1.error.message).toBe("read: gh api failed (1): HTTP 502");
+  expect(r1.steps).toEqual(["read"]);
+  const r2 = await publish(mkGh({ comments: vi.fn(() => new Promise(() => {})) }), { timeoutMs: 5 });
+  expect(r2.error.message).toBe("read: gh issue comments timed out after 5 ms");
+  const r3 = await publish(mkGh({ comments: vi.fn(async (n) => { if (n === 9) throw new Error("PR comments 404"); return beats; }) }));
+  expect(r3.error.message).toBe("read: PR comments 404");
+  const ac = new AbortController(); ac.abort(new Error("cancelled by merge-stage"));
+  const r4 = await publish(mkGh(), { signal: ac.signal });
+  expect(r4.error.message).toBe("read: cancelled by merge-stage");
+
+  // build: the section cannot be assembled (a gates value that throws when read).
+  const r5 = await publish(mkGh(), { gates: { get level() { throw new Error("gates unreadable"); } } });
+  expect(r5.error.message).toBe("build: gates unreadable");
+  expect(r5.steps).toEqual(["read", "build"]);
+
+  // edit: the PR-body read, the write, and an over-limit body.
+  const r6 = await publish(mkGh({ prBody: vi.fn(async () => { throw new Error("gh pr view failed (1): HTTP 502"); }) }));
+  expect(r6.error.message).toBe("edit: gh pr view failed (1): HTTP 502");
+  const r7 = await publish(mkGh({ editPrBody: vi.fn(async () => { throw new Error("gh pr edit failed (1): HTTP 502"); }) }));
+  expect(r7.error.message).toBe("edit: gh pr edit failed (1): HTTP 502");
+  expect(r7.steps).toEqual(["read", "build", "edit"]);
+  const r8 = await publish(mkGh({ prBody: vi.fn(async () => "z".repeat(PR_BODY_MAX_CHARS_195 + 1)) }));
+  expect(r8.error.message).toBe("edit: PR #9 body is already 65537 characters outside the evidence section — over GitHub's 65536-character limit; section not written");
+});
+
+// ── #195 skeptic round 3 — the two `gh api user` reads on the evidence path (factory logins, the comment step's viewer) are
+// handed the bound's signal, so a timeout kills them instead of abandoning them; without a signal the calls are the old ones ──
+import { resolveFactoryLogins as resolveFactoryLogins195 } from "../lib/gh.js";
+
+test("test_195_login_and_viewer_reads_are_cancelled_through_the_signal", async () => {
+  // (1) the adapter: viewerLogin / viewerType take an optional signal down to the gh child; absent → exactly the old call.
+  {
+    const run = makeFakeRun([
+      { match: (c, a) => c === "gh" && a.includes("--jq"), result: { code: 0, stdout: "Bot\n", stderr: "" } },
+      { match: (c, a) => c === "gh" && a[0] === "api" && a[1] === "user", result: { code: 0, stdout: JSON.stringify({ login: "ktb-bot" }), stderr: "" } },
+    ]);
+    const gh = makeGh195({ run, repo: "acme/app" });
+    const ac = new AbortController();
+    expect(await gh.viewerLogin({ signal: ac.signal })).toBe("ktb-bot");
+    expect(await gh.viewerType({ signal: ac.signal })).toBe("Bot");
+    expect(await gh.viewerLogin()).toBe("ktb-bot");
+    expect(await gh.viewerType()).toBe("Bot");
+    expect(run.calls.map((c) => c.args)).toEqual([["api", "user"], ["api", "user", "--jq", ".type"], ["api", "user"], ["api", "user", "--jq", ".type"]]);
+    expect(run.calls.map((c) => c.opts)).toEqual([{ signal: ac.signal }, { signal: ac.signal }, {}, {}]);
+  }
+  // (2) resolveFactoryLogins hands its signal to both viewer reads; without one it calls them exactly as before (no argument).
+  {
+    const ac = new AbortController();
+    const gh = { viewerLogin: vi.fn(async () => "ktb-bot"), viewerType: vi.fn(async () => "Bot") };
+    expect((await resolveFactoryLogins195({ gh, env: { GITHUB_ACTIONS: "true" }, signal: ac.signal })).logins).toEqual(["ktb-bot"]);
+    expect(gh.viewerLogin.mock.calls).toEqual([[{ signal: ac.signal }]]);
+    expect(gh.viewerType.mock.calls).toEqual([[{ signal: ac.signal }]]);
+    const plain = { viewerLogin: vi.fn(async () => "ktb-bot"), viewerType: vi.fn(async () => "Bot") };
+    await resolveFactoryLogins195({ gh: plain, env: { GITHUB_ACTIONS: "true" } });
+    expect(plain.viewerLogin.mock.calls).toEqual([[]]);
+    expect(plain.viewerType.mock.calls).toEqual([[]]);
+  }
+  // (3) publish: the factory-logins read hangs (inside Actions, env injected) → it is bounded, its signal is ABORTED (the gh
+  // child would be killed), and the publish goes on with unresolved logins.
+  {
+    let seen = null;
+    const gh = {
+      comments: vi.fn(async () => []),
+      viewerLogin: vi.fn((opts) => { seen = opts?.signal ?? null; return new Promise(() => {}); }),
+      prBody: vi.fn(async () => "Closes #7\n"),
+      editPrBody: vi.fn(async () => {}),
+    };
+    const r = await makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env: { GITHUB_ACTIONS: "true" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 5 })
+      .publishPrEvidence({ pr: 9, route: "merge", gates: null });
+    expect(r.ok).toBe(true);
+    expect(r.logins).toEqual({ ok: false, reason: "factory logins timed out after 5 ms" });
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen.aborted).toBe(true);
+  }
+  // (4) the comment step: the viewer read hangs → bounded, and its signal is aborted.
+  {
+    let seen = null;
+    const gh = {
+      viewerLogin: vi.fn((opts) => { seen = opts?.signal ?? null; return new Promise(() => {}); }),
+      comments: vi.fn(async () => []),
+      comment: vi.fn(async () => {}),
+    };
+    await expect(makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, now: () => "x", timeoutMs: 5 }).postEvidenceComment("md")).rejects.toThrow(/^gh api user timed out after 5 ms$/);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen.aborted).toBe(true);
+    expect(gh.comment).not.toHaveBeenCalled();
+  }
+});
+
+// ── #195 skeptic round 3 — (a) two-actor mode (ADR-021): the merge job's viewer is the merge actor, but agent sessions post
+// as FACTORY_BOT_LOGIN; a marked comment forged through the bot account is still the factory's and is overwritten, never left
+// standing beside a second one. (b) main()'s record source is the writer's own path: the dep, given only `root`, reads the
+// record appendRunRecord wrote for this issue — and main() passes `root`, not its own reader. ──────────────────────────────
+test("test_195_two_actor_forged_marker_through_the_bot_login_is_overwritten", async () => {
+  const md = "## Factory evidence\n\nreal rows";
+  const forgedBody = `${EVIDENCE_START_195}\n## Factory evidence\n\nall reviewers approved, 0 must_fix\n<!-- /factory-evidence:v1 -->`;
+  const env = { GITHUB_ACTIONS: "true", FACTORY_BOT_LOGIN: "KTB-Bot" };
+  const fakeGh = (comments) => ({
+    viewerLogin: vi.fn(async () => "ktb-merge"),                // the merge actor's token
+    viewerType: vi.fn(async () => "Bot"),
+    comments: vi.fn(async () => comments.map((c) => ({ ...c }))),
+    comment: vi.fn(async (_n, b) => { comments.push({ id: 900 + comments.length, body: b, author: "ktb-merge" }); }),
+    patchComment: vi.fn(async (id, b) => { comments.find((c) => c.id === id).body = b; }),
+  });
+  const mk = (gh) => makePrEvidenceDeps({ gh, issue: 7, readRecord: () => null, env, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+  // The forgery sits under the agent actor's login (case differs from FACTORY_BOT_LOGIN — GitHub logins are case-insensitive).
+  {
+    const comments = [{ id: 31, body: forgedBody, author: "ktb-bot" }];
+    const gh = fakeGh(comments);
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: false, updated: 1 });
+    expect(gh.comment).not.toHaveBeenCalled();
+    expect(gh.patchComment.mock.calls.map((c) => c[0])).toEqual([31]);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].body).toContain("real rows");
+    expect(comments[0].body).not.toContain("all reviewers approved");
+  }
+  // A stranger's marked comment is still that stranger's text: the runner posts its own, and patches nothing.
+  {
+    const comments = [{ id: 41, body: forgedBody, author: "mallory" }];
+    const gh = fakeGh(comments);
+    expect(await mk(gh).postEvidenceComment(md)).toEqual({ ok: true, posted: true, updated: 0 });
+    expect(gh.patchComment).not.toHaveBeenCalled();
+    expect(comments[1].body).toContain("real rows");
+  }
+  // Logins that cannot be resolved (the viewer read fails inside resolveFactoryLogins) fail the step closed — nothing is
+  // posted beside a marked comment whose author cannot be classified.
+  {
+    const comments = [{ id: 51, body: forgedBody, author: "ktb-bot" }];
+    const gh = fakeGh(comments);
+    let calls = 0;
+    gh.viewerLogin = vi.fn(async () => { calls += 1; if (calls > 1) throw new Error("HTTP 502"); return "ktb-merge"; });
+    await expect(mk(gh).postEvidenceComment(md)).rejects.toThrow(/factory logins.*HTTP 502/);
+    expect(gh.comment).not.toHaveBeenCalled();
+    expect(gh.patchComment).not.toHaveBeenCalled();
+  }
+});
+
+test("test_195_main_reads_the_record_the_writer_wrote_for_this_issue", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rs195-root-"));
+  appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-601", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 7.25, runs: 3, ok: true })] });
+  // A decoy record for another number (the PR's) must not be the source.
+  appendRunRecord({ root, issue: 9, stage: "implement", runnerId: "gha-601", now: "2026-10-03T09:00:00Z", lines: [budgetLine195({ cap: 60, usd: 1.0, runs: 1, ok: true })] });
+  let body = "Closes #7\n";
+  const gh = {
+    comments: vi.fn(async (n) => (n === 7 ? [{ body: heartbeatBody195({ issue: 7, stage: "implement", runnerId: "gha-601", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" }] : [])),
+    prBody: vi.fn(async () => body),
+    editPrBody: vi.fn(async (_pr, b) => { body = b; }),
+  };
+  const deps = makePrEvidenceDeps({ gh, issue: 7, root, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z" });
+  await deps.publishPrEvidence({ pr: 9, route: "merge", gates: null });
+  expect(body).toContain("- lifetime cost: $7.25 / $60 cap over 3 run(s) — record: budget: line of run 601 (implement)");
+  expect(body).not.toContain("$1.00");
+  // No record on disk for this issue → no cost row, never a throw.
+  const empty = mkdtempSync(join(tmpdir(), "rs195-empty-"));
+  body = "Closes #7\n";
+  await makePrEvidenceDeps({ gh, issue: 7, root: empty, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z" }).publishPrEvidence({ pr: 9, route: "merge", gates: null });
+  expect(body).not.toContain("lifetime cost");
+  // main() hands the dep its checkout root and lets the dep read the writer's path — no reader of its own.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  const calls = src.match(/\.\.\.makePrEvidenceDeps\(\{[^}]*\}\)/g) ?? [];
+  expect(calls).toEqual(["...makePrEvidenceDeps({ gh, issue, env: process.env, root })"]);
+});
+
+// ── #195 skeptic round 4 — the merge stage always gets the evidence slot from runStage. If a wiring drops the
+// `publishPrEvidence` key (for example a refactor of main()'s spread of makePrEvidenceDeps), nothing is published on any
+// route. That must be visible as one FAIL line, never a silent no-op.
+test("test_195_run_stage_hands_merge_an_evidence_slot_even_when_the_dep_is_dropped", async () => {
+  const v = { role: "a", verdict: "approve", confidence: "high", must_fix: [], should_fix: [], verified: [] };
+  const review = { schema: "factory.review.v1", issue: 7, pr: 9, head_sha: "a".repeat(40), round: 1, verdicts: [v], orchestration: "workflow", guarantee: "verified" };
+  const comments = [{ id: 1, createdAt: "2026-09-11T00:00:00Z", body: renderHandoff({ stage: "review", issue: 7, summary: "s", data: review }) }];
+  const mk = (over = {}) => {
+    const lines = [];
+    const d = baseDeps({
+      assertHandoff: vi.fn(async () => requirementFor("factory:approved")({ issue: 7, comments, prerequisite: true })),
+      resetGates: async () => {}, runRecord: (l) => lines.push(...l),
+      defaultBranch: "main",
+      prInfo: async () => ({ number: 9, state: "OPEN", mergeable: "MERGEABLE" }),
+      gates: async () => ({ schema: "factory.gates.v1", status: "GREEN", head_sha: "a".repeat(40) }),
+      mergeGates: async () => ({ checksGreen: true, integrityGreen: true }),
+      protectedPaths: async () => ({ ok: true, files: [] }),
+      policyViolations: async () => ({ ok: true, files: [] }),
+      ...mergeReviewDepsFor("a".repeat(40)),
+      mergePr: vi.fn(async () => {}), closeIssue: async () => {},
+      ...over,
+    });
+    return { d, lines };
+  };
+  // (1) the deps carry no publishPrEvidence key at all: the merge still happens, exit 0, and exactly one FAIL line says why.
+  {
+    const { d, lines } = mk();
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written (issue #7)"]);
+  }
+  // (2) a wired dep is used as is (the slot never replaces it), and the deps object the caller built is not mutated.
+  {
+    const publishPrEvidence = vi.fn(async () => ({ ok: true, markdown: "md" }));
+    const { d, lines } = mk({ publishPrEvidence, postEvidenceComment: vi.fn(async () => ({ ok: true, posted: true })) });
+    expect(await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" })).toBe(0);
+    expect(publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", "evidence: issue comment posted"]);
+  }
+  {
+    const { d } = mk();
+    await runStage({ stage: "merge", issue: 7, deps: d, runnerId: "r" });
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
+  }
+});
+
+// ── #195 rework arch1 — the run-record path has ONE owner: run-record.js's `runRecordPath`. The writer (`appendRunRecord`)
+// and the evidence dep (`makePrEvidenceDeps`) take the path from it, and asking for it creates nothing.
+import * as runRecord195 from "../lib/run-record.js";
+
+test("test_195_run_record_path_has_one_owner", async () => {
+  expect(typeof runRecord195.runRecordPath).toBe("function");
+  const root = mkdtempSync(join(tmpdir(), "rs195-path-"));
+  // Pure: asking for the path creates nothing.
+  expect(runRecord195.runRecordPath({ root, issue: 7 })).toBe(join(root, "docs/factory/runs/7.md"));
+  expect(existsSync(join(root, "docs"))).toBe(false);
+  // The writer writes exactly there.
+  const written = appendRunRecord({ root, issue: 7, stage: "implement", runnerId: "gha-1", now: "2026-10-03T09:00:00Z", lines: ["x"] });
+  expect(written).toBe(runRecord195.runRecordPath({ root, issue: 7 }));
+  expect(runRecord195.runRecordPath({ root, issue: 12 })).toBe(join(root, "docs/factory/runs/12.md"));
+  // run-stage imports the owner's function (the evidence dep's reader goes through it; test_195_main_reads_the_record_the_
+  // writer_wrote and test_208_evidence_reads_the_record_the_writer_wrote prove the behaviour). #208 non_goal: the older
+  // record-path literals elsewhere in run-stage.js are a follow-up, so no source-literal count is pinned here.
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/^import \{[^}]*\brunRecordPath\b[^}]*\} from "\.\.\/lib\/run-record\.js";$/m);
+});

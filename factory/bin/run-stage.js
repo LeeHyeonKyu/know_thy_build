@@ -4,7 +4,8 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { run } from "../lib/exec.js";
-import { makeGh, allChecksGreen, resolveFactoryLogins } from "../lib/gh.js";
+import { makeGh, allChecksGreen, resolveFactoryLogins, PR_BODY_TIMEOUT_MS, bounded } from "../lib/gh.js";
+import { buildEvidence, applyEvidenceSection, evidenceComment, hasEvidenceComment, PR_BODY_MAX_CHARS } from "../lib/evidence.js";
 import { loadCharter, loadHarness, loadRoles, breakerThresholds } from "../lib/config.js";
 import { composeEnv } from "../lib/test-env.js";
 import { loadQuarantine, saveQuarantine as writeQuarantine } from "../lib/quarantine.js";
@@ -37,7 +38,7 @@ import { renderHandoff, latestHandoff, parseHandoffs } from "../lib/handoff.js";
 import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
-import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { appendRunRecord, appendRunRecordLine, runRecordPath, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
 import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
@@ -165,6 +166,15 @@ export function stageMaxTurns(harness, stage) {
     if (Number.isInteger(v) && v >= 1) return v;
   }
   return DEFAULT_MAX_TURNS;
+}
+
+/**
+ * The human-readable line the implement stage writes right before a passing self-gate's `self-gate-detail:` line (same
+ * `record()` call, so the two are adjacent in one section). #195 — `lib/evidence.js` reads its advisory count: the detail
+ * line alone cannot tell a mutation check that passed from one that crashed or skipped a file (both non-blocking).
+ */
+export function selfGateOkLine(sg, advisoryCount = 0) {
+  return `self-gate: ${sg?.ranChecks?.join("+") || "none"} → ok${advisoryCount ? ` (${advisoryCount} advisory)` : ""}`;
 }
 
 /**
@@ -730,7 +740,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       if (!m.ok) { const t = await d.transition({ to: "factory:blocked", reason: `undecidable — ${m.reason}` }); record([`mirror: FAIL — ${m.reason}`, ...refusal(t)]); return 2; }
       if (m.applicable) record([mirrorLine(m)]);
     }
-    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d, record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
+    if (stage === "merge") return await runMergeStage({ issue, defaultBranch: d.defaultBranch, headSha: checkoutSha, d: withEvidenceSlot(d), record, refusal, postStatus, retryFromBlocked: entryLabel === "factory:blocked" ? blockedOriginFrom : false, stamp: { runId, runnerId, round: null } });
     if (stage === "implement") {                                      // planned → in-progress: 작업 시작을 라벨로 알린다
       const ip = await d.transition({ to: "factory:in-progress", reason: `claimed by ${runnerId}` });
       if (!ip.ok) { record(refusal(ip)); return 2; }
@@ -1371,7 +1381,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
           record(["verify: ok", `self-gate: ${sg.ranChecks.join("+") || "none"} → BLOCKED — attempt ${attempt} → ${to} — ${summary}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null }), ...refusal(t), ...gatesNote, usage]);
           return t.ok ? 0 : 2;
         }
-        record([`self-gate: ${sg.ranChecks.join("+") || "none"} → ok${advisory.length ? ` (${advisory.length} advisory)` : ""}`, selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
+        record([selfGateOkLine(sg, advisory.length), selfGateDetailLine(sg, { ...stamp, ktbVersion: d.ktbVersion ?? null })]);
       }
     }
     await d.writeHandoff({ stage, data: v.data, gates });
@@ -2263,6 +2273,142 @@ export function makeCharterReady({ root, set, loadCharter: readCharter = loadCha
     set({ engine });
     if (charter.status !== "ready") { log(`factory: CHARTER status is ${charter.status} — dormant`); return false; }
     return true;
+  };
+}
+
+/**
+ * #195 — the deps runStage hands the merge stage always carry the `publishPrEvidence` slot. merge-stage keeps a wiring with
+ * no slot at all byte-identical (pre-#195 harnesses that call runMergeStage directly), so if the slot were left to main()'s
+ * spread of `makePrEvidenceDeps`, a refactor that dropped the spread would publish nothing on any route and record nothing.
+ * Here a missing key becomes a `null` slot, which merge-stage turns into its one FAIL line. A wired dep is used as is. The
+ * caller's object is not mutated, and every other key is read THROUGH it at use time — a Proxy, not a copy: runStage's `d`
+ * is itself a Proxy whose `transition` and `mergePr` are tracked (#196 — a crash after mergePr returned must not become an
+ * engine-crash block), and copying its own property descriptors would hand merge-stage the untracked raw deps; getters
+ * (`selfChange`, `engine`) likewise stay getters (#208: the 3-way resolution with #196's tracking Proxy).
+ */
+export function withEvidenceSlot(d) {
+  if (Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return d;
+  const SLOT = "publishPrEvidence";
+  return new Proxy(d, {
+    get: (target, key) => (key === SLOT ? null : Reflect.get(target, key)),
+    has: (target, key) => key === SLOT || Reflect.has(target, key),
+    getOwnPropertyDescriptor: (target, key) => (key === SLOT
+      ? { value: null, enumerable: true, writable: true, configurable: true }
+      : Reflect.getOwnPropertyDescriptor(target, key)),
+  });
+}
+
+/**
+ * #195 — `makePrEvidenceDeps`: merge-stage's `publishPrEvidence` + `postEvidenceComment` (the PR-evidence dep is named apart
+ * from feedback's `appendEvidence`). The section is built by `lib/evidence.js` — imported statically at the top of this file,
+ * so it is the base-branch engine's copy (loaded when the process started on the base checkout, before checkoutHead): a PR
+ * that changes evidence.js does not render its own evidence. Inputs, each named apart: the local hydrated run record
+ * (`readRecord`); the tracking issue's comments (heartbeats, handoffs, transitions); the PR's comments — where the builder
+ * posts its factory.rework-response.v1 (factory-builder.md: `gh pr comment <pr>`; context.js reads them there too); the
+ * factory's logins (`resolveFactoryLogins` with the caller's `env` injected — never `process.env` from in here — and no
+ * comments, so a stranger's heartbeat-shaped comment cannot make its author a factory login); and this merge run's live
+ * gates result passed in by merge-stage — never the record's FACTORY_GATES line. Logins that cannot be resolved do not fail
+ * the publish: the section fails closed (no row from any comment, a note saying why) and the result's `logins` carries the
+ * reason, which merge-stage writes as the record's FAIL line. The logins read and the comment step's viewer read get the
+ * bound's signal like every other gh call here, so a timeout kills them rather than leaving them running.
+ * PR-body I/O goes only through gh.js: `prBody` immediately before `editPrBody` (read-modify-write; a human edit landing
+ * between the two can still be lost — gh has no compare-and-swap on a PR body), each bounded by `timeoutMs`, no retry; the
+ * comment reads are bounded the same way. merge-stage's `signal` cancels the step: checked before the write and handed to
+ * every gh child, so a timed-out step never writes after the merge or the transition. A body whose author text alone is
+ * over GitHub's limit is a failure, not a write. Any failure rejects with the failing step named (`read: …`, `build: …`,
+ * `edit: …`); merge-stage turns it into the one `evidence: FAIL — …` line. The marked issue comment is posted only after a
+ * merge (merge-stage calls `postEvidenceComment` then) and at most once — the runner's existing marked comment is updated in
+ * place through gh.patchComment (see `postEvidenceComment`). Every gh call there is bounded and takes merge-stage's signal.
+ */
+export function makePrEvidenceDeps({ gh, issue, readRecord = null, root = null, env = null, now = () => new Date().toISOString(), timeoutMs = PR_BODY_TIMEOUT_MS }) {
+  // Without a reader of its own, the dep reads the record `appendRunRecord` writes for this issue under `root` (main() passes
+  // only its checkout root). The path comes from run-record.js's `runRecordPath` — the same function the writer uses.
+  if (typeof readRecord !== "function") {
+    const p = root ? runRecordPath({ root, issue }) : null;
+    readRecord = () => (p && existsSync(p) ? readFileSync(p, "utf8") : null);
+  }
+  return {
+    publishPrEvidence: async ({ pr, route = null, gates = null, gatesRerun = false, reason = null, signal = null, onStep = null } = {}) => {
+      /**
+       * `fn()` inside the named evidence step: the step is reported first (`onStep` — merge-stage names it when its own timeout
+       * fires before this rejection can reach it), and a failure is renamed to it (merge-stage's FAIL line names the step).
+       */
+      const inStep = async (step, fn) => {
+        try { onStep?.(step); } catch { /* a reporting callback never changes the step's outcome */ }
+        try { return await fn(); } catch (e) {
+          const msg = e?.message || String(e);
+          throw new Error(msg.startsWith(`${step}: `) ? msg : `${step}: ${msg}`, { cause: e });
+        }
+      };
+      const live = () => { if (signal?.aborted) throw (signal.reason ?? new Error("evidence step aborted")); };
+      // A record that does not exist is no source (null, no row); a record that exists but cannot be read is a failed read
+      // step — never a section published as if the record rows simply were not there.
+      const { recordText, issueComments, prComments, factoryLogins } = await inStep("read", async () => {
+        let recordText;
+        try { recordText = readRecord(); } catch (e) { throw new Error(`run record unreadable — ${e?.message || e}`, { cause: e }); }
+        const issueComments = await bounded((s) => gh.comments(issue, { signal: s }), { ms: timeoutMs, what: "gh issue comments", signal });
+        live();
+        const prComments = await bounded((s) => gh.comments(pr, { signal: s }), { ms: timeoutMs, what: "gh pr comments", signal });
+        live();
+        let factoryLogins;
+        try { factoryLogins = await bounded((s) => resolveFactoryLogins({ gh, env, signal: s }), { ms: timeoutMs, what: "factory logins", signal }); }
+        catch (e) { live(); factoryLogins = { ok: false, reason: e?.message || String(e) }; }
+        live();
+        return { recordText, issueComments, prComments, factoryLogins };
+      });
+      // #208 dw6 — no record file for this issue is said in the section (never an empty-looking one); the read created nothing.
+      const recordMissing = recordText == null ? Number(issue) : null;
+      const { markdown, data } = await inStep("build", () => buildEvidence({ recordText, recordMissing, issueComments, prComments, factoryLogins, gates, gatesRerun, reason, pr, now: now() }));
+      return await inStep("edit", async () => {
+        const current = await gh.prBody(pr, { timeoutMs, signal });
+        live();
+        const next = applyEvidenceSection(current, markdown);
+        if (next.overflow) {
+          const outside = String(current ?? "").length;
+          throw new Error(`PR #${pr} body is already ${outside} characters outside the evidence section — over GitHub's ${PR_BODY_MAX_CHARS}-character limit; section not written`);
+        }
+        await gh.editPrBody(pr, next.body, { timeoutMs, signal });
+        return { ok: true, route, markdown, truncated: next.truncated, unbound: data.unbound, logins: data.logins };
+      });
+    },
+    /**
+     * The marked issue comment, at most once. Who wrote an existing marked comment matters: one by another account is that
+     * account's text (shown under its name) and does not stop the runner's own; one by ANY factory login — the job's viewer
+     * plus every login `resolveFactoryLogins` returns for the injected `env` (the same set buildEvidence attributes by; in
+     * two-actor mode, ADR-021, the viewer is the merge actor while agent sessions post as FACTORY_BOT_LOGIN) — is the
+     * factory's and is overwritten with the runner's evidence, so a forged one never stands and no second comment is posted.
+     * Logins that cannot be resolved fail the step closed (nothing is posted beside a comment nobody can classify). A
+     * byte-identical marked comment always counts as already posted (it is unchanged, so nothing forged stands).
+     * Every gh call is bounded by `timeoutMs` and by merge-stage's `signal`, no retry.
+     */
+    postEvidenceComment: async (markdown, { signal = null } = {}) => {
+      const step = (what, start) => bounded(start, { ms: timeoutMs, what, signal });
+      const target = evidenceComment(markdown);
+      const self = typeof gh.viewerLogin === "function" ? await step("gh api user", (s) => gh.viewerLogin({ signal: s })) : null;
+      const mine = new Set();
+      if (self) mine.add(String(self).trim().toLowerCase());
+      if (env) {
+        const r = await step("factory logins", (s) => resolveFactoryLogins({ gh, env, signal: s }));
+        if (r?.ok !== true || !Array.isArray(r.logins)) throw new Error(`factory logins: ${r?.reason || "not resolved"}`);
+        for (const l of r.logins) { const k = String(l ?? "").trim().toLowerCase(); if (k) mine.add(k); }
+      }
+      const comments = await step("gh issue comments", (s) => gh.comments(issue, { signal: s }));
+      const marked = (Array.isArray(comments) ? comments : []).filter((c) => hasEvidenceComment([c]));
+      // A byte-identical comment already says exactly what the runner would post, whoever it is attributed to (an adapter
+      // without authors included) — it counts as posted and is left as is.
+      const own = marked.filter((c) => c?.body === target || mine.has(String(c?.author ?? "").trim().toLowerCase()));
+      if (!own.length) {
+        await step("gh issue comment", (s) => gh.comment(issue, target, { signal: s }));
+        return { ok: true, posted: true, updated: 0 };
+      }
+      let updated = 0;
+      for (const c of own) {
+        if (c.body === target) continue;
+        await step("gh api PATCH issue comment", (s) => gh.patchComment(c.id, target, { signal: s }));
+        updated += 1;
+      }
+      return { ok: true, posted: false, updated };
+    },
   };
 }
 
@@ -3650,6 +3796,8 @@ async function main() {
     comment: (number, body) => gh.comment(number, body),
     /** merge stage 전용(KTB-15): implement가 연 draft PR을 머지 직전에 ready로 뒤집는다. 멱등이다. */
     prReady: (pr) => gh.prReady(pr),
+    /** #195 — merge stage: the runner's PR evidence (base-engine evidence.js, the hydrated local record, gh.js body read/edit). */
+    ...makePrEvidenceDeps({ gh, issue, env: process.env, root }),
     /**
      * ADR-021 — 두 배우 모드의 표식. 워크플로(`factory-merge.yml`)가 `FACTORY_TWO_ACTOR`에
      * `${{ secrets.FACTORY_MERGE_TOKEN != '' }}`를 싣는다 — **토큰 값을 한 번 더 복사하지 않고**

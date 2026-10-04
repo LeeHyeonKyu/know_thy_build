@@ -296,6 +296,10 @@ export function flakyCandidateLines(ids, outcome, { runId = null, runnerId = nul
 /** GitHub은 mergeable을 비동기로 계산한다 — UNKNOWN은 "영영 모름"이 아니라 "아직 안 끝남"이다.
  * 한 번만 재확인한다: 그사이 끝나면 믿고, 아니면 사람이 본다(무한정 기다리지 않는다). */
 const MERGEABILITY_REPOLL_MS = 5000;
+/** #195 — the PR-evidence step's own bound: it may delay the merge or the hand-off by at most this much (no retry). */
+export const EVIDENCE_TIMEOUT_MS = 60 * 1000;
+/** #195 — a reason that already names its evidence step (run-stage's dep renames its rejections to `read: …` / `build: …` / `edit: …`). */
+const EVIDENCE_STEP_PREFIX = /^(read|build|edit|comment): /;
 
 /**
  * KTB-15b I1 / KTB-19 — draft→ready 플립(`gh pr ready`, 아래 (6a))은 GitHub의 `ready_for_review` PR
@@ -489,7 +493,91 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   //
   // `sections`는 **규칙별로** 하나씩이다(KTB-10 I3): 한 PR이 두 규칙을 동시에 어길 수 있고(역할 파일
   // 편집 + lessons 삭제), 그때 한 제목으로 뭉치면 사람이 목록의 절반을 엉뚱한 설명으로 읽는다.
+  /**
+   * #195 (re-landed by #208; ADR-037 §2) — the runner's "Factory evidence" section on the PR body (`d.publishPrEvidence`,
+   * run-stage's gh.js wiring; named apart from feedback's `appendEvidence`). It is published at exactly two points: right
+   * before mergePr (after the two-actor approval and the self-merge evidence write succeeded — on the self-change path, after
+   * the veto window closed), and as the first act of handToHuman. Nowhere else: needs-human / blocked exits that bypass
+   * handToHuman publish nothing (#208 non_goal). It never blocks or reorders anything: a throw, a rejection, an `ok:false` or a
+   * timeout becomes exactly one `evidence: FAIL — <step>: <reason> (issue #<n>)` record line naming the failing step (read,
+   * build, edit — or comment for the issue comment after a merge) and the issue, and the merge or transition goes on. The dep reports the step it is in through `onStep`, so a
+   * timeout that fires here before the dep's own step-named rejection can arrive still names the step; a dep that never
+   * reports one failed in the step it was handed first, `read` — the FAIL line names one of read, build, edit or comment, never
+   * anything else. A MISSING dep — the wiring has the `publishPrEvidence` slot (run-stage's always does)
+   * but no function in it — is that same one FAIL line (step `read`: nothing could be read), never a silent no-op. A wiring that predates the slot entirely (no `publishPrEvidence` key) is left byte-identical: existing tests pin
+   * that record exactly (test_179_switch_off_is_byte_identical and its neighbours), and tests are load-bearing.
+   *
+   * A timeout CANCELS, it does not abandon: the dep gets an AbortSignal and the timer aborts it before this function returns,
+   * i.e. before mergePr / the needs-human transition. The dep checks it before its write and hands it to the `gh pr edit`
+   * child (lib/exec.js kills an aborted child), so a late-settling dep cannot rewrite the PR body after the merge or the
+   * transition while the record says FAIL.
+   */
+  /**
+   * #208 dw5 — a merge run publishes EXACTLY ONCE: the two points are on exits that exclude each other (handToHuman returns
+   * the run's exit code; mergePr is reached only when no hand-off happened), and `published` makes that structural — a later
+   * call in the same run is a no-op, so a failed publish is not retried either. The veto window publishes nothing itself: a
+   * veto, or an open breaker after the window, hands off through handToHuman (one publish there); a clean window goes on to
+   * the publish before mergePr. Needs-human / blocked routes that bypass handToHuman (mergeGates, the re-check after ready,
+   * review verification, two-actor refusals, the self-merge evidence refusal, undecidable) do not publish. A run records at
+   * most ONE FAIL line for the PR-body step (`evidenceFailed`).
+   */
+  let published = false, evidenceFailed = false;
+  let evidenceMarkdown = null, evidenceGates = null, evidenceRerun = false, evidenceLoginsUnresolved = false;
+  const evidenceMs = Number.isFinite(d.evidenceTimeoutMs) && d.evidenceTimeoutMs > 0 ? d.evidenceTimeoutMs : EVIDENCE_TIMEOUT_MS;
+  /**
+   * `start(signal)` raced against the evidence bound; on timeout the signal is aborted BEFORE this returns (cancel, not
+   * abandon). `stepNow()` is the step the dep last reported — the timeout's message names it.
+   */
+  const boundedEvidence = async (start, stepNow) => {
+    const ac = new AbortController();
+    let timer;
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => start(ac.signal)),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const step = stepNow();
+            const e = new Error(`${step}: timed out after ${evidenceMs} ms — the ${step} step was cancelled`);
+            ac.abort(e);
+            reject(e);
+          }, evidenceMs);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
+  };
+  /** #208 dw3 — every evidence FAIL line names the issue it is about (the run record is read beside other issues' records). */
+  const failLine = (text) => `evidence: FAIL — ${text} (issue #${issue})`;
+  /** One FAIL line's text: the reason, prefixed with `step` unless it already names an evidence step. */
+  const evidenceFail = (step, e) => {
+    const msg = publicReason(e?.message || e);
+    return failLine(EVIDENCE_STEP_PREFIX.test(msg) ? msg : `${step}: ${msg}`);
+  };
+  const failOnce = (line) => { if (evidenceFailed) return; evidenceFailed = true; record([line]); };
+  const publishEvidence = async ({ route, reason = null }) => {
+    if (published) return;                                             // dw5: once per merge run, whatever the route
+    published = true;
+    if (!Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")) return;   // pre-#195 wiring: no slot, record unchanged
+    if (typeof d.publishPrEvidence !== "function") {
+      failOnce(failLine("read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written"));
+      return;
+    }
+    let step = "read";
+    const onStep = (s) => { if (typeof s === "string" && EVIDENCE_STEP_PREFIX.test(`${s}: `)) step = s; };
+    try {
+      const r = await boundedEvidence((signal) => d.publishPrEvidence({ pr, route, gates: evidenceGates, gatesRerun: evidenceRerun, reason, signal, onStep }), () => step);
+      if (r?.ok === false) throw new Error(r.reason || "publishPrEvidence answered ok:false");
+      evidenceMarkdown = typeof r?.markdown === "string" ? r.markdown : null;
+      record([`evidence: published to PR #${pr} (${route})`]);
+      // The factory's logins could not be resolved (part of the read step): the section went out failing closed — no row from
+      // any comment, a note saying why; the record says so too, as the one FAIL line for this step — never silently empty.
+      evidenceLoginsUnresolved = r?.logins?.ok === false;
+      if (evidenceLoginsUnresolved) failOnce(failLine(`read: factory logins not resolved (${publicReason(r.logins.reason || "not resolved")}) — nothing from issue or PR comments was shown`));
+    } catch (e) {
+      failOnce(evidenceFail(step, e));
+    }
+  };
   const handToHuman = async ({ reason, sections }) => {
+    await publishEvidence({ route: "hand-off", reason });
     try {
       await d.comment?.(pr, [
         ...sections.flatMap(({ heading, why, files }) => [
@@ -808,6 +896,8 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     return 2;
   }
   record([`merge: gates ${gates.status}`, ...testEnvNote]);
+  evidenceGates = gates;                     // #195 — this run's own verdict (the re-run's, when it ran) is the gates row
+  evidenceRerun = mergedOnRerunIds !== null;
 
   // (4b) KTB-15b: blocked에서 재시도된 런이면, 게이트가 방금 다시 GREEN으로 확인된 지금이 라벨을
   // approved로 되돌릴 유일하게 정당한 시점이다(위 doc comment 참고) — 아래 mergeGates·prReady·mergePr는
@@ -1284,6 +1374,9 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
     record([`merge: self-merge evidence for PR #${pr} confirmed on factory/records before the merge`]);
   }
 
+  // #195/#208 — the evidence lands on the PR body right before the squash: after the two-actor approval and the self-merge
+  // evidence write succeeded (their refusals above publish nothing), and on the self-change path after the window closed.
+  await publishEvidence({ route: "merge" });
   try {
     // #179 — 자기 변경 경로는 창 뒤에 다시 검증한 head를 머지 호출에 못 박는다(`--match-head-commit`): 재검증과 머지 사이의
     // push는 GitHub이 거부한다. 오늘의 경로는 호출 모양 그대로다.
@@ -1309,6 +1402,22 @@ export async function runMergeStage({ issue, defaultBranch, headSha, d, record, 
   // passed on retry, and the PR merged". Written after mergePr returned, so the mark never sits on a merge that did not happen.
   const rerunMark = mergedOnRerunIds ? ` — ${MERGED_ON_RERUN_TEXT} (first run RED on ${idList(mergedOnRerunIds)}, rerun GREEN)` : "";
   record([`merge: merged ${sha ? sha.slice(0, 7) : "unknown"} via PR #${pr}${rerunMark}`]);
+
+  // #195 — after a merge, the same evidence once on the tracking issue (the dep updates the runner's existing marked comment
+  // instead of posting a second one). Best-effort and bounded like the PR-body step (a hung gh here must not hold the
+  // transition below); a failure is one record line, and the line says what the dep reported doing.
+  // Logins that could not be resolved already gave the run its one FAIL line, and the comment step would fail closed on the
+  // same cause: it is not attempted, and the record says so plainly.
+  if (evidenceMarkdown !== null && evidenceLoginsUnresolved) record(["evidence: issue comment not posted — factory logins not resolved (see the FAIL line)"]);
+  else if (evidenceMarkdown !== null && typeof d.postEvidenceComment === "function") {
+    try {
+      const r = await boundedEvidence((signal) => d.postEvidenceComment(evidenceMarkdown, { signal }), () => "comment");
+      if (r?.ok === false) throw new Error(r.reason || "postEvidenceComment answered ok:false");
+      record([r?.posted === true ? "evidence: issue comment posted"
+        : r?.posted === false ? `evidence: issue comment already present — not posted again (${Number.isInteger(r.updated) ? r.updated : 0} updated in place)`
+          : "evidence: issue comment dep returned without saying whether it posted"]);
+    } catch (e) { record([evidenceFail("comment", e)]); }
+  }
   // #189 — 자기 변경 경로의 머지만 차단기의 증거가 된다. 그 줄은 위에서(머지 전에) 이미 적고 브랜치에서 확인했다(rework r5 cf1).
 
   // (7) 라벨 전이. 이 시점부터는 되돌릴 수 없다 — 거부돼도 needs-human 코멘트는 transition() 자신이
