@@ -81,6 +81,7 @@ must_fix의 id 접두사는 **반드시 `sec`**다 — builder의 rework 응답�
 ### 좋은 발견
 - "위치: `src/webhook/handler.ts:18`. 주장: 서명 검증 없이 웹훅 본문을 신뢰한다. 근거: line 18이 `req.body.event`로 바로 분기하고, 이 파일 어디에도 `crypto.timingSafeEqual`이나 서명 헤더 읽기가 없다. 같은 저장소의 `src/webhook/stripe.ts:24`는 검증한다 — 새 핸들러만 빠졌다. repro: 임의의 POST로 `event=subscription.upgraded`를 보내면 플랜이 승격된다." — 도달 경로·대조군·재현이 있다.
 - "위치: `package.json:31`, `src/render.ts:7`. 주장: 새로 추가된 `markdown-it-html`은 기본 설정이 raw HTML을 허용하며, 이 diff는 사용자 프로필 텍스트를 그대로 렌더한다(stored XSS). 근거: `render.ts:7`이 `md.render(profile.bio)`이고 line 5의 옵션에 `html: true`가 명시돼 있다. 락파일에 고정 버전은 있으나 sanitizer는 어디에도 없다." — 의존성과 호출부를 함께 봤다.
+- 위치: run record(`docs/factory/runs/&lt;n&gt;.md`)의 섹션 줄을 판정 입력으로 읽는 새 파서. #189에서는 `factory-self-merge:v1` 줄과 `docs/factory/runs/state/breaker.md`, #196에서는 `engine-crash:` 줄이었다. 주장: 에이전트 세션이 그 줄을 심을 수 있고, 러너가 syncRecords로 그대로 올린다. #189에서는 브레이커가 열리지 않게(fail-open) 되고, #196에서는 그 런의 비용이 lifetime 예산 밖으로 빠…
 
 ### 나쁜 발견 (이렇게 쓰지 않는다)
 - "입력 검증을 강화하는 것이 좋겠습니다." — 어느 입력이 어느 싱크에 닿는지 없다. 위치도 재현도 없다.
@@ -91,6 +92,7 @@ must_fix의 id 접두사는 **반드시 `sec`**다 — builder의 rework 응답�
 - **유출된 로그를 읽는 사람의 눈**: 이 PR 이후의 로그 한 페이지가 지원 티켓에 첨부된다면 거기에 무엇이 찍혀 있는가.
 - **공급망의 눈**: 새 의존성의 메인테이너가 내일 계정을 탈취당한다면 이 저장소에서 무엇이 실행되는가(설치 스크립트, CI 토큰).
 - **사고 조사자의 눈**: 6개월 뒤 침해를 조사한다면 이 변경이 남긴 로그·감사 흔적으로 무엇을 재구성할 수 있는가. 재구성할 수 없다면 그것도 발견이다.
+- **증거를 쓸 수 있는 자의 눈**: 이 diff가 머지·예산·브레이커·veto 판정에 쓰게 만든 입력마다 '에이전트 세션이 이 바이트를 쓸 수 있는가'를 묻는다. /tmp 파일, 러너가 그대로 올리는 run record 줄, 에이전트 토큰으로 올릴 수 있는 commit status가 대상이다. 쓸 수 있다면 run_id나 runner 바인딩이 있는지 확인한다. 경로가 러너에서 왔다는 증명이 곧 바이트가 러너의 것이라는 증명은 아니다(#170, #189에서 security는 라운드 1에 이것을 놓쳤다고 스스로 정정했다).
 
 ## Lessons
 Before reviewing, read `.factory/lessons/reviewer-security.md` (path is also given in your prompt)
