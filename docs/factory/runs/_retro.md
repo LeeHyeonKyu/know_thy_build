@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1 / 2.08 / 2.08 |
 | escaped defects | 0 | 16 |
 | revert rate | 없음 | 0.00 (0/12) |
-| needs-human | 0 | 51 |
+| needs-human | 4 | 51 |
 | rejects by role | 없음 | spec-conformance 7, qa 4, correctness 10, architecture 6 |
 | reviewer overlap | 없음 | 0.53 (16/30, runs 31) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 4, architecture 3 |
-| qa na ratio | 없음 | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
-| cost (usd) | 30.06 | 624.92 |
-| tokens | input 418854 / output 37775 | input 17203431 / output 1312904 |
+| qa na ratio | 0.33 (5/15 claims, na-heavy 0/2 approvals) | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
+| cost (usd) | 176.91 | 624.92 |
+| tokens | input 2711591 / output 249728 | input 17203431 / output 1312904 |
 | retro cost (usd) | 0.00 | 8.45 |
 | retro tokens | input 0 / output 0 | input 22 / output 21249 |
 | full retros | — | 7 |
@@ -921,6 +921,142 @@
           189
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "No test checks the production wiring that keeps gh client failures out of engine-crash. If `dependencyClient(...)` is removed from main(), every test still passes, and a gh error-shaped response that throws TypeError inside gh.js (e.g. `.object.sha` on `{\"message\":\"Not Found\"}`) gets classified as engine-crash. That run's cost then leaves the lifetime budget and the issue escalates as an 'engine defect'. This is the dw1 rubric's 'never from a dependency/infra Error' failing silently.",
+        "runs": [
+          196
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The new engine_crash flag removes a run's cost from the lifetime budget cap. Text an agent controls can still forge it, which breaks the issue's own invariant that agents get no self-report and engine-crash comes only from code paths. Both forgery guards fail. Guard 1, the writer-side quoting, only handles `[ \\t]*` before `engine-crash:`. The parser later calls `.trim()` on every line, which also strips NBSP, \\v, \\f, \\r and U+2028, so `\\n engine-crash:` is not quoted but still parses as a crash line. Guard 2, the position plus same-runner check, compares the crash line against the section header. That header is also forgeable from the same text, because HEADER_RE is `^...$` with /m and agent text with embedded newlines lands verbatim in appendRunRecord. The forged section then includes the runner's real `usage:` line that follows it in the same record() call, so that run's real cost moves into engineUsd.",
+        "runs": [
+          196
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "A triage-stage engine crash is never escalated. The engine-crash retry loop has no bound for triage, and with this diff every loop's cost is also excluded from the lifetime budget cap. So nothing ever stops the loop. This contradicts the diff's own contract: the sweeper.js doc comment says ENGINE_CRASH_MAX_RETRIES is 'the only brake', and ADR-035 says the same.",
+        "runs": [
+          196
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The builder agent's own implement handoff can raise a TypeError in engine code. isEngineCrash then labels that run an engine crash, and the implement run's full cost moves out of the lifetime budget cap. Before this diff, that run's cost counted against the cap. The ADR-035 premise that a TypeError, ReferenceError or RangeError not raised by a dependency is an engine bug does not hold: LLM output (and issue text that prompt-injects the builder) can choose to fail this way. No error raised while handling agent artifacts gets the dependency mark.",
+        "runs": [
+          196
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "In production every must_fix row will say 'unanswered', even when the builder answered it. The factory posts rework responses as comments on the PR, but the evidence dependency reads only the tracking issue's comments. That puts a false statement into the PR body, which breaks dw3 ('fixed' + sha on the matching row) and the issue's own goal.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The new `editComment(id, body, { signal })` is a second gh-adapter method for an operation the adapter already has. `patchComment(commentId, body)` at gh.js:454 runs the same PATCH. The two copies have already diverged: only the new one takes an AbortSignal. The PATCH path now has two truths. A later fix to error handling, timeout or retry will land in one copy and not the other. Every fake gh in the tests (heartbeat, sweeper and status suites use `patchComment`) now has to guess which name the code under test calls.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "exec.js is changed outside files_expected and the diff carries no 'Scope change' reason.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw3 ('fixed' + sha on the matching must_fix row) is not met in production. The test passes, but the wiring reads rework responses only from the issue's comments.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "`RECORD_SECTION` is a third copy of the run-record section-header grammar (`## <stage> · <at> · <runner>`), and it already differs from the other two. It is also the one place the header is used to bind evidence, for the budget/cost row in `boundBudget`, lines 161-168.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "The run count re-inlines the heartbeat head regex in the same file that already imports `parseHeartbeat`. The heartbeat module documents that the writer and the reader of this format stay in one file.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "makePrEvidenceDeps rebuilds the run-record path from a literal: `join(root, \"docs/factory/runs\", `${issue}.md`)`. This is the fourth independent copy of the writer's path rule. The comment two lines above (2173-2174) says the path \"is the writer's … and cannot drift to another one\", and that is not true. Nothing ties this copy to `recordPath` in run-record.js. If the writer's path changes, this reader gets `existsSync` false and returns null. buildEvidence treats null as \"no source\", so every record row (review rounds, self-gate, proof, cost) drops out with no FAIL line. The section is still published and looks valid.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A file outside files_expected was changed, and the diff gives no Scope change reason.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "A non_goal was crossed. Evidence is now published on needs-human routes that bypass handToHuman.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw5 says publishing happens 'exactly once per merge run', but on the veto route evidence is published twice. The test was written around that.",
+        "runs": [
+          195
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "A builder can choose a PR title that stops the breaker from counting a revert. `parseRevertCommits` trusts any `(#N)` inside the quoted part of a revert subject first (via \"subject\"). It never reaches the body evidence from GitHub (`This reverts commit <sha>` / `Reverts owner/repo#N`). In the GitHub Revert-button flow with a PR_TITLE squash subject, the quoted part is the builder-written PR title, not the squash subject. So a `(#K)` in that title sends the revert to the wrong PR K. The reverted judge auto-merge then looks unreverted and on main, and it breaks the streak. The breaker stays closed and judge-path auto-merge goes on.",
+        "runs": [
+          189
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The diff changes factory/bin/retro.js, which is not in files_expected. It also adds a records-upload guard (makeRecordsUploadGuard, makeMergeAbortVouch, syncRunRecords) that rewires the stage-end and abort syncs in run-stage.js and the retro sync. No done_when covers this work and the diff carries no explicit 'Scope change' statement.",
+        "runs": [
+          189
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The breaker fails open when the post-merge evidence is lost. A judge-path auto-merge records itself in exactly one place: the local run record. That record reaches factory/records through one stage-end syncRecords push, which has a single internal retry. If that push fails or throws, run-stage only logs it with console.error, and it also writes a 'run-record sync: failed' line into the same local file that never got uploaded. On the ephemeral runner that file is then gone. Nothing retries, and no later stage for that issue re-uploads it, because the issue is closed. When the PR is reverted later, the breaker never counts it: parseRevertCommits does attribute the revert to PR #N, but buildHistory has no auto-merge event for #N, and evaluateBreaker only builds windows from known judge merges. The revert is not even listed in readBreaker's detail, because the 'not attributable' count only covers reverts that could not be tied to any PR, and this one was tied to a PR. Two real consecutive judge reverts can leave the breaker reporting {ok:true, open:false}. The same thing happens on the abort path. There the guard has an empty trust set, so a line survives only if makeMergeAbortVouch's gh.prView confirms MERGED/headRefOid. A prView failure drops the line, and the merge disappears from the evidence. The core property (open after revert_streak judge reverts) therefore rests on a best-effort push whose failure is never surfaced. dw5 treats unreadable state as not-closed, but missing evidence is read as 'no merge happened'.",
+        "runs": [
+          189
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1103,6 +1239,24 @@
           179
         ],
         "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "Keeping the `--retry` refusal and only improving its message is a sound fallback, but it does not deliver the issue's 'single verb resolved by caller'. Making it the whole of part (2) leaves the stated acceptance unmet.",
+        "runs": [
+          196
+        ],
+        "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "Making PR comments the source of rework responses is the wrong fix. The engine already puts the rework response in a runner-posted record on the tracking issue: the implement handoff. Switching to PR comments forces an author filter (sec-s1), adds a resolveFactoryLogins call at merge time and a new failure mode that empties every row, and adds a second input contract (issueComments/prComments). None of that is needed if evidence.js reads data.rework_response from the implement handoff it already parses. (.claude/workflows/factory-implement.js:624-625,645; factory/bin/run-stage.js:3384,3395-3397; factory-builder.md:123 'PR 코멘트로도 남긴다'. Would accept instead: a check against #189's real implement handoffs showing they lack data.rework_response.) A companion objection to product-advocate says amendment (1) pins the secondary source, and that PR comments have no round anchor (context.js:205-217).",
+        "runs": [
+          195
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1211,6 +1365,21 @@
         "issue": 179,
         "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/gh.js, .factory/lib/merge-stage.js, factory/bin/run-stage.js, factory/lib/gh.js, factory/lib/merge-stage.js, factory/test/gh.test.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #188)",
         "at": "2026-10-03T14:00:03Z"
+      },
+      {
+        "issue": 196,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/bin/transition.js, .factory/lib/budget.js, .factory/lib/retro/issue-comments.js, .factory/lib/run-record.js, .factory/lib/sweeper.js, .factory/lib/transition.js, .factory/lib/usage.js, factory/bin/run-stage.js, factory/bin/transition.js, factory/lib/budget.js, factory/lib/retro/issue-comments.js, factory/lib/run-record.js, factory/lib/sweeper.js, factory/lib/transition.js, factory/lib/usage.js, factory/test/budget.test.js, factory/test/issue-comments.test.js, factory/test/run-stage.test.js, factory/test/sweeper.test.js, factory/test/transition.test.js, factory/test/usage.test.js (see PR #204)",
+        "at": "2026-10-03T18:55:57Z"
+      },
+      {
+        "issue": 195,
+        "reason": "lifetime cost $61.40 over 108 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-03T19:49:23Z"
+      },
+      {
+        "issue": 189,
+        "reason": "protected paths changed — human merge required: .factory/bin/retro.js, .factory/bin/run-stage.js, .factory/bin/sweep.js, .factory/install-manifest.json, .factory/lib/breaker.js, .factory/lib/config.js, .factory/lib/merge-stage.js, .factory/lib/sweeper.js, factory/bin/retro.js, factory/bin/run-stage.js, factory/bin/sweep.js, factory/cli/breaker.js, factory/cli/index.js, factory/lib/breaker.js, factory/lib/config.js, factory/lib/merge-stage.js, factory/lib/sweeper.js, factory/test/breaker.test.js, factory/test/config.test.js, factory/test/merge-stage.test.js, factory/test/sweeper.test.js (see PR #193)",
+        "at": "2026-10-03T18:05:11Z"
       }
     ]
   },
@@ -1231,17 +1400,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
+    "needs_human": 4,
+    "qa_approvals": 2,
+    "qa_claims_total": 10,
+    "qa_na_total": 5,
+    "qa_na_ratio": 0.33,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 30.056969,
+      "cost_usd": 176.90978,
       "tokens": {
-        "input": 418854,
-        "output": 37775
+        "input": 2711591,
+        "output": 249728
       }
     }
   },
