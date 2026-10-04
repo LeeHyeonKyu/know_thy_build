@@ -1,6 +1,6 @@
 # Retro State
 
-- last retro: 2026-10-03T14:31:31.999Z
+- last retro: 2026-10-04T02:59:59.565Z
 - merges since last retro: 0
 - current N: 1
 
@@ -8,31 +8,37 @@
 
 | at | yield | n_before | n_after | needs_human_since |
 | --- | --- | --- | --- | --- |
-| 2026-09-15T10:31:18.686Z | 0 | 1 | 2 | 1 |
 | 2026-10-01T23:09:32.429Z | 0 | 2 | 1 | 13 |
 | 2026-10-02T05:21:19.380Z | 0 | 1 | 1 | 3 |
 | 2026-10-03T10:55:51.477Z | 1 | 1 | 1 | 16 |
 | 2026-10-03T14:31:31.999Z | 1 | 1 | 1 | 10 |
+| 2026-10-04T02:59:59.565Z | 0 | 1 | 1 | 5 |
 
 ## Stats
 
 | metric | this window | cumulative |
 | --- | --- | --- |
-| merged | 0 | 12 |
-| review rounds avg | 0 | 2.08 |
-| rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1 / 2.08 / 2.08 |
-| escaped defects | 0 | 16 |
-| revert rate | 없음 | 0.00 (0/12) |
-| needs-human | 4 | 51 |
-| rejects by role | 없음 | spec-conformance 7, qa 4, correctness 10, architecture 6 |
-| reviewer overlap | 없음 | 0.53 (16/30, runs 31) |
-| unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 4, architecture 3 |
-| qa na ratio | 0.33 (5/15 claims, na-heavy 0/2 approvals) | 0.21 (20/97 claims, na-heavy 3/13 approvals) |
-| cost (usd) | 176.91 | 624.92 |
-| tokens | input 2711591 / output 249728 | input 17203431 / output 1312904 |
-| retro cost (usd) | 0.00 | 8.45 |
-| retro tokens | input 0 / output 0 | input 22 / output 21249 |
-| full retros | — | 7 |
+| merged | 1 | 13 |
+| review rounds avg | 3 | 2.15 |
+| rounds/issue (plan/impl/review) | 1 / 5 / 3 | 1 / 2.3 / 2.15 |
+| escaped defects | 4 (#189×4) | 20 |
+| revert rate | 0.00 (0/1) | 0.00 (0/13) |
+| needs-human | 5 | 56 |
+| rejects by role | correctness 2, security 2, spec-conformance 1 | spec-conformance 8, qa 4, correctness 12, architecture 6, security 2 |
+| reviewer overlap | 0.33 (2/6, runs 5) | 0.50 (18/36, runs 36) |
+| unique findings by role | correctness 2, security 2 | spec-conformance 3, qa 4, correctness 6, architecture 3, security 2 |
+| qa na ratio | 0.33 (5/15 claims, na-heavy 0/2 approvals) | 0.22 (25/112 claims, na-heavy 3/15 approvals) |
+| cost (usd) | 188.19 | 813.11 |
+| tokens | input 2966854 / output 271837 | input 20170285 / output 1584741 |
+| retro cost (usd) | 1.20 | 9.65 |
+| retro tokens | input 4 / output 3334 | input 26 / output 24583 |
+| full retros | — | 8 |
+
+### Rounds per issue (this window)
+
+| issue | plan | implement | review | escaped |
+| --- | --- | --- | --- | --- |
+| #189 | 1 | 5 | 3 | 4 |
 
 ### Phase-2 gate baseline (this session)
 
@@ -46,7 +52,7 @@
 ```json
 {
   "cursor": {
-    "last_retro_at": "2026-10-03T14:31:31.999Z",
+    "last_retro_at": "2026-10-04T02:59:59.565Z",
     "last_record_offsets": {}
   },
   "merges_since": 0,
@@ -433,6 +439,72 @@
           "reason": null,
           "proposals": [
             "gate"
+          ]
+        }
+      ],
+      "n_before": 1,
+      "n_after": 1
+    },
+    {
+      "at": "2026-10-04T02:59:59.565Z",
+      "yield": 0,
+      "needs_human_since": 5,
+      "applied": [
+        {
+          "step": "feedback-route",
+          "issues": [
+            189
+          ],
+          "actions": [
+            {
+              "kind": "warning",
+              "step": "feedback-route",
+              "login": "LeeHyeonKyu",
+              "current": "bot-hk",
+              "reason": "current factory identity: bot-hk (machine user/app, viewer); older runs in this window ran under a shared identity (LeeHyeonKyu) — their human decisions are unverifiable, nothing to register"
+            },
+            {
+              "kind": "product",
+              "step": "feedback-route",
+              "issue": 189,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "step": "lessons:factory-builder",
+          "added": [
+            "L-2026-10-04-01",
+            "L-2026-10-04-02",
+            "L-2026-10-04-03"
+          ],
+          "rejected": [],
+          "evicted": [],
+          "cited": []
+        },
+        {
+          "step": "role:reviewer-security",
+          "added": [
+            {
+              "section": "### 좋은 발견",
+              "text": "위치: run record(`docs/factory/runs/&lt;n&gt;.md`)의 섹션 줄을 판정 입력으로 읽는 새 파서. #189에서는 `factory-self-merge:v1` 줄과 `docs/factory/runs/state/breaker.md`, #196에서는 `engine-crash:` 줄이었다. 주장: 에이전트 세션이 그 줄을 심을 수 있고, 러너가 syncRecords로 그대로 올린다. #189에서는 브레이커가 열리지 않게(fail-open) 되고, #196에서는 그 런의 비용이 lifetime 예산 밖으로 빠…"
+            },
+            {
+              "section": "## Perspectives",
+              "text": "**증거를 쓸 수 있는 자의 눈**: 이 diff가 머지·예산·브레이커·veto 판정에 쓰게 만든 입력마다 '에이전트 세션이 이 바이트를 쓸 수 있는가'를 묻는다. /tmp 파일, 러너가 그대로 올리는 run record 줄, 에이전트 토큰으로 올릴 수 있는 commit status가 대상이다. 쓸 수 있다면 run_id나 runner 바인딩이 있는지 확인한다. 경로가 러너에서 왔다는 증명이 곧 바이트가 러너의 것이라는 증명은 아니다(#170, #189에서 security는 라운드 1에 이것을 놓쳤다고 스스로 정정했다)."
+            }
+          ],
+          "skipped": [],
+          "deferred": []
+        },
+        {
+          "step": "publish-lessons",
+          "pr": 214,
+          "merged": false,
+          "reason": "gh pr merge failed (1): X Pull request LeeHyeonKyu/know_thy_build#214 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\nTo use administrator privileges to immediately merge the pull request, add the `--admin` flag.",
+          "files": [
+            ".factory/lessons/factory-builder.md",
+            ".claude/agents/reviewer-security.md"
           ]
         }
       ],
@@ -1368,8 +1440,8 @@
       },
       {
         "issue": 196,
-        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/bin/transition.js, .factory/lib/budget.js, .factory/lib/retro/issue-comments.js, .factory/lib/run-record.js, .factory/lib/sweeper.js, .factory/lib/transition.js, .factory/lib/usage.js, factory/bin/run-stage.js, factory/bin/transition.js, factory/lib/budget.js, factory/lib/retro/issue-comments.js, factory/lib/run-record.js, factory/lib/sweeper.js, factory/lib/transition.js, factory/lib/usage.js, factory/test/budget.test.js, factory/test/issue-comments.test.js, factory/test/run-stage.test.js, factory/test/sweeper.test.js, factory/test/transition.test.js, factory/test/usage.test.js (see PR #204)",
-        "at": "2026-10-03T18:55:57Z"
+        "reason": "lifetime cost $62.38 over 117 run(s) exceeds [budget].usd_per_issue $60 — a person raises the budget (`:proposal`), splits the issue, or closes it (wont-do); the counter spans re-queues and human retries on purpose",
+        "at": "2026-10-04T02:54:59Z"
       },
       {
         "issue": 195,
@@ -1384,82 +1456,110 @@
     ]
   },
   "stats": {
-    "merged": 0,
-    "review_rounds_avg": 0,
-    "plan_rounds_avg": 0,
-    "implement_rounds_avg": 0,
-    "rounds_per_issue": [],
-    "escaped_defects": 0,
-    "escaped_defects_detail": [],
+    "merged": 1,
+    "review_rounds_avg": 3,
+    "plan_rounds_avg": 1,
+    "implement_rounds_avg": 5,
+    "rounds_per_issue": [
+      {
+        "issue": 189,
+        "plan": 1,
+        "implement": 5,
+        "review": 3
+      }
+    ],
+    "escaped_defects": 4,
+    "escaped_defects_detail": [
+      {
+        "issue": 189,
+        "count": 4
+      }
+    ],
     "reverts": 0,
     "reverted_issues": [],
-    "revert_rate": null,
-    "rejects_by_role": {},
-    "review_runs": 0,
-    "findings_total": 0,
-    "overlapping_findings": 0,
-    "unique_findings_by_role": {},
-    "overlap_ratio": 0,
-    "needs_human": 4,
+    "revert_rate": 0,
+    "rejects_by_role": {
+      "correctness": 2,
+      "security": 2,
+      "spec-conformance": 1
+    },
+    "review_runs": 5,
+    "findings_total": 6,
+    "overlapping_findings": 2,
+    "unique_findings_by_role": {
+      "correctness": 2,
+      "security": 2
+    },
+    "overlap_ratio": 0.33,
+    "needs_human": 5,
     "qa_approvals": 2,
     "qa_claims_total": 10,
     "qa_na_total": 5,
     "qa_na_ratio": 0.33,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 176.90978,
+      "cost_usd": 188.188095,
       "tokens": {
-        "input": 2711591,
-        "output": 249728
+        "input": 2966854,
+        "output": 271837
+      }
+    },
+    "retro_usage": {
+      "cost_usd": 1.197151,
+      "tokens": {
+        "input": 4,
+        "output": 3334
       }
     }
   },
   "stats_total": {
-    "merged": 12,
-    "review_rounds_avg": 2.08,
+    "merged": 13,
+    "review_rounds_avg": 2.15,
     "plan_rounds_avg": 1,
-    "implement_rounds_avg": 2.08,
-    "escaped_defects": 16,
+    "implement_rounds_avg": 2.3,
+    "escaped_defects": 20,
     "reverts": 0,
     "reverted_issues": [],
     "revert_rate": 0,
     "rejects_by_role": {
-      "spec-conformance": 7,
+      "spec-conformance": 8,
       "qa": 4,
-      "correctness": 10,
-      "architecture": 6
+      "correctness": 12,
+      "architecture": 6,
+      "security": 2
     },
-    "review_runs": 31,
-    "findings_total": 30,
-    "overlapping_findings": 16,
+    "review_runs": 36,
+    "findings_total": 36,
+    "overlapping_findings": 18,
     "unique_findings_by_role": {
       "spec-conformance": 3,
       "qa": 4,
-      "correctness": 4,
-      "architecture": 3
+      "correctness": 6,
+      "architecture": 3,
+      "security": 2
     },
-    "overlap_ratio": 0.53,
-    "needs_human": 51,
-    "qa_approvals": 13,
-    "qa_claims_total": 77,
-    "qa_na_total": 20,
-    "qa_na_ratio": 0.21,
+    "overlap_ratio": 0.5,
+    "needs_human": 56,
+    "qa_approvals": 15,
+    "qa_claims_total": 87,
+    "qa_na_total": 25,
+    "qa_na_ratio": 0.22,
     "qa_na_heavy_approvals": 3,
     "usage": {
-      "cost_usd": 624.922939,
+      "cost_usd": 813.111034,
       "tokens": {
-        "input": 17203431,
-        "output": 1312904
+        "input": 20170285,
+        "output": 1584741
       }
     },
     "retro_usage": {
-      "cost_usd": 8.45224,
+      "cost_usd": 9.649391,
       "tokens": {
-        "input": 22,
-        "output": 21249
+        "input": 26,
+        "output": 24583
       }
     },
-    "retros": 7
+    "retros": 8
   },
   "deferred_proposals": [],
   "deletion_candidates": []
