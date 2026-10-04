@@ -3308,7 +3308,7 @@ test("test_176_blocked_arm_skips_a_mid_swap_two_label_issue", async () => {
   expect(d2).toHaveBeenCalledWith({ stage: "review", issue: 16 });
 });
 
-// ── #196 (ADR-035) — engine-crash blocked은 R(하트비트 재큐)를 쓰지 않고, 이름 붙은 상한까지만 다시 민다 ─────────────────
+// ── #196 (ADR-036) — engine-crash blocked은 R(하트비트 재큐)를 쓰지 않고, 이름 붙은 상한까지만 다시 민다 ─────────────────
 import { ENGINE_CRASH_MAX_RETRIES } from "../lib/sweeper.js";
 import { transition as realTransition196 } from "../lib/transition.js";
 
@@ -3509,12 +3509,14 @@ test("test_196_runner_hop_keeps_other_triage_causes_as_before", async () => {
   expect(await sweep(args)).toContainEqual({ kind: "blocked-retry", issue: 5, stage: "triage", cause: "other" });
 });
 
-// ── #196 self-critique (skeptic f3) — engine-crash의 needs-human은 엔진 결함이다: 새 엔진이 오면 ADR-032의 릴리스 재시도가 한 번 받는다 ──
-// 픽스처는 진짜 생산자다: 크래시 런의 blocked 전이(명시 cause=engine-crash)는 진짜 transition()이, 재시도·에스컬레이션(엔진 버전을 싣는다)은
-// 진짜 sweep()이 쓴다. 에스컬레이션이 버전을 실어도, 그것을 읽는 유일한 팔이 engine-crash를 엔진 원인으로 보지 않으면 버전은 죽은 기록이다.
+// ── #196 plan non_goal — engine-crash의 needs-human은 ADR-032의 릴리스 재시도 팔에 **배선되지 않는다** ─────────────────────────────
+// plan의 non_goals: "Wiring engine-crash into engineCausedNeedsHuman/sweepRetryOnRelease (see dissent d-same-version-cap)". 같은 엔진 상한
+// (ENGINE_CRASH_MAX_RETRIES)이 dw4가 핀하는 유일한 유료 재시도이고, "engine defect" needs-human이 끝 상태다 — 릴리스마다 한 번씩 자동으로
+// 다시 미는 팔은 그 위에 유료 세션을 더한다. 픽스처는 진짜 생산자다: 크래시 런의 blocked 전이(명시 cause=engine-crash)는 진짜 transition()이,
+// 재시도·에스컬레이션(엔진 버전을 싣는다)은 진짜 sweep()이 쓴다. 대조군: 같은 모양의 undecidable needs-human은 그 팔이 받는다.
 import { engineCausedNeedsHuman as engineCausedNeedsHuman196 } from "../lib/sweeper.js";
 
-test("test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine", async () => {
+test("test_196_engine_crash_needs_human_stays_out_of_the_release_retry_arm", async () => {
   const w = world156();
   const n = 96;
   w.add(n, "factory:in-progress", [planHandoff156(n), seedTransition156("factory:ready", "factory:planned"), seedTransition156("factory:planned", "factory:in-progress")]);
@@ -3525,20 +3527,22 @@ test("test_196_engine_crash_needs_human_is_retried_once_on_a_new_engine", async 
   expect(w.label(n)).toBe("factory:needs-human");
   const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
   expect(esc).toMatch(/engine defect/);
-  expect(ENGINE_VERSION156.exec(esc)?.[1]).toBe("1.4.50");
-  expect(engineCausedNeedsHuman196(await w.gh.comments(n))).toMatchObject({ thenVersion: "1.4.50" });
+  expect(esc).toContain(`transition.js ${n} factory:queue`);
+  expect(engineCausedNeedsHuman196(await w.gh.comments(n))).toBeNull();
 
-  // 같은 엔진: 아무것도 하지 않는다
+  // 새 엔진이 와도: release-retry 없음, 마커 없음, dispatch 없음 — 끝 상태는 "engine defect" needs-human이다
   w.dispatchStage.mockClear();
-  const same = await w.sweep("1.4.50");
-  expect(same).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n }));
-  expect(w.label(n)).toBe("factory:needs-human");
-
-  // 새 엔진: 중단 지점(implement 전 → planned)으로 한 번, 릴리스 주체로
   const after = await w.sweep("1.4.51");
-  expect(after).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n, version: "1.4.51", from: "1.4.50", to: "factory:planned" }));
-  expect(w.label(n)).toBe("factory:planned");
-  expect(releaseMarkers156(w, n)).toHaveLength(1);
+  expect(after).not.toContainEqual(expect.objectContaining({ kind: "release-retry", issue: n }));
+  expect(w.label(n)).toBe("factory:needs-human");
+  expect(releaseMarkers156(w, n)).toHaveLength(0);
+  expect(w.dispatchStage).not.toHaveBeenCalledWith(expect.objectContaining({ issue: n }));
+
+  // 대조군: 같은 사건 모양의 undecidable needs-human은 그 팔이 받는다(팔은 살아 있고, 빠진 것은 engine-crash뿐이다)
+  const u = 97;
+  await implementStoppedUndecidable156(w, u, "1.4.50");
+  expect(engineCausedNeedsHuman196(await w.gh.comments(u))).toMatchObject({ thenVersion: "1.4.50" });
+  expect(await w.sweep("1.4.51")).toContainEqual(expect.objectContaining({ kind: "release-retry", issue: u, version: "1.4.51" }));
 });
 
 // ── #189 (S4c, ADR-033) — 차단기의 열림은 상태가 바뀔 때 한 번만 기록·알린다(진짜 git, 실제 생산자) ──────────────────
@@ -3647,3 +3651,97 @@ test("test_189_sweep_records_breaker_state_once_per_change", async () => {
   expect(gh.comment.mock.calls.length).toBe(commentsBefore);
   expect(existsSync189(join189(cwd, BREAKER_STATE_DIR189, "breaker.md"))).toBe(false);
 }, 240000);
+
+// ── #196 dw5 — 되돌리기 안전: **옛 엔진**(이 변경 직전 main의 factory/lib, 커밋으로 고정)이 새 데이터를 읽으면 세는 쪽으로 실패한다 ───────
+// 옛 코드는 흉내가 아니라 진짜다: `git archive <PRE_196> factory/lib factory/bin`을 임시 디렉터리에 풀어 그 모듈을 import한다(그 커밋은 main의 조상이라
+// 사라지지 않는다). 새 데이터도 진짜 생산자다: blocked 마커는 새 transition()이(명시 cause=engine-crash), 크래시 섹션은 새 runStage의 catch가,
+// 재시도 마커는 새 sweep()이 쓴다. 단언: 옛 sweeper는 engine-crash를 `other`로 다루고(같은 상한 1, 같은 "environment/credentials" 문장),
+// 옛 예산은 크래시 런의 돈을 usd에 그대로 세며(던지지 않고, 총합이 깨지지 않고), USAGE_RE의 models 파싱은 새것과 같다. 남는 것은 정확히
+// 하나다 — 옛 sweeper는 새 sweeper가 쓴 태그 달린 재시도 마커를 읽지 못해 이슈당 한 번 더 민다(ADR-036 "되돌리기").
+import { execFileSync as execFileSync196 } from "node:child_process";
+import { mkdtempSync as mkdtempSync196, symlinkSync as symlinkSync196, readFileSync as readFileSync196 } from "node:fs";
+import { tmpdir as tmpdir196 } from "node:os";
+import { join as join196 } from "node:path";
+import { fileURLToPath as fileURLToPath196, pathToFileURL as pathToFileURL196 } from "node:url";
+import { runStage as runStage196, usageLine as usageLine196 } from "../bin/run-stage.js";
+import { appendRunRecord as appendRunRecord196 } from "../lib/run-record.js";
+import { parseRunRecord as parseRunRecord196 } from "../lib/usage.js";
+import { lifetimeCostOf as lifetimeCostOfNew196 } from "../lib/budget.js";
+
+const PRE_196 = "d6648d4e618d34ed3f63694fc73773dfbd9e301c";   // main 직전(#189 머지) — 이 변경이 없는 마지막 엔진
+async function pre196Engine() {
+  const repo = fileURLToPath196(new URL("../..", import.meta.url));
+  const dir = mkdtempSync196(join196(tmpdir196(), "pre196-"));
+  const tar = execFileSync196("git", ["archive", "--format=tar", PRE_196, "factory/lib", "factory/bin"], { cwd: repo, maxBuffer: 256 << 20 });
+  execFileSync196("tar", ["-x", "-C", dir], { input: tar });
+  symlinkSync196(join196(repo, "node_modules"), join196(dir, "node_modules"), "dir");
+  const load = (p) => import(pathToFileURL196(join196(dir, "factory/lib", p)).href);
+  return { ic: await load("retro/issue-comments.js"), usage: await load("usage.js"), budget: await load("budget.js"), sweeper: await load("sweeper.js"), transition: await load("transition.js") };
+}
+
+test("test_196_unknown_engine_crash_fields_fail_toward_counting", async () => {
+  const old = await pre196Engine();
+  expect(old.ic.BLOCKED_CAUSES).not.toContain("engine-crash");                   // 정말 이 변경 전의 엔진이다
+  expect(old.sweeper.BLOCKED_ESCALATION_REASON).not.toHaveProperty("engine-crash");
+
+  // ── 마커: 새 엔진의 크래시 블록과 새 sweeper의 재시도 1회, 그다음 되돌림 ──
+  const w = world156();
+  const n = 196;
+  w.add(n, "factory:in-progress", [planHandoff156(n), seedTransition156("factory:ready", "factory:planned"), seedTransition156("factory:planned", "factory:in-progress")]);
+  const reason = "engine crash — implement threw TypeError: Cannot read properties of undefined (reading 'test')";
+  expect((await w.transition({ issue: n, to: "factory:blocked", reason, stage: "implement", cause: "engine-crash" })).ok).toBe(true);
+  expect(await w.sweep("1.4.50")).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: n, cause: "engine-crash" }));   // 새 엔진의 한 번
+  expect(w.dispatchStage).toHaveBeenCalledTimes(1);
+
+  // 옛 파서는 그 마커를 던지지 않고 읽고, 원인 문구에서는 `other`를 되짚는다
+  const comments = await w.gh.comments(n);
+  expect(old.ic.blockedOrigin(comments)).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "engine-crash" });
+  expect(old.ic.blockedCause(reason)).toBe("other");
+
+  const oldTransition = (args) => old.transition.transition({ gh: w.gh, env: {}, skipRehearsal: true, ...args });
+  const oldSweep = () => old.sweeper.sweep({
+    gh: w.gh, charter, thresholds: T, now: w.now(), staleMinutes: 30, transition: oldTransition, release: vi.fn(),
+    quarantine: { quarantined: [] }, saveQuarantine: () => {}, dispatchStage: w.dispatchStage,
+    factoryLogins: async () => ({ ok: true, logins: [BOT156] }), installedVersion: async () => "1.4.49",
+  });
+  // 되돌린 엔진: 태그 달린 새 재시도 마커를 못 읽어 **한 번 더** 민다(남는 것), 그다음은 `other`의 문장으로 사람에게 — 끝없이 돌지 않는다
+  expect(await oldSweep()).toContainEqual(expect.objectContaining({ kind: "blocked-retry", issue: n }));
+  expect(w.dispatchStage).toHaveBeenCalledTimes(2);
+  expect(await oldSweep()).toContainEqual(expect.objectContaining({ kind: "blocked-escalated", issue: n }));
+  expect(w.dispatchStage).toHaveBeenCalledTimes(2);
+  expect(w.label(n)).toBe("factory:needs-human");
+  const esc = w.bodies(n).filter((b) => /to=factory:needs-human/.test(b)).at(-1);
+  expect(esc).toContain(old.sweeper.BLOCKED_ESCALATION_REASON.other);
+  expect(esc).not.toMatch(/engine defect/);
+  expect(w.bodies(n).some((b) => /factory-retry /.test(b))).toBe(false);          // R(하트비트 재큐)는 어느 엔진에서도 쓰이지 않았다
+
+  // ── 예산: 새 runStage의 크래시 섹션을 옛 예산이 읽는다 ──
+  const root = mkdtempSync196(join196(tmpdir196(), "pre196-rec-"));
+  appendRunRecord196({ root, issue: n, stage: "implement", runnerId: "gha-1", lines: [usageLine196({ usage: { input_tokens: 10 }, total_cost_usd: 40, num_turns: 3, terminal_reason: "end_turn", modelUsage: { "claude-opus-5": { costUSD: 40 } } })] });
+  for (const runnerId of ["gha-2", "gha-3", "gha-4"]) {
+    const code = await runStage196({
+      stage: "implement", issue: n, runnerId, runId: runnerId.slice(4),
+      deps: {
+        charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+        heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+        buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }), resetAgentsLog: async () => {},
+        claudeP: async () => ({ is_error: false, result: "{}", usage: { input_tokens: 7 }, total_cost_usd: 30, num_turns: 4, terminal_reason: "end_turn", modelUsage: { "claude-opus-5": { costUSD: 30 } } }),
+        gates: async () => { const o = undefined; return o.test; },
+        verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+        transition: async ({ to }) => ({ ok: true, to }),
+        runRecord: (lines) => appendRunRecord196({ root, issue: n, stage: "implement", runnerId, lines }),
+        release: async () => true,
+      },
+    });
+    expect(code).toBe(1);
+  }
+  const text = readFileSync196(join196(root, "docs/factory/runs", `${n}.md`), "utf8");
+  expect(parseRunRecord196(text).filter((e) => e.engine_crash)).toHaveLength(3);   // 새 엔진에게는 크래시 셋
+  expect(lifetimeCostOfNew196(text).usd).toBeLessThan(130);                         // 새 엔진은 그중 일부를 뺀다
+  // 옛 엔진: 던지지 않고, 크래시 런 셋을 모두 보통 런으로 센다 — 총합은 기록의 모든 usage 줄의 합 그대로
+  expect(old.budget.lifetimeCostOf(text)).toEqual({ usd: 130, runs: 4, priced: 4 });
+  expect(old.budget.budgetCheck({ charter: { budget: { usd_per_issue: 100 } }, recordText: text })).toMatchObject({ ok: false, usd: 130 });
+  // USAGE_RE의 models 파싱은 두 엔진이 같다(크래시 줄은 옛 파서에게 모르는 줄일 뿐이다)
+  const strip = (e) => ({ stage: e.stage, runner: e.runner, cost_usd: e.cost_usd, models: e.models, num_turns: e.num_turns });
+  expect(old.usage.parseRunRecord(text).map(strip)).toEqual(parseRunRecord196(text).map(strip));
+});

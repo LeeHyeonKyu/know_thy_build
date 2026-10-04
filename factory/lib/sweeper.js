@@ -141,7 +141,7 @@ export const API_ERROR_MAX_RETRIES = 3;
 export const CANCELLED_MAX_RETRIES = 3;
 
 /**
- * #196 (ADR-035) — **엔진 크래시는 R을 쓰지 않지만, 상한은 있다.** `runStage`의 catch가 프로그래밍 오류를 잡으면 이슈를
+ * #196 (ADR-036) — **엔진 크래시는 R을 쓰지 않지만, 상한은 있다.** `runStage`의 catch가 프로그래밍 오류를 잡으면 이슈를
  * `factory:blocked`(cause=engine-crash)으로 옮긴다 — 그래서 하트비트 재큐 팔(`factory-retry`, R)은 그 런을 보지 않는다. 대신 이
  * blocked 팔이 같은 스테이지를 이 횟수만큼 다시 밀고, 그다음 크래시는 "엔진 결함" 문장으로 사람에게 간다. 결정적인 크래시는 같은
  * 엔진에서 같은 자리에서 또 죽으므로 한 번이면 충분하다(일시적인 것은 한 번에 풀린다). 상한이 없으면 K·R·예산 어느 것도 이 루프를
@@ -167,7 +167,7 @@ export const BLOCKED_ESCALATION_REASON = {
   "gates-unhandled": "blocked (test command exited non-zero with 0 failing tests — unhandled error outside tests, see the gate log) — needs human",
   undecidable: "blocked (undecidable) — needs human",
   other: "blocked (environment/credentials) — needs human",
-  // #196 (ADR-035) — 마지막 자리(`BLOCKED_CAUSES`와 같은 자리, nit 9). 이슈의 예산·재시도가 아니라 **엔진**이 원인이라고 말하고,
+  // #196 (ADR-036) — 마지막 자리(`BLOCKED_CAUSES`와 같은 자리, nit 9). 이슈의 예산·재시도가 아니라 **엔진**이 원인이라고 말하고,
   // 고친 뒤 무엇을 치면 되는지 말한다. `<n>`·`<engine>`은 에스컬레이션 순간에 이 이슈 번호와 설치본 버전으로 채운다.
   "engine-crash": "blocked (engine defect — the stage crashed with a programming error in the factory engine <engine>, not in this issue's work, budget or retries; after the engine fix, requeue with `node .factory/bin/transition.js <n> factory:queue`) — needs human",
 };
@@ -528,13 +528,10 @@ const RELEASE_RETRY_IMPLEMENT_TARGETS = new Set(["factory:planned", "factory:rew
 const sameLogin = (a, b) => typeof a === "string" && typeof b === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
 
 /**
- * blocked 사건 중 엔진 원인인 것. #196 self-critique (skeptic f3) — engine-crash(러너의 catch만 쓰는 원인, 에스컬레이션은 "engine defect")는
- * 이 저장소에서 가장 직접적인 엔진 결함이다: 새 엔진이 오면 한 번 스스로 재시도한다(그 에스컬레이션이 싣는 엔진 버전의 유일한 독자가 이 팔이다).
- * 루프는 없다 — 릴리스당 1회(`factory-retry-on-release` 마커)이고, 그 재시도가 또 크래시하면 blocked 팔의 상한이 다시 문다.
+ * 마지막 전이 코멘트가 엔진 결함으로 인한 needs-human인가. 아니면 null, 맞으면 `{ comment, thenVersion }`.
+ * #196 (ADR-036) — blocked 원인 `engine-crash`는 여기에 **일부러 없다**(plan non_goals, dissent d-same-version-cap): 같은 엔진 상한
+ * (`ENGINE_CRASH_MAX_RETRIES`)이 크래시의 유일한 유료 재시도이고 "engine defect" needs-human이 끝 상태다. 릴리스 팔 배선은 후속 이슈(#210)의 몫이다.
  */
-const ENGINE_CAUSED_BLOCKS = new Set(["undecidable", "engine-crash"]);
-
-/** 마지막 전이 코멘트가 엔진 결함으로 인한 needs-human인가. 아니면 null, 맞으면 `{ comment, thenVersion }`. */
 export function engineCausedNeedsHuman(comments) {
   const list = Array.isArray(comments) ? comments : [];
   let idx = -1;
@@ -549,7 +546,7 @@ export function engineCausedNeedsHuman(comments) {
   const t = lastTransition([comment]);
   const reason = t?.reason ?? "";
   const engine = reason.startsWith(ENGINE_ESCALATION_PREFIX)
-    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && ENGINE_CAUSED_BLOCKS.has(blockedOrigin(list.slice(0, idx + 1))?.cause));
+    || (m[1] === "factory:blocked" && reason.startsWith("blocked (") && blockedOrigin(list.slice(0, idx + 1))?.cause === "undecidable");
   if (!engine) return null;
   return { comment, thenVersion: ENGINE_VERSION.exec(body)?.[1] ?? null };
 }
