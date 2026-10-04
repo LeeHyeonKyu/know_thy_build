@@ -157,3 +157,29 @@ test("mixed n/a cost sections are ignored in sums, never treated as 0-that-block
   const summary = summarizeUsage(new Map([["5", text]]), { now: "2026-09-15T00:00:00Z" });
   expect(summary.perIssue[0]).toEqual({ issue: "5", cost_usd: 2, runs: 2, tokens: { input: 1, output: 1 } });
 });
+
+// ── #196 Scope change — `appendRunRecord`의 정리(`neutralizeRecordLine`)는 **실제 생산자의 줄을 바이트 하나 바꾸지 않는다** ─────────
+// 그 정리는 모든 스테이지의 기록자에 걸린다(runStage의 record()·abortStage·main의 recordLine). 그래서 기록에 실제로 나가는 줄 —
+// 진짜 크래시 줄(원소 맨 앞), usage 줄, progress 마커가 개행 뒤에 붙는 usage 줄, review-evidence 줄, budget 줄, abort 줄 — 이 그대로
+// 파일에 나가고 그대로 읽히는지 핀한다. 원소 맨 앞까지 인용하거나 개행 뒤 조각을 통째로 인용하는 정리는 여기서 실패한다.
+import { engineCrashLine as engineCrashLine196, neutralizeRecordLine as neutralizeRecordLine196 } from "../lib/usage.js";
+import { reviewEvidenceLine as reviewEvidenceLine196 } from "../lib/run-record.js";
+import { budgetLine as budgetLine196 } from "../lib/budget.js";
+
+test("test_196_record_neutralizer_leaves_real_producer_lines_byte_identical", () => {
+  const root = mkdtempSync(join(tmpdir(), "usage196-"));
+  const out = { usage: { input_tokens: 3 }, total_cost_usd: 2.5, num_turns: 4, terminal_reason: "end_turn", modelUsage: { "claude-opus-5": { costUSD: 2.5 } } };
+  const lines = [
+    "error: implement aborted — Cannot read properties of undefined (reading 'test')",
+    engineCrashLine196({ stage: "implement", runnerId: "gha-1", runId: "1", error: new TypeError("Cannot read properties of undefined (reading 'test')") }),
+    usageLine(out, { phase: "gates", turns: 4 }),
+    reviewEvidenceLine196({ headSha: "a".repeat(40), round: 1, decision: "approve", verdicts: [{ role: "spec", verdict: "approve" }], runId: "1", runnerId: "gha-1" }),
+    budgetLine196({ ok: true, cap: 50, usd: 10, runs: 2, engineUsd: 2.5, engineRuns: 1 }),
+  ];
+  expect(lines[2]).toMatch(/^usage: .*\n<!-- factory-progress:v1 /);            // 픽스처가 정말 개행을 실은 원소다
+  for (const l of lines) expect(neutralizeRecordLine196(l)).toBe(l);
+  appendRunRecord({ root, issue: 9, stage: "implement", runnerId: "gha-1", lines, now: "2026-10-03T00:00:00Z" });
+  const text = readFileSync(join(root, "docs/factory/runs/9.md"), "utf8");
+  expect(text).toBe(`# Run · #9\n\n## implement · 2026-10-03T00:00Z · gha-1\n${lines.join("\n")}\n`);
+  expect(parseRunRecord(text)).toEqual([expect.objectContaining({ stage: "implement", cost_usd: 2.5, num_turns: 4, engine_crash: true })]);
+});

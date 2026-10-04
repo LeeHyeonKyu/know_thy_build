@@ -18,6 +18,65 @@ const HEADER_RE = /^## (triage|plan|implement|review|merge|retro|sweep) · (.+?)
 // 마지막 ` cost_usd: ` 앞의 `}`까지 되돌아가므로 중첩 깊이와 무관하게 한 줄을 통째로 집는다.
 const USAGE_RE = /^usage: (\{.*\}) cost_usd: (\S+) num_turns: (\S+) terminal_reason: (\S+) models: (.*)$/;
 
+/**
+ * #196 (ADR-036) — **engine-crash 줄.** `runStage`의 catch가 프로그래밍 오류(TypeError 등)를 잡았을 때만 러너가 쓴다
+ * (`bin/run-stage.js`) — 그 섹션은 이 런이 던지기 전에 모은 `usage:` 줄을 함께 싣고, `lib/budget.js`가 그 비용을 평생 상한에서
+ * 빼 따로 보고한다. 생성자와 정규식이 이 파일 한 곳에 있는 이유는 `usageLine`/`USAGE_RE`와 같다: 쓰는 쪽과 읽는 쪽이 어긋나면
+ * 테스트가 전부 초록인 채로 아무것도 세지 않는다.
+ *
+ * 줄은 **자기 런을 지목한다**(`runner=`): 섹션 헤더의 러너와 같은 줄만 센다. 다른 러너를 지목한 줄(복사·위조)은 무시하고, 그
+ * 섹션은 보통 런으로 센다 — 모르는 것은 세는 쪽으로 기운다(엔진 런을 세면 사람이 조금 일찍 볼 뿐이고, 보통 런을 빼면 상한이 샌다).
+ * 메시지는 한 줄로 접는다(개행이 들어간 오류 문구가 다음 줄을 흉내 내지 못하게).
+ *
+ * **위조 방어는 겹으로 건다**(①·①'·② — ADR-036 2. skeptic sc2 — 러너는 게이트 사유·의존성 오류 메시지처럼 남이 만든 문구를 기록에 옮겨 적고, 그 문구의
+ * 개행은 기록에서 제 줄이 된다):
+ *   ① 쓰는 쪽 — `runStage`의 `record()`는 진짜 크래시 줄이 아닌 모든 줄에서 줄머리의 `engine-crash:`를 `quoteEngineCrashLines`로
+ *      인용 표시한다(문구는 감사용으로 남고, 크래시 줄로는 읽히지 않는다).
+ *   ② 읽는 쪽 — 크래시 줄은 **자리**까지 맞아야 센다: 섹션 본문의 첫 줄이 `error: <섹션 스테이지> aborted — `이고 바로 다음 줄이
+ *      그 스테이지·그 러너의 크래시 줄일 때만이다(`runStage` catch가 쓰는 모양 그대로). 다른 자리의 크래시 줄은 세지 않는다.
+ */
+export const ENGINE_CRASH_PREFIX = "engine-crash:";
+const ENGINE_CRASH_RE = /^engine-crash: stage=(\S+) runner=(\S+) run_id=(\S+) error=(\w+) —/;
+export const engineCrashLine = ({ stage, runnerId, runId = null, error }) => {
+  const name = /^\w+$/.test(String(error?.name ?? "")) ? error.name : "Error";
+  const msg = String(error?.message ?? error ?? "").replace(/https?:\/\/\S+/g, "<url>").replace(/\s+/g, " ").trim().slice(0, 200);
+  return `${ENGINE_CRASH_PREFIX} stage=${stage} runner=${runnerId} run_id=${runId ?? "n/a"} error=${name} — ${msg}`;
+};
+/**
+ * #196 rework sec1 — **"줄머리"는 읽는 쪽이 정한다.** 파서는 줄을 `.trim()`하고(그 공백 집합은 JS `\s`와 같다: NBSP·\v·\f·\r·
+ * U+2028·BOM·U+3000…), `HEADER_RE`의 `^`(/m)는 \n뿐 아니라 \r·U+2028·U+2029 뒤에서도 선다. 그래서 인용은 그 줄 끝 넷 뒤의
+ * **`\s` 전부**를 건너뛰고 본다 — `[ \t]`만 보던 예전 모양은 NBSP 한 글자로 뚫렸다.
+ */
+const LINE_TERMINATOR_RE = /[\n\r\u2028\u2029]/;
+/** 진짜 크래시 줄이 아닌 텍스트에서, 어느 줄이든 줄머리의 `engine-crash:`를 인용 표시한다(①). */
+export const quoteEngineCrashLines = (text) => String(text).replace(/(^|[\n\r\u2028\u2029])(\s*)engine-crash:/g, "$1$2(quoted) engine-crash:");
+/** 어느 줄이든 줄머리의 `## `(섹션 헤더 모양)를 인용 표시한다 — 기록에 옮겨 적힌 문구가 섹션을 열지 못하게(①'). */
+export const quoteRecordHeaders = (text) => String(text).replace(/(^|[\n\r\u2028\u2029])(\s*)## /g, "$1$2(quoted) ## ");
+/**
+ * `appendRunRecord`가 **모든** 기록 줄에 거는 정리(sec1): 줄 하나(배열 원소 하나)는 섹션 헤더를 세우지 못하고, 그 줄 **안의**
+ * 개행 뒤 조각은 크래시 줄도 `usage:` 줄도 되지 못한다. 원소의 첫 조각은 그대로 둔다 — 진짜 크래시 줄·usage 줄은 러너가 원소
+ * 하나로 넘기고, 그 밖의 원소는 이미 `record()`가 크래시 머리를 통째로 인용했다. 이렇게 하면 `record()`를 거치지 않는 기록자
+ * (abortStage·main의 recordLine)도 개행 하나로 헤더·크래시 줄·비용 줄을 지어내지 못한다(파서는 섹션의 **첫** `usage:` 줄을 센다 —
+ * 옮겨 적힌 문구가 진짜 usage보다 앞서면 그 런의 비용을 바꿔 쓸 수 있었다).
+ */
+export const neutralizeRecordLine = (line) => {
+  const s = quoteRecordHeaders(line);
+  const m = LINE_TERMINATOR_RE.exec(s);
+  if (!m) return s;
+  const rest = quoteEngineCrashLines(s.slice(m.index)).replace(/(^|[\n\r\u2028\u2029])(\s*)usage:/g, "$1$2(quoted) usage:");
+  return s.slice(0, m.index) + rest;
+};
+/**
+ * 섹션이 `runStage` catch가 쓴 크래시 섹션인가(②): 첫 줄 `error: <stage> aborted — `, 둘째 줄 그 스테이지·그 러너의 크래시 줄.
+ * `lines`는 **trim하지 않은** 줄이다(sec1): 러너는 두 줄을 줄 맨 앞부터 쓴다 — 앞에 공백이 붙은 줄은 러너가 쓴 모양이 아니므로 세지 않는다.
+ */
+function sectionEngineCrash(lines, stage, runner) {
+  const body = lines.filter((l) => l.trim() !== "");
+  if (body.length < 2 || !body[0].startsWith(`error: ${stage} aborted — `)) return false;
+  const m = ENGINE_CRASH_RE.exec(body[1]);
+  return Boolean(m && m[1] === stage && m[2] === runner);
+}
+
 /** "YYYY-MM-DDTHH:MMZ"(초 없는 short form)도, 일반 ISO도 받는다. 파싱 불가면 null. */
 function toMs(at) {
   const shortForm = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})Z$/.exec(at);
@@ -66,8 +125,11 @@ export function parseRunRecord(text) {
     const start = m.index + m[0].length;
     const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
     const body = text.slice(start, end);
-    const usageLineText = body.split("\n").map((l) => l.trim()).find((l) => l.startsWith("usage:"));
+    const bodyLines = body.split("\n").map((l) => l.trim());
+    const usageLineText = bodyLines.find((l) => l.startsWith("usage:"));
     const parsed = usageLineText ? parseUsageLine(usageLineText) : null;
+    // #196 — 키는 크래시 섹션에만 선다: 크래시 줄이 없는 기록의 항목은 바이트 하나 안 바뀐다(옛 소비자·고정이 그대로 본다).
+    const engineCrash = sectionEngineCrash(body.split("\n"), m[1], m[3].trim());
     out.push({
       stage: m[1],
       at: m[2],
@@ -79,6 +141,7 @@ export function parseRunRecord(text) {
       cache_creation_tokens: parsed ? parsed.cache_creation_tokens : null,
       num_turns: parsed ? parsed.num_turns : null,
       models: parsed ? parsed.models : null,
+      ...(engineCrash ? { engine_crash: true } : {}),
     });
   }
   return out;
