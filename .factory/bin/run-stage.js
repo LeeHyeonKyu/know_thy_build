@@ -38,6 +38,7 @@ import { validate } from "../lib/schemas.js";
 import { blockedOrigin, commentsSinceRequeue, commentsSinceCycleStart, countTransitionsTo, TRANSITION_TO, countSelfGateRetries, countAllSelfGateRetries, SELF_GATE_RETRY_BACKSTOP, selfGateRetryComment, kRestartState, kRestartComment, kRestartBriefOf, sameKRestartBrief, wherePaths } from "../lib/retro/issue-comments.js";
 import { transition } from "../lib/transition.js";
 import { appendRunRecord, appendRunRecordLine, reviewEvidenceLine, parseReviewEvidence, runIdOfRunner } from "../lib/run-record.js";
+import { engineCrashLine, quoteEngineCrashLines } from "../lib/usage.js";
 import { parseHeartbeatComment } from "../lib/board.js";
 import { syncRecords, hydrateRecord, readRecordsDetailed } from "../lib/records-branch.js";
 import { budgetCheck, budgetLine } from "../lib/budget.js";
@@ -183,12 +184,103 @@ export function usageLine(out, progress = null) {
   return progress ? `${line}\n${progressMarker(progress)}` : line;
 }
 
+/**
+ * #196 (ADR-036) — **엔진 크래시의 닫힌 목록.** `runStage`의 catch가 잡은 예외 중 **엔진 코드가 던진** `TypeError`·`ReferenceError`·
+ * `RangeError`만 "엔진의 프로그래밍 오류"로 본다(2026-10-03의 `Cannot read properties of undefined (reading 'test')`가 TypeError였다).
+ * 들지 않는 것:
+ *   - 의존성·인프라가 던지는 plain `Error`(`gh exploded`, EACCES, SIGKILL된 워커).
+ *   - **의존성 클라이언트 안에서** 난 어떤 종류의 오류든 — `dependencyClient`로 감싼 gh 클라이언트가 던진 것은 표식을 달고 나온다.
+ *     gh.js는 gh 출력을 보호 없이 `JSON.parse`하고(빈·잘린 출력 → SyntaxError) 필드를 바로 읽는다(오류 모양 응답 → TypeError) —
+ *     그것은 엔진 결함이 아니라 의존성 장애이고, `resolveRepo`가 같은 SyntaxError를 plain Error로 다시 싸는 것과 같은 판단이다.
+ *   - `SyntaxError` 전부 — 런타임의 SyntaxError는 엔진 코드가 아니라 **데이터**(gh 출력·에이전트 산출물·설정 정규식)의 실패다.
+ * 판정은 오류의 **종류와 출처**이지 메시지 문구가 아니다(문구는 누구나 흉내 낸다). plain Error를 던지는 엔진 버그는 들지 않는다 —
+ * 모르면 오늘의 경로(exit 1, 전이 없음)로 간다(ADR-036).
+ */
+export const ENGINE_CRASH_ERRORS = [TypeError, ReferenceError, RangeError];
+const DEPENDENCY_ERROR = Symbol.for("factory.dependency-error");
+const markDependencyError = (e) => {
+  if (e && (typeof e === "object" || typeof e === "function")) {
+    try { Object.defineProperty(e, DEPENDENCY_ERROR, { value: true, configurable: true }); } catch { /* 얼린 오류 — 표식 없이 간다 */ }
+  }
+  return e;
+};
+export const isDependencyError = (e) => Boolean(e && e[DEPENDENCY_ERROR]);
+export const isEngineCrash = (e) => !isDependencyError(e) && ENGINE_CRASH_ERRORS.some((C) => e instanceof C);
+/**
+ * #196 — 의존성 클라이언트(gh)를 감싼다: 메서드가 던지거나 거부하면 그 오류에 "의존성에서 왔다" 표식을 단다. 값은 바꾸지 않는다
+ * (동기 결과는 동기로, 함수가 아닌 속성은 그대로). 표식은 오류 객체에 붙으므로 그것을 그대로 다시 던지는 엔진 lib(`transition({ gh })`)를
+ * 지나도 따라간다. main()의 gh가 이것을 거친다 — 이 래퍼를 빼면 gh 출력 장애가 "엔진 결함"으로 사람에게 간다.
+ */
+export function dependencyClient(client) {
+  return new Proxy(client, {
+    get(target, key, receiver) {
+      const v = Reflect.get(target, key, receiver);
+      if (typeof v !== "function") return v;
+      return function dependencyCall(...args) {
+        let out;
+        try { out = v.apply(target, args); } catch (e) { throw markDependencyError(e); }
+        return out && typeof out.then === "function" ? out.then(undefined, (e) => { throw markDependencyError(e); }) : out;
+      };
+    },
+  });
+}
+
+/**
+ * #196 rework cf1 — main()의 gh 조립. 프로덕션 `makeGh`를 `dependencyClient`로 감싸, gh 출력 장애(gh.js 안의 SyntaxError·TypeError)가
+ * engine-crash로 읽히지 않게 한다. main()은 gh를 **이 함수로만** 만들고, 테스트가 같은 함수를 돈다(#174 `makeTransitionDep` 선례).
+ */
+export function makeStageGh({ run, repo }) {
+  return dependencyClient(makeGh({ run, repo }));
+}
+
 export async function runStage({ stage, issue, deps, runnerId = "unknown", runAttempt = "1", runId = process.env.GITHUB_RUN_ID || runIdOfRunner(runnerId) }) {
-  const d = deps;
+  /**
+   * #196 self-critique (skeptic f1) — 이 런이 **hand-off**를 했는가(성공한 전이 중 claim(→ in-progress)과 blocked-retry hop
+   * (`prerequisite: true`, 이미 얻었던 in-flight 라벨의 복구)이 아닌 것). hand-off는 다음 스테이지를 이미 깨웠다 — 그 뒤의 크래시가
+   * 라벨을 blocked으로 뒤집으면 도는 다음 스테이지의 발밑이 바뀐다. catch는 이 값이 있으면 engine-crash 전이를 하지 않는다.
+   * deps를 펼치지 않고 Proxy로 transition 하나만 감싼다(프로덕션 deps의 게터 — merge의 selfChange·engine — 를 그대로 살린다).
+   */
+  let handedOffTo = null;
+  const trackedTransition = typeof deps.transition === "function"
+    ? async (args) => {
+      const t = await deps.transition(args);
+      if (t?.ok === true && args?.prerequisite !== true && args?.to !== "factory:in-progress") handedOffTo = args?.to ?? "unknown";
+      return t;
+    }
+    : deps.transition;
+  /**
+   * #196 dw3 — merge의 hand-off는 전이가 아니라 `mergePr`다: 그것이 끝난 순간 PR은 main에 있고 되돌릴 수 없다. 그 뒤(→ merged 전이 전)의
+   * 크래시가 이슈를 blocked(engine-crash)로 옮기면 sweeper가 이미 머지된 PR로 merge를 다시 밀고, 에스컬레이션이 사람에게
+   * `factory:queue`를 치라고 한다 — main의 코드로 파이프라인을 처음부터 다시 돈다. 그래서 `mergePr`가 끝나면 그것을 hand-off로 센다.
+   * merge-stage.js는 건드리지 않는다: 이 Proxy가 프로덕션 deps(`makeMergeSelfChangeDeps`의 mergePr 포함)와 테스트 deps를 똑같이 감싼다.
+   */
+  const trackedMergePr = typeof deps.mergePr === "function"
+    ? async (pr, ...rest) => {
+      const r = await deps.mergePr(pr, ...rest);
+      handedOffTo = `the merge of PR #${pr} (mergePr returned)`;
+      return r;
+    }
+    : deps.mergePr;
+  const d = new Proxy(deps, {
+    get: (target, key) => (key === "transition" ? trackedTransition : key === "mergePr" ? trackedMergePr : Reflect.get(target, key)),
+  });
   if (!(await d.charterReady())) { console.error("factory: CHARTER not ready or doctor failing — dormant"); return 0; }
   /** 거부된 전이는 절대 조용히 넘기지 않는다 — 런 레코드 한 줄로 남긴다. */
   const refusal = (t) => (t.ok ? [] : [`transition refused: ${t.reason}`]);
-  const record = (lines) => { try { d.runRecord(lines); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); } };
+  /**
+   * #196 — 이 런의 `usage:` 줄(claude가 끝난 뒤에 생긴다)과, 그것이 이미 기록에 나갔는지. catch가 크래시 섹션에 **던지기 전에 모은
+   * usage**를 싣기 위해 try 밖에 둔다 — 이미 나갔으면 다시 쓰지 않는다(같은 돈을 두 섹션에서 세지 않게; 그때는 앞 섹션이 보통 런으로
+   * 세어지고, 그 방향이 안전하다).
+   */
+  let usage = null;
+  let usageRecorded = false;
+  /** #196 sc2 — 이 런의 진짜 크래시 줄(catch만 정한다). 그 밖의 줄은 줄머리 `engine-crash:`가 인용 표시돼 나간다(위조 방어 ①). */
+  let crashLine = null;
+  const record = (lines) => {
+    if (usage && lines.includes(usage)) usageRecorded = true;
+    const safe = lines.map((l) => (crashLine !== null && l === crashLine ? l : quoteEngineCrashLines(l)));
+    try { d.runRecord(safe); } catch (e) { console.error(`factory: run record write failed — ${e.message}`); }
+  };
   /**
    * 체크 상태 게시는 부수 효과다 — 실패해도 런을 죽이지 않는다. sha가 없으면 애초에 게시할 대상이
    * 없으므로(어느 커밋 얘기인지 모름) 건너뛰고 흔적만 남긴다.
@@ -227,6 +319,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
     } catch (e) {
       // 예산을 못 읽은 것은 흐름 제어의 고장이지 안전 게이트가 아니다 — 흔적을 남기고 진행한다.
+      // #196 dw2 — 그 흔적은 **시끄럽다**(잡 로그에도): engine-crash 분할의 버그가 조용히 새지 않게. 이 런은 보통 섹션으로 기록되어 센다.
+      console.error(`factory: budget: check failed — ${e?.message || e}`);
       record([`budget: check failed — ${e?.message || e}`]);
     }
   }
@@ -691,7 +785,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 하트비트는 아직 살아 있다. 실패해도 usage 줄은 그대로 나간다(관측이 기록을 막지 않는다).
     let finalProgress = null;
     try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
-    let usage = usageLine(out, finalProgress);
+    usage = usageLine(out, finalProgress);
     /**
      * #143 (S3b) — **빌더에게 넘긴 병합은 세션 직후에 끝났는지 묻는다.** 브랜치 확인·드리프트 제거·미러 커밋·턴 한도/API 오류의
      * 게이트 복구 **전**이다: 그 단계들은 전부 끝난 트리를 가정하고, 마커째 커밋된 트리를 미러로 재생성하거나 게이트로 판정하면
@@ -1309,7 +1403,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * `factory:planned`(implement가 다시 뜬다; rework 라운드가 아니라 K를 태우지 않는다), 그 뒤는 needs-human이다.
      */
     if (stage === "implement" && v.data?.verifier?.verdict === "rejected" && d.selfGateRetry) {
-      const findings = (v.data.verifier.findings || []).map((f) => ({ check: "verifier", blocking: true, detail: String(f?.claim ?? f?.detail ?? f).slice(0, 400) }));
+      // #196 rework sec1 — implement.v1은 findings의 타입을 보지 않는다: 배열이 아니면(문자열·객체·숫자) "findings 없음"이다. 예전의 `|| []`는
+      // `"x".map`에서 TypeError를 내 에이전트가 고른 산출물로 engine-crash를 만들 수 있었다(그 런의 비용이 상한에서 빠졌다).
+      const findings = (Array.isArray(v.data.verifier.findings) ? v.data.verifier.findings : []).map((f) => ({ check: "verifier", blocking: true, detail: String(f?.claim ?? f?.detail ?? f).slice(0, 400) }));
       const summary = findings.map((f) => f.detail.slice(0, 120)).join(" | ") || "verifier rejected";
       const { attempt, total } = await d.selfGateRetry({ head: v.data.head_sha ?? null, findings });
       const bounded = attempt >= 2 || (Number.isFinite(total) && total >= SELF_GATE_RETRY_BACKSTOP);
@@ -1359,7 +1455,54 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     return t.ok ? 0 : 2;
   } catch (e) {
     console.error(`factory: stage ${stage} aborted — ${e?.message || e}`);
-    record([`error: ${stage} aborted — ${e?.message || e}`]);
+    if (!isEngineCrash(e)) {
+      // 의존성·인프라 Error — 오늘의 경로 그대로(F1): 전이 없음, exit 1. 라벨은 in-flight에 남고 sweeper의 하트비트 팔이 받는다.
+      record([`error: ${stage} aborted — ${e?.message || e}`]);
+      return 1;
+    }
+    if (handedOffTo !== null) {
+      // skeptic f1 — hand-off 뒤의 크래시: 그 라벨이 서 있고 다음 스테이지가 이미 깨어났다. 오늘의 경로(전이 없음, exit 1)이고 크래시 줄을
+      // 쓰지 않는다 — 그러니 아직 기록되지 않은 usage는 이 섹션에 실려 **상한 안으로** 센다(빠지는 쪽이 아니라 세는 쪽이 안전하다).
+      record([
+        `error: ${stage} aborted — ${String(e?.message || e).replace(/\s+/g, " ").trim()}`,
+        `crash: after the hand-off to ${handedOffTo} — no transition (the hand-off stands; this run is not an engine-crash block)`,
+        ...(usage && !usageRecorded ? [usage] : []),
+      ]);
+      return 1;
+    }
+    /**
+     * #196 (ADR-036) — **엔진 크래시는 이 자리가 유일한 생산자다.** 이 런은 락을 쥐고 있다(claim 뒤의 try). 이슈를 `factory:blocked`으로
+     * 옮기며 원인을 transition()의 명시 `cause`로 찍는다 — 사유 문구에서 되짚지 않는다(`CAUSE_RULES`에는 이 등급이 없다). 그러면
+     * 이 런은 하트비트 재큐(R, `factory-retry`)를 타지 않고 sweeper의 blocked 팔이 `ENGINE_CRASH_MAX_RETRIES`까지만 다시 민다.
+     * 같은 섹션에 러너가 쓴 engine-crash 줄과 던지기 전에 모은 usage를 남긴다 — `lib/budget.js`가 그 돈을 상한에서 빼 따로 보인다.
+     * dw3 — **크래시 줄은 블록이 실제로 섰을 때만 쓴다.** 전이가 거부되거나(라벨이 이미 needs-human·blocked) 던지면 engine-crash 블록은
+     * 없다: 그때 크래시 줄을 쓰면 블록 없이 돈만 상한에서 빠진다. 그래서 그 경우는 오늘의 경로(크래시 줄 없음, usage는 상한 안으로,
+     * exit 1)이고, 왜 블록이 없는지를 `crash:` 줄 하나로 남긴다. 그래서 전이를 **먼저** 하고 기록을 그 결과로 고른다.
+     */
+    const name = e?.name || e?.constructor?.name || "Error";
+    // 첫 두 줄의 모양과 순서가 곧 계약이다(`lib/usage.js` ②): `error:` 줄은 메시지를 한 줄로 접어 둘째 줄이 크래시 줄이 되게 한다.
+    const errorLine = `error: ${stage} aborted — ${String(e?.message || e).replace(/\s+/g, " ").trim()}`;
+    const unrecorded = usage && !usageRecorded ? [usage] : [];
+    let t = null;
+    let thrown = null;
+    try {
+      t = await d.transition({ to: "factory:blocked", reason: `engine crash — ${stage} threw ${name}: ${truncateReason(e?.message || e)}`, cause: "engine-crash" });
+    } catch (te) {
+      thrown = te ?? new Error("transition threw");
+    }
+    if (!thrown && t?.ok === true) {
+      crashLine = engineCrashLine({ stage, runnerId, runId, error: e });
+      record([errorLine, crashLine, ...unrecorded, `transition: ${t.to ?? "factory:blocked"} (cause=engine-crash)`]);
+      return 1;
+    }
+    record([
+      errorLine,
+      thrown
+        ? `crash: the engine-crash block failed — ${truncateReason(thrown?.message || thrown)} — no transition; this run counts in the cap`
+        : `crash: the engine-crash block was refused — ${truncateReason(t?.reason || "no result")} — this run counts in the cap`,
+      ...unrecorded,
+      ...(thrown ? [`transition failed: → factory:blocked (cause=engine-crash) — ${truncateReason(thrown?.message || thrown)}`] : refusal(t ?? { ok: false, reason: "no result" })),
+    ]);
     return 1;
   } finally {
     hb?.stop();
@@ -3096,7 +3239,7 @@ async function main() {
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   // r1 should_fix 3 — `process.env`는 **이 배선 한 줄**에만 산다(`runAttemptOf`는 env를 받는다).
   const runAttempt = runAttemptOf(process.env);
-  const gh = makeGh({ run, repo });
+  const gh = makeStageGh({ run, repo });          // #196 — gh 장애는 engine-crash가 아니다(표식; 조립은 makeStageGh 한 곳)
   // 정리 경로는 CHARTER도 harness도 읽지 않는다 — 읽을 것이 하나라도 깨져 있으면 고아 락이 그대로
   // 남고, 이 스텝의 존재 이유가 사라진다(fail open이 옳은 유일한 자리다: 아무것도 판정하지 않는다).
   if (abortedStatus !== null) {
