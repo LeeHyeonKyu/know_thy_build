@@ -429,7 +429,7 @@ const reworkBlock = mustFix.length > 0
     `Respond to EVERY id above — a silent omission reads as an unaddressed reject. For each item: ` +
     `status "fixed" with the commit sha that fixed it, or status "disputed" with a reason that cites the ` +
     `plan handoff (\`non_goals\`, \`files_expected\`) or a concrete file path. Opinion is not a dispute.\n` +
-    `A rework round SUBTRACTS (ADR-034 §5): fix what the must_fix items name and nothing else. Do not add a ` +
+    `A rework round SUBTRACTS (ADR-037 §5): fix what the must_fix items name and nothing else. Do not add a ` +
     `new file, a new export, a second parser or list, a new done_when, or gate evidence for paths the review ` +
     `did not raise — every K-exhaustion in the 2026-10 census (#149, #157, #170) was a builder that added in ` +
     `rework and was rightly rejected again. If a finding genuinely needs new code, keep it inside the files the ` +
