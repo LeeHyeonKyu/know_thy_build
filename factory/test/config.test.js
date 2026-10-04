@@ -189,3 +189,46 @@ test("test_178_self_change_config_defaults_and_validation — parseSelfChange re
     expect(() => parseSelfChange(raw), JSON.stringify(raw)).toThrow(new RegExp(key.replace(/[.]/g, "\\.")));
   }
 });
+
+// ── #189 (S4c) — CHARTER `self_change.breaker`: 키는 revert_streak 하나, 없으면 기본값 2, 그 밖은 설정 오류 ──────────────
+test("test_189_breaker_opens_on_two_consecutive_reverts_of_judge_automerges — self_change.breaker config", async () => {
+  const { parseSelfChange, breakerThresholds, BREAKER_DEFAULTS } = await import("../lib/config.js");
+  const root = fixture();
+  const charterPath = join(root, "docs/factory/CHARTER.md");
+  const base = readFileSync(charterPath, "utf8");
+  const withBlock = (block) => writeFileSync(charterPath, base.replace("budget: {}\n", `budget: {}\n${block}`));
+
+  expect(BREAKER_DEFAULTS).toEqual({ revert_streak: 2 });
+  // 키를 빼면 기본값(실제 CHARTER 경로로 읽힌다).
+  expect(breakerThresholds(loadCharter(root).self_change)).toEqual({ revert_streak: 2 });
+  withBlock("self_change:\n  auto_merge_judge: true\n");
+  expect(breakerThresholds(loadCharter(root).self_change)).toEqual({ revert_streak: 2 });
+  withBlock("self_change:\n  breaker:\n    revert_streak: 3\n");
+  expect(loadCharter(root).self_change.breaker).toEqual({ revert_streak: 3 });
+  expect(breakerThresholds(loadCharter(root).self_change)).toEqual({ revert_streak: 3 });
+  // 이슈 초안의 다른 키(쿨다운·bad-ratio 창)는 이 엔진이 구현하지 않으므로 조용히 받지 않고 던진다.
+  for (const key of ["cooldown_hours: 6", "window: 5", "bad_ratio: 0.4"]) {
+    withBlock(`self_change:\n  breaker:\n    revert_streak: 2\n    ${key}\n`);
+    expect(() => loadCharter(root), key).toThrow(new RegExp(`self_change\\.breaker.*${key.split(":")[0]}`));
+  }
+  // 모양이 틀린 값 → 설정 오류(기본값으로 접지 않는다).
+  for (const [raw, re] of [
+    [{ breaker: { revert_streak: 0 } }, /self_change\.breaker\.revert_streak/],
+    [{ breaker: { revert_streak: -1 } }, /self_change\.breaker\.revert_streak/],
+    [{ breaker: { revert_streak: 1.5 } }, /self_change\.breaker\.revert_streak/],
+    [{ breaker: { revert_streak: "2" } }, /self_change\.breaker\.revert_streak/],
+    [{ breaker: { revert_streak: null } }, /self_change\.breaker\.revert_streak/],
+    [{ breaker: true }, /self_change\.breaker/],
+    [{ breaker: [2] }, /self_change\.breaker/],
+    [{ breaker: null }, /self_change\.breaker/],
+  ]) {
+    expect(() => parseSelfChange(raw), JSON.stringify(raw)).toThrow(re);
+  }
+  // 빈 맵은 "쓰지 않은 키는 기본값".
+  expect(parseSelfChange({ breaker: {} }).breaker).toEqual({ revert_streak: 2 });
+  // 기본값 객체는 공유되지 않는다(한 호출의 변경이 다음 호출로 새지 않는다).
+  const a = breakerThresholds(undefined);
+  a.revert_streak = 99;
+  expect(breakerThresholds(undefined)).toEqual({ revert_streak: 2 });
+  expect(Object.isFrozen(BREAKER_DEFAULTS)).toBe(true);
+});

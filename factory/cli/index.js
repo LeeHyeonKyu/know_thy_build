@@ -23,6 +23,9 @@ export const HELP = `
     factory analyze --health [--json]   Aggregate the behavioural health signals and print the report
     factory board [--repo owner/name]…  Local viewer: lanes, timeline and live agent progress across repos
                 [--port 4173] [--interval 60] [--once [--json]]
+    factory breaker --reset --reason <text>
+                                        Close the auto-merge circuit breaker (person-only — refused in agent
+                                        sessions and CI; recorded as person:<login> on factory/records)
 `;
 
 /**
@@ -56,6 +59,8 @@ export async function main(argv) {
     // board는 `pkgRoot`가 필요하다(ADR-022 Task B) — CLI가 내는 페이지와 `factory init`이 설치하는
     // 페이지는 **같은 파일**이어야 하고, 패키지 안의 그 원본은 pkgRoot 아래에만 있다.
     case "board": return (await import("./board.js")).boardCommand({ root, pkgRoot, argv: rest, io });
+    // #189 — 사람 전용 리셋. `env`를 명시로 넘긴다: 그 함수는 process.env를 직접 읽지 않는다(에이전트 세션·CI 판정의 재료가 이것이다).
+    case "breaker": return (await import("./breaker.js")).breakerCommand({ root, argv: rest, io, run: realRun, env: process.env });
     default: io.err(`unknown factory command: ${sub}\n${HELP}`); return 1;
   }
 }

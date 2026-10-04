@@ -34,7 +34,7 @@ import { routeMergedIssues } from "../lib/feedback/route.js";
 import { announceFailure } from "../lib/gha.js";
 import { loadInstallManifest, INSTALL_MANIFEST_PATH } from "../lib/feedback/install-manifest.js";
 import { loadQuarantine, saveQuarantine } from "../lib/quarantine.js";
-import { readRecordsDetailed, recordsSourceOf, syncRecords } from "../lib/records-branch.js";
+import { readRecordsDetailed, recordsSourceOf } from "../lib/records-branch.js";
 import { validate } from "../lib/schemas.js";
 import { extractStageArtifact, readTranscript } from "../lib/stage-artifact.js";
 import { harvest as harvestRecords, mergeCandidates } from "../lib/retro/harvest.js";
@@ -48,7 +48,8 @@ import {
 } from "../lib/retro/quarantine-ops.js";
 import { applyRoleAdditions as applyRoleAdditionsText } from "../lib/retro/role-additions.js";
 import { nextN, parseRetroState, renderRetroState, shouldRunFull } from "../lib/retro/state.js";
-import { stageMaxTurns } from "./run-stage.js";
+import { stageMaxTurns, syncRunRecords } from "./run-stage.js";
+import { makeRecordsUploadGuard } from "../lib/breaker.js";
 import { hitApiError, apiErrorReason } from "../lib/verify-stage.js";
 import { HARNESS_LABEL } from "../lib/label-catalog.js";
 export { HARNESS_LABEL };   // 재수출 — run-stage.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
@@ -1217,12 +1218,19 @@ async function main() {
     // `_retro.md`는 매번 통째로 다시 렌더링되는 상태 파일이라 꼬리 병합의 대상이 아니고(병합되면 마커·
     // JSON 펜스가 둘인 파일이 된다), 교체는 하이드레이트한 blob에만 건다 — 그 사이 상태가 움직였으면
     // 덮어쓰지 않고 moved로 튕긴다(records-branch.js `overwrite`/`expectBlob` 참조).
-    sync: ({ expectBlob } = {}) => syncRecords({ run, cwd: root, message: `retro: state update (${runnerId})`, overwrite: [STATE_FILE], expectBlob }),
+    sync: ({ expectBlob } = {}) => retroRecordsSync({ run, root, runnerId, expectBlob }),
     nBounds: { min: retro.min ?? 1, max: retro.max ?? Infinity },
   };
 
   process.exit(await runRetro({ deps, force, now }));
 }
+
+/**
+ * #189 self-critique f2 — retro의 기록 동기화. 기본 dir(`docs/factory/runs/**`)을 러너의 이름으로 미는 문이고, retro는 바로 그 워크트리에서
+ * `claude -p`(에이전트)를 부른다 — 그래서 run-stage의 스테이지 끝 동기화와 **같은 업로드 가드**를 탄다(`syncRunRecords`): 심어진 차단기
+ * 상태 파일은 지우고, 브랜치에 없던 자동 머지 줄은 걸러 낸다. retro는 자동 머지 줄을 쓰지 않으므로 믿는 줄이 없다.
+ */
+export const retroRecordsSync = ({ run, root, runnerId, expectBlob }) => syncRunRecords({ run, root, message: `retro: state update (${runnerId})`, guard: makeRecordsUploadGuard({ run, cwd: root }), overwrite: [STATE_FILE], expectBlob });
 
 const isMain = process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
 if (isMain) main().catch((e) => { console.error(e); process.exit(1); });
