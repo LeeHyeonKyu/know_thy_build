@@ -368,11 +368,12 @@ function recordingRun({ beforePush = null } = {}) {
 }
 
 /** fakeGh + 열린 PR 조회(head 접두사로 거른다)·PR 편집. */
-function standingGh({ prs = [], checks = [PASS], pr = 77 } = {}) {
+function standingGh({ prs = [], checks = [PASS], pr = 77, headSha = async () => null } = {}) {
   return {
     ...fakeGh({ checks, pr }),
     openPrsByHeadPrefix: vi.fn(async (prefix) => prs.filter((p) => p.headRefName.startsWith(prefix))),
     editPr: vi.fn(async () => {}),
+    prHeadSha: vi.fn(headSha),
   };
 }
 const standingPr = (number, headRefName, headRefOid, title = "old title") => ({ number, title, headRefName, headRefOid });
@@ -381,26 +382,18 @@ test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
   const OLD = "factory/lessons-2026-09-05";
   const NEW = `factory/lessons-${DATE}`;
 
-  // (a) 열린 lessons PR이 있다 → 새 PR 없이 그 브랜치를 base + 그 PR이 이미 싣고 있던 추가 + 이번 lessons로 갈아 끼운다.
-  // 그 PR의 추가는 이번 회차가 다시 만들지 않아도(다른 역할 파일이든, 같은 파일의 다른 줄이든) 사라지지 않는다(#201 cf1).
+  // (a) 열린 lessons PR이 있다 → 새 PR 없이 그 브랜치를 base + 이번 lessons(applyLessons가 정한 텍스트 그대로)로 갈아 끼운다.
   {
     const { remote, cwd } = await realRepo();
-    const OTHER_PATH = ".factory/lessons/factory-builder.md";
-    const OTHER_TEXT = "<!-- factory-lessons:v1 role=factory-builder max=12 -->\n- [L-2026-09-05-02] builder only.\n  근거: runs/90.md, runs/92.md. 인용: 0회.\n";
-    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n  근거: runs/90.md, runs/91.md. 인용: 0회.\n`, [OTHER_PATH]: OTHER_TEXT } });
+    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n  근거: runs/90.md, runs/91.md. 인용: 0회.\n` } });
     const run = recordingRun();
-    const gh = standingGh({ prs: [standingPr(150, OLD, oldSha, "retro: lessons/examples 2026-09-05")] });
+    const gh = standingGh({ prs: [standingPr(150, OLD, oldSha, "retro: lessons/examples 2026-09-05")], headSha: () => g(remote, "rev-parse", OLD) });
     const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, spies(), { cwd }));
 
     expect(gh.createPr).not.toHaveBeenCalled();
     expect(out).toMatchObject({ pr: 150, merged: true, branch: OLD });
     expect(await remoteHas(remote, `refs/heads/${NEW}`)).toBe(false);
-    const refreshed = await g(remote, "show", `${OLD}:${LESSONS_PATH}`);
-    expect(refreshed).toContain("- [L-2026-09-05-01] old.");
-    expect(refreshed).toContain("- [L-2026-09-12-01] 타임존 비교는 파싱 함수의 기본 타임존을 확인한다.");
-    expect(refreshed.indexOf("[L-2026-09-05-01]")).toBeLessThan(refreshed.indexOf("[L-2026-09-12-01]"));
-    expect(refreshed.split("\n").filter((l) => l.startsWith("<!-- factory-lessons:v1"))).toHaveLength(1);
-    expect(await g(remote, "show", `${OLD}:${OTHER_PATH}`)).toBe(OTHER_TEXT.trim());
+    expect(await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).toBe(LESSONS_TEXT.trim());
     expect(await g(remote, "rev-parse", `${OLD}^`)).toBe(await g(remote, "rev-parse", "main"));
     const push = run.calls.find((c) => c.cmd === "git" && c.args[0] === "push");
     expect(push.args).toContain(`--force-with-lease=refs/heads/${OLD}:${oldSha}`);
@@ -412,10 +405,9 @@ test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
     expect(n).toBe(150);
     expect(edit.title).toBe(`retro: lessons/examples ${DATE}`);
     expect(edit.body).toContain(LESSONS_PATH);
-    expect(edit.body).toContain(OTHER_PATH);
     expect(gh.comment.mock.calls.some(([p, b]) => p === 150 && b.includes(`retro(${DATE})가 이 PR을 갱신했다`))).toBe(true);
     expect(gh.prChecks).toHaveBeenCalledWith(150);
-    expect(gh.mergePr).toHaveBeenCalledWith(150, expect.objectContaining({ method: "squash" }));
+    expect(gh.mergePr).toHaveBeenCalledWith(150, expect.objectContaining({ method: "squash", matchHeadCommit: await g(remote, "rev-parse", OLD) }));
   }
 
   // (b) 리스는 **읽은 head**에 걸린다 — 읽은 뒤 누가 그 브랜치에 push하면 retro의 push가 거부되고 그 커밋이 이긴다.
@@ -531,57 +523,62 @@ test("test_201_hand_to_human_translates_the_branch_policy_refusal", async () => 
   expect(otherText).not.toContain("admin");
 });
 
-test("test_201_refresh_does_not_duplicate_a_lesson_the_standing_pr_already_carries", async () => {
-  // #201 cf1(rework) — 미머지 lessons PR의 항목은 후보로 남아 다음 retro가 같은 문장을 새 id로 다시 채택한다(retro.js의
-  // applyLessons는 default 체크아웃만 보고 중복을 거른다). 갱신이 그 둘을 다 남기면 회차마다 같은 문장이 하나씩 늘어
-  // `max=`를 넘고 integrity가 RED가 된다. 또 서로 다른 두 항목이 같은 `근거:` 줄로 끝나면 줄 단위 합치기가 앞 항목의
-  // 근거 줄을 떼어 낼 수 있다 — 그 항목은 `lessons entry missing 근거`가 된다. 역할 파일의 bullet도 같다.
+test("test_201_refresh_publishes_applyLessons_text_verbatim_within_the_cap", async () => {
+  // #201 arch1 — 채택(중복·상한·id)은 lessons.js의 `applyLessons`가 정한다. 갱신은 그 결과를 그대로 싣는다 — publish가
+  // 그 PR의 항목을 다시 합치면 상한(`max=`)이 결정된 곳 밖에서 깨진다: default에 max-1개, 그 PR이 A를 더했고, 이번 회차가
+  // (default를 보고) B를 더하면 합친 파일은 max+1개 → integrity RED → push 없음 → 사람이 머지할 때까지 매 회차 막힌다.
   const OLD = "factory/lessons-2026-09-05";
-  const ROLE_PATH = "agents/reviewer-correctness.md";
-  const ROLE_MAIN = "# reviewer\n\n## Perspectives\n- existing view\n\n## Lessons\nread the file\n";
-  const ROLE_PR = "# reviewer\n\n## Perspectives\n- existing view\n- carried view\n\n## Lessons\nread the file\n";
-  const EVID = "  근거: runs/90.md, runs/91.md. 인용: 0회.";
-  const TZ = "타임존 비교는 파싱 함수의 기본 타임존을 확인한다.";
+  const HEADER2 = "<!-- factory-lessons:v1 role=reviewer-correctness max=2 -->\n";
+  const E0 = "- [L-2026-09-01-01] on main.\n  근거: runs/80.md, runs/81.md. 인용: 0회.\n";
   const { remote, cwd } = await realRepo();
-  // main에 역할 파일을 둔다(그 PR과 이번 회차가 같은 base에서 갈라진다).
-  mkdirSync(join(cwd, dirname(ROLE_PATH)), { recursive: true });
-  writeFileSync(join(cwd, ROLE_PATH), ROLE_MAIN);
+  writeFileSync(join(cwd, LESSONS_PATH), `${HEADER2}${E0}`);
   await g(cwd, "add", ".");
-  await g(cwd, ...BOT_ID, "commit", "-q", "-m", "role file");
+  await g(cwd, ...BOT_ID, "commit", "-q", "-m", "one entry, max=2");
   await g(cwd, "push", "-q", "origin", "main");
+  const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${HEADER2}${E0}- [L-2026-09-05-01] A from the standing PR.\n  근거: runs/90.md, runs/91.md. 인용: 0회.\n` } });
+  const thisRun = `${HEADER2}${E0}- [L-2026-09-12-01] B from this run.\n  근거: runs/97.md, runs/104.md. 인용: 0회.\n`;
 
-  const oldSha = await pushToBranch(remote, OLD, { files: {
-    [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] ${TZ}\n${EVID}\n- [L-2026-09-05-02] carried only.\n  근거: runs/97.md, runs/104.md. 인용: 0회.\n`,
-    [ROLE_PATH]: ROLE_PR,
-  } });
-  // 이번 회차: 같은 TZ 문장이 새 id로 다시 채택됐고(근거는 늘었다), 새 문장 하나는 그 PR의 마지막 항목과 같은 근거 줄로 끝난다.
-  const files = {
-    [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-12-01] ${TZ}\n  근거: runs/90.md, runs/91.md, runs/120.md. 인용: 0회.\n- [L-2026-09-12-02] fresh this run.\n  근거: runs/97.md, runs/104.md. 인용: 0회.\n`,
-    [ROLE_PATH]: "# reviewer\n\n## Perspectives\n- existing view\n- carried view\n- fresh view\n\n## Lessons\nread the file\n",
+  const gh = standingGh({ prs: [standingPr(150, OLD, oldSha)], headSha: () => g(remote, "rev-parse", OLD) });
+  const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd, files: { [LESSONS_PATH]: thisRun } }));
+
+  expect(out, String(out.reason)).toMatchObject({ pr: 150, merged: true, branch: OLD });
+  expect(gh.createPr).not.toHaveBeenCalled();
+  expect(await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).toBe(thisRun.trim());
+}, 60000);
+
+test("test_201_refresh_does_not_merge_on_the_old_heads_stale_check", async () => {
+  // #201 cf1 — 갈아 끼우는 PR의 이전 head에는 이미 green `factory/integrity`가 있을 수 있다(그래서 그 PR이 남아 있다).
+  // push 직후 GitHub이 PR head를 옮기기 전의 `gh pr checks`는 그 이전 head의 PASS를 돌려준다. PR head가 방금 push한
+  // 커밋이 아니면 그 PASS는 판정이 아니다(pending) — 머지하지 않는다. 머지할 때는 그 커밋에 고정한다(--match-head-commit).
+  const OLD = "factory/lessons-2026-09-05";
+  const standingRepo = async () => {
+    const repo = await realRepo();
+    const oldSha = await pushToBranch(repo.remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n  근거: runs/90.md, runs/91.md. 인용: 0회.\n` } });
+    return { ...repo, oldSha };
   };
 
-  let lease = oldSha;
-  for (const round of [1, 2]) {
-    const gh = standingGh({ prs: [standingPr(150, OLD, lease)] });
-    const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd, files }));
-    expect(out, `round ${round}: ${out.reason}`).toMatchObject({ pr: 150, branch: OLD });
-    expect(gh.createPr).not.toHaveBeenCalled();
-    lease = await g(remote, "rev-parse", OLD);
+  // (a) PR head가 끝내 이전 커밋에 머문다 + 체크는 PASS(이전 head의 것) → 머지하지 않고 사람에게 넘긴다.
+  {
+    const { remote, cwd, oldSha } = await standingRepo();
+    const gh = standingGh({ prs: [standingPr(150, OLD, oldSha)], checks: [PASS], headSha: async () => oldSha });
+    const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd }));
+    expect(await g(remote, "rev-parse", OLD)).not.toBe(oldSha);
+    expect(gh.prHeadSha).toHaveBeenCalledWith(150);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ pr: 150, merged: false });
+    expect(gh.addLabels).toHaveBeenCalledWith(150, ["factory:needs-human"]);
+  }
 
-    const lessons = (await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).split("\n");
-    const entries = lessons.filter((l) => l.startsWith("- [L-"));
-    expect(entries, `round ${round}`).toEqual([
-      `- [L-2026-09-05-01] ${TZ}`,
-      "- [L-2026-09-05-02] carried only.",
-      "- [L-2026-09-12-02] fresh this run.",
-    ]);
-    // 모든 항목 바로 다음 줄이 그 항목의 근거 줄이다(떼어진 근거 없음).
-    for (const e of entries) expect(lessons[lessons.indexOf(e) + 1], `${e} (round ${round})`).toMatch(/^ {2}근거: /);
-    expect(lessons.filter((l) => l.startsWith("  근거: "))).toHaveLength(3);
-
-    const role = await g(remote, "show", `${OLD}:${ROLE_PATH}`);
-    expect(role.split("\n").filter((l) => l === "- carried view"), `round ${round}`).toHaveLength(1);
-    expect(role.split("\n").filter((l) => l === "- fresh view")).toHaveLength(1);
-    expect(role.split("\n").filter((l) => l === "- existing view")).toHaveLength(1);
+  // (b) PR head가 두 번째 폴링에서야 새 커밋으로 옮겨진다 → 그때의 PASS로 머지하고, 그 커밋에 고정한다.
+  {
+    const { remote, cwd, oldSha: lease } = await standingRepo();
+    let calls = 0;
+    const gh = standingGh({ prs: [standingPr(150, OLD, lease)], checks: [PASS], headSha: async () => (++calls === 1 ? lease : g(remote, "rev-parse", OLD)) });
+    const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd }));
+    const pushed = await g(remote, "rev-parse", OLD);
+    expect(pushed).not.toBe(lease);
+    expect(out).toMatchObject({ pr: 150, merged: true });
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(gh.mergePr).toHaveBeenCalledWith(150, { method: "squash", deleteBranch: true, matchHeadCommit: pushed });
   }
 }, 120000);
