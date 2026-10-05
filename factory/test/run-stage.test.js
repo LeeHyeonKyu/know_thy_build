@@ -6332,6 +6332,7 @@ test("test_195_run_record_path_has_one_owner", async () => {
 
 // ── #200 — the self-gate `scope` check, fed by the production call site (`makeSelfGateDep`) from a real git repository ──────
 import { run as realRun200 } from "../lib/exec.js";
+import { addedLinesByPath } from "../bin/run-stage.js";
 
 async function scopeRepo200() {
   const root = mkdtempSync(join(tmpdir(), "fq200-"));
@@ -6412,6 +6413,65 @@ test("test_200_run_stage_feeds_scope_inputs_from_git", async () => {
     expect(r.skippedChecks.find((s) => s.check === "scope")?.detail).toMatch(why);
     expect(calls.some((a) => a.includes("-U0") || a.includes("-z"))).toBe(false);
   }
+});
+
+test("test_200_scope_check_ignores_a_token_on_a_removed_line", async () => {
+  // The base already carries a `Scope change (#200)` header in two outside files (an earlier round that landed, say).
+  const root = mkdtempSync(join(tmpdir(), "fq200r-"));
+  const git = async (...args) => {
+    const r = await realRun200("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0);
+    return r.stdout.trim();
+  };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  const body = (n) => Array.from({ length: 30 }, (_, i) => `export const ${n}${i} = ${i};`).join("\n") + "\n";
+  const header = "// Scope change (#200): an old reason\n";
+  await git("init", "-q", "-b", "main");
+  put("factory/lib/self-gate.js", body("g"));
+  put("factory/lib/replaced.js", header + body("r"));
+  put("factory/lib/dropped.js", body("d").replace("export const d15", header + "export const d15"));
+  await git("add", "-A"); await git("commit", "-q", "-m", "base");
+  await git("checkout", "-q", "-b", "claude/fq-200");
+  // This round: replaced.js swaps the header for an ordinary line (one `-`, one `+` in the same hunk);
+  // dropped.js only deletes the header line (a pure `-` hunk). Neither adds a token of its own.
+  put("factory/lib/replaced.js", "// an ordinary comment\n" + body("r"));
+  put("factory/lib/dropped.js", body("d"));
+  await git("add", "-A"); await git("commit", "-q", "-m", "round 2");
+  const mergeBase = async () => git("merge-base", "main", "HEAD");
+  const dep = makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctx200(["factory/lib/self-gate.js"]) });
+  const r = await dep({ gates: GREEN_200 });
+  expect(r.ranChecks).toContain("scope");
+  expect(r.ok).toBe(false);
+  expect(scopeFindings200(r).filter((f) => f.blocking).map((f) => f.detail.split(" is outside")[0]).sort())
+    .toEqual(["factory/lib/dropped.js", "factory/lib/replaced.js"]);
+});
+
+test("test_200_added_lines_by_path_keeps_only_plus_lines", () => {
+  // A hunk with context lines (git emits these whenever -U0 is not honoured, e.g. a configured diff.context) and removed
+  // lines that carry the token: only the `+` lines are added; the counts stay in step so the next file is still parsed.
+  const diff = [
+    "diff --git a/factory/lib/a.js b/factory/lib/a.js",
+    "--- a/factory/lib/a.js",
+    "+++ b/factory/lib/a.js",
+    "@@ -1,4 +1,4 @@",
+    " // Scope change (#200): a context line",
+    "-// Scope change (#200): a removed line",
+    "+export const kept = 1;",
+    " // Scope change (#200): another context line",
+    " export const tail = 0;",
+    "@@ -9 +9,0 @@",
+    "-// Scope change (#200): removed alone",
+    "diff --git a/factory/lib/b.js b/factory/lib/b.js",
+    "--- a/factory/lib/b.js",
+    "+++ b/factory/lib/b.js",
+    "@@ -3,0 +4 @@",
+    "+// Scope change (#200): b's own line",
+    "",
+  ].join("\n");
+  const m = addedLinesByPath(diff);
+  expect([...m.keys()].sort()).toEqual(["factory/lib/a.js", "factory/lib/b.js"]);
+  expect(m.get("factory/lib/a.js")).toEqual(["export const kept = 1;"]);
+  expect(m.get("factory/lib/b.js")).toEqual(["// Scope change (#200): b's own line"]);
 });
 
 test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
