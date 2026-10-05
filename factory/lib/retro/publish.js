@@ -169,6 +169,40 @@ async function foreignCommits({ run, wt, defaultBranch, head }) {
     .map(([sha]) => sha);
 }
 
+/**
+ * #201 cf1 — 열린 lessons PR이 이미 싣고 있는 추가를 이번 커밋(worktree HEAD, `origin/<default>` + 이번 `files`)에 옮겨
+ * 싣는다 → 그 PR이 바꾼 경로 목록. `files`는 이번 회차가 바꾼 파일뿐이고 그 텍스트도 러너 체크아웃(= default) 기준이라,
+ * 이것 없이 force push하면 그 PR의 미머지 추가가 지워진다(다른 역할 파일이든 같은 파일의 다른 줄이든).
+ * 파일마다 3-way 합친다: base = 그 PR과 default의 merge-base, 한쪽 = 그 PR의 head, 다른 쪽 = 이번 커밋. 둘 다 같은 자리
+ * (파일 끝)에 append하므로 `--union`으로 양쪽 줄을 다 남긴다 — PR의 줄이 먼저, 이번 회차의 줄이 뒤다. 그 PR에서 없어진
+ * 경로는 옮기지 않는다(retro는 파일을 지우지 않는다). 커밋은 하나로 둔다(`--amend`): PR은 여전히 default 위의 커밋 하나다.
+ */
+async function carryStanding({ run, wt, defaultBranch, head, writeFile, mkdir }) {
+  const base = (await git(run, ["merge-base", `origin/${defaultBranch}`, head], { cwd: wt })).trim();
+  const changed = (await git(run, ["diff", "--name-only", "--no-renames", "-z", base, head], { cwd: wt })).split("\0").filter(Boolean);
+  const blobOf = async (rev, rel) => {
+    const r = await run("git", ["rev-parse", "--verify", "-q", `${rev}:${rel}`], { cwd: wt });
+    return r.code === 0 ? r.stdout.trim() : null;
+  };
+  let empty = null;
+  const carried = [];
+  for (const rel of changed) {
+    const theirs = await blobOf(head, rel);
+    if (!theirs) continue;
+    empty ??= (await git(run, ["hash-object", "-w", "--stdin"], { cwd: wt, input: "" })).trim();
+    const merged = await git(run, ["merge-file", "-p", "--union", "--object-id", theirs, (await blobOf(base, rel)) ?? empty, (await blobOf("HEAD", rel)) ?? empty], { cwd: wt });
+    const abs = join(wt, rel);
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, merged);
+    await git(run, ["add", "--", rel], { cwd: wt });
+    carried.push(rel);
+  }
+  if (carried.length) {
+    await git(run, ["-c", `user.name=${BOT_NAME}`, "-c", `user.email=${BOT_EMAIL}`, "commit", "--amend", "--no-edit"], { cwd: wt });
+  }
+  return carried;
+}
+
 const lessonsBody = (date, paths) => [
   `retro(${date})가 다크로 append한 lesson·역할 예시/관점입니다(§8.1).`,
   `\`${INTEGRITY_CHECK}\`가 GREEN이면 retro가 스스로 머지하고, 아니면 \`${NEEDS_HUMAN}\`을 붙이고 사람에게 넘깁니다.`,
@@ -200,6 +234,28 @@ export async function openAndMergeLessonsPr({
     return await withWorktree({ run, cwd, defaultBranch, mkdtemp, rm }, async (wt) => {
       const paths = await stageAndCommit({ run, wt, files, message: title, writeFile, mkdir });
 
+      // #201 — 이미 열린 lessons PR이 있으면 새 PR을 쌓지 않고 그 브랜치를 갈아 끼운다. 그 PR의 추가는 `carryStanding`이
+      // 이번 커밋에 옮겨 싣고, integrity 선검사는 그렇게 **합친** 커밋을 본다(push되는 것이 곧 검사한 것이다).
+      // 리스는 **방금 읽은 head**에 건다: worktree에는 그 브랜치의 원격 추적 ref가 없어 맨 `--force-with-lease`는
+      // 아무것도 지키지 못한다.
+      const standing = await findStanding({ gh, prefix: LESSONS_PREFIX, log });
+      let lease = null;
+      if (standing) {
+        branch = standing.headRefName;
+        lease = await fetchBranchHead({ run, wt, branch });
+        // 리스는 읽은 뒤 몇 초만 지킨다. needs-human PR에 사람이 며칠 전에 올린 수정은 그 head에 이미 들어 있으므로
+        // 리스로는 못 지킨다 — factory-bot이 아닌 커밋이 하나라도 있으면 아예 덮어쓰지 않는다.
+        const foreign = await foreignCommits({ run, wt, defaultBranch, head: lease });
+        if (foreign.length) {
+          const shas = foreign.map((x) => x.slice(0, 7)).join(", ");
+          const reason = `standing lessons PR #${standing.number} carries commits not made by ${BOT_NAME} (${shas}) — not refreshed`;
+          await quiet(() => gh.comment(standing.number, `retro(${date})는 이 PR을 갱신하지 않았습니다 — 브랜치에 ${BOT_NAME}가 아닌 커밋(${shas})이 있어 덮어쓰지 않습니다. 이 PR을 머지하거나 닫으면 다음 retro가 새 PR을 엽니다.`));
+          log(`retro: ${reason}`);
+          return { pr: standing.number, merged: false, reason, branch };
+        }
+        for (const rel of await carryStanding({ run, wt, defaultBranch, head: lease, writeFile, mkdir })) if (!paths.includes(rel)) paths.push(rel);
+      }
+
       const base = (await git(run, ["merge-base", "HEAD", `origin/${defaultBranch}`], { cwd: wt })).trim();
       const integrity = await integrityCheck({ run, cwd: wt, base, harness, readFile });
       if (!integrity.ok) {
@@ -227,27 +283,11 @@ export async function openAndMergeLessonsPr({
         return { pr: null, merged: false, reason, branch };
       }
 
-      // #201 — 이미 열린 lessons PR이 있으면 새 PR을 쌓지 않고 그 브랜치를 갈아 끼운다. worktree는 `origin/<default>`에서
-      // 시작했고 `files`는 누적된 lessons 전체이므로 내용은 "base + 지금까지의 lessons"다. 리스는 **방금 읽은 head**에
-      // 건다: worktree에는 그 브랜치의 원격 추적 ref가 없어 맨 `--force-with-lease`는 아무것도 지키지 못한다.
-      const standing = await findStanding({ gh, prefix: LESSONS_PREFIX, log });
       if (standing) {
-        branch = standing.headRefName;
-        const lease = await fetchBranchHead({ run, wt, branch });
-        // 리스는 읽은 뒤 몇 초만 지킨다. needs-human PR에 사람이 며칠 전에 올린 수정은 그 head에 이미 들어 있으므로
-        // 리스로는 못 지킨다 — factory-bot이 아닌 커밋이 하나라도 있으면 아예 덮어쓰지 않는다.
-        const foreign = await foreignCommits({ run, wt, defaultBranch, head: lease });
-        if (foreign.length) {
-          const shas = foreign.map((x) => x.slice(0, 7)).join(", ");
-          const reason = `standing lessons PR #${standing.number} carries commits not made by ${BOT_NAME} (${shas}) — not refreshed`;
-          await quiet(() => gh.comment(standing.number, `retro(${date})는 이 PR을 갱신하지 않았습니다 — 브랜치에 ${BOT_NAME}가 아닌 커밋(${shas})이 있어 덮어쓰지 않습니다. 이 PR을 머지하거나 닫으면 다음 retro가 새 PR을 엽니다.`));
-          log(`retro: ${reason}`);
-          return { pr: standing.number, merged: false, reason, branch };
-        }
         await git(run, ["push", `--force-with-lease=refs/heads/${branch}:${lease}`, "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
         pr = standing.number;
         await gh.editPr(pr, { title, body: lessonsBody(date, paths) });
-        await quiet(() => gh.comment(pr, `retro(${date})가 이 PR을 갱신했다 — 브랜치를 \`origin/${defaultBranch}\` + 이번까지 누적된 lessons로 다시 만들었습니다(새 PR은 열지 않았습니다).`));
+        await quiet(() => gh.comment(pr, `retro(${date})가 이 PR을 갱신했다 — 브랜치를 \`origin/${defaultBranch}\` + 이 PR이 싣고 있던 추가 + 이번 회차의 추가로 다시 만들었습니다(새 PR은 열지 않았습니다).`));
         log(`retro: lessons PR #${pr} refreshed in place`);
       } else {
         await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });

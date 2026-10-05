@@ -381,10 +381,13 @@ test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
   const OLD = "factory/lessons-2026-09-05";
   const NEW = `factory/lessons-${DATE}`;
 
-  // (a) 열린 lessons PR이 있다 → 새 PR 없이 그 브랜치를 base + 이번 lessons로 갈아 끼운다.
+  // (a) 열린 lessons PR이 있다 → 새 PR 없이 그 브랜치를 base + 그 PR이 이미 싣고 있던 추가 + 이번 lessons로 갈아 끼운다.
+  // 그 PR의 추가는 이번 회차가 다시 만들지 않아도(다른 역할 파일이든, 같은 파일의 다른 줄이든) 사라지지 않는다(#201 cf1).
   {
     const { remote, cwd } = await realRepo();
-    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n` } });
+    const OTHER_PATH = ".factory/lessons/factory-builder.md";
+    const OTHER_TEXT = "<!-- factory-lessons:v1 role=factory-builder max=12 -->\n- [L-2026-09-05-02] builder only.\n  근거: runs/90.md, runs/92.md. 인용: 0회.\n";
+    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n  근거: runs/90.md, runs/91.md. 인용: 0회.\n`, [OTHER_PATH]: OTHER_TEXT } });
     const run = recordingRun();
     const gh = standingGh({ prs: [standingPr(150, OLD, oldSha, "retro: lessons/examples 2026-09-05")] });
     const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, spies(), { cwd }));
@@ -392,7 +395,12 @@ test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
     expect(gh.createPr).not.toHaveBeenCalled();
     expect(out).toMatchObject({ pr: 150, merged: true, branch: OLD });
     expect(await remoteHas(remote, `refs/heads/${NEW}`)).toBe(false);
-    expect(await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).toBe(LESSONS_TEXT.trim());
+    const refreshed = await g(remote, "show", `${OLD}:${LESSONS_PATH}`);
+    expect(refreshed).toContain("- [L-2026-09-05-01] old.");
+    expect(refreshed).toContain("- [L-2026-09-12-01] 타임존 비교는 파싱 함수의 기본 타임존을 확인한다.");
+    expect(refreshed.indexOf("[L-2026-09-05-01]")).toBeLessThan(refreshed.indexOf("[L-2026-09-12-01]"));
+    expect(refreshed.split("\n").filter((l) => l.startsWith("<!-- factory-lessons:v1"))).toHaveLength(1);
+    expect(await g(remote, "show", `${OLD}:${OTHER_PATH}`)).toBe(OTHER_TEXT.trim());
     expect(await g(remote, "rev-parse", `${OLD}^`)).toBe(await g(remote, "rev-parse", "main"));
     const push = run.calls.find((c) => c.cmd === "git" && c.args[0] === "push");
     expect(push.args).toContain(`--force-with-lease=refs/heads/${OLD}:${oldSha}`);
@@ -404,6 +412,7 @@ test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
     expect(n).toBe(150);
     expect(edit.title).toBe(`retro: lessons/examples ${DATE}`);
     expect(edit.body).toContain(LESSONS_PATH);
+    expect(edit.body).toContain(OTHER_PATH);
     expect(gh.comment.mock.calls.some(([p, b]) => p === 150 && b.includes(`retro(${DATE})가 이 PR을 갱신했다`))).toBe(true);
     expect(gh.prChecks).toHaveBeenCalledWith(150);
     expect(gh.mergePr).toHaveBeenCalledWith(150, expect.objectContaining({ method: "squash" }));
@@ -412,7 +421,7 @@ test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
   // (b) 리스는 **읽은 head**에 걸린다 — 읽은 뒤 누가 그 브랜치에 push하면 retro의 push가 거부되고 그 커밋이 이긴다.
   {
     const { remote, cwd } = await realRepo();
-    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n` } });
+    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n  근거: runs/90.md, runs/91.md. 인용: 0회.\n` } });
     let racer = null;
     const run = recordingRun({ beforePush: async () => { racer = await pushToBranch(remote, OLD, { from: OLD, files: { "racer.txt": "x\n" } }); } });
     const gh = standingGh({ prs: [standingPr(150, OLD, oldSha)] });
