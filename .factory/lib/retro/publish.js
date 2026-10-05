@@ -91,9 +91,17 @@ const isFail = (c) => (c.bucket ? FAIL_BUCKETS.has(c.bucket) : FAIL_STATES.has(c
  * 폴링한다. 끝내 판정을 못 얻으면 timeout으로 떨어지므로 여전히 fail closed다.
  * 마지막 회차 뒤에는 자지 않는다(누구도 기다리지 않을 잠이다).
  */
-async function pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log }) {
+async function pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log, headSha = null }) {
   for (let i = 0; i < maxPolls; i += 1) {
     try {
+      // #201 cf1 — `headSha`가 주어지면(제자리 갱신) PR head가 그 커밋이 될 때까지는 체크를 읽지 않는다: 이전 head의
+      // green 체크가 남아 있고 `gh pr checks`는 그것이 어느 커밋의 것인지 말하지 않는다. 아직 옮겨지지 않았으면 pending이다.
+      const live = headSha ? await gh.prHeadSha(pr) : null;
+      if (headSha && live !== headSha) {
+        log(`retro: PR #${pr} head is ${live ?? "unknown"}, not the pushed ${headSha} yet (${i + 1}/${maxPolls})`);
+        if (i < maxPolls - 1) await sleep(pollMs);
+        continue;
+      }
       const checks = (await gh.prChecks(pr)) || [];
       const mine = checks.filter((c) => c?.name === INTEGRITY_CHECK);
       if (mine.some(isFail)) {
@@ -169,75 +177,6 @@ async function foreignCommits({ run, wt, defaultBranch, head }) {
     .map(([sha]) => sha);
 }
 
-/**
- * #201 cf1 — 열린 lessons PR이 이미 싣고 있는 추가를 이번 커밋(worktree HEAD, `origin/<default>` + 이번 `files`)에 옮겨
- * 싣는다 → 그 PR이 바꾼 경로 목록. `files`는 이번 회차가 바꾼 파일뿐이고 그 텍스트도 러너 체크아웃(= default) 기준이라,
- * 이것 없이 force push하면 그 PR의 미머지 추가가 지워진다(다른 역할 파일이든 같은 파일의 다른 줄이든).
- * 파일마다 3-way 합친다: base = 그 PR과 default의 merge-base, 한쪽 = 그 PR의 head, 다른 쪽 = 이번 커밋. 둘 다 같은 자리
- * (파일 끝)에 append하므로 `--union`으로 양쪽 줄을 다 남긴다 — PR의 줄이 먼저, 이번 회차의 줄이 뒤다. 그 PR에서 없어진
- * 경로는 옮기지 않는다(retro는 파일을 지우지 않는다). 커밋은 하나로 둔다(`--amend`): PR은 여전히 default 위의 커밋 하나다.
- */
-/**
- * `ours`(이번 커밋의 파일)를 항목 블록(들여쓰지 않은 줄 + 뒤따르는 들여쓴 줄 — lessons의 `- [L-…] 문장` + `  근거:`, 역할
- * 파일의 `- 문장`)으로 나눠, base에 없던(= 이번 회차가 더한) `- ` 블록 중 `theirs`(그 PR의 head)에 같은 문장이 있는 것을
- * 뺀 텍스트를 돌려준다. 문장 비교는 `[L-…]` id를 떼고 공백을 접어서 한다(같은 문장이 다른 id로 다시 채택된 경우).
- * 뺄 것이 없으면 null.
- */
-function dropCarried(ours, base, theirs) {
-  const blocks = (text) => {
-    const out = [];
-    for (const line of text.split("\n")) {
-      if (out.length && /^\s/.test(line) && line.trim()) out[out.length - 1].push(line);
-      else out.push([line]);
-    }
-    return out;
-  };
-  const key = (block) => /^- /.test(block[0])
-    ? block[0].replace(/^- (\[L-\d{4}-\d{2}-\d{2}-\d{2}\]\s?)?/, "").replace(/\s+/g, " ").trim()
-    : null;
-  const inBase = new Set(blocks(base).map((b) => b.join("\n")));
-  const inTheirs = new Set(blocks(theirs).map(key).filter(Boolean));
-  const all = blocks(ours);
-  const keep = all.filter((b) => { const k = key(b); return !(k && !inBase.has(b.join("\n")) && inTheirs.has(k)); });
-  return keep.length === all.length ? null : keep.flat().join("\n");
-}
-
-async function carryStanding({ run, wt, defaultBranch, head, writeFile, mkdir }) {
-  const base = (await git(run, ["merge-base", `origin/${defaultBranch}`, head], { cwd: wt })).trim();
-  const changed = (await git(run, ["diff", "--name-only", "--no-renames", "-z", base, head], { cwd: wt })).split("\0").filter(Boolean);
-  const blobOf = async (rev, rel) => {
-    const r = await run("git", ["rev-parse", "--verify", "-q", `${rev}:${rel}`], { cwd: wt });
-    return r.code === 0 ? r.stdout.trim() : null;
-  };
-  let empty = null;
-  const carried = [];
-  for (const rel of changed) {
-    const theirs = await blobOf(head, rel);
-    if (!theirs) continue;
-    empty ??= (await git(run, ["hash-object", "-w", "--stdin"], { cwd: wt, input: "" })).trim();
-    const baseBlob = (await blobOf(base, rel)) ?? empty;
-    const oursBlob = (await blobOf("HEAD", rel)) ?? empty;
-    // 이번 회차가 **새로** 쓴 항목 중 그 PR이 이미 싣고 있는 문장은 빼고 합친다(#201 cf1 rework): 미머지 PR의 항목은
-    // 후보로 남아 retro가 같은 문장을 새 id로 다시 채택하므로(applyLessons는 default 체크아웃만 본다), 그대로 합치면
-    // 회차마다 한 벌씩 늘어 `max=`를 넘는다. 남는 쪽은 그 PR의 항목(먼저 붙은 id)이다.
-    const blobText = async (b) => (b === empty ? "" : await git(run, ["cat-file", "blob", b], { cwd: wt }));
-    const kept = dropCarried(await blobText(oursBlob), await blobText(baseBlob), await blobText(theirs));
-    const oursForMerge = kept == null ? oursBlob : (await git(run, ["hash-object", "-w", "--stdin"], { cwd: wt, input: kept })).trim();
-    // `--diff3`: 기본(zealous) 정리는 양쪽 추가가 같은 줄(같은 `근거:`)로 끝나면 그 줄을 충돌 밖으로 빼서 앞 항목의 근거를
-    // 떼어 낸다 → integrity `lessons entry missing 근거`. diff3 스타일은 그 정리를 하지 않아 항목이 통째로 남는다.
-    const merged = await git(run, ["merge-file", "-p", "--union", "--diff3", "--object-id", theirs, baseBlob, oursForMerge], { cwd: wt });
-    const abs = join(wt, rel);
-    await mkdir(dirname(abs), { recursive: true });
-    await writeFile(abs, merged);
-    await git(run, ["add", "--", rel], { cwd: wt });
-    carried.push(rel);
-  }
-  if (carried.length) {
-    await git(run, ["-c", `user.name=${BOT_NAME}`, "-c", `user.email=${BOT_EMAIL}`, "commit", "--amend", "--no-edit"], { cwd: wt });
-  }
-  return carried;
-}
-
 const lessonsBody = (date, paths) => [
   `retro(${date})가 다크로 append한 lesson·역할 예시/관점입니다(§8.1).`,
   `\`${INTEGRITY_CHECK}\`가 GREEN이면 retro가 스스로 머지하고, 아니면 \`${NEEDS_HUMAN}\`을 붙이고 사람에게 넘깁니다.`,
@@ -269,8 +208,9 @@ export async function openAndMergeLessonsPr({
     return await withWorktree({ run, cwd, defaultBranch, mkdtemp, rm }, async (wt) => {
       const paths = await stageAndCommit({ run, wt, files, message: title, writeFile, mkdir });
 
-      // #201 — 이미 열린 lessons PR이 있으면 새 PR을 쌓지 않고 그 브랜치를 갈아 끼운다. 그 PR의 추가는 `carryStanding`이
-      // 이번 커밋에 옮겨 싣고, integrity 선검사는 그렇게 **합친** 커밋을 본다(push되는 것이 곧 검사한 것이다).
+      // #201 — 이미 열린 lessons PR이 있으면 새 PR을 쌓지 않고 그 브랜치를 `origin/<default>` + 이번 `files`로 갈아 끼운다.
+      // 파일 내용은 합치지 않는다(arch1): 채택·중복·상한·id는 lessons.js(`applyLessons`)가 정하고 여기서는 그 결과를 그대로
+      // 싣는다 — 여기서 그 PR의 텍스트를 다시 합치면 상한이 결정된 곳 밖에서 깨진다.
       // 리스는 **방금 읽은 head**에 건다: worktree에는 그 브랜치의 원격 추적 ref가 없어 맨 `--force-with-lease`는
       // 아무것도 지키지 못한다.
       const standing = await findStanding({ gh, prefix: LESSONS_PREFIX, log });
@@ -288,7 +228,6 @@ export async function openAndMergeLessonsPr({
           log(`retro: ${reason}`);
           return { pr: standing.number, merged: false, reason, branch };
         }
-        for (const rel of await carryStanding({ run, wt, defaultBranch, head: lease, writeFile, mkdir })) if (!paths.includes(rel)) paths.push(rel);
       }
 
       const base = (await git(run, ["merge-base", "HEAD", `origin/${defaultBranch}`], { cwd: wt })).trim();
@@ -318,11 +257,13 @@ export async function openAndMergeLessonsPr({
         return { pr: null, merged: false, reason, branch };
       }
 
+      let pushed = null;
       if (standing) {
         await git(run, ["push", `--force-with-lease=refs/heads/${branch}:${lease}`, "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
+        pushed = (await git(run, ["rev-parse", "HEAD"], { cwd: wt })).trim();
         pr = standing.number;
         await gh.editPr(pr, { title, body: lessonsBody(date, paths) });
-        await quiet(() => gh.comment(pr, `retro(${date})가 이 PR을 갱신했다 — 브랜치를 \`origin/${defaultBranch}\` + 이 PR이 싣고 있던 추가 + 이번 회차의 추가로 다시 만들었습니다(새 PR은 열지 않았습니다).`));
+        await quiet(() => gh.comment(pr, `retro(${date})가 이 PR을 갱신했다 — 브랜치를 \`origin/${defaultBranch}\` + 이번 회차의 lessons로 다시 만들었습니다(새 PR은 열지 않았습니다).`));
         log(`retro: lessons PR #${pr} refreshed in place`);
       } else {
         await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
@@ -336,9 +277,10 @@ export async function openAndMergeLessonsPr({
         return { pr: null, merged: false, reason, branch };
       }
 
-      const poll = await pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log });
+      // 제자리 갱신이면 폴링과 머지를 방금 push한 커밋에 고정한다(#201 cf1) — 이전 head의 green 체크로 새 커밋이 머지되지 않는다.
+      const poll = await pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log, headSha: pushed });
       if (poll.state === "pass") {
-        await gh.mergePr(pr, { method: "squash", deleteBranch: true });
+        await gh.mergePr(pr, pushed ? { method: "squash", deleteBranch: true, matchHeadCommit: pushed } : { method: "squash", deleteBranch: true });
         log(`retro: lessons PR #${pr} merged (dark)`);
         return { pr, merged: true, reason: null, branch };
       }
