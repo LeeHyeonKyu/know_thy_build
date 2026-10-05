@@ -177,6 +177,31 @@ async function foreignCommits({ run, wt, defaultBranch, head }) {
  * (파일 끝)에 append하므로 `--union`으로 양쪽 줄을 다 남긴다 — PR의 줄이 먼저, 이번 회차의 줄이 뒤다. 그 PR에서 없어진
  * 경로는 옮기지 않는다(retro는 파일을 지우지 않는다). 커밋은 하나로 둔다(`--amend`): PR은 여전히 default 위의 커밋 하나다.
  */
+/**
+ * `ours`(이번 커밋의 파일)를 항목 블록(들여쓰지 않은 줄 + 뒤따르는 들여쓴 줄 — lessons의 `- [L-…] 문장` + `  근거:`, 역할
+ * 파일의 `- 문장`)으로 나눠, base에 없던(= 이번 회차가 더한) `- ` 블록 중 `theirs`(그 PR의 head)에 같은 문장이 있는 것을
+ * 뺀 텍스트를 돌려준다. 문장 비교는 `[L-…]` id를 떼고 공백을 접어서 한다(같은 문장이 다른 id로 다시 채택된 경우).
+ * 뺄 것이 없으면 null.
+ */
+function dropCarried(ours, base, theirs) {
+  const blocks = (text) => {
+    const out = [];
+    for (const line of text.split("\n")) {
+      if (out.length && /^\s/.test(line) && line.trim()) out[out.length - 1].push(line);
+      else out.push([line]);
+    }
+    return out;
+  };
+  const key = (block) => /^- /.test(block[0])
+    ? block[0].replace(/^- (\[L-\d{4}-\d{2}-\d{2}-\d{2}\]\s?)?/, "").replace(/\s+/g, " ").trim()
+    : null;
+  const inBase = new Set(blocks(base).map((b) => b.join("\n")));
+  const inTheirs = new Set(blocks(theirs).map(key).filter(Boolean));
+  const all = blocks(ours);
+  const keep = all.filter((b) => { const k = key(b); return !(k && !inBase.has(b.join("\n")) && inTheirs.has(k)); });
+  return keep.length === all.length ? null : keep.flat().join("\n");
+}
+
 async function carryStanding({ run, wt, defaultBranch, head, writeFile, mkdir }) {
   const base = (await git(run, ["merge-base", `origin/${defaultBranch}`, head], { cwd: wt })).trim();
   const changed = (await git(run, ["diff", "--name-only", "--no-renames", "-z", base, head], { cwd: wt })).split("\0").filter(Boolean);
@@ -190,7 +215,17 @@ async function carryStanding({ run, wt, defaultBranch, head, writeFile, mkdir })
     const theirs = await blobOf(head, rel);
     if (!theirs) continue;
     empty ??= (await git(run, ["hash-object", "-w", "--stdin"], { cwd: wt, input: "" })).trim();
-    const merged = await git(run, ["merge-file", "-p", "--union", "--object-id", theirs, (await blobOf(base, rel)) ?? empty, (await blobOf("HEAD", rel)) ?? empty], { cwd: wt });
+    const baseBlob = (await blobOf(base, rel)) ?? empty;
+    const oursBlob = (await blobOf("HEAD", rel)) ?? empty;
+    // 이번 회차가 **새로** 쓴 항목 중 그 PR이 이미 싣고 있는 문장은 빼고 합친다(#201 cf1 rework): 미머지 PR의 항목은
+    // 후보로 남아 retro가 같은 문장을 새 id로 다시 채택하므로(applyLessons는 default 체크아웃만 본다), 그대로 합치면
+    // 회차마다 한 벌씩 늘어 `max=`를 넘는다. 남는 쪽은 그 PR의 항목(먼저 붙은 id)이다.
+    const blobText = async (b) => (b === empty ? "" : await git(run, ["cat-file", "blob", b], { cwd: wt }));
+    const kept = dropCarried(await blobText(oursBlob), await blobText(baseBlob), await blobText(theirs));
+    const oursForMerge = kept == null ? oursBlob : (await git(run, ["hash-object", "-w", "--stdin"], { cwd: wt, input: kept })).trim();
+    // `--diff3`: 기본(zealous) 정리는 양쪽 추가가 같은 줄(같은 `근거:`)로 끝나면 그 줄을 충돌 밖으로 빼서 앞 항목의 근거를
+    // 떼어 낸다 → integrity `lessons entry missing 근거`. diff3 스타일은 그 정리를 하지 않아 항목이 통째로 남는다.
+    const merged = await git(run, ["merge-file", "-p", "--union", "--diff3", "--object-id", theirs, baseBlob, oursForMerge], { cwd: wt });
     const abs = join(wt, rel);
     await mkdir(dirname(abs), { recursive: true });
     await writeFile(abs, merged);

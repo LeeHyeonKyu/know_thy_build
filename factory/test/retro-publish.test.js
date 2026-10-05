@@ -530,3 +530,58 @@ test("test_201_hand_to_human_translates_the_branch_policy_refusal", async () => 
   expect(otherText).not.toContain("factory/gates");
   expect(otherText).not.toContain("admin");
 });
+
+test("test_201_refresh_does_not_duplicate_a_lesson_the_standing_pr_already_carries", async () => {
+  // #201 cf1(rework) — 미머지 lessons PR의 항목은 후보로 남아 다음 retro가 같은 문장을 새 id로 다시 채택한다(retro.js의
+  // applyLessons는 default 체크아웃만 보고 중복을 거른다). 갱신이 그 둘을 다 남기면 회차마다 같은 문장이 하나씩 늘어
+  // `max=`를 넘고 integrity가 RED가 된다. 또 서로 다른 두 항목이 같은 `근거:` 줄로 끝나면 줄 단위 합치기가 앞 항목의
+  // 근거 줄을 떼어 낼 수 있다 — 그 항목은 `lessons entry missing 근거`가 된다. 역할 파일의 bullet도 같다.
+  const OLD = "factory/lessons-2026-09-05";
+  const ROLE_PATH = "agents/reviewer-correctness.md";
+  const ROLE_MAIN = "# reviewer\n\n## Perspectives\n- existing view\n\n## Lessons\nread the file\n";
+  const ROLE_PR = "# reviewer\n\n## Perspectives\n- existing view\n- carried view\n\n## Lessons\nread the file\n";
+  const EVID = "  근거: runs/90.md, runs/91.md. 인용: 0회.";
+  const TZ = "타임존 비교는 파싱 함수의 기본 타임존을 확인한다.";
+  const { remote, cwd } = await realRepo();
+  // main에 역할 파일을 둔다(그 PR과 이번 회차가 같은 base에서 갈라진다).
+  mkdirSync(join(cwd, dirname(ROLE_PATH)), { recursive: true });
+  writeFileSync(join(cwd, ROLE_PATH), ROLE_MAIN);
+  await g(cwd, "add", ".");
+  await g(cwd, ...BOT_ID, "commit", "-q", "-m", "role file");
+  await g(cwd, "push", "-q", "origin", "main");
+
+  const oldSha = await pushToBranch(remote, OLD, { files: {
+    [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] ${TZ}\n${EVID}\n- [L-2026-09-05-02] carried only.\n  근거: runs/97.md, runs/104.md. 인용: 0회.\n`,
+    [ROLE_PATH]: ROLE_PR,
+  } });
+  // 이번 회차: 같은 TZ 문장이 새 id로 다시 채택됐고(근거는 늘었다), 새 문장 하나는 그 PR의 마지막 항목과 같은 근거 줄로 끝난다.
+  const files = {
+    [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-12-01] ${TZ}\n  근거: runs/90.md, runs/91.md, runs/120.md. 인용: 0회.\n- [L-2026-09-12-02] fresh this run.\n  근거: runs/97.md, runs/104.md. 인용: 0회.\n`,
+    [ROLE_PATH]: "# reviewer\n\n## Perspectives\n- existing view\n- carried view\n- fresh view\n\n## Lessons\nread the file\n",
+  };
+
+  let lease = oldSha;
+  for (const round of [1, 2]) {
+    const gh = standingGh({ prs: [standingPr(150, OLD, lease)] });
+    const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd, files }));
+    expect(out, `round ${round}: ${out.reason}`).toMatchObject({ pr: 150, branch: OLD });
+    expect(gh.createPr).not.toHaveBeenCalled();
+    lease = await g(remote, "rev-parse", OLD);
+
+    const lessons = (await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).split("\n");
+    const entries = lessons.filter((l) => l.startsWith("- [L-"));
+    expect(entries, `round ${round}`).toEqual([
+      `- [L-2026-09-05-01] ${TZ}`,
+      "- [L-2026-09-05-02] carried only.",
+      "- [L-2026-09-12-02] fresh this run.",
+    ]);
+    // 모든 항목 바로 다음 줄이 그 항목의 근거 줄이다(떼어진 근거 없음).
+    for (const e of entries) expect(lessons[lessons.indexOf(e) + 1], `${e} (round ${round})`).toMatch(/^ {2}근거: /);
+    expect(lessons.filter((l) => l.startsWith("  근거: "))).toHaveLength(3);
+
+    const role = await g(remote, "show", `${OLD}:${ROLE_PATH}`);
+    expect(role.split("\n").filter((l) => l === "- carried view"), `round ${round}`).toHaveLength(1);
+    expect(role.split("\n").filter((l) => l === "- fresh view")).toHaveLength(1);
+    expect(role.split("\n").filter((l) => l === "- existing view")).toHaveLength(1);
+  }
+}, 120000);
