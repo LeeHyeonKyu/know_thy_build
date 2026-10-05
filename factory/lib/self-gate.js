@@ -413,13 +413,13 @@ export function judgeScope({ issue, filesExpected, changes } = {}) {
   const names = (l, p) => namesPath(l, p, paths);
   const addedOf = (c) => (Array.isArray(c.added) ? c.added : []).filter((l) => typeof l === "string");
   const tokenLines = rows.flatMap((c) => addedOf(c).filter((l) => l.includes(token)));
-  // An own token line justifies its host unless it gives the reason for another changed path instead (names one, not the host).
-  const forHost = (l, p) => l.includes(token) && (names(l, p) || !paths.some((q) => q !== p && names(l, q)));
+  // An own token line justifies its host, whatever other path it also names (dw1) — so the finding below, "carries no … line",
+  // is only ever said of a path whose own added lines truly carry none (review cf1/spec1/qa1).
   const findings = [];
   for (const c of rows) {
     const p = c.path;
     if (runnerWrittenPath(p) || inFilesExpected(filesExpected, p)) continue;
-    if (addedOf(c).some((l) => forHost(l, p))) continue;
+    if (addedOf(c).some((l) => l.includes(token))) continue;
     if (tokenLines.some((l) => names(l, p))) continue;
     findings.push({
       check: "scope", blocking: true,
