@@ -6329,3 +6329,145 @@ test("test_195_run_record_path_has_one_owner", async () => {
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/^import \{[^}]*\brunRecordPath\b[^}]*\} from "\.\.\/lib\/run-record\.js";$/m);
 });
+
+// ── #200 — the self-gate `scope` check, fed by the production call site (`makeSelfGateDep`) from a real git repository ──────
+import { run as realRun200 } from "../lib/exec.js";
+
+async function scopeRepo200() {
+  const root = mkdtempSync(join(tmpdir(), "fq200-"));
+  const git = async (...args) => {
+    const r = await realRun200("git", ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: root });
+    expect(r.code, `git ${args.join(" ")}: ${r.stderr}`).toBe(0);
+    return r.stdout.trim();
+  };
+  const put = (p, s) => { mkdirSync(dirname(join(root, p)), { recursive: true }); writeFileSync(join(root, p), s); };
+  const body = (n) => Array.from({ length: 30 }, (_, i) => `export const ${n}${i} = ${i};`).join("\n") + "\n";
+  await git("init", "-q", "-b", "main");
+  put("factory/lib/self-gate.js", body("g")); put("factory/lib/old-name.js", body("o")); put("README.md", "# r\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "base");
+  await git("checkout", "-q", "-b", "claude/fq-200");
+  return { root, git, put, body };
+}
+const HARNESS_200 = { commands: {}, test: { test_glob: ["nothing/**"], source_glob: [] } };
+const GREEN_200 = { schema: "factory.gates.v1", status: "GREEN" };
+const ctx200 = (filesExpected) => ({ issue: { number: 200 }, handoffs: { plan: { files_expected: filesExpected } }, loaded: {} });
+const scopeFindings200 = (r) => r.findings.filter((f) => f.check === "scope");
+
+test("test_200_run_stage_feeds_scope_inputs_from_git", async () => {
+  const { root, git, put, body } = await scopeRepo200();
+  // This round: an in-scope edit, an outside file with no token, a move to a new outside path, and a path with a space
+  // that carries its own header line.
+  put("factory/lib/self-gate.js", body("g") + "export const more = 1;\n");
+  put("factory/lib/outside.js", body("x"));
+  await git("mv", "factory/lib/old-name.js", "factory/lib/new-name.js");
+  put("docs/my notes.md", "<!-- Scope change (#200): the operator notes for this gate — dw5 -->\n# notes\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "round 1");
+  expect(await git("diff", "--name-status", "main...HEAD")).toMatch(/^R\d+\tfactory\/lib\/old-name\.js\tfactory\/lib\/new-name\.js$/m);   // git's default sees a rename
+
+  // Meanwhile the base branch gains a line naming every outside path under this issue's token, and the branch merges it (#143).
+  await git("checkout", "-q", "main");
+  put("docs/from-main.md", "Scope change (#200): factory/lib/outside.js factory/lib/new-name.js factory/lib/old-name.js\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "main moves on");
+  await git("checkout", "-q", "claude/fq-200");
+  await git("merge", "-q", "--no-edit", "main");
+  const mergeBase = async () => git("merge-base", "main", "HEAD");
+
+  const fe = ["factory/lib/self-gate.js", "factory/test/"];
+  const dep = makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctx200(fe) });
+  const red = await dep({ gates: GREEN_200 });
+  expect(red.ok).toBe(false);
+  expect(red.ranChecks).toContain("scope");
+  const blocked = scopeFindings200(red).filter((f) => f.blocking);
+  // The move is D old + A new (rename detection off); the base-merged line covers nothing; the spaced path's own header counts.
+  expect(blocked.map((f) => f.detail.split(" is outside")[0]).sort()).toEqual(["factory/lib/new-name.js", "factory/lib/old-name.js", "factory/lib/outside.js"]);
+  for (const f of blocked) {
+    expect(f.detail).toContain('"Scope change (#200)"');
+    expect(f.detail).not.toMatch(/#undefined|#null/);
+  }
+
+  // The builder adds the header to the outside file (and names the moved pair from it) → those findings are gone.
+  put("factory/lib/outside.js", "// Scope change (#200): the shared reader lives here — dw5\n" + body("x"));
+  put("factory/lib/new-name.js", "// Scope change (#200): renamed from factory/lib/old-name.js — dw5\n" + body("o"));
+  await git("add", "-A"); await git("commit", "-q", "-m", "round 1: scope headers");
+  const green = await dep({ gates: GREEN_200 });
+  expect(scopeFindings200(green)).toEqual([]);
+  expect(green.ok).toBe(true);
+  expect(green.ranChecks).toContain("scope");
+
+  // A ctx without handoffs / without a plan does not throw — the check is skipped visibly, nothing is read for it.
+  for (const ctx of [{ issue: { number: 200 }, loaded: {} }, { issue: { number: 200 }, handoffs: {}, loaded: {} }, null]) {
+    const calls = [];
+    const spy = async (cmd, args, opts) => { calls.push(args); return realRun200(cmd, args, opts); };
+    const r = await makeSelfGateDep({ root, harness: HARNESS_200, run: spy, mergeBase, getCtx: () => ctx })({ gates: GREEN_200 });
+    expect(scopeFindings200(r)).toEqual([]);
+    expect(r.skippedChecks.find((s) => s.check === "scope")?.detail).toMatch(/^skipped — .*no plan handoff/);
+    expect(calls.some((a) => a.includes("-U0"))).toBe(false);
+  }
+  // An empty or non-array files_expected, or no issue number, is skipped the same way — named, and without a scope read.
+  for (const [ctx, why] of [[ctx200([]), /files_expected is empty/], [ctx200("factory/lib/self-gate.js"), /not an array/], [{ handoffs: { plan: { files_expected: fe } }, loaded: {} }, /no issue number/]]) {
+    const calls = [];
+    const spy = async (cmd, args, opts) => { calls.push(args); return realRun200(cmd, args, opts); };
+    const r = await makeSelfGateDep({ root, harness: HARNESS_200, run: spy, mergeBase, getCtx: () => ctx })({ gates: GREEN_200 });
+    expect(scopeFindings200(r)).toEqual([]);
+    expect(r.skippedChecks.find((s) => s.check === "scope")?.detail).toMatch(why);
+    expect(calls.some((a) => a.includes("-U0") || a.includes("-z"))).toBe(false);
+  }
+});
+
+test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
+  const { root, git, put, body } = await scopeRepo200();
+  put("factory/lib/outside.js", body("x"));
+  await git("add", "-A"); await git("commit", "-q", "-m", "round 1");
+  const mergeBase = async () => git("merge-base", "main", "HEAD");
+  const fe = ["factory/lib/self-gate.js"];
+  const isScopeRead = (args) => args.includes("--no-renames") && (args.includes("-U0") || args.includes("-z"));
+  const failing = (mode) => async (cmd, args, opts) => {
+    if (cmd === "git" && isScopeRead(args) && args.includes(mode === "names" ? "-z" : "-U0")) {
+      if (mode === "throw") throw new Error("spawn git ENOMEM");
+      return { code: 128, stdout: "", stderr: "fatal: bad object deadbeef" };
+    }
+    return realRun200(cmd, args, opts);
+  };
+
+  // Sanity: with a working read the outside file is a blocking finding — so a silent pass below would be a real loss.
+  const real = await makeSelfGateDep({ root, harness: HARNESS_200, run: realRun200, mergeBase, getCtx: () => ctx200(fe) })({ gates: GREEN_200 });
+  expect(scopeFindings200(real).filter((f) => f.blocking).map((f) => f.detail.split(" is outside")[0])).toEqual(["factory/lib/outside.js"]);
+
+  const variants = [
+    ["lines exit 128", { run: failing("lines") }, /fatal: bad object/],
+    ["names exit 128", { run: failing("names") }, /fatal: bad object/],
+    ["spawn throws", { run: failing("throw") }, /ENOMEM/],
+    ["overflow", { run: realRun200, scopeMaxBytes: 64 }, /exceeds 64 bytes/],
+  ];
+  for (const [name, opts, why] of variants) {
+    for (const gates of [GREEN_200, { schema: "factory.gates.v1", status: "RED", reason: "unit failed" }]) {
+      const dep = makeSelfGateDep({ root, harness: HARNESS_200, mergeBase, getCtx: () => ctx200(fe), ...opts });
+      const r = await dep({ gates });                                   // never throws → never the BLOCKED path in runStage
+      const sc = scopeFindings200(r);
+      expect(sc, name).toHaveLength(1);
+      expect(sc[0].blocking, name).toBe(false);
+      expect(sc[0].detail.startsWith("scope check could not run — "), name).toBe(true);
+      expect(sc[0].detail, name).toMatch(why);
+      // Not a pass in disguise, not a truncated false RED: no "outside files_expected" finding at all, and the gates decide.
+      expect(r.findings.some((f) => /outside files_expected/.test(f.detail)), name).toBe(false);
+      expect(r.ok, name).toBe(gates.status === "GREEN");
+      expect(r.ranChecks, name).toContain("gates");
+    }
+  }
+
+  // And through runStage: an unreadable scope diff does not move the issue to factory:blocked.
+  const dep = makeSelfGateDep({ root, harness: HARNESS_200, mergeBase, getCtx: () => ctx200(fe), run: failing("lines") });
+  const transitions = [];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }), resetGates: async () => {},
+    assertHandoff: async () => ({ ok: true }), buildContext: async () => ({ roster: [], orchestration: "workflow", limits: { K: 3 } }),
+    heartbeat: async () => ({ stop: () => {} }), resetAgentsLog: async () => {},
+    claudeP: async () => ({ is_error: false, result: "{}" }), gates: async () => GREEN_200,
+    verifyStage: () => ({ ok: true, reasons: [], data: { head_sha: "a".repeat(40) } }),
+    writeHandoff: async () => {}, transition: async (t) => { transitions.push(t.to); return { ok: true }; },
+    runRecord: () => {}, release: async () => {}, selfGate: dep,
+  };
+  await runStage({ stage: "implement", issue: 200, deps });
+  expect(transitions).not.toContain("factory:blocked");
+  expect(transitions).toContain("factory:awaiting-review");
+});
