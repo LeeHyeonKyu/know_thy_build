@@ -1,3 +1,5 @@
+// Scope change (#208): 기록 경로 규칙(`runRecordPath`)을 writer 옆으로 — #195 arch1. 헤더 파서는 여기 새로 두지 않는다:
+// evidence.js는 형식의 주인인 lib/usage.js `parseRunRecord`로 섹션을 읽는다(#208 plan non_goal — 다섯 번째 파서 금지, dw6).
 import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { neutralizeRecordLine } from "./usage.js";
@@ -15,8 +17,18 @@ export function appendRunRecord({ root, issue, title = "", stage, runnerId, line
   return p;
 }
 
+/**
+ * #195 rework arch1 (#208) — the ONE owner of the run-record path rule (`<root>/docs/factory/runs/<issue>.md`). Pure: it
+ * creates nothing (the writer's `recordPath` below creates the directory and the header; a reader must not). The writer
+ * takes its path from here, and so does run-stage's evidence dep (`makePrEvidenceDeps`), so the evidence step cannot read
+ * a different file from the one `appendRunRecord` wrote.
+ */
+export function runRecordPath({ root, issue }) {
+  return join(root, "docs/factory/runs", `${issue}.md`);
+}
+
 function recordPath({ root, issue, title = "" }) {
-  const p = join(root, "docs/factory/runs", `${issue}.md`);
+  const p = runRecordPath({ root, issue });
   mkdirSync(dirname(p), { recursive: true });
   if (!existsSync(p)) writeFileSync(p, `# Run · #${issue}${title ? " " + title : ""}\n`);
   return p;

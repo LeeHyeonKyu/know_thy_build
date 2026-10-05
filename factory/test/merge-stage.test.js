@@ -3469,3 +3469,580 @@ test("test_189_failed_judge_merge_then_person_merge_never_counts_as_judge_autome
   expect(e.s12.code).toBe(0);
   expect(e.b).toEqual(expect.objectContaining({ ok: true, open: true }));
 }, 240000);
+
+// ── #195 — the runner's PR evidence is published exactly once per merge run, before the merge or the hand-off ─────────────
+// The dep is `publishPrEvidence` (not feedback's `appendEvidence`). Order is checked on the recorded dep calls; the evidence
+// step must never block, duplicate or reorder the merge or the needs-human transition.
+const evidence195 = (impl = async () => ({ ok: true, markdown: "## Factory evidence\n(md)" })) => ({
+  publishPrEvidence: vi.fn(impl),
+  postEvidenceComment: vi.fn(async () => ({ ok: true, posted: true })),
+});
+const failLines195 = (lines) => lines.filter((l) => l.startsWith("evidence: FAIL — "));
+const order195 = (a, b) => expect(a.mock.invocationCallOrder[0]).toBeLessThan(b.mock.invocationCallOrder[0]);
+const needsHumanCall195 = (d) => d.transition.mock.invocationCallOrder[d.transition.mock.calls.findIndex((c) => c[0].to === "factory:needs-human")];
+
+// #208 — the issue's dw5 test id (PR #202 named it test_195_merge_stage_publishes_evidence_once_before_merge_and_hand_off).
+test("test_195_evidence_published_exactly_once_per_merge_run", async () => {
+  // (a) auto-merge: once, after every gate and check, before mergePr; the issue comment follows the merge.
+  {
+    const ev = evidence195();
+    const d = baseD(ev);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ pr: 9, route: "merge", gatesRerun: false, reason: null, gates: { status: "GREEN", level: "full" } });
+    order195(d.mergeGates, ev.publishPrEvidence);
+    order195(d.prReady, ev.publishPrEvidence);
+    order195(ev.publishPrEvidence, d.mergePr);
+    expect(ev.postEvidenceComment.mock.calls.map((c) => c[0])).toEqual(["## Factory evidence\n(md)"]);
+    order195(d.mergePr, ev.postEvidenceComment);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", "evidence: issue comment posted"]);
+  }
+  // (b) protected-path hand-off (before d.gates()): once, before the needs-human transition, with no gates and the hand-off reason.
+  {
+    const ev = evidence195();
+    const d = baseD({ ...ev, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    expect(await run(d)).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    const args = ev.publishPrEvidence.mock.calls[0][0];
+    expect(args).toMatchObject({ pr: 9, route: "hand-off", gates: null });
+    expect(args.reason).toMatch(/^protected paths changed — human merge required: \.github\/workflows\/x\.yml/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+    expect(d.gates).not.toHaveBeenCalled();
+    expect(ev.postEvidenceComment).not.toHaveBeenCalled();
+  }
+  // (c) policy hand-off.
+  {
+    const ev = evidence195();
+    const v = { file: "factory/test/merge-stage.test.js", rule: "tests-modified — an existing test assertion changed" };
+    const d = baseD({ ...ev, policyViolations: vi.fn(async () => ({ ok: true, files: [v.file], violations: [v] })) });
+    expect(await run(d)).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toMatch(/existing tests modified or deleted/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+  }
+  // (d) judge-path refusal hand-off.
+  {
+    const ev = evidence195();
+    const d = selfD179({ ...ev,
+      protectedPaths: vi.fn(async () => ({ ok: true, files: BASE_FIXTURES_179.judge.files })),
+      selfChange: { auto_merge_non_judge: false, auto_merge_judge: true, veto_minutes: 60 },
+      reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "standard" })) });
+    expect((await run179(d)).code).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "hand-off", gates: null });
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toMatch(/^judge path needs a unanimous review/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+  }
+  // (e) self-change path: once, right before mergePr — after the window closed, never while it is open (#208: evidence only
+  // before the merge call and at the start of handToHuman).
+  {
+    const ev = evidence195();
+    const d = selfD179(ev);
+    const r = await run179(d);
+    expect(r.code).toBe(0);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "merge", gates: { status: "GREEN" } });
+    const announce = d.comment.mock.calls.findIndex((c) => /거부권 창/.test(c[1]));
+    expect(announce).toBeGreaterThanOrEqual(0);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(d.comment.mock.invocationCallOrder[announce]);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(d.sleep.mock.invocationCallOrder.at(-1));
+    order195(ev.publishPrEvidence, d.mergePr);
+    expect(ev.postEvidenceComment).toHaveBeenCalledTimes(1);
+  }
+  // (f) a veto: the hand-off that ends the window (handToHuman, before the needs-human transition) is the run's ONE publish —
+  // the window and its poll ticks never publish.
+  {
+    const ev = evidence195();
+    const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+    expect((await run179(d)).code).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "hand-off" });
+    expect(ev.publishPrEvidence.mock.calls[0][0].reason).toMatch(/^vetoed by @owner/);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+    expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+    expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^vetoed by @owner/);
+    expect(ev.postEvidenceComment).not.toHaveBeenCalled();
+  }
+  // (f2) the same veto through the REAL run-stage dep and a stateful PR body: one section, written once, one record line.
+  {
+    let body = "Closes #7\n";
+    const gh = { comments: vi.fn(async () => []), prBody: vi.fn(async () => body), editPrBody: vi.fn(async (_p, b) => { body = b; }), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot") };
+    const real = makePrEvidenceDeps195({ gh, issue: 7, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+    const d = selfD179({ ...real, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+    const { code, lines } = await run179(d);
+    expect(code).toBe(2);
+    expect(gh.editPrBody).toHaveBeenCalledTimes(1);
+    expect(body.split("<!-- factory-evidence:v1 -->").length - 1).toBe(1);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (hand-off)"]);
+  }
+  // (f3) a veto with a failing dep: the hand-off's publish fails, nothing tries again, and the record gets exactly ONE
+  // FAIL line. The transition and exit code do not change.
+  {
+    // The fake reports its steps the way run-stage's dep does (read → build → edit, where `gh pr view` is the edit step's read).
+    const ev = evidence195(async ({ onStep }) => { onStep("read"); onStep("build"); onStep("edit"); throw new Error("gh pr view failed (1): HTTP 502"); });
+    const d = selfD179({ ...ev, vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) });
+    const { code, lines } = await run179(d);
+    expect(code).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — edit: gh pr view failed (1): HTTP 502 (issue #7)"]);
+    expect(d.transition.mock.calls.at(-1)[0].to).toBe("factory:needs-human");
+  }
+  // (f4) plan non_goals[0]: needs-human routes that bypass handToHuman — the mergeGates refusal (required checks / integrity
+  // not GREEN) and the review-verification refusal — publish NOTHING. The transition and exit code are as before.
+  for (const [name, over] of [
+    ["checks", { mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) }],
+    ["integrity", { mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: false })) }],
+    ["review", { reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review handoff on this issue" })) }],
+  ]) {
+    const ev = evidence195();
+    const d = baseD({ ...ev, ...over });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record }), name).toBe(2);
+    expect(d.transition.mock.calls.map((c) => c[0].to), name).toEqual(["factory:needs-human"]);
+    expect(ev.publishPrEvidence, name).not.toHaveBeenCalled();
+    expect(d.mergePr, name).not.toHaveBeenCalled();
+    expect(lines.filter((l) => l.startsWith("evidence: ")), name).toEqual([]);
+  }
+  // (f5) the post-window review re-verification refusal on the self-change path bypasses handToHuman: nothing is published.
+  {
+    const ev = evidence195();
+    let n = 0;
+    const d = selfD179({ ...ev, prHeadShaLive: vi.fn(async () => (++n === 1 ? HEAD : "c".repeat(40))) });
+    expect((await run179(d)).code).toBe(2);
+    expect(ev.publishPrEvidence).not.toHaveBeenCalled();
+    expect(d.transition.mock.calls.at(-1)[0].reason).toMatch(/^review verification failed — PR head moved during this run/);
+    expect(d.mergePr).not.toHaveBeenCalled();
+  }
+  // (f6) run-stage's dep with a run record that exists but cannot be read (EACCES): the read step fails, so nothing is
+  // written and there is no "published" line. The record gets one FAIL line naming the read step, and the merge still
+  // happens.
+  {
+    const gh = { comments: vi.fn(async () => []), prBody: vi.fn(async () => "Closes #7\n"), editPrBody: vi.fn(async () => {}), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot") };
+    const eacces = Object.assign(new Error("EACCES: permission denied, open 'docs/factory/runs/7.md'"), { code: "EACCES" });
+    const real = makePrEvidenceDeps195({ gh, issue: 7, readRecord: () => { throw eacces; }, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 1000 });
+    const d = baseD(real);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(gh.editPrBody).not.toHaveBeenCalled();
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: FAIL — read: run record unreadable — EACCES: permission denied, open 'docs/factory/runs/7.md' (issue #7)"]);
+  }
+  // (g) the dep throws, rejects, times out or answers ok:false → the merge / the transition still happens, the exit code is
+  // unchanged, and the record gets exactly one `evidence: FAIL — <reason> (issue #<n>)` line.
+  const failing = {
+    throws: () => { throw new Error("gh pr edit exploded"); },
+    rejects: async () => { throw new Error("gh pr view failed (1): HTTP 502"); },
+    "times out": () => new Promise(() => {}),
+    "ok:false": async () => ({ ok: false, reason: "body unreadable" }),
+  };
+  for (const [kind, impl] of Object.entries(failing)) {
+    const ev = evidence195(impl);
+    const d = baseD({ ...ev, evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record }), kind).toBe(0);
+    expect(d.mergePr, kind).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to), kind).toEqual(["factory:merged"]);
+    expect(failLines195(lines), kind).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("evidence: ")), kind).toHaveLength(1);
+    expect(ev.postEvidenceComment, kind).not.toHaveBeenCalled();
+
+    const ev2 = evidence195(impl);
+    const h = baseD({ ...ev2, evidenceTimeoutMs: 5, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    const rec2 = makeRecord();
+    expect(await run(h, { record: rec2.record }), kind).toBe(2);
+    expect(h.transition.mock.calls.map((c) => c[0].to), kind).toEqual(["factory:needs-human"]);
+    expect(failLines195(rec2.lines), kind).toHaveLength(1);
+  }
+  expect(failLines195((await (async () => { const ev = evidence195(failing.rejects); const { lines, record } = makeRecord(); await run(baseD(ev), { record }); return lines; })()))[0]).toMatch(/HTTP 502/);
+  // A failing issue comment after the merge is recorded and never undoes anything.
+  {
+    const ev = evidence195();
+    ev.postEvidenceComment = vi.fn(async () => { throw new Error("comment 500"); });
+    const d = baseD(ev);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.closeIssue).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.startsWith("evidence: FAIL — "))).toEqual(["evidence: FAIL — comment: comment 500 (issue #7)"]);
+  }
+  // An older wiring without the dep merges exactly as before.
+  {
+    const d = baseD();
+    expect(await run(d)).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+  }
+});
+
+// #195 self-critique — the rerun fact is a value merge-stage hands to the evidence dep; it is guarded at the wiring layer on
+// the real #157 rerun route (runGates-produced RED, then GREEN), not only by calling buildEvidence with gatesRerun:true.
+test("test_195_rerun_fact_reaches_the_evidence_dep_on_the_157_rerun_route", async () => {
+  const first = await producedGates({ failing: [OC_ID], sha: HEAD });
+  const second = await producedGates({ failing: [], sha: HEAD });
+  const ev = evidence195();
+  const r = await run157({ seq: [first, second], diff: { ok: true, files: CLIENT_ONLY }, over: { prReady: undefined, ...ev } });
+  expect(r.code).toBe(0);
+  expect(r.d.gates).toHaveBeenCalledTimes(2);
+  expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+  const args = ev.publishPrEvidence.mock.calls[0][0];
+  expect(args.route).toBe("merge");
+  expect(args.gatesRerun).toBe(true);
+  // The gates row is the re-run's GREEN verdict, not the first run's RED.
+  expect(args.gates.status).toBe("GREEN");
+  expect(args.gates.gates.unit.failing_ids).toEqual([]);
+  expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(r.d.gates.mock.invocationCallOrder[1]);
+  expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(r.d.mergePr.mock.invocationCallOrder[0]);
+
+  // Same harness, first run GREEN: no re-run, and the dep is told so.
+  const ev2 = evidence195();
+  const plain = await run157({ seq: [second], diff: { ok: true, files: CLIENT_ONLY }, over: { prReady: undefined, ...ev2 } });
+  expect(plain.code).toBe(0);
+  expect(plain.d.gates).toHaveBeenCalledTimes(1);
+  expect(ev2.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "merge", gatesRerun: false, gates: { status: "GREEN" } });
+});
+
+// #195 self-critique — a timed-out evidence step is CANCELLED, not abandoned: merge-stage aborts the signal it handed the dep
+// before it moves on, so a dep that settles late cannot write the PR body after the merge or the needs-human transition.
+test("test_195_evidence_timeout_cancels_the_write_before_the_merge_or_hand_off", async () => {
+  for (const route of ["merge", "hand-off"]) {
+    let release;
+    const held = new Promise((res) => { release = res; });
+    const events = [];
+    const ev = evidence195(async ({ signal, onStep }) => {
+      onStep?.("edit");                                                  // the dep says which step it is in (run-stage's does)
+      events.push("publish:start");
+      await held;                                                        // gh is slow: settles only after the timeout fired
+      if (signal?.aborted) { events.push("publish:cancelled"); throw signal.reason ?? new Error("aborted"); }
+      events.push("publish:write");
+      return { ok: true, markdown: "late" };
+    });
+    const signalNow = () => ev.publishPrEvidence.mock.calls[0]?.[0]?.signal;
+    const over = route === "hand-off" ? { protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) } : {};
+    const d = baseD({ ...ev, evidenceTimeoutMs: 5, ...over });
+    const mergePr = d.mergePr;
+    d.mergePr = vi.fn(async (...a) => { events.push(`mergePr:aborted=${signalNow()?.aborted}`); return mergePr(...a); });
+    const transition = d.transition;
+    d.transition = vi.fn(async (t) => { if (t.to === "factory:needs-human") events.push(`needs-human:aborted=${signalNow()?.aborted}`); return transition(t); });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record }), route).toBe(route === "merge" ? 0 : 2);
+    expect(signalNow(), route).toBeInstanceOf(AbortSignal);
+    // The signal was aborted BEFORE the irreversible step ran.
+    expect(events, route).toContain(route === "merge" ? "mergePr:aborted=true" : "needs-human:aborted=true");
+    expect(failLines195(lines), route).toHaveLength(1);
+    expect(failLines195(lines), route).toEqual(["evidence: FAIL — edit: timed out after 5 ms — the edit step was cancelled (issue #7)"]);
+    // The late dep now settles: it sees the abort and never writes.
+    release();
+    await held;
+    await new Promise((res) => setImmediate(res));
+    expect(events, route).toContain("publish:cancelled");
+    expect(events, route).not.toContain("publish:write");
+    expect(ev.postEvidenceComment, route).not.toHaveBeenCalled();
+  }
+  // A dep that finishes in time is handed a signal that was never aborted.
+  const ok = evidence195();
+  await run(baseD(ok));
+  expect(ok.publishPrEvidence.mock.calls[0][0].signal.aborted).toBe(false);
+});
+
+// #195 skeptic round 2 — a missing dep is never silent, and the post-merge issue comment is bounded and cancelled like the
+// PR-body step: a hung `gh` there must not stop the factory:merged transition or the issue close. Its record line says what
+// the dep did (posted vs already present), not what was hoped.
+test("test_195_missing_evidence_dep_and_hung_issue_comment_are_recorded_not_silent", async () => {
+  // (1) The publishPrEvidence slot is there but the dep is missing: the merge still happens, the exit code is unchanged, and
+  // exactly one FAIL line says why.
+  {
+    const d = baseD({ publishPrEvidence: undefined });
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(true);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written (issue #7)"]);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toHaveLength(1);
+  }
+  // … and on the hand-off route: one FAIL line before the needs-human transition, exit code 2 as before.
+  {
+    const d = baseD({ publishPrEvidence: null, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(2);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:needs-human"]);
+    expect(failLines195(lines)).toHaveLength(1);
+  }
+  // A wiring that predates the slot (no publishPrEvidence key at all — every pre-#195 test harness) keeps its record
+  // byte-identical, as test_179_switch_off_is_byte_identical pins: no evidence line of any kind.
+  {
+    const d = baseD();
+    expect(Object.prototype.hasOwnProperty.call(d, "publishPrEvidence")).toBe(false);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([]);
+  }
+  // (2) The issue comment hangs: bounded by the same evidence timeout and cancelled through its signal; the merged
+  // transition and the issue close still run, and the record says the comment failed.
+  {
+    const ev = evidence195();
+    let seen = null;
+    ev.postEvidenceComment = vi.fn((_md, opts) => { seen = opts?.signal ?? null; return new Promise(() => {}); });
+    const d = baseD({ ...ev, evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.transition.mock.calls.map((c) => c[0].to)).toEqual(["factory:merged"]);
+    expect(d.closeIssue).toHaveBeenCalledTimes(1);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen.aborted).toBe(true);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — comment: timed out after 5 ms — the comment step was cancelled (issue #7)"]);
+  }
+  // (3) The record line follows what the dep did: an existing runner comment (a rerun) is not reported as a new post.
+  for (const [answer, line] of [
+    [{ ok: true, posted: true }, "evidence: issue comment posted"],
+    [{ ok: true, posted: false, updated: 1 }, "evidence: issue comment already present — not posted again (1 updated in place)"],
+    [{ ok: true, posted: false, updated: 0 }, "evidence: issue comment already present — not posted again (0 updated in place)"],
+    [undefined, "evidence: issue comment dep returned without saying whether it posted"],
+  ]) {
+    const ev = evidence195();
+    ev.postEvidenceComment = vi.fn(async () => answer);
+    const { lines, record } = makeRecord();
+    expect(await run(baseD(ev), { record })).toBe(0);
+    expect(lines.filter((l) => l.startsWith("evidence: issue comment"))).toEqual([line]);
+  }
+});
+
+// ── #195 rework round 1 — logins that cannot be resolved reach the record as a FAIL line (the section says so too) ──────────
+test("test_195_unresolved_logins_reach_the_record_as_a_fail_line", async () => {
+  const reason = "no factory login could be resolved — set FACTORY_BOT_LOGIN";
+  // Auto-merge route: the section is still published (with its visible note), the merge happens, exit code 0 — and the record
+  // gets exactly one FAIL line naming the logins step.
+  {
+    const ev = evidence195(async () => ({ ok: true, markdown: "## Factory evidence\n(md)", logins: { ok: false, reason } }));
+    const d = baseD(ev);
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(failLines195(lines)).toEqual([`evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown (issue #7)`]);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual([
+      "evidence: published to PR #9 (merge)",
+      `evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown (issue #7)`,
+      "evidence: issue comment not posted — factory logins not resolved (see the FAIL line)",
+    ]);
+    expect(ev.postEvidenceComment).not.toHaveBeenCalled();
+  }
+  // Hand-off route: same line, the transition and exit code 2 unchanged.
+  {
+    const ev = evidence195(async () => ({ ok: true, markdown: "md", logins: { ok: false, reason } }));
+    const d = baseD({ ...ev, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(2);
+    expect(needsHumanCall195(d)).toBeGreaterThan(ev.publishPrEvidence.mock.invocationCallOrder[0]);
+    expect(failLines195(lines)).toEqual([`evidence: FAIL — read: factory logins not resolved (${reason}) — nothing from issue or PR comments was shown (issue #7)`]);
+  }
+  // Resolved logins → no FAIL line.
+  {
+    const ev = evidence195(async () => ({ ok: true, markdown: "md", logins: { ok: true, logins: ["ktb-bot"] } }));
+    const { lines, record } = makeRecord();
+    expect(await run(baseD(ev), { record })).toBe(0);
+    expect(failLines195(lines)).toEqual([]);
+  }
+});
+
+// ── #195 skeptic round 3 — the FAIL line names the failing step (read, build, edit or comment) on the real wiring, including
+// when merge-stage's own timeout fires first: run-stage's dep reports the step it is in ──────────────────────────────────────
+import { makePrEvidenceDeps as makePrEvidenceDeps195 } from "../bin/run-stage.js";
+import { heartbeatBody as heartbeatBody195m } from "../lib/heartbeat.js";
+
+test("test_195_evidence_fail_line_names_the_failing_step", async () => {
+  const hang = () => new Promise(() => {});
+  const beats = [{ body: heartbeatBody195m({ issue: 42, stage: "implement", runnerId: "gha-501", started: "x", last: "x" }), createdAt: "2026-10-03T09:00:00Z", author: "ktb-bot" }];
+  /** The real run-stage evidence deps over a fake gh; the dep's own bounds are long, so merge-stage's 5 ms bound fires first. */
+  const realDeps = (over = {}) => makePrEvidenceDeps195({
+    gh: { comments: vi.fn(async () => beats), prBody: vi.fn(async () => "Closes #42\n"), editPrBody: vi.fn(async () => {}), comment: vi.fn(async () => {}), viewerLogin: vi.fn(async () => "ktb-bot"), ...over },
+    issue: 42, readRecord: () => null, env: { FACTORY_BOT_LOGIN: "ktb-bot" }, now: () => "2026-10-03T12:30:00Z", timeoutMs: 60_000,
+  });
+  const cases = [
+    ["read hangs", { comments: vi.fn(hang) }, "evidence: FAIL — read: timed out after 5 ms — the read step was cancelled (issue #7)"],
+    ["read fails", { comments: vi.fn(async () => { throw new Error("gh api failed (1): HTTP 502"); }) }, "evidence: FAIL — read: gh api failed (1): HTTP 502 (issue #7)"],
+    ["edit read hangs", { prBody: vi.fn(hang) }, "evidence: FAIL — edit: timed out after 5 ms — the edit step was cancelled (issue #7)"],
+    ["edit write hangs", { editPrBody: vi.fn(hang) }, "evidence: FAIL — edit: timed out after 5 ms — the edit step was cancelled (issue #7)"],
+    ["edit write fails", { editPrBody: vi.fn(async () => { throw new Error("gh pr edit failed (1): HTTP 502"); }) }, "evidence: FAIL — edit: gh pr edit failed (1): HTTP 502 (issue #7)"],
+  ];
+  for (const [name, over, line] of cases) {
+    for (const route of ["merge", "hand-off"]) {
+      const extra = route === "hand-off" ? { protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) } : {};
+      const d = baseD({ ...realDeps(over), evidenceTimeoutMs: 5, ...extra });
+      const { lines, record } = makeRecord();
+      expect(await run(d, { record }), `${name} ${route}`).toBe(route === "merge" ? 0 : 2);
+      expect(failLines195(lines), `${name} ${route}`).toEqual([line]);
+      expect(d.transition.mock.calls.map((c) => c[0].to), `${name} ${route}`).toEqual([route === "merge" ? "factory:merged" : "factory:needs-human"]);
+    }
+  }
+  // build: the dep reports the step, so a build-time hang is named "build" too (a dep that never settles in build).
+  {
+    const d = baseD({ publishPrEvidence: vi.fn(({ onStep }) => { onStep("read"); onStep("build"); return hang(); }), evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(failLines195(lines)).toEqual(["evidence: FAIL — build: timed out after 5 ms — the build step was cancelled (issue #7)"]);
+  }
+  // comment (after the merge, real dep): the viewer read hangs, or the post fails → the comment step is named.
+  for (const [over, line] of [
+    [{ viewerLogin: vi.fn(hang) }, "evidence: FAIL — comment: timed out after 5 ms — the comment step was cancelled (issue #7)"],
+    [{ comment: vi.fn(async () => { throw new Error("gh issue failed (1): HTTP 500"); }) }, "evidence: FAIL — comment: gh issue failed (1): HTTP 500 (issue #7)"],
+  ]) {
+    const d = baseD({ ...realDeps(over), evidenceTimeoutMs: 5 });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: published to PR #9 (merge)", line]);
+    expect(d.closeIssue).toHaveBeenCalledTimes(1);
+  }
+});
+
+// ── #195 skeptic round 4 (flaw 4) — the FAIL line names one of the four steps (read, build, edit, comment), never anything
+// else: a dep that reports no step failed in the step it was handed first (read), and a dep message that starts with some
+// other word is not mistaken for a step name. ──────────────────────────────────────────────────────────────────────────────
+test("test_195_fail_line_step_is_one_of_read_build_edit_comment", async () => {
+  const cases = [
+    ["no step reported, throws", () => { throw new Error("boom"); }, "evidence: FAIL — read: boom (issue #7)"],
+    ["no step reported, rejects", async () => { throw new Error("gh api failed (1): HTTP 502"); }, "evidence: FAIL — read: gh api failed (1): HTTP 502 (issue #7)"],
+    ["no step reported, ok:false", async () => ({ ok: false, reason: "body unreadable" }), "evidence: FAIL — read: body unreadable (issue #7)"],
+    ["no step reported, hangs", () => new Promise(() => {}), "evidence: FAIL — read: timed out after 5 ms — the read step was cancelled (issue #7)"],
+    ["foreign prefix", async () => { throw new Error("publish: nope"); }, "evidence: FAIL — read: publish: nope (issue #7)"],
+    ["reported build", async ({ onStep }) => { onStep("read"); onStep("build"); throw new Error("bad input"); }, "evidence: FAIL — build: bad input (issue #7)"],
+  ];
+  for (const [name, impl, line] of cases) {
+    const ev = evidence195(impl);
+    const { lines, record } = makeRecord();
+    expect(await run(baseD({ ...ev, evidenceTimeoutMs: 5 }), { record }), name).toBe(0);
+    expect(failLines195(lines), name).toEqual([line]);
+    expect(failLines195(lines)[0], name).toMatch(/^evidence: FAIL — (read|build|edit|comment): /);
+  }
+});
+
+// ── #208 (re-land of #195) — where the one publish sits, what a failed publish leaves, and how many times each merge exit
+// publishes. Counts are the plan's dw5 table; the spy is the injected `publishPrEvidence` dep, driven through runMergeStage
+// (the public entry). ADR-037 §2: the evidence is assembled by the runner and published just before the merge call or at the
+// start of handToHuman — nowhere else.
+const VETOED_208 = { vetoLabel: vi.fn(async () => ({ ok: true, vetoes: [{ login: "owner", at: null }] })) };
+const breakerOpen208 = { ok: true, open: true, since: "2026-10-02T00:00:00Z", reason: "2 judge-path auto-merges reverted in a row", detail: "x" };
+const breakerClosed208 = { ok: true, open: false, since: null, reason: null, detail: "closed" };
+/** The call order of a spy relative to another (first invocation of each). */
+const before208 = (a, b) => a.mock.invocationCallOrder[0] < b.mock.invocationCallOrder[0];
+
+test("test_195_merge_stage_appends_before_merge_and_before_hand_to_human", async () => {
+  // (1) auto-merge: after every gate, check, ready flip and review verification — immediately before mergePr, which is
+  // called exactly once.
+  {
+    const ev = evidence195();
+    const d = baseD(ev);
+    expect(await run(d)).toBe(0);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ pr: 9, route: "merge" });
+    for (const earlier of [d.gates, d.mergeGates, d.prReady, d.reviewEvidence]) expect(before208(earlier, ev.publishPrEvidence)).toBe(true);
+    expect(before208(ev.publishPrEvidence, d.mergePr)).toBe(true);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+  }
+  // (2) two-actor auto-merge: the approval comes first, then the publish, then the merge.
+  {
+    const ev = evidence195();
+    const d = baseD({ ...ev, twoActor: true, approvePr: vi.fn(async () => {}) });
+    expect(await run(d)).toBe(0);
+    expect(before208(d.approvePr, ev.publishPrEvidence)).toBe(true);
+    expect(before208(ev.publishPrEvidence, d.mergePr)).toBe(true);
+  }
+  // (3) self-change auto-merge: the window closes, the breaker is asked again and the self-merge line is made durable — then
+  // the publish, then the merge. Nothing is published while the window is open.
+  {
+    const ev = evidence195();
+    const d = selfD179(ev);
+    expect((await run179(d)).code).toBe(0);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "merge" });
+    const announce = d.comment.mock.calls.findIndex((c) => /거부권 창/.test(c[1]));
+    expect(announce).toBeGreaterThanOrEqual(0);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(d.comment.mock.invocationCallOrder[announce]);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(d.vetoLabel.mock.invocationCallOrder.at(-1));
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeGreaterThan(d.breaker.mock.invocationCallOrder.at(-1));
+    expect(before208(d.persistSelfMerge, ev.publishPrEvidence)).toBe(true);
+    expect(before208(ev.publishPrEvidence, d.mergePr)).toBe(true);
+  }
+  // (4) handToHuman: the publish is its first act — before the human-merge comment and before the needs-human transition.
+  {
+    const ev = evidence195();
+    const d = baseD({ ...ev, protectedPaths: vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] })) });
+    expect(await run(d)).toBe(2);
+    expect(ev.publishPrEvidence).toHaveBeenCalledTimes(1);
+    expect(ev.publishPrEvidence.mock.calls[0][0]).toMatchObject({ route: "hand-off" });
+    expect(before208(ev.publishPrEvidence, d.comment)).toBe(true);
+    expect(ev.publishPrEvidence.mock.invocationCallOrder[0]).toBeLessThan(needsHumanCall195(d));
+    expect(d.mergePr).not.toHaveBeenCalled();
+  }
+});
+
+test("test_208_evidence_publish_failure_does_not_block_merge", async () => {
+  const failing = {
+    throws: () => { throw new Error("gh pr edit exploded"); },
+    rejects: async () => { throw new Error("gh pr view failed (1): HTTP 502"); },
+    "times out": () => new Promise(() => {}),
+    "ok:false": async () => ({ ok: false, reason: "body unreadable" }),
+  };
+  for (const [kind, impl] of Object.entries(failing)) {
+    // Auto-merge: mergePr exactly once, the merged transition, exit 0 — and exactly one record line saying the evidence
+    // publish failed, naming the issue.
+    {
+      const ev = evidence195(impl);
+      const d = baseD({ ...ev, evidenceTimeoutMs: 5 });
+      const { lines, record } = makeRecord();
+      expect(await run(d, { record }), kind).toBe(0);
+      expect(d.mergePr, kind).toHaveBeenCalledTimes(1);
+      expect(d.transition.mock.calls.map((c) => c[0].to), kind).toEqual(["factory:merged"]);
+      const fails = lines.filter((l) => l.startsWith("evidence: FAIL"));
+      expect(fails, kind).toHaveLength(1);
+      expect(fails[0], kind).toMatch(/^evidence: FAIL — (read|build|edit): .+ \(issue #7\)$/);
+      expect(lines.filter((l) => l.startsWith("evidence: ")), kind).toEqual(fails);
+    }
+    // The self-change path: the same — the merge still happens with the verified head pinned.
+    {
+      const ev = evidence195(impl);
+      const d = selfD179({ ...ev, evidenceTimeoutMs: 5 });
+      const { code, lines } = await run179(d);
+      expect(code, kind).toBe(0);
+      expect(d.mergePr.mock.calls, kind).toEqual([[9, { matchHeadCommit: HEAD }]]);
+      expect(lines.filter((l) => l.startsWith("evidence: FAIL")), kind).toEqual([expect.stringMatching(/ \(issue #7\)$/)]);
+    }
+  }
+  // A missing dep in the slot is the same one line, with the issue.
+  {
+    const d = baseD({ publishPrEvidence: null });
+    const { lines, record } = makeRecord();
+    expect(await run(d, { record })).toBe(0);
+    expect(d.mergePr).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.startsWith("evidence: "))).toEqual(["evidence: FAIL — read: no publishPrEvidence dep is wired — nothing was read and no evidence section was written (issue #7)"]);
+  }
+});
+
+test("test_208_evidence_publish_count_across_merge_exits", async () => {
+  const handOffFiles = () => vi.fn(async () => ({ ok: true, files: [".github/workflows/x.yml"] }));
+  const nth = (first, rest) => { let k = 0; return vi.fn(async () => (++k === 1 ? first : rest)); };
+  const exits = [
+    // [name, how the run is driven with the spy deps `ev`, expected publishPrEvidence calls, expected exit code]
+    ["auto-merge", (ev) => run(baseD(ev)), 1, 0],
+    ["self-change auto-merge", (ev) => run179(selfD179(ev)), 1, 0],
+    ["handToHuman (protected paths)", (ev) => run(baseD({ ...ev, protectedPaths: handOffFiles() })), 1, 2],
+    ["veto window then hand-off", (ev) => run179(selfD179({ ...ev, ...VETOED_208 })), 1, 2],
+    ["breakerGate open before the window", (ev) => run179(selfD179({ ...ev, breaker: vi.fn(async () => breakerOpen208) })), 1, 2],
+    ["breakerGate open after the window", (ev) => run179(selfD179({ ...ev, breaker: nth(breakerClosed208, breakerOpen208) })), 1, 2],
+    ["checks not GREEN", (ev) => run(baseD({ ...ev, mergeGates: vi.fn(async () => ({ checksGreen: false, integrityGreen: true })) })), 0, 2],
+    ["integrity not GREEN", (ev) => run(baseD({ ...ev, mergeGates: vi.fn(async () => ({ checksGreen: true, integrityGreen: false })) })), 0, 2],
+    ["re-verify after ready not GREEN", (ev) => run(baseD({ ...ev, mergeGates: nth({ checksGreen: true, integrityGreen: true }, { checksGreen: true, integrityGreen: false }) })), 0, 2],
+    ["review verification refused", (ev) => run(baseD({ ...ev, reviewEvidence: vi.fn(async () => ({ ok: false, reason: "no review handoff on this issue" })) })), 0, 2],
+    ["undecidable (protected-path check)", (ev) => run(baseD({ ...ev, protectedPaths: vi.fn(async () => ({ ok: false, files: [], reason: "git failed" })) })), 0, 2],
+    ["undecidable (veto announcement not posted)", (ev) => run179(selfD179({ ...ev, comment: vi.fn(async () => { throw new Error("HTTP 502"); }) })), 0, 2],
+    ["post-window review re-verification refused", (ev) => run179(selfD179({ ...ev, prHeadShaLive: nth(HEAD, "c".repeat(40)) })), 0, 2],
+    ["two-actor: approvePr not wired", (ev) => run(baseD({ ...ev, twoActor: true })), 0, 2],
+    ["two-actor: approval refused", (ev) => run(baseD({ ...ev, twoActor: true, approvePr: vi.fn(async () => { throw new Error("HTTP 422"); }) })), 0, 2],
+    ["persistSelfMerge refused (ok:false)", (ev) => run179(selfD179({ ...ev, persistSelfMerge: vi.fn(async () => ({ ok: false, reason: "push rejected" })) })), 0, 2],
+    ["persistSelfMerge refused (throws)", (ev) => run179(selfD179({ ...ev, persistSelfMerge: vi.fn(async () => { throw new Error("git push failed"); }) })), 0, 2],
+  ];
+  for (const [name, drive, calls, code] of exits) {
+    const ev = evidence195();
+    const r = await drive(ev);
+    expect(typeof r === "number" ? r : r.code, name).toBe(code);
+    expect(ev.publishPrEvidence.mock.calls.length, name).toBe(calls);
+  }
+});
