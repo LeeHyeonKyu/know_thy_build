@@ -1,4 +1,4 @@
-import { test, expect } from "vitest";
+import { test, expect, vi } from "vitest";
 import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding } from "../lib/self-gate.js";
 import { makeFakeRun } from "../lib/exec.js";
 
@@ -384,6 +384,21 @@ test("test_174_restart_brief_allows_named_files_only_never_a_directory_prefix", 
  * Removed and context lines never reach `added`, so a token that lives on one of them cannot satisfy the check — the
  * callers below model that by putting such text anywhere except `added`.
  */
+// #200 — files_expected entries glob.js would hang on (or throw on). glob.js is mocked to delegate to the real module, except
+// that one of these entries THROWS instead of compiling — so a missing guard surfaces as a RED assertion, never as a hang.
+const { POISON_200, globCalls200 } = vi.hoisted(() => ({
+  POISON_200: ["factory/lib/{a,b.js", "*********************b", "*a*a*a*a*b", "factory/{*}.js", "factory/{a*a*a*a*}.js", "factory/{a?,b}.js"],
+  globCalls200: [],
+}));
+vi.mock("../lib/glob.js", async (importOriginal) => {
+  const real = await importOriginal();
+  const guard = (g) => { globCalls200.push(g); if (POISON_200.includes(g)) throw new Error(`glob.js reached with the malformed entry ${JSON.stringify(g)}`); };
+  return {
+    ...real,
+    globToRegex: (g) => { guard(g); return real.globToRegex(g); },
+    matchesAny: (globs, file) => { globs.forEach(guard); return real.matchesAny(globs, file); },
+  };
+});
 const SCOPE_GATES = { schema: "factory.gates.v1", status: "GREEN" };
 const scopeRun = (scope) => runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates: SCOPE_GATES, changedTests: [], changedSources: [], scope });
 const scopeBlocking = (r) => r.findings.filter((f) => f.check === "scope" && f.blocking);
@@ -479,6 +494,23 @@ test("test_200_scope_check_accepts_an_outside_path_named_elsewhere", async () =>
   }
   // The token and the path on two DIFFERENT added lines do not combine.
   expect(blockedPaths(await judge([own(["// Scope change (#200): see below", "// factory/lib/foo.js"]), deleted]))).toEqual(["factory/lib/foo.js"]);
+
+  // A token line in an outside file that gives the reason for ANOTHER changed path covers that path, not its host: the
+  // host stays RED until a line names it too (or names no other changed path).
+  const hostA = (lines) => ({ path: "factory/lib/a.js", status: "M", added: lines });
+  expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): factory/lib/foo.js is deleted"]), deleted]))).toEqual(["factory/lib/a.js"]);
+  expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): factory/lib/a.js replaces factory/lib/foo.js"]), deleted]))).toEqual([]);
+  expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): the shared reader — dw2", "// Scope change (#200): factory/lib/foo.js is deleted"]), deleted]))).toEqual([]);
+
+  // A path with a space is named whole: a reason for `docs/my notes.md` never covers the changed path `docs/my` that is
+  // its space-delimited prefix (nor `factory/lib/a` for `factory/lib/a b.js`), from another file or from its own lines.
+  const spaced = { path: "docs/my notes.md", status: "D", added: [] };
+  const prefix = { path: "docs/my", status: "D", added: [] };
+  expect(blockedPaths(await judge([own(["// Scope change (#200): docs/my notes.md is folded into the gate docs"]), spaced, prefix]))).toEqual(["docs/my"]);
+  expect(blockedPaths(await judge([own(["// Scope change (#200): docs/my notes.md and docs/my are folded in"]), spaced, prefix]))).toEqual([]);
+  const spacedJs = { path: "factory/lib/a b.js", status: "A", added: ["// Scope change (#200): factory/lib/a b.js is the new reader"] };
+  const prefixHost = { path: "factory/lib/a", status: "A", added: ["// Scope change (#200): factory/lib/a b.js is the new reader"] };
+  expect(blockedPaths(await judge([own(["x"]), spacedJs, prefixHost]))).toEqual(["factory/lib/a"]);
 });
 
 test("test_200_scope_check_ignores_mirror_and_run_record_paths", async () => {
@@ -555,22 +587,28 @@ test("test_200_scope_check_skips_without_files_expected", async () => {
 test("test_200_scope_check_fails_open_on_a_malformed_files_expected_entry", async () => {
   // files_expected comes from the plan handoff (LLM output, or any comment carrying the marker). An entry glob.js cannot
   // compile in bounded time — an unclosed `{` (endless loop), a long `*` run or too many `*` runs (catastrophic
-  // backtracking, also inside `{…}`), an entry the RegExp constructor rejects (`{*}`) — must not hang or throw: the check fails open, visibly.
+  // backtracking), a `*`/`?` inside `{…}` (backtracking, or a RegExp the constructor rejects: `{*}`) — never reaches
+  // glob.js: the mocked glob.js above THROWS on these entries instead of hanging, so a missing guard is a RED here, not a
+  // stalled worker. The check is skipped visibly (skippedChecks + the self-gate-detail line), the same way as "no plan" —
+  // never a finding, because non-blocking findings are copied into the reviewer handoff (plan non_goals).
+  const { selfGateDetailLine } = await import("../lib/self-gate.js");
   const outside = { path: "factory/lib/" + "a".repeat(30) + ".js", status: "M", added: ["export const y = 2;"] };
-  for (const bad of ["factory/lib/{a,b.js", "*********************b", "*a*a*a*a*b", "factory/{*}.js", "factory/{a*a*a*a*}.js"]) {
-    const t0 = Date.now();
+  for (const bad of POISON_200) {
+    globCalls200.length = 0;
     const r = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/lib/self-gate.js", bad], changes: [outside] });
-    expect(Date.now() - t0, bad).toBeLessThan(1000);
+    expect(globCalls200.filter((g) => POISON_200.includes(g)), bad).toEqual([]);
     expect(r.ok, bad).toBe(true);
-    expect(r.ranChecks, bad).toContain("scope");
-    const s = r.findings.filter((f) => f.check === "scope");
-    expect(s, bad).toHaveLength(1);
-    expect(s[0].blocking, bad).toBe(false);
-    expect(s[0].detail.startsWith("scope check could not run — "), bad).toBe(true);
-    expect(s[0].detail, bad).toContain(JSON.stringify(bad));               // names the entry the plan has to fix
+    expect(r.ranChecks, bad).not.toContain("scope");
+    expect(r.findings.filter((f) => f.check === "scope"), bad).toEqual([]);
+    expect(advisoryFindings(r.findings).filter((f) => f.check === "scope"), bad).toEqual([]);
+    const sk = r.skippedChecks.filter((x) => x.check === "scope");
+    expect(sk, bad).toHaveLength(1);
+    expect(sk[0].detail.startsWith(`skipped — files_expected entry ${JSON.stringify(bad)} `), bad).toBe(true);
+    expect(selfGateDetailLine(r, { runId: "1" }), bad).toContain(JSON.stringify(sk[0].detail).slice(1, -1));
   }
   // Well-formed globs still judge: braces, `**`, and three `*` runs match; an outside path is still RED.
   const ok = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/**/*.{js,mjs}", "docs/**/*-*.md"], changes: [outside, { path: "docs/a/b-c.md", status: "M", added: ["x"] }] });
+  expect(ok.ranChecks).toContain("scope");
   expect(ok.findings.filter((f) => f.check === "scope")).toEqual([]);
   const red = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/test/*.{js,mjs}"], changes: [outside] });
   expect(scopeBlocking(red).map((f) => f.detail.split(" ")[0])).toEqual([outside.path]);
