@@ -423,9 +423,9 @@ test("test_200_scope_check_blocks_an_outside_path_without_a_scope_change_line", 
     const r = await scopeRun(base([line]));
     expect(scopeBlocking(r).map((f) => f.detail.split(" ")[0]), line).toEqual([outside]);
   }
-  // A token that only exists on a removed or a context line never reaches `added` — the path stays RED.
-  const removedOnly = await scopeRun({ ...base(["export const y = 3;"]), removed: ["// Scope change (#200): old reason"] });
-  expect(scopeBlocking(removedOnly).map((f) => f.detail.split(" ")[0])).toEqual([outside]);
+  // A token on a removed or a context line is dropped by run-stage's diff parser before it reaches `added` — that property
+  // is pinned where it lives, against real git: test_200_scope_check_ignores_a_token_on_a_removed_line and
+  // test_200_added_lines_by_path_keeps_only_plus_lines (run-stage.test.js).
 
   // A second outside path is judged on its own: a line in glob.js covers glob.js only.
   const two = await scopeRun(base(["// Scope change (#200): dw1"], [{ path: "factory/lib/mirror.js", status: "M", added: ["export const z = 1;"] }]));
