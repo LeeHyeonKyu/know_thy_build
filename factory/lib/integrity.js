@@ -1,3 +1,4 @@
+// Scope change (#200): review arch1 — the one `-U0` added-lines parser lives here; run-stage's scope input reads it instead of a second copy (dw5).
 import { matchesAny } from "./glob.js";
 
 const SKIP_PRAGMAS = [/\.skip\s*\(/, /\bxit\s*\(/, /\bxdescribe\s*\(/, /@pytest\.mark\.skip/, /istanbul ignore/, /pragma:\s*no cover/, /Stryker disable/];
@@ -497,19 +498,50 @@ function fileFor(line, current, pendingOld) {
   if (line.startsWith("+++ /dev/null")) return pendingOld;
   return current;
 }
-/** git diff -U0 파싱: "+" 줄마다 신규 파일 기준 줄 번호(line, 1-indexed)를 함께 기록한다 */
+/** git's C-style quoted path (`"b/we\\"ird"`) → the path. Octal escapes are bytes (decoded as UTF-8 together). */
+function unquoteGitPath(s) {
+  if (!(s.length >= 2 && s.startsWith('"') && s.endsWith('"'))) return s;
+  const bytes = [];
+  const simple = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  for (let i = 1; i < s.length - 1; i++) {
+    const ch = s[i];
+    if (ch !== "\\") { bytes.push(...Buffer.from(ch, "utf8")); continue; }
+    const n = s[i + 1];
+    if (/[0-7]/.test(n)) { bytes.push(parseInt(s.slice(i + 1, i + 4), 8)); i += 3; continue; }
+    bytes.push(simple[n] ?? n.charCodeAt(0)); i += 1;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+/** `+++ b/<path>` → `<path>` (null for `/dev/null`). Unquoted names with a space get a trailing TAB from git — dropped. */
+function plusPath(header) {
+  let rest = header.slice(4);
+  if (rest === "/dev/null") return null;
+  if (!rest.startsWith('"') && rest.endsWith("\t")) rest = rest.slice(0, -1);
+  rest = unquoteGitPath(rest);
+  return rest.startsWith("b/") ? rest.slice(2) : rest;
+}
+/**
+ * git diff -U0 파싱: "+" 줄마다 신규 파일 기준 줄 번호(line, 1-indexed)를 함께 기록한다. 이 저장소의 유일한 "추가된 줄" 파서다 —
+ * `must_not add` 게이트(gates.js)와 self-gate `scope` 입력(run-stage `addedLinesByPath`)이 같은 답을 읽는다(#200 arch1).
+ * 헌크는 `@@ -a,b +c,d @@`의 줄 수만큼 소비하므로 내용이 `++ `로 시작하는 추가 줄을 파일 헤더로 오인하지 않고,
+ * 경로는 git의 따옴표·꼬리 TAB을 벗겨 경로 그대로 키로 쓴다.
+ */
 export function addedLines(u0) {
-  const m = new Map(); let file = null, pendingOld = null, newLine = 0;
+  const m = new Map(); let file = null, oldLeft = 0, newLeft = 0, newLine = 0;
   for (const line of u0.split("\n")) {
-    if (line.startsWith("--- ")) { pendingOld = line.startsWith("--- a/") ? line.slice(6) : null; continue; }
-    if (line.startsWith("+++ ")) { file = fileFor(line, file, pendingOld); continue; }
-    const h = HUNK_HEADER.exec(line);
-    if (h) { newLine = Number(h[2]); continue; }
-    if (file && line.startsWith("+") && !line.startsWith("+++")) {
-      if (!m.has(file)) m.set(file, []);
-      m.get(file).push({ text: line.slice(1), line: newLine });
-      newLine++;
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("+")) {
+        newLeft--;
+        if (file) { if (!m.has(file)) m.set(file, []); m.get(file).push({ text: line.slice(1), line: newLine }); }
+        newLine++;
+      } else if (line.startsWith("-")) oldLeft--;
+      else if (line.startsWith(" ")) { oldLeft--; newLeft--; newLine++; }   // a context line (-U0 emits none) — never "added"
+      continue;                                                            // `\ No newline at end of file` and the like
     }
+    if (line.startsWith("diff --git ")) { file = null; continue; }
+    if (line.startsWith("+++ ")) { file = plusPath(line); continue; }
+    const h = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (h) { oldLeft = h[1] === undefined ? 1 : Number(h[1]); newLeft = h[3] === undefined ? 1 : Number(h[3]); newLine = Number(h[2]); }
   }
   return m;
 }

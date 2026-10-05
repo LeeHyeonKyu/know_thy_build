@@ -6333,6 +6333,7 @@ test("test_195_run_record_path_has_one_owner", async () => {
 // ── #200 — the self-gate `scope` check, fed by the production call site (`makeSelfGateDep`) from a real git repository ──────
 import { run as realRun200 } from "../lib/exec.js";
 import { addedLinesByPath } from "../bin/run-stage.js";
+import { addedLines } from "../lib/integrity.js";
 
 async function scopeRepo200() {
   const root = mkdtempSync(join(tmpdir(), "fq200-"));
@@ -6472,6 +6473,31 @@ test("test_200_added_lines_by_path_keeps_only_plus_lines", () => {
   expect([...m.keys()].sort()).toEqual(["factory/lib/a.js", "factory/lib/b.js"]);
   expect(m.get("factory/lib/a.js")).toEqual(["export const kept = 1;"]);
   expect(m.get("factory/lib/b.js")).toEqual(["// Scope change (#200): b's own line"]);
+
+  // review arch1 — the same diff text the `must_not add` gate parses: an added line whose text starts with `++ ` is a line,
+  // not a header, and a path with a space (git's trailing TAB) or a quoted path is keyed by the path itself.
+  const odd = [
+    "diff --git a/x.js b/x.js",
+    "--- a/x.js",
+    "+++ b/x.js",
+    "@@ -0,0 +1,2 @@",
+    "+++ Scope change (#200): x",
+    "+ok",
+    "diff --git a/my notes.md b/my notes.md",
+    "--- a/my notes.md\t",
+    "+++ b/my notes.md\t",
+    "@@ -1,0 +2 @@",
+    "+hello",
+    'diff --git "a/caf\\303\\251.md" "b/caf\\303\\251.md"',
+    '--- "a/caf\\303\\251.md"',
+    '+++ "b/caf\\303\\251.md"',
+    "@@ -0,0 +1 @@",
+    "+bonjour",
+    "",
+  ].join("\n");
+  const om = addedLinesByPath(odd);
+  expect(Object.fromEntries(om)).toEqual({ "x.js": ["++ Scope change (#200): x", "ok"], "my notes.md": ["hello"], "café.md": ["bonjour"] });
+  expect(addedLines(odd).get("x.js")).toEqual([{ text: "++ Scope change (#200): x", line: 1 }, { text: "ok", line: 2 }]);
 });
 
 test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
