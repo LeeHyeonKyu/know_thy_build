@@ -49,7 +49,7 @@ import { readBreaker, makeRecordsUploadGuard, makeMergeAbortVouch, persistSelfMe
 import { isEngineCheckout } from "../lib/non-judge-paths.js";
 import { HARNESS_OPENS } from "../lib/protected-paths.js";
 import { claimCountsLabel, evidenceFor, probeEvidenceDir, qaDirRel, touchesDataPaths } from "../lib/qa-evidence.js";
-import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine } from "../lib/self-gate.js";
+import { runSelfGate, summarizeFindings, advisoryFindings, harnessFinding, selfGateDetailLine, scopeSkipReason } from "../lib/self-gate.js";
 import { loadInstallManifest } from "../lib/feedback/install-manifest.js";
 
 /** 스테이지 → 성공 시 목적 상태, 요구 handoff를 만드는 직전 스테이지 */
@@ -2207,10 +2207,100 @@ export async function addedPathsNoRenames({ run, cwd, base }) {
 }
 
 /**
+ * #200 — the self-gate `scope` input, read from git HERE (`runSelfGate` only judges it). Two reads of the same range, both with
+ * rename detection OFF (a move is `D old` + `A new`, so the new path is judged like any added file — a sibling of
+ * `addedPathsNoRenames`, whose contract is unchanged):
+ *   · `--name-status -z` — every changed path and its status, NUL-separated (spaces, quotes, non-ASCII arrive verbatim; a binary
+ *     file has a row here and no text hunk below);
+ *   · `-U0` with fixed prefixes, no color/ext-diff/textconv — the lines this range ADDED, per file. Hunks are consumed by their
+ *     `@@ -a,b +c,d @@` counts, so an added line whose text itself starts with `++ ` is never mistaken for a file header.
+ * `<merge-base>...HEAD` excludes what the branch got by merging the base (#143): a foreign `Scope change (#n)` header that
+ * arrived from main is not an added line of this round.
+ *
+ * A failed read, a thrown spawn, or an output larger than `maxBytes` is returned as `error` — the gate turns it into a visible
+ * non-blocking finding (fail open, the issue's "품질 보조이지 안전 장치가 아니다"), never a pass and never a truncated parse that
+ * would invent a false RED. `exec.js` `run()` buffers the whole output (it never truncates); the cap makes "too large to judge"
+ * an explicit outcome instead of a silent one.
+ */
+export const SCOPE_DIFF_MAX_BYTES = 32 * 1024 * 1024;
+const SCOPE_GIT = ["-c", "core.quotepath=off", "diff", "--no-renames", "--no-color", "--no-ext-diff"];
+
+/** git's C-style quoted path (`"a/we\"ird"`) → the path. Octal escapes are bytes (decoded as UTF-8 together). */
+function unquoteGitPath(s) {
+  if (!(s.length >= 2 && s.startsWith('"') && s.endsWith('"'))) return s;
+  const bytes = [];
+  const simple = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  for (let i = 1; i < s.length - 1; i++) {
+    const ch = s[i];
+    if (ch !== "\\") { bytes.push(...Buffer.from(ch, "utf8")); continue; }
+    const n = s[i + 1];
+    if (/[0-7]/.test(n)) { bytes.push(parseInt(s.slice(i + 1, i + 4), 8)); i += 3; continue; }
+    bytes.push(simple[n] ?? n.charCodeAt(0)); i += 1;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+/** `+++ b/<path>` → `<path>` (null for `/dev/null`). Unquoted names with a space get a trailing TAB from git — dropped. */
+function plusPath(header) {
+  let rest = header.slice(4);
+  if (rest === "/dev/null") return null;
+  if (!rest.startsWith('"') && rest.endsWith("\t")) rest = rest.slice(0, -1);
+  rest = unquoteGitPath(rest);
+  return rest.startsWith("b/") ? rest.slice(2) : rest;
+}
+
+/** The added lines of a `-U0` diff, per destination path. */
+export function addedLinesByPath(text) {
+  const out = new Map();
+  let file = null, oldLeft = 0, newLeft = 0;
+  for (const line of String(text || "").split("\n")) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("+")) { newLeft--; if (file) out.get(file).push(line.slice(1)); }
+      else if (line.startsWith("-")) oldLeft--;
+      else if (line.startsWith(" ")) { oldLeft--; newLeft--; }      // a context line (defensive: -U0 emits none) — never "added"
+      continue;                                                      // `\ No newline at end of file` and the like
+    }
+    if (line.startsWith("diff --git ")) { file = null; continue; }
+    if (line.startsWith("+++ ")) { file = plusPath(line); if (file && !out.has(file)) out.set(file, []); continue; }
+    const h = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (h) { oldLeft = h[1] === undefined ? 1 : Number(h[1]); newLeft = h[2] === undefined ? 1 : Number(h[2]); }
+  }
+  return out;
+}
+
+export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE_DIFF_MAX_BYTES }) {
+  const filesExpected = plan?.files_expected;
+  const input = { issue, plan: Boolean(plan), filesExpected };
+  if (scopeSkipReason(input)) return input;                         // nothing to judge → no git read at all
+  const read = async (args) => {
+    let r;
+    try { r = await run("git", [...SCOPE_GIT, ...args, `${base}...HEAD`], { cwd }); }
+    catch (e) { return { error: `git diff failed — ${e?.message || e}` }; }
+    if (r?.code !== 0) return { error: `git diff failed — ${String(r?.stderr || "").trim().split("\n")[0] || `exit ${r?.code}`}` };
+    const out = String(r.stdout || "");
+    const size = Buffer.byteLength(out, "utf8");
+    if (size > maxBytes) return { error: `the diff output (${size} bytes) exceeds ${maxBytes} bytes — not judged rather than truncated` };
+    return { out };
+  };
+  const names = await read(["--name-status", "-z"]);
+  if (names.error) return { ...input, error: names.error };
+  const lines = await read(["-U0", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"]);
+  if (lines.error) return { ...input, error: lines.error };
+  const parts = names.out.split("\0");
+  const added = addedLinesByPath(lines.out);
+  const changes = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const status = parts[i].trim()[0], path = parts[i + 1];
+    if (status && path) changes.push({ path, status, added: added.get(path) ?? [] });
+  }
+  return { ...input, changes };
+}
+
+/**
  * The implement self-gate dep (production = what the test drives). Inputs are what main() already holds; `getCtx` returns
  * the context built for this run (`ctxCache`). `run-stage` computes every list here (git), `runSelfGate` only judges them.
  */
-export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
+export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx, scopeMaxBytes = SCOPE_DIFF_MAX_BYTES }) {
   return async ({ gates }) => {
     // 2026-10-03 실측(#157·#170·#178 implement 세 런이 게이트 GREEN 직후 "Cannot read properties of undefined (reading 'test')"로 죽음):
     // #174가 이 dep을 팩토리 함수로 빼면서 `harness`를 **값으로** 받았는데, main()의 `harness`는 deps 객체가 만들어진 뒤 `charterReady`에서야
@@ -2231,12 +2321,15 @@ export function makeSelfGateDep({ root, harness, run, mergeBase, getCtx }) {
     // #174 — a K self-restart round: the new-file list is measured HERE (git), from the restart head; self-gate only judges it.
     const brief = ctx?.loaded?.k_restart_brief ?? null;
     const restartBrief = brief ? await restartBriefInput({ run, cwd: root, brief, ...(await addedPathsNoRenames({ run, cwd: root, base })) }) : null;
+    // #200 — the scope check's input: the plan's files_expected, the run's own issue number, and this round's diff (git, here).
+    const scope = await scopeInput({ run, cwd: root, base, issue: Number(ctx?.issue?.number), plan: ctx?.handoffs?.plan ?? null, maxBytes: scopeMaxBytes });
     return runSelfGate({
       root, harness: h, gates, run,
       // NEW tests only (should_fix 2) — the mutation check's dual is "a new test fails when its
       // property is violated"; a lightly-edited pre-existing test is not what it judges.
       changedTests: diff.addedTests, changedSources: diff.sources, pins,
       ...(restartBrief ? { restartBrief } : {}),
+      scope,
     });
   };
 }
