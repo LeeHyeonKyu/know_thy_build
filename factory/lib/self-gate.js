@@ -1,6 +1,6 @@
 import { checkNewTestsFailOnMutation, isWrongReasonRed } from "./mutation-check.js";
 import { q } from "./prove-test.js";
-import { globToRegex, matchesAny } from "./glob.js";
+import { matchesAny } from "./glob.js";
 import { inMirrorFamily } from "./mirror.js";
 
 /**
@@ -330,6 +330,13 @@ export function scopeSkipReason({ issue, plan, filesExpected } = {}) {
   if (!Array.isArray(filesExpected)) return "skipped — files_expected is not an array in the plan handoff";
   if (!filesExpected.some((e) => typeof e === "string" && e.trim())) return "skipped — files_expected is empty in the plan handoff";
   if (!(Number.isInteger(issue) && issue > 0)) return "skipped — this run carries no issue number to look for";
+  // A malformed entry skips the whole check, visibly (dropping just that entry would turn the paths it meant to cover into
+  // blocking false positives). A skip, not a finding: non-blocking findings are copied into the reviewer handoff (plan
+  // non_goals), and the plan's typo is not the builder's defect.
+  for (const e of filesExpected.filter((x) => typeof x === "string" && x)) {
+    const why = unsafeEntryReason(e);
+    if (why) return `skipped — files_expected entry ${JSON.stringify(e)} ${why}, which glob.js cannot match in bounded time`;
+  }
   return null;
 }
 
@@ -343,26 +350,27 @@ export function inFilesExpected(filesExpected, path) {
   return entries.some((e) => e.endsWith("/") && path.startsWith(e));
 }
 
-/** Why glob.js cannot compile this plan-authored `files_expected` entry in bounded time, or null when it can (#200 cf1).
+/** Why glob.js cannot match this plan-authored `files_expected` entry in bounded time, or null when it can (#200 cf1).
  * Before #200 globToRegex only saw operator/contract globs; plan entries are LLM- or comment-authored, and glob.js loops
- * forever on an unclosed `{`, throws on what it cannot compile (`{*}`), and backtracks catastrophically on a run of 3+ `*`
- * or on more than MAX_STAR_RUNS `*` runs, inside `{…}` or not (four runs against a 250-char path already take ~1 s). */
+ * forever on an unclosed `{`, passes a `*`/`?` inside `{…}` to RegExp raw (a SyntaxError for `{*}`, a backtracking quantifier
+ * for `{a*a*}`), and backtracks catastrophically on a run of 3+ `*` or on more than MAX_STAR_RUNS `*` runs (four runs
+ * against a 250-char path already take ~1 s). Decided here WITHOUT calling glob.js, so a bad entry never reaches it. */
 const MAX_STAR_RUNS = 3;
 function unsafeEntryReason(entry) {
-  let open = -1, runs = 0;
+  let open = false, runs = 0;
   for (let i = 0; i < entry.length; i++) {
     const ch = entry[i];
-    if (ch === "{" && open === -1) open = i;
-    else if (ch === "}" && open !== -1) open = -1;
+    if (ch === "{" && !open) open = true;
+    else if (ch === "}" && open) open = false;
+    else if (open && (ch === "*" || ch === "?")) return `has a \`${ch}\` inside \`{…}\``;
     else if (ch === "*") {
       let n = 1; while (entry[i + n] === "*") n++;
       if (n > 2) return `has a run of ${n} \`*\``;
       runs++; i += n - 1;
     }
   }
-  if (open !== -1) return "has a `{` with no closing `}`";
+  if (open) return "has a `{` with no closing `}`";
   if (runs > MAX_STAR_RUNS) return `has ${runs} \`*\` runs (at most ${MAX_STAR_RUNS})`;
-  try { globToRegex(entry); } catch (e) { return `does not compile — ${e?.message || e}`; }
   return null;
 }
 
@@ -370,40 +378,49 @@ function unsafeEntryReason(entry) {
 export const runnerWrittenPath = (path) => inMirrorFamily(path) || path.startsWith(RUN_RECORDS_PREFIX);
 
 const PATH_CHAR = /[A-Za-z0-9_\-/~]/;
+/** Is `path` at `line[i]` delimited as a whole path? */
+function wholeAt(line, i, path) {
+  const before = i > 0 ? line[i - 1] : "";
+  const after = line[i + path.length] ?? "";
+  const next = line[i + path.length + 1] ?? "";
+  if (before && (PATH_CHAR.test(before) || before === ".")) return false;
+  if (after && PATH_CHAR.test(after)) return false;
+  if (after === "." && next && (PATH_CHAR.test(next) || next === ".")) return false;
+  return true;
+}
 /** Does `line` name `path` as a whole path? The neighbours must not continue a path: `x/foo.js`, `foo.js.bak` and `foo.jsx`
- * do not name `foo.js`; a sentence's final `.` (end of line or before a space/punctuation) does not count as a continuation. */
-export function namesPath(line, path) {
+ * do not name `foo.js`; a sentence's final `.` (end of line or before a space/punctuation) does not count as a continuation.
+ * A space ends a path here, so `others` (the other changed paths) resolve a path with a space: where a longer one of them
+ * is named at the same spot (`docs/my notes.md`), its space-delimited prefix (`docs/my`) is not. */
+export function namesPath(line, path, others = []) {
   if (!path) return false;
+  const longer = (Array.isArray(others) ? others : []).filter((q) => typeof q === "string" && q.length > path.length && q.startsWith(path));
   for (let i = line.indexOf(path); i !== -1; i = line.indexOf(path, i + 1)) {
-    const before = i > 0 ? line[i - 1] : "";
-    const after = line[i + path.length] ?? "";
-    const next = line[i + path.length + 1] ?? "";
-    if (before && (PATH_CHAR.test(before) || before === ".")) continue;
-    if (after && PATH_CHAR.test(after)) continue;
-    if (after === "." && next && (PATH_CHAR.test(next) || next === ".")) continue;
+    if (!wholeAt(line, i, path)) continue;
+    if (longer.some((q) => line.startsWith(q, i) && wholeAt(line, i, q))) continue;
     return true;
   }
   return false;
 }
 
-/** The judgement. `changes`: `[{ path, status, added: string[] }]`. Returns blocking findings, one per unjustified path. */
+/** The judgement. `changes`: `[{ path, status, added: string[] }]`. Returns blocking findings, one per unjustified path.
+ * Precondition: `scopeSkipReason` returned null for this input (runSelfGate checks it) — that is what keeps a malformed
+ * plan entry out of glob.js. */
 export function judgeScope({ issue, filesExpected, changes } = {}) {
   const token = scopeChangeToken(issue);
-  // A malformed entry fails the whole check open, visibly (dw6): dropping just that entry would turn the paths it meant to
-  // cover into blocking false positives.
-  for (const e of (Array.isArray(filesExpected) ? filesExpected : []).filter((x) => typeof x === "string" && x)) {
-    const why = unsafeEntryReason(e);
-    if (why) return [{ check: "scope", blocking: false, detail: `scope check could not run — files_expected entry ${JSON.stringify(e)} ${why}` }];
-  }
   const rows = (Array.isArray(changes) ? changes : []).filter((c) => c && typeof c.path === "string" && c.path);
+  const paths = rows.map((c) => c.path);
+  const names = (l, p) => namesPath(l, p, paths);
   const addedOf = (c) => (Array.isArray(c.added) ? c.added : []).filter((l) => typeof l === "string");
   const tokenLines = rows.flatMap((c) => addedOf(c).filter((l) => l.includes(token)));
+  // An own token line justifies its host unless it gives the reason for another changed path instead (names one, not the host).
+  const forHost = (l, p) => l.includes(token) && (names(l, p) || !paths.some((q) => q !== p && names(l, q)));
   const findings = [];
   for (const c of rows) {
     const p = c.path;
     if (runnerWrittenPath(p) || inFilesExpected(filesExpected, p)) continue;
-    if (addedOf(c).some((l) => l.includes(token))) continue;
-    if (tokenLines.some((l) => namesPath(l, p))) continue;
+    if (addedOf(c).some((l) => forHost(l, p))) continue;
+    if (tokenLines.some((l) => names(l, p))) continue;
     findings.push({
       check: "scope", blocking: true,
       // The check name is the summary's prefix (`summarizeFindings` → `scope: <P> is outside …`), so the detail starts at P.

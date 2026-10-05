@@ -6388,7 +6388,7 @@ test("test_200_run_stage_feeds_scope_inputs_from_git", async () => {
 
   // The builder adds the header to the outside file (and names the moved pair from it) → those findings are gone.
   put("factory/lib/outside.js", "// Scope change (#200): the shared reader lives here — dw5\n" + body("x"));
-  put("factory/lib/new-name.js", "// Scope change (#200): renamed from factory/lib/old-name.js — dw5\n" + body("o"));
+  put("factory/lib/new-name.js", "// Scope change (#200): factory/lib/new-name.js is renamed from factory/lib/old-name.js — dw5\n" + body("o"));
   await git("add", "-A"); await git("commit", "-q", "-m", "round 1: scope headers");
   const green = await dep({ gates: GREEN_200 });
   expect(scopeFindings200(green)).toEqual([]);
