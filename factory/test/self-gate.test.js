@@ -376,3 +376,178 @@ test("test_174_restart_brief_allows_named_files_only_never_a_directory_prefix", 
     "new file outside the restart brief: factory/lib/extra.js",
   ]);
 });
+
+/**
+ * ── #200 — `scope`: a path outside the plan's `files_expected` must carry a `Scope change (#<issue>)` line in the diff ───
+ * The pure judge. run-stage (`makeSelfGateDep`) reads git and hands it `{ issue, plan, filesExpected, changes }`, where
+ * `changes` is every path of `git diff --no-renames <base>...HEAD` with its status and ONLY the lines that diff added.
+ * Removed and context lines never reach `added`, so a token that lives on one of them cannot satisfy the check — the
+ * callers below model that by putting such text anywhere except `added`.
+ */
+const SCOPE_GATES = { schema: "factory.gates.v1", status: "GREEN" };
+const scopeRun = (scope) => runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates: SCOPE_GATES, changedTests: [], changedSources: [], scope });
+const scopeBlocking = (r) => r.findings.filter((f) => f.check === "scope" && f.blocking);
+const FE200 = ["factory/lib/self-gate.js", "factory/bin/run-stage.js", "factory/test/*.test.js", "factory/test/fixtures/"];
+
+test("test_200_scope_check_blocks_an_outside_path_without_a_scope_change_line", async () => {
+  const outside = "factory/lib/glob.js";
+  const base = (outsideAdded, extra = []) => ({
+    issue: 200, plan: true, filesExpected: FE200,
+    changes: [
+      { path: "factory/lib/self-gate.js", status: "M", added: ["export const x = 1;"] },          // exact entry, no line → passes
+      { path: "factory/test/self-gate.test.js", status: "M", added: ["test('x', () => {});"] },   // glob entry, no line → passes
+      { path: "factory/test/fixtures/deep/a.json", status: "A", added: ["{}"] },                    // under a trailing-`/` entry → passes
+      { path: outside, status: "M", added: outsideAdded },
+      ...extra,
+    ],
+  });
+
+  // No line anywhere → RED, and the builder-facing text names the exact path and the exact line it needs.
+  const red = await scopeRun(base(["export const y = 2;"]));
+  expect(red.ok).toBe(false);
+  expect(red.ranChecks).toContain("scope");
+  const b = scopeBlocking(red);
+  expect(b).toHaveLength(1);
+  expect(b[0].harness).toBeFalsy();
+  expect(b[0].detail.startsWith(`${outside} is outside files_expected and carries no "Scope change (#200)" line`)).toBe(true);
+  expect(summarizeFindings(b).startsWith(`scope: ${outside} is outside files_expected and carries no "Scope change (#200)" line`)).toBe(true);
+
+  // The line among the path's own added lines → GREEN.
+  const green = await scopeRun(base(["// Scope change (#200): the matcher needs a directory prefix rule — dw1", "export const y = 2;"]));
+  expect(scopeBlocking(green)).toEqual([]);
+  expect(green.ok).toBe(true);
+  expect(green.ranChecks).toContain("scope");
+
+  // Tokens that do NOT satisfy it: another issue's header carried over (and a longer number that merely starts with 200).
+  for (const line of ["// Scope change (#199): carried over from another issue", "// Scope change (#2000): a different issue", "// scope change (#200) lower-case is not the convention"]) {
+    const r = await scopeRun(base([line]));
+    expect(scopeBlocking(r).map((f) => f.detail.split(" ")[0]), line).toEqual([outside]);
+  }
+  // A token that only exists on a removed or a context line never reaches `added` — the path stays RED.
+  const removedOnly = await scopeRun({ ...base(["export const y = 3;"]), removed: ["// Scope change (#200): old reason"] });
+  expect(scopeBlocking(removedOnly).map((f) => f.detail.split(" ")[0])).toEqual([outside]);
+
+  // A second outside path is judged on its own: a line in glob.js covers glob.js only.
+  const two = await scopeRun(base(["// Scope change (#200): dw1"], [{ path: "factory/lib/mirror.js", status: "M", added: ["export const z = 1;"] }]));
+  expect(scopeBlocking(two).map((f) => f.detail.split(" ")[0])).toEqual(["factory/lib/mirror.js"]);
+
+  // A trailing-`/` entry is a prefix, not a glob that matches nothing: without it, the fixture would be RED.
+  const noPrefix = await scopeRun({ ...base(["// Scope change (#200): dw1"]), filesExpected: FE200.filter((e) => !e.endsWith("/")) });
+  expect(scopeBlocking(noPrefix).map((f) => f.detail.split(" ")[0])).toEqual(["factory/test/fixtures/deep/a.json"]);
+  // …and the prefix stops at a path boundary: `factory/test/fixtures-old/x` is not under `factory/test/fixtures/`.
+  const sibling = await scopeRun(base(["// Scope change (#200): dw1"], [{ path: "factory/test/fixtures-old/x.json", status: "A", added: ["{}"] }]));
+  expect(scopeBlocking(sibling).map((f) => f.detail.split(" ")[0])).toEqual(["factory/test/fixtures-old/x.json"]);
+});
+
+test("test_200_scope_check_accepts_an_outside_path_named_elsewhere", async () => {
+  const fe = ["factory/lib/self-gate.js"];
+  const judge = (changes) => scopeRun({ issue: 200, plan: true, filesExpected: fe, changes });
+  const blockedPaths = (r) => scopeBlocking(r).map((f) => f.detail.split(" ")[0]).sort();
+  const deleted = { path: "factory/lib/foo.js", status: "D", added: [] };
+  const json = { path: "factory/test/fixtures/run.json", status: "M", added: ['{"a": 1}'] };
+  const png = { path: "docs/img/flow.png", status: "A", added: [] };
+  const own = (lines) => ({ path: "factory/lib/self-gate.js", status: "M", added: lines });
+
+  // Nothing names them → all three RED.
+  expect(blockedPaths(await judge([own(["x"]), deleted, json, png]))).toEqual(["docs/img/flow.png", "factory/lib/foo.js", "factory/test/fixtures/run.json"]);
+
+  // One added line elsewhere names each one together with the token → GREEN (a deleted file, a JSON fixture, a binary).
+  const named = await judge([own([
+    "// Scope change (#200): factory/lib/foo.js is deleted — its parser moved here (dw2)",
+    "// Scope change (#200): `factory/test/fixtures/run.json` gains the field the new reader needs.",
+    "// Scope change (#200): docs/img/flow.png, the diagram of this gate",
+  ]), deleted, json, png]);
+  expect(blockedPaths(named)).toEqual([]);
+  expect(named.ok).toBe(true);
+
+  // Path boundaries: a longer path that merely starts with P, or ends with it, does not name P.
+  const longer = await judge([own([
+    "// Scope change (#200): factory/lib/foo.js.bak is the backup",
+    "// Scope change (#200): old/factory/lib/foo.js moved",
+    "// Scope change (#200): xfactory/lib/foo.js",
+  ]), deleted]);
+  expect(blockedPaths(longer)).toEqual(["factory/lib/foo.js"]);
+
+  // A reason for a different file, a token with no path, the path without the token, or another issue's token → RED.
+  for (const line of [
+    "// Scope change (#200): factory/lib/bar.js is deleted",
+    "// Scope change (#200): cleanup",
+    "// removed factory/lib/foo.js (no token)",
+    "// Scope change (#199): factory/lib/foo.js is deleted",
+  ]) {
+    expect(blockedPaths(await judge([own([line]), deleted])), line).toEqual(["factory/lib/foo.js"]);
+  }
+  // The token and the path on two DIFFERENT added lines do not combine.
+  expect(blockedPaths(await judge([own(["// Scope change (#200): see below", "// factory/lib/foo.js"]), deleted]))).toEqual(["factory/lib/foo.js"]);
+});
+
+test("test_200_scope_check_ignores_mirror_and_run_record_paths", async () => {
+  const fe = ["factory/lib/self-gate.js"];
+  const changes = [
+    { path: ".factory/lib/self-gate.js", status: "M", added: ["x"] },
+    { path: ".factory/bin/run-stage.js", status: "M", added: ["x"] },
+    { path: ".factory/actions/a.yml", status: "M", added: ["x"] },
+    { path: ".factory/install-manifest.json", status: "M", added: ["x"] },
+    { path: ".claude/hooks/block-dangerous.sh", status: "M", added: ["x"] },
+    { path: "docs/factory/runs/200.md", status: "M", added: ["x"] },
+    { path: "docs/factory/runs/nested/1.md", status: "A", added: ["x"] },
+    { path: "factory/lib/self-gate.js", status: "M", added: ["x"] },
+  ];
+  const r = await scopeRun({ issue: 200, plan: true, filesExpected: fe, changes });
+  expect(r.ranChecks).toContain("scope");
+  expect(r.findings.filter((f) => f.check === "scope")).toEqual([]);
+  expect(r.ok).toBe(true);
+
+  // The exclusion is mirror.js's own rule, not a broader prefix: a non-`.sh` file under `.claude/hooks/`, a sibling of
+  // the manifest, another `.factory/` path and a `docs/factory/` file that is not a run record are still judged.
+  const judged = [
+    { path: ".claude/hooks/README.md", status: "A", added: ["x"] },
+    { path: ".factory/install-manifest.json.bak", status: "A", added: ["x"] },
+    { path: ".factory/harness.toml", status: "M", added: ["x"] },
+    { path: "docs/factory/runs.md", status: "M", added: ["x"] },
+    { path: "docs/factory/DECISIONS.md", status: "M", added: ["x"] },
+  ];
+  const red = await scopeRun({ issue: 200, plan: true, filesExpected: fe, changes: [...changes, ...judged] });
+  expect(scopeBlocking(red).map((f) => f.detail.split(" ")[0]).sort()).toEqual(judged.map((c) => c.path).sort());
+});
+
+test("test_200_scope_check_skips_without_files_expected", async () => {
+  const { selfGateDetailLine, SELF_GATE_DETAIL_PREFIX } = await import("../lib/self-gate.js");
+  const changes = [{ path: "factory/lib/glob.js", status: "M", added: ["export const y = 2;"] }];
+  const cases = [
+    [{ issue: 200, plan: false, filesExpected: undefined, changes }, /no plan handoff/],
+    [{ issue: 200, plan: true, filesExpected: [], changes }, /files_expected is empty/],
+    [{ issue: 200, plan: true, filesExpected: "factory/lib/self-gate.js", changes }, /files_expected is not an array/],
+  ];
+  const details = [];
+  for (const [scope, why] of cases) {
+    const r = await scopeRun(scope);
+    expect(r.findings.filter((f) => f.check === "scope")).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.ranChecks).not.toContain("scope");
+    const s = r.skippedChecks.filter((x) => x.check === "scope");
+    expect(s).toHaveLength(1);
+    expect(s[0].detail.startsWith("skipped — ")).toBe(true);
+    expect(s[0].detail).toMatch(why);
+    details.push(s[0].detail);
+    // The run record's machine line carries the reason, so "not checked (and why)" is readable from the record alone.
+    const o = JSON.parse(selfGateDetailLine(r, { runId: "1", runnerId: "gha-1", ktbVersion: "1.4.0" }).slice(SELF_GATE_DETAIL_PREFIX.length));
+    const recorded = o.skipped.filter((x) => x.check === "scope");
+    expect(recorded).toEqual([{ check: "scope", reason: s[0].reason, detail: s[0].detail }]);
+  }
+  expect(new Set(details).size).toBe(3);                                   // each case names itself
+
+  // A judged round with nothing out of scope is a different record: scope ran, nothing skipped.
+  const clean = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/lib/glob.js"], changes });
+  expect(clean.ranChecks).toContain("scope");
+  expect(clean.skippedChecks.filter((x) => x.check === "scope")).toEqual([]);
+
+  // No scope input at all (null / absent) → exactly today's result: no ran or skipped entry for scope, same bytes.
+  const today = await runSelfGate({ root: "/root", harness, run: makeFakeRun([]), gates: SCOPE_GATES, changedTests: [], changedSources: [] });
+  const withNull = await scopeRun(null);
+  expect(withNull).toEqual(today);
+  expect(JSON.stringify(withNull)).toBe(JSON.stringify(today));
+  expect(today.ranChecks).not.toContain("scope");
+  expect(today.skippedChecks.map((x) => x.check)).not.toContain("scope");
+  expect(selfGateDetailLine(withNull, { runId: "1" })).toBe(selfGateDetailLine(today, { runId: "1" }));
+});
