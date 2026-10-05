@@ -490,14 +490,6 @@ const isProtectedEntry = ({ path, deleted }, prot) => (!deleted && additiveGlobF
 const cannotCompute = (reason) => ({ ok: false, violations: [{ file: "-", rule: `integrity could not be computed: ${reason}` }], protected: [], policy: [], tests_allowed: [], checked: { files: [] } });
 const gitReason = (what, r) => `${what} exited ${r.code}${r.stderr ? `: ${r.stderr.trim().slice(0, 200)}` : ""}`;
 
-const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
-
-/** 파일 귀속: "+++ b/X" → X, 삭제 diff의 "+++ /dev/null"은 직전 "--- a/X"의 X로 귀속시킨다 */
-function fileFor(line, current, pendingOld) {
-  if (line.startsWith("+++ b/")) return line.slice(6);
-  if (line.startsWith("+++ /dev/null")) return pendingOld;
-  return current;
-}
 /** git's C-style quoted path (`"b/we\\"ird"`) → the path. Octal escapes are bytes (decoded as UTF-8 together). */
 function unquoteGitPath(s) {
   if (!(s.length >= 2 && s.startsWith('"') && s.endsWith('"'))) return s;
@@ -512,59 +504,62 @@ function unquoteGitPath(s) {
   }
   return Buffer.from(bytes).toString("utf8");
 }
-/** `+++ b/<path>` → `<path>` (null for `/dev/null`). Unquoted names with a space get a trailing TAB from git — dropped. */
-function plusPath(header) {
+/** `--- a/<path>` / `+++ b/<path>` → `<path>` (null for `/dev/null`). Unquoted names with a space get a trailing TAB from git — dropped. */
+function headerPath(header) {
   let rest = header.slice(4);
   if (rest === "/dev/null") return null;
   if (!rest.startsWith('"') && rest.endsWith("\t")) rest = rest.slice(0, -1);
   rest = unquoteGitPath(rest);
-  return rest.startsWith("b/") ? rest.slice(2) : rest;
+  return /^[ab]\//.test(rest) ? rest.slice(2) : rest;
+}
+/**
+ * The one `-U0` hunk walk (#200 arch1): `{ file, sign, text, line }` for every `+`/`-` line. A hunk is consumed by the line
+ * counts of its `@@ -a,b +c,d @@` header, so a content line that starts with `++ ` or `-- ` is never read as a file header.
+ * `file` is the `+++` path, or — for a deletion (`+++ /dev/null`) — the `---` path; `line` is the new-file line number for
+ * `+` and the base-file line number for `-` (1-indexed).
+ */
+function hunkLines(u0) {
+  const out = []; let oldPath = null, file = null, oldLeft = 0, newLeft = 0, oldLine = 0, newLine = 0;
+  for (const line of u0.split("\n")) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("+")) { newLeft--; if (file) out.push({ file, sign: "+", text: line.slice(1), line: newLine }); newLine++; }
+      else if (line.startsWith("-")) { oldLeft--; if (file) out.push({ file, sign: "-", text: line.slice(1), line: oldLine }); oldLine++; }
+      else if (line.startsWith(" ")) { oldLeft--; newLeft--; oldLine++; newLine++; }   // a context line (-U0 emits none) — neither
+      continue;                                                                        // `\ No newline at end of file` and the like
+    }
+    if (line.startsWith("diff --git ")) { oldPath = null; file = null; continue; }
+    if (line.startsWith("--- ")) { oldPath = headerPath(line); continue; }
+    if (line.startsWith("+++ ")) { file = headerPath(line) ?? oldPath; continue; }
+    const h = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (h) {
+      oldLine = Number(h[1]); oldLeft = h[2] === undefined ? 1 : Number(h[2]);
+      newLine = Number(h[3]); newLeft = h[4] === undefined ? 1 : Number(h[4]);
+    }
+  }
+  return out;
+}
+function linesBySign(u0, sign) {
+  const m = new Map();
+  for (const { file, sign: s, text, line } of hunkLines(u0)) {
+    if (s !== sign) continue;
+    if (!m.has(file)) m.set(file, []);
+    m.get(file).push({ text, line });
+  }
+  return m;
 }
 /**
  * git diff -U0 파싱: "+" 줄마다 신규 파일 기준 줄 번호(line, 1-indexed)를 함께 기록한다. 이 저장소의 유일한 "추가된 줄" 파서다 —
  * `must_not add` 게이트(gates.js)와 self-gate `scope` 입력(run-stage `addedLinesByPath`)이 같은 답을 읽는다(#200 arch1).
  * 헌크는 `@@ -a,b +c,d @@`의 줄 수만큼 소비하므로 내용이 `++ `로 시작하는 추가 줄을 파일 헤더로 오인하지 않고,
- * 경로는 git의 따옴표·꼬리 TAB을 벗겨 경로 그대로 키로 쓴다.
+ * 경로는 git의 따옴표·꼬리 TAB을 벗겨 경로 그대로 키로 쓴다. 삭제된 줄(`removedLines`)도 같은 헌크 순회(`hunkLines`)에서 나온다.
  */
-export function addedLines(u0) {
-  const m = new Map(); let file = null, oldLeft = 0, newLeft = 0, newLine = 0;
-  for (const line of u0.split("\n")) {
-    if (oldLeft > 0 || newLeft > 0) {
-      if (line.startsWith("+")) {
-        newLeft--;
-        if (file) { if (!m.has(file)) m.set(file, []); m.get(file).push({ text: line.slice(1), line: newLine }); }
-        newLine++;
-      } else if (line.startsWith("-")) oldLeft--;
-      else if (line.startsWith(" ")) { oldLeft--; newLeft--; newLine++; }   // a context line (-U0 emits none) — never "added"
-      continue;                                                            // `\ No newline at end of file` and the like
-    }
-    if (line.startsWith("diff --git ")) { file = null; continue; }
-    if (line.startsWith("+++ ")) { file = plusPath(line); continue; }
-    const h = /^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-    if (h) { oldLeft = h[1] === undefined ? 1 : Number(h[1]); newLeft = h[3] === undefined ? 1 : Number(h[3]); newLine = Number(h[2]); }
-  }
-  return m;
-}
+export function addedLines(u0) { return linesBySign(u0, "+"); }
 /**
  * 삭제된 줄. `additive_only` 판정은 위치를 안 따지지만(있으면 위반), harness.toml 섹션 판정(M9)은
  * **어느 섹션에서 지워졌는가**를 물어야 해서 base 파일 기준 줄 번호(`line`, 1-indexed)를 함께 싣는다.
- * 삭제 전용 diff도 옛 파일명으로 귀속시킨다.
+ * 삭제 전용 diff도 옛 파일명으로 귀속시킨다. `addedLines`와 같은 헌크 순회다 — 두 답이 갈라지지 않는다(#200 arch1).
  */
-function removedLines(u0) {
-  const m = new Map(); let file = null, pendingOld = null, oldLine = 0;
-  for (const line of u0.split("\n")) {
-    if (line.startsWith("--- ")) { pendingOld = line.startsWith("--- a/") ? line.slice(6) : null; continue; }
-    if (line.startsWith("+++ ")) { file = fileFor(line, file, pendingOld); continue; }
-    const h = HUNK_HEADER.exec(line);
-    if (h) { oldLine = Number(h[1]); continue; }
-    if (file && line.startsWith("-") && !line.startsWith("---")) {
-      if (!m.has(file)) m.set(file, []);
-      m.get(file).push({ text: line.slice(1), line: oldLine });
-      oldLine++;
-    }
-  }
-  return m;
-}
+function removedLines(u0) { return linesBySign(u0, "-"); }
 /**
  * 현재 파일(lines, 1-indexed lineNo 기준)에서 lineNo가 속한 가장 가까운 '## ' 헤더.
  * addedLineNos에 속한 헤더 줄(이번 diff가 새로 추가한 헤더)은 경계로 인정하지 않는다 —
