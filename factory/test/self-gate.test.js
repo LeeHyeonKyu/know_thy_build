@@ -551,3 +551,27 @@ test("test_200_scope_check_skips_without_files_expected", async () => {
   expect(today.skippedChecks.map((x) => x.check)).not.toContain("scope");
   expect(selfGateDetailLine(withNull, { runId: "1" })).toBe(selfGateDetailLine(today, { runId: "1" }));
 });
+
+test("test_200_scope_check_fails_open_on_a_malformed_files_expected_entry", async () => {
+  // files_expected comes from the plan handoff (LLM output, or any comment carrying the marker). An entry glob.js cannot
+  // compile in bounded time — an unclosed `{` (endless loop), a long `*` run or too many `*` runs (catastrophic
+  // backtracking, also inside `{…}`), an entry the RegExp constructor rejects (`{*}`) — must not hang or throw: the check fails open, visibly.
+  const outside = { path: "factory/lib/" + "a".repeat(30) + ".js", status: "M", added: ["export const y = 2;"] };
+  for (const bad of ["factory/lib/{a,b.js", "*********************b", "*a*a*a*a*b", "factory/{*}.js", "factory/{a*a*a*a*}.js"]) {
+    const t0 = Date.now();
+    const r = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/lib/self-gate.js", bad], changes: [outside] });
+    expect(Date.now() - t0, bad).toBeLessThan(1000);
+    expect(r.ok, bad).toBe(true);
+    expect(r.ranChecks, bad).toContain("scope");
+    const s = r.findings.filter((f) => f.check === "scope");
+    expect(s, bad).toHaveLength(1);
+    expect(s[0].blocking, bad).toBe(false);
+    expect(s[0].detail.startsWith("scope check could not run — "), bad).toBe(true);
+    expect(s[0].detail, bad).toContain(JSON.stringify(bad));               // names the entry the plan has to fix
+  }
+  // Well-formed globs still judge: braces, `**`, and three `*` runs match; an outside path is still RED.
+  const ok = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/**/*.{js,mjs}", "docs/**/*-*.md"], changes: [outside, { path: "docs/a/b-c.md", status: "M", added: ["x"] }] });
+  expect(ok.findings.filter((f) => f.check === "scope")).toEqual([]);
+  const red = await scopeRun({ issue: 200, plan: true, filesExpected: ["factory/test/*.{js,mjs}"], changes: [outside] });
+  expect(scopeBlocking(red).map((f) => f.detail.split(" ")[0])).toEqual([outside.path]);
+});
