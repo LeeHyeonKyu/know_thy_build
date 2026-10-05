@@ -1,6 +1,6 @@
 import { checkNewTestsFailOnMutation, isWrongReasonRed } from "./mutation-check.js";
 import { q } from "./prove-test.js";
-import { matchesAny } from "./glob.js";
+import { globToRegex, matchesAny } from "./glob.js";
 import { inMirrorFamily } from "./mirror.js";
 
 /**
@@ -343,6 +343,29 @@ export function inFilesExpected(filesExpected, path) {
   return entries.some((e) => e.endsWith("/") && path.startsWith(e));
 }
 
+/** Why glob.js cannot compile this plan-authored `files_expected` entry in bounded time, or null when it can (#200 cf1).
+ * Before #200 globToRegex only saw operator/contract globs; plan entries are LLM- or comment-authored, and glob.js loops
+ * forever on an unclosed `{`, throws on what it cannot compile (`{*}`), and backtracks catastrophically on a run of 3+ `*`
+ * or on more than MAX_STAR_RUNS `*` runs, inside `{…}` or not (four runs against a 250-char path already take ~1 s). */
+const MAX_STAR_RUNS = 3;
+function unsafeEntryReason(entry) {
+  let open = -1, runs = 0;
+  for (let i = 0; i < entry.length; i++) {
+    const ch = entry[i];
+    if (ch === "{" && open === -1) open = i;
+    else if (ch === "}" && open !== -1) open = -1;
+    else if (ch === "*") {
+      let n = 1; while (entry[i + n] === "*") n++;
+      if (n > 2) return `has a run of ${n} \`*\``;
+      runs++; i += n - 1;
+    }
+  }
+  if (open !== -1) return "has a `{` with no closing `}`";
+  if (runs > MAX_STAR_RUNS) return `has ${runs} \`*\` runs (at most ${MAX_STAR_RUNS})`;
+  try { globToRegex(entry); } catch (e) { return `does not compile — ${e?.message || e}`; }
+  return null;
+}
+
 /** A path the runner wrote, never the builder — the mirror families and the run records. */
 export const runnerWrittenPath = (path) => inMirrorFamily(path) || path.startsWith(RUN_RECORDS_PREFIX);
 
@@ -366,6 +389,12 @@ export function namesPath(line, path) {
 /** The judgement. `changes`: `[{ path, status, added: string[] }]`. Returns blocking findings, one per unjustified path. */
 export function judgeScope({ issue, filesExpected, changes } = {}) {
   const token = scopeChangeToken(issue);
+  // A malformed entry fails the whole check open, visibly (dw6): dropping just that entry would turn the paths it meant to
+  // cover into blocking false positives.
+  for (const e of (Array.isArray(filesExpected) ? filesExpected : []).filter((x) => typeof x === "string" && x)) {
+    const why = unsafeEntryReason(e);
+    if (why) return [{ check: "scope", blocking: false, detail: `scope check could not run — files_expected entry ${JSON.stringify(e)} ${why}` }];
+  }
   const rows = (Array.isArray(changes) ? changes : []).filter((c) => c && typeof c.path === "string" && c.path);
   const addedOf = (c) => (Array.isArray(c.added) ? c.added : []).filter((l) => typeof l === "string");
   const tokenLines = rows.flatMap((c) => addedOf(c).filter((l) => l.includes(token)));
