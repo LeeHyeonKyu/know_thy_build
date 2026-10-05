@@ -324,7 +324,11 @@ export async function runSelfGate({
 const RUN_RECORDS_PREFIX = "docs/factory/runs/";
 
 /** Why the scope check cannot judge this round, or null when it can. One reader for the dep (which then skips the git
- * read) and the judge (which records the skip) — the reason text is what the run record's `self-gate-detail` line carries. */
+ * read) and the judge (which records the skip) — the reason text is what the run record's `self-gate-detail` line carries.
+ * Scope change (#200): dw4 names three fail-open cases (no plan, non-array, empty); two more skip the same visible way —
+ * no issue number (dw5: a finding is never said under `#undefined`) and a files_expected entry glob.js cannot match in
+ * bounded time (round-1 must_fix cf1/sec1/spec1/qa1: it hung the self-gate). Each names itself in the skip detail, so the
+ * run record still tells "not checked (and why)" apart from "nothing out of scope". */
 export function scopeSkipReason({ issue, plan, filesExpected } = {}) {
   if (!plan) return "skipped — no plan handoff in this run's context, so there is no files_expected to check against";
   if (!Array.isArray(filesExpected)) return "skipped — files_expected is not an array in the plan handoff";
@@ -415,6 +419,10 @@ export function judgeScope({ issue, filesExpected, changes } = {}) {
   const tokenLines = rows.flatMap((c) => addedOf(c).filter((l) => l.includes(token)));
   // An own token line justifies its host, whatever other path it also names (dw1) — so the finding below, "carries no … line",
   // is only ever said of a path whose own added lines truly carry none (review cf1/spec1/qa1).
+  // dw1 over dw2 here, deliberately: dw2's "a reason for one file never silently covers a different file" governs the
+  // named-elsewhere route (a line in file X clears Y only by naming Y). A line in P's OWN diff is not silent about P — it sits
+  // in P's hunk, where spec-conformance reads it; whether its reason holds is that reviewer's call (plan non_goals: "checks
+  // that a line is present, not that the reason holds"). Narrowing it was the round-2 defect cf1/spec1/qa1 rejected.
   const findings = [];
   for (const c of rows) {
     const p = c.path;
