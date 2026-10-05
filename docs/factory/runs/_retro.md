@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1 / 2.3 / 2.15 |
 | escaped defects | 0 | 20 |
 | revert rate | 없음 | 0.00 (0/13) |
-| needs-human | 0 | 56 |
+| needs-human | 1 | 56 |
 | rejects by role | 없음 | spec-conformance 8, qa 4, correctness 12, architecture 6, security 2 |
 | reviewer overlap | 없음 | 0.50 (18/36, runs 36) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 6, architecture 3, security 2 |
-| qa na ratio | 없음 | 0.22 (25/112 claims, na-heavy 3/15 approvals) |
-| cost (usd) | 0.13 | 813.11 |
-| tokens | input 24321 / output 357 | input 20170285 / output 1584741 |
+| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.22 (25/112 claims, na-heavy 3/15 approvals) |
+| cost (usd) | 20.03 | 813.11 |
+| tokens | input 261713 / output 27615 | input 20170285 / output 1584741 |
 | retro cost (usd) | 0.00 | 9.65 |
 | retro tokens | input 0 / output 0 | input 26 / output 24583 |
 | full retros | — | 8 |
@@ -1446,6 +1446,11 @@
         "issue": 189,
         "reason": "protected paths changed — human merge required: .factory/bin/retro.js, .factory/bin/run-stage.js, .factory/bin/sweep.js, .factory/install-manifest.json, .factory/lib/breaker.js, .factory/lib/config.js, .factory/lib/merge-stage.js, .factory/lib/sweeper.js, factory/bin/retro.js, factory/bin/run-stage.js, factory/bin/sweep.js, factory/cli/breaker.js, factory/cli/index.js, factory/lib/breaker.js, factory/lib/config.js, factory/lib/merge-stage.js, factory/lib/sweeper.js, factory/test/breaker.test.js, factory/test/config.test.js, factory/test/merge-stage.test.js, factory/test/sweeper.test.js (see PR #193)",
         "at": "2026-10-03T18:05:11Z"
+      },
+      {
+        "issue": 208,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/install-manifest.json, .factory/lib/evidence.js, .factory/lib/exec.js, .factory/lib/gh.js, .factory/lib/merge-stage.js, .factory/lib/run-record.js, factory/bin/run-stage.js, factory/lib/evidence.js, factory/lib/exec.js, factory/lib/gh.js, factory/lib/merge-stage.js, factory/lib/run-record.js, factory/test/evidence.test.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #215)",
+        "at": "2026-10-04T04:10:09Z"
       }
     ]
   },
@@ -1466,17 +1471,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
-    "qa_approvals": 0,
-    "qa_claims_total": 0,
+    "needs_human": 1,
+    "qa_approvals": 1,
+    "qa_claims_total": 7,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0.126291,
+      "cost_usd": 20.033893,
       "tokens": {
-        "input": 24321,
-        "output": 357
+        "input": 261713,
+        "output": 27615
       }
     }
   },
