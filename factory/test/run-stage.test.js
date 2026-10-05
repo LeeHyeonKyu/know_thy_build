@@ -6500,6 +6500,37 @@ test("test_200_added_lines_by_path_keeps_only_plus_lines", () => {
   expect(addedLines(odd).get("x.js")).toEqual([{ text: "++ Scope change (#200): x", line: 1 }, { text: "ok", line: 2 }]);
 });
 
+import { integrityCheck as integrityCheck200, policyViolations as policyViolations200 } from "../lib/integrity.js";
+test("test_200_integrity_gates_read_removed_lines_with_the_added_lines_parser", async () => {
+  // review arch1 (one -U0 parser): the removed lines integrity/must_not judge beside the added ones come from the SAME hunk walk,
+  // through the real gates on a real git diff — a spaced path (git's trailing TAB) and a removed line whose text starts with
+  // `-- ` (a `--- ` diff line inside a hunk) are removals of that very path, never lost to a header-prefix scan.
+  const { root, git, put } = await scopeRepo200();
+  put("docs/my notes.md", "# notes\n\n## Examples\nold line\n");
+  put("t/sql.test.js", "test('q', () => {});\n-- drop table users\n");
+  put("t/my spec.test.js", "test('a', () => {});\n// keep\n// gone\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "base files");
+  const base = await git("rev-parse", "HEAD");
+  put("docs/my notes.md", "# notes\n\n## Examples\n");
+  put("t/sql.test.js", "test('q', () => {});\n");
+  put("t/my spec.test.js", "test('a', () => {});\n// keep\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "round");
+  const harness = { protected: { additive_only: { "docs/*.md": ["## Examples"] } }, test: { test_glob: ["t/**"] } };
+  const want = [
+    { file: "docs/my notes.md", rule: "additive-only sections (## Examples) — removals or edits outside allowed sections" },
+    { file: "t/my spec.test.js", rule: "tests-modified — 1 line(s) removed from an existing test — human merge required" },
+    { file: "t/sql.test.js", rule: "tests-modified — 1 line(s) removed from an existing test — human merge required" },
+  ];
+  const byFile = (vs) => [...vs].sort((a, b) => a.file.localeCompare(b.file));
+
+  const pv = await policyViolations200({ run: realRun200, cwd: root, base, harness });
+  expect(pv.ok).toBe(true);
+  expect(byFile(pv.violations)).toEqual(want);
+
+  const ic = await integrityCheck200({ run: realRun200, cwd: root, base, harness, readFile: (p) => { try { return readFileSync(p, "utf8"); } catch { return null; } } });
+  expect(byFile(ic.policy)).toEqual(want);
+});
+
 test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
   const { root, git, put, body } = await scopeRepo200();
   put("factory/lib/outside.js", body("x"));
