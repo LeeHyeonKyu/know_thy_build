@@ -4,6 +4,10 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { makeFakeRun } from "../lib/exec.js";
 import { openAndMergeLessonsPr, openProposalPr, withWorktree } from "../lib/retro/publish.js";
+import { run as realRun } from "../lib/exec.js";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname } from "node:path";
 
 const DATE = "2026-09-12";
 const LESSONS_PATH = ".factory/lessons/reviewer-correctness.md";
@@ -302,4 +306,218 @@ test("withWorktree removes the temp dir even when the body throws", async () => 
   expect(inner).toBeTruthy();
   expect(s.rm).toHaveBeenCalled();
   expect(existsSync(s.rm.mock.calls[0][0])).toBe(false);
+});
+
+// ── #201 — retro keeps ONE standing lessons PR (and one proposal PR) and refreshes it in place ──────────────
+// 이 저장소의 브랜치 보호 때문에 다크 머지는 한 번도 성공한 적이 없다 — retro마다 새 PR을 열면 같은 줄을
+// 고치는 lessons PR이 쌓인다(#153·#164·#182·#190). 아래 테스트는 **진짜 git**(bare 원격 + 클론)을 쓴다:
+// "브랜치에 무엇이 남았는가"는 git만 답할 수 있다. 케이스마다 넉넉한 timeout(records-branch.test.js와 같은 이유).
+const BOT_ID = ["-c", "user.name=factory-bot", "-c", "user.email=factory-bot@users.noreply.github.com"];
+const HUMAN_ID = ["-c", "user.name=Jane Maintainer", "-c", "user.email=jane@example.com"];
+const LESSONS_HEADER = "<!-- factory-lessons:v1 role=reviewer-correctness max=30 -->\n";
+
+async function g(cwd, ...args) {
+  const r = await realRun("git", args, { cwd });
+  if (r.code !== 0) throw new Error(`git ${args.join(" ")} (${r.code}): ${r.stderr}`);
+  return r.stdout.trim();
+}
+const remoteHas = async (remote, ref) => (await realRun("git", ["rev-parse", "--verify", "-q", ref], { cwd: remote })).code === 0;
+const isAncestor = async (remote, a, b) => (await realRun("git", ["merge-base", "--is-ancestor", a, b], { cwd: remote })).code === 0;
+
+/** bare 원격 + origin이 그것을 가리키는 클론(main에 lessons 헤더만 있는 파일 하나). */
+async function realRepo() {
+  const remote = mkdtempSync(join(tmpdir(), "retro201-remote-"));
+  await g(remote, "init", "-q", "--bare", "-b", "main");
+  const cwd = mkdtempSync(join(tmpdir(), "retro201-clone-"));
+  await g(cwd, "init", "-q", "-b", "main");
+  mkdirSync(join(cwd, dirname(LESSONS_PATH)), { recursive: true });
+  writeFileSync(join(cwd, LESSONS_PATH), LESSONS_HEADER);
+  await g(cwd, "add", ".");
+  await g(cwd, ...BOT_ID, "commit", "-q", "-m", "init");
+  await g(cwd, "remote", "add", "origin", remote);
+  await g(cwd, "push", "-q", "origin", "main");
+  return { remote, cwd };
+}
+
+/** 다른 클론이 `branch`에 커밋 하나를 올린다(`from`에서 출발) → 그 커밋의 sha. 사람·다른 retro의 push 역할. */
+async function pushToBranch(remote, branch, { author = BOT_ID, files, from = "main" }) {
+  const c = mkdtempSync(join(tmpdir(), "retro201-other-"));
+  await g(c, "clone", "-q", remote, ".");
+  await g(c, "checkout", "-q", "-B", branch, `origin/${from}`);
+  for (const [rel, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(c, rel)), { recursive: true });
+    writeFileSync(join(c, rel), text);
+  }
+  await g(c, "add", ".");
+  await g(c, ...author, "commit", "-q", "-m", `edit ${branch}`);
+  await g(c, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+  return g(c, "rev-parse", "HEAD");
+}
+
+/** 진짜 git을 부르며 호출을 기록한다. `beforePush`가 있으면 첫 push 직전에 한 번 부른다(경합 재현). */
+function recordingRun({ beforePush = null } = {}) {
+  const calls = [];
+  let raced = false;
+  const r = async (cmd, args, opts = {}) => {
+    calls.push({ cmd, args, opts });
+    if (beforePush && !raced && cmd === "git" && args[0] === "push") { raced = true; await beforePush(); }
+    return realRun(cmd, args, opts);
+  };
+  r.calls = calls;
+  return r;
+}
+
+/** fakeGh + 열린 PR 조회(head 접두사로 거른다)·PR 편집. */
+function standingGh({ prs = [], checks = [PASS], pr = 77 } = {}) {
+  return {
+    ...fakeGh({ checks, pr }),
+    openPrsByHeadPrefix: vi.fn(async (prefix) => prs.filter((p) => p.headRefName.startsWith(prefix))),
+    editPr: vi.fn(async () => {}),
+  };
+}
+const standingPr = (number, headRefName, headRefOid, title = "old title") => ({ number, title, headRefName, headRefOid });
+
+test("test_201_lessons_pr_is_refreshed_in_place_when_one_is_open", async () => {
+  const OLD = "factory/lessons-2026-09-05";
+  const NEW = `factory/lessons-${DATE}`;
+
+  // (a) 열린 lessons PR이 있다 → 새 PR 없이 그 브랜치를 base + 이번 lessons로 갈아 끼운다.
+  {
+    const { remote, cwd } = await realRepo();
+    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n` } });
+    const run = recordingRun();
+    const gh = standingGh({ prs: [standingPr(150, OLD, oldSha, "retro: lessons/examples 2026-09-05")] });
+    const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, spies(), { cwd }));
+
+    expect(gh.createPr).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ pr: 150, merged: true, branch: OLD });
+    expect(await remoteHas(remote, `refs/heads/${NEW}`)).toBe(false);
+    expect(await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).toBe(LESSONS_TEXT.trim());
+    expect(await g(remote, "rev-parse", `${OLD}^`)).toBe(await g(remote, "rev-parse", "main"));
+    const push = run.calls.find((c) => c.cmd === "git" && c.args[0] === "push");
+    expect(push.args).toContain(`--force-with-lease=refs/heads/${OLD}:${oldSha}`);
+    expect(push.args).not.toContain("--force");
+    expect(push.args).not.toContain("-f");
+    expect(push.args).not.toContain("--force-with-lease");
+    expect(gh.editPr).toHaveBeenCalledTimes(1);
+    const [n, edit] = gh.editPr.mock.calls[0];
+    expect(n).toBe(150);
+    expect(edit.title).toBe(`retro: lessons/examples ${DATE}`);
+    expect(edit.body).toContain(LESSONS_PATH);
+    expect(gh.comment.mock.calls.some(([p, b]) => p === 150 && b.includes(`retro(${DATE})가 이 PR을 갱신했다`))).toBe(true);
+    expect(gh.prChecks).toHaveBeenCalledWith(150);
+    expect(gh.mergePr).toHaveBeenCalledWith(150, expect.objectContaining({ method: "squash" }));
+  }
+
+  // (b) 리스는 **읽은 head**에 걸린다 — 읽은 뒤 누가 그 브랜치에 push하면 retro의 push가 거부되고 그 커밋이 이긴다.
+  {
+    const { remote, cwd } = await realRepo();
+    const oldSha = await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n` } });
+    let racer = null;
+    const run = recordingRun({ beforePush: async () => { racer = await pushToBranch(remote, OLD, { from: OLD, files: { "racer.txt": "x\n" } }); } });
+    const gh = standingGh({ prs: [standingPr(150, OLD, oldSha)] });
+    const out = await openAndMergeLessonsPr(lessonsArgs(run, gh, spies(), { cwd }));
+    expect(racer).toMatch(/^[0-9a-f]{40}$/);
+    expect(await g(remote, "rev-parse", OLD)).toBe(racer);
+    expect(out.merged).toBe(false);
+    expect(gh.createPr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  }
+
+  // (c) 열린 lessons PR이 없다 → 오늘처럼 새 브랜치·새 PR.
+  {
+    const { remote, cwd } = await realRepo();
+    const gh = standingGh({ prs: [] });
+    const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd }));
+    expect(out).toMatchObject({ pr: 77, merged: true, branch: NEW });
+    expect(gh.createPr).toHaveBeenCalledTimes(1);
+    expect(gh.createPr.mock.calls[0][0]).toMatchObject({ head: NEW, base: "main", title: `retro: lessons/examples ${DATE}` });
+    expect(gh.editPr).not.toHaveBeenCalled();
+    expect(await g(remote, "show", `${NEW}:${LESSONS_PATH}`)).toBe(LESSONS_TEXT.trim());
+  }
+}, 120000);
+
+test("test_201_human_commit_on_standing_lessons_pr_survives_refresh", async () => {
+  const OLD = "factory/lessons-2026-09-05";
+  const { remote, cwd } = await realRepo();
+  await pushToBranch(remote, OLD, { files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] old.\n` } });
+  const humanSha = await pushToBranch(remote, OLD, { author: HUMAN_ID, from: OLD, files: { [LESSONS_PATH]: `${LESSONS_HEADER}- [L-2026-09-05-01] fixed by a human.\n` } });
+  const gh = standingGh({ prs: [standingPr(150, OLD, humanSha)] });
+  const out = await openAndMergeLessonsPr(lessonsArgs(recordingRun(), gh, spies(), { cwd }));
+
+  const head = await g(remote, "rev-parse", OLD);
+  expect(await isAncestor(remote, humanSha, head)).toBe(true);
+  expect(await g(remote, "show", `${OLD}:${LESSONS_PATH}`)).toContain("fixed by a human");
+  expect(out.merged).toBe(false);
+  expect(gh.mergePr).not.toHaveBeenCalled();
+  for (const [, body] of gh.comment.mock.calls) expect(body).not.toContain("다시 손대지 않습니다");
+
+  // handToHuman의 문구는 더 이상 "retro가 다시 손대지 않는다"고 약속하지 않는다 — retro는 매번 그 PR을 갱신한다.
+  const gh2 = fakeGh({ checks: [FAIL] });
+  await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh2, spies()));
+  const text = gh2.comment.mock.calls[0][1];
+  expect(text).toContain("factory:needs-human");
+  expect(text).not.toContain("다시 손대지 않습니다");
+}, 60000);
+
+test("test_201_proposal_pr_is_appended_when_one_is_open", async () => {
+  const OLD = "factory/retro-proposal-2026-09-05";
+  const OLD_FILE = "docs/factory/retro/2026-09-05.md";
+  const NEW_FILE = `docs/factory/retro/${DATE}.md`;
+  const title = "retro proposals 2026-09-01..2026-09-06";
+  const body = "<!-- factory-retro:v1 period=2026-09-01..2026-09-06 -->\n";
+
+  // (a) 열린 제안 PR이 있다 → 그 브랜치 위에 이번 파일을 더한다(이전 날짜 파일은 그대로), 제목 갱신, 새 PR 없음.
+  {
+    const { remote, cwd } = await realRepo();
+    const oldSha = await pushToBranch(remote, OLD, { files: { [OLD_FILE]: "# old proposals\n" } });
+    const gh = standingGh({ prs: [standingPr(140, OLD, oldSha, "retro proposals 2026-08-25..2026-08-31")] });
+    const out = await openProposalPr({ run: recordingRun(), gh, cwd, defaultBranch: "main", files: { [NEW_FILE]: "# new proposals\n" }, title, body, date: DATE, ...spies() });
+
+    expect(out).toMatchObject({ pr: 140, branch: OLD, reason: null });
+    expect(gh.createPr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(await g(remote, "show", `${OLD}:${OLD_FILE}`)).toBe("# old proposals");
+    expect(await g(remote, "show", `${OLD}:${NEW_FILE}`)).toBe("# new proposals");
+    expect(await isAncestor(remote, oldSha, OLD)).toBe(true);
+    expect(await remoteHas(remote, `refs/heads/factory/retro-proposal-${DATE}`)).toBe(false);
+    expect(gh.editPr).toHaveBeenCalledWith(140, expect.objectContaining({ title }));
+  }
+
+  // (b) 열린 제안 PR이 없다 → 오늘처럼 라벨 붙은 새 PR.
+  {
+    const { remote, cwd } = await realRepo();
+    const gh = standingGh({ prs: [], pr: 141 });
+    const out = await openProposalPr({ run: recordingRun(), gh, cwd, defaultBranch: "main", files: { [NEW_FILE]: "# new proposals\n" }, title, body, date: DATE, ...spies() });
+    expect(out).toMatchObject({ pr: 141, branch: `factory/retro-proposal-${DATE}`, reason: null });
+    expect(gh.createPr).toHaveBeenCalledWith({ head: `factory/retro-proposal-${DATE}`, base: "main", title, body, labels: ["factory:retro-proposal"] });
+    expect(gh.editPr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(await g(remote, "show", `factory/retro-proposal-${DATE}:${NEW_FILE}`)).toBe("# new proposals");
+  }
+}, 120000);
+
+test("test_201_hand_to_human_translates_the_branch_policy_refusal", async () => {
+  // 이 저장소의 retro PR들(#153·#164·#182·#190)이 머지 단계에서 받은 거부 문구의 형태.
+  const POLICY = "gh pr merge failed (1): X Pull request o/r#190 is not mergeable: the base branch policy prohibits the merge.";
+  const gh = fakeGh({ checks: [PASS] });
+  gh.mergePr = vi.fn(async () => { throw new Error(POLICY); });
+  const out = await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh, spies()));
+  expect(out).toMatchObject({ pr: 77, merged: false });
+  const policyText = gh.comment.mock.calls[0][1];
+  expect(policyText).toContain(POLICY);
+  const translation = policyText.split("\n").find((l) => l.includes("factory/gates"));
+  expect(translation).toBeTruthy();
+  expect(translation).toContain("factory/review");
+  expect(translation).toContain("admin");
+  expect(translation).not.toContain(POLICY);
+
+  const OTHER = "gh pr merge failed (1): X Pull request o/r#190 is not mergeable: the merge commit cannot be cleanly created.";
+  const gh2 = fakeGh({ checks: [PASS] });
+  gh2.mergePr = vi.fn(async () => { throw new Error(OTHER); });
+  await openAndMergeLessonsPr(lessonsArgs(makeFakeRun(gitTable()), gh2, spies()));
+  const otherText = gh2.comment.mock.calls[0][1];
+  expect(otherText).toContain(OTHER);
+  expect(otherText).not.toContain("factory/gates");
+  expect(otherText).not.toContain("admin");
 });
