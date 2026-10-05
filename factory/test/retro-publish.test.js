@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { makeFakeRun } from "../lib/exec.js";
 import { openAndMergeLessonsPr, openProposalPr, withWorktree } from "../lib/retro/publish.js";
+import { renderProposalPr } from "../lib/retro/proposals.js";
 import { run as realRun } from "../lib/exec.js";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -373,6 +374,7 @@ function standingGh({ prs = [], checks = [PASS], pr = 77, headSha = async () => 
     ...fakeGh({ checks, pr }),
     openPrsByHeadPrefix: vi.fn(async (prefix) => prs.filter((p) => p.headRefName.startsWith(prefix))),
     editPr: vi.fn(async () => {}),
+    prBody: vi.fn(async () => ""),
     prHeadSha: vi.fn(headSha),
   };
 }
@@ -485,6 +487,25 @@ test("test_201_proposal_pr_is_appended_when_one_is_open", async () => {
     expect(gh.editPr).toHaveBeenCalledWith(140, expect.objectContaining({ title }));
   }
 
+  // (a2) #201 cf1 — 본문은 갈아 끼우지 않는다: 이전 회차의 P<i> 섹션과 period 마커가 이번 회차의 것과 함께 남는다.
+  {
+    const { remote, cwd } = await realRepo();
+    const oldSha = await pushToBranch(remote, OLD, { files: { [OLD_FILE]: "# old proposals\n" } });
+    const prior = renderProposalPr({ period: { from: "2026-09-01", to: "2026-09-05" }, proposals: [{ kind: "role-new", title: "OLD-role-new-proposal", body: "old why" }] });
+    const now = renderProposalPr({ period: { from: "2026-09-06", to: "2026-09-12" }, proposals: [{ kind: "threshold", title: "NEW-threshold-proposal", body: "new why" }] });
+    const gh = standingGh({ prs: [standingPr(140, OLD, oldSha, prior.title)] });
+    gh.prBody = vi.fn(async () => prior.body);
+    const out = await openProposalPr({ run: recordingRun(), gh, cwd, defaultBranch: "main", files: { [NEW_FILE]: "# new proposals\n" }, title: now.title, body: now.body, date: DATE, ...spies() });
+    expect(out).toMatchObject({ pr: 140, reason: null });
+    expect(gh.prBody).toHaveBeenCalledWith(140);
+    const sent = gh.editPr.mock.calls[0][1].body;
+    expect(sent).toContain("factory-retro:v1 period=2026-09-01..2026-09-05");
+    expect(sent).toContain("factory-retro:v1 period=2026-09-06..2026-09-12");
+    expect(sent).toMatch(/### P\d+ · 역할 신설[^\n]*\n\n\*\*OLD-role-new-proposal\*\*/);
+    expect(sent).toMatch(/### P\d+ · 임계 조정[^\n]*\n\n\*\*NEW-threshold-proposal\*\*/);
+    expect(gh.editPr.mock.calls[0][1].title).toBe(now.title);
+  }
+
   // (b) 열린 제안 PR이 없다 → 오늘처럼 라벨 붙은 새 PR.
   {
     const { remote, cwd } = await realRepo();
@@ -582,3 +603,31 @@ test("test_201_refresh_does_not_merge_on_the_old_heads_stale_check", async () =>
     expect(gh.mergePr).toHaveBeenCalledWith(150, { method: "squash", deleteBranch: true, matchHeadCommit: pushed });
   }
 }, 120000);
+
+test("test_201_appended_proposal_body_keeps_p_labels_unique", async () => {
+  // #201 cf1/dw6 — 갱신된 본문에서 사람과 `:proposal` 스킬은 P<i> 하나로 제안을 고른다. 두 회차가 모두 P1·P2로 시작하면
+  // "P1"이 두 제안을 가리킨다 — 이번 회차의 섹션 번호는 이미 있는 가장 큰 번호 다음부터 이어 붙인다.
+  const OLD = "factory/retro-proposal-2026-09-05";
+  const { remote, cwd } = await realRepo();
+  const oldSha = await pushToBranch(remote, OLD, { files: { "docs/factory/retro/2026-09-05.md": "# old\n" } });
+  const prior = renderProposalPr({ period: { from: "2026-09-01", to: "2026-09-05" }, proposals: [
+    { kind: "role-new", title: "T-old-a", body: "a" },
+    { kind: "gate", title: "T-old-b", body: "b" },
+  ] });
+  const now = renderProposalPr({ period: { from: "2026-09-06", to: "2026-09-12" }, proposals: [
+    { kind: "threshold", title: "T-new-c", body: "c" },
+    { kind: "role-change", title: "T-new-d", body: "d" },
+  ] });
+  const gh = standingGh({ prs: [standingPr(140, OLD, oldSha, prior.title)] });
+  gh.prBody = vi.fn(async () => prior.body);
+  await openProposalPr({ run: recordingRun(), gh, cwd, defaultBranch: "main", files: { [`docs/factory/retro/${DATE}.md`]: "# new\n" }, title: now.title, body: now.body, date: DATE, ...spies() });
+
+  const sent = gh.editPr.mock.calls[0][1].body;
+  const sections = sent.split(/^(?=### )/m).filter((x) => /^### P\d+\b/.test(x));
+  const labels = sections.map((x) => x.match(/^### (P\d+)\b/)[1]);
+  expect(labels).toHaveLength(4);
+  expect(new Set(labels).size).toBe(4);
+  for (const t of ["T-old-a", "T-old-b", "T-new-c", "T-new-d"]) {
+    expect(sections.filter((x) => x.includes(`**${t}**`))).toHaveLength(1);
+  }
+}, 60000);

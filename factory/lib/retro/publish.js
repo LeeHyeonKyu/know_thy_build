@@ -298,6 +298,19 @@ export async function openAndMergeLessonsPr({
 }
 
 /**
+ * #201 cf1/dw6 — 열린 제안 PR의 본문(`prior`) 뒤에 이번 회차의 본문을 이어 붙인다. 이번 회차의 `### P<i>` 머리는 이미 있는
+ * 가장 큰 번호 다음부터 다시 매긴다 — 두 회차가 모두 P1부터 시작하면 "P1" 하나가 두 제안을 가리킨다.
+ */
+function appendProposalBody(prior, next) {
+  const head = String(prior ?? "").replace(/\s+$/, "");
+  if (!head) return next;
+  let max = 0;
+  for (const m of head.matchAll(/^### P(\d+)\b/gm)) max = Math.max(max, Number(m[1]));
+  const renumbered = String(next ?? "").replace(/^### P(\d+)\b/gm, (_, n) => `### P${max + Number(n)}`);
+  return `${head}\n\n---\n\n${renumbered}`;
+}
+
+/**
  * `openProposalPr(...) → { pr, branch, reason }` — 사람이 머지하는 제안 PR(§8.3).
  * #201: 열린 `factory/retro-proposal-*` PR이 있으면 새 PR 대신 그 브랜치에 이번 날짜 파일을 더하고 제목·본문을 갱신한다.
  * 라벨은 생성 시점에 붙는다. **머지하지 않는다** — 체크를 폴링하지도 않는다.
@@ -314,11 +327,14 @@ export async function openProposalPr({
       const standing = await findStanding({ gh, prefix: PROPOSAL_PREFIX, log });
       if (standing) {
         branch = standing.headRefName;
+        // #201 cf1 — 본문은 사람과 `:proposal` 스킬이 제안을 고르는 목록이다. 이전 회차의 제안 파일이 브랜치에 남는 만큼 그
+        // 섹션과 period 마커도 본문에 남긴다: 이번 회차의 본문을 **덧붙인다**(push 전에 읽는다 — 못 읽으면 아무것도 바꾸지 않는다).
+        const merged = appendProposalBody(await gh.prBody(standing.number), body);
         const head = await fetchBranchHead({ run, wt, branch });
         await git(run, ["checkout", "--detach", head], { cwd: wt });
         await stageAndCommit({ run, wt, files, message: `retro: proposals ${date}`, writeFile, mkdir });
         await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
-        await gh.editPr(standing.number, { title, body });
+        await gh.editPr(standing.number, { title, body: merged });
         log(`retro: proposal PR #${standing.number} appended in place (human merges)`);
         return { pr: standing.number, branch, reason: null };
       }
