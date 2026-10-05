@@ -6587,4 +6587,21 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
   await runStage({ stage: "implement", issue: 200, deps });
   expect(transitions).not.toContain("factory:blocked");
   expect(transitions).toContain("factory:awaiting-review");
+
+  // "Gates, mutation and pins still run and decide the result": a round that adds a test beside a source change (mutation
+  // input) and carries a guardable rework pin. Whatever way the scope read fails, both checks still run and their blocking
+  // findings turn GREEN gates into ok:false — a scope error that returned early, or skipped them, would leave ok:true.
+  put("t/new.test.js", "test('n', () => {});\n");
+  await git("add", "-A"); await git("commit", "-q", "-m", "round 1b: a new test");
+  const hPins = { commands: { test_one: "echo 'AssertionError: expected 1 to be 2'; exit 1 # {file} {name}" }, test: { test_glob: ["t/**"], source_glob: ["factory/lib/**"] } };
+  const pin = { id: "p1", text: "the prior fix holds", guard: { kind: "test", ref: "test_200_prior_fix" } };
+  const ctxPins = () => ({ ...ctx200(fe), handoffs: { plan: { files_expected: fe }, review: { decision: "rework", pins: [pin] } } });
+  for (const [name, opts] of variants) {
+    const r = await makeSelfGateDep({ root, harness: hPins, mergeBase, getCtx: ctxPins, ...opts })({ gates: GREEN_200 });
+    for (const c of ["gates", "mutation", "pins", "scope"]) expect(r.ranChecks, `${name}: ${c}`).toContain(c);
+    expect(scopeFindings200(r).map((f) => [f.blocking, f.detail.startsWith("scope check could not run — ")]), name).toEqual([[false, true]]);
+    expect(r.findings.some((f) => f.check === "mutation" && f.blocking), name).toBe(true);
+    expect(r.findings.some((f) => f.check === "pin" && f.blocking && f.ids?.includes("p1")), name).toBe(true);
+    expect(r.ok, name).toBe(false);
+  }
 });
