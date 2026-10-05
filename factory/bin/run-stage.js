@@ -13,7 +13,7 @@ import { backPressure } from "../lib/back-pressure.js";
 import { runStageGates, verdictLine, gatesDetailLines, commitStatusState, maxTier } from "../lib/gates.js";
 import { isGitDiffError, changedFiles } from "../lib/changed-files.js";
 import { MergeBaseError, MERGE_BASE_BLOCKED_REASON, MERGE_BASE_ERROR_CODE, isMergeBaseError, GIT_DIFF_BLOCKED_REASON } from "../lib/blocked-errors.js";
-import { integrityCheck, protectedPaths, policyViolations, addedLines } from "../lib/integrity.js";
+import { integrityCheck, protectedPaths, policyViolations } from "../lib/integrity.js";
 import { needsDenyAllWritesHook } from "../lib/agent-md.js";
 import { claim, release, lockHolder } from "../lib/claim.js";
 import { requirementFor } from "../lib/requirements.js";
@@ -2225,9 +2225,48 @@ export async function addedPathsNoRenames({ run, cwd, base }) {
 export const SCOPE_DIFF_MAX_BYTES = 32 * 1024 * 1024;
 const SCOPE_GIT = ["-c", "core.quotepath=off", "diff", "--no-renames", "--no-color", "--no-ext-diff"];
 
-/** The added lines of a `-U0` diff, per destination path — the text of `integrity.js` `addedLines`, the one parser the
- * `must_not add` gate also reads (review arch1: a second copy here had already drifted from it). */
-export const addedLinesByPath = (text) => new Map([...addedLines(String(text || ""))].map(([p, ls]) => [p, ls.map((l) => l.text)]));
+/** git's C-style quoted path (`"a/we\"ird"`) → the path. Octal escapes are bytes (decoded as UTF-8 together). */
+function unquoteGitPath(s) {
+  if (!(s.length >= 2 && s.startsWith('"') && s.endsWith('"'))) return s;
+  const bytes = [];
+  const simple = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  for (let i = 1; i < s.length - 1; i++) {
+    const ch = s[i];
+    if (ch !== "\\") { bytes.push(...Buffer.from(ch, "utf8")); continue; }
+    const n = s[i + 1];
+    if (/[0-7]/.test(n)) { bytes.push(parseInt(s.slice(i + 1, i + 4), 8)); i += 3; continue; }
+    bytes.push(simple[n] ?? n.charCodeAt(0)); i += 1;
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+/** `+++ b/<path>` → `<path>` (null for `/dev/null`). Unquoted names with a space get a trailing TAB from git — dropped. */
+function plusPath(header) {
+  let rest = header.slice(4);
+  if (rest === "/dev/null") return null;
+  if (!rest.startsWith('"') && rest.endsWith("\t")) rest = rest.slice(0, -1);
+  rest = unquoteGitPath(rest);
+  return rest.startsWith("b/") ? rest.slice(2) : rest;
+}
+
+/** The added lines of a `-U0` diff, per destination path. */
+export function addedLinesByPath(text) {
+  const out = new Map();
+  let file = null, oldLeft = 0, newLeft = 0;
+  for (const line of String(text || "").split("\n")) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("+")) { newLeft--; if (file) out.get(file).push(line.slice(1)); }
+      else if (line.startsWith("-")) oldLeft--;
+      else if (line.startsWith(" ")) { oldLeft--; newLeft--; }      // a context line (defensive: -U0 emits none) — never "added"
+      continue;                                                      // `\ No newline at end of file` and the like
+    }
+    if (line.startsWith("diff --git ")) { file = null; continue; }
+    if (line.startsWith("+++ ")) { file = plusPath(line); if (file && !out.has(file)) out.set(file, []); continue; }
+    const h = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (h) { oldLeft = h[1] === undefined ? 1 : Number(h[1]); newLeft = h[2] === undefined ? 1 : Number(h[2]); }
+  }
+  return out;
+}
 
 export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE_DIFF_MAX_BYTES }) {
   const filesExpected = plan?.files_expected;
