@@ -495,22 +495,27 @@ test("test_200_scope_check_accepts_an_outside_path_named_elsewhere", async () =>
   // The token and the path on two DIFFERENT added lines do not combine.
   expect(blockedPaths(await judge([own(["// Scope change (#200): see below", "// factory/lib/foo.js"]), deleted]))).toEqual(["factory/lib/foo.js"]);
 
-  // A token line in an outside file that gives the reason for ANOTHER changed path covers that path, not its host: the
-  // host stays RED until a line names it too (or names no other changed path).
+  // A token line on an outside file's OWN added lines makes that file GREEN (dw1), whatever other changed path it also
+  // names — and it covers the path it names (dw2). The finding never tells a builder to add a line that is already there
+  // (review cf1/spec1/qa1: "fixtures for factory/lib/self-gate.js" named the in-scope module and kept the host RED).
   const hostA = (lines) => ({ path: "factory/lib/a.js", status: "M", added: lines });
-  expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): factory/lib/foo.js is deleted"]), deleted]))).toEqual(["factory/lib/a.js"]);
+  expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): factory/lib/foo.js is deleted"]), deleted]))).toEqual([]);
+  const helper = { path: "factory/test/helper.js", status: "A", added: ["// Scope change (#200): fixtures for the scope check in factory/lib/self-gate.js — dw1"] };
+  expect(blockedPaths(await judge([{ path: "factory/lib/self-gate.js", status: "M", added: ["x"] }, helper]))).toEqual([]);
   expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): factory/lib/a.js replaces factory/lib/foo.js"]), deleted]))).toEqual([]);
   expect(blockedPaths(await judge([own(["x"]), hostA(["// Scope change (#200): the shared reader — dw2", "// Scope change (#200): factory/lib/foo.js is deleted"]), deleted]))).toEqual([]);
 
   // A path with a space is named whole: a reason for `docs/my notes.md` never covers the changed path `docs/my` that is
-  // its space-delimited prefix (nor `factory/lib/a` for `factory/lib/a b.js`), from another file or from its own lines.
+  // its space-delimited prefix (nor `factory/lib/a` for `factory/lib/a b.js`) from another file; a token on a path's own
+  // added lines still makes that path GREEN (dw1).
   const spaced = { path: "docs/my notes.md", status: "D", added: [] };
   const prefix = { path: "docs/my", status: "D", added: [] };
   expect(blockedPaths(await judge([own(["// Scope change (#200): docs/my notes.md is folded into the gate docs"]), spaced, prefix]))).toEqual(["docs/my"]);
   expect(blockedPaths(await judge([own(["// Scope change (#200): docs/my notes.md and docs/my are folded in"]), spaced, prefix]))).toEqual([]);
   const spacedJs = { path: "factory/lib/a b.js", status: "A", added: ["// Scope change (#200): factory/lib/a b.js is the new reader"] };
   const prefixHost = { path: "factory/lib/a", status: "A", added: ["// Scope change (#200): factory/lib/a b.js is the new reader"] };
-  expect(blockedPaths(await judge([own(["x"]), spacedJs, prefixHost]))).toEqual(["factory/lib/a"]);
+  expect(blockedPaths(await judge([own(["x"]), spacedJs, prefixHost]))).toEqual([]);
+  expect(blockedPaths(await judge([own(["x"]), spacedJs, { ...prefixHost, added: ["x"] }]))).toEqual(["factory/lib/a"]);
 });
 
 test("test_200_scope_check_ignores_mirror_and_run_record_paths", async () => {
