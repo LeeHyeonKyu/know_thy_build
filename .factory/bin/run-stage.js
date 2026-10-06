@@ -914,6 +914,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 없다 — K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
      */
     let payloadErrorMemo;
+    let payloadCtx = ctx;                                             // 디스패처가 옮겨 쓴 loaded.json을 쓴 ctx — plan 리페어 턴이면 그 턴의 것
     const payloadError = async () => {
       if (payloadErrorMemo === undefined) {
         payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
@@ -922,7 +923,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       return payloadErrorMemo;
     };
     const blockOnPayload = async (error, lines) => {
-      const size = Number.isInteger(ctx?.loaded_json?.bytes) ? `loaded.json ${ctx.loaded_json.bytes} bytes` : "loaded.json size unknown";
+      const size = Number.isInteger(payloadCtx?.loaded_json?.bytes) ? `loaded.json ${payloadCtx.loaded_json.bytes} bytes` : "loaded.json size unknown";
       const reason = `dispatcher payload: ${error} (${size})`;
       const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
       record([...lines, `verify: ${reason} — not an agent artifact defect`, ...refusal(t), usage]);
@@ -1027,8 +1028,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const repairReasons = v.planRepair;
       record([`plan repair (KTB-51): one repair turn — feeding ${repairReasons.length} validator reason(s) back: ${repairReasons.join("; ")}`]);
       let repairOut = null;
+      let repairCtx = null;
       try {
-        const repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
+        repairCtx = await d.buildContext({ setupDirty, planRepair: repairReasons });
         /**
          * Task 1 (리뷰 SF-5) — 이 두 번째 `buildContext`가 `context.<role>.json`을 **다시 쓰고**
          * `plan_repair`를 투영에 더한다. 곧 리페어 턴의 플래너가 실제로 읽은 문맥은 이것인데, 첫
@@ -1036,6 +1038,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
          */
         const repairManifest = contextManifestLines(repairCtx, stamp);
         if (repairManifest.length) record(repairManifest);
+        // #207 — 이 buildContext가 loaded.json을 다시 썼다(`plan_repair`로 커진다). 리페어 턴의 디스패처가 옮겨 쓰는 것은 그 파일이다.
+        const repairLoadedNote = loadedJsonLine(repairCtx);
+        if (repairLoadedNote) record([repairLoadedNote]);
         await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
         repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
       } catch (e) {
@@ -1046,6 +1051,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (repairOut) {
         out = repairOut;
+        payloadCtx = repairCtx ?? ctx;                                // #207 — 이제 실패를 말하는 것은 리페어 턴의 반환과 그 턴의 loaded.json이다(memo는 리페어 전에 계산되지 않는다 — plan엔 게이트가 없다)
         try { finalProgress = d.progress?.() ?? null; } catch { /* best-effort */ }
         usage = usageLine(out, finalProgress);
         // plan is a no-write stage — re-assert the worktree exactly as the first pass did (KTB-14).
@@ -2064,13 +2070,14 @@ const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
   && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
   && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
 export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
-  // 후보는 최신이 먼저다. **가장 최근의 워크플로 반환**(`orchestration: "workflow"` + `issue` 키 — 스테이지 산출물과 fail-closed
-  // 반환 둘 다 그 모양이다)을 고르고, 그것이 fail-closed일 때만 답한다: 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려
+  // 후보는 최신이 먼저다. **가장 최근의 워크플로 반환**(`orchestration: "workflow"` + `issue` 키 + `guarantee: "structural"` —
+  // 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가 먼저 Read하는 loaded.json
+  // (`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을 고르고, 그것이 fail-closed일 때만 답한다: 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려
   // 스키마가 틀린 산출물을 냈다면 그것은 산출물 결함이다 — 옛 fail-closed가 그 결함을 blocked로 덮지 못한다.
   const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
-    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
+    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
   return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;
 }
