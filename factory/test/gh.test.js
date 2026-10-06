@@ -803,3 +803,35 @@ test("test_179_gh_merge_pr_pins_the_head_commit", async () => {
   await expect(gh.mergePr(9, { matchHeadCommit: "--admin" })).rejects.toThrow(/matchHeadCommit/);
   expect(run.calls).toHaveLength(2);
 });
+
+// ── #201 — retro가 열린 lessons/제안 PR을 찾아 제자리에서 갱신하는 두 dep ─────────────────────────────
+test("test_201_gh_edit_pr_sets_title_and_body", async () => {
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "edit", result: { code: 0, stdout: "https://github.com/o/r/pull/150\n", stderr: "" } }]);
+  const gh = makeGh({ run, repo });
+  await gh.editPr(150, { title: "retro: lessons/examples 2026-10-05", body: "> quoted\nB" });
+  expect(run.calls[0].args).toEqual(["pr", "edit", "150", "-R", repo, "--title", "retro: lessons/examples 2026-10-05", "--body-file", "-"]);
+  expect(run.calls[0].opts.input).toBe("> quoted\nB");
+  expect(run.calls[0].args.join(" ")).not.toContain("quoted");
+
+  const failing = makeFakeRun([{ match: () => true, result: { code: 1, stdout: "", stderr: "HTTP 403" } }]);
+  await expect(makeGh({ run: failing, repo }).editPr(150, { title: "t", body: "b" })).rejects.toThrow(/HTTP 403/);
+});
+
+test("test_201_gh_open_prs_by_head_prefix_filters_prefix_and_forks_with_an_explicit_limit", async () => {
+  const prs = [
+    { number: 182, title: "retro: lessons/examples 2026-10-01", headRefName: "factory/lessons-2026-10-01", headRefOid: "b".repeat(40), isCrossRepository: false },
+    { number: 190, title: "retro: lessons/examples 2026-10-03", headRefName: "factory/lessons-2026-10-03", headRefOid: "a".repeat(40), isCrossRepository: false },
+    { number: 199, title: "fork", headRefName: "factory/lessons-2026-10-04", headRefOid: "c".repeat(40), isCrossRepository: true },
+    { number: 201, title: "x", headRefName: "claude/fq-201", headRefOid: "d".repeat(40), isCrossRepository: false },
+  ];
+  const run = makeFakeRun([{ match: (c, a) => a[0] === "pr" && a[1] === "list", result: { code: 0, stdout: JSON.stringify(prs), stderr: "" } }]);
+  const out = await makeGh({ run, repo }).openPrsByHeadPrefix("factory/lessons-");
+  // 가장 최근 PR이 먼저(번호 내림차순), fork·다른 접두사는 빠진다.
+  expect(out.map((p) => p.number)).toEqual([190, 182]);
+  expect(out[0]).toEqual({ number: 190, title: "retro: lessons/examples 2026-10-03", headRefName: "factory/lessons-2026-10-03", headRefOid: "a".repeat(40) });
+  const args = run.calls[0].args;
+  expect(args.slice(0, 6)).toEqual(["pr", "list", "-R", repo, "--state", "open"]);
+  // gh의 기본값 30개에 기대지 않는다 — 열린 PR이 30개를 넘으면 lessons PR이 목록 밖으로 밀려 다시 쌓인다.
+  expect(Number(args[args.indexOf("--limit") + 1])).toBeGreaterThan(30);
+  expect(args[args.indexOf("--json") + 1].split(",")).toEqual(expect.arrayContaining(["number", "headRefName", "headRefOid", "isCrossRepository"]));
+});

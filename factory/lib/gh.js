@@ -799,5 +799,26 @@ export function makeGh({ run, repo, sleep = realSleep }) {
       const j = JSON.parse(await gh(args));
       return j.map((p) => ({ number: p.number, title: p.title, body: p.body ?? "", headRefName: p.headRefName, updatedAt: p.updatedAt }));
     },
+    /**
+     * #201 — 이 저장소(fork 제외)에서 head 브랜치가 `prefix`로 시작하는 **열린** PR들, 번호 내림차순(최근 것이 먼저).
+     * retro가 "이미 열린 lessons/제안 PR"을 찾아 제자리에서 갱신하는 자리다. `prList`와 따로 두는 이유: lessons PR에는
+     * 거를 라벨이 없어 전체 목록을 봐야 하고, gh의 기본 `--limit`(30)에 기대면 열린 PR이 30개를 넘는 순간 그 PR이
+     * 목록 밖으로 밀려 PR이 다시 쌓인다. `headRefOid`는 force-with-lease의 기대값 후보, `isCrossRepository`는 fork
+     * PR(같은 이름의 남의 브랜치)을 retro가 retitle·코멘트하지 않도록 거르는 데 쓴다.
+     */
+    async openPrsByHeadPrefix(prefix, { limit = 500 } = {}) {
+      const j = JSON.parse(await gh(["pr", "list", "-R", repo, "--state", "open", "--limit", String(limit), "--json", "number,title,headRefName,headRefOid,isCrossRepository"]));
+      return j
+        .filter((p) => !p.isCrossRepository && String(p.headRefName ?? "").startsWith(prefix))
+        .sort((a, b) => b.number - a.number)
+        .map((p) => ({ number: p.number, title: p.title, headRefName: p.headRefName, headRefOid: p.headRefOid }));
+    },
+    /**
+     * #201 — 열린 PR의 제목과 본문을 바꾼다. 본문은 `editPrBody`처럼 stdin(`--body-file -`)으로만 넘긴다 — argv에
+     * 넣으면 `>`로 시작하는 줄 하나가 셸·훅에서 리다이렉션으로 읽힌다. 실패는 삼키지 않는다(호출자가 판단한다).
+     */
+    async editPr(pr, { title, body }) {
+      await gh(["pr", "edit", String(pr), "-R", repo, "--title", title, "--body-file", "-"], { input: body });
+    },
   };
 }

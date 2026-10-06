@@ -91,9 +91,17 @@ const isFail = (c) => (c.bucket ? FAIL_BUCKETS.has(c.bucket) : FAIL_STATES.has(c
  * 폴링한다. 끝내 판정을 못 얻으면 timeout으로 떨어지므로 여전히 fail closed다.
  * 마지막 회차 뒤에는 자지 않는다(누구도 기다리지 않을 잠이다).
  */
-async function pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log }) {
+async function pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log, headSha = null }) {
   for (let i = 0; i < maxPolls; i += 1) {
     try {
+      // #201 cf1 — `headSha`가 주어지면(제자리 갱신) PR head가 그 커밋이 될 때까지는 체크를 읽지 않는다: 이전 head의
+      // green 체크가 남아 있고 `gh pr checks`는 그것이 어느 커밋의 것인지 말하지 않는다. 아직 옮겨지지 않았으면 pending이다.
+      const live = headSha ? await gh.prHeadSha(pr) : null;
+      if (headSha && live !== headSha) {
+        log(`retro: PR #${pr} head is ${live ?? "unknown"}, not the pushed ${headSha} yet (${i + 1}/${maxPolls})`);
+        if (i < maxPolls - 1) await sleep(pollMs);
+        continue;
+      }
       const checks = (await gh.prChecks(pr)) || [];
       const mine = checks.filter((c) => c?.name === INTEGRITY_CHECK);
       if (mine.some(isFail)) {
@@ -110,16 +118,63 @@ async function pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log }) {
   return { state: "timeout", reason: "timeout" };
 }
 
-/** 자동 머지를 포기할 때 — PR은 열어 둔 채 사람이 보도록 라벨과 이유를 남긴다. 여기서 실패해도 원래 이유를 잃지 않는다. */
+// #201 — `gh pr merge`의 이 거부는 이 저장소의 브랜치 보호에서 온다: 보호 규칙이 `factory/gates`·`factory/review` 상태와
+// 승인을 요구하는데 retro의 lessons PR에는 그 셋이 생길 수 없다(#153·#164·#182·#190 전부 같은 원문). 원문만 보면 사람이
+// "무엇이 고장났나"를 찾아 나서게 되므로 사람 말 한 줄을 더한다. GitHub이 문구를 바꾸면 번역은 조용히 빠지고 원문만 남는다.
+const BRANCH_POLICY_REFUSAL = /base branch policy prohibits the merge/i;
+const BRANCH_POLICY_PLAIN = "왜 다크 머지가 안 됐나: 이 저장소의 브랜치 보호가 factory/gates·factory/review 상태와 승인을 요구하는데 retro PR에는 그것이 생길 수 없다 — 사람이 admin으로 머지한다.";
+
+/**
+ * 자동 머지를 포기할 때 — PR은 열어 둔 채 사람이 보도록 라벨과 이유를 남긴다. 여기서 실패해도 원래 이유를 잃지 않는다.
+ * 원문(`reason`)은 언제나 그대로 싣고, 브랜치 보호 거부일 때만 그 위에 번역 한 줄을 둔다(#201).
+ * "retro가 다시 손대지 않는다"고 약속하지 않는다: retro는 다음 회차에 이 PR을 제자리에서 갱신한다(#201) — 다만
+ * 브랜치에 factory-bot이 아닌 커밋이 있으면 덮어쓰지 않는다(`openAndMergeLessonsPr`).
+ */
 async function handToHuman({ gh, pr, reason, log }) {
   // addLabels는 `gh issue edit`을 쓰지만 PR도 같은 번호 공간이라 그대로 붙는다(별도 prAddLabels 불필요).
   await quiet(() => gh.addLabels(pr, [NEEDS_HUMAN]));
-  await quiet(() => gh.comment(pr, [
-    `retro가 연 lessons PR의 자동 머지를 중단했습니다: ${reason}.`,
+  const lines = ["retro가 연 lessons PR의 자동 머지를 중단했습니다."];
+  if (BRANCH_POLICY_REFUSAL.test(String(reason ?? ""))) lines.push("", BRANCH_POLICY_PLAIN);
+  lines.push(
     "",
-    `\`${NEEDS_HUMAN}\`을 붙였습니다 — 사람이 diff를 보고 머지하거나 닫아 주세요(retro는 다시 손대지 않습니다).`,
-  ].join("\n")));
+    `원문: ${reason}`,
+    "",
+    `\`${NEEDS_HUMAN}\`을 붙였습니다 — 사람이 diff를 보고 머지하거나 닫아 주세요. 다음 retro는 새 PR을 열지 않고 이 PR을 제자리에서 갱신합니다(브랜치에 ${BOT_NAME}가 아닌 커밋이 있으면 덮어쓰지 않습니다).`,
+  );
+  await quiet(() => gh.comment(pr, lines.join("\n")));
   log(`retro: lessons PR #${pr} handed to human — ${reason}`);
+}
+
+const LESSONS_PREFIX = "factory/lessons-";
+const PROPOSAL_PREFIX = "factory/retro-proposal-";
+
+/**
+ * #201 — 이미 열린 retro PR(head가 `prefix`로 시작, fork 제외) 중 가장 최근 것, 없으면 null. 둘 이상 열려 있으면(이 변경
+ * 이전에 쌓인 것) 가장 최근 것 하나만 갱신하고 나머지는 사람이 닫는다. 조회 실패는 판정이 아니다 — 오늘처럼 새 PR을
+ * 여는 쪽으로 떨어진다(lessons는 다음 retro가 다시 계산하므로 잃는 것은 없고, 최악은 PR 하나가 더 생기는 것이다).
+ */
+async function findStanding({ gh, prefix, log }) {
+  try {
+    const prs = (await gh.openPrsByHeadPrefix(prefix)) || [];
+    return prs.find((p) => p?.number != null && String(p.headRefName ?? "").startsWith(prefix)) ?? null;
+  } catch (e) {
+    log(`retro: could not list open ${prefix}* PRs — ${String(e?.message || e)}; opening a new PR instead`);
+    return null;
+  }
+}
+
+/** worktree 안에서 원격 브랜치 하나의 **지금** head를 가져온다 → sha. 이 sha가 곧 force-with-lease의 기대값이다. */
+async function fetchBranchHead({ run, wt, branch }) {
+  await git(run, ["fetch", "origin", `refs/heads/${branch}`], { cwd: wt });
+  return (await git(run, ["rev-parse", "FETCH_HEAD"], { cwd: wt })).trim();
+}
+
+/** `origin/<default>..head`에서 factory-bot이 만들지 않은 커밋들(sha). 사람이 needs-human PR에 올린 수정이 여기 걸린다. */
+async function foreignCommits({ run, wt, defaultBranch, head }) {
+  const out = await git(run, ["log", "--format=%H%x09%an%x09%ae", `origin/${defaultBranch}..${head}`], { cwd: wt });
+  return out.split("\n").filter(Boolean).map((l) => l.split("\t"))
+    .filter(([, name, email]) => !(name === BOT_NAME && email === BOT_EMAIL))
+    .map(([sha]) => sha);
 }
 
 const lessonsBody = (date, paths) => [
@@ -135,6 +190,8 @@ const lessonsBody = (date, paths) => [
  * `openAndMergeLessonsPr(...) → { pr, merged, reason, branch }` — 다크 경로(P4-R2).
  *
  * 순서: worktree → 파일 쓰기 → **커밋** → `integrityCheck` 로컬 선검사 → push → PR → 체크 폴링 → 머지.
+ * #201: 열린 `factory/lessons-*` PR이 있으면 "push → PR"이 "그 브랜치로 리스 건 force push → 제목·본문 갱신 → 갱신
+ * 코멘트"가 된다(그 브랜치에 factory-bot이 아닌 커밋이 있으면 아무것도 밀지 않고 멈춘다). 나머지 순서는 같다.
  * 선검사를 커밋 **뒤에** 두는 이유: `integrityCheck`는 `base...HEAD` diff를 보므로 커밋되지 않은
  * 워킹 트리 변경은 보이지 않는다(커밋 전에 부르면 항상 "변경 없음"이 되어 검사가 무의미해진다).
  * 커밋은 어차피 버려질 임시 worktree 안에서만 일어나고, RED면 push도 PR도 하지 않는다.
@@ -144,12 +201,34 @@ export async function openAndMergeLessonsPr({
   readFile = defaultReadFile, pollMs = 15000, maxPolls = 40, sleep = defaultSleep, log = () => {},
   mkdtemp = fsMkdtemp, rm = fsRm, writeFile = fsWriteFile, mkdir = fsMkdir,
 }) {
-  const branch = `factory/lessons-${date}`;
+  let branch = `${LESSONS_PREFIX}${date}`;
   const title = `retro: lessons/examples ${date}`;
   let pr = null;
   try {
     return await withWorktree({ run, cwd, defaultBranch, mkdtemp, rm }, async (wt) => {
       const paths = await stageAndCommit({ run, wt, files, message: title, writeFile, mkdir });
+
+      // #201 — 이미 열린 lessons PR이 있으면 새 PR을 쌓지 않고 그 브랜치를 `origin/<default>` + 이번 `files`로 갈아 끼운다.
+      // 파일 내용은 합치지 않는다(arch1): 채택·중복·상한·id는 lessons.js(`applyLessons`)가 정하고 여기서는 그 결과를 그대로
+      // 싣는다 — 여기서 그 PR의 텍스트를 다시 합치면 상한이 결정된 곳 밖에서 깨진다.
+      // 리스는 **방금 읽은 head**에 건다: worktree에는 그 브랜치의 원격 추적 ref가 없어 맨 `--force-with-lease`는
+      // 아무것도 지키지 못한다.
+      const standing = await findStanding({ gh, prefix: LESSONS_PREFIX, log });
+      let lease = null;
+      if (standing) {
+        branch = standing.headRefName;
+        lease = await fetchBranchHead({ run, wt, branch });
+        // 리스는 읽은 뒤 몇 초만 지킨다. needs-human PR에 사람이 며칠 전에 올린 수정은 그 head에 이미 들어 있으므로
+        // 리스로는 못 지킨다 — factory-bot이 아닌 커밋이 하나라도 있으면 아예 덮어쓰지 않는다.
+        const foreign = await foreignCommits({ run, wt, defaultBranch, head: lease });
+        if (foreign.length) {
+          const shas = foreign.map((x) => x.slice(0, 7)).join(", ");
+          const reason = `standing lessons PR #${standing.number} carries commits not made by ${BOT_NAME} (${shas}) — not refreshed`;
+          await quiet(() => gh.comment(standing.number, `retro(${date})는 이 PR을 갱신하지 않았습니다 — 브랜치에 ${BOT_NAME}가 아닌 커밋(${shas})이 있어 덮어쓰지 않습니다. 이 PR을 머지하거나 닫으면 다음 retro가 새 PR을 엽니다.`));
+          log(`retro: ${reason}`);
+          return { pr: standing.number, merged: false, reason, branch };
+        }
+      }
 
       const base = (await git(run, ["merge-base", "HEAD", `origin/${defaultBranch}`], { cwd: wt })).trim();
       const integrity = await integrityCheck({ run, cwd: wt, base, harness, readFile });
@@ -178,8 +257,18 @@ export async function openAndMergeLessonsPr({
         return { pr: null, merged: false, reason, branch };
       }
 
-      await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
-      pr = await gh.createPr({ head: branch, base: defaultBranch, title, body: lessonsBody(date, paths) });
+      let pushed = null;
+      if (standing) {
+        await git(run, ["push", `--force-with-lease=refs/heads/${branch}:${lease}`, "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
+        pushed = (await git(run, ["rev-parse", "HEAD"], { cwd: wt })).trim();
+        pr = standing.number;
+        await gh.editPr(pr, { title, body: lessonsBody(date, paths) });
+        await quiet(() => gh.comment(pr, `retro(${date})가 이 PR을 갱신했다 — 브랜치를 \`origin/${defaultBranch}\` + 이번 회차의 lessons로 다시 만들었습니다(새 PR은 열지 않았습니다).`));
+        log(`retro: lessons PR #${pr} refreshed in place`);
+      } else {
+        await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
+        pr = await gh.createPr({ head: branch, base: defaultBranch, title, body: lessonsBody(date, paths) });
+      }
       if (pr == null) {
         // 브랜치는 이미 밀렸고 PR도 열렸을 수 있는데 번호를 못 읽었다 — 라벨도 코멘트도 붙일 곳이
         // 없으니 머지를 시도하지 않고 사람이 볼 수 있게 이유만 남긴다(절대 추측해서 머지하지 않는다).
@@ -188,9 +277,10 @@ export async function openAndMergeLessonsPr({
         return { pr: null, merged: false, reason, branch };
       }
 
-      const poll = await pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log });
+      // 제자리 갱신이면 폴링과 머지를 방금 push한 커밋에 고정한다(#201 cf1) — 이전 head의 green 체크로 새 커밋이 머지되지 않는다.
+      const poll = await pollIntegrity({ gh, pr, pollMs, maxPolls, sleep, log, headSha: pushed });
       if (poll.state === "pass") {
-        await gh.mergePr(pr, { method: "squash", deleteBranch: true });
+        await gh.mergePr(pr, pushed ? { method: "squash", deleteBranch: true, matchHeadCommit: pushed } : { method: "squash", deleteBranch: true });
         log(`retro: lessons PR #${pr} merged (dark)`);
         return { pr, merged: true, reason: null, branch };
       }
@@ -208,16 +298,46 @@ export async function openAndMergeLessonsPr({
 }
 
 /**
+ * #201 cf1/dw6 — 열린 제안 PR의 본문(`prior`) 뒤에 이번 회차의 본문을 이어 붙인다. 이번 회차의 `### P<i>` 머리는 이미 있는
+ * 가장 큰 번호 다음부터 다시 매긴다 — 두 회차가 모두 P1부터 시작하면 "P1" 하나가 두 제안을 가리킨다.
+ */
+function appendProposalBody(prior, next) {
+  const head = String(prior ?? "").replace(/\s+$/, "");
+  if (!head) return next;
+  let max = 0;
+  for (const m of head.matchAll(/^### P(\d+)\b/gm)) max = Math.max(max, Number(m[1]));
+  const renumbered = String(next ?? "").replace(/^### P(\d+)\b/gm, (_, n) => `### P${max + Number(n)}`);
+  return `${head}\n\n---\n\n${renumbered}`;
+}
+
+/**
  * `openProposalPr(...) → { pr, branch, reason }` — 사람이 머지하는 제안 PR(§8.3).
+ * #201: 열린 `factory/retro-proposal-*` PR이 있으면 새 PR 대신 그 브랜치에 이번 날짜 파일을 더하고 제목·본문을 갱신한다.
  * 라벨은 생성 시점에 붙는다. **머지하지 않는다** — 체크를 폴링하지도 않는다.
  */
 export async function openProposalPr({
   run, gh, cwd, defaultBranch, files, title, body, date, log = () => {},
   mkdtemp = fsMkdtemp, rm = fsRm, writeFile = fsWriteFile, mkdir = fsMkdir,
 }) {
-  const branch = `factory/retro-proposal-${date}`;
+  let branch = `${PROPOSAL_PREFIX}${date}`;
   try {
     return await withWorktree({ run, cwd, defaultBranch, mkdtemp, rm }, async (wt) => {
+      // #201 — 이미 열린 제안 PR이 있으면 그 브랜치 **위에** 이번 날짜 파일을 더한다. 제안 파일은 날짜별 파일이라 충돌이
+      // 없고, 그 브랜치에서 출발해 force 없이 push하므로 이전 날짜 파일도 누구의 커밋도 사라지지 않는다.
+      const standing = await findStanding({ gh, prefix: PROPOSAL_PREFIX, log });
+      if (standing) {
+        branch = standing.headRefName;
+        // #201 cf1 — 본문은 사람과 `:proposal` 스킬이 제안을 고르는 목록이다. 이전 회차의 제안 파일이 브랜치에 남는 만큼 그
+        // 섹션과 period 마커도 본문에 남긴다: 이번 회차의 본문을 **덧붙인다**(push 전에 읽는다 — 못 읽으면 아무것도 바꾸지 않는다).
+        const merged = appendProposalBody(await gh.prBody(standing.number), body);
+        const head = await fetchBranchHead({ run, wt, branch });
+        await git(run, ["checkout", "--detach", head], { cwd: wt });
+        await stageAndCommit({ run, wt, files, message: `retro: proposals ${date}`, writeFile, mkdir });
+        await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
+        await gh.editPr(standing.number, { title, body: merged });
+        log(`retro: proposal PR #${standing.number} appended in place (human merges)`);
+        return { pr: standing.number, branch, reason: null };
+      }
       await stageAndCommit({ run, wt, files, message: `retro: proposals ${date}`, writeFile, mkdir });
       await git(run, ["push", "origin", `HEAD:refs/heads/${branch}`], { cwd: wt });
       const pr = await gh.createPr({ head: branch, base: defaultBranch, title, body, labels: [PROPOSAL_LABEL] });
