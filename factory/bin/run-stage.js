@@ -2064,13 +2064,14 @@ const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
   && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
   && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
 export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
-  // 후보는 최신이 먼저다. **가장 최근의 워크플로 반환**(`orchestration: "workflow"` + `issue` 키 — 스테이지 산출물과 fail-closed
-  // 반환 둘 다 그 모양이다)을 고르고, 그것이 fail-closed일 때만 답한다: 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려
+  // 후보는 최신이 먼저다. **가장 최근의 워크플로 반환**(`orchestration: "workflow"` + `issue` 키 + `guarantee: "structural"` —
+  // 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가 먼저 Read하는 loaded.json
+  // (`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을 고르고, 그것이 fail-closed일 때만 답한다: 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려
   // 스키마가 틀린 산출물을 냈다면 그것은 산출물 결함이다 — 옛 fail-closed가 그 결함을 blocked로 덮지 못한다.
   const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
-    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
+    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
   return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;
 }

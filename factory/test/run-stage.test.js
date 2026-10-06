@@ -6583,6 +6583,7 @@ import { dispatcherPayloadErrorOf } from "../bin/run-stage.js";
 import { sweep as sweep207, engineCausedNeedsHuman as engineCausedNeedsHuman207, BLOCKED_ESCALATION_REASON as ESCALATION207 } from "../lib/sweeper.js";
 import { blockedOrigin as blockedOrigin207 } from "../lib/retro/issue-comments.js";
 import { lifetimeCostOf as lifetimeCostOf207 } from "../lib/budget.js";
+import { buildContext as buildContext207 } from "../lib/context.js";
 
 const WF207 = (name) => new URL(`../../templates/factory/claude/workflows/factory-${name}.js`, import.meta.url).pathname;
 /** run 37140542370의 모양: args 전체가 JSON 문자열로 오다 잘렸다(닫는 괄호 누락) → issue 0, context payload missing. */
@@ -6656,6 +6657,40 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   const note = JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(missing)}</result></task-notification>` }] } });
   expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: "The workflow returned an error." }, transcriptText: note })).toBe("context payload missing");
   expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: "The workflow returned an error." }, transcriptText: "" })).toBeNull();
+
+  // rework cf1/spec2 — 실제 디스패처는 **먼저 loaded.json을 Read한다**(factory-*.md step 1). 그 내용은 진짜 생산자(buildContext)가
+  // 디스크에 쓴 그대로다: `issue` 키와 `orchestration: "workflow"`를 가졌지만 워크플로 반환이 아니다 — 그것이 fail-closed 반환을 가려선 안 된다.
+  const lr = mkdtempSync(join(tmpdir(), "rs207-"));
+  mkdirSync(join(lr, ".factory"), { recursive: true }); mkdirSync(join(lr, "docs/factory"), { recursive: true });
+  writeFileSync(join(lr, ".factory/harness.toml"), `schema = 1\n[harness]\nmaturity = "M0"\n[factory]\norchestration = "workflow"\n[commands]\nunit = "npm test"\n[gates]\nrequired = ["unit"]\nfast = ["unit"]\nfull = ["unit"]\ndeep = ["unit"]\n`);
+  writeFileSync(join(lr, "docs/factory/CHARTER.md"), `---\nschema: factory.charter.v1\nstatus: ready\ntier_default: standard\nroster:\n  docs: [correctness]\n  standard: [correctness, qa, spec-conformance]\nplan_roles:\n  docs: [architect, skeptic]\n  default: [architect, skeptic, operator]\nplan_rounds: { docs: 2, default: 3 }\n---\n`);
+  writeFileSync(join(lr, ".factory/roles.toml"), `[triage]\nagent = "t.md"\nmodel = "sonnet"\n[implement.builder]\nagent = "b.md"\nmodel = "opus"\n[implement.verifier]\nagent = "v.md"\nmodel = "opus"\ncold_read = true\n`);
+  await buildContext207({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement" });
+  const loadedText = readFileSync(join(lr, ".factory/out/loaded.json"), "utf8");
+  expect(JSON.parse(loadedText)).toMatchObject({ issue: 207, orchestration: "workflow" });    // 가리는 쪽의 모양이 정말 그렇다
+  const numbered = loadedText.split("\n").map((l, i) => `${String(i + 1).padStart(6)}\t${l}`).join("\n");
+  const readLoaded = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id: "r1", input: { file_path: `${lr}/.factory/out/loaded.json` } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "r1", content: numbered }] } }),
+  ];
+  const wfReturn = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w1", input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: JSON.stringify(missing) }] } }),
+  ];
+  const prose = { is_error: false, result: "The workflow returned an error." };
+  // (a) 전경 Workflow tool_result — 마지막 말은 산문.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: [...readLoaded, ...wfReturn].join("\n") })).toBe("context payload missing");
+  // (b) 디스패처의 마지막 말(완료 알림 없음).
+  expect(dispatcherPayloadErrorOf({ out: { is_error: false, result: fenced207(missing) }, transcriptText: readLoaded.join("\n") })).toBe("context payload missing");
+  // (c) 완료 알림 — 예전에도 되던 자리, 계속 된다.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: [...readLoaded, note].join("\n") })).toBe("context payload missing");
+  // 그리고 loaded.json Read만 있으면(워크플로 반환이 없으면) 여전히 답이 없다.
+  expect(dispatcherPayloadErrorOf({ out: prose, transcriptText: readLoaded.join("\n") })).toBeNull();
+  // runStage 끝까지: 진짜 트랜스크립트 모양(Read → 전경 Workflow 반환)에서 needs-human이 아니라 blocked/undecidable.
+  const fg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: [...readLoaded, ...wfReturn].join("\n") }) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: fg, runnerId: "r" })).toBe(2);
+  expect(fg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(fg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
 
   // 에스컬레이션 뒤에도 엔진 원인이다: 진짜 transition()으로 in-progress → blocked, 진짜 sweep()이 한 번 재시도하고 같은 자리에서
   // 또 멈추면 사람에게 올린다 — 그 needs-human을 engineCausedNeedsHuman이 엔진 원인으로 읽는다.
