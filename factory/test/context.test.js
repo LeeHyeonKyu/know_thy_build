@@ -743,3 +743,265 @@ test("test_174_builder_context_takes_the_brief_bound_to_the_restart_transition",
   expect(loaded.k_restart_brief.findings).toEqual(real);
   expect(loaded.k_restart_brief.paths).toEqual(["factory/lib/self-gate.js"]);
 });
+
+/**
+ * #207 — 디스패처가 `loaded.json`을 Workflow `args`로 **손으로 옮겨 쓰는** 경로의 크기를 줄인다. implement에서만, 쓰는 사본에서만
+ * 자유 텍스트 다섯 필드를 앞 200자 + 포인터로 자르고(4096바이트를 넘으면 100자로 한 번 더), 구조(id·where·guard·status·길이)는
+ * 그대로 둔다. 포인터가 가리키는 `context.builder.json`·`context.json`·반환된 `ctx.loaded`는 전문을 든다. 모든 스테이지가
+ * `loaded.json: N bytes` 한 줄을 런 기록에 남긴다(N은 디스크 위 파일의 UTF-8 바이트). 픽스처는 실제 생산자로 만든다:
+ * review 핸드오프는 `renderHandoff`, 핀은 `deriveReworkPins`, self-gate findings는 `selfGateRetryComment`, K 재시작 브리프는
+ * `kRestartComment` + 진짜 `transition()`, 분쟁은 `factory.rework-response.v1` PR 코멘트.
+ */
+import { statSync as statSync207 } from "node:fs";
+import { deriveReworkPins as deriveReworkPins207 } from "../lib/verify-stage.js";
+import { selfGateRetryComment as selfGateRetryComment207 } from "../lib/retro/issue-comments.js";
+
+const POINTER207 = "… (full text: .factory/out/context.builder.json)";
+const LIMIT207 = 4096;
+const cut207 = (s, n) => (Array.from(s).length > n ? Array.from(s).slice(0, n).join("") + POINTER207 : s);
+
+function root207({ builderColdRead = false } = {}) {
+  const r = root();
+  const roles = readFileSync(join(r, ".factory/roles.toml"), "utf8");
+  writeFileSync(join(r, ".factory/roles.toml"), `${roles}[implement.builder]\nagent = ".claude/agents/factory-builder.md"\nmodel = "opus"\n${builderColdRead ? "cold_read = true\n" : ""}[implement.verifier]\nagent = ".claude/agents/factory-verifier.md"\nmodel = "opus"\ncold_read = true\n`);
+  return r;
+}
+
+/**
+ * 실제 rework 라운드의 이력: implement 핸드오프 → (K 재시작 브리프 + 재시작 rework 전이) → self-gate 차단 코멘트 →
+ * rework review 핸드오프(must_fix + deriveReworkPins 핀). PR 코멘트에는 분쟁이 담긴 rework-response가 있다.
+ */
+async function reworkHistory207({ issue = 207, claims, disputedReason, sgDetail, briefClaim, evidence = "e" }) {
+  const H = "d".repeat(40);
+  const pr = 41;
+  const doneWhen = claims.map((_, i) => ({ id: `dw${i + 1}`, text: "t", level: "unit", check: { kind: "test", ref: `test_207_case_${i + 1}` } }));
+  const mustFix = claims.map((claim, i) => ({ id: `dw${i + 1}`, where: `factory/lib/context.js:${100 + i}`, claim, evidence }));
+  const pins = deriveReworkPins207({ mustFix, doneWhen });
+  let label = "factory:awaiting-review", tick = 0;
+  const comments = [
+    { body: renderHandoff({ stage: "plan", issue, summary: "s", data: { schema: "factory.plan.v1", issue, done_when: doneWhen } }), author: "factory-bot", createdAt: "2026-10-01T00:00:00Z" },
+    { body: renderHandoff({ stage: "implement", issue, summary: "s", data: { schema: "factory.implement.v1", issue, pr, head_sha: H } }), author: "factory-bot", createdAt: "2026-10-01T00:00:01Z" },
+  ];
+  const gh = {
+    issue: async () => ({ number: issue, title: "T", body: "", labels: [label] }),
+    comments: async (n) => (n === pr
+      ? [{ id: 90, body: "```json\n" + JSON.stringify({ schema: "factory.rework-response.v1", issue, responses: [{ id: "dw1", status: "fixed", commit: "abc" }, { id: "dw2", status: "disputed", reason: disputedReason }] }) + "\n```", createdAt: "2026-10-02T09:00:00Z" }]
+      : comments.slice()),
+    comment: async (_n, body) => { comments.push({ body, author: "factory-bot", createdAt: new Date(Date.UTC(2026, 9, 2, 0, 0, tick++)).toISOString() }); },
+    setFactoryLabel: async (_n, to) => { label = to; },
+  };
+  const to = (t) => transition174({ gh, issue, to: t, reason: "x", by: "factory:run-1", stage: "review", env: {} });
+  await to("factory:rework"); label = "factory:awaiting-review";
+  await gh.comment(issue, kRestartComment174({ issue, pr, head: H, findings: [{ id: "k1", where: "factory/lib/context.js:325", claim: briefClaim }, { id: "k2", where: "factory/bin/run-stage.js:1065", claim: "short" }] }));
+  await to("factory:rework");
+  await gh.comment(issue, selfGateRetryComment207({ issue, head: H, attempt: 1, findings: [{ check: "gate:unit", blocking: true, detail: sgDetail }, { check: "mutation", blocking: true, detail: "short" }] }));
+  await gh.comment(issue, renderHandoff({ stage: "review", issue, summary: "s", data: {
+    schema: "factory.review.v1", issue, pr, head_sha: H, round: 1, orchestration: "workflow", decision: "rework",
+    verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: mustFix, should_fix: [], verified: [] }],
+    pins,
+  } }));
+  label = "factory:in-progress";
+  return { gh, issue, mustFix, pins };
+}
+
+/** 다섯 자유 텍스트 필드를 뺀 나머지 — 구조 비교용(키 순서·배열 길이·id·where·guard·status 전부). */
+function structureOf207(loaded) {
+  const o = JSON.parse(JSON.stringify(loaded));
+  const drop = (arr, key) => { for (const x of Array.isArray(arr) ? arr : []) if (x && typeof x === "object") delete x[key]; };
+  drop(o.must_fix, "claim"); drop(o.disputed, "reason"); drop(o.rework_pins, "text"); drop(o.self_gate_findings, "detail"); drop(o.k_restart_brief?.findings, "claim");
+  return o;
+}
+
+const loadedOnDisk207 = (r) => JSON.parse(readFileSync(join(r, ".factory/out/loaded.json"), "utf8"));
+
+test("test_207_loaded_json_truncates_free_text_and_keeps_structure", async () => {
+  const long = (tag) => `${tag}: the guard test still passes when the behaviour it guards is deleted, so it proves nothing about the contract — `.repeat(4);
+  const short = "short claim, under the limit";
+  // (a) 다섯 개의 긴 must_fix(계약의 모양) — 200자 패스로는 4096을 넘으므로(아래에서 확인) 100자 패스가 적용된다.
+  // (b) 긴 must_fix 하나 + 짧은 하나 — 200자 패스로 4096 안에 들어온다. 두 경우 모두 다섯 필드가 같은 규칙으로 잘린다.
+  const cases = [
+    { name: "five long", claims: [long("c1"), long("c2"), long("c3"), long("c4"), long("c5")], n: 100 },
+    { name: "one long", claims: [long("c1"), short], n: 200 },
+  ];
+  for (const { name, claims, n } of cases) {
+    const fixture = { claims, disputedReason: long("disputed"), sgDetail: long("gate unit RED"), briefClaim: long("brief").slice(0, 380) };
+    const r = root207();
+    const { gh, issue, mustFix } = await reworkHistory207(fixture);
+    const ctx = await buildContext({ root: r, gh, issue, stage: "implement" });
+    const disk = loadedOnDisk207(r);
+    const at200 = Buffer.byteLength(JSON.stringify({ ...ctx.loaded,
+      must_fix: ctx.loaded.must_fix.map((m) => ({ ...m, claim: cut207(m.claim, 200) })),
+      rework_pins: ctx.loaded.rework_pins.map((p) => ({ ...p, text: cut207(p.text, 200) })),
+      disputed: ctx.loaded.disputed.map((x) => ({ ...x, reason: cut207(x.reason, 200) })),
+      self_gate_findings: ctx.loaded.self_gate_findings.map((f) => ({ ...f, detail: cut207(f.detail, 200) })),
+      k_restart_brief: { ...ctx.loaded.k_restart_brief, findings: ctx.loaded.k_restart_brief.findings.map((f) => ({ ...f, claim: cut207(f.claim, 200) })) },
+    }, null, 2));
+    expect(at200 > LIMIT207, name).toBe(n === 100);
+
+    // 다섯 필드가 모두 앞 n자 + 포인터(n자 이하는 그대로, 포인터 없음).
+    expect(disk.must_fix.map((m) => m.claim), name).toEqual(claims.map((c) => cut207(c, n)));
+    expect(disk.must_fix[0].claim.endsWith(POINTER207), name).toBe(true);
+    expect(Array.from(disk.must_fix[0].claim.slice(0, -POINTER207.length)), name).toHaveLength(n);
+    for (const [i, c] of claims.entries()) if (c === short) expect(disk.must_fix[i].claim, name).toBe(short);
+    expect(disk.rework_pins.map((p) => p.text), name).toEqual(claims.map((c) => cut207(c, n)));
+    expect(disk.disputed, name).toEqual([{ id: "dw2", status: "disputed", reason: cut207(fixture.disputedReason, n) }]);
+    expect(disk.self_gate_findings.map((f) => f.detail), name).toEqual([cut207(fixture.sgDetail, n), "short"]);
+    expect(disk.k_restart_brief.findings.map((f) => f.claim), name).toEqual([cut207(fixture.briefClaim, n), "short"]);
+    for (const t of [disk.disputed[0].reason, disk.self_gate_findings[0].detail, disk.k_restart_brief.findings[0].claim]) expect(t.endsWith(POINTER207), name).toBe(true);
+
+    // 구조는 입력(= 반환된 ctx.loaded)과 깊이 같다: id·where·guard·status·배열 길이·그 밖의 모든 키.
+    expect(structureOf207(disk), name).toEqual(structureOf207(ctx.loaded));
+    expect(disk.must_fix.map(({ id, where }) => ({ id, where })), name).toEqual(mustFix.map(({ id, where }) => ({ id, where })));
+    expect(disk.rework_pins.map((p) => p.guard), name).toEqual(claims.map((_, i) => ({ kind: "test", ref: `test_207_case_${i + 1}` })));
+
+    // 포인터가 가리키는 파일(디스크에서 다시 읽는다)과 context.json, 그리고 반환된 ctx.loaded는 같은 id 아래 전문을 든다.
+    const builder = JSON.parse(readFileSync(join(r, ".factory/out/context.builder.json"), "utf8"));
+    const full = JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8"));
+    for (const src of [builder.loaded, full.loaded, ctx.loaded]) {
+      for (const [i, c] of claims.entries()) {
+        expect(src.must_fix.find((m) => m.id === `dw${i + 1}`).claim, name).toBe(c);
+        expect(src.rework_pins.find((p) => p.id === `dw${i + 1}`).text, name).toBe(c);
+      }
+      expect(src.disputed.find((d) => d.id === "dw2").reason, name).toBe(fixture.disputedReason);
+      expect(src.self_gate_findings.find((f) => f.check === "gate:unit").detail, name).toBe(fixture.sgDetail);
+      expect(src.k_restart_brief.findings.find((f) => f.id === "k1").claim, name).toBe(fixture.briefClaim);
+    }
+    expect(builder.handoffs.review.verdicts[0].must_fix.map((m) => m.claim), name).toEqual(claims);
+  }
+
+  // 포인터가 가리킬 파일이 전문을 들지 않는 배선(builder가 cold_read)에서는 자르지 않는다 — 포인터가 거짓이 되므로.
+  const fixture = { claims: [long("c1"), short], disputedReason: long("disputed"), sgDetail: long("sg"), briefClaim: "b" };
+  const cold = root207({ builderColdRead: true });
+  const h2 = await reworkHistory207(fixture);
+  const ctx2 = await buildContext({ root: cold, gh: h2.gh, issue: h2.issue, stage: "implement" });
+  expect(loadedOnDisk207(cold)).toEqual(JSON.parse(JSON.stringify(ctx2.loaded)));
+  expect(readFileSync(join(cold, ".factory/out/loaded.json"), "utf8")).not.toContain("full text:");
+});
+
+/** runStage를 실제 buildContext 배선(makeBuildContextDep)으로 돌리고 런 기록 줄을 모은다. */
+async function runWithRecord207({ r, gh, issue, stage }) {
+  const lines = [];
+  const deps = {
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: makeBuildContextDep({ root: r, gh, issue, stage, run: null, mergeBase: async () => null, recordLine: () => {} }),
+    resetAgentsLog: async () => {},
+    claudeP: async () => ({ is_error: false, result: "{}" }),
+    gates: async () => null, verifyStage: () => ({ ok: true, reasons: [], data: {} }), writeHandoff: async () => {},
+    transition: async ({ to }) => ({ ok: true, to }), runRecord: (l) => lines.push(...l), release: async () => true,
+    ...(stage === "implement" ? {
+      checkoutBranch: async () => ({ ok: true, branch: `claude/fq-${issue}`, base: `origin/claude/fq-${issue}`, existed: true }),
+      overlayFactoryConfig: async () => ({ ok: true, sha: "b".repeat(40), paths: [] }),
+      assertStageBranch: async () => ({ ok: true }), ciSettingsPresent: async () => true,
+    } : {}),
+  };
+  expect(await runStage({ stage, issue, deps })).toBe(0);
+  return lines;
+}
+const sizeLines207 = (lines) => lines.filter((l) => /^loaded\.json: \d+ bytes/.test(l));
+const bytesOf207 = (line) => Number(/^loaded\.json: (\d+) bytes/.exec(line)[1]);
+
+test("test_207_review_loaded_json_keeps_full_text_and_never_points_at_an_absent_file", async () => {
+  const long = (tag) => `${tag}: the review copy of this claim must stay whole, because factory-review.js reads prior.claim from it — `.repeat(4);
+  const claims = [long("c1"), long("c2"), long("c3"), long("c4"), long("c5")];
+  const fixture = { claims, disputedReason: long("disputed"), sgDetail: long("sg"), briefClaim: "b" };
+  for (const stage of ["review", "plan", "triage"]) {
+    const r = root207();
+    const { gh, issue } = await reworkHistory207(fixture);
+    const lines = await runWithRecord207({ r, gh, issue, stage });
+    const text = readFileSync(join(r, ".factory/out/loaded.json"), "utf8");
+    const disk = JSON.parse(text);
+    if (stage === "review") {
+      expect(disk.must_fix.map((m) => m.claim)).toEqual(claims);                // 전문 그대로
+      expect(disk.disputed).toEqual([{ id: "dw2", status: "disputed", reason: fixture.disputedReason }]);
+      expect(disk.rework_pins.map((p) => p.text)).toEqual(claims);
+    }
+    // 바이트까지 예전과 같다: 직렬화된 ctx.loaded 그대로.
+    const ctx = JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8"));
+    expect(text, stage).toBe(JSON.stringify(ctx.loaded, null, 2));
+    // 이 런이 쓰지 않은 context.*.json을 가리키는 문자열이 하나도 없다(포인터도 없다).
+    expect(text, stage).not.toContain("full text:");
+    for (const m of text.matchAll(/\.factory\/out\/context\.[\w-]+\.json/g)) expect(existsSync(join(r, m[0])), `${stage}: ${m[0]}`).toBe(true);
+    // 크기는 여전히 기록된다 — 한 줄, 디스크 위 바이트.
+    const size = sizeLines207(lines);
+    expect(size, stage).toHaveLength(1);
+    expect(bytesOf207(size[0])).toBe(statSync207(join(r, ".factory/out/loaded.json")).size);
+  }
+});
+
+test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", async () => {
+  // 한국어(문자당 3바이트) — 200자 패스로는 4096을 못 맞추고, 100자 패스로 내려간다.
+  const ko = (tag) => `${tag}: 이 가드 테스트는 지키는 동작을 지워도 통과하므로 계약에 대해 아무것도 증명하지 못한다 — `.repeat(6);
+  const claims = [ko("c1"), ko("c2"), ko("c3"), ko("c4"), ko("c5")];
+  const fixture = { claims, disputedReason: ko("분쟁"), sgDetail: ko("게이트"), briefClaim: ko("브리프").slice(0, 380) };
+  const r = root207();
+  const { gh, issue } = await reworkHistory207(fixture);
+  const lines = await runWithRecord207({ r, gh, issue, stage: "implement" });
+  const path = join(r, ".factory/out/loaded.json");
+  const disk = loadedOnDisk207(r);
+  // 200자로 잘랐을 때는 4096을 넘는 페이로드다(그래서 두 번째 패스가 정당하다).
+  const ctx = JSON.parse(readFileSync(join(r, ".factory/out/context.json"), "utf8"));
+  const at200 = JSON.parse(JSON.stringify(ctx.loaded));
+  for (const m of at200.must_fix) m.claim = cut207(m.claim, 200);
+  for (const p of at200.rework_pins) p.text = cut207(p.text, 200);
+  expect(Buffer.byteLength(JSON.stringify(at200, null, 2))).toBeGreaterThan(LIMIT207);
+  // 두 번째 패스: 100자 + 포인터, 그 이상의 패스는 없다.
+  expect(disk.must_fix.map((m) => m.claim)).toEqual(claims.map((c) => cut207(c, 100)));
+  expect(disk.rework_pins.map((p) => p.text)).toEqual(claims.map((c) => cut207(c, 100)));
+  expect(disk.disputed[0].reason).toBe(cut207(fixture.disputedReason, 100));
+  expect(disk.self_gate_findings[0].detail).toBe(cut207(fixture.sgDetail, 100));
+  expect(disk.k_restart_brief.findings[0].claim).toBe(cut207(fixture.briefClaim, 100));
+  // 기록: 정확히 한 줄, N = 디스크 위 파일의 UTF-8 바이트.
+  const size = sizeLines207(lines);
+  expect(size).toHaveLength(1);
+  expect(bytesOf207(size[0])).toBe(statSync207(path).size);
+  expect(bytesOf207(size[0])).toBe(Buffer.byteLength(readFileSync(path, "utf8"), "utf8"));
+  expect(bytesOf207(size[0]) <= LIMIT207).toBe(!/over/.test(size[0]));
+
+  // 작은 페이로드: 두 번째 패스 없음(200자에서 멈춘다), 그래도 줄은 남고, '넘었다'는 말은 없다.
+  const small = { claims: ["x".repeat(300), "short"], disputedReason: "r", sgDetail: "d", briefClaim: "b" };
+  const r2 = root207();
+  const h2 = await reworkHistory207(small);
+  const l2 = await runWithRecord207({ r: r2, gh: h2.gh, issue: h2.issue, stage: "implement" });
+  expect(loadedOnDisk207(r2).must_fix.map((m) => m.claim)).toEqual([cut207("x".repeat(300), 200), "short"]);
+  const s2 = sizeLines207(l2);
+  expect(s2).toHaveLength(1);
+  expect(bytesOf207(s2[0])).toBe(statSync207(join(r2, ".factory/out/loaded.json")).size);
+  expect(bytesOf207(s2[0])).toBeLessThanOrEqual(LIMIT207);
+  expect(s2[0]).not.toMatch(/over/);
+
+  // 두 패스 뒤에도 넘는다(항목 40개) — 예외 없이, 같은 런의 기록이 넘었다고 말한다.
+  const many = { claims: Array.from({ length: 40 }, (_, i) => ko(`m${i}`)), disputedReason: "r", sgDetail: "d", briefClaim: "b" };
+  const r3 = root207();
+  const h3 = await reworkHistory207(many);
+  const l3 = await runWithRecord207({ r: r3, gh: h3.gh, issue: h3.issue, stage: "implement" });
+  expect(loadedOnDisk207(r3).must_fix.map((m) => m.claim)).toEqual(many.claims.map((c) => cut207(c, 100)));
+  const s3 = sizeLines207(l3);
+  expect(s3).toHaveLength(1);
+  expect(bytesOf207(s3[0])).toBe(statSync207(join(r3, ".factory/out/loaded.json")).size);
+  expect(bytesOf207(s3[0])).toBeGreaterThan(LIMIT207);
+  expect(s3[0]).toMatch(new RegExp(`over the ${LIMIT207}-byte limit`));
+
+  // #195 라운드 2의 모양(잘리지 않은 must_fix ≈4,516 + rework_pins ≈1,288바이트): ≤4096이거나 기록이 넘었다고 말하고,
+  // must_fix의 길이·id·핀의 guard.kind/ref는 JSON.parse로 그대로 읽힌다.
+  const c195 = [0, 1, 2, 3].map((i) => `cf${i}: ${"리뷰 라운드 2의 지적 — ".repeat(9)}`.slice(0, 120));
+  const evidence195 = "증거: ".concat("run 37140542370의 기록과 diff 줄 번호 — ".repeat(20)).slice(0, 470);
+  const f195 = { claims: c195, disputedReason: "r", sgDetail: "d", briefClaim: "b", evidence: evidence195 };
+  const r4 = root207();
+  const h4 = await reworkHistory207(f195);
+  const l4 = await runWithRecord207({ r: r4, gh: h4.gh, issue: h4.issue, stage: "implement" });
+  const full4 = JSON.parse(readFileSync(join(r4, ".factory/out/context.json"), "utf8")).loaded;
+  const mfBytes = Buffer.byteLength(JSON.stringify(full4.must_fix, null, 2));
+  const pinBytes = Buffer.byteLength(JSON.stringify(full4.rework_pins, null, 2));
+  expect(mfBytes).toBeGreaterThan(4000); expect(mfBytes).toBeLessThan(5000);
+  expect(pinBytes).toBeGreaterThan(1000); expect(pinBytes).toBeLessThan(1600);
+  const s4 = sizeLines207(l4);
+  expect(s4).toHaveLength(1);
+  const n4 = bytesOf207(s4[0]);
+  expect(n4).toBe(statSync207(join(r4, ".factory/out/loaded.json")).size);
+  expect(n4 <= LIMIT207 || /over the 4096-byte limit/.test(s4[0])).toBe(true);
+  const parsed4 = JSON.parse(readFileSync(join(r4, ".factory/out/loaded.json"), "utf8"));
+  expect(parsed4.must_fix).toHaveLength(4);
+  expect(parsed4.must_fix.map((m) => m.id)).toEqual(["dw1", "dw2", "dw3", "dw4"]);
+  expect(parsed4.rework_pins.map((p) => [p.guard.kind, p.guard.ref])).toEqual([0, 1, 2, 3].map((i) => ["test", `test_207_case_${i + 1}`]));
+});
