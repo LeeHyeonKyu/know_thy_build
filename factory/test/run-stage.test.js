@@ -6841,3 +6841,26 @@ test("test_207_dispatcher_payload_block_adds_no_marker_field_and_no_budget_exclu
   expect(cost).not.toHaveProperty("engineUsd");                                           // engine-crash 면제로 빠지지 않는다
   expect(cost).not.toHaveProperty("crashCountedUsd");
 });
+
+// skeptic (#207) — KTB-51 plan 리페어 턴의 두 번째 buildContext가 loaded.json을 **다시 쓴다**(`plan_repair`가 붙어 커진다). 디스패처가
+// 옮겨 쓴 것은 그 파일이므로 기록에 그 크기 줄이 하나 더 서고, 리페어 턴이 fail-closed로 끝나면 사유의 바이트 수도 그 파일의 것이다.
+test("test_207_plan_repair_fail_closed_reports_the_repaired_loaded_json_size", async () => {
+  const plan = await truncatedArgsReturn207("plan");
+  const first = { ...ctx207, loaded_json: { path: ".factory/out/loaded.json", bytes: 3000, limit: 4096, truncated_to: null, over: false } };
+  const repaired = { ...ctx207, plan_repair: R1_REASONS, loaded_json: { path: ".factory/out/loaded.json", bytes: 5123, limit: 4096, truncated_to: null, over: true } };
+  const buildContext = vi.fn(async ({ planRepair = null } = {}) => (planRepair ? repaired : first));
+  const claudeP = vi.fn()
+    .mockResolvedValueOnce({ is_error: false, result: "{}" })
+    .mockResolvedValueOnce({ is_error: false, result: fenced207(plan) });
+  const vs = vi.fn()
+    .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
+    .mockImplementation(({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }));
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const lines = [];
+  const deps = planRepairDeps({ buildContext, claudeP, verifyStage: vs, transition, runRecord: (l) => lines.push(...l) });
+  expect(await runStage({ stage: "plan", issue: 207, deps, runnerId: "r" })).toBe(2);
+  expect(claudeP).toHaveBeenCalledTimes(2);
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 5123 bytes)" });
+  expect(lines.filter((l) => /^loaded\.json: \d+ bytes/.test(l))).toEqual(["loaded.json: 3000 bytes", "loaded.json: 5123 bytes — over the 4096-byte limit"]);
+});

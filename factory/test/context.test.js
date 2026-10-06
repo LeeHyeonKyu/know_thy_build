@@ -1063,3 +1063,31 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(parsed4.must_fix.map((m) => m.id)).toEqual(["dw1", "dw2", "dw3", "dw4"]);
   expect(parsed4.rework_pins.map((p) => [p.guard.kind, p.guard.ref])).toEqual([0, 1, 2, 3].map((i) => ["test", `test_207_case_${i + 1}`]));
 });
+
+// skeptic (#207) — 자르기는 코드 포인트 단위다: 이모지(U+1F600, UTF-16 두 단위)가 200/100 경계를 넘어도 서로게이트 쌍을 가르지 않는다.
+// 기대값은 cut 규칙을 다시 쓰지 않고 손으로 센 문자열이다 — `s.slice(0, n)`(UTF-16 단위) 변이는 여기서 외짝 서로게이트를 남긴다.
+test("test_207_loaded_json_cut_counts_code_points_and_never_splits_a_surrogate_pair", async () => {
+  const E = "\u{1F600}";
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  // 200자 패스(작은 페이로드): "a" + 이모지 300개 → 앞 200 코드 포인트 = "a" + 이모지 199개.
+  const r = root207();
+  const h = await reworkHistory207({ claims: [`a${E.repeat(300)}`, "short"], disputedReason: `r${E.repeat(250)}`, sgDetail: "d", briefClaim: "b", restartAndSelfGate: false });
+  await buildContext({ root: r, gh: h.gh, issue: h.issue, stage: "implement" });
+  const text = readFileSync(join(r, ".factory/out/loaded.json"), "utf8");
+  expect(text).not.toContain("�");
+  const disk = JSON.parse(text);
+  expect(disk.must_fix.map((m) => m.claim)).toEqual([`a${E.repeat(199)}${POINTER207}`, "short"]);
+  expect(disk.disputed[0].reason).toBe(`r${E.repeat(199)}${POINTER207}`);
+  for (const s of [disk.must_fix[0].claim, disk.disputed[0].reason]) expect(lone.test(s), s.slice(0, 8)).toBe(false);
+  // 100자 패스(항목 40개라 4096을 넘는다): "b" + 이모지 → 앞 100 코드 포인트 = "b" + 이모지 99개, 역시 짝이 온전하다.
+  const r2 = root207();
+  const h2 = await reworkHistory207({ claims: Array.from({ length: 40 }, () => `b${E.repeat(150)}`), disputedReason: "r", sgDetail: "d", briefClaim: "b" });
+  await buildContext({ root: r2, gh: h2.gh, issue: h2.issue, stage: "implement" });
+  const text2 = readFileSync(join(r2, ".factory/out/loaded.json"), "utf8");
+  expect(text2).not.toContain("�");
+  const disk2 = JSON.parse(text2);
+  expect(disk2.must_fix.map((m) => m.claim)).toEqual(Array.from({ length: 40 }, () => `b${E.repeat(99)}${POINTER207}`));
+  expect(disk2.must_fix.some((m) => lone.test(m.claim))).toBe(false);
+  // 전문은 포인터가 가리키는 파일에 그대로다.
+  expect(JSON.parse(readFileSync(join(r2, ".factory/out/context.builder.json"), "utf8")).loaded.must_fix[0].claim).toBe(`b${E.repeat(150)}`);
+});
