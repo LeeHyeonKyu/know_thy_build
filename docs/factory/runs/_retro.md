@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 1 / 2.3 / 2.15 |
 | escaped defects | 0 | 20 |
 | revert rate | 없음 | 0.00 (0/13) |
-| needs-human | 1 | 56 |
+| needs-human | 4 | 56 |
 | rejects by role | 없음 | spec-conformance 8, qa 4, correctness 12, architecture 6, security 2 |
 | reviewer overlap | 없음 | 0.50 (18/36, runs 36) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 6, architecture 3, security 2 |
-| qa na ratio | 0.00 (0/7 claims, na-heavy 0/1 approvals) | 0.22 (25/112 claims, na-heavy 3/15 approvals) |
-| cost (usd) | 20.03 | 813.11 |
-| tokens | input 261713 / output 27615 | input 20170285 / output 1584741 |
+| qa na ratio | 0.25 (5/20 claims, na-heavy 1/3 approvals) | 0.22 (25/112 claims, na-heavy 3/15 approvals) |
+| cost (usd) | 72.85 | 813.11 |
+| tokens | input 1956691 / output 156385 | input 20170285 / output 1584741 |
 | retro cost (usd) | 0.00 | 9.65 |
 | retro tokens | input 0 / output 0 | input 26 / output 24583 |
 | full retros | — | 8 |
@@ -1123,6 +1123,126 @@
           189
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "When retro refreshes the open lessons PR, it throws away every lesson and role addition that PR carried and that this run does not regenerate. The comment at line 231 says `files` holds all the lessons accumulated so far. That is false. `files` holds only the files this run changed, and their text is the runner checkout (main) plus this run's additions. The new commit is built from `origin/<default>` plus `files` and force-pushed over the standing branch, so the PR's earlier unmerged content is replaced, not kept.",
+        "runs": [
+          201
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "Once a standing lessons PR exists, every refresh copies the lessons it carried forward a second time. The usual state is that the standing PR is never merged dark. In that state each retro run adds another copy of the same lesson text under a new id. The file then grows past `max=` and integrity goes RED, so refreshes stop for good, or the PR goes to a human full of duplicate entries.",
+        "runs": [
+          201
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "The in-place refresh polls and merges a PR whose earlier head may already have a green factory/integrity check. pollIntegrity has no way to tell the old head's check from the new head's check, and mergePr is called without matchHeadCommit. A stale PASS left on the force-pushed-over commit can therefore pass the gate, and the dark merge would land a head that the remote integrity check never judged. The old createPr path could not hit this: a brand-new PR has no checks, so the poll treated it as pending (fail closed).",
+        "runs": [
+          201
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "Deciding which lessons a file holds is now split across two places. retro.js runs `applyLessons` on the default-branch text, which never contains the standing PR's entries. publish.js then merges the standing PR's text on top with its own parser (`dropCarried`) and `git merge-file --union`, and that merge knows nothing about `max=` or id allocation. The two pieces disagree about what the file holds, and the result breaks: the cap is no longer enforced where it is decided. In that case the refresh path stays stuck for good, while the old new-PR path would have passed.",
+        "runs": [
+          201
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "When retro adds to a proposal PR that is already open, it replaces the whole PR body with only this run's proposals. The earlier retro's proposals stay in the diff (their dated file is kept), but they vanish from the PR body. The PR body is the interface the `:proposal` skill and the human use to list proposals and decide on each one. So the earlier, still-undecided proposals become invisible, yet they land on main when the human merges the one standing PR.",
+        "runs": [
+          201
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "Appending to an open proposal PR replaces the whole PR body with this run's proposals only. Earlier proposals stay in the diff (their dated file is kept) but vanish from the body that the :proposal skill and the human use to decide. Code-read only; I did not run it against GitHub. Same defect as cf1; I confirmed it myself in round 2.",
+        "runs": [
+          201
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "This promotes my round-1 cf-s1 to must_fix. inFilesExpected passes plan-authored files_expected strings into globToRegex without validating them. Two kinds of entry make the call never return: (a) a `{` with no closing `}` loops forever, and (b) a long run of `*` causes catastrophic backtracking. The call is synchronous, so the implement stage's self-gate hangs. It writes no record line, no transition and no visible finding until the job timeout kills it. That breaks dw6, which requires the check to fail open visibly and without blocking. Before this diff, globToRegex only received globs owned by operators or contracts. This diff is the first to give it LLM- or comment-authored strings, so the defect is introduced here. I rated it should_fix in round 1 because I judged a malformed plan entry unlikely. I was wrong to let likelihood decide: the failure mode is an unbounded hang, which is exactly what the issue says this check must not do.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "This diff sends the plan handoff's `files_expected` strings into `glob.js` `globToRegex` for the first time, and nothing validates them. That input is LLM output, and it is also parsed from any issue comment carrying a handoff marker. Two kinds of string never return. (a) A `{` with no closing `}` sends globToRegex into an endless loop: `indexOf` returns -1, the code sets `i = end = -1`, the loop restarts at 0, and the regex string keeps growing until memory runs out. (b) A run of `*` builds a regex like `[^/]*[^/]*…b` that backtracks catastrophically. Either one hangs the implement stage's self-gate. Issue #200 requires this check to fail open, and dw6 asks for failures to be visible and non-blocking. Instead, a bad entry stalls the runner until the job timeout. Before this diff, globToRegex only received operator-owned config (harness.toml, protected-path lists) and contract globs. It never received plan-handoff strings.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw6 promises the scope check fails open visibly and never blocks or stalls the run. A plan-authored files_expected entry with an unclosed `{` makes the check hang instead.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "A files_expected entry with an unclosed `{` makes the scope check hang forever instead of failing open. In round 1 I approved without trying a malformed plan-authored glob. The diff newly sends plan-handoff strings (LLM or comment authored) into globToRegex. Issue #200 and dw6 require the check to fail open and visibly.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "correctness",
+        "text": "A file outside files_expected can carry `Scope change (#<issue>)` in its own added lines and still get a blocking finding. This happens when that line also names some other changed path, even an in-scope one such as the module the file supports. The finding then says the file \"carries no \\\"Scope change (#200)\\\" line\" and tells the builder to add exactly the line that is already there. That breaks the issue's rule: P passes if any of its own added lines contains the token. It also breaks dw1, which says adding the line to P's own added lines makes it GREEN. The builder ends up in a self-gate loop with a remedy that cannot fix the RED. Naturally written headers hit this, for example \"Scope change (#200): fixtures for factory/lib/self-gate.js\".",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "architecture",
+        "text": "`addedLinesByPath` is a second parser for the same fact, \"the added lines of a `-U0` diff, per path\". The owner already exists as `factory/lib/integrity.js:501` `addedLines`, and `factory/lib/gates.js:632` uses it for the `must_not add` gate on the same `git diff --no-renames -U0 <base>...HEAD` range. The two parsers already give different answers on the same diff. So the implement stage now has two gates, `must-not` and self-gate `scope`, that disagree about what this round added, and a fix to either parser will not reach the other. The new parser is also a library-shaped pure function placed in a 4096-line bin, where no other lib consumer can import it without depending on run-stage.js.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "dw1 promises that adding the Scope change line to P's own added lines makes P GREEN. The implementation withholds that for an own token line that also names another changed path, including an in-scope one. The finding text still says P \"carries no ... line\" while the line is present, so the builder gets a remedy that cannot clear the RED. This is a contract divergence from dw1's literal text, which my round 1 missed.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "qa",
+        "text": "A file outside files_expected whose own added line has the Scope change (#200) token, and that line also names another changed path, still gets a blocking finding. The finding says the file carries no such line and tells the builder to add the line that is already there. This breaks dw1, which says the token on P's own added lines makes it GREEN. It also leaves the builder in a loop with a remedy that cannot clear the RED. I confirm cf1 by running it myself.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The diff rewrites the shared -U0 parser behind the integrity, must_not and harness-section gates. integrity.js is outside the plan's files_expected, and the rewrite is not what issue #200 asked for. The only 'Scope change' reason is a review finding ('review arch1'), not the issue's scope or an approved plan change.",
+        "runs": [
+          200
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1323,6 +1443,15 @@
           195
         ],
         "source": "dissent"
+      },
+      {
+        "role": "operator",
+        "kind": "good",
+        "text": "Adding the diff-reading helper in run-stage.js without a size or timeout bound is a resource gap. One `git diff -U0` over a large generated or lockfile diff is loaded into memory as a single string and parsed. The helper needs a maxBuffer and must fail loud (GitDiffError) on overflow, not truncate. Truncation would silently drop added lines and produce false REDs. (Operator's R2 concession also held that a git read failure must throw GitDiffError, not skip.)",
+        "runs": [
+          200
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1451,6 +1580,16 @@
         "issue": 208,
         "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/install-manifest.json, .factory/lib/evidence.js, .factory/lib/exec.js, .factory/lib/gh.js, .factory/lib/merge-stage.js, .factory/lib/run-record.js, factory/bin/run-stage.js, factory/lib/evidence.js, factory/lib/exec.js, factory/lib/gh.js, factory/lib/merge-stage.js, factory/lib/run-record.js, factory/test/evidence.test.js, factory/test/merge-stage.test.js, factory/test/run-stage.test.js (see PR #215)",
         "at": "2026-10-04T04:10:09Z"
+      },
+      {
+        "issue": 201,
+        "reason": "protected paths changed — human merge required: .factory/lib/gh.js, .factory/lib/retro/publish.js, factory/lib/gh.js, factory/lib/retro/publish.js, factory/test/gh.test.js, factory/test/retro-publish.test.js (see PR #218)",
+        "at": "2026-10-05T21:48:58Z"
+      },
+      {
+        "issue": 200,
+        "reason": "protected paths changed — human merge required: .factory/bin/run-stage.js, .factory/lib/self-gate.js, factory/bin/run-stage.js, factory/lib/self-gate.js, factory/test/run-stage.test.js, factory/test/self-gate.test.js (see PR #216)",
+        "at": "2026-10-05T17:39:53Z"
       }
     ]
   },
@@ -1471,17 +1610,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 1,
-    "qa_approvals": 1,
-    "qa_claims_total": 7,
-    "qa_na_total": 0,
-    "qa_na_ratio": 0,
-    "qa_na_heavy_approvals": 0,
+    "needs_human": 4,
+    "qa_approvals": 3,
+    "qa_claims_total": 15,
+    "qa_na_total": 5,
+    "qa_na_ratio": 0.25,
+    "qa_na_heavy_approvals": 1,
     "usage": {
-      "cost_usd": 20.033893,
+      "cost_usd": 72.853712,
       "tokens": {
-        "input": 261713,
-        "output": 27615
+        "input": 1956691,
+        "output": 156385
       }
     }
   },
