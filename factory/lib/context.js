@@ -342,7 +342,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
  * ── #207 — `loaded.json`은 디스패처(LLM)가 Workflow `args`로 **손으로 옮겨 쓰는** 파일이다 ──────────────────────────────
  *
  * 2026-10-03 #195 rework 라운드 2(run 37140542370): 6,604바이트 페이로드가 6,231바이트에서 잘려 워크플로가 "context payload
- * missing"으로 끝났다. rework 라운드가 쌓일수록 커지는 것은 자유 텍스트 다섯 필드다. 워크플로가 제어 흐름에 쓰는 것은 구조
+ * missing"으로 끝났다. rework 라운드가 쌓일수록 커지는 것은 자유 텍스트 다섯 필드(must_fix 항목은 claim과 함께 evidence·repro까지)다. 워크플로가 제어 흐름에 쓰는 것은 구조
  * (`.length`·id·where·`guard.kind/ref`·status)이고, 전문은 빌더가 자기 세션에서 `context.builder.json`(= 전체 ctx, `loaded`·
  * `handoffs.review` 포함)으로 읽는다. 그래서 **implement에서만**, **쓰는 사본에서만** 그 필드를 앞 N자 + 포인터로 자른다 —
  * 포인터가 가리키는 파일이 이 런에 쓰이고 전문을 드는 유일한 스테이지가 implement다(builder 역할이 cold_read면 그 파일은
@@ -363,10 +363,12 @@ const cutEach = (arr, key, n) => (Array.isArray(arr)
   ? arr.map((x) => (x && typeof x === "object" && typeof x[key] === "string" ? { ...x, [key]: cutText(x[key], n) } : x))
   : arr);
 
-/** 자유 텍스트 다섯 필드만 n자로 자른 **새 객체**. 입력은 건드리지 않고, 키 순서·구조·배열 길이는 그대로다. */
+/** 자유 텍스트 필드(다섯 필드 + must_fix[].evidence·repro)만 n자로 자른 **새 객체**. 입력은 건드리지 않고, 키 순서·구조·배열 길이는 그대로다. */
 export function truncateLoadedFreeText(loaded, n) {
   const out = { ...loaded };
-  if ("must_fix" in out) out.must_fix = cutEach(out.must_fix, "claim", n);
+  // must_fix 항목은 리뷰 FINDING 그대로다(factory-review.js: claim·evidence 필수, repro 선택 — 셋 다 자유 텍스트). #195 라운드 2의
+  // 무게 대부분은 claim이 아니라 evidence·repro였다(실측: 4건 claim 1,114자 / evidence 2,390자 / repro 451자).
+  if ("must_fix" in out) out.must_fix = ["claim", "evidence", "repro"].reduce((arr, key) => cutEach(arr, key, n), out.must_fix);
   if ("disputed" in out) out.disputed = cutEach(out.disputed, "reason", n);
   if ("rework_pins" in out) out.rework_pins = cutEach(out.rework_pins, "text", n);
   if ("self_gate_findings" in out) out.self_gate_findings = cutEach(out.self_gate_findings, "detail", n);

@@ -903,11 +903,38 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       if (m.applicable) { record([mirrorLine(m)]); if (stage === "implement" && m.changed.length && m.sha) mirrorSha = m.sha; }
     }
+    /**
+     * #207 — **워크플로의 fail-closed 반환은 디스패처 전달 고장이다.** 네 워크플로는 `args.loaded`를 못 받거나 다른 이슈의 것을
+     * 받으면 `{issue, error: "context payload missing" | "context issue mismatch…", orchestration, guarantee}`를 돌려준다. 그것은
+     * 에이전트 산출물의 결함이 아니라 판정 불가다 — 사람이 할 일이 없다(run 37140542370: 잘린 6,604바이트 args → needs-human,
+     * 운영 세션이 재큐). blocked/undecidable로 세워 sweeper의 재시도에 맡긴다. 빌더는 돌지 않았으므로 게이트는 손대지 않은 브랜치
+     * head를 잰 것이다 — 그래서 **게이트가 어떤 상태든**(던짐·BLOCKED·실패 테스트 없는 RED·RED·GREEN) 이 원인이 이긴다. 다만 그
+     * 게이트 상태들이 어차피 실패로 끝나는 자리에서만 끼어든다(GREEN·보통 RED는 verify 실패 뒤 아래 자리) — 성공할 런을 막지 않는다.
+     * selfGateRetry·plan 리페어도 띄우지 않는다(빌더가 고칠 것이 없다). 턴 한도·API 오류는 먼저 자기 자리로 간다. 새 마커 필드는
+     * 없다 — K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
+     */
+    let payloadErrorMemo;
+    const payloadError = async () => {
+      if (payloadErrorMemo === undefined) {
+        payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
+          : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
+      }
+      return payloadErrorMemo;
+    };
+    const blockOnPayload = async (error, lines) => {
+      const size = Number.isInteger(ctx?.loaded_json?.bytes) ? `loaded.json ${ctx.loaded_json.bytes} bytes` : "loaded.json size unknown";
+      const reason = `dispatcher payload: ${error} (${size})`;
+      const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
+      record([...lines, `verify: ${reason} — not an agent artifact defect`, ...refusal(t), usage]);
+      return 2;
+    };
     let gates = null;
     if (!out?.is_error || hitMaxTurns(out) || hitApiError(out)) {
       try { gates = await d.gates(ctx); }                             // 게이트 없는 스테이지(triage/plan)는 null
       catch (e) {
         if (!isMergeBaseError(e) && !isGitDiffError(e)) throw e;
+        const pe = await payloadError();
+        if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${e.message}`]);
         const reason = isMergeBaseError(e) ? MERGE_BASE_BLOCKED_REASON : GIT_DIFF_BLOCKED_REASON;
         const t = await d.transition({ to: "factory:blocked", reason });
         record([`gates: BLOCKED — ${e.message}`, ...refusal(t), usage]);
@@ -931,6 +958,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       : gates.schema === "factory.gates.v1" ? [verdictLine(gates), ...gatesDetailLines(gates, stamp), ...testEnvNote] : [];
     // BLOCKED은 "판정 불가"다 — GREEN도 RED도 아니므로 needs-human이 아니라 blocked로 세운다.
     if (gates?.status === "BLOCKED") {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: gates.blocked_reason || "gates could not be decided" });
       record([`gates: BLOCKED — ${gates.blocked_reason || "unknown"}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -952,6 +981,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     const unhandled = unhandledGateReason(gates);
     if (unhandled) {
+      const pe = await payloadError();
+      if (pe) return blockOnPayload(pe, [`gates: RED (unhandled) — ${unhandled}`, ...gatesNote]);
       const t = await d.transition({ to: "factory:blocked", reason: unhandled, cause: "gates-unhandled" });
       record([`gates: RED (unhandled) — ${unhandled}`, ...refusal(t), ...gatesNote, usage]);
       return 2;
@@ -1059,24 +1090,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       const apiError = hitApiError(out);
       const qaPath = qaEvidenceUnusable(v.reasons);
       const blocked = hitMaxTurns(out) || qaPath || (apiError && !isNonTransientApiError(out));
-      /**
-       * #207 — **워크플로의 fail-closed 반환은 디스패처 전달 고장이다.** 네 워크플로는 `args.loaded`를 못 받거나 다른 이슈의 것을
-       * 받으면 `{issue, error: "context payload missing" | "context issue mismatch…", orchestration, guarantee}`를 돌려준다. 그것은
-       * 에이전트 산출물의 결함이 아니라 판정 불가다 — 사람이 할 일이 없다(run 37140542370: 잘린 6,604바이트 args → needs-human,
-       * 운영 세션이 재큐). blocked/undecidable로 세워 sweeper의 재시도에 맡긴다. 게이트 RED여도 selfGateRetry·plan 리페어를 띄우지
-       * 않는다(빌더가 고칠 것이 없다). 기존 등급(턴 한도·API 오류·qa 증거 경로)은 먼저 자기 자리로 간다. 새 마커 필드는 없다 —
-       * K·R·예산 면제는 ADR-036 개정 이슈의 몫이다(plan non_goals).
-       */
-      const payloadError = !blocked && !apiError
-        ? (d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out }))
-        : null;
-      if (payloadError) {
-        const size = Number.isInteger(ctx?.loaded_json?.bytes) ? `loaded.json ${ctx.loaded_json.bytes} bytes` : "loaded.json size unknown";
-        const reason = `dispatcher payload: ${payloadError} (${size})`;
-        const t = await d.transition({ to: "factory:blocked", reason, cause: "undecidable" });
-        record(["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), `verify: ${reason} — not an agent artifact defect`, ...refusal(t), ...gatesNote, usage]);
-        return 2;
-      }
+      // #207 — 디스패처 전달 고장(위 §payloadError). 턴 한도·API 오류·qa 증거 경로는 먼저 자기 자리로 간다.
+      const pe = !blocked && !apiError ? await payloadError() : null;
+      if (pe) return blockOnPayload(pe, ["verify: FAIL", ...v.reasons.map((r) => `- ${r}`), ...gatesNote]);
       /**
        * 1.4.23 (L26, 데모 #7) — **빌더의 커밋 뒤 gates RED는 빌더가 고칠 수 있는 가장 흔한 실패다**(기존 테스트를 깨뜨렸다).
        * 그런데 이 가지는 그것을 "산출물 결함"으로 읽어 곧장 needs-human으로 세웠다 — 검증자 거부(1.4.9)와 self-gate 발견
@@ -2043,8 +2059,9 @@ export function implementHeadShaOf({ out, transcriptText = "" } = {}) {
  */
 export const DISPATCHER_PAYLOAD_MISSING = "context payload missing";
 export const DISPATCHER_PAYLOAD_MISMATCH = "context issue mismatch";
+// `orchestration: "workflow"`은 아래 후보 검사가 이미 요구한다 — 여기서는 나머지 모양만 본다.
 const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
-  && (typeof o.issue === "number" || o.issue === null) && o.orchestration === "workflow" && o.guarantee === "structural"
+  && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
   && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
 export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
   // 후보는 최신이 먼저다. **가장 최근의 워크플로 반환**(`orchestration: "workflow"` + `issue` 키 — 스테이지 산출물과 fail-closed

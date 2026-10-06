@@ -771,11 +771,15 @@ function root207({ builderColdRead = false } = {}) {
  * 실제 rework 라운드의 이력: implement 핸드오프 → (K 재시작 브리프 + 재시작 rework 전이) → self-gate 차단 코멘트 →
  * rework review 핸드오프(must_fix + deriveReworkPins 핀). PR 코멘트에는 분쟁이 담긴 rework-response가 있다.
  */
-async function reworkHistory207({ issue = 207, claims, disputedReason, sgDetail, briefClaim, evidence = "e" }) {
+async function reworkHistory207({ issue = 207, claims: claimsIn, items, disputedReason, sgDetail, briefClaim, evidence = "e", restartAndSelfGate = true }) {
   const H = "d".repeat(40);
   const pr = 41;
+  const claims = items ? items.map((m) => m.claim) : claimsIn;
   const doneWhen = claims.map((_, i) => ({ id: `dw${i + 1}`, text: "t", level: "unit", check: { kind: "test", ref: `test_207_case_${i + 1}` } }));
-  const mustFix = claims.map((claim, i) => ({ id: `dw${i + 1}`, where: `factory/lib/context.js:${100 + i}`, claim, evidence }));
+  // `items`: 실제 리뷰 must_fix 항목(텍스트 그대로) — id만 이 픽스처의 done_when에 묶는다(핀의 guard가 그 id로 붙는다).
+  const mustFix = items
+    ? items.map((m, i) => ({ ...m, id: `dw${i + 1}` }))
+    : claims.map((claim, i) => ({ id: `dw${i + 1}`, where: `factory/lib/context.js:${100 + i}`, claim, evidence }));
   const pins = deriveReworkPins207({ mustFix, doneWhen });
   let label = "factory:awaiting-review", tick = 0;
   const comments = [
@@ -791,10 +795,12 @@ async function reworkHistory207({ issue = 207, claims, disputedReason, sgDetail,
     setFactoryLabel: async (_n, to) => { label = to; },
   };
   const to = (t) => transition174({ gh, issue, to: t, reason: "x", by: "factory:run-1", stage: "review", env: {} });
-  await to("factory:rework"); label = "factory:awaiting-review";
-  await gh.comment(issue, kRestartComment174({ issue, pr, head: H, findings: [{ id: "k1", where: "factory/lib/context.js:325", claim: briefClaim }, { id: "k2", where: "factory/bin/run-stage.js:1065", claim: "short" }] }));
-  await to("factory:rework");
-  await gh.comment(issue, selfGateRetryComment207({ issue, head: H, attempt: 1, findings: [{ check: "gate:unit", blocking: true, detail: sgDetail }, { check: "mutation", blocking: true, detail: "short" }] }));
+  if (restartAndSelfGate) {
+    await to("factory:rework"); label = "factory:awaiting-review";
+    await gh.comment(issue, kRestartComment174({ issue, pr, head: H, findings: [{ id: "k1", where: "factory/lib/context.js:325", claim: briefClaim }, { id: "k2", where: "factory/bin/run-stage.js:1065", claim: "short" }] }));
+    await to("factory:rework");
+    await gh.comment(issue, selfGateRetryComment207({ issue, head: H, attempt: 1, findings: [{ check: "gate:unit", blocking: true, detail: sgDetail }, { check: "mutation", blocking: true, detail: "short" }] }));
+  }
   await gh.comment(issue, renderHandoff({ stage: "review", issue, summary: "s", data: {
     schema: "factory.review.v1", issue, pr, head_sha: H, round: 1, orchestration: "workflow", decision: "rework",
     verdicts: [{ role: "correctness", verdict: "reject", confidence: "high", must_fix: mustFix, should_fix: [], verified: [] }],
@@ -803,6 +809,39 @@ async function reworkHistory207({ issue = 207, claims, disputedReason, sgDetail,
   label = "factory:in-progress";
   return { gh, issue, mustFix, pins };
 }
+
+/**
+ * #195 rework 라운드 1 리뷰 핸드오프(head 1e6b1a3)의 must_fix 네 건 — 이슈 #195 코멘트에서 그대로 옮긴 실제 텍스트다. 2026-10-03
+ * run 37140542370이 6,604바이트 args를 잘라 먹은 것이 이 라운드 뒤의 implement였다(must_fix ≈4.5 KB + rework_pins ≈1.3 KB).
+ */
+const MUST_FIX_195 = [
+  {
+    "id": "cf1",
+    "where": "factory/bin/run-stage.js:2160 (makePrEvidenceDeps.publishPrEvidence → gh.comments(issue)); factory/lib/evidence.js:114-127,228-244",
+    "claim": "In production every must_fix row will say 'unanswered', even when the builder answered it. The factory posts rework responses as comments on the PR, but the evidence dependency reads only the tracking issue's comments. That puts a false statement into the PR body, which breaks dw3 ('fixed' + sha on the matching row) and the issue's own goal.",
+    "evidence": "templates/factory/claude/agents/factory-builder.md:85 and templates/factory/claude/workflows/factory-implement.js:231,431 tell the builder to post factory.rework-response.v1 with `gh pr comment <pr>`. The existing reader factory/lib/context.js:376 reads them from `gh.comments(pr)`. publishPrEvidence calls only `gh.comments(issue)` and passes those comments to buildEvidence, and reworkResponses() looks only in that list. The dw3 test puts reworkResponse() into the issue comment fixture (evidence.test.js:110), and the run-stage wiring test feeds issue comments only (run-stage.test.js:5217). Both pass even though the real responses live somewhere else.",
+    "repro": "I ran buildEvidence on real data: the records-branch docs/factory/runs/189.md with issue #189's comments. All 5 must_fix rows (cf1, sec1, sec2, sec1 r2, spec1) render as 'unanswered'. Adding PR #193's comments to the same input gives 'fixed in 86b194f' / 'f4df9db' / 'e469bb3'. So the wiring must also read the PR's comments (gh.comments(pr)), and a test should place the response on the PR."
+  },
+  {
+    "id": "arch1",
+    "where": "factory/lib/gh.js:380",
+    "claim": "The new `editComment(id, body, { signal })` is a second gh-adapter method for an operation the adapter already has. `patchComment(commentId, body)` at gh.js:454 runs the same PATCH. The two copies have already diverged: only the new one takes an AbortSignal. The PATCH path now has two truths. A later fix to error handling, timeout or retry will land in one copy and not the other. Every fake gh in the tests (heartbeat, sweeper and status suites use `patchComment`) now has to guess which name the code under test calls.",
+    "evidence": "Both methods build the same argv. gh.js:381 is `gh([\"api\", \"-X\", \"PATCH\", `repos/${repo}/issues/comments/${id}`, \"--input\", \"-\"], { input: JSON.stringify({ body }), ...signal })` and gh.js:456 is `gh([\"api\", \"-X\", \"PATCH\", `repos/${repo}/issues/comments/${commentId}`, \"--input\", \"-\"], { input: JSON.stringify({ body }) })`. `git grep patchComment` finds existing callers in lib/heartbeat.js and the fakes in sweeper.test.js (84 hits), heartbeat.test.js (18), status.test.js and charter.test.js. This same diff already shows the non-duplicating pattern: it extends `comments(n, { signal })` and `comment(n, body, { signal })` with an optional signal and leaves 'absent → exactly the old call'. `patchComment` should get the same optional `{ signal }`, and run-stage.js:2195 (`gh.editComment(...)`) should call it.",
+    "repro": "git show HEAD:factory/lib/gh.js | sed -n '378,382p;454,457p'"
+  },
+  {
+    "id": "spec1",
+    "where": "factory/lib/exec.js:44-46",
+    "claim": "exec.js is changed outside files_expected and the diff carries no 'Scope change' reason.",
+    "evidence": "plan files_expected omits factory/lib/exec.js and the triage impact_paths do not list it. The diff contains only the code comment '#195 — opts.signal ...', not a 'Scope change:' reason tied to dw4/dw6. Fix: add a 'Scope change:' reason in the diff, or amend files_expected. This is a scope finding only; whether the signal option is structurally sound belongs to architecture."
+  },
+  {
+    "id": "spec2",
+    "where": "factory/bin/run-stage.js:2160 (publishPrEvidence → gh.comments(issue)); done_when dw3",
+    "claim": "dw3 ('fixed' + sha on the matching must_fix row) is not met in production. The test passes, but the wiring reads rework responses only from the issue's comments.",
+    "evidence": "I confirmed publishPrEvidence calls gh.comments(issue) at run-stage.js:2160. The builder posts rework responses with `gh pr comment <pr>` (templates/factory/claude/agents/factory-builder.md:88). The dw3 test and the run-stage wiring test put the response in the issue-comment fixture, so the test does not exercise where the response actually lives. This agrees with cf1, which reproduced it on real data: all 5 rows 'unanswered' with issue comments only. The wiring must also read gh.comments(pr), and a test must place the response on the PR."
+  }
+];
 
 /** 다섯 자유 텍스트 필드를 뺀 나머지 — 구조 비교용(키 순서·배열 길이·id·where·guard·status 전부). */
 function structureOf207(loaded) {
@@ -982,11 +1021,10 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(bytesOf207(s3[0])).toBeGreaterThan(LIMIT207);
   expect(s3[0]).toMatch(new RegExp(`over the ${LIMIT207}-byte limit`));
 
-  // #195 라운드 2의 모양(잘리지 않은 must_fix ≈4,516 + rework_pins ≈1,288바이트): ≤4096이거나 기록이 넘었다고 말하고,
-  // must_fix의 길이·id·핀의 guard.kind/ref는 JSON.parse로 그대로 읽힌다.
-  const c195 = [0, 1, 2, 3].map((i) => `cf${i}: ${"리뷰 라운드 2의 지적 — ".repeat(9)}`.slice(0, 120));
-  const evidence195 = "증거: ".concat("run 37140542370의 기록과 diff 줄 번호 — ".repeat(20)).slice(0, 470);
-  const f195 = { claims: c195, disputedReason: "r", sgDetail: "d", briefClaim: "b", evidence: evidence195 };
+  // #195 라운드 2의 모양 — 실제 must_fix 네 건(잘리지 않은 must_fix ≈4,5xx + rework_pins ≈1,3xx바이트): ≤4096이거나 기록이 넘었다고
+  // 말하고, must_fix의 길이·id·핀의 guard.kind/ref는 JSON.parse로 그대로 읽힌다.
+  // 그 라운드에는 K 재시작 브리프가 없었고 이 head의 self-gate 발견도 없었다 — 픽스처도 그 둘을 싣지 않는다.
+  const f195 = { items: MUST_FIX_195, disputedReason: "r", restartAndSelfGate: false };
   const r4 = root207();
   const h4 = await reworkHistory207(f195);
   const l4 = await runWithRecord207({ r: r4, gh: h4.gh, issue: h4.issue, stage: "implement" });
@@ -1000,7 +1038,27 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   const n4 = bytesOf207(s4[0]);
   expect(n4).toBe(statSync207(join(r4, ".factory/out/loaded.json")).size);
   expect(n4 <= LIMIT207 || /over the 4096-byte limit/.test(s4[0])).toBe(true);
+  // 사건의 모양은 실제로 한계 아래로 내려온다 — 줄이 "넘었다"고 말하는 것만으로는 고친 것이 아니다. 무게 대부분은 claim이 아니라
+  // must_fix[].evidence(리뷰 스키마의 필수 자유 텍스트)였으므로 그것도 같은 규칙으로 잘리고, 전문은 포인터가 가리키는 파일에 있다.
+  const untruncated4 = Buffer.byteLength(JSON.stringify(full4, null, 2));
+  expect(untruncated4).toBeGreaterThan(6000);
+  expect(n4).toBeLessThanOrEqual(LIMIT207);
+  expect(s4[0]).not.toMatch(/over/);
   const parsed4 = JSON.parse(readFileSync(join(r4, ".factory/out/loaded.json"), "utf8"));
+  // 실제 항목의 자유 텍스트(claim·evidence·repro)는 같은 n자 + 포인터, where는 그대로. 전문은 포인터가 가리키는 파일에 같은 id로 있다.
+  const cutTo4 = Number(/cut to (\d+) chars/.exec(s4[0])?.[1]);
+  expect([200, 100]).toContain(cutTo4);
+  const builder4 = JSON.parse(readFileSync(join(r4, ".factory/out/context.builder.json"), "utf8"));
+  for (const [i, m] of MUST_FIX_195.entries()) {
+    const id = `dw${i + 1}`;
+    expect(Object.keys(parsed4.must_fix[i]), id).toEqual(Object.keys(m));
+    expect(parsed4.must_fix[i].where, id).toBe(m.where);
+    for (const k of ["claim", "evidence", "repro"]) if (k in m) expect(parsed4.must_fix[i][k], `${id}.${k}`).toBe(cut207(m[k], cutTo4));
+    expect(builder4.loaded.must_fix.find((x) => x.id === id), id).toEqual({ ...m, id });
+  }
+  expect(parsed4.must_fix.every((m) => m.evidence.endsWith(POINTER207))).toBe(true);
+  // 짧은 evidence는 그대로다(포인터 없음) — 위 두 번째 패스 픽스처의 기본값 "e".
+  expect(disk.must_fix.map((m) => m.evidence)).toEqual(claims.map(() => "e"));
   expect(parsed4.must_fix).toHaveLength(4);
   expect(parsed4.must_fix.map((m) => m.id)).toEqual(["dw1", "dw2", "dw3", "dw4"]);
   expect(parsed4.rework_pins.map((p) => [p.guard.kind, p.guard.ref])).toEqual([0, 1, 2, 3].map((i) => ["test", `test_207_case_${i + 1}`]));

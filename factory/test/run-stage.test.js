@@ -6581,7 +6581,7 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
 import { runWorkflow as runWorkflow207 } from "./helpers/run-workflow.js";
 import { dispatcherPayloadErrorOf } from "../bin/run-stage.js";
 import { sweep as sweep207, engineCausedNeedsHuman as engineCausedNeedsHuman207, BLOCKED_ESCALATION_REASON as ESCALATION207 } from "../lib/sweeper.js";
-import { blockedOrigin as blockedOrigin207, blockedOriginMarker as blockedOriginMarker207 } from "../lib/retro/issue-comments.js";
+import { blockedOrigin as blockedOrigin207 } from "../lib/retro/issue-comments.js";
 import { lifetimeCostOf as lifetimeCostOf207 } from "../lib/budget.js";
 
 const WF207 = (name) => new URL(`../../templates/factory/claude/workflows/factory-${name}.js`, import.meta.url).pathname;
@@ -6618,6 +6618,26 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned" }));
 
+  // 게이트가 어떤 상태든 같은 자리다: 빌더가 돌지 않은 브랜치 head를 잰 게이트는 BLOCKED이거나, 실패 테스트 없는 RED(`reason`)이거나,
+  // merge-base를 못 구해 던질 수 있다 — 그 어느 쪽도 이 런의 원인이 아니다. 원인 없는 blocked·`gates-unhandled`로 라벨되지 않는다.
+  const gateStates = [
+    ["GREEN", async () => ({ ...RED207, status: "GREEN", failing: [], failed: 0, gates: { unit: { status: "GREEN" } }, tests: { failing: [], excluded: [] } })],
+    ["BLOCKED", async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "test env did not come up", head_sha: "a".repeat(40) })],
+    ["RED with reason", async () => ({ ...RED207, gates: { unit: { status: "RED", reason: "RED with no failing test: worker stderr EPIPE" } } })],
+    ["merge-base throws", async () => { throw new MergeBaseError("origin/main: exit 128"); }],
+  ];
+  for (const [name, gates] of gateStates) {
+    const gl = [];
+    const gd = implDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates, selfGateRetry, runRecord: (l) => gl.push(...l) });
+    expect(await runStage({ stage: "implement", issue: 207, deps: gd, runnerId: "r" }), name).toBe(2);
+    expect(gd.transition.mock.calls.map(([t]) => t.to), name).not.toContain("factory:needs-human");
+    const t = gd.transition.mock.calls.at(-1)[0];
+    expect([t.to, t.cause], name).toEqual(["factory:blocked", "undecidable"]);
+    expect(t.reason, name).toBe("dispatcher payload: context payload missing (loaded.json 6604 bytes)");
+    expect(gl.some((l) => /not an agent artifact defect/.test(l)), name).toBe(true);
+  }
+  expect(selfGateRetry).not.toHaveBeenCalled();
+
   // review + context issue mismatch: 같은 자리.
   const rv = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(mismatch) }), verifyStage: ({ stage, out, gates }) => verifyStage({ stage, out, roster: [], orchestration: "workflow", gates }), transition: vi.fn(async ({ to }) => ({ ok: true, to })), gates: async () => null });
   expect(await runStage({ stage: "review", issue: 42, deps: rv })).toBe(2);
@@ -6645,15 +6665,29 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   await runStage({ stage: "implement", issue: 42, deps: real, runnerId: "r" });
   expect(gh.label).toBe("factory:blocked");
   expect(blockedOrigin207(await gh.comments())).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "undecidable" });
+  const dispatchStage = vi.fn(async () => {});
   const sweepOnce = () => sweep207({
     gh: { ...gh, searchIssues: async (label) => (gh.label === label ? [{ number: 42 }] : []), issueList: async () => [], patchComment: async () => {} },
     charter: { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } }, thresholds: { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 },
     now: new Date().toISOString(), staleMinutes: 30, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {},
-    transition: (args) => transition({ gh, env: {}, skipRehearsal: true, ...args }), dispatchStage: vi.fn(async () => {}),
+    transition: (args) => transition({ gh, env: {}, skipRehearsal: true, ...args }), dispatchStage,
     factoryLogins: async () => ({ ok: true, logins: [] }), installedVersion: async () => "1.4.60",
   });
   await sweepOnce();                                                                       // 한 번 다시 민다
-  await gh.comment(42, `${blockedOriginMarker207({ from: "factory:in-progress", stage: "implement", cause: "undecidable" })}\nimplement: dispatcher payload: context payload missing (loaded.json 6604 bytes)`);
+  expect(gh.label).toBe("factory:blocked");                                                // 재시도는 라벨이 아니라 dispatch다
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+  // 그 재시도된 런도 진짜 runStage가 돈다(같은 디스패처 고장): blocked에서 origin을 확인하고 되돌아간 뒤 다시 멈춘다 —
+  // 두 번째 blocked 마커와 사유는 테스트가 손으로 쓴 것이 아니라 이 브랜치가 쓴 것이다.
+  const before = (await gh.comments()).length;
+  const again = implDeps({
+    issueLabels: async () => [gh.label], blockedOrigin: async () => blockedOrigin207(await gh.comments()),
+    buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry, transition: realTransitionDep(gh, ctxCache),
+  });
+  expect(await runStage({ stage: "implement", issue: 42, deps: again, runnerId: "r" })).toBe(2);
+  expect(gh.label).toBe("factory:blocked");
+  const second = (await gh.comments()).slice(before);
+  expect(blockedOrigin207(second)).toMatchObject({ from: "factory:in-progress", stage: "implement", cause: "undecidable" });
+  expect(second.map((c) => c.body).join("\n")).toContain("dispatcher payload: context payload missing (loaded.json 6604 bytes)");
   await sweepOnce();                                                                       // 같은 자리 → 사람에게
   expect(gh.label).toBe("factory:needs-human");
   const comments = await gh.comments();
@@ -6680,6 +6714,45 @@ test("test_207_ordinary_schema_mismatch_and_bare_issue_zero_stay_needs_human", a
   await needsHuman(fenced207({ schema: "factory.review.v1", issue: 42, verdicts: "nope" }));                                     // 보통의 스키마 불일치
   expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ error: "context payload missing" }) } })).toBeNull();
   expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 0 }) } })).toBeNull();
+  // 네 템플릿의 모양에서 한 군데만 어긋나도 fail-closed가 아니다 — 에러 문구를 흉내 낸 산출물이 needs-human을 빠져나가지 못한다.
+  const near = [
+    ["no guarantee", { issue: 0, error: "context payload missing", orchestration: "workflow" }],
+    ["guarantee verified", { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "verified" }],
+    ["string issue", { issue: "207", error: "context payload missing", orchestration: "workflow", guarantee: "structural" }],
+    ["no issue key", { error: "context payload missing", orchestration: "workflow", guarantee: "structural" }],
+    ["no orchestration", { issue: 0, error: "context payload missing", guarantee: "structural" }],
+    ["orchestration subagents", { issue: 0, error: "context payload missing", orchestration: "subagents", guarantee: "structural" }],
+    ["error not exact", { issue: 0, error: "context payload missing!", orchestration: "workflow", guarantee: "structural" }],
+    ["mismatch not a prefix", { issue: 0, error: "the context issue mismatch", orchestration: "workflow", guarantee: "structural" }],
+  ];
+  for (const [name, o] of near) {
+    expect(dispatcherPayloadErrorOf({ out: { result: fenced207(o) } }), name).toBeNull();
+    await needsHuman(fenced207(o));
+  }
+  // 그 대조: 정확한 모양이면 issue가 null(triage/plan/review의 Number(undefined))이어도, mismatch 접두여도 잡힌다.
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: null, error: "context payload missing", orchestration: "workflow", guarantee: "structural" }) } })).toBe("context payload missing");
+  expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 42, error: "context issue mismatch: args 42 vs loaded 7", orchestration: "workflow", guarantee: "structural" }) } })).toBe("context issue mismatch: args 42 vs loaded 7");
+  // 게이트가 BLOCKED이거나 실패 테스트 없는 RED여도, 보통의 산출물이면 예전 자리 그대로다(원인 없는 blocked / gates-unhandled).
+  const gb = viaRealVerify(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }), { gates: async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: gb })).toBe(2);
+  expect(gb.transition.mock.calls.at(-1)[0]).toEqual({ to: "factory:blocked", reason: "env down" });
+  const gu = viaRealVerify(fenced207({ issue: 0, orchestration: "workflow", guarantee: "structural" }), { gates: async () => ({ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }) });
+  expect(await runStage({ stage: "review", issue: 42, deps: gu })).toBe(2);
+  expect(gu.transition.mock.calls.at(-1)[0]).toEqual({ to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" });
+  // 턴 한도·API 오류는 게이트가 막힌 자리에서도 먼저다: fail-closed 반환이 트랜스크립트에 있어도 디스패처 사유로 바꿔 달지 않는다.
+  for (const [name, cut] of [
+    ["max turns", { is_error: true, subtype: "error_max_turns", terminal_reason: "max_turns", num_turns: 80, result: fenced207(missing) }],
+    ["api error", { is_error: true, terminal_reason: "api_error", api_error_status: 529, result: `Overloaded\n${fenced207(missing)}` }],
+  ]) {
+    for (const [g, want] of [
+      [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+      [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+    ]) {
+      const dd = viaRealVerify(fenced207(missing), { claudeP: async () => cut, gates: async () => g });
+      expect(await runStage({ stage: "review", issue: 42, deps: dd }), name).toBe(2);
+      expect(dd.transition.mock.calls.at(-1)[0], `${name} / ${g.status}`).toEqual(want);
+    }
+  }
   // 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려 스키마가 틀린 산출물을 냈다 — 가장 최근 반환이 이긴다: 산출물 결함(needs-human).
   const notify = (o) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(o)}</result></task-notification>` }] } });
   const retried = [notify(missing), notify({ schema: "factory.implement.v1", issue: 207, orchestration: "workflow", guarantee: "structural", head_sha: "nope" })].join("\n");
