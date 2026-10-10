@@ -57,7 +57,7 @@ import { HARNESS_LABEL } from "../lib/label-catalog.js";
 import { transition } from "../lib/transition.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
 import { makeQueueAdmission } from "../lib/admission.js";
-import { notQueuedComment } from "../lib/harness-request.js";
+import { createBacklogIssueAndQueue } from "../lib/harness-request.js";
 export { HARNESS_LABEL };   // 재수출 — run-stage.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
 
 const QUEUE_LABEL = "factory:queue";
@@ -1095,7 +1095,7 @@ export function roleFileMap(roles) {
  * 하네스 요청(harness-request.js)과 같은 문 — 리허설(`makeRehearsalChecker`) **과** 큐 진입 심사(`makeQueueAdmission`)를 실은
  * `transition()` — 이 만든다. 검사기는 이 함수가 직접 조립한다(배선을 빠뜨린 retro가 조용히 문을 여는 길이 없게; `skipRehearsal`은 쓰지 않는다).
  *   - 큐에 들어가면 `{ issue, queued: true }`.
- *   - 거부되거나 문이 던지면 이슈는 `backlog`에 남고, 이슈에 사유와 다음 걸음을 적은 코멘트(`notQueuedComment`, 하네스 이슈의
+ *   - 거부되거나 문이 던지면 이슈는 `backlog`에 남고, 이슈에 사유와 다음 걸음을 적은 코멘트(`createBacklogIssueAndQueue` → `notQueuedComment`, 하네스 이슈의
  *     `factory-harness-not-queued` 모양)를 달고 `{ issue, queued: false, queue_reason }`을 돌려준다 — 던지지 않는다(이슈는 이미 있다).
  *     수용한 위험(ADR-025의 잠금): 리허설이 낡으면 승격 이슈도 사람의 `factory rehearse` + `:next`까지 backlog에 선다.
  * 큐를 목적지로 들지 않은 요청(flaky 재작성 이슈 등)은 그대로 만든다.
@@ -1105,16 +1105,13 @@ export function makeRetroCreateIssue({ gh, root, charter, harness, env }) {
   const admission = makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env }) });
   return async ({ title, body, labels = [] }) => {
     if (!labels.includes(QUEUE_LABEL)) return gh.createIssue({ title, body, labels });
-    const number = await gh.createIssue({ title, body, labels: labels.map((l) => (l === QUEUE_LABEL ? "backlog" : l)) });
-    if (number == null) throw new Error("gh issue create returned no issue number");
-    let t, threw = false;
-    try { t = await transition({ gh, issue: number, to: QUEUE_LABEL, reason: `retro maturity promotion: ${title}`, rehearsal, admission }); }
-    catch (e) { threw = true; t = { ok: false, reason: `queue transition threw — ${String(e?.message || e).split("\n")[0]}` }; }
-    if (t?.ok === true) return { issue: number, queued: true };
-    const reason = t?.reason || "unknown";
-    try { await gh.comment(number, notQueuedComment({ issue: number, reason, threw, parkedFeature: false })); }
-    catch { /* 코멘트의 실패가 이슈 생성의 실패는 아니다 — 반환값이 사유를 싣는다 */ }
-    return { issue: number, queued: false, queue_reason: reason };
+    // 리뷰 arch1 — 만들기 → 문 → 거부 코멘트의 꼬리는 하네스 요청과 **같은 함수**다(사본을 두지 않는다).
+    return createBacklogIssueAndQueue({
+      gh, title, body, labels: labels.map((l) => (l === QUEUE_LABEL ? "backlog" : l)),
+      reason: `retro maturity promotion: ${title}`,
+      transitionIssue: ({ issue, to, reason }) => transition({ gh, issue, to, reason, rehearsal, admission }),
+      parkedFeature: false,
+    });
   };
 }
 
