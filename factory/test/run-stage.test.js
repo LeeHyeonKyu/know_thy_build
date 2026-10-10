@@ -6572,3 +6572,46 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+// ── #233 (gap P-12 / ledger M-6) — 올린 tier가 생산 경로에 닿는다 ──────────────────────────────
+// verifyStage는 자기 호출자가 넘긴 것만 본다(d1): 러너의 triage 검증이 harness `[load_bearing].paths`를
+// 넘겨야 올림이 산다. 그리고 writeHandoff는 매 handoff의 tier_effective/tier_source를 컨텍스트 값으로
+// 덮어썼다(d2) — triage에서 "impact-paths"가 지워지면 plan 시점의 context.js가 그것을 영영 보지 못한다.
+import * as rs233 from "../bin/run-stage.js";
+
+test("test_233_raised_tier_reaches_the_triage_handoff_and_run_record", async () => {
+  const runTriage = async ({ impact_paths, tier = "standard", loadBearing }) => {
+    const root = mkdtempSync(join(tmpdir(), "rs-233-"));
+    const ctx = { roster: [], orchestration: "workflow", limits: { K: 3 }, tier, tier_effective: tier, tier_source: "triage", tier_floor: "docs" };
+    const posted = [], lines = [];
+    const gh = { comment: async (_issue, body) => posted.push(body) };
+    const deps = baseDeps({
+      buildContext: async () => ctx,
+      claudeP: async () => ({ is_error: false, result: JSON.stringify({ schema: "factory.triage.v1", issue: 7, disposition: "ready", tier, impact_paths, reason: "r", orchestration: "workflow" }) }),
+      verifyStage: rs233.makeVerifyStageDep({ root, stage: "triage", getCtx: () => ctx, getCharter: () => ({ never_automate: [] }), getHarness: () => ({ load_bearing: { paths: loadBearing } }) }),
+      writeHandoff: rs233.makeWriteHandoffDep({ gh, issue: 7, stage: "triage", getCtx: () => ctx }),
+      transition: async () => ({ ok: true, to: "factory:ready" }),
+      runRecord: (l) => lines.push(...l),
+    });
+    const code = await runStage({ stage: "triage", issue: 7, deps });
+    const handoffs = parseHandoffs(posted.map((body, i) => ({ id: i, body, createdAt: "2026-10-10T00:00:00Z" })));
+    return { code, lines, handoff: handoffs.find((h) => h.stage === "triage")?.data };
+  };
+  const LB = ["factory/bin/run-stage.js", ".factory/bin/run-stage.js"];
+
+  const hit = await runTriage({ impact_paths: ["factory/lib/context.js", "factory/bin/run-stage.js"], loadBearing: LB });
+  expect(hit.code).toBe(0);
+  expect(hit.lines).toContain("tier: raised to load-bearing — impact path factory/bin/run-stage.js matches [load_bearing].paths");
+  expect(hit.handoff.tier).toBe("standard");                                       // 신고는 그대로
+  expect([hit.handoff.tier_effective, hit.handoff.tier_source]).toEqual(["load-bearing", "impact-paths"]);   // 컨텍스트 값에 덮이지 않는다
+
+  // 같은 이슈, 하네스에 load_bearing이 없으면(= 글롭이 verifyStage에 안 닿으면) 올림도 기록도 없다
+  const unwired = await runTriage({ impact_paths: ["factory/bin/run-stage.js"], loadBearing: [] });
+  expect(unwired.lines.some((l) => /raised to load-bearing/.test(l))).toBe(false);
+  expect([unwired.handoff.tier_effective, unwired.handoff.tier_source]).toEqual(["standard", "triage"]);
+
+  // miss — 컨텍스트가 계산한 값이 그대로 실린다(오늘의 동작)
+  const miss = await runTriage({ impact_paths: ["factory/lib/context.js"], loadBearing: LB });
+  expect(miss.lines.some((l) => /raised to load-bearing/.test(l))).toBe(false);
+  expect([miss.handoff.tier_effective, miss.handoff.tier_source]).toEqual(["standard", "triage"]);
+});

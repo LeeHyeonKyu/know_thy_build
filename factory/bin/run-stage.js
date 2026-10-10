@@ -1088,6 +1088,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     if (stage === "triage" && v.data?.never_automate_hit?.length) {
       record([`never_automate_hit: ${v.data.never_automate_hit.map((h) => `${h.path} (${h.glob})`).join(", ")} — disposition forced to wont-do by CHARTER NEVER_AUTOMATE`]);
     }
+    // #233 — 같은 모양: 스크립트가 impact_paths로 실효 tier를 올렸다면 그 사실이 run 기록에 한 줄로 남는다(신고 tier·라벨은 그대로).
+    if (stage === "triage" && v.data?.tier_source === "impact-paths" && v.data.load_bearing_hit?.length) {
+      record([`tier: raised to load-bearing — impact path ${v.data.load_bearing_hit.map((h) => h.path).join(", ")} matches [load_bearing].paths`]);
+    }
     // tier 라벨은 triage가 붙인다(스펙 §3.2, KTB-9). `label-catalog.js`가 세 라벨을 만들어 두는데
     // 붙이는 코드가 어디에도 없었고, tier는 handoff JSON 안에만 있어서 사람이 이슈 목록에서 볼 수
     // 없었다. **handoff가 검증된 뒤**에만 붙인다 — 검증 전의 tier는 에이전트의 자기 신고일 뿐이다.
@@ -2294,6 +2298,44 @@ export async function scopeInput({ run, cwd, base, issue, plan, maxBytes = SCOPE
     if (status && path) changes.push({ path, status, added: added.get(path) ?? [] });
   }
   return { ...input, changes };
+}
+
+/**
+ * #233 — 러너의 `verifyStage` dep (production = what the test drives). main()의 인라인 클로저였던 것을 꺼냈다:
+ * 그래야 "러너가 verifyStage에 무엇을 넘기는가"(NEVER_AUTOMATE, `[load_bearing].paths`)를 테스트가 실제 배선으로 핀한다.
+ * 게터인 이유 — charter·harness는 `charterReady` 뒤에, ctx는 `buildContext` 뒤에 생긴다.
+ */
+export function makeVerifyStageDep({ root, stage, getCtx, getCharter, getHarness, qaEvidenceSummary = () => null }) {
+  return ({ out, gates }) => {
+    const ctx = getCtx();
+    // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
+    // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
+    const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctx.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctx.rounds, orchestration: ctx.orchestration, gates, planLimits: ctx.plan, issueBody: ctx.issue?.body, neverAutomate: getCharter()?.never_automate, loadBearing: getHarness()?.load_bearing?.paths ?? [], qaManifest: stage === "review" ? qaEvidenceSummary() : null });
+    // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
+    // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
+    if (v.ok && v.data) { try { mkdirSync(join(root, ".factory/out"), { recursive: true }); writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
+    return v;
+  };
+}
+
+/**
+ * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
+ * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
+ * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
+ */
+export function makeWriteHandoffDep({ gh, issue, stage, getCtx }) {
+  return async ({ data }) => {
+    const ctx = getCtx();
+    // #233 — triage 검증이 impact_paths로 올린 tier(`tier_source: "impact-paths"`, verify-stage만 쓴다)는 컨텍스트 값으로
+    // 덮지 않는다: triage의 컨텍스트는 신고/바닥만 알고, 여기서 지워지면 plan 시점의 resolveTier가 올림을 영영 보지 못한다.
+    // 덮지 않을 뿐 내리지도 않는다 — 컨텍스트가 더 높으면 그쪽이다.
+    const raised = stage === "triage" && data?.tier_source === "impact-paths";
+    const tierFields = raised
+      ? { tier_effective: maxTier(data.tier_effective, ctx?.tier_effective), tier_source: "impact-paths" }
+      : ctx?.tier_effective ? { tier_effective: ctx.tier_effective, tier_source: ctx.tier_source } : null;
+    const d2 = tierFields ? { ...data, ...tierFields } : data;
+    await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
+  };
 }
 
 /**
@@ -3799,24 +3841,9 @@ async function main() {
      * 붙인 뒤 그 파일을 다시 써 온디스크 산출물과 handoff 코멘트가 갈리지 않게 한다.
      */
     syncStageArtifact: (data) => { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(data, null, 2)); } catch { /* 기록 실패는 스테이지를 죽이지 않는다 */ } },
-    verifyStage: ({ out, gates }) => {
-      // 감사 M1 — NEVER_AUTOMATE의 글롭 항목은 CHARTER에서 그대로 온다(컨텍스트를 거치지 않는다:
-      // 이 재확인의 요점은 에이전트가 본 것과 **독립적인** 출처라는 데 있다).
-      const v = verifyStage({ stage, out, transcriptText: transcriptTextFor(root, out), agentsLog: readAgentsLog(join(root, ".factory/out/agents.jsonl")), roster: ctxCache.roster, rolePrefix: ROLE_PREFIX[stage] || "", expectedRounds: ctxCache.rounds, orchestration: ctxCache.orchestration, gates, planLimits: ctxCache.plan, issueBody: ctxCache.issue?.body, neverAutomate: charter.never_automate, qaManifest: stage === "review" ? qaEvidenceSummary() : null });
-      // 추출에 성공했으면 `<stage>.json`을 **산출물**로 덮는다 — 사람과 다음 도구가 여는 파일이
-      // 디스패처의 산문 섞인 envelope이 아니라 스테이지가 실제로 쓴 객체이도록(envelope은 옆에 남아 있다).
-      if (v.ok && v.data) { try { writeFileSync(join(root, ".factory/out", `${stage}.json`), JSON.stringify(v.data, null, 2)); } catch { /* 기록 실패가 스테이지를 죽이지 않는다 */ } }
-      return v;
-    },
-    /**
-     * 감사 H3 — handoff에는 **러너가 계산한** 실효 tier를 함께 싣는다(`tier_effective`/`tier_source`).
-     * 에이전트가 적는 `tier`는 자기 신고이고, 이 둘은 diff에서 나온 사실이다: 다음 스테이지와 사람이
-     * 같은 코멘트에서 "무엇으로 채점됐는가"를 읽을 수 있어야 한다. 스키마는 추가 필드를 막지 않는다.
-     */
-    writeHandoff: async ({ data }) => {
-      const d2 = ctxCache?.tier_effective ? { ...data, tier_effective: ctxCache.tier_effective, tier_source: ctxCache.tier_source } : data;
-      await gh.comment(issue, renderHandoff({ stage, issue, summary: d2.summary || `### ${stage} 완료`, data: d2 }));
-    },
+    // #233 — 두 dep의 본문은 `makeVerifyStageDep`·`makeWriteHandoffDep`(위)에 있다: 테스트가 같은 배선을 몬다.
+    verifyStage: makeVerifyStageDep({ root, stage, getCtx: () => ctxCache, getCharter: () => charter, getHarness: () => harness, qaEvidenceSummary }),
+    writeHandoff: makeWriteHandoffDep({ gh, issue, stage, getCtx: () => ctxCache }),
     /** triage 전용(KTB-9): 판정된 tier를 라벨로 내보낸다 — 다른 `factory:tier-*`는 같은 호출에서 떨어진다. */
     setTierLabel: (tier) => gh.setTierLabel(issue, tierLabel(tier)),
     /** merge stage 전용: PR이 열려 있는지, 충돌은 없는지 — implement handoff에 적힌 PR을 조회한다. */
