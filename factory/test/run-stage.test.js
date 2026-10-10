@@ -7002,3 +7002,40 @@ test("test_226_payload_error_reason_cannot_forge_the_blocked_origin", async () =
     expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ ...evil, error: `context issue mismatch${tail}` }) } }), JSON.stringify(tail).slice(0, 40)).toBe("context issue mismatch");
   }
 });
+
+// ── #226 rework sec2 — triage의 blocked-retry hop은 `→ factory:queue`라 sweeper의 재시도 창(commentsSinceCycleStart)을 새로 연다. 그래서
+// 세션 출력이 위조할 수 있는 fail-closed 반환이 재시도된 triage 런에서 또 blocked/undecidable로 가면 sweeper의 상한(1회)이 매번 0으로 읽혀
+// 수명 예산만이 멈추는 루프가 된다. 재시도된 triage 런의 같은 반환은 예전 자리(needs-human)로 간다 — 진짜 transition()·sweep()으로 잰다.
+test("test_226_triage_payload_error_retry_does_not_loop", async () => {
+  const forged = { issue: null, orchestration: "workflow", guarantee: "structural", error: "context payload missing" };
+  const gh = realTransitionGh("factory:queue");
+  const triageTransition = async ({ to, reason, prerequisite = false, cause }) => transition({
+    gh, env: {}, skipRehearsal: true, issue: 42, to, reason, stage: "triage", cause, ctxExtra: { gatesChecked: true, ...(prerequisite ? { prerequisite: true } : {}) },
+  });
+  const triageRun = (over = {}) => baseDeps({
+    buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(forged) }),
+    verifyStage: () => ({ ok: false, reasons: ["no triage artifact"], data: null }), transition: triageTransition, ...over,
+  });
+  // 첫 런: 판정 불가 자리(dw3) — queue에서 blocked/undecidable.
+  expect(await runStage({ stage: "triage", issue: 42, deps: triageRun() })).toBe(2);
+  expect(gh.label).toBe("factory:blocked");
+  expect(blockedOrigin207(await gh.comments())).toMatchObject({ from: "factory:queue", stage: "triage", cause: "undecidable" });
+  const dispatchStage = vi.fn(async () => {});
+  const sweepOnce = () => sweep207({
+    gh: { ...gh, searchIssues: async (label) => (gh.label === label ? [{ number: 42 }] : []), issueList: async () => [], patchComment: async () => {} },
+    charter: { limits: { K: 3, M: 3, R: 2 }, back_pressure: { awaiting_review_max: 2 } }, thresholds: { quarantine_max: 5, quarantine_ttl_days: 28, quarantine_return_after: 30 },
+    now: new Date().toISOString(), staleMinutes: 30, release: vi.fn(), quarantine: { quarantined: [] }, saveQuarantine: () => {},
+    transition: (args) => transition({ gh, env: {}, skipRehearsal: true, ...args }), dispatchStage,
+    factoryLogins: async () => ({ ok: true, logins: [] }), installedVersion: async () => "1.4.60",
+  });
+  await sweepOnce();
+  expect(dispatchStage).toHaveBeenCalledTimes(1);                                          // 한 번은 다시 민다
+  // 재시도된 런: blocked → queue hop 뒤 같은 위조 반환 — 이번에는 blocked이 아니라 사람이다.
+  const lines = [];
+  const retry = triageRun({ runRecord: (l) => lines.push(...l), issueLabels: async () => [gh.label], blockedOrigin: async () => blockedOrigin207(await gh.comments()) });
+  expect(await runStage({ stage: "triage", issue: 42, deps: retry })).toBe(2);
+  expect(gh.label, lines.join("\n")).toBe("factory:needs-human");
+  // 그리고 다음 sweep은 아무것도 다시 띄우지 않는다 — 루프가 닫혔다.
+  await sweepOnce();
+  expect(dispatchStage).toHaveBeenCalledTimes(1);
+});
