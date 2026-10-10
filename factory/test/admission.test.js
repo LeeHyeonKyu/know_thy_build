@@ -232,3 +232,29 @@ test("test_136_harness_flaky_alternation_is_bounded", async () => {
   expect((await admit({ issue: 40 })).ok).toBe(true);
   for (const n of [50, 60, 70, 80]) expect((await admit({ issue: n })).ok, `#${n}`).toBe(false);
 });
+
+// ── #230 — refusals carry structured codes, and the triage entry maps them without reading reason text ──────────────
+import { entryRecheck, admissionRefusedReason } from "../lib/admission.js";
+
+test("test_230_admission_codes_classify_per_issue_vs_capacity_refusals", async () => {
+  const noJob = { ...person, body: "## Impact paths\n- `auth/login.ts`" };                     // no done_when + NEVER_AUTOMATE
+  const r = queueAdmission({ issue: noJob, charter: charter(), ...base, queued: [{ number: 1 }, { number: 2 }, { number: 3 }] });
+  expect(r.codes).toEqual(["no-done-when", "never-automate", "queue-max"]);
+  expect(r.codes).toHaveLength(r.reasons.length);
+  // the entry re-check keeps the per-issue facts only, in transition()'s wording; NEVER_AUTOMATE wins the target
+  expect(entryRecheck(r)).toEqual({ verdict: "refuse", to: "factory:wont-do", reason: admissionRefusedReason({ reasons: r.reasons.slice(0, 2) }) });
+  expect(admissionRefusedReason({ reasons: r.reasons.slice(0, 2) })).toBe(`queue admission refused — ${r.reasons[0]}; ${r.reasons[1]}`);
+  const missing = queueAdmission({ issue: { ...person, body: "please" }, charter: charter(), ...base });
+  expect(entryRecheck(missing)).toEqual({ verdict: "refuse", to: "factory:needs-info", reason: `queue admission refused — ${missing.reasons[0]}` });
+  // capacity alone is not re-judged at the entry
+  const full = queueAdmission({ issue: person, charter: charter(), ...base, queued: [{ number: 1 }, { number: 2 }, { number: 3 }] });
+  expect(full.codes).toEqual(["queue-max"]);
+  expect(entryRecheck(full)).toEqual({ verdict: "pass" });
+  expect(entryRecheck({ ok: true, reasons: [] })).toEqual({ verdict: "pass" });
+  // an unreadable read — or a refusal that does not say why in codes — is never a verdict
+  const broken = await makeQueueAdmission({ gh: { issue: async () => { throw new Error("boom"); } }, charter: charter() })({ issue: 10 });
+  expect(broken.codes).toEqual(["unreadable"]);
+  expect(entryRecheck(broken)).toMatchObject({ verdict: "unreadable", reason: expect.stringContaining("boom") });
+  expect(entryRecheck({ ok: false, reasons: ["something"] })).toMatchObject({ verdict: "unreadable" });
+  expect(entryRecheck(null)).toMatchObject({ verdict: "unreadable" });
+});
