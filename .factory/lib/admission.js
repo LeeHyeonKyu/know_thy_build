@@ -78,8 +78,13 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
 
   // #247 — 심사받는 이슈 자신은 세지 않는다(아래 open_max의 자기 제외와 같은 규칙). backlog에서 오는 이슈는 이 목록에 없으므로
   // `transition()`·로컬 진입의 판정은 그대로이고, 이미 큐에 있는 이슈의 triage 진입 재심사에서만 차이가 난다 — 꽉 찬 큐의 N번째가
-  // 자기 자신을 세어 쫓겨나지 않고, N+1번째만 걸린다.
-  const queuedOthers = queued.filter((q) => q?.number !== issue?.number);
+  // 자기 자신을 세어 쫓겨나지 않는다.
+  // #247 (skeptic) — 큐에 있는 이슈는 형제 전부가 아니라 **자기보다 앞선 형제**만 센다(이슈 번호 순 — 검색 결과의 순서가 아니라
+  // 모든 판정이 같이 보는 순서). 큐는 정당하게 N+1을 들 수 있다(blocked 재시도 hop의 복구는 상한을 다시 재지 않는다; 문의 count-then-write
+  // 경합). 형제 전부를 세면 그 큐의 **모든** 구성원이 차례로 거부돼 꽉 찬 큐가 통째로 needs-human으로 비워진다. 앞선 형제만 세면 번호 순으로
+  // 첫 N개는 언제나 통과하고, 그 뒤에 선 (구성원 수 − N)개만 상한에 걸린다 — 그것이 문을 비켜 들어온 이슈인지는 이 입력으로 알 수 없다.
+  const inQueue = queued.some((q) => q?.number === issue?.number);
+  const queuedOthers = queued.filter((q) => q?.number !== issue?.number && (!inQueue || Number(q?.number) < Number(issue?.number)));
   if (queuedOthers.length >= queueMax) refuse(ADMISSION_CODES.queueMax, `queue ${queuedOthers.length} ≥ ${queueMax} (back_pressure.queue_max)`);
 
   if (self) {
@@ -135,8 +140,8 @@ export const admissionRefusedReason = (a) => `queue admission refused — ${(Arr
  * 상한(`queue-max`·`self-open-max`)과 세대(`self-depth`)는 기본으로 다시 보지 않는다: 큐에 들어온 이슈는 형제를 세므로 꽉 찬 큐가
  * 통째로 비워지고, `factory:queue → backlog`는 그래프에 없다(lib/labels.js). 상한은 `transition()`과 로컬 진입의 문에 남는다.
  * #247 — 예외 하나: 호출자가 `{ queueMax: true }`를 주면(triage의 **새** 진입 — blocked 재시도 hop의 복구가 아닌 진입) `queue-max`도
- * 다시 본다. `queueAdmission`이 이슈 자신을 세지 않으므로(자기 제외) 꽉 찬 큐의 N번째는 통과하고, 문을 비켜 들어온 N+1번째만
- * 걸린다. 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태로 가고, 상한만 걸렸으면 `factory:needs-human` — 고칠 본문(needs-info)도
+ * 다시 본다. `queueAdmission`이 큐에 있는 이슈에게는 번호가 앞선 형제만 세므로(자기 제외 + 순위) 번호 순 첫 N개는 통과하고, 그 뒤에
+ * 선 (구성원 수 − N)개만 걸린다 — 문을 비켜 들어온 이슈가 꼭 그것이라는 보장은 없다(`test_247_full_queue_triage_never_evicts_its_first_n_members`). 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태로 가고, 상한만 걸렸으면 `factory:needs-human` — 고칠 본문(needs-info)도
  * 끝낼 이유(wont-do)도 아니며, triage를 다시 띄우지 않는 `factory:queue`의 출구다. 큐가 비면 사람이 `needs-human → queue`(문이
  * 상한을 다시 잰다)로 되돌린다. `self-open-max`·세대는 묻든 말든 다시 보지 않는다(형제끼리 서로를 쫓아낸다).
  * 읽지 못했으면(`unreadable`, 또는 코드 없는 거부 — 모르는 모양) 판정이 아니다: 호출자는 이슈를 내보내지 않고 재시도 가능한 자리에 세운다.
