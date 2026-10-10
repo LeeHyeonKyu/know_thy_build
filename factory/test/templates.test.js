@@ -95,6 +95,7 @@ test("CHARTER template is a draft with the §5.3 frontmatter", () => {
   expect(data.limits).toEqual({ K: 2, M: 3, R: 2 });
   expect(data.roster.standard).toEqual(["correctness", "spec-conformance", "qa"]);
   expect(data.roster["load-bearing"]).toContain("architecture");
+  expect(data.plan_rounds).toEqual({ docs: 2, default: 2 });
   expect(data.retro.every_merges).toEqual({ initial: 1, min: 1, max: 20 });
 });
 

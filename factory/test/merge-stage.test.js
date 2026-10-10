@@ -2858,11 +2858,15 @@ test("test_179_judge_path_unanimity_is_provenance_bound", async () => {
 });
 
 // ── #179 self-critique — NEVER_AUTOMATE은 자기 변경 경로 안에서도 사람 머지다 ─────────────────────────────────────
-// `templates/factory/docs/**`는 비판정 목록에 있지만 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도 걸린다. 스위치가 켜져도
-// 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. 글롭은 실제 CHARTER에서 읽는다.
+// `templates/factory/docs/**`는 비판정 목록에 있는데, 2026-10-11(허점 원장 P-4)까지는 CHARTER NEVER_AUTOMATE의 `templates/factory/**`에도
+// 걸렸다. 스위치가 켜져도 그런 PR은 창을 열지 않고(게이트도 돌지 않고) 오늘의 보호 경로 hand-off 그대로 사람에게 간다. P-4 뒤 실제 CHARTER는
+// 판정 로직 템플릿만 적어 그 교집합이 **없다** — 그래서 여기서는 실제 목록에 `templates/factory/docs/**`를 더해 넣어 메커니즘을 핀한다
+// (NEVER_AUTOMATE이 비판정 경로를 덮을 때의 동작은 CHARTER가 무엇을 적든 같아야 한다). 실제 목록의 모양도 함께 핀한다.
 test("test_179_never_automate_beats_self_change", async () => {
   const QA_DOC = "templates/factory/docs/QA.md";
-  expect(NEVER_AUTOMATE_179).toContain("templates/factory/**");                 // 실제 CHARTER의 항목이다
+  expect(NEVER_AUTOMATE_179).not.toContain("templates/factory/**");             // P-4: 템플릿 전체 금지는 사라졌다
+  expect(NEVER_AUTOMATE_179).toEqual(expect.arrayContaining(["templates/factory/github/workflows/**", "templates/factory/claude/settings.json", "factory/hooks/**"]));
+  const NEVER_AUTOMATE_WITH_DOCS = [...NEVER_AUTOMATE_179, "templates/factory/docs/**"];
   expect(classifyProtected179([QA_DOC], { engine: true })).toEqual({ non_judge: [QA_DOC], judge: [] });   // 구멍의 전제: 비판정이다
 
   const cases = [
@@ -2871,7 +2875,7 @@ test("test_179_never_automate_beats_self_change", async () => {
     ["judge path with both switches on", ["factory/lib/gates.js", QA_DOC], { auto_merge_non_judge: true, auto_merge_judge: true, veto_minutes: 60 }],
   ];
   for (const [label, files, selfChange] of cases) {
-    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
+    const d = selfD179({ protectedPaths: vi.fn(async () => ({ ok: true, files })), selfChange, neverAutomate: NEVER_AUTOMATE_WITH_DOCS, reviewRoster: vi.fn(async () => ({ ok: true, roles: ["correctness", "qa"], tier: "load-bearing" })) });
     const { code, lines } = await run179(d);
     const reason = `protected paths changed — human merge required: ${files.join(", ")}`;
     expect(code, label).toBe(2);
@@ -2881,7 +2885,7 @@ test("test_179_never_automate_beats_self_change", async () => {
     expect(lines, label).toEqual([
       "merge: PR #9 is OPEN",
       "merge: PR #9 not conflicting (MERGEABLE)",
-      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/**); a NEVER_AUTOMATE path is always human-merged`,
+      `merge: self-change path refused — CHARTER NEVER_AUTOMATE matches ${QA_DOC} (templates/factory/docs/**); a NEVER_AUTOMATE path is always human-merged`,
       `merge: ${reason}`,
     ]);
     for (const dep of [d.vetoWindow.open, d.vetoWindow.read, d.vetoLabel, d.sleep, d.gates, d.mergePr]) expect(dep, label).not.toHaveBeenCalled();

@@ -777,17 +777,17 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | tier | 판정 기준 | 리뷰 로스터 | gate 레벨 | 예산(토큰/이슈) — 참고값, 기본 미적용 |
 |---|---|---|---|---|
 | docs | diff가 `docs/**`, `*.md`만 | correctness, spec-conformance | fast | 100k |
-| standard | 기본 | correctness, architecture, spec-conformance, qa | full | 600k |
+| standard | 기본 | correctness, spec-conformance, qa (architecture는 load-bearing에만 — 54판정 중 단독 거부 0) | full | 600k |
 | load-bearing | `harness.toml [load_bearing]` 경로 포함 | correctness, security, architecture, spec-conformance, qa | deep | 1.2M |
 
 ## Plan 토론 로스터
 | tier | 토론자 | 라운드 |
 |---|---|---|
 | docs | architect, skeptic | 2 (입장 → synthesizer 종합; 교차검토 생략) |
-| standard / load-bearing | product-advocate, architect, skeptic, operator | 3 + 서명 |
+| standard / load-bearing | product-advocate, architect, skeptic, operator | 2 + 서명 |
 
 ## Hard limits
-- review rounds K = 3
+- review rounds K = 2 (3라운드 승인은 8건 중 1건)
 - same gate RED M = 3
 - runner retries R = 2
 - review 대기(awaiting-review) 이슈가 {{awaiting_review_max}}개 이상이면 implement는 새 claim을 하지 않는다 (back-pressure)

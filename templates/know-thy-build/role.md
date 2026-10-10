@@ -154,8 +154,8 @@ stance  = "<이 역할이 토론에서 대변하는 입장, 한 문장>"
 ```diff
  roster:
    docs: [correctness, spec-conformance]
--  standard: [correctness, architecture, spec-conformance, qa]
-+  standard: [correctness, architecture, spec-conformance, qa, <short>]
+-  standard: [correctness, spec-conformance, qa]
++  standard: [correctness, spec-conformance, qa, <short>]
    load-bearing: [correctness, security, architecture, spec-conformance, qa]
 ```
 
