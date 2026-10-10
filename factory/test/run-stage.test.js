@@ -6759,7 +6759,7 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
   // record names it before the agent starts, so a wiring defect is visible in every run it touches. This case also strips the
   // hop's door (`skipRehearsal`, test-only) — the one shape where nothing judges the retry. With the door in place (d6 below)
   // the retry of an inadmissible issue stops at the hop. The entry itself is not fail-closed because the pre-#230 test
-  // "KTB-15b: triage entering from factory:blocked…" runs this retry with no admission dep and expects the agent (ADR-039).
+  // "KTB-15b: triage entering from factory:blocked…" runs this retry with no admission dep and expects the agent (ADR-040).
   const g4 = await seed(NO_DONE_WHEN_230);
   const order4 = [];
   const adm4 = makeStageAdmission({ gh: g4, getCharter: () => CHARTER_230, factoryLogins: logins230 });

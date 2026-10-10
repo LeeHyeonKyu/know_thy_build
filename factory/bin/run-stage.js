@@ -117,7 +117,7 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 /**
  * #230 — triage 진입 재심사에 심사기(`deps.admission`)가 실리지 않은 런이 남기는 기록 한 줄. 재심사를 건너뛴 사실이 런 기록에 남는다(조용히 지나가지 않는다).
- * 프로덕션 배선(main)은 언제나 심사기를 싣는다 — 이 줄이 기록에 보이면 배선 사고다. 거부(fail closed)로 하지 않는 이유는 ADR-039.
+ * 프로덕션 배선(main)은 언제나 심사기를 싣는다 — 이 줄이 기록에 보이면 배선 사고다. 거부(fail closed)로 하지 않는 이유는 ADR-040.
  */
 export const TRIAGE_RECHECK_UNWIRED = "triage entry: queue admission not wired into this run — re-check skipped (wiring defect: main() always wires it)";
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
@@ -530,7 +530,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
      *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
      *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
-     *     (`TRIAGE_RECHECK_UNWIRED`). 거부로 하지 않는 이유는 ADR-039 — 기존 triage 테스트가 심사기 없는 deps로 큐 진입을 돌린다.
+     *     (`TRIAGE_RECHECK_UNWIRED`). 거부로 하지 않는 이유는 ADR-040 — 기존 triage 테스트가 심사기 없는 deps로 큐 진입을 돌린다.
      */
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission !== "function") {
       record([TRIAGE_RECHECK_UNWIRED]);
@@ -3515,7 +3515,7 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admiss
        * **배선이 비면 거부한다(fail closed)**: `admission`을 넘겼는데 함수가 아니면(`null` 등 — main이 심사기를 만들지 못한 모양) 라벨을
        * 쓰지 않고 `transition()`이 같은 경우에 내는 문장(`ADMISSION_UNWIRED`) 그대로 거부한다 — 리허설의 `REHEARSAL_UNWIRED`와 같은 규칙.
        * 예외 하나: 키 자체를 **생략한** 호출은 예전처럼 리허설만 본다. 기존 테스트(run-stage.test.js "makeLocalEntry: backlog issue with no
-       * factory label → sets factory:queue…", 심사기 없이 빈 본문을 큐에 넣는다)가 그 모양을 고정하기 때문이다(tests_are_load_bearing, ADR-039).
+       * factory label → sets factory:queue…", 심사기 없이 빈 본문을 큐에 넣는다)가 그 모양을 고정하기 때문이다(tests_are_load_bearing, ADR-040).
        * 그 길로 큐에 든 이슈도 에이전트에는 닿지 못한다: 바로 뒤 triage 진입 재심사(runStage)가 같은 심사기로 다시 본다(테스트가 고정).
        */
       if (admission !== undefined) {

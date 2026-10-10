@@ -433,7 +433,7 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 - **`_retro.md` 하이드레이트/no-clobber (리뷰 Critical, 계획 문서에 없던 실행 판결)**. 초판은 `readRecords`(설계상 절대 던지지 않는다)로 상태를 읽어, fetch 실패와 "기록 없음"을 구별하지 못한 채 기본 상태로 브랜치를 덮어쓸 수 있었다. 판결: `factory/lib/records-branch.js`에 `readRecordsDetailed({run,cwd,branch,dir}) → {records, blobs, fetched, exists, failures, parent}`를 추가(`readRecords`는 `.records`만 돌려주는 얇은 래퍼가 됐다) — `fetched`는 "브랜치 내용을 확정했다"를 뜻하고, fetch가 실패했을 때는 `git ls-remote --exit-code`(0=있음, 2=없음, 그 외=오류)로 "없다"와 "모른다"를 가른다. `runRetro`는 `hydrate()`가 던지거나 `fetched === false`거나 `_retro.md`가 브랜치에 있는데 못 읽었으면(`stateFailed`) **exit 2로 아무것도 쓰지 않고 끝난다**(writeState·sync·claudeP 전부 호출하지 않음). 브랜치에 `_retro.md`가 아예 없으면(첫 실행) 기본 상태로 진행하고 `expectBlob: {"_retro.md": null}`로 "생성이지 교체가 아니다"를 명시한다. `syncRecords({overwrite:["_retro.md"], expectBlob})`는 교체 전에 parent 트리의 그 blob sha가 하이드레이트한 sha와 같은지 확인하고 다르면(누군가 먼저 밀었다) 아무것도 밀지 않고 `{ok:false, moved:true}`를 돌려준다 — `runRetro`는 그때 한 번만 재하이드레이트해 **같은 순수 변이(`applyMutation(base, mutation)`)를 새 base에 재적용**하고 재시도하며, 그래도 움직였거나 재하이드레이트가 다시 실패하면 exit 1(맹목적 덮어쓰기 금지). `_retro.md`는 `overwrite`(통째로 재렌더)로만 동기화한다 — run 기록(append-only 로그)에 쓰는 꼬리-병합 규칙을 그대로 쓰면 새 렌더가 옛 렌더의 접두어가 아니므로 마커·JSON 펜스가 파일에 두 개 생기고 다음 retro가 첫 펜스(옛 상태)만 읽어 커서가 영원히 전진하지 않는다. `hydrate`는 `_retro.md`만 로컬을 덮어써 복원한다(run 기록은 아직 push 안 된 로컬 꼬리일 수 있어 "없을 때만 복원"이 맞지만 `_retro.md`는 브랜치가 유일한 진실이다). `_retro.md`의 기계 블록은 마커 `<!-- factory-retro-state:v1 -->` + JSON 펜스이고 그 위에 사람용 통계·이력 표를 둔다.
 
 **결정**: 위 관측대로 P4-R1~R7과 다섯 가지 실행 판결(needs-human "도달" 게이트로의 정정·K 무효화, 통계의 창/누적 분리, ISO 주차는 `period.from`, 성숙도 격차의 분석-전-계산, `_retro.md`의 하이드레이트 provenance + no-clobber 재적용)을 Plan 4의 확정 동작으로 채택한다. retro는 절대 라벨을 옮기지 않고 코드를 고치지 않는다 — 산출은 lessons/예시/관점 append(다크 자체 머지), 제안 PR(사람 머지), harness/rewrite 이슈 생성, `quarantine.toml`·`_retro.md` 갱신뿐이라는 계획의 전제는 구현 전체에서 위반 없이 유지됐다(모든 경로가 fake deps 주입 테스트로 확인됨).
-  → **대체됨(#230, ADR-039)**: "retro는 절대 라벨을 옮기지 않는다"에 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의
+  → **대체됨(#230, ADR-040)**: "retro는 절대 라벨을 옮기지 않는다"에 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의
   `backlog → factory:queue` 한 걸음이고, 그 걸음은 리허설과 큐 진입 심사를 실은 `transition()`으로만 간다(`makeRetroCreateIssue`).
   기존 이슈의 라벨은 여전히 옮기지 않고, 코드도 고치지 않는다.
 
@@ -3344,7 +3344,7 @@ RED면 non-zero로 끝난다.
   지나지 않는 **유일한** 생산자이고, 그 사실은 여기에 적혀 있어야 grep으로 찾을 수 있다.
   → **대체됨(#136, S2b)**: `ensureHarnessIssue`의 하네스 이슈는 이제 `backlog`로 태어나 문을 지난다. 남은 우회 생산자는
   retro의 성숙도 격차 이슈(`bin/retro.js`)다 — 아래 "S2b" 항목.
-  → **대체됨(#230, ADR-039)**: retro의 성숙도 격차 이슈도 `backlog`로 태어나 문을 지난다. 이제 큐 라벨을 단 채 태어나는 생산자는 없다.
+  → **대체됨(#230, ADR-040)**: retro의 성숙도 격차 이슈도 `backlog`로 태어나 문을 지난다. 이제 큐 라벨을 단 채 태어나는 생산자는 없다.
 - 지문 해시의 구분자는 `\u0000` **이스케이프**로 적는다. r1은 리터럴 NUL 바이트를 넣었고, 그 두
   바이트가 git에게 이 모듈을 binary로 보이게 해 `git diff`가 내용을 영영 보여주지 않았다 — 게이트를
   정의하는 파일이 사람·도구·**팩토리 자신의 리뷰 스테이지** 모두에게 구조적으로 리뷰 면제였다.
@@ -3882,7 +3882,7 @@ S4 이전에 "생성물은 diff가 아니다"를 한 곳(`inMirrorFamily`)에서
 - **문은 아직 하나가 아니다**: retro의 성숙도 격차 하네스 이슈(`bin/retro.js`, `[QUEUE_LABEL, HARNESS_LABEL]`로 태어난다 — S2c)와 로컬 진입
   (`makeLocalEntry`, 리허설만 본다)이 여전히 심사를 우회한다. 그래서 `open_max`는 아직 하드 상한이 아니다. 기존에 열린 하네스 이슈의 라벨은
   옮기지 않는다.
-  → **대체됨(#230, ADR-039)**: retro 승격 이슈는 `backlog`로 태어나 문을 지나고, 로컬 진입은 심사를 부른다. 손 라벨로 들어온 이슈는
+  → **대체됨(#230, ADR-040)**: retro 승격 이슈는 `backlog`로 태어나 문을 지나고, 로컬 진입은 심사를 부른다. 손 라벨로 들어온 이슈는
   triage 진입이 이슈 자신의 사실(done_when·NEVER_AUTOMATE)로 다시 본다. 상한(`queue_max`·`open_max`)을 triage 진입에서 다시 보는 일은
   아직 없다(#245) — 그래서 손 라벨 홍수에 대해 `open_max`는 여전히 하드 상한이 아니다.
 **1.4.38 (KTB #136 실측, 넷째).** #136은 implement를 끝까지 통과했다(미러 커밋 `33c1889` 5개 파일, `must_not` 통과, 게이트 5/5 GREEN) —
@@ -4518,7 +4518,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
 
-## ADR-039 큐로 들어오는 문은 하나다 — triage 진입 재심사, 로컬 진입 심사, retro 승격 이슈 — 2026-10-10 (#230)
+## ADR-040 큐로 들어오는 문은 하나다 — triage 진입 재심사, 로컬 진입 심사, retro 승격 이슈 — 2026-10-10 (#230)
 
 **사건**: 허점 원장(`docs/research/ktb-gap-ledger-2026-10-09.md` §1, E-1·E-2·E-3·E-8)에 따르면 `factory:queue`로 가는 정식 경로
 `transition()`(리허설 + 큐 진입 심사, ADR-025·S2)을 비켜 가는 길이 셋 있었다. ① 사람이 UI로 붙인 라벨과 라벨을 단 채 태어난
