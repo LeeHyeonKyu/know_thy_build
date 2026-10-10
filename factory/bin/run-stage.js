@@ -491,7 +491,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 나머지 로직을 그 라벨에서 정상적으로 이어간다.
     const retryCfg = BLOCKED_RETRY[stage];
     let blockedOriginFrom = false;          // merge only (KTB-19 review I-2): the origin label itself, not just a boolean
-    let retriedFromBlocked = false;         // #226 rework sec2 — this run is the blocked-retry hop's run (§payloadError)
     if (retryCfg && entryLabel === "factory:blocked") {
       const origin = await d.blockedOrigin?.();
       if (!origin || !retryCfg.origins.includes(origin.from)) {
@@ -511,7 +510,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         if (!t.ok) { record([`${stage}: blocked retry hop refused`, ...refusal(t)]); return 2; }
         record([`${stage}: blocked retry — hopped back to ${t.to}`]);
         entryLabel = t.to;
-        retriedFromBlocked = true;
       } else {
         blockedOriginFrom = origin.from;
       }
@@ -914,12 +912,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     let payloadErrorMemo;
     let payloadCtx = ctx;                                             // 디스패처가 옮겨 쓴 loaded.json을 쓴 ctx — plan 리페어 턴이면 그 턴의 것
-    // rework sec2 — triage의 retry hop은 `→ factory:queue`라 sweeper의 재시도 창을 새로 연다(issue-comments.js commentsSinceCycleStart):
-    // 재시도된 triage 런이 또 blocked/undecidable로 가면 sweeper의 1회 상한이 매번 0으로 읽혀 수명 예산만이 멈추는 루프가 된다(fail-closed
-    // 모양은 세션 출력이 만들 수 있다). 그래서 재시도된 triage 런의 같은 반환은 예전 자리(needs-human)로 간다 — 한 번 재시도, 그다음 사람.
     const payloadError = async () => {
       if (payloadErrorMemo === undefined) {
-        payloadErrorMemo = (stage === "triage" && retriedFromBlocked) || hitMaxTurns(out) || hitApiError(out) ? null
+        payloadErrorMemo = hitMaxTurns(out) || hitApiError(out) ? null
           : ((d.dispatcherPayloadError ? await d.dispatcherPayloadError(out) : dispatcherPayloadErrorOf({ out })) ?? null);
       }
       return payloadErrorMemo;
@@ -2082,12 +2077,7 @@ export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
     transcriptText,
     validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
-  if (!a.ok || !isWorkflowFailClosed(a.data)) return null;
-  // rework sec1 — 이 문구는 blocked 전이 코멘트의 사유로, 러너의 `factory-blocked-origin` 마커 **앞에** 실린다. 꼬리는 세션 출력이 정하므로
-  // 템플릿 문구가 쓰는 글자(영숫자·공백·`.,:_-`, 160자 이내)일 때만 그대로 싣고, 아니면 고정 접두만 싣는다 — 마커를 위조할 `<!--`가 들어갈
-  // 자리가 없다(test_226_payload_error_reason_cannot_forge_the_blocked_origin).
-  const e = a.data.error;
-  return e === DISPATCHER_PAYLOAD_MISSING || /^context issue mismatch: [\w .,:-]{1,160}$/.test(e) ? e : DISPATCHER_PAYLOAD_MISMATCH;
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;
 }
 
 /**
