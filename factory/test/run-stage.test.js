@@ -6579,7 +6579,7 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
 // 세웠다. 픽스처는 실제 생산자다: fail-closed 반환은 진짜 워크플로 템플릿을 runWorkflow로 돌려 얻고, 검증은 진짜 verifyStage,
 // 전이는 진짜 transition(), 에스컬레이션은 진짜 sweep(), 기록은 진짜 appendRunRecord와 lifetimeCostOf다.
 import { runWorkflow as runWorkflow207 } from "./helpers/run-workflow.js";
-import { dispatcherPayloadErrorOf } from "../bin/run-stage.js";
+import { dispatcherPayloadErrorOf, makeBuildContextDep } from "../bin/run-stage.js";
 import { sweep as sweep207, engineCausedNeedsHuman as engineCausedNeedsHuman207, BLOCKED_ESCALATION_REASON as ESCALATION207 } from "../lib/sweeper.js";
 import { blockedOrigin as blockedOrigin207 } from "../lib/retro/issue-comments.js";
 import { lifetimeCostOf as lifetimeCostOf207 } from "../lib/budget.js";
@@ -6616,6 +6616,8 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   expect(last.cause).toBe("undecidable");
   expect(last.reason.startsWith("dispatcher payload: context payload missing")).toBe(true);
   expect(last.reason).toContain("loaded.json 6604 bytes");
+  expect(last.reason).not.toMatch(/args len/);                                            // 엔진이 보지 못하는 수를 말하지 않는다
+  expect(lines.some((l) => /^engine-crash:/.test(l))).toBe(false);                        // 두 번째 engine-crash 생산자가 아니다
   expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(d.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:planned" }));
 
@@ -6730,7 +6732,7 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   expect(engineCausedNeedsHuman207(comments)).not.toBeNull();
 });
 
-test("test_207_ordinary_schema_mismatch_and_bare_issue_zero_stay_needs_human", async () => {
+test("test_207_ordinary_artifact_defect_stays_needs_human", async () => {
   const missing = await truncatedArgsReturn207("implement");
   const viaRealVerify = (result, over = {}) => baseDeps({
     buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result }),
@@ -6747,6 +6749,17 @@ test("test_207_ordinary_schema_mismatch_and_bare_issue_zero_stay_needs_human", a
   await needsHuman(fenced207({ issue: 0, error: "reviewer crashed", orchestration: "workflow", guarantee: "structural" }));      // fail-closed 문구가 아닌 에러
   await needsHuman(fenced207({ error: "context payload missing" }));                                                             // error 키 하나뿐(워크플로의 모양이 아니다)
   await needsHuman(fenced207({ schema: "factory.review.v1", issue: 42, verdicts: "nope" }));                                     // 보통의 스키마 불일치
+  // fail-closed 문구가 **최상위 `error`가 아닌 자리**에만 있다 — 중첩된 객체, 리뷰 산출물의 자유 텍스트, 디스패처의 산문. 모두 산출물 결함이다.
+  const nestedOrProse = [
+    ["nested error", { issue: 0, orchestration: "workflow", guarantee: "structural", result: { error: "context payload missing" } }],
+    ["nested fail-closed object", { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", verdicts: "nope", prior: { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "structural" } }],
+    ["free-text field", { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", summary: "context payload missing", verdicts: [{ role: "correctness", verdict: "reject", must_fix: [{ id: "cf1", claim: "context payload missing", evidence: "context issue mismatch: 1 vs 2" }] }] }],
+  ];
+  for (const [name, o] of nestedOrProse) {
+    expect(dispatcherPayloadErrorOf({ out: { result: fenced207(o) } }), name).toBeNull();
+    await needsHuman(fenced207(o));
+  }
+  await needsHuman("The workflow said: context payload missing. I could not continue.");                                       // 산문뿐, 산출물 없음
   expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ error: "context payload missing" }) } })).toBeNull();
   expect(dispatcherPayloadErrorOf({ out: { result: fenced207({ issue: 0 }) } })).toBeNull();
   // 네 템플릿의 모양에서 한 군데만 어긋나도 fail-closed가 아니다 — 에러 문구를 흉내 낸 산출물이 needs-human을 빠져나가지 못한다.
@@ -6848,7 +6861,10 @@ test("test_207_plan_repair_fail_closed_reports_the_repaired_loaded_json_size", a
   const plan = await truncatedArgsReturn207("plan");
   const first = { ...ctx207, loaded_json: { path: ".factory/out/loaded.json", bytes: 3000, limit: 4096, truncated_to: null, over: false } };
   const repaired = { ...ctx207, plan_repair: R1_REASONS, loaded_json: { path: ".factory/out/loaded.json", bytes: 5123, limit: 4096, truncated_to: null, over: true } };
-  const buildContext = vi.fn(async ({ planRepair = null } = {}) => (planRepair ? repaired : first));
+  const lines = [];
+  // 실제 배선: makeBuildContextDep가 매 buildContext 뒤에 그 런의 loaded.json 크기를 기록한다(produce만 주입).
+  const produce = vi.fn(async ({ planRepair = null } = {}) => (planRepair ? repaired : first));
+  const buildContext = makeBuildContextDep({ root: "/nonexistent", gh: null, issue: 207, stage: "plan", run: null, mergeBase: async () => null, recordLine: (l) => lines.push(l), produce });
   const claudeP = vi.fn()
     .mockResolvedValueOnce({ is_error: false, result: "{}" })
     .mockResolvedValueOnce({ is_error: false, result: fenced207(plan) });
@@ -6856,7 +6872,6 @@ test("test_207_plan_repair_fail_closed_reports_the_repaired_loaded_json_size", a
     .mockReturnValueOnce({ ok: false, reasons: [...R1_REASONS], planRepair: [...R1_REASONS], data: { rounds: 2 } })
     .mockImplementation(({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }));
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
-  const lines = [];
   const deps = planRepairDeps({ buildContext, claudeP, verifyStage: vs, transition, runRecord: (l) => lines.push(...l) });
   expect(await runStage({ stage: "plan", issue: 207, deps, runnerId: "r" })).toBe(2);
   expect(claudeP).toHaveBeenCalledTimes(2);

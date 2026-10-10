@@ -788,9 +788,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      */
     const manifestNote = contextManifestLines(ctx, stamp);
     if (manifestNote.length) record(manifestNote);
-    // #207 — 디스패처가 손으로 옮겨 쓸 `loaded.json`의 디스크 위 크기(모든 스테이지, 한 줄). 크기를 모르는 ctx면 줄이 없다.
-    const loadedNote = loadedJsonLine(ctx);
-    if (loadedNote) record([loadedNote]);
     await d.resetAgentsLog?.();                                       // 지난 런의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
     let planRepairAttempt = 0;                                        // Task 9 (KTB-51): in-run one-shot cap for the plan validator repair
     let out = await d.claudeP(ctx, { harnessIssue });
@@ -1038,9 +1035,6 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
          */
         const repairManifest = contextManifestLines(repairCtx, stamp);
         if (repairManifest.length) record(repairManifest);
-        // #207 — 이 buildContext가 loaded.json을 다시 썼다(`plan_repair`로 커진다). 리페어 턴의 디스패처가 옮겨 쓰는 것은 그 파일이다.
-        const repairLoadedNote = loadedJsonLine(repairCtx);
-        if (repairLoadedNote) record([repairLoadedNote]);
         await d.resetAgentsLog?.();                                   // 지난 턴의 agents.jsonl이 로스터 체크를 대신 만족시키지 못하게
         repairOut = await d.claudeP(repairCtx ?? ctx, { harnessIssue, planRepair: repairReasons });
       } catch (e) {
@@ -3142,6 +3136,10 @@ export const makeBuildContextDep = ({ root, gh, issue, stage, run, mergeBase, re
     catch (e) { if (!isMergeBaseError(e)) throw e; recordLine("tier: merge-base unresolved — tier floor not computed (gates will block)"); }
     const ctx = await produce({ root, gh, issue, stage, run, base, setupDirty, planRepair, mergeConflicts });
     onBuilt(ctx);
+    // #207 — 이 buildContext가 쓴 `loaded.json`의 디스크 위 크기(디스패처가 손으로 옮겨 쓸 파일, 모든 스테이지). 매 호출이 한 줄이다:
+    // plan 리페어 턴의 두 번째 buildContext는 `plan_repair`가 붙어 커진 파일을 다시 쓰므로 그 크기도 따로 선다. 모르면 줄이 없다.
+    const loadedNote = loadedJsonLine(ctx);
+    if (loadedNote) recordLine(loadedNote);
     return ctx;
   };
 
