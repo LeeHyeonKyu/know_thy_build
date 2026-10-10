@@ -2801,12 +2801,24 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
  * Every stage transition funnels through here. `buildExtra(args)` is main's ctxExtra builder (roster, gates file, merge gates).
  */
 export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
+  /**
+   * #230 (skeptic) — **triage의 blocked 재시도 hop은 상한을 다시 재지 않는다.** 그 hop(`prerequisite: true`, blocked → factory:queue)은
+   * 이미 얻었던 큐 라벨의 복구다. 그런데 이슈가 blocked에 있는 동안 문은 그것을 새 도착으로 센다 — 형제가 open_max에 있거나 다른
+   * 이슈가 빈자리를 채웠으면 hop이 매 sweep 거부되고, 일시적 gh 실패 한 번이 받아들여진 이슈를 needs-human까지 밀었다(dw2 위반).
+   * 그래서 이 hop의 문은 triage 진입 재심사(`entryRecheck`)가 다시 재는 것만 잰다: 이슈 자신의 사실(done_when·NEVER_AUTOMATE)과
+   * 읽기 실패는 여전히 hop을 거부하고(심사기가 없으면 `transition()`이 ADMISSION_UNWIRED로 거부한다 — fail closed 그대로), 상한·세대만
+   * 거부한 판정은 통과로 읽는다. 다른 전이와 다른 스테이지의 큐 전이는 심사기를 그대로 받는다.
+   */
+  const hopAdmission = typeof admission === "function"
+    ? async (a) => { const r = await admission(a); return entryRecheck(r).verdict === "pass" ? { ...r, ok: true } : r; }
+    : admission;
   return async (args) => {
     const { to, reason, cause, by = null } = args;
     const ctxExtra = await buildExtra(args);
+    const retryHop = stage === "triage" && args.prerequisite === true && to === "factory:queue";
     // The K restart's transition carries `by=factory:run-<id>` (kRestartState counts a restart as used only with it); every
     // other caller passes none and is written `by=script`, as before.
-    return transitionFn({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission, ...(by ? { by } : {}) });
+    return transitionFn({ gh, issue, to, reason, ctxExtra, stage, cause, rehearsal, admission: retryHop ? hopAdmission : admission, ...(by ? { by } : {}) });
   };
 }
 
