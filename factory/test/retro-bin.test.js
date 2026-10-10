@@ -1425,3 +1425,42 @@ test("test_230_retro_promotion_issue_is_born_backlog_and_transitioned", async ()
   writeFileSync(join(draftRoot, "docs/factory/CHARTER.md"), "---\nschema: factory.charter.v1\nstatus: draft\n---\n");
   expect(retroMainDeps({ root: draftRoot, repo: "o/r", runnerId: "t", gh: ghFor230({ variable: hash }), env: {}, now: NOW })).toEqual({ dormant: "factory: CHARTER status is draft — retro dormant" });
 });
+
+// ── #247 dw5 (skeptic) — retro's promotion takes the SAME queue tail as flaky issues and harness requests ─────────────────────
+// The test_230 test above pins the comment's shape; a retro that inlined its own create → door → comment copy would still pass it.
+// Here the tail makeRetroCreateIssue calls is observed: an injected wrapper around the real createBacklogIssueAndQueue must be the
+// one that runs (an inline copy never calls it), and the default path writes byte-for-byte that function's notQueuedComment.
+import { makeRetroCreateIssue } from "../bin/retro.js";
+import { createBacklogIssueAndQueue, notQueuedComment } from "../lib/harness-request.js";
+
+test("test_247_retro_promotion_uses_the_single_backlog_queue_tail", async () => {
+  const { root, hash } = checkout230();
+  const charter247 = { back_pressure: { queue_max: 3 }, self_generated: { open_max: 5, depth_max: 1 }, never_automate: [] };
+  const harness247 = { project: { default_branch: "main" } };
+  const promo = { title: PROMO_230, body: "## done_when\n- [ ] promoted", labels: ["factory:queue", "factory:harness"] };
+
+  // wired through the injected tail: the shared function runs once with the backlog labels and no parked-feature sentence
+  for (const [name, g, queued] of [["admitted", ghFor230({ variable: hash }), true], ["queue full", ghFor230({ variable: hash, queued: 3 }), false]]) {
+    const tail = vi.fn(createBacklogIssueAndQueue);
+    const r = await makeRetroCreateIssue({ gh: g, root, charter: charter247, harness: harness247, env: {}, queueTail: tail })(promo);
+    expect(tail, name).toHaveBeenCalledTimes(1);
+    expect(tail.mock.calls[0][0], name).toMatchObject({ gh: g, title: PROMO_230, labels: ["backlog", "factory:harness"], parkedFeature: false });
+    expect(r, name).toEqual(await tail.mock.results[0].value);
+    expect(r.queued, name).toBe(queued);
+    expect(g.created.map((c) => c.labels), name).toEqual([["backlog", "factory:harness"]]);
+  }
+  // a request that does not ask for the queue never touches the tail
+  const plain = vi.fn(createBacklogIssueAndQueue);
+  const g0 = ghFor230({ variable: hash });
+  await makeRetroCreateIssue({ gh: g0, root, charter: charter247, harness: harness247, env: {}, queueTail: plain })({ title: "t", body: "b", labels: ["backlog", "factory:flaky"] });
+  expect(plain).not.toHaveBeenCalled();
+
+  // the default path: refused and throwing doors leave exactly the shared function's comment, byte for byte
+  for (const [name, g, threw] of [["refused", ghFor230({ variable: hash, queued: 3 }), false], ["throws", ghFor230({ variable: hash, swapThrows: true }), true]]) {
+    const r = await makeRetroCreateIssue({ gh: g, root, charter: charter247, harness: harness247, env: {} })(promo);
+    expect(r.queued, name).toBe(false);
+    // (transition() writes its own transition/failed-swap comments; the not-queued comment is the tail's, exactly one)
+    const mine = g.store.get(r.issue).comments.map((c) => c.body).filter((b) => b.startsWith(notQueuedMarker(r.issue)));
+    expect(mine, name).toEqual([notQueuedComment({ issue: r.issue, reason: r.queue_reason, threw, parkedFeature: false })]);
+  }
+});

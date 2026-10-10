@@ -1100,13 +1100,15 @@ export function roleFileMap(roles) {
  *     수용한 위험(ADR-025의 잠금): 리허설이 낡으면 승격 이슈도 사람의 `factory rehearse` + `:next`까지 backlog에 선다.
  * 큐를 목적지로 들지 않은 요청(flaky 재작성 이슈 등)은 그대로 만든다.
  */
-export function makeRetroCreateIssue({ gh, root, charter, harness, env }) {
+// #247 dw5 — `queueTail`은 그 꼬리 자체다(기본값이 유일한 구현 `createBacklogIssueAndQueue`). 주입은 테스트가 "같은 함수를 부른다"를
+// 관측하기 위한 것이다 — 사본을 끼울 자리가 아니다(test_247_retro_promotion_uses_the_single_backlog_queue_tail).
+export function makeRetroCreateIssue({ gh, root, charter, harness, env, queueTail = createBacklogIssueAndQueue }) {
   const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });
   const admission = makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env }) });
   return async ({ title, body, labels = [] }) => {
     if (!labels.includes(QUEUE_LABEL)) return gh.createIssue({ title, body, labels });
     // 리뷰 arch1 — 만들기 → 문 → 거부 코멘트의 꼬리는 하네스 요청과 **같은 함수**다(사본을 두지 않는다).
-    return createBacklogIssueAndQueue({
+    return queueTail({
       gh, title, body, labels: labels.map((l) => (l === QUEUE_LABEL ? "backlog" : l)),
       reason: `retro maturity promotion: ${title}`,
       transitionIssue: ({ issue, to, reason }) => transition({ gh, issue, to, reason, rehearsal, admission }),
