@@ -246,10 +246,12 @@ test("test_230_admission_codes_classify_per_issue_vs_capacity_refusals", async (
   expect(admissionRefusedReason({ reasons: r.reasons.slice(0, 2) })).toBe(`queue admission refused — ${r.reasons[0]}; ${r.reasons[1]}`);
   const missing = queueAdmission({ issue: { ...person, body: "please" }, charter: charter(), ...base });
   expect(entryRecheck(missing)).toEqual({ verdict: "refuse", to: "factory:needs-info", reason: `queue admission refused — ${missing.reasons[0]}` });
-  // capacity alone is not re-judged at the entry
+  // #247 — queue_max alone IS re-judged at the entry (the issue itself is not counted, see test_247_…_queue_max): a person's
+  // fix cannot clear it, so it goes to needs-human, with the cap's own sentence; the other caps are still not re-judged there
   const full = queueAdmission({ issue: person, charter: charter(), ...base, queued: [{ number: 1 }, { number: 2 }, { number: 3 }] });
   expect(full.codes).toEqual(["queue-max"]);
-  expect(entryRecheck(full)).toEqual({ verdict: "pass" });
+  expect(entryRecheck(full)).toEqual({ verdict: "refuse", to: "factory:needs-human", reason: `queue admission refused — ${full.reasons[0]}` });
+  expect(entryRecheck({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], codes: ["self-open-max"] })).toEqual({ verdict: "pass" });
   expect(entryRecheck({ ok: true, reasons: [] })).toEqual({ verdict: "pass" });
   // an unreadable read — or a refusal that does not say why in codes — is never a verdict
   const broken = await makeQueueAdmission({ gh: { issue: async () => { throw new Error("boom"); } }, charter: charter() })({ issue: 10 });

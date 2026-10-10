@@ -76,7 +76,11 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
   const hits = neverAutomateHits(impactPathsOf(body), charter?.never_automate ?? []);
   if (hits.length) refuse(ADMISSION_CODES.neverAutomate, `NEVER_AUTOMATE: ${hits.map((h) => `${h.path} (glob ${h.glob})`).join(", ")} — this issue would end wont-do; split the automatable part or let a person fix it`);
 
-  if (queued.length >= queueMax) refuse(ADMISSION_CODES.queueMax, `queue ${queued.length} ≥ ${queueMax} (back_pressure.queue_max)`);
+  // #247 — 심사받는 이슈 자신은 세지 않는다(아래 open_max의 자기 제외와 같은 규칙). backlog에서 오는 이슈는 이 목록에 없으므로
+  // `transition()`·로컬 진입의 판정은 그대로이고, 이미 큐에 있는 이슈의 triage 진입 재심사에서만 차이가 난다 — 꽉 찬 큐의 N번째가
+  // 자기 자신을 세어 쫓겨나지 않고, N+1번째만 걸린다.
+  const queuedOthers = queued.filter((q) => q?.number !== issue?.number);
+  if (queuedOthers.length >= queueMax) refuse(ADMISSION_CODES.queueMax, `queue ${queuedOthers.length} ≥ ${queueMax} (back_pressure.queue_max)`);
 
   if (self) {
     const open = openSelfGenerated.filter((o) => o?.number !== issue?.number);
@@ -128,8 +132,11 @@ export const admissionRefusedReason = (a) => `queue admission refused — ${(Arr
  * 대기 중 본문 변화 — 어느 길로 왔든 여기서 걸린다). 다시 판정하는 것은 **이슈 자신의 사실**뿐이다:
  *   - `no-done-when` → `factory:needs-info`(본문을 고치면 `needs-info → queue`로 돌아온다)
  *   - `never-automate` → `factory:wont-do`(triage가 같은 사실을 만나면 스크립트가 강제하는 바로 그 상태 — 한 사실에 끝 상태는 하나다)
- * 상한(`queue-max`·`self-open-max`)과 세대(`self-depth`)는 다시 보지 않는다: 큐에 들어온 이슈는 자기 자신과 형제를 세므로 꽉 찬 큐가
- * 통째로 비워지고, `factory:queue → backlog`는 그래프에 없다(lib/labels.js). 상한은 `transition()`과 로컬 진입의 문에 남는다.
+ * #247 — `queue-max`는 다시 본다: `queueAdmission`이 이슈 자신을 세지 않으므로(자기 제외) 꽉 찬 큐의 N번째는 통과하고, 문을
+ * 비켜 들어온 N+1번째만 걸린다. 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태로 가고, 상한만 걸렸으면 `factory:needs-human` —
+ * 이슈를 고칠 사람(needs-info)도 끝낼 이유(wont-do)도 아니고, `factory:queue → backlog`는 그래프에 없으며(lib/labels.js), 큐가
+ * 비면 사람이 `needs-human → queue`(문이 상한을 다시 잰다)로 되돌린다. triage를 다시 띄우지 않는 출구다.
+ * `self-open-max`·세대(`self-depth`)는 다시 보지 않는다(형제끼리 서로를 쫓아낸다 — 상한은 `transition()`과 로컬 진입의 문에 남는다).
  * 읽지 못했으면(`unreadable`, 또는 코드 없는 거부 — 모르는 모양) 판정이 아니다: 호출자는 이슈를 내보내지 않고 재시도 가능한 자리에 세운다.
  * 반환: `{ verdict: "pass" }` | `{ verdict: "refuse", to, reason }` | `{ verdict: "unreadable", reason }`.
  */
@@ -143,7 +150,10 @@ export function entryRecheck(a) {
     return { verdict: "unreadable", reason: reasons.join("; ") || a.reason || "admission refused without a reason code" };
   }
   const own = codes.map((c, i) => [c, reasons[i]]).filter(([c]) => c in ENTRY_TARGET);
-  if (!own.length) return { verdict: "pass" };
+  if (!own.length) {
+    const cap = codes.indexOf(ADMISSION_CODES.queueMax);
+    return cap === -1 ? { verdict: "pass" } : { verdict: "refuse", to: "factory:needs-human", reason: admissionRefusedReason({ reasons: [reasons[cap]] }) };
+  }
   const to = own.some(([c]) => c === ADMISSION_CODES.neverAutomate) ? ENTRY_TARGET[ADMISSION_CODES.neverAutomate] : ENTRY_TARGET[ADMISSION_CODES.noDoneWhen];
   return { verdict: "refuse", to, reason: admissionRefusedReason({ reasons: own.map(([, r]) => r) }) };
 }

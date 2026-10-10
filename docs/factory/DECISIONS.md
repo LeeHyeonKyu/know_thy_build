@@ -3883,8 +3883,8 @@ S4 이전에 "생성물은 diff가 아니다"를 한 곳(`inMirrorFamily`)에서
   (`makeLocalEntry`, 리허설만 본다)이 여전히 심사를 우회한다. 그래서 `open_max`는 아직 하드 상한이 아니다. 기존에 열린 하네스 이슈의 라벨은
   옮기지 않는다.
   → **대체됨(#230, ADR-040)**: retro 승격 이슈는 `backlog`로 태어나 문을 지나고, 로컬 진입은 심사를 부른다. 손 라벨로 들어온 이슈는
-  triage 진입이 이슈 자신의 사실(done_when·NEVER_AUTOMATE)로 다시 본다. 상한(`queue_max`·`open_max`)을 triage 진입에서 다시 보는 일은
-  아직 없다(#245) — 그래서 손 라벨 홍수에 대해 `open_max`는 여전히 하드 상한이 아니다.
+  triage 진입이 이슈 자신의 사실(done_when·NEVER_AUTOMATE)과 `queue_max`(자기 자신은 세지 않는다, #247)로 다시 본다. `open_max`를 triage
+  진입에서 다시 보는 일은 아직 없다(#245) — 그래서 손 라벨 홍수에 대해 `open_max`는 여전히 하드 상한이 아니다.
 **1.4.38 (KTB #136 실측, 넷째).** #136은 implement를 끝까지 통과했다(미러 커밋 `33c1889` 5개 파일, `must_not` 통과, 게이트 5/5 GREEN) —
 #41의 절반이 처음으로 실제로 증명된 런이다. 그 다음 review에서 미러 **검증**이 오판했다: overlay의 `git checkout <base> -- …`는 인덱스도
 base로 바꾸는데, 재생성 뒤 워크트리는 PR head와 같아졌어도 인덱스는 base라 `git status`가 staged 변경을 보고했고 검증은 "소스와 다르다"고
@@ -4518,7 +4518,9 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
 업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.
 
-## ADR-040 큐로 들어오는 문은 하나다 — triage 진입 재심사, 로컬 진입 심사, retro 승격 이슈 — 2026-10-10 (#230)
+## ADR-040 큐로 들어오는 문은 하나다 — triage 진입 재심사, 로컬 진입 심사, retro 승격 이슈 — 2026-10-10 (#230, 재착륙 #247)
+
+(#230 브랜치 `claude/fq-230`이 한 칸 앞 번호로 쓴 항목이다. 그 번호는 PR #229의 것이므로 #247이 재착륙하며 040으로 바꿨다.)
 
 **사건**: 허점 원장(`docs/research/ktb-gap-ledger-2026-10-09.md` §1, E-1·E-2·E-3·E-8)에 따르면 `factory:queue`로 가는 정식 경로
 `transition()`(리허설 + 큐 진입 심사, ADR-025·S2)을 비켜 가는 길이 셋 있었다. ① 사람이 UI로 붙인 라벨과 라벨을 단 채 태어난
@@ -4529,7 +4531,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 **결정** — 심사 규칙은 계속 `lib/admission.js` 한 곳에만 둔다. 세 자리는 main()이 만든 **같은 심사기**를 주입받아 부르기만 한다.
 1. **triage 진입 재심사**(`runStage`). 진입 라벨이 `factory:queue`로 정해진 뒤에 돈다. 로컬 진입과 blocked 재시도 hop 뒤, 에이전트를
    띄우기 전이다. 판정은 `entryRecheck`가 구조화된 코드(`queueAdmission`의 `codes`)로 하고, 사유 문구를 정규식으로 되읽지 않는다.
-   **이슈 자신의 사실만 다시 판정한다**:
+   **이슈 자신의 사실과 `queue_max`를 다시 판정한다**(`queue_max`는 #247 — 아래 "#247이 더한 것"):
    - done_when 없음 → `factory:needs-info`. NEVER_AUTOMATE → `factory:wont-do`. 이슈 본문의 "needs-info"와 다르게 wont-do로 보내는 이유:
      triage가 같은 사실을 만나면 스크립트가 강제하는 상태가 이미 wont-do다(감사 M1). 한 사실에는 끝 상태가 하나다.
    - 거부는 `transition()`으로 한다. 코멘트는 그 전이 코멘트 하나이고, 사유는 큐 문이 같은 본문에 쓰는 문장
@@ -4538,10 +4540,11 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
      때(감사 M13)와 같은 `factory:blocked`/`api-error`로 세우고 exit 2다. needs-info·wont-do·backlog로 보내지 않고, "부적격"이라고
      말하지도 않는다. sweeper의 blocked 재시도는 hop(`blocked → queue`) 뒤에 이 자리를 다시 지난다. 그 hop도 큐 문을 지나지만,
      **이 자리가 다시 재는 것만 잰다**(`makeTransitionDep`, triage의 `prerequisite` hop): 이슈 자신의 사실과 읽기 실패는 hop을 거부하고
-     (심사기가 없으면 `transition()`이 `ADMISSION_UNWIRED`로 거부한다), 상한·세대만 걸린 판정은 통과로 읽는다. hop은 이미 얻었던 큐
+     (심사기가 없으면 `transition()`이 `ADMISSION_UNWIRED`로 거부한다), `open_max`·세대만 걸린 판정은 통과로 읽는다. hop은 이미 얻었던 큐
      라벨의 복구인데, blocked에 있는 동안 문은 그 이슈를 새 도착으로 세기 때문이다. 그대로 두면 일시적 gh 실패 한 번 뒤에 형제가
-     `open_max`에 있거나 다른 이슈가 빈자리를 채운 이슈는 hop이 매 sweep 거부되어 needs-human까지 밀렸다(`test_230_…_unreadable_…`가
-     두 상한 모두로 고정한다). 이슈 자신의 사실이 걸린 재시도는 hop에서 멈춰 blocked에 남는다(needs-info가 아니다 — `blocked →
+     `open_max`에 있는 이슈는 hop이 매 sweep 거부되어 needs-human까지 밀렸다(`test_230_…_unreadable_…`가 고정한다). #247부터 진입이
+     `queue_max`를 다시 재므로 hop도 잰다: blocked에 있는 동안 다른 이슈가 큐를 채웠으면 hop이 거부되어 blocked에 남는다(같은 테스트가
+     고정한다 — 강등 없음, 큐가 비면 다음 재시도가 지난다). 이슈 자신의 사실이 걸린 재시도는 hop에서 멈춰 blocked에 남는다(needs-info가 아니다 — `blocked →
      needs-info`는 그래프에 없다). sweeper가 재시도 한도 뒤에 needs-human으로 올린다.
 2. **로컬 진입 심사**(`makeLocalEntry`). 리허설 다음, `setFactoryLabel` 앞에서 같은 심사기를 부른다. 거부면 라벨도 코멘트도 쓰지
    않고, `local entry refused: <큐 문과 같은 문장>`을 돌려주며 stderr에도 낸다. 상한도 여기서 판정한다(이슈가 아직 backlog라 자기
@@ -4552,13 +4555,21 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
    (`retro: harness issue #N stays in backlog — not queued: …`)을 남기고, 이슈에는 사유와 다음 걸음을 적은 `factory-harness-not-queued`
    코멘트를 하나 단다(피처 주차 문장은 뺀다). retro는 던지지 않고 나머지 단계를 마친다.
 
-**이슈 본문과 다른 것**(계획 토론에서 결정, 이견은 계획 handoff의 dissent d1·d2에 남아 있다):
-- **triage 진입에서 상한을 다시 보지 않는다**(`queue_max`·`open_max`·`depth_max`). 큐에 든 이슈는 자기 자신과 형제를 센다. 그래서 꽉
-  찬 큐는 통째로 비워지고, `open_max` 형제는 서로를 쫓아낸다. 게다가 `factory:queue → backlog`는 그래프(`lib/labels.js`)에 없는 엣지다.
-  "앞선 이슈만 센다"는 대안에는 정의되지 않은 도착 순서가 필요하다. 이슈 번호는 그 순서가 아니다(`needs-info → queue` 재진입).
-  상한은 `transition()`과 로컬 진입의 문에 남는다. E-8 중 **상한 절반**(손 라벨 홍수, 대기 중 상한 변경)은 열려 있고 **#245**가 이어받는다.
-  본문 변화 절반은 위 1이 닫는다.
-- **backlog로 내보내는 상한 거부는 만들지 않았다**(위와 같은 이유). needs-info를 상한 거부에 쓰는 일도 없다.
+**#247이 더한 것**(#247 계획 dw2 — 계획 토론의 네 역할이 모두 짚은 결함):
+- **`queueAdmission`은 심사받는 이슈 자신을 `queue_max`에 세지 않는다**(`open_max`가 이미 하던 자기 제외와 같은 규칙, `lib/admission.js`).
+  backlog·needs-info·needs-human·blocked에서 오는 이슈는 큐 목록에 없으므로 `transition()`·로컬 진입의 판정은 바뀌지 않는다.
+- 그래서 **triage 진입이 `queue_max`를 다시 본다.** 꽉 찬 큐(N/N)의 이슈는 자기 자신을 세어 쫓겨나지 않고, 문을 비켜 들어온 N+1번째만
+  거부된다. 상한만 걸린 거부의 끝 상태는 `factory:needs-human`이다 — 고칠 본문이 없으니 needs-info가 아니고, 끝낼 이유가 아니니
+  wont-do가 아니며, `factory:queue → backlog`는 그래프에 없다(새 엣지를 만들지 않는다). triage를 다시 띄우지 않고, 큐가 비면 사람이
+  `needs-human → queue`로 되돌린다(그 문이 상한을 다시 잰다). 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태(needs-info·wont-do)로 간다.
+  (`test_247_triage_reentry_does_not_count_itself_against_queue_max`, `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`)
+
+**이슈 본문과 다른 것**(#230 계획 토론에서 결정, 이견은 그 계획 handoff의 dissent d1·d2에 남아 있다):
+- **triage 진입에서 `open_max`·`depth_max`는 다시 보지 않는다.** `open_max` 형제는 서로를 센다(자기 제외를 해도 형제끼리 서로를
+  쫓아낸다). "앞선 이슈만 센다"는 대안에는 정의되지 않은 도착 순서가 필요하다. 이슈 번호는 그 순서가 아니다(`needs-info → queue` 재진입).
+  그 상한은 `transition()`과 로컬 진입의 문에 남는다. E-8 중 **`open_max` 절반**(손 라벨 홍수)은 열려 있고 **#245**가 이어받는다.
+  본문 변화 절반과 `queue_max`는 위 1과 #247이 닫는다.
+- **backlog로 내보내는 상한 거부는 만들지 않았다**(그래프에 엣지가 없다). needs-info를 상한 거부에 쓰는 일도 없다.
 - **로컬 진입의 "심사기 미배선 → 거부"는 한 모양만 빼고 지킨다.** `admission`을 넘겼는데 함수가 아니면(`null`·`false`·객체) 라벨도
   코멘트도 쓰지 않고, `transition()`이 같은 경우에 내는 `ADMISSION_UNWIRED` 문장으로 거부한다. 빠진 모양은 키 자체를 **생략한** 호출이다.
   기존 테스트 `makeLocalEntry: backlog issue with no factory label → sets factory:queue…`(run-stage.test.js)가 심사기 없이 빈 본문을 큐에
@@ -4574,7 +4585,9 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   남는 틈은 hop의 문까지 끈 모양(`skipRehearsal`, 테스트 전용)뿐이다.
   같은 이유로 dw3 루브릭("origin이 queue인 재시도는 심사를 통과해야만 에이전트에 닿는다")과 dw4의 "미배선이면 거부"는 이 두
   생략 모양에서 문자 그대로는 지켜지지 않는다. 그것을 지키려면 위 기존 테스트를 바꿔야 하고, 이슈 본문에 `tests_changed_allowed:`가
-  없다 — 계획이 dw4를 고치거나 사람이 그 테스트 변경을 승인할 일이다.
+  없다 — 계획이 dw4를 고치거나 사람이 그 테스트 변경을 승인할 일이다. #247(이슈 본문 spec1, 계획 dw3)도 같은 자리에서 멈췄다: 키를
+  생략한 호출을 거부로 바꾸면 위 기존 테스트가 깨지고, #247 본문에도 `tests_changed_allowed:`가 없다. 이 모양은 그 승인이 올 때까지
+  위 규칙 그대로다.
 - **retro의 요청 모양은 그대로다**: `runRetro`는 여전히 `labels: [QUEUE_LABEL, HARNESS_LABEL]`을 목적지 요청으로 넘긴다. 기존 테스트
   (retro-bin.test.js ⓹)가 이 모양을 고정하기 때문이다. GitHub에 이슈를 만드는 dep(`makeRetroCreateIssue`)은 큐 라벨로 이슈를 만들지
   않는다. 그래서 retro에는 큐 라벨을 달고 태어나는 길이 없다.
@@ -4586,13 +4599,23 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 - 큐에 든 이슈의 triage 진입마다 gh 읽기가 더 든다(심사 한 번).
 - 사람이 부적격 이슈를 거듭 재큐하면 주기마다 전이 코멘트가 하나씩 쌓인다(dedup은 만들지 않았다).
 - NEVER_AUTOMATE 글롭의 오탐은 wont-do(출구 없음)로 간다. triage 스크립트의 기존 강제와 같은 결과다.
-- blocked 재시도 hop이 상한을 재지 않으므로, 일시적 실패로 blocked에 갔다 돌아온 이슈는 그사이 꽉 찬 큐에도 다시 들어간다(큐가
-  상한을 한 칸 넘을 수 있다). 이미 문을 지났던 이슈의 복구이고, 대안(매 sweep 거부 → needs-human)은 받아들여진 이슈를 형제 수로
-  밀어낸다.
+- blocked 재시도 hop이 `open_max`를 재지 않으므로, 일시적 실패로 blocked에 갔다 돌아온 자기생성 이슈는 그사이 형제가 상한에 닿았어도
+  다시 들어간다. 이미 문을 지났던 이슈의 복구이고, 대안(매 sweep 거부 → needs-human)은 받아들여진 이슈를 형제 수로 밀어낸다.
+- #247 — 반대로 `queue_max`는 hop도 잰다. 일시적 실패로 blocked에 간 사이 큐가 다른 이슈로 꽉 차면, 그 이슈는 큐가 빌 때까지 blocked에서
+  기다리고, 재시도 한도 안에 비지 않으면 sweeper가 needs-human으로 올린다. 큐를 N+1로 넘기는 것보다 이쪽을 골랐다.
+
+**배포 뒤 사람이 보는 변화**(소급 적용):
+- 이미 `factory:queue`에 있는 이슈도 **다음 triage 진입에서 다시 심사된다.** 손으로 큐 라벨을 붙였고 본문에 done_when이 없는 이슈는
+  배포 뒤 첫 triage에서 needs-info로 간다(전이 코멘트 하나, 사유는 큐 문의 문장 그대로). 큐가 `queue_max`를 넘겨 쌓여 있었다면
+  넘친 이슈는 needs-human으로 간다. 일을 잃은 것이 아니다 — 본문을 고치거나 큐가 비면 문을 지나 돌아온다.
+- retro의 성숙도 승격 이슈는 **더는 자동으로 큐에 들어가지 않을 수 있다**: 문(리허설 + 심사)이 거부하면 backlog에 남고
+  `factory-harness-not-queued` 코멘트 하나가 그 사유를 말한다. 예전에는 거부될 일 없이 큐 라벨을 달고 태어났다.
 - 데몬 경쟁: 진입 재심사의 전이는 claim을 쥔 채로 끝난다. claim을 잃은 런은 이 자리에 오기 전에 exit 2로 끝난다(KTB-28).
   이를 직접 고정하는 테스트는 없다.
 
 **검증**: `test_230_triage_entry_reruns_admission_and_refuses_like_transition`(코멘트 = 진짜 `transition()`의 문장, 에이전트 0회, 통과
 경로의 dep 호출 순서가 같다), `test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity`,
 `test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes`, `test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label`,
-`test_230_retro_promotion_issue_is_born_backlog_and_transitioned`, `test_230_admission_codes_classify_per_issue_vs_capacity_refusals`.
+`test_230_retro_promotion_issue_is_born_backlog_and_transitioned`, `test_230_admission_codes_classify_per_issue_vs_capacity_refusals`;
+#247: `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`, `test_247_triage_reentry_does_not_count_itself_against_queue_max`,
+`test_247_local_entry_receives_production_admission_closure`(main과 같은 늦은 CHARTER 심사기로, runStage의 순서대로 로컬 진입이 여전히 큐에 넣는다).

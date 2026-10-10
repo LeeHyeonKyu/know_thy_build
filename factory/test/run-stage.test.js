@@ -6683,8 +6683,9 @@ test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async
 });
 
 test("test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity", async () => {
-  // queue_max 3 counting the triaged issue itself (#9 + #1 + #2), and #9 is a self-generated harness issue whose two active
-  // self-generated siblings (#21, #22) sit exactly at self_generated.open_max 2.
+  // queue_max 3 counting the triaged issue itself (#9 + #1 + #21 — exactly at capacity, not over it: #247 does not count #9
+  // against itself), and #9 is a self-generated harness issue whose two active self-generated siblings (#21, #22) sit exactly
+  // at self_generated.open_max 2.
   const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
   const gh = store230([
     { number: 5, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
@@ -6693,9 +6694,11 @@ test("test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity", 
     { number: 21, labels: ["factory:queue", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
     { number: 22, labels: ["factory:ready", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
   ]);
-  // the fixture really is at capacity: the shared admission, asked about #9 itself, names both caps (and only those)
+  // the fixture really is at capacity: the shared admission, asked about #9 itself, names the open_max cap (and only that —
+  // #9's own queue slot is not counted against queue_max since #247, so the full queue of three does not refuse its own member)
   const self = await makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
-  expect(self.reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)", "self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  expect(self.reasons).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  expect((await gh.searchIssues("factory:queue")).map((i) => i.number).sort()).toEqual([1, 21, 9].sort());
   const atLaunch = [];
   const d = triageDeps230(gh, 9, {
     claudeP: vi.fn(async () => { atLaunch.push(...[9, 1, 21, 22].map((n) => [n, stateOf230(gh, n)])); return { is_error: false, result: "{}" }; }),
@@ -6789,8 +6792,9 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
 
   // one transient admission failure must not strand a capacity-bound queued issue: the retry hop back to factory:queue restores
   // a label the issue already earned, so it does not re-judge the caps the entry re-check does not re-judge either (dw2) — not
-  // against siblings at self_generated.open_max (#9 is a harness issue; #21 queued and #22 ready are its siblings), not against
-  // a queue that another issue filled to queue_max while #9 sat in blocked
+  // against siblings at self_generated.open_max (#9 is a harness issue; #21 queued and #22 ready are its siblings).
+  // #247 — queue_max IS re-judged at the entry now, so a queue that another issue filled to queue_max while #9 sat in blocked
+  // holds #9 at the hop (it stays blocked, retryable, and is not demoted) instead of letting it in as the N+1th
   const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
   const fixtures = [
     ["siblings at open_max", [
@@ -6803,9 +6807,9 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
     ["queue filled to queue_max", [
       { number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 },
       ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
-    ], [1, 2, 3], /queue 3 ≥ 3/],
+    ], [1, 2, 3], /queue 3 ≥ 3/, false],
   ];
-  for (const [name, issues, others, cap] of fixtures) {
+  for (const [name, issues, others, cap, reaches = true] of fixtures) {
     const gc = store230(issues);
     // the transient failure: the first admission read throws, the run blocks the issue (retryable, not a verdict)
     let flaky = true;
@@ -6822,6 +6826,12 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
     const atLaunch = [];
     const retry = triageDeps230(gc, 9, { claudeP: vi.fn(async () => { atLaunch.push([9, stateOf230(gc, 9)], ...others.map((n) => [n, stateOf230(gc, n)])); return { is_error: false, result: "{}" }; }) });
     await runStage({ stage: "triage", issue: 9, deps: retry });
+    if (!reaches) {
+      expect(retry.claudeP, name).not.toHaveBeenCalled();
+      expect(stateOf230(gc, 9), name).toBe("factory:blocked");
+      expect(others.map((n) => [n, stateOf230(gc, n)]), name).toEqual(before);
+      continue;
+    }
     expect(retry.claudeP, name).toHaveBeenCalledTimes(1);
     expect(atLaunch, name).toEqual([[9, "factory:queue"], ...before]);
     expect(gc.store.get(9).comments.some((c) => /queue admission refused/.test(c.body)), name).toBe(false);
@@ -6893,4 +6903,100 @@ test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label"
   // main() hands local entry the same admission closure
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/localEntry: makeLocalEntry\(\{ gh, issue, stage, env: process\.env, rehearsal, admission \}\)/);
+});
+
+// ── #247 — the #230 re-land, plus what the #247 plan pins on top: the refusal's resting state, the self-count at
+// triage re-entry, and local entry still enqueuing through the production closure in runStage's own order ──────────
+import { TRANSITIONS, ENTRY_LABELS } from "../lib/labels.js";
+import { queueAdmission } from "../lib/admission.js";
+
+const QUEUE_EXITS_247 = [...TRANSITIONS.get("factory:queue")];
+/** store230 + a log of every label write, so "at most one label write" is counted on the fake gh, not inferred. */
+const counted247 = (issues) => {
+  const gh = store230(issues);
+  const writes = [];
+  const set = gh.setFactoryLabel.bind(gh);
+  gh.setFactoryLabel = async (n, to) => { writes.push([Number(n), to]); return set(n, to); };
+  return { gh, writes };
+};
+
+test("test_247_triage_refusal_leaves_a_terminal_label_and_one_comment", async () => {
+  // reached factory:queue by a hand label (no transition() ever ran): no done_when in the body
+  const { gh, writes } = counted247([{ number: 9, labels: ["factory:queue"], body: NO_DONE_WHEN_230 }]);
+  const d = triageDeps230(gh, 9);
+  expect(await runStage({ stage: "triage", issue: 9, deps: d })).toBe(0);
+  expect(d.claudeP).not.toHaveBeenCalled();                                     // no triage work ran
+  // exactly one label write, onto a legal exit edge of factory:queue (labels.js TRANSITIONS — no new edge)
+  expect(writes).toHaveLength(1);
+  const [[n, to]] = writes;
+  expect(n).toBe(9);
+  expect(QUEUE_EXITS_247).toContain(to);
+  expect(stateOf230(gh, 9)).toBe(to);
+  // the resting state does not re-trigger triage: it is not a triage entry label, and a second triage run is a no-op
+  expect(ENTRY_LABELS.triage).not.toContain(to);
+  const again = triageDeps230(gh, 9);
+  await runStage({ stage: "triage", issue: 9, deps: again });
+  expect(again.claudeP).not.toHaveBeenCalled();
+  expect(writes).toHaveLength(1);
+  // exactly one comment, carrying transition()'s own admission sentence unchanged
+  const said = await doorReason230(NO_DONE_WHEN_230);
+  const comments = gh.store.get(9).comments.map((c) => c.body);
+  expect(comments).toHaveLength(1);
+  expect(comments[0]).toContain(said);
+});
+
+test("test_247_triage_reentry_does_not_count_itself_against_queue_max", async () => {
+  // queue_max = 3 (CHARTER_230). The pure rule first: the judged issue in the queue list is not counted against it…
+  const me = { number: 9, body: WELL_FORMED_230, author: "LeeHyeonKyu", labels: ["factory:queue"] };
+  const pure = (queued) => queueAdmission({ issue: me, charter: CHARTER_230, queued: queued.map((number) => ({ number })), openSelfGenerated: [], byNumber: () => null, factoryLogins: ["factory-bot"] });
+  expect(pure([9, 1, 2])).toMatchObject({ ok: true });
+  expect(pure([9, 1, 2, 3]).ok).toBe(false);
+  expect(pure([9, 1, 2, 3]).reasons.join("; ")).toMatch(/back_pressure\.queue_max/);
+  // …and a backlog issue (not in the list) is judged exactly as before: three others fill a queue_max of 3
+  expect(pure([1, 2, 3]).ok).toBe(false);
+  expect(pure([1, 2]).ok).toBe(true);
+
+  // N of N, the target included: triage entry admits it — no refusal, no label change, the agent runs
+  const atN = counted247([9, 1, 2].map((number) => ({ number, labels: ["factory:queue"], body: WELL_FORMED_230 })));
+  const dN = triageDeps230(atN.gh, 9, { transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  await runStage({ stage: "triage", issue: 9, deps: dN });
+  expect(dN.claudeP).toHaveBeenCalledTimes(1);
+  expect(atN.writes).toEqual([]);
+  expect(atN.gh.store.get(9).comments).toEqual([]);
+  expect(dN.transition.mock.calls.map(([a]) => a.to)).not.toContain("factory:needs-human");
+
+  // N+1 of N, the target included: refused before any triage work, the reason names back_pressure.queue_max
+  const over = counted247([9, 1, 2, 3].map((number) => ({ number, labels: ["factory:queue"], body: WELL_FORMED_230 })));
+  const dO = triageDeps230(over.gh, 9);
+  expect(await runStage({ stage: "triage", issue: 9, deps: dO })).toBe(0);
+  expect(dO.claudeP).not.toHaveBeenCalled();
+  expect(over.writes).toHaveLength(1);
+  expect(QUEUE_EXITS_247).toContain(over.writes[0][1]);
+  expect(ENTRY_LABELS.triage).not.toContain(over.writes[0][1]);
+  const c = over.gh.store.get(9).comments.map((x) => x.body);
+  expect(c).toHaveLength(1);
+  expect(c[0]).toMatch(/queue admission refused — queue 3 ≥ 3 \(back_pressure\.queue_max\)/);
+  // the others are untouched — one over-cap issue leaves, the members stay
+  for (const k of [1, 2, 3]) expect(stateOf230(over.gh, k)).toBe("factory:queue");
+});
+
+test("test_247_local_entry_receives_production_admission_closure", async () => {
+  // production shape: main() builds one admission closure (makeStageAdmission) whose CHARTER is filled in by charterReady
+  // later, and hands it to makeLocalEntry. Before charterReady it refuses ("CHARTER not loaded") — so this only enqueues if
+  // runStage really runs charterReady before localEntry.
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  let charter;
+  const admission = makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: logins230 });
+  expect((await admission({ issue: 12 })).ok).toBe(false);                     // the closure really does refuse before CHARTER
+  const said = [];
+  const d = triageDeps230(gh, 12, {
+    admission,
+    charterReady: async () => { charter = CHARTER_230; return true; },
+    localEntry: makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: rehearsed230, admission, log: (m) => said.push(m) }),
+  });
+  await runStage({ stage: "triage", issue: 12, deps: d });
+  expect(said).toEqual([]);                                                     // no refusal line
+  expect(gh.store.get(12).comments.map((x) => x.body)).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)"]);
+  expect(d.claudeP).toHaveBeenCalledTimes(1);                                   // enqueued, re-checked, and on to the agent
+  expect(stateOf230(gh, 12)).toBe("factory:queue");
 });

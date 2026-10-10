@@ -526,7 +526,9 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 그 심사기(`deps.admission`, 같은 `makeQueueAdmission`)를 다시 부른다. 판정은 `entryRecheck` 하나가 구조화된 코드로 한다:
      *   - 이슈 자신의 사실(done_when 없음 → needs-info, NEVER_AUTOMATE → wont-do)이면 `transition()`으로 내보낸다 — 코멘트는 그 전이
      *     코멘트 하나이고 사유는 큐 문이 같은 본문에 쓰는 문장 그대로다. claim은 finally가 푼다, exit 0.
-     *   - 상한은 다시 보지 않는다(자기 자신을 세는 꽉 찬 큐가 통째로 비워진다 — `entryRecheck` 주석). 그 이슈는 오늘처럼 에이전트로 간다.
+     *   - #247 — `queue_max`는 다시 본다. 심사는 이슈 자신을 세지 않으므로(`queueAdmission`의 자기 제외) 꽉 찬 큐의 N번째는 통과하고,
+     *     문을 비켜 들어온 N+1번째만 `factory:needs-human`으로 간다(`entryRecheck` 주석). `open_max`·세대는 다시 보지 않는다 — 그 이슈는
+     *     오늘처럼 에이전트로 간다.
      *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
      *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
      *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
@@ -2802,12 +2804,14 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
  */
 export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
   /**
-   * #230 (skeptic) — **triage의 blocked 재시도 hop은 상한을 다시 재지 않는다.** 그 hop(`prerequisite: true`, blocked → factory:queue)은
+   * #230 (skeptic) — **triage의 blocked 재시도 hop은 진입 재심사가 재지 않는 상한을 다시 재지 않는다.** 그 hop(`prerequisite: true`, blocked → factory:queue)은
    * 이미 얻었던 큐 라벨의 복구다. 그런데 이슈가 blocked에 있는 동안 문은 그것을 새 도착으로 센다 — 형제가 open_max에 있거나 다른
    * 이슈가 빈자리를 채웠으면 hop이 매 sweep 거부되고, 일시적 gh 실패 한 번이 받아들여진 이슈를 needs-human까지 밀었다(dw2 위반).
    * 그래서 이 hop의 문은 triage 진입 재심사(`entryRecheck`)가 다시 재는 것만 잰다: 이슈 자신의 사실(done_when·NEVER_AUTOMATE)과
-   * 읽기 실패는 여전히 hop을 거부하고(심사기가 없으면 `transition()`이 ADMISSION_UNWIRED로 거부한다 — fail closed 그대로), 상한·세대만
-   * 거부한 판정은 통과로 읽는다. 다른 전이와 다른 스테이지의 큐 전이는 심사기를 그대로 받는다.
+   * 읽기 실패는 여전히 hop을 거부하고(심사기가 없으면 `transition()`이 ADMISSION_UNWIRED로 거부한다 — fail closed 그대로), `open_max`·세대만
+   * 거부한 판정은 통과로 읽는다. #247 — 진입 재심사가 `queue_max`를 다시 재므로 hop도 잰다: blocked에 있는 동안 큐가 다른 이슈로 꽉
+   * 찼으면 hop이 거부되어 이슈는 blocked에 남고(재시도 가능, 강등 없음), N+1번째로 들어가 needs-human으로 밀리지 않는다.
+   * 다른 전이와 다른 스테이지의 큐 전이는 심사기를 그대로 받는다.
    */
   const hopAdmission = typeof admission === "function"
     ? async (a) => { const r = await admission(a); return entryRecheck(r).verdict === "pass" ? { ...r, ok: true } : r; }
