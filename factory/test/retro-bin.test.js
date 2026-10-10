@@ -1310,3 +1310,191 @@ test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async
   expect(ymdOf("2026-09-05")).toBe("2026-09-05");
   expect(ymdOf(undefined)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 });
+
+// ── #230 — the retro maturity-promotion issue is born in backlog and walks through the real door ──────────────────
+// Driven through retro's own deps assembly (`retroMainDeps`, the function main() calls — it loads CHARTER/harness/roles from
+// the checkout the way main() does and builds `createIssue` with `makeRetroCreateIssue`): real makeRehearsalChecker over a
+// temp checkout, real makeQueueAdmission over the CHARTER read from disk, real transition(), fake gh. Verdicts are the fake
+// gh's labels and comments plus retro's own record — an assembly that drops rehearsal or admission ends refused here.
+import { retroMainDeps } from "../bin/retro.js";
+import { rehearsalHash } from "../lib/rehearsal.js";
+import { notQueuedMarker } from "../lib/harness-request.js";
+import { mkdirSync } from "node:fs";
+
+const PROMO_230 = "harness: promote to M1 — DB schema files present";
+const checkout230 = () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb230-retro-"));
+  mkdirSync(join(root, ".factory"), { recursive: true });
+  mkdirSync(join(root, "docs/factory"), { recursive: true });
+  const harnessText = "[project]\ndefault_branch = \"main\"\n";
+  // the CHARTER main() would load: queue_max 3 is what the "queue full" case below runs into
+  const charterText = "---\nschema: factory.charter.v1\nstatus: ready\nback_pressure: { queue_max: 3 }\nself_generated: { open_max: 5, depth_max: 1 }\n---\n# CHARTER\n\n## NEVER_AUTOMATE\n- nothing\n";
+  writeFileSync(join(root, ".factory/harness.toml"), harnessText);
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), charterText);
+  writeFileSync(join(root, ".factory/roles.toml"), "");
+  return { root, hash: rehearsalHash({ harnessText, charterText }) };
+};
+const STATE_LABELS_230 = new Set(["backlog", "factory:queue", "factory:ready", "factory:needs-info", "factory:blocked"]);
+const ghFor230 = ({ variable, queued = 0, swapThrows = false }) => {
+  const store = new Map();
+  let seq = 400;
+  for (let k = 0; k < queued; k++) store.set(k + 1, { number: k + 1, title: `q${k}`, body: "## done_when\n- [ ] q", labels: ["factory:queue"], comments: [], author: "LeeHyeonKyu" });
+  const created = [];
+  return {
+    store, created,
+    async createIssue({ title, body, labels }) { const number = (seq += 1); created.push({ number, labels: [...labels] }); store.set(number, { number, title, body, labels: [...labels], comments: [], author: "factory-bot" }); return number; },
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { if (swapThrows) throw new Error("HTTP 403 label write"); const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATE_LABELS_230.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.labels.includes(label)).map((i) => ({ number: i.number })); },
+    async getVariable() { return variable; },
+    async commitsForPath() { return []; },
+    async commitStatuses() { return []; },
+  };
+};
+const retroWith230 = async (gh, root, over = {}) => {
+  // main()'s own assembly; only the deps that would reach git, claude or the records branch are swapped for makeDeps' fakes
+  const assembled = retroMainDeps({ root, repo: "o/r", runnerId: "test/230", gh, env: {}, now: NOW });
+  expect(assembled.dormant).toBeUndefined();
+  const { deps, recorded } = makeDeps({ state: freshState(), overrides: { createIssue: vi.fn(assembled.deps.createIssue), ...over } });
+  const code = await runRetro({ deps, now: NOW });
+  const promo = [...gh.store.values()].find((i) => i.title === PROMO_230);
+  return { code, deps, recorded, promo };
+};
+
+test("test_230_retro_promotion_issue_is_born_backlog_and_transitioned", async () => {
+  const { root, hash } = checkout230();
+
+  // rehearsal current, queue has room → born backlog + factory:harness, moved to factory:queue by transition()
+  const gh = ghFor230({ variable: hash });
+  const ok = await retroWith230(gh, root);
+  expect(ok.code).toBe(0);
+  expect(gh.created.find((c) => c.number === ok.promo.number).labels).toEqual(["backlog", "factory:harness"]);
+  expect(ok.promo.labels).toEqual(["factory:harness", "factory:queue"]);
+  expect(ok.promo.comments.map((c) => c.body.split("\n")[0])).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=script -->"]);
+  expect(ok.recorded.some((l) => /stays in backlog/.test(l))).toBe(false);
+  // the other issue retro opens (a flaky rewrite) is born backlog and stays there — only the promotion takes the door
+  const rewrite = [...gh.store.values()].find((i) => i.title === "rewrite flaky test at another level: t2");
+  expect(rewrite.labels).toEqual(["backlog", "factory:flaky"]);
+  expect(rewrite.comments).toEqual([]);
+
+  // refused: stale rehearsal, a full queue → stays backlog, one record line, one comment with the reason and the next step
+  for (const [name, g, why] of [
+    ["stale rehearsal", ghFor230({ variable: "0".repeat(64) }), /rehears/],
+    ["queue full", ghFor230({ variable: hash, queued: 3 }), /queue admission refused — queue 3 ≥ 3 \(back_pressure\.queue_max\)/],
+  ]) {
+    const r = await retroWith230(g, root);
+    expect(r.code, name).toBe(0);                                                // retro does not throw
+    expect(r.promo.labels, name).toEqual(["backlog", "factory:harness"]);
+    const lines = r.recorded.filter((l) => l.startsWith(`retro: harness issue #${r.promo.number} stays in backlog`));
+    expect(lines, name).toHaveLength(1);
+    expect(lines[0], name).toMatch(why);
+    expect(r.promo.comments, name).toHaveLength(1);
+    const c = r.promo.comments[0].body;
+    expect(c.startsWith(notQueuedMarker(r.promo.number)), name).toBe(true);
+    expect(c, name).toMatch(why);
+    expect(c, name).toMatch(/\/know-thy-build:next/);                            // the next step
+    expect(c, name).not.toMatch(/피처는 이 이슈가 큐에 들어가 머지될 때까지 주차/); // no parked feature behind a retro promotion
+    expect(r.deps.publishProposal, name).toHaveBeenCalledTimes(1);               // the remaining steps still ran
+    expect(r.deps.sync, name).toHaveBeenCalled();
+  }
+
+  // the door throws (label write 403) → still backlog, recorded, commented; retro finishes
+  const thrown = await retroWith230(ghFor230({ variable: hash, swapThrows: true }), root);
+  expect(thrown.code).toBe(0);
+  expect(thrown.promo.labels).toEqual(["backlog", "factory:harness"]);
+  expect(thrown.recorded.filter((l) => l.startsWith(`retro: harness issue #${thrown.promo.number} stays in backlog`) && /HTTP 403 label write/.test(l))).toHaveLength(1);
+  expect(thrown.promo.comments.filter((c) => c.body.startsWith(notQueuedMarker(thrown.promo.number)))).toHaveLength(1);
+  expect(thrown.deps.publishProposal).toHaveBeenCalledTimes(1);
+
+  // a duplicate open title still creates no second issue
+  const dupGh = ghFor230({ variable: hash });
+  const dup = await retroWith230(dupGh, root, { harvest: vi.fn(async () => ({ ...HARVEST(), harnessTitles: [PROMO_230] })) });
+  expect(dup.promo).toBeUndefined();
+  expect(dupGh.created.map((c) => c.labels)).toEqual([["backlog", "factory:flaky"]]);
+
+  // main() runs retro on exactly that assembly
+  const src = readFileSync(new URL("../bin/retro.js", import.meta.url), "utf8");
+  const mainSrc = src.slice(src.indexOf("\nasync function main() {"), src.indexOf("\nexport function retroMainDeps("));
+  expect(mainSrc).toMatch(/const assembled = retroMainDeps\(\{ root, repo, runnerId, gh, env: process\.env, now \}\);/);
+  expect(mainSrc).toMatch(/process\.exit\(await runRetro\(\{ deps: assembled\.deps, force, now \}\)\);/);
+  expect(mainSrc).not.toMatch(/createIssue/);
+  // and a checkout whose CHARTER is not ready stays dormant instead of opening anything
+  const { root: draftRoot } = checkout230();
+  writeFileSync(join(draftRoot, "docs/factory/CHARTER.md"), "---\nschema: factory.charter.v1\nstatus: draft\n---\n");
+  expect(retroMainDeps({ root: draftRoot, repo: "o/r", runnerId: "t", gh: ghFor230({ variable: hash }), env: {}, now: NOW })).toEqual({ dormant: "factory: CHARTER status is draft — retro dormant" });
+});
+
+// ── #247 dw5 (skeptic) — retro's promotion takes the SAME queue tail as flaky issues and harness requests ─────────────────────
+// The test_230 test above pins the comment's shape; a retro that inlined its own create → door → comment copy would still pass it.
+// Here the tail makeRetroCreateIssue calls is observed: an injected wrapper around the real createBacklogIssueAndQueue must be the
+// one that runs (an inline copy never calls it), and the default path writes byte-for-byte that function's notQueuedComment.
+import { makeRetroCreateIssue } from "../bin/retro.js";
+import { createBacklogIssueAndQueue, notQueuedComment } from "../lib/harness-request.js";
+
+test("test_247_retro_promotion_uses_the_single_backlog_queue_tail", async () => {
+  const { root, hash } = checkout230();
+  const charter247 = { back_pressure: { queue_max: 3 }, self_generated: { open_max: 5, depth_max: 1 }, never_automate: [] };
+  const harness247 = { project: { default_branch: "main" } };
+  const promo = { title: PROMO_230, body: "## done_when\n- [ ] promoted", labels: ["factory:queue", "factory:harness"] };
+
+  // wired through the injected tail: the shared function runs once with the backlog labels and no parked-feature sentence
+  for (const [name, g, queued] of [["admitted", ghFor230({ variable: hash }), true], ["queue full", ghFor230({ variable: hash, queued: 3 }), false]]) {
+    const tail = vi.fn(createBacklogIssueAndQueue);
+    const r = await makeRetroCreateIssue({ gh: g, root, charter: charter247, harness: harness247, env: {}, queueTail: tail })(promo);
+    expect(tail, name).toHaveBeenCalledTimes(1);
+    expect(tail.mock.calls[0][0], name).toMatchObject({ gh: g, title: PROMO_230, labels: ["backlog", "factory:harness"], parkedFeature: false });
+    expect(r, name).toEqual(await tail.mock.results[0].value);
+    expect(r.queued, name).toBe(queued);
+    expect(g.created.map((c) => c.labels), name).toEqual([["backlog", "factory:harness"]]);
+  }
+  // a request that does not ask for the queue never touches the tail
+  const plain = vi.fn(createBacklogIssueAndQueue);
+  const g0 = ghFor230({ variable: hash });
+  await makeRetroCreateIssue({ gh: g0, root, charter: charter247, harness: harness247, env: {}, queueTail: plain })({ title: "t", body: "b", labels: ["backlog", "factory:flaky"] });
+  expect(plain).not.toHaveBeenCalled();
+
+  // the default path: refused and throwing doors leave exactly the shared function's comment, byte for byte
+  for (const [name, g, threw] of [["refused", ghFor230({ variable: hash, queued: 3 }), false], ["throws", ghFor230({ variable: hash, swapThrows: true }), true]]) {
+    const r = await makeRetroCreateIssue({ gh: g, root, charter: charter247, harness: harness247, env: {} })(promo);
+    expect(r.queued, name).toBe(false);
+    // (transition() writes its own transition/failed-swap comments; the not-queued comment is the tail's, exactly one)
+    const mine = g.store.get(r.issue).comments.map((c) => c.body).filter((b) => b.startsWith(notQueuedMarker(r.issue)));
+    expect(mine, name).toEqual([notQueuedComment({ issue: r.issue, reason: r.queue_reason, threw, parkedFeature: false })]);
+  }
+});
+
+// ── #249 (dw4, self-critique) — the refusal trace in retro's run state: `queued: false` + `queue_reason` on the harness step ──────
+// test_230 above pins the record line and the comment; this pins the third place dw4 names — the `applied` entry retro writes into
+// `_retro.md`'s history — through main()'s own assembly and the real door. A retro that dropped the field, or wrote it on an
+// admitted issue, fails here.
+test("test_249_retro_history_records_queued_false_with_the_refusal_reason", async () => {
+  const { root, hash } = checkout230();
+  const runWith = async (gh) => {
+    const assembled = retroMainDeps({ root, repo: "o/r", runnerId: "test/249", gh, env: {}, now: NOW });
+    const { deps, recorded, last } = makeDeps({ state: freshState(), overrides: { createIssue: assembled.deps.createIssue } });
+    expect(await runRetro({ deps, now: NOW })).toBe(0);
+    const promo = [...gh.store.values()].find((i) => i.title === PROMO_230);
+    const step = last().history.at(-1).applied.filter((a) => a.step === "harness");
+    return { promo, recorded, step };
+  };
+
+  // refused by the door (queue 3 ≥ queue_max 3): the history entry carries queued:false and the same reason as the record line
+  const refused = await runWith(ghFor230({ variable: hash, queued: 3 }));
+  expect(refused.promo.labels).toEqual(["backlog", "factory:harness"]);
+  expect(refused.step).toHaveLength(1);
+  expect(refused.step[0]).toMatchObject({ step: "harness", title: PROMO_230, issue: refused.promo.number, queued: false });
+  expect(refused.step[0].queue_reason).toMatch(/^queue admission refused — queue 3 ≥ 3 \(back_pressure\.queue_max\)/);
+  expect(refused.recorded).toContain(`retro: harness issue #${refused.promo.number} stays in backlog — not queued: ${refused.step[0].queue_reason}`);
+
+  // the door throws: still a refusal trace, with the thrown error as the reason
+  const thrown = await runWith(ghFor230({ variable: hash, swapThrows: true }));
+  expect(thrown.step[0]).toMatchObject({ issue: thrown.promo.number, queued: false });
+  expect(thrown.step[0].queue_reason).toMatch(/HTTP 403 label write/);
+
+  // admitted: no refusal trace in the history entry
+  const ok = await runWith(ghFor230({ variable: hash }));
+  expect(ok.promo.labels).toEqual(["factory:harness", "factory:queue"]);
+  expect(ok.step).toEqual([{ step: "harness", title: PROMO_230, issue: ok.promo.number }]);
+});

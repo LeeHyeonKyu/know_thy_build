@@ -1,3 +1,4 @@
+// Scope change (#249): dw4/dw6 — re-landing branch claude/fq-247 @ 9f6dc7a as-is (non_goal "no new design"): that branch makes the flaky harvest call harness-request.js's single createBacklogIssueAndQueue (the tail dw4's retro promotion uses), so dropping this hunk would leave a second copy of that tail. (#247: dw5, verifier finding 4.)
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { parseVitestJson } from "./parsers/vitest-json.js";
@@ -13,6 +14,7 @@ import { runDiffCoverage } from "./diff-coverage.js";
 import { mutationGate } from "./mutation.js";
 import { scrubbedRunner } from "./exec.js";
 import { SECRET_ENV, scrubText } from "../bin/scrub-artifacts.js";
+import { createBacklogIssueAndQueue } from "./harness-request.js";
 
 const LEVELS = ["fast", "full", "deep"];
 /**
@@ -589,18 +591,18 @@ export async function runStageGates({ run: injectedRun, cwd, harness, stage, tie
          * 태어나 리허설 + 심사를 실은 문을 지나고, 거부되면 `factory-harness-not-queued` 코멘트를 단다.
          */
         try {
-          const n = await gh?.createIssue({ title, body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`, labels: ["backlog", "factory:flaky"] });
-          result.flaky_issues.push(n);
-          if (n != null) {
-            const t = transitionIssue
-              ? await transitionIssue({ issue: n, to: "factory:queue", reason: `flaky test harvested while implementing #${issue}` })
-              : { ok: false, reason: "no transition wiring in this gate run — the issue stays in backlog" };
-            if (!t?.ok) {
-              (result.flaky_issues_backlogged ??= []).push({ issue: n, reason: t?.reason || "unknown" });
-              try { await gh?.comment(n, `<!-- factory-flaky-not-queued issue=${n} -->\n이 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이가 거부됐습니다: ${t?.reason || "unknown"}\n\n하네스를 러너에서 한 번 돌린 뒤(\`factory rehearse\`) \`/know-thy-build:next\`로 큐에 넣으세요(ADR-025).`); }
-              catch { /* 기록의 실패가 수확의 실패는 아니다 */ }
-            }
-          }
+          // #247 dw5 — the create-in-backlog → door → not-queued-comment tail is harness-request.js's single
+          // `createBacklogIssueAndQueue` (the one harness requests and retro promotions call), not a copy with its own marker.
+          const made = await createBacklogIssueAndQueue({
+            gh, title,
+            body: `Detected while implementing #${issue}. evidence: ${JSON.stringify(c.evidence)}`,
+            labels: ["backlog", "factory:flaky"],
+            reason: `flaky test harvested while implementing #${issue}`,
+            transitionIssue,
+            parkedFeature: false,
+          });
+          result.flaky_issues.push(made.issue);
+          if (!made.queued) (result.flaky_issues_backlogged ??= []).push({ issue: made.issue, reason: made.queue_reason });
         } catch (e) { result.flaky_issues.push(`error: ${e?.message || e}`); }
       }
       result.tests.failed = result.tests.failing.length;
