@@ -21,7 +21,7 @@ import { STAGE_OF_TARGET, ENTRY_LABELS, BLOCKED_RETRY, factoryLabelOf, STATES, T
 import { HARNESS_LABEL, VETO_LABEL } from "../lib/label-catalog.js";
 import { harnessNeeded, ensureHarnessIssue, parkedReason, findOpenHarnessIssueFor } from "../lib/harness-request.js";
 import { makeRehearsalChecker } from "../lib/rehearsal.js";
-import { makeQueueAdmission } from "../lib/admission.js";
+import { makeQueueAdmission, entryRecheck, admissionRefusedReason, ADMISSION_CODES } from "../lib/admission.js";
 import { mirrorStep, mirrorMatchesHead, inMirrorFamily, regenerateMirror, mirrorApplicable, isUnionMergePath, MIRROR_FAMILIES } from "../lib/mirror.js";
 import { REHEARSAL_UNWIRED } from "../lib/transition.js";
 export { HARNESS_LABEL };   // 재수출 — retro.js와 이 값이 같은 소스에서 왔다는 것을 테스트가 import equality로 확인한다
@@ -512,6 +512,35 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         entryLabel = t.to;
       } else {
         blockedOriginFrom = origin.from;
+      }
+    }
+    /**
+     * #230 (허점 원장 E-1·E-3·E-8) — **큐로 들어오는 문은 하나다: triage 진입이 심사를 한 번 더 돈다.** `transition()`의 큐 문을
+     * 비켜 오는 길이 있었다 — 사람이 UI로 붙인 라벨, 라벨을 달고 태어난 이슈, 문을 지난 뒤 러너 대기(55~90분) 중에 바뀐 본문.
+     * 그래서 에이전트를 띄우기 전, 진입 라벨이 `factory:queue`로 정해진 이 자리(로컬 진입과 blocked 재시도 hop **뒤**)에서 main의
+     * 그 심사기(`deps.admission`, 같은 `makeQueueAdmission`)를 다시 부른다. 판정은 `entryRecheck` 하나가 구조화된 코드로 한다:
+     *   - 이슈 자신의 사실(done_when 없음 → needs-info, NEVER_AUTOMATE → wont-do)이면 `transition()`으로 내보낸다 — 코멘트는 그 전이
+     *     코멘트 하나이고 사유는 큐 문이 같은 본문에 쓰는 문장 그대로다. claim은 finally가 푼다, exit 0.
+     *   - 상한은 다시 보지 않는다(자기 자신을 세는 꽉 찬 큐가 통째로 비워진다 — `entryRecheck` 주석). 그 이슈는 오늘처럼 에이전트로 간다.
+     *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
+     *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
+     */
+    if (stage === "triage" && entryLabel === "factory:queue" && d.admission) {
+      let v;
+      try { v = entryRecheck(await d.admission({ issue })); }
+      catch (e) { v = { verdict: "unreadable", reason: `queue admission threw — ${e?.message || e}` }; }
+      if (v.verdict === "unreadable") {
+        record([`triage entry: queue admission unreadable — ${v.reason}`]);
+        const t = await d.transition({ to: "factory:blocked", reason: `queue admission unreadable at triage entry — ${v.reason} (not a verdict on this issue; retried)`, cause: "api-error" });
+        console.error(`factory: stage triage aborted — queue admission unreadable: ${v.reason}`);
+        record([...refusal(t)]);
+        return 2;
+      }
+      if (v.verdict === "refuse") {
+        const t = await d.transition({ to: v.to, reason: v.reason });
+        console.error(`factory: issue #${issue} — triage entry refused: ${v.reason}`);
+        record([`triage entry: ${v.reason} → ${v.to}`, ...(t.ok ? [`transition: ${t.to}`] : refusal(t))]);
+        return t.ok ? 0 : 2;
       }
     }
     /**
@@ -3437,7 +3466,7 @@ export const overlayLine = (ov) => {
  * 마커 코멘트를 남긴다 — 락은 이미 이 프로세스가 쥐고 있으므로, 라벨 이벤트로 따라 뜨는 GitHub의
  * triage 잡은 claim에 실패해 exit 0으로 물러난다(의도된 설계, 중복 실행 방지).
  */
-export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
+export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admission = null, log = (m) => console.error(m) }) {
   return async () => {
     if (!env?.FACTORY_LOCAL_ENTRY || stage !== "triage") return null;
     const it = await gh.issue(issue);
@@ -3458,11 +3487,38 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null }) {
        */
       const r = await rehearsal?.();
       if (!r || r.ok !== true) return `local entry refused: ${r?.reason || REHEARSAL_UNWIRED}`;
+      /**
+       * #230 (E-2) — **심사도 같은 문으로.** 리허설만 보던 이 자리는 done_when 없는 이슈·NEVER_AUTOMATE·꽉 찬 큐를 그대로 큐에 썼다.
+       * main의 그 심사기를 부르고, 거부면 라벨을 쓰지 않고 큐 문과 같은 문장을 돌려주고 stderr에도 낸다.
+       * 심사기를 받지 않은 호출(`admission` 생략)은 예전처럼 리허설만 본다 — 기존 테스트(run-stage.test.js "makeLocalEntry: backlog
+       * issue with no factory label → sets factory:queue…", 빈 본문을 큐에 넣는다)가 그 모양을 고정하고(tests_are_load_bearing), 프로덕션
+       * 배선(main)은 언제나 심사기를 넘긴다. 그렇게 큐에 들어온 이슈도 triage 진입의 재심사(runStage)가 이슈 자신의 사실로 다시 본다.
+       */
+      if (typeof admission === "function") {
+        const a = await admission({ issue });
+        if (a?.ok !== true) {
+          const line = `local entry refused: ${admissionRefusedReason(a)}`;
+          log(line);
+          return line;
+        }
+      }
       await gh.setFactoryLabel(issue, "factory:queue");
       await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
       return "local entry: backlog → factory:queue";
     }
     return null;
+  };
+}
+
+/**
+ * main()의 큐 진입 심사기(#230에서 추출 — 테스트가 프로덕션 배선을 그대로 부르게). CHARTER는 `charterReady`가 나중에 읽으므로
+ * 호출 시점에 `getCharter()`로 늦게 본다. 없으면 거부하되(fail closed) 그 거부는 `unreadable`이다 — 이슈에 대한 판정이 아니다.
+ */
+export function makeStageAdmission({ gh, getCharter, factoryLogins }) {
+  return async (args) => {
+    const charter = getCharter();
+    if (!charter) return { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"], codes: [ADMISSION_CODES.unreadable] };
+    return makeQueueAdmission({ gh, charter, factoryLogins })(args);
   };
 }
 
@@ -3551,9 +3607,8 @@ async function main() {
    */
   const rehearsal = makeRehearsalChecker({ gh, root, branch: () => harness?.project?.default_branch || "main" });   // 지연: harness는 charterReady에서 읽힌다
   // S2 — 큐 진입 심사. charter는 charterReady에서 읽히므로 호출 시점에 늦게 본다; 없으면 심사기가 거부한다(fail closed).
-  const admission = async (args) => (charter
-    ? makeQueueAdmission({ gh, charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) })(args)
-    : { ok: false, reasons: ["CHARTER not loaded — queue admission needs it"] });
+  // #230 — 이 한 심사기가 큐 문(`deps.transition`)·로컬 진입·triage 진입 재심사에 모두 간다.
+  const admission = makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: () => resolveFactoryLogins({ gh, env: process.env }) });
   const deps = {
     // 잠드는 건 정상 동작이지만 "왜" 잠들었는지는 반드시 말한다(`makeCharterReady`). #179 — 엔진 판정도 거기서, base에서 굳는다.
     charterReady: makeCharterReady({ root, set: (s) => { if ("charter" in s) charter = s.charter; if ("harness" in s) harness = s.harness; if ("engine" in s) engineAtBase = s.engine; } }),
@@ -3566,7 +3621,9 @@ async function main() {
     trustWorkspace: () => trustWorkspace({ root }),
     claim: () => claim({ run, cwd: root, issue, stage, runnerId }),
     // KTB-44 (r2 nf-2): 로컬 진입도 다른 네 생산자와 **같은** 검사기를 지난다.
-    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal }),
+    localEntry: makeLocalEntry({ gh, issue, stage, env: process.env, rehearsal, admission }),
+    /** #230 — triage 진입의 재심사(runStage). 위 큐 문과 같은 심사기다. */
+    admission,
     /** 진입 상태 가드(KTB-10)의 재료 — 지금 이 순간 이슈에 붙어 있는 라벨 이름들. */
     issueLabels: async () => (await gh.issue(issue)).labels,
     /** blocked 재시도 가드 전용(KTB-15b I2) — 지금의 factory:blocked이 마지막으로 어느 스테이지의

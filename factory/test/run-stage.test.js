@@ -6572,3 +6572,211 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
     expect(r.ok, name).toBe(false);
   }
 });
+
+// ── #230 — one door into the queue: the triage entry re-runs admission; local entry admits ───────────────────────
+// Every test here drives the real door: real transition(), real makeQueueAdmission (through main's `makeStageAdmission`
+// where the wiring is the point), a fake gh that keeps labels and comments. Verdicts come from the fake gh's state —
+// the final label, the comments the issue actually got, whether the agent was launched — not from mock arguments.
+import { makeStageAdmission } from "../bin/run-stage.js";
+import { blockedOrigin as blockedOrigin230 } from "../lib/retro/issue-comments.js";
+
+const CHARTER_230 = { never_automate: ["templates/factory/**"], back_pressure: { queue_max: 3 }, self_generated: { open_max: 2, depth_max: 1 } };
+const WELL_FORMED_230 = "## What\nfix the button\n\n## Impact paths\n- `src/button.js`\n\n## done_when\n- [ ] `test_9_button` — it clicks";
+const NO_DONE_WHEN_230 = "## What\nplease fix the button\n\n## Impact paths\n- `src/button.js`";
+const NEVER_AUTO_230 = "## What\nbump the template\n\n## Impact paths\n- `templates/factory/github/workflows/x.yml`\n\n## done_when\n- [ ] `test_9_tpl` — bumped";
+const store230 = (issues) => {
+  const store = new Map();
+  for (const i of issues) store.set(i.number, { state: "open", title: `#${i.number}`, author: "LeeHyeonKyu", comments: [], ...i, labels: [...i.labels] });
+  const gh = {
+    store,
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATES.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.state === "open" && i.labels.includes(label)).map((i) => ({ number: i.number })); },
+  };
+  return gh;
+};
+const logins230 = async () => ({ ok: true, logins: ["factory-bot"] });
+const rehearsed230 = async () => ({ ok: true });
+/** What the real `transition({ to: "factory:queue" })` says about the same body — on a backlog twin in a fresh, under-capacity store. */
+const doorReason230 = async (body, extra = {}) => {
+  const gh = store230([{ number: 900, labels: ["backlog"], body, ...extra }]);
+  const t = await realTransition({ gh, issue: 900, to: "factory:queue", rehearsal: rehearsed230, admission: makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 }) });
+  expect(t.ok).toBe(false);
+  return t.reason;
+};
+/** A triage run's deps the way main() assembles them: production transition dep + production admission closure. */
+const triageDeps230 = (gh, n, { charter = CHARTER_230, admission, transition, lines = [], ...over } = {}) => {
+  const adm = admission === undefined ? makeStageAdmission({ gh, getCharter: () => charter, factoryLogins: logins230 }) : admission;
+  return baseDeps({
+    issueLabels: async () => (await gh.issue(n)).labels,
+    blockedOrigin: async () => blockedOrigin230(await gh.comments(n)),
+    transition: transition ?? makeTransitionDep({ gh, issue: n, stage: "triage", rehearsal: rehearsed230, admission: adm, buildExtra: async () => ({}) }),
+    ...(adm ? { admission: adm } : {}),
+    claudeP: vi.fn(async () => ({ is_error: false, result: "{}" })),
+    release: vi.fn(async () => true),
+    runRecord: (l) => lines.push(...l),
+    ...over,
+  });
+};
+const stateOf230 = (gh, n) => gh.store.get(n).labels.find((l) => STATES.has(l));
+
+test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async () => {
+  // (a) no done_when → needs-info; (b) NEVER_AUTOMATE impact path → wont-do (the state triage's own override forces, run-stage :1089)
+  for (const [body, end] of [[NO_DONE_WHEN_230, "factory:needs-info"], [NEVER_AUTO_230, "factory:wont-do"]]) {
+    const gh = store230([{ number: 9, labels: ["factory:queue"], body }]);
+    const lines = [];
+    const d = triageDeps230(gh, 9, { lines });
+    expect(await runStage({ stage: "triage", issue: 9, deps: d }), end).toBe(0);
+    expect(stateOf230(gh, 9), end).toBe(end);                                   // the label actually left factory:queue
+    expect(d.claudeP, end).not.toHaveBeenCalled();                              // no agent money spent
+    expect(d.release, end).toHaveBeenCalled();                                  // the claim is released
+    const expected = await doorReason230(body);
+    expect(expected, end).toMatch(/^queue admission refused — /);
+    const comments = gh.store.get(9).comments.map((c) => c.body);
+    expect(comments, end).toHaveLength(1);                                      // one comment — transition()'s own
+    expect(comments[0], end).toMatch(new RegExp(`^<!-- factory-transition:v1 from=factory:queue to=${end} by=script -->\n`));
+    expect(comments[0].split("\n")[1], end).toBe(`factory:queue → ${end} — ${expected}`);
+    expect(lines.some((l) => l.includes(expected)), end).toBe(true);
+  }
+
+  // (c) an admissible issue reaches the agent — and the run calls the same deps in the same order as a run without the re-check
+  const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
+  const order = (d, calls) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, typeof v === "function" ? async (...a) => { calls.push(k); return v(...a); } : v]));
+  const today = [], now = [];
+  const stub = () => ({ transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  const without = triageDeps230(gh, 9, { admission: null, ...stub() });
+  expect(without.admission).toBeUndefined();
+  await runStage({ stage: "triage", issue: 9, deps: order(without, today) });
+  const withIt = triageDeps230(gh, 9, stub());
+  await runStage({ stage: "triage", issue: 9, deps: order(withIt, now) });
+  expect(withIt.claudeP).toHaveBeenCalledTimes(1);
+  expect(now.filter((k) => k === "admission")).toHaveLength(1);
+  expect(now.filter((k) => k !== "admission")).toEqual(today);
+  expect(now.indexOf("admission")).toBeLessThan(now.indexOf("claudeP"));
+  expect(gh.store.get(9).comments).toEqual([]);                                 // nothing said about admission on the happy path
+
+  // main() wires the one admission closure into the triage entry and into local entry
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/const admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, factoryLogins: \(\) => resolveFactoryLogins\(\{ gh, env: process\.env \}\) \}\);/);
+  expect(src).toMatch(/\n    admission,\n/);
+});
+
+test("test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity", async () => {
+  // queue_max 3 counting the triaged issue itself (#9 + #1 + #2), and #9 is a self-generated harness issue whose two active
+  // self-generated siblings (#21, #22) sit exactly at self_generated.open_max 2.
+  const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
+  const gh = store230([
+    { number: 5, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+    { number: 9, labels: ["factory:queue", "factory:harness"], body: harness9, author: "factory-bot" },
+    { number: 1, labels: ["factory:queue"], body: WELL_FORMED_230 },
+    { number: 21, labels: ["factory:queue", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+    { number: 22, labels: ["factory:ready", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+  ]);
+  // the fixture really is at capacity: the shared admission, asked about #9 itself, names both caps (and only those)
+  const self = await makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
+  expect(self.reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)", "self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  const atLaunch = [];
+  const d = triageDeps230(gh, 9, {
+    claudeP: vi.fn(async () => { atLaunch.push(...[9, 1, 21, 22].map((n) => [n, stateOf230(gh, n)])); return { is_error: false, result: "{}" }; }),
+  });
+  await runStage({ stage: "triage", issue: 9, deps: d });
+  expect(d.claudeP).toHaveBeenCalledTimes(1);                                   // the agent is launched
+  expect(atLaunch).toEqual([[9, "factory:queue"], [1, "factory:queue"], [21, "factory:queue"], [22, "factory:ready"]]);   // nobody demoted
+  expect(gh.store.get(9).comments.some((c) => /queue admission refused/.test(c.body))).toBe(false);
+});
+
+test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", async () => {
+  const unreadable = [
+    ["gh throws inside admission", (gh) => ({ gh: { ...gh, searchIssues: async () => { throw new Error("HTTP 502 search"); } }, charter: CHARTER_230 }), /HTTP 502 search/],
+    ["CHARTER not loaded", (gh) => ({ gh, charter: undefined }), /CHARTER not loaded/],
+  ];
+  for (const [name, wire, why] of unreadable) {
+    const gh = store230([{ number: 9, labels: ["factory:queue"], body: NO_DONE_WHEN_230 }]);
+    const { gh: admGh, charter } = wire(gh);
+    const lines = [];
+    const d = triageDeps230(gh, 9, { lines, admission: makeStageAdmission({ gh: admGh, getCharter: () => charter, factoryLogins: logins230 }) });
+    expect(await runStage({ stage: "triage", issue: 9, deps: d }), name).toBe(2);
+    expect(stateOf230(gh, 9), name).toBe("factory:blocked");                    // never needs-info / wont-do / backlog
+    expect(blockedOrigin230(await gh.comments(9)), name).toMatchObject({ from: "factory:queue", stage: "triage", cause: "api-error" });
+    expect(gh.store.get(9).comments.some((c) => /admission refused|inadmissible/.test(c.body)), name).toBe(false);
+    expect(d.claudeP, name).not.toHaveBeenCalled();
+    expect(lines.some((l) => l.startsWith("triage entry: queue admission unreadable") && why.test(l)), name).toBe(true);
+  }
+  // an admission dep that throws is the same unreadable, not a verdict
+  const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
+  const d = triageDeps230(gh, 9, { admission: async () => { throw new Error("boom"); } });
+  expect(await runStage({ stage: "triage", issue: 9, deps: d })).toBe(2);
+  expect(stateOf230(gh, 9)).toBe("factory:blocked");
+  expect(d.claudeP).not.toHaveBeenCalled();
+
+  // the sweeper's blocked retry (origin factory:queue) re-enters triage: it cannot reach the agent unless admission passes
+  const seed = async (body) => {
+    const g = store230([{ number: 9, labels: ["factory:queue"], body }]);
+    expect((await realTransition({ gh: g, issue: 9, to: "factory:blocked", reason: "entry state unreadable — HTTP 502", stage: "triage", cause: "api-error" })).ok).toBe(true);
+    return g;
+  };
+  // production wiring: the hop itself goes through the door
+  const g1 = await seed(NO_DONE_WHEN_230);
+  const d1 = triageDeps230(g1, 9);
+  await runStage({ stage: "triage", issue: 9, deps: d1 });
+  expect(d1.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g1, 9)).not.toBe("factory:ready");
+  // even a hop that skipped the door lands in front of the entry re-check
+  const g2 = await seed(NO_DONE_WHEN_230);
+  const adm2 = makeStageAdmission({ gh: g2, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const d2 = triageDeps230(g2, 9, { admission: adm2, transition: makeTransitionDep({ gh: g2, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm2, buildExtra: async () => ({}),
+    transitionFn: (a) => realTransition({ ...a, ...(a.to === "factory:queue" ? { skipRehearsal: true } : {}) }) }) });
+  expect(await runStage({ stage: "triage", issue: 9, deps: d2 })).toBe(0);
+  expect(d2.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g2, 9)).toBe("factory:needs-info");
+  // and an admissible issue's retry still reaches the agent
+  const g3 = await seed(WELL_FORMED_230);
+  const d3 = triageDeps230(g3, 9);
+  await runStage({ stage: "triage", issue: 9, deps: d3 });
+  expect(d3.claudeP).toHaveBeenCalledTimes(1);
+});
+
+test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label", async () => {
+  const env = { FACTORY_LOCAL_ENTRY: "1" };                                     // injected, never process.env
+  const cases = [
+    ["no done_when", [{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]],
+    ["NEVER_AUTOMATE", [{ number: 12, labels: ["backlog"], body: NEVER_AUTO_230 }]],
+    ["queue at queue_max", [{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }, ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 }))]],
+  ];
+  for (const [name, issues] of cases) {
+    const gh = store230(issues);
+    const setFactoryLabel = vi.spyOn(gh, "setFactoryLabel");
+    const comment = vi.spyOn(gh, "comment");
+    const said = [];
+    const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 }), log: (m) => said.push(m) })();
+    // what the real transition() says for the same issue in the same repo state
+    const twin = store230(issues);
+    const t = await realTransition({ gh: twin, issue: 12, to: "factory:queue", rehearsal: rehearsed230, admission: makeQueueAdmission({ gh: twin, charter: CHARTER_230, factoryLogins: logins230 }) });
+    expect(t.ok, name).toBe(false);
+    expect(line, name).toBe(`local entry refused: ${t.reason}`);
+    expect(said, name).toEqual([line]);                                          // printed to stderr as well
+    expect(setFactoryLabel, name).not.toHaveBeenCalled();
+    expect(comment, name).not.toHaveBeenCalled();
+    expect(stateOf230(gh, 12), name).toBe("backlog");
+  }
+  // an admissible backlog issue is queued exactly as today
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const said = [];
+  const line = await makeLocalEntry({ gh, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 }), log: (m) => said.push(m) })();
+  expect(line).toBe("local entry: backlog → factory:queue");
+  expect(stateOf230(gh, 12)).toBe("factory:queue");
+  expect(gh.store.get(12).comments.map((c) => c.body)).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)"]);
+  expect(said).toEqual([]);
+  // without FACTORY_LOCAL_ENTRY there is no local entry at all
+  expect(await makeLocalEntry({ gh: store230([{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]), issue: 12, stage: "triage", env: {}, rehearsal: rehearsed230, admission: async () => ({ ok: false, reasons: ["x"] }) })()).toBeNull();
+  // the admission that reads gh fails closed: an unreadable read refuses, it never writes the label
+  const broken = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const refused = await makeLocalEntry({ gh: broken, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeStageAdmission({ gh: broken, getCharter: () => undefined, factoryLogins: logins230 }), log: () => {} })();
+  expect(refused).toBe("local entry refused: queue admission refused — CHARTER not loaded — queue admission needs it");
+  expect(stateOf230(broken, 12)).toBe("backlog");
+  // main() hands local entry the same admission closure
+  const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
+  expect(src).toMatch(/localEntry: makeLocalEntry\(\{ gh, issue, stage, env: process\.env, rehearsal, admission \}\)/);
+});
