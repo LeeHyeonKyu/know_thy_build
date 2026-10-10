@@ -1085,7 +1085,8 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(s4).toHaveLength(1);
   const n4 = bytesOf207(s4[0]);
   expect(n4).toBe(statSync207(join(r4, ".factory/out/loaded.json")).size);
-  expect(n4 <= LIMIT207 || /over the 4096-byte limit/.test(s4[0])).toBe(true);
+  // 줄은 넘었을 때, 그리고 그때만 "over"라고 말한다(넘은 파일이 "over"라는 문구만으로 통과하지 않도록 양방향으로 묶는다).
+  expect(/over the 4096-byte limit/.test(s4[0])).toBe(n4 > LIMIT207);
   // 사건의 모양은 실제로 한계 아래로 내려온다 — 줄이 "넘었다"고 말하는 것만으로는 고친 것이 아니다. 무게 대부분은 claim이 아니라
   // must_fix[].evidence(리뷰 스키마의 필수 자유 텍스트)였으므로 그것도 같은 규칙으로 잘리고, 전문은 포인터가 가리키는 파일에 있다.
   const untruncated4 = Buffer.byteLength(JSON.stringify(full4, null, 2));
@@ -1096,6 +1097,15 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   // 실제 항목의 자유 텍스트(claim·evidence·repro)는 같은 n자 + 포인터, where는 그대로. 전문은 포인터가 가리키는 파일에 같은 id로 있다.
   const cutTo4 = Number(/cut to (\d+) chars/.exec(s4[0])?.[1]);
   expect([200, 100]).toContain(cutTo4);
+  // skeptic (#207): 사건의 모양은 200자 패스로는 4096을 넘고(아래에서 확인), 실제로 내려오게 한 것은 100자 두 번째 패스다 —
+  // 200자에서 멈추는 회귀는 여기서 RED가 된다(dw1 (a)와 같은 방식).
+  expect(cutTo4).toBe(100);
+  const at200of4 = Buffer.byteLength(JSON.stringify({ ...full4,
+    must_fix: full4.must_fix.map((m) => ({ ...m, claim: cut207(m.claim, 200), evidence: cut207(m.evidence, 200), ...("repro" in m ? { repro: cut207(m.repro, 200) } : {}) })),
+    rework_pins: full4.rework_pins.map((p) => ({ ...p, text: cut207(p.text, 200) })),
+    disputed: full4.disputed.map((x) => ({ ...x, reason: cut207(x.reason, 200) })),
+  }, null, 2));
+  expect(at200of4).toBeGreaterThan(LIMIT207);
   const builder4 = JSON.parse(readFileSync(join(r4, ".factory/out/context.builder.json"), "utf8"));
   for (const [i, m] of MUST_FIX_195.entries()) {
     const id = `dw${i + 1}`;
@@ -1147,4 +1157,28 @@ test("test_207_loaded_json_cut_counts_code_points_and_never_splits_a_surrogate_p
   expect(disk2.must_fix.some((m) => lone.test(m.claim))).toBe(false);
   // 전문은 포인터가 가리키는 파일에 그대로다.
   expect(JSON.parse(readFileSync(join(r2, ".factory/out/context.builder.json"), "utf8")).loaded.must_fix[0].claim).toBe(`b${E.repeat(150)}`);
+});
+
+// skeptic (#207) — 경계: 정확히 n 코드 포인트인 텍스트는 잘리지 않고(포인터도 없다), n+1이면 앞 n자 + 포인터다. 기대값은 cut 규칙을
+// 다시 쓰지 않고 손으로 쓴 리터럴이다 — `>`를 `>=`로 바꾸는(정확히 n자에도 포인터를 붙이는) 변이와 n-1에서 자르는 변이가 여기서 RED다.
+test("test_207_loaded_json_cut_boundary_exactly_n_chars_is_kept_whole", async () => {
+  const P = "\u2026 (full text: .factory/out/context.builder.json)";
+  // 200자 패스(작은 페이로드 — 두 번째 패스가 필요 없다).
+  const r = root207();
+  const h = await reworkHistory207({ claims: ["x".repeat(200), "y".repeat(201)], disputedReason: "z".repeat(200), sgDetail: "d", briefClaim: "b", restartAndSelfGate: false });
+  const ctx = await buildContext({ root: r, gh: h.gh, issue: h.issue, stage: "implement" });
+  expect(ctx.loaded_json.truncated_to).toBe(200);
+  const disk = loadedOnDisk207(r);
+  expect(disk.must_fix.map((m) => m.claim)).toEqual(["x".repeat(200), "y".repeat(200) + P]);
+  expect(disk.rework_pins.map((p) => p.text)).toEqual(["x".repeat(200), "y".repeat(200) + P]);
+  expect(disk.disputed[0].reason).toBe("z".repeat(200));
+  // 100자 패스(항목 40개, evidence 300자 — 200자 패스로는 4096을 넘는다): 정확히 100자는 그대로, 101자는 100자 + 포인터.
+  const r2 = root207();
+  const claims2 = Array.from({ length: 40 }, (_, i) => (i % 2 ? "q".repeat(101) : "p".repeat(100)));
+  const h2 = await reworkHistory207({ claims: claims2, evidence: "e".repeat(300), disputedReason: "r", sgDetail: "d", briefClaim: "b", restartAndSelfGate: false });
+  const ctx2 = await buildContext({ root: r2, gh: h2.gh, issue: h2.issue, stage: "implement" });
+  expect(ctx2.loaded_json.truncated_to).toBe(100);
+  const disk2 = loadedOnDisk207(r2);
+  expect(disk2.must_fix.map((m) => m.claim)).toEqual(Array.from({ length: 40 }, (_, i) => (i % 2 ? "q".repeat(100) + P : "p".repeat(100))));
+  expect(disk2.must_fix.every((m) => m.evidence === "e".repeat(100) + P)).toBe(true);
 });
