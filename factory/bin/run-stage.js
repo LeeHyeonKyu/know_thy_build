@@ -2064,10 +2064,14 @@ const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
   && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
   && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
 export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
-  // 후보는 최신이 먼저다. **가장 최근의 워크플로 반환**(`orchestration: "workflow"` + `issue` 키 + `guarantee: "structural"` —
-  // 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가 먼저 Read하는 loaded.json
-  // (`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을 고르고, 그것이 fail-closed일 때만 답한다: 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려
-  // 스키마가 틀린 산출물을 냈다면 그것은 산출물 결함이다 — 옛 fail-closed가 그 결함을 blocked로 덮지 못한다.
+  // 후보 순서는 **채널 순서**다(완료 알림 → Read/tool_result → 전경 Workflow 결과 → 최종 메시지, §extractStageArtifact) — 시간
+  // 순서가 아니고, "최신이 먼저"는 **한 채널 안에서만** 참이다. 그 순서로 첫 번째 워크플로 반환(`orchestration: "workflow"` + `issue`
+  // 키 + `guarantee: "structural"` — 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가
+  // 먼저 Read하는 loaded.json(`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을
+  // 고르고, 그것이 fail-closed일 때만 답한다. 그래서 재시도가 **같은 채널이나 더 앞선 채널**로 스키마가 틀린 산출물을 냈다면 그것이
+  // 뽑혀 산출물 결함(needs-human)이 된다. 그러나 옛 fail-closed가 완료 알림으로 왔고 재시도의 반환이 더 뒤의 채널(전경 Workflow 결과·
+  // 최종 메시지)로 왔다면 옛 fail-closed가 뽑혀 blocked/undecidable이 된다 — b881484를 그대로 옮긴 동작이다(plan non_goals: "Any design
+  // beyond the b881484 port"; 교차 채널 순서는 이 이슈 밖이다).
   const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,

@@ -6693,7 +6693,9 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   expect(await runStage({ stage: "implement", issue: 207, deps: fg, runnerId: "r" })).toBe(2);
   expect(fg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(fg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
-  // #226 skeptic — 세 번째 채널(백그라운드 완료 알림)도 runStage를 끝까지 지나 전이의 `to` 라벨까지 잰다: Read → 완료 알림, 마지막 말은 산문.
+  // Scope change (#226): b881484의 이 테스트에 더한 단언 — dw3 rubric("asserts the transition's `to` label … on each of the three channels")을
+  // b881484는 완료 알림 채널에서 runStage 전이로 재지 않았다. 이름·기존 단언은 그대로다(non_goal "Renaming or duplicating the test_207_* tests").
+  // 세 번째 채널(백그라운드 완료 알림)도 runStage를 끝까지 지나 전이의 `to` 라벨까지 잰다: Read → 완료 알림, 마지막 말은 산문.
   // 위의 직접 호출(문자열 반환)만으로는 그 채널이 전이로 이어지는지 보이지 않는다.
   const bg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: [...readLoaded, note].join("\n") }) });
   expect(await runStage({ stage: "implement", issue: 207, deps: bg, runnerId: "r" })).toBe(2);

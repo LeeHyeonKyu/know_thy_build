@@ -383,6 +383,9 @@ export function truncateLoadedFreeText(loaded, n) {
  * 자르기 **전** 같은 직렬화의 UTF-8 바이트 수다(자르지 않았으면 `bytes`와 같다) — 런 기록 줄이 "N bytes (from M bytes; …)"로 남겨, 잘린
  * 페이로드를 빠진 페이로드와 구별하게 한다(#226). 두 패스 뒤에도 넘을 수 있다: 구조(키·배열 원소·id)는 자르지 않으므로(dw1) 항목이 아주
  * 많으면 구조만으로 4096을 넘는다 — 그때 상한은 "필드당 100자"이고, 넘었다는 사실은 `over`와 기록 줄이 숨기지 않는다.
+ * Scope (#226, dw2 rubric "carries a visible record of its original size"): b881484의 기록 줄은 N만 남겼다 — `original_bytes`는 그
+ * rubric 때문에 더한 것이다. 파일 자체에 키로 넣지 않는다: 키를 하나 더하면 dw1("every key … unchanged")을 깬다. 파일 안의 표식은
+ * 잘린 필드마다 붙는 `LOADED_FULL_TEXT_POINTER`이고, 원래 바이트 수는 같은 런의 기록 줄에 있다.
  */
 function writeLoadedJson({ root, stage, loaded, pointerHoldsFullText }) {
   const rel = ".factory/out/loaded.json";
