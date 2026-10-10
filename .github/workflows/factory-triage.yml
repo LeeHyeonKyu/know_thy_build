@@ -46,10 +46,28 @@ jobs:
       - name: Mark the job start
         if: always()
         run: echo "FACTORY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      # 2026-10-09 (ADR-020 이월 7 · ADR-021) — **에이전트 배우는 GitHub App이다.** 머신 유저 PAT(`FACTORY_BOT_TOKEN`)은
+      # 2026-10-06 GitHub의 스팸 휴리스틱에 플래그돼 그 계정의 PR·코멘트가 남들에게 통째로 숨겨졌다(bot-hk). App 설치
+      # 토큰은 그 휴리스틱의 대상이 아니고 잡마다 발급·회수된다. `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY` 시크릿이
+      # 없으면 예전처럼 PAT로 돈다 — 아래 모든 토큰 자리가 `steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN`이다.
+      # 체크아웃보다 앞이어야 한다(체크아웃이 첫 토큰 사용처다).
+      - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
+        id: factory-token
+        if: ${{ secrets.FACTORY_APP_ID != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+      # 설치 토큰은 `gh api user`를 부를 수 없다(403) — 봇 로그인은 여기서 `<app-slug>[bot]`으로 넘긴다(`resolveFactoryLogins` ①).
+      - name: Factory login
+        if: ${{ steps.factory-token.outputs.app-slug != '' }}
+        env:
+          APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
+        run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       # 1.4.19 (L20, own-calendar #28) — **큐에서 기다린 런은 만들어진 시점의 커밋을 체크아웃한다.** 단일 self-hosted 러너
       # 뒤에서 50분을 기다린 implement 런이 그 사이 두 번 올라간 엔진(1.4.12 → 1.4.14)을 전혀 보지 못했고, 옛 검증자
       # 프롬프트로 head를 돌려보냈다. 여기서 origin의 기본 브랜치로 갱신한다 — 런의 headSha는 "어느 main에서 시작하라"가
@@ -71,7 +89,7 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0"
@@ -105,7 +123,7 @@ jobs:
         id: scrub-artifacts
         if: always()
         env:
-          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_BOT_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -142,7 +160,7 @@ jobs:
       - name: Aborted cleanup
         if: always() && job.status != 'success'
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           ISSUE: ${{ github.event.issue.number || inputs.issue }}
@@ -159,7 +177,7 @@ jobs:
       - name: Sweep
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
         run: |
           git checkout ${{ github.sha }} -- .factory || true
           node .factory/bin/sweep.js --quick

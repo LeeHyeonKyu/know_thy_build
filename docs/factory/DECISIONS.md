@@ -4478,3 +4478,35 @@ Error를 던진다. 새 의존성 클라이언트가 그 래퍼 없이 배선되
 blocked-retry 마커, 크래시 줄이다. 옛 코드는 모르는 등급을 `other`로 다루고(같은 상한 1, "environment/credentials" 문장), 크래시 섹션을 보통 런으로
 센다(세는 쪽 — 던지지도, 총합이 깨지지도 않는다). 잔여는 위 "남는 것"의 이슈당 한 번 더의 재시도다. 핀(옛 엔진을 커밋으로 고정해 실제로 돌린다):
 `test_196_unknown_engine_crash_fields_fail_toward_counting`.
+
+## ADR-038 에이전트 배우는 GitHub App이다 — 머신 유저 PAT는 폴백 — 2026-10-09 (소유자 결정)
+
+**사건**: 2026-10-06 01:15 UTC경 머신 유저 `bot-hk`가 GitHub의 스팸 휴리스틱에 **shadow-flag**됐다 — 본인에겐 정상(로그인·배너 없음),
+남들에겐 프로필 404, 그 계정이 쓴 PR(#193·#204·#215·#216·#218·#220 …)·코멘트(핸드오프·전이·하트비트) 전부 비표시, 검색 API는
+"사용자가 없거나 볼 권한이 없다"(422). 협업자 권한은 그대로였고 봇 토큰으로는 공개 저장소 `gh repo view`조차 빈 응답이었다.
+know_thy_build와 own-calendar의 공장이 동시에 멈췄고(#207은 머지 스테이지가 `gh pr view 220`을 못 찾아 needs-human), GitHub Support
+답변은 "활동이 자동 감지에 걸려 수동 검토 중 — 어떻게 쓸 계획인지 설명하라"였다. 패턴은 명백하다: **젊은 계정이 하루 종일 PR과
+코멘트를 쓴다** — 공장이 설계대로 돌수록 더 스팸처럼 보인다.
+
+**결정**: 에이전트 배우(ADR-021의 `FACTORY_BOT_TOKEN` 자리)는 **소유자 계정에 등록된 GitHub App**의 설치 토큰이다. ADR-020 이월
+7번·ADR-021이 "나중에는 GitHub App"으로 적어 둔 그 자리다.
+1. 아홉 워크플로(triage·plan·implement·review·merge·sweeper·retro·health·rehearse) 전부가 **체크아웃 앞에**
+   `actions/create-github-app-token@v3`로 토큰을 민팅한다(`id: factory-token`, `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY`
+   시크릿). 토큰 자리는 모두 `steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN` — App 시크릿이 없는 저장소는
+   예전처럼 PAT로 돈다(채택자 호환). merge 잡은 `FACTORY_MERGE_TOKEN || App || PAT`이고 두 배우 가드가 여전히 첫 스텝이다.
+2. 설치 토큰은 `GET /user`를 부를 수 없다(403) — 봇 로그인은 민팅 직후 `<app-slug>[bot]`을 `FACTORY_BOT_LOGIN`으로
+   `$GITHUB_ENV`에 넘긴다(`resolveFactoryLogins` ①의 문). merge 잡의 "Resolve the agent actor's login"은 그 값이 있으면 그대로 쓴다.
+3. 토큰은 잡 끝에 회수된다(action의 post 스텝). 사람이 PAT를 발급·갱신·회수하는 일이 사라진다.
+4. 두 배우 모드(ADR-021)는 그대로 성립한다: 머지 배우는 소유자 PAT, 에이전트 배우는 App — 서로 다른 주체다. App 권한은
+   Contents·Issues·Pull requests·Actions·Commit statuses: write, Metadata: read. `workflow` 스코프에 해당하는 권한(Workflows)은
+   **주지 않는다** — 에이전트가 `.github/workflows/**`를 밀 수 없어야 한다는 ADR-021의 벽이 App에서도 같다.
+
+**검증**: `yml-lint.test.js` "every agent-token workflow mints a GitHub App token before checkout and never uses the bare PAT" —
+아홉 파일 전부에 민팅 스텝이 체크아웃 앞에 있고, 코멘트가 아닌 줄의 `secrets.FACTORY_BOT_TOKEN }}`는 항상 App 토큰 뒤의 폴백이며,
+merge 잡의 가드가 민팅보다 앞이다. 템플릿 사본(`templates/factory/github/workflows/`)은 설치본과 바이트 동일 — 이 PR이 ADR-033의
+merge `timeout-minutes: 90`도 템플릿에 처음 반영한다(테스트 표의 merge 30→90).
+
+**남는 것**: `gh.viewerLogin`/`viewerScopes`(`gh api user`)는 App 토큰에서 403이다 — `FACTORY_BOT_LOGIN`이 있으면 호출되지 않고,
+doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 **WARN으로 남는다**(후속: App 토큰이면 그 검사를 "해당 없음"으로).
+`gh pr edit`류의 GraphQL `viewer` 조회가 App 토큰에서 어떻게 되는지는 #217(REST PATCH)이 비켜 간다. own-calendar는 다음 릴리스로
+업그레이드하고 같은 두 시크릿을 넣는다. `bot-hk`가 복구되면 숨겨진 PR·코멘트가 다시 보이고, 그 계정은 PAT 폴백으로만 남는다.

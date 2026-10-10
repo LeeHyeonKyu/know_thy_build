@@ -30,17 +30,31 @@ jobs:
     # 만진다 — 넓은 API 장애, 곧 복구 팔이 가장 할 일이 많은 상황에서 잡이 SIGKILL됐다.
     timeout-minutes: 15
     steps:
+      # 2026-10-09 (ADR-020 이월 7 · ADR-021) — 에이전트 배우는 GitHub App이다(사유·모양은 factory-triage.yml의 같은 스텝).
+      # `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY`가 없으면 PAT(`FACTORY_BOT_TOKEN`)로 돈다. 체크아웃보다 앞이어야 한다.
+      - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
+        id: factory-token
+        if: ${{ secrets.FACTORY_APP_ID != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+      - name: Factory login
+        if: ${{ steps.factory-token.outputs.app-slug != '' }}
+        env:
+          APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
+        run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       - uses: ./.factory/actions/setup
         with:
           claude: "false"
           test-env: "false"
       - name: Sweep
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
         run: node .factory/bin/sweep.js
       # ADR-021 r1 finding 2 — **머지 권한 판정은 여기에서만 진짜가 된다.** `tokens.agent-is-admin`,
       # `tokens.agent-workflow-scope`, `protection.codeowners`는 전부 "에이전트 배우가 쥔 토큰이
@@ -56,6 +70,6 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
-          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_BOT_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
         run: node .factory/bin/doctor-ci.js

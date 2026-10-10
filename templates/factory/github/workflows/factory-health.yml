@@ -27,13 +27,27 @@ jobs:
     # `claude -p`를 띄우지 않는 결정적 잡이다(집계와 렌더링뿐) — 스테이지의 상한이 필요 없다.
     timeout-minutes: 20
     steps:
+      # 2026-10-09 (ADR-020 이월 7 · ADR-021) — 에이전트 배우는 GitHub App이다(사유·모양은 factory-triage.yml의 같은 스텝).
+      # `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY`가 없으면 PAT(`FACTORY_BOT_TOKEN`)로 돈다. 체크아웃보다 앞이어야 한다.
+      - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
+        id: factory-token
+        if: ${{ secrets.FACTORY_APP_ID != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+      - name: Factory login
+        if: ${{ steps.factory-token.outputs.app-slug != '' }}
+        env:
+          APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
+        run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           # 기록은 records 브랜치에 있고 판단의 재료(하네스·CHARTER·설치 매니페스트)는 기본 브랜치의
           # 현재 상태다 — 회고와 같은 이유로 기본 브랜치를 본다.
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
-          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       - uses: ./.factory/actions/setup
         with:
           # 러너 전용 — 에이전트를 부르지 않는다. 보고서는 기록에서 **파생**되는 것이지 쓰여지는 것이
@@ -43,7 +57,7 @@ jobs:
           test-env: "false"
       - name: Health
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
         run: node .factory/bin/health.js
       # ADR-020 최종 리뷰 SF-1 — 업로드 전에 크리덴셜을 지운다. 이 잡은 `claude -p`를 띄우지 않아
@@ -56,7 +70,7 @@ jobs:
         id: scrub-artifacts
         if: always()
         env:
-          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_BOT_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
