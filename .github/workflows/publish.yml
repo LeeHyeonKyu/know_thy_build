@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # #196 pins the pre-change engine by commit (`PRE_196`, sweeper.test.js) and runs it for real — a shallow
+          # clone has no such object ("fatal: not a tree object"), which failed every publish after #204 (2026-10-10).
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
