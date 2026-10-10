@@ -242,6 +242,8 @@ export async function ensureHarnessIssue({ gh, issue, entries, pr = null, origin
  * #230 (리뷰 arch1) — "`backlog`로 이슈를 만들고 → 큐 문(`transitionIssue`)을 두드리고 → 거부·던짐이면 `backlog`에 둔 채
  * `notQueuedComment`를 단다"의 **유일한** 구현. 하네스 요청(`ensureHarnessIssue`)과 retro의 성숙도 승격 이슈(retro.js
  * `makeRetroCreateIssue`)가 둘 다 이것을 부른다 — 사본이 갈라지면 한쪽의 수정이 다른 쪽에 닿지 않는다.
+ *   (#247 — 남은 사본 하나: gates.js의 flaky 수확은 main에서부터 같은 꼬리를 자기 마커 `factory-flaky-not-queued`로 따로 갖고 있다.
+ *   그 파일은 #247의 범위 밖이라 옮기지 않았다 — 후속 이슈로 넘긴다.)
  *   - `labels`는 호출자가 준 그대로(`backlog` 포함) 만든다. 번호가 없으면 던진다(만들어졌는지 모른다).
  *   - 문이 없으면 `HARNESS_TRANSITION_UNWIRED`로 `queued:false` — 코멘트는 달지 않는다(예전 그대로).
  *   - 큐에 들어가면 `{ issue, queued: true }`, 아니면 `{ issue, queued: false, queue_reason }` — 던지지 않는다(이슈는 이미 있다).

@@ -246,12 +246,10 @@ test("test_230_admission_codes_classify_per_issue_vs_capacity_refusals", async (
   expect(admissionRefusedReason({ reasons: r.reasons.slice(0, 2) })).toBe(`queue admission refused — ${r.reasons[0]}; ${r.reasons[1]}`);
   const missing = queueAdmission({ issue: { ...person, body: "please" }, charter: charter(), ...base });
   expect(entryRecheck(missing)).toEqual({ verdict: "refuse", to: "factory:needs-info", reason: `queue admission refused — ${missing.reasons[0]}` });
-  // #247 — queue_max alone IS re-judged at the entry (the issue itself is not counted, see test_247_…_queue_max): a person's
-  // fix cannot clear it, so it goes to needs-human, with the cap's own sentence; the other caps are still not re-judged there
+  // capacity alone is not re-judged at the entry
   const full = queueAdmission({ issue: person, charter: charter(), ...base, queued: [{ number: 1 }, { number: 2 }, { number: 3 }] });
   expect(full.codes).toEqual(["queue-max"]);
-  expect(entryRecheck(full)).toEqual({ verdict: "refuse", to: "factory:needs-human", reason: `queue admission refused — ${full.reasons[0]}` });
-  expect(entryRecheck({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], codes: ["self-open-max"] })).toEqual({ verdict: "pass" });
+  expect(entryRecheck(full)).toEqual({ verdict: "pass" });
   expect(entryRecheck({ ok: true, reasons: [] })).toEqual({ verdict: "pass" });
   // an unreadable read — or a refusal that does not say why in codes — is never a verdict
   const broken = await makeQueueAdmission({ gh: { issue: async () => { throw new Error("boom"); } }, charter: charter() })({ issue: 10 });
@@ -259,4 +257,28 @@ test("test_230_admission_codes_classify_per_issue_vs_capacity_refusals", async (
   expect(entryRecheck(broken)).toMatchObject({ verdict: "unreadable", reason: expect.stringContaining("boom") });
   expect(entryRecheck({ ok: false, reasons: ["something"] })).toMatchObject({ verdict: "unreadable" });
   expect(entryRecheck(null)).toMatchObject({ verdict: "unreadable" });
+});
+
+// ── #247 — the triage re-entry re-judges queue_max only when its caller asks (a fresh entry), never by default ─────────
+test("test_247_entry_recheck_rejudges_queue_max_only_when_asked", () => {
+  // person is #10; queue_max is 3. The judged issue sitting in the queue list does not count against itself…
+  const inQueue = (others) => queueAdmission({ issue: person, charter: charter(), ...base, queued: [{ number: 10 }, ...others.map((number) => ({ number }))] });
+  expect(inQueue([1, 2])).toMatchObject({ ok: true });                                      // 3 of 3, itself included: admitted
+  const over = inQueue([1, 2, 3]);                                                          // 4 of 3, itself included: refused
+  expect(over.codes).toEqual(["queue-max"]);
+  expect(over.reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  // …so a fresh triage entry that asks for it refuses only the N+1th, to needs-human (a legal factory:queue exit), with the cap's sentence
+  expect(entryRecheck(over, { queueMax: true })).toEqual({ verdict: "refuse", to: "factory:needs-human", reason: "queue admission refused — queue 3 ≥ 3 (back_pressure.queue_max)" });
+  expect(entryRecheck(inQueue([1, 2]), { queueMax: true })).toEqual({ verdict: "pass" });
+  // the default (and the blocked-retry hop, which restores a label already earned) still does not re-judge capacity
+  expect(entryRecheck(over)).toEqual({ verdict: "pass" });
+  expect(entryRecheck(over, { queueMax: false })).toEqual({ verdict: "pass" });
+  // the other caps are never re-judged at the entry, asked or not
+  expect(entryRecheck({ ok: false, reasons: ["self-generated open 2 ≥ 2 (self_generated.open_max)"], codes: ["self-open-max"] }, { queueMax: true })).toEqual({ verdict: "pass" });
+  // an issue's own fact still wins the target when the cap is hit too
+  const both = queueAdmission({ issue: { ...person, body: "please" }, charter: charter(), ...base, queued: [{ number: 10 }, { number: 1 }, { number: 2 }, { number: 3 }] });
+  expect(both.codes).toEqual(["no-done-when", "queue-max"]);
+  expect(entryRecheck(both, { queueMax: true })).toEqual({ verdict: "refuse", to: "factory:needs-info", reason: `queue admission refused — ${both.reasons[0]}` });
+  // a backlog issue (not in the list) is judged as before: three others fill a queue_max of 3
+  expect(queueAdmission({ issue: person, charter: charter(), ...base, queued: [1, 2, 3].map((number) => ({ number })) }).ok).toBe(false);
 });

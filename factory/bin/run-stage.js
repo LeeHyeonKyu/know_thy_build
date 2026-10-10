@@ -115,11 +115,6 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
-/**
- * #230 — triage 진입 재심사에 심사기(`deps.admission`)가 실리지 않은 런이 남기는 기록 한 줄. 재심사를 건너뛴 사실이 런 기록에 남는다(조용히 지나가지 않는다).
- * 프로덕션 배선(main)은 언제나 심사기를 싣는다 — 이 줄이 기록에 보이면 배선 사고다. 거부(fail closed)로 하지 않는 이유는 ADR-040.
- */
-export const TRIAGE_RECHECK_UNWIRED = "triage entry: queue admission not wired into this run — re-check skipped (wiring defect: main() always wires it)";
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 /**
  * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
@@ -437,6 +432,8 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
     // 라벨이 "진짜"인지 판단할 근거가 없다), 그 사실만은 사람에게 말해야 한다: 어떤 라벨들이 붙어
     // 있는지, 팩토리가 왜 이 스테이지를 실행하지 않는지, sweeper가 다음 sweep에서 정리한다는 것.
     let entryLabel;
+    // #247 — 진입 라벨이 blocked 재시도 hop의 **복구**로 정해졌는가(새 진입이 아니다). 진입 재심사가 `queue_max`를 다시 잴지 가른다.
+    let restoredByHop = false;
     // KTB-20: 같은 라벨 조회에서 `factory:harness`도 읽는다 — implement 스테이지만, 그리고 라벨을
     // 실제로 읽었을 때만 선다(조회 실패 → false → 평범한 이슈로 취급: 더 좁은 쪽이 기본값이다).
     let harnessIssue = false;
@@ -515,6 +512,7 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
         if (!t.ok) { record([`${stage}: blocked retry hop refused`, ...refusal(t)]); return 2; }
         record([`${stage}: blocked retry — hopped back to ${t.to}`]);
         entryLabel = t.to;
+        restoredByHop = true;
       } else {
         blockedOriginFrom = origin.from;
       }
@@ -526,20 +524,22 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      * 그 심사기(`deps.admission`, 같은 `makeQueueAdmission`)를 다시 부른다. 판정은 `entryRecheck` 하나가 구조화된 코드로 한다:
      *   - 이슈 자신의 사실(done_when 없음 → needs-info, NEVER_AUTOMATE → wont-do)이면 `transition()`으로 내보낸다 — 코멘트는 그 전이
      *     코멘트 하나이고 사유는 큐 문이 같은 본문에 쓰는 문장 그대로다. claim은 finally가 푼다, exit 0.
-     *   - #247 — `queue_max`는 다시 본다. 심사는 이슈 자신을 세지 않으므로(`queueAdmission`의 자기 제외) 꽉 찬 큐의 N번째는 통과하고,
-     *     문을 비켜 들어온 N+1번째만 `factory:needs-human`으로 간다(`entryRecheck` 주석). `open_max`·세대는 다시 보지 않는다 — 그 이슈는
-     *     오늘처럼 에이전트로 간다.
+     *   - 상한은 다시 보지 않는다(형제를 세는 꽉 찬 큐가 통째로 비워진다 — `entryRecheck` 주석). 그 이슈는 오늘처럼 에이전트로 간다.
+     *     #247 — 예외 하나: **새** 진입(blocked 재시도 hop의 복구가 아닌 진입)은 `queue_max`를 다시 잰다(`entryRecheck(…, { queueMax })`).
+     *     심사는 이슈 자신을 세지 않으므로(`queueAdmission`의 자기 제외) 꽉 찬 큐의 N번째는 통과하고, 문을 비켜 들어온 N+1번째만
+     *     `factory:needs-human`으로 간다. hop의 복구는 이미 얻었던 큐 자리이므로 hop 자신처럼 상한을 다시 재지 않는다.
      *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
      *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
      *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
-     *     (`TRIAGE_RECHECK_UNWIRED`). 거부로 하지 않는 이유는 ADR-040 — 기존 triage 테스트가 심사기 없는 deps로 큐 진입을 돌린다.
+     *     (`ADMISSION_UNWIRED`의 첫 절 — #247: "미배선"을 뜻하는 말은 그 하나뿐이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
+     *     테스트 넷(I2 두 건, KTB-20, KTB-15b)이 심사기 없는 deps로 큐 진입을 돌린다.
      */
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission !== "function") {
-      record([TRIAGE_RECHECK_UNWIRED]);
+      record([`triage entry: queue admission re-check skipped — ${ADMISSION_UNWIRED.split(" — ")[0]}`]);
     }
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission === "function") {
       let v;
-      try { v = entryRecheck(await d.admission({ issue })); }
+      try { v = entryRecheck(await d.admission({ issue }), { queueMax: !restoredByHop }); }
       catch (e) { v = { verdict: "unreadable", reason: `queue admission threw — ${e?.message || e}` }; }
       if (v.verdict === "unreadable") {
         record([`triage entry: queue admission unreadable — ${v.reason}`]);
@@ -2804,14 +2804,13 @@ export function makeHarnessIssueDep({ gh, issue, stage, rehearsal, admission, tr
  */
 export function makeTransitionDep({ gh, issue, stage, rehearsal, admission, buildExtra, transitionFn = transition }) {
   /**
-   * #230 (skeptic) — **triage의 blocked 재시도 hop은 진입 재심사가 재지 않는 상한을 다시 재지 않는다.** 그 hop(`prerequisite: true`, blocked → factory:queue)은
+   * #230 (skeptic) — **triage의 blocked 재시도 hop은 상한을 다시 재지 않는다.** 그 hop(`prerequisite: true`, blocked → factory:queue)은
    * 이미 얻었던 큐 라벨의 복구다. 그런데 이슈가 blocked에 있는 동안 문은 그것을 새 도착으로 센다 — 형제가 open_max에 있거나 다른
    * 이슈가 빈자리를 채웠으면 hop이 매 sweep 거부되고, 일시적 gh 실패 한 번이 받아들여진 이슈를 needs-human까지 밀었다(dw2 위반).
    * 그래서 이 hop의 문은 triage 진입 재심사(`entryRecheck`)가 다시 재는 것만 잰다: 이슈 자신의 사실(done_when·NEVER_AUTOMATE)과
-   * 읽기 실패는 여전히 hop을 거부하고(심사기가 없으면 `transition()`이 ADMISSION_UNWIRED로 거부한다 — fail closed 그대로), `open_max`·세대만
-   * 거부한 판정은 통과로 읽는다. #247 — 진입 재심사가 `queue_max`를 다시 재므로 hop도 잰다: blocked에 있는 동안 큐가 다른 이슈로 꽉
-   * 찼으면 hop이 거부되어 이슈는 blocked에 남고(재시도 가능, 강등 없음), N+1번째로 들어가 needs-human으로 밀리지 않는다.
-   * 다른 전이와 다른 스테이지의 큐 전이는 심사기를 그대로 받는다.
+   * 읽기 실패는 여전히 hop을 거부하고(심사기가 없으면 `transition()`이 ADMISSION_UNWIRED로 거부한다 — fail closed 그대로), 상한·세대만
+   * 거부한 판정은 통과로 읽는다. 다른 전이와 다른 스테이지의 큐 전이는 심사기를 그대로 받는다. (#247 — hop 뒤의 진입 재심사도
+   * `queue_max`를 다시 재지 않는다: 새 진입만 잰다, runStage의 `restoredByHop`.)
    */
   const hopAdmission = typeof admission === "function"
     ? async (a) => { const r = await admission(a); return entryRecheck(r).verdict === "pass" ? { ...r, ok: true } : r; }
