@@ -91,7 +91,10 @@ test("CHARTER template is a draft with the §5.3 frontmatter", () => {
   const { data } = parseFrontmatter(read("docs/factory/CHARTER.md"));
   expect(data.schema).toBe("factory.charter.v1");
   expect(data.status).toBe("draft");
-  expect(data.limits).toEqual({ K: 3, M: 3, R: 2 });
+  // 허점 원장 M-1·P-10 (2026-10-11): 채택 저장소 기본값은 K=2, standard 로스터에 architecture 없음 — 엔진 저장소의 CHARTER와 다르다.
+  expect(data.limits).toEqual({ K: 2, M: 3, R: 2 });
+  expect(data.roster.standard).toEqual(["correctness", "spec-conformance", "qa"]);
+  expect(data.roster["load-bearing"]).toContain("architecture");
   expect(data.retro.every_merges).toEqual({ initial: 1, min: 1, max: 20 });
 });
 

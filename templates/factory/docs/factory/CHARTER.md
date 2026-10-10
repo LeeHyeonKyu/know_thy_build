@@ -2,10 +2,13 @@
 schema: factory.charter.v1
 status: draft
 tier_default: standard
-limits: { K: 3, M: 3, R: 2 }
+# 채택 저장소 기본값 (2026-10-11, 허점 원장 M-1·P-10): own-calendar·데모 54판정에서 architecture 단독 거부 0, 3라운드 승인 1/8 —
+# standard 로스터에서 architecture를 빼고 K=2 (docs/research/review-roster-evidence.md). 엔진 저장소(know-thy-build)는 자기 기록이
+# 반대(68라운드, architecture 단독 거부 4)라 architecture 유지·K=3을 쓴다 — 로스터는 저장소별 기록으로 정한다.
+limits: { K: 2, M: 3, R: 2 }
 roster:
   docs: [correctness, spec-conformance]
-  standard: [correctness, architecture, spec-conformance, qa]
+  standard: [correctness, spec-conformance, qa]
   load-bearing: [correctness, security, architecture, spec-conformance, qa]
 plan_roles:
   docs: [architect, skeptic]
