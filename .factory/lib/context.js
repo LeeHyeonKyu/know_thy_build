@@ -27,15 +27,27 @@ const ROSTER_STAGE = { plan: "plan", review: "review" };
  * "바닥을 묻지 않은 것"이라 신고 그대로다(`tier_floor: null`) — 생산 경로(run-stage·bin/build-context)는
  * 둘 다 넘긴다.
  */
-export async function resolveTier({ run, cwd, base, harness, tier }) {
+/*
+ * #233 (gap P-12 / ledger M-6) — `raised`는 triage 검증이 impact_paths를 `[load_bearing].paths`에 대 올린 tier다
+ * (triage handoff의 `tier_source: "impact-paths"`). plan 시점에는 diff가 없어 바닥이 docs(또는 null)라, 이것이
+ * 없으면 plan 모드는 신고 tier가 정했다. 그래서 신고와 합친 값이 **모든 스테이지의** 바닥 입력이다 — diff가
+ * 생긴 뒤에도(implement/review) 내려가지 않는다. 출처는 그 값을 정한 쪽이다: 신고 → triage, 올림 → impact-paths,
+ * diff가 더 높으면 floor.
+ */
+export async function resolveTier({ run, cwd, base, harness, tier, raised = null }) {
   const declared = normalizeTier(tier);
-  if (!run || !base) return { tier_effective: declared, tier_source: "triage", tier_floor: null };
+  const start = raised ? maxTier(declared, raised) : declared;
+  const startSource = start === declared ? "triage" : "impact-paths";
+  if (!run || !base) return { tier_effective: start, tier_source: startSource, tier_floor: null };
   let floor;
   try { floor = tierFloor({ changed: await changedFiles({ run, cwd, base, harness }), harness }); }
   catch { floor = "standard"; }
-  const eff = maxTier(declared, floor);
-  return { tier_effective: eff, tier_source: eff === declared ? "triage" : "floor", tier_floor: floor };
+  const eff = maxTier(start, floor);
+  return { tier_effective: eff, tier_source: eff === start ? startSource : "floor", tier_floor: floor };
 }
+
+/** #233 — triage handoff가 스크립트의 올림을 싣고 있으면 그 tier, 아니면 null. 올림은 위로만 작용한다(resolveTier의 maxTier). */
+export const raisedTierOf = (triage) => (triage?.tier_source === "impact-paths" && triage?.tier_effective ? triage.tier_effective : null);
 
 /**
  * 외부 감사 2026-09-14 H4 — **cold read를 구조로 만든다.**
@@ -244,7 +256,7 @@ export async function buildContext({ root, gh, issue, stage, run = null, base = 
   const tier = handoffs.triage?.tier ?? charter.tier_default;
   const submission = stage === "triage" ? explicitSubmission(comments) : null;
   // 감사 H3 — 로스터·계획은 **신고가 아니라 실효 tier**를 읽는다.
-  const { tier_effective, tier_source, tier_floor } = await resolveTier({ run, cwd: root, base, harness, tier });
+  const { tier_effective, tier_source, tier_floor } = await resolveTier({ run, cwd: root, base, harness, tier, raised: raisedTierOf(handoffs.triage) });
   const rs = ROSTER_STAGE[stage];
   const roster = rs ? rosterFor(charter, roles, rs, tier_effective) : [];
   const role_agents = {}, lessons = {};
