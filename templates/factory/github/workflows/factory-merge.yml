@@ -34,6 +34,9 @@ jobs:
     # `github.event.label.name`은 null이고 contains()는 false다 — 이벤트 이름으로 먼저 가른다.
     if: github.event_name == 'workflow_dispatch' || contains(fromJSON('["factory:approved"]'), github.event.label.name)
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # ADR-038 — 스텝의 `if:`에는 `secrets` 컨텍스트가 없다(잡 `env:`에는 있다). 그래서 "App이 설정됐는가"를 여기서 불리언으로 내린다.
+    env:
+      FACTORY_APP_CONFIGURED: ${{ secrets.FACTORY_APP_ID != '' }}
     # ADR-021 r1 MF-2 b — **머지 토큰은 환경 시크릿이다.** 저장소 시크릿은 같은 저장소의 **어느
     # 브랜치에서 돌든** 워크플로에 주어진다(fork 제한은 same-repo 브랜치에 걸리지 않는다) — 곧
     # 에이전트가 자기 `claude/fq-*` 브랜치에 워크플로 한 장을 올리는 것만으로 admin PAT을 읽어 갈 수
@@ -83,7 +86,7 @@ jobs:
       # 머지 배우(`FACTORY_MERGE_TOKEN`)는 이 스텝과 무관하고, 이 토큰은 체크아웃·상태 조회·에이전트 배우 자리에만 쓰인다.
       - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
         id: factory-token
-        if: ${{ secrets.FACTORY_APP_ID != '' }}
+        if: ${{ env.FACTORY_APP_CONFIGURED == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.FACTORY_APP_ID }}
