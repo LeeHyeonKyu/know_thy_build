@@ -115,6 +115,11 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 
 /** 게이트 파일이 판정을 만드는 스테이지. 여기서 gates가 null이면 판정은 워크플로의 자기 신고뿐이다. */
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
+/**
+ * #230 — triage 진입 재심사에 심사기(`deps.admission`)가 실리지 않은 런이 남기는 기록 한 줄(조용히 지나가지 않는다). main은 언제나 싣는다.
+ * #247 (dw5) — 자기 문장이 아니다: "미배선"을 뜻하는 말은 transition.js의 `ADMISSION_UNWIRED` 하나뿐이고, 이 줄은 그 첫 절을 싣는다.
+ */
+export const TRIAGE_RECHECK_UNWIRED = `triage entry: queue admission re-check skipped — ${ADMISSION_UNWIRED.split(" — ")[0]}`;
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 /**
  * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
@@ -531,11 +536,11 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
      *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
      *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
-     *     (`ADMISSION_UNWIRED`의 첫 절 — #247: "미배선"을 뜻하는 말은 그 하나뿐이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
+     *     (`TRIAGE_RECHECK_UNWIRED` — #247: `ADMISSION_UNWIRED`의 첫 절, "미배선"을 뜻하는 말은 그 하나뿐이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
      *     테스트 넷(I2 두 건, KTB-20, KTB-15b)이 심사기 없는 deps로 큐 진입을 돌린다.
      */
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission !== "function") {
-      record([`triage entry: queue admission re-check skipped — ${ADMISSION_UNWIRED.split(" — ")[0]}`]);
+      record([TRIAGE_RECHECK_UNWIRED]);
     }
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission === "function") {
       let v;
@@ -3515,20 +3520,16 @@ export function makeLocalEntry({ gh, issue, stage, env, rehearsal = null, admiss
       /**
        * #230 (E-2) — **심사도 같은 문으로.** 리허설만 보던 이 자리는 done_when 없는 이슈·NEVER_AUTOMATE·꽉 찬 큐를 그대로 큐에 썼다.
        * main의 그 심사기를 부르고, 거부면 라벨을 쓰지 않고 큐 문과 같은 문장을 돌려주고 stderr에도 낸다.
-       * **배선이 비면 거부한다(fail closed)**: `admission`을 넘겼는데 함수가 아니면(`null` 등 — main이 심사기를 만들지 못한 모양) 라벨을
+       * **배선이 비면 거부한다(fail closed)**: `admission`이 함수가 아니면 — 키를 **생략한** 호출이든 `null` 등을 넘긴 호출이든 — 라벨을
        * 쓰지 않고 `transition()`이 같은 경우에 내는 문장(`ADMISSION_UNWIRED`) 그대로 거부한다 — 리허설의 `REHEARSAL_UNWIRED`와 같은 규칙.
-       * 예외 하나: 키 자체를 **생략한** 호출은 예전처럼 리허설만 본다. 기존 테스트(run-stage.test.js "makeLocalEntry: backlog issue with no
-       * factory label → sets factory:queue…", 심사기 없이 빈 본문을 큐에 넣는다)가 그 모양을 고정하기 때문이다(tests_are_load_bearing, ADR-040).
-       * 그 길로 큐에 든 이슈도 에이전트에는 닿지 못한다: 바로 뒤 triage 진입 재심사(runStage)가 같은 심사기로 다시 본다(테스트가 고정).
+       * #247 (spec1, dw3) — 생략한 키를 예외로 두지 않는다(`admission !== undefined`로 건너뛰던 #230 브랜치의 모양은 리뷰 두 라운드가 거부했다).
        */
-      if (admission !== undefined) {
-        const unwired = typeof admission !== "function";
-        const a = unwired ? null : await admission({ issue });
-        if (unwired || a?.ok !== true) {
-          const line = `local entry refused: ${unwired ? ADMISSION_UNWIRED : admissionRefusedReason(a)}`;
-          log(line);
-          return line;
-        }
+      const unwired = typeof admission !== "function";
+      const a = unwired ? null : await admission({ issue });
+      if (unwired || a?.ok !== true) {
+        const line = `local entry refused: ${unwired ? ADMISSION_UNWIRED : admissionRefusedReason(a)}`;
+        log(line);
+        return line;
       }
       await gh.setFactoryLabel(issue, "factory:queue");
       await gh.comment(issue, "<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)");
