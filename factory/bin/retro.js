@@ -1118,7 +1118,7 @@ export function makeRetroCreateIssue({ gh, root, charter, harness, env }) {
   };
 }
 
-/** CLI 진입: 실제 의존성 조립 */
+/** CLI 진입: 실제 의존성 조립(`retroMainDeps`) 뒤 `runRetro`. */
 async function main() {
   const argv = process.argv.slice(2);
   const force = argv.includes("--force");
@@ -1126,17 +1126,27 @@ async function main() {
   const repo = process.env.FACTORY_REPO || JSON.parse((await run("gh", ["repo", "view", "--json", "nameWithOwner"])).stdout).nameWithOwner;
   const runnerId = process.env.FACTORY_RUNNER_ID || `local/${hostname()}`;
   const gh = makeGh({ run, repo });
+  const now = new Date().toISOString();
+  // `process.env`는 **워크플로 진입점인 여기** 한 줄에만 산다(1.4.0 핫픽스) — 조립은 그것을 `env`로 받는다.
+  const assembled = retroMainDeps({ root, repo, runnerId, gh, env: process.env, now });
+  if (assembled.dormant) { console.error(assembled.dormant); process.exit(0); }
+  process.exit(await runRetro({ deps: assembled.deps, force, now }));
+}
 
+/**
+ * main()의 설정 적재 + 의존성 조립(#230에서 main 밖으로 꺼냈다 — 테스트가 프로덕션 조립을 그대로 부르게; self-critique f4).
+ * CHARTER·harness·roles를 `root`에서 main과 같은 방식으로 읽고, 잠들 이유가 있으면 `{ dormant: <말> }`, 아니면 `{ deps }`.
+ */
+export function retroMainDeps({ root, repo, runnerId, gh, env, now }) {
   // 잠드는 건 정상이지만 "왜"는 반드시 말한다. retro는 기존 이슈의 라벨을 옮기지 않으므로 잠들어도 아무것도 막지 않는다.
   let charter, harness, roles;
   try { charter = loadCharter(root); harness = loadHarness(root); }
-  catch (e) { console.error(`factory: retro dormant — ${e.message}`); process.exit(0); }
-  if (charter.status !== "ready") { console.error(`factory: CHARTER status is ${charter.status} — retro dormant`); process.exit(0); }
+  catch (e) { return { dormant: `factory: retro dormant — ${e.message}` }; }
+  if (charter.status !== "ready") return { dormant: `factory: CHARTER status is ${charter.status} — retro dormant` };
   try { roles = loadRoles(root); }
-  catch (e) { console.error(`factory: .factory/roles.toml unreadable — ${e.message}`); process.exit(0); }
+  catch (e) { return { dormant: `factory: .factory/roles.toml unreadable — ${e.message}` }; }
 
   const retro = charter.retro?.every_merges || {};
-  const now = new Date().toISOString();
   const runsDir = join(root, "docs/factory/runs");
   const outDir = join(root, ".factory/out");
   const statePath = join(runsDir, STATE_FILE);
@@ -1232,7 +1242,7 @@ async function main() {
       return detectMaturityGaps({ files, harness, manifestDeps });
     },
     // #230 — 성숙도 승격 이슈는 backlog로 태어나 리허설 + 심사를 실은 transition()으로 큐에 간다. 그 밖의 이슈는 그대로 만든다.
-    createIssue: makeRetroCreateIssue({ gh, root, charter, harness, env: process.env }),
+    createIssue: makeRetroCreateIssue({ gh, root, charter, harness, env }),
     /** 등록은 세 가지가 한 단계다: 판정 → `quarantine.toml` 저장 → 그 flaky 이슈에 마커 코멘트. */
     registerQuarantine: async ({ issues, commentsByIssue, now: at }) => {
       const { q, registered } = registerFromFlakyIssues({ issues, commentsByIssue, quarantine: loadQuarantine(root), now: at, K: charter.limits?.K });
@@ -1254,8 +1264,7 @@ async function main() {
      * 피드백 루프 Task 3 — 이번 창에 머지된 이슈의 증거를 분류해 주인에게 보낸다(spec §7).
      * `upstream`이 없으면 교차 저장소 호출은 **한 번도** 나가지 않는다(로컬 코멘트만).
      */
-    // `process.env`는 **워크플로 진입점인 여기** 한 줄에만 산다(1.4.0 핫픽스).
-    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness, env: process.env }),
+    routeFeedback: (args) => routeFeedbackArm({ ...args, gh, repo, root, harness, env }),
     /** 열린 제안 PR — 같은 창의 제안을 두 번 열지 않기 위한 dedup 재료(본문 마커 또는 제목). */
     listProposalPrs: () => gh.prList({ label: PROPOSAL_LABEL, state: "open" }),
     publishProposal: ({ files, title, body, date }) => openProposalPr({ run, gh, cwd: root, defaultBranch, files, title, body, date, log: (m) => console.log(m) }),
@@ -1265,8 +1274,7 @@ async function main() {
     sync: ({ expectBlob } = {}) => retroRecordsSync({ run, root, runnerId, expectBlob }),
     nBounds: { min: retro.min ?? 1, max: retro.max ?? Infinity },
   };
-
-  process.exit(await runRetro({ deps, force, now }));
+  return { deps };
 }
 
 /**

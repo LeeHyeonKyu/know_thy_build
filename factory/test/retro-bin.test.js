@@ -1312,10 +1312,11 @@ test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async
 });
 
 // ── #230 — the retro maturity-promotion issue is born in backlog and walks through the real door ──────────────────
-// Driven through retro's own deps assembly (`makeRetroCreateIssue`, which main() spreads into `createIssue`): real
-// makeRehearsalChecker over a temp checkout, real makeQueueAdmission, real transition(), fake gh. Verdicts are the fake
+// Driven through retro's own deps assembly (`retroMainDeps`, the function main() calls — it loads CHARTER/harness/roles from
+// the checkout the way main() does and builds `createIssue` with `makeRetroCreateIssue`): real makeRehearsalChecker over a
+// temp checkout, real makeQueueAdmission over the CHARTER read from disk, real transition(), fake gh. Verdicts are the fake
 // gh's labels and comments plus retro's own record — an assembly that drops rehearsal or admission ends refused here.
-import { makeRetroCreateIssue } from "../bin/retro.js";
+import { retroMainDeps } from "../bin/retro.js";
 import { rehearsalHash } from "../lib/rehearsal.js";
 import { notQueuedMarker } from "../lib/harness-request.js";
 import { mkdirSync } from "node:fs";
@@ -1326,9 +1327,11 @@ const checkout230 = () => {
   mkdirSync(join(root, ".factory"), { recursive: true });
   mkdirSync(join(root, "docs/factory"), { recursive: true });
   const harnessText = "[project]\ndefault_branch = \"main\"\n";
-  const charterText = "---\nstatus: ready\n---\n# CHARTER\n";
+  // the CHARTER main() would load: queue_max 3 is what the "queue full" case below runs into
+  const charterText = "---\nschema: factory.charter.v1\nstatus: ready\nback_pressure: { queue_max: 3 }\nself_generated: { open_max: 5, depth_max: 1 }\n---\n# CHARTER\n\n## NEVER_AUTOMATE\n- nothing\n";
   writeFileSync(join(root, ".factory/harness.toml"), harnessText);
   writeFileSync(join(root, "docs/factory/CHARTER.md"), charterText);
+  writeFileSync(join(root, ".factory/roles.toml"), "");
   return { root, hash: rehearsalHash({ harnessText, charterText }) };
 };
 const STATE_LABELS_230 = new Set(["backlog", "factory:queue", "factory:ready", "factory:needs-info", "factory:blocked"]);
@@ -1350,10 +1353,11 @@ const ghFor230 = ({ variable, queued = 0, swapThrows = false }) => {
     async commitStatuses() { return []; },
   };
 };
-const CHARTER_230 = { never_automate: [], back_pressure: { queue_max: 3 }, self_generated: { open_max: 5, depth_max: 1 } };
-const HARNESS_230 = { project: { default_branch: "main" } };
 const retroWith230 = async (gh, root, over = {}) => {
-  const { deps, recorded } = makeDeps({ state: freshState(), overrides: { createIssue: vi.fn(makeRetroCreateIssue({ gh, root, charter: CHARTER_230, harness: HARNESS_230, env: {} })), ...over } });
+  // main()'s own assembly; only the deps that would reach git, claude or the records branch are swapped for makeDeps' fakes
+  const assembled = retroMainDeps({ root, repo: "o/r", runnerId: "test/230", gh, env: {}, now: NOW });
+  expect(assembled.dormant).toBeUndefined();
+  const { deps, recorded } = makeDeps({ state: freshState(), overrides: { createIssue: vi.fn(assembled.deps.createIssue), ...over } });
   const code = await runRetro({ deps, now: NOW });
   const promo = [...gh.store.values()].find((i) => i.title === PROMO_230);
   return { code, deps, recorded, promo };
@@ -1410,7 +1414,14 @@ test("test_230_retro_promotion_issue_is_born_backlog_and_transitioned", async ()
   expect(dup.promo).toBeUndefined();
   expect(dupGh.created.map((c) => c.labels)).toEqual([["backlog", "factory:flaky"]]);
 
-  // main() assembles exactly this dep
+  // main() runs retro on exactly that assembly
   const src = readFileSync(new URL("../bin/retro.js", import.meta.url), "utf8");
-  expect(src).toMatch(/createIssue: makeRetroCreateIssue\(\{ gh, root, charter, harness, env: process\.env \}\),/);
+  const mainSrc = src.slice(src.indexOf("\nasync function main() {"), src.indexOf("\nexport function retroMainDeps("));
+  expect(mainSrc).toMatch(/const assembled = retroMainDeps\(\{ root, repo, runnerId, gh, env: process\.env, now \}\);/);
+  expect(mainSrc).toMatch(/process\.exit\(await runRetro\(\{ deps: assembled\.deps, force, now \}\)\);/);
+  expect(mainSrc).not.toMatch(/createIssue/);
+  // and a checkout whose CHARTER is not ready stays dormant instead of opening anything
+  const { root: draftRoot } = checkout230();
+  writeFileSync(join(draftRoot, "docs/factory/CHARTER.md"), "---\nschema: factory.charter.v1\nstatus: draft\n---\n");
+  expect(retroMainDeps({ root: draftRoot, repo: "o/r", runnerId: "t", gh: ghFor230({ variable: hash }), env: {}, now: NOW })).toEqual({ dormant: "factory: CHARTER status is draft — retro dormant" });
 });
