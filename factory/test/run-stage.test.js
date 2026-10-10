@@ -6693,6 +6693,13 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   expect(await runStage({ stage: "implement", issue: 207, deps: fg, runnerId: "r" })).toBe(2);
   expect(fg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(fg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
+  // 사유의 바이트 수는 **측정값**이다: 진짜 buildContext(makeBuildContextDep 배선)가 이 런에 쓴 loaded.json의 디스크 위 크기와 같다.
+  const measured = implDeps({
+    buildContext: makeBuildContextDep({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement", run: null, mergeBase: async () => null, recordLine: () => {} }),
+    claudeP: async () => ({ is_error: false, result: fenced207(missing) }), gates: async () => RED207, selfGateRetry,
+  });
+  expect(await runStage({ stage: "implement", issue: 207, deps: measured, runnerId: "r" })).toBe(2);
+  expect(measured.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: `dispatcher payload: context payload missing (loaded.json ${statSync(join(lr, ".factory/out/loaded.json")).size} bytes)` });
 
   // 에스컬레이션 뒤에도 엔진 원인이다: 진짜 transition()으로 in-progress → blocked, 진짜 sweep()이 한 번 재시도하고 같은 자리에서
   // 또 멈추면 사람에게 올린다 — 그 needs-human을 engineCausedNeedsHuman이 엔진 원인으로 읽는다.
