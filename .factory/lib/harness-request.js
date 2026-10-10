@@ -1,3 +1,4 @@
+// Scope change (#230): dw5 requires the retro maturity-promotion issue (also a `factory:harness` issue) to get a comment shaped like `notQueuedComment` — it reuses this function, with an option to drop the "a parked feature waits on this issue" sentence that is false for a retro promotion.
 import { HARNESS_LABEL } from "./label-catalog.js";
 
 /**
@@ -176,7 +177,7 @@ const CAP_EXIT = {
  */
 const UNWIRED_RE = /^no (queue admission|rehearsal checker) is wired into this transition\b/;
 const REHEARSAL_RE = /rehears/i;
-export function notQueuedComment({ issue, reason, threw = false }) {
+export function notQueuedComment({ issue, reason, threw = false, parkedFeature = true }) {
   const why = String(reason ?? "unknown");
   const head = `${notQueuedMarker(issue)}\n이 하네스 이슈는 \`backlog\`에 머물러 있습니다 — 큐 전이${threw ? "가 실패했습니다" : "가 거부됐습니다"}: ${why}`;
   let next;
@@ -194,7 +195,8 @@ export function notQueuedComment({ issue, reason, threw = false }) {
   } else {
     next = "이슈의 상태 라벨이 큐로 가는 전이를 허락하지 않습니다(리허설이나 상한의 문제가 아닙니다) — 라벨을 확인해 `backlog`에 세운 뒤 `/know-thy-build:next`로 큐에 넣으세요.";
   }
-  return `${head}\n\n${next}\n\n이 이슈를 기다리는 피처는 이 이슈가 큐에 들어가 머지될 때까지 주차돼 있습니다(#136).`;
+  // #230 — retro의 성숙도 승격 이슈를 기다리는 피처는 없다(`parkedFeature: false`) — 그 문장은 거기서 거짓이다.
+  return `${head}\n\n${next}${parkedFeature ? "\n\n이 이슈를 기다리는 피처는 이 이슈가 큐에 들어가 머지될 때까지 주차돼 있습니다(#136)." : ""}`;
 }
 
 /**

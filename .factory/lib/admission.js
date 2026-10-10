@@ -65,19 +65,22 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
   const caps = { ...SELF_GENERATED_DEFAULTS, ...(charter?.self_generated || {}) };
   const queueMax = Number.isInteger(charter?.back_pressure?.queue_max) ? charter.back_pressure.queue_max : caps.queue_max;
   const reasons = [];
+  // #230 — 사유마다 구조화된 코드 하나(같은 순서). 호출자는 사유 문구를 정규식으로 되읽지 않고 이것으로 가른다(`entryRecheck`).
+  const codes = [];
+  const refuse = (code, reason) => { codes.push(code); reasons.push(reason); };
   const self = isSelfGenerated(issue, factoryLogins);
   const body = String(issue?.body ?? "");
 
-  if (!self && !DONE_WHEN_RE.test(body)) reasons.push("not an explicit job: the body has no `done_when` section (and no factory marker)");
+  if (!self && !DONE_WHEN_RE.test(body)) refuse(ADMISSION_CODES.noDoneWhen, "not an explicit job: the body has no `done_when` section (and no factory marker)");
 
   const hits = neverAutomateHits(impactPathsOf(body), charter?.never_automate ?? []);
-  if (hits.length) reasons.push(`NEVER_AUTOMATE: ${hits.map((h) => `${h.path} (glob ${h.glob})`).join(", ")} — this issue would end wont-do; split the automatable part or let a person fix it`);
+  if (hits.length) refuse(ADMISSION_CODES.neverAutomate, `NEVER_AUTOMATE: ${hits.map((h) => `${h.path} (glob ${h.glob})`).join(", ")} — this issue would end wont-do; split the automatable part or let a person fix it`);
 
-  if (queued.length >= queueMax) reasons.push(`queue ${queued.length} ≥ ${queueMax} (back_pressure.queue_max)`);
+  if (queued.length >= queueMax) refuse(ADMISSION_CODES.queueMax, `queue ${queued.length} ≥ ${queueMax} (back_pressure.queue_max)`);
 
   if (self) {
     const open = openSelfGenerated.filter((o) => o?.number !== issue?.number);
-    if (open.length >= caps.open_max) reasons.push(`self-generated open ${open.length} ≥ ${caps.open_max} (self_generated.open_max)`);
+    if (open.length >= caps.open_max) refuse(ADMISSION_CODES.selfOpenMax, `self-generated open ${open.length} ≥ ${caps.open_max} (self_generated.open_max)`);
     // 세대: 기원을 따라 올라가며 자기생성인 조상을 센다. 기원을 못 찾으면 거기서 멈춘다(모르는 세대를 발명하지 않는다).
     // #136 (S2b) — **하네스 요청은 세대를 더하지 않는다**(설계 §8.2 표: "개선→하네스→flaky 사슬을 한 세대로 센다"). 하네스 요청은
     // 새 일이 아니라 그 피처를 끝내는 데 필요한 것이다; 이것을 세면 depth_max=1이 자기생성 피처(flaky·개선)의 하네스 요청을 영구히
@@ -103,9 +106,46 @@ export function queueAdmission({ issue, charter, queued = [], openSelfGenerated 
       depth += gen(parent);
       cur = originOf(parent);
     }
-    if (depth > caps.depth_max) reasons.push(`self-generated generation ${depth} > ${caps.depth_max} (self_generated.depth_max) — an issue the factory made from an issue the factory made`);
+    if (depth > caps.depth_max) refuse(ADMISSION_CODES.selfDepth, `self-generated generation ${depth} > ${caps.depth_max} (self_generated.depth_max) — an issue the factory made from an issue the factory made`);
   }
-  return { ok: reasons.length === 0, reasons, self_generated: self };
+  // 통과한 결과의 모양은 예전 그대로다(`codes`는 거부에만 실린다).
+  return { ok: reasons.length === 0, reasons, ...(codes.length ? { codes } : {}), self_generated: self };
+}
+
+/**
+ * #230 — 거부 사유의 구조화된 코드. `unreadable`은 판정이 아니다: 입력을 읽지 못했다는 사실이다(fail closed인 문에서는
+ * 거부와 같은 결과지만, 이미 큐에 있는 이슈를 내보내는 근거가 될 수는 없다 — `entryRecheck`).
+ */
+export const ADMISSION_CODES = Object.freeze({
+  noDoneWhen: "no-done-when", neverAutomate: "never-automate", queueMax: "queue-max", selfOpenMax: "self-open-max", selfDepth: "self-depth", unreadable: "unreadable",
+});
+
+/** 심사 거부를 사람에게 말하는 한 문장 — `transition()`의 큐 문, 로컬 진입, triage 진입이 모두 이 함수로 쓴다(문구가 갈리지 않게). */
+export const admissionRefusedReason = (a) => `queue admission refused — ${(Array.isArray(a?.reasons) && a.reasons.length ? a.reasons : [a?.reason || "unknown"]).join("; ")}`;
+
+/**
+ * #230 — **triage 진입의 재심사.** 이미 `factory:queue`에 있는 이슈를 에이전트 앞에서 다시 본다(손 라벨·라벨 달고 태어난 이슈·
+ * 대기 중 본문 변화 — 어느 길로 왔든 여기서 걸린다). 다시 판정하는 것은 **이슈 자신의 사실**뿐이다:
+ *   - `no-done-when` → `factory:needs-info`(본문을 고치면 `needs-info → queue`로 돌아온다)
+ *   - `never-automate` → `factory:wont-do`(triage가 같은 사실을 만나면 스크립트가 강제하는 바로 그 상태 — 한 사실에 끝 상태는 하나다)
+ * 상한(`queue-max`·`self-open-max`)과 세대(`self-depth`)는 다시 보지 않는다: 큐에 들어온 이슈는 자기 자신과 형제를 세므로 꽉 찬 큐가
+ * 통째로 비워지고, `factory:queue → backlog`는 그래프에 없다(lib/labels.js). 상한은 `transition()`과 로컬 진입의 문에 남는다.
+ * 읽지 못했으면(`unreadable`, 또는 코드 없는 거부 — 모르는 모양) 판정이 아니다: 호출자는 이슈를 내보내지 않고 재시도 가능한 자리에 세운다.
+ * 반환: `{ verdict: "pass" }` | `{ verdict: "refuse", to, reason }` | `{ verdict: "unreadable", reason }`.
+ */
+const ENTRY_TARGET = { [ADMISSION_CODES.noDoneWhen]: "factory:needs-info", [ADMISSION_CODES.neverAutomate]: "factory:wont-do" };
+export function entryRecheck(a) {
+  if (!a || typeof a !== "object") return { verdict: "unreadable", reason: `admission returned ${a === null ? "null" : typeof a}` };
+  if (a.ok === true) return { verdict: "pass" };
+  const reasons = Array.isArray(a.reasons) ? a.reasons : [];
+  const codes = Array.isArray(a.codes) ? a.codes : null;
+  if (!codes || codes.length !== reasons.length || codes.includes(ADMISSION_CODES.unreadable)) {
+    return { verdict: "unreadable", reason: reasons.join("; ") || a.reason || "admission refused without a reason code" };
+  }
+  const own = codes.map((c, i) => [c, reasons[i]]).filter(([c]) => c in ENTRY_TARGET);
+  if (!own.length) return { verdict: "pass" };
+  const to = own.some(([c]) => c === ADMISSION_CODES.neverAutomate) ? ENTRY_TARGET[ADMISSION_CODES.neverAutomate] : ENTRY_TARGET[ADMISSION_CODES.noDoneWhen];
+  return { verdict: "refuse", to, reason: admissionRefusedReason({ reasons: own.map(([, r]) => r) }) };
 }
 
 const ACTIVE = ["factory:queue", "factory:ready", "factory:planned", "factory:in-progress", "factory:rework", "factory:awaiting-review", "factory:approved", "factory:blocked"];
@@ -145,7 +185,7 @@ export function makeQueueAdmission({ gh, charter, factoryLogins = null }) {
       }
       return queueAdmission({ issue: it, charter, queued, openSelfGenerated, byNumber, factoryLogins: logins });
     } catch (e) {
-      return { ok: false, reasons: [`queue admission could not be read — ${e?.message || e}`], self_generated: null };
+      return { ok: false, reasons: [`queue admission could not be read — ${e?.message || e}`], codes: [ADMISSION_CODES.unreadable], self_generated: null };
     }
   };
 }
