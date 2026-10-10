@@ -1044,18 +1044,6 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(bytesOf207(size[0])).toBe(statSync207(path).size);
   expect(bytesOf207(size[0])).toBe(Buffer.byteLength(readFileSync(path, "utf8"), "utf8"));
   expect(bytesOf207(size[0]) <= LIMIT207).toBe(!/over/.test(size[0]));
-  // Scope change (#226): b881484의 이 테스트에 더한 단언 — dw2 rubric("carries a visible record of its original size")을 b881484의 기록 줄(N만)이
-  // 채우지 못해서다. 이름·기존 단언은 그대로다(non_goal "Renaming or duplicating the test_207_* tests"를 지킨다).
-  // 원래 크기도 기록된다: 자르기 전 페이로드(= context.json의 loaded를 같은 방식으로 직렬화한 것)의 UTF-8 바이트 수. 그 줄만 보고
-  // 잘린 페이로드(작아진 N과 원래의 M)를 빠진 페이로드와 구별한다 — 기대값은 기록이 아니라 디스크의 전문에서 잰다.
-  const original = Buffer.byteLength(JSON.stringify(ctx.loaded, null, 2));
-  expect(original).toBeGreaterThan(statSync207(path).size);
-  // #226 skeptic — 조건부 기대를 걷고 이 픽스처의 실제 결과를 고정한다: 자유 텍스트 필드 13개(must_fix 5·핀 5·disputed·self-gate·브리프)가
-  // 100자 한국어 + 포인터로도 4096을 넘는다(두 패스가 상한이다 — b881484). 그 경우 줄은 원래 크기와 '넘었다'를 함께 말한다. 4096 **아래로**
-  // 내려가는 경우는 아래 #195 실제 모양(r4)이 `≤ LIMIT`로 고정한다.
-  expect(statSync207(path).size).toBeGreaterThan(LIMIT207);
-  expect(statSync207(path).size).toBeLessThan(original);
-  expect(size[0]).toBe(`loaded.json: ${statSync207(path).size} bytes (from ${original} bytes; free text cut to 100 chars) — over the ${LIMIT207}-byte limit`);
 
   // 작은 페이로드: 두 번째 패스 없음(200자에서 멈춘다), 그래도 줄은 남고, '넘었다'는 말은 없다.
   const small = { claims: ["x".repeat(300), "short"], disputedReason: "r", sgDetail: "d", briefClaim: "b" };
@@ -1070,8 +1058,6 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(s2[0]).not.toMatch(/over/);
 
   // 두 패스 뒤에도 넘는다(항목 40개) — 예외 없이, 같은 런의 기록이 넘었다고 말한다.
-  // dw2 rubric의 "stays under the bound"와 이 경우: 구조(키·배열 원소·id)만으로 4096을 넘으면 dw1이 구조를 자르지 못하게 하므로 4096 아래로
-  // 내릴 방법이 없다. 그때의 상한은 "자유 텍스트 필드당 100자 + 포인터"이고(아래 첫 단언이 그것을 핀한다), 4096을 넘었다는 사실은 기록이 말한다.
   const many = { claims: Array.from({ length: 40 }, (_, i) => ko(`m${i}`)), disputedReason: "r", sgDetail: "d", briefClaim: "b" };
   const r3 = root207();
   const h3 = await reworkHistory207(many);
@@ -1082,6 +1068,9 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(bytesOf207(s3[0])).toBe(statSync207(join(r3, ".factory/out/loaded.json")).size);
   expect(bytesOf207(s3[0])).toBeGreaterThan(LIMIT207);
   expect(s3[0]).toMatch(new RegExp(`over the ${LIMIT207}-byte limit`));
+  // Scope change (#226): b881484의 이 테스트에 더한 단언은 이것(r3)과 아래 r4 한 줄뿐이다 — dw2 rubric("carries a visible record of its
+  // original size")은 이 테스트(dw2의 check.ref)에 적용되는데 b881484의 기록 줄은 N만 남겼다. 기존 단언은 한 줄도 바뀌지 않았다
+  // (non_goal "Renaming or duplicating the test_207_* tests"). 원래 크기 M은 디스크의 context.json 전문에서 재고, 기록에서 베끼지 않는다.
   // 넘은 채로 끝난 런도 원래 크기를 말한다(넘었다는 사실과 얼마에서 줄였는지가 같은 줄에).
   const original3 = Buffer.byteLength(JSON.stringify(JSON.parse(readFileSync(join(r3, ".factory/out/context.json"), "utf8")).loaded, null, 2));
   expect(s3[0]).toBe(`loaded.json: ${statSync207(join(r3, ".factory/out/loaded.json")).size} bytes (from ${original3} bytes; free text cut to 100 chars) — over the ${LIMIT207}-byte limit`);
@@ -1110,6 +1099,9 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(untruncated4).toBeGreaterThan(6000);
   expect(n4).toBeLessThanOrEqual(LIMIT207);
   expect(s4[0]).not.toMatch(/over/);
+  // #226 (dw2 rubric 두 절을 한 픽스처에서): 사건의 실제 모양은 4096 아래로 내려오고(위 두 줄), 같은 기록 줄이 원래 크기를 말한다 —
+  // 줄만 보고 "잘렸다(M → N)"와 "빠졌다"를 구별한다.
+  expect(s4[0]).toBe(`loaded.json: ${n4} bytes (from ${untruncated4} bytes; free text cut to 100 chars)`);
   const parsed4 = JSON.parse(readFileSync(join(r4, ".factory/out/loaded.json"), "utf8"));
   // 실제 항목의 자유 텍스트(claim·evidence·repro)는 같은 n자 + 포인터, where는 그대로. 전문은 포인터가 가리키는 파일에 같은 id로 있다.
   const cutTo4 = Number(/cut to (\d+) chars/.exec(s4[0])?.[1]);
