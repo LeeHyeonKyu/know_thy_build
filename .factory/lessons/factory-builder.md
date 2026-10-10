@@ -9,3 +9,5 @@ Read this file as a checklist before you start. Entries are appended by the retr
   근거: runs/149.md, runs/156.md, runs/157.md, runs/170.md, runs/178.md. 인용: 0회.
 - [L-2026-10-03-03] diff가 DECISIONS.md·ADR·README·코드 주석에 엔진 동작을 단언하는 문장(종료 코드, 가드가 무엇을 세는가, 실패 몇 번이면 라운드를 잃는가, 리포트가 없을 때 무엇이 되는가)을 넣거나 고치면, 그 문장 옆에 그 동작을 정확히 고정하는 테스트 id를 댈 수 있는지 확인한다 — 댈 수 없으면 테스트를 쓰거나 문장을 뺀다. 문장이 가리키는 경로(예: report가 저장소 밖일 때, transition 실패 1회일 때)를 테스트가 실제로 지나가는지까지 본다.
   근거: runs/18.md, runs/143.md, runs/157.md, runs/174.md. 인용: 0회.
+- [L-2026-10-10-01] diff가 `deps`/client 인자로 주입받는 의존성(gh 어댑터, evidence 소스, dependencyClient 같은 오류 분류 래퍼)을 새로 쓰거나 읽는 소스를 바꾸면, 핸드오프 전에 production 조립 지점(`main()`, `make*Deps`)을 `rg`로 찾아 두 가지를 확인한다 — (1) 테스트가 fake에 넣는 데이터가 production이 실제로 읽는 곳과 같은 출처인가(예: rework 응답은 PR 코멘트에 올라가는데 의존성은 트래킹 이슈 코멘트만 읽는가), (2) 그 조립 줄을 지우거나 바꾸면…
+  근거: runs/195.md, runs/196.md. 인용: 0회.
