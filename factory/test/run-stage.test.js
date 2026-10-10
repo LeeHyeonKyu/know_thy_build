@@ -1308,7 +1308,9 @@ test("makeLocalEntry: backlog issue with no factory label → sets factory:queue
   const setFactoryLabel = vi.fn(async () => {});
   const comment = vi.fn(async () => {});
   const gh = { issue: async () => ({ number: 12, title: "t", body: "", labels: ["backlog", "priority:p1"] }), setFactoryLabel, comment };
-  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }) });
+  // #247 dw3 (spec1): an omitted admission dep now refuses (fail closed), so this test passes one that admits — the plan's rubric
+  // ("the existing local-entry tests are updated to pass admission, not made green by making admission optional"). Assertions unchanged.
+  const entry = makeLocalEntry({ gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal: async () => ({ ok: true }), admission: async () => ({ ok: true }) });
   const line = await entry();
   expect(line).toBe("local entry: backlog → factory:queue");
   expect(setFactoryLabel).toHaveBeenCalledWith(12, "factory:queue");
@@ -6577,11 +6579,7 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
 // Every test here drives the real door: real transition(), real makeQueueAdmission (through main's `makeStageAdmission`
 // where the wiring is the point), a fake gh that keeps labels and comments. Verdicts come from the fake gh's state —
 // the final label, the comments the issue actually got, whether the agent was launched — not from mock arguments.
-import { makeStageAdmission } from "../bin/run-stage.js";
-// Scope change (#247): dw5 — run-stage.js no longer exports a second 'unwired' constant (TRIAGE_RECHECK_UNWIRED); the skipped
-// re-check's record line is built from transition.js ADMISSION_UNWIRED. The line is pinned here, independently, under the old name,
-// so every assertion below that reads it is byte-for-byte the branch's.
-const TRIAGE_RECHECK_UNWIRED = "triage entry: queue admission re-check skipped — no queue admission is wired into this transition";
+import { makeStageAdmission, TRIAGE_RECHECK_UNWIRED } from "../bin/run-stage.js";
 import { blockedOrigin as blockedOrigin230 } from "../lib/retro/issue-comments.js";
 
 const CHARTER_230 = { never_automate: ["templates/factory/**"], back_pressure: { queue_max: 3 }, self_generated: { open_max: 2, depth_max: 1 } };
@@ -6703,6 +6701,10 @@ test("test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity", 
   // self-exclusion there, mirroring open_max), so #9 asked about itself in a queue of three (#9, #1, #21) names only the open_max cap.
   // The triage run below is unchanged: #9 still reaches the agent and nobody is demoted.
   expect(self.reasons).toEqual(["self-generated open 2 ≥ 2 (self_generated.open_max)"]);
+  // …and the queue itself really is at queue_max: a backlog newcomer to this same repo state is refused with the branch's own
+  // "queue 3 ≥ 3" sentence (the newcomer is not in the list, so all three members count — the count #9 used to make of itself).
+  const twin = store230([...[5, 9, 1, 21, 22].map((n) => ({ ...gh.store.get(n), labels: [...gh.store.get(n).labels], comments: [] })), { number: 30, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  expect((await makeQueueAdmission({ gh: twin, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 30 })).reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
   const atLaunch = [];
   const d = triageDeps230(gh, 9, {
     claudeP: vi.fn(async () => { atLaunch.push(...[9, 1, 21, 22].map((n) => [n, stateOf230(gh, n)])); return { is_error: false, result: "{}" }; }),
@@ -6890,13 +6892,15 @@ test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label"
     expect(comment, String(unwired)).not.toHaveBeenCalled();
     expect(stateOf230(g, 12), String(unwired)).toBe("backlog");
   }
-  // the one legacy shape — the admission key omitted, pinned by the pre-#230 makeLocalEntry test — still cannot carry an
-  // inadmissible issue to the agent: the triage entry re-check right behind it (main's admission) sends it to needs-info
+  // the legacy shape — the admission key omitted — cannot carry an inadmissible issue to the agent. #247 dw3 (spec1): it no longer
+  // reaches the label at all (the branch let it through to the triage re-check, which sent it to needs-info); local entry refuses
+  // it fail-closed, so the issue never leaves backlog and the agent is never launched.
   const legacy = store230([{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]);
   const dl = triageDeps230(legacy, 12, { localEntry: makeLocalEntry({ gh: legacy, issue: 12, stage: "triage", env, rehearsal: rehearsed230, log: () => {} }) });
   expect(await runStage({ stage: "triage", issue: 12, deps: dl })).toBe(0);
   expect(dl.claudeP).not.toHaveBeenCalled();
-  expect(stateOf230(legacy, 12)).toBe("factory:needs-info");
+  expect(stateOf230(legacy, 12)).toBe("backlog");
+  expect(legacy.store.get(12).comments).toEqual([]);
   // main() hands local entry the same admission closure
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/localEntry: makeLocalEntry\(\{ gh, issue, stage, env: process\.env, rehearsal, admission \}\)/);
@@ -6996,4 +7000,33 @@ test("test_247_local_entry_receives_production_admission_closure", async () => {
   expect(gh.store.get(12).comments.map((x) => x.body)).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=local -->\nbacklog → factory:queue — claimed locally first (§4.2.5)"]);
   expect(d.claudeP).toHaveBeenCalledTimes(1);                                   // enqueued, re-checked, and on to the agent
   expect(stateOf230(gh, 12)).toBe("factory:queue");
+});
+
+test("test_247_local_entry_without_admission_dep_writes_no_label", async () => {
+  // dw3 / spec1 — the admission key is OMITTED (not passed as undefined) and the rehearsal says ok:true, so a refusal here can only
+  // come from the missing dep. The issue is admissible on its own (well-formed body, empty queue): an admission, had one been wired,
+  // would let it in — so "refused" is the fail-closed rule, not a verdict on the issue.
+  const gh = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const setFactoryLabel = vi.spyOn(gh, "setFactoryLabel");
+  const comment = vi.spyOn(gh, "comment");
+  const rehearsal = vi.fn(async () => ({ ok: true }));
+  const heard = [];
+  const deps = { gh, issue: 12, stage: "triage", env: { FACTORY_LOCAL_ENTRY: "1" }, rehearsal, log: (m) => heard.push(m) };
+  expect("admission" in deps).toBe(false);
+  const line = await makeLocalEntry(deps)();
+  expect(rehearsal).toHaveBeenCalledTimes(1);                                   // the rehearsal ran and passed — it is not the refuser
+  expect(setFactoryLabel).toHaveBeenCalledTimes(0);
+  expect(comment).toHaveBeenCalledTimes(0);
+  expect(stateOf230(gh, 12)).toBe("backlog");
+  expect(gh.store.get(12).comments).toEqual([]);
+  // the sentence is the one the real transition() gives for the same unwired door (its own ADMISSION_UNWIRED), not a new one
+  const t = await realTransition({ gh: store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]), issue: 12, to: "factory:queue", rehearsal: rehearsed230 });
+  expect(t.ok).toBe(false);
+  expect(line).toBe(`local entry refused: ${t.reason}`);
+  expect(heard).toEqual([line]);                                                // and the operator hears it
+  // the same issue with the production admission wired is queued exactly as today — the refusal above is the missing dep alone
+  const ok = store230([{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }]);
+  const queued = await makeLocalEntry({ ...deps, gh: ok, admission: makeStageAdmission({ gh: ok, getCharter: () => CHARTER_230, factoryLogins: logins230 }) })();
+  expect(queued).toBe("local entry: backlog → factory:queue");
+  expect(stateOf230(ok, 12)).toBe("factory:queue");
 });
