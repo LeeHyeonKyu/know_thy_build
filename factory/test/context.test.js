@@ -1050,7 +1050,12 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   // 잘린 페이로드(작아진 N과 원래의 M)를 빠진 페이로드와 구별한다 — 기대값은 기록이 아니라 디스크의 전문에서 잰다.
   const original = Buffer.byteLength(JSON.stringify(ctx.loaded, null, 2));
   expect(original).toBeGreaterThan(statSync207(path).size);
-  expect(size[0]).toBe(`loaded.json: ${statSync207(path).size} bytes (from ${original} bytes; free text cut to 100 chars)` + (statSync207(path).size > LIMIT207 ? ` — over the ${LIMIT207}-byte limit` : ""));
+  // #226 skeptic — 조건부 기대를 걷고 이 픽스처의 실제 결과를 고정한다: 자유 텍스트 필드 13개(must_fix 5·핀 5·disputed·self-gate·브리프)가
+  // 100자 한국어 + 포인터로도 4096을 넘는다(두 패스가 상한이다 — b881484). 그 경우 줄은 원래 크기와 '넘었다'를 함께 말한다. 4096 **아래로**
+  // 내려가는 경우는 아래 #195 실제 모양(r4)이 `≤ LIMIT`로 고정한다.
+  expect(statSync207(path).size).toBeGreaterThan(LIMIT207);
+  expect(statSync207(path).size).toBeLessThan(original);
+  expect(size[0]).toBe(`loaded.json: ${statSync207(path).size} bytes (from ${original} bytes; free text cut to 100 chars) — over the ${LIMIT207}-byte limit`);
 
   // 작은 페이로드: 두 번째 패스 없음(200자에서 멈춘다), 그래도 줄은 남고, '넘었다'는 말은 없다.
   const small = { claims: ["x".repeat(300), "short"], disputedReason: "r", sgDetail: "d", briefClaim: "b" };

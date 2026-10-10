@@ -6928,11 +6928,16 @@ test("test_226_structural_success_result_is_not_a_payload_error", async () => {
   // runStage 끝까지(진짜 verifyStage): 성공한 plan 반환은 planned로 간다 — blocked/undecidable이 아니다.
   const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
   const writeHandoff = vi.fn(async () => {});
-  const pd = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(plan) }), verifyStage: ({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }), transition, writeHandoff });
+  // #226 skeptic — 성공 경로는 판별자를 **부르지 않는다**(run-stage.js §payloadError: "성공할 런을 막지 않는다"). 그 성질을 스파이로 고정한다:
+  // 페이로드 검사를 verify 앞으로 옮기는 회귀는 어떤 판별자로도 성공한 런을 판별자에 맡기게 되고, 여기서 실패한다. 판별자 자체의 정답
+  // (성공 반환 → null)은 위의 직접 호출과 아래 BLOCKED/RED·reworkFail 루프가 잡는다 — 이 구간은 그 둘을 대신하지 않는다.
+  const discriminator = vi.fn((o) => dispatcherPayloadErrorOf({ out: o }));
+  const pd = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(plan) }), verifyStage: ({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }), transition, writeHandoff, dispatcherPayloadError: discriminator });
   expect(await runStage({ stage: "plan", issue: 226, deps: pd })).toBe(0);
   expect(transition.mock.calls.map(([t]) => t.to)).toEqual(["factory:planned"]);
   expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "undecidable" }));
   expect(writeHandoff).toHaveBeenCalled();
+  expect(discriminator).not.toHaveBeenCalled();
 
   // 게이트가 판정 불가(BLOCKED)·실패 테스트 없는 RED인 자리는 페이로드 검사를 실제로 부르는 자리다 — 성공 반환이면 그 자리의 원래 전이
   // 그대로다(원인 없는 blocked / gates-unhandled). 성공 반환에는 `error`가 없으므로, guarantee만 보는 판별자가 여기서 내는 것은
