@@ -6886,3 +6886,53 @@ test("test_207_plan_repair_fail_closed_reports_the_repaired_loaded_json_size", a
   expect(transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 5123 bytes)" });
   expect(lines.filter((l) => /^loaded\.json: \d+ bytes/.test(l))).toEqual(["loaded.json: 3000 bytes", "loaded.json: 5123 bytes — over the 4096-byte limit"]);
 });
+
+// ── #226 (dw4) — cf1의 판별자를 반대쪽에서 잰다: **성공한** 워크플로 반환도 `orchestration: "workflow"`·`guarantee: "structural"`을
+// 싣는다(실제 triage·plan 핸드오프가 그렇다). `guarantee`만 보는 판별자는 그것을 fail-closed로 오인해 멀쩡한 런을 blocked/undecidable로
+// 세운다 — 세 채널(최종 메시지·전경 Workflow tool_result·완료 알림) 어디서 와도 페이로드 오류가 아니고, 런은 제 자리로 간다.
+test("test_226_structural_success_result_is_not_a_payload_error", async () => {
+  const missing = await truncatedArgsReturn207("plan");
+  const plan = { ...planHandoff, issue: 226, done_when: [{ id: "dw1", text: "x", level: "unit", check: { kind: "test", ref: "test_226_x" }, rubric: "r" }], orchestration: "workflow", guarantee: "structural" };
+  const triage = { schema: "factory.triage.v1", issue: 226, disposition: "ready", tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"], reason: "r", summary: "s", orchestration: "workflow", guarantee: "structural" };
+  const prose = { is_error: false, result: "The workflow finished." };
+  const foreground = (o) => [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w226", input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w226", content: JSON.stringify(o) }] } }),
+  ].join("\n");
+  const notification = (o) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(o)}</result></task-notification>` }] } });
+  const channels = {
+    "final message": (o) => ({ out: { is_error: false, result: fenced207(o) }, transcriptText: "" }),
+    "foreground Workflow tool_result": (o) => ({ out: prose, transcriptText: foreground(o) }),
+    "task-notification": (o) => ({ out: prose, transcriptText: notification(o) }),
+  };
+  for (const [channel, via] of Object.entries(channels)) {
+    // 대조: 같은 채널에 fail-closed 반환이면 답이 있다 — 채널을 정말 읽고 있다는 증거.
+    expect(dispatcherPayloadErrorOf(via(missing)), channel).toBe("context payload missing");
+    for (const [name, ok] of [["plan", plan], ["triage", triage]]) {
+      expect(dispatcherPayloadErrorOf(via(ok)), `${channel} / ${name}`).toBeNull();
+    }
+  }
+
+  // runStage 끝까지(진짜 verifyStage): 성공한 plan 반환은 planned로 간다 — blocked/undecidable이 아니다.
+  const transition = vi.fn(async ({ to }) => ({ ok: true, to }));
+  const writeHandoff = vi.fn(async () => {});
+  const pd = baseDeps({ buildContext: async () => ctx207, claudeP: async () => ({ is_error: false, result: fenced207(plan) }), verifyStage: ({ stage, out }) => verifyStage({ stage, out, roster: [], orchestration: "workflow" }), transition, writeHandoff });
+  expect(await runStage({ stage: "plan", issue: 226, deps: pd })).toBe(0);
+  expect(transition.mock.calls.map(([t]) => t.to)).toEqual(["factory:planned"]);
+  expect(transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "undecidable" }));
+  expect(writeHandoff).toHaveBeenCalled();
+
+  // 게이트가 판정 불가(BLOCKED)·실패 테스트 없는 RED인 자리는 페이로드 검사를 실제로 부르는 자리다 — 성공 반환이면 그 자리의 원래 전이
+  // 그대로다(원인 없는 blocked / gates-unhandled). guarantee만 보는 판별자는 여기서 `dispatcher payload:` 사유를 단다.
+  for (const [g, want] of [
+    [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+    [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+  ]) {
+    for (const [channel, via] of Object.entries(channels)) {
+      const { out, transcriptText } = via(plan);
+      const d = baseDeps({ buildContext: async () => ctx207, claudeP: async () => out, gates: async () => g, transition: vi.fn(async ({ to }) => ({ ok: true, to })), dispatcherPayloadError: (o) => dispatcherPayloadErrorOf({ out: o, transcriptText }) });
+      expect(await runStage({ stage: "review", issue: 226, deps: d }), `${channel} / ${g.status}`).toBe(2);
+      expect(d.transition.mock.calls.map(([t]) => t), `${channel} / ${g.status}`).toEqual([want]);
+    }
+  }
+});

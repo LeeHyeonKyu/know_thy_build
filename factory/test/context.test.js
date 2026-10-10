@@ -1182,3 +1182,67 @@ test("test_207_loaded_json_cut_boundary_exactly_n_chars_is_kept_whole", async ()
   expect(disk2.must_fix.map((m) => m.claim)).toEqual(Array.from({ length: 40 }, (_, i) => (i % 2 ? "q".repeat(100) + P : "p".repeat(100))));
   expect(disk2.must_fix.every((m) => m.evidence === "e".repeat(100) + P)).toBe(true);
 });
+
+/**
+ * #226 (dw5, cf1) — 디스패처는 워크플로를 부르기 **전에** `loaded.json`(과 때로 `context.json`)을 Read한다. 그 파일들은 진짜 생산자
+ * (`buildContext`)가 이 런에 쓴 그대로이고, 여기서는 리뷰 must_fix의 자유 텍스트가 fail-closed 반환을 글자 그대로 인용하며
+ * context.json의 handoffs가 `guarantee: "structural"`을 싣는다. 어느 Read도 워크플로의 fail-closed 반환으로 읽히지 않는다 —
+ * 문구·부분 문자열·중첩 키를 보는 판별자는 여기서 실패한다. 런은 원래 자리(원인 없는 blocked / 산출물 결함 needs-human)로 간다.
+ */
+import { dispatcherPayloadErrorOf as dispatcherPayloadErrorOf226 } from "../bin/run-stage.js";
+import { verifyStage as verifyStage226 } from "../lib/verify-stage.js";
+test("test_226_read_of_loaded_json_quoting_the_error_is_not_a_payload_error", async () => {
+  const failClosed = { issue: 0, error: "context payload missing", orchestration: "workflow", guarantee: "structural" };
+  const r = root207();
+  const { gh, issue } = await reworkHistory207({ issue: 226, items: [
+    { where: "factory/bin/run-stage.js:2066", claim: `context payload missing — the workflow returned ${JSON.stringify(failClosed)}`, evidence: "context issue mismatch: args 226 vs loaded 7" },
+    { where: "factory/lib/context.js:326", claim: "short", evidence: "context payload missing" },
+  ], disputedReason: "context payload missing", sgDetail: "d", briefClaim: "b" });
+  await gh.comment(issue, renderHandoff({ stage: "triage", issue, summary: "s", data: { schema: "factory.triage.v1", issue, disposition: "ready", tier: "load-bearing", impact_paths: ["factory/bin/run-stage.js"], reason: "r", summary: "s", orchestration: "workflow", guarantee: "structural" } }));
+  const ctx = await buildContext({ root: r, gh, issue, stage: "implement" });
+  const loadedPath = join(r, ".factory/out/loaded.json");
+  const contextPath = join(r, ".factory/out/context.json");
+  const loadedText = readFileSync(loadedPath, "utf8");
+  const contextText = readFileSync(contextPath, "utf8");
+  // 픽스처가 정말 그렇다: 디스크 위 loaded.json이 그 문구를 인용하고 `issue`·`orchestration: "workflow"`를 가지며, context.json의
+  // handoffs는 `guarantee: "structural"`을 싣는다(가리는 쪽의 모양).
+  expect(loadedText).toContain("context payload missing");
+  expect(JSON.parse(loadedText)).toMatchObject({ issue: 226, orchestration: "workflow" });
+  expect(JSON.parse(loadedText).must_fix[0].claim).toContain("context payload missing");
+  expect(ctx.handoffs.triage).toMatchObject({ orchestration: "workflow", guarantee: "structural" });
+  expect(JSON.parse(contextText).handoffs.triage.guarantee).toBe("structural");
+
+  const numbered = (text) => text.split("\n").map((l, i) => `${String(i + 1).padStart(6)}\t${l}`).join("\n");
+  const read = (id, path, text) => [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Read", id, input: { file_path: path } }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: numbered(text) }] } }),
+  ];
+  const reads = [...read("r1", loadedPath, loadedText), ...read("r2", contextPath, contextText)];
+  const prose = { is_error: false, result: "The workflow said: context payload missing. I could not continue." };
+  for (const [name, lines] of [["loaded.json", reads.slice(0, 2)], ["context.json", reads.slice(2)], ["both", reads]]) {
+    expect(dispatcherPayloadErrorOf226({ out: prose, transcriptText: lines.join("\n") }), name).toBeNull();
+  }
+  // 대조: 같은 Read 뒤에 진짜 전경 Workflow fail-closed 반환이 오면 답이 있다 — Read가 그것을 가리지도, 대신하지도 않는다.
+  const wf = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id: "w1", input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", content: JSON.stringify(failClosed) }] } }),
+  ];
+  expect(dispatcherPayloadErrorOf226({ out: prose, transcriptText: [...reads, ...wf].join("\n") })).toBe("context payload missing");
+
+  // runStage 끝까지: Read만 있는 세션은 원래 자리로 간다.
+  const deps = (over) => ({
+    charterReady: async () => true, trustWorkspace: async () => {}, claim: async () => ({ ok: true }),
+    heartbeat: async () => ({ stop() {} }), assertHandoff: async () => ({ ok: true }),
+    buildContext: async () => ({ ...ctx, roster: [] }), resetAgentsLog: async () => {}, claudeP: async () => prose,
+    verifyStage: ({ stage, out, gates }) => verifyStage226({ stage, out, roster: [], orchestration: "workflow", gates }),
+    writeHandoff: async () => {}, transition: vi.fn(async ({ to }) => ({ ok: true, to })), runRecord: () => {}, release: async () => true,
+    dispatcherPayloadError: (out) => dispatcherPayloadErrorOf226({ out, transcriptText: reads.join("\n") }), ...over,
+  });
+  const blocked = deps({ gates: async () => ({ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }) });
+  expect(await runStage({ stage: "review", issue, deps: blocked })).toBe(2);
+  expect(blocked.transition.mock.calls.map(([t]) => t)).toEqual([{ to: "factory:blocked", reason: "env down" }]);
+  const artifact = deps({ gates: async () => null });
+  expect(await runStage({ stage: "review", issue, deps: artifact })).toBe(2);
+  expect(artifact.transition).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^stage artifact missing or invalid: /) }));
+  expect(artifact.transition).not.toHaveBeenCalledWith(expect.objectContaining({ cause: "undecidable" }));
+});
