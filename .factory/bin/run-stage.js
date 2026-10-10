@@ -2064,22 +2064,20 @@ const isWorkflowFailClosed = (o) => Boolean(o) && typeof o === "object"
   && (typeof o.issue === "number" || o.issue === null) && o.guarantee === "structural"
   && typeof o.error === "string" && (o.error === DISPATCHER_PAYLOAD_MISSING || o.error.startsWith(DISPATCHER_PAYLOAD_MISMATCH));
 export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
-  // 후보는 **채널 순서**다(완료 알림 → 파일 읽기·tool_result → 전경 Workflow 결과 → 마지막 말 — extractStageArtifact), 시간 순서가 아니다.
-  // 그래서 "첫 후보"를 가장 최근 반환으로 읽으면 한 채널의 옛 fail-closed가 다른 채널의 더 새로운 반환을 가린다(#226 skeptic). 대신 두 번 묻는다:
-  // 세션 어디에든 fail-closed가 **아닌** 워크플로 반환이 하나라도 있으면 — 디스패처가 fail-closed 뒤에 워크플로를 다시 돌려 스키마가 틀린 산출물을
-  // 냈든, 그 반대 순서든 — 그것은 산출물 결함이고(needs-human, #207 이전의 자리) 옛 fail-closed가 blocked로 덮지 못한다. 반환이 전부 fail-closed일
-  // 때만 그 `error`가 답이다. 워크플로 반환의 모양은 `orchestration: "workflow"` + `issue` 키 + `guarantee: "structural"`이다(네 템플릿의 스테이지
-  // 산출물과 fail-closed 반환 둘 다). `guarantee`가 빠지면 디스패처가 먼저 Read하는 loaded.json(`issue`·`orchestration`은 있고 `guarantee`는
-  // 없다)이 후보로 뽑힌다 — rework cf1.
-  const isWorkflowReturn = (o) => Boolean(o) && typeof o === "object" && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural";
-  const pick = (accept) => extractStageArtifact({
+  // 후보 순서는 **채널 순서**다(완료 알림 → Read/tool_result → 전경 Workflow 결과 → 최종 메시지, §extractStageArtifact) — 시간
+  // 순서가 아니고, "최신이 먼저"는 **한 채널 안에서만** 참이다. 그 순서로 첫 번째 워크플로 반환(`orchestration: "workflow"` + `issue`
+  // 키 + `guarantee: "structural"` — 네 템플릿의 스테이지 산출물과 fail-closed 반환 둘 다 그 모양이다. `guarantee`가 빠지면 디스패처가
+  // 먼저 Read하는 loaded.json(`issue`·`orchestration`은 있고 `guarantee`는 없다)이 후보로 뽑혀 진짜 반환을 가린다 — rework cf1)을
+  // 고르고, 그것이 fail-closed일 때만 답한다. 그래서 재시도가 **같은 채널이나 더 앞선 채널**로 스키마가 틀린 산출물을 냈다면 그것이
+  // 뽑혀 산출물 결함(needs-human)이 된다. 그러나 옛 fail-closed가 완료 알림으로 왔고 재시도의 반환이 더 뒤의 채널(전경 Workflow 결과·
+  // 최종 메시지)로 왔다면 옛 fail-closed가 뽑혀 blocked/undecidable이 된다 — b881484를 그대로 옮긴 동작이다(plan non_goals: "Any design
+  // beyond the b881484 port"; 교차 채널 순서는 이 이슈 밖이다).
+  const a = extractStageArtifact({
     envelopeResult: out?.result,
     transcriptText,
-    validate: (o) => (isWorkflowReturn(o) && accept(o) ? { ok: true, errors: [] } : { ok: false, errors: ["not a matching workflow return"] }),
+    validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
-  if (pick((o) => !isWorkflowFailClosed(o)).ok) return null;
-  const a = pick(isWorkflowFailClosed);
-  return a.ok ? a.data.error : null;
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;
 }
 
 /**
