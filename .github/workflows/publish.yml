@@ -73,14 +73,26 @@ jobs:
       - name: Next version (runner-generated)
         id: version
         run: |
-          BEFORE="${{ github.event.before }}"
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE" 2>/dev/null; then
-            CHANGED="(first push or unknown base — treated as changed)"
-          else
-            CHANGED=$(git diff --name-only "$BEFORE" "${{ github.sha }}" -- 'factory/lib/**' 'factory/bin/**' 'factory/hooks/**' 'factory/cli/**' 'templates/**' 'bin/**' || true)
-          fi
           LOCAL=$(node -p "require('./package.json').version")
           REMOTE=$(npm view know-thy-build version 2>/dev/null || echo "0.0.0")
+          # 2026-10-10 — 기준은 이번 push의 `before`가 아니라 **마지막으로 발행된 버전의 태그**다. #222(템플릿 9개 = 엔진 내용)의 push는
+          # publish가 validate에서 죽었고(#223이 고침), 바로 다음 push(#223, publish.yml 한 줄)는 `before..after`에 엔진 내용이 없어
+          # "skipping" — #222의 변경은 다음 엔진 머지가 올 때까지 영영 발행되지 않았다. 발행 태그부터 보면 "아직 안 나간 모든 엔진
+          # 변경"이 정확히 잡힌다. 태그가 없으면(첫 발행·태그 push 실패) 예전처럼 `before`를 쓴다.
+          BEFORE="${{ github.event.before }}"
+          if git rev-parse -q --verify "refs/tags/v$REMOTE^{commit}" >/dev/null 2>&1; then
+            BASE="v$REMOTE"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE" 2>/dev/null; then
+            BASE="$BEFORE"
+          else
+            BASE=""
+          fi
+          if [ -z "$BASE" ]; then
+            CHANGED="(first push or unknown base — treated as changed)"
+          else
+            echo "Diff base: $BASE"
+            CHANGED=$(git diff --name-only "$BASE" "${{ github.sha }}" -- 'factory/lib/**' 'factory/bin/**' 'factory/hooks/**' 'factory/cli/**' 'templates/**' 'bin/**' || true)
+          fi
           if [ "$LOCAL" != "$REMOTE" ] && [ "$(printf '%s\n%s\n' "$REMOTE" "$LOCAL" | sort -V | tail -1)" = "$LOCAL" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"; echo "version=$LOCAL" >> "$GITHUB_OUTPUT"; echo "bump=false" >> "$GITHUB_OUTPUT"
             echo "Publishing $LOCAL as written in package.json (remote: $REMOTE)"
