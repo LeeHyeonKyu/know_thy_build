@@ -28,8 +28,8 @@
 | reviewer overlap | 없음 | 0.50 (18/36, runs 36) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 6, architecture 3, security 2 |
 | qa na ratio | 없음 | 0.22 (30/138 claims, na-heavy 4/19 approvals) |
-| cost (usd) | 10.86 | 910.10 |
-| tokens | input 160776 / output 18791 | input 22526857 / output 1779541 |
+| cost (usd) | 44.20 | 910.10 |
+| tokens | input 937448 / output 84484 | input 22526857 / output 1779541 |
 | retro cost (usd) | 0.00 | 10.44 |
 | retro tokens | input 0 / output 0 | input 30 / output 26670 |
 | full retros | — | 9 |
@@ -1270,6 +1270,38 @@
           200
         ],
         "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "Design beyond the b881484 port was added without a done_when. Commit 38e5616 (\"answer the skeptic\") replaced the branch's 'most recent workflow return decides' rule with a two-question rule: any non-fail-closed workflow return anywhere in the session turns the result into needs-human, and only all-fail-closed counts. It also added a third new test, test_226_stale_fail_closed_..., with no matching done_when.",
+        "runs": [
+          226
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "The new payload-error route copies session text the agent controls straight into the factory:blocked transition comment, ahead of the real `factory-blocked-origin` marker. Session output can therefore forge the blocked origin (`from=`, `stage=`, `cause=`) that the sweeper and the blocked-retry hop treat as runner-authored fact. That lets it pick `cause=engine-crash`, which escapes the R budget, and pick any `from=` label, which chooses the stage the sweeper re-dispatches and the hop it takes with `prerequisite: true`.",
+        "runs": [
+          226
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "security",
+        "text": "At the triage stage, hostile issue text can turn a terminal needs-human into a repeating triage run that only the per-issue lifetime USD budget stops. The undecidable retry cap does not hold for triage. Before this diff, the same input stopped after one run.",
+        "runs": [
+          226
+        ],
+        "source": "must_fix"
+      },
+      {
+        "role": "spec-conformance",
+        "text": "The diff adds retry/escalation logic and reason sanitising beyond the b881484 port. No done_when covers it and the plan never approved it. A retried triage run's payload error is not blocked again and goes to needs-human. Two extra tests pin this.",
+        "runs": [
+          226
+        ],
+        "source": "must_fix"
       }
     ],
     "examples": [
@@ -1488,6 +1520,15 @@
           207
         ],
         "source": "dissent"
+      },
+      {
+        "role": "skeptic",
+        "kind": "good",
+        "text": "Calling it \"engine-caused, not needs-human\" moves the cost. If a real artifact defect gets classified as an engine fault, the issue goes to blocked or retry instead of to a human. The fail-closed path then becomes a silent retry loop that burns $ per sweep. The plan must show that this route is bounded by the existing retry ceiling. (Skeptic's R1 dw4: 'on a repeated occurrence at the same head it escalates and does not retry forever'. Operator agreed in R2: 'the existing per-head ceiling has to be pinned for this route', citing factory/bin/run-stage.js:1342.)",
+        "runs": [
+          226
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1658,10 +1699,10 @@
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 10.85687,
+      "cost_usd": 44.198985,
       "tokens": {
-        "input": 160776,
-        "output": 18791
+        "input": 937448,
+        "output": 84484
       }
     }
   },
