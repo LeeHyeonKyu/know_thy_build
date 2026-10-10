@@ -6659,6 +6659,10 @@ test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async
   expect(now.some((k) => k === `runRecord:${TRIAGE_RECHECK_UNWIRED}`)).toBe(false);
   expect(now.filter((k) => k !== "admission")).toEqual(today.filter((k) => k !== `runRecord:${TRIAGE_RECHECK_UNWIRED}`));
   expect(now.indexOf("admission")).toBeLessThan(now.indexOf("claudeP"));
+  // "today" is pinned literally, not only as this PR's other branch: the sequence up to the agent launch, as the pre-#230
+  // run-stage.js (0627918) calls it for these deps, with the one re-check call between the entry-label read and the heartbeat
+  const PRE_230_UP_TO_AGENT = ["charterReady", "trustWorkspace", "claim", "issueLabels", "heartbeat", "assertHandoff", "buildContext", "resetAgentsLog", "claudeP"];
+  expect(now.slice(0, now.indexOf("claudeP") + 1)).toEqual([...PRE_230_UP_TO_AGENT.slice(0, 4), "admission", ...PRE_230_UP_TO_AGENT.slice(4)]);
   expect(gh.store.get(9).comments).toEqual([]);                                 // nothing said about admission on the happy path
 
   // main() wires the one admission closure into the triage entry and into local entry
@@ -6752,8 +6756,10 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
   await runStage({ stage: "triage", issue: 9, deps: d3 });
   expect(d3.claudeP).toHaveBeenCalledTimes(1);
   // a run whose deps carry no admission (main() always wires one — pinned above) never skips the re-check silently: the run
-  // record names it before the agent starts, so a wiring defect is visible in every run it touches (ADR-039: not fail-closed,
-  // because the pre-#230 triage tests run factory:queue entries without an admission dep)
+  // record names it before the agent starts, so a wiring defect is visible in every run it touches. This case also strips the
+  // hop's door (`skipRehearsal`, test-only) — the one shape where nothing judges the retry. With the door in place (d6 below)
+  // the retry of an inadmissible issue stops at the hop. The entry itself is not fail-closed because the pre-#230 test
+  // "KTB-15b: triage entering from factory:blocked…" runs this retry with no admission dep and expects the agent (ADR-039).
   const g4 = await seed(NO_DONE_WHEN_230);
   const order4 = [];
   const adm4 = makeStageAdmission({ gh: g4, getCharter: () => CHARTER_230, factoryLogins: logins230 });
@@ -6771,6 +6777,55 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
   expect(await runStage({ stage: "triage", issue: 9, deps: d5 })).toBe(2);
   expect(d5.claudeP).not.toHaveBeenCalled();
   expect(stateOf230(g5, 9)).toBe("factory:blocked");
+  // with main's own transition dep and no admission dep on the run, the retry of an inadmissible issue still cannot reach the
+  // agent: the hop's door judges the issue's own facts itself (it does not lean on the entry re-check being wired)
+  const g6 = await seed(NO_DONE_WHEN_230);
+  const adm6 = makeStageAdmission({ gh: g6, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const d6 = triageDeps230(g6, 9, { admission: null, transition: makeTransitionDep({ gh: g6, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm6, buildExtra: async () => ({}) }) });
+  expect(d6.admission).toBeUndefined();
+  expect(await runStage({ stage: "triage", issue: 9, deps: d6 })).toBe(2);
+  expect(d6.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g6, 9)).toBe("factory:blocked");
+
+  // one transient admission failure must not strand a capacity-bound queued issue: the retry hop back to factory:queue restores
+  // a label the issue already earned, so it does not re-judge the caps the entry re-check does not re-judge either (dw2) — not
+  // against siblings at self_generated.open_max (#9 is a harness issue; #21 queued and #22 ready are its siblings), not against
+  // a queue that another issue filled to queue_max while #9 sat in blocked
+  const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
+  const fixtures = [
+    ["siblings at open_max", [
+      { number: 5, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+      { number: 9, labels: ["factory:queue", "factory:harness"], body: harness9, author: "factory-bot" },
+      { number: 1, labels: ["factory:queue"], body: WELL_FORMED_230 },
+      { number: 21, labels: ["factory:queue", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+      { number: 22, labels: ["factory:ready", "factory:flaky"], body: "Detected while implementing #5. evidence: {}" },
+    ], [1, 21, 22], /self-generated open 2 ≥ 2/],
+    ["queue filled to queue_max", [
+      { number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 },
+      ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+    ], [1, 2, 3], /queue 3 ≥ 3/],
+  ];
+  for (const [name, issues, others, cap] of fixtures) {
+    const gc = store230(issues);
+    // the transient failure: the first admission read throws, the run blocks the issue (retryable, not a verdict)
+    let flaky = true;
+    const flakyGh = { ...gc, searchIssues: async (l) => { if (flaky) { flaky = false; throw new Error("HTTP 502 search"); } return gc.searchIssues(l); } };
+    const first = triageDeps230(gc, 9, { admission: makeStageAdmission({ gh: flakyGh, getCharter: () => CHARTER_230, factoryLogins: logins230 }) });
+    expect(await runStage({ stage: "triage", issue: 9, deps: first }), name).toBe(2);
+    expect(stateOf230(gc, 9), name).toBe("factory:blocked");
+    // the fixture really is capacity-bound now: the shared door, asked about the blocked #9, refuses it on a cap
+    const door = await makeQueueAdmission({ gh: gc, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
+    expect(door.ok, name).toBe(false);
+    expect(door.reasons.join("; "), name).toMatch(cap);
+    // the sweeper's retry, wired exactly as main() wires it: it hops back and reaches the agent; nobody is demoted
+    const before = others.map((n) => [n, stateOf230(gc, n)]);
+    const atLaunch = [];
+    const retry = triageDeps230(gc, 9, { claudeP: vi.fn(async () => { atLaunch.push([9, stateOf230(gc, 9)], ...others.map((n) => [n, stateOf230(gc, n)])); return { is_error: false, result: "{}" }; }) });
+    await runStage({ stage: "triage", issue: 9, deps: retry });
+    expect(retry.claudeP, name).toHaveBeenCalledTimes(1);
+    expect(atLaunch, name).toEqual([[9, "factory:queue"], ...before]);
+    expect(gc.store.get(9).comments.some((c) => /queue admission refused/.test(c.body)), name).toBe(false);
+  }
 });
 
 test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label", async () => {
