@@ -1310,3 +1310,107 @@ test("ymdOf reduces a cursor timestamp to the date the proposal PR needs", async
   expect(ymdOf("2026-09-05")).toBe("2026-09-05");
   expect(ymdOf(undefined)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 });
+
+// ── #230 — the retro maturity-promotion issue is born in backlog and walks through the real door ──────────────────
+// Driven through retro's own deps assembly (`makeRetroCreateIssue`, which main() spreads into `createIssue`): real
+// makeRehearsalChecker over a temp checkout, real makeQueueAdmission, real transition(), fake gh. Verdicts are the fake
+// gh's labels and comments plus retro's own record — an assembly that drops rehearsal or admission ends refused here.
+import { makeRetroCreateIssue } from "../bin/retro.js";
+import { rehearsalHash } from "../lib/rehearsal.js";
+import { notQueuedMarker } from "../lib/harness-request.js";
+import { mkdirSync } from "node:fs";
+
+const PROMO_230 = "harness: promote to M1 — DB schema files present";
+const checkout230 = () => {
+  const root = mkdtempSync(join(tmpdir(), "ktb230-retro-"));
+  mkdirSync(join(root, ".factory"), { recursive: true });
+  mkdirSync(join(root, "docs/factory"), { recursive: true });
+  const harnessText = "[project]\ndefault_branch = \"main\"\n";
+  const charterText = "---\nstatus: ready\n---\n# CHARTER\n";
+  writeFileSync(join(root, ".factory/harness.toml"), harnessText);
+  writeFileSync(join(root, "docs/factory/CHARTER.md"), charterText);
+  return { root, hash: rehearsalHash({ harnessText, charterText }) };
+};
+const STATE_LABELS_230 = new Set(["backlog", "factory:queue", "factory:ready", "factory:needs-info", "factory:blocked"]);
+const ghFor230 = ({ variable, queued = 0, swapThrows = false }) => {
+  const store = new Map();
+  let seq = 400;
+  for (let k = 0; k < queued; k++) store.set(k + 1, { number: k + 1, title: `q${k}`, body: "## done_when\n- [ ] q", labels: ["factory:queue"], comments: [], author: "LeeHyeonKyu" });
+  const created = [];
+  return {
+    store, created,
+    async createIssue({ title, body, labels }) { const number = (seq += 1); created.push({ number, labels: [...labels] }); store.set(number, { number, title, body, labels: [...labels], comments: [], author: "factory-bot" }); return number; },
+    async issue(n) { const i = store.get(Number(n)); if (!i) throw new Error(`no issue #${n}`); return { ...i, labels: [...i.labels] }; },
+    async comments(n) { return [...(store.get(Number(n))?.comments ?? [])]; },
+    async comment(n, body) { store.get(Number(n)).comments.push({ body }); },
+    async setFactoryLabel(n, to) { if (swapThrows) throw new Error("HTTP 403 label write"); const i = store.get(Number(n)); i.labels = [...i.labels.filter((l) => !STATE_LABELS_230.has(l)), to]; },
+    async searchIssues(label) { return [...store.values()].filter((i) => i.labels.includes(label)).map((i) => ({ number: i.number })); },
+    async getVariable() { return variable; },
+    async commitsForPath() { return []; },
+    async commitStatuses() { return []; },
+  };
+};
+const CHARTER_230 = { never_automate: [], back_pressure: { queue_max: 3 }, self_generated: { open_max: 5, depth_max: 1 } };
+const HARNESS_230 = { project: { default_branch: "main" } };
+const retroWith230 = async (gh, root, over = {}) => {
+  const { deps, recorded } = makeDeps({ state: freshState(), overrides: { createIssue: vi.fn(makeRetroCreateIssue({ gh, root, charter: CHARTER_230, harness: HARNESS_230, env: {} })), ...over } });
+  const code = await runRetro({ deps, now: NOW });
+  const promo = [...gh.store.values()].find((i) => i.title === PROMO_230);
+  return { code, deps, recorded, promo };
+};
+
+test("test_230_retro_promotion_issue_is_born_backlog_and_transitioned", async () => {
+  const { root, hash } = checkout230();
+
+  // rehearsal current, queue has room → born backlog + factory:harness, moved to factory:queue by transition()
+  const gh = ghFor230({ variable: hash });
+  const ok = await retroWith230(gh, root);
+  expect(ok.code).toBe(0);
+  expect(gh.created.find((c) => c.number === ok.promo.number).labels).toEqual(["backlog", "factory:harness"]);
+  expect(ok.promo.labels).toEqual(["factory:harness", "factory:queue"]);
+  expect(ok.promo.comments.map((c) => c.body.split("\n")[0])).toEqual(["<!-- factory-transition:v1 from=backlog to=factory:queue by=script -->"]);
+  expect(ok.recorded.some((l) => /stays in backlog/.test(l))).toBe(false);
+  // the other issue retro opens (a flaky rewrite) is born backlog and stays there — only the promotion takes the door
+  const rewrite = [...gh.store.values()].find((i) => i.title === "rewrite flaky test at another level: t2");
+  expect(rewrite.labels).toEqual(["backlog", "factory:flaky"]);
+  expect(rewrite.comments).toEqual([]);
+
+  // refused: stale rehearsal, a full queue → stays backlog, one record line, one comment with the reason and the next step
+  for (const [name, g, why] of [
+    ["stale rehearsal", ghFor230({ variable: "0".repeat(64) }), /rehears/],
+    ["queue full", ghFor230({ variable: hash, queued: 3 }), /queue admission refused — queue 3 ≥ 3 \(back_pressure\.queue_max\)/],
+  ]) {
+    const r = await retroWith230(g, root);
+    expect(r.code, name).toBe(0);                                                // retro does not throw
+    expect(r.promo.labels, name).toEqual(["backlog", "factory:harness"]);
+    const lines = r.recorded.filter((l) => l.startsWith(`retro: harness issue #${r.promo.number} stays in backlog`));
+    expect(lines, name).toHaveLength(1);
+    expect(lines[0], name).toMatch(why);
+    expect(r.promo.comments, name).toHaveLength(1);
+    const c = r.promo.comments[0].body;
+    expect(c.startsWith(notQueuedMarker(r.promo.number)), name).toBe(true);
+    expect(c, name).toMatch(why);
+    expect(c, name).toMatch(/\/know-thy-build:next/);                            // the next step
+    expect(c, name).not.toMatch(/피처는 이 이슈가 큐에 들어가 머지될 때까지 주차/); // no parked feature behind a retro promotion
+    expect(r.deps.publishProposal, name).toHaveBeenCalledTimes(1);               // the remaining steps still ran
+    expect(r.deps.sync, name).toHaveBeenCalled();
+  }
+
+  // the door throws (label write 403) → still backlog, recorded, commented; retro finishes
+  const thrown = await retroWith230(ghFor230({ variable: hash, swapThrows: true }), root);
+  expect(thrown.code).toBe(0);
+  expect(thrown.promo.labels).toEqual(["backlog", "factory:harness"]);
+  expect(thrown.recorded.filter((l) => l.startsWith(`retro: harness issue #${thrown.promo.number} stays in backlog`) && /HTTP 403 label write/.test(l))).toHaveLength(1);
+  expect(thrown.promo.comments.filter((c) => c.body.startsWith(notQueuedMarker(thrown.promo.number)))).toHaveLength(1);
+  expect(thrown.deps.publishProposal).toHaveBeenCalledTimes(1);
+
+  // a duplicate open title still creates no second issue
+  const dupGh = ghFor230({ variable: hash });
+  const dup = await retroWith230(dupGh, root, { harvest: vi.fn(async () => ({ ...HARVEST(), harnessTitles: [PROMO_230] })) });
+  expect(dup.promo).toBeUndefined();
+  expect(dupGh.created.map((c) => c.labels)).toEqual([["backlog", "factory:flaky"]]);
+
+  // main() assembles exactly this dep
+  const src = readFileSync(new URL("../bin/retro.js", import.meta.url), "utf8");
+  expect(src).toMatch(/createIssue: makeRetroCreateIssue\(\{ gh, root, charter, harness, env: process\.env \}\),/);
+});
