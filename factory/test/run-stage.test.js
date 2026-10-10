@@ -7030,3 +7030,34 @@ test("test_247_local_entry_without_admission_dep_writes_no_label", async () => {
   expect(queued).toBe("local entry: backlog → factory:queue");
   expect(stateOf230(ok, 12)).toBe("factory:queue");
 });
+
+test("test_247_full_queue_triage_never_evicts_its_first_n_members", async () => {
+  // skeptic — queue_max 3 (CHARTER_230) and four well-formed members (#9 listed first, as a hop-restored seat would be): the
+  // fresh triage entry of EVERY member is run, each on its own copy of the same repo state. Only the member ranked after the
+  // first three (#9) is refused; #1, #2 and #3 reach the agent. A guard that refused any member while the queue holds more than
+  // N — or that counted every sibling — would refuse #1, #2 and #3 too, and the full queue would drain to needs-human.
+  const seen = {};
+  for (const k of [9, 1, 2, 3]) {
+    const { gh, writes } = counted247([9, 1, 2, 3].map((number) => ({ number, labels: ["factory:queue"], body: WELL_FORMED_230 })));
+    const d = triageDeps230(gh, k, { transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+    await runStage({ stage: "triage", issue: k, deps: d });
+    const refused = d.transition.mock.calls.map(([a]) => a).filter((a) => a.to === "factory:needs-human");
+    seen[k] = { agent: d.claudeP.mock.calls.length, refused: refused.map((a) => a.reason), writes };
+  }
+  for (const k of [1, 2, 3]) expect(seen[k], `#${k}`).toEqual({ agent: 1, refused: [], writes: [] });
+  expect(seen[9]).toEqual({ agent: 0, refused: ["queue admission refused — queue 3 ≥ 3 (back_pressure.queue_max)"], writes: [] });
+});
+
+test("test_247_triage_recheck_unwired_is_admission_unwired_itself", async () => {
+  // dw5 — "no second unwired constant beyond ADMISSION_UNWIRED": the name the branch's test_230 tests import is that constant,
+  // not a sentence of its own, and a triage run with no admission dep records exactly that sentence once, before the agent.
+  const { ADMISSION_UNWIRED } = await import("../lib/transition.js");
+  expect(TRIAGE_RECHECK_UNWIRED).toBe(ADMISSION_UNWIRED);
+  const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
+  const lines = [];
+  const d = triageDeps230(gh, 9, { admission: null, lines, transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
+  expect("admission" in d).toBe(false);
+  await runStage({ stage: "triage", issue: 9, deps: d });
+  expect(lines.filter((l) => l === ADMISSION_UNWIRED)).toHaveLength(1);
+  expect(lines.filter((l) => /unwired|not wired|re-check skipped/i.test(l) && l !== ADMISSION_UNWIRED)).toEqual([]);
+});

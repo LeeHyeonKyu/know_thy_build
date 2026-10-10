@@ -282,3 +282,24 @@ test("test_247_entry_recheck_rejudges_queue_max_only_when_asked", () => {
   // a backlog issue (not in the list) is judged as before: three others fill a queue_max of 3
   expect(queueAdmission({ issue: person, charter: charter(), ...base, queued: [1, 2, 3].map((number) => ({ number })) }).ok).toBe(false);
 });
+
+// ── #247 (skeptic) — which member of an over-full queue is the over-cap one. A queue can hold N+1 legitimately (the blocked-retry
+// hop restores a seat without re-judging the cap); a fresh triage entry of each member must not count every sibling, or each
+// of them is refused in turn and the whole queue drains to needs-human. Members are ranked by issue number; only those ranked
+// after the first N are over the cap. A backlog issue (not in the list) still counts every member.
+test("test_247_queue_max_refuses_only_members_ranked_after_the_first_n", () => {
+  const judge = (n, queued) => queueAdmission({ issue: { ...person, number: n }, charter: charter(), ...base, queued: queued.map((number) => ({ number })) });
+  // queue_max 3, four members: #10 is the one ranked after the first three — and the list order the search returns is irrelevant
+  for (const order of [[10, 1, 2, 3], [3, 10, 2, 1], [1, 2, 3, 10]]) {
+    for (const n of [1, 2, 3]) expect(judge(n, order), `#${n} in ${order}`).toMatchObject({ ok: true });
+    expect(judge(10, order).reasons, `#10 in ${order}`).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  }
+  // five members over a cap of three: exactly the two ranked last are over it, never more
+  const five = [7, 4, 30, 12, 5];
+  expect(five.filter((n) => !judge(n, five).ok).sort((a, b) => a - b)).toEqual([12, 30]);
+  // at or under the cap nobody is over it
+  expect([1, 2, 3].filter((n) => !judge(n, [1, 2, 3]).ok)).toEqual([]);
+  // a backlog issue — even one with a lower number than every member — is judged by the whole queue, as the door always did
+  expect(judge(0, [1, 2, 3]).reasons).toEqual(["queue 3 ≥ 3 (back_pressure.queue_max)"]);
+  expect(judge(0, [1, 2]).ok).toBe(true);
+});

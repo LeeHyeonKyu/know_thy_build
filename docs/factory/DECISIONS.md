@@ -4558,7 +4558,11 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 - **`queueAdmission`은 심사받는 이슈 자신을 `queue_max`에 세지 않는다**(`open_max`가 이미 하던 자기 제외와 같은 규칙, `lib/admission.js`).
   backlog·needs-info·needs-human·blocked에서 오는 이슈는 큐 목록에 없으므로 `transition()`·로컬 진입의 판정은 바뀌지 않는다.
 - 그래서 **triage의 새 진입이 `queue_max`를 다시 본다**(`entryRecheck(a, { queueMax: true })` — 기본값은 예전처럼 상한을 보지 않는다).
-  꽉 찬 큐(N/N)의 이슈는 자기 자신을 세어 쫓겨나지 않고, 문을 비켜 들어온 N+1번째만 거부된다. blocked 재시도 hop의 복구로 정해진
+  꽉 찬 큐(N/N)의 이슈는 자기 자신을 세어 쫓겨나지 않는다. 큐가 N을 넘겨 들고 있으면(아래 hop의 복구, 문의 count-then-write 경합) 큐에 있는
+  이슈는 **번호가 자기보다 앞선 형제만** 센다: 번호 순 첫 N개는 언제나 통과하고 그 뒤에 선 (구성원 수 − N)개만 거부된다. 형제 전부를 세면
+  구성원 모두가 차례로 거부돼 큐가 통째로 비워진다. 번호는 도착 순서가 아니다(아래 `open_max` 항목) — 그래서 거부되는 것이 문을 비켜
+  들어온 그 이슈라는 보장은 없고, 보장은 "첫 N개는 쫓겨나지 않는다"까지다. backlog에서 오는 이슈는 목록에 없으므로 여전히 구성원 전부를 센다
+  (`test_247_queue_max_refuses_only_members_ranked_after_the_first_n`, `test_247_full_queue_triage_never_evicts_its_first_n_members`). blocked 재시도 hop의 복구로 정해진
   진입은 hop 자신처럼 상한을 다시 재지 않는다(이미 얻었던 큐 자리다 — 아래 수용한 위험, `test_230_…_unreadable_…`의 "queue filled to
   queue_max"가 그대로 고정한다). 상한만 걸린 거부의 끝 상태는 `factory:needs-human`이다 — 고칠 본문이 없으니 needs-info가 아니고, 끝낼 이유가 아니니
   wont-do가 아니며, `factory:queue → backlog`는 그래프에 없다(새 엣지를 만들지 않는다). triage를 다시 띄우지 않고, 큐가 비면 사람이
@@ -4585,8 +4589,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   label → sets factory:queue…`(run-stage.test.js)는 호출 한 줄에 통과하는 심사기를 넘긴다(단언은 그대로). #247 본문에 `tests_changed_allowed:`가
   없으므로 이 한 줄이 자동 머지를 멈추고 사람의 머지로 넘긴다 — 의도한 결과다. 프로덕션 배선(main)은 언제나 심사기를 넘긴다.
 - **triage 진입 재심사도 심사기 dep이 없으면 거부하지 않고 기록한다.** `deps.admission`이 없는 런은 재심사를 건너뛰되, 에이전트를 띄우기
-  전에 런 기록에 `triage entry: queue admission re-check skipped — <ADMISSION_UNWIRED의 첫 절>` 한 줄을 남긴다(조용히 지나가지
-  않는다). #247 — 그 줄(`TRIAGE_RECHECK_UNWIRED`)은 자기 문장을 갖지 않는다: `ADMISSION_UNWIRED`의 첫 절로 만들어진다("미배선"을 뜻하는 말은 그 하나다). 거부(fail closed)로 하지 않은 이유는 위와 같다:
+  전에 런 기록에 `ADMISSION_UNWIRED` 문장 그대로 한 줄을 남긴다(조용히 지나가지
+  않는다). #247 — 그 줄은 자기 문장도 자기 상수도 갖지 않는다: 브랜치 테스트가 import하는 `TRIAGE_RECHECK_UNWIRED`는 `ADMISSION_UNWIRED`의 별칭 재수출이다("미배선"을 뜻하는 말은 그 하나다). 거부(fail closed)로 하지 않은 이유는 위와 같다:
   기존 triage 테스트 넷(I2 두 건, KTB-20, KTB-15b — run-stage.test.js)이 심사기 없는 deps로 `factory:queue` 진입을 끝까지 돌리고, 거부로
   바꾸면 그 넷이 깨진다(실측). 대신 두 가지가 그 틈을 좁힌다. main()의 `deps` 객체가 `admission` 키를 싣는다는 사실을 테스트가 고정하고,
   blocked 재시도의 hop은 main의 전이 dep이 심사기 없이는 `blocked → queue`를 거부하고, 심사기가 있으면 이슈 자신의 사실을 hop에서
@@ -4612,7 +4616,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 **배포 뒤 사람이 보는 변화**(소급 적용):
 - 이미 `factory:queue`에 있는 이슈도 **다음 triage 진입에서 다시 심사된다.** 손으로 큐 라벨을 붙였고 본문에 done_when이 없는 이슈는
   배포 뒤 첫 triage에서 needs-info로 간다(전이 코멘트 하나, 사유는 큐 문의 문장 그대로). 큐가 `queue_max`를 넘겨 쌓여 있었다면
-  새로 triage에 들어오는 넘친 이슈는 needs-human으로 간다. 일을 잃은 것이 아니다 — 본문을 고치거나 큐가 비면 문을 지나 돌아온다.
+  새로 triage에 들어오는 이슈 가운데 번호 순으로 첫 `queue_max`개 뒤에 선 이슈만 needs-human으로 간다. 일을 잃은 것이 아니다 — 본문을 고치거나 큐가 비면 문을 지나 돌아온다.
 - retro의 성숙도 승격 이슈는 **더는 자동으로 큐에 들어가지 않을 수 있다**: 문(리허설 + 심사)이 거부하면 backlog에 남고
   `factory-harness-not-queued` 코멘트 하나가 그 사유를 말한다. 예전에는 거부될 일 없이 큐 라벨을 달고 태어났다.
 - 데몬 경쟁: 진입 재심사의 전이는 claim을 쥔 채로 끝난다. claim을 잃은 런은 이 자리에 오기 전에 exit 2로 끝난다(KTB-28).

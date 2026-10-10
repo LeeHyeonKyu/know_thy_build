@@ -117,9 +117,11 @@ export function stageClaudeEnv({ root, stage, harnessIssue = false, harness = nu
 const GATED_STAGES = new Set(["implement", "review", "merge"]);
 /**
  * #230 — triage 진입 재심사에 심사기(`deps.admission`)가 실리지 않은 런이 남기는 기록 한 줄(조용히 지나가지 않는다). main은 언제나 싣는다.
- * #247 (dw5) — 자기 문장이 아니다: "미배선"을 뜻하는 말은 transition.js의 `ADMISSION_UNWIRED` 하나뿐이고, 이 줄은 그 첫 절을 싣는다.
+ * #247 (dw5) — 새 상수가 아니다: "미배선"을 뜻하는 말은 transition.js의 `ADMISSION_UNWIRED` 하나뿐이고, 이 이름은 그 상수의 별칭
+ * 재수출이다(같은 값, 자기 문장 없음 — 브랜치의 test_230 테스트가 이 이름으로 import한다). 그 문장의 "`→ factory:queue` is refused"는
+ * 이 런에서도 참이다: 심사기가 없는 런의 큐 전이는 `transition()`이 거부한다.
  */
-export const TRIAGE_RECHECK_UNWIRED = `triage entry: queue admission re-check skipped — ${ADMISSION_UNWIRED.split(" — ")[0]}`;
+export { ADMISSION_UNWIRED as TRIAGE_RECHECK_UNWIRED };
 export const GATES_SELF_REPORTED = "gates: self-reported by workflow (no gates.json from this run — unverified)";
 /**
  * 최종 리뷰 A-SF1 — qa 증거 부족을 이 라운드의 판정으로 접을 때 쓰는 **합성 must_fix의 id**.
@@ -531,16 +533,16 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
      *     코멘트 하나이고 사유는 큐 문이 같은 본문에 쓰는 문장 그대로다. claim은 finally가 푼다, exit 0.
      *   - 상한은 다시 보지 않는다(형제를 세는 꽉 찬 큐가 통째로 비워진다 — `entryRecheck` 주석). 그 이슈는 오늘처럼 에이전트로 간다.
      *     #247 — 예외 하나: **새** 진입(blocked 재시도 hop의 복구가 아닌 진입)은 `queue_max`를 다시 잰다(`entryRecheck(…, { queueMax })`).
-     *     심사는 이슈 자신을 세지 않으므로(`queueAdmission`의 자기 제외) 꽉 찬 큐의 N번째는 통과하고, 문을 비켜 들어온 N+1번째만
-     *     `factory:needs-human`으로 간다. hop의 복구는 이미 얻었던 큐 자리이므로 hop 자신처럼 상한을 다시 재지 않는다.
+     *     심사는 큐에 있는 이슈에게 번호가 앞선 형제만 세므로(`queueAdmission`의 자기 제외 + 순위) 번호 순 첫 N개는 통과하고, 그 뒤에 선
+     *     (구성원 수 − N)개만 `factory:needs-human`으로 간다 — 꽉 찬 큐가 통째로 비워지지 않는다(`test_247_full_queue_triage_never_evicts_its_first_n_members`). hop의 복구는 이미 얻었던 큐 자리이므로 hop 자신처럼 상한을 다시 재지 않는다.
      *   - 심사가 입력을 읽지 못했으면(gh 장애, CHARTER 미적재, 심사기가 던짐) 판정이 아니다: 진입 상태를 못 읽었을 때와 같은
      *     `factory:blocked`/`api-error`로 세우고 exit 2 — sweeper의 blocked 재시도가 다시 집고, 그 재시도도 이 자리를 지난다.
      *   - 심사기 dep 자체가 없는 런(main은 언제나 싣는다 — 테스트가 고정)은 재심사를 건너뛰되 런 기록에 그 사실을 한 줄 남긴다
-     *     (`TRIAGE_RECHECK_UNWIRED` — #247: `ADMISSION_UNWIRED`의 첫 절, "미배선"을 뜻하는 말은 그 하나뿐이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
+     *     (`ADMISSION_UNWIRED` 그대로 — #247: "미배선"을 뜻하는 말은 그 하나뿐이고 `TRIAGE_RECHECK_UNWIRED`는 그 별칭이다). 거부로 하지 않는 이유는 ADR-040 — 기존 triage
      *     테스트 넷(I2 두 건, KTB-20, KTB-15b)이 심사기 없는 deps로 큐 진입을 돌린다.
      */
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission !== "function") {
-      record([TRIAGE_RECHECK_UNWIRED]);
+      record([ADMISSION_UNWIRED]);
     }
     if (stage === "triage" && entryLabel === "factory:queue" && typeof d.admission === "function") {
       let v;
