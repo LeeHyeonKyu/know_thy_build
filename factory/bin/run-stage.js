@@ -919,6 +919,10 @@ export async function runStage({ stage, issue, deps, runnerId = "unknown", runAt
       }
       return payloadErrorMemo;
     };
+    // Known gaps, deferred to #240 (spec2: outside this plan — non_goals "Any design beyond the b881484 port" and "Changing the sweeper's
+    // retry or escalation behaviour"): (1) `error` reaches `reason` verbatim, so a session-produced `context issue mismatch…` tail can carry a
+    // forged `factory-blocked-origin` marker ahead of transition.js's own; (2) a triage retry (blocked → queue) opens a fresh sweeper window, so a
+    // triage run that keeps failing closed is re-blocked each time and only the lifetime budget stops it — dw3's sweeper cap is pinned for implement only.
     const blockOnPayload = async (error, lines) => {
       const size = Number.isInteger(payloadCtx?.loaded_json?.bytes) ? `loaded.json ${payloadCtx.loaded_json.bytes} bytes` : "loaded.json size unknown";
       const reason = `dispatcher payload: ${error} (${size})`;
@@ -2077,7 +2081,7 @@ export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
     transcriptText,
     validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
-  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;
+  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;   // verbatim (b881484) — sanitising is #240, see §blockOnPayload
 }
 
 /**

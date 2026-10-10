@@ -873,8 +873,11 @@ test("test_207_loaded_json_truncates_free_text_and_keeps_structure", async () =>
     const fixture = { claims, evidence, repro, disputedReason: long("disputed"), sgDetail: long("gate unit RED"), briefClaim: long("brief").slice(0, 380) };
     const r = root207();
     const { gh, issue, mustFix } = await reworkHistory207(fixture);
-    const ctx = await buildContext({ root: r, gh, issue, stage: "implement" });
+    // setup_dirty는 dw1이 이름으로 부르는 배열이다 — 비어 있으면 원소를 떨어뜨리는 변이가 구조 비교를 통과한다(skeptic F5). 긴 경로 하나를 섞는다.
+    const dirtyPaths = ["package-lock.json", `node_modules/.cache/${"deep/".repeat(60)}state.json`, "factory/out/unit.json"];
+    const ctx = await buildContext({ root: r, gh, issue, stage: "implement", setupDirty: { entries: dirtyPaths.map((path) => ({ path })) } });
     const disk = loadedOnDisk207(r);
+    expect(disk.setup_dirty, name).toEqual(dirtyPaths);                               // 원소·순서·문자열 전문 — 자유 텍스트가 아니므로 자르지 않는다
     if (evidence) for (const m of mustFix) for (const k of ["claim", "evidence", "repro"]) expect(Array.from(m[k]).length, `${name} ${m.id}.${k}`).toBeGreaterThan(200);
     const at200 = Buffer.byteLength(JSON.stringify({ ...ctx.loaded,
       must_fix: ctx.loaded.must_fix.map((m) => ({ ...m, claim: cut207(m.claim, 200), evidence: cut207(m.evidence, 200), ...("repro" in m ? { repro: cut207(m.repro, 200) } : {}) })),
