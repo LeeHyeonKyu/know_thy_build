@@ -4565,6 +4565,12 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   `needs-human → queue`로 되돌린다(그 문이 상한을 다시 잰다). 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태(needs-info·wont-do)로 간다.
   (`test_247_triage_reentry_does_not_count_itself_against_queue_max`, `test_247_entry_recheck_rejudges_queue_max_only_when_asked`,
   `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`)
+- **flaky 수확도 같은 꼬리 하나를 부른다**(#247 dw5, 검증자 지적 4). `lib/gates.js`가 따로 갖고 있던 사본(자기 마커
+  `factory-flaky-not-queued`, 거부 종류와 무관하게 늘 "리허설을 돌리라"는 다음 걸음)을 지우고 `createBacklogIssueAndQueue`(`parkedFeature: false`)를
+  부른다. 보이는 변화: 거부·던짐이면 flaky 이슈에도 `factory-harness-not-queued` 코멘트 하나가 거부 종류에 맞는 다음 걸음을 싣고(코멘트 첫 줄은
+  "이 이슈는 `backlog`에 머물러…"로, 하네스 이슈만 가리키지 않게 고쳤다), 문이 배선되지 않은 게이트 런은 코멘트 없이 `flaky_issues_backlogged`에
+  `HARNESS_TRANSITION_UNWIRED`를 남긴다. 문이 던져도 수확 결과에 `error:` 줄이 더해지지 않는다(이슈 번호 그대로).
+  (`test_247_flaky_harvest_uses_the_single_backlog_queue_tail`)
 
 **이슈 본문과 다른 것**(#230 계획 토론에서 결정, 이견은 그 계획 handoff의 dissent d1·d2에 남아 있다):
 - **triage 진입에서 `open_max`·`depth_max`는 다시 보지 않는다.** `open_max` 형제는 서로를 센다(자기 제외를 해도 형제끼리 서로를

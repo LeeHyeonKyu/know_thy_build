@@ -1,6 +1,8 @@
+// Scope change (#247): dw5 and verifier finding 4 — the flaky harvest in factory/lib/gates.js must use the single harness-request.js createBacklogIssueAndQueue tail; this file pins that.
 import { test, expect, vi } from "vitest";
 import { runGates, verdictLine, recomputeStatus, runStageGates, levelForTier, reUpTestEnv, commitStatusState, gateDetail, gatesDetailLines, attachGateDetails, parseFailingTests, GATES_DETAIL_PREFIX, DETAIL_MAX_CHARS, DETAIL_TAIL_LINES, DETAIL_MAX_REASON } from "../lib/gates.js";
 import { makeFakeRun } from "../lib/exec.js";
+import { notQueuedComment, notQueuedMarker } from "../lib/harness-request.js";
 import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1064,4 +1066,35 @@ test("implement: in KTB's own repo the runner-generated mirror paths are exclude
     expect(r.gates["must-not"].status).toBe("GREEN");
     expect(r.gates["must-not"].log).toMatch(/runner-generated mirror paths excluded: 2/);
   } finally { rmSync(self, { recursive: true, force: true }); }
+});
+
+// #247 dw5 (verifier finding 4) — the flaky harvest goes to the queue through the same single tail that harness requests and
+// retro promotions use (`createBacklogIssueAndQueue`): a refused or throwing door leaves the issue in backlog with exactly one
+// `notQueuedComment` (its marker, its wording), never a second, gates.js-only `factory-flaky-not-queued` comment.
+test("test_247_flaky_harvest_uses_the_single_backlog_queue_tail", async () => {
+  const reviewRun = () => makeFakeRun([
+    baseMixed(),
+    { match: (c, a) => c === "bash" && a[1] === TO, result: ok },
+    { match: (c, a) => c === "bash" && a[1] === "vitest --json", result: bad },
+    diffNames, revParse,
+    { match: (c, a) => c === "git" && a[0] === "worktree", result: ok },
+  ]);
+  const h = { ...stageHarness, gates: { ...stageHarness.gates, full: ["unit"] } };
+  const REFUSED = "queue admission refused — (back_pressure.queue_max) queue is full";
+  for (const [name, door, threw, reason] of [
+    ["refused", async () => ({ ok: false, reason: REFUSED }), false, REFUSED],
+    ["throws", async () => { throw new Error("gh label boom\nstack"); }, true, "queue transition threw — gh label boom"],
+  ]) {
+    const comments = [];
+    const gh = { createIssue: vi.fn(async () => 202), searchIssues: vi.fn(async () => []), comment: vi.fn(async (n, body) => { comments.push({ n, body }); return "u"; }) };
+    const transitionIssue = vi.fn(door);
+    const r = await runStageGates({ run: reviewRun(), cwd: stageCwd, harness: h, stage: "review", tier: "standard", base: "b".repeat(40), gh, issue: 49, readFile: readUnit, transitionIssue });
+    expect(gh.createIssue, name).toHaveBeenCalledWith(expect.objectContaining({ title: "flaky: test/a.test.js::flaky one", labels: ["backlog", "factory:flaky"] }));
+    expect(transitionIssue, name).toHaveBeenCalledWith(expect.objectContaining({ issue: 202, to: "factory:queue" }));
+    expect(r.flaky_issues, name).toEqual([202]);
+    expect(r.flaky_issues_backlogged, name).toEqual([{ issue: 202, reason }]);
+    expect(comments, name).toEqual([{ n: 202, body: notQueuedComment({ issue: 202, reason, threw, parkedFeature: false }) }]);
+    expect(comments[0].body.startsWith(notQueuedMarker(202)), name).toBe(true);
+    expect(comments.some((c) => c.body.includes("factory-flaky-not-queued")), name).toBe(false);
+  }
 });
