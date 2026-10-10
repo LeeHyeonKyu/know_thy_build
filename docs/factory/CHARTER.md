@@ -38,7 +38,7 @@ retro: { every_merges: { initial: 1, min: 1, max: 20 }, light_on_merge: true }
 | tier | 모드 | 역할 | 라운드 |
 |---|---|---|---|
 | docs / standard | single | synthesizer(계획자, opus) + skeptic | 2 (계획 1패스 → 반박 1패스; 반박은 **추가만** 한다) |
-| load-bearing | debate | product-advocate, architect, skeptic, operator | 3 + 서명 (`plan_rounds`) |
+| load-bearing | debate | product-advocate, architect, skeptic, operator | 2 + 서명 (`plan_rounds`; 2026-10-11 3→2, 허점 원장 M-3) |
 
 근거: `docs/factory/dogfood/2026-09-14-plan-baseline.md` · `docs/factory/audit/response-task-9.md`.
 4역할 토론은 이슈당 5.4×–33.7×를 쓰고도 #15·#18에서 단일 패스보다 못했고, must_fix 15건 중 5건이
@@ -105,10 +105,12 @@ plan으로 간다. 감당할 수 있는 이유는 뒤의 층이 남아 있어서
   에이전트 PR이 `version` 필드를 건드리는 것은 여전히 금지다(러너가 아니면 생성물이 아니다).
 - `harness.toml [protected]` 또는 `harness.toml [gates.thresholds]`를 바꾸는 변경 — 판정 기준 자체를 건드리는 diff는 항상 사람 머지(§5.1)
 - 템플릿 중 **판정 로직만** (2026-10-11 소유자 결정, 허점 원장 E-4·P-4 — 그 전에는 templates/factory 아래 전체가 글롭으로 막혔다):
-  `templates/factory/claude/settings.json`(L2 deny), `templates/factory/claude/hooks/**`(L1 훅), `templates/factory/github/workflows/**`(L0 — 잡·권한·머지 배우),
+  `templates/factory/claude/settings.json`·`templates/factory/factory/ci-settings*.json`(L2 deny — 세션과 CI의 것), `factory/hooks/**`(L1 훅의 원본 —
+  템플릿이 아니라 여기서 설치된다, manifest.js의 설치 목록), `templates/factory/github/workflows/**`(L0 — 잡·권한·머지 배우),
   `templates/factory/factory/harness.toml`(보호 경로·게이트 임계의 원본). L0/L1/L2가 무엇을 막는지가 바뀌면 이 템플릿을 설치한 모든 채택
-  저장소의 동작이 함께 바뀐다(항상 사람 리뷰·ADR-020). 에이전트 프롬프트·디스패처 명령·워크플로 스크립트·문서 템플릿은 공장이 바꿀 수 있다 —
-  리뷰 로스터가 보고, 머지 뒤 설치본은 다음 릴리스로 채택자에게 간다.
+  저장소의 동작이 함께 바뀐다(항상 사람 리뷰·ADR-020). 에이전트 프롬프트·디스패처 명령·워크플로 스크립트·문서 템플릿·`roles.toml`은 공장이
+  바꿀 수 있다 — 리뷰 로스터가 보고(roles.toml의 모델 강등은 리뷰어가 볼 몫이고, 없는 로스터 이름은 doctor가 FAIL한다), 머지 뒤 설치본은
+  다음 릴리스로 채택자에게 간다.
 - `.env*`, 시크릿, `.github/workflows/publish.yml`(npm 배포 경로 — 첫 항목과 같은 대상이지만 워크플로 파일 자체를 짚는다)
 
 ## Definition of Done (모든 tier 공통)
