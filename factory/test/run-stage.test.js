@@ -6577,7 +6577,7 @@ test("test_200_scope_check_fails_open_visibly_on_git_read_error", async () => {
 // Every test here drives the real door: real transition(), real makeQueueAdmission (through main's `makeStageAdmission`
 // where the wiring is the point), a fake gh that keeps labels and comments. Verdicts come from the fake gh's state —
 // the final label, the comments the issue actually got, whether the agent was launched — not from mock arguments.
-import { makeStageAdmission } from "../bin/run-stage.js";
+import { makeStageAdmission, TRIAGE_RECHECK_UNWIRED } from "../bin/run-stage.js";
 import { blockedOrigin as blockedOrigin230 } from "../lib/retro/issue-comments.js";
 
 const CHARTER_230 = { never_automate: ["templates/factory/**"], back_pressure: { queue_max: 3 }, self_generated: { open_max: 2, depth_max: 1 } };
@@ -6643,7 +6643,8 @@ test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async
 
   // (c) an admissible issue reaches the agent — and the run calls the same deps in the same order as a run without the re-check
   const gh = store230([{ number: 9, labels: ["factory:queue"], body: WELL_FORMED_230 }]);
-  const order = (d, calls) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, typeof v === "function" ? async (...a) => { calls.push(k); return v(...a); } : v]));
+  // runRecord calls are logged with their first line, so the one line an unwired run adds (and nothing else) can be named
+  const order = (d, calls) => Object.fromEntries(Object.entries(d).map(([k, v]) => [k, typeof v === "function" ? async (...a) => { calls.push(k === "runRecord" ? `runRecord:${a[0]?.[0]}` : k); return v(...a); } : v]));
   const today = [], now = [];
   const stub = () => ({ transition: vi.fn(async ({ to }) => ({ ok: true, to })) });
   const without = triageDeps230(gh, 9, { admission: null, ...stub() });
@@ -6653,7 +6654,10 @@ test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async
   await runStage({ stage: "triage", issue: 9, deps: order(withIt, now) });
   expect(withIt.claudeP).toHaveBeenCalledTimes(1);
   expect(now.filter((k) => k === "admission")).toHaveLength(1);
-  expect(now.filter((k) => k !== "admission")).toEqual(today);
+  // a run without the re-check says so in its record (never silently) — that one line is the only difference from today
+  expect(today.filter((k) => k === `runRecord:${TRIAGE_RECHECK_UNWIRED}`)).toHaveLength(1);
+  expect(now.some((k) => k === `runRecord:${TRIAGE_RECHECK_UNWIRED}`)).toBe(false);
+  expect(now.filter((k) => k !== "admission")).toEqual(today.filter((k) => k !== `runRecord:${TRIAGE_RECHECK_UNWIRED}`));
   expect(now.indexOf("admission")).toBeLessThan(now.indexOf("claudeP"));
   expect(gh.store.get(9).comments).toEqual([]);                                 // nothing said about admission on the happy path
 
@@ -6661,6 +6665,17 @@ test("test_230_triage_entry_reruns_admission_and_refuses_like_transition", async
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/const admission = makeStageAdmission\(\{ gh, getCharter: \(\) => charter, factoryLogins: \(\) => resolveFactoryLogins\(\{ gh, env: process\.env \}\) \}\);/);
   expect(src).toMatch(/\n    admission,\n/);
+  // …and it is a top-level key of the very `deps` object main() hands to runStage (not some other object literal), never reassigned
+  const mainSrc = src.slice(src.indexOf("\nasync function main() {"));
+  const depsAt = mainSrc.indexOf("\n  const deps = {\n");
+  const runAt = mainSrc.indexOf("process.exit(await runStage({ stage, issue, deps, runnerId, runAttempt }));");
+  expect(depsAt).toBeGreaterThan(-1);
+  expect(runAt).toBeGreaterThan(depsAt);
+  const depsEnd = mainSrc.indexOf("\n  };\n", depsAt);
+  expect(depsEnd).toBeGreaterThan(depsAt);
+  expect(depsEnd).toBeLessThan(runAt);
+  expect(mainSrc.slice(depsAt, depsEnd)).toMatch(/\n    admission,\n/);
+  expect(mainSrc.slice(depsEnd, runAt)).not.toMatch(/\bdeps\s*=|delete deps\.admission|deps\.admission\s*=/);
 });
 
 test("test_230_triage_entry_admissible_issue_passes_when_queue_is_at_capacity", async () => {
@@ -6736,6 +6751,26 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
   const d3 = triageDeps230(g3, 9);
   await runStage({ stage: "triage", issue: 9, deps: d3 });
   expect(d3.claudeP).toHaveBeenCalledTimes(1);
+  // a run whose deps carry no admission (main() always wires one — pinned above) never skips the re-check silently: the run
+  // record names it before the agent starts, so a wiring defect is visible in every run it touches (ADR-039: not fail-closed,
+  // because the pre-#230 triage tests run factory:queue entries without an admission dep)
+  const g4 = await seed(NO_DONE_WHEN_230);
+  const order4 = [];
+  const adm4 = makeStageAdmission({ gh: g4, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const d4 = triageDeps230(g4, 9, { admission: null, transition: makeTransitionDep({ gh: g4, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm4, buildExtra: async () => ({}),
+    transitionFn: (a) => realTransition({ ...a, ...(a.to === "factory:queue" ? { skipRehearsal: true } : {}) }) }),
+    runRecord: (l) => order4.push(...l), claudeP: vi.fn(async () => { order4.push("claudeP"); return { is_error: false, result: "{}" }; }) });
+  expect(d4.admission).toBeUndefined();
+  await runStage({ stage: "triage", issue: 9, deps: d4 });
+  expect(order4.filter((l) => l === TRIAGE_RECHECK_UNWIRED)).toHaveLength(1);
+  expect(order4.indexOf(TRIAGE_RECHECK_UNWIRED)).toBeLessThan(order4.indexOf("claudeP"));
+  // and with main's own transition dep, a missing admission cannot even hop back: the blocked → queue door refuses (fail closed)
+  const g5 = await seed(WELL_FORMED_230);
+  const d5 = triageDeps230(g5, 9, { admission: null });
+  expect(d5.admission).toBeUndefined();
+  expect(await runStage({ stage: "triage", issue: 9, deps: d5 })).toBe(2);
+  expect(d5.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(g5, 9)).toBe("factory:blocked");
 });
 
 test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label", async () => {
@@ -6776,6 +6811,30 @@ test("test_230_local_entry_refuses_inadmissible_issues_before_writing_the_label"
   const refused = await makeLocalEntry({ gh: broken, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: makeStageAdmission({ gh: broken, getCharter: () => undefined, factoryLogins: logins230 }), log: () => {} })();
   expect(refused).toBe("local entry refused: queue admission refused — CHARTER not loaded — queue admission needs it");
   expect(stateOf230(broken, 12)).toBe("backlog");
+  // an unwired admission refuses (fail closed): no label write, no comment, and the sentence is what the real transition()
+  // says for the same unwired door
+  for (const unwired of [null, false, {}]) {
+    const issues = [{ number: 12, labels: ["backlog"], body: WELL_FORMED_230 }];
+    const g = store230(issues);
+    const setFactoryLabel = vi.spyOn(g, "setFactoryLabel");
+    const comment = vi.spyOn(g, "comment");
+    const heard = [];
+    const l = await makeLocalEntry({ gh: g, issue: 12, stage: "triage", env, rehearsal: rehearsed230, admission: unwired, log: (m) => heard.push(m) })();
+    const t = await realTransition({ gh: store230(issues), issue: 12, to: "factory:queue", rehearsal: rehearsed230, admission: unwired });
+    expect(t.ok, String(unwired)).toBe(false);
+    expect(l, String(unwired)).toBe(`local entry refused: ${t.reason}`);
+    expect(heard, String(unwired)).toEqual([l]);
+    expect(setFactoryLabel, String(unwired)).not.toHaveBeenCalled();
+    expect(comment, String(unwired)).not.toHaveBeenCalled();
+    expect(stateOf230(g, 12), String(unwired)).toBe("backlog");
+  }
+  // the one legacy shape — the admission key omitted, pinned by the pre-#230 makeLocalEntry test — still cannot carry an
+  // inadmissible issue to the agent: the triage entry re-check right behind it (main's admission) sends it to needs-info
+  const legacy = store230([{ number: 12, labels: ["backlog"], body: NO_DONE_WHEN_230 }]);
+  const dl = triageDeps230(legacy, 12, { localEntry: makeLocalEntry({ gh: legacy, issue: 12, stage: "triage", env, rehearsal: rehearsed230, log: () => {} }) });
+  expect(await runStage({ stage: "triage", issue: 12, deps: dl })).toBe(0);
+  expect(dl.claudeP).not.toHaveBeenCalled();
+  expect(stateOf230(legacy, 12)).toBe("factory:needs-info");
   // main() hands local entry the same admission closure
   const src = readFileSync(new URL("../bin/run-stage.js", import.meta.url), "utf8");
   expect(src).toMatch(/localEntry: makeLocalEntry\(\{ gh, issue, stage, env: process\.env, rehearsal, admission \}\)/);
