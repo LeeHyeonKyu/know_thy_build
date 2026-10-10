@@ -4525,7 +4525,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 **결정** — 심사 규칙은 계속 `lib/admission.js` 한 곳에만 둔다. 세 자리는 main()이 만든 **같은 심사기**를 주입받아 부르기만 한다.
 1. **triage 진입 재심사**(`runStage`). 진입 라벨이 `factory:queue`로 정해진 뒤에 돈다. 로컬 진입과 blocked 재시도 hop 뒤, 에이전트를
    띄우기 전이다. 판정은 `entryRecheck`가 구조화된 코드(`queueAdmission`의 `codes`)로 하고, 사유 문구를 정규식으로 되읽지 않는다.
-   **이슈 자신의 사실만 다시 판정한다**(예외: 새 진입의 `queue_max` — #247, 아래 "#247이 더한 것"):
+   **이슈 자신의 사실만 다시 판정한다**(예외: triage 진입의 `queue_max` — hop으로 복구된 진입 포함, #247·#249 sec1, 아래 "#247이 더한 것"):
    - done_when 없음 → `factory:needs-info`. NEVER_AUTOMATE → `factory:wont-do`. 이슈 본문의 "needs-info"와 다르게 wont-do로 보내는 이유:
      triage가 같은 사실을 만나면 스크립트가 강제하는 상태가 이미 wont-do다(감사 M1). 한 사실에는 끝 상태가 하나다.
    - 거부는 `transition()`으로 한다. 코멘트는 그 전이 코멘트 하나이고, 사유는 큐 문이 같은 본문에 쓰는 문장
@@ -4550,8 +4550,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 **#247이 더한 것**(#247 계획 dw2 — 계획 토론의 네 역할이 모두 짚은 결함):
 - **`queueAdmission`은 심사받는 이슈 자신을 `queue_max`에 세지 않는다**(`open_max`가 이미 하던 자기 제외와 같은 규칙, `lib/admission.js`).
   backlog·needs-info·needs-human·blocked에서 오는 이슈는 큐 목록에 없으므로 `transition()`·로컬 진입의 판정은 바뀌지 않는다.
-- 그래서 **triage의 새 진입이 `queue_max`를 다시 본다**(`entryRecheck(a, { queueMax: true })` — 기본값은 예전처럼 상한을 보지 않는다).
-  꽉 찬 큐(N/N)의 이슈는 자기 자신을 세어 쫓겨나지 않는다. 큐가 N을 넘겨 들고 있으면(아래 hop의 복구, 문의 count-then-write 경합) 큐에 있는
+- 그래서 **triage 진입이 — blocked 재시도 hop으로 복구된 진입을 포함해 — `queue_max`를 다시 본다**(`entryRecheck(a, { queueMax: true })` — 기본값은 예전처럼 상한을 보지 않는다).
+  꽉 찬 큐(N/N)의 이슈는 자기 자신을 세어 쫓겨나지 않는다. 큐가 N을 넘겨 들고 있으면(문의 count-then-write 경합, 손 라벨 — hop은 같은 문의 상한을 지나므로 큐를 넘겨 채우지 않는다) 큐에 있는
   이슈는 **번호가 자기보다 앞선 형제만** 센다: 번호 순 첫 N개는 언제나 통과하고 그 뒤에 선 (구성원 수 − N)개만 거부된다. 형제 전부를 세면
   구성원 모두가 차례로 거부돼 큐가 통째로 비워진다. 번호는 도착 순서가 아니다(아래 `open_max` 항목) — 그래서 거부되는 것이 문을 비켜
   들어온 그 이슈라는 보장은 없고, 보장은 "첫 N개는 쫓겨나지 않는다"까지다. backlog에서 오는 이슈는 목록에 없으므로 여전히 구성원 전부를 센다
