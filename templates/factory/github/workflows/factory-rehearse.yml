@@ -44,15 +44,32 @@ jobs:
     # `GITHUB_REF_NAME`을 하네스의 기본 브랜치와 대조해 다르면 기록 없이 exit 1 한다(이중 방어).
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # ADR-038 — 스텝의 `if:`에는 `secrets` 컨텍스트가 없다(잡 `env:`에는 있다). 그래서 "App이 설정됐는가"를 여기서 불리언으로 내린다.
+    env:
+      FACTORY_APP_CONFIGURED: ${{ secrets.FACTORY_APP_ID != '' }}
     # 게이트 전체(unit 포함) + base 워크트리 설치가 한 잡 안에서 돈다 — 스테이지의 상한과 같은 자리.
     timeout-minutes: 60
     steps:
+      # 2026-10-09 (ADR-020 이월 7 · ADR-021) — 에이전트 배우는 GitHub App이다(사유·모양은 factory-triage.yml의 같은 스텝).
+      # `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY`가 없으면 PAT(`FACTORY_BOT_TOKEN`)로 돈다. 체크아웃보다 앞이어야 한다.
+      - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
+        id: factory-token
+        if: ${{ env.FACTORY_APP_CONFIGURED == 'true' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+      - name: Factory login
+        if: ${{ steps.factory-token.outputs.app-slug != '' }}
+        env:
+          APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
+        run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           # 트리거가 dispatch든 push든 **기본 브랜치의 트리**를 본다(위 `if:`와 한 쌍이다).
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
-          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       # 스테이지와 **같은** setup이어야 한다 — 리허설이 증명하려는 것이 바로 이 스텝의 산출물이다
       # ([runtime].setup이 툴체인을 깔았는가, PATH가 다음 스텝에 서는가).
       - uses: ./.factory/actions/setup
@@ -61,7 +78,7 @@ jobs:
           test-env: "true"
       - name: Rehearse
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUN_ID: ${{ github.run_id }}
         run: node .factory/bin/rehearse.js
       # ADR-020 최종 리뷰 SF-1 — 업로드 전에 크리덴셜을 지운다. 이 잡이 올리는 것은 파일 하나
@@ -72,7 +89,7 @@ jobs:
         id: scrub-artifacts
         if: always()
         env:
-          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_BOT_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

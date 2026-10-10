@@ -98,7 +98,7 @@ const files = readdirSync(W).filter((f) => f.endsWith(".yml"));
 // ADR-020 KTB-24 — §4.1 표의 새 값. 데모 #15의 review는 4역할 × +709줄 PR을 45분 안에 못 끝내고
 // **한도에 걸려** 잘렸다(45 m 19 s). 올린 값은 그 관측에서 나왔다: review는 implement과 같은 90,
 // plan은 4대 opus 직렬 구간의 실측(42 m)에 여유를 더한 75, 나머지는 정리 스텝 몫만큼 조금씩 위로.
-const STAGE = { "factory-triage.yml": ["triage", 20, '"factory:queue"'], "factory-plan.yml": ["plan", 75, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 90, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 30, '"factory:approved"'] };
+const STAGE = { "factory-triage.yml": ["triage", 20, '"factory:queue"'], "factory-plan.yml": ["plan", 75, '"factory:ready"'], "factory-implement.yml": ["implement", 90, '"factory:planned","factory:rework"'], "factory-review.yml": ["review", 90, '"factory:awaiting-review"'], "factory-merge.yml": ["merge", 90, '"factory:approved"'] };
 const ISSUE_EXPR = "${{ github.event.issue.number || inputs.issue }}";
 
 test("all ten workflow templates exist and pass lint", () => {
@@ -137,11 +137,11 @@ test("stage workflows follow the §4.1 table and the token/concurrency rules", (
       expect(y, f).not.toContain("            ~/.claude");
       expect(y, f).toContain("if-no-files-found: ignore");
     }
-    expect(y, f).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
+    expect(y, f).toContain("token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
     expect(y, f).toContain("uses: ./.factory/actions/setup");
     expect(y, f).toContain("fetch-depth: 0");
-    if (stage === "merge") { expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}"); expect(y).toContain('claude: "false"'); }
-    else { expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}"); expect(y).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"); }
+    if (stage === "merge") { expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}"); expect(y).toContain('claude: "false"'); }
+    else { expect(y).toContain("GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}"); expect(y).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}"); }
     expect(y, f).toContain(["implement", "review", "merge"].includes(stage) ? 'test-env: "true"' : 'test-env: "false"');
   }
 });
@@ -339,9 +339,11 @@ test("every uploading template scrubs credentials immediately before the upload,
     expect(scrub, f).toBeLessThan(upload);                       // 업로드 **뒤**의 스크럽은 아무것도 지키지 않는다
     expect(y.slice(scrub, upload), f).toMatch(/\n {8}if: always\(\)\n/);
     // 네 시크릿은 **이 스텝의 env로만** 들어온다 — 값이 인자나 `echo`에 실리면 런 로그에 그대로 남는다
-    for (const n of ["FACTORY_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]) {
+    for (const n of ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "GITHUB_TOKEN"]) {
       expect(y.slice(scrub, upload), `${f} ${n}`).toContain(`          ${n}: \${{ secrets.${n} }}\n`);
     }
+    // 에이전트 토큰은 App 토큰(없으면 PAT)이다 — 2026-10-09, 아래 "every agent-token workflow mints…" 참고
+    expect(y.slice(scrub, upload), `${f} FACTORY_BOT_TOKEN`).toContain("          FACTORY_BOT_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}\n");
     expect(y.slice(scrub, upload), f).toContain("node .factory/bin/scrub-artifacts.js ");
     expect(y.slice(scrub, upload), f).not.toContain("echo $");
     // 스크럽이 훑는 경로는 업로드가 올리는 경로를 덮어야 한다(트랜스크립트는 merge에만 없다)
@@ -357,6 +359,40 @@ test("every uploading template scrubs credentials immediately before the upload,
     expect(y, f).not.toContain("upload-artifact");
     expect(y, f).not.toContain("scrub-artifacts");
   }
+});
+
+// 2026-10-09 (ADR-020 이월 7 · ADR-021) — **에이전트 배우는 GitHub App이다.** 2026-10-06 머신 유저(bot-hk)가 GitHub의 스팸
+// 휴리스틱에 플래그돼 그 계정의 PR·코멘트가 남들에게 통째로 숨겨졌고 두 저장소의 공장이 모두 멈췄다. 에이전트 토큰을 쓰는
+// 아홉 워크플로 전부가 (1) 체크아웃 **앞에** `actions/create-github-app-token`으로 토큰을 민팅하고(`id: factory-token`,
+// App 시크릿이 없으면 건너뛰어 PAT로 폴백), (2) 설치 토큰이 `gh api user`를 부를 수 없으므로 봇 로그인을 `<app-slug>[bot]`으로
+// `$GITHUB_ENV`에 넘기며, (3) 토큰 자리마다 `steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN`을 쓴다 —
+// 맨 PAT 참조(`${{ secrets.FACTORY_BOT_TOKEN }}`)가 하나라도 남으면 그 자리만 조용히 플래그된 계정으로 돈다.
+test("every agent-token workflow mints a GitHub App token before checkout and never uses the bare PAT (2026-10-09)", () => {
+  const files = readdirSync(W).filter((f) => f.endsWith(".yml") && !["factory-integrity.yml", "publish.yml"].includes(f));
+  expect(files.length).toBe(9);
+  for (const f of files) {
+    const y = readFileSync(join(W, f), "utf8");
+    const mint = y.indexOf("uses: actions/create-github-app-token@v3");
+    const checkout = y.indexOf("- uses: actions/checkout@v4");
+    expect(mint, f).toBeGreaterThan(-1);
+    expect(mint, f).toBeLessThan(checkout);
+    expect(y, f).toMatch(/- name: Factory token \(GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured\)\n {8}id: factory-token\n {8}if: \$\{\{ env\.FACTORY_APP_CONFIGURED == 'true' \}\}\n/);
+    // `secrets`는 스텝 `if:`에서 쓸 수 없다(컨텍스트 표) — 2026-10-10 그 한 줄이 아홉 파일을 통째로 "workflow file issue"로 만들었다
+    expect(y, f).toContain("FACTORY_APP_CONFIGURED: ${{ secrets.FACTORY_APP_ID != '' }}");
+    expect(y.split("\n").filter((l) => /^\s*if:/.test(l) && l.includes("secrets.")), f).toEqual([]);
+    expect(y, f).toContain("app-id: ${{ secrets.FACTORY_APP_ID }}");
+    expect(y, f).toContain("private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}");
+    expect(y, f).toMatch(/- name: Factory login\n {8}if: \$\{\{ steps\.factory-token\.outputs\.app-slug != '' \}\}\n {8}env:\n {10}APP_SLUG: \$\{\{ steps\.factory-token\.outputs\.app-slug \}\}\n {8}run: echo "FACTORY_BOT_LOGIN=\$\{APP_SLUG\}\[bot\]" >> "\$GITHUB_ENV"\n/);
+    // 맨 PAT 참조는 없다 — 코멘트가 아닌 줄에서 `secrets.FACTORY_BOT_TOKEN }}`는 항상 App 토큰 뒤의 폴백이다
+    const bare = y.split("\n").filter((l) => !/^\s*#/.test(l) && l.includes("secrets.FACTORY_BOT_TOKEN }}") && !l.includes("steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}"));
+    expect(bare, f).toEqual([]);
+    expect(lintWorkflow(y, { file: f }), f).toEqual([]);
+  }
+  // 머지 잡: 머지 배우 → App → PAT 순서의 폴백이고, 두 배우 가드는 여전히 민팅보다 앞이다
+  const merge = readFileSync(join(W, "factory-merge.yml"), "utf8");
+  expect(merge).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
+  expect(merge.indexOf("id: two-actor-token-guard")).toBeLessThan(merge.indexOf("id: factory-token"));
+  expect(merge).toContain('if [[ -n "${FACTORY_BOT_LOGIN:-}" ]]; then');
 });
 
 test("sweeper and integrity workflows", () => {
@@ -382,11 +418,11 @@ test("retro workflow is merge-triggered, serialized, and never cancelled (§8.4 
   expect(y).toContain("fetch-depth: 0");
   // PR head/merge ref가 아니라 머지된 결과가 있는 base 브랜치를 본다 — retro는 현재 저장소 상태를 읽는다
   expect(y).toContain("ref: ${{ github.event.pull_request.base.ref }}");
-  expect(y).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
+  expect(y).toContain("token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
   expect(y).toContain("uses: ./.factory/actions/setup");
   expect(y).toContain('claude: "true"');                                 // full retro는 claude -p를 부른다
   expect(y).toContain('test-env: "false"');                              // retro는 테스트를 돌리지 않는다
-  expect(y).toContain("GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}");
+  expect(y).toContain("GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
   expect(y).toContain("CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}");
   expect(y).toContain("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}");
   expect(y).toContain("FACTORY_RUNNER_ID: gha-${{ github.run_id }}");
@@ -417,7 +453,7 @@ test("health workflow is scheduled, runner-only, minimal-permission, and never c
   expect(y).toContain("cancel-in-progress: false");
   expect(y).toContain("fetch-depth: 0");
   expect(y).toContain("ref: ${{ github.event.repository.default_branch }}");
-  expect(y).toContain("token: ${{ secrets.FACTORY_BOT_TOKEN }}");
+  expect(y).toContain("token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
   expect(y).toContain("uses: ./.factory/actions/setup");  // 스테이지와 **같은** setup
   expect(y).toContain("run: node .factory/bin/health.js");
   // 러너 전용 — 에이전트도 테스트 환경도 띄우지 않는다(보고서는 기록에서 파생된다, 쓰여지지 않는다).
@@ -609,7 +645,7 @@ test("merge-token-scope: the shipped templates obey it — only factory-merge.ym
   // 그리고 머지 템플릿은 값이 아니라 **불리언**으로 모드를 옮긴다(사본을 하나 더 만들지 않는다).
   const merge = readFileSync(join(W, "factory-merge.yml"), "utf8");
   expect(merge).toContain("FACTORY_TWO_ACTOR: ${{ secrets.FACTORY_MERGE_TOKEN != '' }}");
-  expect(merge).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}");
+  expect(merge).toContain("GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}");
 });
 
 

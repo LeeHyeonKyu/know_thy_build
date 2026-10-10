@@ -34,6 +34,9 @@ jobs:
     # `github.event.label.name`은 null이고 contains()는 false다 — 이벤트 이름으로 먼저 가른다.
     if: github.event_name == 'workflow_dispatch' || contains(fromJSON('["factory:approved"]'), github.event.label.name)
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # ADR-038 — 스텝의 `if:`에는 `secrets` 컨텍스트가 없다(잡 `env:`에는 있다). 그래서 "App이 설정됐는가"를 여기서 불리언으로 내린다.
+    env:
+      FACTORY_APP_CONFIGURED: ${{ secrets.FACTORY_APP_ID != '' }}
     # ADR-021 r1 MF-2 b — **머지 토큰은 환경 시크릿이다.** 저장소 시크릿은 같은 저장소의 **어느
     # 브랜치에서 돌든** 워크플로에 주어진다(fork 제한은 same-repo 브랜치에 걸리지 않는다) — 곧
     # 에이전트가 자기 `claude/fq-*` 브랜치에 워크플로 한 장을 올리는 것만으로 admin PAT을 읽어 갈 수
@@ -43,7 +46,10 @@ jobs:
     # 환경이 없거나 이 플랜이 지원하지 않으면 이 줄은 아무 것도 깨뜨리지 않는다 — 환경이 자동 생성되고
     # 시크릿은 저장소 레벨에서 해석된다(그때의 위험은 bootstrap의 note와 doctor가 말한다).
     environment: factory-merge
-    timeout-minutes: 30
+    # #179 (ADR-033) — 거부권 창(CHARTER `self_change.veto_minutes`, 기본 60)을 **잡 안에서** 기다린다. 30분이던 잡은 창을 시작도
+    # 못 하고 blocked이 된다(merge-stage는 "남은 시간 < 창 + 게이트 재실행 + 2분"이면 창을 열지 않는다). 아래 env의
+    # `FACTORY_JOB_TIMEOUT_MINUTES`가 이 값을 그대로 run-stage에 전한다 — 둘은 같이 바뀌어야 한다.
+    timeout-minutes: 90
     steps:
       # 외부 감사 2026-09-14 M7 — **두 배우 모드는 조용히 강등되지 않는다.** 아래 `Run stage`의
       # `GH_TOKEN`은 `secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN`이다. 그 폴백은 단일
@@ -70,10 +76,30 @@ jobs:
             exit 1
           fi
           echo "factory: merge-token check ok (two-actor declared: ${TWO_ACTOR_DECLARED:-unset}, merge token present: $MERGE_TOKEN_PRESENT)"
+      # 거부권 창의 시계: 이 잡이 쓴 시간(FACTORY_JOB_STARTED, 다른 스테이지와 같은 값)과 잡의 한도를 run-stage가 읽는다.
+      - name: Mark the job start
+        run: |
+          echo "FACTORY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+          echo "FACTORY_JOB_TIMEOUT_MINUTES=90" >> "$GITHUB_ENV"
+      # 2026-10-09 (ADR-020 이월 7 · ADR-021) — 에이전트 배우는 GitHub App이다(사유·모양은 factory-triage.yml의 같은 스텝).
+      # `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY`가 없으면 PAT(`FACTORY_BOT_TOKEN`)로 돈다. 두 배우 가드 **뒤**, 체크아웃 **앞**이다 —
+      # 머지 배우(`FACTORY_MERGE_TOKEN`)는 이 스텝과 무관하고, 이 토큰은 체크아웃·상태 조회·에이전트 배우 자리에만 쓰인다.
+      - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
+        id: factory-token
+        if: ${{ env.FACTORY_APP_CONFIGURED == 'true' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.FACTORY_APP_ID }}
+          private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}
+      - name: Factory login
+        if: ${{ steps.factory-token.outputs.app-slug != '' }}
+        env:
+          APP_SLUG: ${{ steps.factory-token.outputs.app-slug }}
+        run: echo "FACTORY_BOT_LOGIN=${APP_SLUG}[bot]" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.FACTORY_BOT_TOKEN }}
+          token: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
       # 1.4.19 (L20, own-calendar #28) — **큐에서 기다린 런은 만들어진 시점의 커밋을 체크아웃한다.** 단일 self-hosted 러너
       # 뒤에서 50분을 기다린 implement 런이 그 사이 두 번 올라간 엔진(1.4.12 → 1.4.14)을 전혀 보지 못했고, 옛 검증자
       # 프롬프트로 head를 돌려보냈다. 여기서 origin의 기본 브랜치로 갱신한다 — 런의 headSha는 "어느 main에서 시작하라"가
@@ -101,8 +127,13 @@ jobs:
       # 맞지 않으면 스스로 fail closed 한다(needs-human).
       - name: Resolve the agent actor's login
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
         run: |
+          # App 모드면 위 `Factory login` 스텝이 이미 `<app-slug>[bot]`을 넣었다 — 설치 토큰은 `gh api user`를 부를 수 없다(403).
+          if [[ -n "${FACTORY_BOT_LOGIN:-}" ]]; then
+            echo "factory: agent actor login resolved from the GitHub App"
+            exit 0
+          fi
           login="$(gh api user --jq .login 2>/dev/null || true)"
           if [[ -n "$login" ]]; then
             echo "FACTORY_BOT_LOGIN=$login" >> "$GITHUB_ENV"
@@ -114,7 +145,7 @@ jobs:
       # ADR-021이 머지 권한을 두는 유일한 자리이고, 그 사실이 이 잡 전체의 전제다.
       - name: Run stage
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.FACTORY_MERGE_TOKEN || steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           # ADR-021 — **토큰이 아니라 "있느냐"만 옮긴다.** merge-stage는 두 배우 모드에서 머지 직전에
           # `gh pr review --approve`를 한 번 부르는데(base 브랜치가 승인 1건을 요구한다), 그 판단에
           # 필요한 것은 불리언 하나뿐이다. 시크릿 값을 env에 한 번 더 복사하면 사본이 하나 더 생길
@@ -152,7 +183,7 @@ jobs:
         id: scrub-artifacts
         if: always()
         env:
-          FACTORY_BOT_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          FACTORY_BOT_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           # ADR-021 — 머지 배우의 토큰이 **값으로** 등장하는 유일한 다른 자리다. 쓰기 위해서가 아니라
           # 아티팩트에서 리터럴로 지우기 위해서다: 이 잡의 `gh`가 그 토큰으로 돌았으므로 트리·로그
           # 어딘가에 남을 수 있고, 그것이 가장 강한 자격증명이다. `yml-lint`의 `merge-token-scope`가
@@ -193,7 +224,7 @@ jobs:
       - name: Aborted cleanup
         if: always() && job.status != 'success'
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
           FACTORY_RUNNER_ID: gha-${{ github.run_id }}
           FACTORY_RUN_ATTEMPT: ${{ github.run_attempt }}
           ISSUE: ${{ github.event.issue.number || inputs.issue }}
@@ -210,7 +241,7 @@ jobs:
       - name: Sweep
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.FACTORY_BOT_TOKEN }}
+          GH_TOKEN: ${{ steps.factory-token.outputs.token || secrets.FACTORY_BOT_TOKEN }}
         run: |
           git checkout ${{ github.sha }} -- .factory || true
           node .factory/bin/sweep.js --quick
