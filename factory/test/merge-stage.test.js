@@ -2865,7 +2865,8 @@ test("test_179_judge_path_unanimity_is_provenance_bound", async () => {
 test("test_179_never_automate_beats_self_change", async () => {
   const QA_DOC = "templates/factory/docs/QA.md";
   expect(NEVER_AUTOMATE_179).not.toContain("templates/factory/**");             // P-4: 템플릿 전체 금지는 사라졌다
-  expect(NEVER_AUTOMATE_179).toEqual(expect.arrayContaining(["templates/factory/github/workflows/**", "templates/factory/claude/settings.json", "factory/hooks/**"]));
+  // 정확히 일곱 — 넓은 글롭이 조용히 돌아오면 여기서 소리 난다(P-4 뒤 실제 CHARTER의 모양 그대로).
+  expect([...NEVER_AUTOMATE_179].sort()).toEqual([".env*", ".github/workflows/publish.yml", "factory/hooks/**", "templates/factory/claude/settings.json", "templates/factory/factory/ci-settings*.json", "templates/factory/factory/harness.toml", "templates/factory/github/workflows/**"]);
   const NEVER_AUTOMATE_WITH_DOCS = [...NEVER_AUTOMATE_179, "templates/factory/docs/**"];
   expect(classifyProtected179([QA_DOC], { engine: true })).toEqual({ non_judge: [QA_DOC], judge: [] });   // 구멍의 전제: 비판정이다
 
