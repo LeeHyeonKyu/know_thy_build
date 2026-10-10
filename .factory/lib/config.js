@@ -115,7 +115,12 @@ export function neverAutomateQualified(body) {
  * 채우는 이유: 여기서는 없는 것과 false가 같은 사실이다(아무도 켜지 않았다 = 꺼져 있다). 아직 아무도 이 값을 읽지 않는다
  * (merge-stage의 거부권 창은 S4a-2).
  */
-export const SELF_CHANGE_DEFAULTS = Object.freeze({ auto_merge_non_judge: false, auto_merge_judge: false, veto_minutes: 60 });
+/**
+ * ADR-039 (2026-10-10, 소유자 결정) — `operator_merge_judge`: 운영 세션(소유자 계정의 Claude 세션)이 **판정 경로**가 든 자기 PR도
+ * 운영 door(`operator-merge-check.js`)로 머지할 수 있다. 기본은 꺼짐(ADR-032의 모양: 비판정 경로만). 켜면 소유자는 서명 기계가
+ * 아니라 거부권만 남는다 — 그 대신 운영 세션은 머지 전에 대역 리뷰어 에이전트를 띄운다(`.claude/CLAUDE.md` "운영 머지" 절).
+ */
+export const SELF_CHANGE_DEFAULTS = Object.freeze({ auto_merge_non_judge: false, auto_merge_judge: false, operator_merge_judge: false, veto_minutes: 60 });
 /**
  * #189 (S4c) — `self_change.breaker`: 자동 머지 회로차단기의 임계. 키는 **`revert_streak` 하나**다(판정 경로 자동 머지의 연속
  * revert 수). 이슈 초안의 `window`·`bad_ratio`·`cooldown_hours`는 이 엔진이 구현하지 않으므로(plan non_goals — bad-ratio 신호를
@@ -160,7 +165,7 @@ export function parseSelfChange(raw) {
   const unknown = Object.keys(raw).filter((k) => !SELF_CHANGE_KEYS.includes(k));
   if (unknown.length) throw new Error(`CHARTER self_change has unknown key(s) ${unknown.join(", ")} (expected ${SELF_CHANGE_KEYS.join(", ")})`);
   const out = { ...SELF_CHANGE_DEFAULTS };
-  for (const k of ["auto_merge_non_judge", "auto_merge_judge"]) {
+  for (const k of ["auto_merge_non_judge", "auto_merge_judge", "operator_merge_judge"]) {
     if (!(k in raw)) continue;
     if (typeof raw[k] !== "boolean") throw new Error(`CHARTER self_change.${k} must be true or false — got ${JSON.stringify(raw[k])}`);
     out[k] = raw[k];

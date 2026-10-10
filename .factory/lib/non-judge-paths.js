@@ -40,6 +40,23 @@ export const NON_JUDGE_GLOBS = Object.freeze([
 export const ANY_REPO_NON_JUDGE_GLOBS = Object.freeze(["docs/**", "templates/factory/docs/**"]);
 
 /**
+ * ADR-039 — **문은 자기 자신을 열지 못한다.** CHARTER `self_change.operator_merge_judge`가 켜져도 이 목록의 파일이 든 PR은 사람이
+ * 머지한다: 운영 door의 판정 코드, 이 양의 목록, 그 bin, 그리고 그 bin을 부르는 훅 — 설치본(`.factory/**`·`.claude/hooks/`)까지.
+ * 그렇지 않으면 한 세션이 자기 PR로 door를 고쳐 쓰고 그 door로 자기 PR을 머지할 수 있다(대역 리뷰는 훅이 강제하지 못하는 절차다).
+ * 글롭이 아니라 정확한 경로다. 목록은 여기 하나다(#178) — `operator-merge.js`는 재export한다.
+ */
+export const DOOR_FILES = Object.freeze([
+  "factory/lib/operator-merge.js", ".factory/lib/operator-merge.js",
+  "factory/lib/non-judge-paths.js", ".factory/lib/non-judge-paths.js",
+  "factory/bin/operator-merge-check.js", ".factory/bin/operator-merge-check.js",
+  "factory/hooks/block-dangerous.sh", ".claude/hooks/block-dangerous.sh",
+  // door가 판정에 **신뢰하는** 한 홉 — 글롭 매처(넓히면 모든 경로가 비판정이 된다)와 CHARTER 리더(스위치를 읽는다).
+  "factory/lib/glob.js", ".factory/lib/glob.js",
+  "factory/lib/config.js", ".factory/lib/config.js",
+]);
+export const isDoorFile = (p) => DOOR_FILES.includes(String(p ?? "").replace(/^\.\//, ""));
+
+/**
  * 위 글롭 안에서도 판정 경로인 것. CHARTER는 규칙이고, runs는 러너가 쓰는 증거이며(`[protected].runner_only`), 템플릿
  * CHARTER는 모든 채택자의 규칙이 찍혀 나오는 원본이다(#178 d1). 세션 지시문(`CLAUDE*.md`·`AGENTS*.md`·`.mcp*.json`)은
  * 어디에 있든 에이전트 세션의 주입 채널이다 — 원본은 `factory/bin/run-stage.js`의 `SESSION_CONFIG_GLOBS`이고(이 lib는 그 bin을
