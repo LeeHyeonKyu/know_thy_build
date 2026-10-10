@@ -25,6 +25,9 @@ jobs:
     # workflow_run에서는 실제로 돈 스테이지가 끝났을 때만 — fan-out의 skipped 런은 아무것도 바꾸지 않았다.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'skipped'
     runs-on: ${{ vars.FACTORY_RUNNER || 'ubuntu-latest' }}
+    # ADR-038 — 스텝의 `if:`에는 `secrets` 컨텍스트가 없다(잡 `env:`에는 있다). 그래서 "App이 설정됐는가"를 여기서 불리언으로 내린다.
+    env:
+      FACTORY_APP_CONFIGURED: ${{ secrets.FACTORY_APP_ID != '' }}
     # ADR-020 r2 SF5 — 5분은 라벨 변경이 `gh` 한 번이던 시절의 예산이다. KTB-30 이후 한 번의 스왑은
     # 최대 ~39초를 잘 수 있고(1s·3s·9s 재시도 ×2 + verify + REST 폴백), 이 잡은 여덟 팔에서 라벨을
     # 만진다 — 넓은 API 장애, 곧 복구 팔이 가장 할 일이 많은 상황에서 잡이 SIGKILL됐다.
@@ -34,7 +37,7 @@ jobs:
       # `FACTORY_APP_ID`·`FACTORY_APP_PRIVATE_KEY`가 없으면 PAT(`FACTORY_BOT_TOKEN`)로 돈다. 체크아웃보다 앞이어야 한다.
       - name: Factory token (GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured)
         id: factory-token
-        if: ${{ secrets.FACTORY_APP_ID != '' }}
+        if: ${{ env.FACTORY_APP_CONFIGURED == 'true' }}
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.FACTORY_APP_ID }}

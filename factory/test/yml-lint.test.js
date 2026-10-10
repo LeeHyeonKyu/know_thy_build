@@ -376,7 +376,10 @@ test("every agent-token workflow mints a GitHub App token before checkout and ne
     const checkout = y.indexOf("- uses: actions/checkout@v4");
     expect(mint, f).toBeGreaterThan(-1);
     expect(mint, f).toBeLessThan(checkout);
-    expect(y, f).toMatch(/- name: Factory token \(GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured\)\n {8}id: factory-token\n {8}if: \$\{\{ secrets\.FACTORY_APP_ID != '' \}\}\n/);
+    expect(y, f).toMatch(/- name: Factory token \(GitHub App; the FACTORY_BOT_TOKEN PAT when no App is configured\)\n {8}id: factory-token\n {8}if: \$\{\{ env\.FACTORY_APP_CONFIGURED == 'true' \}\}\n/);
+    // `secrets`는 스텝 `if:`에서 쓸 수 없다(컨텍스트 표) — 2026-10-10 그 한 줄이 아홉 파일을 통째로 "workflow file issue"로 만들었다
+    expect(y, f).toContain("FACTORY_APP_CONFIGURED: ${{ secrets.FACTORY_APP_ID != '' }}");
+    expect(y.split("\n").filter((l) => /^\s*if:/.test(l) && l.includes("secrets.")), f).toEqual([]);
     expect(y, f).toContain("app-id: ${{ secrets.FACTORY_APP_ID }}");
     expect(y, f).toContain("private-key: ${{ secrets.FACTORY_APP_PRIVATE_KEY }}");
     expect(y, f).toMatch(/- name: Factory login\n {8}if: \$\{\{ steps\.factory-token\.outputs\.app-slug != '' \}\}\n {8}env:\n {10}APP_SLUG: \$\{\{ steps\.factory-token\.outputs\.app-slug \}\}\n {8}run: echo "FACTORY_BOT_LOGIN=\$\{APP_SLUG\}\[bot\]" >> "\$GITHUB_ENV"\n/);
