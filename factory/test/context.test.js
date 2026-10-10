@@ -1044,6 +1044,11 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(bytesOf207(size[0])).toBe(statSync207(path).size);
   expect(bytesOf207(size[0])).toBe(Buffer.byteLength(readFileSync(path, "utf8"), "utf8"));
   expect(bytesOf207(size[0]) <= LIMIT207).toBe(!/over/.test(size[0]));
+  // #226 skeptic — 원래 크기도 기록된다: 자르기 전 페이로드(= context.json의 loaded를 같은 방식으로 직렬화한 것)의 UTF-8 바이트 수. 그 줄만 보고
+  // 잘린 페이로드(작아진 N과 원래의 M)를 빠진 페이로드와 구별한다 — 기대값은 기록이 아니라 디스크의 전문에서 잰다.
+  const original = Buffer.byteLength(JSON.stringify(ctx.loaded, null, 2));
+  expect(original).toBeGreaterThan(statSync207(path).size);
+  expect(size[0]).toBe(`loaded.json: ${statSync207(path).size} bytes (from ${original} bytes; free text cut to 100 chars)` + (statSync207(path).size > LIMIT207 ? ` — over the ${LIMIT207}-byte limit` : ""));
 
   // 작은 페이로드: 두 번째 패스 없음(200자에서 멈춘다), 그래도 줄은 남고, '넘었다'는 말은 없다.
   const small = { claims: ["x".repeat(300), "short"], disputedReason: "r", sgDetail: "d", briefClaim: "b" };
@@ -1068,6 +1073,9 @@ test("test_207_loaded_json_over_4kb_truncates_harder_and_records_its_size", asyn
   expect(bytesOf207(s3[0])).toBe(statSync207(join(r3, ".factory/out/loaded.json")).size);
   expect(bytesOf207(s3[0])).toBeGreaterThan(LIMIT207);
   expect(s3[0]).toMatch(new RegExp(`over the ${LIMIT207}-byte limit`));
+  // 넘은 채로 끝난 런도 원래 크기를 말한다(넘었다는 사실과 얼마에서 줄였는지가 같은 줄에).
+  const original3 = Buffer.byteLength(JSON.stringify(JSON.parse(readFileSync(join(r3, ".factory/out/context.json"), "utf8")).loaded, null, 2));
+  expect(s3[0]).toBe(`loaded.json: ${statSync207(join(r3, ".factory/out/loaded.json")).size} bytes (from ${original3} bytes; free text cut to 100 chars) — over the ${LIMIT207}-byte limit`);
 
   // #195 라운드 2의 모양 — 실제 must_fix 네 건(잘리지 않은 must_fix ≈4,5xx + rework_pins ≈1,3xx바이트): ≤4096이거나 기록이 넘었다고
   // 말하고, must_fix의 길이·id·핀의 guard.kind/ref는 JSON.parse로 그대로 읽힌다.

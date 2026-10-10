@@ -378,11 +378,17 @@ export function truncateLoadedFreeText(loaded, n) {
   return out;
 }
 
-/** `loaded.json`을 쓰고 디스크 위 바이트 수를 돌려준다(→ `{ path, bytes, limit, truncated_to, over }`). */
+/**
+ * `loaded.json`을 쓰고 디스크 위 바이트 수를 돌려준다(→ `{ path, bytes, original_bytes, limit, truncated_to, over }`). `original_bytes`는
+ * 자르기 **전** 같은 직렬화의 UTF-8 바이트 수다(자르지 않았으면 `bytes`와 같다) — 런 기록 줄이 "N bytes (from M bytes; …)"로 남겨, 잘린
+ * 페이로드를 빠진 페이로드와 구별하게 한다(#226). 두 패스 뒤에도 넘을 수 있다: 구조(키·배열 원소·id)는 자르지 않으므로(dw1) 항목이 아주
+ * 많으면 구조만으로 4096을 넘는다 — 그때 상한은 "필드당 100자"이고, 넘었다는 사실은 `over`와 기록 줄이 숨기지 않는다.
+ */
 function writeLoadedJson({ root, stage, loaded, pointerHoldsFullText }) {
   const rel = ".factory/out/loaded.json";
   const path = join(root, rel);
   const write = (obj) => { writeFileSync(path, JSON.stringify(obj, null, 2)); return statSync(path).size; };
+  const originalBytes = Buffer.byteLength(JSON.stringify(loaded, null, 2), "utf8");
   let bytes, truncatedTo = null;
   if (stage === "implement" && pointerHoldsFullText) {
     for (const n of LOADED_TRUNCATE_PASSES) {
@@ -393,14 +399,15 @@ function writeLoadedJson({ root, stage, loaded, pointerHoldsFullText }) {
   } else {
     bytes = write(loaded);
   }
-  return { path: rel, bytes, limit: LOADED_JSON_LIMIT, truncated_to: truncatedTo, over: bytes > LOADED_JSON_LIMIT };
+  return { path: rel, bytes, original_bytes: originalBytes, limit: LOADED_JSON_LIMIT, truncated_to: truncatedTo, over: bytes > LOADED_JSON_LIMIT };
 }
 
 /** 런 기록의 한 줄. 크기를 모르면(배선 밖의 ctx) null — 지어내지 않는다. */
 export function loadedJsonLine(ctx) {
   const m = ctx?.loaded_json;
   if (!m || !Number.isInteger(m.bytes)) return null;
-  const cut = m.truncated_to ? ` (free text cut to ${m.truncated_to} chars)` : "";
+  const from = m.truncated_to && Number.isInteger(m.original_bytes) ? `from ${m.original_bytes} bytes; ` : "";
+  const cut = m.truncated_to ? ` (${from}free text cut to ${m.truncated_to} chars)` : "";
   const over = m.over ? ` — over the ${m.limit}-byte limit` : "";
   return `loaded.json: ${m.bytes} bytes${cut}${over}`;
 }

@@ -6693,6 +6693,16 @@ test("test_207_workflow_payload_error_is_undecidable_not_needs_human", async () 
   expect(await runStage({ stage: "implement", issue: 207, deps: fg, runnerId: "r" })).toBe(2);
   expect(fg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
   expect(fg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
+  // #226 skeptic — 세 번째 채널(백그라운드 완료 알림)도 runStage를 끝까지 지나 전이의 `to` 라벨까지 잰다: Read → 완료 알림, 마지막 말은 산문.
+  // 위의 직접 호출(문자열 반환)만으로는 그 채널이 전이로 이어지는지 보이지 않는다.
+  const bg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: [...readLoaded, note].join("\n") }) });
+  expect(await runStage({ stage: "implement", issue: 207, deps: bg, runnerId: "r" })).toBe(2);
+  expect(bg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human" }));
+  expect(bg.transition.mock.calls.at(-1)[0]).toMatchObject({ to: "factory:blocked", cause: "undecidable", reason: "dispatcher payload: context payload missing (loaded.json 6604 bytes)" });
+  // 대조: 같은 산문, 같은 Read인데 완료 알림이 없으면 blocked/undecidable이 아니다 — 위의 blocked는 알림이 만든 것이다.
+  const noBg = implDeps({ buildContext: async () => ctx207, claudeP: async () => prose, gates: async () => RED207, selfGateRetry, dispatcherPayloadError: (out) => dispatcherPayloadErrorOf({ out, transcriptText: readLoaded.join("\n") }) });
+  await runStage({ stage: "implement", issue: 207, deps: noBg, runnerId: "r" });
+  expect(noBg.transition).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked", cause: "undecidable" }));
   // 사유의 바이트 수는 **측정값**이다: 진짜 buildContext(makeBuildContextDep 배선)가 이 런에 쓴 loaded.json의 디스크 위 크기와 같다.
   const measured = implDeps({
     buildContext: makeBuildContextDep({ root: lr, gh: { issue: async () => ({ number: 207, title: "T", body: "", labels: ["factory:in-progress"] }), comments: async () => [] }, issue: 207, stage: "implement", run: null, mergeBase: async () => null, recordLine: () => {} }),
@@ -6923,7 +6933,9 @@ test("test_226_structural_success_result_is_not_a_payload_error", async () => {
   expect(writeHandoff).toHaveBeenCalled();
 
   // 게이트가 판정 불가(BLOCKED)·실패 테스트 없는 RED인 자리는 페이로드 검사를 실제로 부르는 자리다 — 성공 반환이면 그 자리의 원래 전이
-  // 그대로다(원인 없는 blocked / gates-unhandled). guarantee만 보는 판별자는 여기서 `dispatcher payload:` 사유를 단다.
+  // 그대로다(원인 없는 blocked / gates-unhandled). 성공 반환에는 `error`가 없으므로, guarantee만 보는 판별자가 여기서 내는 것은
+  // `undefined`이고 그것은 payloadError()에서 null이 된다 — 이 루프는 판별자가 성공 반환에 **문자열**을 지어내는 회귀(예: 고정 사유)를
+  // 막는다. guarantee만 보는 판별자 자체는 위의 직접 호출(`toBeNull`)과, 아래 `error` 문자열을 가진 진짜 비-fail-closed 반환이 잡는다.
   for (const [g, want] of [
     [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
     [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
@@ -6934,5 +6946,72 @@ test("test_226_structural_success_result_is_not_a_payload_error", async () => {
       expect(await runStage({ stage: "review", issue: 226, deps: d }), `${channel} / ${g.status}`).toBe(2);
       expect(d.transition.mock.calls.map(([t]) => t), `${channel} / ${g.status}`).toEqual([want]);
     }
+  }
+
+  // #226 skeptic — guarantee만 보는(또는 guarantee + 아무 `error` 문자열을 보는) 판별자를 **전이에서** 잡는 픽스처: 진짜 implement 워크플로가
+  // rework 응답이 끝내 비었을 때 돌려주는 반환(`reworkFailure`). `issue`·`orchestration: "workflow"`·`guarantee: "structural"`에 비어 있지 않은
+  // `error`까지 싣지만 디스패처 전달 고장이 아니라 산출물 결함이다 — 그런 판별자는 이 문자열을 돌려주고 런은 blocked/undecidable로 샌다.
+  const reworkLoaded = { issue: 226, stage: "implement", tier: "standard", roster: [], orchestration: "workflow", pr: 31, must_fix: [{ id: "cf1", where: "factory/bin/run-stage.js:2066", claim: "c", evidence: "e" }] };
+  const reworkFail = (await runWorkflow207(WF207("implement"), {
+    agent: async (_p, opts) => (opts.agentType === "factory-builder" ? { head_sha: "a".repeat(40), pr: 31, branch: "claude/fq-226", summary: "s", tests_added: [], commits: ["a".repeat(40)] } : null),
+    args: { raw: "226", loaded: reworkLoaded },
+  })).result;
+  expect(reworkFail).toMatchObject({ issue: 226, error: "rework response incomplete: cf1", orchestration: "workflow", guarantee: "structural" });   // 생산자가 정말 그렇게 낸다
+  for (const [channel, via] of Object.entries(channels)) {
+    expect(dispatcherPayloadErrorOf(via(reworkFail)), channel).toBeNull();
+    for (const [g, want] of [
+      [{ schema: "factory.gates.v1", status: "BLOCKED", blocked_reason: "env down" }, { to: "factory:blocked", reason: "env down" }],
+      [{ ...RED207, gates: { unit: { status: "RED", reason: "EPIPE" } } }, { to: "factory:blocked", reason: "EPIPE", cause: "gates-unhandled" }],
+    ]) {
+      const { out, transcriptText } = via(reworkFail);
+      const d = implDeps({ buildContext: async () => ctx207, claudeP: async () => out, gates: async () => g, dispatcherPayloadError: (o) => dispatcherPayloadErrorOf({ out: o, transcriptText }) });
+      expect(await runStage({ stage: "implement", issue: 226, deps: d, runnerId: "r" }), `${channel} / ${g.status}`).toBe(2);
+      // implement는 먼저 in-progress를 잡는다(claim) — 그 뒤의 전이가 그 자리의 원래 전이 하나뿐이다.
+      expect(d.transition.mock.calls.map(([t]) => t).filter((t) => t.to !== "factory:in-progress"), `rework failure / ${channel} / ${g.status}`).toEqual([want]);
+    }
+  }
+});
+
+// #226 skeptic — 후보는 채널 순서다(완료 알림 → 파일 읽기·tool_result → 전경 Workflow 결과 → 마지막 말), 시간 순서가 아니다. 그러니 한 채널의
+// 옛 fail-closed가 다른 채널의 **더 새로운** 반환(디스패처가 다시 돌려 얻은, 스키마가 틀린 산출물)을 가려선 안 된다 — 그것은 산출물 결함이다.
+// fail-closed는 세션의 워크플로 반환이 전부 fail-closed일 때만 답이다.
+test("test_226_stale_fail_closed_on_one_channel_does_not_hide_a_retried_artifact_on_another", async () => {
+  const missing = await truncatedArgsReturn207("review");
+  const retried = { schema: "factory.review.v1", issue: 42, orchestration: "workflow", guarantee: "structural", verdicts: "nope" };
+  const notify = (o) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text: `<task-notification><status>completed</status><result>${JSON.stringify(o)}</result></task-notification>` }] } });
+  const foreground = (o, id) => [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Workflow", id, input: {} }] } }),
+    JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: JSON.stringify(o) }] } }),
+  ].join("\n");
+  const prose = { is_error: false, result: "Done." };
+  const cases = [
+    ["background fail-closed, then a foreground retry", prose, [notify(missing), foreground(retried, "w2")].join("\n")],
+    ["foreground fail-closed, then the final message carries the retry", { is_error: false, result: fenced207(retried) }, foreground(missing, "w1")],
+    ["background fail-closed, then the final message carries the retry", { is_error: false, result: fenced207(retried) }, notify(missing)],
+  ];
+  for (const [name, out, transcriptText] of cases) {
+    expect(dispatcherPayloadErrorOf({ out, transcriptText }), name).toBeNull();
+    const d = baseDeps({
+      buildContext: async () => ctx207, claudeP: async () => out, gates: async () => null,
+      verifyStage: ({ stage, out: o, gates }) => verifyStage({ stage, out: o, roster: [], orchestration: "workflow", gates }),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })), dispatcherPayloadError: (o) => dispatcherPayloadErrorOf({ out: o, transcriptText }),
+    });
+    expect(await runStage({ stage: "review", issue: 42, deps: d }), name).toBe(2);
+    expect(d.transition, name).toHaveBeenCalledWith(expect.objectContaining({ to: "factory:needs-human", reason: expect.stringMatching(/^stage artifact missing or invalid: /) }));
+    expect(d.transition, name).not.toHaveBeenCalledWith(expect.objectContaining({ to: "factory:blocked" }));
+  }
+  // 대조: 같은 채널 조합이라도 반환이 전부 fail-closed면(디스패처가 같은 고장을 다시 만났다) 답이 있고 blocked/undecidable이다.
+  for (const [name, out, transcriptText] of [
+    ["background + foreground both fail-closed", prose, [notify(missing), foreground(missing, "w2")].join("\n")],
+    ["foreground fail-closed + final message restating it", { is_error: false, result: fenced207(missing) }, foreground(missing, "w1")],
+  ]) {
+    expect(dispatcherPayloadErrorOf({ out, transcriptText }), name).toBe("context payload missing");
+    const d = baseDeps({
+      buildContext: async () => ctx207, claudeP: async () => out, gates: async () => null,
+      verifyStage: ({ stage, out: o, gates }) => verifyStage({ stage, out: o, roster: [], orchestration: "workflow", gates }),
+      transition: vi.fn(async ({ to }) => ({ ok: true, to })), dispatcherPayloadError: (o) => dispatcherPayloadErrorOf({ out: o, transcriptText }),
+    });
+    expect(await runStage({ stage: "review", issue: 42, deps: d }), name).toBe(2);
+    expect(d.transition.mock.calls.at(-1)[0], name).toMatchObject({ to: "factory:blocked", cause: "undecidable" });
   }
 });
