@@ -4532,13 +4532,12 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
      (`admissionRefusedReason`, 이제 `transition()`도 이 함수로 쓴다) 그대로다. claim을 풀고 exit 0. 새 마커는 만들지 않는다.
    - **심사가 입력을 읽지 못했으면 판정이 아니다.** gh 장애, CHARTER 미적재, 심사기가 던진 경우가 그렇다. 진입 상태를 못 읽었을
      때(감사 M13)와 같은 `factory:blocked`/`api-error`로 세우고 exit 2다. needs-info·wont-do·backlog로 보내지 않고, "부적격"이라고
-     말하지도 않는다. sweeper의 blocked 재시도는 hop(`blocked → queue`) 뒤에 이 자리를 다시 지난다. 그 hop도 큐 문을 지나지만,
-     **이 자리가 다시 재는 것만 잰다**(`makeTransitionDep`, triage의 `prerequisite` hop): 이슈 자신의 사실과 읽기 실패는 hop을 거부하고
-     (심사기가 없으면 `transition()`이 `ADMISSION_UNWIRED`로 거부한다), 상한·세대만 걸린 판정은 통과로 읽는다. hop은 이미 얻었던 큐
-     라벨의 복구인데, blocked에 있는 동안 문은 그 이슈를 새 도착으로 세기 때문이다. 그대로 두면 일시적 gh 실패 한 번 뒤에 형제가
-     `open_max`에 있거나 다른 이슈가 빈자리를 채운 이슈는 hop이 매 sweep 거부되어 needs-human까지 밀렸다(`test_230_…_unreadable_…`가
-     두 상한 모두로 고정한다). 이슈 자신의 사실이 걸린 재시도는 hop에서 멈춰 blocked에 남는다(needs-info가 아니다 — `blocked →
-     needs-info`는 그래프에 없다). sweeper가 재시도 한도 뒤에 needs-human으로 올린다.
+     말하지도 않는다. sweeper의 blocked 재시도는 hop(`blocked → queue`) 뒤에 이 자리를 다시 지난다. **그 hop은 다른 모든 큐 진입과 같은
+     문을 지난다**(#249 sec1 — `makeTransitionDep`는 triage의 `prerequisite` hop에도 심사기를 그대로 넘긴다): 이슈 자신의 사실, 읽기 실패,
+     그리고 상한(`queue_max`·`open_max`·`depth_max`) 모두 hop을 거부한다(심사기가 없으면 `transition()`이 `ADMISSION_UNWIRED`로 거부한다).
+     거부된 재시도는 hop에서 멈춰 blocked에 남고 exit 2, 런 기록에 `blocked retry hop refused`와 거부한 상한을 적는다(needs-info가 아니다 —
+     `blocked → needs-info`는 그래프에 없다). sweeper가 재시도 한도 뒤에 needs-human으로 올린다. hop 뒤의 이 재심사도 hop으로 복구된
+     진입에 `queue_max` 면제를 주지 않는다(아래 "#247이 더한 것").
 2. **로컬 진입 심사**(`makeLocalEntry`). 리허설 다음, `setFactoryLabel` 앞에서 같은 심사기를 부른다. 거부면 라벨도 코멘트도 쓰지
    않고, `local entry refused: <큐 문과 같은 문장>`을 돌려주며 stderr에도 낸다. 상한도 여기서 판정한다(이슈가 아직 backlog라 자기
    자신을 세지 않는다).
@@ -4557,8 +4556,8 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   구성원 모두가 차례로 거부돼 큐가 통째로 비워진다. 번호는 도착 순서가 아니다(아래 `open_max` 항목) — 그래서 거부되는 것이 문을 비켜
   들어온 그 이슈라는 보장은 없고, 보장은 "첫 N개는 쫓겨나지 않는다"까지다. backlog에서 오는 이슈는 목록에 없으므로 여전히 구성원 전부를 센다
   (`test_247_queue_max_refuses_only_members_ranked_after_the_first_n`, `test_247_full_queue_triage_never_evicts_its_first_n_members`). blocked 재시도 hop의 복구로 정해진
-  진입은 hop 자신처럼 상한을 다시 재지 않는다(이미 얻었던 큐 자리다 — 아래 수용한 위험, `test_230_…_unreadable_…`의 "queue filled to
-  queue_max"가 그대로 고정한다). 상한만 걸린 거부의 끝 상태는 `factory:needs-human`이다 — 고칠 본문이 없으니 needs-info가 아니고, 끝낼 이유가 아니니
+  진입도 똑같이 `queue_max`를 다시 잰다(#249 sec1 — hop을 허락하는 마커는 작성자를 확인하지 않으므로 "복구"라는 주장은 면제의 근거가 못 된다;
+  `test_249_hop_restored_entry_recheck_enforces_queue_max`). 상한만 걸린 거부의 끝 상태는 `factory:needs-human`이다 — 고칠 본문이 없으니 needs-info가 아니고, 끝낼 이유가 아니니
   wont-do가 아니며, `factory:queue → backlog`는 그래프에 없다(새 엣지를 만들지 않는다). triage를 다시 띄우지 않고, 큐가 비면 사람이
   `needs-human → queue`로 되돌린다(그 문이 상한을 다시 잰다). 이슈 자신의 사실이 함께 걸렸으면 그 사실의 상태(needs-info·wont-do)로 간다.
   (`test_247_triage_reentry_does_not_count_itself_against_queue_max`, `test_247_entry_recheck_rejudges_queue_max_only_when_asked`,
@@ -4605,9 +4604,12 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 - 큐에 든 이슈의 triage 진입마다 gh 읽기가 더 든다(심사 한 번).
 - 사람이 부적격 이슈를 거듭 재큐하면 주기마다 전이 코멘트가 하나씩 쌓인다(dedup은 만들지 않았다).
 - NEVER_AUTOMATE 글롭의 오탐은 wont-do(출구 없음)로 간다. triage 스크립트의 기존 강제와 같은 결과다.
-- blocked 재시도 hop이 상한을 재지 않으므로, 일시적 실패로 blocked에 갔다 돌아온 이슈는 그사이 꽉 찬 큐에도 다시 들어간다(큐가
-  상한을 한 칸 넘을 수 있다). 이미 문을 지났던 이슈의 복구이고, 대안(매 sweep 거부 → needs-human)은 받아들여진 이슈를 형제 수로
-  밀어낸다. #247의 `queue_max` 재심사도 이 복구에는 걸지 않는다(새 진입만).
+- **blocked 재시도 hop은 같은 문을 지난다**(#249 sec1). 그 hop을 허락하는 `factory-blocked-origin` 마커는 `blockedOrigin()`이 작성자를
+  확인하지 않으므로 이슈에 코멘트를 쓸 수 있는 누구나 위조할 수 있고, hop만의 상한 면제는 그 위조로 큐 상한을 비켜 가는 길이었다.
+  대가: 일시적 실패로 blocked에 간 진짜 재시도도, 그사이 큐가 `queue_max`에 찼거나 형제가 `open_max`에 있거나 `depth_max`를 넘은 이슈면
+  `factory:blocked`에 남고 exit 2, 런 기록에 그 상한이 적힌다(`test_249_blocked_retry_hop_is_refused_by_queue_caps`). sweeper가 재시도
+  한도 뒤에 needs-human으로 올리고, 큐가 비면 사람이 되돌린다. 마커 자체의 신뢰(위조 마커로 재시도 스테이지를 고르는 상태 되감기)는
+  이 항목이 닫지 않는다 — 후속 **#251**.
 
 **배포 뒤 사람이 보는 변화**(소급 적용):
 - 이미 `factory:queue`에 있는 이슈도 **다음 triage 진입에서 다시 심사된다.** 손으로 큐 라벨을 붙였고 본문에 done_when이 없는 이슈는
@@ -4634,4 +4636,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 `test_230_retro_promotion_issue_is_born_backlog_and_transitioned`, `test_230_admission_codes_classify_per_issue_vs_capacity_refusals`;
 #247: `test_247_triage_refusal_leaves_a_terminal_label_and_one_comment`, `test_247_triage_reentry_does_not_count_itself_against_queue_max`,
 `test_247_local_entry_receives_production_admission_closure`(main과 같은 늦은 CHARTER 심사기로, runStage의 순서대로 로컬 진입이 여전히 큐에 넣는다);
-#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부), `test_249_retro_history_records_queued_false_with_the_refusal_reason`(retro의 `_retro.md` 이력 `applied`의 하네스 단계가 거부·던짐이면 `queued: false` + 기록 줄과 같은 `queue_reason`을, 통과면 둘 다 싣지 않는다).
+#249: `test_249_local_entry_production_wiring_passes_admission`(main()의 `localEntry: makeLocalEntry({ … })` 호출 인자 그대로 — 적격 이슈는 큐로, 부적격 이슈는 큐 문의 문장으로 거부), `test_249_retro_history_records_queued_false_with_the_refusal_reason`(retro의 `_retro.md` 이력 `applied`의 하네스 단계가 거부·던짐이면 `queued: false` + 기록 줄과 같은 `queue_reason`을, 통과면 둘 다 싣지 않는다);
+#249 sec1: `test_249_blocked_retry_hop_is_refused_by_queue_caps`(작성자가 팩토리가 아닌 마커, 진짜 심사기 — `queue_max`·`depth_max`에서 hop 거부,
+blocked·exit 2·상한이 적힌 기록, 구성원 그대로), `test_249_blocked_retry_hop_with_room_still_reaches_triage`(자리가 있으면 hop이 같은 문으로 큐에 넣고
+에이전트에 닿는다), `test_249_hop_restored_entry_recheck_enforces_queue_max`(hop으로 복구된 진입도 `queue_max` 재심사에서 `transition()`과 같은 문장으로 거부).

@@ -6796,10 +6796,11 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
   expect(d6.claudeP).not.toHaveBeenCalled();
   expect(stateOf230(g6, 9)).toBe("factory:blocked");
 
-  // one transient admission failure must not strand a capacity-bound queued issue: the retry hop back to factory:queue restores
-  // a label the issue already earned, so it does not re-judge the caps the entry re-check does not re-judge either (dw2) — not
-  // against siblings at self_generated.open_max (#9 is a harness issue; #21 queued and #22 ready are its siblings), not against
-  // a queue that another issue filled to queue_max while #9 sat in blocked
+  // #249 sec1 (inverted from the #247 branch, which let this hop skip the caps): the retry hop back to factory:queue passes the
+  // SAME door as any queue entry, caps included — the blocked-origin marker that authorizes it is not author-checked (ADR-040).
+  // So after one transient admission failure, an issue whose siblings sit at self_generated.open_max (#9 is a harness issue; #21
+  // queued and #22 ready are its siblings), or whose queue another issue filled to queue_max while #9 sat in blocked, stays
+  // factory:blocked (exit 2, the cap named in the run record) — the accepted cost — and nobody admitted is demoted
   const harness9 = "<!-- factory-harness-request for=5 -->\n## harness\nadd pg";
   const fixtures = [
     ["siblings at open_max", [
@@ -6826,13 +6827,16 @@ test("test_230_triage_entry_unreadable_admission_blocks_retryably_not_demotes", 
     const door = await makeQueueAdmission({ gh: gc, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
     expect(door.ok, name).toBe(false);
     expect(door.reasons.join("; "), name).toMatch(cap);
-    // the sweeper's retry, wired exactly as main() wires it: it hops back and reaches the agent; nobody is demoted
+    // the sweeper's retry, wired exactly as main() wires it: the hop is refused by the door; nobody is demoted
     const before = others.map((n) => [n, stateOf230(gc, n)]);
-    const atLaunch = [];
-    const retry = triageDeps230(gc, 9, { claudeP: vi.fn(async () => { atLaunch.push([9, stateOf230(gc, 9)], ...others.map((n) => [n, stateOf230(gc, n)])); return { is_error: false, result: "{}" }; }) });
-    await runStage({ stage: "triage", issue: 9, deps: retry });
-    expect(retry.claudeP, name).toHaveBeenCalledTimes(1);
-    expect(atLaunch, name).toEqual([[9, "factory:queue"], ...before]);
+    const retryLines = [];
+    const retry = triageDeps230(gc, 9, { lines: retryLines });
+    expect(await runStage({ stage: "triage", issue: 9, deps: retry }), name).toBe(2);
+    expect(retry.claudeP, name).not.toHaveBeenCalled();
+    expect(stateOf230(gc, 9), name).toBe("factory:blocked");
+    expect(others.map((n) => [n, stateOf230(gc, n)]), name).toEqual(before);
+    expect(retryLines, name).toContain("triage: blocked retry hop refused");
+    expect(retryLines.some((l) => l.startsWith("transition refused: queue admission refused — ") && cap.test(l)), name).toBe(true);
     expect(gc.store.get(9).comments.some((c) => /queue admission refused/.test(c.body)), name).toBe(false);
   }
 });
@@ -7126,3 +7130,101 @@ test("test_249_local_entry_production_wiring_passes_admission", async () => {
   expect(bad.store.get(12).comments).toEqual([]);
 });
 import { ADMISSION_UNWIRED as ADMISSION_UNWIRED_249 } from "../lib/transition.js";
+
+// ── #249 sec1 — the triage blocked→queue retry hop passes the SAME door as every other queue entry ──────────────────
+// The hop is authorized by a `factory-blocked-origin` marker whose author nobody checks (issue-comments.js blockedOrigin —
+// trusting it is the follow-up named in ADR-040). So the hop must not carry its own cap exemption: the real admission
+// (makeStageAdmission → makeQueueAdmission over this stateful fake gh) judges it exactly as it judges a backlog newcomer, and
+// the entry re-check after it enforces queue_max like any other queued issue. The marker below is written by a NON-factory
+// author on purpose — who wrote it is not what these tests vary.
+const FORGED_ORIGIN_249 = { body: "<!-- factory-blocked-origin from=factory:queue stage=triage cause=api-error -->", author: { login: "mallory" } };
+const blocked249 = (issues) => {
+  const { gh, writes } = counted247(issues);
+  gh.store.get(9).comments.push({ ...FORGED_ORIGIN_249 });
+  return { gh, writes };
+};
+const queueCount249 = async (gh) => (await gh.searchIssues("factory:queue")).length;
+
+test("test_249_blocked_retry_hop_is_refused_by_queue_caps", async () => {
+  const flaky5 = { number: 5, labels: ["factory:in-progress", "factory:flaky"], body: "Detected while implementing #4. evidence: {}", author: "factory-bot" };
+  const cases = [
+    ["queue at back_pressure.queue_max", [
+      { number: 9, labels: ["factory:blocked"], body: WELL_FORMED_230 },
+      ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+    ], [1, 2, 3], /\(back_pressure\.queue_max\)/],
+    // a flaky the factory harvested from a flaky the factory harvested: generation 2 > depth_max 1; the queue has room
+    ["self-generated past self_generated.depth_max", [
+      { number: 4, labels: ["factory:in-progress"], body: WELL_FORMED_230 },
+      flaky5,
+      { number: 9, labels: ["factory:blocked", "factory:flaky"], body: "Detected while implementing #5. evidence: {}", author: "factory-bot" },
+      { number: 1, labels: ["factory:queue"], body: WELL_FORMED_230 },
+    ], [1], /\(self_generated\.depth_max\)/],
+  ];
+  for (const [name, issues, members, cap] of cases) {
+    const { gh, writes } = blocked249(issues);
+    // the real door, asked about the blocked #9 in this very repo state, refuses it on that cap (and only on caps)
+    const door = await makeQueueAdmission({ gh, charter: CHARTER_230, factoryLogins: logins230 })({ issue: 9 });
+    expect(door.ok, name).toBe(false);
+    expect(door.reasons.join("; "), name).toMatch(cap);
+    const sentence = `queue admission refused — ${door.reasons.join("; ")}`;
+    const countBefore = await queueCount249(gh);
+    const commentsBefore = gh.store.get(9).comments.length;
+    const lines = [];
+    const d = triageDeps230(gh, 9, { lines });
+    expect(await runStage({ stage: "triage", issue: 9, deps: d }), name).toBe(2);
+    expect(d.claudeP, name).not.toHaveBeenCalled();                              // no agent money spent
+    expect(writes, name).toEqual([]);                                            // no factory:queue (or needs-human) label written
+    expect(stateOf230(gh, 9), name).toBe("factory:blocked");
+    expect(gh.store.get(9).comments.length, name).toBe(commentsBefore);          // nothing said on the issue in this run
+    const at = lines.indexOf("triage: blocked retry hop refused");
+    expect(at, name).toBeGreaterThan(-1);
+    expect(lines[at + 1], name).toBe(`transition refused: ${sentence}`);         // the real admission's sentence, cap named
+    expect(lines[at + 1], name).toMatch(cap);
+    expect(lines.some((l) => /hopped back to factory:queue/.test(l)), name).toBe(false);
+    for (const k of members) expect(stateOf230(gh, k), `${name} #${k}`).toBe("factory:queue");   // nobody admitted is evicted
+    expect(await queueCount249(gh), name).toBe(countBefore);
+  }
+});
+
+test("test_249_blocked_retry_hop_with_room_still_reaches_triage", async () => {
+  // same forged-author marker, but the queue is below queue_max (2 of 3) and #9 is no self-generated issue: the door admits it
+  const { gh, writes } = blocked249([
+    { number: 9, labels: ["factory:blocked"], body: WELL_FORMED_230 },
+    ...[1, 2].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+  ]);
+  const lines = [];
+  const atLaunch = [];
+  const d = triageDeps230(gh, 9, { lines, claudeP: vi.fn(async () => { atLaunch.push(...[9, 1, 2].map((n) => [n, stateOf230(gh, n)])); return { is_error: false, result: "{}" }; }) });
+  await runStage({ stage: "triage", issue: 9, deps: d });
+  expect(lines).toContain("triage: blocked retry — hopped back to factory:queue");
+  expect(writes[0]).toEqual([9, "factory:queue"]);                               // the hop wrote the label through the door
+  expect(lines.some((l) => l.startsWith("triage entry:"))).toBe(false);          // the entry re-check passed (queue_max enforced, 2 ahead < 3)
+  expect(d.claudeP).toHaveBeenCalledTimes(1);
+  expect(atLaunch).toEqual([[9, "factory:queue"], [1, "factory:queue"], [2, "factory:queue"]]);
+});
+
+test("test_249_hop_restored_entry_recheck_enforces_queue_max", async () => {
+  // the hop lands while lower-numbered siblings already fill queue_max (here the hop's door is switched off — test-only
+  // `skipRehearsal` — to stand for the count-then-write race the door cannot close). The entry re-check is the second,
+  // independent lock: a hop-restored issue is judged under queue_max exactly like any other queued issue.
+  const { gh } = blocked249([
+    { number: 9, labels: ["factory:blocked"], body: WELL_FORMED_230 },
+    ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 })),
+  ]);
+  const adm = makeStageAdmission({ gh, getCharter: () => CHARTER_230, factoryLogins: logins230 });
+  const lines = [];
+  const d = triageDeps230(gh, 9, { lines, admission: adm, transition: makeTransitionDep({ gh, issue: 9, stage: "triage", rehearsal: rehearsed230, admission: adm, buildExtra: async () => ({}),
+    transitionFn: (a) => realTransition({ ...a, ...(a.to === "factory:queue" ? { skipRehearsal: true } : {}) }) }) });
+  expect(await runStage({ stage: "triage", issue: 9, deps: d })).toBe(0);
+  expect(lines).toContain("triage: blocked retry — hopped back to factory:queue");   // it really was restored by the hop
+  expect(d.claudeP).not.toHaveBeenCalled();
+  // the sentence the real transition() gives for a queue entry of #9 against the same three siblings
+  const twin = store230([{ number: 9, labels: ["backlog"], body: WELL_FORMED_230 }, ...[1, 2, 3].map((n) => ({ number: n, labels: ["factory:queue"], body: WELL_FORMED_230 }))]);
+  const t = await realTransition({ gh: twin, issue: 9, to: "factory:queue", rehearsal: rehearsed230, admission: makeQueueAdmission({ gh: twin, charter: CHARTER_230, factoryLogins: logins230 }) });
+  expect(t.ok).toBe(false);
+  expect(t.reason).toMatch(/\(back_pressure\.queue_max\)/);
+  expect(lines).toContain(`triage entry: ${t.reason} → factory:needs-human`);
+  expect(stateOf230(gh, 9)).toBe("factory:needs-human");
+  expect(gh.store.get(9).comments.at(-1).body.split("\n")[1]).toBe(`factory:queue → factory:needs-human — ${t.reason}`);
+  for (const k of [1, 2, 3]) expect(stateOf230(gh, k)).toBe("factory:queue");
+});
