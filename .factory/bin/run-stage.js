@@ -2077,7 +2077,12 @@ export function dispatcherPayloadErrorOf({ out, transcriptText = "" } = {}) {
     transcriptText,
     validate: (o) => (o && o.orchestration === "workflow" && "issue" in o && o.guarantee === "structural" ? { ok: true, errors: [] } : { ok: false, errors: ["not a workflow return"] }),
   });
-  return a.ok && isWorkflowFailClosed(a.data) ? a.data.error : null;
+  if (!a.ok || !isWorkflowFailClosed(a.data)) return null;
+  // rework sec1 — 이 문구는 blocked 전이 코멘트의 사유로, 러너의 `factory-blocked-origin` 마커 **앞에** 실린다. 꼬리는 세션 출력이 정하므로
+  // 템플릿 문구가 쓰는 글자(영숫자·공백·`.,:_-`, 160자 이내)일 때만 그대로 싣고, 아니면 고정 접두만 싣는다 — 마커를 위조할 `<!--`가 들어갈
+  // 자리가 없다(test_226_payload_error_reason_cannot_forge_the_blocked_origin).
+  const e = a.data.error;
+  return e === DISPATCHER_PAYLOAD_MISSING || /^context issue mismatch: [\w .,:-]{1,160}$/.test(e) ? e : DISPATCHER_PAYLOAD_MISMATCH;
 }
 
 /**
