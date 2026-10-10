@@ -23,13 +23,13 @@
 | rounds/issue (plan/impl/review) | 0 / 0 / 0 | 0.81 / 1.87 / 1.75 |
 | escaped defects | 0 | 20 |
 | revert rate | 없음 | 0.00 (0/16) |
-| needs-human | 0 | 60 |
+| needs-human | 1 | 60 |
 | rejects by role | 없음 | spec-conformance 8, qa 4, correctness 12, architecture 6, security 2 |
 | reviewer overlap | 없음 | 0.50 (18/36, runs 36) |
 | unique findings by role | 없음 | spec-conformance 3, qa 4, correctness 6, architecture 3, security 2 |
 | qa na ratio | 없음 | 0.22 (30/138 claims, na-heavy 4/19 approvals) |
-| cost (usd) | 0.12 | 910.10 |
-| tokens | input 25159 / output 313 | input 22526857 / output 1779541 |
+| cost (usd) | 10.86 | 910.10 |
+| tokens | input 160776 / output 18791 | input 22526857 / output 1779541 |
 | retro cost (usd) | 0.00 | 10.44 |
 | retro tokens | input 0 / output 0 | input 30 / output 26670 |
 | full retros | — | 9 |
@@ -1479,6 +1479,15 @@
           200
         ],
         "source": "dissent"
+      },
+      {
+        "role": "product-advocate",
+        "kind": "good",
+        "text": "Using the #196 `engine=true` tag and taking the run out of K/R/budget relies on something that does not exist. It would also make a second engine-crash producer that a dispatcher (an LLM building `args`) can trigger.",
+        "runs": [
+          207
+        ],
+        "source": "dissent"
       }
     ],
     "flaky": [],
@@ -1621,7 +1630,7 @@
       {
         "issue": 207,
         "reason": "gh pr view failed: gh pr view failed (1): GraphQL: Could not resolve to a PullRequest with the number of 220. (repository.pullRequest)",
-        "at": "2026-10-06T01:19:34Z"
+        "at": "2026-10-10T15:46:14Z"
       }
     ]
   },
@@ -1642,17 +1651,17 @@
     "overlapping_findings": 0,
     "unique_findings_by_role": {},
     "overlap_ratio": 0,
-    "needs_human": 0,
+    "needs_human": 1,
     "qa_approvals": 0,
     "qa_claims_total": 0,
     "qa_na_total": 0,
     "qa_na_ratio": 0,
     "qa_na_heavy_approvals": 0,
     "usage": {
-      "cost_usd": 0.118767,
+      "cost_usd": 10.85687,
       "tokens": {
-        "input": 25159,
-        "output": 313
+        "input": 160776,
+        "output": 18791
       }
     }
   },
