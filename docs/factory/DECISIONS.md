@@ -433,6 +433,9 @@ ADR-001~008은 Plan 0(spikes)에서 실제 GitHub Actions 러너(`ubuntu-latest`
 - **`_retro.md` 하이드레이트/no-clobber (리뷰 Critical, 계획 문서에 없던 실행 판결)**. 초판은 `readRecords`(설계상 절대 던지지 않는다)로 상태를 읽어, fetch 실패와 "기록 없음"을 구별하지 못한 채 기본 상태로 브랜치를 덮어쓸 수 있었다. 판결: `factory/lib/records-branch.js`에 `readRecordsDetailed({run,cwd,branch,dir}) → {records, blobs, fetched, exists, failures, parent}`를 추가(`readRecords`는 `.records`만 돌려주는 얇은 래퍼가 됐다) — `fetched`는 "브랜치 내용을 확정했다"를 뜻하고, fetch가 실패했을 때는 `git ls-remote --exit-code`(0=있음, 2=없음, 그 외=오류)로 "없다"와 "모른다"를 가른다. `runRetro`는 `hydrate()`가 던지거나 `fetched === false`거나 `_retro.md`가 브랜치에 있는데 못 읽었으면(`stateFailed`) **exit 2로 아무것도 쓰지 않고 끝난다**(writeState·sync·claudeP 전부 호출하지 않음). 브랜치에 `_retro.md`가 아예 없으면(첫 실행) 기본 상태로 진행하고 `expectBlob: {"_retro.md": null}`로 "생성이지 교체가 아니다"를 명시한다. `syncRecords({overwrite:["_retro.md"], expectBlob})`는 교체 전에 parent 트리의 그 blob sha가 하이드레이트한 sha와 같은지 확인하고 다르면(누군가 먼저 밀었다) 아무것도 밀지 않고 `{ok:false, moved:true}`를 돌려준다 — `runRetro`는 그때 한 번만 재하이드레이트해 **같은 순수 변이(`applyMutation(base, mutation)`)를 새 base에 재적용**하고 재시도하며, 그래도 움직였거나 재하이드레이트가 다시 실패하면 exit 1(맹목적 덮어쓰기 금지). `_retro.md`는 `overwrite`(통째로 재렌더)로만 동기화한다 — run 기록(append-only 로그)에 쓰는 꼬리-병합 규칙을 그대로 쓰면 새 렌더가 옛 렌더의 접두어가 아니므로 마커·JSON 펜스가 파일에 두 개 생기고 다음 retro가 첫 펜스(옛 상태)만 읽어 커서가 영원히 전진하지 않는다. `hydrate`는 `_retro.md`만 로컬을 덮어써 복원한다(run 기록은 아직 push 안 된 로컬 꼬리일 수 있어 "없을 때만 복원"이 맞지만 `_retro.md`는 브랜치가 유일한 진실이다). `_retro.md`의 기계 블록은 마커 `<!-- factory-retro-state:v1 -->` + JSON 펜스이고 그 위에 사람용 통계·이력 표를 둔다.
 
 **결정**: 위 관측대로 P4-R1~R7과 다섯 가지 실행 판결(needs-human "도달" 게이트로의 정정·K 무효화, 통계의 창/누적 분리, ISO 주차는 `period.from`, 성숙도 격차의 분석-전-계산, `_retro.md`의 하이드레이트 provenance + no-clobber 재적용)을 Plan 4의 확정 동작으로 채택한다. retro는 절대 라벨을 옮기지 않고 코드를 고치지 않는다 — 산출은 lessons/예시/관점 append(다크 자체 머지), 제안 PR(사람 머지), harness/rewrite 이슈 생성, `quarantine.toml`·`_retro.md` 갱신뿐이라는 계획의 전제는 구현 전체에서 위반 없이 유지됐다(모든 경로가 fake deps 주입 테스트로 확인됨).
+  → **대체됨(#230, ADR-039)**: "retro는 절대 라벨을 옮기지 않는다"에 예외가 하나 생겼다. retro가 방금 만든 성숙도 승격 이슈의
+  `backlog → factory:queue` 한 걸음이고, 그 걸음은 리허설과 큐 진입 심사를 실은 `transition()`으로만 간다(`makeRetroCreateIssue`).
+  기존 이슈의 라벨은 여전히 옮기지 않고, 코드도 고치지 않는다.
 
 **이월(carry-over) 처리**: Plan 3 최종 리뷰의 이월 세 건을 이 Plan에서 마감했다 — `factory/cli/init.js`의 `GITIGNORE_ENTRIES`에 `test-results/`·`coverage/`·`.nyc_output/` 추가(`init.test.js`가 검증); `templates/factory/claude/agents/factory-retro.md`가 설치되어 `checkRoles`의 `roles.retro-agent-file`이 이제 PASS(과거의 "arrives with Plan 4" WARN 경로는 더 이상 밟히지 않는다); Plan 3의 Bash matcher 확장(ADR-016 F6) 이전에 `factory init`한 저장소는 `factory init --upgrade`로 신규 훅 배선(`deny-all-writes.sh` Bash arm, `factory-retro.*`)을 받아야 한다.
 
@@ -4537,7 +4540,7 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
 2. **로컬 진입 심사**(`makeLocalEntry`). 리허설 다음, `setFactoryLabel` 앞에서 같은 심사기를 부른다. 거부면 라벨도 코멘트도 쓰지
    않고, `local entry refused: <큐 문과 같은 문장>`을 돌려주며 stderr에도 낸다. 상한도 여기서 판정한다(이슈가 아직 backlog라 자기
    자신을 세지 않는다).
-3. **retro 승격 이슈**(`makeRetroCreateIssue`, main의 `createIssue`). 큐를 목적지로 든 요청이면 `backlog` + `factory:harness`로 만들고,
+3. **retro 승격 이슈**(`makeRetroCreateIssue`, main의 `createIssue` — 조립은 `retroMainDeps`로 main 밖에 꺼내 테스트가 그대로 부른다). 큐를 목적지로 든 요청이면 `backlog` + `factory:harness`로 만들고,
    retro가 직접 조립한 `makeRehearsalChecker` + `makeQueueAdmission`을 실은 `transition()`으로 옮긴다(`skipRehearsal`은 쓰지 않는다).
    flaky 수확·하네스 요청과 같은 모양이고 `by=script`다. 거부되거나 문이 던지면 이슈는 backlog에 남는다. 그때 retro 기록에 한 줄
    (`retro: harness issue #N stays in backlog — not queued: …`)을 남기고, 이슈에는 사유와 다음 걸음을 적은 `factory-harness-not-queued`
@@ -4550,9 +4553,17 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   상한은 `transition()`과 로컬 진입의 문에 남는다. E-8 중 **상한 절반**(손 라벨 홍수, 대기 중 상한 변경)은 열려 있고 **#245**가 이어받는다.
   본문 변화 절반은 위 1이 닫는다.
 - **backlog로 내보내는 상한 거부는 만들지 않았다**(위와 같은 이유). needs-info를 상한 거부에 쓰는 일도 없다.
-- **로컬 진입의 "심사기 미배선 → 거부"(fail closed)는 하지 않았다.** 기존 테스트 `makeLocalEntry: backlog issue with no factory label →
-  sets factory:queue…`(run-stage.test.js)가 심사기 없이 빈 본문을 큐에 넣는 모양을 고정하고 있고, tests_are_load_bearing이 그 테스트를
-  바꾸지 못하게 한다. 프로덕션 배선(main)은 언제나 심사기를 넘긴다(테스트가 소스를 고정한다). 그렇게 큐에 든 이슈도 위 1이 다시 본다.
+- **로컬 진입의 "심사기 미배선 → 거부"는 한 모양만 빼고 지킨다.** `admission`을 넘겼는데 함수가 아니면(`null`·`false`·객체) 라벨도
+  코멘트도 쓰지 않고, `transition()`이 같은 경우에 내는 `ADMISSION_UNWIRED` 문장으로 거부한다. 빠진 모양은 키 자체를 **생략한** 호출이다.
+  기존 테스트 `makeLocalEntry: backlog issue with no factory label → sets factory:queue…`(run-stage.test.js)가 심사기 없이 빈 본문을 큐에
+  넣는 모양을 고정하고 있고, tests_are_load_bearing이 그 테스트를 바꾸지 못하게 한다. 그 길로 큐에 든 이슈도 에이전트에는 닿지 못한다:
+  바로 뒤 triage 진입 재심사(위 1)가 같은 심사기로 다시 보고 needs-info로 보낸다(`test_230_local_entry_…`가 runStage로 고정한다).
+  프로덕션 배선(main)은 언제나 심사기를 넘긴다.
+- **triage 진입 재심사도 심사기 dep이 없으면 거부하지 않고 기록한다.** `deps.admission`이 없는 런은 재심사를 건너뛰되, 에이전트를 띄우기
+  전에 런 기록에 `TRIAGE_RECHECK_UNWIRED` 한 줄을 남긴다(조용히 지나가지 않는다). 거부(fail closed)로 하지 않은 이유는 위와 같다:
+  기존 triage 테스트 넷(I2 두 건, KTB-20, KTB-15b — run-stage.test.js)이 심사기 없는 deps로 `factory:queue` 진입을 끝까지 돌리고, 거부로
+  바꾸면 그 넷이 깨진다(실측). 대신 두 가지가 그 틈을 좁힌다. main()의 `deps` 객체가 `admission` 키를 싣는다는 사실을 테스트가 고정하고,
+  blocked 재시도의 hop은 main의 전이 dep이 심사기 없이는 `blocked → queue`를 거부하므로 그 자리에서 이미 닫힌다(`test_230_…_unreadable_…`).
 - **retro의 요청 모양은 그대로다**: `runRetro`는 여전히 `labels: [QUEUE_LABEL, HARNESS_LABEL]`을 목적지 요청으로 넘긴다. 기존 테스트
   (retro-bin.test.js ⓹)가 이 모양을 고정하기 때문이다. GitHub에 이슈를 만드는 dep(`makeRetroCreateIssue`)은 큐 라벨로 이슈를 만들지
   않는다. 그래서 retro에는 큐 라벨을 달고 태어나는 길이 없다.
