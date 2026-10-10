@@ -4578,25 +4578,22 @@ doctor-ci의 토큰 검사는 `continue-on-error`라 잡을 죽이지 않지만 
   그 상한은 `transition()`과 로컬 진입의 문에 남는다. E-8 중 **`open_max` 절반**(손 라벨 홍수)은 열려 있고 **#245**가 이어받는다.
   본문 변화 절반과 `queue_max`는 위 1과 #247이 닫는다.
 - **backlog로 내보내는 상한 거부는 만들지 않았다**(그래프에 엣지가 없다). needs-info를 상한 거부에 쓰는 일도 없다.
-- **로컬 진입의 "심사기 미배선 → 거부"는 한 모양만 빼고 지킨다.** `admission`을 넘겼는데 함수가 아니면(`null`·`false`·객체) 라벨도
-  코멘트도 쓰지 않고, `transition()`이 같은 경우에 내는 `ADMISSION_UNWIRED` 문장으로 거부한다. 빠진 모양은 키 자체를 **생략한** 호출이다.
-  기존 테스트 `makeLocalEntry: backlog issue with no factory label → sets factory:queue…`(run-stage.test.js)가 심사기 없이 빈 본문을 큐에
-  넣는 모양을 고정하고 있고, tests_are_load_bearing이 그 테스트를 바꾸지 못하게 한다. 그 길로 큐에 든 이슈도 에이전트에는 닿지 못한다:
-  바로 뒤 triage 진입 재심사(위 1)가 같은 심사기로 다시 보고 needs-info로 보낸다(`test_230_local_entry_…`가 runStage로 고정한다).
-  프로덕션 배선(main)은 언제나 심사기를 넘긴다.
+- **로컬 진입은 심사기가 배선되지 않으면 거부한다 — 키를 생략한 호출도.** `admission`이 함수가 아니면(키 생략·`null`·`false`·객체)
+  라벨도 코멘트도 쓰지 않고, `transition()`이 같은 경우에 내는 `ADMISSION_UNWIRED` 문장으로 거부한다. #230 브랜치는 키를 **생략한**
+  호출만 예외로 두었다(`admission !== undefined`) — 리뷰 두 라운드가 그 예외를 거부했고(spec1), #247 계획 dw3이 그것을 닫는다
+  (`test_247_local_entry_without_admission_dep_writes_no_label`). 그래서 기존 테스트 `makeLocalEntry: backlog issue with no factory
+  label → sets factory:queue…`(run-stage.test.js)는 호출 한 줄에 통과하는 심사기를 넘긴다(단언은 그대로). #247 본문에 `tests_changed_allowed:`가
+  없으므로 이 한 줄이 자동 머지를 멈추고 사람의 머지로 넘긴다 — 의도한 결과다. 프로덕션 배선(main)은 언제나 심사기를 넘긴다.
 - **triage 진입 재심사도 심사기 dep이 없으면 거부하지 않고 기록한다.** `deps.admission`이 없는 런은 재심사를 건너뛰되, 에이전트를 띄우기
   전에 런 기록에 `triage entry: queue admission re-check skipped — <ADMISSION_UNWIRED의 첫 절>` 한 줄을 남긴다(조용히 지나가지
-  않는다). #247 — 브랜치가 따로 두었던 상수 `TRIAGE_RECHECK_UNWIRED`는 없앴다: "미배선"을 뜻하는 말은 `ADMISSION_UNWIRED` 하나다. 거부(fail closed)로 하지 않은 이유는 위와 같다:
+  않는다). #247 — 그 줄(`TRIAGE_RECHECK_UNWIRED`)은 자기 문장을 갖지 않는다: `ADMISSION_UNWIRED`의 첫 절로 만들어진다("미배선"을 뜻하는 말은 그 하나다). 거부(fail closed)로 하지 않은 이유는 위와 같다:
   기존 triage 테스트 넷(I2 두 건, KTB-20, KTB-15b — run-stage.test.js)이 심사기 없는 deps로 `factory:queue` 진입을 끝까지 돌리고, 거부로
   바꾸면 그 넷이 깨진다(실측). 대신 두 가지가 그 틈을 좁힌다. main()의 `deps` 객체가 `admission` 키를 싣는다는 사실을 테스트가 고정하고,
   blocked 재시도의 hop은 main의 전이 dep이 심사기 없이는 `blocked → queue`를 거부하고, 심사기가 있으면 이슈 자신의 사실을 hop에서
   직접 판정하므로(위 1) `deps.admission`이 빠진 런에서도 부적격 이슈의 재시도는 에이전트에 닿지 않는다(`test_230_…_unreadable_…`).
   남는 틈은 hop의 문까지 끈 모양(`skipRehearsal`, 테스트 전용)뿐이다.
-  같은 이유로 dw3 루브릭("origin이 queue인 재시도는 심사를 통과해야만 에이전트에 닿는다")과 dw4의 "미배선이면 거부"는 이 두
-  생략 모양에서 문자 그대로는 지켜지지 않는다. 그것을 지키려면 위 기존 테스트를 바꿔야 하고, 이슈 본문에 `tests_changed_allowed:`가
-  없다 — 계획이 dw4를 고치거나 사람이 그 테스트 변경을 승인할 일이다. #247(이슈 본문 spec1, 계획 dw3)도 같은 자리에서 멈췄다: 키를
-  생략한 호출을 거부로 바꾸면 위 기존 테스트가 깨지고, #247 본문에도 `tests_changed_allowed:`가 없다. 이 모양은 그 승인이 올 때까지
-  위 규칙 그대로다.
+  같은 이유로 #230 dw3 루브릭("origin이 queue인 재시도는 심사를 통과해야만 에이전트에 닿는다")은 triage 진입의 생략 모양에서 문자 그대로는
+  지켜지지 않는다 — 위 넷을 바꿔야 하고, #247 계획은 그것을 요구하지 않았다. 로컬 진입의 생략 모양은 위 항목이 닫았다.
 - **retro의 요청 모양은 그대로다**: `runRetro`는 여전히 `labels: [QUEUE_LABEL, HARNESS_LABEL]`을 목적지 요청으로 넘긴다. 기존 테스트
   (retro-bin.test.js ⓹)가 이 모양을 고정하기 때문이다. GitHub에 이슈를 만드는 dep(`makeRetroCreateIssue`)은 큐 라벨로 이슈를 만들지
   않는다. 그래서 retro에는 큐 라벨을 달고 태어나는 길이 없다.
